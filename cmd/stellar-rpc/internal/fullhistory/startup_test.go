@@ -356,7 +356,7 @@ func TestBackfill_LaggingBulkTipFoldsLastCommittedChunk(t *testing.T) {
 
 // A young-network first start does no backfill, opens the resume hot DB, starts
 // the (blocking) fake core, serves reads, and runs the ingestion loop — which
-// surfaces the ctx-canceled GetLedger error on a clean shutdown (the daemon top
+// surfaces the ctx-canceled stream error on a clean shutdown (the daemon top
 // level classifies it as clean). The resume ledger is genesis (watermark+1).
 func TestRun_FirstStartServeIngestCleanShutdown(t *testing.T) {
 	cat, _ := testCatalog(t)
@@ -373,7 +373,7 @@ func TestRun_FirstStartServeIngestCleanShutdown(t *testing.T) {
 	go func() { errCh <- run(ctx, cfg) }()
 
 	// Wait until the loop has opened the hot DB, started core, served, and parked on
-	// the blocking getter, then request a clean shutdown.
+	// the blocking stream, then request a clean shutdown.
 	require.Eventually(t, func() bool { return served.Load() == 1 }, 2*time.Second, 5*time.Millisecond)
 	cancel()
 
@@ -395,10 +395,10 @@ func TestRun_FirstStartServeIngestCleanShutdown(t *testing.T) {
 	assert.Equal(t, geometry.HotReady, state)
 }
 
-// A ServeReads error is surfaced wrapped as a restartable failure (NOT clean) and
-// the already-opened resume hot DB is closed on the way out, so a restart can
-// reopen it (the rocksdb LOCK is released). ServeReads runs after the hot DB opens
-// and core starts but before the blocking ingestion loop, so run returns here.
+// A ServeReads error is surfaced wrapped as a restartable failure (NOT clean).
+// ServeReads runs after core starts but BEFORE the ingestion loop launches, so run
+// returns without the loop ever opening the resume hot DB (the boundary-close
+// fence that releases the write handle is pinned where the loop owns it).
 func TestRun_ServeReadsErrorSurfaces(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
@@ -412,11 +412,6 @@ func TestRun_ServeReadsErrorSurfaces(t *testing.T) {
 	require.Contains(t, err.Error(), "serve reads")
 	require.NotErrorIs(t, err, context.Canceled, "a ServeReads error is restartable, not a clean shutdown")
 	require.Equal(t, int32(1), core.openedCount.Load(), "core was started before serving")
-
-	// The resume hot DB was closed on the error path (LOCK released): reopening it succeeds.
-	db, err := openHotDBForChunk(cat, chunk.IDFromLedger(chunk.FirstLedgerSeq), silentLogger())
-	require.NoError(t, err, "the resume hot DB is reopenable — run released its LOCK")
-	require.NoError(t, db.Close())
 }
 
 // run errors on a first start with an unavailable tip (restartable, no sentinel);

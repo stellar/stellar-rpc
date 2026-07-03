@@ -48,6 +48,47 @@ func openTestStore(t *testing.T, cfNames []string) *Store {
 	return s
 }
 
+// TestNew_MustExist_EmptyReadyDBReopens pins that a must-exist read-write open of
+// an already-created but EMPTY DB succeeds: the mode refuses only to CREATE, it
+// never requires committed data. This is the "ready" hot-chunk reopen path (an
+// ingester that crashed before committing its first ledger must still reopen).
+func TestNew_MustExist_EmptyReadyDBReopens(t *testing.T) {
+	path := t.TempDir()
+	cf := []string{"c0"}
+
+	// Create an empty DB the normal way (create-if-missing), then close it.
+	s, err := New(Config{Path: path, ColumnFamilies: cf, Logger: silentLogger()})
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+
+	// Reopen must-exist: succeeds against the existing empty DB.
+	reopened, err := New(Config{Path: path, ColumnFamilies: cf, Logger: silentLogger(), MustExist: true})
+	require.NoError(t, err, "must-exist reopen of an empty ready DB succeeds")
+	require.NoError(t, reopened.Close())
+}
+
+// TestNew_MustExist_GuttedDirFailsOpen pins that a must-exist open of a directory
+// that exists but holds no valid RocksDB (no CURRENT) FAILS. The daemon depends on
+// this: a "ready" hot key whose DB was wiped must never silently auto-heal into a
+// fresh empty DB, which would regress the watermark.
+func TestNew_MustExist_GuttedDirFailsOpen(t *testing.T) {
+	path := t.TempDir()
+	cf := []string{"c0"}
+
+	// Create a real DB, close it, then gut the dir (remove every file, keep the dir).
+	s, err := New(Config{Path: path, ColumnFamilies: cf, Logger: silentLogger()})
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+	entries, err := os.ReadDir(path)
+	require.NoError(t, err)
+	for _, e := range entries {
+		require.NoError(t, os.RemoveAll(filepath.Join(path, e.Name())))
+	}
+
+	_, err = New(Config{Path: path, ColumnFamilies: cf, Logger: silentLogger(), MustExist: true})
+	require.Error(t, err, "must-exist open of a gutted dir (no CURRENT) fails, never auto-heals")
+}
+
 func TestMain(m *testing.M) {
 	if os.Getenv("ROCKSDB_LOCK_PROBE") == "1" {
 		_, err := New(Config{

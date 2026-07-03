@@ -24,7 +24,8 @@ import (
 //     a fresh start). Leads at startup before any hot key exists.
 //   - HOT — only when hot > cold, over "ready" keys: one read-only MaxCommittedSeq
 //     read of the highest ready hot DB (empty DB ⇒ positional CompleteThrough(hot-1)).
-//     Safe: derivation runs before ingestion locks the DB.
+//     The read-only open takes no RocksDB LOCK, so it never contends with a writer;
+//     in practice it runs before ingestion opens the live chunk anyway.
 //   - FLOOR — EarliestLedger()-1 as int64(earliest)-1, so an absent/zero pin
 //     yields the pre-genesis sentinel rather than underflowing.
 //

@@ -277,6 +277,45 @@ func TestIngestLedger_WritesEveryHotType(t *testing.T) {
 	assert.Equal(t, uint64(1), bm.GetCardinality())
 }
 
+// TestIngestLedger_EventlessTxStillIndexesHash pins the post-merge txhash
+// completeness invariant: after #18 folded the txhash and events walks into one
+// ExtractLedgerEvents pass, txhash coverage rests entirely on that walk yielding
+// an element per APPLIED tx — hash included — even for an event-less transaction
+// (the common classic-only case). Every other hotchunk test uses one-tx-one-event
+// ledgers, so nothing else pins it: an SDK change that dropped event-less txs from
+// the walk would silently gut the txhash index for every classic-only transaction.
+func TestIngestLedger_EventlessTxStillIndexesHash(t *testing.T) {
+	chunkID := chunk.ID(0)
+	first := chunkID.FirstLedger()
+	db := openTestDB(t)
+
+	// Two applied txs in one ledger: one carries a contract event, one carries none.
+	eventful := xdr.TransactionMeta{V: 4, V4: &xdr.TransactionMetaV4{
+		Operations: []xdr.OperationMetaV2{{Events: []xdr.ContractEvent{buildContractEvent("eventful")}}},
+	}}
+	eventless := xdr.TransactionMeta{V: 4, V4: &xdr.TransactionMetaV4{
+		Operations: []xdr.OperationMetaV2{{}}, // one op, no events
+	}}
+	lcm, hashes := buildLCM(t, first, []xdr.TransactionMeta{eventful, eventless})
+	require.Len(t, hashes, 2)
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+
+	counts, _, err := db.IngestLedger(first, xdr.LedgerCloseMetaView(raw))
+	require.NoError(t, err)
+	assert.Equal(t, LedgerCounts{Ledgers: 1, Txhash: 2, Events: 1}, counts,
+		"both applied txs' hashes indexed (event-less included); only the eventful tx contributed an event")
+
+	// Both hashes resolve in the txhash CF to this ledger.
+	for _, h := range hashes {
+		seq, gerr := db.Txhash().Get(h)
+		require.NoError(t, gerr, "event-less tx hash must still be indexed")
+		assert.Equal(t, first, seq)
+	}
+	// The events CF holds exactly the one eventful tx's event.
+	assert.Equal(t, uint32(1), eventCount(t, db.Events()))
+}
+
 // TestReopen_RecoversEventsMirror confirms the events facade's warmup runs over
 // the shared store on reopen (the mirror/offsets are reconstructed from the
 // events CFs), so a reopened DB assigns event IDs continuing from disk.

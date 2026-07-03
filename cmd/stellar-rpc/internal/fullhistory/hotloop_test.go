@@ -38,7 +38,7 @@ type fakeCoreStream struct {
 	yieldErrAt uint32            // if non-zero, yield errAt at this seq instead of bytes
 	errAt      error
 
-	calls     atomic.Int32 // seqs considered (mirrors the old per-GetLedger count)
+	calls     atomic.Int32 // seqs yielded by the stream
 	firstSeen atomic.Uint32
 	sawFirst  atomic.Bool
 }

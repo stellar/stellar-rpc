@@ -68,7 +68,7 @@ func openHotDBForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlo
 
 	// The dir + dirent must be durable BEFORE the key flips to "ready", else a
 	// crash between the flip and the dir's durability fabricates the "ready but
-	// dir missing" fatal above for a DB that was actually fine. FsyncNewDirs
+	// dir missing" won't-open error above for a DB that was actually fine. FsyncNewDirs
 	// syncs the leaf then its parent dirent (the one audited barrier for a
 	// freshly created dir).
 	if syncErr := geometry.FsyncNewDirs(filepath.Dir(dir), dir); syncErr != nil {

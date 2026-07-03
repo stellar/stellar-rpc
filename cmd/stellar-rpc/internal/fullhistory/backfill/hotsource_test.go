@@ -28,7 +28,7 @@ func seedReadyHotChunk(t *testing.T, cat *catalog.Catalog, c chunk.ID, top uint3
 		Logger:         silentLogger(),
 	})
 	require.NoError(t, err)
-	h := ledger.NewWithStore(store, c)
+	h := ledger.NewWithStore(store)
 	require.NoError(t, store.Batch(func(b *rocksdb.BatchWriter) error {
 		return h.AddLedgerToBatch(b, ledger.Entry{Seq: top, Bytes: []byte("ledger")})
 	}))

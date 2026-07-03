@@ -116,7 +116,7 @@ func zeroTxLCMBytes(t *testing.T, seq uint32) []byte {
 
 // ---------------------------------------------------------------------------
 // Hot-tier test scaffolding: a test-local equivalent of the root package's hot
-// DB opener (startup.go's openHotDBForChunk). It uses only the public
+// DB opener (hotloop.go's openHotDBForChunk). It uses only the public
 // hotchunk/catalog APIs the production code uses, so a lifecycle test creates the
 // SAME on-disk "ready" hot DB the real daemon would — which the freeze and the
 // watermark refinement then open by Layout path, exactly as production does.
@@ -126,7 +126,7 @@ func zeroTxLCMBytes(t *testing.T, seq uint32) []byte {
 // hot:chunk bracket (transient -> create -> ready) and returns an open handle the
 // caller owns. The test equivalent of the production opener, trimmed to the
 // create branch the lifecycle tests need (no crash-recovery / fsync — those edges
-// are covered by the root ingest_test.go opener tests).
+// are covered by the root hotloop_test.go opener tests).
 func openHotDBForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlog.Entry) (*hotchunk.DB, error) {
 	dir := cat.Layout().HotChunkPath(chunkID)
 	if err := os.RemoveAll(dir); err != nil {

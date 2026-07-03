@@ -87,10 +87,12 @@ func OpenExisting(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB,
 }
 
 // OpenReadOnly opens an EXISTING hot DB read-only — the freeze source's view AND
-// the startup watermark refiner's. RocksDB's read-only open recovers any un-synced
-// WAL into in-memory memtables (persisting nothing), so a reader sees every synced
-// write even after an ungraceful crash — the watermark refinement DEPENDS on that
-// replay to read a correct MaxCommittedSeq. Composing the facades only reads.
+// the startup watermark refiner's. RocksDB's read-only open replays the
+// synced-but-unflushed WAL into in-memory memtables (persisting nothing), so a
+// reader sees every synced write even after an ungraceful crash — the watermark
+// refinement DEPENDS on that replay to read a correct MaxCommittedSeq. (An
+// unsynced tail is exactly what a crash loses, and is not recovered.) Composing
+// the facades only reads.
 func OpenReadOnly(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
 	return open(path, chunkID, logger, true, false)
 }
