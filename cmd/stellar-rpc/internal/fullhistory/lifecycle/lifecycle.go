@@ -97,7 +97,8 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	freezeStart := time.Now()
 	start := ChunkIDOfLedger(floor)
 	if start >= 0 && start <= int64(lastChunk) {
-		if eerr := backfill.RunBackfill(ctx, cfg.ExecConfig, chunk.ID(start), lastChunk); eerr != nil { //nolint:gosec // start in [0, lastChunk]
+		startChunk := chunk.ID(start) //nolint:gosec // start in [0, lastChunk]
+		if eerr := backfill.RunBackfill(ctx, cfg.ExecConfig, startChunk, lastChunk); eerr != nil {
 			return fmt.Errorf("run backfill [%d,%s]: %w", start, lastChunk, eerr)
 		}
 	} else {

@@ -166,11 +166,6 @@ func (h *HotStore) Offsets() (*events.LedgerOffsets, error) {
 	return h.offsets.View(), nil
 }
 
-// index returns the in-memory term mirror. Test-only write hook: no production
-// path reads it. Kept unexported until #772 decides whether the v2 read path
-// hooks into it.
-func (h *HotStore) index() *events.ConcurrentBitmaps { return h.mirror }
-
 // Lookup returns the bitmap of event IDs in this Chunk that match
 // the given term. The returned bitmap is an immutable snapshot of
 // the live mirror — writers publish new pointers via atomic.Store
@@ -471,6 +466,11 @@ func (h *HotStore) IngestLedgerToBatch(
 
 	return func() { h.applyLedger(startID, termKeys) }, nil
 }
+
+// index returns the in-memory term mirror. Test-only write hook: no production
+// path reads it. Kept unexported until #772 decides whether the v2 read path
+// hooks into it.
+func (h *HotStore) index() *events.ConcurrentBitmaps { return h.mirror }
 
 // applyLedger updates the mirror + offsets for a ledger whose rows are durable.
 // Infallible by construction (IngestLedgerToBatch validated seq under the

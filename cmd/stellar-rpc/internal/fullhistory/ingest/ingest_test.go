@@ -632,7 +632,8 @@ func TestColdService_Success(t *testing.T) {
 	coldDir := t.TempDir()
 	sink := &testSink{}
 
-	ings, err := buildColdIngesters(coldDirsAt(coldDir, chunkID), chunkID, sink, Config{Ledgers: true, Txhash: true, Events: true})
+	ings, err := buildColdIngesters(
+		coldDirsAt(coldDir, chunkID), chunkID, sink, Config{Ledgers: true, Txhash: true, Events: true})
 	require.NoError(t, err)
 	service := NewColdService(ings, sink)
 	defer func() { require.NoError(t, service.Close()) }()
@@ -833,7 +834,8 @@ func TestWriteColdChunk_RoundTrip(t *testing.T) {
 	sink := &testSink{}
 
 	require.NoError(t, WriteColdChunk(
-		context.Background(), logger, chunkID, rawChunk(stream, chunkID), coldDirsAt(coldDir, chunkID), sink, Config{Ledgers: true},
+		context.Background(), logger, chunkID, rawChunk(stream, chunkID),
+		coldDirsAt(coldDir, chunkID), sink, Config{Ledgers: true},
 	))
 
 	path := packPath(filepath.Join(coldDir, "ledgers"), chunkID)
@@ -862,7 +864,8 @@ func TestWriteColdChunk_ShortStream_NoArtifact(t *testing.T) {
 
 	short := &fakeStream{t: t, count: 3}
 	err := WriteColdChunk(
-		context.Background(), logger, chunkID, rawChunk(short, chunkID), coldDirsAt(coldDir, chunkID), nil, Config{Ledgers: true},
+		context.Background(), logger, chunkID, rawChunk(short, chunkID),
+		coldDirsAt(coldDir, chunkID), nil, Config{Ledgers: true},
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ended at")
@@ -961,7 +964,8 @@ func TestWriteColdChunk_OutOfOrderSeq_NoArtifact(t *testing.T) {
 
 	stream := &seqStream{t: t, seqs: seqs}
 	err := WriteColdChunk(
-		context.Background(), logger, chunkID, rawChunk(stream, chunkID), coldDirsAt(coldDir, chunkID), nil, Config{Ledgers: true},
+		context.Background(), logger, chunkID, rawChunk(stream, chunkID),
+		coldDirsAt(coldDir, chunkID), nil, Config{Ledgers: true},
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "yielded ledger")
@@ -1020,7 +1024,8 @@ func TestWriteColdChunk_DrainStreamError_NoArtifact(t *testing.T) {
 	stream := &errAtSeqStream{t: t, errAtSeq: failAt, err: wantErr}
 
 	err := WriteColdChunk(
-		context.Background(), logger, chunkID, rawChunk(stream, chunkID), coldDirsAt(coldDir, chunkID), nil, Config{Ledgers: true},
+		context.Background(), logger, chunkID, rawChunk(stream, chunkID),
+		coldDirsAt(coldDir, chunkID), nil, Config{Ledgers: true},
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, wantErr, "the backend error must propagate")

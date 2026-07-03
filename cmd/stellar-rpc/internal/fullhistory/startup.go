@@ -116,7 +116,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 
 	// Ingestion and the lifecycle run as a joined pair under errgroup.WithContext:
 	// gctx cancels as soon as EITHER returns — and WithContext records the returning
-	// goroutine's error BEFORE cancelling, so g.Wait surfaces the real cause, not the
+	// goroutine's error BEFORE canceling, so g.Wait surfaces the real cause, not the
 	// sibling's induced context-canceled. g.Wait joins both before run returns,
 	// restoring the single-lifecycle-goroutine invariant across supervisor restarts.
 	// supervise is the one clean-vs-restart decision point; a canceled parent ctx

@@ -129,7 +129,7 @@ func lastCompleteChunkAtID(ledger uint32) (chunk.ID, bool) {
 	if c < 0 {
 		return 0, false
 	}
-	return chunk.ID(c), true //nolint:gosec // c >= 0
+	return chunk.ID(c), true
 }
 
 // runTickForCatalog runs one lifecycle tick the way ingestion would drive it: it

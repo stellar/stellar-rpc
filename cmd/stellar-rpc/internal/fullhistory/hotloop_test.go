@@ -118,7 +118,9 @@ func (r *recordingBoundary) list() []chunk.ID {
 // a recording boundary. The loop opens the resume chunk's hot DB itself, so no DB
 // handle is passed — and the test must hold none on that dir while the loop runs (a
 // second read-write open would contend the RocksDB LOCK).
-func loopConfig(stream ledgerbackend.LedgerStream, cat *catalog.Catalog, resume uint32) (ingestionLoopConfig, *recordingBoundary) {
+func loopConfig(
+	stream ledgerbackend.LedgerStream, cat *catalog.Catalog, resume uint32,
+) (ingestionLoopConfig, *recordingBoundary) {
 	rec := &recordingBoundary{}
 	return ingestionLoopConfig{
 		Stream:   stream,
