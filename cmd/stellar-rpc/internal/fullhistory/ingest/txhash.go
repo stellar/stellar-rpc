@@ -59,8 +59,7 @@ func (t *txhashCold) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMe
 	// chunk that intermediate would be hundreds of MB of transient garbage.
 	hashes, err := sdkingest.ExtractTxHashes(lcm)
 	if err != nil {
-		t.metrics.observe(time.Since(start), 0, err)
-		t.metrics.emit(0, nil) // an Ingest error abandons the chunk; meter it now (Close no longer emits)
+		t.metrics.observe(time.Since(start), 0, err) // terminal: observe emits the per-ingester signal
 		return fmt.Errorf("ExtractTxHashes seq %d: %w", seq, err)
 	}
 	for i := range hashes {

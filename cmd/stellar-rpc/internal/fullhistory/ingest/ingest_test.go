@@ -1331,13 +1331,16 @@ func TestColdService_Finalize_FirstErrorStopsRemaining(t *testing.T) {
 // ───────────────────────── drain overrun guard ─────────────────────────
 
 // countingIngester counts Ingest calls; used to prove the overrun guard fires
-// BEFORE the out-of-chunk ledger is handed to the ingesters.
+// BEFORE the out-of-chunk ledger is handed to the ingesters. It fakes the
+// ColdIngester seam (a ColdService drives it), the layer drain consumes.
 type countingIngester struct{ ingested int }
 
 func (c *countingIngester) Ingest(context.Context, uint32, xdr.LedgerCloseMetaView) error {
 	c.ingested++
 	return nil
 }
+func (*countingIngester) Finalize(context.Context) error { return nil }
+func (*countingIngester) Close() error                   { return nil }
 
 // TestDrain_OverrunPastChunk asserts a stream that keeps yielding in order
 // PAST the chunk's last ledger is rejected before the overrun ledger is
@@ -1349,8 +1352,9 @@ func TestDrain_OverrunPastChunk(t *testing.T) {
 	// One ledger past the chunk, still in order.
 	stream := &fakeStream{t: t, count: ledgersInChunk + 1}
 	counter := &countingIngester{}
+	service := NewColdService([]ColdIngester{counter}, nil)
 
-	err := drain(context.Background(), rawChunk(stream, chunkID), chunkID, counter)
+	err := drain(context.Background(), rawChunk(stream, chunkID), chunkID, service)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "overrun")
 	require.Equal(t, int(ledgersInChunk), counter.ingested,

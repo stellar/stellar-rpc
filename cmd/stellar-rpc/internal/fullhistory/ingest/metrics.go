@@ -123,12 +123,16 @@ func newColdMetrics(sink MetricSink, dataType string) coldMetrics {
 	return coldMetrics{sink: orNop(sink), dataType: dataType}
 }
 
-// observe records one Ingest's wall-clock and (on error) the first error.
+// observe records one Ingest's wall-clock and (on error) the first error. An
+// Ingest error is TERMINAL by the ColdIngester contract (the chunk is abandoned
+// and the ingester is never reused), so observe emits the single per-ingester
+// ColdIngest itself here — callers just observe-and-return, no hand-paired emit.
 func (m *coldMetrics) observe(d time.Duration, items int, err error) {
 	m.accum += d
 	m.items += items
 	if err != nil {
 		m.firstErr = errOrFirst(m.firstErr, err)
+		m.emit(0, nil)
 	}
 }
 

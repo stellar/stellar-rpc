@@ -76,7 +76,7 @@ func SeqValidatedCursor(
 // runs before Finalize, so a short stream never finalizes a truncated artifact.
 // Cancellation is the iterator's job (RawLedgers errors on canceled ctx), so no
 // ctx poll here. The per-ledger sequence guard lives in the shared cursor.
-func drain(ctx context.Context, ledgers iter.Seq2[[]byte, error], chunkID chunk.ID, ing LedgerIngester) error {
+func drain(ctx context.Context, ledgers iter.Seq2[[]byte, error], chunkID chunk.ID, svc *ColdService) error {
 	first, last := chunkID.FirstLedger(), chunkID.LastLedger()
 	seq := first
 	for vl, verr := range SeqValidatedCursor(ledgers, first) {
@@ -90,7 +90,7 @@ func drain(ctx context.Context, ledgers iter.Seq2[[]byte, error], chunkID chunk.
 			return fmt.Errorf("ingest: stream for chunk %d yielded a ledger past %d (chunk overrun)",
 				uint32(chunkID), last)
 		}
-		if err := ing.Ingest(ctx, vl.Seq, vl.View); err != nil {
+		if err := svc.Ingest(ctx, vl.Seq, vl.View); err != nil {
 			return err
 		}
 		seq = vl.Seq + 1

@@ -13,7 +13,6 @@ import (
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 )
@@ -40,11 +39,11 @@ func txhashFor(nibble, tag byte) [32]byte {
 
 func openTestHotStore(t *testing.T) *HotStore {
 	t.Helper()
-	s, _ := openTestHotStoreAt(t, t.TempDir(), chunk.ID(0))
+	s, _ := openTestHotStoreAt(t, t.TempDir())
 	return s
 }
 
-func openTestHotStoreAt(t *testing.T, path string, chunkID chunk.ID) (*HotStore, *rocksdb.Store) {
+func openTestHotStoreAt(t *testing.T, path string) (*HotStore, *rocksdb.Store) {
 	t.Helper()
 	store, err := rocksdb.New(rocksdb.Config{
 		Path:           path,
@@ -54,12 +53,7 @@ func openTestHotStoreAt(t *testing.T, path string, chunkID chunk.ID) (*HotStore,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
-	return NewWithStore(store, chunkID), store
-}
-
-func TestNewWithStore_RecordsChunkBinding(t *testing.T) {
-	s, _ := openTestHotStoreAt(t, t.TempDir(), chunk.ID(7))
-	require.Equal(t, chunk.ID(7), s.ChunkID())
+	return NewWithStore(store), store
 }
 
 func TestHotStore_AddGetRoundTrip(t *testing.T) {
@@ -140,7 +134,7 @@ func TestHotStore_AddEntriesMultiple(t *testing.T) {
 }
 
 func TestHotStore_PostCloseOps(t *testing.T) {
-	s, store := openTestHotStoreAt(t, t.TempDir(), chunk.ID(0))
+	s, store := openTestHotStoreAt(t, t.TempDir())
 	require.NoError(t, store.Close())
 
 	h := txhashFor(0x5, 1)
@@ -155,7 +149,7 @@ func TestHotStore_PostCloseOps(t *testing.T) {
 func TestHotStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
 	path := t.TempDir()
 
-	first, firstStore := openTestHotStoreAt(t, path, chunk.ID(0))
+	first, firstStore := openTestHotStoreAt(t, path)
 	for n := range 16 {
 		require.NoError(t, addEntries(first, []Entry{
 			{Hash: txhashFor(byte(n), 1), LedgerSeq: uint32(n) + 1},
@@ -163,7 +157,7 @@ func TestHotStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
 	}
 	require.NoError(t, firstStore.Close())
 
-	second, _ := openTestHotStoreAt(t, path, chunk.ID(0))
+	second, _ := openTestHotStoreAt(t, path)
 
 	for n := range 16 {
 		got, err := second.Get(txhashFor(byte(n), 1))
@@ -173,7 +167,7 @@ func TestHotStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
 }
 
 func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
-	s, store := openTestHotStoreAt(t, t.TempDir(), chunk.ID(0))
+	s, store := openTestHotStoreAt(t, t.TempDir())
 	// Pre-populate a spread of distinct keys.
 	pre := make([]Entry, 16)
 	for n := range 16 {

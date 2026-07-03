@@ -115,8 +115,8 @@ func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly, mus
 	return &DB{
 		store:   store,
 		chunkID: chunkID,
-		ledger:  ledger.NewWithStore(store, chunkID),
-		txhash:  txhash.NewWithStore(store, chunkID),
+		ledger:  ledger.NewWithStore(store),
+		txhash:  txhash.NewWithStore(store),
 		events:  es,
 	}, nil
 }

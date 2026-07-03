@@ -43,8 +43,7 @@ func NewLedgerColdIngester(packPath string, chunkID chunk.ID, sink MetricSink) (
 func (c *ledgerCold) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
 	start := time.Now()
 	if err := c.writer.AppendLedger(seq, []byte(lcm)); err != nil {
-		c.metrics.observe(time.Since(start), 0, err)
-		c.metrics.emit(0, nil) // an Ingest error abandons the chunk; meter it now (Close no longer emits)
+		c.metrics.observe(time.Since(start), 0, err) // terminal: observe emits the per-ingester signal
 		return fmt.Errorf("AppendLedger(seq=%d): %w", seq, err)
 	}
 	c.metrics.sink.IngestStage(dataTypeLedgers, tierCold, stageWrite, time.Since(start), 1)

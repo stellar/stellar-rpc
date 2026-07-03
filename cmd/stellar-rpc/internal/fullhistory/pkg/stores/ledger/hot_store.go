@@ -9,7 +9,6 @@ import (
 	"iter"
 	"sync"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
@@ -32,10 +31,9 @@ type Entry struct {
 }
 
 // HotStore — RocksDB-backed hot ledger store. Keys are 4-byte BE sequences;
-// values are zstd-compressed (internal). Chunk-bound: accumulates one chunk's
-// ledgers before freezing, with the binding recorded at open time (ChunkID) so
-// the ingest driver can reject a mismatched store. The store does not itself
-// range-check writes (the driver's drain loop already validates every sequence).
+// values are zstd-compressed (internal). It accumulates one chunk's ledgers
+// before freezing; it does not itself range-check writes (the driver's drain loop
+// already validates every sequence against the chunk).
 //
 // Concurrency: all methods are safe for concurrent use, including use alongside
 // the caller-owned rocksdb.Store.Close. A read/write racing Close either completes
@@ -43,9 +41,8 @@ type Entry struct {
 // adds no unguarded state of its own — the compressor pool and decompressor are
 // both concurrent-safe.
 type HotStore struct {
-	store   *rocksdb.Store
-	chunkID chunk.ID
-	dec     *zstd.Decompressor
+	store *rocksdb.Store
+	dec   *zstd.Decompressor
 	// compPool — per-store pool of zstd.Compressors; each concurrent
 	// AddLedgerToBatch borrows one for its Encode call.
 	compPool sync.Pool
@@ -55,20 +52,15 @@ type HotStore struct {
 // LedgersCF. The store is owned by the caller — in production, hotchunk.DB
 // composes this facade over the shared multi-CF DB and closes that DB once. The
 // store must have LedgersCF registered.
-func NewWithStore(store *rocksdb.Store, chunkID chunk.ID) *HotStore {
+func NewWithStore(store *rocksdb.Store) *HotStore {
 	return &HotStore{
-		store:   store,
-		chunkID: chunkID,
-		dec:     zstd.NewDecompressor(),
+		store: store,
+		dec:   zstd.NewDecompressor(),
 		compPool: sync.Pool{
 			New: func() any { return zstd.NewCompressor() },
 		},
 	}
 }
-
-// ChunkID returns the chunk this store is bound to (constructor-supplied;
-// never reads the store).
-func (h *HotStore) ChunkID() chunk.ID { return h.chunkID }
 
 // AddLedgerToBatch compresses one ledger and queues its Put into b on LedgersCF
 // — the building block hotchunk uses to fold the ledger write into the one

@@ -4,7 +4,6 @@
 package txhash
 
 import (
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 )
@@ -25,22 +24,19 @@ type Entry struct {
 //
 // Like every hot store, a HotStore instance is chunk-bound: it
 // accumulates exactly one chunk's (txhash → seq) tuples before being
-// frozen into the chunk's cold .bin artifact. The binding is recorded
-// at open time (ChunkID) so the ingest driver can reject a store
-// bound to a different chunk than it is ingesting; the store does not
-// itself range-check writes (the driver's drain loop already
-// validates every ledger sequence against the chunk).
+// frozen into the chunk's cold .bin artifact. The store does not itself
+// range-check writes (the driver's drain loop already validates every ledger
+// sequence against the chunk).
 type HotStore struct {
-	store   *rocksdb.Store
-	chunkID chunk.ID
+	store *rocksdb.Store
 }
 
 // NewWithStore wraps an ALREADY-OPEN rocksdb.Store as a txhash HotStore on the
 // single txhash CF (CFNames()). The store is owned by the caller — in production,
 // hotchunk.DB composes this facade over the shared per-chunk DB and closes that DB
 // once. The store must have CFNames() registered.
-func NewWithStore(store *rocksdb.Store, chunkID chunk.ID) *HotStore {
-	return &HotStore{store: store, chunkID: chunkID}
+func NewWithStore(store *rocksdb.Store) *HotStore {
+	return &HotStore{store: store}
 }
 
 // CFNames returns the single txhash CF name this facade owns. Exported so
@@ -102,10 +98,6 @@ func Tuning() rocksdb.Tuning {
 		MaxTotalWalSizeMB: 1024,
 	}
 }
-
-// ChunkID returns the chunk this store is bound to (constructor-supplied;
-// never reads the store).
-func (h *HotStore) ChunkID() chunk.ID { return h.chunkID }
 
 // AddEntriesToBatch queues each (txhash → ledgerSeq) Put into b on the txhash
 // CF — the building block hotchunk uses to fold the tx-hash writes into the one

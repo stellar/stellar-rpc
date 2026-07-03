@@ -69,10 +69,9 @@ func NewEventsColdIngester(bucketDir string, chunkID chunk.ID, sink MetricSink) 
 func (e *eventsCold) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
 	start := time.Now()
 	n, ierr := e.ingestSeq(seq, lcm)
-	e.metrics.observe(time.Since(start), n, ierr)
+	e.metrics.observe(time.Since(start), n, ierr) // terminal on err: observe emits the per-ingester signal
 	if ierr != nil {
-		e.failed = true
-		e.metrics.emit(0, nil) // an Ingest error abandons the chunk; meter it now (Close no longer emits)
+		e.failed = true // refuse a post-failure Finalize
 		return ierr
 	}
 	return nil

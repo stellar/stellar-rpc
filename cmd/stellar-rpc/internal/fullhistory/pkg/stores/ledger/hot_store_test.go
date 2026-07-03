@@ -17,7 +17,6 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 )
@@ -32,11 +31,11 @@ func silentLogger() *supportlog.Entry {
 
 func openTestHotStore(t *testing.T) *HotStore {
 	t.Helper()
-	h, _ := openTestHotStoreAt(t, t.TempDir(), chunk.ID(0))
+	h, _ := openTestHotStoreAt(t, t.TempDir())
 	return h
 }
 
-func openTestHotStoreAt(t *testing.T, path string, chunkID chunk.ID) (*HotStore, *rocksdb.Store) {
+func openTestHotStoreAt(t *testing.T, path string) (*HotStore, *rocksdb.Store) {
 	t.Helper()
 	store, err := rocksdb.New(rocksdb.Config{
 		Path:           path,
@@ -45,12 +44,7 @@ func openTestHotStoreAt(t *testing.T, path string, chunkID chunk.ID) (*HotStore,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
-	return NewWithStore(store, chunkID), store
-}
-
-func TestNewWithStore_RecordsChunkBinding(t *testing.T) {
-	h, _ := openTestHotStoreAt(t, t.TempDir(), chunk.ID(7))
-	require.Equal(t, chunk.ID(7), h.ChunkID())
+	return NewWithStore(store), store
 }
 
 func TestHotStore_AddGetRoundTripVerbatim(t *testing.T) {
@@ -212,11 +206,11 @@ func TestHotStore_GracefulCloseAndReopen(t *testing.T) {
 		{Seq: 15, Bytes: []byte("payload-15")},
 	}
 
-	first, firstStore := openTestHotStoreAt(t, path, chunk.ID(0))
+	first, firstStore := openTestHotStoreAt(t, path)
 	require.NoError(t, addLedgers(first, seeded...))
 	require.NoError(t, firstStore.Close())
 
-	second, _ := openTestHotStoreAt(t, path, chunk.ID(0))
+	second, _ := openTestHotStoreAt(t, path)
 
 	for _, want := range seeded {
 		got, err := second.GetLedgerRaw(want.Seq)
@@ -226,7 +220,7 @@ func TestHotStore_GracefulCloseAndReopen(t *testing.T) {
 }
 
 func TestHotStore_PostCloseOps(t *testing.T) {
-	h, store := openTestHotStoreAt(t, t.TempDir(), chunk.ID(0))
+	h, store := openTestHotStoreAt(t, t.TempDir())
 	require.NoError(t, store.Close())
 
 	require.ErrorIs(t, addLedgers(h, Entry{Seq: 1, Bytes: []byte("v")}), stores.ErrStoreClosed)
@@ -248,7 +242,7 @@ func TestHotStore_PostCloseOps(t *testing.T) {
 }
 
 func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
-	h, store := openTestHotStoreAt(t, t.TempDir(), chunk.ID(0))
+	h, store := openTestHotStoreAt(t, t.TempDir())
 	for i := range uint32(50) {
 		require.NoError(t, addLedgers(h, Entry{Seq: i, Bytes: []byte("v")}))
 	}
