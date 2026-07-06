@@ -24,7 +24,7 @@ import (
 // catalog/fixture helpers are copied verbatim from the root fullhistory package's
 // helpers_test.go (which still serves the root tests). The hot-tier helpers
 // (openHotDBForChunk / openLiveHotDB) create the SAME on-disk "ready" hot DBs the
-// real daemon does, so the lifecycle tick freezes and the watermark refinement
+// real daemon does, so the lifecycle tick freezes and the last committed ledger refinement
 // read the genuine hot DBs by path (the way production does after #22).
 
 // testCPI is the tx-hash index width tests build layouts with; equals the
@@ -119,7 +119,7 @@ func zeroTxLCMBytes(t *testing.T, seq uint32) []byte {
 // DB opener (hotloop.go's openHotDBForChunk). It uses only the public
 // hotchunk/catalog APIs the production code uses, so a lifecycle test creates the
 // SAME on-disk "ready" hot DB the real daemon would — which the freeze and the
-// watermark refinement then open by Layout path, exactly as production does.
+// last committed ledger refinement then open by Layout path, exactly as production does.
 // ---------------------------------------------------------------------------
 
 // openHotDBForChunk creates a "ready" shared hot DB for chunkID under the

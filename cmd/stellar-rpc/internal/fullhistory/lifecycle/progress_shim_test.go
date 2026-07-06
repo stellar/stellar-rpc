@@ -11,12 +11,12 @@ import (
 // derivation always opens that DB read-only, so both aliases pass a real logger.
 // deriveCompleteThrough names the cold/floor/positional-selection intent (its
 // callers seed no ready-above-cold hot key, or seed an empty real hot DB whose
-// refinement falls back to the positional term); deriveWatermark names the
+// refinement falls back to the positional term); deriveLastCommitted names the
 // refinement-value intent. Production callers use LastCommittedLedger directly.
 func deriveCompleteThrough(cat *catalog.Catalog) (uint32, error) {
 	return LastCommittedLedger(cat, silentLogger())
 }
 
-func deriveWatermark(cat *catalog.Catalog, logger *supportlog.Entry) (uint32, error) {
+func deriveLastCommitted(cat *catalog.Catalog, logger *supportlog.Entry) (uint32, error) {
 	return LastCommittedLedger(cat, logger)
 }

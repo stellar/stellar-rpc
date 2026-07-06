@@ -32,8 +32,8 @@ func TestMergeTree_FanInSortedAndComplete(t *testing.T) {
 		havePrev       bool
 	)
 	for batch := range finalCh {
-		data := batch.data[:batch.count*binEntrySize]
-		for off := 0; off < len(data); off += binEntrySize {
+		data := batch.data[:batch.count*coldBinEntrySize]
+		for off := 0; off < len(data); off += coldBinEntrySize {
 			k0 := binary.BigEndian.Uint64(data[off:])
 			k1 := binary.BigEndian.Uint64(data[off+8:])
 			if havePrev {

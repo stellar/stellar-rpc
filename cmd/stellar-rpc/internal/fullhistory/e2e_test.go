@@ -79,7 +79,7 @@ func (c *e2eCore) OpenCore(context.Context) (ledgerbackend.LedgerStream, error) 
 // past the synthetic backlog, blocks until ctx is canceled (a live tip stream ends
 // only on shutdown). It records (into its core) the FIRST seq it was asked for
 // (the range From), so the restart step can assert the daemon re-derived the
-// watermark and resumed with no gap.
+// last committed ledger and resumed with no gap.
 type e2eStream struct {
 	core    *e2eCore
 	sawFrom atomic.Bool
@@ -268,7 +268,7 @@ func hashAt(n uint64) [32]byte {
 //	getTransaction-style hash→seq lookup resolves from the cold .idx (chunk 0)
 //	  AND from the live hot CF (chunk 2) →
 //	clean shutdown →
-//	RESTART: re-derive the watermark, resume at exactly watermark+1 (no gap) →
+//	RESTART: re-derive the last committed ledger, resume at exactly last committed ledger + 1 (no gap) →
 //	drive retention far enough to prune chunk 0, confirm a pruned read is not-found.
 //
 // Correctness is asserted at every step.
@@ -347,7 +347,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 
 	require.GreaterOrEqual(t, served.Load(), int32(1), "reads were served")
 	require.Equal(t, c0First, core.fromSeen.Load(),
-		"first start resumes the ingestion stream at genesis (watermark+1)")
+		"first start resumes the ingestion stream at genesis (last committed ledger + 1)")
 
 	// =====================================================================
 	// STEP 2 — clean shutdown. The supervised loop returns nil on ctx cancel.
@@ -431,7 +431,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 
 	// =====================================================================
 	// STEP 5 — RESTART. A fresh runDaemonWith re-opens everything, re-derives the
-	// watermark from durable state, and resumes captive core at watermark+1 with no gap.
+	// last committed ledger from durable state, and resumes captive core at last committed ledger + 1 with no gap.
 	// =====================================================================
 	closePost() // release the inspection metastore handle before the daemon reopens it
 	core.opens.Store(0)

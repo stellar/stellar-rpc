@@ -12,11 +12,13 @@ import (
 
 // eligibleDiscardOps returns a discard closure per hot DB the cold artifacts now
 // fully serve (or that fell past retention). Per chunk: below the floor → discard;
-// complete (last <= through), nothing pending, and the index covers it → discard;
-// otherwise (live, or frozen awaiting coverage) → leave alone.
+// complete (c <= lastChunk), nothing pending, and the index covers it → discard;
+// otherwise (live, or frozen awaiting coverage) → leave alone. Completeness is a
+// chunk-domain comparison (LastLedger is monotonic, so c.LastLedger() <=
+// lastChunk.LastLedger() iff c <= lastChunk); no ledger conversion is needed here.
 // catalog.DiscardHotChunk is idempotent, so a crash between freeze and discard
 // self-heals next tick.
-func eligibleDiscardOps(cat *catalog.Catalog, gate RetentionFloor, through uint32) ([]func() error, error) {
+func eligibleDiscardOps(cat *catalog.Catalog, gate RetentionFloor, lastChunk chunk.ID) ([]func() error, error) {
 	hot, err := cat.HotChunkKeys()
 	if err != nil {
 		return nil, err
@@ -24,11 +26,10 @@ func eligibleDiscardOps(cat *catalog.Catalog, gate RetentionFloor, through uint3
 
 	var ops []func() error
 	for _, c := range hot {
-		last := c.LastLedger()
 		switch {
 		case gate.Excludes(c):
 			ops = append(ops, func() error { return cat.DiscardHotChunk(c) })
-		case last <= through:
+		case c <= lastChunk:
 			// Coverage is read once here and passed into pendingArtifacts — the
 			// discard requires covers independently, so the whole predicate is
 			// ledgers-frozen && events-frozen && covers.
@@ -45,7 +46,7 @@ func eligibleDiscardOps(cat *catalog.Catalog, gate RetentionFloor, through uint3
 			}
 			// else: frozen awaiting coverage, or still producing — leave alone.
 		}
-		// default (last > through): the live chunk or above — ingestion's, not ours.
+		// default (c > lastChunk): the live chunk or above — ingestion's, not ours.
 	}
 	return ops, nil
 }

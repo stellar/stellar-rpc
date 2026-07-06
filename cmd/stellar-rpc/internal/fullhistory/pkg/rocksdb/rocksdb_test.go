@@ -70,7 +70,7 @@ func TestNew_MustExist_EmptyReadyDBReopens(t *testing.T) {
 // TestNew_MustExist_GuttedDirFailsOpen pins that a must-exist open of a directory
 // that exists but holds no valid RocksDB (no CURRENT) FAILS. The daemon depends on
 // this: a "ready" hot key whose DB was wiped must never silently auto-heal into a
-// fresh empty DB, which would regress the watermark.
+// fresh empty DB, which would regress the last committed ledger.
 func TestNew_MustExist_GuttedDirFailsOpen(t *testing.T) {
 	path := t.TempDir()
 	cf := []string{"c0"}

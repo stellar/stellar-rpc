@@ -176,14 +176,19 @@ func assertQuiescent(t *testing.T, cfg Config, cat *catalog.Catalog, through uin
 	require.NoError(t, err)
 	gate := RetentionFloorAt(EffectiveRetentionFloor(through, cfg.RetentionChunks, earliest))
 	start := gate.FirstChunk()
-	if rangeEnd, ok := lastCompleteChunkAtID(through); ok && start <= rangeEnd {
+	// through is derived from the catalog's own last-committed ledger, so it always
+	// resolves to the last complete chunk — the same lastChunk runLifecycle keys its
+	// scans off (0 with ok=false only when nothing is complete, which the discard
+	// scan's per-chunk predicates then correctly treat as no work).
+	lastChunk, ok := lastCompleteChunkAtID(through)
+	if ok && start <= lastChunk {
 		// At quiescence resolve finds an empty plan, so RunBackfill (resolve +
 		// executePlan) is a no-op that returns nil — even with no Backend wired,
 		// since an empty plan never reaches backfillSource.
-		perr := backfill.RunBackfill(context.Background(), cfg.ExecConfig, start, rangeEnd)
+		perr := backfill.RunBackfill(context.Background(), cfg.ExecConfig, start, lastChunk)
 		assert.NoError(t, perr, "re-running backfill schedules no work at quiescence")
 	}
-	dops, err := eligibleDiscardOps(cat, gate, through)
+	dops, err := eligibleDiscardOps(cat, gate, lastChunk)
 	require.NoError(t, err)
 	assert.Empty(t, dops, "re-scan finds no discard work at quiescence")
 	pops, _, err := eligiblePruneOps(cat, gate)

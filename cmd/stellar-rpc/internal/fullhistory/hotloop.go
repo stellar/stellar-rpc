@@ -198,8 +198,7 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 	// The unbounded production stream ends only on ctx cancellation or a source
 	// error, both surfaced as the stream's error element above. Falling through here
 	// means the source stopped WITHOUT an error while the daemon ctx is still live —
-	// unexpected for captive core; surface it as a restartable error rather than a
-	// nil return, which supervise would read as a clean shutdown and silently stop
-	// ingesting.
+	// abnormal; surface a restartable error. (run()'s guard owns the clean-vs-restart
+	// classification.)
 	return errors.New("ingestion stream ended unexpectedly (source stopped with no error)")
 }

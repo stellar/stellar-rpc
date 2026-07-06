@@ -134,7 +134,7 @@ func (m *merger) take(pool chan *mergeBatch) *mergeBatch {
 // mergeBatch is the unit of inter-goroutine hand-off: up to
 // mergeBatchSize fixed-width entries.
 type mergeBatch struct {
-	data  [mergeBatchSize * binEntrySize]byte
+	data  [mergeBatchSize * coldBinEntrySize]byte
 	count int
 }
 
@@ -189,15 +189,21 @@ func siftDown(h []mergeEntry, i, n int) {
 // openDirect opens path read-only, requesting O_DIRECT on Linux and falling
 // back to a cached open if the FS rejects it (EINVAL, e.g. tmpfs) — the
 // aligned ReadAt path is correct either way. directOpenFlag is 0 elsewhere.
+//
+// It goes through os.OpenFile rather than a raw syscall.Open so the fd gets
+// O_CLOEXEC unconditionally: a captive-core child (re)started during a
+// multi-minute merge must not inherit these .bin fds, or the post-build sweep
+// would unlink files the long-lived child keeps pinned. The nonstandard
+// O_DIRECT bit passes through untouched to the openat syscall.
 func openDirect(path string) (*os.File, error) {
-	fd, err := syscall.Open(path, syscall.O_RDONLY|directOpenFlag(), 0)
+	f, err := os.OpenFile(path, os.O_RDONLY|directOpenFlag(), 0)
 	if err != nil && directOpenFlag() != 0 && errors.Is(err, syscall.EINVAL) {
-		fd, err = syscall.Open(path, syscall.O_RDONLY, 0)
+		f, err = os.OpenFile(path, os.O_RDONLY, 0)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("txhash: open %s: %w", path, err)
 	}
-	return os.NewFile(uintptr(fd), path), nil //nolint:gosec // fd is a valid descriptor from syscall.Open
+	return f, nil
 }
 
 // alignedBuffer returns a blockSize-aligned size-byte slice (for O_DIRECT)
@@ -245,7 +251,7 @@ func newFileReader(path string, bufBytes int) (*fileReader, error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("txhash: read %s: %w", path, err)
 	}
-	if n < binHeaderSize {
+	if n < coldBinHeaderSize {
 		_ = f.Close()
 		return nil, fmt.Errorf("txhash: %s too short for header (%d bytes)", path, n)
 	}
@@ -254,13 +260,13 @@ func newFileReader(path string, bufBytes int) (*fileReader, error) {
 		f:       f,
 		buf:     buf,
 		bufBase: backing,
-		cursor:  binHeaderSize,
+		cursor:  coldBinHeaderSize,
 		valid:   n,
 	}, nil
 }
 
-func (r *fileReader) prepareFirst() bool { return r.cursor+binEntrySize <= r.valid }
-func (r *fileReader) entry() []byte      { return r.buf[r.cursor : r.cursor+binEntrySize] }
+func (r *fileReader) prepareFirst() bool { return r.cursor+coldBinEntrySize <= r.valid }
+func (r *fileReader) entry() []byte      { return r.buf[r.cursor : r.cursor+coldBinEntrySize] }
 func (r *fileReader) k0() uint64         { return binary.BigEndian.Uint64(r.buf[r.cursor:]) }
 func (r *fileReader) k1() uint64         { return binary.BigEndian.Uint64(r.buf[r.cursor+8:]) }
 func (r *fileReader) close()             { _ = r.f.Close() }
@@ -269,8 +275,8 @@ func (r *fileReader) close()             { _ = r.f.Close() }
 // when exhausted (re-reading <blockSize bytes to stay aligned for O_DIRECT).
 // Returns false at EOF or on error (check r.err).
 func (r *fileReader) advance() bool {
-	r.cursor += binEntrySize
-	if r.cursor+binEntrySize <= r.valid {
+	r.cursor += coldBinEntrySize
+	if r.cursor+coldBinEntrySize <= r.valid {
 		return true
 	}
 	filePos := r.fileOff + int64(r.cursor)
@@ -283,7 +289,7 @@ func (r *fileReader) advance() bool {
 	r.fileOff = newOff
 	r.valid = n
 	r.cursor = int(filePos - newOff)
-	return r.cursor+binEntrySize <= r.valid
+	return r.cursor+coldBinEntrySize <= r.valid
 }
 
 // mergeStream is a leaf goroutine: heap-merge files into sorted batches
@@ -323,7 +329,7 @@ func (m *merger) mergeStream(files []string, bufBytes int, out chan<- *mergeBatc
 	pos := 0
 	for n > 0 {
 		r := readers[h[0].idx]
-		copy(batch.data[pos*binEntrySize:], r.entry())
+		copy(batch.data[pos*coldBinEntrySize:], r.entry())
 		pos++
 		if pos == mergeBatchSize {
 			batch.count = pos
@@ -373,12 +379,14 @@ type streamReader struct {
 }
 
 func (s *streamReader) entry() []byte {
-	off := s.cur * binEntrySize
-	return s.batch.data[off : off+binEntrySize]
+	off := s.cur * coldBinEntrySize
+	return s.batch.data[off : off+coldBinEntrySize]
 }
-func (s *streamReader) k0() uint64 { return binary.BigEndian.Uint64(s.batch.data[s.cur*binEntrySize:]) }
+func (s *streamReader) k0() uint64 {
+	return binary.BigEndian.Uint64(s.batch.data[s.cur*coldBinEntrySize:])
+}
 func (s *streamReader) k1() uint64 {
-	return binary.BigEndian.Uint64(s.batch.data[s.cur*binEntrySize+8:])
+	return binary.BigEndian.Uint64(s.batch.data[s.cur*coldBinEntrySize+8:])
 }
 
 // advance steps to the next entry, recycling the spent batch and pulling
@@ -435,7 +443,7 @@ func (m *merger) finalMerge(streams []*streamReader, out chan<- *mergeBatch, poo
 	pos := 0
 	for n > 0 {
 		s := streams[h[0].idx]
-		copy(batch.data[pos*binEntrySize:], s.entry())
+		copy(batch.data[pos*coldBinEntrySize:], s.entry())
 		pos++
 		if pos == mergeBatchSize {
 			batch.count = pos
@@ -542,17 +550,17 @@ func feedMergedKeys(
 ) (uint64, error) {
 	var added uint64
 	for batch := range finalCh {
-		data := batch.data[:batch.count*binEntrySize]
-		for off := 0; off < len(data); off += binEntrySize {
-			entry := data[off : off+binEntrySize]
-			seq := binary.LittleEndian.Uint32(entry[binKeySize:])
+		data := batch.data[:batch.count*coldBinEntrySize]
+		for off := 0; off < len(data); off += coldBinEntrySize {
+			entry := data[off : off+coldBinEntrySize]
+			seq := binary.LittleEndian.Uint32(entry[ColdKeySize:])
 			if seq < minLedger || seq > maxLedger {
 				return drainAndFail(finalCh, m, added,
 					fmt.Errorf("txhash: entry seq %d outside index coverage [%d, %d]", seq, minLedger, maxLedger))
 			}
 			// payload fits ColdPayloadSize: BuildColdIndex checked
 			// maxLedger-minLedger <= coldPayloadMax, and seq is in range.
-			if err := builder.AddKey(entry[:binKeySize], uint64(seq-minLedger)); err != nil {
+			if err := builder.AddKey(entry[:ColdKeySize], uint64(seq-minLedger)); err != nil {
 				return drainAndFail(finalCh, m, added, fmt.Errorf("txhash: add key %d: %w", added, err))
 			}
 			added++

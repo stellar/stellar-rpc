@@ -357,7 +357,7 @@ func TestBackfill_LaggingBulkTipCoversLastCommittedChunk(t *testing.T) {
 // A young-network first start does no backfill, opens the resume hot DB, starts
 // the (blocking) fake core, serves reads, and runs the ingestion loop — which
 // surfaces the ctx-canceled stream error on a clean shutdown (the daemon top
-// level classifies it as clean). The resume ledger is genesis (watermark+1).
+// level classifies it as clean). The resume ledger is genesis (last committed ledger + 1).
 func TestRun_FirstStartServeIngestCleanShutdown(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
@@ -387,7 +387,7 @@ func TestRun_FirstStartServeIngestCleanShutdown(t *testing.T) {
 	require.Equal(t, int32(1), served.Load(), "reads were served exactly once")
 	require.Equal(t, int32(1), core.openedCount.Load(), "captive core started once")
 	require.Equal(t, uint32(chunk.FirstLedgerSeq), core.resumeSeen(),
-		"resume ledger is genesis on a fresh start (watermark+1)")
+		"resume ledger is genesis on a fresh start (last committed ledger + 1)")
 
 	// The resume chunk's hot key is "ready" (opened, boundary never crossed).
 	state, err := cat.HotState(chunk.IDFromLedger(chunk.FirstLedgerSeq))

@@ -46,7 +46,7 @@ func TestCommitIndexPromoteAndDemote(t *testing.T) {
 // TestFrozenIndexCoversRange_AssertsUniqueness pins that the shared "covered by a
 // frozen index" predicate (#37) propagates the INV-2 assertion FrozenTxHashIndex
 // makes: two frozen coverages in one window must make EVERY read error, so
-// watermark derivation (progress), discard eligibility, and the resolve diff can
+// last committed ledger derivation (progress), discard eligibility, and the resolve diff can
 // never disagree — one silently tolerating the duplicate while another aborts.
 func TestFrozenIndexCoversRange_AssertsUniqueness(t *testing.T) {
 	cat, _ := testCatalog(t)

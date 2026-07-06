@@ -36,7 +36,7 @@ func LastCommittedLedger(cat *catalog.Catalog, logger *supportlog.Entry) (uint32
 	if err != nil {
 		return 0, err
 	}
-	through := geometry.ChunkLastLedger(cold)
+	lastCommitted := geometry.ChunkLastLedger(cold)
 
 	hot, err := highestReadyChunkSigned(cat)
 	if err != nil {
@@ -49,7 +49,7 @@ func LastCommittedLedger(cat *catalog.Catalog, logger *supportlog.Entry) (uint32
 		if rerr != nil {
 			return 0, rerr
 		}
-		through = max(through, refined)
+		lastCommitted = max(lastCommitted, refined)
 	}
 
 	earliest, ok, err := cat.EarliestLedger()
@@ -59,10 +59,10 @@ func LastCommittedLedger(cat *catalog.Catalog, logger *supportlog.Entry) (uint32
 	if ok {
 		// int64 before the -1 so a zero/genesis pin does not underflow.
 		floor := max(int64(earliest)-1, 0)
-		through = max(through, uint32(floor)) //nolint:gosec // floor in [0, MaxUint32), fits uint32
+		lastCommitted = max(lastCommitted, uint32(floor)) //nolint:gosec // floor in [0, MaxUint32), fits uint32
 	}
 
-	return through, nil
+	return lastCommitted, nil
 }
 
 // refineWithHotDB opens the highest ready hot chunk read-only straight from its

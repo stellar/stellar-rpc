@@ -137,11 +137,11 @@ func TestRunLifecycleTick_DiscardGatedOnIndexCoverage(t *testing.T) {
 	// A live chunk 1 above it so chunk 0 is below the partition boundary.
 	require.NoError(t, cat.PutHotTransient(1))
 
-	through := chunk.ID(0).LastLedger() // chunk 0 complete via cold
+	lastChunk := chunk.ID(0) // chunk 0 complete via cold
 	// txhash is frozen, ledgers/events frozen, but the window has no FROZEN coverage
 	// yet => indexCovers(0) is false => NOT discarded (still needed for lookups via
 	// its .bin/hot DB until the index folds it in).
-	ops, err := eligibleDiscardOps(cat, gateFor(t, cfg, cat, through), through)
+	ops, err := eligibleDiscardOps(cat, gateFor(t, cfg, cat, lastChunk.LastLedger()), lastChunk)
 	require.NoError(t, err)
 	require.Empty(t, ops, "no index coverage yet: the hot DB stays")
 
@@ -152,7 +152,7 @@ func TestRunLifecycleTick_DiscardGatedOnIndexCoverage(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, covered)
 
-	ops, err = eligibleDiscardOps(cat, gateFor(t, cfg, cat, through), through)
+	ops, err = eligibleDiscardOps(cat, gateFor(t, cfg, cat, lastChunk.LastLedger()), lastChunk)
 	require.NoError(t, err)
 	require.Len(t, ops, 1, "covered + nothing pending => discard eligible")
 	require.NoError(t, ops[0]())

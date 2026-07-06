@@ -35,9 +35,11 @@ const (
 	// of each key, so the .bin producer must truncate to exactly that
 	// width for the round-trip to hold.
 	ColdKeySize = streamhash.MinKeySize
+	// coldBinSeqSize is the per-entry ledger seq width (uint32 LE).
+	coldBinSeqSize = 4
 	// coldBinEntrySize is the per-entry width in the cold .bin file:
-	// ColdKeySize bytes of truncated hash + a uint32 LE ledger seq.
-	coldBinEntrySize = ColdKeySize + 4
+	// ColdKeySize bytes of truncated hash + the ledger seq.
+	coldBinEntrySize = ColdKeySize + coldBinSeqSize
 	// coldBinHeaderSize is the leading uint64 LE entry count.
 	coldBinHeaderSize = 8
 )
@@ -111,6 +113,28 @@ func WriteColdBin(path string, entries []ColdEntry) error {
 	return nil
 }
 
+// coldBinCount validates a .bin file's byte size against its declared header
+// count and returns the count. size comes from a trusted Stat; count is the
+// untrusted header value. It divides the trusted size rather than multiplying
+// the untrusted count, so a corrupt header can't overflow the arithmetic
+// (coldBinEntrySize·2^62 ≡ 0 mod 2^64 would slip a wildly wrong count past a
+// naive `size == header + count*entry` check and hand it to the index builder
+// as an allocation). Both the raw reader (ReadColdBin) and the index builder's
+// pre-scan (scanBinHeader) gate on it.
+func coldBinCount(path string, size int64, count uint64) (uint64, error) {
+	body := size - coldBinHeaderSize
+	if body < 0 || body%coldBinEntrySize != 0 {
+		return 0, fmt.Errorf("txhash: %s is %d bytes, not a %d-byte header plus whole %d-byte entries",
+			path, size, coldBinHeaderSize, coldBinEntrySize)
+	}
+	//nolint:gosec // body >= 0 checked above, so the conversion is exact
+	if want := uint64(body) / coldBinEntrySize; count != want {
+		return 0, fmt.Errorf("txhash: %s header claims %d entries but its %d bytes hold %d",
+			path, count, size, want)
+	}
+	return count, nil
+}
+
 // ReadColdBin reads back a .bin file written by WriteColdBin, verifying the
 // header count against the file size. The index-build step iterates these
 // entries; tests use it to assert the writer's on-disk contract.
@@ -132,14 +156,8 @@ func ReadColdBin(path string) ([]ColdEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("txhash: stat %s: %w", path, err)
 	}
-	size := uint64(info.Size()) //nolint:gosec // Stat sizes are non-negative
-	if count > size {           // each entry is >1 byte; also guards the multiply below
-		return nil, fmt.Errorf("txhash: %s: implausible header count %d for %d-byte file", path, count, size)
-	}
-	want := coldBinHeaderSize + count*coldBinEntrySize
-	if size != want {
-		return nil, fmt.Errorf("txhash: %s: header claims %d entries (%d bytes), file has %d bytes",
-			path, count, want, size)
+	if _, err := coldBinCount(path, info.Size(), count); err != nil {
+		return nil, err
 	}
 
 	entries := make([]ColdEntry, count)

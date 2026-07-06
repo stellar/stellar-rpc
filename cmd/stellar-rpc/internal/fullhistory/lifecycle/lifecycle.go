@@ -94,10 +94,11 @@ func runOps(ctx context.Context, cfg Config, ops []func() error) (int, error) {
 }
 
 // runLifecycle runs one tick over the three stages for just-completed chunk
-// lastChunk. through = lastChunk.LastLedger() is the single snapshot every stage
-// shares, so a boundary committing mid-tick can't make stages contradict (it's
-// next tick's work). Plan range is [floor, lastChunk] (start raised to storage);
-// discard/prune key off through.
+// lastChunk — the single snapshot every stage shares, so a boundary committing
+// mid-tick can't make stages contradict (it's next tick's work). Plan range is
+// [floor, lastChunk] (start raised to storage); discard/prune key off lastChunk.
+// Every stage compares in the chunk domain; only EffectiveRetentionFloor needs
+// lastChunk as a ledger.
 //
 // It returns the first stage error WITHOUT classifying it: Loop propagates it to
 // run's errgroup and supervise decides clean-vs-restart (a canceled ctx surfaces
@@ -106,22 +107,22 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	metrics := observability.MetricsOrNop(cfg.Metrics)
 	logger := cfg.Logger
 
-	// The one snapshot every stage shares. earliest and the retention gate are read
-	// and computed ONCE here (not re-derived per scan), then passed to both scans.
-	through := lastChunk.LastLedger()
-
+	// earliest and the retention gate are read and computed ONCE here (not
+	// re-derived per scan), then passed to both scans.
 	earliest, _, err := cat.EarliestLedger()
 	if err != nil {
 		return fmt.Errorf("read earliest ledger: %w", err)
 	}
-	floorLedger := EffectiveRetentionFloor(through, cfg.RetentionChunks, earliest)
+	// The only site that needs lastChunk in the ledger domain; every other stage
+	// compares chunks directly against lastChunk.
+	floorLedger := EffectiveRetentionFloor(lastChunk.LastLedger(), cfg.RetentionChunks, earliest)
 	gate := RetentionFloorAt(floorLedger)
 
 	// Retention-floor gauge only. The last-committed gauge is owned by the ingestion
 	// loop (which holds the true, possibly mid-chunk value); re-emitting it here from
-	// the chunk-aligned `through` would regress it on every tick.
+	// the chunk-aligned lastChunk would regress it on every tick.
 	metrics.RetentionFloor(floorLedger)
-	logger.WithField("through", through).
+	logger.WithField("last_chunk", lastChunk.String()).
 		WithField("floor_chunk", gate.FirstChunk().String()).
 		Debug("streaming: lifecycle tick — derived snapshot")
 
@@ -141,7 +142,7 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 
 	// Stage 2 — discard scan.
 	discardStart := time.Now()
-	discardOps, err := eligibleDiscardOps(cat, gate, through)
+	discardOps, err := eligibleDiscardOps(cat, gate, lastChunk)
 	if err != nil {
 		return fmt.Errorf("eligible discard ops: %w", err)
 	}

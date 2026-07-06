@@ -79,14 +79,14 @@ func TestColumnFamilies_UnionIsNonColliding(t *testing.T) {
 
 // TestIngestLedger_AllCFsAdvanceTogether is the core decision-(a) happy path:
 // one IngestLedger call writes the ledger, its tx hash, and its event into the
-// ONE shared DB, and the single watermark reaches exactly the committed seq —
+// ONE shared DB, and the single committed frontier reaches exactly the committed seq —
 // every CF readable, every CF in lockstep.
 func TestIngestLedger_AllCFsAdvanceTogether(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
 	db := openTestDB(t)
 
-	// Empty DB: no watermark.
+	// Empty DB: no last committed seq.
 	_, ok, err := db.MaxCommittedSeq()
 	require.NoError(t, err)
 	require.False(t, ok)
@@ -120,7 +120,7 @@ func TestIngestLedger_AllCFsAdvanceTogether(t *testing.T) {
 	assert.Equal(t, uint64(2), bm.GetCardinality(), "both ledgers share the event term")
 	assert.Equal(t, uint32(2), eventCount(t, db.Events()))
 
-	// The single authoritative watermark equals the last committed seq.
+	// The single authoritative committed frontier equals the last committed seq.
 	maxSeq, ok, err := db.MaxCommittedSeq()
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -131,7 +131,7 @@ func TestIngestLedger_AllCFsAdvanceTogether(t *testing.T) {
 // guarantee for decision (a): a ledger the events facade rejects (here an
 // out-of-range seq) must leave EVERY CF untouched — the ledgers and txhash CFs
 // included — because the whole ledger is one batch and the events facade's
-// validation aborts that batch before commit. The single watermark must not
+// validation aborts that batch before commit. The single committed frontier must not
 // advance.
 func TestIngestLedger_RejectedLedgerPersistsNothingAcrossAnyCF(t *testing.T) {
 	chunkID := chunk.ID(0)
@@ -158,10 +158,10 @@ func TestIngestLedger_RejectedLedgerPersistsNothingAcrossAnyCF(t *testing.T) {
 	require.ErrorIs(t, lerr, eventstore.ErrTermNotFound)
 	assert.Equal(t, uint32(0), eventCount(t, db.Events()))
 
-	// The single watermark is still empty — nothing committed.
+	// The single committed frontier is still empty — nothing committed.
 	_, ok, err := db.MaxCommittedSeq()
 	require.NoError(t, err)
-	require.False(t, ok, "a rejected ledger must not advance the watermark")
+	require.False(t, ok, "a rejected ledger must not advance the last committed seq")
 }
 
 // TestIngestLedger_MidBatchCommitFailurePersistsNothing simulates a mid-batch
@@ -176,13 +176,13 @@ func TestIngestLedger_MidBatchCommitFailurePersistsNothing(t *testing.T) {
 	db, err := Open(dir, chunkID, silentLogger())
 	require.NoError(t, err)
 
-	// Commit one good ledger so there is a known watermark, then close the DB.
+	// Commit one good ledger so there is a known last committed seq, then close the DB.
 	rawGood, hashGood, _ := lcmWithEvent(t, first)
 	_, err = db.IngestLedger(first, xdr.LedgerCloseMetaView(rawGood))
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
-	// Reopen and confirm the watermark survived (sync=true durability).
+	// Reopen and confirm the last committed seq survived (sync=true durability).
 	db2, err := Open(dir, chunkID, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db2.Close() })
@@ -200,7 +200,7 @@ func TestIngestLedger_MidBatchCommitFailurePersistsNothing(t *testing.T) {
 	require.Error(t, err)
 
 	// Reopen a third time: the failed ledger left NO trace in any CF, and the
-	// watermark is still the last good seq.
+	// last committed seq is still the last good seq.
 	db3, err := Open(dir, chunkID, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db3.Close() })
@@ -208,7 +208,7 @@ func TestIngestLedger_MidBatchCommitFailurePersistsNothing(t *testing.T) {
 	maxSeq, ok, err = db3.MaxCommittedSeq()
 	require.NoError(t, err)
 	require.True(t, ok)
-	assert.Equal(t, first, maxSeq, "the failed ledger did not advance the watermark")
+	assert.Equal(t, first, maxSeq, "the failed ledger did not advance the last committed seq")
 
 	// The events CF advanced for exactly the one good ledger — the failed
 	// ledger's event was not committed (warmup reconstructed the offsets from
@@ -416,7 +416,7 @@ func TestOpenReadOnly_ReadsCommittedAndRejectsWrites(t *testing.T) {
 	}
 	require.NoError(t, db.Close())
 
-	// Reader: a read-only open sees the committed watermark; Close must not flush.
+	// Reader: a read-only open sees the committed frontier; Close must not flush.
 	ro, err := OpenReadOnly(dir, chunkID, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ro.Close()) })

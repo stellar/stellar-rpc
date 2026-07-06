@@ -139,10 +139,10 @@ func loopConfig(
 	}, rec
 }
 
-// impliedResume is the resume point a hot DB's durable watermark implies — one past
+// impliedResume is the resume point a hot DB's durable last committed ledger implies — one past
 // its last committed ledger, or the chunk's first ledger when empty. Production no
 // longer derives this in the loop (it trusts the resume run() passes it), but tests
-// still assert that a restart's durable watermark matches what startup would derive.
+// still assert that a restart's durable last committed ledger matches what startup would derive.
 func impliedResume(t *testing.T, db *hotchunk.DB) uint32 {
 	t.Helper()
 	maxSeq, ok, err := db.MaxCommittedSeq()
@@ -239,7 +239,7 @@ func TestOpenHotTier_TransientRecreatesFresh(t *testing.T) {
 
 // TestRunIngestionLoop_LedgerLandsAcrossAllCFs: polling a short contiguous
 // prefix lands each ledger atomically across the ledgers, txhash, and events
-// CFs — the single watermark advances to the last committed seq, and every CF
+// CFs — the single committed frontier advances to the last committed seq, and every CF
 // is readable. The getter then errs (backend crash), which the loop returns.
 func TestRunIngestionLoop_LedgerLandsAcrossAllCFs(t *testing.T) {
 	cat, _ := testCatalog(t)
@@ -264,7 +264,7 @@ func TestRunIngestionLoop_LedgerLandsAcrossAllCFs(t *testing.T) {
 	maxSeq, ok, err := reopened.MaxCommittedSeq()
 	require.NoError(t, err)
 	require.True(t, ok)
-	assert.Equal(t, first+2, maxSeq, "the single watermark is the last committed seq")
+	assert.Equal(t, first+2, maxSeq, "the single committed frontier is the last committed seq")
 
 	raw, err := reopened.Ledgers().GetLedgerRaw(first + 2)
 	require.NoError(t, err)
@@ -298,7 +298,7 @@ func TestRunIngestionLoop_LastCommittedGaugeAdvancesPerLedger(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestRunIngestionLoop_BoundaryNotifiesCompletedChunk: crossing the chunk 0 -> 1
-// boundary publishes chunk 0 to the lifecycle. The watermark is seeded just below
+// boundary publishes chunk 0 to the lifecycle. The last committed seq is seeded just below
 // the boundary so the stream crosses it in one step.
 func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 	t.Parallel() // seeds a near-full chunk (one synced commit per ledger)

@@ -3,17 +3,13 @@ package txhash
 // cold_index.go is the build half of the cold txhash pipeline:
 // BuildColdIndex merges the per-chunk .bin files for one index — the
 // DefaultChunksPerIndex consecutive chunks it covers — into a single
-// streamhash MPHF. The merge is in cold_merge.go.
+// streamhash MPHF. The merge is in cold_merge.go; the .bin on-disk format
+// (header, entry layout, constants) is owned by cold_bin.go.
 //
-// .bin input format, one file per chunk named <chunkID:08d>.bin:
-//
-//	 8 bytes  entry count  (uint64 LE)
-//	then, per 20-byte entry:
-//	16 bytes  txhash[:16]  (the key; streamhash routes on this)
-//	 4 bytes  ledger seq   (uint32 LE, absolute)
-//
-// Entries within a file must be sorted ascending by the big-endian uint64
-// of their first 8 key bytes (the block order streamhash requires).
+// The merge requires each file's entries pre-sorted ascending by the
+// big-endian uint64 of their first 8 key bytes — the block order streamhash
+// routes on (for the first 8 bytes this is identical to the lex key order
+// WriteColdBin guarantees).
 
 import (
 	"context"
@@ -25,15 +21,6 @@ import (
 	"runtime"
 
 	"github.com/stellar/streamhash"
-)
-
-const (
-	// binKeySize is the key width: streamhash routes on the first 16 bytes,
-	// so the store keys on the 16-byte prefix (Get still takes 32).
-	binKeySize    = 16
-	binSeqSize    = 4
-	binEntrySize  = binKeySize + binSeqSize
-	binHeaderSize = 8
 )
 
 // ErrEmptyBuildSet is returned by BuildColdIndex when inputs hold no
@@ -146,8 +133,9 @@ func scanAndValidate(inputs []string) (uint64, error) {
 	return total, nil
 }
 
-// scanBinHeader opens path, reads its declared entry count, and verifies
-// the file is exactly binHeaderSize + count*binEntrySize bytes.
+// scanBinHeader opens path, reads its declared entry count, and verifies its
+// byte size matches that count via coldBinCount (the shared, overflow-safe
+// header check ReadColdBin also uses).
 func scanBinHeader(path string) (uint64, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -159,15 +147,9 @@ func scanBinHeader(path string) (uint64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("txhash: stat %s: %w", path, err)
 	}
-	var hdr [binHeaderSize]byte
+	var hdr [coldBinHeaderSize]byte
 	if _, err := io.ReadFull(f, hdr[:]); err != nil {
 		return 0, fmt.Errorf("txhash: read header of %s: %w", path, err)
 	}
-	count := binary.LittleEndian.Uint64(hdr[:])
-
-	want := uint64(binHeaderSize) + count*binEntrySize
-	if size := fi.Size(); size < 0 || uint64(size) != want {
-		return 0, fmt.Errorf("txhash: %s is %d bytes, want %d for declared count %d", path, fi.Size(), want, count)
-	}
-	return count, nil
+	return coldBinCount(path, fi.Size(), binary.LittleEndian.Uint64(hdr[:]))
 }

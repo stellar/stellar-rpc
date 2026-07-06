@@ -32,7 +32,7 @@ func makeHotDir(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 }
 
 // readyHot marks a chunk's hot key "ready" AND creates its dir, the production
-// pairing deriveWatermark expects (a ready key whose dir is missing is loss).
+// pairing deriveLastCommitted expects (a ready key whose dir is missing is loss).
 func readyHot(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 	t.Helper()
 	require.NoError(t, cat.PutHotTransient(c))
@@ -159,18 +159,18 @@ func TestLastCommittedLedger(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// deriveWatermark — deriveCompleteThrough + one read-only refinement of the
+// deriveLastCommitted — deriveCompleteThrough + one read-only refinement of the
 // highest ready hot DB, opened lazily by its Layout path. These read REAL
 // per-chunk hot DBs; the sub-chunk-precision / opens-highest / empty-fallback
 // value cases are covered against real DBs in progress_realdb_test.go.
 // ---------------------------------------------------------------------------
 
-func TestDeriveWatermark(t *testing.T) {
+func TestDeriveLastCommitted(t *testing.T) {
 	t.Run("no ready hot keys => equals deriveCompleteThrough, no open", func(t *testing.T) {
 		cat, _ := testCatalog(t)
 		makeChunkDurable(t, cat, 0)
 		// No ready key above the cold term ⇒ the hot>cold gate skips the open entirely.
-		got, err := deriveWatermark(cat, silentLogger())
+		got, err := deriveLastCommitted(cat, silentLogger())
 		require.NoError(t, err)
 		require.Equal(t, chunk.ID(0).LastLedger(), got)
 	})
@@ -190,7 +190,7 @@ func TestDeriveWatermark(t *testing.T) {
 		require.Equal(t, chunk.ID(3).LastLedger(), geometry.ChunkLastLedger(3),
 			"positional term alone under-counts to chunk 3")
 
-		got, err := deriveWatermark(cat, silentLogger())
+		got, err := deriveLastCommitted(cat, silentLogger())
 		require.NoError(t, err)
 		require.Equal(t, chunk4Last, got, "refinement recovers the chunk-4 frontier")
 	})
@@ -206,7 +206,7 @@ func TestDeriveWatermark(t *testing.T) {
 		require.NoError(t, cat.FlipHotReady(2)) // ready key 2, NO dir (not opened here)
 		highSeq := chunk.ID(5).FirstLedger() + 10
 		seedReadyLiveDB(t, cat, 5, highSeq) // highest ready key 5 WITH real DB (opened)
-		got, err := deriveWatermark(cat, silentLogger())
+		got, err := deriveLastCommitted(cat, silentLogger())
 		require.NoError(t, err)
 		require.Equal(t, highSeq, got, "refined to the highest ready chunk's seq")
 	})
@@ -218,7 +218,7 @@ func TestDeriveWatermark(t *testing.T) {
 		// never auto-heals it into a fresh empty DB.
 		require.NoError(t, cat.PutHotTransient(5))
 		require.NoError(t, cat.FlipHotReady(5)) // ready key 5, NO dir
-		_, err := deriveWatermark(cat, silentLogger())
+		_, err := deriveLastCommitted(cat, silentLogger())
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "00000005")
 	})
@@ -226,7 +226,7 @@ func TestDeriveWatermark(t *testing.T) {
 	t.Run("live chunk 0 ready, empty DB => pre-genesis, no underflow", func(t *testing.T) {
 		cat, _ := testCatalog(t)
 		seedReadyLiveDB(t, cat, 0, 0) // ready + real dir, nothing committed
-		got, err := deriveWatermark(cat, silentLogger())
+		got, err := deriveLastCommitted(cat, silentLogger())
 		require.NoError(t, err)
 		require.Equal(t, geometry.PreGenesisLedger, got)
 	})

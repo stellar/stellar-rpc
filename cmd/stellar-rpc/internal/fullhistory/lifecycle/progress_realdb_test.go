@@ -16,7 +16,7 @@ import (
 // seedLedgersCF reopens a CLOSED chunk hot DB raw and commits sparse ledgers-CF
 // entries in one batch via the production AddLedgerToBatch. These fixtures need
 // arbitrary frontier heights without the events CF's contiguity requirement, so
-// they write the one CF the watermark refinement reads (MaxCommittedSeq only
+// they write the one CF the last committed ledger refinement reads (MaxCommittedSeq only
 // looks at the ledgers CF's last key; the payload bytes are never decoded).
 func seedLedgersCF(t *testing.T, cat *catalog.Catalog, c chunk.ID, entries ...ledger.Entry) {
 	t.Helper()
@@ -52,13 +52,13 @@ func seedReadyLiveDB(t *testing.T, cat *catalog.Catalog, c chunk.ID, top uint32)
 	}
 }
 
-// TestDeriveWatermark_RealHotDB_RefinementIsNotStale exercises the watermark
+// TestDeriveLastCommitted_RealHotDB_RefinementIsNotStale exercises the last committed ledger
 // refinement against a REAL per-chunk hotchunk DB opened read-only by its Layout
 // path (the same open production does). It proves the single-DB MaxCommittedSeq
 // refinement reads the actual committed ledger frontier (the ledgers CF's last
 // key) and is not a stale/constant value: the bound rises to exactly the highest
 // seq committed to the live chunk's real DB.
-func TestDeriveWatermark_RealHotDB_RefinementIsNotStale(t *testing.T) {
+func TestDeriveLastCommitted_RealHotDB_RefinementIsNotStale(t *testing.T) {
 	cat, _ := testCatalog(t)
 
 	live := chunk.ID(5)
@@ -84,19 +84,19 @@ func TestDeriveWatermark_RealHotDB_RefinementIsNotStale(t *testing.T) {
 	require.Equal(t, chunk.ID(4).LastLedger(), baseline)
 	require.Greater(t, committedTop, baseline, "fixture must put the real frontier above the baseline")
 
-	got, err := deriveWatermark(cat, silentLogger())
+	got, err := deriveLastCommitted(cat, silentLogger())
 	require.NoError(t, err)
 	require.Equal(t, committedTop, got,
-		"watermark must equal the REAL ledgers-CF last key, not the positional baseline")
+		"last committed ledger must equal the REAL ledgers-CF last key, not the positional baseline")
 }
 
-// TestDeriveWatermark_RealHotDB_OpensHighestReady proves the refinement opens the
+// TestDeriveLastCommitted_RealHotDB_OpensHighestReady proves the refinement opens the
 // HIGHEST ready chunk (the live chunk), not just any ready chunk. Two ready chunks
-// have independent real hot DBs with DIFFERENT committed frontiers; the watermark
+// have independent real hot DBs with DIFFERENT committed frontiers; the last committed ledger
 // must reflect the higher chunk's DB. Only opening the real per-chunk DB by its
 // Layout path distinguishes the two — a "open ready[0] instead of ready[len-1]"
 // regression would land on the wrong frontier.
-func TestDeriveWatermark_RealHotDB_OpensHighestReady(t *testing.T) {
+func TestDeriveLastCommitted_RealHotDB_OpensHighestReady(t *testing.T) {
 	cat, _ := testCatalog(t)
 
 	lower, higher := chunk.ID(4), chunk.ID(7)
@@ -118,17 +118,17 @@ func TestDeriveWatermark_RealHotDB_OpensHighestReady(t *testing.T) {
 	// top, so reading the wrong chunk yields a strictly different (lower) answer.
 	require.Greater(t, highMid, lowTop)
 
-	got, err := deriveWatermark(cat, silentLogger())
+	got, err := deriveLastCommitted(cat, silentLogger())
 	require.NoError(t, err)
 	require.Equal(t, highMid, got,
 		"refinement must open the HIGHEST ready chunk (7), reading its committed mid-seq")
 }
 
-// TestDeriveWatermark_RealHotDB_EmptyLiveFallsBack is the count-only-ready case
+// TestDeriveLastCommitted_RealHotDB_EmptyLiveFallsBack is the count-only-ready case
 // against a real DB: a "ready" live chunk whose real hot DB has NO committed
 // ledger (MaxCommittedSeq ok=false) must fall back to deriveCompleteThrough, not
 // fabricate a frontier. Read through a real read-only open by Layout path.
-func TestDeriveWatermark_RealHotDB_EmptyLiveFallsBack(t *testing.T) {
+func TestDeriveLastCommitted_RealHotDB_EmptyLiveFallsBack(t *testing.T) {
 	cat, _ := testCatalog(t)
 	makeChunkDurable(t, cat, 0) // cold term => chunk 0 last ledger
 
@@ -137,7 +137,7 @@ func TestDeriveWatermark_RealHotDB_EmptyLiveFallsBack(t *testing.T) {
 	require.NoError(t, db.Close())
 
 	// A read-only open of the empty ledgers CF: ok=false, no refinement.
-	got, err := deriveWatermark(cat, silentLogger())
+	got, err := deriveLastCommitted(cat, silentLogger())
 	require.NoError(t, err)
 	require.Equal(t, chunk.ID(2).LastLedger(), got,
 		"empty live DB ⇒ positional baseline (max ready 3 - 1 = chunk 2), no fabricated frontier")
