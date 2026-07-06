@@ -247,9 +247,12 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 	}
 	// Restore the canonical schema after a bulk-load, including one interrupted
 	// by a crash. Must finish before ingestService.Start to avoid starving it.
+	finalizeStart := time.Now()
 	if err := db.FinalizeBulkLoad(context.Background(), daemon.db, cfg.SQLiteDBPath, logger); err != nil {
 		logger.WithError(err).Fatal("failed to finalize backfill bulk-load")
 	}
+	// The backfill perf-eval runner keys off this line; keep it stable
+	logger.WithField("duration", time.Since(finalizeStart).String()).Info("Bulk-load finalize complete")
 	// Start ingestion service only after backfill is complete
 	daemon.ingestService.Start(ingestCfg)
 
