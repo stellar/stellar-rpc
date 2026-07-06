@@ -155,7 +155,9 @@ func waitForCoverage(ctx context.Context, b Backend, target uint32, interval, ti
 		defer cancel()
 		tip, err := b.Tip(tipCtx)
 		if err != nil {
-			// A tip-query failure is fatal — don't retry a broken backend.
+			// A tip-query failure stops this poll loop immediately (no point
+			// re-polling a broken backend); the error surfaces to the pass,
+			// which supervise restarts.
 			return backoff.Permanent(fmt.Errorf("backend tip query: %w", err))
 		}
 		if tip >= target {

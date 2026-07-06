@@ -111,8 +111,9 @@ func (l Layout) LedgersRoot() string { return l.ledgersRoot }
 // EventsRoot is the root EventsPaths composes under.
 func (l Layout) EventsRoot() string { return l.eventsRoot }
 
-// TxHashRawRoot is its own root because the cold pipeline takes an explicit
-// per-kind root (ingest.ColdDirs) rather than a single coldDir/<dataType> layout.
+// TxHashRawRoot is its own root because the cold pipeline (backfill.WriteColdChunk)
+// takes an explicit per-kind root (ingest.ColdDirs) rather than a single
+// coldDir/<dataType> layout.
 func (l Layout) TxHashRawRoot() string { return l.txhashRawRoot }
 
 // TxHashIndexRoot is the root TxHashIndexDir composes under.
