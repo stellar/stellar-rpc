@@ -105,13 +105,11 @@ jobs:
       # fix for the QueryServer.cpp:124 contiguous-snapshot assertion that
       # aborted captive-core catchup on builds 3313..3366.
       #
-      # SPIKE (CAP-0084) DEFERRED: this is still the CAP-0083 vnext image; it
-      # exercises RPC against a P28 core but NOT the CAP-0084 muxed-contract SAC
-      # host behavior. Re-pin to the `4cdd2fc9…`-prefixed `-vnext` build
-      # (stellar/stellar-core#5337 head) once Jenkins publishes it — match the plain
-      # `~vnext` variant, not `~buildtests`. No such build exists yet.
-      core_deb_version: '27.0.1-3367.3589a696b.jammy~vnext'
-      core_docker_img: 'stellar/unsafe-stellar-core:27.0.1-3367.3589a696b.jammy-vnext'
+      # CAP-0084: pinned to the -vnext build 3395 (4cdd2fc9e) matching
+      # stellar-core#5337 HEAD, so RPC integration now exercises the CAP-0084
+      # muxed-contract SAC host behavior. Plain `~vnext` variant (not `~buildtests`).
+      core_deb_version: '27.1.1-3395.4cdd2fc9e.jammy~vnext'
+      core_docker_img: 'stellar/unsafe-stellar-core:27.1.1-3395.4cdd2fc9e.jammy-vnext'
 
   # integration-p25-src:
   #   name: Integration tests (p25, core from source)
