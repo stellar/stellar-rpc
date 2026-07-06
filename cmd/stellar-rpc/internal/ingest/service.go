@@ -296,7 +296,7 @@ func (s *Service) ingestRange(ctx context.Context, backend backends.LedgerBacken
 		fields[key] = duration.Seconds()
 	}
 
-	// Per-chunk phase timings for attributing where backfill time goes
+	// Per-chunk phase timings
 	s.logger.
 		WithFields(fields).
 		Infof("Ingested ledgers [%d, %d]", seqRange.From(), seqRange.To())
@@ -311,8 +311,8 @@ func (s *Service) ingestRange(ctx context.Context, backend backends.LedgerBacken
 	return nil
 }
 
-// ingestLedgerCloseMeta writes a ledger's rows, accumulating per-phase durations
-// into durationMetrics; callers observe/log them.
+// ingestLedgerCloseMeta writes a ledger's rows, accumulating per-phase
+// durations into durationMetrics.
 func (s *Service) ingestLedgerCloseMeta(tx db.WriteTx, ledgerCloseMeta xdr.LedgerCloseMeta,
 	durationMetrics map[string]time.Duration,
 ) error {

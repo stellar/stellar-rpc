@@ -78,23 +78,17 @@ func (d *DB) ResetCache() {
 	d.cache.firstLedgerCloseTime = 0
 }
 
-// Serving DSN pragmas:
-//  1. Use Write-Ahead Logging (WAL).
-//  2. Disable WAL auto-checkpointing (we do the checkpointing ourselves with
-//     wal_checkpoint pragmas after every write transaction).
-//  3. Use synchronous=NORMAL, which is faster and still safe in WAL mode.
+// Serving DSN pragmas. WAL journaling with auto-checkpointing disabled (we
+// checkpoint after every write transaction); synchronous=NORMAL is safe in WAL.
 const serveSQLitePragmas = "_journal_mode=WAL&_wal_autocheckpoint=0&_synchronous=NORMAL"
 
-// Backfill DSN pragmas, relative to serving:
-//  1. Use synchronous=OFF (safe since backfill is restartable and gap-checked).
-//  2. Use a 1 GiB page cache for hot interior B-tree pages; anything larger
-//     displaces the OS page cache and degrades the late run.
+// Backfill DSN pragmas. synchronous=OFF is safe since backfill is restartable
+// and gap-checked; the 1 GiB cache leaves most RAM to the OS page cache.
 const backfillSQLitePragmas = "_journal_mode=WAL&_wal_autocheckpoint=0&_synchronous=OFF" +
 	"&_cache_size=-1048576" // 1 GiB page cache (negative value = KiB)
 
-// Index-build DSN pragmas: a large cache raises the CREATE INDEX sorter's
-// in-memory budget (this session runs alone, single connection); default
-// temp_store so multi-GB sorts spill to disk instead of RAM.
+// Index-build DSN pragmas. A large cache feeds the CREATE INDEX sorter;
+// default temp_store spills large sorts to disk.
 const indexBuildSQLitePragmas = "_journal_mode=WAL&_wal_autocheckpoint=0&_synchronous=NORMAL" +
 	"&_cache_size=-2097152" // 2 GiB page cache (negative value = KiB)
 
@@ -111,9 +105,8 @@ func openSQLiteDB(dbFilePath string) (*db.Session, error) {
 	return session, nil
 }
 
-// OpenSQLiteBackfillSession opens an additional, backfill-tuned session to the
-// same SQLite file. Assumes the schema already exists and skips them. Swap onto
-// the *DB with UseSession for backfill, then restore the serving session.
+// OpenSQLiteBackfillSession opens a backfill-tuned session to the same SQLite
+// file, without running migrations. Swap onto the *DB with UseSession.
 func OpenSQLiteBackfillSession(dbFilePath string) (db.SessionInterface, error) {
 	session, err := db.Open("sqlite3", fmt.Sprintf("file:%s?%s", dbFilePath, backfillSQLitePragmas))
 	if err != nil {
@@ -122,9 +115,8 @@ func OpenSQLiteBackfillSession(dbFilePath string) (db.SessionInterface, error) {
 	return session, nil
 }
 
-// UseSession swaps the underlying session, returning the previous one. Used to
-// apply backfill-specific SQLite tuning for the backfill phase without disturbing
-// the metrics-wrapped serving session + restore it. Single-threaded only.
+// UseSession swaps the underlying session, returning the previous one. Not
+// safe for concurrent use.
 func (d *DB) UseSession(s db.SessionInterface) db.SessionInterface {
 	prev := d.SessionInterface
 	d.SessionInterface = s
@@ -136,78 +128,183 @@ type indexDDL struct {
 	ddl  string
 }
 
-// eventIndexes are the events secondary indexes dropped during a fresh-DB
-// backfill and rebuilt afterwards. DDL text must match 06_topic_indices.sql
-// exactly so the rebuilt schema is identical to a migration-built one.
-// NOTE for migration authors: startup migrations run before EnsureEventIndexes,
-// so a future migration touching these indexes must tolerate their absence
-// (e.g. DROP INDEX IF EXISTS).
+// DDL text must match the migration files byte-exactly. A migration touching
+// these objects must tolerate their absence/twin form and update these constants.
+const (
+	idxLedgerSequenceDDL = "CREATE INDEX index_ledger_sequence ON transactions(ledger_sequence)"
+
+	// canonicalTransactionsDDL mirrors 02_transactions.sql.
+	canonicalTransactionsDDL = "CREATE TABLE transactions (\n" +
+		"    hash BLOB PRIMARY KEY, -- 32-byte binary\n" +
+		"    ledger_sequence INTEGER NOT NULL,\n" +
+		"    application_order INTEGER NOT NULL\n" +
+		")"
+
+	// bulkTransactionsDDL is the indexless bulk-load twin. Same name and
+	// columns as the canonical table, no hash key, so inserts append.
+	bulkTransactionsDDL = "CREATE TABLE transactions (\n" +
+		"    hash BLOB, -- 32-byte binary; key restored by FinalizeBulkLoad\n" +
+		"    ledger_sequence INTEGER NOT NULL,\n" +
+		"    application_order INTEGER NOT NULL\n" +
+		")"
+)
+
+// deferredIndexes are the secondary indexes dropped during a fresh-DB backfill
+// bulk-load and rebuilt by FinalizeBulkLoad.
 //
 //nolint:gochecknoglobals // effectively-constant DDL lookup
-var eventIndexes = []indexDDL{
+var deferredIndexes = []indexDDL{
 	{"idx_id_contract_id", "CREATE INDEX idx_id_contract_id ON events (contract_id, id)"},
 	{"idx_id_topic1", "CREATE INDEX idx_id_topic1 ON events (topic1, id)"},
+	{"index_ledger_sequence", idxLedgerSequenceDDL},
 }
 
-// DropEventIndexes drops the events secondary indexes so a fresh-DB backfill
-// bulk-load avoids random B-tree inserts. EnsureEventIndexes rebuilds them.
-func DropEventIndexes(ctx context.Context, session db.SessionInterface, logger *log.Entry) error {
-	for _, index := range eventIndexes {
+// PrepareBulkLoad drops the deferred indexes and swaps the transactions table
+// for its indexless twin, undone by FinalizeBulkLoad. Requires an empty DB.
+func PrepareBulkLoad(ctx context.Context, session db.SessionInterface, logger *log.Entry) error {
+	for _, index := range deferredIndexes {
 		if _, err := session.ExecRaw(ctx, "DROP INDEX IF EXISTS "+index.name); err != nil {
 			return fmt.Errorf("could not drop index %s: %w", index.name, err)
 		}
-		logger.Infof("Dropped events index %s for backfill bulk-load", index.name)
+		logger.Infof("Dropped index %s for backfill bulk-load", index.name)
 	}
+	if _, err := session.ExecRaw(ctx, "DROP TABLE IF EXISTS "+transactionTableName); err != nil {
+		return fmt.Errorf("could not drop transactions table: %w", err)
+	}
+	if _, err := session.ExecRaw(ctx, bulkTransactionsDDL); err != nil {
+		return fmt.Errorf("could not create bulk transactions table: %w", err)
+	}
+	// Same-named ledger_sequence index for the per-commit trims
+	if _, err := session.ExecRaw(ctx, idxLedgerSequenceDDL); err != nil {
+		return fmt.Errorf("could not index bulk transactions table: %w", err)
+	}
+	logger.Infof("Swapped transactions table for its indexless bulk-load twin")
 	return nil
 }
 
-// EnsureEventIndexes rebuilds any events secondary index dropped by
-// DropEventIndexes. Must complete before live ingestion starts: SQLite is
-// single-writer and a long CREATE INDEX would starve live commits past their
-// busy timeout.
-func EnsureEventIndexes(ctx context.Context, d *DB, dbFilePath string, logger *log.Entry) error {
-	missing, err := missingEventIndexes(ctx, d)
+// FinalizeBulkLoad restores the canonical schema after a bulk-load. Runs at every
+// startup (cheap when nothing to do) and must finish before live ingestion.
+func FinalizeBulkLoad(ctx context.Context, d *DB, dbFilePath string, logger *log.Entry) error {
+	needsRestore, err := transactionsNeedRestore(ctx, d)
 	if err != nil {
 		return err
 	}
-	if len(missing) == 0 {
+	missing, err := missingDeferredIndexes(ctx, d)
+	if err != nil {
+		return err
+	}
+	if !needsRestore && len(missing) == 0 {
 		return nil
 	}
 
-	session, err := db.Open("sqlite3", fmt.Sprintf("file:%s?%s", dbFilePath, indexBuildSQLitePragmas))
+	session, err := openIndexBuildSession(ctx, dbFilePath)
 	if err != nil {
-		return fmt.Errorf("open index build session failed: %w", err)
+		return err
 	}
 	defer func() {
 		if err := session.Close(); err != nil {
 			logger.WithError(err).Warn("could not close index build session")
 		}
 	}()
-	// Single connection so the threads pragma applies to the CREATE INDEX below
-	session.DB.SetMaxOpenConns(1)
-	if _, err := session.ExecRaw(ctx, "PRAGMA threads=4"); err != nil {
-		return fmt.Errorf("could not enable multithreaded sorter: %w", err)
-	}
 
+	if needsRestore {
+		if err := restoreTransactionsTable(ctx, session, logger); err != nil {
+			return err
+		}
+		if err := checkpointWAL(ctx, session); err != nil {
+			return err
+		}
+		// The restore drops the twin's index_ledger_sequence, so recompute
+		if missing, err = missingDeferredIndexes(ctx, d); err != nil {
+			return err
+		}
+	}
 	for _, index := range missing {
-		logger.Infof("Building events index %s (may take minutes, no progress output)", index.name)
+		logger.Infof("Building index %s (may take minutes, no progress output)", index.name)
 		startTime := time.Now()
 		if _, err := session.ExecRaw(ctx, index.ddl); err != nil {
 			return fmt.Errorf("could not build index %s: %w", index.name, err)
 		}
-		// Checkpoint now so the index's WAL debt isn't paid by the first live commit
-		if _, err := session.ExecRaw(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		if err := checkpointWAL(ctx, session); err != nil {
 			return fmt.Errorf("could not checkpoint after building index %s: %w", index.name, err)
 		}
 		logger.WithField("duration", time.Since(startTime).String()).
-			Infof("Built events index %s", index.name)
+			Infof("Built index %s", index.name)
 	}
 	return nil
 }
 
-func missingEventIndexes(ctx context.Context, d *DB) ([]indexDDL, error) {
+// restoreTransactionsTable atomically replaces the bulk-load twin with the
+// canonical table, copying rows in hash order and applying the retention floor.
+func restoreTransactionsTable(ctx context.Context, session db.SessionInterface, logger *log.Entry) error {
+	logger.Infof("Restoring transactions table from its bulk-load twin (may take minutes, no progress output)")
+	startTime := time.Now()
+	if err := session.Begin(ctx); err != nil {
+		return fmt.Errorf("could not begin transactions restore: %w", err)
+	}
+	defer func() {
+		_ = session.Rollback() // no-op after commit
+	}()
+
+	stmts := []string{
+		"DROP TABLE IF EXISTS transactions_bulk",     // leftover from an interrupted restore
+		"DROP INDEX IF EXISTS index_ledger_sequence", // the twin's; rebuilt on the canonical table after
+		"ALTER TABLE " + transactionTableName + " RENAME TO transactions_bulk",
+		canonicalTransactionsDDL,
+	}
+	for _, stmt := range stmts {
+		if _, err := session.ExecRaw(ctx, stmt); err != nil {
+			return fmt.Errorf("transactions restore failed on %q: %w", stmt, err)
+		}
+	}
+	// Hash order builds the key's B-tree append-only; the WHERE applies the
+	// retention floor.
+	result, err := session.ExecRaw(ctx,
+		"INSERT INTO "+transactionTableName+" SELECT hash, ledger_sequence, application_order "+
+			"FROM transactions_bulk "+
+			"WHERE ledger_sequence >= (SELECT COALESCE(MIN(sequence), 0) FROM "+ledgerCloseMetaTableName+") "+
+			"ORDER BY hash")
+	if err != nil {
+		return fmt.Errorf("could not copy rows into transactions table: %w", err)
+	}
+	if _, err := session.ExecRaw(ctx, "DROP TABLE transactions_bulk"); err != nil {
+		return fmt.Errorf("could not drop bulk transactions table: %w", err)
+	}
+	if err := session.Commit(); err != nil {
+		return fmt.Errorf("could not commit transactions restore: %w", err)
+	}
+	rows, _ := result.RowsAffected()
+	logger.WithField("duration", time.Since(startTime).String()).
+		Infof("Restored transactions table (%d rows)", rows)
+	return nil
+}
+
+// transactionsNeedRestore reports whether the transactions table is the
+// bulk-load twin. An unrecognized shape is an error: a migration changed the
+// table and the DDL constants above must be updated with it.
+func transactionsNeedRestore(ctx context.Context, d *DB) (bool, error) {
+	var sqls []string
+	err := d.SelectRaw(ctx, &sqls,
+		"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", transactionTableName)
+	if err != nil {
+		return false, fmt.Errorf("could not check transactions table shape: %w", err)
+	}
+	if len(sqls) == 0 {
+		return false, errors.New("transactions table missing")
+	}
+	switch sqls[0] {
+	case canonicalTransactionsDDL:
+		return false, nil
+	case bulkTransactionsDDL:
+		return true, nil
+	default:
+		return false, fmt.Errorf("unexpected transactions table schema %q", sqls[0])
+	}
+}
+
+func missingDeferredIndexes(ctx context.Context, d *DB) ([]indexDDL, error) {
 	var missing []indexDDL
-	for _, index := range eventIndexes {
+	for _, index := range deferredIndexes {
 		var count int
 		err := d.GetRaw(ctx, &count,
 			"SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?", index.name)
@@ -219,6 +316,29 @@ func missingEventIndexes(ctx context.Context, d *DB) ([]indexDDL, error) {
 		}
 	}
 	return missing, nil
+}
+
+// openIndexBuildSession opens the single-connection session used for bulk
+// schema restoration (see indexBuildSQLitePragmas), with the multithreaded
+// sorter enabled.
+func openIndexBuildSession(ctx context.Context, dbFilePath string) (*db.Session, error) {
+	session, err := db.Open("sqlite3", fmt.Sprintf("file:%s?%s", dbFilePath, indexBuildSQLitePragmas))
+	if err != nil {
+		return nil, fmt.Errorf("open index build session failed: %w", err)
+	}
+	// Single connection so the threads pragma applies to later statements
+	session.DB.SetMaxOpenConns(1)
+	if _, err := session.ExecRaw(ctx, "PRAGMA threads=4"); err != nil {
+		_ = session.Close()
+		return nil, fmt.Errorf("could not enable multithreaded sorter: %w", err)
+	}
+	return session, nil
+}
+
+// checkpointWAL truncates the accumulated WAL into the main DB file.
+func checkpointWAL(ctx context.Context, session db.SessionInterface) error {
+	_, err := session.ExecRaw(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+	return err
 }
 
 func OpenSQLiteDBWithPrometheusMetrics(dbFilePath string, namespace string, sub db.Subservice,

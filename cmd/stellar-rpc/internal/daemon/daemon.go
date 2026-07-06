@@ -205,19 +205,18 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 	var ingestCfg ingest.Config
 	daemon.ingestService, ingestCfg = createIngestService(cfg, logger, daemon, feewindows, historyArchive, rw)
 	if cfg.Backfill {
-		// Bulk-load with backfill-tuned SQLite pragmas via a separate session that is
-		// swapped in for the backfill phase and closed once it completes.
+		// Swap in a backfill-tuned session for the backfill phase
 		tunedSession, err := db.OpenSQLiteBackfillSession(cfg.SQLiteDBPath)
 		if err != nil {
 			logger.WithError(err).Fatal("failed to open backfill-tuned database session")
 		}
 		servingSession := daemon.db.UseSession(tunedSession)
 
-		// On a fresh DB, drop the events secondary indexes so the bulk-load avoids
-		// random B-tree inserts; EnsureEventIndexes rebuilds them below.
+		// On a fresh DB, reshape the schema for the bulk-load; FinalizeBulkLoad
+		// restores it below
 		if _, err := db.NewLedgerReader(daemon.db).GetLedgerRange(context.Background()); errors.Is(err, db.ErrEmptyDB) {
-			if err := db.DropEventIndexes(context.Background(), daemon.db, logger); err != nil {
-				logger.WithError(err).Fatal("failed to drop events indexes for backfill")
+			if err := db.PrepareBulkLoad(context.Background(), daemon.db, logger); err != nil {
+				logger.WithError(err).Fatal("failed to prepare database for backfill bulk-load")
 			}
 		} else if err != nil {
 			logger.WithError(err).Fatal("failed to check database emptiness for backfill")
@@ -237,7 +236,7 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 			logger.WithError(err).Fatal("failed to backfill ledgers")
 		}
 
-		// Restore the serving session and release the tuned session's resources.
+		// Restore the serving session
 		daemon.db.UseSession(servingSession)
 		if err := tunedSession.Close(); err != nil {
 			logger.WithError(err).Warn("could not close backfill-tuned database session")
@@ -246,11 +245,10 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 		daemon.db.ResetCache()
 		feewindows.Reset()
 	}
-	// Rebuild any events indexes dropped for a backfill bulk-load (also covers
-	// crashed-backfill restarts). Must finish before ingestService.Start: SQLite
-	// is single-writer and a long CREATE INDEX would starve live commits.
-	if err := db.EnsureEventIndexes(context.Background(), daemon.db, cfg.SQLiteDBPath, logger); err != nil {
-		logger.WithError(err).Fatal("failed to ensure events indexes")
+	// Restore the canonical schema after a bulk-load, including one interrupted
+	// by a crash. Must finish before ingestService.Start to avoid starving it.
+	if err := db.FinalizeBulkLoad(context.Background(), daemon.db, cfg.SQLiteDBPath, logger); err != nil {
+		logger.WithError(err).Fatal("failed to finalize backfill bulk-load")
 	}
 	// Start ingestion service only after backfill is complete
 	daemon.ingestService.Start(ingestCfg)
