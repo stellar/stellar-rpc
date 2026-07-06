@@ -104,8 +104,12 @@ jobs:
       # Pinned to 3367 (3589a696b), which includes stellar-core#5329 — the
       # fix for the QueryServer.cpp:124 contiguous-snapshot assertion that
       # aborted captive-core catchup on builds 3313..3366.
-      core_deb_version: '27.0.1-3367.3589a696b.jammy~vnext'
-      core_docker_img: 'stellar/unsafe-stellar-core:27.0.1-3367.3589a696b.jammy-vnext'
+      #
+      # CAP-0084: pinned to the -vnext build 3395 (4cdd2fc9e) matching
+      # stellar-core#5337 HEAD, so RPC integration now exercises the CAP-0084
+      # muxed-contract SAC host behavior. Plain `~vnext` variant (not `~buildtests`).
+      core_deb_version: '27.1.1-3395.4cdd2fc9e.jammy~vnext'
+      core_docker_img: 'stellar/unsafe-stellar-core:27.1.1-3395.4cdd2fc9e.jammy-vnext'
 
   # integration-p25-src:
   #   name: Integration tests (p25, core from source)
