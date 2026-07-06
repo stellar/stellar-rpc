@@ -127,7 +127,6 @@ func coldBinCount(path string, size int64, count uint64) (uint64, error) {
 		return 0, fmt.Errorf("txhash: %s is %d bytes, not a %d-byte header plus whole %d-byte entries",
 			path, size, coldBinHeaderSize, coldBinEntrySize)
 	}
-	//nolint:gosec // body >= 0 checked above, so the conversion is exact
 	if want := uint64(body) / coldBinEntrySize; count != want {
 		return 0, fmt.Errorf("txhash: %s header claims %d entries but its %d bytes hold %d",
 			path, count, size, want)

@@ -186,7 +186,7 @@ func assertQuiescent(t *testing.T, cfg Config, cat *catalog.Catalog, through uin
 		// executePlan) is a no-op that returns nil — even with no Backend wired,
 		// since an empty plan never reaches backfillSource.
 		perr := backfill.RunBackfill(context.Background(), cfg.ExecConfig, start, lastChunk)
-		assert.NoError(t, perr, "re-running backfill schedules no work at quiescence")
+		require.NoError(t, perr, "re-running backfill schedules no work at quiescence")
 	}
 	dops, err := eligibleDiscardOps(cat, gate, lastChunk)
 	require.NoError(t, err)

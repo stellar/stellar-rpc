@@ -382,9 +382,11 @@ func (s *streamReader) entry() []byte {
 	off := s.cur * coldBinEntrySize
 	return s.batch.data[off : off+coldBinEntrySize]
 }
+
 func (s *streamReader) k0() uint64 {
 	return binary.BigEndian.Uint64(s.batch.data[s.cur*coldBinEntrySize:])
 }
+
 func (s *streamReader) k1() uint64 {
 	return binary.BigEndian.Uint64(s.batch.data[s.cur*coldBinEntrySize+8:])
 }
