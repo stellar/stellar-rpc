@@ -72,6 +72,15 @@ upload_box_log() {
   aws s3 cp /var/log/user-data.log "s3://$BUCKET/${RESULT_KEY%/*}/user-data.log" >/dev/null 2>&1 || true
 }
 trap upload_box_log EXIT
+
+# Publish the in-progress box log every 5 minutes so a hard-killed or
+# still-running box is observable from S3; dies with the instance.
+if [ -n "$BUCKET" ] && [ -n "$RESULT_KEY" ]; then
+  ( while sleep 300; do
+      aws s3 cp /var/log/user-data.log \
+        "s3://$BUCKET/${RESULT_KEY%/*}/user-data.progress.log" >/dev/null 2>&1 || true
+    done ) &
+fi
 # end temporary scaffolding section
 
 # bootstrap_box installs the build toolchain and checks out TARGET_SHA into

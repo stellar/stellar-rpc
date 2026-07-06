@@ -294,8 +294,11 @@ jobs:
             exit 1
           fi
 
+      # Not always(): on cancellation (e.g. the hosted-runner 6h job cap) the box
+      # keeps running so it can finish and publish its result; the instance's
+      # self_terminate_minutes backstop handles cleanup instead.
       - name: Terminate instance
-        if: always() && steps.launch.outputs.instance_id != ''
+        if: (success() || failure()) && steps.launch.outputs.instance_id != ''
         run: |
           aws ec2 terminate-instances \
             --instance-ids ${{ steps.launch.outputs.instance_id }} || true
