@@ -1,11 +1,13 @@
 package catalog
 
 import (
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
 // ---------------------------------------------------------------------------
@@ -103,4 +105,33 @@ func TestSweepIndexKeyFreezingDebris(t *testing.T) {
 func TestSweepEmptyRefsNoop(t *testing.T) {
 	cat, _ := testCatalog(t)
 	require.NoError(t, cat.SweepChunkArtifacts(nil))
+}
+
+// TestDiscardHotChunkResumesTransient mirrors the sweep siblings' crash-resume
+// coverage for the hot-DB discard: a "transient" key (a discard that crashed after
+// marking transient but before deleting the key) plus a leftover dir must be
+// finished by the next DiscardHotChunk — the dir removed and the key deleted.
+func TestDiscardHotChunkResumesTransient(t *testing.T) {
+	cat, _ := testCatalog(t)
+	c := chunk.ID(4)
+
+	// The mid-discard crash state: a "transient" key + a real leftover dir.
+	require.NoError(t, cat.PutHotTransient(c))
+	dir := cat.layout.HotChunkPath(c)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+
+	require.NoError(t, cat.DiscardHotChunk(c))
+
+	// The resume completed it: key gone, dir gone.
+	state, err := cat.HotState(c)
+	require.NoError(t, err)
+	require.Equal(t, geometry.HotState(""), state, "transient key finished")
+	require.NoDirExists(t, dir, "leftover hot dir swept")
+}
+
+// TestDiscardHotChunkAbsentKeyNoop: an absent hot key is a clean no-op (nothing
+// to finish).
+func TestDiscardHotChunkAbsentKeyNoop(t *testing.T) {
+	cat, _ := testCatalog(t)
+	require.NoError(t, cat.DiscardHotChunk(chunk.ID(9)))
 }

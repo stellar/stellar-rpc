@@ -4,11 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"time"
 
+	"github.com/pelletier/go-toml"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
@@ -34,6 +39,11 @@ type daemonOptions struct {
 	// frontfill-only daemon when no datastore is configured). Tests inject a fakeBackend.
 	Backend backfill.Backend
 
+	// Core starts captive core at the resume ledger and yields the live getter the
+	// ingestion loop polls. nil ⇒ runDaemonWith builds a captiveCoreOpener from
+	// [ingestion] (a complete production opener). Tests inject a fake getter.
+	Core CoreOpener
+
 	// ServeReads launches the RPC read server; it must return promptly, not block.
 	// nil ⇒ the #772 no-op placeholder (reads still come from the v1 SQLite daemon).
 	ServeReads func(ctx context.Context) error
@@ -49,6 +59,11 @@ type daemonOptions struct {
 
 	// IngestSink is the per-type cold-path ingest sink; nil ⇒ a *ingest.PrometheusSink.
 	IngestSink ingest.MetricSink
+
+	// chunksPerTxhashIndex overrides the tx-hash index width (test-only). 0 ⇒ the
+	// fixed geometry.ChunksPerTxhashIndex. Tests set it to 1 so a single chunk's
+	// freeze is a terminal index (exercising the index rebuild + prune path cheaply).
+	chunksPerTxhashIndex uint32
 }
 
 const defaultRestartBackoff = 5 * time.Second
@@ -88,7 +103,11 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	}
 	defer func() { _ = store.Close() }()
 
-	txLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
+	cpi := geometry.ChunksPerTxhashIndex
+	if opts.chunksPerTxhashIndex != 0 {
+		cpi = opts.chunksPerTxhashIndex
+	}
+	txLayout, err := geometry.NewTxHashIndexLayout(cpi)
 	if err != nil {
 		return err
 	}
@@ -130,8 +149,21 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	registry := prometheus.NewRegistry()
 	metrics, sink := buildSinks(opts, registry)
 
+	// Resolve the captive-core opener: injected (tests) or built from
+	// [ingestion].captive_core_config (a complete production opener) — done after
+	// validateConfig so config errors surface first.
+	core := opts.Core
+	if core == nil {
+		built, cerr := newCaptiveCoreOpener(cfg.Ingestion, cfg.Service.DefaultDataDir, logger)
+		if cerr != nil {
+			return cerr
+		}
+		core = built
+	}
+
 	// --- Assemble the StartConfig and run the supervised run loop. ---
-	start := startConfig(cfg, cat, logger, backend, networkTip, serveReads, metrics, sink, tipBackoff, tipMaxAttempts)
+	start := startConfig(
+		cfg, cat, logger, backend, networkTip, core, serveReads, metrics, sink, tipBackoff, tipMaxAttempts)
 
 	backoff := opts.RestartBackoff
 	if backoff <= 0 {
@@ -140,10 +172,12 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	return supervise(ctx, start, logger, backoff)
 }
 
-// startConfig assembles the StartConfig run consumes.
+// startConfig assembles the StartConfig run consumes. run() builds the
+// lifecycle.Config from Exec + RetentionChunks, so backfill and the lifecycle
+// goroutine share ONE catalog, worker pool, and retention floor by construction.
 func startConfig(
 	cfg Config, cat *catalog.Catalog, logger *supportlog.Entry,
-	backend backfill.Backend, networkTip NetworkTipBackend, serveReads func(context.Context) error,
+	backend backfill.Backend, networkTip NetworkTipBackend, core CoreOpener, serveReads func(context.Context) error,
 	metrics observability.Metrics, sink ingest.MetricSink, tipBackoff time.Duration, tipMaxAttempts int,
 ) StartConfig {
 	exec := backfill.ExecConfig{
@@ -161,6 +195,7 @@ func startConfig(
 		Exec:            exec,
 		RetentionChunks: deref(cfg.Retention.RetentionChunks),
 		NetworkTip:      networkTip,
+		Core:            core,
 		ServeReads:      serveReads,
 		TipBackoff:      tipBackoff,
 		TipMaxAttempts:  tipMaxAttempts,
@@ -181,23 +216,20 @@ func buildSinks(opts daemonOptions, registry *prometheus.Registry) (observabilit
 	return metrics, sink
 }
 
-// supervise restarts run on a restartable error after a backoff ("startup is the
-// recovery path"); a clean shutdown or ctx cancel returns nil; ErrFirstStartNoTip
-// is fatal and surfaces up.
+// supervise is the daemon's clean-vs-restart decision point ("startup is the
+// recovery path"): a ctx cancel is a clean shutdown, everything else is warned and
+// retried after a backoff. run() never returns nil (a clean shutdown surfaces as a
+// ctx-canceled error), so clean-vs-restart keys solely off ctx.Err(). There is
+// deliberately no fatal-and-exit class — genuine loss presents as a crash-loop with
+// a clear warn line. The never-auto-heal guarantee lives in the must-exist open
+// (openHotDBForChunk), not here.
 func supervise(
 	ctx context.Context, start StartConfig, logger *supportlog.Entry, backoff time.Duration,
 ) error {
 	for {
 		err := run(ctx, start)
-		if err == nil {
-			return nil // clean shutdown
-		}
 		if ctx.Err() != nil {
 			return nil //nolint:nilerr // ctx canceled is a clean shutdown, not a run failure
-		}
-		// Unrecoverable: a fresh start cannot heal it, so don't spin restarting.
-		if errors.Is(err, ErrFirstStartNoTip) {
-			return err
 		}
 		logger.WithError(err).Warnf("daemon run failed; restarting in %s", backoff)
 		if sleepCtx(ctx, backoff) != nil {
@@ -207,7 +239,7 @@ func supervise(
 }
 
 // sleepCtx blocks for d or until ctx is canceled, returning ctx.Err() if canceled
-// first and nil otherwise. supervise's three-way clean/fatal/restart loop can't be
+// first and nil otherwise. supervise's clean-vs-restart loop can't be
 // a backoff.Retry, so it keeps a hand-rolled sleep — but shares this one helper
 // rather than re-rolling the timer/select (and its easy-to-forget timer.Stop).
 func sleepCtx(ctx context.Context, d time.Duration) error {
@@ -244,6 +276,106 @@ func buildBackfillBackend(
 	return backend, cleanup, nil
 }
 
+// ---------------------------------------------------------------------------
+// Production captive-core opener (the live ingestion source).
+// ---------------------------------------------------------------------------
+
+// captiveCoreOpener is the production CoreOpener. It holds a resolved
+// CaptiveCoreConfig and hands back a captive-core LedgerStream that builds a FRESH
+// core per run (each supervised restart reopens core anew) — the stream owns the
+// process lifecycle, so there is no eager prepare or explicit closer here.
+// Construction mirrors the RPC daemon's newCaptiveCore so the full-history daemon
+// runs captive core and the ledgerbackend the same way (#772 can unify them at
+// the cutover).
+type captiveCoreOpener struct {
+	config ledgerbackend.CaptiveCoreConfig
+}
+
+// newCaptiveCoreOpener resolves the captive-core config, treating the
+// captive_core_config FILE as the single source of truth: NETWORK_PASSPHRASE is
+// read back from it, and the stellar-core binary defaults to the one on PATH.
+// Only the plain history-archive URLs (not derivable from the file's [HISTORY.*]
+// get-commands) come from [ingestion].history_archive_urls. The toml params
+// mirror the RPC daemon (strict, unified events, soroban diagnostic/meta
+// enforcement) so the ingested meta is what the events + txhash stores need.
+func newCaptiveCoreOpener(ing IngestionConfig, dataDir string, logger *supportlog.Entry) (*captiveCoreOpener, error) {
+	if ing.CaptiveCoreConfig == "" {
+		return nil, errors.New("[ingestion].captive_core_config is required for live ingestion")
+	}
+	if len(ing.HistoryArchiveURLs) == 0 {
+		return nil, errors.New("[ingestion].history_archive_urls is required for live ingestion")
+	}
+
+	// NETWORK_PASSPHRASE lives in the captive-core file; read it back so the
+	// operator configures it in one place. (go-toml v1 ignores the other fields.)
+	data, err := os.ReadFile(ing.CaptiveCoreConfig)
+	if err != nil {
+		return nil, fmt.Errorf("read captive_core_config %q: %w", ing.CaptiveCoreConfig, err)
+	}
+	var peek struct {
+		NetworkPassphrase string `toml:"NETWORK_PASSPHRASE"`
+	}
+	if perr := toml.Unmarshal(data, &peek); perr != nil {
+		return nil, fmt.Errorf("parse captive_core_config %q: %w", ing.CaptiveCoreConfig, perr)
+	}
+	if peek.NetworkPassphrase == "" {
+		return nil, fmt.Errorf("captive_core_config %q must define NETWORK_PASSPHRASE", ing.CaptiveCoreConfig)
+	}
+
+	// stellar-core binary: explicit path, else the one on PATH (RPC daemon default).
+	binaryPath := ing.StellarCoreBinaryPath
+	if binaryPath == "" {
+		found, lerr := exec.LookPath("stellar-core")
+		if lerr != nil {
+			return nil, fmt.Errorf(
+				"[ingestion].stellar_core_binary_path unset and stellar-core not found on PATH: %w", lerr)
+		}
+		binaryPath = found
+	}
+
+	storagePath := ing.CaptiveCoreStoragePath
+	if storagePath == "" {
+		storagePath = filepath.Join(dataDir, "captive-core")
+	}
+
+	// Build the toml from the bytes already read, not the path — re-reading via
+	// NewCaptiveCoreTomlFromFile would parse the file twice and, worse, could
+	// observe a different NETWORK_PASSPHRASE than the one peeked above if the file
+	// changed between the two reads (surfacing as the SDK's confusing mismatch error).
+	coreToml, err := ledgerbackend.NewCaptiveCoreTomlFromData(data, ledgerbackend.CaptiveCoreTomlParams{
+		HistoryArchiveURLs:                 ing.HistoryArchiveURLs,
+		NetworkPassphrase:                  peek.NetworkPassphrase,
+		Strict:                             true,
+		EnforceSorobanDiagnosticEvents:     true,
+		EnforceSorobanTransactionMetaExtV1: true,
+		EmitUnifiedEvents:                  true,
+		CoreBinaryPath:                     binaryPath,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("invalid captive-core toml %q: %w", ing.CaptiveCoreConfig, err)
+	}
+
+	return &captiveCoreOpener{
+		config: ledgerbackend.CaptiveCoreConfig{
+			BinaryPath:         binaryPath,
+			StoragePath:        storagePath,
+			NetworkPassphrase:  peek.NetworkPassphrase,
+			HistoryArchiveURLs: ing.HistoryArchiveURLs,
+			Log:                logger.WithField("subservice", "stellar-core"),
+			Toml:               coreToml,
+			UserAgent:          "stellar-rpc-fullhistory",
+		},
+	}, nil
+}
+
+// OpenCore returns the live ingestion stream backed by captive stellar-core. A
+// fresh core per run keeps supervised restarts clean.
+func (c *captiveCoreOpener) OpenCore(ctx context.Context) (ledgerbackend.LedgerStream, error) {
+	cfg := c.config
+	cfg.Context = ctx
+	return ledgerbackend.NewCaptiveCoreStream(cfg, c.config.Log), nil
+}
+
 // resolveNetworkTip adapts the backfill backend to backfill's tip sampler — its Tip
 // frontier (so the tip and the freeze's coverage frontier are one source) — or the
 // not-configured placeholder for a frontfill-only daemon (nil backend).
@@ -278,7 +410,7 @@ func newLogger(cfg LoggingConfig) (*supportlog.Entry, error) {
 	}
 	logger := supportlog.New()
 	logger.SetLevel(level)
-	if cfg.Format == "json" {
+	if cfg.Format == LogFormatJSON {
 		logger.UseJSONFormatter()
 	}
 	return logger, nil
@@ -286,6 +418,7 @@ func newLogger(cfg LoggingConfig) (*supportlog.Entry, error) {
 
 // compile-time interface checks.
 var (
+	_ CoreOpener        = (*captiveCoreOpener)(nil)
 	_ NetworkTipBackend = notConfiguredTip{}
 	_ NetworkTipBackend = backendTip{}
 )

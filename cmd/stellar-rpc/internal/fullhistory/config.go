@@ -4,14 +4,13 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"path/filepath"
-	"runtime"
 
 	"github.com/pelletier/go-toml"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/stellar/go-stellar-sdk/support/datastore"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 )
 
@@ -25,7 +24,7 @@ import (
 // earliest_ledger ([retention]) is the one PINNED field — written immutably on
 // first start (PinEarliestLedger) and validated against its pin (abort on
 // mismatch) on every restart; its field doc flags the set-once contract.
-// (chunks_per_txhash_index is no longer configurable — it is the fixed
+// (The tx-hash index width is not configurable — it is the fixed
 // geometry.ChunksPerTxhashIndex constant.)
 type Config struct {
 	Service   ServiceConfig   `toml:"service"`
@@ -88,10 +87,27 @@ type BackfillConfig struct {
 	BSB ledgerbackend.BufferedStorageBackendConfig `toml:"bsb"`
 }
 
-// IngestionConfig is [ingestion] — the live-network ingestion settings.
+// IngestionConfig is [ingestion] — the live-network ingestion (captive-core)
+// settings. The captive-core config FILE is the single source of truth for what
+// it can hold (notably NETWORK_PASSPHRASE, read back at startup); the remaining
+// keys are the things that don't live in that file — the plain history-archive
+// URLs (the file's [HISTORY.*] entries are shell commands, not the URLs the SDK's
+// archive client needs), and, optionally, the stellar-core binary path and the
+// captive-core storage directory.
 type IngestionConfig struct {
-	// Path to the CaptiveStellarCore config file. Required.
+	// CaptiveCoreConfig is the path to the CaptiveStellarCore (stellar-core) config
+	// file. Required for live ingestion. Must define NETWORK_PASSPHRASE.
 	CaptiveCoreConfig string `toml:"captive_core_config"`
+	// HistoryArchiveURLs are the plain history-archive URLs the SDK reads
+	// checkpoints from. Required for live ingestion (not derivable from the
+	// captive-core file's [HISTORY.*] get-commands).
+	HistoryArchiveURLs []string `toml:"history_archive_urls"`
+	// StellarCoreBinaryPath is the path to the stellar-core binary. Optional —
+	// defaults to the "stellar-core" found on PATH.
+	StellarCoreBinaryPath string `toml:"stellar_core_binary_path"`
+	// CaptiveCoreStoragePath is captive core's BUCKET_DIR_PATH base; optional,
+	// defaults to {default_data_dir}/captive-core.
+	CaptiveCoreStoragePath string `toml:"captive_core_storage_path"`
 }
 
 // LoggingConfig is [logging].
@@ -108,6 +124,9 @@ const (
 
 	DefaultLogLevel  = "info"
 	DefaultLogFormat = "text"
+	// LogFormatJSON is the only non-default logging.format value; anything else is
+	// rejected by validateConfig.
+	LogFormatJSON = "json"
 
 	// EarliestGenesis and EarliestNow are the two symbolic earliest_ledger forms.
 	EarliestGenesis = "genesis"
@@ -149,7 +168,7 @@ func ParseConfig(data []byte) (Config, error) {
 // (and later rejected by validateConfig where a zero is illegal).
 func (cfg Config) WithDefaults() Config {
 	if cfg.Backfill.Workers == nil {
-		v := runtime.GOMAXPROCS(0)
+		v := backfill.DefaultWorkers()
 		cfg.Backfill.Workers = &v
 	}
 	if cfg.Backfill.MaxRetries == nil {
@@ -187,23 +206,27 @@ type Paths struct {
 
 // ResolvePaths fills every storage path, defaulting under default_data_dir.
 // Relative overrides are kept relative (resolved against the caller's working
-// dir); only the defaults are joined to the data dir.
+// dir); only the defaults are joined to the data dir. The default tree is spelled
+// ONCE, by geometry.NewLayout — production flows through here and every package's
+// test helpers through NewLayout, so a rename to the tree can't leave the two
+// disagreeing.
 func (cfg Config) ResolvePaths() Paths {
 	dataDir := cfg.Service.DefaultDataDir
-	pick := func(override, def string) string {
+	def := geometry.NewLayout(dataDir)
+	pick := func(override, defPath string) string {
 		if override != "" {
 			return override
 		}
-		return def
+		return defPath
 	}
 	return Paths{
 		DataDir:     dataDir,
-		Catalog:     pick(cfg.Storage.Catalog, filepath.Join(dataDir, "catalog", "rocksdb")),
-		Ledgers:     pick(cfg.Storage.Ledgers, filepath.Join(dataDir, "ledgers")),
-		Events:      pick(cfg.Storage.Events, filepath.Join(dataDir, "events")),
-		TxhashRaw:   pick(cfg.Storage.TxhashRaw, filepath.Join(dataDir, "txhash", "raw")),
-		TxhashIndex: pick(cfg.Storage.TxhashIndex, filepath.Join(dataDir, "txhash", "index")),
-		HotStorage:  pick(cfg.Storage.Hot, filepath.Join(dataDir, "hot")),
+		Catalog:     pick(cfg.Storage.Catalog, def.CatalogPath()),
+		Ledgers:     pick(cfg.Storage.Ledgers, def.LedgersRoot()),
+		Events:      pick(cfg.Storage.Events, def.EventsRoot()),
+		TxhashRaw:   pick(cfg.Storage.TxhashRaw, def.TxHashRawRoot()),
+		TxhashIndex: pick(cfg.Storage.TxhashIndex, def.TxHashIndexRoot()),
+		HotStorage:  pick(cfg.Storage.Hot, def.HotRoot()),
 	}
 }
 

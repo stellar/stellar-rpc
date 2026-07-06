@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"golang.org/x/sync/errgroup"
-
 	"github.com/stellar/go-stellar-sdk/xdr"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
 )
 
 // errOrFirst returns prev if it is non-nil, else cur. Used to retain the FIRST
@@ -21,56 +21,57 @@ func errOrFirst(prev, cur error) error {
 	return cur
 }
 
-// HotService fans one ledger out to a set of HotIngesters concurrently, waiting
-// for all to finish before returning (so the borrowed view is safe to release),
-// and emits the aggregate per-ledger wall-clock via the sink.
+// HotService commits one ledger to the shared per-chunk hot DB as ONE atomic
+// synced WriteBatch across all hot CFs (decision (a)) and emits the single hot
+// signal family: one HotPhase per hotchunk.Phase. No fan-out — the three types are
+// CFs of one RocksDB committing in one WriteBatch (hotchunk.DB.IngestLedger).
 type HotService struct {
-	ingesters []HotIngester
-	sink      MetricSink
+	db   *hotchunk.DB
+	sink MetricSink
 }
 
-// NewHotService builds a HotService over the enabled hot ingesters. A nil sink
-// defaults to NopSink.
-func NewHotService(ingesters []HotIngester, sink MetricSink) *HotService {
-	return &HotService{ingesters: ingesters, sink: orNop(sink)}
+// NewHotService builds a HotService that writes ledgers, txhash, and events into
+// the shared per-chunk DB. A nil sink defaults to NopSink.
+func NewHotService(db *hotchunk.DB, sink MetricSink) *HotService {
+	return &HotService{db: db, sink: orNop(sink)}
 }
 
-// Ingest runs every hot ingester on lcm concurrently and waits for all of them.
-// seq is the driver-validated sequence of lcm, passed through unchanged. The
-// first ingester error is returned; the production HotIngester.Ingest
-// implementations do not check ctx.Err(), so the siblings run to completion
-// regardless (g.Wait still returns the first error). The single-ingester config
-// skips the errgroup entirely. HotLedgerTotal is emitted with the fan-out
-// wall-clock regardless of success.
-func (s *HotService) Ingest(ctx context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
-	start := time.Now()
-	switch len(s.ingesters) {
-	case 0:
-		// No hot ingesters enabled for this tier: nothing to do.
-		s.sink.HotLedgerTotal(time.Since(start))
-		return nil
-	case 1:
-		// Single ingester: call directly, skipping the errgroup overhead.
-		err := s.ingesters[0].Ingest(ctx, seq, lcm)
-		s.sink.HotLedgerTotal(time.Since(start))
-		return err
-	default:
-		// Two or more: concurrent fan-out, waiting for all.
-		g, gctx := errgroup.WithContext(ctx)
-		for _, ing := range s.ingesters {
-			g.Go(func() error { return ing.Ingest(gctx, seq, lcm) })
-		}
-		err := g.Wait()
-		s.sink.HotLedgerTotal(time.Since(start))
-		return err
+// Ingest commits lcm to the shared hot DB in one atomic synced WriteBatch
+// (decision (a)) and emits one HotPhase per phase from the ledger report. Each
+// phase carries its own wall-clock (the phases partition the per-ledger total),
+// the write phases carry per-type item volume on success, and the outcome lands on
+// the phase that failed BY CONSTRUCTION — a decode failure on PhaseExtract, a
+// commit failure on PhaseCommit — so there is no mislabeled batch-scoped error.
+// On failure only phases [0, Failed] ran, so only those are emitted (and with zero
+// items — nothing landed durably); on success every phase is emitted.
+func (s *HotService) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
+	rep, err := s.db.IngestLedger(seq, lcm)
+
+	last := hotchunk.NumPhases - 1
+	if err != nil {
+		last = rep.Failed
 	}
+	for p := hotchunk.Phase(0); p <= last; p++ {
+		items := rep.Phases[p].Items
+		var perr error
+		if err != nil {
+			items = 0 // the failure path committed nothing durably
+			if p == rep.Failed {
+				perr = err
+			}
+		}
+		s.sink.HotPhase(p, rep.Phases[p].Dur, items, perr)
+	}
+	return err
 }
 
 // ColdService drives a set of ColdIngesters for one chunk: sequential per-ledger
-// Ingest, then Finalize on each. It times from the first Ingest (or, if none ran,
-// from the Finalize/Close call) and emits the aggregate ColdChunkTotal exactly
-// once for the chunk — in Finalize on the success path, otherwise in Close on the
-// failure path (an Ingest error or short stream short-circuits before Finalize).
+// Ingest, then Finalize on each. The per-chunk aggregate timer starts at
+// construction (NewColdService), so its window spans the caller's drain of the
+// source stream plus every Ingest and Finalize — a deliberately wide window (see
+// coldBuckets). It emits the aggregate ColdChunkTotal exactly once for the chunk —
+// in Finalize on the success path, otherwise in Close on the failure path (an
+// Ingest error or short stream short-circuits before Finalize).
 // The totalEmitted flag prevents a double-emit: Finalize sets it so the caller's
 // deferred Close is a no-op for the aggregate. (A ctx or constructor failure
 // happens before the service is built — WriteColdChunk emits that chunk's single
@@ -124,11 +125,12 @@ func (s *ColdService) Finalize(ctx context.Context) error {
 }
 
 // Close closes every cold ingester, joining each Close error, and emits the
-// aggregate ColdChunkTotal if Finalize never reached it (the failure path). Each
-// ingester's own Close in turn emits that ingester's per-chunk ColdIngest if its
-// Finalize never ran, so a failed chunk still produces one per-ingester signal
-// and one aggregate. Idempotent: on the failure path a writer's Close drops its
-// partial file; after a successful Finalize all emissions are no-ops.
+// aggregate ColdChunkTotal if Finalize never reached it (the failure path). A
+// per-ingester ColdIngest is emitted only from a TERMINAL step (a failed Ingest,
+// via coldMetrics.observe, or Finalize) — never from Close, so an ingester rolled
+// back before any work produces no per-ingester sample (only the aggregate here).
+// Idempotent: on the failure path a writer's Close drops its partial file; after
+// a successful Finalize this is a no-op for the aggregate.
 func (s *ColdService) Close() error {
 	var err error
 	for _, ing := range s.ingesters {

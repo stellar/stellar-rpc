@@ -83,8 +83,8 @@ type Reader interface {
 	//
 	// Implementations:
 	//   - HotStore allocates a fresh Snapshot from the live
-	//     ConcurrentLedgerOffsets per call. Concurrent
-	//     IngestLedgerEvents may extend the underlying state after
+	//     ConcurrentLedgerOffsets per call. A concurrent
+	//     IngestLedgerToBatch may extend the underlying state after
 	//     Offsets returns, but the returned snapshot reflects what
 	//     was visible at call time. Callers (Query) take the
 	//     snapshot once at entry and pass it through their helpers.
@@ -183,12 +183,6 @@ type Reader interface {
 	// Each events.Payload carries its LedgerSequence, so consumers can
 	// track ledger boundaries without separate signaling.
 	All(ctx context.Context) iter.Seq2[events.Payload, error]
-
-	// Close releases any resources the Reader holds. Idempotent.
-	// After Close, Lookup / FetchEvents / FetchRange / All return
-	// ErrClosed. Metadata accessors (ChunkID, EventCount, Offsets)
-	// survive Close — see each impl's docstring for details.
-	Close() error
 }
 
 // validateSortedEventIDs returns a wrapped ErrUnsortedEventIDs if

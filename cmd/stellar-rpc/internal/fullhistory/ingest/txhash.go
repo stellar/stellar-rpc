@@ -16,51 +16,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
 
-// ───────────────────────── Hot ingester ─────────────────────────
-
-// txhashHot extracts the ledger's transaction hashes via the SDK
-// (sdkingest.ExtractTxHashes — apply order, hashes copied off the view) and
-// writes (txhash, seq) tuples in one AddEntries call (one fsync per ledger).
-// The store is INJECTED and owned by the caller.
-type txhashHot struct {
-	store *txhash.HotStore
-	sink  MetricSink
-}
-
-// NewTxhashHotIngester returns a HotIngester writing (txhash, seq) tuples into
-// the injected, caller-owned store.
-func NewTxhashHotIngester(store *txhash.HotStore, sink MetricSink) HotIngester {
-	return &txhashHot{store: store, sink: orNop(sink)}
-}
-
-func (t *txhashHot) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
-	m := newHotMetrics(t.sink, dataTypeTxhash)
-	var err error
-	defer func() { m.emit(err) }()
-
-	estart := time.Now()
-	hashes, eerr := sdkingest.ExtractTxHashes(lcm)
-	if eerr != nil {
-		err = fmt.Errorf("ExtractTxHashes seq %d: %w", seq, eerr)
-		return err
-	}
-	t.sink.IngestStage(dataTypeTxhash, tierHot, stageExtract, time.Since(estart), len(hashes))
-	if len(hashes) > 0 {
-		entries := make([]txhash.Entry, len(hashes))
-		for i, h := range hashes {
-			entries[i] = txhash.Entry{Hash: [32]byte(h), LedgerSeq: seq}
-		}
-		wstart := time.Now()
-		if aerr := t.store.AddEntries(entries); aerr != nil {
-			err = fmt.Errorf("AddEntries(seq=%d, n=%d): %w", seq, len(entries), aerr)
-			return err
-		}
-		t.sink.IngestStage(dataTypeTxhash, tierHot, stageWrite, time.Since(wstart), len(entries))
-	}
-	m.items = len(hashes)
-	return nil
-}
-
 // ───────────────────────── Cold ingester ─────────────────────────
 
 // txhashCold accumulates (txhash[:ColdKeySize], seq) tuples per ledger; at
@@ -78,19 +33,18 @@ type txhashCold struct {
 }
 
 // NewTxhashColdIngester returns a ColdIngester that accumulates a per-chunk
-// sorted .bin under coldDir's bucket subdirectory, written at Finalize
-// (overwriting any prior attempt's file — see the package doc's artifact
-// model).
-func NewTxhashColdIngester(coldDir string, chunkID chunk.ID, sink MetricSink) (ColdIngester, error) {
-	bucketDir := filepath.Join(coldDir, chunkID.BucketID())
-	if err := os.MkdirAll(bucketDir, 0o755); err != nil {
-		return nil, fmt.Errorf("mkdir %s: %w", bucketDir, err)
+// sorted .bin at binPath — the caller's geometry.Layout.TxHashBinPath(chunkID),
+// so the write path is Layout's single derivation — written at Finalize
+// (overwriting any prior attempt's file — see the package doc's artifact model).
+func NewTxhashColdIngester(binPath string, chunkID chunk.ID, sink MetricSink) (ColdIngester, error) {
+	if err := os.MkdirAll(filepath.Dir(binPath), 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(binPath), err)
 	}
 	// The initial cap (64Ki entries, ~1.3 MB) deliberately starts well below a
 	// typical pubnet chunk's tx count (~3M): empty/sparse chunks stay cheap,
 	// and a busy chunk just pays a few amortized growths.
 	return &txhashCold{
-		binPath: filepath.Join(bucketDir, txhash.ColdBinName(chunkID)),
+		binPath: binPath,
 		chunkID: chunkID,
 		entries: make([]txhash.ColdEntry, 0, 1<<16),
 		metrics: newColdMetrics(sink, dataTypeTxhash),
@@ -105,7 +59,7 @@ func (t *txhashCold) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMe
 	// chunk that intermediate would be hundreds of MB of transient garbage.
 	hashes, err := sdkingest.ExtractTxHashes(lcm)
 	if err != nil {
-		t.metrics.observe(time.Since(start), 0, err)
+		t.metrics.observe(time.Since(start), 0, err) // terminal: observe emits the per-ingester signal
 		return fmt.Errorf("ExtractTxHashes seq %d: %w", seq, err)
 	}
 	for i := range hashes {
@@ -122,7 +76,7 @@ func (t *txhashCold) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMe
 	// write is the finalize stage; there is no separate cold write stage for
 	// txhash.)
 	d := time.Since(start)
-	t.metrics.sink.IngestStage(dataTypeTxhash, tierCold, stageExtract, d, len(hashes))
+	t.metrics.sink.IngestStage(dataTypeTxhash, stageExtract, d, len(hashes))
 	t.metrics.observe(d, len(hashes), nil)
 	return nil
 }
@@ -139,20 +93,15 @@ func (t *txhashCold) Finalize(_ context.Context) error {
 	})
 	err := txhash.WriteColdBin(t.binPath, t.entries)
 	if err == nil {
-		t.metrics.sink.IngestStage(dataTypeTxhash, tierCold, stageFinalize, time.Since(start), len(t.entries))
+		t.metrics.sink.IngestStage(dataTypeTxhash, stageFinalize, time.Since(start), len(t.entries))
 	}
 	t.metrics.emit(time.Since(start), err)
 	return err
 }
 
-// Close emits the cold metrics if Finalize never ran (the failure path); emit is
-// a no-op after Finalize. There is no open file handle to release (the .bin is
-// written in Finalize).
+// Close is a no-op: there is no open file handle to release (the .bin is written
+// in Finalize), and the cold metric is emitted on a terminal Ingest error or in
+// Finalize — never here, so a rolled-back build produces no phantom sample.
 func (t *txhashCold) Close() error {
-	t.metrics.emit(0, nil)
 	return nil
 }
-
-// abortMetric records a synthetic abort error so a subsequent Close emit does
-// not look like a clean success. Used by the constructor-rollback path.
-func (t *txhashCold) abortMetric(err error) { t.metrics.recordErr(err) }

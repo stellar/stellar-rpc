@@ -13,42 +13,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
 )
 
-// ───────────────────────── Hot ingester ─────────────────────────
-
-// ledgerHot writes raw ledger bytes verbatim into a long-lived ledger.HotStore.
-// AddLedgers fsyncs once per call, so each ledger is durable before Ingest
-// returns. The store is INJECTED and owned by the caller — ledgerHot never
-// opens or closes it.
-type ledgerHot struct {
-	store *ledger.HotStore
-	sink  MetricSink
-}
-
-// NewLedgerHotIngester returns a HotIngester writing raw ledger bytes into the
-// injected, caller-owned store.
-func NewLedgerHotIngester(store *ledger.HotStore, sink MetricSink) HotIngester {
-	return &ledgerHot{store: store, sink: orNop(sink)}
-}
-
-func (h *ledgerHot) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
-	m := newHotMetrics(h.sink, dataTypeLedgers)
-	var err error
-	defer func() { m.emit(err) }()
-
-	// ledger.HotStore.AddLedgers copies the bytes into its RocksDB batch
-	// synchronously, so aliasing the borrowed view buffer here is safe.
-	wstart := time.Now()
-	if aerr := h.store.AddLedgers(ledger.Entry{Seq: seq, Bytes: []byte(lcm)}); aerr != nil {
-		err = fmt.Errorf("AddLedgers(seq=%d): %w", seq, aerr)
-		return err
-	}
-	h.sink.IngestStage(dataTypeLedgers, tierHot, stageWrite, time.Since(wstart), 1)
-	// Set AFTER the store call so a failed write reports items=0, matching
-	// the MetricSink "items written" contract and the other hot ingesters.
-	m.items = 1
-	return nil
-}
-
 // ───────────────────────── Cold ingester ─────────────────────────
 
 // ledgerCold writes raw ledger bytes into a per-chunk ledger.ColdWriter (one
@@ -61,31 +25,28 @@ type ledgerCold struct {
 	appended bool
 }
 
-// NewLedgerColdIngester opens a per-chunk cold ledger writer under coldDir and
-// returns a ColdIngester that owns it. The writer uses its zero-value options;
-// driver-level tuning is a follow-up via Config.
-func NewLedgerColdIngester(coldDir string, chunkID chunk.ID, sink MetricSink) (ColdIngester, error) {
-	// The chunk's pack lives under its %05d bucket subdirectory; ledger.PackName
-	// owns the per-chunk filename so the naming convention has a single owner
-	// shared with the cold-ledger read path (ledger.NewPackStream).
-	path := filepath.Join(coldDir, chunkID.BucketID(), ledger.PackName(chunkID))
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
+// NewLedgerColdIngester opens a per-chunk cold ledger writer at packPath — the
+// caller's geometry.Layout.LedgerPackPath(chunkID), so the write path is Layout's
+// single derivation, not a second copy — and returns a ColdIngester that owns it.
+// The writer uses its zero-value options; driver-level tuning is a follow-up (issue #836).
+func NewLedgerColdIngester(packPath string, chunkID chunk.ID, sink MetricSink) (ColdIngester, error) {
+	if err := os.MkdirAll(filepath.Dir(packPath), 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(packPath), err)
 	}
-	w, err := ledger.NewColdWriter(path, chunkID.FirstLedger(), ledger.ColdWriterOptions{})
+	w, err := ledger.NewColdWriter(packPath, chunkID.FirstLedger(), ledger.ColdWriterOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("ledger.NewColdWriter %s: %w", path, err)
+		return nil, fmt.Errorf("ledger.NewColdWriter %s: %w", packPath, err)
 	}
-	return &ledgerCold{path: path, writer: w, metrics: newColdMetrics(sink, dataTypeLedgers)}, nil
+	return &ledgerCold{path: packPath, writer: w, metrics: newColdMetrics(sink, dataTypeLedgers)}, nil
 }
 
 func (c *ledgerCold) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
 	start := time.Now()
 	if err := c.writer.AppendLedger(seq, []byte(lcm)); err != nil {
-		c.metrics.observe(time.Since(start), 0, err)
+		c.metrics.observe(time.Since(start), 0, err) // terminal: observe emits the per-ingester signal
 		return fmt.Errorf("AppendLedger(seq=%d): %w", seq, err)
 	}
-	c.metrics.sink.IngestStage(dataTypeLedgers, tierCold, stageWrite, time.Since(start), 1)
+	c.metrics.sink.IngestStage(dataTypeLedgers, stageWrite, time.Since(start), 1)
 	c.appended = true
 	c.metrics.observe(time.Since(start), 1, nil)
 	return nil
@@ -105,23 +66,15 @@ func (c *ledgerCold) Finalize(_ context.Context) error {
 		c.metrics.emit(time.Since(start), err)
 		return err
 	}
-	c.metrics.sink.IngestStage(dataTypeLedgers, tierCold, stageFinalize, time.Since(start), 0)
+	c.metrics.sink.IngestStage(dataTypeLedgers, stageFinalize, time.Since(start), 0)
 	c.metrics.emit(time.Since(start), nil)
 	return nil
 }
 
-// Close drops the partial pack when Finalize never ran, and emits the cold
-// metrics if Finalize did not already (the failure path). The writer.Close
-// error is folded into the emitted metric so a close-time failure is counted in
-// errors_total. emit is a no-op after a successful Finalize, so this never
-// double-counts. Error propagation is unchanged: the writer.Close error is
-// still returned.
+// Close drops the partial pack when Finalize never ran. It does NOT emit the cold
+// metric: a terminal Ingest error or Finalize already emitted it, and an ingester
+// that never got that far (a rolled-back build) must produce no phantom sample.
+// The writer.Close error is returned unchanged.
 func (c *ledgerCold) Close() error {
-	cerr := c.writer.Close()
-	c.metrics.emit(0, cerr)
-	return cerr
+	return c.writer.Close()
 }
-
-// abortMetric records a synthetic abort error so a subsequent Close emit does
-// not look like a clean success. Used by the constructor-rollback path.
-func (c *ledgerCold) abortMetric(err error) { c.metrics.recordErr(err) }

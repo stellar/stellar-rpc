@@ -104,7 +104,7 @@ func newQueryFixture(t *testing.T) *queryFixture {
 	require.NoError(t, err)
 
 	first := chunkID.FirstLedger()
-	require.NoError(t, fx.store.IngestLedgerEvents(first, []events.Payload{
+	require.NoError(t, ingestLedgerEvents(fx.store, first, []events.Payload{
 		payloadFor(t, fx.contractA, "evt-a-ab", fx.t0a, fx.t0b),
 		payloadFor(t, fx.contractA, "evt-a-ac", fx.t0a, fx.t0c),
 		payloadFor(t, fx.contractB, "evt-b-ab", fx.t0a, fx.t0b),
@@ -354,7 +354,7 @@ func TestQuery_ManyFiltersAtCallerCap(t *testing.T) {
 		contracts[i][0] = byte(i + 1)
 		payloads[i] = payloadFor(t, contracts[i], fmt.Sprintf("evt-%02d", i))
 	}
-	require.NoError(t, h.store.IngestLedgerEvents(first, payloads))
+	require.NoError(t, ingestLedgerEvents(h.store, first, payloads))
 
 	filters := make([]Filter, n)
 	for i := range n {
@@ -377,7 +377,7 @@ func newMultiLedgerQueryFixture(t *testing.T) *queryFixture {
 	t.Helper()
 	fx := newQueryFixture(t)
 	first := chunk.ID(0).FirstLedger()
-	require.NoError(t, fx.store.IngestLedgerEvents(first+1, []events.Payload{
+	require.NoError(t, ingestLedgerEvents(fx.store, first+1, []events.Payload{
 		payloadFor(t, fx.contractA, "evt-extra-0", fx.t0a),
 		payloadFor(t, fx.contractA, "evt-extra-1", fx.t0a),
 	}))
@@ -544,7 +544,7 @@ func TestQuery_PostFilterRejectsTermHashCollision(t *testing.T) {
 	// ConcurrentBitmaps.AddTo is the writer-side API the ingest path uses
 	// to register (term, eventID) pairs. No concurrent ingest is running
 	// in this test, so the single-writer contract is satisfied.
-	fx.store.Index().AddTo(gammaKey, 4)
+	fx.store.index().AddTo(gammaKey, 4)
 
 	after, err := fx.store.Lookup(context.Background(), gammaKey)
 	require.NoError(t, err)
@@ -609,7 +609,7 @@ func TestQuery_ChunkWithLedgersButZeroEvents(t *testing.T) {
 
 	// Ingest three empty ledgers — recorded in offsets, no events.
 	for i := range uint32(3) {
-		require.NoError(t, h.store.IngestLedgerEvents(first+i, nil))
+		require.NoError(t, ingestLedgerEvents(h.store, first+i, nil))
 	}
 	require.Equal(t, uint32(0), mustEventCount(t, h.store))
 
@@ -704,8 +704,8 @@ func TestQuery_EmptyLeadingLedgerRangeStaysEmpty(t *testing.T) {
 	// real events. After ingest the chunk's offsets read:
 	//   [first]   → [0, 0)   (empty)
 	//   [first+1] → [0, 5)   (5 events)
-	require.NoError(t, h.store.IngestLedgerEvents(first, nil))
-	require.NoError(t, h.store.IngestLedgerEvents(first+1, []events.Payload{
+	require.NoError(t, ingestLedgerEvents(h.store, first, nil))
+	require.NoError(t, ingestLedgerEvents(h.store, first+1, []events.Payload{
 		makeSimplePayload(t, "evt-0"),
 		makeSimplePayload(t, "evt-1"),
 		makeSimplePayload(t, "evt-2"),
@@ -804,7 +804,7 @@ func makeSimplePayload(t *testing.T, dataSymbol string) events.Payload {
 // Walks the hot store one ledger at a time using its Offsets snapshot
 // (which tracks the ingest-time ledger sequence) rather than reading
 // LedgerSequence off each Payload — the test fixture's payloadFor
-// builder doesn't set Payload.LedgerSequence, and HotStore.IngestLedgerEvents
+// builder doesn't set Payload.LedgerSequence, and IngestLedgerToBatch
 // stores them verbatim, so the per-event field is the zero value and
 // can't be used to recover ledger boundaries.
 //

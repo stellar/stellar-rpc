@@ -17,10 +17,14 @@ import (
 func TestMetricsOrNop_NilNeverPanics(t *testing.T) {
 	m := MetricsOrNop(nil)
 	require.NotNil(t, m)
-	m.LastCommitted(5, 2)
+	m.LastCommitted(5)
+	m.RetentionFloor(2)
+	m.ChunkBoundary()
+	m.LiveHotChunks(3)
 	m.BackfillPass(time.Second)
 	m.Freeze(time.Second)
 	m.Rebuild(time.Second)
+	m.Discard(1, time.Second)
 	m.Prune(2, time.Second)
 }
 
@@ -34,10 +38,15 @@ func TestPrometheusMetrics_RegistersAndRecords(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewPrometheusMetrics(reg, "test_ns")
 
-	m.LastCommitted(58, 12)
+	m.LastCommitted(58)
+	m.RetentionFloor(12)
+	m.LiveHotChunks(4)
+	m.ChunkBoundary()
+	m.ChunkBoundary()
 	m.BackfillPass(250 * time.Millisecond)
 	m.Freeze(100 * time.Millisecond)
 	m.Rebuild(50 * time.Millisecond)
+	m.Discard(3, 20*time.Millisecond)
 	m.Prune(2, 5*time.Millisecond)
 
 	families, err := reg.Gather()
@@ -61,10 +70,13 @@ func TestPrometheusMetrics_RegistersAndRecords(t *testing.T) {
 
 	assert.InDelta(t, float64(58), values["test_ns_fullhistory_streaming_last_committed_ledger"], 0)
 	assert.InDelta(t, float64(12), values["test_ns_fullhistory_streaming_retention_floor_ledger"], 0)
-	assert.InDelta(t, float64(2), values["test_ns_fullhistory_streaming_pruned_ops_total"], 0)
+	assert.InDelta(t, float64(4), values["test_ns_fullhistory_streaming_live_hot_chunks"], 0)
+	assert.InDelta(t, float64(2), values["test_ns_fullhistory_streaming_chunk_boundaries_total"], 0)
+	assert.InDelta(t, float64(3), values["test_ns_fullhistory_streaming_discarded_hot_chunks_total"], 0)
+	assert.InDelta(t, float64(2), values["test_ns_fullhistory_streaming_pruned_artifacts_total"], 0)
 
-	// Phase-duration histogram saw backfill_pass + freeze + rebuild + prune = 4 observations.
-	assert.Equal(t, uint64(4), counts["test_ns_fullhistory_streaming_phase_duration_seconds"])
+	// Phase-duration histogram saw backfill_pass + freeze + rebuild + discard + prune = 5 observations.
+	assert.Equal(t, uint64(5), counts["test_ns_fullhistory_streaming_phase_duration_seconds"])
 }
 
 // Double-registration on the same registry panics (one sink per registry).

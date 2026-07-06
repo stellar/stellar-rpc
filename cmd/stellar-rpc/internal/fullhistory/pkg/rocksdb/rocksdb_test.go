@@ -48,6 +48,47 @@ func openTestStore(t *testing.T, cfNames []string) *Store {
 	return s
 }
 
+// TestNew_MustExist_EmptyReadyDBReopens pins that a must-exist read-write open of
+// an already-created but EMPTY DB succeeds: the mode refuses only to CREATE, it
+// never requires committed data. This is the "ready" hot-chunk reopen path (an
+// ingester that crashed before committing its first ledger must still reopen).
+func TestNew_MustExist_EmptyReadyDBReopens(t *testing.T) {
+	path := t.TempDir()
+	cf := []string{"c0"}
+
+	// Create an empty DB the normal way (create-if-missing), then close it.
+	s, err := New(Config{Path: path, ColumnFamilies: cf, Logger: silentLogger()})
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+
+	// Reopen must-exist: succeeds against the existing empty DB.
+	reopened, err := New(Config{Path: path, ColumnFamilies: cf, Logger: silentLogger(), MustExist: true})
+	require.NoError(t, err, "must-exist reopen of an empty ready DB succeeds")
+	require.NoError(t, reopened.Close())
+}
+
+// TestNew_MustExist_GuttedDirFailsOpen pins that a must-exist open of a directory
+// that exists but holds no valid RocksDB (no CURRENT) FAILS. The daemon depends on
+// this: a "ready" hot key whose DB was wiped must never silently auto-heal into a
+// fresh empty DB, which would regress the last committed ledger.
+func TestNew_MustExist_GuttedDirFailsOpen(t *testing.T) {
+	path := t.TempDir()
+	cf := []string{"c0"}
+
+	// Create a real DB, close it, then gut the dir (remove every file, keep the dir).
+	s, err := New(Config{Path: path, ColumnFamilies: cf, Logger: silentLogger()})
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+	entries, err := os.ReadDir(path)
+	require.NoError(t, err)
+	for _, e := range entries {
+		require.NoError(t, os.RemoveAll(filepath.Join(path, e.Name())))
+	}
+
+	_, err = New(Config{Path: path, ColumnFamilies: cf, Logger: silentLogger(), MustExist: true})
+	require.Error(t, err, "must-exist open of a gutted dir (no CURRENT) fails, never auto-heals")
+}
+
 func TestMain(m *testing.M) {
 	if os.Getenv("ROCKSDB_LOCK_PROBE") == "1" {
 		_, err := New(Config{
@@ -90,7 +131,7 @@ func TestNew_TwoStoresSamePathCollide(t *testing.T) {
 	assert.Nil(t, s2)
 }
 
-func TestStore_ConstructAndOpenFailureFreesCacheAndFilter(t *testing.T) {
+func TestStore_ConstructAndOpenFailureFreesCacheAndBBTOs(t *testing.T) {
 	dir := t.TempDir()
 	tuning := Tuning{BlockCacheMB: 4, BloomFilterBitsPerKey: 10}
 
@@ -102,7 +143,7 @@ func TestStore_ConstructAndOpenFailureFreesCacheAndFilter(t *testing.T) {
 	require.Error(t, collider.constructAndOpen())
 
 	assert.Nil(t, collider.cache)
-	assert.Nil(t, collider.filter)
+	assert.Nil(t, collider.bbtos)
 }
 
 func TestNew_CreatesMissingDirectoryWithParents(t *testing.T) {
@@ -141,27 +182,19 @@ func TestStore_PutGet_DefaultCF(t *testing.T) {
 	assert.False(t, found3)
 }
 
-func TestStore_FirstLastKey(t *testing.T) {
+func TestStore_LastKey(t *testing.T) {
 	s := openTestStore(t, nil)
 
-	// Empty default CF: ok=false, no error, at both ends.
-	_, ok, err := s.FirstKey("")
-	require.NoError(t, err)
-	require.False(t, ok)
-	_, ok, err = s.LastKey("")
+	// Empty default CF: ok=false, no error.
+	_, ok, err := s.LastKey("")
 	require.NoError(t, err)
 	require.False(t, ok)
 
 	// EncodeUint32 is big-endian, so byte-lex key order is numeric order:
-	// insert out of order and expect the min/max back.
+	// insert out of order and expect the max back.
 	for _, n := range []uint32{500, 1, 9999, 42} {
 		require.NoError(t, s.Put("", EncodeUint32(n), []byte{byte(n)}))
 	}
-	first, ok, err := s.FirstKey("")
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, uint32(1), DecodeUint32(first))
-
 	last, ok, err := s.LastKey("")
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -169,28 +202,21 @@ func TestStore_FirstLastKey(t *testing.T) {
 
 	// Unknown CF surfaces ErrCFNotFound (distinct from ok=false on an
 	// empty-but-configured CF).
-	_, _, err = s.FirstKey("not-configured")
-	require.ErrorIs(t, err, ErrCFNotFound)
 	_, _, err = s.LastKey("not-configured")
 	require.ErrorIs(t, err, ErrCFNotFound)
 
-	// Non-default CF: FirstKey/LastKey resolve the requested CF
-	// independently of the default CF.
+	// Non-default CF: LastKey resolves the requested CF independently of the default.
 	const altCF = "alt"
 	sAlt := openTestStore(t, []string{altCF})
 	for _, n := range []uint32{7, 3, 8} {
 		require.NoError(t, sAlt.Put(altCF, EncodeUint32(n), []byte{byte(n)}))
 	}
-	first, ok, err = sAlt.FirstKey(altCF)
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, uint32(3), DecodeUint32(first))
 	last, ok, err = sAlt.LastKey(altCF)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, uint32(8), DecodeUint32(last))
 	// The default CF of the same store is untouched → ok=false.
-	_, ok, err = sAlt.FirstKey("")
+	_, ok, err = sAlt.LastKey("")
 	require.NoError(t, err)
 	require.False(t, ok)
 }
@@ -199,6 +225,18 @@ func TestStore_FlushSucceedsOnOpenStore(t *testing.T) {
 	s := openTestStore(t, nil)
 	require.NoError(t, s.Put(defaultCFName, []byte("k"), []byte("v")))
 	assert.NoError(t, s.Flush())
+}
+
+// TestStore_FlushDrainsNamedCF pins that Flush drains every CF, not just the
+// (empty) default one. A plain DB.Flush would leave the named CF's write in
+// its memtable with no SST on disk; FlushCFs drains it to an L0 file.
+func TestStore_FlushDrainsNamedCF(t *testing.T) {
+	s := openTestStore(t, []string{"named"})
+	require.NoError(t, s.Put("named", []byte("k"), []byte("v")))
+	require.NoError(t, s.Flush())
+
+	l0 := s.db.GetPropertyCF("rocksdb.num-files-at-level0", s.cfHandles["named"])
+	assert.Equal(t, "1", l0)
 }
 
 func TestStore_16CF_IsolatedWrites(t *testing.T) {
@@ -373,7 +411,6 @@ func TestStore_OpsAfterCloseFailWithErrStoreClosed(t *testing.T) {
 	}{
 		{"Put", func() error { return s.Put(defaultCFName, []byte("k"), []byte("v")) }},
 		{"Get", func() error { _, _, err := s.Get(defaultCFName, []byte("k")); return err }},
-		{"FirstKey", func() error { _, _, err := s.FirstKey(defaultCFName); return err }},
 		{"LastKey", func() error { _, _, err := s.LastKey(defaultCFName); return err }},
 		{"Delete", func() error { return s.Delete(defaultCFName, []byte("k")) }},
 		{"Iterate", func() error {
@@ -659,7 +696,7 @@ func TestStore_TuningZeroValue(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 
 	assert.Nil(t, s.cache)
-	assert.Nil(t, s.filter)
+	assert.Nil(t, s.bbtos)
 
 	require.NoError(t, s.Put(defaultCFName, []byte("k"), []byte("v")))
 	v, found, err := s.Get(defaultCFName, []byte("k"))

@@ -30,19 +30,3 @@ func DecodeUint32(b []byte) uint32 {
 	}
 	return byteOrder.Uint32(b)
 }
-
-// EncodeUint64 returns a freshly-allocated 8-byte big-endian encoding.
-func EncodeUint64(n uint64) []byte {
-	b := make([]byte, 8)
-	byteOrder.PutUint64(b, n)
-	return b
-}
-
-// DecodeUint64 returns the uint64 from an 8-byte big-endian buffer.
-// Panics if len(b) != 8 — same rationale as DecodeUint32.
-func DecodeUint64(b []byte) uint64 {
-	if len(b) != 8 {
-		panic(fmt.Sprintf("rocksdb: DecodeUint64: expected 8 bytes, got %d", len(b)))
-	}
-	return byteOrder.Uint64(b)
-}

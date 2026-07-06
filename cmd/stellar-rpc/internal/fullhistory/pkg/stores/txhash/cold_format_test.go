@@ -114,7 +114,7 @@ func TestOpenColdReader_BadMetadataErrors(t *testing.T) {
 		// deliberately no WithMetadata
 	)
 	require.NoError(t, err)
-	var k [binKeySize]byte
+	var k [ColdKeySize]byte
 	require.NoError(t, sb.AddKey(k[:], 0))
 	require.NoError(t, sb.Finish())
 	require.NoError(t, sb.Close())
@@ -133,7 +133,7 @@ func TestOpenColdReader_WrongPayloadSizeErrors(t *testing.T) {
 		streamhash.WithMetadata(EncodeLedgerRange(2, 2)),
 	)
 	require.NoError(t, err)
-	var k [binKeySize]byte
+	var k [ColdKeySize]byte
 	require.NoError(t, sb.AddKey(k[:], 0))
 	require.NoError(t, sb.Finish())
 	require.NoError(t, sb.Close())

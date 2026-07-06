@@ -35,8 +35,10 @@ type ExecConfig struct {
 	// MaxRetries bounds per-task retries; 0 = try once.
 	MaxRetries int
 
-	// RetryBackoff is the base inter-retry delay (doubles, capped at maxRetryBackoff); 0 ⇒ default.
-	RetryBackoff time.Duration
+	// retryBackoff is the base inter-retry delay (doubles, capped at maxRetryBackoff).
+	// Not config-wired: production leaves it 0, which retryBackOff (the single
+	// default source) reads as defaultRetryBackoff; it exists as a test seam.
+	retryBackoff time.Duration
 
 	// runChunk/runIndex are test-only seams; nil runs the real processChunk/buildThenSweep.
 	runChunk func(ctx context.Context, cb ChunkBuild) error
@@ -48,15 +50,19 @@ const (
 	maxRetryBackoff     = 30 * time.Second // caps the exponential growth
 )
 
+// DefaultWorkers is the default backfill/lifecycle pool size — one slot per
+// GOMAXPROCS. It is the single source both the TOML default (config.go) and
+// WithDefaults draw on, so the two sites can't silently diverge.
+func DefaultWorkers() int { return runtime.GOMAXPROCS(0) }
+
 // WithDefaults returns a copy of cfg with unset knobs filled in.
 func (cfg ExecConfig) WithDefaults() ExecConfig {
 	if cfg.Workers <= 0 {
-		cfg.Workers = runtime.GOMAXPROCS(0)
+		cfg.Workers = DefaultWorkers()
 	}
-	if cfg.RetryBackoff <= 0 {
-		cfg.RetryBackoff = defaultRetryBackoff
-	}
-	// Metrics is read only via the metrics() accessor / MetricsOrNop, so no default here.
+	// retryBackoff's default is applied lazily in retryBackOff (the single source);
+	// Metrics is read only via the metrics() accessor / MetricsOrNop. Neither needs
+	// a default here.
 	return cfg
 }
 
@@ -214,7 +220,7 @@ func withRetries(ctx context.Context, cfg ExecConfig, fn func() error) error {
 // retryBackOff is the per-task retry policy: count-bounded (MaxRetries) exponential
 // backoff, no jitter (deterministic). A fresh instance per call — BackOff is stateful.
 func (cfg ExecConfig) retryBackOff() backoff.BackOff {
-	base := cfg.RetryBackoff
+	base := cfg.retryBackoff
 	if base <= 0 {
 		base = defaultRetryBackoff
 	}
@@ -233,20 +239,22 @@ func (cfg ExecConfig) retryBackOff() backoff.BackOff {
 }
 
 // RunBackfill resolves the missing work, then executePlans the diff. No upfront
-// producibility gate: an unproducible chunk fatals from backfillSource when the
-// executor reaches it (its bounded coverage wait handles a lagging-but-advancing backend).
+// producibility gate: an unproducible chunk surfaces as a backfillSource error when
+// the executor reaches it — retried under withRetries, then failing the pass so
+// supervise restarts (its bounded coverage wait handles a lagging-but-advancing backend).
 func RunBackfill(ctx context.Context, cfg ExecConfig, rangeStart, rangeEnd chunk.ID) error {
 	cfg = cfg.WithDefaults()
 	if err := cfg.validate(); err != nil {
 		return err
 	}
+	// Time the whole plan-and-execute: resolve (the plan — range-proportional catalog
+	// I/O) plus executePlan. Reported even on execute failure (partial duration is signal).
+	start := time.Now()
 	plan, err := resolve(cfg, rangeStart, rangeEnd)
 	if err != nil {
 		return fmt.Errorf("resolve plan [%s,%s]: %w", rangeStart, rangeEnd, err)
 	}
-	start := time.Now()
 	err = executePlan(ctx, plan, cfg)
-	// Time the freeze stage; reported even on failure (partial duration is signal).
 	cfg.metrics().Freeze(time.Since(start))
 	return err
 }

@@ -11,9 +11,8 @@ import (
 )
 
 // Layout is the SINGLE source of truth for storage paths: a fixed key<->path
-// bijection (design-docs/full-history-streaming-workflow.md "Directory layout")
-// holding one root PER artifact tree, so a Layout plus a key finds any file
-// without listing a directory. NewLayout defaults all roots under one data dir:
+// bijection holding one root PER artifact tree, so a Layout plus a key finds any
+// file without listing a directory. NewLayout defaults all roots under one data dir:
 //
 //	{root}/
 //	├── catalog/rocksdb/
@@ -82,10 +81,18 @@ func (l Layout) LedgerPackPath(c chunk.ID) string {
 	return filepath.Join(l.ledgersRoot, c.BucketID(), ledger.PackName(c))
 }
 
+// EventsBucketDir is a chunk's events cold-segment directory — the bucket dir the
+// three events files (pack, index-pack, index-hash) live under, and the single
+// path the cold events ingester writes into. Sharing it with EventsPaths keeps
+// the events tree's shape defined once.
+func (l Layout) EventsBucketDir(c chunk.ID) string {
+	return filepath.Join(l.eventsRoot, c.BucketID())
+}
+
 // EventsPaths are a chunk's three events cold-segment files. Leaves owned by
 // eventstore.*.
 func (l Layout) EventsPaths(c chunk.ID) []string {
-	dir := filepath.Join(l.eventsRoot, c.BucketID())
+	dir := l.EventsBucketDir(c)
 	return []string{
 		filepath.Join(dir, eventstore.EventsPackName(c)),
 		filepath.Join(dir, eventstore.IndexPackName(c)),
@@ -104,9 +111,9 @@ func (l Layout) LedgersRoot() string { return l.ledgersRoot }
 // EventsRoot is the root EventsPaths composes under.
 func (l Layout) EventsRoot() string { return l.eventsRoot }
 
-// TxHashRawRoot is its own root because the cold pipeline takes an explicit
-// per-kind root (ingest.ColdDirs) rather than the single coldDir/<dataType>
-// layout RunCold derives.
+// TxHashRawRoot is its own root because the cold pipeline (ingest.WriteColdChunk)
+// takes an explicit per-kind root (ingest.ColdDirs) rather than a single
+// coldDir/<dataType> layout.
 func (l Layout) TxHashRawRoot() string { return l.txhashRawRoot }
 
 // TxHashIndexRoot is the root TxHashIndexDir composes under.

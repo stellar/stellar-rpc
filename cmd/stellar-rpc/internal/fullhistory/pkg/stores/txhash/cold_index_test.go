@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"math"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -77,11 +78,11 @@ func fixtureMaxLedger() uint32 {
 func makeFixtureEntries(n int) []fixtureEntry {
 	r := testRNG(uint64(n) | 0xfeed)
 	entries := make([]fixtureEntry, 0, n)
-	seen := make(map[[binKeySize]byte]struct{}, n)
+	seen := make(map[[ColdKeySize]byte]struct{}, n)
 	for len(entries) < n {
 		h := randHash(r)
-		var k [binKeySize]byte
-		copy(k[:], h[:binKeySize])
+		var k [ColdKeySize]byte
+		copy(k[:], h[:ColdKeySize])
 		if _, dup := seen[k]; dup {
 			continue
 		}
@@ -103,16 +104,16 @@ func writeBinFile(t *testing.T, path string, entries []fixtureEntry) {
 	t.Helper()
 	sorted := append([]fixtureEntry(nil), entries...)
 	sort.Slice(sorted, func(i, j int) bool {
-		return bytes.Compare(sorted[i].hash[:binKeySize], sorted[j].hash[:binKeySize]) < 0
+		return bytes.Compare(sorted[i].hash[:ColdKeySize], sorted[j].hash[:ColdKeySize]) < 0
 	})
 
 	var buf bytes.Buffer
-	var hdr [binHeaderSize]byte
+	var hdr [coldBinHeaderSize]byte
 	binary.LittleEndian.PutUint64(hdr[:], uint64(len(sorted)))
 	buf.Write(hdr[:])
-	var seqBuf [binSeqSize]byte
+	var seqBuf [coldBinSeqSize]byte
 	for _, e := range sorted {
-		buf.Write(e.hash[:binKeySize])
+		buf.Write(e.hash[:ColdKeySize])
 		binary.LittleEndian.PutUint32(seqBuf[:], e.seq)
 		buf.Write(seqBuf[:])
 	}
@@ -331,11 +332,11 @@ func TestBuildColdIndex_TruncatedFileErrors(t *testing.T) {
 	// holds): the open-time size cross-check rejects it; no index.
 	dir := t.TempDir()
 	var buf bytes.Buffer
-	var hdr [binHeaderSize]byte
+	var hdr [coldBinHeaderSize]byte
 	binary.LittleEndian.PutUint64(hdr[:], 5) // claim 5
 	buf.Write(hdr[:])
 	// ...but write only one entry.
-	buf.Write(make([]byte, binEntrySize))
+	buf.Write(make([]byte, coldBinEntrySize))
 	p := filepath.Join(dir, "00000005.bin")
 	require.NoError(t, os.WriteFile(p, buf.Bytes(), 0o600))
 
@@ -351,17 +352,39 @@ func TestBuildColdIndex_HeaderUndercountErrors(t *testing.T) {
 	// silently drop the trailing entries; it must error instead.
 	dir := t.TempDir()
 	var buf bytes.Buffer
-	var hdr [binHeaderSize]byte
+	var hdr [coldBinHeaderSize]byte
 	binary.LittleEndian.PutUint64(hdr[:], 1) // declare 1...
 	buf.Write(hdr[:])
-	buf.Write(make([]byte, binEntrySize*3)) // ...but write 3 entries
+	buf.Write(make([]byte, coldBinEntrySize*3)) // ...but write 3 entries
 	p := filepath.Join(dir, "00000005.bin")
 	require.NoError(t, os.WriteFile(p, buf.Bytes(), 0o600))
 
 	idxPath := filepath.Join(dir, IndexFileName(fixtureBaseChunk))
 	err := BuildColdIndex(context.Background(), []string{p}, idxPath, fixtureMinLedger(), fixtureMaxLedger())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "bytes, want")
+	assert.Contains(t, err.Error(), "header claims")
+	assert.NoFileExists(t, idxPath)
+}
+
+func TestBuildColdIndex_HeaderOverflowRejected(t *testing.T) {
+	// A flipped high bit in the header count. The old `size == header + count*entry`
+	// check multiplied the untrusted count, and coldBinEntrySize·2^62 ≡ 0 mod 2^64,
+	// so such a count could pass a size check and feed ~2^62 into the builder (OOM,
+	// then a crash loop). coldBinCount divides the trusted size instead, so it must
+	// reject this cleanly (no allocation, no panic).
+	dir := t.TempDir()
+	var buf bytes.Buffer
+	var hdr [coldBinHeaderSize]byte
+	binary.LittleEndian.PutUint64(hdr[:], math.MaxUint64) // wildly overstated count
+	buf.Write(hdr[:])
+	buf.Write(make([]byte, coldBinEntrySize)) // one real entry
+	p := filepath.Join(dir, "00000005.bin")
+	require.NoError(t, os.WriteFile(p, buf.Bytes(), 0o600))
+
+	idxPath := filepath.Join(dir, IndexFileName(fixtureBaseChunk))
+	err := BuildColdIndex(context.Background(), []string{p}, idxPath, fixtureMinLedger(), fixtureMaxLedger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "header claims")
 	assert.NoFileExists(t, idxPath)
 }
 

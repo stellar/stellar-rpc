@@ -9,7 +9,6 @@ import (
 	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
-	"github.com/stellar/streamhash"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
@@ -32,9 +31,6 @@ type BuildConfig struct {
 
 	// Metrics meters the eager post-build sweep (Prune); nil ⇒ Nop via MetricsOrNop.
 	Metrics observability.Metrics
-
-	// BuildOpts are extra streamhash options; the cold format options are pinned in BuildColdIndex.
-	BuildOpts []streamhash.BuildOption
 }
 
 func (cfg BuildConfig) validate() error {
@@ -98,7 +94,7 @@ func buildTxhashIndex(ctx context.Context, w geometry.TxHashIndexID, lo, hi chun
 		return fmt.Errorf("buildTxhashIndex mkdir %s: %w", indexDir, mkErr)
 	}
 	if berr := txhash.BuildColdIndex(
-		ctx, inputs, idxPath, lo.FirstLedger(), hi.LastLedger(), cfg.BuildOpts...,
+		ctx, inputs, idxPath, lo.FirstLedger(), hi.LastLedger(),
 	); berr != nil {
 		return fmt.Errorf("buildTxhashIndex build window %s coverage [%s,%s]: %w", w, lo, hi, berr)
 	}

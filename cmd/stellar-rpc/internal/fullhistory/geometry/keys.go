@@ -27,6 +27,19 @@ const (
 	StatePruning State = "pruning"
 )
 
+// HotState is a hot-DB key's value. One key per chunk brackets the chunk's hot
+// RocksDB directory; the column families inside carry no individual key.
+type HotState string
+
+const (
+	// HotTransient — a dir operation is in flight (create/delete) or recovery
+	// demoted the key. Recovery is identical either way: open wipes+recreates,
+	// discard re-runs the scan.
+	HotTransient HotState = "transient"
+	// HotReady — the dir exists and is usable.
+	HotReady HotState = "ready"
+)
+
 // Kind is a per-chunk artifact kind. Each maps to one meta-store key suffix
 // and one set of on-disk files.
 type Kind string
@@ -65,7 +78,8 @@ func (i TxHashIndexID) String() string { return fmt.Sprintf("%08d", uint32(i)) }
 
 const (
 	ChunkPrefix       = "chunk:"
-	TxHashIndexPrefix = "txhash_index:"
+	HotChunkPrefix    = "hot:chunk:"
+	TxHashIndexPrefix = "index:"
 
 	// ConfigEarliestLedger is the sole config pin key. (chunks_per_txhash_index is
 	// the fixed ChunksPerTxhashIndex constant, not a pin.)
@@ -77,7 +91,13 @@ func ChunkKey(c chunk.ID, kind Kind) string {
 	return ChunkPrefix + c.String() + ":" + string(kind)
 }
 
-// TxHashIndexKey returns the index coverage key txhash_index:{idx:08d}:{lo:08d}:{hi:08d}.
+// HotChunkKey returns the hot-DB key hot:chunk:{chunk:08d}. One key per chunk
+// brackets the hot RocksDB dir; the value is a HotState.
+func HotChunkKey(c chunk.ID) string {
+	return HotChunkPrefix + c.String()
+}
+
+// TxHashIndexKey returns the index coverage key index:{idx:08d}:{lo:08d}:{hi:08d}.
 // The coverage [lo, hi] lives in the key NAME; the value is pure lifecycle
 // state. lo > hi is a programmer error, surfaced loudly via panic.
 func TxHashIndexKey(idx TxHashIndexID, lo, hi chunk.ID) string {
@@ -87,7 +107,7 @@ func TxHashIndexKey(idx TxHashIndexID, lo, hi chunk.ID) string {
 	return TxHashIndexPrefix + idx.String() + ":" + lo.String() + ":" + hi.String()
 }
 
-// TxHashIndexPrefixFor returns the scan prefix txhash_index:{idx:08d}: that enumerates
+// TxHashIndexPrefixFor returns the scan prefix index:{idx:08d}: that enumerates
 // all coverage keys of one index.
 func TxHashIndexPrefixFor(idx TxHashIndexID) string {
 	return TxHashIndexPrefix + idx.String() + ":"
@@ -129,7 +149,21 @@ func ParseChunkKey(key string) (chunk.ID, Kind, bool) {
 	return chunk.ID(n), kind, true
 }
 
-// ParseTxHashIndexKey decodes txhash_index:{idx:08d}:{lo:08d}:{hi:08d}. State is not part
+// ParseHotChunkKey decodes hot:chunk:{chunk:08d}. ok is false for any key that
+// is not a well-formed hot-chunk key.
+func ParseHotChunkKey(key string) (chunk.ID, bool) {
+	rest, found := strings.CutPrefix(key, HotChunkPrefix)
+	if !found {
+		return 0, false
+	}
+	n, err := ParsePadded(rest)
+	if err != nil {
+		return 0, false
+	}
+	return chunk.ID(n), true
+}
+
+// ParseTxHashIndexKey decodes index:{idx:08d}:{lo:08d}:{hi:08d}. State is not part
 // of the key; callers fill TxHashIndexCoverage.State from the scanned value.
 func ParseTxHashIndexKey(key string) (TxHashIndexCoverage, bool) {
 	rest, found := strings.CutPrefix(key, TxHashIndexPrefix)

@@ -241,7 +241,7 @@ func TestExecutePlan_RetriesThenSucceeds(t *testing.T) {
 	plan := Plan{ChunkBuilds: []ChunkBuild{{Chunk: 0, Artifacts: catalog.AllArtifacts()}}}
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 1, MaxRetries: 3,
-		RetryBackoff: time.Millisecond, // keep the real backoff waits negligible
+		retryBackoff: time.Millisecond, // keep the real backoff waits negligible
 		runChunk: func(context.Context, ChunkBuild) error {
 			if attempts.Add(1) < 3 {
 				return errors.New("transient")
@@ -260,7 +260,7 @@ func TestExecutePlan_ExhaustsRetriesAndAborts(t *testing.T) {
 	plan := Plan{ChunkBuilds: []ChunkBuild{{Chunk: 0, Artifacts: catalog.AllArtifacts()}}}
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 1, MaxRetries: 2,
-		RetryBackoff: time.Millisecond, // keep the real backoff waits negligible
+		retryBackoff: time.Millisecond, // keep the real backoff waits negligible
 		runChunk: func(context.Context, ChunkBuild) error {
 			attempts.Add(1)
 			return errors.New("always fails")
@@ -374,7 +374,7 @@ func TestExecutePlan_ReportsRebuildPerIndexBuild(t *testing.T) {
 // The retry policy doubles from the base, caps at maxRetryBackoff, and Stops after
 // exactly MaxRetries waits (so withRetries makes MaxRetries+1 attempts).
 func TestRetryBackOff_DoublesCapsAndStops(t *testing.T) {
-	cfg := ExecConfig{MaxRetries: 6, RetryBackoff: time.Second}
+	cfg := ExecConfig{MaxRetries: 6, retryBackoff: time.Second}
 	bo := cfg.retryBackOff()
 	var delays []time.Duration
 	for {
@@ -392,14 +392,14 @@ func TestRetryBackOff_DoublesCapsAndStops(t *testing.T) {
 
 // Zero base falls back to the default interval (so a fresh ExecConfig still backs off).
 func TestRetryBackOff_ZeroBaseUsesDefault(t *testing.T) {
-	cfg := ExecConfig{MaxRetries: 1, RetryBackoff: 0}
+	cfg := ExecConfig{MaxRetries: 1, retryBackoff: 0}
 	require.Equal(t, defaultRetryBackoff, cfg.retryBackOff().NextBackOff())
 }
 
 // withRetries makes 1 initial attempt + MaxRetries retries before giving up. A
 // near-zero base keeps the real backoff waits negligible.
 func TestWithRetries_AttemptsThenGivesUp(t *testing.T) {
-	cfg := ExecConfig{MaxRetries: 3, RetryBackoff: time.Nanosecond}
+	cfg := ExecConfig{MaxRetries: 3, retryBackoff: time.Nanosecond}
 	calls := 0
 	err := withRetries(context.Background(), cfg, func() error {
 		calls++
@@ -413,7 +413,7 @@ func TestWithRetries_AttemptsThenGivesUp(t *testing.T) {
 func TestWithRetries_CtxCancelAborts(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	cfg := ExecConfig{MaxRetries: 5, RetryBackoff: time.Hour}
+	cfg := ExecConfig{MaxRetries: 5, retryBackoff: time.Hour}
 	calls := 0
 	err := withRetries(ctx, cfg, func() error {
 		calls++

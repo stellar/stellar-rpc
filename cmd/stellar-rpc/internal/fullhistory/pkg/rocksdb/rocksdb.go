@@ -58,6 +58,22 @@ type Config struct {
 	// "inherit the pinned defaults"; see CFOptions docstring for
 	// the per-knob inherit/override semantics.
 	PerCFOptions map[string]CFOptions
+
+	// ReadOnly opens the store read-only (dir never created, no writes, no
+	// flush-on-close). An un-flushed WAL IS recovered into in-memory memtables
+	// on open (RocksDB OpenForReadOnly semantics; nothing is persisted), so
+	// reads see every synced write, not just SST/MANIFEST state. Used by the
+	// freeze source.
+	ReadOnly bool
+
+	// MustExist opens read-WRITE but with create-if-missing OFF, so opening a
+	// missing or gutted DB fails instead of silently fabricating a fresh empty one
+	// — the "never auto-heal" hot-DB open under a "ready" key, a DB the filesystem
+	// should already hold. (RocksDB's env layer may still leave a stub leaf dir with
+	// a LOG file behind on the failed open; correctness holds — every retry still
+	// fails on the missing CURRENT — but no usable DB is created.) Ignored when
+	// ReadOnly is set (read-only never creates regardless).
+	MustExist bool
 }
 
 // Store is the Layer-1 RocksDB handle. Concrete struct: one impl,
@@ -77,12 +93,14 @@ type Store struct {
 	ro        *grocksdb.ReadOptions
 	wo        *grocksdb.WriteOptions
 
-	// cache and filter are shared across every CF in this store.
-	// Created in applyTuning when the corresponding Tuning knob is
-	// set; destroyed in Close after opts/cfOpts (their BBTOs hold
-	// C-side refs we must drop first).
-	cache  *grocksdb.Cache
-	filter *grocksdb.NativeFilterPolicy
+	// cache is the block cache shared across every CF in this store,
+	// created in applyTuning when BlockCacheMB is set. bbtos are the
+	// per-CF block-based-table options (one per CF that has a cache,
+	// bloom filter, or block-size override); each may own a moved-in
+	// bloom filter. Both are destroyed in Close after opts/cfOpts,
+	// which hold C-side refs we must drop first.
+	cache *grocksdb.Cache
+	bbtos []*grocksdb.BlockBasedTableOptions
 
 	// mu is a lifecycle / memory-safety lock at the C boundary, not
 	// a data-consistency lock (RocksDB is already thread-safe).
@@ -292,26 +310,12 @@ func (s *Store) Iterate(cf string, prefix []byte) iter.Seq2[Entry, error] {
 	}
 }
 
-// FirstKey returns the smallest key in cf. If cf has no keys this is not
-// an error: it returns (nil, false, nil), so callers detect emptiness via
-// ok. (cf == "" selects the default column family; an unregistered cf name
-// returns ErrCFNotFound.)
-// Cheap: a single boundary seek (no scan).
-func (s *Store) FirstKey(cf string) ([]byte, bool, error) {
-	return s.edgeKey(cf, false)
-}
-
 // LastKey returns the largest key in cf. If cf has no keys this is not an
 // error: it returns (nil, false, nil), so callers detect emptiness via ok.
 // (cf == "" selects the default column family; an unregistered cf name
 // returns ErrCFNotFound.)
 // Cheap: a single boundary seek (no scan).
 func (s *Store) LastKey(cf string) ([]byte, bool, error) {
-	return s.edgeKey(cf, true)
-}
-
-//nolint:funcorder // helper grouped with FirstKey/LastKey for readability
-func (s *Store) edgeKey(cf string, last bool) ([]byte, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -325,11 +329,7 @@ func (s *Store) edgeKey(cf string, last bool) ([]byte, bool, error) {
 
 	it := s.db.NewIteratorCF(s.ro, cfh)
 	defer it.Close()
-	if last {
-		it.SeekToLast()
-	} else {
-		it.SeekToFirst()
-	}
+	it.SeekToLast()
 	if !it.Valid() {
 		// Empty CF (it.Err() is nil) or a mid-seek RocksDB error.
 		return nil, false, it.Err()
@@ -341,8 +341,8 @@ func (s *Store) edgeKey(cf string, last bool) ([]byte, bool, error) {
 // IterateRange yields (key, value) for keys in [start, end] byte-lex
 // inclusive. nil or empty start means "from the first key in the CF";
 // nil or empty end means "walk to the end of the CF". Right tool for
-// range scans over EncodeUint32 / EncodeUint64 keys where numeric
-// order matches byte-lex order.
+// range scans over EncodeUint32 keys where numeric order matches
+// byte-lex order.
 //
 // Gap handling: yields every key that exists in [start, end]. Holes
 // (e.g., 100, 102, 105) are silent — callers comparing consecutive
@@ -425,8 +425,13 @@ func (s *Store) Close() error {
 		return nil
 	}
 
-	if err := s.doFlush(); err != nil {
-		s.cfg.Logger.WithError(err).Warnf("rocksdb: graceful close Flush failed at %s; next Open will replay WAL", s.cfg.Path)
+	// A read-only store has nothing to flush (and the RocksDB read-only handle
+	// would reject it); only a writable store flushes its memtable on close.
+	if !s.cfg.ReadOnly {
+		if err := s.doFlush(); err != nil {
+			s.cfg.Logger.WithError(err).Warnf(
+				"rocksdb: graceful close Flush failed at %s; next Open will replay WAL", s.cfg.Path)
+		}
 	}
 
 	for _, cfh := range s.cfHandles {
@@ -439,26 +444,33 @@ func (s *Store) Close() error {
 	for _, o := range s.cfOpts {
 		o.Destroy()
 	}
-	// Tear down cache and filter AFTER opts/cfOpts: each cfOpts'
-	// BBTO holds a C-side ref; releasing those first makes the
-	// final Destroy here safe.
+	// Tear down the per-CF BBTOs and the shared cache AFTER opts/cfOpts.
+	// SetBlockBasedTableFactory copies the BBTO into the CF's factory, so
+	// destroying the BBTO frees the copy we own (Options.Destroy does not);
+	// a BBTO with a moved-in bloom filter frees that filter too.
+	for _, bbto := range s.bbtos {
+		bbto.Destroy()
+	}
+	s.bbtos = nil
 	if s.cache != nil {
 		s.cache.Destroy()
 		s.cache = nil
-	}
-	if s.filter != nil {
-		s.filter.Destroy()
-		s.filter = nil
 	}
 	return nil
 }
 
 // doFlush is the lock-less core of Flush. Caller holds at least
-// mu.RLock and has confirmed s.db != nil.
+// mu.RLock and has confirmed s.db != nil. Flushes every CF: the
+// data CFs are all named, and DB.Flush drains only the (always
+// empty) default CF, so a plain Flush would persist nothing.
 func (s *Store) doFlush() error {
 	fo := grocksdb.NewDefaultFlushOptions()
 	defer fo.Destroy()
-	return s.db.Flush(fo)
+	cfs := make([]*grocksdb.ColumnFamilyHandle, 0, len(s.cfHandles))
+	for _, cfh := range s.cfHandles {
+		cfs = append(cfs, cfh)
+	}
+	return s.db.FlushCFs(cfs, fo)
 }
 
 func (s *Store) checkOpen() error {
@@ -494,14 +506,20 @@ func (s *Store) constructAndOpen() error {
 	if err != nil {
 		return fmt.Errorf("rocksdb: canonicalize path %s: %w", s.cfg.Path, err)
 	}
-	if err := os.MkdirAll(abs, dirPerm); err != nil {
-		return fmt.Errorf("rocksdb: mkdir %s: %w", abs, err)
+	// Read-only and must-exist opens require a pre-existing DB; neither creates
+	// the directory. Only a plain read-write open (create-if-missing) does.
+	if !s.cfg.ReadOnly && !s.cfg.MustExist {
+		if err := os.MkdirAll(abs, dirPerm); err != nil {
+			return fmt.Errorf("mkdir %s: %w", abs, err)
+		}
 	}
 
 	cfNames := resolveCFNames(s.cfg)
 	opts := grocksdb.NewDefaultOptions()
-	opts.SetCreateIfMissing(true)
-	opts.SetCreateIfMissingColumnFamilies(true)
+	if !s.cfg.ReadOnly && !s.cfg.MustExist {
+		opts.SetCreateIfMissing(true)
+		opts.SetCreateIfMissingColumnFamilies(true)
+	}
 
 	cfOpts := make([]*grocksdb.Options, len(cfNames))
 	for i := range cfOpts {
@@ -511,24 +529,35 @@ func (s *Store) constructAndOpen() error {
 	s.applyTuning(opts, cfNames, cfOpts)
 
 	start := time.Now()
-	db, cfHandles, err := grocksdb.OpenDbColumnFamilies(opts, abs, cfNames, cfOpts)
+	var (
+		db        *grocksdb.DB
+		cfHandles []*grocksdb.ColumnFamilyHandle
+	)
+	if s.cfg.ReadOnly {
+		// errorIfWalFileExists=false: a cleanly-closed DB has no WAL; if a crash ever
+		// left one, the open recovers it into in-memory memtables (see Config.ReadOnly)
+		// rather than failing, so reads still see every synced write.
+		db, cfHandles, err = grocksdb.OpenDbForReadOnlyColumnFamilies(opts, abs, cfNames, cfOpts, false)
+	} else {
+		db, cfHandles, err = grocksdb.OpenDbColumnFamilies(opts, abs, cfNames, cfOpts)
+	}
 	elapsed := time.Since(start)
 	if err != nil {
 		opts.Destroy()
 		for _, o := range cfOpts {
 			o.Destroy()
 		}
-		// applyTuning allocated the shared cache and filter as side
-		// effects before the open attempt; without this teardown
-		// they leak (no Close path can reach them since New returns
-		// nil to the caller on failure).
+		// applyTuning allocated the per-CF BBTOs and the shared cache
+		// as side effects before the open attempt; without this
+		// teardown they leak (no Close path can reach them since New
+		// returns nil to the caller on failure).
+		for _, bbto := range s.bbtos {
+			bbto.Destroy()
+		}
+		s.bbtos = nil
 		if s.cache != nil {
 			s.cache.Destroy()
 			s.cache = nil
-		}
-		if s.filter != nil {
-			s.filter.Destroy()
-			s.filter = nil
 		}
 		return fmt.Errorf("rocksdb: open %s: %w", abs, err)
 	}
@@ -548,7 +577,7 @@ func (s *Store) constructAndOpen() error {
 	// WAL on + per-write Sync on — non-negotiable across every
 	// fullhistory store, so pinned here on the shared wo rather
 	// than exposed via Tuning. The streaming ingestion contract
-	// requires "AddEntries returned nil" to mean "durable on disk";
+	// requires "the ledger batch committed" to mean "durable on disk";
 	// one fsync per Put/Batch regardless of size.
 	s.wo.DisableWAL(false)
 	s.wo.SetSync(true)
@@ -635,38 +664,42 @@ func applyDBTuning(opts *grocksdb.Options, t Tuning) {
 	}
 }
 
-// applySharedTableOptions builds one BBTO per CF, all referencing
-// the shared cache + filter (when set) and applying the per-CF
-// BlockSize override (when set). The Store owns cache and filter;
-// Close destroys them after opts/cfOpts.
+// applySharedTableOptions builds one BBTO per CF, referencing the
+// shared block cache (when set), a fresh per-CF bloom filter (when
+// set), and the per-CF BlockSize override (when set). The Store
+// retains every BBTO and the cache; Close destroys them after
+// opts/cfOpts.
 //
-// A BBTO is installed on a CF iff any of cache, filter, or that
-// CF's BlockSize override is non-zero — preserving the previous
-// behavior of leaving RocksDB's default BBTO untouched when no
-// table-level knob is configured.
+// A BBTO is installed on a CF iff any of the cache, a bloom filter,
+// or that CF's BlockSize override is configured — preserving the
+// previous behavior of leaving RocksDB's default BBTO untouched when
+// no table-level knob is set.
+//
+// The bloom filter is built per CF because SetFilterPolicy MOVES the
+// policy into the BBTO (it nils the source pointer), so a single
+// shared filter would install on the first CF only and every later
+// CF would silently get none.
 func (s *Store) applySharedTableOptions(cfNames []string, cfOpts []*grocksdb.Options, t Tuning) {
 	if t.BlockCacheMB > 0 {
 		s.cache = grocksdb.NewLRUCache(uint64(t.BlockCacheMB) << 20)
 	}
-	if t.BloomFilterBitsPerKey > 0 {
-		s.filter = grocksdb.NewBloomFilter(float64(t.BloomFilterBitsPerKey))
-	}
 	for i, o := range cfOpts {
 		override := s.cfg.PerCFOptions[cfNames[i]]
-		if s.cache == nil && s.filter == nil && override.BlockSize == 0 {
+		if s.cache == nil && t.BloomFilterBitsPerKey == 0 && override.BlockSize == 0 {
 			continue
 		}
 		bbto := grocksdb.NewDefaultBlockBasedTableOptions()
 		if s.cache != nil {
 			bbto.SetBlockCache(s.cache)
 		}
-		if s.filter != nil {
-			bbto.SetFilterPolicy(s.filter)
+		if t.BloomFilterBitsPerKey > 0 {
+			bbto.SetFilterPolicy(grocksdb.NewBloomFilter(float64(t.BloomFilterBitsPerKey)))
 		}
 		if override.BlockSize > 0 {
 			bbto.SetBlockSize(override.BlockSize)
 		}
 		o.SetBlockBasedTableFactory(bbto)
+		s.bbtos = append(s.bbtos, bbto)
 	}
 }
 
@@ -674,47 +707,37 @@ func (s *Store) applySharedTableOptions(cfNames []string, cfOpts []*grocksdb.Opt
 // open elapsed. Diagnoses slow restarts: big WAL → replay; high L0
 // → pending compaction; large memtable → crash with unflushed data.
 func logOpenState(log *supportlog.Entry, abs string, s *Store, elapsed time.Duration) {
-	memtable := readUintProperty(s.db, "rocksdb.cur-size-active-mem-table")
-	l0Count := readIntProperty(s.db, "rocksdb.num-files-at-level0")
-	sstSize := readUintProperty(s.db, "rocksdb.total-sst-files-size")
-	walSize := walDirSize(abs)
+	// These are per-CF properties; a DB-level GetProperty resolves against the
+	// always-empty default CF, so sum each across every CF instead.
+	memtable := s.sumUintPropertyCF("rocksdb.cur-size-active-mem-table")
+	l0Count := s.sumUintPropertyCF("rocksdb.num-files-at-level0")
+	sstSize := s.sumUintPropertyCF("rocksdb.total-sst-files-size")
+	walSize := walDirSize(abs) // DB-level: one WAL spans all CFs.
 
 	log.Infof(
-		"[ROCKSDB:OPEN] path=%s elapsed=%s WAL size=%s L0 file count=%s data size=%s memtable size=%s",
+		"[ROCKSDB:OPEN] path=%s elapsed=%s WAL size=%s L0 file count=%d data size=%s memtable size=%s",
 		abs,
 		// Round to microseconds: a fast open like 350µs stays
 		// "350µs" rather than "350.812µs" (operator-noise nanos);
 		// Round(time.Millisecond) would round to "0s".
 		elapsed.Round(time.Microsecond).String(),
 		humanize.Bytes(walSize),
-		humanize.Comma(l0Count),
+		l0Count,
 		humanize.Bytes(sstSize),
 		humanize.Bytes(memtable),
 	)
 }
 
-func readIntProperty(db *grocksdb.DB, name string) int64 {
-	v := db.GetProperty(name)
-	if v == "" {
-		return 0
+// sumUintPropertyCF sums an unsigned-integer RocksDB property across every CF.
+// Empty (ParseUint of "") or unparseable values count as zero.
+func (s *Store) sumUintPropertyCF(name string) uint64 {
+	var total uint64
+	for _, cfh := range s.cfHandles {
+		if n, err := strconv.ParseUint(s.db.GetPropertyCF(name, cfh), 10, 64); err == nil {
+			total += n
+		}
 	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil {
-		return 0
-	}
-	return n
-}
-
-func readUintProperty(db *grocksdb.DB, name string) uint64 {
-	v := db.GetProperty(name)
-	if v == "" {
-		return 0
-	}
-	n, err := strconv.ParseUint(v, 10, 64)
-	if err != nil {
-		return 0
-	}
-	return n
+	return total
 }
 
 // walDirSize sums *.log file sizes in dir (RocksDB exposes no

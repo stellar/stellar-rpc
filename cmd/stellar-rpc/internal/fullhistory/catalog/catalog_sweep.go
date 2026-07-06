@@ -1,8 +1,13 @@
 package catalog
 
 import (
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
+	"fmt"
+	"os"
+	"path/filepath"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
 )
 
 // Key-driven sweeps — the ONLY two deletion bodies in the system, one per key
@@ -83,5 +88,37 @@ func (c *Catalog) SweepTxHashIndexKey(cov geometry.TxHashIndexCoverage) error {
 		return err
 	}
 	geometry.RmdirIfEmpty(dir) // best-effort; an empty dir is not an artifact
+	return nil
+}
+
+// DiscardHotChunk retires a chunk's hot DB once its cold artifacts are durable
+// (or it fell past retention), following the same crash order as the two sweeps
+// above: mark "transient" -> rmdir -> fsync(parent) -> delete key. The key
+// outlives the durable rmdir, so a crash anywhere leaves the key "transient" for
+// the next scan to finish — idempotent, and an absent key is a no-op. The caller
+// MUST have closed the chunk's hot write handle (discard runs after the freeze).
+func (c *Catalog) DiscardHotChunk(chunkID chunk.ID) error {
+	state, err := c.HotState(chunkID)
+	if err != nil {
+		return fmt.Errorf("read hot key chunk %s: %w", chunkID, err)
+	}
+	if state == "" {
+		return nil
+	}
+	if err := c.PutHotTransient(chunkID); err != nil {
+		return fmt.Errorf("mark hot transient chunk %s: %w", chunkID, err)
+	}
+	dir := c.layout.HotChunkPath(chunkID)
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("rmdir hot dir %s: %w", dir, err)
+	}
+	// rmdir durable BEFORE the key delete: the key outlives the dir, so a crash
+	// re-runs the discard rather than leaving a key-less dir.
+	if err := geometry.FsyncDir(filepath.Dir(dir)); err != nil {
+		return fmt.Errorf("fsync hot parent dir %s: %w", filepath.Dir(dir), err)
+	}
+	if err := c.DeleteHotKey(chunkID); err != nil {
+		return fmt.Errorf("delete hot key chunk %s: %w", chunkID, err)
+	}
 	return nil
 }

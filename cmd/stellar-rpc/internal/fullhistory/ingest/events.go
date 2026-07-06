@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"path/filepath"
 	"time"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -23,53 +22,6 @@ func eventPayloads(seq uint32, lcm xdr.LedgerCloseMetaView) ([]events.Payload, e
 		return nil, fmt.Errorf("LCMViewToPayloads seq %d: %w", seq, err)
 	}
 	return payloads, nil
-}
-
-// ───────────────────────── Hot ingester ─────────────────────────
-
-// eventsHot derives []events.Payload from the view (events.LCMViewToPayloads) and
-// writes them with IngestLedgerEvents. Each call is one atomic RocksDB batch
-// (sync=true) plus an in-memory mirror update. The store is INJECTED, already
-// bound to a chunk, and owned by the caller.
-//
-// IngestLedgerEvents is called on every ledger, including ones with zero
-// payloads — LedgerOffsets.Append requires a contiguous sequence and would
-// reject the next non-empty ledger if an empty one were skipped.
-type eventsHot struct {
-	store *eventstore.HotStore
-	sink  MetricSink
-}
-
-// NewEventsHotIngester returns a HotIngester writing contract events into the
-// injected, caller-owned store (already bound to a chunk).
-func NewEventsHotIngester(store *eventstore.HotStore, sink MetricSink) HotIngester {
-	return &eventsHot{store: store, sink: orNop(sink)}
-}
-
-func (e *eventsHot) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
-	m := newHotMetrics(e.sink, dataTypeEvents)
-	var err error
-	defer func() { m.emit(err) }()
-
-	estart := time.Now()
-	payloads, eerr := eventPayloads(seq, lcm)
-	if eerr != nil {
-		err = eerr
-		return err
-	}
-	e.sink.IngestStage(dataTypeEvents, tierHot, stageExtract, time.Since(estart), len(payloads))
-	// IngestLedgerEvents marshals each payload into a scratch buffer that
-	// RocksDB copies synchronously, so the borrowed ContractEventBytes (aliasing
-	// the view) is safe to pass. Term indexing happens inside the store call,
-	// so the write stage here covers term derivation + the RocksDB batch.
-	wstart := time.Now()
-	if ierr := e.store.IngestLedgerEvents(seq, payloads); ierr != nil {
-		err = fmt.Errorf("IngestLedgerEvents(seq=%d, n=%d): %w", seq, len(payloads), ierr)
-		return err
-	}
-	e.sink.IngestStage(dataTypeEvents, tierHot, stageWrite, time.Since(wstart), len(payloads))
-	m.items = len(payloads)
-	return nil
 }
 
 // ───────────────────────── Cold ingester ─────────────────────────
@@ -95,11 +47,11 @@ type eventsCold struct {
 	failed bool
 }
 
-// NewEventsColdIngester opens a per-chunk events.pack cold writer under coldDir
-// and returns a ColdIngester that owns it. The writer uses its zero-value
-// options; driver-level tuning is a follow-up via Config.
-func NewEventsColdIngester(coldDir string, chunkID chunk.ID, sink MetricSink) (ColdIngester, error) {
-	bucketDir := filepath.Join(coldDir, chunkID.BucketID())
+// NewEventsColdIngester opens a per-chunk events.pack cold writer in bucketDir —
+// the caller's geometry.Layout.EventsBucketDir(chunkID), so the write path is
+// Layout's single derivation — and returns a ColdIngester that owns it. The
+// writer uses its zero-value options; driver-level tuning is a follow-up (issue #836).
+func NewEventsColdIngester(bucketDir string, chunkID chunk.ID, sink MetricSink) (ColdIngester, error) {
 	w, err := eventstore.NewColdWriter(chunkID, bucketDir, eventstore.ColdWriterOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("eventstore.NewColdWriter: %w", err)
@@ -117,11 +69,12 @@ func NewEventsColdIngester(coldDir string, chunkID chunk.ID, sink MetricSink) (C
 func (e *eventsCold) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
 	start := time.Now()
 	n, ierr := e.ingestSeq(seq, lcm)
+	e.metrics.observe(time.Since(start), n, ierr) // terminal on err: observe emits the per-ingester signal
 	if ierr != nil {
-		e.failed = true
+		e.failed = true // refuse a post-failure Finalize
+		return ierr
 	}
-	e.metrics.observe(time.Since(start), n, ierr)
-	return ierr
+	return nil
 }
 
 // Finalize writes the events.pack trailer (Finish) + materializes the cold
@@ -135,9 +88,9 @@ func (e *eventsCold) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMe
 func (e *eventsCold) Finalize(ctx context.Context) error {
 	start := time.Now()
 	if e.failed {
-		err := fmt.Errorf("events cold ingester for chunk %s: Finalize after failed Ingest", e.chunkID)
-		e.metrics.emit(time.Since(start), err)
-		return err
+		// Ingest already metered and latched this failure; refuse to finalize a
+		// chunk whose mirror/pack may be ahead of the offsets commit point.
+		return fmt.Errorf("events cold ingester for chunk %s: Finalize after failed Ingest", e.chunkID)
 	}
 	if err := e.writer.Finish(e.offsets); err != nil {
 		err = fmt.Errorf("events ColdWriter.Finish: %w", err)
@@ -153,32 +106,29 @@ func (e *eventsCold) Finalize(ctx context.Context) error {
 		e.metrics.emit(time.Since(start), err)
 		return err
 	}
-	e.metrics.sink.IngestStage(dataTypeEvents, tierCold, stageFinalize, time.Since(start), 0)
+	e.metrics.sink.IngestStage(dataTypeEvents, stageFinalize, time.Since(start), 0)
 	e.metrics.emit(time.Since(start), nil)
 	return nil
 }
 
-// Close drops the partial events.pack when Finalize never ran, and emits the
-// cold metrics if Finalize did not already (the failure path). The writer.Close
-// error is folded into the emitted metric so a close-time failure (e.g. ENOSPC
-// on the partial-drop) is counted in errors_total. emit is a no-op after a
-// successful Finalize. Error propagation is unchanged: the writer.Close error is
-// still returned.
+// Close drops the partial events.pack when Finalize never ran. It does NOT emit
+// the cold metric: a terminal Ingest error or Finalize already emitted it, and an
+// ingester that never got that far (a rolled-back build) must produce no phantom
+// sample. The writer.Close error is returned unchanged.
 func (e *eventsCold) Close() error {
-	cerr := e.writer.Close()
-	e.metrics.emit(0, cerr)
-	return cerr
+	return e.writer.Close()
 }
 
 // ingestSeq writes one ledger's events and returns the count written. The
-// pre-Soroban (V0) policy lives in eventPayloads, shared with the hot tier.
+// pre-Soroban (V0) policy lives in events.LCMViewToPayloads, shared with the
+// hot tier.
 func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, error) {
 	estart := time.Now()
 	payloads, err := eventPayloads(seq, lcm)
 	if err != nil {
 		return 0, err
 	}
-	e.metrics.sink.IngestStage(dataTypeEvents, tierCold, stageExtract, time.Since(estart), len(payloads))
+	e.metrics.sink.IngestStage(dataTypeEvents, stageExtract, time.Since(estart), len(payloads))
 
 	startID := e.offsets.TotalEvents()
 	if uint64(startID)+uint64(len(payloads)) > math.MaxUint32 {
@@ -216,24 +166,20 @@ func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, er
 		}
 		writeDur += time.Since(wstart)
 	}
-	e.metrics.sink.IngestStage(dataTypeEvents, tierCold, stageTermIndex, termDur, len(payloads))
+	e.metrics.sink.IngestStage(dataTypeEvents, stageTermIndex, termDur, len(payloads))
 
 	// offsets.Append LAST — it is the commit point for the ledger. Its cost folds
 	// into the write stage (rather than landing in the per-chunk total but in no
 	// stage), so extract + term_index + write partitions the per-ledger observe
 	// window with no unexplained remainder. uint32(len(payloads)) is 0 for an
-	// empty ledger, matching the old empty-ledger Append(seq, 0).
+	// empty ledger — an explicit Append(seq, 0) that records the empty ledger.
 	wstart := time.Now()
 	//nolint:gosec // the overflow guard above proved startID+len(payloads) fits in uint32
 	oerr := e.offsets.Append(seq, uint32(len(payloads)))
 	writeDur += time.Since(wstart)
-	e.metrics.sink.IngestStage(dataTypeEvents, tierCold, stageWrite, writeDur, len(payloads))
+	e.metrics.sink.IngestStage(dataTypeEvents, stageWrite, writeDur, len(payloads))
 	if oerr != nil {
 		return 0, fmt.Errorf("offsets append seq %d: %w", seq, oerr)
 	}
 	return len(payloads), nil
 }
-
-// abortMetric records a synthetic abort error so a subsequent Close emit does
-// not look like a clean success. Used by the constructor-rollback path.
-func (e *eventsCold) abortMetric(err error) { e.metrics.recordErr(err) }

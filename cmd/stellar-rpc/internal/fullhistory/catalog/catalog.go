@@ -3,12 +3,13 @@ package catalog
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 )
 
 // Catalog is the streaming daemon's view of durable state. It WRAPS
@@ -55,6 +56,20 @@ func (c *Catalog) State(chunkID chunk.ID, kind geometry.Kind) (geometry.State, e
 	return geometry.State(v), nil
 }
 
+// HotState returns the HotState of a chunk's hot-DB key, or empty (key absent).
+// The key's mere existence (any value) marks the chunk as owned by ingestion, and
+// most consumers branch on the value: the freeze source and last-committed
+// derivation treat only "ready" as usable (see ReadyHotChunkKeys), and
+// openHotDBForChunk picks its recovery action from it. Only the discard scan is
+// value-blind (any state means "a hot dir may exist, sweep it").
+func (c *Catalog) HotState(chunkID chunk.ID) (geometry.HotState, error) {
+	v, ok, err := c.get(geometry.HotChunkKey(chunkID))
+	if err != nil || !ok {
+		return "", err
+	}
+	return geometry.HotState(v), nil
+}
+
 // ---------------------------------------------------------------------------
 // Scans. Every "find work" operation iterates keys via PrefixScan; nothing
 // lists a directory. Results are returned sorted so callers need no second
@@ -82,6 +97,19 @@ func (c *Catalog) ChunkArtifactKeys() ([]ArtifactRef, error) {
 // the frozen one plus transient debris.
 func (c *Catalog) TxHashIndexKeys(w geometry.TxHashIndexID) ([]geometry.TxHashIndexCoverage, error) {
 	return c.txhashIndexKeysByPrefix(geometry.TxHashIndexPrefixFor(w))
+}
+
+// HotChunkKeys returns every hot-DB chunk id (value-blind), sorted ascending.
+// The highest is the live chunk — the ingestion/lifecycle partition boundary.
+func (c *Catalog) HotChunkKeys() ([]chunk.ID, error) {
+	return c.hotChunkKeysWith(nil)
+}
+
+// ReadyHotChunkKeys returns only the chunks whose hot-DB key is "ready", sorted
+// ascending. The last-committed ledger counts only these — a "transient" key never advances
+// the bound, which lets recovery demote any hot key without disturbing it.
+func (c *Catalog) ReadyHotChunkKeys() ([]chunk.ID, error) {
+	return c.hotChunkKeysWith(func(s geometry.HotState) bool { return s == geometry.HotReady })
 }
 
 // AllTxHashIndexKeys is TxHashIndexKeys across all indexes.
@@ -118,6 +146,29 @@ func (c *Catalog) FrozenTxHashIndex(w geometry.TxHashIndexID) (geometry.TxHashIn
 	return frozen, found, nil
 }
 
+// FrozenIndexCoversRange reports whether index w's UNIQUE frozen coverage spans
+// the whole inclusive [lo, hi] chunk range. It reads through FrozenTxHashIndex,
+// so INV-2 (at most one frozen coverage per index) is asserted on every call.
+// This is the single "covered by a frozen index" predicate the resolve diff
+// (backfill), the discard eligibility scan, and the last-committed-ledger derivation
+// all share, so they can never disagree about the same catalog snapshot. Reports
+// false (no error) when the index has no frozen coverage yet.
+func (c *Catalog) FrozenIndexCoversRange(w geometry.TxHashIndexID, lo, hi chunk.ID) (bool, error) {
+	frozen, ok, err := c.FrozenTxHashIndex(w)
+	if err != nil {
+		return false, err
+	}
+	return ok && frozen.Lo <= lo && hi <= frozen.Hi, nil
+}
+
+// FrozenIndexCovers reports whether chunk ch's OWN index window has a frozen
+// coverage containing it. A chunk belongs to exactly one window, so its own
+// window is the only one that can cover it — the degenerate single-chunk case of
+// FrozenIndexCoversRange.
+func (c *Catalog) FrozenIndexCovers(ch chunk.ID) (bool, error) {
+	return c.FrozenIndexCoversRange(c.txhashIndex.TxHashIndexID(ch), ch, ch)
+}
+
 // ---------------------------------------------------------------------------
 // Config pins. Written once on first start, immutable thereafter.
 // ---------------------------------------------------------------------------
@@ -131,8 +182,8 @@ func (c *Catalog) EarliestLedger() (uint32, bool, error) {
 // PinEarliestLedger commits the config:earliest_ledger pin in one synced write —
 // the first-start commit validateConfig mandates. Its presence is the sentinel
 // that a prior first start completed: once written, earliest_ledger is immutable
-// and validated-or-abort on every restart. chunks_per_txhash_index is no longer
-// pinned — it is the fixed geometry.ChunksPerTxhashIndex constant.
+// and validated-or-abort on every restart. (The tx-hash index width is not pinned;
+// it is the fixed geometry.ChunksPerTxhashIndex constant.)
 func (c *Catalog) PinEarliestLedger(earliestLedger uint32) error {
 	return c.store.Put(geometry.ConfigEarliestLedger, strconv.FormatUint(uint64(earliestLedger), 10))
 }
@@ -169,6 +220,28 @@ func (c *Catalog) get(key string) (string, bool, error) {
 func (c *Catalog) has(key string) (bool, error) {
 	_, ok, err := c.get(key)
 	return ok, err
+}
+
+// hotChunkKeysWith returns the chunks whose hot-DB key matches keep, sorted
+// ascending. A nil keep matches every value (value-blind).
+func (c *Catalog) hotChunkKeysWith(keep func(geometry.HotState) bool) ([]chunk.ID, error) {
+	var ids []chunk.ID
+	for e, err := range c.store.PrefixScan(geometry.HotChunkPrefix) {
+		if err != nil {
+			return nil, err
+		}
+		id, ok := geometry.ParseHotChunkKey(e.Key)
+		if !ok {
+			return nil, fmt.Errorf("malformed hot key %q", e.Key)
+		}
+		if keep == nil || keep(geometry.HotState(e.Value)) {
+			ids = append(ids, id)
+		}
+	}
+	// PrefixScan yields byte-lex order == numeric under the 8-digit padding, so
+	// the slice is already ascending; sort defensively against a width change.
+	slices.Sort(ids)
+	return ids, nil
 }
 
 // txhashIndexKeysByPrefix scans coverage keys under prefix, attaching each scanned

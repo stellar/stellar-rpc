@@ -3,9 +3,9 @@ package catalog
 import (
 	"errors"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 )
 
 // The one write protocol — mark-then-write. Every durable artifact (per-chunk
@@ -150,4 +150,25 @@ func (c *Catalog) txhashIndexChunkKeysPresent(lo, hi chunk.ID) ([]string, error)
 		}
 	}
 	return keys, nil
+}
+
+// --- Hot-DB key bracket: the file protocol's transient/ready bracket applied to
+// the chunk's hot directory. ---
+
+// PutHotTransient marks a hot-DB key "transient" — the open end, written before
+// the dir is created or a discard begins removing it. A crash mid-operation is
+// detectable from this value alone.
+func (c *Catalog) PutHotTransient(chunkID chunk.ID) error {
+	return c.store.Put(geometry.HotChunkKey(chunkID), string(geometry.HotTransient))
+}
+
+// FlipHotReady marks a hot-DB key "ready" (dir exists and usable). The caller
+// MUST have fsynced the dir (and its parent on creation) first.
+func (c *Catalog) FlipHotReady(chunkID chunk.ID) error {
+	return c.store.Put(geometry.HotChunkKey(chunkID), string(geometry.HotReady))
+}
+
+// DeleteHotKey removes a hot-DB key — the close end, after rmdir. Idempotent.
+func (c *Catalog) DeleteHotKey(chunkID chunk.ID) error {
+	return c.store.Delete(geometry.HotChunkKey(chunkID))
 }

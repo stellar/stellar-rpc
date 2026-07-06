@@ -10,16 +10,36 @@ import (
 // per-phase wall-clock timings; distinct from the per-data-type ingest.MetricSink.
 // All methods must be safe for concurrent use.
 type Metrics interface {
-	// LastCommitted sets the derived last-committed ledger and the effective
-	// retention floor (the two advance together each backfill pass).
-	LastCommitted(lastCommitted, retentionFloor uint32)
+	// LastCommitted sets the derived last-committed ledger gauge. Owned by the two
+	// call sites that know the TRUE value: startup/backfill (as history advances)
+	// and the ingestion loop (one atomic gauge set per committed ledger). The tick
+	// must NOT set it — its chunk-aligned lastChunk.LastLedger() would regress the
+	// gauge below a mid-chunk refined last-committed ledger on every restart.
+	LastCommitted(lastCommitted uint32)
+
+	// RetentionFloor sets the effective retention floor gauge (lowest in-window
+	// ledger). Owned by startup/backfill and the lifecycle tick; the floor depends
+	// only on the last complete chunk, so it does not regress in the tick's window.
+	RetentionFloor(retentionFloor uint32)
+
+	// ChunkBoundary counts one ingestion chunk-boundary handoff. The closed chunk
+	// id is logged at the call site; this metric is a plain counter.
+	ChunkBoundary()
+
+	// LiveHotChunks sets the count of hot-chunk DBs currently on disk (the
+	// hot:chunk key count). Reported by every lifecycle tick after the discard
+	// stage so the gauge tracks the live + awaiting-discard set.
+	LiveHotChunks(count int)
 
 	// BackfillPass records one completed backfill pass's wall-clock.
 	BackfillPass(d time.Duration)
 	// Freeze records one freeze (plan-and-execute) stage's wall-clock.
 	Freeze(d time.Duration)
-	// Rebuild records one index rebuild's wall-clock.
+	// Rebuild records one index rebuild's wall-clock, spanning all retry attempts
+	// (up to MaxRetries+1) and their inter-attempt backoff sleeps in one sample.
 	Rebuild(d time.Duration)
+	// Discard counts the hot DBs a tick retired and records the stage wall-clock.
+	Discard(count int, d time.Duration)
 	// Prune counts swept artifacts and records the sweep's wall-clock.
 	Prune(count int, d time.Duration)
 }
@@ -27,11 +47,15 @@ type Metrics interface {
 // NopMetrics discards every signal — the default when a config carries no Metrics.
 type NopMetrics struct{}
 
-func (NopMetrics) LastCommitted(uint32, uint32) {}
-func (NopMetrics) BackfillPass(time.Duration)   {}
-func (NopMetrics) Freeze(time.Duration)         {}
-func (NopMetrics) Rebuild(time.Duration)        {}
-func (NopMetrics) Prune(int, time.Duration)     {}
+func (NopMetrics) LastCommitted(uint32)       {}
+func (NopMetrics) RetentionFloor(uint32)      {}
+func (NopMetrics) ChunkBoundary()             {}
+func (NopMetrics) LiveHotChunks(int)          {}
+func (NopMetrics) BackfillPass(time.Duration) {}
+func (NopMetrics) Freeze(time.Duration)       {}
+func (NopMetrics) Rebuild(time.Duration)      {}
+func (NopMetrics) Discard(int, time.Duration) {}
+func (NopMetrics) Prune(int, time.Duration)   {}
 
 // MetricsOrNop returns m, or NopMetrics{} when nil, so call sites never nil-check.
 func MetricsOrNop(m Metrics) Metrics {
@@ -56,9 +80,12 @@ type PrometheusMetrics struct {
 	// Gauges — absolute, last-write-wins.
 	lastCommitted  prometheus.Gauge
 	retentionFloor prometheus.Gauge
+	liveHotChunks  prometheus.Gauge
 
-	// Counter — monotonic tally.
-	pruned prometheus.Counter
+	// Counters — monotonic tallies.
+	chunkBoundaries prometheus.Counter
+	discarded       prometheus.Counter
+	pruned          prometheus.Counter
 
 	// Durations — per-phase wall-clock histogram, keyed by phase label.
 	phaseDuration *prometheus.HistogramVec
@@ -69,6 +96,7 @@ const (
 	phaseBackfillPass = "backfill_pass"
 	phaseFreeze       = "freeze"
 	phaseRebuild      = "rebuild"
+	phaseDiscard      = "discard"
 	phasePrune        = "prune"
 )
 
@@ -79,14 +107,20 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 			Namespace: namespace, Subsystem: subsystem, Name: name, Help: help,
 		})
 	}
+	counter := func(name, help string) prometheus.Counter {
+		return prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace, Subsystem: subsystem, Name: name, Help: help,
+		})
+	}
 
 	m := &PrometheusMetrics{
-		lastCommitted:  gauge("last_committed_ledger", "highest ledger durably committed"),
-		retentionFloor: gauge("retention_floor_ledger", "effective retention floor — lowest in-window ledger"),
-		pruned: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: namespace, Subsystem: subsystem,
-			Name: "pruned_ops_total", Help: "artifacts swept after an index build",
-		}),
+		lastCommitted:   gauge("last_committed_ledger", "highest ledger durably committed"),
+		retentionFloor:  gauge("retention_floor_ledger", "effective retention floor — lowest in-window ledger"),
+		liveHotChunks:   gauge("live_hot_chunks", "count of hot-chunk DBs currently on disk"),
+		chunkBoundaries: counter("chunk_boundaries_total", "ingestion chunk-boundary handoffs"),
+		discarded:       counter("discarded_hot_chunks_total", "hot DBs retired by the discard stage"),
+		pruned: counter("pruned_artifacts_total", "artifacts swept by the prune stage (below-floor artifacts, "+
+			"transient index debris, in-retention demotions, and redundant txhash keys)"),
 		phaseDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace, Subsystem: subsystem,
 			Name: "phase_duration_seconds", Help: "wall-clock of a daemon phase action",
@@ -94,14 +128,25 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 		}, []string{"phase"}),
 	}
 
-	registry.MustRegister(m.lastCommitted, m.retentionFloor, m.pruned, m.phaseDuration)
+	registry.MustRegister(
+		m.lastCommitted, m.retentionFloor, m.liveHotChunks,
+		m.chunkBoundaries, m.discarded, m.pruned,
+		m.phaseDuration,
+	)
 	return m
 }
 
-func (m *PrometheusMetrics) LastCommitted(lastCommitted, retentionFloor uint32) {
+func (m *PrometheusMetrics) LastCommitted(lastCommitted uint32) {
 	m.lastCommitted.Set(float64(lastCommitted))
+}
+
+func (m *PrometheusMetrics) RetentionFloor(retentionFloor uint32) {
 	m.retentionFloor.Set(float64(retentionFloor))
 }
+
+func (m *PrometheusMetrics) ChunkBoundary() { m.chunkBoundaries.Inc() }
+
+func (m *PrometheusMetrics) LiveHotChunks(count int) { m.liveHotChunks.Set(float64(count)) }
 
 func (m *PrometheusMetrics) BackfillPass(d time.Duration) {
 	m.phaseDuration.WithLabelValues(phaseBackfillPass).Observe(d.Seconds())
@@ -113,6 +158,13 @@ func (m *PrometheusMetrics) Freeze(d time.Duration) {
 
 func (m *PrometheusMetrics) Rebuild(d time.Duration) {
 	m.phaseDuration.WithLabelValues(phaseRebuild).Observe(d.Seconds())
+}
+
+func (m *PrometheusMetrics) Discard(count int, d time.Duration) {
+	if count > 0 {
+		m.discarded.Add(float64(count))
+	}
+	m.phaseDuration.WithLabelValues(phaseDiscard).Observe(d.Seconds())
 }
 
 func (m *PrometheusMetrics) Prune(count int, d time.Duration) {

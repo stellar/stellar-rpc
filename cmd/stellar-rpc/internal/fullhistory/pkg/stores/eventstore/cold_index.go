@@ -50,15 +50,9 @@ import (
 // hit a slow (*Bitmap).lazyOR path at query time and K≥12 regresses
 // catastrophically.
 //
-// Two callers produce bitmaps:
-//
-//   - Cold backfill builds a Bitmaps single-threaded via per-event
-//     events.TermsFor + Bitmaps.AddTo, hands it directly to this
-//     function.
-//   - The live-chunk freeze path calls hotStore.Index().Snapshot() to
-//     materialize a uniquely-owned Bitmaps from the concurrent live
-//     mirror; that Snapshot Clones each bitmap so this function may
-//     mutate them freely.
+// Both cold backfill and the live-chunk freeze build a Bitmaps single-threaded by
+// re-deriving terms from raw LCMs (per-event events.TermsFor + Bitmaps.AddTo) and
+// hand it directly here.
 //
 // index.hash is the MPHF serialized via buildMPHF.
 //
@@ -133,9 +127,9 @@ func WriteColdIndex(ctx context.Context, chunkID chunk.ID, bitmaps events.Bitmap
 		}
 		var fp [IndexRecordFingerprintLen]byte
 		copy(fp[:], term[:IndexRecordFingerprintLen])
-		// Mutate in place — bitmaps is uniquely owned by the caller
-		// (built single-threaded for cold backfill, or Cloned via
-		// ConcurrentBitmaps.Snapshot for the live-chunk freeze path).
+		// Mutate in place — bitmaps is uniquely owned by the caller, built
+		// single-threaded either way: cold backfill from the .pack, or the freeze
+		// from the read-only hot DB.
 		bitmap.RunOptimize()
 		entries = append(entries, indexEntry{slot: slot, fp: fp, bitmap: bitmap})
 	}

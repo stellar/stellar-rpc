@@ -1,29 +1,16 @@
-// Package txhash holds the hot transaction-hash store (RocksDB-backed,
-// 16-CF nibble-routed) and its value types. A future cold reader
-// (RecSplit-backed) will live alongside the HotStore in this package.
+// Package txhash holds the hot transaction-hash store (RocksDB-backed, a single
+// txhash CF) and its value types. A future cold reader (RecSplit-backed) will
+// live alongside the HotStore in this package.
 package txhash
 
 import (
-	supportlog "github.com/stellar/go-stellar-sdk/support/log"
-
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 )
 
-// 16 CFs — one per high-nibble bucket of byte 0 of the txhash.
-// Same routing the cold RecSplit index uses.
-const numCFs = 16
-
-// cfNameByNibble is the precomputed (cf-0..cf-f) table indexed by
-// hash[0]>>4. Single source of truth used by both cfNames (open-time
-// CF list) and cfNameForTxHash (hot path).
-//
-//nolint:gochecknoglobals
-var cfNameByNibble = [16]string{
-	"cf-0", "cf-1", "cf-2", "cf-3", "cf-4", "cf-5", "cf-6", "cf-7",
-	"cf-8", "cf-9", "cf-a", "cf-b", "cf-c", "cf-d", "cf-e", "cf-f",
-}
+// txhashCF is the single column family holding every (txhash → ledgerSeq)
+// entry for the chunk, per the design's hot-tier spec (one `txhash` CF).
+const txhashCF = "txhash"
 
 // Entry — one (txhash → ledgerSeq) mapping.
 type Entry struct {
@@ -31,65 +18,40 @@ type Entry struct {
 	LedgerSeq uint32
 }
 
-// HotStore — RocksDB-backed hot transaction-hash store. 16 CFs named
-// cf-0..cf-f; each hash routes to cf-{txhash[0]>>4}; ledgerSeq
-// encoded big-endian. Routing, CF names, and encoding are internal.
+// HotStore — RocksDB-backed hot transaction-hash store. A single txhash CF
+// holding the full 32-byte hash as key and the big-endian ledgerSeq as value.
+// The CF name and encoding are internal.
 //
 // Like every hot store, a HotStore instance is chunk-bound: it
 // accumulates exactly one chunk's (txhash → seq) tuples before being
-// frozen into the chunk's cold .bin artifact. The binding is recorded
-// at open time (ChunkID) so the ingest driver can reject a store
-// bound to a different chunk than it is ingesting; the store does not
-// itself range-check writes (the driver's drain loop already
-// validates every ledger sequence against the chunk).
+// frozen into the chunk's cold .bin artifact. The store does not itself
+// range-check writes (the driver's drain loop already validates every ledger
+// sequence against the chunk).
 type HotStore struct {
-	store   *rocksdb.Store
-	chunkID chunk.ID
+	store *rocksdb.Store
 }
 
-// NewHotStore validates inputs and returns an open HotStore bound to
-// chunkID (see the HotStore doc on chunk binding).
-func NewHotStore(path string, chunkID chunk.ID, logger *supportlog.Entry) (*HotStore, error) {
-	if path == "" {
-		return nil, rocksdb.ErrInvalidConfig
-	}
-	if logger == nil {
-		return nil, rocksdb.ErrInvalidConfig
-	}
-	store, err := rocksdb.New(rocksdb.Config{
-		Path:           path,
-		ColumnFamilies: cfNames(),
-		Logger:         logger,
-		Tuning:         tuning(),
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &HotStore{store: store, chunkID: chunkID}, nil
+// NewWithStore wraps an ALREADY-OPEN rocksdb.Store as a txhash HotStore on the
+// single txhash CF (CFNames()). The store is owned by the caller — in production,
+// hotchunk.DB composes this facade over the shared per-chunk DB and closes that DB
+// once. The store must have CFNames() registered.
+func NewWithStore(store *rocksdb.Store) *HotStore {
+	return &HotStore{store: store}
 }
 
-func cfNames() []string {
-	out := make([]string, numCFs)
-	copy(out, cfNameByNibble[:])
-	return out
-}
+// CFNames returns the single txhash CF name this facade owns. Exported so
+// the hotchunk shared-DB opener can register it alongside the other CFs.
+func CFNames() []string { return []string{txhashCF} }
 
-func cfNameForTxHash(hash [32]byte) string {
-	return cfNameByNibble[hash[0]>>4]
-}
-
-// tuning — the hot txhash workload is write-once / point-lookup over
-// 16 CFs; the cross-knob interactions below are non-obvious enough
-// that they get an explicit per-stanza rationale. The other facades
-// ride on RocksDB defaults by contrast — only this workload earned
-// the calibration.
-func tuning() rocksdb.Tuning {
+// Tuning returns this facade's RocksDB tuning, applied to the shared per-chunk
+// DB by the hotchunk opener. The hot txhash workload is write-once /
+// point-lookup; the cross-knob interactions below are non-obvious enough that
+// they get an explicit per-stanza rationale. The other facades ride on RocksDB
+// defaults by contrast — only this workload earned the calibration.
+func Tuning() rocksdb.Tuning {
 	return rocksdb.Tuning{
-		// Per-CF memtable budget × 16 CFs (64 MB × 16 = 1024 MB)
-		// matches the MaxTotalWalSizeMB cap below. Memtable-fill
-		// cadence and WAL-cap cadence align under uniform writes;
-		// either trigger fires at roughly the same time and produces
-		// ~64 MB SSTs.
+		// 64 MB memtable so one flush produces one ~64 MB SST under
+		// uniform writes.
 		WriteBufferMB:        64,
 		MaxWriteBufferNumber: 2,
 
@@ -117,8 +79,7 @@ func tuning() rocksdb.Tuning {
 		TargetFileSizeMB:       64,
 		MaxBytesForLevelBaseMB: 256,
 
-		// High background-job budget for the periodic memtable
-		// flushes across 16 CFs.
+		// Background-job budget for the periodic memtable flushes.
 		MaxBackgroundJobs: 8,
 		MaxOpenFiles:      10_000,
 
@@ -131,47 +92,29 @@ func tuning() rocksdb.Tuning {
 		BlockCacheMB:          512,
 		BloomFilterBitsPerKey: 12,
 
-		// 1 GB WAL cap matches the natural memtable budget above.
-		// Graceful Close auto-Flushes (see rocksdb.Store.Close), so
-		// this cap only bounds ungraceful-shutdown recovery (kernel
-		// panic, power loss, OOM kill).
+		// 1 GB WAL cap. Graceful Close auto-Flushes (see
+		// rocksdb.Store.Close), so this cap only bounds ungraceful-shutdown
+		// recovery (kernel panic, power loss, OOM kill).
 		MaxTotalWalSizeMB: 1024,
 	}
 }
 
-func (h *HotStore) Close() error { return h.store.Close() }
-
-// ChunkID returns the chunk this store is bound to (constructor-supplied;
-// never reads the store).
-func (h *HotStore) ChunkID() chunk.ID { return h.chunkID }
-
-// AddEntries writes a batch of (txhash → ledgerSeq) atomically
-// across however many CFs the hashes' nibbles cover. One fsync per
-// call.
-func (h *HotStore) AddEntries(entries []Entry) error {
-	if h.store.IsClosed() {
-		return rocksdb.ErrStoreClosed
-	}
-	switch len(entries) {
-	case 0:
-		return nil
-	case 1:
-		e := entries[0]
-		return h.store.Put(cfNameForTxHash(e.Hash), e.Hash[:], rocksdb.EncodeUint32(e.LedgerSeq))
-	default:
-		return h.store.Batch(func(b *rocksdb.BatchWriter) error {
-			for _, e := range entries {
-				b.Put(cfNameForTxHash(e.Hash), e.Hash[:], rocksdb.EncodeUint32(e.LedgerSeq))
-			}
-			return nil
-		})
+// AddEntriesToBatch queues each (txhash → ledgerSeq) Put into b on the txhash
+// CF — the building block hotchunk uses to fold the tx-hash writes into the one
+// shared per-ledger WriteBatch (decision (a)). Does not commit (caller owns the
+// batch). It cannot fail: BatchWriter.Put latches any CF error, surfaced by the
+// enclosing Store.Batch, whose lifecycle RLock + checkOpen is the authoritative
+// closed-store guard.
+func (h *HotStore) AddEntriesToBatch(b *rocksdb.BatchWriter, entries []Entry) {
+	for _, e := range entries {
+		b.Put(txhashCF, e.Hash[:], rocksdb.EncodeUint32(e.LedgerSeq))
 	}
 }
 
 // Get returns the ledger sequence the hash was committed in, or
-// (0, stores.ErrNotFound) on miss. Only the routed CF is queried.
+// (0, stores.ErrNotFound) on miss.
 func (h *HotStore) Get(hash [32]byte) (uint32, error) {
-	v, found, err := h.store.Get(cfNameForTxHash(hash), hash[:])
+	v, found, err := h.store.Get(txhashCF, hash[:])
 	if err != nil {
 		return 0, err
 	}
