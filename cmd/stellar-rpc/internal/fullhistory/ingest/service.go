@@ -66,10 +66,12 @@ func (s *HotService) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMe
 }
 
 // ColdService drives a set of ColdIngesters for one chunk: sequential per-ledger
-// Ingest, then Finalize on each. It times from the first Ingest (or, if none ran,
-// from the Finalize/Close call) and emits the aggregate ColdChunkTotal exactly
-// once for the chunk — in Finalize on the success path, otherwise in Close on the
-// failure path (an Ingest error or short stream short-circuits before Finalize).
+// Ingest, then Finalize on each. The per-chunk aggregate timer starts at
+// construction (NewColdService), so its window spans the caller's drain of the
+// source stream plus every Ingest and Finalize — a deliberately wide window (see
+// coldBuckets). It emits the aggregate ColdChunkTotal exactly once for the chunk —
+// in Finalize on the success path, otherwise in Close on the failure path (an
+// Ingest error or short stream short-circuits before Finalize).
 // The totalEmitted flag prevents a double-emit: Finalize sets it so the caller's
 // deferred Close is a no-op for the aggregate. (A ctx or constructor failure
 // happens before the service is built — WriteColdChunk emits that chunk's single

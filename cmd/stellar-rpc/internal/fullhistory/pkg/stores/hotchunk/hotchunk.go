@@ -87,9 +87,9 @@ func OpenExisting(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB,
 }
 
 // OpenReadOnly opens an EXISTING hot DB read-only — the freeze source's view AND
-// the startup watermark refiner's. RocksDB's read-only open replays the
+// the startup last-committed refiner's. RocksDB's read-only open replays the
 // synced-but-unflushed WAL into in-memory memtables (persisting nothing), so a
-// reader sees every synced write even after an ungraceful crash — the watermark
+// reader sees every synced write even after an ungraceful crash — the last-committed
 // refinement DEPENDS on that replay to read a correct MaxCommittedSeq. (An
 // unsynced tail is exactly what a crash loses, and is not recovered.) Composing
 // the facades only reads.
@@ -123,10 +123,14 @@ func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly, mus
 	}, nil
 }
 
-// ChunkID returns the chunk this DB is bound to.
+// ChunkID returns the chunk this DB is bound to. No production caller yet —
+// the intended read seam for the v2 cutover (#772), exercised by tests until then.
 func (d *DB) ChunkID() chunk.ID { return d.chunkID }
 
-// Ledgers returns the ledger read/write facade over the shared store.
+// Ledgers returns the ledger read/write facade over the shared store. Production
+// ingestion and the freeze source reach the facade through DB's own methods, so
+// this accessor has no production caller yet — it's the intended read seam for the
+// v2 cutover (#772), exercised by tests until then.
 func (d *DB) Ledgers() *ledger.HotStore { return d.ledger }
 
 // Txhash returns the txhash read/write facade over the shared store.
@@ -166,6 +170,9 @@ func (d *DB) MaxCommittedSeq() (uint32, bool, error) {
 //   - PhaseLedgers/PhaseTxhash/PhaseEvents: each facade's queue-into-batch step;
 //   - PhaseCommit: the RocksDB batch write (WAL append + fsync + memtable) = the
 //     whole Batch call minus the three queue steps — the fsync wait pprof can't see.
+//   - PhaseApply: the post-commit in-memory mirror/offsets apply (the events
+//     copy-on-write bitmap clones). It runs only after the batch is durable, so it
+//     is emitted on the success path only and Failed is never PhaseApply.
 type Phase uint8
 
 const (
@@ -174,6 +181,7 @@ const (
 	PhaseTxhash
 	PhaseEvents
 	PhaseCommit
+	PhaseApply
 	// NumPhases is the array size; it is not itself a phase.
 	NumPhases
 )
@@ -191,6 +199,8 @@ func (p Phase) String() string {
 		return "events"
 	case PhaseCommit:
 		return "commit"
+	case PhaseApply:
+		return "apply"
 	default:
 		return "unknown"
 	}
@@ -294,11 +304,7 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 
 		ts := time.Now()
 		if len(txEntries) > 0 {
-			if err := d.txhash.AddEntriesToBatch(b, txEntries); err != nil {
-				rep.Phases[PhaseTxhash].Dur = time.Since(ts)
-				failed = PhaseTxhash
-				return fmt.Errorf("queue tx hashes seq %d: %w", seq, err)
-			}
+			d.txhash.AddEntriesToBatch(b, txEntries)
 		}
 		rep.Phases[PhaseTxhash].Dur = time.Since(ts)
 
@@ -327,7 +333,11 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 	}
 
 	// Batch is durable — now and only now apply the events mirror/offsets update.
+	// PhaseApply times this post-commit in-memory work (the events mirror's
+	// copy-on-write bitmap clones), which otherwise lands in no phase.
+	applyStart := time.Now()
 	applyEvents()
+	rep.Phases[PhaseApply].Dur = time.Since(applyStart)
 	return rep, nil
 }
 

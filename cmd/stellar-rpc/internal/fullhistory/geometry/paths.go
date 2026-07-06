@@ -11,9 +11,8 @@ import (
 )
 
 // Layout is the SINGLE source of truth for storage paths: a fixed key<->path
-// bijection (design-docs/full-history-streaming-workflow.md "Directory layout")
-// holding one root PER artifact tree, so a Layout plus a key finds any file
-// without listing a directory. NewLayout defaults all roots under one data dir:
+// bijection holding one root PER artifact tree, so a Layout plus a key finds any
+// file without listing a directory. NewLayout defaults all roots under one data dir:
 //
 //	{root}/
 //	├── catalog/rocksdb/
@@ -113,8 +112,7 @@ func (l Layout) LedgersRoot() string { return l.ledgersRoot }
 func (l Layout) EventsRoot() string { return l.eventsRoot }
 
 // TxHashRawRoot is its own root because the cold pipeline takes an explicit
-// per-kind root (ingest.ColdDirs) rather than the single coldDir/<dataType>
-// layout RunCold derives.
+// per-kind root (ingest.ColdDirs) rather than a single coldDir/<dataType> layout.
 func (l Layout) TxHashRawRoot() string { return l.txhashRawRoot }
 
 // TxHashIndexRoot is the root TxHashIndexDir composes under.

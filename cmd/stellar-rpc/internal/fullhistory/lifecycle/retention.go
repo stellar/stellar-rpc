@@ -11,16 +11,10 @@ import (
 // retention, not the on-disk file set, so prune/sweep can unlink a chunk the
 // instant it passes the floor without coordinating with the index lifecycle. The
 // floor may err LOW harmlessly (a wrongly-retained chunk still hits the reader's
-// missing-file rule), so it anchors on the live CompleteThrough; widening history
+// missing-file rule), so it anchors on the live last-committed ledger; widening history
 // is backfill's job, not the floor's.
 type RetentionFloor struct {
 	chunk chunk.ID // lowest in-retention chunk
-}
-
-// NewRetentionFloor pins the floor for one (through, retentionChunks, earliest)
-// snapshot. A shortened retentionChunks raises the floor at once.
-func NewRetentionFloor(through, retentionChunks, earliest uint32) RetentionFloor {
-	return RetentionFloorAt(EffectiveRetentionFloor(through, retentionChunks, earliest))
 }
 
 // RetentionFloorAt pins the floor from an already-computed floor ledger, so the

@@ -13,7 +13,7 @@ import (
 
 // Progress is derived, never stored. "Highest complete chunk" arithmetic runs in
 // int64 (-1 = "nothing complete") to avoid uint32 wraparound on the pre-genesis
-// sentinel; geometry.CompleteThrough is the chokepoint (the signed chunk↔ledger
+// sentinel; geometry.ChunkLastLedger is the chokepoint (the signed chunk↔ledger
 // maps live in geometry so there is one -1 convention across the daemon).
 
 // LastCommittedLedger is the single highest-durably-committed-ledger derivation.
@@ -23,7 +23,7 @@ import (
 //   - COLD — highest chunk with all artifacts durable (highestDurableChunk; -1 on
 //     a fresh start). Leads at startup before any hot key exists.
 //   - HOT — only when hot > cold, over "ready" keys: one read-only MaxCommittedSeq
-//     read of the highest ready hot DB (empty DB ⇒ positional CompleteThrough(hot-1)).
+//     read of the highest ready hot DB (empty DB ⇒ positional ChunkLastLedger(hot-1)).
 //     The read-only open takes no RocksDB LOCK, so it never contends with a writer;
 //     in practice it runs before ingestion opens the live chunk anyway.
 //   - FLOOR — EarliestLedger()-1 as int64(earliest)-1, so an absent/zero pin
@@ -36,7 +36,7 @@ func LastCommittedLedger(cat *catalog.Catalog, logger *supportlog.Entry) (uint32
 	if err != nil {
 		return 0, err
 	}
-	through := geometry.CompleteThrough(cold)
+	through := geometry.ChunkLastLedger(cold)
 
 	hot, err := highestReadyChunkSigned(cat)
 	if err != nil {
@@ -66,7 +66,7 @@ func LastCommittedLedger(cat *catalog.Catalog, logger *supportlog.Entry) (uint32
 }
 
 // refineWithHotDB opens the highest ready hot chunk read-only straight from its
-// Layout path and returns its MaxCommittedSeq, or CompleteThrough(live-1) on an
+// Layout path and returns its MaxCommittedSeq, or ChunkLastLedger(live-1) on an
 // empty DB. A "ready" key whose dir/DB is gone surfaces as an ordinary
 // (restartable) error — the read-only open never auto-heals it into a fresh empty
 // DB. A read-only open replays any crash-left synced WAL into memtables, so
@@ -87,11 +87,11 @@ func refineWithHotDB(cat *catalog.Catalog, logger *supportlog.Entry, live int64)
 		return maxSeq, nil
 	}
 	// Empty live DB: positional fallback (everything below it).
-	return geometry.CompleteThrough(live - 1), nil
+	return geometry.ChunkLastLedger(live - 1), nil
 }
 
 // highestReadyChunkSigned returns the highest "ready" hot chunk id as int64, or -1
-// when none. The signed return lets CompleteThrough compute the positional term
+// when none. The signed return lets ChunkLastLedger compute the positional term
 // without a uint32 underflow when the live chunk is chunk 0.
 func highestReadyChunkSigned(cat *catalog.Catalog) (int64, error) {
 	ready, err := cat.ReadyHotChunkKeys()
@@ -144,8 +144,8 @@ func highestDurableChunk(cat *catalog.Catalog) (int64, error) {
 		}
 		// A frozen index coverage satisfies txhash even after the .bin was demoted.
 		// The shared catalog predicate asserts INV-2 (one frozen coverage per window)
-		// on every read, so watermark derivation, discard eligibility, and resolve
-		// can never disagree about the same snapshot.
+		// on every read, so last-committed-ledger derivation, discard eligibility, and
+		// resolve can never disagree about the same snapshot.
 		if !k.txhash {
 			covered, err := cat.FrozenIndexCovers(c)
 			if err != nil {

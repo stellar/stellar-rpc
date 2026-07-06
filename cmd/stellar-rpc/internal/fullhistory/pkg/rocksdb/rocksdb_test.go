@@ -131,7 +131,7 @@ func TestNew_TwoStoresSamePathCollide(t *testing.T) {
 	assert.Nil(t, s2)
 }
 
-func TestStore_ConstructAndOpenFailureFreesCacheAndFilter(t *testing.T) {
+func TestStore_ConstructAndOpenFailureFreesCacheAndBBTOs(t *testing.T) {
 	dir := t.TempDir()
 	tuning := Tuning{BlockCacheMB: 4, BloomFilterBitsPerKey: 10}
 
@@ -143,7 +143,7 @@ func TestStore_ConstructAndOpenFailureFreesCacheAndFilter(t *testing.T) {
 	require.Error(t, collider.constructAndOpen())
 
 	assert.Nil(t, collider.cache)
-	assert.Nil(t, collider.filter)
+	assert.Nil(t, collider.bbtos)
 }
 
 func TestNew_CreatesMissingDirectoryWithParents(t *testing.T) {
@@ -225,6 +225,18 @@ func TestStore_FlushSucceedsOnOpenStore(t *testing.T) {
 	s := openTestStore(t, nil)
 	require.NoError(t, s.Put(defaultCFName, []byte("k"), []byte("v")))
 	assert.NoError(t, s.Flush())
+}
+
+// TestStore_FlushDrainsNamedCF pins that Flush drains every CF, not just the
+// (empty) default one. A plain DB.Flush would leave the named CF's write in
+// its memtable with no SST on disk; FlushCFs drains it to an L0 file.
+func TestStore_FlushDrainsNamedCF(t *testing.T) {
+	s := openTestStore(t, []string{"named"})
+	require.NoError(t, s.Put("named", []byte("k"), []byte("v")))
+	require.NoError(t, s.Flush())
+
+	l0 := s.db.GetPropertyCF("rocksdb.num-files-at-level0", s.cfHandles["named"])
+	assert.Equal(t, "1", l0)
 }
 
 func TestStore_16CF_IsolatedWrites(t *testing.T) {
@@ -684,7 +696,7 @@ func TestStore_TuningZeroValue(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 
 	assert.Nil(t, s.cache)
-	assert.Nil(t, s.filter)
+	assert.Nil(t, s.bbtos)
 
 	require.NoError(t, s.Put(defaultCFName, []byte("k"), []byte("v")))
 	v, found, err := s.Get(defaultCFName, []byte("k"))

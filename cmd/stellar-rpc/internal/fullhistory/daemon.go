@@ -62,7 +62,7 @@ type daemonOptions struct {
 
 	// chunksPerTxhashIndex overrides the tx-hash index width (test-only). 0 ⇒ the
 	// fixed geometry.ChunksPerTxhashIndex. Tests set it to 1 so a single chunk's
-	// freeze is a terminal index (exercising the fold+prune path cheaply).
+	// freeze is a terminal index (exercising the index rebuild + prune path cheaply).
 	chunksPerTxhashIndex uint32
 }
 
@@ -217,18 +217,17 @@ func buildSinks(opts daemonOptions, registry *prometheus.Registry) (observabilit
 }
 
 // supervise is the daemon's clean-vs-restart decision point ("startup is the
-// recovery path"): nil or a ctx cancel is a clean shutdown, everything else is
-// warned and retried after a backoff. There is deliberately no fatal-and-exit
-// class — genuine loss presents as a crash-loop with a clear warn line. The
-// never-auto-heal guarantee lives in the must-exist open (openHotDBForChunk), not here.
+// recovery path"): a ctx cancel is a clean shutdown, everything else is warned and
+// retried after a backoff. run() never returns nil (a clean shutdown surfaces as a
+// ctx-canceled error), so clean-vs-restart keys solely off ctx.Err(). There is
+// deliberately no fatal-and-exit class — genuine loss presents as a crash-loop with
+// a clear warn line. The never-auto-heal guarantee lives in the must-exist open
+// (openHotDBForChunk), not here.
 func supervise(
 	ctx context.Context, start StartConfig, logger *supportlog.Entry, backoff time.Duration,
 ) error {
 	for {
 		err := run(ctx, start)
-		if err == nil {
-			return nil // clean shutdown
-		}
 		if ctx.Err() != nil {
 			return nil //nolint:nilerr // ctx canceled is a clean shutdown, not a run failure
 		}
@@ -411,7 +410,7 @@ func newLogger(cfg LoggingConfig) (*supportlog.Entry, error) {
 	}
 	logger := supportlog.New()
 	logger.SetLevel(level)
-	if cfg.Format == "json" {
+	if cfg.Format == LogFormatJSON {
 		logger.UseJSONFormatter()
 	}
 	return logger, nil

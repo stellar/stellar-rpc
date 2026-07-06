@@ -150,8 +150,8 @@ func (c *Catalog) FrozenTxHashIndex(w geometry.TxHashIndexID) (geometry.TxHashIn
 // the whole inclusive [lo, hi] chunk range. It reads through FrozenTxHashIndex,
 // so INV-2 (at most one frozen coverage per index) is asserted on every call.
 // This is the single "covered by a frozen index" predicate the resolve diff
-// (backfill), the discard eligibility scan, and the watermark derivation all
-// share, so they can never disagree about the same catalog snapshot. Reports
+// (backfill), the discard eligibility scan, and the last-committed-ledger derivation
+// all share, so they can never disagree about the same catalog snapshot. Reports
 // false (no error) when the index has no frozen coverage yet.
 func (c *Catalog) FrozenIndexCoversRange(w geometry.TxHashIndexID, lo, hi chunk.ID) (bool, error) {
 	frozen, ok, err := c.FrozenTxHashIndex(w)
@@ -182,8 +182,8 @@ func (c *Catalog) EarliestLedger() (uint32, bool, error) {
 // PinEarliestLedger commits the config:earliest_ledger pin in one synced write —
 // the first-start commit validateConfig mandates. Its presence is the sentinel
 // that a prior first start completed: once written, earliest_ledger is immutable
-// and validated-or-abort on every restart. chunks_per_txhash_index is no longer
-// pinned — it is the fixed geometry.ChunksPerTxhashIndex constant.
+// and validated-or-abort on every restart. (The tx-hash index width is not pinned;
+// it is the fixed geometry.ChunksPerTxhashIndex constant.)
 func (c *Catalog) PinEarliestLedger(earliestLedger uint32) error {
 	return c.store.Put(geometry.ConfigEarliestLedger, strconv.FormatUint(uint64(earliestLedger), 10))
 }

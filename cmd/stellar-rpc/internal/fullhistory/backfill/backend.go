@@ -139,16 +139,13 @@ const (
 
 // waitForCoverage blocks until b's Tip reaches target, polling on interval up to
 // timeout. It returns nil once covered; ErrBackendCoverageTimeout if the tip stays
-// below target until the timeout (coverage lag); a fatal "backend tip query" error
-// if a Tip call itself fails (a broken backend is not retried); or ctx's error if
-// ctx is canceled first. A zero interval/timeout falls back to sane defaults.
+// below target until the timeout (coverage lag); a "backend tip query" error if a
+// Tip call itself fails (surfaced straight up — waitForCoverage does not retry the
+// tip, but the backfill task's withRetries retries the whole task); or ctx's error
+// if ctx is canceled first. interval and timeout must be positive — the sole caller
+// passes defaultCoveragePollInterval/defaultCoverageTimeout, and tests pass their
+// own explicit values.
 func waitForCoverage(ctx context.Context, b Backend, target uint32, interval, timeout time.Duration) error {
-	if interval <= 0 {
-		interval = defaultCoveragePollInterval
-	}
-	if timeout <= 0 {
-		timeout = defaultCoverageTimeout
-	}
 	deadline := time.Now().Add(timeout)
 	poll := func() error {
 		// Bound each tip query by the overall deadline — the parent ctx may carry no

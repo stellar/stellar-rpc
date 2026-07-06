@@ -187,7 +187,7 @@ func TestDeriveWatermark(t *testing.T) {
 		require.NoError(t, cat.PutHotTransient(5)) // the crashed live chunk
 		// The positional term alone (highest ready 4, minus 1) under-counts to chunk 3;
 		// only the refinement below, opening chunk 4's real DB, recovers chunk 4's frontier.
-		require.Equal(t, chunk.ID(3).LastLedger(), geometry.CompleteThrough(3),
+		require.Equal(t, chunk.ID(3).LastLedger(), geometry.ChunkLastLedger(3),
 			"positional term alone under-counts to chunk 3")
 
 		got, err := deriveWatermark(cat, silentLogger())

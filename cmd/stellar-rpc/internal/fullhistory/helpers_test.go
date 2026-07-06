@@ -84,19 +84,21 @@ func freezeCoverage(t *testing.T, cat *catalog.Catalog, w geometry.TxHashIndexID
 // recordingMetrics is a concurrency-safe Metrics sink for backfill tests: counts
 // BackfillPass calls and how many times the last-committed gauge was set, no-ops the rest.
 type recordingMetrics struct {
-	mu             sync.Mutex
-	backfillPasses int
-	gaugesSet      map[string]int // how many times each gauge group was set
+	mu                sync.Mutex
+	backfillPasses    int
+	gaugesSet         map[string]int // how many times each gauge group was set
+	lastCommittedVals []uint32       // every value the last-committed gauge was set to, in order
 }
 
 func newRecordingMetrics() *recordingMetrics {
 	return &recordingMetrics{gaugesSet: map[string]int{}}
 }
 
-func (r *recordingMetrics) LastCommitted(uint32) {
+func (r *recordingMetrics) LastCommitted(v uint32) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.gaugesSet["last_committed"]++
+	r.lastCommittedVals = append(r.lastCommittedVals, v)
 }
 
 func (r *recordingMetrics) RetentionFloor(uint32) {
@@ -117,6 +119,13 @@ func (*recordingMetrics) Rebuild(time.Duration)      {}
 func (*recordingMetrics) Prune(int, time.Duration)   {}
 func (*recordingMetrics) LiveHotChunks(int)          {}
 func (*recordingMetrics) Discard(int, time.Duration) {}
+
+// lastCommittedSeq returns the values the last-committed gauge was set to, in order.
+func (r *recordingMetrics) lastCommittedSeq() []uint32 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]uint32(nil), r.lastCommittedVals...)
+}
 
 var _ observability.Metrics = (*recordingMetrics)(nil)
 

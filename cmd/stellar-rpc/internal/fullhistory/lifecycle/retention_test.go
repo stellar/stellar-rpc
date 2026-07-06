@@ -20,7 +20,7 @@ import (
 // through = chunk 100's last ledger, retain 10 chunks ⇒ floor = chunk 91
 // (EffectiveRetentionFloor: 100-10+1 = 91). Anything below chunk 91 is excluded.
 func TestRetentionFloor_ExcludesBelow(t *testing.T) {
-	floor := NewRetentionFloor(chunk.ID(100).LastLedger(), 10, 0)
+	floor := RetentionFloorAt(EffectiveRetentionFloor(chunk.ID(100).LastLedger(), 10, 0))
 
 	assert.True(t, floor.Excludes(90), "one chunk below the floor => excluded")
 	assert.False(t, floor.Excludes(91), "the floor chunk itself => retained")
@@ -34,8 +34,8 @@ func TestRetentionFloor_ExcludesBelow(t *testing.T) {
 func TestRetentionFloor_ShorteningRaisesFloorImmediately(t *testing.T) {
 	through := chunk.ID(100).LastLedger()
 
-	wide := NewRetentionFloor(through, 50, 0)   // floor = chunk 51
-	narrow := NewRetentionFloor(through, 10, 0) // floor = chunk 91
+	wide := RetentionFloorAt(EffectiveRetentionFloor(through, 50, 0))   // floor = chunk 51
+	narrow := RetentionFloorAt(EffectiveRetentionFloor(through, 10, 0)) // floor = chunk 91
 
 	assert.False(t, wide.Excludes(60), "chunk 60 retained under the wide retention")
 	assert.True(t, narrow.Excludes(60), "shortening retention excludes it at once")
@@ -49,7 +49,7 @@ func TestRetentionFloor_ExcludesIndexByLastChunk(t *testing.T) {
 
 	// through = chunk 11's last ledger, retain 4 chunks ⇒ floor = chunk 8
 	// (11-4+1 = 8). Index 2 ([8,11]) starts at the floor.
-	floor := NewRetentionFloor(chunk.ID(11).LastLedger(), 4, 0)
+	floor := RetentionFloorAt(EffectiveRetentionFloor(chunk.ID(11).LastLedger(), 4, 0))
 
 	// Index 0 ([0,3]) and index 1 ([4,7]) are wholly below the floor; index 2
 	// ([8,11]) is the floor index — at it, not below.
@@ -70,17 +70,17 @@ func TestRetentionFloor_FullHistoryPinsAtEarliest(t *testing.T) {
 	through := chunk.ID(100).LastLedger()
 
 	// earliest at chunk 50: the fixed floor wins; no sliding floor applies.
-	floor := NewRetentionFloor(through, 0, chunk.ID(50).FirstLedger())
+	floor := RetentionFloorAt(EffectiveRetentionFloor(through, 0, chunk.ID(50).FirstLedger()))
 	assert.True(t, floor.Excludes(49), "below earliest => excluded")
 	assert.False(t, floor.Excludes(50), "the earliest chunk is retained")
 
 	// earliest = genesis: full history from chunk 0.
-	atGenesis := NewRetentionFloor(through, 0, chunk.FirstLedgerSeq)
+	atGenesis := RetentionFloorAt(EffectiveRetentionFloor(through, 0, chunk.FirstLedgerSeq))
 	assert.False(t, atGenesis.Excludes(0), "genesis chunk retained under full history")
 
 	// The full-history floor is independent of `through`: a much higher tip does
 	// not raise it (there is no sliding window to slide).
-	higher := NewRetentionFloor(chunk.ID(1_000).LastLedger(), 0, chunk.ID(50).FirstLedger())
+	higher := RetentionFloorAt(EffectiveRetentionFloor(chunk.ID(1_000).LastLedger(), 0, chunk.ID(50).FirstLedger()))
 	assert.False(t, higher.Excludes(50), "full-history floor does not move with the tip")
 	assert.True(t, higher.Excludes(49), "still excludes below earliest regardless of the tip")
 }
@@ -91,7 +91,7 @@ func TestRetentionFloor_FullHistoryPinsAtEarliest(t *testing.T) {
 func TestRetentionFloor_YoungStoreClampsToGenesis(t *testing.T) {
 	// Only 4 complete chunks exist (0..3) but we ask to retain 1000: the sliding
 	// floor 3-1000+1 = -996 must clamp to chunk 0, not wrap.
-	floor := NewRetentionFloor(chunk.ID(3).LastLedger(), 1000, 0)
+	floor := RetentionFloorAt(EffectiveRetentionFloor(chunk.ID(3).LastLedger(), 1000, 0))
 	assert.False(t, floor.Excludes(0), "chunk 0 is at the clamped floor, not below it")
 }
 
@@ -124,7 +124,7 @@ func TestReaderRetention_WindowStraddlingFloorServesInRangeNotBelow(t *testing.T
 	through := chunk.ID(3).LastLedger()
 	// Pick retentionChunks so the sliding floor lands on chunk 2:
 	// geometry.LastCompleteChunkAt(through)=3, floor chunk = 3-retention+1 = 2 ⇒ retention=2.
-	floor := NewRetentionFloor(through, 2, 0)
+	floor := RetentionFloorAt(EffectiveRetentionFloor(through, 2, 0))
 
 	// (The seq-level reader masking — a below-floor read is not-found even though
 	// the stale .idx still hashes chunks 0,1 — returns with the read path, #772;

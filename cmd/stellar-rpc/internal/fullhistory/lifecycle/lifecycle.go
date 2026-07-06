@@ -36,11 +36,13 @@ type Config struct {
 	// sliding floor (the fixed earliest-ledger floor alone applies).
 	RetentionChunks uint32
 
-	// OpRetryAttempts / OpRetryBackoff bound the per-op retry the discard/prune
-	// sweeps use (see runOps). Zero values fall back to defaults in
+	// opRetryAttempts / opRetryBackoff bound the per-op retry the discard/prune
+	// sweeps use (see runOps). Not config-wired: production always runs the
+	// WithLifecycleDefaults constants, so these are unexported internals (a test
+	// seam), not an advertised knob. Zero values fall back to the defaults in
 	// WithLifecycleDefaults.
-	OpRetryAttempts int
-	OpRetryBackoff  time.Duration
+	opRetryAttempts int
+	opRetryBackoff  time.Duration
 }
 
 const (
@@ -52,11 +54,11 @@ const (
 // the op-retry defaults applied. Called once at startup before launching the loop.
 func (cfg Config) WithLifecycleDefaults() Config {
 	cfg.ExecConfig = cfg.WithDefaults()
-	if cfg.OpRetryAttempts < 1 {
-		cfg.OpRetryAttempts = defaultOpRetryAttempts
+	if cfg.opRetryAttempts < 1 {
+		cfg.opRetryAttempts = defaultOpRetryAttempts
 	}
-	if cfg.OpRetryBackoff <= 0 {
-		cfg.OpRetryBackoff = defaultOpRetryBackoff
+	if cfg.opRetryBackoff <= 0 {
+		cfg.opRetryBackoff = defaultOpRetryBackoff
 	}
 	return cfg
 }
@@ -69,22 +71,26 @@ func (cfg Config) WithLifecycleDefaults() Config {
 // a retryable file operation. It checks ctx between ops (and the backoff aborts on
 // ctx cancellation) so a shutdown mid-scan stops promptly; the ctx error surfaces
 // up through Loop for supervise to classify as clean.
-func runOps(ctx context.Context, cfg Config, ops []func() error) error {
+//
+// It returns how many ops ran to success (all of them on a nil error) so the caller
+// can meter the work actually done even when a later op fails — the completed ops
+// already retired their DBs / swept their artifacts and won't re-list next scan.
+func runOps(ctx context.Context, cfg Config, ops []func() error) (int, error) {
 	// A zero-value Config (no WithLifecycleDefaults, e.g. a test harness) runs each
 	// op exactly once.
-	attempts := max(cfg.OpRetryAttempts, 1)
-	for _, op := range ops {
+	attempts := max(cfg.opRetryAttempts, 1)
+	for i, op := range ops {
 		if err := ctx.Err(); err != nil {
-			return err
+			return i, err
 		}
 		// attempts total tries == 1 initial + (attempts-1) retries, fixed pause.
 		//nolint:gosec // attempts >= 1, so attempts-1 >= 0
-		bo := backoff.WithMaxRetries(backoff.NewConstantBackOff(cfg.OpRetryBackoff), uint64(attempts-1))
+		bo := backoff.WithMaxRetries(backoff.NewConstantBackOff(cfg.opRetryBackoff), uint64(attempts-1))
 		if err := backoff.Retry(op, backoff.WithContext(bo, ctx)); err != nil {
-			return err
+			return i, err
 		}
 	}
-	return nil
+	return len(ops), nil
 }
 
 // runLifecycle runs one tick over the three stages for just-completed chunk
@@ -119,7 +125,7 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 		WithField("floor_chunk", gate.FirstChunk().String()).
 		Debug("streaming: lifecycle tick — derived snapshot")
 
-	// Stage 1 — plan-and-execute (freeze + index fold) over [floor, lastChunk], via
+	// Stage 1 — plan-and-execute (freeze + index rebuild) over [floor, lastChunk], via
 	// the same entry point backfill uses (resolve → executePlan → Freeze metric,
 	// recorded internally). A canceled ctx makes RunBackfill return ctx.Err(), which
 	// propagates up for supervise to treat as a clean shutdown. lastChunk is always
@@ -139,12 +145,16 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	if err != nil {
 		return fmt.Errorf("eligible discard ops: %w", err)
 	}
-	if err := runOps(ctx, cfg, discardOps); err != nil {
+	// Meter the DBs actually retired (one op per DB) BEFORE the error check, so a
+	// mid-scan failure still counts what completed rather than losing it: the retired
+	// DBs won't re-list next scan.
+	discarded, err := runOps(ctx, cfg, discardOps)
+	metrics.Discard(discarded, time.Since(discardStart))
+	if err != nil {
 		return fmt.Errorf("discard op: %w", err)
 	}
-	metrics.Discard(len(discardOps), time.Since(discardStart))
-	if len(discardOps) > 0 {
-		logger.WithField("discarded", len(discardOps)).Info("streaming: lifecycle discard stage complete")
+	if discarded > 0 {
+		logger.WithField("discarded", discarded).Info("streaming: lifecycle discard stage complete")
 	}
 
 	// Live hot-chunk gauge after the discard stage.
@@ -156,14 +166,22 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 
 	// Stage 3 — prune scan.
 	pruneStart := time.Now()
-	pruneOps, prunedArtifacts, err := eligiblePruneOps(cat, gate)
+	pruneOps, pruneWeights, err := eligiblePruneOps(cat, gate)
 	if err != nil {
 		return fmt.Errorf("eligible prune ops: %w", err)
 	}
-	if err := runOps(ctx, cfg, pruneOps); err != nil {
-		return fmt.Errorf("prune op: %w", err)
+	// Sum the artifacts swept by the ops that actually completed (each op carries its
+	// own artifact weight — the chunk family collapses many artifacts into one op).
+	// Metered BEFORE the error check so a mid-sweep failure keeps the completed count.
+	completed, err := runOps(ctx, cfg, pruneOps)
+	prunedArtifacts := 0
+	for _, w := range pruneWeights[:completed] {
+		prunedArtifacts += w
 	}
 	metrics.Prune(prunedArtifacts, time.Since(pruneStart))
+	if err != nil {
+		return fmt.Errorf("prune op: %w", err)
+	}
 	if prunedArtifacts > 0 {
 		logger.WithField("pruned", prunedArtifacts).Info("streaming: lifecycle prune stage complete")
 	}

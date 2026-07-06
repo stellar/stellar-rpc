@@ -38,6 +38,7 @@ const testPassphrase = "Public Global Stellar Network ; September 2015"
 
 type hotPhaseCall struct {
 	phase hotchunk.Phase
+	dur   time.Duration
 	items int
 	err   error
 }
@@ -64,10 +65,10 @@ type testSink struct {
 	coldChunkTotals int
 }
 
-func (s *testSink) HotPhase(phase hotchunk.Phase, _ time.Duration, items int, err error) {
+func (s *testSink) HotPhase(phase hotchunk.Phase, dur time.Duration, items int, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.hotPhases = append(s.hotPhases, hotPhaseCall{phase, items, err})
+	s.hotPhases = append(s.hotPhases, hotPhaseCall{phase, dur, items, err})
 }
 
 func (s *testSink) ColdIngest(dataType string, _ time.Duration, items int, err error) {
@@ -106,6 +107,17 @@ func (s *testSink) hotPhaseItems() map[hotchunk.Phase]int {
 	m := map[hotchunk.Phase]int{}
 	for _, c := range s.hotPhases {
 		m[c.phase] += c.items
+	}
+	return m
+}
+
+// hotPhaseDurs returns the wall-clock reported per hot phase, keyed by phase.
+func (s *testSink) hotPhaseDurs() map[hotchunk.Phase]time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := map[hotchunk.Phase]time.Duration{}
+	for _, c := range s.hotPhases {
+		m[c.phase] = c.dur
 	}
 	return m
 }
@@ -788,13 +800,15 @@ func TestPrometheusSink_Smoke(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	require.NotPanics(t, func() {
 		sink := NewPrometheusSink(reg, "test")
-		// The five hot per-ledger phases: extract/commit carry no items, the write
-		// phases carry per-type volume; the commit phase exercises the error dimension.
+		// The six hot per-ledger phases: extract/commit/apply carry no items, the
+		// write phases carry per-type volume; the commit phase exercises the error
+		// dimension.
 		sink.HotPhase(hotchunk.PhaseExtract, time.Millisecond, 0, nil)
 		sink.HotPhase(hotchunk.PhaseLedgers, time.Millisecond, 1, nil)
 		sink.HotPhase(hotchunk.PhaseTxhash, time.Millisecond, 5, nil)
 		sink.HotPhase(hotchunk.PhaseEvents, time.Millisecond, 3, nil)
 		sink.HotPhase(hotchunk.PhaseCommit, time.Millisecond, 0, errFailingCold)
+		sink.HotPhase(hotchunk.PhaseApply, time.Millisecond, 0, nil)
 		sink.ColdIngest(dataTypeTxhash, time.Second, 100, nil)
 		sink.ColdChunkTotal(time.Second)
 		sink.IngestStage(dataTypeEvents, stageFinalize, time.Second, 0)
@@ -975,8 +989,8 @@ func hotTestLogger() *supportlog.Entry {
 
 // TestHotService_EmitsEveryPhaseOnSuccess constructs a HotService over a real hot
 // DB with a recording sink and asserts one successful ingest emits every phase
-// once, the write phases carry per-type volume (extract/commit carry none), and no
-// phase carries an error.
+// once, the write phases carry per-type volume (extract/commit/apply carry none),
+// and no phase carries an error.
 func TestHotService_EmitsEveryPhaseOnSuccess(t *testing.T) {
 	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
 	require.NoError(t, err)
@@ -995,6 +1009,7 @@ func TestHotService_EmitsEveryPhaseOnSuccess(t *testing.T) {
 	assert.Equal(t, 1, items[hotchunk.PhaseEvents], "one event")
 	assert.Zero(t, items[hotchunk.PhaseExtract], "extract carries no items")
 	assert.Zero(t, items[hotchunk.PhaseCommit], "commit carries no items")
+	assert.Zero(t, items[hotchunk.PhaseApply], "apply carries no items")
 	_, hadErr := sink.hotPhaseErr()
 	assert.False(t, hadErr, "success path carries no phase error")
 }
@@ -1019,6 +1034,75 @@ func TestHotService_CommitErrorLandsOnCommitPhase(t *testing.T) {
 	for p, n := range sink.hotPhaseItems() {
 		assert.Zero(t, n, "no items on the failure path (phase %v)", p)
 	}
+}
+
+// TestHotService_ExtractFailureLandsOnExtractPhase asserts a decode failure (garbage
+// LCM bytes) surfaces on the extract phase — the pre-batch walk where every decode
+// failure lands by construction — and emits ONLY that phase (no batch was opened, so
+// no later phase ran).
+func TestHotService_ExtractFailureLandsOnExtractPhase(t *testing.T) {
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	sink := &testSink{}
+	svc := NewHotService(db, sink)
+	first := chunk.ID(0).FirstLedger()
+	// Garbage bytes fail XDR decode in ExtractLedgerEvents, before any batch opens.
+	garbage := bytes.Repeat([]byte{0xff}, 16)
+	require.Error(t, svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(garbage)))
+
+	phase, hadErr := sink.hotPhaseErr()
+	require.True(t, hadErr, "the decode failure must be reported on a phase")
+	assert.Equal(t, hotchunk.PhaseExtract, phase, "a decode failure lands on the extract phase")
+	require.Len(t, sink.hotPhases, 1, "a pre-batch decode failure emits only the extract phase")
+}
+
+// TestHotService_EventsQueueFailureLandsOnEventsPhase asserts an events-queue failure
+// (a ledger that skips ahead of the chunk's next-expected seq) surfaces on the events
+// phase — a queue-step failure AFTER extract/ledger/txhash ran. Because PhaseExtract is
+// Failed's zero value, a NON-zero Failed is the discriminator that proves the phase was
+// actually assigned rather than defaulted.
+func TestHotService_EventsQueueFailureLandsOnEventsPhase(t *testing.T) {
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	sink := &testSink{}
+	svc := NewHotService(db, sink)
+	first := chunk.ID(0).FirstLedger()
+	// A valid LCM but a seq that skips ahead: the events facade expects the empty
+	// chunk's first ledger and rejects first+5 as out of order (ErrLedgerOutOfOrder).
+	// The ledger + txhash queue steps do not sequence-check, so they run first.
+	raw, _, _ := marshalLCMWithEvent(t, first+5)
+	require.Error(t, svc.Ingest(context.Background(), first+5, xdr.LedgerCloseMetaView(raw)))
+
+	phase, hadErr := sink.hotPhaseErr()
+	require.True(t, hadErr, "the queue failure must be reported on a phase")
+	assert.Equal(t, hotchunk.PhaseEvents, phase, "an events-queue failure lands on the events phase")
+	assert.NotEqual(t, hotchunk.PhaseExtract, phase, "a non-zero Failed proves it was assigned, not defaulted")
+	// Phases [extract, ledgers, txhash, events] emitted; commit/apply never ran.
+	assert.Len(t, sink.hotPhases, int(hotchunk.PhaseEvents)+1)
+}
+
+// TestHotService_FailedPhaseCarriesPartialDuration asserts that a failed ledger ingest
+// stamps the failed phase's PARTIAL wall-clock before returning (not a zero sample), and
+// that completed earlier phases carry theirs too. Uses the same out-of-order failure as
+// above, whose failed phase is the events queue.
+func TestHotService_FailedPhaseCarriesPartialDuration(t *testing.T) {
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	sink := &testSink{}
+	svc := NewHotService(db, sink)
+	first := chunk.ID(0).FirstLedger()
+	raw, _, _ := marshalLCMWithEvent(t, first+5)
+	require.Error(t, svc.Ingest(context.Background(), first+5, xdr.LedgerCloseMetaView(raw)))
+
+	durs := sink.hotPhaseDurs()
+	assert.Positive(t, durs[hotchunk.PhaseExtract], "a completed earlier phase carries its wall-clock")
+	assert.Positive(t, durs[hotchunk.PhaseEvents], "the failed phase stamps its partial duration before returning")
 }
 
 // ───────────────────────── cold txhash .bin content (P1-d) ─────────────────────────

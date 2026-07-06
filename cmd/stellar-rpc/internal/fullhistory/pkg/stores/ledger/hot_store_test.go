@@ -234,11 +234,13 @@ func TestHotStore_PostCloseOps(t *testing.T) {
 
 	require.ErrorIs(t, addLedgers(h), stores.ErrStoreClosed)
 
+	// start > end short-circuits before touching the store, so it yields no
+	// entries and no error even on a closed store (the documented contract).
 	iterErr = nil
 	for _, e := range h.IterateLedgers(100, 50) {
 		iterErr = e
 	}
-	require.ErrorIs(t, iterErr, stores.ErrStoreClosed)
+	require.NoError(t, iterErr)
 }
 
 func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {

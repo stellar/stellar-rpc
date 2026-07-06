@@ -9,7 +9,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// CompleteThrough — sentinel-safe signed->ledger map.
+// ChunkLastLedger — sentinel-safe signed->ledger map.
 //
 // ALIASING TRAP: a guard-less impl wraps -1 to exactly PreGenesisLedger anyway
 // (MaxUint32+1 overflows to 0), so a -1-only test is blind to a dropped guard.
@@ -17,7 +17,7 @@ import (
 // the guard must squash).
 // ---------------------------------------------------------------------------
 
-func TestCompleteThrough(t *testing.T) {
+func TestChunkLastLedger(t *testing.T) {
 	tests := []struct {
 		name string
 		in   int64
@@ -32,7 +32,7 @@ func TestCompleteThrough(t *testing.T) {
 	require.Equal(t, uint32(1), PreGenesisLedger, "FirstLedgerSeq-1 == 1 (the doc's chunkLastLedger(-1))")
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, CompleteThrough(tc.in))
+			require.Equal(t, tc.want, ChunkLastLedger(tc.in))
 		})
 	}
 
@@ -44,7 +44,7 @@ func TestCompleteThrough(t *testing.T) {
 	require.Equal(t, PreGenesisLedger, guardlessWrap(-1),
 		"-1 aliases PreGenesisLedger under the wrap — the coincidence this test must not rely on")
 	require.NotEqual(t, PreGenesisLedger, guardlessWrap(-2),
-		"-2 must NOT alias — proving the guard (not a coincidence) is what makes CompleteThrough(-2) safe")
+		"-2 must NOT alias — proving the guard (not a coincidence) is what makes ChunkLastLedger(-2) safe")
 }
 
 // ChunkIDOfLedger maps a ledger to its containing chunk, signed so a sub-genesis

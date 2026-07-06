@@ -327,7 +327,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	// =====================================================================
 	// STEP 1 — first start: config → lock → validate (pin genesis) → start →
 	// direct ingest across the chunk-0 AND chunk-1 boundaries, the lifecycle
-	// freezing, folding, and discarding each just-closed chunk off the doorbell.
+	// freezing, rebuilding the index, and discarding each just-closed chunk off the BoundarySignal.
 	// =====================================================================
 	cfgPath := e2eConfigPath(t, dataDir, 0) // retention 0 (full history) for now
 	cancel, done := runDaemonInBackground(t, cfgPath, core, &served, metrics)
@@ -397,10 +397,10 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	assert.GreaterOrEqual(t, metrics.snapshotFreezeCount(), 1, "at least one freeze stage ran")
 
 	// =====================================================================
-	// STEP 4 — hot lookup and restart watermark.
+	// STEP 4 — hot lookup and restart last-committed ledger.
 	// =====================================================================
-	wmBeforeRestart := mustDeriveWatermark(t, postCat)
-	require.GreaterOrEqual(t, wmBeforeRestart, c2First, "watermark advanced into chunk 2")
+	lastCommittedBeforeRestart := mustDeriveLastCommitted(t, postCat)
+	require.GreaterOrEqual(t, lastCommittedBeforeRestart, c2First, "last-committed advanced into chunk 2")
 
 	// Live hot CF — now the daemon has stopped, chunk 2 (still the un-frozen live
 	// chunk) is reopenable. Resolve the chunk-2 tx hash through the txhash CF — the
@@ -443,9 +443,9 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	require.Eventually(t, func() bool { return core.fromSeen.Load() != 0 }, 30*time.Second, 20*time.Millisecond,
 		"the restarted ingestion loop requested a resume range")
 
-	wantResume := wmBeforeRestart + 1
+	wantResume := lastCommittedBeforeRestart + 1
 	assert.Equal(t, wantResume, core.fromSeen.Load(),
-		"restart streams from the re-derived watermark+1 — the durable frontier, re-derived not stored, no gap")
+		"restart streams from the re-derived last-committed+1 — the durable frontier, re-derived not stored, no gap")
 
 	waitClean(t, cancel2, done2)
 
@@ -461,7 +461,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	pruneMetrics := &e2eMetrics{}
 	cancel3, done3 := runDaemonInBackground(t, prunedCfg, core, &served, pruneMetrics)
 
-	// The prune scan runs on the first lifecycle tick (the at-start doorbell ring).
+	// The prune scan runs on the first lifecycle tick (the at-start BoundarySignal ring).
 	require.Eventually(t, func() bool {
 		return pruneMetrics.prunedCount() > 0
 	}, 60*time.Second, 50*time.Millisecond, "retention prune scan must sweep chunk 0")
@@ -510,11 +510,12 @@ func e2eReadCatalog(t *testing.T, dataDir string) (*catalog.Catalog, func()) {
 	return catalog.NewCatalog(store, NewLayoutFromPaths(paths), windows), func() { _ = store.Close() }
 }
 
-// mustDeriveWatermark derives the durable watermark with the read-only hot-DB
-// refinement (passing a logger opens the highest ready hot DB by its Layout path).
-func mustDeriveWatermark(t *testing.T, cat *catalog.Catalog) uint32 {
+// mustDeriveLastCommitted derives the durable last-committed ledger with the
+// read-only hot-DB refinement (passing a logger opens the highest ready hot DB by
+// its Layout path).
+func mustDeriveLastCommitted(t *testing.T, cat *catalog.Catalog) uint32 {
 	t.Helper()
-	wm, err := lifecycle.LastCommittedLedger(cat, silentLogger())
+	lastCommitted, err := lifecycle.LastCommittedLedger(cat, silentLogger())
 	require.NoError(t, err)
-	return wm
+	return lastCommitted
 }

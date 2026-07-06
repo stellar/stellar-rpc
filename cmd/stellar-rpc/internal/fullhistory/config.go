@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"runtime"
 
 	"github.com/pelletier/go-toml"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/stellar/go-stellar-sdk/support/datastore"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 )
 
@@ -24,7 +24,7 @@ import (
 // earliest_ledger ([retention]) is the one PINNED field — written immutably on
 // first start (PinEarliestLedger) and validated against its pin (abort on
 // mismatch) on every restart; its field doc flags the set-once contract.
-// (chunks_per_txhash_index is no longer configurable — it is the fixed
+// (The tx-hash index width is not configurable — it is the fixed
 // geometry.ChunksPerTxhashIndex constant.)
 type Config struct {
 	Service   ServiceConfig   `toml:"service"`
@@ -124,6 +124,9 @@ const (
 
 	DefaultLogLevel  = "info"
 	DefaultLogFormat = "text"
+	// LogFormatJSON is the only non-default logging.format value; anything else is
+	// rejected by validateConfig.
+	LogFormatJSON = "json"
 
 	// EarliestGenesis and EarliestNow are the two symbolic earliest_ledger forms.
 	EarliestGenesis = "genesis"
@@ -165,7 +168,7 @@ func ParseConfig(data []byte) (Config, error) {
 // (and later rejected by validateConfig where a zero is illegal).
 func (cfg Config) WithDefaults() Config {
 	if cfg.Backfill.Workers == nil {
-		v := runtime.GOMAXPROCS(0)
+		v := backfill.DefaultWorkers()
 		cfg.Backfill.Workers = &v
 	}
 	if cfg.Backfill.MaxRetries == nil {

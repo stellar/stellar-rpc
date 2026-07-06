@@ -15,8 +15,8 @@ import (
 
 // closeColdAll closes every cold ingester built so far, joining each Close error
 // into err. Used when a LATER constructor fails mid-build. The already-built
-// ingesters never ingested or finalized, and Close no longer emits a per-ingester
-// ColdIngest, so a rolled-back build produces no phantom-success sample — no
+// ingesters never ingested or finalized, and Close emits no per-ingester
+// ColdIngest sample, so a rolled-back build produces no phantom-success sample — no
 // abort bookkeeping needed here.
 func closeColdAll(ings []ColdIngester, err error) error {
 	for _, ing := range ings {

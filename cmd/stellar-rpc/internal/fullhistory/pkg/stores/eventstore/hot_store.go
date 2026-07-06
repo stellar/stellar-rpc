@@ -127,7 +127,9 @@ func NewWithStore(store *rocksdb.Store, chunkID chunk.ID) (*HotStore, error) {
 	}, nil
 }
 
-// ChunkID returns the chunk this store serves.
+// ChunkID returns the chunk this store serves. Infallible and usable post-close
+// (the Reader exception). No production caller yet — the intended read seam for
+// the v2 cutover (#772), exercised by tests until then.
 func (h *HotStore) ChunkID() chunk.ID { return h.chunkID }
 
 // EventCount is the total number of events committed to this Chunk
@@ -366,9 +368,12 @@ func (h *HotStore) FetchRange(ctx context.Context, start, count uint32) iter.Seq
 }
 
 // All streams every event in this Chunk in chunk-relative eventID
-// order. Used by the freeze loop to dump a hot Chunk into a
-// ColdWriter without buffering. Thin wrapper over FetchRange; its
-// yielded Payloads are likewise borrowed (valid only for the step).
+// order — the Reader full-scan. The freeze re-derives cold event
+// artifacts from raw LCMs and never calls this, so it has no
+// production caller yet: it's the intended read seam for the v2
+// cutover (#772), exercised by tests until then. Thin wrapper over
+// FetchRange; its yielded Payloads are likewise borrowed (valid only
+// for the step).
 //
 // The committed event count is read inside the returned closure body, so a
 // concurrent ingest between r.All(ctx) returning the Seq2 and the

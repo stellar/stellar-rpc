@@ -1,7 +1,6 @@
 // Package backfill holds the per-chunk "build" primitives the daemon drives:
 // materialize a chunk's cold artifacts and rebuild the rolling tx-hash index,
-// each through the catalog's one-write protocol. See
-// design-docs/full-history-streaming-workflow.md ("Backfill").
+// each through the catalog's one-write protocol.
 package backfill
 
 import (

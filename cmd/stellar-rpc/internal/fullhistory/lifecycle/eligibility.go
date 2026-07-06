@@ -80,18 +80,20 @@ func pendingArtifacts(c chunk.ID, cat *catalog.Catalog, covers bool) (catalog.Ar
 // batched SweepChunkArtifacts for the chunk family). "Below the floor" is the
 // gate predicate shared with the discard scan and read path, so prune deletes
 // exactly what the reader has stopped admitting.
-// The second return is the total number of artifacts the ops will sweep (one per
-// index-key op plus every ref in the single batched chunk sweep), so the caller
-// meters Prune in artifacts — the same unit the Phase 1 sweep reports — rather
-// than in op closures (the chunk family collapses N artifacts into one op).
-func eligiblePruneOps(cat *catalog.Catalog, gate RetentionFloor) ([]func() error, int, error) {
+// The second return is the per-op artifact weight (1 per index-key op; the ref
+// count for the single batched chunk sweep), so the caller meters Prune in artifacts
+// — the same unit the Phase 1 sweep reports — summing only the ops that actually ran
+// (the chunk family collapses N artifacts into one op).
+func eligiblePruneOps(cat *catalog.Catalog, gate RetentionFloor) ([]func() error, []int, error) {
 	var ops []func() error
-	artifacts := 0
+	// weights[i] is the artifact count op[i] sweeps, so a caller can sum the artifacts
+	// of the ops that actually ran (the chunk family collapses many artifacts into one op).
+	var weights []int
 
 	// Index family: transient debris from any window, plus frozen keys below the floor.
 	idxKeys, err := cat.AllTxHashIndexKeys()
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, err
 	}
 	for _, cov := range idxKeys {
 		switch {
@@ -100,18 +102,18 @@ func eligiblePruneOps(cat *catalog.Catalog, gate RetentionFloor) ([]func() error
 			// because no build is in flight when this scan runs (it follows
 			// executePlan's return, and backfill finishes before the loop starts).
 			ops = append(ops, func() error { return cat.SweepTxHashIndexKey(cov) })
-			artifacts++
+			weights = append(weights, 1)
 		case gate.Excludes(cat.TxHashIndexLayout().LastChunk(cov.Index)):
 			// Frozen index key below the floor; the sweep demotes it first.
 			ops = append(ops, func() error { return cat.SweepTxHashIndexKey(cov) })
-			artifacts++
+			weights = append(weights, 1)
 		}
 	}
 
 	// Chunk family: swept in one batch.
 	refs, err := cat.ChunkArtifactKeys()
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, err
 	}
 	var sweep []catalog.ArtifactRef
 	for _, ref := range refs {
@@ -130,7 +132,7 @@ func eligiblePruneOps(cat *catalog.Catalog, gate RetentionFloor) ([]func() error
 			// redundant.
 			redundant, rerr := txhashRedundantInFinalizedWindow(cat, ref.Chunk)
 			if rerr != nil {
-				return nil, 0, rerr
+				return nil, nil, rerr
 			}
 			if redundant {
 				sweep = append(sweep, ref)
@@ -139,9 +141,9 @@ func eligiblePruneOps(cat *catalog.Catalog, gate RetentionFloor) ([]func() error
 	}
 	if len(sweep) > 0 {
 		ops = append(ops, func() error { return cat.SweepChunkArtifacts(sweep) })
-		artifacts += len(sweep)
+		weights = append(weights, len(sweep))
 	}
-	return ops, artifacts, nil
+	return ops, weights, nil
 }
 
 // txhashRedundantInFinalizedWindow reports whether c's window has a TERMINAL

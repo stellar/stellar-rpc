@@ -80,7 +80,7 @@ func TestDeriveWatermark_RealHotDB_RefinementIsNotStale(t *testing.T) {
 	// Sanity: positional baseline (live chunk 5 ⇒ everything below 5) is chunk 4's
 	// last ledger, strictly below the committed top — so the assertion below can
 	// only pass if the refinement actually read the real DB.
-	baseline := geometry.CompleteThrough(int64(live) - 1)
+	baseline := geometry.ChunkLastLedger(int64(live) - 1)
 	require.Equal(t, chunk.ID(4).LastLedger(), baseline)
 	require.Greater(t, committedTop, baseline, "fixture must put the real frontier above the baseline")
 

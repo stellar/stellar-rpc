@@ -31,7 +31,8 @@ func kindBit(k geometry.Kind) (uint8, bool) {
 
 // NewArtifactSet builds a set from the given kinds. Unknown kinds are ignored
 // (the kind registry in the geometry package is the authority); duplicates are
-// idempotent.
+// idempotent. Test-only seam: production builds sets per-kind through the resolver's
+// catalog diff, so only tests construct one explicitly here.
 func NewArtifactSet(kinds ...geometry.Kind) ArtifactSet {
 	var s ArtifactSet
 	for _, k := range kinds {
@@ -43,7 +44,9 @@ func NewArtifactSet(kinds ...geometry.Kind) ArtifactSet {
 }
 
 // AllArtifacts is the full set (ledgers, events, txhash) — what a from-scratch
-// chunk freeze requests before per-kind idempotency narrows it.
+// chunk freeze requests before per-kind idempotency narrows it. Test-only seam
+// (like NewArtifactSet): production reaches the full set through the resolver's
+// per-kind diff, so only tests call this.
 func AllArtifacts() ArtifactSet { return NewArtifactSet(geometry.AllKinds()...) }
 
 // Has reports whether kind is in the set.

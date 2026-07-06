@@ -37,6 +37,12 @@ func validateConfig(
 	if maxRetries < 0 {
 		return 0, fmt.Errorf("max_retries must be >= 0 (got %d) — 0 means run once, no retry", maxRetries)
 	}
+	// logging.format silently means text unless it is exactly "json", so reject any
+	// other value rather than let a typo drop the operator to text logging. Empty is
+	// the unset sentinel WithDefaults resolves to text, so it is not a typo.
+	if f := cfg.Logging.Format; f != "" && f != DefaultLogFormat && f != LogFormatJSON {
+		return 0, fmt.Errorf("logging.format must be %q or %q; got %q", DefaultLogFormat, LogFormatJSON, f)
+	}
 	// Form-validate here so the numeric case avoids chunk.IDFromLedger's sub-genesis panic below.
 	if err := validateEarliestForm(cfg.Retention.EarliestLedger); err != nil {
 		return 0, err

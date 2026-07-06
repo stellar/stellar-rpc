@@ -19,14 +19,16 @@ import (
 )
 
 // run is the daemon's startup, in two steps: (1) BACKFILL to the tip, then
-// (2) SERVE + INGEST — start captive core (injected), begin serving reads
-// (injected), then run the live ingestion loop (which opens the resume chunk's hot
-// DB itself) and the lifecycle loop as a joined errgroup pair (whichever returns
-// first cancels the other; g.Wait surfaces the first error). Returns nil only on a
-// clean shutdown (ctx canceled mid-run); any other return is a restartable error
-// the supervisor warns on and retries with backoff (a first start with no
-// reachable backend, a backfill/ingest/lifecycle failure, or a "ready" hot DB that
-// won't open — none are auto-healed, all are re-attempted).
+// (2) SERVE + INGEST — open the resume chunk's hot DB (so a broken hot tier fails
+// startup, not behind a crash-looping loop), start captive core (injected), begin
+// serving reads (injected), then run the live ingestion loop (handed the open hot
+// DB) and the lifecycle loop as a joined errgroup pair (whichever returns first
+// cancels the other; g.Wait surfaces the first error). Never returns nil: a clean
+// shutdown (ctx canceled mid-run) surfaces as a ctx-canceled error that supervise
+// classifies via ctx.Err(); any other return is a restartable error the supervisor
+// warns on and retries with backoff (a first start with no reachable backend, a
+// backfill/ingest/lifecycle failure, or a "ready" hot DB that won't open — none are
+// auto-healed, all are re-attempted).
 func run(ctx context.Context, cfg StartConfig) error {
 	if err := cfg.validate(); err != nil {
 		return err
@@ -188,6 +190,11 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 			return 0, err
 		}
 
+		// Time the whole pass, tip sample included: sampling the network tip (with its
+		// retry-backoff sleeps) is part of the pass's work, so the timer starts before
+		// it rather than only around runBackfill. Passes that break early (empty range)
+		// record nothing — the metrics call is below the break.
+		passStart := time.Now()
 		tip, err := networkTip(ctx, cfg.NetworkTip, cfg.TipBackoff, cfg.TipMaxAttempts)
 		if err != nil {
 			if lastCommitted < earliest {
@@ -231,7 +238,6 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 			WithField("last_committed", lastCommitted).
 			Info("backfill pass starting")
 
-		passStart := time.Now()
 		if err := runBackfill(ctx, cfg.Exec, rangeStart, rangeEnd); err != nil {
 			return 0, fmt.Errorf("startup backfill [%s,%s]: %w", rangeStart, rangeEnd, err)
 		}
@@ -264,7 +270,7 @@ func withinOneChunkOfTip(tip, lastCommitted uint32) bool {
 // The genesis sentinel reads as a boundary, never mid-chunk.
 func lastCommittedMidChunk(lastCommitted uint32) bool {
 	c := geometry.ChunkIDOfLedger(lastCommitted)
-	return lastCommitted != geometry.CompleteThrough(c)
+	return lastCommitted != geometry.ChunkLastLedger(c)
 }
 
 // ---------------------------------------------------------------------------

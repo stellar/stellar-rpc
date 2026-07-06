@@ -50,7 +50,7 @@ type eventsCold struct {
 // NewEventsColdIngester opens a per-chunk events.pack cold writer in bucketDir —
 // the caller's geometry.Layout.EventsBucketDir(chunkID), so the write path is
 // Layout's single derivation — and returns a ColdIngester that owns it. The
-// writer uses its zero-value options; driver-level tuning is a follow-up via Config.
+// writer uses its zero-value options; driver-level tuning is a follow-up (issue #836).
 func NewEventsColdIngester(bucketDir string, chunkID chunk.ID, sink MetricSink) (ColdIngester, error) {
 	w, err := eventstore.NewColdWriter(chunkID, bucketDir, eventstore.ColdWriterOptions{})
 	if err != nil {
@@ -172,7 +172,7 @@ func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, er
 	// into the write stage (rather than landing in the per-chunk total but in no
 	// stage), so extract + term_index + write partitions the per-ledger observe
 	// window with no unexplained remainder. uint32(len(payloads)) is 0 for an
-	// empty ledger, matching the old empty-ledger Append(seq, 0).
+	// empty ledger — an explicit Append(seq, 0) that records the empty ledger.
 	wstart := time.Now()
 	//nolint:gosec // the overflow guard above proved startID+len(payloads) fits in uint32
 	oerr := e.offsets.Append(seq, uint32(len(payloads)))

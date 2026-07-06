@@ -32,7 +32,7 @@ import (
 // the durable hot:chunk state:
 //   - "ready": open it must-exist (create-if-missing OFF). A missing or gutted DB
 //     FAILS the open — never auto-heal into a fresh empty DB (which would silently
-//     regress the watermark). The open failure is an ordinary restartable error:
+//     regress the last-committed ledger). The open failure is an ordinary restartable error:
 //     a transient self-heals on the next attempt, genuine loss becomes a
 //     supervised crash-loop with the wrapped context.
 //   - "transient" or absent: wipe any leftover dir and create fresh
@@ -126,7 +126,7 @@ type ingestionLoopConfig struct {
 // live chunk. Those opens are read-only, which takes no RocksDB LOCK, so
 // writer/reader separation is a construction invariant here, not a lock readers
 // rely on.
-func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) (err error) {
+func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 	metrics := observability.MetricsOrNop(cfg.Metrics)
 
 	// Take ownership of the resume hot DB run() opened (before serving reads) as the
@@ -139,9 +139,7 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) (err error) 
 	hotDB := cfg.HotDB
 	defer func() {
 		if hotDB != nil {
-			if cerr := hotDB.Close(); cerr != nil && err == nil {
-				err = fmt.Errorf("close live hot DB: %w", cerr)
-			}
+			_ = hotDB.Close() // Close never fails; flush errors are logged inside
 		}
 	}()
 
@@ -175,11 +173,8 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) (err error) 
 			// Handoff fence: close the write handle BEFORE the next chunk's key is
 			// created (that key is what makes THIS chunk complete to a tick, which may
 			// then freeze and discard its hot DB — no writer may hold it then).
-			if cerr := hotDB.Close(); cerr != nil {
-				hotDB = nil // closed (failed) — do not double-close in defer
-				return fmt.Errorf("close hot DB at boundary chunk %s: %w", closed, cerr)
-			}
-			hotDB = nil // released; reopen below republishes it for the defer
+			_ = hotDB.Close() // Close never fails; flush errors are logged inside
+			hotDB = nil       // released; reopen below republishes it for the defer
 
 			nextDB, oerr := openHotDBForChunk(cfg.Catalog, next, cfg.Logger)
 			if oerr != nil {
@@ -201,7 +196,7 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) (err error) 
 		seq++
 	}
 	// The unbounded production stream ends only on ctx cancellation or a source
-	// error, both surfaced as the cursor's error element above. Falling through here
+	// error, both surfaced as the stream's error element above. Falling through here
 	// means the source stopped WITHOUT an error while the daemon ctx is still live —
 	// unexpected for captive core; surface it as a restartable error rather than a
 	// nil return, which supervise would read as a clean shutdown and silently stop

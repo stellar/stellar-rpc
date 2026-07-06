@@ -165,7 +165,7 @@ func gateFor(t *testing.T, cfg Config, cat *catalog.Catalog, through uint32) Ret
 	t.Helper()
 	earliest, _, err := cat.EarliestLedger()
 	require.NoError(t, err)
-	return NewRetentionFloor(through, cfg.RetentionChunks, earliest)
+	return RetentionFloorAt(EffectiveRetentionFloor(through, cfg.RetentionChunks, earliest))
 }
 
 // assertQuiescent re-runs the tick's three derivations against the SAME through
@@ -174,7 +174,7 @@ func assertQuiescent(t *testing.T, cfg Config, cat *catalog.Catalog, through uin
 	t.Helper()
 	earliest, _, err := cat.EarliestLedger()
 	require.NoError(t, err)
-	gate := NewRetentionFloor(through, cfg.RetentionChunks, earliest)
+	gate := RetentionFloorAt(EffectiveRetentionFloor(through, cfg.RetentionChunks, earliest))
 	start := gate.FirstChunk()
 	if rangeEnd, ok := lastCompleteChunkAtID(through); ok && start <= rangeEnd {
 		// At quiescence resolve finds an empty plan, so RunBackfill (resolve +

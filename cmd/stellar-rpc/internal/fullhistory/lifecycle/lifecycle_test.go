@@ -2,30 +2,78 @@ package lifecycle
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
+
+// tickMetricsRecorder counts the two gauges the lifecycle tick could touch, to pin
+// which one it owns. Embeds NopMetrics for every other signal (Discard/Prune/etc.).
+type tickMetricsRecorder struct {
+	observability.NopMetrics
+
+	mu             sync.Mutex
+	lastCommitted  int
+	retentionFloor int
+}
+
+func (r *tickMetricsRecorder) LastCommitted(uint32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lastCommitted++
+}
+
+func (r *tickMetricsRecorder) RetentionFloor(uint32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.retentionFloor++
+}
+
+// TestRunLifecycleTick_DoesNotReEmitLastCommitted: the lifecycle tick owns the
+// retention-floor gauge but must NOT re-emit last-committed — its chunk-aligned value
+// would regress the ingestion loop's mid-chunk last-committed on every tick.
+func TestRunLifecycleTick_DoesNotReEmitLastCommitted(t *testing.T) {
+	cat, _ := smallTxHashIndexCatalog(t, 1)
+	cfg := lifecycleTestConfig(t, cat, 0)
+	rec := &tickMetricsRecorder{}
+	cfg.Metrics = rec
+
+	// A cheap tick with no full ingest: chunk 0 is already frozen + index-covered with
+	// a leftover "ready" hot DB, so the plan stage is a no-op and the discard scan
+	// retires chunk 0. A live chunk 1 keeps chunk 0 below the partition.
+	freezeKinds(t, cat, 0, geometry.KindLedgers, geometry.KindEvents, geometry.KindTxHash)
+	freezeCoverage(t, cat, cat.TxHashIndexLayout().TxHashIndexID(0), 0, 0)
+	makeReadyHotDirNoData(t, cat, 0)
+	live := openLiveHotDB(t, cat, 1)
+	t.Cleanup(func() { _ = live.Close() })
+
+	require.NoError(t, runLifecycle(context.Background(), cfg, cat, chunk.ID(0)))
+
+	assert.Positive(t, rec.retentionFloor, "the tick owns and emits the retention-floor gauge")
+	assert.Zero(t, rec.lastCommitted, "the tick must NOT re-emit last-committed (ingestion owns it)")
+}
 
 // ---------------------------------------------------------------------------
 // End-to-end tick harness: real catalog + real hotchunk DBs.
 // ---------------------------------------------------------------------------
 
-// TestRunLifecycleTick_BoundaryFreezesFoldsDiscards is the "one boundary, end to
+// TestRunLifecycleTick_BoundaryFreezesRebuildsDiscards is the "one boundary, end to
 // end" walk: chunk 0 just closed (its full hot DB is on disk, ready), chunk 1 is
 // the new live chunk. One tick must:
 //   - freeze chunk 0's cold artifacts FROM its hot DB (via processChunk's hot
 //     branch),
-//   - fold chunk 0 into its window's index (terminal coverage, cpi=1),
+//   - rebuild chunk 0's window index (terminal coverage, cpi=1),
 //   - discard chunk 0's hot DB (cold artifacts now fully serve it),
 //   - leave the live chunk 1 untouched.
 //
 // Then re-running the tick is a no-op (quiescence).
-func TestRunLifecycleTick_BoundaryFreezesFoldsDiscards(t *testing.T) {
+func TestRunLifecycleTick_BoundaryFreezesRebuildsDiscards(t *testing.T) {
 	// full-chunk ingest on an isolated TempDir/catalog; overlaps the other heavy
 	// tests to fit the gate's go-test timeout.
 	t.Parallel()
@@ -173,10 +221,10 @@ func TestRunLifecycleTick_PrunesTransientIndexDebris(t *testing.T) {
 
 	through, err := deriveCompleteThrough(cat)
 	require.NoError(t, err)
-	ops, artifacts, err := eligiblePruneOps(cat, gateFor(t, cfg, cat, through))
+	ops, weights, err := eligiblePruneOps(cat, gateFor(t, cfg, cat, through))
 	require.NoError(t, err)
 	require.Len(t, ops, 1, "the freezing debris is swept")
-	require.Equal(t, 1, artifacts, "one index artifact swept")
+	require.Equal(t, []int{1}, weights, "one index artifact swept")
 	require.NoError(t, ops[0]())
 
 	covs, err := cat.AllTxHashIndexKeys()

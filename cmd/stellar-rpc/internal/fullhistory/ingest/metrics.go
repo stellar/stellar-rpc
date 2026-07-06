@@ -58,18 +58,20 @@ var coldStagePairs = []struct{ dataType, stage string }{
 type MetricSink interface {
 	// HotPhase reports ONE phase of one hot ledger ingest — the single hot-tier
 	// signal family. It carries that phase's wall-clock, its item count (0 for the
-	// extract/commit phases, the per-type write volume for the write phases, on the
-	// success path), and its outcome (err is non-nil only on the phase that failed,
-	// so a decode failure lands on PhaseExtract and a commit failure on PhaseCommit
-	// by construction). The per-ledger total is the sum of the phase durations; the
-	// caller emits phases [0, Failed] on error and all phases on success.
+	// extract/commit/apply phases, the per-type write volume for the write phases, on
+	// the success path), and its outcome (err is non-nil only on the phase that
+	// failed, so a decode failure lands on PhaseExtract and a commit failure on
+	// PhaseCommit by construction; the post-commit PhaseApply runs on success only, so
+	// it never carries an error). The per-ledger total is the sum of the phase
+	// durations; the caller emits phases [0, Failed] on error and all phases on success.
 	HotPhase(phase hotchunk.Phase, d time.Duration, items int, err error)
 	// ColdIngest reports one cold ingester's per-chunk total: the summed Ingest
 	// wall-clock plus its Finalize, items the total items written for the chunk,
 	// err the first error (nil on success).
 	ColdIngest(dataType string, d time.Duration, items int, err error)
-	// ColdChunkTotal reports the per-chunk wall-clock across all cold ingesters'
-	// ingests plus their Finalizes (the ColdService lifetime).
+	// ColdChunkTotal reports the per-chunk aggregate wall-clock: the whole
+	// ColdService lifetime, from construction through the drain of the source stream
+	// and every Ingest and Finalize, to the single emit.
 	ColdChunkTotal(d time.Duration)
 	// IngestStage reports one COLD ingester's per-stage wall-clock inside an
 	// Ingest/Finalize call: stage is one of the stage* constants (extract,
@@ -197,11 +199,8 @@ func (c ingestCollectors) observe(d time.Duration, items int, err error) {
 
 // PrometheusSink is a MetricSink that records into Prometheus collectors. It is
 // constructed via NewPrometheusSink, which registers its collectors under a
-// namespace + the fullhistory_ingest subsystem.
-//
-// NOTE: daemon wiring (constructing this from Daemon.MetricsRegistry() and
-// passing it into the ingest drivers) is a follow-up — there is no full-history
-// ingest daemon startup path yet. This type only provides the registerable sink.
+// namespace + the fullhistory_ingest subsystem. The daemon's buildSinks constructs
+// it on the shared registry and wires it into both the cold and hot ingest paths.
 type PrometheusSink struct {
 	// Hot per-ledger phases — the single hot signal family, one set of children per
 	// hotchunk.Phase, indexed by the phase value into a fixed-size ARRAY (not a map),
@@ -228,15 +227,16 @@ type PrometheusSink struct {
 func NewPrometheusSink(registry *prometheus.Registry, namespace string) *PrometheusSink {
 	hotPhaseDurVec := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,
-		Name:    "hot_phase_duration_seconds",
-		Help:    "per-ledger phase wall-clock (extract/ledgers/txhash/events/commit; phases sum to the per-ledger total)",
+		Name: "hot_phase_duration_seconds",
+		Help: "per-ledger phase wall-clock (extract/ledgers/txhash/events/commit/apply; " +
+			"phases sum to the per-ledger total)",
 		Buckets: hotBuckets,
 	}, []string{"phase"})
 
 	hotPhaseItemsVec := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,
 		Name: "hot_phase_items_total",
-		Help: "items written per hot phase (the write phases carry per-type volume; extract/commit are 0)",
+		Help: "items written per hot phase (the write phases carry per-type volume; extract/commit/apply are 0)",
 	}, []string{"phase"})
 
 	hotPhaseErrsVec := prometheus.NewCounterVec(prometheus.CounterOpts{

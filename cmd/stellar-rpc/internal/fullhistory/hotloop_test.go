@@ -34,6 +34,7 @@ import (
 type fakeCoreStream struct {
 	frames     map[uint32][]byte // seq -> raw LCM bytes
 	blockOnCtx bool              // past the last frame, block until ctx.Done
+	endClean   bool              // past the last frame, return with NO error (a graceful stream end)
 	endErr     error             // past the last frame, yield this (when not blocking)
 	yieldErrAt uint32            // if non-zero, yield errAt at this seq instead of bytes
 	errAt      error
@@ -73,6 +74,9 @@ func (s *fakeCoreStream) RawLedgers(
 				<-ctx.Done()
 				yield(nil, ctx.Err())
 				return
+			}
+			if s.endClean {
+				return // graceful stream end: exhaust with no error and no ctx cancel
 			}
 			if s.endErr != nil {
 				yield(nil, s.endErr)
@@ -158,14 +162,14 @@ func openLiveHotDB(t *testing.T, cat *catalog.Catalog, c chunk.ID) *hotchunk.DB 
 	return db
 }
 
-// seedWatermark commits real zero-tx LCMs for [FirstLedger, seq] into chunk c's
+// seedLastCommitted commits real zero-tx LCMs for [FirstLedger, seq] into chunk c's
 // hot DB through the production IngestLedger path (the events CF requires strict
 // ledger contiguity from the chunk's first ledger), then CLOSES the handle —
 // leaving the chunk "ready" on disk with NO open handle, so the loop can open it
 // itself. Returns the resume point (seq+1) a boundary test drives the loop from.
 // Seeding a near-full chunk costs one synced commit per ledger, so its callers run
 // t.Parallel().
-func seedWatermark(t *testing.T, cat *catalog.Catalog, c chunk.ID, seq uint32) uint32 {
+func seedLastCommitted(t *testing.T, cat *catalog.Catalog, c chunk.ID, seq uint32) uint32 {
 	t.Helper()
 	db := openLiveHotDB(t, cat, c)
 	for s := c.FirstLedger(); s <= seq; s++ {
@@ -268,6 +272,27 @@ func TestRunIngestionLoop_LedgerLandsAcrossAllCFs(t *testing.T) {
 	assert.Equal(t, uint32(0), eventCount(t, reopened.Events()), "zero-tx ledgers carry no events")
 }
 
+// TestRunIngestionLoop_LastCommittedGaugeAdvancesPerLedger: the ingestion loop owns
+// the last-committed gauge and sets it once per COMMITTED ledger (mid-chunk included),
+// not a single chunk-aligned value. Asserted by the exact ordered sequence of gauge
+// values a short prefix produces.
+func TestRunIngestionLoop_LastCommittedGaugeAdvancesPerLedger(t *testing.T) {
+	cat, _ := testCatalog(t)
+	c := chunk.ID(0)
+	first := c.FirstLedger()
+
+	stream := streamForSeqs(t, first, first+2)
+	stream.endErr = errors.New("end")
+	cfg, _ := loopConfig(t, stream, cat, first)
+	rec := newRecordingMetrics()
+	cfg.Metrics = rec
+
+	require.Error(t, runIngestionLoop(context.Background(), cfg))
+
+	assert.Equal(t, []uint32{first, first + 1, first + 2}, rec.lastCommittedSeq(),
+		"the loop sets the last-committed gauge per committed ledger, not chunk-aligned")
+}
+
 // ---------------------------------------------------------------------------
 // runIngestionLoop — boundary notifications carry the completed chunk id.
 // ---------------------------------------------------------------------------
@@ -280,7 +305,7 @@ func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(0)
 	c1 := c + 1
-	resume := seedWatermark(t, cat, c, c.LastLedger()-1) // == c.LastLedger()
+	resume := seedLastCommitted(t, cat, c, c.LastLedger()-1) // == c.LastLedger()
 
 	stream := &fakeCoreStream{frames: map[uint32][]byte{
 		c.LastLedger():   zeroTxLCMBytes(t, c.LastLedger()),   // boundary 0->1
@@ -301,6 +326,74 @@ func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 	}
 
 	assert.Equal(t, []chunk.ID{c}, rec.list(), "the completed chunk id was published at the boundary")
+}
+
+// ---------------------------------------------------------------------------
+// runIngestionLoop — handoff fence: close-before-next-key, publish-after-open.
+// ---------------------------------------------------------------------------
+
+// fencePublisher verifies the loop's HANDOFF FENCE from inside Publish. At each
+// boundary it checks, for the just-closed chunk c: (1) c's write handle was released
+// BEFORE the publish — a read-WRITE OpenExisting on c's path takes the RocksDB LOCK,
+// which would fail if the writer still held it; and (2) the NEXT chunk's hot key is
+// already "ready" (its DB was opened before publish). Outcomes are recorded per
+// boundary for the test to assert after the loop.
+type fencePublisher struct {
+	cat *catalog.Catalog
+
+	mu             sync.Mutex
+	published      []chunk.ID
+	closedReleased []bool // per boundary: the closed chunk's write LOCK was free
+	nextReady      []bool // per boundary: the next chunk's hot key was already ready
+}
+
+func (p *fencePublisher) Publish(c chunk.ID) {
+	// (1) The closed chunk's write handle must be released: OpenExisting is read-write
+	// and takes the LOCK, so it succeeds only if the loop already closed the handle.
+	db, err := hotchunk.OpenExisting(p.cat.Layout().HotChunkPath(c), c, silentLogger())
+	released := err == nil
+	if db != nil {
+		_ = db.Close()
+	}
+	// (2) The next chunk must already be open+ready before this publish fires.
+	st, herr := p.cat.HotState(c + 1)
+	ready := herr == nil && st == geometry.HotReady
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.published = append(p.published, c)
+	p.closedReleased = append(p.closedReleased, released)
+	p.nextReady = append(p.nextReady, ready)
+}
+
+// TestRunIngestionLoop_HandoffFenceClosesBeforeNextKey pins the boundary handoff order:
+// the just-closed chunk's write handle is released before the completed chunk is
+// published, and the next chunk's hot key is already "ready" at publish time.
+func TestRunIngestionLoop_HandoffFenceClosesBeforeNextKey(t *testing.T) {
+	t.Parallel() // seeds a near-full chunk (one synced commit per ledger)
+	cat, _ := testCatalog(t)
+	c := chunk.ID(0)
+	c1 := c + 1
+	resume := seedLastCommitted(t, cat, c, c.LastLedger()-1) // == c.LastLedger()
+
+	stream := &fakeCoreStream{frames: map[uint32][]byte{
+		c.LastLedger():   zeroTxLCMBytes(t, c.LastLedger()),   // boundary 0->1
+		c1.FirstLedger(): zeroTxLCMBytes(t, c1.FirstLedger()), // a ledger in chunk 1
+	}, endErr: errors.New("end")}
+
+	// Build the loop config manually so the boundary publisher is our fence checker.
+	db, err := openHotDBForChunk(cat, chunk.IDFromLedger(resume), silentLogger())
+	require.NoError(t, err)
+	fence := &fencePublisher{cat: cat}
+	cfg := ingestionLoopConfig{
+		Stream: stream, Resume: resume, HotDB: db, Catalog: cat, Boundary: fence, Logger: silentLogger(),
+	}
+
+	require.Error(t, runIngestionLoop(context.Background(), cfg), "stream ran dry")
+
+	require.Equal(t, []chunk.ID{c}, fence.published, "the completed chunk was published at the boundary")
+	require.Equal(t, []bool{true}, fence.closedReleased, "the closed chunk's write LOCK was released before publish")
+	require.Equal(t, []bool{true}, fence.nextReady, "the next chunk's hot key was ready before publish")
 }
 
 // ---------------------------------------------------------------------------
@@ -340,6 +433,25 @@ func TestRunIngestionLoop_CtxCancelReturnsCtxErr(t *testing.T) {
 	}
 }
 
+// TestRunIngestionLoop_CleanStreamEndIsError: an ingestion stream that EXHAUSTS with no
+// error and no ctx cancellation (a graceful end the daemon never expects from captive
+// core) surfaces as a non-nil restartable error — never a nil return, which g.Wait would
+// read as a clean shutdown and silently stop ingesting.
+func TestRunIngestionLoop_CleanStreamEndIsError(t *testing.T) {
+	cat, _ := testCatalog(t)
+	c := chunk.ID(0)
+	first := c.FirstLedger()
+
+	stream := streamForSeqs(t, first, first+2)
+	stream.endClean = true // exhaust cleanly past the prefix (no error, no ctx cancel)
+	cfg, _ := loopConfig(t, stream, cat, first)
+
+	err := runIngestionLoop(context.Background(), cfg)
+	require.Error(t, err, "a graceful stream end must surface as an error, not nil")
+	require.Contains(t, err.Error(), "ended unexpectedly")
+	require.NotErrorIs(t, err, context.Canceled, "a clean stream end is restartable, not a clean shutdown")
+}
+
 // TestRunIngestionLoop_StreamErrorReturnsError: a stream error (not a shutdown)
 // propagates as a restartable failure.
 func TestRunIngestionLoop_StreamErrorReturnsError(t *testing.T) {
@@ -359,15 +471,15 @@ func TestRunIngestionLoop_StreamErrorReturnsError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// runIngestionLoop — restart resumes idempotently from the derived watermark.
+// runIngestionLoop — restart resumes idempotently from the derived last-committed.
 // ---------------------------------------------------------------------------
 
-// TestRunIngestionLoop_RestartResumesFromWatermark: after a first run commits a
+// TestRunIngestionLoop_RestartResumesFromLastCommitted: after a first run commits a
 // prefix and exits, a second run over a FRESH open of the SAME hot dir resumes at
-// watermark+1 (asserted via the FIRST seq the stream is asked for) — the stream
-// range starts at the derived resume, and the final watermark is exactly the last
+// last-committed+1 (asserted via the FIRST seq the stream is asked for) — the stream
+// range starts at the derived resume, and the final last-committed is exactly the last
 // delivered seq.
-func TestRunIngestionLoop_RestartResumesFromWatermark(t *testing.T) {
+func TestRunIngestionLoop_RestartResumesFromLastCommitted(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(0)
 	first := c.FirstLedger()
@@ -381,21 +493,21 @@ func TestRunIngestionLoop_RestartResumesFromWatermark(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, first, stream1.firstSeen.Load(), "first run resumed at the chunk's first ledger")
 
-	// The durable watermark now implies resume first+3 — exactly what startup would
-	// derive on restart. Close the handle before the loop reopens the dir.
+	// The durable last-committed ledger now implies resume first+3 — exactly what
+	// startup would derive on restart. Close the handle before the loop reopens the dir.
 	db2, err := openHotDBForChunk(cat, c, silentLogger())
 	require.NoError(t, err)
 	resume := impliedResume(t, db2)
-	assert.Equal(t, first+3, resume, "restart resumes one past the durable watermark")
+	assert.Equal(t, first+3, resume, "restart resumes one past the durable last-committed ledger")
 	require.NoError(t, db2.Close())
 
-	// Second run resumes at the derived watermark and commits two more ledgers.
+	// Second run resumes at the derived last-committed ledger and commits two more ledgers.
 	stream2 := streamForSeqs(t, first+3, first+5)
 	stream2.endErr = errors.New("end")
 	cfg2, _ := loopConfig(t, stream2, cat, resume)
 	err = runIngestionLoop(context.Background(), cfg2)
 	require.Error(t, err)
-	assert.Equal(t, first+3, stream2.firstSeen.Load(), "second run resumed at watermark+1")
+	assert.Equal(t, first+3, stream2.firstSeen.Load(), "second run resumed at last-committed+1")
 
 	reopened, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
 	require.NoError(t, err)

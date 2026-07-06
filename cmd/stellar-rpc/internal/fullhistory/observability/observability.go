@@ -14,7 +14,7 @@ type Metrics interface {
 	// call sites that know the TRUE value: startup/backfill (as history advances)
 	// and the ingestion loop (one atomic gauge set per committed ledger). The tick
 	// must NOT set it — its chunk-aligned lastChunk.LastLedger() would regress the
-	// gauge below a mid-chunk refined watermark on every restart.
+	// gauge below a mid-chunk refined last-committed ledger on every restart.
 	LastCommitted(lastCommitted uint32)
 
 	// RetentionFloor sets the effective retention floor gauge (lowest in-window
@@ -35,7 +35,8 @@ type Metrics interface {
 	BackfillPass(d time.Duration)
 	// Freeze records one freeze (plan-and-execute) stage's wall-clock.
 	Freeze(d time.Duration)
-	// Rebuild records one index rebuild's wall-clock.
+	// Rebuild records one index rebuild's wall-clock, spanning all retry attempts
+	// (up to MaxRetries+1) and their inter-attempt backoff sleeps in one sample.
 	Rebuild(d time.Duration)
 	// Discard counts the hot DBs a tick retired and records the stage wall-clock.
 	Discard(count int, d time.Duration)
@@ -118,7 +119,8 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 		liveHotChunks:   gauge("live_hot_chunks", "count of hot-chunk DBs currently on disk"),
 		chunkBoundaries: counter("chunk_boundaries_total", "ingestion chunk-boundary handoffs"),
 		discarded:       counter("discarded_hot_chunks_total", "hot DBs retired by the discard stage"),
-		pruned:          counter("pruned_artifacts_total", "artifacts swept by the prune stage (below the retention floor)"),
+		pruned: counter("pruned_artifacts_total", "artifacts swept by the prune stage (below-floor artifacts, "+
+			"transient index debris, in-retention demotions, and redundant txhash keys)"),
 		phaseDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace, Subsystem: subsystem,
 			Name: "phase_duration_seconds", Help: "wall-clock of a daemon phase action",

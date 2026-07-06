@@ -14,9 +14,9 @@ import (
 // cpi chunks: index i owns chunks [i*cpi, i*cpi + cpi - 1].
 
 // ChunksPerTxhashIndex is the fixed number of chunks each tx-hash index covers
-// (1000 = 10M ledgers per index). It was once a settable, metastore-pinned
-// config field; it is now a compile-time constant. Changing it would invalidate
-// every existing index boundary, so it is set once, here, for all deployments.
+// (1000 = 10M ledgers per index), a compile-time constant. Changing it would
+// invalidate every existing index boundary, so it is set once, here, for all
+// deployments.
 // It aliases txhash.DefaultChunksPerIndex so the streaming index layout and the
 // cold index builder always agree on the index size.
 const ChunksPerTxhashIndex uint32 = txhash.DefaultChunksPerIndex

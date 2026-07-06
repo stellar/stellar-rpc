@@ -331,7 +331,7 @@ func TestBackfill_RestartTipUnreachableDegrades(t *testing.T) {
 // lastCommitted)==lastCommitted, so rangeEnd==lastCompleteChunkAt(lastCommitted)==5, not
 // ==2 (which would regress below where pruning advanced). Mid-chunk exclusion
 // does NOT fire — the lastCommitted is on a boundary.
-func TestBackfill_LaggingBulkTipFoldsLastCommittedChunk(t *testing.T) {
+func TestBackfill_LaggingBulkTipCoversLastCommittedChunk(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 	lastCommitted := chunk.ID(5).LastLedger()   // chunk-aligned, complete lastCommitted chunk 5
@@ -393,6 +393,34 @@ func TestRun_FirstStartServeIngestCleanShutdown(t *testing.T) {
 	state, err := cat.HotState(chunk.IDFromLedger(chunk.FirstLedgerSeq))
 	require.NoError(t, err)
 	assert.Equal(t, geometry.HotReady, state)
+}
+
+// TestRun_IngestionCleanEndSurfacesErrorNotHang: if the ingestion stream ends
+// gracefully (exhausts with no error and no shutdown), run() must surface a non-nil
+// error and RETURN — g.Wait must never hang on a silent nil. The loop converts the
+// graceful end to an error, and run()'s errgroup guard additionally degrades a nil
+// ingestion return to an error, so a graceful end can never read as a clean shutdown.
+func TestRun_IngestionCleanEndSurfacesErrorNotHang(t *testing.T) {
+	cat, _ := testCatalog(t)
+	pinGenesis(t, cat)
+
+	first := uint32(chunk.FirstLedgerSeq) // fresh start resumes at genesis == chunk 0's first ledger
+	stream := streamForSeqs(t, first, first+2)
+	stream.endClean = true // exhaust cleanly (no error, no ctx cancel)
+	core := &fakeCore{stream: stream}
+	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}} // young: no backfill
+	cfg := startTestConfig(t, cat, tip, core, nil)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- run(context.Background(), cfg) }()
+
+	select {
+	case err := <-errCh:
+		require.Error(t, err, "a graceful stream end surfaces as an error, not a nil clean shutdown")
+		require.NotErrorIs(t, err, context.Canceled, "a graceful end is restartable, not a clean shutdown")
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not return on a graceful stream end — g.Wait hung on a silent nil")
+	}
 }
 
 // A ServeReads error is surfaced wrapped as a restartable failure (NOT clean).

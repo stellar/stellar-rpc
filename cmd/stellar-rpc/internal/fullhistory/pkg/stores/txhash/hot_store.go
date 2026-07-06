@@ -102,13 +102,13 @@ func Tuning() rocksdb.Tuning {
 // AddEntriesToBatch queues each (txhash → ledgerSeq) Put into b on the txhash
 // CF — the building block hotchunk uses to fold the tx-hash writes into the one
 // shared per-ledger WriteBatch (decision (a)). Does not commit (caller owns the
-// batch). The caller runs inside Store.Batch, whose lifecycle RLock + checkOpen
-// is the authoritative closed-store guard, so this adds none.
-func (h *HotStore) AddEntriesToBatch(b *rocksdb.BatchWriter, entries []Entry) error {
+// batch). It cannot fail: BatchWriter.Put latches any CF error, surfaced by the
+// enclosing Store.Batch, whose lifecycle RLock + checkOpen is the authoritative
+// closed-store guard.
+func (h *HotStore) AddEntriesToBatch(b *rocksdb.BatchWriter, entries []Entry) {
 	for _, e := range entries {
 		b.Put(txhashCF, e.Hash[:], rocksdb.EncodeUint32(e.LedgerSeq))
 	}
-	return nil
 }
 
 // Get returns the ledger sequence the hash was committed in, or

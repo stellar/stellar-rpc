@@ -206,6 +206,7 @@ func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 // production write shape, reduced to a test seeding call.
 func addEntries(h *HotStore, entries []Entry) error {
 	return h.store.Batch(func(b *rocksdb.BatchWriter) error {
-		return h.AddEntriesToBatch(b, entries)
+		h.AddEntriesToBatch(b, entries)
+		return nil
 	})
 }

@@ -120,10 +120,6 @@ func (h *HotStore) LastSeq() (uint32, bool, error) {
 // sequences between yielded entries.
 func (h *HotStore) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 	return func(yield func(Entry, error) bool) {
-		if h.store.IsClosed() {
-			yield(Entry{}, stores.ErrStoreClosed)
-			return
-		}
 		if start > end {
 			return
 		}

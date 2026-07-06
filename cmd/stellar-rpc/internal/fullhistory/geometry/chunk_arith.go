@@ -11,9 +11,10 @@ import "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/
 // (FirstLedgerSeq-1) — the ledger-domain image of the -1 chunk sentinel.
 const PreGenesisLedger uint32 = chunk.FirstLedgerSeq - 1
 
-// CompleteThrough maps a signed chunk index to its "complete through" last ledger:
-// c < 0 ⇒ PreGenesisLedger; c >= 0 ⇒ chunk.ID(c).LastLedger().
-func CompleteThrough(c int64) uint32 {
+// ChunkLastLedger maps a signed chunk index to its last ledger: c < 0 ⇒
+// PreGenesisLedger (the sub-genesis sentinel); c >= 0 ⇒ chunk.ID(c).LastLedger().
+// The signed-domain companion of ChunkFirstLedger below.
+func ChunkLastLedger(c int64) uint32 {
 	if c < 0 {
 		return PreGenesisLedger
 	}
