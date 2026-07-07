@@ -2,7 +2,7 @@ package lifecycle
 
 import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
 // RetentionFloor is the lowest chunk still within retention; anything below is

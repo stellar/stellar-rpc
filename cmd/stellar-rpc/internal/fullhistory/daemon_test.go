@@ -19,9 +19,10 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/metastore"
 )
 
 // openMetaAt opens a metastore.Store at path for read-back assertions.
@@ -273,9 +274,9 @@ func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
 	txhashIndexOverride := filepath.Join(overrideRoot, "txidx")
 	catalogOverride := filepath.Join(overrideRoot, "meta")
 
-	cfg := Config{
-		Service: ServiceConfig{DefaultDataDir: dataDir},
-		Storage: StorageConfig{
+	cfg := config.Config{
+		Service: config.ServiceConfig{DefaultDataDir: dataDir},
+		Storage: config.StorageConfig{
 			Catalog:     catalogOverride,
 			Ledgers:     ledgersOverride,
 			Events:      eventsOverride,
@@ -286,7 +287,7 @@ func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
 	}.WithDefaults()
 
 	paths := cfg.ResolvePaths()
-	layout := NewLayoutFromPaths(paths) // exactly the daemon's binding
+	layout := config.NewLayoutFromPaths(paths) // exactly the daemon's binding
 
 	// (1) Every path the Layout composes lives under the override, NOT DataDir.
 	const cid = chunk.ID(5350)
@@ -324,8 +325,8 @@ func TestRunDaemon_LockContentionFailsFast(t *testing.T) {
 	configPath, dataDir := writeTempConfig(t, "")
 
 	// Hold the hot-root lock as a "first daemon" for the test's duration.
-	paths := Paths{HotStorage: filepath.Join(dataDir, "hot")}
-	locks, err := LockRoots(paths.HotStorage)
+	paths := config.Paths{HotStorage: filepath.Join(dataDir, "hot")}
+	locks, err := config.LockRoots(paths.HotStorage)
 	require.NoError(t, err)
 	defer locks.Release()
 
@@ -335,7 +336,7 @@ func TestRunDaemon_LockContentionFailsFast(t *testing.T) {
 		ServeReads: func(context.Context) error { served.Add(1); return nil },
 		Logger:     silentLogger(),
 	})
-	require.ErrorIs(t, err, ErrRootLocked)
+	require.ErrorIs(t, err, config.ErrRootLocked)
 	assert.Zero(t, served.Load(), "run never reached when a root is locked")
 }
 
@@ -476,7 +477,7 @@ func TestNotConfiguredTip_ErrorsClearly(t *testing.T) {
 // With no [backfill.datastore], buildBackfillBackend returns no backend (frontfill),
 // and resolveNetworkTip then yields the not-configured placeholder.
 func TestBuildBackfillBackend_FrontfillNoBackend(t *testing.T) {
-	cfg := Config{}.WithDefaults()
+	cfg := config.Config{}.WithDefaults()
 	backend, cleanup, err := buildBackfillBackend(context.Background(), cfg, silentLogger())
 	require.NoError(t, err)
 	require.Nil(t, backend, "no datastore ⇒ frontfill-only, no backend")
@@ -489,10 +490,10 @@ func TestBuildBackfillBackend_FrontfillNoBackend(t *testing.T) {
 }
 
 func TestNewLogger(t *testing.T) {
-	l, err := newLogger(LoggingConfig{Level: "warn", Format: "json"})
+	l, err := newLogger(config.LoggingConfig{Level: "warn", Format: "json"})
 	require.NoError(t, err)
 	require.NotNil(t, l)
 
-	_, err = newLogger(LoggingConfig{Level: "bogus", Format: "text"})
+	_, err = newLogger(config.LoggingConfig{Level: "bogus", Format: "text"})
 	require.Error(t, err)
 }

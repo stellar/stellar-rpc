@@ -5,9 +5,10 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/durable"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/metastore"
 )
 
 // Key-driven sweeps — the ONLY two deletion bodies in the system, one per key
@@ -45,13 +46,13 @@ func (c *Catalog) SweepChunkArtifacts(refs []ArtifactRef) error {
 	var paths []string
 	for _, ref := range refs {
 		for _, p := range c.layout.ArtifactPaths(ref.Chunk, ref.Kind) {
-			if err := geometry.DeleteFileIfExists(p); err != nil {
+			if err := durable.DeleteFileIfExists(p); err != nil {
 				return err
 			}
 			paths = append(paths, p)
 		}
 	}
-	if err := geometry.FsyncParentDirs(paths); err != nil { // unlinks durable BEFORE keys
+	if err := durable.FsyncParentDirs(paths); err != nil { // unlinks durable BEFORE keys
 		return err
 	}
 
@@ -77,17 +78,17 @@ func (c *Catalog) SweepTxHashIndexKey(cov geometry.TxHashIndexCoverage) error {
 		}
 	}
 	path := c.layout.TxHashIndexFilePath(cov)
-	if err := geometry.DeleteFileIfExists(path); err != nil {
+	if err := durable.DeleteFileIfExists(path); err != nil {
 		return err
 	}
 	dir := c.layout.TxHashIndexDir(cov.Index)
-	if err := geometry.FsyncDir(dir); err != nil { // unlink durable BEFORE key delete
+	if err := durable.FsyncDir(dir); err != nil { // unlink durable BEFORE key delete
 		return err
 	}
 	if err := c.store.Delete(cov.Key); err != nil {
 		return err
 	}
-	geometry.RmdirIfEmpty(dir) // best-effort; an empty dir is not an artifact
+	durable.RmdirIfEmpty(dir) // best-effort; an empty dir is not an artifact
 	return nil
 }
 
@@ -114,7 +115,7 @@ func (c *Catalog) DiscardHotChunk(chunkID chunk.ID) error {
 	}
 	// rmdir durable BEFORE the key delete: the key outlives the dir, so a crash
 	// re-runs the discard rather than leaving a key-less dir.
-	if err := geometry.FsyncDir(filepath.Dir(dir)); err != nil {
+	if err := durable.FsyncDir(filepath.Dir(dir)); err != nil {
 		return fmt.Errorf("fsync hot parent dir %s: %w", filepath.Dir(dir), err)
 	}
 	if err := c.DeleteHotKey(chunkID); err != nil {

@@ -4,8 +4,8 @@ import (
 	"errors"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/metastore"
 )
 
 // The one write protocol — mark-then-write. Every durable artifact (per-chunk
@@ -14,7 +14,7 @@ import (
 //  1. Put the key "freezing" via metastore BEFORE any I/O.
 //  2. The caller writes the file.
 //  3. The caller fsyncs the FILE + its PARENT dirent (+ the GRANDPARENT dirent
-//     when the parent dir was just created) — geometry.BarrierNewFile.
+//     when the parent dir was just created) — durable.BarrierNewFile.
 //  4. Flip to "frozen": a single Put for per-chunk artifacts, or one atomic
 //     Batch for the index (see CommitTxHashIndex).
 //
@@ -37,7 +37,7 @@ import (
 // already-"frozen" kind (per-kind idempotency) is the caller's job.
 func (c *Catalog) MarkChunkFreezing(chunkID chunk.ID, kinds ...geometry.Kind) error {
 	if len(kinds) == 0 {
-		return errors.New("streaming: MarkChunkFreezing requires at least one kind")
+		return errors.New("fullhistory: MarkChunkFreezing requires at least one kind")
 	}
 	return c.store.Batch(func(w *metastore.BatchWriter) error {
 		for _, kind := range kinds {
@@ -48,11 +48,11 @@ func (c *Catalog) MarkChunkFreezing(chunkID chunk.ID, kinds ...geometry.Kind) er
 }
 
 // FlipChunkFrozen is step 4 for per-chunk artifacts: flips every requested kind
-// to "frozen". The caller MUST have completed geometry.BarrierNewFile for every
+// to "frozen". The caller MUST have completed durable.BarrierNewFile for every
 // file first.
 func (c *Catalog) FlipChunkFrozen(chunkID chunk.ID, kinds ...geometry.Kind) error {
 	if len(kinds) == 0 {
-		return errors.New("streaming: FlipChunkFrozen requires at least one kind")
+		return errors.New("fullhistory: FlipChunkFrozen requires at least one kind")
 	}
 	return c.store.Batch(func(w *metastore.BatchWriter) error {
 		for _, kind := range kinds {

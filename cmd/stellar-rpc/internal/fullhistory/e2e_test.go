@@ -50,13 +50,14 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/txhash"
 )
 
 // e2eCore is the CoreOpener handing back a fresh e2eStream per daemon run (a
@@ -502,12 +503,12 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 // this MUST be closed via the returned close func before the next daemon run).
 func e2eReadCatalog(t *testing.T, dataDir string) (*catalog.Catalog, func()) {
 	t.Helper()
-	paths := Config{Service: ServiceConfig{DefaultDataDir: dataDir}}.WithDefaults().ResolvePaths()
+	paths := config.Config{Service: config.ServiceConfig{DefaultDataDir: dataDir}}.WithDefaults().ResolvePaths()
 	store, err := openMetaAt(t, paths.Catalog)
 	require.NoError(t, err)
 	windows, err := geometry.NewTxHashIndexLayout(1) // matches chunksPerTxhashIndex = 1
 	require.NoError(t, err)
-	return catalog.NewCatalog(store, NewLayoutFromPaths(paths), windows), func() { _ = store.Close() }
+	return catalog.NewCatalog(store, config.NewLayoutFromPaths(paths), windows), func() { _ = store.Close() }
 }
 
 // mustDeriveLastCommitted derives the durable last-committed ledger with the

@@ -11,7 +11,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
 // The lifecycle tick runs three stages in order: (1) plan-and-execute (the same
@@ -124,7 +124,7 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	metrics.RetentionFloor(floorLedger)
 	logger.WithField("last_chunk", lastChunk.String()).
 		WithField("floor_chunk", gate.FirstChunk().String()).
-		Debug("streaming: lifecycle tick — derived snapshot")
+		Debug("fullhistory: lifecycle tick — derived snapshot")
 
 	// Stage 1 — plan-and-execute (freeze + index rebuild) over [floor, lastChunk], via
 	// the same entry point backfill uses (resolve → executePlan → Freeze metric,
@@ -155,7 +155,7 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 		return fmt.Errorf("discard op: %w", err)
 	}
 	if discarded > 0 {
-		logger.WithField("discarded", discarded).Info("streaming: lifecycle discard stage complete")
+		logger.WithField("discarded", discarded).Info("fullhistory: lifecycle discard stage complete")
 	}
 
 	// Live hot-chunk gauge after the discard stage.
@@ -184,7 +184,7 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 		return fmt.Errorf("prune op: %w", err)
 	}
 	if prunedArtifacts > 0 {
-		logger.WithField("pruned", prunedArtifacts).Info("streaming: lifecycle prune stage complete")
+		logger.WithField("pruned", prunedArtifacts).Info("fullhistory: lifecycle prune stage complete")
 	}
 	return nil
 }

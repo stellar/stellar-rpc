@@ -13,11 +13,12 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/durable"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/ledger"
 )
 
 // ErrBackendCoverageTimeout is returned when the bulk backend's tip never reaches the chunk in time.
@@ -118,7 +119,7 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 	// created is made durable too.
 	for _, kind := range kinds {
 		for _, path := range layout.ArtifactPaths(chunkID, kind) {
-			if berr := geometry.BarrierNewFile(path); berr != nil {
+			if berr := durable.BarrierNewFile(path); berr != nil {
 				return fmt.Errorf("fsync barrier %s: %w", path, berr)
 			}
 		}

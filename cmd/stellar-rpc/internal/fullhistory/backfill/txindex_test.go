@@ -12,10 +12,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/durable"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/txhash"
 )
 
 // testBuildConfig wires a BuildConfig over the test catalog with a silent
@@ -63,7 +64,7 @@ func freezeChunkBin(t *testing.T, cat *catalog.Catalog, chunkID chunk.ID, entrie
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 	require.NoError(t, cat.MarkChunkFreezing(chunkID, geometry.KindTxHash))
 	require.NoError(t, txhash.WriteColdBin(path, cold))
-	require.NoError(t, geometry.BarrierNewFile(path))
+	require.NoError(t, durable.BarrierNewFile(path))
 	require.NoError(t, cat.FlipChunkFrozen(chunkID, geometry.KindTxHash))
 }
 

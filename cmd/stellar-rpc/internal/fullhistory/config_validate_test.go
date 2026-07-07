@@ -11,16 +11,17 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/config"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
 // validCfg builds a valid Config; callers mutate one field to drive a rejection.
-func validCfg(workers, maxRetries int, earliest string) Config {
-	return Config{
-		Service:   ServiceConfig{DefaultDataDir: "/data"},
-		Retention: RetentionConfig{EarliestLedger: earliest},
-		Backfill:  BackfillConfig{Workers: &workers, MaxRetries: &maxRetries},
-		Ingestion: IngestionConfig{CaptiveCoreConfig: "/cc"},
+func validCfg(workers, maxRetries int, earliest string) config.Config {
+	return config.Config{
+		Service:   config.ServiceConfig{DefaultDataDir: "/data"},
+		Retention: config.RetentionConfig{EarliestLedger: earliest},
+		Backfill:  config.BackfillConfig{Workers: &workers, MaxRetries: &maxRetries},
+		Ingestion: config.IngestionConfig{CaptiveCoreConfig: "/cc"},
 	}
 }
 
@@ -34,7 +35,7 @@ func downTip() *fakeTipBackend {
 	return &fakeTipBackend{err: errors.New("backend unreachable"), errFirst: 99}
 }
 
-func callValidate(t *testing.T, cfg Config, cat *catalog.Catalog, tip NetworkTipBackend) (uint32, error) {
+func callValidate(t *testing.T, cfg config.Config, cat *catalog.Catalog, tip NetworkTipBackend) (uint32, error) {
 	t.Helper()
 	return validateConfig(context.Background(), cfg, cat, tip, time.Millisecond, 3)
 }
@@ -101,7 +102,7 @@ func TestValidateConfig_AcceptsMinWorkersAndZeroRetries(t *testing.T) {
 func TestValidateConfig_RejectsMalformed(t *testing.T) {
 	tests := []struct {
 		name string
-		cfg  Config
+		cfg  config.Config
 		want string
 	}{
 		{"zero workers", validCfg(0, 3, "genesis"), "workers"},

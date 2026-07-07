@@ -12,11 +12,12 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/durable"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
 )
 
 // The hot-DB ingestion loop (decision (a)). One goroutine consumes a single
@@ -72,7 +73,7 @@ func openHotDBForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlo
 	// dir missing" won't-open error above for a DB that was actually fine. FsyncNewDirs
 	// syncs the leaf then its parent dirent (the one audited barrier for a
 	// freshly created dir).
-	if syncErr := geometry.FsyncNewDirs(filepath.Dir(dir), dir); syncErr != nil {
+	if syncErr := durable.FsyncNewDirs(filepath.Dir(dir), dir); syncErr != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("fsync hot dir %s: %w", dir, syncErr)
 	}
@@ -191,7 +192,7 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 			cfg.Logger.WithField("closed_chunk", closed.String()).
 				WithField("next_chunk", next.String()).
 				WithField("last_ledger", seq).
-				Info("streaming: ingestion chunk boundary — handed off to lifecycle")
+				Info("fullhistory: ingestion chunk boundary — handed off to lifecycle")
 		}
 		seq++
 	}

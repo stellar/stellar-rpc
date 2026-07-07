@@ -7,12 +7,12 @@ import (
 	"strconv"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/metastore"
 )
 
-// Catalog is the streaming daemon's view of durable state. It WRAPS
+// Catalog is the full-history daemon's view of durable state. It WRAPS
 // metastore.Store — the merged RocksDB KV store with sync Put/Delete, atomic
 // Batch, and PrefixScan — never reaching around it to RocksDB directly. On top
 // of the geometry package (the key schema + its bijection to disk paths, the
@@ -86,7 +86,7 @@ func (c *Catalog) ChunkArtifactKeys() ([]ArtifactRef, error) {
 		}
 		id, kind, ok := geometry.ParseChunkKey(e.Key)
 		if !ok {
-			return nil, fmt.Errorf("streaming: malformed chunk key %q", e.Key)
+			return nil, fmt.Errorf("fullhistory: malformed chunk key %q", e.Key)
 		}
 		refs = append(refs, ArtifactRef{Chunk: id, Kind: kind, State: geometry.State(e.Value)})
 	}
@@ -136,7 +136,7 @@ func (c *Catalog) FrozenTxHashIndex(w geometry.TxHashIndexID) (geometry.TxHashIn
 		}
 		if found {
 			return geometry.TxHashIndexCoverage{}, false, fmt.Errorf(
-				"streaming: index %s has two frozen coverages (%s and %s) — "+
+				"fullhistory: index %s has two frozen coverages (%s and %s) — "+
 					"uniqueness invariant violated",
 				w, frozen.Key, candidate.Key,
 			)
@@ -254,7 +254,7 @@ func (c *Catalog) txhashIndexKeysByPrefix(prefix string) ([]geometry.TxHashIndex
 		}
 		cov, ok := geometry.ParseTxHashIndexKey(e.Key)
 		if !ok {
-			return nil, fmt.Errorf("streaming: malformed index key %q", e.Key)
+			return nil, fmt.Errorf("fullhistory: malformed index key %q", e.Key)
 		}
 		cov.State = geometry.State(e.Value)
 		covs = append(covs, cov)
@@ -269,7 +269,7 @@ func (c *Catalog) uint32Pin(key string) (uint32, bool, error) {
 	}
 	n, parseErr := strconv.ParseUint(v, 10, 32)
 	if parseErr != nil {
-		return 0, false, fmt.Errorf("streaming: config pin %q is not a uint32: %q", key, v)
+		return 0, false, fmt.Errorf("fullhistory: config pin %q is not a uint32: %q", key, v)
 	}
 	return uint32(n), true, nil
 }

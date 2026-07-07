@@ -19,10 +19,11 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/metastore"
 )
 
 // RunDaemon is the full-history daemon's process entrypoint: load config, lock
@@ -71,7 +72,7 @@ const defaultRestartBackoff = 5 * time.Second
 // runDaemonWith is RunDaemon with explicit options — the seam tests drive.
 func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) error {
 	// --- Load + form-validate the config. ---
-	cfg, err := LoadConfig(configPath)
+	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		return err
 	}
@@ -90,7 +91,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	paths := cfg.ResolvePaths()
 
 	// --- Lock every configured storage root for the daemon's whole life. ---
-	locks, err := LockRoots(paths.RootsToLock()...)
+	locks, err := config.LockRoots(paths.RootsToLock()...)
 	if err != nil {
 		return err
 	}
@@ -111,7 +112,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	if err != nil {
 		return err
 	}
-	cat := catalog.NewCatalog(store, NewLayoutFromPaths(paths), txLayout)
+	cat := catalog.NewCatalog(store, config.NewLayoutFromPaths(paths), txLayout)
 
 	// --- Resolve the backfill backend: injected (tests) or built from
 	// [backfill.datastore] (production; nil ⇒ frontfill-only). Its Tip drives both
@@ -176,7 +177,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 // lifecycle.Config from Exec + RetentionChunks, so backfill and the lifecycle
 // goroutine share ONE catalog, worker pool, and retention floor by construction.
 func startConfig(
-	cfg Config, cat *catalog.Catalog, logger *supportlog.Entry,
+	cfg config.Config, cat *catalog.Catalog, logger *supportlog.Entry,
 	backend backfill.Backend, networkTip NetworkTipBackend, core CoreOpener, serveReads func(context.Context) error,
 	metrics observability.Metrics, sink ingest.MetricSink, tipBackoff time.Duration, tipMaxAttempts int,
 ) StartConfig {
@@ -263,7 +264,7 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // returns (nil, nil, nil) — a frontfill-only daemon (the network tip is then the
 // not-configured placeholder and backfillSource errors only on a backend-only chunk).
 func buildBackfillBackend(
-	ctx context.Context, cfg Config, logger *supportlog.Entry,
+	ctx context.Context, cfg config.Config, logger *supportlog.Entry,
 ) (backfill.Backend, func(), error) {
 	if cfg.Backfill.DataStore.Type == "" {
 		return nil, nil, nil // frontfill-only
@@ -298,7 +299,7 @@ type captiveCoreOpener struct {
 // get-commands) come from [ingestion].history_archive_urls. The toml params
 // mirror the RPC daemon (strict, unified events, soroban diagnostic/meta
 // enforcement) so the ingested meta is what the events + txhash stores need.
-func newCaptiveCoreOpener(ing IngestionConfig, dataDir string, logger *supportlog.Entry) (*captiveCoreOpener, error) {
+func newCaptiveCoreOpener(ing config.IngestionConfig, dataDir string, logger *supportlog.Entry) (*captiveCoreOpener, error) {
 	if ing.CaptiveCoreConfig == "" {
 		return nil, errors.New("[ingestion].captive_core_config is required for live ingestion")
 	}
@@ -403,14 +404,14 @@ type backendTip struct{ backend backfill.Backend }
 func (t backendTip) NetworkTip(ctx context.Context) (uint32, error) { return t.backend.Tip(ctx) }
 
 // newLogger builds a daemon logger from the [logging] config.
-func newLogger(cfg LoggingConfig) (*supportlog.Entry, error) {
+func newLogger(cfg config.LoggingConfig) (*supportlog.Entry, error) {
 	level, err := logrus.ParseLevel(cfg.Level)
 	if err != nil {
 		return nil, fmt.Errorf("invalid logging.level %q: %w", cfg.Level, err)
 	}
 	logger := supportlog.New()
 	logger.SetLevel(level)
-	if cfg.Format == LogFormatJSON {
+	if cfg.Format == config.LogFormatJSON {
 		logger.UseJSONFormatter()
 	}
 	return logger, nil

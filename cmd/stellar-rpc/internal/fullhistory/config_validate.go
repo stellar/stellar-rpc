@@ -8,7 +8,8 @@ import (
 	"time"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/config"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
 // validateConfig is the config gate run before the daemon's run loop: (1) form-validate,
@@ -17,7 +18,7 @@ import (
 // (the daemon loop owns fatal-and-surface).
 func validateConfig(
 	ctx context.Context,
-	cfg Config,
+	cfg config.Config,
 	cat *catalog.Catalog,
 	tip NetworkTipBackend,
 	tipBackoff time.Duration,
@@ -40,8 +41,8 @@ func validateConfig(
 	// logging.format silently means text unless it is exactly "json", so reject any
 	// other value rather than let a typo drop the operator to text logging. Empty is
 	// the unset sentinel WithDefaults resolves to text, so it is not a typo.
-	if f := cfg.Logging.Format; f != "" && f != DefaultLogFormat && f != LogFormatJSON {
-		return 0, fmt.Errorf("logging.format must be %q or %q; got %q", DefaultLogFormat, LogFormatJSON, f)
+	if f := cfg.Logging.Format; f != "" && f != config.DefaultLogFormat && f != config.LogFormatJSON {
+		return 0, fmt.Errorf("logging.format must be %q or %q; got %q", config.DefaultLogFormat, config.LogFormatJSON, f)
 	}
 	// Form-validate here so the numeric case avoids chunk.IDFromLedger's sub-genesis panic below.
 	if err := validateEarliestForm(cfg.Retention.EarliestLedger); err != nil {
@@ -76,11 +77,11 @@ func validateConfig(
 // a numeric value must equal the stored pin, while "now" is a no-op that keeps the
 // pinned floor. The tip is not re-sampled — backfill's max(tip,lastCommitted) handles lag.
 func confirmEarliestUnchanged(configured string, stored uint32) error {
-	if configured == EarliestNow {
+	if configured == config.EarliestNow {
 		return nil
 	}
 	want := uint32(chunk.FirstLedgerSeq)
-	if configured != EarliestGenesis {
+	if configured != config.EarliestGenesis {
 		want = mustParseUint32(configured)
 	}
 	if want != stored {
@@ -95,19 +96,19 @@ func confirmEarliestUnchanged(configured string, stored uint32) error {
 // "now", or a chunk-aligned decimal ledger >= genesis); it does not resolve "now"
 // or check a numeric floor against the tip (first-start-only work).
 func validateEarliestForm(earliest string) error {
-	if earliest == EarliestGenesis || earliest == EarliestNow {
+	if earliest == config.EarliestGenesis || earliest == config.EarliestNow {
 		return nil
 	}
 	n, err := strconv.ParseUint(earliest, 10, 32)
 	if err != nil {
 		return fmt.Errorf("earliest_ledger must be %q, %q, or a chunk-aligned "+
-			"ledger >= %d; got %q", EarliestGenesis, EarliestNow, chunk.FirstLedgerSeq, earliest)
+			"ledger >= %d; got %q", config.EarliestGenesis, config.EarliestNow, chunk.FirstLedgerSeq, earliest)
 	}
 	ledger := uint32(n)
 	if ledger < chunk.FirstLedgerSeq || ledger != chunk.IDFromLedger(ledger).FirstLedger() {
 		return fmt.Errorf("earliest_ledger must be %q, %q, or a chunk-aligned "+
 			"ledger >= %d; got %q (not chunk-aligned or sub-genesis)",
-			EarliestGenesis, EarliestNow, chunk.FirstLedgerSeq, earliest)
+			config.EarliestGenesis, config.EarliestNow, chunk.FirstLedgerSeq, earliest)
 	}
 	return nil
 }
@@ -119,15 +120,15 @@ func resolveEarliestFirstStart(
 	ctx context.Context, earliest string, tip NetworkTipBackend, backoff time.Duration, maxAttempts int,
 ) (uint32, error) {
 	switch earliest {
-	case EarliestGenesis:
+	case config.EarliestGenesis:
 		return chunk.FirstLedgerSeq, nil
 
-	case EarliestNow:
+	case config.EarliestNow:
 		// Resolving "now" requires a tip.
 		t, err := networkTip(ctx, tip, backoff, maxAttempts)
 		if err != nil {
 			return 0, fmt.Errorf("earliest_ledger=%q needs a reachable, ready backend: %w",
-				EarliestNow, err)
+				config.EarliestNow, err)
 		}
 		// chunkFirstLedger(chunkID(tip)) <= tip, so never past the tip.
 		return chunk.IDFromLedger(t).FirstLedger(), nil

@@ -1,6 +1,6 @@
 package geometry
 
-import "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+import "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 
 // Signed pre-genesis chunk arithmetic — the single home for the chunk↔ledger maps
 // that run in int64 so the pre-genesis sentinel (-1 = "nothing complete") never
