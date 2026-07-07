@@ -512,13 +512,13 @@ func (rw *readWriter) NewTx(ctx context.Context) (WriteTx, error) {
 		historyRetentionWindow: rw.historyRetentionWindow,
 		ledgerWriter:           ledgerWriter{stmtCache: stmtCache},
 
-		txWriter: transactionHandler{
+		txWriter: &transactionHandler{
 			log:        rw.log,
 			db:         txSession,
 			stmtCache:  stmtCache,
 			passphrase: rw.passphrase,
 		},
-		eventWriter: eventHandler{
+		eventWriter: &eventHandler{
 			log:        rw.log,
 			db:         txSession,
 			stmtCache:  stmtCache,
@@ -538,8 +538,8 @@ type writeTx struct {
 	tx                     db.SessionInterface
 	stmtCache              *sq.StmtCache
 	ledgerWriter           ledgerWriter
-	txWriter               transactionHandler
-	eventWriter            eventHandler
+	txWriter               *transactionHandler
+	eventWriter            *eventHandler
 	historyRetentionWindow uint32
 }
 
@@ -548,16 +548,27 @@ func (w writeTx) LedgerWriter() LedgerWriter {
 }
 
 func (w writeTx) TransactionWriter() TransactionWriter {
-	return &w.txWriter
+	return w.txWriter
 }
 
 func (w writeTx) EventWriter() EventWriter {
-	return &w.eventWriter
+	return w.eventWriter
 }
 
 func (w writeTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta, durationMetrics map[string]time.Duration) error {
 	ledgerSeq := ledgerCloseMeta.LedgerSequence()
 	ledgerCloseTime := ledgerCloseMeta.LedgerCloseTime()
+
+	flushStart := time.Now()
+	if err := w.txWriter.flushPending(); err != nil {
+		return err
+	}
+	if err := w.eventWriter.flushPending(); err != nil {
+		return err
+	}
+	if durationMetrics != nil {
+		durationMetrics["flush"] = time.Since(flushStart)
+	}
 
 	startTime := time.Now()
 	if err := w.ledgerWriter.trimLedgers(ledgerSeq, w.historyRetentionWindow); err != nil {

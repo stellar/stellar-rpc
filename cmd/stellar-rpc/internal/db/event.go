@@ -61,12 +61,17 @@ type eventHandler struct {
 	db         db.SessionInterface
 	stmtCache  *sq.StmtCache
 	passphrase string
+	pending    []dbEvent
 }
 type dbEvent struct {
-	TxHash xdr.Hash
-	Event  xdr.DiagnosticEvent
-	Cursor string
+	TxHash    xdr.Hash
+	Event     xdr.DiagnosticEvent
+	Cursor    string
+	CloseTime int64
 }
+
+// 10 bind variables/event * 3,000 events stays under SQLite's 32,766 limit
+const maxEventsPerBatch = 3000
 
 func NewEventReader(log *log.Entry, db db.SessionInterface, passphrase string) EventReader {
 	return &eventHandler{log: log, db: db, passphrase: passphrase}
@@ -140,7 +145,6 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 
 		opEvents := allEvents.OperationEvents
 		txEvents := allEvents.TransactionEvents
-		insertableEvents := make([]dbEvent, 0, len(txEvents)+len(opEvents))
 
 		var afterTxIndex uint32
 
@@ -153,6 +157,7 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 					InSuccessfulContractCall: tx.Successful(),
 					Event:                    event.Event,
 				}, // fake diagnostic event since that's what the DB expects
+				CloseTime: lcm.LedgerCloseTime(),
 			}
 
 			switch event.Stage {
@@ -188,13 +193,13 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 				return err
 			}
 
-			insertableEvents = append(insertableEvents, insertedEvent)
+			eventHandler.pending = append(eventHandler.pending, insertedEvent)
 		}
 
 		// Then, gather all of the operation events.
 		for opIndex, innerOpEvents := range opEvents {
 			for eventIndex, event := range innerOpEvents {
-				insertableEvents = append(insertableEvents, dbEvent{
+				eventHandler.pending = append(eventHandler.pending, dbEvent{
 					TxHash: tx.Hash,
 					Event: xdr.DiagnosticEvent{
 						InSuccessfulContractCall: tx.Successful(),
@@ -206,38 +211,15 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 						Op:     uint32(opIndex),
 						Event:  uint32(eventIndex),
 					}.String(),
+					CloseTime: lcm.LedgerCloseTime(),
 				})
 			}
 		}
 
-		// Batch inserts to avoid exceeding SQLite's SQLITE_MAX_VARIABLE_NUMBER
-		// limit (32,766 by default). 10 bind variables/event * 3,000 events =
-		// 30,000 bind variables < 32,766 limit.
-		const maxEventsPerBatch = 3000
-
-		for batchStart := 0; batchStart < len(insertableEvents); batchStart += maxEventsPerBatch {
-			batchEnd := min(batchStart+maxEventsPerBatch, len(insertableEvents))
-
-			query := sq.Insert(eventTableName).
-				Columns(
-					"id",
-					"contract_id",
-					"event_type",
-					"event_data",
-					"ledger_close_time",
-					"transaction_hash",
-					"topic1", "topic2", "topic3", "topic4",
-				)
-
-			for _, event := range insertableEvents[batchStart:batchEnd] {
-				query, err = insertEvents(query, lcm, event)
-				if err != nil {
-					return err
-				}
-			}
-
-			_, err = query.RunWith(eventHandler.stmtCache).Exec()
-			if err != nil {
+		// Full fixed-size batches keep the SQL text constant so the statement
+		// cache reuses one prepare; the remainder is flushed at Commit.
+		for len(eventHandler.pending) >= maxEventsPerBatch {
+			if err = eventHandler.flush(maxEventsPerBatch); err != nil {
 				return err
 			}
 		}
@@ -246,9 +228,39 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 	return nil
 }
 
+func (eventHandler *eventHandler) flush(n int) error {
+	query := sq.Insert(eventTableName).
+		Columns(
+			"id",
+			"contract_id",
+			"event_type",
+			"event_data",
+			"ledger_close_time",
+			"transaction_hash",
+			"topic1", "topic2", "topic3", "topic4",
+		)
+	var err error
+	for _, event := range eventHandler.pending[:n] {
+		if query, err = insertEvents(query, event); err != nil {
+			return err
+		}
+	}
+	if _, err = query.RunWith(eventHandler.stmtCache).Exec(); err != nil {
+		return err
+	}
+	eventHandler.pending = eventHandler.pending[:copy(eventHandler.pending, eventHandler.pending[n:])]
+	return nil
+}
+
+func (eventHandler *eventHandler) flushPending() error {
+	if len(eventHandler.pending) == 0 {
+		return nil
+	}
+	return eventHandler.flush(len(eventHandler.pending))
+}
+
 func insertEvents(
 	query sq.InsertBuilder,
-	lcm xdr.LedgerCloseMeta,
 	event dbEvent,
 ) (sq.InsertBuilder, error) {
 	var contractID []byte
@@ -282,7 +294,7 @@ func insertEvents(
 		contractID,
 		int(event.Event.Event.Type),
 		eventBlob,
-		lcm.LedgerCloseTime(),
+		event.CloseTime,
 		event.TxHash[:],
 		topicList[0], topicList[1], topicList[2], topicList[3],
 	), nil
