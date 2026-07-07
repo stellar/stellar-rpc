@@ -118,7 +118,7 @@ func (c *Catalog) DiscardHotChunk(chunkID chunk.ID) error {
 	if err := durable.FsyncDir(filepath.Dir(dir)); err != nil {
 		return fmt.Errorf("fsync hot parent dir %s: %w", filepath.Dir(dir), err)
 	}
-	if err := c.DeleteHotKey(chunkID); err != nil {
+	if err := c.deleteHotKey(chunkID); err != nil {
 		return fmt.Errorf("delete hot key chunk %s: %w", chunkID, err)
 	}
 	return nil

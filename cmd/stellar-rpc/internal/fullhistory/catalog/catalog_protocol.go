@@ -2,7 +2,11 @@ package catalog
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/durable"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/metastore"
@@ -168,7 +172,43 @@ func (c *Catalog) FlipHotReady(chunkID chunk.ID) error {
 	return c.store.Put(geometry.HotChunkKey(chunkID), string(geometry.HotReady))
 }
 
-// DeleteHotKey removes a hot-DB key — the close end, after rmdir. Idempotent.
-func (c *Catalog) DeleteHotKey(chunkID chunk.ID) error {
+// deleteHotKey removes a hot-DB key — the close end, after rmdir. Idempotent.
+// Unexported: the only production caller is same-package DiscardHotChunk, and the
+// hot-key create/discard choreography now lives behind the catalog, so no other
+// package deletes a hot key directly.
+func (c *Catalog) deleteHotKey(chunkID chunk.ID) error {
 	return c.store.Delete(geometry.HotChunkKey(chunkID))
+}
+
+// BeginHotCreate is the open end of the hot-DB create bracket, mirroring
+// MarkChunkFreezing: it wipes any leftover dir and marks the key "transient"
+// BEFORE the caller runs hotchunk.Open to create a fresh DB. Doing this under the
+// bracket means a crash mid-create leaves a "transient" key, never a "ready" one
+// pointing at a half-built dir — so the ready-key open never has to auto-heal.
+// FinishHotCreate is the matching close end; hotchunk.Open goes between the pair.
+func (c *Catalog) BeginHotCreate(chunkID chunk.ID) error {
+	dir := c.layout.HotChunkPath(chunkID)
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("wipe leftover hot dir %s: %w", dir, err)
+	}
+	if err := c.PutHotTransient(chunkID); err != nil {
+		return fmt.Errorf("mark hot transient chunk %s: %w", chunkID, err)
+	}
+	return nil
+}
+
+// FinishHotCreate is the close end of the hot-DB create bracket, mirroring
+// FlipChunkFrozen: it makes the freshly created dir + its parent dirent durable,
+// then flips the key "ready". The dir MUST be durable before the flip, else a
+// crash between them fabricates a "ready but dir missing" open failure for a DB
+// that was actually fine. The caller MUST have completed hotchunk.Open first.
+func (c *Catalog) FinishHotCreate(chunkID chunk.ID) error {
+	dir := c.layout.HotChunkPath(chunkID)
+	if err := durable.FsyncNewDirs(filepath.Dir(dir), dir); err != nil {
+		return fmt.Errorf("fsync hot dir %s: %w", dir, err)
+	}
+	if err := c.FlipHotReady(chunkID); err != nil {
+		return fmt.Errorf("flip hot ready chunk %s: %w", chunkID, err)
+	}
+	return nil
 }

@@ -4,15 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/durable"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
@@ -48,38 +45,26 @@ func openHotDBForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlo
 	}
 
 	if state == geometry.HotReady {
-		db, openErr := hotchunk.OpenExisting(dir, chunkID, logger)
-		if openErr != nil {
-			return nil, fmt.Errorf("chunk %s is %q but its hot DB won't open: %w", chunkID, geometry.HotReady, openErr)
-		}
-		return db, nil
+		// Resume/boundary write handle for a chunk whose "ready" key promises the DB
+		// exists: must-exist, never-creating (a gutted DB fails restartably, never
+		// auto-heals into a fresh empty DB). OpenReady is the single enforcement site.
+		return hotchunk.OpenReady(state, dir, chunkID, logger, false)
 	}
 
-	// "transient" or absent: wipe any leftover dir, then create fresh under the bracket.
-	if rmErr := os.RemoveAll(dir); rmErr != nil {
-		return nil, fmt.Errorf("wipe leftover hot dir %s: %w", dir, rmErr)
+	// "transient" or absent: create fresh under the catalog's create bracket
+	// (BeginHotCreate wipes + marks transient; FinishHotCreate fsyncs + flips ready),
+	// so a crash mid-create leaves a "transient" key, never a "ready" one pointing at
+	// a half-built dir.
+	if beginErr := cat.BeginHotCreate(chunkID); beginErr != nil {
+		return nil, beginErr
 	}
-	if putErr := cat.PutHotTransient(chunkID); putErr != nil {
-		return nil, fmt.Errorf("mark hot transient chunk %s: %w", chunkID, putErr)
-	}
-
 	db, openErr := hotchunk.Open(dir, chunkID, logger)
 	if openErr != nil {
 		return nil, fmt.Errorf("create hot DB chunk %s: %w", chunkID, openErr)
 	}
-
-	// The dir + dirent must be durable BEFORE the key flips to "ready", else a
-	// crash between the flip and the dir's durability fabricates the "ready but
-	// dir missing" won't-open error above for a DB that was actually fine. FsyncNewDirs
-	// syncs the leaf then its parent dirent (the one audited barrier for a
-	// freshly created dir).
-	if syncErr := durable.FsyncNewDirs(filepath.Dir(dir), dir); syncErr != nil {
+	if finishErr := cat.FinishHotCreate(chunkID); finishErr != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("fsync hot dir %s: %w", dir, syncErr)
-	}
-	if flipErr := cat.FlipHotReady(chunkID); flipErr != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("flip hot ready chunk %s: %w", chunkID, flipErr)
+		return nil, finishErr
 	}
 	return db, nil
 }

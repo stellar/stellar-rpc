@@ -208,7 +208,7 @@ func resolveHotSource(
 	if hotState != geometry.HotReady {
 		return nil, nil, false, nil // "transient"/absent: not a read source
 	}
-	return tryHotSource(chunkID, cfg)
+	return tryHotSource(hotState, chunkID, cfg)
 }
 
 // tryHotSource handles the hot branch under a "ready" key: it opens the chunk's
@@ -216,15 +216,18 @@ func resolveHotSource(
 // used=true when present AND complete; used=false when present-but-incomplete
 // (staleness, caller falls through); err when a "ready" DB is absent or unopenable
 // — an ordinary restartable error, detected lazily on the open.
-func tryHotSource(chunkID chunk.ID, cfg ProcessConfig) (ledgerbackend.LedgerStream, func() error, bool, error) {
+func tryHotSource(
+	state geometry.HotState, chunkID chunk.ID, cfg ProcessConfig,
+) (ledgerbackend.LedgerStream, func() error, bool, error) {
 	dir := cfg.Catalog.Layout().HotChunkPath(chunkID)
-	// Open the chunk's shared multi-CF DB READ-ONLY: the freeze reads its ledgers to
-	// re-derive the cold artifacts and must never mutate it (the read-only open
-	// replays any un-synced WAL into memtables but persists nothing). An absent or
-	// gutted "ready" DB fails the open — restartable, never auto-created.
-	hot, err := hotchunk.OpenReadOnly(dir, chunkID, cfg.Logger)
+	// Open the chunk's shared multi-CF DB READ-ONLY via the single OpenReady
+	// enforcement site: the freeze reads its ledgers to re-derive the cold artifacts
+	// and must never mutate it (the read-only open replays any un-synced WAL into
+	// memtables but persists nothing). An absent or gutted "ready" DB fails the open
+	// — restartable, never auto-created.
+	hot, err := hotchunk.OpenReady(state, dir, chunkID, cfg.Logger, true)
 	if err != nil {
-		return nil, nil, false, fmt.Errorf("chunk %s is ready but its hot DB won't open: %w", chunkID, err)
+		return nil, nil, false, err
 	}
 	maxSeq, present, merr := hot.MaxCommittedSeq()
 	if merr != nil {

@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
-	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
@@ -87,31 +86,6 @@ func freezeCoverage(t *testing.T, cat *catalog.Catalog, w geometry.TxHashIndexID
 	cov, err := cat.MarkTxHashIndexFreezing(w, lo, hi)
 	require.NoError(t, err)
 	require.NoError(t, cat.CommitTxHashIndex(cov))
-}
-
-// zeroTxLCMBytes builds wire bytes of a minimal valid zero-tx V2 LedgerCloseMeta;
-// zero-tx keeps a full 10k-ledger chunk pass cheap.
-func zeroTxLCMBytes(t *testing.T, seq uint32) []byte {
-	t.Helper()
-	lcm := xdr.LedgerCloseMeta{
-		V: 2,
-		V2: &xdr.LedgerCloseMetaV2{
-			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
-				Header: xdr.LedgerHeader{
-					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(0)},
-					LedgerSeq: xdr.Uint32(seq),
-				},
-			},
-			TxSet: xdr.GeneralizedTransactionSet{
-				V:       1,
-				V1TxSet: &xdr.TransactionSetV1{Phases: nil},
-			},
-			TxProcessing: nil,
-		},
-	}
-	raw, err := lcm.MarshalBinary()
-	require.NoError(t, err)
-	return raw
 }
 
 // ---------------------------------------------------------------------------

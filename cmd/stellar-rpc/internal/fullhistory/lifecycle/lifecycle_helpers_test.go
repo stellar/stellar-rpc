@@ -13,6 +13,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/fhtest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
@@ -95,7 +96,7 @@ func ingestFullHotChunk(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 		if seq == c.FirstLedger() {
 			raw = oneTxLCMRand(t, seq)
 		} else {
-			raw = zeroTxLCMBytes(t, seq)
+			raw = fhtest.ZeroTxLCMBytes(t, seq)
 		}
 		_, err := db.IngestLedger(seq, xdr.LedgerCloseMetaView(raw))
 		require.NoError(t, err)

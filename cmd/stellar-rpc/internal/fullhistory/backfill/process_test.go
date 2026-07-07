@@ -14,9 +14,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
-	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/fhtest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
@@ -27,32 +27,6 @@ import (
 // ---------------------------------------------------------------------------
 // LCM fixtures + fakes (a ledger stream and a Backend).
 // ---------------------------------------------------------------------------
-
-// zeroTxLCMBytes builds the wire bytes of a minimal valid zero-transaction V2
-// LedgerCloseMeta for seq. Zero-tx keeps the per-ledger work trivial so a full
-// 10,000-ledger chunk pass stays fast in tests.
-func zeroTxLCMBytes(t *testing.T, seq uint32) []byte {
-	t.Helper()
-	lcm := xdr.LedgerCloseMeta{
-		V: 2,
-		V2: &xdr.LedgerCloseMetaV2{
-			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
-				Header: xdr.LedgerHeader{
-					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(0)},
-					LedgerSeq: xdr.Uint32(seq),
-				},
-			},
-			TxSet: xdr.GeneralizedTransactionSet{
-				V:       1,
-				V1TxSet: &xdr.TransactionSetV1{Phases: nil},
-			},
-			TxProcessing: nil,
-		},
-	}
-	raw, err := lcm.MarshalBinary()
-	require.NoError(t, err)
-	return raw
-}
 
 // fullChunkStream is an in-memory ledgerbackend.LedgerStream yielding every ledger
 // in [from, to] from a per-seq LCM generator. It models a source (a pack or a
@@ -113,7 +87,7 @@ func (b *fakeBackend) Tip(ctx context.Context) (uint32, error) {
 // zeroTxBackend is a Backend whose tip covers any chunk (so the coverage wait
 // passes immediately) and whose stream yields zero-tx LCMs.
 func zeroTxBackend(t *testing.T) *fakeBackend {
-	return &fakeBackend{t: t, gen: zeroTxLCMBytes, tip: math.MaxUint32}
+	return &fakeBackend{t: t, gen: fhtest.ZeroTxLCMBytes, tip: math.MaxUint32}
 }
 
 // ---------------------------------------------------------------------------
@@ -369,7 +343,7 @@ func TestBackfillSource_BulkCoverageErrorAborts(t *testing.T) {
 	cfg := testProcessConfig(t, cat)
 
 	chunkID := chunk.ID(0)
-	cfg.Backend = &fakeBackend{t: t, gen: zeroTxLCMBytes, tipErr: errors.New("boom")}
+	cfg.Backend = &fakeBackend{t: t, gen: fhtest.ZeroTxLCMBytes, tipErr: errors.New("boom")}
 
 	_, _, err := backfillSource(context.Background(), chunkID, catalog.AllArtifacts(), cfg)
 	require.Error(t, err)
@@ -452,7 +426,7 @@ func TestWaitForCoverage_TipBoundedByDeadline(t *testing.T) {
 // Layout path by driving the cold ledger materializer over a zero-tx stream.
 func writeRealPack(t *testing.T, cat *catalog.Catalog, chunkID chunk.ID) {
 	t.Helper()
-	stream := &fullChunkStream{t: t, gen: zeroTxLCMBytes}
+	stream := &fullChunkStream{t: t, gen: fhtest.ZeroTxLCMBytes}
 	raw := stream.RawLedgers(context.Background(),
 		ledgerbackend.BoundedRange(chunkID.FirstLedger(), chunkID.LastLedger()))
 	dirs := ingest.ColdDirs{LedgerPack: cat.Layout().LedgerPackPath(chunkID)}

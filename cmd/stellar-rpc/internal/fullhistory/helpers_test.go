@@ -14,7 +14,6 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
-	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
@@ -132,31 +131,6 @@ var _ observability.Metrics = (*recordingMetrics)(nil)
 // ---------------------------------------------------------------------------
 // LCM fixtures + a fake backfill.Backend for the daemon E2E test.
 // ---------------------------------------------------------------------------
-
-// zeroTxLCMBytes builds wire bytes of a minimal valid zero-tx V2 LedgerCloseMeta;
-// zero-tx keeps a full 10k-ledger chunk pass cheap.
-func zeroTxLCMBytes(t *testing.T, seq uint32) []byte {
-	t.Helper()
-	lcm := xdr.LedgerCloseMeta{
-		V: 2,
-		V2: &xdr.LedgerCloseMetaV2{
-			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
-				Header: xdr.LedgerHeader{
-					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(0)},
-					LedgerSeq: xdr.Uint32(seq),
-				},
-			},
-			TxSet: xdr.GeneralizedTransactionSet{
-				V:       1,
-				V1TxSet: &xdr.TransactionSetV1{Phases: nil},
-			},
-			TxProcessing: nil,
-		},
-	}
-	raw, err := lcm.MarshalBinary()
-	require.NoError(t, err)
-	return raw
-}
 
 // fullChunkStream is an in-memory ledgerbackend.LedgerStream yielding every
 // ledger in [from, to] from a per-seq LCM generator.

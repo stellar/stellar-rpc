@@ -73,9 +73,12 @@ func LastCommittedLedger(cat *catalog.Catalog, logger *supportlog.Entry) (uint32
 // MaxCommittedSeq is correct even after an ungraceful crash.
 func refineWithHotDB(cat *catalog.Catalog, logger *supportlog.Entry, live int64) (uint32, error) {
 	id := chunk.ID(live) //nolint:gosec // live > cold >= -1, so live >= 0
-	hot, openErr := hotchunk.OpenReadOnly(cat.Layout().HotChunkPath(id), id, logger)
+	// live is the highest "ready" hot chunk (from ReadyHotChunkKeys), so route the
+	// read-only open through the single OpenReady enforcement site: must-exist,
+	// never auto-healed, uniform won't-open error.
+	hot, openErr := hotchunk.OpenReady(geometry.HotReady, cat.Layout().HotChunkPath(id), id, logger, true)
 	if openErr != nil {
-		return 0, fmt.Errorf("chunk %s is %q but its hot DB won't open: %w", id, geometry.HotReady, openErr)
+		return 0, openErr
 	}
 	defer func() { _ = hot.Close() }()
 

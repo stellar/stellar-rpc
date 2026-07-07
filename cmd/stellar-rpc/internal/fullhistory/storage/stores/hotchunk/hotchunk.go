@@ -21,6 +21,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores"
@@ -95,6 +96,33 @@ func OpenExisting(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB,
 // the facades only reads.
 func OpenReadOnly(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
 	return open(path, chunkID, logger, true, false)
+}
+
+// OpenReady is the single enforcement site for the "ready key ⇒ must-exist,
+// never-creating open" rule. It takes the hot-key state the CALLER already read
+// and refuses to open anything not "ready", so no caller can accidentally open a
+// creating handle for a chunk the catalog considers ready. readOnly=false is
+// ingestion's write handle for a resumed chunk (OpenExisting); readOnly=true is
+// the freeze source's / last-committed refiner's view (OpenReadOnly). Either way
+// a missing or gutted "ready" DB fails the open — never auto-healed into a fresh
+// empty one — wrapped in the uniform won't-open error so every ready-open site
+// reports it identically.
+func OpenReady(
+	state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly bool,
+) (*DB, error) {
+	if state != geometry.HotReady {
+		return nil, fmt.Errorf(
+			"hotchunk: OpenReady requires chunk %s key %q, got %q", chunkID, geometry.HotReady, state)
+	}
+	openFn := OpenExisting
+	if readOnly {
+		openFn = OpenReadOnly
+	}
+	db, err := openFn(path, chunkID, logger)
+	if err != nil {
+		return nil, fmt.Errorf("chunk %s is %q but its hot DB won't open: %w", chunkID, geometry.HotReady, err)
+	}
+	return db, nil
 }
 
 func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly, mustExist bool) (*DB, error) {

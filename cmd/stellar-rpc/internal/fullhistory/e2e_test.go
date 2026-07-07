@@ -51,6 +51,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/config"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/fhtest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
@@ -311,7 +312,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 		case c2First:
 			frames[seq] = hotRaw
 		default:
-			frames[seq] = zeroTxLCMBytes(t, seq)
+			frames[seq] = fhtest.ZeroTxLCMBytes(t, seq)
 		}
 	}
 	// Chunks 0 and 1 in full (both freeze), then chunk 2's first two ledgers.

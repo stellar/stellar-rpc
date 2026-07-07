@@ -16,6 +16,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/fhtest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
@@ -93,7 +94,7 @@ func streamForSeqs(t *testing.T, from, to uint32) *fakeCoreStream {
 	t.Helper()
 	s := &fakeCoreStream{frames: map[uint32][]byte{}}
 	for seq := from; seq <= to; seq++ {
-		s.frames[seq] = zeroTxLCMBytes(t, seq)
+		s.frames[seq] = fhtest.ZeroTxLCMBytes(t, seq)
 	}
 	return s
 }
@@ -173,7 +174,7 @@ func seedLastCommitted(t *testing.T, cat *catalog.Catalog, c chunk.ID, seq uint3
 	t.Helper()
 	db := openLiveHotDB(t, cat, c)
 	for s := c.FirstLedger(); s <= seq; s++ {
-		_, err := db.IngestLedger(s, zeroTxLCMBytes(t, s))
+		_, err := db.IngestLedger(s, fhtest.ZeroTxLCMBytes(t, s))
 		require.NoError(t, err)
 	}
 	require.NoError(t, db.Close())
@@ -308,8 +309,8 @@ func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 	resume := seedLastCommitted(t, cat, c, c.LastLedger()-1) // == c.LastLedger()
 
 	stream := &fakeCoreStream{frames: map[uint32][]byte{
-		c.LastLedger():   zeroTxLCMBytes(t, c.LastLedger()),   // boundary 0->1
-		c1.FirstLedger(): zeroTxLCMBytes(t, c1.FirstLedger()), // a ledger in chunk 1
+		c.LastLedger():   fhtest.ZeroTxLCMBytes(t, c.LastLedger()),   // boundary 0->1
+		c1.FirstLedger(): fhtest.ZeroTxLCMBytes(t, c1.FirstLedger()), // a ledger in chunk 1
 	}, endErr: errors.New("end")}
 	cfg, rec := loopConfig(t, stream, cat, resume)
 
@@ -377,8 +378,8 @@ func TestRunIngestionLoop_HandoffFenceClosesBeforeNextKey(t *testing.T) {
 	resume := seedLastCommitted(t, cat, c, c.LastLedger()-1) // == c.LastLedger()
 
 	stream := &fakeCoreStream{frames: map[uint32][]byte{
-		c.LastLedger():   zeroTxLCMBytes(t, c.LastLedger()),   // boundary 0->1
-		c1.FirstLedger(): zeroTxLCMBytes(t, c1.FirstLedger()), // a ledger in chunk 1
+		c.LastLedger():   fhtest.ZeroTxLCMBytes(t, c.LastLedger()),   // boundary 0->1
+		c1.FirstLedger(): fhtest.ZeroTxLCMBytes(t, c1.FirstLedger()), // a ledger in chunk 1
 	}, endErr: errors.New("end")}
 
 	// Build the loop config manually so the boundary publisher is our fence checker.

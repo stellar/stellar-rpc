@@ -20,6 +20,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/config"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/fhtest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/metastore"
@@ -113,7 +114,7 @@ func someTxBackend(t *testing.T) *fakeBackend {
 	src := xdr.MustMuxedAddress(keypair.MustRandom().Address())
 	gen := func(t *testing.T, seq uint32) []byte {
 		if seq%2500 != 0 {
-			return zeroTxLCMBytes(t, seq)
+			return fhtest.ZeroTxLCMBytes(t, seq)
 		}
 		raw, _ := oneTxLCMBytes(t, seq, src)
 		return raw
@@ -125,7 +126,7 @@ func someTxBackend(t *testing.T) *fakeBackend {
 	}
 }
 
-// oneTxLCMBytes is zeroTxLCMBytes plus one tx (per-seq SeqNum ⇒ unique hash) so
+// oneTxLCMBytes is fhtest.ZeroTxLCMBytes plus one tx (per-seq SeqNum ⇒ unique hash) so
 // ExtractTxHashes yields exactly one key for seq. Returns the wire bytes and the
 // real, network-hashed transaction hash (the hash the daemon commits for seq), so
 // callers can assert a getTransaction-style hash→seq lookup.
