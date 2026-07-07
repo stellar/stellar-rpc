@@ -370,7 +370,7 @@ func (v *View) resolve(c chunk.ID, k Kind) (Store, error) {
 
 The resolution order is deterministic. When both hot and cold copies are available, routing selects the cold artifact.
 
-If a chunk has no serving home, routing returns `ErrUnavailable`. This can occur during startup recovery when a required artifact has not yet reached a serving state.
+If a chunk has no serving home, routing returns `ErrUnavailable`.
 
 ### Chunk traversal
 
@@ -396,10 +396,10 @@ tx-hash   ───────────── window .idx ──────
 
 Example request:
 
-- `startLedger = 65,439,500`
-- `limit = 1,000`
+- `startLedger = 65,439,995`
+- `limit = 10`
 
-The request spans chunks 6543 and 6544. Chunk 6543 resolves to the cold ledger store and returns the rest of that chunk. Chunk 6544 resolves to the live hot store and returns ledgers up to the remaining limit. The response is the concatenation of both streams.
+The request spans chunks 6543 and 6544. Chunk 6543 resolves to the cold ledger store and returns the last five ledgers of that chunk. Chunk 6544 resolves to the live hot store and returns the remaining five. The response is the concatenation of both streams.
 
 ### `getTransactions`
 
