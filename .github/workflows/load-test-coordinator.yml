@@ -88,9 +88,8 @@ jobs:
           aws-region: us-east-1
 
       # coordinator-runner does the rendering + history fold (it fetches each leg's
-      # S3 result and emits the new comment body, under unit test). The gh api glue
-      # -- reading the existing comment and posting/editing -- stays here. Tolerant:
-      # a posting hiccup must not pre-empt the gate below.
+      # S3 result and emits the new comment body, under unit test). the gh api calls
+      # stay here. Renderer failures abort before posting.
       - name: Render + post sticky report
         env:
           GH_TOKEN: ${{ github.token }}
@@ -115,7 +114,10 @@ jobs:
           fi
 
           # Render the new body (fetches each leg's S3 result, folds prior runs).
-          printf '%s' "$PREV" | go run "$PERF_EVAL" > /tmp/comment.md
+          if ! printf '%s' "$PREV" | go run "$PERF_EVAL" > /tmp/comment.md; then
+            echo "::error::renderer failed; leaving sticky comment untouched"
+            exit 1
+          fi
           cat /tmp/comment.md >> "$GITHUB_STEP_SUMMARY"
 
           # Post / edit the sticky comment (skip if the render produced nothing).
