@@ -51,26 +51,11 @@ on:
         required: false
         type: number
         default: 240
-      results_timeout:
-        description: 'Seconds to poll S3 for the result object before timing out'
-        required: false
-        type: number
-        default: 12600
-      self_terminate_minutes:
-        description: 'Box self-terminate ceiling; sits above the job timeout'
-        required: false
-        type: number
-        default: 240
-      job_timeout_minutes:
-        description: 'GHA job timeout; above results_timeout with boot/SSM/cleanup buffer'
+      budget_minutes:
+        description: 'End-to-end leg ceiling (= job timeout); S3 poll deadline, box self-terminate, and OIDC session derive from it (-15m/+15m/+15m). Derived session must fit the IAM role max.'
         required: false
         type: number
         default: 225
-      role_duration_seconds:
-        description: 'OIDC role session length; backstops the job timeout'
-        required: false
-        type: number
-        default: 14400
       poll_interval:
         description: 'Seconds between S3 result polls'
         required: false
@@ -123,7 +108,7 @@ jobs:
       bucket: ${{ steps.results.outputs.bucket }}
       instance_id: ${{ steps.launch.outputs.instance_id }}
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.job_timeout_minutes }}
+    timeout-minutes: ${{ inputs.budget_minutes }}
     env:
       AWS_REGION: us-east-1
       INSTANCE_TYPE: ${{ inputs.instance_type }}
@@ -134,7 +119,6 @@ jobs:
       TEST_TAG_KEY: test
       TEST_TAG_VAL: stellar-rpc-ci-load-test
       SSM_REGISTRATION_TIMEOUT: ${{ inputs.ssm_registration_timeout }}
-      RESULTS_TIMEOUT: ${{ inputs.results_timeout }}
       POLL_INTERVAL: ${{ inputs.poll_interval }}
       DEBUG_LOG_LINES: 40
       DEBUG_LOG_EVERY_POLLS: 5
@@ -146,6 +130,20 @@ jobs:
       RESULT_KEY: runs/${{ github.run_id }}-${{ github.run_attempt }}/${{ inputs.run_label }}/result.json
 
     steps:
+      # budget_minutes is the job timeout and the other deadlines derive from it so
+      # the ordering (poll < job < self-terminate <= role session) holds by
+      # construction.
+      - name: Derive deadlines
+        id: deadlines
+        run: |
+          B=${{ inputs.budget_minutes }}
+          [ "$B" -gt 30 ] || { echo "::error::budget_minutes must exceed the 15m infra buffers"; exit 1; }
+          {
+            echo "RESULTS_TIMEOUT=$(( (B - 15) * 60 ))"
+            echo "SELF_TERMINATE_MINUTES=$(( B + 15 ))"
+          } >> "$GITHUB_ENV"
+          echo "role_seconds=$(( (B + 15) * 60 ))" >> "$GITHUB_OUTPUT"
+
       # Harness (gather, bootstrap-common.sh, leg script) and the benchmarked
       # code come from one SHA: target_ref is checked out here and the box rebuilds
       # it. Tradeoff: an ad-hoc dispatch against an old ref also runs that ref's
@@ -167,7 +165,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          role-duration-seconds: ${{ inputs.role_duration_seconds }}
+          role-duration-seconds: ${{ steps.deadlines.outputs.role_seconds }}
 
       - name: Resolve latest Ubuntu 22.04 AMI
         id: ami
@@ -193,7 +191,7 @@ jobs:
             echo '#!/usr/bin/env bash'
             echo "export TARGET_SHA=${{ steps.resolve.outputs.sha }} RUN_ID=${{ github.run_id }}-${{ github.run_attempt }}"
             echo "export BUCKET=$BUCKET RESULT_KEY=$RESULT_KEY"
-            echo "export SELF_TERMINATE_MINUTES=${{ inputs.self_terminate_minutes }}"
+            echo "export SELF_TERMINATE_MINUTES=$SELF_TERMINATE_MINUTES"
             if [ -n "$EXTRA_ENV" ]; then printf '%s\n' "$EXTRA_ENV"; fi
             cat "$PERF_EVAL_DIR/bootstrap-common.sh"
             cat "$LEG_SCRIPT"
