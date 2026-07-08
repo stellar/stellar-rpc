@@ -198,9 +198,12 @@ jobs:
 
       - name: Launch EC2 instance
         id: launch
+        env:
+          TARGET_REF: ${{ inputs.target_ref }}
+          RUN_LABEL: ${{ inputs.run_label }}
         run: |
           COMMON_TAGS="{Key=$TEST_TAG_KEY,Value=$TEST_TAG_VAL},
-            {Key=ref,Value=${{ inputs.target_ref }}},
+            {Key=ref,Value=$TARGET_REF},
             {Key=sha,Value=${{ steps.resolve.outputs.sha }}},
             {Key=run-id,Value=${{ github.run_id }}}"
           RUN_INSTANCES_JSON=$(aws ec2 run-instances \
@@ -215,11 +218,11 @@ jobs:
             }]" \
             --tag-specifications \
               "ResourceType=instance,Tags=[
-                {Key=Name,Value=perf-eval-${{ inputs.run_label }}},
+                {Key=Name,Value=perf-eval-$RUN_LABEL},
                 $COMMON_TAGS
               ]" \
               "ResourceType=volume,Tags=[
-                {Key=Name,Value=perf-eval-${{ inputs.run_label }}-root},
+                {Key=Name,Value=perf-eval-${RUN_LABEL}-root},
                 $COMMON_TAGS
               ]" \
             --count 1 \

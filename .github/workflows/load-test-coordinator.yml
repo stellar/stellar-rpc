@@ -76,9 +76,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # Default checkout (github.sha): run renderer at workflow version even
+      # when the legs benchmark another target_sha.
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.plan.outputs.target_sha }}
       - uses: ./.github/actions/setup-go
 
       - name: Configure AWS via OIDC
