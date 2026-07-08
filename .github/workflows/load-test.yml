@@ -32,4 +32,3 @@ jobs:
       target_ref: ${{ inputs.target_ref }}
       run_label: apply-load
       leg_script: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh
-      runner_dir: ./cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/runner

@@ -4,7 +4,7 @@ name: Perf-eval EC2 leg (ephemeral)
 # the box publishes, and reports back to its caller via job outputs + that S3
 # object. It does not post to the PR -- the coordinator owns human-facing output.
 # Box bootstrap: perf-eval/bootstrap-common.sh + the leg script (inputs.leg_script);
-# runner-side polling: perf-eval/harness.Gather (via inputs.runner_dir).
+# runner-side polling: perf-eval/gather.
 
 on:
   # workflow_call is the only trigger: a leg runs through the coordinator.
@@ -20,10 +20,6 @@ on:
         type: string
       leg_script:
         description: 'Path to the leg run script, concatenated after bootstrap-common.sh into the box user-data'
-        required: true
-        type: string
-      runner_dir:
-        description: 'Go package path for `go run <dir> gather` (with leading ./)'
         required: true
         type: string
       instance_type:
@@ -123,7 +119,6 @@ jobs:
       DEBUG_LOG_EVERY_POLLS: 5
       PERF_EVAL_DIR: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval
       LEG_SCRIPT: ${{ inputs.leg_script }}
-      RUNNER_DIR: ${{ inputs.runner_dir }}
       BUCKET: stellar-rpc-ci-load-test
       # run_label disambiguates legs that share this run's id/attempt.
       RESULT_KEY: runs/${{ github.run_id }}-${{ github.run_attempt }}/${{ inputs.run_label }}/result.json
@@ -156,7 +151,7 @@ jobs:
         id: resolve
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      # The runner-side half is `go run <runner_dir> gather`.
+      # The runner-side half is `go run <perf-eval>/gather`.
       - uses: ./.github/actions/setup-go
 
       - name: Configure AWS via OIDC
@@ -256,7 +251,7 @@ jobs:
         id: results
         env:
           INSTANCE_ID: ${{ steps.launch.outputs.instance_id }}
-        run: go run "$RUNNER_DIR" gather
+        run: go run "./$PERF_EVAL_DIR/gather"
 
       - name: Write results summary
         if: always()

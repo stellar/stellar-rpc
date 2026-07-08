@@ -2,7 +2,7 @@
 # own: ec2-leg.yml renders the box user-data as
 #   <preamble exports>  +  bootstrap-common.sh  +  run-<leg>.sh
 # so this file has no shebang. It installs the toolchain and exposes helpers; the
-# leg script calls bootstrap_box then hands off to its `runner instantiate`.
+# leg script calls bootstrap_box then hands off to its runner via run_leg.
 #
 # Result protocol: the box publishes one object to s3://$BUCKET/$RESULT_KEY holding
 # {schemaVersion, verdict, markdown, bench, runId, targetSha}. The Go runner
@@ -124,7 +124,7 @@ bootstrap_box() {
   log "checked out $TARGET_SHA; handing off to the Go runner"
 }
 
-# run_leg hands off to a leg's `<runner_pkg> instantiate`. The Go runner owns the
+# run_leg hands off to a leg's runner package. The Go runner owns the
 # verdict from here, so the bootstrap ERR trap is released first. On a non-zero
 # exit the runner has written the failure body to RESULTS_FILE (or died before
 # doing so), so we publish the fail result it couldn't.
@@ -132,7 +132,7 @@ run_leg() {
   local runner_pkg="$1"
   trap - ERR
   export TARGET_SHA RUN_ID REPO WORK_DIR RESULTS_FILE BUCKET RESULT_KEY
-  if ! go run "$runner_pkg" instantiate; then
+  if ! go run "$runner_pkg"; then
     log "go runner exited non-zero; publishing fail result"
     upload_result fail "$RESULTS_FILE"
     exit 1
