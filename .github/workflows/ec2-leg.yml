@@ -92,15 +92,14 @@ permissions:
   id-token: write   # OIDC AssumeRole into the GHA role
   contents: read    # checkout
 
-# Non-cancelling group keyed on the tested commit + leg. An instance can run until
-# the box’s self-terminate ceiling (bootstrap-common.sh), so new runs queue.
-concurrency:
-  group: ec2-leg-${{ inputs.target_ref }}-${{ inputs.run_label }}
-  cancel-in-progress: false
-
 jobs:
   ec2-leg:
     name: Launch + await ephemeral perf-eval box
+    # Non-cancelling group keyed on the test commit SHA + leg. An instance can run
+    # until the box’s self-terminate ceiling, so new runs queue.
+    concurrency:
+      group: ec2-leg-${{ inputs.target_ref }}-${{ inputs.run_label }}
+      cancel-in-progress: false
     outputs:
       passed: ${{ steps.results.outputs.passed }}
       verdict: ${{ steps.results.outputs.verdict }}
