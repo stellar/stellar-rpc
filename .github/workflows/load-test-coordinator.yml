@@ -72,7 +72,7 @@ jobs:
   report:
     name: Aggregate + report
     needs: [plan, load-test]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -110,7 +110,7 @@ jobs:
           CID=""; PREV=""
           if [ -n "$PR" ]; then
             CID=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-              --jq "map(select(.body | startswith(\"$MARKER\"))) | .[0].id // empty" || true)
+              --jq "map(select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\")))) | .[0].id // empty" || true)
             [ -n "$CID" ] && PREV=$(gh api "repos/$REPO/issues/comments/$CID" --jq '.body' || true)
           fi
 
@@ -118,8 +118,10 @@ jobs:
           printf '%s' "$PREV" | go run "$PERF_EVAL" > /tmp/comment.md
           cat /tmp/comment.md >> "$GITHUB_STEP_SUMMARY"
 
-          # Post / edit the sticky comment.
-          if [ -n "$PR" ]; then
+          # Post / edit the sticky comment (skip if the render produced nothing).
+          if [ ! -s /tmp/comment.md ]; then
+            echo "::warning::render produced no output, skipping comment post"
+          elif [ -n "$PR" ]; then
             jq -Rs '{body: .}' /tmp/comment.md > /tmp/payload.json
             if [ -n "$CID" ]; then
               gh api -X PATCH "repos/$REPO/issues/comments/$CID" --input /tmp/payload.json >/dev/null \
