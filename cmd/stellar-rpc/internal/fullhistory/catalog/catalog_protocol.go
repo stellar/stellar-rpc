@@ -9,13 +9,12 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/durable"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/metastore"
 )
 
 // The one write protocol — mark-then-write. Every durable artifact (per-chunk
 // file or index coverage) flows through here:
 //
-//  1. Put the key "freezing" via metastore BEFORE any I/O.
+//  1. Put the key "freezing" via the catalog KV BEFORE any I/O.
 //  2. The caller writes the file.
 //  3. The caller fsyncs the FILE + its PARENT dirent (+ the GRANDPARENT dirent
 //     when the parent dir was just created) — durable.BarrierNewFile.
@@ -43,7 +42,7 @@ func (c *Catalog) MarkChunkFreezing(chunkID chunk.ID, kinds ...geometry.Kind) er
 	if len(kinds) == 0 {
 		return errors.New("MarkChunkFreezing requires at least one kind")
 	}
-	return c.store.Batch(func(w *metastore.BatchWriter) error {
+	return c.batch(func(w batchWriter) error {
 		for _, kind := range kinds {
 			w.Put(geometry.ChunkKey(chunkID, kind), string(geometry.StateFreezing))
 		}
@@ -58,7 +57,7 @@ func (c *Catalog) FlipChunkFrozen(chunkID chunk.ID, kinds ...geometry.Kind) erro
 	if len(kinds) == 0 {
 		return errors.New("FlipChunkFrozen requires at least one kind")
 	}
-	return c.store.Batch(func(w *metastore.BatchWriter) error {
+	return c.batch(func(w batchWriter) error {
 		for _, kind := range kinds {
 			w.Put(geometry.ChunkKey(chunkID, kind), string(geometry.StateFrozen))
 		}
@@ -78,7 +77,7 @@ func (c *Catalog) MarkTxHashIndexFreezing(
 		Key:   geometry.TxHashIndexKey(w, lo, hi),
 		State: geometry.StateFreezing,
 	}
-	if err := c.store.Put(cov.Key, string(geometry.StateFreezing)); err != nil {
+	if err := c.put(cov.Key, string(geometry.StateFreezing)); err != nil {
 		return geometry.TxHashIndexCoverage{}, err
 	}
 	return cov, nil
@@ -123,7 +122,7 @@ func (c *Catalog) CommitTxHashIndex(cov geometry.TxHashIndexCoverage) error {
 		}
 	}
 
-	return c.store.Batch(func(bw *metastore.BatchWriter) error {
+	return c.batch(func(bw batchWriter) error {
 		bw.Put(cov.Key, string(geometry.StateFrozen))
 		if hasPrev {
 			bw.Put(prev.Key, string(geometry.StatePruning))
@@ -163,13 +162,13 @@ func (c *Catalog) txhashIndexChunkKeysPresent(lo, hi chunk.ID) ([]string, error)
 // the dir is created or a discard begins removing it. A crash mid-operation is
 // detectable from this value alone.
 func (c *Catalog) PutHotTransient(chunkID chunk.ID) error {
-	return c.store.Put(geometry.HotChunkKey(chunkID), string(geometry.HotTransient))
+	return c.put(geometry.HotChunkKey(chunkID), string(geometry.HotTransient))
 }
 
 // FlipHotReady marks a hot-DB key "ready" (dir exists and usable). The caller
 // MUST have fsynced the dir (and its parent on creation) first.
 func (c *Catalog) FlipHotReady(chunkID chunk.ID) error {
-	return c.store.Put(geometry.HotChunkKey(chunkID), string(geometry.HotReady))
+	return c.put(geometry.HotChunkKey(chunkID), string(geometry.HotReady))
 }
 
 // deleteHotKey removes a hot-DB key — the close end, after rmdir. Idempotent.
@@ -177,7 +176,7 @@ func (c *Catalog) FlipHotReady(chunkID chunk.ID) error {
 // hot-key create/discard choreography now lives behind the catalog, so no other
 // package deletes a hot key directly.
 func (c *Catalog) deleteHotKey(chunkID chunk.ID) error {
-	return c.store.Delete(geometry.HotChunkKey(chunkID))
+	return c.del(geometry.HotChunkKey(chunkID))
 }
 
 // BeginHotCreate is the open end of the hot-DB create bracket, mirroring

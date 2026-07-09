@@ -10,7 +10,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Round-trip every key family through the real metastore (the geometry key
+// Round-trip every key family through the real catalog KV (the geometry key
 // schema read back through the Catalog).
 // ---------------------------------------------------------------------------
 

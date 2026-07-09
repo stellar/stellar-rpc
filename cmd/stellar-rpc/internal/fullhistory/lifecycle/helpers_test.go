@@ -16,7 +16,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/metastore"
 )
 
 // This file provides the shared test scaffolding the lifecycle tests need. The
@@ -38,22 +37,23 @@ func silentLogger() *supportlog.Entry {
 	return log
 }
 
-// newTestCatalog builds a Catalog over a real metastore on temp dirs with
-// cpi-wide tx-hash indexes; returns the catalog and artifact root (the store is
-// closed via t.Cleanup).
+// newTestCatalog builds a Catalog over a real KV store on temp dirs with
+// cpi-wide tx-hash indexes; returns the catalog (closed via t.Cleanup) and
+// artifact root.
 func newTestCatalog(t *testing.T, cpi uint32) (*catalog.Catalog, string) {
 	t.Helper()
 	metaDir := t.TempDir()
 	artifactRoot := t.TempDir()
 
-	store, err := metastore.New(filepath.Join(metaDir, "rocksdb"), silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
-
 	idxLayout, err := geometry.NewTxHashIndexLayout(cpi)
 	require.NoError(t, err)
 
-	return catalog.NewCatalog(store, geometry.NewLayout(artifactRoot), idxLayout), artifactRoot
+	cat, err := catalog.Open(
+		filepath.Join(metaDir, "rocksdb"), geometry.NewLayout(artifactRoot), idxLayout, silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.Close() })
+
+	return cat, artifactRoot
 }
 
 // testCatalog builds a catalog with the default (wide) tx-hash index, returning it

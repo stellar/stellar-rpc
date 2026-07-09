@@ -8,7 +8,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/durable"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/metastore"
 )
 
 // Key-driven sweeps — the ONLY two deletion bodies in the system, one per key
@@ -31,7 +30,7 @@ func (c *Catalog) SweepChunkArtifacts(refs []ArtifactRef) error {
 	}
 
 	// Demote first — never unlink under a "frozen" key.
-	if err := c.store.Batch(func(w *metastore.BatchWriter) error {
+	if err := c.batch(func(w batchWriter) error {
 		for _, ref := range refs {
 			if ref.State == geometry.StateFrozen {
 				w.Put(ref.Key(), string(geometry.StatePruning))
@@ -57,7 +56,7 @@ func (c *Catalog) SweepChunkArtifacts(refs []ArtifactRef) error {
 	}
 
 	// Delete the keys — only now that the unlinks are durable.
-	return c.store.Batch(func(w *metastore.BatchWriter) error {
+	return c.batch(func(w batchWriter) error {
 		for _, ref := range refs {
 			w.Delete(ref.Key())
 		}
@@ -73,7 +72,7 @@ func (c *Catalog) SweepChunkArtifacts(refs []ArtifactRef) error {
 // the durable value under it.
 func (c *Catalog) SweepTxHashIndexKey(cov geometry.TxHashIndexCoverage) error {
 	if cov.State == geometry.StateFrozen { // never unlink under a "frozen" key
-		if err := c.store.Put(cov.Key, string(geometry.StatePruning)); err != nil {
+		if err := c.put(cov.Key, string(geometry.StatePruning)); err != nil {
 			return err
 		}
 	}
@@ -85,7 +84,7 @@ func (c *Catalog) SweepTxHashIndexKey(cov geometry.TxHashIndexCoverage) error {
 	if err := durable.FsyncDir(dir); err != nil { // unlink durable BEFORE key delete
 		return err
 	}
-	if err := c.store.Delete(cov.Key); err != nil {
+	if err := c.del(cov.Key); err != nil {
 		return err
 	}
 	durable.RmdirIfEmpty(dir) // best-effort; an empty dir is not an artifact

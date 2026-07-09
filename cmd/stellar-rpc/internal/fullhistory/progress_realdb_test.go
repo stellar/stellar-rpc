@@ -84,7 +84,7 @@ func TestDeriveLastCommitted_RealHotDB_RefinementIsNotStale(t *testing.T) {
 	require.Equal(t, chunk.ID(4).LastLedger(), baseline)
 	require.Greater(t, committedTop, baseline, "fixture must put the real frontier above the baseline")
 
-	got, err := deriveLastCommitted(cat, silentLogger())
+	got, err := lastCommittedLedger(cat)
 	require.NoError(t, err)
 	require.Equal(t, committedTop, got,
 		"last committed ledger must equal the REAL ledgers-CF last key, not the positional baseline")
@@ -118,7 +118,7 @@ func TestDeriveLastCommitted_RealHotDB_OpensHighestReady(t *testing.T) {
 	// top, so reading the wrong chunk yields a strictly different (lower) answer.
 	require.Greater(t, highMid, lowTop)
 
-	got, err := deriveLastCommitted(cat, silentLogger())
+	got, err := lastCommittedLedger(cat)
 	require.NoError(t, err)
 	require.Equal(t, highMid, got,
 		"refinement must open the HIGHEST ready chunk (7), reading its committed mid-seq")
@@ -126,7 +126,7 @@ func TestDeriveLastCommitted_RealHotDB_OpensHighestReady(t *testing.T) {
 
 // TestDeriveLastCommitted_RealHotDB_EmptyLiveFallsBack is the count-only-ready case
 // against a real DB: a "ready" live chunk whose real hot DB has NO committed
-// ledger (MaxCommittedSeq ok=false) must fall back to deriveCompleteThrough, not
+// ledger (MaxCommittedSeq ok=false) must fall back to the positional baseline, not
 // fabricate a frontier. Read through a real read-only open by Layout path.
 func TestDeriveLastCommitted_RealHotDB_EmptyLiveFallsBack(t *testing.T) {
 	cat, _ := testCatalog(t)
@@ -137,7 +137,7 @@ func TestDeriveLastCommitted_RealHotDB_EmptyLiveFallsBack(t *testing.T) {
 	require.NoError(t, db.Close())
 
 	// A read-only open of the empty ledgers CF: ok=false, no refinement.
-	got, err := deriveLastCommitted(cat, silentLogger())
+	got, err := lastCommittedLedger(cat)
 	require.NoError(t, err)
 	require.Equal(t, chunk.ID(2).LastLedger(), got,
 		"empty live DB ⇒ positional baseline (max ready 3 - 1 = chunk 2), no fabricated frontier")

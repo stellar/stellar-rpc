@@ -20,7 +20,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/metastore"
 )
 
 // testCPI is the tx-hash index width tests build layouts with; equals the
@@ -40,29 +39,30 @@ func silentLogger() *supportlog.Entry {
 	return log
 }
 
-// newTestCatalog builds a Catalog over a real metastore on temp dirs with
-// cpi-wide tx-hash indexes; returns the catalog, open store, and artifact root.
-func newTestCatalog(t *testing.T, cpi uint32) (*catalog.Catalog, *metastore.Store, string) {
+// newTestCatalog builds a Catalog over a real KV store on temp dirs with
+// cpi-wide tx-hash indexes; returns the catalog (closed via t.Cleanup) and
+// artifact root.
+func newTestCatalog(t *testing.T, cpi uint32) (*catalog.Catalog, string) {
 	t.Helper()
 	metaDir := t.TempDir()
 	artifactRoot := t.TempDir()
 
-	store, err := metastore.New(filepath.Join(metaDir, "rocksdb"), silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
-
 	idxLayout, err := geometry.NewTxHashIndexLayout(cpi)
 	require.NoError(t, err)
 
-	return catalog.NewCatalog(store, geometry.NewLayout(artifactRoot), idxLayout), store, artifactRoot
+	cat, err := catalog.Open(
+		filepath.Join(metaDir, "rocksdb"), geometry.NewLayout(artifactRoot), idxLayout, silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.Close() })
+
+	return cat, artifactRoot
 }
 
 // testCatalog builds a catalog with the default (wide) tx-hash index, returning it
 // and the artifact root.
 func testCatalog(t *testing.T) (*catalog.Catalog, string) {
 	t.Helper()
-	cat, _, root := newTestCatalog(t, testCPI)
-	return cat, root
+	return newTestCatalog(t, testCPI)
 }
 
 // freezeKinds flips the given per-chunk kinds to "frozen" via the one-write protocol.

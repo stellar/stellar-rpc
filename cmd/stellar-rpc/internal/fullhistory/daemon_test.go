@@ -23,13 +23,19 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/fhtest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/metastore"
 )
 
-// openMetaAt opens a metastore.Store at path for read-back assertions.
-func openMetaAt(t *testing.T, path string) (*metastore.Store, error) {
+// openCatalogAt opens a catalog over the daemon's on-disk KV under dataDir for
+// read-back assertions (closed via t.Cleanup).
+func openCatalogAt(t *testing.T, dataDir string) *catalog.Catalog {
 	t.Helper()
-	return metastore.New(path, silentLogger())
+	txLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
+	require.NoError(t, err)
+	cat, err := catalog.Open(
+		filepath.Join(dataDir, "catalog", "rocksdb"), geometry.NewLayout(dataDir), txLayout, silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.Close() })
+	return cat
 }
 
 // writeTempConfig writes a minimal-valid daemon TOML (genesis floor ⇒ no tip
@@ -95,12 +101,7 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 
 	// validateConfig pinned earliest_ledger before start (cpi is a constant now,
 	// not a pinned value).
-	store, err := openMetaAt(t, filepath.Join(dataDir, "catalog", "rocksdb"))
-	require.NoError(t, err)
-	defer func() { _ = store.Close() }()
-	txLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
-	require.NoError(t, err)
-	cat := catalog.NewCatalog(store, geometry.NewLayout(dataDir), txLayout)
+	cat := openCatalogAt(t, dataDir)
 	earliest, pinned, err := cat.EarliestLedger()
 	require.NoError(t, err)
 	require.True(t, pinned, "validateConfig must pin earliest_ledger before run")
@@ -227,13 +228,8 @@ func TestRunDaemon_BackfillMaterializesAllColdTypesAndIndex(t *testing.T) {
 	}
 
 	// Read the catalog back after the daemon released locks + closed its store.
-	store, err := openMetaAt(t, filepath.Join(dataDir, "catalog", "rocksdb"))
-	require.NoError(t, err)
-	defer func() { _ = store.Close() }()
-	txLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
-	require.NoError(t, err)
-	layout := geometry.NewLayout(dataDir)
-	cat := catalog.NewCatalog(store, layout, txLayout)
+	cat := openCatalogAt(t, dataDir)
+	layout := cat.Layout()
 
 	// (1) Chunk 0's ledger + events artifacts are frozen, with files on disk.
 	ls, err := cat.State(0, geometry.KindLedgers)

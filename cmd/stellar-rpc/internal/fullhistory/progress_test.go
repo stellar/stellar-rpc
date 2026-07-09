@@ -49,7 +49,7 @@ func TestLastCommittedLedger(t *testing.T) {
 	t.Run("fresh store => pre-genesis sentinel, never MaxUint32", func(t *testing.T) {
 		// Every term is -1; the signed domain must yield FirstLedgerSeq-1, not wrap.
 		cat, _ := testCatalog(t)
-		got, err := deriveCompleteThrough(cat)
+		got, err := lastCommittedLedger(cat)
 		require.NoError(t, err)
 		require.Equal(t, geometry.PreGenesisLedger, got)
 	})
@@ -59,7 +59,7 @@ func TestLastCommittedLedger(t *testing.T) {
 		makeChunkDurable(t, cat, 0)
 		makeChunkDurable(t, cat, 1)
 		makeChunkDurable(t, cat, 2)
-		got, err := deriveCompleteThrough(cat)
+		got, err := lastCommittedLedger(cat)
 		require.NoError(t, err)
 		require.Equal(t, chunk.ID(2).LastLedger(), got)
 	})
@@ -71,7 +71,7 @@ func TestLastCommittedLedger(t *testing.T) {
 		// Chunk 2 mid-freeze (events only "freezing") must NOT count: bound stays at 1.
 		freezeKinds(t, cat, 2, geometry.KindLedgers, geometry.KindTxHash)
 		require.NoError(t, cat.MarkChunkFreezing(2, geometry.KindEvents))
-		got, err := deriveCompleteThrough(cat)
+		got, err := lastCommittedLedger(cat)
 		require.NoError(t, err)
 		require.Equal(t, chunk.ID(1).LastLedger(), got)
 	})
@@ -81,7 +81,7 @@ func TestLastCommittedLedger(t *testing.T) {
 		// Chunk 7: txhash demoted but a frozen index coverage spans it ⇒ still durable.
 		freezeKinds(t, cat, 7, geometry.KindLedgers, geometry.KindEvents)
 		freezeCoverage(t, cat, cat.TxHashIndexLayout().TxHashIndexID(7), 0, 999) // window 0 covers chunk 7
-		got, err := deriveCompleteThrough(cat)
+		got, err := lastCommittedLedger(cat)
 		require.NoError(t, err)
 		require.Equal(t, chunk.ID(7).LastLedger(), got)
 	})
@@ -91,7 +91,7 @@ func TestLastCommittedLedger(t *testing.T) {
 		makeChunkDurable(t, cat, 0)
 		// Chunk 1: ledgers+events frozen, no txhash, no covering index.
 		freezeKinds(t, cat, 1, geometry.KindLedgers, geometry.KindEvents)
-		got, err := deriveCompleteThrough(cat)
+		got, err := lastCommittedLedger(cat)
 		require.NoError(t, err)
 		require.Equal(t, chunk.ID(0).LastLedger(), got, "chunk 1 not durable; bound stays at chunk 0")
 	})
@@ -104,7 +104,7 @@ func TestLastCommittedLedger(t *testing.T) {
 		readyHot(t, cat, 3)
 		readyHot(t, cat, 4)
 		seedReadyLiveDB(t, cat, 5, 0)
-		got, err := deriveCompleteThrough(cat)
+		got, err := lastCommittedLedger(cat)
 		require.NoError(t, err)
 		require.Equal(t, chunk.ID(4).LastLedger(), got, "max ready (5) - 1 = chunk 4's last ledger")
 	})
@@ -114,7 +114,7 @@ func TestLastCommittedLedger(t *testing.T) {
 		seedReadyLiveDB(t, cat, 3, 0) // highest ready, empty DB ⇒ positional CompleteThrough(2)
 		// A transient key above the highest ready one must be excluded.
 		require.NoError(t, cat.PutHotTransient(9))
-		got, err := deriveCompleteThrough(cat)
+		got, err := lastCommittedLedger(cat)
 		require.NoError(t, err)
 		require.Equal(t, chunk.ID(2).LastLedger(), got, "max READY (3) - 1, ignoring transient 9")
 	})
@@ -124,7 +124,7 @@ func TestLastCommittedLedger(t *testing.T) {
 		// pre-genesis sentinel, not ID(4294967295).LastLedger().
 		cat, _ := testCatalog(t)
 		seedReadyLiveDB(t, cat, 0, 0) // ready chunk 0, empty DB ⇒ positional fallback
-		got, err := deriveCompleteThrough(cat)
+		got, err := lastCommittedLedger(cat)
 		require.NoError(t, err)
 		require.Equal(t, geometry.PreGenesisLedger, got)
 	})
@@ -134,7 +134,7 @@ func TestLastCommittedLedger(t *testing.T) {
 		// Floor pinned mid-chain, no chunks durable, no hot keys.
 		const floor = 50000
 		require.NoError(t, cat.PinEarliestLedger(floor))
-		got, err := deriveCompleteThrough(cat)
+		got, err := lastCommittedLedger(cat)
 		require.NoError(t, err)
 		require.Equal(t, uint32(floor-1), got)
 	})
@@ -142,7 +142,7 @@ func TestLastCommittedLedger(t *testing.T) {
 	t.Run("earliest pin == genesis (2) does not underflow", func(t *testing.T) {
 		cat, _ := testCatalog(t)
 		require.NoError(t, cat.PinEarliestLedger(chunk.FirstLedgerSeq))
-		got, err := deriveCompleteThrough(cat)
+		got, err := lastCommittedLedger(cat)
 		require.NoError(t, err)
 		require.Equal(t, geometry.PreGenesisLedger, got, "earliest 2 - 1 = 1, not MaxUint32")
 	})
@@ -152,25 +152,25 @@ func TestLastCommittedLedger(t *testing.T) {
 		makeChunkDurable(t, cat, 0)   // cold => chunk 0 last ledger
 		seedReadyLiveDB(t, cat, 4, 0) // positional (empty DB) => chunk 3 last ledger (highest)
 		require.NoError(t, cat.PinEarliestLedger(2))
-		got, err := deriveCompleteThrough(cat)
+		got, err := lastCommittedLedger(cat)
 		require.NoError(t, err)
 		require.Equal(t, chunk.ID(3).LastLedger(), got)
 	})
 }
 
 // ---------------------------------------------------------------------------
-// deriveLastCommitted — deriveCompleteThrough + one read-only refinement of the
-// highest ready hot DB, opened lazily by its Layout path. These read REAL
+// The hot refinement: lastCommittedLedger's one read-only open of the
+// highest ready hot DB, lazily by its Layout path. These read REAL
 // per-chunk hot DBs; the sub-chunk-precision / opens-highest / empty-fallback
 // value cases are covered against real DBs in progress_realdb_test.go.
 // ---------------------------------------------------------------------------
 
 func TestDeriveLastCommitted(t *testing.T) {
-	t.Run("no ready hot keys => equals deriveCompleteThrough, no open", func(t *testing.T) {
+	t.Run("no ready hot keys => cold/floor terms only, no open", func(t *testing.T) {
 		cat, _ := testCatalog(t)
 		makeChunkDurable(t, cat, 0)
 		// No ready key above the cold term ⇒ the hot>cold gate skips the open entirely.
-		got, err := deriveLastCommitted(cat, silentLogger())
+		got, err := lastCommittedLedger(cat)
 		require.NoError(t, err)
 		require.Equal(t, chunk.ID(0).LastLedger(), got)
 	})
@@ -190,7 +190,7 @@ func TestDeriveLastCommitted(t *testing.T) {
 		require.Equal(t, chunk.ID(3).LastLedger(), geometry.ChunkLastLedger(3),
 			"positional term alone under-counts to chunk 3")
 
-		got, err := deriveLastCommitted(cat, silentLogger())
+		got, err := lastCommittedLedger(cat)
 		require.NoError(t, err)
 		require.Equal(t, chunk4Last, got, "refinement recovers the chunk-4 frontier")
 	})
@@ -206,7 +206,7 @@ func TestDeriveLastCommitted(t *testing.T) {
 		require.NoError(t, cat.FlipHotReady(2)) // ready key 2, NO dir (not opened here)
 		highSeq := chunk.ID(5).FirstLedger() + 10
 		seedReadyLiveDB(t, cat, 5, highSeq) // highest ready key 5 WITH real DB (opened)
-		got, err := deriveLastCommitted(cat, silentLogger())
+		got, err := lastCommittedLedger(cat)
 		require.NoError(t, err)
 		require.Equal(t, highSeq, got, "refined to the highest ready chunk's seq")
 	})
@@ -218,7 +218,7 @@ func TestDeriveLastCommitted(t *testing.T) {
 		// never auto-heals it into a fresh empty DB.
 		require.NoError(t, cat.PutHotTransient(5))
 		require.NoError(t, cat.FlipHotReady(5)) // ready key 5, NO dir
-		_, err := deriveLastCommitted(cat, silentLogger())
+		_, err := lastCommittedLedger(cat)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "00000005")
 	})
@@ -226,7 +226,7 @@ func TestDeriveLastCommitted(t *testing.T) {
 	t.Run("live chunk 0 ready, empty DB => pre-genesis, no underflow", func(t *testing.T) {
 		cat, _ := testCatalog(t)
 		seedReadyLiveDB(t, cat, 0, 0) // ready + real dir, nothing committed
-		got, err := deriveLastCommitted(cat, silentLogger())
+		got, err := lastCommittedLedger(cat)
 		require.NoError(t, err)
 		require.Equal(t, geometry.PreGenesisLedger, got)
 	})

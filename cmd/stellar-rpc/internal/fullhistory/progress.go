@@ -3,8 +3,6 @@ package fullhistory
 import (
 	"fmt"
 
-	supportlog "github.com/stellar/go-stellar-sdk/support/log"
-
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
@@ -29,9 +27,10 @@ import (
 //   - FLOOR — EarliestLedger()-1 as int64(earliest)-1, so an absent/zero pin
 //     yields the pre-genesis sentinel rather than underflowing.
 //
-// logger is required (hotchunk.OpenReadyView needs it); there is no logger-less
-// mode — the tick derives the frontier the same way startup does.
-func lastCommittedLedger(cat *catalog.Catalog, logger *supportlog.Entry) (uint32, error) {
+// The refinement's read-only open reuses the catalog's own logger
+// (hotchunk.OpenReadyView needs one), landing the design signature
+// lastCommittedLedger(cat).
+func lastCommittedLedger(cat *catalog.Catalog) (uint32, error) {
 	cold, err := highestDurableChunk(cat)
 	if err != nil {
 		return 0, err
@@ -45,7 +44,7 @@ func lastCommittedLedger(cat *catalog.Catalog, logger *supportlog.Entry) (uint32
 	if hot > cold {
 		// One refinement read of the highest ready hot DB; loss detected lazily on
 		// this open (no eager scan over every ready key).
-		refined, rerr := refineWithHotDB(cat, logger, hot)
+		refined, rerr := refineWithHotDB(cat, hot)
 		if rerr != nil {
 			return 0, rerr
 		}
@@ -71,12 +70,12 @@ func lastCommittedLedger(cat *catalog.Catalog, logger *supportlog.Entry) (uint32
 // (restartable) error — the read-only open never auto-heals it into a fresh empty
 // DB. A read-only open replays any crash-left synced WAL into memtables, so
 // MaxCommittedSeq is correct even after an ungraceful crash.
-func refineWithHotDB(cat *catalog.Catalog, logger *supportlog.Entry, live int64) (uint32, error) {
+func refineWithHotDB(cat *catalog.Catalog, live int64) (uint32, error) {
 	id := chunk.ID(live) //nolint:gosec // live > cold >= -1, so live >= 0
 	// live is the highest "ready" hot chunk (from ReadyHotChunkKeys), so route the
 	// read-only open through the single ready-open enforcement site: must-exist,
 	// never auto-healed, uniform won't-open error.
-	hot, openErr := hotchunk.OpenReadyView(geometry.HotReady, cat.Layout().HotChunkPath(id), id, logger)
+	hot, openErr := hotchunk.OpenReadyView(geometry.HotReady, cat.Layout().HotChunkPath(id), id, cat.Logger())
 	if openErr != nil {
 		return 0, openErr
 	}

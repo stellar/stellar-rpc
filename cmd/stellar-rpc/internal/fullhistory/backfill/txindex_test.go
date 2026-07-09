@@ -263,7 +263,7 @@ func TestBuildThenSweep_TerminalDemotesAndSweepsAllInputs(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildTxhashIndex_SkipsWhenCoverageAlreadyFrozen(t *testing.T) {
-	cat, store, _ := newStreamingTestCatalog(t, 4)
+	cat, _ := newStreamingTestCatalog(t, 4)
 	cfg := testBuildConfig(cat)
 
 	e := txEntry{hashAt(300), seqIn(0, 3)}
@@ -279,12 +279,14 @@ func TestBuildTxhashIndex_SkipsWhenCoverageAlreadyFrozen(t *testing.T) {
 	before, err := os.Stat(idxPath)
 	require.NoError(t, err)
 
-	// Now demote the .bin inputs to "pruning" — simulating a finalized window
-	// whose inputs the sweep is about to remove. A second build of the SAME
-	// coverage must SKIP (never demand the now-non-frozen inputs). The catalog
-	// has no public setter for a raw "pruning" chunk key, so seed it on the store.
-	require.NoError(t, store.Put(geometry.ChunkKey(0, geometry.KindTxHash), string(geometry.StatePruning)))
-	require.NoError(t, store.Put(geometry.ChunkKey(1, geometry.KindTxHash), string(geometry.StatePruning)))
+	// Now sweep the .bin inputs via the real sweep (demote → unlink → key
+	// delete) — the finalized-window state after its inputs are removed. A
+	// second build of the SAME coverage must SKIP (never demand the
+	// now-gone inputs).
+	require.NoError(t, cat.SweepChunkArtifacts([]catalog.ArtifactRef{
+		{Chunk: 0, Kind: geometry.KindTxHash, State: geometry.StateFrozen},
+		{Chunk: 1, Kind: geometry.KindTxHash, State: geometry.StateFrozen},
+	}))
 
 	require.NoError(t, buildTxhashIndex(context.Background(), 0, 0, 1, cfg),
 		"skip check must precede the precondition")

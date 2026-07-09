@@ -23,7 +23,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/metastore"
 )
 
 // RunDaemon is the full-history daemon's process entrypoint: load config, lock
@@ -97,13 +96,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	}
 	defer locks.Release()
 
-	// --- Open the catalog store and bind the catalog. ---
-	store, err := metastore.New(paths.Catalog, logger)
-	if err != nil {
-		return fmt.Errorf("open catalog %q: %w", paths.Catalog, err)
-	}
-	defer func() { _ = store.Close() }()
-
+	// --- Open the catalog (it owns its backing KV store; Close releases it). ---
 	cpi := geometry.ChunksPerTxhashIndex
 	if opts.chunksPerTxhashIndex != 0 {
 		cpi = opts.chunksPerTxhashIndex
@@ -112,7 +105,11 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	if err != nil {
 		return err
 	}
-	cat := catalog.NewCatalog(store, config.NewLayoutFromPaths(paths), txLayout)
+	cat, err := catalog.Open(paths.Catalog, config.NewLayoutFromPaths(paths), txLayout, logger)
+	if err != nil {
+		return fmt.Errorf("open catalog %q: %w", paths.Catalog, err)
+	}
+	defer func() { _ = cat.Close() }()
 
 	// --- Resolve the backfill backend: injected (tests) or built from
 	// [backfill.datastore] (production; nil ⇒ frontfill-only). Its Tip drives both
