@@ -8,7 +8,7 @@ import (
 )
 
 func okLeg(md string) []leg {
-	return []leg{{Label: "Apply-load ingestion", Passed: "true", Verdict: "ok", markdown: md}}
+	return []leg{{Label: "Apply-load ingestion", verdict: "ok", markdown: md}}
 }
 
 func TestParsePrevNumber(t *testing.T) {
@@ -34,7 +34,7 @@ func TestRenderComment_FirstRun(t *testing.T) {
 }
 
 func TestRenderLeg_FallbackWhenNoResult(t *testing.T) {
-	out := renderLeg(leg{Label: "X", Passed: "false", Verdict: ""})
+	out := renderLeg(leg{Label: "X"})
 	require.Contains(t, out, "### ❌ X — verdict: none")
 	require.Contains(t, out, "No result object published")
 }

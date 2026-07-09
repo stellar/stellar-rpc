@@ -32,15 +32,14 @@ var (
 	seriesHeadingRe = regexp.MustCompile(`^## .*Performance Evaluation Test #[0-9]+$`)
 )
 
-// leg is one perf-eval area's outcome from the coordinator workflow; markdown is
-// the body fetched from its result object at s3://Bucket/Key ("" when none).
+// leg is one perf-eval area from the coordinator workflow; verdict and markdown
+// come from its result object at s3://Bucket/Key (both "" when none published).
 type leg struct {
-	Label   string `json:"label"`
-	Bucket  string `json:"bucket"`
-	Key     string `json:"key"`
-	Passed  string `json:"passed"`  // "true" when the leg reported an ok verdict
-	Verdict string `json:"verdict"` // "ok"/"fail", empty on timeout
+	Label  string `json:"label"`
+	Bucket string `json:"bucket"`
+	Key    string `json:"key"`
 
+	verdict  string // "ok"/"fail", empty on timeout
 	markdown string
 }
 
@@ -69,7 +68,7 @@ func run(ctx context.Context) error {
 	}
 	s3Client := s3.NewFromConfig(awsCfg)
 	for i := range legs {
-		legs[i].markdown = fetchMarkdown(ctx, s3Client, legs[i].Bucket, legs[i].Key)
+		legs[i].verdict, legs[i].markdown = fetchResult(ctx, s3Client, legs[i].Bucket, legs[i].Key)
 	}
 
 	body := renderComment(commentInput{
@@ -114,11 +113,11 @@ func renderComment(in commentInput) string {
 // or a fallback when no result object was published.
 func renderLeg(l leg) string {
 	emoji := "❌"
-	if l.Passed == "true" {
+	if l.verdict == "ok" {
 		emoji = "✅"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n### %s %s — verdict: %s\n\n", emoji, l.Label, cmp.Or(l.Verdict, "none"))
+	fmt.Fprintf(&b, "\n### %s %s — verdict: %s\n\n", emoji, l.Label, cmp.Or(l.verdict, "none"))
 	if strings.TrimSpace(l.markdown) != "" {
 		b.WriteString(strings.TrimRight(l.markdown, "\n"))
 		b.WriteByte('\n')
@@ -176,31 +175,32 @@ func parsePrevNumber(body string) int {
 	return 0
 }
 
-// fetchMarkdown returns the leg result object's rendered markdown, or "" when the
-// object is missing or unreadable (a timeout or pre-publish failure).
-func fetchMarkdown(ctx context.Context, client *s3.Client, bucket, key string) string {
+// fetchResult returns the leg result object's verdict and rendered markdown, or
+// ""s when the object is missing or unreadable (a timeout or pre-publish failure).
+func fetchResult(ctx context.Context, client *s3.Client, bucket, key string) (string, string) {
 	if bucket == "" || key == "" {
-		return ""
+		return "", ""
 	}
 	out, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: &bucket, Key: &key})
 	if err != nil {
 		logger.Warnf("no result object at s3://%s/%s: %v", bucket, key, err)
-		return ""
+		return "", ""
 	}
 	defer out.Body.Close()
 	data, err := io.ReadAll(out.Body)
 	if err != nil {
 		logger.Warnf("reading s3://%s/%s: %v", bucket, key, err)
-		return ""
+		return "", ""
 	}
 	var res struct {
+		Verdict  string `json:"verdict"`
 		Markdown string `json:"markdown"`
 	}
 	if err := json.Unmarshal(data, &res); err != nil {
 		logger.Warnf("decoding s3://%s/%s: %v", bucket, key, err)
-		return ""
+		return "", ""
 	}
-	return res.Markdown
+	return res.Verdict, res.Markdown
 }
 
 func parseLegs(s string) ([]leg, error) {

@@ -1,7 +1,9 @@
 name: Load test coordinator
 # Drives the ephemeral load test(s) for a release: resolves the release context,
-# fans out to the callable load-test workflow, then aggregates one consolidated
+# fans out one ec2-leg call per planned leg, then aggregates one consolidated
 # sticky comment on the release PR. Owns reporting of perf eval results to the PR.
+# Legs report through S3 at runs/<run_id>/<run_label>/result.json; adding a leg
+# is one roster entry in the plan job plus its box script.
 
 defaults:
   run:
@@ -40,6 +42,7 @@ jobs:
     outputs:
       target_sha: ${{ steps.ctx.outputs.target_sha }}
       pr_number: ${{ steps.ctx.outputs.pr_number }}
+      legs: ${{ steps.ctx.outputs.legs }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -56,19 +59,23 @@ jobs:
           {
             echo "target_sha=$SHA"
             echo "pr_number=$PR"
+            echo 'legs=[{"label":"Apply-load ingestion","run_label":"apply-load","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh"}]'
           } >> "$GITHUB_OUTPUT"
 
-  # The fan-out: one ec2-leg call per leg. Further legs slot in as sibling jobs
-  # the report aggregates.
+  # The fan-out: one matrix entry per leg.
   load-test:
-    name: Apply-load ingestion
+    name: ${{ matrix.leg.label }}
     needs: plan
+    strategy:
+      fail-fast: false # stops one leg's failure from cancelling other legs
+      matrix:
+        leg: ${{ fromJSON(needs.plan.outputs.legs) }}
     uses: ./.github/workflows/ec2-leg.yml
     secrets: inherit
     with:
       target_ref: ${{ needs.plan.outputs.target_sha }}
-      run_label: apply-load
-      leg_script: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh
+      run_label: ${{ matrix.leg.run_label }}
+      leg_script: ${{ matrix.leg.script }}
 
   report:
     name: Aggregate + report
@@ -100,7 +107,8 @@ jobs:
           TARGET_SHA: ${{ needs.plan.outputs.target_sha }}
           TARGET_REF: ${{ inputs.target_ref || github.ref_name }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          LEGS: '[{"label":"Apply-load ingestion","bucket":"${{ needs.load-test.outputs.bucket }}","key":"${{ needs.load-test.outputs.result_key }}","passed":"${{ needs.load-test.outputs.passed }}","verdict":"${{ needs.load-test.outputs.verdict }}"}]'
+          PLANNED_LEGS: ${{ needs.plan.outputs.legs }}
+          BUCKET: stellar-rpc-ci-load-test # must match ec2-leg.yml
         run: |
           set -uo pipefail
           MARKER='<!-- load-test-results -->'
@@ -113,6 +121,12 @@ jobs:
               --jq "map(select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\")))) | .[0].id // empty" || true)
             [ -n "$CID" ] && PREV=$(gh api "repos/$REPO/issues/comments/$CID" --jq '.body' || true)
           fi
+
+          # Result locations are deterministic (runs/<run_id>/<run_label>/result.json);
+          # derive each leg's fetch spec from the roster.
+          LEGS=$(jq -c --arg pfx "runs/$GITHUB_RUN_ID" --arg b "$BUCKET" \
+            'map({label, bucket: $b, key: ($pfx + "/" + .run_label + "/result.json")})' <<<"$PLANNED_LEGS")
+          export LEGS
 
           # Render the new body (fetches each leg's S3 result, folds prior runs).
           if ! printf '%s' "$PREV" | go run "$PERF_EVAL" > /tmp/comment.md; then
@@ -142,8 +156,8 @@ jobs:
       - name: Set overall status
         if: always()
         run: |
-          if [ "${{ needs.load-test.outputs.passed }}" != "true" ]; then
-            echo "::error::Apply-load ingestion leg did not pass (result=${{ needs.load-test.result }}, verdict=${{ needs.load-test.outputs.verdict }})"
+          if [ "${{ needs.load-test.result }}" != "success" ]; then
+            echo "::error::one or more legs did not pass (aggregate result: ${{ needs.load-test.result }})"
             exit 1
           fi
           echo "all load-test legs passed"
