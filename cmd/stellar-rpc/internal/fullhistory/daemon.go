@@ -296,7 +296,9 @@ type captiveCoreOpener struct {
 // get-commands) come from [ingestion].history_archive_urls. The toml params
 // mirror the RPC daemon (strict, unified events, soroban diagnostic/meta
 // enforcement) so the ingested meta is what the events + txhash stores need.
-func newCaptiveCoreOpener(ing config.IngestionConfig, dataDir string, logger *supportlog.Entry) (*captiveCoreOpener, error) {
+func newCaptiveCoreOpener(
+	ing config.IngestionConfig, dataDir string, logger *supportlog.Entry,
+) (*captiveCoreOpener, error) {
 	if ing.CaptiveCoreConfig == "" {
 		return nil, errors.New("[ingestion].captive_core_config is required for live ingestion")
 	}

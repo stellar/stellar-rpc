@@ -7,8 +7,9 @@ package fhtest
 import (
 	"testing"
 
-	"github.com/stellar/go-stellar-sdk/xdr"
 	"github.com/stretchr/testify/require"
+
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 // ZeroTxLCMBytes returns the marshaled bytes of a minimal, zero-transaction
