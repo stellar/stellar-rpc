@@ -11,10 +11,11 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/durable"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/txhash"
 )
 
 // IndexBuild names one tx-hash index rebuild: the window and coverage [Lo, Hi].
@@ -100,7 +101,7 @@ func buildTxhashIndex(ctx context.Context, w geometry.TxHashIndexID, lo, hi chun
 	}
 
 	// one-write:barrier — fsync the .idx file + its dirents before the keys flip.
-	if barErr := geometry.BarrierNewFile(idxPath); barErr != nil {
+	if barErr := durable.BarrierNewFile(idxPath); barErr != nil {
 		return fmt.Errorf("buildTxhashIndex fsync barrier %s: %w", idxPath, barErr)
 	}
 

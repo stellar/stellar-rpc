@@ -6,7 +6,7 @@ package fullhistory
 // WHAT IS REAL HERE
 //   Everything inside the process is the real production code path:
 //     - runDaemonWith (the true daemon entrypoint): TOML load + form-validate,
-//       per-root flock, meta-store open + Catalog bind, the stateful
+//       per-root flock, catalog open (its own KV store), the stateful
 //       validateConfig gate (pins the floor), and the supervised run loop.
 //     - run → backfillToTip → openHotDBForChunk → runIngestionLoop (the real
 //       atomic per-ledger WriteBatch across all CFs of the real per-chunk
@@ -50,13 +50,14 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/config"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/fhtest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/txhash"
 )
 
 // e2eCore is the CoreOpener handing back a fresh e2eStream per daemon run (a
@@ -310,7 +311,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 		case c2First:
 			frames[seq] = hotRaw
 		default:
-			frames[seq] = zeroTxLCMBytes(t, seq)
+			frames[seq] = fhtest.ZeroTxLCMBytes(t, seq)
 		}
 	}
 	// Chunks 0 and 1 in full (both freeze), then chunk 2's first two ledgers.
@@ -355,7 +356,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	waitClean(t, cancel, done)
 
 	// Bind a fresh inspection catalog on the (now lock-free) data dir for the
-	// post-shutdown reads. It MUST be closed before the restart reopens the metastore.
+	// post-shutdown reads. It MUST be closed before the restart reopens the catalog store.
 	postCat, closePost := e2eReadCatalog(t, dataDir)
 	w0 := postCat.TxHashIndexLayout().TxHashIndexID(c0)
 
@@ -433,7 +434,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	// STEP 5 — RESTART. A fresh runDaemonWith re-opens everything, re-derives the
 	// last committed ledger from durable state, and resumes captive core at last committed ledger + 1 with no gap.
 	// =====================================================================
-	closePost() // release the inspection metastore handle before the daemon reopens it
+	closePost() // release the inspection catalog handle before the daemon reopens it
 	core.opens.Store(0)
 	core.fromSeen.Store(0)
 	cancel2, done2 := runDaemonInBackground(t, cfgPath, core, &served, &e2eMetrics{})
@@ -496,26 +497,26 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	assert.False(t, covOK, "chunk 0's window coverage is pruned ⇒ a chunk-0 hash read is not-found")
 }
 
-// e2eReadCatalog binds a Catalog over a SEPARATE metastore handle on the daemon's
-// data dir, with the same one-chunk window the daemon's test seam uses, for
-// read-only inspection BETWEEN daemon runs (the metastore is RocksDB-primary, so
-// this MUST be closed via the returned close func before the next daemon run).
+// e2eReadCatalog opens a SEPARATE catalog handle on the daemon's data dir, with
+// the same one-chunk window the daemon's test seam uses, for read-only
+// inspection BETWEEN daemon runs (the catalog store is RocksDB-primary, so this
+// MUST be closed via the returned close func before the next daemon run).
 func e2eReadCatalog(t *testing.T, dataDir string) (*catalog.Catalog, func()) {
 	t.Helper()
-	paths := Config{Service: ServiceConfig{DefaultDataDir: dataDir}}.WithDefaults().ResolvePaths()
-	store, err := openMetaAt(t, paths.Catalog)
-	require.NoError(t, err)
+	paths := config.Config{Service: config.ServiceConfig{DefaultDataDir: dataDir}}.WithDefaults().ResolvePaths()
 	windows, err := geometry.NewTxHashIndexLayout(1) // matches chunksPerTxhashIndex = 1
 	require.NoError(t, err)
-	return catalog.NewCatalog(store, NewLayoutFromPaths(paths), windows), func() { _ = store.Close() }
+	cat, err := catalog.Open(paths.Catalog, config.NewLayoutFromPaths(paths), windows, silentLogger())
+	require.NoError(t, err)
+	return cat, func() { _ = cat.Close() }
 }
 
 // mustDeriveLastCommitted derives the durable last-committed ledger with the
-// read-only hot-DB refinement (passing a logger opens the highest ready hot DB by
-// its Layout path).
+// read-only hot-DB refinement (which opens the highest ready hot DB by its
+// Layout path).
 func mustDeriveLastCommitted(t *testing.T, cat *catalog.Catalog) uint32 {
 	t.Helper()
-	lastCommitted, err := lifecycle.LastCommittedLedger(cat, silentLogger())
+	lastCommitted, err := lastCommittedLedger(cat)
 	require.NoError(t, err)
 	return lastCommitted
 }

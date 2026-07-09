@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
 // PinEarliestLedger writes the sole config pin; EarliestLedger reads it back.
@@ -101,8 +101,8 @@ func TestFrozenCoverageDetectsTwoFrozen(t *testing.T) {
 	// Force the invariant-violating state directly through the store: two
 	// frozen coverages in one index. FrozenTxHashIndex must detect it, not pick
 	// one.
-	require.NoError(t, cat.store.Put(geometry.TxHashIndexKey(5, 5100, 5349), string(geometry.StateFrozen)))
-	require.NoError(t, cat.store.Put(geometry.TxHashIndexKey(5, 5100, 5350), string(geometry.StateFrozen)))
+	require.NoError(t, cat.put(geometry.TxHashIndexKey(5, 5100, 5349), string(geometry.StateFrozen)))
+	require.NoError(t, cat.put(geometry.TxHashIndexKey(5, 5100, 5350), string(geometry.StateFrozen)))
 
 	_, _, err := cat.FrozenTxHashIndex(5)
 	require.Error(t, err)

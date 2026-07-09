@@ -15,7 +15,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
 // run is the daemon's startup, in two steps: (1) BACKFILL to the tip, then
@@ -49,11 +49,11 @@ func run(ctx context.Context, cfg StartConfig) error {
 	}
 
 	// Derived, never stored: highest durably-committed ledger (frozen cold artifacts
-	// vs the highest ready hot DB's max committed seq), clamped by earliest-1. Passing
-	// the logger refines with one read-only open of the highest ready hot DB before
+	// vs the highest ready hot DB's max committed seq), clamped by earliest-1. The
+	// derivation refines with one read-only open of the highest ready hot DB before
 	// ingestion opens a writer; a read-only open replays any synced WAL from an
 	// ungraceful crash into memtables, so MaxCommittedSeq is correct.
-	lastCommitted, err := lifecycle.LastCommittedLedger(cat, logger)
+	lastCommitted, err := lastCommittedLedger(cat)
 	if err != nil {
 		return fmt.Errorf("startup derive last-committed: %w", err)
 	}

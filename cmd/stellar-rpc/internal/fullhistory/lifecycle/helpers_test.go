@@ -11,21 +11,19 @@ import (
 	"github.com/stretchr/testify/require"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
-	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
 )
 
 // This file provides the shared test scaffolding the lifecycle tests need. The
 // catalog/fixture helpers are copied verbatim from the root fullhistory package's
 // helpers_test.go (which still serves the root tests). The hot-tier helpers
 // (openHotDBForChunk / openLiveHotDB) create the SAME on-disk "ready" hot DBs the
-// real daemon does, so the lifecycle tick freezes and the last committed ledger refinement
-// read the genuine hot DBs by path (the way production does after #22).
+// real daemon does, so the lifecycle tick's freeze reads the genuine hot DBs by
+// path (the way production does after #22).
 
 // testCPI is the tx-hash index width tests build layouts with; equals the
 // production constant so on-disk geometry reads back identically.
@@ -39,22 +37,23 @@ func silentLogger() *supportlog.Entry {
 	return log
 }
 
-// newTestCatalog builds a Catalog over a real metastore on temp dirs with
-// cpi-wide tx-hash indexes; returns the catalog and artifact root (the store is
-// closed via t.Cleanup).
+// newTestCatalog builds a Catalog over a real KV store on temp dirs with
+// cpi-wide tx-hash indexes; returns the catalog (closed via t.Cleanup) and
+// artifact root.
 func newTestCatalog(t *testing.T, cpi uint32) (*catalog.Catalog, string) {
 	t.Helper()
 	metaDir := t.TempDir()
 	artifactRoot := t.TempDir()
 
-	store, err := metastore.New(filepath.Join(metaDir, "rocksdb"), silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
-
 	idxLayout, err := geometry.NewTxHashIndexLayout(cpi)
 	require.NoError(t, err)
 
-	return catalog.NewCatalog(store, geometry.NewLayout(artifactRoot), idxLayout), artifactRoot
+	cat, err := catalog.Open(
+		filepath.Join(metaDir, "rocksdb"), geometry.NewLayout(artifactRoot), idxLayout, silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.Close() })
+
+	return cat, artifactRoot
 }
 
 // testCatalog builds a catalog with the default (wide) tx-hash index, returning it
@@ -89,37 +88,12 @@ func freezeCoverage(t *testing.T, cat *catalog.Catalog, w geometry.TxHashIndexID
 	require.NoError(t, cat.CommitTxHashIndex(cov))
 }
 
-// zeroTxLCMBytes builds wire bytes of a minimal valid zero-tx V2 LedgerCloseMeta;
-// zero-tx keeps a full 10k-ledger chunk pass cheap.
-func zeroTxLCMBytes(t *testing.T, seq uint32) []byte {
-	t.Helper()
-	lcm := xdr.LedgerCloseMeta{
-		V: 2,
-		V2: &xdr.LedgerCloseMetaV2{
-			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
-				Header: xdr.LedgerHeader{
-					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(0)},
-					LedgerSeq: xdr.Uint32(seq),
-				},
-			},
-			TxSet: xdr.GeneralizedTransactionSet{
-				V:       1,
-				V1TxSet: &xdr.TransactionSetV1{Phases: nil},
-			},
-			TxProcessing: nil,
-		},
-	}
-	raw, err := lcm.MarshalBinary()
-	require.NoError(t, err)
-	return raw
-}
-
 // ---------------------------------------------------------------------------
 // Hot-tier test scaffolding: a test-local equivalent of the root package's hot
 // DB opener (hotloop.go's openHotDBForChunk). It uses only the public
 // hotchunk/catalog APIs the production code uses, so a lifecycle test creates the
-// SAME on-disk "ready" hot DB the real daemon would — which the freeze and the
-// last committed ledger refinement then open by Layout path, exactly as production does.
+// SAME on-disk "ready" hot DB the real daemon would — which the freeze then
+// opens by Layout path, exactly as production does.
 // ---------------------------------------------------------------------------
 
 // openHotDBForChunk creates a "ready" shared hot DB for chunkID under the

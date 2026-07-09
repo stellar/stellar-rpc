@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
 // ---------------------------------------------------------------------------
@@ -55,7 +55,7 @@ func TestSweepChunkArtifactsIdempotentOnMissingFiles(t *testing.T) {
 
 	// Key present, file never written (a "pruning" leftover whose file is
 	// already gone).
-	require.NoError(t, cat.store.Put(geometry.ChunkKey(8, geometry.KindLedgers), string(geometry.StatePruning)))
+	require.NoError(t, cat.put(geometry.ChunkKey(8, geometry.KindLedgers), string(geometry.StatePruning)))
 	require.NoError(t, cat.SweepChunkArtifacts([]ArtifactRef{
 		{Chunk: 8, Kind: geometry.KindLedgers, State: geometry.StatePruning},
 	}))

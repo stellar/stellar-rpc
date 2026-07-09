@@ -13,11 +13,12 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/durable"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/ledger"
 )
 
 // ErrBackendCoverageTimeout is returned when the bulk backend's tip never reaches the chunk in time.
@@ -118,7 +119,7 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 	// created is made durable too.
 	for _, kind := range kinds {
 		for _, path := range layout.ArtifactPaths(chunkID, kind) {
-			if berr := geometry.BarrierNewFile(path); berr != nil {
+			if berr := durable.BarrierNewFile(path); berr != nil {
 				return fmt.Errorf("fsync barrier %s: %w", path, berr)
 			}
 		}
@@ -207,7 +208,7 @@ func resolveHotSource(
 	if hotState != geometry.HotReady {
 		return nil, nil, false, nil // "transient"/absent: not a read source
 	}
-	return tryHotSource(chunkID, cfg)
+	return tryHotSource(hotState, chunkID, cfg)
 }
 
 // tryHotSource handles the hot branch under a "ready" key: it opens the chunk's
@@ -215,15 +216,18 @@ func resolveHotSource(
 // used=true when present AND complete; used=false when present-but-incomplete
 // (staleness, caller falls through); err when a "ready" DB is absent or unopenable
 // — an ordinary restartable error, detected lazily on the open.
-func tryHotSource(chunkID chunk.ID, cfg ProcessConfig) (ledgerbackend.LedgerStream, func() error, bool, error) {
+func tryHotSource(
+	state geometry.HotState, chunkID chunk.ID, cfg ProcessConfig,
+) (ledgerbackend.LedgerStream, func() error, bool, error) {
 	dir := cfg.Catalog.Layout().HotChunkPath(chunkID)
-	// Open the chunk's shared multi-CF DB READ-ONLY: the freeze reads its ledgers to
-	// re-derive the cold artifacts and must never mutate it (the read-only open
-	// replays any un-synced WAL into memtables but persists nothing). An absent or
-	// gutted "ready" DB fails the open — restartable, never auto-created.
-	hot, err := hotchunk.OpenReadOnly(dir, chunkID, cfg.Logger)
+	// Open the chunk's shared multi-CF DB READ-ONLY via the single ready-open
+	// enforcement site: the freeze reads its ledgers to re-derive the cold artifacts
+	// and must never mutate it (the read-only open replays any un-synced WAL into
+	// memtables but persists nothing). An absent or gutted "ready" DB fails the open
+	// — restartable, never auto-created.
+	hot, err := hotchunk.OpenReadyView(state, dir, chunkID, cfg.Logger)
 	if err != nil {
-		return nil, nil, false, fmt.Errorf("chunk %s is ready but its hot DB won't open: %w", chunkID, err)
+		return nil, nil, false, err
 	}
 	maxSeq, present, merr := hot.MaxCommittedSeq()
 	if merr != nil {

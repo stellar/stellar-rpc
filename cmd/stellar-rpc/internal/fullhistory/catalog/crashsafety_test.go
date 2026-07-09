@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/durable"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 )
 
@@ -34,7 +35,7 @@ func TestCrashSafety_FileWrittenKeyNotFlipped(t *testing.T) {
 	require.NoError(t, cat.MarkChunkFreezing(4, geometry.KindLedgers))
 	lfsPath := cat.layout.LedgerPackPath(4)
 	writeArtifact(t, lfsPath)
-	require.NoError(t, geometry.BarrierNewFile(lfsPath))
+	require.NoError(t, durable.BarrierNewFile(lfsPath))
 	// <-- crash here: no FlipChunkFrozen.
 
 	// Index: mark freezing, write+barrier the file, "crash" before CommitTxHashIndex.
@@ -42,7 +43,7 @@ func TestCrashSafety_FileWrittenKeyNotFlipped(t *testing.T) {
 	require.NoError(t, err)
 	idxPath := cat.layout.TxHashIndexFilePath(cov)
 	writeArtifact(t, idxPath)
-	require.NoError(t, geometry.BarrierNewFile(idxPath))
+	require.NoError(t, durable.BarrierNewFile(idxPath))
 	// <-- crash here: no CommitTxHashIndex.
 
 	// INV-3 (disk -> meta): every file on disk has its key.

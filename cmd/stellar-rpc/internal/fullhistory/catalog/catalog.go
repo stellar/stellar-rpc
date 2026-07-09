@@ -1,22 +1,22 @@
 package catalog
 
 import (
-	"errors"
 	"fmt"
 	"slices"
 	"strconv"
 
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/rocksdb"
 )
 
-// Catalog is the streaming daemon's view of durable state. It WRAPS
-// metastore.Store — the merged RocksDB KV store with sync Put/Delete, atomic
-// Batch, and PrefixScan — never reaching around it to RocksDB directly. On top
-// of the geometry package (the key schema + its bijection to disk paths, the
-// tx-hash-index arithmetic, and the fsync helpers) it adds the one-write
+// Catalog is the full-history daemon's view of durable state. It OWNS the
+// RocksDB-backed string-KV store behind it (kv.go — sync Put/Delete, atomic
+// Batch, prefix scans over the single default CF); no other package reaches
+// that store. On top of the geometry package (the key schema + its bijection
+// to disk paths and the tx-hash-index arithmetic) it adds the one-write
 // protocol (catalog_protocol.go) and the key-driven sweeps (catalog_sweep.go).
 //
 // Every key names a file/dir state or a config pin; progress is derived, never
@@ -26,17 +26,32 @@ import (
 // concurrency guard: the design's Concurrency model guarantees one writer per
 // key (see the header note in catalog_protocol.go).
 type Catalog struct {
-	store       *metastore.Store
+	store       *rocksdb.Store
+	logger      *supportlog.Entry
 	layout      geometry.Layout
 	txhashIndex geometry.TxHashIndexLayout
 }
 
-// NewCatalog binds a catalog to an open metastore.Store, the on-disk layout,
-// and the tx-hash-index arithmetic. The store is caller-owned; the catalog never
-// closes it.
-func NewCatalog(store *metastore.Store, layout geometry.Layout, txhashIndex geometry.TxHashIndexLayout) *Catalog {
-	return &Catalog{store: store, layout: layout, txhashIndex: txhashIndex}
+// Open opens the catalog's backing KV store at path (created if absent) and
+// binds the catalog to it, the on-disk layout, and the tx-hash-index
+// arithmetic. path and logger are required (rocksdb.New validates both). The
+// catalog owns the store: Close releases it.
+func Open(
+	path string, layout geometry.Layout, txhashIndex geometry.TxHashIndexLayout, logger *supportlog.Entry,
+) (*Catalog, error) {
+	store, err := rocksdb.New(rocksdb.Config{Path: path, Logger: logger})
+	if err != nil {
+		return nil, err
+	}
+	return &Catalog{store: store, logger: logger, layout: layout, txhashIndex: txhashIndex}, nil
 }
+
+// Close releases the backing store. Idempotent.
+func (c *Catalog) Close() error { return c.store.Close() }
+
+// Logger returns the logger the catalog was opened with — the one derived
+// reads (the last-committed refinement's read-only hot-DB open) reuse.
+func (c *Catalog) Logger() *supportlog.Entry { return c.logger }
 
 func (c *Catalog) Layout() geometry.Layout { return c.layout }
 
@@ -80,13 +95,13 @@ func (c *Catalog) HotState(chunkID chunk.ID) (geometry.HotState, error) {
 // by key — the deletion/audit surface for chunk:* keys.
 func (c *Catalog) ChunkArtifactKeys() ([]ArtifactRef, error) {
 	var refs []ArtifactRef
-	for e, err := range c.store.PrefixScan(geometry.ChunkPrefix) {
+	for e, err := range c.prefixScan(geometry.ChunkPrefix) {
 		if err != nil {
 			return nil, err
 		}
 		id, kind, ok := geometry.ParseChunkKey(e.Key)
 		if !ok {
-			return nil, fmt.Errorf("streaming: malformed chunk key %q", e.Key)
+			return nil, fmt.Errorf("malformed chunk key %q", e.Key)
 		}
 		refs = append(refs, ArtifactRef{Chunk: id, Kind: kind, State: geometry.State(e.Value)})
 	}
@@ -136,7 +151,7 @@ func (c *Catalog) FrozenTxHashIndex(w geometry.TxHashIndexID) (geometry.TxHashIn
 		}
 		if found {
 			return geometry.TxHashIndexCoverage{}, false, fmt.Errorf(
-				"streaming: index %s has two frozen coverages (%s and %s) — "+
+				"index %s has two frozen coverages (%s and %s) — "+
 					"uniqueness invariant violated",
 				w, frozen.Key, candidate.Key,
 			)
@@ -185,7 +200,7 @@ func (c *Catalog) EarliestLedger() (uint32, bool, error) {
 // and validated-or-abort on every restart. (The tx-hash index width is not pinned;
 // it is the fixed geometry.ChunksPerTxhashIndex constant.)
 func (c *Catalog) PinEarliestLedger(earliestLedger uint32) error {
-	return c.store.Put(geometry.ConfigEarliestLedger, strconv.FormatUint(uint64(earliestLedger), 10))
+	return c.put(geometry.ConfigEarliestLedger, strconv.FormatUint(uint64(earliestLedger), 10))
 }
 
 // ArtifactRef names one per-chunk artifact and the State observed for it — the
@@ -202,20 +217,6 @@ func (r ArtifactRef) Key() string { return geometry.ChunkKey(r.Chunk, r.Kind) }
 // Unexported helpers backing the scans and pin getters above.
 // ---------------------------------------------------------------------------
 
-// get returns the value at key. The bool is false (err nil) on a clean miss,
-// distinguishing "absent" from a backing-store error — the value-blind primitive
-// the typed reads above build on.
-func (c *Catalog) get(key string) (string, bool, error) {
-	v, err := c.store.Get(key)
-	if errors.Is(err, stores.ErrNotFound) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, err
-	}
-	return v, true, nil
-}
-
 // has reports whether key exists.
 func (c *Catalog) has(key string) (bool, error) {
 	_, ok, err := c.get(key)
@@ -226,7 +227,7 @@ func (c *Catalog) has(key string) (bool, error) {
 // ascending. A nil keep matches every value (value-blind).
 func (c *Catalog) hotChunkKeysWith(keep func(geometry.HotState) bool) ([]chunk.ID, error) {
 	var ids []chunk.ID
-	for e, err := range c.store.PrefixScan(geometry.HotChunkPrefix) {
+	for e, err := range c.prefixScan(geometry.HotChunkPrefix) {
 		if err != nil {
 			return nil, err
 		}
@@ -248,13 +249,13 @@ func (c *Catalog) hotChunkKeysWith(keep func(geometry.HotState) bool) ([]chunk.I
 // value as State.
 func (c *Catalog) txhashIndexKeysByPrefix(prefix string) ([]geometry.TxHashIndexCoverage, error) {
 	var covs []geometry.TxHashIndexCoverage
-	for e, err := range c.store.PrefixScan(prefix) {
+	for e, err := range c.prefixScan(prefix) {
 		if err != nil {
 			return nil, err
 		}
 		cov, ok := geometry.ParseTxHashIndexKey(e.Key)
 		if !ok {
-			return nil, fmt.Errorf("streaming: malformed index key %q", e.Key)
+			return nil, fmt.Errorf("malformed index key %q", e.Key)
 		}
 		cov.State = geometry.State(e.Value)
 		covs = append(covs, cov)
@@ -269,7 +270,7 @@ func (c *Catalog) uint32Pin(key string) (uint32, bool, error) {
 	}
 	n, parseErr := strconv.ParseUint(v, 10, 32)
 	if parseErr != nil {
-		return 0, false, fmt.Errorf("streaming: config pin %q is not a uint32: %q", key, v)
+		return 0, false, fmt.Errorf("config pin %q is not a uint32: %q", key, v)
 	}
 	return uint32(n), true, nil
 }

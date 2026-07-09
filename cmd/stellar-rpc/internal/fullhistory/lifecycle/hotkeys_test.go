@@ -8,8 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
 // writeArtifact writes a placeholder artifact file at path (creating parents),
@@ -21,34 +20,10 @@ func writeArtifact(t *testing.T, path string) {
 }
 
 // hotKeyExists reports whether chunk c has a hot:chunk key (any value). The
-// catalog's key existence read is unexported; this is the streaming-package test
-// shim over the public HotState ("" ⇒ absent).
+// catalog's key existence read is unexported; this is the test shim over the
+// public HotState ("" ⇒ absent). The raw hot-key round trip itself is tested in
+// the catalog package (TestRoundTripHotKeys), where deleteHotKey is accessible.
 func hotKeyExists(cat *catalog.Catalog, c chunk.ID) (bool, error) {
 	s, err := cat.HotState(c)
 	return s != "", err
-}
-
-func TestRoundTripHotKeys(t *testing.T) {
-	cat, _ := testCatalog(t)
-
-	state, err := cat.HotState(7)
-	require.NoError(t, err)
-	require.Equal(t, geometry.HotState(""), state)
-
-	require.NoError(t, cat.PutHotTransient(7))
-	state, err = cat.HotState(7)
-	require.NoError(t, err)
-	require.Equal(t, geometry.HotTransient, state)
-
-	require.NoError(t, cat.FlipHotReady(7))
-	state, err = cat.HotState(7)
-	require.NoError(t, err)
-	require.Equal(t, geometry.HotReady, state)
-
-	require.NoError(t, cat.DeleteHotKey(7))
-	state, err = cat.HotState(7)
-	require.NoError(t, err)
-	require.Equal(t, geometry.HotState(""), state)
-	// Idempotent on a missing key.
-	require.NoError(t, cat.DeleteHotKey(7))
 }

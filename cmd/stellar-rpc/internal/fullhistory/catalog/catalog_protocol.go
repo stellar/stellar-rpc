@@ -2,19 +2,22 @@ package catalog
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/durable"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
 // The one write protocol — mark-then-write. Every durable artifact (per-chunk
 // file or index coverage) flows through here:
 //
-//  1. Put the key "freezing" via metastore BEFORE any I/O.
+//  1. Put the key "freezing" via the catalog KV BEFORE any I/O.
 //  2. The caller writes the file.
 //  3. The caller fsyncs the FILE + its PARENT dirent (+ the GRANDPARENT dirent
-//     when the parent dir was just created) — geometry.BarrierNewFile.
+//     when the parent dir was just created) — durable.BarrierNewFile.
 //  4. Flip to "frozen": a single Put for per-chunk artifacts, or one atomic
 //     Batch for the index (see CommitTxHashIndex).
 //
@@ -37,9 +40,9 @@ import (
 // already-"frozen" kind (per-kind idempotency) is the caller's job.
 func (c *Catalog) MarkChunkFreezing(chunkID chunk.ID, kinds ...geometry.Kind) error {
 	if len(kinds) == 0 {
-		return errors.New("streaming: MarkChunkFreezing requires at least one kind")
+		return errors.New("MarkChunkFreezing requires at least one kind")
 	}
-	return c.store.Batch(func(w *metastore.BatchWriter) error {
+	return c.batch(func(w batchWriter) error {
 		for _, kind := range kinds {
 			w.Put(geometry.ChunkKey(chunkID, kind), string(geometry.StateFreezing))
 		}
@@ -48,13 +51,13 @@ func (c *Catalog) MarkChunkFreezing(chunkID chunk.ID, kinds ...geometry.Kind) er
 }
 
 // FlipChunkFrozen is step 4 for per-chunk artifacts: flips every requested kind
-// to "frozen". The caller MUST have completed geometry.BarrierNewFile for every
+// to "frozen". The caller MUST have completed durable.BarrierNewFile for every
 // file first.
 func (c *Catalog) FlipChunkFrozen(chunkID chunk.ID, kinds ...geometry.Kind) error {
 	if len(kinds) == 0 {
-		return errors.New("streaming: FlipChunkFrozen requires at least one kind")
+		return errors.New("FlipChunkFrozen requires at least one kind")
 	}
-	return c.store.Batch(func(w *metastore.BatchWriter) error {
+	return c.batch(func(w batchWriter) error {
 		for _, kind := range kinds {
 			w.Put(geometry.ChunkKey(chunkID, kind), string(geometry.StateFrozen))
 		}
@@ -74,7 +77,7 @@ func (c *Catalog) MarkTxHashIndexFreezing(
 		Key:   geometry.TxHashIndexKey(w, lo, hi),
 		State: geometry.StateFreezing,
 	}
-	if err := c.store.Put(cov.Key, string(geometry.StateFreezing)); err != nil {
+	if err := c.put(cov.Key, string(geometry.StateFreezing)); err != nil {
 		return geometry.TxHashIndexCoverage{}, err
 	}
 	return cov, nil
@@ -119,7 +122,7 @@ func (c *Catalog) CommitTxHashIndex(cov geometry.TxHashIndexCoverage) error {
 		}
 	}
 
-	return c.store.Batch(func(bw *metastore.BatchWriter) error {
+	return c.batch(func(bw batchWriter) error {
 		bw.Put(cov.Key, string(geometry.StateFrozen))
 		if hasPrev {
 			bw.Put(prev.Key, string(geometry.StatePruning))
@@ -159,16 +162,52 @@ func (c *Catalog) txhashIndexChunkKeysPresent(lo, hi chunk.ID) ([]string, error)
 // the dir is created or a discard begins removing it. A crash mid-operation is
 // detectable from this value alone.
 func (c *Catalog) PutHotTransient(chunkID chunk.ID) error {
-	return c.store.Put(geometry.HotChunkKey(chunkID), string(geometry.HotTransient))
+	return c.put(geometry.HotChunkKey(chunkID), string(geometry.HotTransient))
 }
 
 // FlipHotReady marks a hot-DB key "ready" (dir exists and usable). The caller
 // MUST have fsynced the dir (and its parent on creation) first.
 func (c *Catalog) FlipHotReady(chunkID chunk.ID) error {
-	return c.store.Put(geometry.HotChunkKey(chunkID), string(geometry.HotReady))
+	return c.put(geometry.HotChunkKey(chunkID), string(geometry.HotReady))
 }
 
-// DeleteHotKey removes a hot-DB key — the close end, after rmdir. Idempotent.
-func (c *Catalog) DeleteHotKey(chunkID chunk.ID) error {
-	return c.store.Delete(geometry.HotChunkKey(chunkID))
+// deleteHotKey removes a hot-DB key — the close end, after rmdir. Idempotent.
+// Unexported: the only production caller is same-package DiscardHotChunk, and the
+// hot-key create/discard choreography now lives behind the catalog, so no other
+// package deletes a hot key directly.
+func (c *Catalog) deleteHotKey(chunkID chunk.ID) error {
+	return c.del(geometry.HotChunkKey(chunkID))
+}
+
+// BeginHotCreate is the open end of the hot-DB create bracket, mirroring
+// MarkChunkFreezing: it wipes any leftover dir and marks the key "transient"
+// BEFORE the caller runs hotchunk.Open to create a fresh DB. Doing this under the
+// bracket means a crash mid-create leaves a "transient" key, never a "ready" one
+// pointing at a half-built dir — so the ready-key open never has to auto-heal.
+// FinishHotCreate is the matching close end; hotchunk.Open goes between the pair.
+func (c *Catalog) BeginHotCreate(chunkID chunk.ID) error {
+	dir := c.layout.HotChunkPath(chunkID)
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("wipe leftover hot dir %s: %w", dir, err)
+	}
+	if err := c.PutHotTransient(chunkID); err != nil {
+		return fmt.Errorf("mark hot transient chunk %s: %w", chunkID, err)
+	}
+	return nil
+}
+
+// FinishHotCreate is the close end of the hot-DB create bracket, mirroring
+// FlipChunkFrozen: it makes the freshly created dir + its parent dirent durable,
+// then flips the key "ready". The dir MUST be durable before the flip, else a
+// crash between them fabricates a "ready but dir missing" open failure for a DB
+// that was actually fine. The caller MUST have completed hotchunk.Open first.
+func (c *Catalog) FinishHotCreate(chunkID chunk.ID) error {
+	dir := c.layout.HotChunkPath(chunkID)
+	if err := durable.FsyncNewDirs(filepath.Dir(dir), dir); err != nil {
+		return fmt.Errorf("fsync hot dir %s: %w", dir, err)
+	}
+	if err := c.FlipHotReady(chunkID); err != nil {
+		return fmt.Errorf("flip hot ready chunk %s: %w", chunkID, err)
+	}
+	return nil
 }

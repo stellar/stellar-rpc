@@ -14,14 +14,12 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
-	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
 // testCPI is the tx-hash index width tests build layouts with; equals the
@@ -41,29 +39,30 @@ func silentLogger() *supportlog.Entry {
 	return log
 }
 
-// newTestCatalog builds a Catalog over a real metastore on temp dirs with
-// cpi-wide tx-hash indexes; returns the catalog, open store, and artifact root.
-func newTestCatalog(t *testing.T, cpi uint32) (*catalog.Catalog, *metastore.Store, string) {
+// newTestCatalog builds a Catalog over a real KV store on temp dirs with
+// cpi-wide tx-hash indexes; returns the catalog (closed via t.Cleanup) and
+// artifact root.
+func newTestCatalog(t *testing.T, cpi uint32) (*catalog.Catalog, string) {
 	t.Helper()
 	metaDir := t.TempDir()
 	artifactRoot := t.TempDir()
 
-	store, err := metastore.New(filepath.Join(metaDir, "rocksdb"), silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
-
 	idxLayout, err := geometry.NewTxHashIndexLayout(cpi)
 	require.NoError(t, err)
 
-	return catalog.NewCatalog(store, geometry.NewLayout(artifactRoot), idxLayout), store, artifactRoot
+	cat, err := catalog.Open(
+		filepath.Join(metaDir, "rocksdb"), geometry.NewLayout(artifactRoot), idxLayout, silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.Close() })
+
+	return cat, artifactRoot
 }
 
 // testCatalog builds a catalog with the default (wide) tx-hash index, returning it
 // and the artifact root.
 func testCatalog(t *testing.T) (*catalog.Catalog, string) {
 	t.Helper()
-	cat, _, root := newTestCatalog(t, testCPI)
-	return cat, root
+	return newTestCatalog(t, testCPI)
 }
 
 // freezeKinds flips the given per-chunk kinds to "frozen" via the one-write protocol.
@@ -132,31 +131,6 @@ var _ observability.Metrics = (*recordingMetrics)(nil)
 // ---------------------------------------------------------------------------
 // LCM fixtures + a fake backfill.Backend for the daemon E2E test.
 // ---------------------------------------------------------------------------
-
-// zeroTxLCMBytes builds wire bytes of a minimal valid zero-tx V2 LedgerCloseMeta;
-// zero-tx keeps a full 10k-ledger chunk pass cheap.
-func zeroTxLCMBytes(t *testing.T, seq uint32) []byte {
-	t.Helper()
-	lcm := xdr.LedgerCloseMeta{
-		V: 2,
-		V2: &xdr.LedgerCloseMetaV2{
-			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
-				Header: xdr.LedgerHeader{
-					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(0)},
-					LedgerSeq: xdr.Uint32(seq),
-				},
-			},
-			TxSet: xdr.GeneralizedTransactionSet{
-				V:       1,
-				V1TxSet: &xdr.TransactionSetV1{Phases: nil},
-			},
-			TxProcessing: nil,
-		},
-	}
-	raw, err := lcm.MarshalBinary()
-	require.NoError(t, err)
-	return raw
-}
 
 // fullChunkStream is an in-memory ledgerbackend.LedgerStream yielding every
 // ledger in [from, to] from a per-seq LCM generator.

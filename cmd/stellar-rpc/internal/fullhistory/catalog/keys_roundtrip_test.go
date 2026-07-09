@@ -6,11 +6,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
 // ---------------------------------------------------------------------------
-// Round-trip every key family through the real metastore (the geometry key
+// Round-trip every key family through the real catalog KV (the geometry key
 // schema read back through the Catalog).
 // ---------------------------------------------------------------------------
 
@@ -51,4 +51,33 @@ func TestRoundTripIndexKey(t *testing.T) {
 	require.Equal(t, geometry.StateFreezing, keys[0].State)
 	require.Equal(t, chunk.ID(5100), keys[0].Lo)
 	require.Equal(t, chunk.ID(5349), keys[0].Hi)
+}
+
+// TestRoundTripHotKeys exercises the raw hot-key bracket primitives end to end:
+// absent -> transient -> ready -> deleted (idempotent on a missing key). It lives
+// here (not in lifecycle) because deleteHotKey is catalog-internal now that the
+// create/discard choreography is behind the catalog.
+func TestRoundTripHotKeys(t *testing.T) {
+	cat, _ := testCatalog(t)
+
+	state, err := cat.HotState(7)
+	require.NoError(t, err)
+	require.Equal(t, geometry.HotState(""), state)
+
+	require.NoError(t, cat.PutHotTransient(7))
+	state, err = cat.HotState(7)
+	require.NoError(t, err)
+	require.Equal(t, geometry.HotTransient, state)
+
+	require.NoError(t, cat.FlipHotReady(7))
+	state, err = cat.HotState(7)
+	require.NoError(t, err)
+	require.Equal(t, geometry.HotReady, state)
+
+	require.NoError(t, cat.deleteHotKey(7))
+	state, err = cat.HotState(7)
+	require.NoError(t, err)
+	require.Equal(t, geometry.HotState(""), state)
+	// Idempotent on a missing key.
+	require.NoError(t, cat.deleteHotKey(7))
 }

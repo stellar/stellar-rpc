@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
 // ---------------------------------------------------------------------------
@@ -53,8 +53,8 @@ func TestFrozenIndexCoversRange_AssertsUniqueness(t *testing.T) {
 
 	// Plant two frozen coverages in window 5, bypassing the promote/demote commit
 	// path (which never leaves two frozen) to stage the corrupt snapshot directly.
-	require.NoError(t, cat.store.Put(geometry.TxHashIndexKey(5, 5100, 5349), string(geometry.StateFrozen)))
-	require.NoError(t, cat.store.Put(geometry.TxHashIndexKey(5, 5100, 5350), string(geometry.StateFrozen)))
+	require.NoError(t, cat.put(geometry.TxHashIndexKey(5, 5100, 5349), string(geometry.StateFrozen)))
+	require.NoError(t, cat.put(geometry.TxHashIndexKey(5, 5100, 5350), string(geometry.StateFrozen)))
 
 	_, rangeErr := cat.FrozenIndexCoversRange(5, 5100, 5349)
 	require.Error(t, rangeErr, "the range predicate must surface the uniqueness violation")

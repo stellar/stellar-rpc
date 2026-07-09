@@ -14,8 +14,7 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
 func silentLogger() *supportlog.Entry {
@@ -26,22 +25,22 @@ func silentLogger() *supportlog.Entry {
 	return log
 }
 
-// testCatalog builds a Catalog over a real metastore.Store on a temp dir plus
-// a temp artifact dir (the Layout root). Returns the catalog and the artifact
-// root so tests can assert against real files on disk.
+// testCatalog builds a Catalog over a real KV store on a temp dir plus a temp
+// artifact dir (the Layout root). Returns the catalog and the artifact root so
+// tests can assert against real files on disk.
 func testCatalog(t *testing.T) (*Catalog, string) {
 	t.Helper()
 	metaDir := t.TempDir()
 	artifactRoot := t.TempDir()
 
-	store, err := metastore.New(filepath.Join(metaDir, "rocksdb"), silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
-
 	idxLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
 	require.NoError(t, err)
 
-	return NewCatalog(store, geometry.NewLayout(artifactRoot), idxLayout), artifactRoot
+	cat, err := Open(filepath.Join(metaDir, "rocksdb"), geometry.NewLayout(artifactRoot), idxLayout, silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.Close() })
+
+	return cat, artifactRoot
 }
 
 // writeArtifact materializes a placeholder file at path (creating parents) so a

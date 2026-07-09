@@ -19,15 +19,23 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/config"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/fhtest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
-// openMetaAt opens a metastore.Store at path for read-back assertions.
-func openMetaAt(t *testing.T, path string) (*metastore.Store, error) {
+// openCatalogAt opens a catalog over the daemon's on-disk KV under dataDir for
+// read-back assertions (closed via t.Cleanup).
+func openCatalogAt(t *testing.T, dataDir string) *catalog.Catalog {
 	t.Helper()
-	return metastore.New(path, silentLogger())
+	txLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
+	require.NoError(t, err)
+	cat, err := catalog.Open(
+		filepath.Join(dataDir, "catalog", "rocksdb"), geometry.NewLayout(dataDir), txLayout, silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.Close() })
+	return cat
 }
 
 // writeTempConfig writes a minimal-valid daemon TOML (genesis floor ⇒ no tip
@@ -93,12 +101,7 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 
 	// validateConfig pinned earliest_ledger before start (cpi is a constant now,
 	// not a pinned value).
-	store, err := openMetaAt(t, filepath.Join(dataDir, "catalog", "rocksdb"))
-	require.NoError(t, err)
-	defer func() { _ = store.Close() }()
-	txLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
-	require.NoError(t, err)
-	cat := catalog.NewCatalog(store, geometry.NewLayout(dataDir), txLayout)
+	cat := openCatalogAt(t, dataDir)
 	earliest, pinned, err := cat.EarliestLedger()
 	require.NoError(t, err)
 	require.True(t, pinned, "validateConfig must pin earliest_ledger before run")
@@ -112,7 +115,7 @@ func someTxBackend(t *testing.T) *fakeBackend {
 	src := xdr.MustMuxedAddress(keypair.MustRandom().Address())
 	gen := func(t *testing.T, seq uint32) []byte {
 		if seq%2500 != 0 {
-			return zeroTxLCMBytes(t, seq)
+			return fhtest.ZeroTxLCMBytes(t, seq)
 		}
 		raw, _ := oneTxLCMBytes(t, seq, src)
 		return raw
@@ -124,7 +127,7 @@ func someTxBackend(t *testing.T) *fakeBackend {
 	}
 }
 
-// oneTxLCMBytes is zeroTxLCMBytes plus one tx (per-seq SeqNum ⇒ unique hash) so
+// oneTxLCMBytes is fhtest.ZeroTxLCMBytes plus one tx (per-seq SeqNum ⇒ unique hash) so
 // ExtractTxHashes yields exactly one key for seq. Returns the wire bytes and the
 // real, network-hashed transaction hash (the hash the daemon commits for seq), so
 // callers can assert a getTransaction-style hash→seq lookup.
@@ -225,13 +228,8 @@ func TestRunDaemon_BackfillMaterializesAllColdTypesAndIndex(t *testing.T) {
 	}
 
 	// Read the catalog back after the daemon released locks + closed its store.
-	store, err := openMetaAt(t, filepath.Join(dataDir, "catalog", "rocksdb"))
-	require.NoError(t, err)
-	defer func() { _ = store.Close() }()
-	txLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
-	require.NoError(t, err)
-	layout := geometry.NewLayout(dataDir)
-	cat := catalog.NewCatalog(store, layout, txLayout)
+	cat := openCatalogAt(t, dataDir)
+	layout := cat.Layout()
 
 	// (1) Chunk 0's ledger + events artifacts are frozen, with files on disk.
 	ls, err := cat.State(0, geometry.KindLedgers)
@@ -273,9 +271,9 @@ func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
 	txhashIndexOverride := filepath.Join(overrideRoot, "txidx")
 	catalogOverride := filepath.Join(overrideRoot, "meta")
 
-	cfg := Config{
-		Service: ServiceConfig{DefaultDataDir: dataDir},
-		Storage: StorageConfig{
+	cfg := config.Config{
+		Service: config.ServiceConfig{DefaultDataDir: dataDir},
+		Storage: config.StorageConfig{
 			Catalog:     catalogOverride,
 			Ledgers:     ledgersOverride,
 			Events:      eventsOverride,
@@ -286,7 +284,7 @@ func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
 	}.WithDefaults()
 
 	paths := cfg.ResolvePaths()
-	layout := NewLayoutFromPaths(paths) // exactly the daemon's binding
+	layout := config.NewLayoutFromPaths(paths) // exactly the daemon's binding
 
 	// (1) Every path the Layout composes lives under the override, NOT DataDir.
 	const cid = chunk.ID(5350)
@@ -324,8 +322,8 @@ func TestRunDaemon_LockContentionFailsFast(t *testing.T) {
 	configPath, dataDir := writeTempConfig(t, "")
 
 	// Hold the hot-root lock as a "first daemon" for the test's duration.
-	paths := Paths{HotStorage: filepath.Join(dataDir, "hot")}
-	locks, err := LockRoots(paths.HotStorage)
+	paths := config.Paths{HotStorage: filepath.Join(dataDir, "hot")}
+	locks, err := config.LockRoots(paths.HotStorage)
 	require.NoError(t, err)
 	defer locks.Release()
 
@@ -335,7 +333,7 @@ func TestRunDaemon_LockContentionFailsFast(t *testing.T) {
 		ServeReads: func(context.Context) error { served.Add(1); return nil },
 		Logger:     silentLogger(),
 	})
-	require.ErrorIs(t, err, ErrRootLocked)
+	require.ErrorIs(t, err, config.ErrRootLocked)
 	assert.Zero(t, served.Load(), "run never reached when a root is locked")
 }
 
@@ -476,7 +474,7 @@ func TestNotConfiguredTip_ErrorsClearly(t *testing.T) {
 // With no [backfill.datastore], buildBackfillBackend returns no backend (frontfill),
 // and resolveNetworkTip then yields the not-configured placeholder.
 func TestBuildBackfillBackend_FrontfillNoBackend(t *testing.T) {
-	cfg := Config{}.WithDefaults()
+	cfg := config.Config{}.WithDefaults()
 	backend, cleanup, err := buildBackfillBackend(context.Background(), cfg, silentLogger())
 	require.NoError(t, err)
 	require.Nil(t, backend, "no datastore ⇒ frontfill-only, no backend")
@@ -489,10 +487,10 @@ func TestBuildBackfillBackend_FrontfillNoBackend(t *testing.T) {
 }
 
 func TestNewLogger(t *testing.T) {
-	l, err := newLogger(LoggingConfig{Level: "warn", Format: "json"})
+	l, err := newLogger(config.LoggingConfig{Level: "warn", Format: "json"})
 	require.NoError(t, err)
 	require.NotNil(t, l)
 
-	_, err = newLogger(LoggingConfig{Level: "bogus", Format: "text"})
+	_, err = newLogger(config.LoggingConfig{Level: "bogus", Format: "text"})
 	require.Error(t, err)
 }

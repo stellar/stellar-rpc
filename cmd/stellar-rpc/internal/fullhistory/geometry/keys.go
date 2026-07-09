@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
 // State is an artifact key's lifecycle value, shared with identical meaning by
@@ -102,7 +102,7 @@ func HotChunkKey(c chunk.ID) string {
 // state. lo > hi is a programmer error, surfaced loudly via panic.
 func TxHashIndexKey(idx TxHashIndexID, lo, hi chunk.ID) string {
 	if lo > hi {
-		panic(fmt.Sprintf("streaming: TxHashIndexKey lo %s > hi %s", lo, hi))
+		panic(fmt.Sprintf("TxHashIndexKey lo %s > hi %s", lo, hi))
 	}
 	return TxHashIndexPrefix + idx.String() + ":" + lo.String() + ":" + hi.String()
 }
@@ -202,11 +202,11 @@ func ParseTxHashIndexKey(key string) (TxHashIndexCoverage, bool) {
 // silently accepted) so the bijection stays exact.
 func ParsePadded(s string) (uint32, error) {
 	if len(s) != 8 {
-		return 0, fmt.Errorf("streaming: %q is not an 8-digit padded id", s)
+		return 0, fmt.Errorf("%q is not an 8-digit padded id", s)
 	}
 	n, err := strconv.ParseUint(s, 10, 32)
 	if err != nil {
-		return 0, fmt.Errorf("streaming: %q is not numeric: %w", s, err)
+		return 0, fmt.Errorf("%q is not numeric: %w", s, err)
 	}
 	return uint32(n), nil
 }

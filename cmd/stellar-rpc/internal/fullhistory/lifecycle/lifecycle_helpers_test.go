@@ -13,8 +13,9 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/fhtest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
 // lifecyclePassphrase is the network passphrase the one-tx fixture hashes
@@ -95,7 +96,7 @@ func ingestFullHotChunk(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 		if seq == c.FirstLedger() {
 			raw = oneTxLCMRand(t, seq)
 		} else {
-			raw = zeroTxLCMBytes(t, seq)
+			raw = fhtest.ZeroTxLCMBytes(t, seq)
 		}
 		_, err := db.IngestLedger(seq, xdr.LedgerCloseMetaView(raw))
 		require.NoError(t, err)
@@ -130,23 +131,6 @@ func lastCompleteChunkAtID(ledger uint32) (chunk.ID, bool) {
 		return 0, false
 	}
 	return chunk.ID(c), true
-}
-
-// runTickForCatalog runs one lifecycle tick the way ingestion would drive it: it
-// derives the highest complete chunk from the catalog (the chunk id ingestion
-// hands over at a boundary) and passes it as lastChunk, returning the tick's
-// error. On a young network with no complete chunk it runs no tick (returns nil) —
-// mirroring production, where the boundary/seed guard upstream never triggers the
-// Loop in that state.
-func runTickForCatalog(ctx context.Context, t *testing.T, cfg Config, cat *catalog.Catalog) error {
-	t.Helper()
-	through, err := deriveCompleteThrough(cat)
-	require.NoError(t, err)
-	last, ok := lastCompleteChunkAtID(through)
-	if !ok {
-		return nil
-	}
-	return runLifecycle(ctx, cfg, cat, last)
 }
 
 // makeReadyHotDirNoData opens and closes a real (empty) hot DB for c so its dir

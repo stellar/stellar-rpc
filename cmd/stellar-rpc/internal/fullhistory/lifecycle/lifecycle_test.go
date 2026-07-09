@@ -10,7 +10,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
 // tickMetricsRecorder counts the two gauges the lifecycle tick could touch, to pin
@@ -85,7 +85,8 @@ func TestRunLifecycleTick_BoundaryFreezesRebuildsDiscards(t *testing.T) {
 	live := openLiveHotDB(t, cat, 1) // the live chunk's hot DB (held open by "ingestion")
 	t.Cleanup(func() { _ = live.Close() })
 
-	require.NoError(t, runTickForCatalog(context.Background(), t, cfg, cat), "a healthy tick never fails")
+	// Chunk 0 is the boundary chunk ingestion hands over.
+	require.NoError(t, runLifecycle(context.Background(), cfg, cat, 0), "a healthy tick never fails")
 
 	// Chunk 0's cold artifacts are all frozen.
 	for _, kind := range []geometry.Kind{geometry.KindLedgers, geometry.KindEvents} {
@@ -115,10 +116,9 @@ func TestRunLifecycleTick_BoundaryFreezesRebuildsDiscards(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, geometry.State(""), lfs1, "the live chunk is not frozen")
 
-	// Quiescence: re-running the tick produces no work.
-	through, err := deriveCompleteThrough(cat)
-	require.NoError(t, err)
-	assertQuiescent(t, cfg, cat, through)
+	// Quiescence: re-running the tick produces no work. The fixture pins the
+	// frontier: chunk 0 durable, live chunk 1 empty ⇒ through = chunk 0's last ledger.
+	assertQuiescent(t, cfg, cat, chunk.ID(0).LastLedger())
 }
 
 // TestRunLifecycleTick_DiscardGatedOnIndexCoverage: a complete chunk whose cold
@@ -181,13 +181,12 @@ func TestRunLifecycleTick_PastFloorPrune(t *testing.T) {
 	live := openLiveHotDB(t, cat, 6) // live chunk
 	t.Cleanup(func() { _ = live.Close() })
 
-	through, err := deriveCompleteThrough(cat)
-	require.NoError(t, err)
-	require.Equal(t, chunk.ID(5).LastLedger(), through)
+	through := chunk.ID(5).LastLedger()
 	floor := EffectiveRetentionFloor(through, cfg.RetentionChunks, 0)
 	require.Equal(t, chunk.ID(4).FirstLedger(), floor, "floor anchors 2 chunks back")
 
-	require.NoError(t, runTickForCatalog(context.Background(), t, cfg, cat), "prune tick never fails")
+	// Chunk 5 is the last complete chunk — the boundary id ingestion hands over.
+	require.NoError(t, runLifecycle(context.Background(), cfg, cat, 5), "prune tick never fails")
 
 	// Chunks 0..3 (wholly below the floor) are gone: keys and files.
 	for c := chunk.ID(0); c <= 3; c++ {
@@ -219,9 +218,8 @@ func TestRunLifecycleTick_PrunesTransientIndexDebris(t *testing.T) {
 	_, err := cat.MarkTxHashIndexFreezing(0, 0, 0)
 	require.NoError(t, err)
 
-	through, err := deriveCompleteThrough(cat)
-	require.NoError(t, err)
-	ops, weights, err := eligiblePruneOps(cat, gateFor(t, cfg, cat, through))
+	// Nothing durable and no hot keys ⇒ through sits at the pre-genesis sentinel.
+	ops, weights, err := eligiblePruneOps(cat, gateFor(t, cfg, cat, geometry.PreGenesisLedger))
 	require.NoError(t, err)
 	require.Len(t, ops, 1, "the freezing debris is swept")
 	require.Equal(t, []int{1}, weights, "one index artifact swept")
@@ -249,7 +247,7 @@ func TestRunLifecycleTick_PrunesTransientIndexDebris(t *testing.T) {
 func TestRunLifecycleTick_FailureReturnsError(t *testing.T) {
 	cat, _ := smallTxHashIndexCatalog(t, 1)
 	cfg := lifecycleTestConfig(t, cat, 0)      // hot tier read by path, no Backend
-	readyHot(t, cat, 1)                        // ready live chunk => through = chunk 0 last ledger
+	makeReadyHotDirNoData(t, cat, 1)           // ready live chunk => through = chunk 0 last ledger
 	require.NoError(t, cat.PutHotTransient(0)) // chunk 0 below live, no frozen artifacts, not a ready source
 
 	err := runLifecycle(context.Background(), cfg, cat, 0) // plan range [0,0], the failing build
