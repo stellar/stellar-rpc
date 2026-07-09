@@ -81,9 +81,12 @@ func TermsForBytes(eventBytes []byte) ([]TermKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("events: view Body.V: %w", err)
 	}
-	// Only Body discriminant V=0 carries topics.
+	// Only Body discriminant V=0 carries topics. A future body version
+	// is a hard error matching the SQLite backend (db/event.go) — a
+	// silently contractID-only index would make topic queries miss
+	// real events with no signal.
 	if bodyVVal != 0 {
-		return keys, nil
+		return nil, fmt.Errorf("events: unsupported ContractEvent body version %d", bodyVVal)
 	}
 	v0, err := body.V0()
 	if err != nil {

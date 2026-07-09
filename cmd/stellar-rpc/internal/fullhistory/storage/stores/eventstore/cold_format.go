@@ -366,4 +366,9 @@ func (m *mphf) Close() error {
 }
 
 // isEmpty reports whether the index holds zero terms (an eventless chunk).
-func (m *mphf) isEmpty() bool { return m.idx.NumKeys() == 0 }
+func (m *mphf) isEmpty() bool { return m.numKeys() == 0 }
+
+// numKeys returns the number of keys the MPHF was built over (0 for an
+// eventless chunk); the cold reader cross-checks it against index.pack's
+// record count.
+func (m *mphf) numKeys() uint64 { return m.idx.NumKeys() }

@@ -14,7 +14,7 @@ import (
 // Single-process enforcement (design "Single-process enforcement"). The daemon
 // holds an exclusive OS lock on a LOCK file under EVERY independently configurable
 // storage root — the catalog, each immutable artifact tree, AND the
-// hot-storage tree. A second daemon touching any shared root fails fast.
+// hot-storage tree. A second daemon pointing at the SAME root path fails fast.
 //
 // All roots, not just the catalog: every [storage] path (catalog, the immutable
 // artifact trees, and hot) is independently configurable, so two daemons with
@@ -22,6 +22,11 @@ import (
 // root matters most — its hot/{chunk} DBs are the only copy of recently-ingested
 // ledgers (created/opened/deleted by ingestion and discard), so sharing it would
 // corrupt or delete that sole copy.
+//
+// Scope: the fail-fast holds only for exact-path sharing — a root NESTED
+// inside another daemon's root never touches the other's LOCK file. Within
+// one daemon, Paths.ValidateRoots rejects nesting before locking; a
+// cross-daemon nested pair is the operator's responsibility.
 //
 // A kernel flock is the right primitive: it releases on ANY process exit
 // (including kill -9 / a crash), so a stale lock never strands the next start —

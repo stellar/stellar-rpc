@@ -89,6 +89,12 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	paths := cfg.ResolvePaths()
 
+	// --- Reject colliding roots BEFORE locking: LockRoots mkdirs each root,
+	// and the per-root flock cannot detect a nested pair. ---
+	if err := paths.ValidateRoots(); err != nil {
+		return err
+	}
+
 	// --- Lock every configured storage root for the daemon's whole life. ---
 	locks, err := config.LockRoots(paths.RootsToLock()...)
 	if err != nil {

@@ -243,3 +243,59 @@ func TestRootsToLock_AllDistinctRoots(t *testing.T) {
 	require.Len(t, roots, 6)
 	assert.NotContains(t, roots, "/data", "the data dir parent is not itself locked")
 }
+
+func TestValidateRoots(t *testing.T) {
+	base := Paths{
+		Catalog:     "/data/catalog/rocksdb",
+		Ledgers:     "/data/ledgers",
+		Events:      "/data/events",
+		TxhashRaw:   "/data/txhash/raw",
+		TxhashIndex: "/data/txhash/index",
+		HotStorage:  "/data/hot",
+	}
+
+	t.Run("default sibling layout is valid", func(t *testing.T) {
+		require.NoError(t, base.ValidateRoots())
+	})
+
+	t.Run("shared-name-prefix siblings are not nested", func(t *testing.T) {
+		p := base
+		p.Ledgers = "/data/store"
+		p.Events = "/data/storefront" // name prefix of a sibling, NOT inside it
+		require.NoError(t, p.ValidateRoots())
+	})
+
+	t.Run("duplicate roots rejected", func(t *testing.T) {
+		p := base
+		p.HotStorage = p.Catalog
+		err := p.ValidateRoots()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "same path")
+		assert.Contains(t, err.Error(), "catalog")
+		assert.Contains(t, err.Error(), "hot")
+	})
+
+	t.Run("duplicate via unclean spelling rejected", func(t *testing.T) {
+		p := base
+		p.HotStorage = "/data/../data/catalog/rocksdb/" // same tree, different spelling
+		err := p.ValidateRoots()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "same path")
+	})
+
+	t.Run("nested root rejected either direction", func(t *testing.T) {
+		p := base
+		p.Events = "/data/ledgers/events" // inside the ledgers root
+		err := p.ValidateRoots()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "nested inside")
+		assert.Contains(t, err.Error(), "events")
+		assert.Contains(t, err.Error(), "ledgers")
+
+		q := base
+		q.Ledgers = "/data/hot/ledgers" // later root as the inner one
+		err = q.ValidateRoots()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "nested inside")
+	})
+}

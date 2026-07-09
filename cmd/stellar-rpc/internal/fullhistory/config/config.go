@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/pelletier/go-toml"
 
@@ -245,6 +247,53 @@ func (p Paths) RootsToLock() []string {
 		p.TxhashIndex,
 		p.HotStorage,
 	}
+}
+
+// rootNames labels RootsToLock's entries, positionally, with their [storage]
+// keys for operator-facing errors.
+//
+//nolint:gochecknoglobals // immutable label table mirroring RootsToLock
+var rootNames = []string{"catalog", "ledgers", "events", "txhash_raw", "txhash_index", "hot"}
+
+// ValidateRoots rejects a Paths whose storage roots collide: two roots
+// resolving to the same path, or one root nested inside another. A shared
+// or nested pair silently puts one store's tree inside another's, where a
+// retention prune of the outer tree can delete the inner store's only
+// copy — and the per-root flock (config_lock.go) cannot catch nesting,
+// since each LOCK file lives at its root's own top level.
+func (p Paths) ValidateRoots() error {
+	roots := p.RootsToLock()
+	abs := make([]string, len(roots))
+	for i, r := range roots {
+		a, err := filepath.Abs(r)
+		if err != nil {
+			return fmt.Errorf("resolve storage root %s (%q): %w", rootNames[i], r, err)
+		}
+		abs[i] = a
+	}
+	for i := range abs {
+		for j := i + 1; j < len(abs); j++ {
+			if abs[i] == abs[j] {
+				return fmt.Errorf("storage roots %s and %s resolve to the same path (%q); every root must be a distinct tree",
+					rootNames[i], rootNames[j], abs[i])
+			}
+			outer, inner := i, j
+			if isAncestorDir(abs[j], abs[i]) {
+				outer, inner = j, i
+			}
+			if isAncestorDir(abs[outer], abs[inner]) {
+				return fmt.Errorf("storage root %s (%q) is nested inside %s (%q); every root must be a distinct, non-nested tree",
+					rootNames[inner], abs[inner], rootNames[outer], abs[outer])
+			}
+		}
+	}
+	return nil
+}
+
+// isAncestorDir reports whether inner lives strictly inside outer. Both
+// must already be absolute, cleaned paths (filepath.Abs does both).
+func isAncestorDir(outer, inner string) bool {
+	return strings.HasPrefix(inner, outer+string(filepath.Separator))
 }
 
 // NewLayoutFromPaths adapts a resolved Paths into a geometry.Layout, so the

@@ -45,7 +45,6 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"math"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -83,10 +82,15 @@ type ColdReader struct {
 	// Cached via sync.OnceValues.
 	waitMeta func() (coldMeta, error)
 
-	// waitMPHF returns the MPHF loaded by a background goroutine
-	// started in OpenColdReader. The goroutine sends its result on
-	// a buffered channel; the wrapped sync.OnceValues receives once
-	// and caches.
+	// waitMPHFRaw returns the MPHF loaded by a background goroutine
+	// started in OpenColdReader — the bare load, no cross-artifact
+	// validation. Close drains through this so an eventless chunk's
+	// teardown does no events.pack metadata I/O.
+	waitMPHFRaw func() (*mphf, error)
+
+	// waitMPHF is waitMPHFRaw plus the load-time cross-checks that
+	// bind the index pair to this chunk. The lookup path resolves
+	// through this; both are sync.OnceValues-cached.
 	waitMPHF func() (*mphf, error)
 
 	closed atomic.Bool
@@ -161,24 +165,61 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		m, err := openMPHF(indexHashPath)
 		ch <- mphfResult{idx: m, err: err}
 	}()
-	c.waitMPHF = sync.OnceValues(func() (*mphf, error) {
+	c.waitMPHFRaw = sync.OnceValues(func() (*mphf, error) {
 		res := <-ch
-		if res.err != nil || !res.idx.isEmpty() {
-			return res.idx, res.err
+		return res.idx, res.err
+	})
+	c.waitMPHF = sync.OnceValues(func() (*mphf, error) {
+		idx, err := c.waitMPHFRaw()
+		if err != nil {
+			return nil, err
 		}
-		// A zero-term index is only valid for an eventless chunk: cross-check
-		// events.pack's count so a mispaired empty index fails loudly instead
-		// of silently matching nothing.
+		if idx.isEmpty() {
+			// A zero-term index is only valid for an eventless chunk: cross-check
+			// events.pack's count so a mispaired empty index fails loudly instead
+			// of silently matching nothing.
+			m, merr := c.waitMeta()
+			if merr != nil {
+				return nil, fmt.Errorf("events: validate empty index for chunk %s: %w", c.chunkID, merr)
+			}
+			if m.count != 0 {
+				return nil, fmt.Errorf(
+					"events: %s holds zero terms but events.pack holds %d events for chunk %s (torn or mispaired index)",
+					indexHashPath, m.count, c.chunkID)
+			}
+			return idx, nil
+		}
+		// Non-empty index: bind the pair to this chunk before serving from
+		// it — index.pack/index.hash carry no chunk ID of their own, so a
+		// mispaired index would silently return an incomplete subset of
+		// matches. Three cheap checks: index.pack's trailer Format,
+		// index.hash keys == index.pack records (halves of one build), and
+		// non-empty index ⇒ non-empty events.pack (converse of the
+		// empty-index check above).
+		tr, terr := c.index.Trailer()
+		if terr != nil {
+			return nil, fmt.Errorf("events: open %s: %w", indexPackPath, terr)
+		}
+		if tr.Format != indexPackFormat {
+			return nil, fmt.Errorf("events: %s: expected format %#x, got %#x (mis-pointed or foreign pack)",
+				indexPackPath, indexPackFormat, tr.Format)
+		}
+		if uint64(tr.TotalItems) != idx.numKeys() {
+			return nil, fmt.Errorf(
+				"events: index pair mismatch for chunk %s: index.hash holds %d keys "+
+					"but index.pack holds %d records (mispaired artifacts)",
+				c.chunkID, idx.numKeys(), tr.TotalItems)
+		}
 		m, merr := c.waitMeta()
 		if merr != nil {
-			return nil, fmt.Errorf("events: validate empty index for chunk %s: %w", c.chunkID, merr)
+			return nil, fmt.Errorf("events: validate index for chunk %s: %w", c.chunkID, merr)
 		}
-		if m.count != 0 {
+		if m.count == 0 {
 			return nil, fmt.Errorf(
-				"events: %s holds zero terms but events.pack holds %d events for chunk %s (torn or mispaired index)",
-				indexHashPath, m.count, c.chunkID)
+				"events: %s holds %d terms but events.pack is eventless for chunk %s (mispaired index)",
+				indexHashPath, idx.numKeys(), c.chunkID)
 		}
-		return res.idx, nil
+		return idx, nil
 	})
 
 	// events.pack metadata loader — runs on first call to
@@ -203,8 +244,11 @@ func (c *ColdReader) Close() error {
 	}
 	// Drain the MPHF goroutine before tearing down. Its result may
 	// be (nil, err) if the load failed — in either case the
-	// goroutine has exited and the channel send has happened.
-	m, _ := c.waitMPHF()
+	// goroutine has exited and the channel send has happened. The
+	// RAW wait on purpose: the validated waitMPHF would do
+	// events.pack metadata I/O just to close an eventless chunk, and
+	// Close has nowhere to surface a verdict anyway.
+	m, _ := c.waitMPHFRaw()
 	var first error
 	if m != nil {
 		if err := m.Close(); err != nil {
@@ -516,13 +560,18 @@ func (c *ColdReader) All(ctx context.Context) iter.Seq2[events.Payload, error] {
 // at most once per reader (sync.OnceValues guards). Placed at the
 // end of the file (after the exported methods) to satisfy funcorder.
 func (c *ColdReader) loadMeta(eventsPath string) (coldMeta, error) {
-	total, err := c.events.TotalItems()
+	tr, err := c.events.Trailer()
 	if err != nil {
 		return coldMeta{}, fmt.Errorf("events: open %s: %w", eventsPath, err)
 	}
-	if total < 0 || uint64(total) > math.MaxUint32 {
-		return coldMeta{}, fmt.Errorf("events: implausible item count %d in %s", total, eventsPath)
+	// Check the trailer's Format before touching any record: a
+	// mis-pointed pack fails at open, not mid-query with an opaque
+	// zstd error (the ledger store does the same).
+	if tr.Format != eventsPackFormat {
+		return coldMeta{}, fmt.Errorf("events: %s: expected format %#x, got %#x (mis-pointed or foreign pack)",
+			eventsPath, eventsPackFormat, tr.Format)
 	}
+	total := tr.TotalItems
 	appData, err := c.events.AppData()
 	if err != nil {
 		return coldMeta{}, fmt.Errorf("events: read app data from %s: %w", eventsPath, err)
@@ -540,5 +589,13 @@ func (c *ColdReader) loadMeta(eventsPath string) (coldMeta, error) {
 		return coldMeta{}, fmt.Errorf("events: chunk-ID mismatch in %s: path says %s, contents start at ledger %d (chunk %s)",
 			eventsPath, c.chunkID, offsets.StartLedger(), got)
 	}
-	return coldMeta{count: uint32(total), offsets: offsets}, nil
+	// The offsets blob's cumulative total must equal the pack's item
+	// count — a mispaired blob (right chunk ID, wrong build) silently
+	// clips tail events off every per-ledger range.
+	if offsets.TotalEvents() != total {
+		return coldMeta{}, fmt.Errorf(
+			"events: %s: offsets blob sums to %d events but the pack holds %d (mispaired offsets)",
+			eventsPath, offsets.TotalEvents(), total)
+	}
+	return coldMeta{count: total, offsets: offsets}, nil
 }

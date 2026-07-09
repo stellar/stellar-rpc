@@ -146,9 +146,11 @@ type Reader interface {
 	// (events.Payload{}, stores.ErrStoreClosed) and stopping is the after-Close
 	// behavior, mirroring All.
 	//
-	// Out-of-range arguments (start >= EventCount, or start+count >
-	// EventCount) yield an error and stop — callers cap count
-	// against EventCount themselves.
+	// count == 0 is a no-op regardless of start (both implementations
+	// short-circuit before bounds-checking). A non-zero count whose
+	// range escapes [0, EventCount) yields a wrapped
+	// ErrFetchRangeOutOfBounds and stops — callers cap count against
+	// EventCount themselves.
 	FetchRange(ctx context.Context, start, count uint32) iter.Seq2[events.Payload, error]
 
 	// All streams every event in this Chunk in chunk-relative

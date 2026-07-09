@@ -13,6 +13,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/packfile"
 )
 
 // buildColdFixture writes a complete cold artifact set (events.pack
@@ -666,4 +667,125 @@ func TestColdReader_AllMatchesFetchRange(t *testing.T) {
 		rangeSyms = append(rangeSyms, dataSym(t, p))
 	}
 	assert.Equal(t, allSyms, rangeSyms)
+}
+
+// writeForeignPack overwrites path with a minimal, valid packfile whose
+// trailer Format is not one of eventstore's — the "mis-pointed or foreign
+// pack" input the open-time format checks reject.
+func writeForeignPack(t *testing.T, path string) {
+	t.Helper()
+	pw, err := packfile.Create(path, packfile.WriterOptions{
+		Format:         0xDEADBEEF,
+		ItemsPerRecord: 1,
+		Overwrite:      true,
+	})
+	require.NoError(t, err)
+	require.NoError(t, pw.AppendItem([]byte("x")))
+	require.NoError(t, pw.Finish(nil))
+}
+
+// copyFile clobbers dst with src's bytes.
+func copyFile(t *testing.T, src, dst string) {
+	t.Helper()
+	b, err := os.ReadFile(src)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(dst, b, 0o644))
+}
+
+// TestColdReader_RejectsWrongFormatEventsPack pins the open-time Format
+// dispatch: a mis-pointed events.pack fails loudly at first metadata
+// access instead of mid-query with an opaque decode error.
+func TestColdReader_RejectsWrongFormatEventsPack(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, _ := buildColdFixture(t, chunkID, 4, 1)
+	writeForeignPack(t, filepath.Join(dir, EventsPackName(chunkID)))
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err, "open is lazy; the format check fires on first metadata access")
+	t.Cleanup(func() { _ = cr.Close() })
+
+	_, err = cr.EventCount()
+	require.ErrorContains(t, err, "expected format")
+}
+
+// TestColdReader_RejectsWrongFormatIndexPack is the index.pack half of the
+// Format dispatch, firing on the lookup path.
+func TestColdReader_RejectsWrongFormatIndexPack(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
+	writeForeignPack(t, filepath.Join(dir, IndexPackName(chunkID)))
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	_, err = cr.LookupKeys(context.Background(), []events.TermKey{contractTermKey(payloads[0])})
+	require.ErrorContains(t, err, "expected format")
+}
+
+// TestColdReader_RejectsMispairedOffsets pins the load-time cross-check of
+// the offsets blob's cumulative total against the pack's item count: a
+// mispaired blob (right chunk, wrong build) would otherwise silently clip
+// tail events off every per-ledger range.
+func TestColdReader_RejectsMispairedOffsets(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir := t.TempDir()
+	first := chunkID.FirstLedger()
+
+	cw, err := NewColdWriter(chunkID, dir, ColdWriterOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cw.Close() })
+	for i := range 3 {
+		require.NoError(t, cw.Append(makeColdPayload(first, 1, fmt.Sprintf("e%d", i))))
+	}
+	// Offsets sum to 2 events; the pack holds 3. ColdWriter.Finish takes
+	// the caller's offsets on trust — the reader-side check is the guard.
+	offsets := events.NewLedgerOffsets(first)
+	require.NoError(t, offsets.Append(first, 2))
+	require.NoError(t, cw.Finish(offsets))
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	_, err = cr.EventCount()
+	require.ErrorContains(t, err, "mispaired offsets")
+}
+
+// TestColdReader_RejectsMispairedIndexHash pins the index-pair binding: an
+// index.hash whose key count disagrees with index.pack's record count
+// (halves from two different builds) must fail at load, not silently
+// return a subset of matches.
+func TestColdReader_RejectsMispairedIndexHash(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dirA, payloadsA := buildColdFixture(t, chunkID, 2, 1) // 4 terms
+	dirB, _ := buildColdFixture(t, chunkID, 8, 1)         // 16 terms
+
+	copyFile(t, filepath.Join(dirB, IndexHashName(chunkID)), filepath.Join(dirA, IndexHashName(chunkID)))
+
+	cr, err := OpenColdReader(chunkID, dirA, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	_, err = cr.LookupKeys(context.Background(), []events.TermKey{contractTermKey(payloadsA[0])})
+	require.ErrorContains(t, err, "index pair mismatch")
+}
+
+// TestColdReader_RejectsNonEmptyIndexOnEventlessChunk is the converse of
+// the empty-index check: a populated index pair copied onto an
+// eventless chunk (a misrouted snapshot) must fail at load.
+func TestColdReader_RejectsNonEmptyIndexOnEventlessChunk(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dirEventless, _ := buildColdFixture(t, chunkID, 0, 2)
+	dirFull, payloads := buildColdFixture(t, chunkID, 4, 1)
+
+	copyFile(t, filepath.Join(dirFull, IndexPackName(chunkID)), filepath.Join(dirEventless, IndexPackName(chunkID)))
+	copyFile(t, filepath.Join(dirFull, IndexHashName(chunkID)), filepath.Join(dirEventless, IndexHashName(chunkID)))
+
+	cr, err := OpenColdReader(chunkID, dirEventless, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	_, err = cr.LookupKeys(context.Background(), []events.TermKey{contractTermKey(payloads[0])})
+	require.ErrorContains(t, err, "eventless")
 }
