@@ -166,7 +166,7 @@ jobs:
             {Key=sha,Value=${{ steps.resolve.outputs.sha }}},
             {Key=run-id,Value=${{ github.run_id }}}"
           RUN_INSTANCES_JSON=$(aws ec2 run-instances \
-            --image-id resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id \
+            --image-id ami-0d28727121d5d4a3c \ # Ubuntu 22.04 amd64 in us-east-1 as of 2026-07-08
             --instance-type "$INSTANCE_TYPE" \
             --iam-instance-profile "Name=$INSTANCE_PROFILE" \
             --user-data file:///tmp/user-data.sh \
