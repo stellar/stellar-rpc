@@ -14,10 +14,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores"
 )
 
-// ErrClosed is returned by Get after Close. Package-local: this store
-// reads an mmap directly, with no Layer-1 wrapper to source a closed error.
-var ErrClosed = errors.New("txhash: store is closed")
-
 // ColdReader serves point lookups against one cold txhash index file.
 //
 // Concurrent Gets are safe (the index is read-only). Get is NOT safe
@@ -31,8 +27,9 @@ type ColdReader struct {
 	closed    atomic.Bool
 }
 
-// OpenColdReader opens the mmap-backed cold txhash index at path (compose it
-// via IndexFileName), validating its payload width and metadata.
+// OpenColdReader opens the mmap-backed cold txhash index at path (the
+// on-disk layout composes it via geometry.Layout.TxHashIndexFilePath),
+// validating its payload width and metadata.
 func OpenColdReader(path string) (*ColdReader, error) {
 	idx, err := streamhash.OpenPayload(path)
 	if err != nil {
@@ -54,11 +51,11 @@ func OpenColdReader(path string) (*ColdReader, error) {
 
 // Get returns the ledgerSeq the hash was committed in, stores.ErrNotFound
 // if it wasn't in the build set (residual fingerprint false positives are
-// caught downstream), or ErrClosed after Close. streamhash keys on the first
+// caught downstream), or stores.ErrStoreClosed after Close. streamhash keys on the first
 // 16 bytes, so the full 32-byte hash and hash[:16] are equivalent.
 func (r *ColdReader) Get(hash [32]byte) (uint32, error) {
 	if r.closed.Load() {
-		return 0, ErrClosed
+		return 0, stores.ErrStoreClosed
 	}
 	_, payload, err := r.idx.QueryPayload(hash[:])
 	if err != nil {

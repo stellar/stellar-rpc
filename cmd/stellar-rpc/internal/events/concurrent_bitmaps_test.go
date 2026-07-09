@@ -8,8 +8,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// newTestConcurrentBitmaps builds an empty ConcurrentBitmaps via the
+// only remaining constructor (production always converts from a
+// warmup/backfill-built Bitmaps).
+func newTestConcurrentBitmaps() *ConcurrentBitmaps {
+	return NewConcurrentBitmapsFromBitmaps(NewBitmaps())
+}
+
 func TestConcurrentBitmaps_AddToAndGet(t *testing.T) {
-	s := NewConcurrentBitmaps()
+	s := newTestConcurrentBitmaps()
 	key := ComputeTermKey([]byte("transfer"), FieldTopic0)
 
 	s.AddTo(key, 0)
@@ -26,7 +33,7 @@ func TestConcurrentBitmaps_AddToAndGet(t *testing.T) {
 }
 
 func TestConcurrentBitmaps_GetMissing(t *testing.T) {
-	s := NewConcurrentBitmaps()
+	s := newTestConcurrentBitmaps()
 	key := ComputeTermKey([]byte("missing"), FieldTopic0)
 	bm, err := s.Get(key)
 	require.NoError(t, err)
@@ -34,7 +41,7 @@ func TestConcurrentBitmaps_GetMissing(t *testing.T) {
 }
 
 func TestConcurrentBitmaps_ListMode(t *testing.T) {
-	s := NewConcurrentBitmaps()
+	s := newTestConcurrentBitmaps()
 	key := ComputeTermKey([]byte("sparse"), FieldTopic0)
 
 	for i := range uint32(promotionThreshold - 1) {
@@ -58,7 +65,7 @@ func TestConcurrentBitmaps_ListMode(t *testing.T) {
 }
 
 func TestConcurrentBitmaps_Promotion(t *testing.T) {
-	s := NewConcurrentBitmaps()
+	s := newTestConcurrentBitmaps()
 	key := ComputeTermKey([]byte("dense"), FieldTopic0)
 
 	for i := range uint32(promotionThreshold) {
@@ -74,7 +81,7 @@ func TestConcurrentBitmaps_Promotion(t *testing.T) {
 }
 
 func TestConcurrentBitmaps_AddAfterPromotion(t *testing.T) {
-	s := NewConcurrentBitmaps()
+	s := newTestConcurrentBitmaps()
 	key := ComputeTermKey([]byte("dense"), FieldTopic0)
 
 	for i := range uint32(promotionThreshold) {
@@ -90,77 +97,8 @@ func TestConcurrentBitmaps_AddAfterPromotion(t *testing.T) {
 	assert.True(t, bm.Contains(2000))
 }
 
-func TestConcurrentBitmaps_Len(t *testing.T) {
-	s := NewConcurrentBitmaps()
-	assert.Equal(t, 0, s.Len())
-
-	keyA := ComputeTermKey([]byte("a"), FieldTopic0)
-	keyB := ComputeTermKey([]byte("b"), FieldTopic1)
-
-	s.AddTo(keyA, 0)
-	assert.Equal(t, 1, s.Len())
-
-	s.AddTo(keyA, 1) // same term
-	assert.Equal(t, 1, s.Len())
-
-	s.AddTo(keyB, 2)
-	assert.Equal(t, 2, s.Len())
-}
-
-// TestConcurrentBitmaps_SnapshotIsUniquelyOwned pins that Snapshot
-// returns a Bitmaps whose bitmaps are independent of the source
-// ConcurrentBitmaps. Mutating a snapshot bitmap must not affect a
-// subsequent Snapshot of the same source.
-func TestConcurrentBitmaps_SnapshotIsUniquelyOwned(t *testing.T) {
-	s := NewConcurrentBitmaps()
-	key := ComputeTermKey([]byte("dense"), FieldTopic0)
-	for i := range uint32(promotionThreshold) {
-		s.AddTo(key, i)
-	}
-
-	snap1 := s.Snapshot()
-	bm1 := snap1[key]
-	require.NotNil(t, bm1)
-	bm1.Add(999_999)
-
-	snap2 := s.Snapshot()
-	bm2 := snap2[key]
-	require.NotNil(t, bm2)
-	assert.False(t, bm2.Contains(999_999),
-		"mutating a snapshot bitmap must not bleed into the source ConcurrentBitmaps")
-
-	// And the original index is still clean.
-	live, err := s.Get(key)
-	require.NoError(t, err)
-	assert.False(t, live.Contains(999_999),
-		"snapshot mutation must not affect the live ConcurrentBitmaps")
-}
-
-func TestConcurrentBitmaps_SnapshotIncludesSparseAndDense(t *testing.T) {
-	s := NewConcurrentBitmaps()
-
-	sparseKey := ComputeTermKey([]byte("sparse"), FieldTopic0)
-	denseKey := ComputeTermKey([]byte("dense"), FieldTopic0)
-
-	// Sparse: stays in list mode.
-	s.AddTo(sparseKey, 0)
-	s.AddTo(sparseKey, 1)
-
-	// Dense: promoted to bitmap mode.
-	for i := range uint32(promotionThreshold + 10) {
-		s.AddTo(denseKey, 100+i)
-	}
-
-	snap := s.Snapshot()
-	assert.Len(t, snap, 2)
-	require.NotNil(t, snap[sparseKey])
-	require.NotNil(t, snap[denseKey])
-	assert.Equal(t, uint64(2), snap[sparseKey].GetCardinality())
-	assert.Equal(t, uint64(promotionThreshold+10), snap[denseKey].GetCardinality())
-}
-
 func TestConcurrentBitmaps_BatchAddTo(t *testing.T) {
-	s := NewConcurrentBitmaps()
+	s := newTestConcurrentBitmaps()
 	key := ComputeTermKey([]byte("batch"), FieldTopic0)
 
 	s.AddTo(key, 0, 1, 2, 3, 4)
@@ -174,7 +112,7 @@ func TestConcurrentBitmaps_BatchAddTo(t *testing.T) {
 }
 
 func TestConcurrentBitmaps_BatchAddToPromotion(t *testing.T) {
-	s := NewConcurrentBitmaps()
+	s := newTestConcurrentBitmaps()
 	key := ComputeTermKey([]byte("batch-promote"), FieldTopic0)
 
 	// Single batch call that crosses threshold.
@@ -198,7 +136,7 @@ func TestConcurrentBitmaps_BatchAddToPromotion(t *testing.T) {
 // pointer. This is the key invariant readers can rely on across the
 // borrow.
 func TestConcurrentBitmaps_GetReturnsImmutableSnapshot(t *testing.T) {
-	s := NewConcurrentBitmaps()
+	s := newTestConcurrentBitmaps()
 	key := ComputeTermKey([]byte("borrow"), FieldTopic0)
 
 	// Promote to bitmap mode.
@@ -231,7 +169,7 @@ func TestConcurrentBitmaps_GetReturnsImmutableSnapshot(t *testing.T) {
 // freeze time after ingest stops), so multi-goroutine Snapshot
 // would be out-of-contract. Run under -race.
 func TestConcurrentBitmaps_ConcurrentGetIsSafe(t *testing.T) {
-	s := NewConcurrentBitmaps()
+	s := newTestConcurrentBitmaps()
 	const nTerms = 200
 	keys := make([]TermKey, nTerms)
 	for i := range nTerms {
@@ -278,7 +216,7 @@ func TestConcurrentBitmaps_ConcurrentGetIsSafe(t *testing.T) {
 // the writer publishes new snapshots; no clones or locks span the
 // borrow. Under -race no data races should be reported.
 func TestConcurrentBitmaps_ConcurrentReadWrite(t *testing.T) {
-	s := NewConcurrentBitmaps()
+	s := newTestConcurrentBitmaps()
 
 	const numTerms = 100
 	const numEvents = 10_000
@@ -301,14 +239,12 @@ func TestConcurrentBitmaps_ConcurrentReadWrite(t *testing.T) {
 		wg.Go(func() {
 			for i := range numEvents {
 				_, _ = s.Get(keys[i%numTerms])
-				_ = s.Len()
 			}
 		})
 	}
 
 	wg.Wait()
 
-	assert.Equal(t, numTerms, s.Len())
 	for _, key := range keys {
 		bm, err := s.Get(key)
 		require.NoError(t, err)
@@ -329,7 +265,7 @@ func TestConcurrentBitmaps_ConcurrentReadWrite(t *testing.T) {
 // promotion boundary should never produce a nil bitmap and
 // should never trip the race detector.
 func TestConcurrentBitmaps_GetDuringPromotionNeverReturnsNil(t *testing.T) {
-	s := NewConcurrentBitmaps()
+	s := newTestConcurrentBitmaps()
 	const numKeys = 200
 
 	keys := make([]TermKey, numKeys)
@@ -383,46 +319,6 @@ func TestConcurrentBitmaps_GetDuringPromotionNeverReturnsNil(t *testing.T) {
 	wg.Wait()
 }
 
-// TestConcurrentBitmaps_SnapshotPostPromotionIncludesAllTerms
-// drives AddTo to push every term across the sparse→dense
-// promotion boundary, then takes a single Snapshot and verifies
-// every populated term appears with the right cardinality.
-//
-// Snapshot's contract is single-caller, called only after ingest
-// has stopped on the chunk — so concurrent AddTo + Snapshot is
-// out-of-contract. This sequential test pins the post-promotion
-// snapshot correctness without violating that contract.
-func TestConcurrentBitmaps_SnapshotPostPromotionIncludesAllTerms(t *testing.T) {
-	s := NewConcurrentBitmaps()
-	const numKeys = 200
-
-	keys := make([]TermKey, numKeys)
-	for i := range numKeys {
-		keys[i] = ComputeTermKey([]byte{byte(i / 256), byte(i % 256)}, FieldTopic0)
-	}
-
-	// Seed each term with promotionThreshold-1 ids: sparse mode.
-	for _, k := range keys {
-		ids := make([]uint32, promotionThreshold-1)
-		for j := range ids {
-			ids[j] = uint32(j)
-		}
-		s.AddTo(k, ids...)
-	}
-
-	// Push every term over the promotion threshold.
-	for i, k := range keys {
-		s.AddTo(k, uint32(promotionThreshold-1+i))
-	}
-
-	snap := s.Snapshot()
-	for _, k := range keys {
-		require.NotNil(t, snap[k], "Snapshot dropped a populated term")
-		assert.Equal(t, uint64(promotionThreshold), snap[k].GetCardinality(),
-			"Snapshot bitmap missing events for a promoted term")
-	}
-}
-
 // TestConcurrentBitmaps_AddToIsIdempotent pins the dedup contract:
 // AddTo can be called multiple times with the same eventID for the
 // same key and the result is the same as adding it once. Covers
@@ -430,7 +326,7 @@ func TestConcurrentBitmaps_SnapshotPostPromotionIncludesAllTerms(t *testing.T) {
 // set semantics).
 func TestConcurrentBitmaps_AddToIsIdempotent(t *testing.T) {
 	t.Run("list mode", func(t *testing.T) {
-		s := NewConcurrentBitmaps()
+		s := newTestConcurrentBitmaps()
 		key := ComputeTermKey([]byte("sparse"), FieldTopic0)
 
 		// Add a few in order.
@@ -457,7 +353,7 @@ func TestConcurrentBitmaps_AddToIsIdempotent(t *testing.T) {
 	})
 
 	t.Run("bitmap mode", func(t *testing.T) {
-		s := NewConcurrentBitmaps()
+		s := newTestConcurrentBitmaps()
 		key := ComputeTermKey([]byte("dense"), FieldTopic0)
 
 		// Force bitmap mode by exceeding the threshold.
@@ -487,7 +383,7 @@ func TestConcurrentBitmaps_AddToIsIdempotent(t *testing.T) {
 // (+40% hot-ingest wall, observed empirically).
 func TestConcurrentBitmaps_DenseAddToSetsCopyOnWrite(t *testing.T) {
 	t.Run("via promotion in AddTo", func(t *testing.T) {
-		s := NewConcurrentBitmaps()
+		s := newTestConcurrentBitmaps()
 		key := ComputeTermKey([]byte("promote"), FieldTopic0)
 		for i := range uint32(promotionThreshold) {
 			s.AddTo(key, i)
@@ -499,7 +395,7 @@ func TestConcurrentBitmaps_DenseAddToSetsCopyOnWrite(t *testing.T) {
 	})
 
 	t.Run("via newTermState over-threshold initial batch", func(t *testing.T) {
-		s := NewConcurrentBitmaps()
+		s := newTestConcurrentBitmaps()
 		key := ComputeTermKey([]byte("initial"), FieldTopic0)
 		ids := make([]uint32, promotionThreshold+10)
 		for i := range ids {
@@ -513,7 +409,7 @@ func TestConcurrentBitmaps_DenseAddToSetsCopyOnWrite(t *testing.T) {
 	})
 
 	t.Run("subsequent AddTo preserves CopyOnWrite via Clone", func(t *testing.T) {
-		s := NewConcurrentBitmaps()
+		s := newTestConcurrentBitmaps()
 		key := ComputeTermKey([]byte("evolve"), FieldTopic0)
 		for i := range uint32(promotionThreshold) {
 			s.AddTo(key, i)

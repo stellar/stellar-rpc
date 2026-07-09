@@ -2,10 +2,11 @@ package txhash
 
 // cold_bin.go owns the on-disk format of the RAW cold txhash chunk: the
 // sorted per-chunk `<chunkID:08d>.bin` file the cold ingester publishes and
-// the deferred streamhash index builder consumes. Keeping the writer, the
-// reader, and the filename helper next to each other in this package gives
-// the format a single owner — producer (ingest) and consumer (index build)
-// import a compile-time-linked codec instead of byte-matching a convention.
+// the deferred streamhash index builder consumes. Keeping the writer and
+// the filename helper next to the index builder's pre-scan in this package
+// gives the format a single owner — producer (ingest) and consumer (index
+// build) import a compile-time-linked codec instead of byte-matching a
+// convention.
 //
 // File layout:
 //
@@ -13,14 +14,16 @@ package txhash
 //	entry   ColdKeySize B  txhash[:ColdKeySize]
 //	        uint32 LE      absolute ledger seq
 //
-// Entries are lex-sorted by key (non-decreasing; duplicate truncated keys
-// are possible and preserved).
+// Entries are lex-sorted by key. Duplicate truncated keys are written
+// verbatim, but the downstream streamhash build fails on them — with
+// 16-byte truncated hashes a collision is astronomically unlikely, and
+// if one ever occurs the index build rejects it loudly rather than
+// serving an ambiguous key.
 
 import (
 	"bufio"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"os"
 
 	"github.com/stellar/streamhash"
@@ -62,8 +65,8 @@ func ColdBinName(chunkID chunk.ID) string {
 // orchestrator's completion record — written only after WriteColdBin returns —
 // is the sole authority on whether the artifact exists, so a partial file
 // from a failed or crashed attempt is inert scratch the retry overwrites
-// (and ReadColdBin's header-vs-size check rejects loudly if one is ever
-// opened).
+// (and scanBinHeader's header-vs-size check rejects loudly if one is
+// ever opened).
 //
 // entries must already be sorted (lex by Key, non-decreasing); this function
 // writes them verbatim.
@@ -119,8 +122,7 @@ func WriteColdBin(path string, entries []ColdEntry) error {
 // the untrusted count, so a corrupt header can't overflow the arithmetic
 // (coldBinEntrySize·2^62 ≡ 0 mod 2^64 would slip a wildly wrong count past a
 // naive `size == header + count*entry` check and hand it to the index builder
-// as an allocation). Both the raw reader (ReadColdBin) and the index builder's
-// pre-scan (scanBinHeader) gate on it.
+// as an allocation). The index builder's pre-scan (scanBinHeader) gates on it.
 func coldBinCount(path string, size int64, count uint64) (uint64, error) {
 	body := size - coldBinHeaderSize
 	if body < 0 || body%coldBinEntrySize != 0 {
@@ -132,41 +134,4 @@ func coldBinCount(path string, size int64, count uint64) (uint64, error) {
 			path, count, size, want)
 	}
 	return count, nil
-}
-
-// ReadColdBin reads back a .bin file written by WriteColdBin, verifying the
-// header count against the file size. The index-build step iterates these
-// entries; tests use it to assert the writer's on-disk contract.
-func ReadColdBin(path string) ([]ColdEntry, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("txhash: open %s: %w", path, err)
-	}
-	defer func() { _ = f.Close() }()
-
-	br := bufio.NewReaderSize(f, 1<<20)
-	var header [coldBinHeaderSize]byte
-	if _, err := io.ReadFull(br, header[:]); err != nil {
-		return nil, fmt.Errorf("txhash: read header of %s: %w", path, err)
-	}
-	count := binary.LittleEndian.Uint64(header[:])
-
-	info, err := f.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("txhash: stat %s: %w", path, err)
-	}
-	if _, err := coldBinCount(path, info.Size(), count); err != nil {
-		return nil, err
-	}
-
-	entries := make([]ColdEntry, count)
-	var entryBuf [coldBinEntrySize]byte
-	for i := range entries {
-		if _, err := io.ReadFull(br, entryBuf[:]); err != nil {
-			return nil, fmt.Errorf("txhash: read entry %d of %s: %w", i, path, err)
-		}
-		copy(entries[i].Key[:], entryBuf[:ColdKeySize])
-		entries[i].Seq = binary.LittleEndian.Uint32(entryBuf[ColdKeySize:])
-	}
-	return entries, nil
 }

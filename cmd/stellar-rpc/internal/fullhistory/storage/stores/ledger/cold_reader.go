@@ -35,7 +35,7 @@ var coldPackDecoder = zstd.NewDecompressor()
 // returns no error. packfile.Open begins the open in a background
 // goroutine immediately; the trailer + AppData are read and validated
 // on the first method call, via a sync.OnceValues-cached loadHeader,
-// where a failed open also surfaces. Read methods (FirstSeq, LastSeq,
+// where a failed open also surfaces. Read methods (LastSeq,
 // GetLedgerRaw, IterateLedgers) are safe for concurrent use; Close
 // is NOT — callers must ensure all in-flight reads have returned
 // before invoking it, matching the underlying packfile.Reader.Close
@@ -102,8 +102,7 @@ func (c *ColdReader) loadHeader() (coldHeader, error) {
 	return coldHeader{firstSeq: first, lastSeq: first + tr.TotalItems - 1}, nil
 }
 
-func (c *ColdReader) FirstSeq() (uint32, error) { h, err := c.init(); return h.firstSeq, err }
-func (c *ColdReader) LastSeq() (uint32, error)  { h, err := c.init(); return h.lastSeq, err }
+func (c *ColdReader) LastSeq() (uint32, error) { h, err := c.init(); return h.lastSeq, err }
 
 // GetLedgerRaw reads the raw LedgerCloseMeta bytes for seq into a fresh,
 // caller-owned buffer. Sequential bulk readers should prefer IterateLedgers,
@@ -133,11 +132,11 @@ func (c *ColdReader) GetLedgerRaw(seq uint32) ([]byte, error) {
 
 // IterateLedgers walks (seq, raw bytes) pairs in [start, end] inclusive,
 // ascending. The requested range must be fully contained within the
-// store's coverage [FirstSeq, LastSeq]; any out-of-range portion — or
+// store's coverage [firstSeq, lastSeq]; any out-of-range portion — or
 // an invalid start > end — is reported as stores.ErrOutOfRange on the
 // first yield (no entries are produced). Callers that span chunk
-// boundaries should clip explicitly against FirstSeq/LastSeq before
-// calling.
+// boundaries should clip explicitly against the store's coverage
+// (the chunk's ledger window, or LastSeq) before calling.
 func (c *ColdReader) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 	return func(yield func(Entry, error) bool) {
 		h, err := c.init()

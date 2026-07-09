@@ -56,26 +56,9 @@ type termState struct {
 //
 //   - Get / LookupKeys: many-reader. No Clone, just atomic.Load.
 //     Safe to call concurrently with AddTo.
-//
-//   - Snapshot: single-caller, called only AFTER ingest has stopped
-//     on the chunk (the freeze path's natural lifecycle). Snapshot
-//     does Clone every dense bitmap to hand uniquely-owned bitmaps
-//     to WriteColdIndex; the same side-effect-on-source applies, so
-//     concurrent Snapshot calls or Snapshot concurrent with AddTo
-//     would race. The orchestrator stops ingest before freezing.
-//
-// To freeze the index to disk, call Snapshot to get a uniquely-owned
-// Bitmaps the caller can mutate (e.g., RunOptimize before
-// MarshalBinary).
 type ConcurrentBitmaps struct {
 	rwmu  sync.RWMutex
 	terms map[TermKey]*atomic.Pointer[termState]
-}
-
-// NewConcurrentBitmaps returns an empty ConcurrentBitmaps ready for
-// single-writer + many-reader use.
-func NewConcurrentBitmaps() *ConcurrentBitmaps {
-	return &ConcurrentBitmaps{terms: make(map[TermKey]*atomic.Pointer[termState])}
 }
 
 // NewConcurrentBitmapsFromBitmaps takes ownership of a single-threaded
@@ -124,7 +107,8 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 // ≥2-input qualifier on FastAnd/FastOr: with a single input the
 // roaring library has historically taken a Clone-the-input
 // shortcut, so callers MUST avoid passing a singleton slice to
-// those aggregators (see query.go:248 for the borrow guard).
+// those aggregators (eventstore's Query guards its single-input
+// cases before calling FastAnd/FastOr).
 //
 // Callers may hold the pointer arbitrarily long. A subsequent Get
 // on the same key may return either this same pointer (no AddTo
@@ -141,15 +125,11 @@ func (s *ConcurrentBitmaps) Get(key TermKey) (*roaring.Bitmap, error) {
 	if p == nil {
 		return nil, nil //nolint:nilnil // not-found is signaled by nil bitmap, no error
 	}
+	// The pointer is always Stored with a non-nil termState holding a
+	// non-nil bm or non-empty ids before it is published to the map.
 	st := p.Load()
-	if st == nil {
-		return nil, nil //nolint:nilnil
-	}
 	if st.bm != nil {
 		return st.bm, nil
-	}
-	if len(st.ids) == 0 {
-		return nil, nil //nolint:nilnil
 	}
 	bm := roaring.New()
 	bm.AddMany(st.ids)
@@ -157,9 +137,9 @@ func (s *ConcurrentBitmaps) Get(key TermKey) (*roaring.Bitmap, error) {
 }
 
 // AddTo records each eventID under key. Idempotent: callers
-// (IngestLedgerEvents, warmup) feed events in chunk-relative
-// event-ID order, so any duplicate is a retry of the already-added
-// sorted prefix and is skipped. The same (key, eventID) pair has
+// (HotStore.applyLedger via the post-commit hook, warmup) feed
+// events in chunk-relative event-ID order, so any duplicate is a
+// retry of the already-added sorted prefix and is skipped. The same (key, eventID) pair has
 // the same effect added once or many times.
 //
 // Single-writer contract: AddTo must not run concurrently with
@@ -248,65 +228,4 @@ func newTermState(eventIDs []uint32) *termState {
 		ids = append(ids, id)
 	}
 	return &termState{ids: ids}
-}
-
-// Len returns the number of distinct terms currently indexed.
-func (s *ConcurrentBitmaps) Len() int {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
-	return len(s.terms)
-}
-
-// Snapshot materializes the index into a Bitmaps that the caller
-// uniquely owns. Each per-term bitmap is a fresh Clone (for
-// dense-mode entries) or a freshly-built bitmap from the sparse-mode
-// id list. The returned Bitmaps' container-data ownership story
-// depends on the source bitmap's CopyOnWrite state:
-//
-//   - Dense terms (created with SetCopyOnWrite=true, see AddTo):
-//     Clone shares container pointers with the source. The
-//     resulting Bitmaps is "Clone-safe": any mutator that REPLACES
-//     a container slot (RunOptimize, AddRange spanning new high-16
-//     blocks) writes into the clone's own keys/containers slice
-//     without touching the source. Any mutator that WRITES THROUGH
-//     a container pointer (Add, AddMany on shared containers)
-//     would alias back to the live mirror — which is why the only
-//     downstream consumer of Snapshot (WriteColdIndex's
-//     RunOptimize + MarshalBinary at cold_index.go:127-128) is
-//     limited to container-replacement mutators.
-//   - Sparse terms: a fresh empty bitmap is built from te.ids, so
-//     the result is fully independent of the source.
-//
-// Single-caller contract: Snapshot must not be called concurrently
-// with itself OR with AddTo on the same ConcurrentBitmaps. The Clone
-// it performs mutates the source bitmap's needCopyOnWrite slice as
-// a side effect of roaring's clone implementation; concurrent
-// Clones on the same source bitmap would race on that slice. In
-// production the orchestrator only calls Snapshot at freeze time,
-// after ingest has stopped on the chunk.
-//
-// Cost: one (O(1) shallow) Clone per dense term + one materialize
-// per sparse term. The RWMutex is held in read mode for the entire
-// iteration, blocking only new-key inserts.
-func (s *ConcurrentBitmaps) Snapshot() Bitmaps {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
-	snap := make(Bitmaps, len(s.terms))
-	for k, p := range s.terms {
-		st := p.Load()
-		if st == nil {
-			continue
-		}
-		if st.bm != nil {
-			snap[k] = st.bm.Clone()
-			continue
-		}
-		if len(st.ids) == 0 {
-			continue
-		}
-		bm := roaring.New()
-		bm.AddMany(st.ids)
-		snap[k] = bm
-	}
-	return snap
 }

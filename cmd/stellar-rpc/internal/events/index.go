@@ -50,54 +50,6 @@ func ComputeTermKey(value []byte, field Field) TermKey {
 	return key
 }
 
-// TermsFor returns the 16-byte hashed term keys (contractID + topics
-// 0..MaxTopicCount-1) applicable to ev. Topics beyond MaxTopicCount
-// are not indexed because the getEvents filter API can't match them
-// anyway (see topicField).
-//
-// Callers pair each returned key with the event's chunk-relative
-// event ID at the call site — TermsFor itself doesn't track event
-// IDs because they're a property of the writer's scheduling
-// (start_id + i), not of the event's contents.
-//
-// Used by callers that already hold a decoded ContractEvent:
-//   - Cold backfill (cold-events-ingest) — derives terms per
-//     payload while populating an in-memory events.Bitmaps for
-//     later WriteColdIndex.
-//
-// The hot ingest path holds only raw event bytes and derives terms via
-// TermsForBytes instead. The live-chunk freeze path calls neither — it
-// converts the hot mirror to a Bitmaps via ConcurrentBitmaps.Snapshot and
-// hands that to WriteColdIndex.
-//
-// A MarshalBinary failure on a topic surfaces as an error rather
-// than a silent skip. Stellar-core has already validated the XDR
-// when it closed the ledger, so a failure here signals corruption
-// somewhere in the pipeline — the right response is to reject the
-// ledger commit (leaving on-disk state untouched), not to
-// under-index events and continue.
-func TermsFor(ev xdr.ContractEvent) ([]TermKey, error) {
-	var keys []TermKey
-	if ev.ContractId != nil {
-		keys = append(keys, ComputeTermKey(ev.ContractId[:], FieldContractID))
-	}
-	v0, ok := ev.Body.GetV0()
-	if !ok {
-		return keys, nil
-	}
-	for i, topic := range v0.Topics {
-		if i >= protocol.MaxTopicCount {
-			break
-		}
-		raw, err := topic.MarshalBinary()
-		if err != nil {
-			return nil, fmt.Errorf("events: marshal topic %d: %w", i, err)
-		}
-		keys = append(keys, ComputeTermKey(raw, topicField(i)))
-	}
-	return keys, nil
-}
-
 // TermsForBytes returns the term keys (contract ID + topics
 // 0..MaxTopicCount-1) for a marshaled ContractEvent, navigating the raw
 // XDR via xdr.ContractEventView instead of a full UnmarshalBinary.

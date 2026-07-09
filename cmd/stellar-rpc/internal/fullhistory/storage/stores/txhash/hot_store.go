@@ -1,6 +1,7 @@
 // Package txhash holds the hot transaction-hash store (RocksDB-backed, a single
-// txhash CF) and its value types. A future cold reader (RecSplit-backed) will
-// live alongside the HotStore in this package.
+// txhash CF), the cold artifacts (the raw per-chunk .bin file and the
+// streamhash-MPHF-backed cold index reader/builder), and the read-assembly
+// layer that resolves a hash across tiers.
 package txhash
 
 import (

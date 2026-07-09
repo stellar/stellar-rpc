@@ -59,9 +59,9 @@ func TestColdWriter_AppendRejectsGapAndKeepsCounter(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 
-	first, err := c.FirstSeq()
+	got, err := c.GetLedgerRaw(100)
 	require.NoError(t, err)
-	assert.Equal(t, uint32(100), first)
+	assert.Equal(t, []byte("a"), got)
 	last, err := c.LastSeq()
 	require.NoError(t, err)
 	assert.Equal(t, uint32(101), last)
@@ -139,9 +139,6 @@ func TestNewColdWriter_TruncatesPreexistingFile(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 
-	first, err := c.FirstSeq()
-	require.NoError(t, err)
-	assert.Equal(t, uint32(999), first)
 	last, err := c.LastSeq()
 	require.NoError(t, err)
 	assert.Equal(t, uint32(999), last)

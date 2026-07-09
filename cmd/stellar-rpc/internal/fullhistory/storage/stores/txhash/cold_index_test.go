@@ -62,6 +62,11 @@ const (
 	fixtureSpreadChunks = 6
 )
 
+// indexFileName names a scratch cold-index file for baseChunk. The on-disk
+// layout is geometry.Layout.TxHashIndexFilePath; tests only need a stable name
+// in their own TempDir, so this reuses chunk.ID's zero-padded String().
+func indexFileName(baseChunk chunk.ID) string { return baseChunk.String() + "-txhash.idx" }
+
 // fixtureMinLedger is the MinLedger anchor for the fixture index group.
 func fixtureMinLedger() uint32 { return fixtureBaseChunk.FirstLedger() }
 
@@ -151,7 +156,7 @@ func buildColdFixture(t *testing.T, n int) (string, []fixtureEntry) {
 	inputs := writeFixtureBins(t, dir, entries)
 	require.Greater(t, len(inputs), 1, "fixture should span multiple .bin files to exercise the merge")
 
-	idxPath := filepath.Join(dir, IndexFileName(fixtureBaseChunk))
+	idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
 	require.NoError(t, BuildColdIndex(context.Background(), inputs, idxPath, fixtureMinLedger(), fixtureMaxLedger()))
 	return idxPath, entries
 }
@@ -203,7 +208,7 @@ func TestBuildColdIndex_LargeFilesSpanMultipleBuffers(t *testing.T) {
 	require.Greater(t, maxSize, int64(mergeFileBufBytes),
 		"fixture must produce a file larger than the read buffer to exercise refills")
 
-	idxPath := filepath.Join(dir, IndexFileName(fixtureBaseChunk))
+	idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
 	require.NoError(t, BuildColdIndex(context.Background(), inputs, idxPath, fixtureMinLedger(), fixtureMaxLedger()))
 
 	r, err := OpenColdReader(idxPath)
@@ -217,7 +222,7 @@ func TestBuildColdIndex_LargeFilesSpanMultipleBuffers(t *testing.T) {
 }
 
 func TestBuildColdIndex_NoInputs(t *testing.T) {
-	idxPath := filepath.Join(t.TempDir(), IndexFileName(0))
+	idxPath := filepath.Join(t.TempDir(), indexFileName(0))
 	err := BuildColdIndex(context.Background(), nil, idxPath, 2, 2)
 	require.ErrorIs(t, err, ErrEmptyBuildSet)
 	assert.NoFileExists(t, idxPath)
@@ -226,7 +231,7 @@ func TestBuildColdIndex_NoInputs(t *testing.T) {
 func TestBuildColdIndex_MaxBelowMinErrors(t *testing.T) {
 	dir := t.TempDir()
 	inputs := writeFixtureBins(t, dir, makeFixtureEntries(8))
-	idxPath := filepath.Join(dir, IndexFileName(fixtureBaseChunk))
+	idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
 	err := BuildColdIndex(context.Background(), inputs, idxPath, 100, 99)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "maxLedger")
@@ -245,7 +250,7 @@ func TestBuildColdIndex_AllEmptyInputs(t *testing.T) {
 		writeBinFile(t, p, nil)
 		inputs = append(inputs, p)
 	}
-	idxPath := filepath.Join(dir, IndexFileName(fixtureBaseChunk))
+	idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
 	err := BuildColdIndex(context.Background(), inputs, idxPath, fixtureMinLedger(), fixtureMaxLedger())
 	require.ErrorIs(t, err, ErrEmptyBuildSet)
 	assert.NoFileExists(t, idxPath)
@@ -253,7 +258,7 @@ func TestBuildColdIndex_AllEmptyInputs(t *testing.T) {
 
 func TestBuildColdIndex_MissingInputErrors(t *testing.T) {
 	dir := t.TempDir()
-	idxPath := filepath.Join(dir, IndexFileName(fixtureBaseChunk))
+	idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
 	err := BuildColdIndex(context.Background(),
 		[]string{filepath.Join(dir, "00000005.bin")}, idxPath, fixtureMinLedger(), fixtureMaxLedger())
 	require.Error(t, err)
@@ -275,7 +280,7 @@ func TestBuildColdIndex_SeqOutsideCoverageErrors(t *testing.T) {
 			dir := t.TempDir()
 			p := filepath.Join(dir, "00000004.bin")
 			writeBinFile(t, p, []fixtureEntry{{hash: randHash(testRNG(1)), seq: tc.seq}})
-			idxPath := filepath.Join(dir, IndexFileName(fixtureBaseChunk))
+			idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
 			err := BuildColdIndex(context.Background(), []string{p}, idxPath, fixtureMinLedger(), fixtureMaxLedger())
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "outside index coverage")
@@ -294,7 +299,7 @@ func TestBuildColdIndex_CoverageSpanExceedsBudgetErrors(t *testing.T) {
 	p := filepath.Join(dir, "99999999.bin")
 	writeBinFile(t, p, entries)
 
-	idxPath := filepath.Join(dir, IndexFileName(0))
+	idxPath := filepath.Join(dir, indexFileName(0))
 	err := BuildColdIndex(context.Background(), []string{p}, idxPath, minLedger, overflowSeq)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "payload budget")
@@ -308,7 +313,7 @@ func TestBuildColdIndex_CallerOptsCannotOverrideFormat(t *testing.T) {
 	dir := t.TempDir()
 	entries := makeFixtureEntries(64)
 	inputs := writeFixtureBins(t, dir, entries)
-	idxPath := filepath.Join(dir, IndexFileName(fixtureBaseChunk))
+	idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
 	err := BuildColdIndex(context.Background(), inputs, idxPath,
 		fixtureMinLedger(), fixtureMaxLedger(), streamhash.WithMetadata(EncodeLedgerRange(7, 7)))
 	require.NoError(t, err)
@@ -340,7 +345,7 @@ func TestBuildColdIndex_TruncatedFileErrors(t *testing.T) {
 	p := filepath.Join(dir, "00000005.bin")
 	require.NoError(t, os.WriteFile(p, buf.Bytes(), 0o600))
 
-	idxPath := filepath.Join(dir, IndexFileName(fixtureBaseChunk))
+	idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
 	err := BuildColdIndex(context.Background(), []string{p}, idxPath, fixtureMinLedger(), fixtureMaxLedger())
 	require.Error(t, err)
 	assert.NoFileExists(t, idxPath)
@@ -359,7 +364,7 @@ func TestBuildColdIndex_HeaderUndercountErrors(t *testing.T) {
 	p := filepath.Join(dir, "00000005.bin")
 	require.NoError(t, os.WriteFile(p, buf.Bytes(), 0o600))
 
-	idxPath := filepath.Join(dir, IndexFileName(fixtureBaseChunk))
+	idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
 	err := BuildColdIndex(context.Background(), []string{p}, idxPath, fixtureMinLedger(), fixtureMaxLedger())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "header claims")
@@ -381,7 +386,7 @@ func TestBuildColdIndex_HeaderOverflowRejected(t *testing.T) {
 	p := filepath.Join(dir, "00000005.bin")
 	require.NoError(t, os.WriteFile(p, buf.Bytes(), 0o600))
 
-	idxPath := filepath.Join(dir, IndexFileName(fixtureBaseChunk))
+	idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
 	err := BuildColdIndex(context.Background(), []string{p}, idxPath, fixtureMinLedger(), fixtureMaxLedger())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "header claims")

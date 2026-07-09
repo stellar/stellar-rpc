@@ -66,7 +66,7 @@ func TestColdReader_GetAfterCloseReturnsClosed(t *testing.T) {
 	require.NoError(t, r.Close())
 
 	_, err = r.Get(entries[0].hash)
-	assert.ErrorIs(t, err, ErrClosed)
+	assert.ErrorIs(t, err, stores.ErrStoreClosed)
 }
 
 func TestColdReader_ConcurrentGets(t *testing.T) {
