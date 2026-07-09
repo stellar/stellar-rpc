@@ -24,12 +24,12 @@ const commandWaitTimeout = 60 * time.Second
 func Gather(ctx context.Context) error {
 	vals, err := RequireEnv("INSTANCE_ID", "AWS_REGION",
 		"RESULTS_TIMEOUT", "POLL_INTERVAL", "GITHUB_OUTPUT", "DEBUG_LOG_LINES", "DEBUG_LOG_EVERY_POLLS",
-		"BUCKET", "RESULT_KEY")
+		"BUCKET", "RESULT_KEY", "RUN_ID")
 	if err != nil {
 		return err
 	}
 	instanceID, region, githubOutput := vals[0], vals[1], vals[4]
-	bucket, resultKey := vals[7], vals[8]
+	bucket, resultKey, runID := vals[7], vals[8], vals[9]
 
 	resultsTimeoutSec, err := strconv.Atoi(vals[2])
 	if err != nil {
@@ -65,6 +65,10 @@ func Gather(ctx context.Context) error {
 			logger.Infof("still waiting for s3://%s/%s", bucket, resultKey)
 		case derr != nil:
 			logger.Warnf("result fetch failed; retrying: %v", derr)
+		// A leftover object from a prior attempt (re-runs share RESULT_KEY) is
+		// "not published yet" so this attempt's box overwrites it.
+		case res.RunID != runID:
+			logger.Infof("ignoring stale result from run %s (want %s)", res.RunID, runID)
 		default:
 			logger.Infof("result published by instance (verdict: %s)", res.Verdict)
 			if werr := os.WriteFile("/tmp/results.md", []byte(res.Markdown), 0o644); werr != nil {

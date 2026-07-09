@@ -165,8 +165,9 @@ jobs:
             {Key=ref,Value=$TARGET_REF},
             {Key=sha,Value=${{ steps.resolve.outputs.sha }}},
             {Key=run-id,Value=${{ github.run_id }}}"
+          # AMI: Ubuntu 22.04 amd64 in us-east-1 as of 2026-07-08
           RUN_INSTANCES_JSON=$(aws ec2 run-instances \
-            --image-id ami-0d28727121d5d4a3c \ # Ubuntu 22.04 amd64 in us-east-1 as of 2026-07-08
+            --image-id ami-0d28727121d5d4a3c \
             --instance-type "$INSTANCE_TYPE" \
             --iam-instance-profile "Name=$INSTANCE_PROFILE" \
             --user-data file:///tmp/user-data.sh \
@@ -211,10 +212,13 @@ jobs:
 
       # Polls S3 for the result object and relays verdict/passed + the result
       # location (bucket/key) as step outputs the coordinator reads.
+      # RUN_ID must match the box preamble's: gather skips result objects from
+      # other attempts (a re-run shares RESULT_KEY with its predecessors).
       - name: Poll for results
         id: results
         env:
           INSTANCE_ID: ${{ steps.launch.outputs.instance_id }}
+          RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
         run: go run "./$PERF_EVAL_DIR/gather"
 
       - name: Write results summary
