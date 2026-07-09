@@ -59,9 +59,9 @@ func Gather(ctx context.Context) error {
 
 	deadline := time.Now().Add(resultsTimeout)
 	for pollCount := 1; time.Now().Before(deadline); pollCount++ {
-		res, derr := fetchResult(ctx, s3Client, bucket, resultKey)
+		res, derr := FetchResult(ctx, s3Client, bucket, resultKey)
 		switch {
-		case errors.Is(derr, errResultNotReady):
+		case errors.Is(derr, ErrResultNotReady):
 			logger.Infof("still waiting for s3://%s/%s", bucket, resultKey)
 		case derr != nil:
 			logger.Warnf("result fetch failed; retrying: %v", derr)

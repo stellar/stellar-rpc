@@ -75,16 +75,16 @@ func PublishResult(
 	return nil
 }
 
-// errResultNotReady means the result object hasn't been published yet.
-var errResultNotReady = errors.New("result not published yet")
+// ErrResultNotReady means the result object hasn't been published yet.
+var ErrResultNotReady = errors.New("result not published yet")
 
-// fetchResult gets and decodes the result object, returning errResultNotReady
+// FetchResult gets and decodes the result object, returning ErrResultNotReady
 // when it is absent.
-func fetchResult(ctx context.Context, client *s3.Client, bucket, key string) (*Result, error) {
+func FetchResult(ctx context.Context, client *s3.Client, bucket, key string) (*Result, error) {
 	out, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: &bucket, Key: &key})
 	if err != nil {
 		if isNotFound(err) {
-			return nil, errResultNotReady
+			return nil, ErrResultNotReady
 		}
 		return nil, err
 	}
