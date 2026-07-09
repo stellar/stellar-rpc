@@ -253,6 +253,28 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 	}
 	// The backfill perf-eval runner keys off this line; keep it stable
 	logger.WithField("duration", time.Since(finalizeStart).String()).Info("Bulk-load finalize complete")
+	// EXPERIMENT (do not commit): top-up frontfill after finalize so captive
+	// core starts near the live tip instead of fill+finalize hours behind
+	if cfg.Backfill {
+		topUpStart := time.Now()
+		topUp, err := ingest.NewBackfillMeta(
+			logger,
+			daemon.ingestService,
+			db.NewLedgerReader(daemon.db),
+			daemon.dataStore,
+			daemon.dataStoreSchema,
+		)
+		if err != nil {
+			logger.WithError(err).Fatal("failed to create top-up backfill metadata")
+		}
+		if err := topUp.RunBackfill(cfg); err != nil {
+			logger.WithError(err).Fatal("failed to top-up frontfill")
+		}
+		daemon.db.ResetCache()
+		feewindows.Reset()
+		logger.WithField("duration", time.Since(topUpStart).String()).
+			Info("Post-finalize frontfill top-up complete")
+	}
 	// Start ingestion service only after backfill is complete
 	daemon.ingestService.Start(ingestCfg)
 
