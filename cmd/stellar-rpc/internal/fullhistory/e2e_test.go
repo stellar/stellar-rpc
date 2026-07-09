@@ -53,7 +53,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/fhtest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores"
@@ -517,7 +516,7 @@ func e2eReadCatalog(t *testing.T, dataDir string) (*catalog.Catalog, func()) {
 // its Layout path).
 func mustDeriveLastCommitted(t *testing.T, cat *catalog.Catalog) uint32 {
 	t.Helper()
-	lastCommitted, err := lifecycle.LastCommittedLedger(cat, silentLogger())
+	lastCommitted, err := lastCommittedLedger(cat, silentLogger())
 	require.NoError(t, err)
 	return lastCommitted
 }

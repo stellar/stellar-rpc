@@ -32,7 +32,7 @@ import (
 // ErrRootLocked is returned when a LOCK file in a configured root is already
 // held by another process. It wraps the offending root so the daemon can name
 // it in the operator-facing error.
-var ErrRootLocked = errors.New("fullhistory: storage root is locked by another process")
+var ErrRootLocked = errors.New("storage root is locked by another process")
 
 // lockFileName is the per-root lock file. Distinct from RocksDB's own "LOCK"
 // so they never collide on the catalog root, which carries both.
@@ -65,7 +65,7 @@ func LockRoots(roots ...string) (*RootLocks, error) {
 		abs, err := filepath.Abs(root)
 		if err != nil {
 			locks.Release()
-			return nil, fmt.Errorf("fullhistory: resolve lock root %q: %w", root, err)
+			return nil, fmt.Errorf("resolve lock root %q: %w", root, err)
 		}
 		if _, dup := seen[abs]; dup {
 			continue
@@ -89,7 +89,7 @@ func LockRoots(roots ...string) (*RootLocks, error) {
 func lockOne(root string) (*os.File, error) {
 	existing := durable.DeepestExistingDir(root)
 	if err := os.MkdirAll(root, 0o755); err != nil {
-		return nil, fmt.Errorf("fullhistory: create lock root %q: %w", root, err)
+		return nil, fmt.Errorf("create lock root %q: %w", root, err)
 	}
 	// Persist the just-created directory chain. MkdirAll does not fsync the
 	// direntries naming the new dirs, and the one-write protocol's grandparent
@@ -97,19 +97,19 @@ func lockOne(root string) (*os.File, error) {
 	// this a fresh-deploy crash could lose a whole storage tree while the synced
 	// catalog still advertises a "frozen" artifact under it.
 	if err := durable.FsyncNewDirs(existing, root); err != nil {
-		return nil, fmt.Errorf("fullhistory: fsync lock root %q: %w", root, err)
+		return nil, fmt.Errorf("fsync lock root %q: %w", root, err)
 	}
 	path := filepath.Join(root, lockFileName)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
-		return nil, fmt.Errorf("fullhistory: open lock file %q: %w", path, err)
+		return nil, fmt.Errorf("open lock file %q: %w", path, err)
 	}
 	if err := acquireLock(f); err != nil {
 		_ = f.Close()
 		if errors.Is(err, ErrRootLocked) {
 			return nil, fmt.Errorf("%w: %q (another daemon is using it)", ErrRootLocked, root)
 		}
-		return nil, fmt.Errorf("fullhistory: lock %q: %w", path, err)
+		return nil, fmt.Errorf("lock %q: %w", path, err)
 	}
 	return f, nil
 }

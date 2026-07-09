@@ -220,12 +220,12 @@ func tryHotSource(
 	state geometry.HotState, chunkID chunk.ID, cfg ProcessConfig,
 ) (ledgerbackend.LedgerStream, func() error, bool, error) {
 	dir := cfg.Catalog.Layout().HotChunkPath(chunkID)
-	// Open the chunk's shared multi-CF DB READ-ONLY via the single OpenReady
+	// Open the chunk's shared multi-CF DB READ-ONLY via the single ready-open
 	// enforcement site: the freeze reads its ledgers to re-derive the cold artifacts
 	// and must never mutate it (the read-only open replays any un-synced WAL into
 	// memtables but persists nothing). An absent or gutted "ready" DB fails the open
 	// — restartable, never auto-created.
-	hot, err := hotchunk.OpenReady(state, dir, chunkID, cfg.Logger, true)
+	hot, err := hotchunk.OpenReadyView(state, dir, chunkID, cfg.Logger)
 	if err != nil {
 		return nil, nil, false, err
 	}

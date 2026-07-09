@@ -1,4 +1,4 @@
-package lifecycle
+package fullhistory
 
 import (
 	"fmt"
@@ -16,7 +16,7 @@ import (
 // sentinel; geometry.ChunkLastLedger is the chokepoint (the signed chunk↔ledger
 // maps live in geometry so there is one -1 convention across the daemon).
 
-// LastCommittedLedger is the single highest-durably-committed-ledger derivation.
+// lastCommittedLedger is the single highest-durably-committed-ledger derivation.
 // It maxes three terms, each in the signed domain so a fresh/young store never
 // underflows to MaxUint32:
 //
@@ -29,9 +29,9 @@ import (
 //   - FLOOR — EarliestLedger()-1 as int64(earliest)-1, so an absent/zero pin
 //     yields the pre-genesis sentinel rather than underflowing.
 //
-// logger is required (hotchunk.OpenReadOnly needs it); there is no logger-less
+// logger is required (hotchunk.OpenReadyView needs it); there is no logger-less
 // mode — the tick derives the frontier the same way startup does.
-func LastCommittedLedger(cat *catalog.Catalog, logger *supportlog.Entry) (uint32, error) {
+func lastCommittedLedger(cat *catalog.Catalog, logger *supportlog.Entry) (uint32, error) {
 	cold, err := highestDurableChunk(cat)
 	if err != nil {
 		return 0, err
@@ -74,9 +74,9 @@ func LastCommittedLedger(cat *catalog.Catalog, logger *supportlog.Entry) (uint32
 func refineWithHotDB(cat *catalog.Catalog, logger *supportlog.Entry, live int64) (uint32, error) {
 	id := chunk.ID(live) //nolint:gosec // live > cold >= -1, so live >= 0
 	// live is the highest "ready" hot chunk (from ReadyHotChunkKeys), so route the
-	// read-only open through the single OpenReady enforcement site: must-exist,
+	// read-only open through the single ready-open enforcement site: must-exist,
 	// never auto-healed, uniform won't-open error.
-	hot, openErr := hotchunk.OpenReady(geometry.HotReady, cat.Layout().HotChunkPath(id), id, logger, true)
+	hot, openErr := hotchunk.OpenReadyView(geometry.HotReady, cat.Layout().HotChunkPath(id), id, logger)
 	if openErr != nil {
 		return 0, openErr
 	}

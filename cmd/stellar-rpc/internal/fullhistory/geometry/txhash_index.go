@@ -44,11 +44,11 @@ type TxHashIndexLayout struct {
 // NewTxHashIndexLayout validates cpi and returns the index arithmetic for it.
 func NewTxHashIndexLayout(chunksPerIndex uint32) (TxHashIndexLayout, error) {
 	if chunksPerIndex == 0 {
-		return TxHashIndexLayout{}, errors.New("fullhistory: chunks_per_txhash_index must be > 0")
+		return TxHashIndexLayout{}, errors.New("chunks_per_txhash_index must be > 0")
 	}
 	if chunksPerIndex > MaxChunksPerTxhashIndex {
 		return TxHashIndexLayout{}, fmt.Errorf(
-			"fullhistory: chunks_per_txhash_index %d exceeds max %d",
+			"chunks_per_txhash_index %d exceeds max %d",
 			chunksPerIndex, MaxChunksPerTxhashIndex,
 		)
 	}

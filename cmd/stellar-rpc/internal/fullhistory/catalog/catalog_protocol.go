@@ -41,7 +41,7 @@ import (
 // already-"frozen" kind (per-kind idempotency) is the caller's job.
 func (c *Catalog) MarkChunkFreezing(chunkID chunk.ID, kinds ...geometry.Kind) error {
 	if len(kinds) == 0 {
-		return errors.New("fullhistory: MarkChunkFreezing requires at least one kind")
+		return errors.New("MarkChunkFreezing requires at least one kind")
 	}
 	return c.store.Batch(func(w *metastore.BatchWriter) error {
 		for _, kind := range kinds {
@@ -56,7 +56,7 @@ func (c *Catalog) MarkChunkFreezing(chunkID chunk.ID, kinds ...geometry.Kind) er
 // file first.
 func (c *Catalog) FlipChunkFrozen(chunkID chunk.ID, kinds ...geometry.Kind) error {
 	if len(kinds) == 0 {
-		return errors.New("fullhistory: FlipChunkFrozen requires at least one kind")
+		return errors.New("FlipChunkFrozen requires at least one kind")
 	}
 	return c.store.Batch(func(w *metastore.BatchWriter) error {
 		for _, kind := range kinds {

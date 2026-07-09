@@ -47,8 +47,9 @@ func openHotDBForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlo
 	if state == geometry.HotReady {
 		// Resume/boundary write handle for a chunk whose "ready" key promises the DB
 		// exists: must-exist, never-creating (a gutted DB fails restartably, never
-		// auto-heals into a fresh empty DB). OpenReady is the single enforcement site.
-		return hotchunk.OpenReady(state, dir, chunkID, logger, false)
+		// auto-heals into a fresh empty DB). OpenReadyWrite routes through the single
+		// ready-open enforcement site.
+		return hotchunk.OpenReadyWrite(state, dir, chunkID, logger)
 	}
 
 	// "transient" or absent: create fresh under the catalog's create bracket
@@ -177,7 +178,7 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 			cfg.Logger.WithField("closed_chunk", closed.String()).
 				WithField("next_chunk", next.String()).
 				WithField("last_ledger", seq).
-				Info("fullhistory: ingestion chunk boundary — handed off to lifecycle")
+				Info("ingestion chunk boundary — handed off to lifecycle")
 		}
 		seq++
 	}

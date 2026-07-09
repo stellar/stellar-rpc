@@ -86,7 +86,7 @@ func (c *Catalog) ChunkArtifactKeys() ([]ArtifactRef, error) {
 		}
 		id, kind, ok := geometry.ParseChunkKey(e.Key)
 		if !ok {
-			return nil, fmt.Errorf("fullhistory: malformed chunk key %q", e.Key)
+			return nil, fmt.Errorf("malformed chunk key %q", e.Key)
 		}
 		refs = append(refs, ArtifactRef{Chunk: id, Kind: kind, State: geometry.State(e.Value)})
 	}
@@ -136,7 +136,7 @@ func (c *Catalog) FrozenTxHashIndex(w geometry.TxHashIndexID) (geometry.TxHashIn
 		}
 		if found {
 			return geometry.TxHashIndexCoverage{}, false, fmt.Errorf(
-				"fullhistory: index %s has two frozen coverages (%s and %s) — "+
+				"index %s has two frozen coverages (%s and %s) — "+
 					"uniqueness invariant violated",
 				w, frozen.Key, candidate.Key,
 			)
@@ -254,7 +254,7 @@ func (c *Catalog) txhashIndexKeysByPrefix(prefix string) ([]geometry.TxHashIndex
 		}
 		cov, ok := geometry.ParseTxHashIndexKey(e.Key)
 		if !ok {
-			return nil, fmt.Errorf("fullhistory: malformed index key %q", e.Key)
+			return nil, fmt.Errorf("malformed index key %q", e.Key)
 		}
 		cov.State = geometry.State(e.Value)
 		covs = append(covs, cov)
@@ -269,7 +269,7 @@ func (c *Catalog) uint32Pin(key string) (uint32, bool, error) {
 	}
 	n, parseErr := strconv.ParseUint(v, 10, 32)
 	if parseErr != nil {
-		return 0, false, fmt.Errorf("fullhistory: config pin %q is not a uint32: %q", key, v)
+		return 0, false, fmt.Errorf("config pin %q is not a uint32: %q", key, v)
 	}
 	return uint32(n), true, nil
 }

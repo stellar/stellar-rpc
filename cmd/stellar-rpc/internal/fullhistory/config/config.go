@@ -142,7 +142,7 @@ const (
 func LoadConfig(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return Config{}, fmt.Errorf("fullhistory: read config %q: %w", path, err)
+		return Config{}, fmt.Errorf("read config %q: %w", path, err)
 	}
 	return ParseConfig(data)
 }
@@ -158,7 +158,7 @@ func LoadConfig(path string) (Config, error) {
 func ParseConfig(data []byte) (Config, error) {
 	var cfg Config
 	if err := toml.NewDecoder(bytes.NewReader(data)).Strict(true).Decode(&cfg); err != nil {
-		return Config{}, fmt.Errorf("fullhistory: parse config: %w", err)
+		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
 	return cfg.WithDefaults(), nil
 }

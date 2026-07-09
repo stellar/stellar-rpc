@@ -53,7 +53,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// the logger refines with one read-only open of the highest ready hot DB before
 	// ingestion opens a writer; a read-only open replays any synced WAL from an
 	// ungraceful crash into memtables, so MaxCommittedSeq is correct.
-	lastCommitted, err := lifecycle.LastCommittedLedger(cat, logger)
+	lastCommitted, err := lastCommittedLedger(cat, logger)
 	if err != nil {
 		return fmt.Errorf("startup derive last-committed: %w", err)
 	}

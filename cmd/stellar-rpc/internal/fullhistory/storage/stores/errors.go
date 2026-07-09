@@ -1,7 +1,7 @@
 // Package stores hosts shared per-domain store packages (ledger,
 // txhash, metastore) and the cross-cutting error sentinels they
 // emit. Per-domain stores translate their backing primitive's
-// errors (storage/rocksdb, storage/rocksdb, os) into these sentinels at
+// errors (storage/rocksdb, internal/packfile, os) into these sentinels at
 // their public-method boundaries, so callers depend only on
 // storage/stores sentinels regardless of which backend served the
 // call.

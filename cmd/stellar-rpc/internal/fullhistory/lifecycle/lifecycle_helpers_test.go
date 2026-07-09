@@ -133,23 +133,6 @@ func lastCompleteChunkAtID(ledger uint32) (chunk.ID, bool) {
 	return chunk.ID(c), true
 }
 
-// runTickForCatalog runs one lifecycle tick the way ingestion would drive it: it
-// derives the highest complete chunk from the catalog (the chunk id ingestion
-// hands over at a boundary) and passes it as lastChunk, returning the tick's
-// error. On a young network with no complete chunk it runs no tick (returns nil) —
-// mirroring production, where the boundary/seed guard upstream never triggers the
-// Loop in that state.
-func runTickForCatalog(ctx context.Context, t *testing.T, cfg Config, cat *catalog.Catalog) error {
-	t.Helper()
-	through, err := deriveCompleteThrough(cat)
-	require.NoError(t, err)
-	last, ok := lastCompleteChunkAtID(through)
-	if !ok {
-		return nil
-	}
-	return runLifecycle(ctx, cfg, cat, last)
-}
-
 // makeReadyHotDirNoData opens and closes a real (empty) hot DB for c so its dir
 // exists on disk and its key is "ready" — the state a discard scan inspects
 // without needing a full ingest.

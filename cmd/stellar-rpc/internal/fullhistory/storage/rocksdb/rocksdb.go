@@ -576,7 +576,7 @@ func (s *Store) constructAndOpen() error {
 
 	// WAL on + per-write Sync on — non-negotiable across every
 	// fullhistory store, so pinned here on the shared wo rather
-	// than exposed via Tuning. The streaming ingestion contract
+	// than exposed via Tuning. The ingestion contract
 	// requires "the ledger batch committed" to mean "durable on disk";
 	// one fsync per Put/Batch regardless of size.
 	s.wo.DisableWAL(false)

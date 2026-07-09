@@ -1,4 +1,4 @@
-package lifecycle
+package fullhistory
 
 import (
 	"os"
@@ -41,7 +41,7 @@ func readyHot(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 }
 
 // ---------------------------------------------------------------------------
-// LastCommittedLedger — chunk-granularity bound, pure catalog read.
+// lastCommittedLedger — chunk-granularity bound, pure catalog read.
 // (CompleteThrough / ChunkIDOfLedger arithmetic is tested in geometry.)
 // ---------------------------------------------------------------------------
 
