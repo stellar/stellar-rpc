@@ -1,31 +1,38 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-func okLeg(md string) []leg {
-	return []leg{{Label: "Apply-load ingestion", verdict: "ok", markdown: md}}
+func okLeg(md string) []legResult {
+	return []legResult{{Label: "Apply-load ingestion", Verdict: "ok", Markdown: md}}
 }
 
-func TestParsePrevNumber(t *testing.T) {
-	require.Equal(t, 0, parsePrevNumber(""))
-	require.Equal(t, 0, parsePrevNumber("## no marker here\nbody"))
-	require.Equal(t, 7, parsePrevNumber(marker+"\n<!-- perf-eval: 7 -->\n## 🧪 Performance Evaluation Test #7\n"))
+func renderN(n int, legs []legResult) string {
+	var prev string
+	for i := range n {
+		prev = renderComment(runRecord{
+			TargetSHA: strings.Repeat("a", 12),
+			TargetRef: "release/v1",
+			RunURL:    fmt.Sprintf("https://example/run/%d", i+1),
+			Legs:      legs,
+		}, prev)
+	}
+	return prev
 }
 
 func TestRenderComment_FirstRun(t *testing.T) {
-	out := renderComment(commentInput{
-		targetSHA: "abcdef1234567890",
-		targetRef: "release/v1.2.3",
-		runURL:    "https://example/run/1",
-		legs:      okLeg("throughput: 42 l/s"),
-	})
+	out := renderComment(runRecord{
+		TargetSHA: "abcdef1234567890",
+		TargetRef: "release/v1.2.3",
+		RunURL:    "https://example/run/1",
+		Legs:      okLeg("throughput: 42 l/s"),
+	}, "")
 	require.True(t, strings.HasPrefix(out, marker+"\n"))
-	require.Contains(t, out, "<!-- perf-eval: 1 -->")
 	require.Contains(t, out, "## 🧪 Performance Evaluation Test #1")
 	require.Contains(t, out, "**Commit:** `abcdef123456` (`release/v1.2.3`)")
 	require.Contains(t, out, "### ✅ Apply-load ingestion — verdict: ok")
@@ -34,50 +41,81 @@ func TestRenderComment_FirstRun(t *testing.T) {
 }
 
 func TestRenderLeg_FallbackWhenNoResult(t *testing.T) {
-	out := renderLeg(leg{Label: "X"})
+	out := renderLeg(legResult{Label: "X"})
 	require.Contains(t, out, "### ❌ X — verdict: none")
 	require.Contains(t, out, "No result object published")
 }
 
 // Four runs in sequence: each run's output is the next run's "prior comment".
-// The result must keep the current run on top and the rest as flat siblings.
-func TestRenderComment_FoldsFlatHistory(t *testing.T) {
-	var prev string
-	for range 4 {
-		prev = renderComment(commentInput{
-			targetSHA: strings.Repeat("a", 12),
-			targetRef: "release/v1",
-			runURL:    "https://example/run",
-			legs:      okLeg("run body"),
-			prev:      prev,
-		})
-	}
+// The result must keep the current run on top and the rest as drop-downs.
+func TestRenderComment_FoldsHistory(t *testing.T) {
+	out := renderN(4, okLeg("run body"))
 
-	// Exactly one current run at the top
-	require.Equal(t, 1, strings.Count(prev, marker))
-	require.Equal(t, 1, countMatching(prev, perfEvalRe.MatchString))
-	require.Equal(t, 1, countMatching(prev, seriesHeadingRe.MatchString))
-	require.Contains(t, prev, "## 🧪 Performance Evaluation Test #4")
+	require.Equal(t, 1, strings.Count(out, marker))
+	require.Contains(t, out, "## 🧪 Performance Evaluation Test #4")
+	require.Equal(t, 3, strings.Count(out, "<details>\n<summary>Performance Evaluation Test #"))
 
-	// Three prior runs, each its own drop-down
-	require.Equal(t, 3, strings.Count(prev, "<details>"))
-	require.Equal(t, 3, strings.Count(prev, "</details>"))
-
-	// Each run in descending order (#3, then #2, then #1)
-	i3 := strings.Index(prev, "Performance Evaluation Test #3")
-	i2 := strings.Index(prev, "Performance Evaluation Test #2")
-	i1 := strings.Index(prev, "Performance Evaluation Test #1")
+	// Each prior run in descending order (#3, then #2, then #1)
+	i3 := strings.Index(out, "Performance Evaluation Test #3")
+	i2 := strings.Index(out, "Performance Evaluation Test #2")
+	i1 := strings.Index(out, "Performance Evaluation Test #1")
 	require.Positive(t, i3)
 	require.Less(t, i3, i2)
 	require.Less(t, i2, i1)
 }
 
-func countMatching(s string, pred func(string) bool) int {
-	n := 0
-	for line := range strings.SplitSeq(s, "\n") {
-		if pred(line) {
-			n++
-		}
+// Leg markdown containing its own <details> block must survive folding intact:
+// the history is data, so rendered markup is never parsed back.
+func TestRenderComment_LegMarkdownWithDetailsSurvivesFold(t *testing.T) {
+	legMD := "table\n\n<details>\n<summary>per-profile breakdown</summary>\n\ninner\n</details>"
+	out := renderN(3, okLeg(legMD))
+
+	hist := parseHistory(out)
+	require.Len(t, hist, 3)
+	for _, r := range hist {
+		require.Equal(t, legMD, r.Legs[0].Markdown)
 	}
-	return n
+	// The inner drop-down renders in every fold without hijacking the structure.
+	require.Equal(t, 3, strings.Count(out, "<summary>per-profile breakdown</summary>"))
+	require.Equal(t, 2, strings.Count(out, "<summary>Performance Evaluation Test #"))
+}
+
+// Numbering continues past the history cap; the oldest runs are shed.
+func TestRenderComment_CapsHistory(t *testing.T) {
+	out := renderN(maxHistory+2, okLeg("run body"))
+
+	hist := parseHistory(out)
+	require.Len(t, hist, maxHistory)
+	require.Equal(t, maxHistory+2, hist[0].Num)
+	require.Contains(t, out, fmt.Sprintf("## 🧪 Performance Evaluation Test #%d", maxHistory+2))
+	require.NotContains(t, out, "Performance Evaluation Test #2\n") // shed
+	require.NotContains(t, out, "Performance Evaluation Test #1\n") // shed
+}
+
+// Oversized histories shed old runs to stay under the comment-size cap.
+func TestRenderComment_ShedsRunsOverSizeCap(t *testing.T) {
+	big := strings.Repeat("x", maxCommentLen/3)
+	out := renderN(5, okLeg(big))
+
+	require.LessOrEqual(t, len(out), maxCommentLen)
+	hist := parseHistory(out)
+	require.NotEmpty(t, hist)
+	require.Equal(t, 5, hist[0].Num) // current run always kept
+}
+
+// A prior comment without a parseable blob (legacy, corrupt, or hand-edited)
+// starts the series fresh instead of failing.
+func TestParseHistory_FreshOnAbsentOrCorrupt(t *testing.T) {
+	require.Nil(t, parseHistory(""))
+	require.Nil(t, parseHistory(marker+"\n## some legacy comment\n"))
+	require.Nil(t, parseHistory("<!-- perf-eval-history: !!!not-base64!!! -->"))
+	require.Nil(t, parseHistory("<!-- perf-eval-history: bm90LWpzb24= -->")) // "not-json"
+
+	out := renderComment(runRecord{
+		TargetSHA: strings.Repeat("a", 12),
+		TargetRef: "release/v1",
+		RunURL:    "https://example/run",
+		Legs:      okLeg("body"),
+	}, marker+"\n## some legacy comment\n")
+	require.Contains(t, out, "## 🧪 Performance Evaluation Test #1")
 }
