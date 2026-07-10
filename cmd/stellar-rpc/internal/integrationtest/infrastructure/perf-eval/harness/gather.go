@@ -1,25 +1,9 @@
-// Command runner drives the ephemeral RPC ingestion load test. It has two
-// subcommands, one per environment the test spans:
-//
-//	runner instantiate   on the EC2 box, after a shell preamble has installed
-//	                     the toolchain and checked out the repo: streams the
-//	                     golden DB, stellar-core, and ledger bundles from S3
-//	                     (sha-verified), runs the ingest benchmark, and writes
-//	                     an ok/fail verdict.
-//	runner orchestrate   on the GHA runner: polls S3 for the result object the
-//	                     instance publishes and relays the verdict + results as
-//	                     step outputs. SSM carries only best-effort debug tails.
-//
-// The two halves coordinate through a single S3 result object (see type result).
-// SSM is used only for live-progress and timeout diagnostics.
-package main
+package harness
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -28,69 +12,24 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
-	"github.com/aws/smithy-go"
-
-	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
-
-var logger = supportlog.New()
-
-func main() {
-	logger.SetLevel(supportlog.InfoLevel)
-
-	cmd := "instantiate"
-	if len(os.Args) > 1 {
-		cmd = os.Args[1]
-	}
-
-	ctx := context.Background()
-	var err error
-	switch cmd {
-	case "instantiate":
-		err = instantiate(ctx)
-	case "orchestrate":
-		err = orchestrate(ctx)
-	default:
-		fmt.Fprintf(os.Stderr, "usage: %s [instantiate|orchestrate]\n", os.Args[0])
-		os.Exit(64)
-	}
-	if err != nil {
-		logger.Errorf("fatal: %v", err)
-		os.Exit(1)
-	}
-}
 
 // commandWaitTimeout backstops a stuck SSM command (the debug-tail reads).
 const commandWaitTimeout = 60 * time.Second
 
-// requireEnv returns the values of keys in order, erroring with every unset one.
-func requireEnv(keys ...string) ([]string, error) {
-	vals := make([]string, len(keys))
-	var missing []string
-	for i, k := range keys {
-		if vals[i] = os.Getenv(k); vals[i] == "" {
-			missing = append(missing, k)
-		}
-	}
-	if len(missing) > 0 {
-		return nil, fmt.Errorf("missing required env: %s", strings.Join(missing, ", "))
-	}
-	return vals, nil
-}
-
-// orchestrate polls the box until it reports a verdict and relays the result as step outputs
-// On timeout it writes a debug comment instead.
-func orchestrate(ctx context.Context) error {
-	vals, err := requireEnv("INSTANCE_ID", "AWS_REGION",
+// Gather is the GHA-runner half: it polls S3 until the box reports a verdict
+// and relays the result as step outputs. On timeout it writes a debug comment
+// instead. Used by every leg's runner.
+func Gather(ctx context.Context) error {
+	vals, err := RequireEnv("INSTANCE_ID", "AWS_REGION",
 		"RESULTS_TIMEOUT", "POLL_INTERVAL", "GITHUB_OUTPUT", "DEBUG_LOG_LINES", "DEBUG_LOG_EVERY_POLLS",
-		"BUCKET", "RESULT_KEY")
+		"BUCKET", "RESULT_KEY", "RUN_ID")
 	if err != nil {
 		return err
 	}
 	instanceID, region, githubOutput := vals[0], vals[1], vals[4]
-	bucket, resultKey := vals[7], vals[8]
+	bucket, resultKey, runID := vals[7], vals[8], vals[9]
 
 	resultsTimeoutSec, err := strconv.Atoi(vals[2])
 	if err != nil {
@@ -120,12 +59,16 @@ func orchestrate(ctx context.Context) error {
 
 	deadline := time.Now().Add(resultsTimeout)
 	for pollCount := 1; time.Now().Before(deadline); pollCount++ {
-		res, derr := fetchResult(ctx, s3Client, bucket, resultKey)
+		res, derr := FetchResult(ctx, s3Client, bucket, resultKey)
 		switch {
-		case errors.Is(derr, errResultNotReady):
+		case errors.Is(derr, ErrResultNotReady):
 			logger.Infof("still waiting for s3://%s/%s", bucket, resultKey)
 		case derr != nil:
 			logger.Warnf("result fetch failed; retrying: %v", derr)
+		// A leftover object from a prior attempt (re-runs share RESULT_KEY) is
+		// "not published yet" so this attempt's box overwrites it.
+		case res.RunID != runID:
+			logger.Infof("ignoring stale result from run %s (want %s)", res.RunID, runID)
 		default:
 			logger.Infof("result published by instance (verdict: %s)", res.Verdict)
 			if werr := os.WriteFile("/tmp/results.md", []byte(res.Markdown), 0o644); werr != nil {
@@ -151,8 +94,7 @@ type ssmRunner struct {
 	instanceID string
 }
 
-// capture dispatches command, waits for it, and returns its stdout. A non-nil
-// error means dispatch failed; an unreadable result is "".
+// capture dispatches command, waits for it, and returns its stdout.
 func (r *ssmRunner) capture(ctx context.Context, command string) (string, error) {
 	var id string
 	var sendErr error
@@ -193,59 +135,6 @@ func (r *ssmRunner) debugTail(ctx context.Context, n int) string {
 		return "__DEBUG_TAIL_UNAVAILABLE__"
 	}
 	return out
-}
-
-// errResultNotReady means the result object hasn't been published yet.
-var errResultNotReady = errors.New("result not published yet")
-
-// fetchResult gets and decodes the result object, returning errResultNotReady
-// when it is absent.
-func fetchResult(ctx context.Context, client *s3.Client, bucket, key string) (*result, error) {
-	out, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: &bucket, Key: &key})
-	if err != nil {
-		if isNotFound(err) {
-			return nil, errResultNotReady
-		}
-		return nil, err
-	}
-	defer out.Body.Close()
-
-	data, err := io.ReadAll(out.Body)
-	if err != nil {
-		return nil, err
-	}
-	var res result
-	if err := json.Unmarshal(data, &res); err != nil {
-		return nil, fmt.Errorf("decoding result object: %w", err)
-	}
-	return &res, nil
-}
-
-// isNotFound reports whether a GetObject error means the key is absent.
-func isNotFound(err error) bool {
-	var nsk *types.NoSuchKey
-	if errors.As(err, &nsk) {
-		return true
-	}
-	var apiErr smithy.APIError
-	if errors.As(err, &apiErr) {
-		switch apiErr.ErrorCode() {
-		case "NoSuchKey", "NotFound":
-			return true
-		}
-	}
-	return false
-}
-
-// appendOutputs appends lines to the GitHub Actions step-output file.
-func appendOutputs(path string, lines ...string) error {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = fmt.Fprintln(f, strings.Join(lines, "\n"))
-	return err
 }
 
 // writeTimeoutComment is the no-verdict path: it writes a comment to
