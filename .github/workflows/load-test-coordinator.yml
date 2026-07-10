@@ -117,7 +117,9 @@ jobs:
       target_ref: ${{ needs.plan.outputs.target_sha }}
       run_label: blaster
       leg_script: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/endpoint-load-test/run-blaster.sh
-      budget_minutes: 190
+      # covers worst-case stacking of the box's phase deadlines: bootstrap
+      # ~20m + READY_DEADLINE 100m + SEED_DEADLINE 20m + BLAST_DEADLINE 60m
+      budget_minutes: 225
       adopt_run_label: backfill
       extra_env: |
         export READY_KEY=runs/${{ github.run_id }}/backfill/serve-ready.json
