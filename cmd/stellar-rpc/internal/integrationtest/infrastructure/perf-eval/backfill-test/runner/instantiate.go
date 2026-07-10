@@ -59,29 +59,21 @@ func instantiate(ctx context.Context) error {
 	}
 	fetch := &harness.S3Fetcher{Client: s3.NewFromConfig(awsCfg), Bucket: bucket}
 
-	if err := fetch.FetchVerified(ctx, "core/stellar-core.zst", corePath, true, "stellar-core"); err != nil {
+	coreCfg, err := prepareFixtures(ctx, fetch, repoRoot, workDir, binaryPath)
+	if err != nil {
 		return bail("%v", err)
 	}
-	if err := os.Chmod(corePath, 0o755); err != nil {
-		return bail("chmod stellar-core: %v", err)
+
+	// Handoff mode: after backfill the daemon is left running (catchup + live
+	// ingestion) so this box becomes the endpoint load test's target RPC, which
+	// drives it over the VPC — hence the non-loopback bind.
+	serveAfter := os.Getenv("SERVE_AFTER_BACKFILL") == "true"
+	endpoint := "localhost:8000"
+	if serveAfter {
+		endpoint = "0.0.0.0:8000"
 	}
 
-	logger.Infof("building stellar-rpc")
-	if err := harness.RunStreaming(ctx, repoRoot, nil, 40, "make", "build-libs"); err != nil {
-		return bail("make build-libs failed: %v", err)
-	}
-	if err := harness.RunStreaming(ctx, repoRoot, nil, 40,
-		"go", "build", "-o", binaryPath, "./cmd/stellar-rpc"); err != nil {
-		return bail("go build failed: %v", err)
-	}
-
-	// fetch + write core config from SDK
-	coreCfg := filepath.Join(workDir, "captive-core-pubnet.cfg")
-	if err := os.WriteFile(coreCfg, ledgerbackend.PubnetDefaultConfig, 0o644); err != nil {
-		return bail("writing captive-core config: %v", err)
-	}
-
-	cfgPath, err := renderConfig(repoRoot, workDir, coreCfg, retention)
+	cfgPath, err := renderConfig(repoRoot, workDir, coreCfg, retention, endpoint)
 	if err != nil {
 		return bail("rendering config: %v", err)
 	}
@@ -90,10 +82,13 @@ func instantiate(ctx context.Context) error {
 	if err != nil {
 		return bail("invalid BACKFILL_DEADLINE %q: %v", deadline, err)
 	}
-	logger.Infof("starting backfill (retention=%s, deadline=%s)", retention, deadline)
-	elapsed, lo, hi, err := runBackfill(ctx, dl, binaryPath, cfgPath)
+	logger.Infof("starting backfill (retention=%s, deadline=%s, serve-after=%t)", retention, deadline, serveAfter)
+	elapsed, lo, hi, daemon, err := runBackfill(ctx, dl, binaryPath, cfgPath, serveAfter)
 	if err != nil {
 		return bail("%v", err)
+	}
+	if daemon != nil {
+		defer daemon.Stop() // covers the bail paths below; Stop is idempotent
 	}
 	ingested := hi - lo + 1
 	logger.Infof("backfill complete: %d ledgers [%d -> %d] in %s", ingested, lo, hi, elapsed.Round(time.Second))
@@ -106,12 +101,45 @@ func instantiate(ctx context.Context) error {
 		ctx, fetch.Client, bucket, resultKey, "ok", runID, targetSHA, resultsFile, ""); err != nil {
 		return bail("publishing result: %v", err)
 	}
+	if daemon != nil {
+		servePhase(ctx, fetch, resultKey, runID, targetSHA, daemon)
+	}
 	return nil
 }
 
-// renderConfig fills the config template's ${...} placeholders (box paths + the
-// retention window) via os.Expand
-func renderConfig(repoRoot, workDir, coreCfg, retention string) (string, error) {
+// prepareFixtures fetches stellar-core, builds stellar-rpc into binaryPath,
+// and writes the SDK's captive-core pubnet config, returning that config path.
+func prepareFixtures(
+	ctx context.Context,
+	fetch *harness.S3Fetcher,
+	repoRoot, workDir, binaryPath string,
+) (string, error) {
+	if err := fetch.FetchVerified(ctx, "core/stellar-core.zst", corePath, true, "stellar-core"); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(corePath, 0o755); err != nil {
+		return "", fmt.Errorf("chmod stellar-core: %w", err)
+	}
+
+	logger.Infof("building stellar-rpc")
+	if err := harness.RunStreaming(ctx, repoRoot, nil, 40, "make", "build-libs"); err != nil {
+		return "", fmt.Errorf("make build-libs failed: %w", err)
+	}
+	if err := harness.RunStreaming(ctx, repoRoot, nil, 40,
+		"go", "build", "-o", binaryPath, "./cmd/stellar-rpc"); err != nil {
+		return "", fmt.Errorf("go build failed: %w", err)
+	}
+
+	coreCfg := filepath.Join(workDir, "captive-core-pubnet.cfg")
+	if err := os.WriteFile(coreCfg, ledgerbackend.PubnetDefaultConfig, 0o644); err != nil {
+		return "", fmt.Errorf("writing captive-core config: %w", err)
+	}
+	return coreCfg, nil
+}
+
+// renderConfig fills the config template's ${...} placeholders (box paths, the
+// retention window, and the bind endpoint) via os.Expand
+func renderConfig(repoRoot, workDir, coreCfg, retention, endpoint string) (string, error) {
 	tmpl, err := os.ReadFile(filepath.Join(repoRoot, legDir, "testdata", "backfill-pubnet.toml.tmpl"))
 	if err != nil {
 		return "", err
@@ -128,6 +156,8 @@ func renderConfig(repoRoot, workDir, coreCfg, retention string) (string, error) 
 			return corePath
 		case "HISTORY_RETENTION_WINDOW":
 			return retention
+		case "ENDPOINT":
+			return endpoint
 		default:
 			return "${" + in + "}" // leave unknown placeholders intact
 		}
@@ -140,18 +170,41 @@ func renderConfig(repoRoot, workDir, coreCfg, retention string) (string, error) 
 	return cfgPath, nil
 }
 
+// daemonHandle controls a daemon left running past its backfill phase.
+type daemonHandle struct {
+	cancel context.CancelFunc
+	done   chan struct{} // closed once the daemon is reaped
+}
+
+// Stop kills the daemon and waits (bounded) for it to be reaped.
+func (d *daemonHandle) Stop() {
+	d.cancel()
+	select {
+	case <-d.done:
+	case <-time.After(30 * time.Second):
+		logger.Warnf("daemon not reaped within 30s of stop")
+	}
+}
+
 // runBackfill launches the daemon and streams its output (teeing to the box log)
-// until the backfill-complete line fires, recording the wall-clock
-func runBackfill(ctx context.Context, deadline time.Duration, binary, cfgPath string) (time.Duration, int, int, error) {
-	runCtx, cancel := context.WithTimeout(ctx, deadline)
-	defer cancel()
+// until the backfill-complete line fires, recording the wall-clock. Without
+// keepAlive the daemon is stopped there, before it starts live ingestion; with
+// keepAlive it is left running (catchup + live ingestion, output still teed)
+// and the returned handle owns stopping it.
+func runBackfill(
+	ctx context.Context, deadline time.Duration, binary, cfgPath string, keepAlive bool,
+) (time.Duration, int, int, *daemonHandle, error) {
+	runCtx, cancel := context.WithCancel(ctx)
+	// deadline covers only the backfill phase, which the daemon may outlive
+	watchdog := time.AfterFunc(deadline, cancel)
 
 	cmd := exec.CommandContext(runCtx, binary, "--config-path", cfgPath)
 	// hide this box's IMDS creds as the public datalake 403s signed requests
 	cmd.Env = append(os.Environ(), "AWS_EC2_METADATA_DISABLED=true")
 	pr, pw, err := os.Pipe()
 	if err != nil {
-		return 0, 0, 0, err
+		cancel()
+		return 0, 0, 0, nil, err
 	}
 	cmd.Stdout, cmd.Stderr = pw, pw
 
@@ -159,10 +212,10 @@ func runBackfill(ctx context.Context, deadline time.Duration, binary, cfgPath st
 	if err := cmd.Start(); err != nil {
 		pw.Close()
 		pr.Close()
-		return 0, 0, 0, fmt.Errorf("starting daemon: %w", err)
+		cancel()
+		return 0, 0, 0, nil, fmt.Errorf("starting daemon: %w", err)
 	}
 	pw.Close() // the child holds the write end and we read until it dies
-	defer pr.Close()
 
 	var elapsed time.Duration
 	var lo, hi int
@@ -175,16 +228,35 @@ func runBackfill(ctx context.Context, deadline time.Duration, binary, cfgPath st
 			elapsed = time.Since(start)
 			lo, _ = strconv.Atoi(m[1])
 			hi, _ = strconv.Atoi(m[2])
-			cancel() // stop the daemon before it starts live ingestion
+			watchdog.Stop()
 			break
 		}
 	}
-	_ = cmd.Wait() // reap; a kill from cancel surfaces here and is expected
 
-	if elapsed == 0 {
-		return 0, 0, 0, fmt.Errorf("daemon exited or hit the %s deadline before backfill completed", deadline)
+	if elapsed == 0 { // daemon died or the watchdog killed it
+		cancel()
+		pr.Close()
+		_ = cmd.Wait()
+		return 0, 0, 0, nil, fmt.Errorf("daemon exited or hit the %s deadline before backfill completed", deadline)
 	}
-	return elapsed, lo, hi, nil
+
+	// keep draining the pipe (the daemon blocks on it once full) and teeing
+	// its catchup/ingestion output to the box log until it dies
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for scanner.Scan() {
+			fmt.Fprintln(os.Stderr, scanner.Text())
+		}
+		pr.Close()
+		_ = cmd.Wait() // reap; a kill from cancel surfaces here and is expected
+	}()
+	daemon := &daemonHandle{cancel: cancel, done: done}
+	if !keepAlive {
+		daemon.Stop() // stop the daemon before it starts live ingestion
+		return elapsed, lo, hi, nil, nil
+	}
+	return elapsed, lo, hi, daemon, nil
 }
 
 func renderMarkdown(sha, retention string, lo, hi, ingested int, elapsed time.Duration) string {
