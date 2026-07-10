@@ -23,10 +23,7 @@ import (
 // checked in (the runner runs with cwd = repo root).
 const legDir = "cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test"
 
-const (
-	corePath   = "/usr/local/bin/stellar-core" // fetched from S3
-	binaryPath = "/data/stellar-rpc-bin"       // built here (the repo checkout is /data/stellar-rpc)
-)
+const corePath = "/usr/local/bin/stellar-core" // fetched from S3
 
 // backfillDoneRe matches the terminal line emitted on backfill's completion
 var backfillDoneRe = regexp.MustCompile(`Backfill process complete, ledgers \[(\d+) -> (\d+)\]`)
@@ -45,6 +42,8 @@ func instantiate(ctx context.Context) error {
 		// ~1 day by default for cheap test runs; the full week is 120960.
 		retention = harness.Env("HISTORY_RETENTION_WINDOW", "17280")
 		deadline  = harness.Env("BACKFILL_DEADLINE", "4h")
+
+		binaryPath = filepath.Join(workDir, "stellar-rpc-bin") // built here (the repo checkout is in WORK_DIR)
 	)
 	repoRoot, err := os.Getwd()
 	if err != nil {
@@ -130,7 +129,7 @@ func renderConfig(repoRoot, workDir, coreCfg, retention string) (string, error) 
 		case "HISTORY_RETENTION_WINDOW":
 			return retention
 		default:
-			return "$" + in // leave unknown placeholders intact
+			return "${" + in + "}" // leave unknown placeholders intact
 		}
 	}
 	body := os.Expand(string(tmpl), mapping)
