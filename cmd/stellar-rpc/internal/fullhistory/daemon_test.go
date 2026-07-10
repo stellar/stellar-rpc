@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/historyarchive"
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -437,7 +438,7 @@ func TestSupervise_FirstStartNoTipRetries(t *testing.T) {
 	// Unreachable tip + no local progress: every run fails the first-start check.
 	tip := &fakeTipBackend{err: errors.New("unreachable"), errFirst: 99}
 	start := startTestConfig(t, cat, tip, &fakeCore{}, nil)
-	start.TipMaxAttempts = 1 // one tip poll per run, so callCount tracks restart count
+	start.Tip = testSampler(1, tip) // one tip poll per run, so callCount tracks restart count
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -457,32 +458,65 @@ func TestSupervise_FirstStartNoTipRetries(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// notConfiguredTip — frontfill-only deployment behavior.
+// buildBackfillBackend / buildTipSampler — the frontfill (no datastore) path.
 // ---------------------------------------------------------------------------
 
-func TestNotConfiguredTip_ErrorsClearly(t *testing.T) {
-	_, err := notConfiguredTip{}.NetworkTip(context.Background())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no bulk backend configured")
-}
-
-// ---------------------------------------------------------------------------
-// buildBackfillBackend — the frontfill (no datastore) path.
-// ---------------------------------------------------------------------------
-
-// With no [backfill.datastore], buildBackfillBackend returns no backend (frontfill),
-// and resolveNetworkTip then yields the not-configured placeholder.
+// With no [backfill.datastore], buildBackfillBackend returns no backend (frontfill).
 func TestBuildBackfillBackend_FrontfillNoBackend(t *testing.T) {
 	cfg := config.Config{}.WithDefaults()
 	backend, cleanup, err := buildBackfillBackend(context.Background(), cfg, silentLogger())
 	require.NoError(t, err)
 	require.Nil(t, backend, "no datastore ⇒ frontfill-only, no backend")
 	require.Nil(t, cleanup, "nothing to release when no backend was opened")
+}
 
-	// The derived tip is the not-configured placeholder: sampling it errors clearly.
-	_, tipErr := resolveNetworkTip(backend).NetworkTip(context.Background())
-	require.Error(t, tipErr)
-	assert.Contains(t, tipErr.Error(), "no bulk backend configured")
+// A frontfill-only daemon (nil backend) with history archives configured gets an
+// archive-backed tip source, so it can bootstrap its earliest_ledger pin — the
+// #833 fix. The archive frontier resolves through GetRootHAS().CurrentLedger.
+func TestBuildTipSampler_FrontfillBootstrapsFromArchive(t *testing.T) {
+	sampler, err := buildTipSampler(
+		context.Background(), nil, []string{"file:///nonexistent-archive"}, silentLogger())
+	require.NoError(t, err)
+	require.NotNil(t, sampler)
+	require.Len(t, sampler.sources, 1, "the archive is the sole tip source when no backend is configured")
+
+	// Drive the archive tip mapping directly against a fake root HAS, proving the
+	// CurrentLedger is what the tip source returns.
+	tip, err := archiveTip(fakeRootHAS{current: 50_000})(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, uint32(50_000), tip)
+}
+
+// fakeRootHAS is a rootHASGetter over a fixed CurrentLedger (or a fixed error),
+// the narrow archive seam archiveTip reads.
+type fakeRootHAS struct {
+	current uint32
+	err     error
+}
+
+func (f fakeRootHAS) GetRootHAS() (historyarchive.HistoryArchiveState, error) {
+	if f.err != nil {
+		return historyarchive.HistoryArchiveState{}, f.err
+	}
+	return historyarchive.HistoryArchiveState{CurrentLedger: f.current}, nil
+}
+
+// A GetRootHAS failure surfaces as a wrapped tip-source error (retryable upstream).
+func TestArchiveTip_RootHASErrorSurfaces(t *testing.T) {
+	_, err := archiveTip(fakeRootHAS{err: errors.New("archive 503")})(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "root HAS")
+	assert.Contains(t, err.Error(), "archive 503")
+}
+
+// With neither a backend nor archive URLs, the sampler has no sources and errors
+// clearly — the frontfill-only misconfiguration that cannot bootstrap.
+func TestBuildTipSampler_NoSourcesErrors(t *testing.T) {
+	sampler, err := buildTipSampler(context.Background(), nil, nil, silentLogger())
+	require.NoError(t, err)
+	_, sampleErr := sampler.Sample(context.Background())
+	require.Error(t, sampleErr)
+	assert.Contains(t, sampleErr.Error(), "no network tip source configured")
 }
 
 func TestNewLogger(t *testing.T) {

@@ -25,6 +25,7 @@ import (
 
 // fakeTipBackend returns tips[i] per call (clamped to the last); if err is set it
 // returns err for the first errFirst calls, then the tip (errFirst large ⇒ always down).
+// Its tip method has the tipSource signature, so it wires straight into a tipSampler.
 type fakeTipBackend struct {
 	mu       sync.Mutex
 	tips     []uint32
@@ -33,7 +34,7 @@ type fakeTipBackend struct {
 	errFirst int // return err for the first errFirst calls, then the tip
 }
 
-func (b *fakeTipBackend) NetworkTip(context.Context) (uint32, error) {
+func (b *fakeTipBackend) tip(context.Context) (uint32, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	n := b.calls
@@ -55,6 +56,16 @@ func (b *fakeTipBackend) callCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.calls
+}
+
+// testSampler builds a tipSampler over the given fake backends (tried in order)
+// with fast test backoff. maxAttempts bounds the retries per Sample call.
+func testSampler(maxAttempts int, backends ...*fakeTipBackend) *tipSampler {
+	sources := make([]tipSource, len(backends))
+	for i, b := range backends {
+		sources[i] = b.tip
+	}
+	return &tipSampler{sources: sources, interval: time.Millisecond, maxAttempts: maxAttempts}
 }
 
 // recordingPlan captures the [lo,hi] each backfill pass asked for via the
@@ -95,11 +106,9 @@ func startTestConfig(
 	cfg := StartConfig{
 		Exec:            exec,
 		RetentionChunks: 0,
-		NetworkTip:      tip,
+		Tip:             testSampler(3, tip),
 		Core:            core,
 		ServeReads:      func(context.Context) error { return nil },
-		TipBackoff:      time.Millisecond,
-		TipMaxAttempts:  3,
 	}
 	if recordPlan != nil {
 		cfg.runBackfill = func(_ context.Context, _ backfill.ExecConfig, lo, hi chunk.ID) error {
@@ -149,39 +158,81 @@ func pinGenesis(t *testing.T, cat *catalog.Catalog) {
 }
 
 // ---------------------------------------------------------------------------
-// networkTip — backoff, sub-genesis rejection, exhausted retries.
+// tipSampler.Sample — backoff, sub-genesis rejection, exhausted retries,
+// and the lake→archive source fallback.
 // ---------------------------------------------------------------------------
 
-func TestNetworkTip_RejectsSubGenesisAsNotReady(t *testing.T) {
-	tip, err := networkTip(context.Background(),
-		&fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq - 1}}, time.Millisecond, 3)
+func TestSample_RejectsSubGenesisAsNotReady(t *testing.T) {
+	tip, err := testSampler(3, &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq - 1}}).
+		Sample(context.Background())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not ready")
 	require.Zero(t, tip)
 }
 
-func TestNetworkTip_RetriesThenSucceeds(t *testing.T) {
+func TestSample_RetriesThenSucceeds(t *testing.T) {
 	b := &fakeTipBackend{tips: []uint32{50_000}, err: errors.New("object store down"), errFirst: 2}
-	tip, err := networkTip(context.Background(), b, time.Millisecond, 5)
+	tip, err := testSampler(5, b).Sample(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, uint32(50_000), tip)
 	require.Equal(t, 3, b.callCount(), "two failures then a success")
 }
 
-func TestNetworkTip_ExhaustedRetriesErrors(t *testing.T) {
+func TestSample_ExhaustedRetriesErrors(t *testing.T) {
 	b := &fakeTipBackend{err: errors.New("object store down"), errFirst: 99}
-	_, err := networkTip(context.Background(), b, time.Millisecond, 4)
+	_, err := testSampler(4, b).Sample(context.Background())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "after 4 attempts")
 	require.Equal(t, 4, b.callCount())
 }
 
-func TestNetworkTip_CtxCancelAbortsWait(t *testing.T) {
+func TestSample_CtxCancelAbortsWait(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	b := &fakeTipBackend{err: errors.New("down"), errFirst: 99}
-	_, err := networkTip(ctx, b, time.Hour, 5)
+	s := &tipSampler{sources: []tipSource{b.tip}, interval: time.Hour, maxAttempts: 5}
+	_, err := s.Sample(ctx)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+// The lake tip is preferred: when the first source answers, the fallback is
+// never consulted.
+func TestSample_PrefersFirstSource(t *testing.T) {
+	lake := &fakeTipBackend{tips: []uint32{50_000}}
+	archive := &fakeTipBackend{tips: []uint32{49_936}} // one checkpoint behind
+	tip, err := testSampler(3, lake, archive).Sample(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, uint32(50_000), tip, "the lake tip wins when it answers")
+	require.Zero(t, archive.callCount(), "the archive fallback is not consulted")
+}
+
+// The archive fallback answers on the same attempt when the lake tip is down —
+// no retry needed to fall over.
+func TestSample_FallsBackToArchiveWhenLakeDown(t *testing.T) {
+	lake := &fakeTipBackend{err: errors.New("lake unreachable"), errFirst: 99}
+	archive := &fakeTipBackend{tips: []uint32{49_936}}
+	tip, err := testSampler(3, lake, archive).Sample(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, uint32(49_936), tip, "falls back to the archive frontier")
+	require.Equal(t, 1, archive.callCount(), "the fallback answers on the first attempt")
+}
+
+// With every source down, Sample exhausts its retries and joins their errors.
+func TestSample_AllSourcesDownExhausts(t *testing.T) {
+	lake := &fakeTipBackend{err: errors.New("lake down"), errFirst: 99}
+	archive := &fakeTipBackend{err: errors.New("archive down"), errFirst: 99}
+	_, err := testSampler(2, lake, archive).Sample(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "lake down")
+	require.Contains(t, err.Error(), "archive down")
+}
+
+// A sampler with no sources at all (neither a lake nor archives) errors clearly
+// — the frontfill-only misconfiguration that cannot bootstrap.
+func TestSample_NoSourcesErrorsClearly(t *testing.T) {
+	_, err := newTipSampler().Sample(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no network tip source configured")
 }
 
 // ---------------------------------------------------------------------------
@@ -308,10 +359,11 @@ func TestBackfill_LongDowntimeRePass(t *testing.T) {
 	assert.GreaterOrEqual(t, tip.callCount(), 3, "the loop re-sampled the tip across passes")
 }
 
-// Degrade-and-serve restart: tip unreachable but local progress exists, so
-// backfill degrades to tip:=lastCommitted, re-resolves [0,2] once, terminates,
-// and never regresses the lastCommitted.
-func TestBackfill_RestartTipUnreachableDegrades(t *testing.T) {
+// Restart with an unreachable tip errors out even when local progress exists: the
+// synthetic tip:=lastCommitted degraded mode is gone (the sampler's lake→archive
+// fallback means an unavailable tip is a genuine "no source reachable"). No
+// backfill pass runs; the supervisor restarts and re-samples.
+func TestBackfill_RestartTipUnreachableErrors(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 	lastCommitted := chunk.ID(2).LastLedger() // local progress exists
@@ -319,12 +371,9 @@ func TestBackfill_RestartTipUnreachableDegrades(t *testing.T) {
 	rec := &recordingPlan{}
 	cfg := startTestConfig(t, cat, tip, nil, rec)
 
-	last, err := backfillToTip(context.Background(), cfg, lastCommitted, chunk.FirstLedgerSeq)
-	require.NoError(t, err, "local progress means no fatal")
-	passes := rec.snapshot()
-	require.Len(t, passes, 1, "exactly one degraded re-resolve pass, then terminate")
-	assert.Equal(t, chunk.ID(2), passes[0][1])
-	assert.Equal(t, lastCommitted, last, "lastCommitted does not regress")
+	_, err := backfillToTip(context.Background(), cfg, lastCommitted, chunk.FirstLedgerSeq)
+	require.Error(t, err, "an unreachable tip errors out — no degraded mode")
+	require.Empty(t, rec.snapshot(), "no backfill pass runs when the tip is unavailable")
 }
 
 // Lagging bulk tip below a chunk-aligned lastCommitted: the anchor is max(tip,
@@ -511,9 +560,9 @@ func TestRun_ValidatesConfig(t *testing.T) {
 	cat, _ := testCatalog(t)
 	base := startTestConfig(t, cat, &fakeTipBackend{tips: []uint32{50_000}}, &fakeCore{}, nil)
 
-	t.Run("nil NetworkTip", func(t *testing.T) {
+	t.Run("nil Tip", func(t *testing.T) {
 		cfg := base
-		cfg.NetworkTip = nil
+		cfg.Tip = nil
 		require.Error(t, run(context.Background(), cfg))
 	})
 	t.Run("nil Core", func(t *testing.T) {

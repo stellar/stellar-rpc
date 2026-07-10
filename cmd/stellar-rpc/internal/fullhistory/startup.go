@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cenkalti/backoff/v4"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
@@ -170,7 +169,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 }
 
 // backfillToTip runs the backfill loop, returning lastCommitted as backfill makes
-// progress. Each pass samples networkTip, anchors on max(tip, lastCommitted),
+// progress. Each pass samples the network tip, anchors on max(tip, lastCommitted),
 // computes [rangeStart, rangeEnd] with the mid-chunk exclusion, and breaks on an
 // empty or non-advancing range.
 func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint32) (uint32, error) {
@@ -195,18 +194,13 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 		// it rather than only around runBackfill. Passes that break early (empty range)
 		// record nothing — the metrics call is below the break.
 		passStart := time.Now()
-		tip, err := networkTip(ctx, cfg.NetworkTip, cfg.TipBackoff, cfg.TipMaxAttempts)
+		// The tip sampler falls back from the lake to the history archives, so an
+		// unavailable tip means no source could be reached at all. Error out rather
+		// than proceed — the daemon must never serve behind an unknown frontier, and
+		// each supervised restart re-samples (a transient outage self-heals).
+		tip, err := cfg.Tip.Sample(ctx)
 		if err != nil {
-			if lastCommitted < earliest {
-				// First start, no reachable backend: error out — the daemon must never
-				// serve incomplete history. Restartable: the property is enforced by
-				// returning an error at all (each restart re-checks lastCommitted <
-				// earliest), not by the exit shape, so a datastore mid-outage or a young
-				// lake below genesis self-heals on a later restart.
-				return 0, fmt.Errorf("network tip unavailable and no local history to serve: %w", err)
-			}
-			// Restart with local progress: serve what's below lastCommitted, skip backfill.
-			tip = lastCommitted
+			return 0, fmt.Errorf("sample network tip: %w", err)
 		}
 
 		// max() guards a lagging bulk tip: the tip alone could regress the floor below
@@ -277,12 +271,6 @@ func lastCommittedMidChunk(lastCommitted uint32) bool {
 // Injected external boundaries (so startup is testable with fakes).
 // ---------------------------------------------------------------------------
 
-// NetworkTipBackend samples the bulk backend's current network tip during backfill.
-// It is consulted only during backfill; once ingestion runs, captive core is the tip.
-type NetworkTipBackend interface {
-	NetworkTip(ctx context.Context) (uint32, error)
-}
-
 // CoreOpener hands back the live ingestion stream the loop consumes. The stream
 // OWNS its source's lifecycle (started on the first RawLedgers pull over the
 // unbounded range from the loop's resume ledger, torn down when the loop exits),
@@ -304,8 +292,9 @@ type StartConfig struct {
 	// diverge on the catalog/pool (the invariant is structural, not by comment).
 	RetentionChunks uint32
 
-	// NetworkTip samples the bulk backend's tip during backfill. Required.
-	NetworkTip NetworkTipBackend
+	// Tip samples the network frontier during backfill (lake first, history
+	// archives as fallback). Its retry defaults are bound at construction. Required.
+	Tip *tipSampler
 
 	// Core starts captive core and yields the ingestion getter. Required.
 	Core CoreOpener
@@ -313,31 +302,15 @@ type StartConfig struct {
 	// ServeReads begins serving reads; it must return promptly, not block. Required.
 	ServeReads func(ctx context.Context) error
 
-	// TipBackoff is networkTip's inter-attempt sleep; TipMaxAttempts bounds the
-	// retries. Zero values fall back to defaults in withDefaults.
-	TipBackoff     time.Duration
-	TipMaxAttempts int
-
 	// runBackfill is a test-only seam for one backfill pass; nil ⇒ backfill.RunBackfill.
 	runBackfill func(ctx context.Context, exec backfill.ExecConfig, lo, hi chunk.ID) error
 }
 
-const (
-	defaultTipBackoff     = time.Second
-	defaultTipMaxAttempts = 5
-)
-
-// withDefaults fills the tip-backoff defaults and the embedded Exec defaults
-// (Workers -> GOMAXPROCS). The lifecycle.Config is assembled from Exec +
-// RetentionChunks in run().
+// withDefaults fills the embedded Exec defaults (Workers -> GOMAXPROCS). The
+// lifecycle.Config is assembled from Exec + RetentionChunks in run(); the tip
+// sampler's retry defaults are bound at its construction, not here.
 func (cfg StartConfig) withDefaults() StartConfig {
 	cfg.Exec = cfg.Exec.WithDefaults()
-	if cfg.TipBackoff <= 0 {
-		cfg.TipBackoff = defaultTipBackoff
-	}
-	if cfg.TipMaxAttempts <= 0 {
-		cfg.TipMaxAttempts = defaultTipMaxAttempts
-	}
 	return cfg
 }
 
@@ -348,8 +321,8 @@ func (cfg StartConfig) validate() error {
 	if cfg.Exec.Logger == nil {
 		return errors.New("nil StartConfig.Exec.Logger")
 	}
-	if cfg.NetworkTip == nil {
-		return errors.New("nil StartConfig.NetworkTip")
+	if cfg.Tip == nil {
+		return errors.New("nil StartConfig.Tip")
 	}
 	if cfg.Core == nil {
 		return errors.New("nil StartConfig.Core")
@@ -358,45 +331,4 @@ func (cfg StartConfig) validate() error {
 		return errors.New("nil StartConfig.ServeReads")
 	}
 	return nil
-}
-
-// networkTip samples backend.NetworkTip, retrying a transient error on a bounded
-// constant backoff (maxAttempts total tries) and rejecting a sub-genesis tip as
-// "not ready" so an unready backend never pins a garbage floor. Built on
-// cenkalti/backoff — the same retry primitive as withRetries and waitForCoverage —
-// so ctx cancellation aborts the wait and the sub-genesis case is backoff.Permanent.
-func networkTip(
-	ctx context.Context, backend NetworkTipBackend, interval time.Duration, maxAttempts int,
-) (uint32, error) {
-	if maxAttempts < 1 {
-		maxAttempts = 1 // never underflow WithMaxRetries' uint64 into an unbounded loop
-	}
-	var (
-		tip      uint32
-		notReady bool
-	)
-	poll := func() error {
-		t, err := backend.NetworkTip(ctx)
-		if err != nil {
-			return err // transient — retry
-		}
-		if t < chunk.FirstLedgerSeq {
-			// Below genesis ⇒ backend empty/not-synced; permanent (it would keep returning 0).
-			notReady = true
-			return backoff.Permanent(fmt.Errorf("backend tip %d is below genesis %d — backend not ready",
-				t, chunk.FirstLedgerSeq))
-		}
-		tip = t
-		return nil
-	}
-	// Constant interval, count-bounded: maxAttempts tries == 1 initial + (maxAttempts-1) retries.
-	bo := backoff.WithMaxRetries(backoff.NewConstantBackOff(interval), uint64(maxAttempts-1))
-	switch err := backoff.Retry(poll, backoff.WithContext(bo, ctx)); {
-	case err == nil:
-		return tip, nil
-	case notReady, ctx.Err() != nil:
-		return 0, err // permanent (not ready) or ctx-canceled: surface as-is, not "exhausted"
-	default:
-		return 0, fmt.Errorf("network tip unavailable after %d attempts: %w", maxAttempts, err)
-	}
 }

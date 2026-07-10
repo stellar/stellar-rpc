@@ -17,15 +17,12 @@ import (
 // it is complete, so backfillSource constructs a bare ledgerbackend.LedgerStream
 // (ledger.NewPackStream) for it, with nothing to wait on.
 //
-// Implementations (one wired now, one deferred):
-//
-//	bsbSource     (now)   Tip = datastore.FindLatestLedgerSequence (the lake frontier)
-//	captiveSource (later) Tip = historyarchive GetRootHAS().CurrentLedger
-//
-// Captive core is the only deferred piece, and the interface is the seam that
-// keeps the path open: it is one new struct (embed ledgerbackend.NewCaptiveCoreStream
-// plus a history-archive Tip) and one daemon factory case, with zero changes to
-// ProcessConfig, backfillSource, waitForCoverage, or ingest.WriteColdChunk.
+// The one implementation is bsbSource (Tip = datastore.FindLatestLedgerSequence,
+// the lake frontier). A frontfill-only deployment configures no datastore and so
+// has no Backend at all — it never freezes bulk history; captive core ingests
+// from the pinned floor. Its network tip comes from the history archives at the
+// daemon layer (a tip source, not a Backend, since no LedgerStream is needed),
+// and is the lake tip's fallback when a datastore IS configured.
 //
 // Tip is its own method because the SDK's LedgerBackend.GetLatestLedgerSequence is
 // NOT the frontier we want — it is prepared-relative (errors before PrepareRange on

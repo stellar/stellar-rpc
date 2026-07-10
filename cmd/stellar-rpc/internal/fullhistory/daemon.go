@@ -13,8 +13,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 
+	"github.com/stellar/go-stellar-sdk/historyarchive"
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/support/storage"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
@@ -128,7 +130,15 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 		}
 		backend = built
 	}
-	networkTip := resolveNetworkTip(backend)
+
+	// The network-tip sampler: the lake frontier (when a backfill datastore is
+	// configured) first, the history archives' root HAS as the fallback (and the
+	// sole source for a frontfill-only daemon, which is how it bootstraps its
+	// earliest_ledger pin). validateConfig needs it, so build it first.
+	sampler, err := buildTipSampler(ctx, backend, cfg.Ingestion.HistoryArchiveURLs, logger)
+	if err != nil {
+		return fmt.Errorf("build tip sampler: %w", err)
+	}
 
 	serveReads := opts.ServeReads
 	if serveReads == nil {
@@ -137,7 +147,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	}
 
 	// --- validateConfig: pin/confirm the layout, resolve the earliest floor. ---
-	if err := validateConfig(ctx, cfg, cat, networkTip, defaultTipBackoff, defaultTipMaxAttempts); err != nil {
+	if err := validateConfig(ctx, cfg, cat, sampler); err != nil {
 		return err
 	}
 
@@ -161,7 +171,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	// --- Assemble the StartConfig and run the supervised run loop. ---
 	start := startConfig(
-		cfg, cat, logger, backend, networkTip, core, serveReads, metrics, sink)
+		cfg, cat, logger, backend, sampler, core, serveReads, metrics, sink)
 
 	backoff := opts.RestartBackoff
 	if backoff <= 0 {
@@ -175,7 +185,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 // goroutine share ONE catalog, worker pool, and retention floor by construction.
 func startConfig(
 	cfg config.Config, cat *catalog.Catalog, logger *supportlog.Entry,
-	backend backfill.Backend, networkTip NetworkTipBackend, core CoreOpener, serveReads func(context.Context) error,
+	backend backfill.Backend, sampler *tipSampler, core CoreOpener, serveReads func(context.Context) error,
 	metrics observability.Metrics, sink ingest.MetricSink,
 ) StartConfig {
 	exec := backfill.ExecConfig{
@@ -189,12 +199,10 @@ func startConfig(
 			Sink:    sink,
 		},
 	}
-	// TipBackoff / TipMaxAttempts are left zero here on purpose:
-	// StartConfig.withDefaults fills them at Start.
 	return StartConfig{
 		Exec:            exec,
 		RetentionChunks: deref(cfg.Retention.RetentionChunks),
-		NetworkTip:      networkTip,
+		Tip:             sampler,
 		Core:            core,
 		ServeReads:      serveReads,
 	}
@@ -376,31 +384,32 @@ func (c *captiveCoreOpener) OpenCore(ctx context.Context) (ledgerbackend.LedgerS
 	return ledgerbackend.NewCaptiveCoreStream(cfg, c.config.Log), nil
 }
 
-// resolveNetworkTip adapts the backfill backend to backfill's tip sampler — its Tip
-// frontier (so the tip and the freeze's coverage frontier are one source) — or the
-// not-configured placeholder for a frontfill-only daemon (nil backend).
-func resolveNetworkTip(backend backfill.Backend) NetworkTipBackend {
-	if backend == nil {
-		return notConfiguredTip{}
+// buildTipSampler assembles the network-tip sampler from the wired sources: the
+// bulk lake frontier (backend.Tip, so the tip and the freeze's coverage frontier
+// are one source) first when a backfill datastore is configured, and the history
+// archives' root HAS as a fallback. For a frontfill-only daemon (nil backend) the
+// archives are the only source — and are how it bootstraps its earliest_ledger
+// pin on first start. The archive URLs are the same ones captive core reads from
+// ([ingestion].history_archive_urls); no new config.
+func buildTipSampler(
+	ctx context.Context, backend backfill.Backend, archiveURLs []string, logger *supportlog.Entry,
+) (*tipSampler, error) {
+	var sources []tipSource
+	if backend != nil {
+		sources = append(sources, backend.Tip)
 	}
-	return backendTip{backend}
+	if len(archiveURLs) > 0 {
+		pool, err := historyarchive.NewArchivePool(archiveURLs, historyarchive.ArchiveOptions{
+			ConnectOptions: storage.ConnectOptions{Context: ctx},
+			Logger:         logger.WithField("subservice", "history-archive-tip"),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("connect history archives: %w", err)
+		}
+		sources = append(sources, archiveTip(pool))
+	}
+	return newTipSampler(sources...), nil
 }
-
-// notConfiguredTip is the NetworkTipBackend placeholder when no bulk backend is
-// configured: every sample returns a clear not-configured error (until #772 wires
-// the real lake tip).
-type notConfiguredTip struct{}
-
-func (notConfiguredTip) NetworkTip(context.Context) (uint32, error) {
-	return 0, errors.New("no bulk backend configured ([backfill.datastore].type empty); " +
-		"cannot sample the network tip (configure a backend, or this is a frontfill-only deployment)")
-}
-
-// backendTip adapts a backfill.Backend to NetworkTipBackend via its Tip frontier, so
-// backfill's tip and the freeze's coverage frontier are sampled from one source.
-type backendTip struct{ backend backfill.Backend }
-
-func (t backendTip) NetworkTip(ctx context.Context) (uint32, error) { return t.backend.Tip(ctx) }
 
 // newLogger builds a daemon logger from the [logging] config.
 func newLogger(cfg config.LoggingConfig) (*supportlog.Entry, error) {
@@ -417,8 +426,4 @@ func newLogger(cfg config.LoggingConfig) (*supportlog.Entry, error) {
 }
 
 // compile-time interface checks.
-var (
-	_ CoreOpener        = (*captiveCoreOpener)(nil)
-	_ NetworkTipBackend = notConfiguredTip{}
-	_ NetworkTipBackend = backendTip{}
-)
+var _ CoreOpener = (*captiveCoreOpener)(nil)
