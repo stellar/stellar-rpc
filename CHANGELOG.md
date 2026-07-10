@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [v27.1.1](https://github.com/stellar/stellar-rpc/compare/v27.1.0...v27.1.1)
+
+### Fixed
+* `getEvents` no longer misses events when one filter constrains `contractIds` or `type` and another filter leaves it empty ([#832](https://github.com/stellar/stellar-rpc/pull/832)).
+* Bumped dependencies to latest versions ([#842](https://github.com/stellar/stellar-rpc/pull/842)).
+* Disable built-in `rpc.*` methods ([#828](https://github.com/stellar/stellar-rpc/pull/828)).
 
 ## [v27.1.0](https://github.com/stellar/stellar-rpc/compare/v27.0.0...v27.1.0)
 
