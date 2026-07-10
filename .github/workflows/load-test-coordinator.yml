@@ -11,9 +11,7 @@ defaults:
 
 on:
   push:
-    # temporary scaffolding: before merge to main, replace with line
-    # branches: [release/**]
-    branches: [release/**, gha-coordinator]
+    branches: [release/**]
   workflow_dispatch:
     inputs:
       target_ref:
@@ -122,8 +120,7 @@ jobs:
             [ -n "$CID" ] && PREV=$(gh api "repos/$REPO/issues/comments/$CID" --jq '.body' || true)
           fi
 
-          # Result locations are deterministic (runs/<run_id>/<run_label>/result.json);
-          # derive each leg's fetch spec from the roster.
+          # Note result locations are deterministic (runs/<run_id>/<run_label>/result.json)
           LEGS=$(jq -c --arg pfx "runs/$GITHUB_RUN_ID" --arg b "$BUCKET" \
             'map({label, bucket: $b, key: ($pfx + "/" + .run_label + "/result.json")})' <<<"$PLANNED_LEGS")
           export LEGS

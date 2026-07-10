@@ -11,10 +11,9 @@ concurrency:
 
 jobs:
   run-system-test:
-    # TODO: re-pin to @master before merging
     # set the git ref of stellar/system-test after the '@'
     # to specify which version of the workflow to call
-    uses: stellar/system-test/.github/workflows/test-workflow.yml@789121c0914150a02122581f32ee62c4e42e1c84
+    uses: stellar/system-test/.github/workflows/test-workflow.yml@master
     with:
       stellar-rpc-repo: "${{ github.repository }}"
       stellar-rpc-ref: "${{ github.ref }}"
