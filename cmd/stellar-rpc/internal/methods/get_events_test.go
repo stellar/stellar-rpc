@@ -1170,6 +1170,172 @@ func BenchmarkGetEvents(b *testing.B) {
 	log.Infof("Benchmark Results: %v ms/op ", msPerOp)
 }
 
+func TestCombineContractIDs(t *testing.T) {
+	idA := strkey.MustEncode(strkey.VersionByteContract, make([]byte, 32))
+	idB := strkey.MustEncode(strkey.VersionByteContract, append(make([]byte, 31), 1))
+
+	t.Run("unions and dedupes across filters", func(t *testing.T) {
+		combined, err := combineContractIDs([]protocol.EventFilter{
+			{ContractIDs: []string{idA, idB}},
+			{ContractIDs: []string{idA}},
+		})
+		require.NoError(t, err)
+		assert.Len(t, combined, 2)
+	})
+
+	t.Run("filter without contract IDs drops the restriction", func(t *testing.T) {
+		// The second filter matches any contract, so no contract ID
+		// restriction may be pushed down to the DB query.
+		combined, err := combineContractIDs([]protocol.EventFilter{
+			{ContractIDs: []string{idA}},
+			{Topics: []protocol.TopicFilter{}},
+		})
+		require.NoError(t, err)
+		assert.Empty(t, combined)
+	})
+
+	t.Run("no filters means no restriction", func(t *testing.T) {
+		combined, err := combineContractIDs(nil)
+		require.NoError(t, err)
+		assert.Empty(t, combined)
+	})
+
+	t.Run("invalid contract ID errors", func(t *testing.T) {
+		_, err := combineContractIDs([]protocol.EventFilter{
+			{ContractIDs: []string{"invalid"}},
+		})
+		require.Error(t, err)
+	})
+}
+
+func TestCombineEventTypes(t *testing.T) {
+	t.Run("unions types across filters", func(t *testing.T) {
+		combined := combineEventTypes([]protocol.EventFilter{
+			{EventType: map[string]any{protocol.EventTypeSystem: nil}},
+			{EventType: map[string]any{protocol.EventTypeContract: nil}},
+		})
+		assert.ElementsMatch(t, []int{
+			int(xdr.ContractEventTypeSystem),
+			int(xdr.ContractEventTypeContract),
+		}, combined)
+	})
+
+	t.Run("filter without event types drops the restriction", func(t *testing.T) {
+		// The second filter matches any event type, so no event type
+		// restriction may be pushed down to the DB query.
+		combined := combineEventTypes([]protocol.EventFilter{
+			{EventType: map[string]any{protocol.EventTypeSystem: nil}},
+			{},
+		})
+		assert.Empty(t, combined)
+	})
+
+	t.Run("no filters means no restriction", func(t *testing.T) {
+		assert.Empty(t, combineEventTypes(nil))
+	})
+}
+
+// setupTwoContractEventsHandler ingests one ledger (seq 2) containing a
+// contract-type event from contract A with topic COUNTER and a contract-type
+// event from contract B with topic TRANSFER, and returns a handler over it.
+func setupTwoContractEventsHandler(t *testing.T) (eventsRPCHandler, xdr.ContractId, xdr.ContractId) {
+	t.Helper()
+	counter := xdr.ScSymbol("COUNTER")
+	transfer := xdr.ScSymbol("TRANSFER")
+
+	contractA := xdr.ContractId([32]byte{1})
+	contractB := xdr.ContractId([32]byte{2})
+
+	dbx := newTestDB(t)
+	ctx := context.TODO()
+	logger := log.DefaultLogger
+
+	writer := db.NewReadWriter(logger, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
+	write, err := writer.NewTx(ctx)
+	require.NoError(t, err)
+	ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
+	store := db.NewEventReader(logger, dbx, passphrase)
+
+	txMeta := []xdr.TransactionMeta{
+		transactionMetaWithEvents(
+			contractEvent(
+				contractA,
+				xdr.ScVec{xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
+				xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter},
+			),
+		),
+		transactionMetaWithEvents(
+			contractEvent(
+				contractB,
+				xdr.ScVec{xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &transfer}},
+				xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &transfer},
+			),
+		),
+	}
+
+	lcm := ledgerCloseMetaWithEvents(2, time.Now().UTC().Unix(), txMeta...)
+	require.NoError(t, ledgerW.InsertLedger(lcm))
+	require.NoError(t, eventW.InsertEvents(lcm))
+	require.NoError(t, write.Commit(lcm, nil))
+
+	return eventsRPCHandler{
+		dbReader:     store,
+		maxLimit:     10000,
+		defaultLimit: 100,
+		ledgerReader: db.NewLedgerReader(dbx),
+	}, contractA, contractB
+}
+
+// Filters are OR-ed together: a filter with no contract IDs matches events
+// from any contract, so it must not be starved by another filter's contract
+// ID restriction.
+func TestGetEventsContractIDFilterDoesNotStarveOtherFilters(t *testing.T) {
+	handler, contractA, contractB := setupTwoContractEventsHandler(t)
+	transfer := xdr.ScSymbol("TRANSFER")
+	transferVal := xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &transfer}
+
+	idA := strkey.MustEncode(strkey.VersionByteContract, contractA[:])
+	idB := strkey.MustEncode(strkey.VersionByteContract, contractB[:])
+
+	// Filter 1 matches contract A's event by contract ID; filter 2 has no
+	// contract IDs and matches contract B's event by topic.
+	results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
+		StartLedger: 2,
+		Filters: []protocol.EventFilter{
+			{ContractIDs: []string{idA}},
+			{Topics: []protocol.TopicFilter{
+				{protocol.SegmentFilter{ScVal: &transferVal}},
+			}},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, results.Events, 2)
+	assert.Equal(t, idA, results.Events[0].ContractID)
+	assert.Equal(t, idB, results.Events[1].ContractID)
+}
+
+// Filters are OR-ed together: a filter with no event types matches events of
+// any type, so it must not be starved by another filter's event type
+// restriction.
+func TestGetEventsEventTypeFilterDoesNotStarveOtherFilters(t *testing.T) {
+	handler, _, contractB := setupTwoContractEventsHandler(t)
+	idB := strkey.MustEncode(strkey.VersionByteContract, contractB[:])
+
+	// Filter 1 matches only system events (there are none); filter 2 has no
+	// event types and matches contract B's contract-type event.
+	results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
+		StartLedger: 2,
+		Filters: []protocol.EventFilter{
+			{EventType: map[string]any{protocol.EventTypeSystem: nil}},
+			{ContractIDs: []string{idB}},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, results.Events, 1)
+	assert.Equal(t, idB, results.Events[0].ContractID)
+	assert.Equal(t, protocol.EventTypeContract, results.Events[0].EventType)
+}
+
 func getTxMetaWithContractEvents(contractID xdr.ContractId) []xdr.TransactionMeta {
 	var counters [1000]xdr.ScSymbol
 	for j := range counters {
