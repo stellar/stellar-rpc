@@ -59,18 +59,43 @@ func PublishResult(
 			logger.Warnf("bench results %s unavailable: %v", benchPath, berr) // best-effort for local runs
 		}
 	}
-	body, err := json.Marshal(res)
-	if err != nil {
-		return fmt.Errorf("marshaling result: %w", err)
+	logger.Infof("publishing result to s3://%s/%s (verdict: %s)", bucket, key, verdict)
+	if err := PutJSON(ctx, client, bucket, key, res); err != nil {
+		return fmt.Errorf("uploading result: %w", err)
 	}
-	logger.Infof("publishing result to s3://%s/%s (verdict: %s, %d bytes)", bucket, key, verdict, len(body))
+	return nil
+}
+
+// PutJSON uploads v to s3://bucket/key as one atomic JSON object.
+func PutJSON(ctx context.Context, client *s3.Client, bucket, key string, v any) error {
+	body, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("marshaling %s: %w", key, err)
+	}
 	if _, err := client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      &bucket,
 		Key:         &key,
 		Body:        bytes.NewReader(body),
 		ContentType: aws.String("application/json"),
 	}); err != nil {
-		return fmt.Errorf("uploading result: %w", err)
+		return fmt.Errorf("uploading s3://%s/%s: %w", bucket, key, err)
+	}
+	return nil
+}
+
+// GetJSON fetches and decodes s3://bucket/key into out, returning
+// ErrResultNotReady when the object is absent.
+func GetJSON(ctx context.Context, client *s3.Client, bucket, key string, out any) error {
+	obj, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: &bucket, Key: &key})
+	if err != nil {
+		if isNotFound(err) {
+			return ErrResultNotReady
+		}
+		return err
+	}
+	defer obj.Body.Close()
+	if err := json.NewDecoder(obj.Body).Decode(out); err != nil {
+		return fmt.Errorf("decoding s3://%s/%s: %w", bucket, key, err)
 	}
 	return nil
 }
@@ -81,22 +106,9 @@ var ErrResultNotReady = errors.New("result not published yet")
 // FetchResult gets and decodes the result object, returning ErrResultNotReady
 // when it is absent.
 func FetchResult(ctx context.Context, client *s3.Client, bucket, key string) (*Result, error) {
-	out, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: &bucket, Key: &key})
-	if err != nil {
-		if isNotFound(err) {
-			return nil, ErrResultNotReady
-		}
-		return nil, err
-	}
-	defer out.Body.Close()
-
-	data, err := io.ReadAll(out.Body)
-	if err != nil {
-		return nil, err
-	}
 	var res Result
-	if err := json.Unmarshal(data, &res); err != nil {
-		return nil, fmt.Errorf("decoding result object: %w", err)
+	if err := GetJSON(ctx, client, bucket, key, &res); err != nil {
+		return nil, err
 	}
 	return &res, nil
 }

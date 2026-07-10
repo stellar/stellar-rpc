@@ -9,6 +9,9 @@
 //	S3Fetcher      on-box: streams (and sha-verifies) corpus objects from S3.
 //	PublishResult  on-box: writes the ok/fail result object the gatherer reads.
 //	RunStreaming   on-box: runs a child, streaming output with a bounded tail.
+//	ServeReady     box-to-box: the rendezvous object (plus AwaitHealthy and the
+//	               PutJSON/GetJSON primitives) through which a handoff box
+//	               advertises its serving RPC to a chained leg.
 //
 // Leg-specific work (which corpus to fetch, which task to run) lives in each
 // leg's own on-box runner command; Gather is its own command (perf-eval/gather)
@@ -20,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
@@ -48,6 +52,20 @@ func Env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// DurationEnv parses key as a duration, keeping def on absence or garbage.
+func DurationEnv(key string, def time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		logger.Warnf("invalid %s %q; using %s", key, v, def)
+		return def
+	}
+	return d
 }
 
 // RequireEnv returns the values of keys in order, erroring with every unset one.
