@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -26,14 +27,12 @@ func RunStreaming(ctx context.Context, dir string, env []string, tailN int, name
 	return nil
 }
 
-// BailInstance writes the failure body (titled per leg) and exits non-zero for
-// the bash wrapper.
+// BailInstance writes the leg's failure body to resultsFile and returns msg as
+// the error for the runner to exit with.
 func BailInstance(resultsFile, title, runID, targetSHA, msg string) error {
-	logger.Error(msg)
 	body := fmt.Sprintf("❌ **%s failed** (run %s on `%s`)\n\n```\n%s\n```\n", title, runID, targetSHA, msg)
 	_ = os.WriteFile(resultsFile, []byte(body), 0o644)
-	os.Exit(1)
-	return nil // unreachable
+	return errors.New(msg)
 }
 
 // tailWriter is a ring buffer-writer that retains the last max bytes written to it.

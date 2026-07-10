@@ -2,7 +2,7 @@
 # own: ec2-leg.yml renders the box user-data as
 #   <preamble exports>  +  bootstrap-common.sh  +  run-<leg>.sh
 # so this file has no shebang. It installs the toolchain and exposes helpers; the
-# leg script calls bootstrap_box then hands off to its `runner instantiate`.
+# leg script calls bootstrap_box then hands off to its runner via run_leg.
 #
 # Result protocol: the box publishes one object to s3://$BUCKET/$RESULT_KEY holding
 # {schemaVersion, verdict, markdown, bench, runId, targetSha}. The Go runner
@@ -64,9 +64,7 @@ bail() {
 }
 trap 'bail "unhandled error at line $LINENO while running: $BASH_COMMAND"' ERR
 
-# temporary scaffolding: before merge to main, remove this section
-# (debug-only: persists the full box log to S3 so a terminated instance is still
-# debuggable; best-effort, never alters the real exit status)
+# persists the full box log to S3 even if instance terminated
 upload_box_log() {
   [ -n "$BUCKET" ] && [ -n "$RESULT_KEY" ] || return 0
   aws s3 cp /var/log/user-data.log "s3://$BUCKET/${RESULT_KEY%/*}/user-data.log" >/dev/null 2>&1 || true
@@ -81,7 +79,6 @@ if [ -n "$BUCKET" ] && [ -n "$RESULT_KEY" ]; then
         "s3://$BUCKET/${RESULT_KEY%/*}/user-data.progress.log" >/dev/null 2>&1 || true
     done ) &
 fi
-# end temporary scaffolding section
 
 # bootstrap_box installs the build toolchain and checks out TARGET_SHA into
 # $WORK_DIR/stellar-rpc, leaving the shell cd'd at the repo root. Generic across
@@ -133,7 +130,7 @@ bootstrap_box() {
   log "checked out $TARGET_SHA; handing off to the Go runner"
 }
 
-# run_leg hands off to a leg's `<runner_pkg> instantiate`. The Go runner owns the
+# run_leg hands off to a leg's runner package. The Go runner owns the
 # verdict from here, so the bootstrap ERR trap is released first. On a non-zero
 # exit the runner has written the failure body to RESULTS_FILE (or died before
 # doing so), so we publish the fail result it couldn't.
@@ -141,7 +138,7 @@ run_leg() {
   local runner_pkg="$1"
   trap - ERR
   export TARGET_SHA RUN_ID REPO WORK_DIR RESULTS_FILE BUCKET RESULT_KEY
-  if ! go run "$runner_pkg" instantiate; then
+  if ! go run "$runner_pkg"; then
     log "go runner exited non-zero; publishing fail result"
     upload_result fail "$RESULTS_FILE"
     exit 1

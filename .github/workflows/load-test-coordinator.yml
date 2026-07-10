@@ -1,7 +1,9 @@
 name: Load test coordinator
 # Drives the ephemeral load test(s) for a release: resolves the release context,
-# fans out to the callable load-test workflow, then aggregates one consolidated
+# fans out one ec2-leg call per planned leg, then aggregates one consolidated
 # sticky comment on the release PR. Owns reporting of perf eval results to the PR.
+# Legs report through S3 at runs/<run_id>/<run_label>/result.json; adding a leg
+# is one roster entry in the plan job plus its box script.
 
 defaults:
   run:
@@ -11,7 +13,7 @@ on:
   push:
     # temporary scaffolding: before merge to main, replace with line
     # branches: [release/**]
-    branches: [release/**, gha-coordinator, backfill-test]
+    branches: [release/**, backfill-test]
   workflow_dispatch:
     inputs:
       target_ref:
@@ -40,6 +42,7 @@ jobs:
     outputs:
       target_sha: ${{ steps.ctx.outputs.target_sha }}
       pr_number: ${{ steps.ctx.outputs.pr_number }}
+      legs: ${{ steps.ctx.outputs.legs }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -56,37 +59,35 @@ jobs:
           {
             echo "target_sha=$SHA"
             echo "pr_number=$PR"
+            echo 'legs=[{"label":"Apply-load ingestion","run_label":"apply-load","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh"}, \
+                        {"label":"Backfill ingestion", "run_label":"backfill","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-load-test/run-load-test.sh"}]'
           } >> "$GITHUB_OUTPUT"
 
-  # The fan-out. Each leg is its own callable workflow (a thin wrapper over the
-  # shared ec2-leg.yml). Further legs slot in as sibling jobs the report
-  # aggregates.
+  # The fan-out: one matrix entry per leg.
   load-test:
-    name: Apply-load ingestion
+    name: ${{ matrix.leg.label }}
     needs: plan
-    uses: ./.github/workflows/load-test.yml
+    strategy:
+      fail-fast: false # stops one leg's failure from cancelling other legs
+      matrix:
+        leg: ${{ fromJSON(needs.plan.outputs.legs) }}
+    uses: ./.github/workflows/ec2-leg.yml
     secrets: inherit
     with:
       target_ref: ${{ needs.plan.outputs.target_sha }}
-
-  backfill:
-    name: Backfill ingestion
-    needs: plan
-    uses: ./.github/workflows/backfill-test.yml
-    secrets: inherit
-    with:
-      target_ref: ${{ needs.plan.outputs.target_sha }}
+      run_label: ${{ matrix.leg.run_label }}
+      leg_script: ${{ matrix.leg.script }}
 
   report:
     name: Aggregate + report
-    needs: [plan, load-test, backfill]
-    if: always()
+    needs: [plan, load-test]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # Default checkout (github.sha): run renderer at workflow version even
+      # when the legs benchmark another target_sha.
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.plan.outputs.target_sha }}
       - uses: ./.github/actions/setup-go
 
       - name: Configure AWS via OIDC
@@ -95,8 +96,9 @@ jobs:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
           aws-region: us-east-1
 
-      # coordinator-runner fetches each leg's S3 result and emits the new comment body,
-      # this ties that to the gh API
+      # coordinator-runner does the rendering + history fold (it fetches each leg's
+      # S3 result and emits the new comment body, under unit test). the gh api calls
+      # stay here. Renderer failures abort before posting.
       - name: Render + post sticky report
         env:
           GH_TOKEN: ${{ github.token }}
@@ -106,9 +108,8 @@ jobs:
           TARGET_SHA: ${{ needs.plan.outputs.target_sha }}
           TARGET_REF: ${{ inputs.target_ref || github.ref_name }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          LEGS: >-
-            [{"label":"Apply-load ingestion","bucket":"${{ needs.load-test.outputs.bucket }}","key":"${{ needs.load-test.outputs.result_key }}","passed":"${{ needs.load-test.outputs.passed }}","verdict":"${{ needs.load-test.outputs.verdict }}"},
-            {"label":"Backfill ingestion","bucket":"${{ needs.backfill.outputs.bucket }}","key":"${{ needs.backfill.outputs.result_key }}","passed":"${{ needs.backfill.outputs.passed }}","verdict":"${{ needs.backfill.outputs.verdict }}"}]
+          PLANNED_LEGS: ${{ needs.plan.outputs.legs }}
+          BUCKET: stellar-rpc-ci-load-test # must match ec2-leg.yml
         run: |
           set -uo pipefail
           MARKER='<!-- load-test-results -->'
@@ -118,16 +119,26 @@ jobs:
           CID=""; PREV=""
           if [ -n "$PR" ]; then
             CID=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-              --jq "map(select(.body | startswith(\"$MARKER\"))) | .[0].id // empty" || true)
+              --jq "map(select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\")))) | .[0].id // empty" || true)
             [ -n "$CID" ] && PREV=$(gh api "repos/$REPO/issues/comments/$CID" --jq '.body' || true)
           fi
 
+          # Note result locations are deterministic (runs/<run_id>/<run_label>/result.json)
+          LEGS=$(jq -c --arg pfx "runs/$GITHUB_RUN_ID" --arg b "$BUCKET" \
+            'map({label, bucket: $b, key: ($pfx + "/" + .run_label + "/result.json")})' <<<"$PLANNED_LEGS")
+          export LEGS
+
           # Render the new body (fetches each leg's S3 result, folds prior runs).
-          printf '%s' "$PREV" | go run "$PERF_EVAL" > /tmp/comment.md
+          if ! printf '%s' "$PREV" | go run "$PERF_EVAL" > /tmp/comment.md; then
+            echo "::error::renderer failed; leaving sticky comment untouched"
+            exit 1
+          fi
           cat /tmp/comment.md >> "$GITHUB_STEP_SUMMARY"
 
-          # Post / edit the sticky comment.
-          if [ -n "$PR" ]; then
+          # Post / edit the sticky comment (skip if the render produced nothing).
+          if [ ! -s /tmp/comment.md ]; then
+            echo "::warning::render produced no output, skipping comment post"
+          elif [ -n "$PR" ]; then
             jq -Rs '{body: .}' /tmp/comment.md > /tmp/payload.json
             if [ -n "$CID" ]; then
               gh api -X PATCH "repos/$REPO/issues/comments/$CID" --input /tmp/payload.json >/dev/null \
@@ -145,14 +156,8 @@ jobs:
       - name: Set overall status
         if: always()
         run: |
-          rc=0
-          if [ "${{ needs.load-test.outputs.passed }}" != "true" ]; then
-            echo "::error::Apply-load ingestion leg did not pass (result=${{ needs.load-test.result }}, verdict=${{ needs.load-test.outputs.verdict }})"
-            rc=1
+          if [ "${{ needs.load-test.result }}" != "success" ]; then
+            echo "::error::one or more legs did not pass (aggregate result: ${{ needs.load-test.result }})"
+            exit 1
           fi
-          if [ "${{ needs.backfill.outputs.passed }}" != "true" ]; then
-            echo "::error::Backfill ingestion leg did not pass (result=${{ needs.backfill.result }}, verdict=${{ needs.backfill.outputs.verdict }})"
-            rc=1
-          fi
-          if [ "$rc" -ne 0 ]; then exit 1; fi
           echo "all load-test legs passed"
