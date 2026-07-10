@@ -2,8 +2,12 @@ name: Load test coordinator
 # Drives the ephemeral load test(s) for a release: resolves the release context,
 # fans out one ec2-leg call per planned leg, then aggregates one consolidated
 # sticky comment on the release PR. Owns reporting of perf eval results to the PR.
-# Legs report through S3 at runs/<run_id>/<run_label>/result.json; adding a leg
-# is one roster entry in the plan job plus its box script.
+# Legs report through S3 at runs/<run_id>/<run_label>/result.json; adding an
+# independent leg is one roster entry in the plan job plus its box script.
+# The backfill -> endpoint-load-test pair is chained instead: backfill keeps its
+# box (DB + serving RPC) alive on success, and the blaster job depends on it,
+# rendezvouses through S3, and adopts the box for cleanup -- so those two are
+# explicit jobs rather than matrix entries.
 
 defaults:
   run:
@@ -43,6 +47,7 @@ jobs:
       target_sha: ${{ steps.ctx.outputs.target_sha }}
       pr_number: ${{ steps.ctx.outputs.pr_number }}
       legs: ${{ steps.ctx.outputs.legs }}
+      matrix_legs: ${{ steps.ctx.outputs.matrix_legs }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -56,20 +61,24 @@ jobs:
           SHA="$(git rev-parse HEAD)"
           PR="$(gh pr list --repo "${{ github.repository }}" --state open \
                   --head "$REF" --json number --jq '.[0].number // ""' 2>/dev/null || true)"
+          # legs: the report roster (comment order) -- every leg the report job
+          # reads from S3. matrix_legs: the independent subset the fan-out runs;
+          # the chained backfill + blaster legs are explicit jobs below.
           {
             echo "target_sha=$SHA"
             echo "pr_number=$PR"
-            echo 'legs=[{"label":"Apply-load ingestion","run_label":"apply-load","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh","budget":225},{"label":"Backfill ingestion","run_label":"backfill","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/run-backfill.sh","budget":345}]'
+            echo 'legs=[{"label":"Apply-load ingestion","run_label":"apply-load"},{"label":"Backfill ingestion","run_label":"backfill"},{"label":"Endpoint load test","run_label":"blaster"}]'
+            echo 'matrix_legs=[{"label":"Apply-load ingestion","run_label":"apply-load","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh","budget":225}]'
           } >> "$GITHUB_OUTPUT"
 
-  # The fan-out: one matrix entry per leg.
+  # The fan-out: one matrix entry per independent leg.
   load-test:
     name: ${{ matrix.leg.label }}
     needs: plan
     strategy:
       fail-fast: false # stops one leg's failure from cancelling other legs
       matrix:
-        leg: ${{ fromJSON(needs.plan.outputs.legs) }}
+        leg: ${{ fromJSON(needs.plan.outputs.matrix_legs) }}
     uses: ./.github/workflows/ec2-leg.yml
     secrets: inherit
     with:
@@ -78,9 +87,44 @@ jobs:
       leg_script: ${{ matrix.leg.script }}
       budget_minutes: ${{ matrix.leg.budget }}
 
+  # Chained pair: the backfill box keeps its DB + RPC serving on success
+  # (keep_instance + SERVE_AFTER_BACKFILL), advertises itself at the serve-ready
+  # key once captive-core catchup finishes, and holds until the blaster leg's
+  # result lands at BLASTER_RESULT_KEY (its stop signal).
+  backfill:
+    name: Backfill ingestion
+    needs: plan
+    uses: ./.github/workflows/ec2-leg.yml
+    secrets: inherit
+    with:
+      target_ref: ${{ needs.plan.outputs.target_sha }}
+      run_label: backfill
+      leg_script: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/run-backfill.sh
+      budget_minutes: 345
+      keep_instance: true
+      extra_env: |
+        export SERVE_AFTER_BACKFILL=true
+        export BLASTER_RESULT_KEY=runs/${{ github.run_id }}/blaster/result.json
+
+  # Runs only once backfill passed (its box is then serving); bootstraps its own
+  # box, which overlaps the backfill box's captive-core catchup, then blasts it.
+  blaster:
+    name: Endpoint load test
+    needs: [plan, backfill]
+    uses: ./.github/workflows/ec2-leg.yml
+    secrets: inherit
+    with:
+      target_ref: ${{ needs.plan.outputs.target_sha }}
+      run_label: blaster
+      leg_script: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/endpoint-load-test/run-blaster.sh
+      budget_minutes: 190
+      adopt_run_label: backfill
+      extra_env: |
+        export READY_KEY=runs/${{ github.run_id }}/backfill/serve-ready.json
+
   report:
     name: Aggregate + report
-    needs: [plan, load-test]
+    needs: [plan, load-test, backfill, blaster]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -151,13 +195,14 @@ jobs:
             fi
           fi
 
-      # Authoritative gate: reflects the load-test legs, independent of whether
+      # Authoritative gate: reflects every leg job, independent of whether
       # the comment posted.
       - name: Set overall status
         if: always()
         run: |
-          if [ "${{ needs.load-test.result }}" != "success" ]; then
-            echo "::error::one or more legs did not pass (aggregate result: ${{ needs.load-test.result }})"
-            exit 1
-          fi
-          echo "all load-test legs passed"
+          FAIL=0
+          [ "${{ needs.load-test.result }}" = "success" ] || { echo "::error::independent legs did not pass (${{ needs.load-test.result }})"; FAIL=1; }
+          [ "${{ needs.backfill.result }}" = "success" ] || { echo "::error::backfill leg did not pass (${{ needs.backfill.result }})"; FAIL=1; }
+          [ "${{ needs.blaster.result }}" = "success" ] || { echo "::error::endpoint load-test leg did not pass (${{ needs.blaster.result }})"; FAIL=1; }
+          [ "$FAIL" = 0 ] && echo "all load-test legs passed"
+          exit "$FAIL"
