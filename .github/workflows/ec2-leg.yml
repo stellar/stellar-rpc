@@ -1,10 +1,10 @@
 name: Perf-eval EC2 leg (ephemeral)
 # Generic callable leg: launches an ephemeral EC2 box, renders its user-data from
 # bootstrap-common.sh + the leg's own run script, polls S3 for the result object
-# the box publishes, and reports back to its caller via job outputs + that S3
-# object. It does not post to the PR -- the coordinator owns human-facing output.
+# the box publishes, and reports through that object (job result = leg verdict).
+# Does not post to the PR -- the coordinator owns human-facing output.
 # Box bootstrap: perf-eval/bootstrap-common.sh + the leg script (inputs.leg_script);
-# runner-side polling: perf-eval/harness.Gather (via inputs.runner_dir).
+# runner-side polling: perf-eval/gather.
 
 on:
   # workflow_call is the only trigger: a leg runs through the coordinator.
@@ -20,10 +20,6 @@ on:
         type: string
       leg_script:
         description: 'Path to the leg run script, concatenated after bootstrap-common.sh into the box user-data'
-        required: true
-        type: string
-      runner_dir:
-        description: 'Go package path for `go run <dir> gather` (with leading ./)'
         required: true
         type: string
       instance_type:
@@ -51,26 +47,11 @@ on:
         required: false
         type: number
         default: 240
-      results_timeout:
-        description: 'Seconds to poll S3 for the result object before timing out'
-        required: false
-        type: number
-        default: 12600
-      self_terminate_minutes:
-        description: 'Box self-terminate ceiling; sits above the job timeout'
-        required: false
-        type: number
-        default: 240
-      job_timeout_minutes:
-        description: 'GHA job timeout; above results_timeout with boot/SSM/cleanup buffer'
+      budget_minutes:
+        description: 'End-to-end leg ceiling (= job timeout); S3 poll deadline, box self-terminate, and OIDC session derive from it (-15m/+15m/+15m). Derived session must fit the IAM role max.'
         required: false
         type: number
         default: 225
-      role_duration_seconds:
-        description: 'OIDC role session length; backstops the job timeout'
-        required: false
-        type: number
-        default: 14400
       poll_interval:
         description: 'Seconds between S3 result polls'
         required: false
@@ -85,45 +66,22 @@ on:
       AWS_GHA_ROLE_ARN:
         description: 'OIDC role ARN to assume for EC2 + S3 access'
         required: true
-    outputs:
-      passed:
-        description: 'true when the instance reported an ok verdict'
-        value: ${{ jobs.ec2-leg.outputs.passed }}
-      verdict:
-        description: 'instance verdict ("ok"/"fail"), empty on timeout'
-        value: ${{ jobs.ec2-leg.outputs.verdict }}
-      result_key:
-        description: 'S3 key of this leg result.json (under the results bucket)'
-        value: ${{ jobs.ec2-leg.outputs.result_key }}
-      bucket:
-        description: 'S3 bucket holding the result object'
-        value: ${{ jobs.ec2-leg.outputs.bucket }}
-      instance_id:
-        description: 'EC2 instance id that was launched (for leak diagnostics)'
-        value: ${{ jobs.ec2-leg.outputs.instance_id }}
 
 # Only the intrinsic infra permissions necessary
 permissions:
   id-token: write   # OIDC AssumeRole into the GHA role
   contents: read    # checkout
 
-# Non-cancelling group keyed on the tested commit + leg. An instance can run until
-# the box’s self-terminate ceiling (bootstrap-common.sh), so new runs queue.
-concurrency:
-  group: ec2-leg-${{ inputs.target_ref }}-${{ inputs.run_label }}
-  cancel-in-progress: false
-
 jobs:
   ec2-leg:
     name: Launch + await ephemeral perf-eval box
-    outputs:
-      passed: ${{ steps.results.outputs.passed }}
-      verdict: ${{ steps.results.outputs.verdict }}
-      result_key: ${{ steps.results.outputs.result_key }}
-      bucket: ${{ steps.results.outputs.bucket }}
-      instance_id: ${{ steps.launch.outputs.instance_id }}
+    # Non-cancelling group keyed on the test commit SHA + leg. An instance can run
+    # until the box’s self-terminate ceiling, so new runs queue.
+    concurrency:
+      group: ec2-leg-${{ inputs.target_ref }}-${{ inputs.run_label }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.job_timeout_minutes }}
+    timeout-minutes: ${{ inputs.budget_minutes }}
     env:
       AWS_REGION: us-east-1
       INSTANCE_TYPE: ${{ inputs.instance_type }}
@@ -134,18 +92,29 @@ jobs:
       TEST_TAG_KEY: test
       TEST_TAG_VAL: stellar-rpc-ci-load-test
       SSM_REGISTRATION_TIMEOUT: ${{ inputs.ssm_registration_timeout }}
-      RESULTS_TIMEOUT: ${{ inputs.results_timeout }}
       POLL_INTERVAL: ${{ inputs.poll_interval }}
       DEBUG_LOG_LINES: 40
       DEBUG_LOG_EVERY_POLLS: 5
       PERF_EVAL_DIR: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval
       LEG_SCRIPT: ${{ inputs.leg_script }}
-      RUNNER_DIR: ${{ inputs.runner_dir }}
       BUCKET: stellar-rpc-ci-load-test
-      # run_label disambiguates legs that share this run's id/attempt.
-      RESULT_KEY: runs/${{ github.run_id }}-${{ github.run_attempt }}/${{ inputs.run_label }}/result.json
+      RESULT_KEY: runs/${{ github.run_id }}/${{ inputs.run_label }}/result.json # deterministic per run + leg
 
     steps:
+      # budget_minutes is the job timeout and the other deadlines derive from it so
+      # the ordering (poll < job < self-terminate <= role session) holds by
+      # construction.
+      - name: Derive deadlines
+        id: deadlines
+        run: |
+          B=${{ inputs.budget_minutes }}
+          [ "$B" -gt 30 ] || { echo "::error::budget_minutes must exceed the 15m infra buffers"; exit 1; }
+          {
+            echo "RESULTS_TIMEOUT=$(( (B - 15) * 60 ))"
+            echo "SELF_TERMINATE_MINUTES=$(( B + 15 ))"
+          } >> "$GITHUB_ENV"
+          echo "role_seconds=$(( (B + 15) * 60 ))" >> "$GITHUB_OUTPUT"
+
       # Harness (gather, bootstrap-common.sh, leg script) and the benchmarked
       # code come from one SHA: target_ref is checked out here and the box rebuilds
       # it. Tradeoff: an ad-hoc dispatch against an old ref also runs that ref's
@@ -159,7 +128,7 @@ jobs:
         id: resolve
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      # The runner-side half is `go run <runner_dir> gather`.
+      # The runner-side half is `go run <perf-eval>/gather`.
       - uses: ./.github/actions/setup-go
 
       - name: Configure AWS via OIDC
@@ -167,20 +136,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          role-duration-seconds: ${{ inputs.role_duration_seconds }}
-
-      - name: Resolve latest Ubuntu 22.04 AMI
-        id: ami
-        run: |
-          AMI=$(aws ec2 describe-images \
-            --owners 099720109477 \
-            --filters \
-              "Name=name,Values=ubuntu/images/hvm-ssd*/ubuntu-jammy-22.04-amd64-server-*" \
-              "Name=architecture,Values=x86_64" \
-              "Name=state,Values=available" \
-            --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
-            --output text)
-          echo "ami=$AMI" >> "$GITHUB_OUTPUT"
+          role-duration-seconds: ${{ steps.deadlines.outputs.role_seconds }}
 
       - name: Render user-data
         # The scripts ship verbatim; parameters travel in a preamble so the bytes
@@ -193,7 +149,7 @@ jobs:
             echo '#!/usr/bin/env bash'
             echo "export TARGET_SHA=${{ steps.resolve.outputs.sha }} RUN_ID=${{ github.run_id }}-${{ github.run_attempt }}"
             echo "export BUCKET=$BUCKET RESULT_KEY=$RESULT_KEY"
-            echo "export SELF_TERMINATE_MINUTES=${{ inputs.self_terminate_minutes }}"
+            echo "export SELF_TERMINATE_MINUTES=$SELF_TERMINATE_MINUTES"
             if [ -n "$EXTRA_ENV" ]; then printf '%s\n' "$EXTRA_ENV"; fi
             cat "$PERF_EVAL_DIR/bootstrap-common.sh"
             cat "$LEG_SCRIPT"
@@ -201,13 +157,17 @@ jobs:
 
       - name: Launch EC2 instance
         id: launch
+        env:
+          TARGET_REF: ${{ inputs.target_ref }}
+          RUN_LABEL: ${{ inputs.run_label }}
         run: |
           COMMON_TAGS="{Key=$TEST_TAG_KEY,Value=$TEST_TAG_VAL},
-            {Key=ref,Value=${{ inputs.target_ref }}},
+            {Key=ref,Value=$TARGET_REF},
             {Key=sha,Value=${{ steps.resolve.outputs.sha }}},
             {Key=run-id,Value=${{ github.run_id }}}"
+          # AMI: Ubuntu 22.04 amd64 in us-east-1 as of 2026-07-08
           RUN_INSTANCES_JSON=$(aws ec2 run-instances \
-            --image-id "${{ steps.ami.outputs.ami }}" \
+            --image-id ami-0d28727121d5d4a3c \
             --instance-type "$INSTANCE_TYPE" \
             --iam-instance-profile "Name=$INSTANCE_PROFILE" \
             --user-data file:///tmp/user-data.sh \
@@ -218,11 +178,11 @@ jobs:
             }]" \
             --tag-specifications \
               "ResourceType=instance,Tags=[
-                {Key=Name,Value=perf-eval-${{ inputs.run_label }}},
+                {Key=Name,Value=perf-eval-$RUN_LABEL},
                 $COMMON_TAGS
               ]" \
               "ResourceType=volume,Tags=[
-                {Key=Name,Value=perf-eval-${{ inputs.run_label }}-root},
+                {Key=Name,Value=perf-eval-${RUN_LABEL}-root},
                 $COMMON_TAGS
               ]" \
             --count 1 \
@@ -252,11 +212,14 @@ jobs:
 
       # Polls S3 for the result object and relays verdict/passed + the result
       # location (bucket/key) as step outputs the coordinator reads.
+      # RUN_ID must match the box preamble's: gather skips result objects from
+      # other attempts (a re-run shares RESULT_KEY with its predecessors).
       - name: Poll for results
         id: results
         env:
           INSTANCE_ID: ${{ steps.launch.outputs.instance_id }}
-        run: go run "$RUNNER_DIR" gather
+          RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: go run "./$PERF_EVAL_DIR/gather"
 
       - name: Write results summary
         if: always()

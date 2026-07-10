@@ -11,8 +11,8 @@
 //	RunStreaming   on-box: runs a child, streaming output with a bounded tail.
 //
 // Leg-specific work (which corpus to fetch, which task to run) lives in each
-// leg's own runner command, which dispatches to Gather or its own
-// instantiate via a thin main.
+// leg's own on-box runner command; Gather is its own command (perf-eval/gather)
+// shared by all legs.
 package harness
 
 import (
@@ -34,23 +34,9 @@ func NewLogger() *supportlog.Entry {
 
 var logger = NewLogger()
 
-func Run(instantiate func(context.Context) error) {
-	cmd := "instantiate"
-	if len(os.Args) > 1 {
-		cmd = os.Args[1]
-	}
-	ctx := context.Background()
-	var err error
-	switch cmd {
-	case "instantiate":
-		err = instantiate(ctx)
-	case "gather":
-		err = Gather(ctx)
-	default:
-		fmt.Fprintf(os.Stderr, "usage: %s [instantiate|gather]\n", os.Args[0])
-		os.Exit(64)
-	}
-	if err != nil {
+// Run executes a command's task, logging and exiting non-zero on error.
+func Run(task func(context.Context) error) {
+	if err := task(context.Background()); err != nil {
 		logger.Errorf("fatal: %v", err)
 		os.Exit(1)
 	}

@@ -38,6 +38,11 @@ func combineContractIDs(filters []protocol.EventFilter) ([][]byte, error) {
 	contractIDs := make([][]byte, 0, len(contractIDSet))
 
 	for _, filter := range filters {
+		// A filter with no contract IDs matches events from any contract, so
+		// the combined DB-level restriction must be dropped entirely.
+		if len(filter.ContractIDs) == 0 {
+			return nil, nil
+		}
 		for _, contractID := range filter.ContractIDs {
 			if !contractIDSet.Contains(contractID) {
 				contractIDSet.Add(contractID)
@@ -57,6 +62,11 @@ func combineEventTypes(filters []protocol.EventFilter) []int {
 	eventTypes := set.NewSet[int](maxEventTypes)
 
 	for _, filter := range filters {
+		// A filter with no event types matches events of any type, so the
+		// combined DB-level restriction must be dropped entirely.
+		if len(filter.EventType) == 0 {
+			return nil
+		}
 		for _, eventType := range filter.EventType.Keys() {
 			eventTypeXDR := protocol.GetEventTypeXDRFromEventType()[eventType]
 			eventTypes.Add(int(eventTypeXDR))

@@ -3,11 +3,3 @@ captive-core/
 .soroban/
 !test.toml
 *.sqlite*
-
-# Generated load-test ledger corpora (hundreds of MB; canonical copies live in
-# s3://stellar-rpc-ci-load-test/ledgers/).
-cmd/stellar-rpc/internal/integrationtest/infrastructure/testdata/*.xdr.zstd
-cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/testdata/*.xdr.zstd
-
-# Compiled refresh tool (build artifact; rebuild with `go build` in refresh/).
-cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/refresh/refresh-tool
