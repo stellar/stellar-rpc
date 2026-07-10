@@ -175,7 +175,7 @@ func buildTxEnvelopeAndHash(t testing.TB) (xdr.TransactionEnvelope, xdr.Hash) {
 
 // buildLCMVersion builds either an LCM V1 (LedgerCloseMetaV1 with
 // TransactionResultMeta — the *non*-V1 result-meta type — exercising
-// LCMViewToPayloads case 1) or an LCM V2 (LedgerCloseMetaV2 with
+// lcmViewToPayloads case 1) or an LCM V2 (LedgerCloseMetaV2 with
 // TransactionResultMetaV1, case 2). Both use a GeneralizedTransactionSet
 // (V1) which is already in apply order, so the SQLite oracle's
 // LedgerTransactionReader and the view path agree on ordering.
@@ -248,7 +248,7 @@ func buildLCMVersion(
 }
 
 // TestExtractEvents_MatchesSQLite is the cross-backend differential: the
-// view-based LCMViewToPayloads must emit, for the same xdr.LedgerCloseMeta, the
+// view-based lcmViewToPayloads must emit, for the same xdr.LedgerCloseMeta, the
 // SAME event sequence the legacy SQLite backend serves — insert via
 // db's InsertEvents, read back through the GetEvents cursor-ordered query
 // (ORDER BY id ASC), and assert the view path's emission order and per-event
@@ -391,7 +391,7 @@ func TestExtractEvents_V0NoPayloads(t *testing.T) {
 }
 
 // TestExtractEvents_V1DifferentialArm exercises the LCM V1 dispatch arm
-// (case 1, TransactionResultMetaView) of LCMViewToPayloads, which the V2-only
+// (case 1, TransactionResultMetaView) of lcmViewToPayloads, which the V2-only
 // differential tests never run. V1 uses LedgerCloseMetaV1 + the non-V1
 // TransactionResultMeta result-meta type — the whole point of this case.
 func TestExtractEvents_V1DifferentialArm(t *testing.T) {
@@ -421,7 +421,7 @@ func TestExtractEvents_V1DifferentialArm(t *testing.T) {
 }
 
 // TestExtractEvents_EmissionOrderCursorAscending pins the emission-order
-// invariant directly on the payload slice: LCMViewToPayloads emits a ledger's
+// invariant directly on the payload slice: lcmViewToPayloads emits a ledger's
 // payloads non-decreasing in (TxIdx, OpIdx) — ascending getEvents cursor
 // order. The fixture MUST carry V4 stage events across multiple txs (each tx
 // here emits BeforeAllTxs + AfterTx + AfterAllTxs events AND two op events):
@@ -615,7 +615,7 @@ func sqliteEventRows(t *testing.T, lcm xdr.LedgerCloseMeta) []sqliteEventRow {
 }
 
 // assertViewMatchesSQLite is the differential oracle: it marshals lcm, runs
-// the view path (LCMViewToPayloads) on the bytes and the legacy SQLite
+// the view path (lcmViewToPayloads) on the bytes and the legacy SQLite
 // path (db InsertEvents → GetEvents) on the struct, and asserts the view's
 // emission sequence equals the SQLite cursor-ascending read sequence
 // position-for-position — tx hash, (TxIdx, OpIdx) cursor key, ledger
@@ -630,7 +630,7 @@ func assertViewMatchesSQLite(t *testing.T, lcm xdr.LedgerCloseMeta) {
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 	viewPayloads, err := lcmViewToPayloads(xdr.LedgerCloseMetaView(raw))
-	require.NoError(t, err, "view path LCMViewToPayloads")
+	require.NoError(t, err, "view path lcmViewToPayloads")
 
 	rows := sqliteEventRows(t, lcm)
 	require.Len(t, viewPayloads, len(rows),
