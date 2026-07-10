@@ -2,12 +2,8 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,17 +23,10 @@ import (
 // checked in (the runner runs with cwd = repo root).
 const legDir = "cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test"
 
-const (
-	corePath = "/usr/local/bin/stellar-core" // fetched from S3
-
-	// The template's ENDPOINT; getHealth here reports healthy once the latest
-	// ledger is within max-healthy-ledger-latency (30s) of now, i.e. at tip.
-	healthURL          = "http://localhost:8000"
-	healthPollInterval = 10 * time.Second
-)
+const corePath = "/usr/local/bin/stellar-core" // fetched from S3
 
 // backfillDoneRe matches the line emitted when the ledger fill completes;
-// finalizeDoneRe the one emitted after the bulk-load schema restore.
+// finalizeDoneRe the terminal one emitted after the deferred index rebuild.
 var (
 	backfillDoneRe = regexp.MustCompile(`Backfill process complete, ledgers \[(\d+) -> (\d+)\]`)
 	finalizeDoneRe = regexp.MustCompile(`Bulk-load finalize complete`)
@@ -55,9 +44,8 @@ func instantiate(ctx context.Context) error {
 		targetSHA   = os.Getenv("TARGET_SHA")
 		runID       = harness.Env("RUN_ID", "manual")
 		// ~1 day by default for cheap test runs; the full week is 120960.
-		retention       = harness.Env("HISTORY_RETENTION_WINDOW", "17280")
-		deadline        = harness.Env("BACKFILL_DEADLINE", "4h")
-		catchupDeadline = harness.Env("CATCHUP_DEADLINE", "2h")
+		retention = harness.Env("HISTORY_RETENTION_WINDOW", "17280")
+		deadline  = harness.Env("BACKFILL_DEADLINE", "4h")
 
 		binaryPath = filepath.Join(workDir, "stellar-rpc-bin") // built here (the repo checkout is in WORK_DIR)
 	)
@@ -106,22 +94,15 @@ func instantiate(ctx context.Context) error {
 	if err != nil {
 		return bail("invalid BACKFILL_DEADLINE %q: %v", deadline, err)
 	}
-	cdl, err := time.ParseDuration(catchupDeadline)
-	if err != nil {
-		return bail("invalid CATCHUP_DEADLINE %q: %v", catchupDeadline, err)
-	}
-	logger.Infof("starting backfill (retention=%s, deadline=%s, catch-up deadline=%s)",
-		retention, deadline, catchupDeadline)
-	stats, err := runBackfill(ctx, dl, cdl, binaryPath, cfgPath)
+	logger.Infof("starting backfill (retention=%s, deadline=%s)", retention, deadline)
+	elapsed, lo, hi, err := runBackfill(ctx, dl, binaryPath, cfgPath)
 	if err != nil {
 		return bail("%v", err)
 	}
-	ingested := stats.hi - stats.lo + 1
-	logger.Infof("backfill complete: %d ledgers [%d -> %d] in %s (fill %s + finalize %s), catch-up %s",
-		ingested, stats.lo, stats.hi, stats.total.Round(time.Second), stats.fill.Round(time.Second),
-		(stats.total - stats.fill).Round(time.Second), stats.describeCatchup())
+	ingested := hi - lo + 1
+	logger.Infof("backfill complete: %d ledgers [%d -> %d] in %s", ingested, lo, hi, elapsed.Round(time.Second))
 
-	md := renderMarkdown(targetSHA, retention, ingested, stats)
+	md := renderMarkdown(targetSHA, retention, lo, hi, ingested, elapsed)
 	if err := os.WriteFile(resultsFile, []byte(md), 0o644); err != nil {
 		return bail("writing results: %v", err)
 	}
@@ -163,33 +144,10 @@ func renderConfig(repoRoot, workDir, coreCfg, retention string) (string, error) 
 	return cfgPath, nil
 }
 
-// runStats are the timed run's measurements. fill and total cover daemon start
-// to the fill and finalize sentinels; catchup covers finalize to getHealth
-// reporting healthy (captive core caught up to the live tip), with tip the
-// ledger it reported. A missed catch-up leaves catchup zero and note set.
-type runStats struct {
-	fill, total, catchup time.Duration
-	lo, hi, tip          int
-	catchupNote          string
-}
-
-// describeCatchup renders the catch-up outcome for the log and report table.
-func (s runStats) describeCatchup() string {
-	if s.catchupNote != "" {
-		return "❌ " + s.catchupNote
-	}
-	return fmt.Sprintf("%s (to ledger %d, %d past the backfill tip)",
-		s.catchup.Round(time.Second), s.tip, s.tip-s.hi)
-}
-
-// runBackfill launches the daemon and streams its output (teeing to the box
-// log) until the fill and finalize lines fire, then polls getHealth until
-// captive core catches up to the live tip, recording all three wall-clocks. A
-// missed catch-up is reported in the stats, not as an error.
-func runBackfill(ctx context.Context, deadline, catchupDeadline time.Duration, binary, cfgPath string,
-) (runStats, error) {
-	var stats runStats
-	runCtx, cancel := context.WithTimeout(ctx, deadline+catchupDeadline)
+// runBackfill launches the daemon and streams its output (teeing to the box log)
+// until the finalize-complete line fires, recording the wall-clock
+func runBackfill(ctx context.Context, deadline time.Duration, binary, cfgPath string) (time.Duration, int, int, error) {
+	runCtx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
 
 	cmd := exec.CommandContext(runCtx, binary, "--config-path", cfgPath)
@@ -197,7 +155,7 @@ func runBackfill(ctx context.Context, deadline, catchupDeadline time.Duration, b
 	cmd.Env = append(os.Environ(), "AWS_EC2_METADATA_DISABLED=true")
 	pr, pw, err := os.Pipe()
 	if err != nil {
-		return stats, err
+		return 0, 0, 0, err
 	}
 	cmd.Stdout, cmd.Stderr = pw, pw
 
@@ -205,132 +163,50 @@ func runBackfill(ctx context.Context, deadline, catchupDeadline time.Duration, b
 	if err := cmd.Start(); err != nil {
 		pw.Close()
 		pr.Close()
-		return stats, fmt.Errorf("starting daemon: %w", err)
+		return 0, 0, 0, fmt.Errorf("starting daemon: %w", err)
 	}
 	pw.Close() // the child holds the write end and we read until it dies
 	defer pr.Close()
 
-	// The scan keeps draining past finalize so the daemon never blocks on a
-	// full pipe; stats writes all happen before close(finalized).
-	finalized := make(chan struct{})
-	exited := make(chan struct{})
-	go func() {
-		defer close(exited)
-		scanner := bufio.NewScanner(pr)
-		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-		done := false
-		for scanner.Scan() {
-			line := scanner.Text()
-			fmt.Fprintln(os.Stderr, line) // tee to the box user-data log (SSM debug tail)
-			if done {
-				continue
-			}
-			if m := backfillDoneRe.FindStringSubmatch(line); m != nil {
-				stats.fill = time.Since(start)
-				stats.lo, _ = strconv.Atoi(m[1])
-				stats.hi, _ = strconv.Atoi(m[2])
-			}
-			if stats.fill != 0 && finalizeDoneRe.MatchString(line) {
-				stats.total = time.Since(start)
-				done = true
-				close(finalized)
-			}
+	var elapsed time.Duration
+	var lo, hi int
+	scanner := bufio.NewScanner(pr)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fmt.Fprintln(os.Stderr, line) // tee to the box user-data log (SSM debug tail)
+		if m := backfillDoneRe.FindStringSubmatch(line); m != nil {
+			lo, _ = strconv.Atoi(m[1])
+			hi, _ = strconv.Atoi(m[2])
 		}
-	}()
-
-	select {
-	case <-finalized:
-	case <-exited:
-		_ = cmd.Wait()
-		phase := "backfill"
-		if stats.fill != 0 {
-			phase = "finalize"
+		if hi != 0 && finalizeDoneRe.MatchString(line) {
+			elapsed = time.Since(start)
+			cancel() // stop the daemon before it starts live ingestion
+			break
 		}
-		return stats, fmt.Errorf("daemon exited or hit the %s+%s deadline before %s completed",
-			deadline, catchupDeadline, phase)
 	}
+	_ = cmd.Wait() // reap; a kill from cancel surfaces here and is expected
 
-	logger.Infof("fill+finalize complete; polling getHealth for captive-core catch-up (deadline %s)",
-		catchupDeadline)
-	catchupStart := time.Now()
-	tip, err := awaitHealthy(runCtx, catchupDeadline)
-	if err != nil {
-		stats.catchupNote = err.Error()
-		logger.Errorf("catch-up not observed: %v", err)
-	} else {
-		stats.catchup = time.Since(catchupStart)
-		stats.tip = tip
+	if elapsed == 0 {
+		return 0, 0, 0, fmt.Errorf("daemon exited or hit the %s deadline before backfill finalized", deadline)
 	}
-	cancel() // stop the daemon
-	<-exited // let the tee drain
-	_ = cmd.Wait()
-	return stats, nil
+	return elapsed, lo, hi, nil
 }
 
-// awaitHealthy polls getHealth until the daemon reports healthy (latest ledger
-// within max-healthy-ledger-latency of now), returning the ledger it reported.
-// Tolerates connection errors: the JSON-RPC server only comes up after finalize.
-func awaitHealthy(ctx context.Context, timeout time.Duration) (int, error) {
-	pollCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	ticker := time.NewTicker(healthPollInterval)
-	defer ticker.Stop()
-	reqBody := []byte(`{"jsonrpc":"2.0","id":1,"method":"getHealth"}`)
-	lastErr := errors.New("no getHealth response yet")
-	for {
-		select {
-		case <-pollCtx.Done():
-			return 0, fmt.Errorf("catch-up unfinished after %s (last: %w)", timeout, lastErr)
-		case <-ticker.C:
-		}
-		req, err := http.NewRequestWithContext(pollCtx, http.MethodPost, healthURL, bytes.NewReader(reqBody))
-		if err != nil {
-			return 0, err
-		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		var parsed struct {
-			Result *struct {
-				Status       string `json:"status"`
-				LatestLedger int    `json:"latestLedger"`
-			} `json:"result"`
-			Error *struct {
-				Message string `json:"message"`
-			} `json:"error"`
-		}
-		err = json.NewDecoder(resp.Body).Decode(&parsed)
-		resp.Body.Close()
-		switch {
-		case err != nil:
-			lastErr = err
-		case parsed.Result != nil && parsed.Result.Status == "healthy":
-			return parsed.Result.LatestLedger, nil
-		case parsed.Error != nil:
-			lastErr = errors.New(parsed.Error.Message) // e.g. "latency ... is too high"
-		}
+func renderMarkdown(sha, retention string, lo, hi, ingested int, elapsed time.Duration) string {
+	shortSHA := sha
+	if len(shortSHA) > 12 {
+		shortSHA = shortSHA[:12]
 	}
-}
-
-func renderMarkdown(sha, retention string, ingested int, stats runStats) string {
-	shortSHA := sha[:min(len(sha), 12)]
 	lps := 0.0
-	if s := stats.total.Seconds(); s > 0 {
+	if s := elapsed.Seconds(); s > 0 {
 		lps = float64(ingested) / s
 	}
 	return fmt.Sprintf("### ⏳ Backfill ingestion — `%s`\n\n"+
 		"| Metric | Value |\n|---|---|\n"+
 		"| Ledgers ingested | %d (`[%d -> %d]`) |\n"+
 		"| Retention window | %s |\n"+
-		"| Fill wall-clock | %s |\n"+
-		"| Finalize wall-clock | %s |\n"+
-		"| Total wall-clock | %s |\n"+
-		"| End-to-end ledgers/sec | %.1f |\n"+
-		"| Captive-core catch-up | %s |\n",
-		shortSHA, ingested, stats.lo, stats.hi, retention,
-		stats.fill.Round(time.Second), (stats.total - stats.fill).Round(time.Second),
-		stats.total.Round(time.Second), lps, stats.describeCatchup())
+		"| Wall-clock | %s |\n"+
+		"| Ledgers/sec | %.1f |\n",
+		shortSHA, ingested, lo, hi, retention, elapsed.Round(time.Second), lps)
 }
