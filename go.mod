@@ -148,3 +148,9 @@ require (
 	gopkg.in/tylerb/graceful.v1 v1.2.15 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+// SPIKE (CAP-0085): the go-stellar-sdk CAP-0085 regen is not yet released, so
+// pin to the fork branch sisuresh/go@p28-cap-0085 (go-stellar-sdk#5962). Remove
+// this replace (and the .golangci.yml gomoddirectives allow-list) once the
+// upstream SDK PR merges and the pseudo-version resolves via the module proxy.
+replace github.com/stellar/go-stellar-sdk => github.com/sisuresh/go v0.0.0-20260710190330-0ea2619a0d34

@@ -39,6 +39,11 @@ linters:
     funlen:
       lines: 100
       statements: 50
+    gomoddirectives:
+      # SPIKE: CAP-0085 Go XDR pin (go-stellar-sdk#5962 unmerged). Remove this and
+      # the replace directive together once the upstream SDK PR is released.
+      replace-allow-list:
+        - github.com/stellar/go-stellar-sdk
     misspell:
       locale: US
     testifylint:

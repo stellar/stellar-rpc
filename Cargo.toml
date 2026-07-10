@@ -22,10 +22,16 @@ version = "=27.0.0"
 # 27.0.0 + `next`) lets cargo treat -prev and -curr as separate compilation
 # units — otherwise it refuses two aliases to the same crate+version.
 # Bump the rev as rs-soroban-env evolves on its protocol-next track.
+#
+# SPIKE: CAP-0085 (externally managed contract executables) — rs-soroban-env#1704
+# (canonical: stellar/rs-soroban-env#1703). Pinned to the fork branch
+# sisuresh/rs-soroban-env@p28-cap-0085. `next` enables CAP-0085's new
+# ContractExecutable variant handling. Productionize -> stellar/rs-soroban-env
+# merged SHA once #1704/#1703 land.
 [workspace.dependencies.soroban-env-host-curr]
 package = "soroban-env-host"
-git = "https://github.com/stellar/rs-soroban-env"
-rev = "883fd56374fc619afaa4c4c7489563555b7173f2"
+git = "https://github.com/sisuresh/rs-soroban-env"
+rev = "b505cd7884a63b7eab72433d41fe02b6623aa8ea"
 features = ["next"]
 
 [workspace.dependencies.soroban-simulation-prev]
@@ -34,16 +40,23 @@ version = "=27.0.0"
 
 [workspace.dependencies.soroban-simulation-curr]
 package = "soroban-simulation"
-git = "https://github.com/stellar/rs-soroban-env"
-rev = "883fd56374fc619afaa4c4c7489563555b7173f2"
+git = "https://github.com/sisuresh/rs-soroban-env"
+rev = "b505cd7884a63b7eab72433d41fe02b6623aa8ea"
 features = ["unstable-next-api"]
 
 [workspace.dependencies.stellar-xdr]
-version = "=27.0.0"
+# SPIKE: rs-stellar-xdr#553 (CAP-0085) — fork branch sisuresh/rs-stellar-xdr@p28-cap-0085.
+# MUST match the git source+rev that rs-soroban-env#1704 uses, so cargo unifies
+# the preflight's stellar-xdr with the host's into one package.
+# Productionize -> stellar/rs-stellar-xdr merged SHA (or crates.io =28.x) once #553 lands.
+git = "https://github.com/sisuresh/rs-stellar-xdr"
+rev = "e1170cd9abb9d1d10cf4a3b7ed4091a109f56b71"
 # `type_enum` provides the `Type`/`TypeVariant` reflection enums used by
 # xdr2json. It was enabled by default in stellar-xdr v26 but is opt-in in v27.
 # `cap_0083` gates the Protocol 28 EmptyTxSet StellarValueType variant.
-features = ["serde", "type_enum", "cap_0083"]
+# `cap_0085_executable_ref` gates the Protocol 28 externally managed contract
+# executable XDR (new ContractExecutable / SCVal variant).
+features = ["serde", "type_enum", "cap_0083", "cap_0085_executable_ref"]
 
 [workspace.dependencies.rand]
 version = "0.8.5"
