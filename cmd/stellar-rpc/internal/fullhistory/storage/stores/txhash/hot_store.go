@@ -44,42 +44,14 @@ func NewWithStore(store *rocksdb.Store) *HotStore {
 // the hotchunk shared-DB opener can register it alongside the other CFs.
 func CFNames() []string { return []string{txhashCF} }
 
-// Tuning returns this facade's RocksDB tuning, applied to the shared per-chunk
-// DB by the hotchunk opener. The hot txhash workload is write-once /
-// point-lookup; the cross-knob interactions below are non-obvious enough that
-// they get an explicit per-stanza rationale. The other facades ride on RocksDB
-// defaults by contrast — only this workload earned the calibration.
+// Tuning returns the DB-wide RocksDB knobs the shared per-chunk DB adopts —
+// resources that were per-instance before the hot stores collapsed into one
+// multi-CF DB and are now shared across every CF. The txhash instance was the
+// only one that set them; the ledger and events instances rode on RocksDB
+// defaults, so keeping txhash's values is the faithful consolidation of the
+// three instances' combined footprint.
 func Tuning() rocksdb.Tuning {
 	return rocksdb.Tuning{
-		// 64 MB memtable so one flush produces one ~64 MB SST under
-		// uniform writes.
-		WriteBufferMB:        64,
-		MaxWriteBufferNumber: 2,
-
-		// L0 triggers pinned high + DisableAutoCompactions=true:
-		// compaction would re-write the same data with no reordering
-		// benefit (txhash is write-once, random-key, point-lookup).
-		// The L0 999s match DisableAutoCompactions so even if a future
-		// flush somehow exceeded the trigger, the engine still
-		// wouldn't try to compact. NOTE: DisableAutoCompactions and
-		// MaxBackgroundJobs are orthogonal — the former turns
-		// compaction off entirely, the latter only caps the thread
-		// budget for background work.
-		Level0FileNumCompactionTrigger: 999,
-		Level0SlowdownWritesTrigger:    999,
-		Level0StopWritesTrigger:        999,
-		DisableAutoCompactions:         true,
-
-		// 64 MB target file matches WriteBufferMB so one memtable
-		// flush produces one ~64 MB SST — fewer bloom checks per
-		// query at no-compaction scale.
-		// MaxBytesForLevelBaseMB is set explicitly even though it's
-		// irrelevant under DisableAutoCompactions (compaction never
-		// promotes past L0); explicit > implicit so a future reader
-		// doesn't have to derive that it's a no-op.
-		TargetFileSizeMB:       64,
-		MaxBytesForLevelBaseMB: 256,
-
 		// Background-job budget for the periodic memtable flushes.
 		MaxBackgroundJobs: 8,
 		MaxOpenFiles:      10_000,
@@ -87,16 +59,60 @@ func Tuning() rocksdb.Tuning {
 		// 512 MB block cache — bloom-filter blocks are the hot
 		// working set; the cache needs to hold recently-touched
 		// bloom blocks at scale.
-		// 12 bits/key bloom (~0.4% false-positive) is tighter than
-		// the standard 10 bits/key because every false positive at
-		// no-compaction SST count costs a disk seek across many SSTs.
-		BlockCacheMB:          512,
-		BloomFilterBitsPerKey: 12,
+		BlockCacheMB: 512,
 
 		// 1 GB WAL cap. Graceful Close auto-Flushes (see
 		// rocksdb.Store.Close), so this cap only bounds ungraceful-shutdown
 		// recovery (kernel panic, power loss, OOM kill).
 		MaxTotalWalSizeMB: 1024,
+	}
+}
+
+// CFOptions returns the per-CF knobs the hotchunk opener installs on the
+// txhash CF alone (merged into the shared DB's PerCFOptions). The hot txhash
+// workload is write-once / point-lookup; the cross-knob interactions below are
+// non-obvious enough that they get an explicit per-stanza rationale. The other
+// CFs ride on RocksDB defaults by contrast — only this workload earned the
+// calibration, and scoping it here keeps it off the ledger and events CFs.
+func CFOptions() map[string]rocksdb.CFOptions {
+	return map[string]rocksdb.CFOptions{
+		txhashCF: {
+			// 64 MB memtable so one flush produces one ~64 MB SST under
+			// uniform writes.
+			WriteBufferMB:        64,
+			MaxWriteBufferNumber: 2,
+
+			// L0 triggers pinned high + DisableAutoCompactions=true:
+			// compaction would re-write the same data with no reordering
+			// benefit (txhash is write-once, random-key, point-lookup).
+			// The L0 999s match DisableAutoCompactions so even if a future
+			// flush somehow exceeded the trigger, the engine still
+			// wouldn't try to compact. NOTE: DisableAutoCompactions and
+			// Tuning.MaxBackgroundJobs are orthogonal — the former turns
+			// compaction off entirely, the latter only caps the thread
+			// budget for background work.
+			Level0FileNumCompactionTrigger: 999,
+			Level0SlowdownWritesTrigger:    999,
+			Level0StopWritesTrigger:        999,
+			DisableAutoCompactions:         true,
+
+			// 64 MB target file matches WriteBufferMB so one memtable
+			// flush produces one ~64 MB SST — fewer bloom checks per
+			// query at no-compaction scale.
+			// MaxBytesForLevelBaseMB is set explicitly even though it's
+			// irrelevant under DisableAutoCompactions (compaction never
+			// promotes past L0); explicit > implicit so a future reader
+			// doesn't have to derive that it's a no-op.
+			TargetFileSizeMB:       64,
+			MaxBytesForLevelBaseMB: 256,
+
+			// 12 bits/key bloom (~0.4% false-positive) is tighter than
+			// the standard 10 bits/key because every false positive at
+			// no-compaction SST count costs a disk seek across many SSTs.
+			// Scoped to this CF: it is the only one probed for keys it may
+			// not hold, so the ledger and events CFs install no bloom.
+			BloomFilterBitsPerKey: 12,
+		},
 	}
 }
 

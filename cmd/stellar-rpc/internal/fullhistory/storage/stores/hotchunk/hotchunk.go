@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"maps"
 	"slices"
 	"time"
 
@@ -54,18 +55,22 @@ func ColumnFamilies() []string {
 	return slices.Concat(ledger.CFNames(), eventstore.CFNames(), txhash.CFNames())
 }
 
-// config builds the shared store's rocksdb.Config: events' per-CF options (ZSTD
-// on DataCF, tuned block sizes) plus the txhash workload's Tuning. Tuning's
-// per-CF fields apply to every CF — a benign over-application (ledger/events CFs
-// just gain a bloom + larger write buffer); the per-CF overrides keep events
-// distinct.
+// config builds the shared store's rocksdb.Config: the DB-wide Tuning
+// (block cache, WAL cap, background jobs) from txhash — the only facade
+// that historically set them — plus the per-CF options merged from every
+// facade. txhash's per-CF knobs (bloom, write buffers, compaction) land on
+// the txhash CF alone; events' overrides (ZSTD, block sizes) on its three
+// CFs; the ledgers CF rides on RocksDB defaults with no bloom, matching each
+// store's pre-unification standalone tuning.
 func config(path string, logger *supportlog.Entry, readOnly, mustExist bool) rocksdb.Config {
+	perCF := eventstore.CFOptions()
+	maps.Copy(perCF, txhash.CFOptions())
 	return rocksdb.Config{
 		Path:           path,
 		ColumnFamilies: ColumnFamilies(),
 		Logger:         logger,
 		Tuning:         txhash.Tuning(),
-		PerCFOptions:   eventstore.CFOptions(),
+		PerCFOptions:   perCF,
 		ReadOnly:       readOnly,
 		MustExist:      mustExist,
 	}
