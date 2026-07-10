@@ -71,15 +71,6 @@ upload_box_log() {
 }
 trap upload_box_log EXIT
 
-# Publish the in-progress box log every 5 minutes so a hard-killed or
-# still-running box is observable from S3; dies with the instance.
-if [ -n "$BUCKET" ] && [ -n "$RESULT_KEY" ]; then
-  ( while sleep 300; do
-      aws s3 cp /var/log/user-data.log \
-        "s3://$BUCKET/${RESULT_KEY%/*}/user-data.progress.log" >/dev/null 2>&1 || true
-    done ) &
-fi
-
 # bootstrap_box installs the build toolchain and checks out TARGET_SHA into
 # $WORK_DIR/stellar-rpc, leaving the shell cd'd at the repo root. Generic across
 # legs; the leg clears any of its own stale artifacts before calling this.

@@ -59,8 +59,7 @@ jobs:
           {
             echo "target_sha=$SHA"
             echo "pr_number=$PR"
-            echo 'legs=[{"label":"Apply-load ingestion","run_label":"apply-load","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh"}, \
-                        {"label":"Backfill ingestion", "run_label":"backfill","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-load-test/run-load-test.sh"}]'
+            echo 'legs=[{"label":"Apply-load ingestion","run_label":"apply-load","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh","budget":225},{"label":"Backfill ingestion","run_label":"backfill","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/run-backfill.sh","budget":345}]'
           } >> "$GITHUB_OUTPUT"
 
   # The fan-out: one matrix entry per leg.
@@ -77,6 +76,7 @@ jobs:
       target_ref: ${{ needs.plan.outputs.target_sha }}
       run_label: ${{ matrix.leg.run_label }}
       leg_script: ${{ matrix.leg.script }}
+      budget_minutes: ${{ matrix.leg.budget }}
 
   report:
     name: Aggregate + report
