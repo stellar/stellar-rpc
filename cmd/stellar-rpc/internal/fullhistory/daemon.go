@@ -266,8 +266,9 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // buildBackfillBackend opens the bulk ledger source from [backfill.datastore]: any
 // SDK datastore (GCS/S3/Filesystem/...) wrapped as a backfill.Backend, plus a cleanup
 // that releases the datastore handle at shutdown. With no datastore configured it
-// returns (nil, nil, nil) — a frontfill-only daemon (the network tip is then the
-// not-configured placeholder and backfillSource errors only on a backend-only chunk).
+// returns (nil, nil, nil) — a frontfill-only daemon (the network tip then comes from
+// the history-archive source wired in buildTipSampler, and backfillSource errors only
+// on a backend-only chunk).
 func buildBackfillBackend(
 	ctx context.Context, cfg config.Config, logger *supportlog.Entry,
 ) (backfill.Backend, func(), error) {

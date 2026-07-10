@@ -52,10 +52,8 @@ func (s *tipSampler) Sample(ctx context.Context) (uint32, error) {
 		return 0, errors.New("no network tip source configured: set [backfill.datastore] " +
 			"or [ingestion].history_archive_urls")
 	}
-	maxAttempts := s.maxAttempts
-	if maxAttempts < 1 {
-		maxAttempts = 1 // never underflow WithMaxRetries' uint64 into an unbounded loop
-	}
+	// Clamp so WithMaxRetries' uint64 never underflows into an unbounded loop.
+	maxAttempts := max(s.maxAttempts, 1)
 	var (
 		tip      uint32
 		notReady bool
@@ -75,7 +73,8 @@ func (s *tipSampler) Sample(ctx context.Context) (uint32, error) {
 		return nil
 	}
 	// Constant interval, count-bounded: maxAttempts tries == 1 initial + (maxAttempts-1) retries.
-	bo := backoff.WithMaxRetries(backoff.NewConstantBackOff(s.interval), uint64(maxAttempts-1))
+	retries := uint64(maxAttempts - 1) //nolint:gosec // clamped to >= 1 above
+	bo := backoff.WithMaxRetries(backoff.NewConstantBackOff(s.interval), retries)
 	switch err := backoff.Retry(poll, backoff.WithContext(bo, ctx)); {
 	case err == nil:
 		return tip, nil
