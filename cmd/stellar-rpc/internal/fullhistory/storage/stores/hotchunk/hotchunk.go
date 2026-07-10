@@ -5,7 +5,9 @@
 // SINGLE per-chunk last-committed ledger (max committed seq, from the ledgers CF's last key)
 // and no per-store frontiers / min-of-three. The three typed facades
 // (ledger/txhash/eventstore HotStore) are composed over the shared store via
-// NewWithStore; their write paths queue Puts into the one shared batch.
+// NewWithStore; their write paths queue Puts into the one shared batch. A
+// read-only open composes a ledgers-only view without the events facade (see
+// OpenReadOnly).
 package hotchunk
 
 import (
@@ -30,9 +32,10 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/txhash"
 )
 
-// DB is one chunk's hot tier: a single multi-CF rocksdb.Store plus the three
-// typed facades composed over it. It owns the store (Close closes it once); the
-// facades wrap it without owning it.
+// DB is one chunk's hot tier: a single multi-CF rocksdb.Store plus the typed
+// facades composed over it — all three on a read-write open; a read-only open
+// leaves events nil (see OpenReadOnly). It owns the store (Close closes it
+// once); the facades wrap it without owning it.
 //
 // Concurrency: ingestion is single-writer; IngestLedger is not safe to call
 // concurrently with itself. Reads via the facades follow each facade's own
