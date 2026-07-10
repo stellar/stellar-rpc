@@ -92,8 +92,16 @@ func OpenExisting(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB,
 // synced-but-unflushed WAL into in-memory memtables (persisting nothing), so a
 // reader sees every synced write even after an ungraceful crash — the last-committed
 // refinement DEPENDS on that replay to read a correct MaxCommittedSeq. (An
-// unsynced tail is exactly what a crash loses, and is not recovered.) Composing
-// the facades only reads.
+// unsynced tail is exactly what a crash loses, and is not recovered.)
+//
+// A read-only open is a LEDGERS-ONLY view: it composes the ledger + txhash facades
+// but SKIPS the events facade, because both read-only callers (freeze re-derives the
+// cold artifacts from raw LCMs via Source(); the startup refiner reads only
+// MaxCommittedSeq()) touch the ledgers CF alone and never the events mirror/offsets.
+// Composing the events facade would run eventstore's unconditional warmup — a full
+// index-CF scan plus bitmap/offsets rebuild — discarded unread at Close (#834). The
+// skip is enforced structurally: a read-only DB has no events facade, so Events()
+// panics and IngestLedger errors rather than serving a cold, unwarmed surface.
 func OpenReadOnly(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
 	return open(path, chunkID, logger, true, false)
 }
@@ -149,18 +157,26 @@ func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly, mus
 		return nil, fmt.Errorf("open chunk %s: %w", chunkID, err)
 	}
 
+	db := &DB{
+		store:   store,
+		chunkID: chunkID,
+		ledger:  ledger.NewWithStore(store),
+		txhash:  txhash.NewWithStore(store),
+	}
+	// A read-only open is a ledgers-only freeze/probe view (see OpenReadOnly): it
+	// never reads events, so skip composing the events facade and its unconditional
+	// warmup scan. Read-WRITE opens (ingestion) MUST warm — the write path assigns
+	// event IDs off the warmed offsets — so they always compose it.
+	if readOnly {
+		return db, nil
+	}
 	es, err := eventstore.NewWithStore(store, chunkID)
 	if err != nil {
 		_ = store.Close()
 		return nil, fmt.Errorf("compose events facade for chunk %s: %w", chunkID, err)
 	}
-	return &DB{
-		store:   store,
-		chunkID: chunkID,
-		ledger:  ledger.NewWithStore(store),
-		txhash:  txhash.NewWithStore(store),
-		events:  es,
-	}, nil
+	db.events = es
+	return db, nil
 }
 
 // ChunkID returns the chunk this DB is bound to. No production caller yet —
@@ -181,7 +197,17 @@ func (d *DB) Txhash() *txhash.HotStore { return d.txhash }
 
 // Events returns the events read/write facade over the shared store.
 // Same status as Txhash: writes feed ingestion, reads are the #772 seam.
-func (d *DB) Events() *eventstore.HotStore { return d.events }
+//
+// Panics on a read-only DB: OpenReadOnly composes a ledgers-only view with no
+// events facade (#834), so reaching for events there is a programming error — a
+// caller that needs a warmed events surface must open read-WRITE (or #772 must
+// add a warmed read-only variant), never silently read a cold, unwarmed store.
+func (d *DB) Events() *eventstore.HotStore {
+	if d.events == nil {
+		panic(fmt.Sprintf("hotchunk: Events() on read-only chunk %s: no events facade (ledgers-only view)", d.chunkID))
+	}
+	return d.events
+}
 
 // Source streams the chunk's LCMs from the ledgers CF as a ledgerbackend.LedgerStream
 // the cold writer (backfill's WriteColdChunk) drains, so a just-closed chunk freezes
@@ -273,6 +299,14 @@ type LedgerReport struct {
 // is the authoritative closed-store guard, so there is no separate pre-check here.
 func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport, error) {
 	var rep LedgerReport
+
+	// A read-only (ledgers-only) DB has no events facade to assign event IDs, and
+	// its store rejects writes anyway. Fail loudly up front rather than nil-deref
+	// the missing facade inside the batch callback (Store.Batch runs the callback
+	// before the write-side rejection fires).
+	if d.events == nil {
+		return rep, fmt.Errorf("chunk %s: IngestLedger on a read-only (ledgers-only) hot DB", d.chunkID)
+	}
 
 	// Pre-extract anything that can fail BEFORE opening the batch, so a decode
 	// error rejects the ledger without a half-built batch.
