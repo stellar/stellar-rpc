@@ -67,6 +67,12 @@ func instantiate(ctx context.Context) error {
 	}
 	s3Client := s3.NewFromConfig(awsCfg)
 
+	configPath := filepath.Join(repoRoot, legDir, "testdata", "endpoints.toml")
+	limits, err := readLimits(configPath)
+	if err != nil {
+		return bail("reading endpoint limits: %v", err)
+	}
+
 	ready, health, err := awaitServeReady(ctx, s3Client, bucket, readyKey, runID, readyDeadline)
 	if err != nil {
 		return bail("%v", err)
@@ -81,26 +87,17 @@ func instantiate(ctx context.Context) error {
 			health.OldestLedger, health.LatestLedger, bufLow, bufHigh)
 	}
 
-	seedPath := filepath.Join(workDir, "blaster-seed.json")
-	logger.Infof("generating seed data: %s ledgers sampled from [%d, %d]", seedCount, lo, hi)
-	sctx, scancel := context.WithTimeout(ctx, seedDeadline)
-	err = harness.RunStreaming(sctx, blasterDir, nil, 40, blasterBin, "generate",
-		"--rpc-url", ready.URL,
-		"--output", seedPath,
-		"--ledger-window", fmt.Sprintf("%d,%d", lo, hi),
-		"--count", seedCount)
-	scancel()
-	if err != nil {
-		return bail("blaster generate failed: %v", err)
-	}
-
-	resultsJSON, err := blast(ctx, blastCall{
+	call := blastCall{
 		bin: blasterBin, dir: blasterDir, url: ready.URL,
-		configPath: filepath.Join(repoRoot, legDir, "testdata", "endpoints.toml"),
-		seedPath:   seedPath,
+		configPath: configPath,
+		seedPath:   filepath.Join(workDir, "blaster-seed.json"),
 		outDir:     filepath.Join(workDir, "blaster-out"),
 		rampUp:     rampUp, duration: duration, deadline: blastDeadline,
-	})
+	}
+	if err := generateSeed(ctx, call, lo, hi, seedCount, seedDeadline); err != nil {
+		return bail("%v", err)
+	}
+	resultsJSON, err := blast(ctx, call)
 	if err != nil {
 		return bail("%v", err)
 	}
@@ -108,12 +105,14 @@ func instantiate(ctx context.Context) error {
 	if err != nil {
 		return bail("reading blaster results: %v", err)
 	}
-	rows, err := summarize(data)
+	rows, err := summarize(data, limits)
 	if err != nil {
 		return bail("summarizing blaster results: %v", err)
 	}
 
-	md := renderMarkdown(targetSHA, rampUp, duration, health.OldestLedger, health.LatestLedger, ready.CatchupSeconds, rows)
+	blasterSHA := harness.Env("BLASTER_SHA", "unknown")
+	md := renderMarkdown(targetSHA, blasterSHA, rampUp, duration,
+		health.OldestLedger, health.LatestLedger, ready.CatchupSeconds, rows)
 	if err := os.WriteFile(resultsFile, []byte(md), 0o644); err != nil {
 		return bail("writing results: %v", err)
 	}
@@ -131,6 +130,21 @@ type blastCall struct {
 	seedPath, outDir string
 	rampUp, duration string
 	deadline         time.Duration
+}
+
+// generateSeed samples the request corpus from the target RPC's ledger window.
+func generateSeed(ctx context.Context, c blastCall, lo, hi int64, count string, deadline time.Duration) error {
+	logger.Infof("generating seed data: %s ledgers sampled from [%d, %d]", count, lo, hi)
+	sctx, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
+	if err := harness.RunStreaming(sctx, c.dir, nil, 40, c.bin, "generate",
+		"--rpc-url", c.url,
+		"--output", c.seedPath,
+		"--ledger-window", fmt.Sprintf("%d,%d", lo, hi),
+		"--count", count); err != nil {
+		return fmt.Errorf("blaster generate failed: %w", err)
+	}
+	return nil
 }
 
 // blast runs the serial endpoint sweep and returns the results JSON path.

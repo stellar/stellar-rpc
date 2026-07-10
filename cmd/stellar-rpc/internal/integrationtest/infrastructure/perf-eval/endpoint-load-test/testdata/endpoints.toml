@@ -8,41 +8,45 @@
 # runner passes --input-data-path (setting both is a blaster error).
 
 [endpoints.getHealth]
-rps = 100
+rps = 15
 start_rps = 10
 
 [endpoints.getLatestLedger]
-rps = 100
+rps = 15
 start_rps = 10
 
 [endpoints.getNetwork]
-rps = 100
+rps = 15
 start_rps = 10
 
 [endpoints.getVersionInfo]
-rps = 100
+rps = 15
 start_rps = 10
 
 [endpoints.getFeeStats]
-rps = 50
+rps = 15
 start_rps = 5
 
 [endpoints.getLedgerEntries]
-rps = 50
+rps = 15
 start_rps = 5
 
 [endpoints.getTransaction]
-rps = 50
+rps = 15
 start_rps = 5
 
+# The paginated endpoints take a limit
 [endpoints.getTransactions]
-rps = 20
-start_rps = 2
+rps = 1
+start_rps = 1
+limit = 1
 
 [endpoints.getLedgers]
-rps = 20
-start_rps = 2
+rps = 1
+start_rps = 1
+limit = 1
 
 [endpoints.getEvents]
-rps = 10
+rps = 1
 start_rps = 1
+limit = 1

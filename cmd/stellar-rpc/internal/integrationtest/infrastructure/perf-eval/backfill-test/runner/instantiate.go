@@ -39,8 +39,8 @@ func instantiate(ctx context.Context) error {
 		resultKey   = os.Getenv("RESULT_KEY")
 		targetSHA   = os.Getenv("TARGET_SHA")
 		runID       = harness.Env("RUN_ID", "manual")
-		// ~1 day by default for cheap test runs; the full week is 120960.
-		retention = harness.Env("HISTORY_RETENTION_WINDOW", "17280")
+		// ~1/2 day for cheap test runs; the full week is 120960.
+		retention = harness.Env("HISTORY_RETENTION_WINDOW", "8640")
 		deadline  = harness.Env("BACKFILL_DEADLINE", "4h")
 
 		binaryPath = filepath.Join(workDir, "stellar-rpc-bin") // built here (the repo checkout is in WORK_DIR)

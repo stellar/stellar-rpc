@@ -7,14 +7,20 @@
 # read-path endpoint in serial and publishes the stats.
 LEG_TITLE="Endpoint load test"
 BLASTER_REPO="${BLASTER_REPO:-stellar/stellar-rpc-blaster}"
-BLASTER_REF="${BLASTER_REF:-dev}" # branch or tag (not a bare SHA)
+BLASTER_REF="${BLASTER_REF:-dev}" # branch, tag, or SHA
 export BLASTER_DIR="${BLASTER_DIR:-$WORK_DIR/stellar-rpc-blaster}"
 
 bootstrap_box
 
-log "cloning + building stellar-rpc-blaster ($BLASTER_REPO@$BLASTER_REF)"
+log "fetching stellar-rpc-blaster ($BLASTER_REPO@$BLASTER_REF)"
 rm -rf "$BLASTER_DIR"
-git clone --depth 1 --branch "$BLASTER_REF" "https://github.com/$BLASTER_REPO.git" "$BLASTER_DIR"
+git init -q "$BLASTER_DIR"
+git -C "$BLASTER_DIR" remote add origin "https://github.com/$BLASTER_REPO.git"
+git -C "$BLASTER_DIR" fetch --depth 1 origin "$BLASTER_REF"
+git -C "$BLASTER_DIR" checkout -q --detach FETCH_HEAD
+BLASTER_SHA=$(git -C "$BLASTER_DIR" rev-parse HEAD)
+export BLASTER_SHA
+log "building stellar-rpc-blaster at $BLASTER_SHA"
 make -C "$BLASTER_DIR" build
 
 run_leg ./cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/endpoint-load-test/runner
