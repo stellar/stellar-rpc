@@ -15,6 +15,11 @@ const (
 	dataTypeLedgers = "ledgers"
 	dataTypeTxhash  = "txhash"
 	dataTypeEvents  = "events"
+	// dataTypeShared labels the ONE per-ledger ExtractLedgerEvents walk the cold
+	// service runs once and shares across txhash + events (issue #836) — it is
+	// not a stored data type, only the scope of the shared extract stage, mirroring
+	// the hot path's single (data-type-less) extract phase.
+	dataTypeShared = "shared"
 )
 
 // Cold stage labels reported via MetricSink.IngestStage. These sit at the seams
@@ -22,23 +27,26 @@ const (
 // store-write samples plus a per-chunk finish), so a CSV sink can reproduce
 // those reports from production ingesters without re-instrumenting.
 const (
-	stageExtract   = "extract"    // view → payloads / hashes derivation
+	stageExtract   = "extract"    // the shared per-ledger ExtractLedgerEvents walk (ColdService)
 	stageTermIndex = "term_index" // per-event term derivation + mirror update (events cold)
 	stageWrite     = "write"      // store write / pack append
 	stageFinalize  = "finalize"   // per-chunk commit (pack trailer, index build, .bin write)
 )
 
-// coldStagePairs is the set of (data_type, stage) pairs the cold ingesters
-// actually emit — the eight real ones, not the 3×4 cross-product. A sink
-// pre-resolves exactly these, so it registers no series no code path can feed.
+// coldStagePairs is the set of (data_type, stage) pairs the cold path actually
+// emits — the seven real ones, not a cross-product. A sink pre-resolves exactly
+// these, so it registers no series no code path can feed. The extract stage is
+// keyed dataTypeShared: after issue #836 the ledger walk is done once by
+// ColdService and shared, so it is metered once per ledger rather than once per
+// consuming type. txhash's per-ledger work is a cheap truncate-append that folds
+// into its ColdIngest total (its stage cost is the finalize sort + .bin write).
 //
 //nolint:gochecknoglobals // fixed label set, read-only
 var coldStagePairs = []struct{ dataType, stage string }{
+	{dataTypeShared, stageExtract},
 	{dataTypeLedgers, stageWrite},
 	{dataTypeLedgers, stageFinalize},
-	{dataTypeTxhash, stageExtract},
 	{dataTypeTxhash, stageFinalize},
-	{dataTypeEvents, stageExtract},
 	{dataTypeEvents, stageTermIndex},
 	{dataTypeEvents, stageWrite},
 	{dataTypeEvents, stageFinalize},

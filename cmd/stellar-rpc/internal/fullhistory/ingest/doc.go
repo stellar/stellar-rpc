@@ -3,10 +3,12 @@
 // and writes the three data types — ledgers, txhashes, contract events —
 // into the full-history stores, one chunk at a time, via the zero-copy
 // view extractors in the go-stellar-sdk ingest package and the RPC-side
-// events.LCMViewToPayloads emitter.
+// events.PayloadsFromLedgerEvents emitter.
 //
-// Two tiers share the per-ledger extraction but differ in everything
-// else:
+// Both tiers extract each ledger with a SINGLE ExtractLedgerEvents walk
+// (the hot DB's IngestLedger, the cold ColdService) — txhash reads each
+// element's paired Hash and events shapes the same slice — but they
+// differ in everything else:
 //
 //   - Hot (HotService): one ledger at a time into the long-lived,
 //     caller-owned per-chunk hot DB, driven by the daemon's live

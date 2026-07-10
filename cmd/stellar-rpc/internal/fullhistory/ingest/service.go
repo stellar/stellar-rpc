@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
@@ -79,25 +80,46 @@ func (s *HotService) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMe
 type ColdService struct {
 	ingesters    []ColdIngester
 	sink         MetricSink
+	extract      bool
 	start        time.Time
 	totalEmitted bool
 }
 
 // NewColdService builds a ColdService over the enabled cold ingesters. A nil
-// sink defaults to NopSink. The per-chunk aggregate timer starts here; the only
-// case where no Ingest follows is an already-errored short/empty stream, where
-// the timing sample is meaningless anyway.
-func NewColdService(ingesters []ColdIngester, sink MetricSink) *ColdService {
-	return &ColdService{ingesters: ingesters, sink: orNop(sink), start: time.Now()}
+// sink defaults to NopSink. extract selects whether Ingest runs the shared
+// per-ledger ExtractLedgerEvents walk: true iff txhash or events is enabled
+// (a ledgers-only chunk needs no walk). The per-chunk aggregate timer starts
+// here; the only case where no Ingest follows is an already-errored short/empty
+// stream, where the timing sample is meaningless anyway.
+func NewColdService(ingesters []ColdIngester, sink MetricSink, extract bool) *ColdService {
+	return &ColdService{ingesters: ingesters, sink: orNop(sink), extract: extract, start: time.Now()}
 }
 
-// Ingest runs every cold ingester on lcm sequentially (each owns mutable
-// per-chunk state, so no concurrency within the service). seq is the
-// driver-validated sequence of lcm, passed through unchanged. The first error
-// aborts the ledger.
+// Ingest walks the borrowed view ONCE (the shared ExtractLedgerEvents, mirroring
+// the hot path's IngestLedger), then runs every cold ingester on the resulting
+// ledgerData sequentially (each owns mutable per-chunk state, so no concurrency
+// within the service). seq is the driver-validated sequence of lcm, passed
+// through unchanged. The single walk is timed and emitted as one ledger-scoped
+// extract stage (dataTypeShared) — txhash and events read it instead of each
+// re-walking. The first error aborts the ledger.
 func (s *ColdService) Ingest(ctx context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
+	l := ledgerData{seq: seq, raw: []byte(lcm)}
+	if s.extract {
+		start := time.Now()
+		txEvents, err := sdkingest.ExtractLedgerEvents(lcm)
+		if err != nil {
+			return fmt.Errorf("extract ledger events seq %d: %w", seq, err)
+		}
+		closedAt, err := lcm.LedgerCloseTime()
+		if err != nil {
+			return fmt.Errorf("ledger close time seq %d: %w", seq, err)
+		}
+		l.txEvents = txEvents
+		l.closedAt = closedAt
+		s.sink.IngestStage(dataTypeShared, stageExtract, time.Since(start), len(txEvents))
+	}
 	for _, ing := range s.ingesters {
-		if err := ing.Ingest(ctx, seq, lcm); err != nil {
+		if err := ing.Ingest(ctx, l); err != nil {
 			return err
 		}
 	}

@@ -7,23 +7,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/stellar/go-stellar-sdk/xdr"
-
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/eventstore"
 )
-
-// eventPayloads derives one ledger's event payloads from the view. A V0
-// (pre-Soroban) ledger has no contract events and yields zero payloads,
-// recorded like any event-free ledger.
-func eventPayloads(seq uint32, lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
-	payloads, err := events.LCMViewToPayloads(lcm)
-	if err != nil {
-		return nil, fmt.Errorf("LCMViewToPayloads seq %d: %w", seq, err)
-	}
-	return payloads, nil
-}
 
 // ───────────────────────── Cold ingester ─────────────────────────
 
@@ -51,12 +38,16 @@ type eventsCold struct {
 // NewEventsColdIngester opens a per-chunk events.pack cold writer in bucketDir —
 // the caller's geometry.Layout.EventsBucketDir(chunkID), so the write path is
 // Layout's single derivation — and returns a ColdIngester that owns it. The
-// writer uses its zero-value options; driver-level tuning is a follow-up (issue #836).
+// writer opts into the batch tuning (coldEncoderConcurrency/coldBytesPerSync):
+// WriteColdChunk, the sole caller, is always a batch freeze/backfill.
 func NewEventsColdIngester(bucketDir string, chunkID chunk.ID, sink MetricSink) (ColdIngester, error) {
 	if err := os.MkdirAll(bucketDir, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", bucketDir, err)
 	}
-	w, err := eventstore.NewColdWriter(chunkID, bucketDir, eventstore.ColdWriterOptions{})
+	w, err := eventstore.NewColdWriter(chunkID, bucketDir, eventstore.ColdWriterOptions{
+		Concurrency:  coldEncoderConcurrency,
+		BytesPerSync: coldBytesPerSync,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("eventstore.NewColdWriter: %w", err)
 	}
@@ -70,9 +61,9 @@ func NewEventsColdIngester(bucketDir string, chunkID chunk.ID, sink MetricSink) 
 	}, nil
 }
 
-func (e *eventsCold) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
+func (e *eventsCold) Ingest(_ context.Context, l ledgerData) error {
 	start := time.Now()
-	n, ierr := e.ingestSeq(seq, lcm)
+	n, ierr := e.ingestSeq(l)
 	e.metrics.observe(time.Since(start), n, ierr) // terminal on err: observe emits the per-ingester signal
 	if ierr != nil {
 		e.failed = true // refuse a post-failure Finalize
@@ -123,17 +114,20 @@ func (e *eventsCold) Close() error {
 	return e.writer.Close()
 }
 
-// ingestSeq writes one ledger's events and returns the count written. The
-// pre-Soroban (V0) policy lives in events.LCMViewToPayloads, shared with the
-// hot tier.
-func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, error) {
-	estart := time.Now()
-	payloads, err := eventPayloads(seq, lcm)
+// ingestSeq writes one ledger's events and returns the count written. It shapes
+// the ColdService's shared ExtractLedgerEvents walk into cursor-ordered payloads
+// via events.PayloadsFromLedgerEvents — the SAME function the hot tier uses, so
+// event-ID assignment is byte-identical to the hot path (same shaping). A
+// pre-Soroban (V0) ledger yields zero payloads, recorded like any event-free
+// ledger. Shaping folds into the per-ingester ColdIngest total; the extraction
+// itself is metered once, ledger-scoped, as the shared extract stage.
+func (e *eventsCold) ingestSeq(l ledgerData) (int, error) {
+	payloads, err := events.PayloadsFromLedgerEvents(l.txEvents, l.seq, l.closedAt)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("shape events seq %d: %w", l.seq, err)
 	}
-	e.metrics.sink.IngestStage(dataTypeEvents, stageExtract, time.Since(estart), len(payloads))
 
+	seq := l.seq
 	startID := e.offsets.TotalEvents()
 	if uint64(startID)+uint64(len(payloads)) > math.MaxUint32 {
 		return 0, fmt.Errorf("chunk %s would overflow uint32 event-id space at ledger %d", e.chunkID, seq)
@@ -148,10 +142,11 @@ func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, er
 	// pack may already be ahead of offsets, which is why Ingest latches `failed`
 	// and Finalize refuses afterwards: recovery means abandoning the chunk via
 	// Close, not resuming mid-chunk. An empty-payload ledger (genuinely zero
-	// events, or a V0 ledger handled by eventPayloads) runs zero iterations but
-	// still emits term_index/write samples and advances offsets below, so every
-	// ledger contributes exactly one sample to each of the three cold stage
-	// histograms — a consumer can divide a stage total by the ledger count.
+	// events, or a V0 ledger that PayloadsFromLedgerEvents shapes to zero payloads)
+	// runs zero iterations but still emits term_index/write samples and advances
+	// offsets below, so every ledger contributes exactly one sample to each of the
+	// two per-ledger events stage histograms — a consumer can divide a stage total
+	// by the ledger count.
 	var termDur, writeDur time.Duration
 	for i := range payloads {
 		tstart := time.Now()

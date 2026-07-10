@@ -9,9 +9,6 @@ import (
 	"slices"
 	"time"
 
-	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
-	"github.com/stellar/go-stellar-sdk/xdr"
-
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/txhash"
 )
@@ -51,33 +48,25 @@ func NewTxhashColdIngester(binPath string, chunkID chunk.ID, sink MetricSink) (C
 	}, nil
 }
 
-func (t *txhashCold) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
+func (t *txhashCold) Ingest(_ context.Context, l ledgerData) error {
 	start := time.Now()
-	// ExtractTxHashes returns full 32-byte hashes (copied, not view-aliased).
-	// Each is truncated to ColdKeySize and appended STRAIGHT into the
-	// accumulator — no intermediate per-ledger entry slice; over a ~3M-tx
-	// chunk that intermediate would be hundreds of MB of transient garbage.
-	hashes, err := sdkingest.ExtractTxHashes(lcm)
-	if err != nil {
-		t.metrics.observe(time.Since(start), 0, err) // terminal: observe emits the per-ingester signal
-		return fmt.Errorf("ExtractTxHashes seq %d: %w", seq, err)
-	}
-	for i := range hashes {
+	// Hashes come from ColdService's shared ExtractLedgerEvents walk: each
+	// element's Hash is the ledger's tx hash in apply order — byte-identical, and
+	// in the same order, as the ExtractTxHashes call this used to run (both read
+	// txProcessingHash off the same TxProcessing iteration). Each is truncated to
+	// ColdKeySize and appended STRAIGHT into the accumulator — no intermediate
+	// per-ledger entry slice; over a ~3M-tx chunk that intermediate would be
+	// hundreds of MB of transient garbage. The extraction itself is metered once,
+	// ledger-scoped, as the shared extract stage; this cheap truncate-append folds
+	// into the per-ingester ColdIngest total (its per-chunk cost is the finalize
+	// sort + .bin write).
+	for i := range l.txEvents {
 		var ke txhash.ColdEntry
-		copy(ke.Key[:], hashes[i][:txhash.ColdKeySize])
-		ke.Seq = seq
+		copy(ke.Key[:], l.txEvents[i].Hash[:txhash.ColdKeySize])
+		ke.Seq = l.seq
 		t.entries = append(t.entries, ke)
 	}
-	// The extract stage spans the SDK hash extraction AND the truncate-and-append
-	// loop — this ingester's only per-ledger CPU. Emitting it here, not right after
-	// ExtractTxHashes, makes the per-ledger stage total equal the Ingest wall-clock,
-	// so the cold stages (extract here, finalize at chunk end) partition the
-	// per-chunk ColdIngest total with no unexplained remainder. (The .bin sort +
-	// write is the finalize stage; there is no separate cold write stage for
-	// txhash.)
-	d := time.Since(start)
-	t.metrics.sink.IngestStage(dataTypeTxhash, stageExtract, d, len(hashes))
-	t.metrics.observe(d, len(hashes), nil)
+	t.metrics.observe(time.Since(start), len(l.txEvents), nil)
 	return nil
 }
 

@@ -29,7 +29,7 @@
 // assigned identically to the SQLite path (db/event.go), so the two backends
 // return the same IDs.
 //
-// Because LCMViewToPayloads emits each ledger in ascending getEvents cursor
+// Because PayloadsFromLedgerEvents emits each ledger in ascending getEvents cursor
 // order, every (txIdx, opIdx) group is contiguous in stream order, so eventIdx
 // could be reconstructed positionally at read time. It is stored explicitly
 // anyway: that keeps the public ID format byte-stable without a payload

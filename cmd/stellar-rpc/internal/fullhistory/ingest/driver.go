@@ -148,7 +148,9 @@ func WriteColdChunk(
 		return berr
 	}
 	logger.Debugf("cold ingest chunk %d [%d, %d]", uint32(chunkID), chunkID.FirstLedger(), chunkID.LastLedger())
-	service := NewColdService(ings, sink)
+	// txhash and events share the single ExtractLedgerEvents walk; a ledgers-only
+	// chunk needs no walk at all.
+	service := NewColdService(ings, sink, cfg.Txhash || cfg.Events)
 	defer func() {
 		if cerr := service.Close(); cerr != nil {
 			err = errors.Join(err, fmt.Errorf("close: %w", cerr))

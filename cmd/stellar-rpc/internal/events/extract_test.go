@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
@@ -22,6 +23,28 @@ import (
 )
 
 const testPassphrase = "Test SDF Network ; September 2015"
+
+// lcmViewToPayloads is the view→payloads convenience the production
+// LCMViewToPayloads wrapper used to provide before #836 deleted it as test-only:
+// the header reads plus the single ExtractLedgerEvents walk, fed to
+// PayloadsFromLedgerEvents. The cursor-contract tests exercise it from raw LCM
+// bytes; production now walks once at a higher level (hot IngestLedger, cold
+// ColdService) and calls PayloadsFromLedgerEvents directly.
+func lcmViewToPayloads(lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
+	seq, err := lcm.LedgerSequence()
+	if err != nil {
+		return nil, err
+	}
+	closedAt, err := lcm.LedgerCloseTime()
+	if err != nil {
+		return nil, err
+	}
+	txEvents, err := ingest.ExtractLedgerEvents(lcm)
+	if err != nil {
+		return nil, err
+	}
+	return events.PayloadsFromLedgerEvents(txEvents, seq, closedAt)
+}
 
 // buildContractEvent returns a ContractEvent with a contractID and a
 // single symbol topic.
@@ -307,7 +330,7 @@ func TestExtractEvents_MatchesSQLite(t *testing.T) {
 		// from chronological order.
 		raw, err := lcm.MarshalBinary()
 		require.NoError(t, err)
-		payloads, err := events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
+		payloads, err := lcmViewToPayloads(xdr.LedgerCloseMetaView(raw))
 		require.NoError(t, err)
 		require.Len(t, payloads, 6)
 		assertViewMatchesSQLite(t, lcm)
@@ -362,7 +385,7 @@ func TestExtractEvents_V0NoPayloads(t *testing.T) {
 	}}
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
-	payloads, err := events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
+	payloads, err := lcmViewToPayloads(xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err)
 	require.Empty(t, payloads)
 }
@@ -436,7 +459,7 @@ func TestExtractEvents_EmissionOrderCursorAscending(t *testing.T) {
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 
-	payloads, err := events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
+	payloads, err := lcmViewToPayloads(xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err)
 	require.Len(t, payloads, 10, "2 txs x (3 stage events + 2 op events)")
 
@@ -487,7 +510,7 @@ func TestExtractEvents_AliasesViewBuffer(t *testing.T) {
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 
-	payloads, err := events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
+	payloads, err := lcmViewToPayloads(xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err)
 	require.Len(t, payloads, 1)
 	require.NotEmpty(t, payloads[0].ContractEventBytes)
@@ -525,7 +548,7 @@ func TestExtractEvents_LegacyMetaV0(t *testing.T) {
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 
-	payloads, err := events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
+	payloads, err := lcmViewToPayloads(xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err, "V0 meta must be skipped, not error")
 	// Only the second (V4) tx emits an event; the V0 tx contributes none.
 	require.Len(t, payloads, 1)
@@ -606,7 +629,7 @@ func assertViewMatchesSQLite(t *testing.T, lcm xdr.LedgerCloseMeta) {
 
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
-	viewPayloads, err := events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
+	viewPayloads, err := lcmViewToPayloads(xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err, "view path LCMViewToPayloads")
 
 	rows := sqliteEventRows(t, lcm)
@@ -655,7 +678,7 @@ func BenchmarkExtractEvents(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		if _, err := events.LCMViewToPayloads(view); err != nil {
+		if _, err := lcmViewToPayloads(view); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -695,7 +718,7 @@ func TestExtractEvents_TopLevelEventsAliasViewBuffer(t *testing.T) {
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 
-	payloads, err := events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
+	payloads, err := lcmViewToPayloads(xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err)
 	require.Len(t, payloads, 1)
 	require.NotEmpty(t, payloads[0].ContractEventBytes)
