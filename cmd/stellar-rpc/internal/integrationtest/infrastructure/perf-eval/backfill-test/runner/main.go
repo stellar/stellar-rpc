@@ -1,6 +1,7 @@
-// Command runner drives the backfill ingestion leg. The shared harness owns the
-// dispatch: `runner gather` polls S3 for the result object on the GHA runner,
-// and `runner instantiate` (default) runs the on-box backfill below.
+// Command runner drives the backfill ingestion leg's on-box half: it builds
+// stellar-rpc and times a --backfill run against the pubnet datastore (then
+// keeps serving in handoff mode). The GHA-runner half is the shared
+// perf-eval/gather.
 package main
 
 import "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/harness"

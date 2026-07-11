@@ -162,7 +162,7 @@ jobs:
             echo '#!/usr/bin/env bash'
             echo "export TARGET_SHA=${{ steps.resolve.outputs.sha }} RUN_ID=${{ github.run_id }}-${{ github.run_attempt }}"
             echo "export BUCKET=$BUCKET RESULT_KEY=$RESULT_KEY"
-            echo "export SELF_TERMINATE_MINUTES=$SELF_TERMINATE_MINUTES"
+            echo "export SELF_TERMINATE_MINUTES=$SELF_TERMINATE_MINUTES BUDGET_MINUTES=${{ inputs.budget_minutes }}"
             if [ -n "$EXTRA_ENV" ]; then printf '%s\n' "$EXTRA_ENV"; fi
             cat "$PERF_EVAL_DIR/bootstrap-common.sh"
             cat "$LEG_SCRIPT"
@@ -223,8 +223,9 @@ jobs:
           echo "::error::SSM agent never registered for $INSTANCE_ID — verify AmazonSSMManagedInstanceCore is attached to the stellar-rpc-ci-load-test role"
           exit 1
 
-      # Polls S3 for the result object and relays verdict/passed + the result
-      # location (bucket/key) as step outputs the coordinator reads.
+      # Polls S3 for the result object and relays found/passed as step outputs
+      # for the gate below (the coordinator reads result objects straight from
+      # S3, not from here).
       # RUN_ID must match the box preamble's: gather skips result objects from
       # other attempts (a re-run shares RESULT_KEY with its predecessors).
       - name: Poll for results

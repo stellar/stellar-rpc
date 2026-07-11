@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -16,9 +17,22 @@ const (
 	ServeStatusFailed = "failed"
 )
 
+// ServeReadyName is the rendezvous object's filename, a sibling of the
+// serving leg's result object.
+const ServeReadyName = "serve-ready.json"
+
+// SiblingKey rewrites a leg's RESULT_KEY (runs/<run_id>/<label>/result.json)
+// to a peer leg's object under the same run prefix, so chained legs derive
+// each other's keys instead of having them threaded through env.
+func SiblingKey(resultKey, peerLabel, name string) string {
+	return path.Join(path.Dir(path.Dir(resultKey)), peerLabel, name)
+}
+
 // ServeReady is the rendezvous object a handoff box (one that keeps its RPC
 // serving after its own leg's result is published) posts to S3 so a chained
-// leg can find and drive it.
+// leg can find and drive it. The consumer contract is Status/Error/RunID/URL;
+// the remaining fields are S3 debugging breadcrumbs (the chained leg re-probes
+// getHealth for live ledger bounds rather than trusting these).
 type ServeReady struct {
 	SchemaVersion int    `json:"schemaVersion"`
 	Status        string `json:"status"` // "ready" or "failed"

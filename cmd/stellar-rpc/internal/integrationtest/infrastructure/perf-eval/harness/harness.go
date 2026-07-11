@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,6 +55,28 @@ func Env(key, def string) string {
 	return def
 }
 
+// LegDeadline returns the instant a box-side runner should bail by: the leg
+// budget (BUDGET_MINUTES from the user-data preamble) after box boot, minus
+// margin, so the box publishes its own verdict just before the GHA poller
+// gives up at budget-15m. ok is false when BUDGET_MINUTES is unset (local
+// runs) or boot time is unreadable -- callers then run unbounded.
+func LegDeadline(margin time.Duration) (time.Time, bool) {
+	mins, err := strconv.Atoi(os.Getenv("BUDGET_MINUTES"))
+	if err != nil || mins <= 0 {
+		return time.Time{}, false
+	}
+	up, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		return time.Time{}, false
+	}
+	var uptimeSecs float64
+	if _, err := fmt.Sscanf(string(up), "%f", &uptimeSecs); err != nil {
+		return time.Time{}, false
+	}
+	boot := time.Now().Add(-time.Duration(uptimeSecs * float64(time.Second)))
+	return boot.Add(time.Duration(mins)*time.Minute - margin), true
+}
+
 // DurationEnv parses key as a duration, keeping def on absence or garbage.
 func DurationEnv(key string, def time.Duration) time.Duration {
 	v := os.Getenv(key)
@@ -66,6 +89,20 @@ func DurationEnv(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+// Int64Env parses key as an int64, keeping def on absence or garbage.
+func Int64Env(key string, def int64) int64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		logger.Warnf("invalid %s %q; using %d", key, v, def)
+		return def
+	}
+	return n
 }
 
 // RequireEnv returns the values of keys in order, erroring with every unset one.

@@ -11,9 +11,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/harness"
@@ -23,69 +20,53 @@ import (
 // checked in (the runner runs with cwd = repo root).
 const legDir = "cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test"
 
-const corePath = "/usr/local/bin/stellar-core" // fetched from S3
-
 // backfillDoneRe matches the terminal line emitted on backfill's completion
 var backfillDoneRe = regexp.MustCompile(`Backfill process complete, ledgers \[(\d+) -> (\d+)\]`)
 
 // instantiate is the instance's backfill task: it fetches + builds test fixtures,
 // runs a timed backfill, then publishes the verdict.
 func instantiate(ctx context.Context) error {
-	var (
-		bucket      = harness.Env("BUCKET", "stellar-rpc-ci-load-test")
-		region      = harness.Env("REGION", "us-east-1")
-		workDir     = harness.Env("WORK_DIR", "/data")
-		resultsFile = harness.Env("RESULTS_FILE", "/tmp/results.md")
-		resultKey   = os.Getenv("RESULT_KEY")
-		targetSHA   = os.Getenv("TARGET_SHA")
-		runID       = harness.Env("RUN_ID", "manual")
-		// ~1/2 day for cheap test runs; the full week is 120960.
-		retention = harness.Env("HISTORY_RETENTION_WINDOW", "8640")
-		deadline  = harness.Env("BACKFILL_DEADLINE", "4h")
-
-		binaryPath = filepath.Join(workDir, "stellar-rpc-bin") // built here (the repo checkout is in WORK_DIR)
-	)
-	repoRoot, err := os.Getwd()
+	leg, err := harness.LegSetup(ctx, "Backfill ingestion")
 	if err != nil {
 		return err
 	}
-	bail := func(format string, args ...any) error {
-		return harness.BailInstance(resultsFile, "Backfill ingestion", runID, targetSHA, fmt.Sprintf(format, args...))
-	}
+	var (
+		// ~1/2 day for cheap test runs; the full week is 120960.
+		retention = harness.Env("HISTORY_RETENTION_WINDOW", "8640")
+		// deliberate perf bound, not lifecycle plumbing: a backfill slower
+		// than this is a regression worth failing on
+		deadline = harness.Env("BACKFILL_DEADLINE", "4h")
 
-	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
-	if err != nil {
-		return bail("loading AWS config: %v", err)
-	}
-	fetch := &harness.S3Fetcher{Client: s3.NewFromConfig(awsCfg), Bucket: bucket}
+		binaryPath = filepath.Join(leg.WorkDir, "stellar-rpc-bin") // built here (the repo checkout is in WORK_DIR)
+	)
 
-	coreCfg, err := prepareFixtures(ctx, fetch, repoRoot, workDir, binaryPath)
+	fixtures, err := prepareFixtures(ctx, leg, binaryPath)
 	if err != nil {
-		return bail("%v", err)
+		return leg.Bail("%v", err)
 	}
 
 	// Handoff mode: after backfill the daemon is left running (catchup + live
 	// ingestion) so this box becomes the endpoint load test's target RPC, which
 	// drives it over the VPC — hence the non-loopback bind.
 	serveAfter := os.Getenv("SERVE_AFTER_BACKFILL") == "true"
-	endpoint := "localhost:8000"
+	endpoint := "localhost:" + rpcPort
 	if serveAfter {
-		endpoint = "0.0.0.0:8000"
+		endpoint = "0.0.0.0:" + rpcPort
 	}
 
-	cfgPath, err := renderConfig(repoRoot, workDir, coreCfg, retention, endpoint)
+	cfgPath, err := renderConfig(leg, fixtures, retention, endpoint)
 	if err != nil {
-		return bail("rendering config: %v", err)
+		return leg.Bail("rendering config: %v", err)
 	}
 
 	dl, err := time.ParseDuration(deadline)
 	if err != nil {
-		return bail("invalid BACKFILL_DEADLINE %q: %v", deadline, err)
+		return leg.Bail("invalid BACKFILL_DEADLINE %q: %v", deadline, err)
 	}
 	logger.Infof("starting backfill (retention=%s, deadline=%s, serve-after=%t)", retention, deadline, serveAfter)
 	elapsed, lo, hi, daemon, err := runBackfill(ctx, dl, binaryPath, cfgPath, serveAfter)
 	if err != nil {
-		return bail("%v", err)
+		return leg.Bail("%v", err)
 	}
 	if daemon != nil {
 		defer daemon.Stop() // covers the bail paths below; Stop is idempotent
@@ -93,67 +74,67 @@ func instantiate(ctx context.Context) error {
 	ingested := hi - lo + 1
 	logger.Infof("backfill complete: %d ledgers [%d -> %d] in %s", ingested, lo, hi, elapsed.Round(time.Second))
 
-	md := renderMarkdown(targetSHA, retention, lo, hi, ingested, elapsed)
-	if err := os.WriteFile(resultsFile, []byte(md), 0o644); err != nil {
-		return bail("writing results: %v", err)
+	md := renderMarkdown(leg.TargetSHA, retention, lo, hi, ingested, elapsed)
+	if err := os.WriteFile(leg.ResultsFile, []byte(md), 0o644); err != nil {
+		return leg.Bail("writing results: %v", err)
 	}
-	if err := harness.PublishResult(
-		ctx, fetch.Client, bucket, resultKey, "ok", runID, targetSHA, resultsFile, ""); err != nil {
-		return bail("publishing result: %v", err)
+	if err := leg.Publish(ctx, ""); err != nil {
+		return leg.Bail("publishing result: %v", err)
 	}
 	if daemon != nil {
-		servePhase(ctx, fetch, resultKey, runID, targetSHA, daemon)
+		servePhase(ctx, leg, daemon)
 	}
 	return nil
 }
 
+// fixtures are the on-box artifacts the daemon run needs.
+type fixtures struct {
+	corePath string // stellar-core binary (fetched from S3)
+	coreCfg  string // captive-core pubnet config (from the SDK)
+}
+
 // prepareFixtures fetches stellar-core, builds stellar-rpc into binaryPath,
-// and writes the SDK's captive-core pubnet config, returning that config path.
-func prepareFixtures(
-	ctx context.Context,
-	fetch *harness.S3Fetcher,
-	repoRoot, workDir, binaryPath string,
-) (string, error) {
-	if err := fetch.FetchVerified(ctx, "core/stellar-core.zst", corePath, true, "stellar-core"); err != nil {
-		return "", err
-	}
-	if err := os.Chmod(corePath, 0o755); err != nil {
-		return "", fmt.Errorf("chmod stellar-core: %w", err)
+// and writes the SDK's captive-core pubnet config.
+func prepareFixtures(ctx context.Context, leg *harness.Leg, binaryPath string) (fixtures, error) {
+	corePath, err := leg.Fetch.FetchStellarCore(ctx)
+	if err != nil {
+		return fixtures{}, err
 	}
 
 	logger.Infof("building stellar-rpc")
-	if err := harness.RunStreaming(ctx, repoRoot, nil, 40, "make", "build-libs"); err != nil {
-		return "", fmt.Errorf("make build-libs failed: %w", err)
+	if err := harness.RunStreaming(ctx, leg.RepoRoot, nil, 40, "make", "build-libs"); err != nil {
+		return fixtures{}, fmt.Errorf("make build-libs failed: %w", err)
 	}
-	if err := harness.RunStreaming(ctx, repoRoot, nil, 40,
+	if err := harness.RunStreaming(ctx, leg.RepoRoot, nil, 40,
 		"go", "build", "-o", binaryPath, "./cmd/stellar-rpc"); err != nil {
-		return "", fmt.Errorf("go build failed: %w", err)
+		return fixtures{}, fmt.Errorf("go build failed: %w", err)
 	}
 
-	coreCfg := filepath.Join(workDir, "captive-core-pubnet.cfg")
+	coreCfg := filepath.Join(leg.WorkDir, "captive-core-pubnet.cfg")
 	if err := os.WriteFile(coreCfg, ledgerbackend.PubnetDefaultConfig, 0o644); err != nil {
-		return "", fmt.Errorf("writing captive-core config: %w", err)
+		return fixtures{}, fmt.Errorf("writing captive-core config: %w", err)
 	}
-	return coreCfg, nil
+	return fixtures{corePath: corePath, coreCfg: coreCfg}, nil
 }
 
 // renderConfig fills the config template's ${...} placeholders (box paths, the
 // retention window, and the bind endpoint) via os.Expand
-func renderConfig(repoRoot, workDir, coreCfg, retention, endpoint string) (string, error) {
-	tmpl, err := os.ReadFile(filepath.Join(repoRoot, legDir, "testdata", "backfill-pubnet.toml.tmpl"))
+func renderConfig(leg *harness.Leg, f fixtures, retention, endpoint string) (string, error) {
+	tmpl, err := os.ReadFile(filepath.Join(leg.RepoRoot, legDir, "testdata", "backfill-pubnet.toml.tmpl"))
 	if err != nil {
 		return "", err
 	}
+	workDir := leg.WorkDir
 	mapping := func(in string) string {
 		switch in {
 		case "CAPTIVE_CORE_CONFIG_PATH":
-			return coreCfg
+			return f.coreCfg
 		case "CAPTIVE_CORE_STORAGE_PATH":
 			return filepath.Join(workDir, "core-storage")
 		case "DB_PATH":
 			return filepath.Join(workDir, "backfill.sqlite")
 		case "STELLAR_CORE_BINARY_PATH":
-			return corePath
+			return f.corePath
 		case "HISTORY_RETENTION_WINDOW":
 			return retention
 		case "ENDPOINT":
@@ -260,10 +241,7 @@ func runBackfill(
 }
 
 func renderMarkdown(sha, retention string, lo, hi, ingested int, elapsed time.Duration) string {
-	shortSHA := sha
-	if len(shortSHA) > 12 {
-		shortSHA = shortSHA[:12]
-	}
+	shortSHA := sha[:min(12, len(sha))]
 	lps := 0.0
 	if s := elapsed.Seconds(); s > 0 {
 		lps = float64(ingested) / s
