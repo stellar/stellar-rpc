@@ -62,7 +62,7 @@ func NewEventsColdIngester(bucketDir string, chunkID chunk.ID, sink MetricSink) 
 		mirror:    events.NewBitmaps(),
 		offsets:   events.NewLedgerOffsets(chunkID.FirstLedger()),
 		bucketDir: bucketDir,
-		metrics:   newColdMetrics(sink, dataTypeEvents),
+		metrics:   newColdMetrics(sink, DataTypeEvents),
 	}, nil
 }
 
@@ -106,7 +106,7 @@ func (e *eventsCold) Finalize(ctx context.Context) error {
 		e.metrics.emit(time.Since(start), err)
 		return err
 	}
-	e.metrics.sink.IngestStage(dataTypeEvents, stageFinalize, time.Since(start), 0)
+	e.metrics.sink.IngestStage(DataTypeEvents, StageFinalize, time.Since(start), 0)
 	e.metrics.emit(time.Since(start), nil)
 	return nil
 }
@@ -128,7 +128,7 @@ func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, er
 	if err != nil {
 		return 0, err
 	}
-	e.metrics.sink.IngestStage(dataTypeEvents, stageExtract, time.Since(estart), len(payloads))
+	e.metrics.sink.IngestStage(DataTypeEvents, StageExtract, time.Since(estart), len(payloads))
 
 	startID := e.offsets.TotalEvents()
 	if uint64(startID)+uint64(len(payloads)) > math.MaxUint32 {
@@ -166,7 +166,7 @@ func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, er
 		}
 		writeDur += time.Since(wstart)
 	}
-	e.metrics.sink.IngestStage(dataTypeEvents, stageTermIndex, termDur, len(payloads))
+	e.metrics.sink.IngestStage(DataTypeEvents, StageTermIndex, termDur, len(payloads))
 
 	// offsets.Append LAST — it is the commit point for the ledger. Its cost folds
 	// into the write stage (rather than landing in the per-chunk total but in no
@@ -177,7 +177,7 @@ func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, er
 	//nolint:gosec // the overflow guard above proved startID+len(payloads) fits in uint32
 	oerr := e.offsets.Append(seq, uint32(len(payloads)))
 	writeDur += time.Since(wstart)
-	e.metrics.sink.IngestStage(dataTypeEvents, stageWrite, writeDur, len(payloads))
+	e.metrics.sink.IngestStage(DataTypeEvents, StageWrite, writeDur, len(payloads))
 	if oerr != nil {
 		return 0, fmt.Errorf("offsets append seq %d: %w", seq, oerr)
 	}

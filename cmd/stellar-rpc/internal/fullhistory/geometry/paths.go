@@ -77,7 +77,15 @@ func (l Layout) HotChunkPath(c chunk.ID) string {
 // leaf is owned by ledger.PackName (shared with the cold writer and reader).
 // EventsPaths/TxHashBinPath follow the same split.
 func (l Layout) LedgerPackPath(c chunk.ID) string {
-	return filepath.Join(l.ledgersRoot, c.BucketID(), ledger.PackName(c))
+	return LedgerPackPath(l.ledgersRoot, c)
+}
+
+// LedgerPackPath composes a chunk's ledger pack path under an explicit ledgers
+// root, for callers that hold only that one tree (a full Layout would carry
+// five unused roots). Layout.LedgerPackPath delegates here so the formula has
+// one home.
+func LedgerPackPath(ledgersRoot string, c chunk.ID) string {
+	return filepath.Join(ledgersRoot, c.BucketID(), ledger.PackName(c))
 }
 
 // EventsBucketDir is a chunk's events cold-segment directory — the bucket dir the

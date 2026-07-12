@@ -81,9 +81,9 @@ func buildColdIngesters(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Co
 		path     string
 		open     func(string, chunk.ID, MetricSink) (ColdIngester, error)
 	}{
-		{cfg.Ledgers, dataTypeLedgers, dirs.LedgerPack, NewLedgerColdIngester},
-		{cfg.Txhash, dataTypeTxhash, dirs.TxhashBin, NewTxhashColdIngester},
-		{cfg.Events, dataTypeEvents, dirs.EventsDir, NewEventsColdIngester},
+		{cfg.Ledgers, DataTypeLedgers, dirs.LedgerPack, NewLedgerColdIngester},
+		{cfg.Txhash, DataTypeTxhash, dirs.TxhashBin, NewTxhashColdIngester},
+		{cfg.Events, DataTypeEvents, dirs.EventsDir, NewEventsColdIngester},
 	}
 	ings := make([]ColdIngester, 0, len(ctors))
 	for _, c := range ctors {
