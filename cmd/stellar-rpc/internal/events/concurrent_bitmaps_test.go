@@ -164,10 +164,7 @@ func TestConcurrentBitmaps_GetReturnsImmutableSnapshot(t *testing.T) {
 // TestConcurrentBitmaps_ConcurrentGetIsSafe runs many concurrent
 // Get callers against the same store. Get is lock-free past the
 // brief map-lookup RLock and returns an immutable snapshot, so
-// concurrent reads should not race. Snapshot is intentionally NOT
-// exercised here — its contract is single-caller (called only at
-// freeze time after ingest stops), so multi-goroutine Snapshot
-// would be out-of-contract. Run under -race.
+// concurrent reads should not race. Run under -race.
 func TestConcurrentBitmaps_ConcurrentGetIsSafe(t *testing.T) {
 	s := newTestConcurrentBitmaps()
 	const nTerms = 200

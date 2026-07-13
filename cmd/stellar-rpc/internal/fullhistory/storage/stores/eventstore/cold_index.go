@@ -51,7 +51,7 @@ import (
 // catastrophically.
 //
 // Both cold backfill and the live-chunk freeze build a Bitmaps single-threaded by
-// re-deriving terms from raw LCMs (per-event events.TermsFor + Bitmaps.AddTo) and
+// re-deriving terms from raw LCMs (per-event events.TermsForBytes + Bitmaps.AddTo) and
 // hand it directly here.
 //
 // index.hash is the MPHF serialized via buildMPHF.

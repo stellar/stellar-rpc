@@ -33,7 +33,11 @@ func TestWarmup_FreshChunkProducesEmptyMirrorsViaNewWithStore(t *testing.T) {
 func TestWarmup_RebuildsMirrorFromIngestedRows(t *testing.T) {
 	// Ingest into one HotStore, close, reopen; the reopened store's
 	// mirror must hold the same terms (warmup replayed them from
-	// events_index).
+	// events_index). One-directional by design: every seeded term
+	// must survive with the right cardinality, but a phantom extra
+	// term in the reopened mirror would pass unnoticed —
+	// ConcurrentBitmaps deliberately has no term enumeration to
+	// check the other direction with.
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
 
