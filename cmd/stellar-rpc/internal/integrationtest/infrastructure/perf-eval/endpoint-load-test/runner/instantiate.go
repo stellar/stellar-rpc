@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -40,9 +39,6 @@ func instantiate(ctx context.Context) error {
 		bufHigh = harness.Int64Env("SEED_BUFFER_HIGH", 128)
 	)
 
-	// The leg budget is the only deadline: proceed assuming every phase makes
-	// it, bailing just before the GHA poller gives up so the box still
-	// publishes its own verdict (with the log tail) instead of a bare timeout.
 	if deadline, ok := harness.LegDeadline(25 * time.Minute); ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithDeadline(ctx, deadline)
@@ -55,12 +51,6 @@ func instantiate(ctx context.Context) error {
 		return leg.Bail("CHAIN_PEER unset; nothing to rendezvous with")
 	}
 	readyKey := harness.SiblingKey(leg.ResultKey, peer, harness.ServeReadyName)
-
-	configPath := filepath.Join(leg.RepoRoot, legDir, "testdata", "endpoints.toml")
-	limits, err := readLimits(configPath)
-	if err != nil {
-		return leg.Bail("reading endpoint limits: %v", err)
-	}
 
 	// fetch + build overlap the peer box's captive-core catchup
 	blasterBin, blasterSHA, err := fetchBlaster(ctx, filepath.Join(leg.WorkDir, "stellar-rpc-blaster"))
@@ -84,23 +74,22 @@ func instantiate(ctx context.Context) error {
 
 	call := blastCall{
 		bin: blasterBin, dir: filepath.Dir(blasterBin), url: ready.URL,
-		configPath: configPath,
-		seedPath:   filepath.Join(leg.WorkDir, "blaster-seed.json"),
-		outDir:     filepath.Join(leg.WorkDir, "blaster-out"),
-		rampUp:     rampUp, duration: duration,
+		configPath:  filepath.Join(leg.RepoRoot, legDir, "testdata", "endpoints.toml"),
+		seedPath:    filepath.Join(leg.WorkDir, "blaster-seed.json"),
+		resultsPath: filepath.Join(leg.WorkDir, "blaster-results.json"),
+		rampUp:      rampUp, duration: duration,
 	}
 	if err := generateSeed(ctx, call, lo, hi, seedCount); err != nil {
 		return leg.Bail("%v", err)
 	}
-	resultsJSON, err := blast(ctx, call)
-	if err != nil {
+	if err := blast(ctx, call); err != nil {
 		return leg.Bail("%v", err)
 	}
-	data, err := os.ReadFile(resultsJSON)
+	data, err := os.ReadFile(call.resultsPath)
 	if err != nil {
 		return leg.Bail("reading blaster results: %v", err)
 	}
-	rows, err := summarize(data, limits)
+	rows, err := summarize(data)
 	if err != nil {
 		return leg.Bail("summarizing blaster results: %v", err)
 	}
@@ -110,7 +99,7 @@ func instantiate(ctx context.Context) error {
 	if err := os.WriteFile(leg.ResultsFile, []byte(md), 0o644); err != nil {
 		return leg.Bail("writing results: %v", err)
 	}
-	if err := leg.Publish(ctx, resultsJSON); err != nil {
+	if err := leg.Publish(ctx, call.resultsPath); err != nil {
 		return leg.Bail("publishing result: %v", err)
 	}
 	return nil
@@ -121,7 +110,7 @@ func instantiate(ctx context.Context) error {
 // resolved commit.
 func fetchBlaster(ctx context.Context, dir string) (string, string, error) {
 	repo := harness.Env("BLASTER_REPO", "stellar/stellar-rpc-blaster")
-	ref := harness.Env("BLASTER_REF", "dev")
+	ref := harness.Env("BLASTER_REF", "f6085c38900f1b1c031dfb78658ea81917f58a30")
 	logger.Infof("fetching stellar-rpc-blaster (%s@%s)", repo, ref)
 	if err := os.RemoveAll(dir); err != nil {
 		return "", "", err
@@ -151,10 +140,10 @@ func fetchBlaster(ctx context.Context, dir string) (string, string, error) {
 
 // blastCall parameterizes one serial blaster sweep.
 type blastCall struct {
-	bin, dir, url    string
-	configPath       string
-	seedPath, outDir string
-	rampUp, duration string
+	bin, dir, url         string
+	configPath            string
+	seedPath, resultsPath string
+	rampUp, duration      string
 }
 
 // generateSeed samples the request corpus from the target RPC's ledger window.
@@ -170,8 +159,8 @@ func generateSeed(ctx context.Context, c blastCall, lo, hi int64, count string) 
 	return nil
 }
 
-// blast runs the serial endpoint sweep and returns the results JSON path.
-func blast(ctx context.Context, c blastCall) (string, error) {
+// blast runs the serial endpoint sweep, writing results to c.resultsPath.
+func blast(ctx context.Context, c blastCall) error {
 	logger.Infof("blasting endpoints in serial (ramp-up %s, duration %s per endpoint)", c.rampUp, c.duration)
 	if err := harness.RunStreaming(ctx, c.dir, nil, 80, c.bin, "run",
 		"--rpc-url", c.url,
@@ -180,10 +169,10 @@ func blast(ctx context.Context, c blastCall) (string, error) {
 		"--serial",
 		"--ramp-up", c.rampUp,
 		"--duration", c.duration,
-		"--test-output-path", c.outDir); err != nil {
-		return "", fmt.Errorf("blaster run failed: %w", err)
+		"--test-output-path", c.resultsPath); err != nil {
+		return fmt.Errorf("blaster run failed: %w", err)
 	}
-	return newestResults(c.outDir)
+	return nil
 }
 
 // awaitServeReady polls for the serve-ready object the peer box publishes,
@@ -242,15 +231,4 @@ func awaitServeReady(
 		case <-time.After(30 * time.Second):
 		}
 	}
-}
-
-// newestResults returns the latest test-results-*.json blaster wrote under dir
-// (the filenames embed a sortable timestamp).
-func newestResults(dir string) (string, error) {
-	matches, err := filepath.Glob(filepath.Join(dir, "test-results-*.json"))
-	if err != nil || len(matches) == 0 {
-		return "", fmt.Errorf("no test-results-*.json under %s", dir)
-	}
-	sort.Strings(matches)
-	return matches[len(matches)-1], nil
 }

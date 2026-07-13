@@ -45,9 +45,7 @@ func instantiate(ctx context.Context) error {
 		return leg.Bail("%v", err)
 	}
 
-	// Handoff mode: after backfill the daemon is left running (catchup + live
-	// ingestion) so this box becomes the endpoint load test's target RPC, which
-	// drives it over the VPC — hence the non-loopback bind.
+	// the chained peer drives this box over the VPC, hence the non-loopback bind
 	serveAfter := os.Getenv("SERVE_AFTER_BACKFILL") == "true"
 	endpoint := "localhost:" + rpcPort
 	if serveAfter {

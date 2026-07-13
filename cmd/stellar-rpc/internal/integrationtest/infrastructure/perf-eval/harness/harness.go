@@ -9,9 +9,7 @@
 //	S3Fetcher      on-box: streams (and sha-verifies) corpus objects from S3.
 //	PublishResult  on-box: writes the ok/fail result object the gatherer reads.
 //	RunStreaming   on-box: runs a child, streaming output with a bounded tail.
-//	ServeReady     box-to-box: the rendezvous object (plus AwaitHealthy and the
-//	               PutJSON/GetJSON primitives) through which a handoff box
-//	               advertises its serving RPC to a chained leg.
+//	ServeReady     box-to-box: the leg-chaining rendezvous object
 //
 // Leg-specific work (which corpus to fetch, which task to run) lives in each
 // leg's own on-box runner command; Gather is its own command (perf-eval/gather)
@@ -57,9 +55,7 @@ func Env(key, def string) string {
 
 // LegDeadline returns the instant a box-side runner should bail by: the leg
 // budget (BUDGET_MINUTES from the user-data preamble) after box boot, minus
-// margin, so the box publishes its own verdict just before the GHA poller
-// gives up at budget-15m. ok is false when BUDGET_MINUTES is unset (local
-// runs) or boot time is unreadable -- callers then run unbounded.
+// margin. ok is false when BUDGET_MINUTES is unset.
 func LegDeadline(margin time.Duration) (time.Time, bool) {
 	mins, err := strconv.Atoi(os.Getenv("BUDGET_MINUTES"))
 	if err != nil || mins <= 0 {

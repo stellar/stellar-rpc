@@ -1,11 +1,6 @@
 # Blaster roster for the endpoint load-test leg: every read-path endpoint the
 # leg blasts (in serial), with its RPS envelope. Blaster steps each endpoint
-# from start_rps (the min) to rps (the max) over --ramp-up, then holds rps for
-# the rest of --duration.
-#
-# PLACEHOLDER VALUES: the real per-endpoint load profile is TBD; these exist so
-# the leg runs end to end. input_data_path is intentionally absent -- the
-# runner passes --input-data-path (setting both is a blaster error).
+# from start_rps to rps over --ramp-up and holds rps for the rest of --duration.
 
 [endpoints.getHealth]
 rps = 15

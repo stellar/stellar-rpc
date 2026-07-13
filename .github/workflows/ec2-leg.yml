@@ -5,9 +5,7 @@ name: Perf-eval EC2 leg (ephemeral)
 # Does not post to the PR -- the coordinator owns human-facing output.
 # Box bootstrap: perf-eval/bootstrap-common.sh + the leg script (inputs.leg_script);
 # runner-side polling: perf-eval/gather.
-# Legs can chain: keep_instance leaves a passing leg's box running (it keeps
-# serving for a successor), and the successor names it via adopt_run_label so
-# this workflow's cleanup also covers the inherited box.
+# Legs can chain via keep_instance + adopt_run_label (see rendezvous.go).
 
 on:
   # workflow_call is the only trigger: a leg runs through the coordinator.
@@ -66,12 +64,12 @@ on:
         type: string
         default: ''
       keep_instance:
-        description: 'Leave the box running after a passing leg so a chained leg can take it over (the box then owns its shutdown; its self-terminate ceiling still backstops it). A failing leg terminates as usual.'
+        description: 'Leave a passing leg''s box running for a chained successor; the box then owns its shutdown. A failing leg terminates as usual.'
         required: false
         type: boolean
         default: false
       adopt_run_label:
-        description: 'run_label of a prior keep_instance leg whose box this leg adopts: it is terminated alongside this leg''s own box'
+        description: 'run_label of a prior keep_instance leg whose box this leg also terminates'
         required: false
         type: string
         default: ''
@@ -130,8 +128,7 @@ jobs:
 
       # Harness (gather, bootstrap-common.sh, leg script) and the benchmarked
       # code come from one SHA: target_ref is checked out here and the box rebuilds
-      # it. Tradeoff: an ad-hoc dispatch against an old ref also runs that ref's
-      # harness.
+      # it.
       - name: Checkout target ref
         uses: actions/checkout@v4
         with:
@@ -152,9 +149,6 @@ jobs:
           role-duration-seconds: ${{ steps.deadlines.outputs.role_seconds }}
 
       - name: Render user-data
-        # The scripts ship verbatim; parameters travel in a preamble so the bytes
-        # that run on the box match the bytes in git. Order is:
-        #   preamble exports -> bootstrap-common.sh -> the leg run script.
         env:
           EXTRA_ENV: ${{ inputs.extra_env }}
         run: |
@@ -271,9 +265,8 @@ jobs:
             exit 1
           fi
 
-      # keep_instance hands a passing leg's box to its chained successor, which
-      # names it via adopt_run_label and cleans it up here (tag-discovered: the
-      # adopter has no job-level handle on the earlier leg's instance id).
+      # The adopted box is tag-discovered: the adopter has no job-level handle
+      # on the earlier leg's instance id.
       - name: Terminate instance
         if: always()
         env:

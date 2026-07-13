@@ -4,10 +4,6 @@ name: Load test coordinator
 # sticky comment on the release PR. Owns reporting of perf eval results to the PR.
 # Legs report through S3 at runs/<run_id>/<run_label>/result.json; adding an
 # independent leg is one roster entry in the plan job plus its box script.
-# The backfill -> endpoint-load-test pair is chained instead: backfill keeps its
-# box (DB + serving RPC) alive on success, and the blaster job depends on it,
-# rendezvouses through S3, and adopts the box for cleanup -- so those two are
-# explicit jobs rather than matrix entries.
 
 defaults:
   run:
@@ -92,11 +88,8 @@ jobs:
       leg_script: ${{ matrix.leg.script }}
       budget_minutes: ${{ matrix.leg.budget }}
 
-  # Chained pair: the backfill box keeps its DB + RPC serving on success
-  # (keep_instance + SERVE_AFTER_BACKFILL), advertises itself via a serve-ready
-  # object once captive-core catchup finishes, and holds until its peer's
-  # result appears (the stop signal). Each side derives the other's S3 keys
-  # from its own RESULT_KEY + CHAIN_PEER, so only the peer labels are wired.
+  # Chained pair, serving side: a pass keeps this box's RPC serving for the
+  # blaster leg.
   backfill:
     name: Backfill ingestion
     needs: plan
@@ -109,13 +102,11 @@ jobs:
       budget_minutes: 345
       keep_instance: true
       # SERVE_DEADLINE must outlast the blaster leg's budget-derived bail point
-      # (blaster budget - 25m from its boot, which is ~this box's serve start)
       extra_env: |
         export SERVE_AFTER_BACKFILL=true CHAIN_PEER=blaster
         export SERVE_DEADLINE=235m
 
-  # Runs only once backfill passed (its box is then serving); bootstraps its own
-  # box, which overlaps the backfill box's captive-core catchup, then blasts it.
+  # Chained pair, driving side: runs once backfill's box is serving, then blasts it.
   blaster:
     name: Endpoint load test
     needs: [plan, backfill]
@@ -125,8 +116,7 @@ jobs:
       target_ref: ${{ needs.plan.outputs.target_sha }}
       run_label: blaster
       leg_script: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/endpoint-load-test/run-blaster.sh
-      # the budget is the leg's only deadline: the box runs its phases naively
-      # and bails ~25m before this to publish its own verdict
+      # the budget is the leg's only deadline, box runs its phases naively
       budget_minutes: 255
       # this box holds only toolchain + shallow repos; the 500GB default is
       # for boxes that ingest

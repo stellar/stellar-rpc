@@ -19,21 +19,14 @@ const rpcPort = "8000"
 
 const localURL = "http://localhost:" + rpcPort
 
-// servePhase is the handoff-mode tail of the backfill leg: the daemon is left
-// running so this box becomes the endpoint load test's target RPC. It waits
-// out captive-core catchup, advertises the box through a serve-ready object,
-// then holds until the chained leg's result appears (or the serve deadline
-// passes) before stopping the daemon and powering the box off. Failures here
-// never touch the already-published backfill verdict: they surface through
-// the serve-ready object and the chained leg's own deadlines.
+// servePhase is the serving side of the leg chaining protocol: await catchup,
+// advertise, hold for the peer's result, power off.
 func servePhase(ctx context.Context, leg *harness.Leg, daemon *daemonHandle) {
 	defer schedulePoweroff(ctx) // runs last (after daemon.Stop): the box owns its shutdown
 	defer daemon.Stop()
 
-	// One deadline bounds the whole serve phase (catchup + holding for the
-	// chained leg's result): a slow catchup eats serving time rather than
-	// failing the handoff. This is the box's lifecycle bound -- no GHA job
-	// watches it anymore -- and the rescheduled shutdown ceiling backstops it.
+	// one deadline bounds catchup + holding, so a slow catchup eats serving
+	// time rather than failing the handoff
 	serveDeadline := harness.DurationEnv("SERVE_DEADLINE", 195*time.Minute)
 	readyKey := path.Join(path.Dir(leg.ResultKey), harness.ServeReadyName)
 	// the chained peer's result object is this box's stop signal

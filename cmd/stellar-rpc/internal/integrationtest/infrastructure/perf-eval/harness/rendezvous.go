@@ -28,11 +28,16 @@ func SiblingKey(resultKey, peerLabel, name string) string {
 	return path.Join(path.Dir(path.Dir(resultKey)), peerLabel, name)
 }
 
-// ServeReady is the rendezvous object a handoff box (one that keeps its RPC
-// serving after its own leg's result is published) posts to S3 so a chained
-// leg can find and drive it. The consumer contract is Status/Error/RunID/URL;
-// the remaining fields are S3 debugging breadcrumbs (the chained leg re-probes
-// getHealth for live ledger bounds rather than trusting these).
+// ServeReady is the S3 object behind leg chaining, and this comment is the
+// protocol's one canonical telling. The serving leg's GHA job sets
+// keep_instance, so a pass leaves its box up; the box posts a ServeReady
+// advertising its RPC, holds until the chained peer's result object appears
+// (the stop signal) or its serve deadline passes, then powers itself off. The
+// peer polls for the ServeReady, probes the URL, and drives the box; the
+// peer's job also adopts the box (adopt_run_label) so GHA cleanup covers it
+// regardless. Each side derives the other's keys via SiblingKey. The consumer
+// contract is Status/Error/RunID/URL; the remaining fields are debugging
+// breadcrumbs (the peer re-probes getHealth rather than trusting them).
 type ServeReady struct {
 	SchemaVersion int    `json:"schemaVersion"`
 	Status        string `json:"status"` // "ready" or "failed"

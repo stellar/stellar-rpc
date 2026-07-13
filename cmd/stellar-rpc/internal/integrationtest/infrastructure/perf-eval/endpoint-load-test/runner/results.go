@@ -4,11 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
-
-	"github.com/pelletier/go-toml"
 )
 
 // endpointStats is one endpoint's row of the report, distilled from blaster's
@@ -16,7 +13,7 @@ import (
 type endpointStats struct {
 	Name      string
 	TargetRPS float64
-	Limit     uint32 // effective pagination limit; 0 = endpoint doesn't paginate
+	Limit     uint64 // effective pagination limit; 0 = endpoint doesn't paginate
 	Requests  uint64
 	Errors    uint64
 	P50       float64
@@ -25,52 +22,16 @@ type endpointStats struct {
 	P999      float64
 }
 
-// defaultLimits are the per-request result limits blaster substitutes when a
-// paginated endpoint's config omits limit (mirrors its GetEndpointLimit).
-var defaultLimits = map[string]uint32{
-	"getTransactions": 50,
-	"getLedgers":      50,
-	"getEvents":       100,
-}
-
-// readLimits returns the effective pagination limit per paginated endpoint in
-// the blaster config: the configured value when set, else blaster's default.
-func readLimits(configPath string) (map[string]uint32, error) {
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return nil, err
-	}
-	var cfg struct {
-		Endpoints map[string]struct {
-			Limit uint32 `toml:"limit"`
-		} `toml:"endpoints"`
-	}
-	if err := toml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parsing %s: %w", configPath, err)
-	}
-	limits := make(map[string]uint32)
-	for name, ep := range cfg.Endpoints {
-		def, paginated := defaultLimits[name]
-		if !paginated {
-			continue
-		}
-		limits[name] = ep.Limit
-		if ep.Limit == 0 {
-			limits[name] = def
-		}
-	}
-	return limits, nil
-}
-
-// summarize distills blaster's results JSON into per-endpoint rows (annotated
-// with their effective limits), sorted by endpoint name (blaster's run order).
-func summarize(data []byte, limits map[string]uint32) ([]endpointStats, error) {
+// summarize distills blaster's results JSON into per-endpoint rows, sorted by
+// endpoint name (blaster's run order).
+func summarize(data []byte) ([]endpointStats, error) {
 	var res struct {
 		//nolint:tagliatelle // external schema: blaster emits snake_case
 		Endpoints map[string]struct {
 			TotalRequests uint64             `json:"total_requests"`
 			Errors        uint64             `json:"errors"`
 			TargetRPS     float64            `json:"target_rps"`
+			Limit         uint64             `json:"limit"`
 			Percentiles   map[string]float64 `json:"percentiles_ms"`
 		} `json:"endpoints"`
 	}
@@ -86,7 +47,7 @@ func summarize(data []byte, limits map[string]uint32) ([]endpointStats, error) {
 		rows = append(rows, endpointStats{
 			Name:      name,
 			TargetRPS: ep.TargetRPS,
-			Limit:     limits[name],
+			Limit:     ep.Limit,
 			Requests:  ep.TotalRequests,
 			Errors:    ep.Errors,
 			P50:       ep.Percentiles["p50.0"],
