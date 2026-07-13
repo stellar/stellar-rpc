@@ -204,10 +204,15 @@ func TestLookup_UnseenKeyBehavior(t *testing.T) {
 	assert.Positive(t, collidedSlot, "some unseen keys collide into the slot space — that's why fingerprints exist")
 }
 
-func TestBuild_EmptyIndexErrors(t *testing.T) {
+func TestBuild_EmptyIndexSucceeds(t *testing.T) {
+	// Zero terms builds a valid empty index rather than erroring.
 	empty := events.NewBitmaps()
-	_, err := buildMPHF(context.Background(), empty, filepath.Join(t.TempDir(), "index.hash"))
-	assert.ErrorIs(t, err, ErrEmptyBuildSet)
+	m, err := buildMPHF(context.Background(), empty, filepath.Join(t.TempDir(), "index.hash"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = m.Close() })
+	assert.True(t, m.isEmpty())
+	_, lerr := m.Lookup(events.ComputeTermKey([]byte("anything"), events.FieldContractID))
+	assert.ErrorIs(t, lerr, ErrKeyNotFound)
 }
 
 func TestOpen_RoundTripsBuiltFile(t *testing.T) {

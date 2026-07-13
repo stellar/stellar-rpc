@@ -257,9 +257,9 @@ func TestColdReader_AllEmptyChunkYieldsNothing(t *testing.T) {
 }
 
 // TestColdReader_EventlessChunk round-trips a chunk with zero events
-// (e.g. a pre-Soroban backfill range): WriteColdIndex publishes the
-// empty-index sentinel, and every read path resolves cleanly — no
-// missing-file errors, no special casing for the orchestrator.
+// (e.g. a pre-Soroban backfill range): WriteColdIndex publishes a real
+// empty index, and every read path resolves cleanly — no missing-file
+// errors, no special casing for the orchestrator.
 func TestColdReader_EventlessChunk(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 0, 2)
@@ -293,19 +293,22 @@ func TestColdReader_EventlessChunk(t *testing.T) {
 	assert.Equal(t, 2, offsets.LedgerCount())
 }
 
-// TestColdReader_EmptyIndexOverNonEmptyPackErrors covers the
-// cross-check guarding the empty-index sentinel: a zero-length
-// index.hash is only valid when events.pack is also empty. A torn
-// write that died at zero bytes (buildMPHF writes the final path
-// directly, so a crash can truncate it) — or a mispaired artifact —
-// must fail loudly at the first lookup, not silently match nothing.
+// TestColdReader_EmptyIndexOverNonEmptyPackErrors covers the cross-check
+// guarding a zero-term index: it is only valid when events.pack is also
+// empty. A real empty index.hash mispaired onto a chunk whose events.pack
+// holds events must fail loudly at the first lookup, not silently match
+// nothing.
 func TestColdReader_EmptyIndexOverNonEmptyPackErrors(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 2, 1)
 	require.NotEmpty(t, payloads)
 
-	// Truncate index.hash to zero bytes, simulating the torn write.
-	require.NoError(t, os.WriteFile(filepath.Join(dir, IndexHashName(chunkID)), nil, 0o644))
+	// Mispair a real empty index.hash (from an eventless build of the same
+	// chunk) onto this non-empty chunk.
+	emptyDir, _ := buildColdFixture(t, chunkID, 0, 1)
+	emptyHash, err := os.ReadFile(filepath.Join(emptyDir, IndexHashName(chunkID)))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, IndexHashName(chunkID)), emptyHash, 0o644))
 
 	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
 	require.NoError(t, err, "Open is lazy — the mismatch surfaces at first Lookup")
@@ -313,8 +316,8 @@ func TestColdReader_EmptyIndexOverNonEmptyPackErrors(t *testing.T) {
 
 	// The mismatch must surface as an error, not a clean miss (nil, no error).
 	_, lerr := cr.LookupKeys(context.Background(), []events.TermKey{contractTermKey(payloads[0])})
-	require.Error(t, lerr)
-	assert.Contains(t, lerr.Error(), "empty-index sentinel")
+	require.Error(t, lerr, "a mispaired empty index must error, not miss silently (nil bitmap)")
+	assert.Contains(t, lerr.Error(), "holds zero terms")
 }
 
 // OpenColdReader is non-blocking: it does no I/O, so a missing or

@@ -17,6 +17,7 @@ import (
 	"github.com/stellar/streamhash"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores"
 )
 
 // ──────────────────────────────────────────────────────────────────
@@ -221,11 +222,28 @@ func TestBuildColdIndex_LargeFilesSpanMultipleBuffers(t *testing.T) {
 	}
 }
 
+// assertEmptyColdIndex checks that idxPath is a valid empty cold index: it
+// opens cleanly, carries its coverage's [wantMin, wantMax] metadata, and every
+// lookup misses.
+func assertEmptyColdIndex(t *testing.T, idxPath string, wantMin, wantMax uint32) {
+	t.Helper()
+	assert.FileExists(t, idxPath)
+	r, err := OpenColdReader(idxPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+	// The empty index must still carry correct coverage bounds.
+	assert.Equal(t, wantMin, r.MinLedger(), "empty index minLedger")
+	assert.Equal(t, wantMax, r.MaxLedger(), "empty index maxLedger")
+	_, err = r.Get(randHash(testRNG(99)))
+	require.ErrorIs(t, err, stores.ErrNotFound)
+}
+
 func TestBuildColdIndex_NoInputs(t *testing.T) {
+	// No .bin files at all: streamhash now builds a valid empty index rather
+	// than refusing.
 	idxPath := filepath.Join(t.TempDir(), indexFileName(0))
-	err := BuildColdIndex(context.Background(), nil, idxPath, 2, 2)
-	require.ErrorIs(t, err, ErrEmptyBuildSet)
-	assert.NoFileExists(t, idxPath)
+	require.NoError(t, BuildColdIndex(context.Background(), nil, idxPath, 2, 2))
+	assertEmptyColdIndex(t, idxPath, 2, 2)
 }
 
 func TestBuildColdIndex_MaxBelowMinErrors(t *testing.T) {
@@ -239,9 +257,9 @@ func TestBuildColdIndex_MaxBelowMinErrors(t *testing.T) {
 }
 
 func TestBuildColdIndex_AllEmptyInputs(t *testing.T) {
-	// .bin files that exist but declare zero entries: the group has no
-	// keys, so the build refuses with ErrEmptyBuildSet and writes no
-	// index.
+	// .bin files that exist but declare zero entries: the build produces a
+	// valid empty index rather than failing, so the backfill advances past a
+	// quiet range instead of stalling (#826).
 	dir := t.TempDir()
 	chunks := []chunk.ID{5, 6}
 	inputs := make([]string, 0, len(chunks))
@@ -251,9 +269,8 @@ func TestBuildColdIndex_AllEmptyInputs(t *testing.T) {
 		inputs = append(inputs, p)
 	}
 	idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
-	err := BuildColdIndex(context.Background(), inputs, idxPath, fixtureMinLedger(), fixtureMaxLedger())
-	require.ErrorIs(t, err, ErrEmptyBuildSet)
-	assert.NoFileExists(t, idxPath)
+	require.NoError(t, BuildColdIndex(context.Background(), inputs, idxPath, fixtureMinLedger(), fixtureMaxLedger()))
+	assertEmptyColdIndex(t, idxPath, fixtureMinLedger(), fixtureMaxLedger())
 }
 
 func TestBuildColdIndex_MissingInputErrors(t *testing.T) {
