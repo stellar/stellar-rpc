@@ -432,6 +432,67 @@ func TestOpenReadOnly_ReadsCommittedAndRejectsWrites(t *testing.T) {
 	require.Error(t, err, "read-only DB must reject writes")
 }
 
+// TestOpenReadOnly_SkipsEventsWarmup pins #834: a read-only (freeze/probe) open is
+// a ledgers-only view that never runs eventstore's index-CF warmup scan, while a
+// read-WRITE open still warms. The proof is a poisoned events-index row that
+// warmup's key-length check rejects: the write open fails on it (warmup ran), the
+// read-only open ignores it (warmup skipped) and still serves the ledgers-only
+// surface — MaxCommittedSeq and Source() byte-for-byte — that freeze/probe use.
+func TestOpenReadOnly_SkipsEventsWarmup(t *testing.T) {
+	chunkID := chunk.ID(0)
+	first := chunkID.FirstLedger()
+	dir := t.TempDir()
+
+	// Writer: ingest two ledgers, capture the exact wire bytes, then close.
+	db, err := Open(dir, chunkID, silentLogger())
+	require.NoError(t, err)
+	want := map[uint32][]byte{}
+	for _, seq := range []uint32{first, first + 1} {
+		raw := zeroTxLCM(t, seq)
+		want[seq] = raw
+		_, ierr := db.IngestLedger(seq, xdr.LedgerCloseMetaView(raw))
+		require.NoError(t, ierr)
+	}
+	require.NoError(t, db.Close())
+
+	// Poison the events index with a malformed row (wrong key length). warmup's
+	// index scan rejects it; a scan-skipping open never sees it. Written through a
+	// bare read-write open of the same multi-CF DB, closed to free the LOCK.
+	raw, err := rocksdb.New(config(dir, silentLogger(), false, true))
+	require.NoError(t, err)
+	require.NoError(t, raw.Put(eventstore.IndexCF, []byte("bad"), nil))
+	require.NoError(t, raw.Close())
+
+	// Read-WRITE open warms → the poisoned index row fails the scan.
+	_, werr := OpenExisting(dir, chunkID, silentLogger())
+	require.ErrorContains(t, werr, "events_index key length",
+		"a read-write open must run the events warmup scan and reject the poison")
+
+	// Read-only open skips the warmup → opens clean despite the poison.
+	ro, err := OpenReadOnly(dir, chunkID, silentLogger())
+	require.NoError(t, err, "read-only open must skip the events warmup and ignore the poison")
+	t.Cleanup(func() { require.NoError(t, ro.Close()) })
+
+	// Probe surface: MaxCommittedSeq resolves through the skipped open.
+	seq, ok, err := ro.MaxCommittedSeq()
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, first+1, seq)
+
+	// Freeze surface: Source() yields the committed ledgers byte-for-byte.
+	got := map[uint32][]byte{}
+	for b, err := range ro.Source().RawLedgers(context.Background(), ledgerbackend.UnboundedRange(first)) {
+		require.NoError(t, err)
+		s, serr := xdr.LedgerCloseMetaView(b).LedgerSequence()
+		require.NoError(t, serr)
+		got[s] = append([]byte(nil), b...) // b is borrowed; clone before the next step
+	}
+	assert.Equal(t, want, got, "freeze reads are byte-identical through the warmup-skipped open")
+
+	// Structural safety: the ledgers-only view has no events facade to hand out.
+	assert.Panics(t, func() { ro.Events() }, "Events() on a ledgers-only view must fail loudly")
+}
+
 // TestIngestLedger_ClosedDBFails confirms a closed shared DB rejects ingest. The
 // closed-store guard is Store.Batch's authoritative lifecycle RLock + checkOpen
 // (the per-facade pre-checks were dropped in #30), so the surfaced sentinel is
