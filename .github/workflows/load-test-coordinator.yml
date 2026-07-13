@@ -56,10 +56,14 @@ jobs:
           SHA="$(git rev-parse HEAD)"
           PR="$(gh pr list --repo "${{ github.repository }}" --state open \
                   --head "$REF" --json number --jq '.[0].number // ""' 2>/dev/null || true)"
+          LEGS='[
+            {"label":"Apply-load ingestion","run_label":"apply-load","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh","budget":225},
+            {"label":"Backfill ingestion","run_label":"backfill","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/run-backfill.sh","budget":345}
+          ]'
           {
             echo "target_sha=$SHA"
             echo "pr_number=$PR"
-            echo 'legs=[{"label":"Apply-load ingestion","run_label":"apply-load","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh","budget":225},{"label":"Backfill ingestion","run_label":"backfill","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/run-backfill.sh","budget":345}]'
+            echo "legs=$(jq -c . <<<"$LEGS")"
           } >> "$GITHUB_OUTPUT"
 
   # The fan-out: one matrix entry per leg.
