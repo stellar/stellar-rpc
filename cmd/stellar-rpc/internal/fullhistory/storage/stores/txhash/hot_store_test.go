@@ -49,7 +49,7 @@ func openTestHotStoreAt(t *testing.T, path string) (*HotStore, *rocksdb.Store) {
 		Path:           path,
 		ColumnFamilies: CFNames(),
 		Logger:         silentLogger(),
-		Tuning:         Tuning(),
+		PerCFOptions:   CFOptions(),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })

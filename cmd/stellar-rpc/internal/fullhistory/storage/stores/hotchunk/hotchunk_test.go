@@ -52,7 +52,7 @@ func assertWriteItems(t *testing.T, rep LedgerReport, txhash int) {
 	assert.Equal(t, 1, rep.Phases[PhaseEvents].Items, "events items")
 }
 
-// TestConfig_PerCFOptionRouting asserts the txhash Tuning knobs reach ONLY the
+// TestConfig_PerCFOptionRouting asserts the txhash calibration reaches ONLY the
 // txhash CF: the ledger CF gets no bloom (it is never probed for missing keys)
 // and the events CFs keep their own compression/block-size overrides. Asserted
 // at the config-construction seam because grocksdb options can't be read back

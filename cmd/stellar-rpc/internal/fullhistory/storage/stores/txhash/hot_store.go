@@ -44,28 +44,6 @@ func NewWithStore(store *rocksdb.Store) *HotStore {
 // the hotchunk shared-DB opener can register it alongside the other CFs.
 func CFNames() []string { return []string{txhashCF} }
 
-// Tuning returns the DB-wide knobs the shared per-chunk DB adopts. The
-// standalone txhash instance was the only one that set them (ledger and
-// events rode on defaults), so its values are the pre-unification
-// instances' combined footprint.
-func Tuning() rocksdb.Tuning {
-	return rocksdb.Tuning{
-		// Background-job budget for the periodic memtable flushes.
-		MaxBackgroundJobs: 8,
-		MaxOpenFiles:      10_000,
-
-		// 512 MB block cache — bloom-filter blocks are the hot
-		// working set; the cache needs to hold recently-touched
-		// bloom blocks at scale.
-		BlockCacheMB: 512,
-
-		// 1 GB WAL cap. Graceful Close auto-Flushes (see
-		// rocksdb.Store.Close), so this cap only bounds ungraceful-shutdown
-		// recovery (kernel panic, power loss, OOM kill).
-		MaxTotalWalSizeMB: 1024,
-	}
-}
-
 // CFOptions returns the calibration the hotchunk opener installs on the
 // txhash CF alone. The workload is write-once / point-lookup; only it
 // earned this tuning — the other CFs ride on RocksDB defaults.

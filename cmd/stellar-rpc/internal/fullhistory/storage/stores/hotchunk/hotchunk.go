@@ -55,10 +55,33 @@ func ColumnFamilies() []string {
 	return slices.Concat(ledger.CFNames(), eventstore.CFNames(), txhash.CFNames())
 }
 
-// config builds the shared store's rocksdb.Config: DB-wide Tuning from
-// txhash (the only facade that historically set it) plus the per-CF options
-// merged from every facade — each CF keeps its pre-unification standalone
-// tuning; the ledgers CF rides on RocksDB defaults.
+// dbTuning is the DB-wide half of the shared store's configuration, owned
+// here because hotchunk owns the DB (each facade only configures its own
+// CFs). The values originate from the standalone txhash store's calibration
+// — the only pre-unification instance that set them.
+func dbTuning() rocksdb.Tuning {
+	return rocksdb.Tuning{
+		// Background-job budget for memtable flushes and the
+		// ledger/events compactions.
+		MaxBackgroundJobs: 8,
+		MaxOpenFiles:      10_000,
+
+		// 512 MB block cache — txhash bloom-filter blocks are the hot
+		// working set; the cache needs to hold recently-touched bloom
+		// blocks at scale.
+		BlockCacheMB: 512,
+
+		// 1 GB WAL cap. Graceful Close auto-Flushes (see
+		// rocksdb.Store.Close), so this cap only bounds
+		// ungraceful-shutdown recovery (kernel panic, power loss, OOM
+		// kill).
+		MaxTotalWalSizeMB: 1024,
+	}
+}
+
+// config builds the shared store's rocksdb.Config: the DB-wide dbTuning plus
+// the per-CF options merged from every facade — each CF keeps its
+// pre-unification standalone tuning; the ledgers CF rides on RocksDB defaults.
 func config(path string, logger *supportlog.Entry, readOnly, mustExist bool) rocksdb.Config {
 	perCF := eventstore.CFOptions()
 	maps.Copy(perCF, txhash.CFOptions())
@@ -66,7 +89,7 @@ func config(path string, logger *supportlog.Entry, readOnly, mustExist bool) roc
 		Path:           path,
 		ColumnFamilies: ColumnFamilies(),
 		Logger:         logger,
-		Tuning:         txhash.Tuning(),
+		Tuning:         dbTuning(),
 		PerCFOptions:   perCF,
 		ReadOnly:       readOnly,
 		MustExist:      mustExist,
