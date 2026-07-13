@@ -679,7 +679,6 @@ func TestStore_TuningRoundTrip(t *testing.T) {
 				Level0SlowdownWritesTrigger:    20,
 				Level0StopWritesTrigger:        36,
 				TargetFileSizeMB:               16,
-				MaxBytesForLevelBaseMB:         64,
 				BloomFilterBitsPerKey:          10,
 			},
 		},

@@ -50,10 +50,6 @@ type CFOptions struct {
 	// TargetFileSizeMB — size at which compaction produces new SSTs.
 	TargetFileSizeMB int
 
-	// MaxBytesForLevelBaseMB — byte budget for level 1; each later
-	// level is this × MaxBytesForLevelMultiplier (10, pinned).
-	MaxBytesForLevelBaseMB int
-
 	// BloomFilterBitsPerKey installs this CF's bloom filter; 0 = none —
 	// right for a CF never probed for keys it may not hold.
 	BloomFilterBitsPerKey int

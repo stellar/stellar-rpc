@@ -633,9 +633,6 @@ func applyCFOverride(o *grocksdb.Options, c CFOptions) {
 	if c.TargetFileSizeMB > 0 {
 		o.SetTargetFileSizeBase(uint64(c.TargetFileSizeMB) << 20)
 	}
-	if c.MaxBytesForLevelBaseMB > 0 {
-		o.SetMaxBytesForLevelBase(uint64(c.MaxBytesForLevelBaseMB) << 20)
-	}
 }
 
 // applyPinnedCFOptions sets the per-CF values that hold for every

@@ -94,12 +94,7 @@ func CFOptions() map[string]rocksdb.CFOptions {
 			// 64 MB target file matches WriteBufferMB so one memtable
 			// flush produces one ~64 MB SST — fewer bloom checks per
 			// query at no-compaction scale.
-			// MaxBytesForLevelBaseMB is set explicitly even though it's
-			// irrelevant under DisableAutoCompactions (compaction never
-			// promotes past L0); explicit > implicit so a future reader
-			// doesn't have to derive that it's a no-op.
-			TargetFileSizeMB:       64,
-			MaxBytesForLevelBaseMB: 256,
+			TargetFileSizeMB: 64,
 
 			// 12 bits/key bloom (~0.4% false-positive) is tighter than
 			// the standard 10 bits/key because every false positive at
