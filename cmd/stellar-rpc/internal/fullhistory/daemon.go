@@ -89,18 +89,14 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	paths := cfg.ResolvePaths()
 
-	// --- Reject colliding roots BEFORE locking: LockRoots mkdirs each root,
-	// and the per-root flock cannot detect a nested pair. ---
+	// --- Reject shared roots, then create + fsync any missing ones. Single-
+	// process enforcement is the catalog's own RocksDB LOCK, taken next. ---
 	if err := paths.ValidateRoots(); err != nil {
 		return err
 	}
-
-	// --- Lock every configured storage root for the daemon's whole life. ---
-	locks, err := config.LockRoots(paths.RootsToLock()...)
-	if err != nil {
+	if err := config.PrepareRoots(paths.Roots()...); err != nil {
 		return err
 	}
-	defer locks.Release()
 
 	// --- Open the catalog (it owns its backing KV store; Close releases it). ---
 	cpi := geometry.ChunksPerTxhashIndex

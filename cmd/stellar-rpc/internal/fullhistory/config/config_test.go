@@ -235,13 +235,13 @@ func TestResolvePaths_OverridesWin(t *testing.T) {
 	assert.Equal(t, "/mnt/hot", p.HotStorage)
 }
 
-func TestRootsToLock_AllDistinctRoots(t *testing.T) {
+func TestRoots_AllDistinct(t *testing.T) {
 	cfg, err := ParseConfig([]byte(minimalValidConfig))
 	require.NoError(t, err)
-	roots := cfg.ResolvePaths().RootsToLock()
+	roots := cfg.ResolvePaths().Roots()
 	// Meta store + four immutable trees + hot storage = six roots.
 	require.Len(t, roots, 6)
-	assert.NotContains(t, roots, "/data", "the data dir parent is not itself locked")
+	assert.NotContains(t, roots, "/data", "the data dir parent is not itself a root")
 }
 
 func TestValidateRoots(t *testing.T) {
@@ -258,21 +258,12 @@ func TestValidateRoots(t *testing.T) {
 		require.NoError(t, base.ValidateRoots())
 	})
 
-	t.Run("shared-name-prefix siblings are not nested", func(t *testing.T) {
-		p := base
-		p.Ledgers = "/data/store"
-		p.Events = "/data/storefront" // name prefix of a sibling, NOT inside it
-		require.NoError(t, p.ValidateRoots())
-	})
-
 	t.Run("duplicate roots rejected", func(t *testing.T) {
 		p := base
 		p.HotStorage = p.Catalog
 		err := p.ValidateRoots()
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "same path")
-		assert.Contains(t, err.Error(), "catalog")
-		assert.Contains(t, err.Error(), "hot")
+		assert.Contains(t, err.Error(), "more than one store")
 	})
 
 	t.Run("duplicate via unclean spelling rejected", func(t *testing.T) {
@@ -280,31 +271,14 @@ func TestValidateRoots(t *testing.T) {
 		p.HotStorage = "/data/../data/catalog/rocksdb/" // same tree, different spelling
 		err := p.ValidateRoots()
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "same path")
+		assert.Contains(t, err.Error(), "more than one store")
 	})
 
-	t.Run("filesystem root nests everything", func(t *testing.T) {
+	t.Run("nested roots are allowed", func(t *testing.T) {
+		// Deliberate: prune and discard delete per-chunk paths only, never a
+		// whole root, so a root inside another root loses nothing.
 		p := base
-		p.Ledgers = "/" // the one cleaned path that ends in a separator
-		err := p.ValidateRoots()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "nested inside")
-		assert.Contains(t, err.Error(), "ledgers")
-	})
-
-	t.Run("nested root rejected either direction", func(t *testing.T) {
-		p := base
-		p.Events = "/data/ledgers/events" // inside the ledgers root
-		err := p.ValidateRoots()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "nested inside")
-		assert.Contains(t, err.Error(), "events")
-		assert.Contains(t, err.Error(), "ledgers")
-
-		q := base
-		q.Ledgers = "/data/hot/ledgers" // later root as the inner one
-		err = q.ValidateRoots()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "nested inside")
+		p.Events = "/data/ledgers/events"
+		require.NoError(t, p.ValidateRoots())
 	})
 }

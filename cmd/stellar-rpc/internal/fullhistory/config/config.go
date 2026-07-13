@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/pelletier/go-toml"
 
@@ -232,13 +231,11 @@ func (cfg Config) ResolvePaths() Paths {
 	}
 }
 
-// RootsToLock returns the distinct storage roots that must each carry a
-// single-process flock: the catalog, every immutable storage tree, and the
-// hot-storage tree (design "Single-process enforcement"). The data dir itself
-// is NOT locked — only the leaf roots a second daemon could independently point
-// at; locking the shared parent would miss two daemons with disjoint data dirs
-// that share one artifact tree. Feed the result to LockRoots (config_lock.go).
-func (p Paths) RootsToLock() []string {
+// Roots returns the distinct storage roots: the catalog, every immutable
+// storage tree, and the hot-storage tree. The data dir itself is NOT a root —
+// only the leaf trees a second daemon could independently point at. Feed the
+// result to ValidateRoots + PrepareRoots (config_roots.go).
+func (p Paths) Roots() []string {
 	return []string{
 		p.Catalog,
 		p.Ledgers,
@@ -249,61 +246,27 @@ func (p Paths) RootsToLock() []string {
 	}
 }
 
-// rootNames labels RootsToLock's entries, positionally, with their [storage]
-// keys for operator-facing errors.
-//
-//nolint:gochecknoglobals // immutable label table mirroring RootsToLock
-var rootNames = []string{"catalog", "ledgers", "events", "txhash_raw", "txhash_index", "hot"}
-
-// ValidateRoots rejects a Paths whose storage roots collide: two roots
-// resolving to the same path, or one root nested inside another. A shared
-// or nested pair silently puts one store's tree inside another's, where a
-// retention prune of the outer tree can delete the inner store's only
-// copy — and the per-root flock (config_lock.go) cannot catch nesting,
-// since each LOCK file lives at its root's own top level.
+// ValidateRoots rejects two storage roots resolving to the same path — the
+// stores would write into each other's trees. Nesting is deliberately
+// allowed: no operation ever removes a whole root (prune and discard delete
+// per-chunk paths only), so a root inside another root loses nothing.
 func (p Paths) ValidateRoots() error {
-	roots := p.RootsToLock()
-	abs := make([]string, len(roots))
-	for i, r := range roots {
+	seen := make(map[string]struct{}, len(p.Roots()))
+	for _, r := range p.Roots() {
 		a, err := filepath.Abs(r)
 		if err != nil {
-			return fmt.Errorf("resolve storage root %s (%q): %w", rootNames[i], r, err)
+			return fmt.Errorf("resolve storage root %q: %w", r, err)
 		}
-		abs[i] = a
-	}
-	for i := range abs {
-		for j := i + 1; j < len(abs); j++ {
-			if abs[i] == abs[j] {
-				return fmt.Errorf("storage roots %s and %s resolve to the same path (%q); every root must be a distinct tree",
-					rootNames[i], rootNames[j], abs[i])
-			}
-			outer, inner := i, j
-			if isAncestorDir(abs[j], abs[i]) {
-				outer, inner = j, i
-			}
-			if isAncestorDir(abs[outer], abs[inner]) {
-				return fmt.Errorf("storage root %s (%q) is nested inside %s (%q); every root must be a distinct, non-nested tree",
-					rootNames[inner], abs[inner], rootNames[outer], abs[outer])
-			}
+		if _, dup := seen[a]; dup {
+			return fmt.Errorf("storage root %q is configured for more than one store; every root must be a distinct tree", a)
 		}
+		seen[a] = struct{}{}
 	}
 	return nil
 }
 
-// isAncestorDir reports whether inner lives strictly inside outer. Both
-// must already be absolute, cleaned paths (filepath.Abs does both). A
-// cleaned path only ends in a separator when it IS the filesystem root —
-// appending another would build the never-matching prefix "//" and let
-// everything nest un-detected under a root of "/".
-func isAncestorDir(outer, inner string) bool {
-	if !strings.HasSuffix(outer, string(filepath.Separator)) {
-		outer += string(filepath.Separator)
-	}
-	return len(inner) > len(outer) && strings.HasPrefix(inner, outer)
-}
-
 // NewLayoutFromPaths adapts a resolved Paths into a geometry.Layout, so the
-// flocked roots (RootsToLock) and the Layout's data roots can never disagree. It
+// prepared roots (Roots) and the Layout's data roots can never disagree. It
 // is the config package's bridge over geometry.NewLayoutFromRoots, which takes
 // plain strings to keep geometry free of any config dependency.
 func NewLayoutFromPaths(p Paths) geometry.Layout {
