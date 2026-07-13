@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/linxGnu/grocksdb"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,6 +50,38 @@ func assertWriteItems(t *testing.T, rep LedgerReport, txhash int) {
 	assert.Equal(t, 1, rep.Phases[PhaseLedgers].Items, "ledgers items")
 	assert.Equal(t, txhash, rep.Phases[PhaseTxhash].Items, "txhash items")
 	assert.Equal(t, 1, rep.Phases[PhaseEvents].Items, "events items")
+}
+
+// TestConfig_PerCFOptionRouting asserts the txhash calibration reaches ONLY the
+// txhash CF: the ledger CF gets no bloom (it is never probed for missing keys)
+// and the events CFs keep their own compression/block-size overrides. Asserted
+// at the config-construction seam because grocksdb options can't be read back
+// off a live DB.
+func TestConfig_PerCFOptionRouting(t *testing.T) {
+	perCF := config(t.TempDir(), silentLogger(), false, false).PerCFOptions
+
+	txCF := txhash.CFNames()[0]
+	assert.Equal(t, 12, perCF[txCF].BloomFilterBitsPerKey, "txhash CF keeps its bloom")
+	assert.Equal(t, 64, perCF[txCF].WriteBufferMB, "txhash CF keeps its write buffer")
+	assert.True(t, perCF[txCF].DisableAutoCompactions, "txhash CF keeps compaction off")
+
+	ledgerCF := ledger.CFNames()[0]
+	assert.Zero(t, perCF[ledgerCF].BloomFilterBitsPerKey, "ledger CF gets no bloom")
+	assert.Zero(t, perCF[ledgerCF].WriteBufferMB, "ledger CF rides on RocksDB defaults")
+	assert.False(t, perCF[ledgerCF].DisableAutoCompactions, "ledger CF keeps auto-compaction")
+
+	assert.Equal(t, grocksdb.ZSTDCompression, perCF[eventstore.DataCF].Compression,
+		"events data CF keeps its ZSTD override")
+	assert.NotZero(t, perCF[eventstore.DataCF].BlockSize, "events data CF keeps its block-size override")
+	assert.Zero(t, perCF[eventstore.DataCF].BloomFilterBitsPerKey, "events data CF gets no bloom")
+}
+
+func TestConfig_DBWideTuningStaysShared(t *testing.T) {
+	tuning := config(t.TempDir(), silentLogger(), false, false).Tuning
+	assert.Equal(t, 512, tuning.BlockCacheMB)
+	assert.Equal(t, 1024, tuning.MaxTotalWalSizeMB)
+	assert.Equal(t, 8, tuning.MaxBackgroundJobs)
+	assert.Equal(t, 10_000, tuning.MaxOpenFiles)
 }
 
 func TestOpen_ValidatesInputs(t *testing.T) {

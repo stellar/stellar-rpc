@@ -133,13 +133,14 @@ func TestNew_TwoStoresSamePathCollide(t *testing.T) {
 
 func TestStore_ConstructAndOpenFailureFreesCacheAndBBTOs(t *testing.T) {
 	dir := t.TempDir()
-	tuning := Tuning{BlockCacheMB: 4, BloomFilterBitsPerKey: 10}
+	tuning := Tuning{BlockCacheMB: 4}
+	perCF := map[string]CFOptions{defaultCFName: {BloomFilterBitsPerKey: 10}}
 
-	holder, err := New(Config{Path: dir, Logger: silentLogger(), Tuning: tuning})
+	holder, err := New(Config{Path: dir, Logger: silentLogger(), Tuning: tuning, PerCFOptions: perCF})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = holder.Close() })
 
-	collider := &Store{cfg: Config{Path: dir, Logger: silentLogger(), Tuning: tuning}}
+	collider := &Store{cfg: Config{Path: dir, Logger: silentLogger(), Tuning: tuning, PerCFOptions: perCF}}
 	require.Error(t, collider.constructAndOpen())
 
 	assert.Nil(t, collider.cache)
@@ -665,18 +666,21 @@ func TestStore_TuningRoundTrip(t *testing.T) {
 		Path:   t.TempDir(),
 		Logger: newTestLogger(&buf),
 		Tuning: Tuning{
-			WriteBufferMB:                  8,
-			MaxWriteBufferNumber:           2,
-			Level0FileNumCompactionTrigger: 4,
-			Level0SlowdownWritesTrigger:    20,
-			Level0StopWritesTrigger:        36,
-			TargetFileSizeMB:               16,
-			MaxBytesForLevelBaseMB:         64,
-			MaxBackgroundJobs:              2,
-			MaxOpenFiles:                   500,
-			BlockCacheMB:                   4,
-			BloomFilterBitsPerKey:          10,
-			MaxTotalWalSizeMB:              16,
+			MaxBackgroundJobs: 2,
+			MaxOpenFiles:      500,
+			BlockCacheMB:      4,
+			MaxTotalWalSizeMB: 16,
+		},
+		PerCFOptions: map[string]CFOptions{
+			defaultCFName: {
+				WriteBufferMB:                  8,
+				MaxWriteBufferNumber:           2,
+				Level0FileNumCompactionTrigger: 4,
+				Level0SlowdownWritesTrigger:    20,
+				Level0StopWritesTrigger:        36,
+				TargetFileSizeMB:               16,
+				BloomFilterBitsPerKey:          10,
+			},
 		},
 	})
 	require.NoError(t, err)
