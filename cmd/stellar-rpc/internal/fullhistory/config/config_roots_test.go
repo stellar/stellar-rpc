@@ -28,7 +28,7 @@ func TestPrepareRoots_LeavesExistingRootsUntouched(t *testing.T) {
 	marker := filepath.Join(root, "existing-file")
 	require.NoError(t, os.WriteFile(marker, []byte("x"), 0o644))
 
-	require.NoError(t, PrepareRoots(root, root)) // duplicate spelling de-duplicated
+	require.NoError(t, PrepareRoots(root, root)) // a repeated root is a harmless no-op
 
 	_, err := os.Stat(marker)
 	require.NoError(t, err, "existing contents survive PrepareRoots")

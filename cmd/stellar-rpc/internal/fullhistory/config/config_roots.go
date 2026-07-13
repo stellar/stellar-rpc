@@ -23,10 +23,9 @@ import (
 // bytes and the atomic rename resolves the race: redundant work, not
 // corruption), and each hot chunk DB carries its own RocksDB LOCK.
 
-// PrepareRoots creates each distinct, non-empty root (if absent) and fsyncs
-// the new directory chain. Idempotent — existing roots are left untouched.
+// PrepareRoots creates each non-empty root (if absent) and fsyncs the new
+// directory chain. Idempotent — existing roots are left untouched.
 func PrepareRoots(roots ...string) error {
-	seen := make(map[string]struct{}, len(roots))
 	for _, root := range roots {
 		if root == "" {
 			continue
@@ -35,10 +34,6 @@ func PrepareRoots(roots ...string) error {
 		if err != nil {
 			return fmt.Errorf("resolve storage root %q: %w", root, err)
 		}
-		if _, dup := seen[abs]; dup {
-			continue
-		}
-		seen[abs] = struct{}{}
 
 		existing := durable.DeepestExistingDir(abs)
 		if err := os.MkdirAll(abs, 0o755); err != nil {
