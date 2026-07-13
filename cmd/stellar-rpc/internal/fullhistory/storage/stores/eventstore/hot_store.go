@@ -14,6 +14,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/rocksdb"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores"
 )
 
 // Column-family names used inside one chunk's hot RocksDB DB. The
@@ -92,12 +93,12 @@ var ErrLedgerOutOfOrder = errors.New("events: ledger out of order")
 // Concurrency:
 //
 //   - Writes (IngestLedgerToBatch) are single-writer (one goroutine per chunk).
-//   - Reads (Lookup, FetchEvents, All) take NO HotStore-level lock — they guard
+//   - Reads (LookupKeys, FetchEvents, All) take NO HotStore-level lock — they guard
 //     via chunkStore.IsClosed() and rely on the mirror's internal locks and
 //     RocksDB's thread-safety.
 //   - Metadata split after the caller-owned store is closed: ChunkID is
 //     infallible (cached, usable post-close); EventCount and
-//     Offsets return ErrClosed after close (Reader-interface contract).
+//     Offsets return stores.ErrStoreClosed after close (Reader-interface contract).
 type HotStore struct {
 	chunkStore *rocksdb.Store
 	chunkID    chunk.ID
@@ -134,12 +135,12 @@ func (h *HotStore) ChunkID() chunk.ID { return h.chunkID }
 
 // EventCount is the total number of events committed to this Chunk
 // so far. Equal to the next event-id IngestLedgerToBatch would assign.
-// Returns (0, ErrClosed) after the caller-owned store is closed. The Reader interface signature
+// Returns (0, stores.ErrStoreClosed) after the caller-owned store is closed. The Reader interface signature
 // is fallible to accommodate ColdReader's lazy metadata load; on the
-// hot side the value is always live and the error is only ErrClosed.
+// hot side the value is always live and the error is only stores.ErrStoreClosed.
 func (h *HotStore) EventCount() (uint32, error) {
 	if h.chunkStore.IsClosed() {
-		return 0, ErrClosed
+		return 0, stores.ErrStoreClosed
 	}
 	return h.offsets.TotalEvents(), nil
 }
@@ -160,40 +161,12 @@ func (h *HotStore) EventCount() (uint32, error) {
 // with the live backing array. Calling Append on the view would
 // silently fork it from the live data; the contract is read-only.
 //
-// Returns (nil, ErrClosed) after the caller-owned store is closed.
+// Returns (nil, stores.ErrStoreClosed) after the caller-owned store is closed.
 func (h *HotStore) Offsets() (*events.LedgerOffsets, error) {
 	if h.chunkStore.IsClosed() {
-		return nil, ErrClosed
+		return nil, stores.ErrStoreClosed
 	}
 	return h.offsets.View(), nil
-}
-
-// Lookup returns the bitmap of event IDs in this Chunk that match
-// the given term. The returned bitmap is an immutable snapshot of
-// the live mirror — writers publish new pointers via atomic.Store
-// (see ConcurrentBitmaps), so the caller never observes a mutating
-// bitmap. Callers MUST NOT mutate it themselves. See Reader.Lookup
-// and ConcurrentBitmaps.Get for the full contract. Returns
-// (nil, ErrTermNotFound) when the term has no matching events.
-// Returns (nil, ErrClosed) after the caller-owned store is closed.
-//
-// ctx is checked as a fast guard but the hot path does no blocking
-// I/O — the bitmap comes from the in-memory mirror.
-func (h *HotStore) Lookup(ctx context.Context, key events.TermKey) (*roaring.Bitmap, error) {
-	if h.chunkStore.IsClosed() {
-		return nil, ErrClosed
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	bm, err := h.mirror.Get(key)
-	if err != nil {
-		return nil, err
-	}
-	if bm == nil {
-		return nil, ErrTermNotFound
-	}
-	return bm, nil
 }
 
 // LookupKeys returns bitmaps for each key, aligned positionally with
@@ -207,7 +180,7 @@ func (h *HotStore) Lookup(ctx context.Context, key events.TermKey) (*roaring.Bit
 // uniformly.
 func (h *HotStore) LookupKeys(ctx context.Context, keys []events.TermKey) ([]*roaring.Bitmap, error) {
 	if h.chunkStore.IsClosed() {
-		return nil, ErrClosed
+		return nil, stores.ErrStoreClosed
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -241,14 +214,14 @@ func (h *HotStore) LookupKeys(ctx context.Context, keys []events.TermKey) ([]*ro
 // cancellable mid-flight.
 //
 // A missing row is an error: eventIDs only reach this path through
-// Lookup, which only returns IDs the mirror knows about — implying
-// RocksDB also has them. A miss indicates corruption or a
+// LookupKeys, which only returns IDs the mirror knows about —
+// implying RocksDB also has them. A miss indicates corruption or a
 // writer/reader mismatch, not a normal not-found case.
 //
-// After the caller-owned store is closed, returns ErrClosed.
+// After the caller-owned store is closed, returns stores.ErrStoreClosed.
 func (h *HotStore) FetchEvents(ctx context.Context, eventIDs []uint32) ([]events.Payload, error) {
 	if h.chunkStore.IsClosed() {
-		return nil, ErrClosed
+		return nil, stores.ErrStoreClosed
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -301,7 +274,7 @@ func (h *HotStore) FetchEvents(ctx context.Context, eventIDs []uint32) ([]events
 // Yielded Payloads are borrowed: ContractEventBytes aliases the iteration
 // buffer and is valid only until the next step — clone to retain.
 //
-// After the caller-owned store is closed, yields (zero Payload, ErrClosed) and stops.
+// After the caller-owned store is closed, yields (zero Payload, stores.ErrStoreClosed) and stops.
 // ctx is checked at entry and between iterator steps —
 // rocksdb.Store.IterateRange does not itself accept a ctx, so a
 // very slow Next() can block past a cancellation until the next
@@ -317,7 +290,7 @@ func (h *HotStore) FetchEvents(ctx context.Context, eventIDs []uint32) ([]events
 func (h *HotStore) FetchRange(ctx context.Context, start, count uint32) iter.Seq2[events.Payload, error] {
 	return func(yield func(events.Payload, error) bool) {
 		if h.chunkStore.IsClosed() {
-			yield(events.Payload{}, ErrClosed)
+			yield(events.Payload{}, stores.ErrStoreClosed)
 			return
 		}
 		if err := ctx.Err(); err != nil {
@@ -379,7 +352,7 @@ func (h *HotStore) FetchRange(ctx context.Context, start, count uint32) iter.Seq
 // concurrent ingest between r.All(ctx) returning the Seq2 and the
 // consumer's first range step is included in the snapshot.
 //
-// After the caller-owned store is closed, yields (zero Payload, ErrClosed) and stops.
+// After the caller-owned store is closed, yields (zero Payload, stores.ErrStoreClosed) and stops.
 func (h *HotStore) All(ctx context.Context) iter.Seq2[events.Payload, error] {
 	return func(yield func(events.Payload, error) bool) {
 		// FetchRange stops iterating after yielding an error; we

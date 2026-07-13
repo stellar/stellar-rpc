@@ -10,7 +10,6 @@ import (
 
 	"github.com/stellar/streamhash"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores"
 )
 
@@ -34,35 +33,6 @@ func TestParseLedgerRange_WrongSizeErrors(t *testing.T) {
 func TestParseLedgerRange_MaxBelowMinErrors(t *testing.T) {
 	_, _, err := ParseLedgerRange(EncodeLedgerRange(100, 99))
 	assert.ErrorIs(t, err, ErrInvalidMetadata)
-}
-
-func TestIndexBaseChunk(t *testing.T) {
-	const cpi = 1000
-	cases := []struct {
-		in   chunk.ID
-		want chunk.ID
-	}{
-		{0, 0},
-		{1, 0},
-		{999, 0},
-		{1000, 1000},
-		{1500, 1000},
-		{2000, 2000},
-	}
-	for _, tc := range cases {
-		assert.Equalf(t, tc.want, IndexBaseChunk(tc.in, cpi),
-			"IndexBaseChunk(%d, %d)", tc.in, cpi)
-	}
-}
-
-func TestIndexBaseChunk_ZeroPanics(t *testing.T) {
-	assert.Panics(t, func() { IndexBaseChunk(5, 0) },
-		"a zero group size must panic loudly, not divide-by-zero")
-}
-
-func TestIndexFileName(t *testing.T) {
-	assert.Equal(t, "00000000-txhash.idx", IndexFileName(0))
-	assert.Equal(t, "00001000-txhash.idx", IndexFileName(1000))
 }
 
 func TestColdReader_UnseenKeyReturnsNotFound(t *testing.T) {

@@ -14,8 +14,7 @@ import (
 
 // validateConfig is the config gate run before the daemon's run loop: (1) form-validate,
 // (2) on restart confirm earliest_ledger unchanged, (3) on first start resolve and
-// pin it. Returns the resolved earliest ledger for StartConfig; plain error returns
-// (the daemon loop owns fatal-and-surface).
+// pin it. Plain error returns (the daemon loop owns fatal-and-surface).
 func validateConfig(
 	ctx context.Context,
 	cfg config.Config,
@@ -23,9 +22,9 @@ func validateConfig(
 	tip NetworkTipBackend,
 	tipBackoff time.Duration,
 	tipMaxAttempts int,
-) (uint32, error) {
+) error {
 	if cat == nil {
-		return 0, errors.New("validateConfig requires a non-nil Catalog")
+		return errors.New("validateConfig requires a non-nil Catalog")
 	}
 
 	workers := deref(cfg.Backfill.Workers)
@@ -33,44 +32,41 @@ func validateConfig(
 
 	// --- 1. Form validation. ---
 	if workers < 1 {
-		return 0, fmt.Errorf("workers must be >= 1 (got %d) — a zero pool deadlocks executePlan", workers)
+		return fmt.Errorf("workers must be >= 1 (got %d) — a zero pool deadlocks executePlan", workers)
 	}
 	if maxRetries < 0 {
-		return 0, fmt.Errorf("max_retries must be >= 0 (got %d) — 0 means run once, no retry", maxRetries)
+		return fmt.Errorf("max_retries must be >= 0 (got %d) — 0 means run once, no retry", maxRetries)
 	}
 	// logging.format silently means text unless it is exactly "json", so reject any
 	// other value rather than let a typo drop the operator to text logging. Empty is
 	// the unset sentinel WithDefaults resolves to text, so it is not a typo.
 	if f := cfg.Logging.Format; f != "" && f != config.DefaultLogFormat && f != config.LogFormatJSON {
-		return 0, fmt.Errorf("logging.format must be %q or %q; got %q", config.DefaultLogFormat, config.LogFormatJSON, f)
+		return fmt.Errorf("logging.format must be %q or %q; got %q", config.DefaultLogFormat, config.LogFormatJSON, f)
 	}
 	// Form-validate here so the numeric case avoids chunk.IDFromLedger's sub-genesis panic below.
 	if err := validateEarliestForm(cfg.Retention.EarliestLedger); err != nil {
-		return 0, err
+		return err
 	}
 
 	earliestStored, earliestPinned, err := cat.EarliestLedger()
 	if err != nil {
-		return 0, fmt.Errorf("read earliest_ledger pin: %w", err)
+		return fmt.Errorf("read earliest_ledger pin: %w", err)
 	}
 
 	if earliestPinned {
 		// --- 2. Restart: confirm earliest_ledger unchanged. ---
-		if err := confirmEarliestUnchanged(cfg.Retention.EarliestLedger, earliestStored); err != nil {
-			return 0, err
-		}
-		return earliestStored, nil
+		return confirmEarliestUnchanged(cfg.Retention.EarliestLedger, earliestStored)
 	}
 
 	// --- 3. First start: resolve, then pin earliest_ledger. ---
 	earliest, err := resolveEarliestFirstStart(ctx, cfg.Retention.EarliestLedger, tip, tipBackoff, tipMaxAttempts)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	if err := cat.PinEarliestLedger(earliest); err != nil {
-		return 0, fmt.Errorf("pin earliest ledger (earliest=%d): %w", earliest, err)
+		return fmt.Errorf("pin earliest ledger (earliest=%d): %w", earliest, err)
 	}
-	return earliest, nil
+	return nil
 }
 
 // confirmEarliestUnchanged enforces earliest_ledger's restart immutability: genesis or

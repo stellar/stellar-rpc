@@ -39,9 +39,6 @@ func TestColdReader_RoundTripVariousSizes(t *testing.T) {
 			path, raws := writeFixturePack(t, firstSeq, n)
 			c := newTestColdReader(t, path)
 
-			first, err := c.FirstSeq()
-			require.NoError(t, err)
-			assert.Equal(t, firstSeq, first)
 			last, err := c.LastSeq()
 			require.NoError(t, err)
 			assert.Equal(t, firstSeq+uint32(n)-1, last)
@@ -171,7 +168,7 @@ func TestColdReader_LazyOpen(t *testing.T) {
 	require.NoError(t, err, "OpenColdReader must not do I/O")
 	t.Cleanup(func() { _ = c.Close() })
 
-	_, err = c.FirstSeq()
+	_, err = c.LastSeq()
 	require.Error(t, err)
 }
 
@@ -189,7 +186,7 @@ func TestColdReader_RejectsWrongAppDataSize(t *testing.T) {
 	c, err := OpenColdReader(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
-	_, err = c.FirstSeq()
+	_, err = c.LastSeq()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "AppData")
 }
@@ -207,7 +204,7 @@ func TestColdReader_RejectsWrongFormat(t *testing.T) {
 	c, err := OpenColdReader(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
-	_, err = c.FirstSeq()
+	_, err = c.LastSeq()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "format")
 }
@@ -242,7 +239,7 @@ func TestColdReader_LastSeqOverflowRejected(t *testing.T) {
 	c, err := OpenColdReader(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
-	_, err = c.FirstSeq()
+	_, err = c.LastSeq()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "overflows")
 }

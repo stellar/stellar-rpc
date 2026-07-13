@@ -55,9 +55,6 @@ func NewTxHashIndexLayout(chunksPerIndex uint32) (TxHashIndexLayout, error) {
 	return TxHashIndexLayout{cpi: chunksPerIndex}, nil
 }
 
-// ChunksPerIndex returns the configured cpi.
-func (l TxHashIndexLayout) ChunksPerIndex() uint32 { return l.cpi }
-
 // TxHashIndexID returns the index containing chunk c: c / cpi.
 func (l TxHashIndexLayout) TxHashIndexID(c chunk.ID) TxHashIndexID {
 	return TxHashIndexID(uint32(c) / l.cpi)

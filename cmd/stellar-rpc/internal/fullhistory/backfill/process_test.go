@@ -21,7 +21,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/ledger"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/txhash"
 )
 
 // ---------------------------------------------------------------------------
@@ -132,8 +131,7 @@ func TestProcessChunk_ProducesAllArtifactsAndFreezes(t *testing.T) {
 
 	// The .bin is readable as a sorted run (rule 5) — exercises the merged
 	// txhash cold writer's output via its reader.
-	entries, err := txhash.ReadColdBin(layout.TxHashBinPath(chunkID))
-	require.NoError(t, err)
+	entries := fhtest.ReadColdBin(t, layout.TxHashBinPath(chunkID))
 	require.Empty(t, entries, "zero-tx chunk yields an empty sorted .bin")
 
 	// The pack is a valid cold ledger pack covering the whole chunk.

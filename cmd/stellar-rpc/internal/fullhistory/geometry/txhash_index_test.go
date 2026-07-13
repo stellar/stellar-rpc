@@ -22,7 +22,7 @@ func TestNewTxHashIndexLayout_Validation(t *testing.T) {
 
 	w, err := NewTxHashIndexLayout(MaxChunksPerTxhashIndex)
 	require.NoError(t, err)
-	require.Equal(t, MaxChunksPerTxhashIndex, w.ChunksPerIndex())
+	require.Equal(t, MaxChunksPerTxhashIndex, w.cpi)
 }
 
 // The pinnable cpi ceiling must never exceed what the cold tx-hash index format
@@ -60,7 +60,7 @@ func TestTxHashIndexArithmetic(t *testing.T) {
 			require.Equal(t, tc.wantTxHashIndex, w.TxHashIndexID(tc.chunkID))
 			require.Equal(t, tc.wantFirst, w.FirstChunk(tc.wantTxHashIndex))
 			require.Equal(t, tc.wantHi, w.LastChunk(tc.wantTxHashIndex))
-			require.Equal(t, uint32(1000), w.ChunksPerIndex())
+			require.Equal(t, uint32(1000), w.cpi)
 		})
 	}
 }

@@ -18,10 +18,12 @@ type CFOptions struct {
 	Compression grocksdb.CompressionType
 
 	// BlockSize overrides the per-CF SST block size in bytes. Zero
-	// means "leave RocksDB's BBTO default (16 KiB)". Small-value CFs
-	// (sparse-key indexes, dense-key offset maps) benefit from
-	// smaller blocks because random Get only needs the block holding
-	// the target key; larger blocks waste I/O per cache miss.
+	// means "leave RocksDB's BBTO default (4 KiB)" — so an explicit
+	// 4-KiB value pins the default rather than changing it.
+	// Small-value CFs (sparse-key indexes, dense-key offset maps)
+	// benefit from smaller blocks because random Get only needs the
+	// block holding the target key; larger blocks waste I/O per
+	// cache miss.
 	BlockSize int
 }
 

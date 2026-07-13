@@ -5,11 +5,16 @@
 package fhtest
 
 import (
+	"encoding/binary"
+	"io"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/txhash"
 )
 
 // ZeroTxLCMBytes returns the marshaled bytes of a minimal, zero-transaction
@@ -36,4 +41,43 @@ func ZeroTxLCMBytes(t *testing.T, seq uint32) []byte {
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 	return raw
+}
+
+// ReadColdBin reads back a cold txhash .bin file written by
+// txhash.WriteColdBin, verifying the header count against the file size.
+// Test-side mirror of the on-disk contract (production consumes .bin files
+// via the index builder's streaming scan, never a full read-back).
+func ReadColdBin(t *testing.T, path string) []txhash.ColdEntry {
+	t.Helper()
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	defer f.Close()
+
+	const headerSize = 8
+	entrySize := txhash.ColdKeySize + 4
+
+	var header [headerSize]byte
+	_, err = io.ReadFull(f, header[:])
+	require.NoError(t, err)
+	count := binary.LittleEndian.Uint64(header[:])
+
+	info, err := f.Stat()
+	require.NoError(t, err)
+	// Divide the trusted size rather than multiplying the untrusted
+	// count (mirrors production's overflow-safe coldBinCount check).
+	body := info.Size() - headerSize
+	require.GreaterOrEqual(t, body, int64(0), "cold .bin shorter than its header")
+	require.Zero(t, body%int64(entrySize), "cold .bin body is not whole entries")
+	require.EqualValues(t, count, body/int64(entrySize),
+		"cold .bin size must match its declared entry count")
+
+	entries := make([]txhash.ColdEntry, count)
+	buf := make([]byte, entrySize)
+	for i := range entries {
+		_, err = io.ReadFull(f, buf)
+		require.NoError(t, err)
+		copy(entries[i].Key[:], buf[:txhash.ColdKeySize])
+		entries[i].Seq = binary.LittleEndian.Uint32(buf[txhash.ColdKeySize:])
+	}
+	return entries
 }

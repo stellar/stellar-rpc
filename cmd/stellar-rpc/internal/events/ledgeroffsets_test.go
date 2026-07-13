@@ -152,37 +152,17 @@ func TestConcurrentLedgerOffsets_Basic(t *testing.T) {
 	assert.Equal(t, uint32(100), m.StartLedger())
 	assert.Equal(t, uint32(104), m.EndLedger())
 
-	start, end, err := m.EventIDs(102)
+	// Per-ledger ranges resolve through a View (the query path's shape).
+	start, end, err := m.View().EventIDs(102)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(1042), start)
 	assert.Equal(t, uint32(2029), end)
 
 	// The empty ledger (101) is a zero-width range.
-	s, e, err := m.EventIDs(101)
+	s, e, err := m.View().EventIDs(101)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(1042), s)
 	assert.Equal(t, uint32(1042), e, "empty ledger is zero-width")
-}
-
-// TestConcurrentLedgerOffsets_Snapshot pins that Snapshot returns a
-// uniquely-owned LedgerOffsets containing the visible state at call
-// time. Subsequent appends to the source don't affect the snapshot.
-func TestConcurrentLedgerOffsets_Snapshot(t *testing.T) {
-	m := NewConcurrentLedgerOffsets(0)
-	m.Append(10)
-	m.Append(20)
-
-	snap := m.Snapshot()
-	assert.Equal(t, 2, snap.LedgerCount())
-	assert.Equal(t, uint32(30), snap.TotalEvents())
-
-	// Append after snapshot.
-	m.Append(5)
-
-	// Source advanced; snapshot unchanged.
-	assert.Equal(t, 3, m.LedgerCount())
-	assert.Equal(t, 2, snap.LedgerCount())
-	assert.Equal(t, uint32(30), snap.TotalEvents())
 }
 
 // TestConcurrentLedgerOffsets_AppendPastCapacity pins the contract that
@@ -220,7 +200,7 @@ func TestConcurrentLedgerOffsets_ConcurrentReadWrite(t *testing.T) {
 	for range numReaders {
 		wg.Go(func() {
 			for i := range uint32(numLedgers) {
-				_, _, _ = m.EventIDs(i)
+				_, _, _ = m.View().EventIDs(i)
 				_ = m.LedgerCount()
 				_ = m.TotalEvents()
 			}

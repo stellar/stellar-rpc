@@ -135,7 +135,7 @@ func scanAndValidate(inputs []string) (uint64, error) {
 
 // scanBinHeader opens path, reads its declared entry count, and verifies its
 // byte size matches that count via coldBinCount (the shared, overflow-safe
-// header check ReadColdBin also uses).
+// header check).
 func scanBinHeader(path string) (uint64, error) {
 	f, err := os.Open(path)
 	if err != nil {

@@ -34,9 +34,9 @@ import (
 // A zero-term bitmaps (an eventless chunk, e.g. a pre-Soroban
 // backfill range) produces the EMPTY index: a zero-length index.hash
 // plus a zero-record index.pack. The cold reader resolves every
-// lookup against it to ErrTermNotFound through the ordinary path, so
-// neither readers nor orchestrators need a pack-without-index special
-// case.
+// LookupKeys entry against it to a nil-bitmap miss through the
+// ordinary path, so neither readers nor orchestrators need a
+// pack-without-index special case.
 //
 // bitmaps is the complete term index for the Chunk, uniquely owned by
 // the caller (no concurrent reader holds a pointer to any of its
@@ -51,7 +51,7 @@ import (
 // catastrophically.
 //
 // Both cold backfill and the live-chunk freeze build a Bitmaps single-threaded by
-// re-deriving terms from raw LCMs (per-event events.TermsFor + Bitmaps.AddTo) and
+// re-deriving terms from raw LCMs (per-event events.TermsForBytes + Bitmaps.AddTo) and
 // hand it directly here.
 //
 // index.hash is the MPHF serialized via buildMPHF.
@@ -94,9 +94,9 @@ func WriteColdIndex(ctx context.Context, chunkID chunk.ID, bitmaps events.Bitmap
 	// build an MPHF over zero keys, so write the empty index instead —
 	// a zero-length index.hash (the sentinel openMPHF recognizes) plus
 	// a zero-record index.pack. Readers then need no missing-file
-	// special case: every Lookup resolves to ErrTermNotFound through
-	// the ordinary path, and all three cold artifacts always exist for
-	// a finalized chunk.
+	// special case: every LookupKeys entry resolves to a nil-bitmap
+	// miss through the ordinary path, and all three cold artifacts
+	// always exist for a finalized chunk.
 	if n == 0 {
 		return writeEmptyColdIndex(indexPackPath, indexHashPath)
 	}

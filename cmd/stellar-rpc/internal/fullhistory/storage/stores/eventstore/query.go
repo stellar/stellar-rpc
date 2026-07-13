@@ -44,7 +44,7 @@ import (
 // event. nil or empty slices are wildcards.
 //
 // Topics[i] constrains topic position i. Positions beyond
-// protocol.MaxTopicCount are not indexed (see events.TermsFor).
+// protocol.MaxTopicCount are not indexed (see events.TermsForBytes).
 type Filter struct {
 	ContractID []byte
 	Topics     [protocol.MaxTopicCount][]byte

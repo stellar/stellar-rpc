@@ -8,15 +8,14 @@ import (
 
 // LedgerOffsets tracks cumulative event counts per ledger within a
 // chunk for build-then-read paths (cold backfill, DecodeLedgerOffsets
-// on the cold-reader side, ConcurrentLedgerOffsets.Snapshot for the
-// freeze handoff). Single-threaded by contract: callers either build
-// it in one goroutine and hand it off to many readers via a
-// sync-providing handoff (sync.OnceValues, struct-field-after-init,
-// etc.), or use it from one goroutine throughout.
+// on the cold-reader side). Single-threaded by contract: callers
+// either build it in one goroutine and hand it off to many readers
+// via a sync-providing handoff (sync.OnceValues,
+// struct-field-after-init, etc.), or use it from one goroutine
+// throughout.
 //
-// For live ingest paths (HotStore) use ConcurrentLedgerOffsets and
-// call Snapshot to convert when handing off to the cold reader's
-// build-then-read shape.
+// For live ingest paths (HotStore) use ConcurrentLedgerOffsets;
+// queries borrow a read-only view of it via View.
 //
 // offsets[i] holds the cumulative event count through relative ledger i.
 // Ledger i's events span IDs [offsets[i-1], offsets[i]).
