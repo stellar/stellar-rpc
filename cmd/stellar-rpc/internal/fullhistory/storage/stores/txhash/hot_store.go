@@ -44,12 +44,10 @@ func NewWithStore(store *rocksdb.Store) *HotStore {
 // the hotchunk shared-DB opener can register it alongside the other CFs.
 func CFNames() []string { return []string{txhashCF} }
 
-// Tuning returns the DB-wide RocksDB knobs the shared per-chunk DB adopts —
-// resources that were per-instance before the hot stores collapsed into one
-// multi-CF DB and are now shared across every CF. The txhash instance was the
-// only one that set them; the ledger and events instances rode on RocksDB
-// defaults, so keeping txhash's values is the faithful consolidation of the
-// three instances' combined footprint.
+// Tuning returns the DB-wide knobs the shared per-chunk DB adopts. The
+// standalone txhash instance was the only one that set them (ledger and
+// events rode on defaults), so its values are the pre-unification
+// instances' combined footprint.
 func Tuning() rocksdb.Tuning {
 	return rocksdb.Tuning{
 		// Background-job budget for the periodic memtable flushes.
@@ -68,12 +66,9 @@ func Tuning() rocksdb.Tuning {
 	}
 }
 
-// CFOptions returns the per-CF knobs the hotchunk opener installs on the
-// txhash CF alone (merged into the shared DB's PerCFOptions). The hot txhash
-// workload is write-once / point-lookup; the cross-knob interactions below are
-// non-obvious enough that they get an explicit per-stanza rationale. The other
-// CFs ride on RocksDB defaults by contrast — only this workload earned the
-// calibration, and scoping it here keeps it off the ledger and events CFs.
+// CFOptions returns the calibration the hotchunk opener installs on the
+// txhash CF alone. The workload is write-once / point-lookup; only it
+// earned this tuning — the other CFs ride on RocksDB defaults.
 func CFOptions() map[string]rocksdb.CFOptions {
 	return map[string]rocksdb.CFOptions{
 		txhashCF: {
@@ -109,8 +104,7 @@ func CFOptions() map[string]rocksdb.CFOptions {
 			// 12 bits/key bloom (~0.4% false-positive) is tighter than
 			// the standard 10 bits/key because every false positive at
 			// no-compaction SST count costs a disk seek across many SSTs.
-			// Scoped to this CF: it is the only one probed for keys it may
-			// not hold, so the ledger and events CFs install no bloom.
+			// Only this CF is probed for keys it may not hold.
 			BloomFilterBitsPerKey: 12,
 		},
 	}

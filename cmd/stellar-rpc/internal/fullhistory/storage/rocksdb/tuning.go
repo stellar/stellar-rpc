@@ -3,14 +3,10 @@ package rocksdb
 import "github.com/linxGnu/grocksdb"
 
 // CFOptions — per-CF overrides applied after the shared pinned defaults.
-// Zero means "inherit the pinned default" (NoCompression for Compression,
-// RocksDB's BBTO default block size for BlockSize, no bloom filter, and
-// grocksdb's memtable/compaction defaults for the rest). Each field a CF
-// leaves zero rides on the wrapper-pinned defaults; a facade opts a specific
-// CF into a knob by setting it here. The knobs are per-CF because each hot
-// data type's workload differs (txhash is write-once/point-lookup; ledgers is
-// never probed for missing keys; events holds compressible XDR) and one CF's
-// tuning must not leak onto the others.
+// Zero means "inherit the default" for every field (NoCompression, RocksDB's
+// BBTO block size, no bloom, grocksdb's memtable/compaction defaults). The
+// knobs are per-CF because each hot workload differs — one CF's tuning must
+// not leak onto the others.
 type CFOptions struct {
 	// Compression overrides the CF's compression type. The wrapper's
 	// pinned default is NoCompression; CFs that hold compressible
@@ -29,24 +25,21 @@ type CFOptions struct {
 	// cache miss.
 	BlockSize int
 
-	// WriteBufferMB sizes the active memtable for this CF, in MB. Zero
-	// leaves grocksdb's default.
+	// WriteBufferMB sizes the active memtable for this CF, in MB.
 	WriteBufferMB int
 
 	// MaxWriteBufferNumber caps the active + immutable memtable count
-	// for this CF before writes back-pressure. Zero leaves the default.
+	// for this CF before writes back-pressure.
 	MaxWriteBufferNumber int
 
 	// Level0FileNumCompactionTrigger — L0 file count that starts
-	// an L0→L1 compaction. Zero leaves the default.
+	// an L0→L1 compaction.
 	Level0FileNumCompactionTrigger int
 
 	// Level0SlowdownWritesTrigger — L0 file count that slows writes.
-	// Zero leaves the default.
 	Level0SlowdownWritesTrigger int
 
-	// Level0StopWritesTrigger — L0 file count that stalls writes
-	// entirely. Zero leaves the default.
+	// Level0StopWritesTrigger — L0 file count that stalls writes entirely.
 	Level0StopWritesTrigger int
 
 	// DisableAutoCompactions turns automatic compaction off for this CF —
@@ -55,18 +48,14 @@ type CFOptions struct {
 	DisableAutoCompactions bool
 
 	// TargetFileSizeMB — size at which compaction produces new SSTs.
-	// Zero leaves the default.
 	TargetFileSizeMB int
 
 	// MaxBytesForLevelBaseMB — byte budget for level 1; each later
-	// level is this × MaxBytesForLevelMultiplier (10, pinned). Zero
-	// leaves the default.
+	// level is this × MaxBytesForLevelMultiplier (10, pinned).
 	MaxBytesForLevelBaseMB int
 
-	// BloomFilterBitsPerKey installs this CF's bloom filter. 0 = no
-	// filter (the default) — right for a CF that is never probed for
-	// keys it may not hold. Positive values install one with that many
-	// bits; typical: 10 (~1% false positive), 12 (~0.4%).
+	// BloomFilterBitsPerKey installs this CF's bloom filter; 0 = none —
+	// right for a CF never probed for keys it may not hold.
 	BloomFilterBitsPerKey int
 }
 

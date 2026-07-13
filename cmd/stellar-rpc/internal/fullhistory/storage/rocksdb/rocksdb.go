@@ -667,10 +667,6 @@ func applyDBTuning(opts *grocksdb.Options, t Tuning) {
 // override (when set). The Store retains every BBTO and the cache;
 // Close destroys them after opts/cfOpts.
 //
-// The block cache is DB-wide (one LRU shared across every CF from
-// Tuning.BlockCacheMB); the bloom filter and block size are per-CF
-// (from PerCFOptions), so only a CF that opts in pays for them.
-//
 // A BBTO is installed on a CF iff the shared cache, that CF's bloom
 // filter, or that CF's BlockSize override is configured — preserving
 // the previous behavior of leaving RocksDB's default BBTO untouched
