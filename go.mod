@@ -23,7 +23,7 @@ require (
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/pflag v1.0.5
 	github.com/stellar/go-stellar-sdk v0.6.1-0.20260618191317-308407eca8c6
-	github.com/stellar/streamhash v0.0.0-20260622155330-9e08e05c5fa6
+	github.com/stellar/streamhash v0.0.0-20260713164615-c72a4e6f578d
 	github.com/stretchr/testify v1.11.1
 )
 

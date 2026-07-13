@@ -297,8 +297,8 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	src := xdr.MustMuxedAddress(keypair.MustRandom().Address())
 	coldRaw, coldHash := oneTxLCMBytes(t, c0First, src) // → frozen cold .idx (chunk 0)
 	hotRaw, hotHash := oneTxLCMBytes(t, c2First, src)   // → live hot CF (chunk 2)
-	// Chunk 1's first ledger also carries a tx so its txhash .bin is non-empty —
-	// streamhash refuses to build a cold index over zero keys (ErrEmptyBuildSet).
+	// Chunk 1's first ledger also carries a tx so its txhash .bin is non-empty,
+	// exercising a real (non-empty) cold index build alongside the empty ones.
 	c1Raw, _ := oneTxLCMBytes(t, c1First, src)
 
 	frames := make(map[uint32][]byte, 2*int(chunk.LedgersPerChunk)+2)

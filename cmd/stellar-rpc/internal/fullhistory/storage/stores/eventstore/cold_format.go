@@ -229,12 +229,6 @@ func DecodeLedgerOffsets(data []byte) (*events.LedgerOffsets, error) {
 // through. No double-hashing.
 // ──────────────────────────────────────────────────────────────────
 
-// ErrEmptyBuildSet is returned by buildMPHF when len(keys) == 0. An
-// MPHF over zero keys has no slots; the zero-term case is handled
-// one level up by WriteColdIndex, which writes the empty-index
-// sentinel instead of calling buildMPHF (see emptyIndexHash).
-var ErrEmptyBuildSet = errors.New("events: cannot build an MPHF with zero keys")
-
 // ErrKeyNotFound is returned by Lookup when streamhash decides the
 // supplied key was not in the build set. Vanilla MPHF semantics
 // return a slot for any input (the design doc assumes this and uses
@@ -247,9 +241,7 @@ var ErrEmptyBuildSet = errors.New("events: cannot build an MPHF with zero keys")
 var ErrKeyNotFound = errors.New("events: key not in build set")
 
 // mphf wraps a streamhash MPHF index, suitable for repeated Lookup
-// against term keys. A nil idx is the EMPTY index (zero terms,
-// produced for an eventless chunk): every Lookup reports
-// ErrKeyNotFound.
+// against term keys.
 type mphf struct {
 	idx *streamhash.Index
 }
@@ -268,8 +260,7 @@ type mphf struct {
 // Memory usage is bounded by streamhash's internal partition buffers,
 // not by the chunk's unique-term count.
 //
-// len(bitmaps) == 0 returns ErrEmptyBuildSet. Duplicate keys are
-// rejected by streamhash.
+// Duplicate keys are rejected by streamhash.
 //
 // ctx is propagated to streamhash.NewBuilder so a long index build
 // honors caller cancellation. The AddKey/Finish loop also checks
@@ -279,9 +270,6 @@ type mphf struct {
 //nolint:nonamedreturns // named err carries through to the deferred builder.Close
 func buildMPHF(ctx context.Context, bitmaps events.Bitmaps, outputPath string) (m *mphf, err error) {
 	total := len(bitmaps)
-	if total <= 0 {
-		return nil, ErrEmptyBuildSet
-	}
 
 	tmpDir, terr := os.MkdirTemp("", "eventstore-unsorted-")
 	if terr != nil {
@@ -324,11 +312,6 @@ func buildMPHF(ctx context.Context, bitmaps events.Bitmaps, outputPath string) (
 // <chunkDir>/index.hash produced by an earlier buildMPHF) for
 // query-time lookups.
 //
-// A zero-length file is the empty-index sentinel written by
-// WriteColdIndex for an eventless chunk (streamhash cannot build an
-// MPHF over zero keys, so there is nothing to serialize): it opens
-// as the empty mphf, whose every Lookup reports ErrKeyNotFound.
-//
 // The file is read into memory up-front via os.ReadFile +
 // streamhash.OpenBytes rather than mmapped. Rationale: a typical
 // MPHF for a single Chunk is small (~hundreds of KB at production
@@ -343,9 +326,6 @@ func openMPHF(path string) (*mphf, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("events: read %s: %w", path, err)
-	}
-	if len(data) == 0 {
-		return &mphf{}, nil // empty index: zero terms, every Lookup misses
 	}
 	idx, err := streamhash.OpenBytes(data)
 	if err != nil {
@@ -364,9 +344,6 @@ func openMPHF(path string) (*mphf, error) {
 // index.pack — an MPHF can map an unseen key to a valid build-set
 // slot, and only the fingerprint catches that residual collision.
 func (m *mphf) Lookup(key events.TermKey) (uint32, error) {
-	if m.idx == nil {
-		return 0, ErrKeyNotFound // empty index (eventless chunk)
-	}
 	slot, err := m.idx.QueryRank(key[:])
 	if err != nil {
 		if errors.Is(err, streamhash.ErrNotFound) {
@@ -383,15 +360,10 @@ func (m *mphf) Lookup(key events.TermKey) (uint32, error) {
 	return uint32(slot), nil
 }
 
-// Close releases the underlying mmap. Idempotent. The empty index
-// holds no resources.
+// Close releases the index; a no-op for the in-memory OpenBytes path.
 func (m *mphf) Close() error {
-	if m.idx == nil {
-		return nil
-	}
 	return m.idx.Close()
 }
 
-// isEmpty reports whether this is the empty index (zero terms, loaded
-// from the zero-length sentinel written for an eventless chunk).
-func (m *mphf) isEmpty() bool { return m.idx == nil }
+// isEmpty reports whether the index holds zero terms (an eventless chunk).
+func (m *mphf) isEmpty() bool { return m.idx.NumKeys() == 0 }

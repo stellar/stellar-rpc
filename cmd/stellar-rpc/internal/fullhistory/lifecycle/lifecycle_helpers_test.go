@@ -24,10 +24,9 @@ const lifecyclePassphrase = network.PublicNetworkPassphrase
 
 // oneTxLCMRand builds the wire bytes of a V2 LedgerCloseMeta carrying ONE
 // transaction for seq, so a chunk ingested with at least one such ledger yields
-// a NON-empty txhash .bin — streamhash refuses to build a cold index over zero
-// keys (txhash.ErrEmptyBuildSet), so a fully zero-tx chunk cannot exercise the
-// real index fold. Mirrors ingest_test's buildLCMReturningHashes, trimmed to one
-// tx.
+// a NON-empty txhash .bin, which exercises the real merge-and-fold index path
+// (a fully zero-tx chunk now builds a valid but trivial empty index instead).
+// Mirrors ingest_test's buildLCMReturningHashes, trimmed to one tx.
 func oneTxLCMRand(t *testing.T, seq uint32) []byte {
 	t.Helper()
 	envelope := xdr.TransactionEnvelope{

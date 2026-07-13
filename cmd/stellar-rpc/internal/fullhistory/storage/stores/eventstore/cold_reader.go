@@ -166,19 +166,16 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		if res.err != nil || !res.idx.isEmpty() {
 			return res.idx, res.err
 		}
-		// The empty-index sentinel (zero-length index.hash) is only valid
-		// for an eventless chunk. Cross-check events.pack's count so a
-		// torn write that died at zero bytes — or a mispaired artifact —
-		// fails loudly here instead of silently matching nothing for a
-		// chunk that has events. (A partial index.hash of any nonzero
-		// size already fails loudly at parse.)
+		// A zero-term index is only valid for an eventless chunk: cross-check
+		// events.pack's count so a mispaired empty index fails loudly instead
+		// of silently matching nothing.
 		m, merr := c.waitMeta()
 		if merr != nil {
 			return nil, fmt.Errorf("events: validate empty index for chunk %s: %w", c.chunkID, merr)
 		}
 		if m.count != 0 {
 			return nil, fmt.Errorf(
-				"events: %s is the empty-index sentinel but events.pack holds %d events for chunk %s (torn or mispaired index)",
+				"events: %s holds zero terms but events.pack holds %d events for chunk %s (torn or mispaired index)",
 				indexHashPath, m.count, c.chunkID)
 		}
 		return res.idx, nil

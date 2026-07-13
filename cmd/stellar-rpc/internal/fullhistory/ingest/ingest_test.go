@@ -1289,8 +1289,8 @@ func TestEventsCold_FinishThenIndexFails_LeavesInertPack(t *testing.T) {
 	ing, err := NewEventsColdIngester(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil)
 	require.NoError(t, err)
 
-	// Ingest one event-bearing ledger so the mirror is non-empty (an empty
-	// build set would take the valid empty-index path instead of buildMPHF).
+	// Ingest one event-bearing ledger so the mirror is non-empty, exercising a
+	// real (non-empty) MPHF build.
 	rawEv, _, _ := marshalLCMWithEvent(t, first)
 	require.NoError(t, ing.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(rawEv)))
 
