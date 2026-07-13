@@ -509,14 +509,13 @@ func TestArchiveTip_RootHASErrorSurfaces(t *testing.T) {
 	assert.Contains(t, err.Error(), "archive 503")
 }
 
-// With neither a backend nor archive URLs, the sampler has no sources and errors
-// clearly — the frontfill-only misconfiguration that cannot bootstrap.
+// With neither a backend nor archive URLs there is no tip source, and the
+// frontfill-only misconfiguration that cannot bootstrap fails at build time —
+// startup, not first sample — with the config-shaped message.
 func TestBuildTipSampler_NoSourcesErrors(t *testing.T) {
-	sampler, err := buildTipSampler(context.Background(), nil, nil, silentLogger())
-	require.NoError(t, err)
-	_, sampleErr := sampler.Sample(context.Background())
-	require.Error(t, sampleErr)
-	assert.Contains(t, sampleErr.Error(), "no network tip source configured")
+	_, err := buildTipSampler(context.Background(), nil, nil, silentLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no network tip source configured")
 }
 
 func TestNewLogger(t *testing.T) {

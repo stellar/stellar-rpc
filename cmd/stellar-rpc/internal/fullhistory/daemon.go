@@ -409,6 +409,12 @@ func buildTipSampler(
 		}
 		sources = append(sources, archiveTip(pool))
 	}
+	if len(sources) == 0 {
+		// Fail at startup with the config-shaped message; captive core would reject
+		// the missing archive URLs later anyway, but less helpfully.
+		return nil, errors.New("no network tip source configured: set [backfill.datastore] " +
+			"or [ingestion].history_archive_urls")
+	}
 	return newTipSampler(sources...), nil
 }
 

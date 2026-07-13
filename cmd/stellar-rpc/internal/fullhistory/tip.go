@@ -65,6 +65,8 @@ func (s *tipSampler) Sample(ctx context.Context) (uint32, error) {
 		}
 		if t < chunk.FirstLedgerSeq {
 			// Below genesis ⇒ backend empty/not-synced; permanent (it would keep returning 0).
+			// Order-blind: this gates whichever source answered first, so a source must
+			// error (not return 0) when empty or it shadows a healthy fallback in sampleOnce.
 			notReady = true
 			return backoff.Permanent(fmt.Errorf("backend tip %d is below genesis %d — backend not ready",
 				t, chunk.FirstLedgerSeq))
