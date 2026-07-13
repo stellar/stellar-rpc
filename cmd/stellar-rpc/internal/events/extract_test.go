@@ -24,12 +24,11 @@ import (
 
 const testPassphrase = "Test SDF Network ; September 2015"
 
-// lcmViewToPayloads is the view→payloads convenience the production
-// LCMViewToPayloads wrapper used to provide before #836 deleted it as test-only:
-// the header reads plus the single ExtractLedgerEvents walk, fed to
-// PayloadsFromLedgerEvents. The cursor-contract tests exercise it from raw LCM
-// bytes; production now walks once at a higher level (hot IngestLedger, cold
-// ColdService) and calls PayloadsFromLedgerEvents directly.
+// lcmViewToPayloads is the view→payloads convenience the cursor-contract tests
+// need to run from raw LCM bytes: the header reads plus the single
+// ExtractLedgerEvents walk, fed to PayloadsFromLedgerEvents. Test-only —
+// production walks once at a higher level (hot IngestLedger, cold ColdService)
+// and calls PayloadsFromLedgerEvents directly.
 func lcmViewToPayloads(lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
 	seq, err := lcm.LedgerSequence()
 	if err != nil {

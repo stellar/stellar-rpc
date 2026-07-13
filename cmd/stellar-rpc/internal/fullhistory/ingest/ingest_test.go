@@ -903,9 +903,9 @@ func eventRichLedger(t *testing.T, seq uint32) []byte {
 //     is the OLD txhash extractor — a separate SDK walk from the shared
 //     ExtractLedgerEvents the ingester now reads — so an entry-by-entry match
 //     proves the switch to `.Hash` off the shared walk changed no byte.
-//   - events per-term bitmaps + count vs. PayloadsFromLedgerEvents (the shaping
-//     LCMViewToPayloads used), with chunk-relative event IDs assigned in ingest
-//     (ascending-seq) order — proving the event-ID assignment is unchanged.
+//   - events per-term bitmaps + count vs. an independent PayloadsFromLedgerEvents
+//     shaping, with chunk-relative event IDs assigned in ingest (ascending-seq)
+//     order — proving the event-ID assignment is unchanged.
 func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
