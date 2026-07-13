@@ -283,6 +283,15 @@ func TestValidateRoots(t *testing.T) {
 		assert.Contains(t, err.Error(), "same path")
 	})
 
+	t.Run("filesystem root nests everything", func(t *testing.T) {
+		p := base
+		p.Ledgers = "/" // the one cleaned path that ends in a separator
+		err := p.ValidateRoots()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "nested inside")
+		assert.Contains(t, err.Error(), "ledgers")
+	})
+
 	t.Run("nested root rejected either direction", func(t *testing.T) {
 		p := base
 		p.Events = "/data/ledgers/events" // inside the ledgers root

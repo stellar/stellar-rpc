@@ -291,9 +291,15 @@ func (p Paths) ValidateRoots() error {
 }
 
 // isAncestorDir reports whether inner lives strictly inside outer. Both
-// must already be absolute, cleaned paths (filepath.Abs does both).
+// must already be absolute, cleaned paths (filepath.Abs does both). A
+// cleaned path only ends in a separator when it IS the filesystem root —
+// appending another would build the never-matching prefix "//" and let
+// everything nest un-detected under a root of "/".
 func isAncestorDir(outer, inner string) bool {
-	return strings.HasPrefix(inner, outer+string(filepath.Separator))
+	if !strings.HasSuffix(outer, string(filepath.Separator)) {
+		outer += string(filepath.Separator)
+	}
+	return len(inner) > len(outer) && strings.HasPrefix(inner, outer)
 }
 
 // NewLayoutFromPaths adapts a resolved Paths into a geometry.Layout, so the
