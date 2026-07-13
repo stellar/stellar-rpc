@@ -89,12 +89,14 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	paths := cfg.ResolvePaths()
 
-	// --- Lock every configured storage root for the daemon's whole life. ---
-	locks, err := config.LockRoots(paths.RootsToLock()...)
-	if err != nil {
+	// --- Reject shared roots, then create + fsync any missing ones. Single-
+	// process enforcement is the catalog's own RocksDB LOCK, taken next. ---
+	if err := paths.ValidateRoots(); err != nil {
 		return err
 	}
-	defer locks.Release()
+	if err := config.PrepareRoots(paths.Roots()...); err != nil {
+		return err
+	}
 
 	// --- Open the catalog (it owns its backing KV store; Close releases it). ---
 	cpi := geometry.ChunksPerTxhashIndex

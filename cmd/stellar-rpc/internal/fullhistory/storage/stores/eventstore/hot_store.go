@@ -531,8 +531,10 @@ func warmup(
 // appear (corruption/tamper) is caught lazily by FetchRange's short-scan
 // check on first read. This is a cheap open-time tripwire on denormalized
 // state, not load-bearing correctness.
-func verifyChunkConsistency(chunkStore *rocksdb.Store, total, indexUpperBound uint32) error {
-	if indexUpperBound > total {
+func verifyChunkConsistency(chunkStore *rocksdb.Store, total uint32, indexUpperBound uint64) error {
+	// indexUpperBound is uint64 so a hostile row at eventID ==
+	// MaxUint32 can't wrap max+1 to 0 and slip past this check.
+	if indexUpperBound > uint64(total) {
 		return fmt.Errorf("events: corrupt chunk: index references event %d but only %d committed",
 			indexUpperBound-1, total)
 	}
@@ -572,15 +574,16 @@ func verifyChunkConsistency(chunkStore *rocksdb.Store, total, indexUpperBound ui
 // GC for many minutes.
 //
 // Also returns the exclusive upper bound of indexed event IDs (max + 1,
-// or 0 if the index is empty) so warmup can cross-check it against the
+// or 0 if the index is empty; uint64 so max+1 can't wrap — see
+// verifyChunkConsistency) for warmup's cross-check against the
 // committed event count.
-func warmupIndex(chunkStore *rocksdb.Store) (*events.ConcurrentBitmaps, uint32, error) {
+func warmupIndex(chunkStore *rocksdb.Store) (*events.ConcurrentBitmaps, uint64, error) {
 	builder := events.NewBitmaps()
 	var (
 		hasPrev         bool
 		prevTerm        events.TermKey
 		buf             []uint32
-		indexUpperBound uint32 // max indexed event ID + 1; 0 if no rows
+		indexUpperBound uint64 // max indexed event ID + 1; 0 if no rows
 	)
 	flush := func() {
 		if !hasPrev || len(buf) == 0 {
@@ -601,8 +604,8 @@ func warmupIndex(chunkStore *rocksdb.Store) (*events.ConcurrentBitmaps, uint32, 
 		var term events.TermKey
 		copy(term[:], entry.Key[0:16])
 		eventID := binary.BigEndian.Uint32(entry.Key[16:20])
-		if eventID+1 > indexUpperBound {
-			indexUpperBound = eventID + 1
+		if uint64(eventID)+1 > indexUpperBound {
+			indexUpperBound = uint64(eventID) + 1
 		}
 		if hasPrev && term != prevTerm {
 			flush()

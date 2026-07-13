@@ -316,25 +316,24 @@ func filepathHasPrefix(path, prefix string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// A second daemon on the same data dir fails fast on the storage-root flock
-// (single-process invariant, enforced before any store opens).
+// A second daemon on the same data dir fails fast at catalog.Open on RocksDB's
+// own exclusive LOCK — the single-process invariant, enforced before ingestion
+// or serving starts.
 func TestRunDaemon_LockContentionFailsFast(t *testing.T) {
 	configPath, dataDir := writeTempConfig(t, "")
 
-	// Hold the hot-root lock as a "first daemon" for the test's duration.
-	paths := config.Paths{HotStorage: filepath.Join(dataDir, "hot")}
-	locks, err := config.LockRoots(paths.HotStorage)
-	require.NoError(t, err)
-	defer locks.Release()
+	// Hold the catalog open as a "first daemon" for the test's duration.
+	_ = openCatalogAt(t, dataDir)
 
 	var served atomic.Int32
-	err = runDaemonWith(context.Background(), configPath, daemonOptions{
+	err := runDaemonWith(context.Background(), configPath, daemonOptions{
 		Backend:    &fakeBackend{tip: chunk.FirstLedgerSeq + 10},
 		ServeReads: func(context.Context) error { served.Add(1); return nil },
 		Logger:     silentLogger(),
 	})
-	require.ErrorIs(t, err, config.ErrRootLocked)
-	assert.Zero(t, served.Load(), "run never reached when a root is locked")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "LOCK", "the failure is RocksDB's catalog lock")
+	assert.Zero(t, served.Load(), "run never reached when the catalog is held")
 }
 
 // First start with a "now" floor and an unreachable tip is fatal at

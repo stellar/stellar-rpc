@@ -73,8 +73,11 @@ func NewEventReader(log *log.Entry, db db.SessionInterface, passphrase string) E
 	return &eventHandler{log: log, db: db, passphrase: passphrase}
 }
 
-//nolint:gocognit
-func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
+// Named error return: the deferred txReader.Close errors.Join below
+// must reach the caller (an unnamed return made it a dead local).
+//
+//nolint:gocognit,cyclop,funlen // pre-existing complexity; only the signature changed
+func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) (err error) {
 	txCount := lcm.CountTransactions()
 
 	if eventHandler.stmtCache == nil {

@@ -1,6 +1,8 @@
 package eventstore
 
 import (
+	"fmt"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -283,4 +285,28 @@ func TestWarmup_OffsetsHandleEmptyTrailingLedger(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint32(1), start)
 	assert.Equal(t, uint32(1), end, "empty ledger reports zero-width range")
+}
+
+// TestWarmup_RejectsIndexRowAtMaxUint32 pins the tripwire against its
+// wrap-adversarial input: an index row at eventID == MaxUint32. With a
+// uint32 upper bound, max+1 wraps to 0 and slips past the > total check
+// — the exact tamper the tripwire exists to catch; the bound is uint64.
+func TestWarmup_RejectsIndexRowAtMaxUint32(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir := t.TempDir()
+
+	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
+	p1, _ := makePayload("a")
+	require.NoError(t, ingestLedgerEvents(hot1, 2, []events.Payload{p1})) // total = 1
+	require.NoError(t, raw1.Close())
+
+	corruptHotChunk(t, dir, chunkID, func(raw *rocksdb.Store) {
+		var term events.TermKey
+		term[0] = 0x99
+		require.NoError(t, raw.Put(IndexCF, encodeIndexKey(term, math.MaxUint32), nil))
+	})
+
+	_, _, err := tryOpenHotStoreForTest(t, dir, chunkID)
+	require.ErrorContains(t, err,
+		fmt.Sprintf("index references event %d but only 1 committed", uint32(math.MaxUint32)))
 }

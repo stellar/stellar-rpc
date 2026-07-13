@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/pelletier/go-toml"
 
@@ -230,13 +231,11 @@ func (cfg Config) ResolvePaths() Paths {
 	}
 }
 
-// RootsToLock returns the distinct storage roots that must each carry a
-// single-process flock: the catalog, every immutable storage tree, and the
-// hot-storage tree (design "Single-process enforcement"). The data dir itself
-// is NOT locked — only the leaf roots a second daemon could independently point
-// at; locking the shared parent would miss two daemons with disjoint data dirs
-// that share one artifact tree. Feed the result to LockRoots (config_lock.go).
-func (p Paths) RootsToLock() []string {
+// Roots returns the distinct storage roots: the catalog, every immutable
+// storage tree, and the hot-storage tree. The data dir itself is NOT a root —
+// only the leaf trees a second daemon could independently point at. Feed the
+// result to ValidateRoots + PrepareRoots (config_roots.go).
+func (p Paths) Roots() []string {
 	return []string{
 		p.Catalog,
 		p.Ledgers,
@@ -247,8 +246,27 @@ func (p Paths) RootsToLock() []string {
 	}
 }
 
+// ValidateRoots rejects two storage roots resolving to the same path — the
+// stores would write into each other's trees. Nesting is deliberately
+// allowed: no operation ever removes a whole root (prune and discard delete
+// per-chunk paths only), so a root inside another root loses nothing.
+func (p Paths) ValidateRoots() error {
+	seen := make(map[string]struct{}, len(p.Roots()))
+	for _, r := range p.Roots() {
+		a, err := filepath.Abs(r)
+		if err != nil {
+			return fmt.Errorf("resolve storage root %q: %w", r, err)
+		}
+		if _, dup := seen[a]; dup {
+			return fmt.Errorf("storage root %q is configured for more than one store; every root must be a distinct tree", a)
+		}
+		seen[a] = struct{}{}
+	}
+	return nil
+}
+
 // NewLayoutFromPaths adapts a resolved Paths into a geometry.Layout, so the
-// flocked roots (RootsToLock) and the Layout's data roots can never disagree. It
+// prepared roots (Roots) and the Layout's data roots can never disagree. It
 // is the config package's bridge over geometry.NewLayoutFromRoots, which takes
 // plain strings to keep geometry free of any config dependency.
 func NewLayoutFromPaths(p Paths) geometry.Layout {
