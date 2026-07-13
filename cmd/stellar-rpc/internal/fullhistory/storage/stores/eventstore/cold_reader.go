@@ -82,16 +82,18 @@ type ColdReader struct {
 	// Cached via sync.OnceValues.
 	waitMeta func() (coldMeta, error)
 
-	// waitMPHFRaw returns the MPHF loaded by a background goroutine
-	// started in OpenColdReader — the bare load, no cross-artifact
-	// validation. Close drains through this so an eventless chunk's
-	// teardown does no events.pack metadata I/O.
-	waitMPHFRaw func() (*mphf, error)
-
-	// waitMPHF is waitMPHFRaw plus the load-time cross-checks that
-	// bind the index pair to this chunk. The lookup path resolves
-	// through this; both are sync.OnceValues-cached.
+	// waitMPHF returns the MPHF loaded by a background goroutine
+	// started in OpenColdReader — the handle only, no cross-artifact
+	// validation, so Close always gets the real handle to release
+	// (a validation failure can never cost it the Close).
 	waitMPHF func() (*mphf, error)
+
+	// validateMPHF is the error-only gate over waitMPHF: the
+	// load-time cross-checks that bind the index pair to this chunk.
+	// The lookup path runs it before using the handle; skipping it on
+	// Close also spares an eventless chunk's teardown the events.pack
+	// metadata I/O. Both are sync.Once*-cached.
+	validateMPHF func() error
 
 	closed atomic.Bool
 }
@@ -165,14 +167,14 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		m, err := openMPHF(indexHashPath)
 		ch <- mphfResult{idx: m, err: err}
 	}()
-	c.waitMPHFRaw = sync.OnceValues(func() (*mphf, error) {
+	c.waitMPHF = sync.OnceValues(func() (*mphf, error) {
 		res := <-ch
 		return res.idx, res.err
 	})
-	c.waitMPHF = sync.OnceValues(func() (*mphf, error) {
-		idx, err := c.waitMPHFRaw()
+	c.validateMPHF = sync.OnceValue(func() error {
+		idx, err := c.waitMPHF()
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if idx.isEmpty() {
 			// A zero-term index is only valid for an eventless chunk: cross-check
@@ -180,14 +182,14 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 			// of silently matching nothing.
 			m, merr := c.waitMeta()
 			if merr != nil {
-				return nil, fmt.Errorf("events: validate empty index for chunk %s: %w", c.chunkID, merr)
+				return fmt.Errorf("events: validate empty index for chunk %s: %w", c.chunkID, merr)
 			}
 			if m.count != 0 {
-				return nil, fmt.Errorf(
+				return fmt.Errorf(
 					"events: %s holds zero terms but events.pack holds %d events for chunk %s (torn or mispaired index)",
 					indexHashPath, m.count, c.chunkID)
 			}
-			return idx, nil
+			return nil
 		}
 		// Non-empty index: bind the pair to this chunk before serving from
 		// it — index.pack/index.hash carry no chunk ID of their own, so a
@@ -198,28 +200,28 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		// empty-index check above).
 		tr, terr := c.index.Trailer()
 		if terr != nil {
-			return nil, fmt.Errorf("events: open %s: %w", indexPackPath, terr)
+			return fmt.Errorf("events: open %s: %w", indexPackPath, terr)
 		}
 		if tr.Format != indexPackFormat {
-			return nil, fmt.Errorf("events: %s: expected format %#x, got %#x (mis-pointed or foreign pack)",
+			return fmt.Errorf("events: %s: expected format %#x, got %#x (mis-pointed or foreign pack)",
 				indexPackPath, indexPackFormat, tr.Format)
 		}
 		if uint64(tr.TotalItems) != idx.numKeys() {
-			return nil, fmt.Errorf(
+			return fmt.Errorf(
 				"events: index pair mismatch for chunk %s: index.hash holds %d keys "+
 					"but index.pack holds %d records (mispaired artifacts)",
 				c.chunkID, idx.numKeys(), tr.TotalItems)
 		}
 		m, merr := c.waitMeta()
 		if merr != nil {
-			return nil, fmt.Errorf("events: validate index for chunk %s: %w", c.chunkID, merr)
+			return fmt.Errorf("events: validate index for chunk %s: %w", c.chunkID, merr)
 		}
 		if m.count == 0 {
-			return nil, fmt.Errorf(
+			return fmt.Errorf(
 				"events: %s holds %d terms but events.pack is eventless for chunk %s (mispaired index)",
 				indexHashPath, idx.numKeys(), c.chunkID)
 		}
-		return idx, nil
+		return nil
 	})
 
 	// events.pack metadata loader — runs on first call to
@@ -244,11 +246,11 @@ func (c *ColdReader) Close() error {
 	}
 	// Drain the MPHF goroutine before tearing down. Its result may
 	// be (nil, err) if the load failed — in either case the
-	// goroutine has exited and the channel send has happened. The
-	// RAW wait on purpose: the validated waitMPHF would do
-	// events.pack metadata I/O just to close an eventless chunk, and
-	// Close has nowhere to surface a verdict anyway.
-	m, _ := c.waitMPHFRaw()
+	// goroutine has exited and the channel send has happened.
+	// waitMPHF is validation-free, so this always gets the real
+	// handle to release, and skipping validateMPHF spares an
+	// eventless chunk's teardown the events.pack metadata I/O.
+	m, _ := c.waitMPHF()
 	var first error
 	if m != nil {
 		if err := m.Close(); err != nil {
@@ -353,6 +355,9 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []events.TermKey) ([]*
 		return nil, nil
 	}
 
+	if err := c.validateMPHF(); err != nil {
+		return nil, err
+	}
 	mphf, err := c.waitMPHF()
 	if err != nil {
 		return nil, err
