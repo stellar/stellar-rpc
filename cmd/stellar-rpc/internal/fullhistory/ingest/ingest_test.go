@@ -23,6 +23,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/fhtest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/eventstore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
@@ -481,8 +482,7 @@ func TestTxhashColdIngester_Bin(t *testing.T) {
 	}
 	require.NoError(t, ing.Finalize(context.Background()))
 
-	entries, err := txhash.ReadColdBin(txhashBinPath(coldDir))
-	require.NoError(t, err)
+	entries := fhtest.ReadColdBin(t, txhashBinPath(coldDir))
 	require.Len(t, entries, 2)
 }
 
@@ -512,10 +512,10 @@ func TestEventsColdIngester_Readback(t *testing.T) {
 	cnt, err := cr.EventCount()
 	require.NoError(t, err)
 	require.Equal(t, uint32(2), cnt)
-	bm, err := cr.Lookup(context.Background(), term)
+	bms, err := cr.LookupKeys(context.Background(), []events.TermKey{term})
 	require.NoError(t, err)
-	require.NotNil(t, bm)
-	require.Equal(t, uint64(2), bm.GetCardinality())
+	require.NotNil(t, bms[0])
+	require.Equal(t, uint64(2), bms[0].GetCardinality())
 }
 
 // ───────────────────────── V0 (pre-Soroban) events handling ─────────────────────────
@@ -566,10 +566,10 @@ func TestEventsColdIngester_V0KeepsOffsetsContiguous(t *testing.T) {
 	require.Equal(t, uint32(1), evEnd)
 
 	// And the event is queryable by its term.
-	bm, err := cr.Lookup(context.Background(), term)
+	bms, err := cr.LookupKeys(context.Background(), []events.TermKey{term})
 	require.NoError(t, err)
-	require.NotNil(t, bm)
-	require.Equal(t, uint64(1), bm.GetCardinality())
+	require.NotNil(t, bms[0])
+	require.Equal(t, uint64(1), bms[0].GetCardinality())
 }
 
 // TestWriteColdChunk_EventlessChunk_FullyReadable drives a full cold chunk of V0
@@ -611,8 +611,10 @@ func TestWriteColdChunk_EventlessChunk_FullyReadable(t *testing.T) {
 	cnt, err := cr.EventCount()
 	require.NoError(t, err)
 	require.Zero(t, cnt)
-	_, lerr := cr.Lookup(context.Background(), events.ComputeTermKey([]byte("any"), events.FieldContractID))
-	require.ErrorIs(t, lerr, eventstore.ErrTermNotFound)
+	anyKey := events.ComputeTermKey([]byte("any"), events.FieldContractID)
+	bms, lerr := cr.LookupKeys(context.Background(), []events.TermKey{anyKey})
+	require.NoError(t, lerr)
+	require.Nil(t, bms[0], "a term with no matching events misses cleanly (nil bitmap)")
 
 	// Metrics still fired: one aggregate per-chunk, one (clean) per-ingester.
 	require.Equal(t, 1, sink.coldChunkTotals, "ColdChunkTotal must fire for an eventless chunk")
@@ -661,13 +663,12 @@ func TestColdService_Success(t *testing.T) {
 		chunkID, filepath.Join(coldDir, DataTypeEvents, chunkID.BucketID()), eventstore.ColdReaderOptions{})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ecr.Close()) }()
-	bm, err := ecr.Lookup(context.Background(), term)
+	bms, err := ecr.LookupKeys(context.Background(), []events.TermKey{term})
 	require.NoError(t, err)
-	require.Equal(t, uint64(2), bm.GetCardinality())
+	require.Equal(t, uint64(2), bms[0].GetCardinality())
 
 	// Txhash .bin count.
-	binEntries, err := txhash.ReadColdBin(txhashBinPath(filepath.Join(coldDir, DataTypeTxhash)))
-	require.NoError(t, err)
+	binEntries := fhtest.ReadColdBin(t, txhashBinPath(filepath.Join(coldDir, DataTypeTxhash)))
 	require.Len(t, binEntries, 2)
 
 	// Metrics: one ColdChunkTotal, one ColdIngest per data type, no errors.
@@ -894,8 +895,7 @@ func TestWriteColdChunk_TxhashCold_Bin(t *testing.T) {
 		coldDirsAt(coldDir, chunkID), nil, Config{Txhash: true},
 	))
 
-	entries, err := txhash.ReadColdBin(txhashBinPath(filepath.Join(coldDir, DataTypeTxhash)))
-	require.NoError(t, err)
+	entries := fhtest.ReadColdBin(t, txhashBinPath(filepath.Join(coldDir, DataTypeTxhash)))
 	require.Len(t, entries, len(txSeqs))
 }
 
@@ -931,10 +931,10 @@ func TestWriteColdChunk_EventsCold_Readback(t *testing.T) {
 	cnt, err := cr.EventCount()
 	require.NoError(t, err)
 	require.Equal(t, uint32(len(evSeqs)), cnt)
-	bm, err := cr.Lookup(context.Background(), term)
+	bms, err := cr.LookupKeys(context.Background(), []events.TermKey{term})
 	require.NoError(t, err)
-	require.NotNil(t, bm)
-	require.Equal(t, uint64(len(evSeqs)), bm.GetCardinality())
+	require.NotNil(t, bms[0])
+	require.Equal(t, uint64(len(evSeqs)), bms[0].GetCardinality())
 }
 
 // ───────────────────────── drain stream errors ─────────────────────────
@@ -1133,8 +1133,7 @@ func TestTxhashColdIngester_BinContent(t *testing.T) {
 	}
 	require.NoError(t, ing.Finalize(context.Background()))
 
-	entries, err := txhash.ReadColdBin(txhashBinPath(coldDir))
-	require.NoError(t, err)
+	entries := fhtest.ReadColdBin(t, txhashBinPath(coldDir))
 	require.Len(t, entries, 2)
 
 	var prevKey [txhash.ColdKeySize]byte
@@ -1290,8 +1289,8 @@ func TestEventsCold_FinishThenIndexFails_LeavesInertPack(t *testing.T) {
 	ing, err := NewEventsColdIngester(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil)
 	require.NoError(t, err)
 
-	// Ingest one event-bearing ledger so the mirror is non-empty (an empty
-	// build set would take the valid empty-index path instead of buildMPHF).
+	// Ingest one event-bearing ledger so the mirror is non-empty, exercising a
+	// real (non-empty) MPHF build.
 	rawEv, _, _ := marshalLCMWithEvent(t, first)
 	require.NoError(t, ing.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(rawEv)))
 

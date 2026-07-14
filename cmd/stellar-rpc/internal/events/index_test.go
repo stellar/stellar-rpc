@@ -1,6 +1,7 @@
 package events
 
 import (
+	"encoding/binary"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -244,4 +245,20 @@ func TestTermsForBytes_TopicCountClippedToMax(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, keys, 1+protocol.MaxTopicCount,
 		"1 contract-ID term + MaxTopicCount topic terms (extras dropped)")
+}
+
+// TestTermsForBytes_UnsupportedBodyVersionHardFails pins the decision that a
+// future ContractEvent body version is a hard indexing error, matching the
+// SQLite backend's hard-fail (db/event.go) — never a silent contractID-only
+// index, which would make topic queries miss real events with no signal.
+func TestTermsForBytes_UnsupportedBodyVersionHardFails(t *testing.T) {
+	// Marshal a valid no-contract-ID V0 event, then patch the body
+	// discriminant in the raw XDR — the wire shape a future protocol
+	// would deliver. Layout without a contract ID:
+	// ext.V (4) || contractId flag (4, =0) || type (4) || body.V (4).
+	raw := marshaledEvent(t, symTopicEvent(nil, "transfer"))
+	binary.BigEndian.PutUint32(raw[12:16], 1)
+
+	_, err := TermsForBytes(raw)
+	require.ErrorContains(t, err, "unsupported ContractEvent body version 1")
 }

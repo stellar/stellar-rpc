@@ -47,10 +47,10 @@ func NewLayout(root string) Layout {
 }
 
 // NewLayoutFromRoots binds a Layout to explicit per-tree roots — the resolved,
-// independently-overridable storage paths the daemon flocks and opens. Taking
+// independently-overridable storage paths the daemon prepares and opens. Taking
 // strings (rather than the config Paths struct) keeps geometry free of any
 // config dependency; the config package's NewLayoutFromPaths adapts a Paths
-// to this so lock and data location can never disagree.
+// to this so prepared roots and data location can never disagree.
 func NewLayoutFromRoots(catalogRoot, hotRoot, ledgersRoot, eventsRoot, txhashRawRoot, txhashIndexRoot string) Layout {
 	return Layout{
 		catalogRoot:     catalogRoot,

@@ -35,9 +35,16 @@ func downTip() *fakeTipBackend {
 	return &fakeTipBackend{err: errors.New("backend unreachable"), errFirst: 99}
 }
 
+// callValidate runs validateConfig and, on success, returns the earliest_ledger
+// value it pinned (read back from the catalog, since validateConfig no longer
+// returns it). On failure the earliest is meaningless, so it returns 0.
 func callValidate(t *testing.T, cfg config.Config, cat *catalog.Catalog, tip NetworkTipBackend) (uint32, error) {
 	t.Helper()
-	return validateConfig(context.Background(), cfg, cat, tip, time.Millisecond, 3)
+	if err := validateConfig(context.Background(), cfg, cat, tip, time.Millisecond, 3); err != nil {
+		return 0, err
+	}
+	el, _, err := cat.EarliestLedger()
+	return el, err
 }
 
 // requireEarliestPin asserts the earliest_ledger pin reads back as wantEarliest;

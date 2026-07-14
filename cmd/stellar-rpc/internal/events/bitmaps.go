@@ -5,8 +5,8 @@ import (
 )
 
 // Bitmaps is the in-memory event index for single-threaded
-// build-then-freeze paths (cold backfill ingest, WriteColdIndex
-// snapshots produced by ConcurrentBitmaps.Snapshot).
+// build-then-freeze paths (cold backfill ingest feeding
+// WriteColdIndex).
 //
 // As a named map type, it supports the natural map operations
 // (`for term, bm := range b`, `len(b)`, `b[term]`) directly — no
@@ -17,8 +17,7 @@ import (
 // NOT safe for concurrent access. The caller guarantees serial
 // access (build then hand off, or a single goroutine throughout).
 // For the concurrent-reader-vs-single-writer case (live HotStore
-// ingest) use ConcurrentBitmaps and convert to Bitmaps via
-// ConcurrentBitmaps.Snapshot before serialization.
+// ingest) use ConcurrentBitmaps.
 type Bitmaps map[TermKey]*roaring.Bitmap
 
 // NewBitmaps returns an empty Bitmaps. Equivalent to make(Bitmaps).
@@ -31,8 +30,8 @@ func NewBitmaps() Bitmaps {
 // the same (key, eventID) pair are silently skipped.
 //
 // The eventIDs slice may be in any order; AddMany handles
-// insertion. For monotonically-ordered batches (the IngestLedgerEvents
-// pattern), AddMany takes its fast path.
+// insertion. For monotonically-ordered batches (the cold backfill
+// ingest pattern), AddMany takes its fast path.
 func (b Bitmaps) AddTo(key TermKey, eventIDs ...uint32) {
 	bm, ok := b[key]
 	if !ok {

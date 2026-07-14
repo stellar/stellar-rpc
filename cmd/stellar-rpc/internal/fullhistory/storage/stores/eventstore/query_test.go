@@ -259,8 +259,7 @@ func TestQuery_DoesNotMutateMirrorBitmaps(t *testing.T) {
 	fx := newQueryFixture(t)
 	// Snapshot the mirror's bitmap for topic0=alpha before any query.
 	key := events.ComputeTermKey(fx.t0aRaw, events.FieldTopic0)
-	before, err := fx.store.Lookup(context.Background(), key)
-	require.NoError(t, err)
+	before := lookupOne(t, fx.store, key)
 	beforeCard := before.GetCardinality()
 
 	// Run several queries that all touch the topic0=alpha term.
@@ -272,8 +271,7 @@ func TestQuery_DoesNotMutateMirrorBitmaps(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	after, err := fx.store.Lookup(context.Background(), key)
-	require.NoError(t, err)
+	after := lookupOne(t, fx.store, key)
 	assert.Equal(t, beforeCard, after.GetCardinality(),
 		"Query must not mutate the mirror's bitmaps")
 }
@@ -536,8 +534,7 @@ func TestQuery_PostFilterRejectsTermHashCollision(t *testing.T) {
 	// topic1=gamma). Inject id=4 (evt-a-b — topic0=beta only,
 	// no topic1) into the same bitmap to simulate a collision.
 	gammaKey := events.ComputeTermKey(fx.t0cRaw, events.FieldTopic1)
-	before, err := fx.store.Lookup(context.Background(), gammaKey)
-	require.NoError(t, err)
+	before := lookupOne(t, fx.store, gammaKey)
 	require.True(t, before.Contains(1), "fixture sanity: id=1 indexes topic1=gamma")
 	require.False(t, before.Contains(4), "fixture sanity: id=4 not yet in topic1=gamma bitmap")
 
@@ -546,8 +543,7 @@ func TestQuery_PostFilterRejectsTermHashCollision(t *testing.T) {
 	// in this test, so the single-writer contract is satisfied.
 	fx.store.index().AddTo(gammaKey, 4)
 
-	after, err := fx.store.Lookup(context.Background(), gammaKey)
-	require.NoError(t, err)
+	after := lookupOne(t, fx.store, gammaKey)
 	require.True(t, after.Contains(4), "fixture sanity: collision id=4 is now in the bitmap")
 
 	// Query with the colliding term: only id=1 should survive the
@@ -578,12 +574,10 @@ func TestQuery_MixedSuccessFilterList(t *testing.T) {
 	missingTopic := xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &missingSym}
 	missingRaw, err := missingTopic.MarshalBinary()
 	require.NoError(t, err)
-	// Sanity check: this term really isn't in the index. The
-	// LookupKeys path (which Query uses) signals miss with a nil
-	// slot; the single-key Lookup surfaces ErrTermNotFound.
+	// Sanity check: this term really isn't in the index. LookupKeys
+	// (which Query uses) signals the miss with a nil slot.
 	missingKey := events.ComputeTermKey(missingRaw, events.FieldTopic0)
-	_, err = fx.store.Lookup(context.Background(), missingKey)
-	require.ErrorIs(t, err, ErrTermNotFound,
+	require.Nil(t, lookupOne(t, fx.store, missingKey),
 		"fixture sanity: 'nonexistent' must not be indexed")
 
 	got, err := Query(context.Background(), fx.store, []Filter{

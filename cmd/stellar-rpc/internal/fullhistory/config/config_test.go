@@ -235,11 +235,50 @@ func TestResolvePaths_OverridesWin(t *testing.T) {
 	assert.Equal(t, "/mnt/hot", p.HotStorage)
 }
 
-func TestRootsToLock_AllDistinctRoots(t *testing.T) {
+func TestRoots_AllDistinct(t *testing.T) {
 	cfg, err := ParseConfig([]byte(minimalValidConfig))
 	require.NoError(t, err)
-	roots := cfg.ResolvePaths().RootsToLock()
+	roots := cfg.ResolvePaths().Roots()
 	// Meta store + four immutable trees + hot storage = six roots.
 	require.Len(t, roots, 6)
-	assert.NotContains(t, roots, "/data", "the data dir parent is not itself locked")
+	assert.NotContains(t, roots, "/data", "the data dir parent is not itself a root")
+}
+
+func TestValidateRoots(t *testing.T) {
+	base := Paths{
+		Catalog:     "/data/catalog/rocksdb",
+		Ledgers:     "/data/ledgers",
+		Events:      "/data/events",
+		TxhashRaw:   "/data/txhash/raw",
+		TxhashIndex: "/data/txhash/index",
+		HotStorage:  "/data/hot",
+	}
+
+	t.Run("default sibling layout is valid", func(t *testing.T) {
+		require.NoError(t, base.ValidateRoots())
+	})
+
+	t.Run("duplicate roots rejected", func(t *testing.T) {
+		p := base
+		p.HotStorage = p.Catalog
+		err := p.ValidateRoots()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "more than one store")
+	})
+
+	t.Run("duplicate via unclean spelling rejected", func(t *testing.T) {
+		p := base
+		p.HotStorage = "/data/../data/catalog/rocksdb/" // same tree, different spelling
+		err := p.ValidateRoots()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "more than one store")
+	})
+
+	t.Run("nested roots are allowed", func(t *testing.T) {
+		// Deliberate: prune and discard delete per-chunk paths only, never a
+		// whole root, so a root inside another root loses nothing.
+		p := base
+		p.Events = "/data/ledgers/events"
+		require.NoError(t, p.ValidateRoots())
+	})
 }

@@ -16,19 +16,12 @@ package eventstore
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/packfile"
 )
-
-// ErrWriterClosed is returned by Append and Finish after the
-// ColdWriter has been closed — either by a successful Finish call
-// or by Close. Re-exported from packfile so callers stay within the
-// eventstore facade for errors.Is checks.
-var ErrWriterClosed = packfile.ErrWriterClosed
 
 // ──────────────────────────────────────────────────────────────────
 // ColdWriter — streams a Chunk's events.Payload sequence into events.pack.
@@ -60,8 +53,6 @@ var ErrWriterClosed = packfile.ErrWriterClosed
 // own internal worker pool for compression, but the writer's
 // public API is single-producer.
 type ColdWriter struct {
-	chunkID chunk.ID
-	dir     string
 	pw      *packfile.Writer
 	scratch []byte // reused Marshal buffer for Append; avoids a per-event alloc
 }
@@ -88,7 +79,8 @@ type ColdWriterOptions struct {
 }
 
 // NewColdWriter creates the events.pack for chunkID inside bucketDir.
-// bucketDir is created if it doesn't exist; the filename is
+// bucketDir must already exist — like the sibling stores, directory
+// creation belongs to the ingest layer. The filename is
 // {chunkID:08d}-events.pack per the backfill design doc. The returned
 // ColdWriter must be closed via either Finish (on success) or Close
 // (on abort) — leaving a ColdWriter open leaks the underlying
@@ -99,9 +91,6 @@ type ColdWriterOptions struct {
 // defaults (serial, no writeback) — fine for tests and per-ledger
 // live writes; batch workloads should opt in.
 func NewColdWriter(chunkID chunk.ID, bucketDir string, opts ColdWriterOptions) (*ColdWriter, error) {
-	if err := os.MkdirAll(bucketDir, 0o755); err != nil {
-		return nil, fmt.Errorf("events: mkdir %s: %w", bucketDir, err)
-	}
 	path := filepath.Join(bucketDir, EventsPackName(chunkID))
 	pw, err := packfile.Create(path, packfile.WriterOptions{
 		Format:           eventsPackFormat,
@@ -114,22 +103,15 @@ func NewColdWriter(chunkID chunk.ID, bucketDir string, opts ColdWriterOptions) (
 	if err != nil {
 		return nil, fmt.Errorf("events: create events.pack at %s: %w", path, err)
 	}
-	return &ColdWriter{chunkID: chunkID, dir: bucketDir, pw: pw}, nil
+	return &ColdWriter{pw: pw}, nil
 }
-
-// ChunkID returns the chunk this ColdWriter serves.
-func (w *ColdWriter) ChunkID() chunk.ID { return w.chunkID }
-
-// Dir returns the bucket directory the cold artifacts live in.
-func (w *ColdWriter) Dir() string { return w.dir }
 
 // Append marshals p into the canonical wire format and writes it to
 // events.pack. Callers must drive Appends in chunk-relative eventID
 // order — packfile records this as item position 0, 1, 2, ... and
 // the cold reader reads them back the same way.
 //
-// Returns ErrWriterClosed (== packfile.ErrWriterClosed) if called
-// after Finish or Close.
+// Returns packfile.ErrWriterClosed if called after Finish or Close.
 func (w *ColdWriter) Append(p events.Payload) error {
 	// Marshal into a reusable scratch buffer. AppendItem copies the bytes
 	// into the packfile's record buffer synchronously, so the scratch is
@@ -147,7 +129,7 @@ func (w *ColdWriter) Append(p events.Payload) error {
 // safe to fence with an atomic durability flag.
 //
 // Finish must not be called more than once. A second call (or a
-// call after Close) returns ErrWriterClosed.
+// call after Close) returns packfile.ErrWriterClosed.
 func (w *ColdWriter) Finish(offsets *events.LedgerOffsets) error {
 	appData, err := encodeLedgerOffsets(offsets)
 	if err != nil {

@@ -14,7 +14,6 @@ package txhash
 import (
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -22,10 +21,6 @@ import (
 
 	"github.com/stellar/streamhash"
 )
-
-// ErrEmptyBuildSet is returned by BuildColdIndex when inputs hold no
-// entries (streamhash can't build an index over zero keys).
-var ErrEmptyBuildSet = errors.New("txhash: cannot build a cold index with zero keys")
 
 // BuildColdIndex builds one cold txhash index from inputs (the per-chunk
 // .bin files for the index) into outputPath. [minLedger, maxLedger] is the
@@ -35,9 +30,8 @@ var ErrEmptyBuildSet = errors.New("txhash: cannot build a cold index with zero k
 //
 // The .bin files are k-way merged (cold_merge.go) and fed single-pass to
 // streamhash. By default the block build uses runtime.NumCPU()/2 workers
-// (~2.7x over single-threaded); caller opts override. Returns
-// ErrEmptyBuildSet for empty inputs, removes the partial output on error,
-// and honors ctx cancellation.
+// (~2.7x over single-threaded); caller opts override. Removes the partial
+// output on error, and honors ctx cancellation.
 func BuildColdIndex(
 	ctx context.Context,
 	inputs []string,
@@ -45,9 +39,6 @@ func BuildColdIndex(
 	minLedger, maxLedger uint32,
 	opts ...streamhash.BuildOption,
 ) (err error) {
-	if len(inputs) == 0 {
-		return ErrEmptyBuildSet
-	}
 	if maxLedger < minLedger {
 		return fmt.Errorf("txhash: maxLedger %d < minLedger %d", maxLedger, minLedger)
 	}
@@ -59,9 +50,6 @@ func BuildColdIndex(
 	total, err := scanAndValidate(inputs)
 	if err != nil {
 		return err
-	}
-	if total == 0 {
-		return ErrEmptyBuildSet
 	}
 
 	// The cold format options go last so they win: a caller can override the
@@ -83,17 +71,21 @@ func BuildColdIndex(
 		}
 	}()
 
-	numLeaves := min(maxMergeLeaves(), len(inputs))
-	m := newMerger(ctx)
-	defer m.stop()
-	finalCh, finalPool := m.buildMergeTree(inputs, numLeaves, mergeFileBufBytes)
+	// Skip the merge for a zero-key coverage: the empty index comes from
+	// Finish alone, and the merge has nothing to feed.
+	if total > 0 {
+		numLeaves := min(maxMergeLeaves(), len(inputs))
+		m := newMerger(ctx)
+		defer m.stop()
+		finalCh, finalPool := m.buildMergeTree(inputs, numLeaves, mergeFileBufBytes)
 
-	added, err := feedMergedKeys(builder, finalCh, finalPool, m, minLedger, maxLedger)
-	if err != nil {
-		return err
-	}
-	if added != total {
-		return fmt.Errorf("txhash: key count mismatch: headers declared %d, merged %d", total, added)
+		added, ferr := feedMergedKeys(builder, finalCh, finalPool, m, minLedger, maxLedger)
+		if ferr != nil {
+			return ferr
+		}
+		if added != total {
+			return fmt.Errorf("txhash: key count mismatch: headers declared %d, merged %d", total, added)
+		}
 	}
 	if ferr := builder.Finish(); ferr != nil {
 		return fmt.Errorf("txhash: finalize cold index at %s: %w", outputPath, ferr)
@@ -135,7 +127,7 @@ func scanAndValidate(inputs []string) (uint64, error) {
 
 // scanBinHeader opens path, reads its declared entry count, and verifies its
 // byte size matches that count via coldBinCount (the shared, overflow-safe
-// header check ReadColdBin also uses).
+// header check).
 func scanBinHeader(path string) (uint64, error) {
 	f, err := os.Open(path)
 	if err != nil {

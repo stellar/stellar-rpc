@@ -63,17 +63,13 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 		return fmt.Errorf("create --out dir %s: %w", opts.OutDir, err)
 	}
 	layout := geometry.NewLayout(opts.HotRoot)
-	// A live daemon creates AND deletes hot/{chunk} DBs under its flocked hot
-	// root (ingestion/discard), and RocksDB's own LOCK file only guards
-	// double-opening one DB dir — so take the daemon's root flock: pointing
-	// --hot-dir at a live deployment fails fast with ErrRootLocked instead of
-	// racing its lifecycle, and the lock closes the stat-then-open window on
-	// the exists check below.
-	locks, err := config.LockRoots(layout.HotRoot())
-	if err != nil {
-		return fmt.Errorf("lock --hot-dir hot root: %w", err)
+	// Create + fsync the hot root up front — the daemon's own root prep. There
+	// is no cross-process root lock to take; double-opening one hot DB dir is
+	// guarded by RocksDB's own LOCK file, and the exists check below keeps hot
+	// timings comparable from a fixed (empty) starting state.
+	if err := config.PrepareRoots(layout.HotRoot()); err != nil {
+		return fmt.Errorf("prepare --hot-dir hot root: %w", err)
 	}
-	defer locks.Release()
 	dbPath := layout.HotChunkPath(opts.Chunk)
 	if _, err := os.Stat(dbPath); err == nil {
 		return fmt.Errorf("hot DB dir %s already exists; delete it for a fixed starting state", dbPath)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/linxGnu/grocksdb"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,6 +50,38 @@ func assertWriteItems(t *testing.T, rep LedgerReport, txhash int) {
 	assert.Equal(t, 1, rep.Phases[PhaseLedgers].Items, "ledgers items")
 	assert.Equal(t, txhash, rep.Phases[PhaseTxhash].Items, "txhash items")
 	assert.Equal(t, 1, rep.Phases[PhaseEvents].Items, "events items")
+}
+
+// TestConfig_PerCFOptionRouting asserts the txhash calibration reaches ONLY the
+// txhash CF: the ledger CF gets no bloom (it is never probed for missing keys)
+// and the events CFs keep their own compression/block-size overrides. Asserted
+// at the config-construction seam because grocksdb options can't be read back
+// off a live DB.
+func TestConfig_PerCFOptionRouting(t *testing.T) {
+	perCF := config(t.TempDir(), silentLogger(), false, false).PerCFOptions
+
+	txCF := txhash.CFNames()[0]
+	assert.Equal(t, 12, perCF[txCF].BloomFilterBitsPerKey, "txhash CF keeps its bloom")
+	assert.Equal(t, 64, perCF[txCF].WriteBufferMB, "txhash CF keeps its write buffer")
+	assert.True(t, perCF[txCF].DisableAutoCompactions, "txhash CF keeps compaction off")
+
+	ledgerCF := ledger.CFNames()[0]
+	assert.Zero(t, perCF[ledgerCF].BloomFilterBitsPerKey, "ledger CF gets no bloom")
+	assert.Zero(t, perCF[ledgerCF].WriteBufferMB, "ledger CF rides on RocksDB defaults")
+	assert.False(t, perCF[ledgerCF].DisableAutoCompactions, "ledger CF keeps auto-compaction")
+
+	assert.Equal(t, grocksdb.ZSTDCompression, perCF[eventstore.DataCF].Compression,
+		"events data CF keeps its ZSTD override")
+	assert.NotZero(t, perCF[eventstore.DataCF].BlockSize, "events data CF keeps its block-size override")
+	assert.Zero(t, perCF[eventstore.DataCF].BloomFilterBitsPerKey, "events data CF gets no bloom")
+}
+
+func TestConfig_DBWideTuningStaysShared(t *testing.T) {
+	tuning := config(t.TempDir(), silentLogger(), false, false).Tuning
+	assert.Equal(t, 512, tuning.BlockCacheMB)
+	assert.Equal(t, 1024, tuning.MaxTotalWalSizeMB)
+	assert.Equal(t, 8, tuning.MaxBackgroundJobs)
+	assert.Equal(t, 10_000, tuning.MaxOpenFiles)
 }
 
 func TestOpen_ValidatesInputs(t *testing.T) {
@@ -114,10 +147,10 @@ func TestIngestLedger_AllCFsAdvanceTogether(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, first+1, seqB)
 	// events CFs.
-	bm, err := db.Events().Lookup(context.Background(), termA)
+	bms, err := db.Events().LookupKeys(context.Background(), []events.TermKey{termA})
 	require.NoError(t, err)
-	require.NotNil(t, bm)
-	assert.Equal(t, uint64(2), bm.GetCardinality(), "both ledgers share the event term")
+	require.NotNil(t, bms[0])
+	assert.Equal(t, uint64(2), bms[0].GetCardinality(), "both ledgers share the event term")
 	assert.Equal(t, uint32(2), eventCount(t, db.Events()))
 
 	// The single authoritative committed frontier equals the last committed seq.
@@ -153,9 +186,10 @@ func TestIngestLedger_RejectedLedgerPersistsNothingAcrossAnyCF(t *testing.T) {
 	// txhash CFs — the hash is absent.
 	_, gerr = db.Txhash().Get(hash)
 	require.ErrorIs(t, gerr, stores.ErrNotFound)
-	// events CFs — no term indexed, no event committed.
-	_, lerr := db.Events().Lookup(context.Background(), term)
-	require.ErrorIs(t, lerr, eventstore.ErrTermNotFound)
+	// events CFs — no term indexed, no event committed (clean miss = nil bitmap).
+	bms, lerr := db.Events().LookupKeys(context.Background(), []events.TermKey{term})
+	require.NoError(t, lerr)
+	require.Nil(t, bms[0])
 	assert.Equal(t, uint32(0), eventCount(t, db.Events()))
 
 	// The single committed frontier is still empty — nothing committed.
@@ -333,10 +367,10 @@ func TestIngestLedger_WritesEveryHotType(t *testing.T) {
 	seq, err := db.Txhash().Get(hash)
 	require.NoError(t, err)
 	assert.Equal(t, first, seq)
-	bm, err := db.Events().Lookup(context.Background(), term)
+	bms, err := db.Events().LookupKeys(context.Background(), []events.TermKey{term})
 	require.NoError(t, err)
-	require.NotNil(t, bm)
-	assert.Equal(t, uint64(1), bm.GetCardinality())
+	require.NotNil(t, bms[0])
+	assert.Equal(t, uint64(1), bms[0].GetCardinality())
 }
 
 // TestIngestLedger_EventlessTxStillIndexesHash pins the post-merge txhash
@@ -429,6 +463,67 @@ func TestOpenReadOnly_ReadsCommittedAndRejectsWrites(t *testing.T) {
 	// A write through the read-only handle must fail — the freeze never mutates.
 	_, err = ro.IngestLedger(first+2, xdr.LedgerCloseMetaView(zeroTxLCM(t, first+2)))
 	require.Error(t, err, "read-only DB must reject writes")
+}
+
+// TestOpenReadOnly_SkipsEventsWarmup pins #834: a read-only (freeze/probe) open is
+// a ledgers-only view that never runs eventstore's index-CF warmup scan, while a
+// read-WRITE open still warms. The proof is a poisoned events-index row that
+// warmup's key-length check rejects: the write open fails on it (warmup ran), the
+// read-only open ignores it (warmup skipped) and still serves the ledgers-only
+// surface — MaxCommittedSeq and Source() byte-for-byte — that freeze/probe use.
+func TestOpenReadOnly_SkipsEventsWarmup(t *testing.T) {
+	chunkID := chunk.ID(0)
+	first := chunkID.FirstLedger()
+	dir := t.TempDir()
+
+	// Writer: ingest two ledgers, capture the exact wire bytes, then close.
+	db, err := Open(dir, chunkID, silentLogger())
+	require.NoError(t, err)
+	want := map[uint32][]byte{}
+	for _, seq := range []uint32{first, first + 1} {
+		raw := zeroTxLCM(t, seq)
+		want[seq] = raw
+		_, ierr := db.IngestLedger(seq, xdr.LedgerCloseMetaView(raw))
+		require.NoError(t, ierr)
+	}
+	require.NoError(t, db.Close())
+
+	// Poison the events index with a malformed row (wrong key length). warmup's
+	// index scan rejects it; a scan-skipping open never sees it. Written through a
+	// bare read-write open of the same multi-CF DB, closed to free the LOCK.
+	raw, err := rocksdb.New(config(dir, silentLogger(), false, true))
+	require.NoError(t, err)
+	require.NoError(t, raw.Put(eventstore.IndexCF, []byte("bad"), nil))
+	require.NoError(t, raw.Close())
+
+	// Read-WRITE open warms → the poisoned index row fails the scan.
+	_, werr := OpenExisting(dir, chunkID, silentLogger())
+	require.ErrorContains(t, werr, "events_index key length",
+		"a read-write open must run the events warmup scan and reject the poison")
+
+	// Read-only open skips the warmup → opens clean despite the poison.
+	ro, err := OpenReadOnly(dir, chunkID, silentLogger())
+	require.NoError(t, err, "read-only open must skip the events warmup and ignore the poison")
+	t.Cleanup(func() { require.NoError(t, ro.Close()) })
+
+	// Probe surface: MaxCommittedSeq resolves through the skipped open.
+	seq, ok, err := ro.MaxCommittedSeq()
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, first+1, seq)
+
+	// Freeze surface: Source() yields the committed ledgers byte-for-byte.
+	got := map[uint32][]byte{}
+	for b, err := range ro.Source().RawLedgers(context.Background(), ledgerbackend.UnboundedRange(first)) {
+		require.NoError(t, err)
+		s, serr := xdr.LedgerCloseMetaView(b).LedgerSequence()
+		require.NoError(t, serr)
+		got[s] = append([]byte(nil), b...) // b is borrowed; clone before the next step
+	}
+	assert.Equal(t, want, got, "freeze reads are byte-identical through the warmup-skipped open")
+
+	// Structural safety: the ledgers-only view has no events facade to hand out.
+	assert.Panics(t, func() { ro.Events() }, "Events() on a ledgers-only view must fail loudly")
 }
 
 // TestIngestLedger_ClosedDBFails confirms a closed shared DB rejects ingest. The

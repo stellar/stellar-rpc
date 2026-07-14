@@ -6,16 +6,18 @@ package eventstore
 // events.LedgerOffsets app-data block, and serves the events.Reader
 // interface against them.
 //
-// Lifecycle: each ColdReader owns two lazy packfile.Reader
-// instances plus an in-memory parsed MPHF index. Open kicks off the
-// MPHF read in a background goroutine; the packfile.Readers are
-// truly lazy and only touch disk on the first call that needs them.
-// Close drains the MPHF goroutine and releases the packfile handles.
-// Multiple ColdReaders can be open against the same chunk directory
-// concurrently — packfile.Reader is safe for concurrent reads and
-// the MPHF is read-only after load.
+// Lifecycle: each ColdReader owns two packfile.Reader instances
+// plus an in-memory parsed MPHF index. Open returns immediately,
+// but all three I/O units start right away in background
+// goroutines: packfile.Open opens each file (holding its fd) and
+// reads its trailer in the background, and the MPHF read kicks off
+// alongside them. Decoded metadata is awaited on the first call
+// that needs it. Close drains the MPHF goroutine and releases the
+// packfile handles. Multiple ColdReaders can be open against the
+// same chunk directory concurrently — packfile.Reader is safe for
+// concurrent reads and the MPHF is read-only after load.
 //
-// Concurrency contract: read methods (Lookup, LookupKeys,
+// Concurrency contract: read methods (LookupKeys,
 // FetchEvents, All) are safe to call concurrently with each other
 // on the same ColdReader. They are NOT safe to call concurrently
 // with Close — the caller is responsible for draining all in-flight
@@ -27,8 +29,8 @@ package eventstore
 //
 // Close semantics by method:
 //
-//   - Lookup, LookupKeys, FetchEvents, All, EventCount, Offsets:
-//     return / yield ErrClosed after Close.
+//   - LookupKeys, FetchEvents, All, EventCount, Offsets:
+//     return / yield stores.ErrStoreClosed after Close.
 //   - ChunkID: is the constructor-supplied chunk ID; never reads
 //     from disk and is unaffected by Close. Callers can use it for
 //     logging, metrics, or error context after closing the reader.
@@ -43,7 +45,6 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"math"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -53,38 +54,46 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/packfile"
 )
 
 // ColdReader is the read side of a frozen Chunk. Implements
 // events.Reader.
 //
-// Open shape: OpenColdReader does no I/O beyond options validation.
-// packfile.Open is lazy; events.pack metadata (TotalItems + AppData
-// + offsets decode + chunkID cross-check) is loaded on first
-// metadata access via a sync.OnceValues-cached loader. The MPHF
-// kicks off in a background goroutine at Open and is awaited on
-// first Lookup / LookupKeys call via a second sync.OnceValues.
-// This makes opening N chunks for a query non-blocking — each
-// reader returns immediately and the three I/O units fan out
-// concurrently across all opened readers.
+// Open shape: OpenColdReader does no synchronous I/O beyond options
+// validation. packfile.Open starts each file's open + trailer read
+// in a background goroutine immediately; events.pack metadata
+// (TotalItems + AppData + offsets decode + chunkID cross-check) is
+// decoded on first metadata access via a sync.OnceValues-cached
+// loader. The MPHF kicks off in a background goroutine at Open and
+// is awaited on the first LookupKeys call via a second
+// sync.OnceValues. This makes opening N chunks for a query
+// non-blocking — each reader returns immediately and the three I/O
+// units fan out concurrently across all opened readers.
 type ColdReader struct {
 	chunkID chunk.ID
 
-	events *packfile.Reader // lazy — first read drives the actual open
-	index  *packfile.Reader // lazy — first ReadItem drives the actual open
+	events *packfile.Reader // opened in the background by packfile.Open; reads await it
+	index  *packfile.Reader // opened in the background by packfile.Open; reads await it
 
-	// waitMeta returns the events.pack metadata (count + offsets)
-	// loaded on first call from the events.pack trailer + AppData.
-	// Cached via sync.OnceValues; the underlying packfile.Reader
-	// is itself lazy, so the trailer/AppData reads only happen here.
+	// waitMeta returns the events.pack metadata (count + offsets),
+	// decoded on first call from the events.pack trailer + AppData.
+	// Cached via sync.OnceValues.
 	waitMeta func() (coldMeta, error)
 
 	// waitMPHF returns the MPHF loaded by a background goroutine
-	// started in OpenColdReader. The goroutine sends its result on
-	// a buffered channel; the wrapped sync.OnceValues receives once
-	// and caches.
+	// started in OpenColdReader — the handle only, no cross-artifact
+	// validation, so Close always gets the real handle to release
+	// (a validation failure can never cost it the Close).
 	waitMPHF func() (*mphf, error)
+
+	// validateMPHF is the error-only gate over waitMPHF: the
+	// load-time cross-checks that bind the index pair to this chunk.
+	// The lookup path runs it before using the handle; skipping it on
+	// Close also spares an eventless chunk's teardown the events.pack
+	// metadata I/O. Both are sync.Once*-cached.
+	validateMPHF func() error
 
 	closed atomic.Bool
 }
@@ -111,12 +120,14 @@ type ColdReaderOptions struct {
 }
 
 // OpenColdReader prepares a ColdReader for chunkID inside bucketDir.
-// It does no I/O — packfile.Open is lazy, the events.pack metadata
-// loader is sync.OnceValues-deferred, and the MPHF loader runs in
-// a background goroutine awaited via sync.OnceValues on first
-// Lookup. Validation errors that depend on file contents (chunkID
-// cross-check, format, AppData layout, MPHF parse) surface from
-// the first method that needs the data, not from Open itself.
+// It does no synchronous I/O — packfile.Open starts each file's open
+// in a background goroutine (holding its fd once open), the
+// events.pack metadata decode is sync.OnceValues-deferred, and the
+// MPHF loader runs in a background goroutine awaited via
+// sync.OnceValues on first LookupKeys. Validation errors that depend
+// on file contents (chunkID cross-check, format, AppData layout,
+// MPHF parse) surface from the first method that needs the data, not
+// from Open itself.
 //
 // bucketDir is the orchestrator-supplied bucket directory
 // ({events_root}/{bucketID:05d}/); this reader does not compose it.
@@ -158,25 +169,59 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 	}()
 	c.waitMPHF = sync.OnceValues(func() (*mphf, error) {
 		res := <-ch
-		if res.err != nil || !res.idx.isEmpty() {
-			return res.idx, res.err
+		return res.idx, res.err
+	})
+	c.validateMPHF = sync.OnceValue(func() error {
+		idx, err := c.waitMPHF()
+		if err != nil {
+			return err
 		}
-		// The empty-index sentinel (zero-length index.hash) is only valid
-		// for an eventless chunk. Cross-check events.pack's count so a
-		// torn write that died at zero bytes — or a mispaired artifact —
-		// fails loudly here instead of silently matching nothing for a
-		// chunk that has events. (A partial index.hash of any nonzero
-		// size already fails loudly at parse.)
+		if idx.isEmpty() {
+			// A zero-term index is only valid for an eventless chunk: cross-check
+			// events.pack's count so a mispaired empty index fails loudly instead
+			// of silently matching nothing.
+			m, merr := c.waitMeta()
+			if merr != nil {
+				return fmt.Errorf("events: validate empty index for chunk %s: %w", c.chunkID, merr)
+			}
+			if m.count != 0 {
+				return fmt.Errorf(
+					"events: %s holds zero terms but events.pack holds %d events for chunk %s (torn or mispaired index)",
+					indexHashPath, m.count, c.chunkID)
+			}
+			return nil
+		}
+		// Non-empty index: bind the pair to this chunk before serving from
+		// it — index.pack/index.hash carry no chunk ID of their own, so a
+		// mispaired index would silently return an incomplete subset of
+		// matches. Three cheap checks: index.pack's trailer Format,
+		// index.hash keys == index.pack records (halves of one build), and
+		// non-empty index ⇒ non-empty events.pack (converse of the
+		// empty-index check above).
+		tr, terr := c.index.Trailer()
+		if terr != nil {
+			return fmt.Errorf("events: open %s: %w", indexPackPath, terr)
+		}
+		if tr.Format != indexPackFormat {
+			return fmt.Errorf("events: %s: expected format %#x, got %#x (mis-pointed or foreign pack)",
+				indexPackPath, indexPackFormat, tr.Format)
+		}
+		if uint64(tr.TotalItems) != idx.numKeys() {
+			return fmt.Errorf(
+				"events: index pair mismatch for chunk %s: index.hash holds %d keys "+
+					"but index.pack holds %d records (mispaired artifacts)",
+				c.chunkID, idx.numKeys(), tr.TotalItems)
+		}
 		m, merr := c.waitMeta()
 		if merr != nil {
-			return nil, fmt.Errorf("events: validate empty index for chunk %s: %w", c.chunkID, merr)
+			return fmt.Errorf("events: validate index for chunk %s: %w", c.chunkID, merr)
 		}
-		if m.count != 0 {
-			return nil, fmt.Errorf(
-				"events: %s is the empty-index sentinel but events.pack holds %d events for chunk %s (torn or mispaired index)",
-				indexHashPath, m.count, c.chunkID)
+		if m.count == 0 {
+			return fmt.Errorf(
+				"events: %s holds %d terms but events.pack is eventless for chunk %s (mispaired index)",
+				indexHashPath, idx.numKeys(), c.chunkID)
 		}
-		return res.idx, nil
+		return nil
 	})
 
 	// events.pack metadata loader — runs on first call to
@@ -192,9 +237,9 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 // the MPHF background goroutine before tearing down so an
 // in-flight load doesn't write to a half-closed handle.
 //
-// Must not be called concurrently with Lookup, LookupKeys,
-// FetchEvents, or All on the same ColdReader. See the type-level
-// concurrency contract for the rationale.
+// Must not be called concurrently with LookupKeys, FetchEvents, or
+// All on the same ColdReader. See the type-level concurrency
+// contract for the rationale.
 func (c *ColdReader) Close() error {
 	if c.closed.Swap(true) {
 		return nil
@@ -202,6 +247,9 @@ func (c *ColdReader) Close() error {
 	// Drain the MPHF goroutine before tearing down. Its result may
 	// be (nil, err) if the load failed — in either case the
 	// goroutine has exited and the channel send has happened.
+	// waitMPHF is validation-free, so this always gets the real
+	// handle to release, and skipping validateMPHF spares an
+	// eventless chunk's teardown the events.pack metadata I/O.
 	m, _ := c.waitMPHF()
 	var first error
 	if m != nil {
@@ -225,10 +273,10 @@ func (c *ColdReader) ChunkID() chunk.ID { return c.chunkID }
 // EventCount is the total number of events in this Chunk. The
 // underlying value is read from events.pack's trailer on first
 // metadata access (lazy); subsequent calls return the cached
-// value. Returns (0, ErrClosed) after Close.
+// value. Returns (0, stores.ErrStoreClosed) after Close.
 func (c *ColdReader) EventCount() (uint32, error) {
 	if c.closed.Load() {
-		return 0, ErrClosed
+		return 0, stores.ErrStoreClosed
 	}
 	m, err := c.waitMeta()
 	if err != nil {
@@ -242,68 +290,18 @@ func (c *ColdReader) EventCount() (uint32, error) {
 // uses this to stitch a multi-ledger query range into
 // chunk-relative event-id ranges (see Reader.Offsets).
 //
-// Returns (nil, ErrClosed) after Close. Callers must treat the
+// Returns (nil, stores.ErrStoreClosed) after Close. Callers must treat the
 // returned value as read-only — mutations would corrupt every
 // other reader holding the same cached snapshot.
 func (c *ColdReader) Offsets() (*events.LedgerOffsets, error) {
 	if c.closed.Load() {
-		return nil, ErrClosed
+		return nil, stores.ErrStoreClosed
 	}
 	m, err := c.waitMeta()
 	if err != nil {
 		return nil, err
 	}
 	return m.offsets, nil
-}
-
-// Lookup returns the bitmap of event IDs matching key. Returns
-// (nil, ErrTermNotFound) when:
-//
-//   - streamhash's routing-stage check proves key was not in the
-//     build set (fast no-match), OR
-//   - MPHF returns a slot but the index.pack 4-byte fingerprint at
-//     that slot doesn't match key[:4] (residual collision).
-//
-// The returned bitmap is freshly unmarshalled — callers can mutate
-// it freely. ctx is observed before and after the MPHF wait (the
-// wait itself isn't ctx-cancellable; the second check catches a
-// cancel that landed while waiting on the background load).
-func (c *ColdReader) Lookup(ctx context.Context, key events.TermKey) (*roaring.Bitmap, error) {
-	if c.closed.Load() {
-		return nil, ErrClosed
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	mphf, err := c.waitMPHF()
-	if err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	slot, err := mphf.Lookup(key)
-	if err != nil {
-		if errors.Is(err, ErrKeyNotFound) {
-			return nil, ErrTermNotFound
-		}
-		return nil, fmt.Errorf("events: MPHF lookup for chunk %s: %w", c.chunkID, err)
-	}
-
-	var bm *roaring.Bitmap
-	err = c.index.ReadItem(int(slot), func(record []byte) error {
-		var err error
-		bm, err = verifyAndDeserializeBitmap(record, key, slot)
-		return err
-	})
-	if err != nil {
-		return nil, fmt.Errorf("events: read index.pack slot %d for chunk %s: %w", slot, c.chunkID, err)
-	}
-	if bm == nil {
-		return nil, ErrTermNotFound
-	}
-	return bm, nil
 }
 
 // verifyAndDeserializeBitmap checks the index.pack record's leading
@@ -348,7 +346,7 @@ func verifyAndDeserializeBitmap(record []byte, key events.TermKey, slot uint32) 
 //     match. Misses (fingerprint mismatch) leave result[i] = nil.
 func (c *ColdReader) LookupKeys(ctx context.Context, keys []events.TermKey) ([]*roaring.Bitmap, error) {
 	if c.closed.Load() {
-		return nil, ErrClosed
+		return nil, stores.ErrStoreClosed
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -357,6 +355,9 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []events.TermKey) ([]*
 		return nil, nil
 	}
 
+	if err := c.validateMPHF(); err != nil {
+		return nil, err
+	}
 	mphf, err := c.waitMPHF()
 	if err != nil {
 		return nil, err
@@ -434,7 +435,7 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []events.TermKey) ([]*
 // idx is unique.
 func (c *ColdReader) FetchEvents(ctx context.Context, eventIDs []uint32) ([]events.Payload, error) {
 	if c.closed.Load() {
-		return nil, ErrClosed
+		return nil, stores.ErrStoreClosed
 	}
 	if len(eventIDs) == 0 {
 		return nil, nil
@@ -488,7 +489,7 @@ func (c *ColdReader) FetchEvents(ctx context.Context, eventIDs []uint32) ([]even
 func (c *ColdReader) FetchRange(ctx context.Context, start, count uint32) iter.Seq2[events.Payload, error] {
 	return func(yield func(events.Payload, error) bool) {
 		if c.closed.Load() {
-			yield(events.Payload{}, ErrClosed)
+			yield(events.Payload{}, stores.ErrStoreClosed)
 			return
 		}
 		if err := ctx.Err(); err != nil {
@@ -537,13 +538,13 @@ func (c *ColdReader) FetchRange(ctx context.Context, start, count uint32) iter.S
 // All streams every event in this Chunk in chunk-relative eventID
 // order. Thin wrapper over FetchRange; its yielded Payloads are
 // likewise borrowed (valid only for the step). The up-front closed
-// check short-circuits to ErrClosed without spinning up the cached
+// check short-circuits to stores.ErrStoreClosed without spinning up the cached
 // waitMeta + descending into FetchRange (which would also detect
 // the closed state, just one indirection later).
 func (c *ColdReader) All(ctx context.Context) iter.Seq2[events.Payload, error] {
 	return func(yield func(events.Payload, error) bool) {
 		if c.closed.Load() {
-			yield(events.Payload{}, ErrClosed)
+			yield(events.Payload{}, stores.ErrStoreClosed)
 			return
 		}
 		m, err := c.waitMeta()
@@ -564,13 +565,18 @@ func (c *ColdReader) All(ctx context.Context) iter.Seq2[events.Payload, error] {
 // at most once per reader (sync.OnceValues guards). Placed at the
 // end of the file (after the exported methods) to satisfy funcorder.
 func (c *ColdReader) loadMeta(eventsPath string) (coldMeta, error) {
-	total, err := c.events.TotalItems()
+	tr, err := c.events.Trailer()
 	if err != nil {
 		return coldMeta{}, fmt.Errorf("events: open %s: %w", eventsPath, err)
 	}
-	if total < 0 || uint64(total) > math.MaxUint32 {
-		return coldMeta{}, fmt.Errorf("events: implausible item count %d in %s", total, eventsPath)
+	// Check the trailer's Format before touching any record: a
+	// mis-pointed pack fails at open, not mid-query with an opaque
+	// zstd error (the ledger store does the same).
+	if tr.Format != eventsPackFormat {
+		return coldMeta{}, fmt.Errorf("events: %s: expected format %#x, got %#x (mis-pointed or foreign pack)",
+			eventsPath, eventsPackFormat, tr.Format)
 	}
+	total := tr.TotalItems
 	appData, err := c.events.AppData()
 	if err != nil {
 		return coldMeta{}, fmt.Errorf("events: read app data from %s: %w", eventsPath, err)
@@ -588,5 +594,13 @@ func (c *ColdReader) loadMeta(eventsPath string) (coldMeta, error) {
 		return coldMeta{}, fmt.Errorf("events: chunk-ID mismatch in %s: path says %s, contents start at ledger %d (chunk %s)",
 			eventsPath, c.chunkID, offsets.StartLedger(), got)
 	}
-	return coldMeta{count: uint32(total), offsets: offsets}, nil
+	// The offsets blob's cumulative total must equal the pack's item
+	// count — a mispaired blob (right chunk ID, wrong build) silently
+	// clips tail events off every per-ledger range.
+	if offsets.TotalEvents() != total {
+		return coldMeta{}, fmt.Errorf(
+			"events: %s: offsets blob sums to %d events but the pack holds %d (mispaired offsets)",
+			eventsPath, offsets.TotalEvents(), total)
+	}
+	return coldMeta{count: total, offsets: offsets}, nil
 }

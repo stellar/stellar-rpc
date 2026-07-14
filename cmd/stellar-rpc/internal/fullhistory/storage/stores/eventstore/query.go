@@ -44,7 +44,7 @@ import (
 // event. nil or empty slices are wildcards.
 //
 // Topics[i] constrains topic position i. Positions beyond
-// protocol.MaxTopicCount are not indexed (see events.TermsFor).
+// protocol.MaxTopicCount are not indexed (see events.TermsForBytes).
 type Filter struct {
 	ContractID []byte
 	Topics     [protocol.MaxTopicCount][]byte
@@ -132,6 +132,12 @@ func EventIDRangeForLedgers(ofs *events.LedgerOffsets, startLedger, endLedger ui
 //
 // MaxEvents caps the result size (0 = unlimited; must be non-negative).
 // Ascending keeps the lowest IDs; descending keeps the highest.
+//
+// MaxEvents is applied BEFORE the defensive post-filter drops residual
+// false positives, so a page can come back shorter than MaxEvents while
+// in-range matches remain. Pagers (the #772 getEvents wiring) MUST NOT
+// treat `len(result) < limit` as exhausted — resume from the last
+// returned event's position instead.
 //
 // Descending selects descending event-ID order; the zero value (false)
 // is ascending — the getEvents v1 default.
@@ -319,6 +325,8 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	// returns owned payloads in ascending order; the defensive
 	// post-filter preserves that order, and we reverse once at the
 	// end for descending output.
+	// NOTE: the MaxEvents cap lands here, BEFORE postFilter — a short
+	// page does not mean exhaustion (see QueryOptions.MaxEvents).
 	ids := selectEventIDs(union, opts.MaxEvents, descending)
 	payloads, err := r.FetchEvents(ctx, ids)
 	if err != nil {

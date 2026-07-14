@@ -586,31 +586,52 @@ func (s *Store) constructAndOpen() error {
 	return nil
 }
 
-// applyTuning splits configuration into wrapper-pinned values
-// (every CF, unconditional), per-facade Tuning fields (applied
-// only when non-zero), and per-CF overrides (applied last so they
-// win over the pinned defaults). BloomFilterBitsPerKey == 0 is
-// the documented "no bloom filter" sentinel.
+// applyTuning splits configuration into wrapper-pinned values (every CF,
+// unconditional), per-CF overrides (applied after the pinned defaults so
+// they win), and DB-wide Tuning fields (applied to the shared Options).
+// BloomFilterBitsPerKey == 0 is the documented "no bloom filter" sentinel.
 func (s *Store) applyTuning(opts *grocksdb.Options, cfNames []string, cfOpts []*grocksdb.Options) {
 	t := s.cfg.Tuning
 	for i, o := range cfOpts {
 		applyPinnedCFOptions(o)
-		applyCFTuning(o, t)
 		applyCFOverride(o, s.cfg.PerCFOptions[cfNames[i]])
 	}
 	applyDBTuning(opts, t)
 	s.applySharedTableOptions(cfNames, cfOpts, t)
 }
 
-// applyCFOverride applies the per-CF Compression override. BlockSize
-// is applied inside applySharedTableOptions when the BBTO is built.
-func applyCFOverride(o *grocksdb.Options, override CFOptions) {
+// applyCFOverride applies the per-CF memtable/compaction/compression knobs.
+// Each is applied only when non-zero, leaving the pinned default otherwise.
+// BlockSize and BloomFilterBitsPerKey are applied inside
+// applySharedTableOptions when the BBTO is built.
+func applyCFOverride(o *grocksdb.Options, c CFOptions) {
 	// CompressionType is an int alias; NoCompression (the pinned
 	// default) is 0. A zero-value override is therefore a no-op and
 	// leaves the pinned NoCompression in place. Non-zero values
 	// (Snappy, ZSTD, ...) replace it.
-	if override.Compression != grocksdb.NoCompression {
-		o.SetCompression(override.Compression)
+	if c.Compression != grocksdb.NoCompression {
+		o.SetCompression(c.Compression)
+	}
+	if c.WriteBufferMB > 0 {
+		o.SetWriteBufferSize(uint64(c.WriteBufferMB) << 20)
+	}
+	if c.MaxWriteBufferNumber > 0 {
+		o.SetMaxWriteBufferNumber(c.MaxWriteBufferNumber)
+	}
+	if c.Level0FileNumCompactionTrigger > 0 {
+		o.SetLevel0FileNumCompactionTrigger(c.Level0FileNumCompactionTrigger)
+	}
+	if c.Level0SlowdownWritesTrigger > 0 {
+		o.SetLevel0SlowdownWritesTrigger(c.Level0SlowdownWritesTrigger)
+	}
+	if c.Level0StopWritesTrigger > 0 {
+		o.SetLevel0StopWritesTrigger(c.Level0StopWritesTrigger)
+	}
+	if c.DisableAutoCompactions {
+		o.SetDisableAutoCompactions(true)
+	}
+	if c.TargetFileSizeMB > 0 {
+		o.SetTargetFileSizeBase(uint64(c.TargetFileSizeMB) << 20)
 	}
 }
 
@@ -623,33 +644,6 @@ func applyPinnedCFOptions(o *grocksdb.Options) {
 	o.SetTargetFileSizeMultiplier(1)
 	o.SetMaxBytesForLevelMultiplier(10)
 	o.SetCompression(grocksdb.NoCompression)
-}
-
-func applyCFTuning(o *grocksdb.Options, t Tuning) {
-	if t.WriteBufferMB > 0 {
-		o.SetWriteBufferSize(uint64(t.WriteBufferMB) << 20)
-	}
-	if t.MaxWriteBufferNumber > 0 {
-		o.SetMaxWriteBufferNumber(t.MaxWriteBufferNumber)
-	}
-	if t.Level0FileNumCompactionTrigger > 0 {
-		o.SetLevel0FileNumCompactionTrigger(t.Level0FileNumCompactionTrigger)
-	}
-	if t.Level0SlowdownWritesTrigger > 0 {
-		o.SetLevel0SlowdownWritesTrigger(t.Level0SlowdownWritesTrigger)
-	}
-	if t.Level0StopWritesTrigger > 0 {
-		o.SetLevel0StopWritesTrigger(t.Level0StopWritesTrigger)
-	}
-	if t.DisableAutoCompactions {
-		o.SetDisableAutoCompactions(true)
-	}
-	if t.TargetFileSizeMB > 0 {
-		o.SetTargetFileSizeBase(uint64(t.TargetFileSizeMB) << 20)
-	}
-	if t.MaxBytesForLevelBaseMB > 0 {
-		o.SetMaxBytesForLevelBase(uint64(t.MaxBytesForLevelBaseMB) << 20)
-	}
 }
 
 func applyDBTuning(opts *grocksdb.Options, t Tuning) {
@@ -665,15 +659,15 @@ func applyDBTuning(opts *grocksdb.Options, t Tuning) {
 }
 
 // applySharedTableOptions builds one BBTO per CF, referencing the
-// shared block cache (when set), a fresh per-CF bloom filter (when
-// set), and the per-CF BlockSize override (when set). The Store
-// retains every BBTO and the cache; Close destroys them after
-// opts/cfOpts.
+// DB-wide block cache (when set), a fresh per-CF bloom filter (when
+// that CF sets BloomFilterBitsPerKey), and the per-CF BlockSize
+// override (when set). The Store retains every BBTO and the cache;
+// Close destroys them after opts/cfOpts.
 //
-// A BBTO is installed on a CF iff any of the cache, a bloom filter,
-// or that CF's BlockSize override is configured — preserving the
-// previous behavior of leaving RocksDB's default BBTO untouched when
-// no table-level knob is set.
+// A BBTO is installed on a CF iff the shared cache, that CF's bloom
+// filter, or that CF's BlockSize override is configured — preserving
+// the previous behavior of leaving RocksDB's default BBTO untouched
+// when no table-level knob is set.
 //
 // The bloom filter is built per CF because SetFilterPolicy MOVES the
 // policy into the BBTO (it nils the source pointer), so a single
@@ -685,15 +679,15 @@ func (s *Store) applySharedTableOptions(cfNames []string, cfOpts []*grocksdb.Opt
 	}
 	for i, o := range cfOpts {
 		override := s.cfg.PerCFOptions[cfNames[i]]
-		if s.cache == nil && t.BloomFilterBitsPerKey == 0 && override.BlockSize == 0 {
+		if s.cache == nil && override.BloomFilterBitsPerKey == 0 && override.BlockSize == 0 {
 			continue
 		}
 		bbto := grocksdb.NewDefaultBlockBasedTableOptions()
 		if s.cache != nil {
 			bbto.SetBlockCache(s.cache)
 		}
-		if t.BloomFilterBitsPerKey > 0 {
-			bbto.SetFilterPolicy(grocksdb.NewBloomFilter(float64(t.BloomFilterBitsPerKey)))
+		if override.BloomFilterBitsPerKey > 0 {
+			bbto.SetFilterPolicy(grocksdb.NewBloomFilter(float64(override.BloomFilterBitsPerKey)))
 		}
 		if override.BlockSize > 0 {
 			bbto.SetBlockSize(override.BlockSize)

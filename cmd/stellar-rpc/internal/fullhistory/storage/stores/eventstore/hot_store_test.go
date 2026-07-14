@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"iter"
 	"path/filepath"
 	"sync"
 	"testing"
 
+	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -21,6 +21,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/rocksdb"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores"
 )
 
 // silentLogger returns a logger whose output is buffered into an
@@ -105,7 +106,7 @@ func makePayload(symbol string) (events.Payload, []events.TermKey) {
 	if err != nil {
 		panic(err) // hardcoded test fixture; an error here is a test bug
 	}
-	keys, err := events.TermsFor(ev)
+	keys, err := events.TermsForBytes(evBytes)
 	if err != nil {
 		panic(err)
 	}
@@ -174,8 +175,7 @@ func TestHotStore_IngestLedgerWritesAllCFs(t *testing.T) {
 	assert.Equal(t, uint32(1), binary.BigEndian.Uint32(offVal))
 
 	// In-memory mirror sees the term.
-	bm, err := h.store.Lookup(context.Background(), keys[0])
-	require.NoError(t, err)
+	bm := lookupOne(t, h.store, keys[0])
 	require.NotNil(t, bm)
 	assert.True(t, bm.Contains(0))
 
@@ -215,12 +215,12 @@ func TestHotStore_EmptyLedgerStillWritesOffsetsAndState(t *testing.T) {
 }
 
 func TestHotStore_LookupReturnsImmutableSnapshot(t *testing.T) {
-	// Pins the dense-mode contract: HotStore.Lookup returns an
-	// immutable snapshot of the live mirror. Writers (IngestLedgerEvents)
+	// Pins the dense-mode contract: HotStore.LookupKeys returns
+	// immutable snapshots of the live mirror. Writers (IngestLedgerEvents)
 	// publish new snapshots via atomic.Pointer COW; the pointer
-	// previously returned by Lookup is never mutated. A subsequent
+	// previously returned by LookupKeys is never mutated. A subsequent
 	// IngestLedgerEvents must NOT affect a previously-returned
-	// bitmap pointer — Lookup callers can safely retain the pointer
+	// bitmap pointer — callers can safely retain the pointer
 	// across writes.
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
@@ -232,8 +232,7 @@ func TestHotStore_LookupReturnsImmutableSnapshot(t *testing.T) {
 		require.NoError(t, ingestLedgerEvents(h.store, 2+i, []events.Payload{p}))
 	}
 
-	first, err := h.store.Lookup(context.Background(), keys[0])
-	require.NoError(t, err)
+	first := lookupOne(t, h.store, keys[0])
 	cardBefore := first.GetCardinality()
 
 	// New ingest publishes a new snapshot. The old pointer must
@@ -241,12 +240,11 @@ func TestHotStore_LookupReturnsImmutableSnapshot(t *testing.T) {
 	require.NoError(t, ingestLedgerEvents(h.store, 72, []events.Payload{p}))
 
 	assert.Equal(t, cardBefore, first.GetCardinality(),
-		"prior Lookup result must be an immutable snapshot — later IngestLedgerEvents must not mutate it")
+		"prior LookupKeys result must be an immutable snapshot — later IngestLedgerEvents must not mutate it")
 
-	second, err := h.store.Lookup(context.Background(), keys[0])
-	require.NoError(t, err)
+	second := lookupOne(t, h.store, keys[0])
 	assert.Equal(t, cardBefore+1, second.GetCardinality(),
-		"subsequent Lookup must observe the new snapshot")
+		"subsequent LookupKeys must observe the new snapshot")
 }
 
 func TestHotStore_FetchEventsRoundTrip(t *testing.T) {
@@ -386,12 +384,12 @@ func TestHotStore_CloseRejectsWrites(t *testing.T) {
 	h := openHotStoreForTest(t, 0)
 	require.NoError(t, h.raw.Close())
 	err := ingestLedgerEvents(h.store, 2, nil)
-	assert.ErrorIs(t, err, ErrClosed)
+	assert.ErrorIs(t, err, stores.ErrStoreClosed)
 }
 
 // TestHotStore_PostCloseReadsError pins the contract that read methods
-// fail loudly after Close. Pre-fix: Lookup only touched the in-memory
-// mirror and returned the cached bitmap silently, even after Close had
+// fail loudly after Close. Pre-fix: LookupKeys only touched the in-memory
+// mirror and returned the cached bitmaps silently, even after Close had
 // released chunkStore — the only "this store is gone" signal callers
 // got was when they tried to FetchEvents and hit a closed RocksDB.
 func TestHotStore_PostCloseReadsError(t *testing.T) {
@@ -402,25 +400,25 @@ func TestHotStore_PostCloseReadsError(t *testing.T) {
 	require.NoError(t, ingestLedgerEvents(h.store, chunkID.FirstLedger(), []events.Payload{p}))
 	require.NoError(t, h.raw.Close())
 
-	// Lookup must error rather than silently returning the cached bitmap.
-	bm, err := h.store.Lookup(context.Background(), keys[0])
-	assert.Nil(t, bm)
-	require.ErrorIs(t, err, ErrClosed)
+	// LookupKeys must error rather than silently returning cached bitmaps.
+	bms, err := h.store.LookupKeys(context.Background(), []events.TermKey{keys[0]})
+	assert.Nil(t, bms)
+	require.ErrorIs(t, err, stores.ErrStoreClosed)
 
-	// FetchEvents returns ErrClosed.
+	// FetchEvents returns ErrStoreClosed.
 	_, err = h.store.FetchEvents(context.Background(), []uint32{0})
-	require.ErrorIs(t, err, ErrClosed)
+	require.ErrorIs(t, err, stores.ErrStoreClosed)
 
-	// All iterator yields ErrClosed on first step.
-	require.ErrorIs(t, firstIterError(h.store.All(context.Background())), ErrClosed)
+	// All iterator yields ErrStoreClosed on first step.
+	require.ErrorIs(t, firstIterError(h.store.All(context.Background())), stores.ErrStoreClosed)
 
 	// Post-Close: ChunkID still works (constructor param);
-	// EventCount and Offsets return ErrClosed.
+	// EventCount and Offsets return ErrStoreClosed.
 	assert.Equal(t, chunkID, h.store.ChunkID())
 	_, err = h.store.EventCount()
-	require.ErrorIs(t, err, ErrClosed)
+	require.ErrorIs(t, err, stores.ErrStoreClosed)
 	_, err = h.store.Offsets()
-	require.ErrorIs(t, err, ErrClosed)
+	require.ErrorIs(t, err, stores.ErrStoreClosed)
 }
 
 // TestHotStore_IngestLedgerEvents_DuplicateLedgerErrors pins the sequencing
@@ -459,10 +457,8 @@ func TestHotStore_IngestLedgerEvents_DuplicateLedgerErrors(t *testing.T) {
 	// (hardcoded 0xab), so we check topic0 (index 1), which is symbol-specific.
 	_, secondKeys := makePayload("b")
 	require.GreaterOrEqual(t, len(secondKeys), 2, "test fixture expected to have a topic0 term")
-	bm, lookupErr := h.store.Lookup(context.Background(), secondKeys[1])
-	require.ErrorIs(t, lookupErr, ErrTermNotFound,
+	assert.Nil(t, lookupOne(t, h.store, secondKeys[1]),
 		"the rejected payload's topic0 term must not appear in the mirror")
-	assert.Nil(t, bm)
 }
 
 // TestHotStore_IngestLedgerEvents_RejectsLedgerGap pins the contract
@@ -565,9 +561,9 @@ func TestHotStore_ConcurrentIngestAndLookup(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for range N {
-			// ErrTermNotFound is expected during the race window
-			// where the writer goroutine hasn't ingested yet.
-			if _, err := h.store.Lookup(context.Background(), keys[0]); err != nil && !errors.Is(err, ErrTermNotFound) {
+			// A miss during the race window (writer hasn't ingested
+			// yet) is a nil bitmap, not an error — any error is a bug.
+			if _, err := h.store.LookupKeys(context.Background(), keys[:1]); err != nil {
 				t.Errorf("lookup: %v", err)
 				return
 			}
@@ -599,10 +595,10 @@ func fetchRangePayloads(t *testing.T, r Reader, start, count uint32) ([]events.P
 
 // firstIterError returns the first non-nil error yielded by seq,
 // or nil if the sequence finishes without one. Used by tests that
-// pin "after Close, this iterator yields ErrClosed and stops" —
-// the iterator returns immediately after the error yield, so the
-// helper doesn't walk a long sequence in practice. Shared with
-// cold_reader_test.go.
+// pin "after Close, this iterator yields stores.ErrStoreClosed and
+// stops" — the iterator returns immediately after the error yield,
+// so the helper doesn't walk a long sequence in practice. Shared
+// with cold_reader_test.go.
 func firstIterError(seq iter.Seq2[events.Payload, error]) error {
 	for _, err := range seq {
 		if err != nil {
@@ -610,6 +606,19 @@ func firstIterError(seq iter.Seq2[events.Payload, error]) error {
 		}
 	}
 	return nil
+}
+
+// lookupOne resolves a single term through the batched LookupKeys API
+// and returns its bitmap (nil on a clean miss). Shared by the
+// hot/cold/query tests that assert on one term at a time. It requires
+// LookupKeys to succeed, so closed/corrupt-path tests must call
+// LookupKeys directly and assert on the error.
+func lookupOne(t *testing.T, r Reader, key events.TermKey) *roaring.Bitmap {
+	t.Helper()
+	bms, err := r.LookupKeys(context.Background(), []events.TermKey{key})
+	require.NoError(t, err)
+	require.Len(t, bms, 1)
+	return bms[0]
 }
 
 func TestHotStore_FetchRangeMidRange(t *testing.T) {
@@ -657,7 +666,7 @@ func TestHotStore_FetchRangePostCloseYieldsErrClosed(t *testing.T) {
 	h := openHotStoreForTest(t, chunkID)
 	require.NoError(t, h.raw.Close())
 
-	require.ErrorIs(t, firstIterError(h.store.FetchRange(context.Background(), 0, 1)), ErrClosed)
+	require.ErrorIs(t, firstIterError(h.store.FetchRange(context.Background(), 0, 1)), stores.ErrStoreClosed)
 }
 
 func TestHotStore_AllMatchesFetchRange(t *testing.T) {
@@ -709,7 +718,7 @@ func mustOffsets(t *testing.T, r Reader) *events.LedgerOffsets {
 // write shape, reduced to a test seeding call.
 func ingestLedgerEvents(h *HotStore, ledgerSeq uint32, payloads []events.Payload) error {
 	if h.chunkStore.IsClosed() {
-		return ErrClosed
+		return stores.ErrStoreClosed
 	}
 	var apply func()
 	if err := h.chunkStore.Batch(func(b *rocksdb.BatchWriter) error {

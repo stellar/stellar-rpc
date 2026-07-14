@@ -56,6 +56,13 @@ func (r *TxReader) GetTransaction(hash [32]byte) (ingest.LedgerTransactionView, 
 		return txv, found, err
 	}
 	if softErr != nil {
+		// Deliberately an error, not a clean not-found: a soft failure
+		// means some candidate (including a cold fingerprint false
+		// positive naming an unservable ledger) could not be verified,
+		// so "the tx does not exist" cannot be asserted. The safe
+		// direction — a false not-found would be indistinguishable
+		// from the tx genuinely not existing (#772's read path relies
+		// on this).
 		return ingest.LedgerTransactionView{}, false, fmt.Errorf("txhash: lookup incomplete: %w", softErr)
 	}
 	return ingest.LedgerTransactionView{}, false, nil

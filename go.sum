@@ -445,6 +445,12 @@ github.com/stellar/go-xdr v0.0.0-20260529210834-0bf8f4956364 h1:gOKrfuWdZ92LFlv0
 github.com/stellar/go-xdr v0.0.0-20260529210834-0bf8f4956364/go.mod h1:If+U9Z1W5xU97VrOgJandQT+2dN7/iOpkCrxBJEyF80=
 github.com/stellar/streamhash v0.0.0-20260622155330-9e08e05c5fa6 h1:57+plrmWTOlCKeTRiYJnfJqU47F0qboBAMFsL9eRjoo=
 github.com/stellar/streamhash v0.0.0-20260622155330-9e08e05c5fa6/go.mod h1:fxKHewECHOFV08vy4rR/J40H7KVZcnNS96q6OdjR+TQ=
+github.com/stellar/streamhash v0.0.0-20260713121614-da9a38b1018e h1:zJrOvEk7g1rPOlU3o1tkEoucLIa0qCOI45j50FzIJEc=
+github.com/stellar/streamhash v0.0.0-20260713121614-da9a38b1018e/go.mod h1:fxKHewECHOFV08vy4rR/J40H7KVZcnNS96q6OdjR+TQ=
+github.com/stellar/streamhash v0.0.0-20260713140807-9f6eeb7acecf h1:0eG06xnYp14POIYGyFQiDHXZzlUdLLpoqhPTQgjAi1g=
+github.com/stellar/streamhash v0.0.0-20260713140807-9f6eeb7acecf/go.mod h1:fxKHewECHOFV08vy4rR/J40H7KVZcnNS96q6OdjR+TQ=
+github.com/stellar/streamhash v0.0.0-20260713164615-c72a4e6f578d h1:KOjgc+0Q2hsqnOa7Zn6sPiGMNDB/wyVC5WpriJV54s4=
+github.com/stellar/streamhash v0.0.0-20260713164615-c72a4e6f578d/go.mod h1:fxKHewECHOFV08vy4rR/J40H7KVZcnNS96q6OdjR+TQ=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/objx v0.4.0/go.mod h1:YvHI0jy2hoMjB+UWwv71VJQ9isScKT/TqJzVSSt89Yw=
 github.com/stretchr/objx v0.5.0/go.mod h1:Yh+to48EsGEfYuaHDzXPcE3xhTkx73EhmCGUpEOglKo=

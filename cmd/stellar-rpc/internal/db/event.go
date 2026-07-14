@@ -73,8 +73,11 @@ func NewEventReader(log *log.Entry, db db.SessionInterface, passphrase string) E
 	return &eventHandler{log: log, db: db, passphrase: passphrase}
 }
 
-//nolint:gocognit
-func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
+// Named error return: the deferred txReader.Close errors.Join below
+// must reach the caller (an unnamed return made it a dead local).
+//
+//nolint:gocognit,cyclop,funlen // pre-existing complexity; only the signature changed
+func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) (err error) {
 	txCount := lcm.CountTransactions()
 
 	if eventHandler.stmtCache == nil {
@@ -160,8 +163,8 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 			// events.StageSentinels — the single definition shared with the
 			// full-history view path — so the two backends cannot drift.
 			// Only the per-stage event counters are selected here (the
-			// full-history path stores no per-event index; it is positional
-			// there).
+			// full-history path stores EventIdx explicitly too, per the
+			// byte-stable-ID decision).
 			var txIdx, opIdx uint32
 			txIdx, opIdx, err = events.StageSentinels(event.Stage, tx.Index)
 			if err != nil {

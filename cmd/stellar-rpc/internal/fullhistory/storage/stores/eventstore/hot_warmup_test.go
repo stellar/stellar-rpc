@@ -1,7 +1,8 @@
 package eventstore
 
 import (
-	"context"
+	"fmt"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -21,10 +22,11 @@ func TestWarmup_FreshChunkProducesEmptyMirrorsViaNewWithStore(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
 
-	// The mirror is open (ingest can still happen); use Len to
-	// inspect it. ConcurrentBitmaps.Len is RLock-protected and
-	// returns the live count.
-	assert.Equal(t, 0, h.store.mirror.Len())
+	// A fresh mirror is empty: probing any term is a clean miss
+	// (nil bitmap, no error).
+	bm, err := h.store.mirror.Get(events.ComputeTermKey([]byte("any"), events.FieldContractID))
+	require.NoError(t, err)
+	assert.Nil(t, bm)
 	assert.Zero(t, h.store.offsets.LedgerCount())
 	assert.Equal(t, uint32(0), h.store.offsets.TotalEvents())
 	assert.Equal(t, chunkID.FirstLedger(), h.store.offsets.StartLedger())
@@ -33,7 +35,11 @@ func TestWarmup_FreshChunkProducesEmptyMirrorsViaNewWithStore(t *testing.T) {
 func TestWarmup_RebuildsMirrorFromIngestedRows(t *testing.T) {
 	// Ingest into one HotStore, close, reopen; the reopened store's
 	// mirror must hold the same terms (warmup replayed them from
-	// events_index).
+	// events_index). One-directional by design: every seeded term
+	// must survive with the right cardinality, but a phantom extra
+	// term in the reopened mirror would pass unnoticed —
+	// ConcurrentBitmaps deliberately has no term enumeration to
+	// check the other direction with.
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
 
@@ -42,11 +48,21 @@ func TestWarmup_RebuildsMirrorFromIngestedRows(t *testing.T) {
 	p2, _ := makePayload("beta")
 	require.NoError(t, ingestLedgerEvents(hot1, 2, []events.Payload{p1, p2}))
 
-	// Snapshot the mirror state before close. Snapshot returns a
-	// uniquely-owned Bitmaps the test can iterate freely.
+	// Derive the terms each seeded payload contributes (the same
+	// events.TermsForBytes the ingest path indexed by), then snapshot
+	// their pre-close cardinalities straight from the live mirror.
+	var seededKeys []events.TermKey
+	for _, p := range []events.Payload{p1, p2} {
+		keys, err := events.TermsForBytes(p.ContractEventBytes)
+		require.NoError(t, err)
+		seededKeys = append(seededKeys, keys...)
+	}
 	expected := make(map[events.TermKey]uint64)
-	for term, bm := range hot1.mirror.Snapshot() {
-		expected[term] = bm.GetCardinality()
+	for _, k := range seededKeys {
+		bm, err := hot1.mirror.Get(k)
+		require.NoError(t, err)
+		require.NotNil(t, bm, "seeded term missing from the pre-close mirror")
+		expected[k] = bm.GetCardinality()
 	}
 	require.NoError(t, raw1.Close())
 
@@ -54,8 +70,11 @@ func TestWarmup_RebuildsMirrorFromIngestedRows(t *testing.T) {
 	hot2, _ := openHotStoreForTestAt(t, dir, chunkID)
 
 	got := make(map[events.TermKey]uint64)
-	for term, bm := range hot2.mirror.Snapshot() {
-		got[term] = bm.GetCardinality()
+	for k := range expected {
+		bm, err := hot2.mirror.Get(k)
+		require.NoError(t, err)
+		require.NotNil(t, bm, "seeded term missing from the reopened mirror")
+		got[k] = bm.GetCardinality()
 	}
 	assert.Equal(t, expected, got)
 }
@@ -74,8 +93,7 @@ func TestWarmup_RestoresEventIDsForRepeatedTerm(t *testing.T) {
 	hot2, _ := openHotStoreForTestAt(t, dir, chunkID)
 
 	contractTermKey := events.ComputeTermKey(eventOf(p1).ContractId[:], events.FieldContractID)
-	bm, err := hot2.Lookup(context.Background(), contractTermKey)
-	require.NoError(t, err)
+	bm := lookupOne(t, hot2, contractTermKey)
 	require.NotNil(t, bm)
 	assert.Equal(t, uint64(3), bm.GetCardinality())
 	for id := range uint32(3) {
@@ -267,4 +285,28 @@ func TestWarmup_OffsetsHandleEmptyTrailingLedger(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint32(1), start)
 	assert.Equal(t, uint32(1), end, "empty ledger reports zero-width range")
+}
+
+// TestWarmup_RejectsIndexRowAtMaxUint32 pins the tripwire against its
+// wrap-adversarial input: an index row at eventID == MaxUint32. With a
+// uint32 upper bound, max+1 wraps to 0 and slips past the > total check
+// — the exact tamper the tripwire exists to catch; the bound is uint64.
+func TestWarmup_RejectsIndexRowAtMaxUint32(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir := t.TempDir()
+
+	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
+	p1, _ := makePayload("a")
+	require.NoError(t, ingestLedgerEvents(hot1, 2, []events.Payload{p1})) // total = 1
+	require.NoError(t, raw1.Close())
+
+	corruptHotChunk(t, dir, chunkID, func(raw *rocksdb.Store) {
+		var term events.TermKey
+		term[0] = 0x99
+		require.NoError(t, raw.Put(IndexCF, encodeIndexKey(term, math.MaxUint32), nil))
+	})
+
+	_, _, err := tryOpenHotStoreForTest(t, dir, chunkID)
+	require.ErrorContains(t, err,
+		fmt.Sprintf("index references event %d but only 1 committed", uint32(math.MaxUint32)))
 }

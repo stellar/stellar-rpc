@@ -32,11 +32,11 @@ import (
 // of the cold artifact always live together.
 //
 // A zero-term bitmaps (an eventless chunk, e.g. a pre-Soroban
-// backfill range) produces the EMPTY index: a zero-length index.hash
+// backfill range) produces a real (empty) index.hash over zero terms
 // plus a zero-record index.pack. The cold reader resolves every
-// lookup against it to ErrTermNotFound through the ordinary path, so
-// neither readers nor orchestrators need a pack-without-index special
-// case.
+// LookupKeys entry against it to a nil-bitmap miss through the
+// ordinary path, so neither readers nor orchestrators need a
+// pack-without-index special case.
 //
 // bitmaps is the complete term index for the Chunk, uniquely owned by
 // the caller (no concurrent reader holds a pointer to any of its
@@ -51,7 +51,7 @@ import (
 // catastrophically.
 //
 // Both cold backfill and the live-chunk freeze build a Bitmaps single-threaded by
-// re-deriving terms from raw LCMs (per-event events.TermsFor + Bitmaps.AddTo) and
+// re-deriving terms from raw LCMs (per-event events.TermsForBytes + Bitmaps.AddTo) and
 // hand it directly here.
 //
 // index.hash is the MPHF serialized via buildMPHF.
@@ -84,22 +84,8 @@ import (
 // chunks); the subsequent index.pack write is a tight in-memory
 // loop that doesn't poll ctx.
 func WriteColdIndex(ctx context.Context, chunkID chunk.ID, bitmaps events.Bitmaps, bucketDir string) (err error) {
-	n := len(bitmaps)
-
 	indexPackPath := filepath.Join(bucketDir, IndexPackName(chunkID))
 	indexHashPath := filepath.Join(bucketDir, IndexHashName(chunkID))
-
-	// Zero terms (an eventless chunk, e.g. an all-pre-Soroban backfill
-	// range — the COMMON case for early history): streamhash cannot
-	// build an MPHF over zero keys, so write the empty index instead —
-	// a zero-length index.hash (the sentinel openMPHF recognizes) plus
-	// a zero-record index.pack. Readers then need no missing-file
-	// special case: every Lookup resolves to ErrTermNotFound through
-	// the ordinary path, and all three cold artifacts always exist for
-	// a finalized chunk.
-	if n == 0 {
-		return writeEmptyColdIndex(indexPackPath, indexHashPath)
-	}
 
 	// On any error path past this point (including a partial write
 	// from buildMPHF itself), remove the orphaned index.hash. Joined
@@ -119,7 +105,7 @@ func WriteColdIndex(ctx context.Context, chunkID chunk.ID, bitmaps events.Bitmap
 	}
 	defer m.Close()
 
-	entries := make([]indexEntry, 0, n)
+	entries := make([]indexEntry, 0, len(bitmaps))
 	for term, bitmap := range bitmaps {
 		slot, lerr := m.Lookup(term)
 		if lerr != nil {
@@ -203,49 +189,4 @@ func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
 		}
 	}
 	return pw.Finish(nil)
-}
-
-// writeEmptyColdIndex publishes the empty cold index for an eventless
-// chunk: a zero-length index.hash (the sentinel openMPHF recognizes as
-// "zero terms") and a zero-record index.pack. Both are fsync'd, matching
-// WriteColdIndex's durability contract. On error any partial artifact is
-// removed so the bucket dir stays clean for retry.
-func writeEmptyColdIndex(indexPackPath, indexHashPath string) (err error) {
-	defer func() {
-		if err == nil {
-			return
-		}
-		if rmErr := os.Remove(indexHashPath); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-			err = errors.Join(err, fmt.Errorf("events: remove orphan %s: %w", indexHashPath, rmErr))
-		}
-	}()
-
-	f, err := os.Create(indexHashPath)
-	if err != nil {
-		return fmt.Errorf("events: create empty index.hash at %s: %w", indexHashPath, err)
-	}
-	if err = f.Sync(); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("events: sync empty index.hash at %s: %w", indexHashPath, err)
-	}
-	if err = f.Close(); err != nil {
-		return fmt.Errorf("events: close empty index.hash at %s: %w", indexHashPath, err)
-	}
-
-	pw, err := packfile.Create(indexPackPath, packfile.WriterOptions{
-		Format:         indexPackFormat,
-		ItemsPerRecord: indexPackItemsPerRecord,
-		Overwrite:      true,
-	})
-	if err != nil {
-		return fmt.Errorf("events: create empty index.pack at %s: %w", indexPackPath, err)
-	}
-	if ferr := pw.Finish(nil); ferr != nil {
-		// pw.Close removes the partial index.pack.
-		if closeErr := pw.Close(); closeErr != nil {
-			ferr = errors.Join(ferr, fmt.Errorf("events: close partial index.pack: %w", closeErr))
-		}
-		return fmt.Errorf("events: finish empty index.pack at %s: %w", indexPackPath, ferr)
-	}
-	return nil
 }

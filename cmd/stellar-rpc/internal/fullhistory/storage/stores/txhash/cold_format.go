@@ -13,8 +13,6 @@ import (
 	"fmt"
 
 	"github.com/stellar/streamhash"
-
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
 // DefaultChunksPerIndex is the default number of chunks per cold txhash index.
@@ -38,21 +36,6 @@ const coldMetadataSize = 8
 // ErrInvalidMetadata is returned when a cold index's metadata is not a valid
 // [MinLedger, MaxLedger] blob.
 var ErrInvalidMetadata = errors.New("txhash: cold index user metadata malformed")
-
-// IndexBaseChunk returns the first chunk ID of the group of chunksPerIndex
-// chunks that contains c. Panics if chunksPerIndex is 0.
-func IndexBaseChunk(c chunk.ID, chunksPerIndex uint32) chunk.ID {
-	if chunksPerIndex == 0 {
-		panic("txhash: IndexBaseChunk called with chunksPerIndex 0")
-	}
-	return chunk.ID(uint32(c) / chunksPerIndex * chunksPerIndex)
-}
-
-// IndexFileName returns the filename for the cold txhash index whose group
-// begins at baseChunk.
-func IndexFileName(baseChunk chunk.ID) string {
-	return baseChunk.String() + "-txhash.idx"
-}
 
 // EncodeLedgerRange packs [minLedger, maxLedger] into the metadata blob.
 func EncodeLedgerRange(minLedger, maxLedger uint32) []byte {

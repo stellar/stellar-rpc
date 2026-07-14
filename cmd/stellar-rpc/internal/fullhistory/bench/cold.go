@@ -44,9 +44,7 @@ type coldOptions struct {
 	ChunkWorkers int
 	// ArtifactRoot is the output root the cold artifacts land under, laid out
 	// by geometry.NewLayout. It is scratch: no completion records are written,
-	// so re-runs overwrite freely (the production artifact model). Its write
-	// roots carry the daemon's single-process flocks for the run — a root a
-	// live daemon holds fails fast with config.ErrRootLocked.
+	// so re-runs overwrite freely (the production artifact model).
 	ArtifactRoot string
 	// OutDir receives the CSV report.
 	OutDir string
@@ -100,19 +98,18 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 	if err := os.MkdirAll(opts.OutDir, 0o755); err != nil {
 		return fmt.Errorf("create --out dir %s: %w", opts.OutDir, err)
 	}
-	// Cold artifacts land at production geometry under ArtifactRoot and the
-	// writers truncate in place, so this is a second writer in the daemon's
-	// single-process design: take its exclusive root flocks on every write
-	// root before touching anything. Pointing --cold-out-dir at a tree a live
-	// daemon holds fails fast with ErrRootLocked instead of truncating packs
-	// it is serving. All three roots are locked regardless of --types —
-	// ArtifactRoot is owned wholesale as scratch.
+	// Cold artifacts land at production geometry under ArtifactRoot: create +
+	// fsync every write root up front, the daemon's own root prep. There is no
+	// cross-process root lock to take — single-process enforcement rides on
+	// the catalog's RocksDB LOCK (which a catalog-less bench run never opens),
+	// and cold trees are write-once behind the one-write protocol, so a
+	// concurrent writer is redundant work, not corruption. All three roots are
+	// prepared regardless of --types — ArtifactRoot is owned wholesale as
+	// scratch.
 	layout := geometry.NewLayout(opts.ArtifactRoot)
-	locks, err := config.LockRoots(layout.LedgersRoot(), layout.EventsRoot(), layout.TxHashRawRoot())
-	if err != nil {
-		return fmt.Errorf("lock --cold-out-dir write roots: %w", err)
+	if err := config.PrepareRoots(layout.LedgersRoot(), layout.EventsRoot(), layout.TxHashRawRoot()); err != nil {
+		return fmt.Errorf("prepare --cold-out-dir write roots: %w", err)
 	}
-	defer locks.Release()
 
 	streamFor, release, err := openSource(ctx, opts.Source)
 	if err != nil {

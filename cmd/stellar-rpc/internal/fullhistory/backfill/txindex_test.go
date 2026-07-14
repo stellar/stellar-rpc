@@ -151,6 +151,30 @@ func TestBuildTxhashIndex_BuildsQueryableCoverage(t *testing.T) {
 	assertCoverageQueryable(t, cat, []txEntry{e0a, e0b, e1a})
 }
 
+// TestBuildTxhashIndex_AllEmptyWindowFreezes pins the #826 fix: a window whose
+// chunks all hold zero transactions (empty .bin files) builds a valid empty
+// index and freezes the coverage, instead of failing the build and re-planning
+// the same window on every restart.
+func TestBuildTxhashIndex_AllEmptyWindowFreezes(t *testing.T) {
+	cat, _ := smallTxHashIndexCatalog(t, 4)
+	cfg := testBuildConfig(cat)
+
+	// Chunks 0 and 1 are frozen with empty .bin files (no transactions).
+	freezeChunkBin(t, cat, 0, nil)
+	freezeChunkBin(t, cat, 1, nil)
+
+	require.NoError(t, buildTxhashIndex(context.Background(), 0, 0, 1, cfg))
+
+	// The coverage freezes rather than stalling in StateFreezing.
+	frozen, ok, err := cat.FrozenTxHashIndex(0)
+	require.NoError(t, err)
+	require.True(t, ok, "an all-empty window must freeze, not stall")
+	require.Equal(t, chunk.ID(0), frozen.Lo)
+	require.Equal(t, chunk.ID(1), frozen.Hi)
+	require.Equal(t, geometry.StateFrozen, frozen.State)
+	require.FileExists(t, cat.Layout().TxHashIndexFilePath(frozen))
+}
+
 // ---------------------------------------------------------------------------
 // Rolling case: hi advances by one each boundary; the predecessor is demoted
 // AND swept; exactly one frozen coverage exists at every instant.

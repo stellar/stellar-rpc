@@ -89,12 +89,14 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	paths := cfg.ResolvePaths()
 
-	// --- Lock every configured storage root for the daemon's whole life. ---
-	locks, err := config.LockRoots(paths.RootsToLock()...)
-	if err != nil {
+	// --- Reject shared roots, then create + fsync any missing ones. Single-
+	// process enforcement is the catalog's own RocksDB LOCK, taken next. ---
+	if err := paths.ValidateRoots(); err != nil {
 		return err
 	}
-	defer locks.Release()
+	if err := config.PrepareRoots(paths.Roots()...); err != nil {
+		return err
+	}
 
 	// --- Open the catalog (it owns its backing KV store; Close releases it). ---
 	cpi := geometry.ChunksPerTxhashIndex
@@ -134,10 +136,8 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 		serveReads = func(context.Context) error { return nil }
 	}
 
-	tipBackoff, tipMaxAttempts := defaultTipBackoff, defaultTipMaxAttempts
-
 	// --- validateConfig: pin/confirm the layout, resolve the earliest floor. ---
-	if _, err := validateConfig(ctx, cfg, cat, networkTip, tipBackoff, tipMaxAttempts); err != nil {
+	if err := validateConfig(ctx, cfg, cat, networkTip, defaultTipBackoff, defaultTipMaxAttempts); err != nil {
 		return err
 	}
 
@@ -161,7 +161,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	// --- Assemble the StartConfig and run the supervised run loop. ---
 	start := startConfig(
-		cfg, cat, logger, backend, networkTip, core, serveReads, metrics, sink, tipBackoff, tipMaxAttempts)
+		cfg, cat, logger, backend, networkTip, core, serveReads, metrics, sink)
 
 	backoff := opts.RestartBackoff
 	if backoff <= 0 {
@@ -176,7 +176,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 func startConfig(
 	cfg config.Config, cat *catalog.Catalog, logger *supportlog.Entry,
 	backend backfill.Backend, networkTip NetworkTipBackend, core CoreOpener, serveReads func(context.Context) error,
-	metrics observability.Metrics, sink ingest.MetricSink, tipBackoff time.Duration, tipMaxAttempts int,
+	metrics observability.Metrics, sink ingest.MetricSink,
 ) StartConfig {
 	exec := backfill.ExecConfig{
 		Catalog:    cat,
@@ -189,14 +189,14 @@ func startConfig(
 			Sink:    sink,
 		},
 	}
+	// TipBackoff / TipMaxAttempts are left zero here on purpose:
+	// StartConfig.withDefaults fills them at Start.
 	return StartConfig{
 		Exec:            exec,
 		RetentionChunks: deref(cfg.Retention.RetentionChunks),
 		NetworkTip:      networkTip,
 		Core:            core,
 		ServeReads:      serveReads,
-		TipBackoff:      tipBackoff,
-		TipMaxAttempts:  tipMaxAttempts,
 	}
 }
 

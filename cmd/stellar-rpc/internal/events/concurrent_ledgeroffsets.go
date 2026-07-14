@@ -1,17 +1,16 @@
 package events
 
 import (
-	"fmt"
 	"sync/atomic"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
 // ConcurrentLedgerOffsets tracks cumulative event counts per ledger
-// for live ingest paths: a single writer (IngestLedgerEvents) and
-// many concurrent readers (queries calling EventIDs / TotalEvents /
-// etc.). Lock-free reads via a fixed-capacity backing array plus an
-// atomic counter publishing the valid prefix.
+// for live ingest paths: a single writer (HotStore.applyLedger via
+// the post-commit hook) and many concurrent readers (queries calling
+// View / TotalEvents / etc.). Lock-free reads via a fixed-capacity
+// backing array plus an atomic counter publishing the valid prefix.
 //
 // Memory: 40KB up-front per instance (LedgersPerChunk × uint32).
 // Same as the slice the locked version pre-allocates, just shaped
@@ -22,12 +21,9 @@ import (
 //   - Append (writer): writes backing[n] then atomic.Store(len, n+1).
 //     The Store happens-before any reader's Load that observes the
 //     new value (Go memory model), so the prior write is visible.
-//   - Read methods (EventIDs, TotalEvents, etc.): atomic.Load(len),
+//   - Read methods (View, TotalEvents, etc.): atomic.Load(len),
 //     then read backing[:n]. Disjoint memory from the writer's
 //     next write at backing[n].
-//   - Snapshot copies backing[:n] into a fresh slice and returns a
-//     uniquely-owned LedgerOffsets for serialization (ColdWriter.Finish,
-//     query handoff to the build-then-read shape).
 //
 // Single-writer contract: Append must be called from a single
 // goroutine. Concurrent Appends would race on the len counter and
@@ -67,26 +63,6 @@ func (m *ConcurrentLedgerOffsets) Append(eventCount uint32) {
 	m.count.Store(n + 1)
 }
 
-// EventIDs returns the half-open event ID range [start, end) for the
-// given ledger.
-func (m *ConcurrentLedgerOffsets) EventIDs(ledger uint32) (uint32, uint32, error) {
-	n := m.count.Load()
-	if n == 0 {
-		return 0, 0, fmt.Errorf("ledger %d not found: no ledgers recorded", ledger)
-	}
-	endLedger := m.startLedger + n
-	if ledger < m.startLedger || ledger >= endLedger {
-		return 0, 0, fmt.Errorf("ledger %d is outside bounds [%d, %d)",
-			ledger, m.startLedger, endLedger)
-	}
-	rel := ledger - m.startLedger
-	var start uint32
-	if rel > 0 {
-		start = m.backing[rel-1]
-	}
-	return start, m.backing[rel], nil
-}
-
 // LedgerCount returns the number of ledgers recorded.
 func (m *ConcurrentLedgerOffsets) LedgerCount() int {
 	return int(m.count.Load())
@@ -114,8 +90,8 @@ func (m *ConcurrentLedgerOffsets) EndLedger() uint32 {
 // View returns a *LedgerOffsets sharing the live backing array,
 // capped to the count visible at call time. Used by HotStore on
 // the query hot path: each Query allocates one View (~24 bytes:
-// slice header + startLedger) instead of a 40KB Snapshot copy of
-// the full backing array.
+// slice header + startLedger) instead of a 40KB deep copy of the
+// full backing array.
 //
 // Safety: the slice's cap is set equal to its len, so any caller
 // that calls Append on the returned LedgerOffsets allocates a
@@ -133,22 +109,6 @@ func (m *ConcurrentLedgerOffsets) View() *LedgerOffsets {
 	n := m.count.Load()
 	return &LedgerOffsets{
 		offsets:     m.backing[:n:n],
-		startLedger: m.startLedger,
-	}
-}
-
-// Snapshot returns a uniquely-owned LedgerOffsets containing a
-// deep copy of the current state. Use this when the caller needs
-// independence from the live backing array — e.g., serializing to
-// disk via ColdWriter.Finish, or any path that retains the
-// pointer across mutation of the source. For the read hot path
-// where the caller only needs a few scalar reads, prefer View.
-func (m *ConcurrentLedgerOffsets) Snapshot() *LedgerOffsets {
-	n := m.count.Load()
-	offsets := make([]uint32, n)
-	copy(offsets, m.backing[:n])
-	return &LedgerOffsets{
-		offsets:     offsets,
 		startLedger: m.startLedger,
 	}
 }

@@ -151,10 +151,10 @@ func TestWriter_AppendAfterFinishErrors(t *testing.T) {
 	require.NoError(t, w.Finish(offsets))
 
 	err = w.Append(makeColdPayload(2, 1, "x"))
-	require.ErrorIs(t, err, ErrWriterClosed, "Append after Finish must return ErrWriterClosed")
+	require.ErrorIs(t, err, packfile.ErrWriterClosed, "Append after Finish must return packfile.ErrWriterClosed")
 
 	err = w.Finish(offsets)
-	require.ErrorIs(t, err, ErrWriterClosed, "double Finish must return ErrWriterClosed")
+	require.ErrorIs(t, err, packfile.ErrWriterClosed, "double Finish must return packfile.ErrWriterClosed")
 }
 
 func TestWriter_FailedFinishCleansUpViaClose(t *testing.T) {

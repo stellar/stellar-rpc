@@ -22,7 +22,7 @@ func BenchmarkEventIndex_10M(b *testing.B) {
 		buildSec := time.Since(start).Seconds()
 
 		b.ReportMetric(buildSec, "build_sec")
-		b.ReportMetric(float64(idx.Len()), "terms")
+		b.ReportMetric(float64(len(idx.terms)), "terms")
 
 		runtime.GC()
 		var mem runtime.MemStats
@@ -42,7 +42,7 @@ func buildIndex10M() *ConcurrentBitmaps {
 		numTopicVals = 3_000_000
 	)
 
-	idx := NewConcurrentBitmaps()
+	idx := NewConcurrentBitmapsFromBitmaps(NewBitmaps())
 	rng := rand.New(rand.NewSource(42))
 
 	contractKeys := make([]TermKey, numContracts)

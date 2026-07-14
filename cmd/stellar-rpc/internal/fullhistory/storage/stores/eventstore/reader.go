@@ -12,23 +12,11 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
-// ErrTermNotFound is the canonical "this term has no matching events
-// in this Chunk" sentinel returned by all Reader implementations.
-// Callers use errors.Is(err, ErrTermNotFound) to distinguish a clean
-// no-match from real errors (closed store, decode failure, etc.).
-//
-// HotStore returns this when the in-memory mirror has no entry for
-// the key. ColdReader returns this when streamhash fast-no-matches
-// the key OR when the index.pack fingerprint mismatches the key
-// (a residual MPHF collision).
-var ErrTermNotFound = errors.New("events: term not found in chunk")
-
-// ErrClosed is the canonical "this reader/store has been closed"
-// sentinel for the package. Returned by HotStore and ColdReader
-// read methods (Lookup, LookupKeys, FetchEvents, All, EventCount,
-// Offsets) after Close. ChunkID is the one exception — it returns
+// Closed-store lifecycle: HotStore and ColdReader read methods
+// (LookupKeys, FetchEvents, All, EventCount, Offsets) return
+// stores.ErrStoreClosed after Close, per the storage/stores
+// translation contract. ChunkID is the one exception — it returns
 // its constructor-supplied value unchanged after Close.
-var ErrClosed = errors.New("events: store is closed")
 
 // ErrUnsortedEventIDs is returned by FetchEvents when the supplied
 // eventIDs slice violates the sorted-ascending-no-duplicates
@@ -71,7 +59,7 @@ type Reader interface {
 
 	// EventCount is the total number of events in this Chunk.
 	// Equal to the last events.LedgerOffsets cumulative count.
-	// Returns (0, ErrClosed) after Close. On ColdReader, the value
+	// Returns (0, stores.ErrStoreClosed) after Close. On ColdReader, the value
 	// is read lazily from events.pack's trailer on first call.
 	EventCount() (uint32, error)
 
@@ -82,59 +70,46 @@ type Reader interface {
 	// ranges before fetching events.
 	//
 	// Implementations:
-	//   - HotStore allocates a fresh Snapshot from the live
-	//     ConcurrentLedgerOffsets per call. A concurrent
-	//     IngestLedgerToBatch may extend the underlying state after
-	//     Offsets returns, but the returned snapshot reflects what
-	//     was visible at call time. Callers (Query) take the
-	//     snapshot once at entry and pass it through their helpers.
+	//   - HotStore returns a View sharing the live
+	//     ConcurrentLedgerOffsets backing array, capped to the count
+	//     visible at call time. A concurrent ingest may extend the
+	//     underlying state after Offsets returns, but the returned
+	//     view reflects what was visible at call time. Callers
+	//     (Query) take the view once at entry and pass it through
+	//     their helpers.
 	//   - ColdReader returns the lazily-decoded LedgerOffsets cached
 	//     on the reader; the same pointer is returned to every
 	//     caller. Both paths must treat the returned value as
 	//     read-only — mutation would corrupt either the live mirror
-	//     (hot, indirectly via the snapshot's backing slice) or
-	//     every other reader holding the cached pointer (cold).
+	//     (hot, indirectly via the view's backing slice) or every
+	//     other reader holding the cached pointer (cold).
 	//
-	// Returns (nil, ErrClosed) after Close.
+	// Returns (nil, stores.ErrStoreClosed) after Close.
 	Offsets() (*events.LedgerOffsets, error)
-
-	// Lookup returns the bitmap of event IDs in this Chunk that
-	// match the given term.
-	//
-	// Bitmap ownership: callers MUST treat the returned bitmap as
-	// read-only. The hot path returns an immutable snapshot of the
-	// live mirror — ConcurrentBitmaps stores bitmap pointers via
-	// atomic.Pointer COW, so the returned pointer will never be
-	// mutated by anyone. The cold path returns a freshly-unmarshaled
-	// bitmap that's logically owned by the caller. Either way callers
-	// must not mutate; eventstore.Query is the only consumer today
-	// and never mutates, and downstream roaring.FastAnd/FastOr never
-	// mutate inputs.
-	//
-	// Returns (nil, ErrTermNotFound) when the term has no matching
-	// events. Other errors signal corruption or internal failure.
-	//
-	// ctx cancels in-flight I/O on the cold path (MPHF load,
-	// index.pack ReadAt); hot side checks ctx as a fast guard before
-	// touching the in-memory mirror.
-	Lookup(ctx context.Context, key events.TermKey) (*roaring.Bitmap, error)
 
 	// LookupKeys returns bitmaps for each key, aligned positionally
 	// with the input slice (result[i] corresponds to keys[i]).
 	// result[i] is nil if keys[i] has no matching events in this
-	// chunk — the function does not return ErrTermNotFound for
-	// individual misses.
+	// chunk — a per-key miss is not an error.
 	//
-	// Equivalent to calling Lookup for each key (and treating
-	// ErrTermNotFound as a nil result), but ColdReader coalesces
-	// the underlying packfile reads into a single ReadItems pass,
-	// fanning out across the worker count configured via
-	// ColdReaderOptions.Concurrency. HotStore returns borrowed
-	// mirror references with no per-key Clone (see Lookup).
+	// ColdReader coalesces the underlying packfile reads into a
+	// single ReadItems pass, fanning out across the worker count
+	// configured via ColdReaderOptions.Concurrency. HotStore returns
+	// borrowed mirror references with no per-key Clone.
 	//
-	// Bitmap ownership: same as Lookup — caller must not mutate.
+	// Bitmap ownership: callers MUST treat returned bitmaps as
+	// read-only. The hot path returns immutable snapshots of the
+	// live mirror — ConcurrentBitmaps stores bitmap pointers via
+	// atomic.Pointer COW, so a returned pointer will never be
+	// mutated by anyone. The cold path returns freshly-unmarshaled
+	// bitmaps logically owned by the caller. Either way callers
+	// must not mutate; eventstore.Query is the only consumer today
+	// and never mutates, and downstream roaring.FastAnd/FastOr never
+	// mutate inputs.
 	//
-	// ctx cancels in-flight I/O on the cold path.
+	// ctx cancels in-flight I/O on the cold path (MPHF load,
+	// index.pack ReadAt); hot side checks ctx as a fast guard before
+	// touching the in-memory mirror.
 	LookupKeys(ctx context.Context, keys []events.TermKey) ([]*roaring.Bitmap, error)
 
 	// FetchEvents decodes events for the supplied chunk-relative
@@ -151,7 +126,7 @@ type Reader interface {
 	// scattered-read batches, the hot path checks between Gets.
 	//
 	// A missing row is an error: eventIDs only reach this path
-	// through Lookup, so a miss signals corruption or a
+	// through LookupKeys, so a miss signals corruption or a
 	// writer/reader mismatch, not a normal not-found case.
 	FetchEvents(ctx context.Context, eventIDs []uint32) ([]events.Payload, error)
 
@@ -168,18 +143,20 @@ type Reader interface {
 	// and may be sparse.
 	//
 	// ctx cancels in-flight I/O on both paths. Yielding
-	// (events.Payload{}, ErrClosed) and stopping is the after-Close
+	// (events.Payload{}, stores.ErrStoreClosed) and stopping is the after-Close
 	// behavior, mirroring All.
 	//
-	// Out-of-range arguments (start >= EventCount, or start+count >
-	// EventCount) yield an error and stop — callers cap count
-	// against EventCount themselves.
+	// count == 0 is a no-op regardless of start (both implementations
+	// short-circuit before bounds-checking). A non-zero count whose
+	// range escapes [0, EventCount) yields a wrapped
+	// ErrFetchRangeOutOfBounds and stops — callers cap count against
+	// EventCount themselves.
 	FetchRange(ctx context.Context, start, count uint32) iter.Seq2[events.Payload, error]
 
 	// All streams every event in this Chunk in chunk-relative
-	// eventID order. The freeze loop uses this to dump a hot Chunk
-	// into a Writer without intermediate buffering. Equivalent to
-	// FetchRange(ctx, 0, EventCount).
+	// eventID order without intermediate buffering. Equivalent to
+	// FetchRange(ctx, 0, EventCount). (The freeze path does NOT use
+	// this — it re-derives cold artifacts from raw LCMs.)
 	// Each events.Payload carries its LedgerSequence, so consumers can
 	// track ledger boundaries without separate signaling.
 	All(ctx context.Context) iter.Seq2[events.Payload, error]

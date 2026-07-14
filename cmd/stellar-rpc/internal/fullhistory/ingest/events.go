@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"time"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -52,6 +53,9 @@ type eventsCold struct {
 // Layout's single derivation — and returns a ColdIngester that owns it. The
 // writer uses its zero-value options; driver-level tuning is a follow-up (issue #836).
 func NewEventsColdIngester(bucketDir string, chunkID chunk.ID, sink MetricSink) (ColdIngester, error) {
+	if err := os.MkdirAll(bucketDir, 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir %s: %w", bucketDir, err)
+	}
 	w, err := eventstore.NewColdWriter(chunkID, bucketDir, eventstore.ColdWriterOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("eventstore.NewColdWriter: %w", err)
