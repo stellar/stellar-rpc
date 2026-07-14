@@ -25,7 +25,11 @@ import (
 
 // fakeTipBackend returns tips[i] per call (clamped to the last); if err is set it
 // returns err for the first errFirst calls, then the tip (errFirst large ⇒ always down).
+// Its Tip method makes it a backfill.Backend — the embedded LedgerStream stays nil
+// since these tests never stream (the runBackfill seam records passes instead).
 type fakeTipBackend struct {
+	ledgerbackend.LedgerStream
+
 	mu       sync.Mutex
 	tips     []uint32
 	calls    int
@@ -33,7 +37,9 @@ type fakeTipBackend struct {
 	errFirst int // return err for the first errFirst calls, then the tip
 }
 
-func (b *fakeTipBackend) NetworkTip(context.Context) (uint32, error) {
+var _ backfill.Backend = (*fakeTipBackend)(nil)
+
+func (b *fakeTipBackend) Tip(context.Context) (uint32, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	n := b.calls
@@ -90,16 +96,13 @@ func startTestConfig(
 		Catalog: cat,
 		Logger:  silentLogger(),
 		Workers: 2,
-		Process: backfill.ProcessConfig{},
+		Process: backfill.ProcessConfig{Backend: tip}, // the tip source every pass samples
 	}
 	cfg := StartConfig{
 		Exec:            exec,
 		RetentionChunks: 0,
-		NetworkTip:      tip,
 		Core:            core,
 		ServeReads:      func(context.Context) error { return nil },
-		TipBackoff:      time.Millisecond,
-		TipMaxAttempts:  3,
 	}
 	if recordPlan != nil {
 		cfg.runBackfill = func(_ context.Context, _ backfill.ExecConfig, lo, hi chunk.ID) error {
@@ -149,38 +152,39 @@ func pinGenesis(t *testing.T, cat *catalog.Catalog) {
 }
 
 // ---------------------------------------------------------------------------
-// networkTip — backoff, sub-genesis rejection, exhausted retries.
+// sampleTipWithRetry — backoff, sub-genesis rejection, exhausted retries, ctx cancel.
 // ---------------------------------------------------------------------------
 
-func TestNetworkTip_RejectsSubGenesisAsNotReady(t *testing.T) {
-	tip, err := networkTip(context.Background(),
-		&fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq - 1}}, time.Millisecond, 3)
+func TestSampleTip_RejectsSubGenesisAsNotReady(t *testing.T) {
+	b := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq - 1}}
+	tip, err := sampleTipWithRetry(context.Background(), b.Tip, time.Millisecond, 3)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not ready")
 	require.Zero(t, tip)
+	require.Equal(t, 1, b.callCount(), "sub-genesis is permanent — no retries burned")
 }
 
-func TestNetworkTip_RetriesThenSucceeds(t *testing.T) {
+func TestSampleTip_RetriesThenSucceeds(t *testing.T) {
 	b := &fakeTipBackend{tips: []uint32{50_000}, err: errors.New("object store down"), errFirst: 2}
-	tip, err := networkTip(context.Background(), b, time.Millisecond, 5)
+	tip, err := sampleTipWithRetry(context.Background(), b.Tip, time.Millisecond, 5)
 	require.NoError(t, err)
 	require.Equal(t, uint32(50_000), tip)
 	require.Equal(t, 3, b.callCount(), "two failures then a success")
 }
 
-func TestNetworkTip_ExhaustedRetriesErrors(t *testing.T) {
+func TestSampleTip_ExhaustedRetriesErrors(t *testing.T) {
 	b := &fakeTipBackend{err: errors.New("object store down"), errFirst: 99}
-	_, err := networkTip(context.Background(), b, time.Millisecond, 4)
+	_, err := sampleTipWithRetry(context.Background(), b.Tip, time.Millisecond, 4)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "after 4 attempts")
 	require.Equal(t, 4, b.callCount())
 }
 
-func TestNetworkTip_CtxCancelAbortsWait(t *testing.T) {
+func TestSampleTip_CtxCancelAbortsWait(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	b := &fakeTipBackend{err: errors.New("down"), errFirst: 99}
-	_, err := networkTip(ctx, b, time.Hour, 5)
+	_, err := sampleTipWithRetry(ctx, b.Tip, time.Hour, 5)
 	require.ErrorIs(t, err, context.Canceled)
 }
 
@@ -188,12 +192,14 @@ func TestNetworkTip_CtxCancelAbortsWait(t *testing.T) {
 // backfillToTip — backfill loop edge cases.
 // ---------------------------------------------------------------------------
 
-// First start (genesis, no local history) with the tip absent errors out
-// (restartable — no sentinel; the supervisor retries).
+// First start (genesis, no local history) with no usable tip errors out
+// (restartable — no sentinel; the supervisor retries). Sub-genesis reads as a
+// permanent "not ready", so the sample fails fast instead of burning the
+// production retry backoff backfillToTip now applies.
 func TestBackfill_FirstStartTipAbsentErrors(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
-	tip := &fakeTipBackend{err: errors.New("backend unreachable"), errFirst: 99}
+	tip := &fakeTipBackend{tips: []uint32{0}}
 	cfg := startTestConfig(t, cat, tip, nil, &recordingPlan{})
 
 	// Empty catalog ⇒ lastCommitted=1 < earliest=2 ⇒ first start with no progress.
@@ -308,23 +314,23 @@ func TestBackfill_LongDowntimeRePass(t *testing.T) {
 	assert.GreaterOrEqual(t, tip.callCount(), 3, "the loop re-sampled the tip across passes")
 }
 
-// Degrade-and-serve restart: tip unreachable but local progress exists, so
-// backfill degrades to tip:=lastCommitted, re-resolves [0,2] once, terminates,
-// and never regresses the lastCommitted.
-func TestBackfill_RestartTipUnreachableDegrades(t *testing.T) {
+// Restart with no usable tip errors out even when local progress exists: the
+// synthetic tip:=lastCommitted degraded mode is gone. No backfill pass runs; the
+// supervisor restarts and re-samples. Sub-genesis reads as a permanent "not
+// ready" — one poll, no retry sleeps — and resolves to the same "tip
+// unavailable" outcome as an erroring tip (whose retry exhaustion
+// TestSampleTip_ExhaustedRetriesErrors covers at a fast interval).
+func TestBackfill_RestartTipUnavailableErrors(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 	lastCommitted := chunk.ID(2).LastLedger() // local progress exists
-	tip := &fakeTipBackend{err: errors.New("backend down"), errFirst: 99}
+	tip := &fakeTipBackend{tips: []uint32{0}}
 	rec := &recordingPlan{}
 	cfg := startTestConfig(t, cat, tip, nil, rec)
 
-	last, err := backfillToTip(context.Background(), cfg, lastCommitted, chunk.FirstLedgerSeq)
-	require.NoError(t, err, "local progress means no fatal")
-	passes := rec.snapshot()
-	require.Len(t, passes, 1, "exactly one degraded re-resolve pass, then terminate")
-	assert.Equal(t, chunk.ID(2), passes[0][1])
-	assert.Equal(t, lastCommitted, last, "lastCommitted does not regress")
+	_, err := backfillToTip(context.Background(), cfg, lastCommitted, chunk.FirstLedgerSeq)
+	require.Error(t, err, "an unavailable tip errors out — no degraded mode")
+	require.Empty(t, rec.snapshot(), "no backfill pass runs when the tip is unavailable")
 }
 
 // Lagging bulk tip below a chunk-aligned lastCommitted: the anchor is max(tip,
@@ -479,13 +485,14 @@ func TestRun_OpensHotDBAndCoreBeforeServe(t *testing.T) {
 }
 
 // run errors on a first start with an unavailable tip (restartable, no sentinel);
-// reads are never served and ingestion never starts.
+// reads are never served and ingestion never starts. Sub-genesis ⇒ one
+// permanent-failure poll, no retry sleeps.
 func TestRun_FirstStartNoTipErrors(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 	served := atomic.Int32{}
 	core := &fakeCore{}
-	tip := &fakeTipBackend{err: errors.New("unreachable"), errFirst: 99}
+	tip := &fakeTipBackend{tips: []uint32{0}}
 	cfg := startTestConfig(t, cat, tip, core, nil)
 	cfg.ServeReads = func(context.Context) error { served.Add(1); return nil }
 
@@ -511,9 +518,9 @@ func TestRun_ValidatesConfig(t *testing.T) {
 	cat, _ := testCatalog(t)
 	base := startTestConfig(t, cat, &fakeTipBackend{tips: []uint32{50_000}}, &fakeCore{}, nil)
 
-	t.Run("nil NetworkTip", func(t *testing.T) {
+	t.Run("nil Backend", func(t *testing.T) {
 		cfg := base
-		cfg.NetworkTip = nil
+		cfg.Exec.Process.Backend = nil // the backfill tip + freeze source
 		require.Error(t, run(context.Background(), cfg))
 	})
 	t.Run("nil Core", func(t *testing.T) {

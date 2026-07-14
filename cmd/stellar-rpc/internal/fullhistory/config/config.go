@@ -79,8 +79,9 @@ type BackfillConfig struct {
 	// DefaultMaxRetries.
 	MaxRetries *int `toml:"max_retries"`
 
-	// DataStore is the bulk ledger source. An empty Type means frontfill-only (no
-	// backfill backend); otherwise any SDK datastore type is accepted.
+	// DataStore is the bulk ledger source. An empty Type means no lake — backfill
+	// then replays through captive core from the history archives; otherwise any
+	// SDK datastore type is accepted.
 	DataStore datastore.DataStoreConfig `toml:"datastore"`
 
 	// BSB tunes the buffered-storage stream over DataStore; zero fields fall back to
