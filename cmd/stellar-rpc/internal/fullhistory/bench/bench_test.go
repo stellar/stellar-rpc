@@ -223,6 +223,11 @@ func TestRunHotFromPack(t *testing.T) {
 	require.Contains(t, driver, "chunk_wall")
 	assert.EqualValues(t, 1, driver["chunk_wall"]["n"])
 	assert.EqualValues(t, numLedgers, driver["chunk_wall"]["n_items"])
+	// Every ledger's end-to-end ingest includes the fsync'd commit, so all
+	// samples are non-zero and n = n_items = the ledger count.
+	require.Contains(t, driver, "ingest_total")
+	assert.EqualValues(t, numLedgers, driver["ingest_total"]["n"])
+	assert.EqualValues(t, numLedgers, driver["ingest_total"]["n_items"])
 	require.Contains(t, driver, "read_blocked")
 
 	// A second run against the same hot root must refuse: hot timings are

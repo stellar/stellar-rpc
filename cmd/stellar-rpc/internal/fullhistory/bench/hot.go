@@ -107,8 +107,8 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 
 // driveHot feeds the benchmarked range through svc.Ingest sequentially,
 // mirroring the daemon's hot loop, and records per-ledger source wait
-// (read_blocked, first pull's setup excluded) plus the run's wall-clock
-// (chunk_wall) on the sink.
+// (read_blocked, first pull's setup excluded), per-ledger end-to-end ingest
+// time (ingest_total) plus the run's wall-clock (chunk_wall) on the sink.
 func driveHot(
 	ctx context.Context,
 	svc *ingest.HotService,
@@ -137,9 +137,11 @@ func driveHot(
 		if seq != first {
 			sink.observeDriver(driverReadBlocked, time.Since(tRead), 0)
 		}
+		tIngest := time.Now()
 		if err := svc.Ingest(ctx, seq, xdr.LedgerCloseMetaView(raw)); err != nil {
 			return fmt.Errorf("hot ingest seq %d: %w", seq, err)
 		}
+		sink.observeDriver(driverIngestTotal, time.Since(tIngest), 1)
 		seq++
 		tRead = time.Now()
 	}
