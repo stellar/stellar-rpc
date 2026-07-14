@@ -179,9 +179,16 @@ func runBackfill(ctx context.Context, deadline time.Duration, binary, cfgPath st
 			break
 		}
 	}
+	scanErr := scanner.Err()
+	if scanErr != nil {
+		cancel()
+	}
 	_ = cmd.Wait() // reap; a kill from cancel surfaces here and is expected
 
 	if elapsed == 0 {
+		if scanErr != nil {
+			return 0, 0, 0, fmt.Errorf("reading daemon output: %w", scanErr)
+		}
 		return 0, 0, 0, fmt.Errorf("daemon exited or hit the %s deadline before backfill completed", deadline)
 	}
 	return elapsed, lo, hi, nil
