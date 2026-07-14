@@ -19,6 +19,11 @@ on:
         required: false
         type: string
         default: ''
+      pr_number:
+        description: 'PR to report results to (default: inferred from the tested branch)'
+        required: false
+        type: string
+        default: ''
 
 # Keyed on the release ref so a new push to the same branch supersedes an
 # in-flight test. Each leg's self-terminate ceiling backstops its box.
@@ -50,11 +55,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REF: ${{ inputs.target_ref || github.ref_name }}
+          PR: ${{ inputs.pr_number }}
         run: |
           SHA="$(git rev-parse HEAD)"
-          PR="$(gh pr list --repo "${{ github.repository }}" --state open \
-                  --base main --head "$REF" --json number --jq '.[0].number // ""' 2>/dev/null || true)"
-
+          if [ -z "$PR" ]; then
+            PR="$(gh pr list --repo "${{ github.repository }}" --state open \
+                    --head "$REF" --json number --jq '.[0].number // ""' 2>/dev/null || true)"
+          fi
           # go-bench baseline: latest published release, falls back to the highest v* tag.
           BASELINE="$(gh api "repos/${{ github.repository }}/releases/latest" --jq .tag_name 2>/dev/null || true)"
           if [ -z "$BASELINE" ]; then
@@ -64,16 +71,16 @@ jobs:
           [ -n "$BASELINE" ] || echo "::warning::no baseline release found; the go-bench leg will fail"
           echo "go-bench baseline: ${BASELINE:-<none>}"
 
-          # Per-leg sizing rides in the roster; ec2-leg.yml receives it verbatim.
-          LEGS="$(jq -nc --arg baseline "$BASELINE" '[
-            {label: "Apply-load ingestion", run_label: "apply-load",
-             script: "cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh",
-             instance_type: "c5.2xlarge", root_volume_gb: 500, budget_minutes: 225, extra_env: ""},
-            {label: "Go endpoint benchmarks", run_label: "go-bench",
-             script: "cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/go-bench/run-go-bench.sh",
-             instance_type: "c5.2xlarge", root_volume_gb: 50, budget_minutes: 90,
-             extra_env: ("export BASELINE_REF=" + $baseline)}
-          ]')"
+          # Unquoted heredoc so $BASELINE expands into the go-bench entry;
+          # jq -c compacts and validates.
+          LEGS="$(jq -c . <<EOF
+          [
+            {"label":"Apply-load ingestion","run_label":"apply-load","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh","budget":225},
+            {"label":"Backfill ingestion","run_label":"backfill","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/run-backfill.sh","budget":345},
+            {"label":"Go endpoint benchmarks","run_label":"go-bench","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/go-bench/run-go-bench.sh","budget":90,"root_volume_gb":50,"extra_env":"export BASELINE_REF=$BASELINE"}
+          ]
+          EOF
+          )"
           {
             echo "target_sha=$SHA"
             echo "pr_number=$PR"
@@ -94,10 +101,10 @@ jobs:
       target_ref: ${{ needs.plan.outputs.target_sha }}
       run_label: ${{ matrix.leg.run_label }}
       leg_script: ${{ matrix.leg.script }}
-      instance_type: ${{ matrix.leg.instance_type }}
-      root_volume_gb: ${{ matrix.leg.root_volume_gb }}
-      budget_minutes: ${{ matrix.leg.budget_minutes }}
-      extra_env: ${{ matrix.leg.extra_env }}
+      budget_minutes: ${{ matrix.leg.budget }}
+      # optional per-leg fields; fallbacks mirror the ec2-leg.yml defaults
+      root_volume_gb: ${{ matrix.leg.root_volume_gb || 500 }}
+      extra_env: ${{ matrix.leg.extra_env || '' }}
 
   report:
     name: Aggregate + report

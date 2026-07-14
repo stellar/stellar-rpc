@@ -210,8 +210,8 @@ jobs:
           echo "::error::SSM agent never registered for $INSTANCE_ID — verify AmazonSSMManagedInstanceCore is attached to the stellar-rpc-ci-load-test role"
           exit 1
 
-      # Polls S3 for the result object and relays verdict/passed + the result
-      # location (bucket/key) as step outputs the coordinator reads.
+      # Polls S3 for the result object and relays found/passed as step outputs
+      # for the fail gate below.
       # RUN_ID must match the box preamble's: gather skips result objects from
       # other attempts (a re-run shares RESULT_KEY with its predecessors).
       - name: Poll for results
