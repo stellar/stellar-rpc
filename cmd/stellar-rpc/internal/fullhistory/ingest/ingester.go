@@ -99,16 +99,21 @@ func (c *coldChunk) ingest(seq uint32, lcm xdr.LedgerCloseMetaView) error {
 	if c.txhash == nil && c.events == nil {
 		return nil
 	}
+	// A walk failure aborts the ledger before any writer runs, so no per-writer
+	// signal fires for it — the error-carrying ColdExtract (with the partial
+	// walk's duration) is its one metric, mirroring hot's PhaseExtract failure.
 	start := time.Now()
 	txEvents, err := sdkingest.ExtractLedgerEvents(lcm)
 	if err != nil {
+		c.sink.ColdExtract(time.Since(start), 0, err)
 		return fmt.Errorf("extract ledger events seq %d: %w", seq, err)
 	}
 	closedAt, err := lcm.LedgerCloseTime()
 	if err != nil {
+		c.sink.ColdExtract(time.Since(start), 0, err)
 		return fmt.Errorf("ledger close time seq %d: %w", seq, err)
 	}
-	c.sink.ColdExtract(time.Since(start), len(txEvents))
+	c.sink.ColdExtract(time.Since(start), len(txEvents), nil)
 	if c.txhash != nil {
 		if err := c.txhash.write(seq, txEvents); err != nil {
 			return err

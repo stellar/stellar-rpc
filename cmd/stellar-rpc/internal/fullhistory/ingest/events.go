@@ -90,7 +90,7 @@ func (e *eventsCold) finalize(ctx context.Context) error {
 	if e.failed {
 		// write already metered and latched this failure; refuse to finalize a
 		// chunk whose mirror/pack may be ahead of the offsets commit point.
-		return fmt.Errorf("events cold writer for chunk %s: Finalize after failed Ingest", e.chunkID)
+		return fmt.Errorf("events cold writer for chunk %s: finalize after failed write", e.chunkID)
 	}
 	if err := e.writer.Finish(e.offsets); err != nil {
 		err = fmt.Errorf("events ColdWriter.Finish: %w", err)

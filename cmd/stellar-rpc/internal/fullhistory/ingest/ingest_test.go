@@ -58,6 +58,11 @@ type stageCall struct {
 	items    int
 }
 
+type coldExtractCall struct {
+	items int
+	err   error
+}
+
 // testSink records every MetricSink call for assertions. Safe for concurrent
 // use (the hot methods fire from the per-ledger ingestion goroutine).
 type testSink struct {
@@ -65,7 +70,7 @@ type testSink struct {
 	hotPhases       []hotPhaseCall
 	coldIngests     []coldCall
 	stages          []stageCall
-	coldExtracts    []int // items per shared-walk ColdExtract call
+	coldExtracts    []coldExtractCall // one entry per shared-walk ColdExtract call
 	coldChunkTotals int
 }
 
@@ -87,10 +92,10 @@ func (s *testSink) ColdChunkTotal(time.Duration) {
 	s.coldChunkTotals++
 }
 
-func (s *testSink) ColdExtract(_ time.Duration, items int) {
+func (s *testSink) ColdExtract(_ time.Duration, items int, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.coldExtracts = append(s.coldExtracts, items)
+	s.coldExtracts = append(s.coldExtracts, coldExtractCall{items, err})
 }
 
 func (s *testSink) IngestStage(dataType, stage string, _ time.Duration, items int) {
@@ -707,8 +712,11 @@ func TestColdChunk_Success(t *testing.T) {
 	require.Empty(t, sink.coldErrorTypes(), "success path records no writer errors")
 
 	// The shared per-ledger walk fires ONE ColdExtract per ledger — not one per
-	// consuming type.
+	// consuming type — and none carries an error on the success path.
 	require.Len(t, sink.coldExtracts, 2, "one shared extract walk per ledger")
+	for _, ce := range sink.coldExtracts {
+		require.NoError(t, ce.err, "success path records no extract errors")
+	}
 
 	// Per-stage signals: the per-ledger stages fire once per (non-empty) ledger,
 	// the per-chunk finalize stage once per writer. The exact map is asserted so
@@ -754,6 +762,12 @@ func TestColdChunk_MidChunkFailure_NoArtifact(t *testing.T) {
 	err = cc.ingest(first+1, xdr.LedgerCloseMetaView(garbage))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "extract ledger events", "the shared walk rejects the garbage ledger")
+
+	// The failed walk is metered: an error-carrying ColdExtract (its one metric —
+	// no writer ran for that ledger), after the first ledger's clean one.
+	require.Len(t, sink.coldExtracts, 2)
+	require.NoError(t, sink.coldExtracts[0].err)
+	require.Error(t, sink.coldExtracts[1].err, "the failed shared walk emits an error-carrying ColdExtract")
 
 	// Nothing has emitted: both writers ingested cleanly (no terminal error of
 	// their own) and never finalized.
@@ -818,7 +832,8 @@ func TestPrometheusSink_Smoke(t *testing.T) {
 		sink.HotPhase(hotchunk.PhaseApply, time.Millisecond, 0, nil)
 		sink.ColdIngest(dataTypeTxhash, time.Second, 100, nil)
 		sink.ColdChunkTotal(time.Second)
-		sink.ColdExtract(time.Millisecond, 3)
+		sink.ColdExtract(time.Millisecond, 3, nil)
+		sink.ColdExtract(time.Millisecond, 0, errors.New("induced extract failure"))
 		sink.IngestStage(dataTypeEvents, stageFinalize, time.Second, 0)
 	})
 
@@ -1467,7 +1482,7 @@ func TestEventsCold_FinalizeAfterFailedIngest_Refuses(t *testing.T) {
 
 	ferr := ing.finalize(context.Background())
 	require.Error(t, ferr)
-	require.Contains(t, ferr.Error(), "Finalize after failed Ingest")
+	require.Contains(t, ferr.Error(), "finalize after failed write")
 }
 
 // ───────────────────────── coldChunk.finalize first-error ─────────────────────────

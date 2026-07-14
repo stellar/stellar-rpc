@@ -79,10 +79,13 @@ type MetricSink interface {
 	// ColdExtract reports the ONE shared per-ledger ExtractLedgerEvents walk the
 	// cold chunk runs and both txhash and events read (issue #836) — ledger-scoped,
 	// not per data type, mirroring the hot path's type-less extract phase. items
-	// is the walk's transaction count. Since the walk left the per-type writers,
-	// their ColdIngest totals are post-extraction figures and the per-type stages
-	// a partial breakdown of them.
-	ColdExtract(d time.Duration, items int)
+	// is the walk's transaction count (0 on failure); err is non-nil when the
+	// walk itself failed, which aborts the ledger before any writer runs — the
+	// duration then covers the partial walk, mirroring hot's PhaseExtract error
+	// signal. Since the walk left the per-type writers, their ColdIngest totals
+	// are post-extraction figures and the per-type stages a partial breakdown of
+	// them.
+	ColdExtract(d time.Duration, items int, err error)
 	// IngestStage reports one COLD writer's per-stage wall-clock inside an
 	// ingest/finalize call: stage is one of the stage* constants (term_index,
 	// write, finalize), items the stage's natural item count (0 where none
@@ -99,7 +102,7 @@ type NopSink struct{}
 func (NopSink) HotPhase(hotchunk.Phase, time.Duration, int, error) {}
 func (NopSink) ColdIngest(string, time.Duration, int, error)       {}
 func (NopSink) ColdChunkTotal(time.Duration)                       {}
-func (NopSink) ColdExtract(time.Duration, int)                     {}
+func (NopSink) ColdExtract(time.Duration, int, error)              {}
 func (NopSink) IngestStage(string, string, time.Duration, int)     {}
 
 // orNop returns sink, or NopSink{} when sink is nil, so call sites never
@@ -241,7 +244,8 @@ type PrometheusSink struct {
 	// Aggregate per-chunk cold wall-clock (the WriteColdChunk attempt).
 	coldChunkTotal prometheus.Observer
 	// The shared per-ledger extract walk — ledger-scoped, label-less.
-	coldExtract prometheus.Observer
+	coldExtract     prometheus.Observer
+	coldExtractErrs prometheus.Counter
 }
 
 // NewPrometheusSink builds a PrometheusSink and MustRegisters its collectors on
@@ -312,14 +316,22 @@ func NewPrometheusSink(registry *prometheus.Registry, namespace string) *Prometh
 		Buckets: coldStageBuckets,
 	})
 
+	coldExtractErrs := prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: metricsSubsystem,
+		Name: "cold_extract_errors_total",
+		Help: "shared-walk failures (the ledger aborts before any writer runs); " +
+			"the cold mirror of hot_phase_errors_total{phase=\"extract\"}",
+	})
+
 	registry.MustRegister(hotPhaseDurVec, hotPhaseItemsVec, hotPhaseErrsVec,
-		coldDuration, coldItems, coldErrors, coldChunkTotal, coldStageVec, coldExtract)
+		coldDuration, coldItems, coldErrors, coldChunkTotal, coldStageVec, coldExtract, coldExtractErrs)
 
 	sink := &PrometheusSink{
-		cold:           make(map[string]ingestCollectors, 3),
-		coldStage:      make(map[string]prometheus.Observer, len(coldStagePairs)),
-		coldChunkTotal: coldChunkTotal,
-		coldExtract:    coldExtract,
+		cold:            make(map[string]ingestCollectors, 3),
+		coldStage:       make(map[string]prometheus.Observer, len(coldStagePairs)),
+		coldChunkTotal:  coldChunkTotal,
+		coldExtract:     coldExtract,
+		coldExtractErrs: coldExtractErrs,
 	}
 	// Hot phases: one child per phase, indexed by the phase value.
 	for p := range hotchunk.NumPhases {
@@ -359,11 +371,16 @@ func (p *PrometheusSink) ColdChunkTotal(d time.Duration) {
 	p.coldChunkTotal.Observe(d.Seconds())
 }
 
-// ColdExtract records the shared per-ledger walk's duration. The item count is
-// not exported to Prometheus (cold_items_total{txhash} already counts the
-// chunk's transactions); it exists on the interface for the CSV bench sink.
-func (p *PrometheusSink) ColdExtract(d time.Duration, _ int) {
+// ColdExtract records the shared per-ledger walk's duration (the partial walk
+// on failure — a phase that blocked then failed is signal) and counts failures.
+// The item count is not exported to Prometheus (cold_items_total{txhash}
+// already counts the chunk's transactions); it exists on the interface for the
+// CSV bench sink.
+func (p *PrometheusSink) ColdExtract(d time.Duration, _ int, err error) {
 	p.coldExtract.Observe(d.Seconds())
+	if err != nil {
+		p.coldExtractErrs.Inc()
+	}
 }
 
 // IngestStage records the per-stage cold duration. The per-stage item counts are
