@@ -10,7 +10,8 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Arithmetic: geometry.LastCompleteChunkAt, EffectiveRetentionFloor.
+// Arithmetic: geometry.LastCompleteChunkAt. (The retention floor is tested in the
+// geometry package.)
 // ---------------------------------------------------------------------------
 
 func TestLastCompleteChunkAt(t *testing.T) {
@@ -30,65 +31,6 @@ func TestLastCompleteChunkAt(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.want, geometry.LastCompleteChunkAt(tc.ledger))
-		})
-	}
-}
-
-func TestEffectiveRetentionFloor(t *testing.T) {
-	genesis := uint32(chunk.FirstLedgerSeq)
-	tests := []struct {
-		name            string
-		upperBound      uint32
-		retentionChunks uint32
-		earliest        uint32
-		want            uint32
-	}{
-		{
-			name:            "no sliding (retention 0): earliest floor wins",
-			upperBound:      chunk.ID(100).LastLedger(),
-			retentionChunks: 0,
-			earliest:        chunk.ID(10).FirstLedger(),
-			want:            chunk.ID(10).FirstLedger(),
-		},
-		{
-			name:            "no sliding, no earliest pin: genesis",
-			upperBound:      chunk.ID(100).LastLedger(),
-			retentionChunks: 0,
-			earliest:        0,
-			want:            genesis,
-		},
-		{
-			name:            "sliding floor leads when above earliest",
-			upperBound:      chunk.ID(100).LastLedger(), // last complete chunk = 100
-			retentionChunks: 10,                         // floor chunk = 100-10+1 = 91
-			earliest:        0,
-			want:            chunk.ID(91).FirstLedger(),
-		},
-		{
-			name:            "earliest floor leads when above the sliding floor",
-			upperBound:      chunk.ID(100).LastLedger(),
-			retentionChunks: 10,                         // sliding floor chunk = 91
-			earliest:        chunk.ID(95).FirstLedger(), // higher
-			want:            chunk.ID(95).FirstLedger(),
-		},
-		{
-			name:            "retention wider than history clamps to chunk 0, never wraps",
-			upperBound:      chunk.ID(3).LastLedger(),
-			retentionChunks: 1000, // sliding chunk = 3-1000+1 < 0 => clamp to chunk 0
-			earliest:        0,
-			want:            chunk.ID(0).FirstLedger(),
-		},
-		{
-			name:            "young store (upperBound below first chunk) clamps to chunk 0",
-			upperBound:      chunk.FirstLedgerSeq + 5, // no complete chunk yet
-			retentionChunks: 5,
-			earliest:        0,
-			want:            chunk.ID(0).FirstLedger(),
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, EffectiveRetentionFloor(tc.upperBound, tc.retentionChunks, tc.earliest))
 		})
 	}
 }

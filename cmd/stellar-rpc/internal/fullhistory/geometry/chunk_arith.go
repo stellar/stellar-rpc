@@ -13,7 +13,6 @@ const PreGenesisLedger uint32 = chunk.FirstLedgerSeq - 1
 
 // ChunkLastLedger maps a signed chunk index to its last ledger: c < 0 ⇒
 // PreGenesisLedger (the sub-genesis sentinel); c >= 0 ⇒ chunk.ID(c).LastLedger().
-// The signed-domain companion of ChunkFirstLedger below.
 func ChunkLastLedger(c int64) uint32 {
 	if c < 0 {
 		return PreGenesisLedger
@@ -37,11 +36,4 @@ func ChunkIDOfLedger(ledger uint32) int64 {
 // underflow for ledger 0).
 func LastCompleteChunkAt(ledger uint32) int64 {
 	return (int64(ledger)+1-int64(chunk.FirstLedgerSeq))/int64(chunk.LedgersPerChunk) - 1
-}
-
-// ChunkFirstLedger maps a non-negative signed chunk index to its first ledger.
-// It is the signed-domain companion of chunk.ID.FirstLedger used after a
-// max(..., 0) clamp.
-func ChunkFirstLedger(c int64) uint32 {
-	return chunk.ID(c).FirstLedger() //nolint:gosec // c >= 0 (clamped) and bounded by real chunk ids
 }

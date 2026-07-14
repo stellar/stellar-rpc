@@ -25,6 +25,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
 // RunDaemon is the full-history daemon's process entrypoint: load config, lock
@@ -108,17 +109,9 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	}
 
 	// --- Open the catalog (it owns its backing KV store; Close releases it). ---
-	cpi := geometry.ChunksPerTxhashIndex
-	if opts.chunksPerTxhashIndex != 0 {
-		cpi = opts.chunksPerTxhashIndex
-	}
-	txLayout, err := geometry.NewTxHashIndexLayout(cpi)
+	cat, err := openCatalog(paths, opts, logger)
 	if err != nil {
 		return err
-	}
-	cat, err := catalog.Open(paths.Catalog, config.NewLayoutFromPaths(paths), txLayout, logger)
-	if err != nil {
-		return fmt.Errorf("open catalog %q: %w", paths.Catalog, err)
 	}
 	defer func() { _ = cat.Close() }()
 
@@ -126,12 +119,9 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// ingestion loop, and the no-lake backfill source is built from its stream. A
 	// bad [ingestion] config therefore surfaces before validateConfig's errors —
 	// cosmetic, both are fatal startup errors. ---
-	core := opts.Core
-	if core == nil {
-		core, err = newCaptiveCoreOpener(cfg.Ingestion, cfg.Service.DefaultDataDir, logger)
-		if err != nil {
-			return err
-		}
+	core, err := resolveCore(opts, cfg, logger)
+	if err != nil {
+		return err
 	}
 
 	// --- The history-archive pool: the no-lake backfill source's frontier. nil
@@ -174,9 +164,14 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	}
 
 	// --- validateConfig: pin/confirm the layout, resolve the earliest floor. ---
-	if err := validateConfig(ctx, cfg, cat, backend.Tip); err != nil {
+	earliest, err := validateConfig(ctx, cfg, cat, backend.Tip)
+	if err != nil {
 		return err
 	}
+
+	// Bind the retention policy once, on the far side of validation: earliest is
+	// validateConfig's return — pinned and chunk-aligned.
+	retention := geometry.NewRetention(deref(cfg.Retention.RetentionChunks), chunk.IDFromLedger(earliest))
 
 	// Control-plane Metrics and the ingest sink share ONE registry, built after the
 	// validateConfig gate (it registers Prometheus collectors).
@@ -186,7 +181,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	// --- Assemble the StartConfig and run the supervised run loop. ---
 	start := startConfig(
-		cfg, cat, logger, backend, core, serveReads, metrics, sink, hs)
+		cfg, cat, logger, backend, core, serveReads, metrics, sink, hs, retention)
 
 	backoff := opts.RestartBackoff
 	if backoff <= 0 {
@@ -195,13 +190,44 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	return supervise(ctx, start, logger, backoff)
 }
 
+// openCatalog resolves the tx-hash index width (test override, else the fixed
+// constant) and opens the catalog over it. The caller owns Close.
+func openCatalog(paths config.Paths, opts daemonOptions, logger *supportlog.Entry) (*catalog.Catalog, error) {
+	cpi := geometry.ChunksPerTxhashIndex
+	if opts.chunksPerTxhashIndex != 0 {
+		cpi = opts.chunksPerTxhashIndex
+	}
+	txLayout, err := geometry.NewTxHashIndexLayout(cpi)
+	if err != nil {
+		return nil, err
+	}
+	cat, err := catalog.Open(paths.Catalog, config.NewLayoutFromPaths(paths), txLayout, logger)
+	if err != nil {
+		return nil, fmt.Errorf("open catalog %q: %w", paths.Catalog, err)
+	}
+	return cat, nil
+}
+
+// resolveCore returns the injected CoreOpener (tests) or a production captive-core
+// opener built from [ingestion].
+func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry) (CoreOpener, error) {
+	if opts.Core != nil {
+		return opts.Core, nil
+	}
+	built, err := newCaptiveCoreOpener(cfg.Ingestion, cfg.Service.DefaultDataDir, logger)
+	if err != nil {
+		return nil, err
+	}
+	return built, nil
+}
+
 // startConfig assembles the StartConfig run consumes. run() builds the
-// lifecycle.Config from Exec + RetentionChunks, so backfill and the lifecycle
+// lifecycle.Config from Exec + Retention, so backfill and the lifecycle
 // goroutine share ONE catalog, worker pool, and retention floor by construction.
 func startConfig(
 	cfg config.Config, cat *catalog.Catalog, logger *supportlog.Entry,
 	backend backfill.Backend, core CoreOpener, serveReads func(context.Context) error,
-	metrics observability.Metrics, sink ingest.MetricSink, hs *healthState,
+	metrics observability.Metrics, sink ingest.MetricSink, hs *healthState, retention geometry.Retention,
 ) StartConfig {
 	exec := backfill.ExecConfig{
 		Catalog:    cat,
@@ -215,11 +241,11 @@ func startConfig(
 		},
 	}
 	return StartConfig{
-		Exec:            exec,
-		RetentionChunks: deref(cfg.Retention.RetentionChunks),
-		Core:            core,
-		ServeReads:      serveReads,
-		health:          hs,
+		Exec:       exec,
+		Retention:  retention,
+		Core:       core,
+		ServeReads: serveReads,
+		health:     hs,
 	}
 }
 
@@ -335,7 +361,7 @@ type rootHASGetter interface {
 
 // Tip reports the archives' current frontier — the root HAS CurrentLedger. The
 // archives lag the network by up to one checkpoint (64 ledgers); backfill's
-// anchor = max(tip, lastCommitted) and the signed withinOneChunkOfTip already
+// max(tip, lastCommitted) target and the signed withinOneChunkOfTip already
 // absorb that, so no lag adjustment here.
 func (s *captiveSource) Tip(context.Context) (uint32, error) {
 	has, err := s.archives.GetRootHAS()

@@ -14,8 +14,24 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/txhash"
 )
+
+// RetentionFor builds a geometry.Retention over cat's earliest_ledger pin, or
+// chunk 0 (full history) when a test has not pinned one.
+func RetentionFor(t *testing.T, cat *catalog.Catalog, size uint32) geometry.Retention {
+	t.Helper()
+	earliest, pinned, err := cat.EarliestLedger()
+	require.NoError(t, err)
+	ec := chunk.ID(0)
+	if pinned {
+		ec = chunk.IDFromLedger(earliest)
+	}
+	return geometry.NewRetention(size, ec)
+}
 
 // ZeroTxLCMBytes returns the marshaled bytes of a minimal, zero-transaction
 // LedgerCloseMeta (V2) for ledger seq — the fixture ingestion/backfill/lifecycle
