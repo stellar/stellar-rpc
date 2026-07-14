@@ -381,13 +381,14 @@ func BenchmarkTransactionFetch(b *testing.B) {
 	require.NoError(b, write.Commit(lcms[len(lcms)-1], nil))
 	reader := NewTransactionReader(log, db, passphrase)
 
-	randoms := make([]int, b.N)
-	for i := 0; b.Loop(); i++ {
+	// fixed-size pool of pre-drawn indices (b.Loop owns the iteration count)
+	randoms := make([]int, 4096)
+	for i := range randoms {
 		randoms[i] = rand.Intn(len(lcms))
 	}
 
 	for i := 0; b.Loop(); i++ {
-		r := randoms[i]
+		r := randoms[i%len(randoms)]
 		tx, err := reader.GetTransaction(ctx, lcms[r].TransactionHash(0))
 		require.NoError(b, err)
 		assert.Equal(b, r%2 == 0, tx.Successful)
