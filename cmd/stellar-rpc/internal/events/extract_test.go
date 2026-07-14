@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
@@ -22,6 +23,27 @@ import (
 )
 
 const testPassphrase = "Test SDF Network ; September 2015"
+
+// lcmViewToPayloads is the view→payloads convenience the cursor-contract tests
+// need to run from raw LCM bytes: the header reads plus the single
+// ExtractLedgerEvents walk, fed to PayloadsFromLedgerEvents. Test-only —
+// production walks once at a higher level (hot IngestLedger, cold coldChunk.ingest)
+// and calls PayloadsFromLedgerEvents directly.
+func lcmViewToPayloads(lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
+	seq, err := lcm.LedgerSequence()
+	if err != nil {
+		return nil, err
+	}
+	closedAt, err := lcm.LedgerCloseTime()
+	if err != nil {
+		return nil, err
+	}
+	txEvents, err := ingest.ExtractLedgerEvents(lcm)
+	if err != nil {
+		return nil, err
+	}
+	return events.PayloadsFromLedgerEvents(txEvents, seq, closedAt)
+}
 
 // buildContractEvent returns a ContractEvent with a contractID and a
 // single symbol topic.
@@ -152,7 +174,7 @@ func buildTxEnvelopeAndHash(t testing.TB) (xdr.TransactionEnvelope, xdr.Hash) {
 
 // buildLCMVersion builds either an LCM V1 (LedgerCloseMetaV1 with
 // TransactionResultMeta — the *non*-V1 result-meta type — exercising
-// LCMViewToPayloads case 1) or an LCM V2 (LedgerCloseMetaV2 with
+// lcmViewToPayloads case 1) or an LCM V2 (LedgerCloseMetaV2 with
 // TransactionResultMetaV1, case 2). Both use a GeneralizedTransactionSet
 // (V1) which is already in apply order, so the SQLite oracle's
 // LedgerTransactionReader and the view path agree on ordering.
@@ -225,7 +247,7 @@ func buildLCMVersion(
 }
 
 // TestExtractEvents_MatchesSQLite is the cross-backend differential: the
-// view-based LCMViewToPayloads must emit, for the same xdr.LedgerCloseMeta, the
+// view-based lcmViewToPayloads must emit, for the same xdr.LedgerCloseMeta, the
 // SAME event sequence the legacy SQLite backend serves — insert via
 // db's InsertEvents, read back through the GetEvents cursor-ordered query
 // (ORDER BY id ASC), and assert the view path's emission order and per-event
@@ -307,7 +329,7 @@ func TestExtractEvents_MatchesSQLite(t *testing.T) {
 		// from chronological order.
 		raw, err := lcm.MarshalBinary()
 		require.NoError(t, err)
-		payloads, err := events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
+		payloads, err := lcmViewToPayloads(xdr.LedgerCloseMetaView(raw))
 		require.NoError(t, err)
 		require.Len(t, payloads, 6)
 		assertViewMatchesSQLite(t, lcm)
@@ -362,13 +384,13 @@ func TestExtractEvents_V0NoPayloads(t *testing.T) {
 	}}
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
-	payloads, err := events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
+	payloads, err := lcmViewToPayloads(xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err)
 	require.Empty(t, payloads)
 }
 
 // TestExtractEvents_V1DifferentialArm exercises the LCM V1 dispatch arm
-// (case 1, TransactionResultMetaView) of LCMViewToPayloads, which the V2-only
+// (case 1, TransactionResultMetaView) of lcmViewToPayloads, which the V2-only
 // differential tests never run. V1 uses LedgerCloseMetaV1 + the non-V1
 // TransactionResultMeta result-meta type — the whole point of this case.
 func TestExtractEvents_V1DifferentialArm(t *testing.T) {
@@ -398,7 +420,7 @@ func TestExtractEvents_V1DifferentialArm(t *testing.T) {
 }
 
 // TestExtractEvents_EmissionOrderCursorAscending pins the emission-order
-// invariant directly on the payload slice: LCMViewToPayloads emits a ledger's
+// invariant directly on the payload slice: lcmViewToPayloads emits a ledger's
 // payloads non-decreasing in (TxIdx, OpIdx) — ascending getEvents cursor
 // order. The fixture MUST carry V4 stage events across multiple txs (each tx
 // here emits BeforeAllTxs + AfterTx + AfterAllTxs events AND two op events):
@@ -436,7 +458,7 @@ func TestExtractEvents_EmissionOrderCursorAscending(t *testing.T) {
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 
-	payloads, err := events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
+	payloads, err := lcmViewToPayloads(xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err)
 	require.Len(t, payloads, 10, "2 txs x (3 stage events + 2 op events)")
 
@@ -487,7 +509,7 @@ func TestExtractEvents_AliasesViewBuffer(t *testing.T) {
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 
-	payloads, err := events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
+	payloads, err := lcmViewToPayloads(xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err)
 	require.Len(t, payloads, 1)
 	require.NotEmpty(t, payloads[0].ContractEventBytes)
@@ -525,7 +547,7 @@ func TestExtractEvents_LegacyMetaV0(t *testing.T) {
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 
-	payloads, err := events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
+	payloads, err := lcmViewToPayloads(xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err, "V0 meta must be skipped, not error")
 	// Only the second (V4) tx emits an event; the V0 tx contributes none.
 	require.Len(t, payloads, 1)
@@ -592,7 +614,7 @@ func sqliteEventRows(t *testing.T, lcm xdr.LedgerCloseMeta) []sqliteEventRow {
 }
 
 // assertViewMatchesSQLite is the differential oracle: it marshals lcm, runs
-// the view path (LCMViewToPayloads) on the bytes and the legacy SQLite
+// the view path (lcmViewToPayloads) on the bytes and the legacy SQLite
 // path (db InsertEvents → GetEvents) on the struct, and asserts the view's
 // emission sequence equals the SQLite cursor-ascending read sequence
 // position-for-position — tx hash, (TxIdx, OpIdx) cursor key, ledger
@@ -606,8 +628,8 @@ func assertViewMatchesSQLite(t *testing.T, lcm xdr.LedgerCloseMeta) {
 
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
-	viewPayloads, err := events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
-	require.NoError(t, err, "view path LCMViewToPayloads")
+	viewPayloads, err := lcmViewToPayloads(xdr.LedgerCloseMetaView(raw))
+	require.NoError(t, err, "view path lcmViewToPayloads")
 
 	rows := sqliteEventRows(t, lcm)
 	require.Len(t, viewPayloads, len(rows),
@@ -655,7 +677,7 @@ func BenchmarkExtractEvents(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		if _, err := events.LCMViewToPayloads(view); err != nil {
+		if _, err := lcmViewToPayloads(view); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -695,7 +717,7 @@ func TestExtractEvents_TopLevelEventsAliasViewBuffer(t *testing.T) {
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 
-	payloads, err := events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
+	payloads, err := lcmViewToPayloads(xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err)
 	require.Len(t, payloads, 1)
 	require.NotEmpty(t, payloads[0].ContractEventBytes)

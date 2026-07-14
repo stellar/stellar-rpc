@@ -7,6 +7,7 @@ import (
 	"iter"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
@@ -56,6 +58,11 @@ type stageCall struct {
 	items    int
 }
 
+type coldExtractCall struct {
+	items int
+	err   error
+}
+
 // testSink records every MetricSink call for assertions. Safe for concurrent
 // use (the hot methods fire from the per-ledger ingestion goroutine).
 type testSink struct {
@@ -63,6 +70,7 @@ type testSink struct {
 	hotPhases       []hotPhaseCall
 	coldIngests     []coldCall
 	stages          []stageCall
+	coldExtracts    []coldExtractCall // one entry per shared-walk ColdExtract call
 	coldChunkTotals int
 }
 
@@ -82,6 +90,12 @@ func (s *testSink) ColdChunkTotal(time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.coldChunkTotals++
+}
+
+func (s *testSink) ColdExtract(_ time.Duration, items int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.coldExtracts = append(s.coldExtracts, coldExtractCall{items, err})
 }
 
 func (s *testSink) IngestStage(dataType, stage string, _ time.Duration, items int) {
@@ -391,6 +405,20 @@ func viewOf(t *testing.T, seq uint32) xdr.LedgerCloseMetaView {
 	return xdr.LedgerCloseMetaView(marshalLCM(t, seq))
 }
 
+// extractFor runs the shared ExtractLedgerEvents walk plus the close-time read
+// over one raw ledger — what coldChunk.ingest hands the txhash/events writers.
+// Tests that drive a single writer directly (no coldChunk) use it in place of
+// the walk.
+func extractFor(t *testing.T, raw []byte) ([]sdkingest.LedgerTransactionEvents, int64) {
+	t.Helper()
+	view := xdr.LedgerCloseMetaView(raw)
+	txEvents, err := sdkingest.ExtractLedgerEvents(view)
+	require.NoError(t, err)
+	closedAt, err := view.LedgerCloseTime()
+	require.NoError(t, err)
+	return txEvents, closedAt
+}
+
 // marshalV0LCM builds a minimal V0 (pre-Soroban) LedgerCloseMeta with no
 // transactions and returns its wire bytes. V0 LCMs carry no contract events,
 // so the events ingesters record them as a zero-payload ledger.
@@ -433,22 +461,22 @@ func (s *errAtSeqStream) RawLedgers(
 	}
 }
 
-// ───────────────────────── per-ingester unit tests ─────────────────────────
+// ───────────────────────── per-writer unit tests ─────────────────────────
 
-// TestLedgerColdIngester_Readback ingests one ledger via the cold ledger
-// ingester, finalizes, and reads back through the cold reader.
-func TestLedgerColdIngester_Readback(t *testing.T) {
+// TestLedgerColdWriter_Readback ingests one ledger via the cold ledger
+// writer, finalizes, and reads back through the cold reader.
+func TestLedgerColdWriter_Readback(t *testing.T) {
 	chunkID := chunk.ID(0)
 	seq := chunkID.FirstLedger()
 	raw := marshalLCM(t, seq)
 	coldDir := t.TempDir()
 
-	ing, err := NewLedgerColdIngester(packPath(coldDir, chunkID), chunkID, nil)
+	ing, err := newLedgerCold(packPath(coldDir, chunkID), chunkID, nil)
 	require.NoError(t, err)
-	defer func() { require.NoError(t, ing.Close()) }()
+	defer func() { require.NoError(t, ing.close()) }()
 
-	require.NoError(t, ing.Ingest(context.Background(), seq, xdr.LedgerCloseMetaView(raw)))
-	require.NoError(t, ing.Finalize(context.Background()))
+	require.NoError(t, ing.write(seq, raw))
+	require.NoError(t, ing.finalize(context.Background()))
 
 	cr, err := ledger.OpenColdReader(packPath(coldDir, chunkID))
 	require.NoError(t, err)
@@ -465,45 +493,47 @@ func txhashBinPath(root string) string {
 	return filepath.Join(root, c.BucketID(), txhash.ColdBinName(c))
 }
 
-// TestTxhashColdIngester_Bin ingests two tx-bearing ledgers via the cold txhash
-// ingester, finalizes, and reads the .bin back through the store codec.
-func TestTxhashColdIngester_Bin(t *testing.T) {
+// TestTxhashColdWriter_Bin ingests two tx-bearing ledgers via the cold txhash
+// writer, finalizes, and reads the .bin back through the store codec.
+func TestTxhashColdWriter_Bin(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := NewTxhashColdIngester(txhashBinPath(coldDir), chunkID, nil)
+	ing, err := newTxhashCold(txhashBinPath(coldDir), chunkID, nil)
 	require.NoError(t, err)
-	defer func() { require.NoError(t, ing.Close()) }()
+	defer func() { require.NoError(t, ing.close()) }()
 
 	for _, seq := range []uint32{first, first + 1} {
 		raw, _, _ := marshalLCMWithEvent(t, seq)
-		require.NoError(t, ing.Ingest(context.Background(), seq, xdr.LedgerCloseMetaView(raw)))
+		txEvents, _ := extractFor(t, raw)
+		require.NoError(t, ing.write(seq, txEvents))
 	}
-	require.NoError(t, ing.Finalize(context.Background()))
+	require.NoError(t, ing.finalize(context.Background()))
 
 	entries := fhtest.ReadColdBin(t, txhashBinPath(coldDir))
 	require.Len(t, entries, 2)
 }
 
-// TestEventsColdIngester_Readback ingests two event-bearing ledgers via the cold
-// events ingester, finalizes, and resolves the term through the cold reader.
-func TestEventsColdIngester_Readback(t *testing.T) {
+// TestEventsColdWriter_Readback ingests two event-bearing ledgers via the cold
+// events writer, finalizes, and resolves the term through the cold reader.
+func TestEventsColdWriter_Readback(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := NewEventsColdIngester(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil)
+	ing, err := newEventsCold(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil)
 	require.NoError(t, err)
-	defer func() { require.NoError(t, ing.Close()) }()
+	defer func() { require.NoError(t, ing.close()) }()
 
 	var term events.TermKey
 	for _, seq := range []uint32{first, first + 1} {
 		raw, _, tk := marshalLCMWithEvent(t, seq)
 		term = tk
-		require.NoError(t, ing.Ingest(context.Background(), seq, xdr.LedgerCloseMetaView(raw)))
+		txEvents, closedAt := extractFor(t, raw)
+		require.NoError(t, ing.write(seq, closedAt, txEvents))
 	}
-	require.NoError(t, ing.Finalize(context.Background()))
+	require.NoError(t, ing.finalize(context.Background()))
 
 	bucketDir := filepath.Join(coldDir, chunkID.BucketID())
 	cr, err := eventstore.OpenColdReader(chunkID, bucketDir, eventstore.ColdReaderOptions{})
@@ -520,25 +550,27 @@ func TestEventsColdIngester_Readback(t *testing.T) {
 
 // ───────────────────────── V0 (pre-Soroban) events handling ─────────────────────────
 
-// TestEventsColdIngester_V0KeepsOffsetsContiguous ingests a V0 ledger followed by
+// TestEventsColdWriter_V0KeepsOffsetsContiguous ingests a V0 ledger followed by
 // an event-bearing V2 ledger and asserts: the V0 ledger does not error, and the
 // LedgerOffsets stay contiguous (both ledgers present, the event-bearing one's
 // single event ID immediately follows the empty V0 ledger).
-func TestEventsColdIngester_V0KeepsOffsetsContiguous(t *testing.T) {
+func TestEventsColdWriter_V0KeepsOffsetsContiguous(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := NewEventsColdIngester(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil)
+	ing, err := newEventsCold(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil)
 	require.NoError(t, err)
-	defer func() { require.NoError(t, ing.Close()) }()
+	defer func() { require.NoError(t, ing.close()) }()
 
 	// Ledger `first`: V0 → zero events, no error.
-	require.NoError(t, ing.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(marshalV0LCM(t, first))))
+	v0Events, v0ClosedAt := extractFor(t, marshalV0LCM(t, first))
+	require.NoError(t, ing.write(first, v0ClosedAt, v0Events))
 	// Ledger `first+1`: one contract event.
 	rawEv, _, term := marshalLCMWithEvent(t, first+1)
-	require.NoError(t, ing.Ingest(context.Background(), first+1, xdr.LedgerCloseMetaView(rawEv)))
-	require.NoError(t, ing.Finalize(context.Background()))
+	evEvents, evClosedAt := extractFor(t, rawEv)
+	require.NoError(t, ing.write(first+1, evClosedAt, evEvents))
+	require.NoError(t, ing.finalize(context.Background()))
 
 	bucketDir := filepath.Join(coldDir, chunkID.BucketID())
 	cr, err := eventstore.OpenColdReader(chunkID, bucketDir, eventstore.ColdReaderOptions{})
@@ -622,29 +654,28 @@ func TestWriteColdChunk_EventlessChunk_FullyReadable(t *testing.T) {
 	require.Zero(t, sink.coldErrorTypes()[dataTypeEvents], "eventless chunk is not an error")
 }
 
-// ───────────────────────── ColdService tests ─────────────────────────
+// ───────────────────────── coldChunk tests ─────────────────────────
 
-// TestColdService_Success drives ledger+txhash+events cold ingesters through a
-// ColdService and asserts readback plus the metrics signals.
-func TestColdService_Success(t *testing.T) {
+// TestColdChunk_Success drives ledger+txhash+events cold writers through a
+// coldChunk and asserts readback plus the metrics signals.
+func TestColdChunk_Success(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 	sink := &testSink{}
 
-	ings, err := buildColdIngesters(
+	cc, err := openColdChunk(
 		coldDirsAt(coldDir, chunkID), chunkID, sink, Config{Ledgers: true, Txhash: true, Events: true})
 	require.NoError(t, err)
-	service := NewColdService(ings, sink)
-	defer func() { require.NoError(t, service.Close()) }()
+	defer func() { require.NoError(t, cc.close()) }()
 
 	var term events.TermKey
 	for _, seq := range []uint32{first, first + 1} {
 		raw, _, tk := marshalLCMWithEvent(t, seq)
 		term = tk
-		require.NoError(t, service.Ingest(context.Background(), seq, xdr.LedgerCloseMetaView(raw)))
+		require.NoError(t, cc.ingest(seq, xdr.LedgerCloseMetaView(raw)))
 	}
-	require.NoError(t, service.Finalize(context.Background()))
+	require.NoError(t, cc.finalize(context.Background()))
 
 	// Ledger cold readback: tx hashes use random keypairs, so bytes can't be
 	// regenerated for comparison — assert the boundary ledger reads back and
@@ -671,88 +702,80 @@ func TestColdService_Success(t *testing.T) {
 	binEntries := fhtest.ReadColdBin(t, txhashBinPath(filepath.Join(coldDir, dataTypeTxhash)))
 	require.Len(t, binEntries, 2)
 
-	// Metrics: one ColdChunkTotal, one ColdIngest per data type, no errors.
-	require.Equal(t, 1, sink.coldChunkTotals)
+	// Metrics: one ColdIngest per data type, no errors. (The aggregate
+	// ColdChunkTotal is WriteColdChunk's, not coldChunk's — see the driver tests.)
+	require.Zero(t, sink.coldChunkTotals, "the aggregate belongs to WriteColdChunk, not coldChunk")
 	cdt := sink.coldDataTypes()
 	require.Equal(t, 1, cdt[dataTypeLedgers])
 	require.Equal(t, 1, cdt[dataTypeTxhash])
 	require.Equal(t, 1, cdt[dataTypeEvents])
-	require.Empty(t, sink.coldErrorTypes(), "success path records no ingester errors")
+	require.Empty(t, sink.coldErrorTypes(), "success path records no writer errors")
 
-	// Per-stage signals: per-ledger cold stages fired once per (non-empty)
-	// ledger, the per-chunk finalize stage once per ingester. The exact map is
-	// asserted so an unexpected stage emission (or a missing one) also fails —
-	// events now emits term_index/write for every ledger, and txhash's extract
-	// spans its whole per-ledger Ingest.
+	// The shared per-ledger walk fires ONE ColdExtract per ledger — not one per
+	// consuming type — and none carries an error on the success path.
+	require.Len(t, sink.coldExtracts, 2, "one shared extract walk per ledger")
+	for _, ce := range sink.coldExtracts {
+		require.NoError(t, ce.err, "success path records no extract errors")
+	}
+
+	// Per-stage signals: the per-ledger stages fire once per (non-empty) ledger,
+	// the per-chunk finalize stage once per writer. The exact map is asserted so
+	// an unexpected stage emission (or a missing one) also fails — events emits
+	// term_index/write for every ledger, and txhash does only its finalize sort +
+	// .bin write (its cheap per-ledger accumulate folds into the ColdIngest
+	// total).
 	require.Equal(t, map[string]int{
 		dataTypeLedgers + "/" + stageWrite:    2,
 		dataTypeLedgers + "/" + stageFinalize: 1,
-		dataTypeTxhash + "/" + stageExtract:   2,
 		dataTypeTxhash + "/" + stageFinalize:  1,
-		dataTypeEvents + "/" + stageExtract:   2,
 		dataTypeEvents + "/" + stageTermIndex: 2,
 		dataTypeEvents + "/" + stageWrite:     2,
 		dataTypeEvents + "/" + stageFinalize:  1,
 	}, sink.stageCounts())
 
-	// No double-emit: the deferred Close (after this body) must not add a second
-	// ColdIngest or ColdChunkTotal, since Finalize already emitted.
-	require.NoError(t, service.Close())
-	require.Equal(t, 1, sink.coldChunkTotals, "Close after Finalize must not re-emit the aggregate")
-	require.Len(t, sink.coldIngests, 3, "Close after Finalize must not re-emit per-ingester signals")
+	// No double-emit: the deferred close (after this body) must not add a second
+	// ColdIngest, since finalize already emitted.
+	require.NoError(t, cc.close())
+	require.Len(t, sink.coldIngests, 3, "close after finalize must not re-emit per-writer signals")
 }
 
-// failingCold is a ColdIngester whose Ingest always fails, modeling a mid-chunk
-// error. Finalize must NOT run on this path.
-type failingCold struct {
-	finalized bool
-	closed    bool
-}
-
-var errFailingCold = errors.New("failingCold: induced ingest failure")
-
-func (f *failingCold) Ingest(context.Context, uint32, xdr.LedgerCloseMetaView) error {
-	return errFailingCold
-}
-func (f *failingCold) Finalize(context.Context) error { f.finalized = true; return nil }
-func (f *failingCold) Close() error                   { f.closed = true; return nil }
-
-// TestColdService_FailurePath_NoArtifact uses two real cold ingesters plus a
-// failing sibling: ColdService.Ingest returns the sibling's error, Finalize is
-// not called, the deferred Close drops the partial ledger pack, and no finalized
-// artifact remains. It asserts the aggregate ColdChunkTotal still fires for the
-// attempt, but the two real ingesters emit NO per-ingester ColdIngest: each
-// ingested cleanly (no terminal error of its own) and never finalized, and Close
-// no longer emits — so a chunk abandoned by a sibling leaves no phantom sample.
-func TestColdService_FailurePath_NoArtifact(t *testing.T) {
+// TestColdChunk_MidChunkFailure_NoArtifact aborts a chunk mid-ingest: the first
+// ledger lands in both writers, then the second ledger's shared extract walk
+// fails on garbage LCM bytes — AFTER the ledgers writer already appended them
+// (the raw append does not decode). finalize must not run (coldChunk contract);
+// close drops the partial ledger pack, so no finalized artifact remains, and
+// neither writer emits a per-writer ColdIngest: each ingested cleanly (no
+// terminal error of its own) and never finalized — a chunk abandoned by the
+// shared walk leaves no phantom sample.
+func TestColdChunk_MidChunkFailure_NoArtifact(t *testing.T) {
 	chunkID := chunk.ID(0)
+	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 	sink := &testSink{}
 
-	realLedger, err := NewLedgerColdIngester(packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID), chunkID, sink)
+	cc, err := openColdChunk(coldDirsAt(coldDir, chunkID), chunkID, sink, Config{Ledgers: true, Events: true})
 	require.NoError(t, err)
-	realEvents, err := NewEventsColdIngester(filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID()), chunkID, sink)
-	require.NoError(t, err)
-	failing := &failingCold{}
-	service := NewColdService([]ColdIngester{realLedger, realEvents, failing}, sink)
 
-	// First ledger: the real ingesters succeed, failing returns an error → the
-	// sequential Ingest aborts the ledger with the sibling's error.
-	err = service.Ingest(context.Background(), chunkID.FirstLedger(), viewOf(t, chunkID.FirstLedger()))
-	require.ErrorIs(t, err, errFailingCold)
-	require.False(t, failing.finalized, "Finalize must not run on the failure path")
+	require.NoError(t, cc.ingest(first, viewOf(t, first)))
 
-	// Nothing has emitted: the real ingesters ingested cleanly (no terminal error)
-	// and never finalized; the mock sibling records nothing.
-	require.Empty(t, sink.coldDataTypes(), "no per-ingester ColdIngest on the sibling-failure path")
-	require.Zero(t, sink.coldChunkTotals, "no ColdChunkTotal before Close")
+	garbage := bytes.Repeat([]byte{0xff}, 16)
+	err = cc.ingest(first+1, xdr.LedgerCloseMetaView(garbage))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "extract ledger events", "the shared walk rejects the garbage ledger")
 
-	// Close drops partials and emits the aggregate only.
-	require.NoError(t, service.Close())
-	require.True(t, failing.closed)
+	// The failed walk is metered: an error-carrying ColdExtract (its one metric —
+	// no writer ran for that ledger), after the first ledger's clean one.
+	require.Len(t, sink.coldExtracts, 2)
+	require.NoError(t, sink.coldExtracts[0].err)
+	require.Error(t, sink.coldExtracts[1].err, "the failed shared walk emits an error-carrying ColdExtract")
 
-	require.Empty(t, sink.coldDataTypes(), "a chunk abandoned by a sibling emits no per-ingester ColdIngest")
-	require.Equal(t, 1, sink.coldChunkTotals, "exactly one aggregate ColdChunkTotal")
+	// Nothing has emitted: both writers ingested cleanly (no terminal error of
+	// their own) and never finalized.
+	require.Empty(t, sink.coldDataTypes(), "no per-writer ColdIngest on the shared-walk failure path")
+
+	// Close drops partials; still no per-writer sample.
+	require.NoError(t, cc.close())
+	require.Empty(t, sink.coldDataTypes(), "an abandoned chunk emits no per-writer ColdIngest")
 
 	// No finalized ledger pack must exist.
 	path := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
@@ -760,37 +783,34 @@ func TestColdService_FailurePath_NoArtifact(t *testing.T) {
 	require.True(t, os.IsNotExist(statErr), "expected no cold ledger artifact at %s, stat err: %v", path, statErr)
 }
 
-// TestColdIngester_Failure_RecordsErrorMetric drives a real cold ledger ingester
-// so its OWN Ingest fails (recording firstErr), then Close. The failure is an
+// TestColdWriter_Failure_RecordsErrorMetric drives a real cold ledger writer
+// so its OWN write fails (recording firstErr), then close. The failure is an
 // out-of-order seq: the per-chunk ColdWriter expects the chunk's first ledger,
 // so AppendLedger rejects a later one. Per #765 a failed cold chunk must record
-// a per-ingester error count and an aggregate duration sample. A terminal Ingest
-// error emits the single per-ingester ColdIngest right there (Close no longer
-// emits), so the error-carrying sample is present after Ingest returns.
-func TestColdIngester_Failure_RecordsErrorMetric(t *testing.T) {
+// a per-writer error count. A terminal write error emits the single per-writer
+// ColdIngest right there (close never emits), so the error-carrying sample is
+// present after ingest returns.
+func TestColdWriter_Failure_RecordsErrorMetric(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldDir := t.TempDir()
 	sink := &testSink{}
 
-	realLedger, err := NewLedgerColdIngester(packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID), chunkID, sink)
+	cc, err := openColdChunk(coldDirsAt(coldDir, chunkID), chunkID, sink, Config{Ledgers: true})
 	require.NoError(t, err)
-	service := NewColdService([]ColdIngester{realLedger}, sink)
 
-	// An out-of-order seq makes the writer's own AppendLedger fail inside the
-	// ingester's Ingest, so it records its firstErr and emits the error-carrying
-	// ColdIngest. (drain would never feed this — the test targets the ingester's
-	// metric path directly.)
+	// An out-of-order seq makes the writer's own AppendLedger fail inside write,
+	// so it records its firstErr and emits the error-carrying ColdIngest. (drain
+	// would never feed this — the test targets the writer's metric path directly.)
 	wrongSeq := chunkID.FirstLedger() + 5
-	require.Error(t, service.Ingest(context.Background(), wrongSeq, viewOf(t, wrongSeq)))
-	require.Equal(t, 1, sink.coldDataTypes()[dataTypeLedgers], "the failed Ingest emits its ColdIngest immediately")
+	require.Error(t, cc.ingest(wrongSeq, viewOf(t, wrongSeq)))
+	require.Equal(t, 1, sink.coldDataTypes()[dataTypeLedgers], "the failed write emits its ColdIngest immediately")
 
-	// Finalize is skipped on this path; Close emits nothing more.
-	require.NoError(t, service.Close())
+	// finalize is skipped on this path; close emits nothing more.
+	require.NoError(t, cc.close())
 
-	// Exactly one ColdIngest for ledgers, carrying the error, plus one aggregate.
+	// Exactly one ColdIngest for ledgers, carrying the error.
 	require.Equal(t, 1, sink.coldDataTypes()[dataTypeLedgers])
-	require.Equal(t, 1, sink.coldErrorTypes()[dataTypeLedgers], "the recorded ColdIngest carries the ingest error")
-	require.Equal(t, 1, sink.coldChunkTotals)
+	require.Equal(t, 1, sink.coldErrorTypes()[dataTypeLedgers], "the recorded ColdIngest carries the write error")
 }
 
 // ───────────────────────── metrics sink tests ─────────────────────────
@@ -808,10 +828,12 @@ func TestPrometheusSink_Smoke(t *testing.T) {
 		sink.HotPhase(hotchunk.PhaseLedgers, time.Millisecond, 1, nil)
 		sink.HotPhase(hotchunk.PhaseTxhash, time.Millisecond, 5, nil)
 		sink.HotPhase(hotchunk.PhaseEvents, time.Millisecond, 3, nil)
-		sink.HotPhase(hotchunk.PhaseCommit, time.Millisecond, 0, errFailingCold)
+		sink.HotPhase(hotchunk.PhaseCommit, time.Millisecond, 0, errors.New("induced commit failure"))
 		sink.HotPhase(hotchunk.PhaseApply, time.Millisecond, 0, nil)
 		sink.ColdIngest(dataTypeTxhash, time.Second, 100, nil)
 		sink.ColdChunkTotal(time.Second)
+		sink.ColdExtract(time.Millisecond, 3, nil)
+		sink.ColdExtract(time.Millisecond, 0, errors.New("induced extract failure"))
 		sink.IngestStage(dataTypeEvents, stageFinalize, time.Second, 0)
 	})
 
@@ -850,6 +872,129 @@ func TestWriteColdChunk_RoundTrip(t *testing.T) {
 
 	require.Equal(t, 1, sink.coldChunkTotals)
 	require.Equal(t, 1, sink.coldDataTypes()[dataTypeLedgers])
+}
+
+// eventRichLedger builds a multi-tx, multi-event ledger: tx0 with two op events,
+// tx1 with BeforeAllTxs + AfterTx stage events straddling one op event, tx2 with
+// no events. It exercises cross-tx and cross-stage cursor ordering, so the
+// byte-identity check below is a real ordering test, not a single-event smoke.
+func eventRichLedger(t *testing.T, seq uint32) []byte {
+	t.Helper()
+	tx0 := xdr.TransactionMeta{V: 4, V4: &xdr.TransactionMetaV4{
+		Operations: []xdr.OperationMetaV2{{Events: []xdr.ContractEvent{
+			buildContractEvent("a"), buildContractEvent("b"),
+		}}},
+	}}
+	tx1 := xdr.TransactionMeta{V: 4, V4: &xdr.TransactionMetaV4{
+		Events: []xdr.TransactionEvent{
+			{Stage: xdr.TransactionEventStageTransactionEventStageBeforeAllTxs, Event: buildContractEvent("fee")},
+			{Stage: xdr.TransactionEventStageTransactionEventStageAfterTx, Event: buildContractEvent("refund")},
+		},
+		Operations: []xdr.OperationMetaV2{{Events: []xdr.ContractEvent{buildContractEvent("c")}}},
+	}}
+	tx2 := xdr.TransactionMeta{V: 4, V4: &xdr.TransactionMetaV4{}}
+	raw, err := buildLCM(t, seq, []xdr.TransactionMeta{tx0, tx1, tx2}).MarshalBinary()
+	require.NoError(t, err)
+	return raw
+}
+
+// TestWriteColdChunk_ByteIdentity_SharedWalk is the #836 invariant guard: the
+// single-walk cold path must produce artifacts byte-identical to the old
+// two-walk path. It drives the real WriteColdChunk entrypoint over a chunk with
+// several rich sentinel ledgers and compares the artifacts to INDEPENDENT
+// reference computations:
+//
+//   - txhash .bin vs. sorted, truncated ExtractTxHashes output. ExtractTxHashes
+//     is the OLD txhash extractor — a separate SDK walk from the shared
+//     ExtractLedgerEvents the ingester now reads — so an entry-by-entry match
+//     proves the switch to `.Hash` off the shared walk changed no byte.
+//   - events per-term bitmaps + count vs. an independent PayloadsFromLedgerEvents
+//     shaping, with chunk-relative event IDs assigned in ingest (ascending-seq)
+//     order — proving the event-ID assignment is unchanged.
+//
+//nolint:funlen // one invariant, two inline reference computations — splitting would obscure it
+func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
+	chunkID := chunk.ID(0)
+	first := chunkID.FirstLedger()
+	coldDir := t.TempDir()
+
+	// Rich sentinels scattered across the chunk; the rest are cheap zero-tx
+	// ledgers (no hashes, no events). Capture each sentinel's raw for the
+	// reference computations.
+	sentinels := []uint32{first, first + 1, first + 7}
+	raws := map[uint32][]byte{}
+	gen := func(tt *testing.T, seq uint32) []byte {
+		if slices.Contains(sentinels, seq) {
+			raw := eventRichLedger(tt, seq)
+			raws[seq] = raw
+			return raw
+		}
+		return marshalLCM(tt, seq)
+	}
+	require.NoError(t, WriteColdChunk(
+		context.Background(), testLogger(), chunkID, rawChunk(fullStream(t, chunkID, gen), chunkID),
+		coldDirsAt(coldDir, chunkID), nil, Config{Ledgers: true, Txhash: true, Events: true},
+	))
+
+	// Reference #1 — txhash: sorted, truncated ExtractTxHashes over the sentinels.
+	var wantEntries []txhash.ColdEntry
+	for _, seq := range sentinels {
+		hashes, err := sdkingest.ExtractTxHashes(xdr.LedgerCloseMetaView(raws[seq]))
+		require.NoError(t, err)
+		for _, h := range hashes {
+			var ke txhash.ColdEntry
+			copy(ke.Key[:], h[:txhash.ColdKeySize])
+			ke.Seq = seq
+			wantEntries = append(wantEntries, ke)
+		}
+	}
+	slices.SortFunc(wantEntries, func(a, b txhash.ColdEntry) int { return bytes.Compare(a.Key[:], b.Key[:]) })
+	gotEntries := fhtest.ReadColdBin(t, txhashBinPath(filepath.Join(coldDir, dataTypeTxhash)))
+	require.Equal(t, wantEntries, gotEntries, "cold .bin must match the old ExtractTxHashes path byte-for-byte")
+
+	// Reference #2 — events: PayloadsFromLedgerEvents with chunk-relative IDs
+	// assigned in ingest (ascending-seq) order, mapped to their term keys.
+	wantTermIDs := map[events.TermKey][]uint32{}
+	var nextID uint32
+	for _, seq := range sentinels {
+		view := xdr.LedgerCloseMetaView(raws[seq])
+		txEvents, err := sdkingest.ExtractLedgerEvents(view)
+		require.NoError(t, err)
+		closedAt, err := view.LedgerCloseTime()
+		require.NoError(t, err)
+		payloads, err := events.PayloadsFromLedgerEvents(txEvents, seq, closedAt)
+		require.NoError(t, err)
+		for i := range payloads {
+			keys, kerr := events.TermsForBytes(payloads[i].ContractEventBytes)
+			require.NoError(t, kerr)
+			for _, k := range keys {
+				wantTermIDs[k] = append(wantTermIDs[k], nextID)
+			}
+			nextID++
+		}
+	}
+	require.NotEmpty(t, wantTermIDs, "sentinels must carry events")
+
+	ecr, err := eventstore.OpenColdReader(
+		chunkID, filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID()), eventstore.ColdReaderOptions{})
+	require.NoError(t, err)
+	defer func() { require.NoError(t, ecr.Close()) }()
+
+	cnt, err := ecr.EventCount()
+	require.NoError(t, err)
+	require.Equal(t, nextID, cnt, "cold event count must match the reference payload count")
+
+	terms := make([]events.TermKey, 0, len(wantTermIDs))
+	for k := range wantTermIDs {
+		terms = append(terms, k)
+	}
+	bms, err := ecr.LookupKeys(context.Background(), terms)
+	require.NoError(t, err)
+	for i, k := range terms {
+		require.NotNil(t, bms[i], "term %d present in reference must resolve", i)
+		require.Equal(t, wantTermIDs[k], bms[i].ToArray(),
+			"cold term bitmap must carry the same event IDs as the shaping reference")
+	}
 }
 
 // TestWriteColdChunk_ShortStream_NoArtifact verifies a short stream makes WriteColdChunk error
@@ -1107,20 +1252,20 @@ func TestHotService_FailedPhaseCarriesPartialDuration(t *testing.T) {
 
 // ───────────────────────── cold txhash .bin content (P1-d) ─────────────────────────
 
-// TestTxhashColdIngester_BinContent ingests two tx-bearing ledgers, finalizes,
+// TestTxhashColdWriter_BinContent ingests two tx-bearing ledgers, finalizes,
 // then reads the .bin back through the store codec and asserts the contract
 // the deferred streamhash builder relies on: each key == the fixture tx hash
 // truncated to txhash.ColdKeySize (pinned to streamhash.MinKeySize by the
 // codec), each seq == the ledger it was ingested in, and entries are in
 // non-decreasing key order.
-func TestTxhashColdIngester_BinContent(t *testing.T) {
+func TestTxhashColdWriter_BinContent(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := NewTxhashColdIngester(txhashBinPath(coldDir), chunkID, nil)
+	ing, err := newTxhashCold(txhashBinPath(coldDir), chunkID, nil)
 	require.NoError(t, err)
-	defer func() { require.NoError(t, ing.Close()) }()
+	defer func() { require.NoError(t, ing.close()) }()
 
 	// Capture each fixture hash + the seq it was ingested in.
 	wantSeqByKey := map[[txhash.ColdKeySize]byte]uint32{}
@@ -1129,9 +1274,10 @@ func TestTxhashColdIngester_BinContent(t *testing.T) {
 		var key [txhash.ColdKeySize]byte
 		copy(key[:], hash[:txhash.ColdKeySize])
 		wantSeqByKey[key] = seq
-		require.NoError(t, ing.Ingest(context.Background(), seq, xdr.LedgerCloseMetaView(raw)))
+		txEvents, _ := extractFor(t, raw)
+		require.NoError(t, ing.write(seq, txEvents))
 	}
-	require.NoError(t, ing.Finalize(context.Background()))
+	require.NoError(t, ing.finalize(context.Background()))
 
 	entries := fhtest.ReadColdBin(t, txhashBinPath(coldDir))
 	require.Len(t, entries, 2)
@@ -1202,56 +1348,56 @@ func countCleanColdIngests(s *testSink) int {
 	return n
 }
 
-// TestBuildColdIngesters_RollbackOneBuilt makes a LATER constructor (txhash) fail
-// by planting a regular file at the txhash per-type directory, so the
-// constructor's own MkdirAll fails. The earlier-built ledger ingester is rolled
-// back via closeColdAll — which only closes it. Since Close no longer emits a
-// per-ingester ColdIngest, a rolled-back ingester (built, never ingested or
-// finalized) produces NO sample at all: no phantom success, no synthetic abort.
-func TestBuildColdIngesters_RollbackOneBuilt(t *testing.T) {
+// TestOpenColdChunk_RollbackOneBuilt makes a LATER writer's open (txhash) fail
+// by planting a regular file at the txhash per-type directory, so its own
+// MkdirAll fails. The earlier-opened ledger writer is rolled back — closed
+// only. Since close never emits a per-writer ColdIngest, a rolled-back writer
+// (opened, never ingested or finalized) produces NO sample at all: no phantom
+// success, no synthetic abort.
+func TestOpenColdChunk_RollbackOneBuilt(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldDir := t.TempDir()
 	sink := &testSink{}
 
 	// Plant a regular FILE where the txhash per-type directory must be
-	// created: the ledger ingester builds first, then NewTxhashColdIngester
-	// fails its bucket-dir MkdirAll.
+	// created: the ledger writer opens first, then newTxhashCold fails its
+	// bucket-dir MkdirAll.
 	require.NoError(t, os.WriteFile(filepath.Join(coldDir, dataTypeTxhash), []byte("not a dir"), 0o644))
 
-	_, err := buildColdIngesters(coldDirsAt(coldDir, chunkID), chunkID, sink, Config{Ledgers: true, Txhash: true})
-	require.Error(t, err, "txhash constructor must fail on the planted file")
+	_, err := openColdChunk(coldDirsAt(coldDir, chunkID), chunkID, sink, Config{Ledgers: true, Txhash: true})
+	require.Error(t, err, "the txhash open must fail on the planted file")
 
-	// The ledger ingester was built then rolled back with no Ingest/Finalize, so
+	// The ledger writer was opened then rolled back with no write/finalize, so
 	// it emits nothing.
-	require.Empty(t, sink.coldDataTypes(), "a rolled-back ingester emits no per-ingester ColdIngest")
+	require.Empty(t, sink.coldDataTypes(), "a rolled-back writer emits no per-writer ColdIngest")
 }
 
-// TestBuildColdIngesters_RollbackTwoBuilt makes the LAST constructor (events)
-// fail AFTER both the ledger AND txhash ingesters were already built, so
-// closeColdAll rolls back two ingesters. Same invariant at greater rollback
-// depth: neither rolled-back ingester emits a per-ingester ColdIngest.
-func TestBuildColdIngesters_RollbackTwoBuilt(t *testing.T) {
+// TestOpenColdChunk_RollbackTwoBuilt makes the LAST writer's open (events)
+// fail AFTER both the ledger AND txhash writers were already opened, so the
+// rollback closes two writers. Same invariant at greater rollback depth:
+// neither rolled-back writer emits a per-writer ColdIngest.
+func TestOpenColdChunk_RollbackTwoBuilt(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldDir := t.TempDir()
 	sink := &testSink{}
 
 	// Plant a directory at the events.pack path: the ledger and txhash
-	// ingesters build first, then NewEventsColdIngester fails opening the
-	// pack over the directory.
+	// writers open first, then newEventsCold fails opening the pack over
+	// the directory.
 	packPath := filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID(), eventstore.EventsPackName(chunkID))
 	require.NoError(t, os.MkdirAll(packPath, 0o755))
 
-	_, err := buildColdIngesters(coldDirsAt(coldDir, chunkID), chunkID, sink,
+	_, err := openColdChunk(coldDirsAt(coldDir, chunkID), chunkID, sink,
 		Config{Ledgers: true, Txhash: true, Events: true})
-	require.Error(t, err, "events constructor must fail on the planted directory")
+	require.Error(t, err, "the events open must fail on the planted directory")
 
-	// Both the ledger and txhash ingesters were built then rolled back with no
-	// Ingest/Finalize, so neither emits a per-ingester ColdIngest.
-	require.Empty(t, sink.coldDataTypes(), "rolled-back ingesters emit no per-ingester ColdIngest")
+	// Both the ledger and txhash writers were opened then rolled back with no
+	// write/finalize, so neither emits a per-writer ColdIngest.
+	require.Empty(t, sink.coldDataTypes(), "rolled-back writers emit no per-writer ColdIngest")
 }
 
 // TestWriteColdChunk_ConstructorFailure_EmitsAggregate drives a constructor failure
-// through WriteColdChunk (not buildColdIngesters directly) and asserts the chunk
+// through WriteColdChunk (not openColdChunk directly) and asserts the chunk
 // attempt still produces its single aggregate ColdChunkTotal — the invariant
 // is one aggregate per chunk attempt, including pre-service failures.
 func TestWriteColdChunk_ConstructorFailure_EmitsAggregate(t *testing.T) {
@@ -1286,20 +1432,21 @@ func TestEventsCold_FinishThenIndexFails_LeavesInertPack(t *testing.T) {
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := NewEventsColdIngester(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil)
+	ing, err := newEventsCold(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil)
 	require.NoError(t, err)
 
 	// Ingest one event-bearing ledger so the mirror is non-empty, exercising a
 	// real (non-empty) MPHF build.
 	rawEv, _, _ := marshalLCMWithEvent(t, first)
-	require.NoError(t, ing.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(rawEv)))
+	txEvents, closedAt := extractFor(t, rawEv)
+	require.NoError(t, ing.write(first, closedAt, txEvents))
 
 	// Plant a DIRECTORY where index.hash must be written → buildMPHF fails.
 	bucketDir := filepath.Join(coldDir, chunkID.BucketID())
 	indexHashPath := filepath.Join(bucketDir, eventstore.IndexHashName(chunkID))
 	require.NoError(t, os.Mkdir(indexHashPath, 0o755))
 
-	ferr := ing.Finalize(context.Background())
+	ferr := ing.finalize(context.Background())
 	require.Error(t, ferr, "Finalize must fail when WriteColdIndex fails")
 	require.Contains(t, ferr.Error(), "WriteColdIndex")
 
@@ -1310,112 +1457,104 @@ func TestEventsCold_FinishThenIndexFails_LeavesInertPack(t *testing.T) {
 	require.NoError(t, statErr, "the index-less events.pack stays on disk after WriteColdIndex failure")
 
 	// Close is still safe/idempotent afterwards and does not remove the pack.
-	require.NoError(t, ing.Close())
+	require.NoError(t, ing.close())
 	_, statErr = os.Stat(packPath)
-	require.NoError(t, statErr, "Close after a committed Finish must not drop the pack")
+	require.NoError(t, statErr, "close after a committed Finish must not drop the pack")
 }
 
-// TestEventsCold_FinalizeAfterFailedIngest_Refuses asserts the failed-Ingest
-// latch: once an Ingest errors (here via a malformed view), Finalize must
-// refuse rather than commit a pack+index whose mirror may be ahead of the
-// offsets commit point.
+// TestEventsCold_FinalizeAfterFailedIngest_Refuses asserts the failed-write
+// latch: once a write errors (here shaping a malformed TransactionEvent),
+// finalize must refuse rather than commit a pack+index whose mirror may be ahead
+// of the offsets commit point.
 func TestEventsCold_FinalizeAfterFailedIngest_Refuses(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldDir := t.TempDir()
 
-	ing, err := NewEventsColdIngester(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil)
+	ing, err := newEventsCold(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil)
 	require.NoError(t, err)
-	defer func() { require.NoError(t, ing.Close()) }()
+	defer func() { require.NoError(t, ing.close()) }()
 
-	bad := xdr.LedgerCloseMetaView([]byte{0x00, 0x01, 0x02})
-	require.Error(t, ing.Ingest(context.Background(), chunkID.FirstLedger(), bad))
+	// A garbage top-level TransactionEvent fails PayloadsFromLedgerEvents' Stage
+	// decode inside write — the walk itself is coldChunk's job, so the
+	// per-writer failure is a shaping error over the shared walk's output.
+	bad := []sdkingest.LedgerTransactionEvents{{TransactionEvents: [][]byte{{0xff, 0xff}}}}
+	require.Error(t, ing.write(chunkID.FirstLedger(), 0, bad))
 
-	ferr := ing.Finalize(context.Background())
+	ferr := ing.finalize(context.Background())
 	require.Error(t, ferr)
-	require.Contains(t, ferr.Error(), "Finalize after failed Ingest")
+	require.Contains(t, ferr.Error(), "finalize after failed write")
 }
 
-// ───────────────────────── ColdService.Finalize first-error ─────────────────────────
+// ───────────────────────── coldChunk.finalize first-error ─────────────────────────
 
-// finalizeErrCold is a ColdIngester whose Finalize errors; it records whether
-// Finalize/Close ran.
-type finalizeErrCold struct {
-	err       error
-	finalized bool
-	closed    bool
-}
+// TestColdChunk_Finalize_FirstErrorStopsRemaining asserts coldChunk.finalize
+// stops at the first writer's error and does NOT finalize (publish) the later
+// writers — once a sibling failed, the rest are released (never finalized) by
+// the caller's deferred close, so a failed chunk never gains newly committed
+// artifacts past the failure. It also asserts the flip side: the artifact an
+// EARLIER writer already committed in this attempt stays on disk as inert
+// scratch (see the package doc's artifact model). All three writers are real:
+// the txhash finalize is made to fail by planting a directory at its .bin
+// path, after the ledgers finalize already committed its pack and before the
+// events finalize would publish its index.
+func TestColdChunk_Finalize_FirstErrorStopsRemaining(t *testing.T) {
+	chunkID := chunk.ID(0)
+	first := chunkID.FirstLedger()
+	coldDir := t.TempDir()
+	sink := &testSink{}
 
-func (f *finalizeErrCold) Ingest(context.Context, uint32, xdr.LedgerCloseMetaView) error { return nil }
-func (f *finalizeErrCold) Finalize(context.Context) error {
-	f.finalized = true
-	return f.err
-}
-func (f *finalizeErrCold) Close() error { f.closed = true; return nil }
+	cc, err := openColdChunk(coldDirsAt(coldDir, chunkID), chunkID, sink,
+		Config{Ledgers: true, Txhash: true, Events: true})
+	require.NoError(t, err)
 
-// recordFinalizeCold is a ColdIngester that records it was finalized (no error).
-type recordFinalizeCold struct {
-	finalized bool
-	closed    bool
-}
+	raw, _, _ := marshalLCMWithEvent(t, first)
+	require.NoError(t, cc.ingest(first, xdr.LedgerCloseMetaView(raw)))
 
-func (r *recordFinalizeCold) Ingest(context.Context, uint32, xdr.LedgerCloseMetaView) error {
-	return nil
-}
-func (r *recordFinalizeCold) Finalize(context.Context) error { r.finalized = true; return nil }
-func (r *recordFinalizeCold) Close() error                   { r.closed = true; return nil }
+	// Plant a DIRECTORY at the .bin path: txhash's finalize (WriteColdBin's
+	// os.Create) fails after the ledgers finalize already ran.
+	binPath := txhashBinPath(filepath.Join(coldDir, dataTypeTxhash))
+	require.NoError(t, os.Mkdir(binPath, 0o755))
 
-// TestColdService_Finalize_FirstErrorStopsRemaining asserts ColdService.Finalize
-// returns the first ingester's error and does NOT finalize (publish) the later
-// ingesters — once a sibling failed, the rest are released (never finalized) by
-// the caller's deferred Close, so a failed chunk never gains newly committed
-// artifacts past the failure.
-func TestColdService_Finalize_FirstErrorStopsRemaining(t *testing.T) {
-	firstErr := errors.New("first finalize failure")
-	failing := &finalizeErrCold{err: firstErr}
-	later := &recordFinalizeCold{}
+	ferr := cc.finalize(context.Background())
+	require.Error(t, ferr, "finalize must surface the txhash failure")
 
-	service := NewColdService([]ColdIngester{failing, later}, &testSink{})
-	ferr := service.Finalize(context.Background())
+	// The earlier writer's already-committed pack REMAINS on disk.
+	path := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
+	_, statErr := os.Stat(path)
+	require.NoError(t, statErr, "the earlier writer's published artifact stays on disk")
 
-	require.ErrorIs(t, ferr, firstErr, "Finalize returns the first error")
-	require.True(t, failing.finalized, "first ingester's Finalize ran (and failed)")
-	require.False(t, later.finalized, "later ingester must NOT be finalized after a sibling failure")
+	// The later (events) writer was never finalized: no index artifacts.
+	bucketDir := filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID())
+	_, statErr = os.Stat(filepath.Join(bucketDir, eventstore.IndexPackName(chunkID)))
+	require.True(t, os.IsNotExist(statErr), "a later writer must NOT be finalized after a sibling failure")
 
-	require.NoError(t, service.Close())
-	require.True(t, later.closed, "later ingester is released via Close instead")
+	require.NoError(t, cc.close())
+	_, statErr = os.Stat(path)
+	require.NoError(t, statErr, "close after a committed finalize must not drop the published pack")
 }
 
 // ───────────────────────── drain overrun guard ─────────────────────────
 
-// countingIngester counts Ingest calls; used to prove the overrun guard fires
-// BEFORE the out-of-chunk ledger is handed to the ingesters. It fakes the
-// ColdIngester seam (a ColdService drives it), the layer drain consumes.
-type countingIngester struct{ ingested int }
-
-func (c *countingIngester) Ingest(context.Context, uint32, xdr.LedgerCloseMetaView) error {
-	c.ingested++
-	return nil
-}
-func (*countingIngester) Finalize(context.Context) error { return nil }
-func (*countingIngester) Close() error                   { return nil }
-
 // TestDrain_OverrunPastChunk asserts a stream that keeps yielding in order
 // PAST the chunk's last ledger is rejected before the overrun ledger is
 // ingested — not after the stream ends, by which point the extra ledgers
-// would already be durably written on the hot path.
+// would already be durably written on the hot path. The per-ledger write-stage
+// count is the proof: the ledgers writer emits one per accepted ledger.
 func TestDrain_OverrunPastChunk(t *testing.T) {
 	chunkID := chunk.ID(0)
 	ledgersInChunk := chunkID.LastLedger() - chunkID.FirstLedger() + 1
 	// One ledger past the chunk, still in order.
 	stream := &fakeStream{t: t, count: ledgersInChunk + 1}
-	counter := &countingIngester{}
-	service := NewColdService([]ColdIngester{counter}, nil)
+	sink := &testSink{}
+	cc, err := openColdChunk(coldDirsAt(t.TempDir(), chunkID), chunkID, sink, Config{Ledgers: true})
+	require.NoError(t, err)
+	defer func() { require.NoError(t, cc.close()) }()
 
-	err := drain(context.Background(), rawChunk(stream, chunkID), chunkID, service)
+	err = drain(rawChunk(stream, chunkID), chunkID, cc)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "overrun")
-	require.Equal(t, int(ledgersInChunk), counter.ingested,
-		"the out-of-chunk ledger must not reach the ingesters")
+	require.Equal(t, int(ledgersInChunk), sink.stageCounts()[dataTypeLedgers+"/"+stageWrite],
+		"the out-of-chunk ledger must not reach the writers")
 }
 
 // ───────────────────────── lazy-source / empty-stream failures ─────────────────────────
@@ -1483,35 +1622,5 @@ func TestWriteColdChunk_EmptyStream(t *testing.T) {
 	require.Equal(t, 1, sink.coldChunkTotals, "the failed attempt still emits its aggregate")
 }
 
-// TestColdService_FinalizeAbort_KeepsEarlierArtifact: when a LATER ingester's
-// Finalize fails, the loop stops and the error is returned — but the artifact
-// an earlier ingester already published in this attempt stays on disk. The
-// orchestrator never records completion for the failed chunk, so the leftover
-// is inert scratch (see the package doc's artifact model) and the retry's
-// overwrite is the cleanup.
-func TestColdService_FinalizeAbort_KeepsEarlierArtifact(t *testing.T) {
-	chunkID := chunk.ID(0)
-	coldDir := t.TempDir()
-	sink := &testSink{}
-
-	realLedger, err := NewLedgerColdIngester(packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID), chunkID, sink)
-	require.NoError(t, err)
-	failErr := errors.New("induced finalize failure")
-	failing := &finalizeErrCold{err: failErr}
-	service := NewColdService([]ColdIngester{realLedger, failing}, sink)
-
-	require.NoError(t, service.Ingest(context.Background(), chunkID.FirstLedger(), viewOf(t, chunkID.FirstLedger())))
-
-	ferr := service.Finalize(context.Background())
-	require.ErrorIs(t, ferr, failErr)
-	require.True(t, failing.finalized, "the failing ingester's Finalize ran (and stopped the loop)")
-
-	// The earlier ingester's already-published pack REMAINS on disk.
-	path := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
-	_, statErr := os.Stat(path)
-	require.NoError(t, statErr, "the earlier ingester's published artifact stays on disk")
-
-	require.NoError(t, service.Close())
-	_, statErr = os.Stat(path)
-	require.NoError(t, statErr, "Close after a committed Finalize must not drop the published pack")
-}
+// The earlier-artifact-stays-on-disk invariant when a LATER writer's finalize
+// fails is covered by TestColdChunk_Finalize_FirstErrorStopsRemaining above.

@@ -2,24 +2,11 @@ package ingest
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"time"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
 )
-
-// errOrFirst returns prev if it is non-nil, else cur. Used to retain the FIRST
-// error a cold ingester saw across its Ingest/Finalize lifetime for the sink's
-// per-chunk err report.
-func errOrFirst(prev, cur error) error {
-	if prev != nil {
-		return prev
-	}
-	return cur
-}
 
 // HotService commits one ledger to the shared per-chunk hot DB as ONE atomic
 // synced WriteBatch across all hot CFs (decision (a)) and emits the single hot
@@ -63,90 +50,4 @@ func (s *HotService) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMe
 		s.sink.HotPhase(p, rep.Phases[p].Dur, items, perr)
 	}
 	return err
-}
-
-// ColdService drives a set of ColdIngesters for one chunk: sequential per-ledger
-// Ingest, then Finalize on each. The per-chunk aggregate timer starts at
-// construction (NewColdService), so its window spans the caller's drain of the
-// source stream plus every Ingest and Finalize — a deliberately wide window (see
-// coldBuckets). It emits the aggregate ColdChunkTotal exactly once for the chunk —
-// in Finalize on the success path, otherwise in Close on the failure path (an
-// Ingest error or short stream short-circuits before Finalize).
-// The totalEmitted flag prevents a double-emit: Finalize sets it so the caller's
-// deferred Close is a no-op for the aggregate. (A ctx or constructor failure
-// happens before the service is built — WriteColdChunk emits that chunk's single
-// ColdChunkTotal directly.)
-type ColdService struct {
-	ingesters    []ColdIngester
-	sink         MetricSink
-	start        time.Time
-	totalEmitted bool
-}
-
-// NewColdService builds a ColdService over the enabled cold ingesters. A nil
-// sink defaults to NopSink. The per-chunk aggregate timer starts here; the only
-// case where no Ingest follows is an already-errored short/empty stream, where
-// the timing sample is meaningless anyway.
-func NewColdService(ingesters []ColdIngester, sink MetricSink) *ColdService {
-	return &ColdService{ingesters: ingesters, sink: orNop(sink), start: time.Now()}
-}
-
-// Ingest runs every cold ingester on lcm sequentially (each owns mutable
-// per-chunk state, so no concurrency within the service). seq is the
-// driver-validated sequence of lcm, passed through unchanged. The first error
-// aborts the ledger.
-func (s *ColdService) Ingest(ctx context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
-	for _, ing := range s.ingesters {
-		if err := ing.Ingest(ctx, seq, lcm); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// Finalize commits each cold ingester's chunk artifact (explicit, error-checked,
-// never deferred). The first Finalize error STOPS the loop: the remaining
-// (unfinalized) ingesters are released by the caller's deferred Close, and the
-// failed chunk attempt is reported to the orchestrator, which never records
-// completion for it. Artifacts the earlier ingesters already wrote are left in
-// place — without the orchestrator's completion record they are inert scratch
-// (see the package doc's artifact model), and the retry's overwrite is the
-// cleanup. The per-chunk ColdChunkTotal is emitted here on the success path.
-func (s *ColdService) Finalize(ctx context.Context) error {
-	var ferr error
-	for _, ing := range s.ingesters {
-		if err := ing.Finalize(ctx); err != nil {
-			ferr = fmt.Errorf("finalize: %w", err)
-			break
-		}
-	}
-	s.emitChunkTotal()
-	return ferr
-}
-
-// Close closes every cold ingester, joining each Close error, and emits the
-// aggregate ColdChunkTotal if Finalize never reached it (the failure path). A
-// per-ingester ColdIngest is emitted only from a TERMINAL step (a failed Ingest,
-// via coldMetrics.observe, or Finalize) — never from Close, so an ingester rolled
-// back before any work produces no per-ingester sample (only the aggregate here).
-// Idempotent: on the failure path a writer's Close drops its partial file; after
-// a successful Finalize this is a no-op for the aggregate.
-func (s *ColdService) Close() error {
-	var err error
-	for _, ing := range s.ingesters {
-		if cerr := ing.Close(); cerr != nil {
-			err = errors.Join(err, fmt.Errorf("close: %w", cerr))
-		}
-	}
-	s.emitChunkTotal()
-	return err
-}
-
-// emitChunkTotal reports the aggregate ColdChunkTotal exactly once for the chunk.
-func (s *ColdService) emitChunkTotal() {
-	if s.totalEmitted {
-		return
-	}
-	s.totalEmitted = true
-	s.sink.ColdChunkTotal(time.Since(s.start))
 }

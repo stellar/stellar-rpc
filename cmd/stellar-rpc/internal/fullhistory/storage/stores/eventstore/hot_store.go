@@ -371,7 +371,7 @@ func (h *HotStore) All(ctx context.Context) iter.Seq2[events.Payload, error] {
 // before any Put; on any error Store.Batch discards the whole WriteBatch, so a
 // rejected ledger never leaves committed rows behind.
 //
-// payloads is produced by events.LCMViewToPayloads, which emits each ledger's
+// payloads is produced by events.PayloadsFromLedgerEvents, which emits each ledger's
 // events in ascending getEvents cursor order — write order here IS the cursor
 // contract (event IDs are assigned by arrival position). Terms are derived via
 // events.TermsForBytes on each payload's ContractEventBytes.

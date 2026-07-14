@@ -3,10 +3,12 @@
 // and writes the three data types — ledgers, txhashes, contract events —
 // into the full-history stores, one chunk at a time, via the zero-copy
 // view extractors in the go-stellar-sdk ingest package and the RPC-side
-// events.LCMViewToPayloads emitter.
+// events.PayloadsFromLedgerEvents emitter.
 //
-// Two tiers share the per-ledger extraction but differ in everything
-// else:
+// Both tiers extract each ledger with a SINGLE ExtractLedgerEvents walk
+// (the hot DB's IngestLedger, the cold coldChunk.ingest) — txhash reads
+// each element's paired Hash and events shapes the same slice — but they
+// differ in everything else:
 //
 //   - Hot (HotService): one ledger at a time into the long-lived,
 //     caller-owned per-chunk hot DB, driven by the daemon's live
@@ -19,9 +21,9 @@
 //     SOURCE-BLIND — the caller resolves the chunk's ledger source and
 //     passes the raw ledger iterator, so the materializer never learns
 //     whether the bytes came from a local .pack or the bulk backend.
-//     Each cold ingester OPENS its own per-chunk writer; Finalize
-//     publishes the artifact and Close drops partials on the failure
-//     path (ColdService orchestrates).
+//     Each enabled data type gets its own per-chunk cold writer, opened
+//     by openColdChunk; finalize publishes the artifacts and close drops
+//     partials on the failure path (coldChunk orchestrates).
 //
 // Artifact model (cold) — the contract every layer here relies on:
 //
@@ -44,24 +46,24 @@
 // Failure semantics (cold) follow from the model: a chunk either fully
 // finalizes — and only then may the orchestrator record completion — or
 // the attempt is abandoned and re-run from scratch; there is no
-// mid-chunk resume. Once any Ingest fails, the chunk is released via
-// Close (Finalize must not run; see the ColdIngester contract). Once
-// any Finalize fails, ColdService stops at the first error; whatever
-// the earlier ingesters already wrote stays on disk as inert scratch.
+// mid-chunk resume. Once any ingest fails, the chunk is released via
+// close (finalize must not run; see the coldChunk contract). Once any
+// finalize fails, coldChunk stops at the first error; whatever the
+// earlier writers already wrote stays on disk as inert scratch.
 //
 // Data types are processed in canonical ledgers→txhash→events order;
-// the constructor table in buildColdIngesters is the order's single
-// definition site. The on-disk formats and per-chunk filenames are
-// owned by the store packages (ledger.PackName, txhash.ColdBinName +
-// its .bin codec, eventstore's cold-format helpers); this package only
-// composes the {bucketID:05d}/ bucket directories around them.
+// openColdChunk is the order's single definition site. The on-disk
+// formats and per-chunk filenames are owned by the store packages
+// (ledger.PackName, txhash.ColdBinName + its .bin codec, eventstore's
+// cold-format helpers); this package only composes the {bucketID:05d}/
+// bucket directories around them.
 //
-// Inputs are borrowed: every Ingest receives a view over the source
+// Inputs are borrowed: every ingest receives a view over the source
 // stream's buffer, valid only until the next ledger is pulled, and
-// each ingester copies what it retains (see ColdIngester). The raw
+// each writer copies what it retains (see coldChunk.ingest). The raw
 // ledger iterator's contract includes yielding an error on ctx
 // cancellation — the drain loop relies on it for cancellation rather
 // than polling ctx itself. Metrics flow through MetricSink (Prometheus in prod,
 // recorders in tests); the cold tier's invariant is exactly one
-// ColdChunkTotal per chunk attempt, including pre-service failures.
+// ColdChunkTotal per chunk attempt, including pre-open failures.
 package ingest
