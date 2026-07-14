@@ -152,6 +152,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 			Logger:   logger,
 			Metrics:  metrics,
 			Sink:     cfg.Exec.Process.Sink,
+			Health:   cfg.health,
 		})
 		if err == nil {
 			// WithContext cancels gctx (unblocking the lifecycle sibling in g.Wait)
@@ -302,6 +303,10 @@ type StartConfig struct {
 
 	// runBackfill is a test-only seam for one backfill pass; nil ⇒ backfill.RunBackfill.
 	runBackfill func(ctx context.Context, exec backfill.ExecConfig, lo, hi chunk.ID) error
+
+	// health is the readiness/health signal the ingestion loop feeds per commit;
+	// #772's read server consumes it (as HealthSignal). nil ⇒ observe is a no-op.
+	health *healthState
 }
 
 // withDefaults fills the embedded Exec defaults (Workers -> GOMAXPROCS). The

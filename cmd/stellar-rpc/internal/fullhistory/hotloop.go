@@ -91,6 +91,7 @@ type ingestionLoopConfig struct {
 	Logger   *supportlog.Entry
 	Metrics  observability.Metrics
 	Sink     ingest.MetricSink
+	Health   *healthState
 }
 
 // runIngestionLoop is the hot tier's OWNER: the single goroutine that opens,
@@ -146,13 +147,22 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		}
 
 		// One atomic synced WriteBatch across all hot CFs (via hotDB.IngestLedger).
-		if ierr := hotService.Ingest(ctx, seq, xdr.LedgerCloseMetaView(raw)); ierr != nil {
+		view := xdr.LedgerCloseMetaView(raw)
+		if ierr := hotService.Ingest(ctx, seq, view); ierr != nil {
 			return fmt.Errorf("ingest ledger %d: %w", seq, ierr)
 		}
 		// The ingestion loop owns the last-committed gauge: this is the TRUE
 		// committed ledger (mid-chunk included), one atomic gauge set per ledger.
 		// The tick must not touch it — its chunk-aligned value would regress it.
 		metrics.LastCommitted(seq)
+
+		// Feed the readiness/health signal from the SAME commit: the first commit
+		// latches readiness, and the close time drives the health staleness check.
+		// A committed ledger's close time always decodes; skip the signal on the
+		// near-impossible decode error rather than fail an already-durable commit.
+		if closeUnix, cerr := view.LedgerCloseTime(); cerr == nil {
+			cfg.Health.observe(closeUnix)
+		}
 
 		// Chunk boundary: this seq is the chunk's last ledger.
 		if closed := chunk.IDFromLedger(seq); seq == closed.LastLedger() {
