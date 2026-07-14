@@ -19,11 +19,13 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/harness"
 )
 
-// legDir is this leg's path under the repo root, where its config template is
-// checked in (the runner runs with cwd = repo root).
-const legDir = "cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test"
+const (
+	// runner runs w/ cwd = repo root, so paths are relative to there
+	legDir   = "cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test"
+	corePath = "/usr/local/bin/stellar-core" // fetched from S3
+)
 
-const corePath = "/usr/local/bin/stellar-core" // fetched from S3
+const ledgerThreshold = 384 // mirrors ingest.ledgerThreshold in backfill.go
 
 // backfillDoneRe matches the terminal line emitted on backfill's completion
 var backfillDoneRe = regexp.MustCompile(`Backfill process complete, ledgers \[(\d+) -> (\d+)\]`)
@@ -51,6 +53,11 @@ func instantiate(ctx context.Context) error {
 	}
 	bail := func(format string, args ...any) error {
 		return harness.BailInstance(resultsFile, "Backfill ingestion", runID, targetSHA, fmt.Sprintf(format, args...))
+	}
+
+	want, err := strconv.Atoi(retention) // used to compare against ingested ledgers below
+	if err != nil {
+		return bail("parsing retention window %q: %v", retention, err)
 	}
 
 	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
@@ -96,6 +103,9 @@ func instantiate(ctx context.Context) error {
 		return bail("%v", err)
 	}
 	ingested := hi - lo + 1
+	if ingested+ledgerThreshold < want {
+		return bail("backfill reported complete but ingested %d of %s ledgers", ingested, retention)
+	}
 	logger.Infof("backfill complete: %d ledgers [%d -> %d] in %s", ingested, lo, hi, elapsed.Round(time.Second))
 
 	md := renderMarkdown(targetSHA, retention, lo, hi, ingested, elapsed)
