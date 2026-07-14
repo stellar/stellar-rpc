@@ -13,7 +13,7 @@ import (
 // idempotency).
 //
 // Backed by a fixed-width bitmask over allKinds' canonical order, so Kinds()
-// yields that order (matching buildColdIngesters) and membership is alloc-free.
+// yields that order (matching openColdChunk) and membership is alloc-free.
 type ArtifactSet struct {
 	mask uint8
 }

@@ -2,58 +2,175 @@ package ingest
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"time"
 
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
+	"github.com/stellar/go-stellar-sdk/xdr"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
-// ledgerData is one ledger's shared, already-extracted input to every cold
-// ingester. ColdService walks the borrowed view ONCE (ExtractLedgerEvents) and
-// hands the result to each per-type writer, so txhash and events share the
-// single TxProcessing walk instead of each running their own — halving cold
-// per-ledger extraction, matching the hot path's IngestLedger (issue #836).
+// coldChunk is one chunk's set of cold writers — one concrete field per data
+// type, nil when the type is not enabled. The set is fixed at three, so there
+// is no ingester interface or fan-out: ingest mirrors what the hot path's
+// hotchunk.DB.IngestLedger does inline (extract once, then concrete writes),
+// and each writer takes exactly the inputs it uses.
 //
-//   - seq is the ledger sequence on drain's contiguous counter (the in-order
-//     contract is enforced at the source).
-//   - raw is the wire-format LedgerCloseMeta bytes for the ledgers writer; it
-//     ALIASES the source stream's borrowed buffer, valid only for the current
-//     Ingest call, so an implementation must copy what it retains.
-//   - txEvents is the per-transaction hash + contract events (apply order); each
-//     element's Hash feeds txhash and the slice feeds events via
-//     events.PayloadsFromLedgerEvents. Its byte slices alias the same buffer.
-//   - closedAt is the view's LedgerCloseTime, needed for event shaping.
+// Ownership: openColdChunk opens each enabled writer's per-chunk file; finalize
+// commits the chunk's artifacts (explicit, error-checked, never deferred);
+// close is always deferred and idempotent — on the failure path (finalize never
+// ran) each writer drops its partial file.
 //
-// txEvents/closedAt are zero when neither txhash nor events is enabled
-// (ledgers-only: ColdService skips the walk entirely).
-type ledgerData struct {
-	seq      uint32
-	raw      []byte
-	closedAt int64
-	txEvents []sdkingest.LedgerTransactionEvents
+// Contract: finalize must NOT be called after a failed ingest — once any ingest
+// errors, the chunk is abandoned via close and retried from scratch. A writer
+// may have committed partial per-ledger state before the error (the events
+// writer's mirror/pack run ahead of its offsets commit point), so a
+// post-failure finalize could publish an inconsistent artifact; eventsCold
+// latches the failure and refuses.
+type coldChunk struct {
+	ledgers *ledgerCold
+	txhash  *txhashCold
+	events  *eventsCold
+	sink    MetricSink
 }
 
-// ColdIngester ingests one data type for one chunk into a per-chunk cold writer.
+// openColdChunk opens one cold writer per enabled type at its resolved path —
+// the single definition site of the canonical ledgers→txhash→events order and
+// the build rollback. An enabled type with an empty ColdDirs path is a config
+// error. On any failure the already-opened writers are closed; they never
+// ingested or finalized, and close emits no per-writer ColdIngest sample, so a
+// rolled-back build produces no phantom-success sample.
+func openColdChunk(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Config) (*coldChunk, error) {
+	cc := &coldChunk{sink: sink}
+	fail := func(err error) (*coldChunk, error) { return nil, errors.Join(err, cc.close()) }
+	if cfg.Ledgers {
+		if dirs.LedgerPack == "" {
+			return fail(errors.New("ingest: ledgers enabled but its ColdDirs path is empty"))
+		}
+		w, err := newLedgerCold(dirs.LedgerPack, chunkID, sink)
+		if err != nil {
+			return fail(fmt.Errorf("open ledgers cold writer: %w", err))
+		}
+		cc.ledgers = w
+	}
+	if cfg.Txhash {
+		if dirs.TxhashBin == "" {
+			return fail(errors.New("ingest: txhash enabled but its ColdDirs path is empty"))
+		}
+		w, err := newTxhashCold(dirs.TxhashBin, chunkID, sink)
+		if err != nil {
+			return fail(fmt.Errorf("open txhash cold writer: %w", err))
+		}
+		cc.txhash = w
+	}
+	if cfg.Events {
+		if dirs.EventsDir == "" {
+			return fail(errors.New("ingest: events enabled but its ColdDirs path is empty"))
+		}
+		w, err := newEventsCold(dirs.EventsDir, chunkID, sink)
+		if err != nil {
+			return fail(fmt.Errorf("open events cold writer: %w", err))
+		}
+		cc.events = w
+	}
+	return cc, nil
+}
+
+// ingest writes one ledger into every enabled writer, in canonical order. lcm
+// is a borrowed view over the source stream's buffer, valid only for this call
+// — each writer copies what it retains. seq is the ledger sequence on drain's
+// contiguous counter (the in-order contract is enforced at the source).
 //
-// Ownership: the ingester OPENS its own per-chunk writer in its constructor and
-// owns its lifecycle. Finalize commits the chunk's artifact (explicit,
-// error-checked, never deferred). Close is always deferred and idempotent; on
-// the failure path (Finalize never ran) it drops any partial file.
-//
-// Contract: Finalize must NOT be called after a failed Ingest — once any
-// Ingest errors, the chunk is abandoned via Close and retried from scratch.
-// Implementations may have committed partial per-ledger state before the
-// error (e.g. the events ingester's mirror/pack run ahead of its offsets
-// commit point), so a post-failure Finalize could publish an inconsistent
-// artifact; implementations are encouraged to latch the failure and refuse
-// (eventsCold does).
-//
-// Input: l carries one ledger's shared pre-extracted data (see ledgerData). Its
-// borrowed byte slices are valid only for the current call — an implementation
-// must copy any bytes it retains. ColdService drives the per-ledger Ingest calls
-// sequentially, so each ledger is fully consumed before the next.
-type ColdIngester interface {
-	Ingest(ctx context.Context, l ledgerData) error
-	Finalize(ctx context.Context) error
-	Close() error
+// When txhash or events is enabled, the view is walked ONCE (the shared
+// ExtractLedgerEvents, mirroring the hot path's IngestLedger) and both read the
+// result — halving cold per-ledger extraction (issue #836). The walk-or-not
+// decision is structural: no consumer of the walk → no walk, so a ledgers-only
+// chunk never pays it and an enabled events writer can never miss it. The walk
+// is metered as the ledger-scoped ColdExtract signal. The first error aborts
+// the ledger.
+func (c *coldChunk) ingest(seq uint32, lcm xdr.LedgerCloseMetaView) error {
+	if c.ledgers != nil {
+		if err := c.ledgers.write(seq, []byte(lcm)); err != nil {
+			return err
+		}
+	}
+	if c.txhash == nil && c.events == nil {
+		return nil
+	}
+	start := time.Now()
+	txEvents, err := sdkingest.ExtractLedgerEvents(lcm)
+	if err != nil {
+		return fmt.Errorf("extract ledger events seq %d: %w", seq, err)
+	}
+	closedAt, err := lcm.LedgerCloseTime()
+	if err != nil {
+		return fmt.Errorf("ledger close time seq %d: %w", seq, err)
+	}
+	c.sink.ColdExtract(time.Since(start), len(txEvents))
+	if c.txhash != nil {
+		if err := c.txhash.write(seq, txEvents); err != nil {
+			return err
+		}
+	}
+	if c.events != nil {
+		if err := c.events.write(seq, closedAt, txEvents); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// finalize commits each enabled writer's chunk artifact, in canonical order.
+// The first error STOPS: the remaining (unfinalized) writers are released by
+// the caller's deferred close, and the failed chunk attempt is reported to the
+// orchestrator, which never records completion for it. Artifacts the earlier
+// writers already committed are left in place — without the orchestrator's
+// completion record they are inert scratch (see the package doc's artifact
+// model), and the retry's overwrite is the cleanup.
+func (c *coldChunk) finalize(ctx context.Context) error {
+	if c.ledgers != nil {
+		if err := c.ledgers.finalize(ctx); err != nil {
+			return fmt.Errorf("finalize: %w", err)
+		}
+	}
+	if c.txhash != nil {
+		if err := c.txhash.finalize(ctx); err != nil {
+			return fmt.Errorf("finalize: %w", err)
+		}
+	}
+	if c.events != nil {
+		if err := c.events.finalize(ctx); err != nil {
+			return fmt.Errorf("finalize: %w", err)
+		}
+	}
+	return nil
+}
+
+// close closes every opened writer, joining each close error. Idempotent: on
+// the failure path a writer's close drops its partial file; after a successful
+// finalize it is a no-op. A per-writer ColdIngest is emitted only from a
+// TERMINAL step (a failed write, via coldMetrics.observe, or finalize) — never
+// from close, so a writer rolled back before any work produces no sample.
+func (c *coldChunk) close() error {
+	var err error
+	if c.ledgers != nil {
+		if cerr := c.ledgers.close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("close: %w", cerr))
+		}
+	}
+	if c.txhash != nil {
+		if cerr := c.txhash.close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("close: %w", cerr))
+		}
+	}
+	if c.events != nil {
+		if cerr := c.events.close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("close: %w", cerr))
+		}
+	}
+	return err
 }
 
 // Cold writers run ONLY on the batch freeze/backfill path — WriteColdChunk is

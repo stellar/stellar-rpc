@@ -15,35 +15,29 @@ const (
 	dataTypeLedgers = "ledgers"
 	dataTypeTxhash  = "txhash"
 	dataTypeEvents  = "events"
-	// dataTypeShared labels the ONE per-ledger ExtractLedgerEvents walk the cold
-	// service runs once and shares across txhash + events (issue #836) — it is
-	// not a stored data type, only the scope of the shared extract stage, mirroring
-	// the hot path's single (data-type-less) extract phase.
-	dataTypeShared = "shared"
 )
 
 // Cold stage labels reported via MetricSink.IngestStage. These sit at the seams
-// the rpc-hack bench collectors measured (per-stage extract / term-index /
-// store-write samples plus a per-chunk finish), so a CSV sink can reproduce
-// those reports from production ingesters without re-instrumenting.
+// the rpc-hack bench collectors measured (per-stage term-index / store-write
+// samples plus a per-chunk finish), so a CSV sink can reproduce those reports
+// from production writers without re-instrumenting. The shared per-ledger
+// ExtractLedgerEvents walk is NOT a stage: it belongs to no single data type,
+// so it is its own ledger-scoped signal (MetricSink.ColdExtract), mirroring the
+// hot path's type-less extract phase.
 const (
-	stageExtract   = "extract"    // the shared per-ledger ExtractLedgerEvents walk (ColdService)
 	stageTermIndex = "term_index" // per-event term derivation + mirror update (events cold)
 	stageWrite     = "write"      // store write / pack append
 	stageFinalize  = "finalize"   // per-chunk commit (pack trailer, index build, .bin write)
 )
 
 // coldStagePairs is the set of (data_type, stage) pairs the cold path actually
-// emits — the seven real ones, not a cross-product. A sink pre-resolves exactly
-// these, so it registers no series no code path can feed. The extract stage is
-// keyed dataTypeShared: after issue #836 the ledger walk is done once by
-// ColdService and shared, so it is metered once per ledger rather than once per
-// consuming type. txhash's per-ledger work is a cheap truncate-append that folds
-// into its ColdIngest total (its stage cost is the finalize sort + .bin write).
+// emits — the six real ones, not a cross-product. A sink pre-resolves exactly
+// these, so it registers no series no code path can feed. txhash's per-ledger
+// work is a cheap truncate-append that folds into its ColdIngest total (its
+// stage cost is the finalize sort + .bin write).
 //
 //nolint:gochecknoglobals // fixed label set, read-only
 var coldStagePairs = []struct{ dataType, stage string }{
-	{dataTypeShared, stageExtract},
 	{dataTypeLedgers, stageWrite},
 	{dataTypeLedgers, stageFinalize},
 	{dataTypeTxhash, stageFinalize},
@@ -78,13 +72,21 @@ type MetricSink interface {
 	// err the first error (nil on success).
 	ColdIngest(dataType string, d time.Duration, items int, err error)
 	// ColdChunkTotal reports the per-chunk aggregate wall-clock: the whole
-	// ColdService lifetime, from construction through the drain of the source stream
-	// and every Ingest and Finalize, to the single emit.
+	// WriteColdChunk attempt, from just after config validation through open,
+	// the drain of the source stream, every ingest and finalize, to the
+	// deferred close.
 	ColdChunkTotal(d time.Duration)
-	// IngestStage reports one COLD ingester's per-stage wall-clock inside an
-	// Ingest/Finalize call: stage is one of the stage* constants (extract,
-	// term_index, write, finalize), items the stage's natural item count (0 where
-	// none applies). The whole-call ColdIngest signal cannot be decomposed by a
+	// ColdExtract reports the ONE shared per-ledger ExtractLedgerEvents walk the
+	// cold chunk runs and both txhash and events read (issue #836) — ledger-scoped,
+	// not per data type, mirroring the hot path's type-less extract phase. items
+	// is the walk's transaction count. Since the walk left the per-type writers,
+	// their ColdIngest totals are post-extraction figures and the per-type stages
+	// a partial breakdown of them.
+	ColdExtract(d time.Duration, items int)
+	// IngestStage reports one COLD writer's per-stage wall-clock inside an
+	// ingest/finalize call: stage is one of the stage* constants (term_index,
+	// write, finalize), items the stage's natural item count (0 where none
+	// applies). The whole-call ColdIngest signal cannot be decomposed by a
 	// sink after the fact, so the per-stage granularity the bench reports need is
 	// exposed as its own signal — a sink that doesn't want it can no-op it.
 	IngestStage(dataType, stage string, d time.Duration, items int)
@@ -97,6 +99,7 @@ type NopSink struct{}
 func (NopSink) HotPhase(hotchunk.Phase, time.Duration, int, error) {}
 func (NopSink) ColdIngest(string, time.Duration, int, error)       {}
 func (NopSink) ColdChunkTotal(time.Duration)                       {}
+func (NopSink) ColdExtract(time.Duration, int)                     {}
 func (NopSink) IngestStage(string, string, time.Duration, int)     {}
 
 // orNop returns sink, or NopSink{} when sink is nil, so call sites never
@@ -108,8 +111,18 @@ func orNop(sink MetricSink) MetricSink {
 	return sink
 }
 
+// errOrFirst returns prev if it is non-nil, else cur. Used to retain the FIRST
+// error a cold writer saw across its ingest/finalize lifetime for the sink's
+// per-chunk err report.
+func errOrFirst(prev, cur error) error {
+	if prev != nil {
+		return prev
+	}
+	return cur
+}
+
 // coldMetrics is the per-chunk metric accumulator shared by all three cold
-// ingesters. Each ingester accumulates Ingest wall-clock (accum), item count
+// writers. Each ingester accumulates Ingest wall-clock (accum), item count
 // (items), and the FIRST error it saw (firstErr) across the chunk, then emits a
 // single ColdIngest signal on a TERMINAL step only: Finalize (success or error),
 // or an Ingest error (which abandons the chunk). Close NEVER emits — an ingester
@@ -134,7 +147,7 @@ func newColdMetrics(sink MetricSink, dataType string) coldMetrics {
 }
 
 // observe records one Ingest's wall-clock and (on error) the first error. An
-// Ingest error is TERMINAL by the ColdIngester contract (the chunk is abandoned
+// write error is TERMINAL by the coldChunk contract (the chunk is abandoned
 // and the ingester is never reused), so observe emits the single per-ingester
 // ColdIngest itself here — callers just observe-and-return, no hand-paired emit.
 func (m *coldMetrics) observe(d time.Duration, items int, err error) {
@@ -180,9 +193,9 @@ var (
 	hotBuckets = prometheus.DefBuckets
 	// 1s … ~34min, doubling.
 	coldBuckets = prometheus.ExponentialBuckets(1, 2, 12)
-	// Cold STAGE observations span per-ledger sub-stages (sub-millisecond
-	// extract/append) through the per-chunk finalize (minutes): 1ms … ~70min,
-	// ×4 per bucket.
+	// Cold STAGE observations (also the shared extract walk) span per-ledger
+	// sub-stages (sub-millisecond appends) through the per-chunk finalize
+	// (minutes): 1ms … ~70min, ×4 per bucket.
 	coldStageBuckets = prometheus.ExponentialBuckets(0.001, 4, 12)
 )
 
@@ -222,11 +235,13 @@ type PrometheusSink struct {
 	// their data_type from the same constant set the map is built from, so a lookup
 	// can never miss — indexed directly, no on-the-fly vector fallback.
 	cold map[string]ingestCollectors
-	// Per-cold-stage durations, pre-resolved for the eight real (data_type, stage)
+	// Per-cold-stage durations, pre-resolved for the six real (data_type, stage)
 	// pairs only (coldStagePairs), keyed "dataType/stage".
 	coldStage map[string]prometheus.Observer
-	// Aggregate per-chunk cold wall-clock (ColdService lifetime).
+	// Aggregate per-chunk cold wall-clock (the WriteColdChunk attempt).
 	coldChunkTotal prometheus.Observer
+	// The shared per-ledger extract walk — ledger-scoped, label-less.
+	coldExtract prometheus.Observer
 }
 
 // NewPrometheusSink builds a PrometheusSink and MustRegisters its collectors on
@@ -255,8 +270,9 @@ func NewPrometheusSink(registry *prometheus.Registry, namespace string) *Prometh
 
 	coldDuration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,
-		Name:    "cold_ingest_duration_seconds",
-		Help:    "per-ingester cold wall-clock (per chunk, incl. Finalize)",
+		Name: "cold_ingest_duration_seconds",
+		Help: "per-writer cold wall-clock (per chunk, incl. finalize; post-extraction — " +
+			"the shared walk is cold_extract_duration_seconds)",
 		Buckets: coldBuckets,
 	}, []string{"data_type"})
 
@@ -275,25 +291,35 @@ func NewPrometheusSink(registry *prometheus.Registry, namespace string) *Prometh
 	coldChunkTotal := prometheus.NewHistogram(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,
 		Name:    "cold_chunk_duration_seconds",
-		Help:    "aggregate per-chunk wall-clock across all cold ingesters (ColdService lifetime)",
+		Help:    "aggregate per-chunk wall-clock across all cold writers (the WriteColdChunk attempt)",
 		Buckets: coldBuckets,
 	})
 
 	coldStageVec := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,
 		Name: "cold_stage_duration_seconds",
-		Help: "per-stage wall-clock inside a cold Ingest/Finalize " +
-			"(extract, term_index, write, finalize; not every data type emits every stage)",
+		Help: "per-stage wall-clock inside a cold ingest/finalize " +
+			"(term_index, write, finalize; not every data type emits every stage; a partial " +
+			"breakdown — the unstaged remainder folds into cold_ingest_duration_seconds)",
 		Buckets: coldStageBuckets,
 	}, []string{"data_type", "stage"})
 
+	coldExtract := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: namespace, Subsystem: metricsSubsystem,
+		Name: "cold_extract_duration_seconds",
+		Help: "the shared per-ledger ExtractLedgerEvents walk (one per ledger, read by " +
+			"txhash and events; ledger-scoped, so no data_type)",
+		Buckets: coldStageBuckets,
+	})
+
 	registry.MustRegister(hotPhaseDurVec, hotPhaseItemsVec, hotPhaseErrsVec,
-		coldDuration, coldItems, coldErrors, coldChunkTotal, coldStageVec)
+		coldDuration, coldItems, coldErrors, coldChunkTotal, coldStageVec, coldExtract)
 
 	sink := &PrometheusSink{
 		cold:           make(map[string]ingestCollectors, 3),
 		coldStage:      make(map[string]prometheus.Observer, len(coldStagePairs)),
 		coldChunkTotal: coldChunkTotal,
+		coldExtract:    coldExtract,
 	}
 	// Hot phases: one child per phase, indexed by the phase value.
 	for p := range hotchunk.NumPhases {
@@ -308,7 +334,7 @@ func NewPrometheusSink(registry *prometheus.Registry, namespace string) *Prometh
 			errors:   coldErrors.WithLabelValues(dataType),
 		}
 	}
-	// Cold stages: only the eight real (data_type, stage) pairs.
+	// Cold stages: only the six real (data_type, stage) pairs.
 	for _, k := range coldStagePairs {
 		sink.coldStage[k.dataType+"/"+k.stage] = coldStageVec.WithLabelValues(k.dataType, k.stage)
 	}
@@ -331,6 +357,13 @@ func (p *PrometheusSink) ColdIngest(dataType string, d time.Duration, items int,
 
 func (p *PrometheusSink) ColdChunkTotal(d time.Duration) {
 	p.coldChunkTotal.Observe(d.Seconds())
+}
+
+// ColdExtract records the shared per-ledger walk's duration. The item count is
+// not exported to Prometheus (cold_items_total{txhash} already counts the
+// chunk's transactions); it exists on the interface for the CSV bench sink.
+func (p *PrometheusSink) ColdExtract(d time.Duration, _ int) {
+	p.coldExtract.Observe(d.Seconds())
 }
 
 // IngestStage records the per-stage cold duration. The per-stage item counts are
