@@ -2,10 +2,8 @@ package fullhistory
 
 import (
 	"context"
-	"errors"
 	"strconv"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,21 +28,17 @@ func readyTip(ledger uint32) *fakeTipBackend {
 	return &fakeTipBackend{tips: []uint32{ledger}}
 }
 
-// downTip returns a tip backend that never comes up.
+// downTip returns a tip backend that never becomes usable. Sub-genesis reads as
+// a permanent "not ready", so validateConfig (which applies the production retry
+// policy) fails fast instead of sleeping through the backoff.
 func downTip() *fakeTipBackend {
-	return &fakeTipBackend{err: errors.New("backend unreachable"), errFirst: 99}
+	return &fakeTipBackend{tips: []uint32{0}}
 }
 
-// callValidate runs validateConfig and, on success, returns the earliest_ledger
-// value it pinned (read back from the catalog, since validateConfig no longer
-// returns it). On failure the earliest is meaningless, so it returns 0.
-func callValidate(t *testing.T, cfg config.Config, cat *catalog.Catalog, tip NetworkTipBackend) (uint32, error) {
+// callValidate runs validateConfig, returning the earliest_ledger it pinned.
+func callValidate(t *testing.T, cfg config.Config, cat *catalog.Catalog, tip *fakeTipBackend) (uint32, error) {
 	t.Helper()
-	if err := validateConfig(context.Background(), cfg, cat, tip, time.Millisecond, 3); err != nil {
-		return 0, err
-	}
-	el, _, err := cat.EarliestLedger()
-	return el, err
+	return validateConfig(context.Background(), cfg, cat, tip.Tip)
 }
 
 // requireEarliestPin asserts the earliest_ledger pin reads back as wantEarliest;

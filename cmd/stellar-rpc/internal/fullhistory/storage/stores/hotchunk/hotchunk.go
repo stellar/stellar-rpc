@@ -343,10 +343,10 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 	// per transaction in apply order, the tx hash AND its contract events. txhash
 	// reads each element's Hash and events shapes the same slice
 	// (PayloadsFromLedgerEvents), so the two share one walk instead of the two
-	// (ExtractTxHashes + LCMViewToPayloads-internal ExtractLedgerEvents) they used
-	// to each run — halving per-ledger extraction. Shaping the already-extracted
-	// slice (not re-walking) keeps the event-ID assignment order identical to
-	// LCMViewToPayloads. The atomic batch below serializes only the commit; the
+	// (ExtractTxHashes + a second ExtractLedgerEvents walk) they would each run —
+	// halving per-ledger extraction. Shaping the already-extracted slice (not
+	// re-walking) keeps the event-ID assignment order identical to a per-view
+	// shaping. The atomic batch below serializes only the commit; the
 	// extractors are independent and could run concurrently into the same batch if
 	// catch-up profiling ever demands it — sequential is right at live cadence.
 	// Every failure below stamps the failed phase's PARTIAL duration before

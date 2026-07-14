@@ -18,7 +18,7 @@ import (
 // lastChunk.LastLedger() iff c <= lastChunk); no ledger conversion is needed here.
 // catalog.DiscardHotChunk is idempotent, so a crash between freeze and discard
 // self-heals next tick.
-func eligibleDiscardOps(cat *catalog.Catalog, gate RetentionFloor, lastChunk chunk.ID) ([]func() error, error) {
+func eligibleDiscardOps(cat *catalog.Catalog, floor chunk.ID, lastChunk chunk.ID) ([]func() error, error) {
 	hot, err := cat.HotChunkKeys()
 	if err != nil {
 		return nil, err
@@ -27,7 +27,7 @@ func eligibleDiscardOps(cat *catalog.Catalog, gate RetentionFloor, lastChunk chu
 	var ops []func() error
 	for _, c := range hot {
 		switch {
-		case gate.Excludes(c):
+		case c < floor:
 			ops = append(ops, func() error { return cat.DiscardHotChunk(c) })
 		case c <= lastChunk:
 			// Coverage is read once here and passed into pendingArtifacts — the
@@ -85,7 +85,7 @@ func pendingArtifacts(c chunk.ID, cat *catalog.Catalog, covers bool) (catalog.Ar
 // count for the single batched chunk sweep), so the caller meters Prune in artifacts
 // — the same unit the Phase 1 sweep reports — summing only the ops that actually ran
 // (the chunk family collapses N artifacts into one op).
-func eligiblePruneOps(cat *catalog.Catalog, gate RetentionFloor) ([]func() error, []int, error) {
+func eligiblePruneOps(cat *catalog.Catalog, floor chunk.ID) ([]func() error, []int, error) {
 	var ops []func() error
 	// weights[i] is the artifact count op[i] sweeps, so a caller can sum the artifacts
 	// of the ops that actually ran (the chunk family collapses many artifacts into one op).
@@ -104,7 +104,7 @@ func eligiblePruneOps(cat *catalog.Catalog, gate RetentionFloor) ([]func() error
 			// executePlan's return, and backfill finishes before the loop starts).
 			ops = append(ops, func() error { return cat.SweepTxHashIndexKey(cov) })
 			weights = append(weights, 1)
-		case gate.Excludes(cat.TxHashIndexLayout().LastChunk(cov.Index)):
+		case cat.TxHashIndexLayout().LastChunk(cov.Index) < floor:
 			// Frozen index key below the floor; the sweep demotes it first.
 			ops = append(ops, func() error { return cat.SweepTxHashIndexKey(cov) })
 			weights = append(weights, 1)
@@ -119,7 +119,7 @@ func eligiblePruneOps(cat *catalog.Catalog, gate RetentionFloor) ([]func() error
 	var sweep []catalog.ArtifactRef
 	for _, ref := range refs {
 		switch {
-		case gate.Excludes(ref.Chunk):
+		case ref.Chunk < floor:
 			// Past retention: any state goes.
 			sweep = append(sweep, ref)
 		case ref.State == geometry.StatePruning:

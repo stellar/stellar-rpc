@@ -117,7 +117,7 @@ func lifecycleTestConfig(t *testing.T, cat *catalog.Catalog, retentionChunks uin
 			Workers: 2,
 			Process: backfill.ProcessConfig{},
 		},
-		RetentionChunks: retentionChunks,
+		Retention: fhtest.RetentionFor(t, cat, retentionChunks),
 	}
 }
 
@@ -142,39 +142,34 @@ func makeReadyHotDirNoData(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 	require.NoError(t, db.Close())
 }
 
-// gateFor builds the retention gate the tick passes into the eligibility scans,
-// from the same (through, retention, earliest) snapshot runLifecycle uses.
-func gateFor(t *testing.T, cfg Config, cat *catalog.Catalog, through uint32) RetentionFloor {
+// floorFor is the retention floor the tick derives for the given through ledger:
+// FloorAt over the last complete chunk (-1 when none).
+func floorFor(t *testing.T, cfg Config, through uint32) chunk.ID {
 	t.Helper()
-	earliest, _, err := cat.EarliestLedger()
-	require.NoError(t, err)
-	return RetentionFloorAt(EffectiveRetentionFloor(through, cfg.RetentionChunks, earliest))
+	return cfg.Retention.FloorAt(geometry.LastCompleteChunkAt(through))
 }
 
 // assertQuiescent re-runs the tick's three derivations against the SAME through
 // snapshot and asserts none schedule work — the quiescence postcondition.
 func assertQuiescent(t *testing.T, cfg Config, cat *catalog.Catalog, through uint32) {
 	t.Helper()
-	earliest, _, err := cat.EarliestLedger()
-	require.NoError(t, err)
-	gate := RetentionFloorAt(EffectiveRetentionFloor(through, cfg.RetentionChunks, earliest))
-	start := gate.FirstChunk()
+	floor := floorFor(t, cfg, through)
 	// through is derived from the catalog's own last-committed ledger, so it always
 	// resolves to the last complete chunk — the same lastChunk runLifecycle keys its
 	// scans off (0 with ok=false only when nothing is complete, which the discard
 	// scan's per-chunk predicates then correctly treat as no work).
 	lastChunk, ok := lastCompleteChunkAtID(through)
-	if ok && start <= lastChunk {
+	if ok && floor <= lastChunk {
 		// At quiescence resolve finds an empty plan, so RunBackfill (resolve +
 		// executePlan) is a no-op that returns nil — even with no Backend wired,
 		// since an empty plan never reaches backfillSource.
-		perr := backfill.RunBackfill(context.Background(), cfg.ExecConfig, start, lastChunk)
+		perr := backfill.RunBackfill(context.Background(), cfg.ExecConfig, floor, lastChunk)
 		require.NoError(t, perr, "re-running backfill schedules no work at quiescence")
 	}
-	dops, err := eligibleDiscardOps(cat, gate, lastChunk)
+	dops, err := eligibleDiscardOps(cat, floor, lastChunk)
 	require.NoError(t, err)
 	assert.Empty(t, dops, "re-scan finds no discard work at quiescence")
-	pops, _, err := eligiblePruneOps(cat, gate)
+	pops, _, err := eligiblePruneOps(cat, floor)
 	require.NoError(t, err)
 	assert.Empty(t, pops, "re-scan finds no prune work at quiescence")
 }

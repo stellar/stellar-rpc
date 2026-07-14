@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cenkalti/backoff/v4"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
@@ -60,14 +59,14 @@ func run(ctx context.Context, cfg StartConfig) error {
 
 	metrics := observability.MetricsOrNop(cfg.Exec.Metrics)
 	metrics.LastCommitted(lastCommitted)
-	metrics.RetentionFloor(lifecycle.EffectiveRetentionFloor(lastCommitted, cfg.RetentionChunks, earliest))
+	metrics.RetentionFloor(retentionFloorLedger(cfg.Retention, lastCommitted))
 	logger.WithField("last_committed", lastCommitted).
 		WithField("earliest", earliest).
 		WithField("pinned", pinned).
 		Info("startup — last-committed derived, beginning backfill")
 
 	// Step 1: backfill to the tip.
-	lastCommitted, err = backfillToTip(ctx, cfg, lastCommitted, earliest)
+	lastCommitted, err = backfillToTip(ctx, cfg, lastCommitted)
 	if err != nil {
 		return err
 	}
@@ -123,8 +122,8 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// The lifecycle config draws on the SAME Exec wiring backfill uses, so the two
 	// share one catalog/pool by construction.
 	lifecycleCfg := lifecycle.Config{
-		ExecConfig:      cfg.Exec,
-		RetentionChunks: cfg.RetentionChunks,
+		ExecConfig: cfg.Exec,
+		Retention:  cfg.Retention,
 	}.WithLifecycleDefaults()
 
 	// Begin serving reads (injected) BEFORE launching the loops; it must return
@@ -153,6 +152,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 			Logger:   logger,
 			Metrics:  metrics,
 			Sink:     cfg.Exec.Process.Sink,
+			Health:   cfg.health,
 		})
 		if err == nil {
 			// WithContext cancels gctx (unblocking the lifecycle sibling in g.Wait)
@@ -170,11 +170,11 @@ func run(ctx context.Context, cfg StartConfig) error {
 }
 
 // backfillToTip runs the backfill loop, returning lastCommitted as backfill makes
-// progress. Each pass samples networkTip, anchors on max(tip, lastCommitted),
-// computes [rangeStart, rangeEnd] with the mid-chunk exclusion, and breaks on an
-// empty or non-advancing range.
-func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint32) (uint32, error) {
-	retentionChunks := cfg.RetentionChunks
+// progress. Each pass samples the backend tip, computes the target frontier
+// (passTarget, which quarantines all tip logic), derives the floor from it, and
+// breaks on an empty or non-advancing range.
+func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted uint32) (uint32, error) {
+	ret := cfg.Retention
 	metrics := observability.MetricsOrNop(cfg.Exec.Metrics)
 	logger := cfg.Exec.Logger
 
@@ -190,47 +190,32 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 			return 0, err
 		}
 
-		// Time the whole pass, tip sample included: sampling the network tip (with its
-		// retry-backoff sleeps) is part of the pass's work, so the timer starts before
-		// it rather than only around runBackfill. Passes that break early (empty range)
-		// record nothing — the metrics call is below the break.
+		// Time the whole pass, tip sample included; passes that break early record
+		// nothing (the metrics calls are below the break).
 		passStart := time.Now()
-		tip, err := networkTip(ctx, cfg.NetworkTip, cfg.TipBackoff, cfg.TipMaxAttempts)
+		// The backend owns its frontier (the lake for bsbSource, the archives for
+		// captiveSource). A tip still unavailable after the bounded retry errors the
+		// pass rather than proceeding — the daemon must never serve behind an unknown
+		// frontier — and each supervised restart re-samples (a transient outage
+		// self-heals).
+		tip, err := sampleTipWithRetry(
+			ctx, cfg.Exec.Process.Backend.Tip, defaultTipBackoff, defaultTipMaxAttempts)
 		if err != nil {
-			if lastCommitted < earliest {
-				// First start, no reachable backend: error out — the daemon must never
-				// serve incomplete history. Restartable: the property is enforced by
-				// returning an error at all (each restart re-checks lastCommitted <
-				// earliest), not by the exit shape, so a datastore mid-outage or a young
-				// lake below genesis self-heals on a later restart.
-				return 0, fmt.Errorf("network tip unavailable and no local history to serve: %w", err)
-			}
-			// Restart with local progress: serve what's below lastCommitted, skip backfill.
-			tip = lastCommitted
+			return 0, fmt.Errorf("sample network tip: %w", err)
 		}
 
-		// max() guards a lagging bulk tip: the tip alone could regress the floor below
-		// pruning or drop a complete last-committed chunk.
-		anchor := max(tip, lastCommitted)
-		rangeStart := chunk.IDFromLedger(lifecycle.EffectiveRetentionFloor(anchor, retentionChunks, earliest))
-
-		// Same anchor for rangeEnd: a complete last-committed chunk above a lagging tip
-		// still folds in; chunks beyond the tip are durable and self-skip.
-		rangeEndSigned := geometry.LastCompleteChunkAt(anchor)
-
-		// Mid-chunk resume exclusion: a mid-chunk last-committed within one chunk of the tip
-		// leaves the partial resume chunk to ingestion. Under the mid-chunk precondition
-		// (guarded here) the last COMPLETE chunk is exactly one short of the live chunk,
-		// so LastCompleteChunkAt names it directly — same vocabulary as rangeEndSigned above.
-		if withinOneChunkOfTip(tip, lastCommitted) && lastCommittedMidChunk(lastCommitted) {
-			rangeEndSigned = geometry.LastCompleteChunkAt(lastCommitted)
-		}
-
-		// Break on an empty or non-advancing range.
-		if rangeEndSigned < int64(rangeStart) || rangeEndSigned <= backfilledThrough {
+		// Break on a degenerate range: nothing-complete (-1) or non-advancing at the
+		// first guard, an inverted range (earliest pinned above the target, e.g. a
+		// first start with earliest_ledger="now") at the second.
+		target := passTarget(tip, lastCommitted)
+		if target <= backfilledThrough {
 			break
 		}
-		rangeEnd := chunk.ID(rangeEndSigned) //nolint:gosec // > rangeStart >= 0
+		rangeStart := ret.FloorAt(target)
+		if int64(rangeStart) > target {
+			break
+		}
+		rangeEnd := chunk.ID(target) //nolint:gosec // target > backfilledThrough >= -1 ⇒ target >= 0
 
 		logger.WithField("range_lo", rangeStart.String()).
 			WithField("range_hi", rangeEnd.String()).
@@ -245,12 +230,11 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 
 		// Advance the last-committed, never regressing (a lagging tip's rangeEnd can sit below it).
 		lastCommitted = max(lastCommitted, rangeEnd.LastLedger())
-		backfilledThrough = rangeEndSigned
+		backfilledThrough = target
 
 		metrics.BackfillPass(passDuration)
-		// Refresh the derived gauges as last-committed advances and the floor rises with it.
 		metrics.LastCommitted(lastCommitted)
-		metrics.RetentionFloor(lifecycle.EffectiveRetentionFloor(lastCommitted, retentionChunks, earliest))
+		metrics.RetentionFloor(rangeStart.FirstLedger()) // the floor this pass built to
 		logger.WithField("range_lo", rangeStart.String()).
 			WithField("range_hi", rangeEnd.String()).
 			WithField("last_committed", lastCommitted).
@@ -258,6 +242,28 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 			Info("backfill pass complete")
 	}
 	return lastCommitted, nil
+}
+
+// passTarget is the highest complete chunk this backfill pass builds to: the last
+// complete chunk at max(tip, lastCommitted), lowered by the mid-chunk exclusion so
+// a mid-chunk last-committed within one chunk of the tip leaves its partial resume
+// chunk to ingestion. Signed; -1 means no complete chunk exists. All tip logic is
+// quarantined here, so the retention floor derives from the returned target alone.
+func passTarget(tip, lastCommitted uint32) int64 {
+	// max() guards a lagging bulk tip: the tip alone could drop a complete
+	// last-committed chunk.
+	target := geometry.LastCompleteChunkAt(max(tip, lastCommitted))
+	if withinOneChunkOfTip(tip, lastCommitted) && lastCommittedMidChunk(lastCommitted) {
+		target = geometry.LastCompleteChunkAt(lastCommitted)
+	}
+	return target
+}
+
+// retentionFloorLedger is the retention_floor_ledger gauge value for the highest
+// committed ledger. FloorAt maps the -1 "nothing complete yet" frontier to the
+// earliest chunk, so no young-store branch is needed here.
+func retentionFloorLedger(ret geometry.Retention, committed uint32) uint32 {
+	return ret.FloorAt(geometry.LastCompleteChunkAt(committed)).FirstLedger()
 }
 
 // withinOneChunkOfTip reports whether the last-committed sits within one chunk of the
@@ -277,12 +283,6 @@ func lastCommittedMidChunk(lastCommitted uint32) bool {
 // Injected external boundaries (so startup is testable with fakes).
 // ---------------------------------------------------------------------------
 
-// NetworkTipBackend samples the bulk backend's current network tip during backfill.
-// It is consulted only during backfill; once ingestion runs, captive core is the tip.
-type NetworkTipBackend interface {
-	NetworkTip(ctx context.Context) (uint32, error)
-}
-
 // CoreOpener hands back the live ingestion stream the loop consumes. The stream
 // OWNS its source's lifecycle (started on the first RawLedgers pull over the
 // unbounded range from the loop's resume ledger, torn down when the loop exits),
@@ -298,14 +298,10 @@ type StartConfig struct {
 	// Exec drives backfill's RunBackfill; its Catalog/Logger are the shared ones.
 	Exec backfill.ExecConfig
 
-	// RetentionChunks bounds the sliding retention floor's width — the backfill
-	// floor's width too (0 ⇒ the earliest-ledger floor only). run() assembles the
-	// lifecycle.Config from Exec + this, so the lifecycle and backfill can never
-	// diverge on the catalog/pool (the invariant is structural, not by comment).
-	RetentionChunks uint32
-
-	// NetworkTip samples the bulk backend's tip during backfill. Required.
-	NetworkTip NetworkTipBackend
+	// Retention is the floor policy, bound once at startup from the validated
+	// earliest_ledger pin. run() assembles the lifecycle.Config from Exec + this,
+	// so the lifecycle and backfill share one floor by construction.
+	Retention geometry.Retention
 
 	// Core starts captive core and yields the ingestion getter. Required.
 	Core CoreOpener
@@ -313,31 +309,19 @@ type StartConfig struct {
 	// ServeReads begins serving reads; it must return promptly, not block. Required.
 	ServeReads func(ctx context.Context) error
 
-	// TipBackoff is networkTip's inter-attempt sleep; TipMaxAttempts bounds the
-	// retries. Zero values fall back to defaults in withDefaults.
-	TipBackoff     time.Duration
-	TipMaxAttempts int
-
 	// runBackfill is a test-only seam for one backfill pass; nil ⇒ backfill.RunBackfill.
 	runBackfill func(ctx context.Context, exec backfill.ExecConfig, lo, hi chunk.ID) error
+
+	// health is the readiness/health signal the ingestion loop feeds per commit;
+	// #772's read server consumes it (as HealthSignal). nil ⇒ observe is a no-op.
+	health *healthState
 }
 
-const (
-	defaultTipBackoff     = time.Second
-	defaultTipMaxAttempts = 5
-)
-
-// withDefaults fills the tip-backoff defaults and the embedded Exec defaults
-// (Workers -> GOMAXPROCS). The lifecycle.Config is assembled from Exec +
-// RetentionChunks in run().
+// withDefaults fills the embedded Exec defaults (Workers -> GOMAXPROCS). The
+// lifecycle.Config is assembled from Exec + Retention in run(); the tip retry
+// policy is the sampleTipWithRetry defaults at its call sites, not here.
 func (cfg StartConfig) withDefaults() StartConfig {
 	cfg.Exec = cfg.Exec.WithDefaults()
-	if cfg.TipBackoff <= 0 {
-		cfg.TipBackoff = defaultTipBackoff
-	}
-	if cfg.TipMaxAttempts <= 0 {
-		cfg.TipMaxAttempts = defaultTipMaxAttempts
-	}
 	return cfg
 }
 
@@ -348,8 +332,10 @@ func (cfg StartConfig) validate() error {
 	if cfg.Exec.Logger == nil {
 		return errors.New("nil StartConfig.Exec.Logger")
 	}
-	if cfg.NetworkTip == nil {
-		return errors.New("nil StartConfig.NetworkTip")
+	if cfg.Exec.Process.Backend == nil {
+		// The backend is the tip source every backfill pass samples (and the
+		// freeze's bulk fetch); runDaemonWith guarantees one at startup.
+		return errors.New("nil StartConfig.Exec.Process.Backend")
 	}
 	if cfg.Core == nil {
 		return errors.New("nil StartConfig.Core")
@@ -358,45 +344,4 @@ func (cfg StartConfig) validate() error {
 		return errors.New("nil StartConfig.ServeReads")
 	}
 	return nil
-}
-
-// networkTip samples backend.NetworkTip, retrying a transient error on a bounded
-// constant backoff (maxAttempts total tries) and rejecting a sub-genesis tip as
-// "not ready" so an unready backend never pins a garbage floor. Built on
-// cenkalti/backoff — the same retry primitive as withRetries and waitForCoverage —
-// so ctx cancellation aborts the wait and the sub-genesis case is backoff.Permanent.
-func networkTip(
-	ctx context.Context, backend NetworkTipBackend, interval time.Duration, maxAttempts int,
-) (uint32, error) {
-	if maxAttempts < 1 {
-		maxAttempts = 1 // never underflow WithMaxRetries' uint64 into an unbounded loop
-	}
-	var (
-		tip      uint32
-		notReady bool
-	)
-	poll := func() error {
-		t, err := backend.NetworkTip(ctx)
-		if err != nil {
-			return err // transient — retry
-		}
-		if t < chunk.FirstLedgerSeq {
-			// Below genesis ⇒ backend empty/not-synced; permanent (it would keep returning 0).
-			notReady = true
-			return backoff.Permanent(fmt.Errorf("backend tip %d is below genesis %d — backend not ready",
-				t, chunk.FirstLedgerSeq))
-		}
-		tip = t
-		return nil
-	}
-	// Constant interval, count-bounded: maxAttempts tries == 1 initial + (maxAttempts-1) retries.
-	bo := backoff.WithMaxRetries(backoff.NewConstantBackOff(interval), uint64(maxAttempts-1))
-	switch err := backoff.Retry(poll, backoff.WithContext(bo, ctx)); {
-	case err == nil:
-		return tip, nil
-	case notReady, ctx.Err() != nil:
-		return 0, err // permanent (not ready) or ctx-canceled: surface as-is, not "exhausted"
-	default:
-		return 0, fmt.Errorf("network tip unavailable after %d attempts: %w", maxAttempts, err)
-	}
 }

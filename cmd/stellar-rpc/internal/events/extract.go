@@ -7,12 +7,13 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
-// LCMViewToPayloads walks a zero-copy LedgerCloseMetaView and returns one
-// Payload per emitted contract event, in ASCENDING getEvents cursor order —
-// the order the SQLite path serves (ORDER BY id ASC in db/event.go). The event
-// store serves in write order (event IDs are assigned by arrival position and
-// the term bitmaps iterate in ID order), so emission order here IS the cursor
-// contract. Concretely, per ledger:
+// PayloadsFromLedgerEvents shapes an already-extracted per-transaction event
+// slice (ingest.ExtractLedgerEvents output) into one Payload per emitted
+// contract event, in ASCENDING getEvents cursor order — the order the SQLite
+// path serves (ORDER BY id ASC in db/event.go). The event store serves in write
+// order (event IDs are assigned by arrival position and the term bitmaps iterate
+// in ID order), so emission order here IS the cursor contract. Concretely, per
+// ledger:
 //
 //  1. every transaction's BeforeAllTxs events (cursor (0, 0)), in tx apply
 //     order — a stable partition of the SDK's per-tx traversal;
@@ -34,33 +35,14 @@ import (
 // (ingest.ExtractLedgerEvents — one TxProcessing walk yields hash + events
 // together). This function adds only the RPC-specific Payload shape, the
 // Stage→(TxIdx, OpIdx) cursor-sentinel mapping, EventIdx, and the cursor
-// ordering — all in PayloadsFromLedgerEvents, over which this is the thin
-// view-reading wrapper.
-func LCMViewToPayloads(lcm xdr.LedgerCloseMetaView) ([]Payload, error) {
-	ledgerSeq, err := lcm.LedgerSequence()
-	if err != nil {
-		return nil, err
-	}
-	ledgerClosedAt, err := lcm.LedgerCloseTime()
-	if err != nil {
-		return nil, err
-	}
-	txEvents, err := ingest.ExtractLedgerEvents(lcm)
-	if err != nil {
-		return nil, err
-	}
-	return PayloadsFromLedgerEvents(txEvents, ledgerSeq, ledgerClosedAt)
-}
-
-// PayloadsFromLedgerEvents shapes an already-extracted per-transaction event
-// slice (ingest.ExtractLedgerEvents output) into cursor-ordered Payloads. It is
-// the body of LCMViewToPayloads minus the SDK walk, so a caller that already
-// holds the txEvents — the hot ingest path, which also needs the paired tx
-// hashes (txEvents[i].Hash) — can feed BOTH txhash and events from ONE
-// ExtractLedgerEvents call instead of walking TxProcessing twice. ledgerSeq and
-// ledgerClosedAt are the view's header values (cheap reads, not a walk). The
-// cursor ordering and EventIdx assignment are IDENTICAL to what LCMViewToPayloads
-// produced inline, so event IDs are unchanged across the refactor.
+// ordering.
+//
+// Taking the already-extracted txEvents (rather than re-walking a view) lets a
+// caller that already holds them — the hot ingest path and the cold materializer,
+// both of which also need the paired tx hashes (txEvents[i].Hash) — feed BOTH
+// txhash and events from ONE ExtractLedgerEvents call instead of walking
+// TxProcessing twice. ledgerSeq and ledgerClosedAt are the view's header values
+// (cheap reads, not a walk).
 func PayloadsFromLedgerEvents(
 	txEvents []ingest.LedgerTransactionEvents, ledgerSeq uint32, ledgerClosedAt int64,
 ) ([]Payload, error) {
@@ -130,7 +112,7 @@ func PayloadsFromLedgerEvents(
 }
 
 // countPayloads sums the per-tx top-level event + per-op event counts — the
-// exact number of payloads LCMViewToPayloads emits across its three passes,
+// exact number of payloads PayloadsFromLedgerEvents emits across its three passes,
 // used to size the result slice once.
 func countPayloads(txEvents []ingest.LedgerTransactionEvents) int {
 	total := 0
@@ -144,7 +126,7 @@ func countPayloads(txEvents []ingest.LedgerTransactionEvents) int {
 }
 
 // appendStageEventPayloads emits the V4 top-level TransactionEvents whose
-// Stage equals wantStage, skipping the other (known) stages — LCMViewToPayloads
+// Stage equals wantStage, skipping the other (known) stages — PayloadsFromLedgerEvents
 // calls it once per stage per its cursor-ordered pass structure. An UNKNOWN
 // stage errors in every pass (via StageSentinels), so a new protocol stage can
 // never be silently dropped by the stage filter. Stage and the inner

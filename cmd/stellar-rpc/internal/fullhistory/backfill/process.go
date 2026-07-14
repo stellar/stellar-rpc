@@ -30,10 +30,10 @@ type ProcessConfig struct {
 	Logger  *supportlog.Entry
 	Sink    ingest.MetricSink
 
-	// Backend is the bulk source for a chunk with no local copy (BSB now, captive
-	// core later — see the Backend interface). It carries its own frontier Tip, so
-	// the coverage wait needs no separate waiter. May be nil for frontfill-only;
-	// backfillSource errors if a chunk then needs it.
+	// Backend is the bulk source for a chunk with no local copy (the bulk lake or
+	// a captive-core replay — see the Backend interface). It carries its own
+	// frontier Tip, so the coverage wait needs no separate waiter. May be nil when
+	// no bulk source is configured; backfillSource errors if a chunk then needs it.
 	Backend Backend
 }
 
