@@ -23,10 +23,11 @@ type tipSource func(ctx context.Context) (uint32, error)
 
 // tipSampler is the single home for network-tip sampling: first-start
 // earliest_ledger resolution and every backfill pass both go through it. It
-// queries its sources in order — the bulk lake frontier first, the history
-// archives' root HAS as a fallback (and the sole source for a frontfill-only
-// daemon) — and returns the first that answers, retrying a transient failure of
-// them all on a bounded constant backoff. Built on cenkalti/backoff, the same
+// queries its sources in order — the backend's own frontier first (the bulk lake
+// for bsbSource, the history archives for captiveSource), the archives' root HAS
+// as the lake's fallback — and returns the first that answers, retrying a
+// transient failure of them all on a bounded constant backoff. Built on
+// cenkalti/backoff, the same
 // retry primitive withRetries and waitForCoverage use, so ctx cancellation
 // aborts the wait. A sub-genesis tip is rejected as "not ready" (permanent) so
 // an unready backend never pins a garbage floor.
@@ -108,8 +109,8 @@ type rootHASGetter interface {
 }
 
 // archiveTip samples the network frontier from the history archives' root HAS.
-// It is the tip source for a frontfill-only daemon (no bulk lake) and the
-// fallback when the lake tip is unavailable. The archives lag the lake by up to
+// It is captiveSource's frontier for a no-lake daemon and the fallback when the
+// lake tip is unavailable. The archives lag the lake by up to
 // one checkpoint (64 ledgers); backfill's anchor = max(tip, lastCommitted) and
 // the signed withinOneChunkOfTip already absorb that, so no lag adjustment here.
 func archiveTip(a rootHASGetter) tipSource {

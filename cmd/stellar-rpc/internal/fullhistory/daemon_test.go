@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/historyarchive"
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -109,20 +111,25 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 	assert.Equal(t, uint32(chunk.FirstLedgerSeq), earliest)
 }
 
-// someTxBackend serves mostly zero-tx ledgers with a sparse few carrying one tx:
+// someTxGen generates mostly zero-tx ledgers with a sparse few carrying one tx:
 // an all-zero-tx chunk can't build a txhash index ("zero keys"), so it needs some.
-func someTxBackend(t *testing.T) *fakeBackend {
+func someTxGen(t *testing.T) func(*testing.T, uint32) []byte {
 	t.Helper()
 	src := xdr.MustMuxedAddress(keypair.MustRandom().Address())
-	gen := func(t *testing.T, seq uint32) []byte {
+	return func(t *testing.T, seq uint32) []byte {
 		if seq%2500 != 0 {
 			return fhtest.ZeroTxLCMBytes(t, seq)
 		}
 		raw, _ := oneTxLCMBytes(t, seq, src)
 		return raw
 	}
+}
+
+// someTxBackend is a fake bulk backend over someTxGen's ledgers.
+func someTxBackend(t *testing.T) *fakeBackend {
+	t.Helper()
 	return &fakeBackend{
-		LedgerStream: &fullChunkStream{t: t, gen: gen},
+		LedgerStream: &fullChunkStream{t: t, gen: someTxGen(t)},
 		// Tip covers chunk 0 ⇒ the freeze's coverage wait passes at once.
 		tip: chunk.ID(0).LastLedger(),
 	}
@@ -458,33 +465,65 @@ func TestSupervise_FirstStartNoTipRetries(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// buildBackfillBackend / buildTipSampler — the frontfill (no datastore) path.
+// buildBackfillBackend / buildTipSampler — the no-lake (no datastore) paths.
 // ---------------------------------------------------------------------------
 
-// With no [backfill.datastore], buildBackfillBackend returns no backend (frontfill).
-func TestBuildBackfillBackend_FrontfillNoBackend(t *testing.T) {
+// With neither [backfill.datastore] nor an archive pool, buildBackfillBackend
+// returns no backend (the tip-sampler build then fails startup).
+func TestBuildBackfillBackend_NoSourcesNoBackend(t *testing.T) {
 	cfg := config.Config{}.WithDefaults()
-	backend, cleanup, err := buildBackfillBackend(context.Background(), cfg, silentLogger())
+	backend, cleanup, err := buildBackfillBackend(context.Background(), cfg, &fakeCore{}, nil, silentLogger())
 	require.NoError(t, err)
-	require.Nil(t, backend, "no datastore ⇒ frontfill-only, no backend")
+	require.Nil(t, backend, "no datastore and no archives ⇒ no bulk source")
 	require.Nil(t, cleanup, "nothing to release when no backend was opened")
 }
 
-// A frontfill-only daemon (nil backend) with history archives configured gets an
-// archive-backed tip source, so it can bootstrap its earliest_ledger pin — the
-// #833 fix. The archive frontier resolves through GetRootHAS().CurrentLedger.
-func TestBuildTipSampler_FrontfillBootstrapsFromArchive(t *testing.T) {
-	sampler, err := buildTipSampler(
-		context.Background(), nil, []string{"file:///nonexistent-archive"}, silentLogger())
+// With no lake but archives configured, the backfill backend is captive core
+// (#833): the stream is the core opener's, and Tip is the archives' root HAS —
+// so a below-now earliest_ledger floor is fillable, not just pinnable.
+func TestBuildBackfillBackend_NoLakeBuildsCaptiveSource(t *testing.T) {
+	cfg := config.Config{}.WithDefaults()
+	core := &fakeCore{}
+	backend, cleanup, err := buildBackfillBackend(
+		context.Background(), cfg, core, fakeRootHAS{current: 70_000}, silentLogger())
 	require.NoError(t, err)
-	require.NotNil(t, sampler)
+	require.Nil(t, cleanup, "no datastore handle to release")
+	require.IsType(t, &captiveSource{}, backend)
+	assert.Equal(t, int32(1), core.openedCount.Load(), "the backend stream is the core opener's")
+
+	tip, err := backend.Tip(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, uint32(70_000), tip, "the frontier is the archives' root HAS CurrentLedger")
+}
+
+// A no-lake daemon's sampler has the archives as its sole source, so it can
+// bootstrap its earliest_ledger pin — the #833 fix. The archive frontier
+// resolves through GetRootHAS().CurrentLedger.
+func TestBuildTipSampler_NoBackendBootstrapsFromArchive(t *testing.T) {
+	sampler, err := buildTipSampler(nil, fakeRootHAS{current: 50_000})
+	require.NoError(t, err)
 	require.Len(t, sampler.sources, 1, "the archive is the sole tip source when no backend is configured")
 
-	// Drive the archive tip mapping directly against a fake root HAS, proving the
-	// CurrentLedger is what the tip source returns.
-	tip, err := archiveTip(fakeRootHAS{current: 50_000})(context.Background())
+	tip, err := sampler.Sample(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, uint32(50_000), tip)
+}
+
+// A lake backend keeps the archive pool as its fallback: two sources, lake first.
+func TestBuildTipSampler_LakeGetsArchiveFallback(t *testing.T) {
+	sampler, err := buildTipSampler(
+		&fakeBackend{tip: chunk.FirstLedgerSeq}, fakeRootHAS{current: 50_000})
+	require.NoError(t, err)
+	require.Len(t, sampler.sources, 2, "lake frontier first, archive fallback second")
+}
+
+// The captive backend's Tip already IS the archive, so the pool is not added
+// again as a fallback — one source, never consulted twice per attempt.
+func TestBuildTipSampler_CaptiveBackendNotDuplicated(t *testing.T) {
+	has := fakeRootHAS{current: 60_000}
+	sampler, err := buildTipSampler(&captiveSource{archives: has}, has)
+	require.NoError(t, err)
+	require.Len(t, sampler.sources, 1, "captiveSource.Tip is the archive; no duplicate source")
 }
 
 // fakeRootHAS is a rootHASGetter over a fixed CurrentLedger (or a fixed error),
@@ -509,13 +548,139 @@ func TestArchiveTip_RootHASErrorSurfaces(t *testing.T) {
 	assert.Contains(t, err.Error(), "archive 503")
 }
 
-// With neither a backend nor archive URLs there is no tip source, and the
-// frontfill-only misconfiguration that cannot bootstrap fails at build time —
-// startup, not first sample — with the config-shaped message.
+// With neither a backend nor an archive pool there is no tip source, and the
+// misconfiguration that cannot bootstrap fails at build time — startup, not
+// first sample — with the config-shaped message.
 func TestBuildTipSampler_NoSourcesErrors(t *testing.T) {
-	_, err := buildTipSampler(context.Background(), nil, nil, silentLogger())
+	_, err := buildTipSampler(nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no network tip source configured")
+}
+
+// ---------------------------------------------------------------------------
+// The no-lake backfill path, end to end through the real entrypoint.
+// ---------------------------------------------------------------------------
+
+// streamCore is a CoreOpener over a fixed LedgerStream (the captive-core seam
+// for the no-lake backfill test: production hands the same opener's stream to
+// both the captive backfill source and the live loop).
+type streamCore struct{ stream ledgerbackend.LedgerStream }
+
+func (c *streamCore) OpenCore(context.Context) (ledgerbackend.LedgerStream, error) {
+	return c.stream, nil
+}
+
+// coreReplayStream is the fake captive-core stream for the no-lake path: a
+// BOUNDED pull (the captive backfill source replaying a chunk) serves gen's
+// ledgers for exactly [From, To], and an UNBOUNDED pull (the live loop's steady
+// state) blocks until ctx cancel — the fake analog of core's catchup-vs-runFrom
+// modes.
+type coreReplayStream struct {
+	t   *testing.T
+	gen func(*testing.T, uint32) []byte
+}
+
+var _ ledgerbackend.LedgerStream = (*coreReplayStream)(nil)
+
+func (s *coreReplayStream) RawLedgers(
+	ctx context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
+) iter.Seq2[[]byte, error] {
+	return func(yield func([]byte, error) bool) {
+		if !r.Bounded() {
+			<-ctx.Done()
+			yield(nil, ctx.Err())
+			return
+		}
+		for seq := r.From(); seq <= r.To(); seq++ {
+			if !yield(s.gen(s.t, seq), nil) {
+				return
+			}
+		}
+	}
+}
+
+// writeFileArchive lays out a minimal file:// history archive — just the root
+// HAS naming the frontier — and returns its URL.
+func writeFileArchive(t *testing.T, currentLedger uint32) string {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".well-known"), 0o755))
+	has := fmt.Sprintf(`{"version": 1, "server": "test", "currentLedger": %d, "currentBuckets": []}`,
+		currentLedger)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, ".well-known", "stellar-history.json"), []byte(has), 0o644))
+	return "file://" + dir
+}
+
+// #833 acceptance: a no-lake daemon (no [backfill.datastore]) with history
+// archives BACKFILLS — a below-now floor is fillable through captive core, not
+// just pinnable. Boots the real entrypoint with a genesis floor, a file://
+// archive whose root HAS covers chunk 0 (the REAL pool construction and frontier
+// read), and a core stream serving the bounded replay; chunk 0's cold artifacts
+// freeze exactly as on the lake path.
+func TestRunDaemon_NoLakeBackfillsThroughCaptiveCore(t *testing.T) {
+	archiveURL := writeFileArchive(t, chunk.ID(0).LastLedger())
+
+	dataDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "daemon.toml")
+	body := fmt.Sprintf(`
+[service]
+default_data_dir = %q
+
+[retention]
+earliest_ledger = "genesis"
+
+[backfill]
+workers = 1
+
+[ingestion]
+captive_core_config = "/dev/null"
+history_archive_urls = [%q]
+`, dataDir, archiveURL)
+	require.NoError(t, os.WriteFile(configPath, []byte(body), 0o644))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	servedCh := make(chan struct{}, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runDaemonWith(ctx, configPath, daemonOptions{
+			// NO Backend injected: the daemon wires the captive source itself from
+			// the injected core opener + the file:// archive pool.
+			Core:       &streamCore{stream: &coreReplayStream{t: t, gen: someTxGen(t)}},
+			ServeReads: func(context.Context) error { servedCh <- struct{}{}; return nil },
+			Logger:     silentLogger(),
+		})
+	}()
+	select {
+	case <-servedCh: // backfill complete; the daemon is now parked in ingestion
+	case err := <-errCh:
+		t.Fatalf("daemon returned before backfill completed: %v", err)
+	case <-time.After(60 * time.Second):
+		cancel()
+		t.Fatal("no-lake backfill did not finish within 60s")
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		require.NoError(t, err, "a ctx-canceled ingestion loop is a clean shutdown")
+	case <-time.After(10 * time.Second):
+		t.Fatal("runDaemonWith did not return after ctx cancel")
+	}
+
+	// Chunk 0 froze from the captive replay: ledgers + events + the index coverage.
+	cat := openCatalogAt(t, dataDir)
+	for _, kind := range []geometry.Kind{geometry.KindLedgers, geometry.KindEvents} {
+		state, err := cat.State(0, kind)
+		require.NoError(t, err)
+		assert.Equal(t, geometry.StateFrozen, state, "chunk 0 %s frozen from the captive replay", kind)
+	}
+	assert.FileExists(t, cat.Layout().LedgerPackPath(0))
+	cov, ok, err := cat.FrozenTxHashIndex(0)
+	require.NoError(t, err)
+	require.True(t, ok, "window 0 has a frozen txhash index coverage")
+	assert.Equal(t, chunk.ID(0), cov.Lo)
+	assert.Equal(t, chunk.ID(0), cov.Hi)
 }
 
 func TestNewLogger(t *testing.T) {

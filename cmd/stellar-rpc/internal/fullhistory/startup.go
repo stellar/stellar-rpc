@@ -292,8 +292,9 @@ type StartConfig struct {
 	// diverge on the catalog/pool (the invariant is structural, not by comment).
 	RetentionChunks uint32
 
-	// Tip samples the network frontier during backfill (lake first, history
-	// archives as fallback). Its retry defaults are bound at construction. Required.
+	// Tip samples the network frontier during backfill (the backend's own frontier
+	// first, the archives as the lake's fallback). Its retry defaults are bound at
+	// construction. Required.
 	Tip *tipSampler
 
 	// Core starts captive core and yields the ingestion getter. Required.

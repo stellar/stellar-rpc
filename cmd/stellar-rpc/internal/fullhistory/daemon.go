@@ -37,8 +37,9 @@ func RunDaemon(ctx context.Context, configPath string) error {
 // daemonOptions carries the daemon's injectable seams; production leaves every field zero.
 type daemonOptions struct {
 	// Backend is the bulk ledger source backfill freezes from and samples the tip from.
-	// nil ⇒ runDaemonWith builds it from [backfill.datastore] (which itself yields a
-	// frontfill-only daemon when no datastore is configured). Tests inject a fakeBackend.
+	// nil ⇒ runDaemonWith builds it: the bulk lake from [backfill.datastore], else —
+	// with history archives configured — captive core replaying from the archives
+	// (#833). Tests inject a fakeBackend.
 	Backend backfill.Backend
 
 	// Core starts captive core at the resume ledger and yields the live getter the
@@ -115,13 +116,33 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	}
 	defer func() { _ = cat.Close() }()
 
-	// --- Resolve the backfill backend: injected (tests) or built from
-	// [backfill.datastore] (production; nil ⇒ frontfill-only). Its Tip drives both
-	// backfill's network tip and the freeze's coverage frontier, so validateConfig
-	// (which needs the tip) runs after this. ---
+	// --- The history-archive pool: the no-lake backfill source's frontier and the
+	// lake tip's fallback. nil when [ingestion].history_archive_urls is unset. ---
+	var pool rootHASGetter
+	if len(cfg.Ingestion.HistoryArchiveURLs) > 0 {
+		pool, err = newArchivePool(ctx, cfg.Ingestion.HistoryArchiveURLs, logger)
+		if err != nil {
+			return err
+		}
+	}
+
+	// --- Resolve the backfill backend: injected (tests), the bulk lake
+	// ([backfill.datastore]), or captive core replaying from the archives when no
+	// lake is configured (#833). Its Tip drives both backfill's network tip and the
+	// freeze's coverage frontier, so validateConfig (which needs the tip) runs after
+	// this. The captive path resolves the core opener early — its stream IS the
+	// backend — so there [ingestion] config errors surface before validateConfig's;
+	// every other path keeps the opener after validateConfig, below. ---
 	backend := opts.Backend
+	core := opts.Core
 	if backend == nil {
-		built, cleanup, berr := buildBackfillBackend(ctx, cfg, logger)
+		if core == nil && cfg.Backfill.DataStore.Type == "" && pool != nil {
+			core, err = newCaptiveCoreOpener(cfg.Ingestion, cfg.Service.DefaultDataDir, logger)
+			if err != nil {
+				return err
+			}
+		}
+		built, cleanup, berr := buildBackfillBackend(ctx, cfg, core, pool, logger)
 		if berr != nil {
 			return fmt.Errorf("build backfill backend: %w", berr)
 		}
@@ -131,11 +152,11 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 		backend = built
 	}
 
-	// The network-tip sampler: the lake frontier (when a backfill datastore is
-	// configured) first, the history archives' root HAS as the fallback (and the
-	// sole source for a frontfill-only daemon, which is how it bootstraps its
-	// earliest_ledger pin). validateConfig needs it, so build it first.
-	sampler, err := buildTipSampler(ctx, backend, cfg.Ingestion.HistoryArchiveURLs, logger)
+	// The network-tip sampler: the backend's own frontier first (the lake for
+	// bsbSource, the archives for captiveSource), the archive pool as the lake's
+	// fallback. On first start the sampled tip is how a below-now earliest_ledger
+	// pin resolves. validateConfig needs it, so build it first.
+	sampler, err := buildTipSampler(backend, pool)
 	if err != nil {
 		return fmt.Errorf("build tip sampler: %w", err)
 	}
@@ -157,10 +178,10 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	registry := prometheus.NewRegistry()
 	metrics, sink := buildSinks(opts, registry)
 
-	// Resolve the captive-core opener: injected (tests) or built from
-	// [ingestion].captive_core_config (a complete production opener) — done after
-	// validateConfig so config errors surface first.
-	core := opts.Core
+	// Resolve the captive-core opener if still unset: injected (tests), resolved
+	// early by the captive backfill path above, or built here from
+	// [ingestion].captive_core_config — after validateConfig so config errors
+	// surface first.
 	if core == nil {
 		built, cerr := newCaptiveCoreOpener(cfg.Ingestion, cfg.Service.DefaultDataDir, logger)
 		if cerr != nil {
@@ -263,24 +284,57 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // Production backfill backend construction.
 // ---------------------------------------------------------------------------
 
-// buildBackfillBackend opens the bulk ledger source from [backfill.datastore]: any
-// SDK datastore (GCS/S3/Filesystem/...) wrapped as a backfill.Backend, plus a cleanup
-// that releases the datastore handle at shutdown. With no datastore configured it
-// returns (nil, nil, nil) — a frontfill-only daemon (the network tip then comes from
-// the history-archive source wired in buildTipSampler, and backfillSource errors only
-// on a backend-only chunk).
+// buildBackfillBackend opens the bulk ledger source backfill freezes from. With a
+// [backfill.datastore] it is the SDK datastore (GCS/S3/Filesystem/...) wrapped as a
+// backfill.Backend, plus a cleanup that releases the datastore handle at shutdown.
+// With no datastore but history archives configured it is captive core instead
+// (captiveSource): core replays each chunk's bounded range and the archives' root
+// HAS is the frontier — so a below-now earliest_ledger floor is fillable, not just
+// pinnable (#833). With neither it returns (nil, nil, nil), and the tip-sampler
+// build fails startup with the config-shaped message.
 func buildBackfillBackend(
-	ctx context.Context, cfg config.Config, logger *supportlog.Entry,
+	ctx context.Context, cfg config.Config, core CoreOpener, pool rootHASGetter, logger *supportlog.Entry,
 ) (backfill.Backend, func(), error) {
-	if cfg.Backfill.DataStore.Type == "" {
-		return nil, nil, nil // frontfill-only
+	if cfg.Backfill.DataStore.Type != "" {
+		backend, cleanup, err := backfill.NewBSBBackendFromConfig(ctx, cfg.Backfill.DataStore, cfg.Backfill.BSB)
+		if err != nil {
+			return nil, nil, err
+		}
+		logger.WithField("datastore_type", cfg.Backfill.DataStore.Type).Info("wired BSB backfill backend")
+		return backend, cleanup, nil
 	}
-	backend, cleanup, err := backfill.NewBSBBackendFromConfig(ctx, cfg.Backfill.DataStore, cfg.Backfill.BSB)
+	if pool == nil || core == nil {
+		return nil, nil, nil // no bulk source at all; the tip-sampler build gates this
+	}
+	stream, err := core.OpenCore(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("open captive-core backfill stream: %w", err)
 	}
-	logger.WithField("datastore_type", cfg.Backfill.DataStore.Type).Info("wired BSB backfill backend")
-	return backend, cleanup, nil
+	logger.Info("wired captive-core backfill backend (no bulk lake configured)")
+	return &captiveSource{LedgerStream: stream, archives: pool}, nil, nil
+}
+
+// captiveSource is the backfill.Backend for a no-lake deployment: captive core
+// replays each chunk's bounded range, and the history archives' root HAS — the
+// same archives core itself reads — is the frontier Tip. The SDK's captive stream
+// builds a FRESH core per RawLedgers call (each in its own ephemeral working
+// dir), so executePlan's parallel per-chunk pulls run independent cores rather
+// than contending on one cursor.
+//
+// Each bounded replay catches its core up to the range start, so the cost is one
+// catch-up per chunk: fine for a small retention window, infeasible for deep
+// history — a deep-history deployment configures the bulk lake instead.
+type captiveSource struct {
+	ledgerbackend.LedgerStream // the captive-core stream (CoreOpener.OpenCore)
+
+	archives rootHASGetter
+}
+
+var _ backfill.Backend = (*captiveSource)(nil)
+
+// Tip reports the archives' current frontier — the root HAS CurrentLedger.
+func (s *captiveSource) Tip(ctx context.Context) (uint32, error) {
+	return archiveTip(s.archives)(ctx)
 }
 
 // ---------------------------------------------------------------------------
@@ -385,29 +439,34 @@ func (c *captiveCoreOpener) OpenCore(ctx context.Context) (ledgerbackend.LedgerS
 	return ledgerbackend.NewCaptiveCoreStream(cfg, c.config.Log), nil
 }
 
-// buildTipSampler assembles the network-tip sampler from the wired sources: the
-// bulk lake frontier (backend.Tip, so the tip and the freeze's coverage frontier
-// are one source) first when a backfill datastore is configured, and the history
-// archives' root HAS as a fallback. For a frontfill-only daemon (nil backend) the
-// archives are the only source — and are how it bootstraps its earliest_ledger
-// pin on first start. The archive URLs are the same ones captive core reads from
-// ([ingestion].history_archive_urls); no new config.
-func buildTipSampler(
-	ctx context.Context, backend backfill.Backend, archiveURLs []string, logger *supportlog.Entry,
-) (*tipSampler, error) {
+// newArchivePool connects [ingestion].history_archive_urls — the same archives
+// captive core reads; no new config. urls must be non-empty (the caller skips the
+// pool entirely when none are configured).
+func newArchivePool(ctx context.Context, urls []string, logger *supportlog.Entry) (rootHASGetter, error) {
+	pool, err := historyarchive.NewArchivePool(urls, historyarchive.ArchiveOptions{
+		ConnectOptions: storage.ConnectOptions{Context: ctx},
+		Logger:         logger.WithField("subservice", "history-archive"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("connect history archives: %w", err)
+	}
+	return pool, nil
+}
+
+// buildTipSampler assembles the network-tip sampler: the backend's own frontier
+// first (backend.Tip, so the tip and the freeze's coverage frontier are one
+// source — the lake for bsbSource, the archives for captiveSource), and the
+// archive pool as the lake's fallback. The pool is skipped when the backend's Tip
+// already IS the archive (captiveSource), so no source is consulted twice.
+func buildTipSampler(backend backfill.Backend, pool rootHASGetter) (*tipSampler, error) {
 	var sources []tipSource
 	if backend != nil {
 		sources = append(sources, backend.Tip)
 	}
-	if len(archiveURLs) > 0 {
-		pool, err := historyarchive.NewArchivePool(archiveURLs, historyarchive.ArchiveOptions{
-			ConnectOptions: storage.ConnectOptions{Context: ctx},
-			Logger:         logger.WithField("subservice", "history-archive-tip"),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("connect history archives: %w", err)
+	if pool != nil {
+		if _, archiveBacked := backend.(*captiveSource); !archiveBacked {
+			sources = append(sources, archiveTip(pool))
 		}
-		sources = append(sources, archiveTip(pool))
 	}
 	if len(sources) == 0 {
 		// Fail at startup with the config-shaped message; captive core would reject
