@@ -194,11 +194,13 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 		// it rather than only around runBackfill. Passes that break early (empty range)
 		// record nothing — the metrics call is below the break.
 		passStart := time.Now()
-		// The tip sampler falls back from the lake to the history archives, so an
-		// unavailable tip means no source could be reached at all. Error out rather
-		// than proceed — the daemon must never serve behind an unknown frontier, and
-		// each supervised restart re-samples (a transient outage self-heals).
-		tip, err := cfg.Tip.Sample(ctx)
+		// The backend owns its frontier (the lake for bsbSource, the archives for
+		// captiveSource). A tip still unavailable after the bounded retry errors the
+		// pass rather than proceeding — the daemon must never serve behind an unknown
+		// frontier — and each supervised restart re-samples (a transient outage
+		// self-heals).
+		tip, err := sampleTipWithRetry(
+			ctx, cfg.Exec.Process.Backend.Tip, defaultTipBackoff, defaultTipMaxAttempts)
 		if err != nil {
 			return 0, fmt.Errorf("sample network tip: %w", err)
 		}
@@ -292,11 +294,6 @@ type StartConfig struct {
 	// diverge on the catalog/pool (the invariant is structural, not by comment).
 	RetentionChunks uint32
 
-	// Tip samples the network frontier during backfill (the backend's own frontier
-	// first, the archives as the lake's fallback). Its retry defaults are bound at
-	// construction. Required.
-	Tip *tipSampler
-
 	// Core starts captive core and yields the ingestion getter. Required.
 	Core CoreOpener
 
@@ -309,7 +306,7 @@ type StartConfig struct {
 
 // withDefaults fills the embedded Exec defaults (Workers -> GOMAXPROCS). The
 // lifecycle.Config is assembled from Exec + RetentionChunks in run(); the tip
-// sampler's retry defaults are bound at its construction, not here.
+// retry policy is the sampleTipWithRetry defaults at its call sites, not here.
 func (cfg StartConfig) withDefaults() StartConfig {
 	cfg.Exec = cfg.Exec.WithDefaults()
 	return cfg
@@ -322,8 +319,10 @@ func (cfg StartConfig) validate() error {
 	if cfg.Exec.Logger == nil {
 		return errors.New("nil StartConfig.Exec.Logger")
 	}
-	if cfg.Tip == nil {
-		return errors.New("nil StartConfig.Tip")
+	if cfg.Exec.Process.Backend == nil {
+		// The backend is the tip source every backfill pass samples (and the
+		// freeze's bulk fetch); runDaemonWith guarantees one at startup.
+		return errors.New("nil StartConfig.Exec.Process.Backend")
 	}
 	if cfg.Core == nil {
 		return errors.New("nil StartConfig.Core")

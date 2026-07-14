@@ -344,15 +344,17 @@ func TestRunDaemon_LockContentionFailsFast(t *testing.T) {
 	assert.Zero(t, served.Load(), "run never reached when the catalog is held")
 }
 
-// First start with a "now" floor and an unreachable tip is fatal at
-// validateConfig: "now" cannot resolve, so the daemon surfaces it.
+// First start with a "now" floor and no usable tip is fatal at validateConfig:
+// "now" cannot resolve, so the daemon surfaces it.
 func TestRunDaemon_NowFloorRequiresTip(t *testing.T) {
 	configPath, _ := writeTempConfigNow(t)
 
 	err := runDaemonWith(context.Background(), configPath, daemonOptions{
-		// An unreachable bulk source (Tip errors) ⇒ the derived network tip can't
-		// resolve "now".
-		Backend:        &fakeBackend{tipErr: errors.New("unreachable")},
+		// A never-ready bulk source (sub-genesis tip ⇒ fast permanent failure) means
+		// the network tip can't resolve "now". Core injected: the opener now resolves
+		// up front and the stub captive_core_config would otherwise error first.
+		Backend:        &fakeBackend{tip: 0},
+		Core:           &fakeCore{},
 		Logger:         silentLogger(),
 		RestartBackoff: time.Millisecond,
 	})
@@ -442,10 +444,11 @@ func TestSupervise_RetriesThenCleanShutdown(t *testing.T) {
 func TestSupervise_FirstStartNoTipRetries(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
-	// Unreachable tip + no local progress: every run fails the first-start check.
-	tip := &fakeTipBackend{err: errors.New("unreachable"), errFirst: 99}
+	// A never-ready tip (sub-genesis ⇒ one permanent-failure poll per run, no
+	// retry sleeps) + no local progress: every run fails the first-start check,
+	// so callCount tracks the restart count.
+	tip := &fakeTipBackend{tips: []uint32{0}}
 	start := startTestConfig(t, cat, tip, &fakeCore{}, nil)
-	start.Tip = testSampler(1, tip) // one tip poll per run, so callCount tracks restart count
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -465,17 +468,30 @@ func TestSupervise_FirstStartNoTipRetries(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// buildBackfillBackend / buildTipSampler — the no-lake (no datastore) paths.
+// buildBackfillBackend — the no-lake (no datastore) paths.
 // ---------------------------------------------------------------------------
 
 // With neither [backfill.datastore] nor an archive pool, buildBackfillBackend
-// returns no backend (the tip-sampler build then fails startup).
+// returns no backend (runDaemonWith then fails startup).
 func TestBuildBackfillBackend_NoSourcesNoBackend(t *testing.T) {
 	cfg := config.Config{}.WithDefaults()
 	backend, cleanup, err := buildBackfillBackend(context.Background(), cfg, &fakeCore{}, nil, silentLogger())
 	require.NoError(t, err)
 	require.Nil(t, backend, "no datastore and no archives ⇒ no bulk source")
 	require.Nil(t, cleanup, "nothing to release when no backend was opened")
+}
+
+// A daemon with no bulk source at all (no datastore, no archives; the injected
+// Core bypasses newCaptiveCoreOpener's own archive-URL requirement) fails fast at
+// startup with the config-shaped message — not at the first backfill pass.
+func TestRunDaemon_NoBulkSourceFailsFast(t *testing.T) {
+	configPath, _ := writeTempConfig(t, "")
+	err := runDaemonWith(context.Background(), configPath, daemonOptions{
+		Core:   &fakeCore{},
+		Logger: silentLogger(),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no bulk ledger source configured")
 }
 
 // With no lake but archives configured, the backfill backend is captive core
@@ -494,36 +510,6 @@ func TestBuildBackfillBackend_NoLakeBuildsCaptiveSource(t *testing.T) {
 	tip, err := backend.Tip(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, uint32(70_000), tip, "the frontier is the archives' root HAS CurrentLedger")
-}
-
-// A no-lake daemon's sampler has the archives as its sole source, so it can
-// bootstrap its earliest_ledger pin — the #833 fix. The archive frontier
-// resolves through GetRootHAS().CurrentLedger.
-func TestBuildTipSampler_NoBackendBootstrapsFromArchive(t *testing.T) {
-	sampler, err := buildTipSampler(nil, fakeRootHAS{current: 50_000})
-	require.NoError(t, err)
-	require.Len(t, sampler.sources, 1, "the archive is the sole tip source when no backend is configured")
-
-	tip, err := sampler.Sample(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, uint32(50_000), tip)
-}
-
-// A lake backend keeps the archive pool as its fallback: two sources, lake first.
-func TestBuildTipSampler_LakeGetsArchiveFallback(t *testing.T) {
-	sampler, err := buildTipSampler(
-		&fakeBackend{tip: chunk.FirstLedgerSeq}, fakeRootHAS{current: 50_000})
-	require.NoError(t, err)
-	require.Len(t, sampler.sources, 2, "lake frontier first, archive fallback second")
-}
-
-// The captive backend's Tip already IS the archive, so the pool is not added
-// again as a fallback — one source, never consulted twice per attempt.
-func TestBuildTipSampler_CaptiveBackendNotDuplicated(t *testing.T) {
-	has := fakeRootHAS{current: 60_000}
-	sampler, err := buildTipSampler(&captiveSource{archives: has}, has)
-	require.NoError(t, err)
-	require.Len(t, sampler.sources, 1, "captiveSource.Tip is the archive; no duplicate source")
 }
 
 // fakeRootHAS is a rootHASGetter over a fixed CurrentLedger (or a fixed error),
@@ -546,15 +532,6 @@ func TestArchiveTip_RootHASErrorSurfaces(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "root HAS")
 	assert.Contains(t, err.Error(), "archive 503")
-}
-
-// With neither a backend nor an archive pool there is no tip source, and the
-// misconfiguration that cannot bootstrap fails at build time — startup, not
-// first sample — with the config-shaped message.
-func TestBuildTipSampler_NoSourcesErrors(t *testing.T) {
-	_, err := buildTipSampler(nil, nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no network tip source configured")
 }
 
 // ---------------------------------------------------------------------------

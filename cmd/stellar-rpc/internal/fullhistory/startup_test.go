@@ -25,8 +25,11 @@ import (
 
 // fakeTipBackend returns tips[i] per call (clamped to the last); if err is set it
 // returns err for the first errFirst calls, then the tip (errFirst large ⇒ always down).
-// Its tip method has the tipSource signature, so it wires straight into a tipSampler.
+// Its Tip method makes it a backfill.Backend — the embedded LedgerStream stays nil
+// since these tests never stream (the runBackfill seam records passes instead).
 type fakeTipBackend struct {
+	ledgerbackend.LedgerStream
+
 	mu       sync.Mutex
 	tips     []uint32
 	calls    int
@@ -34,7 +37,9 @@ type fakeTipBackend struct {
 	errFirst int // return err for the first errFirst calls, then the tip
 }
 
-func (b *fakeTipBackend) tip(context.Context) (uint32, error) {
+var _ backfill.Backend = (*fakeTipBackend)(nil)
+
+func (b *fakeTipBackend) Tip(context.Context) (uint32, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	n := b.calls
@@ -56,16 +61,6 @@ func (b *fakeTipBackend) callCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.calls
-}
-
-// testSampler builds a tipSampler over the given fake backends (tried in order)
-// with fast test backoff. maxAttempts bounds the retries per Sample call.
-func testSampler(maxAttempts int, backends ...*fakeTipBackend) *tipSampler {
-	sources := make([]tipSource, len(backends))
-	for i, b := range backends {
-		sources[i] = b.tip
-	}
-	return &tipSampler{sources: sources, interval: time.Millisecond, maxAttempts: maxAttempts}
 }
 
 // recordingPlan captures the [lo,hi] each backfill pass asked for via the
@@ -101,12 +96,11 @@ func startTestConfig(
 		Catalog: cat,
 		Logger:  silentLogger(),
 		Workers: 2,
-		Process: backfill.ProcessConfig{},
+		Process: backfill.ProcessConfig{Backend: tip}, // the tip source every pass samples
 	}
 	cfg := StartConfig{
 		Exec:            exec,
 		RetentionChunks: 0,
-		Tip:             testSampler(3, tip),
 		Core:            core,
 		ServeReads:      func(context.Context) error { return nil },
 	}
@@ -158,93 +152,54 @@ func pinGenesis(t *testing.T, cat *catalog.Catalog) {
 }
 
 // ---------------------------------------------------------------------------
-// tipSampler.Sample — backoff, sub-genesis rejection, exhausted retries,
-// and the lake→archive source fallback.
+// sampleTipWithRetry — backoff, sub-genesis rejection, exhausted retries, ctx cancel.
 // ---------------------------------------------------------------------------
 
-func TestSample_RejectsSubGenesisAsNotReady(t *testing.T) {
-	tip, err := testSampler(3, &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq - 1}}).
-		Sample(context.Background())
+func TestSampleTip_RejectsSubGenesisAsNotReady(t *testing.T) {
+	b := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq - 1}}
+	tip, err := sampleTipWithRetry(context.Background(), b.Tip, time.Millisecond, 3)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not ready")
 	require.Zero(t, tip)
+	require.Equal(t, 1, b.callCount(), "sub-genesis is permanent — no retries burned")
 }
 
-func TestSample_RetriesThenSucceeds(t *testing.T) {
+func TestSampleTip_RetriesThenSucceeds(t *testing.T) {
 	b := &fakeTipBackend{tips: []uint32{50_000}, err: errors.New("object store down"), errFirst: 2}
-	tip, err := testSampler(5, b).Sample(context.Background())
+	tip, err := sampleTipWithRetry(context.Background(), b.Tip, time.Millisecond, 5)
 	require.NoError(t, err)
 	require.Equal(t, uint32(50_000), tip)
 	require.Equal(t, 3, b.callCount(), "two failures then a success")
 }
 
-func TestSample_ExhaustedRetriesErrors(t *testing.T) {
+func TestSampleTip_ExhaustedRetriesErrors(t *testing.T) {
 	b := &fakeTipBackend{err: errors.New("object store down"), errFirst: 99}
-	_, err := testSampler(4, b).Sample(context.Background())
+	_, err := sampleTipWithRetry(context.Background(), b.Tip, time.Millisecond, 4)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "after 4 attempts")
 	require.Equal(t, 4, b.callCount())
 }
 
-func TestSample_CtxCancelAbortsWait(t *testing.T) {
+func TestSampleTip_CtxCancelAbortsWait(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	b := &fakeTipBackend{err: errors.New("down"), errFirst: 99}
-	s := &tipSampler{sources: []tipSource{b.tip}, interval: time.Hour, maxAttempts: 5}
-	_, err := s.Sample(ctx)
+	_, err := sampleTipWithRetry(ctx, b.Tip, time.Hour, 5)
 	require.ErrorIs(t, err, context.Canceled)
-}
-
-// The lake tip is preferred: when the first source answers, the fallback is
-// never consulted.
-func TestSample_PrefersFirstSource(t *testing.T) {
-	lake := &fakeTipBackend{tips: []uint32{50_000}}
-	archive := &fakeTipBackend{tips: []uint32{49_936}} // one checkpoint behind
-	tip, err := testSampler(3, lake, archive).Sample(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, uint32(50_000), tip, "the lake tip wins when it answers")
-	require.Zero(t, archive.callCount(), "the archive fallback is not consulted")
-}
-
-// The archive fallback answers on the same attempt when the lake tip is down —
-// no retry needed to fall over.
-func TestSample_FallsBackToArchiveWhenLakeDown(t *testing.T) {
-	lake := &fakeTipBackend{err: errors.New("lake unreachable"), errFirst: 99}
-	archive := &fakeTipBackend{tips: []uint32{49_936}}
-	tip, err := testSampler(3, lake, archive).Sample(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, uint32(49_936), tip, "falls back to the archive frontier")
-	require.Equal(t, 1, archive.callCount(), "the fallback answers on the first attempt")
-}
-
-// With every source down, Sample exhausts its retries and joins their errors.
-func TestSample_AllSourcesDownExhausts(t *testing.T) {
-	lake := &fakeTipBackend{err: errors.New("lake down"), errFirst: 99}
-	archive := &fakeTipBackend{err: errors.New("archive down"), errFirst: 99}
-	_, err := testSampler(2, lake, archive).Sample(context.Background())
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "lake down")
-	require.Contains(t, err.Error(), "archive down")
-}
-
-// A sampler with no sources at all (neither a lake nor archives) errors clearly
-// — the frontfill-only misconfiguration that cannot bootstrap.
-func TestSample_NoSourcesErrorsClearly(t *testing.T) {
-	_, err := newTipSampler().Sample(context.Background())
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "no network tip source configured")
 }
 
 // ---------------------------------------------------------------------------
 // backfillToTip — backfill loop edge cases.
 // ---------------------------------------------------------------------------
 
-// First start (genesis, no local history) with the tip absent errors out
-// (restartable — no sentinel; the supervisor retries).
+// First start (genesis, no local history) with no usable tip errors out
+// (restartable — no sentinel; the supervisor retries). Sub-genesis reads as a
+// permanent "not ready", so the sample fails fast instead of burning the
+// production retry backoff backfillToTip now applies.
 func TestBackfill_FirstStartTipAbsentErrors(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
-	tip := &fakeTipBackend{err: errors.New("backend unreachable"), errFirst: 99}
+	tip := &fakeTipBackend{tips: []uint32{0}}
 	cfg := startTestConfig(t, cat, tip, nil, &recordingPlan{})
 
 	// Empty catalog ⇒ lastCommitted=1 < earliest=2 ⇒ first start with no progress.
@@ -560,9 +515,9 @@ func TestRun_ValidatesConfig(t *testing.T) {
 	cat, _ := testCatalog(t)
 	base := startTestConfig(t, cat, &fakeTipBackend{tips: []uint32{50_000}}, &fakeCore{}, nil)
 
-	t.Run("nil Tip", func(t *testing.T) {
+	t.Run("nil Backend", func(t *testing.T) {
 		cfg := base
-		cfg.Tip = nil
+		cfg.Exec.Process.Backend = nil // the backfill tip + freeze source
 		require.Error(t, run(context.Background(), cfg))
 	})
 	t.Run("nil Core", func(t *testing.T) {

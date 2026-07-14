@@ -18,7 +18,7 @@ func validateConfig(
 	ctx context.Context,
 	cfg config.Config,
 	cat *catalog.Catalog,
-	tip *tipSampler,
+	tip tipSource,
 ) error {
 	if cat == nil {
 		return errors.New("validateConfig requires a non-nil Catalog")
@@ -109,8 +109,9 @@ func validateEarliestForm(earliest string) error {
 // resolveEarliestFirstStart turns the form-validated earliest_ledger into the
 // chunk-aligned ledger to pin on first start. Genesis needs no tip; "now" and a
 // numeric floor each require a reachable backend so neither pins a future floor.
+// tip is the backend's raw frontier query; the retry policy is applied here.
 func resolveEarliestFirstStart(
-	ctx context.Context, earliest string, tip *tipSampler,
+	ctx context.Context, earliest string, tip tipSource,
 ) (uint32, error) {
 	switch earliest {
 	case config.EarliestGenesis:
@@ -118,7 +119,7 @@ func resolveEarliestFirstStart(
 
 	case config.EarliestNow:
 		// Resolving "now" requires a tip.
-		t, err := tip.Sample(ctx)
+		t, err := sampleTipWithRetry(ctx, tip, defaultTipBackoff, defaultTipMaxAttempts)
 		if err != nil {
 			return 0, fmt.Errorf("earliest_ledger=%q needs a reachable, ready backend: %w",
 				config.EarliestNow, err)
@@ -130,7 +131,7 @@ func resolveEarliestFirstStart(
 		// Numeric: pinned immutably, so it must be checked against a real tip — a
 		// floor ahead of the network would become permanent and resume from a future ledger.
 		floor := mustParseUint32(earliest)
-		t, err := tip.Sample(ctx)
+		t, err := sampleTipWithRetry(ctx, tip, defaultTipBackoff, defaultTipMaxAttempts)
 		if err != nil {
 			return 0, fmt.Errorf("first start with a numeric earliest_ledger needs a "+
 				"reachable, ready backend to validate the floor against the network tip: %w", err)
