@@ -24,6 +24,20 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
 
+// GetEnv reads the common leg environment.
+func GetEnv() map[string]string {
+	return map[string]string{
+		"BUCKET":       Env("BUCKET", "stellar-rpc-ci-load-test"),
+		"REGION":       Env("REGION", "us-east-1"),
+		"WORK_DIR":     Env("WORK_DIR", "/data"),
+		"RESULTS_FILE": Env("RESULTS_FILE", "/tmp/results.md"),
+		"RESULT_KEY":   os.Getenv("RESULT_KEY"),
+		"TARGET_SHA":   os.Getenv("TARGET_SHA"),
+		"RUN_ID":       Env("RUN_ID", "manual"),
+		"REPO":         Env("REPO", "stellar/stellar-rpc"),
+	}
+}
+
 // NewLogger returns an Info-level logger (supportlog.New starts at WARN). Each
 // leg's runner uses one for its own messages.
 func NewLogger() *supportlog.Entry {

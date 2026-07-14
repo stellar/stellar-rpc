@@ -26,15 +26,9 @@ var (
 // from S3, runs the benchmark, and writes the ok/fail verdict.
 func instantiate(ctx context.Context) error {
 	var (
-		bucket       = harness.Env("BUCKET", "stellar-rpc-ci-load-test")
-		region       = harness.Env("REGION", "us-east-1")
-		workDir      = harness.Env("WORK_DIR", "/data")
-		goldenDB     = harness.Env("GOLDEN_DB", filepath.Join(workDir, "golden.sqlite"))
-		resultsFile  = harness.Env("RESULTS_FILE", "/tmp/results.md")
+		env          = harness.GetEnv()
+		goldenDB     = harness.Env("GOLDEN_DB", filepath.Join(env["WORK_DIR"], "golden.sqlite"))
 		benchResults = harness.Env("BENCH_RESULTS", "/tmp/bench-results.json")
-		resultKey    = os.Getenv("RESULT_KEY")
-		targetSHA    = os.Getenv("TARGET_SHA")
-		runID        = harness.Env("RUN_ID", "manual")
 	)
 
 	repoRoot, err := os.Getwd()
@@ -42,14 +36,15 @@ func instantiate(ctx context.Context) error {
 		return err
 	}
 	bail := func(format string, args ...any) error {
-		return harness.BailInstance(resultsFile, "Ingest load test", runID, targetSHA, fmt.Sprintf(format, args...))
+		return harness.BailInstance(env["RESULTS_FILE"], "Ingest load test", env["RUN_ID"], env["TARGET_SHA"],
+			fmt.Sprintf(format, args...))
 	}
 
-	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(env["REGION"]))
 	if err != nil {
 		return bail("loading AWS config: %v", err)
 	}
-	fetch := &harness.S3Fetcher{Client: s3.NewFromConfig(awsCfg), Bucket: bucket}
+	fetch := &harness.S3Fetcher{Client: s3.NewFromConfig(awsCfg), Bucket: env["BUCKET"]}
 
 	bundlePaths, goldenFetchSecs, err := fetchCorpus(ctx, fetch, goldenDB)
 	if err != nil {
@@ -69,10 +64,10 @@ func instantiate(ctx context.Context) error {
 		"LOADTEST_INGEST_DEADLINE=" + harness.Env("LOADTEST_INGEST_DEADLINE", "150m"),
 		"LOADTEST_SQLITE_PATH=" + goldenDB,
 		"PERF_RESULTS_PATH=" + benchResults,
-		"PERF_RESULTS_MD_PATH=" + resultsFile,
-		"PERF_TARGET_SHA=" + targetSHA,
-		"PERF_RUN_ID=" + runID,
-		"PERF_REPO=" + harness.Env("REPO", "stellar/stellar-rpc"),
+		"PERF_RESULTS_MD_PATH=" + env["RESULTS_FILE"],
+		"PERF_TARGET_SHA=" + env["TARGET_SHA"],
+		"PERF_RUN_ID=" + env["RUN_ID"],
+		"PERF_REPO=" + env["REPO"],
 		fmt.Sprintf("PERF_GOLDEN_FETCH_SECONDS=%d", goldenFetchSecs),
 		"STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true",
 	}
@@ -82,12 +77,13 @@ func instantiate(ctx context.Context) error {
 		return bail("benchmark failed:\n%v", err)
 	}
 
-	if fi, err := os.Stat(resultsFile); err != nil || fi.Size() == 0 {
-		return bail("benchmark succeeded but did not emit %s", resultsFile)
+	if fi, err := os.Stat(env["RESULTS_FILE"]); err != nil || fi.Size() == 0 {
+		return bail("benchmark succeeded but did not emit %s", env["RESULTS_FILE"])
 	}
 	logger.Infof("results ready; publishing verdict")
 	if err := harness.PublishResult(
-		ctx, fetch.Client, bucket, resultKey, "ok", runID, targetSHA, resultsFile, benchResults,
+		ctx, fetch.Client, env["BUCKET"], env["RESULT_KEY"], "ok", env["RUN_ID"], env["TARGET_SHA"],
+		env["RESULTS_FILE"], benchResults,
 	); err != nil {
 		return bail("publishing result: %v", err)
 	}
