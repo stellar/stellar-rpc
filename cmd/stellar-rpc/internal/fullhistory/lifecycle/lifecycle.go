@@ -10,6 +10,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
@@ -32,9 +33,9 @@ import (
 type Config struct {
 	backfill.ExecConfig
 
-	// RetentionChunks bounds the sliding retention floor's width. 0 disables the
-	// sliding floor (the fixed earliest-ledger floor alone applies).
-	RetentionChunks uint32
+	// Retention is the floor policy, bound once at startup from the validated
+	// earliest_ledger pin.
+	Retention geometry.Retention
 
 	// opRetryAttempts / opRetryBackoff bound the per-op retry the discard/prune
 	// sweeps use (see runOps). Not config-wired: production always runs the
@@ -97,8 +98,7 @@ func runOps(ctx context.Context, cfg Config, ops []func() error) (int, error) {
 // lastChunk — the single snapshot every stage shares, so a boundary committing
 // mid-tick can't make stages contradict (it's next tick's work). Plan range is
 // [floor, lastChunk] (start raised to storage); discard/prune key off lastChunk.
-// Every stage compares in the chunk domain; only EffectiveRetentionFloor needs
-// lastChunk as a ledger.
+// Every stage compares in the chunk domain.
 //
 // It returns the first stage error WITHOUT classifying it: Loop propagates it to
 // run's errgroup and supervise decides clean-vs-restart (a canceled ctx surfaces
@@ -107,23 +107,14 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	metrics := observability.MetricsOrNop(cfg.Metrics)
 	logger := cfg.Logger
 
-	// earliest and the retention gate are read and computed ONCE here (not
-	// re-derived per scan), then passed to both scans.
-	earliest, _, err := cat.EarliestLedger()
-	if err != nil {
-		return fmt.Errorf("read earliest ledger: %w", err)
-	}
-	// The only site that needs lastChunk in the ledger domain; every other stage
-	// compares chunks directly against lastChunk.
-	floorLedger := EffectiveRetentionFloor(lastChunk.LastLedger(), cfg.RetentionChunks, earliest)
-	gate := RetentionFloorAt(floorLedger)
+	floor := cfg.Retention.FloorAt(int64(lastChunk))
 
 	// Retention-floor gauge only. The last-committed gauge is owned by the ingestion
 	// loop (which holds the true, possibly mid-chunk value); re-emitting it here from
 	// the chunk-aligned lastChunk would regress it on every tick.
-	metrics.RetentionFloor(floorLedger)
+	metrics.RetentionFloor(floor.FirstLedger())
 	logger.WithField("last_chunk", lastChunk.String()).
-		WithField("floor_chunk", gate.FirstChunk().String()).
+		WithField("floor_chunk", floor.String()).
 		Debug("lifecycle tick — derived snapshot")
 
 	// Stage 1 — plan-and-execute (freeze + index rebuild) over [floor, lastChunk], via
@@ -134,15 +125,15 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	// needed is the empty-range check (floor above lastChunk when retention outran
 	// production). An empty range emits no Freeze sample — the Discard/Prune samples
 	// below carry empty-tick visibility.
-	if start := gate.FirstChunk(); start <= lastChunk {
-		if eerr := backfill.RunBackfill(ctx, cfg.ExecConfig, start, lastChunk); eerr != nil {
-			return fmt.Errorf("run backfill [%s,%s]: %w", start, lastChunk, eerr)
+	if floor <= lastChunk {
+		if eerr := backfill.RunBackfill(ctx, cfg.ExecConfig, floor, lastChunk); eerr != nil {
+			return fmt.Errorf("run backfill [%s,%s]: %w", floor, lastChunk, eerr)
 		}
 	}
 
 	// Stage 2 — discard scan.
 	discardStart := time.Now()
-	discardOps, err := eligibleDiscardOps(cat, gate, lastChunk)
+	discardOps, err := eligibleDiscardOps(cat, floor, lastChunk)
 	if err != nil {
 		return fmt.Errorf("eligible discard ops: %w", err)
 	}
@@ -167,7 +158,7 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 
 	// Stage 3 — prune scan.
 	pruneStart := time.Now()
-	pruneOps, pruneWeights, err := eligiblePruneOps(cat, gate)
+	pruneOps, pruneWeights, err := eligiblePruneOps(cat, floor)
 	if err != nil {
 		return fmt.Errorf("eligible prune ops: %w", err)
 	}

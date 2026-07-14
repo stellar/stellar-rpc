@@ -141,7 +141,7 @@ func TestRunLifecycleTick_DiscardGatedOnIndexCoverage(t *testing.T) {
 	// txhash is frozen, ledgers/events frozen, but the window has no FROZEN coverage
 	// yet => indexCovers(0) is false => NOT discarded (still needed for lookups via
 	// its .bin/hot DB until the index folds it in).
-	ops, err := eligibleDiscardOps(cat, gateFor(t, cfg, cat, lastChunk.LastLedger()), lastChunk)
+	ops, err := eligibleDiscardOps(cat, floorFor(t, cfg, lastChunk.LastLedger()), lastChunk)
 	require.NoError(t, err)
 	require.Empty(t, ops, "no index coverage yet: the hot DB stays")
 
@@ -152,7 +152,7 @@ func TestRunLifecycleTick_DiscardGatedOnIndexCoverage(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, covered)
 
-	ops, err = eligibleDiscardOps(cat, gateFor(t, cfg, cat, lastChunk.LastLedger()), lastChunk)
+	ops, err = eligibleDiscardOps(cat, floorFor(t, cfg, lastChunk.LastLedger()), lastChunk)
 	require.NoError(t, err)
 	require.Len(t, ops, 1, "covered + nothing pending => discard eligible")
 	require.NoError(t, ops[0]())
@@ -182,8 +182,8 @@ func TestRunLifecycleTick_PastFloorPrune(t *testing.T) {
 	t.Cleanup(func() { _ = live.Close() })
 
 	through := chunk.ID(5).LastLedger()
-	floor := EffectiveRetentionFloor(through, cfg.RetentionChunks, 0)
-	require.Equal(t, chunk.ID(4).FirstLedger(), floor, "floor anchors 2 chunks back")
+	floor := floorFor(t, cfg, through)
+	require.Equal(t, chunk.ID(4), floor, "floor anchors 2 chunks back")
 
 	// Chunk 5 is the last complete chunk — the boundary id ingestion hands over.
 	require.NoError(t, runLifecycle(context.Background(), cfg, cat, 5), "prune tick never fails")
@@ -219,7 +219,7 @@ func TestRunLifecycleTick_PrunesTransientIndexDebris(t *testing.T) {
 	require.NoError(t, err)
 
 	// Nothing durable and no hot keys ⇒ through sits at the pre-genesis sentinel.
-	ops, weights, err := eligiblePruneOps(cat, gateFor(t, cfg, cat, geometry.PreGenesisLedger))
+	ops, weights, err := eligiblePruneOps(cat, floorFor(t, cfg, geometry.PreGenesisLedger))
 	require.NoError(t, err)
 	require.Len(t, ops, 1, "the freezing debris is swept")
 	require.Equal(t, []int{1}, weights, "one index artifact swept")

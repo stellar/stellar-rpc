@@ -13,15 +13,16 @@ import (
 
 // validateConfig is the config gate run before the daemon's run loop: (1) form-validate,
 // (2) on restart confirm earliest_ledger unchanged, (3) on first start resolve and
-// pin it. Plain error returns (the daemon loop owns fatal-and-surface).
+// pin it. On success it returns the pinned, chunk-aligned earliest_ledger so the
+// caller binds the retention floor from the validated path instead of re-reading it.
 func validateConfig(
 	ctx context.Context,
 	cfg config.Config,
 	cat *catalog.Catalog,
 	tip tipSource,
-) error {
+) (uint32, error) {
 	if cat == nil {
-		return errors.New("validateConfig requires a non-nil Catalog")
+		return 0, errors.New("validateConfig requires a non-nil Catalog")
 	}
 
 	workers := deref(cfg.Backfill.Workers)
@@ -29,41 +30,45 @@ func validateConfig(
 
 	// --- 1. Form validation. ---
 	if workers < 1 {
-		return fmt.Errorf("workers must be >= 1 (got %d) — a zero pool deadlocks executePlan", workers)
+		return 0, fmt.Errorf("workers must be >= 1 (got %d) — a zero pool deadlocks executePlan", workers)
 	}
 	if maxRetries < 0 {
-		return fmt.Errorf("max_retries must be >= 0 (got %d) — 0 means run once, no retry", maxRetries)
+		return 0, fmt.Errorf("max_retries must be >= 0 (got %d) — 0 means run once, no retry", maxRetries)
 	}
 	// logging.format silently means text unless it is exactly "json", so reject any
 	// other value rather than let a typo drop the operator to text logging. Empty is
 	// the unset sentinel WithDefaults resolves to text, so it is not a typo.
 	if f := cfg.Logging.Format; f != "" && f != config.DefaultLogFormat && f != config.LogFormatJSON {
-		return fmt.Errorf("logging.format must be %q or %q; got %q", config.DefaultLogFormat, config.LogFormatJSON, f)
+		return 0, fmt.Errorf("logging.format must be %q or %q; got %q",
+			config.DefaultLogFormat, config.LogFormatJSON, f)
 	}
 	// Form-validate here so the numeric case avoids chunk.IDFromLedger's sub-genesis panic below.
 	if err := validateEarliestForm(cfg.Retention.EarliestLedger); err != nil {
-		return err
+		return 0, err
 	}
 
 	earliestStored, earliestPinned, err := cat.EarliestLedger()
 	if err != nil {
-		return fmt.Errorf("read earliest_ledger pin: %w", err)
+		return 0, fmt.Errorf("read earliest_ledger pin: %w", err)
 	}
 
 	if earliestPinned {
 		// --- 2. Restart: confirm earliest_ledger unchanged. ---
-		return confirmEarliestUnchanged(cfg.Retention.EarliestLedger, earliestStored)
+		if err := confirmEarliestUnchanged(cfg.Retention.EarliestLedger, earliestStored); err != nil {
+			return 0, err
+		}
+		return earliestStored, nil
 	}
 
 	// --- 3. First start: resolve, then pin earliest_ledger. ---
 	earliest, err := resolveEarliestFirstStart(ctx, cfg.Retention.EarliestLedger, tip)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if err := cat.PinEarliestLedger(earliest); err != nil {
-		return fmt.Errorf("pin earliest ledger (earliest=%d): %w", earliest, err)
+		return 0, fmt.Errorf("pin earliest ledger (earliest=%d): %w", earliest, err)
 	}
-	return nil
+	return earliest, nil
 }
 
 // confirmEarliestUnchanged enforces earliest_ledger's restart immutability: genesis or

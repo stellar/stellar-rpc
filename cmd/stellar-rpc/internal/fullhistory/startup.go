@@ -59,14 +59,14 @@ func run(ctx context.Context, cfg StartConfig) error {
 
 	metrics := observability.MetricsOrNop(cfg.Exec.Metrics)
 	metrics.LastCommitted(lastCommitted)
-	metrics.RetentionFloor(lifecycle.EffectiveRetentionFloor(lastCommitted, cfg.RetentionChunks, earliest))
+	metrics.RetentionFloor(retentionFloorLedger(cfg.Retention, lastCommitted))
 	logger.WithField("last_committed", lastCommitted).
 		WithField("earliest", earliest).
 		WithField("pinned", pinned).
 		Info("startup — last-committed derived, beginning backfill")
 
 	// Step 1: backfill to the tip.
-	lastCommitted, err = backfillToTip(ctx, cfg, lastCommitted, earliest)
+	lastCommitted, err = backfillToTip(ctx, cfg, lastCommitted)
 	if err != nil {
 		return err
 	}
@@ -122,8 +122,8 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// The lifecycle config draws on the SAME Exec wiring backfill uses, so the two
 	// share one catalog/pool by construction.
 	lifecycleCfg := lifecycle.Config{
-		ExecConfig:      cfg.Exec,
-		RetentionChunks: cfg.RetentionChunks,
+		ExecConfig: cfg.Exec,
+		Retention:  cfg.Retention,
 	}.WithLifecycleDefaults()
 
 	// Begin serving reads (injected) BEFORE launching the loops; it must return
@@ -170,11 +170,11 @@ func run(ctx context.Context, cfg StartConfig) error {
 }
 
 // backfillToTip runs the backfill loop, returning lastCommitted as backfill makes
-// progress. Each pass samples the network tip, anchors on max(tip, lastCommitted),
-// computes [rangeStart, rangeEnd] with the mid-chunk exclusion, and breaks on an
-// empty or non-advancing range.
-func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint32) (uint32, error) {
-	retentionChunks := cfg.RetentionChunks
+// progress. Each pass samples the backend tip, computes the target frontier
+// (passTarget, which quarantines all tip logic), derives the floor from it, and
+// breaks on an empty or non-advancing range.
+func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted uint32) (uint32, error) {
+	ret := cfg.Retention
 	metrics := observability.MetricsOrNop(cfg.Exec.Metrics)
 	logger := cfg.Exec.Logger
 
@@ -190,10 +190,8 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 			return 0, err
 		}
 
-		// Time the whole pass, tip sample included: sampling the network tip (with its
-		// retry-backoff sleeps) is part of the pass's work, so the timer starts before
-		// it rather than only around runBackfill. Passes that break early (empty range)
-		// record nothing — the metrics call is below the break.
+		// Time the whole pass, tip sample included; passes that break early record
+		// nothing (the metrics calls are below the break).
 		passStart := time.Now()
 		// The backend owns its frontier (the lake for bsbSource, the archives for
 		// captiveSource). A tip still unavailable after the bounded retry errors the
@@ -206,28 +204,18 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 			return 0, fmt.Errorf("sample network tip: %w", err)
 		}
 
-		// max() guards a lagging bulk tip: the tip alone could regress the floor below
-		// pruning or drop a complete last-committed chunk.
-		anchor := max(tip, lastCommitted)
-		rangeStart := chunk.IDFromLedger(lifecycle.EffectiveRetentionFloor(anchor, retentionChunks, earliest))
-
-		// Same anchor for rangeEnd: a complete last-committed chunk above a lagging tip
-		// still folds in; chunks beyond the tip are durable and self-skip.
-		rangeEndSigned := geometry.LastCompleteChunkAt(anchor)
-
-		// Mid-chunk resume exclusion: a mid-chunk last-committed within one chunk of the tip
-		// leaves the partial resume chunk to ingestion. Under the mid-chunk precondition
-		// (guarded here) the last COMPLETE chunk is exactly one short of the live chunk,
-		// so LastCompleteChunkAt names it directly — same vocabulary as rangeEndSigned above.
-		if withinOneChunkOfTip(tip, lastCommitted) && lastCommittedMidChunk(lastCommitted) {
-			rangeEndSigned = geometry.LastCompleteChunkAt(lastCommitted)
-		}
-
-		// Break on an empty or non-advancing range.
-		if rangeEndSigned < int64(rangeStart) || rangeEndSigned <= backfilledThrough {
+		// Break on a degenerate range: nothing-complete (-1) or non-advancing at the
+		// first guard, an inverted range (earliest pinned above the target, e.g. a
+		// first start with earliest_ledger="now") at the second.
+		target := passTarget(tip, lastCommitted)
+		if target <= backfilledThrough {
 			break
 		}
-		rangeEnd := chunk.ID(rangeEndSigned) //nolint:gosec // > rangeStart >= 0
+		rangeStart := ret.FloorAt(target)
+		if int64(rangeStart) > target {
+			break
+		}
+		rangeEnd := chunk.ID(target) //nolint:gosec // target > backfilledThrough >= -1 ⇒ target >= 0
 
 		logger.WithField("range_lo", rangeStart.String()).
 			WithField("range_hi", rangeEnd.String()).
@@ -242,12 +230,11 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 
 		// Advance the last-committed, never regressing (a lagging tip's rangeEnd can sit below it).
 		lastCommitted = max(lastCommitted, rangeEnd.LastLedger())
-		backfilledThrough = rangeEndSigned
+		backfilledThrough = target
 
 		metrics.BackfillPass(passDuration)
-		// Refresh the derived gauges as last-committed advances and the floor rises with it.
 		metrics.LastCommitted(lastCommitted)
-		metrics.RetentionFloor(lifecycle.EffectiveRetentionFloor(lastCommitted, retentionChunks, earliest))
+		metrics.RetentionFloor(rangeStart.FirstLedger()) // the floor this pass built to
 		logger.WithField("range_lo", rangeStart.String()).
 			WithField("range_hi", rangeEnd.String()).
 			WithField("last_committed", lastCommitted).
@@ -255,6 +242,28 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 			Info("backfill pass complete")
 	}
 	return lastCommitted, nil
+}
+
+// passTarget is the highest complete chunk this backfill pass builds to: the last
+// complete chunk at max(tip, lastCommitted), lowered by the mid-chunk exclusion so
+// a mid-chunk last-committed within one chunk of the tip leaves its partial resume
+// chunk to ingestion. Signed; -1 means no complete chunk exists. All tip logic is
+// quarantined here, so the retention floor derives from the returned target alone.
+func passTarget(tip, lastCommitted uint32) int64 {
+	// max() guards a lagging bulk tip: the tip alone could drop a complete
+	// last-committed chunk.
+	target := geometry.LastCompleteChunkAt(max(tip, lastCommitted))
+	if withinOneChunkOfTip(tip, lastCommitted) && lastCommittedMidChunk(lastCommitted) {
+		target = geometry.LastCompleteChunkAt(lastCommitted)
+	}
+	return target
+}
+
+// retentionFloorLedger is the retention_floor_ledger gauge value for the highest
+// committed ledger. FloorAt maps the -1 "nothing complete yet" frontier to the
+// earliest chunk, so no young-store branch is needed here.
+func retentionFloorLedger(ret geometry.Retention, committed uint32) uint32 {
+	return ret.FloorAt(geometry.LastCompleteChunkAt(committed)).FirstLedger()
 }
 
 // withinOneChunkOfTip reports whether the last-committed sits within one chunk of the
@@ -289,11 +298,10 @@ type StartConfig struct {
 	// Exec drives backfill's RunBackfill; its Catalog/Logger are the shared ones.
 	Exec backfill.ExecConfig
 
-	// RetentionChunks bounds the sliding retention floor's width — the backfill
-	// floor's width too (0 ⇒ the earliest-ledger floor only). run() assembles the
-	// lifecycle.Config from Exec + this, so the lifecycle and backfill can never
-	// diverge on the catalog/pool (the invariant is structural, not by comment).
-	RetentionChunks uint32
+	// Retention is the floor policy, bound once at startup from the validated
+	// earliest_ledger pin. run() assembles the lifecycle.Config from Exec + this,
+	// so the lifecycle and backfill share one floor by construction.
+	Retention geometry.Retention
 
 	// Core starts captive core and yields the ingestion getter. Required.
 	Core CoreOpener
@@ -310,8 +318,8 @@ type StartConfig struct {
 }
 
 // withDefaults fills the embedded Exec defaults (Workers -> GOMAXPROCS). The
-// lifecycle.Config is assembled from Exec + RetentionChunks in run(); the tip
-// retry policy is the sampleTipWithRetry defaults at its call sites, not here.
+// lifecycle.Config is assembled from Exec + Retention in run(); the tip retry
+// policy is the sampleTipWithRetry defaults at its call sites, not here.
 func (cfg StartConfig) withDefaults() StartConfig {
 	cfg.Exec = cfg.Exec.WithDefaults()
 	return cfg

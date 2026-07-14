@@ -15,6 +15,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/fhtest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
@@ -99,10 +100,10 @@ func startTestConfig(
 		Process: backfill.ProcessConfig{Backend: tip}, // the tip source every pass samples
 	}
 	cfg := StartConfig{
-		Exec:            exec,
-		RetentionChunks: 0,
-		Core:            core,
-		ServeReads:      func(context.Context) error { return nil },
+		Exec:       exec,
+		Retention:  fhtest.RetentionFor(t, cat, 0),
+		Core:       core,
+		ServeReads: func(context.Context) error { return nil },
 	}
 	if recordPlan != nil {
 		cfg.runBackfill = func(_ context.Context, _ backfill.ExecConfig, lo, hi chunk.ID) error {
@@ -203,7 +204,7 @@ func TestBackfill_FirstStartTipAbsentErrors(t *testing.T) {
 	cfg := startTestConfig(t, cat, tip, nil, &recordingPlan{})
 
 	// Empty catalog ⇒ lastCommitted=1 < earliest=2 ⇒ first start with no progress.
-	_, err := backfillToTip(context.Background(), cfg, preGenesisLedger, chunk.FirstLedgerSeq)
+	_, err := backfillToTip(context.Background(), cfg, preGenesisLedger)
 	require.Error(t, err)
 }
 
@@ -218,7 +219,7 @@ func TestBackfill_FirstStartTipPresentComputesRange(t *testing.T) {
 	tip := &fakeTipBackend{tips: []uint32{tipLedger}}
 	cfg := startTestConfig(t, cat, tip, nil, rec)
 
-	last, err := backfillToTip(context.Background(), cfg, preGenesisLedger, chunk.FirstLedgerSeq)
+	last, err := backfillToTip(context.Background(), cfg, preGenesisLedger)
 	require.NoError(t, err)
 	passes := rec.snapshot()
 	require.Len(t, passes, 1, "the tip does not move, so exactly one backfill pass")
@@ -237,7 +238,7 @@ func TestBackfill_YoungNetworkNoOp(t *testing.T) {
 	rec := &recordingPlan{}
 	cfg := startTestConfig(t, cat, tip, nil, rec)
 
-	last, err := backfillToTip(context.Background(), cfg, preGenesisLedger, chunk.FirstLedgerSeq)
+	last, err := backfillToTip(context.Background(), cfg, preGenesisLedger)
 	require.NoError(t, err)
 	require.Empty(t, rec.snapshot(), "no backfill pass on a young network")
 	assert.Equal(t, preGenesisLedger, last, "lastCommitted unchanged")
@@ -254,7 +255,7 @@ func TestBackfill_SteadyRestartNoOp(t *testing.T) {
 	tip := &fakeTipBackend{tips: []uint32{tipLedger}}
 	cfg := startTestConfig(t, cat, tip, nil, rec)
 
-	last, err := backfillToTip(context.Background(), cfg, lastCommitted, chunk.FirstLedgerSeq)
+	last, err := backfillToTip(context.Background(), cfg, lastCommitted)
 	require.NoError(t, err)
 	passes := rec.snapshot()
 	require.Len(t, passes, 1)
@@ -265,7 +266,7 @@ func TestBackfill_SteadyRestartNoOp(t *testing.T) {
 // Mid-chunk resume exclusion: a lastCommitted inside chunk 5 leaves the partial
 // resume chunk to ingestion — rangeEnd folds back to chunkID(lastCommitted)-1=4. Tip
 // is AT chunk 5's last ledger (complete-at-tip) so the exclusion is detectable:
-// without it lastCompleteChunkAt(anchor)=5 and the live chunk would be backfilled.
+// without it lastCompleteChunkAt(max(tip,lastCommitted))=5 and the live chunk would be backfilled.
 func TestBackfill_MidChunkResumeExclusion(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
@@ -275,7 +276,7 @@ func TestBackfill_MidChunkResumeExclusion(t *testing.T) {
 	tip := &fakeTipBackend{tips: []uint32{tipLedger}}
 	cfg := startTestConfig(t, cat, tip, nil, rec)
 
-	last, err := backfillToTip(context.Background(), cfg, lastCommitted, chunk.FirstLedgerSeq)
+	last, err := backfillToTip(context.Background(), cfg, lastCommitted)
 	require.NoError(t, err)
 	passes := rec.snapshot()
 	require.Len(t, passes, 1)
@@ -286,6 +287,32 @@ func TestBackfill_MidChunkResumeExclusion(t *testing.T) {
 	assert.Less(t, passes[0][0], chunk.ID(5))
 	// The excluded chunk stays the resume point ⇒ lastCommitted unchanged.
 	assert.Equal(t, lastCommitted, last)
+}
+
+// TestBackfill_FloorAnchorsOnTargetNotTip is the finding's scenario: a mid-chunk
+// last-committed within one chunk of a tip one chunk ahead, with finite retention.
+// The floor must anchor on the post-exclusion target (the last complete chunk at
+// last-committed = chunk 99), not on the tip's chunk 100 — otherwise the pass
+// builds [96,99] and the seed tick immediately rebuilds [95,99], a transient
+// coverage gap at chunk 95.
+func TestBackfill_FloorAnchorsOnTargetNotTip(t *testing.T) {
+	cat, _ := testCatalog(t)
+	pinGenesis(t, cat)
+	lastCommitted := chunk.ID(100).FirstLedger() + 100 // mid chunk 100
+	tipLedger := chunk.ID(101).FirstLedger() + 50      // chunk 101, within one chunk of last-committed
+	rec := &recordingPlan{}
+	tip := &fakeTipBackend{tips: []uint32{tipLedger}}
+	cfg := startTestConfig(t, cat, tip, nil, rec)
+	cfg.Retention = fhtest.RetentionFor(t, cat, 5) // retain 5 chunks
+
+	last, err := backfillToTip(context.Background(), cfg, lastCommitted)
+	require.NoError(t, err)
+	passes := rec.snapshot()
+	require.Len(t, passes, 1)
+	assert.Equal(t, chunk.ID(95), passes[0][0],
+		"floor anchors on the post-exclusion target (chunk 99 ⇒ 95), NOT the tip (chunk 100 ⇒ 96)")
+	assert.Equal(t, chunk.ID(99), passes[0][1], "rangeEnd is the last complete chunk at last-committed")
+	assert.Equal(t, lastCommitted, last, "the mid-chunk resume point stays last-committed")
 }
 
 // Long-downtime re-pass: the tip advances between passes, so the loop re-passes
@@ -302,7 +329,7 @@ func TestBackfill_LongDowntimeRePass(t *testing.T) {
 	rec := &recordingPlan{}
 	cfg := startTestConfig(t, cat, tip, nil, rec)
 
-	last, err := backfillToTip(context.Background(), cfg, preGenesisLedger, chunk.FirstLedgerSeq)
+	last, err := backfillToTip(context.Background(), cfg, preGenesisLedger)
 	require.NoError(t, err)
 
 	var maxHi chunk.ID
@@ -328,12 +355,12 @@ func TestBackfill_RestartTipUnavailableErrors(t *testing.T) {
 	rec := &recordingPlan{}
 	cfg := startTestConfig(t, cat, tip, nil, rec)
 
-	_, err := backfillToTip(context.Background(), cfg, lastCommitted, chunk.FirstLedgerSeq)
+	_, err := backfillToTip(context.Background(), cfg, lastCommitted)
 	require.Error(t, err, "an unavailable tip errors out — no degraded mode")
 	require.Empty(t, rec.snapshot(), "no backfill pass runs when the tip is unavailable")
 }
 
-// Lagging bulk tip below a chunk-aligned lastCommitted: the anchor is max(tip,
+// Lagging bulk tip below a chunk-aligned lastCommitted: max(tip,
 // lastCommitted)==lastCommitted, so rangeEnd==lastCompleteChunkAt(lastCommitted)==5, not
 // ==2 (which would regress below where pruning advanced). Mid-chunk exclusion
 // does NOT fire — the lastCommitted is on a boundary.
@@ -346,10 +373,10 @@ func TestBackfill_LaggingBulkTipCoversLastCommittedChunk(t *testing.T) {
 	tip := &fakeTipBackend{tips: []uint32{tipLedger}}
 	cfg := startTestConfig(t, cat, tip, nil, rec)
 
-	last, err := backfillToTip(context.Background(), cfg, lastCommitted, chunk.FirstLedgerSeq)
+	last, err := backfillToTip(context.Background(), cfg, lastCommitted)
 	require.NoError(t, err)
 	passes := rec.snapshot()
-	require.Len(t, passes, 1, "one pass anchored on the lastCommitted, then backfilledThrough==5 breaks")
+	require.Len(t, passes, 1, "one pass over the lastCommitted's chunk, then backfilledThrough==5 breaks")
 	assert.Equal(t, chunk.ID(5), passes[0][1],
 		"rangeEnd == lastCompleteChunkAt(lastCommitted) == 5, NOT lastCompleteChunkAt(tip) == 2")
 	assert.Equal(t, chunk.ID(0), passes[0][0], "rangeStart is chunk 0 (genesis floor)")
@@ -577,6 +604,16 @@ func TestWithinOneChunkOfTip(t *testing.T) {
 	}
 }
 
+// retentionFloorLedger emits the floor chunk's first ledger, or the earliest
+// chunk's on a young store (no complete chunk yet).
+func TestRetentionFloorLedger(t *testing.T) {
+	ret := geometry.NewRetention(5, chunk.ID(3)) // retain 5 chunks, earliest chunk 3
+	// A complete chunk 100 ⇒ sliding floor 96 (above the earliest).
+	assert.Equal(t, chunk.ID(96).FirstLedger(), retentionFloorLedger(ret, chunk.ID(100).LastLedger()))
+	// Young store, nothing complete ⇒ the earliest chunk, not a sliding floor.
+	assert.Equal(t, chunk.ID(3).FirstLedger(), retentionFloorLedger(ret, preGenesisLedger))
+}
+
 // ---------------------------------------------------------------------------
 // backfill observability.
 // ---------------------------------------------------------------------------
@@ -594,7 +631,7 @@ func TestBackfill_ReportsPassAndProgress(t *testing.T) {
 	metrics := newRecordingMetrics()
 	start.Exec.Metrics = metrics
 
-	got, err := backfillToTip(context.Background(), start, preGenesisLedger, chunk.FirstLedgerSeq)
+	got, err := backfillToTip(context.Background(), start, preGenesisLedger)
 	require.NoError(t, err)
 
 	assert.Positive(t, metrics.backfillPasses, "at least one backfill pass reported")
