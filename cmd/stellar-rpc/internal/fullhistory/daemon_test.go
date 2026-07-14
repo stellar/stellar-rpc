@@ -513,7 +513,7 @@ func TestBuildBackfillBackend_NoLakeBuildsCaptiveSource(t *testing.T) {
 }
 
 // fakeRootHAS is a rootHASGetter over a fixed CurrentLedger (or a fixed error),
-// the narrow archive seam archiveTip reads.
+// the narrow archive seam captiveSource.Tip reads.
 type fakeRootHAS struct {
 	current uint32
 	err     error
@@ -526,9 +526,10 @@ func (f fakeRootHAS) GetRootHAS() (historyarchive.HistoryArchiveState, error) {
 	return historyarchive.HistoryArchiveState{CurrentLedger: f.current}, nil
 }
 
-// A GetRootHAS failure surfaces as a wrapped tip-source error (retryable upstream).
-func TestArchiveTip_RootHASErrorSurfaces(t *testing.T) {
-	_, err := archiveTip(fakeRootHAS{err: errors.New("archive 503")})(context.Background())
+// A GetRootHAS failure surfaces as a wrapped tip error (retryable upstream).
+func TestCaptiveSourceTip_RootHASErrorSurfaces(t *testing.T) {
+	src := &captiveSource{archives: fakeRootHAS{err: errors.New("archive 503")}}
+	_, err := src.Tip(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "root HAS")
 	assert.Contains(t, err.Error(), "archive 503")

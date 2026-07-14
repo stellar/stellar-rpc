@@ -320,9 +320,22 @@ type captiveSource struct {
 
 var _ backfill.Backend = (*captiveSource)(nil)
 
-// Tip reports the archives' current frontier — the root HAS CurrentLedger.
-func (s *captiveSource) Tip(ctx context.Context) (uint32, error) {
-	return archiveTip(s.archives)(ctx)
+// rootHASGetter is the slice of historyarchive.ArchiveInterface Tip needs: the
+// network frontier is the CurrentLedger the root HAS publishes.
+type rootHASGetter interface {
+	GetRootHAS() (historyarchive.HistoryArchiveState, error)
+}
+
+// Tip reports the archives' current frontier — the root HAS CurrentLedger. The
+// archives lag the network by up to one checkpoint (64 ledgers); backfill's
+// anchor = max(tip, lastCommitted) and the signed withinOneChunkOfTip already
+// absorb that, so no lag adjustment here.
+func (s *captiveSource) Tip(context.Context) (uint32, error) {
+	has, err := s.archives.GetRootHAS()
+	if err != nil {
+		return 0, fmt.Errorf("history archive root HAS: %w", err)
+	}
+	return has.CurrentLedger, nil
 }
 
 // ---------------------------------------------------------------------------

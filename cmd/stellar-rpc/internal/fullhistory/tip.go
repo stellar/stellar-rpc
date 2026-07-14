@@ -7,8 +7,6 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 
-	"github.com/stellar/go-stellar-sdk/historyarchive"
-
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
@@ -62,25 +60,5 @@ func sampleTipWithRetry(
 		return 0, err // permanent (not ready) or ctx-canceled: surface as-is, not "exhausted"
 	default:
 		return 0, fmt.Errorf("network tip unavailable after %d attempts: %w", maxAttempts, err)
-	}
-}
-
-// rootHASGetter is the slice of historyarchive.ArchiveInterface archiveTip needs:
-// the network frontier is the CurrentLedger the root HAS publishes.
-type rootHASGetter interface {
-	GetRootHAS() (historyarchive.HistoryArchiveState, error)
-}
-
-// archiveTip samples the network frontier from the history archives' root HAS —
-// captiveSource's frontier for a no-lake daemon. The archives lag the network by
-// up to one checkpoint (64 ledgers); backfill's anchor = max(tip, lastCommitted)
-// and the signed withinOneChunkOfTip already absorb that, so no lag adjustment here.
-func archiveTip(a rootHASGetter) tipSource {
-	return func(context.Context) (uint32, error) {
-		has, err := a.GetRootHAS()
-		if err != nil {
-			return 0, fmt.Errorf("history archive root HAS: %w", err)
-		}
-		return has.CurrentLedger, nil
 	}
 }

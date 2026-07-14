@@ -314,20 +314,22 @@ func TestBackfill_LongDowntimeRePass(t *testing.T) {
 	assert.GreaterOrEqual(t, tip.callCount(), 3, "the loop re-sampled the tip across passes")
 }
 
-// Restart with an unreachable tip errors out even when local progress exists: the
-// synthetic tip:=lastCommitted degraded mode is gone (the sampler's lake→archive
-// fallback means an unavailable tip is a genuine "no source reachable"). No
-// backfill pass runs; the supervisor restarts and re-samples.
-func TestBackfill_RestartTipUnreachableErrors(t *testing.T) {
+// Restart with no usable tip errors out even when local progress exists: the
+// synthetic tip:=lastCommitted degraded mode is gone. No backfill pass runs; the
+// supervisor restarts and re-samples. Sub-genesis reads as a permanent "not
+// ready" — one poll, no retry sleeps — and resolves to the same "tip
+// unavailable" outcome as an erroring tip (whose retry exhaustion
+// TestSampleTip_ExhaustedRetriesErrors covers at a fast interval).
+func TestBackfill_RestartTipUnavailableErrors(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 	lastCommitted := chunk.ID(2).LastLedger() // local progress exists
-	tip := &fakeTipBackend{err: errors.New("backend down"), errFirst: 99}
+	tip := &fakeTipBackend{tips: []uint32{0}}
 	rec := &recordingPlan{}
 	cfg := startTestConfig(t, cat, tip, nil, rec)
 
 	_, err := backfillToTip(context.Background(), cfg, lastCommitted, chunk.FirstLedgerSeq)
-	require.Error(t, err, "an unreachable tip errors out — no degraded mode")
+	require.Error(t, err, "an unavailable tip errors out — no degraded mode")
 	require.Empty(t, rec.snapshot(), "no backfill pass runs when the tip is unavailable")
 }
 
@@ -483,13 +485,14 @@ func TestRun_OpensHotDBAndCoreBeforeServe(t *testing.T) {
 }
 
 // run errors on a first start with an unavailable tip (restartable, no sentinel);
-// reads are never served and ingestion never starts.
+// reads are never served and ingestion never starts. Sub-genesis ⇒ one
+// permanent-failure poll, no retry sleeps.
 func TestRun_FirstStartNoTipErrors(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 	served := atomic.Int32{}
 	core := &fakeCore{}
-	tip := &fakeTipBackend{err: errors.New("unreachable"), errFirst: 99}
+	tip := &fakeTipBackend{tips: []uint32{0}}
 	cfg := startTestConfig(t, cat, tip, core, nil)
 	cfg.ServeReads = func(context.Context) error { served.Add(1); return nil }
 
