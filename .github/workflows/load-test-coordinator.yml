@@ -11,9 +11,7 @@ defaults:
 
 on:
   push:
-    # temporary scaffolding: before merge to main, replace with line
-    # branches: [release/**]
-    branches: [release/**, backfill-test]
+    branches: [release/**]
   workflow_dispatch:
     inputs:
       target_ref:
