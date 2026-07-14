@@ -18,12 +18,11 @@ import (
 )
 
 // NewCommand returns the `bench-ingest` command tree: `cold`
-// benchmarks ingest.WriteColdChunk, `hot` benchmarks ingest.HotService — both
-// against the production ingest package, reporting per-stage percentile CSVs.
+// benchmarks ingest.WriteColdChunk, `hot` benchmarks ingest.HotService.
 func NewCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bench-ingest",
-		Short: "Benchmark full-history ingestion against the production ingest path",
+		Short: "Benchmark full-history ingestion",
 	}
 	cmd.AddCommand(newColdCommand(), newHotCommand())
 	return cmd
@@ -146,7 +145,7 @@ func newColdCommand() *cobra.Command {
 					StartChunk:   chunk.ID(chunkArg),
 					NumChunks:    numChunks,
 					ChunkWorkers: chunkWorkers,
-					ArtifactRoot: coldOutDir,
+					ColdRoot:     coldOutDir,
 					OutDir:       outDir,
 				})
 			})

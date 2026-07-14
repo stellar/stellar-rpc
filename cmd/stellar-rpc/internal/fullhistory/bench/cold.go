@@ -1,10 +1,9 @@
 // Package bench implements the full-history ingestion benchmarks behind the
-// stellar-rpc bench-ingest subcommand (issue #771): drivers that feed a ledger
+// stellar-rpc bench-ingest subcommand: drivers that feed a ledger
 // source through the PRODUCTION ingest entry points — ingest.WriteColdChunk
 // (cold) and ingest.HotService (hot) — and a csvSink that aggregates the
 // MetricSink signals those paths already emit into per-stage percentile CSV
-// reports. Nothing here re-instruments or re-implements ingestion; the engine
-// under measurement is the one that ships.
+// reports.
 package bench
 
 import (
@@ -28,8 +27,7 @@ import (
 )
 
 // maxChunkID is the last chunk ID whose LastLedger fits in a uint32 ledger
-// sequence (see chunk.ID.LastLedger); past it the ledger-range arithmetic
-// wraps, so a --chunk beyond it would silently benchmark a garbage range.
+// sequence (see chunk.ID.LastLedger).
 const maxChunkID = chunk.ID(math.MaxUint32/chunk.LedgersPerChunk - 1)
 
 // coldOptions configures one cold ingest benchmark run.
@@ -42,10 +40,10 @@ type coldOptions struct {
 	StartChunk   chunk.ID
 	NumChunks    int
 	ChunkWorkers int
-	// ArtifactRoot is the output root the cold artifacts land under, laid out
-	// by geometry.NewLayout. It is scratch: no completion records are written,
-	// so re-runs overwrite freely (the production artifact model).
-	ArtifactRoot string
+	// ColdRoot is the output root the cold artifacts land under, laid out by
+	// geometry.NewLayout. It is scratch: no completion records are written,
+	// so re-runs overwrite freely.
+	ColdRoot string
 	// OutDir receives the CSV report.
 	OutDir string
 }
@@ -65,14 +63,14 @@ func (o coldOptions) validate() error {
 		return fmt.Errorf("--chunk=%d with --num-chunks=%d ends at chunk %d, past the last valid chunk ID %d",
 			uint32(o.StartChunk), o.NumChunks, end, uint32(maxChunkID))
 	}
-	if o.ArtifactRoot == "" {
+	if o.ColdRoot == "" {
 		return errors.New("--cold-out-dir is required")
 	}
 	// Refuse re-packing a source pack tree in place: the cold ledger writer
 	// overwrites its destination, and destination == source would corrupt the
 	// pack mid-read.
 	if o.Source.Kind == sourcePack && o.Types.Ledgers {
-		outLedgers := geometry.NewLayout(o.ArtifactRoot).LedgersRoot()
+		outLedgers := geometry.NewLayout(o.ColdRoot).LedgersRoot()
 		if samePath(o.Source.PackDir, outLedgers) {
 			return fmt.Errorf("--cold-out-dir's ledgers tree (%s) must differ from --pack-dir", outLedgers)
 		}
@@ -94,19 +92,15 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 		logger.Infof("--chunk-workers=%d > --num-chunks=%d; clamping", opts.ChunkWorkers, opts.NumChunks)
 		opts.ChunkWorkers = opts.NumChunks
 	}
-	// Surface an unwritable --out before the expensive run, not after it.
+	// Surface an unwritable --out before the run.
 	if err := os.MkdirAll(opts.OutDir, 0o755); err != nil {
 		return fmt.Errorf("create --out dir %s: %w", opts.OutDir, err)
 	}
-	// Cold artifacts land at production geometry under ArtifactRoot: create +
-	// fsync every write root up front, the daemon's own root prep. There is no
-	// cross-process root lock to take — single-process enforcement rides on
-	// the catalog's RocksDB LOCK (which a catalog-less bench run never opens),
-	// and cold trees are write-once behind the one-write protocol, so a
-	// concurrent writer is redundant work, not corruption. All three roots are
-	// prepared regardless of --types — ArtifactRoot is owned wholesale as
-	// scratch.
-	layout := geometry.NewLayout(opts.ArtifactRoot)
+	// Create and fsync the ledgers, events, and txhash roots up front,
+	// even when --types skips some; the bench owns ColdRoot as scratch.
+	// Catalog-less runs have no RocksDB LOCK, but cold's one-write protocol
+	// makes concurrent writers duplicate work rather than corrupt data.
+	layout := geometry.NewLayout(opts.ColdRoot)
 	if err := config.PrepareRoots(layout.LedgersRoot(), layout.EventsRoot(), layout.TxHashRawRoot()); err != nil {
 		return fmt.Errorf("prepare --cold-out-dir write roots: %w", err)
 	}

@@ -101,7 +101,7 @@ func TestRunColdFromPack(t *testing.T) {
 		StartChunk:   chunkID,
 		NumChunks:    1,
 		ChunkWorkers: 1,
-		ArtifactRoot: outRoot,
+		ColdRoot:     outRoot,
 		OutDir:       csvDir,
 	})
 	require.NoError(t, err)
@@ -164,7 +164,7 @@ func TestRunColdMultiChunkWorkers(t *testing.T) {
 		StartChunk:   chunk.ID(0),
 		NumChunks:    2,
 		ChunkWorkers: 2,
-		ArtifactRoot: t.TempDir(),
+		ColdRoot:     t.TempDir(),
 		OutDir:       csvDir,
 	})
 	require.NoError(t, err)
@@ -186,7 +186,7 @@ func TestRunColdRefusesInPlaceRepack(t *testing.T) {
 		StartChunk:   chunk.ID(0),
 		NumChunks:    1,
 		ChunkWorkers: 1,
-		ArtifactRoot: root,
+		ColdRoot:     root,
 		OutDir:       t.TempDir(),
 	})
 	require.ErrorContains(t, err, "must differ from --pack-dir")

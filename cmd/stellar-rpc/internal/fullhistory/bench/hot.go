@@ -9,7 +9,6 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
-	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
@@ -48,7 +47,7 @@ func (o hotOptions) validate() error {
 	return nil
 }
 
-// runHot benchmarks the production hot ingest path: it opens a fresh
+// runHot benchmarks the hot ingest path: it opens a fresh
 // per-chunk hot DB, builds ingest.NewHotService over it with the CSV sink,
 // and drives the chunk's ledgers through Ingest one at a time — the same
 // shape as the daemon's live loop. Per-phase percentiles come from the
@@ -138,7 +137,7 @@ func driveHot(
 			sink.observeDriver(driverReadBlocked, time.Since(tRead), 0)
 		}
 		tIngest := time.Now()
-		if err := svc.Ingest(ctx, seq, xdr.LedgerCloseMetaView(raw)); err != nil {
+		if err := svc.Ingest(ctx, seq, raw); err != nil {
 			return fmt.Errorf("hot ingest seq %d: %w", seq, err)
 		}
 		sink.observeDriver(driverIngestTotal, time.Since(tIngest), 1)
