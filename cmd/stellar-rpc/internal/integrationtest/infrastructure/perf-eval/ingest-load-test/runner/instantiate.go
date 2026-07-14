@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,7 +69,7 @@ func instantiate(ctx context.Context) error {
 		"PERF_TARGET_SHA=" + env["TARGET_SHA"],
 		"PERF_RUN_ID=" + env["RUN_ID"],
 		"PERF_REPO=" + env["REPO"],
-		fmt.Sprintf("PERF_GOLDEN_FETCH_SECONDS=%d", goldenFetchSecs),
+		"PERF_GOLDEN_FETCH_SECONDS=" + strconv.Itoa(goldenFetchSecs),
 		"STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true",
 	}
 	if err := harness.RunStreaming(ctx, repoRoot, benchEnv, 80,

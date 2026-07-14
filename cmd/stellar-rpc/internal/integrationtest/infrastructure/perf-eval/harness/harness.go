@@ -64,21 +64,6 @@ func Env(key, def string) string {
 	return def
 }
 
-// RequireEnv returns the values of keys in order, erroring with every unset one.
-func RequireEnv(keys ...string) ([]string, error) {
-	vals := make([]string, len(keys))
-	var missing []string
-	for i, k := range keys {
-		if vals[i] = os.Getenv(k); vals[i] == "" {
-			missing = append(missing, k)
-		}
-	}
-	if len(missing) > 0 {
-		return nil, fmt.Errorf("missing required env: %s", strings.Join(missing, ", "))
-	}
-	return vals, nil
-}
-
 // appendOutputs appends lines to the GitHub Actions step-output file.
 func appendOutputs(path string, lines ...string) error {
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
