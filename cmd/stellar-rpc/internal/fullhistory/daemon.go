@@ -90,6 +90,12 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 		}
 	}
 
+	// Readiness/health signal, fed by the ingestion loop per commit; both signals
+	// derive from the last committed ledger. Created outside the supervised run
+	// loop so it survives restarts (readiness stays latched across them).
+	// TODO(#772): serve it from the read server (as HealthSignal).
+	hs := &healthState{}
+
 	paths := cfg.ResolvePaths()
 
 	// --- Reject shared roots, then create + fsync any missing ones. Single-
@@ -180,7 +186,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	// --- Assemble the StartConfig and run the supervised run loop. ---
 	start := startConfig(
-		cfg, cat, logger, backend, core, serveReads, metrics, sink)
+		cfg, cat, logger, backend, core, serveReads, metrics, sink, hs)
 
 	backoff := opts.RestartBackoff
 	if backoff <= 0 {
@@ -195,7 +201,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 func startConfig(
 	cfg config.Config, cat *catalog.Catalog, logger *supportlog.Entry,
 	backend backfill.Backend, core CoreOpener, serveReads func(context.Context) error,
-	metrics observability.Metrics, sink ingest.MetricSink,
+	metrics observability.Metrics, sink ingest.MetricSink, hs *healthState,
 ) StartConfig {
 	exec := backfill.ExecConfig{
 		Catalog:    cat,
@@ -213,6 +219,7 @@ func startConfig(
 		RetentionChunks: deref(cfg.Retention.RetentionChunks),
 		Core:            core,
 		ServeReads:      serveReads,
+		health:          hs,
 	}
 }
 
