@@ -171,8 +171,8 @@ func (h *HotStore) Offsets() (*events.LedgerOffsets, error) {
 
 // LookupKeys returns bitmaps for each key, aligned positionally with
 // the input slice. result[i] is nil if keys[i] has no matching
-// events. See Reader.LookupKeys for the semantics — in particular
-// the borrowed-bitmap contract (callers must not mutate).
+// events. See Reader.LookupKeys for the semantics — each returned
+// bitmap is an owned clone the caller may read or mutate.
 //
 // Hot-side implementation is N in-memory mirror lookups — no I/O
 // to batch — but exposing this method satisfies the Reader

@@ -8,6 +8,36 @@ import (
 	"time"
 )
 
+// BenchmarkConcurrentBitmaps_DenseAddTo proves the write fix: a
+// single AddTo of the next monotonic ID onto an already-dense term
+// costs about the same regardless of how many IDs the term already
+// holds. Each sub-benchmark pre-fills one dense term with N IDs
+// (outside the timed loop) and then times single-ID AddTo calls.
+//
+// With the in-place AddMany, ns/op should stay roughly flat across N.
+// The old clone-per-AddTo code scaled ns/op with N (each AddTo cloned
+// the whole bitmap, O(numContainers)).
+func BenchmarkConcurrentBitmaps_DenseAddTo(b *testing.B) {
+	for _, n := range []int{1_000, 100_000, 5_000_000} {
+		b.Run(fmt.Sprintf("prefill=%d", n), func(b *testing.B) {
+			key := ComputeTermKey([]byte("hot"), FieldContractID)
+			s := NewConcurrentBitmapsFromBitmaps(NewBitmaps())
+			ids := make([]uint32, n)
+			for i := range ids {
+				ids[i] = uint32(i)
+			}
+			s.AddTo(key, ids...) // one-time prefill; promotes to dense
+			next := uint32(n)
+
+			b.ReportAllocs()
+			for b.Loop() {
+				s.AddTo(key, next)
+				next++
+			}
+		})
+	}
+}
+
 // BenchmarkEventIndex_10M measures heap at full chunk scale.
 // Distribution modeled on real production chunk data:
 //

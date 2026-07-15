@@ -94,18 +94,14 @@ type Reader interface {
 	//
 	// ColdReader coalesces the underlying packfile reads into a
 	// single ReadItems pass, fanning out across the worker count
-	// configured via ColdReaderOptions.Concurrency. HotStore returns
-	// borrowed mirror references with no per-key Clone.
+	// configured via ColdReaderOptions.Concurrency. HotStore clones
+	// each matching bitmap out of the in-memory mirror.
 	//
-	// Bitmap ownership: callers MUST treat returned bitmaps as
-	// read-only. The hot path returns immutable snapshots of the
-	// live mirror — ConcurrentBitmaps stores bitmap pointers via
-	// atomic.Pointer COW, so a returned pointer will never be
-	// mutated by anyone. The cold path returns freshly-unmarshaled
-	// bitmaps logically owned by the caller. Either way callers
-	// must not mutate; eventstore.Query is the only consumer today
-	// and never mutates, and downstream roaring.FastAnd/FastOr never
-	// mutate inputs.
+	// Bitmap ownership: both paths return bitmaps owned by the
+	// caller — the cold path freshly unmarshals them, the hot path
+	// clones them out of the live mirror — so the caller may read or
+	// mutate them freely. eventstore.Query treats them as read-only
+	// and relies on roaring.FastAnd/FastOr never mutating inputs.
 	//
 	// ctx cancels in-flight I/O on the cold path (MPHF load,
 	// index.pack ReadAt); hot side checks ctx as a fast guard before
