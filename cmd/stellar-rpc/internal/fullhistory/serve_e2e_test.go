@@ -168,7 +168,10 @@ func oneTxEventLCM(t *testing.T, seq uint32, src xdr.MuxedAccount, data string) 
 // generic map (result/error), mirroring serve/server_test.go's postJSON.
 func postRPC(t *testing.T, url, body string) map[string]any {
 	t.Helper()
-	resp, err := http.Post(url, "application/json", bytes.NewReader([]byte(body)))
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, url, bytes.NewReader([]byte(body)))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
@@ -176,6 +179,30 @@ func postRPC(t *testing.T, url, body string) map[string]any {
 	var out map[string]any
 	require.NoError(t, json.Unmarshal(raw, &out), "response: %s", raw)
 	return out
+}
+
+// asMap/asSlice/asString are checked type-assertion helpers for the decoded
+// JSON-RPC envelopes: they fail the test loudly instead of panicking on a shape
+// mismatch (forcetypeassert), keeping the assertions below readable.
+func asMap(t *testing.T, v any) map[string]any {
+	t.Helper()
+	m, ok := v.(map[string]any)
+	require.True(t, ok, "expected a JSON object, got %T", v)
+	return m
+}
+
+func asSlice(t *testing.T, v any) []any {
+	t.Helper()
+	s, ok := v.([]any)
+	require.True(t, ok, "expected a JSON array, got %T", v)
+	return s
+}
+
+func asString(t *testing.T, v any) string {
+	t.Helper()
+	s, ok := v.(string)
+	require.True(t, ok, "expected a JSON string, got %T", v)
+	return s
 }
 
 // TestServeE2E_QueryHotAndCold is the query POC's end-to-end gate — see the file
@@ -258,7 +285,11 @@ func TestServeE2E_QueryHotAndCold(t *testing.T) {
 
 	// Poll /ready — it latches true once the ingestion loop commits its first ledger.
 	require.Eventually(t, func() bool {
-		resp, err := http.Get(base + "/ready")
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/ready", nil)
+		if err != nil {
+			return false
+		}
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return false
 		}
@@ -295,11 +326,11 @@ func TestServeE2E_QueryHotAndCold(t *testing.T) {
 	}, 60*time.Second, 200*time.Millisecond, "getLedgers must span the cold→hot seam")
 
 	seam := postRPC(t, base+"/", ledgersReq(c0Last-1, 10))
-	seamRes := seam["result"].(map[string]any)
+	seamRes := asMap(t, seam["result"])
 	assert.EqualValues(t, liveLast, seamRes["latestLedger"], "latest is the live tip")
-	seamLedgers := seamRes["ledgers"].([]any)
-	firstSeq := seamLedgers[0].(map[string]any)["sequence"]
-	lastSeq := seamLedgers[len(seamLedgers)-1].(map[string]any)["sequence"]
+	seamLedgers := asSlice(t, seamRes["ledgers"])
+	firstSeq := asMap(t, seamLedgers[0])["sequence"]
+	lastSeq := asMap(t, seamLedgers[len(seamLedgers)-1])["sequence"]
 	assert.EqualValues(t, c0Last-1, firstSeq, "seam page starts in the cold chunk")
 	assert.EqualValues(t, liveLast, lastSeq, "seam page ends in the live chunk")
 
@@ -310,10 +341,10 @@ func TestServeE2E_QueryHotAndCold(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return txStatus(t, base, coldHash) == "SUCCESS"
 	}, 60*time.Second, 200*time.Millisecond, "cold tx must resolve from frozen history")
-	coldTx := postRPC(t, base+"/", txReq(coldHash))["result"].(map[string]any)
+	coldTx := asMap(t, postRPC(t, base+"/", txReq(coldHash))["result"])
 	assert.EqualValues(t, c0Last, coldTx["ledger"], "cold tx is in chunk 0's last ledger")
 
-	hotTx := postRPC(t, base+"/", txReq(hotHash))["result"].(map[string]any)
+	hotTx := asMap(t, postRPC(t, base+"/", txReq(hotHash))["result"])
 	assert.Equal(t, "SUCCESS", hotTx["status"], "live tx must resolve from the hot tier")
 	assert.EqualValues(t, c1First, hotTx["ledger"], "live tx is in chunk 1's first ledger")
 
@@ -322,18 +353,18 @@ func TestServeE2E_QueryHotAndCold(t *testing.T) {
 	// c0Last, limit 1) returns the cold tx; the follow-up cursor page returns the
 	// live tx — proving continuation across the cold→hot boundary.
 	// -------------------------------------------------------------------------
-	page1 := postRPC(t, base+"/", txsReqStart(c0Last, 1))["result"].(map[string]any)
-	p1txs := page1["transactions"].([]any)
+	page1 := asMap(t, postRPC(t, base+"/", txsReqStart(c0Last, 1))["result"])
+	p1txs := asSlice(t, page1["transactions"])
 	require.Len(t, p1txs, 1, "page 1 returns exactly the cold tx (limit 1)")
-	assert.Equal(t, hex.EncodeToString(coldHash[:]), p1txs[0].(map[string]any)["txHash"])
-	cursor1 := page1["cursor"].(string)
+	assert.Equal(t, hex.EncodeToString(coldHash[:]), asMap(t, p1txs[0])["txHash"])
+	cursor1 := asString(t, page1["cursor"])
 
-	page2 := postRPC(t, base+"/", txsReqCursor(cursor1, 5))["result"].(map[string]any)
-	p2txs := page2["transactions"].([]any)
+	page2 := asMap(t, postRPC(t, base+"/", txsReqCursor(cursor1, 5))["result"])
+	p2txs := asSlice(t, page2["transactions"])
 	require.NotEmpty(t, p2txs, "the cursor page resumes past the cold tx")
 	var sawHot bool
 	for _, tx := range p2txs {
-		if tx.(map[string]any)["txHash"] == hex.EncodeToString(hotHash[:]) {
+		if asMap(t, tx)["txHash"] == hex.EncodeToString(hotHash[:]) {
 			sawHot = true
 		}
 	}
@@ -357,13 +388,13 @@ func TestServeE2E_QueryHotAndCold(t *testing.T) {
 		return len(evs) == 2
 	}, 60*time.Second, 200*time.Millisecond, "getEvents must match events in both tiers")
 
-	evResp := postRPC(t, base+"/", eventsReq(c0Last, cStrkey))["result"].(map[string]any)
-	evs := evResp["events"].([]any)
+	evResp := asMap(t, postRPC(t, base+"/", eventsReq(c0Last, cStrkey))["result"])
+	evs := asSlice(t, evResp["events"])
 	require.Len(t, evs, 2)
-	assert.EqualValues(t, c0Last, evs[0].(map[string]any)["ledger"], "first event is cold")
-	assert.EqualValues(t, c1First, evs[1].(map[string]any)["ledger"], "second event is hot")
+	assert.EqualValues(t, c0Last, asMap(t, evs[0])["ledger"], "first event is cold")
+	assert.EqualValues(t, c1First, asMap(t, evs[1])["ledger"], "second event is hot")
 	for _, e := range evs {
-		assert.Equal(t, cStrkey, e.(map[string]any)["contractId"], "only the filtered contract matched")
+		assert.Equal(t, cStrkey, asMap(t, e)["contractId"], "only the filtered contract matched")
 	}
 
 	// -------------------------------------------------------------------------
@@ -372,7 +403,7 @@ func TestServeE2E_QueryHotAndCold(t *testing.T) {
 	// A startLedger below the served floor (genesis) errors with the range surfaced.
 	below := postRPC(t, base+"/", ledgersReq(c0First-1, 5))
 	require.NotNil(t, below["error"], "getLedgers below the floor must error")
-	belowMsg := fmt.Sprint(below["error"].(map[string]any)["message"])
+	belowMsg := fmt.Sprint(asMap(t, below["error"])["message"])
 	assert.Contains(t, belowMsg, "oldest ledger", "the below-floor error surfaces the available range")
 	assert.Contains(t, belowMsg, "latest ledger", "the below-floor error surfaces the available range")
 
@@ -381,7 +412,7 @@ func TestServeE2E_QueryHotAndCold(t *testing.T) {
 	miss[0], miss[31] = 0xDE, 0xAD
 	unknown := postRPC(t, base+"/", txReq(miss))
 	require.Nil(t, unknown["error"], "an unknown hash is a normal NOT_FOUND response, not an error")
-	assert.Equal(t, "NOT_FOUND", unknown["result"].(map[string]any)["status"])
+	assert.Equal(t, "NOT_FOUND", asMap(t, unknown["result"])["status"])
 }
 
 // ---- JSON-RPC request builders (raw wire strings keep the test readable). ----

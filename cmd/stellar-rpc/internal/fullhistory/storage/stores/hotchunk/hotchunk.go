@@ -194,7 +194,9 @@ func openReady(
 	return db, nil
 }
 
-func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly, mustExist, composeEvents bool) (*DB, error) {
+func open(
+	path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly, mustExist, composeEvents bool,
+) (*DB, error) {
 	if path == "" {
 		return nil, stores.ErrInvalidConfig
 	}

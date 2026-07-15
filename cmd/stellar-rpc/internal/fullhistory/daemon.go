@@ -193,6 +193,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// placeholder (reads still come from the v1 SQLite daemon). ---
 	serveReads := opts.ServeReads
 	var servingReg *serve.Registry
+	//nolint:nestif // POC read-path resolution kept inline with the lifecycle wiring it feeds
 	if serveReads == nil {
 		if cfg.Serve.Endpoint != "" {
 			// The read server verifies by-hash lookups with the network passphrase;

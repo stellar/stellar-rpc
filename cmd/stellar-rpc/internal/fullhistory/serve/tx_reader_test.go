@@ -146,7 +146,7 @@ func TestTxReader_HotHit(t *testing.T) {
 
 	got, err := txr.GetTransaction(t.Context(), xdr.Hash(hash))
 	require.NoError(t, err)
-	assert.EqualValues(t, seq, got.Ledger.Sequence)
+	assert.Equal(t, seq, got.Ledger.Sequence)
 	assert.Equal(t, hex.EncodeToString(hash[:]), got.TransactionHash)
 	assert.True(t, got.Successful)
 	assert.NotEmpty(t, got.Envelope, "envelope XDR carried through")
@@ -160,7 +160,7 @@ func TestTxReader_ColdHit(t *testing.T) {
 
 	got, err := txr.GetTransaction(t.Context(), xdr.Hash(hash))
 	require.NoError(t, err, "the frozen .idx candidate resolves + verifies against the cold ledger")
-	assert.EqualValues(t, seq, got.Ledger.Sequence)
+	assert.Equal(t, seq, got.Ledger.Sequence)
 	assert.Equal(t, hex.EncodeToString(hash[:]), got.TransactionHash)
 	assert.NotEmpty(t, got.Envelope)
 }
@@ -170,7 +170,7 @@ func TestTxReader_Miss(t *testing.T) {
 	txr := NewTransactionReader(r, layout, network.PublicNetworkPassphrase)
 
 	_, err := txr.GetTransaction(t.Context(), xdr.Hash(unknownHash(0xDEADBEEF)))
-	assert.ErrorIs(t, err, db.ErrNoTransaction, "an uncommitted hash is a clean not-found")
+	require.ErrorIs(t, err, db.ErrNoTransaction, "an uncommitted hash is a clean not-found")
 }
 
 // A cold candidate below the retention floor is skipped at the index seam (a
@@ -201,7 +201,7 @@ func TestTxReader_GetTransactionHandler(t *testing.T) {
 	resp, ok := res.(protocol.GetTransactionResponse)
 	require.True(t, ok)
 	assert.Equal(t, protocol.TransactionStatusSuccess, resp.Status)
-	assert.EqualValues(t, seq, resp.Ledger)
+	assert.Equal(t, seq, resp.Ledger)
 
 	// NotFound.
 	miss := unknownHash(0x1234)

@@ -43,23 +43,22 @@ type ServerParams struct {
 	Cfg        config.ServeConfig
 }
 
-// requestDurationBuckets spans 100µs to 10s — the benchmark's latency dynamic
-// range (a cold multi-chunk scan can reach seconds; a hot single-ledger hit is
-// sub-millisecond). This is THE instrument the fhbench harness reads.
-var requestDurationBuckets = []float64{
-	0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025,
-	0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10,
-}
-
 // StartServer binds the JSON-RPC server on p.Cfg.Endpoint and starts serving in
 // a background goroutine. It returns the bound address (so an endpoint of
 // host:0 yields the real OS-assigned port), a shutdown func, and any bind error.
-// The server also shuts down when ctx is cancelled.
+// The server also shuts down when ctx is canceled.
 //
 // POC: no CORS, no backlog/duration limiters, no request-size cap — the
 // benchmark client controls load and the server is not internet-facing. v1's
 // jsonrpc.go stacks all of those; add them at productionization.
 func StartServer(ctx context.Context, p ServerParams) (net.Addr, func(), error) {
+	// requestDurationBuckets spans 100µs to 10s — the benchmark's latency dynamic
+	// range (a cold multi-chunk scan can reach seconds; a hot single-ledger hit is
+	// sub-millisecond). This is THE instrument the fhbench harness reads.
+	requestDurationBuckets := []float64{
+		0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025,
+		0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10,
+	}
 	durations := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "fullhistory_rpc_request_duration_seconds",
 		Help:    "Per-endpoint JSON-RPC request latency for the full-history read server.",
@@ -100,7 +99,8 @@ func StartServer(ctx context.Context, p ServerParams) (net.Addr, func(), error) 
 	httpMux.HandleFunc("/ready", readyProbe(p.Health))
 
 	// Listen first so a host:0 endpoint resolves to a real port before we return.
-	ln, err := net.Listen("tcp", p.Cfg.Endpoint)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", p.Cfg.Endpoint)
 	if err != nil {
 		_ = bridge.Close()
 		return nil, nil, err
@@ -120,6 +120,7 @@ func StartServer(ctx context.Context, p ServerParams) (net.Addr, func(), error) 
 	}()
 
 	var once sync.Once
+	//nolint:contextcheck // uses a fresh Background ctx so graceful drain runs after the run ctx is canceled
 	shutdown := func() {
 		once.Do(func() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -139,7 +140,7 @@ func StartServer(ctx context.Context, p ServerParams) (net.Addr, func(), error) 
 }
 
 // instrument wraps a jrpc2.Handler to record its wall-clock latency into the
-// per-endpoint histogram, labelled by method and ok/error status.
+// per-endpoint histogram, labeled by method and ok/error status.
 func instrument(endpoint string, vec *prometheus.HistogramVec, h jrpc2.Handler) jrpc2.Handler {
 	return func(ctx context.Context, req *jrpc2.Request) (any, error) {
 		start := time.Now()
@@ -193,6 +194,7 @@ func lastCommit(h HealthLike) (time.Time, bool) {
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
+	//nolint:errchkjson // body is always a JSON-safe map[string]any built in this file
 	_ = json.NewEncoder(w).Encode(body)
 }
 

@@ -30,7 +30,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -60,7 +60,7 @@ func main() {
 		concurrency: *concurrency,
 		duration:    *duration,
 		limit:       *limit,
-		chunkSize:   uint32(*chunkSize),
+		chunkSize:   uint32(*chunkSize), //nolint:gosec // --chunk-size flag; never within range of a uint32 overflow
 		sampleSize:  *sampleSize,
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, "fhbench:", err)
@@ -90,7 +90,10 @@ func (c runConfig) endpoints() ([]string, error) {
 			return []string{e}, nil
 		}
 	}
-	return nil, fmt.Errorf("unknown --endpoint %q (want one of getLedgers|getTransactions|getTransaction|getEvents|all)", c.endpoint)
+	return nil, fmt.Errorf(
+		"unknown --endpoint %q (want one of getLedgers|getTransactions|getTransaction|getEvents|all)",
+		c.endpoint,
+	)
 }
 
 func run(ctx context.Context, cfg runConfig) error {
@@ -108,7 +111,8 @@ func run(ctx context.Context, cfg runConfig) error {
 	if err != nil {
 		return fmt.Errorf("discovery: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "served range: [%d, %d] (%d ledgers)\n", window.oldest, window.latest, window.latest-window.oldest+1)
+	fmt.Fprintf(os.Stderr, "served range: [%d, %d] (%d ledgers)\n",
+		window.oldest, window.latest, window.latest-window.oldest+1)
 
 	tiers := computeTiers(window, cfg.chunkSize, cfg.tier)
 	if len(tiers) == 0 {
@@ -138,12 +142,12 @@ func run(ctx context.Context, cfg runConfig) error {
 	for _, e := range eps {
 		for _, tr := range tiers {
 			fmt.Fprintf(os.Stderr, "running %s / %s tier for %s (%d workers) ...\n", e, tr.name, cfg.duration, cfg.concurrency)
-			res := runLoad(ctx, c, e, tr, hashes[tr.name], cfg.concurrency, cfg.duration, cfg.limit, cfg.chunkSize)
+			res := runLoad(ctx, c, e, tr, hashes[tr.name], cfg.concurrency, cfg.duration, cfg.limit)
 			results = append(results, res)
 		}
 	}
 
-	fmt.Print(formatReport(results))
+	fmt.Fprint(os.Stdout, formatReport(results))
 	return nil
 }
 
@@ -442,7 +446,7 @@ func (r result) rps() float64 {
 // runLoad drives `concurrency` closed-loop workers against one (endpoint, tier)
 // for `dur`, recording each request's wall time and error status.
 func runLoad(ctx context.Context, c *rpcClient, endpoint string, t tier, hashes []string,
-	concurrency int, dur time.Duration, limit int, chunkSize uint32,
+	concurrency int, dur time.Duration, limit int,
 ) result {
 	ctx, cancel := context.WithTimeout(ctx, dur)
 	defer cancel()
@@ -455,10 +459,11 @@ func runLoad(ctx context.Context, c *rpcClient, endpoint string, t tier, hashes 
 
 	var wg sync.WaitGroup
 	start := time.Now()
-	for i := 0; i < concurrency; i++ {
+	for i := range concurrency {
 		wg.Add(1)
 		go func(worker int) {
 			defer wg.Done()
+			//nolint:gosec // load-generator sampling; a weak PRNG is intentional (no security use)
 			rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(worker)))
 			var local []sample
 			iter := 0
@@ -504,6 +509,7 @@ func buildRequest(endpoint string, t tier, hashes []string, limit int, rng *rand
 		if span <= 1 {
 			return t.first
 		}
+		//nolint:gosec // rng.Int63n(span) < span <= uint32 max, so the conversion cannot overflow
 		return t.first + uint32(rng.Int63n(int64(span)))
 	}
 	switch endpoint {
@@ -557,10 +563,7 @@ func quantile(sorted []time.Duration, q float64) time.Duration {
 		return sorted[n-1]
 	}
 	rank := int(math.Ceil(q * float64(n)))
-	idx := rank - 1
-	if idx < 0 {
-		idx = 0
-	}
+	idx := max(rank-1, 0)
 	if idx >= n {
 		idx = n - 1
 	}
@@ -574,12 +577,13 @@ func formatReport(results []result) string {
 		"endpoint", "tier", "count", "RPS", "p50", "p90", "p99", "max", "errors")
 	b.WriteString("\n")
 	b.WriteString(header)
-	b.WriteString(fmt.Sprintf("%s\n", dashes(len(header)-1)))
+	b.WriteString(dashes(len(header)-1) + "\n")
 
 	for _, r := range results {
 		sorted := append([]time.Duration(nil), r.durations...)
-		sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-		b.WriteString(fmt.Sprintf(
+		slices.Sort(sorted)
+		fmt.Fprintf(
+			&b,
 			"%-16s %-5s %8d %10.1f %9s %9s %9s %9s %8d\n",
 			r.endpoint, r.tier, len(r.durations), r.rps(),
 			fmtDur(quantile(sorted, 0.50)),
@@ -587,7 +591,7 @@ func formatReport(results []result) string {
 			fmtDur(quantile(sorted, 0.99)),
 			fmtDur(quantile(sorted, 1.0)),
 			r.errors,
-		))
+		)
 	}
 	return b.String()
 }

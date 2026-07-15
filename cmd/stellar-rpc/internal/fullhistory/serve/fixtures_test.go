@@ -22,8 +22,8 @@ import (
 // contractEventXDR builds a contract-type ContractEvent for the given contract
 // ID with a single symbol topic and symbol data — the minimal shape the events
 // index and the protocol filter both key off (mirror of the eventstore and
-// ingest test fixtures). It returns the event and its marshaled bytes.
-func contractEventXDR(t *testing.T, contractID xdr.ContractId, topic, data string) (xdr.ContractEvent, []byte) {
+// ingest test fixtures).
+func contractEventXDR(t *testing.T, contractID xdr.ContractId, topic, data string) xdr.ContractEvent {
 	t.Helper()
 	topicSym := xdr.ScSymbol(topic)
 	dataSym := xdr.ScSymbol(data)
@@ -39,9 +39,7 @@ func contractEventXDR(t *testing.T, contractID xdr.ContractId, topic, data strin
 			},
 		},
 	}
-	raw, err := ev.MarshalBinary()
-	require.NoError(t, err)
-	return ev, raw
+	return ev
 }
 
 // eventLedgerLCM builds a V2 LedgerCloseMeta carrying one transaction whose sole

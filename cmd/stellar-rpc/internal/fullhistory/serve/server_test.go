@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -17,8 +18,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/fhtest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
-
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 // fakeHealth is a mutable HealthLike for the server probes: Ready() and the last
@@ -58,8 +57,8 @@ func buildServerRegistry(t *testing.T) (*Registry, geometry.Layout, uint32, uint
 }
 
 // startTestServer boots a server over the tiny hot fixture and returns its base
-// URL, the metrics registry, and the fixture's first/last served ledger.
-func startTestServer(t *testing.T, health HealthLike) (string, *prometheus.Registry, uint32, uint32) {
+// URL and the fixture's first/last served ledger.
+func startTestServer(t *testing.T, health HealthLike) (string, uint32, uint32) {
 	t.Helper()
 	reg, layout, first, last := buildServerRegistry(t)
 	metrics := prometheus.NewRegistry()
@@ -78,12 +77,15 @@ func startTestServer(t *testing.T, health HealthLike) (string, *prometheus.Regis
 	})
 	require.NoError(t, err)
 	t.Cleanup(shutdown)
-	return "http://" + addr.String(), metrics, first, last
+	return "http://" + addr.String(), first, last
 }
 
 func postJSON(t *testing.T, url, body string) map[string]any {
 	t.Helper()
-	resp, err := http.Post(url, "application/json", bytes.NewReader([]byte(body)))
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, url, bytes.NewReader([]byte(body)))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
@@ -93,10 +95,21 @@ func postJSON(t *testing.T, url, body string) map[string]any {
 	return out
 }
 
+// httpGet issues a context-carrying GET (noctx) and returns the response; the
+// caller closes the body.
+func httpGet(t *testing.T, url string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	return resp
+}
+
 func TestStartServer_GetLedgersOverHTTP(t *testing.T) {
 	h := &fakeHealth{}
 	h.ready.Store(true)
-	base, _, first, last := startTestServer(t, h)
+	base, first, last := startTestServer(t, h)
 
 	req := `{"jsonrpc":"2.0","id":1,"method":"getLedgers","params":{"startLedger":` +
 		itoa(int(first)) + `,"pagination":{"limit":10}}}`
@@ -114,52 +127,47 @@ func TestStartServer_GetLedgersOverHTTP(t *testing.T) {
 func TestStartServer_MetricsExposeLatencyHistogram(t *testing.T) {
 	h := &fakeHealth{}
 	h.ready.Store(true)
-	base, _, first, _ := startTestServer(t, h)
+	base, first, _ := startTestServer(t, h)
 
 	req := `{"jsonrpc":"2.0","id":1,"method":"getLedgers","params":{"startLedger":` +
 		itoa(int(first)) + `,"pagination":{"limit":10}}}`
 	postJSON(t, base+"/", req)
 
-	resp, err := http.Get(base + "/metrics")
-	require.NoError(t, err)
+	resp := httpGet(t, base+"/metrics")
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	assert.Contains(t, string(body), "fullhistory_rpc_request_duration_seconds",
 		"the benchmark latency histogram must be exposed after a request")
 	assert.Contains(t, string(body), `endpoint="getLedgers"`,
-		"the histogram must be labelled per endpoint")
+		"the histogram must be labeled per endpoint")
 }
 
 func TestStartServer_ReadyReflectsHealth(t *testing.T) {
 	h := &fakeHealth{} // not ready yet
-	base, _, _, _ := startTestServer(t, h)
+	base, _, _ := startTestServer(t, h)
 
-	resp, err := http.Get(base + "/ready")
-	require.NoError(t, err)
+	resp := httpGet(t, base+"/ready")
 	_ = resp.Body.Close()
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode, "not ready -> 503")
 
 	h.ready.Store(true)
-	resp, err = http.Get(base + "/ready")
-	require.NoError(t, err)
+	resp = httpGet(t, base+"/ready")
 	_ = resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "ready -> 200")
 }
 
 func TestStartServer_HealthReportsCommit(t *testing.T) {
 	h := &fakeHealth{}
-	base, _, _, _ := startTestServer(t, h)
+	base, _, _ := startTestServer(t, h)
 
-	resp, err := http.Get(base + "/health")
-	require.NoError(t, err)
+	resp := httpGet(t, base+"/health")
 	_ = resp.Body.Close()
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode, "no commit -> 503")
 
 	h.haveCommit.Store(true)
 	h.closeUnix.Store(1234567890)
-	resp, err = http.Get(base + "/health")
-	require.NoError(t, err)
+	resp = httpGet(t, base+"/health")
 	defer func() { _ = resp.Body.Close() }()
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "committed -> 200")
 }

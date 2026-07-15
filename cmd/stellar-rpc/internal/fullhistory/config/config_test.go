@@ -125,7 +125,7 @@ func TestParseConfig_MinimalAppliesDefaults(t *testing.T) {
 	// Serving is disabled by default (empty endpoint), but the per-endpoint
 	// limits are always filled to the v1 defaults so the server can mount its
 	// handlers without a nil deref regardless of whether [serve] is present.
-	assert.Equal(t, "", cfg.Serve.Endpoint)
+	assert.Empty(t, cfg.Serve.Endpoint)
 	assert.Equal(t, DefaultServeMaxLedgersLimit, *cfg.Serve.MaxLedgersLimit)
 	assert.Equal(t, DefaultServeDefaultLedgersLimit, *cfg.Serve.DefaultLedgersLimit)
 	assert.Equal(t, DefaultServeMaxTransactionsLimit, *cfg.Serve.MaxTransactionsLimit)

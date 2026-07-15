@@ -114,6 +114,7 @@ func rpcStub(t *testing.T, handlers map[string]func(params json.RawMessage) (any
 // oldestLedger/latestLedger fields carry the served range.
 func TestDiscoverPrimaryGetTransaction(t *testing.T) {
 	srv := rpcStub(t, map[string]func(json.RawMessage) (any, *rpcError){
+		//nolint:unparam // uniform rpcStub handler signature; not every stub exercises every result
 		"getTransaction": func(params json.RawMessage) (any, *rpcError) {
 			var req struct {
 				Hash string `json:"hash"`
@@ -142,9 +143,11 @@ func TestDiscoverPrimaryGetTransaction(t *testing.T) {
 // unavailable: parse the served range out of getLedgers' out-of-range error.
 func TestDiscoverFallbackFromError(t *testing.T) {
 	srv := rpcStub(t, map[string]func(json.RawMessage) (any, *rpcError){
+		//nolint:unparam // uniform rpcStub handler signature; not every stub exercises every result
 		"getTransaction": func(json.RawMessage) (any, *rpcError) {
 			return nil, &rpcError{Code: -32601, Message: "method not found"}
 		},
+		//nolint:unparam // uniform rpcStub handler signature; not every stub exercises every result
 		"getLedgers": func(json.RawMessage) (any, *rpcError) {
 			return nil, &rpcError{Code: -32600, Message: "start ledger (1) must be between the oldest " +
 				"ledger: 40001 and the latest ledger: 98765 for this rpc instance"}
@@ -164,9 +167,11 @@ func TestDiscoverFallbackFromError(t *testing.T) {
 // server whose range includes the startLedger=1 probe).
 func TestDiscoverFallbackFromSuccess(t *testing.T) {
 	srv := rpcStub(t, map[string]func(json.RawMessage) (any, *rpcError){
+		//nolint:unparam // uniform rpcStub handler signature; not every stub exercises every result
 		"getTransaction": func(json.RawMessage) (any, *rpcError) {
 			return nil, &rpcError{Code: -32601, Message: "method not found"}
 		},
+		//nolint:unparam // uniform rpcStub handler signature; not every stub exercises every result
 		"getLedgers": func(json.RawMessage) (any, *rpcError) {
 			return map[string]any{
 				"ledgers":      []any{},
@@ -189,6 +194,7 @@ func TestSampleTxHashes(t *testing.T) {
 	// Two pages of two txs each, then an empty page.
 	page := 0
 	srv := rpcStub(t, map[string]func(json.RawMessage) (any, *rpcError){
+		//nolint:unparam // uniform rpcStub handler signature; not every stub exercises every result
 		"getTransactions": func(json.RawMessage) (any, *rpcError) {
 			page++
 			switch page {
@@ -248,13 +254,14 @@ func TestFormatReport(t *testing.T) {
 
 func TestRunLoadSmoke(t *testing.T) {
 	srv := rpcStub(t, map[string]func(json.RawMessage) (any, *rpcError){
+		//nolint:unparam // uniform rpcStub handler signature; not every stub exercises every result
 		"getLedgers": func(json.RawMessage) (any, *rpcError) {
 			return map[string]any{"ledgers": []any{}, "oldestLedger": 2, "latestLedger": 100}, nil
 		},
 	})
 
 	tr := tier{name: "hot", first: 50, last: 100}
-	res := runLoad(context.Background(), newRPCClient(srv.URL), "getLedgers", tr, nil, 2, 150*time.Millisecond, 10, 10_000)
+	res := runLoad(context.Background(), newRPCClient(srv.URL), "getLedgers", tr, nil, 2, 150*time.Millisecond, 10)
 	if len(res.durations) == 0 {
 		t.Fatalf("runLoad recorded no samples")
 	}

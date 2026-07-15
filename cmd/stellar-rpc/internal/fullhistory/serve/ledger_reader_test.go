@@ -42,7 +42,7 @@ func lcmWithCloseTime(t *testing.T, seq uint32, closeTime int64) []byte {
 		V2: &xdr.LedgerCloseMetaV2{
 			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
 				Header: xdr.LedgerHeader{
-					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(closeTime)}, //nolint:gosec
+					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(closeTime)},
 					LedgerSeq: xdr.Uint32(seq),
 				},
 			},
@@ -66,7 +66,7 @@ func writeColdLedgerRun(t *testing.T, layout geometry.Layout, c chunk.ID, firstS
 	w, err := ledger.NewColdWriter(path, firstSeq, ledger.ColdWriterOptions{})
 	require.NoError(t, err)
 	for i, raw := range raws {
-		require.NoError(t, w.AppendLedger(firstSeq+uint32(i), raw)) //nolint:gosec
+		require.NoError(t, w.AppendLedger(firstSeq+uint32(i), raw))
 	}
 	require.NoError(t, w.Commit())
 	require.NoError(t, w.Close())
@@ -111,7 +111,7 @@ func TestLedgerReader_BatchGetLedgers_ColdHotSeam(t *testing.T) {
 	require.Len(t, got, hotLast-coldFirst+1, "full contiguous run across the seam")
 
 	for i, mc := range got {
-		wantSeq := uint32(coldFirst + i) //nolint:gosec
+		wantSeq := uint32(coldFirst + i)
 		assert.EqualValues(t, wantSeq, mc.Header.Header.LedgerSeq, "header sequence in order")
 
 		// Decode the retained Lcm bytes independently: catches a missing copy of
@@ -133,8 +133,7 @@ func TestLedgerReader_BatchGetLedgers_BelowFloorErrors(t *testing.T) {
 	defer func() { _ = tx.Done() }()
 
 	_, err = tx.BatchGetLedgers(t.Context(), coldFirst-1, hotLast)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, stores.ErrOutOfRange)
+	require.ErrorIs(t, err, stores.ErrOutOfRange)
 }
 
 func TestLedgerReader_BatchGetLedgers_EndClampsToLatest(t *testing.T) {
@@ -156,7 +155,7 @@ func TestLedgerReader_GetLedgerRange_EndpointsAndCloseTimes(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.EqualValues(t, coldFirst, lrange.FirstLedger.Sequence)
-	assert.EqualValues(t, int64(coldFirst)*10, lrange.FirstLedger.CloseTime, "first close time decoded from cold bytes")
+	assert.Equal(t, int64(coldFirst)*10, lrange.FirstLedger.CloseTime, "first close time decoded from cold bytes")
 	assert.EqualValues(t, hotLast, lrange.LastLedger.Sequence)
 	assert.EqualValues(t, 0, lrange.LastLedger.CloseTime, "hot ZeroTx ledgers carry close time 0")
 }
@@ -193,18 +192,18 @@ func TestLedgerReader_GetLedgerRange_EmptyIsErrEmptyDB(t *testing.T) {
 	lr := NewLedgerReader(r, layout)
 
 	_, err := lr.GetLedgerRange(t.Context())
-	assert.ErrorIs(t, err, db.ErrEmptyDB)
+	require.ErrorIs(t, err, db.ErrEmptyDB)
 
 	_, err = lr.GetLatestLedgerSequence(t.Context())
-	assert.ErrorIs(t, err, db.ErrEmptyDB)
+	require.ErrorIs(t, err, db.ErrEmptyDB)
 }
 
 func TestLedgerReader_UnsupportedPOCMethods(t *testing.T) {
 	lr, _ := buildSeamReader(t)
-	assert.Error(t, lr.StreamAllLedgers(t.Context(), nil))
-	assert.Error(t, lr.StreamLedgerRange(t.Context(), coldFirst, hotLast, nil))
+	require.Error(t, lr.StreamAllLedgers(t.Context(), nil))
+	require.Error(t, lr.StreamLedgerRange(t.Context(), coldFirst, hotLast, nil))
 	_, _, _, err := lr.GetLedgerCountInRange(t.Context(), coldFirst, hotLast)
-	assert.Error(t, err)
+	require.Error(t, err)
 }
 
 // Step 4 integration: the real getLedgers handler, mounted over the adapter,

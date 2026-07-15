@@ -100,9 +100,9 @@ func NewRegistry(cat *catalog.Catalog, retention geometry.Retention, logger *sup
 // every ledger <= the admitted latest has a serving home in the loaded View. A
 // chunk boundary between the loads could otherwise let latest point into a
 // chunk the older View does not serve.
-func (r *Registry) Admit() (latest uint32, v *View) {
-	latest = r.latest.Load()
-	v = r.current.Load()
+func (r *Registry) Admit() (uint32, *View) {
+	latest := r.latest.Load()
+	v := r.current.Load()
 	return latest, v
 }
 
@@ -254,6 +254,9 @@ func (r *Registry) scanCold() (map[chunk.ID]ColdFlags, error) {
 			f.Ledgers = true
 		case geometry.KindEvents:
 			f.Events = true
+		case geometry.KindTxHash:
+			// txhash .bin is a transient index artifact, never a cold serving
+			// artifact — see the doc comment above.
 		}
 		cold[ref.Chunk] = f
 	}

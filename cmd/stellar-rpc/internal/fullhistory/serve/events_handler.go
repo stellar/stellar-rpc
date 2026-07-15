@@ -3,6 +3,7 @@ package serve
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -60,7 +61,7 @@ type foundEvent struct {
 	ledgerClosedAt int64
 }
 
-//nolint:cyclop,funlen // mirrors v1 getEvents' validate→scan→format→cursor shape
+//nolint:cyclop // mirrors v1 getEvents' validate→scan→format→cursor shape
 func (h eventsHandler) getEvents(
 	ctx context.Context, request protocol.GetEventsRequest,
 ) (protocol.GetEventsResponse, error) {
@@ -235,7 +236,7 @@ func (h eventsHandler) scanChunk(
 		// MaxEvents cap (QueryOptions doc: "Pagers MUST NOT treat len(result) <
 		// limit as exhausted"), so a false positive inside the capped prefix can
 		// shrink the result while real matches remain past the cap.
-		windowSize := int(rng.End - rng.Start) //nolint:gosec // chunk event-id space (~10M today) fits int
+		windowSize := int(rng.End - rng.Start) // chunk event-id space (~10M today) fits int
 		if len(matches) == remaining || queryCap >= windowSize {
 			*found = append(*found, matches...)
 			return nil
@@ -352,7 +353,7 @@ func topicFilterSets(topics []protocol.TopicFilter) ([][protocol.MaxTopicCount][
 			if err != nil {
 				return nil, fmt.Errorf("marshal topic segment: %w", err)
 			}
-			set[i] = encoded
+			set[i] = encoded //nolint:gosec // i < MaxTopicCount, guarded by the break above (G602 false positive)
 		}
 		out = append(out, set)
 	}
@@ -368,7 +369,7 @@ func eventInfoForEvent(
 ) (protocol.EventInfo, error) {
 	v0, ok := event.Event.Body.GetV0()
 	if !ok {
-		return protocol.EventInfo{}, fmt.Errorf("unknown event version")
+		return protocol.EventInfo{}, errors.New("unknown event version")
 	}
 
 	eventType, ok := protocol.GetEventTypeFromEventTypeXDR()[event.Event.Type]

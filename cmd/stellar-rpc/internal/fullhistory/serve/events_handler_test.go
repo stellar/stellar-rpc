@@ -51,11 +51,11 @@ func buildEventsSeamFixture(t *testing.T) eventsFixture {
 	require.NoError(t, cat.PinEarliestLedger(coldFirst))
 
 	cA, cB := contractID(0xAA), contractID(0xBB)
-	evA1, _ := contractEventXDR(t, cA, "topic-a", "a1")
-	evB, _ := contractEventXDR(t, cB, "topic-b", "b1")
-	evA2, _ := contractEventXDR(t, cA, "topic-a", "a2")
-	evA3, _ := contractEventXDR(t, cA, "topic-a", "a3")
-	evB2, _ := contractEventXDR(t, cB, "topic-b", "b2")
+	evA1 := contractEventXDR(t, cA, "topic-a", "a1")
+	evB := contractEventXDR(t, cB, "topic-b", "b1")
+	evA2 := contractEventXDR(t, cA, "topic-a", "a2")
+	evA3 := contractEventXDR(t, cA, "topic-a", "a3")
+	evB2 := contractEventXDR(t, cB, "topic-b", "b2")
 
 	// Cold chunk 0: A@coldFirst, B@coldFirst+1, A@coldLast.
 	coldSeqs := []uint32{coldFirst, coldFirst + 1, coldLast}
@@ -180,9 +180,8 @@ func TestGetEvents_OutOfRangeStartErrors(t *testing.T) {
 
 	_, err := h(t.Context(), getEventsRequest(t,
 		`{"startLedger":`+itoa(coldFirst-1)+`,"pagination":{"limit":10}}`))
-	require.Error(t, err)
-	rpcErr, ok := err.(*jrpc2.Error)
-	require.True(t, ok, "a jrpc2.Error carrying the range")
+	var rpcErr *jrpc2.Error
+	require.ErrorAs(t, err, &rpcErr, "a jrpc2.Error carrying the range")
 	assert.Contains(t, rpcErr.Message, "ledger range")
 }
 
@@ -234,10 +233,10 @@ func TestGetEvents_CollisionUnderfillDoesNotSkip(t *testing.T) {
 	require.NoError(t, cat.PinEarliestLedger(first))
 
 	cA, cB := contractID(0xAA), contractID(0xBB)
-	evA, _ := contractEventXDR(t, cA, "topic-a", "a")
-	evB, _ := contractEventXDR(t, cB, "topic-b", "b")
+	evA := contractEventXDR(t, cA, "topic-a", "a")
+	evB := contractEventXDR(t, cB, "topic-b", "b")
 
-	// One event per ledger: B, B, A, A → event IDs 0..3.
+	// One event per ledger: B, then B, then A, then A → event IDs 0..3.
 	seqs := []uint32{first, first + 1, first + 2, coldLast}
 	ledgerEvents := map[uint32][]xdr.ContractEvent{
 		first:     {evB},
@@ -245,7 +244,7 @@ func TestGetEvents_CollisionUnderfillDoesNotSkip(t *testing.T) {
 		first + 2: {evA},
 		coldLast:  {evA},
 	}
-	var raws [][]byte
+	raws := make([][]byte, 0, len(seqs))
 	for _, seq := range seqs {
 		raws = append(raws, lcmWithCloseTime(t, seq, int64(seq)*10))
 	}
