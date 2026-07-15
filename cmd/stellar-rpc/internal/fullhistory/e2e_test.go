@@ -6,8 +6,9 @@ package fullhistory
 // WHAT IS REAL HERE
 //   Everything inside the process is the real production code path:
 //     - runDaemonWith (the true daemon entrypoint): TOML load + form-validate,
-//       per-root flock, catalog open (its own KV store), the stateful
-//       validateConfig gate (pins the floor), and the supervised run loop.
+//       root prep, catalog open (its own KV store, holding the single-process
+//       lock), the stateful validateConfig gate (pins the floor), and the
+//       supervised run loop.
 //     - run → backfillToTip → openHotDBForChunk → runIngestionLoop (the real
 //       atomic per-ledger WriteBatch across all CFs of the real per-chunk
 //       hotchunk RocksDB), the real boundary handoff, the real boundary signal.

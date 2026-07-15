@@ -22,9 +22,9 @@ import (
 // committing each ledger as one atomic synced WriteBatch across all CFs. It keeps
 // NO progress variable — the last synced batch IS the last-committed ledger,
 // re-derived at startup. Its only coupling to the lifecycle is the boundary
-// signal: at each boundary it publishes the just-completed chunk id (the two
-// goroutines share no memory). Clean-shutdown vs crash is decided at the daemon
-// top level (a ctx-canceled return is clean).
+// signal: at each boundary it publishes the just-completed chunk id.
+// Clean-shutdown vs crash is decided at the daemon top level (a ctx-canceled
+// return is clean).
 
 // openHotDBForChunk opens/recovers/creates the chunk's shared hot DB, keyed on
 // the durable hot:chunk state:
