@@ -172,9 +172,10 @@ func (c *Catalog) FlipHotReady(chunkID chunk.ID) error {
 }
 
 // deleteHotKey removes a hot-DB key — the close end, after rmdir. Idempotent.
-// Unexported: the only production caller is same-package DiscardHotChunk, and the
-// hot-key create/discard choreography now lives behind the catalog, so no other
-// package deletes a hot key directly.
+// Unexported: the only production caller is same-package DestroyHotChunk (via
+// DiscardHotChunk or a deferred reaper destroy), and the hot-key create/discard
+// choreography lives behind the catalog, so no other package deletes a hot key
+// directly.
 func (c *Catalog) deleteHotKey(chunkID chunk.ID) error {
 	return c.del(geometry.HotChunkKey(chunkID))
 }

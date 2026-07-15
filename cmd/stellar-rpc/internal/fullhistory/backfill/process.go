@@ -35,6 +35,12 @@ type ProcessConfig struct {
 	// frontier Tip, so the coverage wait needs no separate waiter. May be nil when
 	// no bulk source is configured; backfillSource errors if a chunk then needs it.
 	Backend Backend
+
+	// OnFrozen is called after a chunk's kinds flip "frozen" — the registry's
+	// PublishFrozen hook, making the fresh cold artifacts servable. nil skips it:
+	// during startup backfill the registry does not exist yet, and the startup
+	// catalog scan (registry.BuildFromCatalog) covers those chunks instead.
+	OnFrozen func(c chunk.ID, kinds ...geometry.Kind)
 }
 
 func (cfg ProcessConfig) validate() error {
@@ -128,6 +134,11 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 	// one-write:flip — every requested kind to "frozen" (the only state readers trust).
 	if ferr := cat.FlipChunkFrozen(chunkID, kinds...); ferr != nil {
 		return fmt.Errorf("flip frozen chunk %s %s: %w", chunkID, artifacts, ferr)
+	}
+	// Publish AFTER the commit (R1: only durable, serving-ready artifacts enter a
+	// View). Only the kinds this pass actually froze are announced.
+	if cfg.OnFrozen != nil {
+		cfg.OnFrozen(chunkID, kinds...)
 	}
 	return nil
 }

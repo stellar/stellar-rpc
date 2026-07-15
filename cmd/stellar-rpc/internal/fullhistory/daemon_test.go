@@ -26,6 +26,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/fhtest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/registry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
@@ -82,7 +83,7 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 	opts := daemonOptions{
 		Backend:    &fakeBackend{tip: chunk.FirstLedgerSeq + 10},
 		Core:       &fakeCore{}, // default getter blocks until ctx cancel
-		ServeReads: func(context.Context) error { served.Add(1); return nil },
+		ServeReads: func(context.Context, *registry.Registry) error { served.Add(1); return nil },
 		Logger:     silentLogger(),
 	}
 
@@ -128,7 +129,7 @@ func TestRunDaemon_AdminEndpointServesLatencyAndMetrics(t *testing.T) {
 	opts := daemonOptions{
 		Backend:    &fakeBackend{tip: chunk.FirstLedgerSeq + 10}, // young: no backfill
 		Core:       &fakeCore{stream: stream},
-		ServeReads: func(context.Context) error { return nil },
+		ServeReads: func(context.Context, *registry.Registry) error { return nil },
 		Logger:     silentLogger(),
 		adminUp:    func(addr string) { addrCh <- addr },
 	}
@@ -274,7 +275,7 @@ func TestRunDaemon_BackfillMaterializesAllColdTypesAndIndex(t *testing.T) {
 			// The network tip is derived from this same backend's Tip.
 			Backend:    someTxBackend(t),
 			Core:       &fakeCore{}, // default getter blocks until ctx cancel
-			ServeReads: func(context.Context) error { servedCh <- struct{}{}; return nil },
+			ServeReads: func(context.Context, *registry.Registry) error { servedCh <- struct{}{}; return nil },
 			Logger:     silentLogger(),
 		})
 	}()
@@ -395,7 +396,7 @@ func TestRunDaemon_LockContentionFailsFast(t *testing.T) {
 	var served atomic.Int32
 	err := runDaemonWith(context.Background(), configPath, daemonOptions{
 		Backend:    &fakeBackend{tip: chunk.FirstLedgerSeq + 10},
-		ServeReads: func(context.Context) error { served.Add(1); return nil },
+		ServeReads: func(context.Context, *registry.Registry) error { served.Add(1); return nil },
 		Logger:     silentLogger(),
 	})
 	require.Error(t, err)
@@ -472,7 +473,7 @@ func TestSupervise_RetriesThenCleanShutdown(t *testing.T) {
 	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}} // young: no backfill
 	start := startTestConfig(t, cat, tip, &fakeCore{}, nil)
 	// An always-erroring ServeReads makes each attempt a restartable failure.
-	start.ServeReads = func(context.Context) error {
+	start.ServeReads = func(context.Context, *registry.Registry) error {
 		attempts.Add(1)
 		return errors.New("transient serve failure")
 	}
@@ -685,7 +686,7 @@ history_archive_urls = [%q]
 			// NO Backend injected: the daemon wires the captive source itself from
 			// the injected core opener + the file:// archive pool.
 			Core:       &streamCore{stream: &coreReplayStream{t: t, gen: someTxGen(t)}},
-			ServeReads: func(context.Context) error { servedCh <- struct{}{}; return nil },
+			ServeReads: func(context.Context, *registry.Registry) error { servedCh <- struct{}{}; return nil },
 			Logger:     silentLogger(),
 		})
 	}()

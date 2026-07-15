@@ -120,10 +120,68 @@ func (r *recordingBoundary) list() []chunk.ID {
 	return append([]chunk.ID(nil), r.ids...)
 }
 
+// hookRecorder is the test hotPublisher standing in for the registry: it OWNS
+// every handle PublishHot hands it (the loop closes nothing — the registry is
+// the closer in production) and records the AdvanceLatest watermark values.
+// Tests that reopen a chunk's DB call closeAll first to release the write LOCKs,
+// mirroring registry.Close at run() exit; loopConfig also registers it as a
+// cleanup.
+type hookRecorder struct {
+	mu     sync.Mutex
+	hot    map[chunk.ID]*hotchunk.DB
+	latest []uint32
+}
+
+func newHookRecorder() *hookRecorder {
+	return &hookRecorder{hot: map[chunk.ID]*hotchunk.DB{}}
+}
+
+func (r *hookRecorder) PublishHot(c chunk.ID, db *hotchunk.DB) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.hot[c] = db
+}
+
+func (r *hookRecorder) AdvanceLatest(seq uint32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.latest = append(r.latest, seq)
+}
+
+// has reports whether chunk c's handle was published (and not yet closed).
+func (r *hookRecorder) has(c chunk.ID) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.hot[c]
+	return ok
+}
+
+func (r *hookRecorder) latestSeqs() []uint32 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]uint32(nil), r.latest...)
+}
+
+// closeAll closes every held handle. Idempotent — safe as both a mid-test
+// release and the registered cleanup.
+func (r *hookRecorder) closeAll() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for c, db := range r.hot {
+		_ = db.Close()
+		delete(r.hot, c)
+	}
+}
+
+// hooksOf returns the hookRecorder loopConfig installed as the loop's registry.
+func hooksOf(cfg ingestionLoopConfig) *hookRecorder { return cfg.Registry.(*hookRecorder) }
+
 // loopConfig builds an ingestionLoopConfig for a test: the stream + resume point +
-// a recording boundary, and opens the resume chunk's hot DB the way run() does now
-// (the loop takes ownership and closes it). The test must hold no other handle on
-// that dir while the loop runs (a second read-write open would contend the LOCK).
+// a recording boundary, and opens the resume chunk's hot DB the way run() does.
+// A hookRecorder stands in for the registry as the owner of every handle (the
+// resume one is adopted here, as run()'s registry build adopts its pre-opened
+// handle). The test must hold no other write handle on those dirs while the
+// recorder does (a second read-write open would contend the LOCK).
 func loopConfig(
 	t *testing.T, stream ledgerbackend.LedgerStream, cat *catalog.Catalog, resume uint32,
 ) (ingestionLoopConfig, *recordingBoundary) {
@@ -131,12 +189,16 @@ func loopConfig(
 	rec := &recordingBoundary{}
 	db, err := openHotDBForChunk(cat, chunk.IDFromLedger(resume), silentLogger())
 	require.NoError(t, err)
+	hooks := newHookRecorder()
+	hooks.PublishHot(chunk.IDFromLedger(resume), db)
+	t.Cleanup(hooks.closeAll)
 	return ingestionLoopConfig{
 		Stream:   stream,
 		Resume:   resume,
 		HotDB:    db,
 		Catalog:  cat,
 		Boundary: rec,
+		Registry: hooks,
 		Logger:   silentLogger(),
 	}, rec
 }
@@ -258,7 +320,9 @@ func TestRunIngestionLoop_LedgerLandsAcrossAllCFs(t *testing.T) {
 	err := runIngestionLoop(context.Background(), cfg)
 	require.Error(t, err, "stream ran past the prefix and errored")
 
-	// Reopen the (loop-closed) DB and assert every CF advanced together.
+	// Release the registry-owned handle (production: registry.Close at run()
+	// exit), then reopen the DB and assert every CF advanced together.
+	hooksOf(cfg).closeAll()
 	reopened, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = reopened.Close() })
@@ -316,6 +380,8 @@ func TestRunIngestionLoop_LastCommittedGaugeAdvancesPerLedger(t *testing.T) {
 
 	assert.Equal(t, []uint32{first, first + 1, first + 2}, rec.lastCommittedSeq(),
 		"the loop sets the last-committed gauge per committed ledger, not chunk-aligned")
+	assert.Equal(t, []uint32{first, first + 1, first + 2}, hooksOf(cfg).latestSeqs(),
+		"the registry watermark advances once per committed ledger, in commit order")
 }
 
 // ---------------------------------------------------------------------------
@@ -354,47 +420,58 @@ func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// runIngestionLoop — handoff fence: close-before-next-key, publish-after-open.
+// runIngestionLoop — handoff fence: writer stopped + next key created + next
+// handle registered, all before the boundary publish. The filled chunk's
+// handle STAYS OPEN (registry-owned, serving reads) — the loop closes nothing.
 // ---------------------------------------------------------------------------
 
 // fencePublisher verifies the loop's HANDOFF FENCE from inside Publish. At each
-// boundary it checks, for the just-closed chunk c: (1) c's write handle was released
-// BEFORE the publish — a read-WRITE OpenExisting on c's path takes the RocksDB LOCK,
-// which would fail if the writer still held it; and (2) the NEXT chunk's hot key is
-// already "ready" (its DB was opened before publish). Outcomes are recorded per
-// boundary for the test to assert after the loop.
+// boundary it checks, for the just-filled chunk c: (1) c's write handle is STILL
+// HELD — a read-WRITE OpenExisting on c's path takes the RocksDB LOCK, so it must
+// FAIL while the registry-owned handle stays open; (2) the NEXT chunk's hot key
+// is already "ready" (its DB was opened before publish); and (3) the next
+// chunk's handle was already handed to the registry (PublishHot precedes the
+// boundary publish, so the watermark can never outrun the View). Outcomes are
+// recorded per boundary for the test to assert after the loop.
 type fencePublisher struct {
-	cat *catalog.Catalog
+	cat   *catalog.Catalog
+	hooks *hookRecorder
 
-	mu             sync.Mutex
-	published      []chunk.ID
-	closedReleased []bool // per boundary: the closed chunk's write LOCK was free
-	nextReady      []bool // per boundary: the next chunk's hot key was already ready
+	mu            sync.Mutex
+	published     []chunk.ID
+	closedHeld    []bool // per boundary: the filled chunk's write handle still open (LOCK taken)
+	nextReady     []bool // per boundary: the next chunk's hot key was already ready
+	nextPublished []bool // per boundary: the next chunk's handle already registry-owned
 }
 
 func (p *fencePublisher) Publish(c chunk.ID) {
-	// (1) The closed chunk's write handle must be released: OpenExisting is read-write
-	// and takes the LOCK, so it succeeds only if the loop already closed the handle.
+	// (1) The filled chunk's handle must still be open: OpenExisting is read-write
+	// and takes the LOCK, so it fails exactly while the registry holds the handle.
 	db, err := hotchunk.OpenExisting(p.cat.Layout().HotChunkPath(c), c, silentLogger())
-	released := err == nil
+	held := err != nil
 	if db != nil {
 		_ = db.Close()
 	}
 	// (2) The next chunk must already be open+ready before this publish fires.
 	st, herr := p.cat.HotState(c + 1)
 	ready := herr == nil && st == geometry.HotReady
+	// (3) And its handle must already be registry-owned.
+	nextPub := p.hooks.has(c + 1)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.published = append(p.published, c)
-	p.closedReleased = append(p.closedReleased, released)
+	p.closedHeld = append(p.closedHeld, held)
 	p.nextReady = append(p.nextReady, ready)
+	p.nextPublished = append(p.nextPublished, nextPub)
 }
 
-// TestRunIngestionLoop_HandoffFenceClosesBeforeNextKey pins the boundary handoff order:
-// the just-closed chunk's write handle is released before the completed chunk is
-// published, and the next chunk's hot key is already "ready" at publish time.
-func TestRunIngestionLoop_HandoffFenceClosesBeforeNextKey(t *testing.T) {
+// TestRunIngestionLoop_HandoffFenceKeepsHandleRegistersNext pins the boundary
+// handoff order under registry ownership: the filled chunk's write handle stays
+// open (the registry serves reads from it until discard retires it), the next
+// chunk's hot key is already "ready" at publish time, and the next chunk's
+// handle reached the registry before the completed chunk was published.
+func TestRunIngestionLoop_HandoffFenceKeepsHandleRegistersNext(t *testing.T) {
 	t.Parallel() // seeds a near-full chunk (one synced commit per ledger)
 	cat, _ := testCatalog(t)
 	c := chunk.ID(0)
@@ -409,16 +486,23 @@ func TestRunIngestionLoop_HandoffFenceClosesBeforeNextKey(t *testing.T) {
 	// Build the loop config manually so the boundary publisher is our fence checker.
 	db, err := openHotDBForChunk(cat, chunk.IDFromLedger(resume), silentLogger())
 	require.NoError(t, err)
-	fence := &fencePublisher{cat: cat}
+	hooks := newHookRecorder()
+	hooks.PublishHot(chunk.IDFromLedger(resume), db)
+	t.Cleanup(hooks.closeAll)
+	fence := &fencePublisher{cat: cat, hooks: hooks}
 	cfg := ingestionLoopConfig{
-		Stream: stream, Resume: resume, HotDB: db, Catalog: cat, Boundary: fence, Logger: silentLogger(),
+		Stream: stream, Resume: resume, HotDB: db, Catalog: cat,
+		Boundary: fence, Registry: hooks, Logger: silentLogger(),
 	}
 
 	require.Error(t, runIngestionLoop(context.Background(), cfg), "stream ran dry")
 
 	require.Equal(t, []chunk.ID{c}, fence.published, "the completed chunk was published at the boundary")
-	require.Equal(t, []bool{true}, fence.closedReleased, "the closed chunk's write LOCK was released before publish")
+	require.Equal(t, []bool{true}, fence.closedHeld,
+		"the filled chunk's write handle stays open at publish time — the registry serves reads from it")
 	require.Equal(t, []bool{true}, fence.nextReady, "the next chunk's hot key was ready before publish")
+	require.Equal(t, []bool{true}, fence.nextPublished,
+		"the next chunk's handle reached the registry before the boundary publish")
 }
 
 // ---------------------------------------------------------------------------
@@ -517,6 +601,9 @@ func TestRunIngestionLoop_RestartResumesFromLastCommitted(t *testing.T) {
 	err := runIngestionLoop(context.Background(), cfg1)
 	require.Error(t, err)
 	assert.Equal(t, first, stream1.firstSeen.Load(), "first run resumed at the chunk's first ledger")
+	// Release the first run's registry-owned handle (production: registry.Close
+	// at run() exit) so the re-derivation below can take the write LOCK.
+	hooksOf(cfg1).closeAll()
 
 	// The durable last-committed ledger now implies resume first+3 — exactly what
 	// startup would derive on restart. Close the handle before the loop reopens the dir.
@@ -534,6 +621,7 @@ func TestRunIngestionLoop_RestartResumesFromLastCommitted(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, first+3, stream2.firstSeen.Load(), "second run resumed at last-committed+1")
 
+	hooksOf(cfg2).closeAll() // release the second run's handle before the final reopen
 	reopened, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = reopened.Close() })

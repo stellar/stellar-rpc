@@ -32,6 +32,20 @@ type BuildConfig struct {
 
 	// Metrics meters the eager post-build sweep (Prune); nil ⇒ Nop via MetricsOrNop.
 	Metrics observability.Metrics
+
+	// OnIndexSwap is called after CommitTxHashIndex lands, with the committed
+	// coverage (State already "frozen") — the registry's SwapTxIndex hook, which
+	// opens the fresh .idx reader and retires the predecessor's through the
+	// reaper. An error fails the build (the run restarts and the startup scan
+	// rebuilds the View from the catalog, which already holds the new coverage).
+	// nil (startup backfill: no registry yet) skips it.
+	OnIndexSwap func(cov geometry.TxHashIndexCoverage) error
+
+	// DeferDestroy, when set, receives each sweep's destructive half (unlink +
+	// key delete) instead of running it inline — the registry reaper's Schedule,
+	// so files a query holding an older View may still be reading outlive the
+	// grace period. nil (startup backfill, tests) destroys inline as before.
+	DeferDestroy func(destroy func() error)
 }
 
 func (cfg BuildConfig) validate() error {
@@ -111,13 +125,26 @@ func buildTxhashIndex(ctx context.Context, w geometry.TxHashIndexID, lo, hi chun
 	if cerr := cat.CommitTxHashIndex(cov); cerr != nil {
 		return fmt.Errorf("buildTxhashIndex commit window %s coverage [%s,%s]: %w", w, lo, hi, cerr)
 	}
+	// Publish AFTER the atomic commit: the durable state is "frozen" now, so the
+	// registry accepts the swap. A skipped build (already frozen, above) never
+	// reaches here — the startup scan already published that coverage.
+	if cfg.OnIndexSwap != nil {
+		cov.State = geometry.StateFrozen
+		if serr := cfg.OnIndexSwap(cov); serr != nil {
+			return fmt.Errorf("buildTxhashIndex publish window %s coverage [%s,%s]: %w", w, lo, hi, serr)
+		}
+	}
 	return nil
 }
 
-// buildThenSweep runs an IndexBuild (rule 4), then eagerly sweeps this window's
-// superseded ("pruning") coverages plus (terminal builds) its demoted .bin inputs —
-// freeing disk without waiting for a prune tick. Window-local, so concurrent windows'
-// sweeps don't collide; a crash mid-sweep is finished by the next run. Abandoned
+// buildThenSweep runs an IndexBuild (rule 4), then sweeps this window's
+// superseded ("pruning") coverages plus (terminal builds) its demoted .bin inputs.
+// With no DeferDestroy the sweep runs eagerly inline — freeing disk without
+// waiting for a prune tick; with one (the registry reaper), the already-demoted
+// keys' destructive halves run after the grace period, because queries holding
+// older Views may still be reading the superseded .idx. Window-local, so
+// concurrent windows' sweeps don't collide; a crash mid-sweep (or before a
+// deferred destroy runs) is finished by the next run's scans. Abandoned
 // "freezing" debris from a crashed earlier build is the lifecycle prune stage's job.
 func buildThenSweep(ctx context.Context, b IndexBuild, cfg BuildConfig) error {
 	if err := cfg.validate(); err != nil {
@@ -129,7 +156,8 @@ func buildThenSweep(ctx context.Context, b IndexBuild, cfg BuildConfig) error {
 		return err
 	}
 
-	// Eager sweep: reclaim the now-redundant inputs the fresh .idx supersedes.
+	// Sweep the now-redundant inputs the fresh .idx supersedes. The commit batch
+	// already demoted them all to "pruning", so only the destructive half remains.
 	sweepStart := time.Now()
 	swept := 0
 
@@ -138,12 +166,14 @@ func buildThenSweep(ctx context.Context, b IndexBuild, cfg BuildConfig) error {
 		return fmt.Errorf("buildThenSweep read index keys window %s: %w", b.Index, err)
 	}
 	for _, cov := range covs {
-		// Sweep the superseded ("pruning") coverages this build just demoted. The
+		// The superseded ("pruning") coverages this build just demoted. The
 		// coverage just built is "frozen" now, so it's skipped.
 		if cov.State != geometry.StatePruning {
 			continue
 		}
-		if serr := cat.SweepTxHashIndexKey(cov); serr != nil {
+		if cfg.DeferDestroy != nil {
+			cfg.DeferDestroy(func() error { return cat.DestroyTxHashIndexKey(cov) })
+		} else if serr := cat.SweepTxHashIndexKey(cov); serr != nil {
 			return fmt.Errorf("buildThenSweep sweep coverage %s: %w", cov.Key, serr)
 		}
 		swept++
@@ -153,12 +183,18 @@ func buildThenSweep(ctx context.Context, b IndexBuild, cfg BuildConfig) error {
 	if err != nil {
 		return err
 	}
-	if serr := cat.SweepChunkArtifacts(demoted); serr != nil {
+	if cfg.DeferDestroy != nil {
+		if len(demoted) > 0 {
+			cfg.DeferDestroy(func() error { return cat.DestroyChunkArtifacts(demoted) })
+		}
+	} else if serr := cat.SweepChunkArtifacts(demoted); serr != nil {
 		return fmt.Errorf("buildThenSweep sweep demoted inputs window %s: %w", b.Index, serr)
 	}
 	swept += len(demoted)
 
-	// Meter the sweep on the success path only — a mid-sweep failure aborts the plan.
+	// Meter the sweep on the success path only — a mid-sweep failure aborts the
+	// plan. Deferred destroys are counted at schedule time (the artifacts are
+	// already demoted and unreachable; only the unlink waits out the grace).
 	observability.MetricsOrNop(cfg.Metrics).Prune(swept, time.Since(sweepStart))
 	return nil
 }

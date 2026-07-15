@@ -25,6 +25,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/registry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/latencytrack"
 )
@@ -49,9 +50,10 @@ type daemonOptions struct {
 	// [ingestion] (a complete production opener). Tests inject a fake getter.
 	Core CoreOpener
 
-	// ServeReads launches the RPC read server; it must return promptly, not block.
-	// nil ⇒ the #772 no-op placeholder (reads still come from the v1 SQLite daemon).
-	ServeReads func(ctx context.Context) error
+	// ServeReads launches the RPC read server over the run's serving registry;
+	// it must return promptly, not block. nil ⇒ the #772 no-op placeholder
+	// (reads still come from the v1 SQLite daemon).
+	ServeReads func(ctx context.Context, reg *registry.Registry) error
 
 	// RestartBackoff is the supervised loop's inter-restart sleep; zero ⇒ defaultRestartBackoff.
 	RestartBackoff time.Duration
@@ -166,7 +168,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	serveReads := opts.ServeReads
 	if serveReads == nil {
 		// TODO(#772): wire the full-history RPC read server; no-op until the cutover.
-		serveReads = func(context.Context) error { return nil }
+		serveReads = func(context.Context, *registry.Registry) error { return nil }
 	}
 
 	// --- validateConfig: pin/confirm the layout, resolve the earliest floor. ---
@@ -253,7 +255,7 @@ func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry
 // goroutine share ONE catalog, worker pool, and retention floor by construction.
 func startConfig(
 	cfg config.Config, cat *catalog.Catalog, logger *supportlog.Entry,
-	backend backfill.Backend, core CoreOpener, serveReads func(context.Context) error,
+	backend backfill.Backend, core CoreOpener, serveReads func(context.Context, *registry.Registry) error,
 	metrics observability.Metrics, sink ingest.MetricSink, hs *healthState, retention geometry.Retention,
 	latency *latencytrack.Set,
 ) StartConfig {

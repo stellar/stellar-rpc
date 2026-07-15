@@ -16,19 +16,52 @@ import (
 // otherwise (live, or frozen awaiting coverage) → leave alone. Completeness is a
 // chunk-domain comparison (LastLedger is monotonic, so c.LastLedger() <=
 // lastChunk.LastLedger() iff c <= lastChunk); no ledger conversion is needed here.
-// catalog.DiscardHotChunk is idempotent, so a crash between freeze and discard
+// Both discard shapes are idempotent, so a crash between freeze and discard
 // self-heals next tick.
-func eligibleDiscardOps(cat *catalog.Catalog, floor chunk.ID, lastChunk chunk.ID) ([]func() error, error) {
+//
+// unpublish is the registry hook (Config.UnpublishHot). With one, each op
+// removes the chunk from the serving View first and hands the physical
+// destruction (rmdir + key delete) to the registry's reaper — the reaper closes
+// the registry-owned handle, then destroys, after the grace period; only the
+// catalog demotion ("transient") runs in the op itself. With nil, the op is the
+// classic inline catalog.DiscardHotChunk.
+func eligibleDiscardOps(
+	cat *catalog.Catalog, floor chunk.ID, lastChunk chunk.ID,
+	unpublish func(c chunk.ID, destroy func() error),
+) ([]func() error, error) {
 	hot, err := cat.HotChunkKeys()
 	if err != nil {
 		return nil, err
+	}
+
+	discard := func(c chunk.ID) func() error {
+		if unpublish == nil {
+			return func() error { return cat.DiscardHotChunk(c) }
+		}
+		return func() error {
+			state, herr := cat.HotState(c)
+			if herr != nil {
+				return herr
+			}
+			if state == "" {
+				return nil // a deferred destroy already finished it
+			}
+			// Unpublish BEFORE the catalog demotion and every destructive step.
+			// The chunk's cold artifacts keep serving; the reaper closes the hot
+			// handle and runs the destroy after the grace period. Scheduling is
+			// idempotent: a replayed discard (transient debris from a crash or an
+			// earlier tick whose destroy hasn't fired yet) just re-schedules the
+			// same idempotent destroy.
+			unpublish(c, func() error { return cat.DestroyHotChunk(c) })
+			return cat.PutHotTransient(c)
+		}
 	}
 
 	var ops []func() error
 	for _, c := range hot {
 		switch {
 		case c < floor:
-			ops = append(ops, func() error { return cat.DiscardHotChunk(c) })
+			ops = append(ops, discard(c))
 		case c <= lastChunk:
 			// Coverage is read once here and passed into pendingArtifacts — the
 			// discard requires covers independently, so the whole predicate is
@@ -42,7 +75,7 @@ func eligibleDiscardOps(cat *catalog.Catalog, floor chunk.ID, lastChunk chunk.ID
 				return nil, perr
 			}
 			if pending.Empty() && covers {
-				ops = append(ops, func() error { return cat.DiscardHotChunk(c) })
+				ops = append(ops, discard(c))
 			}
 			// else: frozen awaiting coverage, or still producing — leave alone.
 		}
@@ -77,15 +110,49 @@ func pendingArtifacts(c chunk.ID, cat *catalog.Catalog, covers bool) (catalog.Ar
 }
 
 // eligiblePruneOps is the system's only file-deleter, key-driven, covering both
-// key families. It returns sweep closures (SweepTxHashIndexKey per index key, one
-// batched SweepChunkArtifacts for the chunk family). "Below the floor" is the
-// gate predicate shared with the discard scan and read path, so prune deletes
-// exactly what the reader has stopped admitting.
+// key families. It returns sweep closures (one per index key, one batched op for
+// the chunk family). "Below the floor" is the gate predicate shared with the
+// discard scan and read path, so prune deletes exactly what the reader has
+// stopped admitting.
+//
+// deferDestroy is the registry hook (Config.DeferDestroy). With one, each op
+// demotes its keys now and hands the destructive half (unlink + key delete) to
+// the registry's reaper for after the grace period; a re-scan before the
+// deferred destroy runs re-lists the demoted keys and re-schedules the same
+// idempotent destroy. With nil, each op is the classic inline sweep.
+//
 // The second return is the per-op artifact weight (1 per index-key op; the ref
 // count for the single batched chunk sweep), so the caller meters Prune in artifacts
 // — the same unit the Phase 1 sweep reports — summing only the ops that actually ran
 // (the chunk family collapses N artifacts into one op).
-func eligiblePruneOps(cat *catalog.Catalog, floor chunk.ID) ([]func() error, []int, error) {
+func eligiblePruneOps(
+	cat *catalog.Catalog, floor chunk.ID, deferDestroy func(destroy func() error),
+) ([]func() error, []int, error) {
+	sweepIndexKey := func(cov geometry.TxHashIndexCoverage) func() error {
+		if deferDestroy == nil {
+			return func() error { return cat.SweepTxHashIndexKey(cov) }
+		}
+		return func() error {
+			if err := cat.DemoteTxHashIndexKey(cov); err != nil {
+				return err
+			}
+			deferDestroy(func() error { return cat.DestroyTxHashIndexKey(cov) })
+			return nil
+		}
+	}
+	sweepChunkRefs := func(refs []catalog.ArtifactRef) func() error {
+		if deferDestroy == nil {
+			return func() error { return cat.SweepChunkArtifacts(refs) }
+		}
+		return func() error {
+			if err := cat.DemoteChunkArtifacts(refs); err != nil {
+				return err
+			}
+			deferDestroy(func() error { return cat.DestroyChunkArtifacts(refs) })
+			return nil
+		}
+	}
+
 	var ops []func() error
 	// weights[i] is the artifact count op[i] sweeps, so a caller can sum the artifacts
 	// of the ops that actually ran (the chunk family collapses many artifacts into one op).
@@ -102,11 +169,11 @@ func eligiblePruneOps(cat *catalog.Catalog, floor chunk.ID) ([]func() error, []i
 			// Transient debris (a crashed build or unfinished demotion). Safe only
 			// because no build is in flight when this scan runs (it follows
 			// executePlan's return, and backfill finishes before the loop starts).
-			ops = append(ops, func() error { return cat.SweepTxHashIndexKey(cov) })
+			ops = append(ops, sweepIndexKey(cov))
 			weights = append(weights, 1)
 		case cat.TxHashIndexLayout().LastChunk(cov.Index) < floor:
 			// Frozen index key below the floor; the sweep demotes it first.
-			ops = append(ops, func() error { return cat.SweepTxHashIndexKey(cov) })
+			ops = append(ops, sweepIndexKey(cov))
 			weights = append(weights, 1)
 		}
 	}
@@ -141,7 +208,7 @@ func eligiblePruneOps(cat *catalog.Catalog, floor chunk.ID) ([]func() error, []i
 		}
 	}
 	if len(sweep) > 0 {
-		ops = append(ops, func() error { return cat.SweepChunkArtifacts(sweep) })
+		ops = append(ops, sweepChunkRefs(sweep))
 		weights = append(weights, len(sweep))
 	}
 	return ops, weights, nil

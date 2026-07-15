@@ -37,6 +37,21 @@ type Config struct {
 	// earliest_ledger pin.
 	Retention geometry.Retention
 
+	// The three registry hooks (#772). Each is nil-safe; all nil (tests,
+	// pre-registry callers) keeps every physical deletion inline, exactly as
+	// before the registry existed. Production sets all three from one registry.
+	//
+	// UnpublishHot removes a chunk's hot handle from the serving View before the
+	// discard demotes its catalog key; the registry's reaper closes the handle
+	// and then runs the destroy it is handed, after the grace period.
+	UnpublishHot func(c chunk.ID, destroy func() error)
+	// AdvanceFloor publishes a prune run's new retention floor, dropping every
+	// below-floor resource from the View before any demotion happens.
+	AdvanceFloor func(floor chunk.ID)
+	// DeferDestroy receives each prune sweep's destructive half (unlink + key
+	// delete) instead of running it inline — the registry reaper's Schedule.
+	DeferDestroy func(destroy func() error)
+
 	// opRetryAttempts / opRetryBackoff bound the per-op retry the discard/prune
 	// sweeps use (see runOps). Not config-wired: production always runs the
 	// WithLifecycleDefaults constants, so these are unexported internals (a test
@@ -133,7 +148,7 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 
 	// Stage 2 — discard scan.
 	discardStart := time.Now()
-	discardOps, err := eligibleDiscardOps(cat, floor, lastChunk)
+	discardOps, err := eligibleDiscardOps(cat, floor, lastChunk, cfg.UnpublishHot)
 	if err != nil {
 		return fmt.Errorf("eligible discard ops: %w", err)
 	}
@@ -156,9 +171,14 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	}
 	metrics.LiveHotChunks(len(hot))
 
-	// Stage 3 — prune scan.
+	// Stage 3 — prune scan. The floor gate publishes FIRST (spec: gate,
+	// unpublish, demote, then destroy): every below-floor resource leaves the
+	// serving View before any demotion or deletion below touches it.
+	if cfg.AdvanceFloor != nil {
+		cfg.AdvanceFloor(floor)
+	}
 	pruneStart := time.Now()
-	pruneOps, pruneWeights, err := eligiblePruneOps(cat, floor)
+	pruneOps, pruneWeights, err := eligiblePruneOps(cat, floor, cfg.DeferDestroy)
 	if err != nil {
 		return fmt.Errorf("eligible prune ops: %w", err)
 	}

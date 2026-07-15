@@ -14,7 +14,9 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/registry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/latencytrack"
 )
 
@@ -82,21 +84,42 @@ func run(ctx context.Context, cfg StartConfig) error {
 
 	// Open the resume chunk's hot DB BEFORE serving reads, so a broken hot tier (a
 	// "ready" key whose DB won't open) fails startup instead of serving behind a
-	// crash-looping ingestion loop. run() owns the close only until the loop takes
-	// over: loopOwnsDB flips true at the errgroup launch, after which the loop's
-	// deferred close owns it (and g.Wait joins before run returns, so there is no
-	// window where neither owns it). Restarts re-enter run() from the top, so this
-	// stays the single initial-open site; the loop still reopens at each boundary.
+	// crash-looping ingestion loop. run() owns the close only until the registry
+	// build below adopts the handle; on a build failure the deferred close releases
+	// it (and its RocksDB LOCK) for the supervised restart. Restarts re-enter run()
+	// from the top, so this stays the single initial-open site; the loop still
+	// opens each next chunk's DB at its boundary.
 	hotDB, err := openHotDBForChunk(cat, chunk.IDFromLedger(resumeLedger), logger)
 	if err != nil {
 		return fmt.Errorf("startup open resume hot tier for ledger %d: %w", resumeLedger, err)
 	}
-	loopOwnsDB := false
+	registryOwnsDB := false
 	defer func() {
-		if !loopOwnsDB {
-			_ = hotDB.Close() // an error before the loop took ownership
+		if !registryOwnsDB {
+			_ = hotDB.Close() // an error before the registry took ownership
 		}
 	}()
+
+	// Build the serving registry from the catalog scan — the startup row of the
+	// spec's View-update table. It happens BEFORE the lifecycle goroutine starts,
+	// so no freeze/discard/prune can land between the scan and the live hooks
+	// below. The registry (and its reaper goroutine) is per-run: it dies with
+	// Close on every exit and is rebuilt on a supervised restart. The live
+	// chunk's handle is handed in pre-opened — the build must not attempt a
+	// second write open of it — and its ownership transfers to the registry.
+	reg, err := registry.BuildFromCatalog(cat, cfg.Retention, lastCommitted, registry.Options{
+		PreOpened: map[chunk.ID]*hotchunk.DB{chunk.IDFromLedger(resumeLedger): hotDB},
+		Logger:    logger,
+	})
+	if err != nil {
+		return fmt.Errorf("startup build serving registry: %w", err)
+	}
+	registryOwnsDB = true
+	// Close runs after g.Wait() below has joined both loops (defers are LIFO and
+	// run after the return value is computed): publishers and query admission
+	// have stopped by then, and Close releases every handle immediately — no
+	// grace period — so the supervised restart finds every RocksDB LOCK free.
+	defer reg.Close()
 
 	// The live ingestion stream. It owns the captive-core process (started on the
 	// loop's first pull, torn down when the loop exits), so there is no eager
@@ -121,15 +144,27 @@ func run(ctx context.Context, cfg StartConfig) error {
 	}
 
 	// The lifecycle config draws on the SAME Exec wiring backfill uses, so the two
-	// share one catalog/pool by construction.
+	// share one catalog/pool by construction — plus the registry hooks, so every
+	// serving-map transition the tick commits is published to the View and every
+	// physical destruction defers behind the reaper's grace period. (The startup
+	// backfill above ran with these hooks nil: no registry existed yet, and the
+	// catalog scan just covered its output.)
+	execWithHooks := cfg.Exec
+	execWithHooks.Process.OnFrozen = reg.PublishFrozen
+	execWithHooks.Build.OnIndexSwap = reg.SwapTxIndex
+	execWithHooks.Build.DeferDestroy = reg.Reaper().Schedule
 	lifecycleCfg := lifecycle.Config{
-		ExecConfig: cfg.Exec,
-		Retention:  cfg.Retention,
+		ExecConfig:   execWithHooks,
+		Retention:    cfg.Retention,
+		UnpublishHot: reg.UnpublishHot,
+		AdvanceFloor: reg.AdvanceFloor,
+		DeferDestroy: reg.Reaper().Schedule,
 	}.WithLifecycleDefaults()
 
 	// Begin serving reads (injected) BEFORE launching the loops; it must return
-	// promptly (launch, not block).
-	if err := cfg.ServeReads(ctx); err != nil {
+	// promptly (launch, not block). The registry is the server's whole read face:
+	// admission, chunk resolution, and the reader caches all hang off it.
+	if err := cfg.ServeReads(ctx, reg); err != nil {
 		return fmt.Errorf("startup serve reads: %w", err)
 	}
 
@@ -141,8 +176,6 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// supervise is the one clean-vs-restart decision point; a canceled parent ctx
 	// classifies as clean.
 	g, gctx := errgroup.WithContext(ctx)
-	// The loop's deferred close now owns hotDB; g.Wait joins it before run returns.
-	loopOwnsDB = true
 	g.Go(func() error {
 		err := runIngestionLoop(gctx, ingestionLoopConfig{
 			Stream:   stream,
@@ -150,6 +183,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 			HotDB:    hotDB,
 			Catalog:  cat,
 			Boundary: boundary,
+			Registry: reg,
 			Logger:   logger,
 			Metrics:  metrics,
 			Sink:     cfg.Exec.Process.Sink,
@@ -308,8 +342,11 @@ type StartConfig struct {
 	// Core starts captive core and yields the ingestion getter. Required.
 	Core CoreOpener
 
-	// ServeReads begins serving reads; it must return promptly, not block. Required.
-	ServeReads func(ctx context.Context) error
+	// ServeReads begins serving reads over the run's freshly built registry; it
+	// must return promptly, not block. Required. The registry dies with the run
+	// (run() closes it on exit), so the server must stop admitting queries when
+	// ctx cancels.
+	ServeReads func(ctx context.Context, reg *registry.Registry) error
 
 	// runBackfill is a test-only seam for one backfill pass; nil ⇒ backfill.RunBackfill.
 	runBackfill func(ctx context.Context, exec backfill.ExecConfig, lo, hi chunk.ID) error

@@ -184,6 +184,89 @@ const (
 
 ---
 
+## Stage 3 — write integration: registry hooks through hotloop/backfill/lifecycle/startup (2026-07-15) — COMPLETE
+
+- Files changed (no new production files):
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/hotloop.go` — `hotPublisher` interface, `ingestionLoopConfig.Registry` (REQUIRED; loop errors on nil), boundary no longer closes, per-ledger `AdvanceLatest`, ownership comments rewritten (HANDOFF FENCE, LIVE-CHUNK EXCLUSION).
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/startup.go` — registry built in `run()` (see below), `StartConfig.ServeReads` signature, hook wiring into lifecycle config, `defer reg.Close()` teardown.
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/daemon.go` — `daemonOptions.ServeReads` signature + no-op default.
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/backfill/process.go` — `ProcessConfig.OnFrozen`, called after `FlipChunkFrozen` with exactly the kinds frozen.
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/backfill/txindex.go` — `BuildConfig.OnIndexSwap` + `BuildConfig.DeferDestroy`; `buildTxhashIndex` publishes after `CommitTxHashIndex` (skip path publishes nothing); `buildThenSweep` defers sweep bodies when `DeferDestroy` set.
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/lifecycle/lifecycle.go` — `Config.UnpublishHot/AdvanceFloor/DeferDestroy`; `AdvanceFloor(floor)` fires at the top of the prune stage (gate → unpublish → demote → destroy).
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/lifecycle/eligibility.go` — discard/prune op bodies built per hook presence (nil ⇒ exact pre-registry inline behavior).
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/catalog/catalog_sweep.go` — each sweep split into exported demote/destroy halves (see API); `DiscardHotChunk` recomposed as `PutHotTransient` + `DestroyHotChunk`; destroy bodies re-read the durable key and SKIP re-frozen/"ready"/absent keys.
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/catalog/catalog_protocol.go` — `deleteHotKey` doc comment only.
+  - Tests: `hotloop_test.go` (hookRecorder owns handles; fence test rewritten — see deviations), `e2e_test.go` (registry captured via ServeReads; View-vs-catalog assertions), `catalog/catalog_sweep_test.go` (+5 split/guard tests), `startup_test.go`/`daemon_test.go` (signature swaps), 3 lifecycle test files (nil hook args).
+- As-built API (everything stage 4+ consumes):
+
+```go
+// startup.go / daemon.go — THE ServeReads signature decision (doc offered field-vs-signature):
+StartConfig.ServeReads  func(ctx context.Context, reg *registry.Registry) error
+daemonOptions.ServeReads  // same signature; nil ⇒ no-op
+// run() order: backfill → open resume hot DB → BuildFromCatalog(cat, cfg.Retention, lastCommitted,
+//   Options{PreOpened: {resumeChunk: hotDB}, Logger}) → OpenCore → boundary seed → lifecycle cfg
+//   (hooks wired) → ServeReads(ctx, reg) → errgroup{ingestion, lifecycle} → g.Wait → deferred reg.Close()
+
+// hotloop.go — the loop's registry face (satisfied by *registry.Registry):
+type hotPublisher interface {
+    PublishHot(c chunk.ID, db *hotchunk.DB) // ownership transfers with the call
+    AdvanceLatest(seq uint32)
+}
+// ingestionLoopConfig.Registry hotPublisher — REQUIRED (loop returns error on nil)
+
+// backfill — nil-safe hook fields (startup backfill leaves all nil):
+ProcessConfig.OnFrozen     func(c chunk.ID, kinds ...geometry.Kind)          // after FlipChunkFrozen
+BuildConfig.OnIndexSwap    func(cov geometry.TxHashIndexCoverage) error      // after CommitTxHashIndex, cov.State=frozen; error FAILS the build
+BuildConfig.DeferDestroy   func(destroy func() error)                        // nil ⇒ sweep inline
+
+// lifecycle — nil-safe hook fields (all nil ⇒ pre-registry inline destruction):
+Config.UnpublishHot  func(c chunk.ID, destroy func() error)
+Config.AdvanceFloor  func(floor chunk.ID)
+Config.DeferDestroy  func(destroy func() error)
+
+// catalog — sweeps split so demote can run NOW and destroy LATER (reaper):
+func (c *Catalog) DemoteChunkArtifacts(refs []ArtifactRef) error       // frozen→pruning batch, no I/O
+func (c *Catalog) DestroyChunkArtifacts(refs []ArtifactRef) error      // unlink→fsync→del keys; guarded
+func (c *Catalog) DemoteTxHashIndexKey(cov geometry.TxHashIndexCoverage) error
+func (c *Catalog) DestroyTxHashIndexKey(cov geometry.TxHashIndexCoverage) error
+func (c *Catalog) DestroyHotChunk(chunkID chunk.ID) error              // rmdir→fsync→del key; guarded
+// SweepChunkArtifacts / SweepTxHashIndexKey / DiscardHotChunk = demote + destroy (unchanged semantics)
+// Guard: every Destroy* re-reads the durable key first — absent ⇒ no-op (idempotent re-run);
+// re-"frozen" (or hot "ready") ⇒ warn + SKIP, never unlink a serving artifact.
+```
+
+- Hook table as implemented (all eight rows):
+  - `openHotDBForChunk` boundary open → `PublishHot(next, nextDB)` right after the open, BEFORE `Boundary.Publish(closed)` and before next's first commit.
+  - Resume-chunk open → adopted via `BuildFromCatalog` `PreOpened` (the startup-scan row covers it; no explicit `PublishHot`).
+  - Ingest success → `AdvanceLatest(seq)` immediately after `hotService.Ingest` returns nil (before the gauges; failed ingest records nothing).
+  - Boundary → NO close; the filled chunk's handle stays registry-owned and serving.
+  - `processChunk` freeze commit → `OnFrozen(chunk, kinds...)` (nil during startup backfill).
+  - `buildTxhashIndex` commit → `OnIndexSwap(cov)` with `State=StateFrozen`; predecessor/.bin sweep bodies deferred via `DeferDestroy` in lifecycle runs, inline in startup backfill.
+  - Discard op (registry mode) → read hot state (absent ⇒ no-op) → `UnpublishHot(c, DestroyHotChunk)` → `PutHotTransient(c)`; reaper closes handle THEN destroys after grace.
+  - Prune → `AdvanceFloor(floor)` first, then per-op demote-now + `DeferDestroy(destroy)`.
+- Deviations from the stage doc + why:
+  - ServeReads SIGNATURE changed (not a StartConfig registry field): the registry is per-run — built inside `run()` after backfill — so it cannot live in the once-built StartConfig.
+  - `ingestionLoopConfig.Registry` is REQUIRED, not nil-safe: with no owner, boundary-opened handles would leak (production always has the registry by loop time). The doc's nil-safety requirement applies to backfill/lifecycle hooks only, which are nil-safe.
+  - `TestRunIngestionLoop_HandoffFenceClosesBeforeNextKey` REWRITTEN as `TestRunIngestionLoop_HandoffFenceKeepsHandleRegistersNext`: the old test pinned close-before-publish, which this stage deliberately removed. New assertions: filled chunk's write handle still HELD at publish (read-write reopen fails on the RocksDB LOCK), next key ready, next handle registry-owned before the boundary publish. Loop tests use a `hookRecorder` (owns handles; `closeAll` stands in for `registry.Close`) — the "loop closes nothing" contract is uniform, no legacy dual mode.
+  - Freeze does NOT read through the registry handle: `backfillSource`'s read-only hot open kept as-is (the doc's default; the HotProbe seam remains an option for later).
+  - Destroy-side state guards (skip re-frozen/ready/absent) added beyond the doc: with destruction now deferred up to grace T, a guard converts any future re-freeze-while-pending bug from silent artifact loss into a warn+skip. Analysis says no current flow can re-freeze a demoted key before its destroy runs (floors and coverage bounds are monotone; equal-coverage freezing debris is rebuilt by stage 1 of the same tick before the stage-3 scan defers anything); the guard is defense-in-depth, with a theoretical read-then-unlink TOCTOU accepted as unreachable.
+  - `OnIndexSwap` error FAILS the build (doc silent on error handling): a failed swap would leave the View serving the superseded coverage while the catalog holds the new one; failing → supervised restart → `BuildFromCatalog` republishes correctly.
+  - Deferred sweeps re-list until the destroy fires: a next tick's scan re-sees "pruning"/"transient" keys and re-schedules the same idempotent destroy (bounded duplicate work, correct outcome). Prune/Discard METRICS count at op/schedule time, not physical-deletion time.
+- Verification:
+  - `go build ./...` exit 0; `go vet ./cmd/stellar-rpc/internal/fullhistory/... ./cmd/stellar-rpc/internal/latencytrack/...` exit 0 (final tree).
+  - `go test ./cmd/stellar-rpc/internal/fullhistory/... ./cmd/stellar-rpc/internal/latencytrack/... -count=1`: ALL packages ok, exit 0 — fullhistory 248s (full e2e), backfill 74s, lifecycle 111s, catalog 25s (incl. 5 new split/guard tests), registry 7s; the stage-1 lifecycle flake did not recur.
+  - E2e extended per acceptance: `ServeReads` captures the run's registry; after both discards settle, `require.Eventually` pins the admitted View to the catalog — `Latest == last delivered ledger`, `HotChunks == {live chunk}`, floor == genesis chunk — then frozen chunks 0/1 resolve BOTH cold readers via `LedgerReaderFor`/`EventReaderFor` (a chunk-0 ledger reads back through the cold tier), and `View.Indexes()` carries both terminal coverages. Post-shutdown steps (key/file deletion, LOCK release, restart resume, prune) unchanged and green — they prove `registry.Close()` drains deferred destroys at run() exit.
+  - golangci-lint still not runnable locally (2.11.3 built with go1.25 vs repo go1.26) — CI-only, pre-existing.
+- Warnings / notes for stage 4:
+  - `ServeReads(ctx, reg)` hands you the PER-RUN registry: it dies (Close) when `run()` exits and a fresh one arrives on the next supervised restart — hold it only inside the serving goroutine's run scope, stop admitting on ctx cancel, and never Close it yourself.
+  - `Registry.Admit()` is the only admission point; `latest` seeds from the derived last-committed at build and advances per commit thereafter. The View has NO cold-flag accessor — resolve chunks through `LedgerReaderFor`/`EventReaderFor` (they wrap the caches + `ErrUnavailable`).
+  - A discarded chunk's hot handle may serve an admitted View for up to grace T after `UnpublishHot` — adapters must not cache resolutions across admissions (per-request Admit, as the spec says).
+  - Grace is still `DefaultGrace` 30s (stage 6 passes real T = max request duration + 5s via `Options.Grace`); cache caps still defaults (stage 6: `[serving]` keys).
+  - The e2e helper `runDaemonInBackground` now returns `(cancel, done, *atomic.Pointer[registry.Registry])` — reuse the cell for read-path e2e assertions.
+  - `hotchunk.DB.Close()` idempotency verified again by the hookRecorder tests (double closeAll is safe), but the registry remains single-owner — do not Close registry-owned handles in adapters (View doc comments say the same).
+
+---
+
 <!-- APPEND NEW ENTRIES BELOW. Template:
 
 ## Stage N — <title> (<date>) — COMPLETE | PARTIAL(resume: <exact next action>)

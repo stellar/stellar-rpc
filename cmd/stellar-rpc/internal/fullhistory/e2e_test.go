@@ -14,6 +14,11 @@ package fullhistory
 //     - lifecycle.Loop / runLifecycle: the real resolve + executePlan
 //       freeze (cold artifacts derived FROM the live hot DB), the real txhash
 //       index fold (a real streamhash .idx on disk), the real discard + prune.
+//     - The serving registry: run() builds it from the real catalog scan, the
+//       loops publish every transition into it (PublishHot/AdvanceLatest/
+//       PublishFrozen/SwapTxIndex/UnpublishHot/AdvanceFloor), physical
+//       destruction defers through its reaper, and the test reads chunks back
+//       through its admitted View.
 //     - The real txhash stores on both sides of a getTransaction-style hash→seq
 //       lookup: the cold ColdReader over the frozen .idx and the live hot CF.
 //
@@ -23,8 +28,9 @@ package fullhistory
 //       cross their injected interfaces (CoreOpener / backfill.Backend) and are
 //       fed synthetic-but-well-formed LedgerCloseMeta. No captive core, no
 //       object store, no network.
-//     - ServeReads is a no-op recorder (the read cutover is #772). The read PATH
-//       exercised is the txhash index lookup getTransaction will sit on.
+//     - ServeReads only records the run's registry (the HTTP layer is stage 6
+//       of #772). The read PATHS exercised are the registry View resolution
+//       and the txhash index lookup getTransaction will sit on.
 //
 // cpi=1 (the chunksPerTxhashIndex test seam) makes every one-chunk window
 // terminal the instant its chunk freezes, so the freeze→fold→discard→prune
@@ -37,6 +43,7 @@ import (
 	"iter"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -54,6 +61,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/fhtest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/registry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
@@ -203,26 +211,33 @@ format = "text"
 }
 
 // runDaemonInBackground starts runDaemonWith on a cancellable ctx and returns a
-// cancel func plus a channel carrying its (clean-shutdown) return. A young-network
-// tip (inside chunk 0) means backfill is a no-op and first-start ingests directly
+// cancel func, a channel carrying its (clean-shutdown) return, and a pointer
+// cell that receives each run's serving registry as ServeReads observes it (a
+// supervised restart stores the fresh run's registry). A young-network tip
+// (inside chunk 0) means backfill is a no-op and first-start ingests directly
 // from genesis via the fake core.
 func runDaemonInBackground(
 	t *testing.T, cfgPath string, core *e2eCore, served *atomic.Int32, metrics observability.Metrics,
-) (context.CancelFunc, <-chan error) {
+) (context.CancelFunc, <-chan error, *atomic.Pointer[registry.Registry]) {
 	t.Helper()
 	ctx, cancelFn := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
+	regCell := &atomic.Pointer[registry.Registry]{}
 	opts := daemonOptions{
-		Backend:              &fakeBackend{tip: chunk.FirstLedgerSeq + 5}, // young: no backfill
-		Core:                 core,
-		ServeReads:           func(context.Context) error { served.Add(1); return nil },
+		Backend: &fakeBackend{tip: chunk.FirstLedgerSeq + 5}, // young: no backfill
+		Core:    core,
+		ServeReads: func(_ context.Context, reg *registry.Registry) error {
+			regCell.Store(reg)
+			served.Add(1)
+			return nil
+		},
 		Logger:               silentLogger(),
 		Metrics:              metrics,
 		RestartBackoff:       10 * time.Millisecond,
 		chunksPerTxhashIndex: 1,
 	}
 	go func() { errCh <- runDaemonWith(ctx, cfgPath, opts) }()
-	return cancelFn, errCh
+	return cancelFn, errCh, regCell
 }
 
 // waitClean cancels the daemon and requires a clean (nil) shutdown.
@@ -331,7 +346,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	// freezing, rebuilding the index, and discarding each just-closed chunk off the BoundarySignal.
 	// =====================================================================
 	cfgPath := e2eConfigPath(t, dataDir, 0) // retention 0 (full history) for now
-	cancel, done := runDaemonInBackground(t, cfgPath, core, &served, metrics)
+	cancel, done, regCell := runDaemonInBackground(t, cfgPath, core, &served, metrics)
 
 	// Wait until ingestion crosses BOTH boundaries and commits into chunk 2.
 	// Delivering c2First proves both boundary handoffs fired (chunks 0 and 1
@@ -349,6 +364,44 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	require.GreaterOrEqual(t, served.Load(), int32(1), "reads were served")
 	require.Equal(t, c0First, core.fromSeen.Load(),
 		"first start resumes the ingestion stream at genesis (last committed ledger + 1)")
+
+	// --- Registry: the live serving View converges to the catalog. Chunks 0 and 1
+	// froze and their hot DBs were discarded (unpublished; physical destruction is
+	// grace-deferred), so only the live chunk 2 keeps a hot handle; both frozen
+	// chunks resolve to their cold stores; each one-chunk window carries a frozen
+	// terminal index coverage; the floor sits at genesis (retention 0); and the
+	// watermark equals the last ledger the fake core delivered. Eventually-polled:
+	// the discard metric fires inside the tick, a beat before the View update. ---
+	reg := regCell.Load()
+	require.NotNil(t, reg, "ServeReads observed the run's registry")
+	require.Eventually(t, func() bool {
+		snap := reg.Admit()
+		return snap.Latest == core.delivered.Load() &&
+			slices.Equal(snap.View.HotChunks(), []chunk.ID{c2}) &&
+			snap.View.Floor() == c0
+	}, 60*time.Second, 50*time.Millisecond,
+		"the admitted View must settle to: hot={chunk 2}, floor=genesis, latest=last delivered")
+	snap := reg.Admit()
+	for _, c := range []chunk.ID{c0, c1} {
+		lr, lerr := reg.LedgerReaderFor(snap.View, c)
+		require.NoError(t, lerr, "frozen chunk %s resolves a (cold) ledger store", c)
+		require.NotNil(t, lr)
+		er, eerr := reg.EventReaderFor(snap.View, c)
+		require.NoError(t, eerr, "frozen chunk %s resolves a (cold) event store", c)
+		require.NotNil(t, er)
+	}
+	ledgerStore, err := reg.LedgerReaderFor(snap.View, c0)
+	require.NoError(t, err)
+	raw, err := ledgerStore.GetLedgerRaw(c0First)
+	require.NoError(t, err, "a chunk-0 ledger reads back through the registry's cold tier")
+	require.NotEmpty(t, raw)
+	covs := snap.View.Indexes()
+	require.Len(t, covs, 2, "one frozen index coverage per one-chunk window")
+	for i, want := range []chunk.ID{c0, c1} {
+		assert.Equal(t, want, covs[i].Lo, "window %d coverage Lo", i)
+		assert.Equal(t, want, covs[i].Hi, "window %d coverage Hi", i)
+		assert.NotNil(t, covs[i].Idx, "window %d keeps an open reader", i)
+	}
 
 	// =====================================================================
 	// STEP 2 — clean shutdown. The supervised loop returns nil on ctx cancel.
@@ -437,7 +490,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	closePost() // release the inspection catalog handle before the daemon reopens it
 	core.opens.Store(0)
 	core.fromSeen.Store(0)
-	cancel2, done2 := runDaemonInBackground(t, cfgPath, core, &served, &e2eMetrics{})
+	cancel2, done2, _ := runDaemonInBackground(t, cfgPath, core, &served, &e2eMetrics{})
 
 	require.Eventually(t, func() bool { return core.opens.Load() >= 1 }, 30*time.Second, 20*time.Millisecond,
 		"the restarted daemon re-opened captive core")
@@ -460,7 +513,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	require.FileExists(t, prunedIdxPath, "chunk 0's cold index exists before the prune")
 
 	pruneMetrics := &e2eMetrics{}
-	cancel3, done3 := runDaemonInBackground(t, prunedCfg, core, &served, pruneMetrics)
+	cancel3, done3, _ := runDaemonInBackground(t, prunedCfg, core, &served, pruneMetrics)
 
 	// The prune scan runs on the first lifecycle tick (the at-start BoundarySignal ring).
 	require.Eventually(t, func() bool {
