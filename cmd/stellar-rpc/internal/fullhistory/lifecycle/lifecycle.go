@@ -44,6 +44,20 @@ type Config struct {
 	// WithLifecycleDefaults.
 	opRetryAttempts int
 	opRetryBackoff  time.Duration
+
+	// TickObserver is notified after each SUCCESSFUL tick (query POC): the read
+	// server's serve.Registry rescans the catalog and republishes its serving
+	// View so freeze/discard/prune become visible to queries. nil ⇒ no observer
+	// (the no-serve daemon). The observer defined as an interface here keeps
+	// lifecycle free of any read-server dependency.
+	TickObserver TickObserver
+}
+
+// TickObserver observes completed lifecycle ticks. *serve.Registry satisfies it
+// (its TickCompleted rescans + republishes); the interface lives here so
+// lifecycle does not import the serve package.
+type TickObserver interface {
+	TickCompleted()
 }
 
 const (
@@ -176,6 +190,14 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	}
 	if prunedArtifacts > 0 {
 		logger.WithField("pruned", prunedArtifacts).Info("lifecycle prune stage complete")
+	}
+
+	// End of a fully successful tick: the durable state just changed (freeze /
+	// discard / prune), so let the read server's serving View rescan and
+	// republish. A mid-tick error returns above WITHOUT notifying — the next tick
+	// (which subsumes it) republishes then. No-op when no observer is wired.
+	if cfg.TickObserver != nil {
+		cfg.TickObserver.TickCompleted()
 	}
 	return nil
 }
