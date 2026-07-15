@@ -80,6 +80,110 @@ type ServingConfig struct {
 
 ---
 
+## Stage 2 — fullhistory/registry: View, Registry, Reaper, caches, resolve, BuildFromCatalog (2026-07-15) — COMPLETE
+
+- Files added (new package, nothing else in the repo touched):
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/registry/view.go` — View, ColdChunk, IndexCoverage, resolve (cold wins), clone, accessors, `ErrUnavailable`.
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/registry/registry.go` — Registry, Snapshot, Admit, publish (clone-mutate-store), all write-side hooks, `LedgerStoreHandle`, reader resolution, defaults.
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/registry/reaper.go` — grace-period Reaper (one goroutine, FIFO queue; grace fixed ⇒ head-only wait).
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/registry/cache.go` — generic per-kind LRU (`readerCache[R]`); eviction/retirement never close inline, always via reaper.
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/registry/build.go` — Options + BuildFromCatalog (startup scan → initial View).
+  - Tests: `helpers_test.go`, `reaper_test.go`, `cache_test.go`, `registry_test.go`, `build_test.go` in the same directory.
+- As-built exported API (everything stage 3+ consumes):
+
+```go
+// package registry — import ".../internal/fullhistory/registry"
+var ErrUnavailable error                      // chunk has no serving store in this view
+
+type View struct{ /* unexported: floor, hot, cold, indexes */ } // immutable once published
+func (v *View) Floor() chunk.ID
+func (v *View) FloorLedger() uint32           // floor.FirstLedger()
+func (v *View) HotChunks() []chunk.ID         // ascending
+func (v *View) HotDB(c chunk.ID) (*hotchunk.DB, bool)  // registry-owned; never Close it
+func (v *View) Indexes() []IndexCoverage      // copy, ascending by Window; readers registry-owned
+
+type ColdChunk struct{ Ledgers, Events bool }
+type IndexCoverage struct {
+    Window geometry.TxHashIndexID
+    Lo, Hi chunk.ID                           // the .idx's ACTUAL coverage, not window bounds
+    Idx    *txhash.ColdReader
+}
+
+type Snapshot struct { Latest uint32; View *View }
+func (r *Registry) Admit() Snapshot           // loads latest FIRST, then View (order load-bearing)
+func (r *Registry) Reaper() *Reaper           // for lifecycle-deferred unlink/key-delete (stage 3 prune)
+
+// Write-side hooks (stage 3 call sites per its hook table):
+func (r *Registry) PublishHot(c chunk.ID, db *hotchunk.DB)       // ownership transfers to registry
+func (r *Registry) AdvanceLatest(seq uint32)
+func (r *Registry) PublishFrozen(c chunk.ID, kinds ...geometry.Kind) // KindTxHash accepted+skipped
+func (r *Registry) SwapTxIndex(cov geometry.TxHashIndexCoverage) error // opens new reader; retires old via reaper; REFUSES non-frozen cov
+func (r *Registry) UnpublishHot(c chunk.ID, destroy func() error) // after grace: handle.Close() THEN destroy()
+func (r *Registry) AdvanceFloor(floor chunk.ID)                   // drops+retires below-floor hot/cold/indexes/cached readers; regression = warn+ignore
+func (r *Registry) Close()                                        // idempotent; closes EVERYTHING now (reaper drained run-now)
+
+// Read faces (stages 4–5):
+type LedgerStoreHandle interface {            // satisfied by *ledger.ColdReader AND *ledger.HotStore
+    GetLedgerRaw(seq uint32) ([]byte, error)
+    IterateLedgers(start, end uint32) iter.Seq2[ledger.Entry, error]
+}
+func (r *Registry) LedgerReaderFor(v *View, c chunk.ID) (LedgerStoreHandle, error)
+func (r *Registry) EventReaderFor(v *View, c chunk.ID) (eventstore.Reader, error)
+
+type Reaper struct{ /* one goroutine */ }
+func NewReaper(grace time.Duration, logger *supportlog.Entry) *Reaper
+func (p *Reaper) Schedule(destroy func() error) // non-blocking; nil ignored; post-Close runs inline
+func (p *Reaper) Close()                        // stop goroutine + run all pending destroys NOW
+
+type Options struct {
+    Grace          time.Duration              // 0 ⇒ DefaultGrace
+    LedgerCacheCap int                        // 0 ⇒ DefaultLedgerCacheCap
+    EventCacheCap  int                        // 0 ⇒ DefaultEventCacheCap
+    PreOpened      map[chunk.ID]*hotchunk.DB  // live-chunk handle(s) ingestion already holds
+    Logger         *supportlog.Entry          // nil ⇒ cat.Logger()
+}
+func BuildFromCatalog(cat *catalog.Catalog, ret geometry.Retention, latest uint32, opts Options) (*Registry, error)
+
+const (
+    DefaultGrace          = 30 * time.Second
+    DefaultLedgerCacheCap = 128
+    DefaultEventCacheCap  = 32
+)
+```
+
+- Semantics pinned by tests (the behavioral contract, beyond signatures):
+  - Admission: latest-then-View load order (hammered concurrently); write side must keep publishing a chunk's home BEFORE advancing latest into it.
+  - Publish: clone-mutate-store under one mutex; old Snapshots stay fully usable (immutability test).
+  - resolve: cold wins over hot per kind; per-kind independence (ledgers can be cold while events still hot); no home ⇒ `ErrUnavailable`.
+  - Floor: `BuildFromCatalog` floor = `ret.FloorAt(geometry.LastCompleteChunkAt(latest))` (same derivation as `retentionFloorLedger` in startup.go); chunk-aligned per D-record.
+  - UnpublishHot's reaper unit: handle Close FIRST, then destroy — destroy's body must NOT touch the DB (it gets a closed handle).
+  - Registry.Close: no grace, synchronous, idempotent; every RocksDB LOCK released when it returns (supervised-restart requirement).
+- Deviations from the stage doc + why:
+  - `LedgerStoreHandle` is only `{GetLedgerRaw, IterateLedgers}` — `LastSeq` differs between the two stores (`(uint32, error)` cold vs `(uint32, bool, error)` hot) so it cannot be shared; doc said "define the smallest interface that fits both".
+  - Additions beyond the doc's list (all needed by stages 3–4, recorded here as the API grew): `Registry.Reaper()` (stage 3 prune defers unlink/key-delete "via reaper"), View accessors `Floor/FloorLedger/HotChunks/HotDB/Indexes` (stage 4 assembles tx-probe sets + bounds from the View), exported `Default*` constants, `Options.Logger`.
+  - `SwapTxIndex` REFUSES (error + View unchanged) a non-frozen coverage instead of assert-log-and-proceed — R1 says a transient resource must never enter a View; the error also covers the open-failure case the doc's signature already implied.
+  - `BuildFromCatalog` EXCLUDES below-floor entries entirely (ready hot keys, frozen chunk flags, coverages with `Hi < floor`) rather than only gating at query time — matches the steady-state invariant AdvanceFloor maintains and avoids opening handles for prune debris. A PreOpened handle that isn't a ready in-retention chunk is rejected with a warn and stays CALLER-owned; accepted handles become registry-owned.
+  - `PublishFrozen` silently skips `KindTxHash` (stage 3 can pass exactly the kinds it froze; the .bin is an index-build input, never chunk-served). Unknown kinds warn.
+  - resolve returns an internal `tier` struct, not a `Store` interface — ledger and event readers have different types; the two `*ReaderFor` funcs are the public faces (doc's own framing).
+  - Cold-reader cache opens use `eventstore.ColdReaderOptions{Concurrency: 0}` (serial coalesced reads) — tuning deferred to stages 5–6.
+  - Known benign window (documented in cache.go): a query on an older View can re-insert a retired chunk's cold reader after unpublish/floor-advance; it is bounded by the LRU cap and closed on eviction or Close. The doc's acquire path ("hit → return; miss → open, insert, return") is implemented as written.
+- Verification:
+  - `go build ./...` exit 0; `go vet ./...` exit 0 (final state, after all edits).
+  - `go test ./cmd/stellar-rpc/internal/fullhistory/... ./cmd/stellar-rpc/internal/latencytrack/... -count=1`: every package ok, exit 0 — including the full e2e (241s) and lifecycle (105s; the stage-1 flake did not recur).
+  - Registry package additionally passes `-race -count=1` (24 tests): admission-order hammer (4 readers vs publisher), clone isolation, cold-over-hot preference (real RocksDB hot DB + type-asserted tiers), floor advance (drops hot/cold/index + cache retire + grace-delayed closes observed via `stores.ErrStoreClosed`), reaper grace timing (destroy stamps its own run time ≥ T), FIFO order, Close-runs-pending-now, exactly-once across concurrent Schedule/Close, LRU eviction→retire routing, BuildFromCatalog over a real catalog + real cold pack + real hot DB + real (empty) `.idx` with R1 noise (freezing chunk, freezing coverage, ready-key-without-dir below floor) and read-through assertions on both tiers, PreOpened adoption (same pointer, ownership transfer on Close) and rejection (handle left open for caller), pristine catalog, ready-chunk-won't-open build failure.
+  - golangci-lint still not runnable locally (2.11.3 built with go1.25 vs repo go1.26) — CI-only, pre-existing.
+- Warnings / notes for stage 3:
+  - Ordering the hooks rely on: `PublishHot(C+1)` must complete before C+1's first `AdvanceLatest` (the loop's natural sequence — do not reorder); `AdvanceLatest` only on Ingest's success path.
+  - `Registry.Close()` requires publishers and query admission stopped FIRST: a publish that lands after Close leaks its resource into the dead View (comment on Close says this). Teardown order in run(): stop loops → registry.Close().
+  - `UnpublishHot(c, destroy)`: destroy runs AFTER the handle is closed — put only transient-mark/rmdir/key-delete in it, never DB reads. It is also scheduled even if the chunk was not in the View (safe for replayed discards).
+  - Prune: call `AdvanceFloor(floor)` first, demote in the run, then `reg.Reaper().Schedule(...)` the unlink+key-delete bodies (keep the fsync ordering inside the destroy step).
+  - `BuildFromCatalog` opens write handles for EVERY ready in-retention hot chunk not in `PreOpened` — pass the live chunk's handle (and any other ingestion-held handle) via `Options.PreOpened` or the build's second write-open will fail on the RocksDB LOCK.
+  - The registry (and its reaper goroutine) is per-run: build it inside run() after backfill, Close it on run() exit, rebuild on supervised restart. `latest` seeds from the caller-derived last-committed ledger (`lastCommittedLedger(cat)`).
+  - Grace: assembly must eventually pass real `T` = max request duration + 5s margin (stage 6); until then DefaultGrace 30s applies.
+  - `hotchunk.DB.Close()` is idempotent (verified in its doc/comment: "releases the shared store exactly once. Idempotent.") — but the registry is single-owner, so double-close should not arise.
+
+---
+
 <!-- APPEND NEW ENTRIES BELOW. Template:
 
 ## Stage N — <title> (<date>) — COMPLETE | PARTIAL(resume: <exact next action>)
