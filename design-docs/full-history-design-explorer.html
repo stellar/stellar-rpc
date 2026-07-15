@@ -758,8 +758,8 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
     <li>Done-channels signal <em>success</em>: a chunk build closes its channel only once its <code>.bin</code>
       is frozen, so an index build proceeds only when every input it needs exists. A chunk build that exhausts
       its retries leaves its channel open and returns an error, which cancels the group context; any dependent
-      waiting on it unblocks through the <code>&lt;-gctx.Done()</code> case and bails — the daemon aborts and a
-      restart re-resolves from durable keys.</li>
+      waiting on it unblocks through the <code>&lt;-gctx.Done()</code> case and bails — the run fails and the
+      next startup re-resolves from durable keys.</li>
     <li><code>resolve</code> re-plans from the artifact keys on every run, so completed work never repeats and
       interrupted work needs no reconciliation.</li>
   </ul>
@@ -849,17 +849,16 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   <p>
     The <b>handoff fence is the boundary's write order</b>: the ingestion loop closes its write handle and
     opens the next chunk — which moves the partition, since the closed chunk now lies below the new live
-    chunk — <em>before</em> it hands the completed chunk to the lifecycle on the channel. So by the time the
+    chunk — <em>before</em> it notifies the lifecycle of the completed chunk. So by the time the
     lifecycle freezes and discards it, no writer holds it.
   </p>
   <p>
-    The only connection between the goroutines is the <b>channel</b>, which carries the chunk ingestion just
-    completed on a buffered channel of depth <code>lifecycleQueueDepth</code>. The lifecycle drains it to the
-    highest value each wake and plans up to that chunk, folding a backlog of boundaries into one run. The
-    value sets only the run's <em>range</em>; the work is still gated by durable keys — <code>resolve</code>
-    and the scans decide what to build, discard, and prune. A send onto a full buffer means the lifecycle has
-    fallen <code>lifecycleQueueDepth</code> boundaries behind ingestion — a fatal "freeze can't keep up,"
-    never a silent drop (the depth sits well above the at-most-one signal a healthy daemon holds).
+    The only connection between the goroutines is the <b>boundary notification</b>, which carries the chunk
+    ingestion just completed. Notifications coalesce: the lifecycle wakes on the latest completed chunk and
+    plans up to it, folding a backlog of boundaries into one run, so notifying never blocks ingestion and the
+    lifecycle can never fall behind by more than one run. The value sets only the run's <em>range</em>; the
+    work is still gated by durable keys — <code>resolve</code> and the scans decide what to build, discard,
+    and prune.
   </p>
 </section>
 
@@ -990,7 +989,7 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
     <li><b>Everything re-derived on every notification</b> — there is no persisted plan to drift.</li>
   </ul>
   <p>
-    Runtime op failure aborts the daemon (after bounded retries) rather than deferring silently — safe
+    Runtime op failure fails the run (after bounded retries) rather than deferring silently — safe
     because <b>startup is the recovery path</b>: every state a run can leave behind is one startup is built
     to converge.
   </p>
@@ -1471,11 +1470,11 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
       d:"openHotDBForChunk: put hot:chunk:00005351 = \"transient\" → create the RocksDB dir → fsync dir + parent dirent → flip to \"ready\". The instant this key exists, chunk 5350 sits below the highest hot key: the partition has moved, and any lifecycle scan may now freeze and discard it.",
       f:s => { s.meta.splice(1, 0, { k:"hot:chunk:00005351", v:"ready" }); mark(s, "m", 1);
                s.files.splice(1, 0, { p:"hot/00005351/", kind:"dir", note:"new live chunk" }); mark(s, "f", 1); } },
-    { a:"ingestion", t:"notify(5350) — send on the channel",
-      d:"Non-blocking send of the completed chunk on a buffered channel. The lifecycle freezes up to the most recent chunk it receives; the chunk only says how far to go — what to build, discard, and prune is read from the catalog keys. A full channel is fatal: the lifecycle has fallen too far behind ingestion.",
+    { a:"ingestion", t:"notify(5350) — publish the boundary",
+      d:"Non-blocking boundary notification of the completed chunk; notifications coalesce, so publishing never blocks ingestion and the lifecycle can never fall behind by more than one run. The chunk only says how far to go — what to build, discard, and prune is read from the catalog keys.",
       f:s => {} },
     { a:"lifecycle", t:"Run: derive + resolve",
-      d:"lifecycle drains the channel → chunk 5350 (last ledger 53,510,001). Floor stays at 5100 — pinned by earliest_ledger, so it doesn't slide this run. resolve diffs [5100, 5350] against the catalog → Plan{ ChunkBuild 5350 {ledgers, events, txhash}, IndexBuild w5 [5100, 5350] }. The plan is just a value — loggable, diffable, testable.",
+      d:"lifecycle wakes on the latest boundary → chunk 5350 (last ledger 53,510,001). Floor stays at 5100 — pinned by earliest_ledger, so it doesn't slide this run. resolve diffs [5100, 5350] against the catalog → Plan{ ChunkBuild 5350 {ledgers, events, txhash}, IndexBuild w5 [5100, 5350] }. The plan is just a value — loggable, diffable, testable.",
       f:s => {} },
     { a:"lifecycle", t:"ChunkBuild 5350 — mark",
       d:"One synced batch puts chunk:00005350:{ledgers, events, txhash} = \"freezing\" — before any I/O, so any file that appears next is already reachable from a key.",
@@ -1654,14 +1653,14 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
         { c:"ok", ic:"✓", t:"retention gate: seq ≥ floor → admitted", s:"" },
         { c:"ok", ic:"✓", t:"fetch the LCM, verify the full 32-byte hash → confirms → return", s:"" },
       ],
-      note:"A hash has no window hint, so the reader probes every in-retention window. The fingerprint (<code>fpWidth</code> bytes) rejects non-containing windows with no fetch; the containing window's fingerprint hit is confirmed by the full-hash verify. The tx is in at most one window, so at most one probe confirms." },
+      note:"A hash has no window hint, so the reader probes every in-retention window. The fingerprint (1 byte) rejects non-containing windows with no fetch; the containing window's fingerprint hit is confirmed by the full-hash verify. The tx is in at most one window, so at most one probe confirms." },
     { label:"Fingerprint false positive",
       nodes:[
         { c:"dim", ic:"·", t:"window 7: fingerprint miss → skip", s:"" },
-        { c:"fail", ic:"✕", t:"window 6: fingerprint HIT (false positive) → fetch + verify → fails", s:"~256^(−fpWidth) chance; the fetched tx's full hash doesn't match → rejected, keep probing" },
+        { c:"fail", ic:"✕", t:"window 6: fingerprint HIT (false positive) → fetch + verify → fails", s:"~1/256 chance; the fetched tx's full hash doesn't match → rejected, keep probing" },
         { c:"ok", ic:"✓", t:"window 5: fingerprint hit → fetch + verify → confirms → return", s:"" },
       ],
-      note:"The fingerprint is a screen, not a decision: a non-containing window matches it with probability <code>256^(−fpWidth)</code> and costs a wasted fetch the verify rejects. <code>fpWidth</code> is the knob that keeps spurious fetches ≪ 1; the verify is what guarantees only the true window is ever returned." },
+      note:"The fingerprint is a screen, not a decision: a non-containing window matches it with probability ~1/256 and costs a wasted fetch the verify rejects. The screen keeps spurious fetches ≪ 1; the verify is what guarantees only the true window is ever returned." },
     { label:"Not found",
       nodes:[
         { c:"dim", ic:"·", t:"window 7: fingerprint miss", s:"" },
@@ -1763,7 +1762,7 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
     if (idx.state === "done") return "<b>Plan complete.</b> Every chunk build closed its done-channel, so the index build's wait fell through and it ran the k-way merge. Wall-clock was the slowest dependency chain, not the sum of the stages.";
     const f = tasks.find(x => x.state === "failed");
     if (idx.state === "cancelled" || f) {
-      return "<b>chunk "+(f ? f.id : FAILID)+" exhausted its retries.</b> It returns an error and <em>leaves <code>done["+(f ? f.id : FAILID)+"]</code> open</em>; the error cancels <code>gctx</code>. The index build, parked in its wait loop, unblocks through the <code>&lt;-gctx.Done()</code> case and bails. The daemon aborts; a restart re-resolves from durable keys and repeats no finished work.";
+      return "<b>chunk "+(f ? f.id : FAILID)+" exhausted its retries.</b> It returns an error and <em>leaves <code>done["+(f ? f.id : FAILID)+"]</code> open</em>; the error cancels <code>gctx</code>. The index build, parked in its wait loop, unblocks through the <code>&lt;-gctx.Done()</code> case and bails. The run fails; the next startup re-resolves from durable keys and repeats no finished work.";
     }
     const running = tasks.filter(x => x.state === "running").length;
     const dn = tasks.filter(x => x.kind === "chunk" && x.state === "done").length;

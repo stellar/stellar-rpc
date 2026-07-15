@@ -81,7 +81,7 @@ The hot tier is a plain key-value table, one per chunk, stored as a `txhash` col
 - **Key**: the full 32-byte transaction hash.
 - **Value**: the 4-byte ledger sequence.
 
-Storing the full hash makes the hot tier **exact**: a lookup either finds the hash or it doesn't. There are no false positives to screen out and nothing to verify. The table is tuned for point lookups — bloom filters on, ordering off.
+Storing the full hash makes the hot tier **exact**: a lookup either finds the hash or it doesn't. There are no false positives to screen out and nothing to verify. The table is tuned for point lookups.
 
 ### 5.2 Write path
 
@@ -107,7 +107,7 @@ entry × count    20 bytes each: [key: 16][seq: 4 LE]
 ```
 
 - `key` is the **first 16 bytes of the transaction hash**. The index uses only these 16 bytes to place and find a transaction; what happens when two hashes share a 16-byte prefix is in §8.2.
-- Entries are sorted ascending by the **big-endian `uint64` prefix of `key`**.
+- Entries are sorted ascending by `key`, **bytewise over all 16 bytes** — a total order, so the same entries always produce byte-identical files (rebuilds are deterministic).
 
 The `.bin` is a pre-sorted file, and a lookup never reads it directly. It is sorted because streamhash builds an index **much faster, and with much less memory, when its keys arrive already sorted** — its *sorted-builder mode*.
 
@@ -117,8 +117,8 @@ A `.bin` is kept while it is still a rebuild input — every rebuild re-merges t
 
 The `.idx` lives at `txhash/index/{window:08d}/{lo:08d}-{hi:08d}.idx`, tracked by the catalog key `index:{window:08d}:{lo:08d}:{hi:08d}`. There is one minimal-perfect-hash file per **coverage** — a coverage being the chunk range `[lo, hi]` the file actually hashes. Streamhash's `SortedBuilder` builds it from the k-way merge of `.bin[lo..hi]`. The index carries two per-entry fields:
 
-- **Payload (3 bytes): the answer the hash maps to — a ledger seq.** It is stored as an offset from the window's first ledger (`MinLedger = chunkFirstLedger(lo)`) rather than as a full seq, to save bytes. A window spans 10,000,000 ledgers, so the largest offset (`10_000_000 - 1`) fits in a 24-bit field. Streamhash writes the payload width into the index file's header; `MinLedger`, which streamhash does not model itself, rides in the file's user-metadata slot. Both are read back at lookup time, so there is no separate sidecar file.
-- **Fingerprint (`fpWidth` bytes, default 1): a few bytes per entry to screen out wrong hashes** before the expensive fetch-and-verify. Because a lookup probes every in-retention window (§8.2), a wider fingerprint is a trade-off: it costs index size (+1 byte per transaction) but cuts the number of false-positive fetches across those windows. Fixed per build.
+- **Payload (3 bytes): the answer the hash maps to — a ledger seq.** It is stored as an offset from the coverage's first ledger (`MinLedger = chunkFirstLedger(lo)`) rather than as a full seq, to save bytes. A window spans 10,000,000 ledgers, so the largest offset (`10_000_000 - 1`) fits in a 24-bit field. Streamhash writes the payload width into the index file's header; the coverage's ledger range `[MinLedger, MaxLedger]`, which streamhash does not model itself, rides in the file's user-metadata slot as two 4-byte little-endian values. Both are read back when the index is opened, so there is no separate sidecar file.
+- **Fingerprint (1 byte, fixed by the format): screens out wrong hashes** before the expensive fetch-and-verify. One byte rejects ~255/256 of foreign hashes per window probe (§8.2), costing one byte per transaction.
 
 All-in, the index costs ≈4.2 bytes per transaction (MPHF structure + payload + fingerprint) — ≈12.5 GB for a dense full window, versus the ≈60 GB of `.bin` runs it consumes.
 
@@ -127,7 +127,7 @@ All-in, the index costs ≈4.2 bytes per transaction (MPHF structure + payload +
 An index file is named by its **coverage** — the chunk range `[lo, hi]` it hashes:
 
 - **`lo`** — the lowest chunk the index covers. It is the window's first chunk, unless the retention floor has cut into the window, in which case it rises to the first chunk still retained.
-- **`hi`** — the highest chunk the index covers. While the window is the current one (the network tip is in it), `hi` advances by one chunk on each rebuild. Once the window is complete, `hi` is its last chunk and the index is final.
+- **`hi`** — the highest chunk the index covers. While the window is the current one (the network tip is in it), each rebuild advances `hi` to the highest frozen chunk: by one in steady state, by many when catching up after downtime. Once the window is complete, `hi` is its last chunk and the index is final.
 
 A window has exactly **one live index** at a time, and a lookup resolves "the window's index" to that one file. A rebuild builds a new index at a wider coverage and replaces the live one; the replacement is atomic, so a lookup always sees one complete index, never a half-built one. (How that swap stays atomic across a crash is the daemon's write protocol, in the streaming doc.)
 
@@ -147,7 +147,7 @@ This is affordable because the rebuild is cheap relative to its cadence: a full-
 
 To rebuild window `w`'s index over coverage `[lo, hi]`:
 
-1. **Skip if already done.** If the live index already covers exactly `[lo, hi]`, there is nothing to do.
+1. **Skip if already done.** If the live index already covers `[lo, hi]`, there is nothing to do. (A live index *wider* than desired also counts — a risen floor never forces a narrowing rebuild; the below-floor slice is masked by the retention gate, §8.2.)
 2. **Merge.** Merge the sorted `.bin` files for chunks `[lo, hi]` into a new index file, with streamhash's sorted-builder. (Every chunk in `[lo, hi]` must have a `.bin`; a missing one fails the merge.)
 3. **Swap in.** Make the new file the window's live index, replacing the previous one.
 
@@ -193,7 +193,7 @@ The cold tier **probes every in-retention window's `.idx`**. A hash gives no hin
 ```
 for each in-retention window (its live index → {lo}-{hi}.idx):
   → MPHF probe on the hash's 16-byte prefix
-  → fingerprint check (fpWidth bytes)             — miss ⇒ skip this window
+  → fingerprint check (1 byte)                    — miss ⇒ skip this window
   → on a fingerprint hit:
        seq = MinLedger + payload (3 bytes)
        retention gate: seq ≥ floor?               — else skip this window
@@ -239,7 +239,7 @@ Transient peaks: ~2× the index size in the window dir during each rebuild (~25 
 - **Ingest, hot**: one `(hash, seq)` put per transaction, inside the ledger's existing write.
 - **Ingest, cold**: the in-memory sort of ~3M entries is negligible against the chunk's streaming pass; the `.bin` write is sequential.
 - **Rebuild**: a full dense window merges ~60 GB of sorted `.bin` files into a ~12.5 GB `.idx` in ≈1 minute (~200 MB/s write burst), measured in the `bench-fullhistory` harness. Mid-window rebuilds scale with `hi − lo`. Against a ~14-hour boundary cadence at mainnet rates, the rebuild is a ~0.1% duty cycle.
-- **Lookup, cold**: one MPHF probe per in-retention window — fingerprint screen, then fetch-and-verify on a hit. The hash is in at most one window, so at most one fetch confirms; fingerprint false positives (bounded by `fpWidth`, §6.2) are rejected by the full-hash verify. Probe ordering, parallelism, and the resulting latency/throughput are the query-routing design's concern (§8.1).
+- **Lookup, cold**: one MPHF probe per in-retention window — fingerprint screen, then fetch-and-verify on a hit. The hash is in at most one window, so at most one fetch confirms; fingerprint false positives (~1/256 per window, §6.2) are rejected by the full-hash verify. Probe ordering, parallelism, and the resulting latency/throughput are the query-routing design's concern (§8.1).
 - **Lookup, hot**: one RocksDB point get in a bloom-filtered CF, then the same ledger fetch.
 
 ---

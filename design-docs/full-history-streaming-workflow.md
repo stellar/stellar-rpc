@@ -8,7 +8,7 @@ It keeps two tiers of data. **Hot** data is the most recent ledgers near the net
 
 The daemon does three things:
 
-- **Backfills on startup.** Before it serves anything, it runs backfill as a subroutine to bring what's on disk in line with the current retention window. It pulls every chunk inside that window that isn't already frozen from a configured `LedgerBackend` — by default BSB (the Buffered Storage Backend, which reads ledgers from an object store), or captive core or any other conformant backend if BSB isn't available. It skips the partial chunk still forming at the tip; hot-DB ingestion fills that one once it starts. This single mechanism covers a first-ever start, gaps left by downtime, and gaps opened by widening retention.
+- **Backfills on startup.** Before it serves anything, it runs backfill as a subroutine to bring what's on disk in line with the current retention window. It pulls every chunk inside that window that isn't already frozen from a configured bulk source: an object-store lake read through BSB (the Buffered Storage Backend) when one is configured, otherwise captive core replaying from the history archives. It skips the partial chunk still forming at the tip; hot-DB ingestion fills that one once it starts. This single mechanism covers a first-ever start, gaps left by downtime, and gaps opened by widening retention.
 - **Ingests** live ledgers from `CaptiveStellarCore` into one hot RocksDB per chunk — ledgers, transaction hashes, and events as column families, written in one atomic batch per ledger.
 - **Freezes** completed chunks to immutable files, **rebuilds** the current tx-hash index from its frozen inputs on every chunk boundary, and **prunes** superseded and past-retention artifacts. All run in a background lifecycle goroutine.
 
@@ -28,7 +28,7 @@ chunkLastLedger(c)  = (c + 1) * 10_000 + 1
 indexID(c)          = c / 1000                           # takes a CHUNK id
 ```
 
-Chunk ids are **signed**, because `chunkID` uses floor division. The only id below 0 is **chunk −1**, meaning "before the first chunk." It comes up in one place: the "nothing ingested yet" sentinel `earliest_ledger - 1`, which maps to chunk −1 (and `chunkLastLedger(-1) = 1` maps back). Chunk −1 only ever appears in startup arithmetic; every chunk id written to disk is `≥ 0`.
+Every chunk id written to disk is `≥ 0`. Startup arithmetic also uses one signed id, **chunk −1**, meaning "before the first chunk": the value of `lastCompleteChunkAt` when no chunk is complete yet (`chunkLastLedger(-1) = 1` maps back). A daemon whose floor is pinned above genesis never produces it: its "nothing ingested yet" base `earliest_ledger - 1` maps to the ordinary chunk just below the floor.
 
 All chunk and window ids use uniform `%08d` zero-padding. Example (window = 1,000 chunks):
 
@@ -42,7 +42,7 @@ All chunk and window ids use uniform `%08d` zero-padding. Example (window = 1,00
 
 ## Configuration
 
-One TOML file (`--config`) configures the daemon.
+One TOML file configures the daemon, passed as `--config` to the `full-history` subcommand (`stellar-rpc full-history --config <path>`). Decoding is strict: an unknown key or section is a startup error, so a stale or mistyped config fails loudly instead of being half-read.
 
 **[service]**
 
@@ -50,47 +50,45 @@ One TOML file (`--config`) configures the daemon.
 |---|---|---|---|
 | `default_data_dir` | string | **required** | Base directory for the catalog and default storage paths. |
 
+**[retention]** — the two inputs to the retention floor; the effective floor is the higher of the two:
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `retention_chunks` | uint32 | `0` | Retention window in chunks. `0` = full history. |
+| `earliest_ledger` | uint32 \| `"genesis"` \| `"now"` | `"genesis"` | Earliest ledger this daemon will ever have data for — a fixed lower floor on history. Must be chunk-aligned; `"now"` resolves to the current network tip's chunk at first start. Resolved and pinned on the first start (a reachable backend is required, to resolve `"now"` and to reject a numeric floor past the tip; see `validateConfig`), immutable thereafter. Setting it above genesis skips upfront backfill — useful when no fast backfill source is available and the daemon only follows the live network (`earliest_ledger = "now"`). |
+
+**[storage]** — one optional path per on-disk tree; an unset key defaults under `{default_data_dir}`:
+
+| Key | Default path | Holds |
+|---|---|---|
+| `catalog` | `{default_data_dir}/catalog/rocksdb` | the catalog RocksDB |
+| `ledgers` | `{default_data_dir}/ledgers` | `.pack` files |
+| `events` | `{default_data_dir}/events` | events cold segments |
+| `txhash_raw` | `{default_data_dir}/txhash/raw` | transient `.bin` files |
+| `txhash_index` | `{default_data_dir}/txhash/index` | per-window `.idx` |
+| `hot` | `{default_data_dir}/hot` | per-chunk hot RocksDB databases |
+
 **[backfill]**
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `workers` | int | `GOMAXPROCS` | Concurrent task slots for backfill. |
-| `max_retries` | int | `3` | Retries per backfill task before the daemon aborts. |
+| `max_retries` | int | `3` | Retries per backfill task, after the first attempt, before the task fails the run. |
 
-**[backfill.bsb]** — Buffered Storage Backend (the default backfill `LedgerBackend`; required **unless** another conformant `LedgerBackend` is configured as the backfill source — `backendNetworkTip`/`processChunk`'s default `source` all go through whichever backend is configured)
+**[backfill.datastore]** — the bulk ledger source: the SDK's `datastore.DataStoreConfig`, verbatim (`type`, `params`, `schema`), so any SDK datastore (GCS, S3, Filesystem) works. Optional: an empty `type` means no lake, and backfill replays through captive core from the history archives instead.
+
+**[backfill.bsb]** — tuning for the buffered-storage stream over the datastore: the SDK's `BufferedStorageBackendConfig`, verbatim. Optional; unset fields take backfill-tuned defaults (`buffer_size` 5000, `num_workers` 50, bounded retries).
+
+**[ingestion]** — the live-network (captive core) settings:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `bucket_path` | string | **required** | Remote object store path for LedgerCloseMeta (no `gs://` prefix for GCS). |
-| `buffer_size` | int | `1000` | Prefetch buffer depth per connection. |
-| `num_workers` | int | `20` | Download workers per connection. |
-
-**[immutable_storage.*]** — one optional `path` per artifact tree (defaults under `{default_data_dir}`):
-
-| Section | Default path | Holds |
-|---|---|---|
-| `[immutable_storage.ledgers]` | `{default_data_dir}/ledgers` | `.pack` files |
-| `[immutable_storage.events]` | `{default_data_dir}/events` | events cold segments |
-| `[immutable_storage.txhash_raw]` | `{default_data_dir}/txhash/raw` | transient `.bin` files |
-| `[immutable_storage.txhash_index]` | `{default_data_dir}/txhash/index` | per-window `.idx` |
-
-**[catalog]** — optional `path` (default `{default_data_dir}/catalog/rocksdb`).
+| `captive_core_config` | string | **required** | Path to the CaptiveStellarCore config file. Must define `NETWORK_PASSPHRASE`. |
+| `history_archive_urls` | []string | **required** | History-archive URLs for the SDK's archive client. Not derivable from the captive-core file, whose `[HISTORY.*]` entries are shell commands. |
+| `stellar_core_binary_path` | string | `stellar-core` on `PATH` | Path to the stellar-core binary. |
+| `captive_core_storage_path` | string | `{default_data_dir}/captive-core` | Captive core's working directory. |
 
 **[logging]** — optional `level` (`debug`/`info`/`warn`/`error`, default `info`) and `format` (`text`/`json`, default `text`).
-
-**[streaming]**
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `retention_chunks` | uint32 | `0` | Retention window in chunks. `0` = full history. |
-| `earliest_ledger` | uint32 \| `"genesis"` \| `"now"` | `"genesis"` | Earliest ledger this daemon will ever have data for — a fixed lower floor on history. Combined with `retention_chunks`, the effective floor is the higher of the two. Must be chunk-aligned; `"now"` resolves to the current network tip's chunk at first start. Resolved and stored on the first start (a reachable backend is required for `"now"` and numeric floors; see `validateConfig`), immutable thereafter. Setting it above genesis skips upfront backfill — useful when no fast backfill source is available and the daemon only follows the live network (`earliest_ledger = "now"`). |
-| `captive_core_config` | string | **required** | Path to CaptiveStellarCore config file. |
-
-**[streaming.hot_storage]**
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `path` | string | `{default_data_dir}/hot` | Base path for hot RocksDB databases. |
 
 **CLI**
 
@@ -136,7 +134,7 @@ Chunk-level files group into buckets of 1,000 chunks (`bucket_id = chunk_id / 10
 
 ### The chunk hot DB
 
-During ingestion the daemon maintains **one hot RocksDB per chunk** at `{hot_storage.path}/{chunk:08d}/`, holding everything for that chunk not yet materialized to cold artifacts. The data types are column families of the one instance:
+During ingestion the daemon maintains **one hot RocksDB per chunk** at `{storage.hot}/{chunk:08d}/`, holding everything for that chunk not yet materialized to cold artifacts. The data types are column families of the one instance:
 
 | Column family | Holds | Serves |
 |---|---|---|
@@ -159,7 +157,7 @@ The catalog holds three groups of keys: per-chunk artifact state keys, hot DB st
 | `chunk:{chunk:08d}:events` | `"freezing"` \| `"frozen"` \| `"pruning"` | Per-chunk events cold segment state. |
 | `index:{txhash_index:08d}:{lo:08d}:{hi:08d}` | `"freezing"` \| `"frozen"` \| `"pruning"` | One key per index **coverage**. The key *name* carries the coverage `[lo, hi]` and maps 1:1 to the file `{lo:08d}-{hi:08d}.idx`; the *value* is pure lifecycle state — the same three values as every other artifact key. At most one coverage per window is `"frozen"` at any moment, and a key with `hi` = its window's last chunk is **terminal** by definition (see [Index keys](#index-keys) below). |
 
-For the per-chunk keys, `"freezing"` means the immutable file is being written; `"frozen"` means it's fsynced and durable; `"pruning"` means the file is queued for removal; key absent means neither file nor in-progress write exists. Index keys use the **same three states with the same meanings** — a rebuild marks its coverage `"freezing"` before any I/O, and its commit batch flips it to `"frozen"` while demoting the superseded coverage to `"pruning"`. Every artifact key therefore obeys one set of crash rules: `"freezing"` = delete (or re-derive) the file, `"pruning"` = finish the delete, `"frozen"` = truth.
+For the per-chunk keys, `"freezing"` means the immutable file is being written; `"frozen"` means it's fsynced and durable; `"pruning"` means the file is queued for removal; key absent means neither file nor in-progress write exists. Index keys use the **same three states with the same meanings** — a rebuild marks its coverage `"freezing"` before writing the file, and its commit batch flips it to `"frozen"` while demoting the superseded coverage to `"pruning"`. Every artifact key therefore obeys one set of crash rules: `"freezing"` = delete (or re-derive) the file, `"pruning"` = finish the delete, `"frozen"` = truth.
 
 **Hot DB state key**:
 
@@ -196,14 +194,14 @@ So `lo` equals the window's first chunk unless the start of the window has dropp
 
 Every durable artifact — per-chunk files and index coverages alike — is written the same way, **mark-then-write**:
 
-1. put `"freezing"` *before* any I/O;
+1. put `"freezing"` *before* the file is written;
 2. write the file;
-3. fsync the file, its parent dirent, and — when the parent was just created — the grandparent dirent;
+3. fsync the file and the directory entries naming it;
 4. flip the key to `"frozen"`.
 
 The key is always written before the file. So every file can be found from its key — cleanup walks keys, never directories — and a file left half-written by a crash carries a `"freezing"` key, which marks it for re-derivation or removal. Step 3 fsyncs the directory entries, not just the file, so the file's existence on disk survives a crash before its key flips to `"frozen"`.
 
-Deletion is the same protocol in reverse: demote the key to `"pruning"`, unlink the file, then delete the key, with an `fsyncDir` between the unlink and the key delete. So a key is gone only once its file is — **key absent ⟹ file gone**. Two functions do all file deletion: `sweepChunkArtifacts` for per-chunk artifacts and `sweepIndexKey` for index files.
+Deletion is the same protocol in reverse: demote the key to `"pruning"`, unlink the file, then delete the key, with an `fsyncDir` between the unlink and the key delete. So a key is gone only once its file is — **key absent ⟹ file gone** — and no file is ever unlinked under a `"frozen"` key. One sweep per key family (per-chunk artifacts, index coverages) deletes every committed artifact; a writer that fails mid-write removes its own partial output under the `"freezing"` key it still holds.
 
 ---
 
@@ -280,7 +278,7 @@ func processChunk(cfg Config, chunk ChunkID, artifacts ArtifactSet) error {
 		return err
 	}
 
-	batch := cat.NewBatch() // mark "freezing" before any I/O
+	batch := cat.NewBatch() // mark "freezing" before the writes
 	for _, kind := range artifacts.Kinds() {
 		batch.Put(chunkKey(chunk, kind), "freezing")
 	}
@@ -322,7 +320,7 @@ func backfillSource(cfg Config, chunk ChunkID, artifacts ArtifactSet) (LedgerSou
 	}
 	// Backfill backend: the only source for a chunk with no local copy. If its
 	// tip lags below this chunk, wait for coverage.
-	waitForBackendCoverage(cfg, chunk) // bounded; fatal on timeout
+	waitForBackendCoverage(cfg, chunk) // bounded; a timeout fails the task
 	return backfillBackend(cfg), nil    // BSB by default
 }
 ```
@@ -337,7 +335,7 @@ func buildTxhashIndex(w WindowID, lo, hi ChunkID, cat Catalog) error {
 	}
 
 	key := indexKey(w, lo, hi)
-	cat.Put(key, "freezing") // mark before any I/O
+	cat.Put(key, "freezing") // mark before the writes
 
 	sb := streamhash.NewSortedBuilder(indexFilePath(key))
 	for entry := range kWayMerge(binFiles(lo, hi)) { // sorted .bin files → one stream
@@ -345,7 +343,7 @@ func buildTxhashIndex(w WindowID, lo, hi ChunkID, cat Catalog) error {
 	}
 	sb.Finish()
 	fsyncFile(indexFilePath(key))
-	fsyncDir(indexWindowDir(key)) // + grandparent on the window's first build
+	fsyncDir(indexWindowDir(key)) // dir entry durable before the key freezes
 
 	batch := cat.NewBatch() // one atomic synced write — the whole finalization
 	batch.Put(key, "frozen")
@@ -437,7 +435,7 @@ func buildThenSweep(cfg Config, b IndexBuild) error {
 ```
 
 - **`cfg.Workers`** (default `GOMAXPROCS`) is the only resource knob: at most that many tasks run at once, drawn from all windows' eligible work. Goroutines are cheap structure — thousands may be parked on the semaphore or on done-channels.
-- Done-channels signal *success*: a chunk build closes its channel only once its `.bin` is frozen, so an index build proceeds only when every input it needs exists. A chunk build that exhausts its retries leaves its channel open and returns an error, which cancels `gctx`; any dependent waiting on it unblocks through the `<-gctx.Done()` case and bails. A task that exhausts its retries aborts the daemon ([error policy](#lifecycle)); restart re-resolves from durable keys and completed work never repeats.
+- Done-channels signal *success*: a chunk build closes its channel only once its `.bin` is frozen, so an index build proceeds only when every input it needs exists. A chunk build that exhausts its retries leaves its channel open and returns an error, which cancels `gctx`; any dependent waiting on it unblocks through the `<-gctx.Done()` case and bails. A task that exhausts its retries fails the run ([error policy](#lifecycle)); the next startup re-resolves from durable keys, so completed work never repeats.
 
 ---
 
@@ -452,7 +450,7 @@ Startup runs in two steps, both in `startStreaming` below:
 1. **Backfill** brings on-disk coverage in line with the retention window, up through the last *complete* chunk at the tip. The partial chunk still forming at the tip is left to hot-DB ingestion: its ledgers so far are already in the live hot DB (which serves them), and ingestion completes the chunk as new ledgers arrive. Backfill re-runs if the tip advances mid-pass, and when it returns, the whole in-retention history up to that point is on disk as frozen files — ready to serve.
 2. **Serve + ingest** opens the resume chunk's hot DB, starts captive core, serving, the lifecycle goroutine, and the hot-DB ingestion loop. The lifecycle is seeded with the last complete chunk so its first run fires at once; that run finishes any crash/downtime leftovers concurrently with serving. Reads never wait for it, because a reader only ever resolves a `"ready"` hot DB or a `"frozen"` cold file — never a transient key.
 
-Operational note — **peak disk after long downtime**: pruning runs only in the first run's prune stage, *after* backfill has materialized every newly-in-retention chunk, so a downtime approaching or exceeding the retention window transiently holds up to ~2× the retention footprint (the stale window plus its replacement). Size volumes accordingly, or prune stale ranges manually before restarting after very long downtime; a disk-full during backfill otherwise aborts before the relieving prune can run, on every retry.
+Operational note — **peak disk after long downtime**: pruning runs only in the first run's prune stage, *after* backfill has materialized every newly-in-retention chunk, so a downtime approaching or exceeding the retention window transiently holds up to ~2× the retention footprint (the stale window plus its replacement). Size volumes accordingly, or prune stale ranges manually before restarting after very long downtime; a disk-full during backfill otherwise fails the run before the relieving prune can fire, on every pass.
 
 The retention floor and resume point are computed by:
 
@@ -478,9 +476,9 @@ func lastCompleteChunkAt(ledger uint32) int64 {
 	return (int64(ledger)-1)/LedgersPerChunk - 1
 }
 
-// maxCommittedSeq returns the highest ledger committed to a hot DB; for a
-// freshly opened, empty chunk-C DB it returns chunkFirstLedger(C) - 1 (the
-// watermark just below the chunk), so the boundary-crash derivation is exact.
+// maxCommittedSeq: the highest ledger committed to a hot DB; an empty chunk-C DB
+// counts as chunkFirstLedger(C) - 1 (the watermark just below the chunk), so the
+// boundary-crash derivation is exact.
 //
 // lastCommittedLedger: the highest ledger in durable storage — the live hot DB's
 // last, the highest frozen chunk's if it leads, or earliest-1 if neither exists.
@@ -521,33 +519,27 @@ func startStreaming(ctx context.Context, cfg Config) error {
 	earliest := cat.EarliestLedger()
 	lastCommitted := lastCommittedLedger(cat)
 
-	// Step 1: backfill from the floor up to the last complete chunk at the tip,
-	// leaving the partial tip chunk to ingestion. Re-pass while the tip moves.
+	// Step 1: backfill from the floor up to each pass's target chunk, leaving the
+	// partial tip chunk to ingestion. Re-pass while the tip moves.
 	backfilledThrough := int64(-1)
 	for {
 		tip, err := networkTip(cfg)
 		if err != nil {
-			if lastCommitted < earliest {
-				fatalf("network tip unavailable and no local history to serve: %v", err)
-			}
-			tip = lastCommitted // backend down, but local data exists: serve it
+			return err // no tip, no pass: never serve behind an unknown frontier
 		}
-		anchor := max(tip, lastCommitted)
-		rangeEnd := lastCompleteChunkAt(anchor)
-		rangeStart := retentionFloorChunk(rangeEnd, cfg.RetentionChunks, earliest)
-		midChunk := lastCommitted != chunkLastLedger(chunkID(lastCommitted))
-		nearTip := int64(tip)-int64(lastCommitted) < LedgersPerChunk
-		if nearTip && midChunk {
-			rangeEnd = chunkID(lastCommitted) - 1 // leave the partial resume chunk to ingestion
+		target := backfillTarget(tip, lastCommitted)
+		if target <= backfilledThrough {
+			break // the tip stopped advancing the target: backfill is done
 		}
-		if rangeEnd < rangeStart || rangeEnd <= backfilledThrough {
-			break
+		rangeStart := retentionFloorChunk(target, cfg.RetentionChunks, earliest)
+		if rangeStart > target {
+			break // floor pinned above the target (e.g. a first start with "now")
 		}
-		if err := executePlan(ctx, cfg, resolve(cfg, rangeStart, rangeEnd)); err != nil {
+		if err := executePlan(ctx, cfg, resolve(cfg, rangeStart, target)); err != nil {
 			return err
 		}
-		lastCommitted = max(lastCommitted, chunkLastLedger(rangeEnd))
-		backfilledThrough = rangeEnd
+		lastCommitted = max(lastCommitted, chunkLastLedger(target))
+		backfilledThrough = target
 	}
 	resumeLedger := lastCommitted + 1
 
@@ -557,30 +549,48 @@ func startStreaming(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	core := startCaptiveCore(cfg, resumeLedger)
-	lifecycleCh := make(chan ChunkID, lifecycleQueueDepth)
-	lifecycleCh <- lastCompleteChunkAt(resumeLedger - 1) // seed the first run
-	go lifecycleLoop(ctx, cfg, lifecycleCh)
+	core := openCaptiveCore(cfg) // constructed here; starts on the loop's first pull
+	if seed := lastCompleteChunkAt(resumeLedger - 1); seed >= 0 {
+		notifyBoundary(seed) // no seed on a young network with no complete chunk
+	}
 	serveReads()
-	return runIngestionLoop(ctx, cat, core, hotDB, lifecycleCh, resumeLedger)
+	go lifecycleLoop(ctx, cfg)
+	return runIngestionLoop(ctx, cat, core, hotDB, resumeLedger)
+}
+
+// backfillTarget: the highest complete chunk a pass builds to — the last complete
+// chunk at max(tip, lastCommitted), except that a mid-chunk lastCommitted within
+// one chunk of the tip lowers it to the chunk below the resume point, leaving the
+// partial resume chunk to ingestion. The retention floor derives from this target,
+// so the floor never sits above what the pass actually builds.
+func backfillTarget(tip, lastCommitted uint32) int64 {
+	target := lastCompleteChunkAt(max(tip, lastCommitted))
+	midChunk := lastCommitted != chunkLastLedger(chunkID(lastCommitted))
+	nearTip := int64(tip)-int64(lastCommitted) < LedgersPerChunk
+	if nearTip && midChunk {
+		target = lastCompleteChunkAt(lastCommitted)
+	}
+	return target
 }
 ```
 
-`validateConfig` checks the config and, on the first start, resolves and pins `earliest_ledger`:
+A pass with no reachable tip fails the run rather than proceeding: the daemon never serves behind an unknown frontier, and the next run re-samples, so a transient backend outage self-heals.
+
+`validateConfig` checks the config and, on the first start, resolves and pins `earliest_ledger`. `fail` here rejects startup outright: unlike a runtime failure, a bad config is never retried, so the daemon refuses to start rather than run against a wrong pin:
 
 ```go
 func validateConfig(cfg Config) {
 	cat := cfg.Catalog
 	if cfg.Workers < 1 {
-		fatalf("workers must be > 0 (got %d)", cfg.Workers)
+		fail("workers must be > 0 (got %d)", cfg.Workers)
 	}
 	if cfg.MaxRetries < 0 {
-		fatalf("max_retries must be >= 0 (got %d)", cfg.MaxRetries)
+		fail("max_retries must be >= 0 (got %d)", cfg.MaxRetries)
 	}
 	if cfg.EarliestLedger != "genesis" && cfg.EarliestLedger != "now" {
 		n, err := parseUint32(cfg.EarliestLedger)
 		if err != nil || n < GenesisLedger || n != chunkFirstLedger(chunkID(n)) {
-			fatalf("earliest_ledger must be \"genesis\", \"now\", or a chunk-aligned "+
+			fail("earliest_ledger must be \"genesis\", \"now\", or a chunk-aligned "+
 				"ledger >= %d; got %q.", GenesisLedger, cfg.EarliestLedger)
 		}
 	}
@@ -594,7 +604,7 @@ func validateConfig(cfg Config) {
 				want = atoi(cfg.EarliestLedger)
 			}
 			if want != atoi(earliestStored) {
-				fatalf("earliest_ledger changed: stored=%s, config=%s; wipe the data dir to change it.",
+				fail("earliest_ledger changed: stored=%s, config=%s; wipe the data dir to change it.",
 					earliestStored, cfg.EarliestLedger)
 			}
 		}
@@ -611,17 +621,17 @@ func validateConfig(cfg Config) {
 	case "now":
 		tip, err := networkTip(cfg)
 		if err != nil {
-			fatalf("earliest_ledger=now needs a reachable backend: %v", err)
+			fail("earliest_ledger=now needs a reachable backend: %v", err)
 		}
 		earliest = chunkFirstLedger(chunkID(tip))
 	default:
 		earliest = atoi(cfg.EarliestLedger)
 		tip, err := networkTip(cfg)
 		if err != nil {
-			fatalf("a numeric earliest_ledger needs a reachable backend to validate against the tip: %v", err)
+			fail("a numeric earliest_ledger needs a reachable backend to validate against the tip: %v", err)
 		}
 		if earliest > tip {
-			fatalf("earliest_ledger (%d) is past the network tip (%d)", earliest, tip)
+			fail("earliest_ledger (%d) is past the network tip (%d)", earliest, tip)
 		}
 	}
 	cat.Put("config:earliest_ledger", itoa(earliest))
@@ -657,17 +667,7 @@ func openHotDBForChunk(cat Catalog, chunk ChunkID) (*HotDB, error) {
 
 ```go
 func runIngestionLoop(ctx context.Context, cat Catalog, core LedgerBackend, hotDB *HotDB,
-	lifecycleCh chan<- ChunkID, resumeLedger uint32) error {
-
-	// A full lifecycleCh means freeze has fallen lifecycleQueueDepth boundaries
-	// behind ingestion — fail loud.
-	notify := func(complete ChunkID) {
-		select {
-		case lifecycleCh <- complete:
-		default:
-			fatalf("lifecycle fell %d boundaries behind ingestion; investigate", lifecycleQueueDepth)
-		}
-	}
+	resumeLedger uint32) error {
 
 	for seq := resumeLedger; ; seq++ {
 		lcm, err := core.GetLedger(ctx, seq) // blocks until ledger seq is available
@@ -690,32 +690,32 @@ func runIngestionLoop(ctx context.Context, cat Catalog, core LedgerBackend, hotD
 			if hotDB, err = openHotDBForChunk(cat, chunkID(seq)+1); err != nil {
 				return err
 			}
-			notify(chunkID(seq))
+			notifyBoundary(chunkID(seq))
 		}
 	}
 }
 ```
 
-A `GetLedger` failure returns from the loop and exits the process; the next startup resumes from where the last synced batch left off, since the batch is all-or-nothing. A clean shutdown cancels `ctx` and returns the same way, distinguished from a crash at the daemon's top level. The completed chunk id is all ingestion sends the lifecycle — *how far to go*; what to build, discard, and prune the lifecycle reads from the catalog.
+A `GetLedger` failure returns from the loop and fails the run; the next startup resumes from where the last synced batch left off, since the batch is all-or-nothing. A clean shutdown cancels `ctx` and returns the same way, distinguished from a failure at the daemon's top level. The completed chunk id is all ingestion tells the lifecycle — *how far to go*; what to build, discard, and prune the lifecycle reads from the catalog. `notifyBoundary` never blocks and notifications coalesce: the lifecycle acts on the latest completed chunk, so ingestion can never be held back by a busy lifecycle, and the lifecycle can never fall behind by more than one run.
 
 ### Lifecycle
 
-The lifecycle is a background goroutine. Each notification — one per ingestion boundary, plus a startup seed — triggers one **run**, which does three stages in order:
+The lifecycle is a background goroutine. Each notification — one per ingestion boundary, plus a startup seed — wakes it for one **run** over the latest completed chunk; if several boundaries arrive while a run is in progress, the next run's single pass covers them all. A run does three stages in order:
 
 1. **Plan-and-execute** — `resolve` + `executePlan` over `[floor, last complete chunk]`, the same machinery backfill uses. In steady state this freezes the just-closed chunk from its hot DB and folds it into the current window's index; rebuilding the whole window each boundary costs ≈1 minute against a boundary that arrives only every ~14 h at mainnet rates.
 2. **Discard** — retire hot DBs the cold artifacts now fully serve.
 3. **Prune** — sweep demoted and past-retention files.
 
-At runtime the floor only rises (retention config is fixed for the life of the process; widening applies at the next startup), so `[floor, last complete chunk]` always sits within existing storage — a run produces only the just-closed chunk and never reaches below. Extending the *bottom* of storage — a fresh start, or filling to a widened floor — is startup backfill's job.
+At runtime the floor only rises (retention config is fixed for the life of the process; widening applies at the next startup), so a run produces only the just-closed chunk and never reaches below existing storage. When the floor sits above the last complete chunk — retention outran production, as on a young `"now"` deployment — the range is empty and the run builds nothing. Extending the *bottom* of storage — a fresh start, or filling to a widened floor — is startup backfill's job.
 
 Everything the run does derives from the catalog plus the one chunk id ingestion hands it:
 
 ```go
-func runLifecycle(ctx context.Context, cfg Config, lastChunk ChunkID) {
+func runLifecycle(ctx context.Context, cfg Config, lastChunk ChunkID) error {
 	floor := retentionFloorChunk(lastChunk, cfg.RetentionChunks, cfg.Catalog.EarliestLedger())
 
 	if err := executePlan(ctx, cfg, resolve(cfg, floor, lastChunk)); err != nil {
-		fatalf("lifecycle run: %v", err) // abort; startup is the recovery path
+		return err // fails the run; startup is the recovery path
 	}
 	for _, op := range eligibleDiscardOps(cfg, lastChunk, floor) {
 		op()
@@ -723,26 +723,13 @@ func runLifecycle(ctx context.Context, cfg Config, lastChunk ChunkID) {
 	for _, op := range eligiblePruneOps(cfg, floor) {
 		op()
 	}
-}
-
-const lifecycleQueueDepth = 8 // far above the at-most-one a healthy daemon holds
-
-func lifecycleLoop(ctx context.Context, cfg Config, lifecycleCh <-chan ChunkID) {
-	for lastChunk := range lifecycleCh {
-	drain: // if several chunks queued, take the most recent — one run covers them
-		for {
-			select {
-			case lastChunk = <-lifecycleCh:
-			default:
-				break drain
-			}
-		}
-		runLifecycle(ctx, cfg, lastChunk)
-	}
+	return nil
 }
 ```
 
-Between runs the goroutine is idle, and idle means **settled**: a re-scan would produce no ops and every storage invariant holds, so an [audit](#correctness) run at any such moment would pass. A failing op retries with backoff, then aborts the daemon — startup is the recovery path, the same policy as ingestion.
+The loop around it is trivial: block until a boundary notification, read the latest completed chunk, run once.
+
+Between runs the goroutine is idle, and idle means **settled**: a re-scan would produce no ops and every storage invariant holds, so an [audit](#correctness) run at any such moment would pass. A failing op retries with backoff, then fails the run — startup is the recovery path, the same policy as ingestion.
 
 The discard and prune stages are the two `eligible*` scans below. **Discard** retires a chunk's hot DB once its cold artifacts fully serve it (the window's index covers the chunk), or once it falls past retention. **Prune** is the system's only file-deleter: it sweeps transient index keys, the `.bin` inputs a terminal commit demoted, and everything below the retention floor, through `sweepIndexKey`/`sweepChunkArtifacts`. Each scan returns zero-arg ops the run calls in order.
 
@@ -825,7 +812,7 @@ func eligiblePruneOps(cfg Config, floor ChunkID) []func() {
 }
 ```
 
-The op bodies — one discard, two sweeps — are the daemon's entire directory- and file-deletion surface:
+The op bodies — one discard, two sweeps — delete every committed artifact and hot DB:
 
 ```go
 func discardHotDBForChunk(cat Catalog, chunk ChunkID) {
@@ -839,9 +826,11 @@ func discardHotDBForChunk(cat Catalog, chunk ChunkID) {
 }
 
 func sweepChunkArtifacts(cat Catalog, refs []ArtifactRef) {
-	batch := cat.NewBatch() // demote before the unlink
+	batch := cat.NewBatch() // never unlink under a "frozen" key
 	for _, ref := range refs {
-		batch.Put(chunkKey(ref.Chunk, ref.Kind), "pruning")
+		if ref.State == Frozen {
+			batch.Put(chunkKey(ref.Chunk, ref.Kind), "pruning")
+		}
 	}
 	batch.Commit()
 
@@ -860,7 +849,9 @@ func sweepChunkArtifacts(cat Catalog, refs []ArtifactRef) {
 }
 
 func sweepIndexKey(cat Catalog, key IndexKey) {
-	cat.Put(key, "pruning") // demote before the unlink (synced → durable first)
+	if key.State == Frozen {
+		cat.Put(key, "pruning") // never unlink under a "frozen" key
+	}
 	deleteFileIfExists(indexFilePath(key))
 	fsyncDir(indexWindowDir(key))
 	cat.Delete(key) // key outlives the unlink, so a crash re-runs the sweep
@@ -868,7 +859,7 @@ func sweepIndexKey(cat Catalog, key IndexKey) {
 }
 ```
 
-`discardHotDBForChunk` removes a hot DB directory under its `hot:chunk` key; the two `sweep*` functions are the entire file-deletion surface, one body per key family. The prune walk's two families are independent of each other and of discard — a chunk swept while its window's `.idx` still resolves to it could leave a `getTransaction` pointing at a deleted `.pack`, but a below-floor read is not-found regardless ([reader contract](#reader-contract)).
+`discardHotDBForChunk` removes a hot DB directory under its `hot:chunk` key; one sweep body per key family deletes every committed artifact. The prune walk's two families are independent of each other and of discard — a chunk swept while its window's `.idx` still resolves to it could leave a `getTransaction` pointing at a deleted `.pack`, but a below-floor read is not-found regardless ([reader contract](#reader-contract)).
 
 ### Concurrency model
 
@@ -877,9 +868,9 @@ Two writer goroutines and read-only readers. The catalog partitions their domain
 - **Ingestion** owns the live chunk: the sole writer of its hot DB, and the creator of each `hot:chunk` key (via `openHotDBForChunk` at the boundary).
 - **The lifecycle** owns everything below it: handed-off hot DBs (freeze + discard), all `chunk:*` and `index:*` keys, and the deletion side of `hot:chunk` keys.
 
-The two share no memory; their only link is the channel. The handoff is by write ordering — ingestion closes the chunk and opens the next (moving the partition) *before* sending it — so the lifecycle never freezes a chunk a writer still holds. Both write the catalog at the same time but never the same key (RocksDB handles concurrent writes safely). And because the chunk ids ingestion hands over only increase, a chunk completing while a lifecycle run is already in progress just bumps the starting point of the *next* run — it can't disturb the one underway. Readers hold their own read-only handles and resolve files through keys, so writer activity never races them.
+Their only link is the boundary notification. The handoff is by write ordering — ingestion closes the chunk and opens the next (moving the partition) *before* notifying — so the lifecycle never freezes a chunk a writer still holds. Both write the catalog at the same time but never the same key (RocksDB handles concurrent writes safely). And because the chunk ids ingestion hands over only increase, a chunk completing while a lifecycle run is already in progress just bumps the starting point of the *next* run — it can't disturb the one underway. Readers hold their own read-only handles and resolve files through keys, so writer activity never races them.
 
-**Single-process enforcement.** All of the above assumes a *single* daemon owns the data; two daemons sharing it would corrupt it. The daemon enforces that at startup by taking a kernel file lock (`flock`) on a `LOCK` file in **each** of its roots — the catalog and every configured storage tree. A second daemon pointed at any of those paths can't acquire the lock and exits; the lock releases on any exit, including `kill -9`, so it never goes stale. It has to lock every root, not just the catalog, because the catalog and the storage trees are configured as independent paths — otherwise two daemons with different catalogs could still share a storage tree. The hot tree matters most: its `hot/{chunk}` DBs are the only copy of recently-ingested ledgers that aren't frozen yet.
+**Single-process enforcement.** All of the above assumes a *single* daemon owns the data. The catalog's RocksDB holds an exclusive lock, so a second daemon pointed at the same catalog fails to start; the lock releases on any exit, including `kill -9`, so it never goes stale. The storage trees carry no locks of their own: cold trees are write-once (a redundant writer produces identical bytes), and each hot chunk DB holds its own RocksDB lock. Pointing two daemons with *different* catalogs at the same storage tree is an unsupported misconfiguration the daemon does not defend against.
 
 ---
 
@@ -928,7 +919,7 @@ Each invariant has a distinct audit. INV-1 you check by issuing reads or by re-d
 
 ### Convergence
 
-**Startup converges from any on-disk state.** Whatever a partial-completion crash, an operator action, or surgical recovery leaves behind, startup drives the system to a settled state satisfying INV-1 ∧ INV-2 ∧ INV-3 ∧ INV-4. Startup here is the backfill pass followed by the first lifecycle run (fired by the startup seed), and it reaches a settled state within that first run — typically seconds after serving opens, bounded by the run's freeze, rebuild, and prune workload. From any state reachable *during* a run, the lifecycle run alone converges, within a bounded number of runs. And since a runtime op failure aborts the daemon, every state a run can leave behind is one startup is built to converge.
+**Startup converges from any on-disk state.** Whatever a partial-completion crash, an operator action, or surgical recovery leaves behind, startup drives the system to a settled state satisfying INV-1 ∧ INV-2 ∧ INV-3 ∧ INV-4. Startup here is the backfill pass followed by the first lifecycle run (fired by the startup seed), and it reaches a settled state within that first run — typically seconds after serving opens, bounded by the run's freeze, rebuild, and prune workload. From any state reachable *during* a run, the lifecycle run alone converges, within a bounded number of runs. And since a runtime op failure fails the run and hands recovery back to startup, every state a run can leave behind is one startup is built to converge.
 
 The split matters because some repairs are inherently backfill's, not the run's: a per-chunk `"freezing"` key with no hot DB behind it (a crashed backfill write) is repaired by re-materialization, and a surgically removed range is re-derived from the LedgerBackend — no run phase produces data. The run's province is everything else: index transients, demotions, freezes from live hot DBs, prunes.
 
