@@ -6,8 +6,9 @@
 // and no per-store frontiers / min-of-three. The three typed facades
 // (ledger/txhash/eventstore HotStore) are composed over the shared store via
 // NewWithStore; their write paths queue Puts into the one shared batch. A
-// read-only open composes a ledgers-only view without the events facade (see
-// OpenReadOnly).
+// read-only open comes in two shapes: a ledgers-only view without the events
+// facade (OpenReadOnly, for freeze/probe) and a full-facade query view that warms
+// and serves all three (OpenReadView).
 package hotchunk
 
 import (
@@ -34,9 +35,9 @@ import (
 )
 
 // DB is one chunk's hot tier: a single multi-CF rocksdb.Store plus the typed
-// facades composed over it — all three on a read-write open; a read-only open
-// leaves events nil (see OpenReadOnly). It owns the store (Close closes it
-// once); the facades wrap it without owning it.
+// facades composed over it — all three on a read-write open or a full read view
+// (OpenReadView); a ledgers-only read-only open leaves events nil (OpenReadOnly).
+// It owns the store (Close closes it once); the facades wrap it without owning it.
 //
 // Concurrency: ingestion is single-writer; IngestLedger is not safe to call
 // concurrently with itself. Reads via the facades follow each facade's own
@@ -103,7 +104,7 @@ func config(path string, logger *supportlog.Entry, readOnly, mustExist bool) roc
 // (ingestion's handle for a NEW chunk) and composes the three facades over it. On
 // any facade-construction failure the shared store is closed before returning.
 func Open(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return open(path, chunkID, logger, false, false)
+	return open(path, chunkID, logger, false, false, true)
 }
 
 // OpenExisting opens an EXISTING hot DB read-WRITE with create-if-missing OFF —
@@ -112,7 +113,7 @@ func Open(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) 
 // empty one (the "never auto-heal" rule); the caller treats that failure as an
 // ordinary restartable error.
 func OpenExisting(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return open(path, chunkID, logger, false, true)
+	return open(path, chunkID, logger, false, true, true)
 }
 
 // OpenReadOnly opens an EXISTING hot DB read-only — the freeze source's view AND
@@ -130,41 +131,61 @@ func OpenExisting(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB,
 // index-CF scan plus bitmap/offsets rebuild — discarded unread at Close (#834). The
 // skip is enforced structurally: a read-only DB has no events facade, so Events()
 // panics and IngestLedger errors rather than serving a cold, unwarmed surface.
+//
+// For a read-only handle that DOES serve events (a boundary-closed but not-yet-frozen
+// chunk that must still answer queries), use OpenReadView, which composes all three
+// facades and pays the warmup.
 func OpenReadOnly(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return open(path, chunkID, logger, true, false)
+	return open(path, chunkID, logger, true, false, false)
 }
 
 // OpenReadyWrite opens a "ready" chunk's hot DB read-WRITE — ingestion's handle
 // for a resumed chunk (OpenExisting underneath). openReady enforces the ready-open
 // rule.
 func OpenReadyWrite(state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return openReady(state, path, chunkID, logger, false)
+	return openReady(state, path, chunkID, logger, OpenExisting)
 }
 
 // OpenReadyView opens a "ready" chunk's hot DB read-only — the freeze source's
-// and the last-committed refiner's view (OpenReadOnly underneath). openReady
-// enforces the ready-open rule.
+// and the last-committed refiner's LEDGERS-ONLY view (OpenReadOnly underneath).
+// openReady enforces the ready-open rule.
 func OpenReadyView(state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return openReady(state, path, chunkID, logger, true)
+	return openReady(state, path, chunkID, logger, OpenReadOnly)
+}
+
+// OpenReadView opens a "ready" chunk's hot DB read-only with the FULL facade union
+// (ledgers + txhash + events, warmup included) — the query view for a chunk whose
+// write handle was fenced at the boundary but whose cold artifacts aren't frozen
+// yet. Unlike OpenReadyView it pays eventstore's warmup so Events() and Txhash()
+// serve. Read-only opens take no RocksDB LOCK, so this coexists with the freeze
+// source's own OpenReadyView. openReady enforces the ready-open rule.
+func OpenReadView(state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
+	return openReady(state, path, chunkID, logger, openReadFull)
+}
+
+// openReadFull opens an EXISTING hot DB read-only with all three facades composed
+// (the OpenReadView store open). Split out so it matches openReady's openFn shape.
+func openReadFull(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
+	return open(path, chunkID, logger, true, false, true)
 }
 
 // openReady is the single enforcement site for the "ready key ⇒ must-exist,
-// never-creating open" rule behind the OpenReadyWrite/OpenReadyView pair. It
-// takes the hot-key state the CALLER already read and refuses to open anything
-// not "ready", so no caller can accidentally open a creating handle for a chunk
-// the catalog considers ready. Either way a missing or gutted "ready" DB fails
-// the open — never auto-healed into a fresh empty one — wrapped in the uniform
-// won't-open error so every ready-open site reports it identically.
+// never-creating open" rule behind the OpenReadyWrite/OpenReadyView/OpenReadView
+// trio. It takes the hot-key state the CALLER already read and refuses to open
+// anything not "ready", so no caller can accidentally open a creating handle for a
+// chunk the catalog considers ready. It dispatches to the caller-chosen open
+// (read-write, ledgers-only read, or full read view). Either way a missing or
+// gutted "ready" DB fails the open — never auto-healed into a fresh empty one —
+// wrapped in the uniform won't-open error so every ready-open site reports it
+// identically.
 func openReady(
-	state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly bool,
+	state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry,
+	openFn func(string, chunk.ID, *supportlog.Entry) (*DB, error),
 ) (*DB, error) {
 	if state != geometry.HotReady {
 		return nil, fmt.Errorf(
-			"hotchunk: ready-open requires chunk %s key %q, got %q", chunkID, geometry.HotReady, state)
-	}
-	openFn := OpenExisting
-	if readOnly {
-		openFn = OpenReadOnly
+			"hotchunk: ready-open requires chunk %s key %q, got %q", chunkID, geometry.HotReady, state,
+		)
 	}
 	db, err := openFn(path, chunkID, logger)
 	if err != nil {
@@ -173,7 +194,7 @@ func openReady(
 	return db, nil
 }
 
-func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly, mustExist bool) (*DB, error) {
+func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly, mustExist, composeEvents bool) (*DB, error) {
 	if path == "" {
 		return nil, stores.ErrInvalidConfig
 	}
@@ -191,11 +212,12 @@ func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly, mus
 		ledger:  ledger.NewWithStore(store),
 		txhash:  txhash.NewWithStore(store),
 	}
-	// A read-only open is a ledgers-only freeze/probe view (see OpenReadOnly): it
-	// never reads events, so skip composing the events facade and its unconditional
-	// warmup scan. Read-WRITE opens (ingestion) MUST warm — the write path assigns
-	// event IDs off the warmed offsets — so they always compose it.
-	if readOnly {
+	// The ledgers-only freeze/probe view (OpenReadOnly) skips the events facade and
+	// its unconditional warmup scan — it never reads events. Everyone else composes
+	// it: read-WRITE opens (ingestion) MUST warm because the write path assigns event
+	// IDs off the warmed offsets, and the full read view (OpenReadView) warms so it
+	// can serve queries.
+	if !composeEvents {
 		return db, nil
 	}
 	es, err := eventstore.NewWithStore(store, chunkID)
@@ -226,10 +248,10 @@ func (d *DB) Txhash() *txhash.HotStore { return d.txhash }
 // Events returns the events read/write facade over the shared store.
 // Same status as Txhash: writes feed ingestion, reads are the #772 seam.
 //
-// Panics on a read-only DB: OpenReadOnly composes a ledgers-only view with no
-// events facade (#834), so reaching for events there is a programming error — a
-// caller that needs a warmed events surface must open read-WRITE (or #772 must
-// add a warmed read-only variant), never silently read a cold, unwarmed store.
+// Panics on a ledgers-only DB: OpenReadOnly composes a view with no events facade
+// (#834), so reaching for events there is a programming error — a caller that needs
+// a warmed events surface must open read-WRITE or use the full read view
+// (OpenReadView), never silently read a cold, unwarmed store.
 func (d *DB) Events() *eventstore.HotStore {
 	if d.events == nil {
 		panic(fmt.Sprintf("hotchunk: Events() on read-only chunk %s: no events facade (ledgers-only view)", d.chunkID))

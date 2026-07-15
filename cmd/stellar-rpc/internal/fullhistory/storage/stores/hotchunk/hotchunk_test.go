@@ -16,6 +16,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores"
@@ -524,6 +525,64 @@ func TestOpenReadOnly_SkipsEventsWarmup(t *testing.T) {
 
 	// Structural safety: the ledgers-only view has no events facade to hand out.
 	assert.Panics(t, func() { ro.Events() }, "Events() on a ledgers-only view must fail loudly")
+}
+
+// TestOpenReadView_ServesAllFacades pins the query POC's full-facade read-only
+// open: unlike OpenReadOnly's ledgers-only view, OpenReadView composes all three
+// facades (ledgers + txhash + events, warmup included) so a boundary-closed but
+// not-yet-frozen chunk stays fully servable. Two concurrent OpenReadView handles
+// must coexist — read-only opens take no RocksDB LOCK.
+func TestOpenReadView_ServesAllFacades(t *testing.T) {
+	chunkID := chunk.ID(0)
+	first := chunkID.FirstLedger()
+	dir := t.TempDir()
+
+	// Writer: ingest two ledgers each carrying one tx + one contract event, then close.
+	db, err := Open(dir, chunkID, silentLogger())
+	require.NoError(t, err)
+	rawA, hashA, termA := lcmWithEvent(t, first)
+	rawB, hashB, _ := lcmWithEvent(t, first+1)
+	_, err = db.IngestLedger(first, xdr.LedgerCloseMetaView(rawA))
+	require.NoError(t, err)
+	_, err = db.IngestLedger(first+1, xdr.LedgerCloseMetaView(rawB))
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	ro, err := OpenReadView(geometry.HotReady, dir, chunkID, silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ro.Close()) })
+
+	// Ledgers facade.
+	gotA, err := ro.Ledgers().GetLedgerRaw(first)
+	require.NoError(t, err)
+	assert.Equal(t, rawA, gotA)
+
+	// Txhash facade.
+	seqA, err := ro.Txhash().Get(hashA)
+	require.NoError(t, err)
+	assert.Equal(t, first, seqA)
+	seqB, err := ro.Txhash().Get(hashB)
+	require.NoError(t, err)
+	assert.Equal(t, first+1, seqB)
+
+	// Events facade (warmup ran): count and term lookup both resolve.
+	assert.Equal(t, uint32(2), eventCount(t, ro.Events()))
+	bms, err := ro.Events().LookupKeys(context.Background(), []events.TermKey{termA})
+	require.NoError(t, err)
+	require.NotNil(t, bms[0])
+	assert.Equal(t, uint64(2), bms[0].GetCardinality(), "both ledgers share the event term")
+
+	// A second read-only view opens while the first is live — no LOCK conflict.
+	ro2, err := OpenReadView(geometry.HotReady, dir, chunkID, silentLogger())
+	require.NoError(t, err)
+	require.NoError(t, ro2.Close())
+}
+
+// TestOpenReadView_RejectsNonReadyState confirms OpenReadView routes through the
+// same ready-open enforcement as OpenReadyView: a non-ready state refuses to open.
+func TestOpenReadView_RejectsNonReadyState(t *testing.T) {
+	_, err := OpenReadView(geometry.HotState(""), t.TempDir(), chunk.ID(0), silentLogger())
+	require.Error(t, err)
 }
 
 // TestIngestLedger_ClosedDBFails confirms a closed shared DB rejects ingest. The
