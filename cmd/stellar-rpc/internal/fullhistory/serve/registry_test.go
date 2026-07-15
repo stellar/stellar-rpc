@@ -1,6 +1,7 @@
 package serve
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -19,6 +20,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/ledger"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/txhash"
 )
 
 func silentLogger() *supportlog.Entry {
@@ -75,6 +77,26 @@ func writeColdLedgerPack(t *testing.T, layout geometry.Layout, c chunk.ID, seq u
 	require.NoError(t, w.AppendLedger(seq, raw))
 	require.NoError(t, w.Commit())
 	require.NoError(t, w.Close())
+}
+
+// freezeTxIndex builds a real frozen tx-hash index for window w covering chunks
+// [lo, hi] over ledgers [minLedger, maxLedger] and holding entries: writes a
+// .bin, runs BuildColdIndex to the layout's .idx path, then marks + commits it
+// frozen in the catalog (the backfill build path, minus the daemon).
+func freezeTxIndex(
+	t *testing.T, cat *catalog.Catalog, layout geometry.Layout,
+	w geometry.TxHashIndexID, lo, hi chunk.ID, minLedger, maxLedger uint32, entries []txhash.ColdEntry,
+) {
+	t.Helper()
+	binPath := filepath.Join(t.TempDir(), "index.bin")
+	require.NoError(t, txhash.WriteColdBin(binPath, entries))
+
+	cov, err := cat.MarkTxHashIndexFreezing(w, lo, hi)
+	require.NoError(t, err)
+	idxPath := layout.TxHashIndexFilePath(cov)
+	require.NoError(t, os.MkdirAll(filepath.Dir(idxPath), 0o755))
+	require.NoError(t, txhash.BuildColdIndex(context.Background(), []string{binPath}, idxPath, minLedger, maxLedger))
+	require.NoError(t, cat.CommitTxHashIndex(cov))
 }
 
 // (a) Admit returns the seeded latest and an initial View with a frozen chunk in
@@ -219,6 +241,65 @@ func TestTickCompleted_FreezeAndDiscard(t *testing.T) {
 	// ErrStoreClosed (memory-safe), not a crash.
 	_, err = bReader.Get(seqB)
 	assert.ErrorIs(t, err, stores.ErrStoreClosed, "discarded handle closed; stale read is store-closed")
+}
+
+// TxIdx: BuildInitial opens a frozen window's .idx into a usable reader, and a
+// steady tick reuses the same *ColdReader when the coverage is unchanged.
+func TestTxIdx_BuildProbeAndReuse(t *testing.T) {
+	cat, layout := newTestCatalog(t)
+
+	// A known hash resolving to seq 5, in window 0 / chunk 0 (cpi=1).
+	var hash [32]byte
+	for i := range hash {
+		hash[i] = byte(i + 1)
+	}
+	var entry txhash.ColdEntry
+	copy(entry.Key[:], hash[:])
+	entry.Seq = 5
+	freezeTxIndex(t, cat, layout, geometry.TxHashIndexID(0), chunk.ID(0), chunk.ID(0),
+		chunk.ID(0).FirstLedger(), chunk.ID(0).LastLedger(), []txhash.ColdEntry{entry})
+
+	r := NewRegistry(cat, fhtest.RetentionFor(t, cat, 0), silentLogger())
+	require.NoError(t, r.BuildInitial(chunk.ID(0).LastLedger()))
+
+	_, v := r.Admit()
+	require.Len(t, v.TxIdx, 1)
+	assert.Equal(t, chunk.ID(0), v.TxIdx[0].Lo)
+	assert.Equal(t, chunk.ID(0), v.TxIdx[0].Hi)
+	require.NotNil(t, v.TxIdx[0].Reader)
+	got, err := v.TxIdx[0].Reader.Get(hash)
+	require.NoError(t, err, "the frozen .idx reader resolves the known hash")
+	assert.EqualValues(t, 5, got)
+
+	// A steady tick (coverage unchanged) reuses the same reader — no reopen/leak.
+	before := v.TxIdx[0].Reader
+	r.TickCompleted()
+	_, v2 := r.Admit()
+	require.Len(t, v2.TxIdx, 1)
+	assert.Same(t, before, v2.TxIdx[0].Reader, "unchanged coverage reuses the reader")
+}
+
+// ResolveEvents: hot handle serves when no cold flag; unknown chunk is
+// ErrUnavailable.
+func TestResolveEvents_HotAndUnavailable(t *testing.T) {
+	cat, layout := newTestCatalog(t)
+	r := NewRegistry(cat, fhtest.RetentionFor(t, cat, 0), silentLogger())
+	require.NoError(t, r.BuildInitial(0))
+
+	db0 := openHotChunk(t, cat, layout, chunk.ID(0), 2)
+	t.Cleanup(func() { _ = db0.Close() })
+	r.HotOpened(chunk.ID(0), db0)
+
+	_, v := r.Admit()
+	ev, err := v.ResolveEvents(chunk.ID(0), layout)
+	require.NoError(t, err)
+	require.NotNil(t, ev.Reader())
+	_, err = ev.Reader().EventCount()
+	require.NoError(t, err, "hot events reader is usable")
+	require.NoError(t, ev.Close())
+
+	_, err = v.ResolveEvents(chunk.ID(99), layout)
+	assert.ErrorIs(t, err, ErrUnavailable)
 }
 
 // (e) Every hook is safe on a nil *Registry (the no-serve path needs no guards).
