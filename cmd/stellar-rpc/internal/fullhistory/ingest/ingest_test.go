@@ -80,6 +80,10 @@ func (s *testSink) HotPhase(phase hotchunk.Phase, dur time.Duration, items int, 
 	s.hotPhases = append(s.hotPhases, hotPhaseCall{phase, dur, items, err})
 }
 
+// HotLedger is loop-level (emitted by the fullhistory ingestion loop, never by
+// this package), so nothing here asserts on it.
+func (s *testSink) HotLedger(time.Duration, time.Duration) {}
+
 func (s *testSink) ColdIngest(dataType string, _ time.Duration, items int, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

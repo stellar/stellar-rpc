@@ -67,6 +67,14 @@ type MetricSink interface {
 	// it never carries an error). The per-ledger total is the sum of the phase
 	// durations; the caller emits phases [0, Failed] on error and all phases on success.
 	HotPhase(phase hotchunk.Phase, d time.Duration, items int, err error)
+	// HotLedger reports the wall-clocks that bracket one successful hot ledger
+	// ingest, measured by the ingestion loop itself: read is the time the loop
+	// spent blocked waiting for the ledger's raw bytes from the source stream,
+	// and e2e is read plus the whole Ingest call. The HotPhase signals above
+	// decompose only the Ingest side, so neither value can be derived from them
+	// after the fact. Reported on success only — a failed pull or ingest is not
+	// a per-ledger timing sample (its failure is metered via HotPhase).
+	HotLedger(read, e2e time.Duration)
 	// ColdIngest reports one cold ingester's per-chunk total: the summed Ingest
 	// wall-clock plus its Finalize, items the total items written for the chunk,
 	// err the first error (nil on success).
@@ -100,6 +108,7 @@ type MetricSink interface {
 type NopSink struct{}
 
 func (NopSink) HotPhase(hotchunk.Phase, time.Duration, int, error) {}
+func (NopSink) HotLedger(time.Duration, time.Duration)             {}
 func (NopSink) ColdIngest(string, time.Duration, int, error)       {}
 func (NopSink) ColdChunkTotal(time.Duration)                       {}
 func (NopSink) ColdExtract(time.Duration, int, error)              {}
@@ -234,6 +243,11 @@ type PrometheusSink struct {
 	hotPhaseDur   [hotchunk.NumPhases]prometheus.Observer
 	hotPhaseItems [hotchunk.NumPhases]prometheus.Counter
 	hotPhaseErrs  [hotchunk.NumPhases]prometheus.Counter
+	// Per-ledger loop-level wall-clocks (HotLedger): the stream-read wait and the
+	// end-to-end total. The write side needs no histogram of its own — it is the
+	// sum of the hot phases above.
+	hotLedgerRead prometheus.Observer
+	hotLedgerE2E  prometheus.Observer
 	// Pre-resolved per-cold-ingester children, keyed by data type. Producers draw
 	// their data_type from the same constant set the map is built from, so a lookup
 	// can never miss — indexed directly, no on-the-fly vector fallback.
@@ -271,6 +285,21 @@ func NewPrometheusSink(registry *prometheus.Registry, namespace string) *Prometh
 		Name: "hot_phase_errors_total",
 		Help: "hot ledger failures by the phase that failed (decode->extract, commit->commit, by construction)",
 	}, []string{"phase"})
+
+	hotLedgerRead := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: namespace, Subsystem: metricsSubsystem,
+		Name: "hot_ledger_read_duration_seconds",
+		Help: "per-ledger wait for the raw ledger from the source stream " +
+			"(sub-ms on a backlog, one close interval at the live tip; the first pull includes core startup)",
+		Buckets: hotBuckets,
+	})
+
+	hotLedgerE2E := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: namespace, Subsystem: metricsSubsystem,
+		Name:    "hot_ledger_e2e_duration_seconds",
+		Help:    "per-ledger end-to-end hot ingest wall-clock (source read + the full ingest commit)",
+		Buckets: hotBuckets,
+	})
 
 	coldDuration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,
@@ -323,10 +352,12 @@ func NewPrometheusSink(registry *prometheus.Registry, namespace string) *Prometh
 			"the cold mirror of hot_phase_errors_total{phase=\"extract\"}",
 	})
 
-	registry.MustRegister(hotPhaseDurVec, hotPhaseItemsVec, hotPhaseErrsVec,
+	registry.MustRegister(hotPhaseDurVec, hotPhaseItemsVec, hotPhaseErrsVec, hotLedgerRead, hotLedgerE2E,
 		coldDuration, coldItems, coldErrors, coldChunkTotal, coldStageVec, coldExtract, coldExtractErrs)
 
 	sink := &PrometheusSink{
+		hotLedgerRead:   hotLedgerRead,
+		hotLedgerE2E:    hotLedgerE2E,
 		cold:            make(map[string]ingestCollectors, 3),
 		coldStage:       make(map[string]prometheus.Observer, len(coldStagePairs)),
 		coldChunkTotal:  coldChunkTotal,
@@ -361,6 +392,11 @@ func (p *PrometheusSink) HotPhase(phase hotchunk.Phase, d time.Duration, items i
 	if err != nil {
 		p.hotPhaseErrs[phase].Inc()
 	}
+}
+
+func (p *PrometheusSink) HotLedger(read, e2e time.Duration) {
+	p.hotLedgerRead.Observe(read.Seconds())
+	p.hotLedgerE2E.Observe(e2e.Seconds())
 }
 
 func (p *PrometheusSink) ColdIngest(dataType string, d time.Duration, items int, err error) {

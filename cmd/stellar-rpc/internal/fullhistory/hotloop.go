@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -15,6 +16,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/latencytrack"
 )
 
 // The hot-DB ingestion loop (decision (a)). One goroutine consumes a single
@@ -92,6 +94,9 @@ type ingestionLoopConfig struct {
 	Metrics  observability.Metrics
 	Sink     ingest.MetricSink
 	Health   *healthState
+	// Latency receives the per-ledger ingest.read / ingest.write / ingest.e2e
+	// series (D8 exact quantiles). Optional; nil drops the samples, like Health.
+	Latency *latencytrack.Set
 }
 
 // runIngestionLoop is the hot tier's OWNER: the single goroutine that opens,
@@ -135,22 +140,48 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 	// rebuilds it for the reopened chunk DB below.
 	hotService := ingest.NewHotService(hotDB, cfg.Sink)
 
+	// Per-ledger benchmarking series (D8), resolved once — a nil Latency set
+	// hands out nil trackers whose Record drops the sample. sink is the loop's
+	// own emitter for the read/e2e Prometheus counterparts (the per-phase
+	// signals are emitted inside hotService.Ingest, which already or-nops).
+	readLat := cfg.Latency.Tracker(latSeriesIngestRead)
+	writeLat := cfg.Latency.Tracker(latSeriesIngestWrite)
+	e2eLat := cfg.Latency.Tracker(latSeriesIngestE2E)
+	sink := cfg.Sink
+	if sink == nil {
+		sink = ingest.NopSink{}
+	}
+
 	// One continuous stream from the resume ledger, consumed on a local sequence
 	// counter. The in-order contract is enforced at the SOURCE — captive core (and
 	// every SDK backend) validates its own output — so the loop trusts the counter
 	// rather than re-parsing each view's sequence. A stream / decode error ends the
 	// loop for the daemon to classify.
+	//
+	// Three durations are measured per ledger: read is the time spent blocked in
+	// the stream iterator waiting for this ledger's raw bytes (so the FIRST read
+	// includes captive core's startup), write is the whole Ingest call, and e2e
+	// is their sum. readStart is reset at the very END of the body so boundary
+	// handoff work never counts as read time; a failed pull or ingest records
+	// nothing (errors are metered via HotPhase, not timed as samples).
 	seq := cfg.Resume
+	readStart := time.Now()
 	for raw, verr := range cfg.Stream.RawLedgers(ctx, ledgerbackend.UnboundedRange(cfg.Resume)) {
 		if verr != nil {
 			return fmt.Errorf("ingestion stream: %w", verr)
 		}
+		arrived := time.Now()
 
 		// One atomic synced WriteBatch across all hot CFs (via hotDB.IngestLedger).
 		view := xdr.LedgerCloseMetaView(raw)
 		if ierr := hotService.Ingest(ctx, seq, view); ierr != nil {
 			return fmt.Errorf("ingest ledger %d: %w", seq, ierr)
 		}
+		read, write := arrived.Sub(readStart), time.Since(arrived)
+		readLat.Record(read)
+		writeLat.Record(write)
+		e2eLat.Record(read + write)
+		sink.HotLedger(read, read+write)
 		// The ingestion loop owns the last-committed gauge: this is the TRUE
 		// committed ledger (mid-chunk included), one atomic gauge set per ledger.
 		// The tick must not touch it — its chunk-aligned value would regress it.
@@ -191,6 +222,7 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 				Info("ingestion chunk boundary — handed off to lifecycle")
 		}
 		seq++
+		readStart = time.Now()
 	}
 	// The unbounded production stream ends only on ctx cancellation or a source
 	// error, both surfaced as the stream's error element above. Falling through here

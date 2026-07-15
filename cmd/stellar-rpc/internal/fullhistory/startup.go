@@ -15,6 +15,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/latencytrack"
 )
 
 // run is the daemon's startup, in two steps: (1) BACKFILL to the tip, then
@@ -153,6 +154,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 			Metrics:  metrics,
 			Sink:     cfg.Exec.Process.Sink,
 			Health:   cfg.health,
+			Latency:  cfg.latency,
 		})
 		if err == nil {
 			// WithContext cancels gctx (unblocking the lifecycle sibling in g.Wait)
@@ -315,6 +317,10 @@ type StartConfig struct {
 	// health is the readiness/health signal the ingestion loop feeds per commit;
 	// #772's read server consumes it (as HealthSignal). nil ⇒ observe is a no-op.
 	health *healthState
+
+	// latency receives the per-ledger ingest.* series from the ingestion loop
+	// (D8). nil ⇒ samples are dropped.
+	latency *latencytrack.Set
 }
 
 // withDefaults fills the embedded Exec defaults (Workers -> GOMAXPROCS). The

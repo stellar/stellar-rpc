@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,6 +110,64 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, pinned, "validateConfig must pin earliest_ledger before run")
 	assert.Equal(t, uint32(chunk.FirstLedgerSeq), earliest)
+}
+
+// The [serving].admin_endpoint path end to end: runDaemonWith brings the admin
+// listener up on a kernel-picked port (learned via the adminUp seam), the live
+// ingestion loop feeds the ingest.* latency series from real commits, and both
+// endpoints answer — /latency.json with non-zero snapshots, /metrics with the
+// new per-ledger histograms.
+func TestRunDaemon_AdminEndpointServesLatencyAndMetrics(t *testing.T) {
+	configPath, _ := writeTempConfig(t, "[serving]\nadmin_endpoint = \"127.0.0.1:0\"")
+
+	first := chunk.ID(0).FirstLedger()
+	stream := streamForSeqs(t, first, first+2)
+	stream.blockOnCtx = true // past the three frames, hold the live tip open
+
+	addrCh := make(chan string, 1)
+	opts := daemonOptions{
+		Backend:    &fakeBackend{tip: chunk.FirstLedgerSeq + 10}, // young: no backfill
+		Core:       &fakeCore{stream: stream},
+		ServeReads: func(context.Context) error { return nil },
+		Logger:     silentLogger(),
+		adminUp:    func(addr string) { addrCh <- addr },
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- runDaemonWith(ctx, configPath, opts) }()
+
+	var addr string
+	select {
+	case addr = <-addrCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("admin listener did not come up")
+	}
+
+	// The listener is up before the loop; poll until all three frames committed.
+	var snap latencySnapshot
+	require.Eventually(t, func() bool {
+		snap = getLatencyJSON(t, addr)
+		return snap[latSeriesIngestE2E].Count >= 3
+	}, 10*time.Second, 10*time.Millisecond, "the loop never fed three e2e samples")
+
+	for _, series := range []string{latSeriesIngestRead, latSeriesIngestWrite, latSeriesIngestE2E} {
+		assert.Equal(t, uint64(3), snap[series].Count, "series %s: one sample per committed ledger", series)
+	}
+	assert.Positive(t, snap[latSeriesIngestWrite].Max)
+
+	status, body := httpGetBody(t, "http://"+addr+"/metrics")
+	require.Equal(t, http.StatusOK, status)
+	assert.Contains(t, body, "fullhistory_ingest_hot_ledger_read_duration_seconds")
+	assert.Contains(t, body, "fullhistory_ingest_hot_ledger_e2e_duration_seconds")
+
+	cancel()
+	select {
+	case err := <-errCh:
+		require.NoError(t, err, "ctx cancel is a clean daemon shutdown")
+	case <-time.After(10 * time.Second):
+		t.Fatal("runDaemonWith did not return after ctx cancel")
+	}
 }
 
 // someTxGen generates mostly zero-tx ledgers with a sparse few carrying one tx:

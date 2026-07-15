@@ -16,6 +16,9 @@ const fullValidConfig = `
 [service]
 default_data_dir = "/var/lib/fullhistory"
 
+[serving]
+admin_endpoint = "0.0.0.0:8001"
+
 [retention]
 earliest_ledger = "now"
 retention_chunks = 100
@@ -70,6 +73,7 @@ func TestParseConfig_FullDocument(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "/var/lib/fullhistory", cfg.Service.DefaultDataDir)
+	assert.Equal(t, "0.0.0.0:8001", cfg.Serving.AdminEndpoint)
 	assert.Equal(t, "now", cfg.Retention.EarliestLedger)
 	assert.Equal(t, uint32(100), *cfg.Retention.RetentionChunks)
 	assert.Equal(t, "/mnt/catalog", cfg.Storage.Catalog)
@@ -105,6 +109,7 @@ func TestParseConfig_MinimalAppliesDefaults(t *testing.T) {
 	assert.Equal(t, DefaultEarliestLedger, cfg.Retention.EarliestLedger)
 	assert.Equal(t, DefaultLogLevel, cfg.Logging.Level)
 	assert.Equal(t, DefaultLogFormat, cfg.Logging.Format)
+	assert.Empty(t, cfg.Serving.AdminEndpoint, "admin listener is disabled by default")
 }
 
 func TestParseConfig_ExplicitZeroPreserved(t *testing.T) {

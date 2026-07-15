@@ -26,6 +26,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/latencytrack"
 )
 
 // RunDaemon is the full-history daemon's process entrypoint: load config, lock
@@ -68,6 +69,11 @@ type daemonOptions struct {
 	// fixed geometry.ChunksPerTxhashIndex. Tests set it to 1 so a single chunk's
 	// freeze is a terminal index (exercising the index rebuild + prune path cheaply).
 	chunksPerTxhashIndex uint32
+
+	// adminUp is called with the admin listener's bound address once it is
+	// serving (test-only). Tests set [serving].admin_endpoint to "127.0.0.1:0"
+	// and learn the kernel-picked port here.
+	adminUp func(addr string)
 }
 
 const defaultRestartBackoff = 5 * time.Second
@@ -175,13 +181,34 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	// Control-plane Metrics and the ingest sink share ONE registry, built after the
 	// validateConfig gate (it registers Prometheus collectors).
-	// TODO(#772): expose it on the read server's /metrics.
 	registry := prometheus.NewRegistry()
 	metrics, sink := buildSinks(opts, registry)
 
+	// The exact-quantile latency set (D8) lives outside the supervised run loop —
+	// like the health signal — so counts, quantiles, and max-ever span restarts.
+	// The sink wrapper mirrors every cold per-chunk total into backfill.chunk;
+	// the ingestion loop feeds the ingest.* series through StartConfig.
+	latency := new(latencytrack.Set)
+	sink = chunkLatencySink{MetricSink: sink, chunk: latency.Tracker(latSeriesBackfillChunk)}
+
 	// --- Assemble the StartConfig and run the supervised run loop. ---
 	start := startConfig(
-		cfg, cat, logger, backend, core, serveReads, metrics, sink, hs, retention)
+		cfg, cat, logger, backend, core, serveReads, metrics, sink, hs, retention, latency)
+
+	// The admin listener ([serving].admin_endpoint) also sits outside the run
+	// loop: it starts before backfill and stays up across supervised restarts,
+	// so /metrics and /latency.json answer during backfill and ingestion alike.
+	// The deferred stop runs when supervise returns, i.e. on daemon ctx cancel.
+	if cfg.Serving.AdminEndpoint != "" {
+		adminAddr, stopAdmin, aerr := startAdminServer(cfg.Serving.AdminEndpoint, registry, latency, logger)
+		if aerr != nil {
+			return aerr
+		}
+		defer stopAdmin()
+		if opts.adminUp != nil {
+			opts.adminUp(adminAddr)
+		}
+	}
 
 	backoff := opts.RestartBackoff
 	if backoff <= 0 {
@@ -228,6 +255,7 @@ func startConfig(
 	cfg config.Config, cat *catalog.Catalog, logger *supportlog.Entry,
 	backend backfill.Backend, core CoreOpener, serveReads func(context.Context) error,
 	metrics observability.Metrics, sink ingest.MetricSink, hs *healthState, retention geometry.Retention,
+	latency *latencytrack.Set,
 ) StartConfig {
 	exec := backfill.ExecConfig{
 		Catalog:    cat,
@@ -246,6 +274,7 @@ func startConfig(
 		Core:       core,
 		ServeReads: serveReads,
 		health:     hs,
+		latency:    latency,
 	}
 }
 

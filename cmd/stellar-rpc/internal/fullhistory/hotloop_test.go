@@ -20,6 +20,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/latencytrack"
 )
 
 // ---------------------------------------------------------------------------
@@ -271,6 +272,29 @@ func TestRunIngestionLoop_LedgerLandsAcrossAllCFs(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, raw)
 	assert.Equal(t, uint32(0), eventCount(t, reopened.Events()), "zero-tx ledgers carry no events")
+}
+
+// TestRunIngestionLoop_RecordsPerLedgerLatency: each committed ledger records one
+// sample into the ingest.read / ingest.write / ingest.e2e series. The failed final
+// pull (the stream's endErr) records nothing.
+func TestRunIngestionLoop_RecordsPerLedgerLatency(t *testing.T) {
+	cat, _ := testCatalog(t)
+	first := chunk.ID(0).FirstLedger()
+
+	stream := streamForSeqs(t, first, first+2)
+	stream.endErr = errors.New("end")
+	cfg, _ := loopConfig(t, stream, cat, first)
+	cfg.Latency = new(latencytrack.Set)
+
+	require.Error(t, runIngestionLoop(context.Background(), cfg))
+
+	all := cfg.Latency.SnapshotAll()
+	for _, series := range []string{latSeriesIngestRead, latSeriesIngestWrite, latSeriesIngestE2E} {
+		assert.Equal(t, uint64(3), all[series].Count, "series %s: one sample per committed ledger", series)
+	}
+	assert.Positive(t, all[latSeriesIngestWrite].Max, "a synced commit takes measurable time")
+	assert.GreaterOrEqual(t, all[latSeriesIngestE2E].Max, all[latSeriesIngestWrite].Max,
+		"e2e is read + write per ledger")
 }
 
 // TestRunIngestionLoop_LastCommittedGaugeAdvancesPerLedger: the ingestion loop owns

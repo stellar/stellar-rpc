@@ -29,6 +29,7 @@ import (
 // geometry.ChunksPerTxhashIndex constant.)
 type Config struct {
 	Service   ServiceConfig   `toml:"service"`
+	Serving   ServingConfig   `toml:"serving"`
 	Retention RetentionConfig `toml:"retention"`
 	Storage   StorageConfig   `toml:"storage"`
 	Backfill  BackfillConfig  `toml:"backfill"`
@@ -40,6 +41,17 @@ type Config struct {
 type ServiceConfig struct {
 	// Base dir for the catalog and default storage paths. Required.
 	DefaultDataDir string `toml:"default_data_dir"`
+}
+
+// ServingConfig is [serving] — the read-service knobs (#772). Stage 1
+// introduces only the admin endpoint; the JSON-RPC serving keys (endpoint,
+// per-method limits, execution durations, cache sizes) land with the service
+// itself (stage 6).
+type ServingConfig struct {
+	// AdminEndpoint is the admin HTTP listen address, serving GET /metrics
+	// (Prometheus) and GET /latency.json (exact-quantile latency snapshots).
+	// Empty (the default) disables the admin listener.
+	AdminEndpoint string `toml:"admin_endpoint"`
 }
 
 // RetentionConfig is [retention] — the two inputs to the retention floor:
