@@ -41,6 +41,18 @@ func NewTransactionReader(reg *Registry, layout geometry.Layout, passphrase stri
 func (r txReader) GetTransaction(_ context.Context, hash xdr.Hash) (db.Transaction, error) {
 	_, v := r.reg.Admit()
 
+	// POC: this probe chain finds a fee-bump transaction by its OUTER hash only,
+	// never its inner hash — a v1 parity gap. v1 indexes a fee-bump under both
+	// hashes (db/transaction.go: transactions[tx.Result.InnerHash()] = tx), but the
+	// full-history write path stores exactly ONE key per tx — the outer TxProcessing
+	// result hash — in BOTH tiers (the cold .bin/.idx build in ingest/txhash.go and
+	// the hot txhash CF in hot_store.go), and the SDK verify chain
+	// (ingest.LedgerTransactionViewByHash) matches that outer hash only. So
+	// GetTransaction(innerHash) returns a clean NOT_FOUND where v1 returns the
+	// fee-bump tx. Not fixable at this read layer. Productionization requires
+	// inner-hash index entries at build time (hot CF + .bin codec + .idx build +
+	// backfill) or an inner-hash fallback in the SDK extractor.
+
 	// Hot indexes newest chunk first (higher ID = newer).
 	hotIDs := slices.Sorted(maps.Keys(v.Hot))
 	hot := make([]txhash.HashIndex, 0, len(hotIDs))

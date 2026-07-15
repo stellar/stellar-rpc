@@ -243,6 +243,46 @@ func TestTickCompleted_FreezeAndDiscard(t *testing.T) {
 	assert.ErrorIs(t, err, stores.ErrStoreClosed, "discarded handle closed; stale read is store-closed")
 }
 
+// (regression, I-2) TickCompleted must never delete-and-close a chunk whose live
+// write handle is in the current View. openHotDBForChunk creates the hot:chunk
+// key BEFORE HotOpened publishes the handle, and HotOpened serializes on the same
+// mu the tick's hot-key scan now takes — so a chunk in Hot is always in the scan
+// set, and the live handle survives the tick (and stays open: it still reads and
+// still ingests). Before the fix the scan ran outside the publish lock, so a
+// chunk that went live between a stale scan and the publish was closed while live.
+func TestTickCompleted_DoesNotCloseLiveChunk(t *testing.T) {
+	cat, layout := newTestCatalog(t)
+	r := NewRegistry(cat, fhtest.RetentionFor(t, cat, 0), silentLogger())
+	require.NoError(t, r.BuildInitial(0))
+
+	// A completed chunk 0 kept hot as a read-view stand-in, plus the LIVE write
+	// handle for chunk 1 published via HotOpened. openHotChunk runs the real create
+	// bracket, so both chunks have a "ready" hot:chunk key exactly as the ingestion
+	// loop leaves them at a boundary.
+	db0 := openHotChunk(t, cat, layout, chunk.ID(0), 2)
+	t.Cleanup(func() { _ = db0.Close() })
+	r.HotOpened(chunk.ID(0), db0)
+
+	seq1 := chunk.ID(1).FirstLedger()
+	liveDB := openHotChunk(t, cat, layout, chunk.ID(1), seq1)
+	t.Cleanup(func() { _ = liveDB.Close() })
+	r.HotOpened(chunk.ID(1), liveDB)
+
+	r.TickCompleted()
+
+	_, v := r.Admit()
+	require.Contains(t, v.Hot, chunk.ID(1), "live chunk survives the tick")
+	assert.Same(t, liveDB, v.Hot[chunk.ID(1)], "live write handle is un-swapped")
+
+	// The handle was NOT closed by the tick: it still serves reads and still
+	// accepts writes (a closed store would ErrStoreClosed both).
+	got, err := v.Hot[chunk.ID(1)].Ledgers().GetLedgerRaw(seq1)
+	require.NoError(t, err, "live handle still serves reads after the tick")
+	require.NotEmpty(t, got)
+	_, err = liveDB.IngestLedger(seq1+1, xdr.LedgerCloseMetaView(fhtest.ZeroTxLCMBytes(t, seq1+1)))
+	require.NoError(t, err, "live write handle still ingests after the tick")
+}
+
 // TxIdx: BuildInitial opens a frozen window's .idx into a usable reader, and a
 // steady tick reuses the same *ColdReader when the coverage is unchanged.
 func TestTxIdx_BuildProbeAndReuse(t *testing.T) {

@@ -210,12 +210,18 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 			servingReg = serve.NewRegistry(cat, retention, logger)
 			layout := config.NewLayoutFromPaths(paths)
 			serveReads = func(serveCtx context.Context) error {
-				// serveCtx is the daemon run ctx — cancellable — so StartServer's
-				// ctx-cancel watcher shuts the server down at daemon shutdown (no leak).
-				// POC: on a supervised restart the previous server is torn down only
-				// when the daemon ctx cancels; a fixed-port restart would rebind-fail
-				// until then. Acceptable for the query POC (host:0 benchmark binds a
-				// fresh port; serving restarts are out of scope).
+				// serveCtx is the daemon run ctx — it cancels only at daemon shutdown,
+				// so StartServer's ctx-cancel watcher tears the server down then (no leak
+				// on clean shutdown).
+				// POC: supervise re-invokes ServeReads on every restartable error while
+				// the daemon ctx is still live, so the prior server keeps its listener.
+				// StartServer now registers its histogram tolerantly (reusing the existing
+				// collector) instead of panicking, and binds BEFORE it registers — so a
+				// fixed-port restart cleanly rebind-fails ("address already in use") and
+				// the daemon crash-loops on the bind until the daemon ctx tears the prior
+				// server down. Acceptable for the query POC: the host:0 benchmark binds a
+				// fresh ephemeral port each attempt (the prior server lingers but does not
+				// block the restart), and serving restarts are out of scope.
 				addr, _, serr := serve.StartServer(serveCtx, serve.ServerParams{
 					Registry:   servingReg,
 					Layout:     layout,

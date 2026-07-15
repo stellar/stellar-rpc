@@ -3,6 +3,7 @@ package serve
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"sync"
@@ -52,6 +53,19 @@ type ServerParams struct {
 // benchmark client controls load and the server is not internet-facing. v1's
 // jsonrpc.go stacks all of those; add them at productionization.
 func StartServer(ctx context.Context, p ServerParams) (net.Addr, func(), error) {
+	// Bind FIRST — before touching prometheus. Two reasons: a host:0 endpoint must
+	// resolve to a real port before we return, and (load-bearing for restarts) the
+	// daemon builds ONE process registry but supervise re-invokes StartServer on
+	// every restartable error, so a transient bind failure must return before any
+	// collector is registered — otherwise a lingering registration would trip the
+	// retry. A fixed-port restart fails cleanly here (address already in use) until
+	// the prior server's daemon-ctx teardown frees the port; see daemon.go.
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", p.Cfg.Endpoint)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	// requestDurationBuckets spans 100µs to 10s — the benchmark's latency dynamic
 	// range (a cold multi-chunk scan can reach seconds; a hot single-ledger hit is
 	// sub-millisecond). This is THE instrument the fhbench harness reads.
@@ -64,7 +78,21 @@ func StartServer(ctx context.Context, p ServerParams) (net.Addr, func(), error) 
 		Help:    "Per-endpoint JSON-RPC request latency for the full-history read server.",
 		Buckets: requestDurationBuckets,
 	}, []string{"endpoint", "status"})
-	p.Metrics.MustRegister(durations)
+	// Register tolerantly, NOT MustRegister: a supervised restart re-enters
+	// StartServer against the same process registry, so the second registration of
+	// this histogram is expected. Reuse the already-registered collector so restarts
+	// re-observe into the SAME series instead of panicking.
+	if regErr := p.Metrics.Register(durations); regErr != nil {
+		var already prometheus.AlreadyRegisteredError
+		if errors.As(regErr, &already) {
+			if existing, ok := already.ExistingCollector.(*prometheus.HistogramVec); ok {
+				durations = existing
+			}
+		} else {
+			_ = ln.Close()
+			return nil, nil, regErr
+		}
+	}
 
 	lr := NewLedgerReader(p.Registry, p.Layout)
 	txr := NewTransactionReader(p.Registry, p.Layout, p.Passphrase)
@@ -97,14 +125,6 @@ func StartServer(ctx context.Context, p ServerParams) (net.Addr, func(), error) 
 	httpMux.Handle("/metrics", promhttp.HandlerFor(p.Metrics, promhttp.HandlerOpts{}))
 	httpMux.HandleFunc("/health", healthProbe(p.Health))
 	httpMux.HandleFunc("/ready", readyProbe(p.Health))
-
-	// Listen first so a host:0 endpoint resolves to a real port before we return.
-	var lc net.ListenConfig
-	ln, err := lc.Listen(ctx, "tcp", p.Cfg.Endpoint)
-	if err != nil {
-		_ = bridge.Close()
-		return nil, nil, err
-	}
 
 	srv := &http.Server{
 		Handler: httpMux,

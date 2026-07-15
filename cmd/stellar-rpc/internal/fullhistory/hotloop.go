@@ -81,8 +81,11 @@ type boundaryPublisher interface {
 // (query POC): the ingestion loop calls it as the true committed watermark and
 // the hot map change as it commits, boundary-closes, and opens chunks.
 // *serve.Registry satisfies it; the daemon leaves it nil (nopServingHooks) when
-// [serve] is disabled, so every non-serving test compiles unchanged. All three
-// hooks are cheap and non-blocking (atomic store / map clone-publish).
+// [serve] is disabled, so every non-serving test compiles unchanged.
+// LedgerCommitted and HotOpened are cheap (atomic store / map clone-publish), but
+// ChunkClosed is NOT non-blocking: it synchronously opens a full-facade read view
+// (RocksDB open + mandatory eventstore warmup) on the ingestion goroutine, so it
+// stalls ingestion for the warmup's duration once per chunk boundary.
 type servingHooks interface {
 	LedgerCommitted(seq uint32)
 	HotOpened(c chunk.ID, db *hotchunk.DB)

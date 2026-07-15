@@ -182,7 +182,9 @@ func (r *Registry) BuildInitial(lastCommitted uint32) error {
 // TickCompleted rescans the catalog and republishes: it recomputes Cold, TxIdx,
 // and Floor from durable state, keeps existing hot handles, closes handles for
 // chunks that vanished (discarded) and swaps in fresh tx-hash readers for
-// superseded coverages. Fallible catalog work runs before the lock; on error it
+// superseded coverages. Cold/TxIdx rescans run before the lock; the hot-key scan
+// and the clone-and-store run UNDER mu (so a chunk going live via HotOpened can
+// never be misread as discarded — see the in-body note). On any scan error it
 // logs and leaves the current View in place (lifecycle re-runs the next tick).
 func (r *Registry) TickCompleted() {
 	if r == nil {
@@ -196,8 +198,26 @@ func (r *Registry) TickCompleted() {
 		return
 	}
 
+	txidx, err := r.rescanTxIdx(r.current.Load().TxIdx)
+	if err != nil {
+		r.logger.WithError(err).Error("serve: tick tx-hash rescan failed")
+		return
+	}
+
+	// The hot-key scan, the delete-set, and the clone-and-store MUST run together
+	// under mu. openHotDBForChunk creates a chunk's hot:chunk key BEFORE HotOpened
+	// publishes its live write handle, and HotOpened serializes on this same mu.
+	// So a scan taken under the lock can never miss a chunk whose handle is already
+	// in the View: either HotOpened has run (handle in Hot AND key in the scan) or
+	// it has not (neither). Scanning outside the lock reopened that gap — a chunk
+	// that went live between an unlocked scan and the publish would be absent from
+	// the stale scan set and get deleted-and-closed while live, ErrStoreClosed-ing
+	// the next Ingest.
+	var toClose []*hotchunk.DB
+	r.mu.Lock()
 	hotKeys, err := r.cat.HotChunkKeys()
 	if err != nil {
+		r.mu.Unlock()
 		r.logger.WithError(err).Error("serve: tick hot-key scan failed")
 		return
 	}
@@ -205,29 +225,22 @@ func (r *Registry) TickCompleted() {
 	for _, c := range hotKeys {
 		present[c] = struct{}{}
 	}
-
-	txidx, err := r.rescanTxIdx(r.current.Load().TxIdx)
-	if err != nil {
-		r.logger.WithError(err).Error("serve: tick tx-hash rescan failed")
-		return
-	}
-
-	var toClose []*hotchunk.DB
-	r.publish(func(v *View) {
-		v.Floor = floor
-		v.Cold = cold
-		v.TxIdx = txidx
-		for c, db := range v.Hot {
-			if _, ok := present[c]; ok {
-				continue
-			}
-			// Discarded: remove from the serving map, then close the handle.
-			// rocksdb Store.Close is lifecycle-guarded — an in-flight read on an
-			// older View gets stores.ErrStoreClosed, memory-safe.
-			delete(v.Hot, c)
-			toClose = append(toClose, db)
+	next := r.current.Load().clone()
+	next.Floor = floor
+	next.Cold = cold
+	next.TxIdx = txidx
+	for c, db := range next.Hot {
+		if _, ok := present[c]; ok {
+			continue
 		}
-	})
+		// Discarded: remove from the serving map, then close the handle.
+		// rocksdb Store.Close is lifecycle-guarded — an in-flight read on an
+		// older View gets stores.ErrStoreClosed, memory-safe.
+		delete(next.Hot, c)
+		toClose = append(toClose, db)
+	}
+	r.current.Store(next)
+	r.mu.Unlock()
 
 	for _, db := range toClose {
 		if err := db.Close(); err != nil {
