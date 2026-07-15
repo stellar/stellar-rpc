@@ -1,5 +1,7 @@
 # Session Handoff — Full-History Query POC (2026-07-15)
 
+> **STATUS: COMPLETE (2026-07-15, second session).** All 9 tasks done; final review verdict: ready for benchmarking. Final HEAD `6e35a7b9`. See "Completion summary" at the bottom. The resume instructions below are retained for the record.
+
 Resume document for continuing execution of `2026-07-15-fullhistory-query-poc.md` (same directory) in a fresh Claude Code session on another machine.
 
 ## How to resume
@@ -48,3 +50,18 @@ Tasks 6-9: not started.
 ## Review-package / task-brief scripts
 
 From the superpowers plugin: `~/.claude/plugins/cache/claude-plugins-official/superpowers/6.1.1/skills/subagent-driven-development/scripts/{task-brief,review-package}` (version dir may differ on the new machine — glob it).
+
+## Completion summary (second session, Linux box, 2026-07-15)
+
+Tasks 5-9 executed per the protocol above (opus workers + opus per-task reviews, fable max-effort final review).
+
+- Task 5: getEvents handler over eventstore.Query — 68cb0533 + I1 fix 91d05191 (chunk exhaustion gated on window coverage; collision-simulating regression test). Review clean.
+- Task 6: [serve] JSON-RPC server + per-endpoint latency histogram + /metrics /health /ready — 4e502601. Review clean.
+- Task 7: daemon wiring + TestServeE2E_QueryHotAndCold — fc63b4ee. Review clean; plan's BuildInitial/HotOpened prose order was backwards, implementation uses the correct order (review-confirmed).
+- Task 8: tools/fhbench harness + README — 4350e2e6 + structured discovery probe 7ae10abf. Review clean.
+- Lint gate: 846e389c (golangci-lint 0 issues on --new-from-rev origin/feature/full-history).
+- Task 9 final review (fable, max effort): no Critical; 3 CONFIRMED Important fixed in 6e35a7b9 (restart-safe metrics registration; TickCompleted live-handle race closed under r.mu; fee-bump inner-hash v1-parity gap POC-marked). 33 deferred minors adjudicated (21 accepted-POC, 7 rejected). Full record in the executing machine's .superpowers/sdd/ (untracked).
+
+Env notes (Linux): RocksDB 10.9.1 at ~/.rocksdb, zstd 1.5.7 at ~/.zstd (system 1.5.5 too old); CGO_CFLAGS="-I$HOME/.rocksdb/include -I$HOME/.zstd/include" CGO_LDFLAGS="-L$HOME/.rocksdb/lib -L$HOME/.zstd/lib -Wl,-rpath,$HOME/.rocksdb/lib -Wl,-rpath,$HOME/.zstd/lib".
+
+Known accepted gaps for benchmark interpretation: fee-bump inner-hash lookups NOT_FOUND (v1 finds them); cold readers open per-ledger (dominant cold-tier cost); getEvents re-query latency cliff for index-unselective/type-selective filters; error blips at chunk boundaries (fence ErrStoreClosed window); BuildInitial on supervised restart leaks prior View read handles until first tick.
