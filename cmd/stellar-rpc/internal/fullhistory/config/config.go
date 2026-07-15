@@ -34,6 +34,26 @@ type Config struct {
 	Backfill  BackfillConfig  `toml:"backfill"`
 	Ingestion IngestionConfig `toml:"ingestion"`
 	Logging   LoggingConfig   `toml:"logging"`
+	Serve     ServeConfig     `toml:"serve"`
+}
+
+// ServeConfig is [serve] — the read-side JSON-RPC server (query POC). An empty
+// endpoint disables serving (the default), so a pure ingestion/backfill daemon
+// needs no [serve] section at all. The per-endpoint limits mirror the v1 RPC
+// getLedgers/getTransactions/getEvents caps; they are pointers so an absent key
+// is distinguishable from an explicit zero, with the v1 defaults filled in
+// WithDefaults.
+type ServeConfig struct {
+	// Endpoint is the host:port the JSON-RPC server listens on; "" disables
+	// serving. Use host:0 to bind an OS-assigned port (benchmark harness).
+	Endpoint string `toml:"endpoint"`
+
+	MaxLedgersLimit          *uint `toml:"max_ledgers_limit"`          // v1 default 200
+	DefaultLedgersLimit      *uint `toml:"default_ledgers_limit"`      // v1 default 50
+	MaxTransactionsLimit     *uint `toml:"max_transactions_limit"`     // v1 default 200
+	DefaultTransactionsLimit *uint `toml:"default_transactions_limit"` // v1 default 50
+	MaxEventsLimit           *uint `toml:"max_events_limit"`           // v1 default 10000
+	DefaultEventsLimit       *uint `toml:"default_events_limit"`       // v1 default 100
 }
 
 // ServiceConfig is [service].
@@ -138,6 +158,19 @@ const (
 	DefaultEarliestLedger = EarliestGenesis
 )
 
+// [serve] per-endpoint limit defaults, copied verbatim from the v1 RPC config
+// (cmd/stellar-rpc/internal/config/options.go: max/default ledgers 200/50,
+// transactions 200/50, events 10000/100). Filled by WithDefaults so the server
+// mounts identically whether or not [serve] pins them.
+const (
+	DefaultServeMaxLedgersLimit          uint = 200
+	DefaultServeDefaultLedgersLimit      uint = 50
+	DefaultServeMaxTransactionsLimit     uint = 200
+	DefaultServeDefaultTransactionsLimit uint = 50
+	DefaultServeMaxEventsLimit           uint = 10000
+	DefaultServeDefaultEventsLimit       uint = 100
+)
+
 // LoadConfig reads and parses the TOML config at path. It applies defaults but
 // does NOT validate semantics or touch any pin — that is validateConfig's job.
 // See ParseConfig.
@@ -190,7 +223,23 @@ func (cfg Config) WithDefaults() Config {
 	if cfg.Logging.Format == "" {
 		cfg.Logging.Format = DefaultLogFormat
 	}
+	fillUint(&cfg.Serve.MaxLedgersLimit, DefaultServeMaxLedgersLimit)
+	fillUint(&cfg.Serve.DefaultLedgersLimit, DefaultServeDefaultLedgersLimit)
+	fillUint(&cfg.Serve.MaxTransactionsLimit, DefaultServeMaxTransactionsLimit)
+	fillUint(&cfg.Serve.DefaultTransactionsLimit, DefaultServeDefaultTransactionsLimit)
+	fillUint(&cfg.Serve.MaxEventsLimit, DefaultServeMaxEventsLimit)
+	fillUint(&cfg.Serve.DefaultEventsLimit, DefaultServeDefaultEventsLimit)
 	return cfg
+}
+
+// fillUint sets *p to def when the key was absent (nil pointer). An explicit
+// zero is preserved, matching the pointer-defaulting contract of the other
+// optional scalars above.
+func fillUint(p **uint, def uint) {
+	if *p == nil {
+		v := def
+		*p = &v
+	}
 }
 
 // Paths is the resolved set of on-disk paths the daemon uses — the single place

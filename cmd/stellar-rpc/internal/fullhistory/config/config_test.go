@@ -48,6 +48,15 @@ captive_core_config = "/etc/captive-core.toml"
 [logging]
 level = "debug"
 format = "json"
+
+[serve]
+endpoint = "127.0.0.1:8100"
+max_ledgers_limit = 300
+default_ledgers_limit = 75
+max_transactions_limit = 400
+default_transactions_limit = 80
+max_events_limit = 20000
+default_events_limit = 250
 `
 
 // A minimal config: only the required keys, everything else defaulted.
@@ -87,6 +96,13 @@ func TestParseConfig_FullDocument(t *testing.T) {
 	assert.Equal(t, "/etc/captive-core.toml", cfg.Ingestion.CaptiveCoreConfig)
 	assert.Equal(t, "debug", cfg.Logging.Level)
 	assert.Equal(t, "json", cfg.Logging.Format)
+	assert.Equal(t, "127.0.0.1:8100", cfg.Serve.Endpoint)
+	assert.Equal(t, uint(300), *cfg.Serve.MaxLedgersLimit)
+	assert.Equal(t, uint(75), *cfg.Serve.DefaultLedgersLimit)
+	assert.Equal(t, uint(400), *cfg.Serve.MaxTransactionsLimit)
+	assert.Equal(t, uint(80), *cfg.Serve.DefaultTransactionsLimit)
+	assert.Equal(t, uint(20000), *cfg.Serve.MaxEventsLimit)
+	assert.Equal(t, uint(250), *cfg.Serve.DefaultEventsLimit)
 }
 
 func TestParseConfig_MinimalAppliesDefaults(t *testing.T) {
@@ -105,6 +121,17 @@ func TestParseConfig_MinimalAppliesDefaults(t *testing.T) {
 	assert.Equal(t, DefaultEarliestLedger, cfg.Retention.EarliestLedger)
 	assert.Equal(t, DefaultLogLevel, cfg.Logging.Level)
 	assert.Equal(t, DefaultLogFormat, cfg.Logging.Format)
+
+	// Serving is disabled by default (empty endpoint), but the per-endpoint
+	// limits are always filled to the v1 defaults so the server can mount its
+	// handlers without a nil deref regardless of whether [serve] is present.
+	assert.Equal(t, "", cfg.Serve.Endpoint)
+	assert.Equal(t, DefaultServeMaxLedgersLimit, *cfg.Serve.MaxLedgersLimit)
+	assert.Equal(t, DefaultServeDefaultLedgersLimit, *cfg.Serve.DefaultLedgersLimit)
+	assert.Equal(t, DefaultServeMaxTransactionsLimit, *cfg.Serve.MaxTransactionsLimit)
+	assert.Equal(t, DefaultServeDefaultTransactionsLimit, *cfg.Serve.DefaultTransactionsLimit)
+	assert.Equal(t, DefaultServeMaxEventsLimit, *cfg.Serve.MaxEventsLimit)
+	assert.Equal(t, DefaultServeDefaultEventsLimit, *cfg.Serve.DefaultEventsLimit)
 }
 
 func TestParseConfig_ExplicitZeroPreserved(t *testing.T) {
@@ -194,6 +221,18 @@ default_data_dir = "/d"
 [backfill.bsb]
 bucket_path = "b/p"
 bufer_size = 10
+[ingestion]
+captive_core_config = "/cc"
+`,
+		},
+		{
+			name: "unknown key under [serve]",
+			text: `
+[service]
+default_data_dir = "/d"
+[serve]
+endpoint = "127.0.0.1:8100"
+max_ledger_limit = 100
 [ingestion]
 captive_core_config = "/cc"
 `,
