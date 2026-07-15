@@ -81,13 +81,14 @@ go run ./tools/fhbench --url http://127.0.0.1:8000 --endpoint all --tier both \
 
 ### How it works
 
-1. **Discovery.** fhbench sends one `getLedgers` probe to learn the served range.
-   Because v1 `getLedgers` validates that `startLedger` is inside the served
-   range *before* returning that range, there is no zero-knowledge "successful"
-   probe — so the probe deliberately uses `startLedger=1` (always below the
-   genesis-clamped floor of 2) and reads `oldest`/`latest` out of the resulting
-   out-of-range error message. If a server does answer, it takes the range from
-   the successful response instead.
+1. **Discovery.** fhbench probes `getTransaction` with a dummy all-zeros hash:
+   the handler populates the structured `oldestLedger`/`latestLedger` response
+   fields *before* returning the `NOT_FOUND` status, so a single 200 response
+   carries the served range with no string parsing. If that probe fails (e.g. a
+   server without `getTransaction`), it falls back to a `getLedgers` probe with
+   `startLedger=1` (always below the genesis-clamped floor of 2) and reads
+   `oldest`/`latest` out of the resulting out-of-range error message — or from
+   the successful response if the server happens to answer.
 2. **Tiering.**
    - **hot** = the last `chunk-size/2` ledgers before `latest`.
    - **cold** = the oldest full chunk at or after `oldest` — chunk *k* covers

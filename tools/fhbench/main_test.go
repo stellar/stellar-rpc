@@ -109,8 +109,42 @@ func rpcStub(t *testing.T, handlers map[string]func(params json.RawMessage) (any
 	return srv
 }
 
-func TestDiscoverFromError(t *testing.T) {
+// TestDiscoverPrimaryGetTransaction covers the primary probe: getTransaction
+// with a dummy all-zeros hash returns a structured NOT_FOUND response whose
+// oldestLedger/latestLedger fields carry the served range.
+func TestDiscoverPrimaryGetTransaction(t *testing.T) {
 	srv := rpcStub(t, map[string]func(json.RawMessage) (any, *rpcError){
+		"getTransaction": func(params json.RawMessage) (any, *rpcError) {
+			var req struct {
+				Hash string `json:"hash"`
+			}
+			if err := json.Unmarshal(params, &req); err != nil || len(req.Hash) != 64 {
+				t.Errorf("probe hash = %q, want 64 hex chars", req.Hash)
+			}
+			return map[string]any{
+				"status":       "NOT_FOUND",
+				"oldestLedger": 40_001,
+				"latestLedger": 98_765,
+			}, nil
+		},
+	})
+
+	w, err := discover(context.Background(), newRPCClient(srv.URL))
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	if w.oldest != 40_001 || w.latest != 98_765 {
+		t.Errorf("discover = [%d,%d], want [40001,98765]", w.oldest, w.latest)
+	}
+}
+
+// TestDiscoverFallbackFromError covers the fallback when getTransaction is
+// unavailable: parse the served range out of getLedgers' out-of-range error.
+func TestDiscoverFallbackFromError(t *testing.T) {
+	srv := rpcStub(t, map[string]func(json.RawMessage) (any, *rpcError){
+		"getTransaction": func(json.RawMessage) (any, *rpcError) {
+			return nil, &rpcError{Code: -32601, Message: "method not found"}
+		},
 		"getLedgers": func(json.RawMessage) (any, *rpcError) {
 			return nil, &rpcError{Code: -32600, Message: "start ledger (1) must be between the oldest " +
 				"ledger: 40001 and the latest ledger: 98765 for this rpc instance"}
@@ -126,8 +160,13 @@ func TestDiscoverFromError(t *testing.T) {
 	}
 }
 
-func TestDiscoverFromSuccess(t *testing.T) {
+// TestDiscoverFallbackFromSuccess covers the fallback's success branch (a
+// server whose range includes the startLedger=1 probe).
+func TestDiscoverFallbackFromSuccess(t *testing.T) {
 	srv := rpcStub(t, map[string]func(json.RawMessage) (any, *rpcError){
+		"getTransaction": func(json.RawMessage) (any, *rpcError) {
+			return nil, &rpcError{Code: -32601, Message: "method not found"}
+		},
 		"getLedgers": func(json.RawMessage) (any, *rpcError) {
 			return map[string]any{
 				"ledgers":      []any{},

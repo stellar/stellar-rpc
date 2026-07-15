@@ -252,13 +252,45 @@ type ledgerInfo struct {
 // "start ledger (N) must be between the oldest ledger: X and the latest ledger: Y ...".
 var rangeErrRe = regexp.MustCompile(`oldest ledger: (\d+) and the latest ledger: (\d+)`)
 
-// discover learns the served ledger range. Because v1 getLedgers validates that
-// startLedger is inside the served range BEFORE returning the range, there is no
-// zero-knowledge "successful" probe: we send startLedger=1 (always below the
-// genesis-clamped floor of 2) and read the range from the error message. If a
-// server does answer (e.g. oldest happens to be <=1), we take the range from the
-// successful response instead.
+// discover learns the served ledger range.
+//
+// Primary probe: getTransaction with a dummy all-zeros hash. Its handler fills
+// the structured oldestLedger/latestLedger response fields BEFORE returning the
+// NOT_FOUND status, so one 200 response carries the range with no string
+// parsing (methods/get_transaction.go).
+//
+// Fallback (covers servers without getTransaction): a getLedgers probe. Because
+// v1 getLedgers validates that startLedger is inside the served range BEFORE
+// returning the range, there is no zero-knowledge "successful" probe: we send
+// startLedger=1 (always below the genesis-clamped floor of 2) and read the
+// range from the out-of-range error message. If a server does answer (e.g.
+// oldest happens to be <=1), we take the range from the successful response.
 func discover(ctx context.Context, c *rpcClient) (ledgerWindow, error) {
+	if w, err := discoverViaGetTransaction(ctx, c); err == nil {
+		return w, nil
+	}
+	return discoverViaGetLedgers(ctx, c)
+}
+
+// discoverViaGetTransaction is the structured primary probe (see discover).
+func discoverViaGetTransaction(ctx context.Context, c *rpcClient) (ledgerWindow, error) {
+	var resp struct {
+		Status       string `json:"status"`
+		OldestLedger uint32 `json:"oldestLedger"`
+		LatestLedger uint32 `json:"latestLedger"`
+	}
+	dummyHash := "0000000000000000000000000000000000000000000000000000000000000000"
+	if err := c.call(ctx, "getTransaction", map[string]any{"hash": dummyHash}, &resp); err != nil {
+		return ledgerWindow{}, err
+	}
+	if resp.LatestLedger == 0 {
+		return ledgerWindow{}, errors.New("getTransaction probe returned an empty ledger range")
+	}
+	return ledgerWindow{oldest: resp.OldestLedger, latest: resp.LatestLedger}, nil
+}
+
+// discoverViaGetLedgers is the error-parsing fallback probe (see discover).
+func discoverViaGetLedgers(ctx context.Context, c *rpcClient) (ledgerWindow, error) {
 	var resp getLedgersResponse
 	err := c.call(ctx, "getLedgers", map[string]any{
 		"startLedger": 1,
