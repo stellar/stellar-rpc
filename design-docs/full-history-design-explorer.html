@@ -867,7 +867,7 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   <h2>The reader contract</h2>
   <div class="spec-ref">Normative spec: <a href="full-history-streaming-workflow.md#reader-contract">streaming — Reader contract</a> · <a href="gettransaction-full-history-design.md#8-query-path">transactions — §8 Query path</a></div>
   <p>
-    A read resolves data through <b>two rules</b>, and the rest of the design relies on both:
+    A read resolves data through <b>three rules</b>, and the rest of the design relies on all of them:
   </p>
   <ol>
     <li><b>Only <span class="kv st-ready">"ready"</span> and <span class="kv st-frozen">"frozen"</span> are
@@ -880,6 +880,10 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
       not-found regardless of what's still on disk — the contract that lets pruning unlink files
       <em>unilaterally</em> (a stale <code>.idx</code> may resolve a hash to a <code>.pack</code> that's been
       deleted, but the below-floor read is not-found anyway).</li>
+    <li><b>Cold wins where it covers.</b> When a chunk's frozen cold artifacts fully cover it, a read resolves
+      the chunk from them; a <span class="kv st-ready">"ready"</span> hot DB for such a chunk is a leftover
+      awaiting discard and may hold only part of the chunk. The hot tier is authoritative only above cold
+      coverage.</li>
   </ol>
   <p>
     Together these make retention the single source of truth for "is this available?". <b>Everything else
@@ -912,11 +916,9 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
     <summary><span class="chev">▸</span><span class="invchip">INV-1</span> Read correctness</summary>
     <div class="body">Any data request whose ledger scope falls entirely within the retention window returns
     correct results — content matches what a conformant LedgerBackend would produce, no partial state
-    visible, no in-retention range unreachable. <b>Audit:</b> issue reads, or re-derive artifacts via a
-    conformant backend and byte-compare. One transient exception: when surgical recovery demotes hot data down
-    to the live chunk, the last committed ledger rewinds and the floor regresses with it, briefly admitting a
-    few already-pruned bottom chunks — those reads fail <em>soft</em> (not-found, never wrong data) until the
-    floor re-advances.</div>
+    visible, no in-retention range unreachable. <b>Audit:</b> issue reads, or re-derive artifacts and
+    byte-compare — against the same backend and core version, since replayed meta is not byte-stable across
+    versions.</div>
   </details>
   <details class="inv">
     <summary><span class="chev">▸</span><span class="invchip">INV-2</span> Single canonical state</summary>
@@ -953,16 +955,15 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   <div class="note warn">
     <b>Surgical recovery (tainted data).</b> The operator never touches the filesystem — recovery is one
     atomic catalog batch that <em>demotes</em> keys. Tainted cold artifacts go to
-    <span class="kv st-freezing">"freezing"</span>, and backfill re-derives them. For the hot tier, demote
-    <b>every <code>hot:chunk</code> at or above the lowest tainted chunk — the live chunk always included</b> —
-    to <span class="kv st-transient">"transient"</span>. Why the whole tail, not just the tainted chunk: the
-    hot tier is repaired only by re-ingestion, which replays <em>forward</em> from the last committed ledger
-    (the highest <span class="kv st-ready">"ready"</span> hot chunk). To replay a tainted hot chunk the
-    watermark must first fall <em>below</em> it — and since it's the max over all
-    <span class="kv st-ready">"ready"</span> keys, that means demoting every hot DB at or above the lowest
-    tainted one. Then captive core re-ingests the tail forward; the untainted chunks swept up in the demotion
-    are re-derived byte-identically. (A lost hot volume is the same recovery, triggered by loss rather than
-    taint.)
+    <span class="kv st-freezing">"freezing"</span>, and backfill re-derives them. When hot data is tainted,
+    also demote <b>every <code>hot:chunk</code> at or above the lowest tainted hot chunk — the live chunk
+    included</b> — to <span class="kv st-transient">"transient"</span>. Why the whole tail, not just the
+    tainted chunk: a demoted hot DB is never a source, so backfill re-derives the demoted <em>complete</em>
+    chunks as cold from the backend, and only the live partial chunk is repaired by re-ingestion, which
+    replays <em>forward</em> from the last committed ledger. That watermark derives from the durable cold
+    artifacts plus the highest <span class="kv st-ready">"ready"</span> hot DB — demoting everything at or
+    above the taint is what lets it fall below the taint so the replay reaches it. (A lost hot volume is the
+    same recovery, triggered by loss rather than taint.)
   </div>
 
   <h3>What a bug looks like</h3>

@@ -25,7 +25,7 @@ hash ──► seq ──► LCM for seq ──► extract the tx ──► veri
 Three properties of the transaction-hash key space shape the design:
 
 - **Point lookups only.** Every query is for one specific hash, never a range or prefix — exactly what a perfect hash is built for.
-- **Hashes are uniform and immutable.** A transaction hash is never updated, and corresponds to at most one applied transaction (the network's replay protection). The map is append-only: one batch of entries per ledger.
+- **Hashes are uniform and immutable.** A transaction hash is never updated, and corresponds to at most one applied transaction (the network's replay protection). A fee-bump transaction is resolvable by **both** its hashes — the outer (fee-bump) hash and the inner transaction's hash — so ingestion writes one entry per hash: two for a fee-bump, one otherwise. The map is append-only: one batch of entries per ledger.
 - **The full transaction is always fetched anyway.** The response needs the envelope, result, and meta, so the read path always ends by fetching the transaction and checking its full 32-byte hash. That means the map needn't be exact — only *complete*, never missing a hash that is really there. False positives are harmless: a fingerprint screens most of them, and the final hash check catches the rest.
 
 ---
@@ -85,7 +85,7 @@ Storing the full hash makes the hot tier **exact**: a lookup either finds the ha
 
 ### 5.2 Write path
 
-Writing is straightforward. As each ledger is ingested, one `(hash, seq)` entry is added for every transaction in it, in the same atomic write that stores the rest of the ledger. So a ledger's hashes are written all-or-nothing, together with the rest of the ledger.
+Writing is straightforward. As each ledger is ingested, one `(hash, seq)` entry is added for every transaction hash in it — two entries for a fee-bump (outer and inner) — in the same atomic write that stores the rest of the ledger. So a ledger's hashes are written all-or-nothing, together with the rest of the ledger.
 
 ### 5.3 Lifetime
 
@@ -139,7 +139,7 @@ So the index hashes exactly the transactions in chunks `[lo, hi]`. Chunks below 
 
 ### 7.1 Rebuild cadence and cost
 
-The current window's index is **rebuilt from scratch on every chunk boundary**, to fold in the chunk that just froze; it grows until the window is complete. Only the current window is ever rebuilt — a finalized window's index never changes.
+The current window's index is **rebuilt from scratch on every chunk boundary**, to fold in the chunk that just froze; it grows until the window is complete. In steady state only the current window is rebuilt; startup backfill also rebuilds a past window's non-terminal index after downtime crosses its boundary, and retention widening rebuilds a finalized one (§7.3). Outside those, a finalized window's index never changes.
 
 This is affordable because the rebuild is cheap relative to its cadence: a full-window build takes ≈1 minute, against a boundary only every ~14 hours at mainnet rates (Part 4). Rebuilding the whole index each time keeps every `.idx` on disk a complete index for its coverage, with no half-updated state.
 
@@ -148,7 +148,7 @@ This is affordable because the rebuild is cheap relative to its cadence: a full-
 To rebuild window `w`'s index over coverage `[lo, hi]`:
 
 1. **Skip if already done.** If the live index already covers `[lo, hi]`, there is nothing to do. (A live index *wider* than desired also counts — a risen floor never forces a narrowing rebuild; the below-floor slice is masked by the retention gate, §8.2.)
-2. **Merge.** Merge the sorted `.bin` files for chunks `[lo, hi]` into a new index file, with streamhash's sorted-builder. (Every chunk in `[lo, hi]` must have a `.bin`; a missing one fails the merge.)
+2. **Merge.** Merge the sorted `.bin` files for chunks `[lo, hi]` into a new index file, with streamhash's sorted-builder. (Every chunk in `[lo, hi]` must have a `.bin`; a missing one fails the merge. A coverage with no transactions at all builds a valid empty index, and lookups against it simply miss.)
 3. **Swap in.** Make the new file the window's live index, replacing the previous one.
 
 ```go
@@ -165,11 +165,11 @@ Because a rebuild writes a whole new file and only swaps it in at the end, the l
 
 ### 7.3 Finalization
 
-When a window's last chunk is folded in, its index is final: it covers the whole window and is not rebuilt again — unless retention later widens to include older chunks, when it is rebuilt wider to cover them. The window's `.bin` files have done their job as rebuild inputs, and are deleted.
+When a window's last chunk is folded in, its index is final: it covers the window's in-retention chunks `[lo, last]` and is not rebuilt again — unless retention later widens to include older chunks, when the spent `.bin` inputs are re-derived (from the local ledger packs, or the backend where the packs were pruned too) and the index is rebuilt wider to cover them. The window's `.bin` files have done their job as rebuild inputs, and are deleted.
 
 ### 7.4 Disk use during a rebuild
 
-A rebuild writes a whole new index file before the old one is removed, so a window directory briefly holds ~2× the index size (~25 GB at the end of a dense window). The window's `.bin` files are also all on disk together, since the rebuild merges them at once — about 60 GB for a dense window. Both are transient.
+A rebuild writes a whole new index file before the old one is removed, so a window directory briefly holds ~2× the index size (~25 GB at the end of a dense window). The window's `.bin` files are also all on disk together, since the rebuild merges them at once — about 60 GB for a dense window. Both are transient. During a multi-window catch-up (a first start, or backfill after long downtime) the executor does not serialize windows, so several windows' `.bin` sets can be on disk at once: the transient scales with the backlog, up to every window in the plan — size a full-history first start for that, not for one window.
 
 The window-end rebuild writes ~12.5 GB in ~1 minute (~200 MB/s burst) — trivial on instance NVMe, but worth provisioning for on throughput-capped volumes like EBS gp3.
 
@@ -184,7 +184,7 @@ A hash names no ledger, so the reader cannot know which home holds it in advance
 | cold — one `.idx` per window | **every in-retention window** | MPHF + fingerprint + verify (§8.2) |
 | hot — `txhash` CF per chunk | the chunks above any window's `hi` (live, or frozen awaiting coverage) | exact full-key get (§8.3) |
 
-The hot tier is a few chunks at most — one window's tail, normally just the live chunk — so the probe set is `≈ (in-retention windows) + (a handful of chunks)`. How the reader learns current coverage and stays consistent across rebuilds is the query-routing design's concern. This document requires only two things: that the two tiers together cover the whole retention window (the gap-free hot→cold handoff, §5.3), and that each transaction lives in exactly one of them. So **at most one probe confirms**: the verify runs on every fingerprint hit but succeeds for at most one.
+The hot tier is normally just the live chunk plus a window's tail — after downtime or a slow freeze it can be many chunks, shrinking as rebuilds advance `hi` (§8.3) — so the probe set is `≈ (in-retention windows) + (the hot chunks)`. Before a window has any index, all of its chunks are hot-tier. How the reader learns current coverage and stays consistent across rebuilds is the query-routing design's concern. This document requires only two things: that the two tiers together cover the whole retention window (the gap-free hot→cold handoff, §5.3), and that each transaction lives in exactly one of them. So **at most one probe confirms**: the verify runs on every fingerprint hit but succeeds for at most one.
 
 ### 8.2 Cold lookup
 
@@ -210,7 +210,7 @@ A **16-byte prefix collision between two distinct in-retention transactions** ha
 
 *Different windows* — the more likely of the two, since a shared prefix is far more apt to straddle two of history's windows than to fall inside one. Each transaction keys into its own window's `.idx`, so neither build sees a duplicate and both resolve normally. The collision shows up only as a fingerprint false-positive when a lookup probes the *other* window. That window's MPHF maps the shared prefix to its own resident transaction, and the fingerprint (also derived from those 16 bytes) matches — but the fetch-and-verify rejects it, because the full 32-byte hashes differ. This is exactly the foreign-key path the verify already exists for: one wasted ledger fetch, no wrong answer and no false negative.
 
-*Same window* — the genuine residual. The two are a single key to that window's builder, so streamhash rejects the duplicate at build time (`ErrDuplicateKey`) and the build fails **loudly**: it never silently drops a transaction, and the verify ensures it never returns a wrong one. This is the only bound on completeness, and it is tiny — the birthday probability over a dense window's ~3×10⁹ keys against 2¹²⁸ is ~10⁻²⁰ per window, a cryptographic-scale risk accepted as negligible.
+*Same window* — the genuine residual. The two are a single key to that window's builder, so streamhash rejects the duplicate at build time (`ErrDuplicateKey`) and the build fails **loudly and permanently**: that window's index can never build, so the daemon stops converging — a total outage rather than a silent gap, and never a wrong answer. This is the only bound on completeness, and it is tiny — the birthday probability over a dense window's ~3×10⁹ keys against 2¹²⁸ is ~10⁻²⁰ per window, a cryptographic-scale risk accepted as negligible.
 
 **Probe ordering, parallelism, early-stop, and the resulting latency and I/O are the query-routing design's concern** (§8.1), out of scope here.
 
@@ -224,7 +224,7 @@ Chunks above `hi` are probed in their hot DBs' `txhash` column family — an exa
 
 ## 9. Storage footprint
 
-Per dense chunk (~3M transactions) and dense window (1,000 chunks, ~3×10⁹ transactions):
+Per dense chunk (~3M transactions) and dense window (1,000 chunks, ~3×10⁹ transactions); entry counts run slightly above transaction counts, since a fee-bump contributes two entries:
 
 | Structure | Unit cost | Dense chunk | Dense window | Lifetime |
 |---|---|---|---|---|
