@@ -172,10 +172,13 @@ func (h eventsHandler) getEvents(
 // The eventstore index is a coarse pre-filter, so eventstore.Query results are
 // re-checked against request.Matches (event type, exact contract, full topic
 // semantics incl. wildcards/length) and the resume cursor. Because that exact
-// post-filter — and the resume drop — can discard index candidates, MaxEvents:
+// post-filter — and the resume drop, and Query's OWN collision post-filter
+// (applied after MaxEvents) — can discard index candidates, MaxEvents:
 // remaining could return a capped page that yields fewer than `remaining`
-// matches while the chunk still holds more. When that happens the cap is doubled
-// and the chunk re-queried, so the seam between chunks never skips a match.
+// matches while the chunk still holds more. The cap is doubled and the chunk
+// re-queried until the page fills or the cap covers the whole event-ID window
+// (the only reliable exhaustion proof), so the seam between chunks never skips
+// a match.
 //
 // POC: the chunk is re-queried from scratch on underfill rather than advancing a
 // pinned event-ID cursor; correct but re-fetches. A streaming pager that threads
@@ -226,14 +229,19 @@ func (h eventsHandler) scanChunk(
 		if err != nil {
 			return err
 		}
-		// Enough to fill the page, or the whole window is exhausted (Query returned
-		// fewer than the cap): take what matched and move on.
-		if len(matches) == remaining || len(payloads) < queryCap {
+		// Done when the page fills, or when the cap covered the whole event-ID
+		// window — only then is the chunk provably exhausted. A short result alone
+		// is NOT exhaustion: Query applies its collision post-filter AFTER the
+		// MaxEvents cap (QueryOptions doc: "Pagers MUST NOT treat len(result) <
+		// limit as exhausted"), so a false positive inside the capped prefix can
+		// shrink the result while real matches remain past the cap.
+		windowSize := int(rng.End - rng.Start) //nolint:gosec // chunk event-id space (~10M today) fits int
+		if len(matches) == remaining || queryCap >= windowSize {
 			*found = append(*found, matches...)
 			return nil
 		}
-		// Cap hit but the page is still short after the exact post-filter: the
-		// window holds more candidates — widen the cap and re-scan this chunk.
+		// Page still short and the cap did not cover the window: more candidates
+		// may remain — widen the cap and re-scan this chunk.
 	}
 }
 

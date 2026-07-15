@@ -135,9 +135,15 @@ func openHotEventChunk(
 // [startLedger, startLedger+len(seqs)-1] (a partial-chunk pack — the POC fixture
 // keeps cold artifacts tiny, like writeColdLedgerRun). Payloads carry a
 // deterministic close time (seq*10) matching the hot path's header close time.
+//
+// poison, when non-nil, runs over the term bitmaps just before the index is
+// written — a test hook to inject false-positive event IDs, simulating what an
+// xxh3_128 term collision would produce (mirror of eventstore's
+// TestQuery_PostFilterRejectsTermHashCollision technique on the cold side).
 func writeColdEventsChunk(
 	t *testing.T, layout geometry.Layout, c chunk.ID,
 	startLedger uint32, seqs []uint32, ledgerEvents map[uint32][]xdr.ContractEvent,
+	poison func(events.Bitmaps),
 ) {
 	t.Helper()
 	dir := layout.EventsBucketDir(c)
@@ -178,6 +184,9 @@ func writeColdEventsChunk(
 		}
 	}
 	require.NoError(t, cw.Finish(offsets))
+	if poison != nil {
+		poison(idx)
+	}
 	require.NoError(t, eventstore.WriteColdIndex(context.Background(), c, idx, dir))
 }
 

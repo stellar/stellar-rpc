@@ -12,6 +12,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/fhtest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
@@ -70,7 +71,7 @@ func buildEventsSeamFixture(t *testing.T) eventsFixture {
 	}
 	writeColdLedgerRun(t, layout, chunk.ID(0), coldFirst, raws)
 	freezeLedgers(t, cat, chunk.ID(0))
-	writeColdEventsChunk(t, layout, chunk.ID(0), coldFirst, coldSeqs, coldEvents)
+	writeColdEventsChunk(t, layout, chunk.ID(0), coldFirst, coldSeqs, coldEvents, nil)
 	freezeEvents(t, cat, chunk.ID(0))
 
 	// Hot chunk 1: A@hotFirst, B@hotLast.
@@ -212,6 +213,64 @@ func TestGetEvents_NoFilterMatchesAll(t *testing.T) {
 	}
 	assert.Equal(t, []uint32{coldFirst, coldFirst + 1, coldLast, hotFirst, hotLast}, ledgers,
 		"ascending cursor order across the seam")
+}
+
+// Regression for review finding I1: eventstore.Query applies its collision
+// post-filter AFTER the MaxEvents cap, so a short result does NOT mean the
+// window is exhausted (QueryOptions.MaxEvents contract). If scanChunk treats a
+// capped-but-underfilled query as exhaustion, real matches past the cap are
+// skipped permanently (the short page's cursor advances past them).
+//
+// The fixture simulates an xxh3_128 term collision by poisoning contract A's
+// term bitmap with the IDs of contract B's events (0, 1): with limit 2, the
+// first Query(MaxEvents=2) fetches only the two false positives, Query's own
+// post-filter drops both, and a `len(payloads) < cap` exhaustion gate would
+// stop before ever fetching the real A events at IDs 2, 3.
+func TestGetEvents_CollisionUnderfillDoesNotSkip(t *testing.T) {
+	cat, layout := newTestCatalog(t)
+	// Four cold ledgers ending at chunk 0's last ledger, so the whole run stays
+	// inside one chunk.
+	first := uint32(coldLast - 3)
+	require.NoError(t, cat.PinEarliestLedger(first))
+
+	cA, cB := contractID(0xAA), contractID(0xBB)
+	evA, _ := contractEventXDR(t, cA, "topic-a", "a")
+	evB, _ := contractEventXDR(t, cB, "topic-b", "b")
+
+	// One event per ledger: B, B, A, A → event IDs 0..3.
+	seqs := []uint32{first, first + 1, first + 2, coldLast}
+	ledgerEvents := map[uint32][]xdr.ContractEvent{
+		first:     {evB},
+		first + 1: {evB},
+		first + 2: {evA},
+		coldLast:  {evA},
+	}
+	var raws [][]byte
+	for _, seq := range seqs {
+		raws = append(raws, lcmWithCloseTime(t, seq, int64(seq)*10))
+	}
+	writeColdLedgerRun(t, layout, chunk.ID(0), first, raws)
+	freezeLedgers(t, cat, chunk.ID(0))
+
+	// Poison contract A's term bitmap with B's event IDs — the collision stand-in.
+	poison := func(idx events.Bitmaps) {
+		key := events.ComputeTermKey(cA[:], events.FieldContractID)
+		idx.AddTo(key, 0, 1)
+	}
+	writeColdEventsChunk(t, layout, chunk.ID(0), first, seqs, ledgerEvents, poison)
+	freezeEvents(t, cat, chunk.ID(0))
+
+	r := NewRegistry(cat, fhtest.RetentionFor(t, cat, 0), silentLogger())
+	require.NoError(t, r.BuildInitial(coldLast))
+	fx := eventsFixture{reg: r, layout: layout, contractA: contractStrkey(t, cA)}
+
+	resp := callGetEvents(t, fx, `{"startLedger":`+itoa(int(first))+
+		`,"filters":[{"contractIds":["`+fx.contractA+`"]}],"pagination":{"limit":2}}`)
+
+	require.Len(t, resp.Events, 2, "both real A events found despite the collision-capped first query")
+	assert.EqualValues(t, first+2, resp.Events[0].Ledger)
+	assert.EqualValues(t, coldLast, resp.Events[1].Ledger)
+	assert.Equal(t, resp.Events[1].ID, resp.Cursor, "page filled: cursor is the last real match")
 }
 
 // itoa is a tiny helper so the JSON request literals stay readable.
