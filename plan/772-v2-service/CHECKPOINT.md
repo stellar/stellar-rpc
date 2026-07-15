@@ -267,6 +267,52 @@ func (c *Catalog) DestroyHotChunk(chunkID chunk.ID) error              // rmdir�
 
 ---
 
+## Stage 4 — fullhistory/serve: db.LedgerReader + db.TransactionReader over the registry (2026-07-15) — COMPLETE
+
+- Files added (new package; NOTHING else in the repo touched — no methods/* edits were needed):
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/serve/ledger_reader.go` — package doc, `LedgerReader`, `admission` (the one-Snapshot read core), `ledgerReaderTx`, `decodeLedgerHeader`.
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/serve/transaction_reader.go` — `TransactionReader`, probe-set assembly, `boundedIndex`, `routingLedgerSource`.
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/serve/serve_test.go` — real-store fixture (catalog + cold packs + `.bin`→`.idx` + live hot chunk) + 6 tests.
+- As-built exported API (what stage 6 assembles):
+
+```go
+// package serve — import ".../internal/fullhistory/serve"
+func NewLedgerReader(reg *registry.Registry) *LedgerReader   // implements db.LedgerReader
+func NewTransactionReader(reg *registry.Registry, networkPassphrase string) (*TransactionReader, error)
+                                                             // implements db.TransactionReader; errors on nil reg / "" passphrase
+```
+
+- Behavior contract (pinned by tests):
+  - `NewTx` = the spec's admission: ONE `registry.Admit()` snapshot; every `LedgerReaderTx` method runs against it; `Done()` = no-op nil. Point-read methods (`GetLedger`, `GetLedgerRange`, `GetLatestLedgerSequence`) admit per call.
+  - Bounds: found=false ONLY outside the admitted `[View.FloorLedger(), latest]` (below floor = R2, above latest = never-ahead-of-watermark). INSIDE the bounds a store-level miss surfaces as an ERROR — the View invariant says every in-range ledger has a serving home, so a hole is data loss, not a not-found.
+  - `GetLedgerRange` = `{floor, latest}` with close times from two point reads (cold rides the LRU; per stage doc, memoize per-View only if getHealth profiling ever shows it hot). Empty registry (`latest == 0` or floor ledger > latest) → `db.ErrEmptyDB` (v1's empty-DB shape); same for `GetLatestLedgerSequence`. The v1 handlers' own request.Validate against this range reproduces v1's out-of-range error shape verbatim — the adapter never fabricates that error itself.
+  - `BatchGetLedgers` walks `[start, end]` chunk by chunk ascending, clamps silently to the admitted bounds exactly like v1's SQL BETWEEN (rejection is the handler's job), copies borrowed iterator bytes, derives `Header` via v1's partial decode (version → skip V1+ ext → header; copied byte-for-byte from `db/ledger.go`), errors with v1's exact "batch size must be greater than zero" on start > end, returns empty-non-nil on a fully clamped range, checks ctx per chunk.
+  - `StreamAllLedgers` / `StreamLedgerRange` / `GetLedgerCountInRange`: honest "not supported by the full-history backend" errors — grep confirmed NO served endpoint reaches them (v1-ingest/migration helpers only).
+  - `GetTransaction`: per-request admit → probe sets from the View (hot = every hot chunk's `Txhash()`, cold = every `Indexes()` `.idx`, both newest-first) → `txhash.NewTxReader` → direct `LedgerTransactionView` → `db.Transaction` mapping; found=false → `db.ErrNoTransaction`.
+- THE TxReader soft-miss verification result (stage doc's mandatory check):
+  - `TxReader.scan` DOES keep probing after a cold-candidate ledger-fetch failure, BUT records it as a soft error, and `GetTransaction` deliberately converts "all tiers missed + softErr != nil" into a `"txhash: lookup incomplete"` ERROR (the in-code comment cites #772: a soft failure means "not found" cannot be asserted). The ONLY sentinel the scan skips cleanly on is `stores.ErrNotFound` from the INDEX `Get`.
+  - Therefore the floor gate lives on the indexes, not the ledger source: `boundedIndex` wraps every probe-set entry and maps a hit outside `[floorLedger, latest]` to `stores.ErrNotFound`. The stage doc's fallback ("wrap the LedgerSource to return the sentinel the scan skips on") is impossible — no such sentinel exists on that path; every ledger-source error is soft for cold candidates and turns the lookup into an InternalError instead of notFound. Matches the design doc's §getTransaction line "Candidates below the admitted floor are skipped". TxReader semantics untouched.
+  - `routingLedgerSource` still re-checks bounds (returns `stores.ErrNotFound`) as defense in depth — also keeps `chunk.IDFromLedger` (which panics below ledger 2) unreachable on garbage seqs.
+- Stored-bytes (compression) finding (stage doc's mandatory check): `GetLedgerRaw` returns DECOMPRESSED raw LedgerCloseMeta XDR on BOTH tiers — zstd is internal to the stores (cold: packfile `RecordDecoder`; hot: facade decode) — in fresh caller-owned buffers, so `.Lcm` needs no decode helper in the veneer. `IterateLedgers` yields BORROWED bytes on both tiers (valid only until the next step — the batch walk clones per ledger). Cold `IterateLedgers` REJECTS ranges not fully inside pack coverage (`stores.ErrOutOfRange`) → the walk clips to `[chunk.FirstLedger(), chunk.LastLedger()] ∩ [lo, hi]` per chunk; hot tolerates any range.
+- Deviations from the stage doc + why:
+  - `db.ParseTransaction` NOT reused: it needs a parsed `ingest.LedgerTransaction`, but `TxReader` returns the raw-bytes `ingest.LedgerTransactionView` whose fields map 1:1 onto `db.Transaction` (same outer result-pair hash → hex, raw Result/Meta/Envelope wire bytes, `DiagnosticEvents` verbatim-no-wrap on both paths — verified against `TransactionMeta.GetDiagnosticEvents` — identical V3 soroban contract-event gate, empty-not-nil slices on both). Bonus: the view path handles TransactionMeta V0 (genesis-era ledgers) which `ParseTransaction`'s `GetTransactionEvents` errors on.
+  - Above-latest gating added beyond the doc's floor-only framing: a hot exact-index hit past the admitted `latest` (ingest commits run ahead of `AdvanceLatest` by design) reads as clean notFound, so a response can never carry a tx whose ledger exceeds its own `latestLedger`. Pinned by `TestServe_NeverAheadOfLatest`.
+  - `NewTransactionReader` returns an error (nil registry / empty passphrase) unlike v1's constructor — the passphrase is config-derived data and stage 6 should fail assembly loudly, not per-request.
+- Fee-bump inner-hash finding (v1→v2 behavioral difference, NOT fixable in the adapter): v1's SQLite indexed BOTH `Result.TransactionHash` (outer) and `Result.InnerHash()` for fee-bumps; the v2 write side (hot entries and `.bin`→`.idx`, stages ≤3) indexes ONLY the TxProcessing outer hash, and `LedgerTransactionViewByHash` matches outer hashes only. So v2 `getTransaction(innerHash)` returns txNotFound where v1 found the outer tx. The gettransaction design doc is silent on inner hashes; changing this means changing ingestion + index format — flag to Karthik if inner-hash lookups must keep working.
+- Verification:
+  - `go build ./...` exit 0; `go vet ./...` exit 0.
+  - `go test ./cmd/stellar-rpc/internal/fullhistory/... ./cmd/stellar-rpc/internal/latencytrack/... -count=1`: ALL packages ok, exit 0 — fullhistory 241s (full e2e), lifecycle 106s (stage-1 flake did not recur), serve 52s under the parallel run (2.8s standalone), registry/backfill/catalog/stores all green.
+  - Serve tests cover the acceptance scenarios end-to-end over REAL stores (catalog + cold ledger packs incl. one full 10k-ledger pack + `WriteColdBin`→`BuildColdIndex` `.idx` + live `hotchunk.DB` adopted via `PreOpened`): (a) `BatchGetLedgers` spans the cold→hot chunk boundary with byte-exact `.Lcm` and `Header` == `lcm.LedgerHeaderHistoryEntry()`; (b) `GetTransaction` resolves txs from the cold `.idx` AND the live hot chunk (hash/seq/closeTime/appOrder/envelope asserted); (c) below-floor after `AdvanceFloor`: ledger reads flip to found=false, the advertised range starts at the new floor, batch clamps, and the still-indexed pruned tx returns `db.ErrNoTransaction` (NOT "lookup incomplete") — the boundedIndex gate's whole point. Plus never-ahead-of-latest and empty-registry (`ErrEmptyDB`) coverage.
+  - golangci-lint still not runnable locally (2.11.3 built with go1.25 vs repo go1.26) — CI-only, pre-existing.
+- Warnings / notes for stage 5:
+  - Reuse the serve plumbing: `admission` shows the per-request pattern (one `Admit()`, then per-chunk `*ReaderFor` — never cache resolutions across admissions); the events adapter should mirror it with `EventReaderFor` + the same `[floor, latest]` clamps (leading-edge reject stays the handler's/validator's job; trailing edge truncates at `latest`).
+  - The event veneer's per-chunk scan windows must clip to chunk boundaries the same way `BatchGetLedgers` does — cold eventstore readers are per-chunk artifacts.
+  - `db.ErrEmptyDB` is the pre-first-commit shape from range/latest methods; stage 6's backfill gate keeps most traffic away from that state anyway.
+  - Fixture builders worth lifting from `serve_test.go`: `buildLCM` (tx-bearing V2 LCM with deterministic closeTime=seq) and the `.bin`→`.idx` assembly — stage 5 needs event-bearing LCMs; extend `buildLCM` rather than re-inventing (or promote shared bits into `fhtest` if the copy grows).
+  - For stage 6: surface NETWORK_PASSPHRASE (parsed in `newCaptiveCoreOpener`) to `serve.NewTransactionReader`; build all adapters INSIDE the `ServeReads(ctx, reg)` scope (registry is per-run); `getTransaction`'s handler does a second `GetLedgerRange` admission after the tx read — fine, latest is monotone, but don't "optimize" the two admissions into one shared snapshot across handler boundaries.
+
+---
+
 <!-- APPEND NEW ENTRIES BELOW. Template:
 
 ## Stage N — <title> (<date>) — COMPLETE | PARTIAL(resume: <exact next action>)
