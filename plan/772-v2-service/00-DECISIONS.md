@@ -25,7 +25,7 @@
 | D6 | Below-floor fallback | REMOVED. Strict R2: a request whose leading edge is below the admitted floor gets an out-of-range error carrying the available range. No `rpcdatastore` fallback in the v2 query path; the ledger lake stays backfill-only. |
 | D7 | Config | Superimpose the v1 service knobs onto the v2 TOML as a new `[serving]` section (endpoint, admin endpoint, per-method limits, execution durations, cache sizes), defaults copied from v1 (`/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/config/options.go`). Captive-core query-server knobs go under `[ingestion]`. Karthik fills `earliest_ledger` and the `[backfill.datastore]`/`[backfill.bsb]` values himself — devbox config ships with placeholders. |
 | D8 | Benchmarking metrics | (a) Per-ledger ingestion: read-from-source, write-to-disk, and end-to-end durations with exact p50/p75/p90/p99 + max-ever + count + avg. (b) Per-endpoint query latency: p50/p75/p90/p99 + avg + max. (c) A new custom JSON-RPC method `metrics` surfaces all of it as JSON; it is gate-exempt (works during backfill). Existing plumbing (`ingest.MetricSink`/`PrometheusSink`, v1 `request_duration_seconds` summary) stays; the new `latencytrack` package adds the exact-quantile layer Prometheus can't provide in-process. |
-| D9 | Session strategy | Work split into staged packages, one fresh Claude session per stage, sequential, same repo/directory. Handoff via `CHECKPOINT.md` (each session reads it first, appends its entry last). No session commits to git — Karthik commits manually between stages. |
+| D9 | Session strategy | Work split into staged packages, one fresh Claude session per stage, sequential, same repo/directory. Handoff via `CHECKPOINT.md` (each session reads it first, appends its entry last). Commits happen at session end ONLY on Karthik's explicit go-ahead ("commit"): one commit per stage (code + CHECKPOINT.md entry together) on the current branch. Never push. |
 
 ## Cross-cutting implementation choices (settled, do not re-open)
 
@@ -40,7 +40,7 @@
 - Ascending-only getEvents (v1 parity). `eventstore.QueryOptions.Descending` exists but the v1 handler/cursor contract is ascending; keep parity.
 - Network passphrase: single source of truth is the captive-core TOML (`NETWORK_PASSPHRASE`), already parsed inside `newCaptiveCoreOpener` in `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/daemon.go`. Surface it to serving (needed by `txhash.NewTxReader`, getTransactions parsing, getEvents, getNetwork) instead of adding a second config key.
 - Tests: unit tests take a back seat (Karthik's call). Every stage must compile (`go build ./...`), pass `go vet`, and keep existing tests green (`go test ./cmd/stellar-rpc/internal/fullhistory/...`). New tests only where they're cheap insurance for gnarly logic (registry publish/admission ordering, latencytrack quantiles, cursor stitching).
-- Never commit or push. Leave changes in the working tree.
+- Commit only at session end and only when Karthik says "commit" (D9). Never push.
 
 ## Known sharp edges every session must respect
 
