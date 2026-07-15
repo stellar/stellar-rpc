@@ -16,8 +16,8 @@ func TestNewCommand(t *testing.T) {
 	require.Equal(t, "bench-ingest", cmd.Use)
 
 	requiredBySubcommand := map[string][]string{
-		"cold": {"types", "chunk", "cold-out-dir"},
-		"hot":  {"chunk", "hot-dir"},
+		"cold": {"start-chunk", "cold-out-dir"},
+		"hot":  {"start-chunk", "hot-dir"},
 	}
 	subs := make(map[string]*cobra.Command, len(cmd.Commands()))
 	for _, sub := range cmd.Commands() {

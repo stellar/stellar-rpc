@@ -2,9 +2,7 @@ package bench
 
 import (
 	"context"
-	"fmt"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -13,12 +11,12 @@ import (
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
-// NewCommand returns the `bench-ingest` command tree: `cold`
-// benchmarks ingest.WriteColdChunk, `hot` benchmarks ingest.HotService.
+// NewCommand returns the `bench-ingest` command tree: `cold` benchmarks the
+// daemon's backfill (backfill.RunBackfill), `hot` benchmarks the daemon's live
+// ingestion loop.
 func NewCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bench-ingest",
@@ -47,14 +45,16 @@ func (f *sourceFlags) bind(cmd *cobra.Command) {
 	fs.StringVar(&f.packDir, "pack-dir", "",
 		"source ledgers tree root holding {bucket:05d}/{chunk:08d}.pack (required iff --source=pack)")
 	fs.StringVar(&f.bucketPath, "bucket-path", "sdf-ledger-close-meta/v1/ledgers/pubnet",
-		"datastore destination_bucket_path (used iff --source=bsb)")
+		"datastore destination_bucket_path, or the lake's local directory for "+
+			"--datastore-type=Filesystem (used iff --source=bsb)")
 	fs.Uint32Var(&f.bsbBufferSize, "bsb-buffer-size", 0,
-		"BSB prefetch buffer depth PER chunk worker (0 = backfill default)")
+		"BSB prefetch buffer depth PER worker (0 = backfill default)")
 	fs.Uint32Var(&f.bsbNumWorkers, "bsb-num-workers", 0,
-		"BSB download workers PER chunk worker (0 = backfill default)")
+		"BSB download workers PER worker (0 = backfill default)")
 	fs.Uint32Var(&f.retryLimit, "retry-limit", 0, "BSB retry attempts on transient failure (0 = backfill default)")
 	fs.DurationVar(&f.retryWait, "retry-wait", 0, "BSB delay between retries (0 = backfill default)")
-	fs.StringVar(&f.datastoreType, "datastore-type", "GCS", "BSB datastore type: GCS | S3 (used iff --source=bsb)")
+	fs.StringVar(&f.datastoreType, "datastore-type", "GCS",
+		"BSB datastore type: GCS | S3 | Filesystem (used iff --source=bsb)")
 	fs.StringVar(&f.region, "region", "", "bucket region for --datastore-type=S3, e.g. us-east-2")
 }
 
@@ -70,25 +70,6 @@ func (f *sourceFlags) config() sourceConfig {
 		DatastoreType: f.datastoreType,
 		Region:        f.region,
 	}
-}
-
-// parseTypes turns the --types flag value into an ingest.Config.
-func parseTypes(arg string) (ingest.Config, error) {
-	var cfg ingest.Config
-	for t := range strings.SplitSeq(arg, ",") {
-		switch strings.TrimSpace(t) {
-		case "ledgers":
-			cfg.Ledgers = true
-		case "txhash":
-			cfg.Txhash = true
-		case "events":
-			cfg.Events = true
-		case "":
-		default:
-			return cfg, fmt.Errorf("--types: unknown data type %q (expected subset of ledgers,txhash,events)", t)
-		}
-	}
-	return cfg, nil
 }
 
 // benchContext returns the run context (canceled on SIGINT/SIGTERM) and an
@@ -115,93 +96,96 @@ func writePartialCSVs(logger *supportlog.Entry, sink *csvSink, outDir string) {
 	}
 }
 
-func newColdCommand() *cobra.Command {
-	var (
-		src          sourceFlags
-		typesArg     string
-		chunkArg     uint32
-		numChunks    int
-		chunkWorkers int
-		coldOutDir   string
-		outDir       string
-		prof         profileFlags
-	)
+// newBenchCommand builds one bench-ingest subcommand skeleton — no positional
+// args, SIGINT-canceled context, Info-level logger, profiling around run —
+// with the source and profile flag sets bound.
+func newBenchCommand(
+	use, short string, src *sourceFlags, prof *profileFlags,
+	run func(ctx context.Context, logger *supportlog.Entry) error,
+) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "cold",
-		Short: "Benchmark cold ingestion (ingest.WriteColdChunk) chunk by chunk",
+		Use:   use,
+		Short: short,
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
-			types, err := parseTypes(typesArg)
-			if err != nil {
-				return err
-			}
 			ctx, stop, logger := benchContext()
 			defer stop()
-			return prof.around(logger, func() error {
-				return runCold(ctx, logger, coldOptions{
-					Source:       src.config(),
-					Types:        types,
-					StartChunk:   chunk.ID(chunkArg),
-					NumChunks:    numChunks,
-					ChunkWorkers: chunkWorkers,
-					ColdRoot:     coldOutDir,
-					OutDir:       outDir,
-				})
-			})
+			return prof.around(logger, func() error { return run(ctx, logger) })
 		},
 	}
 	src.bind(cmd)
 	prof.bind(cmd)
+	return cmd
+}
+
+func newColdCommand() *cobra.Command {
+	var (
+		src        sourceFlags
+		startChunk uint32
+		numChunks  int
+		workers    int
+		coldOutDir string
+		outDir     string
+		prof       profileFlags
+	)
+	cmd := newBenchCommand("cold",
+		"Benchmark cold ingestion: the daemon's backfill (chunk freezes + txhash index builds) over a chunk range",
+		&src, &prof,
+		func(ctx context.Context, logger *supportlog.Entry) error {
+			return runCold(ctx, logger, coldOptions{
+				Source:     src.config(),
+				StartChunk: chunk.ID(startChunk),
+				NumChunks:  numChunks,
+				Workers:    workers,
+				ColdRoot:   coldOutDir,
+				OutDir:     outDir,
+			})
+		})
 	fs := cmd.Flags()
-	fs.StringVar(&typesArg, "types", "", "comma-separated subset of ledgers,txhash,events (required)")
-	fs.Uint32Var(&chunkArg, "chunk", 0, "first chunk ID to ingest (required)")
-	fs.IntVar(&numChunks, "num-chunks", 1, "how many consecutive chunks to ingest starting at --chunk")
-	fs.IntVar(&chunkWorkers, "chunk-workers", 1, "how many chunks to run concurrently (clamped to --num-chunks)")
+	fs.Uint32Var(&startChunk, "start-chunk", 0, "first chunk ID to backfill (required)")
+	fs.IntVar(&numChunks, "num-chunks", 1, "how many consecutive chunks to backfill starting at --start-chunk")
+	fs.IntVar(&workers, "workers", 1, "backfill worker-pool size, shared by chunk freezes and index builds")
 	fs.StringVar(&coldOutDir, "cold-out-dir", "",
-		"output root for cold artifacts (required; scratch — re-runs overwrite)")
+		"output root for cold artifacts (required; use a fresh dir — same-range "+
+			"re-runs overwrite, but leftovers from other ranges are never swept)")
 	fs.StringVar(&outDir, "out", "bench-out", "CSV output dir")
-	markRequired(cmd, "types", "chunk", "cold-out-dir")
+	markRequired(cmd, "start-chunk", "cold-out-dir")
 	return cmd
 }
 
 func newHotCommand() *cobra.Command {
 	var (
 		src        sourceFlags
-		chunkArg   uint32
+		startChunk uint32
+		numChunks  int
 		numLedgers uint32
 		hotDir     string
 		outDir     string
 		prof       profileFlags
 	)
-	cmd := &cobra.Command{
-		Use:   "hot",
-		Short: "Benchmark hot ingestion (ingest.HotService) over one chunk's ledgers",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			cmd.SilenceUsage = true
-			ctx, stop, logger := benchContext()
-			defer stop()
-			return prof.around(logger, func() error {
-				return runHot(ctx, logger, hotOptions{
-					Source:     src.config(),
-					Chunk:      chunk.ID(chunkArg),
-					NumLedgers: numLedgers,
-					HotRoot:    hotDir,
-					OutDir:     outDir,
-				})
+	cmd := newBenchCommand("hot",
+		"Benchmark hot ingestion: the daemon's live ingestion loop over a chunk range",
+		&src, &prof,
+		func(ctx context.Context, logger *supportlog.Entry) error {
+			return runHot(ctx, logger, hotOptions{
+				Source:     src.config(),
+				StartChunk: chunk.ID(startChunk),
+				NumChunks:  numChunks,
+				NumLedgers: numLedgers,
+				HotRoot:    hotDir,
+				OutDir:     outDir,
 			})
-		},
-	}
-	src.bind(cmd)
-	prof.bind(cmd)
+		})
 	fs := cmd.Flags()
-	fs.Uint32Var(&chunkArg, "chunk", 0, "chunk ID to ingest (required)")
-	fs.Uint32Var(&numLedgers, "num-ledgers", 0, "cap on ledgers ingested from the chunk (0 = whole chunk)")
+	fs.Uint32Var(&startChunk, "start-chunk", 0, "first chunk ID to ingest (required)")
+	fs.IntVar(&numChunks, "num-chunks", 1,
+		"how many consecutive chunks to ingest starting at --start-chunk (>1 exercises the hot DB rotation)")
+	fs.Uint32Var(&numLedgers, "num-ledgers", 0, "cap on ledgers ingested from the range's start (0 = whole range)")
 	fs.StringVar(&hotDir, "hot-dir", "",
-		"scratch root for the fresh hot RocksDB (required; the chunk's DB dir must not exist)")
+		"scratch root for the hot RocksDBs (required; leftover chunk DBs are wiped for a fixed starting state)")
 	fs.StringVar(&outDir, "out", "bench-out", "CSV output dir")
-	markRequired(cmd, "chunk", "hot-dir")
+	markRequired(cmd, "start-chunk", "hot-dir")
 	return cmd
 }
 

@@ -4,55 +4,70 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"os"
 	"time"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
 )
 
-// hotOptions configures one hot ingest benchmark run.
+// hotOptions configures one hot-ingest benchmark run.
 type hotOptions struct {
+	// Source is the ledger source the loop reads from: a local pack tree or a
+	// BSB datastore.
 	Source sourceConfig
-	// Chunk is the single chunk whose ledgers are driven through the hot
-	// service. Hot ingestion always writes all three data types — one atomic
-	// WriteBatch across every hot column family — so there is no Types knob.
-	Chunk chunk.ID
-	// NumLedgers caps how many of the chunk's ledgers are ingested (0 = the
-	// whole chunk). fsync-per-ledger makes full-chunk hot runs slow; a cap
-	// gives cheap smoke runs without changing what is measured per ledger.
+
+	// StartChunk and NumChunks give the chunk range to ingest,
+	// [StartChunk, StartChunk+NumChunks). A range spanning more than one chunk
+	// crosses a chunk boundary, exercising the loop's hot-DB rotation.
+	StartChunk chunk.ID
+	NumChunks  int
+
+	// NumLedgers caps how many ledgers are ingested from the range's start
+	// (0 = the whole range). fsync-per-ledger makes full runs slow, so a cap
+	// gives a cheap smoke run without changing what is measured per ledger; a
+	// cap below one chunk never reaches a boundary.
 	NumLedgers uint32
-	// HotRoot is the scratch root the fresh hot RocksDB is created under (at
-	// geometry.NewLayout(HotRoot).HotChunkPath(Chunk)). The chunk's DB dir
-	// must not already exist: hot timings are only comparable from a fixed
-	// (empty) starting state — wipe it between runs.
+
+	// HotRoot is the scratch root the hot RocksDBs are created under, at
+	// geometry.NewLayout(HotRoot).HotChunkPath(chunk). Each chunk's DB is
+	// opened through the production create bracket, which wipes any leftover
+	// dir, so every run starts from an empty DB (hot timings are only
+	// comparable from a fixed starting state).
 	HotRoot string
+
 	// OutDir receives the CSV report.
 	OutDir string
 }
 
+// validate checks the flags and chunk range before runHot touches the
+// filesystem.
 func (o hotOptions) validate() error {
 	if o.HotRoot == "" {
 		return errors.New("--hot-dir is required")
 	}
-	if o.Chunk > maxChunkID {
-		return fmt.Errorf("--chunk=%d is past the last valid chunk ID %d", uint32(o.Chunk), uint32(maxChunkID))
+	if o.NumChunks < 1 {
+		return fmt.Errorf("--num-chunks must be >= 1, got %d", o.NumChunks)
+	}
+	if end := uint64(o.StartChunk) + uint64(o.NumChunks) - 1; end > uint64(maxChunkID) {
+		return fmt.Errorf("--start-chunk=%d with --num-chunks=%d ends at chunk %d, past the last valid chunk ID %d",
+			uint32(o.StartChunk), o.NumChunks, end, uint32(maxChunkID))
 	}
 	return nil
 }
 
-// runHot benchmarks the hot ingest path: it opens a fresh
-// per-chunk hot DB, builds ingest.NewHotService over it with the CSV sink,
-// and drives the chunk's ledgers through Ingest one at a time — the same
-// shape as the daemon's live loop. Per-phase percentiles come from the
-// HotPhase signals; the read_blocked driver row captures time spent waiting
-// on the source between ledgers.
+// runHot benchmarks the hot path: the daemon's ingestion loop (via
+// fullhistory.RunBoundedIngestionLoop) over the range's ledgers, into fresh hot
+// DBs opened through a scratch catalog. A no-op boundary discards completed
+// chunks so no cold-path freeze runs, isolating the hot measurement. The sink
+// collects the loop's per-phase HotPhase timings; on success runHot records the
+// whole-run wall-clock and writes the CSV report.
 func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) error {
 	if err := opts.validate(); err != nil {
 		return err
@@ -62,38 +77,52 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 		return fmt.Errorf("create --out dir %s: %w", opts.OutDir, err)
 	}
 	layout := geometry.NewLayout(opts.HotRoot)
-	// Create + fsync the hot root up front — the daemon's own root prep. There
-	// is no cross-process root lock to take; double-opening one hot DB dir is
-	// guarded by RocksDB's own LOCK file, and the exists check below keeps hot
-	// timings comparable from a fixed (empty) starting state.
+	// Create + fsync the hot root up front — the daemon's own root prep.
 	if err := config.PrepareRoots(layout.HotRoot()); err != nil {
 		return fmt.Errorf("prepare --hot-dir hot root: %w", err)
 	}
-	dbPath := layout.HotChunkPath(opts.Chunk)
-	if _, err := os.Stat(dbPath); err == nil {
-		return fmt.Errorf("hot DB dir %s already exists; delete it for a fixed starting state", dbPath)
+	cat, releaseCat, err := openScratchCatalog(layout, logger)
+	if err != nil {
+		return err
 	}
-	streamFor, release, err := openSource(ctx, opts.Source)
+	defer releaseCat()
+
+	backend, release, err := openSource(ctx, opts.Source)
 	if err != nil {
 		return err
 	}
 	defer release()
-	stream, err := streamFor(opts.Chunk)
-	if err != nil {
-		return err
-	}
 
-	db, err := hotchunk.Open(dbPath, opts.Chunk, logger)
-	if err != nil {
-		return fmt.Errorf("open hot DB %s: %w", dbPath, err)
+	first := opts.StartChunk.FirstLedger()
+	//nolint:gosec // validate() proved StartChunk+NumChunks-1 <= maxChunkID
+	last := (opts.StartChunk + chunk.ID(uint32(opts.NumChunks-1))).LastLedger()
+	// Overflow-safe cap: compare against the range's span rather than adding
+	// a flag-supplied count to a ledger sequence.
+	if span := last - first + 1; opts.NumLedgers > 0 && opts.NumLedgers < span {
+		last = first + opts.NumLedgers - 1
 	}
-	defer func() { _ = db.Close() }()
 
 	sink := newCSVSink()
-	if err := driveHot(ctx, ingest.NewHotService(db, sink), stream, sink, opts); err != nil {
+	start := time.Now()
+	err = fullhistory.RunBoundedIngestionLoop(ctx, fullhistory.BoundedIngestConfig{
+		Stream:   boundedStream{inner: backend, first: first, last: last},
+		Resume:   first,
+		Catalog:  cat,
+		Boundary: nopBoundary{},
+		Logger:   logger,
+		Metrics:  sink,
+		Sink:     sink,
+	})
+	// The loop cannot tell a complete bounded stream from one that ran dry;
+	// the sink's last-committed gauge (set once per ingested ledger) can.
+	if err == nil && sink.lastCommittedSeq() != last {
+		err = fmt.Errorf("stream ended at seq %d, expected through %d", sink.lastCommittedSeq(), last)
+	}
+	if err != nil {
 		writePartialCSVs(logger, sink, opts.OutDir)
 		return err
 	}
+	sink.observe(fileDriver, driverRunWall, time.Since(start), int(last-first+1))
 
 	sink.logSummary(logger)
 	written, err := sink.writeCSVs(opts.OutDir)
@@ -104,49 +133,25 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 	return nil
 }
 
-// driveHot feeds the benchmarked range through svc.Ingest sequentially,
-// mirroring the daemon's hot loop, and records per-ledger source wait
-// (read_blocked, first pull's setup excluded), per-ledger end-to-end ingest
-// time (ingest_total) plus the run's wall-clock (chunk_wall) on the sink.
-func driveHot(
-	ctx context.Context,
-	svc *ingest.HotService,
-	stream ledgerbackend.LedgerStream,
-	sink *csvSink,
-	opts hotOptions,
-) error {
-	first, last := opts.Chunk.FirstLedger(), opts.Chunk.LastLedger()
-	// Overflow-safe cap: compare against the chunk's span rather than adding
-	// a flag-supplied count to a ledger sequence.
-	if span := last - first + 1; opts.NumLedgers > 0 && opts.NumLedgers < span {
-		last = first + opts.NumLedgers - 1
-	}
-
-	start := time.Now()
-	seq := first
-	tRead := time.Now()
-	for raw, serr := range stream.RawLedgers(ctx, ledgerbackend.BoundedRange(first, last)) {
-		if serr != nil {
-			return fmt.Errorf("stream at seq %d: %w", seq, serr)
-		}
-		// The first pull pays source setup (datastore dial, PrepareRange,
-		// prefetch spin-up), not a between-ledgers wait — one setup-sized
-		// outlier in a row whose max/total mean steady-state waits — so it
-		// is excluded from read_blocked. It still counts in chunk_wall.
-		if seq != first {
-			sink.observeDriver(driverReadBlocked, time.Since(tRead), 0)
-		}
-		tIngest := time.Now()
-		if err := svc.Ingest(ctx, seq, raw); err != nil {
-			return fmt.Errorf("hot ingest seq %d: %w", seq, err)
-		}
-		sink.observeDriver(driverIngestTotal, time.Since(tIngest), 1)
-		seq++
-		tRead = time.Now()
-	}
-	if seq != last+1 {
-		return fmt.Errorf("stream ended at seq %d, expected through %d", seq-1, last)
-	}
-	sink.observeDriver(driverChunkWall, time.Since(start), int(seq-first))
-	return nil
+// boundedStream pins the range a LedgerStream serves. The ingestion loop always
+// requests an unbounded range, so the bench wraps its source to serve only
+// [first, last]; the stream then ends after last, which is what stops the loop.
+type boundedStream struct {
+	inner       ledgerbackend.LedgerStream
+	first, last uint32
 }
+
+// RawLedgers serves inner's ledgers clamped to [first, last], ignoring the
+// range the loop asks for.
+func (b boundedStream) RawLedgers(
+	ctx context.Context, _ ledgerbackend.Range, opts ...ledgerbackend.StreamOption,
+) iter.Seq2[[]byte, error] {
+	return b.inner.RawLedgers(ctx, ledgerbackend.BoundedRange(b.first, b.last), opts...)
+}
+
+// nopBoundary discards the ingestion loop's boundary publications: a bounded
+// bench run has no lifecycle to hand completed chunks to, so nothing is handed
+// off to a freeze — keeping the hot measurement isolated from the cold path.
+type nopBoundary struct{}
+
+func (nopBoundary) Publish(chunk.ID) {}

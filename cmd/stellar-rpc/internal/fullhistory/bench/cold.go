@@ -1,9 +1,3 @@
-// Package bench implements the full-history ingestion benchmarks behind the
-// stellar-rpc bench-ingest subcommand: drivers that feed a ledger
-// source through the PRODUCTION ingest entry points — ingest.WriteColdChunk
-// (cold) and ingest.HotService (hot) — and a csvSink that aggregates the
-// MetricSink signals those paths already emit into per-stage percentile CSV
-// reports.
 package bench
 
 import (
@@ -15,14 +9,11 @@ import (
 	"path/filepath"
 	"time"
 
-	"golang.org/x/sync/errgroup"
-
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
@@ -30,46 +21,54 @@ import (
 // sequence (see chunk.ID.LastLedger).
 const maxChunkID = chunk.ID(math.MaxUint32/chunk.LedgersPerChunk - 1)
 
-// coldOptions configures one cold ingest benchmark run.
+// coldOptions configures one cold-ingest benchmark run.
 type coldOptions struct {
+	// Source is the ledger source the backfill reads from: a local pack tree
+	// or a BSB datastore.
 	Source sourceConfig
-	// Types selects which cold data types to materialize.
-	Types ingest.Config
-	// StartChunk..StartChunk+NumChunks-1 are ingested; ChunkWorkers chunks run
-	// concurrently (clamped to NumChunks).
-	StartChunk   chunk.ID
-	NumChunks    int
-	ChunkWorkers int
-	// ColdRoot is the output root the cold artifacts land under, laid out by
-	// geometry.NewLayout. It is scratch: no completion records are written,
-	// so re-runs overwrite freely.
+
+	// StartChunk and NumChunks give the chunk range to backfill,
+	// [StartChunk, StartChunk+NumChunks). The run materializes that range's
+	// full artifact set: ledger packs, txhash .bins, events segments, and the
+	// cross-chunk txhash index.
+	StartChunk chunk.ID
+	NumChunks  int
+
+	// Workers sizes the backfill worker pool, shared by chunk freezes and
+	// index builds.
+	Workers int
+
+	// ColdRoot is the output root the artifacts land under, laid out by
+	// geometry.NewLayout. It is scratch: a re-run over the same range
+	// overwrites freely, but artifacts from other ranges are left in place and
+	// can look valid to later tooling, so point each run at a fresh dir.
 	ColdRoot string
+
 	// OutDir receives the CSV report.
 	OutDir string
 }
 
+// validate checks the flags and chunk range before runCold touches the
+// filesystem.
 func (o coldOptions) validate() error {
-	if !o.Types.Ledgers && !o.Types.Txhash && !o.Types.Events {
-		return errors.New("--types must enable at least one of ledgers,txhash,events")
-	}
 	if o.NumChunks < 1 {
 		return fmt.Errorf("--num-chunks must be >= 1, got %d", o.NumChunks)
 	}
-	if o.ChunkWorkers < 1 {
-		return fmt.Errorf("--chunk-workers must be >= 1, got %d", o.ChunkWorkers)
+	if o.Workers < 1 {
+		return fmt.Errorf("--workers must be >= 1, got %d", o.Workers)
 	}
 	// uint64 so StartChunk+NumChunks-1 cannot itself wrap before the compare.
 	if end := uint64(o.StartChunk) + uint64(o.NumChunks) - 1; end > uint64(maxChunkID) {
-		return fmt.Errorf("--chunk=%d with --num-chunks=%d ends at chunk %d, past the last valid chunk ID %d",
+		return fmt.Errorf("--start-chunk=%d with --num-chunks=%d ends at chunk %d, past the last valid chunk ID %d",
 			uint32(o.StartChunk), o.NumChunks, end, uint32(maxChunkID))
 	}
 	if o.ColdRoot == "" {
 		return errors.New("--cold-out-dir is required")
 	}
-	// Refuse re-packing a source pack tree in place: the cold ledger writer
-	// overwrites its destination, and destination == source would corrupt the
-	// pack mid-read.
-	if o.Source.Kind == sourcePack && o.Types.Ledgers {
+	// Refuse re-packing a source pack tree in place: the backfill always
+	// materializes ledger packs, the cold ledger writer overwrites its
+	// destination, and destination == source would corrupt the pack mid-read.
+	if o.Source.Kind == sourcePack {
 		outLedgers := geometry.NewLayout(o.ColdRoot).LedgersRoot()
 		if samePath(o.Source.PackDir, outLedgers) {
 			return fmt.Errorf("--cold-out-dir's ledgers tree (%s) must differ from --pack-dir", outLedgers)
@@ -78,56 +77,58 @@ func (o coldOptions) validate() error {
 	return nil
 }
 
-// runCold benchmarks the production cold ingest path: for each chunk in
-// [StartChunk, StartChunk+NumChunks), it opens an independent ledger stream
-// and calls ingest.WriteColdChunk against the CSV sink, with up to
-// ChunkWorkers chunks in flight. On success it writes the CSV report and logs
-// a per-row summary plus the run's effective chunk concurrency
-// (sum(chunk_wall)/total_wall).
+// runCold benchmarks the cold path: one backfill.RunBackfill over the
+// requested chunk range, against a fresh scratch catalog so the run is a clean
+// backfill from empty. As the backfill runs, the sink collects its per-stage
+// MetricSink timings and the scheduler's observability metrics. On success
+// runCold writes the CSV report and logs a summary, including the effective
+// chunk concurrency for multi-chunk runs.
 func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) error {
 	if err := opts.validate(); err != nil {
 		return err
-	}
-	if opts.ChunkWorkers > opts.NumChunks {
-		logger.Infof("--chunk-workers=%d > --num-chunks=%d; clamping", opts.ChunkWorkers, opts.NumChunks)
-		opts.ChunkWorkers = opts.NumChunks
 	}
 	// Surface an unwritable --out before the run.
 	if err := os.MkdirAll(opts.OutDir, 0o755); err != nil {
 		return fmt.Errorf("create --out dir %s: %w", opts.OutDir, err)
 	}
-	// Create and fsync the ledgers, events, and txhash roots up front,
-	// even when --types skips some; the bench owns ColdRoot as scratch.
-	// Catalog-less runs have no RocksDB LOCK, but cold's one-write protocol
-	// makes concurrent writers duplicate work rather than corrupt data.
+	// Create and fsync the write roots up front — the daemon's own root prep.
 	layout := geometry.NewLayout(opts.ColdRoot)
-	if err := config.PrepareRoots(layout.LedgersRoot(), layout.EventsRoot(), layout.TxHashRawRoot()); err != nil {
+	if err := config.PrepareRoots(
+		layout.LedgersRoot(), layout.EventsRoot(), layout.TxHashRawRoot(), layout.TxHashIndexRoot(),
+	); err != nil {
 		return fmt.Errorf("prepare --cold-out-dir write roots: %w", err)
 	}
 
-	streamFor, release, err := openSource(ctx, opts.Source)
+	cat, releaseCat, err := openScratchCatalog(layout, logger)
+	if err != nil {
+		return err
+	}
+	defer releaseCat()
+
+	backend, release, err := openSource(ctx, opts.Source)
 	if err != nil {
 		return err
 	}
 	defer release()
 
 	sink := newCSVSink()
+	//nolint:gosec // validate() proved StartChunk+NumChunks-1 <= maxChunkID
+	end := opts.StartChunk + chunk.ID(uint32(opts.NumChunks-1))
 
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(opts.ChunkWorkers)
 	start := time.Now()
-	for i := range opts.NumChunks {
-		chunkID := opts.StartChunk + chunk.ID(uint32(i))
-		g.Go(func() error {
-			if err := runOneColdChunk(gctx, logger, streamFor, layout, sink, chunkID, opts.Types); err != nil {
-				return fmt.Errorf("chunk %d: %w", uint32(chunkID), err)
-			}
-			return nil
-		})
-	}
-	if err := g.Wait(); err != nil {
+	err = backfill.RunBackfill(ctx, backfill.ExecConfig{
+		Catalog: cat,
+		Logger:  logger,
+		Metrics: sink,
+		Process: backfill.ProcessConfig{Sink: sink, Backend: backend},
+		Workers: opts.Workers,
+		// Benchmarks measure one clean attempt; retries would fold failure +
+		// backoff time into the samples.
+		MaxRetries: 0,
+	}, opts.StartChunk, end)
+	if err != nil {
 		writePartialCSVs(logger, sink, opts.OutDir)
-		return err
+		return fmt.Errorf("backfill [%s,%s]: %w", opts.StartChunk, end, err)
 	}
 	totalWall := time.Since(start)
 
@@ -141,43 +142,14 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 	return nil
 }
 
-// runOneColdChunk materializes one chunk's cold artifacts from its own stream
-// and reports the driver-observed chunk wall (stream open + WriteColdChunk) to
-// the sink.
-func runOneColdChunk(
-	ctx context.Context,
-	logger *supportlog.Entry,
-	streamFor streamFactory,
-	layout geometry.Layout,
-	sink *csvSink,
-	chunkID chunk.ID,
-	types ingest.Config,
-) error {
-	start := time.Now()
-	stream, err := streamFor(chunkID)
-	if err != nil {
-		return err
-	}
-	raw := stream.RawLedgers(ctx, ledgerbackend.BoundedRange(chunkID.FirstLedger(), chunkID.LastLedger()))
-	dirs := ingest.ColdDirs{
-		LedgerPack: layout.LedgerPackPath(chunkID),
-		TxhashBin:  layout.TxHashBinPath(chunkID),
-		EventsDir:  layout.EventsBucketDir(chunkID),
-	}
-	if err := ingest.WriteColdChunk(ctx, logger, chunkID, raw, dirs, sink, types); err != nil {
-		return err
-	}
-	sink.observeDriver(driverChunkWall, time.Since(start), 0)
-	return nil
-}
-
 // logColdWall logs the run's total wall-clock and, for multi-chunk runs, the
-// effective chunk concurrency (sum of per-chunk walls over the total wall).
+// effective chunk concurrency (sum of the engine's per-chunk totals over the
+// total wall).
 func logColdWall(logger *supportlog.Entry, sink *csvSink, numChunks int, totalWall time.Duration) {
 	if numChunks > 1 && totalWall > 0 {
-		sumChunkWall := sink.sumDriver(driverChunkWall)
-		logger.Infof("total wall = %s (sum(chunk_wall)/total = %.2fx effective concurrency)",
-			totalWall.Round(time.Millisecond), float64(sumChunkWall)/float64(totalWall))
+		sumChunkTotal := sink.sumDriver(driverChunkTotal)
+		logger.Infof("total wall = %s (sum(chunk_total)/total = %.2fx effective concurrency)",
+			totalWall.Round(time.Millisecond), float64(sumChunkTotal)/float64(totalWall))
 		return
 	}
 	logger.Infof("total wall = %s", totalWall.Round(time.Millisecond))

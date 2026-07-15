@@ -6,11 +6,13 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
 )
 
@@ -29,15 +31,24 @@ const (
 	fileDriver = "driver" // driver.csv: per-chunk aggregate rows
 )
 
-// Driver-report row labels. chunk_wall, ingest_total and read_blocked are
-// observed by the bench drivers themselves (observeDriver); the rest arrive
+// Driver-report row labels. run_wall is recorded by the hot bench driver
+// itself via observe; backfill_wall and index_rebuild arrive through the
+// observability.Metrics signals the backfill scheduler emits; ingest_total is
+// reconstructed in HotPhase from each ledger's phase burst; the rest arrive
 // through the MetricSink cold signals.
 const (
-	driverChunkWall   = "chunk_wall"   // per-chunk wall-clock incl. stream open, seen by the driver
-	driverIngestTotal = "ingest_total" // hot only: per-ledger end-to-end Ingest time (all phases, source wait excluded)
-	driverReadBlocked = "read_blocked" // hot only: wait on the source between ledgers
-	driverChunkTotal  = "chunk_total"  // ColdChunkTotal: per-chunk ColdService lifetime
-	driverTotalSuffix = "_total"       // ColdIngest per data type: "<type>_total"
+	driverBackfillWall = "backfill_wall" // cold only: RunBackfill's whole plan-and-execute wall (Metrics.Freeze)
+	driverIndexRebuild = "index_rebuild" // cold only: one txhash index build incl. eager sweep (Metrics.Rebuild)
+	driverChunkTotal   = "chunk_total"   // ColdChunkTotal: per-chunk ColdService lifetime
+	driverTotalSuffix  = "_total"        // ColdIngest per data type: "<type>_total"
+	// cold only: the shared per-ledger ExtractLedgerEvents walk (ColdExtract),
+	// ledger-scoped and belonging to no single data type, so it lands in
+	// driver.csv.
+	driverColdExtract = "cold_extract"
+	// hot only: per-ledger end-to-end ingest time, reconstructed as the sum of
+	// one ledger's HotPhase burst (per-phase percentiles can't be summed).
+	driverIngestTotal = "ingest_total"
+	driverRunWall     = "run_wall" // hot only: whole-run wall-clock, seen by the driver
 )
 
 // fileSpec is one CSV file of the report: its basename (without .csv) and the
@@ -50,33 +61,38 @@ type fileSpec struct {
 // fileSpecs is the whole report schema, in file emission order:
 //
 //   - one CSV per cold data type the ingest engine reports (ledgers.csv,
-//     txhash.csv, events.csv), one row per cold pipeline stage (extract →
-//     term_index → write → finalize) as reported via MetricSink.IngestStage;
+//     txhash.csv, events.csv), one row per cold pipeline stage (term_index →
+//     write → finalize) as reported via MetricSink.IngestStage;
 //   - hot.csv, one row per hot ingest phase, in hotchunk.Phase order;
-//   - driver.csv, the per-chunk aggregates: the driver-observed chunk
-//     wall-clock, the engine's ColdChunkTotal, one "<type>_total" row per
-//     cold data type (ColdIngest), and the hot bench's per-ledger ingest and
-//     source-wait rows.
+//   - driver.csv, the run-level aggregates: the cold scheduler's backfill wall
+//     and per-index-build rebuild rows (observability.Metrics), the engine's
+//     ColdChunkTotal, one "<type>_total" row per cold data type (ColdIngest),
+//     the shared per-ledger cold extract walk (ColdExtract), the hot
+//     per-ledger end-to-end ingest_total (reconstructed from each ledger's
+//     phase burst in HotPhase), and the hot bench's driver-observed run
+//     wall-clock.
 //
 // A label recorded outside this vocabulary is still reported: withUnknown
-// appends it after the known rows (or files) rather than silently dropping it.
+// appends it after the known rows (or files), so nothing is silently dropped.
 //
 //nolint:gochecknoglobals // fixed report schema, read-only
 var fileSpecs = func() []fileSpec {
 	coldTypes := []string{ingest.DataTypeLedgers, ingest.DataTypeTxhash, ingest.DataTypeEvents}
-	coldStages := []string{ingest.StageExtract, ingest.StageTermIndex, ingest.StageWrite, ingest.StageFinalize}
+	coldStages := []string{ingest.StageTermIndex, ingest.StageWrite, ingest.StageFinalize}
 
 	hotRows := make([]string, hotchunk.NumPhases)
 	for p := range hotchunk.NumPhases {
 		hotRows[p] = p.String()
 	}
 
-	driverRows := make([]string, 0, len(coldTypes)+4)
-	driverRows = append(driverRows, driverChunkWall, driverChunkTotal)
+	driverRows := make([]string, 0, len(coldTypes)+6)
+	driverRows = append(driverRows, driverBackfillWall, driverIndexRebuild, driverChunkTotal)
 	for _, dt := range coldTypes {
 		driverRows = append(driverRows, dt+driverTotalSuffix)
 	}
-	driverRows = append(driverRows, driverIngestTotal, driverReadBlocked)
+	// cold_extract closes the cold rows; ingest_total then run_wall keep the
+	// two hot rows grouped at the end.
+	driverRows = append(driverRows, driverColdExtract, driverIngestTotal, driverRunWall)
 
 	specs := make([]fileSpec, 0, len(coldTypes)+2)
 	for _, dt := range coldTypes {
@@ -108,32 +124,85 @@ type rowKey struct {
 	file, row string
 }
 
-// csvSink is an ingest.MetricSink that records every signal in memory and, on
-// writeCSVs, aggregates them into percentile CSVs
-// (stage,n,n_items,total_ns,p50_ns,p90_ns,p99_ns,max_ns) laid out per
+// csvSink is an ingest.MetricSink AND an observability.Metrics that records
+// every signal in memory and, on writeCSVs, aggregates them into percentile
+// CSVs (stage,n,n_items,total_ns,p50_ns,p90_ns,p99_ns,max_ns) laid out per
 // fileSpecs. n counts only non-zero-duration samples (an empty ledger's
 // zero-duration stage does not skew percentiles) and n_items sums each
 // included sample's natural item count. Rows with no included samples — and
-// files with no rows — are suppressed.
+// files with no rows — are suppressed. Most signals map one-to-one onto a
+// sample; HotPhase additionally reconstructs the per-ledger ingest_total row
+// from each ledger's phase burst (see HotPhase).
+//
+// Of the observability signals only the durations a bench run produces are
+// recorded (Freeze — the backfill wall — and Rebuild — one index build each);
+// LastCommitted is tracked as a gauge for the hot driver's completion check,
+// and the rest carry no bench signal so they are dropped — Prune does fire
+// from each index build's eager sweep, but its wall is already inside Rebuild
+// and a fresh scratch run sweeps ~nothing; the others never fire.
 //
 // All methods are safe for concurrent use (one mutex), as the MetricSink
-// contract requires: the cold drivers run several WriteColdChunk workers
-// against one sink.
+// contract requires: the backfill scheduler runs several chunk freezes against
+// one sink.
 type csvSink struct {
 	mu   sync.Mutex
 	rows map[rowKey]*series // every signal is one sample on a (file, row) key
+
+	// hotBurst accumulates the current hot ledger's HotPhase durations so
+	// HotPhase can reconstruct the per-ledger end-to-end ingest_total (the
+	// phases partition the per-ledger total). Guarded by mu.
+	hotBurst time.Duration
+
+	// lastSeq mirrors the loop's last-committed gauge (Metrics.LastCommitted,
+	// set once per ingested ledger) so the hot driver can verify the bounded
+	// run reached its final ledger.
+	lastSeq atomic.Uint32
 }
 
-var _ ingest.MetricSink = (*csvSink)(nil)
+var (
+	_ ingest.MetricSink     = (*csvSink)(nil)
+	_ observability.Metrics = (*csvSink)(nil)
+)
 
 // newCSVSink returns an empty recorder.
 func newCSVSink() *csvSink {
 	return &csvSink{rows: make(map[rowKey]*series)}
 }
 
-// HotPhase records one phase of one hot ledger ingest.
+// HotPhase records one phase of one hot ledger ingest into hot.csv, and
+// reconstructs the per-ledger end-to-end ingest_total for driver.csv from the
+// phase burst.
+//
+// The production hot loop (runIngestionLoop) is a SINGLE goroutine, so HotPhase
+// signals arrive as strict per-ledger bursts in hotchunk.Phase order:
+// extract → ledgers → txhash → events → commit → apply, one burst per ledger.
+// The phases partition the per-ledger IngestLedger wall-clock, so their sum IS
+// the per-ledger total — a number per-phase percentiles can't recover
+// (percentiles don't sum). PhaseExtract (always first) resets the accumulator
+// for a new ledger; PhaseApply (terminal, emitted on the success path only —
+// never the failed phase) records one ingest_total sample with items=1. A
+// failed ledger never reaches PhaseApply, so it contributes nothing (the run
+// aborts and partial CSVs are written anyway).
+//
+// The accumulator is mutex-guarded so the sink stays safe under the MetricSink
+// contract regardless; only the production single-writer pattern yields
+// meaningful sums (interleaved bursts would sum across ledgers, never race).
 func (s *csvSink) HotPhase(phase hotchunk.Phase, d time.Duration, items int, _ error) {
 	s.observe(fileHot, phase.String(), d, items)
+
+	// Accumulator under its own critical section, released before the observe
+	// below so the two locks are sequential, never nested.
+	s.mu.Lock()
+	if phase == hotchunk.PhaseExtract {
+		s.hotBurst = 0
+	}
+	s.hotBurst += d
+	total := s.hotBurst
+	s.mu.Unlock()
+
+	if phase == hotchunk.PhaseApply {
+		s.observe(fileDriver, driverIngestTotal, total, 1)
+	}
 }
 
 // ColdIngest records one cold ingester's per-chunk total.
@@ -146,10 +215,49 @@ func (s *csvSink) ColdChunkTotal(d time.Duration) {
 	s.observe(fileDriver, driverChunkTotal, d, 0)
 }
 
+// ColdExtract records the shared per-ledger ExtractLedgerEvents walk —
+// ledger-scoped and type-less, so it lands in driver.csv (see
+// driverColdExtract).
+func (s *csvSink) ColdExtract(d time.Duration, items int, _ error) {
+	s.observe(fileDriver, driverColdExtract, d, items)
+}
+
 // IngestStage records one cold ingester's per-stage wall-clock.
 func (s *csvSink) IngestStage(dataType, stage string, d time.Duration, items int) {
 	s.observe(dataType, stage, d, items)
 }
+
+// Freeze records one backfill pass's whole plan-and-execute wall-clock.
+func (s *csvSink) Freeze(d time.Duration) {
+	s.observe(fileDriver, driverBackfillWall, d, 0)
+}
+
+// Rebuild records one txhash index build's wall-clock (including its eager
+// post-build sweep).
+func (s *csvSink) Rebuild(d time.Duration) {
+	s.observe(fileDriver, driverIndexRebuild, d, 0)
+}
+
+// LastCommitted tracks the hot loop's per-ledger committed gauge (see lastSeq).
+func (s *csvSink) LastCommitted(lastCommitted uint32) {
+	s.lastSeq.Store(lastCommitted)
+}
+
+// The remaining observability signals carry no useful bench signal and are
+// accepted and dropped — Prune does fire (from each index build's eager
+// sweep) but its wall is already inside Rebuild; the others never fire.
+
+func (s *csvSink) RetentionFloor(uint32) {}
+
+func (s *csvSink) ChunkBoundary() {}
+
+func (s *csvSink) LiveHotChunks(int) {}
+
+func (s *csvSink) BackfillPass(time.Duration) {}
+
+func (s *csvSink) Discard(int, time.Duration) {}
+
+func (s *csvSink) Prune(int, time.Duration) {}
 
 // observe appends one sample to the (file, row) series, creating it on first
 // use. Every recording method lands here. (funcorder pins it below the
@@ -166,11 +274,9 @@ func (s *csvSink) observe(fileName, rowName string, d time.Duration, items int) 
 	sr.observe(d, items)
 }
 
-// observeDriver records a driver-level row (driverChunkWall, driverReadBlocked)
-// outside the MetricSink interface — timings only the bench driver's own loop
-// can see.
-func (s *csvSink) observeDriver(name string, d time.Duration, items int) {
-	s.observe(fileDriver, name, d, items)
+// lastCommittedSeq returns the highest ledger the hot loop reported committed.
+func (s *csvSink) lastCommittedSeq() uint32 {
+	return s.lastSeq.Load()
 }
 
 // sumDriver returns the summed duration of a driver row's samples — the
@@ -234,8 +340,8 @@ func aggregate(name string, s *series) (row, bool) {
 }
 
 // withUnknown returns order plus any keys of m not already in it, sorted and
-// appended after the known order — a recorded label outside the known
-// vocabulary is reported after the known rows rather than silently dropped.
+// appended after the known order, so a recorded label outside the known
+// vocabulary still appears, after the known rows.
 func withUnknown[V any](order []string, m map[string]V) []string {
 	var extra []string
 	for k := range m {
