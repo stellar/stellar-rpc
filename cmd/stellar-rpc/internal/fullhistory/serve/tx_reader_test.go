@@ -173,18 +173,17 @@ func TestTxReader_Miss(t *testing.T) {
 	assert.ErrorIs(t, err, db.ErrNoTransaction, "an uncommitted hash is a clean not-found")
 }
 
-// A cold candidate below the retention floor must not be served: the floor gate
-// makes the ledger probe not-found even though the pack still holds the bytes,
-// so the tx is not returned (a soft-error incomplete lookup, never pruned data).
+// A cold candidate below the retention floor is skipped at the index seam (a
+// window index may keep naming pruned ledgers, design R2), so it reads as a
+// clean index miss and ends as db.ErrNoTransaction — never pruned data, never
+// an incomplete-lookup error.
 func TestTxReader_BelowFloorSkipped(t *testing.T) {
 	// Pin earliest to chunk 1's first ledger ⇒ floor sits above chunk 0's tx.
 	r, layout, hash, _ := buildColdTxFixture(t, chunk.ID(1).FirstLedger())
 	txr := NewTransactionReader(r, layout, network.PublicNetworkPassphrase)
 
-	got, err := txr.GetTransaction(t.Context(), xdr.Hash(hash))
-	require.Error(t, err, "below-floor candidate is not served")
-	assert.NotErrorIs(t, err, db.ErrNoTransaction, "incomplete lookup, not a false not-found")
-	assert.Empty(t, got.TransactionHash, "no transaction returned")
+	_, err := txr.GetTransaction(t.Context(), xdr.Hash(hash))
+	assert.ErrorIs(t, err, db.ErrNoTransaction, "below-floor candidate skips to a clean not-found")
 }
 
 // Step: the real getTransaction handler, mounted over the adapter, returns a

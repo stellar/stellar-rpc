@@ -47,17 +47,16 @@ func (r txReader) GetTransaction(_ context.Context, hash xdr.Hash) (db.Transacti
 	for i := len(hotIDs) - 1; i >= 0; i-- {
 		hot = append(hot, v.Hot[hotIDs[i]].Txhash())
 	}
-	// Cold windows newest first (TxIdx is ascending by Lo).
+	// Cold windows newest first (TxIdx is ascending by Lo), each floor-gated: a
+	// window index may keep naming ledgers prune has removed (design R2), so a
+	// below-floor candidate is a clean index miss, not an unverifiable probe.
+	floor := max(v.Floor.FirstLedger(), v.Earliest)
 	cold := make([]txhash.HashIndex, 0, len(v.TxIdx))
 	for i := len(v.TxIdx) - 1; i >= 0; i-- {
-		cold = append(cold, v.TxIdx[i].Reader)
+		cold = append(cold, floorGatedIndex{inner: v.TxIdx[i].Reader, floor: floor})
 	}
 
-	src := txLedgerSource{
-		view:   v,
-		layout: r.layout,
-		floor:  max(v.Floor.FirstLedger(), v.Earliest),
-	}
+	src := txLedgerSource{view: v, layout: r.layout}
 	tr, err := txhash.NewTxReader(hot, cold, src, r.passphrase)
 	if err != nil {
 		return db.Transaction{}, err
@@ -73,21 +72,36 @@ func (r txReader) GetTransaction(_ context.Context, hash xdr.Hash) (db.Transacti
 	return viewToTransaction(txv), nil
 }
 
+// floorGatedIndex drops a cold candidate whose ledger sits below the retention
+// floor. A window index legitimately keeps naming ledgers prune has already
+// removed (design R2), so a below-floor hit is a clean index miss — not a
+// candidate the ledger source must then fail to verify.
+type floorGatedIndex struct {
+	inner txhash.HashIndex
+	floor uint32
+}
+
+func (g floorGatedIndex) Get(hash [32]byte) (uint32, error) {
+	seq, err := g.inner.Get(hash)
+	if err != nil {
+		return 0, err
+	}
+	if seq < g.floor {
+		return 0, stores.ErrNotFound
+	}
+	return seq, nil
+}
+
 // txLedgerSource resolves a ledger's raw bytes for the txhash reader over one
-// pinned View, opening/closing the per-chunk reader per call. It returns
-// not-found for a seq below the retention floor so a cold fingerprint candidate
-// naming pruned history is skipped rather than served (design: R2 for by-hash
-// lookups).
+// pinned View, opening/closing the per-chunk reader per call. A genuine
+// resolution failure stays an error (the reader's "never a false not-found"
+// path); below-floor filtering happens at the index layer above.
 type txLedgerSource struct {
 	view   *View
 	layout geometry.Layout
-	floor  uint32
 }
 
 func (s txLedgerSource) GetLedgerRaw(seq uint32) ([]byte, error) {
-	if seq < s.floor {
-		return nil, stores.ErrNotFound
-	}
 	lc, err := s.view.ResolveLedgers(chunk.IDFromLedger(seq), s.layout)
 	if err != nil {
 		return nil, err
