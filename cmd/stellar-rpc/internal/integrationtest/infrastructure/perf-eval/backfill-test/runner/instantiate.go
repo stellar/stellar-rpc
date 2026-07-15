@@ -19,18 +19,16 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/harness"
 )
 
-// legDir is this leg's path under the repo root, where its config template is
-// checked in (the runner runs with cwd = repo root).
-const legDir = "cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test"
-
-const corePath = "/usr/local/bin/stellar-core" // fetched from S3
-
-// backfillDoneRe matches the line emitted when the ledger fill completes;
-// finalizeDoneRe the terminal one emitted after the deferred index rebuild.
-var (
-	backfillDoneRe = regexp.MustCompile(`Backfill process complete, ledgers \[(\d+) -> (\d+)\]`)
-	finalizeDoneRe = regexp.MustCompile(`Bulk-load finalize complete`)
+const (
+	// runner runs w/ cwd = repo root, so paths are relative to there
+	legDir   = "cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test"
+	corePath = "/usr/local/bin/stellar-core" // fetched from S3
 )
+
+const ledgerThreshold = 384 // mirrors ingest.ledgerThreshold in backfill.go
+
+// backfillDoneRe matches the terminal line emitted on backfill's completion
+var backfillDoneRe = regexp.MustCompile(`Backfill process complete, ledgers \[(\d+) -> (\d+)\]`)
 
 // instantiate is the instance's backfill task: it fetches + builds test fixtures,
 // runs a timed backfill, then publishes the verdict.
@@ -55,6 +53,11 @@ func instantiate(ctx context.Context) error {
 	}
 	bail := func(format string, args ...any) error {
 		return harness.BailInstance(resultsFile, "Backfill ingestion", runID, targetSHA, fmt.Sprintf(format, args...))
+	}
+
+	want, err := strconv.Atoi(retention) // used to compare against ingested ledgers below
+	if err != nil {
+		return bail("parsing retention window %q: %v", retention, err)
 	}
 
 	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
@@ -100,6 +103,9 @@ func instantiate(ctx context.Context) error {
 		return bail("%v", err)
 	}
 	ingested := hi - lo + 1
+	if ingested+ledgerThreshold < want {
+		return bail("backfill reported complete but ingested %d of %s ledgers", ingested, retention)
+	}
 	logger.Infof("backfill complete: %d ledgers [%d -> %d] in %s", ingested, lo, hi, elapsed.Round(time.Second))
 
 	md := renderMarkdown(targetSHA, retention, lo, hi, ingested, elapsed)
@@ -145,7 +151,7 @@ func renderConfig(repoRoot, workDir, coreCfg, retention string) (string, error) 
 }
 
 // runBackfill launches the daemon and streams its output (teeing to the box log)
-// until the finalize-complete line fires, recording the wall-clock
+// until the backfill-complete line fires, recording the wall-clock
 func runBackfill(ctx context.Context, deadline time.Duration, binary, cfgPath string) (time.Duration, int, int, error) {
 	runCtx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
@@ -176,19 +182,24 @@ func runBackfill(ctx context.Context, deadline time.Duration, binary, cfgPath st
 		line := scanner.Text()
 		fmt.Fprintln(os.Stderr, line) // tee to the box user-data log (SSM debug tail)
 		if m := backfillDoneRe.FindStringSubmatch(line); m != nil {
+			elapsed = time.Since(start)
 			lo, _ = strconv.Atoi(m[1])
 			hi, _ = strconv.Atoi(m[2])
-		}
-		if hi != 0 && finalizeDoneRe.MatchString(line) {
-			elapsed = time.Since(start)
 			cancel() // stop the daemon before it starts live ingestion
 			break
 		}
 	}
+	scanErr := scanner.Err()
+	if scanErr != nil {
+		cancel()
+	}
 	_ = cmd.Wait() // reap; a kill from cancel surfaces here and is expected
 
 	if elapsed == 0 {
-		return 0, 0, 0, fmt.Errorf("daemon exited or hit the %s deadline before backfill finalized", deadline)
+		if scanErr != nil {
+			return 0, 0, 0, fmt.Errorf("reading daemon output: %w", scanErr)
+		}
+		return 0, 0, 0, fmt.Errorf("daemon exited or hit the %s deadline before backfill completed", deadline)
 	}
 	return elapsed, lo, hi, nil
 }
