@@ -83,6 +83,8 @@ func (c *e2eCore) OpenCore(context.Context) (ledgerbackend.LedgerStream, error) 
 	return &e2eStream{core: c}, nil
 }
 
+func (c *e2eCore) NetworkPassphrase() string { return "fullhistory test network" }
+
 // e2eStream is the FAKE captive-core LedgerStream the ingestion loop consumes: it
 // yields the backlog frames contiguously from the range's From() and, once it runs
 // past the synthetic backlog, blocks until ctx is canceled (a live tip stream ends
@@ -194,6 +196,9 @@ func e2eConfigPath(t *testing.T, dataDir string, retentionChunks uint32) string 
 	body := fmt.Sprintf(`
 [service]
 default_data_dir = %q
+
+[serving]
+endpoint = "127.0.0.1:0"
 
 [retention]
 earliest_ledger = "genesis"

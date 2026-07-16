@@ -361,6 +361,102 @@ func NewEventReader(reg *registry.Registry) *EventReader   // implements db.Even
 
 ---
 
+## Stage 6 — service assembly: [serving] config, backfill gate, JSON-RPC server, v2 getHealth, `metrics` (2026-07-15) — COMPLETE
+
+- Files added:
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/serve/gate.go` — backfill gate (`atomic.Pointer[state]`), per-run `state{ledgers,transactions,events}`, gated `db.*` readers, THE gated error.
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/serve/server.go` — `serve.Config`, `serve.Server` (`NewServer/Handler/ServeReads/Close`), `GraceFor`, the v2 `interfaces.Daemon` impl (`rpcDaemon`), erroring `CoreClient` stub.
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/serve/jsonrpc.go` — v2 method table (13 methods), per-method queue+duration limiters (v1 defaults in code), latency middleware, gate wrapper, logging + `request_duration_seconds` decoration, jhttp bridge, CORS, MaxBytes.
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/serve/health.go` — v2 getHealth + the custom `metrics` method (`serve.HealthSignal` declared locally so serve never imports its parent).
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/serve/events_response.go` — the getEvents fork: v1 handler wrapped, response re-mapped into local `eventInfo`/`getEventsResponse` structs WITHOUT `inSuccessfulContractCall`.
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/serve/server_test.go` — gate lifecycle + all endpoints over httptest + raw-JSON key-absence + tag-mirror tests.
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/serving_e2e_test.go` — the smoke: full daemon, real HTTP, both phases.
+- Files changed:
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/config/config.go` — `[serving]` grew endpoint/limits/durations/global-queue/caches; `[ingestion]` grew the four captive-core HTTP keys; defaults + `withDefaults` helpers (+ `config_test.go` round-trips).
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/config_validate.go` — `validateServing` (explicit values judged, nil = unset skipped) (+ `config_validate_test.go` new test).
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/daemon.go` — serving assembly + `startRPCServer` (outside supervise, like admin), ServeReads chaining, `promRegistry` rename (unshadows the registry package), live-vs-backfill opener split, query-server toml params, `NetworkPassphrase()` on the opener, `rpcUp`/`fastCoreClient` test seams, grace/caps into StartConfig.
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/startup.go` — `CoreOpener` grew `NetworkPassphrase()`; `StartConfig` grew unexported `registryGrace`/`ledgerCacheCap`/`eventCacheCap` (fed into `registry.Options`); `ServeReads` now receives the errgroup's gctx (called after the group is created).
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/admin.go` — pprof endpoints absorbed onto the admin mux; shared `startHTTPServer` bind/serve/stop helper (used by admin + JSON-RPC listeners).
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/fullhistory/fhtest/fhtest.go` — `ZeroTxLCMBytesAt(t, seq, closeTimeUnix)` (ZeroTxLCMBytes now delegates with 0; bytes unchanged).
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/cmd/stellar-rpc/internal/methods/get_version_info.go` — THE one v1 patch: nil-guard on `daemon.GetCore()`, core version reads "unavailable" when nil (v1 unaffected — its core is never nil).
+  - Test fakes grew `NetworkPassphrase()`: `e2e_test.go` (e2eCore), `daemon_test.go` (streamCore), `startup_test.go` (fakeCore). Every daemon-running test TOML (`writeTempConfig`, `e2eConfigPath`, the no-lake test, the smoke) pins `[serving] endpoint = "127.0.0.1:0"`.
+- As-built exported API (what stage 7 consumes):
+
+```go
+// package config — [serving] keys (strict TOML; defaults per constants):
+// endpoint (default "localhost:8000", v1's default — the JSON-RPC server ALWAYS
+// starts; the backfill gate answers for the not-ready phase), admin_endpoint,
+// max_events_limit 10000, default_events_limit 100, max_transactions_limit 200,
+// default_transactions_limit 50, max_ledgers_limit 200, default_ledgers_limit 50,
+// max_request_execution_duration "25s", request_backlog_global_queue_limit 5000,
+// max_healthy_ledger_latency "30s", ledger_reader_cache 0⇒128, event_reader_cache 0⇒32.
+// [ingestion] additions: captive_core_http_port 11626 (0 disables),
+// captive_core_http_query_port 11628 (0 disables getLedgerEntries),
+// captive_core_http_query_thread_pool_size NumCPU, captive_core_http_query_snapshot_ledgers 4.
+
+// package serve
+type HealthSignal interface { Ready() bool; LastCommitClose() (time.Time, bool) } // healthState satisfies it
+type Config struct {
+    Logger *supportlog.Entry; PromRegistry *prometheus.Registry; Latency *latencytrack.Set
+    Health HealthSignal; NetworkPassphrase string; Serving config.ServingConfig
+    RetentionChunks uint32; FastCoreClient interfaces.FastCoreClient // nil ⇒ getLedgerEntries disabled-stub
+}
+func NewServer(cfg Config) (*Server, error)      // validates; registers metrics on PromRegistry
+func (s *Server) Handler() http.Handler          // full stack: CORS→MaxBytes→global limits→bridge
+func (s *Server) ServeReads(ctx context.Context, reg *registry.Registry) error // the StartConfig seam shape
+func (s *Server) Close()                         // bridge close
+func GraceFor(s config.ServingConfig) time.Duration // reaper grace: max(durations)+5s (30s at defaults)
+
+// fullhistory
+type CoreOpener interface {
+    OpenCore(ctx context.Context) (ledgerbackend.LedgerStream, error)
+    NetworkPassphrase() string                   // NEW — captive file is the single source
+}
+// daemonOptions seams: rpcUp func(addr string), fastCoreClient interfaces.FastCoreClient (tests)
+// StartConfig unexported: registryGrace, ledgerCacheCap, eventCacheCap → registry.Options
+```
+
+- Method table (all limits v1 defaults, in code): getHealth 1000/5s GATE-EXEMPT, `metrics` 1000/5s GATE-EXEMPT, getEvents 1000/10s, getNetwork 1000/5s, getVersionInfo 1000/5s, getLatestLedger 1000/5s, getLedgers 1000/10s, getLedgerEntries 1000/5s, getTransaction 1000/5s, getTransactions 1000/5s, sendTransaction 500/15s STUB, simulateTransaction 100/15s STUB, getFeeStats 100/5s STUB (stubs gate-exempt).
+- Wire contracts pinned by tests:
+  - Gated error (every gated method, both idle-backfill and mid-restart): `{"code":-32603,"message":"backfill in progress; query serving not started"}`.
+  - Stubs: `{"code":-32601,"message":"method \"X\" is not supported by the full-history service"}`; getLedgerEntries with query port 0: -32601 "getLedgerEntries is disabled: the captive-core query server is off ([ingestion].captive_core_http_query_port = 0)".
+  - getHealth gate-closed (SUCCESS, not error): `{"status":"backfill in progress"}` + zero range; gate-open: v1 semantics — freshness from `HealthSignal.LastCommitClose()` (fallback: range close time), stale ⇒ v1's `-32603 "latency (...) since last known ledger closed is too high (>...)"`, empty range ⇒ v1's "data stores are not initialized"; healthy ⇒ `{"status":"healthy","latestLedger","oldestLedger","ledgerRetentionWindow"}`.
+  - Retention window value (getHealth): `retention_chunks × 10_000` when >0; full history (0) ⇒ `latest−oldest+1` at call time (the honest served span).
+  - `metrics` response schema (exact; Stats wire form = stage-1 `MarshalJSON`, seconds floats):
+    `{"ingestion":{"backfill.chunk":{"count","avg","max","p50","p75","p90","p99"},"ingest.read":{...},"ingest.write":{...},"ingest.e2e":{...}},"rpc":{"getLedgers":{...},"getHealth":{...},...}}`
+    (rpc keys = plain method names; ingestion keys = full series names; a series appears once its tracker exists — backfill.chunk from process start, ingest.* once the loop starts, rpc.* per method at assembly).
+  - v2 getEvents responses have NO `inSuccessfulContractCall` key (D10) — asserted on raw wire bytes of an event-BEARING response through the real jhttp bridge (serve test) AND on the daemon's HTTP listener (smoke); `TestEventInfoMirrorsProtocolShape` pins the local structs tag-for-tag against the SDK minus exactly that field, so SDK drift breaks a test instead of the wire shape.
+- Assembly choice (the stage doc's copy-vs-parameterize): COPIED the v1 method-table pattern into `serve/jsonrpc.go`; v1's `internal/jsonrpc.go` is untouched. No in-memory v1 `config.Config` exists — the v1 handler constructors take scalars, so the "superimposition" reduced to copying v1 DEFAULT VALUES into `[serving]` keys + the in-code table. decorateHandlers copied minus the simulateTransaction error-status special case (dead — simulate is stubbed).
+- Deviations from the stage doc + why:
+  - (Reversed in-session on Karthik's review:) the first cut made `endpoint = ""` mean "serving disabled" with "" as the default. Karthik rejected that — the server must ALWAYS start, on v1's default, with the gate handling backfill. Final state: default `localhost:8000`, the serving block in `runDaemonWith` is unconditional, and there is no off switch ("" just means "use the default"). Every test daemon TOML pins `endpoint = "127.0.0.1:0"` so tests never depend on port 8000 being free.
+  - The gate lives at TWO layers, neither of them the stage-4/5 constructors (doc sketched "adapters take the Gate"): a method-level wrapper returns THE error pre-handler, and gated `db.*` wrappers route each call to the CURRENT run's readers (built per run inside `Server.ServeReads`) — stage-4/5 code untouched. Gate undo: ctx-watch + CAS (an old run's watcher can never clobber a newer publish). A request in flight when its run dies reads from closing stores and surfaces store-closed internal errors — bounded, documented on ServeReads.
+  - run() now calls `ServeReads(gctx, reg)` (the errgroup's ctx, created just before) instead of the run's parent ctx: the gate closes when the RUN winds down (loop failure ⇒ supervised restart re-gates), not only at daemon shutdown. Signature unchanged.
+  - Latency middleware EXCLUDES gated rejections (gate wraps OUTSIDE the tracker): latencytrack series never decay, so a long backfill's instant rejections would permanently poison `rpc.*` quantiles. Gated requests still hit logs + the v1-compatible Prometheus summary (decoration is outermost). Tracker measures queue-wait + handler (user-perceived), resolved once at assembly.
+  - Stubs are gate-exempt (doc silent): their answer never depends on phase — "not supported" during backfill too, pinned by the smoke.
+  - `GraceFor` = max(`max_request_execution_duration`, per-method in-code durations) + 5s = 30s at defaults. D8's phrasing was per-method max + 5s; folding in the global TOML knob keeps grace monotone when an operator raises only that ceiling.
+  - `metrics` field names are stage 1's Stats wire form, NOT this stage doc's illustrative `avg_s`/`max_s` — stage 1's "wire-identical with /latency.json" note is binding.
+  - Per-method limiter gauges/counters and the global HTTP counters are REGISTERED on the daemon's registry. v1 constructs them but never registers them (they are invisible in v1's /metrics); registering is additive with identical names.
+  - TWO captive-core openers: the live one carries `HTTPPort` + `HTTPQueryServerParams`; backfill's stays port-free (today's toml byte-for-byte). Required, not stylistic: the no-lake backend runs several bounded replay cores CONCURRENTLY from one opener, and the SDK's CatchupToml zeroes HTTP_PORT but NOT the query-server port — with ports they would race to bind.
+  - `CoreOpener` grew `NetworkPassphrase()` (the settled "surface it to serving" choice); serve.NewServer fails fast on an empty passphrase so a bad captive file cannot become a restart loop.
+  - `validateServing` judges only EXPLICIT values (nil = key never set): hand-built configs (tests) skip cleanly; parsed configs are always post-WithDefaults so every field is non-nil in production. Explicit zeros rejected per the config package's own convention.
+- Verification:
+  - `go build ./...` exit 0; `go vet ./...` exit 0 (final tree).
+  - Full suite `go test ./cmd/stellar-rpc/internal/fullhistory/... ./cmd/stellar-rpc/internal/latencytrack/... ./cmd/stellar-rpc/internal/methods/... ./cmd/stellar-rpc/internal/db/... -count=1`: first pass had ONE real failure class — the new `validateServing` rejected the hand-built configs in `config_validate_test.go` (nil serving limits deref'd to 0). Fixed to nil-skip semantics (above) + added `TestValidateConfig_ServingExplicitValuesJudgedNilSkipped`. Every other package green on that first pass: backfill 69s, catalog 16s, config 2.5s, geometry, ingest 14s, lifecycle 112s (the stage-1 flake did not recur), observability, registry 11s, serve 124s (parallel), chunk, rocksdb 29s, eventstore 64s, hotchunk, ledger, txhash, latencytrack, methods 17s (nil-guard patch covered), db 16s.
+  - The new smoke flaked ONCE across four fullhistory-package runs (passed in the first full suite and in a verbose diagnostic rerun; failed once in between): its phase-2 assertions assumed the whole frame backlog had committed the moment getHealth first read "healthy", but healthy needs only the FIRST live commit — under timing jitter `getLedgers` could see a clamped 1-ledger batch. Fixed in the test (production untouched): the readiness poll now waits for `status == healthy && latestLedger >= <last frame>`, making every later assert deterministic. Final `fullhistory` + `serve` parallel rerun on the fixed tree: green (181.5s / 28.5s, exit 0).
+  - Manual smoke per Acceptance (e2e harness, `TestE2E_ServingSmoke_GateThenEndpoints`): a real daemon with `[serving]` endpoints on `:0`, backend Tip HELD ⇒ deterministic backfill phase — getLedgers returns the gated error, getHealth returns "backfill in progress" success, `metrics` answers (backfill.chunk series present), sendTransaction stub answers -32601, admin listener serves /debug/pprof; Tip released ⇒ getHealth flips healthy (frames close "now"), then getLatestLedger/getLedgers/getTransaction(NOT_FOUND path)/getTransactions/getEvents(raw body free of the deprecated key)/getNetwork(passphrase from the opener)/getVersionInfo("unavailable")/getLedgerEntries(injected query client) all answer, `metrics` shows ingest.e2e count > 0 AND rpc.* counts > 0; clean ctx-cancel shutdown.
+  - serve `server_test.go` covers the same over `httptest` against the stage-4/5 real-store fixture INCLUDING the event-bearing raw-JSON key-absence assertion, unhealthy-when-stale, disabled getLedgerEntries, and gate re-close on run-ctx cancel.
+  - After the endpoint-default reversal (server always on, `localhost:8000`), `go build ./...`/`go vet` clean and the `config` + `fullhistory` packages re-ran green — every daemon-running test now also brings the JSON-RPC listener up on `:0` as part of its run.
+  - golangci-lint still not runnable locally (2.11.3 built with go1.25 vs repo go1.26) — CI-only, pre-existing.
+- Warnings / notes for stage 7:
+  - `[serving].endpoint` defaults to `localhost:8000` (v1's default) and the server always starts — the devbox TOML only overrides it if that port is taken; set `admin_endpoint` explicitly (that one IS off by default). `[ingestion].captive_core_http_query_port` defaults to 11628 and must stay >0 for getLedgerEntries; `captive_core_http_port` 11626 collides with a v1 RPC on the same host — override one.
+  - getLedgerEntries answers only while the live core runs (post-backfill; the query server rides the live core). During backfill it returns the gated error like everything else.
+  - smoke.sh contract strings are pinned above (gated -32603 + exact message, stubs -32601, getHealth statuses, metrics schema). The stub row satisfies "plus one stub" cheaply via sendTransaction.
+  - `RunDaemon` needs no new params — everything rides the TOML. The real captive-core query server (HTTP_QUERY_PORT in the generated core config) is exercised for the first time on devbox: call getLedgerEntries through the service and watch core's log for the query-server startup line.
+  - Reaper grace auto-derives: raising `max_request_execution_duration` raises grace (T = max+5s).
+  - The stage-1 lifecycle flake did not recur this session; if a devbox full-suite run hits it, rerun that package (`-count=1`) before suspecting the change.
+
+---
+
 <!-- APPEND NEW ENTRIES BELOW. Template:
 
 ## Stage N — <title> (<date>) — COMPLETE | PARTIAL(resume: <exact next action>)

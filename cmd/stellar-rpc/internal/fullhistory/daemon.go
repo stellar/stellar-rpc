@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,8 +14,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 
+	"github.com/stellar/go-stellar-sdk/clients/stellarcore"
 	"github.com/stellar/go-stellar-sdk/historyarchive"
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	supporthttp "github.com/stellar/go-stellar-sdk/support/http"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/support/storage"
 
@@ -26,6 +29,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/registry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/serve"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/latencytrack"
 )
@@ -50,9 +54,10 @@ type daemonOptions struct {
 	// [ingestion] (a complete production opener). Tests inject a fake getter.
 	Core CoreOpener
 
-	// ServeReads launches the RPC read server over the run's serving registry;
-	// it must return promptly, not block. nil ⇒ the #772 no-op placeholder
-	// (reads still come from the v1 SQLite daemon).
+	// ServeReads observes each run's serving registry; it must return promptly,
+	// not block. It runs IN ADDITION to the built-in JSON-RPC server's gate
+	// publish (after it). nil ⇒ nothing extra. Tests use it to capture the
+	// registry.
 	ServeReads func(ctx context.Context, reg *registry.Registry) error
 
 	// RestartBackoff is the supervised loop's inter-restart sleep; zero ⇒ defaultRestartBackoff.
@@ -76,6 +81,13 @@ type daemonOptions struct {
 	// serving (test-only). Tests set [serving].admin_endpoint to "127.0.0.1:0"
 	// and learn the kernel-picked port here.
 	adminUp func(addr string)
+
+	// rpcUp is adminUp's twin for the JSON-RPC listener ([serving].endpoint).
+	rpcUp func(addr string)
+
+	// fastCoreClient overrides the getLedgerEntries backend (test-only). nil ⇒
+	// a stellar-core client at the captive core's HTTP query port.
+	fastCoreClient interfaces.FastCoreClient
 }
 
 const defaultRestartBackoff = 5 * time.Second
@@ -101,8 +113,8 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	// Readiness/health signal, fed by the ingestion loop per commit; both signals
 	// derive from the last committed ledger. Created outside the supervised run
-	// loop so it survives restarts (readiness stays latched across them).
-	// TODO(#772): serve it from the read server (as HealthSignal).
+	// loop so it survives restarts (readiness stays latched across them). The
+	// JSON-RPC getHealth reads it (as serve.HealthSignal).
 	hs := &healthState{}
 
 	paths := cfg.ResolvePaths()
@@ -149,7 +161,19 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// (which needs the tip) runs after this. ---
 	backend := opts.Backend
 	if backend == nil {
-		built, cleanup, berr := buildBackfillBackend(ctx, cfg, core, pool, logger)
+		// The no-lake path replays chunks through captive core, several replay
+		// cores at once — they must not inherit the live core's HTTP ports (see
+		// newCaptiveCoreOpener), so backfill gets its own port-free opener. An
+		// injected Core (tests) serves both roles as-is.
+		backfillCore := core
+		if opts.Core == nil && cfg.Backfill.DataStore.Type == "" && pool != nil {
+			bfOpener, berr := newCaptiveCoreOpener(cfg.Ingestion, cfg.Service.DefaultDataDir, logger, false)
+			if berr != nil {
+				return berr
+			}
+			backfillCore = bfOpener
+		}
+		built, cleanup, berr := buildBackfillBackend(ctx, cfg, backfillCore, pool, logger)
 		if berr != nil {
 			return fmt.Errorf("build backfill backend: %w", berr)
 		}
@@ -165,12 +189,6 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 			"or [ingestion].history_archive_urls")
 	}
 
-	serveReads := opts.ServeReads
-	if serveReads == nil {
-		// TODO(#772): wire the full-history RPC read server; no-op until the cutover.
-		serveReads = func(context.Context, *registry.Registry) error { return nil }
-	}
-
 	// --- validateConfig: pin/confirm the layout, resolve the earliest floor. ---
 	earliest, err := validateConfig(ctx, cfg, cat, backend.Tip)
 	if err != nil {
@@ -183,8 +201,8 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	// Control-plane Metrics and the ingest sink share ONE registry, built after the
 	// validateConfig gate (it registers Prometheus collectors).
-	registry := prometheus.NewRegistry()
-	metrics, sink := buildSinks(opts, registry)
+	promRegistry := prometheus.NewRegistry()
+	metrics, sink := buildSinks(opts, promRegistry)
 
 	// The exact-quantile latency set lives outside the supervised run loop —
 	// like the health signal — so counts, quantiles, and max-ever span restarts.
@@ -192,6 +210,29 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// the ingestion loop feeds the ingest.* series through StartConfig.
 	latency := new(latencytrack.Set)
 	sink = chunkLatencySink{MetricSink: sink, chunk: latency.Tracker(latSeriesBackfillChunk)}
+
+	// --- JSON-RPC serving ([serving].endpoint, default localhost:8000). Like
+	// the admin listener below, the server lives OUTSIDE the supervised run
+	// loop: assembled and bound once, it answers "backfill in progress" from
+	// the daemon's first moment and follows each run's registry through the
+	// backfill gate (its ServeReads publishes the run's readers; the run's end
+	// withdraws them). An injected opts.ServeReads still runs, after the gate
+	// publish. ---
+	srv, stopRPC, err := startRPCServer(cfg, opts, core, promRegistry, latency, hs, logger)
+	if err != nil {
+		return err
+	}
+	defer stopRPC()
+	inner := opts.ServeReads
+	serveReads := func(ctx context.Context, reg *registry.Registry) error {
+		if err := srv.ServeReads(ctx, reg); err != nil {
+			return err
+		}
+		if inner != nil {
+			return inner(ctx, reg)
+		}
+		return nil
+	}
 
 	// --- Assemble the StartConfig and run the supervised run loop. ---
 	start := startConfig(
@@ -202,7 +243,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// so /metrics and /latency.json answer during backfill and ingestion alike.
 	// The deferred stop runs when supervise returns, i.e. on daemon ctx cancel.
 	if cfg.Serving.AdminEndpoint != "" {
-		adminAddr, stopAdmin, aerr := startAdminServer(cfg.Serving.AdminEndpoint, registry, latency, logger)
+		adminAddr, stopAdmin, aerr := startAdminServer(cfg.Serving.AdminEndpoint, promRegistry, latency, logger)
 		if aerr != nil {
 			return aerr
 		}
@@ -238,17 +279,81 @@ func openCatalog(paths config.Paths, opts daemonOptions, logger *supportlog.Entr
 }
 
 // resolveCore returns the injected CoreOpener (tests) or a production captive-core
-// opener built from [ingestion].
+// opener built from [ingestion]. This is the LIVE core — the only one allowed to
+// serve the admin HTTP port and the getLedgerEntries query server.
 func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry) (CoreOpener, error) {
 	if opts.Core != nil {
 		return opts.Core, nil
 	}
-	built, err := newCaptiveCoreOpener(cfg.Ingestion, cfg.Service.DefaultDataDir, logger)
+	built, err := newCaptiveCoreOpener(cfg.Ingestion, cfg.Service.DefaultDataDir, logger, true)
 	if err != nil {
 		return nil, err
 	}
 	return built, nil
 }
+
+// startRPCServer assembles the JSON-RPC serving stack (serve.NewServer) and
+// binds its listener. The returned stop func shuts the listener down and
+// closes the assembly; runDaemonWith defers it around the supervised run
+// loop, so — like the admin listener — the JSON-RPC port spans restarts and
+// dies only with the daemon.
+func startRPCServer(
+	cfg config.Config, opts daemonOptions, core CoreOpener,
+	promRegistry *prometheus.Registry, latency *latencytrack.Set, hs *healthState,
+	logger *supportlog.Entry,
+) (*serve.Server, func(), error) {
+	fastClient := opts.fastCoreClient
+	if fastClient == nil {
+		if queryPort := deref(cfg.Ingestion.CaptiveCoreHTTPQueryPort); queryPort > 0 {
+			fastClient = &stellarcore.Client{
+				URL:  fmt.Sprintf("http://localhost:%d", queryPort),
+				HTTP: &http.Client{Timeout: coreQueryRequestTimeout},
+			}
+		}
+	}
+	srv, err := serve.NewServer(serve.Config{
+		Logger:            logger,
+		PromRegistry:      promRegistry,
+		Latency:           latency,
+		Health:            hs,
+		NetworkPassphrase: core.NetworkPassphrase(),
+		Serving:           cfg.Serving,
+		RetentionChunks:   deref(cfg.Retention.RetentionChunks),
+		FastCoreClient:    fastClient,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	rpcMux := supporthttp.NewAPIMux(logger)
+	rpcMux.Handle("/", srv.Handler())
+	addr, stopListener, err := startHTTPServer(
+		"json-rpc", cfg.Serving.Endpoint,
+		&http.Server{Handler: rpcMux, ReadTimeout: rpcReadTimeout}, //nolint:gosec // ReadTimeout covers headers
+		logger)
+	if err != nil {
+		srv.Close()
+		return nil, nil, err
+	}
+	logger.WithField("addr", addr).Info("JSON-RPC server listening")
+	if opts.rpcUp != nil {
+		opts.rpcUp(addr)
+	}
+	stop := func() {
+		stopListener()
+		srv.Close()
+	}
+	return srv, stop, nil
+}
+
+const (
+	// coreQueryRequestTimeout bounds one getLedgerEntries round-trip to the
+	// captive core query server (the v1 daemon's core request timeout default).
+	coreQueryRequestTimeout = 2 * time.Second
+
+	// rpcReadTimeout mirrors the v1 daemon's JSON-RPC server ReadTimeout.
+	rpcReadTimeout = 5 * time.Second
+)
 
 // startConfig assembles the StartConfig run consumes. run() builds the
 // lifecycle.Config from Exec + Retention, so backfill and the lifecycle
@@ -277,6 +382,11 @@ func startConfig(
 		ServeReads: serveReads,
 		health:     hs,
 		latency:    latency,
+		// The reaper grace period exists to let in-flight requests finish
+		// against retired stores, so it derives from the serving duration limits.
+		registryGrace:  serve.GraceFor(cfg.Serving),
+		ledgerCacheCap: deref(cfg.Serving.LedgerReaderCache),
+		eventCacheCap:  deref(cfg.Serving.EventReaderCache),
 	}
 }
 
@@ -424,8 +534,15 @@ type captiveCoreOpener struct {
 // get-commands) come from [ingestion].history_archive_urls. The toml params
 // mirror the RPC daemon (strict, unified events, soroban diagnostic/meta
 // enforcement) so the ingested meta is what the events + txhash stores need.
+//
+// serveHTTP wires the [ingestion] admin HTTP port and HTTP query-server
+// settings into the core config. Only the LIVE ingestion core may serve HTTP:
+// the no-lake backfill backend runs several bounded replay cores from one
+// opener CONCURRENTLY, and with HTTP enabled they would all race to bind the
+// same ports — so the backfill opener passes false and its cores stay
+// port-free, exactly as before the query server existed.
 func newCaptiveCoreOpener(
-	ing config.IngestionConfig, dataDir string, logger *supportlog.Entry,
+	ing config.IngestionConfig, dataDir string, logger *supportlog.Entry, serveHTTP bool,
 ) (*captiveCoreOpener, error) {
 	if ing.CaptiveCoreConfig == "" {
 		return nil, errors.New("[ingestion].captive_core_config is required for live ingestion")
@@ -470,7 +587,7 @@ func newCaptiveCoreOpener(
 	// NewCaptiveCoreTomlFromFile would parse the file twice and, worse, could
 	// observe a different NETWORK_PASSPHRASE than the one peeked above if the file
 	// changed between the two reads (surfacing as the SDK's confusing mismatch error).
-	coreToml, err := ledgerbackend.NewCaptiveCoreTomlFromData(data, ledgerbackend.CaptiveCoreTomlParams{
+	tomlParams := ledgerbackend.CaptiveCoreTomlParams{
 		HistoryArchiveURLs:                 ing.HistoryArchiveURLs,
 		NetworkPassphrase:                  peek.NetworkPassphrase,
 		Strict:                             true,
@@ -478,7 +595,19 @@ func newCaptiveCoreOpener(
 		EnforceSorobanTransactionMetaExtV1: true,
 		EmitUnifiedEvents:                  true,
 		CoreBinaryPath:                     binaryPath,
-	})
+	}
+	if serveHTTP {
+		httpPort := uint(deref(ing.CaptiveCoreHTTPPort))
+		tomlParams.HTTPPort = &httpPort
+		if queryPort := deref(ing.CaptiveCoreHTTPQueryPort); queryPort > 0 {
+			tomlParams.HTTPQueryServerParams = &ledgerbackend.HTTPQueryServerParams{
+				Port:            queryPort,
+				ThreadPoolSize:  deref(ing.CaptiveCoreHTTPQueryThreadPoolSize),
+				SnapshotLedgers: deref(ing.CaptiveCoreHTTPQuerySnapshotLedgers),
+			}
+		}
+	}
+	coreToml, err := ledgerbackend.NewCaptiveCoreTomlFromData(data, tomlParams)
 	if err != nil {
 		return nil, fmt.Errorf("invalid captive-core toml %q: %w", ing.CaptiveCoreConfig, err)
 	}
@@ -502,6 +631,12 @@ func (c *captiveCoreOpener) OpenCore(ctx context.Context) (ledgerbackend.LedgerS
 	cfg := c.config
 	cfg.Context = ctx
 	return ledgerbackend.NewCaptiveCoreStream(cfg, c.config.Log), nil
+}
+
+// NetworkPassphrase reports the passphrase read back from the captive-core
+// config file.
+func (c *captiveCoreOpener) NetworkPassphrase() string {
+	return c.config.NetworkPassphrase
 }
 
 // newArchivePool connects [ingestion].history_archive_urls — the same archives

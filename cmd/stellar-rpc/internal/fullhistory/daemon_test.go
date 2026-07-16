@@ -49,6 +49,10 @@ func writeTempConfig(t *testing.T, extra string) (string, string) {
 	t.Helper()
 	dataDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "daemon.toml")
+	// The JSON-RPC endpoint is pinned to a kernel-picked port so test daemons
+	// never depend on the production default (localhost:8000) being free.
+	// extra lines land inside [serving]; an extra opening its own [section]
+	// works too.
 	body := fmt.Sprintf(`
 [service]
 default_data_dir = %q
@@ -62,6 +66,9 @@ captive_core_config = "/dev/null"
 [logging]
 level = "debug"
 format = "text"
+
+[serving]
+endpoint = "127.0.0.1:0"
 %s
 `, dataDir, extra)
 	require.NoError(t, os.WriteFile(configPath, []byte(body), 0o644))
@@ -119,7 +126,7 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 // endpoints answer — /latency.json with non-zero snapshots, /metrics with the
 // new per-ledger histograms.
 func TestRunDaemon_AdminEndpointServesLatencyAndMetrics(t *testing.T) {
-	configPath, _ := writeTempConfig(t, "[serving]\nadmin_endpoint = \"127.0.0.1:0\"")
+	configPath, _ := writeTempConfig(t, "admin_endpoint = \"127.0.0.1:0\"")
 
 	first := chunk.ID(0).FirstLedger()
 	stream := streamForSeqs(t, first, first+2)
@@ -608,6 +615,8 @@ func (c *streamCore) OpenCore(context.Context) (ledgerbackend.LedgerStream, erro
 	return c.stream, nil
 }
 
+func (c *streamCore) NetworkPassphrase() string { return "fullhistory test network" }
+
 // coreReplayStream is the fake captive-core stream for the no-lake path: a
 // BOUNDED pull (the captive backfill source replaying a chunk) serves gen's
 // ledgers for exactly [From, To], and an UNBOUNDED pull (the live loop's steady
@@ -664,6 +673,9 @@ func TestRunDaemon_NoLakeBackfillsThroughCaptiveCore(t *testing.T) {
 	body := fmt.Sprintf(`
 [service]
 default_data_dir = %q
+
+[serving]
+endpoint = "127.0.0.1:0"
 
 [retention]
 earliest_ledger = "genesis"

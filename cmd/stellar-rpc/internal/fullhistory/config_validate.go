@@ -46,6 +46,9 @@ func validateConfig(
 	if err := validateEarliestForm(cfg.Retention.EarliestLedger); err != nil {
 		return 0, err
 	}
+	if err := validateServing(cfg.Serving); err != nil {
+		return 0, err
+	}
 
 	earliestStored, earliestPinned, err := cat.EarliestLedger()
 	if err != nil {
@@ -69,6 +72,49 @@ func validateConfig(
 		return 0, fmt.Errorf("pin earliest ledger (earliest=%d): %w", earliest, err)
 	}
 	return earliest, nil
+}
+
+// validateServing form-checks the [serving] knobs. It runs whether or not the
+// JSON-RPC endpoint is set — a typo in a limit should fail loudly, not lie in
+// wait for the day serving is switched on. A nil field means the key was never
+// set (config.WithDefaults fills it), so only EXPLICIT values are judged here.
+func validateServing(s config.ServingConfig) error {
+	limits := []struct {
+		name     string
+		def, max *uint
+	}{
+		{"events", s.DefaultEventsLimit, s.MaxEventsLimit},
+		{"transactions", s.DefaultTransactionsLimit, s.MaxTransactionsLimit},
+		{"ledgers", s.DefaultLedgersLimit, s.MaxLedgersLimit},
+	}
+	for _, l := range limits {
+		if l.max != nil && *l.max == 0 {
+			return fmt.Errorf("[serving] max_%s_limit must be > 0", l.name)
+		}
+		if l.def != nil && *l.def == 0 {
+			return fmt.Errorf("[serving] default_%s_limit must be > 0", l.name)
+		}
+		if l.def != nil && l.max != nil && *l.def > *l.max {
+			return fmt.Errorf("[serving] default_%s_limit (%d) must not exceed max_%s_limit (%d)",
+				l.name, *l.def, l.name, *l.max)
+		}
+	}
+	if d := s.MaxRequestExecutionDuration; d != nil && *d <= 0 {
+		return errors.New("[serving] max_request_execution_duration must be > 0")
+	}
+	if d := s.MaxHealthyLedgerLatency; d != nil && *d <= 0 {
+		return errors.New("[serving] max_healthy_ledger_latency must be > 0")
+	}
+	if q := s.RequestBacklogGlobalQueueLimit; q != nil && *q == 0 {
+		return errors.New("[serving] request_backlog_global_queue_limit must be > 0")
+	}
+	if c := s.LedgerReaderCache; c != nil && *c < 0 {
+		return errors.New("[serving] ledger_reader_cache must be >= 0 (0 = built-in default)")
+	}
+	if c := s.EventReaderCache; c != nil && *c < 0 {
+		return errors.New("[serving] event_reader_cache must be >= 0 (0 = built-in default)")
+	}
+	return nil
 }
 
 // confirmEarliestUnchanged enforces earliest_ledger's restart immutability: genesis or

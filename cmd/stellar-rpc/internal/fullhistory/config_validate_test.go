@@ -96,6 +96,38 @@ func TestValidateConfig_AcceptsMinWorkersAndZeroRetries(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestValidateConfig_ServingExplicitValuesJudgedNilSkipped(t *testing.T) {
+	cat, _ := testCatalog(t)
+
+	// All-nil serving fields (hand-built config, defaults not yet applied): fine.
+	_, err := callValidate(t, validCfg(4, 3, "genesis"), cat, downTip())
+	require.NoError(t, err)
+
+	// Explicit zero limit: rejected.
+	zero := uint(0)
+	cfg := validCfg(4, 3, "genesis")
+	cfg.Serving.MaxEventsLimit = &zero
+	_, err = callValidate(t, cfg, cat, downTip())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "max_events_limit")
+
+	// Explicit default above its max: rejected.
+	lo, hi := uint(10), uint(5)
+	cfg = validCfg(4, 3, "genesis")
+	cfg.Serving.MaxLedgersLimit = &hi
+	cfg.Serving.DefaultLedgersLimit = &lo
+	_, err = callValidate(t, cfg, cat, downTip())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "default_ledgers_limit")
+
+	// A parsed document (defaults applied) validates clean.
+	parsed, err := config.ParseConfig([]byte("[service]\ndefault_data_dir = \"/d\"\n" +
+		"[ingestion]\ncaptive_core_config = \"/cc\"\n"))
+	require.NoError(t, err)
+	_, err = callValidate(t, parsed, cat, downTip())
+	require.NoError(t, err)
+}
+
 // ---------------------------------------------------------------------------
 // Reject the malformed forms (stateless).
 // ---------------------------------------------------------------------------

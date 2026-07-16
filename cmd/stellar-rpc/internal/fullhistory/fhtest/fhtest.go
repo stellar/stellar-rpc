@@ -38,12 +38,20 @@ func RetentionFor(t *testing.T, cat *catalog.Catalog, size uint32) geometry.Rete
 // tests feed in when they need a valid but empty ledger.
 func ZeroTxLCMBytes(t *testing.T, seq uint32) []byte {
 	t.Helper()
+	return ZeroTxLCMBytesAt(t, seq, 0)
+}
+
+// ZeroTxLCMBytesAt is ZeroTxLCMBytes with an explicit close time (unix
+// seconds) — for tests exercising close-time-based behavior, like getHealth's
+// freshness check.
+func ZeroTxLCMBytesAt(t *testing.T, seq uint32, closeTimeUnix int64) []byte {
+	t.Helper()
 	lcm := xdr.LedgerCloseMeta{
 		V: 2,
 		V2: &xdr.LedgerCloseMetaV2{
 			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
 				Header: xdr.LedgerHeader{
-					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(0)},
+					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(closeTimeUnix)}, //nolint:gosec // test times
 					LedgerSeq: xdr.Uint32(seq),
 				},
 			},

@@ -108,8 +108,11 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// chunk's handle is handed in pre-opened — the build must not attempt a
 	// second write open of it — and its ownership transfers to the registry.
 	reg, err := registry.BuildFromCatalog(cat, cfg.Retention, lastCommitted, registry.Options{
-		PreOpened: map[chunk.ID]*hotchunk.DB{chunk.IDFromLedger(resumeLedger): hotDB},
-		Logger:    logger,
+		Grace:          cfg.registryGrace,
+		LedgerCacheCap: cfg.ledgerCacheCap,
+		EventCacheCap:  cfg.eventCacheCap,
+		PreOpened:      map[chunk.ID]*hotchunk.DB{chunk.IDFromLedger(resumeLedger): hotDB},
+		Logger:         logger,
 	})
 	if err != nil {
 		return fmt.Errorf("startup build serving registry: %w", err)
@@ -161,13 +164,6 @@ func run(ctx context.Context, cfg StartConfig) error {
 		DeferDestroy: reg.Reaper().Schedule,
 	}.WithLifecycleDefaults()
 
-	// Begin serving reads (injected) BEFORE launching the loops; it must return
-	// promptly (launch, not block). The registry is the server's whole read face:
-	// admission, chunk resolution, and the reader caches all hang off it.
-	if err := cfg.ServeReads(ctx, reg); err != nil {
-		return fmt.Errorf("startup serve reads: %w", err)
-	}
-
 	// Ingestion and the lifecycle run as a joined pair under errgroup.WithContext:
 	// gctx cancels as soon as EITHER returns — and WithContext records the returning
 	// goroutine's error BEFORE canceling, so g.Wait surfaces the real cause, not the
@@ -176,6 +172,16 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// supervise is the one clean-vs-restart decision point; a canceled parent ctx
 	// classifies as clean.
 	g, gctx := errgroup.WithContext(ctx)
+
+	// Begin serving reads (injected) BEFORE launching the loops; it must return
+	// promptly (launch, not block). The registry is the server's whole read face:
+	// admission, chunk resolution, and the reader caches all hang off it. The
+	// server gets gctx — the pair's context — so it stops admitting queries when
+	// THIS run winds down (shutdown or a loop failure), not only when the whole
+	// daemon does; the registry it was handed dies with the run.
+	if err := cfg.ServeReads(gctx, reg); err != nil {
+		return fmt.Errorf("startup serve reads: %w", err)
+	}
 	g.Go(func() error {
 		err := runIngestionLoop(gctx, ingestionLoopConfig{
 			Stream:   stream,
@@ -327,6 +333,12 @@ func lastCommittedMidChunk(lastCommitted uint32) bool {
 // LedgerStream.
 type CoreOpener interface {
 	OpenCore(ctx context.Context) (ledgerbackend.LedgerStream, error)
+
+	// NetworkPassphrase identifies the network this source's ledgers belong
+	// to. The production opener reads it from the captive-core config file —
+	// the single place the network is configured — and the JSON-RPC serving
+	// layer consumes it (transaction hashing, getNetwork).
+	NetworkPassphrase() string
 }
 
 // StartConfig is run's resolved dependency bundle.
@@ -352,12 +364,23 @@ type StartConfig struct {
 	runBackfill func(ctx context.Context, exec backfill.ExecConfig, lo, hi chunk.ID) error
 
 	// health is the readiness/health signal the ingestion loop feeds per commit;
-	// #772's read server consumes it (as HealthSignal). nil ⇒ observe is a no-op.
+	// the read server consumes it (as HealthSignal). nil ⇒ observe is a no-op.
 	health *healthState
 
 	// latency receives the per-ledger ingest.* series from the ingestion
 	// loop. nil ⇒ samples are dropped.
 	latency *latencytrack.Set
+
+	// registryGrace is how long a retired store keeps serving in-flight
+	// requests before it is destroyed. The daemon derives it from the serving
+	// duration limits (serve.GraceFor); 0 ⇒ the registry default.
+	registryGrace time.Duration
+
+	// ledgerCacheCap / eventCacheCap size the registry's cold-reader caches
+	// ([serving] ledger_reader_cache / event_reader_cache); 0 ⇒ the registry
+	// defaults.
+	ledgerCacheCap int
+	eventCacheCap  int
 }
 
 // withDefaults fills the embedded Exec defaults (Workers -> GOMAXPROCS). The

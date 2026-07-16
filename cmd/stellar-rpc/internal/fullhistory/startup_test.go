@@ -137,6 +137,8 @@ func (c *fakeCore) OpenCore(context.Context) (ledgerbackend.LedgerStream, error)
 	return c.stream, nil
 }
 
+func (c *fakeCore) NetworkPassphrase() string { return "fullhistory test network" }
+
 // resumeSeen returns the resume ledger the loop opened the stream at (the range's
 // From()), 0 before the loop has pulled.
 func (c *fakeCore) resumeSeen() uint32 {

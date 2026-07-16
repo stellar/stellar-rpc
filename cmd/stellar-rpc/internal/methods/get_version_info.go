@@ -22,7 +22,12 @@ func NewGetVersionInfoHandler(
 
 	coreHandler := func(ctx context.Context, _ protocol.GetVersionInfoRequest,
 	) (protocol.GetVersionInfoResponse, error) {
-		captiveCoreVersion := core.GetCoreVersion()
+		// The full-history daemon has no CaptiveStellarCore handle (its core
+		// lives behind the SDK's stream), so GetCore returns nil there.
+		captiveCoreVersion := "unavailable"
+		if core != nil {
+			captiveCoreVersion = core.GetCoreVersion()
+		}
 		protocolVersion, err := getProtocolVersion(ctx, ledgerReader)
 		if err != nil {
 			logger.WithError(err).Error("failed to fetch protocol version")

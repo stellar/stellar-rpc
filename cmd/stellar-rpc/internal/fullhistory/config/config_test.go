@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -17,7 +18,19 @@ const fullValidConfig = `
 default_data_dir = "/var/lib/fullhistory"
 
 [serving]
+endpoint = "0.0.0.0:8000"
 admin_endpoint = "0.0.0.0:8001"
+max_events_limit = 20000
+default_events_limit = 200
+max_transactions_limit = 400
+default_transactions_limit = 100
+max_ledgers_limit = 400
+default_ledgers_limit = 100
+max_request_execution_duration = "50s"
+request_backlog_global_queue_limit = 10000
+max_healthy_ledger_latency = "60s"
+ledger_reader_cache = 256
+event_reader_cache = 64
 
 [retention]
 earliest_ledger = "now"
@@ -47,6 +60,10 @@ num_workers = 40
 
 [ingestion]
 captive_core_config = "/etc/captive-core.toml"
+captive_core_http_port = 21626
+captive_core_http_query_port = 21628
+captive_core_http_query_thread_pool_size = 7
+captive_core_http_query_snapshot_ledgers = 9
 
 [logging]
 level = "debug"
@@ -73,7 +90,23 @@ func TestParseConfig_FullDocument(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "/var/lib/fullhistory", cfg.Service.DefaultDataDir)
+	assert.Equal(t, "0.0.0.0:8000", cfg.Serving.Endpoint)
 	assert.Equal(t, "0.0.0.0:8001", cfg.Serving.AdminEndpoint)
+	assert.Equal(t, uint(20000), *cfg.Serving.MaxEventsLimit)
+	assert.Equal(t, uint(200), *cfg.Serving.DefaultEventsLimit)
+	assert.Equal(t, uint(400), *cfg.Serving.MaxTransactionsLimit)
+	assert.Equal(t, uint(100), *cfg.Serving.DefaultTransactionsLimit)
+	assert.Equal(t, uint(400), *cfg.Serving.MaxLedgersLimit)
+	assert.Equal(t, uint(100), *cfg.Serving.DefaultLedgersLimit)
+	assert.Equal(t, 50*time.Second, *cfg.Serving.MaxRequestExecutionDuration)
+	assert.Equal(t, uint(10000), *cfg.Serving.RequestBacklogGlobalQueueLimit)
+	assert.Equal(t, 60*time.Second, *cfg.Serving.MaxHealthyLedgerLatency)
+	assert.Equal(t, 256, *cfg.Serving.LedgerReaderCache)
+	assert.Equal(t, 64, *cfg.Serving.EventReaderCache)
+	assert.Equal(t, uint16(21626), *cfg.Ingestion.CaptiveCoreHTTPPort)
+	assert.Equal(t, uint16(21628), *cfg.Ingestion.CaptiveCoreHTTPQueryPort)
+	assert.Equal(t, uint16(7), *cfg.Ingestion.CaptiveCoreHTTPQueryThreadPoolSize)
+	assert.Equal(t, uint16(9), *cfg.Ingestion.CaptiveCoreHTTPQuerySnapshotLedgers)
 	assert.Equal(t, "now", cfg.Retention.EarliestLedger)
 	assert.Equal(t, uint32(100), *cfg.Retention.RetentionChunks)
 	assert.Equal(t, "/mnt/catalog", cfg.Storage.Catalog)
@@ -110,6 +143,23 @@ func TestParseConfig_MinimalAppliesDefaults(t *testing.T) {
 	assert.Equal(t, DefaultLogLevel, cfg.Logging.Level)
 	assert.Equal(t, DefaultLogFormat, cfg.Logging.Format)
 	assert.Empty(t, cfg.Serving.AdminEndpoint, "admin listener is disabled by default")
+	assert.Equal(t, DefaultServingEndpoint, cfg.Serving.Endpoint,
+		"the JSON-RPC server always starts, on the v1 default address")
+	assert.Equal(t, DefaultMaxEventsLimit, *cfg.Serving.MaxEventsLimit)
+	assert.Equal(t, DefaultDefaultEventsLimit, *cfg.Serving.DefaultEventsLimit)
+	assert.Equal(t, DefaultMaxTransactionsLimit, *cfg.Serving.MaxTransactionsLimit)
+	assert.Equal(t, DefaultDefaultTransactionsLimit, *cfg.Serving.DefaultTransactionsLimit)
+	assert.Equal(t, DefaultMaxLedgersLimit, *cfg.Serving.MaxLedgersLimit)
+	assert.Equal(t, DefaultDefaultLedgersLimit, *cfg.Serving.DefaultLedgersLimit)
+	assert.Equal(t, DefaultMaxRequestExecutionDuration, *cfg.Serving.MaxRequestExecutionDuration)
+	assert.Equal(t, DefaultRequestBacklogGlobalQueueLimit, *cfg.Serving.RequestBacklogGlobalQueueLimit)
+	assert.Equal(t, DefaultMaxHealthyLedgerLatency, *cfg.Serving.MaxHealthyLedgerLatency)
+	assert.Nil(t, cfg.Serving.LedgerReaderCache, "unset cache caps flow to the registry as zero")
+	assert.Nil(t, cfg.Serving.EventReaderCache)
+	assert.Equal(t, DefaultCaptiveCoreHTTPPort, *cfg.Ingestion.CaptiveCoreHTTPPort)
+	assert.Equal(t, DefaultCaptiveCoreHTTPQueryPort, *cfg.Ingestion.CaptiveCoreHTTPQueryPort)
+	assert.Equal(t, defaultQueryThreadPoolSize(), *cfg.Ingestion.CaptiveCoreHTTPQueryThreadPoolSize)
+	assert.Equal(t, DefaultCaptiveCoreHTTPQuerySnapshotLedgers, *cfg.Ingestion.CaptiveCoreHTTPQuerySnapshotLedgers)
 }
 
 func TestParseConfig_ExplicitZeroPreserved(t *testing.T) {

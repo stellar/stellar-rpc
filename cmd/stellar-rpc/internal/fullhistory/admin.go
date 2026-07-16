@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -17,14 +18,16 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/latencytrack"
 )
 
-// adminShutdownGrace bounds how long stop() waits for in-flight admin requests
-// (a /metrics scrape) before the daemon exits anyway.
-const adminShutdownGrace = 2 * time.Second
+// httpShutdownGrace bounds how long a listener's stop func waits for in-flight
+// requests (a /metrics scrape, a JSON-RPC response) before the daemon exits
+// anyway.
+const httpShutdownGrace = 2 * time.Second
 
 // startAdminServer starts the admin HTTP listener ([serving].admin_endpoint):
 //
 //	GET /metrics      — Prometheus exposition of the daemon's registry
 //	GET /latency.json — latency.SnapshotAll() as JSON, durations in seconds
+//	/debug/pprof/...  — the standard Go profiling endpoints
 //
 // It binds synchronously (a bad endpoint fails daemon startup) and serves from
 // a goroutine. The returned address is the bound one — with an ":0" endpoint
@@ -46,24 +49,41 @@ func startAdminServer(
 			logger.WithError(encErr).Warn("admin: write /latency.json response")
 		}
 	})
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	addr, stop, err := startHTTPServer("admin", endpoint, server, logger)
+	if err != nil {
+		return "", nil, err
+	}
+	logger.WithField("addr", addr).Info("admin server listening (/metrics, /latency.json, /debug/pprof)")
+	return addr, stop, nil
+}
+
+// startHTTPServer binds endpoint synchronously (a bad endpoint fails daemon
+// startup) and serves from a goroutine. It returns the bound address (with an
+// ":0" endpoint the kernel picks the port — the address is how tests learn it)
+// and a stop func that shuts the server down with a short drain.
+func startHTTPServer(
+	name, endpoint string, server *http.Server, logger *supportlog.Entry,
+) (string, func(), error) {
 	listener, err := net.Listen("tcp", endpoint)
 	if err != nil {
-		return "", nil, fmt.Errorf("admin listener on %q: %w", endpoint, err)
+		return "", nil, fmt.Errorf("%s listener on %q: %w", name, endpoint, err)
 	}
-	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		if serveErr := server.Serve(listener); !errors.Is(serveErr, http.ErrServerClosed) {
-			logger.WithError(serveErr).Warn("admin server exited")
+			logger.WithError(serveErr).Warnf("%s server exited", name)
 		}
 	}()
-
-	addr := listener.Addr().String()
-	logger.WithField("addr", addr).Info("admin server listening (/metrics, /latency.json)")
 	stop := func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), adminShutdownGrace)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), httpShutdownGrace)
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}
-	return addr, stop, nil
+	return listener.Addr().String(), stop, nil
 }

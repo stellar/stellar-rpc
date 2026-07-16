@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"time"
 
 	"github.com/pelletier/go-toml"
 
@@ -43,15 +45,57 @@ type ServiceConfig struct {
 	DefaultDataDir string `toml:"default_data_dir"`
 }
 
-// ServingConfig is [serving] — the read-service knobs (#772). Only the admin
-// endpoint exists so far; the JSON-RPC serving keys (endpoint, per-method
-// limits, execution durations, cache sizes) land together with the service
-// itself.
+// ServingConfig is [serving] — the read-service knobs. Limit and duration
+// defaults are copied from the v1 RPC daemon's options so the two services
+// behave the same under the same load. Per-method queue limits and per-method
+// execution durations are NOT configurable here — they use the v1 defaults in
+// code (the serve package's method table).
 type ServingConfig struct {
+	// Endpoint is the JSON-RPC HTTP listen address. Default "localhost:8000"
+	// (the v1 daemon's default). The server always starts — during backfill it
+	// answers every data method with a "backfill in progress" error and starts
+	// serving data the moment backfill completes.
+	Endpoint string `toml:"endpoint"`
+
 	// AdminEndpoint is the admin HTTP listen address, serving GET /metrics
-	// (Prometheus) and GET /latency.json (exact-quantile latency snapshots).
-	// Empty (the default) disables the admin listener.
+	// (Prometheus), GET /latency.json (exact-quantile latency snapshots), and
+	// /debug/pprof. Empty (the default) disables the admin listener.
 	AdminEndpoint string `toml:"admin_endpoint"`
+
+	// MaxEventsLimit / DefaultEventsLimit bound getEvents page sizes. Defaults
+	// 10000 / 100.
+	MaxEventsLimit     *uint `toml:"max_events_limit"`
+	DefaultEventsLimit *uint `toml:"default_events_limit"`
+
+	// MaxTransactionsLimit / DefaultTransactionsLimit bound getTransactions
+	// page sizes. Defaults 200 / 50.
+	MaxTransactionsLimit     *uint `toml:"max_transactions_limit"`
+	DefaultTransactionsLimit *uint `toml:"default_transactions_limit"`
+
+	// MaxLedgersLimit / DefaultLedgersLimit bound getLedgers page sizes.
+	// Defaults 200 / 50.
+	MaxLedgersLimit     *uint `toml:"max_ledgers_limit"`
+	DefaultLedgersLimit *uint `toml:"default_ledgers_limit"`
+
+	// MaxRequestExecutionDuration is the HTTP-layer ceiling on any single
+	// request; past it the server responds 504 and aborts the request.
+	// Default "25s".
+	MaxRequestExecutionDuration *time.Duration `toml:"max_request_execution_duration"`
+
+	// RequestBacklogGlobalQueueLimit caps concurrently in-flight HTTP requests
+	// across all methods. Default 5000.
+	RequestBacklogGlobalQueueLimit *uint `toml:"request_backlog_global_queue_limit"`
+
+	// MaxHealthyLedgerLatency is getHealth's freshness threshold: if the last
+	// committed ledger closed longer ago than this, getHealth reports the
+	// service unhealthy. Default "30s".
+	MaxHealthyLedgerLatency *time.Duration `toml:"max_healthy_ledger_latency"`
+
+	// LedgerReaderCache / EventReaderCache cap the cold per-chunk reader
+	// caches (entries = chunks). 0 or unset means the registry's built-in
+	// defaults (128 ledger readers, 32 event readers).
+	LedgerReaderCache *int `toml:"ledger_reader_cache"`
+	EventReaderCache  *int `toml:"event_reader_cache"`
 }
 
 // RetentionConfig is [retention] — the two inputs to the retention floor:
@@ -122,6 +166,24 @@ type IngestionConfig struct {
 	// CaptiveCoreStoragePath is captive core's BUCKET_DIR_PATH base; optional,
 	// defaults to {default_data_dir}/captive-core.
 	CaptiveCoreStoragePath string `toml:"captive_core_storage_path"`
+
+	// CaptiveCoreHTTPPort is the live core's admin HTTP port. Default 11626;
+	// 0 disables it. Applies only to the live ingestion core — backfill's
+	// bounded replay cores never serve HTTP.
+	CaptiveCoreHTTPPort *uint16 `toml:"captive_core_http_port"`
+
+	// CaptiveCoreHTTPQueryPort is the live core's HTTP query-server port —
+	// the backend getLedgerEntries reads from. Default 11628; 0 disables the
+	// query server, and with it getLedgerEntries.
+	CaptiveCoreHTTPQueryPort *uint16 `toml:"captive_core_http_query_port"`
+
+	// CaptiveCoreHTTPQueryThreadPoolSize is the query server's worker count.
+	// Default: the machine's CPU count.
+	CaptiveCoreHTTPQueryThreadPoolSize *uint16 `toml:"captive_core_http_query_thread_pool_size"`
+
+	// CaptiveCoreHTTPQuerySnapshotLedgers is how many recent ledgers the query
+	// server keeps snapshots for. Default 4.
+	CaptiveCoreHTTPQuerySnapshotLedgers *uint16 `toml:"captive_core_http_query_snapshot_ledgers"`
 }
 
 // LoggingConfig is [logging].
@@ -135,6 +197,23 @@ type LoggingConfig struct {
 // Documented defaults (design "Configuration").
 const (
 	DefaultMaxRetries int = 3
+
+	// [serving] defaults, copied from the v1 RPC daemon's options.
+	DefaultServingEndpoint                              = "localhost:8000"
+	DefaultMaxEventsLimit                 uint          = 10000
+	DefaultDefaultEventsLimit             uint          = 100
+	DefaultMaxTransactionsLimit           uint          = 200
+	DefaultDefaultTransactionsLimit       uint          = 50
+	DefaultMaxLedgersLimit                uint          = 200
+	DefaultDefaultLedgersLimit            uint          = 50
+	DefaultMaxRequestExecutionDuration                  = 25 * time.Second
+	DefaultRequestBacklogGlobalQueueLimit uint          = 5000
+	DefaultMaxHealthyLedgerLatency                      = 30 * time.Second
+
+	// [ingestion] captive-core HTTP defaults, copied from the v1 RPC daemon.
+	DefaultCaptiveCoreHTTPPort                 uint16 = 11626
+	DefaultCaptiveCoreHTTPQueryPort            uint16 = 11628
+	DefaultCaptiveCoreHTTPQuerySnapshotLedgers uint16 = 4
 
 	DefaultLogLevel  = "info"
 	DefaultLogFormat = "text"
@@ -202,7 +281,73 @@ func (cfg Config) WithDefaults() Config {
 	if cfg.Logging.Format == "" {
 		cfg.Logging.Format = DefaultLogFormat
 	}
+	cfg.Serving = cfg.Serving.withDefaults()
+	cfg.Ingestion = cfg.Ingestion.withDefaults()
 	return cfg
+}
+
+func (s ServingConfig) withDefaults() ServingConfig {
+	if s.Endpoint == "" {
+		s.Endpoint = DefaultServingEndpoint
+	}
+	setUint(&s.MaxEventsLimit, DefaultMaxEventsLimit)
+	setUint(&s.DefaultEventsLimit, DefaultDefaultEventsLimit)
+	setUint(&s.MaxTransactionsLimit, DefaultMaxTransactionsLimit)
+	setUint(&s.DefaultTransactionsLimit, DefaultDefaultTransactionsLimit)
+	setUint(&s.MaxLedgersLimit, DefaultMaxLedgersLimit)
+	setUint(&s.DefaultLedgersLimit, DefaultDefaultLedgersLimit)
+	setUint(&s.RequestBacklogGlobalQueueLimit, DefaultRequestBacklogGlobalQueueLimit)
+	if s.MaxRequestExecutionDuration == nil {
+		v := DefaultMaxRequestExecutionDuration
+		s.MaxRequestExecutionDuration = &v
+	}
+	if s.MaxHealthyLedgerLatency == nil {
+		v := DefaultMaxHealthyLedgerLatency
+		s.MaxHealthyLedgerLatency = &v
+	}
+	// LedgerReaderCache/EventReaderCache stay nil when unset: 0 reaches the
+	// registry, which applies its own built-in defaults.
+	return s
+}
+
+func (ing IngestionConfig) withDefaults() IngestionConfig {
+	if ing.CaptiveCoreHTTPPort == nil {
+		v := DefaultCaptiveCoreHTTPPort
+		ing.CaptiveCoreHTTPPort = &v
+	}
+	if ing.CaptiveCoreHTTPQueryPort == nil {
+		v := DefaultCaptiveCoreHTTPQueryPort
+		ing.CaptiveCoreHTTPQueryPort = &v
+	}
+	if ing.CaptiveCoreHTTPQueryThreadPoolSize == nil {
+		v := defaultQueryThreadPoolSize()
+		ing.CaptiveCoreHTTPQueryThreadPoolSize = &v
+	}
+	if ing.CaptiveCoreHTTPQuerySnapshotLedgers == nil {
+		v := DefaultCaptiveCoreHTTPQuerySnapshotLedgers
+		ing.CaptiveCoreHTTPQuerySnapshotLedgers = &v
+	}
+	return ing
+}
+
+func setUint(p **uint, def uint) {
+	if *p == nil {
+		v := def
+		*p = &v
+	}
+}
+
+// defaultQueryThreadPoolSize is the CPU count clamped into uint16 (the SDK's
+// query-server param width).
+func defaultQueryThreadPoolSize() uint16 {
+	n := runtime.NumCPU()
+	if n > int(^uint16(0)) {
+		return ^uint16(0)
+	}
+	if n < 1 {
+		return 1
+	}
+	return uint16(n)
 }
 
 // Paths is the resolved set of on-disk paths the daemon uses — the single place
