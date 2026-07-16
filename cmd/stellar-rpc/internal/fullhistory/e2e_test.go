@@ -68,6 +68,13 @@ type e2eCore struct {
 	fromSeen  atomic.Uint32
 	delivered atomic.Uint32
 	opens     atomic.Int32
+
+	// Optional test hooks (default nil/0, so existing callers are unaffected).
+	// onYield timestamps each frame as it enters ingestion; yieldDelay paces
+	// frame delivery so a query poller can stay ahead of commits. Used by the
+	// ingest→query latency test.
+	onYield    func(seq uint32)
+	yieldDelay time.Duration
 }
 
 func (c *e2eCore) OpenCore(context.Context) (ledgerbackend.LedgerStream, error) {
@@ -102,8 +109,19 @@ func (s *e2eStream) RawLedgers(
 			}
 			if raw, ok := s.core.frames[seq]; ok {
 				s.core.delivered.Store(seq)
+				if s.core.onYield != nil {
+					s.core.onYield(seq)
+				}
 				if !yield(raw, nil) {
 					return
+				}
+				if s.core.yieldDelay > 0 {
+					select {
+					case <-ctx.Done():
+						yield(nil, ctx.Err())
+						return
+					case <-time.After(s.core.yieldDelay):
+					}
 				}
 				continue
 			}
