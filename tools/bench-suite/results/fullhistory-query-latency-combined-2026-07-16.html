@@ -236,6 +236,18 @@ pre.metadata {
 </style>
 </head>
 <body>
+<style>
+  /* comparison-table extras (scoped, self-contained) */
+  table.cmp th.grp { text-align: center; border-bottom: 1px solid var(--baseline); }
+  table.cmp th.g2, table.cmp td.g2 { border-left: 1px solid var(--baseline); }
+  table.cmp td.hi { color: var(--warn); font-weight: 650; }
+  table.cmp td.lo { color: var(--good-text); }
+  .defs dt { font-weight: 650; margin-top: 14px; color: var(--ink); }
+  .defs dt code { font-weight: 650; }
+  .defs dd { margin: 3px 0 0; color: var(--ink-2); }
+  .tbl-note { font-size: 12.5px; color: var(--muted); margin: 8px 0 26px; max-width: 60em; }
+  .tbl-cap { font-weight: 650; margin: 26px 0 8px; }
+</style>
 <div class="wrap">
 
 <header class="masthead">
@@ -243,7 +255,7 @@ pre.metadata {
     <span>Stellar RPC v2 · Full-History Storage Engine</span>
     <span>Query Latency Report · 2026-07-16</span>
   </div>
-  <h1>Query latency — synthetic profiles (hot + cold) and live-pubnet hot tip</h1>
+  <h1>Query latency — synthetic profiles (hot vs cold) and live-pubnet hot tip</h1>
   <p class="mast-sub">Query-serving latency of the <code>full-history</code> daemon over JSON-RPC, combining two
   regimes: <strong>(A)</strong> three synthetic apply-load profiles — sac / token / soroswap — on both the hot
   RocksDB tier and the frozen cold tier, and <strong>(B)</strong> live pubnet tip queries on the hot tier with a
@@ -277,13 +289,50 @@ pre.metadata {
   </div>
 </section>
 
-<section id="synthetic-hot">
-  <div class="sec-head"><span class="sec-num">02</span><h2>Part A — synthetic profiles, hot tier</h2></div>
-  <p class="sec-intro">Real sac / token / soroswap apply-load ledgers replayed through the daemon and served from
-  the hot RocksDB tier. These ledgers are large — thousands of tx + Soroban meta each.</p>
+<section id="defs" class="method">
+  <div class="sec-head"><span class="sec-num">02</span><h2>How to read this report</h2></div>
+  <p class="sec-intro">Every latency below is milliseconds (ms), lower is better, measured end-to-end over JSON-RPC
+  unless a row says otherwise. Definitions of every term and column header:</p>
+  <dl class="defs">
+    <dt>Hot tier vs cold tier</dt>
+    <dd><strong>hot</strong> = the daemon's live RocksDB store, holding recent ledgers in the "hot" DB.
+    <strong>cold</strong> = frozen, immutable chunk artifacts for older history — a zstd <code>.pack</code> file
+    plus MPHF + roaring-bitmap index files. A query hits one tier depending on how old the target ledger is.</dd>
+    <dt><code>p50</code> / <code>p90</code> / <code>p99</code> / <code>max</code></dt>
+    <dd>Latency percentiles (nearest-rank) over the request sample. <strong>p50</strong> = median (half the
+    requests were faster); <strong>p90</strong> / <strong>p99</strong> = the slowest 10 % / 1 % boundary;
+    <strong>max</strong> = the single slowest request. p50 tells you the typical case, p99 the tail.</dd>
+    <dt><code>count</code> / reps</dt>
+    <dd>Number of requests in the sample. Light endpoints use 500 reps; <code>getLedgers</code> is capped by a
+    45-second wall budget (so its count is however many requests fit — 71–127), which makes its p99 less robust.</dd>
+    <dt>Endpoints</dt>
+    <dd><code>getLedgers</code> = fetch whole ledger(s) including the full <code>LedgerCloseMeta</code> blob
+    (large — 10–17 MB each here, measured at <code>limit=1</code>). <code>getTransaction</code> = one transaction
+    by hash. <code>getTransactions</code> = a page of transactions. <code>getEvents</code> = a filtered contract-event
+    query.</dd>
+    <dt>Ingest (source → durable commit)</dt>
+    <dd>Time from the daemon receiving a ledger to it being durably committed (one fsync). This is the "how fresh"
+    leg — separate from query latency, which reads already-committed data.</dd>
+    <dt><code>conc</code> / <code>req/s</code> (Part B)</dt>
+    <dd><strong>conc</strong> = number of concurrent in-flight requests the load generator keeps open.
+    <strong>req/s</strong> = completed requests per second (throughput) at that concurrency.</dd>
+    <dt>term / OR-union (getEvents sweep)</dt>
+    <dd>A <strong>term</strong> is one indexed constraint — a distinct contract ID, or a distinct topic value at a
+    position. A query <strong>OR-unions</strong> N terms (matches any of them). <strong>window</strong> = the query
+    spans the 20-ledger steady-state window; <strong>chunk</strong> = random starts over the whole 10,000-ledger
+    frozen chunk.</dd>
+  </dl>
+</section>
 
+<section id="synthetic">
+  <div class="sec-head"><span class="sec-num">03</span><h2>Part A — synthetic profiles: hot vs cold</h2></div>
+  <p class="sec-intro">Real sac / token / soroswap apply-load ledgers replayed through the daemon and served from
+  each tier. These ledgers are large — thousands of tx + Soroban meta each. Query passes are sequential
+  (one request at a time).</p>
+
+  <div class="tbl-cap">Ledger size per profile</div>
   <div class="target-table-wrap"><table class="target">
-    <thead><tr><th>profile</th><th>decompressed LCM</th><th>on-disk (zstd)</th><th>compression</th></tr></thead>
+    <thead><tr><th>profile</th><th>decompressed LCM (in-memory)</th><th>on-disk (zstd)</th><th>compression ratio</th></tr></thead>
     <tbody>
       <tr><td>sac</td><td>~17.3 MB</td><td>~2.1 MB</td><td>8.2×</td></tr>
       <tr><td>token</td><td>~16.5 MB</td><td>~1.7 MB</td><td>9.5×</td></tr>
@@ -291,9 +340,9 @@ pre.metadata {
     </tbody>
   </table></div>
 
-  <p style="margin-top:22px"><strong>Ingest → durable commit, per ledger</strong> (source → commit, ms):</p>
+  <div class="tbl-cap">Ingest → durable commit, per ledger (source → committed; not a query)</div>
   <div class="target-table-wrap"><table class="target">
-    <thead><tr><th>profile</th><th>p50</th><th>p90</th><th>p99</th></tr></thead>
+    <thead><tr><th>profile</th><th>p50 (median)</th><th>p90</th><th>p99</th></tr></thead>
     <tbody>
       <tr><td>sac</td><td>129.3</td><td>138.9</td><td>145.3</td></tr>
       <tr><td>token</td><td>129.9</td><td>133.6</td><td>144.7</td></tr>
@@ -301,90 +350,117 @@ pre.metadata {
     </tbody>
   </table></div>
 
-  <p style="margin-top:22px"><strong>Query latency — hot tier</strong> (ms). getLedgers at limit=1 (budget-capped
-  <code>count</code>); getTransaction / getEvents 500 reps:</p>
-  <div class="target-table-wrap"><table class="target">
-    <thead><tr><th>profile</th><th>endpoint</th><th>count</th><th>p50</th><th>p90</th><th>p99</th><th>max</th></tr></thead>
+  <div class="tbl-cap">Query latency — hot vs cold, side by side (ms)</div>
+  <div class="target-table-wrap"><table class="target cmp">
+    <thead>
+      <tr>
+        <th rowspan="2">profile</th>
+        <th rowspan="2">endpoint</th>
+        <th class="grp" colspan="2">p50 — typical (ms)</th>
+        <th class="grp g2" colspan="2">p99 — tail (ms)</th>
+      </tr>
+      <tr>
+        <th>hot</th><th>cold</th><th class="g2">hot</th><th>cold</th>
+      </tr>
+    </thead>
     <tbody>
-      <tr><td>sac</td><td>getLedgers</td><td>80</td><td>567.4</td><td>581.8</td><td>607.6</td><td>607.6</td></tr>
-      <tr><td>sac</td><td>getTransaction</td><td>500</td><td>18.1</td><td>19.2</td><td>25.4</td><td>28.9</td></tr>
-      <tr><td>sac</td><td>getEvents</td><td>500</td><td>7.8</td><td>8.0</td><td>12.0</td><td>12.6</td></tr>
-      <tr><td>token</td><td>getLedgers</td><td>82</td><td>550.8</td><td>557.7</td><td>570.6</td><td>570.6</td></tr>
-      <tr><td>token</td><td>getTransaction</td><td>500</td><td>18.2</td><td>19.5</td><td>24.8</td><td>26.8</td></tr>
-      <tr><td>token</td><td>getEvents</td><td>500</td><td>7.5</td><td>7.9</td><td>10.0</td><td>13.6</td></tr>
-      <tr><td>soroswap</td><td>getLedgers</td><td>127</td><td>355.8</td><td>363.8</td><td>370.6</td><td>375.3</td></tr>
-      <tr><td>soroswap</td><td>getTransaction</td><td>500</td><td>11.6</td><td>12.5</td><td>17.6</td><td>19.8</td></tr>
-      <tr><td>soroswap</td><td>getEvents</td><td>500</td><td>4.4</td><td>5.5</td><td>8.0</td><td>8.6</td></tr>
+      <tr><td>sac</td><td>getLedgers</td><td>567.4</td><td>617.2</td><td class="g2">607.6</td><td>671.0</td></tr>
+      <tr><td>sac</td><td>getTransaction</td><td>18.1</td><td>18.3</td><td class="g2">25.4</td><td class="hi">40.3</td></tr>
+      <tr><td>sac</td><td>getEvents</td><td>7.8</td><td>8.8</td><td class="g2">12.0</td><td>14.4</td></tr>
+      <tr><td>token</td><td>getLedgers</td><td>550.8</td><td>604.9</td><td class="g2">570.6</td><td>664.0</td></tr>
+      <tr><td>token</td><td>getTransaction</td><td>18.2</td><td class="lo">16.0</td><td class="g2">24.8</td><td class="hi">34.0</td></tr>
+      <tr><td>token</td><td>getEvents</td><td>7.5</td><td class="lo">3.4</td><td class="g2">10.0</td><td class="lo">4.9</td></tr>
+      <tr><td>soroswap</td><td>getLedgers</td><td>355.8</td><td>415.4</td><td class="g2">370.6</td><td>449.5</td></tr>
+      <tr><td>soroswap</td><td>getTransaction</td><td>11.6</td><td>11.7</td><td class="g2">17.6</td><td class="hi">25.4</td></tr>
+      <tr><td>soroswap</td><td>getEvents</td><td>4.4</td><td class="hi">18.9</td><td class="g2">8.0</td><td class="hi">24.8</td></tr>
     </tbody>
   </table></div>
-</section>
+  <p class="tbl-note"><strong>hot</strong> = live RocksDB tier, <strong>cold</strong> = frozen chunk artifacts.
+  Lower is better. <span style="color:var(--warn); font-weight:650">Orange</span> = cold notably slower than hot;
+  <span style="color:var(--good-text)">green</span> = cold faster than hot. Hot figures are the run-1 pass;
+  cold are the run-2 all-profile pass (hot reproduced within ~5 % run-to-run). <strong>Takeaway: cold tracks hot
+  closely everywhere except soroswap getEvents</strong> (selective filters — see the term sweep below), and cold
+  getTransaction carries a heavier p99 tail (cold txhash MPHF lookup).</p>
 
-<section id="synthetic-cold">
-  <div class="sec-head"><span class="sec-num">03</span><h2>Part A — synthetic profiles, cold tier</h2></div>
-  <p class="sec-intro">Served from frozen cold artifacts (<code>.pack</code> + MPHF/bitmap index), page-cache-warm.
-  Run 2 froze all three profiles' catalogs and re-measured sac as a reproduction check.</p>
-
-  <div class="target-table-wrap"><table class="target">
-    <thead><tr><th>profile</th><th>endpoint</th><th>count</th><th>p50</th><th>p90</th><th>p99</th><th>max</th></tr></thead>
-    <tbody>
-      <tr><td>sac</td><td>getLedgers</td><td>73</td><td>617.2</td><td>653.1</td><td>671.0</td><td>671.0</td></tr>
-      <tr><td>sac</td><td>getTransaction</td><td>500</td><td>18.3</td><td>31.7</td><td>40.3</td><td>43.3</td></tr>
-      <tr><td>sac</td><td>getEvents</td><td>500</td><td>8.8</td><td>10.5</td><td>14.4</td><td>14.9</td></tr>
-      <tr><td>token</td><td>getLedgers</td><td>74</td><td>604.9</td><td>638.9</td><td>664.0</td><td>664.0</td></tr>
-      <tr><td>token</td><td>getTransaction</td><td>500</td><td>16.0</td><td>25.4</td><td>34.0</td><td>41.5</td></tr>
-      <tr><td>token</td><td>getEvents</td><td>500</td><td>3.4</td><td>4.2</td><td>4.9</td><td>5.4</td></tr>
-      <tr><td>soroswap</td><td>getLedgers</td><td>109</td><td>415.4</td><td>433.9</td><td>449.5</td><td>451.6</td></tr>
-      <tr><td>soroswap</td><td>getTransaction</td><td>500</td><td>11.7</td><td>18.9</td><td>25.4</td><td>26.5</td></tr>
-      <tr><td>soroswap</td><td>getEvents</td><td>500</td><td>18.9</td><td>22.8</td><td>24.8</td><td>27.3</td></tr>
-    </tbody>
-  </table></div>
+  <details class="tv"><summary>Full percentiles — hot and cold (p50 / p90 / p99 / max, with sample count)</summary>
+  <div class="tv-scroll" style="padding-top:12px">
+    <div class="tbl-cap" style="margin-top:8px">Hot tier</div>
+    <table class="data" style="width:100%">
+      <thead><tr><th>profile</th><th>endpoint</th><th>count</th><th>p50</th><th>p90</th><th>p99</th><th>max</th></tr></thead>
+      <tbody>
+        <tr><td>sac</td><td>getLedgers</td><td>80</td><td>567.4</td><td>581.8</td><td>607.6</td><td>607.6</td></tr>
+        <tr><td>sac</td><td>getTransaction</td><td>500</td><td>18.1</td><td>19.2</td><td>25.4</td><td>28.9</td></tr>
+        <tr><td>sac</td><td>getEvents</td><td>500</td><td>7.8</td><td>8.0</td><td>12.0</td><td>12.6</td></tr>
+        <tr><td>token</td><td>getLedgers</td><td>82</td><td>550.8</td><td>557.7</td><td>570.6</td><td>570.6</td></tr>
+        <tr><td>token</td><td>getTransaction</td><td>500</td><td>18.2</td><td>19.5</td><td>24.8</td><td>26.8</td></tr>
+        <tr><td>token</td><td>getEvents</td><td>500</td><td>7.5</td><td>7.9</td><td>10.0</td><td>13.6</td></tr>
+        <tr><td>soroswap</td><td>getLedgers</td><td>127</td><td>355.8</td><td>363.8</td><td>370.6</td><td>375.3</td></tr>
+        <tr><td>soroswap</td><td>getTransaction</td><td>500</td><td>11.6</td><td>12.5</td><td>17.6</td><td>19.8</td></tr>
+        <tr><td>soroswap</td><td>getEvents</td><td>500</td><td>4.4</td><td>5.5</td><td>8.0</td><td>8.6</td></tr>
+      </tbody>
+    </table>
+    <div class="tbl-cap">Cold tier (run 2, all profiles)</div>
+    <table class="data" style="width:100%">
+      <thead><tr><th>profile</th><th>endpoint</th><th>count</th><th>p50</th><th>p90</th><th>p99</th><th>max</th></tr></thead>
+      <tbody>
+        <tr><td>sac</td><td>getLedgers</td><td>73</td><td>617.2</td><td>653.1</td><td>671.0</td><td>671.0</td></tr>
+        <tr><td>sac</td><td>getTransaction</td><td>500</td><td>18.3</td><td>31.7</td><td>40.3</td><td>43.3</td></tr>
+        <tr><td>sac</td><td>getEvents</td><td>500</td><td>8.8</td><td>10.5</td><td>14.4</td><td>14.9</td></tr>
+        <tr><td>token</td><td>getLedgers</td><td>74</td><td>604.9</td><td>638.9</td><td>664.0</td><td>664.0</td></tr>
+        <tr><td>token</td><td>getTransaction</td><td>500</td><td>16.0</td><td>25.4</td><td>34.0</td><td>41.5</td></tr>
+        <tr><td>token</td><td>getEvents</td><td>500</td><td>3.4</td><td>4.2</td><td>4.9</td><td>5.4</td></tr>
+        <tr><td>soroswap</td><td>getLedgers</td><td>109</td><td>415.4</td><td>433.9</td><td>449.5</td><td>451.6</td></tr>
+        <tr><td>soroswap</td><td>getTransaction</td><td>500</td><td>11.7</td><td>18.9</td><td>25.4</td><td>26.5</td></tr>
+        <tr><td>soroswap</td><td>getEvents</td><td>500</td><td>18.9</td><td>22.8</td><td>24.8</td><td>27.3</td></tr>
+      </tbody>
+    </table>
+  </div>
+  </details>
 
   <div class="note-callout"><strong>Cold ≈ hot — for getLedgers, getTransaction, and dense-match getEvents.</strong>
-  getEvents cold is even slightly faster at p50 on dense-match profiles; getTransaction has a heavier cold tail
-  (cold txhash MPHF lookup + reading the large ledger from the pack). The exception is selective multi-term
-  getEvents on cold — see the term sweep below.</div>
+  getEvents cold is even faster than hot on dense-match profiles (token). getTransaction has a heavier cold p99
+  tail (cold txhash MPHF lookup + reading the large ledger from the pack). The one real divergence is selective
+  multi-term getEvents on cold — quantified next.</div>
 
-  <p style="margin-top:22px"><strong>getEvents OR-union index-term sweep</strong> (p50 / p90 / p99 ms). A
-  <em>term</em> = one indexed constraint (a contract ID, or a topic value at a position); each row OR-unions N real
-  harvested terms, 500 reps, limit 10:</p>
+  <div class="tbl-cap">getEvents OR-union index-term sweep — how latency grows with the number of terms</div>
   <div class="target-table-wrap"><table class="target">
-    <thead><tr><th>profile</th><th>tier·scope</th><th>t=1</th><th>t=4</th><th>t=8</th><th>t=15</th></tr></thead>
+    <thead><tr><th>profile</th><th>tier · scope</th><th>1 term</th><th>4 terms</th><th>8 terms</th><th>15 terms</th></tr></thead>
     <tbody>
-      <tr><td>sac</td><td>hot·window</td><td>8.4 / 9.7 / 11.4</td><td>8.4 / 9.0 / 10.8</td><td>8.5 / 9.1 / 11.1</td><td>6.8 / 7.8 / 11.4</td></tr>
-      <tr><td>sac</td><td>cold·window</td><td>8.4 / 10.4 / 13.4</td><td>8.6 / 10.7 / 12.8</td><td>6.6 / 9.2 / 11.9</td><td>8.7 / 10.5 / 14.1</td></tr>
-      <tr><td>token</td><td>hot·window</td><td>7.6 / 7.9 / 11.9</td><td>6.2 / 7.7 / 8.6</td><td>7.5 / 7.8 / 10.2</td><td>7.7 / 7.9 / 12.4</td></tr>
-      <tr><td>token</td><td>cold·window</td><td>3.4 / 4.2 / 4.9</td><td>5.1 / 6.1 / 7.1</td><td>8.1 / 13.2 / 15.4</td><td>16.9 / 19.6 / 22.0</td></tr>
-      <tr><td>soroswap</td><td>hot·window</td><td>4.2 / 4.7 / 5.9</td><td>4.3 / 6.3 / 7.8</td><td>6.1 / 6.8 / 7.7</td><td>6.1 / 6.7 / 7.3</td></tr>
-      <tr><td>soroswap</td><td>cold·window</td><td>9.5 / 12.8 / 16.4</td><td>52.7 / 60.0 / 67.0</td><td>98.5 / 115.7 / 129.6</td><td>137.2 / 150.2 / 158.3</td></tr>
+      <tr><td>sac</td><td>hot · window</td><td>8.4 / 9.7 / 11.4</td><td>8.4 / 9.0 / 10.8</td><td>8.5 / 9.1 / 11.1</td><td>6.8 / 7.8 / 11.4</td></tr>
+      <tr><td>sac</td><td>cold · window</td><td>8.4 / 10.4 / 13.4</td><td>8.6 / 10.7 / 12.8</td><td>6.6 / 9.2 / 11.9</td><td>8.7 / 10.5 / 14.1</td></tr>
+      <tr><td>token</td><td>hot · window</td><td>7.6 / 7.9 / 11.9</td><td>6.2 / 7.7 / 8.6</td><td>7.5 / 7.8 / 10.2</td><td>7.7 / 7.9 / 12.4</td></tr>
+      <tr><td>token</td><td>cold · window</td><td>3.4 / 4.2 / 4.9</td><td>5.1 / 6.1 / 7.1</td><td>8.1 / 13.2 / 15.4</td><td class="hi">16.9 / 19.6 / 22.0</td></tr>
+      <tr><td>soroswap</td><td>hot · window</td><td>4.2 / 4.7 / 5.9</td><td>4.3 / 6.3 / 7.8</td><td>6.1 / 6.8 / 7.7</td><td>6.1 / 6.7 / 7.3</td></tr>
+      <tr><td>soroswap</td><td>cold · window</td><td>9.5 / 12.8 / 16.4</td><td>52.7 / 60.0 / 67.0</td><td>98.5 / 115.7 / 129.6</td><td class="hi">137.2 / 150.2 / 158.3</td></tr>
     </tbody>
   </table></div>
-  <p style="font-size:13.5px; color:var(--ink-2)">Hot is flat everywhere (~4–9 ms, 1→15 terms). Cold is flat when
-  terms match densely (sac). Cold scales with term count when terms are selective: token ≈1 ms/term; soroswap
-  (most selective vocabulary) ≈12 ms/term → 15 terms ≈ 137 ms. Cause: the cold reader is opened per request (POC,
-  no LRU) and sparse matches trigger the POC underfill re-query loop in <code>events_handler.scanChunk</code>.
-  Productionization paths: an LRU for cold readers and a streaming pager.</p>
+  <p class="tbl-note">Each cell is <strong>p50 / p90 / p99</strong> in ms (500 reps, limit 10). Hot is flat
+  everywhere (~4–9 ms for 1→15 terms). Cold is flat when terms match densely (sac). Cold scales with term count
+  when terms are selective: token ≈1 ms/term; soroswap (most selective vocabulary) ≈12 ms/term → 15 terms ≈ 137 ms.
+  Cause: the cold reader is opened per request (POC, no LRU) and sparse matches trigger the POC underfill re-query
+  loop in <code>events_handler.scanChunk</code>. Productionization: an LRU for cold readers and a streaming pager.</p>
 
-  <p style="margin-top:22px"><strong>Direct in-process read</strong>, no serve path (ms). <code>store.Get</code> =
-  RocksDB point read (compressed); <code>GetLedgerRaw</code> adds the zstd decode:</p>
+  <div class="tbl-cap">Direct in-process read — no serve path (isolates the storage read from HTTP; ms)</div>
   <div class="target-table-wrap"><table class="target">
-    <thead><tr><th>profile</th><th>store.Get (compressed)</th><th>hot GetLedgerRaw</th><th>cold GetLedgerRaw</th></tr></thead>
+    <thead><tr><th>profile</th><th>store.Get (RocksDB point read, compressed)</th><th>hot GetLedgerRaw (+ zstd decode)</th><th>cold GetLedgerRaw (pack + decode)</th></tr></thead>
     <tbody>
       <tr><td>sac</td><td>0.63</td><td>8.2</td><td>7.9</td></tr>
       <tr><td>token</td><td>0.62</td><td>7.4</td><td>7.3</td></tr>
       <tr><td>soroswap</td><td>0.16</td><td>4.6</td><td>3.7</td></tr>
     </tbody>
   </table></div>
+  <p class="tbl-note">The read itself is single-digit ms — proof that <code>getLedgers</code>' ~350–670 ms serve
+  time is transfer/serialization, not storage.</p>
 </section>
 
 <section id="livepubnet">
   <div class="sec-head"><span class="sec-num">04</span><h2>Part B — live pubnet, hot-DB tip querying</h2></div>
   <p class="sec-intro">Local daemon ingesting live pubnet and serving over JSON-RPC on loopback. Data dir on
-  tmpfs (best-case storage latency). All HTTP 200, zero errors.</p>
+  tmpfs (best-case storage latency). All HTTP 200, zero errors. Different machine from Part A.</p>
 
-  <p><strong>Single-request latency</strong> (warm, sequential, n=40; end-to-end <code>curl</code>
-  <code>time_total</code>, ms):</p>
+  <div class="tbl-cap">Single-request latency — warm, sequential, n=40 (end-to-end curl time_total, ms)</div>
   <div class="target-table-wrap"><table class="target">
-    <thead><tr><th>method</th><th>resp size</th><th>min</th><th>p50</th><th>p90</th><th>p99</th><th>max</th><th>mean</th></tr></thead>
+    <thead><tr><th>method</th><th>resp size</th><th>min</th><th>p50 (median)</th><th>p90</th><th>p99</th><th>max</th><th>mean</th></tr></thead>
     <tbody>
       <tr><td>getLedgers (limit 1)</td><td>1.7 MB</td><td>33.0</td><td>35.0</td><td>38.1</td><td>38.9</td><td>39.1</td><td>35.4</td></tr>
       <tr><td>getTransactions (limit 5)</td><td>17.5 KB</td><td>7.9</td><td>8.5</td><td>9.8</td><td>16.5</td><td>16.7</td><td>9.2</td></tr>
@@ -397,7 +473,8 @@ pre.metadata {
   <strong>getLedgers end-to-end (35 ms) is dominated by shipping the ~1.7 MB LedgerCloseMeta, not the ~4.6 ms
   handler.</strong></div>
 
-  <p style="margin-top:22px"><strong>Concurrency sweep</strong> (<code>hey</code>, loopback, keep-alive; latencies ms):</p>
+  <div class="tbl-cap">Concurrency sweep — throughput and latency as concurrent load rises (hey, loopback, keep-alive)</div>
+  <p class="tbl-note" style="margin-top:0"><strong>conc</strong> = concurrent in-flight requests · <strong>req/s</strong> = completed requests per second · p50 / p90 / p99 / max in ms.</p>
   <div class="tiles" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr))">
     <div>
       <div class="fig-no" style="margin-bottom:6px">getTransaction · ~2.9 KB</div>
@@ -450,9 +527,9 @@ pre.metadata {
       </table></div>
     </div>
   </div>
-  <p style="font-size:13.5px; color:var(--ink-2)">Throughput ceilings (16-core box): getEvents ~2,250 req/s ·
-  getTransaction ~1,700 · getTransactions ~535 · getLedgers ~80 req/s. Saturates at concurrency ≈ 8–16, then
-  degrades linearly with concurrency (textbook worker-pool queueing) — no errors, no cliff.</p>
+  <p class="tbl-note">Throughput ceilings (16-core box): getEvents ~2,250 req/s · getTransaction ~1,700 ·
+  getTransactions ~535 · getLedgers ~80 req/s. Saturates at concurrency ≈ 8–16, then latency grows linearly with
+  concurrency (textbook worker-pool queueing) — no errors, no cliff.</p>
 </section>
 
 <section id="analysis">
