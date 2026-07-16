@@ -160,27 +160,29 @@ func newColdCommand() *cobra.Command {
 
 func newHotCommand() *cobra.Command {
 	var (
-		src        sourceFlags
-		startChunk uint32
-		numChunks  int
-		numLedgers uint32
-		hotDir     string
-		catalogDir string
-		outDir     string
-		prof       profileFlags
+		src           sourceFlags
+		startChunk    uint32
+		numChunks     int
+		numLedgers    uint32
+		hotDir        string
+		catalogDir    string
+		closeInterval time.Duration
+		outDir        string
+		prof          profileFlags
 	)
 	cmd := newBenchCommand("hot",
 		"Benchmark hot ingestion: the daemon's live ingestion loop over a chunk range",
 		&src, &prof,
 		func(ctx context.Context, logger *supportlog.Entry) error {
 			return runHot(ctx, logger, hotOptions{
-				Source:     src.config(),
-				StartChunk: chunk.ID(startChunk),
-				NumChunks:  numChunks,
-				NumLedgers: numLedgers,
-				HotRoot:    hotDir,
-				CatalogDir: catalogDir,
-				OutDir:     outDir,
+				Source:        src.config(),
+				StartChunk:    chunk.ID(startChunk),
+				NumChunks:     numChunks,
+				NumLedgers:    numLedgers,
+				HotRoot:       hotDir,
+				CatalogDir:    catalogDir,
+				CloseInterval: closeInterval,
+				OutDir:        outDir,
 			})
 		})
 	fs := cmd.Flags()
@@ -192,6 +194,9 @@ func newHotCommand() *cobra.Command {
 		"scratch root for the hot RocksDBs (required; leftover chunk DBs are wiped for a fixed starting state)")
 	fs.StringVar(&catalogDir, "catalog-dir", "",
 		"base dir for the run's scratch catalog; default: --hot-dir")
+	fs.DurationVar(&closeInterval, "close-interval", 0,
+		"assumed time between ledger closes; >0 paces ingestion to that steady-state cadence "+
+			"and reports pace_lag (0 = ingest back-to-back, catch-up throughput)")
 	fs.StringVar(&outDir, "out", "bench-out", "CSV output dir")
 	markRequired(cmd, "start-chunk", "hot-dir")
 	return cmd

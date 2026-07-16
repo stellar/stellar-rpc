@@ -5,8 +5,10 @@ import (
 	"encoding/csv"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
@@ -159,6 +161,15 @@ func TestRunColdFromPack(t *testing.T) {
 	// loosely (sub-tick walks are excluded).
 	require.Contains(t, driver, "cold_extract")
 
+	// The rss_test.go tests use fake readers; this is the only assertion that
+	// exercises the real readPeakRSS. It only works on Linux — which is what
+	// CI runs — so on other platforms the read fails and the row is skipped.
+	if runtime.GOOS == "linux" {
+		require.Contains(t, driver, "peak_rss_bytes")
+		assert.EqualValues(t, 1, driver["peak_rss_bytes"]["n"])
+		assert.Positive(t, driver["peak_rss_bytes"]["total_ns"])
+	}
+
 	// The cold artifacts landed at the Layout-resolved paths — including the
 	// cross-chunk txhash index the backfill builds beyond WriteColdChunk. The
 	// window is partial (chunk 0 of a ChunksPerTxhashIndex-chunk window), so
@@ -292,6 +303,15 @@ func TestRunHotFromPack(t *testing.T) {
 	assert.EqualValues(t, numLedgers, driver["ingest_total"]["n"])
 	assert.EqualValues(t, numLedgers, driver["ingest_total"]["n_items"])
 	assert.NotContains(t, driver, "read_blocked")
+	// An unpaced run must not add pace rows — the CSV rows are a de facto
+	// contract, and pace_lag belongs to --close-interval runs only.
+	assert.NotContains(t, driver, "pace_lag")
+	assert.NotContains(t, driver, "pace_lag_final")
+	if runtime.GOOS == "linux" {
+		require.Contains(t, driver, "peak_rss_bytes")
+		assert.EqualValues(t, 1, driver["peak_rss_bytes"]["n"])
+		assert.Positive(t, driver["peak_rss_bytes"]["total_ns"])
+	}
 
 	// A second run against the same hot root succeeds from a fixed (empty)
 	// starting state: the production create bracket wipes the leftover DB.
@@ -326,4 +346,43 @@ func TestRunHotIncompleteStream(t *testing.T) {
 	// them is exact rather than volatile.
 	require.ErrorContains(t, err, "ingestion stream: stores: out of range: "+
 		"requested [2, 61] outside store coverage [2, 51]")
+}
+
+// TestRunHotPaced is the end-to-end paced hot path: a capped run with a small
+// --close-interval must hold each ledger to its due time, so the whole run
+// cannot finish before the last ledger comes due — at least (n−1) intervals of
+// real wall time — and the driver report must carry the pace rows the paced
+// mode adds. The interval is chosen well above this machine's per-ledger
+// ingest cost (a few ms of fsync'd commit), so unpaced ingestion alone cannot
+// satisfy the bound — only real sleeping can. It is a lower bound, so the
+// timing assertion never flakes.
+func TestRunHotPaced(t *testing.T) {
+	const numLedgers = 20
+	const interval = 25 * time.Millisecond
+	chunkID := chunk.ID(0)
+	packDir, _ := writeSourcePack(t, t.TempDir(), chunkID, numLedgers)
+	csvDir := filepath.Join(t.TempDir(), "csv")
+
+	start := time.Now()
+	require.NoError(t, runHot(context.Background(), testLogger(), hotOptions{
+		Source:        sourceConfig{Kind: sourcePack, PackDir: packDir},
+		StartChunk:    chunkID,
+		NumChunks:     1,
+		NumLedgers:    numLedgers,
+		HotRoot:       t.TempDir(),
+		CloseInterval: interval,
+		OutDir:        csvDir,
+	}))
+	// The last ledger (position numLedgers-1) yields no sooner than its due time,
+	// anchor + (numLedgers-1)*interval, and the anchor is set after this start.
+	assert.GreaterOrEqual(t, time.Since(start), time.Duration(numLedgers-1)*interval)
+
+	// The paced run adds the pace rows: every ledger's ingest takes real time,
+	// so no lag sample is zero and the rows are not suppressed. pace_lag_final
+	// is the run's ending state, one sample.
+	driver := readCSV(t, filepath.Join(csvDir, "driver.csv"))
+	require.Contains(t, driver, "pace_lag")
+	assert.EqualValues(t, numLedgers, driver["pace_lag"]["n_items"])
+	require.Contains(t, driver, "pace_lag_final")
+	assert.EqualValues(t, 1, driver["pace_lag_final"]["n"])
 }

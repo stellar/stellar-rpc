@@ -134,6 +134,9 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 		// backoff time into the samples.
 		MaxRetries: 0,
 	}, opts.StartChunk, end)
+	// VmHWM never decreases, so it can be read right here — before the error
+	// check — and a failed run's partial CSV still gets the row.
+	recordPeakRSS(logger, sink, readPeakRSS)
 	if err != nil {
 		writePartialCSVs(logger, sink, opts.OutDir)
 		return fmt.Errorf("backfill [%s,%s]: %w", opts.StartChunk, end, err)

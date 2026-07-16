@@ -46,6 +46,14 @@ type hotOptions struct {
 	// under. Empty means HotRoot.
 	CatalogDir string
 
+	// CloseInterval is the assumed time between ledger closes. When positive,
+	// the run gives each ledger a due time interval apart and waits out the
+	// idle gap after ingesting one, asking the steady-state question "if
+	// ledgers closed every CloseInterval, could ingestion keep up?" — answered
+	// by the pace_lag row and the run's summary verdict. Zero (the default)
+	// ingests back-to-back and measures pure catch-up throughput.
+	CloseInterval time.Duration
+
 	// OutDir receives the CSV report.
 	OutDir string
 }
@@ -63,6 +71,9 @@ func (o hotOptions) validate() error {
 		return fmt.Errorf("--start-chunk=%d with --num-chunks=%d ends at chunk %d, past the last valid chunk ID %d",
 			uint32(o.StartChunk), o.NumChunks, end, uint32(maxChunkID))
 	}
+	if o.CloseInterval < 0 {
+		return fmt.Errorf("--close-interval must be >= 0, got %s", o.CloseInterval)
+	}
 	return nil
 }
 
@@ -72,6 +83,11 @@ func (o hotOptions) validate() error {
 // chunks so no cold-path freeze runs, isolating the hot measurement. The sink
 // collects the loop's per-phase HotPhase timings; on success runHot records the
 // whole-run wall-clock and writes the CSV report.
+//
+// With --close-interval (opts.CloseInterval) set, the source is paced to that
+// close cadence: the run measures steady-state keep-up rather than catch-up
+// throughput, recording per-ledger pace_lag and logging a drain-or-grow
+// verdict.
 func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) error {
 	if err := opts.validate(); err != nil {
 		return err
@@ -111,9 +127,12 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 	}
 
 	sink := newCSVSink()
+	stream, schedule := buildHotStream(backend, first, last, opts.CloseInterval)
+	sink.schedule = schedule
+
 	start := time.Now()
 	err = fullhistory.RunBoundedIngestionLoop(ctx, fullhistory.BoundedIngestConfig{
-		Stream:   boundedStream{inner: backend, first: first, last: last},
+		Stream:   stream,
 		Resume:   first,
 		Catalog:  cat,
 		Boundary: nopBoundary{},
@@ -121,6 +140,9 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 		Metrics:  sink,
 		Sink:     sink,
 	})
+	// VmHWM never decreases, so it can be read right here — before the
+	// completion check — and a failed run's partial CSV still gets the row.
+	recordPeakRSS(logger, sink, readPeakRSS)
 	// The loop cannot tell a complete bounded stream from one that ran dry;
 	// the sink's last-committed gauge (set once per ingested ledger) can.
 	if err == nil && sink.lastCommittedSeq() != last {
@@ -131,14 +153,72 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 		return err
 	}
 	sink.observe(fileDriver, driverRunWall, time.Since(start), int(last-first+1))
+	return writeHotReport(logger, sink, schedule, opts.CloseInterval, opts.OutDir)
+}
 
+// writeHotReport produces the success-path report: for a paced run it first
+// records the final ledger's lag as the pace_lag_final row (the pace_lag
+// percentiles discard sample order, so the drain-or-grow number needs its own
+// row), then logs the summary — plus the paced verdict — and writes the CSVs
+// under outDir.
+func writeHotReport(
+	logger *supportlog.Entry, sink *csvSink, schedule *paceSchedule, interval time.Duration, outDir string,
+) error {
+	if stats, ok := sink.paceLagStats(); schedule != nil && ok {
+		sink.observe(fileDriver, driverPaceLagFinal, stats.final, 1)
+	}
 	sink.logSummary(logger)
-	written, err := sink.writeCSVs(opts.OutDir)
+	if schedule != nil {
+		logPaceSummary(logger, sink, interval)
+	}
+	written, err := sink.writeCSVs(outDir)
 	if err != nil {
 		return err
 	}
-	logger.Infof("wrote %d CSVs to %s", len(written), opts.OutDir)
+	logger.Infof("wrote %d CSVs to %s", len(written), outDir)
 	return nil
+}
+
+// buildHotStream wraps backend for a bounded hot run. With closeInterval == 0
+// it returns the plain boundedStream and a nil schedule — the back-to-back
+// path. With closeInterval > 0 it composes a pacingStream over the
+// boundedStream so each ledger yields no sooner than its due time, and returns
+// the paceSchedule the sink measures pace_lag against.
+func buildHotStream(
+	backend ledgerbackend.LedgerStream, first, last uint32, closeInterval time.Duration,
+) (ledgerbackend.LedgerStream, *paceSchedule) {
+	bounded := boundedStream{inner: backend, first: first, last: last}
+	if closeInterval <= 0 {
+		return bounded, nil
+	}
+	schedule := newPaceSchedule(closeInterval, first)
+	return pacingStream{inner: bounded, schedule: schedule, sleep: contextSleep}, schedule
+}
+
+// backlogGrew reports whether a paced run ended still behind schedule: a final
+// lag of at least one close interval means at least one ledger's worth of
+// backlog was never worked off. The comparison uses the interval because an
+// on-pace ledger's lag equals its own ingest time, which varies from ledger
+// to ledger and says nothing about backlog.
+func backlogGrew(stats paceLagStatsResult, interval time.Duration) bool {
+	return stats.final >= interval
+}
+
+// logPaceSummary logs the paced run's one-line verdict: the close interval, the
+// per-ledger floor (lag when on pace), the peak lag, the final ledger's lag,
+// and whether the backlog drained or grew (backlogGrew).
+func logPaceSummary(logger *supportlog.Entry, sink *csvSink, interval time.Duration) {
+	stats, ok := sink.paceLagStats()
+	if !ok {
+		return
+	}
+	verdict := "backlog drained (run ended within one close interval of the schedule)"
+	if backlogGrew(stats, interval) {
+		verdict = "backlog GREW (final lag >= one close interval — ingestion is not keeping up)"
+	}
+	logger.Infof("pacing @ %s close interval: per-ledger floor=%s peak lag=%s final lag=%s -> %s",
+		interval, stats.floor.Round(time.Millisecond), stats.peak.Round(time.Millisecond),
+		stats.final.Round(time.Millisecond), verdict)
 }
 
 // boundedStream pins the range a LedgerStream serves. The ingestion loop always

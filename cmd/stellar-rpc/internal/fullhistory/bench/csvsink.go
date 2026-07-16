@@ -49,6 +49,21 @@ const (
 	// one ledger's HotPhase burst (per-phase percentiles can't be summed).
 	driverIngestTotal = "ingest_total"
 	driverRunWall     = "run_wall" // hot only: whole-run wall-clock, seen by the driver
+	// hot only, paced runs (--close-interval > 0): per-ledger lag behind the
+	// close schedule at commit. Its "duration" columns carry a lag time; a
+	// lag that grows across the run means the backlog is growing (see
+	// recordPaceLag).
+	driverPaceLag = "pace_lag"
+	// hot only, paced runs: the final ledger's lag behind the close schedule,
+	// one sample per run. The pace_lag percentiles discard sample order, so
+	// they cannot show whether the backlog had drained or was still growing
+	// when the run ended; this row records that ending state.
+	driverPaceLagFinal = "pace_lag_final"
+	// cold AND hot: the run's peak resident set size (VmHWM), recorded once
+	// at run end (see recordPeakRSS). Its "duration" columns carry BYTES, not
+	// nanoseconds: storing the byte count as a duration lets the row use the
+	// same CSV format as every other row.
+	driverPeakRSS = "peak_rss_bytes"
 )
 
 // Cold data-type and stage report labels, fixing the file/row order of the cold
@@ -85,8 +100,17 @@ type fileSpec struct {
 //     ColdChunkTotal, one "<type>_total" row per cold data type (ColdIngest),
 //     the shared per-ledger cold extract walk (ColdExtract), the hot
 //     per-ledger end-to-end ingest_total (reconstructed from each ledger's
-//     phase burst in HotPhase), and the hot bench's driver-observed run
-//     wall-clock.
+//     phase burst in HotPhase), the hot bench's driver-observed run wall-clock,
+//     the paced hot run's per-ledger pace_lag and end-of-run pace_lag_final,
+//     and — for both modes, wherever VmHWM is readable — the run's
+//     peak_rss_bytes.
+//
+// The driver row order groups by producer: the cold rows first, then the
+// hot-only rows (ingest_total, run_wall, pace_lag, pace_lag_final together),
+// and finally peak_rss_bytes, which both modes emit. A row that recorded
+// nothing is suppressed, so each mode's report carries only its own rows —
+// and peak_rss_bytes is absent where /proc is unavailable (macOS; see
+// recordPeakRSS).
 //
 // A label recorded outside this vocabulary is still reported: withUnknown
 // appends it after the known rows (or files), so nothing is silently dropped.
@@ -101,14 +125,16 @@ var fileSpecs = func() []fileSpec {
 		hotRows[p] = p.String()
 	}
 
-	driverRows := make([]string, 0, len(coldTypes)+6)
+	driverRows := make([]string, 0, len(coldTypes)+9)
 	driverRows = append(driverRows, driverBackfillWall, driverIndexRebuild, driverChunkTotal)
 	for _, dt := range coldTypes {
 		driverRows = append(driverRows, dt+driverTotalSuffix)
 	}
-	// cold_extract closes the cold rows; ingest_total then run_wall keep the
-	// two hot rows grouped at the end.
-	driverRows = append(driverRows, driverColdExtract, driverIngestTotal, driverRunWall)
+	// cold_extract closes the cold rows; ingest_total, run_wall, and the two
+	// pace rows keep the hot-only rows grouped after them; peak_rss_bytes
+	// comes last, emitted by both modes.
+	driverRows = append(driverRows, driverColdExtract,
+		driverIngestTotal, driverRunWall, driverPaceLag, driverPaceLagFinal, driverPeakRSS)
 
 	specs := make([]fileSpec, 0, len(coldTypes)+2)
 	for _, dt := range coldTypes {
@@ -173,6 +199,11 @@ type csvSink struct {
 	// set once per ingested ledger) so the hot driver can verify the bounded
 	// run reached its final ledger.
 	lastSeq atomic.Uint32
+
+	// schedule is the paced hot run's close schedule (--close-interval > 0);
+	// LastCommitted measures each committed ledger's lag against it. Nil in
+	// every other run — cold, or unpaced hot — which records no pace_lag.
+	schedule *paceSchedule
 }
 
 var (
@@ -254,9 +285,13 @@ func (s *csvSink) Rebuild(d time.Duration) {
 	s.observe(fileDriver, driverIndexRebuild, d, 0)
 }
 
-// LastCommitted tracks the hot loop's per-ledger committed gauge (see lastSeq).
+// LastCommitted tracks the hot loop's per-ledger committed gauge (see lastSeq),
+// and — for a paced run — records that ledger's lag behind the close schedule.
 func (s *csvSink) LastCommitted(lastCommitted uint32) {
 	s.lastSeq.Store(lastCommitted)
+	if s.schedule != nil {
+		s.recordPaceLag(lastCommitted)
+	}
 }
 
 // The remaining observability signals carry no useful bench signal and are
@@ -307,6 +342,51 @@ func (s *csvSink) sumDriver(name string) time.Duration {
 		}
 	}
 	return total
+}
+
+// recordPaceLag records how far past its scheduled due time ledger seq
+// committed: lag = now − due(seq), clamped at ≥ 0 (defensive: through the
+// pacer a commit never precedes its due time), as one driverPaceLag sample
+// with items=1. On pace, a ledger starts at its due time, so its lag at
+// commit ≈ its own ingest time; a lag that grows across the run means
+// ingestion cannot keep up with the close cadence and the backlog is growing.
+func (s *csvSink) recordPaceLag(seq uint32) {
+	due, ok := s.schedule.dueForSeq(seq)
+	if !ok {
+		return
+	}
+	lag := max(s.schedule.clock().Sub(due), 0)
+	s.observe(fileDriver, driverPaceLag, lag, 1)
+}
+
+// paceLagStats summarizes the recorded pace_lag samples in ledger order: the
+// floor (min lag ≈ the per-ledger ingest cost when on pace), the peak (max lag
+// ≈ the deepest backlog), and the final ledger's lag. ok is false when no
+// paced samples exist. It reads the raw samples, so — unlike the aggregated
+// row — a zero-lag sample still counts.
+func (s *csvSink) paceLagStats() (paceLagStatsResult, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sr := s.rows[rowKey{file: fileDriver, row: driverPaceLag}]
+	if sr == nil || len(sr.samples) == 0 {
+		return paceLagStatsResult{}, false
+	}
+	res := paceLagStatsResult{
+		floor: sr.samples[0].d,
+		final: sr.samples[len(sr.samples)-1].d,
+	}
+	for _, sm := range sr.samples {
+		res.floor = min(res.floor, sm.d)
+		res.peak = max(res.peak, sm.d)
+	}
+	return res, true
+}
+
+// paceLagStatsResult is the paced run's lag summary (see paceLagStats).
+type paceLagStatsResult struct {
+	floor time.Duration // min lag ≈ the per-ledger ingest cost when on pace
+	peak  time.Duration // max lag ≈ the deepest backlog
+	final time.Duration // the final ledger's lag
 }
 
 // row is one aggregated CSV row.
@@ -464,6 +544,12 @@ func writeCSV(path string, rows []row) error {
 func (s *csvSink) logSummary(logger *supportlog.Entry) {
 	for _, f := range s.files() {
 		for _, r := range f.rows {
+			// peak_rss_bytes carries bytes in its duration fields; render it
+			// as a byte count, not a garbled duration.
+			if f.name == fileDriver && r.name == driverPeakRSS {
+				logger.Infof("%-10s %-12s n=%-7d bytes=%d", f.name, r.name, r.n, r.total.Nanoseconds())
+				continue
+			}
 			logger.Infof("%-10s %-12s n=%-7d items=%-9d total=%-12s p50=%-10s p90=%-10s p99=%-10s max=%s",
 				f.name, r.name, r.n, r.items,
 				r.total.Round(time.Microsecond),

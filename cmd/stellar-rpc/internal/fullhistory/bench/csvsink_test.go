@@ -140,7 +140,7 @@ func TestCSVSinkLastCommitted(t *testing.T) {
 	sink.LastCommitted(42)
 	assert.EqualValues(t, 42, sink.lastCommittedSeq())
 
-	// Dropped signals must not fabricate CSV rows.
+	// No schedule attached, so LastCommitted records no pace_lag row.
 	sink.RetentionFloor(7)
 	sink.ChunkBoundary()
 	sink.LiveHotChunks(3)
@@ -150,4 +150,82 @@ func TestCSVSinkLastCommitted(t *testing.T) {
 	written, err := sink.writeCSVs(t.TempDir())
 	require.NoError(t, err)
 	assert.Empty(t, written)
+}
+
+// TestCSVSinkPaceLag drives LastCommitted against an anchored schedule and an
+// injected clock: each committed ledger's lag is now − its due time. Ledger 2
+// (due at the anchor) commits 30ms in; ledger 3 stays on pace at 30ms; ledger 4
+// falls 200ms behind. The stats feed the run's drain-or-grow verdict, and the
+// aggregated pace_lag row carries one item per ledger.
+func TestCSVSinkPaceLag(t *testing.T) {
+	clock := &fakeClock{t: time.Unix(0, 0)}
+	sched := &paceSchedule{interval: 100 * time.Millisecond, firstSeq: 2, clock: clock.now}
+	sched.dueForPos(0) // anchor the schedule as the pacer would, at the first yield
+	sink := newCSVSink()
+	sink.schedule = sched
+
+	clock.advance(30 * time.Millisecond) // ledger 2 (due t0) commits at t0+30
+	sink.LastCommitted(2)
+	clock.advance(100 * time.Millisecond) // ledger 3 (due t0+100) commits at t0+130
+	sink.LastCommitted(3)
+	clock.advance(270 * time.Millisecond) // ledger 4 (due t0+200) commits at t0+400
+	sink.LastCommitted(4)
+
+	stats, ok := sink.paceLagStats()
+	require.True(t, ok)
+	assert.Equal(t, 30*time.Millisecond, stats.floor)
+	assert.Equal(t, 200*time.Millisecond, stats.peak)
+	assert.Equal(t, 200*time.Millisecond, stats.final)
+
+	driver := readCSV(t, filepath.Join(mustWriteCSVs(t, sink), "driver.csv"))
+	require.Contains(t, driver, "pace_lag")
+	assert.EqualValues(t, 3, driver["pace_lag"]["n"])
+	assert.EqualValues(t, 3, driver["pace_lag"]["n_items"])
+}
+
+// TestCSVSinkPaceLagClampedToZero: a ledger committing before its due time (its
+// lag would be negative) records a zero-lag sample, which the aggregated row
+// then drops as sub-tick — so a paced run whose only sample is on-time writes no
+// pace_lag row.
+func TestCSVSinkPaceLagClampedToZero(t *testing.T) {
+	clock := &fakeClock{t: time.Unix(0, 0)}
+	sched := &paceSchedule{interval: 100 * time.Millisecond, firstSeq: 2, clock: clock.now}
+	sched.dueForPos(0)
+	sink := newCSVSink()
+	sink.schedule = sched
+
+	sink.LastCommitted(5) // pos 3, due t0+300, clock still t0 → lag −300ms → clamped 0
+
+	stats, ok := sink.paceLagStats()
+	require.True(t, ok) // the raw (zero) sample is recorded
+	assert.Zero(t, stats.final)
+	written, err := sink.writeCSVs(t.TempDir())
+	require.NoError(t, err)
+	assert.Empty(t, written) // the lone zero-duration sample is suppressed
+}
+
+// TestCSVSinkPaceLagUnanchored: a commit arriving before the schedule anchors
+// has no due time to score against, so it records nothing — guarding the
+// pace_lag row against a garbage lag measured from the zero time.
+func TestCSVSinkPaceLagUnanchored(t *testing.T) {
+	clock := &fakeClock{t: time.Unix(0, 0)}
+	sink := newCSVSink()
+	sink.schedule = &paceSchedule{interval: 100 * time.Millisecond, firstSeq: 2, clock: clock.now}
+
+	sink.LastCommitted(2)
+
+	_, ok := sink.paceLagStats()
+	assert.False(t, ok)
+	written, err := sink.writeCSVs(t.TempDir())
+	require.NoError(t, err)
+	assert.Empty(t, written)
+}
+
+// mustWriteCSVs writes the sink's report to a temp dir and returns it.
+func mustWriteCSVs(t *testing.T, sink *csvSink) string {
+	t.Helper()
+	outDir := t.TempDir()
+	_, err := sink.writeCSVs(outDir)
+	require.NoError(t, err)
+	return outDir
 }
