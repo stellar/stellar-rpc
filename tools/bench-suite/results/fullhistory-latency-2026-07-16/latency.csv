@@ -1,0 +1,33 @@
+profile,tier,metric,endpoint,p50_ms,p90_ms,p99_ms,max_ms,count,notes
+# ingest = source->durable-commit, one sample per steady-state ledger (window 10202..10221, warmup 200)
+sac,-,ingest,-,129.289,138.865,145.293,145.293,20,src->commit per ledger
+token,-,ingest,-,129.904,133.558,144.723,144.723,20,src->commit per ledger
+soroswap,-,ingest,-,76.728,82.561,85.430,85.430,20,src->commit per ledger
+# query latency, HOT tier (served from hot RocksDB); getLedgers limit=1
+sac,hot,query,getLedgers,567.426,581.782,607.643,607.643,80,budget-capped 45s
+sac,hot,query,getTransaction,18.118,19.205,25.398,28.901,500,
+sac,hot,query,getEvents,7.795,8.036,12.026,12.562,500,
+token,hot,query,getLedgers,550.752,557.650,570.621,570.621,82,budget-capped 45s
+token,hot,query,getTransaction,18.201,19.522,24.752,26.844,500,
+token,hot,query,getEvents,7.508,7.852,10.030,13.635,500,
+soroswap,hot,query,getLedgers,355.831,363.789,370.555,375.347,127,budget-capped 45s
+soroswap,hot,query,getTransaction,11.557,12.514,17.620,19.756,500,
+soroswap,hot,query,getEvents,4.442,5.486,7.976,8.585,500,
+# query latency, COLD tier (served from frozen cold artifacts); getLedgers limit=1
+sac,cold,query,getLedgers,641.281,664.384,685.442,685.442,71,budget-capped 45s
+sac,cold,query,getTransaction,17.652,29.972,38.739,45.733,500,
+sac,cold,query,getEvents,6.211,8.416,9.487,12.687,500,
+# direct in-process read (no serve path): store.Get = RocksDB point read (compressed); GetLedgerRaw = Get + zstd decode
+sac,hot,read_store_get,-,0.634,,,,,ns/op 634056; compressed ~2.1MB
+sac,hot,read_getledgerraw,-,8.248,,,,,Get+zstd decode; decoded ~17.3MB
+sac,cold,read_getledgerraw,-,7.883,,,,,pack index+seek+decode; decoded ~17.3MB
+token,hot,read_store_get,-,0.618,,,,,compressed ~1.7MB
+token,hot,read_getledgerraw,-,7.449,,,,,decoded ~16.5MB
+token,cold,read_getledgerraw,-,7.272,,,,,decoded ~16.5MB
+soroswap,hot,read_store_get,-,0.159,,,,,compressed ~0.5MB
+soroswap,hot,read_getledgerraw,-,4.648,,,,,decoded ~10.0MB
+soroswap,cold,read_getledgerraw,-,3.685,,,,,decoded ~10.0MB
+# toy baseline (1 tx / 1 event synthetic ledger), for reference
+toy,hot,visibility_full,-,4.500,,4.744,,10,source->query
+toy,hot,visibility_ingest,-,3.035,,,,10,source->commit
+toy,hot,visibility_visible,-,1.500,,1.775,,10,commit->query

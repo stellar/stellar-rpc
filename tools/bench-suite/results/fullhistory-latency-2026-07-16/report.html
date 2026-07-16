@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Full-history latency — sac / token / soroswap — 2026-07-16</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb;
+    --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --baseline: #c3c2b7; --border: rgba(11,11,11,0.10);
+    --hot: #eb6834; --cold: #2a78d6; --good: #006300;
+    --fill-rest: #c3c2b7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --page: #0d0d0d; --surface: #1a1a19;
+      --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --baseline: #383835; --border: rgba(255,255,255,0.10);
+      --hot: #d95926; --cold: #3987e5; --good: #0ca30c;
+      --fill-rest: #383835;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19;
+    --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --baseline: #383835; --border: rgba(255,255,255,0.10);
+    --hot: #d95926; --cold: #3987e5; --good: #0ca30c;
+    --fill-rest: #383835;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--page); color: var(--ink);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 40px 24px 80px; }
+  header h1 { font-size: 26px; line-height: 1.2; margin: 0 0 6px; letter-spacing: -0.01em; }
+  header p.sub { color: var(--ink-2); margin: 0 0 18px; max-width: 68ch; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  .chip {
+    font-size: 12.5px; color: var(--ink-2); background: var(--surface);
+    border: 1px solid var(--border); border-radius: 999px; padding: 3px 11px;
+  }
+  .toggle {
+    float: right; font: inherit; font-size: 13px; cursor: pointer;
+    color: var(--ink-2); background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 5px 10px;
+  }
+  h2 { font-size: 18px; margin: 40px 0 4px; letter-spacing: -0.01em; }
+  h2 .n { color: var(--muted); font-weight: 600; margin-right: 8px; }
+  .lede { color: var(--ink-2); margin: 0 0 16px; max-width: 72ch; }
+  section { border-top: 1px solid var(--grid); padding-top: 8px; }
+
+  /* KPI tiles */
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px,1fr)); gap: 12px; margin: 22px 0 8px; }
+  .kpi { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+  .kpi .v { font-size: 27px; line-height: 1.1; letter-spacing: -0.02em; }
+  .kpi .u { font-size: 15px; color: var(--ink-2); }
+  .kpi .l { font-size: 12.5px; color: var(--ink-2); margin-top: 4px; }
+
+  /* findings */
+  ul.find { margin: 8px 0 0; padding: 0; list-style: none; }
+  ul.find li { position: relative; padding: 8px 0 8px 26px; border-bottom: 1px solid var(--grid); }
+  ul.find li:last-child { border-bottom: 0; }
+  ul.find li::before {
+    content: ""; position: absolute; left: 4px; top: 15px; width: 8px; height: 8px;
+    border-radius: 2px; background: var(--cold);
+  }
+  ul.find li.hot::before { background: var(--hot); }
+  ul.find b { font-weight: 650; }
+
+  /* tables */
+  .scroll { overflow-x: auto; margin: 6px 0 4px; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  caption { text-align: left; color: var(--muted); font-size: 12.5px; padding: 6px 0; }
+  th, td { padding: 7px 12px; text-align: right; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  thead th { color: var(--ink-2); font-weight: 600; border-bottom: 1px solid var(--baseline); }
+  tbody td { border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; }
+  tbody tr:hover td { background: color-mix(in srgb, var(--cold) 7%, transparent); }
+  .grp td { border-top: 2px solid var(--grid); }
+  .num { font-variant-numeric: tabular-nums; }
+  .dim { color: var(--muted); }
+  .tag { display: inline-block; font-size: 11px; font-weight: 650; padding: 1px 7px; border-radius: 6px; }
+  .tag.hot { color: #fff; background: var(--hot); }
+  .tag.cold { color: #fff; background: var(--cold); }
+
+  /* anatomy proportion bar */
+  .anat { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin: 8px 0; }
+  .anat .bar { display: flex; height: 34px; border-radius: 7px; overflow: hidden; border: 1px solid var(--border); }
+  .anat .seg { display: flex; align-items: center; padding: 0 10px; font-size: 12.5px; font-weight: 600; color: #fff; white-space: nowrap; }
+  .anat .read { background: var(--cold); }
+  .anat .rest { background: var(--fill-rest); color: var(--ink); }
+  .anat .legend { display: flex; gap: 18px; margin-top: 10px; font-size: 12.5px; color: var(--ink-2); flex-wrap: wrap; }
+  .anat .legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+
+  /* hot vs cold mini bars */
+  .hc { display: grid; gap: 14px; margin: 10px 0; }
+  .hc .row { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .hc .name { font-weight: 650; margin-bottom: 8px; }
+  .hc .track { display: grid; grid-template-columns: 52px 1fr 92px; align-items: center; gap: 10px; margin: 4px 0; }
+  .hc .track .k { font-size: 12px; color: var(--ink-2); }
+  .hc .track .barwrap { background: color-mix(in srgb, var(--baseline) 40%, transparent); border-radius: 5px; height: 14px; }
+  .hc .track .fill { height: 14px; border-radius: 5px; }
+  .hc .track .fill.hot { background: var(--hot); }
+  .hc .track .fill.cold { background: var(--cold); }
+  .hc .track .val { text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; }
+
+  .callout { background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--cold); border-radius: 8px; padding: 12px 16px; margin: 12px 0; color: var(--ink-2); }
+  .callout b { color: var(--ink); }
+  footer { margin-top: 48px; padding-top: 14px; border-top: 1px solid var(--grid); color: var(--muted); font-size: 12.5px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; background: color-mix(in srgb, var(--baseline) 22%, transparent); padding: 1px 5px; border-radius: 5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <button class="toggle" id="themeToggle" type="button">◐ theme</button>
+  <header>
+    <h1>Full-history ingest &amp; query latency</h1>
+    <p class="sub">Latency of the <code>full-history</code> daemon on the synthetic apply-load
+      profiles (<b>sac</b>, <b>token</b>, <b>soroswap</b>), measured on <b>real</b> profile
+      ledgers across both serving tiers — <span class="tag hot">hot</span> (RocksDB) and
+      <span class="tag cold">cold</span> (frozen pack + MPHF/bitmap index artifacts).</p>
+    <div class="chips">
+      <span class="chip">AWS c6id.8xlarge · 32 vCPU · 64 GiB · local NVMe</span>
+      <span class="chip">branch poc/fullhistory-query</span>
+      <span class="chip">2026-07-16</span>
+      <span class="chip">window: 20 steady-state ledgers (warmup 200)</span>
+      <span class="chip">500 reps/endpoint · getLedgers limit=1</span>
+    </div>
+  </header>
+
+  <div class="kpis">
+    <div class="kpi"><div class="v">10–17<span class="u"> MB</span></div><div class="l">decompressed ledger size (steady state)</div></div>
+    <div class="kpi"><div class="v">77–130<span class="u"> ms</span></div><div class="l">ingest p50 (source → commit)</div></div>
+    <div class="kpi"><div class="v">4–8<span class="u"> ms</span></div><div class="l">getEvents / getTransaction p50 (hot)</div></div>
+    <div class="kpi"><div class="v">356–567<span class="u"> ms</span></div><div class="l">getLedgers p50 — payload-bound</div></div>
+  </div>
+
+  <section>
+    <h2>Key findings</h2>
+    <ul class="find">
+      <li>Ingest <b>dominates the targeted endpoints</b> — getTransaction/getEvents add only ~4–18 ms on top of the ~77–130 ms ingest leg.</li>
+      <li class="hot"><b>getLedgers is the outlier, and it is payload-bound, not read-bound.</b> A direct hot read (incl. zstd decode) is ~8 ms, but getLedgers over HTTP is ~567 ms: <b>~1.4 % is the read, ~98.6 % is base64 + JSON + HTTP shipping the 10–17 MB ledger.</b></li>
+      <li><b>Cold serves ≈ as fast as hot</b> across all three endpoints (getTransaction has a somewhat heavier cold tail). This is the property the full-history design targets.</li>
+      <li class="hot">Decompression is cheap (~6–8 ms); <b>the size of what's shipped is the cost.</b> <code>limit=1</code>→<code>limit=5</code> scales ~5× linearly, confirming size-bound.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">1</span>Ledger characteristics</h2>
+    <p class="lede">These synthetic ledgers are large — thousands of tx + Soroban meta each. This size drives the getLedgers cost.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>profile</th><th>decompressed LCM</th><th>on-disk (zstd)</th><th>compression</th></tr></thead>
+      <tbody>
+        <tr><td>sac</td><td>~17.3 MB</td><td>~2.1 MB</td><td>~8.2×</td></tr>
+        <tr><td>token</td><td>~16.5 MB</td><td>~1.7 MB</td><td>~9.5×</td></tr>
+        <tr><td>soroswap</td><td>~10.0 MB</td><td>~0.5 MB</td><td>~19×</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <h2><span class="n">2</span>Ingest → query (source → durable commit)</h2>
+    <p class="lede">One sample per steady-state ledger, in-process timestamps.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>profile</th><th>p50</th><th>p90</th><th>p99</th></tr></thead>
+      <tbody>
+        <tr><td>sac</td><td>129.3 ms</td><td>138.9 ms</td><td>145.3 ms</td></tr>
+        <tr><td>token</td><td>129.9 ms</td><td>133.6 ms</td><td>144.7 ms</td></tr>
+        <tr><td>soroswap</td><td>76.7 ms</td><td>82.6 ms</td><td>85.4 ms</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <h2><span class="n">3</span>Query latency — <span class="tag hot">hot</span> tier</h2>
+    <p class="lede">Served from hot RocksDB. 0 errors throughout. getLedgers <code>limit=1</code> is budget-capped (count = reps within the 45 s budget); its p99 is over fewer samples.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>profile</th><th>endpoint</th><th>count</th><th>p50</th><th>p90</th><th>p99</th><th>max</th></tr></thead>
+      <tbody>
+        <tr class="grp"><td>sac</td><td>getLedgers</td><td class="dim">80</td><td>567.4</td><td>581.8</td><td>607.6</td><td>607.6</td></tr>
+        <tr><td></td><td>getTransaction</td><td class="dim">500</td><td>18.1</td><td>19.2</td><td>25.4</td><td>28.9</td></tr>
+        <tr><td></td><td>getEvents</td><td class="dim">500</td><td>7.8</td><td>8.0</td><td>12.0</td><td>12.6</td></tr>
+        <tr class="grp"><td>token</td><td>getLedgers</td><td class="dim">82</td><td>550.8</td><td>557.7</td><td>570.6</td><td>570.6</td></tr>
+        <tr><td></td><td>getTransaction</td><td class="dim">500</td><td>18.2</td><td>19.5</td><td>24.8</td><td>26.8</td></tr>
+        <tr><td></td><td>getEvents</td><td class="dim">500</td><td>7.5</td><td>7.9</td><td>10.0</td><td>13.6</td></tr>
+        <tr class="grp"><td>soroswap</td><td>getLedgers</td><td class="dim">127</td><td>355.8</td><td>363.8</td><td>370.6</td><td>375.3</td></tr>
+        <tr><td></td><td>getTransaction</td><td class="dim">500</td><td>11.6</td><td>12.5</td><td>17.6</td><td>19.8</td></tr>
+        <tr><td></td><td>getEvents</td><td class="dim">500</td><td>4.4</td><td>5.5</td><td>8.0</td><td>8.6</td></tr>
+      </tbody>
+      <caption>All values in milliseconds.</caption>
+    </table></div>
+  </section>
+
+  <section>
+    <h2><span class="n">4</span>Where the getLedgers time goes</h2>
+    <p class="lede">sac, per ledger. The read (RocksDB Get + zstd decode of a ~17 MB blob) is a sliver; base64 + JSON + HTTP transport of the decompressed payload is nearly all of it.</p>
+    <div class="anat">
+      <div class="bar">
+        <div class="seg read" style="width:1.4%" title="read (Get + zstd decode) ≈ 8 ms"></div>
+        <div class="seg rest" style="width:98.6%">base64 + JSON + HTTP transport &nbsp;≈&nbsp; 559 ms &nbsp;(98.6%)</div>
+      </div>
+      <div class="legend">
+        <span><span class="sw" style="background:var(--cold)"></span>storage read (Get + zstd decode) ≈ 8 ms (1.4%)</span>
+        <span><span class="sw" style="background:var(--fill-rest)"></span>serialize + ship the ~17 MB payload ≈ 559 ms (98.6%)</span>
+      </div>
+    </div>
+    <div class="callout"><b>Implication:</b> optimize the payload, not the read — cap page size, compress transport, stream the base64 encoder, or ship a lighter projection. Storage-read tuning can win at most ~1 %.</div>
+  </section>
+
+  <section>
+    <h2><span class="n">5</span><span class="tag hot">hot</span> vs <span class="tag cold">cold</span> — sac</h2>
+    <p class="lede">Same query pass served from frozen cold artifacts. Bars are normalized per endpoint (each endpoint's own scale). Cold serves ≈ as fast as hot; getTransaction has a heavier cold tail.</p>
+    <div class="hc">
+      <div class="row">
+        <div class="name">getLedgers <span class="dim num">— p50</span></div>
+        <div class="track"><span class="k">hot</span><div class="barwrap"><div class="fill hot" style="width:88.5%"></div></div><span class="val">567.4 ms</span></div>
+        <div class="track"><span class="k">cold</span><div class="barwrap"><div class="fill cold" style="width:100%"></div></div><span class="val">641.3 ms</span></div>
+      </div>
+      <div class="row">
+        <div class="name">getTransaction <span class="dim num">— p50 / p99</span></div>
+        <div class="track"><span class="k">hot</span><div class="barwrap"><div class="fill hot" style="width:46.8%"></div></div><span class="val">18.1 / 25.4 ms</span></div>
+        <div class="track"><span class="k">cold</span><div class="barwrap"><div class="fill cold" style="width:45.6%"></div></div><span class="val">17.7 / 38.7 ms</span></div>
+      </div>
+      <div class="row">
+        <div class="name">getEvents <span class="dim num">— p50</span></div>
+        <div class="track"><span class="k">hot</span><div class="barwrap"><div class="fill hot" style="width:100%"></div></div><span class="val">7.8 ms</span></div>
+        <div class="track"><span class="k">cold</span><div class="barwrap"><div class="fill cold" style="width:79.6%"></div></div><span class="val">6.2 ms</span></div>
+      </div>
+    </div>
+    <p class="lede dim">Cold reads here are OS-page-cache-warm. Only sac had a servable daemon catalog on the box; token/soroswap cold serving needs a catalog rebuilt over their existing cold artifacts.</p>
+  </section>
+
+  <section>
+    <h2><span class="n">6</span>Direct in-process read (no serve path)</h2>
+    <p class="lede"><code>store.Get</code> = RocksDB point read (compressed value); <code>GetLedgerRaw</code> adds the zstd decode. Cold ≈ hot; both decode-bound.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>profile</th><th>store.Get (compressed)</th><th>hot GetLedgerRaw</th><th>cold GetLedgerRaw</th></tr></thead>
+      <tbody>
+        <tr><td>sac</td><td>0.63 ms</td><td>8.2 ms</td><td>7.9 ms</td></tr>
+        <tr><td>token</td><td>0.62 ms</td><td>7.4 ms</td><td>7.3 ms</td></tr>
+        <tr><td>soroswap</td><td>0.16 ms</td><td>4.6 ms</td><td>3.7 ms</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <h2><span class="n">7</span>End-to-end (synthesized: ingest + query)</h2>
+    <p class="lede">e2e = ingest + hot query at the same percentile. Summing per-stage percentiles is a conservative upper bound; commit→queryable (~1–2 ms) is treated as negligible.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>profile</th><th>endpoint</th><th>e2e p50</th><th>e2e p99</th></tr></thead>
+      <tbody>
+        <tr class="grp"><td>sac</td><td>getLedgers</td><td>~696.7 ms</td><td>~752.9 ms</td></tr>
+        <tr><td></td><td>getTransaction</td><td>~147.4 ms</td><td>~170.7 ms</td></tr>
+        <tr><td></td><td>getEvents</td><td>~137.1 ms</td><td>~157.3 ms</td></tr>
+        <tr class="grp"><td>token</td><td>getLedgers</td><td>~680.7 ms</td><td>~715.3 ms</td></tr>
+        <tr><td></td><td>getTransaction</td><td>~148.1 ms</td><td>~169.5 ms</td></tr>
+        <tr><td></td><td>getEvents</td><td>~137.4 ms</td><td>~154.7 ms</td></tr>
+        <tr class="grp"><td>soroswap</td><td>getLedgers</td><td>~432.5 ms</td><td>~456.0 ms</td></tr>
+        <tr><td></td><td>getTransaction</td><td>~88.3 ms</td><td>~103.0 ms</td></tr>
+        <tr><td></td><td>getEvents</td><td>~81.1 ms</td><td>~93.4 ms</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <h2><span class="n">8</span>Method &amp; caveats</h2>
+    <p class="lede">Harness: <code>TestServeE2E_ProfileLatency</code> (hot) and <code>TestServeE2E_ColdQueryLatency</code> (cold);
+      direct read via <code>BenchmarkHotGetLedgerRaw</code>. Real ledgers fed through the live hot path
+      (no freeze); cold served from pre-frozen artifacts. Percentiles are nearest-rank.</p>
+    <ul class="find">
+      <li>The chunk head is contract-deploy warmup, ~40× lighter than steady state; measurements skip 200 warmup ledgers and measure ledgers 10202–10221.</li>
+      <li>getLedgers p99 is over the budget-capped sample count (71–127), less robust than the 500-rep getTransaction/getEvents p99s.</li>
+      <li>Reference toy baseline (1-tx/1-event ledger): full ~4.5 ms, ingest ~3.0 ms, visible ~1.5 ms — ~40× lighter than real ingest; not a production number.</li>
+      <li>Per-ledger commit→query <em>visibility</em> is not reported for real profiles: under heavy ingestion the sequential poller lags the commit frontier, so that span measures poller lag, not visibility. <code>ingest</code> and the query-latency pass are the reliable metrics.</li>
+    </ul>
+  </section>
+
+  <footer>
+    Data: <code>latency.csv</code> · full notes: <code>README.md</code> · driver: <code>tools/bench-suite/run-e2e-latency-suite.sh</code>
+  </footer>
+</div>
+<script>
+  (function () {
+    var btn = document.getElementById('themeToggle');
+    btn.addEventListener('click', function () {
+      var root = document.documentElement;
+      var cur = root.getAttribute('data-theme');
+      var dark = cur ? cur === 'dark'
+        : window.matchMedia('(prefers-color-scheme: dark)').matches;
+      root.setAttribute('data-theme', dark ? 'light' : 'dark');
+    });
+  })();
+</script>
+</body>
+</html>
