@@ -78,6 +78,33 @@ go run ./tools/fhbench --url http://127.0.0.1:8000 --endpoint all --tier both \
 | `--limit`       | `50`                     | Page limit for range/events requests |
 | `--chunk-size`  | `10000`                  | Ledgers per chunk — must match the daemon's geometry (see below) |
 | `--sample-size` | `100`                    | Target tx-hash samples per tier for `getTransaction` |
+| `--event-terms` | (none)                   | getEvents OR-union term sweep: comma-separated distinct-term counts, e.g. `1,4,8,15` |
+| `--event-vocab` | `500`                    | Events sampled per tier to harvest the term vocabulary for `--event-terms` |
+
+### getEvents index-term sweep (`--event-terms`)
+
+By default the getEvents load rotates no-filter / `type=contract` / `type=system`
+— all **index-unselective** (the type constraint isn't indexed), so every request
+scans the whole window and filters in Go. That measures the worst case, not the
+path the index accelerates.
+
+`--event-terms` measures the selective path as a function of **index-term count**.
+A *term* is one indexed constraint: a distinct contract ID, or a distinct topic
+value at a distinct position (0–2) — exactly the eventstore index's term model.
+Before timing, fhbench harvests a real vocabulary of both kinds from unfiltered
+getEvents over each tier, then for each requested count *N* it builds a getEvents
+request whose filters **OR-union** *N* real terms and runs a full load. The report
+adds a `terms` column so you get a term-count → latency curve:
+
+```sh
+go run ./tools/fhbench --endpoint getEvents --tier both --event-terms 1,4,8,15
+```
+
+Terms pack into homogeneous filters (contract-only and topic-only, ≤5 each) so
+they are OR'd, never AND'd, staying within the protocol's 5-filter / 5-per-filter
+caps (so up to ~25 terms are expressible; the sweep is meant for ≤15). Topic terms
+are built as `["*"×pos, value, "**"]` — position-anchored but length-flexible, so
+they match their source events.
 
 ### How it works
 

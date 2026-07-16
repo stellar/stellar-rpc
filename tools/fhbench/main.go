@@ -32,6 +32,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -50,8 +51,19 @@ func main() {
 		// partition (hot half-chunk, cold oldest full chunk), not correctness.
 		chunkSize  = flag.Uint("chunk-size", 10_000, "ledgers per chunk (matches the daemon's geometry)")
 		sampleSize = flag.Int("sample-size", 100, "target transaction-hash samples per tier for getTransaction")
+		eventTerms = flag.String("event-terms", "",
+			"getEvents OR-union term sweep: comma-separated distinct-term counts (e.g. 1,4,8,15). "+
+				"Each run OR's that many real harvested contract-ID/topic terms. Empty = type-filter rotation.")
+		eventVocab = flag.Int("event-vocab", 500,
+			"events sampled per tier to harvest the contract-ID/topic term vocabulary for --event-terms")
 	)
 	flag.Parse()
+
+	terms, err := parseTermCounts(*eventTerms)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "fhbench:", err)
+		os.Exit(1)
+	}
 
 	if err := run(context.Background(), runConfig{
 		url:         *url,
@@ -62,6 +74,8 @@ func main() {
 		limit:       *limit,
 		chunkSize:   uint32(*chunkSize), //nolint:gosec // --chunk-size flag; never within range of a uint32 overflow
 		sampleSize:  *sampleSize,
+		eventTerms:  terms,
+		eventVocab:  *eventVocab,
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, "fhbench:", err)
 		os.Exit(1)
@@ -77,6 +91,24 @@ type runConfig struct {
 	limit       int
 	chunkSize   uint32
 	sampleSize  int
+	eventTerms  []int // getEvents OR-union term-count sweep (nil = type-filter rotation)
+	eventVocab  int
+}
+
+// parseTermCounts parses the --event-terms comma list into positive term counts.
+func parseTermCounts(s string) ([]int, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
+	var out []int
+	for _, part := range strings.Split(s, ",") {
+		n, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil || n < 1 {
+			return nil, fmt.Errorf("invalid --event-terms value %q (want positive integers)", part)
+		}
+		out = append(out, n)
+	}
+	return out, nil
 }
 
 // endpoints resolves the --endpoint selector to the concrete method list.
@@ -138,12 +170,35 @@ func run(ctx context.Context, cfg runConfig) error {
 		}
 	}
 
+	// Harvest the getEvents term vocabulary per tier (only for a --event-terms sweep).
+	vocab := map[string][]term{}
+	if len(cfg.eventTerms) > 0 && slices.Contains(eps, "getEvents") {
+		for _, tr := range tiers {
+			vs, err := harvestEventVocab(ctx, c, tr, cfg.eventVocab)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: harvesting %s tier event vocab: %v\n", tr.name, err)
+			}
+			fmt.Fprintf(os.Stderr, "harvested %d event terms in %s tier [%d,%d]\n", len(vs), tr.name, tr.first, tr.last)
+			vocab[tr.name] = vs
+		}
+	}
+
 	var results []result
 	for _, e := range eps {
 		for _, tr := range tiers {
+			// getEvents with a term sweep runs once per requested term count.
+			if e == "getEvents" && len(cfg.eventTerms) > 0 {
+				for _, n := range cfg.eventTerms {
+					fmt.Fprintf(os.Stderr, "running getEvents[terms=%d] / %s tier for %s (%d workers) ...\n",
+						n, tr.name, cfg.duration, cfg.concurrency)
+					results = append(results,
+						runLoad(ctx, c, e, tr, nil, vocab[tr.name], n, cfg.concurrency, cfg.duration, cfg.limit))
+				}
+				continue
+			}
 			fmt.Fprintf(os.Stderr, "running %s / %s tier for %s (%d workers) ...\n", e, tr.name, cfg.duration, cfg.concurrency)
-			res := runLoad(ctx, c, e, tr, hashes[tr.name], cfg.concurrency, cfg.duration, cfg.limit)
-			results = append(results, res)
+			results = append(results,
+				runLoad(ctx, c, e, tr, hashes[tr.name], nil, 0, cfg.concurrency, cfg.duration, cfg.limit))
 		}
 	}
 
@@ -428,12 +483,153 @@ func sampleTxHashes(ctx context.Context, c *rpcClient, t tier, want int) ([]stri
 }
 
 // ---------------------------------------------------------------------------
+// getEvents term vocabulary + OR-union filter construction
+// ---------------------------------------------------------------------------
+
+// term is one indexed getEvents constraint harvested from real data: a contract
+// ID, or an exact topic value at a position. Each maps to exactly one eventstore
+// index term (contract-id term, or (position, value) topic term).
+type term struct {
+	contractID string // set iff a contract term (strkey)
+	topicPos   int    // topic position (topic terms only)
+	topicVal   string // base64 ScVal (topic terms only)
+}
+
+func (t term) isContract() bool { return t.contractID != "" }
+
+// maxIndexedTopicPos is the highest topic position harvested as a term. Positions
+// 0..2 leave room for a trailing "**" (zero-or-more) segment inside the 4-position
+// index, so the built filter stays length-flexible and matches its source events;
+// position 3 has no room for "**" and is skipped.
+const maxIndexedTopicPos = 2
+
+// eventInfoLite is the subset of a getEvents EventInfo fhbench reads to harvest terms.
+type eventInfoLite struct {
+	ContractID string   `json:"contractId"`
+	Topic      []string `json:"topic"` // base64 ScVals, one per position
+}
+
+type getEventsResponse struct {
+	Events []eventInfoLite `json:"events"`
+	Cursor string          `json:"cursor"`
+}
+
+// harvestEventVocab pages unfiltered getEvents over the tier and collects up to
+// `want` DISTINCT terms — contract IDs and (position,value) topic terms —
+// interleaved so a small term count still mixes both kinds.
+func harvestEventVocab(ctx context.Context, c *rpcClient, t tier, want int) ([]term, error) {
+	var (
+		contracts, topics []term
+		seenC             = map[string]bool{}
+		seenT             = map[string]bool{}
+		cursor            string
+	)
+	for len(contracts)+len(topics) < want {
+		params := map[string]any{"pagination": map[string]any{"limit": 200}}
+		if cursor == "" {
+			params["startLedger"] = t.first
+			params["endLedger"] = t.last + 1 // endLedger is exclusive; +1 includes t.last
+		} else {
+			params["pagination"] = map[string]any{"limit": 200, "cursor": cursor}
+		}
+		var resp getEventsResponse
+		if err := c.call(ctx, "getEvents", params, &resp); err != nil {
+			return interleaveTerms(contracts, topics), err
+		}
+		if len(resp.Events) == 0 {
+			break
+		}
+		for _, ev := range resp.Events {
+			if ev.ContractID != "" && !seenC[ev.ContractID] {
+				seenC[ev.ContractID] = true
+				contracts = append(contracts, term{contractID: ev.ContractID})
+			}
+			for pos, val := range ev.Topic {
+				if pos > maxIndexedTopicPos {
+					break
+				}
+				if val == "" {
+					continue
+				}
+				key := strconv.Itoa(pos) + ":" + val
+				if !seenT[key] {
+					seenT[key] = true
+					topics = append(topics, term{topicPos: pos, topicVal: val})
+				}
+			}
+		}
+		if resp.Cursor == "" || resp.Cursor == cursor {
+			break
+		}
+		cursor = resp.Cursor
+	}
+	return interleaveTerms(contracts, topics), nil
+}
+
+// interleaveTerms zips the two pools so any prefix of length N mixes contract and
+// topic terms rather than being all-contract then all-topic.
+func interleaveTerms(contracts, topics []term) []term {
+	out := make([]term, 0, len(contracts)+len(topics))
+	for i := 0; i < len(contracts) || i < len(topics); i++ {
+		if i < len(contracts) {
+			out = append(out, contracts[i])
+		}
+		if i < len(topics) {
+			out = append(out, topics[i])
+		}
+	}
+	return out
+}
+
+// buildEventTermsFilters builds an OR-union getEvents `filters` value from the
+// first n harvested terms. Terms pack into HOMOGENEOUS filters — contract-only
+// and topic-only — so distinct terms are OR'd, never AND'd (a filter mixing a
+// contract ID with a topic would AND them). Contract IDs pack <=5 per filter and
+// topic clauses <=5 per filter, so total filters stay within the protocol's
+// 5-filter cap for n up to 25.
+func buildEventTermsFilters(vocab []term, n int) []any {
+	n = min(n, len(vocab))
+	var (
+		contractIDs  []string
+		topicClauses []any
+	)
+	for _, t := range vocab[:n] {
+		if t.isContract() {
+			contractIDs = append(contractIDs, t.contractID)
+		} else {
+			topicClauses = append(topicClauses, topicSegments(t.topicPos, t.topicVal))
+		}
+	}
+	var filters []any
+	for i := 0; i < len(contractIDs); i += 5 {
+		filters = append(filters, map[string]any{"contractIds": contractIDs[i:min(i+5, len(contractIDs))]})
+	}
+	for i := 0; i < len(topicClauses); i += 5 {
+		filters = append(filters, map[string]any{"topics": topicClauses[i:min(i+5, len(topicClauses))]})
+	}
+	return filters
+}
+
+// topicSegments builds one topic filter constraining position pos to val: earlier
+// positions wildcarded with "*", val at pos, and a trailing "**" (zero-or-more) so
+// it terms the index at exactly (pos, val) yet stays length-flexible and matches
+// events with additional topics.
+func topicSegments(pos int, val string) []any {
+	segs := make([]any, 0, pos+2)
+	for range pos {
+		segs = append(segs, "*")
+	}
+	return append(segs, val, "**")
+}
+
+// ---------------------------------------------------------------------------
 // Load phase
 // ---------------------------------------------------------------------------
 
 type result struct {
 	endpoint  string
 	tier      string
+	terms     int // getEvents OR-union term count (0 = not a term-sweep row)
 	durations []time.Duration
 	errors    int
 	wall      time.Duration
@@ -449,7 +645,7 @@ func (r result) rps() float64 {
 // runLoad drives `concurrency` closed-loop workers against one (endpoint, tier)
 // for `dur`, recording each request's wall time and error status.
 func runLoad(ctx context.Context, c *rpcClient, endpoint string, t tier, hashes []string,
-	concurrency int, dur time.Duration, limit int,
+	vocab []term, eventTerms int, concurrency int, dur time.Duration, limit int,
 ) result {
 	ctx, cancel := context.WithTimeout(ctx, dur)
 	defer cancel()
@@ -471,7 +667,7 @@ func runLoad(ctx context.Context, c *rpcClient, endpoint string, t tier, hashes 
 			var local []sample
 			iter := 0
 			for ctx.Err() == nil {
-				params := buildRequest(endpoint, t, hashes, limit, rng, iter)
+				params := buildRequest(endpoint, t, hashes, vocab, eventTerms, limit, rng, iter)
 				iter++
 				if params == nil {
 					// No request buildable (e.g. getTransaction with no samples).
@@ -492,7 +688,7 @@ func runLoad(ctx context.Context, c *rpcClient, endpoint string, t tier, hashes 
 	wg.Wait()
 	wall := time.Since(start)
 
-	res := result{endpoint: endpoint, tier: t.name, wall: wall}
+	res := result{endpoint: endpoint, tier: t.name, terms: eventTerms, wall: wall}
 	for _, ls := range samples {
 		for _, s := range ls {
 			res.durations = append(res.durations, s.d)
@@ -506,7 +702,9 @@ func runLoad(ctx context.Context, c *rpcClient, endpoint string, t tier, hashes 
 
 // buildRequest returns the JSON-RPC params for one randomized request within the
 // tier, or nil when no request can be built (getTransaction with no samples).
-func buildRequest(endpoint string, t tier, hashes []string, limit int, rng *rand.Rand, iter int) any {
+func buildRequest(
+	endpoint string, t tier, hashes []string, vocab []term, eventTerms, limit int, rng *rand.Rand, iter int,
+) any {
 	span := t.last - t.first + 1
 	randStart := func() uint32 {
 		if span <= 1 {
@@ -528,10 +726,19 @@ func buildRequest(endpoint string, t tier, hashes []string, limit int, rng *rand
 		return map[string]any{"hash": hashes[rng.Intn(len(hashes))]}
 	case "getEvents":
 		startLedger := randStart()
-		endLedger := t.last
+		// Term-sweep mode: OR-union eventTerms real harvested contract/topic terms
+		// over the whole tier (endLedger is exclusive, so +1 includes t.last).
+		if eventTerms > 0 {
+			return map[string]any{
+				"startLedger": startLedger,
+				"endLedger":   t.last + 1,
+				"pagination":  map[string]any{"limit": limit},
+				"filters":     buildEventTermsFilters(vocab, eventTerms),
+			}
+		}
 		params := map[string]any{
 			"startLedger": startLedger,
-			"endLedger":   endLedger,
+			"endLedger":   t.last,
 			"pagination":  map[string]any{"limit": limit},
 			"filters":     []any{},
 		}
@@ -576,8 +783,8 @@ func quantile(sorted []time.Duration, q float64) time.Duration {
 // formatReport renders the per-(endpoint,tier) latency table as plain text.
 func formatReport(results []result) string {
 	var b bytes.Buffer
-	header := fmt.Sprintf("%-16s %-5s %8s %10s %9s %9s %9s %9s %8s\n",
-		"endpoint", "tier", "count", "RPS", "p50", "p90", "p99", "max", "errors")
+	header := fmt.Sprintf("%-16s %-5s %6s %8s %10s %9s %9s %9s %9s %8s\n",
+		"endpoint", "tier", "terms", "count", "RPS", "p50", "p90", "p99", "max", "errors")
 	b.WriteString("\n")
 	b.WriteString(header)
 	b.WriteString(dashes(len(header)-1) + "\n")
@@ -585,10 +792,14 @@ func formatReport(results []result) string {
 	for _, r := range results {
 		sorted := append([]time.Duration(nil), r.durations...)
 		slices.Sort(sorted)
+		termsStr := "-"
+		if r.terms > 0 {
+			termsStr = strconv.Itoa(r.terms)
+		}
 		fmt.Fprintf(
 			&b,
-			"%-16s %-5s %8d %10.1f %9s %9s %9s %9s %8d\n",
-			r.endpoint, r.tier, len(r.durations), r.rps(),
+			"%-16s %-5s %6s %8d %10.1f %9s %9s %9s %9s %8d\n",
+			r.endpoint, r.tier, termsStr, len(r.durations), r.rps(),
 			fmtDur(quantile(sorted, 0.50)),
 			fmtDur(quantile(sorted, 0.90)),
 			fmtDur(quantile(sorted, 0.99)),

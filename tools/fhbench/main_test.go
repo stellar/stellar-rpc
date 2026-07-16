@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -81,6 +83,67 @@ func TestComputeTiers(t *testing.T) {
 	small := computeTiers(ledgerWindow{oldest: 2, latest: 4_000}, chunkSize, "hot")
 	if len(small) != 1 || small[0].first != 2 || small[0].last != 4_000 {
 		t.Errorf("small-window hot tier = %+v, want [2,4000]", small)
+	}
+}
+
+func TestBuildEventTermsFilters(t *testing.T) {
+	// 6 contract + 6 topic terms, interleaved (any prefix mixes both kinds).
+	var contracts, topics []term
+	for i := 0; i < 6; i++ {
+		contracts = append(contracts, term{contractID: fmt.Sprintf("C%d", i)})
+		topics = append(topics, term{topicPos: i % 3, topicVal: fmt.Sprintf("T%d", i)})
+	}
+	vocab := interleaveTerms(contracts, topics) // 12 terms, alternating C,T,C,T...
+
+	// One term → exactly one filter.
+	if got := buildEventTermsFilters(vocab, 1); len(got) != 1 {
+		t.Fatalf("n=1: got %d filters, want 1", len(got))
+	}
+
+	// All 12 terms: <=5 filters, every filter HOMOGENEOUS (OR, never AND), each
+	// group <=5, and all terms accounted for.
+	filters := buildEventTermsFilters(vocab, 12)
+	if len(filters) > 5 {
+		t.Fatalf("got %d filters, exceeds protocol max 5", len(filters))
+	}
+	nContract, nTopic := 0, 0
+	for _, raw := range filters {
+		m := raw.(map[string]any)
+		_, hasC := m["contractIds"]
+		_, hasT := m["topics"]
+		if hasC && hasT {
+			t.Errorf("filter mixes contractIds and topics — that ANDs them, breaking OR-union")
+		}
+		if hasC {
+			ids := m["contractIds"].([]string)
+			if len(ids) > 5 {
+				t.Errorf("contractIds group of %d exceeds 5", len(ids))
+			}
+			nContract += len(ids)
+		}
+		if hasT {
+			clauses := m["topics"].([]any)
+			if len(clauses) > 5 {
+				t.Errorf("topics group of %d exceeds 5", len(clauses))
+			}
+			nTopic += len(clauses)
+		}
+	}
+	if nContract != 6 || nTopic != 6 {
+		t.Errorf("term accounting: %d contract + %d topic, want 6 + 6", nContract, nTopic)
+	}
+
+	// topicSegments: pos i wildcards positions 0..i-1, exact val at i, trailing "**".
+	if got := topicSegments(2, "V"); !reflect.DeepEqual(got, []any{"*", "*", "V", "**"}) {
+		t.Errorf("topicSegments(2,V) = %v", got)
+	}
+	if got := topicSegments(0, "V"); !reflect.DeepEqual(got, []any{"V", "**"}) {
+		t.Errorf("topicSegments(0,V) = %v", got)
+	}
+
+	// n over the vocabulary size clamps instead of panicking.
+	if got := buildEventTermsFilters(vocab, 1000); len(got) == 0 {
+		t.Errorf("n>len(vocab) should still build filters from the whole vocab")
 	}
 }
 
@@ -268,7 +331,7 @@ func TestRunLoadSmoke(t *testing.T) {
 	})
 
 	tr := tier{name: "hot", first: 50, last: 100}
-	res := runLoad(context.Background(), newRPCClient(srv.URL), "getLedgers", tr, nil, 2, 150*time.Millisecond, 10)
+	res := runLoad(context.Background(), newRPCClient(srv.URL), "getLedgers", tr, nil, nil, 0, 2, 150*time.Millisecond, 10)
 	if len(res.durations) == 0 {
 		t.Fatalf("runLoad recorded no samples")
 	}
