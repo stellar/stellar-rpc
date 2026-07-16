@@ -1,0 +1,54 @@
+# Full-history daemon config — local pubnet run, query POC.
+#
+# Retention: 2 chunks (= 20,000 ledgers; a chunk is 10,000 ledgers).
+# Start point: "now" — pin the earliest ledger to the start of the chunk that
+#              contains the current network tip. NO genesis backfill; the daemon
+#              starts at the latest ledger reachable from the history archives
+#              (the frontier captive core reads) and ingests forward from there.
+#
+# Fill in the two REQUIRED paths under [ingestion], then run:
+#   stellar-rpc full-history --config pubnet-2chunk.toml
+
+[service]
+# Base dir for the catalog + all storage trees. Created if missing.
+default_data_dir = "/tmp/fullhistory-pubnet"
+
+[retention]
+# "now" = start at the current tip's chunk (no backfill from genesis).
+# PINNED on first start — to change it later you must wipe default_data_dir.
+earliest_ledger = "now"
+# 2 chunks retained = 20,000 ledgers behind the tip.
+retention_chunks = 2
+
+[ingestion]
+# REQUIRED: path to a stellar-core config file that defines NETWORK_PASSPHRASE
+# for pubnet and a valid tier-1 quorum. See README.md for how to get one.
+captive_core_config = "/ABSOLUTE/PATH/TO/captive-core-pubnet.cfg"
+
+# REQUIRED: pubnet history archives (the network frontier + backfill source).
+history_archive_urls = [
+  "https://history.stellar.org/prd/core-live/core_live_001",
+  "https://history.stellar.org/prd/core-live/core_live_002",
+  "https://history.stellar.org/prd/core-live/core_live_003",
+]
+
+# Optional: path to the stellar-core binary. Defaults to "stellar-core" on PATH.
+# stellar_core_binary_path = "/opt/homebrew/bin/stellar-core"
+
+# Optional: captive-core working dir. Defaults to <default_data_dir>/captive-core.
+# captive_core_storage_path = "/tmp/fullhistory-pubnet/captive-core"
+
+[serve]
+# Setting endpoint turns ON the JSON-RPC read server (getLedgers,
+# getTransactions, getTransaction, getEvents) + /health, /ready, /metrics.
+# Leave empty to run a pure ingestion daemon with no reads.
+endpoint = "localhost:8000"
+
+[backfill]
+# No [backfill.datastore] block => no bulk lake. With earliest_ledger = "now"
+# there is nothing below the current chunk to backfill, so the daemon replays
+# only the current chunk through captive core from the archives, then goes live.
+
+[logging]
+level = "info"    # trace|debug|info|warn|error
+format = "text"   # text|json
