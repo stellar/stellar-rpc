@@ -8,7 +8,7 @@ Every query is admitted against a single immutable snapshot of the **serving map
 
 A small in-memory **registry** owns the serving map. When a storage operation changes what is servable, such as freezing a chunk, replacing a transaction hash index, discarding a hot database, or advancing the retention floor, the registry creates a new View, applies the change, and atomically publishes it. Queries already in flight continue using the View they admitted with, while newly admitted queries observe the updated View.
 
-Deletion safety is time-based rather than reader-tracked. Every request runs under a fixed deadline. Once a resource is removed from the current View, no newly admitted query can reach it. Any query that can still reach it must have admitted an older View and must finish before its deadline. The lifecycle therefore delays physical destruction until a grace period longer than the maximum request lifetime has elapsed.
+Deletion is deferred rather than reader-tracked. Every request runs under a fixed deadline. Once a resource is removed from the current View, no newly admitted query can reach it, and physical destruction waits out a grace period longer than the maximum request lifetime, so queries holding an older View can finish against it ([The reaper](#the-reaper)).
 
 The following terms are used throughout this document.
 
@@ -54,11 +54,11 @@ These races occur while ingestion, freezing, index replacement, discard, and pru
 The design uses four mechanisms:
 
 1. Every query resolves against one immutable View of the serving map, so routing decisions never mix storage states (H1).
-2. The registry publishes a new View whenever the serving map changes.
-3. The reaper destroys retired resources only after they have been unreachable for a grace period longer than the maximum request lifetime, so nothing a request can reach is destroyed while it runs (H2, H4).
+2. The registry publishes a new View whenever the serving map changes, for example when a freeze adds cold artifacts or prune advances the retention floor.
+3. The reaper destroys retired resources only after they have been unreachable for a grace period longer than the maximum request lifetime, and every close of a shared handle drains in-flight operations, so nothing a request can reach is destroyed while it runs (H2, H4).
 4. The registry maintains the `latest` watermark so queries never observe partially ingested ledgers (H3).
 
-Together, these mechanisms let ingestion, lifecycle operations, and queries proceed concurrently without requiring readers to coordinate with writers. Queries perform two atomic loads during admission, then use ordinary immutable data for the rest of the request. They do not acquire locks or participate in reference counting.
+Together, these mechanisms let ingestion, lifecycle operations, and queries proceed concurrently without requiring readers to coordinate with writers. Queries perform two atomic loads at admission and never register with the registry, hold reference counts, or block on writers.
 
 ```mermaid
 flowchart TB
@@ -72,25 +72,20 @@ flowchart TB
     CAT[("Catalog")] -.->|"startup rebuild"| V
 
     subgraph REG["registry"]
-        V["current View<br/>floor · hot · cold · indexes"]
+        V["current View<br/>floor · hot · cold · index coverage"]
         W["latest watermark"]
         HOT["hot DB handles"]
-        IDX["window .idx readers"]
-        CACHE["cold reader caches"]
         REAP["reaper"]
     end
 
     Q["Query"] -->|"load latest"| W
     Q -->|"load View"| V
+    Q -.->|"opens per request"| FILES["cold files: .pack, events, .idx"]
 
     V -->|"references"| HOT
-    V -->|"references"| IDX
-    V -.->|"opens on demand"| CACHE
 
-    REAP -->|"retire / close after T"| HOT
-    REAP -->|"retire / close after T"| IDX
-    REAP -->|"evict / close after T"| CACHE
-    REAP -->|"unlink / remove after T"| FS["retired files and dirs"]
+    REAP -->|"close after T"| HOT
+    REAP -->|"unlink after T"| FILES
 ```
 
 ---
@@ -105,7 +100,7 @@ Each View records:
 - the retention floor used by queries admitted with that View,
 - the hot stores,
 - the cold artifacts available for each chunk, and
-- the transaction hash indexes for each window.
+- the transaction hash index coverage for each window.
 
 The registry is rebuilt from the catalog during startup before the server begins accepting requests.
 
@@ -130,11 +125,10 @@ type ColdChunk struct {
 }
 
 type IndexCoverage struct {
-    Window WindowID
+    Window geometry.TxHashIndexID
     Lo, Hi chunk.ID // the frozen .idx's actual coverage, not the window bounds:
                     // Hi trails the tip while the window is current, and Lo is
                     // the retention floor at build time
-    Idx    *txhash.ColdReader
 }
 ```
 
@@ -143,8 +137,8 @@ type IndexCoverage struct {
 Each field exists for a specific reason.
 
 - **`hot` stores shared handles.** Each hot chunk has one registry-owned `hotchunk.DB` instance used by ingestion and queries.
-- **`cold` holds flags, not open readers.** A `ColdChunk` entry only says the chunk's artifact is frozen and servable. The reader object itself is opened on demand through the reader caches ([Open-handle management](#open-handle-management)): with thousands of cold chunks, holding every reader open would cost gigabytes, unlike the handful of hot databases and window indexes the View references directly.
-- **`indexes` stores transaction hash readers.** Each in-retention window has one current `.idx` reader.
+- **`cold` holds flags, not open readers.** A `ColdChunk` entry only says the chunk's artifact is frozen and servable. The reader itself is opened per request ([Open-handle management](#open-handle-management)): with thousands of cold chunks, holding every reader open would cost gigabytes, unlike the handful of hot databases the View references directly.
+- **`indexes` stores coverage metadata, not readers.** Each in-retention window has one current coverage entry; the `.idx` file itself is opened per request ([Open-handle management](#open-handle-management)).
 - **`latest` is stored outside the View.** The serving map changes only at chunk boundaries and lifecycle transitions, while `latest` advances every ledger. Keeping it separate avoids copying the View every few seconds.
 
 ### Admission
@@ -201,7 +195,7 @@ Its rule is:
 
 > A resource that was reachable from a published View may be destroyed only after it has been unreachable for at least grace period **T**.
 
-A resource becomes **unreachable** when it has been removed from the current View and can no longer be returned by reader caches. A resource is **destroyed** when it is permanently closed or removed.
+A resource becomes **unreachable** when it has been removed from the current View. A resource is **destroyed** when it is permanently closed or removed.
 
 ```go
 type Reaper struct {
@@ -216,16 +210,23 @@ Every read handler runs under an enforced request deadline **D**. The grace peri
 T = maximum request timeout + safety margin
 ```
 
-This is enough because every query keeps exactly one admitted View for its entire lifetime. Once a resource is unpublished, no newly admitted query can reach it. Any query that can still reach it must have admitted an older View, and therefore must finish before its deadline **D**. Since **T > D**, the resource is not destroyed until all such queries should have completed.
+The grace period preserves availability. A query that admitted a View before a resource was unpublished may still be routed to that resource for the rest of its lifetime. Since **T > D**, the resource remains open and servable until every such query has passed its deadline, so lifecycle transitions do not fail requests already in flight.
 
-The same rule covers hot databases, transaction hash index readers, and cached cold readers.
+The grace period alone is not sufficient for memory safety, because the deadline bounds the response, not the handler goroutine. On timeout, the request duration limiter cancels the request context and returns an error to the client without waiting for the handler. A handler blocked in a call that cannot observe cancellation, such as a RocksDB read stalled on a slow disk, keeps running past **D** and can still hold a reference after **T**.
+
+Memory safety therefore comes from ownership and drain barriers, not from time:
+
+- **Hot databases**: the only shared handles. `rocksdb.Store` holds a read lock across every C call; `Close` flips a closed flag, then takes the write lock, so it waits for in-flight operations to drain and every later operation fails cleanly with a closed error.
+- **Cold readers and window indexes**: opened and closed by the request that uses them ([Open-handle management](#open-handle-management)). No other component ever closes them, so a close cannot race a read.
+
+A straggler that outlives **T** is harmless: `Close` waits out its in-flight operation, and any later operation fails with a closed error. For retired files, unlink does not disturb descriptors already open: a straggler keeps reading the unlinked file, and the space is reclaimed when it exits.
 
 Deletion follows this sequence:
 
 1. Remove the resource from the serving map.
 2. Record the catalog demotion, such as `"pruning"` or `"transient"`.
 3. Schedule the resource with the reaper.
-4. After **T**, close handles, unlink files, remove directories, and remove the catalog entry.
+4. After **T**: close retired hot databases, unlink retired files, remove directories, and remove the catalog entry.
 
 Only physical destruction is delayed. Catalog demotions still occur during the lifecycle run.
 
@@ -260,9 +261,9 @@ Every write-side transition that changes what is servable gets a registry hook. 
 | `openHotDBForChunk` flips `hot:chunk:{c}` to `"ready"` | Publish `hot[c] = stores` using the shared instance. | Publish after the catalog key flips to `"ready"` and before the chunk's first ledger commits, so the watermark can never enter a chunk the current View does not serve.                                       |
 | Per-ledger ingest cycle: atomic `batch.Commit(sync)` plus in-memory applies | `latest.Store(seq)` | Final step of the cycle, after every serving structure contains the ledger.                                                                                                                                   |
 | `processChunk` flips artifact keys to `"frozen"` | Publish `cold[c].{kind} = true` for each frozen kind. | Publish after the commit. During startup backfill this hook has no effect; the startup scan (last row) covers those chunks.                                                                                   |
-| Transaction index rebuild (`buildTxhashIndex`): a single atomic catalog write freezes the new coverage and demotes its predecessor to `"pruning"` | Replace the window's `IndexCoverage` entry with the new coverage and its reader. Hand the predecessor's reader to the reaper. | Publish after the atomic write. The predecessor's file deletion, previously `buildThenSweep`'s immediate unlink, now waits out the grace period, because queries holding older Views may still be reading it. |
-| `discardHotDBForChunk` | Remove `hot[c]` from the View and hand the hot database to the reaper. | Unpublish before catalog demotion and every destructive step.                                                                                                                                                 |
-| Retention prune | Publish the run's new floor, which also drops below-floor `cold`, `hot`, and `indexes` entries. | Gate, unpublish, demote, then destroy. The floor update removes below-floor resources before every demotion.                                                                                                  |
+| Transaction index rebuild (`buildTxhashIndex`): a single atomic catalog write freezes the new coverage and demotes its predecessor to `"pruning"` | Replace the window's `IndexCoverage` entry with the new coverage. Schedule the predecessor's `.idx` unlink with the reaper. | Publish after the atomic write. The predecessor's file deletion, previously `buildThenSweep`'s immediate unlink, now waits out the grace period, because queries holding older Views may still open and read it. Coverage file names encode their `Lo-Hi` range, so an older View's entry opens its own generation of the index, never the replacement. |
+| Hot database discard (`DiscardHotChunk`) | Remove `hot[c]` from the View and hand the hot database to the reaper. | Unpublish before catalog demotion and every destructive step.                                                                                                                                                 |
+| Retention prune | Publish the run's new floor, which also drops below-floor `cold`, `hot`, and `indexes` entries. | Gate, unpublish, demote, then schedule destruction with the reaper. The floor update removes below-floor resources before every demotion.                                                                                                  |
 | Startup `serveReads()` | Build the initial View from the catalog scan: `"ready"` hot keys, `"frozen"` chunk keys, frozen coverages, and the calculated floor. | Complete before the lifecycle goroutine starts, so no freeze can land between the scan and the hooks becoming live.                                                                                           |
 
 Four ordering notes matter:
@@ -281,41 +282,34 @@ Together, these hooks maintain the read-side coverage property: at every publica
 
 ## Open-handle management
 
-The registry manages three kinds of serving resources. Each uses a different lifetime policy based on its access pattern and resource cost.
+The registry manages two kinds of serving resources, with opposite lifetime policies.
 
 | Resource | Policy |
 | --- | --- |
-| Hot databases | Always open |
-| Window transaction indexes (`txhash.ColdReader`) | Always open |
-| Per-chunk cold readers (`ledger.ColdReader`, `eventstore.ColdReader`) | Open on demand through per-kind LRU caches |
+| Hot databases | Always open, shared by ingestion and queries |
+| Cold files (chunk packfiles, events indexes, window `.idx`) | Opened and closed by each request |
+
+Handles are cheap to create and expensive to share: an open or mmap costs microseconds, while a shared handle needs close coordination with every reader. The policies follow.
 
 ### Hot databases
 
-Hot databases remain open from `openHotDBForChunk` until the reaper destroys them after discard.
+Hot databases remain open from `openHotDBForChunk` until the reaper destroys them after discard. Each hot chunk has a single shared RocksDB instance owned by the registry; ingestion and queries use the same handle concurrently, and its close drains in-flight operations ([The reaper](#the-reaper)).
 
-Each hot chunk has a single shared RocksDB instance owned by the registry. Ingestion and queries use the same handle concurrently. RocksDB supports concurrent reads and writes on a single database instance.
+### Cold readers and window indexes
 
-### Transaction hash indexes
+Every cold resource is opened by the request that needs it and closed when the request finishes with it. Only the owner closes a reader, so a close never races a read, and retirement needs no reader tracking ([The reaper](#the-reaper)).
 
-Each in-retention window keeps one `txhash.ColdReader` open.
+The MVP does no caching here. Each open re-reads and re-parses what it needs.
 
-These readers maintain only the state needed to service lookups efficiently. Keeping them open also simplifies index replacement because older Views continue using the superseded reader until the reaper closes it after the grace period.
+### Deferred: caching parsed state
 
-### Cold readers
+An open re-reads and re-parses the reader's metadata: the events reader loads its MPHF and each packfile loads its offsets index. For a frequently hit chunk the reads are served from the OS page cache, but the parsing and allocation repeat on every open.
 
-Cold readers are opened on demand.
+If this shows up in profiles, add a bounded cache of the parsed state, keyed by chunk. Only data with no close method goes in it; handles never do. Evicting data is harmless, so the cache needs nothing from the reaper or the serving map, and it can be added later without changing this design.
 
-Full history contains thousands of chunks and continues to grow. Keeping readers open for every cold artifact would consume substantial memory while providing little benefit for infrequently accessed data. Instead, the registry records only whether an artifact is available, and reader objects are managed through bounded per-kind LRU caches.
+### Platform assumption
 
-Ledger and event readers use separate caches because their resource costs differ significantly. Separate caches also prevent heavy event traffic from evicting ledger readers needed by other query paths.
-
-### Interaction with the reaper
-
-Reader caches follow the same lifetime rules as every other serving resource.
-
-When a chunk is removed from the serving map, its cached readers are also retired. The reaper delays closing those readers until the grace period has elapsed, ensuring that no admitted query can still be using them.
-
-Removing cached readers when a chunk is unpublished also guarantees deterministic cleanup. Otherwise, a lightly used reader could remain in the cache indefinitely and keep an unlinked file open until it was eventually evicted.
+Per-request opens with deferred unlink rely on POSIX unlink semantics: an unlinked file stays readable through existing descriptors and mappings, and its name is immediately reusable. Linux and macOS provide this. Windows does not provide this reliably: memory-mapped files cannot be deleted while mapped, so the reaper's unlink would need retry semantics there.
 
 ---
 
@@ -359,7 +353,7 @@ Routing resolves each chunk independently.
 ```go
 func (v *View) resolve(c chunk.ID, k Kind) (Store, error) {
     if v.cold[c].has(k) {
-        return coldReaders(c, k)
+        return openColdReaders(c, k)
     }
     if hs, ok := v.hot[c]; ok {
         return hs.store(k)
@@ -421,7 +415,7 @@ Instead, the router probes the transaction indexes in two stages:
 The router supplies `TxReader` with:
 
 - the hot transaction indexes,
-- the window transaction indexes, and
+- the window index coverages, whose `.idx` files the lookup opens as it probes, and
 - a ledger source backed by `resolve(chunk, Ledgers)`.
 
 This preserves the existing lookup semantics while allowing `TxReader` to operate across both hot and cold storage.
@@ -467,7 +461,7 @@ The streaming workflow assumes the ingestion worker owns the hot RocksDB instanc
 
 This proposal transfers ownership to the registry. Each hot database is opened once, registered in the current View, and shared by both ingestion and queries until the reaper destroys it after discard.
 
-This change allows queries to access hot databases without opening additional RocksDB instances. It also changes the freeze source: freezing previously reopened the cleanly closed chunk read-only, and instead reads through the same shared handle, supplied via the backfill `HotProbe` seam.
+This change allows queries to access hot databases without opening additional RocksDB instances. It also changes the freeze source: today the backfill's `resolveHotSource` reopens the cleanly closed chunk read-only; under this proposal it is supplied the registry's shared handle instead.
 
 ### View updates
 
@@ -505,7 +499,6 @@ The catalog protocol is unchanged except for the delayed physical destruction of
 - **Datastore fallback below the floor.** The v1 `getLedgers` handler can fall back to the remote object store for pre-retention ledgers. v2 must either preserve that behavior as an explicit exception to R2 or remove it at cutover. This decision belongs to #772.
 - **Serving floor precision.** This design currently uses a chunk-aligned floor, so `oldestLedger` advances in 10,000-ledger steps. A ledger-precise floor would better match v1’s sliding window, but adds another floor concept.
 - **`getTransaction` probe parallelism.** The proposal uses sequential newest-first probing. If window count or tail latency becomes a problem, parallel probing can be added inside the lookup path without changing the routing model.
-- **Cache sizing.** Ledger and event reader cache capacities are implementation-time tuning parameters.
 
 ---
 
@@ -513,15 +506,25 @@ The catalog protocol is unchanged except for the delayed physical destruction of
 
 ### Explicit reader tracking
 
-Track active readers directly, either by reference-counting Views/resources or by holding a reader lock while a query runs.
+Track active readers directly, either by reference-counting Views and resources or by holding a reader lock while a query runs.
 
-This was not chosen because it adds work to every query: each request must acquire and release some reader state. This proposal avoids that by using the request deadline as the bound on reader lifetime. Queries only load `latest` and the current View at admission.
+The design already tracks readers at the operation level: the hot database wrapper holds a read lock for the duration of each call, which is what makes its close a drain barrier. This alternative is per-request tracking: a count held for the request's whole lifetime, letting the reaper destroy a resource the moment its count reaches zero instead of waiting out the grace period.
+
+This was not chosen because exact reclamation timing is not needed, and per-request counts handle the failure case worse. A request stuck past its deadline holds its count indefinitely and keeps the resource alive, while under the grace period the same straggler receives a closed error and terminates. A missed release also pins the resource forever, a bug class a dropped View pointer cannot have.
+
+Per-request tracking becomes necessary if a request type without an enforced deadline is ever added, such as a streaming subscription. The grace period's availability argument depends on **D** existing.
 
 ### Filesystem unlink semantics alone
 
-Rely on the filesystem to keep already-open files readable after they are unlinked.
+Rely on the filesystem to keep already-open files readable after they are unlinked, and unlink immediately at retirement with no grace period.
 
-This was not chosen because it only applies to already-open cold files. It does not protect RocksDB handles, cache misses that open a file after unlink, or other resource types that must be closed explicitly. This proposal uses the grace period uniformly for hot databases, cold readers, and index readers.
+The design adopts the first half: a request that opened a cold file before it was unlinked keeps reading it ([Open-handle management](#open-handle-management)). Immediate unlink was not chosen because it only protects files that are already open. A query holding an older View may open a chunk for the first time after prune has removed it, and would fail mid-request. Deferring the unlink by the grace period covers those late opens. Hot databases are unaffected either way: a RocksDB handle is not kept alive by unlink semantics, and its lifetime is governed by the drain barrier and the reaper.
+
+### Catalog snapshots instead of the View
+
+Take a RocksDB snapshot of the catalog at each admission instead of publishing an immutable View.
+
+A snapshot covers only metadata. It cannot share the hot database's single handle or keep files alive, so the registry, reaper, and watermark all remain. What it adds: per-request snapshot acquire and release across the CGO boundary, routing lookups as CGO reads instead of map lookups, and the serving rules evaluated in every reader instead of once at publish, all to re-derive state that changes only a few times a day. The View is the same repeatable read, built once per transition and loaded with one atomic pointer read.
 
 ---
 
