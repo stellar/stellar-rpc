@@ -51,6 +51,22 @@ const (
 	driverRunWall     = "run_wall" // hot only: whole-run wall-clock, seen by the driver
 )
 
+// Cold data-type and stage report labels, fixing the file/row order of the cold
+// CSVs (see fileSpecs). They MUST equal the strings the ingest engine emits
+// through MetricSink (ColdIngest's data_type, IngestStage's data_type/stage) —
+// they set the report ORDER. A label that drifts from the engine's is not dropped:
+// withUnknown appends any unrecognized row after the known ones; it only loses
+// its curated position.
+const (
+	coldTypeLedgers = "ledgers"
+	coldTypeTxhash  = "txhash"
+	coldTypeEvents  = "events"
+
+	coldStageTermIndex = "term_index"
+	coldStageWrite     = "write"
+	coldStageFinalize  = "finalize"
+)
+
 // fileSpec is one CSV file of the report: its basename (without .csv) and the
 // fixed top-to-bottom order of its rows.
 type fileSpec struct {
@@ -77,8 +93,8 @@ type fileSpec struct {
 //
 //nolint:gochecknoglobals // fixed report schema, read-only
 var fileSpecs = func() []fileSpec {
-	coldTypes := []string{ingest.DataTypeLedgers, ingest.DataTypeTxhash, ingest.DataTypeEvents}
-	coldStages := []string{ingest.StageTermIndex, ingest.StageWrite, ingest.StageFinalize}
+	coldTypes := []string{coldTypeLedgers, coldTypeTxhash, coldTypeEvents}
+	coldStages := []string{coldStageTermIndex, coldStageWrite, coldStageFinalize}
 
 	hotRows := make([]string, hotchunk.NumPhases)
 	for p := range hotchunk.NumPhases {

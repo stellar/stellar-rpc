@@ -44,6 +44,10 @@ type coldOptions struct {
 	// can look valid to later tooling, so point each run at a fresh dir.
 	ColdRoot string
 
+	// CatalogDir is the base dir the run-scoped scratch catalog is created
+	// under. Empty means ColdRoot.
+	CatalogDir string
+
 	// OutDir receives the CSV report.
 	OutDir string
 }
@@ -99,7 +103,11 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 		return fmt.Errorf("prepare --cold-out-dir write roots: %w", err)
 	}
 
-	cat, releaseCat, err := openScratchCatalog(layout, logger)
+	catalogBase := opts.CatalogDir
+	if catalogBase == "" {
+		catalogBase = opts.ColdRoot
+	}
+	cat, releaseCat, err := openScratchCatalog(catalogBase, layout, logger)
 	if err != nil {
 		return err
 	}

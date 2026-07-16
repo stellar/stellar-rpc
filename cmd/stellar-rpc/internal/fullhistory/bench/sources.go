@@ -149,7 +149,7 @@ func (p packBackend) RawLedgers(
 		for c := chunk.IDFromLedger(rng.From()); c <= chunk.IDFromLedger(rng.To()); c++ {
 			path := geometry.LedgerPackPath(p.root, c)
 			if _, err := os.Stat(path); err != nil {
-				yield(nil, fmt.Errorf("source pack missing: %w", err))
+				yield(nil, fmt.Errorf("stat source pack %s: %w", path, err))
 				return
 			}
 			sub := ledgerbackend.BoundedRange(max(rng.From(), c.FirstLedger()), min(rng.To(), c.LastLedger()))

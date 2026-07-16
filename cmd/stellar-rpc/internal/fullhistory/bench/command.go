@@ -126,6 +126,7 @@ func newColdCommand() *cobra.Command {
 		numChunks  int
 		workers    int
 		coldOutDir string
+		catalogDir string
 		outDir     string
 		prof       profileFlags
 	)
@@ -139,6 +140,7 @@ func newColdCommand() *cobra.Command {
 				NumChunks:  numChunks,
 				Workers:    workers,
 				ColdRoot:   coldOutDir,
+				CatalogDir: catalogDir,
 				OutDir:     outDir,
 			})
 		})
@@ -149,6 +151,8 @@ func newColdCommand() *cobra.Command {
 	fs.StringVar(&coldOutDir, "cold-out-dir", "",
 		"output root for cold artifacts (required; use a fresh dir — same-range "+
 			"re-runs overwrite, but leftovers from other ranges are never swept)")
+	fs.StringVar(&catalogDir, "catalog-dir", "",
+		"base dir for the run's scratch catalog; default: --cold-out-dir")
 	fs.StringVar(&outDir, "out", "bench-out", "CSV output dir")
 	markRequired(cmd, "start-chunk", "cold-out-dir")
 	return cmd
@@ -161,6 +165,7 @@ func newHotCommand() *cobra.Command {
 		numChunks  int
 		numLedgers uint32
 		hotDir     string
+		catalogDir string
 		outDir     string
 		prof       profileFlags
 	)
@@ -174,6 +179,7 @@ func newHotCommand() *cobra.Command {
 				NumChunks:  numChunks,
 				NumLedgers: numLedgers,
 				HotRoot:    hotDir,
+				CatalogDir: catalogDir,
 				OutDir:     outDir,
 			})
 		})
@@ -184,6 +190,8 @@ func newHotCommand() *cobra.Command {
 	fs.Uint32Var(&numLedgers, "num-ledgers", 0, "cap on ledgers ingested from the range's start (0 = whole range)")
 	fs.StringVar(&hotDir, "hot-dir", "",
 		"scratch root for the hot RocksDBs (required; leftover chunk DBs are wiped for a fixed starting state)")
+	fs.StringVar(&catalogDir, "catalog-dir", "",
+		"base dir for the run's scratch catalog; default: --hot-dir")
 	fs.StringVar(&outDir, "out", "bench-out", "CSV output dir")
 	markRequired(cmd, "start-chunk", "hot-dir")
 	return cmd

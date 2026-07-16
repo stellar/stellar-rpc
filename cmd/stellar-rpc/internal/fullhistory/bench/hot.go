@@ -42,6 +42,10 @@ type hotOptions struct {
 	// comparable from a fixed starting state).
 	HotRoot string
 
+	// CatalogDir is the base dir the run-scoped scratch catalog is created
+	// under. Empty means HotRoot.
+	CatalogDir string
+
 	// OutDir receives the CSV report.
 	OutDir string
 }
@@ -81,7 +85,11 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 	if err := config.PrepareRoots(layout.HotRoot()); err != nil {
 		return fmt.Errorf("prepare --hot-dir hot root: %w", err)
 	}
-	cat, releaseCat, err := openScratchCatalog(layout, logger)
+	catalogBase := opts.CatalogDir
+	if catalogBase == "" {
+		catalogBase = opts.HotRoot
+	}
+	cat, releaseCat, err := openScratchCatalog(catalogBase, layout, logger)
 	if err != nil {
 		return err
 	}

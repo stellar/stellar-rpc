@@ -12,22 +12,22 @@ import (
 // subdirectory names used on disk. (The hot tier keys its per-ledger phases by
 // hotchunk.Phase, not by data type — see MetricSink.HotPhase.)
 const (
-	DataTypeLedgers = "ledgers"
-	DataTypeTxhash  = "txhash"
-	DataTypeEvents  = "events"
+	dataTypeLedgers = "ledgers"
+	dataTypeTxhash  = "txhash"
+	dataTypeEvents  = "events"
 )
 
-// Cold stage labels reported via MetricSink.IngestStage — the per-stage seams
-// (term-index / store-write samples plus a per-chunk finish) that let a
-// benchmark sink report stage-level timings from production writers without
-// re-instrumenting. The shared per-ledger
+// Cold stage labels reported via MetricSink.IngestStage. These sit at the seams
+// the rpc-hack bench collectors measured (per-stage term-index / store-write
+// samples plus a per-chunk finish), so a CSV sink can reproduce those reports
+// from production writers without re-instrumenting. The shared per-ledger
 // ExtractLedgerEvents walk is NOT a stage: it belongs to no single data type,
 // so it is its own ledger-scoped signal (MetricSink.ColdExtract), mirroring the
 // hot path's type-less extract phase.
 const (
-	StageTermIndex = "term_index" // per-event term derivation + mirror update (events cold)
-	StageWrite     = "write"      // store write / pack append
-	StageFinalize  = "finalize"   // per-chunk commit (pack trailer, index build, .bin write)
+	stageTermIndex = "term_index" // per-event term derivation + mirror update (events cold)
+	stageWrite     = "write"      // store write / pack append
+	stageFinalize  = "finalize"   // per-chunk commit (pack trailer, index build, .bin write)
 )
 
 // coldStagePairs is the set of (data_type, stage) pairs the cold path actually
@@ -38,12 +38,12 @@ const (
 //
 //nolint:gochecknoglobals // fixed label set, read-only
 var coldStagePairs = []struct{ dataType, stage string }{
-	{DataTypeLedgers, StageWrite},
-	{DataTypeLedgers, StageFinalize},
-	{DataTypeTxhash, StageFinalize},
-	{DataTypeEvents, StageTermIndex},
-	{DataTypeEvents, StageWrite},
-	{DataTypeEvents, StageFinalize},
+	{dataTypeLedgers, stageWrite},
+	{dataTypeLedgers, stageFinalize},
+	{dataTypeTxhash, stageFinalize},
+	{dataTypeEvents, stageTermIndex},
+	{dataTypeEvents, stageWrite},
+	{dataTypeEvents, stageFinalize},
 }
 
 // MetricSink receives ingest timing and volume signals. Ingesters report their
@@ -87,7 +87,7 @@ type MetricSink interface {
 	// them.
 	ColdExtract(d time.Duration, items int, err error)
 	// IngestStage reports one COLD writer's per-stage wall-clock inside an
-	// ingest/finalize call: stage is one of the Stage* constants (term_index,
+	// ingest/finalize call: stage is one of the stage* constants (term_index,
 	// write, finalize), items the stage's natural item count (0 where none
 	// applies). The whole-call ColdIngest signal cannot be decomposed by a
 	// sink after the fact, so the per-stage granularity the bench reports need is
@@ -339,7 +339,7 @@ func NewPrometheusSink(registry *prometheus.Registry, namespace string) *Prometh
 		sink.hotPhaseItems[p] = hotPhaseItemsVec.WithLabelValues(p.String())
 		sink.hotPhaseErrs[p] = hotPhaseErrsVec.WithLabelValues(p.String())
 	}
-	for _, dataType := range []string{DataTypeLedgers, DataTypeTxhash, DataTypeEvents} {
+	for _, dataType := range []string{dataTypeLedgers, dataTypeTxhash, dataTypeEvents} {
 		sink.cold[dataType] = ingestCollectors{
 			duration: coldDuration.WithLabelValues(dataType),
 			items:    coldItems.WithLabelValues(dataType),

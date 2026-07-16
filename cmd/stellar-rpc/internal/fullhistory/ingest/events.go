@@ -59,7 +59,7 @@ func newEventsCold(bucketDir string, chunkID chunk.ID, sink MetricSink) (*events
 		mirror:    events.NewBitmaps(),
 		offsets:   events.NewLedgerOffsets(chunkID.FirstLedger()),
 		bucketDir: bucketDir,
-		metrics:   newColdMetrics(sink, DataTypeEvents),
+		metrics:   newColdMetrics(sink, dataTypeEvents),
 	}, nil
 }
 
@@ -106,7 +106,7 @@ func (e *eventsCold) finalize(ctx context.Context) error {
 		e.metrics.emit(time.Since(start), err)
 		return err
 	}
-	e.metrics.sink.IngestStage(DataTypeEvents, StageFinalize, time.Since(start), 0)
+	e.metrics.sink.IngestStage(dataTypeEvents, stageFinalize, time.Since(start), 0)
 	e.metrics.emit(time.Since(start), nil)
 	return nil
 }
@@ -169,7 +169,7 @@ func (e *eventsCold) ingestSeq(seq uint32, closedAt int64, txEvents []sdkingest.
 		}
 		writeDur += time.Since(wstart)
 	}
-	e.metrics.sink.IngestStage(DataTypeEvents, StageTermIndex, termDur, len(payloads))
+	e.metrics.sink.IngestStage(dataTypeEvents, stageTermIndex, termDur, len(payloads))
 
 	// offsets.Append LAST — it is the commit point for the ledger. Its cost folds
 	// into the write stage, so term_index and write are the two per-ledger stages
@@ -182,7 +182,7 @@ func (e *eventsCold) ingestSeq(seq uint32, closedAt int64, txEvents []sdkingest.
 	//nolint:gosec // the overflow guard above proved startID+len(payloads) fits in uint32
 	oerr := e.offsets.Append(seq, uint32(len(payloads)))
 	writeDur += time.Since(wstart)
-	e.metrics.sink.IngestStage(DataTypeEvents, StageWrite, writeDur, len(payloads))
+	e.metrics.sink.IngestStage(dataTypeEvents, stageWrite, writeDur, len(payloads))
 	if oerr != nil {
 		return 0, fmt.Errorf("offsets append seq %d: %w", seq, oerr)
 	}

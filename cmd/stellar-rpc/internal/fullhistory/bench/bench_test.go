@@ -246,7 +246,7 @@ func TestPackBackendMultiChunkRange(t *testing.T) {
 	for _, err := range (packBackend{root: packDir}).RawLedgers(
 		context.Background(), ledgerbackend.BoundedRange(chunk.ID(2).FirstLedger(), chunk.ID(2).FirstLedger()),
 	) {
-		require.ErrorContains(t, err, "source pack missing")
+		require.ErrorContains(t, err, "stat source pack")
 	}
 }
 

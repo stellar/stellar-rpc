@@ -38,7 +38,7 @@ func newLedgerCold(packPath string, chunkID chunk.ID, sink MetricSink) (*ledgerC
 	if err != nil {
 		return nil, fmt.Errorf("ledger.NewColdWriter %s: %w", packPath, err)
 	}
-	return &ledgerCold{path: packPath, writer: w, metrics: newColdMetrics(sink, DataTypeLedgers)}, nil
+	return &ledgerCold{path: packPath, writer: w, metrics: newColdMetrics(sink, dataTypeLedgers)}, nil
 }
 
 // write appends one ledger's raw wire bytes. raw ALIASES the source stream's
@@ -50,7 +50,7 @@ func (c *ledgerCold) write(seq uint32, raw []byte) error {
 		c.metrics.observe(time.Since(start), 0, err) // terminal: observe emits the per-writer signal
 		return fmt.Errorf("AppendLedger(seq=%d): %w", seq, err)
 	}
-	c.metrics.sink.IngestStage(DataTypeLedgers, StageWrite, time.Since(start), 1)
+	c.metrics.sink.IngestStage(dataTypeLedgers, stageWrite, time.Since(start), 1)
 	c.metrics.observe(time.Since(start), 1, nil)
 	return nil
 }
@@ -62,7 +62,7 @@ func (c *ledgerCold) finalize(_ context.Context) error {
 		c.metrics.emit(time.Since(start), err)
 		return err
 	}
-	c.metrics.sink.IngestStage(DataTypeLedgers, StageFinalize, time.Since(start), 0)
+	c.metrics.sink.IngestStage(dataTypeLedgers, stageFinalize, time.Since(start), 0)
 	c.metrics.emit(time.Since(start), nil)
 	return nil
 }

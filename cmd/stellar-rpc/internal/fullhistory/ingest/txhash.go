@@ -46,7 +46,7 @@ func newTxhashCold(binPath string, chunkID chunk.ID, sink MetricSink) (*txhashCo
 		binPath: binPath,
 		chunkID: chunkID,
 		entries: make([]txhash.ColdEntry, 0, 1<<16),
-		metrics: newColdMetrics(sink, DataTypeTxhash),
+		metrics: newColdMetrics(sink, dataTypeTxhash),
 	}, nil
 }
 
@@ -84,7 +84,7 @@ func (t *txhashCold) finalize(_ context.Context) error {
 	})
 	err := txhash.WriteColdBin(t.binPath, t.entries)
 	if err == nil {
-		t.metrics.sink.IngestStage(DataTypeTxhash, StageFinalize, time.Since(start), len(t.entries))
+		t.metrics.sink.IngestStage(dataTypeTxhash, stageFinalize, time.Since(start), len(t.entries))
 	}
 	t.metrics.emit(time.Since(start), err)
 	return err

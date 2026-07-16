@@ -3,7 +3,6 @@ package bench
 import (
 	"fmt"
 	"os"
-	"runtime"
 	"runtime/pprof"
 
 	"github.com/spf13/cobra"
@@ -21,11 +20,12 @@ type profileFlags struct {
 func (p *profileFlags) bind(cmd *cobra.Command) {
 	fs := cmd.Flags()
 	fs.StringVar(&p.cpuProfile, "cpuprofile", "", "write a Go CPU profile to PATH")
-	fs.StringVar(&p.memProfile, "memprofile", "", "write a Go heap profile to PATH (taken at run end)")
+	fs.StringVar(&p.memProfile, "memprofile", "",
+		"write a Go allocation profile to PATH (read it with `go tool pprof -alloc_space`)")
 }
 
-// around runs fn under the configured profiles: the CPU profile spans fn, and
-// the heap profile is written after fn returns (before stores close).
+// around runs fn under the optional profiles: the CPU profile spans the whole
+// run; the heap profile is written once fn returns (see writeHeapProfile).
 func (p *profileFlags) around(logger *supportlog.Entry, fn func() error) error {
 	if p.cpuProfile != "" {
 		f, err := os.Create(p.cpuProfile)
@@ -49,6 +49,14 @@ func (p *profileFlags) around(logger *supportlog.Entry, fn func() error) error {
 	return err
 }
 
+// writeHeapProfile writes the heap profile to --memprofile. Read it as an
+// ALLOCATION profile (`go tool pprof -alloc_space`): that view is cumulative —
+// every byte the run allocated, whether or not it was later freed — so writing
+// it here, after the run's stores have closed, still captures the full picture.
+// The default `-inuse_space` view is a live snapshot taken after teardown and
+// under-reports, so it is not what this profile is for. No GC is forced:
+// alloc_space is unaffected by collection, so there is nothing to gain by
+// perturbing the run.
 func (p *profileFlags) writeHeapProfile(logger *supportlog.Entry) {
 	f, err := os.Create(p.memProfile)
 	if err != nil {
@@ -56,7 +64,6 @@ func (p *profileFlags) writeHeapProfile(logger *supportlog.Entry) {
 		return
 	}
 	defer func() { _ = f.Close() }()
-	runtime.GC()
 	if err := pprof.WriteHeapProfile(f); err != nil {
 		logger.Errorf("write heap profile: %v", err)
 		return
