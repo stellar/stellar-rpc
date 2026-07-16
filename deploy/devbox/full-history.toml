@@ -6,7 +6,8 @@
 # this file can never pin the wrong retention on first start.
 #
 # Paths in here are IN-CONTAINER paths; the RUNBOOK's docker run mounts
-# the host config directory at /config (read-only) and a data volume at /data.
+# the host config directory at /config (read-only) and a host data
+# directory at /data.
 
 [service]
 # Everything the daemon stores (catalog, chunk stores, captive-core work dir)
@@ -28,13 +29,21 @@ admin_endpoint = "0.0.0.0:8001"
 # override it.
 
 [retention]
-# FILL: "genesis", "now", or a decimal ledger number aligned to a 10,000-ledger
-# chunk boundary (e.g. 58370000). PINNED ON FIRST START: once the daemon has
-# run, this value is stored next to the data and every later start must match
-# it — changing it means wiping the data volume. "genesis" backfills all of
-# pubnet history (weeks of work + a lot of disk); "now" skips backfill and
-# starts at the live tip; a recent chunk-aligned number gives a bounded,
-# real backfill. The literal "FILL" below makes an unfilled config fail at
+# FILL: one of —
+#   "genesis"    backfill ALL of pubnet history from ledger 2 (weeks of work
+#                and a lot of disk);
+#   "now"        no backfill: pin at the live tip, start captive core, and
+#                serve forward from here on;
+#   "<number>"   a QUOTED decimal ledger that is the first ledger of a chunk,
+#                giving a bounded, real backfill. Chunks are 10,000 ledgers
+#                starting at ledger 2, so valid numbers are N*10000 + 2:
+#                "2", "10002", ..., "63480002". For any recent ledger L, the
+#                chunk start containing it is L - ((L - 2) % 10000).
+# "0", other unaligned numbers, and unquoted integers are all invalid — the
+# key is a TOML string and the daemon validates its form at startup.
+# PINNED ON FIRST START: once the daemon has run, this value is stored next
+# to the data and every later start must match it — changing it means wiping
+# the data volume. The literal "FILL" below makes an unfilled config fail at
 # startup validation instead of silently defaulting to "genesis".
 earliest_ledger = "FILL"
 

@@ -49,26 +49,32 @@ docker save stellar-rpc-v2:dev | gzip | ssh <devbox> 'gunzip | docker load'
 
 ## 3. Prepare the devbox
 
-- Create a config directory and copy the two config files into it (from the repo root):
+- Create the config and data directories, then copy the two config files over (scp from the repo root):
 
 ```bash
-ssh <devbox> mkdir -p '~/stellar-rpc-v2/config'
+ssh <devbox> mkdir -p '~/stellar-rpc-v2/config' '~/stellar-rpc-v2/data'
 scp deploy/devbox/full-history.toml deploy/devbox/captive-core-pubnet.cfg \
   <devbox>:~/stellar-rpc-v2/config/
 ```
 
 - Edit `~/stellar-rpc-v2/config/full-history.toml` on the box and resolve every `FILL:`:
-  - `[retention] earliest_ledger` — REQUIRED; the daemon refuses to start while it says `"FILL"`. Pinned forever on first start; see the comments in the file.
+  - `[retention] earliest_ledger` — REQUIRED; the daemon refuses to start while it says `"FILL"`. Accepted values: `"genesis"` (all of history), `"now"` (no backfill — pin at the live tip, start captive core, serve forward), or a quoted chunk-start ledger (`N*10000 + 2`, e.g. `"63480002"`) for a bounded backfill. Pinned forever on first start; details in the file's comments.
   - `[retention] retention_chunks` — 0 (keep everything) is a fine start; changeable later.
   - `[backfill.datastore]` / `[backfill.bsb]` — uncomment and fill to backfill from a ledger lake; leave commented to backfill by captive-core replay from the history archives (slow but zero-config).
-- Data lives in a named volume (`stellar-rpc-v2-data` below). Sizing: full pubnet history is large, and after a long downtime the box transiently needs up to ~2× the retained size while re-backfilling before pruning catches up — leave headroom.
+
+### Where the data lives
+
+- Inside the container everything is under `/data` — that is `[service] default_data_dir` in the TOML. The daemon lays out its trees beneath it: `catalog/rocksdb` (the chunk catalog), `ledgers/` (immutable ledger packs), `events/` (immutable event segments), `txhash/raw` + `txhash/index`, `hot/` (per-chunk hot RocksDB stores), and `captive-core/` (core's working directory). One mount covers all of it; the `[storage]` TOML section exists to relocate individual trees but is not needed here.
+- The §4 `docker run` mounts the directory made above: `-v ~/stellar-rpc-v2/data:/data`. To put the data on a bigger disk, make the directory there and mount that path instead (`mkdir -p /mnt/<bigdisk>/stellar-rpc-v2-data`, then `-v /mnt/<bigdisk>/stellar-rpc-v2-data:/data`). The container runs as root, so plain `mkdir` is enough — no chown.
+- (A Docker named volume — `-v stellar-rpc-v2-data:/data`, no mkdir needed — also works, but it hides the data under `/var/lib/docker/volumes/` on the root disk; an explicit directory is easier to find, size, and wipe.)
+- Sizing: full pubnet history is large, and after a long downtime the box transiently needs up to ~2× the retained size while re-backfilling before pruning catches up — leave headroom.
 
 ## 4. Run
 
 ```bash
 docker run -d --restart unless-stopped --name stellar-rpc-v2 \
   -v ~/stellar-rpc-v2/config:/config:ro \
-  -v stellar-rpc-v2-data:/data \
+  -v ~/stellar-rpc-v2/data:/data \
   -p 8000:8000 -p 8001:8001 \
   stellar-rpc-v2:dev \
   full-history --config /config/full-history.toml
@@ -108,12 +114,65 @@ RPC_URL=http://host:8000 ADMIN_URL=http://host:8001 ./smoke.sh   # remote form
 
 - getLedgerEntries only answers while the live core runs (post-backfill) — its query server rides the live captive core. First devbox run is also the first real exercise of that query server: watch `docker logs` for core's query-server startup line.
 
-## 6. Operate
+## 6. Measure request latency
+
+Two views of the same request: what the client experiences (curl timing, includes the network) and what the server measured for itself (exact quantiles of queue-wait + handler execution) — the difference between them is network/connection overhead. Run the curls on the devbox itself (or through `ssh -L 8000:localhost:8000 <devbox>`) to take the WAN out of the numbers; hit `http://<devbox>:8000` directly to include it.
+
+- One timed getLedgers, client-side (start ledger taken from getHealth):
+
+```bash
+OLDEST=$(curl -s http://localhost:8000 -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' | jq -r '.result.oldestLedger')
+
+curl -s -o /dev/null http://localhost:8000 -H 'Content-Type: application/json' \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getLedgers\",\"params\":{\"startLedger\":$OLDEST,\"pagination\":{\"limit\":5}}}" \
+  -w 'total=%{time_total}s  ttfb=%{time_starttransfer}s  connect=%{time_connect}s\n'
+```
+
+- One timed getTransaction (pluck a real hash from a recent window first):
+
+```bash
+LATEST=$(curl -s http://localhost:8000 -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getLatestLedger"}' | jq -r '.result.sequence')
+
+HASH=$(curl -s http://localhost:8000 -H 'Content-Type: application/json' \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getTransactions\",\"params\":{\"startLedger\":$((LATEST - 99)),\"pagination\":{\"limit\":1}}}" \
+  | jq -r '.result.transactions[0].txHash')
+
+curl -s -o /dev/null http://localhost:8000 -H 'Content-Type: application/json' \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getTransaction\",\"params\":{\"hash\":\"$HASH\"}}" \
+  -w 'total=%{time_total}s  ttfb=%{time_starttransfer}s\n'
+```
+
+- Quick client-side distribution — 20 shots of the same request, sorted:
+
+```bash
+for i in $(seq 20); do
+  curl -s -o /dev/null -w '%{time_total}\n' http://localhost:8000 \
+    -H 'Content-Type: application/json' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getTransaction\",\"params\":{\"hash\":\"$HASH\"}}"
+done | sort -n | awk '{a[NR]=$1} END {print "p50", a[int(NR*0.5)]; print "p90", a[int(NR*0.9)]; print "max", a[NR]}'
+```
+
+- The server's own numbers — exact per-method quantiles (p50/p75/p90/p99 + max + count + avg) since process start, measured from queue entry to handler return (everything but the network). Same data through two doors:
+
+```bash
+# the custom JSON-RPC method (works during backfill too):
+curl -s http://localhost:8000 -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"metrics"}' | jq '.result.rpc.getTransaction'
+
+# the admin listener (per-series keys are prefixed, e.g. "rpc.getTransaction"):
+curl -s http://localhost:8001/latency.json | jq '."rpc.getTransaction"'
+```
+
+- The same `metrics`/`latency.json` responses also carry the ingestion side (`ingest.read` / `ingest.write` / `ingest.e2e` per-ledger timings and `backfill.chunk`), so one call shows both halves of the benchmark.
+
+## 7. Operate
 
 - `docker stop stellar-rpc-v2` sends SIGTERM = clean shutdown (`docker rm` it before a fresh `docker run`).
 - The daemon supervises itself in-process: an ingestion failure tears down and restarts the run loop inside the container (serving re-gates during the restart); the container itself stays up.
-- Restart after downtime resumes from the catalog on the data volume; expect a catch-up backfill phase (gated again) before serving resumes.
-- `[retention] earliest_ledger` is pinned to the volume: to change it, wipe the volume (`docker volume rm stellar-rpc-v2-data`) and re-backfill from scratch.
+- Restart after downtime resumes from the catalog in the data directory; expect a catch-up backfill phase (gated again) before serving resumes.
+- `[retention] earliest_ledger` is pinned to the data directory: to change it, wipe the directory (`rm -rf ~/stellar-rpc-v2/data`, recreate it) and re-backfill from scratch.
 
 ## Appendix — bare-metal build (debug only)
 

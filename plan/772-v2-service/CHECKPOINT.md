@@ -470,13 +470,13 @@ type CoreOpener interface {
 - Files added:
   - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/deploy/devbox/captive-core-pubnet.cfg` — pubnet passphrase + SDF quorum; deliberately free of HTTP_PORT/PEER_PORT/query/BUCKET_DIR_PATH keys (the daemon injects those from `[ingestion]`; the SDK's strict handling rejects file-set values that clash).
   - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/deploy/devbox/full-history.toml` — every key verified against the strict schema in config.go; in-container paths (`/config`, `/data`); `[serving]` endpoint `0.0.0.0:8000` + admin `0.0.0.0:8001`; pubnet SDF archive URLs.
-  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/deploy/devbox/RUNBOOK.md` — build→transfer→prepare→run→watch→operate + bare-metal appendix; measured build numbers.
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/deploy/devbox/RUNBOOK.md` — build→transfer→prepare→run→watch→measure-latency→operate + bare-metal appendix; measured build numbers. The measure-latency section times getLedgers/getTransaction from the client (curl -w single-shot + 20-shot distribution) and reads the server's exact per-method quantiles (`metrics` method / admin `/latency.json`) — the gap between the two is network overhead.
   - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/deploy/devbox/smoke.sh` — all 11 served methods + getFeeStats stub + admin `/metrics` and `/latency.json`; three phase branches (backfill-gated / gate-open-empty-range / healthy); exits non-zero on any contract mismatch.
 - Files changed: `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/Makefile` — `docker-build` target over the EXISTING `cmd/stellar-rpc/docker/Dockerfile` (no new Dockerfile), `DOCKER_IMAGE ?= stellar-rpc-v2:dev`, optional `DOCKER_PLATFORM`, `STELLAR_CORE_VERSION`/`REPOSITORY_VERSION` build-arg passthrough; added to `.PHONY`.
 - Exact commands (also in the RUNBOOK):
   - build: `make docker-build STELLAR_CORE_VERSION=27.1.0-3365.3589a696b.noble DOCKER_PLATFORM=linux/amd64`
   - transfer: `docker save stellar-rpc-v2:dev | gzip | ssh <devbox> 'gunzip | docker load'`
-  - run: `docker run -d --restart unless-stopped --name stellar-rpc-v2 -v ~/stellar-rpc-v2/config:/config:ro -v stellar-rpc-v2-data:/data -p 8000:8000 -p 8001:8001 stellar-rpc-v2:dev full-history --config /config/full-history.toml` (detached container survives ssh logout by construction; the restart policy also survives devbox reboots)
+  - run: `mkdir -p ~/stellar-rpc-v2/config ~/stellar-rpc-v2/data` once, then `docker run -d --restart unless-stopped --name stellar-rpc-v2 -v ~/stellar-rpc-v2/config:/config:ro -v ~/stellar-rpc-v2/data:/data -p 8000:8000 -p 8001:8001 stellar-rpc-v2:dev full-history --config /config/full-history.toml` (bind-mounted host directory for the data — Karthik's preference over a named volume; detached container survives ssh logout by construction)
 - Deviations from the stage doc + why:
   - `earliest_ledger` placeholder is the literal uncommented string `"FILL"`, not a commented-out key: an absent key silently defaults to `"genesis"` and PINS it immutably on first start; the literal instead fails `validateEarliestForm` loudly before anything is pinned (verified in-image).
   - smoke.sh has a third phase branch beyond the doc's two: gate-open-but-empty-range (`data stores are not initialized`), observed live in verification — with `earliest_ledger="now"` backfill has no complete chunks, the gate opens immediately, and the range is empty until the first live commit. RUNBOOK documents the same transient.
@@ -491,10 +491,11 @@ type CoreOpener interface {
   - `go build ./...` exit 0, `go vet ./...` exit 0.
 - Warnings / notes for the devbox run:
   - apt.stellar.org noble has NO arm64 stellar-core packages — an arm64 image build fails at the core install; amd64 is the only option until SDF publishes arm64 noble debs.
-  - Fill `earliest_ledger` BEFORE first start; changing it afterwards requires wiping the data volume (`docker volume rm stellar-rpc-v2-data`).
+  - Fill `earliest_ledger` BEFORE first start; changing it afterwards requires wiping the mounted data directory (`rm -rf ~/stellar-rpc-v2/data`, recreate, restart). Chunk-aligned means `N*10000 + 2` (chunks start at ledger 2) — the TOML comments carry the formula; the first shipped comment had a misaligned example (58370000), caught by Karthik's question and fixed pre-commit of the follow-up.
   - With `"now"`: expect the brief `data stores are not initialized` getHealth error between gate-open and the first live commit (smoke.sh and RUNBOOK both handle/document it).
   - smoke.sh's getTransactions/getEvents non-empty assertions assume activity in the most recent 100 pubnet ledgers — safe on pubnet.
   - The built image (real pin) is still loaded locally as `stellar-rpc-v2:dev`, ready for `docker save`; rebuild any time with the make target.
+  - Deferred on Karthik's request (2026-07-15, post-stage): he prefers Python over shell for this tooling — rework the deploy/devbox scripting (smoke.sh and/or the RUNBOOK §6 latency snippets) as a Python script in a follow-up; not part of this stage's scope.
 - Plan status: stages 1–7 all COMPLETE. The #772 v2-service staged plan is COMPLETE. Remaining work is operational (Karthik's devbox run with filled placeholders), not plan-scoped.
 
 ---
