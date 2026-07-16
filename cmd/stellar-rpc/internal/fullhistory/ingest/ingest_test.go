@@ -936,21 +936,28 @@ func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 		coldDirsAt(coldDir, chunkID), nil, Config{Ledgers: true, Txhash: true, Events: true},
 	))
 
-	// Reference #1 — txhash: sorted, truncated ExtractTxHashes over the sentinels.
+	// Reference #1 — txhash: sorted, truncated entries for every resolvable
+	// hash (outer, plus a fee-bump's inner) over the sentinels.
 	var wantEntries []txhash.ColdEntry
 	for _, seq := range sentinels {
-		hashes, err := sdkingest.ExtractTxHashes(xdr.LedgerCloseMetaView(raws[seq]))
+		txEvents, err := sdkingest.ExtractLedgerEvents(xdr.LedgerCloseMetaView(raws[seq]))
 		require.NoError(t, err)
-		for _, h := range hashes {
+		for i := range txEvents {
 			var ke txhash.ColdEntry
-			copy(ke.Key[:], h[:txhash.ColdKeySize])
+			copy(ke.Key[:], txEvents[i].Hash[:txhash.ColdKeySize])
 			ke.Seq = seq
 			wantEntries = append(wantEntries, ke)
+			if txEvents[i].FeeBump {
+				var ike txhash.ColdEntry
+				copy(ike.Key[:], txEvents[i].InnerHash[:txhash.ColdKeySize])
+				ike.Seq = seq
+				wantEntries = append(wantEntries, ike)
+			}
 		}
 	}
 	slices.SortFunc(wantEntries, func(a, b txhash.ColdEntry) int { return bytes.Compare(a.Key[:], b.Key[:]) })
 	gotEntries := fhtest.ReadColdBin(t, txhashBinPath(filepath.Join(coldDir, dataTypeTxhash)))
-	require.Equal(t, wantEntries, gotEntries, "cold .bin must match the old ExtractTxHashes path byte-for-byte")
+	require.Equal(t, wantEntries, gotEntries, "cold .bin must hold every resolvable hash, sorted and truncated")
 
 	// Reference #2 — events: PayloadsFromLedgerEvents with chunk-relative IDs
 	// assigned in ingest (ascending-seq) order, mapped to their term keys.
@@ -1624,3 +1631,91 @@ func TestWriteColdChunk_EmptyStream(t *testing.T) {
 
 // The earlier-artifact-stays-on-disk invariant when a LATER writer's finalize
 // fails is covered by TestColdChunk_Finalize_FirstErrorStopsRemaining above.
+
+// buildLCMWithFeeBump builds a single-transaction V2 LCM whose transaction is a
+// fee-bump with a real txFEE_BUMP_INNER_SUCCESS result, returning the outer and
+// inner hashes.
+func buildLCMWithFeeBump(t *testing.T, seq uint32) (xdr.LedgerCloseMeta, [32]byte, [32]byte) {
+	t.Helper()
+	inner := xdr.Transaction{
+		SourceAccount: xdr.MustMuxedAddress(keypair.MustRandom().Address()),
+		Ext:           xdr.TransactionExt{V: 1, SorobanData: &xdr.SorobanTransactionData{}},
+	}
+	envelope := xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTxFeeBump,
+		FeeBump: &xdr.FeeBumpTransactionEnvelope{Tx: xdr.FeeBumpTransaction{
+			Fee:       999,
+			FeeSource: xdr.MustMuxedAddress(keypair.MustRandom().Address()),
+			InnerTx: xdr.FeeBumpTransactionInnerTx{
+				Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+				V1:   &xdr.TransactionV1Envelope{Tx: inner},
+			},
+		}},
+	}
+	outerHash, err := network.HashTransactionInEnvelope(envelope, testPassphrase)
+	require.NoError(t, err)
+	innerHash, err := network.HashTransactionInEnvelope(xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx, V1: envelope.FeeBump.Tx.InnerTx.V1,
+	}, testPassphrase)
+	require.NoError(t, err)
+
+	ops := []xdr.OperationResult{}
+	result := xdr.TransactionResult{FeeCharged: 200, Result: xdr.TransactionResultResult{
+		Code: xdr.TransactionResultCodeTxFeeBumpInnerSuccess,
+		InnerResultPair: &xdr.InnerTransactionResultPair{
+			TransactionHash: innerHash,
+			Result: xdr.InnerTransactionResult{Result: xdr.InnerTransactionResultResult{
+				Code: xdr.TransactionResultCodeTxSuccess, Results: &ops,
+			}},
+		},
+	}}
+	comp := []xdr.TxSetComponent{{
+		Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
+		TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
+			Txs: []xdr.TransactionEnvelope{envelope},
+		},
+	}}
+	lcm := xdr.LedgerCloseMeta{V: 2, V2: &xdr.LedgerCloseMetaV2{
+		LedgerHeader: xdr.LedgerHeaderHistoryEntry{Header: xdr.LedgerHeader{
+			ScpValue: xdr.StellarValue{CloseTime: xdr.TimePoint(0)}, LedgerSeq: xdr.Uint32(seq),
+		}},
+		TxSet: xdr.GeneralizedTransactionSet{V: 1, V1TxSet: &xdr.TransactionSetV1{
+			Phases: []xdr.TransactionPhase{{V: 0, V0Components: &comp}},
+		}},
+		TxProcessing: []xdr.TransactionResultMetaV1{{
+			TxApplyProcessing: xdr.TransactionMeta{V: 3, V3: &xdr.TransactionMetaV3{}},
+			Result:            xdr.TransactionResultPair{TransactionHash: outerHash, Result: result},
+		}},
+	}}
+	return lcm, outerHash, innerHash
+}
+
+// TestTxhashColdWriter_FeeBumpBothHashes: a fee-bump ledger contributes two
+// .bin entries — the outer and the inner hash — both mapping to the same seq,
+// so the cold index resolves the transaction by either.
+func TestTxhashColdWriter_FeeBumpBothHashes(t *testing.T) {
+	chunkID := chunk.ID(0)
+	seq := chunkID.FirstLedger()
+	coldDir := t.TempDir()
+
+	ing, err := newTxhashCold(txhashBinPath(coldDir), chunkID, nil)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, ing.close()) }()
+
+	lcm, outerHash, innerHash := buildLCMWithFeeBump(t, seq)
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+	txEvents, _ := extractFor(t, raw)
+	require.NoError(t, ing.write(seq, txEvents))
+	require.NoError(t, ing.finalize(context.Background()))
+
+	entries := fhtest.ReadColdBin(t, txhashBinPath(coldDir))
+	require.Len(t, entries, 2)
+	keys := make([][]byte, 0, len(entries))
+	for i := range entries {
+		require.Equal(t, seq, entries[i].Seq)
+		keys = append(keys, entries[i].Key[:])
+	}
+	assert.Contains(t, keys, outerHash[:txhash.ColdKeySize])
+	assert.Contains(t, keys, innerHash[:txhash.ColdKeySize])
+}
