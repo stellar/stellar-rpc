@@ -360,9 +360,12 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 		rep.Failed = PhaseExtract
 		return rep, fmt.Errorf("extract ledger events seq %d: %w", seq, err)
 	}
-	txEntries := make([]txhash.Entry, len(txEvents))
+	txEntries := make([]txhash.Entry, 0, len(txEvents))
 	for i := range txEvents {
-		txEntries[i] = txhash.Entry{Hash: txEvents[i].Hash, LedgerSeq: seq}
+		txEntries = append(txEntries, txhash.Entry{Hash: txEvents[i].Hash, LedgerSeq: seq})
+		if txEvents[i].FeeBump {
+			txEntries = append(txEntries, txhash.Entry{Hash: txEvents[i].InnerHash, LedgerSeq: seq})
+		}
 	}
 
 	closedAt, err := lcm.LedgerCloseTime()
