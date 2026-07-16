@@ -245,5 +245,55 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 	// means the source stopped WITHOUT an error while the daemon ctx is still live —
 	// abnormal; surface a restartable error. (run()'s guard owns the clean-vs-restart
 	// classification.)
-	return errors.New("ingestion stream ended unexpectedly (source stopped with no error)")
+	return errStreamEnded
+}
+
+// errStreamEnded reports the stream stopping with no error while ctx is still
+// live.
+var errStreamEnded = errors.New("ingestion stream ended unexpectedly (source stopped with no error)")
+
+// BoundedIngestConfig configures RunBoundedIngestionLoop. Catalog must be bound
+// to the layout whose hot root the run writes; every hot DB the loop touches is
+// opened through it (the create bracket wipes any leftover chunk dir, so runs
+// always start from an empty DB).
+type BoundedIngestConfig struct {
+	// Stream must be bounded to the range to ingest: its end is what terminates
+	// the loop (the loop itself always requests an unbounded range).
+	Stream ledgerbackend.LedgerStream
+	// Resume is the first ledger to ingest; its chunk's hot DB is opened fresh.
+	Resume  uint32
+	Catalog *catalog.Catalog
+	// Boundary receives the id of each chunk the loop completes, as in the
+	// daemon's loop.
+	Boundary boundaryPublisher
+	Logger   *supportlog.Entry
+	Metrics  observability.Metrics
+	Sink     ingest.MetricSink
+}
+
+// RunBoundedIngestionLoop runs the ingestion loop over a bounded stream: it
+// opens the resume chunk's hot DB through openHotDBForChunk and runs
+// runIngestionLoop until the stream ends. A bounded stream ending is the
+// expected termination (errStreamEnded), so unlike the daemon's unbounded run
+// it is remapped to a nil error rather than surfaced as a restartable failure.
+func RunBoundedIngestionLoop(ctx context.Context, cfg BoundedIngestConfig) error {
+	hotDB, err := openHotDBForChunk(cfg.Catalog, chunk.IDFromLedger(cfg.Resume), cfg.Logger)
+	if err != nil {
+		return fmt.Errorf("open hot DB for resume ledger %d: %w", cfg.Resume, err)
+	}
+	// The loop's first deferred statement takes ownership of the close.
+	err = runIngestionLoop(ctx, ingestionLoopConfig{
+		Stream:   cfg.Stream,
+		Resume:   cfg.Resume,
+		HotDB:    hotDB,
+		Catalog:  cfg.Catalog,
+		Boundary: cfg.Boundary,
+		Logger:   cfg.Logger,
+		Metrics:  cfg.Metrics,
+		Sink:     cfg.Sink,
+	})
+	if errors.Is(err, errStreamEnded) {
+		return nil
+	}
+	return err
 }

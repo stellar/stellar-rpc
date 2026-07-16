@@ -15,6 +15,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/bench"
 )
 
 func main() {
@@ -110,6 +111,7 @@ func main() {
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(genConfigFileCmd)
 	rootCmd.AddCommand(fullHistoryCmd)
+	rootCmd.AddCommand(bench.NewCommand())
 
 	if err := cfg.AddFlags(rootCmd); err != nil {
 		fmt.Fprintf(os.Stderr, "could not parse config options: %v\n", err)
