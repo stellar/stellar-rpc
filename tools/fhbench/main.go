@@ -95,6 +95,13 @@ type runConfig struct {
 	eventVocab  int
 }
 
+// maxSweepTerms is the largest --event-terms count guaranteed expressible: any
+// contract/topic split of n<=21 packs into <=5 homogeneous filters (ceil(c/5)+
+// ceil(t/5) <= 5), the protocol's per-request cap. From 22 up, a near-even split
+// (e.g. 11+11 -> 3+3 filters) exceeds the cap, so those are rejected up front
+// rather than failing per-request against the server.
+const maxSweepTerms = 21
+
 // parseTermCounts parses the --event-terms comma list into positive term counts.
 func parseTermCounts(s string) ([]int, error) {
 	if strings.TrimSpace(s) == "" {
@@ -105,6 +112,11 @@ func parseTermCounts(s string) ([]int, error) {
 		n, err := strconv.Atoi(strings.TrimSpace(part))
 		if err != nil || n < 1 {
 			return nil, fmt.Errorf("invalid --event-terms value %q (want positive integers)", part)
+		}
+		if n > maxSweepTerms {
+			return nil, fmt.Errorf(
+				"--event-terms value %d exceeds %d (a mixed contract/topic split past that "+
+					"can overflow the protocol's 5-filter cap)", n, maxSweepTerms)
 		}
 		out = append(out, n)
 	}
@@ -186,13 +198,25 @@ func run(ctx context.Context, cfg runConfig) error {
 	var results []result
 	for _, e := range eps {
 		for _, tr := range tiers {
-			// getEvents with a term sweep runs once per requested term count.
+			// getEvents with a term sweep runs once per requested term count. The
+			// count is clamped to the harvested vocabulary up front so the reported
+			// `terms` column is the number of terms actually OR'd, never an
+			// aspirational one the vocab could not honor.
 			if e == "getEvents" && len(cfg.eventTerms) > 0 {
 				for _, n := range cfg.eventTerms {
+					eff := min(n, len(vocab[tr.name]))
+					if eff == 0 {
+						fmt.Fprintf(os.Stderr, "skipping getEvents[terms=%d] / %s tier: empty term vocabulary\n", n, tr.name)
+						continue
+					}
+					if eff < n {
+						fmt.Fprintf(os.Stderr, "warning: %s tier vocab has only %d terms; running terms=%d instead of %d\n",
+							tr.name, eff, eff, n)
+					}
 					fmt.Fprintf(os.Stderr, "running getEvents[terms=%d] / %s tier for %s (%d workers) ...\n",
-						n, tr.name, cfg.duration, cfg.concurrency)
+						eff, tr.name, cfg.duration, cfg.concurrency)
 					results = append(results,
-						runLoad(ctx, c, e, tr, nil, vocab[tr.name], n, cfg.concurrency, cfg.duration, cfg.limit))
+						runLoad(ctx, c, e, tr, nil, vocab[tr.name], eff, cfg.concurrency, cfg.duration, cfg.limit))
 				}
 				continue
 			}
@@ -387,7 +411,11 @@ type tier struct {
 
 // computeTiers partitions the served window into hot and/or cold tiers.
 //   - hot  = the last chunkSize/2 ledgers before latest (recently ingested; the
-//     RocksDB hot path plus the live chunk).
+//     RocksDB hot path), clamped to the chunk CONTAINING latest: the daemon
+//     freezes complete chunks to cold, so ledgers below the live chunk's first
+//     ledger may already be cold-served — letting the hot tier span them would
+//     silently mix cold reads into the "hot" rows. The clamp trades a shorter
+//     hot span right after a chunk boundary for a pure-hot label.
 //   - cold = the oldest full chunk at or after oldest (a sealed chunk served from
 //     cold artifacts). A chunk is [k*chunkSize+2 .. (k+1)*chunkSize+1], matching
 //     the daemon's genesis-anchored geometry (FirstLedgerSeq=2).
@@ -401,6 +429,13 @@ func computeTiers(w ledgerWindow, chunkSize uint32, which string) []tier {
 		first := w.oldest
 		if w.latest > half {
 			first = w.latest - half + 1
+		}
+		// Clamp to the live chunk (the chunk containing latest) — everything below
+		// its first ledger is a complete chunk the daemon may have frozen cold.
+		if w.latest >= 2 {
+			if liveFirst := (w.latest-2)/chunkSize*chunkSize + 2; first < liveFirst {
+				first = liveFirst
+			}
 		}
 		if first < w.oldest {
 			first = w.oldest
@@ -439,9 +474,11 @@ type getTransactionsResponse struct {
 	Cursor string `json:"cursor"`
 }
 
-// sampleTxHashes pages getTransactions from the tier's first ledger, collecting
-// up to want distinct tx hashes that fall within the tier bounds. It stops at
-// want, on an empty/absent cursor, or after a page returns no transactions.
+// sampleTxHashes pages getTransactions from the tier MIDPOINT (the head of a
+// chunk is often deploy/setup warmup with far lighter ledgers than steady state,
+// so head-sampled hashes understate the by-hash read cost), collecting up to
+// want distinct tx hashes that fall within the tier bounds. It stops at want,
+// on an empty/absent cursor, or after a page returns no transactions.
 func sampleTxHashes(ctx context.Context, c *rpcClient, t tier, want int) ([]string, error) {
 	var (
 		hashes []string
@@ -451,7 +488,7 @@ func sampleTxHashes(ctx context.Context, c *rpcClient, t tier, want int) ([]stri
 	for len(hashes) < want {
 		params := map[string]any{"pagination": map[string]any{"limit": 200}}
 		if cursor == "" {
-			params["startLedger"] = t.first
+			params["startLedger"] = t.first + (t.last-t.first)/2
 		} else {
 			params["pagination"] = map[string]any{"limit": 200, "cursor": cursor}
 		}
@@ -516,7 +553,10 @@ type getEventsResponse struct {
 
 // harvestEventVocab pages unfiltered getEvents over the tier and collects up to
 // `want` DISTINCT terms — contract IDs and (position,value) topic terms —
-// interleaved so a small term count still mixes both kinds.
+// interleaved so a small term count still mixes both kinds. Harvesting starts at
+// the tier MIDPOINT, not its head: a chunk's head is often unrepresentative
+// (contract deploys / account setup on the synthetic profiles), and sweep
+// queries land anywhere in the tier, so terms should come from steady state.
 func harvestEventVocab(ctx context.Context, c *rpcClient, t tier, want int) ([]term, error) {
 	var (
 		contracts, topics []term
@@ -527,7 +567,7 @@ func harvestEventVocab(ctx context.Context, c *rpcClient, t tier, want int) ([]t
 	for len(contracts)+len(topics) < want {
 		params := map[string]any{"pagination": map[string]any{"limit": 200}}
 		if cursor == "" {
-			params["startLedger"] = t.first
+			params["startLedger"] = t.first + (t.last-t.first)/2
 			params["endLedger"] = t.last + 1 // endLedger is exclusive; +1 includes t.last
 		} else {
 			params["pagination"] = map[string]any{"limit": 200, "cursor": cursor}
@@ -585,8 +625,8 @@ func interleaveTerms(contracts, topics []term) []term {
 // first n harvested terms. Terms pack into HOMOGENEOUS filters — contract-only
 // and topic-only — so distinct terms are OR'd, never AND'd (a filter mixing a
 // contract ID with a topic would AND them). Contract IDs pack <=5 per filter and
-// topic clauses <=5 per filter, so total filters stay within the protocol's
-// 5-filter cap for n up to 25.
+// topic clauses <=5 per filter; any contract/topic split of n <= maxSweepTerms
+// (21) stays within the protocol's 5-filter cap (parseTermCounts rejects more).
 func buildEventTermsFilters(vocab []term, n int) []any {
 	n = min(n, len(vocab))
 	var (
@@ -680,6 +720,10 @@ func runLoad(ctx context.Context, c *rpcClient, endpoint string, t tier, hashes 
 					// Deadline hit mid-request; do not count the truncated request.
 					break
 				}
+				// Errored requests are tallied but excluded from the latency
+				// distribution — an error return (validation, out-of-range, 5xx)
+				// is not a served request, and its (often fast-fail) latency
+				// would skew the percentiles the table reports.
 				local = append(local, sample{d: elapsed, err: err != nil})
 			}
 			samples[worker] = local
@@ -691,10 +735,11 @@ func runLoad(ctx context.Context, c *rpcClient, endpoint string, t tier, hashes 
 	res := result{endpoint: endpoint, tier: t.name, terms: eventTerms, wall: wall}
 	for _, ls := range samples {
 		for _, s := range ls {
-			res.durations = append(res.durations, s.d)
 			if s.err {
 				res.errors++
+				continue
 			}
+			res.durations = append(res.durations, s.d)
 		}
 	}
 	return res
@@ -738,7 +783,7 @@ func buildRequest(
 		}
 		params := map[string]any{
 			"startLedger": startLedger,
-			"endLedger":   t.last,
+			"endLedger":   t.last + 1, // exclusive; +1 includes t.last, matching the sweep mode
 			"pagination":  map[string]any{"limit": limit},
 			"filters":     []any{},
 		}

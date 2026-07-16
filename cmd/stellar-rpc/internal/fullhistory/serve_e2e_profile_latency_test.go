@@ -52,6 +52,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -184,6 +185,213 @@ func harvestTxHashes(ctx context.Context, base string, startLedger uint32, want 
 		cursor = page.Cursor
 	}
 	return hashes
+}
+
+// fhTerm is one indexed getEvents constraint harvested from real data — a
+// contract ID, or an exact topic value at a position (0..2, leaving room for a
+// trailing "**") — mirroring tools/fhbench's term model so the e2e sweep and the
+// black-box fhbench sweep measure the same thing.
+type fhTerm struct {
+	contractID string // set iff a contract term (strkey)
+	topicPos   int    // topic position (topic terms only)
+	topicVal   string // base64 ScVal (topic terms only)
+}
+
+// termEventsPage is the subset of a getEvents page the term harvest reads.
+type termEventsPage struct {
+	Events []struct {
+		ContractID string   `json:"contractId"`
+		Topic      []string `json:"topic"`
+	} `json:"events"`
+	Cursor string `json:"cursor"`
+}
+
+// fetchTermEventsPage POSTs one unfiltered getEvents page — the first page spans
+// [startLedger, endExclusive), later pages resume from the cursor.
+func fetchTermEventsPage(
+	ctx context.Context, base string, startLedger, endExclusive uint32, cursor string,
+) (termEventsPage, bool) {
+	body := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"getEvents","params":`+
+		`{"startLedger":%d,"endLedger":%d,"pagination":{"limit":200}}}`, startLedger, endExclusive)
+	if cursor != "" {
+		body = fmt.Sprintf(
+			`{"jsonrpc":"2.0","id":1,"method":"getEvents","params":{"pagination":{"cursor":%q,"limit":200}}}`,
+			cursor)
+	}
+	var page termEventsPage
+	res, ok := resultMap(tryRPC(ctx, base+"/", body))
+	if !ok {
+		return page, false
+	}
+	raw, err := json.Marshal(res)
+	if err != nil {
+		return page, false
+	}
+	return page, json.Unmarshal(raw, &page) == nil
+}
+
+// termHarvest accumulates DISTINCT contract and topic terms from getEvents pages.
+type termHarvest struct {
+	contracts, topics []fhTerm
+	seenC, seenT      map[string]bool
+}
+
+func (h *termHarvest) absorb(page termEventsPage) {
+	for _, ev := range page.Events {
+		if ev.ContractID != "" && !h.seenC[ev.ContractID] {
+			h.seenC[ev.ContractID] = true
+			h.contracts = append(h.contracts, fhTerm{contractID: ev.ContractID})
+		}
+		for pos, val := range ev.Topic {
+			if pos > 2 { // positions 0..2 leave room for the trailing "**"
+				break
+			}
+			if val == "" {
+				continue
+			}
+			key := strconv.Itoa(pos) + ":" + val
+			if !h.seenT[key] {
+				h.seenT[key] = true
+				h.topics = append(h.topics, fhTerm{topicPos: pos, topicVal: val})
+			}
+		}
+	}
+}
+
+// interleaved zips the two pools so any prefix of length N mixes contract and
+// topic terms rather than being all-contract then all-topic.
+func (h *termHarvest) interleaved() []fhTerm {
+	out := make([]fhTerm, 0, len(h.contracts)+len(h.topics))
+	for i := 0; i < len(h.contracts) || i < len(h.topics); i++ {
+		if i < len(h.contracts) {
+			out = append(out, h.contracts[i])
+		}
+		if i < len(h.topics) {
+			out = append(out, h.topics[i])
+		}
+	}
+	return out
+}
+
+// harvestEventTerms pages unfiltered getEvents over [startLedger, endExclusive)
+// and collects up to `want` DISTINCT terms, contract and topic terms interleaved
+// so any prefix of the result mixes both kinds.
+func harvestEventTerms(ctx context.Context, base string, startLedger, endExclusive uint32, want int) []fhTerm {
+	h := termHarvest{seenC: map[string]bool{}, seenT: map[string]bool{}}
+	var cursor string
+	for len(h.contracts)+len(h.topics) < want {
+		page, ok := fetchTermEventsPage(ctx, base, startLedger, endExclusive, cursor)
+		if !ok || len(page.Events) == 0 {
+			break
+		}
+		h.absorb(page)
+		if page.Cursor == "" || page.Cursor == cursor {
+			break
+		}
+		cursor = page.Cursor
+	}
+	return h.interleaved()
+}
+
+// eventsTermsReq builds a getEvents request OR-unioning the first n harvested
+// terms over [start, endExclusive). Terms pack into HOMOGENEOUS filters
+// (contract-only / topic-only, <=5 per filter) so they are OR'd, never AND'd;
+// topic terms become ["*"×pos, value, "**"] — position-anchored, length-flexible.
+func eventsTermsReq(t *testing.T, start, endExclusive uint32, terms []fhTerm, n, limit int) string {
+	t.Helper()
+	n = min(n, len(terms))
+	var (
+		contractIDs  []string
+		topicClauses []any
+	)
+	for _, tm := range terms[:n] {
+		if tm.contractID != "" {
+			contractIDs = append(contractIDs, tm.contractID)
+			continue
+		}
+		segs := make([]any, 0, tm.topicPos+2)
+		for range tm.topicPos {
+			segs = append(segs, "*")
+		}
+		topicClauses = append(topicClauses, append(segs, tm.topicVal, "**"))
+	}
+	var filters []any
+	for i := 0; i < len(contractIDs); i += 5 {
+		filters = append(filters, map[string]any{"contractIds": contractIDs[i:min(i+5, len(contractIDs))]})
+	}
+	for i := 0; i < len(topicClauses); i += 5 {
+		filters = append(filters, map[string]any{"topics": topicClauses[i:min(i+5, len(topicClauses))]})
+	}
+	params, err := json.Marshal(map[string]any{
+		"startLedger": start,
+		"endLedger":   endExclusive,
+		"pagination":  map[string]any{"limit": limit},
+		"filters":     filters,
+	})
+	require.NoError(t, err, "marshal term-sweep getEvents params")
+	return fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"getEvents","params":%s}`, params)
+}
+
+// sweepTermCounts parses FHBENCH_EVENT_TERMS (default "1,4,8,15"; "none"
+// disables the sweep). Counts above 21 are rejected: any contract/topic split of
+// n<=21 packs into <=5 homogeneous filters, the protocol's per-request cap.
+func sweepTermCounts(t *testing.T) []int {
+	t.Helper()
+	v := os.Getenv("FHBENCH_EVENT_TERMS")
+	if v == "" {
+		v = "1,4,8,15"
+	}
+	if v == "none" {
+		return nil
+	}
+	var out []int
+	for part := range strings.SplitSeq(v, ",") {
+		n, err := strconv.Atoi(strings.TrimSpace(part))
+		require.NoError(t, err, "FHBENCH_EVENT_TERMS entry %q", part)
+		require.Positive(t, n, "FHBENCH_EVENT_TERMS entries must be >= 1")
+		require.LessOrEqual(t, n, 21, "FHBENCH_EVENT_TERMS > 21 can overflow the protocol's 5-filter cap")
+		out = append(out, n)
+	}
+	return out
+}
+
+// runEventTermsSweep measures the SELECTIVE getEvents path as a function of
+// OR-union index-term count over the window [measureFrom, lastLedger]: for each
+// requested count it issues the same OR-union of real harvested terms via the
+// caller's measure loop. Contrast with the plain getEvents row (single contract
+// filter) and fhbench's full-chunk sweep (long-span variant of the same model).
+func runEventTermsSweep(
+	ctx context.Context, t *testing.T, base string,
+	measure func(name string, do func(qctx context.Context, n int) bool),
+	measureFrom, lastLedger uint32,
+) {
+	t.Helper()
+	counts := sweepTermCounts(t)
+	if len(counts) == 0 {
+		return
+	}
+	terms := harvestEventTerms(ctx, base, measureFrom, lastLedger+1, 64)
+	if len(terms) == 0 {
+		t.Logf("  getEvents[terms]   (skipped — no event terms harvested from the window)")
+		return
+	}
+	t.Logf("getEvents term sweep over [%d,%d]: %d terms harvested (limit 10/page):",
+		measureFrom, lastLedger, len(terms))
+	for _, n := range counts {
+		eff := min(n, len(terms))
+		if eff < n {
+			t.Logf("  (vocab has only %d terms; running terms=%d instead of %d)", len(terms), eff, n)
+		}
+		body := eventsTermsReq(t, measureFrom, lastLedger+1, terms, eff, 10)
+		measure(fmt.Sprintf("getEvents[t=%d]", eff), func(qctx context.Context, _ int) bool {
+			res, ok := resultMap(tryRPC(qctx, base+"/", body))
+			if !ok {
+				return false
+			}
+			_, has := res["events"]
+			return has
+		})
+	}
 }
 
 // harvestContract pulls one real contract id out of an unfiltered getEvents page
@@ -507,4 +715,7 @@ func TestServeE2E_ProfileLatency(t *testing.T) {
 	} else {
 		t.Logf("  getEvents          (skipped — no contract id harvested from the window)")
 	}
+
+	// ---- Phase 3: getEvents OR-union index-term sweep (selective path) ----
+	runEventTermsSweep(ctx, t, base, measure, measureFrom, lastLedger)
 }

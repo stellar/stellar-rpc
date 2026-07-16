@@ -131,6 +131,7 @@
       <span class="chip">2026-07-16</span>
       <span class="chip">window: 20 steady-state ledgers (warmup 200)</span>
       <span class="chip">500 reps/endpoint · getLedgers limit=1</span>
+      <span class="chip">run 2: cold on all profiles · getEvents term sweep 1/4/8/15</span>
     </div>
   </header>
 
@@ -146,7 +147,8 @@
     <ul class="find">
       <li>Ingest <b>dominates the targeted endpoints</b> — getTransaction/getEvents add only ~4–18 ms on top of the ~77–130 ms ingest leg.</li>
       <li class="hot"><b>getLedgers is the outlier, and it is payload-bound, not read-bound.</b> A direct hot read (incl. zstd decode) is ~8 ms, but getLedgers over HTTP is ~567 ms: <b>~1.4 % is the read, ~98.6 % is base64 + JSON + HTTP shipping the 10–17 MB ledger.</b></li>
-      <li><b>Cold serves ≈ as fast as hot</b> across all three endpoints (getTransaction has a somewhat heavier cold tail). This is the property the full-history design targets.</li>
+      <li><b>Cold serves ≈ as fast as hot</b> for getLedgers, getTransaction, and dense-match getEvents (getTransaction has a somewhat heavier cold tail) — confirmed on all three profiles in run 2. This is the property the full-history design targets.</li>
+      <li class="hot"><b>The exception (run 2): selective multi-term getEvents on cold.</b> OR-unions of genuinely selective terms scale with term count on cold (token ≈1 ms/term; soroswap ≈12 ms/term — 15 terms ≈ 137–181 ms) while hot stays flat (~4–9 ms). Cause: per-request cold-reader open + the POC underfill re-query loop (§6).</li>
       <li class="hot">Decompression is cheap (~6–8 ms); <b>the size of what's shipped is the cost.</b> <code>limit=1</code>→<code>limit=5</code> scales ~5× linearly, confirming size-bound.</li>
     </ul>
   </section>
@@ -233,11 +235,49 @@
         <div class="track"><span class="k">cold</span><div class="barwrap"><div class="fill cold" style="width:79.6%"></div></div><span class="val">6.2 ms</span></div>
       </div>
     </div>
-    <p class="lede dim">Cold reads here are OS-page-cache-warm. Only sac had a servable daemon catalog on the box; token/soroswap cold serving needs a catalog rebuilt over their existing cold artifacts.</p>
+    <p class="lede dim">Cold reads here are OS-page-cache-warm. At run-1 time only sac had a servable daemon catalog; run 2 froze token/soroswap catalogs (6m19s / 4m15s wall) and completed the matrix below.</p>
+    <h2 style="border:0; margin-top:28px"><span class="n">5b</span>Cold tier, all profiles <span class="dim" style="font-size:13px">(run 2)</span></h2>
+    <p class="lede">Same window and method; sac re-measured as a reproduction check (largest run-1↔run-2 deltas ≈ ±5 %). Black-box fhbench cross-checks over the whole frozen chunk agree within ~5 %.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>profile</th><th>endpoint</th><th>count</th><th>p50</th><th>p90</th><th>p99</th><th>max</th></tr></thead>
+      <tbody>
+        <tr class="grp"><td>sac</td><td>getLedgers</td><td class="dim">73</td><td>617.2</td><td>653.1</td><td>671.0</td><td>671.0</td></tr>
+        <tr><td></td><td>getTransaction</td><td class="dim">500</td><td>18.3</td><td>31.7</td><td>40.3</td><td>43.3</td></tr>
+        <tr><td></td><td>getEvents</td><td class="dim">500</td><td>8.8</td><td>10.5</td><td>14.4</td><td>14.9</td></tr>
+        <tr class="grp"><td>token</td><td>getLedgers</td><td class="dim">74</td><td>604.9</td><td>638.9</td><td>664.0</td><td>664.0</td></tr>
+        <tr><td></td><td>getTransaction</td><td class="dim">500</td><td>16.0</td><td>25.4</td><td>34.0</td><td>41.5</td></tr>
+        <tr><td></td><td>getEvents</td><td class="dim">500</td><td>3.4</td><td>4.2</td><td>4.9</td><td>5.4</td></tr>
+        <tr class="grp"><td>soroswap</td><td>getLedgers</td><td class="dim">109</td><td>415.4</td><td>433.9</td><td>449.5</td><td>451.6</td></tr>
+        <tr><td></td><td>getTransaction</td><td class="dim">500</td><td>11.7</td><td>18.9</td><td>25.4</td><td>26.5</td></tr>
+        <tr><td></td><td>getEvents</td><td class="dim">500</td><td>18.9</td><td>22.8</td><td>24.8</td><td>27.3</td></tr>
+      </tbody>
+      <caption>All values in milliseconds. soroswap getEvents cold (18.9 vs 4.7 hot) is the selective-filter effect — see §6.</caption>
+    </table></div>
   </section>
 
   <section>
-    <h2><span class="n">6</span>Direct in-process read (no serve path)</h2>
+    <h2><span class="n">6</span>getEvents index-term sweep <span class="dim" style="font-size:13px">(run 2)</span></h2>
+    <p class="lede">Each cell OR-unions N real harvested index terms (a term = a distinct contract ID or a distinct topic value at a position). <b>window</b> = the 20-ledger steady-state window, 500 reps; <b>chunk</b> = random starts over the whole 10 000-ledger frozen chunk (fhbench, 30 s). Cells are p50 / p99 ms.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>profile</th><th>tier · scope</th><th>t=1</th><th>t=4</th><th>t=8</th><th>t=15</th></tr></thead>
+      <tbody>
+        <tr class="grp"><td>sac</td><td><span class="tag hot">hot</span> window</td><td>8.4 / 11.4</td><td>8.4 / 10.8</td><td>8.5 / 11.1</td><td>6.8 / 11.4</td></tr>
+        <tr><td></td><td><span class="tag cold">cold</span> window</td><td>8.4 / 13.4</td><td>8.6 / 12.8</td><td>6.6 / 11.9</td><td>8.7 / 14.1</td></tr>
+        <tr><td></td><td><span class="tag cold">cold</span> chunk</td><td>8.0 / 14.0</td><td>8.4 / 15.3</td><td>8.5 / 14.7</td><td>8.4 / 15.5</td></tr>
+        <tr class="grp"><td>token</td><td><span class="tag hot">hot</span> window</td><td>7.6 / 11.9</td><td>6.2 / 8.6</td><td>7.5 / 10.2</td><td>7.7 / 12.4</td></tr>
+        <tr><td></td><td><span class="tag cold">cold</span> window</td><td>3.4 / 4.9</td><td>5.1 / 7.1</td><td>8.1 / 15.4</td><td>16.9 / 22.0</td></tr>
+        <tr><td></td><td><span class="tag cold">cold</span> chunk</td><td>4.4 / 7.2</td><td>6.7 / 9.5</td><td>8.9 / 13.4</td><td>16.5 / 21.8</td></tr>
+        <tr class="grp"><td>soroswap</td><td><span class="tag hot">hot</span> window</td><td>4.2 / 5.9</td><td>4.3 / 7.8</td><td>6.1 / 7.7</td><td>6.1 / 7.3</td></tr>
+        <tr><td></td><td><span class="tag cold">cold</span> window</td><td>9.5 / 16.4</td><td>52.7 / 67.0</td><td>98.5 / 129.6</td><td>137.2 / 158.3</td></tr>
+        <tr><td></td><td><span class="tag cold">cold</span> chunk</td><td>12.4 / 18.3</td><td>47.1 / 61.6</td><td>101.2 / 128.2</td><td>181.2 / 220.3</td></tr>
+      </tbody>
+      <caption>p50 / p99 ms · limit 10 · full data in termsweep.csv.</caption>
+    </table></div>
+    <div class="callout"><b>Reading the curve:</b> hot is flat everywhere; cold is flat when terms match densely (sac) and scales with term count when terms are selective (token ≈1 ms/term, soroswap ≈12 ms/term). Hot and cold share the same bitmap-driven <code>eventstore.Query</code> — the divergence is the per-request cold-reader open (POC: no LRU) plus the underfill loop in <code>scanChunk</code>, which re-queries the chunk with a doubling cap when sparse matches leave the page short. Productionization paths: LRU'd cold readers; a streaming pager that advances a pinned event-ID cursor. Window ≈ chunk everywhere, so the curve tracks term selectivity, not scan-span length.</div>
+  </section>
+
+  <section>
+    <h2><span class="n">7</span>Direct in-process read (no serve path)</h2>
     <p class="lede"><code>store.Get</code> = RocksDB point read (compressed value); <code>GetLedgerRaw</code> adds the zstd decode. Cold ≈ hot; both decode-bound.</p>
     <div class="scroll"><table>
       <thead><tr><th>profile</th><th>store.Get (compressed)</th><th>hot GetLedgerRaw</th><th>cold GetLedgerRaw</th></tr></thead>
@@ -250,7 +290,7 @@
   </section>
 
   <section>
-    <h2><span class="n">7</span>End-to-end (synthesized: ingest + query)</h2>
+    <h2><span class="n">8</span>End-to-end (synthesized: ingest + query)</h2>
     <p class="lede">e2e = ingest + hot query at the same percentile. Summing per-stage percentiles is a conservative upper bound; commit→queryable (~1–2 ms) is treated as negligible.</p>
     <div class="scroll"><table>
       <thead><tr><th>profile</th><th>endpoint</th><th>e2e p50</th><th>e2e p99</th></tr></thead>
@@ -269,20 +309,23 @@
   </section>
 
   <section>
-    <h2><span class="n">8</span>Method &amp; caveats</h2>
+    <h2><span class="n">9</span>Method &amp; caveats</h2>
     <p class="lede">Harness: <code>TestServeE2E_ProfileLatency</code> (hot) and <code>TestServeE2E_ColdQueryLatency</code> (cold);
-      direct read via <code>BenchmarkHotGetLedgerRaw</code>. Real ledgers fed through the live hot path
-      (no freeze); cold served from pre-frozen artifacts. Percentiles are nearest-rank.</p>
+      direct read via <code>BenchmarkHotGetLedgerRaw</code>; black-box cross-checks and the chunk-scope sweep via <code>tools/fhbench</code>.
+      Real ledgers fed through the live hot path (no freeze); cold served from pre-frozen artifacts. Percentiles are nearest-rank.</p>
     <ul class="find">
-      <li>The chunk head is contract-deploy warmup, ~40× lighter than steady state; measurements skip 200 warmup ledgers and measure ledgers 10202–10221.</li>
+      <li>The chunk head is contract-deploy warmup, ~40× lighter than steady state; measurements skip 200 warmup ledgers and measure ledgers 10202–10221. Run 2 also moved fhbench's tx-hash/term sampling from the tier head to the tier midpoint for the same reason (head-sampled soroswap cold getTransaction read 2.7 ms vs the representative 10.8 ms).</li>
       <li>getLedgers p99 is over the budget-capped sample count (71–127), less robust than the 500-rep getTransaction/getEvents p99s.</li>
+      <li>All query passes are sequential closed-loop — unloaded-latency floors, not latency under concurrent load.</li>
+      <li><b>Run-2 reproduction:</b> re-running run 1's hot pass reproduced it within ±5 % (e.g. soroswap getLedgers 355.8 → 355.9 ms; sac getLedgers 567.4 → 567.0 ms). A methodology review fixed several fhbench issues (hot-tier clamp to the live chunk, endLedger off-by-one, error-latency exclusion, mid-tier sampling, term-count cap) — none affect run-1 tables, which came from the e2e harness.</li>
+      <li>The term-sweep curve depends on the harvested vocabulary's selectivity — a property of the profile (sac: one match-all contract; soroswap: many contracts). Real-network vocabularies sit between the extremes.</li>
       <li>Reference toy baseline (1-tx/1-event ledger): full ~4.5 ms, ingest ~3.0 ms, visible ~1.5 ms — ~40× lighter than real ingest; not a production number.</li>
       <li>Per-ledger commit→query <em>visibility</em> is not reported for real profiles: under heavy ingestion the sequential poller lags the commit frontier, so that span measures poller lag, not visibility. <code>ingest</code> and the query-latency pass are the reliable metrics.</li>
     </ul>
   </section>
 
   <footer>
-    Data: <code>latency.csv</code> · full notes: <code>README.md</code> · driver: <code>tools/bench-suite/run-e2e-latency-suite.sh</code>
+    Data: <code>latency.csv</code> · <code>termsweep.csv</code> · full notes: <code>README.md</code> · driver: <code>tools/bench-suite/run-e2e-latency-suite.sh</code>
   </footer>
 </div>
 <script>

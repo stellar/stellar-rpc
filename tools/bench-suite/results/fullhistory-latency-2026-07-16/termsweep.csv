@@ -1,0 +1,44 @@
+profile,tier,scope,terms,p50_ms,p90_ms,p99_ms,max_ms,count,notes
+# getEvents OR-union index-term sweep (run 2, 2026-07-16). A term = one indexed
+# constraint (distinct contract ID, or distinct topic value at position 0..2),
+# harvested from real events and OR-united into homogeneous filters, limit 10.
+# scope=window20: fixed span = the 20-ledger steady-state window [10202..10221],
+#   sequential closed loop, 500 reps (45 s budget), via the e2e harness sweeps.
+# scope=chunk: random start over the whole frozen chunk [10002..20001], endLedger
+#   = chunk end, fhbench --concurrency 1 --duration 30s (count = reps completed).
+sac,hot,window20,1,8.435,9.678,11.417,27.601,500,
+sac,hot,window20,4,8.387,9.009,10.751,12.932,500,
+sac,hot,window20,8,8.522,9.112,11.133,12.248,500,
+sac,hot,window20,15,6.773,7.841,11.383,14.988,500,
+token,hot,window20,1,7.624,7.940,11.878,12.150,500,
+token,hot,window20,4,6.205,7.682,8.550,11.796,500,
+token,hot,window20,8,7.532,7.763,10.195,12.163,500,
+token,hot,window20,15,7.660,7.877,12.412,12.813,500,
+soroswap,hot,window20,1,4.160,4.724,5.917,7.013,500,
+soroswap,hot,window20,4,4.337,6.273,7.773,8.677,500,
+soroswap,hot,window20,8,6.133,6.819,7.731,8.663,500,
+soroswap,hot,window20,15,6.124,6.746,7.345,7.666,500,
+sac,cold,window20,1,8.440,10.361,13.402,14.282,500,
+sac,cold,window20,4,8.629,10.675,12.816,15.383,500,
+sac,cold,window20,8,6.623,9.232,11.923,13.312,500,
+sac,cold,window20,15,8.666,10.466,14.113,15.358,500,
+token,cold,window20,1,3.449,4.239,4.850,5.290,500,
+token,cold,window20,4,5.123,6.143,7.076,9.435,500,
+token,cold,window20,8,8.149,13.171,15.393,18.359,500,
+token,cold,window20,15,16.933,19.646,22.035,23.051,500,
+soroswap,cold,window20,1,9.497,12.772,16.439,17.918,500,
+soroswap,cold,window20,4,52.697,60.010,67.019,73.349,500,
+soroswap,cold,window20,8,98.490,115.712,129.649,137.659,453,budget-capped 45s
+soroswap,cold,window20,15,137.214,150.247,158.341,171.999,332,budget-capped 45s
+sac,cold,chunk,1,8.028,12.151,14.004,16.850,3422,
+sac,cold,chunk,4,8.444,12.423,15.301,17.493,3343,
+sac,cold,chunk,8,8.480,12.555,14.670,18.926,3409,
+sac,cold,chunk,15,8.360,12.791,15.519,18.322,3302,
+token,cold,chunk,1,4.446,5.906,7.174,17.772,6613,
+token,cold,chunk,4,6.722,8.128,9.481,15.836,4489,
+token,cold,chunk,8,8.901,11.580,13.350,21.878,3270,
+token,cold,chunk,15,16.467,18.922,21.780,25.015,1818,
+soroswap,cold,chunk,1,12.433,15.647,18.268,23.399,2399,
+soroswap,cold,chunk,4,47.076,55.431,61.596,66.871,623,
+soroswap,cold,chunk,8,101.203,114.535,128.231,129.401,295,
+soroswap,cold,chunk,15,181.201,205.370,220.335,236.675,166,

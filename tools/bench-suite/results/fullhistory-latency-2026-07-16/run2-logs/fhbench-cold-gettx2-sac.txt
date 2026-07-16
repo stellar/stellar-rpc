@@ -1,0 +1,5 @@
+### sac COLD getTransaction (mid-tier hash sample, concurrency 1)
+
+endpoint         tier   terms    count        RPS       p50       p90       p99       max   errors
+--------------------------------------------------------------------------------------------------
+getTransaction   cold       -     1565       52.2  17.468ms  27.335ms  36.755ms  47.844ms        0

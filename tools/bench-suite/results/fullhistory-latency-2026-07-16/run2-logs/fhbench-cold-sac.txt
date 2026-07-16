@@ -1,0 +1,20 @@
+### sac COLD getEvents term sweep (full frozen chunk, limit 10, concurrency 1)
+
+endpoint         tier   terms    count        RPS       p50       p90       p99       max   errors
+--------------------------------------------------------------------------------------------------
+getEvents        cold       1     3422      114.1   8.028ms  12.151ms  14.004ms   16.85ms        0
+getEvents        cold       4     3343      111.4   8.444ms  12.423ms  15.301ms  17.493ms        0
+getEvents        cold       8     3409      113.6    8.48ms  12.555ms   14.67ms  18.926ms        0
+getEvents        cold      15     3302      110.1    8.36ms  12.791ms  15.519ms  18.322ms        0
+
+### sac COLD getTransaction (concurrency 1)
+
+endpoint         tier   terms    count        RPS       p50       p90       p99       max   errors
+--------------------------------------------------------------------------------------------------
+getTransaction   cold       -     2121       70.7  15.338ms  22.776ms  35.249ms  43.757ms        0
+
+### sac COLD getLedgers (limit 1, concurrency 1)
+
+endpoint         tier   terms    count        RPS       p50       p90       p99       max   errors
+--------------------------------------------------------------------------------------------------
+getLedgers       cold       -       47        1.6 624.845ms 665.083ms 680.266ms 680.266ms        0

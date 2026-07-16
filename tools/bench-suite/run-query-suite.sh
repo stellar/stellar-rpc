@@ -12,8 +12,19 @@
 # Runs ONE profile at a time (each cold freeze peaks ~20-30 GB) — do NOT overlap
 # with the ingest campaign. See tools/fhbench/README.md for fhbench itself.
 #
+# CAVEATS:
+#   - The harness's HOT tier is SYNTHETIC 1-tx/1-event filler ledgers (it exists
+#     to latch /ready and give the hot tier something to serve) — hot-tier rows
+#     here are NOT representative of real-profile hot serving. Use
+#     run-e2e-latency-suite.sh (real ledgers live-ingested hot) for that.
+#   - getLedgers returns WHOLE ledgers; on these profiles one decoded ledger is
+#     10-17 MB, so limit 50 × 8 workers ≈ >8 GB of in-flight responses — an OOM
+#     risk on a shared box. GETLEDGERS_LIMIT (default 1) caps that endpoint
+#     separately; raise it deliberately.
+#
 # Env knobs: OUT, PORT(=8100), DURATION(=45s), HOT_LEDGERS(=5200), CONCURRENCY(=8),
-# PASSPHRASE(=Public Global Stellar Network ; September 2015), READY_TIMEOUT(=1800),
+# GETLEDGERS_LIMIT(=1), EVENT_TERMS(=1,4,8,15),
+# PASSPHRASE(=Public Global Stellar Network ; September 2015), READY_TIMEOUT(=3600),
 # TESTBIN, FHBENCH, PACKS_ROOT.
 set -euo pipefail
 
@@ -26,6 +37,7 @@ PORT="${PORT:-8100}"
 DURATION="${DURATION:-45s}"
 HOT_LEDGERS="${HOT_LEDGERS:-5200}"
 CONCURRENCY="${CONCURRENCY:-8}"
+GETLEDGERS_LIMIT="${GETLEDGERS_LIMIT:-1}"
 EVENT_TERMS="${EVENT_TERMS:-1,4,8,15}"
 PASSPHRASE="${PASSPHRASE:-Public Global Stellar Network ; September 2015}"
 READY_TIMEOUT="${READY_TIMEOUT:-3600}"
@@ -89,12 +101,15 @@ for entry in "${PROFILES[@]}"; do
 	curl -s "$base/metrics" >"$pdir/metrics-before.txt" 2>/dev/null || true
 
 	# fhbench per endpoint, both tiers; aggregate tables into one file.
+	# getLedgers uses its own (small) limit — whole 10-17 MB ledgers per item.
 	report="$pdir/fhbench.txt"
 	: >"$report"
 	for ep in "${ENDPOINTS[@]}"; do
-		echo "### $name $ep (both tiers)" >>"$report"
+		limit=50
+		[ "$ep" = getLedgers ] && limit="$GETLEDGERS_LIMIT"
+		echo "### $name $ep (both tiers, limit $limit)" >>"$report"
 		"$FHBENCH" --url "$base" --endpoint "$ep" --tier both \
-			--concurrency "$CONCURRENCY" --duration "$DURATION" --limit 50 \
+			--concurrency "$CONCURRENCY" --duration "$DURATION" --limit "$limit" \
 			>>"$report" 2>>"$pdir/fhbench.err" || echo "fhbench $ep failed (see fhbench.err)" >>"$report"
 		echo >>"$report"
 	done

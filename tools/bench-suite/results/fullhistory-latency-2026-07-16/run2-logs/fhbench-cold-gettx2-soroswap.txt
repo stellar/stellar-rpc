@@ -1,0 +1,5 @@
+### soroswap COLD getTransaction (mid-tier hash sample, concurrency 1)
+
+endpoint         tier   terms    count        RPS       p50       p90       p99       max   errors
+--------------------------------------------------------------------------------------------------
+getTransaction   cold       -     2497       83.2  10.828ms  18.009ms  25.495ms  28.548ms        0

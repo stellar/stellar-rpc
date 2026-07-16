@@ -31,3 +31,23 @@ soroswap,cold,read_getledgerraw,-,3.685,,,,,decoded ~10.0MB
 toy,hot,visibility_full,-,4.500,,4.744,,10,source->query
 toy,hot,visibility_ingest,-,3.035,,,,10,source->commit
 toy,hot,visibility_visible,-,1.500,,1.775,,10,commit->query
+# ===================== run 2 (2026-07-16, later the same day) =====================
+# Same box/method/window, sweep-extended harness. token/soroswap catalogs were
+# frozen via TestServeProfileForBench (freeze wall: token 6m19s, soroswap 4m15s,
+# sac run-1 11m10s), unblocking their cold tiers. sac rows re-measure run 1 as a
+# reproduction check. Term-sweep data: see termsweep.csv.
+sac,hot,query,getLedgers,566.999,577.826,593.944,593.944,80,run2 repro of run1
+sac,hot,query,getTransaction,18.490,19.188,26.846,30.103,500,run2 repro of run1
+sac,hot,query,getEvents,6.802,8.152,12.198,13.692,500,run2 repro of run1
+sac,-,ingest,-,127.563,140.723,175.259,175.259,20,run2 repro of run1
+token,-,ingest,-,122.765,128.778,132.615,132.615,20,run2 repro of run1
+soroswap,-,ingest,-,80.211,84.254,87.290,87.290,20,run2 repro of run1
+sac,cold,query,getLedgers,617.248,653.133,671.021,671.021,73,run2 repro of run1
+sac,cold,query,getTransaction,18.322,31.725,40.315,43.309,500,run2 repro of run1
+sac,cold,query,getEvents,8.788,10.541,14.392,14.942,500,run2 repro of run1
+token,cold,query,getLedgers,604.933,638.877,663.991,663.991,74,run2; new cold catalog
+token,cold,query,getTransaction,15.997,25.438,33.990,41.462,500,run2; new cold catalog
+token,cold,query,getEvents,3.386,4.166,4.880,5.378,500,run2; new cold catalog
+soroswap,cold,query,getLedgers,415.400,433.864,449.496,451.625,109,run2; new cold catalog
+soroswap,cold,query,getTransaction,11.686,18.918,25.383,26.529,500,run2; new cold catalog
+soroswap,cold,query,getEvents,18.921,22.768,24.798,27.314,500,run2; contract term is 1-of-many -> sparse matches (see README)

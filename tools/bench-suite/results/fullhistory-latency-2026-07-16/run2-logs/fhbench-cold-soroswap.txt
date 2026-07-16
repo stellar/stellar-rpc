@@ -1,0 +1,20 @@
+### soroswap COLD getEvents term sweep (full frozen chunk, limit 10, concurrency 1)
+
+endpoint         tier   terms    count        RPS       p50       p90       p99       max   errors
+--------------------------------------------------------------------------------------------------
+getEvents        cold       1     2399       80.0  12.433ms  15.647ms  18.268ms  23.399ms        0
+getEvents        cold       4      623       20.8  47.076ms  55.431ms  61.596ms  66.871ms        0
+getEvents        cold       8      295        9.8 101.203ms 114.535ms 128.231ms 129.401ms        0
+getEvents        cold      15      166        5.5 181.201ms  205.37ms 220.335ms 236.675ms        0
+
+### soroswap COLD getTransaction (concurrency 1)
+
+endpoint         tier   terms    count        RPS       p50       p90       p99       max   errors
+--------------------------------------------------------------------------------------------------
+getTransaction   cold       -     9721      324.0   2.687ms   4.843ms   6.513ms   9.193ms        0
+
+### soroswap COLD getLedgers (limit 1, concurrency 1)
+
+endpoint         tier   terms    count        RPS       p50       p90       p99       max   errors
+--------------------------------------------------------------------------------------------------
+getLedgers       cold       -       78        2.6 390.585ms 416.619ms  462.88ms  462.88ms        0

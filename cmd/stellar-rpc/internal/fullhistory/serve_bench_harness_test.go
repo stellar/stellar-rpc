@@ -20,6 +20,12 @@ package fullhistory
 //     from the post-backfill resume point. They land in the next (unfrozen) chunk
 //     as the HOT tier, give getTransaction/getEvents something to sample there,
 //     and latch /ready (which keys off a live commit).
+//     NOTE: this makes the hot tier SYNTHETIC 1-tx toy ledgers — fhbench hot-tier
+//     rows against this harness are NOT representative of real-profile hot
+//     serving (the profiles' real ledgers are 10-17 MB with thousands of tx).
+//     TestServeE2E_ProfileLatency, which live-ingests the real ledgers into the
+//     hot tier, is the representative hot-path benchmark; this harness's value
+//     is the real COLD tier it freezes.
 //   - cpi=1 so each frozen chunk's one-chunk tx-hash window is terminal the instant
 //     it freezes — the cold .idx a by-hash lookup resolves against exists.
 //

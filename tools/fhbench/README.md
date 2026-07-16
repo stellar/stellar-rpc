@@ -102,9 +102,12 @@ go run ./tools/fhbench --endpoint getEvents --tier both --event-terms 1,4,8,15
 
 Terms pack into homogeneous filters (contract-only and topic-only, ≤5 each) so
 they are OR'd, never AND'd, staying within the protocol's 5-filter / 5-per-filter
-caps (so up to ~25 terms are expressible; the sweep is meant for ≤15). Topic terms
-are built as `["*"×pos, value, "**"]` — position-anchored but length-flexible, so
-they match their source events.
+caps. Any contract/topic mix of up to 21 terms fits the cap; counts above 21 are
+rejected at flag parse (the sweep is meant for ≤15). The vocabulary is harvested
+from the tier **midpoint** (a chunk head is often deploy/setup noise), and a run's
+`terms` column reports the count actually OR'd (clamped to the harvested vocab).
+Topic terms are built as `["*"×pos, value, "**"]` — position-anchored but
+length-flexible, so they match their source events.
 
 ### How it works
 
@@ -117,7 +120,10 @@ they match their source events.
    `oldest`/`latest` out of the resulting out-of-range error message — or from
    the successful response if the server happens to answer.
 2. **Tiering.**
-   - **hot** = the last `chunk-size/2` ledgers before `latest`.
+   - **hot** = the last `chunk-size/2` ledgers before `latest`, clamped to the
+     chunk containing `latest` (complete chunks below it may already be frozen
+     cold — the clamp keeps the hot label pure at the cost of a shorter span
+     right after a chunk boundary).
    - **cold** = the oldest full chunk at or after `oldest` — chunk *k* covers
      `[k*chunk-size+2 .. (k+1)*chunk-size+1]` (genesis-anchored, `FirstLedgerSeq=2`).
 3. **Sampling.** For `getTransaction`, fhbench pages `getTransactions` within each

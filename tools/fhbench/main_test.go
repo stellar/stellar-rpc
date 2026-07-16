@@ -60,9 +60,11 @@ func TestComputeTiers(t *testing.T) {
 	if !ok {
 		t.Fatalf("no hot tier")
 	}
-	// hot = last chunkSize/2 ledgers before latest -> [45000-5000+1, 45000]
-	if hot.first != 40_001 || hot.last != 45_000 {
-		t.Errorf("hot tier = [%d,%d], want [40001,45000]", hot.first, hot.last)
+	// hot = last chunkSize/2 ledgers before latest, clamped to the live chunk
+	// (chunk 4 = [40002,50001]) so it cannot bleed into possibly-frozen chunks:
+	// [45000-5000+1, 45000] -> clamp 40001 up to 40002.
+	if hot.first != 40_002 || hot.last != 45_000 {
+		t.Errorf("hot tier = [%d,%d], want [40002,45000]", hot.first, hot.last)
 	}
 
 	cold, ok := byName["cold"]
@@ -83,6 +85,30 @@ func TestComputeTiers(t *testing.T) {
 	small := computeTiers(ledgerWindow{oldest: 2, latest: 4_000}, chunkSize, "hot")
 	if len(small) != 1 || small[0].first != 2 || small[0].last != 4_000 {
 		t.Errorf("small-window hot tier = %+v, want [2,4000]", small)
+	}
+
+	// Fewer than half-chunk hot ledgers above the last frozen chunk (e.g. a
+	// serve-harness daemon: cold chunk [10002,20001], hot commits to 23933): the
+	// hot tier must clamp to the live chunk [20002,...], NOT reach back into the
+	// frozen chunk (latest-4999 = 18934 would mislabel 1068 cold ledgers as hot).
+	clamped := computeTiers(ledgerWindow{oldest: 10_002, latest: 23_933}, chunkSize, "hot")
+	if len(clamped) != 1 || clamped[0].first != 20_002 || clamped[0].last != 23_933 {
+		t.Errorf("post-freeze hot tier = %+v, want [20002,23933]", clamped)
+	}
+}
+
+func TestParseTermCounts(t *testing.T) {
+	got, err := parseTermCounts(" 1, 4,8,15 ")
+	if err != nil || !reflect.DeepEqual(got, []int{1, 4, 8, 15}) {
+		t.Errorf("parseTermCounts = %v, %v", got, err)
+	}
+	if _, err := parseTermCounts(""); err != nil {
+		t.Errorf("empty list must be nil, nil: %v", err)
+	}
+	for _, bad := range []string{"0", "-3", "x", "1,,2", "22", "25"} {
+		if _, err := parseTermCounts(bad); err == nil {
+			t.Errorf("parseTermCounts(%q) must fail (zero/negative/garbage/over-cap)", bad)
+		}
 	}
 }
 
@@ -337,5 +363,26 @@ func TestRunLoadSmoke(t *testing.T) {
 	}
 	if res.errors != 0 {
 		t.Errorf("runLoad recorded %d errors against a healthy stub", res.errors)
+	}
+}
+
+// TestRunLoadExcludesErrorLatencies pins that errored requests are tallied in
+// `errors` but kept OUT of the latency distribution (fast-fail errors would
+// otherwise drag the percentiles down).
+func TestRunLoadExcludesErrorLatencies(t *testing.T) {
+	srv := rpcStub(t, map[string]func(json.RawMessage) (any, *rpcError){
+		//nolint:unparam // uniform rpcStub handler signature
+		"getLedgers": func(json.RawMessage) (any, *rpcError) {
+			return nil, &rpcError{Code: -32600, Message: "boom"}
+		},
+	})
+
+	tr := tier{name: "hot", first: 50, last: 100}
+	res := runLoad(context.Background(), newRPCClient(srv.URL), "getLedgers", tr, nil, nil, 0, 1, 100*time.Millisecond, 10)
+	if res.errors == 0 {
+		t.Fatalf("all-error stub recorded no errors")
+	}
+	if len(res.durations) != 0 {
+		t.Errorf("errored requests leaked %d samples into the latency distribution", len(res.durations))
 	}
 }

@@ -1,0 +1,13 @@
+=== RUN   TestServeE2E_ColdQueryLatency
+    serve_e2e_cold_latency_test.go:128: COLD query-latency on "soroswap" chunk 1, window [10202,10221]: 500 reps/endpoint (200 tx hashes, contract="CAWUNDBJDSUIPM5A3XAPFDHMMWI6EE5V6NBOEV6BFQTY3JD55P4S75AC")
+    serve_e2e_cold_latency_test.go:130:   endpoint         count    p50          p90          p99          max          errors
+    serve_e2e_cold_latency_test.go:164:   getLedgers       109      415.4ms      433.864ms    449.496ms    451.625ms    0  (budget-capped at 45s)
+    serve_e2e_cold_latency_test.go:164:   getTransaction   500      11.686ms     18.918ms     25.383ms     26.529ms     0
+    serve_e2e_cold_latency_test.go:164:   getEvents        500      18.921ms     22.768ms     24.798ms     27.314ms     0
+    serve_e2e_cold_latency_test.go:212: getEvents term sweep over [10202,10221]: 91 terms harvested (limit 10/page):
+    serve_e2e_cold_latency_test.go:164:   getEvents[t=1]   500      9.497ms      12.772ms     16.439ms     17.918ms     0
+    serve_e2e_cold_latency_test.go:164:   getEvents[t=4]   500      52.697ms     60.01ms      67.019ms     73.349ms     0
+    serve_e2e_cold_latency_test.go:164:   getEvents[t=8]   453      98.49ms      115.712ms    129.649ms    137.659ms    0  (budget-capped at 45s)
+    serve_e2e_cold_latency_test.go:164:   getEvents[t=15]  332      137.214ms    150.247ms    158.341ms    171.999ms    0  (budget-capped at 45s)
+--- PASS: TestServeE2E_ColdQueryLatency (183.36s)
+PASS

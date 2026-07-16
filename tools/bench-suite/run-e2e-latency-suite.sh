@@ -16,6 +16,7 @@
 # heavy ledgers is the cost here (tens of ms each), so keep WARMUP modest.
 #
 # Env knobs: OUT, WINDOW(=20), WARMUP(=200), REPS(=500), FIRST_CHUNK(=1),
+# EVENT_TERMS(=1,4,8,15; "none" disables the getEvents OR-union term sweep),
 # PASSPHRASE, TESTBIN, LEDGERS_ROOTS (space-separated "name:ledgers-root" pairs;
 # a ledgers-root is the dir whose <bucket>/<chunk>.pack tree holds the profile's
 # ledgers — either a packs-root/<profile> or a served data dir's .../ledgers).
@@ -28,6 +29,7 @@ WINDOW="${WINDOW:-20}"
 WARMUP="${WARMUP:-200}"
 REPS="${REPS:-500}"
 FIRST_CHUNK="${FIRST_CHUNK:-1}"
+EVENT_TERMS="${EVENT_TERMS:-1,4,8,15}"
 PASSPHRASE="${PASSPHRASE:-Public Global Stellar Network ; September 2015}"
 
 export LD_LIBRARY_PATH="/home/simon/.zstd/lib:/home/simon/.rocksdb/lib:${LD_LIBRARY_PATH:-}"
@@ -57,6 +59,7 @@ for entry in "${ROOTS[@]}"; do
 	FHBENCH_WINDOW_LEDGERS="$WINDOW" \
 	FHBENCH_WARMUP_LEDGERS="$WARMUP" \
 	FHBENCH_QUERY_REPS="$REPS" \
+	FHBENCH_EVENT_TERMS="$EVENT_TERMS" \
 	FHBENCH_PASSPHRASE="$PASSPHRASE" \
 		"$TESTBIN" -test.run '^TestServeE2E_ProfileLatency$' -test.v -test.timeout 0 \
 		>"$OUT/$name.txt" 2>&1 || echo "  $name FAILED (see $OUT/$name.txt)"

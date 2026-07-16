@@ -206,4 +206,8 @@ func TestServeE2E_ColdQueryLatency(t *testing.T) {
 	} else {
 		t.Logf("  getEvents          (skipped — no contract id harvested from the cold window)")
 	}
+
+	// getEvents OR-union index-term sweep over the same cold window (selective
+	// path), directly comparable to the hot test's sweep on identical ledgers.
+	runEventTermsSweep(ctx, t, base, measure, measureFrom, lastLedger)
 }
