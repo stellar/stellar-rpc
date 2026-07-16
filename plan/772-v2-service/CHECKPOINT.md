@@ -457,6 +457,48 @@ type CoreOpener interface {
 
 ---
 
+## Stage 7 — devbox config, Docker image, runbook, smoke script (2026-07-15) — COMPLETE — PLAN COMPLETE
+
+- Grill-me answers (binding inputs for these artifacts):
+  - stellar-core pin: `27.1.0-3365.3589a696b.noble` — newest noble-STABLE in apt.stellar.org at session time, verified against the live package index. The noble repo publishes **amd64 only** (`Architectures: amd64` in its Release file), so the image is amd64-only by necessity.
+  - Devbox arch: amd64. PRIMARY build path: Karthik's arm64 Mac cross-builds with `--platform linux/amd64`, then transfers via `docker save | ssh | docker load` (no registry, never pushed).
+  - Image tag: `stellar-rpc-v2:dev` (overridable via the `DOCKER_IMAGE` make variable).
+  - `[retention]`: ships as FILL — `earliest_ledger = "FILL"` (deliberately fail-loud, see deviations) and `retention_chunks = 0` with a FILL comment (not pinned; changeable later).
+  - `[backfill.datastore]` + `[backfill.bsb]`: commented `# FILL:` skeletons (GCS shape shown; schema keys and BSB knobs explained in plain English in-file). Leaving them commented is a documented mode: no lake ⇒ backfill replays via captive core from the history archives.
+  - Pubnet quorum: SDF-only 3-validator set (Karthik's pick over full Tier-1), copied verbatim from the SDF-maintained stellar/quickstart repo, `pubnet/stellar-rpc/etc/stellar-captive-core.cfg` @ main, fetched live this session.
+  - Host ports: 8000/8001 free on the devbox; straight `-p` mappings.
+- Files added:
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/deploy/devbox/captive-core-pubnet.cfg` — pubnet passphrase + SDF quorum; deliberately free of HTTP_PORT/PEER_PORT/query/BUCKET_DIR_PATH keys (the daemon injects those from `[ingestion]`; the SDK's strict handling rejects file-set values that clash).
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/deploy/devbox/full-history.toml` — every key verified against the strict schema in config.go; in-container paths (`/config`, `/data`); `[serving]` endpoint `0.0.0.0:8000` + admin `0.0.0.0:8001`; pubnet SDF archive URLs.
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/deploy/devbox/RUNBOOK.md` — build→transfer→prepare→run→watch→operate + bare-metal appendix; measured build numbers.
+  - `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/deploy/devbox/smoke.sh` — all 11 served methods + getFeeStats stub + admin `/metrics` and `/latency.json`; three phase branches (backfill-gated / gate-open-empty-range / healthy); exits non-zero on any contract mismatch.
+- Files changed: `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service/Makefile` — `docker-build` target over the EXISTING `cmd/stellar-rpc/docker/Dockerfile` (no new Dockerfile), `DOCKER_IMAGE ?= stellar-rpc-v2:dev`, optional `DOCKER_PLATFORM`, `STELLAR_CORE_VERSION`/`REPOSITORY_VERSION` build-arg passthrough; added to `.PHONY`.
+- Exact commands (also in the RUNBOOK):
+  - build: `make docker-build STELLAR_CORE_VERSION=27.1.0-3365.3589a696b.noble DOCKER_PLATFORM=linux/amd64`
+  - transfer: `docker save stellar-rpc-v2:dev | gzip | ssh <devbox> 'gunzip | docker load'`
+  - run: `docker run -d --restart unless-stopped --name stellar-rpc-v2 -v ~/stellar-rpc-v2/config:/config:ro -v stellar-rpc-v2-data:/data -p 8000:8000 -p 8001:8001 stellar-rpc-v2:dev full-history --config /config/full-history.toml` (detached container survives ssh logout by construction; the restart policy also survives devbox reboots)
+- Deviations from the stage doc + why:
+  - `earliest_ledger` placeholder is the literal uncommented string `"FILL"`, not a commented-out key: an absent key silently defaults to `"genesis"` and PINS it immutably on first start; the literal instead fails `validateEarliestForm` loudly before anything is pinned (verified in-image).
+  - smoke.sh has a third phase branch beyond the doc's two: gate-open-but-empty-range (`data stores are not initialized`), observed live in verification — with `earliest_ledger="now"` backfill has no complete chunks, the gate opens immediately, and the range is empty until the first live commit. RUNBOOK documents the same transient.
+  - The getLedgerEntries smoke key is the XLM Stellar-Asset-Contract instance (`CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA`), derived with the SDK from the pubnet passphrase (never archived, always present); the exact Go construction is documented inside smoke.sh.
+- Verification:
+  - Config parses (host): a throwaway test ran strict `config.LoadConfig` on the TOML and `ledgerbackend.NewCaptiveCoreTomlFromData` with the daemon's exact live params on the cfg — both pass (test deleted; nothing outside Makefile + deploy/ remains changed).
+  - `make docker-build` with the real pin + `--platform linux/amd64` on the arm64 Mac: SUCCESS, 12m45s cold, image 444MB, `linux/amd64`. In-image: `stellar-core 27.1.0 (3589a696b...)` = exactly the apt pin; `stellar-rpc 25.1.0 (cc90e294..., feature/772-v2-service)`. Both binaries exec under Rosetta.
+  - Shipped-TOML-verbatim container run: strict parse OK → catalog RocksDB opens under `/data` → `wired captive-core backfill backend (no bulk lake configured)` → aborts with `earliest_ledger must be "genesis", "now", or a chunk-aligned ledger >= 2; got "FILL"` — the fail-loud design works end-to-end in-image.
+  - `earliest="now"` scratch-copy run (config-parse-deep and beyond): full startup — history archives reached, `now` resolved and PINNED, backfill completed (no complete chunks), gate OPENED, `:8000` answered getHealth with the stage-6-pinned empty-range error; admin `:8001/metrics` served Prometheus text and `/latency.json` all series (backfill.chunk, ingest.*, rpc.* per method); JSON-RPC `metrics` returned the `{ingestion, rpc}` schema; getFeeStats returned the byte-exact pinned stub error. `docker stop` = clean SIGTERM shutdown in 1.5s; `docker start` resumed from the catalog honoring the pin.
+  - Live-core pubnet catchup under emulation wedged mid-bucket-download (archive miss → `gzip -d` exit 1 → re-download stall, cpu ~0%) — a local-environment limitation (qemu/Rosetta + 7.65GiB Docker VM vs a pubnet catchup), not a daemon defect: the daemon kept serving its contracts throughout. The healthy-phase full smoke is the devbox run, as the stage doc anticipated.
+  - smoke.sh: `bash -n` clean; every request/response field name it asserts was verified against the SDK `protocols/rpc` structs and stage 6's pinned wire strings; the empty-range branch was exercised live (exit 0). The backfill-gated branch is locally unobservable with `"now"` (backfill never has work) — that contract stays pinned by stage 6's e2e tests.
+  - `go build ./...` exit 0, `go vet ./...` exit 0.
+- Warnings / notes for the devbox run:
+  - apt.stellar.org noble has NO arm64 stellar-core packages — an arm64 image build fails at the core install; amd64 is the only option until SDF publishes arm64 noble debs.
+  - Fill `earliest_ledger` BEFORE first start; changing it afterwards requires wiping the data volume (`docker volume rm stellar-rpc-v2-data`).
+  - With `"now"`: expect the brief `data stores are not initialized` getHealth error between gate-open and the first live commit (smoke.sh and RUNBOOK both handle/document it).
+  - smoke.sh's getTransactions/getEvents non-empty assertions assume activity in the most recent 100 pubnet ledgers — safe on pubnet.
+  - The built image (real pin) is still loaded locally as `stellar-rpc-v2:dev`, ready for `docker save`; rebuild any time with the make target.
+- Plan status: stages 1–7 all COMPLETE. The #772 v2-service staged plan is COMPLETE. Remaining work is operational (Karthik's devbox run with filled placeholders), not plan-scoped.
+
+---
+
 <!-- APPEND NEW ENTRIES BELOW. Template:
 
 ## Stage N — <title> (<date>) — COMPLETE | PARTIAL(resume: <exact next action>)

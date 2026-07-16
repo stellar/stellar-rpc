@@ -10,7 +10,7 @@
 | 4 | `stage-4-ledger-tx-adapters.md` | `fullhistory/serve`: db.LedgerReader + db.TransactionReader veneers | 2, 3 |
 | 5 | `stage-5-events-adapter.md` | db.EventReader veneer (multi-chunk stitching, cursors) | 2, 3 (4 preferred first — shares serve pkg plumbing) |
 | 6 | `stage-6-service-assembly.md` | `[serving]` config, gate, JSON-RPC server, stubs, getLedgerEntries, v2 getHealth, `metrics` endpoint, latency middleware | 1, 3, 4, 5 |
-| 7 | `stage-7-devbox-config.md` | Devbox TOML (+placeholders), RUNBOOK, smoke.sh | 6 |
+| 7 | `stage-7-devbox-config.md` | Pubnet captive-core cfg, sample v2 TOML (+placeholders), Docker image (make target over the existing Dockerfile), RUNBOOK (docker run on devbox), smoke.sh | 6 |
 
 - Run them strictly in order 1→7, one fresh Claude session each, in `/Users/karthik/WS/new-world/stellar-rpc-the-v2-service`.
 
@@ -138,14 +138,28 @@ CHECKPOINT.md entry as one commit on the current branch.
 Open /Users/karthik/WS/new-world/stellar-rpc-the-v2-service/plan/772-v2-service/ and follow
 the checkpoint protocol in 01-STAGES.md: first run its entry gate against CHECKPOINT.md —
 stages 1-6 must be COMPLETE; if not, resume the unfinished stage instead and stop after
-it. Then read 00-DECISIONS.md and stage-7-devbox-config.md, and produce the devbox
-deliverables: deploy/devbox/full-history.toml with FILL-marked placeholders matching the
-config keys that were ACTUALLY built, the captive-core template, RUNBOOK.md (verified by
-doing a clean build yourself), and smoke.sh covering every served endpoint plus one stub.
-BLOCKING exit gate: append your stage entry to CHECKPOINT.md marking the plan COMPLETE
-(or PARTIAL with exact resume point) BEFORE your final summary. Then follow the commit
-gate: never commit uninvited, never push — when I say "commit", commit this stage's
-deliverables + CHECKPOINT.md entry as one commit on the current branch.
+it. Then read 00-DECISIONS.md and stage-7-devbox-config.md IN FULL — it carries the
+introspected facts (the v2 Dockerfile at cmd/stellar-rpc/docker/Dockerfile and its build
+args, the Makefile's missing docker target, the full-history CLI, the .github workflow
+conventions) — plus stage 6's CHECKPOINT entry for the as-built config keys and wire
+contracts. BEFORE writing any file, run the /grill-me skill per the stage doc's §0 —
+one question at a time — to get from me: the stellar-core version string to pin in the
+image (noble apt package), devbox arch, image tag naming, retention/earliest_ledger,
+the [backfill.datastore]+[backfill.bsb] lake values (or leave FILL placeholders), and
+the pubnet validators source; grill again mid-stage whenever the captive-core cfg or
+RPC TOML needs information you do not have — never invent values. Then produce the
+deliverables: deploy/devbox/captive-core-pubnet.cfg (a real pubnet config),
+deploy/devbox/full-history.toml (every key verified against the strict-TOML schema in
+config.go; FILL-marked placeholders for what I fill), the Makefile docker-build target
+wrapping the EXISTING Dockerfile (no new Dockerfile) with the documented build command
+taking my core version string, deploy/devbox/RUNBOOK.md (docker build + docker run
+steps for the devbox — config mount, data volume, ports 8000/8001; verify the build
+and a config-parse-deep local run yourself), and deploy/devbox/smoke.sh covering every
+served endpoint plus one stub. Do not push images or code anywhere. BLOCKING exit gate:
+append your stage entry to CHECKPOINT.md marking the plan COMPLETE (or PARTIAL with
+exact resume point) BEFORE your final summary. Then follow the commit gate: never
+commit uninvited, never push — when I say "commit", commit this stage's deliverables +
+CHECKPOINT.md entry as one commit on the current branch.
 ```
 
 ## Notes

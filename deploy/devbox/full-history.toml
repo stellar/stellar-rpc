@@ -1,0 +1,103 @@
+# Full-history v2 daemon config for the aws-devbox (PUBLIC network).
+#
+# Parsing is STRICT: a mistyped key name is a startup error, not silently
+# ignored. Lines marked "FILL:" are the operator-supplied values — the daemon
+# refuses to start until earliest_ledger is replaced, so an unfilled copy of
+# this file can never pin the wrong retention on first start.
+#
+# Paths in here are IN-CONTAINER paths; the RUNBOOK's docker run mounts
+# the host config directory at /config (read-only) and a data volume at /data.
+
+[service]
+# Everything the daemon stores (catalog, chunk stores, captive-core work dir)
+# lives under this directory unless overridden per-store in [storage].
+default_data_dir = "/data"
+
+[serving]
+# 0.0.0.0 so docker's -p port mapping reaches the listeners from outside the
+# container. JSON-RPC on 8000; admin (Prometheus /metrics, /latency.json,
+# /debug/pprof) on 8001 — the admin listener is OFF unless set here.
+endpoint = "0.0.0.0:8000"
+admin_endpoint = "0.0.0.0:8001"
+# Page-size limits, request-duration ceilings, and reader-cache sizes all have
+# v1-parity defaults (max_events_limit 10000, default_events_limit 100,
+# max_transactions_limit 200, default_transactions_limit 50, max_ledgers_limit
+# 200, default_ledgers_limit 50, max_request_execution_duration "25s",
+# request_backlog_global_queue_limit 5000, max_healthy_ledger_latency "30s",
+# ledger_reader_cache 128, event_reader_cache 32) — set a key here only to
+# override it.
+
+[retention]
+# FILL: "genesis", "now", or a decimal ledger number aligned to a 10,000-ledger
+# chunk boundary (e.g. 58370000). PINNED ON FIRST START: once the daemon has
+# run, this value is stored next to the data and every later start must match
+# it — changing it means wiping the data volume. "genesis" backfills all of
+# pubnet history (weeks of work + a lot of disk); "now" skips backfill and
+# starts at the live tip; a recent chunk-aligned number gives a bounded,
+# real backfill. The literal "FILL" below makes an unfilled config fail at
+# startup validation instead of silently defaulting to "genesis".
+earliest_ledger = "FILL"
+
+# FILL: how many 10,000-ledger chunks to keep, sliding forward as new ledgers
+# arrive; 0 keeps everything from earliest_ledger on. Unlike earliest_ledger
+# this is NOT pinned — it can change between restarts.
+retention_chunks = 0
+
+[backfill]
+# workers defaults to the machine's CPU count, max_retries to 3; override here
+# if the devbox needs different concurrency.
+
+# FILL: the ledger lake backfill bulk-reads from. Leaving this whole block
+# commented out is a valid (slow) mode: with no datastore configured, backfill
+# replays history through bounded captive-core runs against the history
+# archives instead of bulk-reading a lake.
+#
+# type is an SDK datastore kind ("GCS", "S3", ...). params are per-type string
+# settings (GCS wants destination_bucket_path; S3 wants bucket_name/region).
+# The schema table describes how the lake's writer laid out files — how many
+# ledgers are packed per object and how many objects per directory partition —
+# and MUST match what actually wrote the bucket, or object names won't resolve.
+#
+# [backfill.datastore]
+# type = "GCS"
+# [backfill.datastore.params]
+# destination_bucket_path = "FILL-bucket/path"
+# [backfill.datastore.schema]
+# ledgers_per_file = 1
+# files_per_partition = 64000
+
+# FILL (optional): tuning for the buffered download stream over the datastore.
+# buffer_size = ledger objects prefetched in memory, num_workers = parallel
+# downloads, retry_limit = per-object retries, retry_wait = pause between
+# retries. Omitted/zero values use the backfill package defaults.
+#
+# [backfill.bsb]
+# buffer_size = 100
+# num_workers = 10
+# retry_limit = 3
+# retry_wait = "5s"
+
+[ingestion]
+# The captive-core config file (mounted next to this one) is the single source
+# of the network passphrase and the validator quorum. The RUNBOOK mounts the
+# config directory at /config.
+captive_core_config = "/config/captive-core-pubnet.cfg"
+
+# Pubnet SDF history archives — where captive core catches up from and where
+# checkpoint metadata is read. Required; not derivable from the captive-core
+# file's [HISTORY] shell commands.
+history_archive_urls = [
+  "https://history.stellar.org/prd/core-live/core_live_001",
+  "https://history.stellar.org/prd/core-live/core_live_002",
+  "https://history.stellar.org/prd/core-live/core_live_003",
+]
+
+# stellar_core_binary_path is omitted on purpose: the image puts stellar-core
+# on PATH at /usr/bin/stellar-core. The core admin port (11626) and query
+# server port (11628, needed by getLedgerEntries) use their defaults and stay
+# INSIDE the container — do not publish them.
+
+[logging]
+level = "info"
+# json so `docker logs` output is machine-parseable line-per-event.
+format = "json"

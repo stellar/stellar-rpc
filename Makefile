@@ -110,6 +110,21 @@ clean:
 build-stellar-rpc: build-libs
 	go build -ldflags="${GOLDFLAGS}" ${MACOS_MIN_VER} -o ${STELLAR_RPC_BINARY} -trimpath -v ./cmd/stellar-rpc
 
+# Builds the full-history v2 service image from cmd/stellar-rpc/docker/Dockerfile
+# (build context = repo root). STELLAR_CORE_VERSION pins the stellar-core noble
+# apt package baked into the runtime stage; unset installs the latest. Set
+# DOCKER_PLATFORM to cross-build (e.g. DOCKER_PLATFORM=linux/amd64 on an arm64
+# mac for an amd64 devbox — slow under emulation but correct).
+#
+#   make docker-build STELLAR_CORE_VERSION=27.1.0-3365.3589a696b.noble DOCKER_PLATFORM=linux/amd64
+DOCKER_IMAGE ?= stellar-rpc-v2:dev
+docker-build:
+	docker build $(if $(DOCKER_PLATFORM),--platform $(DOCKER_PLATFORM)) \
+		-f cmd/stellar-rpc/docker/Dockerfile \
+		--build-arg STELLAR_CORE_VERSION=$(STELLAR_CORE_VERSION) \
+		--build-arg REPOSITORY_VERSION=$(REPOSITORY_VERSION) \
+		-t $(DOCKER_IMAGE) .
+
 go-check-branch:
 	golangci-lint run ./... --new-from-rev $$(git rev-parse origin/main)
 
@@ -117,4 +132,4 @@ go-check:
 	golangci-lint run ./...
 
 # PHONY lists all the targets that aren't file names, so that make would skip the timestamp based check.
-.PHONY: clean fmt watch test rust-test go-test check rust-check go-check install build build-stellar-rpc build-libs lint lint-changes
+.PHONY: clean fmt watch test rust-test go-test check rust-check go-check install build build-stellar-rpc build-libs lint lint-changes docker-build
