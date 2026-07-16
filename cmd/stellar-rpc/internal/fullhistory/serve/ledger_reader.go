@@ -1,8 +1,8 @@
 // Package serve implements the v1 db reader interfaces (db.LedgerReader,
-// db.TransactionReader) as thin veneers over the full-history registry, so
-// the existing v1 JSON-RPC handlers (getLedgers, getTransactions,
-// getTransaction, getLatestLedger, getNetwork, getVersionInfo, getHealth) run
-// unchanged against the v2 chunked stores.
+// db.TransactionReader, db.EventReader) as thin veneers over the
+// full-history registry, so the existing v1 JSON-RPC handlers (getLedgers,
+// getTransactions, getTransaction, getEvents, getLatestLedger, getNetwork,
+// getVersionInfo, getHealth) run unchanged against the v2 chunked stores.
 //
 // Every request runs against exactly one admitted registry Snapshot
 // {latest, View}: db.LedgerReader.NewTx pins one admission for a whole

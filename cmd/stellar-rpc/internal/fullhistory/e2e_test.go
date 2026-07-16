@@ -28,8 +28,8 @@ package fullhistory
 //       cross their injected interfaces (CoreOpener / backfill.Backend) and are
 //       fed synthetic-but-well-formed LedgerCloseMeta. No captive core, no
 //       object store, no network.
-//     - ServeReads only records the run's registry (the HTTP layer is stage 6
-//       of #772). The read PATHS exercised are the registry View resolution
+//     - ServeReads only records the run's registry (no HTTP serving layer
+//       exists yet). The read PATHS exercised are the registry View resolution
 //       and the txhash index lookup getTransaction will sit on.
 //
 // cpi=1 (the chunksPerTxhashIndex test seam) makes every one-chunk window

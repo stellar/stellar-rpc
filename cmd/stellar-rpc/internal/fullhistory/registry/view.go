@@ -11,7 +11,7 @@
 //	h, err := reg.LedgerReaderFor(snap.View, chunkID)  // cold wins, else hot
 //	raw, err := h.GetLedgerRaw(seq)
 //
-// The write side (ingestion + lifecycle, wired in stage 3 of #772) publishes
+// The write side (ingestion + lifecycle) publishes
 // serving-map changes through the hook methods (PublishHot, AdvanceLatest,
 // PublishFrozen, SwapTxIndex, UnpublishHot, AdvanceFloor); each hook clones
 // the current View, applies the change, and atomically republishes, handing

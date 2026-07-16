@@ -186,7 +186,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	registry := prometheus.NewRegistry()
 	metrics, sink := buildSinks(opts, registry)
 
-	// The exact-quantile latency set (D8) lives outside the supervised run loop —
+	// The exact-quantile latency set lives outside the supervised run loop —
 	// like the health signal — so counts, quantiles, and max-ever span restarts.
 	// The sink wrapper mirrors every cold per-chunk total into backfill.chunk;
 	// the ingestion loop feeds the ingest.* series through StartConfig.

@@ -7,9 +7,9 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/latencytrack"
 )
 
-// The latencytrack series the daemon records (decision D8). The hot ingestion
-// loop feeds the three ingest.* series per ledger; chunkLatencySink feeds
-// backfill.chunk per cold chunk. The read service (stage 6) adds rpc.<method>.
+// The latencytrack series the daemon records. The hot ingestion loop feeds
+// the three ingest.* series per ledger; chunkLatencySink feeds backfill.chunk
+// per cold chunk. The read service adds rpc.<method> when it is assembled.
 const (
 	latSeriesIngestRead    = "ingest.read"
 	latSeriesIngestWrite   = "ingest.write"

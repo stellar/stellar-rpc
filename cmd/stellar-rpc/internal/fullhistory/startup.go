@@ -355,8 +355,8 @@ type StartConfig struct {
 	// #772's read server consumes it (as HealthSignal). nil ⇒ observe is a no-op.
 	health *healthState
 
-	// latency receives the per-ledger ingest.* series from the ingestion loop
-	// (D8). nil ⇒ samples are dropped.
+	// latency receives the per-ledger ingest.* series from the ingestion
+	// loop. nil ⇒ samples are dropped.
 	latency *latencytrack.Set
 }
 

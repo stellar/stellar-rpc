@@ -162,7 +162,7 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 	// rebuilds it for the reopened chunk DB below.
 	hotService := ingest.NewHotService(hotDB, cfg.Sink)
 
-	// Per-ledger benchmarking series (D8), resolved once — a nil Latency set
+	// Per-ledger benchmarking series, resolved once — a nil Latency set
 	// hands out nil trackers whose Record drops the sample. sink is the loop's
 	// own emitter for the read/e2e Prometheus counterparts (the per-phase
 	// signals are emitted inside hotService.Ingest, which already or-nops).

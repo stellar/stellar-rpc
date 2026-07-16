@@ -43,10 +43,10 @@ type ServiceConfig struct {
 	DefaultDataDir string `toml:"default_data_dir"`
 }
 
-// ServingConfig is [serving] — the read-service knobs (#772). Stage 1
-// introduces only the admin endpoint; the JSON-RPC serving keys (endpoint,
-// per-method limits, execution durations, cache sizes) land with the service
-// itself (stage 6).
+// ServingConfig is [serving] — the read-service knobs (#772). Only the admin
+// endpoint exists so far; the JSON-RPC serving keys (endpoint, per-method
+// limits, execution durations, cache sizes) land together with the service
+// itself.
 type ServingConfig struct {
 	// AdminEndpoint is the admin HTTP listen address, serving GET /metrics
 	// (Prometheus) and GET /latency.json (exact-quantile latency snapshots).

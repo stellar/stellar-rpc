@@ -363,8 +363,8 @@ func (r *Registry) publish(mutate func(next *View) (retire []func() error)) {
 }
 
 // Grace and cache-capacity defaults, used when Options leaves them zero. The
-// service assembly (stage 6) feeds real values: grace = max request duration
-// + margin; caps from the [serving] config.
+// service assembly feeds real values: grace = max request duration + margin;
+// caps from the [serving] config.
 const (
 	DefaultGrace          = 30 * time.Second
 	DefaultLedgerCacheCap = 128
