@@ -451,6 +451,26 @@ pre.metadata {
   </table></div>
   <p class="tbl-note">The read itself is single-digit ms — proof that <code>getLedgers</code>' ~350–670 ms serve
   time is transfer/serialization, not storage.</p>
+
+  <div class="tbl-cap">End-to-end — brand-new ledger, ingest → queryable (synthesized: ingest + hot query, ms)</div>
+  <div class="target-table-wrap"><table class="target">
+    <thead><tr><th>profile</th><th>endpoint</th><th>e2e p50</th><th>e2e p99</th></tr></thead>
+    <tbody>
+      <tr><td>sac</td><td>getLedgers</td><td>~696.7</td><td>~752.9</td></tr>
+      <tr><td>sac</td><td>getTransaction</td><td>~147.4</td><td>~170.7</td></tr>
+      <tr><td>sac</td><td>getEvents</td><td>~137.1</td><td>~157.3</td></tr>
+      <tr><td>token</td><td>getLedgers</td><td>~680.7</td><td>~715.3</td></tr>
+      <tr><td>token</td><td>getTransaction</td><td>~148.1</td><td>~169.5</td></tr>
+      <tr><td>token</td><td>getEvents</td><td>~137.4</td><td>~154.7</td></tr>
+      <tr><td>soroswap</td><td>getLedgers</td><td>~432.5</td><td>~456.0</td></tr>
+      <tr><td>soroswap</td><td>getTransaction</td><td>~88.3</td><td>~103.0</td></tr>
+      <tr><td>soroswap</td><td>getEvents</td><td>~81.1</td><td>~93.4</td></tr>
+    </tbody>
+  </table></div>
+  <p class="tbl-note">The full path for a just-closed ledger: <strong>e2e = ingest (source → commit) + hot query</strong>,
+  summed at the same percentile. Summing per-stage percentiles is a conservative upper bound; commit → queryable is
+  treated as negligible (the design's visibility window is ~1–2 ms). Ingest (~77–130 ms) dominates the light
+  endpoints; for getLedgers the query transfer still dominates.</p>
 </section>
 
 <section id="livepubnet">
