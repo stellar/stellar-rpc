@@ -1,0 +1,13 @@
+=== RUN   TestServeE2E_ColdQueryLatency
+    serve_e2e_cold_latency_test.go:128: COLD query-latency on "sac" chunk 1, window [10202,10221]: 500 reps/endpoint (200 tx hashes, contract="CCMPGRP4VKR5CJR77YQHDWB3KIKYYRHZSVWGC5F2JRIME2UNM4JLI64D")
+    serve_e2e_cold_latency_test.go:130:   endpoint         count    p50          p90          p99          max          errors
+    serve_e2e_cold_latency_test.go:164:   getLedgers       73       617.248ms    653.133ms    671.021ms    671.021ms    0  (budget-capped at 45s)
+    serve_e2e_cold_latency_test.go:164:   getTransaction   500      18.322ms     31.725ms     40.315ms     43.309ms     0
+    serve_e2e_cold_latency_test.go:164:   getEvents        500      8.788ms      10.541ms     14.392ms     14.942ms     0
+    serve_e2e_cold_latency_test.go:212: getEvents term sweep over [10202,10221]: 402 terms harvested (limit 10/page):
+    serve_e2e_cold_latency_test.go:164:   getEvents[t=1]   500      8.44ms       10.361ms     13.402ms     14.282ms     0
+    serve_e2e_cold_latency_test.go:164:   getEvents[t=4]   500      8.629ms      10.675ms     12.816ms     15.383ms     0
+    serve_e2e_cold_latency_test.go:164:   getEvents[t=8]   500      6.623ms      9.232ms      11.923ms     13.312ms     0
+    serve_e2e_cold_latency_test.go:164:   getEvents[t=15]  500      8.666ms      10.466ms     14.113ms     15.358ms     0
+--- PASS: TestServeE2E_ColdQueryLatency (77.97s)
+PASS

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/serve"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
@@ -68,6 +70,17 @@ type daemonOptions struct {
 	// fixed geometry.ChunksPerTxhashIndex. Tests set it to 1 so a single chunk's
 	// freeze is a terminal index (exercising the index rebuild + prune path cheaply).
 	chunksPerTxhashIndex uint32
+
+	// serveAddr, when set, is invoked with the read server's bound address once
+	// StartServer returns (test-only): a host:0 endpoint yields the OS-assigned
+	// port here so the e2e can dial it. nil in production.
+	serveAddr func(net.Addr)
+
+	// passphrase overrides the network passphrase the read server verifies tx
+	// hashes with (test-only): the e2e injects a fake Core (bypassing the
+	// captive-core peek), so it supplies the passphrase here. "" ⇒ production
+	// reads it from the captive-core config peek.
+	passphrase string
 }
 
 const defaultRestartBackoff = 5 * time.Second
@@ -119,7 +132,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// ingestion loop, and the no-lake backfill source is built from its stream. A
 	// bad [ingestion] config therefore surfaces before validateConfig's errors —
 	// cosmetic, both are fatal startup errors. ---
-	core, err := resolveCore(opts, cfg, logger)
+	core, corePassphrase, err := resolveCore(opts, cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -157,12 +170,6 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 			"or [ingestion].history_archive_urls")
 	}
 
-	serveReads := opts.ServeReads
-	if serveReads == nil {
-		// TODO(#772): wire the full-history RPC read server; no-op until the cutover.
-		serveReads = func(context.Context) error { return nil }
-	}
-
 	// --- validateConfig: pin/confirm the layout, resolve the earliest floor. ---
 	earliest, err := validateConfig(ctx, cfg, cat, backend.Tip)
 	if err != nil {
@@ -179,9 +186,68 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	registry := prometheus.NewRegistry()
 	metrics, sink := buildSinks(opts, registry)
 
+	// --- Resolve the read path (query POC). When an injected ServeReads is
+	// present (existing ingestion/backfill tests) it wins unchanged. Otherwise a
+	// non-empty [serve].endpoint builds the serving Registry and a ServeReads that
+	// launches the JSON-RPC read server on it; an empty endpoint keeps the no-op
+	// placeholder (reads still come from the v1 SQLite daemon). ---
+	serveReads := opts.ServeReads
+	var servingReg *serve.Registry
+	//nolint:nestif // POC read-path resolution kept inline with the lifecycle wiring it feeds
+	if serveReads == nil {
+		if cfg.Serve.Endpoint != "" {
+			// The read server verifies by-hash lookups with the network passphrase;
+			// serving with the wrong (or empty) one would silently miss every tx, so
+			// refuse to start.
+			passphrase := opts.passphrase
+			if passphrase == "" {
+				passphrase = corePassphrase
+			}
+			if passphrase == "" {
+				return errors.New("[serve].endpoint is set but the network passphrase is empty; " +
+					"it is read from [ingestion].captive_core_config's NETWORK_PASSPHRASE")
+			}
+			servingReg = serve.NewRegistry(cat, retention, logger)
+			layout := config.NewLayoutFromPaths(paths)
+			serveReads = func(serveCtx context.Context) error {
+				// serveCtx is the daemon run ctx — it cancels only at daemon shutdown,
+				// so StartServer's ctx-cancel watcher tears the server down then (no leak
+				// on clean shutdown).
+				// POC: supervise re-invokes ServeReads on every restartable error while
+				// the daemon ctx is still live, so the prior server keeps its listener.
+				// StartServer now registers its histogram tolerantly (reusing the existing
+				// collector) instead of panicking, and binds BEFORE it registers — so a
+				// fixed-port restart cleanly rebind-fails ("address already in use") and
+				// the daemon crash-loops on the bind until the daemon ctx tears the prior
+				// server down. Acceptable for the query POC: the host:0 benchmark binds a
+				// fresh ephemeral port each attempt (the prior server lingers but does not
+				// block the restart), and serving restarts are out of scope.
+				addr, _, serr := serve.StartServer(serveCtx, serve.ServerParams{
+					Registry:   servingReg,
+					Layout:     layout,
+					Passphrase: passphrase,
+					Health:     hs,
+					Metrics:    registry,
+					Logger:     logger,
+					Cfg:        cfg.Serve,
+				})
+				if serr != nil {
+					return serr
+				}
+				if opts.serveAddr != nil {
+					opts.serveAddr(addr)
+				}
+				return nil
+			}
+		} else {
+			serveReads = func(context.Context) error { return nil }
+		}
+	}
+
 	// --- Assemble the StartConfig and run the supervised run loop. ---
 	start := startConfig(
-		cfg, cat, logger, backend, core, serveReads, metrics, sink, hs, retention)
+		cfg, cat, logger, backend, core, serveReads, metrics, sink, hs, retention, servingReg,
+	)
 
 	backoff := opts.RestartBackoff
 	if backoff <= 0 {
@@ -209,16 +275,19 @@ func openCatalog(paths config.Paths, opts daemonOptions, logger *supportlog.Entr
 }
 
 // resolveCore returns the injected CoreOpener (tests) or a production captive-core
-// opener built from [ingestion].
-func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry) (CoreOpener, error) {
+// opener built from [ingestion], plus the network passphrase the read server
+// verifies tx hashes with. The passphrase is the one the captive-core peek read
+// back from the config file (empty for an injected Core — the test supplies it
+// via daemonOptions.passphrase instead).
+func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry) (CoreOpener, string, error) {
 	if opts.Core != nil {
-		return opts.Core, nil
+		return opts.Core, "", nil
 	}
 	built, err := newCaptiveCoreOpener(cfg.Ingestion, cfg.Service.DefaultDataDir, logger)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return built, nil
+	return built, built.config.NetworkPassphrase, nil
 }
 
 // startConfig assembles the StartConfig run consumes. run() builds the
@@ -228,6 +297,7 @@ func startConfig(
 	cfg config.Config, cat *catalog.Catalog, logger *supportlog.Entry,
 	backend backfill.Backend, core CoreOpener, serveReads func(context.Context) error,
 	metrics observability.Metrics, sink ingest.MetricSink, hs *healthState, retention geometry.Retention,
+	serving *serve.Registry,
 ) StartConfig {
 	exec := backfill.ExecConfig{
 		Catalog:    cat,
@@ -246,6 +316,7 @@ func startConfig(
 		Core:       core,
 		ServeReads: serveReads,
 		health:     hs,
+		serving:    serving,
 	}
 }
 
@@ -425,7 +496,8 @@ func newCaptiveCoreOpener(
 		found, lerr := exec.LookPath("stellar-core")
 		if lerr != nil {
 			return nil, fmt.Errorf(
-				"[ingestion].stellar_core_binary_path unset and stellar-core not found on PATH: %w", lerr)
+				"[ingestion].stellar_core_binary_path unset and stellar-core not found on PATH: %w", lerr,
+			)
 		}
 		binaryPath = found
 	}

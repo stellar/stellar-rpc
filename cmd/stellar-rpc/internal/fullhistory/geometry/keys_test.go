@@ -47,6 +47,7 @@ func TestKeyToPathBijection(t *testing.T) {
 
 	// The doc's directory-layout examples.
 	require.Equal(t, "/data/ledgers/00005/00005350.pack", l.LedgerPackPath(5350))
+	require.Equal(t, l.LedgerPackPath(5350), LedgerPackPath("/data/ledgers", 5350))
 	require.Equal(t, "/data/txhash/raw/00005/00005350.bin", l.TxHashBinPath(5350))
 	require.Equal(t, []string{
 		"/data/events/00005/00005350-events.pack",

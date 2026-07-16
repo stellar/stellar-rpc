@@ -14,6 +14,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/serve"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
@@ -125,6 +126,24 @@ func run(ctx context.Context, cfg StartConfig) error {
 		ExecConfig: cfg.Exec,
 		Retention:  cfg.Retention,
 	}.WithLifecycleDefaults()
+	// The read server (query POC) rescans + republishes its View after each
+	// successful tick. Set only when serving is enabled so the no-serve daemon
+	// carries no observer.
+	if cfg.serving != nil {
+		lifecycleCfg.TickObserver = cfg.serving
+	}
+
+	// Seed the read server's serving View from durable state, then publish the
+	// live resume chunk's shared write handle. Order is load-bearing: BuildInitial
+	// rebuilds the whole View and deliberately OMITS the resume (highest ready)
+	// chunk, leaving it for HotOpened — so HotOpened MUST follow BuildInitial or
+	// the fresh View would clobber the resume chunk (matching serve's tested
+	// BuildInitial→HotOpened order). Both are no-ops when serving is disabled, and
+	// both precede ServeReads so the server admits against a populated View.
+	if err := cfg.serving.BuildInitial(lastCommitted); err != nil {
+		return fmt.Errorf("startup build initial serving view: %w", err)
+	}
+	cfg.serving.HotOpened(chunk.IDFromLedger(resumeLedger), hotDB)
 
 	// Begin serving reads (injected) BEFORE launching the loops; it must return
 	// promptly (launch, not block).
@@ -153,6 +172,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 			Metrics:  metrics,
 			Sink:     cfg.Exec.Process.Sink,
 			Health:   cfg.health,
+			Serving:  cfg.serving,
 		})
 		if err == nil {
 			// WithContext cancels gctx (unblocking the lifecycle sibling in g.Wait)
@@ -199,7 +219,8 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted uint32) (
 		// frontier — and each supervised restart re-samples (a transient outage
 		// self-heals).
 		tip, err := sampleTipWithRetry(
-			ctx, cfg.Exec.Process.Backend.Tip, defaultTipBackoff, defaultTipMaxAttempts)
+			ctx, cfg.Exec.Process.Backend.Tip, defaultTipBackoff, defaultTipMaxAttempts,
+		)
 		if err != nil {
 			return 0, fmt.Errorf("sample network tip: %w", err)
 		}
@@ -315,6 +336,12 @@ type StartConfig struct {
 	// health is the readiness/health signal the ingestion loop feeds per commit;
 	// #772's read server consumes it (as HealthSignal). nil ⇒ observe is a no-op.
 	health *healthState
+
+	// serving is the read server's serve.Registry (query POC): the ingestion loop
+	// drives its write-side hooks and startup seeds its initial View. nil when
+	// [serve] is disabled — every *serve.Registry hook is nil-receiver safe, so the
+	// no-serve path needs no guards.
+	serving *serve.Registry
 }
 
 // withDefaults fills the embedded Exec defaults (Workers -> GOMAXPROCS). The

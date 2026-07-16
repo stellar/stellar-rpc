@@ -77,6 +77,30 @@ type boundaryPublisher interface {
 	Publish(c chunk.ID)
 }
 
+// servingHooks is the write-side coupling to the read-server's serve.Registry
+// (query POC): the ingestion loop calls it as the true committed watermark and
+// the hot map change as it commits, boundary-closes, and opens chunks.
+// *serve.Registry satisfies it; the daemon leaves it nil (nopServingHooks) when
+// [serve] is disabled, so every non-serving test compiles unchanged.
+// LedgerCommitted and HotOpened are cheap (atomic store / map clone-publish), but
+// ChunkClosed is NOT non-blocking: it synchronously opens a full-facade read view
+// (RocksDB open + mandatory eventstore warmup) on the ingestion goroutine, so it
+// stalls ingestion for the warmup's duration once per chunk boundary.
+type servingHooks interface {
+	LedgerCommitted(seq uint32)
+	HotOpened(c chunk.ID, db *hotchunk.DB)
+	ChunkClosed(c chunk.ID)
+}
+
+// nopServingHooks is the no-serve default: every hook is a no-op, so the
+// ingestion loop drives the same call sites whether or not a read server is
+// wired.
+type nopServingHooks struct{}
+
+func (nopServingHooks) LedgerCommitted(uint32)           {}
+func (nopServingHooks) HotOpened(chunk.ID, *hotchunk.DB) {}
+func (nopServingHooks) ChunkClosed(chunk.ID)             {}
+
 // ingestionLoopConfig bundles the ingestion loop's dependencies. run() opens the
 // resume chunk's hot DB (HotDB) BEFORE serving reads — so a broken hot tier fails
 // startup instead of serving behind a crash-looping loop — and hands the open
@@ -92,6 +116,11 @@ type ingestionLoopConfig struct {
 	Metrics  observability.Metrics
 	Sink     ingest.MetricSink
 	Health   *healthState
+
+	// Serving is the read-server registry's write-side hook surface (query POC);
+	// nil ⇒ nopServingHooks (no read server). Normalized in runIngestionLoop so
+	// the hook call sites below need no nil guard.
+	Serving servingHooks
 }
 
 // runIngestionLoop is the hot tier's OWNER: the single goroutine that opens,
@@ -116,6 +145,10 @@ type ingestionLoopConfig struct {
 // rely on.
 func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 	metrics := observability.MetricsOrNop(cfg.Metrics)
+	// Normalize the serving hooks once so every call site below is guard-free.
+	if cfg.Serving == nil {
+		cfg.Serving = nopServingHooks{}
+	}
 
 	// Take ownership of the resume hot DB run() opened (before serving reads) as the
 	// loop's FIRST statement, so the deferred close sits ahead of any early return —
@@ -155,6 +188,10 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		// committed ledger (mid-chunk included), one atomic gauge set per ledger.
 		// The tick must not touch it — its chunk-aligned value would regress it.
 		metrics.LastCommitted(seq)
+		// Advance the read server's `latest` watermark AFTER the commit is durable,
+		// so a query never admits a ledger the View cannot yet serve (design:
+		// "latest advances last"). No-op when serving is disabled.
+		cfg.Serving.LedgerCommitted(seq)
 
 		// Feed the readiness/health signal from the SAME commit: the first commit
 		// latches readiness, and the close time drives the health staleness check.
@@ -173,12 +210,23 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 			_ = hotDB.Close() // Close never fails; flush errors are logged inside
 			hotDB = nil       // released; reopen below republishes it for the defer
 
+			// The write handle is closed; hand the closed chunk to the read server so
+			// it reopens a full-facade read view (OpenReadView) and keeps serving it
+			// until freeze covers it from cold. Must follow the Close above (the fence)
+			// and precede Publish below. No-op when serving is disabled.
+			cfg.Serving.ChunkClosed(closed)
+
 			nextDB, oerr := openHotDBForChunk(cfg.Catalog, next, cfg.Logger)
 			if oerr != nil {
 				return fmt.Errorf("open hot DB for chunk %s at boundary: %w", next, oerr)
 			}
 			hotDB = nextDB
 			hotService = ingest.NewHotService(hotDB, cfg.Sink)
+			// Publish the new live chunk's shared write handle to the read server
+			// BEFORE Boundary.Publish (and thus before any LedgerCommitted can advance
+			// latest into it), so the View serves the new chunk the instant latest can
+			// reach it (design ordering rule). No-op when serving is disabled.
+			cfg.Serving.HotOpened(next, nextDB)
 			// next's key (created inside openHotDBForChunk) moved the partition; only
 			// now publish the completed chunk to the lifecycle.
 			cfg.Boundary.Publish(closed)
@@ -197,5 +245,55 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 	// means the source stopped WITHOUT an error while the daemon ctx is still live —
 	// abnormal; surface a restartable error. (run()'s guard owns the clean-vs-restart
 	// classification.)
-	return errors.New("ingestion stream ended unexpectedly (source stopped with no error)")
+	return errStreamEnded
+}
+
+// errStreamEnded reports the stream stopping with no error while ctx is still
+// live.
+var errStreamEnded = errors.New("ingestion stream ended unexpectedly (source stopped with no error)")
+
+// BoundedIngestConfig configures RunBoundedIngestionLoop. Catalog must be bound
+// to the layout whose hot root the run writes; every hot DB the loop touches is
+// opened through it (the create bracket wipes any leftover chunk dir, so runs
+// always start from an empty DB).
+type BoundedIngestConfig struct {
+	// Stream must be bounded to the range to ingest: its end is what terminates
+	// the loop (the loop itself always requests an unbounded range).
+	Stream ledgerbackend.LedgerStream
+	// Resume is the first ledger to ingest; its chunk's hot DB is opened fresh.
+	Resume  uint32
+	Catalog *catalog.Catalog
+	// Boundary receives the id of each chunk the loop completes, as in the
+	// daemon's loop.
+	Boundary boundaryPublisher
+	Logger   *supportlog.Entry
+	Metrics  observability.Metrics
+	Sink     ingest.MetricSink
+}
+
+// RunBoundedIngestionLoop runs the ingestion loop over a bounded stream: it
+// opens the resume chunk's hot DB through openHotDBForChunk and runs
+// runIngestionLoop until the stream ends. A bounded stream ending is the
+// expected termination (errStreamEnded), so unlike the daemon's unbounded run
+// it is remapped to a nil error rather than surfaced as a restartable failure.
+func RunBoundedIngestionLoop(ctx context.Context, cfg BoundedIngestConfig) error {
+	hotDB, err := openHotDBForChunk(cfg.Catalog, chunk.IDFromLedger(cfg.Resume), cfg.Logger)
+	if err != nil {
+		return fmt.Errorf("open hot DB for resume ledger %d: %w", cfg.Resume, err)
+	}
+	// The loop's first deferred statement takes ownership of the close.
+	err = runIngestionLoop(ctx, ingestionLoopConfig{
+		Stream:   cfg.Stream,
+		Resume:   cfg.Resume,
+		HotDB:    hotDB,
+		Catalog:  cfg.Catalog,
+		Boundary: cfg.Boundary,
+		Logger:   cfg.Logger,
+		Metrics:  cfg.Metrics,
+		Sink:     cfg.Sink,
+	})
+	if errors.Is(err, errStreamEnded) {
+		return nil
+	}
+	return err
 }

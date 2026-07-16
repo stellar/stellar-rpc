@@ -1,0 +1,19 @@
+=== RUN   TestServeE2E_ProfileLatency
+    serve_e2e_profile_latency_test.go:593: ingest→query visibility on real "token" ledgers [10202..10221], warmup=200 (20 samples, one per ledger):
+    serve_e2e_profile_latency_test.go:595:   span       p50            p90            p99            max
+    serve_e2e_profile_latency_test.go:596:   (NOTE: p90/p99 over 20 one-per-ledger samples collapse toward max; see the query-latency pass below for a dense p99)
+    serve_e2e_profile_latency_test.go:586:   full       p50=1m19.367581s p90=1m22.665839s p99=1m23.510799s max=1m23.510799s
+    serve_e2e_profile_latency_test.go:586:   ingest     p50=122.765ms  p90=128.778ms  p99=132.615ms  max=132.615ms
+    serve_e2e_profile_latency_test.go:586:   visible    p50=1m19.246581s p90=1m22.539908s p99=1m23.409197s max=1m23.409197s
+    serve_e2e_profile_latency_test.go:605: query-latency pass: 500 reps/endpoint over [10202,10221] (200 tx hashes, contract="CA5EIFMV7WOGRAAZS4PG66LTAWHGNKJRD63MRJLZJPFPOWOIRKBGF63C"):
+    serve_e2e_profile_latency_test.go:607:   endpoint         count    p50          p90          p99          max          errors
+    serve_e2e_profile_latency_test.go:647:   getLedgers       83       548.691ms    557.727ms    563.645ms    563.645ms    0  (budget-capped at 45s)
+    serve_e2e_profile_latency_test.go:647:   getTransaction   500      18.185ms     19.135ms     25.126ms     27.636ms     0
+    serve_e2e_profile_latency_test.go:647:   getEvents        500      7.614ms      7.843ms      11.265ms     12.059ms     0
+    serve_e2e_profile_latency_test.go:697: getEvents term sweep over [10202,10221]: 402 terms harvested (limit 10/page):
+    serve_e2e_profile_latency_test.go:647:   getEvents[t=1]   500      7.624ms      7.94ms       11.878ms     12.15ms      0
+    serve_e2e_profile_latency_test.go:647:   getEvents[t=4]   500      6.205ms      7.682ms      8.55ms       11.796ms     0
+    serve_e2e_profile_latency_test.go:647:   getEvents[t=8]   500      7.532ms      7.763ms      10.195ms     12.163ms     0
+    serve_e2e_profile_latency_test.go:647:   getEvents[t=15]  500      7.66ms       7.877ms      12.412ms     12.813ms     0
+--- PASS: TestServeE2E_ProfileLatency (183.94s)
+PASS

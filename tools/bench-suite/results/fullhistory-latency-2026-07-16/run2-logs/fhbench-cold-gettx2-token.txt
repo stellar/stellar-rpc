@@ -1,0 +1,5 @@
+### token COLD getTransaction (mid-tier hash sample, concurrency 1)
+
+endpoint         tier   terms    count        RPS       p50       p90       p99       max   errors
+--------------------------------------------------------------------------------------------------
+getTransaction   cold       -     1704       56.8  16.297ms   24.41ms   35.27ms  40.784ms        0
