@@ -1,6 +1,6 @@
 # Full-History Query-Support POC Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Implemented task-by-task; steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A runnable full-history daemon that serves `getLedgers`, `getTransaction`, `getTransactions`, and `getEvents` over JSON-RPC from both hot RocksDB chunks and sealed cold artifacts, instrumented for ingestion + per-endpoint latency benchmarking, per the query-routing design in PR #843 (`design-docs/query-routing-design.md` on the `docs/query-routing-design` branch).
 
@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Branch: `poc/fullhistory-query` (off `feature/full-history`). Commit after every task; commit messages `fullhistory: <what> (query POC)`. **Never** add AI/Claude attribution or Co-authored-by lines.
+- Branch: `poc/fullhistory-query` (off `feature/full-history`). Commit after every task; commit messages `fullhistory: <what> (query POC)`.
 - This is a POC. Deliberate simplifications are marked `// POC:` with the ceiling and the upgrade path (e.g. `// POC: no reaper — superseded .idx readers leak (bounded by coverage swaps); add grace-period reaper at productionization`).
 - **POC scope cuts (locked, do not re-add):** no LRU reader caches (per-request cold readers), no reaper (see safety rules in Task 2), no datastore fallback (pass `nil`), chunk-aligned retention floor.
 - macOS test invocation (RocksDB 10.9.1 lives at `~/.rocksdb-1091`; brew's 11.x is incompatible):
@@ -316,9 +316,9 @@ func StartServer(ctx context.Context, p ServerParams) (addr net.Addr, shutdown f
 
 ### Task 9: Final review gate
 
-- [ ] Opus-review findings from Tasks 1-8 all addressed (each task got an opus review before merge-forward).
+- [ ] Per-task review findings from Tasks 1-8 all addressed (each task got a review before merge-forward).
 - [ ] Full tree: `go build ./...`, `go vet ./...`, fullhistory tree `-short` green, `golangci-lint` clean on the diff (repo lint: build v2.11.3 with go1.26, `--new-from-rev origin/feature/full-history`, gofumpt).
-- [ ] Fable (max-effort) end-to-end review of the cumulative diff vs this plan + design doc: admission ordering, fence preservation, borrowed-bytes copying, error taxonomy, POC markers present.
+- [ ] Max-effort end-to-end review of the cumulative diff vs this plan + design doc: admission ordering, fence preservation, borrowed-bytes copying, error taxonomy, POC markers present.
 - [ ] Fix anything CONFIRMED; re-run tests; final commit.
 
 ## Self-review notes

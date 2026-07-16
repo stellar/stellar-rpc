@@ -1,15 +1,8 @@
 # Session Handoff — Full-History Query POC (2026-07-15)
 
-> **STATUS: COMPLETE (2026-07-15, second session).** All 9 tasks done; final review verdict: ready for benchmarking. Final HEAD `6e35a7b9`. See "Completion summary" at the bottom. The resume instructions below are retained for the record.
+> **STATUS: COMPLETE (2026-07-15, second session).** All 9 tasks done; final review verdict: ready for benchmarking. Final HEAD `6e35a7b9`. See "Completion summary" at the bottom. The notes below are retained for the record.
 
-Resume document for continuing execution of `2026-07-15-fullhistory-query-poc.md` (same directory) in a fresh Claude Code session on another machine.
-
-## How to resume
-
-1. `git fetch && git checkout poc/fullhistory-query` (branched off `feature/full-history`).
-2. Start a Claude Code session in the repo root and say:
-   > Resume executing docs/superpowers/plans/2026-07-15-fullhistory-query-poc.md with superpowers:subagent-driven-development, per the HANDOFF file next to it. Workers + per-task reviews on opus, final review on fable. Resume at the first task not marked complete below.
-3. Re-create the scratch ledger from the "Progress ledger" section below at `.superpowers/sdd/progress.md` (git-ignored, machine-local). Task briefs are regenerated with the skill's `scripts/task-brief PLAN_FILE N`.
+Companion record for `2026-07-15-fullhistory-query-poc.md` (same directory), the task-by-task implementation plan.
 
 ## Progress ledger (authoritative copy at handoff)
 
@@ -23,23 +16,23 @@ Task 3: complete (commits 6067a677..82098f67, review clean)
   Env note: serve pkg now links Rust libs; build once with RUSTUP_TOOLCHAIN=1.89 make build-libs.
 Task 4: complete (commits 82098f67..a5f32e8d, review clean after floor-gate-at-index-seam fix)
   Minor (deferred to final review): fee-bump inner-hash lookup depends on whether index build stores inner keys (cross-task check); nil-hotDB-guard cut not comment-marked in tx_reader.go.
-Task 5: IN FLIGHT at handoff (getEvents v2 handler) — worker died with the old machine; NO commits/files landed. Restart Task 5 from its plan section.
-Tasks 6-9: not started.
+Task 5: IN FLIGHT at handoff (getEvents v2 handler) — no commits/files landed. Restarted from its plan section.
+Tasks 6-9: not started at handoff.
 ```
 
-## Execution protocol being used
+## Execution protocol used
 
-- One opus implementer subagent per task (fresh context; task brief via `scripts/task-brief`), TDD, one commit per task, report file per task.
-- One opus task-review subagent per task (brief + implementer report + `scripts/review-package BASE..HEAD` diff file). Critical/Important findings go back to the implementer, then focused re-review.
-- Task 9 = whole-branch final review on fable (max effort) over `git merge-base origin/feature/full-history HEAD`..HEAD, plus full-tree `-short` run and repo golangci-lint.
-- Commit messages: `fullhistory: <what> (query POC)`. Never any AI/Claude attribution or Co-authored-by lines (user rule).
+- One implementer per task (fresh context), TDD, one commit per task, report per task.
+- One task-review per task over the task's `BASE..HEAD` diff. Critical/Important findings go back to the implementer, then a focused re-review.
+- Task 9 = whole-branch final review (max effort) over `git merge-base origin/feature/full-history HEAD`..HEAD, plus a full-tree `-short` run and repo golangci-lint.
+- Commit messages: `fullhistory: <what> (query POC)`.
 
 ## Mid-task design decisions already made (binding, not in the plan text)
 
 1. **Task 4 amendment:** the below-floor gate for cold tx-hash candidates lives at the HashIndex seam (`floorGatedIndex` wrapping each `View.TxIdx` reader, returning `stores.ErrNotFound` for candidate seq < max(floor.FirstLedger(), earliest)) — NOT at the LedgerSource — so `txhash.TxReader` sees a clean miss and a below-floor-only hash ends as `db.ErrNoTransaction` (design R2). Landed in a5f32e8d.
 2. Task 2 keeps superseded `.idx` readers open deliberately (mmap close would fault racing reads; no reaper in POC) but DOES close discarded hot handles (rocksdb close is lifecycle-guarded). Both `// POC:`-marked in registry.go.
 
-## Environment prerequisites on the new machine
+## Environment prerequisites
 
 - **RocksDB (macOS):** grocksdb v1.10.7 needs RocksDB 10.9.1; brew's 11.x lacks a required symbol. Build 10.9.1 from source to `~/.rocksdb-1091`, then test with:
   `CGO_CFLAGS="-I$HOME/.rocksdb-1091/include" CGO_LDFLAGS="-L$HOME/.rocksdb-1091/lib -L/opt/homebrew/lib -Wl,-rpath,$HOME/.rocksdb-1091/lib -Wl,-rpath,/opt/homebrew/lib" go test ./cmd/stellar-rpc/internal/fullhistory/... -short -count=1`
@@ -47,20 +40,16 @@ Tasks 6-9: not started.
 - **Rust libs:** the serve package imports `methods`, which links xdr2json/preflight. Build once: `RUSTUP_TOOLCHAIN=1.89 make build-libs` (default cargo 1.84 fails on an edition2024 dep).
 - Gate test success on the command's exit code directly; do not pipe.
 
-## Review-package / task-brief scripts
-
-From the superpowers plugin: `~/.claude/plugins/cache/claude-plugins-official/superpowers/6.1.1/skills/subagent-driven-development/scripts/{task-brief,review-package}` (version dir may differ on the new machine — glob it).
-
 ## Completion summary (second session, Linux box, 2026-07-15)
 
-Tasks 5-9 executed per the protocol above (opus workers + opus per-task reviews, fable max-effort final review).
+Tasks 5-9 executed per the protocol above (per-task implementation + review, max-effort final review).
 
 - Task 5: getEvents handler over eventstore.Query — 68cb0533 + I1 fix 91d05191 (chunk exhaustion gated on window coverage; collision-simulating regression test). Review clean.
 - Task 6: [serve] JSON-RPC server + per-endpoint latency histogram + /metrics /health /ready — 4e502601. Review clean.
 - Task 7: daemon wiring + TestServeE2E_QueryHotAndCold — fc63b4ee. Review clean; plan's BuildInitial/HotOpened prose order was backwards, implementation uses the correct order (review-confirmed).
 - Task 8: tools/fhbench harness + README — 4350e2e6 + structured discovery probe 7ae10abf. Review clean.
 - Lint gate: 846e389c (golangci-lint 0 issues on --new-from-rev origin/feature/full-history).
-- Task 9 final review (fable, max effort): no Critical; 3 CONFIRMED Important fixed in 6e35a7b9 (restart-safe metrics registration; TickCompleted live-handle race closed under r.mu; fee-bump inner-hash v1-parity gap POC-marked). 33 deferred minors adjudicated (21 accepted-POC, 7 rejected). Full record in the executing machine's .superpowers/sdd/ (untracked).
+- Task 9 final review (max effort): no Critical; 3 CONFIRMED Important fixed in 6e35a7b9 (restart-safe metrics registration; TickCompleted live-handle race closed under r.mu; fee-bump inner-hash v1-parity gap POC-marked). 33 deferred minors adjudicated (21 accepted-POC, 7 rejected).
 
 Env notes (Linux): RocksDB 10.9.1 at ~/.rocksdb, zstd 1.5.7 at ~/.zstd (system 1.5.5 too old); CGO_CFLAGS="-I$HOME/.rocksdb/include -I$HOME/.zstd/include" CGO_LDFLAGS="-L$HOME/.rocksdb/lib -L$HOME/.zstd/lib -Wl,-rpath,$HOME/.rocksdb/lib -Wl,-rpath,$HOME/.zstd/lib".
 
