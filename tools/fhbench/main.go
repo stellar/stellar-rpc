@@ -340,7 +340,10 @@ func computeTiers(w ledgerWindow, chunkSize uint32, which string) []tier {
 	var out []tier
 	if which == "hot" || which == "both" {
 		half := chunkSize / 2
-		first := w.latest
+		// Default to the whole window; take the last half-chunk only when the
+		// window is longer than that (else a sub-half-chunk window — e.g. a young
+		// or single-hot-chunk daemon — would collapse the hot tier to [latest,latest]).
+		first := w.oldest
 		if w.latest > half {
 			first = w.latest - half + 1
 		}

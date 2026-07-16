@@ -75,6 +75,13 @@ func TestComputeTiers(t *testing.T) {
 	if got := computeTiers(w, chunkSize, "hot"); len(got) != 1 || got[0].name != "hot" {
 		t.Errorf("computeTiers hot-only = %+v", got)
 	}
+
+	// Sub-half-chunk window (young / single-hot-chunk daemon): the hot tier must
+	// span the whole window, not collapse to [latest,latest].
+	small := computeTiers(ledgerWindow{oldest: 2, latest: 4_000}, chunkSize, "hot")
+	if len(small) != 1 || small[0].first != 2 || small[0].last != 4_000 {
+		t.Errorf("small-window hot tier = %+v, want [2,4000]", small)
+	}
 }
 
 // rpcStub builds an httptest server that dispatches on JSON-RPC method.
