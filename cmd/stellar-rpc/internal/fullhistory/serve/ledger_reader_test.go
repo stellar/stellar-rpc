@@ -198,6 +198,19 @@ func TestLedgerReader_GetLedgerRange_EmptyIsErrEmptyDB(t *testing.T) {
 	require.ErrorIs(t, err, db.ErrEmptyDB)
 }
 
+// A watermark of FirstLedgerSeq-1 is the startup "nothing committed yet" sentinel
+// (BuildInitial seeds it before the first commit). GetLedgerRange must report
+// ErrEmptyDB, not panic in chunk.IDFromLedger on the sub-genesis close-time read.
+func TestLedgerReader_GetLedgerRange_SentinelWatermarkIsErrEmptyDB(t *testing.T) {
+	cat, layout := newTestCatalog(t)
+	r := NewRegistry(cat, fhtest.RetentionFor(t, cat, 0), silentLogger())
+	require.NoError(t, r.BuildInitial(chunk.FirstLedgerSeq-1))
+	lr := NewLedgerReader(r, layout)
+
+	_, err := lr.GetLedgerRange(t.Context())
+	require.ErrorIs(t, err, db.ErrEmptyDB)
+}
+
 func TestLedgerReader_UnsupportedPOCMethods(t *testing.T) {
 	lr, _ := buildSeamReader(t)
 	require.Error(t, lr.StreamAllLedgers(t.Context(), nil))

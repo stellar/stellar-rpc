@@ -119,7 +119,11 @@ func (tx *readTx) GetLedger(_ context.Context, sequence uint32) (xdr.LedgerClose
 }
 
 func (tx *readTx) GetLedgerRange(_ context.Context) (ledgerbucketwindow.LedgerRange, error) {
-	if tx.latest == 0 {
+	// Not-yet-servable watermark: 0 before the first View is built, and the
+	// FirstLedgerSeq-1 sentinel that startup seeds ("nothing committed yet")
+	// until the first ledger commits. Guard both — a sub-genesis latest would
+	// panic chunk.IDFromLedger in closeTime below.
+	if tx.latest < chunk.FirstLedgerSeq {
 		return ledgerbucketwindow.LedgerRange{}, db.ErrEmptyDB
 	}
 	firstCloseTime, err := tx.closeTime(tx.first)
