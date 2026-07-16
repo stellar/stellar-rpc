@@ -1,0 +1,513 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stellar RPC v2 — Query Latency Report (2026-07-16)</title>
+<style>
+:root {
+  --page: #f6f7f9;
+  --surface: #fcfdfe;
+  --ink: #101720;
+  --ink-2: #4a5460;
+  --muted: #828b98;
+  --grid: #e4e8ed;
+  --baseline: #c5ccd4;
+  --border: rgba(16, 23, 32, 0.10);
+  --accent: #2a78d6;
+  --s1: #2a78d6;  /* blue   — cold tier / extract / ingest_total */
+  --s2: #1baf7a;  /* aqua   */
+  --s3: #eda100;  /* yellow */
+  --s5: #4a3aa7;  /* violet — apply */
+  --s6: #e34948;  /* red    — commit/fsync, MPHF finalize */
+  --hot: #eb6834; /* orange — hot tier / block-interval reference */
+  --deemph: #aeb6c0;
+  --good: #0ca30c;
+  --good-text: #006300;
+  --warn: #b95f04;
+  --tip-bg: #101720;
+  --tip-ink: #f3f6f9;
+  --tip-ink2: #b9c2cc;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: #0b0e12; --surface: #14181e; --ink: #f3f6f9; --ink-2: #b9c2cc;
+    --muted: #8a93a0; --grid: #242b34; --baseline: #39424d;
+    --border: rgba(255,255,255,0.10); --accent: #3987e5;
+    --s1: #3987e5; --s2: #199e70; --s3: #c98500; --s5: #9085e9; --s6: #e66767;
+    --hot: #d95926; --deemph: #4a545f; --good: #0ca30c; --good-text: #0ca30c;
+    --warn: #e08a2e;
+    --tip-bg: #f3f6f9; --tip-ink: #101720; --tip-ink2: #4a5460;
+  }
+}
+:root[data-theme="light"] {
+  --page: #f6f7f9; --surface: #fcfdfe; --ink: #101720; --ink-2: #4a5460;
+  --muted: #828b98; --grid: #e4e8ed; --baseline: #c5ccd4;
+  --border: rgba(16,23,32,0.10); --accent: #2a78d6;
+  --s1: #2a78d6; --s2: #1baf7a; --s3: #eda100; --s5: #4a3aa7; --s6: #e34948;
+  --hot: #eb6834; --deemph: #aeb6c0; --good: #0ca30c; --good-text: #006300;
+  --warn: #b95f04;
+  --tip-bg: #101720; --tip-ink: #f3f6f9; --tip-ink2: #b9c2cc;
+}
+:root[data-theme="dark"] {
+  --page: #0b0e12; --surface: #14181e; --ink: #f3f6f9; --ink-2: #b9c2cc;
+  --muted: #8a93a0; --grid: #242b34; --baseline: #39424d;
+  --border: rgba(255,255,255,0.10); --accent: #3987e5;
+  --s1: #3987e5; --s2: #199e70; --s3: #c98500; --s5: #9085e9; --s6: #e66767;
+  --hot: #d95926; --deemph: #4a545f; --good: #0ca30c; --good-text: #0ca30c;
+  --warn: #e08a2e;
+  --tip-bg: #f3f6f9; --tip-ink: #101720; --tip-ink2: #4a5460;
+}
+
+* { box-sizing: border-box; }
+html { background: var(--page); }
+body {
+  margin: 0; background: var(--page); color: var(--ink);
+  font: 15px/1.6 -apple-system, "Segoe UI", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  border-top: 4px solid var(--accent);
+}
+.mono { font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace; }
+.wrap { max-width: 940px; margin: 0 auto; padding: 0 24px 80px; }
+
+.masthead { padding: 40px 0 0; }
+.mast-eyebrow {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 16px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11.5px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--ink-2); border-bottom: 1px solid var(--baseline); padding-bottom: 10px;
+}
+h1 {
+  font-size: clamp(28px, 4.6vw, 40px); line-height: 1.12; font-weight: 750;
+  letter-spacing: -0.015em; text-wrap: balance; margin: 26px 0 10px; max-width: 21em;
+}
+.mast-sub { color: var(--ink-2); font-size: 16.5px; max-width: 44em; margin: 0 0 28px; text-wrap: balance; }
+.meta-grid {
+  display: grid; grid-template-columns: 1fr;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+}
+.meta-cell { padding: 12px 16px 11px; border-top: 1px solid var(--border); }
+.meta-grid .meta-cell:first-child { border-top: none; }
+@media (min-width: 760px) {
+  .meta-grid { grid-template-columns: repeat(3, 1fr); }
+  .meta-grid .meta-cell:nth-child(-n+3) { border-top: none; }
+  .meta-cell:not(:nth-child(3n+1)) { border-left: 1px solid var(--border); }
+}
+.meta-k {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 3px;
+}
+.meta-v { font-size: 13.5px; color: var(--ink); font-family: ui-monospace, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+.meta-v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid transparent; }
+.meta-v a:hover { border-bottom-color: var(--accent); }
+
+section { margin-top: 64px; }
+.sec-head { display: flex; align-items: baseline; gap: 14px; border-bottom: 1px solid var(--baseline); padding-bottom: 8px; margin-bottom: 8px; }
+.sec-num { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; color: var(--accent); letter-spacing: 0.08em; }
+h2 { font-size: 23px; font-weight: 700; letter-spacing: -0.01em; margin: 0; text-wrap: balance; }
+.sec-intro { color: var(--ink-2); max-width: 46em; }
+p { max-width: 46em; }
+p strong { font-weight: 650; color: var(--ink); }
+code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.9em; background: color-mix(in srgb, var(--ink) 6%, transparent); padding: 1px 5px; border-radius: 4px; }
+
+.banner {
+  display: flex; align-items: center; gap: 22px; flex-wrap: wrap;
+  background: var(--surface); border: 1px solid var(--border);
+  border-left: 4px solid var(--good);
+  border-radius: 10px; padding: 20px 24px; margin: 24px 0 18px;
+}
+.banner-figure { font-size: 52px; font-weight: 750; letter-spacing: -0.02em; line-height: 1; }
+.banner-figure .of { color: var(--muted); font-weight: 500; }
+.banner-copy { flex: 1 1 320px; min-width: 260px; }
+.banner-copy .lead { font-weight: 650; }
+.banner-copy p { margin: 2px 0 0; color: var(--ink-2); font-size: 13.5px; line-height: 1.5; }
+.chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; letter-spacing: 0.08em;
+  color: var(--good-text); border: 1px solid color-mix(in srgb, var(--good) 45%, transparent);
+  background: color-mix(in srgb, var(--good) 9%, transparent);
+  border-radius: 999px; padding: 2px 9px; vertical-align: 2px;
+}
+.chip.warn {
+  color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  background: color-mix(in srgb, var(--warn) 9%, transparent);
+}
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-top: 14px; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px 14px; }
+.tile-label { font-size: 12.5px; color: var(--ink-2); line-height: 1.45; }
+.tile-value { font-size: 30px; font-weight: 700; letter-spacing: -0.01em; line-height: 1.15; margin-bottom: 4px; }
+.tile-value small { font-size: 16px; font-weight: 600; color: var(--ink-2); }
+
+figure.fig { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; margin: 22px 0; padding: 18px 20px 12px; }
+.fig-head { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; flex-wrap: wrap; margin-bottom: 4px; }
+.fig-title { font-weight: 650; font-size: 15px; }
+.fig-no {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 10.5px; letter-spacing: 0.12em; color: var(--muted); text-transform: uppercase;
+  display: block; margin-bottom: 2px;
+}
+.legend { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; font-size: 12px; color: var(--ink-2); }
+.lg-item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.lg-sw { width: 11px; height: 11px; border-radius: 3px; flex: none; }
+.lg-ln { width: 16px; height: 2px; border-radius: 1px; flex: none; }
+.fig-body { min-height: 40px; }
+.fig-body svg { display: block; width: 100%; height: auto; }
+figcaption { color: var(--muted); font-size: 12.5px; line-height: 1.5; margin: 8px 0 6px; max-width: 60em; }
+
+.ax { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; fill: var(--muted); font-variant-numeric: tabular-nums; }
+.rowlab { font-size: 12.5px; fill: var(--ink); font-weight: 550; }
+.rowsub { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px; fill: var(--muted); }
+.vallab { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; fill: var(--ink-2); font-variant-numeric: tabular-nums; }
+.gridline { stroke: var(--grid); stroke-width: 1; }
+.baseline-l { stroke: var(--baseline); stroke-width: 1; }
+.paneltitle { font-size: 12.5px; fill: var(--ink); font-weight: 620; }
+.refline { stroke: var(--hot); stroke-width: 1.5; stroke-dasharray: 4 4; }
+.reflab { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px; fill: var(--hot); letter-spacing: 0.04em; }
+
+.hit { cursor: default; }
+.hit:hover { filter: brightness(1.08); }
+.hit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: no-preference) { .hit { transition: filter 120ms ease; } }
+
+.tip {
+  position: fixed; z-index: 50; pointer-events: none; opacity: 0;
+  background: var(--tip-bg); color: var(--tip-ink);
+  border-radius: 8px; padding: 9px 12px; font-size: 12.5px; line-height: 1.5;
+  max-width: 300px; box-shadow: 0 4px 18px rgba(0,0,0,0.25);
+}
+.tip-title { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--tip-ink2); margin-bottom: 4px; }
+.tip-row { display: flex; align-items: baseline; gap: 7px; white-space: nowrap; }
+.tip-key { width: 12px; height: 3px; border-radius: 1.5px; flex: none; align-self: center; }
+.tip-val { font-weight: 650; font-variant-numeric: tabular-nums; }
+.tip-lab { color: var(--tip-ink2); }
+
+details.tv { border-top: 1px solid var(--grid); margin-top: 4px; }
+details.tv summary {
+  cursor: pointer; list-style: none; padding: 8px 0 6px;
+  font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--muted);
+}
+details.tv summary::before { content: "▸ "; }
+details.tv[open] summary::before { content: "▾ "; }
+details.tv summary:hover { color: var(--accent); }
+.tv-scroll { overflow-x: auto; padding-bottom: 8px; }
+table.data { border-collapse: collapse; font-size: 12.5px; min-width: 480px; }
+table.data th {
+  text-align: right; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
+  font-weight: 500; padding: 4px 12px 6px 0; border-bottom: 1px solid var(--baseline);
+}
+table.data th:first-child, table.data td:first-child { text-align: left; padding-left: 0; }
+table.data td {
+  text-align: right; padding: 5px 12px 5px 0; border-bottom: 1px solid var(--grid);
+  font-family: ui-monospace, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; color: var(--ink-2);
+}
+table.data td:first-child { color: var(--ink); font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+
+.target-table-wrap { overflow-x: auto; margin-top: 18px; }
+table.target { border-collapse: collapse; width: 100%; min-width: 600px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+table.target th, table.target td { padding: 10px 14px; border-bottom: 1px solid var(--grid); text-align: right; }
+table.target th { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+table.target td { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; font-variant-numeric: tabular-nums; color: var(--ink); }
+table.target th:first-child, table.target td:first-child { text-align: left; }
+table.target td:first-child { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; font-size: 13.5px; }
+.cell-ok { color: var(--good-text); font-size: 10px; letter-spacing: 0.06em; margin-left: 6px; }
+.cell-warn { color: var(--warn); font-size: 10px; letter-spacing: 0.06em; margin-left: 6px; }
+
+.method dl { max-width: 52em; }
+.method dt { font-weight: 650; margin-top: 16px; }
+.method dd { margin: 4px 0 0; color: var(--ink-2); }
+pre.metadata {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 16px 18px; overflow-x: auto; font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px; line-height: 1.6; color: var(--ink-2); margin-top: 14px;
+}
+.footer {
+  margin-top: 72px; padding-top: 16px; border-top: 1px solid var(--baseline);
+  color: var(--muted); font-size: 12.5px; line-height: 1.6;
+}
+.note-callout {
+  border: 1px solid var(--border); border-left: 3px solid var(--hot);
+  background: var(--surface); border-radius: 8px; padding: 12px 16px; margin: 16px 0;
+  font-size: 13.5px; color: var(--ink-2); max-width: 52em;
+}
+.note-callout strong { color: var(--ink); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="masthead">
+  <div class="mast-eyebrow">
+    <span>Stellar RPC v2 · Full-History Storage Engine</span>
+    <span>Query Latency Report · 2026-07-16</span>
+  </div>
+  <h1>Query latency — synthetic profiles (hot + cold) and live-pubnet hot tip</h1>
+  <p class="mast-sub">Query-serving latency of the <code>full-history</code> daemon over JSON-RPC, combining two
+  regimes: <strong>(A)</strong> three synthetic apply-load profiles — sac / token / soroswap — on both the hot
+  RocksDB tier and the frozen cold tier, and <strong>(B)</strong> live pubnet tip queries on the hot tier with a
+  concurrency sweep. The two ran on different hardware — compare shapes and ratios, not raw ms across parts.</p>
+  <div class="meta-grid">
+    <div class="meta-cell"><div class="meta-k">Part A — machine</div><div class="meta-v">AWS c6id.8xlarge · Xeon Platinum 8375C · 32 vCPU · 64 GiB · local NVMe</div></div>
+    <div class="meta-cell"><div class="meta-k">Part B — machine</div><div class="meta-v">16 vCPU · 58 GB · Debian 13 · data dir on tmpfs · loopback (~0 RTT)</div></div>
+    <div class="meta-cell"><div class="meta-k">Build</div><div class="meta-v">poc/fullhistory-query</div></div>
+    <div class="meta-cell"><div class="meta-k">Part A — method</div><div class="meta-v">real profile ledgers; window 20 steady-state ledgers (10202–10221); 500 reps/endpoint; getLedgers limit=1, 45 s budget; sequential (c=1)</div></div>
+    <div class="meta-cell"><div class="meta-k">Part B — method</div><div class="meta-v">live pubnet, tip ≈ 63,499,700; stellar-core 27.1.0 (proto 27); hey 0.1.5; retention 2 chunks</div></div>
+    <div class="meta-cell"><div class="meta-k">Source</div><div class="meta-v">stellar-rpc <span class="mono">tools/bench-suite/results/</span> · 0 errors throughout</div></div>
+  </div>
+</header>
+
+<section id="glance">
+  <div class="sec-head"><span class="sec-num">01</span><h2>At a glance</h2></div>
+  <div class="banner">
+    <div class="banner-copy">
+      <div class="lead">getTransaction / getEvents stay cheap; <code>getLedgers</code> is payload-bound, not read-bound. <span class="chip">✓ COLD ≈ HOT</span> <span class="chip warn">SELECTIVE getEvents TAIL</span></div>
+      <p>On the light endpoints, query adds only ~4–18 ms on top of ingest. A direct hot read of a 17 MB ledger
+      (incl. zstd decode) is ~8 ms, yet serving it over HTTP is ~567 ms — <strong>~98.6 % is base64 + JSON + HTTP</strong>
+      shipping the blob, ~1.4 % is the storage read. Cold serves ≈ as fast as hot, with one exception: selective
+      multi-term getEvents on cold scales with term count while hot stays flat.</p>
+    </div>
+  </div>
+  <div class="tiles">
+    <div class="tile"><div class="tile-value">~35 <small>ms</small></div><div class="tile-label">Live-pubnet <code>getLedgers</code> (limit 1) end-to-end p50 on a ~1.7 MB ledger; ~4.6 ms of that is the server handler.</div></div>
+    <div class="tile"><div class="tile-value">~567 <small>ms</small></div><div class="tile-label">Synthetic sac <code>getLedgers</code> hot p50 on a ~17 MB ledger — ~1.4 % read, ~98.6 % transfer.</div></div>
+    <div class="tile"><div class="tile-value">1.7–2.9 <small>ms</small></div><div class="tile-label">Live-pubnet <code>getEvents</code> / <code>getTransaction</code> p50 at the tip — the light endpoints are near-instant.</div></div>
+    <div class="tile"><div class="tile-value">≈12 <small>ms / term</small></div><div class="tile-label">soroswap selective <code>getEvents</code> on cold: latency scales with OR-union term count (hot stays flat). POC cold-reader open + underfill loop.</div></div>
+  </div>
+</section>
+
+<section id="synthetic-hot">
+  <div class="sec-head"><span class="sec-num">02</span><h2>Part A — synthetic profiles, hot tier</h2></div>
+  <p class="sec-intro">Real sac / token / soroswap apply-load ledgers replayed through the daemon and served from
+  the hot RocksDB tier. These ledgers are large — thousands of tx + Soroban meta each.</p>
+
+  <div class="target-table-wrap"><table class="target">
+    <thead><tr><th>profile</th><th>decompressed LCM</th><th>on-disk (zstd)</th><th>compression</th></tr></thead>
+    <tbody>
+      <tr><td>sac</td><td>~17.3 MB</td><td>~2.1 MB</td><td>8.2×</td></tr>
+      <tr><td>token</td><td>~16.5 MB</td><td>~1.7 MB</td><td>9.5×</td></tr>
+      <tr><td>soroswap</td><td>~10.0 MB</td><td>~0.5 MB</td><td>19×</td></tr>
+    </tbody>
+  </table></div>
+
+  <p style="margin-top:22px"><strong>Ingest → durable commit, per ledger</strong> (source → commit, ms):</p>
+  <div class="target-table-wrap"><table class="target">
+    <thead><tr><th>profile</th><th>p50</th><th>p90</th><th>p99</th></tr></thead>
+    <tbody>
+      <tr><td>sac</td><td>129.3</td><td>138.9</td><td>145.3</td></tr>
+      <tr><td>token</td><td>129.9</td><td>133.6</td><td>144.7</td></tr>
+      <tr><td>soroswap</td><td>76.7</td><td>82.6</td><td>85.4</td></tr>
+    </tbody>
+  </table></div>
+
+  <p style="margin-top:22px"><strong>Query latency — hot tier</strong> (ms). getLedgers at limit=1 (budget-capped
+  <code>count</code>); getTransaction / getEvents 500 reps:</p>
+  <div class="target-table-wrap"><table class="target">
+    <thead><tr><th>profile</th><th>endpoint</th><th>count</th><th>p50</th><th>p90</th><th>p99</th><th>max</th></tr></thead>
+    <tbody>
+      <tr><td>sac</td><td>getLedgers</td><td>80</td><td>567.4</td><td>581.8</td><td>607.6</td><td>607.6</td></tr>
+      <tr><td>sac</td><td>getTransaction</td><td>500</td><td>18.1</td><td>19.2</td><td>25.4</td><td>28.9</td></tr>
+      <tr><td>sac</td><td>getEvents</td><td>500</td><td>7.8</td><td>8.0</td><td>12.0</td><td>12.6</td></tr>
+      <tr><td>token</td><td>getLedgers</td><td>82</td><td>550.8</td><td>557.7</td><td>570.6</td><td>570.6</td></tr>
+      <tr><td>token</td><td>getTransaction</td><td>500</td><td>18.2</td><td>19.5</td><td>24.8</td><td>26.8</td></tr>
+      <tr><td>token</td><td>getEvents</td><td>500</td><td>7.5</td><td>7.9</td><td>10.0</td><td>13.6</td></tr>
+      <tr><td>soroswap</td><td>getLedgers</td><td>127</td><td>355.8</td><td>363.8</td><td>370.6</td><td>375.3</td></tr>
+      <tr><td>soroswap</td><td>getTransaction</td><td>500</td><td>11.6</td><td>12.5</td><td>17.6</td><td>19.8</td></tr>
+      <tr><td>soroswap</td><td>getEvents</td><td>500</td><td>4.4</td><td>5.5</td><td>8.0</td><td>8.6</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="synthetic-cold">
+  <div class="sec-head"><span class="sec-num">03</span><h2>Part A — synthetic profiles, cold tier</h2></div>
+  <p class="sec-intro">Served from frozen cold artifacts (<code>.pack</code> + MPHF/bitmap index), page-cache-warm.
+  Run 2 froze all three profiles' catalogs and re-measured sac as a reproduction check.</p>
+
+  <div class="target-table-wrap"><table class="target">
+    <thead><tr><th>profile</th><th>endpoint</th><th>count</th><th>p50</th><th>p90</th><th>p99</th><th>max</th></tr></thead>
+    <tbody>
+      <tr><td>sac</td><td>getLedgers</td><td>73</td><td>617.2</td><td>653.1</td><td>671.0</td><td>671.0</td></tr>
+      <tr><td>sac</td><td>getTransaction</td><td>500</td><td>18.3</td><td>31.7</td><td>40.3</td><td>43.3</td></tr>
+      <tr><td>sac</td><td>getEvents</td><td>500</td><td>8.8</td><td>10.5</td><td>14.4</td><td>14.9</td></tr>
+      <tr><td>token</td><td>getLedgers</td><td>74</td><td>604.9</td><td>638.9</td><td>664.0</td><td>664.0</td></tr>
+      <tr><td>token</td><td>getTransaction</td><td>500</td><td>16.0</td><td>25.4</td><td>34.0</td><td>41.5</td></tr>
+      <tr><td>token</td><td>getEvents</td><td>500</td><td>3.4</td><td>4.2</td><td>4.9</td><td>5.4</td></tr>
+      <tr><td>soroswap</td><td>getLedgers</td><td>109</td><td>415.4</td><td>433.9</td><td>449.5</td><td>451.6</td></tr>
+      <tr><td>soroswap</td><td>getTransaction</td><td>500</td><td>11.7</td><td>18.9</td><td>25.4</td><td>26.5</td></tr>
+      <tr><td>soroswap</td><td>getEvents</td><td>500</td><td>18.9</td><td>22.8</td><td>24.8</td><td>27.3</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note-callout"><strong>Cold ≈ hot — for getLedgers, getTransaction, and dense-match getEvents.</strong>
+  getEvents cold is even slightly faster at p50 on dense-match profiles; getTransaction has a heavier cold tail
+  (cold txhash MPHF lookup + reading the large ledger from the pack). The exception is selective multi-term
+  getEvents on cold — see the term sweep below.</div>
+
+  <p style="margin-top:22px"><strong>getEvents OR-union index-term sweep</strong> (p50 / p90 / p99 ms). A
+  <em>term</em> = one indexed constraint (a contract ID, or a topic value at a position); each row OR-unions N real
+  harvested terms, 500 reps, limit 10:</p>
+  <div class="target-table-wrap"><table class="target">
+    <thead><tr><th>profile</th><th>tier·scope</th><th>t=1</th><th>t=4</th><th>t=8</th><th>t=15</th></tr></thead>
+    <tbody>
+      <tr><td>sac</td><td>hot·window</td><td>8.4 / 9.7 / 11.4</td><td>8.4 / 9.0 / 10.8</td><td>8.5 / 9.1 / 11.1</td><td>6.8 / 7.8 / 11.4</td></tr>
+      <tr><td>sac</td><td>cold·window</td><td>8.4 / 10.4 / 13.4</td><td>8.6 / 10.7 / 12.8</td><td>6.6 / 9.2 / 11.9</td><td>8.7 / 10.5 / 14.1</td></tr>
+      <tr><td>token</td><td>hot·window</td><td>7.6 / 7.9 / 11.9</td><td>6.2 / 7.7 / 8.6</td><td>7.5 / 7.8 / 10.2</td><td>7.7 / 7.9 / 12.4</td></tr>
+      <tr><td>token</td><td>cold·window</td><td>3.4 / 4.2 / 4.9</td><td>5.1 / 6.1 / 7.1</td><td>8.1 / 13.2 / 15.4</td><td>16.9 / 19.6 / 22.0</td></tr>
+      <tr><td>soroswap</td><td>hot·window</td><td>4.2 / 4.7 / 5.9</td><td>4.3 / 6.3 / 7.8</td><td>6.1 / 6.8 / 7.7</td><td>6.1 / 6.7 / 7.3</td></tr>
+      <tr><td>soroswap</td><td>cold·window</td><td>9.5 / 12.8 / 16.4</td><td>52.7 / 60.0 / 67.0</td><td>98.5 / 115.7 / 129.6</td><td>137.2 / 150.2 / 158.3</td></tr>
+    </tbody>
+  </table></div>
+  <p style="font-size:13.5px; color:var(--ink-2)">Hot is flat everywhere (~4–9 ms, 1→15 terms). Cold is flat when
+  terms match densely (sac). Cold scales with term count when terms are selective: token ≈1 ms/term; soroswap
+  (most selective vocabulary) ≈12 ms/term → 15 terms ≈ 137 ms. Cause: the cold reader is opened per request (POC,
+  no LRU) and sparse matches trigger the POC underfill re-query loop in <code>events_handler.scanChunk</code>.
+  Productionization paths: an LRU for cold readers and a streaming pager.</p>
+
+  <p style="margin-top:22px"><strong>Direct in-process read</strong>, no serve path (ms). <code>store.Get</code> =
+  RocksDB point read (compressed); <code>GetLedgerRaw</code> adds the zstd decode:</p>
+  <div class="target-table-wrap"><table class="target">
+    <thead><tr><th>profile</th><th>store.Get (compressed)</th><th>hot GetLedgerRaw</th><th>cold GetLedgerRaw</th></tr></thead>
+    <tbody>
+      <tr><td>sac</td><td>0.63</td><td>8.2</td><td>7.9</td></tr>
+      <tr><td>token</td><td>0.62</td><td>7.4</td><td>7.3</td></tr>
+      <tr><td>soroswap</td><td>0.16</td><td>4.6</td><td>3.7</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="livepubnet">
+  <div class="sec-head"><span class="sec-num">04</span><h2>Part B — live pubnet, hot-DB tip querying</h2></div>
+  <p class="sec-intro">Local daemon ingesting live pubnet and serving over JSON-RPC on loopback. Data dir on
+  tmpfs (best-case storage latency). All HTTP 200, zero errors.</p>
+
+  <p><strong>Single-request latency</strong> (warm, sequential, n=40; end-to-end <code>curl</code>
+  <code>time_total</code>, ms):</p>
+  <div class="target-table-wrap"><table class="target">
+    <thead><tr><th>method</th><th>resp size</th><th>min</th><th>p50</th><th>p90</th><th>p99</th><th>max</th><th>mean</th></tr></thead>
+    <tbody>
+      <tr><td>getLedgers (limit 1)</td><td>1.7 MB</td><td>33.0</td><td>35.0</td><td>38.1</td><td>38.9</td><td>39.1</td><td>35.4</td></tr>
+      <tr><td>getTransactions (limit 5)</td><td>17.5 KB</td><td>7.9</td><td>8.5</td><td>9.8</td><td>16.5</td><td>16.7</td><td>9.2</td></tr>
+      <tr><td>getTransaction (by hash)</td><td>2.9 KB</td><td>2.4</td><td>2.5</td><td>4.0</td><td>4.1</td><td>10.4</td><td>2.9</td></tr>
+      <tr><td>getEvents (limit 10)</td><td>4.9 KB</td><td>1.7</td><td>1.7</td><td>1.8</td><td>2.2</td><td>4.2</td><td>1.8</td></tr>
+    </tbody>
+  </table></div>
+  <div class="note-callout">Server-side handler latency (from <code>/metrics</code>, excludes network/transfer):
+  getEvents avg 1.68 ms · getTransaction 2.89 ms · getLedgers 4.61 ms · getTransactions 10.51 ms.
+  <strong>getLedgers end-to-end (35 ms) is dominated by shipping the ~1.7 MB LedgerCloseMeta, not the ~4.6 ms
+  handler.</strong></div>
+
+  <p style="margin-top:22px"><strong>Concurrency sweep</strong> (<code>hey</code>, loopback, keep-alive; latencies ms):</p>
+  <div class="tiles" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr))">
+    <div>
+      <div class="fig-no" style="margin-bottom:6px">getTransaction · ~2.9 KB</div>
+      <div class="target-table-wrap"><table class="target" style="min-width:0">
+        <thead><tr><th>conc</th><th>req/s</th><th>p50</th><th>p90</th><th>p99</th><th>max</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>323</td><td>2.5</td><td>4.7</td><td>9.3</td><td>11</td></tr>
+          <tr><td>8</td><td>1,324</td><td>4.2</td><td>11.3</td><td>16.6</td><td>19</td></tr>
+          <tr><td>16</td><td>1,637</td><td>8.1</td><td>17.5</td><td>22.8</td><td>33</td></tr>
+          <tr><td>32</td><td>1,650</td><td>19.1</td><td>29.4</td><td>37.9</td><td>51</td></tr>
+          <tr><td>64</td><td>1,700</td><td>36.5</td><td>51.2</td><td>64.5</td><td>101</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+    <div>
+      <div class="fig-no" style="margin-bottom:6px">getEvents (limit 10) · ~4.9 KB</div>
+      <div class="target-table-wrap"><table class="target" style="min-width:0">
+        <thead><tr><th>conc</th><th>req/s</th><th>p50</th><th>p90</th><th>p99</th><th>max</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>460</td><td>1.9</td><td>2.5</td><td>7.1</td><td>14</td></tr>
+          <tr><td>8</td><td>1,905</td><td>2.9</td><td>8.3</td><td>13.7</td><td>16</td></tr>
+          <tr><td>16</td><td>2,207</td><td>5.3</td><td>13.4</td><td>19.9</td><td>24</td></tr>
+          <tr><td>32</td><td>2,213</td><td>13.4</td><td>22.9</td><td>29.8</td><td>38</td></tr>
+          <tr><td>64</td><td>2,256</td><td>27.5</td><td>38.6</td><td>55.8</td><td>74</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+    <div>
+      <div class="fig-no" style="margin-bottom:6px">getTransactions (limit 5) · ~29 KB</div>
+      <div class="target-table-wrap"><table class="target" style="min-width:0">
+        <thead><tr><th>conc</th><th>req/s</th><th>p50</th><th>p90</th><th>p99</th><th>max</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>121</td><td>7.4</td><td>11.9</td><td>16.4</td><td>20</td></tr>
+          <tr><td>8</td><td>519</td><td>15.4</td><td>21.3</td><td>25.9</td><td>34</td></tr>
+          <tr><td>16</td><td>532</td><td>28.3</td><td>42.3</td><td>55.8</td><td>75</td></tr>
+          <tr><td>32</td><td>538</td><td>57.2</td><td>81.3</td><td>98.3</td><td>134</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+    <div>
+      <div class="fig-no" style="margin-bottom:6px">getLedgers (limit 1) · ~1.3 MB — heavy payload</div>
+      <div class="target-table-wrap"><table class="target" style="min-width:0">
+        <thead><tr><th>conc</th><th>req/s</th><th>p50</th><th>p90</th><th>p99</th><th>max</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>36</td><td>27.0</td><td>30.4</td><td>35.4</td><td>44</td></tr>
+          <tr><td>4</td><td>83</td><td>47.5</td><td>58.3</td><td>68.0</td><td>72</td></tr>
+          <tr><td>8</td><td>80</td><td>95.6</td><td>118.7</td><td>158.5</td><td>165</td></tr>
+          <tr><td>16</td><td>80</td><td>193.8</td><td>244.0</td><td>311.4</td><td>372</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+  </div>
+  <p style="font-size:13.5px; color:var(--ink-2)">Throughput ceilings (16-core box): getEvents ~2,250 req/s ·
+  getTransaction ~1,700 · getTransactions ~535 · getLedgers ~80 req/s. Saturates at concurrency ≈ 8–16, then
+  degrades linearly with concurrency (textbook worker-pool queueing) — no errors, no cliff.</p>
+</section>
+
+<section id="analysis">
+  <div class="sec-head"><span class="sec-num">05</span><h2>Combined analysis</h2></div>
+
+  <div class="note-callout"><strong>getLedgers is payload-bound everywhere.</strong> Live pubnet (~1.7 MB LCM) →
+  ~35 ms end-to-end; synthetic (~17 MB LCM) → ~567 ms. ~10× payload ⇒ ~15× latency while the storage read stays
+  ~5–8 ms. The direct-read numbers confirm it: ~1.4 % read, ~98.6 % base64 + JSON + HTTP.</div>
+
+  <div class="note-callout"><strong>Light endpoints stay cheap even on heavy ledgers.</strong> getTransaction /
+  getEvents: ~1.8–2.9 ms on the pubnet tip → ~8–18 ms on 17 MB synthetic ledgers. They scale with the target
+  ledger's size but never approach getLedgers' cost.</div>
+
+  <div class="note-callout"><strong>Cold ≈ hot — with one exception.</strong> The cold tier serves getLedgers,
+  getTransaction, and dense-match getEvents at essentially hot-tier latency. The exception is selective multi-term
+  getEvents on cold, which scales with term count (token ≈1 ms/term; soroswap ≈12 ms/term → 15 terms ≈ 137 ms)
+  while hot stays flat — the POC's per-request cold-reader open + underfill re-query loop (fixable with an LRU +
+  streaming pager).</div>
+
+  <div class="note-callout"><strong>Ingest gates freshness.</strong> 77–130 ms src→commit on synthetic profiles
+  dwarfs the ~2–18 ms query legs, so how fast a brand-new ledger becomes queryable is ingest-bound for everything
+  except getLedgers.</div>
+
+  <h3 style="margin-top:28px">Where to spend on getLedgers (size-bound, not read-bound)</h3>
+  <ol style="max-width:52em; color:var(--ink-2); line-height:1.7">
+    <li>Cap default/max page size (<code>[serve].default_ledgers_limit</code> / <code>max_ledgers_limit</code>).</li>
+    <li>Transport compression (gzip/zstd <code>Content-Encoding</code>) — base64'd XDR is highly compressible.</li>
+    <li>Stream the base64 encoder instead of materializing the full string per ledger.</li>
+    <li>Lighter projection (header-only / opt-out of full meta).</li>
+    <li><s>Storage-read tuning</s> — the read is ~1 %; not worth it.</li>
+  </ol>
+</section>
+
+<section id="caveats" class="method">
+  <div class="sec-head"><span class="sec-num">06</span><h2>Caveats</h2></div>
+  <dl>
+    <dt>Different hardware between parts</dt>
+    <dd>Part A ran on a 32 vCPU c6id.8xlarge / NVMe; Part B on a 16 vCPU Debian box / tmpfs. Compare shapes and ratios, not raw ms across parts.</dd>
+    <dt>Percentiles</dt>
+    <dd>Nearest-rank. Synthetic getLedgers p99 is over a budget-capped sample (71–127), less robust than the 500-rep getTransaction/getEvents p99s.</dd>
+    <dt>Cold reads are cache-warm</dt>
+    <dd>Synthetic cold reads are OS-page-cache-warm; an uncached first-touch adds disk latency.</dd>
+    <dt>Live-pubnet client contention</dt>
+    <dd>Client + server shared 16 cores (client stole CPU) and loopback RTT ≈ 0 — add real network latency to every p50 and expect higher ceilings on a dedicated client.</dd>
+    <dt>Concurrency</dt>
+    <dd>All Part A query passes are sequential (concurrency 1): unloaded-latency floors, not latency under concurrent load. Part B sweeps concurrency 1–64.</dd>
+  </dl>
+</section>
+
+<div class="footer">
+  Full-history query POC · branch <span class="mono">poc/fullhistory-query</span>. Synthetic profiles measured on
+  AWS c6id.8xlarge; live pubnet on a 16 vCPU Debian box. Source data and prose:
+  <span class="mono">stellar-rpc/tools/bench-suite/results/</span>. No value was invented, interpolated, or smoothed.
+</div>
+
+</div>
+</body>
+</html>
