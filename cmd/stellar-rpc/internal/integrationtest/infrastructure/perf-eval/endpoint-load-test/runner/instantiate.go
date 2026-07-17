@@ -73,7 +73,7 @@ func instantiate(ctx context.Context) error {
 	}
 
 	call := blastCall{
-		bin: blasterBin, dir: filepath.Dir(blasterBin), url: ready.URL,
+		bin: blasterBin, url: ready.URL,
 		configPath:  filepath.Join(leg.RepoRoot, legDir, "testdata", "endpoints.toml"),
 		seedPath:    filepath.Join(leg.WorkDir, "blaster-seed.json"),
 		resultsPath: filepath.Join(leg.WorkDir, "blaster-results.json"),
@@ -140,7 +140,7 @@ func fetchBlaster(ctx context.Context, dir string) (string, string, error) {
 
 // blastCall parameterizes one serial blaster sweep.
 type blastCall struct {
-	bin, dir, url         string
+	bin, url              string
 	configPath            string
 	seedPath, resultsPath string
 	rampUp, duration      string
@@ -149,7 +149,7 @@ type blastCall struct {
 // generateSeed samples the request corpus from the target RPC's ledger window.
 func generateSeed(ctx context.Context, c blastCall, lo, hi int64, count string) error {
 	logger.Infof("generating seed data: %s ledgers sampled from [%d, %d]", count, lo, hi)
-	if err := harness.RunStreaming(ctx, c.dir, nil, 40, c.bin, "generate",
+	if err := harness.RunStreaming(ctx, filepath.Dir(c.bin), nil, 40, c.bin, "generate",
 		"--rpc-url", c.url,
 		"--output", c.seedPath,
 		"--ledger-window", fmt.Sprintf("%d,%d", lo, hi),
@@ -162,7 +162,7 @@ func generateSeed(ctx context.Context, c blastCall, lo, hi int64, count string) 
 // blast runs the serial endpoint sweep, writing results to c.resultsPath.
 func blast(ctx context.Context, c blastCall) error {
 	logger.Infof("blasting endpoints in serial (ramp-up %s, duration %s per endpoint)", c.rampUp, c.duration)
-	if err := harness.RunStreaming(ctx, c.dir, nil, 80, c.bin, "run",
+	if err := harness.RunStreaming(ctx, filepath.Dir(c.bin), nil, 80, c.bin, "run",
 		"--rpc-url", c.url,
 		"--config-path", c.configPath,
 		"--input-data-path", c.seedPath,
@@ -228,7 +228,7 @@ func awaitServeReady(
 		case <-ctx.Done():
 			return nil, nil, fmt.Errorf("no usable serve-ready object at s3://%s/%s before the leg deadline: %w",
 				bucket, key, ctx.Err())
-		case <-time.After(30 * time.Second):
+		case <-time.After(harness.RendezvousPollInterval):
 		}
 	}
 }

@@ -21,30 +21,35 @@ const localURL = "http://localhost:" + rpcPort
 
 // servePhase is the serving side of the leg chaining protocol: await catchup,
 // advertise, hold for the peer's result, power off.
-func servePhase(ctx context.Context, leg *harness.Leg, daemon *daemonHandle) {
-	defer schedulePoweroff(ctx) // runs last (after daemon.Stop): the box owns its shutdown
+func servePhase(
+	ctx context.Context, fetch *harness.S3Fetcher, resultKey, runID, targetSHA string, daemon *daemonHandle,
+) {
+	// runs last (after daemon.Stop): the box owns its shutdown, leaving the leg
+	// script's EXIT trap a minute to upload the box log
+	defer rescheduleShutdown(ctx, 1, "serve phase complete")
 	defer daemon.Stop()
 
 	// one deadline bounds catchup + holding, so a slow catchup eats serving
 	// time rather than failing the handoff
 	serveDeadline := harness.DurationEnv("SERVE_DEADLINE", 195*time.Minute)
-	readyKey := path.Join(path.Dir(leg.ResultKey), harness.ServeReadyName)
+	readyKey := path.Join(path.Dir(resultKey), harness.ServeReadyName)
 	// the chained peer's result object is this box's stop signal
 	stopKey := ""
 	if peer := os.Getenv("CHAIN_PEER"); peer != "" {
-		stopKey = harness.SiblingKey(leg.ResultKey, peer, path.Base(leg.ResultKey))
+		stopKey = harness.SiblingKey(resultKey, peer, path.Base(resultKey))
 	}
 
-	extendShutdownCeiling(ctx, int(serveDeadline.Minutes())+30)
+	// the bootstrap's pending self-terminate would cut the serve window short
+	rescheduleShutdown(ctx, int(serveDeadline.Minutes())+30, "serve-phase self-terminate ceiling")
 
 	wctx, wcancel := context.WithTimeout(ctx, serveDeadline)
 	defer wcancel()
 
 	publishReady := func(r harness.ServeReady) {
 		r.SchemaVersion = 1
-		r.RunID = leg.RunID
-		r.TargetSHA = leg.TargetSHA
-		if err := harness.PutJSON(ctx, leg.Fetch.Client, leg.Bucket, readyKey, r); err != nil {
+		r.RunID = runID
+		r.TargetSHA = targetSHA
+		if err := harness.PutJSON(ctx, fetch.Client, fetch.Bucket, readyKey, r); err != nil {
 			logger.Errorf("publishing serve-ready object: %v", err)
 		}
 	}
@@ -83,12 +88,12 @@ func servePhase(ctx context.Context, leg *harness.Leg, daemon *daemonHandle) {
 	}
 	for {
 		var res harness.Result
-		err := harness.GetJSON(wctx, leg.Fetch.Client, leg.Bucket, stopKey, &res)
+		err := harness.GetJSON(wctx, fetch.Client, fetch.Bucket, stopKey, &res)
 		switch {
 		// A leftover result from an earlier attempt is not a stop signal: this
 		// attempt's peer leg still needs the box.
-		case err == nil && harness.SameWorkflowRun(res.RunID, leg.RunID) &&
-			harness.RunAttempt(res.RunID) >= harness.RunAttempt(leg.RunID):
+		case err == nil && harness.SameWorkflowRun(res.RunID, runID) &&
+			harness.RunAttempt(res.RunID) >= harness.RunAttempt(runID):
 			logger.Infof("peer leg reported %q; serve phase over", res.Verdict)
 			return
 		case err == nil:
@@ -100,34 +105,23 @@ func servePhase(ctx context.Context, leg *harness.Leg, daemon *daemonHandle) {
 		case <-wctx.Done():
 			logger.Warnf("serve deadline passed without a peer result; shutting down")
 			return
-		case <-time.After(30 * time.Second):
+		case <-time.After(harness.RendezvousPollInterval):
 		}
 	}
 }
 
-// extendShutdownCeiling replaces the pending `shutdown -P` with one minutes
-// from now. Best-effort: the old ceiling would cut the serve phase short, but
-// a failure here only means the box may terminate early, never that it leaks.
-func extendShutdownCeiling(ctx context.Context, minutes int) {
+// rescheduleShutdown replaces the box's pending `shutdown -P` with one minutes
+// from now (shutdown behavior is terminate). Best-effort: a failure only means
+// the box may power off off-schedule, never that it leaks.
+func rescheduleShutdown(ctx context.Context, minutes int, reason string) {
 	if out, err := exec.CommandContext(ctx, "shutdown", "-c").CombinedOutput(); err != nil {
 		logger.Warnf("canceling pending shutdown: %v (%s)", err, out)
 	}
 	arg := fmt.Sprintf("+%d", minutes)
-	cmd := exec.CommandContext(ctx, "shutdown", "-P", arg, "serve-phase self-terminate ceiling")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		logger.Warnf("rescheduling self-terminate ceiling: %v (%s)", err, out)
+	if out, err := exec.CommandContext(ctx, "shutdown", "-P", arg, reason).CombinedOutput(); err != nil {
+		logger.Warnf("rescheduling shutdown: %v (%s)", err, out)
 	} else {
-		logger.Infof("self-terminate ceiling pushed to %s from now", arg)
-	}
-}
-
-// schedulePoweroff powers the box off in a minute (shutdown behavior is
-// terminate), leaving the leg script's EXIT trap time to upload the box log.
-func schedulePoweroff(ctx context.Context) {
-	logger.Infof("serve phase over; powering off")
-	_ = exec.CommandContext(ctx, "shutdown", "-c").Run()
-	if out, err := exec.CommandContext(ctx, "shutdown", "-P", "+1", "serve phase complete").CombinedOutput(); err != nil {
-		logger.Warnf("scheduling poweroff: %v (%s)", err, out)
+		logger.Infof("shutdown rescheduled to %s from now (%s)", arg, reason)
 	}
 }
 

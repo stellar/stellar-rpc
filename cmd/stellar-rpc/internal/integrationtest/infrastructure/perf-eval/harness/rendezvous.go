@@ -21,6 +21,10 @@ const (
 // serving leg's result object.
 const ServeReadyName = "serve-ready.json"
 
+// RendezvousPollInterval is the cadence at which both chained legs poll S3
+// for the other side's object.
+const RendezvousPollInterval = 30 * time.Second
+
 // SiblingKey rewrites a leg's RESULT_KEY (runs/<run_id>/<label>/result.json)
 // to a peer leg's object under the same run prefix, so chained legs derive
 // each other's keys instead of having them threaded through env.

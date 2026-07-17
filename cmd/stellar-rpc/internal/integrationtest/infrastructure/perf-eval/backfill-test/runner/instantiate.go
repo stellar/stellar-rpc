@@ -114,15 +114,7 @@ func instantiate(ctx context.Context) error {
 
 	if daemon != nil {
 		// hand the serving box off to the chained blaster leg
-		leg := &harness.Leg{
-			Title:     "Backfill ingestion",
-			Bucket:    bucket,
-			ResultKey: resultKey,
-			TargetSHA: targetSHA,
-			RunID:     runID,
-			Fetch:     fetch,
-		}
-		servePhase(ctx, leg, daemon)
+		servePhase(ctx, fetch, resultKey, runID, targetSHA, daemon)
 	}
 	return nil
 }
