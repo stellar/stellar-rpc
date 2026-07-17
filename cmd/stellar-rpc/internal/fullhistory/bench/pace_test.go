@@ -184,15 +184,3 @@ func TestContextSleep(t *testing.T) {
 	cancel()
 	require.ErrorIs(t, contextSleep(ctx, time.Hour), context.Canceled)
 }
-
-// TestBacklogGrew pins the drain-or-grow verdict threshold: the backlog counts
-// as grown only when the final ledger committed at least one close interval
-// late. An on-pace final lag (≈ that ledger's own ingest time) stays below
-// the interval no matter how it compares to other ledgers'.
-func TestBacklogGrew(t *testing.T) {
-	const interval = 600 * time.Millisecond
-	assert.False(t, backlogGrew(paceLagStatsResult{final: 30 * time.Millisecond}, interval))
-	assert.False(t, backlogGrew(paceLagStatsResult{final: interval - time.Millisecond}, interval))
-	assert.True(t, backlogGrew(paceLagStatsResult{final: interval}, interval))
-	assert.True(t, backlogGrew(paceLagStatsResult{final: 3 * time.Second}, interval))
-}

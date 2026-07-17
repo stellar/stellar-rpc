@@ -303,10 +303,9 @@ func TestRunHotFromPack(t *testing.T) {
 	assert.EqualValues(t, numLedgers, driver["ingest_total"]["n"])
 	assert.EqualValues(t, numLedgers, driver["ingest_total"]["n_items"])
 	assert.NotContains(t, driver, "read_blocked")
-	// An unpaced run must not add pace rows — the CSV rows are a de facto
-	// contract, and pace_lag belongs to --close-interval runs only.
+	// An unpaced run must not add the pace_lag row — the CSV rows are a de
+	// facto contract, and pace_lag belongs to --close-interval runs only.
 	assert.NotContains(t, driver, "pace_lag")
-	assert.NotContains(t, driver, "pace_lag_final")
 	if runtime.GOOS == "linux" {
 		require.Contains(t, driver, "peak_rss_bytes")
 		assert.EqualValues(t, 1, driver["peak_rss_bytes"]["n"])
@@ -377,12 +376,9 @@ func TestRunHotPaced(t *testing.T) {
 	// anchor + (numLedgers-1)*interval, and the anchor is set after this start.
 	assert.GreaterOrEqual(t, time.Since(start), time.Duration(numLedgers-1)*interval)
 
-	// The paced run adds the pace rows: every ledger's ingest takes real time,
-	// so no lag sample is zero and the rows are not suppressed. pace_lag_final
-	// is the run's ending state, one sample.
+	// The paced run adds the pace_lag row: every ledger's ingest takes real
+	// time, so no lag sample is zero and the row is not suppressed.
 	driver := readCSV(t, filepath.Join(csvDir, "driver.csv"))
 	require.Contains(t, driver, "pace_lag")
 	assert.EqualValues(t, numLedgers, driver["pace_lag"]["n_items"])
-	require.Contains(t, driver, "pace_lag_final")
-	assert.EqualValues(t, 1, driver["pace_lag_final"]["n"])
 }

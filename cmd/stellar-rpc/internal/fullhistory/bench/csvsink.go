@@ -54,11 +54,6 @@ const (
 	// lag that grows across the run means the backlog is growing (see
 	// recordPaceLag).
 	driverPaceLag = "pace_lag"
-	// hot only, paced runs: the final ledger's lag behind the close schedule,
-	// one sample per run. The pace_lag percentiles discard sample order, so
-	// they cannot show whether the backlog had drained or was still growing
-	// when the run ended; this row records that ending state.
-	driverPaceLagFinal = "pace_lag_final"
 	// cold AND hot: the run's peak resident set size (VmHWM), recorded once
 	// at run end (see recordPeakRSS). Its "duration" columns carry BYTES, not
 	// nanoseconds: storing the byte count as a duration lets the row use the
@@ -101,15 +96,14 @@ type fileSpec struct {
 //     the shared per-ledger cold extract walk (ColdExtract), the hot
 //     per-ledger end-to-end ingest_total (reconstructed from each ledger's
 //     phase burst in HotPhase), the hot bench's driver-observed run wall-clock,
-//     the paced hot run's per-ledger pace_lag and end-of-run pace_lag_final,
-//     and — for both modes, wherever VmHWM is readable — the run's
-//     peak_rss_bytes.
+//     the paced hot run's per-ledger pace_lag, and — for both modes, wherever
+//     VmHWM is readable — the run's peak_rss_bytes.
 //
 // The driver row order groups by producer: the cold rows first, then the
-// hot-only rows (ingest_total, run_wall, pace_lag, pace_lag_final together),
-// and finally peak_rss_bytes, which both modes emit. A row that recorded
-// nothing is suppressed, so each mode's report carries only its own rows —
-// and peak_rss_bytes is absent where /proc is unavailable (macOS; see
+// hot-only rows (ingest_total, run_wall, pace_lag together), and finally
+// peak_rss_bytes, which both modes emit. A row that recorded nothing is
+// suppressed, so each mode's report carries only its own rows — and
+// peak_rss_bytes is absent where /proc is unavailable (macOS; see
 // recordPeakRSS).
 //
 // A label recorded outside this vocabulary is still reported: withUnknown
@@ -125,16 +119,16 @@ var fileSpecs = func() []fileSpec {
 		hotRows[p] = p.String()
 	}
 
-	driverRows := make([]string, 0, len(coldTypes)+9)
+	driverRows := make([]string, 0, len(coldTypes)+8)
 	driverRows = append(driverRows, driverBackfillWall, driverIndexRebuild, driverChunkTotal)
 	for _, dt := range coldTypes {
 		driverRows = append(driverRows, dt+driverTotalSuffix)
 	}
-	// cold_extract closes the cold rows; ingest_total, run_wall, and the two
-	// pace rows keep the hot-only rows grouped after them; peak_rss_bytes
-	// comes last, emitted by both modes.
+	// cold_extract closes the cold rows; ingest_total, run_wall, and pace_lag
+	// keep the hot-only rows grouped after them; peak_rss_bytes comes last,
+	// emitted by both modes.
 	driverRows = append(driverRows, driverColdExtract,
-		driverIngestTotal, driverRunWall, driverPaceLag, driverPaceLagFinal, driverPeakRSS)
+		driverIngestTotal, driverRunWall, driverPaceLag, driverPeakRSS)
 
 	specs := make([]fileSpec, 0, len(coldTypes)+2)
 	for _, dt := range coldTypes {
@@ -357,36 +351,6 @@ func (s *csvSink) recordPaceLag(seq uint32) {
 	}
 	lag := max(s.schedule.clock().Sub(due), 0)
 	s.observe(fileDriver, driverPaceLag, lag, 1)
-}
-
-// paceLagStats summarizes the recorded pace_lag samples in ledger order: the
-// floor (min lag ≈ the per-ledger ingest cost when on pace), the peak (max lag
-// ≈ the deepest backlog), and the final ledger's lag. ok is false when no
-// paced samples exist. It reads the raw samples, so — unlike the aggregated
-// row — a zero-lag sample still counts.
-func (s *csvSink) paceLagStats() (paceLagStatsResult, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sr := s.rows[rowKey{file: fileDriver, row: driverPaceLag}]
-	if sr == nil || len(sr.samples) == 0 {
-		return paceLagStatsResult{}, false
-	}
-	res := paceLagStatsResult{
-		floor: sr.samples[0].d,
-		final: sr.samples[len(sr.samples)-1].d,
-	}
-	for _, sm := range sr.samples {
-		res.floor = min(res.floor, sm.d)
-		res.peak = max(res.peak, sm.d)
-	}
-	return res, true
-}
-
-// paceLagStatsResult is the paced run's lag summary (see paceLagStats).
-type paceLagStatsResult struct {
-	floor time.Duration // min lag ≈ the per-ledger ingest cost when on pace
-	peak  time.Duration // max lag ≈ the deepest backlog
-	final time.Duration // the final ledger's lag
 }
 
 // row is one aggregated CSV row.

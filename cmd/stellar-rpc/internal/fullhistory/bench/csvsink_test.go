@@ -155,7 +155,7 @@ func TestCSVSinkLastCommitted(t *testing.T) {
 // TestCSVSinkPaceLag drives LastCommitted against an anchored schedule and an
 // injected clock: each committed ledger's lag is now − its due time. Ledger 2
 // (due at the anchor) commits 30ms in; ledger 3 stays on pace at 30ms; ledger 4
-// falls 200ms behind. The stats feed the run's drain-or-grow verdict, and the
+// falls 200ms behind. Assert the recorded per-ledger lag samples and that the
 // aggregated pace_lag row carries one item per ledger.
 func TestCSVSinkPaceLag(t *testing.T) {
 	clock := &fakeClock{t: time.Unix(0, 0)}
@@ -171,11 +171,8 @@ func TestCSVSinkPaceLag(t *testing.T) {
 	clock.advance(270 * time.Millisecond) // ledger 4 (due t0+200) commits at t0+400
 	sink.LastCommitted(4)
 
-	stats, ok := sink.paceLagStats()
-	require.True(t, ok)
-	assert.Equal(t, 30*time.Millisecond, stats.floor)
-	assert.Equal(t, 200*time.Millisecond, stats.peak)
-	assert.Equal(t, 200*time.Millisecond, stats.final)
+	assert.Equal(t, []time.Duration{30 * time.Millisecond, 30 * time.Millisecond, 200 * time.Millisecond},
+		paceLagSamples(sink))
 
 	driver := readCSV(t, filepath.Join(mustWriteCSVs(t, sink), "driver.csv"))
 	require.Contains(t, driver, "pace_lag")
@@ -196,9 +193,7 @@ func TestCSVSinkPaceLagClampedToZero(t *testing.T) {
 
 	sink.LastCommitted(5) // pos 3, due t0+300, clock still t0 → lag −300ms → clamped 0
 
-	stats, ok := sink.paceLagStats()
-	require.True(t, ok) // the raw (zero) sample is recorded
-	assert.Zero(t, stats.final)
+	assert.Equal(t, []time.Duration{0}, paceLagSamples(sink)) // the raw (zero) sample is recorded
 	written, err := sink.writeCSVs(t.TempDir())
 	require.NoError(t, err)
 	assert.Empty(t, written) // the lone zero-duration sample is suppressed
@@ -214,8 +209,7 @@ func TestCSVSinkPaceLagUnanchored(t *testing.T) {
 
 	sink.LastCommitted(2)
 
-	_, ok := sink.paceLagStats()
-	assert.False(t, ok)
+	assert.Empty(t, paceLagSamples(sink))
 	written, err := sink.writeCSVs(t.TempDir())
 	require.NoError(t, err)
 	assert.Empty(t, written)
@@ -228,4 +222,19 @@ func mustWriteCSVs(t *testing.T, sink *csvSink) string {
 	_, err := sink.writeCSVs(outDir)
 	require.NoError(t, err)
 	return outDir
+}
+
+// paceLagSamples returns the recorded pace_lag sample durations in record order.
+func paceLagSamples(sink *csvSink) []time.Duration {
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	sr := sink.rows[rowKey{file: fileDriver, row: driverPaceLag}]
+	if sr == nil {
+		return nil
+	}
+	ds := make([]time.Duration, len(sr.samples))
+	for i, sm := range sr.samples {
+		ds[i] = sm.d
+	}
+	return ds
 }
