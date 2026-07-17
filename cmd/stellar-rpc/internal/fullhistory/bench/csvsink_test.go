@@ -215,6 +215,22 @@ func TestCSVSinkPaceLagUnanchored(t *testing.T) {
 	assert.Empty(t, written)
 }
 
+// TestCSVSinkPaceLagBelowFirstSeq: a commit for a ledger below the schedule's
+// firstSeq is off the schedule entirely, so it records nothing — guarding the
+// pace_lag row against the wrapped uint32 offset a below-range seq would
+// otherwise score against.
+func TestCSVSinkPaceLagBelowFirstSeq(t *testing.T) {
+	clock := &fakeClock{t: time.Unix(0, 0)}
+	sched := &paceSchedule{interval: 100 * time.Millisecond, firstSeq: 2, clock: clock.now}
+	sched.dueForPos(0)
+	sink := newCSVSink()
+	sink.schedule = sched
+
+	sink.LastCommitted(1)
+
+	assert.Empty(t, paceLagSamples(sink))
+}
+
 // mustWriteCSVs writes the sink's report to a temp dir and returns it.
 func mustWriteCSVs(t *testing.T, sink *csvSink) string {
 	t.Helper()

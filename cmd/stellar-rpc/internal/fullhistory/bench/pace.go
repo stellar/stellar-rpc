@@ -50,7 +50,7 @@ func (s *paceSchedule) dueForPos(pos int) time.Time {
 func (s *paceSchedule) dueForSeq(seq uint32) (time.Time, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.anchored {
+	if !s.anchored || seq < s.firstSeq {
 		return time.Time{}, false
 	}
 	pos := int(seq - s.firstSeq)
