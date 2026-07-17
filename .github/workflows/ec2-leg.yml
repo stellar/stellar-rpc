@@ -218,8 +218,7 @@ jobs:
           exit 1
 
       # Polls S3 for the result object and relays found/passed as step outputs
-      # for the gate below (the coordinator reads result objects straight from
-      # S3, not from here).
+      # for the gate below.
       # RUN_ID must match the box preamble's: gather skips result objects from
       # other attempts (a re-run shares RESULT_KEY with its predecessors).
       - name: Poll for results
@@ -265,8 +264,7 @@ jobs:
             exit 1
           fi
 
-      # The adopted box is tag-discovered: the adopter has no job-level handle
-      # on the earlier leg's instance id.
+      # The adopted box is tag-discovered
       - name: Terminate instance
         if: always()
         env:

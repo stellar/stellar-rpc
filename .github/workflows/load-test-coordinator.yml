@@ -2,8 +2,8 @@ name: Load test coordinator
 # Drives the ephemeral load test(s) for a release: resolves the release context,
 # fans out one ec2-leg call per planned leg, then aggregates one consolidated
 # sticky comment on the release PR. Owns reporting of perf eval results to the PR.
-# Legs report through S3 at runs/<run_id>/<run_label>/result.json; adding an
-# independent leg is one roster entry in the plan job plus its box script.
+# Legs report through S3 at runs/<run_id>/<run_label>/result.json; adding a leg
+# is one roster entry in the plan job plus its box script.
 
 defaults:
   run:
@@ -11,9 +11,7 @@ defaults:
 
 on:
   push:
-    # temporary scaffolding: before merge to main, replace with line
-    # branches: [release/**]
-    branches: [release/**, blaster-test]
+    branches: [release/**]
   workflow_dispatch:
     inputs:
       target_ref:
