@@ -40,8 +40,3 @@ limit = 1
 rps = 1
 start_rps = 1
 limit = 1
-
-[endpoints.getEvents]
-rps = 1
-start_rps = 1
-limit = 1
