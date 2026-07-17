@@ -18,7 +18,8 @@ The following terms are used throughout this document.
 - **Admission snapshot**: A RocksDB snapshot of the catalog taken when a query is admitted and released when it completes. A repeatable read of routing metadata.
 - **Handle set**: The router's map of open hot database handles, published atomically. A query loads it once at admission.
 - **Hot / cold**: Hot data is served from a live RocksDB database, one per hot chunk. Cold data is served from sealed files written once during freezing.
-- **Retention floor**: The oldest ledger served, derived at admission from `latest` and the retention configuration. A request whose leading edge is below its admitted floor is not served (R2).
+- **Index coverage**: The chunk range `[Lo, Hi]` a window's `.idx` actually covers, recorded in its catalog key and encoded in its file name. `Hi` trails the tip while the window is current, and `Lo` is the retention floor at build time.
+- **Retention floor**: The oldest ledger served, derived at admission from the snapshot and the retention configuration. A request whose leading edge is below its admitted floor is not served (R2).
 - **`latest`**: The newest fully ingested ledger visible to queries.
 
 ---
@@ -127,8 +128,9 @@ func (r *Router) Admit() (*Admission, error) {
     if err != nil {
         return nil, err
     }
-    // The frontier is the last complete chunk, the same anchor prune uses.
-    floor := r.retention.FloorAt(geometry.LastCompleteChunkAt(latest))
+    // The frontier is the highest ready hot chunk in the snapshot minus
+    // one: the same last-complete-chunk anchor the lifecycle run uses.
+    floor := r.retention.FloorAt(hotFrontier(r.catalog, snap))
     return &Admission{latest: latest, floor: floor, handles: handles, snap: snap, catalog: r.catalog}, nil
 }
 
@@ -141,7 +143,7 @@ The order is important, for the same reason as in the streaming workflow's write
 
 The snapshot is loaded last, so the metadata is the newest of the three. Any skew between the handle set and the snapshot then resolves safely: if the snapshot shows a chunk demoted from hot after the handle set was loaded, it also shows the chunk's cold artifacts frozen, because coverage is published before discard, and routing prefers cold. A query never needs a handle for a chunk its snapshot no longer serves hot. Skew in the other direction, a hot chunk the handle set does not yet contain, cannot be reached at all: its first ledger commits only after the handle is published, so the admitted `latest` never points into it.
 
-The floor is derived from the admitted `latest` and the retention configuration, so it is consistent with the admitted range by construction. Prune uses the same derivation at its own frontier; since `latest` is monotonic, an admitted floor is never behind a completed prune's floor, so queries are never routed below pruned data.
+The floor is derived from the snapshot: the frontier is the highest ready hot chunk minus one, the same anchor the lifecycle run uses. Floor and index coverage therefore come from the same read and cannot disagree.
 
 After admission, the query validates and clamps its requested range against `[floor, latest]`. Requests whose leading edge falls below the floor are rejected with an error carrying the available range. Requests extending beyond `latest` are truncated.
 
@@ -199,10 +201,10 @@ The grace period alone is not sufficient for memory safety, because the deadline
 
 Memory safety therefore comes from ownership and drain barriers, not from time:
 
-- **Hot databases**: the only shared handles. `rocksdb.Store` holds a read lock across every C call; `Close` flips a closed flag, then takes the write lock, so it waits for in-flight operations to drain and every later operation fails cleanly with a closed error.
+- **Hot databases**: the only shared handles. `rocksdb.Store` holds a read lock across every C call, and no close path frees the database while an operation is in flight. The blocking `Close` waits for in-flight operations to drain. The deletion path closes through `CloseIfIdle`, a non-blocking variant this design adds ([Changes to the streaming workflow](#changes-to-the-streaming-workflow)): it sets the closed flag, closes only if nothing is in flight, and otherwise reports failure so the run can alarm and skip. Either way, every operation after the flag is set fails cleanly with a closed error. By deletion time the grace period has outlasted every deadline, so `CloseIfIdle` normally succeeds immediately; failure means a read stuck past its deadline, exactly the case the alarm is for.
 - **Cold readers and window indexes**: opened and closed by the request that uses them ([Open-handle management](#open-handle-management)). No other component ever closes them, so a close cannot race a read.
 
-A straggler that outlives **T** is harmless: `Close` waits out its in-flight operation, and any later operation fails with a closed error. For retired files, unlink does not disturb descriptors already open: a straggler keeps reading the unlinked file, and the space is reclaimed when it exits.
+A straggler that outlives **T** is harmless: the deletion path declines to close under it and retries in a later run, and every operation the straggler issues after the closed flag is set fails with a closed error. For retired files, unlink does not disturb descriptors already open: a straggler keeps reading the unlinked file, and the space is reclaimed when it exits.
 
 Deletion follows this sequence:
 
@@ -368,7 +370,9 @@ A transaction hash does not identify the chunk containing the transaction, so ro
 Instead, the router probes the transaction indexes in two stages:
 
 1. Probe the hot transaction indexes. A match is definitive.
-2. Probe each window transaction index. A match identifies a candidate ledger, which is fetched and verified against the full transaction hash. Candidates below the admitted floor are skipped. This enforces R2 for by-hash lookups, which have no range to clamp, and makes it safe for a window index to keep naming ledgers that prune has already removed.
+2. Probe each window transaction index. A match identifies a candidate ledger, which is fetched and verified against the full transaction hash.
+
+A candidate is served only if `floor <= ledger <= latest`, both from admission. The floor gate enforces R2 and makes it safe for a window index to keep naming pruned ledgers. The `latest` gate enforces H3: without it, a probe could return a transaction from a ledger above the admitted `latest`, since the hot store keeps advancing after admission.
 
 The router supplies `TxReader` with:
 
@@ -423,7 +427,7 @@ This change allows queries to access hot databases without opening additional Ro
 
 ### Catalog snapshot support
 
-The rocksdb wrapper gains snapshot support: acquire and release, and snapshot-pinned reads and iteration, under the same lifecycle-lock discipline as its other operations. The catalog store uses them for admission.
+The rocksdb wrapper gains snapshot support: acquire and release (`NewSnapshot`, `ReleaseSnapshot`) and snapshot-pinned reads and iteration (`GetSnap`), under the same lifecycle-lock discipline as its other operations. The catalog store uses them for admission.
 
 ### `latest` watermark
 
@@ -435,7 +439,7 @@ Advancing the watermark is the final step of per-ledger ingestion. Queries admit
 
 The streaming workflow destroys retired resources immediately after catalog demotion.
 
-This proposal defers destruction to the end of the run, after a grace period from demotion. The catalog protocol is unchanged except for that delay.
+This proposal defers destruction to the end of the run, after a grace period from demotion. The catalog protocol is unchanged except for that delay. The rocksdb wrapper gains a non-blocking `CloseIfIdle` for this path: it closes only when no operation is in flight and reports failure rather than waiting.
 
 ---
 
