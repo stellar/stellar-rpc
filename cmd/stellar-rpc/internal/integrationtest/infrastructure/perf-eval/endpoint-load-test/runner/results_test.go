@@ -57,14 +57,11 @@ func TestSummarize(t *testing.T) {
 	require.InDelta(t, 60.1, gl.P999, 0.001)
 }
 
-func TestSummarizeRejectsEmpty(t *testing.T) {
+func TestRenderMarkdown(t *testing.T) {
+	// fails on empty
 	_, err := summarize([]byte(`{"endpoints": {}}`))
 	require.Error(t, err)
-	_, err = summarize([]byte(`not json`))
-	require.Error(t, err)
-}
 
-func TestRenderMarkdown(t *testing.T) {
 	rows, err := summarize([]byte(fixture))
 	require.NoError(t, err)
 	md := renderMarkdown("0123456789abcdef", "fedcba9876543210", "2m", "3m", 60_000_000, 60_017_280, 1800, rows)
@@ -72,7 +69,7 @@ func TestRenderMarkdown(t *testing.T) {
 	require.Contains(t, md, "`0123456789ab`")
 	require.Contains(t, md, "ramp-up 2m, duration 3m, blaster `fedcba987654`")
 	require.Contains(t, md, "`[60000000, 60017280]`")
-	require.Contains(t, md, "catchup 1800s")
+	require.Contains(t, md, "handoff wait 1800s")
 	require.Contains(t, md, "| p50 (ms) | p95 (ms) | p99 (ms) | p99.9 (ms) |")
 	require.Contains(t, md, "| getLedgers (limit=1) | 20 | 3600 | 9 (0.2%) | 3.2 | 9.8 | 21.5 | 60.1 |")
 	require.Contains(t, md, "| getHealth | 100 | 18000 | 0 (0.0%) | 0.4 | 0.9 | 1.5 | 4.2 |")

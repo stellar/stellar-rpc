@@ -5,7 +5,7 @@ name: Perf-eval EC2 leg (ephemeral)
 # Does not post to the PR -- the coordinator owns human-facing output.
 # Box bootstrap: perf-eval/bootstrap-common.sh + the leg script (inputs.leg_script);
 # runner-side polling: perf-eval/gather.
-# Legs can chain via keep_instance + adopt_run_label (see rendezvous.go).
+# Legs can chain via keep_instance + adopt_run_label + the instance_ip output.
 
 on:
   # workflow_call is the only trigger: a leg runs through the coordinator.
@@ -69,10 +69,14 @@ on:
         type: boolean
         default: false
       adopt_run_label:
-        description: 'run_label of a prior keep_instance leg whose box this leg also terminates'
+        description: 'run_label of a prior keep_instance leg whose box this leg also terminates when it passes'
         required: false
         type: string
         default: ''
+    outputs:
+      instance_ip:
+        description: 'Private IPv4 of the launched box, for chained legs'
+        value: ${{ jobs.ec2-leg.outputs.instance_ip }}
     secrets:
       AWS_GHA_ROLE_ARN:
         description: 'OIDC role ARN to assume for EC2 + S3 access'
@@ -86,6 +90,8 @@ permissions:
 jobs:
   ec2-leg:
     name: Launch + await ephemeral perf-eval box
+    outputs:
+      instance_ip: ${{ steps.launch.outputs.instance_ip }}
     # Non-cancelling group keyed on the test commit SHA + leg. An instance can run
     # until the box’s self-terminate ceiling, so new runs queue.
     concurrency:
@@ -201,6 +207,7 @@ jobs:
 
           INSTANCE_ID=$(printf '%s' "$RUN_INSTANCES_JSON" | jq -r '.Instances[0].InstanceId')
           echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+          echo "instance_ip=$(printf '%s' "$RUN_INSTANCES_JSON" | jq -r '.Instances[0].PrivateIpAddress')" >> "$GITHUB_OUTPUT"
 
       - name: Wait for SSM agent to register
         env:
@@ -268,7 +275,8 @@ jobs:
             exit 1
           fi
 
-      # The adopted box is tag-discovered
+      # The adopted box is tag-discovered. Adoption fires only on a pass. Note that
+      # a failed leg leaves the box to its serve ceiling so a re-run can reuse it.
       - name: Terminate instance
         if: always()
         env:
@@ -282,7 +290,7 @@ jobs:
           elif [ -n "$INSTANCE_ID" ]; then
             aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" || true
           fi
-          if [ -n "$ADOPT_RUN_LABEL" ]; then
+          if [ -n "$ADOPT_RUN_LABEL" ] && [ "$LEG_PASSED" = "true" ]; then
             ADOPTED=$(aws ec2 describe-instances \
               --filters "Name=tag:run-id,Values=${{ github.run_id }}" \
                         "Name=tag:Name,Values=perf-eval-$ADOPT_RUN_LABEL" \

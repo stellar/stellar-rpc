@@ -11,7 +11,7 @@ defaults:
 
 on:
   push:
-    branches: [release/**]
+    branches: [release/**, blaster-test/**]
   workflow_dispatch:
     inputs:
       target_ref:
@@ -47,8 +47,6 @@ jobs:
       pr_number: ${{ steps.ctx.outputs.pr_number }}
       legs: ${{ steps.ctx.outputs.legs }}
       matrix_legs: ${{ steps.ctx.outputs.matrix_legs }}
-      blaster_budget: ${{ steps.ctx.outputs.blaster_budget }}
-      serve_deadline: ${{ steps.ctx.outputs.serve_deadline }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -73,17 +71,11 @@ jobs:
             {"label":"Backfill ingestion","run_label":"backfill"},
             {"label":"Endpoint load test","run_label":"blaster"}
           ]'
-          # Chained-pair timing, derived here so the two sides cannot drift:
-          # the blaster's runner bails 25m before its budget, so a serve window
-          # 20m under that budget strictly outlasts every bail path.
-          BLASTER_BUDGET=255
           {
             echo "target_sha=$SHA"
             echo "pr_number=$PR"
             echo "legs=$(jq -c . <<<"$LEGS")"
             echo "matrix_legs=$(jq -c 'map(select(.script))' <<<"$LEGS")"
-            echo "blaster_budget=$BLASTER_BUDGET"
-            echo "serve_deadline=$((BLASTER_BUDGET - 20))m"
           } >> "$GITHUB_OUTPUT"
 
   # The fan-out: one matrix entry per independent leg.
@@ -116,10 +108,10 @@ jobs:
       budget_minutes: 345
       keep_instance: true
       extra_env: |
-        export SERVE_AFTER_BACKFILL=true CHAIN_PEER=blaster
-        export SERVE_DEADLINE=${{ needs.plan.outputs.serve_deadline }}
+        export SERVE_AFTER_BACKFILL=true
 
-  # Chained pair, driving side: runs once backfill's box is serving, then blasts it.
+  # Chained pair, driving side: starts once backfill's leg passes (its box then
+  # enters catchup), probes the handed-off address until healthy, then blasts.
   blaster:
     name: Endpoint load test
     needs: [plan, backfill]
@@ -129,11 +121,11 @@ jobs:
       target_ref: ${{ needs.plan.outputs.target_sha }}
       run_label: blaster
       leg_script: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/endpoint-load-test/run-blaster.sh
-      budget_minutes: ${{ fromJSON(needs.plan.outputs.blaster_budget) }}
+      budget_minutes: 255
       root_volume_gb: 50
       adopt_run_label: backfill
       extra_env: |
-        export CHAIN_PEER=backfill
+        export TARGET_RPC=http://${{ needs.backfill.outputs.instance_ip }}:8000
 
   report:
     name: Aggregate + report

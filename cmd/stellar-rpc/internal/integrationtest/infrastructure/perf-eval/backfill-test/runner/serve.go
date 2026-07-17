@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path"
@@ -14,99 +12,44 @@ import (
 )
 
 // rpcPort is where the daemon serves; it crosses the box boundary (bind
-// endpoint, local health probe, and the URL advertised to the chained leg).
+// endpoint here, TARGET_RPC in the coordinator's chained handoff).
 const rpcPort = "8000"
 
-const localURL = "http://localhost:" + rpcPort
-
-// servePhase is the serving side of the leg chaining protocol: await catchup,
-// advertise, hold for the peer's result, power off.
-func servePhase(
-	ctx context.Context, fetch *harness.S3Fetcher, resultKey, runID, targetSHA string, daemon *daemonHandle,
-) {
-	// runs last (after daemon.Stop): the box owns its shutdown, leaving the leg
-	// script's EXIT trap a minute to upload the box log
-	defer rescheduleShutdown(ctx, 1, "serve phase complete")
+// servePhase parks the box serving for the chained blaster leg, which gets
+// this box's address through GHA (the coordinator's TARGET_RPC handoff) and
+// probes getHealth directly. Termination is external (blaster job's adopt
+// cleanup) so the hold only backstops orphaned runs.
+func servePhase(ctx context.Context, daemon *daemonHandle) {
+	// on the backstop path the leg script's EXIT trap gets a minute to upload
+	// the box log before poweroff
+	defer rescheduleShutdown(ctx, 1, "serve phase over")
 	defer daemon.Stop()
 
-	// one deadline bounds catchup + holding, so a slow catchup eats serving
-	// time rather than failing the handoff
-	serveDeadline := harness.DurationEnv("SERVE_DEADLINE", 195*time.Minute)
-	readyKey := path.Join(path.Dir(resultKey), harness.ServeReadyName)
-	// the chained peer's result object is this box's stop signal
-	stopKey := ""
-	if peer := os.Getenv("CHAIN_PEER"); peer != "" {
-		stopKey = harness.SiblingKey(resultKey, peer, path.Base(resultKey))
+	// the boot-time self-terminate (budget+15m) can predate the blast's end
+	ceiling := harness.DurationEnv("SERVE_CEILING", 6*time.Hour)
+	rescheduleShutdown(ctx, int(ceiling.Minutes()), "serve ceiling")
+
+	// the happy-path hard kill skips the EXIT-trap upload, persist the log up to now
+	snapshotBoxLog(ctx)
+
+	logger.Infof("serving :%s until external termination (ceiling %s)", rpcPort, ceiling)
+	select {
+	case <-ctx.Done():
+	case <-time.After(ceiling):
+		logger.Warnf("serve ceiling passed without external termination")
 	}
+}
 
-	// the bootstrap's pending self-terminate would cut the serve window short
-	rescheduleShutdown(ctx, int(serveDeadline.Minutes())+30, "serve-phase self-terminate ceiling")
-
-	wctx, wcancel := context.WithTimeout(ctx, serveDeadline)
-	defer wcancel()
-
-	publishReady := func(r harness.ServeReady) {
-		r.SchemaVersion = 1
-		r.RunID = runID
-		r.TargetSHA = targetSHA
-		if err := harness.PutJSON(ctx, fetch.Client, fetch.Bucket, readyKey, r); err != nil {
-			logger.Errorf("publishing serve-ready object: %v", err)
-		}
-	}
-
-	logger.Infof("serve phase: awaiting catchup (serve window %s)", serveDeadline)
-	start := time.Now()
-	health, err := harness.AwaitHealthy(wctx, localURL, 15*time.Second)
-	if err != nil {
-		logger.Errorf("serve phase: %v", err)
-		publishReady(harness.ServeReady{Status: harness.ServeStatusFailed, Error: err.Error()})
+// snapshotBoxLog copies the box log so far next to the result object.
+func snapshotBoxLog(ctx context.Context) {
+	bucket, key := os.Getenv("BUCKET"), os.Getenv("RESULT_KEY")
+	if bucket == "" || key == "" {
 		return
 	}
-	catchupSecs := int(time.Since(start).Seconds())
-
-	ip, err := privateIPv4()
-	if err != nil {
-		logger.Errorf("serve phase: %v", err)
-		publishReady(harness.ServeReady{Status: harness.ServeStatusFailed, Error: err.Error()})
-		return
-	}
-	url := fmt.Sprintf("http://%s:%s", ip, rpcPort)
-	publishReady(harness.ServeReady{
-		Status:         harness.ServeStatusReady,
-		URL:            url,
-		OldestLedger:   health.OldestLedger,
-		LatestLedger:   health.LatestLedger,
-		CatchupSeconds: catchupSecs,
-	})
-	logger.Infof("serving %s (ledgers [%d, %d], catchup %ds); holding until peer result or %s",
-		url, health.OldestLedger, health.LatestLedger, catchupSecs, serveDeadline)
-
-	if stopKey == "" {
-		logger.Warnf("CHAIN_PEER unset; serving until the deadline")
-		<-wctx.Done()
-		return
-	}
-	for {
-		var res harness.Result
-		err := harness.GetJSON(wctx, fetch.Client, fetch.Bucket, stopKey, &res)
-		switch {
-		// A leftover result from an earlier attempt is not a stop signal: this
-		// attempt's peer leg still needs the box.
-		case err == nil && harness.SameWorkflowRun(res.RunID, runID) &&
-			harness.RunAttempt(res.RunID) >= harness.RunAttempt(runID):
-			logger.Infof("peer leg reported %q; serve phase over", res.Verdict)
-			return
-		case err == nil:
-			logger.Infof("ignoring stale peer result from run %s", res.RunID)
-		case !errors.Is(err, harness.ErrResultNotReady):
-			logger.Warnf("peer result fetch failed; retrying: %v", err)
-		}
-		select {
-		case <-wctx.Done():
-			logger.Warnf("serve deadline passed without a peer result; shutting down")
-			return
-		case <-time.After(harness.RendezvousPollInterval):
-		}
+	dst := fmt.Sprintf("s3://%s/%s/user-data-serving.log", bucket, path.Dir(key))
+	cmd := exec.CommandContext(ctx, "aws", "s3", "cp", "/var/log/user-data.log", dst)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		logger.Warnf("snapshotting box log to %s: %v (%s)", dst, err, out)
 	}
 }
 
@@ -123,21 +66,4 @@ func rescheduleShutdown(ctx context.Context, minutes int, reason string) {
 	} else {
 		logger.Infof("shutdown rescheduled to %s from now (%s)", arg, reason)
 	}
-}
-
-// privateIPv4 returns the box's primary non-loopback IPv4 address, which is
-// what the chained leg's box dials within the VPC.
-func privateIPv4() (string, error) {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return "", fmt.Errorf("listing interfaces: %w", err)
-	}
-	for _, a := range addrs {
-		if ipn, ok := a.(*net.IPNet); ok && !ipn.IP.IsLoopback() {
-			if v4 := ipn.IP.To4(); v4 != nil {
-				return v4.String(), nil
-			}
-		}
-	}
-	return "", errors.New("no non-loopback IPv4 address found")
 }

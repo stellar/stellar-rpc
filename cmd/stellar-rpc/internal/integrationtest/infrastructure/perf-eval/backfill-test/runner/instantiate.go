@@ -114,7 +114,7 @@ func instantiate(ctx context.Context) error {
 
 	if daemon != nil {
 		// hand the serving box off to the chained blaster leg
-		servePhase(ctx, fetch, resultKey, runID, targetSHA, daemon)
+		servePhase(ctx, daemon)
 	}
 	return nil
 }

@@ -9,7 +9,7 @@
 //	S3Fetcher      on-box: streams (and sha-verifies) corpus objects from S3.
 //	PublishResult  on-box: writes the ok/fail result object the gatherer reads.
 //	RunStreaming   on-box: runs a child, streaming output with a bounded tail.
-//	ServeReady     box-to-box: the leg-chaining rendezvous object
+//	AwaitHealthy   on-box: polls an RPC's getHealth until it reports healthy.
 //
 // Leg-specific work (which corpus to fetch, which task to run) lives in each
 // leg's own on-box runner command; Gather is its own command (perf-eval/gather)

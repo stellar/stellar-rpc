@@ -61,13 +61,13 @@ func summarize(data []byte) ([]endpointStats, error) {
 }
 
 func renderMarkdown(
-	sha, blasterSHA, rampUp, duration string, oldest, latest uint32, catchupSecs int, rows []endpointStats,
+	sha, blasterSHA, rampUp, duration string, oldest, latest uint32, handoffSecs int, rows []endpointStats,
 ) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "### 🎯 Endpoint load test — `%s`\n\n", sha[:min(12, len(sha))])
 	fmt.Fprintf(&b, "Serial blast per endpoint (ramp-up %s, duration %s, blaster `%s`) against the backfilled RPC "+
-		"(ledgers `[%d, %d]`, catchup %ds).\n\n",
-		rampUp, duration, blasterSHA[:min(12, len(blasterSHA))], oldest, latest, catchupSecs)
+		"(ledgers `[%d, %d]`, handoff wait %ds).\n\n",
+		rampUp, duration, blasterSHA[:min(12, len(blasterSHA))], oldest, latest, handoffSecs)
 	b.WriteString("| Endpoint | Target RPS | Requests | Errors | p50 (ms) | p95 (ms) | p99 (ms) | p99.9 (ms) |\n")
 	b.WriteString("|---|---|---|---|---|---|---|---|\n")
 	for _, r := range rows {

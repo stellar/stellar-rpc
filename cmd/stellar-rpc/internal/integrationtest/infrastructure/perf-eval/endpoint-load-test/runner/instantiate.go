@@ -2,17 +2,12 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-
-	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/harness"
 )
@@ -46,24 +41,29 @@ func instantiate(ctx context.Context) error {
 		logger.Infof("leg deadline in %s (budget-derived)", time.Until(deadline).Round(time.Minute))
 	}
 
-	peer := os.Getenv("CHAIN_PEER")
-	if peer == "" {
-		return leg.Bail("CHAIN_PEER unset; nothing to rendezvous with")
+	// the chained handoff: the coordinator passes the serving box's address once
+	// its backfill leg passes as the box enters captive-core catchup
+	target := os.Getenv("TARGET_RPC")
+	if target == "" {
+		return leg.Bail("TARGET_RPC unset; nothing to blast")
 	}
-	readyKey := harness.SiblingKey(leg.ResultKey, peer, harness.ServeReadyName)
 
-	// fetch + build overlap the peer box's captive-core catchup
+	// fetch + build overlap the target box's catchup
 	blasterBin, blasterSHA, err := fetchBlaster(ctx, filepath.Join(leg.WorkDir, "stellar-rpc-blaster"))
 	if err != nil {
 		return leg.Bail("%v", err)
 	}
 
-	ready, health, err := awaitServeReady(ctx, leg.Fetch.Client, leg.Bucket, readyKey, leg.RunID)
+	wctx, wcancel := context.WithTimeout(ctx, harness.DurationEnv("CATCHUP_TIMEOUT", 60*time.Minute))
+	waitStart := time.Now()
+	health, err := harness.AwaitHealthy(wctx, target, 15*time.Second) // await catchup
+	wcancel()
 	if err != nil {
-		return leg.Bail("%v", err)
+		return leg.Bail("target RPC %s: %v", target, err)
 	}
-	logger.Infof("target RPC %s serving ledgers [%d, %d] (catchup %ds)",
-		ready.URL, health.OldestLedger, health.LatestLedger, ready.CatchupSeconds)
+	handoffSecs := int(time.Since(waitStart).Seconds())
+	logger.Infof("target RPC %s serving ledgers [%d, %d] (handoff wait %ds)",
+		target, health.OldestLedger, health.LatestLedger, handoffSecs)
 
 	lo := int64(health.OldestLedger) + bufLow
 	hi := int64(health.LatestLedger) - bufHigh
@@ -72,8 +72,9 @@ func instantiate(ctx context.Context) error {
 			health.OldestLedger, health.LatestLedger, bufLow, bufHigh)
 	}
 
+	// launch blast
 	call := blastCall{
-		bin: blasterBin, url: ready.URL,
+		bin: blasterBin, url: target,
 		configPath:  filepath.Join(leg.RepoRoot, legDir, "testdata", "endpoints.toml"),
 		seedPath:    filepath.Join(leg.WorkDir, "blaster-seed.json"),
 		resultsPath: filepath.Join(leg.WorkDir, "blaster-results.json"),
@@ -95,7 +96,7 @@ func instantiate(ctx context.Context) error {
 	}
 
 	md := renderMarkdown(leg.TargetSHA, blasterSHA, rampUp, duration,
-		health.OldestLedger, health.LatestLedger, ready.CatchupSeconds, rows)
+		health.OldestLedger, health.LatestLedger, handoffSecs, rows)
 	if err := os.WriteFile(leg.ResultsFile, []byte(md), 0o644); err != nil {
 		return leg.Bail("writing results: %v", err)
 	}
@@ -173,62 +174,4 @@ func blast(ctx context.Context, c blastCall) error {
 		return fmt.Errorf("blaster run failed: %w", err)
 	}
 	return nil
-}
-
-// awaitServeReady polls for the serve-ready object the peer box publishes,
-// then probes the advertised RPC directly; the probe's getHealth response
-// carries the live ledger bounds the seed window derives from. A leftover
-// object from a prior attempt is honored only if its box still answers.
-func awaitServeReady(
-	ctx context.Context, client *s3.Client, bucket, key, runID string,
-) (*harness.ServeReady, *protocol.GetHealthResponse, error) {
-	probe := func(url string, window time.Duration) (*protocol.GetHealthResponse, error) {
-		pctx, cancel := context.WithTimeout(ctx, window)
-		defer cancel()
-		res, err := harness.AwaitHealthy(pctx, url, 10*time.Second)
-		if err != nil {
-			return nil, err
-		}
-		return &res, nil
-	}
-
-	staleProbed := "" // prior-attempt RunID already probed dead; don't re-dial it every poll
-	for {
-		var ready harness.ServeReady
-		err := harness.GetJSON(ctx, client, bucket, key, &ready)
-		switch {
-		case errors.Is(err, harness.ErrResultNotReady):
-			logger.Infof("waiting for serve-ready object s3://%s/%s", bucket, key)
-		case err != nil:
-			logger.Warnf("serve-ready fetch failed; retrying: %v", err)
-		case !harness.SameWorkflowRun(ready.RunID, runID):
-			logger.Infof("ignoring serve-ready from foreign run %s", ready.RunID)
-		case harness.RunAttempt(ready.RunID) < harness.RunAttempt(runID):
-			// prior-attempt leftover: its box may be long gone, so one probe
-			// decides between reusing it and waiting for this attempt's object
-			if ready.Status == harness.ServeStatusReady && ready.RunID != staleProbed {
-				if health, perr := probe(ready.URL, time.Minute); perr == nil {
-					logger.Infof("reusing still-serving box from prior attempt (%s)", ready.RunID)
-					return &ready, health, nil
-				}
-				staleProbed = ready.RunID
-			}
-			logger.Infof("stale serve-ready from attempt %s; waiting for a fresh one", ready.RunID)
-		case ready.Status != harness.ServeStatusReady:
-			return nil, nil, fmt.Errorf("peer box reported serve failure: %s", ready.Error)
-		default:
-			// the box just reported healthy, so a short window suffices
-			health, perr := probe(ready.URL, 3*time.Minute)
-			if perr != nil {
-				return nil, nil, fmt.Errorf("serve-ready published but %s unreachable: %w", ready.URL, perr)
-			}
-			return &ready, health, nil
-		}
-		select {
-		case <-ctx.Done():
-			return nil, nil, fmt.Errorf("no usable serve-ready object at s3://%s/%s before the leg deadline: %w",
-				bucket, key, ctx.Err())
-		case <-time.After(harness.RendezvousPollInterval):
-		}
-	}
 }
