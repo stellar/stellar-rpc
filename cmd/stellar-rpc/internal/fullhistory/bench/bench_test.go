@@ -233,6 +233,40 @@ func TestRunColdRefusesInPlaceRepack(t *testing.T) {
 	require.ErrorContains(t, err, "must differ from --pack-dir")
 }
 
+// TestBenchRejectsInvalidSourceEarly asserts a bad --source invocation fails in
+// validate(), before either driver creates its output or scratch directories.
+func TestBenchRejectsInvalidSourceEarly(t *testing.T) {
+	base := t.TempDir()
+	coldRoot := filepath.Join(base, "cold")
+	hotRoot := filepath.Join(base, "hot")
+	outDir := filepath.Join(base, "csv")
+
+	err := runCold(context.Background(), testLogger(), coldOptions{
+		Source:     sourceConfig{Kind: sourcePack}, // --pack-dir missing
+		StartChunk: chunk.ID(0),
+		NumChunks:  1,
+		Workers:    1,
+		ColdRoot:   coldRoot,
+		OutDir:     outDir,
+	})
+	require.ErrorContains(t, err, "--pack-dir is required")
+
+	err = runHot(context.Background(), testLogger(), hotOptions{
+		Source:     sourceConfig{Kind: "bogus"},
+		StartChunk: chunk.ID(0),
+		NumChunks:  1,
+		HotRoot:    hotRoot,
+		OutDir:     outDir,
+	})
+	require.ErrorContains(t, err, "expected pack|bsb")
+
+	require.ErrorContains(t, sourceConfig{Kind: sourceBSB}.validate(), "--bucket-path is required")
+
+	for _, dir := range []string{coldRoot, hotRoot, outDir} {
+		require.NoDirExists(t, dir, "invalid invocation must not create %s", dir)
+	}
+}
+
 // TestPackBackendMultiChunkRange exercises the pack source's chunk routing: one
 // bounded RawLedgers call spanning two packs streams both, in order — what the
 // hot driver relies on when a run crosses a chunk boundary.

@@ -72,6 +72,25 @@ type sourceConfig struct {
 	Region string
 }
 
+// validate checks the source selection so the drivers can reject a bad
+// invocation before they create any output directories. DatastoreType is left
+// to the SDK, which owns the accepted set.
+func (c sourceConfig) validate() error {
+	switch c.Kind {
+	case sourcePack:
+		if c.PackDir == "" {
+			return errors.New("--pack-dir is required when --source=pack")
+		}
+	case sourceBSB:
+		if c.BucketPath == "" {
+			return errors.New("--bucket-path is required when --source=bsb")
+		}
+	default:
+		return fmt.Errorf("--source=%s; expected %s|%s", c.Kind, sourcePack, sourceBSB)
+	}
+	return nil
+}
+
 // openSource resolves cfg into a backfill.Backend — the LedgerStream + frontier
 // Tip pair the production freeze path fetches from — plus a release func for any
 // run-long resources (the BSB Tip datastore handle).
@@ -86,14 +105,8 @@ func openSource(ctx context.Context, cfg sourceConfig) (backfill.Backend, func()
 	noop := func() {}
 	switch cfg.Kind {
 	case sourcePack:
-		if cfg.PackDir == "" {
-			return nil, noop, errors.New("--pack-dir is required when --source=pack")
-		}
 		return packBackend{root: cfg.PackDir}, noop, nil
 	case sourceBSB:
-		if cfg.BucketPath == "" {
-			return nil, noop, errors.New("--bucket-path is required when --source=bsb")
-		}
 		// GCS/S3 name their bucket via destination_bucket_path; the Filesystem
 		// datastore names its local root via destination_path.
 		pathKey := "destination_bucket_path"

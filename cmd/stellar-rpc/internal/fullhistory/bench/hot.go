@@ -61,6 +61,9 @@ type hotOptions struct {
 // validate checks the flags and chunk range before runHot touches the
 // filesystem.
 func (o hotOptions) validate() error {
+	if err := o.Source.validate(); err != nil {
+		return err
+	}
 	if o.HotRoot == "" {
 		return errors.New("--hot-dir is required")
 	}

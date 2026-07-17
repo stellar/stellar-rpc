@@ -55,6 +55,9 @@ type coldOptions struct {
 // validate checks the flags and chunk range before runCold touches the
 // filesystem.
 func (o coldOptions) validate() error {
+	if err := o.Source.validate(); err != nil {
+		return err
+	}
 	if o.NumChunks < 1 {
 		return fmt.Errorf("--num-chunks must be >= 1, got %d", o.NumChunks)
 	}
