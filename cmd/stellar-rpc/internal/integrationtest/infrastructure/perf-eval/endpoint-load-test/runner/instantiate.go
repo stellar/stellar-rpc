@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caarlos0/env/v11"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/harness"
 )
 
@@ -16,45 +18,55 @@ import (
 // roster is checked in (the runner runs with cwd = repo root).
 const legDir = "cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/endpoint-load-test"
 
-// instantiate is the instance's blast task: it rendezvouses with the chained
-// peer's serving RPC, generates seed data across its ledger window, runs the
-// serial endpoint blast, and publishes the stats.
+// blasterEnv is the leg's env-derived config.
+type blasterEnv struct {
+	RampUp    string `env:"BLASTER_RAMP_UP"  envDefault:"2m"`
+	Duration  string `env:"BLASTER_DURATION" envDefault:"3m"`
+	SeedCount string `env:"SEED_COUNT"       envDefault:"1000"`
+	// left buffer outruns retention trimming during the blast; right buffer
+	// keeps clear of the (still advancing) tip
+	BufferLow  int64 `env:"SEED_BUFFER_LOW"  envDefault:"1000"`
+	BufferHigh int64 `env:"SEED_BUFFER_HIGH" envDefault:"128"`
+	// serving box's address, passed by the coordinator once the backfill leg passes
+	TargetRPC      string        `env:"TARGET_RPC"`
+	CatchupTimeout time.Duration `env:"CATCHUP_TIMEOUT" envDefault:"60m"`
+	BudgetMinutes  int           `env:"BUDGET_MINUTES"`
+	BlasterRepo    string        `env:"BLASTER_REPO"    envDefault:"stellar/stellar-rpc-blaster"`
+	BlasterRef     string        `env:"BLASTER_REF"     envDefault:"f6085c38900f1b1c031dfb78658ea81917f58a30"`
+}
+
+// instantiate is the instance's blast task: it receives the chained peer's serving
+// RPC, generates seed data, runs the endpoint blast, and publishes the stats.
 func instantiate(ctx context.Context) error {
 	leg, err := harness.LegSetup(ctx, "Endpoint load test")
 	if err != nil {
 		return err
 	}
-	var (
-		rampUp    = harness.Env("BLASTER_RAMP_UP", "2m")
-		duration  = harness.Env("BLASTER_DURATION", "3m")
-		seedCount = harness.Env("SEED_COUNT", "1000")
-		// left buffer outruns retention trimming during the blast; right buffer
-		// keeps clear of the (still advancing) tip
-		bufLow  = harness.Int64Env("SEED_BUFFER_LOW", 1000)
-		bufHigh = harness.Int64Env("SEED_BUFFER_HIGH", 128)
-	)
+	cfg, err := env.ParseAs[blasterEnv]()
+	if err != nil {
+		return leg.Bail("parsing env: %v", err)
+	}
 
-	if deadline, ok := harness.LegDeadline(25 * time.Minute); ok {
+	if deadline, ok := harness.BootDeadline(cfg.BudgetMinutes, 25*time.Minute); ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithDeadline(ctx, deadline)
 		defer cancel()
 		logger.Infof("leg deadline in %s (budget-derived)", time.Until(deadline).Round(time.Minute))
 	}
 
-	// the chained handoff: the coordinator passes the serving box's address once
-	// its backfill leg passes as the box enters captive-core catchup
-	target := os.Getenv("TARGET_RPC")
-	if target == "" {
+	if cfg.TargetRPC == "" {
 		return leg.Bail("TARGET_RPC unset; nothing to blast")
 	}
+	target := cfg.TargetRPC
 
 	// fetch + build overlap the target box's catchup
-	blasterBin, blasterSHA, err := fetchBlaster(ctx, filepath.Join(leg.WorkDir, "stellar-rpc-blaster"))
+	blasterBin, blasterSHA, err := fetchBlaster(ctx,
+		filepath.Join(leg.WorkDir, "stellar-rpc-blaster"), cfg.BlasterRepo, cfg.BlasterRef)
 	if err != nil {
 		return leg.Bail("%v", err)
 	}
 
-	wctx, wcancel := context.WithTimeout(ctx, harness.DurationEnv("CATCHUP_TIMEOUT", 60*time.Minute))
+	wctx, wcancel := context.WithTimeout(ctx, cfg.CatchupTimeout)
 	waitStart := time.Now()
 	health, err := harness.AwaitHealthy(wctx, target, 15*time.Second) // await catchup
 	wcancel()
@@ -65,11 +77,10 @@ func instantiate(ctx context.Context) error {
 	logger.Infof("target RPC %s serving ledgers [%d, %d] (handoff wait %ds)",
 		target, health.OldestLedger, health.LatestLedger, handoffSecs)
 
-	lo := int64(health.OldestLedger) + bufLow
-	hi := int64(health.LatestLedger) - bufHigh
+	lo, hi := int64(health.OldestLedger)+cfg.BufferLow, int64(health.LatestLedger)-cfg.BufferHigh
 	if hi <= lo {
 		return leg.Bail("ledger window [%d, %d] leaves no room after buffers +%d/-%d",
-			health.OldestLedger, health.LatestLedger, bufLow, bufHigh)
+			health.OldestLedger, health.LatestLedger, cfg.BufferLow, cfg.BufferHigh)
 	}
 
 	// launch blast
@@ -78,9 +89,9 @@ func instantiate(ctx context.Context) error {
 		configPath:  filepath.Join(leg.RepoRoot, legDir, "testdata", "endpoints.toml"),
 		seedPath:    filepath.Join(leg.WorkDir, "blaster-seed.json"),
 		resultsPath: filepath.Join(leg.WorkDir, "blaster-results.json"),
-		rampUp:      rampUp, duration: duration,
+		rampUp:      cfg.RampUp, duration: cfg.Duration,
 	}
-	if err := generateSeed(ctx, call, lo, hi, seedCount); err != nil {
+	if err := generateSeed(ctx, call, lo, hi, cfg.SeedCount); err != nil {
 		return leg.Bail("%v", err)
 	}
 	if err := blast(ctx, call); err != nil {
@@ -95,7 +106,7 @@ func instantiate(ctx context.Context) error {
 		return leg.Bail("summarizing blaster results: %v", err)
 	}
 
-	md := renderMarkdown(leg.TargetSHA, blasterSHA, rampUp, duration,
+	md := renderMarkdown(leg.TargetSHA, blasterSHA, cfg.RampUp, cfg.Duration,
 		health.OldestLedger, health.LatestLedger, handoffSecs, rows)
 	if err := os.WriteFile(leg.ResultsFile, []byte(md), 0o644); err != nil {
 		return leg.Bail("writing results: %v", err)
@@ -106,12 +117,8 @@ func instantiate(ctx context.Context) error {
 	return nil
 }
 
-// fetchBlaster shallow-checks-out and builds stellar-rpc-blaster (BLASTER_REPO
-// at BLASTER_REF -- branch, tag, or SHA), returning the binary path and the
-// resolved commit.
-func fetchBlaster(ctx context.Context, dir string) (string, string, error) {
-	repo := harness.Env("BLASTER_REPO", "stellar/stellar-rpc-blaster")
-	ref := harness.Env("BLASTER_REF", "f6085c38900f1b1c031dfb78658ea81917f58a30")
+// fetchBlaster checks-out and builds stellar-rpc-blaster
+func fetchBlaster(ctx context.Context, dir, repo, ref string) (string, string, error) {
 	logger.Infof("fetching stellar-rpc-blaster (%s@%s)", repo, ref)
 	if err := os.RemoveAll(dir); err != nil {
 		return "", "", err

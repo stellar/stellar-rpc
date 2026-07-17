@@ -13,6 +13,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/caarlos0/env/v11"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 
@@ -30,67 +31,64 @@ const ledgerThreshold = 384 // mirrors ingest.ledgerThreshold in backfill.go
 // backfillDoneRe matches the terminal line emitted on backfill's completion
 var backfillDoneRe = regexp.MustCompile(`Backfill process complete, ledgers \[(\d+) -> (\d+)\]`)
 
-// instantiate is the instance's backfill task: it fetches + builds test fixtures,
-// runs a timed backfill, then publishes the verdict. With SERVE_AFTER_BACKFILL
-// it then holds the daemon serving for the chained blaster leg.
-func instantiate(ctx context.Context) error {
-	var (
-		bucket      = harness.Env("BUCKET", "stellar-rpc-ci-load-test")
-		region      = harness.Env("REGION", "us-east-1")
-		workDir     = harness.Env("WORK_DIR", "/data")
-		resultsFile = harness.Env("RESULTS_FILE", "/tmp/results.md")
-		resultKey   = os.Getenv("RESULT_KEY")
-		targetSHA   = os.Getenv("TARGET_SHA")
-		runID       = harness.Env("RUN_ID", "manual")
-		// ~1 day by default for cheap test runs; the full week is 120960.
-		retention = harness.Env("HISTORY_RETENTION_WINDOW", "17280")
-		deadline  = harness.Env("BACKFILL_DEADLINE", "4h")
+// backfillEnv is the leg's env-derived config.
+type backfillEnv struct {
+	Bucket      string `env:"BUCKET"       envDefault:"stellar-rpc-ci-load-test"`
+	Region      string `env:"REGION"       envDefault:"us-east-1"`
+	WorkDir     string `env:"WORK_DIR"     envDefault:"/data"`
+	ResultsFile string `env:"RESULTS_FILE" envDefault:"/tmp/results.md"`
+	ResultKey   string `env:"RESULT_KEY"`
+	TargetSHA   string `env:"TARGET_SHA"`
+	RunID       string `env:"RUN_ID"       envDefault:"manual"`
+	// ~1 day by default for cheap test runs; the full week is 120960.
+	Retention int           `env:"HISTORY_RETENTION_WINDOW" envDefault:"17280"`
+	Deadline  time.Duration `env:"BACKFILL_DEADLINE"        envDefault:"4h"`
+	// serve on a non-loopback bind after the backfill completes
+	ServeAfter bool `env:"SERVE_AFTER_BACKFILL"`
+}
 
-		binaryPath = filepath.Join(workDir, "stellar-rpc-bin") // built here (the repo checkout is in WORK_DIR)
-	)
+// instantiate fetches + builds test fixtures + runs a timed backfill, then
+// publishes the verdict. With SERVE_AFTER_BACKFILL it keeps the daemon serving.
+func instantiate(ctx context.Context) error {
+	cfg, err := env.ParseAs[backfillEnv]()
+	if err != nil {
+		return fmt.Errorf("parsing env: %w", err) // run_leg publishes the generic fail
+	}
+	binaryPath := filepath.Join(cfg.WorkDir, "stellar-rpc-bin") // built here (the repo checkout is in WORK_DIR)
+	retention := strconv.Itoa(cfg.Retention)                    // config template + report take it as a string
+
 	repoRoot, err := os.Getwd()
 	if err != nil {
 		return err
 	}
 	bail := func(format string, args ...any) error {
-		return harness.BailInstance(resultsFile, "Backfill ingestion", runID, targetSHA, fmt.Sprintf(format, args...))
+		return harness.BailInstance(cfg.ResultsFile, "Backfill ingestion", cfg.RunID, cfg.TargetSHA,
+			fmt.Sprintf(format, args...))
 	}
 
-	want, err := strconv.Atoi(retention) // used to compare against ingested ledgers below
-	if err != nil {
-		return bail("parsing retention window %q: %v", retention, err)
-	}
-
-	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(cfg.Region))
 	if err != nil {
 		return bail("loading AWS config: %v", err)
 	}
-	fetch := &harness.S3Fetcher{Client: s3.NewFromConfig(awsCfg), Bucket: bucket}
+	fetch := &harness.S3Fetcher{Client: s3.NewFromConfig(awsCfg), Bucket: cfg.Bucket}
 
-	coreCfg, err := prepareFixtures(ctx, fetch, repoRoot, workDir, binaryPath)
+	coreCfg, err := prepareFixtures(ctx, fetch, repoRoot, cfg.WorkDir, binaryPath)
 	if err != nil {
 		return bail("%v", err)
 	}
 
-	// with SERVE_AFTER_BACKFILL the chained blaster leg drives this box over the
-	// VPC, so the daemon binds a non-loopback address and stays up to serve
-	serveAfter := os.Getenv("SERVE_AFTER_BACKFILL") == "true"
 	endpoint := "localhost:" + rpcPort
-	if serveAfter {
+	if cfg.ServeAfter {
 		endpoint = "0.0.0.0:" + rpcPort
 	}
 
-	cfgPath, err := renderConfig(repoRoot, workDir, coreCfg, retention, endpoint)
+	cfgPath, err := renderConfig(repoRoot, cfg.WorkDir, coreCfg, retention, endpoint)
 	if err != nil {
 		return bail("rendering config: %v", err)
 	}
 
-	dl, err := time.ParseDuration(deadline)
-	if err != nil {
-		return bail("invalid BACKFILL_DEADLINE %q: %v", deadline, err)
-	}
-	logger.Infof("starting backfill (retention=%s, deadline=%s, serve-after=%t)", retention, deadline, serveAfter)
-	elapsed, lo, hi, daemon, err := runBackfill(ctx, dl, binaryPath, cfgPath, serveAfter)
+	logger.Infof("starting backfill (retention=%s, deadline=%s, serve-after=%t)", retention, cfg.Deadline, cfg.ServeAfter)
+	elapsed, lo, hi, daemon, err := runBackfill(ctx, cfg.Deadline, binaryPath, cfgPath, cfg.ServeAfter)
 	if err != nil {
 		return bail("%v", err)
 	}
@@ -98,17 +96,17 @@ func instantiate(ctx context.Context) error {
 		defer daemon.Stop() // covers the bail paths below; Stop is idempotent
 	}
 	ingested := hi - lo + 1
-	if ingested+ledgerThreshold < want {
+	if ingested+ledgerThreshold < cfg.Retention {
 		return bail("backfill reported complete but ingested %d of %s ledgers", ingested, retention)
 	}
 	logger.Infof("backfill complete: %d ledgers [%d -> %d] in %s", ingested, lo, hi, elapsed.Round(time.Second))
 
-	md := renderMarkdown(targetSHA, retention, lo, hi, ingested, elapsed)
-	if err := os.WriteFile(resultsFile, []byte(md), 0o644); err != nil {
+	md := renderMarkdown(cfg.TargetSHA, retention, lo, hi, ingested, elapsed)
+	if err := os.WriteFile(cfg.ResultsFile, []byte(md), 0o644); err != nil {
 		return bail("writing results: %v", err)
 	}
 	if err := harness.PublishResult(
-		ctx, fetch.Client, bucket, resultKey, "ok", runID, targetSHA, resultsFile, ""); err != nil {
+		ctx, fetch.Client, cfg.Bucket, cfg.ResultKey, "ok", cfg.RunID, cfg.TargetSHA, cfg.ResultsFile, ""); err != nil {
 		return bail("publishing result: %v", err)
 	}
 
@@ -198,10 +196,7 @@ func (d *daemonHandle) Stop() {
 }
 
 // runBackfill launches the daemon and streams its output (teeing to the box log)
-// until the backfill-complete line fires, recording the wall-clock. Without
-// keepAlive the daemon is stopped there, before it starts live ingestion; with
-// keepAlive it is left running (catchup + live ingestion, output still teed)
-// and the returned handle owns stopping it.
+// until the backfill-complete line fires, recording the wall-clock.
 func runBackfill(
 	ctx context.Context, deadline time.Duration, binary, cfgPath string, keepAlive bool,
 ) (time.Duration, int, int, *daemonHandle, error) {

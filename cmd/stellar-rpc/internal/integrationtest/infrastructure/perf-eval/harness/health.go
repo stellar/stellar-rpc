@@ -10,8 +10,7 @@ import (
 )
 
 // AwaitHealthy polls url's getHealth every interval until the RPC reports
-// healthy, returning the winning response. Transport errors (server not up
-// yet) and unhealthy verdicts both count as "not yet"; ctx bounds the wait.
+// healthy, returning the winning response. ctx bounds the wait.
 func AwaitHealthy(ctx context.Context, url string, interval time.Duration) (protocol.GetHealthResponse, error) {
 	client := rpcclient.NewClient(url, nil)
 	defer client.Close()

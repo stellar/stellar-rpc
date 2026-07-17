@@ -94,8 +94,7 @@ jobs:
       leg_script: ${{ matrix.leg.script }}
       budget_minutes: ${{ matrix.leg.budget }}
 
-  # Chained pair, serving side: a pass keeps this box's RPC serving for the
-  # blaster leg.
+  # Chained pair, serving side (keep box's RPC serving for the blaster leg).
   backfill:
     name: Backfill ingestion
     needs: plan
@@ -110,7 +109,7 @@ jobs:
       extra_env: |
         export SERVE_AFTER_BACKFILL=true
 
-  # Chained pair, driving side: starts once backfill's leg passes (its box then
+  # Chained pair, blasting side: starts once backfill's leg passes (its box then
   # enters catchup), probes the handed-off address until healthy, then blasts.
   blaster:
     name: Endpoint load test

@@ -9,7 +9,6 @@
 //	S3Fetcher      on-box: streams (and sha-verifies) corpus objects from S3.
 //	PublishResult  on-box: writes the ok/fail result object the gatherer reads.
 //	RunStreaming   on-box: runs a child, streaming output with a bounded tail.
-//	AwaitHealthy   on-box: polls an RPC's getHealth until it reports healthy.
 //
 // Leg-specific work (which corpus to fetch, which task to run) lives in each
 // leg's own on-box runner command; Gather is its own command (perf-eval/gather)
@@ -20,7 +19,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -53,54 +51,6 @@ func Env(key, def string) string {
 	return def
 }
 
-// LegDeadline returns the instant a box-side runner should bail by: the leg
-// budget (BUDGET_MINUTES from the user-data preamble) after box boot, minus
-// margin. ok is false when BUDGET_MINUTES is unset.
-func LegDeadline(margin time.Duration) (time.Time, bool) {
-	mins, err := strconv.Atoi(os.Getenv("BUDGET_MINUTES"))
-	if err != nil || mins <= 0 {
-		return time.Time{}, false
-	}
-	up, err := os.ReadFile("/proc/uptime")
-	if err != nil {
-		return time.Time{}, false
-	}
-	var uptimeSecs float64
-	if _, err := fmt.Sscanf(string(up), "%f", &uptimeSecs); err != nil {
-		return time.Time{}, false
-	}
-	boot := time.Now().Add(-time.Duration(uptimeSecs * float64(time.Second)))
-	return boot.Add(time.Duration(mins)*time.Minute - margin), true
-}
-
-// DurationEnv parses key as a duration, keeping def on absence or garbage.
-func DurationEnv(key string, def time.Duration) time.Duration {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		logger.Warnf("invalid %s %q; using %s", key, v, def)
-		return def
-	}
-	return d
-}
-
-// Int64Env parses key as an int64, keeping def on absence or garbage.
-func Int64Env(key string, def int64) int64 {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil {
-		logger.Warnf("invalid %s %q; using %d", key, v, def)
-		return def
-	}
-	return n
-}
-
 // RequireEnv returns the values of keys in order, erroring with every unset one.
 func RequireEnv(keys ...string) ([]string, error) {
 	vals := make([]string, len(keys))
@@ -114,6 +64,24 @@ func RequireEnv(keys ...string) ([]string, error) {
 		return nil, fmt.Errorf("missing required env: %s", strings.Join(missing, ", "))
 	}
 	return vals, nil
+}
+
+// BootDeadline returns the instant a box-side runner should bail by: budget
+// minutes after box boot, minus margin. ok is false when the budget is unset.
+func BootDeadline(budgetMinutes int, margin time.Duration) (time.Time, bool) {
+	if budgetMinutes <= 0 {
+		return time.Time{}, false
+	}
+	up, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		return time.Time{}, false
+	}
+	var uptimeSecs float64
+	if _, err := fmt.Sscanf(string(up), "%f", &uptimeSecs); err != nil {
+		return time.Time{}, false
+	}
+	boot := time.Now().Add(-time.Duration(uptimeSecs * float64(time.Second)))
+	return boot.Add(time.Duration(budgetMinutes)*time.Minute - margin), true
 }
 
 // appendOutputs appends lines to the GitHub Actions step-output file.

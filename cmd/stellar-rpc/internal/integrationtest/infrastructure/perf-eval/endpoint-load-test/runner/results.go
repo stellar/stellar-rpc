@@ -22,8 +22,7 @@ type endpointStats struct {
 	P999      float64
 }
 
-// summarize distills blaster's results JSON into per-endpoint rows, sorted by
-// endpoint name (blaster's run order).
+// summarize turns blaster's results JSON into per-endpoint rows.
 func summarize(data []byte) ([]endpointStats, error) {
 	var res struct {
 		//nolint:tagliatelle // external schema: blaster emits snake_case
