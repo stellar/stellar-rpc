@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -104,9 +105,13 @@ func instantiate(ctx context.Context) error {
 		return bail("reading benchstat output: %v", err)
 	}
 
-	uploadRawLogs(ctx, s3Client, env["BUCKET"], env["RESULT_KEY"],
+	uploaded := uploadRawLogs(ctx, s3Client, env["BUCKET"], env["RESULT_KEY"],
 		map[string]string{"baseline.txt": baselineOut, "candidate.txt": candidateOut, "benchstat.txt": benchstatOut})
 
+	var rawLogsPrefix string
+	if len(uploaded) > 0 {
+		rawLogsPrefix = "s3://" + env["BUCKET"] + "/" + path.Dir(env["RESULT_KEY"]) + "/"
+	}
 	report := benchReport{
 		BaselineRef:    baselineRef,
 		BaselineSHA:    baselineSHA,
@@ -115,7 +120,8 @@ func instantiate(ctx context.Context) error {
 		Benchstat:      string(benchstat),
 		BaselineFails:  baselineFails,
 		CandidateFails: candidateFails,
-		RawLogsPrefix:  "s3://" + env["BUCKET"] + "/" + path.Dir(env["RESULT_KEY"]) + "/",
+		RawLogsPrefix:  rawLogsPrefix,
+		RawLogs:        uploaded,
 	}
 	if err := os.WriteFile(env["RESULTS_FILE"], []byte(renderMarkdown(report)), 0o644); err != nil {
 		return bail("writing results markdown: %v", err)
@@ -218,11 +224,15 @@ func runBenchstat(ctx context.Context, baselineOut, candidateOut, outFile string
 }
 
 // uploadRawLogs best-effort copies the raw bench outputs next to the result
-// object, so the comment can stay a summary.
-func uploadRawLogs(ctx context.Context, client *s3.Client, bucket, resultKey string, files map[string]string) {
+// object, so the comment can stay a summary. Returns the names of the files
+// that actually landed sorted for a stable comment.
+func uploadRawLogs(
+	ctx context.Context, client *s3.Client, bucket, resultKey string, files map[string]string,
+) []string {
 	if resultKey == "" {
-		return
+		return nil
 	}
+	var uploaded []string
 	prefix := path.Dir(resultKey)
 	for name, p := range files {
 		body, err := os.ReadFile(p)
@@ -238,8 +248,12 @@ func uploadRawLogs(ctx context.Context, client *s3.Client, bucket, resultKey str
 			ContentType: aws.String("text/plain"),
 		}); err != nil {
 			logger.Warnf("uploading s3://%s/%s: %v", bucket, key, err)
+			continue
 		}
+		uploaded = append(uploaded, name)
 	}
+	sort.Strings(uploaded)
+	return uploaded
 }
 
 // benchReport is everything the comparison markdown is rendered from.
@@ -251,7 +265,8 @@ type benchReport struct {
 	BaselineFails  []string `json:"baselineFails,omitempty"`  // roster packages whose baseline bench run failed
 	CandidateFails []string `json:"candidateFails,omitempty"` // roster packages whose candidate bench run failed
 	Benchstat      string   `json:"-"`
-	RawLogsPrefix  string   `json:"-"` // s3:// prefix holding the raw logs, "" on local runs
+	RawLogsPrefix  string   `json:"-"` // s3:// prefix holding the raw logs, "" when none uploaded
+	RawLogs        []string `json:"-"` // names of the raw logs that actually uploaded
 }
 
 // renderMarkdown renders the leg's comment section: the refs compared + flags
@@ -269,8 +284,8 @@ func renderMarkdown(r benchReport) string {
 	}
 	fmt.Fprintf(&b, "\n<details>\n<summary>benchstat: baseline vs candidate</summary>\n\n```\n%s\n```\n\n</details>\n",
 		strings.TrimRight(r.Benchstat, "\n"))
-	if r.RawLogsPrefix != "" {
-		fmt.Fprintf(&b, "\nRaw benchmark logs: `%s`\n", r.RawLogsPrefix)
+	if len(r.RawLogs) > 0 {
+		fmt.Fprintf(&b, "\nRaw benchmark logs (`%s`): %s\n", r.RawLogsPrefix, strings.Join(r.RawLogs, ", "))
 	}
 	return b.String()
 }

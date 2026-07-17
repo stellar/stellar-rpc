@@ -11,7 +11,7 @@ defaults:
 
 on:
   push:
-    branches: [release/**]
+    branches: [release/**, go-bench-test]
   workflow_dispatch:
     inputs:
       target_ref:
