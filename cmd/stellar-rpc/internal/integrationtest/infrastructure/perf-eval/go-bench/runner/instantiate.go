@@ -23,21 +23,9 @@ import (
 
 const legTitle = "Go endpoint benchmarks"
 
-// auditedBenches is the roster of benches for this test (excludes benchmarks
-// that are integration tests).
-var auditedBenches = []struct {
-	pkg     string
-	benches []string
-}{
-	{"cmd/stellar-rpc/internal/methods", []string{
-		"BenchmarkGetLedgers", "BenchmarkGetEventsTopicFilters", "BenchmarkGetEvents",
-		"BenchmarkJSONTransactions", "BenchmarkGetProtocolVersion",
-	}},
-	{"cmd/stellar-rpc/internal/preflight", []string{"BenchmarkGetPreflight"}},
-	{"cmd/stellar-rpc/internal/feewindow", []string{"BenchmarkComputeFeeDistribution"}},
-	{"cmd/stellar-rpc/internal/db", []string{
-		"BenchmarkGetLedgerRange", "BenchmarkBatchGetLedgers", "BenchmarkTransactionFetch",
-	}},
+// benchDenylist is the set of benchmarks to exclude from the suite.
+var benchDenylist = []string{
+	"BenchmarkGetLedgerEntries", // is an integration test
 }
 
 // instantiate is the instance half after the bootstrap, which runs the benches
@@ -176,35 +164,42 @@ func checkoutBaseline(ctx context.Context, dir, repo, ref string) (string, error
 	return strings.TrimSpace(string(out)), nil
 }
 
-// runSuite runs the audited benchmarks of each roster package in dir with
-// identical flags, teeing each package's stdout to outFile while streaming to
-// the box log. Returns the packages that failed.
+// runSuite runs every benchmark in the module in dir except benchDenylist.
+// Returns the packages go test reported as failed (empty on success).
 func runSuite(ctx context.Context, dir, outFile string, count int) []string {
-	var failed []string
-	for _, entry := range auditedBenches {
-		// Open per iteration (append) so a defer isn't held across the whole loop.
-		f, err := os.OpenFile(outFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-		if err != nil {
-			logger.Warnf("opening %s for %s: %v", outFile, entry.pkg, err)
-			failed = append(failed, entry.pkg)
-			continue
+	f, err := os.OpenFile(outFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		logger.Warnf("opening %s: %v", outFile, err)
+		return []string{"<suite>"}
+	}
+	defer f.Close()
+	var buf bytes.Buffer
+	cmd := exec.CommandContext(ctx, "go", "test", "-run", "^$", "-bench", ".",
+		"-skip", "^("+strings.Join(benchDenylist, "|")+")$",
+		"-benchmem", "-count", strconv.Itoa(count), "-timeout", "30m",
+		"./...")
+	cmd.Dir = dir
+	cmd.Stdout, cmd.Stderr = io.MultiWriter(f, &buf, os.Stderr), os.Stderr
+	if err := cmd.Run(); err != nil {
+		failed := parseFailedPkgs(buf.String())
+		if len(failed) == 0 {
+			failed = []string{"<suite>"}
 		}
-		cmd := exec.CommandContext(ctx, "go",
-			"test", "-run", "^$",
-			"-bench", "^("+strings.Join(entry.benches, "|")+")$",
-			"-benchmem", "-count", strconv.Itoa(count), "-timeout", "30m",
-			"./"+entry.pkg+"/")
-		cmd.Dir = dir
-		cmd.Stdout = io.MultiWriter(f, os.Stderr)
-		cmd.Stderr = os.Stderr
-		err = cmd.Run()
-		f.Close()
-		if err != nil {
-			logger.Warnf("bench run failed for %s in %s: %v", entry.pkg, dir, err)
-			failed = append(failed, entry.pkg)
+		logger.Warnf("bench run failed in %s: %v (packages: %s)", dir, err, strings.Join(failed, ", "))
+		return failed
+	}
+	return nil
+}
+
+// parseFailedPkgs allows us to see which packages failed in the bench suite.
+func parseFailedPkgs(out string) []string {
+	var pkgs []string
+	for line := range strings.SplitSeq(out, "\n") {
+		if fields := strings.Fields(line); len(fields) >= 2 && fields[0] == "FAIL" {
+			pkgs = append(pkgs, fields[1])
 		}
 	}
-	return failed
+	return pkgs
 }
 
 // runBenchstat compares the two bench outputs into outFile, teeing benchstat's
@@ -218,8 +213,7 @@ func runBenchstat(ctx context.Context, baselineOut, candidateOut, outFile string
 	cmd := exec.CommandContext(ctx, "go", "run", "golang.org/x/perf/cmd/benchstat@latest",
 		filepath.Base(baselineOut), filepath.Base(candidateOut))
 	cmd.Dir = filepath.Dir(baselineOut)
-	cmd.Stdout = io.MultiWriter(f, os.Stderr)
-	cmd.Stderr = os.Stderr
+	cmd.Stdout, cmd.Stderr = io.MultiWriter(f, os.Stderr), os.Stderr
 	return cmd.Run()
 }
 
@@ -262,8 +256,8 @@ type benchReport struct {
 	BaselineSHA    string   `json:"baselineSha"`
 	TargetSHA      string   `json:"targetSha"`
 	Count          int      `json:"count"`
-	BaselineFails  []string `json:"baselineFails,omitempty"`  // roster packages whose baseline bench run failed
-	CandidateFails []string `json:"candidateFails,omitempty"` // roster packages whose candidate bench run failed
+	BaselineFails  []string `json:"baselineFails,omitempty"`  // packages whose baseline bench run failed
+	CandidateFails []string `json:"candidateFails,omitempty"` // packages whose candidate bench run failed
 	Benchstat      string   `json:"-"`
 	RawLogsPrefix  string   `json:"-"` // s3:// prefix holding the raw logs, "" when none uploaded
 	RawLogs        []string `json:"-"` // names of the raw logs that actually uploaded
