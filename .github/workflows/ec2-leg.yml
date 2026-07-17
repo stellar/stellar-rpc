@@ -128,7 +128,8 @@ jobs:
 
       # Harness (gather, bootstrap-common.sh, leg script) and the benchmarked
       # code come from one SHA: target_ref is checked out here and the box rebuilds
-      # it.
+      # it. Tradeoff: an ad-hoc dispatch against an old ref also runs that ref's
+      # harness.
       - name: Checkout target ref
         uses: actions/checkout@v4
         with:
@@ -149,6 +150,9 @@ jobs:
           role-duration-seconds: ${{ steps.deadlines.outputs.role_seconds }}
 
       - name: Render user-data
+        # The scripts ship verbatim; parameters travel in a preamble so the bytes
+        # that run on the box match the bytes in git. Order is:
+        #   preamble exports -> bootstrap-common.sh -> the leg run script.
         env:
           EXTRA_ENV: ${{ inputs.extra_env }}
         run: |
@@ -218,7 +222,7 @@ jobs:
           exit 1
 
       # Polls S3 for the result object and relays found/passed as step outputs
-      # for the gate below.
+      # for the fail gate below.
       # RUN_ID must match the box preamble's: gather skips result objects from
       # other attempts (a re-run shares RESULT_KEY with its predecessors).
       - name: Poll for results

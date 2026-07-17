@@ -19,6 +19,11 @@ on:
         required: false
         type: string
         default: ''
+      pr_number:
+        description: 'PR to report results to (default: inferred from the tested branch)'
+        required: false
+        type: string
+        default: ''
 
 # Keyed on the release ref so a new push to the same branch supersedes an
 # in-flight test. Each leg's self-terminate ceiling backstops its box.
@@ -51,10 +56,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REF: ${{ inputs.target_ref || github.ref_name }}
+          PR: ${{ inputs.pr_number }}
         run: |
           SHA="$(git rev-parse HEAD)"
-          PR="$(gh pr list --repo "${{ github.repository }}" --state open \
-                  --head "$REF" --json number --jq '.[0].number // ""' 2>/dev/null || true)"
+          if [ -z "$PR" ]; then
+            PR="$(gh pr list --repo "${{ github.repository }}" --state open \
+                    --head "$REF" --json number --jq '.[0].number // ""' 2>/dev/null || true)"
+          fi
           # One roster (comment order) drives both the report job and the
           # matrix fan-out: entries carrying a script ride the matrix; the
           # chained backfill + blaster pair runs as explicit jobs below.

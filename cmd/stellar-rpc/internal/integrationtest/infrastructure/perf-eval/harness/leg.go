@@ -59,18 +59,3 @@ func (l *Leg) Publish(ctx context.Context, benchPath string) error {
 	return PublishResult(ctx, l.Fetch.Client, l.Bucket, l.ResultKey, "ok",
 		l.RunID, l.TargetSHA, l.ResultsFile, benchPath)
 }
-
-// corePath is where every leg installs the pre-built stellar-core cached in S3.
-const corePath = "/usr/local/bin/stellar-core"
-
-// FetchStellarCore streams the cached stellar-core build from S3 into place
-// and returns its path.
-func (f *S3Fetcher) FetchStellarCore(ctx context.Context) (string, error) {
-	if err := f.FetchVerified(ctx, "core/stellar-core.zst", corePath, true, "stellar-core"); err != nil {
-		return "", err
-	}
-	if err := os.Chmod(corePath, 0o755); err != nil {
-		return "", fmt.Errorf("chmod stellar-core: %w", err)
-	}
-	return corePath, nil
-}
