@@ -1,7 +1,7 @@
 # All stages use ubuntu:24.04 — same glibc everywhere, so shared
 # libraries built in one stage work in any other. zstd and RocksDB
 # are built from source (not apt) to pin versions. Go and Rust come
-# from upstream tarballs since there's no golang:1.25-noble image.
+# from upstream tarballs since there's no golang:1.26-noble image.
 
 # --- Stage 1: zstd 1.5.7 (ubuntu 24.04 ships 1.5.5) ---
 FROM ubuntu:24.04 AS zstd-build
@@ -58,7 +58,7 @@ RUN cmake -S /tmp/rocksdb-${ROCKSDB_VERSION} -B /tmp/rocksdb-build \
 
 # --- Stage 3: Build stellar-rpc ---
 FROM ubuntu:24.04 AS rpc-build
-ARG GO_VERSION=1.25.8
+ARG GO_VERSION=1.26.5
 ARG RUST_TOOLCHAIN_VERSION=stable
 ARG REPOSITORY_VERSION
 
