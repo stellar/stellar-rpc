@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -165,6 +166,7 @@ func checkoutBaseline(ctx context.Context, dir, repo, ref string) (string, error
 }
 
 // runSuite runs every benchmark in the module in dir except benchDenylist.
+// Only stderr (tool/compile errors, low-volume) streams to the log.
 // Returns the packages go test reported as failed (empty on success).
 func runSuite(ctx context.Context, dir, outFile string, count int) []string {
 	f, err := os.OpenFile(outFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
@@ -173,15 +175,14 @@ func runSuite(ctx context.Context, dir, outFile string, count int) []string {
 		return []string{"<suite>"}
 	}
 	defer f.Close()
-	var buf bytes.Buffer
 	cmd := exec.CommandContext(ctx, "go", "test", "-run", "^$", "-bench", ".",
 		"-skip", "^("+strings.Join(benchDenylist, "|")+")$",
 		"-benchmem", "-count", strconv.Itoa(count), "-timeout", "30m",
 		"./...")
 	cmd.Dir = dir
-	cmd.Stdout, cmd.Stderr = io.MultiWriter(f, &buf, os.Stderr), os.Stderr
+	cmd.Stdout, cmd.Stderr = f, os.Stderr
 	if err := cmd.Run(); err != nil {
-		failed := parseFailedPkgs(buf.String())
+		failed := parseFailedPkgs(outFile)
 		if len(failed) == 0 {
 			failed = []string{"<suite>"}
 		}
@@ -191,11 +192,19 @@ func runSuite(ctx context.Context, dir, outFile string, count int) []string {
 	return nil
 }
 
-// parseFailedPkgs allows us to see which packages failed in the bench suite.
-func parseFailedPkgs(out string) []string {
+// parseFailedPkgs scans a bench output file for go test's FAIL lines.
+func parseFailedPkgs(outFile string) []string {
+	f, err := os.Open(outFile)
+	if err != nil {
+		logger.Warnf("reading %s for FAIL lines: %v", outFile, err)
+		return nil
+	}
+	defer f.Close()
 	var pkgs []string
-	for line := range strings.SplitSeq(out, "\n") {
-		if fields := strings.Fields(line); len(fields) >= 2 && fields[0] == "FAIL" {
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		if fields := strings.Fields(sc.Text()); len(fields) >= 2 && fields[0] == "FAIL" {
 			pkgs = append(pkgs, fields[1])
 		}
 	}
