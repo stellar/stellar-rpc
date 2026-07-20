@@ -34,7 +34,7 @@ type blasterEnv struct {
 	CatchupTimeout time.Duration `env:"CATCHUP_TIMEOUT" envDefault:"60m"`
 	BudgetMinutes  int           `env:"BUDGET_MINUTES"`
 	BlasterRepo    string        `env:"BLASTER_REPO"    envDefault:"stellar/stellar-rpc-blaster"`
-	BlasterRef     string        `env:"BLASTER_REF"     envDefault:"73c0b3fac3251b62b70a0497ed0acd2430a1cfd4"`
+	BlasterRef     string        `env:"BLASTER_REF"     envDefault:"dev"`
 }
 
 // instantiate is the instance's blast task: it receives the chained peer's serving
