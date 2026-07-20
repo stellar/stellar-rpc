@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	_ "embed"
+	"fmt"
 	"os"
 	"path"
 	"runtime"
@@ -210,7 +211,13 @@ func (m inMemoryLedgerEntryGetter) Done() error {
 	return nil
 }
 
-func getPreflightParameters(t testing.TB) Parameters {
+// supportedProtocolVersions are the protocol versions the bundled soroban hosts
+// can simulate: the previous host (prev) handles protocol 26 and the current
+// host (curr) handles protocol 27. Preflight switches between them at runtime
+// based on the ledger's protocol version, so the tests exercise both paths.
+var supportedProtocolVersions = []uint32{26, 27}
+
+func getPreflightParameters(t testing.TB, protocolVersion uint32) Parameters {
 	ledgerEntryGetter, err := newInMemoryLedgerEntryGetter(mockLedgerEntries, latestSimulateTransactionLedgerSeq)
 	require.NoError(t, err)
 	argSymbol := xdr.ScSymbol("world")
@@ -242,49 +249,91 @@ func getPreflightParameters(t testing.TB) Parameters {
 		NetworkPassphrase: "foo",
 		LedgerEntryGetter: ledgerEntryGetter,
 		BucketListSize:    200,
-		// TODO: test with multiple protocol versions
-		ProtocolVersion: 25,
-		AuthMode:        protocol.AuthModeRecord,
+		LedgerTime:        1_700_000_123,
+		ProtocolVersion:   protocolVersion,
+		AuthMode:          protocol.AuthModeRecord,
 	}
 	return params
 }
 
+func TestGetLedgerInfoUsesProvidedLedgerTime(t *testing.T) {
+	params := Parameters{
+		NetworkPassphrase: "Standalone Network ; February 2017",
+		LedgerSeq:         42,
+		LedgerTime:        1_700_000_123,
+		ProtocolVersion:   25,
+		BucketListSize:    200,
+	}
+
+	ledgerInfo := getLedgerInfo(params)
+	defer freeLedgerInfo(ledgerInfo)
+
+	require.EqualValues(t, params.LedgerTime, ledgerInfo.timestamp)
+	require.EqualValues(t, params.LedgerSeq, ledgerInfo.sequence_number)
+	require.EqualValues(t, params.ProtocolVersion, ledgerInfo.protocol_version)
+	require.EqualValues(t, params.BucketListSize, ledgerInfo.bucket_list_size)
+}
+
 func TestGetPreflight(t *testing.T) {
-	// in-memory
-	params := getPreflightParameters(t)
-	result, err := GetPreflight(t.Context(), params)
-	require.NoError(t, err)
-	require.Empty(t, result.Error)
+	for _, protocolVersion := range supportedProtocolVersions {
+		t.Run(fmt.Sprintf("protocol %d", protocolVersion), func(t *testing.T) {
+			// in-memory
+			params := getPreflightParameters(t, protocolVersion)
+			result, err := GetPreflight(t.Context(), params)
+			require.NoError(t, err)
+			require.Empty(t, result.Error)
+		})
+	}
 }
 
 func TestGetPreflightDebug(t *testing.T) {
-	params := getPreflightParameters(t)
-	// Cause an error: non-existent function
-	params.OpBody.InvokeHostFunctionOp.HostFunction.InvokeContract.FunctionName = "bar"
+	for _, protocolVersion := range supportedProtocolVersions {
+		t.Run(fmt.Sprintf("protocol %d", protocolVersion), func(t *testing.T) {
+			params := getPreflightParameters(t, protocolVersion)
+			// Cause an error: non-existent function
+			params.OpBody.InvokeHostFunctionOp.HostFunction.InvokeContract.FunctionName = "bar"
 
-	resultWithDebug, err := GetPreflight(t.Context(), params)
-	require.NoError(t, err)
-	require.NotEmpty(t, resultWithDebug.Error)
-	require.Contains(t, resultWithDebug.Error, "Event log")
-	require.Contains(t, resultWithDebug.Error, "Diagnostic Event")
-	require.NotContains(t, resultWithDebug.Error, "DebugInfo not available")
+			resultWithDebug, err := GetPreflight(t.Context(), params)
+			require.NoError(t, err)
+			require.NotEmpty(t, resultWithDebug.Error)
+			require.Contains(t, resultWithDebug.Error, "Event log")
+			require.Contains(t, resultWithDebug.Error, "Diagnostic Event")
+			require.NotContains(t, resultWithDebug.Error, "DebugInfo not available")
 
-	// Disable debug
-	params.EnableDebug = false
-	resultWithoutDebug, err := GetPreflight(t.Context(), params)
-	require.NoError(t, err)
-	require.NotEmpty(t, resultWithoutDebug.Error)
-	require.NotContains(t, resultWithoutDebug.Error, "Event log")
-	require.NotContains(t, resultWithoutDebug.Error, "Diagnostic Event")
-	require.Contains(t, resultWithoutDebug.Error, "DebugInfo not available")
+			// Disable debug
+			params.EnableDebug = false
+			resultWithoutDebug, err := GetPreflight(t.Context(), params)
+			require.NoError(t, err)
+			require.NotEmpty(t, resultWithoutDebug.Error)
+			require.NotContains(t, resultWithoutDebug.Error, "Event log")
+			require.NotContains(t, resultWithoutDebug.Error, "Diagnostic Event")
+			require.Contains(t, resultWithoutDebug.Error, "DebugInfo not available")
+		})
+	}
 }
 
 func BenchmarkGetPreflight(b *testing.B) {
-	params := getPreflightParameters(b)
+	params := getPreflightParameters(b, supportedProtocolVersions[len(supportedProtocolVersions)-1])
 
 	for b.Loop() {
 		result, err := GetPreflight(b.Context(), params)
 		require.NoError(b, err)
 		require.Empty(b, result.Error)
 	}
+}
+
+// TestGetPreflightUseUpgradedAuthSilentlyIgnoredOnPrevProtocol locks in the agreed
+// behavior that requesting v2 (AddressV2) credentials on a protocol served by
+// the prev soroban-env host -- which predates v2 credentials -- is silently
+// ignored rather than rejected: v1 behavior is used and no error is returned.
+// It runs at protocol 26, which routes to the prev host. (Asserting the
+// credential version itself requires an auth-recording contract on the curr
+// host; that is covered by the integration tests.)
+func TestGetPreflightUseUpgradedAuthSilentlyIgnoredOnPrevProtocol(t *testing.T) {
+	const prevHostProtocol = 26
+	params := getPreflightParameters(t, prevHostProtocol)
+	params.UseUpgradedAuth = true
+	result, err := GetPreflight(t.Context(), params)
+	require.NoError(t, err)
+	require.Empty(t, result.Error)
 }

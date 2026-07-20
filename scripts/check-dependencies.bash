@@ -58,7 +58,16 @@ do
     else
       # revision is a crate version
       CARGO_SRC_BASE_DIR=$(realpath ${CARGO_HOME:-$HOME/.cargo}/registry/src/index*)
-      STELLAR_XDR_REVISION_FROM_RUST=$(cat "${CARGO_SRC_BASE_DIR}/stellar-xdr-${RS_STELLAR_XDR_REVISION}/xdr/curr-version")
+      CRATE_DIR="${CARGO_SRC_BASE_DIR}/stellar-xdr-${RS_STELLAR_XDR_REVISION}"
+      # The XDR definitions are a pinned commit of stellar/stellar-xdr. Up to
+      # stellar-xdr v26 that commit lived in xdr/curr-version; from v27 the xdr
+      # definitions became a git submodule and the commit is recorded in the
+      # top-level xdr-version file instead.
+      if [ -f "${CRATE_DIR}/xdr-version" ]; then
+        STELLAR_XDR_REVISION_FROM_RUST=$(cat "${CRATE_DIR}/xdr-version")
+      else
+        STELLAR_XDR_REVISION_FROM_RUST=$(cat "${CRATE_DIR}/xdr/curr-version")
+      fi
     fi
   else
     echo "The project depends on multiple versions of the Rust rs-stellar-xdr@$PROTO library"

@@ -6,9 +6,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -29,6 +32,7 @@ import (
 
 	client "github.com/stellar/go-stellar-sdk/clients/rpcclient"
 	"github.com/stellar/go-stellar-sdk/clients/stellarcore"
+	"github.com/stellar/go-stellar-sdk/historyarchive"
 	"github.com/stellar/go-stellar-sdk/keypair"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	proto "github.com/stellar/go-stellar-sdk/protocols/stellarcore"
@@ -42,7 +46,7 @@ import (
 
 const (
 	StandaloneNetworkPassphrase = "Standalone Network ; February 2017"
-	MaxSupportedProtocolVersion = 24
+	MaxSupportedProtocolVersion = 27
 	FriendbotURL                = "http://localhost:8000/friendbot"
 	// Needed when Core is run with ARTIFICIALLY_ACCELERATE_TIME_FOR_TESTING=true
 	checkpointFrequency               = 8
@@ -73,7 +77,8 @@ type TestOnlyRPCConfig struct {
 }
 
 type TestConfig struct {
-	ProtocolVersion int32
+	ProtocolVersion   int32
+	NetworkPassphrase string
 	// Run a previously released version of RPC (in a container) instead of the current version
 	UseReleasedRPCVersion string
 	// Use/Reuse a SQLite file path
@@ -94,6 +99,14 @@ type TestConfig struct {
 	DelayDaemonForLedgerN  int  // don't start daemon until ledger N reached by core
 
 	DatastoreConfigFunc func(*config.Config)
+
+	// LoadTest mode swaps the daemon's ingestion from captive-core to a synthetic
+	// ledger stream and skips all the captive-core/history-archive scaffolding.
+	IngestLoadTest config.IngestLoadTestConfig
+
+	// HistoryRetentionWindow overrides the daemon's retention window. Zero
+	// uses the harness default (config.OneDayOfLedgers).
+	HistoryRetentionWindow uint32
 }
 
 type TestCorePorts struct {
@@ -120,6 +133,9 @@ type Test struct {
 
 	protocolVersion int32
 
+	historyRetentionWindow uint32
+	networkPassphrase      string
+
 	rpcConfigFilesDir string
 
 	sqlitePath             string
@@ -143,6 +159,9 @@ type Test struct {
 	ignoreLedgerCloseTimes bool
 
 	datastoreConfigFunc func(*config.Config)
+
+	ingestLoadTest config.IngestLoadTestConfig
+	fakeArchiveURL string
 }
 
 //nolint:cyclop
@@ -152,6 +171,7 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 	}
 	i := &Test{t: t}
 
+	i.networkPassphrase = StandaloneNetworkPassphrase
 	i.masterAccount = &txnbuild.SimpleAccount{
 		AccountID: i.MasterKey().Address(),
 		Sequence:  0,
@@ -167,6 +187,16 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		parallel = !cfg.NoParallel
 		i.datastoreConfigFunc = cfg.DatastoreConfigFunc
 		i.ignoreLedgerCloseTimes = cfg.IgnoreLedgerCloseTimes
+		i.ingestLoadTest = cfg.IngestLoadTest
+		i.historyRetentionWindow = cfg.HistoryRetentionWindow
+		if i.ingestLoadTest.Enabled() {
+			// apply-load ledgers have close time of 1970-01-01
+			i.ignoreLedgerCloseTimes = true
+		}
+
+		if cfg.NetworkPassphrase != "" {
+			i.networkPassphrase = cfg.NetworkPassphrase
+		}
 
 		if cfg.OnlyRPC != nil {
 			i.onlyRPC = true
@@ -210,10 +240,15 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 	i.rpcConfigFilesDir = i.t.TempDir()
 
 	i.prepareShutdownHandlers()
+	if i.ingestLoadTest.Enabled() {
+		i.fakeArchiveURL = i.startFakeHistoryArchive()
+	}
 	if i.areThereContainers() {
 		i.spawnContainers()
 	}
-	if !i.onlyRPC {
+
+	// skipped in load test mode because it doesn't use a live core
+	if !i.onlyRPC && !i.ingestLoadTest.Enabled() {
 		i.coreClient = &stellarcore.Client{URL: "http://" + i.testPorts.CoreHTTPHostPort}
 		i.waitForCore()
 		i.waitForCheckpoint()
@@ -231,12 +266,40 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.waitForRPC()
 	}
 
-	i.upgradeLimits() // upgrades need preflight so need RPC up
+	if !i.ingestLoadTest.Enabled() {
+		i.upgradeLimits() // upgrades need preflight so need RPC up
+	}
 	return i
 }
 
+// startFakeHistoryArchive serves a minimal .well-known/stellar-history.json.
+// Ingestion consults it only when the DB is empty (to pick a start ledger),
+// so a constant CurrentLedger of 1 starts the synthetic stream at ledger 1;
+// non-empty DBs derive their start from the DB itself and never read this.
+func (i *Test) startFakeHistoryArchive() string {
+	i.t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/.well-known/stellar-history.json" {
+			http.NotFound(w, r)
+			return
+		}
+		body, err := json.Marshal(historyarchive.HistoryArchiveState{
+			Version:           1,
+			Server:            "stellar-rpc-loadtest-fake",
+			NetworkPassphrase: i.networkPassphrase,
+			CurrentLedger:     1,
+		})
+		require.NoError(i.t, err)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	i.t.Cleanup(srv.Close)
+	return srv.URL
+}
+
 func (i *Test) areThereContainers() bool {
-	return i.runRPCInContainer() || !i.onlyRPC
+	// Load-test mode bypasses captive-core, so it needs no containers.
+	return !i.ingestLoadTest.Enabled() && (i.runRPCInContainer() || !i.onlyRPC)
 }
 
 func (i *Test) spawnContainers() {
@@ -357,26 +420,49 @@ func (i *Test) getRPConfigForContainer() rpcConfig {
 		archiveURL:               fmt.Sprintf("http://%s:%d", inContainerCoreHostname, inContainerCoreArchivePort),
 		sqlitePath:               "/db/" + filepath.Base(i.sqlitePath),
 		captiveCoreHTTPQueryPort: i.testPorts.captiveCoreHTTPQueryPort,
+		networkPassphrase:        i.networkPassphrase,
+		logLevel:                 "debug",
+		historyRetentionWindow:   i.historyRetentionWindow,
 	}
 }
 
+// findCoreBinary returns the stellar-core binary to use:
+// STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN if set, otherwise
+// "stellar-core" from PATH.
+func findCoreBinary(t testing.TB) string {
+	if coreBinaryPath := os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN"); coreBinaryPath != "" {
+		return coreBinaryPath
+	}
+	coreBinaryPath, err := exec.LookPath("stellar-core")
+	require.NoError(t, err, "stellar-core not found in PATH and STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN unset")
+	return coreBinaryPath
+}
+
 func (i *Test) getRPConfigForDaemon() rpcConfig {
-	coreBinaryPath := os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN")
-	if coreBinaryPath == "" {
-		i.t.Fatal("missing STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN")
+	stellarCoreURL := "http://" + i.testPorts.CoreHTTPHostPort
+	archiveURL := "http://" + i.testPorts.CoreArchiveHostPort
+	logLevel := "debug"
+	if i.ingestLoadTest.Enabled() {
+		stellarCoreURL = "http://localhost:0" // unreachable + unused in load test mode, must be not empty
+		archiveURL = i.fakeArchiveURL
+		// warn makes the benchmark an "ingest-only" metric, reduces I/O noise drastically
+		logLevel = "warn"
 	}
 	return rpcConfig{
 		// Allocate port dynamically and then figure out what the port is
 		endPoint:                 "localhost:0",
 		adminEndpoint:            "localhost:0",
-		stellarCoreURL:           "http://" + i.testPorts.CoreHTTPHostPort,
-		coreBinaryPath:           coreBinaryPath,
+		stellarCoreURL:           stellarCoreURL,
+		coreBinaryPath:           findCoreBinary(i.t),
 		captiveCoreConfigPath:    path.Join(i.rpcConfigFilesDir, captiveCoreConfigFilename),
 		captiveCoreStoragePath:   i.captiveCoreStoragePath,
-		archiveURL:               "http://" + i.testPorts.CoreArchiveHostPort,
+		archiveURL:               archiveURL,
 		sqlitePath:               i.sqlitePath,
 		captiveCoreHTTPQueryPort: i.testPorts.captiveCoreHTTPQueryPort,
 		ignoreLedgerCloseTimes:   i.ignoreLedgerCloseTimes,
+		networkPassphrase:        i.networkPassphrase,
+		logLevel:                 logLevel,
+		historyRetentionWindow:   i.historyRetentionWindow,
 	}
 }
 
@@ -392,6 +478,9 @@ type rpcConfig struct {
 	archiveURL               string
 	sqlitePath               string
 	ignoreLedgerCloseTimes   bool
+	networkPassphrase        string
+	logLevel                 string
+	historyRetentionWindow   uint32
 }
 
 func (vars rpcConfig) toMap() map[string]string {
@@ -399,6 +488,10 @@ func (vars rpcConfig) toMap() map[string]string {
 	if vars.ignoreLedgerCloseTimes {
 		// If we're ignoring close times, permit absurdly high latencies
 		maxHealthyLedgerLatency = time.Duration(1<<63 - 1).String()
+	}
+	retentionWindow := strconv.Itoa(config.OneDayOfLedgers)
+	if vars.historyRetentionWindow > 0 {
+		retentionWindow = strconv.FormatUint(uint64(vars.historyRetentionWindow), 10)
 	}
 	return map[string]string{
 		"ENDPOINT":                                         vars.endPoint,
@@ -414,12 +507,12 @@ func (vars rpcConfig) toMap() map[string]string {
 		"STELLAR_CAPTIVE_CORE_HTTP_QUERY_SNAPSHOT_LEDGERS": "1",
 		"EMIT_CLASSIC_EVENTS":                              "true",
 		"FRIENDBOT_URL":                                    FriendbotURL,
-		"NETWORK_PASSPHRASE":                               StandaloneNetworkPassphrase,
+		"NETWORK_PASSPHRASE":                               vars.networkPassphrase,
 		"HISTORY_ARCHIVE_URLS":                             vars.archiveURL,
-		"LOG_LEVEL":                                        "debug",
+		"LOG_LEVEL":                                        vars.logLevel,
 		"DB_PATH":                                          vars.sqlitePath,
 		"INGESTION_TIMEOUT":                                "10m",
-		"HISTORY_RETENTION_WINDOW":                         strconv.Itoa(config.OneDayOfLedgers),
+		"HISTORY_RETENTION_WINDOW":                         retentionWindow,
 		"CHECKPOINT_FREQUENCY":                             strconv.Itoa(checkpointFrequency),
 		"MAX_HEALTHY_LEDGER_LATENCY":                       maxHealthyLedgerLatency,
 		"PREFLIGHT_ENABLE_DEBUG":                           "true",
@@ -553,6 +646,10 @@ func (i *Test) createRPCDaemon(c rpcConfig) *daemon.Daemon {
 
 	if i.datastoreConfigFunc != nil {
 		i.datastoreConfigFunc(&cfg)
+	}
+
+	if i.ingestLoadTest.Enabled() {
+		cfg.IngestLoadTest = i.ingestLoadTest
 	}
 
 	logger := supportlog.New()

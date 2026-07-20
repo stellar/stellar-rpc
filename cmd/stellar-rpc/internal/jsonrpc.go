@@ -3,7 +3,6 @@ package internal
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -99,7 +98,7 @@ func decorateHandlers(daemon interfaces.Daemon, logger *log.Entry, m handler.Map
 				}
 			}
 			requestMetric.With(label).Observe(duration.Seconds())
-			logResponse(logger, reqID, duration, label["status"], result)
+			logResponse(logger, reqID, duration, label["status"])
 			return result, err
 		})
 	}
@@ -121,7 +120,7 @@ func logRequest(logger *log.Entry, reqID string, req *jrpc2.Request) {
 	logger.Debug("starting JSONRPC request params")
 }
 
-func logResponse(logger *log.Entry, reqID string, duration time.Duration, status string, response any) {
+func logResponse(logger *log.Entry, reqID string, duration time.Duration, status string) {
 	logger = logger.WithFields(log.F{
 		"subsys":   "jsonrpc",
 		"req":      reqID,
@@ -130,15 +129,6 @@ func logResponse(logger *log.Entry, reqID string, duration time.Duration, status
 		"status":   status,
 	})
 	logger.Info("finished JSONRPC request")
-
-	if status == "ok" {
-		responseBytes, err := json.Marshal(response)
-		if err == nil {
-			// the result is useful but can be really verbose, let's only print it with debug level
-			logger = logger.WithField("result", string(responseBytes))
-			logger.Debug("finished JSONRPC request result")
-		}
-	}
 }
 
 func toSnakeCase(s string) string {
@@ -158,6 +148,9 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 	bridgeOptions := jhttp.BridgeOptions{
 		Server: &jrpc2.ServerOptions{
 			Logger: func(text string) { params.Logger.Debug(text) },
+			// Disable built-in rpc.* methods (e.g. rpc.serverInfo) that
+			// bypass the handler allowlist and request limiters.
+			DisableBuiltin: true,
 		},
 	}
 
