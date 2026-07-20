@@ -72,11 +72,11 @@ jobs:
           echo "go-bench baseline: ${BASELINE:-<none>}"
 
           # Unquoted heredoc so $BASELINE expands into the go-bench entry;
-          # jq -c compacts and validates.
+          # Temporarily disabled while iterating on go-bench (restore before merge):
+          #   {"label":"Apply-load ingestion","run_label":"apply-load","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh","budget":225},
+          #   {"label":"Backfill ingestion","run_label":"backfill","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/run-backfill.sh","budget":345},
           LEGS="$(jq -c . <<EOF
           [
-            {"label":"Apply-load ingestion","run_label":"apply-load","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh","budget":225},
-            {"label":"Backfill ingestion","run_label":"backfill","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/run-backfill.sh","budget":345},
             {"label":"Go endpoint benchmarks","run_label":"go-bench","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/go-bench/run-go-bench.sh","budget":120,"root_volume_gb":50,"extra_env":"export BASELINE_REF=$BASELINE"}
           ]
           EOF

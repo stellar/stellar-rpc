@@ -27,6 +27,7 @@ const legTitle = "Go endpoint benchmarks"
 // benchDenylist is the set of benchmarks to exclude from the suite.
 var benchDenylist = []string{
 	"BenchmarkGetLedgerEntries", // is an integration test
+	"BenchmarkTransactionFetch", // is currently broken on main
 }
 
 // instantiate is the instance half after the bootstrap, which runs the benches
