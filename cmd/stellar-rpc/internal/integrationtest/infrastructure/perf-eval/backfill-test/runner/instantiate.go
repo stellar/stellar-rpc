@@ -34,25 +34,20 @@ var backfillDoneRe = regexp.MustCompile(`Backfill process complete, ledgers \[(\
 // runs a timed backfill, then publishes the verdict.
 func instantiate(ctx context.Context) error {
 	var (
-		bucket      = harness.Env("BUCKET", "stellar-rpc-ci-load-test")
-		region      = harness.Env("REGION", "us-east-1")
-		workDir     = harness.Env("WORK_DIR", "/data")
-		resultsFile = harness.Env("RESULTS_FILE", "/tmp/results.md")
-		resultKey   = os.Getenv("RESULT_KEY")
-		targetSHA   = os.Getenv("TARGET_SHA")
-		runID       = harness.Env("RUN_ID", "manual")
+		env = harness.GetEnv()
 		// ~1 day by default for cheap test runs; the full week is 120960.
 		retention = harness.Env("HISTORY_RETENTION_WINDOW", "17280")
 		deadline  = harness.Env("BACKFILL_DEADLINE", "4h")
 
-		binaryPath = filepath.Join(workDir, "stellar-rpc-bin") // built here (the repo checkout is in WORK_DIR)
+		binaryPath = filepath.Join(env["WORK_DIR"], "stellar-rpc-bin") // built here (the repo checkout is in WORK_DIR)
 	)
 	repoRoot, err := os.Getwd()
 	if err != nil {
 		return err
 	}
 	bail := func(format string, args ...any) error {
-		return harness.BailInstance(resultsFile, "Backfill ingestion", runID, targetSHA, fmt.Sprintf(format, args...))
+		return harness.BailInstance(env["RESULTS_FILE"], "Backfill ingestion", env["RUN_ID"], env["TARGET_SHA"],
+			fmt.Sprintf(format, args...))
 	}
 
 	want, err := strconv.Atoi(retention) // used to compare against ingested ledgers below
@@ -60,11 +55,11 @@ func instantiate(ctx context.Context) error {
 		return bail("parsing retention window %q: %v", retention, err)
 	}
 
-	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(env["REGION"]))
 	if err != nil {
 		return bail("loading AWS config: %v", err)
 	}
-	fetch := &harness.S3Fetcher{Client: s3.NewFromConfig(awsCfg), Bucket: bucket}
+	fetch := &harness.S3Fetcher{Client: s3.NewFromConfig(awsCfg), Bucket: env["BUCKET"]}
 
 	if err := fetch.FetchVerified(ctx, "core/stellar-core.zst", corePath, true, "stellar-core"); err != nil {
 		return bail("%v", err)
@@ -83,12 +78,12 @@ func instantiate(ctx context.Context) error {
 	}
 
 	// fetch + write core config from SDK
-	coreCfg := filepath.Join(workDir, "captive-core-pubnet.cfg")
+	coreCfg := filepath.Join(env["WORK_DIR"], "captive-core-pubnet.cfg")
 	if err := os.WriteFile(coreCfg, ledgerbackend.PubnetDefaultConfig, 0o644); err != nil {
 		return bail("writing captive-core config: %v", err)
 	}
 
-	cfgPath, err := renderConfig(repoRoot, workDir, coreCfg, retention)
+	cfgPath, err := renderConfig(repoRoot, env["WORK_DIR"], coreCfg, retention)
 	if err != nil {
 		return bail("rendering config: %v", err)
 	}
@@ -108,12 +103,13 @@ func instantiate(ctx context.Context) error {
 	}
 	logger.Infof("backfill complete: %d ledgers [%d -> %d] in %s", ingested, lo, hi, elapsed.Round(time.Second))
 
-	md := renderMarkdown(targetSHA, retention, lo, hi, ingested, elapsed)
-	if err := os.WriteFile(resultsFile, []byte(md), 0o644); err != nil {
+	md := renderMarkdown(env["TARGET_SHA"], retention, lo, hi, ingested, elapsed)
+	if err := os.WriteFile(env["RESULTS_FILE"], []byte(md), 0o644); err != nil {
 		return bail("writing results: %v", err)
 	}
 	if err := harness.PublishResult(
-		ctx, fetch.Client, bucket, resultKey, "ok", runID, targetSHA, resultsFile, ""); err != nil {
+		ctx, fetch.Client, env["BUCKET"], env["RESULT_KEY"], "ok", env["RUN_ID"], env["TARGET_SHA"],
+		env["RESULTS_FILE"], ""); err != nil {
 		return bail("publishing result: %v", err)
 	}
 	return nil

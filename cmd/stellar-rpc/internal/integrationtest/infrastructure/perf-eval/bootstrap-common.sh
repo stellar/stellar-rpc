@@ -64,12 +64,13 @@ bail() {
 }
 trap 'bail "unhandled error at line $LINENO while running: $BASH_COMMAND"' ERR
 
-# persists the full box log to S3 even if instance terminated
+# persists the full box log to S3 even if instance terminated. TERM is trapped
+# too: a hard terminate mid-run (leg timeout) never reaches the EXIT trap.
 upload_box_log() {
   [ -n "$BUCKET" ] && [ -n "$RESULT_KEY" ] || return 0
   aws s3 cp /var/log/user-data.log "s3://$BUCKET/${RESULT_KEY%/*}/user-data.log" >/dev/null 2>&1 || true
 }
-trap upload_box_log EXIT
+trap upload_box_log EXIT TERM
 
 # bootstrap_box installs the build toolchain and checks out TARGET_SHA into
 # $WORK_DIR/stellar-rpc, leaving the shell cd'd at the repo root. Generic across

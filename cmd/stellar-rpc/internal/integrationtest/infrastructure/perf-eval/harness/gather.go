@@ -22,33 +22,33 @@ const commandWaitTimeout = 60 * time.Second
 // and relays the result as step outputs. On timeout it writes a debug comment
 // instead. Used by every leg's runner.
 func Gather(ctx context.Context) error {
-	vals, err := RequireEnv("INSTANCE_ID", "AWS_REGION",
-		"RESULTS_TIMEOUT", "POLL_INTERVAL", "GITHUB_OUTPUT", "DEBUG_LOG_LINES", "DEBUG_LOG_EVERY_POLLS",
-		"BUCKET", "RESULT_KEY", "RUN_ID")
-	if err != nil {
-		return err
+	envStr := map[string]string{}
+	var missing []string
+	for _, k := range []string{
+		"INSTANCE_ID", "AWS_REGION", "RESULTS_TIMEOUT", "POLL_INTERVAL", "GITHUB_OUTPUT",
+		"DEBUG_LOG_LINES", "DEBUG_LOG_EVERY_POLLS", "BUCKET", "RESULT_KEY", "RUN_ID",
+	} {
+		if envStr[k] = os.Getenv(k); envStr[k] == "" {
+			missing = append(missing, k)
+		}
 	}
-	instanceID, region, githubOutput := vals[0], vals[1], vals[4]
-	bucket, resultKey, runID := vals[7], vals[8], vals[9]
+	if len(missing) > 0 {
+		return fmt.Errorf("missing required env: %s", strings.Join(missing, ", "))
+	}
+	instanceID, region, githubOutput := envStr["INSTANCE_ID"], envStr["AWS_REGION"], envStr["GITHUB_OUTPUT"]
+	bucket, resultKey, runID := envStr["BUCKET"], envStr["RESULT_KEY"], envStr["RUN_ID"]
 
-	resultsTimeoutSec, err := strconv.Atoi(vals[2])
-	if err != nil {
-		return fmt.Errorf("RESULTS_TIMEOUT: %w", err)
+	envInt := map[string]int{}
+	for _, k := range []string{"RESULTS_TIMEOUT", "POLL_INTERVAL", "DEBUG_LOG_LINES", "DEBUG_LOG_EVERY_POLLS"} {
+		n, err := strconv.Atoi(envStr[k])
+		if err != nil {
+			return fmt.Errorf("%s: %w", k, err)
+		}
+		envInt[k] = n
 	}
-	pollIntervalSec, err := strconv.Atoi(vals[3])
-	if err != nil {
-		return fmt.Errorf("POLL_INTERVAL: %w", err)
-	}
-	debugLogLines, err := strconv.Atoi(vals[5])
-	if err != nil {
-		return fmt.Errorf("DEBUG_LOG_LINES: %w", err)
-	}
-	debugEveryPolls, err := strconv.Atoi(vals[6])
-	if err != nil {
-		return fmt.Errorf("DEBUG_LOG_EVERY_POLLS: %w", err)
-	}
-	resultsTimeout := time.Duration(resultsTimeoutSec) * time.Second
-	pollInterval := time.Duration(pollIntervalSec) * time.Second
+	debugLogLines, debugEveryPolls := envInt["DEBUG_LOG_LINES"], envInt["DEBUG_LOG_EVERY_POLLS"]
+	resultsTimeout := time.Duration(envInt["RESULTS_TIMEOUT"]) * time.Second
+	pollInterval := time.Duration(envInt["POLL_INTERVAL"]) * time.Second
 
 	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
 	if err != nil {

@@ -11,7 +11,7 @@ defaults:
 
 on:
   push:
-    branches: [release/**]
+    branches: [release/**, go-bench-test]
   workflow_dispatch:
     inputs:
       target_ref:
@@ -62,14 +62,29 @@ jobs:
             PR="$(gh pr list --repo "${{ github.repository }}" --state open \
                     --head "$REF" --json number --jq '.[0].number // ""' 2>/dev/null || true)"
           fi
-          LEGS='[
-            {"label":"Apply-load ingestion","run_label":"apply-load","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh","budget":225},
-            {"label":"Backfill ingestion","run_label":"backfill","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/run-backfill.sh","budget":345}
-          ]'
+          # go-bench baseline: latest published release, falls back to the highest v* tag.
+          BASELINE="$(gh api "repos/${{ github.repository }}/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          if [ -z "$BASELINE" ]; then
+            BASELINE="$(git ls-remote --tags --refs origin 'v[0-9]*' \
+              | sed 's|.*refs/tags/||' | sort -V | tail -n 1 || true)"
+          fi
+          [ -n "$BASELINE" ] || echo "::warning::no baseline release found; the go-bench leg will fail"
+          echo "go-bench baseline: ${BASELINE:-<none>}"
+
+          # Unquoted heredoc so $BASELINE expands into the go-bench entry;
+          # Temporarily disabled while iterating on go-bench (restore before merge):
+          #   {"label":"Apply-load ingestion","run_label":"apply-load","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh","budget":225},
+          #   {"label":"Backfill ingestion","run_label":"backfill","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/run-backfill.sh","budget":345},
+          LEGS="$(jq -c . <<EOF
+          [
+            {"label":"Go endpoint benchmarks","run_label":"go-bench","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/go-bench/run-go-bench.sh","budget":120,"root_volume_gb":50,"extra_env":"export BASELINE_REF=$BASELINE"}
+          ]
+          EOF
+          )"
           {
             echo "target_sha=$SHA"
             echo "pr_number=$PR"
-            echo "legs=$(jq -c . <<<"$LEGS")"
+            echo "legs=$LEGS"
           } >> "$GITHUB_OUTPUT"
 
   # The fan-out: one matrix entry per leg.
@@ -87,6 +102,9 @@ jobs:
       run_label: ${{ matrix.leg.run_label }}
       leg_script: ${{ matrix.leg.script }}
       budget_minutes: ${{ matrix.leg.budget }}
+      # optional per-leg fields; fallbacks mirror the ec2-leg.yml defaults
+      root_volume_gb: ${{ matrix.leg.root_volume_gb || 500 }}
+      extra_env: ${{ matrix.leg.extra_env || '' }}
 
   report:
     name: Aggregate + report
