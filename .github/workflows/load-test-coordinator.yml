@@ -11,7 +11,7 @@ defaults:
 
 on:
   push:
-    branches: [release/**]
+    branches: [release/**, blaster-test]
   workflow_dispatch:
     inputs:
       target_ref:
@@ -46,6 +46,7 @@ jobs:
       target_sha: ${{ steps.ctx.outputs.target_sha }}
       pr_number: ${{ steps.ctx.outputs.pr_number }}
       legs: ${{ steps.ctx.outputs.legs }}
+      matrix_legs: ${{ steps.ctx.outputs.matrix_legs }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -62,24 +63,29 @@ jobs:
             PR="$(gh pr list --repo "${{ github.repository }}" --state open \
                     --head "$REF" --json number --jq '.[0].number // ""' 2>/dev/null || true)"
           fi
+          # One roster (comment order) drives both the report job and the
+          # matrix fan-out: entries carrying a script ride the matrix; the
+          # chained backfill + blaster pair runs as explicit jobs below.
           LEGS='[
             {"label":"Apply-load ingestion","run_label":"apply-load","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh","budget":225},
-            {"label":"Backfill ingestion","run_label":"backfill","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/run-backfill.sh","budget":345}
+            {"label":"Backfill ingestion","run_label":"backfill"},
+            {"label":"Endpoint load test","run_label":"blaster"}
           ]'
           {
             echo "target_sha=$SHA"
             echo "pr_number=$PR"
             echo "legs=$(jq -c . <<<"$LEGS")"
+            echo "matrix_legs=$(jq -c 'map(select(.script))' <<<"$LEGS")"
           } >> "$GITHUB_OUTPUT"
 
-  # The fan-out: one matrix entry per leg.
+  # The fan-out: one matrix entry per independent leg.
   load-test:
     name: ${{ matrix.leg.label }}
     needs: plan
     strategy:
       fail-fast: false # stops one leg's failure from cancelling other legs
       matrix:
-        leg: ${{ fromJSON(needs.plan.outputs.legs) }}
+        leg: ${{ fromJSON(needs.plan.outputs.matrix_legs) }}
     uses: ./.github/workflows/ec2-leg.yml
     secrets: inherit
     with:
@@ -88,9 +94,41 @@ jobs:
       leg_script: ${{ matrix.leg.script }}
       budget_minutes: ${{ matrix.leg.budget }}
 
+  # Chained pair, serving side (keep box's RPC serving for the blaster leg).
+  backfill:
+    name: Backfill ingestion
+    needs: plan
+    uses: ./.github/workflows/ec2-leg.yml
+    secrets: inherit
+    with:
+      target_ref: ${{ needs.plan.outputs.target_sha }}
+      run_label: backfill
+      leg_script: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/run-backfill.sh
+      budget_minutes: 345
+      keep_instance: true
+      extra_env: |
+        export SERVE_AFTER_BACKFILL=true
+
+  # Chained pair, blasting side: starts once backfill's leg passes (its box then
+  # enters catchup), probes the handed-off address until healthy, then blasts.
+  blaster:
+    name: Endpoint load test
+    needs: [plan, backfill]
+    uses: ./.github/workflows/ec2-leg.yml
+    secrets: inherit
+    with:
+      target_ref: ${{ needs.plan.outputs.target_sha }}
+      run_label: blaster
+      leg_script: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/endpoint-load-test/run-blaster.sh
+      budget_minutes: 255
+      root_volume_gb: 50
+      adopt_run_label: backfill
+      extra_env: |
+        export TARGET_RPC=http://${{ needs.backfill.outputs.instance_ip }}:8000
+
   report:
     name: Aggregate + report
-    needs: [plan, load-test]
+    needs: [plan, load-test, backfill, blaster]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -161,13 +199,14 @@ jobs:
             fi
           fi
 
-      # Authoritative gate: reflects the load-test legs, independent of whether
-      # the comment posted.
       - name: Set overall status
         if: always()
+        env:
+          NEEDS: ${{ toJSON(needs) }}
         run: |
-          if [ "${{ needs.load-test.result }}" != "success" ]; then
-            echo "::error::one or more legs did not pass (aggregate result: ${{ needs.load-test.result }})"
+          FAILED=$(jq -r '[to_entries[] | select(.value.result != "success") | .key] | join(", ")' <<<"$NEEDS")
+          if [ -n "$FAILED" ]; then
+            echo "::error::jobs did not pass: $FAILED"
             exit 1
           fi
           echo "all load-test legs passed"

@@ -9,6 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.89.1
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.69.3
 	github.com/aws/smithy-go v1.27.1
+	github.com/caarlos0/env/v11 v11.4.1
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/creachadair/jrpc2 v1.3.3
 	github.com/fsouza/fake-gcs-server v1.49.2
