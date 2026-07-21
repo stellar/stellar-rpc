@@ -134,7 +134,7 @@ runs:
         echo 'KEY_PREFIX=${{ github.workflow }}-${{ github.job }}-${{ runner.os }}-${{ inputs.go-version }}-matrix(${{ join(matrix.*,'|') }})' >> $GITHUB_OUTPUT
         echo "GOCACHE=$(go env GOCACHE)" >> $GITHUB_OUTPUT
         echo "GOMODCACHE=$(go env GOMODCACHE)" >> $GITHUB_OUTPUT
-        if [ ${{ runner.os }} != 'Windows' ]; then echo SUDO='sudo' >> $GITHUB_OUTPUT; fi
+        echo SUDO='sudo' >> $GITHUB_OUTPUT
       id: variables
 
     # Cache the Go Modules downloaded during the job.

@@ -38,10 +38,11 @@ jobs:
     name: Build
     strategy:
       # One platform failing shouldn't hide whether the others actually
-      # pass — Windows failing (a separate, pre-existing gap: the
-      # setup-go action never installs zstd/RocksDB for it at all) was
-      # cancelling every other platform's build before it could reach
-      # its own conclusion.
+      # pass. This used to matter a lot here: the Windows leg that used to
+      # be in this matrix (see below) had never had zstd/RocksDB CI
+      # support, and stayed invisibly broken for weeks because it kept
+      # getting cancelled by macOS failing first, before fail-fast was
+      # turned off.
       fail-fast: false
       matrix:
         include:
@@ -57,9 +58,13 @@ jobs:
           - os: macos-latest
             rust_target: aarch64-apple-darwin
             go_arch: arm64
-          - os: windows-latest
-            rust_target: x86_64-pc-windows-gnu
-            go_arch: amd64
+          # No windows-latest leg: it was default CI-matrix boilerplate,
+          # not an actual deployment target (no Windows packaging or
+          # release artifact exists anywhere in this repo), and never had
+          # working RocksDB support to begin with — the storage engine's
+          # own design docs already note Windows doesn't reliably support
+          # the deferred-unlink trick it depends on, with no workaround
+          # ever built for it.
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
