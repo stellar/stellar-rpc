@@ -55,12 +55,26 @@ runs:
 
     # --- librocksdb ---
     # System deps (snappy, lz4, zlib) aren't cached — install on every run.
-    - name: Install RocksDB link deps
+    # This has to run unconditionally, not just on a cache miss: it's not
+    # about building librocksdb, it's about satisfying the final `go build`
+    # link step, which needs these regardless of whether librocksdb itself
+    # was already cached and skipped its own build below.
+    - name: Install RocksDB link deps (Linux)
       if: runner.os == 'Linux'
       shell: bash
       run: |
         sudo apt-get update -qq
         sudo apt-get install -y -qq libsnappy-dev liblz4-dev zlib1g-dev
+
+    # grocksdb's Go bindings hard-code `-lsnappy -llz4 -lz` in their own
+    # #cgo LDFLAGS unconditionally, regardless of what librocksdb itself
+    # was actually compiled with — see scripts/install-rocksdb.sh for
+    # detail. Same reasoning as the Linux step above for why this can't
+    # live inside the cache-gated build step below.
+    - name: Install RocksDB link deps (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: brew install snappy lz4
 
     - name: Cache librocksdb
       if: runner.os == 'Linux' || runner.os == 'macOS'
