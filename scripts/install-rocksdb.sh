@@ -7,7 +7,10 @@
 # rocksdb` floats to whatever Homebrew's current formula is (11.x as of
 # writing) with no way to pin an older one, and that has already broken the
 # build once: grocksdb v1.10.7 calls a RocksDB C API function that 11.x
-# removed.
+# removed. Building from source on macOS also fixes a second, separate
+# problem: brew only installs a library for the host's own architecture,
+# which breaks the x86_64-apple-darwin build on Apple Silicon CI runners.
+# Set MACOS_ARCH (e.g. "x86_64") to cross-compile for a different target.
 #
 # Downloads the source tarball with SHA256 verification, builds a shared
 # library, and installs headers + lib to PREFIX. ~5 min from scratch, cached
@@ -35,13 +38,11 @@ PREFIX="${PREFIX:-/usr/local}"
 
 case "$(uname -s)" in
   Darwin)
-    # Build deps — RocksDB links against these compression libs.
     if command -v brew &>/dev/null; then
       command -v cmake &>/dev/null || brew install cmake
       command -v ninja &>/dev/null || brew install ninja
-      brew install snappy lz4
     else
-      echo "error: homebrew not found, install cmake/ninja/snappy/lz4 manually" >&2
+      echo "error: homebrew not found, install cmake/ninja manually" >&2
       exit 1
     fi
 
@@ -54,11 +55,20 @@ case "$(uname -s)" in
     echo "${ROCKSDB_SHA256}  $WORKDIR/rocksdb.tar.gz" | shasum -a 256 -c
     tar xzf "$WORKDIR/rocksdb.tar.gz" -C "$WORKDIR"
 
-    # ZSTD_HOME: if set, use that zstd install (e.g. Homebrew's prefix from
-    # install-zstd.sh in CI). Otherwise cmake finds system libzstd.
+    # ZSTD_HOME: if set, use that zstd install (e.g. install-zstd.sh's
+    # PREFIX in CI). Otherwise cmake finds system libzstd.
     ZSTD_PREFIX_FLAG=""
     if [ -n "${ZSTD_HOME:-}" ] && [ -d "$ZSTD_HOME" ]; then
       ZSTD_PREFIX_FLAG="-DCMAKE_PREFIX_PATH=$ZSTD_HOME"
+    fi
+
+    # MACOS_ARCH: target architecture to build for (e.g. "x86_64" when
+    # cross-compiling from an arm64 runner). Defaults to the host's own
+    # architecture when unset. Must match whatever ZSTD_HOME was built
+    # for, or this link fails the same way brew's arm64-only zstd did.
+    ARCH_FLAG=""
+    if [ -n "${MACOS_ARCH:-}" ]; then
+      ARCH_FLAG="-DCMAKE_OSX_ARCHITECTURES=$MACOS_ARCH"
     fi
 
     # Build shared library (.dylib). See the Linux branch below for why
@@ -78,7 +88,8 @@ case "$(uname -s)" in
       -DWITH_GFLAGS=OFF \
       -DWITH_ZSTD=ON \
       -DPORTABLE=1 \
-      $ZSTD_PREFIX_FLAG
+      $ZSTD_PREFIX_FLAG \
+      $ARCH_FLAG
 
     ninja -C "$WORKDIR/build" -j"$(sysctl -n hw.ncpu)" rocksdb-shared
 

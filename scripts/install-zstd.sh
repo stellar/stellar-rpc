@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 #
 # Install libzstd 1.5.7 for the packfile CGo wrapper and RocksDB.
-# Works on Linux and macOS. On Linux, builds a shared library (.so)
-# from source using cmake+ninja and installs headers + lib to PREFIX
-# (default /usr/local).
+#
+# Works on Linux and macOS. Both build a shared library from source using
+# cmake+ninja and install headers + lib to PREFIX (default /usr/local) —
+# needed on macOS (not just pinning) because a plain `brew install zstd`
+# only produces a library for the host's own architecture, which breaks
+# the x86_64-apple-darwin build on Apple Silicon CI runners. Set
+# MACOS_ARCH (e.g. "x86_64") to cross-compile for a different target.
 #
 # Usage:
 #   ./scripts/install-zstd.sh                        # → /usr/local
@@ -18,11 +22,42 @@ PREFIX="${PREFIX:-/usr/local}"
 case "$(uname -s)" in
   Darwin)
     if command -v brew &>/dev/null; then
-      brew install zstd
+      command -v cmake &>/dev/null || brew install cmake
+      command -v ninja &>/dev/null || brew install ninja
     else
-      echo "error: homebrew not found, install zstd manually" >&2
+      echo "error: homebrew not found, install cmake/ninja manually" >&2
       exit 1
     fi
+
+    WORKDIR=$(mktemp -d)
+    trap 'rm -rf "$WORKDIR"' EXIT
+
+    curl -sSfL -o "$WORKDIR/zstd.tar.gz" \
+      "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz"
+    echo "${ZSTD_SHA256}  $WORKDIR/zstd.tar.gz" | shasum -a 256 -c
+
+    tar xzf "$WORKDIR/zstd.tar.gz" -C "$WORKDIR"
+
+    # MACOS_ARCH: target architecture to build for (e.g. "x86_64" when
+    # cross-compiling from an arm64 runner). Defaults to the host's own
+    # architecture when unset.
+    ARCH_FLAG=""
+    if [ -n "${MACOS_ARCH:-}" ]; then
+      ARCH_FLAG="-DCMAKE_OSX_ARCHITECTURES=$MACOS_ARCH"
+    fi
+
+    # shellcheck disable=SC2086
+    cmake -S "$WORKDIR/zstd-${ZSTD_VERSION}/build/cmake" -B "$WORKDIR/build" \
+      -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+      -DZSTD_BUILD_SHARED=ON \
+      -DZSTD_BUILD_STATIC=OFF \
+      -DZSTD_BUILD_PROGRAMS=OFF \
+      $ARCH_FLAG
+
+    ninja -C "$WORKDIR/build" -j"$(sysctl -n hw.ncpu)"
+    ninja -C "$WORKDIR/build" install
     ;;
   Linux)
     # cmake + ninja are needed to build. Install only if missing — in CI

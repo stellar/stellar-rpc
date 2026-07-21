@@ -16,24 +16,42 @@ runs:
       shell: bash
       run: echo "ImageOS=${ImageOS}" >> $GITHUB_ENV
 
+    # Maps Go's arch naming to Darwin's -DCMAKE_OSX_ARCHITECTURES naming
+    # (only "amd64" differs) so the native libs below get built for
+    # whatever architecture Go is targeting, not just the runner's own —
+    # matters because macos-latest runners are arm64 hardware, so the
+    # x86_64-apple-darwin matrix leg is cross-compiling.
+    - name: Compute macOS target arch
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        case "${{ inputs.go-arch }}" in
+          amd64) echo "MACOS_ARCH=x86_64" >> $GITHUB_ENV ;;
+          arm64) echo "MACOS_ARCH=arm64" >> $GITHUB_ENV ;;
+        esac
+
     # --- libzstd ---
     - name: Cache libzstd
-      if: runner.os == 'Linux'
+      if: runner.os == 'Linux' || runner.os == 'macOS'
       id: cache-zstd
       uses: actions/cache@v4
       with:
         path: ~/.zstd
         key: libzstd-1.5.7-${{ runner.os }}-${{ env.ImageOS }}-${{ inputs.go-arch || runner.arch }}-${{ hashFiles('scripts/install-zstd.sh') }}
 
-    - name: Build libzstd from source
+    - name: Build libzstd from source (Linux)
       if: runner.os == 'Linux' && steps.cache-zstd.outputs.cache-hit != 'true'
       shell: bash
       run: PREFIX="$HOME/.zstd" ./scripts/install-zstd.sh
 
-    - name: Install libzstd (macOS)
-      if: runner.os == 'macOS'
+    # Homebrew's zstd only builds for the runner's own architecture, which
+    # breaks the x86_64-apple-darwin build on Apple Silicon CI runners
+    # (the same problem librocksdb below has), so this builds from source
+    # too via MACOS_ARCH from the step above.
+    - name: Build libzstd from source (macOS)
+      if: runner.os == 'macOS' && steps.cache-zstd.outputs.cache-hit != 'true'
       shell: bash
-      run: ./scripts/install-zstd.sh
+      run: PREFIX="$HOME/.zstd" ./scripts/install-zstd.sh
 
     # --- librocksdb ---
     # System deps (snappy, lz4, zlib) aren't cached — install on every run.
@@ -59,23 +77,23 @@ runs:
 
     # Homebrew's rocksdb formula floats to whatever is currently in
     # homebrew-core (11.x as of writing) with no way to pin the 10.9.1
-    # that grocksdb v1.10.7 requires, so this builds from source too —
-    # same pinned version and cmake invocation as Linux, via Homebrew's
-    # zstd install for the ZSTD_HOME dependency.
+    # that grocksdb v1.10.7 requires, and only builds for the runner's own
+    # architecture, so this builds from source too — same pinned version,
+    # cmake invocation, and MACOS_ARCH target as Linux/the zstd step above.
     - name: Build librocksdb from source (macOS)
       if: runner.os == 'macOS' && steps.cache-rocksdb.outputs.cache-hit != 'true'
       shell: bash
-      run: PREFIX="$HOME/.rocksdb" ZSTD_HOME="$(brew --prefix zstd)" ./scripts/install-rocksdb.sh
+      run: PREFIX="$HOME/.rocksdb" ZSTD_HOME="$HOME/.zstd" ./scripts/install-rocksdb.sh
 
     # --- CGO flags + library search path ---
-    # Neither Linux's user-local prefixes (~/.zstd, ~/.rocksdb) nor macOS's
-    # Homebrew prefix are on the compiler's default search path, so both
-    # need the paths passed explicitly. Relying on the default search path
-    # here is what broke the macOS build previously: GitHub's macos-latest
-    # runner image moves Homebrew's prefix around from one image to the
-    # next (e.g. /opt/homebrew vs /usr/local), so a path that happens to
-    # be searched by default on one image snapshot silently stops working
-    # on the next.
+    # ~/.zstd and ~/.rocksdb aren't on the compiler's default search path
+    # on either platform, so both need the paths passed explicitly.
+    # macOS used to install these via Homebrew and rely on its prefix
+    # happening to be searched by default — that broke when GitHub
+    # rotated the macos-latest runner image out from under it (Homebrew's
+    # prefix moves between images, e.g. /opt/homebrew vs /usr/local), so
+    # both libs are now built from source to a fixed path instead, same
+    # as Linux.
     - name: Configure CGO for native libs (Linux)
       if: runner.os == 'Linux'
       shell: bash
@@ -88,10 +106,9 @@ runs:
       if: runner.os == 'macOS'
       shell: bash
       run: |
-        ZSTD_PREFIX="$(brew --prefix zstd)"
-        echo "CGO_CFLAGS=-I$ZSTD_PREFIX/include -I$HOME/.rocksdb/include" >> $GITHUB_ENV
-        echo "CGO_LDFLAGS=-L$ZSTD_PREFIX/lib -L$HOME/.rocksdb/lib" >> $GITHUB_ENV
-        echo "DYLD_LIBRARY_PATH=$ZSTD_PREFIX/lib:$HOME/.rocksdb/lib" >> $GITHUB_ENV
+        echo "CGO_CFLAGS=-I$HOME/.zstd/include -I$HOME/.rocksdb/include" >> $GITHUB_ENV
+        echo "CGO_LDFLAGS=-L$HOME/.zstd/lib -L$HOME/.rocksdb/lib" >> $GITHUB_ENV
+        echo "DYLD_LIBRARY_PATH=$HOME/.zstd/lib:$HOME/.rocksdb/lib" >> $GITHUB_ENV
 
     - name: Set up Go
       uses: actions/setup-go@v6
