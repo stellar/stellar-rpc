@@ -36,8 +36,10 @@ runs:
         echo "TARGET_ARCH=$arch" >> "$GITHUB_ENV"
         # Darwin's -DCMAKE_OSX_ARCHITECTURES wants x86_64, not amd64.
         if [ "${{ runner.os }}" = macOS ]; then
-          [ "$arch" = amd64 ] && echo "MACOS_ARCH=x86_64" >> "$GITHUB_ENV"
-          [ "$arch" = arm64 ] && echo "MACOS_ARCH=arm64"  >> "$GITHUB_ENV"
+          case "$arch" in
+            amd64) echo "MACOS_ARCH=x86_64" >> "$GITHUB_ENV" ;;
+            arm64) echo "MACOS_ARCH=arm64"  >> "$GITHUB_ENV" ;;
+          esac
         fi
 
     # --- libzstd ---

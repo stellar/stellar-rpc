@@ -28,17 +28,25 @@ case "$(uname -s)" in
     command -v brew &>/dev/null || { echo "error: homebrew not found, install cmake/ninja manually" >&2; exit 1; }
     command -v cmake &>/dev/null || brew install cmake
     command -v ninja &>/dev/null || brew install ninja
-    [ -n "${MACOS_ARCH:-}" ] && ARCH_FLAG="-DCMAKE_OSX_ARCHITECTURES=$MACOS_ARCH"
+    if [ -n "${MACOS_ARCH:-}" ]; then
+      ARCH_FLAG="-DCMAKE_OSX_ARCHITECTURES=$MACOS_ARCH"
+    fi
     ;;
   Linux)
     SHASUM=(sha256sum -c)
     JOBS="$(nproc)"
     LIB_GLOB='librocksdb.so*'
     # sudo only when not already root (CI is non-root; a root container isn't).
-    if [ "$(id -u)" -ne 0 ] && command -v sudo &>/dev/null; then SUDO=(sudo); else SUDO=(); fi
+    if [ "$(id -u)" -ne 0 ] && command -v sudo &>/dev/null; then
+      SUDO=(sudo)
+    else
+      SUDO=()
+    fi
     # Need a system libzstd only when ZSTD_HOME wasn't supplied.
     pkgs=(cmake ninja-build)
-    [ -z "${ZSTD_HOME:-}" ] && pkgs+=(libzstd-dev)
+    if [ -z "${ZSTD_HOME:-}" ]; then
+      pkgs+=(libzstd-dev)
+    fi
     if command -v apt-get &>/dev/null; then
       "${SUDO[@]}" apt-get update -qq
       "${SUDO[@]}" apt-get install -y -qq "${pkgs[@]}"
