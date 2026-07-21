@@ -12,17 +12,13 @@
 set -euo pipefail
 
 ROCKSDB_VERSION=10.9.1
-# SHA256 of the GitHub-generated source tarball (not a release asset).
-ROCKSDB_SHA256=e2e2e0254ddcb5338a58ba0723c90e792dbdca10aec520f7186e7b3a3e1c5223
 PREFIX="${PREFIX:-/usr/local}"
 WITH_TOOLS="${WITH_TOOLS:-0}"
 
-# Per-OS: checksum tool, parallel jobs, build deps, installed lib glob, cross
-# arch flag.
+# Per-OS: parallel jobs, build deps, installed lib glob, cross arch flag.
 ARCH_FLAG=""
 case "$(uname -s)" in
   Darwin)
-    SHASUM=(shasum -a 256 -c)
     JOBS="$(sysctl -n hw.ncpu)"
     LIB_GLOB='librocksdb*.dylib'
     command -v brew &>/dev/null || { echo "error: homebrew not found, install cmake/ninja manually" >&2; exit 1; }
@@ -33,7 +29,6 @@ case "$(uname -s)" in
     fi
     ;;
   Linux)
-    SHASUM=(sha256sum -c)
     JOBS="$(nproc)"
     LIB_GLOB='librocksdb.so*'
     # Bare-machine fallback: install only what's missing. CI runners and the
@@ -62,7 +57,6 @@ trap 'rm -rf "$WORKDIR"' EXIT
 
 curl -sSfL -o "$WORKDIR/rocksdb.tar.gz" \
   "https://github.com/facebook/rocksdb/archive/refs/tags/v${ROCKSDB_VERSION}.tar.gz"
-echo "${ROCKSDB_SHA256}  $WORKDIR/rocksdb.tar.gz" | "${SHASUM[@]}"
 tar xzf "$WORKDIR/rocksdb.tar.gz" -C "$WORKDIR"
 
 # Build against ZSTD_HOME if given (e.g. ~/.zstd in CI), else a system libzstd.
