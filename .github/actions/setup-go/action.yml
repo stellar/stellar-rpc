@@ -45,22 +45,27 @@ runs:
         sudo apt-get install -y -qq libsnappy-dev liblz4-dev zlib1g-dev
 
     - name: Cache librocksdb
-      if: runner.os == 'Linux'
+      if: runner.os == 'Linux' || runner.os == 'macOS'
       id: cache-rocksdb
       uses: actions/cache@v4
       with:
         path: ~/.rocksdb
         key: librocksdb-10.9.1-${{ runner.os }}-${{ env.ImageOS }}-${{ inputs.go-arch || runner.arch }}-${{ hashFiles('scripts/install-rocksdb.sh') }}
 
-    - name: Build librocksdb from source
+    - name: Build librocksdb from source (Linux)
       if: runner.os == 'Linux' && steps.cache-rocksdb.outputs.cache-hit != 'true'
       shell: bash
       run: PREFIX="$HOME/.rocksdb" ZSTD_HOME="$HOME/.zstd" ./scripts/install-rocksdb.sh
 
-    - name: Install librocksdb (macOS)
-      if: runner.os == 'macOS'
+    # Homebrew's rocksdb formula floats to whatever is currently in
+    # homebrew-core (11.x as of writing) with no way to pin the 10.9.1
+    # that grocksdb v1.10.7 requires, so this builds from source too —
+    # same pinned version and cmake invocation as Linux, via Homebrew's
+    # zstd install for the ZSTD_HOME dependency.
+    - name: Build librocksdb from source (macOS)
+      if: runner.os == 'macOS' && steps.cache-rocksdb.outputs.cache-hit != 'true'
       shell: bash
-      run: ./scripts/install-rocksdb.sh
+      run: PREFIX="$HOME/.rocksdb" ZSTD_HOME="$(brew --prefix zstd)" ./scripts/install-rocksdb.sh
 
     # --- CGO flags + library search path ---
     # Neither Linux's user-local prefixes (~/.zstd, ~/.rocksdb) nor macOS's
@@ -84,10 +89,9 @@ runs:
       shell: bash
       run: |
         ZSTD_PREFIX="$(brew --prefix zstd)"
-        ROCKSDB_PREFIX="$(brew --prefix rocksdb)"
-        echo "CGO_CFLAGS=-I$ZSTD_PREFIX/include -I$ROCKSDB_PREFIX/include" >> $GITHUB_ENV
-        echo "CGO_LDFLAGS=-L$ZSTD_PREFIX/lib -L$ROCKSDB_PREFIX/lib" >> $GITHUB_ENV
-        echo "DYLD_LIBRARY_PATH=$ZSTD_PREFIX/lib:$ROCKSDB_PREFIX/lib" >> $GITHUB_ENV
+        echo "CGO_CFLAGS=-I$ZSTD_PREFIX/include -I$HOME/.rocksdb/include" >> $GITHUB_ENV
+        echo "CGO_LDFLAGS=-L$ZSTD_PREFIX/lib -L$HOME/.rocksdb/lib" >> $GITHUB_ENV
+        echo "DYLD_LIBRARY_PATH=$ZSTD_PREFIX/lib:$HOME/.rocksdb/lib" >> $GITHUB_ENV
 
     - name: Set up Go
       uses: actions/setup-go@v6

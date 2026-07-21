@@ -3,17 +3,20 @@
 # Install RocksDB 10.9.1 for the backfill CGo bindings (grocksdb v1.10.7).
 #
 # Works on Linux and macOS. Used by both CI (setup-go action) and developers.
+# Both platforms build the same pinned version from source — `brew install
+# rocksdb` floats to whatever Homebrew's current formula is (11.x as of
+# writing) with no way to pin an older one, and that has already broken the
+# build once: grocksdb v1.10.7 calls a RocksDB C API function that 11.x
+# removed.
 #
-# Linux: installs build deps (snappy, lz4, zstd, zlib), downloads the source
-#   tarball with SHA256 verification, builds a shared library (.so), and
-#   installs headers + lib to PREFIX. ~5 min from scratch, cached in CI.
+# Downloads the source tarball with SHA256 verification, builds a shared
+# library, and installs headers + lib to PREFIX. ~5 min from scratch, cached
+# in CI.
 #
-#   cmake is used (not make) because:
-#     - cmake has WITH_BZ2=OFF (default OFF). The Makefile auto-detects bz2
-#       via #include <bzlib.h> with no way to disable it.
-#     - ninja is faster than make for parallel C++ compilation.
-#
-# macOS: delegates to brew install rocksdb (brew handles version + deps).
+# cmake is used (not make) because:
+#   - cmake has WITH_BZ2=OFF (default OFF). The Makefile auto-detects bz2
+#     via #include <bzlib.h> with no way to disable it.
+#   - ninja is faster than make for parallel C++ compilation.
 #
 # Usage:
 #   ./scripts/install-rocksdb.sh                        # → /usr/local
@@ -32,12 +35,61 @@ PREFIX="${PREFIX:-/usr/local}"
 
 case "$(uname -s)" in
   Darwin)
+    # Build deps — RocksDB links against these compression libs.
     if command -v brew &>/dev/null; then
-      brew install rocksdb
+      command -v cmake &>/dev/null || brew install cmake
+      command -v ninja &>/dev/null || brew install ninja
+      brew install snappy lz4
     else
-      echo "error: homebrew not found, install rocksdb manually" >&2
+      echo "error: homebrew not found, install cmake/ninja/snappy/lz4 manually" >&2
       exit 1
     fi
+
+    WORKDIR=$(mktemp -d)
+    trap 'rm -rf "$WORKDIR"' EXIT
+
+    # Download + verify source tarball.
+    curl -sSfL -o "$WORKDIR/rocksdb.tar.gz" \
+      "https://github.com/facebook/rocksdb/archive/refs/tags/v${ROCKSDB_VERSION}.tar.gz"
+    echo "${ROCKSDB_SHA256}  $WORKDIR/rocksdb.tar.gz" | shasum -a 256 -c
+    tar xzf "$WORKDIR/rocksdb.tar.gz" -C "$WORKDIR"
+
+    # ZSTD_HOME: if set, use that zstd install (e.g. Homebrew's prefix from
+    # install-zstd.sh in CI). Otherwise cmake finds system libzstd.
+    ZSTD_PREFIX_FLAG=""
+    if [ -n "${ZSTD_HOME:-}" ] && [ -d "$ZSTD_HOME" ]; then
+      ZSTD_PREFIX_FLAG="-DCMAKE_PREFIX_PATH=$ZSTD_HOME"
+    fi
+
+    # Build shared library (.dylib). See the Linux branch below for why
+    # cmake targets rocksdb-shared specifically rather than the default.
+    #
+    # shellcheck disable=SC2086
+    cmake -S "$WORKDIR/rocksdb-${ROCKSDB_VERSION}" -B "$WORKDIR/build" \
+      -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+      -DROCKSDB_BUILD_SHARED=ON \
+      -DWITH_TESTS=OFF \
+      -DWITH_TOOLS=OFF \
+      -DWITH_BENCHMARK_TOOLS=OFF \
+      -DWITH_CORE_TOOLS=OFF \
+      -DWITH_BZ2=OFF \
+      -DWITH_GFLAGS=OFF \
+      -DWITH_ZSTD=ON \
+      -DPORTABLE=1 \
+      $ZSTD_PREFIX_FLAG
+
+    ninja -C "$WORKDIR/build" -j"$(sysctl -n hw.ncpu)" rocksdb-shared
+
+    # Manual install — see the Linux branch below for why.
+    #
+    # macOS versions shared libs as name.MAJOR.MINOR.dylib (version before
+    # the extension), unlike Linux's name.so.MAJOR.MINOR (version after) —
+    # so the glob has to match the extension at the end, not the start.
+    mkdir -p "$PREFIX/lib" "$PREFIX/include"
+    cp -a "$WORKDIR/build"/librocksdb*.dylib "$PREFIX/lib/"
+    cp -r "$WORKDIR/rocksdb-${ROCKSDB_VERSION}/include/rocksdb" "$PREFIX/include/"
     ;;
   Linux)
     # Build deps — RocksDB links against these compression libs.
