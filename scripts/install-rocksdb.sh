@@ -1,33 +1,13 @@
 #!/usr/bin/env bash
 #
-# Install RocksDB 10.9.1 for the backfill CGo bindings (grocksdb v1.10.7).
+# Build RocksDB 10.9.1 from source (shared lib) for the grocksdb v1.10.7 CGo
+# bindings and install to PREFIX (default /usr/local). Pinned from source
+# because brew/apt track a newer major than grocksdb v1.10.7 supports, and
+# because from source it can target a cross-compile arch via MACOS_ARCH.
+# Bump ROCKSDB_VERSION and grocksdb together.
 #
-# Works on Linux and macOS. Used by both CI (setup-go action) and developers.
-# Both platforms build the same pinned version from source — `brew install
-# rocksdb` floats to whatever Homebrew's current formula is (11.x as of
-# writing) with no way to pin an older one, and that has already broken the
-# build once: grocksdb v1.10.7 calls a RocksDB C API function that 11.x
-# removed. Building from source on macOS also fixes a second, separate
-# problem: brew only installs a library for the host's own architecture,
-# which breaks the x86_64-apple-darwin build on Apple Silicon CI runners.
-# Set MACOS_ARCH (e.g. "x86_64") to cross-compile for a different target.
-#
-# Downloads the source tarball with SHA256 verification, builds a shared
-# library, and installs headers + lib to PREFIX. ~5 min from scratch, cached
-# in CI.
-#
-# cmake is used (not make) because:
-#   - cmake has WITH_BZ2=OFF (default OFF). The Makefile auto-detects bz2
-#     via #include <bzlib.h> with no way to disable it.
-#   - ninja is faster than make for parallel C++ compilation.
-#
-# Usage:
-#   ./scripts/install-rocksdb.sh                        # → /usr/local
-#   PREFIX=$HOME/.rocksdb ./scripts/install-rocksdb.sh  # → ~/.rocksdb (CI)
-#
-# Version mapping (grocksdb → RocksDB):
-#   grocksdb v1.10.7 → RocksDB 10.9.1
-#   Bump both together when upgrading.
+#   PREFIX=$HOME/.rocksdb ./scripts/install-rocksdb.sh   # lib only (CI, dev)
+#   WITH_TOOLS=1 ./scripts/install-rocksdb.sh            # + ldb/sst_dump/db_bench (Docker)
 #
 set -euo pipefail
 
@@ -35,140 +15,92 @@ ROCKSDB_VERSION=10.9.1
 # SHA256 of the GitHub-generated source tarball (not a release asset).
 ROCKSDB_SHA256=e2e2e0254ddcb5338a58ba0723c90e792dbdca10aec520f7186e7b3a3e1c5223
 PREFIX="${PREFIX:-/usr/local}"
+WITH_TOOLS="${WITH_TOOLS:-0}"
 
+# Per-OS: checksum tool, parallel jobs, build deps, installed lib glob, cross
+# arch flag.
+ARCH_FLAG=""
 case "$(uname -s)" in
   Darwin)
-    # grocksdb's own Go bindings hard-code `-lsnappy -llz4 -lz` in their
-    # #cgo LDFLAGS unconditionally, regardless of what this RocksDB build
-    # was actually compiled with (it isn't — WITH_ZSTD is the only codec
-    # enabled below) — so the final `go build` link fails outright
-    # without them, even though nothing ever calls into them.
-    if command -v brew &>/dev/null; then
-      command -v cmake &>/dev/null || brew install cmake
-      command -v ninja &>/dev/null || brew install ninja
-      brew install snappy lz4
-    else
-      echo "error: homebrew not found, install cmake/ninja/snappy/lz4 manually" >&2
-      exit 1
-    fi
-
-    WORKDIR=$(mktemp -d)
-    trap 'rm -rf "$WORKDIR"' EXIT
-
-    # Download + verify source tarball.
-    curl -sSfL -o "$WORKDIR/rocksdb.tar.gz" \
-      "https://github.com/facebook/rocksdb/archive/refs/tags/v${ROCKSDB_VERSION}.tar.gz"
-    echo "${ROCKSDB_SHA256}  $WORKDIR/rocksdb.tar.gz" | shasum -a 256 -c
-    tar xzf "$WORKDIR/rocksdb.tar.gz" -C "$WORKDIR"
-
-    # ZSTD_HOME: if set, use that zstd install (e.g. install-zstd.sh's
-    # PREFIX in CI). Otherwise cmake finds system libzstd.
-    ZSTD_PREFIX_FLAG=""
-    if [ -n "${ZSTD_HOME:-}" ] && [ -d "$ZSTD_HOME" ]; then
-      ZSTD_PREFIX_FLAG="-DCMAKE_PREFIX_PATH=$ZSTD_HOME"
-    fi
-
-    # MACOS_ARCH: target architecture to build for (e.g. "x86_64" when
-    # cross-compiling from an arm64 runner). Defaults to the host's own
-    # architecture when unset. Must match whatever ZSTD_HOME was built
-    # for, or this link fails the same way brew's arm64-only zstd did.
-    ARCH_FLAG=""
-    if [ -n "${MACOS_ARCH:-}" ]; then
-      ARCH_FLAG="-DCMAKE_OSX_ARCHITECTURES=$MACOS_ARCH"
-    fi
-
-    # Build shared library (.dylib). See the Linux branch below for why
-    # cmake targets rocksdb-shared specifically rather than the default.
-    #
-    # shellcheck disable=SC2086
-    cmake -S "$WORKDIR/rocksdb-${ROCKSDB_VERSION}" -B "$WORKDIR/build" \
-      -G Ninja \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-      -DROCKSDB_BUILD_SHARED=ON \
-      -DWITH_TESTS=OFF \
-      -DWITH_TOOLS=OFF \
-      -DWITH_BENCHMARK_TOOLS=OFF \
-      -DWITH_CORE_TOOLS=OFF \
-      -DWITH_BZ2=OFF \
-      -DWITH_GFLAGS=OFF \
-      -DWITH_ZSTD=ON \
-      -DPORTABLE=1 \
-      $ZSTD_PREFIX_FLAG \
-      $ARCH_FLAG
-
-    ninja -C "$WORKDIR/build" -j"$(sysctl -n hw.ncpu)" rocksdb-shared
-
-    # Manual install — see the Linux branch below for why.
-    #
-    # macOS versions shared libs as name.MAJOR.MINOR.dylib (version before
-    # the extension), unlike Linux's name.so.MAJOR.MINOR (version after) —
-    # so the glob has to match the extension at the end, not the start.
-    mkdir -p "$PREFIX/lib" "$PREFIX/include"
-    cp -a "$WORKDIR/build"/librocksdb*.dylib "$PREFIX/lib/"
-    cp -r "$WORKDIR/rocksdb-${ROCKSDB_VERSION}/include/rocksdb" "$PREFIX/include/"
+    SHASUM=(shasum -a 256 -c)
+    JOBS="$(sysctl -n hw.ncpu)"
+    LIB_GLOB='librocksdb*.dylib'
+    command -v brew &>/dev/null || { echo "error: homebrew not found, install cmake/ninja manually" >&2; exit 1; }
+    command -v cmake &>/dev/null || brew install cmake
+    command -v ninja &>/dev/null || brew install ninja
+    [ -n "${MACOS_ARCH:-}" ] && ARCH_FLAG="-DCMAKE_OSX_ARCHITECTURES=$MACOS_ARCH"
     ;;
   Linux)
-    # Build deps — RocksDB links against these compression libs.
+    SHASUM=(sha256sum -c)
+    JOBS="$(nproc)"
+    LIB_GLOB='librocksdb.so*'
+    # sudo only when not already root (CI is non-root; a root container isn't).
+    if [ "$(id -u)" -ne 0 ] && command -v sudo &>/dev/null; then SUDO=(sudo); else SUDO=(); fi
+    # Need a system libzstd only when ZSTD_HOME wasn't supplied.
+    pkgs=(cmake ninja-build)
+    [ -z "${ZSTD_HOME:-}" ] && pkgs+=(libzstd-dev)
     if command -v apt-get &>/dev/null; then
-      sudo apt-get update -qq
-      sudo apt-get install -y -qq cmake ninja-build \
-        libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev
+      "${SUDO[@]}" apt-get update -qq
+      "${SUDO[@]}" apt-get install -y -qq "${pkgs[@]}"
     fi
-
-    WORKDIR=$(mktemp -d)
-    trap 'rm -rf "$WORKDIR"' EXIT
-
-    # Download + verify source tarball.
-    curl -sSfL -o "$WORKDIR/rocksdb.tar.gz" \
-      "https://github.com/facebook/rocksdb/archive/refs/tags/v${ROCKSDB_VERSION}.tar.gz"
-    echo "${ROCKSDB_SHA256}  $WORKDIR/rocksdb.tar.gz" | sha256sum -c
-    tar xzf "$WORKDIR/rocksdb.tar.gz" -C "$WORKDIR"
-
-    # ZSTD_HOME: if set, use that zstd install (e.g. ~/.zstd from
-    # install-zstd.sh in CI). Otherwise cmake finds system libzstd
-    # (from apt libzstd-dev above).
-    ZSTD_PREFIX_FLAG=""
-    if [ -n "${ZSTD_HOME:-}" ] && [ -d "$ZSTD_HOME" ]; then
-      ZSTD_PREFIX_FLAG="-DCMAKE_PREFIX_PATH=$ZSTD_HOME"
-    fi
-
-    # Build shared library (.so).
-    #
-    # Shared (not static) because all CI runners and Docker stages use
-    # ubuntu:24.04 — same glibc version everywhere. LD_LIBRARY_PATH is
-    # set in the CI action to find the .so at runtime.
-    #
-    # shellcheck disable=SC2086
-    cmake -S "$WORKDIR/rocksdb-${ROCKSDB_VERSION}" -B "$WORKDIR/build" \
-      -G Ninja \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-      -DROCKSDB_BUILD_SHARED=ON \
-      -DWITH_TESTS=OFF \
-      -DWITH_TOOLS=OFF \
-      -DWITH_BENCHMARK_TOOLS=OFF \
-      -DWITH_CORE_TOOLS=OFF \
-      -DWITH_BZ2=OFF \
-      -DWITH_GFLAGS=OFF \
-      -DWITH_ZSTD=ON \
-      -DPORTABLE=1 \
-      $ZSTD_PREFIX_FLAG
-
-    # Build only the shared target. RocksDB's cmake unconditionally adds
-    # a static target (no option to disable it). Building all targets
-    # compiles every source file twice (~355 × 2). Targeting rocksdb-shared
-    # explicitly halves the build.
-    ninja -C "$WORKDIR/build" -j"$(nproc)" rocksdb-shared
-
-    # Manual install — 'ninja install' requires the static lib which we
-    # didn't build. Copy shared lib + headers directly.
-    mkdir -p "$PREFIX/lib" "$PREFIX/include"
-    cp -a "$WORKDIR/build"/librocksdb.so* "$PREFIX/lib/"
-    cp -r "$WORKDIR/rocksdb-${ROCKSDB_VERSION}/include/rocksdb" "$PREFIX/include/"
     ;;
   *)
     echo "error: unsupported OS $(uname -s)" >&2
     exit 1
     ;;
 esac
+
+WORKDIR=$(mktemp -d)
+trap 'rm -rf "$WORKDIR"' EXIT
+
+curl -sSfL -o "$WORKDIR/rocksdb.tar.gz" \
+  "https://github.com/facebook/rocksdb/archive/refs/tags/v${ROCKSDB_VERSION}.tar.gz"
+echo "${ROCKSDB_SHA256}  $WORKDIR/rocksdb.tar.gz" | "${SHASUM[@]}"
+tar xzf "$WORKDIR/rocksdb.tar.gz" -C "$WORKDIR"
+
+# Build against ZSTD_HOME if given (e.g. ~/.zstd in CI), else a system libzstd.
+ZSTD_PREFIX_FLAG=""
+if [ -n "${ZSTD_HOME:-}" ] && [ -d "$ZSTD_HOME" ]; then
+  ZSTD_PREFIX_FLAG="-DCMAKE_PREFIX_PATH=$ZSTD_HOME"
+fi
+
+if [ "$WITH_TOOLS" = 1 ]; then
+  TOOLS_FLAGS=(-DWITH_TOOLS=ON -DWITH_CORE_TOOLS=ON -DWITH_BENCHMARK_TOOLS=ON)
+else
+  TOOLS_FLAGS=(-DWITH_TOOLS=OFF -DWITH_CORE_TOOLS=OFF -DWITH_BENCHMARK_TOOLS=OFF)
+fi
+
+# zstd is the only codec (WITH_ZSTD=ON); snappy/lz4/zlib default OFF, so the
+# built lib needs only libzstd. cmake (not make): make force-detects bz2 with
+# no opt-out. See the Makefile's grocksdb_clean_link tag for the link side.
+# shellcheck disable=SC2086
+cmake -S "$WORKDIR/rocksdb-${ROCKSDB_VERSION}" -B "$WORKDIR/build" \
+  -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+  -DROCKSDB_BUILD_SHARED=ON \
+  -DWITH_TESTS=OFF \
+  -DWITH_BZ2=OFF \
+  -DWITH_GFLAGS=OFF \
+  -DWITH_ZSTD=ON \
+  -DPORTABLE=1 \
+  "${TOOLS_FLAGS[@]}" \
+  $ZSTD_PREFIX_FLAG \
+  $ARCH_FLAG
+
+if [ "$WITH_TOOLS" = 1 ]; then
+  ninja -C "$WORKDIR/build" -j"$JOBS"
+  ninja -C "$WORKDIR/build" install
+  # cmake's install target doesn't place the tool binaries; copy them out.
+  mkdir -p "$PREFIX/bin"
+  cp "$WORKDIR/build/tools/ldb" "$WORKDIR/build/tools/sst_dump" "$PREFIX/bin/"
+  cp "$WORKDIR/build/db_bench" "$PREFIX/bin/"
+else
+  # Shared target only (halves the build vs cmake's always-on static target).
+  # Install by hand since `ninja install` would pull in that static lib.
+  ninja -C "$WORKDIR/build" -j"$JOBS" rocksdb-shared
+  mkdir -p "$PREFIX/lib" "$PREFIX/include"
+  # shellcheck disable=SC2086
+  cp -a "$WORKDIR/build"/$LIB_GLOB "$PREFIX/lib/"
+  cp -r "$WORKDIR/rocksdb-${ROCKSDB_VERSION}/include/rocksdb" "$PREFIX/include/"
+fi
