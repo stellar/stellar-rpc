@@ -28,15 +28,11 @@ case "$(uname -s)" in
   Linux)
     SHASUM=(sha256sum -c)
     JOBS="$(nproc)"
-    # sudo only when not already root (CI is non-root; a root container isn't).
-    if [ "$(id -u)" -ne 0 ] && command -v sudo &>/dev/null; then
-      SUDO=(sudo)
-    else
-      SUDO=()
-    fi
+    # Bare-machine fallback; CI runners and the Docker image already ship
+    # cmake/ninja, so this is skipped there.
     if command -v apt-get &>/dev/null && { ! command -v cmake &>/dev/null || ! command -v ninja &>/dev/null; }; then
-      "${SUDO[@]}" apt-get update -qq
-      "${SUDO[@]}" apt-get install -y -qq cmake ninja-build
+      sudo apt-get update -qq
+      sudo apt-get install -y -qq cmake ninja-build
     fi
     ;;
   *)

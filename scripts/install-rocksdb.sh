@@ -36,20 +36,19 @@ case "$(uname -s)" in
     SHASUM=(sha256sum -c)
     JOBS="$(nproc)"
     LIB_GLOB='librocksdb.so*'
-    # sudo only when not already root (CI is non-root; a root container isn't).
-    if [ "$(id -u)" -ne 0 ] && command -v sudo &>/dev/null; then
-      SUDO=(sudo)
-    else
-      SUDO=()
+    # Bare-machine fallback: install only what's missing. CI runners and the
+    # Docker image already ship cmake/ninja, and ZSTD_HOME supplies zstd, so
+    # this is skipped there.
+    pkgs=()
+    if ! command -v cmake &>/dev/null || ! command -v ninja &>/dev/null; then
+      pkgs+=(cmake ninja-build)
     fi
-    # Need a system libzstd only when ZSTD_HOME wasn't supplied.
-    pkgs=(cmake ninja-build)
     if [ -z "${ZSTD_HOME:-}" ]; then
       pkgs+=(libzstd-dev)
     fi
-    if command -v apt-get &>/dev/null; then
-      "${SUDO[@]}" apt-get update -qq
-      "${SUDO[@]}" apt-get install -y -qq "${pkgs[@]}"
+    if command -v apt-get &>/dev/null && [ "${#pkgs[@]}" -gt 0 ]; then
+      sudo apt-get update -qq
+      sudo apt-get install -y -qq "${pkgs[@]}"
     fi
     ;;
   *)
