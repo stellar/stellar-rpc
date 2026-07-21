@@ -1,4 +1,8 @@
 version: "2"
+run:
+  # Match the build tags the code compiles with (see Makefile GOFLAGS).
+  build-tags:
+    - grocksdb_clean_link
 linters:
   default: all
   disable:

@@ -42,12 +42,17 @@ mod curr {
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
 
-    // soroban-simulation-curr with unstable-next-api no longer takes bucket_list_size.
-    pub(crate) fn load_network_config(
-        snapshot: &impl soroban_env_host::storage::SnapshotSource,
-        _bucket_list_size: u64,
-    ) -> crate::Result<soroban_simulation::NetworkConfig> {
-        soroban_simulation::NetworkConfig::load_from_snapshot(snapshot)
+    // Constructs the recording auth mode for this protocol version. The current
+    // protocol's soroban-env can emit either v1 (`Address`) or v2 (`AddressV2`)
+    // credentials, selected by `use_upgraded_auth`.
+    pub(crate) fn make_recording_auth_mode(
+        disable_non_root_auth: bool,
+        use_upgraded_auth: bool,
+    ) -> soroban_env_host::e2e_invoke::RecordingInvocationAuthMode {
+        soroban_env_host::e2e_invoke::RecordingInvocationAuthMode::recording(
+            disable_non_root_auth,
+            use_upgraded_auth,
+        )
     }
 }
 
@@ -61,11 +66,13 @@ mod prev {
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
 
-    pub(crate) fn load_network_config(
-        snapshot: &impl soroban_env_host::storage::SnapshotSource,
-        bucket_list_size: u64,
-    ) -> crate::Result<soroban_simulation::NetworkConfig> {
-        soroban_simulation::NetworkConfig::load_from_snapshot(snapshot, bucket_list_size)
+    // The previous protocol's soroban-env predates v2 Address credentials, so
+    // `use_upgraded_auth` is ignored and v1 `Address` credentials are always used.
+    pub(crate) fn make_recording_auth_mode(
+        disable_non_root_auth: bool,
+        _use_upgraded_auth: bool,
+    ) -> soroban_env_host::e2e_invoke::RecordingInvocationAuthMode {
+        soroban_env_host::e2e_invoke::RecordingInvocationAuthMode::Recording(disable_non_root_auth)
     }
 }
 
@@ -195,6 +202,7 @@ pub extern "C" fn preflight_invoke_hf_op(
     resource_config: CResourceConfig,
     enable_debug: bool,
     auth_mode: u32,
+    use_upgraded_auth: bool,
 ) -> *mut CPreflightResult {
     let proto = ledger_info.protocol_version;
     catch_preflight_panic(&move || {
@@ -207,6 +215,7 @@ pub extern "C" fn preflight_invoke_hf_op(
                 resource_config,
                 enable_debug,
                 auth_mode.into(),
+                use_upgraded_auth,
             )
         } else if proto == curr::PROTOCOL {
             curr::shared::preflight_invoke_hf_op_or_maybe_panic(
@@ -217,6 +226,7 @@ pub extern "C" fn preflight_invoke_hf_op(
                 resource_config,
                 enable_debug,
                 auth_mode.into(),
+                use_upgraded_auth,
             )
         } else {
             bail!("unsupported protocol version: {proto}")

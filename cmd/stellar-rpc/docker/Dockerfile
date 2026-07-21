@@ -1,9 +1,8 @@
-# All stages use ubuntu:24.04 — same glibc everywhere, so shared
-# libraries built in one stage work in any other. zstd and RocksDB
-# are built from source (not apt) to pin versions. Go and Rust come
-# from upstream tarballs since there's no golang:1.25-noble image.
+# All stages use ubuntu:24.04 so shared libs built in one stage work in any
+# other (same glibc). zstd and RocksDB are built from source to pin versions;
+# Go and Rust come from upstream tarballs (there's no golang:1.26-noble image).
 
-# --- Stage 1: zstd 1.5.7 (ubuntu 24.04 ships 1.5.5) ---
+# --- Stage 1: zstd ---
 FROM ubuntu:24.04 AS zstd-build
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt update && apt install -y build-essential cmake ninja-build curl && apt clean
@@ -11,54 +10,21 @@ RUN apt update && apt install -y build-essential cmake ninja-build curl && apt c
 COPY scripts/install-zstd.sh /tmp/install-zstd.sh
 RUN PREFIX=/usr/local /tmp/install-zstd.sh
 
-# --- Stage 2: RocksDB 10.9.1 (shared + tools) ---
+# --- Stage 2: RocksDB (shared lib + CLI tools) ---
 FROM ubuntu:24.04 AS rocksdb-build
-ARG ROCKSDB_VERSION=10.9.1
-ARG ROCKSDB_SHA256=e2e2e0254ddcb5338a58ba0723c90e792dbdca10aec520f7186e7b3a3e1c5223
-
 ENV DEBIAN_FRONTEND=noninteractive
+RUN apt update && apt install -y build-essential cmake ninja-build curl && apt clean
 
-RUN apt update && apt install -y \
-    build-essential cmake ninja-build curl \
-    libsnappy-dev liblz4-dev zlib1g-dev \
-    && apt clean
-
-# zstd 1.5.7 from stage 1 (not apt).
 COPY --from=zstd-build /usr/local/include/ /usr/local/include/
 COPY --from=zstd-build /usr/local/lib/libzstd* /usr/local/lib/
 RUN ldconfig
 
-RUN curl -sSfL -o /tmp/rocksdb.tar.gz \
-    "https://github.com/facebook/rocksdb/archive/refs/tags/v${ROCKSDB_VERSION}.tar.gz" \
-    && echo "${ROCKSDB_SHA256}  /tmp/rocksdb.tar.gz" | sha256sum -c \
-    && tar xzf /tmp/rocksdb.tar.gz -C /tmp \
-    && rm /tmp/rocksdb.tar.gz
-
-# Shared lib + tools. cmake install doesn't install tool binaries,
-# so they're copied manually from the build directory.
-RUN cmake -S /tmp/rocksdb-${ROCKSDB_VERSION} -B /tmp/rocksdb-build \
-    -G Ninja \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX=/usr/local \
-    -DROCKSDB_BUILD_SHARED=ON \
-    -DWITH_TESTS=OFF \
-    -DWITH_ZSTD=ON \
-    -DWITH_BZ2=OFF \
-    -DWITH_GFLAGS=OFF \
-    -DWITH_TOOLS=ON \
-    -DWITH_BENCHMARK_TOOLS=ON \
-    -DWITH_CORE_TOOLS=ON \
-    -DPORTABLE=1 \
-    && ninja -C /tmp/rocksdb-build -j"$(nproc)" \
-    && ninja -C /tmp/rocksdb-build install \
-    && ldconfig \
-    && cp /tmp/rocksdb-build/tools/ldb /tmp/rocksdb-build/tools/sst_dump /usr/local/bin/ \
-    && cp /tmp/rocksdb-build/db_bench /usr/local/bin/ \
-    && rm -rf /tmp/rocksdb-${ROCKSDB_VERSION} /tmp/rocksdb-build
+COPY scripts/install-rocksdb.sh /tmp/install-rocksdb.sh
+RUN WITH_TOOLS=1 PREFIX=/usr/local ZSTD_HOME=/usr/local /tmp/install-rocksdb.sh && ldconfig
 
 # --- Stage 3: Build stellar-rpc ---
 FROM ubuntu:24.04 AS rpc-build
-ARG GO_VERSION=1.25.8
+ARG GO_VERSION=1.26.5
 ARG RUST_TOOLCHAIN_VERSION=stable
 ARG REPOSITORY_VERSION
 
@@ -67,11 +33,7 @@ ENV RUSTUP_HOME=/rust/.rust
 ENV PATH="/usr/local/go/bin:$CARGO_HOME/bin:${PATH}"
 ENV DEBIAN_FRONTEND=noninteractive
 
-# grocksdb cgo flags need -lsnappy -llz4 -lz at link time.
-RUN apt update && apt install -y \
-    build-essential curl git jq \
-    libsnappy-dev liblz4-dev zlib1g-dev \
-    && apt clean
+RUN apt update && apt install -y build-essential curl git jq && apt clean
 
 RUN curl -sSfL "https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz" \
     | tar -C /usr/local -xzf -
@@ -100,7 +62,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt update && apt install -y --no-install-recommends \
     ca-certificates curl wget gnupg apt-utils jq \
-    libsnappy1v5 liblz4-1 zlib1g \
     && apt clean
 
 # stellar-core from SDF apt repo (noble packages).

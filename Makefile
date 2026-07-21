@@ -2,6 +2,10 @@ all: check build test
 
 export RUSTFLAGS=-Dwarnings -Dclippy::all -Dclippy::pedantic
 
+# grocksdb's clean_link tag drops its default -lsnappy -llz4 -lz; our
+# librocksdb uses zstd only. CI sets the same via GOFLAGS in setup-go.
+export GOFLAGS := -tags=grocksdb_clean_link
+
 REPOSITORY_COMMIT_HASH := "$(shell git rev-parse HEAD)"
 ifeq (${REPOSITORY_COMMIT_HASH},"")
     $(error failed to retrieve git head commit hash)

@@ -21,7 +21,6 @@ import (
 	"context"
 	"fmt"
 	"runtime/cgo"
-	"time"
 	"unsafe"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
@@ -103,10 +102,12 @@ type Parameters struct {
 	NetworkPassphrase string
 	LedgerEntryGetter ledgerentries.LedgerEntryGetter
 	LedgerSeq         uint32
+	LedgerTime        uint64
 	BucketListSize    uint64
 	ResourceConfig    protocol.ResourceConfig
 	EnableDebug       bool
 	AuthMode          string
+	UseUpgradedAuth   bool
 	ProtocolVersion   uint32
 }
 
@@ -175,7 +176,7 @@ func getLedgerInfo(params Parameters) C.ledger_info_t {
 		network_passphrase: C.CString(params.NetworkPassphrase),
 		sequence_number:    C.uint32_t(params.LedgerSeq),
 		protocol_version:   C.uint32_t(params.ProtocolVersion),
-		timestamp:          C.uint64_t(time.Now().Unix()),
+		timestamp:          C.uint64_t(params.LedgerTime),
 		base_reserve:       defaultBaseReserve,
 		bucket_list_size:   C.uint64_t(params.BucketListSize),
 	}
@@ -268,6 +269,7 @@ func getInvokeHostFunctionPreflight(ctx context.Context, params Parameters) (Pre
 		resourceConfig,
 		C.bool(params.EnableDebug),
 		C.uint32_t(authMode),
+		C.bool(params.UseUpgradedAuth),
 	)
 
 	return GoPreflight(res), nil

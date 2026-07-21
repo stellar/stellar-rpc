@@ -12,6 +12,7 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/historyarchive"
 	backends "github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	"github.com/stellar/go-stellar-sdk/ingest/loadtest"
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
@@ -37,7 +38,11 @@ type Config struct {
 	LedgerBackend     backends.LedgerBackend
 	Timeout           time.Duration
 	OnIngestionRetry  backoff.Notify
-	Daemon            interfaces.Daemon
+	// OnLedgerIngested, if non-nil, is invoked after each ledger commits with its
+	// sequence and the duration that's recorded to ledger_ingestion_duration_seconds.
+	// Set by the load test to capture exact per-ledger timing without polling.
+	OnLedgerIngested func(seq uint32, d time.Duration)
+	Daemon           interfaces.Daemon
 }
 
 func NewService(cfg Config) *Service {
@@ -81,6 +86,7 @@ func newService(cfg Config) *Service {
 		ledgerBackend:     cfg.LedgerBackend,
 		networkPassPhrase: cfg.NetworkPassPhrase,
 		timeout:           cfg.Timeout,
+		onLedgerIngested:  cfg.OnLedgerIngested,
 		metrics: Metrics{
 			ingestionDurationMetric: ingestionDurationMetric,
 			latestLedgerMetric:      latestLedgerMetric,
@@ -110,11 +116,16 @@ func (s *Service) Start(cfg Config) {
 					// keep retrying until history archives are published
 					constantBackoff.Reset()
 				}
+				if errors.Is(err, loadtest.ErrLoadTestDone) {
+					// Load-test mode: synthetic ledger stream is exhausted.
+					// Stop retrying and let the daemon stay up so its DB can be queried
+					return backoff.Permanent(err)
+				}
 				return err
 			},
 			contextBackoff,
 			cfg.OnIngestionRetry)
-		if err != nil && !errors.Is(err, context.Canceled) {
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, loadtest.ErrLoadTestDone) {
 			s.logger.WithError(err).Fatal("could not run ingestion")
 		}
 	})
@@ -137,6 +148,7 @@ type Service struct {
 	wg                sync.WaitGroup
 	metrics           Metrics
 	latestIngestedSeq uint32
+	onLedgerIngested  func(seq uint32, d time.Duration)
 }
 
 func (s *Service) Close() error {
@@ -232,9 +244,13 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 		WithField("duration", time.Since(totalStartTime).Seconds()).
 		Debugf("Ingested ledger %d", sequence)
 
+	total := time.Since(totalStartTime)
 	s.metrics.ingestionDurationMetric.
 		With(prometheus.Labels{"type": "total"}).
-		Observe(time.Since(totalStartTime).Seconds())
+		Observe(total.Seconds())
+	if s.onLedgerIngested != nil {
+		s.onLedgerIngested(sequence, total)
+	}
 	if sequence > s.latestIngestedSeq {
 		s.latestIngestedSeq = sequence
 		s.metrics.latestLedgerMetric.Set(float64(sequence))

@@ -164,9 +164,11 @@ type GetterParameters struct {
 	Footprint         xdr.LedgerFootprint
 	ResourceConfig    protocol.ResourceConfig
 	AuthMode          string
+	UseUpgradedAuth   bool
 	ProtocolVersion   uint32
 	LedgerEntryGetter ledgerentries.LedgerEntryGetter
 	LedgerSeq         uint32
+	LedgerTime        uint64
 }
 
 func (pwp *WorkerPool) GetPreflight(ctx context.Context, params GetterParameters) (Preflight, error) {
@@ -183,11 +185,13 @@ func (pwp *WorkerPool) GetPreflight(ctx context.Context, params GetterParameters
 		NetworkPassphrase: pwp.networkPassphrase,
 		LedgerEntryGetter: wrappedGetter,
 		LedgerSeq:         params.LedgerSeq,
+		LedgerTime:        params.LedgerTime,
 		BucketListSize:    params.BucketListSize,
 		Footprint:         params.Footprint,
 		ResourceConfig:    params.ResourceConfig,
 		EnableDebug:       pwp.enableDebug,
 		AuthMode:          params.AuthMode,
+		UseUpgradedAuth:   params.UseUpgradedAuth,
 		ProtocolVersion:   params.ProtocolVersion,
 	}
 	resultC := make(chan workerResult)

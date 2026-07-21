@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+## [v27.1.1](https://github.com/stellar/stellar-rpc/compare/v27.1.0...v27.1.1)
+
+### Fixed
+* `getEvents` no longer misses events when one filter constrains `contractIds` or `type` and another filter leaves it empty ([#832](https://github.com/stellar/stellar-rpc/pull/832)).
+* Bumped dependencies to latest versions ([#842](https://github.com/stellar/stellar-rpc/pull/842)).
+* Disable built-in `rpc.*` methods ([#828](https://github.com/stellar/stellar-rpc/pull/828)).
+
+## [v27.1.0](https://github.com/stellar/stellar-rpc/compare/v27.0.0...v27.1.0)
+
+### Added
+* `simulateTransaction` now has a `UseUpgradedAuth` flag to opt-in to the `AddressV2` authorization scheme ([#783](https://github.com/stellar/stellar-rpc/pull/783)).
+* `getHealth` now returns `latestLedgerCloseTime` and `oldestLedgerCloseTime`, the unix timestamps (seconds) at which the latest and oldest ledgers closed. This lets clients assess ledger freshness from the lightweight health endpoint without fetching full ledger metadata via `getLatestLedger` ([#797](https://github.com/stellar/stellar-rpc/pull/797)).
+
+### Fixed
+* Query performance improvements via caching ([#801](https://github.com/stellar/stellar-rpc/pull/801)).
+* `simulateTransaction` now returns the ledger's close time rather than the execution timestamp to accurately reflect simulation state ([#742](https://github.com/stellar/stellar-rpc/pull/742)).
+
+
+## [v27.0.0](https://github.com/stellar/stellar-rpc/compare/v26.0.1...v27.0.0)
+
+### Breaking Changes
+* XDR has been updated to support Protocol 27 ([#761](https://github.com/stellar/stellar-rpc/pull/761), [#766](https://github.com/stellar/stellar-rpc/pull/766)).
+
+
+## [v26.0.1](https://github.com/stellar/stellar-rpc/compare/v26.0.0...v26.0.1)
+
+### Fixed
+* We no longer log the entire response payload under `--log-level=debug`.
+
 
 ## [v26.0.0](https://github.com/stellar/stellar-rpc/compare/v25.1.1...v26.0.0)
 

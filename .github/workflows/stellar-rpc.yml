@@ -37,6 +37,8 @@ jobs:
   build:
     name: Build
     strategy:
+      # One platform failing shouldn't hide whether the others pass.
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
@@ -51,9 +53,8 @@ jobs:
           - os: macos-latest
             rust_target: aarch64-apple-darwin
             go_arch: arm64
-          - os: windows-latest
-            rust_target: x86_64-pc-windows-gnu
-            go_arch: amd64
+          # No windows-latest: not a deployment target, and the storage
+          # engine needs deferred unlink, which Windows lacks.
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -79,14 +80,6 @@ jobs:
           CGO_ENABLED: 1
           GOARCH: ${{ matrix.go_arch }}
 
-  integration-p25-pkg:
-    name: Integration tests (P25)
-    uses: ./.github/workflows/integration-tests.yml
-    with:
-      protocol_version: '25'
-      core_deb_version: '26.0.0-3089.8e43a2d3b.jammy'
-      core_docker_img: 'stellar/stellar-core:26.0.0-3089.8e43a2d3b.jammy'
-
   integration-p26-pkg:
     name: Integration tests (P26)
     uses: ./.github/workflows/integration-tests.yml
@@ -94,6 +87,14 @@ jobs:
       protocol_version: '26'
       core_deb_version: '26.0.0-3089.8e43a2d3b.jammy'
       core_docker_img: 'stellar/stellar-core:26.0.0-3089.8e43a2d3b.jammy'
+
+  integration-p27-pkg:
+    name: Integration tests (P27)
+    uses: ./.github/workflows/integration-tests.yml
+    with:
+      protocol_version: '27'
+      core_deb_version: '27.0.0-3288.7696c069d.jammy'
+      core_docker_img: 'stellar/stellar-core:27.0.0-3288.7696c069d.jammy'
 
   # integration-p25-src:
   #   name: Integration tests (p25, core from source)

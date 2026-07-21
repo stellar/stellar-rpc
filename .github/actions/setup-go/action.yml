@@ -1,6 +1,10 @@
 name: 'Setup the Go environment'
 description: 'Installs go, libzstd, librocksdb, and restores/saves the build/module cache'
 inputs:
+  go-version:
+    description: 'Go toolchain version to install'
+    required: false
+    default: '1.26'
   go-arch:
     description: 'Target Go architecture (used for native lib cache keys when cross-compiling)'
     required: false
@@ -8,81 +12,116 @@ inputs:
 runs:
   using: "composite"
   steps:
-    # Capture ImageOS (e.g. ubuntu22, ubuntu24) for use in cache keys.
-    # This is a runner environment variable, not available in ${{ env.* }}
-    # context until explicitly exported to GITHUB_ENV.
-    - name: Detect OS version
-      if: runner.os == 'Linux'
+    # Runner-only env var; export it so the native-lib cache keys below can
+    # include it and invalidate when the image (and its toolchain) rotates.
+    - name: Detect runner image version
+      if: runner.os == 'Linux' || runner.os == 'macOS'
       shell: bash
-      run: echo "ImageOS=${ImageOS}" >> $GITHUB_ENV
+      run: echo "ImageOS=${ImageOS}" >> "$GITHUB_ENV"
+
+    # Normalize the target arch to Go's naming (amd64/arm64) so a job that
+    # omits go-arch shares one native-lib cache with the Build leg for that
+    # arch. runner.arch reports GitHub's naming (X64/ARM64).
+    - name: Resolve target architecture
+      shell: bash
+      run: |
+        arch="${{ inputs.go-arch }}"
+        if [ -z "$arch" ]; then
+          case "${{ runner.arch }}" in
+            X64)   arch=amd64 ;;
+            ARM64) arch=arm64 ;;
+            *)     arch="$(echo "${{ runner.arch }}" | tr '[:upper:]' '[:lower:]')" ;;
+          esac
+        fi
+        echo "TARGET_ARCH=$arch" >> "$GITHUB_ENV"
+        # Darwin's -DCMAKE_OSX_ARCHITECTURES wants x86_64, not amd64.
+        if [ "${{ runner.os }}" = macOS ]; then
+          case "$arch" in
+            amd64) echo "MACOS_ARCH=x86_64" >> "$GITHUB_ENV" ;;
+            arm64) echo "MACOS_ARCH=arm64"  >> "$GITHUB_ENV" ;;
+          esac
+        fi
 
     # --- libzstd ---
     - name: Cache libzstd
-      if: runner.os == 'Linux'
+      if: runner.os == 'Linux' || runner.os == 'macOS'
       id: cache-zstd
       uses: actions/cache@v4
       with:
         path: ~/.zstd
-        key: libzstd-1.5.7-${{ runner.os }}-${{ env.ImageOS }}-${{ inputs.go-arch || runner.arch }}-${{ hashFiles('scripts/install-zstd.sh') }}
+        key: libzstd-1.5.7-${{ runner.os }}-${{ env.ImageOS }}-${{ env.TARGET_ARCH }}-${{ hashFiles('scripts/install-zstd.sh') }}
 
-    - name: Build libzstd from source
+    - name: Build libzstd from source (Linux)
       if: runner.os == 'Linux' && steps.cache-zstd.outputs.cache-hit != 'true'
       shell: bash
       run: PREFIX="$HOME/.zstd" ./scripts/install-zstd.sh
 
-    - name: Install libzstd (macOS)
-      if: runner.os == 'macOS'
+    # From source (not brew) so it's pinned and built for the target arch,
+    # which the x86_64 leg needs when cross-compiling on arm64 runners.
+    - name: Build libzstd from source (macOS)
+      if: runner.os == 'macOS' && steps.cache-zstd.outputs.cache-hit != 'true'
       shell: bash
-      run: ./scripts/install-zstd.sh
+      run: PREFIX="$HOME/.zstd" ./scripts/install-zstd.sh
 
     # --- librocksdb ---
-    # System deps (snappy, lz4, zlib) aren't cached — install on every run.
-    - name: Install RocksDB link deps
-      if: runner.os == 'Linux'
-      shell: bash
-      run: |
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq libsnappy-dev liblz4-dev zlib1g-dev
-
+    # No snappy/lz4/zlib install: the Go side uses the grocksdb_clean_link
+    # tag (GOFLAGS, below), which drops grocksdb's `-lsnappy -llz4 -lz`, and
+    # our librocksdb is built with zstd only.
     - name: Cache librocksdb
-      if: runner.os == 'Linux'
+      if: runner.os == 'Linux' || runner.os == 'macOS'
       id: cache-rocksdb
       uses: actions/cache@v4
       with:
+        # Hash install-zstd.sh too: RocksDB links ~/.zstd, so a zstd bump
+        # must invalidate this cache and force a matching rebuild.
         path: ~/.rocksdb
-        key: librocksdb-10.9.1-${{ runner.os }}-${{ env.ImageOS }}-${{ inputs.go-arch || runner.arch }}-${{ hashFiles('scripts/install-rocksdb.sh') }}
+        key: librocksdb-10.9.1-${{ runner.os }}-${{ env.ImageOS }}-${{ env.TARGET_ARCH }}-${{ hashFiles('scripts/install-rocksdb.sh', 'scripts/install-zstd.sh') }}
 
-    - name: Build librocksdb from source
+    - name: Build librocksdb from source (Linux)
       if: runner.os == 'Linux' && steps.cache-rocksdb.outputs.cache-hit != 'true'
       shell: bash
       run: PREFIX="$HOME/.rocksdb" ZSTD_HOME="$HOME/.zstd" ./scripts/install-rocksdb.sh
 
-    - name: Install librocksdb (macOS)
-      if: runner.os == 'macOS'
+    - name: Build librocksdb from source (macOS)
+      if: runner.os == 'macOS' && steps.cache-rocksdb.outputs.cache-hit != 'true'
       shell: bash
-      run: ./scripts/install-rocksdb.sh
+      run: PREFIX="$HOME/.rocksdb" ZSTD_HOME="$HOME/.zstd" ./scripts/install-rocksdb.sh
 
-    # --- CGO flags + LD_LIBRARY_PATH ---
-    # Libs are in ~/.zstd and ~/.rocksdb (not /usr/local), so the
-    # compiler and dynamic linker need explicit paths.
-    - name: Configure CGO for native libs
+    # ~/.zstd and ~/.rocksdb aren't on the default search path, so pass them
+    # explicitly.
+    - name: Configure CGO for native libs (Linux)
       if: runner.os == 'Linux'
       shell: bash
       run: |
-        echo "CGO_CFLAGS=-I$HOME/.zstd/include -I$HOME/.rocksdb/include" >> $GITHUB_ENV
-        echo "CGO_LDFLAGS=-L$HOME/.zstd/lib -L$HOME/.rocksdb/lib" >> $GITHUB_ENV
-        echo "LD_LIBRARY_PATH=$HOME/.zstd/lib:$HOME/.rocksdb/lib" >> $GITHUB_ENV
+        echo "CGO_CFLAGS=-I$HOME/.zstd/include -I$HOME/.rocksdb/include" >> "$GITHUB_ENV"
+        echo "CGO_LDFLAGS=-L$HOME/.zstd/lib -L$HOME/.rocksdb/lib" >> "$GITHUB_ENV"
+        echo "LD_LIBRARY_PATH=$HOME/.zstd/lib:$HOME/.rocksdb/lib" >> "$GITHUB_ENV"
+
+    # No DYLD_LIBRARY_PATH: SIP strips DYLD_* when /bin/bash is exec'd, and
+    # CI only links the binary (never runs it), so it isn't needed.
+    - name: Configure CGO for native libs (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        echo "CGO_CFLAGS=-I$HOME/.zstd/include -I$HOME/.rocksdb/include" >> "$GITHUB_ENV"
+        echo "CGO_LDFLAGS=-L$HOME/.zstd/lib -L$HOME/.rocksdb/lib" >> "$GITHUB_ENV"
 
     - name: Set up Go
       uses: actions/setup-go@v6
       with:
-        go-version: '1.26'
+        go-version: ${{ inputs.go-version }}
         # unfortunately we cannot use the provided caching because it uses the
         # same cache for all workflows/jobs, leading to undesired cache clashes,
         # causing uncached test runs etc ...
         # You can see the cache key at https://github.com/actions/setup-go/blob/4e0b6c77c6448caafaff5eed51516cad78e7639a/src/cache-restore.ts#L34
         # There is a ticket to add prefixes for the cache, which should solve it https://github.com/actions/setup-go/issues/358
         cache: false
+
+    # Build grocksdb with clean_link for every go command in the job (build,
+    # test, CodeQL autobuild, golangci-lint). Mirrors the Makefile.
+    - name: Set GOFLAGS
+      shell: bash
+      run: echo "GOFLAGS=-tags=grocksdb_clean_link" >> "$GITHUB_ENV"
 
     # Restore original modification time of files based on the date of the most
     # recent commit that modified them as mtimes affect the Go test cache.
@@ -97,7 +136,7 @@ runs:
         echo 'KEY_PREFIX=${{ github.workflow }}-${{ github.job }}-${{ runner.os }}-${{ inputs.go-version }}-matrix(${{ join(matrix.*,'|') }})' >> $GITHUB_OUTPUT
         echo "GOCACHE=$(go env GOCACHE)" >> $GITHUB_OUTPUT
         echo "GOMODCACHE=$(go env GOMODCACHE)" >> $GITHUB_OUTPUT
-        if [ ${{ runner.os }} != 'Windows' ]; then echo SUDO='sudo' >> $GITHUB_OUTPUT; fi
+        echo SUDO='sudo' >> $GITHUB_OUTPUT
       id: variables
 
     # Cache the Go Modules downloaded during the job.
