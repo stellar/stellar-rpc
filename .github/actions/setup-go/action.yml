@@ -62,16 +62,32 @@ runs:
       shell: bash
       run: ./scripts/install-rocksdb.sh
 
-    # --- CGO flags + LD_LIBRARY_PATH ---
-    # Libs are in ~/.zstd and ~/.rocksdb (not /usr/local), so the
-    # compiler and dynamic linker need explicit paths.
-    - name: Configure CGO for native libs
+    # --- CGO flags + library search path ---
+    # Neither Linux's user-local prefixes (~/.zstd, ~/.rocksdb) nor macOS's
+    # Homebrew prefix are on the compiler's default search path, so both
+    # need the paths passed explicitly. Relying on the default search path
+    # here is what broke the macOS build previously: GitHub's macos-latest
+    # runner image moves Homebrew's prefix around from one image to the
+    # next (e.g. /opt/homebrew vs /usr/local), so a path that happens to
+    # be searched by default on one image snapshot silently stops working
+    # on the next.
+    - name: Configure CGO for native libs (Linux)
       if: runner.os == 'Linux'
       shell: bash
       run: |
         echo "CGO_CFLAGS=-I$HOME/.zstd/include -I$HOME/.rocksdb/include" >> $GITHUB_ENV
         echo "CGO_LDFLAGS=-L$HOME/.zstd/lib -L$HOME/.rocksdb/lib" >> $GITHUB_ENV
         echo "LD_LIBRARY_PATH=$HOME/.zstd/lib:$HOME/.rocksdb/lib" >> $GITHUB_ENV
+
+    - name: Configure CGO for native libs (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        ZSTD_PREFIX="$(brew --prefix zstd)"
+        ROCKSDB_PREFIX="$(brew --prefix rocksdb)"
+        echo "CGO_CFLAGS=-I$ZSTD_PREFIX/include -I$ROCKSDB_PREFIX/include" >> $GITHUB_ENV
+        echo "CGO_LDFLAGS=-L$ZSTD_PREFIX/lib -L$ROCKSDB_PREFIX/lib" >> $GITHUB_ENV
+        echo "DYLD_LIBRARY_PATH=$ZSTD_PREFIX/lib:$ROCKSDB_PREFIX/lib" >> $GITHUB_ENV
 
     - name: Set up Go
       uses: actions/setup-go@v6
