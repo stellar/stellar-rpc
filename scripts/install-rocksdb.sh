@@ -38,11 +38,17 @@ PREFIX="${PREFIX:-/usr/local}"
 
 case "$(uname -s)" in
   Darwin)
+    # grocksdb's own Go bindings hard-code `-lsnappy -llz4 -lz` in their
+    # #cgo LDFLAGS unconditionally, regardless of what this RocksDB build
+    # was actually compiled with (it isn't — WITH_ZSTD is the only codec
+    # enabled below) — so the final `go build` link fails outright
+    # without them, even though nothing ever calls into them.
     if command -v brew &>/dev/null; then
       command -v cmake &>/dev/null || brew install cmake
       command -v ninja &>/dev/null || brew install ninja
+      brew install snappy lz4
     else
-      echo "error: homebrew not found, install cmake/ninja manually" >&2
+      echo "error: homebrew not found, install cmake/ninja/snappy/lz4 manually" >&2
       exit 1
     fi
 
