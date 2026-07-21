@@ -37,6 +37,12 @@ jobs:
   build:
     name: Build
     strategy:
+      # One platform failing shouldn't hide whether the others actually
+      # pass — Windows failing (a separate, pre-existing gap: the
+      # setup-go action never installs zstd/RocksDB for it at all) was
+      # cancelling every other platform's build before it could reach
+      # its own conclusion.
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
