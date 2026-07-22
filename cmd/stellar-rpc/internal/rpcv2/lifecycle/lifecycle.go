@@ -42,10 +42,11 @@ type Config struct {
 	// no handle is published.
 	Router HandleDiscarder
 
-	// grace is the deferred-deletion wait before destroying demoted hot chunks. It
-	// is 0 until the read server sets a request deadline (design: T = max request
-	// timeout + margin); with no in-flight readers a zero wait is safe.
-	grace time.Duration
+	// Grace is the deferred-deletion wait before destroying demoted resources.
+	// Unset (<= 0) takes defaultGrace via WithLifecycleDefaults; tests override it
+	// small. TODO(#772): derive from the read server's request deadline
+	// (T = max request timeout + margin) and boot-validate T exceeds that timeout.
+	Grace time.Duration
 
 	// opRetryAttempts / opRetryBackoff bound the per-op retry the discard/prune
 	// sweeps use (see runOps). Not config-wired: production always runs the
@@ -59,6 +60,11 @@ type Config struct {
 const (
 	defaultOpRetryAttempts = 3
 	defaultOpRetryBackoff  = 5 * time.Second
+	// defaultGrace is the placeholder deferred-deletion wait until the read server
+	// derives it from the request deadline (#772). Chosen to comfortably outlast
+	// any plausible request; the wait falls once per run, minutes against runs
+	// hours apart.
+	defaultGrace = 5 * time.Minute
 )
 
 // WithLifecycleDefaults returns a copy with the embedded ExecConfig defaults and
@@ -70,6 +76,9 @@ func (cfg Config) WithLifecycleDefaults() Config {
 	}
 	if cfg.opRetryBackoff <= 0 {
 		cfg.opRetryBackoff = defaultOpRetryBackoff
+	}
+	if cfg.Grace <= 0 {
+		cfg.Grace = defaultGrace
 	}
 	return cfg
 }
