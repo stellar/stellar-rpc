@@ -12,7 +12,7 @@ import (
 
 // TestStageSentinels pins the Stage→(TxIdx, OpIdx) cursor-sentinel mapping.
 // StageSentinels is the SINGLE definition of this policy for both storage
-// backends (PayloadsFromLedgerEvents and db/event.go's InsertEvents), so these
+// backends (PayloadsFromLedgerEvents and sqlitedb/event.go's InsertEvents), so these
 // values ARE the v1 getEvents cursor-encoding contract:
 //
 //   - BeforeAllTxs → (0, 0): sorts before any real transaction (TxIdx >= 1);
