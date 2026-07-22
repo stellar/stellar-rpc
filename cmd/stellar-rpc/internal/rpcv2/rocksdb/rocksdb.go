@@ -25,6 +25,7 @@ var (
 	ErrInvalidConfig = errors.New("rocksdb: invalid config")
 	ErrCFNotFound    = errors.New("rocksdb: column family not configured at open")
 	ErrStoreClosed   = errors.New("rocksdb: store is closed")
+	ErrNilSnapshot   = errors.New("rocksdb: nil or released snapshot")
 )
 
 const (
@@ -112,6 +113,10 @@ type Store struct {
 	mu sync.RWMutex
 
 	closed atomic.Bool
+
+	// snapRefs counts snapshots not yet returned to ReleaseSnapshot; teardown
+	// logs a leak when it closes with snapRefs > 0.
+	snapRefs atomic.Int64
 }
 
 // New validates cfg and returns a fully-open Store. On any failure
@@ -170,6 +175,12 @@ func (s *Store) Put(cf string, key, value []byte) error {
 // Get returns (value, true, nil) on hit, (nil, false, nil) on miss.
 // Returned value is a fresh copy the caller owns.
 func (s *Store) Get(cf string, key []byte) ([]byte, bool, error) {
+	return s.getRO(s.ro, cf, key)
+}
+
+// getRO is the shared body for Get and GetAsOf; ro selects the read view
+// (s.ro for a live read, a snapshot-pinned ReadOptions for GetAsOf).
+func (s *Store) getRO(ro *grocksdb.ReadOptions, cf string, key []byte) ([]byte, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if err := s.checkOpen(); err != nil {
@@ -179,7 +190,7 @@ func (s *Store) Get(cf string, key []byte) ([]byte, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	handle, err := s.db.GetPinnedCFV2(s.ro, cfh, key)
+	handle, err := s.db.GetPinnedCFV2(ro, cfh, key)
 	if err != nil {
 		return nil, false, err
 	}
@@ -273,6 +284,12 @@ type Entry struct {
 // Up-front errors (closed/never-opened/unknown CF) and mid-walk
 // RocksDB errors yield once with (Entry{}, err).
 func (s *Store) Iterate(cf string, prefix []byte) iter.Seq2[Entry, error] {
+	return s.iterateRO(s.ro, cf, prefix)
+}
+
+// iterateRO is the shared body for Iterate and IterateAsOf; ro selects the read
+// view (s.ro for a live scan, a snapshot-pinned ReadOptions for IterateAsOf).
+func (s *Store) iterateRO(ro *grocksdb.ReadOptions, cf string, prefix []byte) iter.Seq2[Entry, error] {
 	return func(yield func(Entry, error) bool) {
 		s.mu.RLock()
 		defer s.mu.RUnlock()
@@ -287,7 +304,7 @@ func (s *Store) Iterate(cf string, prefix []byte) iter.Seq2[Entry, error] {
 			return
 		}
 
-		it := s.db.NewIteratorCF(s.ro, cfh)
+		it := s.db.NewIteratorCF(ro, cfh)
 		defer it.Close()
 
 		// Copy prefix: the caller may mutate its buffer while ranging.
@@ -392,6 +409,73 @@ func (s *Store) IterateRange(cf string, start, end []byte) iter.Seq2[Entry, erro
 	}
 }
 
+// Snapshot is a pinned, repeatable-read view of the store. Acquire with
+// NewSnapshot, read through GetAsOf / IterateAsOf, and release it via
+// ReleaseSnapshot when done: a leaked snapshot is a held C resource never
+// reclaimed until the store closes.
+type Snapshot struct {
+	snap *grocksdb.Snapshot
+}
+
+// NewSnapshot pins the store's current state for snapshot-scoped reads. Fails
+// with ErrStoreClosed on a closed store.
+func (s *Store) NewSnapshot() (*Snapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.checkOpen(); err != nil {
+		return nil, err
+	}
+	s.snapRefs.Add(1)
+	return &Snapshot{snap: s.db.NewSnapshot()}, nil
+}
+
+// ReleaseSnapshot releases a snapshot acquired from NewSnapshot. Nil-safe and
+// idempotent. If the store already tore down its C DB, the release is skipped:
+// teardown already freed the snapshot along with the DB, so there is nothing
+// left to release.
+func (s *Store) ReleaseSnapshot(snap *Snapshot) {
+	if snap == nil || snap.snap == nil {
+		return
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	s.snapRefs.Add(-1)
+	if s.db != nil {
+		s.db.ReleaseSnapshot(snap.snap)
+	}
+	snap.snap = nil
+}
+
+// GetAsOf is Get pinned to snap's view. A nil or released snapshot returns
+// ErrNilSnapshot.
+func (s *Store) GetAsOf(snap *Snapshot, cf string, key []byte) ([]byte, bool, error) {
+	if snap == nil || snap.snap == nil {
+		return nil, false, ErrNilSnapshot
+	}
+	// Fresh ReadOptions: setting the snapshot on shared s.ro would surface it
+	// to every concurrent live reader (same reason as BatchMultiGet).
+	ro := grocksdb.NewDefaultReadOptions()
+	ro.SetSnapshot(snap.snap)
+	defer ro.Destroy()
+	return s.getRO(ro, cf, key)
+}
+
+// IterateAsOf is Iterate pinned to snap's view: the whole prefix scan is
+// unaffected by concurrent writes. A nil or released snapshot yields
+// ErrNilSnapshot once.
+func (s *Store) IterateAsOf(snap *Snapshot, cf string, prefix []byte) iter.Seq2[Entry, error] {
+	return func(yield func(Entry, error) bool) {
+		if snap == nil || snap.snap == nil {
+			yield(Entry{}, ErrNilSnapshot)
+			return
+		}
+		ro := grocksdb.NewDefaultReadOptions()
+		ro.SetSnapshot(snap.snap)
+		defer ro.Destroy()
+		s.iterateRO(ro, cf, prefix)(yield)
+	}
+}
+
 // Flush drains the active memtable to an SST. Callers do NOT need
 // to call this before Close — Close auto-Flushes internally.
 func (s *Store) Flush() error {
@@ -409,18 +493,36 @@ func (s *Store) IsClosed() bool {
 	return s.closed.Load()
 }
 
-// Close shuts the store down. Idempotent. Waits for any in-flight
-// ops to settle, then auto-Flushes the active memtable (best-effort)
-// so the next graceful New on the same path replays zero WAL. On
-// Flush failure: logged, teardown proceeds; data stays durable in
-// the WAL and replays on the next New.
+// Close shuts the store down. Idempotent. Sets the closed flag, waits for
+// in-flight ops to drain, then tears down. Auto-Flushes the memtable
+// (best-effort) so the next graceful New on the same path replays zero WAL; on
+// Flush failure teardown still proceeds and the WAL replays on the next New.
 func (s *Store) Close() error {
-	if !s.closed.CompareAndSwap(false, true) {
-		return nil
-	}
-
+	s.closed.Store(true)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.teardownLocked()
+}
+
+// CloseIfIdle is the non-blocking variant of Close used by deferred deletion.
+// It sets the closed flag, then tears down ONLY if no op is in flight; if one
+// still holds the read-lock it returns (false, nil) at once, leaving the store
+// closed to new ops. The straggler's next op then fails with ErrStoreClosed,
+// and a later retry tears down once it has drained. The closed flag is never
+// rolled back, which is safe only because this runs on a resource being deleted.
+func (s *Store) CloseIfIdle() (bool, error) {
+	s.closed.Store(true)
+	if !s.mu.TryLock() {
+		return false, nil
+	}
+	defer s.mu.Unlock()
+	return true, s.teardownLocked()
+}
+
+// teardownLocked frees every C resource once. The caller MUST hold mu.Lock so
+// no op is in flight against the C DB. Idempotent via the s.db == nil latch,
+// which also covers a half-built store whose constructAndOpen never set s.db.
+func (s *Store) teardownLocked() error {
 	if s.db == nil {
 		return nil
 	}
@@ -432,6 +534,10 @@ func (s *Store) Close() error {
 			s.cfg.Logger.WithError(err).Warnf(
 				"rocksdb: graceful close Flush failed at %s; next Open will replay WAL", s.cfg.Path)
 		}
+	}
+
+	if n := s.snapRefs.Load(); n > 0 {
+		s.cfg.Logger.Warnf("rocksdb: closing %s with %d unreleased snapshot(s)", s.cfg.Path, n)
 	}
 
 	for _, cfh := range s.cfHandles {
@@ -456,6 +562,7 @@ func (s *Store) Close() error {
 		s.cache.Destroy()
 		s.cache = nil
 	}
+	s.db = nil // latch: a second teardown no-ops
 	return nil
 }
 
