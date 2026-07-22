@@ -17,11 +17,11 @@ import (
 	"github.com/stellar/go-stellar-sdk/toid"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 type transactionsRPCHandler struct {
-	ledgerReader      db.LedgerReader
+	ledgerReader      store.LedgerReader
 	maxLimit          uint
 	defaultLimit      uint
 	logger            *log.Entry
@@ -70,7 +70,7 @@ func (h transactionsRPCHandler) initializePagination(request protocol.GetTransac
 
 // fetchLedgerData calls the meta table to fetch the corresponding ledger data.
 func (h transactionsRPCHandler) fetchLedgerData(ctx context.Context, ledgerSeq uint32,
-	readTx db.LedgerReaderTx,
+	readTx store.LedgerReaderTx,
 ) (xdr.LedgerCloseMeta, error) {
 	ledger, found, err := readTx.GetLedger(ctx, ledgerSeq)
 	if err != nil {
@@ -141,7 +141,7 @@ func (h transactionsRPCHandler) processTransactionsInLedger(
 			}
 		}
 
-		tx, err := db.ParseTransaction(ledger, ingestTx)
+		tx, err := store.ParseTransaction(ledger, ingestTx)
 		if err != nil {
 			return nil, false, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
@@ -286,7 +286,7 @@ func (h transactionsRPCHandler) getTransactionsByLedgerSequence(ctx context.Cont
 	}, nil
 }
 
-func NewGetTransactionsHandler(logger *log.Entry, ledgerReader db.LedgerReader, maxLimit,
+func NewGetTransactionsHandler(logger *log.Entry, ledgerReader store.LedgerReader, maxLimit,
 	defaultLimit uint, networkPassphrase string,
 ) jrpc2.Handler {
 	transactionsHandler := transactionsRPCHandler{

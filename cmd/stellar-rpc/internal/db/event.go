@@ -18,6 +18,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 const (
@@ -25,36 +26,9 @@ const (
 	firstLedger    = uint32(2)
 )
 
-// TopicCondition represents a single topic column equality constraint, where
-// the column field matches the `topicN` column within the database.
-type TopicCondition struct {
-	Column int
-	Value  []byte
-}
-
-// TopicFilter is a conjunction (AND) of `TopicCondition`s. All conditions must
-// match for the filter to be satisfied.
-type TopicFilter []TopicCondition
-
-// TopicFilters is a disjunction (OR) of `TopicFilter`s. If any `TopicFilter`
-// matches a row, the DB event is considered a candidate for further filtering.
-type TopicFilters []TopicFilter
-
 // EventWriter is used during ingestion of events from LCM to DB
 type EventWriter interface {
 	InsertEvents(lcm xdr.LedgerCloseMeta) error
-}
-
-// EventReader has all the public methods to fetch events from DB
-type EventReader interface {
-	GetEvents(
-		ctx context.Context,
-		cursorRange protocol.CursorRange,
-		contractIDs [][]byte,
-		topics TopicFilters,
-		eventTypes []int,
-		f ScanFunction,
-	) error
 }
 
 type eventHandler struct {
@@ -69,7 +43,7 @@ type dbEvent struct {
 	Cursor string
 }
 
-func NewEventReader(log *log.Entry, db db.SessionInterface, passphrase string) EventReader {
+func NewEventReader(log *log.Entry, db db.SessionInterface, passphrase string) store.EventReader {
 	return &eventHandler{log: log, db: db, passphrase: passphrase}
 }
 
@@ -290,13 +264,6 @@ func insertEvents(
 	), nil
 }
 
-type ScanFunction func(
-	event xdr.DiagnosticEvent,
-	cursor protocol.Cursor,
-	ledgerCloseTimestamp int64,
-	txHash *xdr.Hash,
-) bool
-
 // trimEvents removes all Events which fall outside the ledger retention window.
 func (eventHandler *eventHandler) trimEvents(latestLedgerSeq uint32, retentionWindow uint32) error {
 	if latestLedgerSeq+1 <= retentionWindow {
@@ -325,9 +292,9 @@ func (eventHandler *eventHandler) GetEvents(
 	ctx context.Context,
 	cursorRange protocol.CursorRange,
 	contractIDs [][]byte,
-	topics TopicFilters,
+	topics store.TopicFilters,
 	eventTypes []int,
-	scanner ScanFunction,
+	scanner store.ScanFunction,
 ) error {
 	start := time.Now()
 

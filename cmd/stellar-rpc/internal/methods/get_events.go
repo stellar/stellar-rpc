@@ -16,7 +16,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 )
 
@@ -26,11 +26,11 @@ const (
 )
 
 type eventsRPCHandler struct {
-	dbReader     db.EventReader
+	dbReader     store.EventReader
 	maxLimit     uint
 	defaultLimit uint
 	logger       *log.Entry
-	ledgerReader db.LedgerReader
+	ledgerReader store.LedgerReader
 }
 
 func combineContractIDs(filters []protocol.EventFilter) ([][]byte, error) {
@@ -79,8 +79,8 @@ func combineEventTypes(filters []protocol.EventFilter) []int {
 	return uniqueEventTypes
 }
 
-func combineTopics(filters []protocol.EventFilter) (db.TopicFilters, error) {
-	topicFilters := make(db.TopicFilters, 0, len(filters))
+func combineTopics(filters []protocol.EventFilter) (store.TopicFilters, error) {
+	topicFilters := make(store.TopicFilters, 0, len(filters))
 
 	for _, filter := range filters {
 		if len(filter.Topics) == 0 {
@@ -89,7 +89,7 @@ func combineTopics(filters []protocol.EventFilter) (db.TopicFilters, error) {
 
 		// Each topic is an OR...
 		for _, topicFilter := range filter.Topics {
-			conditions := make(db.TopicFilter, 0, len(topicFilter))
+			conditions := make(store.TopicFilter, 0, len(topicFilter))
 			// ...but each segment within a topic is an AND.
 			for i, segmentFilter := range topicFilter {
 				if segmentFilter.Wildcard != nil || segmentFilter.ScVal == nil {
@@ -99,7 +99,7 @@ func combineTopics(filters []protocol.EventFilter) (db.TopicFilters, error) {
 				if err != nil {
 					return nil, fmt.Errorf("failed to marshal segment: %w", err)
 				}
-				conditions = append(conditions, db.TopicCondition{
+				conditions = append(conditions, store.TopicCondition{
 					Column: i + 1, // columns start with `topic1`
 					Value:  encodedTopic,
 				})
@@ -195,7 +195,7 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 	eventTypes := combineEventTypes(request.Filters)
 
 	// Scan function to apply filters
-	var eventScanFunction db.ScanFunction = func(
+	var eventScanFunction store.ScanFunction = func(
 		event xdr.DiagnosticEvent, cursor protocol.Cursor, ledgerCloseTimestamp int64, txHash *xdr.Hash,
 	) bool {
 		if request.Matches(event) {
@@ -331,10 +331,10 @@ func eventInfoForEvent(
 // NewGetEventsHandler returns a json rpc handler to fetch and filter events
 func NewGetEventsHandler(
 	logger *log.Entry,
-	dbReader db.EventReader,
+	dbReader store.EventReader,
 	maxLimit uint,
 	defaultLimit uint,
-	ledgerReader db.LedgerReader,
+	ledgerReader store.LedgerReader,
 ) jrpc2.Handler {
 	eventsHandler := eventsRPCHandler{
 		dbReader:     dbReader,

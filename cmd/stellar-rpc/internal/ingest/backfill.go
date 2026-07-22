@@ -14,11 +14,13 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/limits"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 const (
 	// ChunkSize is the number of ledgers to read/write per commit during backfill.
-	ChunkSize uint32 = config.OneDayOfLedgers / 18 // = 960 ledgers, approx. 2Gb of RAM usage
+	ChunkSize uint32 = limits.OneDayOfLedgers / 18 // = 960 ledgers, approx. 2Gb of RAM usage
 	// Acceptable number of ledgers that may be missing from the backfill tail/head
 	ledgerThreshold uint32 = 384 // six checkpoints/~30 minutes of ledgers
 )
@@ -66,7 +68,7 @@ func NewBackfillMeta(
 	// Query local DB to determine min and max sequence numbers among the written ledgers
 	var dbIsEmpty bool
 	ledgerRange, err := reader.GetLedgerRange(ctx)
-	if errors.Is(err, db.ErrEmptyDB) {
+	if errors.Is(err, store.ErrEmptyDB) {
 		dbIsEmpty = true
 	} else if err != nil {
 		return BackfillMeta{}, errors.Wrap(err, "could not get ledger range from local DB")
@@ -246,7 +248,7 @@ func (b *BackfillMeta) verifyDbGapless(ctx context.Context, timeout time.Duratio
 	defer cancelCheckNoGaps()
 
 	ledgerRange, err := b.dbInfo.reader.GetLedgerRange(ctx)
-	if errors.Is(err, db.ErrEmptyDB) {
+	if errors.Is(err, store.ErrEmptyDB) {
 		return 0, 0, nil // empty DB is considered gapless
 	} else if err != nil {
 		return 0, 0, errors.Wrap(err, "db verify: could not get ledger range")

@@ -18,6 +18,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 func createContractEvent() xdr.ContractEvent {
@@ -80,7 +81,7 @@ func TestTransactionEvent(t *testing.T) {
 	testCases := []struct {
 		name       string
 		txMeta     xdr.TransactionMeta
-		expectedTx Transaction
+		expectedTx store.Transaction
 	}{
 		{
 			name: "V4 with all events",
@@ -109,7 +110,7 @@ func TestTransactionEvent(t *testing.T) {
 					},
 				},
 			},
-			expectedTx: Transaction{
+			expectedTx: store.Transaction{
 				ContractEvents: [][][]byte{
 					{
 						mustMarshalBinary(createContractEvent()),
@@ -154,7 +155,7 @@ func TestTransactionNotFound(t *testing.T) {
 
 	reader := NewTransactionReader(log, db, passphrase)
 	_, err := reader.GetTransaction(context.TODO(), xdr.Hash{})
-	require.ErrorIs(t, err, ErrNoTransaction)
+	require.ErrorIs(t, err, store.ErrNoTransaction)
 }
 
 func txMetaWithEvents(acctSeq uint32) xdr.LedgerCloseMeta {
@@ -222,7 +223,7 @@ func TestTransactionFound(t *testing.T) {
 	// check 404 case
 	reader := NewTransactionReader(log, db, passphrase)
 	_, err = reader.GetTransaction(ctx, xdr.Hash{})
-	require.ErrorIs(t, err, ErrNoTransaction)
+	require.ErrorIs(t, err, store.ErrNoTransaction)
 
 	eventReader := NewEventReader(log, db, passphrase)
 	start := protocol.Cursor{Ledger: 1}

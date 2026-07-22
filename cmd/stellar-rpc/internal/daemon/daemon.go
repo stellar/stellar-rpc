@@ -38,6 +38,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/util"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version"
 )
 
 const (
@@ -256,8 +257,8 @@ func setupLogger(cfg *config.Config, logger *supportlog.Entry) *supportlog.Entry
 		logger.UseJSONFormatter()
 	}
 	logger.WithFields(supportlog.F{
-		"version": config.Version,
-		"commit":  config.CommitHash,
+		"version": version.Version,    //nolint:goconst // log field name, not a shared constant
+		"commit":  version.CommitHash, //nolint:goconst // log field name, not a shared constant
 	}).Info("starting Stellar RPC")
 	return logger
 }

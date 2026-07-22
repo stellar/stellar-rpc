@@ -8,7 +8,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 type LedgerKeyAndEntry struct {
@@ -23,7 +23,7 @@ type LedgerEntryGetter interface {
 
 // NewLedgerEntryGetter creates a LedgerEntryGetter which obtains the latest known value of the given ledger entries
 func NewLedgerEntryGetter(coreClient interfaces.FastCoreClient,
-	latestLedgerReader db.LedgerReader,
+	latestLedgerReader store.LedgerReader,
 ) LedgerEntryGetter {
 	return &coreLedgerEntryGetter{
 		coreClient: coreClient,
@@ -45,7 +45,7 @@ func NewLedgerEntryAtGetter(coreClient interfaces.FastCoreClient, atLedger uint3
 type coreLedgerEntryGetter struct {
 	coreClient         interfaces.FastCoreClient
 	atLedger           uint32
-	latestLedgerReader db.LedgerReader
+	latestLedgerReader store.LedgerReader
 }
 
 func (c coreLedgerEntryGetter) GetLedgerEntries(

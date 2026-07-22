@@ -10,6 +10,8 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/stellar/go-stellar-sdk/support/datastore"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version"
 )
 
 // Config represents the configuration of a stellar-rpc server
@@ -169,7 +171,7 @@ func (cfg *Config) loadDefaults() error {
 			}
 		}
 	}
-	cfg.HistoryArchiveUserAgent = "stellar-rpc/" + Version
+	cfg.HistoryArchiveUserAgent = "stellar-rpc/" + version.Version
 	return nil
 }
 

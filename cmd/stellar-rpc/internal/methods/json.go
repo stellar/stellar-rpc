@@ -5,11 +5,11 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 )
 
-func transactionToJSON(tx db.Transaction) (
+func transactionToJSON(tx store.Transaction) (
 	[]byte,
 	[]byte,
 	[]byte,
@@ -36,7 +36,7 @@ func transactionToJSON(tx db.Transaction) (
 	return result, envelope, resultMeta, nil
 }
 
-func ledgerToJSON(chunk *db.LedgerMetadataChunk) ([]byte, []byte, error) {
+func ledgerToJSON(chunk *store.LedgerMetadataChunk) ([]byte, []byte, error) {
 	var err error
 	var closeMetaJSON, headerJSON []byte
 

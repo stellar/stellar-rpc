@@ -15,8 +15,8 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/logmetrics"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version"
 )
 
 func (d *Daemon) registerMetrics() {
@@ -32,10 +32,10 @@ func (d *Daemon) registerMetrics() {
 		[]string{"version", "goversion", "commit", "branch", "build_timestamp"},
 	)
 	buildInfoGauge.With(prometheus.Labels{
-		"version":         config.Version,
-		"commit":          config.CommitHash,
-		"branch":          config.Branch,
-		"build_timestamp": config.BuildTimestamp,
+		"version":         version.Version,
+		"commit":          version.CommitHash,
+		"branch":          version.Branch,
+		"build_timestamp": version.BuildTimestamp,
 		"goversion":       runtime.Version(),
 	}).Inc()
 

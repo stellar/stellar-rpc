@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 func getProtocolVersion(
 	ctx context.Context,
-	ledgerReader db.LedgerReader,
+	ledgerReader store.LedgerReader,
 ) (uint32, error) {
 	latestLedger, err := ledgerReader.GetLatestLedgerSequence(ctx)
 	if err != nil {

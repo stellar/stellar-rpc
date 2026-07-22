@@ -15,7 +15,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 )
 
@@ -25,7 +25,7 @@ import (
 func NewSendTransactionHandler(
 	daemon interfaces.Daemon,
 	logger *log.Entry,
-	ledgerReader db.LedgerReader,
+	ledgerReader store.LedgerReader,
 	passphrase string,
 	decodeOptions xdr.DecodeOptions,
 ) jrpc2.Handler {

@@ -7,6 +7,8 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 const (
@@ -132,7 +134,7 @@ func newGuardedDataMigration(
 ) (Migration, error) {
 	metaKey := "Migration" + uniqueMigrationName + "Done"
 	previouslyMigrated, err := getMetaBool(ctx, db, metaKey)
-	if err != nil && !errors.Is(err, ErrEmptyDB) {
+	if err != nil && !errors.Is(err, store.ErrEmptyDB) {
 		return nil, err
 	}
 	if previouslyMigrated {
@@ -183,7 +185,7 @@ func (g *guardedMigration) Commit(ctx context.Context) error {
 func GetMigrationLedgerRange(ctx context.Context, db *DB, retentionWindow uint32) (LedgerSeqRange, error) {
 	firstLedgerToMigrate := firstLedger
 	latestLedger, err := NewLedgerReader(db).GetLatestLedgerSequence(ctx)
-	if err != nil && !errors.Is(err, ErrEmptyDB) {
+	if err != nil && !errors.Is(err, store.ErrEmptyDB) {
 		return LedgerSeqRange{}, fmt.Errorf("failed to get latest ledger sequence: %w", err)
 	}
 	if latestLedger > retentionWindow {

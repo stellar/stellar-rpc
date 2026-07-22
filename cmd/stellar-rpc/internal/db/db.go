@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"embed"
-	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -21,12 +20,11 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 //go:embed sqlmigrations/*.sql
 var sqlMigrations embed.FS
-
-var ErrEmptyDB = errors.New("DB is empty")
 
 const (
 	metaTableName = "metadata"
@@ -145,7 +143,7 @@ func getMetaValue(ctx context.Context, q db.SessionInterface, key string) (strin
 	}
 	switch len(results) {
 	case 0:
-		return "", ErrEmptyDB
+		return "", store.ErrEmptyDB
 	case 1:
 		// expected length on an initialized DB
 	default:

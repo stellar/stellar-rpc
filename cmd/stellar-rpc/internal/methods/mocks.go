@@ -8,14 +8,14 @@ import (
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 var (
-	_ db.LedgerReader           = &MockLedgerReader{}
-	_ db.LedgerReaderTx         = &MockLedgerReaderTx{}
+	_ store.LedgerReader        = &MockLedgerReader{}
+	_ store.LedgerReaderTx      = &MockLedgerReaderTx{}
 	_ rpcdatastore.LedgerReader = &MockDatastoreReader{}
 )
 
@@ -28,7 +28,7 @@ func (m *MockLedgerReader) GetLedger(ctx context.Context, sequence uint32) (xdr.
 	return args.Get(0).(xdr.LedgerCloseMeta), args.Bool(1), args.Error(2) //nolint:forcetypeassert
 }
 
-func (m *MockLedgerReader) StreamAllLedgers(ctx context.Context, f db.StreamLedgerFn) error {
+func (m *MockLedgerReader) StreamAllLedgers(ctx context.Context, f store.StreamLedgerFn) error {
 	args := m.Called(ctx, f)
 	return args.Error(0)
 }
@@ -48,15 +48,15 @@ func (m *MockLedgerReader) GetLedgerCountInRange(
 }
 
 func (m *MockLedgerReader) StreamLedgerRange(ctx context.Context, startLedger, endLedger uint32,
-	f db.StreamLedgerFn,
+	f store.StreamLedgerFn,
 ) error {
 	args := m.Called(ctx, startLedger, endLedger, f)
 	return args.Error(0)
 }
 
-func (m *MockLedgerReader) NewTx(ctx context.Context) (db.LedgerReaderTx, error) {
+func (m *MockLedgerReader) NewTx(ctx context.Context) (store.LedgerReaderTx, error) {
 	args := m.Called(ctx)
-	return args.Get(0).(db.LedgerReaderTx), args.Error(1) //nolint:forcetypeassert
+	return args.Get(0).(store.LedgerReaderTx), args.Error(1) //nolint:forcetypeassert
 }
 
 func (m *MockLedgerReader) GetLatestLedgerSequence(ctx context.Context) (uint32, error) {
@@ -73,9 +73,10 @@ func (m *MockLedgerReaderTx) GetLedgerRange(ctx context.Context) (ledgerbucketwi
 	return args.Get(0).(ledgerbucketwindow.LedgerRange), args.Error(1) //nolint:forcetypeassert
 }
 
-func (m *MockLedgerReaderTx) BatchGetLedgers(ctx context.Context, start, end uint32) ([]db.LedgerMetadataChunk, error) {
+func (m *MockLedgerReaderTx) BatchGetLedgers(ctx context.Context, start, end uint32,
+) ([]store.LedgerMetadataChunk, error) {
 	args := m.Called(ctx, start, end)
-	return args.Get(0).([]db.LedgerMetadataChunk), args.Error(1) //nolint:forcetypeassert
+	return args.Get(0).([]store.LedgerMetadataChunk), args.Error(1) //nolint:forcetypeassert
 }
 
 func (m *MockLedgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {

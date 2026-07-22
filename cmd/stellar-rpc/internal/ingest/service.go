@@ -19,6 +19,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/feewindow"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/util"
 )
 
@@ -179,7 +180,7 @@ func (s *Service) getNextLedgerSequence(ctx context.Context,
 	case err == nil:
 		nextLedgerSeq = curLedgerSeq + 1
 
-	case errors.Is(err, db.ErrEmptyDB):
+	case errors.Is(err, store.ErrEmptyDB):
 		root, rootErr := archive.GetRootHAS()
 		// DB is empty, check latest available ledger in History Archives
 		if rootErr != nil {

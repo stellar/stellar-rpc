@@ -16,6 +16,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/bench"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version"
 )
 
 func main() {
@@ -41,7 +42,7 @@ func main() {
 		Use:   "version",
 		Short: "Print version information and exit",
 		Run: func(_ *cobra.Command, _ []string) {
-			if config.CommitHash == "" {
+			if version.CommitHash == "" {
 				//nolint:forbidigo
 				fmt.Printf("stellar-rpc dev\n")
 			} else {
@@ -49,19 +50,19 @@ func main() {
 				// ( since that's what the end-user would typically have )
 				// but keep it for internal build ( so that we'll know from which branch it
 				// was built )
-				branch := config.Branch
+				branch := version.Branch
 				if branch == "main" {
 					branch = ""
 				}
 				//nolint:forbidigo
-				fmt.Printf("stellar-rpc %s (%s) %s\n", config.Version, config.CommitHash, branch)
+				fmt.Printf("stellar-rpc %s (%s) %s\n", version.Version, version.CommitHash, branch)
 			}
 			//nolint:forbidigo
 			fmt.Printf("stellar-xdr %s\n", goxdr.CommitHash)
 			//nolint:forbidigo
-			fmt.Printf("soroban-env-host-prev %s\n", config.RSSorobanEnvVersionPrev)
+			fmt.Printf("soroban-env-host-prev %s\n", version.RSSorobanEnvVersionPrev)
 			//nolint:forbidigo
-			fmt.Printf("soroban-env-host-curr %s\n", config.RSSorobanEnvVersionCurr)
+			fmt.Printf("soroban-env-host-curr %s\n", version.RSSorobanEnvVersionCurr)
 		},
 	}
 

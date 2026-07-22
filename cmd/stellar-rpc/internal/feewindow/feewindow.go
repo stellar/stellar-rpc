@@ -13,31 +13,13 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
-
-type FeeDistribution struct {
-	Max         uint64
-	Min         uint64
-	Mode        uint64
-	P10         uint64
-	P20         uint64
-	P30         uint64
-	P40         uint64
-	P50         uint64
-	P60         uint64
-	P70         uint64
-	P80         uint64
-	P90         uint64
-	P95         uint64
-	P99         uint64
-	FeeCount    uint32
-	LedgerCount uint32
-}
 
 type FeeWindow struct {
 	lock          sync.RWMutex
 	feesPerLedger *ledgerbucketwindow.LedgerBucketWindow[[]uint64]
-	distribution  FeeDistribution
+	distribution  store.FeeDistribution
 }
 
 func NewFeeWindow(retentionWindow uint32) *FeeWindow {
@@ -69,12 +51,12 @@ func (fw *FeeWindow) Reset() {
 	fw.lock.Lock()
 	defer fw.lock.Unlock()
 	fw.feesPerLedger.Reset()
-	fw.distribution = FeeDistribution{}
+	fw.distribution = store.FeeDistribution{}
 }
 
-func computeFeeDistribution(fees []uint64, ledgerCount uint32) FeeDistribution {
+func computeFeeDistribution(fees []uint64, ledgerCount uint32) store.FeeDistribution {
 	if len(fees) == 0 {
-		return FeeDistribution{}
+		return store.FeeDistribution{}
 	}
 	slices.Sort(fees)
 	mode := fees[0]
@@ -110,7 +92,7 @@ func computeFeeDistribution(fees []uint64, ledgerCount uint32) FeeDistribution {
 		kth := ((p * countUint64) + 100 - 1) / 100
 		return fees[kth-1]
 	}
-	return FeeDistribution{
+	return store.FeeDistribution{
 		Max:         fees[len(fees)-1],
 		Min:         fees[0],
 		Mode:        mode,
@@ -138,7 +120,7 @@ func int64ToUint64(value int64, fieldName string) (uint64, error) {
 	return uint64(value), nil
 }
 
-func (fw *FeeWindow) GetFeeDistribution() FeeDistribution {
+func (fw *FeeWindow) GetFeeDistribution() store.FeeDistribution {
 	fw.lock.RLock()
 	defer fw.lock.RUnlock()
 	return fw.distribution
@@ -237,6 +219,19 @@ func (fw *FeeWindows) Reset() {
 	fw.SorobanInclusionFeeWindow.Reset()
 	fw.ClassicFeeWindow.Reset()
 }
+
+func (fw *FeeWindows) SorobanInclusionFeeDistribution() store.FeeDistribution {
+	return fw.SorobanInclusionFeeWindow.GetFeeDistribution()
+}
+
+func (fw *FeeWindows) ClassicFeeDistribution() store.FeeDistribution {
+	return fw.ClassicFeeWindow.GetFeeDistribution()
+}
+
+// Compile-time check that FeeWindows implements store.FeeStats, the interface
+// the shared getFeeStats handler consumes (and the contract v2's fee windows
+// must satisfy). Breaks the build here, next to the type, if the two drift.
+var _ store.FeeStats = &FeeWindows{}
 
 func (fw *FeeWindows) AsMigration(seqRange db.LedgerSeqRange) db.Migration {
 	return &feeWindowMigration{

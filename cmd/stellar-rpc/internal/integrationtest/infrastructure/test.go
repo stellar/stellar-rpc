@@ -42,6 +42,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/limits"
 )
 
 const (
@@ -105,7 +106,7 @@ type TestConfig struct {
 	IngestLoadTest config.IngestLoadTestConfig
 
 	// HistoryRetentionWindow overrides the daemon's retention window. Zero
-	// uses the harness default (config.OneDayOfLedgers).
+	// uses the harness default (limits.OneDayOfLedgers).
 	HistoryRetentionWindow uint32
 }
 
@@ -489,7 +490,7 @@ func (vars rpcConfig) toMap() map[string]string {
 		// If we're ignoring close times, permit absurdly high latencies
 		maxHealthyLedgerLatency = time.Duration(1<<63 - 1).String()
 	}
-	retentionWindow := strconv.Itoa(config.OneDayOfLedgers)
+	retentionWindow := strconv.Itoa(limits.OneDayOfLedgers)
 	if vars.historyRetentionWindow > 0 {
 		retentionWindow = strconv.FormatUint(uint64(vars.historyRetentionWindow), 10)
 	}

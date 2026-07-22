@@ -25,6 +25,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 const (
@@ -374,7 +375,7 @@ func countOps(env xdr.TransactionEnvelope) (int, int) {
 // getLedgerBounds returns the DB's latest ledger sequence and its ledger count.
 func getLedgerBounds(ctx context.Context, sdb *db.DB) (uint32, uint32, error) {
 	r, err := db.NewLedgerReader(sdb).GetLedgerRange(ctx)
-	if errors.Is(err, db.ErrEmptyDB) {
+	if errors.Is(err, store.ErrEmptyDB) {
 		return 0, 0, nil // zero values for empty DB
 	}
 	return r.LastLedger.Sequence, r.LastLedger.Sequence - r.FirstLedger.Sequence + 1, err

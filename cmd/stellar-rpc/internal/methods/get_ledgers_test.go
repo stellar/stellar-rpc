@@ -16,6 +16,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 var expectedLedgerInfo = protocol.LedgerInfo{
@@ -409,7 +410,7 @@ func TestFetchLedgersErrors(t *testing.T) {
 	t.Run("DB error", func(t *testing.T) {
 		mockTx := new(MockLedgerReaderTx)
 		mockTx.On("BatchGetLedgers", ctx, uint32(150), uint32(151)).
-			Return([]db.LedgerMetadataChunk(nil), errors.New("db error"))
+			Return([]store.LedgerMetadataChunk(nil), errors.New("db error"))
 
 		handler := ledgersHandler{}
 		_, err := handler.fetchLedgers(ctx, 150, 151, "default", mockTx, localRange)
@@ -472,7 +473,7 @@ func TestGetLedgers_EmptyBatchGetLedgersResult(t *testing.T) {
 		mockReaderTx.On("GetLedgerRange", ctx).Return(localRange, nil)
 		// BatchGetLedgers returns empty slice even though GetLedgerRange indicates data exists
 		mockReaderTx.On("BatchGetLedgers", ctx, uint32(151), uint32(155)).
-			Return([]db.LedgerMetadataChunk{}, nil)
+			Return([]store.LedgerMetadataChunk{}, nil)
 
 		request := protocol.GetLedgersRequest{
 			Pagination: &protocol.LedgerPaginationOptions{
@@ -512,7 +513,7 @@ func TestGetLedgers_EmptyBatchGetLedgersResult(t *testing.T) {
 		mockReaderTx.On("GetLedgerRange", ctx).Return(localRange, nil)
 		// BatchGetLedgers returns empty slice even though GetLedgerRange indicates data exists
 		mockReaderTx.On("BatchGetLedgers", ctx, uint32(100), uint32(104)).
-			Return([]db.LedgerMetadataChunk{}, nil)
+			Return([]store.LedgerMetadataChunk{}, nil)
 
 		request := protocol.GetLedgersRequest{
 			StartLedger: 100,

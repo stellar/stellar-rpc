@@ -1,5 +1,5 @@
 //nolint:gochecknoglobals // allow global variables
-package config
+package version
 
 var (
 	// Version is the stellar-rpc version number, which is injected during build time.

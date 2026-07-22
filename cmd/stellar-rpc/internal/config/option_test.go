@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/limits"
 )
 
 func TestConfigOptionGetTomlKey(t *testing.T) {
@@ -122,11 +124,11 @@ func TestValidateFeeStatsRetentionWindow(t *testing.T) {
 	require.NoError(t, o.Validate(o))
 
 	// valid: at the cap
-	require.NoError(t, o.setValue(uint32(MaxFeeStatsRetentionWindow)))
+	require.NoError(t, o.setValue(uint32(limits.MaxFeeStatsRetentionWindow)))
 	require.NoError(t, o.Validate(o))
 
 	// invalid: exceeds cap
-	require.NoError(t, o.setValue(uint32(MaxFeeStatsRetentionWindow+1)))
+	require.NoError(t, o.setValue(uint32(limits.MaxFeeStatsRetentionWindow+1)))
 	require.ErrorContains(t, o.Validate(o), "cannot exceed 1000 ledgers")
 }
 

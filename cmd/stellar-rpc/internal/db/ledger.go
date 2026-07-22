@@ -14,29 +14,18 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 const (
 	ledgerCloseMetaTableName = "ledger_close_meta"
 )
 
-type StreamLedgerFn func(xdr.LedgerCloseMeta) error
-
+// LedgerReader extends the shared serving interface with
+// GetLedgerCountInRange, which only v1's ingestion backfill needs.
 type LedgerReader interface {
-	GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error)
-	StreamAllLedgers(ctx context.Context, f StreamLedgerFn) error
-	GetLedgerRange(ctx context.Context) (ledgerbucketwindow.LedgerRange, error)
+	store.LedgerReader
 	GetLedgerCountInRange(ctx context.Context, start uint32, end uint32) (uint32, uint32, uint32, error)
-	StreamLedgerRange(ctx context.Context, startLedger uint32, endLedger uint32, f StreamLedgerFn) error
-	NewTx(ctx context.Context) (LedgerReaderTx, error)
-	GetLatestLedgerSequence(ctx context.Context) (uint32, error)
-}
-
-type LedgerReaderTx interface {
-	GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error)
-	GetLedgerRange(ctx context.Context) (ledgerbucketwindow.LedgerRange, error)
-	BatchGetLedgers(ctx context.Context, start uint32, end uint32) ([]LedgerMetadataChunk, error)
-	Done() error
 }
 
 type LedgerWriter interface {
@@ -64,16 +53,11 @@ func (l ledgerReaderTx) GetLedgerRange(ctx context.Context) (ledgerbucketwindow.
 	return getLedgerRangeWithoutCache(ctx, l.tx)
 }
 
-type LedgerMetadataChunk struct {
-	Header xdr.LedgerHeaderHistoryEntry
-	Lcm    []byte
-}
-
 // BatchGetLedgers fetches ledgers in batches from the db.
 func (l ledgerReaderTx) BatchGetLedgers(
 	ctx context.Context,
 	start, end uint32,
-) ([]LedgerMetadataChunk, error) {
+) ([]store.LedgerMetadataChunk, error) {
 	if start > end {
 		return nil, errors.New("batch size must be greater than zero")
 	}
@@ -89,9 +73,9 @@ func (l ledgerReaderTx) BatchGetLedgers(
 		return nil, err
 	}
 
-	batch := make([]LedgerMetadataChunk, len(results))
+	batch := make([]store.LedgerMetadataChunk, len(results))
 	for i, meta := range results {
-		batch[i] = LedgerMetadataChunk{Lcm: meta}
+		batch[i] = store.LedgerMetadataChunk{Lcm: meta}
 
 		var v xdr.Int32
 		rd := bytes.NewReader(meta)
@@ -127,7 +111,7 @@ func NewLedgerReader(db *DB) LedgerReader {
 	return ledgerReader{db: db}
 }
 
-func (r ledgerReader) NewTx(ctx context.Context) (LedgerReaderTx, error) {
+func (r ledgerReader) NewTx(ctx context.Context) (store.LedgerReaderTx, error) {
 	r.db.cache.RLock()
 	defer r.db.cache.RUnlock()
 	txSession := r.db.Clone()
@@ -142,32 +126,12 @@ func (r ledgerReader) NewTx(ctx context.Context) (LedgerReaderTx, error) {
 	return tx, nil
 }
 
-// StreamAllLedgers runs f over all the ledgers in the database (until f errors or signals it's done).
-func (r ledgerReader) StreamAllLedgers(ctx context.Context, f StreamLedgerFn) error {
-	sql := sq.Select("meta").From(ledgerCloseMetaTableName).OrderBy("sequence asc")
-	q, err := r.db.Query(ctx, sql)
-	if err != nil {
-		return err
-	}
-	defer q.Close()
-	for q.Next() {
-		var closeMeta xdr.LedgerCloseMeta
-		if err = q.Scan(&closeMeta); err != nil {
-			return err
-		}
-		if err = f(closeMeta); err != nil {
-			return err
-		}
-	}
-	return q.Err()
-}
-
 // StreamLedgerRange runs f over inclusive (startLedger, endLedger) (until f errors or signals it's done).
 func (r ledgerReader) StreamLedgerRange(
 	ctx context.Context,
 	startLedger uint32,
 	endLedger uint32,
-	f StreamLedgerFn,
+	f store.StreamLedgerFn,
 ) error {
 	sql := sq.Select("meta").From(ledgerCloseMetaTableName).
 		Where(sq.GtOrEq{"sequence": startLedger}).
@@ -272,7 +236,7 @@ func getLedgerRangeWithCache(ctx context.Context, db readDB,
 	}
 
 	if len(lcm) == 0 {
-		return ledgerbucketwindow.LedgerRange{}, ErrEmptyDB
+		return ledgerbucketwindow.LedgerRange{}, store.ErrEmptyDB
 	}
 
 	return ledgerbucketwindow.LedgerRange{
@@ -302,7 +266,7 @@ func getLedgerRangeWithoutCache(ctx context.Context, db readDB) (ledgerbucketwin
 	}
 
 	if len(lcms) == 0 {
-		return ledgerbucketwindow.LedgerRange{}, ErrEmptyDB
+		return ledgerbucketwindow.LedgerRange{}, store.ErrEmptyDB
 	}
 
 	return ledgerbucketwindow.LedgerRange{

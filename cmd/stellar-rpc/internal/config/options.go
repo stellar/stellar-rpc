@@ -19,19 +19,11 @@ import (
 	"github.com/stellar/go-stellar-sdk/network"
 	"github.com/stellar/go-stellar-sdk/support/datastore"
 	"github.com/stellar/go-stellar-sdk/support/strutils"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/limits"
 )
 
 const (
-	// OneDayOfLedgers is (roughly) a 24 hour window of ledgers.
-	OneDayOfLedgers   = 17280
-	SevenDayOfLedgers = OneDayOfLedgers * 7
-
-	// MaxFeeStatsRetentionWindow is the maximum allowed fee stats retention
-	// window (~55 minutes). Larger windows cause slow startup due to
-	// O(n^2) fee distribution recomputation and provide no meaningful
-	// improvement in fee estimates.
-	MaxFeeStatsRetentionWindow = 1000
-
 	defaultHTTPEndpoint             = "localhost:8000"
 	defaultCaptiveCoreHTTPPort      = 11626 // regular queries like /info
 	defaultCaptiveCoreHTTPQueryPort = 11628
@@ -315,9 +307,9 @@ func (cfg *Config) options() Options {
 			Usage: fmt.Sprintf(
 				"configures history retention window for transactions and events, expressed in number of ledgers,"+
 					" the default value is %d which corresponds to about 7 days of history",
-				SevenDayOfLedgers),
+				limits.SevenDayOfLedgers),
 			ConfigKey:    &cfg.HistoryRetentionWindow,
-			DefaultValue: uint32(SevenDayOfLedgers),
+			DefaultValue: uint32(limits.SevenDayOfLedgers),
 			Validate:     positive,
 		},
 		{
@@ -750,13 +742,7 @@ func feeStatsRetentionWindowValidator(option *Option) error {
 	if !ok {
 		return fmt.Errorf("%s is not a uint32", option.Name)
 	}
-	v := *ptr
-	if v > MaxFeeStatsRetentionWindow {
-		return fmt.Errorf(
-			"%s cannot exceed %d ledgers (got %d)",
-			option.Name, MaxFeeStatsRetentionWindow, v)
-	}
-	return nil
+	return limits.ValidateFeeStatsRetentionWindow(option.Name, *ptr)
 }
 
 func positive(option *Option) error {

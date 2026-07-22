@@ -11,6 +11,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 type MockTransactionHandler struct {
@@ -67,13 +68,13 @@ func (txn *MockTransactionHandler) InsertTransactions(lcm xdr.LedgerCloseMeta) e
 }
 
 func (txn *MockTransactionHandler) GetTransaction(_ context.Context, hash xdr.Hash) (
-	Transaction, error,
+	store.Transaction, error,
 ) {
 	tx, ok := txn.txs[hash.HexString()]
 	if !ok {
-		return Transaction{}, ErrNoTransaction
+		return store.Transaction{}, store.ErrNoTransaction
 	}
-	itx, err := ParseTransaction(*txn.txHashToMeta[hash.HexString()], tx)
+	itx, err := store.ParseTransaction(*txn.txHashToMeta[hash.HexString()], tx)
 	return itx, err
 }
 
@@ -97,11 +98,7 @@ func (m *MockLedgerReader) GetLedger(_ context.Context, sequence uint32) (xdr.Le
 	return *lcm, true, nil
 }
 
-func (m *MockLedgerReader) StreamAllLedgers(_ context.Context, _ StreamLedgerFn) error {
-	return nil
-}
-
-func (m *MockLedgerReader) StreamLedgerRange(_ context.Context, _ uint32, _ uint32, _ StreamLedgerFn) error {
+func (m *MockLedgerReader) StreamLedgerRange(_ context.Context, _ uint32, _ uint32, _ store.StreamLedgerFn) error {
 	return nil
 }
 
@@ -113,7 +110,7 @@ func (m *MockLedgerReader) GetLatestLedgerSequence(_ context.Context) (uint32, e
 	return 0, nil
 }
 
-func (m *MockLedgerReader) NewTx(_ context.Context) (LedgerReaderTx, error) {
+func (m *MockLedgerReader) NewTx(_ context.Context) (store.LedgerReaderTx, error) {
 	return nil, errors.New("mock NewTx error")
 }
 
@@ -125,7 +122,7 @@ func (m *MockLedgerReader) GetLedgerCountInRange(_ context.Context,
 }
 
 var (
-	_ TransactionReader = &MockTransactionHandler{}
-	_ TransactionWriter = &MockTransactionHandler{}
-	_ LedgerReader      = &MockLedgerReader{}
+	_ store.TransactionReader = &MockTransactionHandler{}
+	_ TransactionWriter       = &MockTransactionHandler{}
+	_ LedgerReader            = &MockLedgerReader{}
 )

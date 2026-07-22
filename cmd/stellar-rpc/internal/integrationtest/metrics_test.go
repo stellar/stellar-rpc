@@ -13,8 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version"
 )
 
 func TestMetrics(t *testing.T) {
@@ -24,11 +24,11 @@ func TestMetrics(t *testing.T) {
 	metrics := getMetrics(t, metricsURL)
 	buildMetric := fmt.Sprintf(
 		"soroban_rpc_build_info{branch=\"%s\",build_timestamp=\"%s\",commit=\"%s\",goversion=\"%s\",version=\"%s\"} 1",
-		config.Branch,
-		config.BuildTimestamp,
-		config.CommitHash,
+		version.Branch,
+		version.BuildTimestamp,
+		version.CommitHash,
 		runtime.Version(),
-		config.Version,
+		version.Version,
 	)
 	require.Contains(t, metrics, buildMetric)
 

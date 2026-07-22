@@ -5,13 +5,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version"
 )
 
 func setVersionInfoForTests() {
-	config.CommitHash = "commitHash"
-	config.BuildTimestamp = "buildTimestamp"
+	version.CommitHash = "commitHash"
+	version.BuildTimestamp = "buildTimestamp"
 }
 
 func TestGetVersionInfoSucceeds(t *testing.T) {

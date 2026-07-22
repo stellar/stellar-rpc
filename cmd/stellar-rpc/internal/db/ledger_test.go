@@ -14,6 +14,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 var (
@@ -42,7 +43,7 @@ func createLedger(ledgerSequence uint32) xdr.LedgerCloseMeta {
 func assertLedgerRange(t *testing.T, reader LedgerReader, start, end uint32) {
 	ctx := t.Context()
 	var allLedgers []xdr.LedgerCloseMeta
-	err := reader.StreamAllLedgers(ctx, func(txmeta xdr.LedgerCloseMeta) error {
+	err := reader.StreamLedgerRange(ctx, start-1, end+1, func(txmeta xdr.LedgerCloseMeta) error {
 		allLedgers = append(allLedgers, txmeta)
 		return nil
 	})
@@ -225,7 +226,7 @@ func TestGetLedgerRange_EmptyDB(t *testing.T) {
 
 	reader := NewLedgerReader(db)
 	ledgerRange, err := reader.GetLedgerRange(ctx)
-	assert.Equal(t, ErrEmptyDB, err)
+	assert.Equal(t, store.ErrEmptyDB, err)
 	assert.Equal(t, uint32(0), ledgerRange.FirstLedger.Sequence)
 	assert.Equal(t, int64(0), ledgerRange.FirstLedger.CloseTime)
 	assert.Equal(t, uint32(0), ledgerRange.LastLedger.Sequence)
