@@ -169,7 +169,8 @@ func assertQuiescent(t *testing.T, cfg Config, cat *catalog.Catalog, through uin
 	dchunks, err := eligibleDiscardChunks(cat, floor, lastChunk)
 	require.NoError(t, err)
 	assert.Empty(t, dchunks, "re-scan finds no discard work at quiescence")
-	pops, _, err := eligiblePruneOps(cat, floor)
+	idxCovs, chunkRefs, err := eligiblePruneTargets(cat, floor)
 	require.NoError(t, err)
-	assert.Empty(t, pops, "re-scan finds no prune work at quiescence")
+	assert.Empty(t, idxCovs, "re-scan finds no index prune work at quiescence")
+	assert.Empty(t, chunkRefs, "re-scan finds no chunk prune work at quiescence")
 }
