@@ -120,18 +120,22 @@ func run(ctx context.Context, cfg StartConfig) error {
 		boundary.Publish(chunk.ID(seed)) //nolint:gosec // seed >= 0
 	}
 
+	// The serving router holds the query watermark, advanced by the ingestion loop
+	// below. It also owns the shared hot-database handles: the loop publishes them,
+	// the freeze reads completed chunks through them (HotHandle), and the lifecycle
+	// unpublishes them at discard (Router) for deferred deletion to close. It will
+	// back the read server in later work; for now nothing reads it. Constructed per
+	// run — no query survives a restart, so a fresh router each run is fine.
+	router := serving.NewRouter(cat, cfg.Retention)
+	cfg.Exec.Process.HotHandle = router.Handle
+
 	// The lifecycle config draws on the SAME Exec wiring backfill uses, so the two
 	// share one catalog/pool by construction.
 	lifecycleCfg := lifecycle.Config{
 		ExecConfig: cfg.Exec,
 		Retention:  cfg.Retention,
+		Router:     router,
 	}.WithLifecycleDefaults()
-
-	// The serving router holds the query watermark, advanced by the ingestion loop
-	// below. It will also hold the shared hot-database handles and back the read
-	// server in later work; for now nothing reads it. Constructed per run — no
-	// query survives a restart, so a fresh router each run is fine.
-	router := serving.NewRouter(cat, cfg.Retention)
 
 	// Begin serving reads (injected) BEFORE launching the loops; it must return
 	// promptly (launch, not block).

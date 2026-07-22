@@ -248,6 +248,11 @@ func (d *DB) Source() ledgerbackend.LedgerStream {
 // concurrently with in-flight reads/writes.
 func (d *DB) Close() error { return d.store.Close() }
 
+// CloseIfIdle is the non-blocking Close deferred deletion uses to reclaim a
+// discarded chunk: it closes only when no operation is in flight and otherwise
+// reports (false, nil) without blocking. See rocksdb.Store.CloseIfIdle.
+func (d *DB) CloseIfIdle() (bool, error) { return d.store.CloseIfIdle() }
+
 // MaxCommittedSeq returns the single authoritative per-chunk last-committed ledger: the
 // highest seq durably committed, from the ledgers CF's last key. Under decision
 // (a) this one value pins EVERY CF's frontier. ok=false on an empty DB.

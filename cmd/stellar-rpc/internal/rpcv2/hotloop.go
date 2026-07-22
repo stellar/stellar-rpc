@@ -98,42 +98,45 @@ type ingestionLoopConfig struct {
 	Router *serving.Router
 }
 
-// runIngestionLoop is the hot tier's OWNER: the single goroutine that opens,
-// writes, closes, and hands off the per-chunk hot DBs. It consumes ONE continuous
+// runIngestionLoop is the hot tier's writer: the single goroutine that opens,
+// writes, and hands off the per-chunk hot DBs. It consumes ONE continuous
 // sequence-validated ledger stream from Resume (the stream owns the captive-core
 // process — started on the first pull, torn down when this loop exits), commits
 // each ledger as one atomic synced WriteBatch (decision (a)), and at each chunk
-// boundary closes the just-filled DB, opens the next, and publishes the completed
-// chunk to the lifecycle. A ctx-canceled return is a clean shutdown; any other
-// error is RESTARTABLE (startup re-derives the last-committed ledger, losing nothing).
+// boundary opens the next DB and publishes the completed chunk to the lifecycle. A
+// ctx-canceled return is a clean shutdown; any other error is RESTARTABLE (startup
+// re-derives the last-committed ledger, losing nothing).
 //
-// HANDOFF FENCE: the DB is CLOSED before the next chunk's hot:chunk key is created
-// — that key is what makes THIS chunk complete to the lifecycle, which could then
-// discard a dir a still-live writer holds. Publish fires only after the next DB is
-// open. The HotService is rebuilt each boundary.
-//
-// LIVE-CHUNK EXCLUSION: this loop is the SOLE writer of a chunk's hot DB and
-// closes it before publishing the chunk complete (the fence above); the lifecycle
-// only ever opens chunks at or below the highest complete one — strictly below the
-// live chunk. Those opens are read-only, which takes no RocksDB LOCK, so
-// writer/reader separation is a construction invariant here, not a lock readers
-// rely on.
+// HANDOFF: with a Router set (the live daemon), the loop does NOT close the
+// completed chunk's DB at the boundary — it transfers ownership to the router, so
+// queries and the freeze read the completed chunk through its shared handle, and
+// the lifecycle closes it at discard once cold coverage exists (deferred deletion's
+// CloseIfIdle drains any in-flight reader). With no Router (the bounded backfill
+// loop, which serves no queries) the loop keeps the old fence: it closes the
+// completed DB before the next chunk's key is created, since the DB would otherwise
+// have no owner. Either way the next DB is opened and its handle published before
+// the completed chunk is announced, and the HotService is rebuilt each boundary.
 func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 	metrics := observability.MetricsOrNop(cfg.Metrics)
 
-	// Take ownership of the resume hot DB run() opened (before serving reads) as the
-	// loop's FIRST statement, so the deferred close sits ahead of any early return —
-	// no ownership gap for a transient failure to leak the handle (and its RocksDB
-	// LOCK) through. The loop is this DB's single writer and reopens it at every
-	// boundary; the defer closes whatever handle is live on any exit (the boundary
-	// handoff already closed every prior chunk's DB), and no writer races the close
-	// (the loop has stopped on every exit path).
+	// Take ownership of the resume hot DB run() opened as the loop's FIRST statement,
+	// so the deferred close sits ahead of any early return. hotDB always points at
+	// the LIVE chunk (reassigned at each boundary), so the defer closes only the live
+	// chunk on exit; completed chunks are owned by the router (live loop) or were
+	// closed at their boundary (bounded loop). No writer races the close — the loop
+	// has stopped on every exit path.
 	hotDB := cfg.HotDB
 	defer func() {
 		if hotDB != nil {
 			_ = hotDB.Close() // Close never fails; flush errors are logged inside
 		}
 	}()
+
+	// Publish the live chunk's handle so queries can read the tip. Nil in the bounded
+	// backfill loop, which serves no queries.
+	if cfg.Router != nil {
+		cfg.Router.PublishHandle(chunk.IDFromLedger(cfg.Resume), hotDB)
+	}
 
 	// hotService binds the metrics sink to THIS hotDB instance; the boundary handoff
 	// rebuilds it for the reopened chunk DB below.
@@ -178,11 +181,13 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		// Chunk boundary: this seq is the chunk's last ledger.
 		if closed := chunk.IDFromLedger(seq); seq == closed.LastLedger() {
 			next := closed + 1
-			// Handoff fence: close the write handle BEFORE the next chunk's key is
-			// created (that key is what makes THIS chunk complete to a tick, which may
-			// then freeze and discard its hot DB — no writer may hold it then).
-			_ = hotDB.Close() // Close never fails; flush errors are logged inside
-			hotDB = nil       // released; reopen below republishes it for the defer
+			// With no router, keep the old fence: close the completed DB before the
+			// next chunk's key exists, since it would otherwise have no owner. With a
+			// router, do NOT close — ownership transfers to the router (the handle was
+			// published at open); the lifecycle closes it at discard.
+			if cfg.Router == nil {
+				_ = hotDB.Close() // Close never fails; flush errors are logged inside
+			}
 
 			nextDB, oerr := openHotDBForChunk(cfg.Catalog, next, cfg.Logger)
 			if oerr != nil {
@@ -190,8 +195,11 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 			}
 			hotDB = nextDB
 			hotService = ingest.NewHotService(hotDB, cfg.Sink)
-			// next's key (created inside openHotDBForChunk) moved the partition; only
-			// now publish the completed chunk to the lifecycle.
+			// Publish the next chunk's handle before its first ledger commits, then
+			// announce the completed chunk to the lifecycle.
+			if cfg.Router != nil {
+				cfg.Router.PublishHandle(next, nextDB)
+			}
 			cfg.Boundary.Publish(closed)
 
 			// Boundary observability (the woken tick reports the freeze/discard/prune).
