@@ -5,8 +5,11 @@
 package serving
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
+
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
@@ -61,6 +64,30 @@ func NewRouter(cat *catalog.Catalog, retention geometry.Retention) *Router {
 	r := &Router{catalog: cat, retention: retention}
 	r.handles.Store(&HandleSet{hot: map[chunk.ID]*hotchunk.DB{}})
 	return r
+}
+
+// BootstrapHandles opens and publishes a handle for every ready hot chunk except
+// liveChunk, which the ingestion loop opens and publishes itself. These are
+// completed chunks a prior run left ready (not yet discarded); queries read them
+// hot until the freeze covers them cold. They are opened read-write so the events
+// facade is warmed (a read-only open is ledgers-only), and the router closes them
+// at discard. Runs at startup before any query is admitted.
+func (r *Router) BootstrapHandles(liveChunk chunk.ID, logger *supportlog.Entry) error {
+	ready, err := r.catalog.ReadyHotChunkKeys()
+	if err != nil {
+		return fmt.Errorf("bootstrap: read ready hot chunks: %w", err)
+	}
+	for _, c := range ready {
+		if c == liveChunk {
+			continue
+		}
+		db, err := hotchunk.OpenReadyWrite(geometry.HotReady, r.catalog.Layout().HotChunkPath(c), c, logger)
+		if err != nil {
+			return fmt.Errorf("bootstrap: open hot chunk %s: %w", c, err)
+		}
+		r.PublishHandle(c, db)
+	}
+	return nil
 }
 
 func (r *Router) SetLatest(seq uint32) { r.latest.Store(seq) }
