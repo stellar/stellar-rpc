@@ -11,6 +11,7 @@ import (
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
+	"github.com/spf13/cobra"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
@@ -90,7 +91,8 @@ func (o coldOptions) validate() error {
 // MetricSink timings and the scheduler's observability metrics. On success
 // runCold writes the CSV report and logs a summary, including the effective
 // chunk concurrency for multi-chunk runs.
-func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) error {
+func runCold(ctx context.Context, logger *supportlog.Entry, cmd *cobra.Command, opts coldOptions) error {
+	startedAt := time.Now().UTC()
 	if err := opts.validate(); err != nil {
 		return err
 	}
@@ -150,6 +152,9 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 	logColdWall(logger, sink, opts.NumChunks, totalWall)
 	written, err := sink.writeCSVs(opts.OutDir)
 	if err != nil {
+		return err
+	}
+	if err := writeInvocationJSON(opts.OutDir, cmd, captureFlags(cmd), startedAt, time.Now().UTC()); err != nil {
 		return err
 	}
 	logger.Infof("wrote %d CSVs to %s", len(written), opts.OutDir)
