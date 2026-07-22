@@ -36,11 +36,11 @@ type ProcessConfig struct {
 	// no bulk source is configured; backfillSource errors if a chunk then needs it.
 	Backend Backend
 
-	// HotHandle looks up the router's shared hot-database handle for a chunk. When
-	// it returns a handle, the freeze reads the completed chunk through that one
-	// handle rather than opening a second read-only reader against the still-open
-	// writer (whose ledger CF auto-compacts, which would race the reader). Nil for
-	// the startup backfill, where no writer is live and the read-only reopen is safe.
+	// HotHandle returns the router's shared handle for a chunk, if one is published.
+	// The freeze reads a completed chunk through it rather than reopening the DB:
+	// the writer is still open and compacting, so a separate reader could race a
+	// compaction and read a just-deleted file. Nil during the startup catch-up
+	// (before ingestion starts, so no writer is open), where a read-only reopen is safe.
 	HotHandle func(chunk.ID) (*hotchunk.DB, bool)
 }
 
