@@ -14,8 +14,8 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
@@ -27,12 +27,12 @@ var expectedLedgerInfo = protocol.LedgerInfo{
 	LedgerMetadata:  "AAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAAAAAAAAAAAAAEAAAACAAABAIAAAAAAAAAAPww0v5OtDZlx0EzMkPcFURyDiq2XNKSi+w16A/x/6JoAAAABAAAAAP///50AAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAEzmSAb0wlZuZ7vERyxkacbwbERSS/IM82EYhemLKdUAAAAAAAAABkAAAAAAAAAAAAAAAAAAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==", //nolint:lll
 }
 
-func setupTestDB(t *testing.T, numLedgers int) *db.DB {
+func setupTestDB(t *testing.T, numLedgers int) *sqlitedb.DB {
 	testDB := NewTestDB(t)
 	daemon := interfaces.MakeNoOpDeamon()
 	for sequence := 1; sequence <= numLedgers; sequence++ {
 		ledgerCloseMeta := txMeta(uint32(sequence)-100, true)
-		tx, err := db.
+		tx, err := sqlitedb.
 			NewReadWriter(log.DefaultLogger, testDB, daemon, 100, passphrase).
 			NewTx(t.Context())
 		require.NoError(t, err)
@@ -45,7 +45,7 @@ func setupTestDB(t *testing.T, numLedgers int) *db.DB {
 func TestGetLedgers_DefaultLimit(t *testing.T) {
 	testDB := setupTestDB(t, 50)
 	handler := ledgersHandler{
-		ledgerReader: db.NewLedgerReader(testDB),
+		ledgerReader: sqlitedb.NewLedgerReader(testDB),
 		maxLimit:     100,
 		defaultLimit: 5,
 	}
@@ -71,7 +71,7 @@ func TestGetLedgers_DefaultLimit(t *testing.T) {
 func TestGetLedgers_CustomLimit(t *testing.T) {
 	testDB := setupTestDB(t, 40)
 	handler := ledgersHandler{
-		ledgerReader: db.NewLedgerReader(testDB),
+		ledgerReader: sqlitedb.NewLedgerReader(testDB),
 		maxLimit:     100,
 		defaultLimit: 5,
 	}
@@ -96,7 +96,7 @@ func TestGetLedgers_CustomLimit(t *testing.T) {
 func TestGetLedgers_WithCursor(t *testing.T) {
 	testDB := setupTestDB(t, 10)
 	handler := ledgersHandler{
-		ledgerReader: db.NewLedgerReader(testDB),
+		ledgerReader: sqlitedb.NewLedgerReader(testDB),
 		maxLimit:     100,
 		defaultLimit: 5,
 	}
@@ -121,7 +121,7 @@ func TestGetLedgers_WithCursor(t *testing.T) {
 func TestGetLedgers_InvalidStartLedger(t *testing.T) {
 	testDB := setupTestDB(t, 10)
 	handler := ledgersHandler{
-		ledgerReader: db.NewLedgerReader(testDB),
+		ledgerReader: sqlitedb.NewLedgerReader(testDB),
 		maxLimit:     100,
 		defaultLimit: 5,
 	}
@@ -138,7 +138,7 @@ func TestGetLedgers_InvalidStartLedger(t *testing.T) {
 func TestGetLedgers_LimitExceedsMaxLimit(t *testing.T) {
 	testDB := setupTestDB(t, 10)
 	handler := ledgersHandler{
-		ledgerReader: db.NewLedgerReader(testDB),
+		ledgerReader: sqlitedb.NewLedgerReader(testDB),
 		maxLimit:     100,
 		defaultLimit: 5,
 	}
@@ -158,7 +158,7 @@ func TestGetLedgers_LimitExceedsMaxLimit(t *testing.T) {
 func TestGetLedgers_InvalidCursor(t *testing.T) {
 	testDB := setupTestDB(t, 10)
 	handler := ledgersHandler{
-		ledgerReader: db.NewLedgerReader(testDB),
+		ledgerReader: sqlitedb.NewLedgerReader(testDB),
 		maxLimit:     100,
 		defaultLimit: 5,
 	}
@@ -177,7 +177,7 @@ func TestGetLedgers_InvalidCursor(t *testing.T) {
 func TestGetLedgers_JSONFormat(t *testing.T) {
 	testDB := setupTestDB(t, 10)
 	handler := ledgersHandler{
-		ledgerReader: db.NewLedgerReader(testDB),
+		ledgerReader: sqlitedb.NewLedgerReader(testDB),
 		maxLimit:     100,
 		defaultLimit: 5,
 	}
@@ -212,7 +212,7 @@ func TestGetLedgers_JSONFormat(t *testing.T) {
 func TestGetLedgers_NoLedgers(t *testing.T) {
 	testDB := setupTestDB(t, 0)
 	handler := ledgersHandler{
-		ledgerReader: db.NewLedgerReader(testDB),
+		ledgerReader: sqlitedb.NewLedgerReader(testDB),
 		maxLimit:     100,
 		defaultLimit: 5,
 	}
@@ -229,7 +229,7 @@ func TestGetLedgers_NoLedgers(t *testing.T) {
 func TestGetLedgers_CursorGreaterThanLatestLedger(t *testing.T) {
 	testDB := setupTestDB(t, 10)
 	handler := ledgersHandler{
-		ledgerReader: db.NewLedgerReader(testDB),
+		ledgerReader: sqlitedb.NewLedgerReader(testDB),
 		maxLimit:     100,
 		defaultLimit: 5,
 	}
@@ -248,7 +248,7 @@ func TestGetLedgers_CursorGreaterThanLatestLedger(t *testing.T) {
 func BenchmarkGetLedgers(b *testing.B) {
 	testDB := setupBenchmarkingDB(b)
 	handler := ledgersHandler{
-		ledgerReader: db.NewLedgerReader(testDB),
+		ledgerReader: sqlitedb.NewLedgerReader(testDB),
 		maxLimit:     200,
 		defaultLimit: 5,
 	}
@@ -268,10 +268,10 @@ func BenchmarkGetLedgers(b *testing.B) {
 	}
 }
 
-func setupBenchmarkingDB(b *testing.B) *db.DB {
+func setupBenchmarkingDB(b *testing.B) *sqlitedb.DB {
 	testDB := NewTestDB(b)
 	logger := log.DefaultLogger
-	writer := db.NewReadWriter(logger, testDB, interfaces.MakeNoOpDeamon(),
+	writer := sqlitedb.NewReadWriter(logger, testDB, interfaces.MakeNoOpDeamon(),
 		1_000_000, passphrase)
 	write, err := writer.NewTx(context.TODO())
 	require.NoError(b, err)

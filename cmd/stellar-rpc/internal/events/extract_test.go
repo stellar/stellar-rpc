@@ -18,8 +18,8 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
 )
 
 const testPassphrase = "Test SDF Network ; September 2015"
@@ -578,11 +578,11 @@ func sqliteEventRows(t *testing.T, lcm xdr.LedgerCloseMeta) []sqliteEventRow {
 	ctx := t.Context()
 	logger := log.DefaultLogger
 
-	testDB, err := db.OpenSQLiteDB(path.Join(t.TempDir(), "events.sqlite"))
+	testDB, err := sqlitedb.OpenSQLiteDB(path.Join(t.TempDir(), "events.sqlite"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, testDB.Close()) })
 
-	writer := db.NewReadWriter(logger, testDB, interfaces.MakeNoOpDeamon(),
+	writer := sqlitedb.NewReadWriter(logger, testDB, interfaces.MakeNoOpDeamon(),
 		1_000_000 /* retention window: keep everything */, testPassphrase)
 	write, err := writer.NewTx(ctx)
 	require.NoError(t, err)
@@ -596,7 +596,7 @@ func sqliteEventRows(t *testing.T, lcm xdr.LedgerCloseMeta) []sqliteEventRow {
 		End:   protocol.Cursor{Ledger: seq + 1},
 	}
 	var rows []sqliteEventRow
-	reader := db.NewEventReader(logger, testDB, testPassphrase)
+	reader := sqlitedb.NewEventReader(logger, testDB, testPassphrase)
 	err = reader.GetEvents(ctx, cursorRange, nil, nil, nil,
 		func(event xdr.DiagnosticEvent, cur protocol.Cursor, closeTime int64, txHash *xdr.Hash) bool {
 			evBytes, merr := event.Event.MarshalBinary()

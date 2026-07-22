@@ -14,7 +14,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 )
 
@@ -23,8 +23,8 @@ func TestGetTransaction(t *testing.T) {
 	var (
 		ctx          = context.TODO()
 		log          = log.DefaultLogger
-		store        = db.NewMockTransactionStore("passphrase")
-		ledgerReader = db.NewMockLedgerReader(store)
+		store        = sqlitedb.NewMockTransactionStore("passphrase")
+		ledgerReader = sqlitedb.NewMockLedgerReader(store)
 	)
 	log.SetLevel(logrus.DebugLevel)
 
@@ -405,8 +405,8 @@ func emptyTxMeta(acctSeq uint32) xdr.LedgerCloseMeta {
 }
 
 func TestGetTransaction_JSONFormat(t *testing.T) {
-	mockDBReader := db.NewMockTransactionStore(NetworkPassphrase)
-	mockLedgerReader := db.NewMockLedgerReader(mockDBReader)
+	mockDBReader := sqlitedb.NewMockTransactionStore(NetworkPassphrase)
+	mockLedgerReader := sqlitedb.NewMockLedgerReader(mockDBReader)
 	var lookupHash string
 	var lookupEnv xdr.TransactionEnvelope
 	for i := 1; i <= 3; i++ {
@@ -456,8 +456,8 @@ func TestGetTransaction_JSONFormat(t *testing.T) {
 }
 
 func BenchmarkJSONTransactions(b *testing.B) {
-	mockDBReader := db.NewMockTransactionStore(NetworkPassphrase)
-	mockLedgerReader := db.NewMockLedgerReader(mockDBReader)
+	mockDBReader := sqlitedb.NewMockTransactionStore(NetworkPassphrase)
+	mockLedgerReader := sqlitedb.NewMockLedgerReader(mockDBReader)
 
 	var lookupHash string
 	var lookupEnv xdr.TransactionEnvelope
