@@ -18,6 +18,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/fhtest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/serving"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
 )
@@ -292,6 +293,24 @@ func TestRunIngestionLoop_LastCommittedGaugeAdvancesPerLedger(t *testing.T) {
 
 	assert.Equal(t, []uint32{first, first + 1, first + 2}, rec.lastCommittedSeq(),
 		"the loop sets the last-committed gauge per committed ledger, not chunk-aligned")
+}
+
+// TestRunIngestionLoop_AdvancesServingWatermark: when a router is wired, the loop
+// advances its serving watermark per committed ledger, ending at the last one.
+func TestRunIngestionLoop_AdvancesServingWatermark(t *testing.T) {
+	cat, _ := testCatalog(t)
+	c := chunk.ID(0)
+	first := c.FirstLedger()
+
+	stream := streamForSeqs(t, first, first+2)
+	stream.endErr = errors.New("end")
+	cfg, _ := loopConfig(t, stream, cat, first)
+	router := serving.NewRouter(cat, geometry.NewRetention(0, 0))
+	cfg.Router = router
+
+	require.Error(t, runIngestionLoop(context.Background(), cfg))
+
+	assert.Equal(t, first+2, router.Latest(), "the watermark advanced to the last committed ledger")
 }
 
 // ---------------------------------------------------------------------------

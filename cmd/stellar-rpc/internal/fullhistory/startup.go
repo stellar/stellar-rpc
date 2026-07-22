@@ -14,6 +14,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/serving"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
@@ -126,6 +127,12 @@ func run(ctx context.Context, cfg StartConfig) error {
 		Retention:  cfg.Retention,
 	}.WithLifecycleDefaults()
 
+	// The serving router holds the query watermark, advanced by the ingestion loop
+	// below. It will also hold the shared hot-database handles and back the read
+	// server in later work; for now nothing reads it. Constructed per run — no
+	// query survives a restart, so a fresh router each run is fine.
+	router := serving.NewRouter(cat, cfg.Retention)
+
 	// Begin serving reads (injected) BEFORE launching the loops; it must return
 	// promptly (launch, not block).
 	if err := cfg.ServeReads(ctx); err != nil {
@@ -153,6 +160,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 			Metrics:  metrics,
 			Sink:     cfg.Exec.Process.Sink,
 			Health:   cfg.health,
+			Router:   router,
 		})
 		if err == nil {
 			// WithContext cancels gctx (unblocking the lifecycle sibling in g.Wait)

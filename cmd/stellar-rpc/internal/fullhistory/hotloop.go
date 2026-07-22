@@ -13,6 +13,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/serving"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
 )
@@ -92,6 +93,9 @@ type ingestionLoopConfig struct {
 	Metrics  observability.Metrics
 	Sink     ingest.MetricSink
 	Health   *healthState
+	// Router, when set, receives the serving watermark after each ledger commits.
+	// The bounded backfill loop leaves it nil: backfill serves no queries.
+	Router *serving.Router
 }
 
 // runIngestionLoop is the hot tier's OWNER: the single goroutine that opens,
@@ -155,6 +159,13 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		// committed ledger (mid-chunk included), one atomic gauge set per ledger.
 		// The tick must not touch it — its chunk-aligned value would regress it.
 		metrics.LastCommitted(seq)
+
+		// Advance the serving watermark last, once the ledger is fully queryable:
+		// IngestLedger completes the in-memory events apply before returning, so a
+		// query admitted after this can serve seq from every hot store.
+		if cfg.Router != nil {
+			cfg.Router.SetLatest(seq)
+		}
 
 		// Feed the readiness/health signal from the SAME commit: the first commit
 		// latches readiness, and the close time drives the health staleness check.
