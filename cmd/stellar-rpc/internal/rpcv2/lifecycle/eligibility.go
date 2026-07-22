@@ -75,38 +75,31 @@ func pendingArtifacts(c chunk.ID, cat *catalog.Catalog, covers bool) (catalog.Ar
 	return need, nil
 }
 
-// eligiblePruneOps is the system's only file-deleter, key-driven, covering both
-// key families. It returns sweep closures (SweepTxHashIndexKey per index key, one
-// batched SweepChunkArtifacts for the chunk family). "Below the floor" is the
-// gate predicate shared with the discard scan and read path, so prune deletes
-// exactly what the reader has stopped admitting.
-// The second return is the per-op artifact weight (1 per index-key op; the ref
-// count for the single batched chunk sweep), so the caller meters Prune in artifacts
-// — the same unit the Phase 1 sweep reports — summing only the ops that actually ran
-// (the chunk family collapses N artifacts into one op).
-func eligiblePruneOps(cat *catalog.Catalog, floor chunk.ID) ([]func() error, []int, error) {
-	var ops []func() error
-	// weights[i] is the artifact count op[i] sweeps, so a caller can sum the artifacts
-	// of the ops that actually ran (the chunk family collapses many artifacts into one op).
-	var weights []int
-
+// eligiblePruneTargets is the system's only file-deleter scan, key-driven,
+// covering both key families. It returns the index coverages to sweep (one each)
+// and the batched per-chunk refs to sweep. "Below the floor" is the gate predicate
+// shared with the discard scan and read path, so prune deletes exactly what the
+// reader has stopped admitting. The caller demotes each target and defers the
+// destroy to end of run.
+func eligiblePruneTargets(
+	cat *catalog.Catalog, floor chunk.ID,
+) ([]geometry.TxHashIndexCoverage, []catalog.ArtifactRef, error) {
 	// Index family: transient debris from any window, plus frozen keys below the floor.
 	idxKeys, err := cat.AllTxHashIndexKeys()
 	if err != nil {
 		return nil, nil, err
 	}
+	var idxCovs []geometry.TxHashIndexCoverage
 	for _, cov := range idxKeys {
 		switch {
 		case cov.State == geometry.StateFreezing || cov.State == geometry.StatePruning:
 			// Transient debris (a crashed build or unfinished demotion). Safe only
 			// because no build is in flight when this scan runs (it follows
 			// executePlan's return, and backfill finishes before the loop starts).
-			ops = append(ops, func() error { return cat.SweepTxHashIndexKey(cov) })
-			weights = append(weights, 1)
+			idxCovs = append(idxCovs, cov)
 		case cat.TxHashIndexLayout().LastChunk(cov.Index) < floor:
-			// Frozen index key below the floor; the sweep demotes it first.
-			ops = append(ops, func() error { return cat.SweepTxHashIndexKey(cov) })
-			weights = append(weights, 1)
+			// Frozen index key below the floor; the demote marks it pruning first.
+			idxCovs = append(idxCovs, cov)
 		}
 	}
 
@@ -139,11 +132,7 @@ func eligiblePruneOps(cat *catalog.Catalog, floor chunk.ID) ([]func() error, []i
 			}
 		}
 	}
-	if len(sweep) > 0 {
-		ops = append(ops, func() error { return cat.SweepChunkArtifacts(sweep) })
-		weights = append(weights, len(sweep))
-	}
-	return ops, weights, nil
+	return idxCovs, sweep, nil
 }
 
 // txhashRedundantInFinalizedWindow reports whether c's window has a TERMINAL

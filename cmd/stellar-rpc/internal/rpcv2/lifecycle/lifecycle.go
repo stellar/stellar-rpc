@@ -143,7 +143,7 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 
 	// Stage 2 — discard scan. Demote each eligible hot chunk (unpublish its handle,
 	// mark it transient) and collect it in pending for destruction at end of run.
-	var pending hotDeletions
+	var pending pendingDeletions
 	discardStart := time.Now()
 	discardChunks, err := eligibleDiscardChunks(cat, floor, lastChunk)
 	if err != nil {
@@ -151,7 +151,7 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	}
 	demoteOps := make([]func() error, len(discardChunks))
 	for i, c := range discardChunks {
-		demoteOps[i] = func() error { return pending.demote(cfg.Router, cat, c) }
+		demoteOps[i] = func() error { return pending.demoteHotChunk(cfg.Router, cat, c) }
 	}
 	// Meter the DBs actually demoted (one op per DB) BEFORE the error check, so a
 	// mid-scan failure still counts what completed rather than losing it: the demoted
@@ -172,15 +172,26 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	}
 	metrics.LiveHotChunks(len(hot))
 
-	// Stage 3 — prune scan.
+	// Stage 3 — prune scan. Demote each eligible cold artifact (mark it pruning) and
+	// defer its file/key destroy to end of run, alongside the discarded hot chunks.
 	pruneStart := time.Now()
-	pruneOps, pruneWeights, err := eligiblePruneOps(cat, floor)
+	idxCovs, chunkRefs, err := eligiblePruneTargets(cat, floor)
 	if err != nil {
-		return fmt.Errorf("eligible prune ops: %w", err)
+		return fmt.Errorf("eligible prune targets: %w", err)
 	}
-	// Sum the artifacts swept by the ops that actually completed (each op carries its
-	// own artifact weight — the chunk family collapses many artifacts into one op).
-	// Metered BEFORE the error check so a mid-sweep failure keeps the completed count.
+	// One demote op per index coverage, one batched op for the chunk family; each
+	// op carries its artifact weight so the meter sums only the ops that ran.
+	pruneOps := make([]func() error, 0, len(idxCovs)+1)
+	pruneWeights := make([]int, 0, len(idxCovs)+1)
+	for _, cov := range idxCovs {
+		pruneOps = append(pruneOps, func() error { return pending.demoteTxHashIndex(cat, cov) })
+		pruneWeights = append(pruneWeights, 1)
+	}
+	if len(chunkRefs) > 0 {
+		pruneOps = append(pruneOps, func() error { return pending.demoteChunkArtifacts(cat, chunkRefs) })
+		pruneWeights = append(pruneWeights, len(chunkRefs))
+	}
+	// Metered BEFORE the error check so a mid-scan failure keeps the completed count.
 	completed, err := runOps(ctx, cfg, pruneOps)
 	prunedArtifacts := 0
 	for _, w := range pruneWeights[:completed] {
@@ -188,15 +199,15 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	}
 	metrics.Prune(prunedArtifacts, time.Since(pruneStart))
 	if err != nil {
-		return fmt.Errorf("prune op: %w", err)
+		return fmt.Errorf("prune demote: %w", err)
 	}
 	if prunedArtifacts > 0 {
 		logger.WithField("pruned", prunedArtifacts).Info("lifecycle prune stage complete")
 	}
 
-	// End of run: destroy the hot chunks demoted in stage 2, once every stage has
-	// finished (design: wait the grace period once, then delete).
-	pending.destroy(ctx, cfg, cat)
+	// End of run: destroy everything demoted this run — discarded hot handles and
+	// pruned cold files — after one grace wait (design: wait once, then delete).
+	pending.run(ctx, cfg)
 	return nil
 }
 
