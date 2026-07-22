@@ -181,9 +181,9 @@ func TestCSVSinkPaceLag(t *testing.T) {
 }
 
 // TestCSVSinkPaceLagClampedToZero: a ledger committing before its due time (its
-// lag would be negative) records a zero-lag sample, which the aggregated row
-// then drops as sub-tick — so a paced run whose only sample is on-time writes no
-// pace_lag row.
+// lag would be negative) records a zero-lag sample. Zero-lag samples are part
+// of the lag distribution (an on-time ledger), so a paced run whose only
+// sample is on-time still writes a pace_lag row, with all percentiles 0.
 func TestCSVSinkPaceLagClampedToZero(t *testing.T) {
 	clock := &fakeClock{t: time.Unix(0, 0)}
 	sched := &paceSchedule{interval: 100 * time.Millisecond, firstSeq: 2, clock: clock.now}
@@ -194,9 +194,38 @@ func TestCSVSinkPaceLagClampedToZero(t *testing.T) {
 	sink.LastCommitted(5) // pos 3, due t0+300, clock still t0 → lag −300ms → clamped 0
 
 	assert.Equal(t, []time.Duration{0}, paceLagSamples(sink)) // the raw (zero) sample is recorded
-	written, err := sink.writeCSVs(t.TempDir())
-	require.NoError(t, err)
-	assert.Empty(t, written) // the lone zero-duration sample is suppressed
+	driver := readCSV(t, filepath.Join(mustWriteCSVs(t, sink), "driver.csv"))
+	require.Contains(t, driver, "pace_lag")
+	assert.EqualValues(t, 1, driver["pace_lag"]["n"])
+	assert.EqualValues(t, 1, driver["pace_lag"]["n_items"])
+	assert.EqualValues(t, 0, driver["pace_lag"]["p50_ns"])
+	assert.EqualValues(t, 0, driver["pace_lag"]["p99_ns"])
+}
+
+// TestCSVSinkPaceLagMixed: on-time (zero-lag) and late ledgers aggregate into
+// one pace_lag row that counts every committed ledger, so the percentiles
+// reflect how often the run kept pace, not just how late the late ledgers were.
+func TestCSVSinkPaceLagMixed(t *testing.T) {
+	clock := &fakeClock{t: time.Unix(0, 0)}
+	sched := &paceSchedule{interval: 100 * time.Millisecond, firstSeq: 2, clock: clock.now}
+	sched.dueForPos(0)
+	sink := newCSVSink()
+	sink.schedule = sched
+
+	sink.LastCommitted(2) // due t0, commits at t0 → lag 0
+	clock.advance(100 * time.Millisecond)
+	sink.LastCommitted(3) // due t0+100, commits at t0+100 → lag 0
+	clock.advance(200 * time.Millisecond)
+	sink.LastCommitted(4) // due t0+200, commits at t0+300 → lag 100ms
+
+	assert.Equal(t, []time.Duration{0, 0, 100 * time.Millisecond}, paceLagSamples(sink))
+
+	driver := readCSV(t, filepath.Join(mustWriteCSVs(t, sink), "driver.csv"))
+	require.Contains(t, driver, "pace_lag")
+	assert.EqualValues(t, 3, driver["pace_lag"]["n"])
+	assert.EqualValues(t, 3, driver["pace_lag"]["n_items"])
+	assert.EqualValues(t, 0, driver["pace_lag"]["p50_ns"]) // 2 of 3 ledgers on time
+	assert.EqualValues(t, (100 * time.Millisecond).Nanoseconds(), driver["pace_lag"]["max_ns"])
 }
 
 // TestCSVSinkPaceLagUnanchored: a commit arriving before the schedule anchors

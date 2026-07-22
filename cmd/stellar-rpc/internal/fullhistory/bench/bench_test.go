@@ -17,6 +17,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
+	"github.com/spf13/cobra"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/fhtest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
@@ -109,7 +110,7 @@ func TestRunColdFromPack(t *testing.T) {
 	outRoot := t.TempDir()
 	csvDir := filepath.Join(t.TempDir(), "csv")
 
-	err := runCold(context.Background(), testLogger(), coldOptions{
+	err := runCold(context.Background(), testLogger(), &cobra.Command{Use: "test"}, coldOptions{
 		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
 		StartChunk: chunkID,
 		NumChunks:  1,
@@ -193,7 +194,7 @@ func TestRunColdMultiChunk(t *testing.T) {
 	outRoot := t.TempDir()
 	csvDir := filepath.Join(t.TempDir(), "csv")
 
-	err := runCold(context.Background(), testLogger(), coldOptions{
+	err := runCold(context.Background(), testLogger(), &cobra.Command{Use: "test"}, coldOptions{
 		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
 		StartChunk: chunk.ID(0),
 		NumChunks:  2,
@@ -222,7 +223,7 @@ func TestRunColdMultiChunk(t *testing.T) {
 // guard.
 func TestRunColdRefusesInPlaceRepack(t *testing.T) {
 	root := t.TempDir()
-	err := runCold(context.Background(), testLogger(), coldOptions{
+	err := runCold(context.Background(), testLogger(), &cobra.Command{Use: "test"}, coldOptions{
 		Source:     sourceConfig{Kind: sourcePack, PackDir: geometry.NewLayout(root).LedgersRoot()},
 		StartChunk: chunk.ID(0),
 		NumChunks:  1,
@@ -241,7 +242,7 @@ func TestBenchRejectsInvalidSourceEarly(t *testing.T) {
 	hotRoot := filepath.Join(base, "hot")
 	outDir := filepath.Join(base, "csv")
 
-	err := runCold(context.Background(), testLogger(), coldOptions{
+	err := runCold(context.Background(), testLogger(), &cobra.Command{Use: "test"}, coldOptions{
 		Source:     sourceConfig{Kind: sourcePack}, // --pack-dir missing
 		StartChunk: chunk.ID(0),
 		NumChunks:  1,
@@ -251,7 +252,7 @@ func TestBenchRejectsInvalidSourceEarly(t *testing.T) {
 	})
 	require.ErrorContains(t, err, "--pack-dir is required")
 
-	err = runHot(context.Background(), testLogger(), hotOptions{
+	err = runHot(context.Background(), testLogger(), &cobra.Command{Use: "test"}, hotOptions{
 		Source:     sourceConfig{Kind: "bogus"},
 		StartChunk: chunk.ID(0),
 		NumChunks:  1,
@@ -313,7 +314,7 @@ func TestRunHotFromPack(t *testing.T) {
 		HotRoot:    hotRoot,
 		OutDir:     csvDir,
 	}
-	require.NoError(t, runHot(context.Background(), testLogger(), opts))
+	require.NoError(t, runHot(context.Background(), testLogger(), &cobra.Command{Use: "test"}, opts))
 
 	// The commit phase (WAL append + fsync) is far above timer granularity,
 	// so every ledger contributes a sample; extract likewise.
@@ -348,7 +349,7 @@ func TestRunHotFromPack(t *testing.T) {
 
 	// A second run against the same hot root succeeds from a fixed (empty)
 	// starting state: the production create bracket wipes the leftover DB.
-	require.NoError(t, runHot(context.Background(), testLogger(), opts))
+	require.NoError(t, runHot(context.Background(), testLogger(), &cobra.Command{Use: "test"}, opts))
 }
 
 // TestRunHotIncompleteStream asserts an undersized source is a hard error, not
@@ -366,7 +367,7 @@ func TestRunHotIncompleteStream(t *testing.T) {
 	chunkID := chunk.ID(0)
 	packDir, _ := writeSourcePack(t, t.TempDir(), chunkID, packed)
 
-	err := runHot(context.Background(), testLogger(), hotOptions{
+	err := runHot(context.Background(), testLogger(), &cobra.Command{Use: "test"}, hotOptions{
 		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
 		StartChunk: chunkID,
 		NumChunks:  1,
@@ -397,7 +398,7 @@ func TestRunHotPaced(t *testing.T) {
 	csvDir := filepath.Join(t.TempDir(), "csv")
 
 	start := time.Now()
-	require.NoError(t, runHot(context.Background(), testLogger(), hotOptions{
+	require.NoError(t, runHot(context.Background(), testLogger(), &cobra.Command{Use: "test"}, hotOptions{
 		Source:        sourceConfig{Kind: sourcePack, PackDir: packDir},
 		StartChunk:    chunkID,
 		NumChunks:     1,

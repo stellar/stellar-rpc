@@ -11,6 +11,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
+	"github.com/spf13/cobra"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
@@ -90,7 +91,8 @@ func (o hotOptions) validate() error {
 // With --close-interval (opts.CloseInterval) set, the source is paced to that
 // close cadence: the run measures steady-state keep-up rather than catch-up
 // throughput, recording per-ledger pace_lag.
-func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) error {
+func runHot(ctx context.Context, logger *supportlog.Entry, cmd *cobra.Command, opts hotOptions) error {
+	startedAt := time.Now().UTC()
 	if err := opts.validate(); err != nil {
 		return err
 	}
@@ -158,6 +160,9 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 	sink.logSummary(logger)
 	written, err := sink.writeCSVs(opts.OutDir)
 	if err != nil {
+		return err
+	}
+	if err := writeInvocationJSON(opts.OutDir, cmd, captureFlags(cmd), startedAt, time.Now().UTC()); err != nil {
 		return err
 	}
 	logger.Infof("wrote %d CSVs to %s", len(written), opts.OutDir)
