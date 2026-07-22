@@ -17,7 +17,7 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/pflag v1.0.5
-	github.com/stellar/go-stellar-sdk v0.6.1-0.20260616165505-26fec7c0e891
+	github.com/stellar/go-stellar-sdk v0.6.1-0.20260722220414-82df7643786e
 	github.com/stretchr/testify v1.11.1
 )
 
@@ -148,8 +148,3 @@ require (
 	gopkg.in/tylerb/graceful.v1 v1.2.15 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-// SPIKE: pin go-stellar-sdk to the CAP-0085 fork branch (sisuresh/go
-// p28-cap-0085) until stellar/go-stellar-sdk#5965 merges, then re-pin to the
-// merged upstream commit and drop this replace + the .golangci.yml allow-list.
-replace github.com/stellar/go-stellar-sdk => github.com/sisuresh/go v0.0.0-20260722181103-a44a67183c61
