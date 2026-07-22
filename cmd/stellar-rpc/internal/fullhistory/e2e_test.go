@@ -221,6 +221,7 @@ func runDaemonInBackground(
 		Metrics:              metrics,
 		RestartBackoff:       10 * time.Millisecond,
 		chunksPerTxhashIndex: 1,
+		lifecycleGrace:       time.Millisecond, // don't park the run on the 5m default
 	}
 	go func() { errCh <- runDaemonWith(ctx, cfgPath, opts) }()
 	return cancelFn, errCh

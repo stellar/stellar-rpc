@@ -147,6 +147,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 		ExecConfig: cfg.Exec,
 		Retention:  cfg.Retention,
 		Router:     router,
+		Grace:      cfg.lifecycleGrace,
 	}.WithLifecycleDefaults()
 
 	// Begin serving reads (injected) BEFORE launching the loops; it must return
@@ -335,6 +336,11 @@ type StartConfig struct {
 
 	// runBackfill is a test-only seam for one backfill pass; nil ⇒ backfill.RunBackfill.
 	runBackfill func(ctx context.Context, exec backfill.ExecConfig, lo, hi chunk.ID) error
+
+	// lifecycleGrace overrides the deferred-deletion wait; 0 ⇒ lifecycle's
+	// defaultGrace. Tests set it small so a run's end-of-run destroy does not park
+	// for minutes.
+	lifecycleGrace time.Duration
 
 	// health is the readiness/health signal the ingestion loop feeds per commit;
 	// #772's read server consumes it (as HealthSignal). nil ⇒ observe is a no-op.

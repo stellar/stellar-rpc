@@ -82,17 +82,16 @@ func (p *pendingDeletions) demoteTxHashIndex(cat *catalog.Catalog, cov geometry.
 	return nil
 }
 
-// run waits the grace period once (skipped when zero, as it is until the read
-// server sets a request deadline) and runs every queued destroy. A destroy that
+// run waits the grace period once, then runs every queued destroy. A destroy that
 // fails is logged and left for the next run's scan to re-discover via its still-
 // demoted key.
 func (p *pendingDeletions) run(ctx context.Context, cfg Config) {
 	if len(p.items) == 0 {
 		return
 	}
-	if cfg.grace > 0 {
+	if cfg.Grace > 0 {
 		select {
-		case <-time.After(cfg.grace):
+		case <-time.After(cfg.Grace):
 		case <-ctx.Done():
 			return // shutdown: the demoted keys persist for the next run
 		}
