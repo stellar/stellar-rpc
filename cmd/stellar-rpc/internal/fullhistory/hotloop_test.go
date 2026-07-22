@@ -416,6 +416,46 @@ func TestRunIngestionLoop_HandoffFenceClosesBeforeNextKey(t *testing.T) {
 	require.Equal(t, []bool{true}, fence.nextReady, "the next chunk's hot key was ready before publish")
 }
 
+// TestRunIngestionLoop_BoundaryTransfersOwnershipToRouter: with a router set, the
+// boundary does NOT close the completed chunk's DB — the router keeps it open (for
+// queries and the freeze) and the next chunk's handle is published too.
+func TestRunIngestionLoop_BoundaryTransfersOwnershipToRouter(t *testing.T) {
+	t.Parallel() // seeds a near-full chunk (one synced commit per ledger)
+	cat, _ := testCatalog(t)
+	c := chunk.ID(0)
+	c1 := c + 1
+	resume := seedLastCommitted(t, cat, c, c.LastLedger()-1) // == c.LastLedger()
+
+	stream := &fakeCoreStream{frames: map[uint32][]byte{
+		c.LastLedger():   fhtest.ZeroTxLCMBytes(t, c.LastLedger()),   // boundary 0->1
+		c1.FirstLedger(): fhtest.ZeroTxLCMBytes(t, c1.FirstLedger()), // a ledger in chunk 1
+	}, endErr: errors.New("end")}
+
+	db, err := openHotDBForChunk(cat, chunk.IDFromLedger(resume), silentLogger())
+	require.NoError(t, err)
+	router := serving.NewRouter(cat, geometry.NewRetention(0, 0))
+	cfg := ingestionLoopConfig{
+		Stream: stream, Resume: resume, HotDB: db, Catalog: cat,
+		Boundary: &recordingBoundary{}, Logger: silentLogger(), Router: router,
+	}
+
+	require.Error(t, runIngestionLoop(context.Background(), cfg), "stream ran dry")
+
+	// The completed chunk stays in the router, still open (the loop closed only the
+	// live chunk on exit), and the next chunk's handle was published.
+	completed, ok := router.Handle(c)
+	require.True(t, ok, "completed chunk's handle retained in the router")
+	_, ok = router.Handle(c1)
+	require.True(t, ok, "next chunk's handle published")
+
+	maxSeq, present, err := completed.MaxCommittedSeq()
+	require.NoError(t, err)
+	require.True(t, present)
+	assert.Equal(t, c.LastLedger(), maxSeq, "the retained handle still answers reads")
+
+	_ = completed.Close() // router-owned; not closed by the loop
+}
+
 // ---------------------------------------------------------------------------
 // runIngestionLoop — clean shutdown vs crash (classified at the daemon top
 // level: ctx-canceled return is clean, any other error is restartable).

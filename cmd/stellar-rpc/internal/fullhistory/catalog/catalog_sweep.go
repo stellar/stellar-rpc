@@ -108,12 +108,20 @@ func (c *Catalog) DiscardHotChunk(chunkID chunk.ID) error {
 	if err := c.PutHotTransient(chunkID); err != nil {
 		return fmt.Errorf("mark hot transient chunk %s: %w", chunkID, err)
 	}
+	return c.DestroyHotChunk(chunkID)
+}
+
+// DestroyHotChunk removes a hot chunk's dir and key — the destroy half of the
+// discard, split out for deferred deletion (which demotes during a stage, then
+// destroys at end of run). The caller MUST have marked the chunk transient and
+// closed its hot handle. rmdir is made durable BEFORE the key delete, so the key
+// outlives the dir and a crash re-runs the destroy rather than leaving a key-less
+// dir. Idempotent: an absent dir/key is a no-op.
+func (c *Catalog) DestroyHotChunk(chunkID chunk.ID) error {
 	dir := c.layout.HotChunkPath(chunkID)
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("rmdir hot dir %s: %w", dir, err)
 	}
-	// rmdir durable BEFORE the key delete: the key outlives the dir, so a crash
-	// re-runs the discard rather than leaving a key-less dir.
 	if err := durable.FsyncDir(filepath.Dir(dir)); err != nil {
 		return fmt.Errorf("fsync hot parent dir %s: %w", filepath.Dir(dir), err)
 	}

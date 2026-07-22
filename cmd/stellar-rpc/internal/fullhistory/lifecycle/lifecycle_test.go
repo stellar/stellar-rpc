@@ -141,9 +141,9 @@ func TestRunLifecycleTick_DiscardGatedOnIndexCoverage(t *testing.T) {
 	// txhash is frozen, ledgers/events frozen, but the window has no FROZEN coverage
 	// yet => indexCovers(0) is false => NOT discarded (still needed for lookups via
 	// its .bin/hot DB until the index folds it in).
-	ops, err := eligibleDiscardOps(cat, floorFor(t, cfg, lastChunk.LastLedger()), lastChunk)
+	chunks, err := eligibleDiscardChunks(cat, floorFor(t, cfg, lastChunk.LastLedger()), lastChunk)
 	require.NoError(t, err)
-	require.Empty(t, ops, "no index coverage yet: the hot DB stays")
+	require.Empty(t, chunks, "no index coverage yet: the hot DB stays")
 
 	// Now finalize the window's index so it covers chunk 0 (terminal needs chunk
 	// 1's .bin too; build a non-terminal-but-covering frozen coverage [0,0]).
@@ -152,10 +152,14 @@ func TestRunLifecycleTick_DiscardGatedOnIndexCoverage(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, covered)
 
-	ops, err = eligibleDiscardOps(cat, floorFor(t, cfg, lastChunk.LastLedger()), lastChunk)
+	chunks, err = eligibleDiscardChunks(cat, floorFor(t, cfg, lastChunk.LastLedger()), lastChunk)
 	require.NoError(t, err)
-	require.Len(t, ops, 1, "covered + nothing pending => discard eligible")
-	require.NoError(t, ops[0]())
+	require.Equal(t, []chunk.ID{0}, chunks, "covered + nothing pending => discard eligible")
+
+	// Demote then destroy, as a run does across its discard stage and its end.
+	var pending hotDeletions
+	require.NoError(t, pending.demote(cfg.Router, cat, 0))
+	pending.destroy(context.Background(), cfg, cat)
 
 	has, err := hotKeyExists(cat, 0)
 	require.NoError(t, err)

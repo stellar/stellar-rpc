@@ -10,25 +10,24 @@ import (
 // tick calls in order. Both are PURE READS — eligibility comes from durable keys
 // alone, so re-running against the same snapshot yields nothing (quiescence).
 
-// eligibleDiscardOps returns a discard closure per hot DB the cold artifacts now
-// fully serve (or that fell past retention). Per chunk: below the floor → discard;
-// complete (c <= lastChunk), nothing pending, and the index covers it → discard;
-// otherwise (live, or frozen awaiting coverage) → leave alone. Completeness is a
-// chunk-domain comparison (LastLedger is monotonic, so c.LastLedger() <=
-// lastChunk.LastLedger() iff c <= lastChunk); no ledger conversion is needed here.
-// catalog.DiscardHotChunk is idempotent, so a crash between freeze and discard
-// self-heals next tick.
-func eligibleDiscardOps(cat *catalog.Catalog, floor chunk.ID, lastChunk chunk.ID) ([]func() error, error) {
+// eligibleDiscardChunks returns each hot chunk the cold artifacts now fully serve
+// (or that fell past retention). Per chunk: below the floor → discard; complete
+// (c <= lastChunk), nothing pending, and the index covers it → discard; otherwise
+// (live, or frozen awaiting coverage) → leave alone. Completeness is a chunk-domain
+// comparison (LastLedger is monotonic, so c.LastLedger() <= lastChunk.LastLedger()
+// iff c <= lastChunk); no ledger conversion is needed here. The discard demote is
+// idempotent, so a crash between freeze and discard self-heals next tick.
+func eligibleDiscardChunks(cat *catalog.Catalog, floor chunk.ID, lastChunk chunk.ID) ([]chunk.ID, error) {
 	hot, err := cat.HotChunkKeys()
 	if err != nil {
 		return nil, err
 	}
 
-	var ops []func() error
+	var chunks []chunk.ID
 	for _, c := range hot {
 		switch {
 		case c < floor:
-			ops = append(ops, func() error { return cat.DiscardHotChunk(c) })
+			chunks = append(chunks, c)
 		case c <= lastChunk:
 			// Coverage is read once here and passed into pendingArtifacts — the
 			// discard requires covers independently, so the whole predicate is
@@ -42,13 +41,13 @@ func eligibleDiscardOps(cat *catalog.Catalog, floor chunk.ID, lastChunk chunk.ID
 				return nil, perr
 			}
 			if pending.Empty() && covers {
-				ops = append(ops, func() error { return cat.DiscardHotChunk(c) })
+				chunks = append(chunks, c)
 			}
 			// else: frozen awaiting coverage, or still producing — leave alone.
 		}
 		// default (c > lastChunk): the live chunk or above — ingestion's, not ours.
 	}
-	return ops, nil
+	return chunks, nil
 }
 
 // pendingArtifacts lists which outputs chunk still needs: ledgers and events must

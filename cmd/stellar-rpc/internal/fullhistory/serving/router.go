@@ -67,6 +67,14 @@ func (r *Router) SetLatest(seq uint32) { r.latest.Store(seq) }
 
 func (r *Router) Latest() uint32 { return r.latest.Load() }
 
+// Handle returns the currently published hot database for chunk c, if any. The
+// freeze source reads a completed chunk through this shared handle rather than
+// opening a second reader against the still-open writer.
+func (r *Router) Handle(c chunk.ID) (*hotchunk.DB, bool) {
+	db, ok := r.handles.Load().hot[c]
+	return db, ok
+}
+
 // PublishHandle adds or replaces the hot database for chunk c and publishes the
 // new set atomically.
 func (r *Router) PublishHandle(c chunk.ID, db *hotchunk.DB) {
@@ -78,13 +86,17 @@ func (r *Router) PublishHandle(c chunk.ID, db *hotchunk.DB) {
 }
 
 // DiscardHandle removes the hot database for chunk c and publishes the new set
-// atomically. It only unpublishes the handle; deferred deletion closes it later.
-func (r *Router) DiscardHandle(c chunk.ID) {
+// atomically, returning the removed handle (nil if absent). It only unpublishes;
+// the caller (deferred deletion) closes the returned handle later.
+func (r *Router) DiscardHandle(c chunk.ID) *hotchunk.DB {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	next := r.handles.Load().clone()
+	cur := r.handles.Load()
+	db := cur.hot[c]
+	next := cur.clone()
 	delete(next.hot, c)
 	r.handles.Store(next)
+	return db
 }
 
 // Admission is one query's consistent view of serving state, held for the
