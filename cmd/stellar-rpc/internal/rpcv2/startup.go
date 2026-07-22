@@ -129,6 +129,18 @@ func run(ctx context.Context, cfg StartConfig) error {
 	router := serving.NewRouter(cat, cfg.Retention)
 	cfg.Exec.Process.HotHandle = router.Handle
 
+	// Before serving: destroy any resources a crashed run left demoted, then open
+	// and publish the handles for ready hot chunks below the live one (completed
+	// chunks a prior run had not yet discarded). The live chunk's handle is
+	// published by the ingestion loop. Both complete before the loops start.
+	liveChunk := chunk.IDFromLedger(resumeLedger)
+	if err := lifecycle.StartupSweep(cat, liveChunk); err != nil {
+		return fmt.Errorf("startup sweep: %w", err)
+	}
+	if err := router.BootstrapHandles(liveChunk, logger); err != nil {
+		return fmt.Errorf("startup bootstrap handles: %w", err)
+	}
+
 	// The lifecycle config draws on the SAME Exec wiring backfill uses, so the two
 	// share one catalog/pool by construction.
 	lifecycleCfg := lifecycle.Config{

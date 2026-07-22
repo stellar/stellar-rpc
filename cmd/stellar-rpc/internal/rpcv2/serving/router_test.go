@@ -47,6 +47,42 @@ func newTestRouter(t *testing.T, size uint32, earliest chunk.ID) (*Router, *cata
 	return NewRouter(cat, geometry.NewRetention(size, earliest)), cat
 }
 
+// makeReadyHotChunk creates a real hot DB dir for chunk c and marks its key ready,
+// leaving no open handle — the on-disk state BootstrapHandles reopens.
+func makeReadyHotChunk(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
+	t.Helper()
+	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+	require.NoError(t, cat.FlipHotReady(c))
+}
+
+// TestBootstrapHandles pins that startup publishes a handle for every ready hot
+// chunk except the live one (which the ingestion loop publishes).
+func TestBootstrapHandles(t *testing.T) {
+	cat := openTestCatalog(t, silentLogger())
+	r := NewRouter(cat, geometry.NewRetention(0, 0))
+	for _, c := range []chunk.ID{5, 6, 7} {
+		makeReadyHotChunk(t, cat, c)
+	}
+
+	require.NoError(t, r.BootstrapHandles(7, silentLogger()))
+
+	_, ok5 := r.Handle(5)
+	_, ok6 := r.Handle(6)
+	_, ok7 := r.Handle(7)
+	assert.True(t, ok5, "completed ready chunk published")
+	assert.True(t, ok6, "completed ready chunk published")
+	assert.False(t, ok7, "live chunk skipped; the ingestion loop publishes it")
+
+	// The router owns the bootstrapped handles; close them (no loop here).
+	for _, c := range []chunk.ID{5, 6} {
+		if db, ok := r.Handle(c); ok {
+			_ = db.Close()
+		}
+	}
+}
+
 func TestSetLatest(t *testing.T) {
 	r, _ := newTestRouter(t, 0, 0)
 	assert.Equal(t, uint32(0), r.Latest())
