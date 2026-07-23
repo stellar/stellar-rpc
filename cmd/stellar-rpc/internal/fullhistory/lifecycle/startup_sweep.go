@@ -10,9 +10,14 @@ import (
 
 // StartupSweep destroys resources a crashed run left demoted, before the daemon
 // resumes serving. The catalog demotions are the durable work list: a "transient"
-// hot key or a "pruning" cold key marks a deletion that never finished. No query
-// survives the process, so the destroy is immediate — the grace period is only for
-// in-flight readers, of which a fresh process has none.
+// hot key or a "pruning" cold key marks a deletion that never finished. The destroy
+// is immediate (no grace wait): it runs before any query is admitted, so nothing
+// holds a handle to what it removes.
+//
+// TODO(#772): supervise() calls run() — and thus StartupSweep — on each supervised
+// in-process restart, not only at process start. Today no read server exists, so
+// no query can span a restart; once one does, confirm an in-flight query from the
+// prior run cannot reach a resource this sweep destroys immediately.
 //
 // It skips chunks at or above liveChunk: a "transient" key there is a mid-CREATE
 // leftover (openHotDBForChunk recreates it), not a mid-discard one. Runs before
