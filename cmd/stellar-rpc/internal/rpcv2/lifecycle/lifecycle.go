@@ -37,10 +37,10 @@ type Config struct {
 	// earliest_ledger pin.
 	Retention geometry.Retention
 
-	// Router unpublishes a discarded hot chunk's handle so deferred deletion can
-	// close it (see deletion.go). Nil in the bounded backfill / test case, where
-	// no handle is published.
-	Router HandleDiscarder
+	// Router unpublishes a discarded hot chunk's handle and closes it once idle so
+	// deferred deletion can retire it (see deletion.go). Nil in the bounded
+	// backfill / test case, where no handle is published.
+	Router HandleRetirer
 
 	// Grace is the deferred-deletion wait before destroying demoted resources.
 	// Unset (<= 0) takes defaultGrace via WithLifecycleDefaults; tests override it

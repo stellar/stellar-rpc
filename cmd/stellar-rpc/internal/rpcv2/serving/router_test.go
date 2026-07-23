@@ -193,27 +193,58 @@ func TestHotHandles_CopyOnWrite(t *testing.T) {
 	assert.True(t, live6)
 }
 
-// TestClose_ClosesAndClearsHandles pins that shutdown closes every published hot
-// handle and empties the set. The handles are real on-disk DBs so Close flushes;
-// a second Close (the idempotent live-chunk case) is a no-op.
+// publishReadyHandle makes a ready on-disk chunk and publishes an open handle to it.
+func publishReadyHandle(t *testing.T, r *Router, cat *catalog.Catalog, c chunk.ID) {
+	t.Helper()
+	makeReadyHotChunk(t, cat, c)
+	db, err := hotchunk.OpenExisting(cat.Layout().HotChunkPath(c), c, silentLogger())
+	require.NoError(t, err)
+	r.PublishHandle(c, db)
+}
+
+// TestDiscardThenCloseDiscarded pins the retire path: DiscardHandle unpublishes the
+// handle into the closing set, CloseDiscarded closes the idle handle, and a repeat
+// CloseDiscarded is a no-op (nothing left pending). This is the close-retry seam
+// the deferred-deletion fix relies on — the handle survives in closing across the
+// discard and the (later) close.
+func TestDiscardThenCloseDiscarded(t *testing.T) {
+	cat := openTestCatalog(t, silentLogger())
+	r := NewRouter(cat, geometry.NewRetention(0, 0))
+	publishReadyHandle(t, r, cat, 5)
+
+	r.DiscardHandle(5)
+	_, ok := r.Handle(5)
+	assert.False(t, ok, "discarded handle is unpublished")
+
+	assert.True(t, r.CloseDiscarded(5), "idle discarded handle closes")
+	assert.True(t, r.CloseDiscarded(5), "second call: nothing pending")
+
+	// DiscardHandle for a chunk not published is a harmless no-op (the retry case).
+	r.DiscardHandle(5)
+	assert.True(t, r.CloseDiscarded(5), "no-op discard leaves nothing to close")
+}
+
+// TestClose_ClosesAndClearsHandles pins that shutdown closes every hot handle —
+// both published and awaiting-close — and empties both sets. A second Close is a
+// no-op (idempotent handle Close, e.g. the live chunk the ingestion loop closes).
 func TestClose_ClosesAndClearsHandles(t *testing.T) {
 	cat := openTestCatalog(t, silentLogger())
 	r := NewRouter(cat, geometry.NewRetention(0, 0))
-	for _, c := range []chunk.ID{5, 6} {
-		makeReadyHotChunk(t, cat, c)
-		db, err := hotchunk.OpenExisting(cat.Layout().HotChunkPath(c), c, silentLogger())
-		require.NoError(t, err)
-		r.PublishHandle(c, db)
-	}
+	publishReadyHandle(t, r, cat, 5)
+	publishReadyHandle(t, r, cat, 6)
+
+	// Discard 6 so it sits in the closing set (unpublished, not yet closed).
+	r.DiscardHandle(6)
 
 	r.Close()
 
 	_, ok5 := r.Handle(5)
-	_, ok6 := r.Handle(6)
-	assert.False(t, ok5, "handles cleared on close")
-	assert.False(t, ok6, "handles cleared on close")
+	assert.False(t, ok5, "published handle cleared on close")
+	// The discarded-but-unclosed handle is drained too: a later CloseDiscarded finds
+	// nothing pending.
+	assert.True(t, r.CloseDiscarded(6), "closing set drained on close")
 
-	r.Close() // idempotent: closing an already-closed, emptied router is safe
+	r.Close() // idempotent
 }
 
 // TestAdmit_ReleaseFreesSnapshot pins that Release returns the snapshot, so a
