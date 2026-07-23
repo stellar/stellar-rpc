@@ -137,8 +137,8 @@ func run(ctx context.Context, cfg StartConfig) error {
 	if err := lifecycle.StartupSweep(cat, liveChunk); err != nil {
 		return fmt.Errorf("startup sweep: %w", err)
 	}
-	if err := router.BootstrapHandles(liveChunk, logger); err != nil {
-		return fmt.Errorf("startup bootstrap handles: %w", err)
+	if err := router.PublishReadyHandles(liveChunk, logger); err != nil {
+		return fmt.Errorf("startup publish ready handles: %w", err)
 	}
 
 	// The lifecycle config draws on the SAME Exec wiring backfill uses, so the two

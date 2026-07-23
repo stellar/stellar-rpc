@@ -310,7 +310,7 @@ func TestRunIngestionLoop_AdvancesServingWatermark(t *testing.T) {
 
 	require.Error(t, runIngestionLoop(context.Background(), cfg))
 
-	assert.Equal(t, first+2, router.Latest(), "the watermark advanced to the last committed ledger")
+	assert.Equal(t, first+2, router.Watermark(), "the watermark advanced to the last committed ledger")
 }
 
 // ---------------------------------------------------------------------------

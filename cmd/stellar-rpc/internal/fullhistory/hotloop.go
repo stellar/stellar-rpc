@@ -167,7 +167,7 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		// IngestLedger completes the in-memory events apply before returning, so a
 		// query admitted after this can serve seq from every hot store.
 		if cfg.Router != nil {
-			cfg.Router.SetLatest(seq)
+			cfg.Router.SetWatermark(seq)
 		}
 
 		// Feed the readiness/health signal from the SAME commit: the first commit

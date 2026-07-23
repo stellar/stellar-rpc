@@ -48,7 +48,7 @@ func newTestRouter(t *testing.T, size uint32, earliest chunk.ID) (*Router, *cata
 }
 
 // makeReadyHotChunk creates a real hot DB dir for chunk c and marks its key ready,
-// leaving no open handle — the on-disk state BootstrapHandles reopens.
+// leaving no open handle — the on-disk state PublishReadyHandles reopens.
 func makeReadyHotChunk(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 	t.Helper()
 	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
@@ -57,16 +57,16 @@ func makeReadyHotChunk(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 	require.NoError(t, cat.FlipHotReady(c))
 }
 
-// TestBootstrapHandles pins that startup publishes a handle for every ready hot
+// TestPublishReadyHandles pins that startup publishes a handle for every ready hot
 // chunk except the live one (which the ingestion loop publishes).
-func TestBootstrapHandles(t *testing.T) {
+func TestPublishReadyHandles(t *testing.T) {
 	cat := openTestCatalog(t, silentLogger())
 	r := NewRouter(cat, geometry.NewRetention(0, 0))
 	for _, c := range []chunk.ID{5, 6, 7} {
 		makeReadyHotChunk(t, cat, c)
 	}
 
-	require.NoError(t, r.BootstrapHandles(7, silentLogger()))
+	require.NoError(t, r.PublishReadyHandles(7, silentLogger()))
 
 	_, ok5 := r.Handle(5)
 	_, ok6 := r.Handle(6)
@@ -83,11 +83,11 @@ func TestBootstrapHandles(t *testing.T) {
 	}
 }
 
-func TestSetLatest(t *testing.T) {
+func TestSetWatermark(t *testing.T) {
 	r, _ := newTestRouter(t, 0, 0)
-	assert.Equal(t, uint32(0), r.Latest())
-	r.SetLatest(42)
-	assert.Equal(t, uint32(42), r.Latest())
+	assert.Equal(t, uint32(0), r.Watermark())
+	r.SetWatermark(42)
+	assert.Equal(t, uint32(42), r.Watermark())
 }
 
 // TestAdmit_FloorDerivation pins that the admitted floor is Retention.FloorAt
@@ -148,7 +148,7 @@ func TestAdmit_CapturesStateAtAdmissionInstant(t *testing.T) {
 	r, cat := newTestRouter(t, 0, 0)
 	require.NoError(t, cat.FlipHotReady(5))
 	require.NoError(t, cat.FlipHotReady(6))
-	r.SetLatest(65_000)
+	r.SetWatermark(65_000)
 	r.PublishHandle(5, &hotchunk.DB{})
 
 	a, err := r.Admit()
@@ -156,39 +156,39 @@ func TestAdmit_CapturesStateAtAdmissionInstant(t *testing.T) {
 	defer a.Release()
 
 	// Mutate every piece of serving state after admission.
-	r.SetLatest(70_000)
+	r.SetWatermark(70_000)
 	require.NoError(t, cat.FlipHotReady(7))
 	r.PublishHandle(7, &hotchunk.DB{})
 	r.DiscardHandle(5)
 
 	assert.Equal(t, uint32(65_000), a.Latest(), "watermark frozen at admission")
 
-	_, has5 := a.handles.hot[5]
-	_, has7 := a.handles.hot[7]
+	_, has5 := a.handles.byChunk[5]
+	_, has7 := a.handles.byChunk[7]
 	assert.True(t, has5, "handle present at admission is retained")
 	assert.False(t, has7, "handle published after admission is not visible")
 }
 
-// TestHandleSet_CopyOnWrite pins that publish/discard replace the set wholesale
-// and never mutate a set already loaded by a query.
-func TestHandleSet_CopyOnWrite(t *testing.T) {
+// TestHotHandles_CopyOnWrite pins that publish/discard replace the map wholesale
+// and never mutate a map already loaded by a query.
+func TestHotHandles_CopyOnWrite(t *testing.T) {
 	r, _ := newTestRouter(t, 0, 0)
 	r.PublishHandle(5, &hotchunk.DB{})
 
 	loaded := r.handles.Load()
 
 	r.PublishHandle(6, &hotchunk.DB{})
-	_, has6 := loaded.hot[6]
-	assert.False(t, has6, "publish must not mutate a previously loaded set")
+	_, has6 := loaded.byChunk[6]
+	assert.False(t, has6, "publish must not mutate a previously loaded map")
 
 	r.DiscardHandle(5)
-	_, has5 := loaded.hot[5]
-	assert.True(t, has5, "discard must not mutate a previously loaded set")
+	_, has5 := loaded.byChunk[5]
+	assert.True(t, has5, "discard must not mutate a previously loaded map")
 
-	// The live set reflects both mutations.
+	// The live map reflects both mutations.
 	live := r.handles.Load()
-	_, live5 := live.hot[5]
-	_, live6 := live.hot[6]
+	_, live5 := live.byChunk[5]
+	_, live6 := live.byChunk[6]
 	assert.False(t, live5)
 	assert.True(t, live6)
 }
