@@ -18,7 +18,7 @@ import (
 
 // Closed-store lifecycle: HotStore and ColdReader read methods
 // (LookupKeys, FetchEvents, All, EventCount, Offsets) return
-// stores.ErrStoreClosed after Close, per the storage/stores
+// stores.ErrStoreClosed after Close, per the stores
 // translation contract. ChunkID is the one exception — it returns
 // its constructor-supplied value unchanged after Close.
 

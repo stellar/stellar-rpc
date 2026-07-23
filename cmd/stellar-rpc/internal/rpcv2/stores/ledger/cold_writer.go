@@ -115,7 +115,7 @@ func (w *ColdWriter) Commit() error {
 func (w *ColdWriter) Close() error { return w.pw.Close() }
 
 // translateWriterErr maps packfile-level lifecycle errors to the
-// storage/stores sentinels so callers depend only on stores.* errors.
+// stores sentinels so callers depend only on stores.* errors.
 func translateWriterErr(err error) error {
 	if errors.Is(err, packfile.ErrWriterClosed) {
 		return stores.ErrStoreClosed

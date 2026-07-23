@@ -388,7 +388,7 @@ This preserves the existing lookup semantics while allowing `TxReader` to operat
 
 Each page establishes a scan window, resolves the overlapping chunks, and invokes the existing event query engine for each reader.
 
-The event query engine operates on the common `eventstore.Reader` interface, so routing is identical for hot and cold readers.
+The event query engine operates on the common `event.Reader` interface, so routing is identical for hot and cold readers.
 
 Pages terminate when either:
 

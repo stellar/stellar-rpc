@@ -9,7 +9,7 @@
 //
 // Subsystem-specific concerns (column-family names, on-disk layout,
 // hot/cold lifecycle) live in each subsystem package under
-// rpcv2/storage/stores/ — so adding a new subsystem doesn't grow
+// rpcv2/stores/ — so adding a new subsystem doesn't grow
 // this package.
 package chunk
 

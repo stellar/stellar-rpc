@@ -15,7 +15,7 @@ import (
 // the guard must squash).
 // ---------------------------------------------------------------------------
 
-func TestChunkLastLedger(t *testing.T) {
+func TestLastLedgerOf(t *testing.T) {
 	tests := []struct {
 		name string
 		in   int64
@@ -47,7 +47,7 @@ func TestChunkLastLedger(t *testing.T) {
 
 // SignedIDOfLedger maps a ledger to its containing chunk, signed so a sub-genesis
 // ledger yields -1 rather than panicking.
-func TestChunkIDOfLedger(t *testing.T) {
+func TestSignedIDOfLedger(t *testing.T) {
 	require.Equal(t, int64(-1), SignedIDOfLedger(FirstLedgerSeq-1), "sub-genesis => -1 sentinel")
 	require.Equal(t, int64(0), SignedIDOfLedger(FirstLedgerSeq), "genesis => chunk 0")
 	require.Equal(t, int64(0), SignedIDOfLedger(ID(0).LastLedger()), "chunk 0's last ledger => chunk 0")

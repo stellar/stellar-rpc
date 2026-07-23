@@ -151,7 +151,7 @@ func (h *HotStore) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 }
 
 // translateRocksErr maps rocksdb-level lifecycle errors to the
-// storage/stores sentinels so callers depend only on stores.* errors.
+// stores sentinels so callers depend only on stores.* errors.
 func translateRocksErr(err error) error {
 	if errors.Is(err, rocksdb.ErrStoreClosed) {
 		return stores.ErrStoreClosed

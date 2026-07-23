@@ -725,7 +725,7 @@ func TestQuery_EmptyLeadingLedgerRangeStaysEmpty(t *testing.T) {
 	// Sanity: the same call WITH a freshly-pinned whole-chunk range
 	// returns all 5 events from ledger first+1. The two callers
 	// (empty leading-ledger window vs. whole chunk) produce different
-	// EventIDRanges and the engine respects each literally — that's
+	// IDRanges and the engine respects each literally — that's
 	// the whole point of the snapshot-isolation contract.
 	got, err = Query(context.Background(), h.store, nil,
 		QueryOptions{Range: wholeChunk(t, h.store)})
@@ -950,7 +950,7 @@ func TestQuery_ColdReaderParity_DescendingRangeWithCap(t *testing.T) {
 
 // ─── IDRangeForLedgers helper coverage ──────────────────────────────
 
-func TestEventIDRangeForLedgers_TranslatesLedgerWindow(t *testing.T) {
+func TestIDRangeForLedgers_TranslatesLedgerWindow(t *testing.T) {
 	fx := newMultiLedgerQueryFixture(t)
 	first := chunk.ID(0).FirstLedger()
 	ofs, err := fx.store.Offsets()
@@ -972,7 +972,7 @@ func TestEventIDRangeForLedgers_TranslatesLedgerWindow(t *testing.T) {
 	assert.Equal(t, IDRange{Start: 5, End: 7}, r)
 }
 
-func TestEventIDRangeForLedgers_OutOfRangeLedgerErrors(t *testing.T) {
+func TestIDRangeForLedgers_OutOfRangeLedgerErrors(t *testing.T) {
 	fx := newMultiLedgerQueryFixture(t)
 	first := chunk.ID(0).FirstLedger()
 	ofs, err := fx.store.Offsets()

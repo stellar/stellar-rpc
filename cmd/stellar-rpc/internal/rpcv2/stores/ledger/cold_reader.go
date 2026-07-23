@@ -178,7 +178,7 @@ func (c *ColdReader) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 func (c *ColdReader) Close() error { return c.r.Close() }
 
 // translateReaderErr maps packfile- and os-level errors to the
-// storage/stores sentinels.
+// stores sentinels.
 func translateReaderErr(err error) error {
 	if errors.Is(err, os.ErrClosed) {
 		return stores.ErrStoreClosed
