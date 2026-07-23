@@ -1,4 +1,4 @@
-package eventstore
+package event
 
 // cold_writer.go is the events.pack writer half of the cold-Chunk
 // pipeline. ColdWriter streams a Chunk's events.Payload sequence

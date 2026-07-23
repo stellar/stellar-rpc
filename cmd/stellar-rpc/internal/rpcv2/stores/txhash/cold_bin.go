@@ -55,7 +55,7 @@ type ColdEntry struct {
 
 // ColdBinName returns the .bin filename for chunkID (`<chunkID:08d>.bin`).
 // Bucket-directory composition ({bucketID:05d}/) is the orchestrator's job,
-// mirroring the eventstore cold-format split.
+// mirroring the event store cold-format split.
 func ColdBinName(chunkID chunk.ID) string {
 	return chunkID.String() + ".bin"
 }

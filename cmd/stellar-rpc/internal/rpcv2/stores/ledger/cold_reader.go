@@ -26,7 +26,7 @@ const appDataSize = 4
 // coldPackDecoder is the process-wide zstd decoder for cold ledger
 // pack records. packfile.RecordDecoder must be concurrent-safe and
 // zstd.Decompressor satisfies that, so a single shared instance
-// serves every ColdReader. Mirrors eventstore's pattern.
+// serves every ColdReader. Mirrors the event store's pattern.
 //
 //nolint:gochecknoglobals // shared by design; the decoder is stateless + concurrent-safe
 var coldPackDecoder = zstd.NewDecompressor()

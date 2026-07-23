@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/eventstore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
@@ -97,13 +97,13 @@ func (l Layout) EventsBucketDir(c chunk.ID) string {
 }
 
 // EventsPaths are a chunk's three events cold-segment files. Leaves owned by
-// eventstore.*.
+// event.*.
 func (l Layout) EventsPaths(c chunk.ID) []string {
 	dir := l.EventsBucketDir(c)
 	return []string{
-		filepath.Join(dir, eventstore.EventsPackName(c)),
-		filepath.Join(dir, eventstore.IndexPackName(c)),
-		filepath.Join(dir, eventstore.IndexHashName(c)),
+		filepath.Join(dir, event.EventsPackName(c)),
+		filepath.Join(dir, event.IndexPackName(c)),
+		filepath.Join(dir, event.IndexHashName(c)),
 	}
 }
 

@@ -1,4 +1,4 @@
-package eventstore
+package event
 
 // cold_reader.go is the read side of a frozen Chunk. It opens the
 // three cold artifacts produced by ColdWriter + WriteColdIndex

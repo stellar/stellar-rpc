@@ -1,4 +1,4 @@
-package eventstore
+package event
 
 import (
 	"bytes"
@@ -126,30 +126,30 @@ func dataSyms(t *testing.T, payloads []events.Payload) []string {
 }
 
 // eventIDRangeFor is a test-side convenience wrapper over the
-// public EventIDRangeForLedgers helper: it pulls the fixture's
+// public IDRangeForLedgers helper: it pulls the fixture's
 // offsets snapshot and translates the inclusive ledger window. The
-// production adapter calls EventIDRangeForLedgers directly with its
+// production adapter calls IDRangeForLedgers directly with its
 // own offsets handle.
-func eventIDRangeFor(t *testing.T, fx *queryFixture, startLedger, endLedger uint32) EventIDRange {
+func eventIDRangeFor(t *testing.T, fx *queryFixture, startLedger, endLedger uint32) IDRange {
 	t.Helper()
 	ofs, err := fx.store.Offsets()
 	require.NoError(t, err)
-	r, err := EventIDRangeForLedgers(ofs, startLedger, endLedger)
+	r, err := IDRangeForLedgers(ofs, startLedger, endLedger)
 	require.NoError(t, err)
 	return r
 }
 
-// wholeChunk returns the EventIDRange covering everything r has
+// wholeChunk returns the IDRange covering everything r has
 // ingested at this moment — the test-side equivalent of the
 // snapshot the multi-chunk coordinator pins at request entry.
 // Each test that wants "scan the whole chunk" pins its OWN snapshot
 // via this helper rather than relying on a hidden engine default,
 // keeping the snapshot-isolation contract visible at every call site.
-func wholeChunk(t *testing.T, r Reader) EventIDRange {
+func wholeChunk(t *testing.T, r Reader) IDRange {
 	t.Helper()
 	ec, err := r.EventCount()
 	require.NoError(t, err)
-	return EventIDRange{End: ec}
+	return IDRange{End: ec}
 }
 
 func TestQuery_MatchAllOnEmptyFiltersSlice(t *testing.T) {
@@ -309,12 +309,12 @@ func TestQuery_InvertedRangeRejected(t *testing.T) {
 	// such a range, so receiving one is always a calling bug.
 	fx := newQueryFixture(t)
 	_, err := Query(context.Background(), fx.store, nil,
-		QueryOptions{Range: EventIDRange{Start: 500, End: 100}})
+		QueryOptions{Range: IDRange{Start: 500, End: 100}})
 	require.Error(t, err)
 
 	// Start == End is a legitimate empty range, NOT an error.
 	got, err := Query(context.Background(), fx.store, nil,
-		QueryOptions{Range: EventIDRange{Start: 3, End: 3}})
+		QueryOptions{Range: IDRange{Start: 3, End: 3}})
 	require.NoError(t, err)
 	assert.Empty(t, got)
 }
@@ -400,7 +400,7 @@ func TestQuery_RangeEndBeyondChunkRejected(t *testing.T) {
 	// caller bug (wrong chunk's offsets, stale snapshot). Surface it
 	// loudly rather than silently clipping.
 	_, err := Query(context.Background(), fx.store, nil,
-		QueryOptions{Range: EventIDRange{Start: 0, End: 1_000_000}})
+		QueryOptions{Range: IDRange{Start: 0, End: 1_000_000}})
 	require.Error(t, err)
 }
 
@@ -682,8 +682,8 @@ func TestQuery_RangeAndEmptiesUnion(t *testing.T) {
 
 // TestQuery_EmptyLeadingLedgerRangeStaysEmpty pins the fix for the
 // Codex-flagged bug: when a chunk's first ledger has zero events but
-// later ledgers have events, EventIDRangeForLedgers(ofs, first, first)
-// legitimately returns EventIDRange{0, 0}. A prior implementation
+// later ledgers have events, IDRangeForLedgers(ofs, first, first)
+// legitimately returns IDRange{0, 0}. A prior implementation
 // treated End == 0 as a "whole chunk" sentinel and silently expanded
 // the empty query to return events from later ledgers. Under the
 // snapshot-isolation contract (Range mandatory and authoritative), the
@@ -707,14 +707,14 @@ func TestQuery_EmptyLeadingLedgerRangeStaysEmpty(t *testing.T) {
 		makeSimplePayload(t, "evt-4"),
 	}))
 
-	// EventIDRangeForLedgers translates the empty-prefix request to
-	// EventIDRange{0, 0}. This is what the future adapter / coordinator
+	// IDRangeForLedgers translates the empty-prefix request to
+	// IDRange{0, 0}. This is what the future adapter / coordinator
 	// will hand to Query for a getEvents call restricted to ledger `first`.
 	ofs, err := h.store.Offsets()
 	require.NoError(t, err)
-	emptyRange, err := EventIDRangeForLedgers(ofs, first, first)
+	emptyRange, err := IDRangeForLedgers(ofs, first, first)
 	require.NoError(t, err)
-	require.Equal(t, EventIDRange{Start: 0, End: 0}, emptyRange,
+	require.Equal(t, IDRange{Start: 0, End: 0}, emptyRange,
 		"fixture sanity: empty leading-ledger window must produce {0, 0}")
 
 	got, err := Query(context.Background(), h.store, nil,
@@ -948,7 +948,7 @@ func TestQuery_ColdReaderParity_DescendingRangeWithCap(t *testing.T) {
 	assert.Equal(t, []string{"evt-extra-1", "evt-extra-0"}, dataSyms(t, got))
 }
 
-// ─── EventIDRangeForLedgers helper coverage ──────────────────────────────
+// ─── IDRangeForLedgers helper coverage ──────────────────────────────
 
 func TestEventIDRangeForLedgers_TranslatesLedgerWindow(t *testing.T) {
 	fx := newMultiLedgerQueryFixture(t)
@@ -957,19 +957,19 @@ func TestEventIDRangeForLedgers_TranslatesLedgerWindow(t *testing.T) {
 	require.NoError(t, err)
 
 	// Whole multi-ledger range: covers ids [0, 7).
-	r, err := EventIDRangeForLedgers(ofs, first, first+1)
+	r, err := IDRangeForLedgers(ofs, first, first+1)
 	require.NoError(t, err)
-	assert.Equal(t, EventIDRange{Start: 0, End: 7}, r)
+	assert.Equal(t, IDRange{Start: 0, End: 7}, r)
 
 	// First ledger only: ids [0, 5).
-	r, err = EventIDRangeForLedgers(ofs, first, first)
+	r, err = IDRangeForLedgers(ofs, first, first)
 	require.NoError(t, err)
-	assert.Equal(t, EventIDRange{Start: 0, End: 5}, r)
+	assert.Equal(t, IDRange{Start: 0, End: 5}, r)
 
 	// Second ledger only: ids [5, 7).
-	r, err = EventIDRangeForLedgers(ofs, first+1, first+1)
+	r, err = IDRangeForLedgers(ofs, first+1, first+1)
 	require.NoError(t, err)
-	assert.Equal(t, EventIDRange{Start: 5, End: 7}, r)
+	assert.Equal(t, IDRange{Start: 5, End: 7}, r)
 }
 
 func TestEventIDRangeForLedgers_OutOfRangeLedgerErrors(t *testing.T) {
@@ -980,11 +980,11 @@ func TestEventIDRangeForLedgers_OutOfRangeLedgerErrors(t *testing.T) {
 
 	// startLedger past the chunk's ingested window — surfaced loudly,
 	// not silently clipped (matches LedgerOffsets.EventIDs contract).
-	_, err = EventIDRangeForLedgers(ofs, first+100, first+100)
+	_, err = IDRangeForLedgers(ofs, first+100, first+100)
 	require.Error(t, err)
 
 	// startLedger below the chunk's ingested window.
-	_, err = EventIDRangeForLedgers(ofs, 1, first)
+	_, err = IDRangeForLedgers(ofs, 1, first)
 	require.Error(t, err)
 }
 

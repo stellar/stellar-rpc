@@ -164,7 +164,7 @@ func (p *Payload) MarshalInto(dst []byte) ([]byte, error) {
 //
 // IMPORTANT — buffer-lifetime contract: the returned ContractEventBytes
 // slice ALIASES into data and is valid only as long as data is. The
-// eventstore read paths apply this two ways:
+// the event store read paths apply this two ways:
 //
 //   - FetchEvents passes data that outlives the returned slice — hot from
 //     rocksdb.BatchMultiGet (freshly allocated, caller-owned), cold by

@@ -1,4 +1,4 @@
-package eventstore
+package event
 
 // cold_format.go defines the on-disk format for cold-Chunk artifacts
 // and the building blocks shared by the cold writer and reader. Four

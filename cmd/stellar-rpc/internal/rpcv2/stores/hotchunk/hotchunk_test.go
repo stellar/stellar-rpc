@@ -19,7 +19,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/eventstore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
@@ -70,10 +70,10 @@ func TestConfig_PerCFOptionRouting(t *testing.T) {
 	assert.Zero(t, perCF[ledgerCF].WriteBufferMB, "ledger CF rides on RocksDB defaults")
 	assert.False(t, perCF[ledgerCF].DisableAutoCompactions, "ledger CF keeps auto-compaction")
 
-	assert.Equal(t, grocksdb.ZSTDCompression, perCF[eventstore.DataCF].Compression,
+	assert.Equal(t, grocksdb.ZSTDCompression, perCF[event.DataCF].Compression,
 		"events data CF keeps its ZSTD override")
-	assert.NotZero(t, perCF[eventstore.DataCF].BlockSize, "events data CF keeps its block-size override")
-	assert.Zero(t, perCF[eventstore.DataCF].BloomFilterBitsPerKey, "events data CF gets no bloom")
+	assert.NotZero(t, perCF[event.DataCF].BlockSize, "events data CF keeps its block-size override")
+	assert.Zero(t, perCF[event.DataCF].BloomFilterBitsPerKey, "events data CF gets no bloom")
 }
 
 func TestConfig_DBWideTuningStaysShared(t *testing.T) {
@@ -95,14 +95,14 @@ func TestOpen_ValidatesInputs(t *testing.T) {
 func TestColumnFamilies_UnionIsNonColliding(t *testing.T) {
 	cfs := ColumnFamilies()
 	// 1 ledger CF + 3 events CFs + 1 txhash CF = 5.
-	require.Len(t, cfs, len(ledger.CFNames())+len(eventstore.CFNames())+len(txhash.CFNames()))
+	require.Len(t, cfs, len(ledger.CFNames())+len(event.CFNames())+len(txhash.CFNames()))
 	seen := map[string]bool{}
 	for _, cf := range cfs {
 		require.False(t, seen[cf], "CF name %q collides across facades", cf)
 		seen[cf] = true
 	}
 	require.Contains(t, seen, ledger.LedgersCF)
-	for _, cf := range eventstore.CFNames() {
+	for _, cf := range event.CFNames() {
 		require.Contains(t, seen, cf)
 	}
 	for _, cf := range txhash.CFNames() {
@@ -177,7 +177,7 @@ func TestIngestLedger_RejectedLedgerPersistsNothingAcrossAnyCF(t *testing.T) {
 
 	_, err := db.IngestLedger(badSeq, xdr.LedgerCloseMetaView(raw))
 	require.Error(t, err)
-	require.ErrorIs(t, err, eventstore.ErrLedgerOutOfRange)
+	require.ErrorIs(t, err, event.ErrLedgerOutOfRange)
 
 	// NOTHING persisted, across every CF:
 	// ledgers CF — no row at badSeq.
@@ -279,7 +279,7 @@ func TestSharedBatch_DirectRocksAbortAcrossCFs(t *testing.T) {
 	err := storeOf(db).Batch(func(b *rocksdb.BatchWriter) error {
 		b.Put(ledger.LedgersCF, rocksdb.EncodeUint32(2), []byte("ledger-row"))
 		b.Put(txhash.CFNames()[0], hash[:], rocksdb.EncodeUint32(2))
-		b.Put(eventstore.DataCF, []byte{0, 0, 0, 0}, []byte("event-row"))
+		b.Put(event.DataCF, []byte{0, 0, 0, 0}, []byte("event-row"))
 		return sentinelErr // abort: nothing should commit
 	})
 	require.ErrorIs(t, err, sentinelErr)
@@ -466,7 +466,7 @@ func TestOpenReadOnly_ReadsCommittedAndRejectsWrites(t *testing.T) {
 }
 
 // TestOpenReadOnly_SkipsEventsWarmup pins #834: a read-only (freeze/probe) open is
-// a ledgers-only view that never runs eventstore's index-CF warmup scan, while a
+// a ledgers-only view that never runs the event store's index-CF warmup scan, while a
 // read-WRITE open still warms. The proof is a poisoned events-index row that
 // warmup's key-length check rejects: the write open fails on it (warmup ran), the
 // read-only open ignores it (warmup skipped) and still serves the ledgers-only
@@ -493,7 +493,7 @@ func TestOpenReadOnly_SkipsEventsWarmup(t *testing.T) {
 	// bare read-write open of the same multi-CF DB, closed to free the LOCK.
 	raw, err := rocksdb.New(config(dir, silentLogger(), false, true))
 	require.NoError(t, err)
-	require.NoError(t, raw.Put(eventstore.IndexCF, []byte("bad"), nil))
+	require.NoError(t, raw.Put(event.IndexCF, []byte("bad"), nil))
 	require.NoError(t, raw.Close())
 
 	// Read-WRITE open warms → the poisoned index row fails the scan.

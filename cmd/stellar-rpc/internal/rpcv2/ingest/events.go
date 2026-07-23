@@ -11,7 +11,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/eventstore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 )
 
 // ───────────────────────── Cold writer ─────────────────────────
@@ -23,7 +23,7 @@ import (
 // chunk-relative event IDs.
 type eventsCold struct {
 	chunkID   chunk.ID
-	writer    *eventstore.ColdWriter
+	writer    *event.ColdWriter
 	mirror    events.Bitmaps
 	offsets   *events.LedgerOffsets
 	bucketDir string
@@ -46,12 +46,12 @@ func newEventsCold(bucketDir string, chunkID chunk.ID, sink MetricSink) (*events
 	if err := os.MkdirAll(bucketDir, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", bucketDir, err)
 	}
-	w, err := eventstore.NewColdWriter(chunkID, bucketDir, eventstore.ColdWriterOptions{
+	w, err := event.NewColdWriter(chunkID, bucketDir, event.ColdWriterOptions{
 		Concurrency:  coldEncoderConcurrency,
 		BytesPerSync: coldBytesPerSync,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("eventstore.NewColdWriter: %w", err)
+		return nil, fmt.Errorf("event.NewColdWriter: %w", err)
 	}
 	return &eventsCold{
 		chunkID:   chunkID,
@@ -97,7 +97,7 @@ func (e *eventsCold) finalize(ctx context.Context) error {
 		e.metrics.emit(time.Since(start), err)
 		return err
 	}
-	if err := eventstore.WriteColdIndex(ctx, e.chunkID, e.mirror, e.bucketDir); err != nil {
+	if err := event.WriteColdIndex(ctx, e.chunkID, e.mirror, e.bucketDir); err != nil {
 		// Finish already committed events.pack; the index-less pack is left
 		// in place — without the orchestrator's completion record it is
 		// inert scratch (see the package doc's artifact model), and the

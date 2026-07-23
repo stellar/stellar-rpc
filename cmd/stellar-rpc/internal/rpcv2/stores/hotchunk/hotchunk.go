@@ -4,7 +4,7 @@
 // across ALL of them — so a ledger is fully present or fully absent, with a
 // SINGLE per-chunk last-committed ledger (max committed seq, from the ledgers CF's last key)
 // and no per-store frontiers / min-of-three. The three typed facades
-// (ledger/txhash/eventstore HotStore) are composed over the shared store via
+// (ledger/txhash/the event store HotStore) are composed over the shared store via
 // NewWithStore; their write paths queue Puts into the one shared batch. A
 // read-only open composes a ledgers-only view without the events facade (see
 // OpenReadOnly).
@@ -28,7 +28,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/eventstore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
@@ -47,7 +47,7 @@ type DB struct {
 
 	ledger *ledger.HotStore
 	txhash *txhash.HotStore
-	events *eventstore.HotStore
+	events *event.HotStore
 }
 
 // ColumnFamilies is the full CF list for the shared per-chunk DB (ledger + 3
@@ -55,7 +55,7 @@ type DB struct {
 // callers (including tests) never hand-stitch the union. Names are non-colliding
 // across the facades.
 func ColumnFamilies() []string {
-	return slices.Concat(ledger.CFNames(), eventstore.CFNames(), txhash.CFNames())
+	return slices.Concat(ledger.CFNames(), event.CFNames(), txhash.CFNames())
 }
 
 // dbTuning is the DB-wide half of the shared store's configuration, owned
@@ -86,7 +86,7 @@ func dbTuning() rocksdb.Tuning {
 // the per-CF options merged from every facade — each CF keeps its
 // pre-unification standalone tuning; the ledgers CF rides on RocksDB defaults.
 func config(path string, logger *supportlog.Entry, readOnly, mustExist bool) rocksdb.Config {
-	perCF := eventstore.CFOptions()
+	perCF := event.CFOptions()
 	maps.Copy(perCF, txhash.CFOptions())
 	return rocksdb.Config{
 		Path:           path,
@@ -126,7 +126,7 @@ func OpenExisting(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB,
 // but SKIPS the events facade, because both read-only callers (freeze re-derives the
 // cold artifacts from raw LCMs via Source(); the startup refiner reads only
 // MaxCommittedSeq()) touch the ledgers CF alone and never the events mirror/offsets.
-// Composing the events facade would run eventstore's unconditional warmup — a full
+// Composing the events facade would run the event store's unconditional warmup — a full
 // index-CF scan plus bitmap/offsets rebuild — discarded unread at Close (#834). The
 // skip is enforced structurally: a read-only DB has no events facade, so Events()
 // panics and IngestLedger errors rather than serving a cold, unwarmed surface.
@@ -198,7 +198,7 @@ func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly, mus
 	if readOnly {
 		return db, nil
 	}
-	es, err := eventstore.NewWithStore(store, chunkID)
+	es, err := event.NewWithStore(store, chunkID)
 	if err != nil {
 		_ = store.Close()
 		return nil, fmt.Errorf("compose events facade for chunk %s: %w", chunkID, err)
@@ -230,7 +230,7 @@ func (d *DB) Txhash() *txhash.HotStore { return d.txhash }
 // events facade (#834), so reaching for events there is a programming error — a
 // caller that needs a warmed events surface must open read-WRITE (or #772 must
 // add a warmed read-only variant), never silently read a cold, unwarmed store.
-func (d *DB) Events() *eventstore.HotStore {
+func (d *DB) Events() *event.HotStore {
 	if d.events == nil {
 		panic(fmt.Sprintf("hotchunk: Events() on read-only chunk %s: no events facade (ledgers-only view)", d.chunkID))
 	}

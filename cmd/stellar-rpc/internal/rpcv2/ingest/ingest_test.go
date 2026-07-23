@@ -27,7 +27,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/eventstore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
@@ -536,7 +536,7 @@ func TestEventsColdWriter_Readback(t *testing.T) {
 	require.NoError(t, ing.finalize(context.Background()))
 
 	bucketDir := filepath.Join(coldDir, chunkID.BucketID())
-	cr, err := eventstore.OpenColdReader(chunkID, bucketDir, eventstore.ColdReaderOptions{})
+	cr, err := event.OpenColdReader(chunkID, bucketDir, event.ColdReaderOptions{})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cr.Close()) }()
 	cnt, err := cr.EventCount()
@@ -573,7 +573,7 @@ func TestEventsColdWriter_V0KeepsOffsetsContiguous(t *testing.T) {
 	require.NoError(t, ing.finalize(context.Background()))
 
 	bucketDir := filepath.Join(coldDir, chunkID.BucketID())
-	cr, err := eventstore.OpenColdReader(chunkID, bucketDir, eventstore.ColdReaderOptions{})
+	cr, err := event.OpenColdReader(chunkID, bucketDir, event.ColdReaderOptions{})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cr.Close()) }()
 
@@ -607,7 +607,7 @@ func TestEventsColdWriter_V0KeepsOffsetsContiguous(t *testing.T) {
 // TestWriteColdChunk_EventlessChunk_FullyReadable drives a full cold chunk of V0
 // (pre-Soroban, eventless) ledgers with Events enabled — the common backfill
 // case for early history. The whole chunk has zero contract events;
-// eventstore.WriteColdIndex publishes a valid EMPTY index for it, so all
+// event.WriteColdIndex publishes a valid EMPTY index for it, so all
 // three cold artifacts exist and the chunk is fully readable: a term-filtered
 // Lookup resolves to "no matches" through the ordinary path instead of a
 // missing-file error.
@@ -627,9 +627,9 @@ func TestWriteColdChunk_EventlessChunk_FullyReadable(t *testing.T) {
 
 	// All three cold artifacts exist (events.pack + the empty index pair).
 	for _, name := range []string{
-		eventstore.EventsPackName(chunkID),
-		eventstore.IndexPackName(chunkID),
-		eventstore.IndexHashName(chunkID),
+		event.EventsPackName(chunkID),
+		event.IndexPackName(chunkID),
+		event.IndexHashName(chunkID),
 	} {
 		_, statErr := os.Stat(filepath.Join(bucketDir, name))
 		require.NoError(t, statErr, "eventless chunk must publish %s", name)
@@ -637,7 +637,7 @@ func TestWriteColdChunk_EventlessChunk_FullyReadable(t *testing.T) {
 
 	// The chunk is readable end to end: zero events, and a filtered lookup
 	// misses cleanly rather than erroring on a missing index.
-	cr, err := eventstore.OpenColdReader(chunkID, bucketDir, eventstore.ColdReaderOptions{})
+	cr, err := event.OpenColdReader(chunkID, bucketDir, event.ColdReaderOptions{})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cr.Close()) }()
 	cnt, err := cr.EventCount()
@@ -690,8 +690,8 @@ func TestColdChunk_Success(t *testing.T) {
 	require.Equal(t, first, decoded.LedgerSequence())
 
 	// Events cold readback.
-	ecr, err := eventstore.OpenColdReader(
-		chunkID, filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID()), eventstore.ColdReaderOptions{})
+	ecr, err := event.OpenColdReader(
+		chunkID, filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID()), event.ColdReaderOptions{})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ecr.Close()) }()
 	bms, err := ecr.LookupKeys(context.Background(), []events.TermKey{term})
@@ -982,8 +982,8 @@ func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 	}
 	require.NotEmpty(t, wantTermIDs, "sentinels must carry events")
 
-	ecr, err := eventstore.OpenColdReader(
-		chunkID, filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID()), eventstore.ColdReaderOptions{})
+	ecr, err := event.OpenColdReader(
+		chunkID, filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID()), event.ColdReaderOptions{})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ecr.Close()) }()
 
@@ -1076,7 +1076,7 @@ func TestWriteColdChunk_EventsCold_Readback(t *testing.T) {
 	))
 
 	bucketDir := filepath.Join(coldDir, "events", chunkID.BucketID())
-	cr, err := eventstore.OpenColdReader(chunkID, bucketDir, eventstore.ColdReaderOptions{})
+	cr, err := event.OpenColdReader(chunkID, bucketDir, event.ColdReaderOptions{})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cr.Close()) }()
 
@@ -1391,7 +1391,7 @@ func TestOpenColdChunk_RollbackTwoBuilt(t *testing.T) {
 	// Plant a directory at the events.pack path: the ledger and txhash
 	// writers open first, then newEventsCold fails opening the pack over
 	// the directory.
-	packPath := filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID(), eventstore.EventsPackName(chunkID))
+	packPath := filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID(), event.EventsPackName(chunkID))
 	require.NoError(t, os.MkdirAll(packPath, 0o755))
 
 	_, err := openColdChunk(coldDirsAt(coldDir, chunkID), chunkID, sink,
@@ -1450,7 +1450,7 @@ func TestEventsCold_FinishThenIndexFails_LeavesInertPack(t *testing.T) {
 
 	// Plant a DIRECTORY where index.hash must be written → buildMPHF fails.
 	bucketDir := filepath.Join(coldDir, chunkID.BucketID())
-	indexHashPath := filepath.Join(bucketDir, eventstore.IndexHashName(chunkID))
+	indexHashPath := filepath.Join(bucketDir, event.IndexHashName(chunkID))
 	require.NoError(t, os.Mkdir(indexHashPath, 0o755))
 
 	ferr := ing.finalize(context.Background())
@@ -1459,7 +1459,7 @@ func TestEventsCold_FinishThenIndexFails_LeavesInertPack(t *testing.T) {
 
 	// The committed events.pack stays in place as inert scratch (Finish ran,
 	// so the later Close does not drop it either).
-	packPath := filepath.Join(bucketDir, eventstore.EventsPackName(chunkID))
+	packPath := filepath.Join(bucketDir, event.EventsPackName(chunkID))
 	_, statErr := os.Stat(packPath)
 	require.NoError(t, statErr, "the index-less events.pack stays on disk after WriteColdIndex failure")
 
@@ -1532,7 +1532,7 @@ func TestColdChunk_Finalize_FirstErrorStopsRemaining(t *testing.T) {
 
 	// The later (events) writer was never finalized: no index artifacts.
 	bucketDir := filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID())
-	_, statErr = os.Stat(filepath.Join(bucketDir, eventstore.IndexPackName(chunkID)))
+	_, statErr = os.Stat(filepath.Join(bucketDir, event.IndexPackName(chunkID)))
 	require.True(t, os.IsNotExist(statErr), "a later writer must NOT be finalized after a sibling failure")
 
 	require.NoError(t, cc.close())

@@ -1,4 +1,8 @@
-package eventstore
+// Package event is the per-chunk event store (hot RocksDB CFs + cold
+// pack/index artifacts). Named in the singular because the plural —
+// events — belongs to rpcv2/events, the extraction/index machinery
+// this store is built on.
+package event
 
 import (
 	"context"
@@ -103,7 +107,7 @@ type Reader interface {
 	// atomic.Pointer COW, so a returned pointer will never be
 	// mutated by anyone. The cold path returns freshly-unmarshaled
 	// bitmaps logically owned by the caller. Either way callers
-	// must not mutate; eventstore.Query is the only consumer today
+	// must not mutate; event.Query is the only consumer today
 	// and never mutates, and downstream roaring.FastAnd/FastOr never
 	// mutate inputs.
 	//

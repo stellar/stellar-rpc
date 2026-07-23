@@ -1,4 +1,4 @@
-package eventstore
+package event
 
 // query.go is the events-side coordinator that turns a {filters,
 // Range, MaxEvents, Descending} spec into matching events for one
@@ -78,7 +78,7 @@ func (f *Filter) termKeys() []events.TermKey {
 	return keys
 }
 
-// EventIDRange is a literal half-open chunk-relative event-ID window
+// IDRange is a literal half-open chunk-relative event-ID window
 // [Start, End). Both bounds are mandatory.
 //
 // Snapshot-isolation contract: the caller pins End once at request
@@ -92,17 +92,17 @@ func (f *Filter) termKeys() []events.TermKey {
 // offsets or stale snapshot) — under the snapshot-isolation contract
 // a properly-pinned End never exceeds the chunk's current EventCount,
 // since chunks only grow.
-type EventIDRange struct {
+type IDRange struct {
 	Start, End uint32
 }
 
 // isEmpty reports whether r covers zero events.
-func (r EventIDRange) isEmpty() bool { return r.Start == r.End }
+func (r IDRange) isEmpty() bool { return r.Start == r.End }
 
 // check validates the structural invariant Start <= End. Does NOT
 // check End against the chunk's EventCount — that requires a Reader
 // and is enforced by Query.
-func (r EventIDRange) check() error {
+func (r IDRange) check() error {
 	if r.End < r.Start {
 		return fmt.Errorf(
 			"events: Range.End (%d) must be >= Range.Start (%d)",
@@ -111,21 +111,21 @@ func (r EventIDRange) check() error {
 	return nil
 }
 
-// EventIDRangeForLedgers translates the closed ledger window
-// [startLedger, endLedger] into the half-open EventIDRange
+// IDRangeForLedgers translates the closed ledger window
+// [startLedger, endLedger] into the half-open IDRange
 // [firstID, lastID) covering those ledgers' events. Both bounds
 // must lie inside ofs's [StartLedger, EndLedger) range; out-of-range
 // bounds surface a wrapped error from LedgerOffsets.EventIDs.
-func EventIDRangeForLedgers(ofs *events.LedgerOffsets, startLedger, endLedger uint32) (EventIDRange, error) {
+func IDRangeForLedgers(ofs *events.LedgerOffsets, startLedger, endLedger uint32) (IDRange, error) {
 	firstID, _, err := ofs.EventIDs(startLedger)
 	if err != nil {
-		return EventIDRange{}, fmt.Errorf("events: range start ledger %d: %w", startLedger, err)
+		return IDRange{}, fmt.Errorf("events: range start ledger %d: %w", startLedger, err)
 	}
 	_, lastID, err := ofs.EventIDs(endLedger)
 	if err != nil {
-		return EventIDRange{}, fmt.Errorf("events: range end ledger %d: %w", endLedger, err)
+		return IDRange{}, fmt.Errorf("events: range end ledger %d: %w", endLedger, err)
 	}
-	return EventIDRange{Start: firstID, End: lastID}, nil
+	return IDRange{Start: firstID, End: lastID}, nil
 }
 
 // QueryOptions configures a Query call.
@@ -142,12 +142,12 @@ func EventIDRangeForLedgers(ofs *events.LedgerOffsets, startLedger, endLedger ui
 // Descending selects descending event-ID order; the zero value (false)
 // is ascending — the getEvents v1 default.
 //
-// Range is REQUIRED. See EventIDRange for the snapshot-isolation
+// Range is REQUIRED. See IDRange for the snapshot-isolation
 // contract.
 type QueryOptions struct {
 	MaxEvents  int
 	Descending bool
-	Range      EventIDRange
+	Range      IDRange
 }
 
 // topicFieldByPosition maps topic position 0..MaxTopicCount-1 to its
@@ -172,7 +172,7 @@ var topicFieldByPosition = [protocol.MaxTopicCount]events.Field{
 //   - len(filters) == 0 is treated as a single match-all filter,
 //     consistent with getEvents.
 //
-// See QueryOptions / EventIDRange for the window, cap, and order
+// See QueryOptions / IDRange for the window, cap, and order
 // contract.
 //
 //nolint:gocognit,cyclop,funlen

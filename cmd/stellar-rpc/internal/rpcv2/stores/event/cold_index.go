@@ -1,4 +1,4 @@
-package eventstore
+package event
 
 // cold_index.go is the index half of the cold-Chunk pipeline. It
 // produces index.pack (per-slot bitmap records) + index.hash (the

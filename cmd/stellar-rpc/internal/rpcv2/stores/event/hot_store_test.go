@@ -1,4 +1,4 @@
-package eventstore
+package event
 
 import (
 	"bytes"
@@ -129,7 +129,7 @@ func eventOf(p events.Payload) xdr.ContractEvent {
 	return ev
 }
 
-// dataSym returns a Payload's ScVal Data symbol. The eventstore read path
+// dataSym returns a Payload's ScVal Data symbol. The the event store read path
 // yields Payloads carrying only raw event XDR (ContractEventBytes), so
 // assertions decode it back to a ContractEvent first.
 func dataSym(t *testing.T, p events.Payload) string {

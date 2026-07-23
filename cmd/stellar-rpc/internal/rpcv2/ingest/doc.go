@@ -54,7 +54,7 @@
 // Data types are processed in canonical ledgers→txhash→events order;
 // openColdChunk is the order's single definition site. The on-disk
 // formats and per-chunk filenames are owned by the store packages
-// (ledger.PackName, txhash.ColdBinName + its .bin codec, eventstore's
+// (ledger.PackName, txhash.ColdBinName + its .bin codec, the event store's
 // cold-format helpers); this package only composes the {bucketID:05d}/
 // bucket directories around them.
 //

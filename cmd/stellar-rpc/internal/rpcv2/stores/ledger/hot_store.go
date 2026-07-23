@@ -19,7 +19,7 @@ import (
 const LedgersCF = "ledgers"
 
 // CFNames returns the CFs this facade owns, so the hotchunk shared-DB opener
-// assembles the union the same way it does for txhash and eventstore (every
+// assembles the union the same way it does for txhash and the event store (every
 // facade exports CFNames()).
 func CFNames() []string { return []string{LedgersCF} }
 

@@ -1,4 +1,4 @@
-package eventstore
+package event
 
 import (
 	"context"
@@ -670,7 +670,7 @@ func TestColdReader_AllMatchesFetchRange(t *testing.T) {
 }
 
 // writeForeignPack overwrites path with a minimal, valid packfile whose
-// trailer Format is not one of eventstore's — the "mis-pointed or foreign
+// trailer Format is not one of the event store's — the "mis-pointed or foreign
 // pack" input the open-time format checks reject.
 func writeForeignPack(t *testing.T, path string) {
 	t.Helper()

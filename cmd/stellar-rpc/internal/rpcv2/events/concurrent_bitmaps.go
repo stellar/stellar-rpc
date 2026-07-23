@@ -98,7 +98,7 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 //   - SetCopyOnWrite
 //   - Any *Writable* accessor on the underlying roaringArray
 //
-// Safe caller-side methods (used by eventstore.Query today): any
+// Safe caller-side methods (used by event.Query today): any
 // non-mutating read — Contains, GetCardinality, Iterator,
 // ToArray, IsEmpty, Minimum, Maximum — plus the non-mutating
 // aggregation entry points roaring.And, roaring.FastAnd (≥2
@@ -107,7 +107,7 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 // ≥2-input qualifier on FastAnd/FastOr: with a single input the
 // roaring library has historically taken a Clone-the-input
 // shortcut, so callers MUST avoid passing a singleton slice to
-// those aggregators (eventstore's Query guards its single-input
+// those aggregators (the event store's Query guards its single-input
 // cases before calling FastAnd/FastOr).
 //
 // Callers may hold the pointer arbitrarily long. A subsequent Get
