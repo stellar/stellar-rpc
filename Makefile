@@ -126,11 +126,14 @@ build-stellar-rpc: build-rpc-v1
 build-rpc-v2:
 	go build -ldflags="${GOLDFLAGS}" ${MACOS_MIN_VER} -o ${STELLAR_RPC_V2_BINARY} -trimpath -v ./cmd/stellar-rpc/rpcv2
 
+# Override for feature branches, e.g. `make go-check-branch BASE=origin/feature/full-history`.
+BASE ?= origin/main
+
 go-check-branch:
-	golangci-lint run ./... --new-from-rev $$(git rev-parse origin/main)
+	golangci-lint run ./... --new-from-rev $$(git rev-parse $(BASE))
 
 go-check:
 	golangci-lint run ./...
 
 # PHONY lists all the targets that aren't file names, so that make would skip the timestamp based check.
-.PHONY: clean fmt watch test rust-test go-test check rust-check go-check install build build-stellar-rpc build-rpc-v1 build-rpc-v2 build-libs lint lint-changes
+.PHONY: all clean fmt watch bench test rust-test go-test check rust-check go-check go-check-branch install build build-stellar-rpc build-rpc-v1 build-rpc-v2 build-libs

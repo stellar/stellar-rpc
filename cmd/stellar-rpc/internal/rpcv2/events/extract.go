@@ -6,7 +6,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
+	stages "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 )
 
 // PayloadsFromLedgerEvents shapes an already-extracted per-transaction event
@@ -159,7 +159,7 @@ func appendStageEventPayloads(
 		}
 		// StageSentinels also validates the stage: an unknown stage errors
 		// here, in whichever pass sees it first.
-		txIdx, opIdx, err := events.StageSentinels(stage, applyIdx)
+		txIdx, opIdx, err := stages.StageSentinels(stage, applyIdx)
 		if err != nil {
 			return nil, err
 		}

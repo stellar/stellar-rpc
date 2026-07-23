@@ -21,7 +21,7 @@ func TestCORS(t *testing.T) {
 	request, err := http.NewRequestWithContext(
 		t.Context(),
 		http.MethodPost,
-		test.GetSorobanRPCURL(),
+		test.GetStellarRPCURL(),
 		bytes.NewBufferString(body),
 	)
 	require.NoError(t, err)

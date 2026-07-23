@@ -10,6 +10,10 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
+// PrometheusNamespace is the metrics namespace used by the RPC service.
+// TODO: deprecate and rename to stellar_rpc
+const PrometheusNamespace = "soroban_rpc"
+
 // Daemon defines the interface that the Daemon would be implementing.
 // this would be useful for decoupling purposes, allowing to test components without
 // the actual daemon.

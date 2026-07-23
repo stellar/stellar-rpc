@@ -33,13 +33,6 @@ func (ledgerReader *ConstantLedgerReader) GetLedgerRange(_ context.Context) (led
 	return ledgerbucketwindow.LedgerRange{}, nil
 }
 
-func (ledgerReader *ConstantLedgerReader) GetLedgerCountInRange(
-	_ context.Context,
-	_, _ uint32,
-) (uint32, uint32, uint32, error) {
-	return 0, 0, 0, nil
-}
-
 func (ledgerReader *ConstantLedgerReader) NewTx(_ context.Context) (store.LedgerReaderTx, error) {
 	return nil, errors.New("mock NewTx error")
 }
@@ -51,10 +44,6 @@ func (ledgerReader *ConstantLedgerReader) GetLedger(_ context.Context,
 			sequence,
 			expectedLatestLedgerCloseTime),
 		true, nil
-}
-
-func (ledgerReader *ConstantLedgerReader) StreamAllLedgers(_ context.Context, _ store.StreamLedgerFn) error {
-	return nil
 }
 
 func (ledgerReader *ConstantLedgerReader) StreamLedgerRange(

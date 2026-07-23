@@ -7,7 +7,6 @@ import (
 	"github.com/spf13/cobra"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
-	goxdr "github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/daemon"
@@ -33,34 +32,6 @@ func main() {
 		},
 	}
 
-	versionCmd := &cobra.Command{
-		Use:   "version",
-		Short: "Print version information and exit",
-		Run: func(_ *cobra.Command, _ []string) {
-			if version.CommitHash == "" {
-				//nolint:forbidigo
-				fmt.Printf("stellar-rpc dev\n")
-			} else {
-				// avoid printing the branch for the main branch
-				// ( since that's what the end-user would typically have )
-				// but keep it for internal build ( so that we'll know from which branch it
-				// was built )
-				branch := version.Branch
-				if branch == "main" {
-					branch = ""
-				}
-				//nolint:forbidigo
-				fmt.Printf("stellar-rpc %s (%s) %s\n", version.Version, version.CommitHash, branch)
-			}
-			//nolint:forbidigo
-			fmt.Printf("stellar-xdr %s\n", goxdr.CommitHash)
-			//nolint:forbidigo
-			fmt.Printf("soroban-env-host-prev %s\n", version.RSSorobanEnvVersionPrev)
-			//nolint:forbidigo
-			fmt.Printf("soroban-env-host-curr %s\n", version.RSSorobanEnvVersionCurr)
-		},
-	}
-
 	genConfigFileCmd := &cobra.Command{
 		Use:   "gen-config-file",
 		Short: "Generate a config file with default settings",
@@ -80,7 +51,7 @@ func main() {
 		},
 	}
 
-	rootCmd.AddCommand(versionCmd)
+	rootCmd.AddCommand(version.NewCommand())
 	rootCmd.AddCommand(genConfigFileCmd)
 
 	if err := cfg.AddFlags(rootCmd); err != nil {

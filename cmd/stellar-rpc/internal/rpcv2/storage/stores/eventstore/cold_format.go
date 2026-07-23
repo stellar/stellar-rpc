@@ -44,8 +44,8 @@ import (
 
 // Cold artifact filenames are chunk-ID-prefixed and live as flat
 // siblings inside a bucket directory, per the backfill design doc
-// (full-history/design-docs/03-backfill-workflow.md §"Directory
-// Structure"). Layout: {events_root}/{bucketID:05d}/{chunkID:08d}-events.pack
+// (design-docs/full-history-streaming-workflow.md).
+// Layout: {events_root}/{bucketID:05d}/{chunkID:08d}-events.pack
 // and analogous for index.pack / index.hash.
 //
 // Bucket path composition is the orchestrator's job — this package

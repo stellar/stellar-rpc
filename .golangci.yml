@@ -25,7 +25,9 @@ linters:
     # The rpcv1 (SQLite) and rpcv2 (RocksDB) trees must stay independent, and
     # the shared packages directly under internal/ must not depend on either
     # tree. Test files are exempt: a few shared handler tests use v1's SQLite
-    # as their fixture backend until #883's parity harness replaces them.
+    # as their fixture backend until #883's parity harness replaces them, and
+    # rpcv2/events/extract_test.go deliberately imports rpcv1/sqlitedb to
+    # differential-test v2 event extraction against v1's cursor ordering.
     depguard:
       rules:
         shared-internal:

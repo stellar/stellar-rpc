@@ -262,7 +262,7 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.spawnRPCDaemon()
 	}
 
-	i.rpcClient = client.NewClient(i.GetSorobanRPCURL(), nil)
+	i.rpcClient = client.NewClient(i.GetStellarRPCURL(), nil)
 	if shouldWaitForRPC {
 		i.waitForRPC()
 	}
@@ -367,7 +367,7 @@ func (i *Test) MasterAccount() txnbuild.Account {
 	return i.masterAccount
 }
 
-func (i *Test) GetSorobanRPCURL() string {
+func (i *Test) GetStellarRPCURL() string {
 	return fmt.Sprintf("http://localhost:%d", i.testPorts.RPCPort)
 }
 

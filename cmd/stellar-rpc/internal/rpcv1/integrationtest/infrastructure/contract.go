@@ -21,7 +21,8 @@ func getTestContract(name string) []byte {
 	ret, err := os.ReadFile(contractFile)
 	if err != nil {
 		str := fmt.Sprintf(
-			"unable to read %s.wasm (%v) please run `make build-test-wasms` at the project root directory",
+			"unable to read %s.wasm (%v); the test contracts are checked in under wasms/ at the repo root — "+
+				"if this fails, the checkout is incomplete or the path resolution above is wrong",
 			name,
 			err,
 		)

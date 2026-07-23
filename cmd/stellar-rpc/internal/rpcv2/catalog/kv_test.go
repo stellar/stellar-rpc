@@ -17,8 +17,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/storage/rocksdb"
 )
 
-// The catalog's string-KV layer (kv.go), exercised through Open. Moved from the
-// former metastore package when it was folded into the catalog.
+// The catalog's string-KV layer (kv.go), exercised through Open.
 
 // openKVAt opens a catalog at an explicit KV path (for reopen/persistence
 // cases); the artifact layout is irrelevant to the KV tests.

@@ -28,23 +28,9 @@ func (m *MockLedgerReader) GetLedger(ctx context.Context, sequence uint32) (xdr.
 	return args.Get(0).(xdr.LedgerCloseMeta), args.Bool(1), args.Error(2) //nolint:forcetypeassert
 }
 
-func (m *MockLedgerReader) StreamAllLedgers(ctx context.Context, f store.StreamLedgerFn) error {
-	args := m.Called(ctx, f)
-	return args.Error(0)
-}
-
 func (m *MockLedgerReader) GetLedgerRange(ctx context.Context) (ledgerbucketwindow.LedgerRange, error) {
 	args := m.Called(ctx)
 	return args.Get(0).(ledgerbucketwindow.LedgerRange), args.Error(1) //nolint:forcetypeassert
-}
-
-func (m *MockLedgerReader) GetLedgerCountInRange(
-	ctx context.Context,
-	start uint32,
-	end uint32,
-) (uint32, uint32, uint32, error) {
-	args := m.Called(ctx, start, end)
-	return args.Get(0).(uint32), args.Get(1).(uint32), args.Get(2).(uint32), args.Error(3) //nolint:forcetypeassert
 }
 
 func (m *MockLedgerReader) StreamLedgerRange(ctx context.Context, startLedger, endLedger uint32,
