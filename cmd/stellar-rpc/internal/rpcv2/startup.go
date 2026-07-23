@@ -135,8 +135,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 
 	// Before serving: destroy any resources a crashed run left demoted, then open
 	// and publish the handles for ready hot chunks below the live one (completed
-	// chunks a prior run had not yet discarded). The live chunk's handle is
-	// published by the ingestion loop. Both complete before the loops start.
+	// chunks a prior run had not yet discarded). Both complete before the loops start.
 	liveChunk := chunk.IDFromLedger(resumeLedger)
 	if err := lifecycle.StartupSweep(cat, liveChunk); err != nil {
 		return fmt.Errorf("startup sweep: %w", err)
@@ -144,6 +143,15 @@ func run(ctx context.Context, cfg StartConfig) error {
 	if err := router.PublishReadyHandles(liveChunk, logger); err != nil {
 		return fmt.Errorf("startup publish ready handles: %w", err)
 	}
+
+	// Seed the router's live state so a query admitted before the ingestion loop's
+	// first commit is correct: publish the already-open resume DB as the live
+	// chunk's handle (PublishReadyHandles skips the live chunk), and set the
+	// watermark to the last committed ledger — it would otherwise read 0, making the
+	// admitted range invalid on a restart with data. The loop republishes the handle
+	// (idempotent) and advances the watermark from here.
+	router.PublishHandle(liveChunk, hotDB)
+	router.SetWatermark(lastCommitted)
 
 	// The lifecycle config draws on the SAME Exec wiring backfill uses, so the two
 	// share one catalog/pool by construction.
