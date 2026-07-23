@@ -97,15 +97,19 @@ jobs:
     uses: ./.github/workflows/integration-tests.yml
     with:
       protocol_version: '28'
-      # Protocol 28 (CAP-0083) runs against the vnext (next-protocol-enabled)
-      # core build. Plain vnext (no `~buildtests`) to mirror the plain
-      # release deb / docker image used by the P27 leg above.
+      # Protocol 28 runs against the vnext (next-protocol-enabled) core build.
+      # Plain vnext (no `~buildtests`) to mirror the plain release deb / docker
+      # image used by the P27 leg above.
       #
-      # Pinned to 3367 (3589a696b), which includes stellar-core#5329 — the
-      # fix for the QueryServer.cpp:124 contiguous-snapshot assertion that
-      # aborted captive-core catchup on builds 3313..3366.
-      core_deb_version: '27.0.1-3367.3589a696b.jammy~vnext'
-      core_docker_img: 'stellar/unsafe-stellar-core:27.0.1-3367.3589a696b.jammy-vnext'
+      # Pinned to 3444 (0e3d3d955), a vnext build of stellar-core master that
+      # includes CAP-85 core support (stellar-core#5358) and pins its
+      # src/rust/soroban/p28 host submodule at rs-soroban-env 88cadc32 — the
+      # exact commit this preflight's soroban-env-host-curr uses. Matching the
+      # host commit keeps the simulation cost model identical to apply-time
+      # metering (an older core mismatched it, causing ScecExceededLimit
+      # "operation instructions exceeds amount specified" failures).
+      core_deb_version: '27.1.1-3444.0e3d3d955.jammy~vnext'
+      core_docker_img: 'stellar/unsafe-stellar-core:27.1.1-3444.0e3d3d955.jammy-vnext'
 
   # integration-p25-src:
   #   name: Integration tests (p25, core from source)

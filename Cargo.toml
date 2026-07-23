@@ -16,17 +16,21 @@ serde_json = "1.0"
 package = "soroban-env-host"
 version = "=27.0.0"
 
-# Shift the window: `-prev` is now the released P27 host (crates.io 27.0.0),
-# and `-curr` is the next-protocol-aware host pulled from upstream main with
-# `next` enabled, declaring P28. Using a git rev (instead of crates.io
-# 27.0.0 + `next`) lets cargo treat -prev and -curr as separate compilation
-# units — otherwise it refuses two aliases to the same crate+version.
-# Bump the rev as rs-soroban-env evolves on its protocol-next track.
+# Shift the window: `-prev` is the released P27 host (crates.io 27.0.0), and
+# `-curr` is the P28 host pulled from the MERGED CAP-0085 rs-soroban-env commit
+# (stellar/rs-soroban-env#1703). At that commit rs-soroban-env's baseline has
+# advanced so that the default (non-`next`) build already declares protocol 28
+# — `next` now declares protocol 29. So `-curr` must NOT enable `next`, or the
+# preflight's numeric dispatch (`proto == curr::PROTOCOL`) would see 29 and
+# reject ledgers at protocol 28. CAP-0085's XDR types are unaffected: the
+# host pins stellar-xdr with `cap_0085_executable_ref` in its own workspace,
+# independent of `next`. Using a git rev (instead of crates.io 27.0.0) lets
+# cargo treat -prev and -curr as separate compilation units. Bump the rev as
+# rs-soroban-env evolves on its protocol-next track.
 [workspace.dependencies.soroban-env-host-curr]
 package = "soroban-env-host"
 git = "https://github.com/stellar/rs-soroban-env"
-rev = "883fd56374fc619afaa4c4c7489563555b7173f2"
-features = ["next"]
+rev = "88cadc320cd2030bae2110036b361ff474776db1"
 
 [workspace.dependencies.soroban-simulation-prev]
 package = "soroban-simulation"
@@ -35,15 +39,22 @@ version = "=27.0.0"
 [workspace.dependencies.soroban-simulation-curr]
 package = "soroban-simulation"
 git = "https://github.com/stellar/rs-soroban-env"
-rev = "883fd56374fc619afaa4c4c7489563555b7173f2"
+rev = "88cadc320cd2030bae2110036b361ff474776db1"
 features = ["unstable-next-api"]
 
 [workspace.dependencies.stellar-xdr]
 version = "=27.0.0"
+# Pinned to the MERGED CAP-0085 rs-stellar-xdr commit
+# (stellar/rs-stellar-xdr#556) — the exact rev that the CAP-0085 host commit
+# above itself pins, so cargo unifies the preflight's stellar-xdr with the
+# host's into one package.
+git = "https://github.com/stellar/rs-stellar-xdr"
+rev = "a90de0c0d6eba8be668e9074cfb7b285ac0ecd34"
 # `type_enum` provides the `Type`/`TypeVariant` reflection enums used by
 # xdr2json. It was enabled by default in stellar-xdr v26 but is opt-in in v27.
-# `cap_0083` gates the Protocol 28 EmptyTxSet StellarValueType variant.
-features = ["serde", "type_enum", "cap_0083"]
+# `cap_0083` gates the Protocol 28 EmptyTxSet StellarValueType variant;
+# `cap_0085_executable_ref` gates the CAP-0085 ContractExecutable variant.
+features = ["serde", "type_enum", "cap_0083", "cap_0085_executable_ref"]
 
 [workspace.dependencies.rand]
 version = "0.8.5"
