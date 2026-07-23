@@ -10,11 +10,11 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/storage/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/storage/stores/hotchunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
 // The hot-DB ingestion loop (decision (a)). One goroutine consumes a single

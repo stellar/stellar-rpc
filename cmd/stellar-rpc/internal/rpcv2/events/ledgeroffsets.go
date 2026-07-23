@@ -3,7 +3,7 @@ package events
 import (
 	"fmt"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
 
 // LedgerOffsets tracks cumulative event counts per ledger within a

@@ -13,7 +13,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/storage/stores/hotchunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
 // This file is the bench CSV reporter, in three layers: the report schema

@@ -11,10 +11,10 @@ import (
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/storage/chunk"
 )
 
 // run is the daemon's startup, in two steps: (1) BACKFILL to the tip, then
@@ -115,7 +115,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 
 	// Seed the first tick with the last complete chunk at the resume point so it
 	// fires at once. Skipped on a young network where no chunk is complete.
-	if seed := geometry.LastCompleteChunkAt(lastCommitted); seed >= 0 {
+	if seed := chunk.LastCompleteChunkAt(lastCommitted); seed >= 0 {
 		boundary.Publish(chunk.ID(seed)) //nolint:gosec // seed >= 0
 	}
 
@@ -252,9 +252,9 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted uint32) (
 func passTarget(tip, lastCommitted uint32) int64 {
 	// max() guards a lagging bulk tip: the tip alone could drop a complete
 	// last-committed chunk.
-	target := geometry.LastCompleteChunkAt(max(tip, lastCommitted))
+	target := chunk.LastCompleteChunkAt(max(tip, lastCommitted))
 	if withinOneChunkOfTip(tip, lastCommitted) && lastCommittedMidChunk(lastCommitted) {
-		target = geometry.LastCompleteChunkAt(lastCommitted)
+		target = chunk.LastCompleteChunkAt(lastCommitted)
 	}
 	return target
 }
@@ -263,7 +263,7 @@ func passTarget(tip, lastCommitted uint32) int64 {
 // committed ledger. FloorAt maps the -1 "nothing complete yet" frontier to the
 // earliest chunk, so no young-store branch is needed here.
 func retentionFloorLedger(ret geometry.Retention, committed uint32) uint32 {
-	return ret.FloorAt(geometry.LastCompleteChunkAt(committed)).FirstLedger()
+	return ret.FloorAt(chunk.LastCompleteChunkAt(committed)).FirstLedger()
 }
 
 // withinOneChunkOfTip reports whether the last-committed sits within one chunk of the
@@ -275,8 +275,8 @@ func withinOneChunkOfTip(tip, lastCommitted uint32) bool {
 // lastCommittedMidChunk reports whether lastCommitted falls strictly inside a chunk.
 // The genesis sentinel reads as a boundary, never mid-chunk.
 func lastCommittedMidChunk(lastCommitted uint32) bool {
-	c := geometry.ChunkIDOfLedger(lastCommitted)
-	return lastCommitted != geometry.ChunkLastLedger(c)
+	c := chunk.SignedIDOfLedger(lastCommitted)
+	return lastCommitted != chunk.LastLedgerOf(c)
 }
 
 // ---------------------------------------------------------------------------

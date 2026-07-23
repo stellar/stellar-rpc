@@ -11,7 +11,7 @@ import (
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
 
 // NewCommand returns the `bench-ingest` command tree: `cold` benchmarks the

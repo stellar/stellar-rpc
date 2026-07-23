@@ -3,7 +3,7 @@ package events
 import (
 	"sync/atomic"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
 
 // ConcurrentLedgerOffsets tracks cumulative event counts per ledger

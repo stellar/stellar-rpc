@@ -1,7 +1,7 @@
 package geometry
 
 import (
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
 
 // Retention is the daemon's retention policy: keep size chunks back from the

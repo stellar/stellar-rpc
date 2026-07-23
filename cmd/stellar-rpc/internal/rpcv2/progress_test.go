@@ -7,8 +7,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/storage/chunk"
 )
 
 // ---------------------------------------------------------------------------
@@ -42,7 +42,7 @@ func readyHot(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 
 // ---------------------------------------------------------------------------
 // lastCommittedLedger — chunk-granularity bound, pure catalog read.
-// (CompleteThrough / ChunkIDOfLedger arithmetic is tested in geometry.)
+// (CompleteThrough / SignedIDOfLedger arithmetic is tested in geometry.)
 // ---------------------------------------------------------------------------
 
 func TestLastCommittedLedger(t *testing.T) {
@@ -51,7 +51,7 @@ func TestLastCommittedLedger(t *testing.T) {
 		cat, _ := testCatalog(t)
 		got, err := lastCommittedLedger(cat)
 		require.NoError(t, err)
-		require.Equal(t, geometry.PreGenesisLedger, got)
+		require.Equal(t, chunk.PreGenesisLedger, got)
 	})
 
 	t.Run("cold term leads: highest fully-durable chunk", func(t *testing.T) {
@@ -126,7 +126,7 @@ func TestLastCommittedLedger(t *testing.T) {
 		seedReadyLiveDB(t, cat, 0, 0) // ready chunk 0, empty DB ⇒ positional fallback
 		got, err := lastCommittedLedger(cat)
 		require.NoError(t, err)
-		require.Equal(t, geometry.PreGenesisLedger, got)
+		require.Equal(t, chunk.PreGenesisLedger, got)
 	})
 
 	t.Run("earliest pin floor leads when above cold/positional terms", func(t *testing.T) {
@@ -144,7 +144,7 @@ func TestLastCommittedLedger(t *testing.T) {
 		require.NoError(t, cat.PinEarliestLedger(chunk.FirstLedgerSeq))
 		got, err := lastCommittedLedger(cat)
 		require.NoError(t, err)
-		require.Equal(t, geometry.PreGenesisLedger, got, "earliest 2 - 1 = 1, not MaxUint32")
+		require.Equal(t, chunk.PreGenesisLedger, got, "earliest 2 - 1 = 1, not MaxUint32")
 	})
 
 	t.Run("max of all three terms", func(t *testing.T) {
@@ -187,7 +187,7 @@ func TestDeriveLastCommitted(t *testing.T) {
 		require.NoError(t, cat.PutHotTransient(5)) // the crashed live chunk
 		// The positional term alone (highest ready 4, minus 1) under-counts to chunk 3;
 		// only the refinement below, opening chunk 4's real DB, recovers chunk 4's frontier.
-		require.Equal(t, chunk.ID(3).LastLedger(), geometry.ChunkLastLedger(3),
+		require.Equal(t, chunk.ID(3).LastLedger(), chunk.LastLedgerOf(3),
 			"positional term alone under-counts to chunk 3")
 
 		got, err := lastCommittedLedger(cat)
@@ -228,6 +228,6 @@ func TestDeriveLastCommitted(t *testing.T) {
 		seedReadyLiveDB(t, cat, 0, 0) // ready + real dir, nothing committed
 		got, err := lastCommittedLedger(cat)
 		require.NoError(t, err)
-		require.Equal(t, geometry.PreGenesisLedger, got)
+		require.Equal(t, chunk.PreGenesisLedger, got)
 	})
 }

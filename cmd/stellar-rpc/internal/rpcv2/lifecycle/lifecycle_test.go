@@ -8,9 +8,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/storage/chunk"
 )
 
 // tickMetricsRecorder counts the two gauges the lifecycle tick could touch, to pin
@@ -169,7 +169,7 @@ func TestRunLifecycleTick_PastFloorPrune(t *testing.T) {
 	cfg := lifecycleTestConfig(t, cat, 2) // retain ~2 chunks
 
 	// CompleteThrough will be chunk 5's last ledger (positional: live chunk 6).
-	// floor = geometry.LastCompleteChunkAt(through)-retention+1 = 5-2+1 = chunk 4's first
+	// floor = chunk.LastCompleteChunkAt(through)-retention+1 = 5-2+1 = chunk 4's first
 	// ledger. So chunks 0..3 are wholly past the floor and must be swept.
 	for c := chunk.ID(0); c <= 5; c++ {
 		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindTxHash)
@@ -219,7 +219,7 @@ func TestRunLifecycleTick_PrunesTransientIndexDebris(t *testing.T) {
 	require.NoError(t, err)
 
 	// Nothing durable and no hot keys ⇒ through sits at the pre-genesis sentinel.
-	ops, weights, err := eligiblePruneOps(cat, floorFor(t, cfg, geometry.PreGenesisLedger))
+	ops, weights, err := eligiblePruneOps(cat, floorFor(t, cfg, chunk.PreGenesisLedger))
 	require.NoError(t, err)
 	require.Len(t, ops, 1, "the freezing debris is swept")
 	require.Equal(t, []int{1}, weights, "one index artifact swept")

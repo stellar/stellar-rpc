@@ -3,7 +3,7 @@ package catalog
 import (
 	"iter"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/storage/rocksdb"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 )
 
 // The catalog's backing KV: a single RocksDB default column family with a

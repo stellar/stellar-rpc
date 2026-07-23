@@ -13,9 +13,8 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/storage/chunk"
 )
 
 // lifecyclePassphrase is the network passphrase the one-tx fixture hashes
@@ -121,11 +120,11 @@ func lifecycleTestConfig(t *testing.T, cat *catalog.Catalog, retentionChunks uin
 	}
 }
 
-// lastCompleteChunkAtID maps geometry.LastCompleteChunkAt to a chunk.ID (ok=false
+// lastCompleteChunkAtID maps chunk.LastCompleteChunkAt to a chunk.ID (ok=false
 // on a negative result). Was a production helper until #25 (the tick now plans
 // [floor, lastChunk] without it); it lives here for the tick-mirroring helpers.
 func lastCompleteChunkAtID(ledger uint32) (chunk.ID, bool) {
-	c := geometry.LastCompleteChunkAt(ledger)
+	c := chunk.LastCompleteChunkAt(ledger)
 	if c < 0 {
 		return 0, false
 	}
@@ -146,7 +145,7 @@ func makeReadyHotDirNoData(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 // FloorAt over the last complete chunk (-1 when none).
 func floorFor(t *testing.T, cfg Config, through uint32) chunk.ID {
 	t.Helper()
-	return cfg.Retention.FloorAt(geometry.LastCompleteChunkAt(through))
+	return cfg.Retention.FloorAt(chunk.LastCompleteChunkAt(through))
 }
 
 // assertQuiescent re-runs the tick's three derivations against the SAME through

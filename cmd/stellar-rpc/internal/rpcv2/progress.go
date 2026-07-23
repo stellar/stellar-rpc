@@ -4,14 +4,14 @@ import (
 	"fmt"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/storage/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/storage/stores/hotchunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
 // Progress is derived, never stored. "Highest complete chunk" arithmetic runs in
 // int64 (-1 = "nothing complete") to avoid uint32 wraparound on the pre-genesis
-// sentinel; geometry.ChunkLastLedger is the chokepoint (the signed chunk↔ledger
+// sentinel; chunk.LastLedgerOf is the chokepoint (the signed chunk↔ledger
 // maps live in geometry so there is one -1 convention across the daemon).
 
 // lastCommittedLedger is the single highest-durably-committed-ledger derivation.
@@ -21,7 +21,7 @@ import (
 //   - COLD — highest chunk with all artifacts durable (highestDurableChunk; -1 on
 //     a fresh start). Leads at startup before any hot key exists.
 //   - HOT — only when hot > cold, over "ready" keys: one read-only MaxCommittedSeq
-//     read of the highest ready hot DB (empty DB ⇒ positional ChunkLastLedger(hot-1)).
+//     read of the highest ready hot DB (empty DB ⇒ positional LastLedgerOf(hot-1)).
 //     The read-only open takes no RocksDB LOCK, so it never contends with a writer;
 //     in practice it runs before ingestion opens the live chunk anyway.
 //   - FLOOR — EarliestLedger()-1 as int64(earliest)-1, so an absent/zero pin
@@ -35,7 +35,7 @@ func lastCommittedLedger(cat *catalog.Catalog) (uint32, error) {
 	if err != nil {
 		return 0, err
 	}
-	lastCommitted := geometry.ChunkLastLedger(cold)
+	lastCommitted := chunk.LastLedgerOf(cold)
 
 	hot, err := highestReadyChunkSigned(cat)
 	if err != nil {
@@ -65,7 +65,7 @@ func lastCommittedLedger(cat *catalog.Catalog) (uint32, error) {
 }
 
 // refineWithHotDB opens the highest ready hot chunk read-only straight from its
-// Layout path and returns its MaxCommittedSeq, or ChunkLastLedger(live-1) on an
+// Layout path and returns its MaxCommittedSeq, or LastLedgerOf(live-1) on an
 // empty DB. A "ready" key whose dir/DB is gone surfaces as an ordinary
 // (restartable) error — the read-only open never auto-heals it into a fresh empty
 // DB. A read-only open replays any crash-left synced WAL into memtables, so
@@ -89,11 +89,11 @@ func refineWithHotDB(cat *catalog.Catalog, live int64) (uint32, error) {
 		return maxSeq, nil
 	}
 	// Empty live DB: positional fallback (everything below it).
-	return geometry.ChunkLastLedger(live - 1), nil
+	return chunk.LastLedgerOf(live - 1), nil
 }
 
 // highestReadyChunkSigned returns the highest "ready" hot chunk id as int64, or -1
-// when none. The signed return lets ChunkLastLedger compute the positional term
+// when none. The signed return lets LastLedgerOf compute the positional term
 // without a uint32 underflow when the live chunk is chunk 0.
 func highestReadyChunkSigned(cat *catalog.Catalog) (int64, error) {
 	ready, err := cat.ReadyHotChunkKeys()

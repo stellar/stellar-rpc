@@ -6,11 +6,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/storage/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/storage/rocksdb"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/storage/stores/hotchunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/storage/stores/ledger"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 )
 
 // seedLedgersCF reopens a CLOSED chunk hot DB raw and commits sparse ledgers-CF
@@ -80,7 +79,7 @@ func TestDeriveLastCommitted_RealHotDB_RefinementIsNotStale(t *testing.T) {
 	// Sanity: positional baseline (live chunk 5 ⇒ everything below 5) is chunk 4's
 	// last ledger, strictly below the committed top — so the assertion below can
 	// only pass if the refinement actually read the real DB.
-	baseline := geometry.ChunkLastLedger(int64(live) - 1)
+	baseline := chunk.LastLedgerOf(int64(live) - 1)
 	require.Equal(t, chunk.ID(4).LastLedger(), baseline)
 	require.Greater(t, committedTop, baseline, "fixture must put the real frontier above the baseline")
 

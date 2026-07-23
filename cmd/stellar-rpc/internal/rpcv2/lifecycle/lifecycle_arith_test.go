@@ -5,12 +5,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/storage/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
 
 // ---------------------------------------------------------------------------
-// Arithmetic: geometry.LastCompleteChunkAt. (The retention floor is tested in the
+// Arithmetic: chunk.LastCompleteChunkAt. (The retention floor is tested in the
 // geometry package.)
 // ---------------------------------------------------------------------------
 
@@ -30,7 +29,7 @@ func TestLastCompleteChunkAt(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, geometry.LastCompleteChunkAt(tc.ledger))
+			require.Equal(t, tc.want, chunk.LastCompleteChunkAt(tc.ledger))
 		})
 	}
 }

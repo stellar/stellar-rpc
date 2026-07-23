@@ -13,8 +13,8 @@ import (
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/storage/chunk"
 )
 
 func silentLogger() *supportlog.Entry {
