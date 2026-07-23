@@ -28,51 +28,52 @@ type Router struct {
 	catalog   *catalog.Catalog
 	retention geometry.Retention
 
-	// latest is the newest fully ingested ledger visible to queries. The ingest
-	// loop advances it as the final step of each per-ledger cycle.
-	latest atomic.Uint32
+	// watermark is the newest fully ingested ledger visible to queries. The ingest
+	// loop advances it as the final step of each per-ledger cycle. Queries read a
+	// frozen copy at admission (Admission.Latest), never this live value.
+	watermark atomic.Uint32
 
-	// handles is the copy-on-write set of open hot-database handles, published
+	// handles is the copy-on-write map of open hot-database handles, published
 	// atomically. A query loads it once at admission.
-	handles atomic.Pointer[HandleSet]
+	handles atomic.Pointer[hotHandles]
 
-	// mu serializes handle-set updates (publish/discard) so a lost update cannot
-	// drop a concurrently published handle.
+	// mu serializes handle updates (publish/discard) so a lost update cannot drop
+	// a concurrently published handle.
 	mu sync.Mutex
 }
 
-// HandleSet is an immutable set of open hot-database handles keyed by chunk,
+// hotHandles is an immutable map of open hot-database handles keyed by chunk,
 // replaced wholesale on every publish or discard so a query that loaded one keeps
 // reading it.
-type HandleSet struct {
-	hot map[chunk.ID]*hotchunk.DB
+type hotHandles struct {
+	byChunk map[chunk.ID]*hotchunk.DB
 }
 
-// clone returns a deep copy of the map so a copy-on-write update never mutates a
-// set a query is already reading.
-func (h *HandleSet) clone() *HandleSet {
-	m := make(map[chunk.ID]*hotchunk.DB, len(h.hot))
-	for c, db := range h.hot {
+// clone returns a deep copy so a copy-on-write update never mutates a map a query
+// is already reading.
+func (h *hotHandles) clone() *hotHandles {
+	m := make(map[chunk.ID]*hotchunk.DB, len(h.byChunk))
+	for c, db := range h.byChunk {
 		m[c] = db
 	}
-	return &HandleSet{hot: m}
+	return &hotHandles{byChunk: m}
 }
 
 // NewRouter binds a Router to the catalog and retention policy, starting with an
-// empty handle set and a zero watermark.
+// empty handle map and a zero watermark.
 func NewRouter(cat *catalog.Catalog, retention geometry.Retention) *Router {
 	r := &Router{catalog: cat, retention: retention}
-	r.handles.Store(&HandleSet{hot: map[chunk.ID]*hotchunk.DB{}})
+	r.handles.Store(&hotHandles{byChunk: map[chunk.ID]*hotchunk.DB{}})
 	return r
 }
 
-// BootstrapHandles opens and publishes a handle for every ready hot chunk except
-// liveChunk, which the ingestion loop opens and publishes itself. These are
+// PublishReadyHandles opens and publishes a handle for every ready hot chunk
+// except liveChunk, which the ingestion loop opens and publishes itself. These are
 // completed chunks a prior run left ready (not yet discarded); queries read them
 // hot until the freeze covers them cold. They are opened read-write so the events
 // facade is warmed (a read-only open is ledgers-only), and the router closes them
 // at discard. Runs at startup before any query is admitted.
-func (r *Router) BootstrapHandles(liveChunk chunk.ID, logger *supportlog.Entry) error {
+func (r *Router) PublishReadyHandles(liveChunk chunk.ID, logger *supportlog.Entry) error {
 	ready, err := r.catalog.ReadyHotChunkKeys()
 	if err != nil {
 		return fmt.Errorf("bootstrap: read ready hot chunks: %w", err)
@@ -90,15 +91,19 @@ func (r *Router) BootstrapHandles(liveChunk chunk.ID, logger *supportlog.Entry) 
 	return nil
 }
 
-func (r *Router) SetLatest(seq uint32) { r.latest.Store(seq) }
+// SetWatermark publishes the newest fully ingested ledger; the ingest loop calls
+// it as the final step of each per-ledger cycle.
+func (r *Router) SetWatermark(seq uint32) { r.watermark.Store(seq) }
 
-func (r *Router) Latest() uint32 { return r.latest.Load() }
+// Watermark returns the live watermark. Queries do not call this — they read the
+// frozen Admission.Latest captured at admission (see the watermark field).
+func (r *Router) Watermark() uint32 { return r.watermark.Load() }
 
 // Handle returns the currently published hot database for chunk c, if any. The
 // freeze source reads a completed chunk through this shared handle rather than
 // opening a second reader against the still-open writer.
 func (r *Router) Handle(c chunk.ID) (*hotchunk.DB, bool) {
-	db, ok := r.handles.Load().hot[c]
+	db, ok := r.handles.Load().byChunk[c]
 	return db, ok
 }
 
@@ -108,7 +113,7 @@ func (r *Router) PublishHandle(c chunk.ID, db *hotchunk.DB) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	next := r.handles.Load().clone()
-	next.hot[c] = db
+	next.byChunk[c] = db
 	r.handles.Store(next)
 }
 
@@ -119,9 +124,9 @@ func (r *Router) DiscardHandle(c chunk.ID) *hotchunk.DB {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	cur := r.handles.Load()
-	db := cur.hot[c]
+	db := cur.byChunk[c]
 	next := cur.clone()
-	delete(next.hot, c)
+	delete(next.byChunk, c)
 	r.handles.Store(next)
 	return db
 }
@@ -133,7 +138,7 @@ func (r *Router) DiscardHandle(c chunk.ID) *hotchunk.DB {
 type Admission struct {
 	latest  uint32
 	floor   chunk.ID
-	handles *HandleSet
+	handles *hotHandles
 	snap    *rocksdb.Snapshot
 	catalog *catalog.Catalog
 }
@@ -146,7 +151,7 @@ type Admission struct {
 // The caller MUST call Release when the request completes, including on error
 // paths.
 func (r *Router) Admit() (*Admission, error) {
-	latest := r.latest.Load()
+	latest := r.watermark.Load()
 	handles := r.handles.Load()
 	snap, err := r.catalog.NewSnapshot()
 	if err != nil {
