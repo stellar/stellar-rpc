@@ -2,6 +2,7 @@ package serving
 
 import (
 	"bytes"
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -9,9 +10,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/fhtest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
@@ -222,6 +225,55 @@ func TestDiscardThenCloseDiscarded(t *testing.T) {
 	// DiscardHandle for a chunk not published is a harmless no-op (the retry case).
 	r.DiscardHandle(5)
 	assert.True(t, r.CloseDiscarded(5), "no-op discard leaves nothing to close")
+}
+
+// TestCloseDiscarded_BusyRetainsThenRetryDrains pins the retry behavior the fix
+// promises: while a reader is in flight, CloseDiscarded reports false and keeps the
+// handle in the closing set; once the reader drains, a later call closes it and
+// removes it. A parked ledger scan holds the store's lock to force the busy path.
+func TestCloseDiscarded_BusyRetainsThenRetryDrains(t *testing.T) {
+	cat := openTestCatalog(t, silentLogger())
+	r := NewRouter(cat, geometry.NewRetention(0, 0))
+	const c chunk.ID = 5
+
+	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
+	require.NoError(t, err)
+	_, err = db.IngestLedger(c.FirstLedger(), fhtest.ZeroTxLCMBytes(t, c.FirstLedger()))
+	require.NoError(t, err)
+	r.PublishHandle(c, db)
+
+	// Park a reader inside the ledger stream so the store's read-lock stays held,
+	// which makes CloseIfIdle (under CloseDiscarded) report busy.
+	parked, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		first := true
+		for _, ierr := range db.Source().RawLedgers(
+			context.Background(), ledgerbackend.BoundedRange(c.FirstLedger(), c.FirstLedger()),
+		) {
+			if ierr != nil {
+				return
+			}
+			if first {
+				close(parked)
+				<-release
+				first = false
+			}
+		}
+	}()
+	<-parked
+
+	r.DiscardHandle(c)
+	require.False(t, r.CloseDiscarded(c), "reader in flight → close deferred")
+	_, retained := r.closing[c]
+	assert.True(t, retained, "the handle is retained in closing for a later retry")
+
+	close(release)
+	<-done
+
+	require.True(t, r.CloseDiscarded(c), "after the reader drains, the retained handle closes")
+	_, stillThere := r.closing[c]
+	assert.False(t, stillThere, "closing is drained once the handle closes")
 }
 
 // TestClose_ClosesAndClearsHandles pins that shutdown closes every hot handle —
