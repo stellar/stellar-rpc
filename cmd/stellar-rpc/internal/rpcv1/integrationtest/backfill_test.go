@@ -17,7 +17,7 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
@@ -192,7 +192,7 @@ func createDbWithLedgers(t *testing.T, start, end, retentionWindow uint32) strin
 	}()
 
 	testLogger := supportlog.New()
-	rw := sqlitedb.NewReadWriter(testLogger, testDB, interfaces.MakeNoOpDeamon(),
+	rw := sqlitedb.NewReadWriter(testLogger, testDB, host.MakeNoOpDaemon(),
 		retentionWindow, network.TestNetworkPassphrase)
 
 	// Insert dummy ledgers into the DB

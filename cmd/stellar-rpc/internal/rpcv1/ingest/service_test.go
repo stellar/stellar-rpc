@@ -17,7 +17,7 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
 )
@@ -51,7 +51,7 @@ func TestRetryRunningIngestion(t *testing.T) {
 		LedgerBackend:     nil,
 		Timeout:           time.Second,
 		OnIngestionRetry:  incrementRetry,
-		Daemon:            interfaces.MakeNoOpDeamon(),
+		Daemon:            host.MakeNoOpDaemon(),
 	}
 	service := NewService(config)
 	service.Start(config)
@@ -84,7 +84,7 @@ func setupMocks() (*MockDB, *ledgerbackend.MockDatabaseBackend, *MockTx) {
 }
 
 func setupService(mockDB *MockDB, mockLedgerBackend *ledgerbackend.MockDatabaseBackend) *Service {
-	daemon := interfaces.MakeNoOpDeamon()
+	daemon := host.MakeNoOpDaemon()
 	config := Config{
 		Logger:            supportlog.New(),
 		DB:                mockDB,

@@ -17,7 +17,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
@@ -76,7 +76,7 @@ func TestTransactionEvent(t *testing.T) {
 	log := log.DefaultLogger
 	log.SetLevel(logrus.TraceLevel)
 
-	writer := NewReadWriter(log, db, interfaces.MakeNoOpDeamon(), 10, passphrase)
+	writer := NewReadWriter(log, db, host.MakeNoOpDaemon(), 10, passphrase)
 
 	testCases := []struct {
 		name       string
@@ -201,7 +201,7 @@ func TestTransactionFound(t *testing.T) {
 	log := log.DefaultLogger
 	log.SetLevel(logrus.TraceLevel)
 
-	writer := NewReadWriter(log, db, interfaces.MakeNoOpDeamon(), 10, passphrase)
+	writer := NewReadWriter(log, db, host.MakeNoOpDaemon(), 10, passphrase)
 	write, err := writer.NewTx(ctx)
 	require.NoError(t, err)
 
@@ -270,7 +270,7 @@ func TestInsertTransactionsBatchingExceedsLimit(t *testing.T) {
 			ledgerSeq := uint32(10 + i)
 			lcm := lcmWithCtTxns(ledgerSeq, tc.numTxs)
 
-			writer := NewReadWriter(log, testDB, interfaces.MakeNoOpDeamon(), 100, passphrase)
+			writer := NewReadWriter(log, testDB, host.MakeNoOpDaemon(), 100, passphrase)
 			writeTx, err := writer.NewTx(ctx)
 			require.NoError(t, err)
 
@@ -364,7 +364,7 @@ func BenchmarkTransactionFetch(b *testing.B) {
 	ctx := context.TODO()
 	log := log.DefaultLogger
 
-	writer := NewReadWriter(log, db, interfaces.MakeNoOpDeamon(), 1_000_000, passphrase)
+	writer := NewReadWriter(log, db, host.MakeNoOpDaemon(), 1_000_000, passphrase)
 	write, err := writer.NewTx(ctx)
 	require.NoError(b, err)
 

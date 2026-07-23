@@ -5,7 +5,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
@@ -30,7 +30,7 @@ type HandlerParams struct {
 	LedgerReader          store.LedgerReader
 	Logger                *log.Entry
 	PreflightGetter       methods.PreflightGetter
-	Daemon                interfaces.Daemon
+	Daemon                host.Daemon
 	DataStoreLedgerReader rpcdatastore.LedgerReader
 }
 

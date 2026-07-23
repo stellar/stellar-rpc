@@ -16,7 +16,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
@@ -43,7 +43,7 @@ type Config struct {
 	// sequence and the duration that's recorded to ledger_ingestion_duration_seconds.
 	// Set by the load test to capture exact per-ledger timing without polling.
 	OnLedgerIngested func(seq uint32, d time.Duration)
-	Daemon           interfaces.Daemon
+	Daemon           host.Daemon
 }
 
 func NewService(cfg Config) *Service {

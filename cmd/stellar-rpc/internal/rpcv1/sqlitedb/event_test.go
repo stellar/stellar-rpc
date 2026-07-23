@@ -14,7 +14,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 )
 
 func transactionMetaWithEvents(events ...xdr.ContractEvent) xdr.TransactionMeta {
@@ -176,7 +176,7 @@ func TestInsertEvents(t *testing.T) {
 	log.SetLevel(logrus.TraceLevel)
 	now := time.Now().UTC()
 
-	writer := NewReadWriter(log, db, interfaces.MakeNoOpDeamon(), 10, passphrase)
+	writer := NewReadWriter(log, db, host.MakeNoOpDaemon(), 10, passphrase)
 	write, err := writer.NewTx(ctx)
 	require.NoError(t, err)
 	contractID := xdr.ContractId([32]byte{})
@@ -257,7 +257,7 @@ func TestInsertEventsBatchingExceedsLimit(t *testing.T) {
 			txMeta := []xdr.TransactionMeta{transactionMetaWithEvents(opEvents...)}
 			lcm := ledgerCloseMetaWithEvents(ledgerSeq, now.Unix(), txMeta...)
 
-			writer := NewReadWriter(log, testDB, interfaces.MakeNoOpDeamon(), 100, passphrase)
+			writer := NewReadWriter(log, testDB, host.MakeNoOpDaemon(), 100, passphrase)
 			write, err := writer.NewTx(ctx)
 			require.NoError(t, err)
 

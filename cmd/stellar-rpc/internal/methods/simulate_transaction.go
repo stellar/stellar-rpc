@@ -13,7 +13,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
@@ -282,7 +282,7 @@ func sorobanDataFromTx(tx xdr.Transaction) (*xdr.SorobanTransactionData, bool) {
 //nolint:cyclop,funlen
 func NewSimulateTransactionHandler(logger *log.Entry,
 	ledgerReader store.LedgerReader,
-	coreClient interfaces.FastCoreClient, getter PreflightGetter,
+	coreClient host.FastCoreClient, getter PreflightGetter,
 	decodeOptions xdr.DecodeOptions,
 ) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, request protocol.SimulateTransactionRequest,

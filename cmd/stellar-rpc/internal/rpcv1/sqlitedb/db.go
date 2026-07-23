@@ -19,7 +19,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
@@ -200,7 +200,7 @@ type readWriter struct {
 func NewReadWriter(
 	log *log.Entry,
 	db *DB,
-	daemon interfaces.Daemon,
+	daemon host.Daemon,
 	historyRetentionWindow uint32,
 	networkPassphrase string,
 ) ReadWriter {

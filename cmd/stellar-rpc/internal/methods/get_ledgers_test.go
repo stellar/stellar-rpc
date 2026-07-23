@@ -13,7 +13,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
@@ -29,7 +29,7 @@ var expectedLedgerInfo = protocol.LedgerInfo{
 
 func setupTestDB(t *testing.T, numLedgers int) *sqlitedb.DB {
 	testDB := NewTestDB(t)
-	daemon := interfaces.MakeNoOpDeamon()
+	daemon := host.MakeNoOpDaemon()
 	for sequence := 1; sequence <= numLedgers; sequence++ {
 		ledgerCloseMeta := txMeta(uint32(sequence)-100, true)
 		tx, err := sqlitedb.
@@ -271,7 +271,7 @@ func BenchmarkGetLedgers(b *testing.B) {
 func setupBenchmarkingDB(b *testing.B) *sqlitedb.DB {
 	testDB := NewTestDB(b)
 	logger := log.DefaultLogger
-	writer := sqlitedb.NewReadWriter(logger, testDB, interfaces.MakeNoOpDeamon(),
+	writer := sqlitedb.NewReadWriter(logger, testDB, host.MakeNoOpDaemon(),
 		1_000_000, passphrase)
 	write, err := writer.NewTx(context.TODO())
 	require.NoError(b, err)

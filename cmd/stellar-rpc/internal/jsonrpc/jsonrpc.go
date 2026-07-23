@@ -25,7 +25,7 @@ import (
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/support/log"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
 )
 
@@ -70,7 +70,7 @@ type HandlerSpec struct {
 // daemon (for metrics), the logger, and the global request limits applied
 // across all methods.
 type Params struct {
-	Daemon                interfaces.Daemon
+	Daemon                host.Daemon
 	Logger                *log.Entry
 	Specs                 []HandlerSpec
 	GlobalQueueLimit      uint
@@ -78,7 +78,7 @@ type Params struct {
 	GlobalDurationLimit   time.Duration
 }
 
-func decorateHandlers(daemon interfaces.Daemon, logger *log.Entry, m handler.Map) handler.Map {
+func decorateHandlers(daemon host.Daemon, logger *log.Entry, m handler.Map) handler.Map {
 	requestMetric := prometheus.NewSummaryVec(prometheus.SummaryOpts{
 		Namespace:  daemon.MetricsNamespace(),
 		Subsystem:  "json_rpc",
@@ -154,7 +154,7 @@ func toSnakeCase(s string) string {
 
 // wrapWithLimiters applies the per-method backlog-queue and request-duration
 // limiters (and their metrics) around a single method handler.
-func wrapWithLimiters(spec HandlerSpec, daemon interfaces.Daemon, logger *log.Entry) jrpc2.Handler {
+func wrapWithLimiters(spec HandlerSpec, daemon host.Daemon, logger *log.Entry) jrpc2.Handler {
 	longName := toSnakeCase(spec.MethodName)
 	queueLimiterGaugeName := longName + "_inflight_requests"
 	queueLimiterGaugeHelp := "Number of concurrenty in-flight " + spec.MethodName + " requests"

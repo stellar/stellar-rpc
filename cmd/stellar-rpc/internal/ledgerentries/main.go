@@ -7,7 +7,7 @@ import (
 	coreProto "github.com/stellar/go-stellar-sdk/protocols/stellarcore"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
@@ -22,7 +22,7 @@ type LedgerEntryGetter interface {
 }
 
 // NewLedgerEntryGetter creates a LedgerEntryGetter which obtains the latest known value of the given ledger entries
-func NewLedgerEntryGetter(coreClient interfaces.FastCoreClient,
+func NewLedgerEntryGetter(coreClient host.FastCoreClient,
 	latestLedgerReader store.LedgerReader,
 ) LedgerEntryGetter {
 	return &coreLedgerEntryGetter{
@@ -35,7 +35,7 @@ func NewLedgerEntryGetter(coreClient interfaces.FastCoreClient,
 
 // NewLedgerEntryAtGetter creates a LedgerEntryGetter which gets the value
 // of the given ledger entries at a fixed ledger
-func NewLedgerEntryAtGetter(coreClient interfaces.FastCoreClient, atLedger uint32) LedgerEntryGetter {
+func NewLedgerEntryAtGetter(coreClient host.FastCoreClient, atLedger uint32) LedgerEntryGetter {
 	return &coreLedgerEntryGetter{
 		coreClient: coreClient,
 		atLedger:   atLedger,
@@ -43,7 +43,7 @@ func NewLedgerEntryAtGetter(coreClient interfaces.FastCoreClient, atLedger uint3
 }
 
 type coreLedgerEntryGetter struct {
-	coreClient         interfaces.FastCoreClient
+	coreClient         host.FastCoreClient
 	atLedger           uint32
 	latestLedgerReader store.LedgerReader
 }

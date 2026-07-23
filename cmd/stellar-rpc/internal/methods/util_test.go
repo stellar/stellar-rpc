@@ -10,13 +10,13 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
 )
 
 func BenchmarkGetProtocolVersion(b *testing.B) {
 	dbx := NewTestDB(b)
-	daemon := interfaces.MakeNoOpDeamon()
+	daemon := host.MakeNoOpDaemon()
 
 	ledgerReader := sqlitedb.NewLedgerReader(dbx)
 	_, exists, err := ledgerReader.GetLedger(b.Context(), 1)
@@ -40,7 +40,7 @@ func BenchmarkGetProtocolVersion(b *testing.B) {
 
 func TestGetProtocolVersion(t *testing.T) {
 	dbx := NewTestDB(t)
-	daemon := interfaces.MakeNoOpDeamon()
+	daemon := host.MakeNoOpDaemon()
 
 	ledgerReader := sqlitedb.NewLedgerReader(dbx)
 	_, exists, err := ledgerReader.GetLedger(t.Context(), 1)

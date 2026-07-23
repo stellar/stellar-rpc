@@ -14,7 +14,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
 )
 
@@ -47,7 +47,7 @@ type WorkerPool struct {
 }
 
 type WorkerPoolConfig struct {
-	Daemon            interfaces.Daemon
+	Daemon            host.Daemon
 	WorkerCount       uint
 	JobQueueCapacity  uint
 	EnableDebug       bool

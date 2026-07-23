@@ -18,7 +18,7 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/support/storage"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
@@ -256,11 +256,11 @@ func startConfig(
 func buildSinks(opts daemonOptions, registry *prometheus.Registry) (observability.Metrics, ingest.MetricSink) {
 	metrics := opts.Metrics
 	if metrics == nil {
-		metrics = observability.NewPrometheusMetrics(registry, interfaces.PrometheusNamespace)
+		metrics = observability.NewPrometheusMetrics(registry, host.PrometheusNamespace)
 	}
 	sink := opts.IngestSink
 	if sink == nil {
-		sink = ingest.NewPrometheusSink(registry, interfaces.PrometheusNamespace)
+		sink = ingest.NewPrometheusSink(registry, host.PrometheusNamespace)
 	}
 	return metrics, sink
 }

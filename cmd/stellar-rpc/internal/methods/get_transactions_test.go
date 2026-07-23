@@ -15,7 +15,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/toid"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
 )
 
@@ -310,7 +310,7 @@ func createEmptyTestLedger(sequence uint32) xdr.LedgerCloseMeta {
 
 func setupDB(t *testing.T, numLedgers int, skipLedger int) *sqlitedb.DB {
 	testDB := NewTestDB(t)
-	daemon := interfaces.MakeNoOpDeamon()
+	daemon := host.MakeNoOpDaemon()
 	for sequence := 1; sequence <= numLedgers; sequence++ {
 		if sequence == skipLedger {
 			continue
@@ -326,7 +326,7 @@ func setupDB(t *testing.T, numLedgers int, skipLedger int) *sqlitedb.DB {
 
 func setupDBNoTxs(t *testing.T, numLedgers int) *sqlitedb.DB {
 	testDB := NewTestDB(t)
-	daemon := interfaces.MakeNoOpDeamon()
+	daemon := host.MakeNoOpDaemon()
 	for sequence := 1; sequence <= numLedgers; sequence++ {
 		ledgerCloseMeta := createEmptyTestLedger(uint32(sequence))
 

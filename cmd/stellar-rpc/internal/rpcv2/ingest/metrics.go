@@ -180,7 +180,7 @@ func (m *coldMetrics) emit(extra time.Duration, err error) {
 }
 
 // metricsSubsystem is the Prometheus subsystem for all full-history ingest
-// metrics, under the daemon's namespace (interfaces.PrometheusNamespace).
+// metrics, under the daemon's namespace (host.PrometheusNamespace).
 const metricsSubsystem = "fullhistory_ingest"
 
 // Histogram buckets per tier. Hot observations are per-ledger
@@ -250,7 +250,7 @@ type PrometheusSink struct {
 
 // NewPrometheusSink builds a PrometheusSink and MustRegisters its collectors on
 // registry under namespace + the fullhistory_ingest subsystem. namespace is the
-// daemon convention value (interfaces.PrometheusNamespace).
+// daemon convention value (host.PrometheusNamespace).
 func NewPrometheusSink(registry *prometheus.Registry, namespace string) *PrometheusSink {
 	hotPhaseDurVec := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,

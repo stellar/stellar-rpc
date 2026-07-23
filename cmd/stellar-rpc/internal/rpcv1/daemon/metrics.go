@@ -15,7 +15,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/logmetrics"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version"
 )
 
@@ -27,14 +27,14 @@ const (
 
 func (d *Daemon) registerMetrics() {
 	// LogMetricsHook is a metric which counts log lines emitted by stellar rpc
-	logMetricsHook := logmetrics.New(interfaces.PrometheusNamespace)
+	logMetricsHook := logmetrics.New(host.PrometheusNamespace)
 	d.logger.AddHook(logMetricsHook)
 	for _, counter := range logMetricsHook {
 		d.metricsRegistry.MustRegister(counter)
 	}
 
 	buildInfoGauge := prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{Namespace: interfaces.PrometheusNamespace, Subsystem: "build", Name: "info"},
+		prometheus.GaugeOpts{Namespace: host.PrometheusNamespace, Subsystem: "build", Name: "info"},
 		[]string{versionLabel, "goversion", commitLabel, "branch", "build_timestamp"},
 	)
 	buildInfoGauge.With(prometheus.Labels{
@@ -55,7 +55,7 @@ func (d *Daemon) MetricsRegistry() *prometheus.Registry {
 }
 
 func (d *Daemon) MetricsNamespace() string {
-	return interfaces.PrometheusNamespace
+	return host.PrometheusNamespace
 }
 
 type CoreClientWithMetrics struct {
@@ -67,12 +67,12 @@ type CoreClientWithMetrics struct {
 
 func newCoreClientWithMetrics(client stellarcore.Client, registry *prometheus.Registry) *CoreClientWithMetrics {
 	submitMetric := prometheus.NewSummaryVec(prometheus.SummaryOpts{
-		Namespace: interfaces.PrometheusNamespace, Subsystem: "txsub", Name: "submission_duration_seconds",
+		Namespace: host.PrometheusNamespace, Subsystem: "txsub", Name: "submission_duration_seconds",
 		Help:       "submission durations to Stellar-Core, sliding window = 10m",
 		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001}, //nolint:mnd
 	}, []string{"status"})
 	opCountMetric := prometheus.NewSummaryVec(prometheus.SummaryOpts{
-		Namespace: interfaces.PrometheusNamespace, Subsystem: "txsub", Name: "operation_count",
+		Namespace: host.PrometheusNamespace, Subsystem: "txsub", Name: "operation_count",
 		Help:       "number of operations included in a transaction, sliding window = 10m",
 		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001}, //nolint:mnd
 	}, []string{"status"})
@@ -114,11 +114,11 @@ func (c *CoreClientWithMetrics) SubmitTransaction(ctx context.Context,
 	return response, err
 }
 
-func (d *Daemon) CoreClient() interfaces.CoreClient {
+func (d *Daemon) CoreClient() host.CoreClient {
 	return d.coreClient
 }
 
-func (d *Daemon) FastCoreClient() interfaces.FastCoreClient {
+func (d *Daemon) FastCoreClient() host.FastCoreClient {
 	return d.coreQueryingClient
 }
 

@@ -1,4 +1,4 @@
-package interfaces
+package host
 
 import (
 	"context"
@@ -23,7 +23,7 @@ type NoOpDaemon struct {
 	core             *ledgerbackend.CaptiveStellarCore
 }
 
-func MakeNoOpDeamon() *NoOpDaemon {
+func MakeNoOpDaemon() *NoOpDaemon {
 	return &NoOpDaemon{
 		metricsRegistry:  prometheus.NewRegistry(),
 		metricsNamespace: PrometheusNamespace,

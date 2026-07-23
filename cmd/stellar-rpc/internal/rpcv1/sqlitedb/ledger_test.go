@@ -13,7 +13,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
@@ -73,7 +73,7 @@ func assertLedgerRange(t *testing.T, reader LedgerReader, start, end uint32) {
 
 func TestLedgers(t *testing.T) {
 	db := NewTestDB(t)
-	daemon := interfaces.MakeNoOpDeamon()
+	daemon := host.MakeNoOpDaemon()
 
 	reader := NewLedgerReader(db)
 	_, exists, err := reader.GetLedger(t.Context(), 1)
@@ -117,7 +117,7 @@ func TestGetLedgerRange_NonEmptyDB(t *testing.T) {
 	db := NewTestDB(t)
 	ctx := context.TODO()
 
-	writer := NewReadWriter(logger, db, interfaces.MakeNoOpDeamon(), 10, passphrase)
+	writer := NewReadWriter(logger, db, host.MakeNoOpDaemon(), 10, passphrase)
 	write, err := writer.NewTx(ctx)
 	require.NoError(t, err)
 
@@ -148,7 +148,7 @@ func TestGetLedgerRange_SingleDBRow(t *testing.T) {
 	db := NewTestDB(t)
 	ctx := t.Context()
 
-	writer := NewReadWriter(logger, db, interfaces.MakeNoOpDeamon(), 10, passphrase)
+	writer := NewReadWriter(logger, db, host.MakeNoOpDaemon(), 10, passphrase)
 	write, err := writer.NewTx(ctx)
 	require.NoError(t, err)
 
@@ -181,7 +181,7 @@ func TestGetLedgerRange_OldestCacheInvalidatedOnTrim(t *testing.T) {
 	const retentionWindow = 10
 	db := NewTestDB(t)
 	ctx := context.TODO()
-	writer := NewReadWriter(logger, db, interfaces.MakeNoOpDeamon(), retentionWindow, passphrase)
+	writer := NewReadWriter(logger, db, host.MakeNoOpDaemon(), retentionWindow, passphrase)
 	reader := NewLedgerReader(db)
 
 	ingest := func(base uint32, count int) {
@@ -282,7 +282,7 @@ func setupBenchmarkingDB(b *testing.B) (*DB, []xdr.LedgerCloseMeta) {
 	logger := log.DefaultLogger
 	logger.SetOutput(io.Discard)
 
-	writer := NewReadWriter(logger, testDB, interfaces.MakeNoOpDeamon(),
+	writer := NewReadWriter(logger, testDB, host.MakeNoOpDaemon(),
 		1_000_000, passphrase)
 	write, err := writer.NewTx(b.Context())
 	require.NoError(b, err)

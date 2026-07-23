@@ -29,7 +29,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/storage"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1"
@@ -54,7 +54,7 @@ const (
 type Daemon struct {
 	core                *ledgerbackend.CaptiveStellarCore
 	coreClient          *CoreClientWithMetrics
-	coreQueryingClient  interfaces.FastCoreClient
+	coreQueryingClient  host.FastCoreClient
 	ingestService       *ingest.Service
 	db                  *sqlitedb.DB
 	jsonRPCHandler      *rpcv1.Handler
@@ -296,7 +296,7 @@ func mustCreateHistoryArchive(cfg *config.Config, logger *supportlog.Entry) *his
 
 func mustOpenDatabase(cfg *config.Config, logger *supportlog.Entry, metricsRegistry *prometheus.Registry) *sqlitedb.DB {
 	dbConn, err := sqlitedb.OpenSQLiteDBWithPrometheusMetrics(
-		cfg.SQLiteDBPath, interfaces.PrometheusNamespace, "db", metricsRegistry)
+		cfg.SQLiteDBPath, host.PrometheusNamespace, "db", metricsRegistry)
 	if err != nil {
 		logger.WithError(err).Fatal("could not open database")
 	}
@@ -310,7 +310,7 @@ func createStellarCoreClient(cfg *config.Config) stellarcore.Client {
 	}
 }
 
-func createHighperfStellarCoreClient(cfg *config.Config) interfaces.FastCoreClient {
+func createHighperfStellarCoreClient(cfg *config.Config) host.FastCoreClient {
 	return &stellarcore.Client{
 		URL:  fmt.Sprintf("http://localhost:%d", cfg.CaptiveCoreHTTPQueryPort),
 		HTTP: &http.Client{Timeout: cfg.CoreRequestTimeout},
@@ -599,4 +599,4 @@ func (d *Daemon) Run() {
 }
 
 // Ensure the daemon conforms to the interface
-var _ interfaces.Daemon = (*Daemon)(nil)
+var _ host.Daemon = (*Daemon)(nil)

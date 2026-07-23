@@ -17,7 +17,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/toid"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 )
@@ -582,7 +582,7 @@ func sqliteEventRows(t *testing.T, lcm xdr.LedgerCloseMeta) []sqliteEventRow {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, testDB.Close()) })
 
-	writer := sqlitedb.NewReadWriter(logger, testDB, interfaces.MakeNoOpDeamon(),
+	writer := sqlitedb.NewReadWriter(logger, testDB, host.MakeNoOpDaemon(),
 		1_000_000 /* retention window: keep everything */, testPassphrase)
 	write, err := writer.NewTx(ctx)
 	require.NoError(t, err)

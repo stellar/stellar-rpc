@@ -11,7 +11,7 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
 )
 
@@ -25,7 +25,7 @@ func TestGapDetection(t *testing.T) {
 	require.NoError(t, err)
 	defer testDB.Close()
 
-	rw := sqlitedb.NewReadWriter(testLogger, testDB, interfaces.MakeNoOpDeamon(), 10,
+	rw := sqlitedb.NewReadWriter(testLogger, testDB, host.MakeNoOpDaemon(), 10,
 		network.TestNetworkPassphrase)
 
 	writeTx, err := rw.NewTx(ctx)
