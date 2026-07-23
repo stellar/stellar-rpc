@@ -81,6 +81,8 @@ linters:
       enable-all: true
       disable:
         - go-require
+        # Team preference: assert.NoError is fine for error checks; don't force require.
+        - require-error
     wrapcheck:
       ignore-sigs:
         - .Errorf(
