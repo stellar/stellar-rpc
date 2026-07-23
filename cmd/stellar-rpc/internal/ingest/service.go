@@ -273,12 +273,35 @@ func (s *Service) ingestRange(ctx context.Context, backend backends.LedgerBacken
 		}
 	}()
 
-	var ledgerCloseMeta xdr.LedgerCloseMeta
-	for seq := seqRange.From(); seq <= seqRange.To(); seq++ {
-		ledgerCloseMeta, err = backend.GetLedger(ctx, seq)
-		if err != nil {
-			return err
+	// Fetch (and decode) ledgers ahead of the DB writes
+	type fetched struct {
+		lcm xdr.LedgerCloseMeta
+		err error
+	}
+	fetchCtx, cancelFetch := context.WithCancel(ctx)
+	defer cancelFetch()
+	fetches := make(chan fetched, 8) //nolint:mnd
+	go func() {
+		defer close(fetches)
+		for seq := seqRange.From(); seq <= seqRange.To(); seq++ {
+			lcm, err := backend.GetLedger(fetchCtx, seq)
+			select {
+			case fetches <- fetched{lcm, err}:
+			case <-fetchCtx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
 		}
+	}()
+
+	var ledgerCloseMeta xdr.LedgerCloseMeta
+	for f := range fetches {
+		if f.err != nil {
+			return f.err
+		}
+		ledgerCloseMeta = f.lcm
 		if err := s.ingestLedgerCloseMeta(tx, ledgerCloseMeta); err != nil {
 			return err
 		}

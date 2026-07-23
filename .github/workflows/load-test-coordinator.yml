@@ -11,7 +11,9 @@ defaults:
 
 on:
   push:
-    branches: [release/**]
+    # temporary scaffolding: before merge to main, replace with line
+    # branches: [release/**]
+    branches: [release/**, optimize-backfill]
   workflow_dispatch:
     inputs:
       target_ref:
@@ -56,6 +58,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REF: ${{ inputs.target_ref || github.ref_name }}
           PR: ${{ inputs.pr_number }}
+        # TODO: Restore relevant legs before merging (removed apply load leg)
         run: |
           SHA="$(git rev-parse HEAD)"
           if [ -z "$PR" ]; then
@@ -63,7 +66,6 @@ jobs:
                     --head "$REF" --json number --jq '.[0].number // ""' 2>/dev/null || true)"
           fi
           LEGS='[
-            {"label":"Apply-load ingestion","run_label":"apply-load","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh","budget":225},
             {"label":"Backfill ingestion","run_label":"backfill","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/run-backfill.sh","budget":345}
           ]'
           {

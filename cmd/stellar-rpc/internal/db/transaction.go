@@ -57,9 +57,19 @@ type transactionHandler struct {
 	db         db.SessionInterface
 	stmtCache  *sq.StmtCache
 	passphrase string
+	pending    []pendingTx
 
 	ingestMetric, countMetric prometheus.Observer
 }
+
+type pendingTx struct {
+	hash  xdr.Hash
+	seq   uint32
+	index uint32
+}
+
+// 3 bind variables/row * 10,000 rows stays under SQLite's 32,766 limit
+const maxTxRowsPerBatch = 10000
 
 func NewTransactionReader(log *log.Entry, db db.SessionInterface, passphrase string) TransactionReader {
 	return &transactionHandler{log: log, db: db, passphrase: passphrase}
@@ -109,29 +119,13 @@ func (txn *transactionHandler) InsertTransactions(lcm xdr.LedgerCloseMeta) error
 		transactions[tx.Result.TransactionHash] = tx
 	}
 
-	// Batch inserts to avoid exceeding SQLite's SQLITE_MAX_VARIABLE_NUMBER
-	// limit (32,766 by default). With 3 bind variables per transaction, we
-	// cap each INSERT at 3,000 rows (9,000 bind variables) to stay well
-	// within the limit.
-	const maxRowsPerBatch = 3000
-	rowsInBatch := 0
-	query := sq.Insert(transactionTableName).
-		Columns("hash", "ledger_sequence", "application_order")
 	for hash, tx := range transactions {
-		query = query.Values(hash[:], lcm.LedgerSequence(), tx.Index)
-		rowsInBatch++
-
-		if rowsInBatch >= maxRowsPerBatch {
-			if _, err = query.RunWith(txn.stmtCache).Exec(); err != nil {
-				return err
-			}
-			query = sq.Insert(transactionTableName).
-				Columns("hash", "ledger_sequence", "application_order")
-			rowsInBatch = 0
-		}
+		txn.pending = append(txn.pending, pendingTx{hash, lcm.LedgerSequence(), tx.Index})
 	}
-	if rowsInBatch > 0 {
-		if _, err = query.RunWith(txn.stmtCache).Exec(); err != nil {
+	// Full fixed-size batches keep the SQL text constant so the statement
+	// cache reuses one prepare; the remainder is flushed at Commit.
+	for len(txn.pending) >= maxTxRowsPerBatch {
+		if err = txn.flush(maxTxRowsPerBatch); err != nil {
 			return err
 		}
 	}
@@ -139,7 +133,27 @@ func (txn *transactionHandler) InsertTransactions(lcm xdr.LedgerCloseMeta) error
 	L.WithField("duration", time.Since(start)).
 		Debugf("Ingested %d transaction lookups", len(transactions))
 
-	return err
+	return nil
+}
+
+func (txn *transactionHandler) flush(n int) error {
+	query := sq.Insert(transactionTableName).
+		Columns("hash", "ledger_sequence", "application_order")
+	for _, row := range txn.pending[:n] {
+		query = query.Values(row.hash[:], row.seq, row.index)
+	}
+	if _, err := query.RunWith(txn.stmtCache).Exec(); err != nil {
+		return err
+	}
+	txn.pending = txn.pending[:copy(txn.pending, txn.pending[n:])]
+	return nil
+}
+
+func (txn *transactionHandler) flushPending() error {
+	if len(txn.pending) == 0 {
+		return nil
+	}
+	return txn.flush(len(txn.pending))
 }
 
 func (txn *transactionHandler) RegisterMetrics(ingest, count prometheus.Observer) {
