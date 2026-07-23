@@ -13,7 +13,6 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/db"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
@@ -46,7 +45,7 @@ type ledgerReaderTx struct {
 	latestLedgerCloseTime int64
 }
 
-func (l ledgerReaderTx) GetLedgerRange(ctx context.Context) (ledgerbucketwindow.LedgerRange, error) {
+func (l ledgerReaderTx) GetLedgerRange(ctx context.Context) (store.LedgerRange, error) {
 	if l.latestLedgerSeq != 0 {
 		return getLedgerRangeWithCache(ctx, l.tx, l.latestLedgerSeq, l.latestLedgerCloseTime)
 	}
@@ -161,7 +160,7 @@ func (r ledgerReader) GetLedger(ctx context.Context, sequence uint32) (xdr.Ledge
 }
 
 // GetLedgerRange pulls the min/max ledger sequence numbers from the meta table.
-func (r ledgerReader) GetLedgerRange(ctx context.Context) (ledgerbucketwindow.LedgerRange, error) {
+func (r ledgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRange, error) {
 	r.db.cache.RLock()
 	latestLedgerSeqCache := r.db.cache.latestLedgerSeq
 	latestLedgerCloseTimeCache := r.db.cache.latestLedgerCloseTime
@@ -173,12 +172,12 @@ func (r ledgerReader) GetLedgerRange(ctx context.Context) (ledgerbucketwindow.Le
 	// read-heavy workloads (e.g. getTransaction polling), which previously
 	// decoded the entire oldest LedgerCloseMeta blob on every single call.
 	if latestLedgerSeqCache != 0 && firstLedgerSeqCache != 0 {
-		return ledgerbucketwindow.LedgerRange{
-			FirstLedger: ledgerbucketwindow.LedgerInfo{
+		return store.LedgerRange{
+			FirstLedger: store.LedgerInfo{
 				Sequence:  firstLedgerSeqCache,
 				CloseTime: firstLedgerCloseTimeCache,
 			},
-			LastLedger: ledgerbucketwindow.LedgerInfo{
+			LastLedger: store.LedgerInfo{
 				Sequence:  latestLedgerSeqCache,
 				CloseTime: latestLedgerCloseTimeCache,
 			},
@@ -224,7 +223,7 @@ func (r ledgerReader) GetLatestLedgerSequence(ctx context.Context) (uint32, erro
 // It only needs to look up the first ledger since we have the latest cached.
 func getLedgerRangeWithCache(ctx context.Context, db readDB,
 	latestSeq uint32, latestTime int64,
-) (ledgerbucketwindow.LedgerRange, error) {
+) (store.LedgerRange, error) {
 	query := sq.Select("meta").
 		From(ledgerCloseMetaTableName).
 		Where(
@@ -232,19 +231,19 @@ func getLedgerRangeWithCache(ctx context.Context, db readDB,
 		)
 	var lcm []xdr.LedgerCloseMeta
 	if err := db.Select(ctx, &lcm, query); err != nil {
-		return ledgerbucketwindow.LedgerRange{}, fmt.Errorf("couldn't query ledger range: %w", err)
+		return store.LedgerRange{}, fmt.Errorf("couldn't query ledger range: %w", err)
 	}
 
 	if len(lcm) == 0 {
-		return ledgerbucketwindow.LedgerRange{}, store.ErrEmptyDB
+		return store.LedgerRange{}, store.ErrEmptyDB
 	}
 
-	return ledgerbucketwindow.LedgerRange{
-		FirstLedger: ledgerbucketwindow.LedgerInfo{
+	return store.LedgerRange{
+		FirstLedger: store.LedgerInfo{
 			Sequence:  lcm[0].LedgerSequence(),
 			CloseTime: lcm[0].LedgerCloseTime(),
 		},
-		LastLedger: ledgerbucketwindow.LedgerInfo{
+		LastLedger: store.LedgerInfo{
 			Sequence:  latestSeq,
 			CloseTime: latestTime,
 		},
@@ -252,7 +251,7 @@ func getLedgerRangeWithCache(ctx context.Context, db readDB,
 }
 
 // getLedgerRangeWithoutCache queries both the first and last ledger when cache isn't available
-func getLedgerRangeWithoutCache(ctx context.Context, db readDB) (ledgerbucketwindow.LedgerRange, error) {
+func getLedgerRangeWithoutCache(ctx context.Context, db readDB) (store.LedgerRange, error) {
 	query := sq.Select("lcm.meta").
 		From(ledgerCloseMetaTableName + " as lcm").
 		Where(sq.Or{
@@ -262,19 +261,19 @@ func getLedgerRangeWithoutCache(ctx context.Context, db readDB) (ledgerbucketwin
 
 	var lcms []xdr.LedgerCloseMeta
 	if err := db.Select(ctx, &lcms, query); err != nil {
-		return ledgerbucketwindow.LedgerRange{}, fmt.Errorf("couldn't query ledger range: %w", err)
+		return store.LedgerRange{}, fmt.Errorf("couldn't query ledger range: %w", err)
 	}
 
 	if len(lcms) == 0 {
-		return ledgerbucketwindow.LedgerRange{}, store.ErrEmptyDB
+		return store.LedgerRange{}, store.ErrEmptyDB
 	}
 
-	return ledgerbucketwindow.LedgerRange{
-		FirstLedger: ledgerbucketwindow.LedgerInfo{
+	return store.LedgerRange{
+		FirstLedger: store.LedgerInfo{
 			Sequence:  lcms[0].LedgerSequence(),
 			CloseTime: lcms[0].LedgerCloseTime(),
 		},
-		LastLedger: ledgerbucketwindow.LedgerInfo{
+		LastLedger: store.LedgerInfo{
 			Sequence:  lcms[len(lcms)-1].LedgerSequence(),
 			CloseTime: lcms[len(lcms)-1].LedgerCloseTime(),
 		},

@@ -12,7 +12,6 @@ import (
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
@@ -29,8 +28,8 @@ func (ledgerReader *ConstantLedgerReader) GetLatestLedgerSequence(_ context.Cont
 	return expectedLatestLedgerSequence, nil
 }
 
-func (ledgerReader *ConstantLedgerReader) GetLedgerRange(_ context.Context) (ledgerbucketwindow.LedgerRange, error) {
-	return ledgerbucketwindow.LedgerRange{}, nil
+func (ledgerReader *ConstantLedgerReader) GetLedgerRange(_ context.Context) (store.LedgerRange, error) {
+	return store.LedgerRange{}, nil
 }
 
 func (ledgerReader *ConstantLedgerReader) NewTx(_ context.Context) (store.LedgerReaderTx, error) {

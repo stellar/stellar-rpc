@@ -8,8 +8,6 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/xdr"
-
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
 )
 
 var ErrNoTransaction = errors.New("no transaction with this hash exists")
@@ -23,7 +21,7 @@ type Transaction struct {
 	FeeBump          bool
 	ApplicationOrder int32
 	Successful       bool
-	Ledger           ledgerbucketwindow.LedgerInfo
+	Ledger           LedgerInfo
 
 	TransactionEvents [][]byte   // XDR encoded xdr.TransactionEvent
 	ContractEvents    [][][]byte // XDR encoded xdr.ContractEvent
@@ -48,7 +46,7 @@ func ParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTransaction
 	}
 	tx.ApplicationOrder = int32(applicationOrder)
 	tx.Successful = ingestTx.Result.Successful()
-	tx.Ledger = ledgerbucketwindow.LedgerInfo{
+	tx.Ledger = LedgerInfo{
 		Sequence:  lcm.LedgerSequence(),
 		CloseTime: lcm.LedgerCloseTime(),
 	}

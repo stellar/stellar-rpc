@@ -10,14 +10,13 @@ import (
 	"github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 type MockTransactionHandler struct {
 	passphrase string
 
-	ledgerRange     ledgerbucketwindow.LedgerRange
+	ledgerRange     store.LedgerRange
 	txs             map[string]ingest.LedgerTransaction
 	txHashToMeta    map[string]*xdr.LedgerCloseMeta
 	ledgerSeqToMeta map[uint32]*xdr.LedgerCloseMeta
@@ -102,7 +101,7 @@ func (m *MockLedgerReader) StreamLedgerRange(_ context.Context, _ uint32, _ uint
 	return nil
 }
 
-func (m *MockLedgerReader) GetLedgerRange(_ context.Context) (ledgerbucketwindow.LedgerRange, error) {
+func (m *MockLedgerReader) GetLedgerRange(_ context.Context) (store.LedgerRange, error) {
 	return m.txn.ledgerRange, nil
 }
 

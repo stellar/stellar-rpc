@@ -3,7 +3,7 @@ package ledgerbucketwindow
 import (
 	"fmt"
 
-	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 // LedgerBucketWindow is a sequence of buckets associated to a ledger window.
@@ -67,36 +67,19 @@ func (w *LedgerBucketWindow[T]) Len() uint32 {
 	return uint32(len(w.buckets))
 }
 
-type LedgerInfo struct {
-	Sequence  uint32
-	CloseTime int64
-}
-
-type LedgerRange struct {
-	FirstLedger LedgerInfo
-	LastLedger  LedgerInfo
-}
-
-func (lr LedgerRange) ToLedgerSeqRange() protocol.LedgerSeqRange {
-	return protocol.LedgerSeqRange{
-		FirstLedger: lr.FirstLedger.Sequence,
-		LastLedger:  lr.LastLedger.Sequence,
-	}
-}
-
-func (w *LedgerBucketWindow[T]) GetLedgerRange() LedgerRange {
+func (w *LedgerBucketWindow[T]) GetLedgerRange() store.LedgerRange {
 	length := w.Len()
 	if length == 0 {
-		return LedgerRange{}
+		return store.LedgerRange{}
 	}
 	firstBucket := w.Get(0)
 	lastBucket := w.Get(length - 1)
-	return LedgerRange{
-		FirstLedger: LedgerInfo{
+	return store.LedgerRange{
+		FirstLedger: store.LedgerInfo{
 			Sequence:  firstBucket.LedgerSeq,
 			CloseTime: firstBucket.LedgerCloseTimestamp,
 		},
-		LastLedger: LedgerInfo{
+		LastLedger: store.LedgerInfo{
 			Sequence:  lastBucket.LedgerSeq,
 			CloseTime: lastBucket.LedgerCloseTimestamp,
 		},

@@ -14,7 +14,6 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
@@ -312,9 +311,9 @@ func getLedgerRange(sequences []uint32) []xdr.LedgerCloseMeta {
 }
 
 func TestGetLedgers(t *testing.T) {
-	localRange := ledgerbucketwindow.LedgerRange{
-		FirstLedger: ledgerbucketwindow.LedgerInfo{Sequence: 100},
-		LastLedger:  ledgerbucketwindow.LedgerInfo{Sequence: 200},
+	localRange := store.LedgerRange{
+		FirstLedger: store.LedgerInfo{Sequence: 100},
+		LastLedger:  store.LedgerInfo{Sequence: 200},
 	}
 
 	tests := []struct {
@@ -463,9 +462,9 @@ func TestGetLedgers_EmptyBatchGetLedgersResult(t *testing.T) {
 			defaultLimit: 5,
 		}
 
-		localRange := ledgerbucketwindow.LedgerRange{
-			FirstLedger: ledgerbucketwindow.LedgerInfo{Sequence: 100},
-			LastLedger:  ledgerbucketwindow.LedgerInfo{Sequence: 200},
+		localRange := store.LedgerRange{
+			FirstLedger: store.LedgerInfo{Sequence: 100},
+			LastLedger:  store.LedgerInfo{Sequence: 200},
 		}
 
 		mockReader.On("NewTx", ctx).Return(mockReaderTx, nil)
@@ -503,9 +502,9 @@ func TestGetLedgers_EmptyBatchGetLedgersResult(t *testing.T) {
 			defaultLimit: 5,
 		}
 
-		localRange := ledgerbucketwindow.LedgerRange{
-			FirstLedger: ledgerbucketwindow.LedgerInfo{Sequence: 100},
-			LastLedger:  ledgerbucketwindow.LedgerInfo{Sequence: 200},
+		localRange := store.LedgerRange{
+			FirstLedger: store.LedgerInfo{Sequence: 100},
+			LastLedger:  store.LedgerInfo{Sequence: 200},
 		}
 
 		mockReader.On("NewTx", ctx).Return(mockReaderTx, nil)
