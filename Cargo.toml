@@ -16,19 +16,21 @@ serde_json = "1.0"
 package = "soroban-env-host"
 version = "=27.0.0"
 
-# Shift the window: `-prev` is now the released P27 host (crates.io 27.0.0),
-# and `-curr` is the next-protocol-aware host pulled from upstream main with
-# `next` enabled, declaring P28. Using a git rev (instead of crates.io
-# 27.0.0 + `next`) lets cargo treat -prev and -curr as separate compilation
-# units — otherwise it refuses two aliases to the same crate+version.
-# Pinned to the MERGED CAP-0085 rs-soroban-env commit
-# (stellar/rs-soroban-env#1703). Bump the rev as rs-soroban-env evolves on its
-# protocol-next track.
+# Shift the window: `-prev` is the released P27 host (crates.io 27.0.0), and
+# `-curr` is the P28 host pulled from the MERGED CAP-0085 rs-soroban-env commit
+# (stellar/rs-soroban-env#1703). At that commit rs-soroban-env's baseline has
+# advanced so that the default (non-`next`) build already declares protocol 28
+# — `next` now declares protocol 29. So `-curr` must NOT enable `next`, or the
+# preflight's numeric dispatch (`proto == curr::PROTOCOL`) would see 29 and
+# reject ledgers at protocol 28. CAP-0085's XDR types are unaffected: the
+# host pins stellar-xdr with `cap_0085_executable_ref` in its own workspace,
+# independent of `next`. Using a git rev (instead of crates.io 27.0.0) lets
+# cargo treat -prev and -curr as separate compilation units. Bump the rev as
+# rs-soroban-env evolves on its protocol-next track.
 [workspace.dependencies.soroban-env-host-curr]
 package = "soroban-env-host"
 git = "https://github.com/stellar/rs-soroban-env"
 rev = "88cadc320cd2030bae2110036b361ff474776db1"
-features = ["next"]
 
 [workspace.dependencies.soroban-simulation-prev]
 package = "soroban-simulation"
