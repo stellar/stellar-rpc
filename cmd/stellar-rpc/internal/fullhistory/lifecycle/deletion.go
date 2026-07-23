@@ -8,7 +8,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
 )
 
 // Deferred deletion. A lifecycle run demotes each retired resource during a stage
@@ -37,25 +36,23 @@ func (p *pendingDeletions) add(label string, destroy func() error) {
 }
 
 // demoteHotChunk unpublishes chunk c's handle (so new admissions stop routing to
-// it) and marks it transient, then queues the destroy: close the handle and remove
-// the dir and key. A re-run finds the handle already gone (DiscardHandle returns
-// nil) and re-marks the key. router may be nil (bounded backfill / tests).
-func (p *pendingDeletions) demoteHotChunk(router HandleDiscarder, cat *catalog.Catalog, c chunk.ID) error {
-	var handle *hotchunk.DB
+// it) and marks it transient, then queues the destroy: close the handle, then
+// remove the dir and key. router may be nil (bounded backfill / tests).
+func (p *pendingDeletions) demoteHotChunk(router HandleRetirer, cat *catalog.Catalog, c chunk.ID) error {
 	if router != nil {
-		handle = router.DiscardHandle(c)
+		router.DiscardHandle(c)
 	}
 	if err := cat.PutHotTransient(c); err != nil {
 		return err
 	}
 	p.add("hot chunk "+c.String(), func() error {
-		if handle != nil {
-			// A handle still serving an in-flight reader is left for a later run:
-			// CloseIfIdle reports busy, the transient key persists, and the next
-			// discard scan re-discovers it (with the handle no longer published).
-			if ok, _ := handle.CloseIfIdle(); !ok {
-				return errReaderInFlight
-			}
+		// Close the handle before removing files. A reader still in flight leaves
+		// the transient key for a later run: CloseDiscarded reports false, the next
+		// discard scan re-collects the key, and the router keeps the handle in its
+		// closing set until it drains — so the close itself retries, not just the
+		// catalog cleanup.
+		if router != nil && !router.CloseDiscarded(c) {
+			return errReaderInFlight
 		}
 		return cat.DestroyHotChunk(c)
 	})
@@ -104,10 +101,12 @@ func (p *pendingDeletions) run(ctx context.Context, cfg Config) {
 	}
 }
 
-// HandleDiscarder is the slice of the router the discard path uses: unpublish a
-// hot handle and return it for closing. Narrowed to an interface so the lifecycle
-// does not depend on the whole serving package (a nil discarder is the bounded
-// backfill / test case). *serving.Router satisfies it.
-type HandleDiscarder interface {
-	DiscardHandle(c chunk.ID) *hotchunk.DB
+// HandleRetirer is the slice of the router the discard path uses: unpublish a hot
+// handle (DiscardHandle), then close it once idle (CloseDiscarded), retried across
+// runs until it drains. An interface so the lifecycle does not depend on the whole
+// serving package (a nil retirer is the bounded backfill / test case).
+// *serving.Router satisfies it.
+type HandleRetirer interface {
+	DiscardHandle(c chunk.ID)
+	CloseDiscarded(c chunk.ID) bool
 }

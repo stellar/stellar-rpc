@@ -37,9 +37,16 @@ type Router struct {
 	// atomically. A query loads it once at admission.
 	handles atomic.Pointer[hotHandles]
 
-	// mu serializes handle updates (publish/discard) so a lost update cannot drop
-	// a concurrently published handle.
+	// mu serializes handle updates (publish/discard/close) so a lost update cannot
+	// drop a concurrently published handle. Also guards closing.
 	mu sync.Mutex
+
+	// closing holds handles unpublished by DiscardHandle but not yet closed because
+	// a reader was still in flight. CloseDiscarded retries them across lifecycle
+	// runs until they drain; Router.Close drains them at shutdown. Keeping the
+	// handle here (not just its chunk id) is what lets the close actually retry —
+	// once unpublished, it is the only remaining reference. Guarded by mu.
+	closing map[chunk.ID]*hotchunk.DB
 }
 
 // hotHandles is an immutable map of open hot-database handles keyed by chunk,
@@ -62,7 +69,7 @@ func (h *hotHandles) clone() *hotHandles {
 // NewRouter binds a Router to the catalog and retention policy, starting with an
 // empty handle map and a zero watermark.
 func NewRouter(cat *catalog.Catalog, retention geometry.Retention) *Router {
-	r := &Router{catalog: cat, retention: retention}
+	r := &Router{catalog: cat, retention: retention, closing: map[chunk.ID]*hotchunk.DB{}}
 	r.handles.Store(&hotHandles{byChunk: map[chunk.ID]*hotchunk.DB{}})
 	return r
 }
@@ -117,25 +124,49 @@ func (r *Router) PublishHandle(c chunk.ID, db *hotchunk.DB) {
 	r.handles.Store(next)
 }
 
-// DiscardHandle removes the hot database for chunk c and publishes the new set
-// atomically, returning the removed handle (nil if absent). It only unpublishes;
-// the caller (deferred deletion) closes the returned handle later.
-func (r *Router) DiscardHandle(c chunk.ID) *hotchunk.DB {
+// DiscardHandle unpublishes chunk c's handle so new admissions stop routing to it,
+// moving it to the closing set for CloseDiscarded to close once idle. Idempotent:
+// a repeat call (the retry re-collecting the transient key) is a no-op, since the
+// handle is no longer published.
+func (r *Router) DiscardHandle(c chunk.ID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	cur := r.handles.Load()
-	db := cur.byChunk[c]
+	db, ok := cur.byChunk[c]
+	if !ok {
+		return // already discarded (in closing, or already closed)
+	}
 	next := cur.clone()
 	delete(next.byChunk, c)
 	r.handles.Store(next)
-	return db
+	r.closing[c] = db
 }
 
-// Close closes every published hot handle and clears the set, flushing each DB on
-// the way out. Called once on clean shutdown, after ingestion and lifecycle have
-// stopped, so nothing races it; handle Close is idempotent, so the live chunk
-// (also closed by the ingestion loop) double-closes harmlessly. The catalog is
-// caller-owned and is not closed here.
+// CloseDiscarded closes chunk c's discarded handle when no operation is in flight,
+// returning true once it is closed (or there was none pending). False means a
+// reader is still in flight; the caller leaves the chunk's transient key so a
+// later run re-collects it and retries — the handle stays in closing until it
+// drains. Deferred deletion calls this after the grace period, before unlinking
+// the chunk's files.
+func (r *Router) CloseDiscarded(c chunk.ID) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	db, ok := r.closing[c]
+	if !ok {
+		return true // nothing pending
+	}
+	if closed, _ := db.CloseIfIdle(); !closed {
+		return false
+	}
+	delete(r.closing, c)
+	return true
+}
+
+// Close closes every hot handle — both published and awaiting-close — and clears
+// the sets, flushing each DB on the way out. Called once on clean shutdown, after
+// ingestion and lifecycle have stopped, so nothing races it; handle Close is
+// idempotent, so the live chunk (also closed by the ingestion loop) double-closes
+// harmlessly. The catalog is caller-owned and is not closed here.
 func (r *Router) Close() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -143,6 +174,10 @@ func (r *Router) Close() {
 		_ = db.Close()
 	}
 	r.handles.Store(&hotHandles{byChunk: map[chunk.ID]*hotchunk.DB{}})
+	for c, db := range r.closing {
+		_ = db.Close()
+		delete(r.closing, c)
+	}
 }
 
 // Admission is one query's consistent view of serving state, held for the
