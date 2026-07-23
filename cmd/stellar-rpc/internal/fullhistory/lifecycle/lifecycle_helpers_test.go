@@ -166,10 +166,11 @@ func assertQuiescent(t *testing.T, cfg Config, cat *catalog.Catalog, through uin
 		perr := backfill.RunBackfill(context.Background(), cfg.ExecConfig, floor, lastChunk)
 		require.NoError(t, perr, "re-running backfill schedules no work at quiescence")
 	}
-	dops, err := eligibleDiscardOps(cat, floor, lastChunk)
+	dchunks, err := eligibleDiscardChunks(cat, floor, lastChunk)
 	require.NoError(t, err)
-	assert.Empty(t, dops, "re-scan finds no discard work at quiescence")
-	pops, _, err := eligiblePruneOps(cat, floor)
+	assert.Empty(t, dchunks, "re-scan finds no discard work at quiescence")
+	idxCovs, chunkRefs, err := eligiblePruneTargets(cat, floor)
 	require.NoError(t, err)
-	assert.Empty(t, pops, "re-scan finds no prune work at quiescence")
+	assert.Empty(t, idxCovs, "re-scan finds no index prune work at quiescence")
+	assert.Empty(t, chunkRefs, "re-scan finds no chunk prune work at quiescence")
 }

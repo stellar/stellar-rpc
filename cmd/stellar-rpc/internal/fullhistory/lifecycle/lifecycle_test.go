@@ -8,10 +8,38 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
+
+// TestPendingDeletions_ColdArtifactDeferred pins that a pruned cold artifact is
+// demoted (marked pruning) during the stage but its file survives until the
+// end-of-run destroy — the design's "demote now, delete at end of run" split.
+func TestPendingDeletions_ColdArtifactDeferred(t *testing.T) {
+	cat, _ := smallTxHashIndexCatalog(t, 1)
+	c := chunk.ID(0)
+	freezeKinds(t, cat, c, geometry.KindLedgers)
+	writeArtifact(t, cat.Layout().LedgerPackPath(c))
+	ref := catalog.ArtifactRef{Chunk: c, Kind: geometry.KindLedgers, State: geometry.StateFrozen}
+
+	var pending pendingDeletions
+	require.NoError(t, pending.demoteChunkArtifacts(cat, []catalog.ArtifactRef{ref}))
+
+	// After demote: key is pruning, but the file is still on disk (destroy deferred).
+	st, err := cat.State(c, geometry.KindLedgers)
+	require.NoError(t, err)
+	assert.Equal(t, geometry.StatePruning, st, "demote marks pruning")
+	assert.FileExists(t, cat.Layout().LedgerPackPath(c), "file survives until end-of-run destroy")
+
+	// End of run: file and key are gone.
+	pending.run(context.Background(), lifecycleTestConfig(t, cat, 0))
+	st, err = cat.State(c, geometry.KindLedgers)
+	require.NoError(t, err)
+	assert.Equal(t, geometry.State(""), st, "key destroyed at end of run")
+	assert.NoFileExists(t, cat.Layout().LedgerPackPath(c), "file destroyed at end of run")
+}
 
 // tickMetricsRecorder counts the two gauges the lifecycle tick could touch, to pin
 // which one it owns. Embeds NopMetrics for every other signal (Discard/Prune/etc.).
@@ -141,9 +169,9 @@ func TestRunLifecycleTick_DiscardGatedOnIndexCoverage(t *testing.T) {
 	// txhash is frozen, ledgers/events frozen, but the window has no FROZEN coverage
 	// yet => indexCovers(0) is false => NOT discarded (still needed for lookups via
 	// its .bin/hot DB until the index folds it in).
-	ops, err := eligibleDiscardOps(cat, floorFor(t, cfg, lastChunk.LastLedger()), lastChunk)
+	chunks, err := eligibleDiscardChunks(cat, floorFor(t, cfg, lastChunk.LastLedger()), lastChunk)
 	require.NoError(t, err)
-	require.Empty(t, ops, "no index coverage yet: the hot DB stays")
+	require.Empty(t, chunks, "no index coverage yet: the hot DB stays")
 
 	// Now finalize the window's index so it covers chunk 0 (terminal needs chunk
 	// 1's .bin too; build a non-terminal-but-covering frozen coverage [0,0]).
@@ -152,10 +180,14 @@ func TestRunLifecycleTick_DiscardGatedOnIndexCoverage(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, covered)
 
-	ops, err = eligibleDiscardOps(cat, floorFor(t, cfg, lastChunk.LastLedger()), lastChunk)
+	chunks, err = eligibleDiscardChunks(cat, floorFor(t, cfg, lastChunk.LastLedger()), lastChunk)
 	require.NoError(t, err)
-	require.Len(t, ops, 1, "covered + nothing pending => discard eligible")
-	require.NoError(t, ops[0]())
+	require.Equal(t, []chunk.ID{0}, chunks, "covered + nothing pending => discard eligible")
+
+	// Demote then destroy, as a run does across its discard stage and its end.
+	var pending pendingDeletions
+	require.NoError(t, pending.demoteHotChunk(cfg.Router, cat, 0))
+	pending.run(context.Background(), cfg)
 
 	has, err := hotKeyExists(cat, 0)
 	require.NoError(t, err)
@@ -219,11 +251,11 @@ func TestRunLifecycleTick_PrunesTransientIndexDebris(t *testing.T) {
 	require.NoError(t, err)
 
 	// Nothing durable and no hot keys ⇒ through sits at the pre-genesis sentinel.
-	ops, weights, err := eligiblePruneOps(cat, floorFor(t, cfg, geometry.PreGenesisLedger))
+	idxCovs, chunkRefs, err := eligiblePruneTargets(cat, floorFor(t, cfg, geometry.PreGenesisLedger))
 	require.NoError(t, err)
-	require.Len(t, ops, 1, "the freezing debris is swept")
-	require.Equal(t, []int{1}, weights, "one index artifact swept")
-	require.NoError(t, ops[0]())
+	require.Len(t, idxCovs, 1, "the freezing debris is swept")
+	require.Empty(t, chunkRefs, "no chunk-family debris")
+	require.NoError(t, cat.SweepTxHashIndexKey(idxCovs[0]))
 
 	covs, err := cat.AllTxHashIndexKeys()
 	require.NoError(t, err)

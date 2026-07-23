@@ -49,6 +49,15 @@ func Open(
 // Close releases the backing store. Idempotent.
 func (c *Catalog) Close() error { return c.store.Close() }
 
+// NewSnapshot pins a repeatable-read view of the catalog for a query's lifetime;
+// the query reads routing state through the *AsOf accessors. The caller MUST
+// release it via ReleaseSnapshot when done, including on error paths — a leaked
+// snapshot is never reclaimed until the store closes.
+func (c *Catalog) NewSnapshot() (*rocksdb.Snapshot, error) { return c.store.NewSnapshot() }
+
+// ReleaseSnapshot releases a snapshot acquired from NewSnapshot. Nil-safe.
+func (c *Catalog) ReleaseSnapshot(snap *rocksdb.Snapshot) { c.store.ReleaseSnapshot(snap) }
+
 // Logger returns the logger the catalog was opened with — the one derived
 // reads (the last-committed refinement's read-only hot-DB open) reuse.
 func (c *Catalog) Logger() *supportlog.Entry { return c.logger }
@@ -64,11 +73,12 @@ func (c *Catalog) TxHashIndexLayout() geometry.TxHashIndexLayout { return c.txha
 // State returns the lifecycle State of a per-chunk artifact key, or the empty
 // State when the key is absent — neither file nor in-progress write exists.
 func (c *Catalog) State(chunkID chunk.ID, kind geometry.Kind) (geometry.State, error) {
-	v, ok, err := c.get(geometry.ChunkKey(chunkID, kind))
-	if err != nil || !ok {
-		return "", err
-	}
-	return geometry.State(v), nil
+	return decodeState(c.get(geometry.ChunkKey(chunkID, kind)))
+}
+
+// StateAsOf is State read through an admission snapshot.
+func (c *Catalog) StateAsOf(snap *rocksdb.Snapshot, chunkID chunk.ID, kind geometry.Kind) (geometry.State, error) {
+	return decodeState(c.getAsOf(snap, geometry.ChunkKey(chunkID, kind)))
 }
 
 // HotState returns the HotState of a chunk's hot-DB key, or empty (key absent).
@@ -78,7 +88,25 @@ func (c *Catalog) State(chunkID chunk.ID, kind geometry.Kind) (geometry.State, e
 // openHotDBForChunk picks its recovery action from it. Only the discard scan is
 // value-blind (any state means "a hot dir may exist, sweep it").
 func (c *Catalog) HotState(chunkID chunk.ID) (geometry.HotState, error) {
-	v, ok, err := c.get(geometry.HotChunkKey(chunkID))
+	return decodeHotState(c.get(geometry.HotChunkKey(chunkID)))
+}
+
+// HotStateAsOf is HotState read through an admission snapshot.
+func (c *Catalog) HotStateAsOf(snap *rocksdb.Snapshot, chunkID chunk.ID) (geometry.HotState, error) {
+	return decodeHotState(c.getAsOf(snap, geometry.HotChunkKey(chunkID)))
+}
+
+// decodeState / decodeHotState turn a raw KV read into a typed lifecycle state,
+// mapping a clean miss (ok == false) to the empty state so live and snapshot
+// reads share one decode.
+func decodeState(v string, ok bool, err error) (geometry.State, error) {
+	if err != nil || !ok {
+		return "", err
+	}
+	return geometry.State(v), nil
+}
+
+func decodeHotState(v string, ok bool, err error) (geometry.HotState, error) {
 	if err != nil || !ok {
 		return "", err
 	}
@@ -111,25 +139,39 @@ func (c *Catalog) ChunkArtifactKeys() ([]ArtifactRef, error) {
 // TxHashIndexKeys returns index w's coverage keys with their State, sorted by key —
 // the frozen one plus transient debris.
 func (c *Catalog) TxHashIndexKeys(w geometry.TxHashIndexID) ([]geometry.TxHashIndexCoverage, error) {
-	return c.txhashIndexKeysByPrefix(geometry.TxHashIndexPrefixFor(w))
+	return c.txhashIndexKeysByPrefix(nil, geometry.TxHashIndexPrefixFor(w))
+}
+
+// TxHashIndexKeysAsOf is TxHashIndexKeys read through an admission snapshot.
+func (c *Catalog) TxHashIndexKeysAsOf(
+	snap *rocksdb.Snapshot, w geometry.TxHashIndexID,
+) ([]geometry.TxHashIndexCoverage, error) {
+	return c.txhashIndexKeysByPrefix(snap, geometry.TxHashIndexPrefixFor(w))
 }
 
 // HotChunkKeys returns every hot-DB chunk id (value-blind), sorted ascending.
 // The highest is the live chunk — the ingestion/lifecycle partition boundary.
 func (c *Catalog) HotChunkKeys() ([]chunk.ID, error) {
-	return c.hotChunkKeysWith(nil)
+	return c.hotChunkKeysWith(nil, nil)
 }
 
 // ReadyHotChunkKeys returns only the chunks whose hot-DB key is "ready", sorted
 // ascending. The last-committed ledger counts only these — a "transient" key never advances
 // the bound, which lets recovery demote any hot key without disturbing it.
 func (c *Catalog) ReadyHotChunkKeys() ([]chunk.ID, error) {
-	return c.hotChunkKeysWith(func(s geometry.HotState) bool { return s == geometry.HotReady })
+	return c.hotChunkKeysWith(nil, isReadyHot)
 }
+
+// ReadyHotChunkKeysAsOf is ReadyHotChunkKeys read through an admission snapshot.
+func (c *Catalog) ReadyHotChunkKeysAsOf(snap *rocksdb.Snapshot) ([]chunk.ID, error) {
+	return c.hotChunkKeysWith(snap, isReadyHot)
+}
+
+func isReadyHot(s geometry.HotState) bool { return s == geometry.HotReady }
 
 // AllTxHashIndexKeys is TxHashIndexKeys across all indexes.
 func (c *Catalog) AllTxHashIndexKeys() ([]geometry.TxHashIndexCoverage, error) {
-	return c.txhashIndexKeysByPrefix(geometry.TxHashIndexPrefix)
+	return c.txhashIndexKeysByPrefix(nil, geometry.TxHashIndexPrefix)
 }
 
 // FrozenTxHashIndex returns the index's UNIQUE "frozen" coverage — the key
@@ -137,28 +179,14 @@ func (c *Catalog) AllTxHashIndexKeys() ([]geometry.TxHashIndexCoverage, error) {
 // yet. It asserts INV-2 (at most one frozen coverage per index at any moment)
 // by erroring if it observes two — a detectable bug, not a tie-break to resolve.
 func (c *Catalog) FrozenTxHashIndex(w geometry.TxHashIndexID) (geometry.TxHashIndexCoverage, bool, error) {
-	covs, err := c.TxHashIndexKeys(w)
-	if err != nil {
-		return geometry.TxHashIndexCoverage{}, false, err
-	}
-	var (
-		frozen geometry.TxHashIndexCoverage
-		found  bool
-	)
-	for _, candidate := range covs {
-		if candidate.State != geometry.StateFrozen {
-			continue
-		}
-		if found {
-			return geometry.TxHashIndexCoverage{}, false, fmt.Errorf(
-				"index %s has two frozen coverages (%s and %s) — "+
-					"uniqueness invariant violated",
-				w, frozen.Key, candidate.Key,
-			)
-		}
-		frozen, found = candidate, true
-	}
-	return frozen, found, nil
+	return c.frozenTxHashIndex(nil, w)
+}
+
+// FrozenTxHashIndexAsOf is FrozenTxHashIndex read through an admission snapshot.
+func (c *Catalog) FrozenTxHashIndexAsOf(
+	snap *rocksdb.Snapshot, w geometry.TxHashIndexID,
+) (geometry.TxHashIndexCoverage, bool, error) {
+	return c.frozenTxHashIndex(snap, w)
 }
 
 // FrozenIndexCoversRange reports whether index w's UNIQUE frozen coverage spans
@@ -223,11 +251,41 @@ func (c *Catalog) has(key string) (bool, error) {
 	return ok, err
 }
 
+// frozenTxHashIndex is the shared body for FrozenTxHashIndex and its snapshot
+// twin. It asserts INV-2 (at most one frozen coverage per index) by erroring on a
+// second frozen coverage — a detectable bug, not a tie-break to resolve.
+func (c *Catalog) frozenTxHashIndex(
+	snap *rocksdb.Snapshot, w geometry.TxHashIndexID,
+) (geometry.TxHashIndexCoverage, bool, error) {
+	covs, err := c.txhashIndexKeysByPrefix(snap, geometry.TxHashIndexPrefixFor(w))
+	if err != nil {
+		return geometry.TxHashIndexCoverage{}, false, err
+	}
+	var (
+		frozen geometry.TxHashIndexCoverage
+		found  bool
+	)
+	for _, candidate := range covs {
+		if candidate.State != geometry.StateFrozen {
+			continue
+		}
+		if found {
+			return geometry.TxHashIndexCoverage{}, false, fmt.Errorf(
+				"index %s has two frozen coverages (%s and %s) — "+
+					"uniqueness invariant violated",
+				w, frozen.Key, candidate.Key,
+			)
+		}
+		frozen, found = candidate, true
+	}
+	return frozen, found, nil
+}
+
 // hotChunkKeysWith returns the chunks whose hot-DB key matches keep, sorted
-// ascending. A nil keep matches every value (value-blind).
-func (c *Catalog) hotChunkKeysWith(keep func(geometry.HotState) bool) ([]chunk.ID, error) {
+// ascending. A nil keep matches every value (value-blind); a nil snap reads live.
+func (c *Catalog) hotChunkKeysWith(snap *rocksdb.Snapshot, keep func(geometry.HotState) bool) ([]chunk.ID, error) {
 	var ids []chunk.ID
-	for e, err := range c.prefixScan(geometry.HotChunkPrefix) {
+	for e, err := range c.prefixScanAsOf(snap, geometry.HotChunkPrefix) {
 		if err != nil {
 			return nil, err
 		}
@@ -246,10 +304,12 @@ func (c *Catalog) hotChunkKeysWith(keep func(geometry.HotState) bool) ([]chunk.I
 }
 
 // txhashIndexKeysByPrefix scans coverage keys under prefix, attaching each scanned
-// value as State.
-func (c *Catalog) txhashIndexKeysByPrefix(prefix string) ([]geometry.TxHashIndexCoverage, error) {
+// value as State. A nil snap reads live.
+func (c *Catalog) txhashIndexKeysByPrefix(
+	snap *rocksdb.Snapshot, prefix string,
+) ([]geometry.TxHashIndexCoverage, error) {
 	var covs []geometry.TxHashIndexCoverage
-	for e, err := range c.prefixScan(prefix) {
+	for e, err := range c.prefixScanAsOf(snap, prefix) {
 		if err != nil {
 			return nil, err
 		}

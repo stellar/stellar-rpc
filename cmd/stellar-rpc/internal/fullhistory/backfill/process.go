@@ -35,6 +35,13 @@ type ProcessConfig struct {
 	// frontier Tip, so the coverage wait needs no separate waiter. May be nil when
 	// no bulk source is configured; backfillSource errors if a chunk then needs it.
 	Backend Backend
+
+	// HotHandle returns the router's shared handle for a chunk, if one is published.
+	// The freeze reads a completed chunk through it rather than reopening the DB:
+	// the writer is still open and compacting, so a separate reader could race a
+	// compaction and read a just-deleted file. Nil during the startup catch-up
+	// (before ingestion starts, so no writer is open), where a read-only reopen is safe.
+	HotHandle func(chunk.ID) (*hotchunk.DB, bool)
 }
 
 func (cfg ProcessConfig) validate() error {
@@ -201,6 +208,15 @@ func backfillSource(
 func resolveHotSource(
 	chunkID chunk.ID, cfg ProcessConfig,
 ) (ledgerbackend.LedgerStream, func() error, bool, error) {
+	// Prefer the router's shared handle when it holds this chunk: the completed
+	// chunk's writer is still open under the live daemon, so a second read-only open
+	// would race its ledger-CF background compaction. Read through the one handle,
+	// and never close it — the router owns it.
+	if cfg.HotHandle != nil {
+		if db, ok := cfg.HotHandle(chunkID); ok {
+			return db.Source(), func() error { return nil }, true, nil
+		}
+	}
 	hotState, err := cfg.Catalog.HotState(chunkID)
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("read hot state chunk %s: %w", chunkID, err)

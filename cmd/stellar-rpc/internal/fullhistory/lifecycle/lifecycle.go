@@ -37,6 +37,17 @@ type Config struct {
 	// earliest_ledger pin.
 	Retention geometry.Retention
 
+	// Router unpublishes a discarded hot chunk's handle and closes it once idle so
+	// deferred deletion can retire it (see deletion.go). Nil in the bounded
+	// backfill / test case, where no handle is published.
+	Router HandleRetirer
+
+	// Grace is the deferred-deletion wait before destroying demoted resources.
+	// Unset (<= 0) takes defaultGrace via WithLifecycleDefaults; tests override it
+	// small. TODO(#772): derive from the read server's request deadline
+	// (T = max request timeout + margin) and boot-validate T exceeds that timeout.
+	Grace time.Duration
+
 	// opRetryAttempts / opRetryBackoff bound the per-op retry the discard/prune
 	// sweeps use (see runOps). Not config-wired: production always runs the
 	// WithLifecycleDefaults constants, so these are unexported internals (a test
@@ -49,6 +60,11 @@ type Config struct {
 const (
 	defaultOpRetryAttempts = 3
 	defaultOpRetryBackoff  = 5 * time.Second
+	// defaultGrace is the placeholder deferred-deletion wait until the read server
+	// derives it from the request deadline (#772). Chosen to comfortably outlast
+	// any plausible request; the wait falls once per run, minutes against runs
+	// hours apart.
+	defaultGrace = 5 * time.Minute
 )
 
 // WithLifecycleDefaults returns a copy with the embedded ExecConfig defaults and
@@ -60,6 +76,9 @@ func (cfg Config) WithLifecycleDefaults() Config {
 	}
 	if cfg.opRetryBackoff <= 0 {
 		cfg.opRetryBackoff = defaultOpRetryBackoff
+	}
+	if cfg.Grace <= 0 {
+		cfg.Grace = defaultGrace
 	}
 	return cfg
 }
@@ -131,19 +150,25 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 		}
 	}
 
-	// Stage 2 — discard scan.
+	// Stage 2 — discard scan. Demote each eligible hot chunk (unpublish its handle,
+	// mark it transient) and collect it in pending for destruction at end of run.
+	var pending pendingDeletions
 	discardStart := time.Now()
-	discardOps, err := eligibleDiscardOps(cat, floor, lastChunk)
+	discardChunks, err := eligibleDiscardChunks(cat, floor, lastChunk)
 	if err != nil {
-		return fmt.Errorf("eligible discard ops: %w", err)
+		return fmt.Errorf("eligible discard chunks: %w", err)
 	}
-	// Meter the DBs actually retired (one op per DB) BEFORE the error check, so a
-	// mid-scan failure still counts what completed rather than losing it: the retired
-	// DBs won't re-list next scan.
-	discarded, err := runOps(ctx, cfg, discardOps)
+	demoteOps := make([]func() error, len(discardChunks))
+	for i, c := range discardChunks {
+		demoteOps[i] = func() error { return pending.demoteHotChunk(cfg.Router, cat, c) }
+	}
+	// Meter the DBs actually demoted (one op per DB) BEFORE the error check, so a
+	// mid-scan failure still counts what completed rather than losing it: the demoted
+	// DBs carry a transient key that won't re-list as ready next scan.
+	discarded, err := runOps(ctx, cfg, demoteOps)
 	metrics.Discard(discarded, time.Since(discardStart))
 	if err != nil {
-		return fmt.Errorf("discard op: %w", err)
+		return fmt.Errorf("discard demote: %w", err)
 	}
 	if discarded > 0 {
 		logger.WithField("discarded", discarded).Info("lifecycle discard stage complete")
@@ -156,15 +181,26 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	}
 	metrics.LiveHotChunks(len(hot))
 
-	// Stage 3 — prune scan.
+	// Stage 3 — prune scan. Demote each eligible cold artifact (mark it pruning) and
+	// defer its file/key destroy to end of run, alongside the discarded hot chunks.
 	pruneStart := time.Now()
-	pruneOps, pruneWeights, err := eligiblePruneOps(cat, floor)
+	idxCovs, chunkRefs, err := eligiblePruneTargets(cat, floor)
 	if err != nil {
-		return fmt.Errorf("eligible prune ops: %w", err)
+		return fmt.Errorf("eligible prune targets: %w", err)
 	}
-	// Sum the artifacts swept by the ops that actually completed (each op carries its
-	// own artifact weight — the chunk family collapses many artifacts into one op).
-	// Metered BEFORE the error check so a mid-sweep failure keeps the completed count.
+	// One demote op per index coverage, one batched op for the chunk family; each
+	// op carries its artifact weight so the meter sums only the ops that ran.
+	pruneOps := make([]func() error, 0, len(idxCovs)+1)
+	pruneWeights := make([]int, 0, len(idxCovs)+1)
+	for _, cov := range idxCovs {
+		pruneOps = append(pruneOps, func() error { return pending.demoteTxHashIndex(cat, cov) })
+		pruneWeights = append(pruneWeights, 1)
+	}
+	if len(chunkRefs) > 0 {
+		pruneOps = append(pruneOps, func() error { return pending.demoteChunkArtifacts(cat, chunkRefs) })
+		pruneWeights = append(pruneWeights, len(chunkRefs))
+	}
+	// Metered BEFORE the error check so a mid-scan failure keeps the completed count.
 	completed, err := runOps(ctx, cfg, pruneOps)
 	prunedArtifacts := 0
 	for _, w := range pruneWeights[:completed] {
@@ -172,11 +208,15 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	}
 	metrics.Prune(prunedArtifacts, time.Since(pruneStart))
 	if err != nil {
-		return fmt.Errorf("prune op: %w", err)
+		return fmt.Errorf("prune demote: %w", err)
 	}
 	if prunedArtifacts > 0 {
 		logger.WithField("pruned", prunedArtifacts).Info("lifecycle prune stage complete")
 	}
+
+	// End of run: destroy everything demoted this run — discarded hot handles and
+	// pruned cold files — after one grace wait (design: wait once, then delete).
+	pending.run(ctx, cfg)
 	return nil
 }
 

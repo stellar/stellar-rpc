@@ -20,27 +20,41 @@ import (
 // sweep re-runs. Deleting the key first would orphan a file with no key — the
 // one class this design cannot find.
 
-// SweepChunkArtifacts deletes the files and keys for a batch of per-chunk refs.
-// Still-"frozen" refs are demoted to "pruning" first so no unlink happens under
-// a frozen key; "freezing"/"pruning" refs unlink directly. The batch shares one
-// demote, one fsync pass, and one key-delete across all refs.
+// SweepChunkArtifacts deletes the files and keys for a batch of per-chunk refs,
+// as one immediate demote-then-destroy. Deferred deletion instead calls
+// DemoteChunkArtifacts during a stage and DestroyChunkArtifacts at end of run.
 func (c *Catalog) SweepChunkArtifacts(refs []ArtifactRef) error {
+	if err := c.DemoteChunkArtifacts(refs); err != nil {
+		return err
+	}
+	return c.DestroyChunkArtifacts(refs)
+}
+
+// DemoteChunkArtifacts demotes every still-"frozen" ref in the batch to "pruning"
+// (in one write), so no unlink later happens under a frozen key. "freezing"/
+// "pruning" refs are already past frozen and left as-is. Idempotent.
+func (c *Catalog) DemoteChunkArtifacts(refs []ArtifactRef) error {
 	if len(refs) == 0 {
 		return nil
 	}
-
-	// Demote first — never unlink under a "frozen" key.
-	if err := c.batch(func(w batchWriter) error {
+	return c.batch(func(w batchWriter) error {
 		for _, ref := range refs {
 			if ref.State == geometry.StateFrozen {
 				w.Put(ref.Key(), string(geometry.StatePruning))
 			}
 		}
 		return nil
-	}); err != nil {
-		return err
-	}
+	})
+}
 
+// DestroyChunkArtifacts unlinks the files and deletes the keys for a batch of
+// refs the caller has already demoted. The batch shares one fsync pass and one
+// key-delete; unlinks are made durable BEFORE the keys, so the key outlives the
+// file and a crash re-runs the destroy. Idempotent: absent files/keys are no-ops.
+func (c *Catalog) DestroyChunkArtifacts(refs []ArtifactRef) error {
+	if len(refs) == 0 {
+		return nil
+	}
 	// Unlink every file (idempotent), collecting parents for the barrier.
 	var paths []string
 	for _, ref := range refs {
@@ -54,7 +68,6 @@ func (c *Catalog) SweepChunkArtifacts(refs []ArtifactRef) error {
 	if err := durable.FsyncParentDirs(paths); err != nil { // unlinks durable BEFORE keys
 		return err
 	}
-
 	// Delete the keys — only now that the unlinks are durable.
 	return c.batch(func(w batchWriter) error {
 		for _, ref := range refs {
@@ -64,18 +77,31 @@ func (c *Catalog) SweepChunkArtifacts(refs []ArtifactRef) error {
 	})
 }
 
-// SweepTxHashIndexKey deletes one index coverage's file and key, in the same order as
-// SweepChunkArtifacts. A "frozen" coverage is demoted first; "freezing" debris
-// (a crashed attempt, never salvaged) and "pruning" coverages take the same
-// path from here. cov.State is the caller's observation; the one-writer-per-key
-// invariant (see catalog_protocol.go) means no concurrent writer can have changed
-// the durable value under it.
+// SweepTxHashIndexKey deletes one index coverage's file and key, as one immediate
+// demote-then-destroy. Deferred deletion instead calls DemoteTxHashIndexKey during
+// a stage and DestroyTxHashIndexKey at end of run.
 func (c *Catalog) SweepTxHashIndexKey(cov geometry.TxHashIndexCoverage) error {
-	if cov.State == geometry.StateFrozen { // never unlink under a "frozen" key
-		if err := c.put(cov.Key, string(geometry.StatePruning)); err != nil {
-			return err
-		}
+	if err := c.DemoteTxHashIndexKey(cov); err != nil {
+		return err
 	}
+	return c.DestroyTxHashIndexKey(cov)
+}
+
+// DemoteTxHashIndexKey demotes a "frozen" coverage to "pruning" so no unlink later
+// happens under a frozen key; "freezing"/"pruning" debris is left as-is. cov.State
+// is the caller's observation; the one-writer-per-key invariant (catalog_protocol.go)
+// means no concurrent writer changed the durable value under it. Idempotent.
+func (c *Catalog) DemoteTxHashIndexKey(cov geometry.TxHashIndexCoverage) error {
+	if cov.State == geometry.StateFrozen {
+		return c.put(cov.Key, string(geometry.StatePruning))
+	}
+	return nil
+}
+
+// DestroyTxHashIndexKey unlinks one coverage's file and deletes its key, for a
+// coverage the caller has already demoted. Unlink is made durable BEFORE the key
+// delete, so the key outlives the file and a crash re-runs. Idempotent.
+func (c *Catalog) DestroyTxHashIndexKey(cov geometry.TxHashIndexCoverage) error {
 	path := c.layout.TxHashIndexFilePath(cov)
 	if err := durable.DeleteFileIfExists(path); err != nil {
 		return err
@@ -108,12 +134,20 @@ func (c *Catalog) DiscardHotChunk(chunkID chunk.ID) error {
 	if err := c.PutHotTransient(chunkID); err != nil {
 		return fmt.Errorf("mark hot transient chunk %s: %w", chunkID, err)
 	}
+	return c.DestroyHotChunk(chunkID)
+}
+
+// DestroyHotChunk removes a hot chunk's dir and key — the destroy half of the
+// discard, split out for deferred deletion (which demotes during a stage, then
+// destroys at end of run). The caller MUST have marked the chunk transient and
+// closed its hot handle. rmdir is made durable BEFORE the key delete, so the key
+// outlives the dir and a crash re-runs the destroy rather than leaving a key-less
+// dir. Idempotent: an absent dir/key is a no-op.
+func (c *Catalog) DestroyHotChunk(chunkID chunk.ID) error {
 	dir := c.layout.HotChunkPath(chunkID)
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("rmdir hot dir %s: %w", dir, err)
 	}
-	// rmdir durable BEFORE the key delete: the key outlives the dir, so a crash
-	// re-runs the discard rather than leaving a key-less dir.
 	if err := durable.FsyncDir(filepath.Dir(dir)); err != nil {
 		return fmt.Errorf("fsync hot parent dir %s: %w", filepath.Dir(dir), err)
 	}

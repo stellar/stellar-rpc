@@ -68,6 +68,11 @@ type daemonOptions struct {
 	// fixed geometry.ChunksPerTxhashIndex. Tests set it to 1 so a single chunk's
 	// freeze is a terminal index (exercising the index rebuild + prune path cheaply).
 	chunksPerTxhashIndex uint32
+
+	// lifecycleGrace overrides the deferred-deletion wait (test-only). 0 ⇒ the
+	// lifecycle's defaultGrace. Tests that drive discard/prune set it small so the
+	// end-of-run destroy does not park for minutes.
+	lifecycleGrace time.Duration
 }
 
 const defaultRestartBackoff = 5 * time.Second
@@ -182,6 +187,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// --- Assemble the StartConfig and run the supervised run loop. ---
 	start := startConfig(
 		cfg, cat, logger, backend, core, serveReads, metrics, sink, hs, retention)
+	start.lifecycleGrace = opts.lifecycleGrace
 
 	backoff := opts.RestartBackoff
 	if backoff <= 0 {

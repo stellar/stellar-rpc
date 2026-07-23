@@ -1,0 +1,93 @@
+package lifecycle
+
+import (
+	"fmt"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
+)
+
+// StartupSweep destroys resources a crashed run left demoted, before the daemon
+// resumes serving. The catalog demotions are the durable work list: a "transient"
+// hot key or a "pruning" cold key marks a deletion that never finished. The destroy
+// is immediate (no grace wait): it runs before any query is admitted, so nothing
+// holds a handle to what it removes.
+//
+// TODO(#772): supervise() calls run() — and thus StartupSweep — on each supervised
+// in-process restart, not only at process start. Today no read server exists, so
+// no query can span a restart; once one does, confirm an in-flight query from the
+// prior run cannot reach a resource this sweep destroys immediately.
+//
+// It skips chunks at or above liveChunk: a "transient" key there is a mid-CREATE
+// leftover (openHotDBForChunk recreates it), not a mid-discard one. Runs before
+// the lifecycle goroutine and before any query is admitted.
+func StartupSweep(cat *catalog.Catalog, liveChunk chunk.ID) error {
+	if err := sweepTransientHotChunks(cat, liveChunk); err != nil {
+		return err
+	}
+	if err := sweepIndexDebris(cat); err != nil {
+		return err
+	}
+	return sweepPruningChunkArtifacts(cat)
+}
+
+// sweepTransientHotChunks discards the "transient" hot chunks below liveChunk —
+// mid-discard leftovers a crashed run never finished.
+func sweepTransientHotChunks(cat *catalog.Catalog, liveChunk chunk.ID) error {
+	hot, err := cat.HotChunkKeys()
+	if err != nil {
+		return fmt.Errorf("startup sweep: read hot keys: %w", err)
+	}
+	for _, c := range hot {
+		if c >= liveChunk {
+			continue
+		}
+		st, err := cat.HotState(c)
+		if err != nil {
+			return fmt.Errorf("startup sweep: read hot state %s: %w", c, err)
+		}
+		if st == geometry.HotTransient {
+			if err := cat.DiscardHotChunk(c); err != nil {
+				return fmt.Errorf("startup sweep: discard hot %s: %w", c, err)
+			}
+		}
+	}
+	return nil
+}
+
+// sweepIndexDebris sweeps "freezing"/"pruning" index coverages — a crashed build
+// or an unfinished demotion.
+func sweepIndexDebris(cat *catalog.Catalog) error {
+	idx, err := cat.AllTxHashIndexKeys()
+	if err != nil {
+		return fmt.Errorf("startup sweep: read index keys: %w", err)
+	}
+	for _, cov := range idx {
+		if cov.State == geometry.StateFreezing || cov.State == geometry.StatePruning {
+			if err := cat.SweepTxHashIndexKey(cov); err != nil {
+				return fmt.Errorf("startup sweep: sweep index %s: %w", cov.Key, err)
+			}
+		}
+	}
+	return nil
+}
+
+// sweepPruningChunkArtifacts sweeps the "pruning" per-chunk artifacts a crashed
+// prune left behind, in one batch.
+func sweepPruningChunkArtifacts(cat *catalog.Catalog) error {
+	refs, err := cat.ChunkArtifactKeys()
+	if err != nil {
+		return fmt.Errorf("startup sweep: read chunk keys: %w", err)
+	}
+	var pruning []catalog.ArtifactRef
+	for _, ref := range refs {
+		if ref.State == geometry.StatePruning {
+			pruning = append(pruning, ref)
+		}
+	}
+	if err := cat.SweepChunkArtifacts(pruning); err != nil {
+		return fmt.Errorf("startup sweep: sweep chunk artifacts: %w", err)
+	}
+	return nil
+}

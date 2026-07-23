@@ -14,6 +14,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/serving"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
@@ -119,11 +120,46 @@ func run(ctx context.Context, cfg StartConfig) error {
 		boundary.Publish(chunk.ID(seed)) //nolint:gosec // seed >= 0
 	}
 
+	// The serving router holds the query watermark, advanced by the ingestion loop
+	// below. It also owns the shared hot-database handles: the loop publishes them,
+	// the freeze reads completed chunks through them (HotHandle), and the lifecycle
+	// unpublishes them at discard (Router) for deferred deletion to close. It will
+	// back the read server in later work; for now nothing reads it. Constructed per
+	// run — no query survives a restart, so a fresh router each run is fine.
+	router := serving.NewRouter(cat, cfg.Retention)
+	cfg.Exec.Process.HotHandle = router.Handle
+	// Close the router's hot handles on the way out (after g.Wait joins the loops
+	// below), flushing each completed chunk the router still holds. The live
+	// chunk is also closed by the ingestion loop; handle Close is idempotent.
+	defer router.Close()
+
+	// Before serving: destroy any resources a crashed run left demoted, then open
+	// and publish the handles for ready hot chunks below the live one (completed
+	// chunks a prior run had not yet discarded). Both complete before the loops start.
+	liveChunk := chunk.IDFromLedger(resumeLedger)
+	if err := lifecycle.StartupSweep(cat, liveChunk); err != nil {
+		return fmt.Errorf("startup sweep: %w", err)
+	}
+	if err := router.PublishReadyHandles(liveChunk, logger); err != nil {
+		return fmt.Errorf("startup publish ready handles: %w", err)
+	}
+
+	// Seed the router's live state so a query admitted before the ingestion loop's
+	// first commit is correct: publish the already-open resume DB as the live
+	// chunk's handle (PublishReadyHandles skips the live chunk), and set the
+	// watermark to the last committed ledger — it would otherwise read 0, making the
+	// admitted range invalid on a restart with data. The loop republishes the handle
+	// (idempotent) and advances the watermark from here.
+	router.PublishHandle(liveChunk, hotDB)
+	router.SetWatermark(lastCommitted)
+
 	// The lifecycle config draws on the SAME Exec wiring backfill uses, so the two
 	// share one catalog/pool by construction.
 	lifecycleCfg := lifecycle.Config{
 		ExecConfig: cfg.Exec,
 		Retention:  cfg.Retention,
+		Router:     router,
+		Grace:      cfg.lifecycleGrace,
 	}.WithLifecycleDefaults()
 
 	// Begin serving reads (injected) BEFORE launching the loops; it must return
@@ -153,6 +189,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 			Metrics:  metrics,
 			Sink:     cfg.Exec.Process.Sink,
 			Health:   cfg.health,
+			Router:   router,
 		})
 		if err == nil {
 			// WithContext cancels gctx (unblocking the lifecycle sibling in g.Wait)
@@ -311,6 +348,11 @@ type StartConfig struct {
 
 	// runBackfill is a test-only seam for one backfill pass; nil ⇒ backfill.RunBackfill.
 	runBackfill func(ctx context.Context, exec backfill.ExecConfig, lo, hi chunk.ID) error
+
+	// lifecycleGrace overrides the deferred-deletion wait; 0 ⇒ lifecycle's
+	// defaultGrace. Tests set it small so a run's end-of-run destroy does not park
+	// for minutes.
+	lifecycleGrace time.Duration
 
 	// health is the readiness/health signal the ingestion loop feeds per commit;
 	// #772's read server consumes it (as HealthSignal). nil ⇒ observe is a no-op.

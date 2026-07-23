@@ -18,6 +18,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/fhtest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/serving"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
 )
@@ -294,6 +295,24 @@ func TestRunIngestionLoop_LastCommittedGaugeAdvancesPerLedger(t *testing.T) {
 		"the loop sets the last-committed gauge per committed ledger, not chunk-aligned")
 }
 
+// TestRunIngestionLoop_AdvancesServingWatermark: when a router is wired, the loop
+// advances its serving watermark per committed ledger, ending at the last one.
+func TestRunIngestionLoop_AdvancesServingWatermark(t *testing.T) {
+	cat, _ := testCatalog(t)
+	c := chunk.ID(0)
+	first := c.FirstLedger()
+
+	stream := streamForSeqs(t, first, first+2)
+	stream.endErr = errors.New("end")
+	cfg, _ := loopConfig(t, stream, cat, first)
+	router := serving.NewRouter(cat, geometry.NewRetention(0, 0))
+	cfg.Router = router
+
+	require.Error(t, runIngestionLoop(context.Background(), cfg))
+
+	assert.Equal(t, first+2, router.Watermark(), "the watermark advanced to the last committed ledger")
+}
+
 // ---------------------------------------------------------------------------
 // runIngestionLoop — boundary notifications carry the completed chunk id.
 // ---------------------------------------------------------------------------
@@ -395,6 +414,46 @@ func TestRunIngestionLoop_HandoffFenceClosesBeforeNextKey(t *testing.T) {
 	require.Equal(t, []chunk.ID{c}, fence.published, "the completed chunk was published at the boundary")
 	require.Equal(t, []bool{true}, fence.closedReleased, "the closed chunk's write LOCK was released before publish")
 	require.Equal(t, []bool{true}, fence.nextReady, "the next chunk's hot key was ready before publish")
+}
+
+// TestRunIngestionLoop_BoundaryTransfersOwnershipToRouter: with a router set, the
+// boundary does NOT close the completed chunk's DB — the router keeps it open (for
+// queries and the freeze) and the next chunk's handle is published too.
+func TestRunIngestionLoop_BoundaryTransfersOwnershipToRouter(t *testing.T) {
+	t.Parallel() // seeds a near-full chunk (one synced commit per ledger)
+	cat, _ := testCatalog(t)
+	c := chunk.ID(0)
+	c1 := c + 1
+	resume := seedLastCommitted(t, cat, c, c.LastLedger()-1) // == c.LastLedger()
+
+	stream := &fakeCoreStream{frames: map[uint32][]byte{
+		c.LastLedger():   fhtest.ZeroTxLCMBytes(t, c.LastLedger()),   // boundary 0->1
+		c1.FirstLedger(): fhtest.ZeroTxLCMBytes(t, c1.FirstLedger()), // a ledger in chunk 1
+	}, endErr: errors.New("end")}
+
+	db, err := openHotDBForChunk(cat, chunk.IDFromLedger(resume), silentLogger())
+	require.NoError(t, err)
+	router := serving.NewRouter(cat, geometry.NewRetention(0, 0))
+	cfg := ingestionLoopConfig{
+		Stream: stream, Resume: resume, HotDB: db, Catalog: cat,
+		Boundary: &recordingBoundary{}, Logger: silentLogger(), Router: router,
+	}
+
+	require.Error(t, runIngestionLoop(context.Background(), cfg), "stream ran dry")
+
+	// The completed chunk stays in the router, still open (the loop closed only the
+	// live chunk on exit), and the next chunk's handle was published.
+	completed, ok := router.Handle(c)
+	require.True(t, ok, "completed chunk's handle retained in the router")
+	_, ok = router.Handle(c1)
+	require.True(t, ok, "next chunk's handle published")
+
+	maxSeq, present, err := completed.MaxCommittedSeq()
+	require.NoError(t, err)
+	require.True(t, present)
+	assert.Equal(t, c.LastLedger(), maxSeq, "the retained handle still answers reads")
+
+	_ = completed.Close() // router-owned; not closed by the loop
 }
 
 // ---------------------------------------------------------------------------

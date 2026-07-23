@@ -17,7 +17,22 @@ import (
 // distinguishing "absent" from a backing-store error — the value-blind primitive
 // the typed reads build on.
 func (c *Catalog) get(key string) (string, bool, error) {
-	v, found, err := c.store.Get("", []byte(key))
+	return c.getAsOf(nil, key)
+}
+
+// getAsOf is get pinned to snap's view; a nil snap reads live. Shared body for
+// get and the typed *AsOf reads.
+func (c *Catalog) getAsOf(snap *rocksdb.Snapshot, key string) (string, bool, error) {
+	var (
+		v     []byte
+		found bool
+		err   error
+	)
+	if snap == nil {
+		v, found, err = c.store.Get("", []byte(key))
+	} else {
+		v, found, err = c.store.GetAsOf(snap, "", []byte(key))
+	}
 	if err != nil {
 		return "", false, err
 	}
@@ -69,8 +84,20 @@ type kvEntry struct {
 // prefixScan yields (key, value) for every entry whose key starts with prefix,
 // in byte-lex order. Empty prefix scans the whole store.
 func (c *Catalog) prefixScan(prefix string) iter.Seq2[kvEntry, error] {
+	return c.prefixScanAsOf(nil, prefix)
+}
+
+// prefixScanAsOf is prefixScan pinned to snap's view; a nil snap scans live.
+// Shared body for prefixScan and the *AsOf scans.
+func (c *Catalog) prefixScanAsOf(snap *rocksdb.Snapshot, prefix string) iter.Seq2[kvEntry, error] {
 	return func(yield func(kvEntry, error) bool) {
-		for e, err := range c.store.Iterate("", []byte(prefix)) {
+		var src iter.Seq2[rocksdb.Entry, error]
+		if snap != nil {
+			src = c.store.IterateAsOf(snap, "", []byte(prefix))
+		} else {
+			src = c.store.Iterate("", []byte(prefix))
+		}
+		for e, err := range src {
 			if err != nil {
 				yield(kvEntry{}, err)
 				return
