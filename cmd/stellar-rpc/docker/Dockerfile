@@ -1,82 +1,50 @@
-# All stages use ubuntu:24.04 so shared libs built in one stage work in any
-# other (same glibc). zstd and RocksDB are built from source to pin versions;
-# Go and Rust come from upstream tarballs (there's no golang:1.26-noble image).
-
-# --- Stage 1: zstd ---
-FROM ubuntu:24.04 AS zstd-build
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt update && apt install -y build-essential cmake ninja-build curl && apt clean
-
-COPY scripts/install-zstd.sh /tmp/install-zstd.sh
-RUN PREFIX=/usr/local /tmp/install-zstd.sh
-
-# --- Stage 2: RocksDB (shared lib + CLI tools) ---
-FROM ubuntu:24.04 AS rocksdb-build
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt update && apt install -y build-essential cmake ninja-build curl && apt clean
-
-COPY --from=zstd-build /usr/local/include/ /usr/local/include/
-COPY --from=zstd-build /usr/local/lib/libzstd* /usr/local/lib/
-RUN ldconfig
-
-COPY scripts/install-rocksdb.sh /tmp/install-rocksdb.sh
-RUN WITH_TOOLS=1 PREFIX=/usr/local ZSTD_HOME=/usr/local /tmp/install-rocksdb.sh && ldconfig
-
-# --- Stage 3: Build stellar-rpc ---
-FROM ubuntu:24.04 AS rpc-build
-ARG GO_VERSION=1.26.5
+FROM golang:1.26-bookworm AS build
 ARG RUST_TOOLCHAIN_VERSION=stable
 ARG REPOSITORY_VERSION
+
+WORKDIR /go/src/github.com/stellar/stellar-rpc
+
+ADD . ./
+
+RUN git config --global --add safe.directory "/go/src/github.com/stellar/stellar-rpc"
 
 ENV CARGO_HOME=/rust/.cargo
 ENV RUSTUP_HOME=/rust/.rust
 ENV PATH="/usr/local/go/bin:$CARGO_HOME/bin:${PATH}"
 ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt update && apt install -y build-essential curl git jq && apt clean
-
-RUN curl -sSfL "https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz" \
-    | tar -C /usr/local -xzf -
+RUN apt update
+RUN apt install -y build-essential jq
+RUN apt clean
 
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain $RUST_TOOLCHAIN_VERSION
 
-COPY --from=zstd-build /usr/local/include/ /usr/local/include/
-COPY --from=zstd-build /usr/local/lib/libzstd* /usr/local/lib/
-COPY --from=rocksdb-build /usr/local/include/rocksdb /usr/local/include/rocksdb
-COPY --from=rocksdb-build /usr/local/lib/librocksdb* /usr/local/lib/
-RUN ldconfig
+RUN make REPOSITORY_VERSION=${REPOSITORY_VERSION} build-rpc-v1
 
-WORKDIR /go/src/github.com/stellar/stellar-rpc
-ADD . ./
-RUN git config --global --add safe.directory "/go/src/github.com/stellar/stellar-rpc" || true
-
-RUN make REPOSITORY_VERSION=${REPOSITORY_VERSION} build-stellar-rpc
+# Move the binary to a common location
 RUN mv stellar-rpc /bin/stellar-rpc
 
-# --- Stage 4: Runtime ---
-FROM ubuntu:24.04 AS runtime
+FROM ubuntu:22.04
 ARG STELLAR_CORE_VERSION
 ENV STELLAR_CORE_VERSION=${STELLAR_CORE_VERSION:-*}
 ENV STELLAR_CORE_BINARY_PATH=/usr/bin/stellar-core
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt update && apt install -y --no-install-recommends \
-    ca-certificates curl wget gnupg apt-utils jq \
-    && apt clean
-
-# stellar-core from SDF apt repo (noble packages).
+# ca-certificates are required to make tls connections
+RUN apt update && apt install -y --no-install-recommends ca-certificates curl wget gnupg apt-utils jq
 RUN curl -sSL https://apt.stellar.org/SDF.asc | gpg --dearmor >/etc/apt/trusted.gpg.d/SDF.gpg
-RUN echo "deb https://apt.stellar.org noble stable" >/etc/apt/sources.list.d/SDF.list
-RUN echo "deb https://apt.stellar.org noble unstable" >/etc/apt/sources.list.d/SDF-unstable.list
+RUN echo "deb https://apt.stellar.org jammy stable" >/etc/apt/sources.list.d/SDF.list
+RUN echo "deb https://apt.stellar.org jammy unstable" >/etc/apt/sources.list.d/SDF-unstable.list
+
+# install llvm-20 so that core can be installed
+RUN wget -O /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key
+RUN echo 'deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main' > /etc/apt/sources.list.d/llvm.list
+RUN echo 'deb-src http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main' >> /etc/apt/sources.list.d/llvm.list
+
 RUN apt update && apt install -y stellar-core=${STELLAR_CORE_VERSION}
 RUN apt clean
 
-COPY --from=zstd-build /usr/local/lib/libzstd.so* /usr/local/lib/
-COPY --from=rocksdb-build /usr/local/lib/librocksdb* /usr/local/lib/
-COPY --from=rocksdb-build /usr/local/bin/ldb /usr/local/bin/
-COPY --from=rocksdb-build /usr/local/bin/sst_dump /usr/local/bin/
-COPY --from=rocksdb-build /usr/local/bin/db_bench /usr/local/bin/
-RUN ldconfig
+# Copy the binary from the build stage
+COPY --from=build /bin/stellar-rpc /app/stellar-rpc
 
-COPY --from=rpc-build /bin/stellar-rpc /app/stellar-rpc
+# Set the entrypoint to the specific binary
 ENTRYPOINT ["/app/stellar-rpc"]

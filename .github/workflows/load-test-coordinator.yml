@@ -63,8 +63,8 @@ jobs:
                     --head "$REF" --json number --jq '.[0].number // ""' 2>/dev/null || true)"
           fi
           LEGS='[
-            {"label":"Apply-load ingestion","run_label":"apply-load","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh","budget":225},
-            {"label":"Backfill ingestion","run_label":"backfill","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/run-backfill.sh","budget":345}
+            {"label":"Apply-load ingestion","run_label":"apply-load","script":"cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh","budget":225},
+            {"label":"Backfill ingestion","run_label":"backfill","script":"cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/backfill-test/run-backfill.sh","budget":345}
           ]'
           {
             echo "target_sha=$SHA"
@@ -123,7 +123,7 @@ jobs:
         run: |
           set -uo pipefail
           MARKER='<!-- load-test-results -->'
-          PERF_EVAL=./cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval
+          PERF_EVAL=./cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval
 
           # Read the existing sticky comment (id + body), if any.
           CID=""; PREV=""

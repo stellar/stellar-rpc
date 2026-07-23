@@ -6,7 +6,6 @@ run:
 linters:
   default: all
   disable:
-    - depguard
     - err113
     - exhaustruct
     - godot
@@ -23,6 +22,39 @@ linters:
     - wrapcheck
     - wsl
   settings:
+    # The rpcv1 (SQLite) and rpcv2 (RocksDB) trees must stay independent, and
+    # the shared packages directly under internal/ must not depend on either
+    # tree. Test files are exempt: a few shared handler tests use v1's SQLite
+    # as their fixture backend until #883's parity harness replaces them.
+    depguard:
+      rules:
+        shared-internal:
+          files:
+            - "**/cmd/stellar-rpc/internal/**"
+            - "!**/cmd/stellar-rpc/internal/rpcv1/**"
+            - "!**/cmd/stellar-rpc/internal/rpcv2/**"
+            - "!$test"
+          deny:
+            - pkg: github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1
+              desc: shared packages under internal/ must not import the rpcv1 tree
+            - pkg: github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2
+              desc: shared packages under internal/ must not import the rpcv2 tree
+        rpcv1-tree:
+          files:
+            - "**/cmd/stellar-rpc/internal/rpcv1/**"
+            - "**/cmd/stellar-rpc/rpcv1/**"
+            - "!$test"
+          deny:
+            - pkg: github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2
+              desc: the rpcv1 tree and the v1 binary must not import the rpcv2 tree
+        rpcv2-tree:
+          files:
+            - "**/cmd/stellar-rpc/internal/rpcv2/**"
+            - "**/cmd/stellar-rpc/rpcv2/**"
+            - "!$test"
+          deny:
+            - pkg: github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1
+              desc: the rpcv2 tree and the v2 binary must not import the rpcv1 tree
     cyclop:
       max-complexity: 15
     dogsled:
@@ -81,7 +113,7 @@ linters:
           - gosec
           - mnd
           - nosprintfhostport
-        path: ^(.*_test\.go|cmd/stellar-rpc/internal/integrationtest/infrastructure/.*)$
+        path: ^(.*_test\.go|cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/.*)$
     paths:
       - third_party$
       - builtin$
