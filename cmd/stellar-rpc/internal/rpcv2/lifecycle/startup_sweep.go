@@ -23,7 +23,18 @@ import (
 // leftover (openHotDBForChunk recreates it), not a mid-discard one. Runs before
 // the lifecycle goroutine and before any query is admitted.
 func StartupSweep(cat *catalog.Catalog, liveChunk chunk.ID) error {
-	// Hot: "transient" chunks below the live chunk are mid-discard leftovers.
+	if err := sweepTransientHotChunks(cat, liveChunk); err != nil {
+		return err
+	}
+	if err := sweepIndexDebris(cat); err != nil {
+		return err
+	}
+	return sweepPruningChunkArtifacts(cat)
+}
+
+// sweepTransientHotChunks discards the "transient" hot chunks below liveChunk —
+// mid-discard leftovers a crashed run never finished.
+func sweepTransientHotChunks(cat *catalog.Catalog, liveChunk chunk.ID) error {
 	hot, err := cat.HotChunkKeys()
 	if err != nil {
 		return fmt.Errorf("startup sweep: read hot keys: %w", err)
@@ -42,8 +53,12 @@ func StartupSweep(cat *catalog.Catalog, liveChunk chunk.ID) error {
 			}
 		}
 	}
+	return nil
+}
 
-	// Cold: "freezing"/"pruning" index debris and "pruning" chunk artifacts.
+// sweepIndexDebris sweeps "freezing"/"pruning" index coverages — a crashed build
+// or an unfinished demotion.
+func sweepIndexDebris(cat *catalog.Catalog) error {
 	idx, err := cat.AllTxHashIndexKeys()
 	if err != nil {
 		return fmt.Errorf("startup sweep: read index keys: %w", err)
@@ -55,7 +70,12 @@ func StartupSweep(cat *catalog.Catalog, liveChunk chunk.ID) error {
 			}
 		}
 	}
+	return nil
+}
 
+// sweepPruningChunkArtifacts sweeps the "pruning" per-chunk artifacts a crashed
+// prune left behind, in one batch.
+func sweepPruningChunkArtifacts(cat *catalog.Catalog) error {
 	refs, err := cat.ChunkArtifactKeys()
 	if err != nil {
 		return fmt.Errorf("startup sweep: read chunk keys: %w", err)

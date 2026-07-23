@@ -178,32 +178,6 @@ func (s *Store) Get(cf string, key []byte) ([]byte, bool, error) {
 	return s.getRO(s.ro, cf, key)
 }
 
-// getRO is the shared body for Get and GetAsOf; ro selects the read view
-// (s.ro for a live read, a snapshot-pinned ReadOptions for GetAsOf).
-func (s *Store) getRO(ro *grocksdb.ReadOptions, cf string, key []byte) ([]byte, bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if err := s.checkOpen(); err != nil {
-		return nil, false, err
-	}
-	cfh, err := s.resolveCF(cf)
-	if err != nil {
-		return nil, false, err
-	}
-	handle, err := s.db.GetPinnedCFV2(ro, cfh, key)
-	if err != nil {
-		return nil, false, err
-	}
-	defer handle.Destroy()
-	if !handle.Exists() {
-		return nil, false, nil
-	}
-	// handle.Data() points into the pinned cache page; copy before
-	// Destroy invalidates it.
-	out := bytes.Clone(handle.Data())
-	return out, true, nil
-}
-
 // BatchMultiGet reads many keys from cf in a single batched call.
 // Returns a [][]byte of length len(keys) where result[i] is the
 // value for keys[i] (a fresh copy the caller owns), or nil if that
@@ -285,46 +259,6 @@ type Entry struct {
 // RocksDB errors yield once with (Entry{}, err).
 func (s *Store) Iterate(cf string, prefix []byte) iter.Seq2[Entry, error] {
 	return s.iterateRO(s.ro, cf, prefix)
-}
-
-// iterateRO is the shared body for Iterate and IterateAsOf; ro selects the read
-// view (s.ro for a live scan, a snapshot-pinned ReadOptions for IterateAsOf).
-func (s *Store) iterateRO(ro *grocksdb.ReadOptions, cf string, prefix []byte) iter.Seq2[Entry, error] {
-	return func(yield func(Entry, error) bool) {
-		s.mu.RLock()
-		defer s.mu.RUnlock()
-
-		if err := s.checkOpen(); err != nil {
-			yield(Entry{}, err)
-			return
-		}
-		cfh, err := s.resolveCF(cf)
-		if err != nil {
-			yield(Entry{}, err)
-			return
-		}
-
-		it := s.db.NewIteratorCF(ro, cfh)
-		defer it.Close()
-
-		// Copy prefix: the caller may mutate its buffer while ranging.
-		pcopy := bytes.Clone(prefix)
-		it.Seek(pcopy)
-
-		for ; it.Valid(); it.Next() {
-			kSlice := it.KeySlice()
-			if !bytes.HasPrefix(kSlice.Data(), pcopy) {
-				return
-			}
-			vSlice := it.ValueSlice()
-			if !yield(Entry{Key: kSlice.Data(), Value: vSlice.Data()}, nil) {
-				return
-			}
-		}
-		if err := it.Err(); err != nil {
-			yield(Entry{}, err)
-		}
-	}
 }
 
 // LastKey returns the largest key in cf. If cf has no keys this is not an
@@ -504,7 +438,8 @@ func (s *Store) Close() error {
 	s.closed.Store(true)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.teardownLocked()
+	s.teardownLocked()
+	return nil
 }
 
 // CloseIfIdle is the non-blocking variant of Close used by deferred deletion.
@@ -519,15 +454,16 @@ func (s *Store) CloseIfIdle() (bool, error) {
 		return false, nil
 	}
 	defer s.mu.Unlock()
-	return true, s.teardownLocked()
+	s.teardownLocked()
+	return true, nil
 }
 
 // teardownLocked frees every C resource once. The caller MUST hold mu.Lock so
 // no op is in flight against the C DB. Idempotent via the s.db == nil latch,
 // which also covers a half-built store whose constructAndOpen never set s.db.
-func (s *Store) teardownLocked() error {
+func (s *Store) teardownLocked() {
 	if s.db == nil {
-		return nil
+		return
 	}
 
 	// A read-only store has nothing to flush (and the RocksDB read-only handle
@@ -566,7 +502,72 @@ func (s *Store) teardownLocked() error {
 		s.cache = nil
 	}
 	s.db = nil // latch: a second teardown no-ops
-	return nil
+}
+
+// getRO is the shared body for Get and GetAsOf; ro selects the read view
+// (s.ro for a live read, a snapshot-pinned ReadOptions for GetAsOf).
+func (s *Store) getRO(ro *grocksdb.ReadOptions, cf string, key []byte) ([]byte, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.checkOpen(); err != nil {
+		return nil, false, err
+	}
+	cfh, err := s.resolveCF(cf)
+	if err != nil {
+		return nil, false, err
+	}
+	handle, err := s.db.GetPinnedCFV2(ro, cfh, key)
+	if err != nil {
+		return nil, false, err
+	}
+	defer handle.Destroy()
+	if !handle.Exists() {
+		return nil, false, nil
+	}
+	// handle.Data() points into the pinned cache page; copy before
+	// Destroy invalidates it.
+	out := bytes.Clone(handle.Data())
+	return out, true, nil
+}
+
+// iterateRO is the shared body for Iterate and IterateAsOf; ro selects the read
+// view (s.ro for a live scan, a snapshot-pinned ReadOptions for IterateAsOf).
+func (s *Store) iterateRO(ro *grocksdb.ReadOptions, cf string, prefix []byte) iter.Seq2[Entry, error] {
+	return func(yield func(Entry, error) bool) {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+
+		if err := s.checkOpen(); err != nil {
+			yield(Entry{}, err)
+			return
+		}
+		cfh, err := s.resolveCF(cf)
+		if err != nil {
+			yield(Entry{}, err)
+			return
+		}
+
+		it := s.db.NewIteratorCF(ro, cfh)
+		defer it.Close()
+
+		// Copy prefix: the caller may mutate its buffer while ranging.
+		pcopy := bytes.Clone(prefix)
+		it.Seek(pcopy)
+
+		for ; it.Valid(); it.Next() {
+			kSlice := it.KeySlice()
+			if !bytes.HasPrefix(kSlice.Data(), pcopy) {
+				return
+			}
+			vSlice := it.ValueSlice()
+			if !yield(Entry{Key: kSlice.Data(), Value: vSlice.Data()}, nil) {
+				return
+			}
+		}
+		if err := it.Err(); err != nil {
+			yield(Entry{}, err)
+		}
+	}
 }
 
 // doFlush is the lock-less core of Flush. Caller holds at least
