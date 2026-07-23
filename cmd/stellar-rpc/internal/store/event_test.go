@@ -1,4 +1,4 @@
-package events
+package store
 
 import (
 	"testing"

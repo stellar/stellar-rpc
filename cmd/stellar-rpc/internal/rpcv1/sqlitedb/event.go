@@ -17,7 +17,6 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
@@ -134,13 +133,13 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) (err err
 			}
 
 			// The Stage→(Tx, Op) cursor sentinels come from
-			// events.StageSentinels — the single definition shared with the
+			// store.StageSentinels — the single definition shared with the
 			// full-history view path — so the two backends cannot drift.
 			// Only the per-stage event counters are selected here (the
 			// full-history path stores EventIdx explicitly too, per the
 			// byte-stable-ID decision).
 			var txIdx, opIdx uint32
-			txIdx, opIdx, err = events.StageSentinels(event.Stage, tx.Index)
+			txIdx, opIdx, err = store.StageSentinels(event.Stage, tx.Index)
 			if err != nil {
 				return err
 			}
