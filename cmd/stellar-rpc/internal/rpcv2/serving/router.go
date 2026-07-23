@@ -148,6 +148,11 @@ func (r *Router) DiscardHandle(c chunk.ID) {
 // later run re-collects it and retries — the handle stays in closing until it
 // drains. Deferred deletion calls this after the grace period, before unlinking
 // the chunk's files.
+//
+// The close runs under mu, so a successful close's memtable flush briefly blocks a
+// concurrent boundary PublishHandle. Admissions are unaffected (they load handles
+// without mu), and the stall is rare (a discard overlapping a boundary) and bounded
+// (one memtable), so it is not worth closing outside the lock.
 func (r *Router) CloseDiscarded(c chunk.ID) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
