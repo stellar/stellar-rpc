@@ -39,7 +39,7 @@ func TestMetrics(t *testing.T) {
 	logger.WithError(err).Error("test error 2")
 
 	metricFamilies, err := daemon.MetricsRegistry().Gather()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	var metric *io_prometheus_client.MetricFamily
 	for _, mf := range metricFamilies {
 		if mf.GetName() == "soroban_rpc_log_error_total" {

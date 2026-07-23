@@ -23,7 +23,7 @@ import (
 func buildSetOptionsTxParams(account txnbuild.Account) txnbuild.TransactionParams {
 	return infrastructure.CreateTransactionParams(
 		account,
-		&txnbuild.SetOptions{HomeDomain: txnbuild.NewHomeDomain("soroban.com")},
+		&txnbuild.SetOptions{HomeDomain: new("soroban.com")},
 	)
 }
 
@@ -68,7 +68,7 @@ func TestGetTransactions(t *testing.T) {
 		StartLedger: ledgers[0],
 	}
 	result, err := client.GetTransactions(ctx, request)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Len(t, result.Transactions, 3)
 	assert.Equal(t, result.Transactions[0].Ledger, ledgers[0])
 	assert.Equal(t, result.Transactions[1].Ledger, ledgers[1])
@@ -82,7 +82,7 @@ func TestGetTransactions(t *testing.T) {
 		},
 	}
 	result, err = client.GetTransactions(ctx, request)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Len(t, result.Transactions, 1)
 	assert.Equal(t, result.Transactions[0].Ledger, ledgers[0])
 
@@ -94,7 +94,7 @@ func TestGetTransactions(t *testing.T) {
 		},
 	}
 	result, err = client.GetTransactions(ctx, request)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Len(t, result.Transactions, 2)
 	assert.Equal(t, result.Transactions[0].Ledger, ledgers[1])
 	assert.Equal(t, result.Transactions[1].Ledger, ledgers[2])

@@ -344,6 +344,8 @@ func verifyAndDeserializeBitmap(record []byte, key events.TermKey, slot uint32) 
 //  4. In the callback, verify each pending key's fingerprint
 //     against the record header and unmarshal a fresh bitmap per
 //     match. Misses (fingerprint mismatch) leave result[i] = nil.
+//
+//nolint:cyclop // the four documented steps above, inline; splitting obscures the pass structure
 func (c *ColdReader) LookupKeys(ctx context.Context, keys []events.TermKey) ([]*roaring.Bitmap, error) {
 	if c.closed.Load() {
 		return nil, stores.ErrStoreClosed

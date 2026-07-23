@@ -435,7 +435,7 @@ func TestGetTransaction_JSONFormat(t *testing.T) {
 	jsBytes, err := json.Marshal(txResp)
 	require.NoError(t, err)
 
-	var tx map[string]interface{}
+	var tx map[string]any
 	require.NoError(t, json.Unmarshal(jsBytes, &tx))
 
 	require.Nilf(t, tx["envelopeXdr"], "field: 'envelopeXdr'")
@@ -450,7 +450,7 @@ func TestGetTransaction_JSONFormat(t *testing.T) {
 	envJs, err := xdr2json.ConvertInterface(lookupEnv)
 	require.NoError(t, err)
 
-	var envelope map[string]interface{}
+	var envelope map[string]any
 	require.NoError(t, json.Unmarshal(envJs, &envelope))
 	require.Equal(t, envelope, tx["envelopeJson"])
 }

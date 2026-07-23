@@ -21,7 +21,7 @@ import (
 
 // NewSendTransactionHandler returns a submit transaction json rpc handler
 //
-//nolint:gocognit
+//nolint:gocognit,cyclop,funlen // one switch over every core submission status
 func NewSendTransactionHandler(
 	daemon interfaces.Daemon,
 	logger *log.Entry,

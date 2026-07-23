@@ -156,7 +156,7 @@ func TestSetValueBool(t *testing.T) {
 	var b bool
 	testCases := []struct {
 		name  string
-		value interface{}
+		value any
 		err   string
 	}{
 		{"valid-bool", true, ""},
@@ -172,7 +172,7 @@ func TestSetValueInt(t *testing.T) {
 	var i int
 	testCases := []struct {
 		name  string
-		value interface{}
+		value any
 		err   string
 	}{
 		{"valid-int", 1, ""},
@@ -186,7 +186,7 @@ func TestSetValueUint32(t *testing.T) {
 	var u32 uint32
 	testCases := []struct {
 		name  string
-		value interface{}
+		value any
 		err   string
 	}{
 		{"valid-uint32", 1, ""},
@@ -200,7 +200,7 @@ func TestSetValueUint64(t *testing.T) {
 	var u64 uint64
 	testCases := []struct {
 		name  string
-		value interface{}
+		value any
 		err   string
 	}{
 		{"valid-uint", 1, ""},
@@ -213,7 +213,7 @@ func TestSetValueFloat64(t *testing.T) {
 	var f64 float64
 	testCases := []struct {
 		name  string
-		value interface{}
+		value any
 		err   string
 	}{
 		{"valid-float", 1.05, ""},
@@ -228,7 +228,7 @@ func TestSetValueString(t *testing.T) {
 	var s string
 	testCases := []struct {
 		name  string
-		value interface{}
+		value any
 		err   string
 	}{
 		{"valid-string", "foobar", ""},
@@ -236,9 +236,9 @@ func TestSetValueString(t *testing.T) {
 	runTestCases(t, &s, testCases)
 }
 
-func runTestCases(t *testing.T, key interface{}, testCases []struct {
+func runTestCases(t *testing.T, key any, testCases []struct {
 	name  string
-	value interface{}
+	value any
 	err   string
 },
 ) {

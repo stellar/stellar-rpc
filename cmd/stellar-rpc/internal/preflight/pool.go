@@ -153,7 +153,7 @@ func (m *metricsLedgerEntryGetterWrapper) GetLedgerEntries(ctx context.Context,
 	entries, seq, err := m.LedgerEntryGetter.GetLedgerEntries(ctx, keys)
 	//nolint:gosec // elapsed milliseconds are non-negative and bounded in this metric path
 	atomic.AddUint64(&m.totalDurationMs, uint64(time.Since(startTime).Milliseconds()))
-	atomic.AddUint32(&m.ledgerEntriesFetched, uint32(len(keys)))
+	atomic.AddUint32(&m.ledgerEntriesFetched, uint32(len(keys))) //nolint:gosec // len() is never negative
 	return entries, seq, err
 }
 

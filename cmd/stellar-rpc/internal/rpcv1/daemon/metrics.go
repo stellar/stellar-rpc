@@ -19,6 +19,12 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version"
 )
 
+// Shared by the build-info metric labels and the startup log fields.
+const (
+	versionLabel = "version"
+	commitLabel  = "commit"
+)
+
 func (d *Daemon) registerMetrics() {
 	// LogMetricsHook is a metric which counts log lines emitted by stellar rpc
 	logMetricsHook := logmetrics.New(interfaces.PrometheusNamespace)
@@ -29,11 +35,11 @@ func (d *Daemon) registerMetrics() {
 
 	buildInfoGauge := prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{Namespace: interfaces.PrometheusNamespace, Subsystem: "build", Name: "info"},
-		[]string{"version", "goversion", "commit", "branch", "build_timestamp"},
+		[]string{versionLabel, "goversion", commitLabel, "branch", "build_timestamp"},
 	)
 	buildInfoGauge.With(prometheus.Labels{
-		"version":         version.Version,
-		"commit":          version.CommitHash,
+		versionLabel:      version.Version,
+		commitLabel:       version.CommitHash,
 		"branch":          version.Branch,
 		"build_timestamp": version.BuildTimestamp,
 		"goversion":       runtime.Version(),

@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func parseBool(option *Option, i interface{}) error {
+func parseBool(option *Option, i any) error {
 	switch v := i.(type) {
 	case nil:
 		return nil
@@ -30,7 +30,7 @@ func parseBool(option *Option, i interface{}) error {
 	return nil
 }
 
-func parseInt(option *Option, i interface{}) error {
+func parseInt(option *Option, i any) error {
 	switch v := i.(type) {
 	case nil:
 		return nil
@@ -48,7 +48,7 @@ func parseInt(option *Option, i interface{}) error {
 	return nil
 }
 
-func parseUint(option *Option, i interface{}) error {
+func parseUint(option *Option, i any) error {
 	switch v := i.(type) {
 	case nil:
 		return nil
@@ -71,7 +71,7 @@ func parseUint(option *Option, i interface{}) error {
 	return nil
 }
 
-func parseFloat(option *Option, i interface{}) error {
+func parseFloat(option *Option, i any) error {
 	switch v := i.(type) {
 	case nil:
 		return nil
@@ -89,7 +89,7 @@ func parseFloat(option *Option, i interface{}) error {
 	return nil
 }
 
-func parseString(option *Option, i interface{}) error {
+func parseString(option *Option, i any) error {
 	switch v := i.(type) {
 	case nil:
 		return nil
@@ -105,7 +105,7 @@ func parseString(option *Option, i interface{}) error {
 	return nil
 }
 
-func parseUint32(option *Option, i interface{}) error {
+func parseUint32(option *Option, i any) error {
 	switch v := i.(type) {
 	case nil:
 		return nil
@@ -131,7 +131,7 @@ func parseUint32(option *Option, i interface{}) error {
 	return nil
 }
 
-func parseDuration(option *Option, i interface{}) error {
+func parseDuration(option *Option, i any) error {
 	durationPtr, ok := option.ConfigKey.(*time.Duration)
 	if !ok {
 		return fmt.Errorf("invalid type for %s: expected *time.Duration", option.Name)
@@ -156,7 +156,7 @@ func parseDuration(option *Option, i interface{}) error {
 	return nil
 }
 
-func parseStringSlice(option *Option, i interface{}) error {
+func parseStringSlice(option *Option, i any) error {
 	stringSlicePtr, ok := option.ConfigKey.(*[]string)
 	if !ok {
 		return fmt.Errorf("invalid type for %s: expected *[]string", option.Name)
@@ -173,7 +173,7 @@ func parseStringSlice(option *Option, i interface{}) error {
 		}
 	case []string:
 		*stringSlicePtr = v
-	case []interface{}:
+	case []any:
 		result := make([]string, len(v))
 		for i, s := range v {
 			str, ok := s.(string)

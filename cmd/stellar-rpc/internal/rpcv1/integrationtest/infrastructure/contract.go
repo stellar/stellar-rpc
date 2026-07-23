@@ -16,7 +16,8 @@ import (
 var testSalt = sha256.Sum256([]byte("a1"))
 
 func getTestContract(name string) []byte {
-	contractFile := path.Join(GetCurrentDirectory(), "../../../../../wasms/test_"+name+".wasm")
+	// six levels up from cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure = repo root
+	contractFile := path.Join(GetCurrentDirectory(), "../../../../../../wasms/test_"+name+".wasm")
 	ret, err := os.ReadFile(contractFile)
 	if err != nil {
 		str := fmt.Sprintf(
@@ -110,7 +111,9 @@ func CreateCreateHelloWorldContractOperation(sourceAccount string) *txnbuild.Inv
 	return createCreateContractOperation(sourceAccount, salt, contractHash)
 }
 
-func createCreateContractOperation(sourceAccount string, salt xdr.Uint256, contractHash xdr.Hash) *txnbuild.InvokeHostFunction {
+func createCreateContractOperation(
+	sourceAccount string, salt xdr.Uint256, contractHash xdr.Hash,
+) *txnbuild.InvokeHostFunction {
 	sourceAccountID := xdr.MustAddress(sourceAccount)
 	return &txnbuild.InvokeHostFunction{
 		HostFunction: xdr.HostFunction{

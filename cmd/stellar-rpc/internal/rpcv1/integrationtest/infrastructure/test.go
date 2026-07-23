@@ -165,7 +165,7 @@ type Test struct {
 	fakeArchiveURL string
 }
 
-//nolint:cyclop
+//nolint:cyclop,funlen,nestif // linear test-environment setup; the cfg overrides read best inline
 func NewTest(t testing.TB, cfg *TestConfig) *Test {
 	if os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_ENABLED") == "" {
 		t.Skip("skipping integration test: STELLAR_RPC_INTEGRATION_TESTS_ENABLED not set")
@@ -552,7 +552,9 @@ func (i *Test) generateCaptiveCoreCfgForContainer() {
 			dir,
 			filename)
 		cmd := exec.CommandContext(i.t.Context(), "git", "show", arg)
-		cmd.Dir = GetCurrentDirectory() + "/../../../../"
+		// The pathspec above starts "./stellar-rpc/..." (old tags predate the
+		// rpcv1 reorg), so run git from the repo's cmd/ directory: five levels up.
+		cmd.Dir = GetCurrentDirectory() + "/../../../../../"
 		return cmd.CombinedOutput()
 	}
 

@@ -206,6 +206,8 @@ func (f *fakeStream) RawLedgers(
 
 // fullStream yields exactly the requested chunk's full [First,Last] range using
 // the given per-seq LCM generator (nil → cheap zero-tx LCMs).
+//
+//nolint:unparam // chunk-general helper; every current caller uses chunk 0
 func fullStream(t *testing.T, chunkID chunk.ID, gen func(*testing.T, uint32) []byte) *fakeStream {
 	t.Helper()
 	return &fakeStream{
@@ -218,8 +220,6 @@ func fullStream(t *testing.T, chunkID chunk.ID, gen func(*testing.T, uint32) []b
 // packPath returns a chunk's cold pack path under a per-type ledgers root. The
 // production packPath moved into the ledger store package alongside NewPackStream,
 // so tests keep their own copy for readback assertions.
-//
-//nolint:unparam // chunk-general helper; every current caller uses chunk 0
 func packPath(ledgersRoot string, c chunk.ID) string {
 	return filepath.Join(ledgersRoot, c.BucketID(), ledger.PackName(c))
 }

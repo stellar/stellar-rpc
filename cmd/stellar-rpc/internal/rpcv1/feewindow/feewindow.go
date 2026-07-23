@@ -93,20 +93,20 @@ func computeFeeDistribution(fees []uint64, ledgerCount uint32) store.FeeDistribu
 		return fees[kth-1]
 	}
 	return store.FeeDistribution{
-		Max:         fees[len(fees)-1],
-		Min:         fees[0],
-		Mode:        mode,
-		P10:         percentile(10),
-		P20:         percentile(20),
-		P30:         percentile(30),
-		P40:         percentile(40),
-		P50:         percentile(50),
-		P60:         percentile(60),
-		P70:         percentile(70),
-		P80:         percentile(80),
-		P90:         percentile(90),
-		P95:         percentile(95),
-		P99:         percentile(99),
+		Max:  fees[len(fees)-1],
+		Min:  fees[0],
+		Mode: mode,
+		P10:  percentile(10),
+		P20:  percentile(20),
+		P30:  percentile(30),
+		P40:  percentile(40),
+		P50:  percentile(50),
+		P60:  percentile(60),
+		P70:  percentile(70),
+		P80:  percentile(80),
+		P90:  percentile(90),
+		P95:  percentile(95),
+		P99:  percentile(99),
 		//nolint:gosec // len() is non-negative and bounded by available memory
 		FeeCount:    uint32(count),
 		LedgerCount: ledgerCount,
@@ -144,7 +144,7 @@ func NewFeeWindows(
 	}
 }
 
-//nolint:gocognit
+//nolint:gocognit,cyclop // one linear pass classifying every fee-bump/tx shape
 func (fw *FeeWindows) IngestFees(meta xdr.LedgerCloseMeta) error {
 	reader, err := ingest.NewLedgerTransactionReaderFromLedgerCloseMeta(fw.networkPassPhrase, meta)
 	if err != nil {

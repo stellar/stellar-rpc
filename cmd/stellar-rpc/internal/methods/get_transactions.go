@@ -90,7 +90,7 @@ func (h transactionsRPCHandler) fetchLedgerData(ctx context.Context, ledgerSeq u
 // processTransactionsInLedger cycles through all the transactions in a ledger, extracts the transaction info
 // and builds the list of transactions.
 //
-//nolint:cyclop
+//nolint:cyclop,funlen // one linear pagination pass; splitting would scatter the cursor math
 func (h transactionsRPCHandler) processTransactionsInLedger(
 	ledger xdr.LedgerCloseMeta, start toid.ID,
 	txns *[]protocol.TransactionInfo, limit uint,
@@ -255,6 +255,7 @@ func (h transactionsRPCHandler) getTransactionsByLedgerSequence(ctx context.Cont
 	txns := make([]protocol.TransactionInfo, 0, limit)
 	var done bool
 	cursor := toid.New(0, 0, 0)
+	//nolint:gosec // TOID ledger sequences are int32 by design; uint32 overflow needs a 2^31 ledger
 	for ledgerSeq := start.LedgerSequence; ledgerSeq <= int32(ledgerRange.LastLedger.Sequence); ledgerSeq++ {
 		if ledgerSeq < 0 {
 			return protocol.GetTransactionsResponse{}, &jrpc2.Error{

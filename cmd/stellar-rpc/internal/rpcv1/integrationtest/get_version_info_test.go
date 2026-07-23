@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version"
@@ -19,7 +20,7 @@ func TestGetVersionInfoSucceeds(t *testing.T) {
 	test := infrastructure.NewTest(t, nil)
 
 	result, err := test.GetRPCLient().GetVersionInfo(t.Context())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	assert.Equal(t, "0.0.0", result.Version)
 	assert.Equal(t, "buildTimestamp", result.BuildTimestamp)

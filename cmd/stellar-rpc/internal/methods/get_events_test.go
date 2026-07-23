@@ -27,7 +27,7 @@ import (
 
 var passphrase = "passphrase"
 
-//nolint:funlen
+//nolint:funlen,maintidx // one declarative case table; length is the test's inventory
 func TestGetEvents(t *testing.T) {
 	now := time.Now().UTC()
 	counter := xdr.ScSymbol("COUNTER")
@@ -754,7 +754,7 @@ func TestGetEvents(t *testing.T) {
 		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
 			Filters: []protocol.EventFilter{
-				{EventType: map[string]interface{}{protocol.EventTypeSystem: nil}},
+				{EventType: map[string]any{protocol.EventTypeSystem: nil}},
 			},
 		})
 		require.NoError(t, err)

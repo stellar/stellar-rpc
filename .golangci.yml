@@ -114,6 +114,11 @@ linters:
           - mnd
           - nosprintfhostport
         path: ^(.*_test\.go|cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/.*)$
+      # The named returns live in cgo-generated //export wrapper shims, which the
+      # linter maps back to source lines here; there is nothing in the source to fix.
+      - linters:
+          - nonamedreturns
+        path: ^cmd/stellar-rpc/internal/preflight/preflight\.go$
     paths:
       - third_party$
       - builtin$

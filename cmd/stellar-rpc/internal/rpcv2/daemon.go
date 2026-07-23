@@ -73,6 +73,8 @@ type daemonOptions struct {
 const defaultRestartBackoff = 5 * time.Second
 
 // runDaemonWith is RunDaemon with explicit options — the seam tests drive.
+//
+//nolint:cyclop,funlen // linear startup sequence; each branch is one wiring step
 func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) error {
 	// --- Load + form-validate the config. ---
 	cfg, err := config.LoadConfig(configPath)
@@ -270,6 +272,8 @@ func buildSinks(opts daemonOptions, registry *prometheus.Registry) (observabilit
 // deliberately no fatal-and-exit class — genuine loss presents as a crash-loop with
 // a clear warn line. The never-auto-heal guarantee lives in the must-exist open
 // (openHotDBForChunk), not here.
+//
+//nolint:unparam // error-shaped for the caller's contract; nil-on-shutdown is the design above
 func supervise(
 	ctx context.Context, start StartConfig, logger *supportlog.Entry, backoff time.Duration,
 ) error {

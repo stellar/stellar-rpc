@@ -23,7 +23,7 @@ import (
 func TestSendTransactionSucceedsWithoutResults(t *testing.T) {
 	test := infrastructure.NewTest(t, nil)
 	test.SendMasterOperation(
-		&txnbuild.SetOptions{HomeDomain: txnbuild.NewHomeDomain("soroban.com")},
+		&txnbuild.SetOptions{HomeDomain: new("soroban.com")},
 	)
 }
 
@@ -84,7 +84,7 @@ func TestSendTransactionBadSequence(t *testing.T) {
 
 	params := infrastructure.CreateTransactionParams(
 		test.MasterAccount(),
-		&txnbuild.SetOptions{HomeDomain: txnbuild.NewHomeDomain("soroban.com")},
+		&txnbuild.SetOptions{HomeDomain: new("soroban.com")},
 	)
 	params.IncrementSequenceNum = false
 	tx, err := txnbuild.NewTransaction(params)

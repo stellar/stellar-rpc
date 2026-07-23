@@ -49,7 +49,6 @@ func (ledgerReader *ConstantLedgerReader) GetLedger(_ context.Context,
 ) (xdr.LedgerCloseMeta, bool, error) {
 	return createLedger(expectedLatestLedgerHashBytes,
 			sequence,
-			expectedLatestLedgerProtocolVersion,
 			expectedLatestLedgerCloseTime),
 		true, nil
 }
@@ -91,13 +90,13 @@ func MakeLedgerHeader(ledgerSequence uint32, protocolVersion uint32, closeTime x
 	return header
 }
 
-func createLedger(hash byte, ledgerSeq uint32, protocolVersion uint32, closeTime xdr.TimePoint) xdr.LedgerCloseMeta {
+func createLedger(hash byte, ledgerSeq uint32, closeTime xdr.TimePoint) xdr.LedgerCloseMeta {
 	return xdr.LedgerCloseMeta{
 		V: 1,
 		V1: &xdr.LedgerCloseMetaV1{
 			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
 				Hash:   xdr.Hash{hash},
-				Header: MakeLedgerHeader(ledgerSeq, protocolVersion, closeTime),
+				Header: MakeLedgerHeader(ledgerSeq, expectedLatestLedgerProtocolVersion, closeTime),
 			},
 			TxSet:        MakeTxSet(), // minimal empty
 			TxProcessing: nil,
@@ -116,7 +115,6 @@ func TestGetLatestLedger(t *testing.T) {
 
 	expectedLedger := createLedger(expectedLatestLedgerHashBytes,
 		expectedLatestLedgerSequence,
-		expectedLatestLedgerProtocolVersion,
 		expectedLatestLedgerCloseTime)
 
 	var receivedHeader xdr.LedgerHeader

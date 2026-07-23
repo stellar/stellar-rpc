@@ -257,8 +257,8 @@ func setupLogger(cfg *config.Config, logger *supportlog.Entry) *supportlog.Entry
 		logger.UseJSONFormatter()
 	}
 	logger.WithFields(supportlog.F{
-		"version": version.Version,    //nolint:goconst // log field name, not a shared constant
-		"commit":  version.CommitHash, //nolint:goconst // log field name, not a shared constant
+		versionLabel: version.Version,
+		commitLabel:  version.CommitHash,
 	}).Info("starting Stellar RPC")
 	return logger
 }
