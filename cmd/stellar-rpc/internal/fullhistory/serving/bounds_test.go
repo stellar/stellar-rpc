@@ -9,20 +9,21 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
-// admittedRange builds an Admission with a fixed floor and watermark for bounds
-// tests — no catalog or snapshot needed, since ClampRange reads only those two.
-func admittedRange(floor chunk.ID, latest uint32) *Admission {
-	return &Admission{floor: floor, latest: latest}
+// admittedRange builds an Admission with floor chunk 5 (oldest ledger 50002) and
+// the given watermark — bounds tests read only those two fields, no catalog or
+// snapshot needed.
+func admittedRange(latest uint32) *Admission {
+	return &Admission{floor: 5, latest: latest}
 }
 
 func TestOldestLedger(t *testing.T) {
-	a := admittedRange(5, 60000)
+	a := admittedRange(60000)
 	assert.Equal(t, chunk.ID(5).FirstLedger(), a.OldestLedger()) // 50002
 }
 
 // floor chunk 5 → oldest 50002; watermark 60000. Admitted range [50002, 60000].
 func TestClampRange_Ascending(t *testing.T) {
-	a := admittedRange(5, 60000)
+	a := admittedRange(60000)
 	const oldest, latest = 50002, 60000
 
 	t.Run("leading edge below floor is rejected with the available range", func(t *testing.T) {
@@ -56,7 +57,7 @@ func TestClampRange_Ascending(t *testing.T) {
 }
 
 func TestClampRange_Descending(t *testing.T) {
-	a := admittedRange(5, 60000)
+	a := admittedRange(60000)
 	const oldest, latest = 50002, 60000
 
 	t.Run("leading (high) edge below floor is rejected", func(t *testing.T) {
@@ -78,5 +79,48 @@ func TestClampRange_Descending(t *testing.T) {
 		require.NoError(t, err) // leading (high) edge 59000 is in range
 		assert.Equal(t, uint32(oldest), lo, "scan terminates at the floor")
 		assert.Equal(t, uint32(59000), hi)
+	})
+}
+
+// floor chunk 5 (oldest 50002), latest chunk 7 mid (70500 → chunk 7). Chunks 5..7
+// overlap the admitted range.
+func TestChunksForRange(t *testing.T) {
+	a := admittedRange(70500) // latest in chunk 7
+
+	t.Run("ascending spans the overlapping chunks in order", func(t *testing.T) {
+		chunks, err := a.ChunksForRange(Ascending, chunk.ID(5).FirstLedger(), 70500)
+		require.NoError(t, err)
+		assert.Equal(t, []chunk.ID{5, 6, 7}, chunks)
+	})
+
+	t.Run("descending reverses the traversal", func(t *testing.T) {
+		chunks, err := a.ChunksForRange(Descending, chunk.ID(5).FirstLedger(), 70500)
+		require.NoError(t, err)
+		assert.Equal(t, []chunk.ID{7, 6, 5}, chunks)
+	})
+
+	t.Run("clamps then traverses: high edge beyond latest stops at latest's chunk", func(t *testing.T) {
+		// hi 999999 truncates to latest (chunk 7); lo in chunk 6.
+		chunks, err := a.ChunksForRange(Ascending, chunk.ID(6).FirstLedger(), 999999)
+		require.NoError(t, err)
+		assert.Equal(t, []chunk.ID{6, 7}, chunks)
+	})
+
+	t.Run("single chunk", func(t *testing.T) {
+		chunks, err := a.ChunksForRange(Ascending, 60005, 60050)
+		require.NoError(t, err)
+		assert.Equal(t, []chunk.ID{6}, chunks)
+	})
+
+	t.Run("leading edge below floor is rejected", func(t *testing.T) {
+		_, err := a.ChunksForRange(Ascending, 1000, 60000)
+		var re *RangeError
+		require.ErrorAs(t, err, &re)
+	})
+
+	t.Run("request beyond latest yields no chunks", func(t *testing.T) {
+		chunks, err := a.ChunksForRange(Ascending, 80000, 90000)
+		require.NoError(t, err)
+		assert.Empty(t, chunks)
 	})
 }

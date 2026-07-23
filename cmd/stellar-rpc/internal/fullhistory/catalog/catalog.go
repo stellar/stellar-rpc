@@ -174,6 +174,11 @@ func (c *Catalog) AllTxHashIndexKeys() ([]geometry.TxHashIndexCoverage, error) {
 	return c.txhashIndexKeysByPrefix(nil, geometry.TxHashIndexPrefix)
 }
 
+// AllTxHashIndexKeysAsOf is AllTxHashIndexKeys read through an admission snapshot.
+func (c *Catalog) AllTxHashIndexKeysAsOf(snap *rocksdb.Snapshot) ([]geometry.TxHashIndexCoverage, error) {
+	return c.txhashIndexKeysByPrefix(snap, geometry.TxHashIndexPrefix)
+}
+
 // FrozenTxHashIndex returns the index's UNIQUE "frozen" coverage — the key
 // readers resolve as "the index" — or ok=false if the index has none
 // yet. It asserts INV-2 (at most one frozen coverage per index at any moment)

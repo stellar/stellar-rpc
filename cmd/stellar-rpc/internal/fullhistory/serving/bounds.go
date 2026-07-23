@@ -1,6 +1,10 @@
 package serving
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
+)
 
 // Direction is a range request's scan direction.
 type Direction int
@@ -55,4 +59,40 @@ func (a *Admission) ClampRange(dir Direction, lo, hi uint32) (uint32, uint32, er
 		lo = oldest // terminate at the floor
 	}
 	return lo, hi, nil
+}
+
+// ChunksForRange clamps the requested ledger range (ClampRange) and returns the
+// chunks overlapping the clamped range in scan order — the sequence a range query
+// walks, resolving each chunk to its serving store. A leading edge below the floor
+// is rejected with *RangeError; an empty result means the request lies beyond
+// latest (nothing to serve yet). Each chunk belongs to exactly one serving store
+// per path, so multi-chunk results are concatenated, not merged.
+func (a *Admission) ChunksForRange(dir Direction, lo, hi uint32) ([]chunk.ID, error) {
+	lo, hi, err := a.ClampRange(dir, lo, hi)
+	if err != nil {
+		return nil, err
+	}
+	if lo > hi {
+		return nil, nil // entirely beyond latest
+	}
+	return chunkSeq(chunk.IDFromLedger(lo), chunk.IDFromLedger(hi), dir), nil
+}
+
+// chunkSeq returns the inclusive chunk ids from first..last in scan order
+// (first <= last). Descending counts down without underflowing at chunk 0.
+func chunkSeq(first, last chunk.ID, dir Direction) []chunk.ID {
+	out := make([]chunk.ID, 0, int(last-first)+1)
+	if dir == Descending {
+		for c := last; ; c-- {
+			out = append(out, c)
+			if c == first {
+				break
+			}
+		}
+		return out
+	}
+	for c := first; c <= last; c++ {
+		out = append(out, c)
+	}
+	return out
 }
