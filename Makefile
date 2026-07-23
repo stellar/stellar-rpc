@@ -71,10 +71,13 @@ Cargo.lock: Cargo.toml
 	cargo update --workspace
 
 # go install ./... would install binaries named after the package dirs (rpcv1,
-# rpcv2), so build each with -o to keep the installed names.
+# rpcv2), so build each with -o to keep the installed names. INSTALL_BIN mirrors
+# go install's destination: GOBIN when set, GOPATH/bin otherwise.
+INSTALL_BIN := $(or $(shell go env GOBIN),$(shell go env GOPATH)/bin)
+
 install: build-libs
-	go build -ldflags="${GOLDFLAGS}" -o "$$(go env GOPATH)/bin/${STELLAR_RPC_V1_BINARY}" ./cmd/stellar-rpc/rpcv1
-	go build -ldflags="${GOLDFLAGS}" -o "$$(go env GOPATH)/bin/${STELLAR_RPC_V2_BINARY}" ./cmd/stellar-rpc/rpcv2
+	go build -ldflags="${GOLDFLAGS}" -o "$(INSTALL_BIN)/${STELLAR_RPC_V1_BINARY}" ./cmd/stellar-rpc/rpcv1
+	go build -ldflags="${GOLDFLAGS}" -o "$(INSTALL_BIN)/${STELLAR_RPC_V2_BINARY}" ./cmd/stellar-rpc/rpcv2
 
 build: build-libs
 	go build -ldflags="${GOLDFLAGS}" ./...
