@@ -189,33 +189,6 @@ func (c *Catalog) FrozenTxHashIndexAsOf(
 	return c.frozenTxHashIndex(snap, w)
 }
 
-func (c *Catalog) frozenTxHashIndex(
-	snap *rocksdb.Snapshot, w geometry.TxHashIndexID,
-) (geometry.TxHashIndexCoverage, bool, error) {
-	covs, err := c.txhashIndexKeysByPrefix(snap, geometry.TxHashIndexPrefixFor(w))
-	if err != nil {
-		return geometry.TxHashIndexCoverage{}, false, err
-	}
-	var (
-		frozen geometry.TxHashIndexCoverage
-		found  bool
-	)
-	for _, candidate := range covs {
-		if candidate.State != geometry.StateFrozen {
-			continue
-		}
-		if found {
-			return geometry.TxHashIndexCoverage{}, false, fmt.Errorf(
-				"index %s has two frozen coverages (%s and %s) — "+
-					"uniqueness invariant violated",
-				w, frozen.Key, candidate.Key,
-			)
-		}
-		frozen, found = candidate, true
-	}
-	return frozen, found, nil
-}
-
 // FrozenIndexCoversRange reports whether index w's UNIQUE frozen coverage spans
 // the whole inclusive [lo, hi] chunk range. It reads through FrozenTxHashIndex,
 // so INV-2 (at most one frozen coverage per index) is asserted on every call.
@@ -276,6 +249,36 @@ func (r ArtifactRef) Key() string { return geometry.ChunkKey(r.Chunk, r.Kind) }
 func (c *Catalog) has(key string) (bool, error) {
 	_, ok, err := c.get(key)
 	return ok, err
+}
+
+// frozenTxHashIndex is the shared body for FrozenTxHashIndex and its snapshot
+// twin. It asserts INV-2 (at most one frozen coverage per index) by erroring on a
+// second frozen coverage — a detectable bug, not a tie-break to resolve.
+func (c *Catalog) frozenTxHashIndex(
+	snap *rocksdb.Snapshot, w geometry.TxHashIndexID,
+) (geometry.TxHashIndexCoverage, bool, error) {
+	covs, err := c.txhashIndexKeysByPrefix(snap, geometry.TxHashIndexPrefixFor(w))
+	if err != nil {
+		return geometry.TxHashIndexCoverage{}, false, err
+	}
+	var (
+		frozen geometry.TxHashIndexCoverage
+		found  bool
+	)
+	for _, candidate := range covs {
+		if candidate.State != geometry.StateFrozen {
+			continue
+		}
+		if found {
+			return geometry.TxHashIndexCoverage{}, false, fmt.Errorf(
+				"index %s has two frozen coverages (%s and %s) — "+
+					"uniqueness invariant violated",
+				w, frozen.Key, candidate.Key,
+			)
+		}
+		frozen, found = candidate, true
+	}
+	return frozen, found, nil
 }
 
 // hotChunkKeysWith returns the chunks whose hot-DB key matches keep, sorted

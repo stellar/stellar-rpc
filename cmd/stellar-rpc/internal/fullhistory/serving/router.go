@@ -6,6 +6,7 @@ package serving
 
 import (
 	"fmt"
+	"maps"
 	"sync"
 	"sync/atomic"
 
@@ -60,9 +61,7 @@ type hotHandles struct {
 // is already reading.
 func (h *hotHandles) clone() *hotHandles {
 	m := make(map[chunk.ID]*hotchunk.DB, len(h.byChunk))
-	for c, db := range h.byChunk {
-		m[c] = db
-	}
+	maps.Copy(m, h.byChunk)
 	return &hotHandles{byChunk: m}
 }
 

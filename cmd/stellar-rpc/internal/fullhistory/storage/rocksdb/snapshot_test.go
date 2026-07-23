@@ -179,7 +179,7 @@ func TestStore_CloseIfIdle_IdleTearsDown(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ok, "an idle store closes immediately")
 	assert.True(t, s.IsClosed())
-	assert.ErrorIs(t, s.Put("", []byte("k"), []byte("v")), ErrStoreClosed)
+	require.ErrorIs(t, s.Put("", []byte("k"), []byte("v")), ErrStoreClosed)
 
 	// Retry after teardown, and a plain Close, are both safe no-ops.
 	ok, err = s.CloseIfIdle()
@@ -229,7 +229,7 @@ func TestStore_CloseIfIdle_BusyReportsFailureWithoutBlocking(t *testing.T) {
 
 	// The store is poisoned even though teardown did not run: new ops fail.
 	assert.True(t, s.IsClosed())
-	assert.ErrorIs(t, s.Put("", []byte("x"), []byte("v")), ErrStoreClosed)
+	require.ErrorIs(t, s.Put("", []byte("x"), []byte("v")), ErrStoreClosed)
 
 	// Let the parked iterator drain, then a retry completes the teardown.
 	close(releaseIter)
