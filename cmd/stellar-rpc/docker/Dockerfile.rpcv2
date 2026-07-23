@@ -1,6 +1,8 @@
 # All stages use ubuntu:24.04 so shared libs built in one stage work in any
 # other (same glibc). zstd and RocksDB are built from source to pin versions;
 # Go and Rust come from upstream tarballs (there's no golang:1.26-noble image).
+# Note: v1 (Dockerfile) ships on ubuntu:22.04, its long-standing production base —
+# the 22.04/24.04 divergence between the two images is deliberate.
 
 # --- Stage 1: zstd ---
 FROM ubuntu:24.04 AS zstd-build

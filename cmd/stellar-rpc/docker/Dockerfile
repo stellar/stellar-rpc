@@ -1,3 +1,5 @@
+# Runtime is ubuntu:22.04 (jammy) with jammy stellar-core packages — v1's long-standing
+# production base, kept as-is. v2 (Dockerfile.rpcv2) ships on 24.04; divergence is deliberate.
 FROM golang:1.26-bookworm AS build
 ARG RUST_TOOLCHAIN_VERSION=stable
 ARG REPOSITORY_VERSION
