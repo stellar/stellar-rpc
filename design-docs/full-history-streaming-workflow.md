@@ -42,7 +42,7 @@ All chunk and window ids use uniform `%08d` zero-padding. Example (window = 1,00
 
 ## Configuration
 
-One TOML file configures the daemon, passed as `--config` to the `full-history` subcommand (`stellar-rpc full-history --config <path>`). Decoding is strict: an unknown key or section is a startup error, so a stale or mistyped config fails loudly instead of being half-read.
+One TOML file configures the daemon, passed as `--config` to the v2 binary (`stellar-rpc-v2 --config <path>`). Decoding is strict: an unknown key or section is a startup error, so a stale or mistyped config fails loudly instead of being half-read.
 
 **[service]**
 

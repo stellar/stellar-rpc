@@ -17,11 +17,11 @@ import (
 	"github.com/stellar/go-stellar-sdk/toid"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 type transactionsRPCHandler struct {
-	ledgerReader      db.LedgerReader
+	ledgerReader      store.LedgerReader
 	maxLimit          uint
 	defaultLimit      uint
 	logger            *log.Entry
@@ -70,7 +70,7 @@ func (h transactionsRPCHandler) initializePagination(request protocol.GetTransac
 
 // fetchLedgerData calls the meta table to fetch the corresponding ledger data.
 func (h transactionsRPCHandler) fetchLedgerData(ctx context.Context, ledgerSeq uint32,
-	readTx db.LedgerReaderTx,
+	readTx store.LedgerReaderTx,
 ) (xdr.LedgerCloseMeta, error) {
 	ledger, found, err := readTx.GetLedger(ctx, ledgerSeq)
 	if err != nil {
@@ -90,7 +90,7 @@ func (h transactionsRPCHandler) fetchLedgerData(ctx context.Context, ledgerSeq u
 // processTransactionsInLedger cycles through all the transactions in a ledger, extracts the transaction info
 // and builds the list of transactions.
 //
-//nolint:cyclop
+//nolint:cyclop,funlen // one linear pagination pass; splitting would scatter the cursor math
 func (h transactionsRPCHandler) processTransactionsInLedger(
 	ledger xdr.LedgerCloseMeta, start toid.ID,
 	txns *[]protocol.TransactionInfo, limit uint,
@@ -141,7 +141,7 @@ func (h transactionsRPCHandler) processTransactionsInLedger(
 			}
 		}
 
-		tx, err := db.ParseTransaction(ledger, ingestTx)
+		tx, err := store.ParseTransaction(ledger, ingestTx)
 		if err != nil {
 			return nil, false, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
@@ -255,6 +255,7 @@ func (h transactionsRPCHandler) getTransactionsByLedgerSequence(ctx context.Cont
 	txns := make([]protocol.TransactionInfo, 0, limit)
 	var done bool
 	cursor := toid.New(0, 0, 0)
+	//nolint:gosec // TOID ledger sequences are int32 by design; uint32 overflow needs a 2^31 ledger
 	for ledgerSeq := start.LedgerSequence; ledgerSeq <= int32(ledgerRange.LastLedger.Sequence); ledgerSeq++ {
 		if ledgerSeq < 0 {
 			return protocol.GetTransactionsResponse{}, &jrpc2.Error{
@@ -286,7 +287,7 @@ func (h transactionsRPCHandler) getTransactionsByLedgerSequence(ctx context.Cont
 	}, nil
 }
 
-func NewGetTransactionsHandler(logger *log.Entry, ledgerReader db.LedgerReader, maxLimit,
+func NewGetTransactionsHandler(logger *log.Entry, ledgerReader store.LedgerReader, maxLimit,
 	defaultLimit uint, networkPassphrase string,
 ) jrpc2.Handler {
 	transactionsHandler := transactionsRPCHandler{

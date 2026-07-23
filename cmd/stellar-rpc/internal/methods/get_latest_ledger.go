@@ -9,11 +9,11 @@ import (
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 // NewGetLatestLedgerHandler returns a JSON RPC handler to retrieve the latest ledger entry from Stellar core.
-func NewGetLatestLedgerHandler(ledgerReader db.LedgerReader) jrpc2.Handler {
+func NewGetLatestLedgerHandler(ledgerReader store.LedgerReader) jrpc2.Handler {
 	coreHandler := func(ctx context.Context, _ protocol.GetLatestLedgerRequest,
 	) (protocol.GetLatestLedgerResponse, error) {
 		latestSequence, err := ledgerReader.GetLatestLedgerSequence(ctx)

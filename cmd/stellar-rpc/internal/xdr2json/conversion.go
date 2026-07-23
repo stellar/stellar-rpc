@@ -33,7 +33,7 @@ import (
 // we only use it to determine the name of the structure. We could just
 // accept a string, but that would make mistakes likelier than passing the
 // structure itself (by reference).
-func ConvertBytes(xdr interface{}, field []byte) (json.RawMessage, error) {
+func ConvertBytes(xdr any, field []byte) (json.RawMessage, error) {
 	if len(field) == 0 {
 		return []byte(""), nil
 	}

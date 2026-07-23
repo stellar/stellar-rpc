@@ -15,8 +15,8 @@ import (
 	"github.com/stellar/go-stellar-sdk/toid"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
 )
 
 const (
@@ -45,7 +45,7 @@ var expectedTransactionInfo = protocol.TransactionInfo{
 func TestGetTransactions_DefaultLimit(t *testing.T) { //nolint:dupl
 	testDB := setupDB(t, 10, 0)
 	handler := transactionsRPCHandler{
-		ledgerReader:      db.NewLedgerReader(testDB),
+		ledgerReader:      sqlitedb.NewLedgerReader(testDB),
 		maxLimit:          100,
 		defaultLimit:      10,
 		networkPassphrase: NetworkPassphrase,
@@ -75,7 +75,7 @@ func TestGetTransactions_DefaultLimit(t *testing.T) { //nolint:dupl
 func TestGetTransactions_DefaultLimitExceedsLatestLedger(t *testing.T) { //nolint:dupl
 	testDB := setupDB(t, 3, 0)
 	handler := transactionsRPCHandler{
-		ledgerReader:      db.NewLedgerReader(testDB),
+		ledgerReader:      sqlitedb.NewLedgerReader(testDB),
 		maxLimit:          100,
 		defaultLimit:      10,
 		networkPassphrase: NetworkPassphrase,
@@ -97,7 +97,7 @@ func TestGetTransactions_DefaultLimitExceedsLatestLedger(t *testing.T) { //nolin
 func TestGetTransactions_CustomLimit(t *testing.T) {
 	testDB := setupDB(t, 10, 0)
 	handler := transactionsRPCHandler{
-		ledgerReader:      db.NewLedgerReader(testDB),
+		ledgerReader:      sqlitedb.NewLedgerReader(testDB),
 		maxLimit:          100,
 		defaultLimit:      10,
 		networkPassphrase: NetworkPassphrase,
@@ -124,7 +124,7 @@ func TestGetTransactions_CustomLimit(t *testing.T) {
 func TestGetTransactions_CustomLimitAndCursor(t *testing.T) {
 	testDB := setupDB(t, 10, 0)
 	handler := transactionsRPCHandler{
-		ledgerReader:      db.NewLedgerReader(testDB),
+		ledgerReader:      sqlitedb.NewLedgerReader(testDB),
 		maxLimit:          100,
 		defaultLimit:      10,
 		networkPassphrase: NetworkPassphrase,
@@ -151,7 +151,7 @@ func TestGetTransactions_CustomLimitAndCursor(t *testing.T) {
 func TestGetTransactions_InvalidStartLedger(t *testing.T) {
 	testDB := setupDB(t, 3, 0)
 	handler := transactionsRPCHandler{
-		ledgerReader:      db.NewLedgerReader(testDB),
+		ledgerReader:      sqlitedb.NewLedgerReader(testDB),
 		maxLimit:          100,
 		defaultLimit:      10,
 		networkPassphrase: NetworkPassphrase,
@@ -174,7 +174,7 @@ func TestGetTransactions_InvalidStartLedger(t *testing.T) {
 func TestGetTransactions_LedgerNotFound(t *testing.T) {
 	testDB := setupDB(t, 3, 2)
 	handler := transactionsRPCHandler{
-		ledgerReader:      db.NewLedgerReader(testDB),
+		ledgerReader:      sqlitedb.NewLedgerReader(testDB),
 		maxLimit:          100,
 		defaultLimit:      10,
 		networkPassphrase: NetworkPassphrase,
@@ -193,7 +193,7 @@ func TestGetTransactions_LedgerNotFound(t *testing.T) {
 func TestGetTransactions_LimitGreaterThanMaxLimit(t *testing.T) {
 	testDB := setupDB(t, 3, 0)
 	handler := transactionsRPCHandler{
-		ledgerReader:      db.NewLedgerReader(testDB),
+		ledgerReader:      sqlitedb.NewLedgerReader(testDB),
 		maxLimit:          100,
 		defaultLimit:      10,
 		networkPassphrase: NetworkPassphrase,
@@ -214,7 +214,7 @@ func TestGetTransactions_LimitGreaterThanMaxLimit(t *testing.T) {
 func TestGetTransactions_InvalidCursorString(t *testing.T) {
 	testDB := setupDB(t, 3, 0)
 	handler := transactionsRPCHandler{
-		ledgerReader:      db.NewLedgerReader(testDB),
+		ledgerReader:      sqlitedb.NewLedgerReader(testDB),
 		maxLimit:          100,
 		defaultLimit:      10,
 		networkPassphrase: NetworkPassphrase,
@@ -234,7 +234,7 @@ func TestGetTransactions_InvalidCursorString(t *testing.T) {
 func TestGetTransactions_JSONFormat(t *testing.T) {
 	testDB := setupDB(t, 3, 0)
 	handler := transactionsRPCHandler{
-		ledgerReader:      db.NewLedgerReader(testDB),
+		ledgerReader:      sqlitedb.NewLedgerReader(testDB),
 		maxLimit:          100,
 		defaultLimit:      10,
 		networkPassphrase: NetworkPassphrase,
@@ -254,7 +254,7 @@ func TestGetTransactions_JSONFormat(t *testing.T) {
 	jsBytes, err := json.Marshal(txResp)
 	require.NoError(t, err)
 
-	var tx map[string]interface{}
+	var tx map[string]any
 	require.NoError(t, json.Unmarshal(jsBytes, &tx))
 
 	require.Nilf(t, tx["envelopeXdr"], "field: 'envelopeXdr'")
@@ -268,7 +268,7 @@ func TestGetTransactions_JSONFormat(t *testing.T) {
 func TestGetTransactions_NoResults(t *testing.T) {
 	testDB := setupDBNoTxs(t, 5)
 	handler := transactionsRPCHandler{
-		ledgerReader:      db.NewLedgerReader(testDB),
+		ledgerReader:      sqlitedb.NewLedgerReader(testDB),
 		maxLimit:          100,
 		defaultLimit:      10,
 		networkPassphrase: NetworkPassphrase,
@@ -308,15 +308,15 @@ func createEmptyTestLedger(sequence uint32) xdr.LedgerCloseMeta {
 	return emptyTxMeta(sequence)
 }
 
-func setupDB(t *testing.T, numLedgers int, skipLedger int) *db.DB {
+func setupDB(t *testing.T, numLedgers int, skipLedger int) *sqlitedb.DB {
 	testDB := NewTestDB(t)
-	daemon := interfaces.MakeNoOpDeamon()
+	daemon := host.MakeNoOpDaemon()
 	for sequence := 1; sequence <= numLedgers; sequence++ {
 		if sequence == skipLedger {
 			continue
 		}
 		ledgerCloseMeta := createTestLedger(uint32(sequence))
-		tx, err := db.NewReadWriter(log.DefaultLogger, testDB, daemon, 100, passphrase).NewTx(t.Context())
+		tx, err := sqlitedb.NewReadWriter(log.DefaultLogger, testDB, daemon, 100, passphrase).NewTx(t.Context())
 		require.NoError(t, err)
 		require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
 		require.NoError(t, tx.Commit(ledgerCloseMeta, nil))
@@ -324,13 +324,13 @@ func setupDB(t *testing.T, numLedgers int, skipLedger int) *db.DB {
 	return testDB
 }
 
-func setupDBNoTxs(t *testing.T, numLedgers int) *db.DB {
+func setupDBNoTxs(t *testing.T, numLedgers int) *sqlitedb.DB {
 	testDB := NewTestDB(t)
-	daemon := interfaces.MakeNoOpDeamon()
+	daemon := host.MakeNoOpDaemon()
 	for sequence := 1; sequence <= numLedgers; sequence++ {
 		ledgerCloseMeta := createEmptyTestLedger(uint32(sequence))
 
-		tx, err := db.NewReadWriter(log.DefaultLogger, testDB, daemon, 100, passphrase).NewTx(t.Context())
+		tx, err := sqlitedb.NewReadWriter(log.DefaultLogger, testDB, daemon, 100, passphrase).NewTx(t.Context())
 		require.NoError(t, err)
 		require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
 		require.NoError(t, tx.Commit(ledgerCloseMeta, nil))

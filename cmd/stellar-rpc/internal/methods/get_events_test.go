@@ -20,14 +20,14 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 )
 
 var passphrase = "passphrase"
 
-//nolint:funlen
+//nolint:funlen,maintidx // one declarative case table; length is the test's inventory
 func TestGetEvents(t *testing.T) {
 	now := time.Now().UTC()
 	counter := xdr.ScSymbol("COUNTER")
@@ -42,11 +42,11 @@ func TestGetEvents(t *testing.T) {
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
 
-		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
+		writer := sqlitedb.NewReadWriter(log, dbx, host.MakeNoOpDaemon(), 10, passphrase)
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := db.NewEventReader(log, dbx, passphrase)
+		store := sqlitedb.NewEventReader(log, dbx, passphrase)
 
 		var txMeta []xdr.TransactionMeta
 		txMeta = append(txMeta, transactionMetaWithEvents(
@@ -72,7 +72,7 @@ func TestGetEvents(t *testing.T) {
 			dbReader:     store,
 			maxLimit:     10000,
 			defaultLimit: 100,
-			ledgerReader: db.NewLedgerReader(dbx),
+			ledgerReader: sqlitedb.NewLedgerReader(dbx),
 		}
 		_, err = handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
@@ -91,12 +91,12 @@ func TestGetEvents(t *testing.T) {
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
 
-		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
+		writer := sqlitedb.NewReadWriter(log, dbx, host.MakeNoOpDaemon(), 10, passphrase)
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := db.NewEventReader(log, dbx, passphrase)
+		store := sqlitedb.NewEventReader(log, dbx, passphrase)
 
 		contractID := xdr.ContractId([32]byte{})
 		var txMeta []xdr.TransactionMeta
@@ -125,7 +125,7 @@ func TestGetEvents(t *testing.T) {
 			dbReader:     store,
 			maxLimit:     10000,
 			defaultLimit: 100,
-			ledgerReader: db.NewLedgerReader(dbx),
+			ledgerReader: sqlitedb.NewLedgerReader(dbx),
 		}
 		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
@@ -181,12 +181,12 @@ func TestGetEvents(t *testing.T) {
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
 
-		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
+		writer := sqlitedb.NewReadWriter(log, dbx, host.MakeNoOpDaemon(), 10, passphrase)
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := db.NewEventReader(log, dbx, passphrase)
+		store := sqlitedb.NewEventReader(log, dbx, passphrase)
 
 		var txMeta []xdr.TransactionMeta
 		contractIDs := []xdr.ContractId{
@@ -218,7 +218,7 @@ func TestGetEvents(t *testing.T) {
 			dbReader:     store,
 			maxLimit:     10000,
 			defaultLimit: 100,
-			ledgerReader: db.NewLedgerReader(dbx),
+			ledgerReader: sqlitedb.NewLedgerReader(dbx),
 		}
 		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
@@ -247,12 +247,12 @@ func TestGetEvents(t *testing.T) {
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
 
-		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
+		writer := sqlitedb.NewReadWriter(log, dbx, host.MakeNoOpDaemon(), 10, passphrase)
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := db.NewEventReader(log, dbx, passphrase)
+		store := sqlitedb.NewEventReader(log, dbx, passphrase)
 
 		var txMeta []xdr.TransactionMeta
 		contractID := xdr.ContractId([32]byte{})
@@ -281,7 +281,7 @@ func TestGetEvents(t *testing.T) {
 			dbReader:     store,
 			maxLimit:     10000,
 			defaultLimit: 100,
-			ledgerReader: db.NewLedgerReader(dbx),
+			ledgerReader: sqlitedb.NewLedgerReader(dbx),
 		}
 		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
@@ -387,12 +387,12 @@ func TestGetEvents(t *testing.T) {
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
 
-		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
+		writer := sqlitedb.NewReadWriter(log, dbx, host.MakeNoOpDaemon(), 10, passphrase)
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := db.NewEventReader(log, dbx, passphrase)
+		store := sqlitedb.NewEventReader(log, dbx, passphrase)
 
 		var txMeta []xdr.TransactionMeta
 		contractID := xdr.ContractId([32]byte{})
@@ -424,7 +424,7 @@ func TestGetEvents(t *testing.T) {
 			dbReader:     store,
 			maxLimit:     10000,
 			defaultLimit: 100,
-			ledgerReader: db.NewLedgerReader(dbx),
+			ledgerReader: sqlitedb.NewLedgerReader(dbx),
 		}
 
 		id := protocol.Cursor{Ledger: 1, Tx: 5, Op: 0, Event: 0}.String()
@@ -583,12 +583,12 @@ func TestGetEvents(t *testing.T) {
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
 
-		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
+		writer := sqlitedb.NewReadWriter(log, dbx, host.MakeNoOpDaemon(), 10, passphrase)
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := db.NewEventReader(log, dbx, passphrase)
+		store := sqlitedb.NewEventReader(log, dbx, passphrase)
 
 		contractID := xdr.ContractId([32]byte{})
 		otherContractID := xdr.ContractId([32]byte{1})
@@ -647,7 +647,7 @@ func TestGetEvents(t *testing.T) {
 			dbReader:     store,
 			maxLimit:     10000,
 			defaultLimit: 100,
-			ledgerReader: db.NewLedgerReader(dbx),
+			ledgerReader: sqlitedb.NewLedgerReader(dbx),
 		}
 		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
@@ -708,11 +708,11 @@ func TestGetEvents(t *testing.T) {
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
 
-		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
+		writer := sqlitedb.NewReadWriter(log, dbx, host.MakeNoOpDaemon(), 10, passphrase)
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := db.NewEventReader(log, dbx, passphrase)
+		store := sqlitedb.NewEventReader(log, dbx, passphrase)
 
 		contractID := xdr.ContractId([32]byte{})
 		txMeta := []xdr.TransactionMeta{
@@ -749,12 +749,12 @@ func TestGetEvents(t *testing.T) {
 			dbReader:     store,
 			maxLimit:     10000,
 			defaultLimit: 100,
-			ledgerReader: db.NewLedgerReader(dbx),
+			ledgerReader: sqlitedb.NewLedgerReader(dbx),
 		}
 		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
 			Filters: []protocol.EventFilter{
-				{EventType: map[string]interface{}{protocol.EventTypeSystem: nil}},
+				{EventType: map[string]any{protocol.EventTypeSystem: nil}},
 			},
 		})
 		require.NoError(t, err)
@@ -797,12 +797,12 @@ func TestGetEvents(t *testing.T) {
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
 
-		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
+		writer := sqlitedb.NewReadWriter(log, dbx, host.MakeNoOpDaemon(), 10, passphrase)
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := db.NewEventReader(log, dbx, passphrase)
+		store := sqlitedb.NewEventReader(log, dbx, passphrase)
 
 		contractID := xdr.ContractId([32]byte{})
 		var txMeta []xdr.TransactionMeta
@@ -827,7 +827,7 @@ func TestGetEvents(t *testing.T) {
 			dbReader:     store,
 			maxLimit:     10000,
 			defaultLimit: 100,
-			ledgerReader: db.NewLedgerReader(dbx),
+			ledgerReader: sqlitedb.NewLedgerReader(dbx),
 		}
 		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
@@ -881,12 +881,12 @@ func TestGetEvents(t *testing.T) {
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
 
-		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
+		writer := sqlitedb.NewReadWriter(log, dbx, host.MakeNoOpDaemon(), 10, passphrase)
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := db.NewEventReader(log, dbx, passphrase)
+		store := sqlitedb.NewEventReader(log, dbx, passphrase)
 
 		contractID := xdr.ContractId([32]byte{})
 		datas := []xdr.ScSymbol{
@@ -940,7 +940,7 @@ func TestGetEvents(t *testing.T) {
 			dbReader:     store,
 			maxLimit:     10000,
 			defaultLimit: 100,
-			ledgerReader: db.NewLedgerReader(dbx),
+			ledgerReader: sqlitedb.NewLedgerReader(dbx),
 		}
 		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			Pagination: &protocol.PaginationOptions{
@@ -1022,12 +1022,12 @@ func BenchmarkGetEventsTopicFilters(b *testing.B) {
 	log.SetLevel(logrus.ErrorLevel)
 
 	dbx := newTestDB(b)
-	writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
+	writer := sqlitedb.NewReadWriter(log, dbx, host.MakeNoOpDaemon(), 10, passphrase)
 	write, err := writer.NewTx(ctx)
 	require.NoError(b, err)
 
 	ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-	store := db.NewEventReader(log, dbx, passphrase)
+	store := sqlitedb.NewEventReader(log, dbx, passphrase)
 
 	const (
 		totalEvents     = 5000
@@ -1089,7 +1089,7 @@ func BenchmarkGetEventsTopicFilters(b *testing.B) {
 		dbReader:     store,
 		maxLimit:     10000,
 		defaultLimit: 1000,
-		ledgerReader: db.NewLedgerReader(dbx),
+		ledgerReader: sqlitedb.NewLedgerReader(dbx),
 	}
 
 	req := protocol.GetEventsRequest{
@@ -1116,11 +1116,11 @@ func BenchmarkGetEvents(b *testing.B) {
 	ctx := context.TODO()
 	log := log.DefaultLogger
 	log.SetLevel(logrus.TraceLevel)
-	store := db.NewEventReader(log, dbx, passphrase)
+	store := sqlitedb.NewEventReader(log, dbx, passphrase)
 	contractID := xdr.ContractId([32]byte{})
 	now := time.Now().UTC()
 
-	writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
+	writer := sqlitedb.NewReadWriter(log, dbx, host.MakeNoOpDaemon(), 10, passphrase)
 
 	for i := range []int{1, 2, 3} {
 		write, err := writer.NewTx(ctx)
@@ -1139,7 +1139,7 @@ func BenchmarkGetEvents(b *testing.B) {
 		dbReader:     store,
 		maxLimit:     10000,
 		defaultLimit: 100,
-		ledgerReader: db.NewLedgerReader(dbx),
+		ledgerReader: sqlitedb.NewLedgerReader(dbx),
 	}
 
 	request := protocol.GetEventsRequest{
@@ -1250,11 +1250,11 @@ func setupTwoContractEventsHandler(t *testing.T) (eventsRPCHandler, xdr.Contract
 	ctx := context.TODO()
 	logger := log.DefaultLogger
 
-	writer := db.NewReadWriter(logger, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
+	writer := sqlitedb.NewReadWriter(logger, dbx, host.MakeNoOpDaemon(), 10, passphrase)
 	write, err := writer.NewTx(ctx)
 	require.NoError(t, err)
 	ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-	store := db.NewEventReader(logger, dbx, passphrase)
+	store := sqlitedb.NewEventReader(logger, dbx, passphrase)
 
 	txMeta := []xdr.TransactionMeta{
 		transactionMetaWithEvents(
@@ -1282,7 +1282,7 @@ func setupTwoContractEventsHandler(t *testing.T) (eventsRPCHandler, xdr.Contract
 		dbReader:     store,
 		maxLimit:     10000,
 		defaultLimit: 100,
-		ledgerReader: db.NewLedgerReader(dbx),
+		ledgerReader: sqlitedb.NewLedgerReader(dbx),
 	}, contractA, contractB
 }
 
@@ -1491,10 +1491,10 @@ func diagnosticEvent(contractID xdr.ContractId, topic []xdr.ScVal, body xdr.ScVa
 	}
 }
 
-func newTestDB(tb testing.TB) *db.DB {
+func newTestDB(tb testing.TB) *sqlitedb.DB {
 	tmp := tb.TempDir()
 	dbPath := path.Join(tmp, "dbx.sqlite")
-	db, err := db.OpenSQLiteDB(dbPath)
+	db, err := sqlitedb.OpenSQLiteDB(dbPath)
 	require.NoError(tb, err)
 	tb.Cleanup(func() {
 		require.NoError(tb, db.Close())

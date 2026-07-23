@@ -95,7 +95,7 @@ jobs:
       POLL_INTERVAL: ${{ inputs.poll_interval }}
       DEBUG_LOG_LINES: 40
       DEBUG_LOG_EVERY_POLLS: 5
-      PERF_EVAL_DIR: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval
+      PERF_EVAL_DIR: cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval
       LEG_SCRIPT: ${{ inputs.leg_script }}
       BUCKET: stellar-rpc-ci-load-test
       RESULT_KEY: runs/${{ github.run_id }}/${{ inputs.run_label }}/result.json # deterministic per run + leg
