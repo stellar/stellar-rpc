@@ -84,14 +84,11 @@ func (d *DB) ResetCache() {
 const serveSQLitePragmas = "_journal_mode=WAL&_wal_autocheckpoint=0&_synchronous=NORMAL"
 
 // Backfill DSN pragmas. synchronous=OFF is safe since backfill is restartable
-// and gap-checked; the 1 GiB cache leaves most RAM to the OS page cache.
-const backfillSQLitePragmas = "_journal_mode=WAL&_wal_autocheckpoint=0&_synchronous=OFF" +
-	"&_cache_size=-1048576" // 1 GiB page cache (negative value = KiB)
+// + gap-checked and the 1 GiB cache leaves most RAM to the OS page cache.
+const backfillSQLitePragmas = "_journal_mode=WAL&_wal_autocheckpoint=0&_synchronous=OFF" + "&_cache_size=-1048576"
 
-// Index-build DSN pragmas. A large cache feeds the CREATE INDEX sorter;
-// default temp_store spills large sorts to disk.
-const indexBuildSQLitePragmas = "_journal_mode=WAL&_wal_autocheckpoint=0&_synchronous=NORMAL" +
-	"&_cache_size=-2097152" // 2 GiB page cache (negative value = KiB)
+// Index-build DSN pragmas. A large cache feeds the CREATE INDEX sorter.
+const indexBuildSQLitePragmas = serveSQLitePragmas + "&_cache_size=-2097152" // 2 GiB page cache
 
 func openSQLiteDB(dbFilePath string) (*db.Session, error) {
 	session, err := db.Open("sqlite3", fmt.Sprintf("file:%s?%s", dbFilePath, serveSQLitePragmas))
