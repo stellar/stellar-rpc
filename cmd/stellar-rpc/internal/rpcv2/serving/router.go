@@ -131,6 +131,20 @@ func (r *Router) DiscardHandle(c chunk.ID) *hotchunk.DB {
 	return db
 }
 
+// Close closes every published hot handle and clears the set, flushing each DB on
+// the way out. Called once on clean shutdown, after ingestion and lifecycle have
+// stopped, so nothing races it; handle Close is idempotent, so the live chunk
+// (also closed by the ingestion loop) double-closes harmlessly. The catalog is
+// caller-owned and is not closed here.
+func (r *Router) Close() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, db := range r.handles.Load().byChunk {
+		_ = db.Close()
+	}
+	r.handles.Store(&hotHandles{byChunk: map[chunk.ID]*hotchunk.DB{}})
+}
+
 // Admission is one query's consistent view of serving state, held for the
 // request's lifetime and released when it completes. It carries the admitted
 // watermark and retention floor, the handle set loaded at admission, and the

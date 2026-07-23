@@ -193,6 +193,29 @@ func TestHotHandles_CopyOnWrite(t *testing.T) {
 	assert.True(t, live6)
 }
 
+// TestClose_ClosesAndClearsHandles pins that shutdown closes every published hot
+// handle and empties the set. The handles are real on-disk DBs so Close flushes;
+// a second Close (the idempotent live-chunk case) is a no-op.
+func TestClose_ClosesAndClearsHandles(t *testing.T) {
+	cat := openTestCatalog(t, silentLogger())
+	r := NewRouter(cat, geometry.NewRetention(0, 0))
+	for _, c := range []chunk.ID{5, 6} {
+		makeReadyHotChunk(t, cat, c)
+		db, err := hotchunk.OpenExisting(cat.Layout().HotChunkPath(c), c, silentLogger())
+		require.NoError(t, err)
+		r.PublishHandle(c, db)
+	}
+
+	r.Close()
+
+	_, ok5 := r.Handle(5)
+	_, ok6 := r.Handle(6)
+	assert.False(t, ok5, "handles cleared on close")
+	assert.False(t, ok6, "handles cleared on close")
+
+	r.Close() // idempotent: closing an already-closed, emptied router is safe
+}
+
 // TestAdmit_ReleaseFreesSnapshot pins that Release returns the snapshot, so a
 // clean admit/release cycle leaves no leak at catalog close.
 func TestAdmit_ReleaseFreesSnapshot(t *testing.T) {

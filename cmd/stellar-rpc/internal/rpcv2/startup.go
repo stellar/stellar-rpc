@@ -128,6 +128,10 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// run — no query survives a restart, so a fresh router each run is fine.
 	router := serving.NewRouter(cat, cfg.Retention)
 	cfg.Exec.Process.HotHandle = router.Handle
+	// Close the router's hot handles on the way out (after g.Wait joins the loops
+	// below), flushing each completed chunk the router still holds. The live
+	// chunk is also closed by the ingestion loop; handle Close is idempotent.
+	defer router.Close()
 
 	// Before serving: destroy any resources a crashed run left demoted, then open
 	// and publish the handles for ready hot chunks below the live one (completed
