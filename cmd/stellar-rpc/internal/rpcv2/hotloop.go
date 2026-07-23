@@ -120,10 +120,14 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 	metrics := observability.MetricsOrNop(cfg.Metrics)
 
 	// Take ownership of the resume hot DB run() opened as the loop's FIRST statement,
-	// so the deferred close sits ahead of any early return. hotDB always points at
-	// the LIVE chunk (reassigned at each boundary), so the defer closes only the live
-	// chunk on exit; completed chunks are owned by the router (live loop) or were
-	// closed at their boundary (bounded loop). No writer races the close — the loop
+	// so the deferred close sits ahead of any early return. hotDB tracks the current
+	// write target, reassigned at each boundary; on a normal exit that is the live
+	// chunk, and completed chunks are the router's to close (live loop) or were
+	// closed at their boundary (bounded loop). The exception is a boundary whose
+	// openHotDBForChunk fails: hotDB still points at the just-completed, router-
+	// published chunk, so the defer closes a handle the router also holds — harmless,
+	// since Close is blocking (drains any in-flight freeze read) and idempotent, and
+	// the ensuing restart rebuilds the router. No writer races the close — the loop
 	// has stopped on every exit path.
 	hotDB := cfg.HotDB
 	defer func() {

@@ -429,10 +429,13 @@ func (s *Store) NewSnapshot() (*Snapshot, error) {
 	return &Snapshot{snap: s.db.NewSnapshot()}, nil
 }
 
-// ReleaseSnapshot releases a snapshot acquired from NewSnapshot. Nil-safe and
-// idempotent. If the store already tore down its C DB, the release is skipped:
-// teardown already freed the snapshot along with the DB, so there is nothing
-// left to release.
+// ReleaseSnapshot releases a snapshot acquired from NewSnapshot. Nil-safe, and
+// idempotent for the owning request (a second sequential release is a no-op).
+// Releasing the same snapshot from two goroutines at once is NOT safe — it would
+// double-free and skew snapRefs — but the one-snapshot-per-admission contract
+// precludes it. If the store already tore down its C DB, the release is skipped:
+// teardown already freed the snapshot along with the DB, so there is nothing left
+// to release.
 func (s *Store) ReleaseSnapshot(snap *Snapshot) {
 	if snap == nil || snap.snap == nil {
 		return

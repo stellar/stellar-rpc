@@ -91,9 +91,11 @@ func (c *Catalog) prefixScan(prefix string) iter.Seq2[kvEntry, error] {
 // Shared body for prefixScan and the *AsOf scans.
 func (c *Catalog) prefixScanAsOf(snap *rocksdb.Snapshot, prefix string) iter.Seq2[kvEntry, error] {
 	return func(yield func(kvEntry, error) bool) {
-		src := c.store.Iterate("", []byte(prefix))
+		var src iter.Seq2[rocksdb.Entry, error]
 		if snap != nil {
 			src = c.store.IterateAsOf(snap, "", []byte(prefix))
+		} else {
+			src = c.store.Iterate("", []byte(prefix))
 		}
 		for e, err := range src {
 			if err != nil {
