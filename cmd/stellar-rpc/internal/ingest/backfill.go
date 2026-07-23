@@ -362,8 +362,8 @@ func (b *BackfillMeta) frontfillChunks(ctx context.Context, bounds fillBounds) e
 // Returns a buffered storage backend for the given datastore
 func makeBackend(dsInfo datastoreInfo) (ledgerbackend.LedgerBackend, error) {
 	ledgersPerFile := dsInfo.schema.LedgersPerFile
-	bufferSize := max(1024/ledgersPerFile, 10) // use fewer files if many ledgers per file
-	numWorkers := max(bufferSize/10, 5)        // approx. 1 worker per 10 buffered files
+	bufferSize := min(max(1024/ledgersPerFile, 10), 256) // use many files if few ledgers per file, cap at 256
+	numWorkers := max(bufferSize/10, 5)                  // approx. 1 worker per 10 buffered files
 	return ledgerbackend.NewBufferedStorageBackend(
 		ledgerbackend.BufferedStorageBackendConfig{
 			BufferSize: bufferSize, // number of files to buffer

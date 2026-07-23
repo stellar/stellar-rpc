@@ -275,6 +275,13 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 		logger.WithField("duration", time.Since(topUpStart).String()).
 			Info("Post-finalize frontfill top-up complete")
 	}
+	// Settle point: captive core's catchup allocates several GB while the
+	// kernel may still hold a large dirty-page backlog from the bulk writes
+	if _, err := daemon.db.ExecRaw(context.Background(), "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		logger.WithError(err).Warn("could not checkpoint WAL before ingestion")
+	}
+	syscall.Sync()
+
 	// Start ingestion service only after backfill is complete
 	daemon.ingestService.Start(ingestCfg)
 

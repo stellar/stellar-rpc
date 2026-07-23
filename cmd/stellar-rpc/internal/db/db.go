@@ -87,8 +87,8 @@ const serveSQLitePragmas = "_journal_mode=WAL&_wal_autocheckpoint=0&_synchronous
 // + gap-checked and the 1 GiB cache leaves most RAM to the OS page cache.
 const backfillSQLitePragmas = "_journal_mode=WAL&_wal_autocheckpoint=0&_synchronous=OFF" + "&_cache_size=-1048576"
 
-// Index-build DSN pragmas. A large cache feeds the CREATE INDEX sorter.
-const indexBuildSQLitePragmas = serveSQLitePragmas + "&_cache_size=-2097152" // 2 GiB page cache
+// Index-build DSN pragmas. A 512 MiB cache feeds the CREATE INDEX sorter.
+const indexBuildSQLitePragmas = serveSQLitePragmas + "&_cache_size=-524288"
 
 func openSQLiteDB(dbFilePath string) (*db.Session, error) {
 	session, err := db.Open("sqlite3", fmt.Sprintf("file:%s?%s", dbFilePath, serveSQLitePragmas))
