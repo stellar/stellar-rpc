@@ -8,4 +8,4 @@ log "clearing stale apply-load state"
 rm -f /tmp/bench-results.json /tmp/load-test-ledgers-*.xdr.zstd
 
 bootstrap_box
-run_leg ./cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/runner
+run_leg ./cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/ingest-load-test/runner
