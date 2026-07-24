@@ -145,9 +145,8 @@ func TestParseConfig_MinimalAppliesDefaults(t *testing.T) {
 }
 
 func TestWithDefaults_FillsEveryPointerLeaf(t *testing.T) {
-	// The two wide-tier keys are the deliberate exceptions: they stay nil when
-	// unset so WithDefaults can tell "operator set a wide default" apart from
-	// "fall through to the compiled default".
+	// The wide-tier keys stay nil when unset — that's how WithDefaults tells
+	// "operator set a wide default" from "use the compiled default".
 	optional := map[string]bool{
 		"service.methods.queue_limit":            true,
 		"service.methods.max_execution_duration": true,

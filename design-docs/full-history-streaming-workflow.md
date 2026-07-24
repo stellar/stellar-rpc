@@ -107,7 +107,7 @@ Every TOML leaf is also settable from the command line:
 **[backfill.datastore]** — the bulk ledger source (`type`, `params`, `schema.ledgers_per_file`, `schema.files_per_partition`; key names match the SDK's `datastore.DataStoreConfig`):
 
 - Any SDK datastore (GCS, S3, Filesystem) works. Optional: an empty `type` means no lake, and backfill replays through captive core from the history archives instead.
-- The network passphrase is deliberately not a key here: the daemon copies it from the captive-core file at startup, and when the lake carries a manifest the SDK verifies the lake was exported from the same network — a wrong-network lake fails startup. A manifest-less lake skips the check.
+- The network passphrase is deliberately not a key here: the daemon copies it from the captive-core file at startup, and when the lake carries a manifest the SDK verifies the lake was exported from the same network — a wrong-network lake fails startup. A manifest-less lake skips the check, but its `schema` must then be set in the config (the SDK needs one of the two).
 
 **[backfill.bsb]** — tuning for the buffered-storage stream that downloads ledger objects from the datastore. Optional:
 

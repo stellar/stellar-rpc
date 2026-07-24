@@ -42,8 +42,6 @@ type FlagOverrides interface {
 	GetStringToString(name string) (map[string]string, error)
 }
 
-var _ FlagOverrides = (*pflag.FlagSet)(nil)
-
 // BindFlags registers one override flag per TOML leaf of Config on fs. Call it
 // once on the root command's flag set, before parsing.
 func BindFlags(fs *pflag.FlagSet) {
@@ -134,11 +132,9 @@ func setLeaf(f reflect.Value, path string, fs FlagOverrides) error {
 		if err != nil {
 			return fail(err)
 		}
-		// Merge per key instead of replacing the file's map: a map flag names
-		// individual entries (--backfill.datastore.params=region=x), and
-		// clobbering the sibling entries the file set is never what the
-		// operator meant. Like every other flag, a map flag can set values but
-		// never remove them.
+		// Merge per key, don't replace the map: a map flag names individual
+		// entries, and clobbering the file's sibling entries is never what the
+		// operator meant.
 		if f.IsNil() {
 			f.Set(reflect.MakeMap(f.Type()))
 		}
@@ -218,10 +214,8 @@ func leafKind(t reflect.Type) kind {
 //     untagged exported field PANICS at BindFlags time. go-toml matches
 //     untagged exported fields by NAME, so a forgotten tag would silently
 //     become a settable file key with no flag — the one way the file schema
-//     and the flag set could drift apart. (Config deliberately contains no
-//     SDK struct types for the same reason — it mirrors them as BSBConfig and
-//     DataStoreConfig, whose untagged SDK fields like NetworkPassphrase must
-//     not be file keys.)
+//     and the flag set could drift apart (see DataStoreConfig for the same
+//     concern with embedded SDK structs);
 //   - a tagged struct field recurses with its tag as a path segment;
 //   - a tagged leaf of an unsupported type PANICS at BindFlags time — adding a
 //     config field of a new type must extend leafKind, not silently lose its flag.
@@ -235,8 +229,8 @@ func walkLeaves(v reflect.Value, prefix string, visit func(path string, f reflec
 		tag := field.Tag.Get("toml")
 		if tag == "" {
 			panic(fmt.Sprintf("config flags: exported field %s.%s has no toml tag — go-toml would "+
-				"still accept it as a file key (matched by field name) but it would get no flag; "+
-				"tag it, or mark it `toml:\"-\"` to exclude it from the file schema", t.Name(), field.Name))
+				"accept it as a file key by field name, but it would get no flag; "+
+				"tag it, or mark it toml:\"-\"", t.Name(), field.Name))
 		}
 		if tag == "-" {
 			continue

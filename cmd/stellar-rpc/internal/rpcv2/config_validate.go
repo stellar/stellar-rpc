@@ -27,10 +27,8 @@ func validateConfig(
 		return 0, errors.New("validateConfig requires a non-nil Catalog")
 	}
 
-	// --- 1. Form validation. runDaemonWith already ran this right after config
-	// load (so a malformed config is rejected before the catalog, captive core,
-	// or datastore are touched); re-running here keeps validateConfig a complete
-	// gate for callers and tests that enter through it directly. ---
+	// --- 1. Form validation (runDaemonWith already ran this right after config
+	// load; re-run so validateConfig stays a complete gate on its own). ---
 	if err := validateForm(cfg); err != nil {
 		return 0, err
 	}
