@@ -48,7 +48,7 @@ func writeTempConfig(t *testing.T, extra string) (string, string) {
 	dataDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "daemon.toml")
 	body := fmt.Sprintf(`
-[service]
+[storage]
 default_data_dir = %q
 
 [retention]
@@ -280,14 +280,14 @@ func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
 	catalogOverride := filepath.Join(overrideRoot, "meta")
 
 	cfg := config.Config{
-		Service: config.ServiceConfig{DefaultDataDir: dataDir},
 		Storage: config.StorageConfig{
-			Catalog:     catalogOverride,
-			Ledgers:     ledgersOverride,
-			Events:      eventsOverride,
-			TxhashRaw:   txhashRawOverride,
-			TxhashIndex: txhashIndexOverride,
-			Hot:         hotOverride,
+			DefaultDataDir: dataDir,
+			Catalog:        catalogOverride,
+			Ledgers:        ledgersOverride,
+			Events:         eventsOverride,
+			TxhashRaw:      txhashRawOverride,
+			TxhashIndex:    txhashIndexOverride,
+			Hot:            hotOverride,
 		},
 	}.WithDefaults()
 
@@ -367,7 +367,7 @@ func writeTempConfigNow(t *testing.T) (string, string) {
 	dataDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "daemon.toml")
 	body := fmt.Sprintf(`
-[service]
+[storage]
 default_data_dir = %q
 [retention]
 earliest_ledger = "now"
@@ -475,7 +475,7 @@ func TestSupervise_FirstStartNoTipRetries(t *testing.T) {
 // returns no backend (runDaemonWith then fails startup).
 func TestBuildBackfillBackend_NoSourcesNoBackend(t *testing.T) {
 	cfg := config.Config{}.WithDefaults()
-	backend, cleanup, err := buildBackfillBackend(context.Background(), cfg, &fakeCore{}, nil, silentLogger())
+	backend, cleanup, err := buildBackfillBackend(context.Background(), cfg, &fakeCore{}, nil, "", silentLogger())
 	require.NoError(t, err)
 	require.Nil(t, backend, "no datastore and no archives ⇒ no bulk source")
 	require.Nil(t, cleanup, "nothing to release when no backend was opened")
@@ -501,7 +501,7 @@ func TestBuildBackfillBackend_NoLakeBuildsCaptiveSource(t *testing.T) {
 	cfg := config.Config{}.WithDefaults()
 	core := &fakeCore{}
 	backend, cleanup, err := buildBackfillBackend(
-		context.Background(), cfg, core, fakeRootHAS{current: 70_000}, silentLogger())
+		context.Background(), cfg, core, fakeRootHAS{current: 70_000}, "", silentLogger())
 	require.NoError(t, err)
 	require.Nil(t, cleanup, "no datastore handle to release")
 	require.IsType(t, &captiveSource{}, backend)
@@ -602,7 +602,7 @@ func TestRunDaemon_NoLakeBackfillsThroughCaptiveCore(t *testing.T) {
 	dataDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "daemon.toml")
 	body := fmt.Sprintf(`
-[service]
+[storage]
 default_data_dir = %q
 
 [retention]

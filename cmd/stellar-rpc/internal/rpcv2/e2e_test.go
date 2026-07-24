@@ -185,7 +185,7 @@ func e2eConfigPath(t *testing.T, dataDir string, retentionChunks uint32) string 
 	t.Helper()
 	cfgPath := filepath.Join(t.TempDir(), "daemon.toml")
 	body := fmt.Sprintf(`
-[service]
+[storage]
 default_data_dir = %q
 
 [retention]
@@ -504,7 +504,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 // MUST be closed via the returned close func before the next daemon run).
 func e2eReadCatalog(t *testing.T, dataDir string) (*catalog.Catalog, func()) {
 	t.Helper()
-	paths := config.Config{Service: config.ServiceConfig{DefaultDataDir: dataDir}}.WithDefaults().ResolvePaths()
+	paths := config.Config{Storage: config.StorageConfig{DefaultDataDir: dataDir}}.WithDefaults().ResolvePaths()
 	windows, err := geometry.NewTxHashIndexLayout(1) // matches chunksPerTxhashIndex = 1
 	require.NoError(t, err)
 	cat, err := catalog.Open(paths.Catalog, config.NewLayoutFromPaths(paths), windows, silentLogger())

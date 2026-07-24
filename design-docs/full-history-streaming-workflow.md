@@ -42,13 +42,41 @@ All chunk and window ids use uniform `%08d` zero-padding. Example (window = 1,00
 
 ## Configuration
 
-One TOML file configures the daemon, passed as `--config` to the v2 binary (`stellar-rpc-v2 --config <path>`). Decoding is strict: an unknown key or section is a startup error, so a stale or mistyped config fails loudly instead of being half-read.
+One TOML file configures the daemon, passed as `--config` to the v2 binary (`stellar-rpc-v2 --config <path>`). Decoding is strict: an unknown key or section is a startup error, so a stale or mistyped config fails loudly instead of being half-read. A fully-commented sample lives at `cmd/stellar-rpc/rpcv2/rpc-v2-sample-config.toml`.
 
-**[service]**
+Every TOML leaf is also settable from the command line:
+
+- One flag per leaf, named by its dotted TOML path: `--storage.default_data_dir`, `--service.methods.getLedgers.queue_limit`.
+- The flag set is derived from the config structs by reflection, so it can never drift from the file schema.
+- Precedence: specificity beats source; within a tier, a set flag beats the file; compiled defaults are the last tier.
+- Map-valued keys merge per entry (`--backfill.datastore.params=region=x` sets one param and keeps the file's others); list-valued keys are replaced wholesale.
+- `--config` stays required — the file is the source of truth, flags are one-off overrides.
+- No environment variables.
+
+**[service]** — the JSON-RPC read-serving policy (#882; entirely dormant today — the read server arrives with #772, and #881 wires `[service.fee_stats]` into live ingestion). Key naming: camelCase only for the JSON-RPC method table names, snake_case elsewhere. Durations are strings (`"10s"`); any duration under 1ms is rejected (a bare TOML integer parses as nanoseconds).
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `default_data_dir` | string | **required** | Base directory for the catalog and default storage paths. |
+| `endpoint` | string | `localhost:8000` | JSON-RPC listen address. |
+| `admin_endpoint` | string | `""` (disabled) | pprof/metrics endpoint, plaintext HTTP. |
+| `max_concurrent_requests` | uint | `5000` | HTTP-layer gate: bounds total in-flight requests across ALL methods, in addition to per-method limits. |
+| `max_request_execution_duration` | duration | `"25s"` | HTTP-layer global timeout. |
+| `request_execution_warning_threshold` | duration | `"5s"` | Slower requests log a warning. |
+
+**[service.fee_stats]** — sizes (in ledgers, 1..1000) of the in-memory fee windows behind getFeeStats; they will be fed by live ingestion (#881), and size ingestion-time memory rather than request handling, hence not method config:
+
+| Key | Default |
+|---|---|
+| `classic_fee_window_ledgers` | `10` |
+| `soroban_inclusion_fee_window_ledgers` | `50` |
+
+**[service.methods.\<methodName\>]** — one table per served method (getHealth, getNetwork, getVersionInfo, getLatestLedger, getTransaction, getTransactions, getLedgers, getEvents, getFeeStats):
+
+- Every method: `queue_limit` and `max_execution_duration`. v1's defaults: 1000 / 5s, except getFeeStats's queue is 100, and getLedgers/getEvents get 10s.
+- The three paginated methods (getTransactions, getLedgers, getEvents) add `max_items_per_response` / `default_items_per_response`.
+- getHealth adds `max_healthy_ledger_latency` (default `"30s"`).
+- Bare `queue_limit` / `max_execution_duration` keys directly on `[service.methods]` form an optional methods-wide default tier: per-method value → wide default → compiled default.
+- Not here: sendTransaction, simulateTransaction, getLedgerEntries and the preflight knobs — they arrive with the captive-core-endpoints work.
 
 **[retention]** — the two inputs to the retention floor; the effective floor is the higher of the two:
 
@@ -57,10 +85,11 @@ One TOML file configures the daemon, passed as `--config` to the v2 binary (`ste
 | `retention_chunks` | uint32 | `0` | Retention window in chunks. `0` = full history. |
 | `earliest_ledger` | uint32 \| `"genesis"` \| `"now"` | `"genesis"` | Earliest ledger this daemon will ever have data for — a fixed lower floor on history. Must be chunk-aligned; `"now"` resolves to the backfill backend's frontier chunk at first start. Resolved and pinned on the first start (a reachable backend is required, to resolve `"now"` and to reject a numeric floor past the tip; see `validateConfig`), immutable thereafter. Setting it above genesis typically skips upfront backfill — useful when no fast backfill source is available and the daemon only follows the live network (`earliest_ledger = "now"`). |
 
-**[storage]** — one optional path per on-disk tree; an unset key defaults under `{default_data_dir}`:
+**[storage]** — the data root plus one optional path per on-disk tree; an unset per-store key defaults under `{default_data_dir}`:
 
 | Key | Default path | Holds |
 |---|---|---|
+| `default_data_dir` | **required** | base directory for the catalog and default storage paths (moved here from `[service]` in #882) |
 | `catalog` | `{default_data_dir}/catalog/rocksdb` | the catalog RocksDB |
 | `ledgers` | `{default_data_dir}/ledgers` | `.pack` files |
 | `events` | `{default_data_dir}/events` | events cold segments |
@@ -75,9 +104,19 @@ One TOML file configures the daemon, passed as `--config` to the v2 binary (`ste
 | `workers` | int | `GOMAXPROCS` | Concurrent task slots for backfill. |
 | `max_retries` | int | `3` | Retries per backfill task, after the first attempt, before the task fails the run. |
 
-**[backfill.datastore]** — the bulk ledger source: the SDK's `datastore.DataStoreConfig`, verbatim (`type`, `params`, `schema`), so any SDK datastore (GCS, S3, Filesystem) works. Optional: an empty `type` means no lake, and backfill replays through captive core from the history archives instead.
+**[backfill.datastore]** — the bulk ledger source (`type`, `params`, `schema.ledgers_per_file`, `schema.files_per_partition`; key names match the SDK's `datastore.DataStoreConfig`):
 
-**[backfill.bsb]** — tuning for the buffered-storage stream over the datastore: the SDK's `BufferedStorageBackendConfig`, verbatim. Optional; unset fields take backfill-tuned defaults (`buffer_size` 5000, `num_workers` 50, bounded retries).
+- Any SDK datastore (GCS, S3, Filesystem) works. Optional: an empty `type` means no lake, and backfill replays through captive core from the history archives instead.
+- The network passphrase is deliberately not a key here: the daemon copies it from the captive-core file at startup, and when the lake carries a manifest the SDK verifies the lake was exported from the same network — a wrong-network lake fails startup. A manifest-less lake skips the check, but its `schema` must then be set in the config (the SDK needs one of the two).
+
+**[backfill.bsb]** — tuning for the buffered-storage stream that downloads ledger objects from the datastore. Optional:
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `buffer_size` | uint32 | `100` | Downloaded ledgers buffered in memory; >= 1. |
+| `num_workers` | uint32 | `10` | Concurrent object downloads; >= 1. |
+| `max_retries` | uint32 | `3` | Retries of ONE object download after a transient error; `0` = fail on the first error. Distinct from `[backfill].max_retries`, which re-runs a whole chunk task. |
+| `retry_wait` | duration | `"5s"` | Pause between retries of one object download; >= 1ms. |
 
 **[ingestion]** — the live-network (captive core) settings:
 
@@ -95,6 +134,7 @@ One TOML file configures the daemon, passed as `--config` to the v2 binary (`ste
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--config` | string | **required** | Path to TOML config file. |
+| `--<section>.<key>` | per key | — | One auto-derived override flag per TOML leaf (see above). |
 
 ---
 
