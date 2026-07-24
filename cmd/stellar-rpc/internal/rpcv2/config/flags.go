@@ -201,12 +201,14 @@ func leafKind(t reflect.Type) kind {
 // walkLeaves visits every flag-eligible leaf of a config struct value, calling
 // visit with the leaf's dotted TOML path and its field Value. Rules:
 //
-//   - only fields with a non-empty, non-"-" `toml` tag participate. Config
-//     deliberately contains no SDK struct types — it mirrors them (BSBConfig,
-//     DataStoreConfig) — because go-toml matches UNTAGGED exported fields by
-//     name, so an embedded SDK struct would silently admit its untagged fields
-//     (e.g. NetworkPassphrase) as file keys, breaking both the strictness
-//     guarantee and the flag/TOML lockstep;
+//   - every exported field must carry a `toml` tag ("-" to opt out); an
+//     untagged exported field PANICS at BindFlags time. go-toml matches
+//     untagged exported fields by NAME, so a forgotten tag would silently
+//     become a settable file key with no flag — the one way the file schema
+//     and the flag set could drift apart. (Config deliberately contains no
+//     SDK struct types for the same reason — it mirrors them as BSBConfig and
+//     DataStoreConfig, whose untagged SDK fields like NetworkPassphrase must
+//     not be file keys.)
 //   - a tagged struct field recurses with its tag as a path segment;
 //   - a tagged leaf of an unsupported type PANICS at BindFlags time — adding a
 //     config field of a new type must extend leafKind, not silently lose its flag.
@@ -214,8 +216,16 @@ func walkLeaves(v reflect.Value, prefix string, visit func(path string, f reflec
 	t := v.Type()
 	for i := range t.NumField() {
 		field := t.Field(i)
+		if !field.IsExported() {
+			continue
+		}
 		tag := field.Tag.Get("toml")
-		if tag == "" || tag == "-" {
+		if tag == "" {
+			panic(fmt.Sprintf("config flags: exported field %s.%s has no toml tag — go-toml would "+
+				"still accept it as a file key (matched by field name) but it would get no flag; "+
+				"tag it, or mark it `toml:\"-\"` to exclude it from the file schema", t.Name(), field.Name))
+		}
+		if tag == "-" {
 			continue
 		}
 		path := tag

@@ -52,7 +52,7 @@ Every TOML leaf is also settable from the command line:
 - `--config` stays required — the file is the source of truth, flags are one-off overrides.
 - No environment variables.
 
-**[service]** — the JSON-RPC read-serving policy (#882; dormant until the read server exists, except `[service.fee_stats]`, which live ingestion consumes — #881). Key naming: camelCase only for the JSON-RPC method table names, snake_case elsewhere. Durations are strings (`"10s"`); any duration under 1ms is rejected (a bare TOML integer parses as nanoseconds).
+**[service]** — the JSON-RPC read-serving policy (#882; entirely dormant today — the read server arrives with #772, and #881 wires `[service.fee_stats]` into live ingestion). Key naming: camelCase only for the JSON-RPC method table names, snake_case elsewhere. Durations are strings (`"10s"`); any duration under 1ms is rejected (a bare TOML integer parses as nanoseconds).
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -62,7 +62,7 @@ Every TOML leaf is also settable from the command line:
 | `max_request_execution_duration` | duration | `"25s"` | HTTP-layer global timeout. |
 | `request_execution_warning_threshold` | duration | `"5s"` | Slower requests log a warning. |
 
-**[service.fee_stats]** — sizes (in ledgers, 1..1000) of the in-memory fee windows behind getFeeStats; fed by live ingestion, hence not method config:
+**[service.fee_stats]** — sizes (in ledgers, 1..1000) of the in-memory fee windows behind getFeeStats; they will be fed by live ingestion (#881), and size ingestion-time memory rather than request handling, hence not method config:
 
 | Key | Default |
 |---|---|

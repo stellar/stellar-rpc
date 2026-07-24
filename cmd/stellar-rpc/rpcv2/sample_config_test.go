@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"regexp"
 	"testing"
 	"time"
 
@@ -38,4 +39,20 @@ func TestSampleConfig_ParsesStrict(t *testing.T) {
 	assert.Equal(t, uint32(backfill.DefaultBSBNumWorkers), *cfg.Backfill.BSB.NumWorkers)
 	assert.Equal(t, uint32(backfill.DefaultBSBMaxRetries), *cfg.Backfill.BSB.MaxRetries)
 	assert.Equal(t, backfill.DefaultBSBRetryWait, *cfg.Backfill.BSB.RetryWait)
+}
+
+func TestSampleConfig_CommentedOptionalKeysParseStrict(t *testing.T) {
+	data, err := os.ReadFile("rpc-v2-sample-config.toml")
+	require.NoError(t, err)
+
+	// Optional keys are documented as `#key = value` lines (no space after #,
+	// unlike prose comments). Uncomment them all: every documented-but-disabled
+	// key must still exist in the schema, or this strict parse fails.
+	re := regexp.MustCompile(`(?m)^#([a-z_]+ = )`)
+	uncommented := re.ReplaceAll(data, []byte("$1"))
+	require.NotEqual(t, string(data), string(uncommented),
+		"expected '#key = value' optional-key lines in the sample")
+
+	_, err = config.ParseConfig(uncommented)
+	require.NoError(t, err)
 }

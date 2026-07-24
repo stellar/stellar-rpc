@@ -89,6 +89,13 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	if cfg.Storage.DefaultDataDir == "" {
 		return errors.New("[storage].default_data_dir is required")
 	}
+	// Reject a malformed config NOW, before anything is opened — no catalog, no
+	// stellar-core lookup, no datastore client or remote reads for a config that
+	// was never going to run. validateConfig re-runs these form checks as part
+	// of its gate, which is harmless (they are pure).
+	if err := validateForm(cfg); err != nil {
+		return err
+	}
 
 	logger := opts.Logger
 	if logger == nil {

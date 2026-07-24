@@ -175,6 +175,11 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 			"default_items_per_response",
 		},
 		{
+			"zero default items",
+			func(c *config.Config) { c.Service.Methods.GetEvents.DefaultItemsPerResponse = uintPtr(0) },
+			"default_items_per_response",
+		},
+		{
 			"fee window above the cap",
 			func(c *config.Config) { c.Service.FeeStats.ClassicFeeWindowLedgers = uint32Ptr(1001) },
 			"classic_fee_window_ledgers",
@@ -221,6 +226,14 @@ func TestValidateConfig_RejectsMalformedBSB(t *testing.T) {
 			"sub-millisecond retry_wait",
 			func(c *config.Config) { c.Backfill.BSB.RetryWait = durPtr(10) },
 			"nanoseconds",
+		},
+		{
+			"num_workers above buffer_size",
+			func(c *config.Config) {
+				c.Backfill.BSB.BufferSize = uint32Ptr(10)
+				c.Backfill.BSB.NumWorkers = uint32Ptr(50)
+			},
+			"num_workers",
 		},
 	}
 	for _, tc := range tests {

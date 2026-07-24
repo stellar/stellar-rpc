@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"testing"
 	"time"
@@ -141,6 +142,27 @@ func TestParseConfig_MinimalAppliesDefaults(t *testing.T) {
 	assert.Equal(t, DefaultEarliestLedger, cfg.Retention.EarliestLedger)
 	assert.Equal(t, DefaultLogLevel, cfg.Logging.Level)
 	assert.Equal(t, DefaultLogFormat, cfg.Logging.Format)
+}
+
+func TestWithDefaults_FillsEveryPointerLeaf(t *testing.T) {
+	// The two wide-tier keys are the deliberate exceptions: they stay nil when
+	// unset so WithDefaults can tell "operator set a wide default" apart from
+	// "fall through to the compiled default".
+	optional := map[string]bool{
+		"service.methods.queue_limit":            true,
+		"service.methods.max_execution_duration": true,
+	}
+
+	cfg, err := ParseConfig([]byte(minimalValidConfig))
+	require.NoError(t, err)
+
+	walkLeaves(reflect.ValueOf(&cfg).Elem(), "", func(path string, f reflect.Value) {
+		if f.Kind() != reflect.Pointer || optional[path] {
+			return
+		}
+		assert.False(t, f.IsNil(), "pointer leaf %s is nil after WithDefaults — "+
+			"a new optional field needs its fill in WithDefaults", path)
+	})
 }
 
 func TestDecodeConfig_RejectsPassphraseUnderDatastore(t *testing.T) {

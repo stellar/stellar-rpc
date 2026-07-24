@@ -27,31 +27,11 @@ func validateConfig(
 		return 0, errors.New("validateConfig requires a non-nil Catalog")
 	}
 
-	workers := deref(cfg.Backfill.Workers)
-	maxRetries := deref(cfg.Backfill.MaxRetries)
-
-	// --- 1. Form validation. ---
-	if workers < 1 {
-		return 0, fmt.Errorf("workers must be >= 1 (got %d) — a zero pool deadlocks executePlan", workers)
-	}
-	if maxRetries < 0 {
-		return 0, fmt.Errorf("max_retries must be >= 0 (got %d) — 0 means run once, no retry", maxRetries)
-	}
-	if err := validateBSB(cfg.Backfill.BSB); err != nil {
-		return 0, err
-	}
-	// logging.format silently means text unless it is exactly "json", so reject any
-	// other value rather than let a typo drop the operator to text logging. Empty is
-	// the unset sentinel WithDefaults resolves to text, so it is not a typo.
-	if f := cfg.Logging.Format; f != "" && f != config.DefaultLogFormat && f != config.LogFormatJSON {
-		return 0, fmt.Errorf("logging.format must be %q or %q; got %q",
-			config.DefaultLogFormat, config.LogFormatJSON, f)
-	}
-	// Form-validate here so the numeric case avoids chunk.IDFromLedger's sub-genesis panic below.
-	if err := validateEarliestForm(cfg.Retention.EarliestLedger); err != nil {
-		return 0, err
-	}
-	if err := validateService(cfg.Service); err != nil {
+	// --- 1. Form validation. runDaemonWith already ran this right after config
+	// load (so a malformed config is rejected before the catalog, captive core,
+	// or datastore are touched); re-running here keeps validateConfig a complete
+	// gate for callers and tests that enter through it directly. ---
+	if err := validateForm(cfg); err != nil {
 		return 0, err
 	}
 
@@ -79,6 +59,35 @@ func validateConfig(
 	return earliest, nil
 }
 
+// validateForm runs every check that needs only the parsed config — no catalog,
+// no backend, no filesystem. It runs AFTER WithDefaults (pointers non-nil) and
+// BEFORE the daemon opens anything, so a malformed config is rejected without
+// side effects.
+func validateForm(cfg config.Config) error {
+	if workers := deref(cfg.Backfill.Workers); workers < 1 {
+		return fmt.Errorf("workers must be >= 1 (got %d) — a zero pool deadlocks executePlan", workers)
+	}
+	if maxRetries := deref(cfg.Backfill.MaxRetries); maxRetries < 0 {
+		return fmt.Errorf("max_retries must be >= 0 (got %d) — 0 means run once, no retry", maxRetries)
+	}
+	if err := validateBSB(cfg.Backfill.BSB); err != nil {
+		return err
+	}
+	// logging.format silently means text unless it is exactly "json", so reject any
+	// other value rather than let a typo drop the operator to text logging. Empty is
+	// the unset sentinel WithDefaults resolves to text, so it is not a typo.
+	if f := cfg.Logging.Format; f != "" && f != config.DefaultLogFormat && f != config.LogFormatJSON {
+		return fmt.Errorf("logging.format must be %q or %q; got %q",
+			config.DefaultLogFormat, config.LogFormatJSON, f)
+	}
+	// Form-validate here so validateConfig's numeric path can't hit
+	// chunk.IDFromLedger's sub-genesis panic.
+	if err := validateEarliestForm(cfg.Retention.EarliestLedger); err != nil {
+		return err
+	}
+	return validateService(cfg.Service)
+}
+
 // minConfiguredDuration guards go-toml v1's nanosecond trap: a bare integer
 // duration decodes as NANOSECONDS (max_execution_duration = 10 → 10ns), so any
 // configured duration under 1ms is a near-certain typo for the string form
@@ -95,6 +104,10 @@ func validateBSB(bsb config.BSBConfig) error {
 	}
 	if *bsb.NumWorkers < 1 {
 		return errors.New("[backfill.bsb].num_workers must be >= 1")
+	}
+	if *bsb.NumWorkers > *bsb.BufferSize {
+		return fmt.Errorf("[backfill.bsb].num_workers (%d) cannot exceed buffer_size (%d) — "+
+			"each worker needs a buffer slot to download into", *bsb.NumWorkers, *bsb.BufferSize)
 	}
 	if *bsb.RetryWait < minConfiguredDuration {
 		return fmt.Errorf("[backfill.bsb].retry_wait is %v — durations below 1ms are rejected; "+
@@ -160,6 +173,13 @@ func validateService(svc config.ServiceConfig) error {
 		}
 	}
 
+	if err := validatePaginatedMethods(m); err != nil {
+		return err
+	}
+	return validateFeeWindows(svc.FeeStats)
+}
+
+func validatePaginatedMethods(m config.MethodsConfig) error {
 	paginated := []struct {
 		name string
 		p    config.PaginatedMethodConfig
@@ -172,18 +192,24 @@ func validateService(svc config.ServiceConfig) error {
 		if *pp.p.MaxItemsPerResponse < 1 {
 			return fmt.Errorf("[service.methods.%s].max_items_per_response must be >= 1", pp.name)
 		}
+		if *pp.p.DefaultItemsPerResponse < 1 {
+			return fmt.Errorf("[service.methods.%s].default_items_per_response must be >= 1", pp.name)
+		}
 		if *pp.p.DefaultItemsPerResponse > *pp.p.MaxItemsPerResponse {
 			return fmt.Errorf("[service.methods.%s].default_items_per_response (%d) cannot exceed max_items_per_response (%d)",
 				pp.name, *pp.p.DefaultItemsPerResponse, *pp.p.MaxItemsPerResponse)
 		}
 	}
+	return nil
+}
 
+func validateFeeWindows(fs config.FeeStatsConfig) error {
 	feeWindows := []struct {
 		name string
 		v    uint32
 	}{
-		{"[service.fee_stats].classic_fee_window_ledgers", *svc.FeeStats.ClassicFeeWindowLedgers},
-		{"[service.fee_stats].soroban_inclusion_fee_window_ledgers", *svc.FeeStats.SorobanInclusionFeeWindowLedgers},
+		{"[service.fee_stats].classic_fee_window_ledgers", *fs.ClassicFeeWindowLedgers},
+		{"[service.fee_stats].soroban_inclusion_fee_window_ledgers", *fs.SorobanInclusionFeeWindowLedgers},
 	}
 	for _, fw := range feeWindows {
 		if fw.v < 1 {

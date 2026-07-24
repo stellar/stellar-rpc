@@ -57,6 +57,29 @@ func TestBindFlags_LockstepWithTOMLSchema(t *testing.T) {
 	}
 }
 
+func TestWalkLeaves_PanicsOnUntaggedExportedField(t *testing.T) {
+	type bad struct {
+		Tagged   string `toml:"tagged"`
+		Untagged string
+	}
+	assert.Panics(t, func() {
+		walkLeaves(reflect.ValueOf(&bad{}).Elem(), "", func(string, reflect.Value) {})
+	})
+}
+
+func TestWalkLeaves_SkipsUnexportedAndOptedOutFields(t *testing.T) {
+	type ok struct {
+		Tagged   string `toml:"tagged"`
+		Excluded string `toml:"-"`
+		hidden   string //nolint:unused // exists to prove unexported fields are skipped
+	}
+	var paths []string
+	walkLeaves(reflect.ValueOf(&ok{}).Elem(), "", func(path string, _ reflect.Value) {
+		paths = append(paths, path)
+	})
+	assert.Equal(t, []string{"tagged"}, paths)
+}
+
 func TestApplyFlags_NoFlagsSetIsANoOp(t *testing.T) {
 	fs := newBoundFlagSet(t)
 	cfg, err := DecodeConfig([]byte(minimalValidConfig))

@@ -43,9 +43,10 @@ type Config struct {
 }
 
 // ServiceConfig is [service] — the JSON-RPC read-serving policy (issue #882).
-// Everything here is dormant until the read server exists, except
-// [service.fee_stats], which live ingestion consumes (issue #881). The whole
-// section is optional: absent keys get v1's defaults in WithDefaults.
+// Everything here is dormant today: the read server arrives with #772, and
+// #881 wires [service.fee_stats] into live ingestion — until then the values
+// are only parsed, defaulted, and validated. The whole section is optional:
+// absent keys get v1's defaults in WithDefaults.
 //
 // Key naming rule: camelCase table keys ONLY where the key is a wire identifier
 // (the [service.methods.<methodName>] tables, named after the JSON-RPC method);
@@ -72,9 +73,10 @@ type ServiceConfig struct {
 }
 
 // FeeStatsConfig is [service.fee_stats] — the sizes, in ledgers, of the two
-// in-memory fee windows live ingestion feeds (issue #881). They live here and
-// NOT in the getFeeStats method table because they size ingestion-time memory,
-// not request handling. Both must be positive and are capped at
+// in-memory fee windows behind getFeeStats. Live ingestion will feed them when
+// #881 lands; nothing consumes them yet. They live here and NOT in the
+// getFeeStats method table because they size ingestion-time memory, not
+// request handling. Both must be positive and are capped at
 // limits.MaxFeeStatsRetentionWindow.
 type FeeStatsConfig struct {
 	ClassicFeeWindowLedgers          *uint32 `toml:"classic_fee_window_ledgers"`

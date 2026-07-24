@@ -63,9 +63,10 @@ retention_chunks = 0
 # -----------------------------------------------------------------------------
 # [service] — the JSON-RPC read-serving policy (issue #882)
 # -----------------------------------------------------------------------------
-# Dormant until the v2 read server exists, EXCEPT [service.fee_stats], which
-# live ingestion consumes today (issue #881). Naming rule: camelCase table
-# keys only where the key IS a JSON-RPC method name; snake_case elsewhere.
+# Dormant today: the v2 read server does not exist yet, and live ingestion
+# starts consuming [service.fee_stats] when issue #881 lands. Naming rule:
+# camelCase table keys only where the key IS a JSON-RPC method name;
+# snake_case elsewhere.
 [service]
 
 # Address the JSON-RPC server listens on.
@@ -83,7 +84,7 @@ max_concurrent_requests = 5000
 max_request_execution_duration = "25s"    # global 504 timeout
 request_execution_warning_threshold = "5s" # slower requests log a warning
 
-# --- Fee statistics windows (consumed by live ingestion, issue #881) --------
+# --- Fee statistics windows (to be consumed by live ingestion — issue #881) --
 # Sizes, in LEDGERS, of the two in-memory windows behind getFeeStats. They
 # live here — not under getFeeStats — because they size ingestion-time
 # memory, not request handling. Both must be 1..1000; larger windows slow
