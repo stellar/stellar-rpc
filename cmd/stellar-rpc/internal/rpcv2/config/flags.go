@@ -71,8 +71,11 @@ func BindFlags(fs *pflag.FlagSet) {
 }
 
 // ApplyFlags writes every flag the user actually set (fs.Changed) into cfg,
-// allocating pointer fields as needed. Run it AFTER DecodeConfig and BEFORE
-// WithDefaults so the overlay participates in defaulting at its own tier.
+// allocating pointer fields as needed. Map-valued flags merge into the file's
+// map key by key (a flag can set an entry, never delete one); slice-valued
+// flags replace the file's slice wholesale (a list has no per-element identity
+// to merge on). Run it AFTER DecodeConfig and BEFORE WithDefaults so the
+// overlay participates in defaulting at its own tier.
 func ApplyFlags(cfg *Config, fs FlagOverrides) error {
 	var firstErr error
 	walkLeaves(reflect.ValueOf(cfg).Elem(), "", func(path string, f reflect.Value) {
@@ -131,7 +134,17 @@ func setLeaf(f reflect.Value, path string, fs FlagOverrides) error {
 		if err != nil {
 			return fail(err)
 		}
-		setPossiblyPointer(f, reflect.ValueOf(v))
+		// Merge per key instead of replacing the file's map: a map flag names
+		// individual entries (--backfill.datastore.params=region=x), and
+		// clobbering the sibling entries the file set is never what the
+		// operator meant. Like every other flag, a map flag can set values but
+		// never remove them.
+		if f.IsNil() {
+			f.Set(reflect.MakeMap(f.Type()))
+		}
+		for k, val := range v {
+			f.SetMapIndex(reflect.ValueOf(k), reflect.ValueOf(val))
+		}
 	case kindUnsupported:
 		// unreachable: walkLeaves panics on an unsupported leaf before visiting
 	}

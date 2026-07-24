@@ -114,6 +114,68 @@ func TestApplyFlags_OverridesFileValues(t *testing.T) {
 	assert.Equal(t, 7*time.Second, *cfg.Backfill.BSB.RetryWait)
 }
 
+func TestApplyFlags_MapFlagMergesPerKey(t *testing.T) {
+	fs := newBoundFlagSet(t)
+	require.NoError(t, fs.Parse([]string{"--backfill.datastore.params=region=us-west-1"}))
+
+	cfg, err := DecodeConfig([]byte(minimalValidConfig))
+	require.NoError(t, err)
+	require.NoError(t, ApplyFlags(&cfg, fs))
+
+	assert.Equal(t, "us-west-1", cfg.Backfill.DataStore.Params["region"])
+	assert.Equal(t, "bucket/path", cfg.Backfill.DataStore.Params["destination_bucket_path"],
+		"a one-key map flag must not clobber the file's other entries")
+}
+
+func TestApplyFlags_MapFlagOverwritesExistingKey(t *testing.T) {
+	fs := newBoundFlagSet(t)
+	require.NoError(t, fs.Parse([]string{"--backfill.datastore.params=destination_bucket_path=other/bucket"}))
+
+	cfg, err := DecodeConfig([]byte(minimalValidConfig))
+	require.NoError(t, err)
+	require.NoError(t, ApplyFlags(&cfg, fs))
+
+	assert.Equal(t, "other/bucket", cfg.Backfill.DataStore.Params["destination_bucket_path"])
+	assert.Len(t, cfg.Backfill.DataStore.Params, 1)
+}
+
+func TestApplyFlags_MapFlagAllocatesAbsentMap(t *testing.T) {
+	fs := newBoundFlagSet(t)
+	require.NoError(t, fs.Parse([]string{"--backfill.datastore.params=region=eu-west-1"}))
+
+	cfg, err := DecodeConfig([]byte(`
+[storage]
+default_data_dir = "/d"
+
+[ingestion]
+captive_core_config = "/cc"
+`))
+	require.NoError(t, err)
+	require.Nil(t, cfg.Backfill.DataStore.Params)
+	require.NoError(t, ApplyFlags(&cfg, fs))
+
+	assert.Equal(t, map[string]string{"region": "eu-west-1"}, cfg.Backfill.DataStore.Params)
+}
+
+func TestApplyFlags_SliceFlagReplacesWholesale(t *testing.T) {
+	fs := newBoundFlagSet(t)
+	require.NoError(t, fs.Parse([]string{"--ingestion.history_archive_urls=https://c.example"}))
+
+	cfg, err := DecodeConfig([]byte(`
+[storage]
+default_data_dir = "/d"
+
+[ingestion]
+captive_core_config = "/cc"
+history_archive_urls = ["https://a.example", "https://b.example"]
+`))
+	require.NoError(t, err)
+	require.NoError(t, ApplyFlags(&cfg, fs))
+
+	assert.Equal(t, []string{"https://c.example"}, cfg.Ingestion.HistoryArchiveURLs,
+		"a slice flag replaces the file's list; it does not append")
+}
+
 func TestApplyFlags_Precedence(t *testing.T) {
 	const fileWithTiers = `
 [storage]

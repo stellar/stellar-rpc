@@ -49,6 +49,7 @@ Every TOML leaf is also settable from the command line:
 - One flag per leaf, named by its dotted TOML path: `--storage.default_data_dir`, `--service.methods.getLedgers.queue_limit`.
 - The flag set is derived from the config structs by reflection, so it can never drift from the file schema.
 - Precedence: specificity beats source; within a tier, a set flag beats the file; compiled defaults are the last tier.
+- Map-valued keys merge per entry (`--backfill.datastore.params=region=x` sets one param and keeps the file's others); list-valued keys are replaced wholesale.
 - `--config` stays required — the file is the source of truth, flags are one-off overrides.
 - No environment variables.
 

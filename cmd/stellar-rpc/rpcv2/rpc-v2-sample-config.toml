@@ -17,6 +17,10 @@
 #     source, so --service.methods.queue_limit=30 (the methods-wide default)
 #     never overrides an explicit [service.methods.getLedgers] value from this
 #     file. There are no environment variables.
+#   * Map-valued keys ([backfill.datastore.params]) merge from the command
+#     line PER ENTRY: --backfill.datastore.params=region=x sets that one entry
+#     and keeps the file's others. List-valued keys (history_archive_urls) are
+#     replaced wholesale.
 #   * Durations are strings like "10s", "500ms", "1m30s". Do NOT write bare
 #     integers — TOML integers decode as NANOSECONDS and any duration under
 #     1ms is rejected at startup.
