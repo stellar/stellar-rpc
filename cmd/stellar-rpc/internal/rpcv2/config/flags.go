@@ -201,9 +201,12 @@ func leafKind(t reflect.Type) kind {
 // walkLeaves visits every flag-eligible leaf of a config struct value, calling
 // visit with the leaf's dotted TOML path and its field Value. Rules:
 //
-//   - only fields with a non-empty, non-"-" `toml` tag participate (untagged
-//     SDK fields like DataStoreConfig.NetworkPassphrase are not part of the
-//     file schema, so they get no flag either);
+//   - only fields with a non-empty, non-"-" `toml` tag participate. Config
+//     deliberately contains no SDK struct types — it mirrors them (BSBConfig,
+//     DataStoreConfig) — because go-toml matches UNTAGGED exported fields by
+//     name, so an embedded SDK struct would silently admit its untagged fields
+//     (e.g. NetworkPassphrase) as file keys, breaking both the strictness
+//     guarantee and the flag/TOML lockstep;
 //   - a tagged struct field recurses with its tag as a path segment;
 //   - a tagged leaf of an unsupported type PANICS at BindFlags time — adding a
 //     config field of a new type must extend leafKind, not silently lose its flag.

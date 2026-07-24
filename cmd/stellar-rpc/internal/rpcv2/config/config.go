@@ -48,8 +48,10 @@ type Config struct {
 // section is optional: absent keys get v1's defaults in WithDefaults.
 //
 // Key naming rule: camelCase table keys ONLY where the key is a wire identifier
-// (the [service.methods.<methodName>] tables, spelled exactly as a client sends
-// the JSON-RPC method); snake_case for every other key.
+// (the [service.methods.<methodName>] tables, named after the JSON-RPC method);
+// snake_case for every other key. The decoder cannot ENFORCE the casing —
+// go-toml matches keys case-insensitively, so a miscased method table is
+// accepted — the rule exists so configs read like the wire protocol.
 type ServiceConfig struct {
 	// Endpoint is the address the JSON-RPC server listens on. Default "localhost:8000".
 	Endpoint string `toml:"endpoint"`
@@ -89,8 +91,9 @@ type FeeStatsConfig struct {
 // a per-method value set in the file. The cascade is resolved in WithDefaults;
 // after it, every per-method field is non-nil.
 //
-// One struct field per method — never a map — so the strict decoder rejects a
-// typo'd method table instead of silently accepting it.
+// One struct field per method — never a map — so the strict decoder rejects an
+// unknown method table instead of silently accepting it. (go-toml matches keys
+// case-insensitively, so this catches misspellings but not wrong casing.)
 type MethodsConfig struct {
 	QueueLimit           *uint          `toml:"queue_limit"`
 	MaxExecutionDuration *time.Duration `toml:"max_execution_duration"`
@@ -170,9 +173,6 @@ type StorageConfig struct {
 }
 
 // BackfillConfig is [backfill] plus the nested [backfill.datastore] and [backfill.bsb].
-// The datastore and BSB blocks reuse the SDK config types verbatim, so any SDK
-// datastore (GCS, S3, Filesystem, ...) works as the bulk source — backfill needs only
-// correct ledger metadata, not a specific store.
 type BackfillConfig struct {
 	// Concurrent task-slot count for bulk backfill; >= 1. Default GOMAXPROCS.
 	Workers *int `toml:"workers"`
@@ -184,11 +184,92 @@ type BackfillConfig struct {
 	// DataStore is the bulk ledger source. An empty Type means no lake — backfill
 	// then replays through captive core from the history archives; otherwise any
 	// SDK datastore type is accepted.
-	DataStore datastore.DataStoreConfig `toml:"datastore"`
+	DataStore DataStoreConfig `toml:"datastore"`
 
-	// BSB tunes the buffered-storage stream over DataStore; zero fields fall back to
-	// the backfill defaults applied in backfill.NewBSBBackend.
-	BSB ledgerbackend.BufferedStorageBackendConfig `toml:"bsb"`
+	// BSB tunes the buffered-storage stream over DataStore.
+	BSB BSBConfig `toml:"bsb"`
+}
+
+// DataStoreConfig is [backfill.datastore] — the bulk ledger source. The key
+// names match the SDK's datastore.DataStoreConfig, but the struct is a mirror
+// rather than the SDK type itself: the SDK struct carries extra untagged fields
+// (NetworkPassphrase, Compression), and go-toml matches untagged exported
+// fields by name, so embedding it would silently admit those as file keys. In
+// particular the network passphrase must never come from this file — the
+// captive-core config is its single source, and the daemon copies it into the
+// SDK config at startup (see SDKConfig).
+type DataStoreConfig struct {
+	// Type is the SDK datastore type: "GCS", "S3", "Filesystem", ... Empty
+	// means no lake.
+	Type string `toml:"type"`
+	// Params are the datastore-type-specific parameters (e.g. GCS's
+	// destination_bucket_path).
+	Params map[string]string `toml:"params"`
+	// Schema describes the lake's file layout. Optional when the lake carries a
+	// manifest — the stream reads the schema from there.
+	Schema DataStoreSchemaConfig `toml:"schema"`
+}
+
+// DataStoreSchemaConfig is [backfill.datastore.schema] — how the lake's ledger
+// files are laid out. Must match how the lake was exported.
+type DataStoreSchemaConfig struct {
+	LedgersPerFile    uint32 `toml:"ledgers_per_file"`
+	FilesPerPartition uint32 `toml:"files_per_partition"`
+}
+
+// SDKConfig converts the [backfill.datastore] section into the SDK's config
+// type. networkPassphrase is the one read back from the captive-core file (empty
+// = unknown, e.g. an injected test core): when non-empty, the SDK compares it
+// against the lake's manifest and refuses a lake exported from a different
+// network.
+func (d DataStoreConfig) SDKConfig(networkPassphrase string) datastore.DataStoreConfig {
+	return datastore.DataStoreConfig{
+		Type:   d.Type,
+		Params: d.Params,
+		Schema: datastore.DataStoreSchema{
+			LedgersPerFile:    d.Schema.LedgersPerFile,
+			FilesPerPartition: d.Schema.FilesPerPartition,
+		},
+		NetworkPassphrase: networkPassphrase,
+	}
+}
+
+// BSBConfig is [backfill.bsb] — tuning for the buffered-storage stream that
+// downloads ledger objects from [backfill.datastore] during backfill. It mirrors
+// the SDK's ledgerbackend.BufferedStorageBackendConfig rather than embedding it,
+// for two reasons: the fields are pointers so an absent key is distinguishable
+// from an explicit zero (max_retries = 0 genuinely disables retries), and the
+// key is named max_retries to match [backfill].max_retries instead of the SDK's
+// retry_limit. SDKConfig converts to the SDK type at the daemon boundary.
+type BSBConfig struct {
+	// BufferSize is how many downloaded ledgers are buffered in memory, keeping
+	// the download ahead of ingest; >= 1. Default backfill.DefaultBSBBufferSize.
+	BufferSize *uint32 `toml:"buffer_size"`
+	// NumWorkers is how many object downloads run concurrently; >= 1. Default
+	// backfill.DefaultBSBNumWorkers.
+	NumWorkers *uint32 `toml:"num_workers"`
+	// MaxRetries caps how many times ONE object download (a single ledger file
+	// fetched from the datastore) is retried after a transient error, waiting
+	// RetryWait between attempts; when the budget is exhausted the whole stream
+	// fails. 0 = fail on the first error, no retries. This is a different knob
+	// from [backfill].max_retries, which re-runs a whole chunk task. Default
+	// backfill.DefaultBSBMaxRetries.
+	MaxRetries *uint32 `toml:"max_retries"`
+	// RetryWait is the pause between retries of one object download; >= 1ms
+	// (validateConfig applies the same nanosecond-typo guard as the [service]
+	// durations). Default backfill.DefaultBSBRetryWait.
+	RetryWait *time.Duration `toml:"retry_wait"`
+}
+
+// SDKConfig converts the resolved [backfill.bsb] section into the SDK's config
+// type. Call it only after WithDefaults, when every field is non-nil.
+func (b BSBConfig) SDKConfig() ledgerbackend.BufferedStorageBackendConfig {
+	return ledgerbackend.BufferedStorageBackendConfig{
+		BufferSize: *b.BufferSize,
+		NumWorkers: *b.NumWorkers,
+		RetryLimit: *b.MaxRetries,
+		RetryWait:  *b.RetryWait,
+	}
 }
 
 // IngestionConfig is [ingestion] — the live-network ingestion (captive-core)
@@ -271,18 +352,12 @@ const (
 	DefaultSorobanInclusionFeeWindowLedgers uint32 = 50
 )
 
-// LoadConfig reads and parses the TOML config at path. It applies defaults but
+// LoadConfigWithFlags reads and parses the TOML config at path, with CLI
+// overrides: decode the file (strict), overlay every flag the user actually set
+// (nil fs = none), THEN resolve defaults — so a flag participates in the
+// methods cascade at its own specificity tier before any default is filled. It
 // does NOT validate semantics or touch any pin — that is validateConfig's job.
-// See ParseConfig.
-func LoadConfig(path string) (Config, error) {
-	return LoadConfigWithFlags(path, nil)
-}
-
-// LoadConfigWithFlags is LoadConfig with CLI overrides: decode the file
-// (strict), overlay every flag the user actually set (nil fs = none), THEN
-// resolve defaults — so a flag participates in the methods cascade at its own
-// specificity tier before any default is filled. See flags.go for the
-// flag-name/TOML-path correspondence.
+// See flags.go for the flag-name/TOML-path correspondence.
 func LoadConfigWithFlags(path string, fs FlagOverrides) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -345,6 +420,10 @@ func (cfg Config) WithDefaults() Config {
 		v := DefaultMaxRetries
 		cfg.Backfill.MaxRetries = &v
 	}
+	fillUint32(&cfg.Backfill.BSB.BufferSize, backfill.DefaultBSBBufferSize)
+	fillUint32(&cfg.Backfill.BSB.NumWorkers, backfill.DefaultBSBNumWorkers)
+	fillUint32(&cfg.Backfill.BSB.MaxRetries, backfill.DefaultBSBMaxRetries)
+	fillDuration(&cfg.Backfill.BSB.RetryWait, backfill.DefaultBSBRetryWait)
 	if cfg.Retention.RetentionChunks == nil {
 		v := uint32(0)
 		cfg.Retention.RetentionChunks = &v

@@ -197,6 +197,53 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 	}
 }
 
+func TestValidateConfig_RejectsMalformedBSB(t *testing.T) {
+	uint32Ptr := func(v uint32) *uint32 { return &v }
+	durPtr := func(v time.Duration) *time.Duration { return &v }
+
+	tests := []struct {
+		name   string
+		mutate func(*config.Config)
+		want   string
+	}{
+		{
+			"zero buffer_size",
+			func(c *config.Config) { c.Backfill.BSB.BufferSize = uint32Ptr(0) },
+			"[backfill.bsb].buffer_size",
+		},
+		{
+			"zero num_workers",
+			func(c *config.Config) { c.Backfill.BSB.NumWorkers = uint32Ptr(0) },
+			"[backfill.bsb].num_workers",
+		},
+		{
+			// The nanosecond trap again: retry_wait = 10 decodes as 10ns.
+			"sub-millisecond retry_wait",
+			func(c *config.Config) { c.Backfill.BSB.RetryWait = durPtr(10) },
+			"nanoseconds",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cat, _ := testCatalog(t)
+			cfg := validCfg(4, 3, "genesis")
+			tc.mutate(&cfg)
+			_, err := callValidate(t, cfg, cat, downTip())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+func TestValidateConfig_AcceptsZeroBSBMaxRetries(t *testing.T) {
+	uint32Ptr := func(v uint32) *uint32 { return &v }
+	cat, _ := testCatalog(t)
+	cfg := validCfg(4, 3, "genesis")
+	cfg.Backfill.BSB.MaxRetries = uint32Ptr(0)
+	_, err := callValidate(t, cfg, cat, downTip())
+	require.NoError(t, err)
+}
+
 // ---------------------------------------------------------------------------
 // First start pins earliest_ledger.
 // ---------------------------------------------------------------------------

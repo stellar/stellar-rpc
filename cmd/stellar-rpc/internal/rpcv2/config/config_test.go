@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 )
 
 // A fully-populated, documented-valid config. Every section present with
@@ -112,8 +114,8 @@ func TestParseConfig_FullDocument(t *testing.T) {
 	assert.Equal(t, 5, *cfg.Backfill.MaxRetries)
 	assert.Equal(t, "GCS", cfg.Backfill.DataStore.Type)
 	assert.Equal(t, "my-bucket/ledgers", cfg.Backfill.DataStore.Params["destination_bucket_path"])
-	assert.Equal(t, uint32(2000), cfg.Backfill.BSB.BufferSize)
-	assert.Equal(t, uint32(40), cfg.Backfill.BSB.NumWorkers)
+	assert.Equal(t, uint32(2000), *cfg.Backfill.BSB.BufferSize)
+	assert.Equal(t, uint32(40), *cfg.Backfill.BSB.NumWorkers)
 	assert.Equal(t, "/etc/captive-core.toml", cfg.Ingestion.CaptiveCoreConfig)
 	assert.Equal(t, "debug", cfg.Logging.Level)
 	assert.Equal(t, "json", cfg.Logging.Format)
@@ -131,10 +133,47 @@ func TestParseConfig_MinimalAppliesDefaults(t *testing.T) {
 	// Documented defaults filled.
 	assert.Equal(t, runtime.GOMAXPROCS(0), *cfg.Backfill.Workers)
 	assert.Equal(t, DefaultMaxRetries, *cfg.Backfill.MaxRetries)
+	assert.Equal(t, uint32(backfill.DefaultBSBBufferSize), *cfg.Backfill.BSB.BufferSize)
+	assert.Equal(t, uint32(backfill.DefaultBSBNumWorkers), *cfg.Backfill.BSB.NumWorkers)
+	assert.Equal(t, uint32(backfill.DefaultBSBMaxRetries), *cfg.Backfill.BSB.MaxRetries)
+	assert.Equal(t, backfill.DefaultBSBRetryWait, *cfg.Backfill.BSB.RetryWait)
 	assert.Equal(t, uint32(0), *cfg.Retention.RetentionChunks)
 	assert.Equal(t, DefaultEarliestLedger, cfg.Retention.EarliestLedger)
 	assert.Equal(t, DefaultLogLevel, cfg.Logging.Level)
 	assert.Equal(t, DefaultLogFormat, cfg.Logging.Format)
+}
+
+func TestDecodeConfig_RejectsPassphraseUnderDatastore(t *testing.T) {
+	_, err := DecodeConfig([]byte(`
+[backfill.datastore]
+type = "GCS"
+NetworkPassphrase = "oops"
+`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "NetworkPassphrase")
+}
+
+func TestDataStoreConfig_SDKConfigCarriesPassphrase(t *testing.T) {
+	d := DataStoreConfig{
+		Type:   "GCS",
+		Params: map[string]string{"destination_bucket_path": "b/p"},
+		Schema: DataStoreSchemaConfig{LedgersPerFile: 1, FilesPerPartition: 64000},
+	}
+	sdk := d.SDKConfig("Public Global Stellar Network ; September 2015")
+
+	assert.Equal(t, "GCS", sdk.Type)
+	assert.Equal(t, "b/p", sdk.Params["destination_bucket_path"])
+	assert.Equal(t, uint32(1), sdk.Schema.LedgersPerFile)
+	assert.Equal(t, uint32(64000), sdk.Schema.FilesPerPartition)
+	assert.Equal(t, "Public Global Stellar Network ; September 2015", sdk.NetworkPassphrase)
+}
+
+func TestParseConfig_ExplicitZeroBSBMaxRetriesSurvives(t *testing.T) {
+	cfg, err := ParseConfig([]byte(minimalValidConfig + "\n[backfill.bsb]\nmax_retries = 0\n"))
+	require.NoError(t, err)
+
+	assert.Zero(t, *cfg.Backfill.BSB.MaxRetries)
+	assert.Zero(t, cfg.Backfill.BSB.SDKConfig().RetryLimit)
 }
 
 func TestParseConfig_ServiceDefaults(t *testing.T) {

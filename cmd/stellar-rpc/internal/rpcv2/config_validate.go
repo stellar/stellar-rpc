@@ -37,6 +37,9 @@ func validateConfig(
 	if maxRetries < 0 {
 		return 0, fmt.Errorf("max_retries must be >= 0 (got %d) — 0 means run once, no retry", maxRetries)
 	}
+	if err := validateBSB(cfg.Backfill.BSB); err != nil {
+		return 0, err
+	}
 	// logging.format silently means text unless it is exactly "json", so reject any
 	// other value rather than let a typo drop the operator to text logging. Empty is
 	// the unset sentinel WithDefaults resolves to text, so it is not a typo.
@@ -82,6 +85,23 @@ func validateConfig(
 // ("10s"). Zero is rejected by the same check — a zero execution budget or
 // warning threshold is never intended.
 const minConfiguredDuration = time.Millisecond
+
+// validateBSB form-validates [backfill.bsb]. It runs AFTER WithDefaults, so
+// every pointer is non-nil. max_retries needs no check — any uint32 is valid,
+// including 0 (no retries).
+func validateBSB(bsb config.BSBConfig) error {
+	if *bsb.BufferSize < 1 {
+		return errors.New("[backfill.bsb].buffer_size must be >= 1")
+	}
+	if *bsb.NumWorkers < 1 {
+		return errors.New("[backfill.bsb].num_workers must be >= 1")
+	}
+	if *bsb.RetryWait < minConfiguredDuration {
+		return fmt.Errorf("[backfill.bsb].retry_wait is %v — durations below 1ms are rejected; "+
+			"a bare TOML integer parses as nanoseconds, write a string like \"5s\"", *bsb.RetryWait)
+	}
+	return nil
+}
 
 // validateService form-validates the [service] section. It runs AFTER
 // WithDefaults, so every pointer is non-nil and the checks cover all three

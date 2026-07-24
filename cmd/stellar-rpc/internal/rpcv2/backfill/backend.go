@@ -33,27 +33,20 @@ type Backend interface {
 	Tip(ctx context.Context) (uint32, error)
 }
 
-// Default buffered-storage tuning, applied when a NewBSBBackend caller leaves a
-// field zero. The SDK's BufferedStorageBackend rejects BufferSize == 0 (and
-// requires NumWorkers <= BufferSize), so zero values must be filled before
-// streaming.
+// Default buffered-storage tuning. Exported because the config package fills
+// them into an unset [backfill.bsb] section and the bench command uses them as
+// its flag defaults — the values are defined once, here.
 //
-// These are the BACKFILL-workload values the rpc-hack bulk-ingest benchmarking
-// converged on, not the daemon's serving-path defaults: the pubnet lake stores one
-// ledger per object, so download throughput is request-latency-bound and scales
-// with workers, and a deep prefetch buffer keeps the download overlapped with
-// ingest.
-//
-// The retry defaults are deliberately non-zero: a multi-day full-history backfill
-// will hit transient object-store errors with certainty, and with RetryLimit 0 a
-// single one fails the whole chunk. Disabling retries entirely is therefore not
-// expressible through the zero value — pass an explicit RetryLimit for a different
-// policy.
+// The buffer and worker defaults are deliberately modest, sized for a daemon
+// that shares its host with serving. The rpc-hack bulk-ingest benchmarking
+// converged on much larger values (buffer 5000, 50 workers) for dedicated
+// backfill runs — raise [backfill.bsb] in the config when download throughput
+// matters more than memory and connection footprint.
 const (
-	defaultBSBBufferSize = 5000
-	defaultBSBNumWorkers = 50
-	defaultBSBRetryLimit = 3
-	defaultBSBRetryWait  = 5 * time.Second
+	DefaultBSBBufferSize = 100
+	DefaultBSBNumWorkers = 10
+	DefaultBSBMaxRetries = 3
+	DefaultBSBRetryWait  = 5 * time.Second
 )
 
 // bsbSource is the Backend over an SDK datastore (the pubnet lake): a
@@ -71,31 +64,27 @@ var _ Backend = (*bsbSource)(nil)
 // NewBSBBackend returns a Backend over the SDK datastore described by cfg. The
 // ledger stream owns its own per-iteration datastore lifecycle (the SDK closes it
 // when iteration ends); the separate, long-lived ds is used only for the frontier
-// Tip and is owned and Closed by the caller (the daemon). Zero bsb fields fall back
-// to the benchmarked backfill defaults.
+// Tip and is owned and Closed by the caller (the daemon).
+//
+// A zero BufferSize or NumWorkers falls back to the defaults above (the SDK
+// backend rejects BufferSize == 0). The retry fields are used VERBATIM —
+// RetryLimit 0 really means no retries — so a caller wanting the default retry
+// policy must pass DefaultBSBMaxRetries / DefaultBSBRetryWait explicitly. The
+// daemon's config layer does exactly that for an unset [backfill.bsb], which is
+// what makes an operator's explicit max_retries = 0 honorable at all.
 func NewBSBBackend(
 	ds datastore.DataStore,
 	cfg datastore.DataStoreConfig,
 	bsb ledgerbackend.BufferedStorageBackendConfig,
 ) Backend {
-	// Fill zero values: the SDK backend rejects BufferSize == 0 and requires
-	// NumWorkers <= BufferSize, so a zero-value config would fail before reading
-	// any ledger, and a zero retry policy would fail whole chunks on the first
-	// transient error.
 	if bsb.BufferSize == 0 {
-		bsb.BufferSize = defaultBSBBufferSize
+		bsb.BufferSize = DefaultBSBBufferSize
 	}
 	if bsb.NumWorkers == 0 {
-		bsb.NumWorkers = defaultBSBNumWorkers
+		bsb.NumWorkers = DefaultBSBNumWorkers
 	}
 	if bsb.NumWorkers > bsb.BufferSize {
 		bsb.NumWorkers = bsb.BufferSize
-	}
-	if bsb.RetryLimit == 0 {
-		bsb.RetryLimit = defaultBSBRetryLimit
-	}
-	if bsb.RetryWait == 0 {
-		bsb.RetryWait = defaultBSBRetryWait
 	}
 	return &bsbSource{
 		LedgerStream: ledgerbackend.NewBufferedStorageStream(bsb, cfg, nil),
@@ -108,6 +97,12 @@ func NewBSBBackend(
 // at shutdown. The datastore type (GCS/S3/Filesystem/...) is whatever dsCfg.Type names —
 // any SDK datastore works. The batch schema is read from the lake manifest by the
 // stream, so dsCfg need not set Schema.
+//
+// When dsCfg.NetworkPassphrase is non-empty, the lake's manifest is verified
+// against it (and the rest of dsCfg) HERE, eagerly. The stream re-runs the same
+// check on every open anyway; failing now turns a wrong-network lake into one
+// clear startup error instead of a retried chunk-task crash loop. A lake with
+// no manifest at all passes — the SDK skips the comparison for it.
 func NewBSBBackendFromConfig(
 	ctx context.Context,
 	dsCfg datastore.DataStoreConfig,
@@ -116,6 +111,12 @@ func NewBSBBackendFromConfig(
 	ds, err := datastore.NewDataStore(ctx, dsCfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open datastore (type %q): %w", dsCfg.Type, err)
+	}
+	if dsCfg.NetworkPassphrase != "" {
+		if _, err := datastore.LoadSchema(ctx, ds, dsCfg); err != nil {
+			_ = ds.Close()
+			return nil, nil, fmt.Errorf("verify datastore manifest (type %q): %w", dsCfg.Type, err)
+		}
 	}
 	return NewBSBBackend(ds, dsCfg, bsb), func() { _ = ds.Close() }, nil
 }

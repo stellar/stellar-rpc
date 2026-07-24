@@ -8,12 +8,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 )
 
-// The shipped sample config must always parse under the strict decoder — every
-// key it documents is thereby proven to exist in the schema. A schema rename
-// that orphans a sample key fails here, not in a user's deploy.
 func TestSampleConfig_ParsesStrict(t *testing.T) {
 	data, err := os.ReadFile("rpc-v2-sample-config.toml")
 	require.NoError(t, err)
@@ -35,4 +33,9 @@ func TestSampleConfig_ParsesStrict(t *testing.T) {
 	assert.Equal(t, config.DefaultClassicFeeWindowLedgers, *cfg.Service.FeeStats.ClassicFeeWindowLedgers)
 	assert.Equal(t, config.DefaultMaxHealthyLedgerLatency, *cfg.Service.Methods.GetHealth.MaxHealthyLedgerLatency)
 	assert.Equal(t, 30*time.Second, *cfg.Service.Methods.GetHealth.MaxHealthyLedgerLatency)
+
+	assert.Equal(t, uint32(backfill.DefaultBSBBufferSize), *cfg.Backfill.BSB.BufferSize)
+	assert.Equal(t, uint32(backfill.DefaultBSBNumWorkers), *cfg.Backfill.BSB.NumWorkers)
+	assert.Equal(t, uint32(backfill.DefaultBSBMaxRetries), *cfg.Backfill.BSB.MaxRetries)
+	assert.Equal(t, backfill.DefaultBSBRetryWait, *cfg.Backfill.BSB.RetryWait)
 }

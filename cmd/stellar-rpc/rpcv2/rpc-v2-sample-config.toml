@@ -175,6 +175,11 @@ max_retries = 3
 # Any SDK datastore works (GCS, S3, filesystem, ...). OMIT this whole block
 # (or leave type = "") for NO lake: backfill then replays history through
 # captive core from [ingestion].history_archive_urls — correct but much slower.
+#
+# The network passphrase is deliberately NOT a key here (or anywhere in this
+# file): the daemon copies it from the captive-core config at startup and, when
+# the lake carries a manifest (.config.json), verifies the lake was exported
+# from the same network — a wrong-network lake fails startup.
 [backfill.datastore]
 
 # SDK datastore type: "GCS", "S3", ... Empty = no lake.
@@ -190,13 +195,16 @@ ledgers_per_file = 1
 files_per_partition = 64000
 
 # --- Buffered reads over the datastore ---------------------------------------
-# Tunes the SDK's buffered-storage stream over [backfill.datastore]. Any field
-# left zero/absent falls back to the backfill defaults applied in code.
+# Tunes the buffered-storage stream that downloads ledger objects from
+# [backfill.datastore]. max_retries here retries ONE object download (a single
+# ledger file) after a transient datastore error, waiting retry_wait between
+# attempts — a different knob from [backfill].max_retries above, which re-runs
+# a whole chunk task.
 [backfill.bsb]
-buffer_size = 100    # ledgers buffered in memory
-num_workers = 10     # concurrent object fetchers
-retry_limit = 0      # per-object retries (0 = none)
-retry_wait = "0s"    # wait between object retries
+buffer_size = 100    # downloaded ledgers buffered in memory; >= 1
+num_workers = 10     # concurrent object downloads; >= 1
+max_retries = 3      # retries per object download; 0 = fail on first error
+retry_wait = "5s"    # pause between retries of one object download
 
 # -----------------------------------------------------------------------------
 # [ingestion] — live-network ingestion via captive stellar-core

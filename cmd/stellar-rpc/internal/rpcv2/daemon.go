@@ -126,7 +126,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// ingestion loop, and the no-lake backfill source is built from its stream. A
 	// bad [ingestion] config therefore surfaces before validateConfig's errors —
 	// cosmetic, both are fatal startup errors. ---
-	core, err := resolveCore(opts, cfg, logger)
+	core, networkPassphrase, err := resolveCore(opts, cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -148,7 +148,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// (which needs the tip) runs after this. ---
 	backend := opts.Backend
 	if backend == nil {
-		built, cleanup, berr := buildBackfillBackend(ctx, cfg, core, pool, logger)
+		built, cleanup, berr := buildBackfillBackend(ctx, cfg, core, pool, networkPassphrase, logger)
 		if berr != nil {
 			return fmt.Errorf("build backfill backend: %w", berr)
 		}
@@ -216,16 +216,18 @@ func openCatalog(paths config.Paths, opts daemonOptions, logger *supportlog.Entr
 }
 
 // resolveCore returns the injected CoreOpener (tests) or a production captive-core
-// opener built from [ingestion].
-func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry) (CoreOpener, error) {
+// opener built from [ingestion], plus the NETWORK_PASSPHRASE read back from the
+// captive-core file. An injected opener carries no passphrase — the empty string
+// means "unknown", which skips the datastore's wrong-network check.
+func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry) (CoreOpener, string, error) {
 	if opts.Core != nil {
-		return opts.Core, nil
+		return opts.Core, "", nil
 	}
 	built, err := newCaptiveCoreOpener(cfg.Ingestion, cfg.Storage.DefaultDataDir, logger)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return built, nil
+	return built, built.config.NetworkPassphrase, nil
 }
 
 // startConfig assembles the StartConfig run consumes. run() builds the
@@ -322,11 +324,18 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // pinnable (#833). With neither it returns (nil, nil, nil) and runDaemonWith fails
 // startup with the config-shaped message. core must be non-nil (runDaemonWith
 // resolves the opener first).
+//
+// networkPassphrase is the one read back from the captive-core file; it is
+// copied into the SDK datastore config so a lake whose manifest names a
+// DIFFERENT network is rejected at startup (NewBSBBackendFromConfig's manifest
+// check). Empty means unknown and skips the check.
 func buildBackfillBackend(
-	ctx context.Context, cfg config.Config, core CoreOpener, pool rootHASGetter, logger *supportlog.Entry,
+	ctx context.Context, cfg config.Config, core CoreOpener, pool rootHASGetter,
+	networkPassphrase string, logger *supportlog.Entry,
 ) (backfill.Backend, func(), error) {
 	if cfg.Backfill.DataStore.Type != "" {
-		backend, cleanup, err := backfill.NewBSBBackendFromConfig(ctx, cfg.Backfill.DataStore, cfg.Backfill.BSB)
+		dsCfg := cfg.Backfill.DataStore.SDKConfig(networkPassphrase)
+		backend, cleanup, err := backfill.NewBSBBackendFromConfig(ctx, dsCfg, cfg.Backfill.BSB.SDKConfig())
 		if err != nil {
 			return nil, nil, err
 		}

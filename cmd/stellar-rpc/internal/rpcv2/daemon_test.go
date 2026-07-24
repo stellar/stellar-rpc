@@ -475,7 +475,7 @@ func TestSupervise_FirstStartNoTipRetries(t *testing.T) {
 // returns no backend (runDaemonWith then fails startup).
 func TestBuildBackfillBackend_NoSourcesNoBackend(t *testing.T) {
 	cfg := config.Config{}.WithDefaults()
-	backend, cleanup, err := buildBackfillBackend(context.Background(), cfg, &fakeCore{}, nil, silentLogger())
+	backend, cleanup, err := buildBackfillBackend(context.Background(), cfg, &fakeCore{}, nil, "", silentLogger())
 	require.NoError(t, err)
 	require.Nil(t, backend, "no datastore and no archives ⇒ no bulk source")
 	require.Nil(t, cleanup, "nothing to release when no backend was opened")
@@ -501,7 +501,7 @@ func TestBuildBackfillBackend_NoLakeBuildsCaptiveSource(t *testing.T) {
 	cfg := config.Config{}.WithDefaults()
 	core := &fakeCore{}
 	backend, cleanup, err := buildBackfillBackend(
-		context.Background(), cfg, core, fakeRootHAS{current: 70_000}, silentLogger())
+		context.Background(), cfg, core, fakeRootHAS{current: 70_000}, "", silentLogger())
 	require.NoError(t, err)
 	require.Nil(t, cleanup, "no datastore handle to release")
 	require.IsType(t, &captiveSource{}, backend)

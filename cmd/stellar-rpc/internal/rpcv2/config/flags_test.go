@@ -88,11 +88,9 @@ func TestApplyFlags_OverridesFileValues(t *testing.T) {
 	assert.Equal(t, uint32(33), *cfg.Service.FeeStats.ClassicFeeWindowLedgers)
 	assert.Equal(t, 3, *cfg.Backfill.Workers)
 	assert.Equal(t, []string{"https://a.example", "https://b.example"}, cfg.Ingestion.HistoryArchiveURLs)
-	assert.Equal(t, 7*time.Second, cfg.Backfill.BSB.RetryWait)
+	assert.Equal(t, 7*time.Second, *cfg.Backfill.BSB.RetryWait)
 }
 
-// The precedence examples from issue #882: specificity beats source; within a
-// tier, CLI beats file; compiled defaults are the last tier.
 func TestApplyFlags_Precedence(t *testing.T) {
 	const fileWithTiers = `
 [storage]
