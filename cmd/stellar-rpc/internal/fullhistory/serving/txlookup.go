@@ -21,6 +21,11 @@ import (
 // newest chunk first. A hot match is exact and definitive, so the newest indexes
 // are probed first. The returned indexes are router-owned handles; the caller does
 // not close them.
+//
+// It is deliberately unfiltered — every published handle, regardless of the
+// admitted floor/latest. A match can therefore name a ledger in a chunk below the
+// floor (a handle that predates this admission); the lookup's floor/latest gate on
+// the resolved ledger is the only thing that keeps such a match from being served.
 func (a *Admission) HotTxIndexes() []txhash.HashIndex {
 	ids := make([]chunk.ID, 0, len(a.handles.byChunk))
 	for c := range a.handles.byChunk {

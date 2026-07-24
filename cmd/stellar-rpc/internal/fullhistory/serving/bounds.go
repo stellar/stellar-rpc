@@ -1,10 +1,17 @@
 package serving
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
+
+// ErrInvertedRange rejects a request whose low edge exceeds its high edge before
+// clamping. It is distinct from the valid empty case (lo > hi after clamping,
+// meaning the request lies beyond latest): an inverted input is a malformed
+// request, not an empty-but-valid one.
+var ErrInvertedRange = errors.New("serving: inverted range (lo > hi)")
 
 // Direction is a range request's scan direction.
 type Direction int
@@ -39,9 +46,14 @@ func (a *Admission) OldestLedger() uint32 { return a.floor.FirstLedger() }
 // leading edge — where results begin, lo for ascending and hi for descending —
 // below the oldest servable ledger is rejected with *RangeError (not clamped).
 // The trailing edge is truncated: an ascending scan stops at latest, a descending
-// scan terminates at the floor. It returns the clamped [lo, hi]; lo > hi means
-// the request lies entirely beyond latest, so there is nothing to serve yet.
+// scan terminates at the floor. It returns the clamped [lo, hi]; lo > hi in the
+// result means the request lies entirely beyond latest, so there is nothing to
+// serve yet. An inverted input (lo > hi before clamping) is rejected with
+// ErrInvertedRange, so callers never confuse a malformed range with an empty one.
 func (a *Admission) ClampRange(dir Direction, lo, hi uint32) (uint32, uint32, error) {
+	if lo > hi {
+		return 0, 0, fmt.Errorf("%w: [%d, %d]", ErrInvertedRange, lo, hi)
+	}
 	oldest, latest := a.OldestLedger(), a.latest
 
 	leading := lo

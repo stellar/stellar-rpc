@@ -54,6 +54,11 @@ func TestClampRange_Ascending(t *testing.T) {
 		require.NoError(t, err) // not below-floor, so not an error — just future
 		assert.Greater(t, lo, hi, "lo > hi signals empty")
 	})
+
+	t.Run("inverted input is rejected, not mislabeled as empty", func(t *testing.T) {
+		_, _, err := a.ClampRange(Ascending, 59000, 51000) // in-range but lo > hi
+		require.ErrorIs(t, err, ErrInvertedRange)
+	})
 }
 
 func TestClampRange_Descending(t *testing.T) {

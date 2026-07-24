@@ -96,6 +96,9 @@ func (a *Admission) EventReader(c chunk.ID) (eventstore.Reader, func() error, er
 	}
 	switch t {
 	case tierCold:
+		// TODO(events adapter / #772): thread read concurrency
+		// (ColdReaderOptions.Concurrency → the packfile ReadItems concurrency) here;
+		// decide whether it is config-driven or caller-supplied. Default for now.
 		cr, err := eventstore.OpenColdReader(c, a.catalog.Layout().EventsBucketDir(c), eventstore.ColdReaderOptions{})
 		if err != nil {
 			return nil, nil, err
