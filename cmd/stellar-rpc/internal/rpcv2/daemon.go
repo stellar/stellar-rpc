@@ -30,9 +30,11 @@ import (
 
 // RunDaemon is the full-history daemon's process entrypoint: load config, lock
 // storage roots, open the catalog, validateConfig, build boundaries, then run
-// the supervised run loop.
-func RunDaemon(ctx context.Context, configPath string) error {
-	return runDaemonWith(ctx, configPath, daemonOptions{})
+// the supervised run loop. flags carries the CLI overrides main registered via
+// config.BindFlags (nil = none); each set flag overlays its TOML key before
+// defaults resolve.
+func RunDaemon(ctx context.Context, configPath string, flags config.FlagOverrides) error {
+	return runDaemonWith(ctx, configPath, daemonOptions{Flags: flags})
 }
 
 // daemonOptions carries the daemon's injectable seams; production leaves every field zero.
@@ -64,6 +66,9 @@ type daemonOptions struct {
 	// IngestSink is the per-type cold-path ingest sink; nil ⇒ a *ingest.PrometheusSink.
 	IngestSink ingest.MetricSink
 
+	// Flags carries the CLI overrides registered by config.BindFlags; nil = none.
+	Flags config.FlagOverrides
+
 	// chunksPerTxhashIndex overrides the tx-hash index width (test-only). 0 ⇒ the
 	// fixed geometry.ChunksPerTxhashIndex. Tests set it to 1 so a single chunk's
 	// freeze is a terminal index (exercising the index rebuild + prune path cheaply).
@@ -77,12 +82,12 @@ const defaultRestartBackoff = 5 * time.Second
 //nolint:cyclop,funlen // linear startup sequence; each branch is one wiring step
 func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) error {
 	// --- Load + form-validate the config. ---
-	cfg, err := config.LoadConfig(configPath)
+	cfg, err := config.LoadConfigWithFlags(configPath, opts.Flags)
 	if err != nil {
 		return err
 	}
-	if cfg.Service.DefaultDataDir == "" {
-		return errors.New("[service].default_data_dir is required")
+	if cfg.Storage.DefaultDataDir == "" {
+		return errors.New("[storage].default_data_dir is required")
 	}
 
 	logger := opts.Logger
@@ -216,7 +221,7 @@ func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry
 	if opts.Core != nil {
 		return opts.Core, nil
 	}
-	built, err := newCaptiveCoreOpener(cfg.Ingestion, cfg.Service.DefaultDataDir, logger)
+	built, err := newCaptiveCoreOpener(cfg.Ingestion, cfg.Storage.DefaultDataDir, logger)
 	if err != nil {
 		return nil, err
 	}

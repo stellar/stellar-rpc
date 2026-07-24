@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/limits"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
@@ -46,6 +48,9 @@ func validateConfig(
 	if err := validateEarliestForm(cfg.Retention.EarliestLedger); err != nil {
 		return 0, err
 	}
+	if err := validateService(cfg.Service); err != nil {
+		return 0, err
+	}
 
 	earliestStored, earliestPinned, err := cat.EarliestLedger()
 	if err != nil {
@@ -69,6 +74,106 @@ func validateConfig(
 		return 0, fmt.Errorf("pin earliest ledger (earliest=%d): %w", earliest, err)
 	}
 	return earliest, nil
+}
+
+// minConfiguredDuration guards go-toml v1's nanosecond trap: a bare integer
+// duration decodes as NANOSECONDS (max_execution_duration = 10 → 10ns), so any
+// configured duration under 1ms is a near-certain typo for the string form
+// ("10s"). Zero is rejected by the same check — a zero execution budget or
+// warning threshold is never intended.
+const minConfiguredDuration = time.Millisecond
+
+// validateService form-validates the [service] section. It runs AFTER
+// WithDefaults, so every pointer is non-nil and the checks cover all three
+// tiers of the methods cascade (an explicit zero at any tier lands here).
+func validateService(svc config.ServiceConfig) error {
+	if *svc.MaxConcurrentRequests < 1 {
+		return errors.New("[service].max_concurrent_requests must be >= 1")
+	}
+	durations := []struct {
+		name string
+		d    time.Duration
+	}{
+		{"[service].max_request_execution_duration", *svc.MaxRequestExecutionDuration},
+		{"[service].request_execution_warning_threshold", *svc.RequestExecutionWarningThreshold},
+		{"[service.methods.getHealth].max_healthy_ledger_latency", *svc.Methods.GetHealth.MaxHealthyLedgerLatency},
+	}
+	m := svc.Methods
+	if m.QueueLimit != nil && *m.QueueLimit < 1 {
+		return errors.New("[service.methods].queue_limit must be >= 1")
+	}
+	if m.MaxExecutionDuration != nil {
+		durations = append(durations, struct {
+			name string
+			d    time.Duration
+		}{"[service.methods].max_execution_duration", *m.MaxExecutionDuration})
+	}
+
+	methods := []struct {
+		name  string
+		queue uint
+		dur   time.Duration
+	}{
+		{"getHealth", *m.GetHealth.QueueLimit, *m.GetHealth.MaxExecutionDuration},
+		{"getNetwork", *m.GetNetwork.QueueLimit, *m.GetNetwork.MaxExecutionDuration},
+		{"getVersionInfo", *m.GetVersionInfo.QueueLimit, *m.GetVersionInfo.MaxExecutionDuration},
+		{"getLatestLedger", *m.GetLatestLedger.QueueLimit, *m.GetLatestLedger.MaxExecutionDuration},
+		{"getTransaction", *m.GetTransaction.QueueLimit, *m.GetTransaction.MaxExecutionDuration},
+		{"getTransactions", *m.GetTransactions.QueueLimit, *m.GetTransactions.MaxExecutionDuration},
+		{"getLedgers", *m.GetLedgers.QueueLimit, *m.GetLedgers.MaxExecutionDuration},
+		{"getEvents", *m.GetEvents.QueueLimit, *m.GetEvents.MaxExecutionDuration},
+		{"getFeeStats", *m.GetFeeStats.QueueLimit, *m.GetFeeStats.MaxExecutionDuration},
+	}
+	for _, mm := range methods {
+		if mm.queue < 1 {
+			return fmt.Errorf("[service.methods.%s].queue_limit must be >= 1", mm.name)
+		}
+		durations = append(durations, struct {
+			name string
+			d    time.Duration
+		}{"[service.methods." + mm.name + "].max_execution_duration", mm.dur})
+	}
+	for _, dd := range durations {
+		if dd.d < minConfiguredDuration {
+			return fmt.Errorf("%s is %v — durations below 1ms are rejected; "+
+				"a bare TOML integer parses as nanoseconds, write a string like \"10s\"", dd.name, dd.d)
+		}
+	}
+
+	paginated := []struct {
+		name string
+		p    config.PaginatedMethodConfig
+	}{
+		{"getTransactions", m.GetTransactions},
+		{"getLedgers", m.GetLedgers},
+		{"getEvents", m.GetEvents},
+	}
+	for _, pp := range paginated {
+		if *pp.p.MaxItemsPerResponse < 1 {
+			return fmt.Errorf("[service.methods.%s].max_items_per_response must be >= 1", pp.name)
+		}
+		if *pp.p.DefaultItemsPerResponse > *pp.p.MaxItemsPerResponse {
+			return fmt.Errorf("[service.methods.%s].default_items_per_response (%d) cannot exceed max_items_per_response (%d)",
+				pp.name, *pp.p.DefaultItemsPerResponse, *pp.p.MaxItemsPerResponse)
+		}
+	}
+
+	feeWindows := []struct {
+		name string
+		v    uint32
+	}{
+		{"[service.fee_stats].classic_fee_window_ledgers", *svc.FeeStats.ClassicFeeWindowLedgers},
+		{"[service.fee_stats].soroban_inclusion_fee_window_ledgers", *svc.FeeStats.SorobanInclusionFeeWindowLedgers},
+	}
+	for _, fw := range feeWindows {
+		if fw.v < 1 {
+			return fmt.Errorf("%s must be >= 1", fw.name)
+		}
+		if err := limits.ValidateFeeStatsRetentionWindow(fw.name, fw.v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // confirmEarliestUnchanged enforces earliest_ledger's restart immutability: genesis or

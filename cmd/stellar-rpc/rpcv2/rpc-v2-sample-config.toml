@@ -1,0 +1,238 @@
+# =============================================================================
+# stellar-rpc-v2 sample configuration
+# =============================================================================
+#
+# Usage:
+#   stellar-rpc-v2 --config /etc/stellar/rpc-v2.toml
+#
+# Rules this file lives by (they differ from v1 — see issue #882):
+#
+#   * Parsing is ALWAYS STRICT: any unknown or misspelled key is a hard
+#     startup error, never silently ignored.
+#   * Every key below is also settable from the command line as a flag named
+#     by its dotted TOML path, e.g.
+#         --storage.default_data_dir=/var/stellar
+#         --service.methods.getLedgers.queue_limit=500
+#     A set flag overrides the file AT THE SAME SPECIFICITY: specificity beats
+#     source, so --service.methods.queue_limit=30 (the methods-wide default)
+#     never overrides an explicit [service.methods.getLedgers] value from this
+#     file. There are no environment variables.
+#   * Durations are strings like "10s", "500ms", "1m30s". Do NOT write bare
+#     integers — TOML integers decode as NANOSECONDS and any duration under
+#     1ms is rejected at startup.
+#   * Every key is optional unless marked required; absent keys take the
+#     defaults shown.
+
+# -----------------------------------------------------------------------------
+# [storage] — where the daemon's data lives
+# -----------------------------------------------------------------------------
+[storage]
+
+# REQUIRED. The data root: the catalog and every store below defaults to a
+# tree under this directory. Also the base for captive core's scratch dir.
+default_data_dir = "/var/stellar/rpc-v2"
+
+# Optional per-store overrides, for splitting trees across disks (e.g. the hot
+# RocksDB on fast local NVMe, cold packs on bulk storage). An empty/absent key
+# derives the path under default_data_dir (shown in the trailing comments).
+# Any two overrides resolving to the same tree are rejected at startup.
+#catalog = ""        # {default_data_dir}/catalog/rocksdb — the catalog RocksDB
+#ledgers = ""        # {default_data_dir}/ledgers         — immutable ledger .pack files
+#events = ""         # {default_data_dir}/events          — immutable events segments
+#txhash_raw = ""     # {default_data_dir}/txhash/raw      — transient txhash .bin files
+#txhash_index = ""   # {default_data_dir}/txhash/index    — frozen per-window .idx files
+#hot = ""            # {default_data_dir}/hot             — per-chunk hot RocksDB databases
+
+# -----------------------------------------------------------------------------
+# [retention] — how much history this daemon keeps
+# -----------------------------------------------------------------------------
+[retention]
+
+# The earliest ledger this daemon will EVER have data for. One of:
+#   "genesis"  — full history from the network's first ledger (the default)
+#   "now"      — start from the chunk containing the network tip at first boot
+#   <number>   — a chunk-aligned ledger sequence (e.g. 50002)
+# PINNED: written immutably on first start and checked on every restart —
+# changing it once data exists aborts startup (wipe the data dir to change it).
+earliest_ledger = "genesis"
+
+# Sliding retention window in CHUNKS (10,000 ledgers each); 0 = keep
+# everything (full history, the default).
+retention_chunks = 0
+
+# -----------------------------------------------------------------------------
+# [service] — the JSON-RPC read-serving policy (issue #882)
+# -----------------------------------------------------------------------------
+# Dormant until the v2 read server exists, EXCEPT [service.fee_stats], which
+# live ingestion consumes today (issue #881). Naming rule: camelCase table
+# keys only where the key IS a JSON-RPC method name; snake_case elsewhere.
+[service]
+
+# Address the JSON-RPC server listens on.
+endpoint = "localhost:8000"
+
+# Admin endpoint (pprof, Prometheus metrics) over plaintext HTTP. "" (the
+# default) disables it. Never expose this to the internet.
+admin_endpoint = ""
+
+# The three keys below are the HTTP-LAYER GATE wrapped around the whole
+# server, exactly as in v1. They always act, on every request, IN ADDITION to
+# the per-method limits: max_concurrent_requests bounds the SUM of in-flight
+# requests across all methods, which no per-method limit can.
+max_concurrent_requests = 5000
+max_request_execution_duration = "25s"    # global 504 timeout
+request_execution_warning_threshold = "5s" # slower requests log a warning
+
+# --- Fee statistics windows (consumed by live ingestion, issue #881) --------
+# Sizes, in LEDGERS, of the two in-memory windows behind getFeeStats. They
+# live here — not under getFeeStats — because they size ingestion-time
+# memory, not request handling. Both must be 1..1000; larger windows slow
+# startup replay without improving fee estimates.
+[service.fee_stats]
+classic_fee_window_ledgers = 10
+soroban_inclusion_fee_window_ledgers = 50
+
+# --- Per-method serving limits ----------------------------------------------
+# Bare keys directly on [service.methods] are the OPTIONAL methods-wide
+# default tier for the two fields every method has. Resolution per method and
+# field: explicit per-method value → methods-wide default → compiled default
+# (the values shown in the tables below, identical to v1's).
+[service.methods]
+#queue_limit = 200              # default queue_limit for all nine methods
+#max_execution_duration = "8s"  # default execution budget for all nine methods
+
+# Each method's table, keyed by the method's wire name:
+#   queue_limit             — max outstanding requests for this method
+#   max_execution_duration  — per-request budget; exceeding it aborts with -32001
+
+[service.methods.getHealth]
+queue_limit = 1000
+max_execution_duration = "5s"
+# getHealth only: the daemon reports healthy while the last committed ledger's
+# close time is within this latency of now.
+max_healthy_ledger_latency = "30s"
+
+[service.methods.getNetwork]
+queue_limit = 1000
+max_execution_duration = "5s"
+
+[service.methods.getVersionInfo]
+queue_limit = 1000
+max_execution_duration = "5s"
+
+[service.methods.getLatestLedger]
+queue_limit = 1000
+max_execution_duration = "5s"
+
+[service.methods.getTransaction]
+queue_limit = 1000
+max_execution_duration = "5s"
+
+# The three paginated methods also carry the page-size caps:
+#   max_items_per_response     — hard cap on the client's pagination limit
+#   default_items_per_response — page size when the request omits a limit
+# (No methods-wide default tier for these two — they exist on only three methods.)
+
+[service.methods.getTransactions]
+queue_limit = 1000
+max_execution_duration = "5s"
+max_items_per_response = 200
+default_items_per_response = 50
+
+[service.methods.getLedgers]
+queue_limit = 1000
+max_execution_duration = "10s"
+max_items_per_response = 200
+default_items_per_response = 50
+
+[service.methods.getEvents]
+queue_limit = 1000
+max_execution_duration = "10s"
+max_items_per_response = 10000
+default_items_per_response = 100
+
+[service.methods.getFeeStats]
+queue_limit = 100
+max_execution_duration = "5s"
+
+# NOT here (by design): sendTransaction, simulateTransaction, getLedgerEntries
+# and the preflight worker settings — those methods are captive-core-backed
+# and arrive with the captive-core-endpoints work. friendbot_url arrives with
+# the getNetwork handler.
+
+# -----------------------------------------------------------------------------
+# [backfill] — bulk history download into local storage
+# -----------------------------------------------------------------------------
+[backfill]
+
+# Concurrent chunk-task slots; >= 1. Default: GOMAXPROCS.
+#workers = 8
+
+# Per-task retries before the daemon aborts; 0 = run once, no retry. Default 3.
+max_retries = 3
+
+# --- The bulk ledger source (a "lake") ---------------------------------------
+# Any SDK datastore works (GCS, S3, filesystem, ...). OMIT this whole block
+# (or leave type = "") for NO lake: backfill then replays history through
+# captive core from [ingestion].history_archive_urls — correct but much slower.
+[backfill.datastore]
+
+# SDK datastore type: "GCS", "S3", ... Empty = no lake.
+type = "GCS"
+
+# Datastore-specific parameters; keys depend on type. For GCS:
+[backfill.datastore.params]
+destination_bucket_path = "my-bucket/path/to/ledgers"
+
+# How the lake's files are laid out. Must match how the lake was exported.
+[backfill.datastore.schema]
+ledgers_per_file = 1
+files_per_partition = 64000
+
+# --- Buffered reads over the datastore ---------------------------------------
+# Tunes the SDK's buffered-storage stream over [backfill.datastore]. Any field
+# left zero/absent falls back to the backfill defaults applied in code.
+[backfill.bsb]
+buffer_size = 100    # ledgers buffered in memory
+num_workers = 10     # concurrent object fetchers
+retry_limit = 0      # per-object retries (0 = none)
+retry_wait = "0s"    # wait between object retries
+
+# -----------------------------------------------------------------------------
+# [ingestion] — live-network ingestion via captive stellar-core
+# -----------------------------------------------------------------------------
+# The captive-core config FILE is the single source of truth for everything
+# core-side — this differs from v1, where NETWORK_PASSPHRASE was an RPC config
+# key of its own. Here the daemon READS the passphrase back from the file
+# below at startup (it must define NETWORK_PASSPHRASE). v1's `network`
+# convenience macro and the captive-core HTTP-port knobs do not exist in v2.
+[ingestion]
+
+# REQUIRED for live ingestion. Path to the stellar-core config used by captive
+# core. Must define NETWORK_PASSPHRASE and at least a quorum set; the daemon
+# passes it to the SDK in strict mode with unified events and soroban
+# diagnostic/meta enforcement ON (same params as the v1 daemon).
+captive_core_config = "/etc/stellar/captive-core.toml"
+
+# REQUIRED for live ingestion. Plain history-archive URLs the SDK reads
+# checkpoints from — not derivable from the core file's [HISTORY.*] entries
+# (those are shell commands, not URLs). Also the no-lake backfill source.
+history_archive_urls = ["https://history.stellar.org/prd/core-live/core_live_001"]
+
+# Path to the stellar-core binary. Default: the "stellar-core" found on PATH.
+#stellar_core_binary_path = "/usr/local/bin/stellar-core"
+
+# Captive core's working/bucket directory. Default: {default_data_dir}/captive-core.
+#captive_core_storage_path = ""
+
+# -----------------------------------------------------------------------------
+# [logging]
+# -----------------------------------------------------------------------------
+[logging]
+
+# Minimum severity: "debug", "info", "warn", "error". Default "info".
+level = "info"
+
+# "text" or "json". Anything else is rejected (a typo must not silently drop
+# you to text logging). Default "text".
+format = "text"

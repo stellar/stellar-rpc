@@ -42,13 +42,28 @@ All chunk and window ids use uniform `%08d` zero-padding. Example (window = 1,00
 
 ## Configuration
 
-One TOML file configures the daemon, passed as `--config` to the v2 binary (`stellar-rpc-v2 --config <path>`). Decoding is strict: an unknown key or section is a startup error, so a stale or mistyped config fails loudly instead of being half-read.
+One TOML file configures the daemon, passed as `--config` to the v2 binary (`stellar-rpc-v2 --config <path>`). Decoding is strict: an unknown key or section is a startup error, so a stale or mistyped config fails loudly instead of being half-read. A fully-commented sample lives at `cmd/stellar-rpc/rpcv2/rpc-v2-sample-config.toml`.
 
-**[service]**
+Every TOML leaf is also settable from the command line as a flag named by its dotted TOML path (`--storage.default_data_dir`, `--service.methods.getLedgers.queue_limit`); the flag set is derived from the config structs by reflection, so it can never drift from the file schema. Precedence: specificity beats source; within a tier, a set flag beats the file; compiled defaults are the last tier. `--config` stays required — the file is the source of truth, flags are one-off overrides. No environment variables.
+
+**[service]** — the JSON-RPC read-serving policy (#882; dormant until the read server exists, except `[service.fee_stats]`, which live ingestion consumes — #881). Key naming: camelCase only for the JSON-RPC method table names, snake_case elsewhere. Durations are strings (`"10s"`); any duration under 1ms is rejected (a bare TOML integer parses as nanoseconds).
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `default_data_dir` | string | **required** | Base directory for the catalog and default storage paths. |
+| `endpoint` | string | `localhost:8000` | JSON-RPC listen address. |
+| `admin_endpoint` | string | `""` (disabled) | pprof/metrics endpoint, plaintext HTTP. |
+| `max_concurrent_requests` | uint | `5000` | HTTP-layer gate: bounds total in-flight requests across ALL methods, in addition to per-method limits. |
+| `max_request_execution_duration` | duration | `"25s"` | HTTP-layer global timeout. |
+| `request_execution_warning_threshold` | duration | `"5s"` | Slower requests log a warning. |
+
+**[service.fee_stats]** — sizes (in ledgers, 1..1000) of the in-memory fee windows behind getFeeStats; fed by live ingestion, hence not method config:
+
+| Key | Default |
+|---|---|
+| `classic_fee_window_ledgers` | `10` |
+| `soroban_inclusion_fee_window_ledgers` | `50` |
+
+**[service.methods.\<methodName\>]** — one table per served method (getHealth, getNetwork, getVersionInfo, getLatestLedger, getTransaction, getTransactions, getLedgers, getEvents, getFeeStats), each with `queue_limit` and `max_execution_duration` (v1's defaults: 1000 / 5s, except getFeeStats 100, and 10s for getLedgers/getEvents). The three paginated methods add `max_items_per_response` / `default_items_per_response`; getHealth adds `max_healthy_ledger_latency` (default `"30s"`). Bare `queue_limit` / `max_execution_duration` keys directly on `[service.methods]` form an optional methods-wide default tier: per-method value → wide default → compiled default. (sendTransaction, simulateTransaction, getLedgerEntries and the preflight knobs arrive with the captive-core-endpoints work.)
 
 **[retention]** — the two inputs to the retention floor; the effective floor is the higher of the two:
 
@@ -57,10 +72,11 @@ One TOML file configures the daemon, passed as `--config` to the v2 binary (`ste
 | `retention_chunks` | uint32 | `0` | Retention window in chunks. `0` = full history. |
 | `earliest_ledger` | uint32 \| `"genesis"` \| `"now"` | `"genesis"` | Earliest ledger this daemon will ever have data for — a fixed lower floor on history. Must be chunk-aligned; `"now"` resolves to the backfill backend's frontier chunk at first start. Resolved and pinned on the first start (a reachable backend is required, to resolve `"now"` and to reject a numeric floor past the tip; see `validateConfig`), immutable thereafter. Setting it above genesis typically skips upfront backfill — useful when no fast backfill source is available and the daemon only follows the live network (`earliest_ledger = "now"`). |
 
-**[storage]** — one optional path per on-disk tree; an unset key defaults under `{default_data_dir}`:
+**[storage]** — the data root plus one optional path per on-disk tree; an unset per-store key defaults under `{default_data_dir}`:
 
 | Key | Default path | Holds |
 |---|---|---|
+| `default_data_dir` | **required** | base directory for the catalog and default storage paths (moved here from `[service]` in #882) |
 | `catalog` | `{default_data_dir}/catalog/rocksdb` | the catalog RocksDB |
 | `ledgers` | `{default_data_dir}/ledgers` | `.pack` files |
 | `events` | `{default_data_dir}/events` | events cold segments |
@@ -95,6 +111,7 @@ One TOML file configures the daemon, passed as `--config` to the v2 binary (`ste
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--config` | string | **required** | Path to TOML config file. |
+| `--<section>.<key>` | per key | — | One auto-derived override flag per TOML leaf (see above). |
 
 ---
 
