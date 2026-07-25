@@ -160,11 +160,16 @@ func TestHotStore_IngestLedgerWritesAllCFs(t *testing.T) {
 	require.NoError(t, decoded.Unmarshal(got))
 	assert.Equal(t, p.TxHash, decoded.TxHash)
 
-	// events_index row per term.
+	// events_index: ONE packed row for the ledger, carrying every term.
+	idxVal, found, err := h.store.chunkStore.Get(IndexCF, encodePackedIndexKey(2))
+	require.NoError(t, err)
+	require.True(t, found, "missing packed index row for ledger 2")
+	decodedTerms := map[events.TermKey][]uint32{}
+	require.NoError(t, decodePackedIndexRow(idxVal, func(term events.TermKey, ids []uint32) {
+		decodedTerms[term] = append([]uint32(nil), ids...)
+	}))
 	for _, key := range keys {
-		_, found, err := h.store.chunkStore.Get(IndexCF, encodeIndexKey(key, 0))
-		require.NoError(t, err)
-		assert.True(t, found, "missing index row for term %x", key)
+		assert.Equal(t, []uint32{0}, decodedTerms[key], "missing/wrong ids for term %x", key)
 	}
 
 	// events_offsets: cumulative = 1.

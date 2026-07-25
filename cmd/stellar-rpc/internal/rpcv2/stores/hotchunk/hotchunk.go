@@ -267,7 +267,10 @@ func (d *DB) MaxCommittedSeq() (uint32, bool, error) {
 //     shaping — all pre-batch, so every decode failure lands here by
 //     construction); HotService.Ingest folds the walk's own duration into this
 //     phase, keeping it "the walk + product reads";
-//   - PhaseLedgers/PhaseTxhash/PhaseEvents: each facade's queue-into-batch step;
+//   - PhaseLedgers/PhaseTxhash/PhaseEvents: each facade's queue-into-batch step.
+//     PhaseLedgers is the JOIN on the background ledger compression forked at
+//     IngestLedger entry (wait-for-encode + Put) — near-zero when the encode
+//     finished within the other steps' window;
 //   - PhaseCommit: the RocksDB batch write (WAL append + fsync + memtable) = the
 //     whole Batch call minus the three queue steps — the fsync wait pprof can't see.
 //   - PhaseApply: the post-commit in-memory mirror/offsets apply (the events
@@ -355,6 +358,16 @@ func (d *DB) IngestLedger(
 		return rep, fmt.Errorf("chunk %s: IngestLedger on a read-only (ledgers-only) hot DB", d.chunkID)
 	}
 
+	// Fork the ledger-bytes zstd encode FIRST: it is independent of every other
+	// step and, unforked, was the second-largest serial slice (~20ms). It runs
+	// concurrent with extract and the queue steps (all read-only on lcmView) and is
+	// joined as the batch's LAST queue step, by which point it has usually
+	// finished — PhaseLedgers then measures only the join wait + Put. The
+	// deferred Discard bounds the borrowed lcmView on every early-error path:
+	// both join and Discard block until the encoder is done with the bytes.
+	pending := d.ledger.StartCompress(ledger.Entry{Seq: seq, Bytes: []byte(lcmView)})
+	defer pending.Discard()
+
 	// Pre-extract anything that can fail BEFORE opening the batch, so a decode
 	// error rejects the ledger without a half-built batch.
 	//
@@ -413,14 +426,11 @@ func (d *DB) IngestLedger(
 	failed := PhaseCommit
 	batchStart := time.Now()
 	cerr := d.store.Batch(func(b *rocksdb.BatchWriter) error {
-		ls := time.Now()
-		if err := d.ledger.AddLedgerToBatch(b, ledger.Entry{Seq: seq, Bytes: []byte(lcmView)}); err != nil {
-			rep.Phases[PhaseLedgers].Dur = time.Since(ls)
-			failed = PhaseLedgers
-			return fmt.Errorf("queue ledger seq %d: %w", seq, err)
-		}
-		rep.Phases[PhaseLedgers].Dur = time.Since(ls)
-
+		// Queue order: txhash and events first, the compression JOIN last —
+		// maximizing the window the background encode has to finish, so the
+		// join usually waits ~0. Rows land in one atomic batch regardless of
+		// queue order; only the emission order of the phase metrics is fixed
+		// (by the Phase constants), not the execution order here.
 		ts := time.Now()
 		if len(txEntries) > 0 {
 			d.txhash.AddEntriesToBatch(b, txEntries)
@@ -436,6 +446,14 @@ func (d *DB) IngestLedger(
 		}
 		rep.Phases[PhaseEvents].Dur = time.Since(es)
 		applyEvents = apply
+
+		ls := time.Now()
+		if err := d.ledger.AddPendingToBatch(b, pending); err != nil {
+			rep.Phases[PhaseLedgers].Dur = time.Since(ls)
+			failed = PhaseLedgers
+			return fmt.Errorf("queue ledger seq %d: %w", seq, err)
+		}
+		rep.Phases[PhaseLedgers].Dur = time.Since(ls)
 		return nil
 	})
 	// Commit is the whole Batch call minus the three queue steps: the RocksDB write
