@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -298,56 +297,6 @@ func TestSharedBatch_DirectRocksAbortAcrossCFs(t *testing.T) {
 // package, so no production accessor is needed).
 func storeOf(db *DB) *rocksdb.Store { return db.store }
 
-// TestSource_SelfBoundsUnboundedRange confirms the freeze source (hotLedgerStream)
-// yields the store's committed ledgers in order and self-bounds an UNBOUNDED range
-// at the committed frontier (mirroring packStream), so drain can pass
-// UnboundedRange(from) rather than a pre-computed bound.
-func TestSource_SelfBoundsUnboundedRange(t *testing.T) {
-	db := openTestDB(t)
-	first := chunk.ID(0).FirstLedger()
-	for i := range uint32(3) {
-		_, err := db.IngestLedger(first+i, xdr.LedgerCloseMetaView(zeroTxLCM(t, first+i)))
-		require.NoError(t, err)
-	}
-
-	var got []uint32
-	for raw, err := range db.Source().RawLedgers(context.Background(), ledgerbackend.UnboundedRange(first)) {
-		require.NoError(t, err)
-		seq, serr := xdr.LedgerCloseMetaView(raw).LedgerSequence()
-		require.NoError(t, serr)
-		got = append(got, seq)
-	}
-	require.Equal(t, []uint32{first, first + 1, first + 2}, got, "self-bounds at the frontier, in order")
-}
-
-// TestSource_RejectsGap pins the source-side in-order guard that replaced the
-// shared cursor: a gap in the hot store's keyspace (the sole writer of recent
-// history) is a real defect and must surface as an error, not a silent skip.
-func TestSource_RejectsGap(t *testing.T) {
-	db := openTestDB(t)
-	first := chunk.ID(0).FirstLedger()
-	// Seed the ledgers CF directly with a GAP (first, first+2), bypassing
-	// IngestLedger's contiguity so the source-level guard is what's exercised.
-	require.NoError(t, storeOf(db).Batch(func(b *rocksdb.BatchWriter) error {
-		for _, s := range []uint32{first, first + 2} {
-			if err := db.Ledgers().AddLedgerToBatch(b, ledger.Entry{Seq: s, Bytes: []byte("x")}); err != nil {
-				return err
-			}
-		}
-		return nil
-	}))
-
-	var lastErr error
-	for _, err := range db.Source().RawLedgers(context.Background(), ledgerbackend.BoundedRange(first, first+2)) {
-		if err != nil {
-			lastErr = err
-			break
-		}
-	}
-	require.Error(t, lastErr)
-	require.Contains(t, lastErr.Error(), "gap")
-}
-
 // TestIngestLedger_WritesEveryHotType confirms the hot tier always writes all
 // three hot data types; per-type disabling is not a supported hot DB mode.
 func TestIngestLedger_WritesEveryHotType(t *testing.T) {
@@ -512,13 +461,14 @@ func TestOpenReadOnly_SkipsEventsWarmup(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, first+1, seq)
 
-	// Freeze surface: Source() yields the committed ledgers byte-for-byte.
+	// Freeze surface: the ledgers facade serves the committed ledgers
+	// byte-for-byte through the warmup-skipped open (the freeze itself scans
+	// the CF via the shared store — FreezeLedgersCold — but the byte-identity
+	// claim is the same either way).
 	got := map[uint32][]byte{}
-	for b, err := range ro.Source().RawLedgers(context.Background(), ledgerbackend.UnboundedRange(first)) {
+	for e, err := range ro.Ledgers().IterateLedgers(first, first+1) {
 		require.NoError(t, err)
-		s, serr := xdr.LedgerCloseMetaView(b).LedgerSequence()
-		require.NoError(t, serr)
-		got[s] = append([]byte(nil), b...) // b is borrowed; clone before the next step
+		got[e.Seq] = append([]byte(nil), e.Bytes...) // borrowed; clone before the next step
 	}
 	assert.Equal(t, want, got, "freeze reads are byte-identical through the warmup-skipped open")
 

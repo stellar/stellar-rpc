@@ -23,6 +23,10 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 )
 
+// linuxGOOS gates the assertions that exercise Linux-only readers (peak RSS
+// via /proc): CI runs Linux; elsewhere the row is skipped.
+const linuxGOOS = "linux"
+
 // eventEvery: every eventEvery-th ledger of a fixture chunk carries one
 // transaction with one contract event; the rest are zero-tx ledgers.
 const eventEvery = 100
@@ -164,7 +168,7 @@ func TestRunColdFromPack(t *testing.T) {
 	// The rss_test.go tests use fake readers; this is the only assertion that
 	// exercises the real readPeakRSS. It only works on Linux — which is what
 	// CI runs — so on other platforms the read fails and the row is skipped.
-	if runtime.GOOS == "linux" {
+	if runtime.GOOS == linuxGOOS {
 		require.Contains(t, driver, "peak_rss_bytes")
 		assert.EqualValues(t, 1, driver["peak_rss_bytes"]["n"])
 		assert.Positive(t, driver["peak_rss_bytes"]["total_ns"])
@@ -340,7 +344,7 @@ func TestRunHotFromPack(t *testing.T) {
 	// An unpaced run must not add the pace_lag row — the CSV rows are a de
 	// facto contract, and pace_lag belongs to --close-interval runs only.
 	assert.NotContains(t, driver, "pace_lag")
-	if runtime.GOOS == "linux" {
+	if runtime.GOOS == linuxGOOS {
 		require.Contains(t, driver, "peak_rss_bytes")
 		assert.EqualValues(t, 1, driver["peak_rss_bytes"]["n"])
 		assert.Positive(t, driver["peak_rss_bytes"]["total_ns"])

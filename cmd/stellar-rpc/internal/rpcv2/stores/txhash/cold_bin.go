@@ -135,3 +135,68 @@ func coldBinCount(path string, size int64, count uint64) (uint64, error) {
 	}
 	return count, nil
 }
+
+// coldBinStream writes a .bin incrementally: placeholder header, streamed
+// entries, then finish patches the leading count and syncs — byte-identical
+// to WriteColdBin's output without holding a chunk's entries in memory. The
+// freeze's CF scan is its user; the walk path keeps the slice-based writer
+// (its accumulator exists anyway for the finalize sort).
+type coldBinStream struct {
+	f     *os.File
+	bw    *bufio.Writer
+	count uint64
+	done  bool
+}
+
+func newColdBinStream(path string) (*coldBinStream, error) {
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, fmt.Errorf("txhash: create %s: %w", path, err)
+	}
+	bw := bufio.NewWriterSize(f, 1<<20)
+	var header [coldBinHeaderSize]byte // count patched in finish
+	if _, werr := bw.Write(header[:]); werr != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("txhash: write header: %w", werr)
+	}
+	return &coldBinStream{f: f, bw: bw}, nil
+}
+
+func (w *coldBinStream) append(e ColdEntry) error {
+	var buf [coldBinEntrySize]byte
+	copy(buf[:ColdKeySize], e.Key[:])
+	binary.LittleEndian.PutUint32(buf[ColdKeySize:], e.Seq)
+	if _, err := w.bw.Write(buf[:]); err != nil {
+		return fmt.Errorf("txhash: write entry: %w", err)
+	}
+	w.count++
+	return nil
+}
+
+// finish flushes, patches the header count, syncs, and closes — the same
+// durability ladder as WriteColdBin (sync before close, close error checked).
+func (w *coldBinStream) finish() error {
+	if err := w.bw.Flush(); err != nil {
+		return fmt.Errorf("txhash: flush: %w", err)
+	}
+	var header [coldBinHeaderSize]byte
+	binary.LittleEndian.PutUint64(header[:], w.count)
+	if _, err := w.f.WriteAt(header[:], 0); err != nil {
+		return fmt.Errorf("txhash: patch header: %w", err)
+	}
+	if err := w.f.Sync(); err != nil {
+		return fmt.Errorf("txhash: sync %s: %w", w.f.Name(), err)
+	}
+	// done only once Close consumes the fd — an earlier error must leave
+	// abort() responsible for releasing it.
+	w.done = true
+	return w.f.Close()
+}
+
+// abort releases the file on the error path; a no-op after finish. The
+// partial file is inert scratch per the artifact model (retry overwrites).
+func (w *coldBinStream) abort() {
+	if !w.done {
+		_ = w.f.Close()
+	}
+}

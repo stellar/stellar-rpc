@@ -14,7 +14,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events/runspill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
 // ───────────────────────── Cold writer ─────────────────────────
@@ -34,11 +33,11 @@ type eventsCold struct {
 	offsets    *events.LedgerOffsets
 	bucketDir  string
 	metrics    coldMetrics
-	// failed latches any write error. A failed write can leave the mirror
-	// and the pack ahead of offsets (offsets is the per-ledger commit point,
-	// appended last), so a subsequent finalize would commit an index whose
-	// bitmaps reference event IDs past offsets.TotalEvents(). The latch makes
-	// finalize refuse instead — the chunk must be abandoned via close and
+	// failed latches any write error. A failed write can leave the spilled
+	// runs and the pack ahead of offsets (offsets is the per-ledger commit
+	// point, appended last), so a subsequent finalize would build an index
+	// whose bitmaps reference event IDs past offsets.TotalEvents(). The
+	// latch makes finalize refuse instead — the chunk must be abandoned via close and
 	// retried from scratch (see coldChunk's contract).
 	failed bool
 }
@@ -96,51 +95,6 @@ func eventsScratchDir(eventsDir string, c chunk.ID) string {
 // chunk's unique-term count.
 const indexSpillSlabBytes = 32 << 20
 
-// eventsFreeze is the freeze-by-merge events writer: it takes NO per-ledger
-// feed (openColdChunk leaves coldChunk.events nil, so the walk never shapes
-// events for it) and produces all three cold events artifacts at finalize
-// straight from the complete hot chunk DB's CFs (hotchunk.FreezeEventsCold).
-type eventsFreeze struct {
-	chunkID   chunk.ID
-	db        *hotchunk.DB
-	bucketDir string
-	metrics   coldMetrics
-}
-
-func newEventsFreeze(bucketDir string, chunkID chunk.ID, db *hotchunk.DB, sink MetricSink) (*eventsFreeze, error) {
-	if err := os.MkdirAll(bucketDir, 0o755); err != nil {
-		return nil, fmt.Errorf("mkdir %s: %w", bucketDir, err)
-	}
-	return &eventsFreeze{
-		chunkID:   chunkID,
-		db:        db,
-		bucketDir: bucketDir,
-		metrics:   newColdMetrics(sink, dataTypeEvents),
-	}, nil
-}
-
-// finalize builds events.pack + index.pack + index.hash from the hot DB. One
-// ColdIngest sample covers the whole build (there are no per-ledger writes to
-// observe on this path).
-func (e *eventsFreeze) finalize(ctx context.Context) error {
-	start := time.Now()
-	scratch := filepath.Join(e.bucketDir, ".freeze-scratch-"+e.chunkID.String())
-	err := e.db.FreezeEventsCold(ctx, scratch, e.bucketDir, event.ColdWriterOptions{
-		Concurrency:  coldEncoderConcurrency,
-		BytesPerSync: coldBytesPerSync,
-	})
-	if err != nil {
-		err = fmt.Errorf("freeze events from hot DB: %w", err)
-	}
-	e.metrics.emit(time.Since(start), err)
-	return err
-}
-
-// close is a no-op: the freeze writer holds no partial state of its own —
-// artifact overwrite-on-retry and scratch wiping are FreezeColdFromStore's
-// contract, and the hot DB is owned by the caller.
-func (e *eventsFreeze) close() error { return nil }
-
 // write ingests one ledger's events from the shared walk's output. txEvents
 // and its byte slices alias the source stream's borrowed buffer, valid only
 // for this call — everything retained is copied synchronously (see ingestSeq).
@@ -156,7 +110,7 @@ func (e *eventsCold) write(seq uint32, closedAt int64, txEvents []sdkingest.Ledg
 }
 
 // finalize writes the events.pack trailer (Finish) + materializes the cold
-// index (WriteColdIndex). An eventless chunk (zero terms — the common case
+// index from the spilled runs (WriteColdIndexFromRuns). An eventless chunk (zero terms — the common case
 // for pre-Soroban backfill ranges) is handled inside WriteColdIndex, which
 // publishes a valid empty index, so all three cold artifacts exist for every
 // finalized chunk. An error from either step means the chunk did not durably

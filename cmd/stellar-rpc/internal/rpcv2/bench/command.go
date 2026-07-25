@@ -16,13 +16,13 @@ import (
 
 // NewCommand returns the `bench-ingest` command tree: `cold` benchmarks the
 // daemon's backfill (backfill.RunBackfill), `hot` benchmarks the daemon's live
-// ingestion loop.
+// ingestion loop, `freeze` benchmarks the hot→cold chunk freeze route.
 func NewCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bench-ingest",
 		Short: "Benchmark full-history ingestion",
 	}
-	cmd.AddCommand(newColdCommand(), newHotCommand())
+	cmd.AddCommand(newColdCommand(), newHotCommand(), newFreezeCommand())
 	return cmd
 }
 
@@ -204,6 +204,45 @@ func newHotCommand() *cobra.Command {
 		"per-ledger trace CSV path: one wall-clock-stamped row per ingested ledger "+
 			"with every phase duration (empty = off)")
 	markRequired(cmd, "start-chunk", "hot-dir")
+	return cmd
+}
+
+func newFreezeCommand() *cobra.Command {
+	var (
+		src        sourceFlags
+		chunkID    uint32
+		workDir    string
+		catalogDir string
+		reuseHot   bool
+		outDir     string
+		prof       profileFlags
+	)
+	cmd := newBenchCommand("freeze",
+		"Benchmark the chunk freeze: the daemon's hot→cold route (a complete hot DB "+
+			"resolved as the backfill source, through the one-write protocol)",
+		&src, &prof,
+		func(ctx context.Context, logger *supportlog.Entry) error {
+			return runFreeze(ctx, logger, freezeOptions{
+				Source:     src.config(),
+				Chunk:      chunk.ID(chunkID),
+				WorkRoot:   workDir,
+				CatalogDir: catalogDir,
+				ReuseHot:   reuseHot,
+				OutDir:     outDir,
+			})
+		})
+	fs := cmd.Flags()
+	fs.Uint32Var(&chunkID, "chunk", 0, "chunk ID to freeze (required)")
+	fs.StringVar(&workDir, "work-dir", "",
+		"single layout root for BOTH tiers (required): the hot DB is populated (or found, "+
+			"with --reuse-hot) under it and the cold artifacts land under it")
+	fs.StringVar(&catalogDir, "catalog-dir", "",
+		"base dir for the run's scratch catalog; default: --work-dir")
+	fs.BoolVar(&reuseHot, "reuse-hot", false,
+		"skip the populate phase and adopt the hot DB a prior run left in --work-dir "+
+			"(cheap iteration; freeze-only RSS row and CPU profile)")
+	fs.StringVar(&outDir, "out", "bench-out", "CSV output dir")
+	markRequired(cmd, "chunk", "work-dir")
 	return cmd
 }
 

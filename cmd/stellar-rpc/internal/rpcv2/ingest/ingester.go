@@ -33,17 +33,14 @@ type coldChunk struct {
 	ledgers *ledgerCold
 	txhash  *txhashCold
 	events  *eventsCold
-	// eventsFreeze is the freeze-by-merge events writer (Config.EventsFreezeDB):
-	// finalize-only — it consumes the hot DB's CFs, so it takes no per-ledger
-	// feed and leaves `events` nil, which also lets a txhash-less freeze skip
-	// the extract walk entirely.
-	eventsFreeze *eventsFreeze
-	sink         MetricSink
+	sink    MetricSink
 }
 
-// openColdChunk opens one cold writer per enabled type at its resolved path —
-// the single definition site of the canonical ledgers→txhash→events order and
-// the build rollback. An enabled type with an empty ColdDirs path is a config
+// openColdChunk opens one cold writer per enabled type at its resolved path,
+// in the canonical ledgers→txhash→events order, with build rollback. (The
+// freeze path re-encodes the same order and per-kind dispatch in
+// FreezeColdChunk — an order or kind change must touch both entry points.)
+// An enabled type with an empty ColdDirs path is a config
 // error. On any failure the already-opened writers are closed; they never
 // ingested or finalized, and close emits no per-writer ColdIngest sample, so a
 // rolled-back build produces no phantom-success sample.
@@ -74,19 +71,11 @@ func openColdChunk(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Config)
 		if dirs.EventsDir == "" {
 			return fail(errors.New("ingest: events enabled but its ColdDirs path is empty"))
 		}
-		if cfg.EventsFreezeDB != nil {
-			w, err := newEventsFreeze(dirs.EventsDir, chunkID, cfg.EventsFreezeDB, sink)
-			if err != nil {
-				return fail(fmt.Errorf("open events freeze writer: %w", err))
-			}
-			cc.eventsFreeze = w
-		} else {
-			w, err := newEventsCold(dirs.EventsDir, chunkID, sink)
-			if err != nil {
-				return fail(fmt.Errorf("open events cold writer: %w", err))
-			}
-			cc.events = w
+		w, err := newEventsCold(dirs.EventsDir, chunkID, sink)
+		if err != nil {
+			return fail(fmt.Errorf("open events cold writer: %w", err))
 		}
+		cc.events = w
 	}
 	return cc, nil
 }
@@ -160,11 +149,6 @@ func (c *coldChunk) finalize(ctx context.Context) error {
 	}
 	if c.events != nil {
 		if err := c.events.finalize(ctx); err != nil {
-			return fmt.Errorf("finalize: %w", err)
-		}
-	}
-	if c.eventsFreeze != nil {
-		if err := c.eventsFreeze.finalize(ctx); err != nil {
 			return fmt.Errorf("finalize: %w", err)
 		}
 	}
