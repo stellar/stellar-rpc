@@ -237,6 +237,19 @@ func (d *DB) Events() *event.HotStore {
 	return d.events
 }
 
+// FreezeEventsCold builds the chunk's three cold events artifacts in
+// bucketDir directly from THIS hot DB's events CFs — freeze-by-merge: the
+// data CF's values are the canonical marshaled payloads, the offsets CF is
+// the ledger-count sequence, and the packed index rows are term-sorted runs,
+// so no ledger re-extraction (and no per-term memory) is needed. Valid on a
+// read-only view; the DB must be complete through the chunk's last ledger
+// (the freeze's source resolution already guarantees it).
+func (d *DB) FreezeEventsCold(
+	ctx context.Context, scratchDir, bucketDir string, opts event.ColdWriterOptions,
+) error {
+	return event.FreezeColdFromStore(ctx, d.chunkID, d.store, scratchDir, bucketDir, opts)
+}
+
 // Source streams the chunk's LCMs from the ledgers CF as a ledgerbackend.LedgerStream
 // the cold writer (backfill's WriteColdChunk) drains, so a just-closed chunk freezes
 // straight from its hot DB without a refetch. The freeze opens the DB read-only.

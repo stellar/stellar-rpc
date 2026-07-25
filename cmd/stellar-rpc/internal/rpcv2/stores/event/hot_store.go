@@ -1,14 +1,12 @@
 package event
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"iter"
 	"math"
-	"slices"
 
 	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/linxGnu/grocksdb"
@@ -730,87 +728,17 @@ func encodePackedIndexKey(ledgerSeq uint32) []byte {
 	return key[:]
 }
 
-// appendPackedIndexRow appends one ledger's packed index-row value to dst and
-// returns it: for each term (byte-sorted, so the encoding is deterministic),
-//
-//	16-byte term hash ‖ uvarint id-count ‖ ids as uvarints
-//	(first absolute, then strictly-positive deltas)
-//
-// Event IDs are appended by the caller in ascending order per term, so the
-// deltas are always ≥ 1 — decodePackedIndexRow rejects a zero delta as
-// corruption. Delta-varint keeps the run for a term with k sequential IDs to
-// ~1 byte per ID.
+// appendPackedIndexRow and decodePackedIndexRow are thin aliases over the
+// SHARED packed-row codec (events.AppendPackedRow / events.DecodePackedRow) —
+// one encoding serves the hot per-ledger index row, the cold build's spill
+// runs, and the freeze-by-merge path, so the three can be merged with one
+// decoder. See events/packedrow.go for the layout.
 func appendPackedIndexRow(dst []byte, perKeyIDs map[events.TermKey][]uint32) []byte {
-	terms := make([]events.TermKey, 0, len(perKeyIDs))
-	for k := range perKeyIDs {
-		terms = append(terms, k)
-	}
-	slices.SortFunc(terms, func(a, b events.TermKey) int { return bytes.Compare(a[:], b[:]) })
-	for _, t := range terms {
-		ids := perKeyIDs[t]
-		dst = append(dst, t[:]...)
-		dst = binary.AppendUvarint(dst, uint64(len(ids)))
-		var prev uint32
-		for j, id := range ids {
-			if j == 0 {
-				dst = binary.AppendUvarint(dst, uint64(id))
-			} else {
-				dst = binary.AppendUvarint(dst, uint64(id-prev))
-			}
-			prev = id
-		}
-	}
-	return dst
+	return events.AppendPackedRow(dst, perKeyIDs)
 }
 
-// decodePackedIndexRow parses a packed index-row value, yielding each term's
-// absolute event-ID list into add. IDs within a term must be strictly
-// increasing (zero deltas rejected); every structural violation is an error —
-// on-disk rows are untrusted input to warmup. ids is reused across terms; add
-// must consume it before returning (warmup's builder.AddTo copies).
 func decodePackedIndexRow(val []byte, add func(term events.TermKey, ids []uint32)) error {
-	var ids []uint32
-	for len(val) > 0 {
-		if len(val) < 16 {
-			return fmt.Errorf("events: packed index row: %d trailing bytes, want 16-byte term", len(val))
-		}
-		var term events.TermKey
-		copy(term[:], val[:16])
-		val = val[16:]
-		count, n := binary.Uvarint(val)
-		if n <= 0 {
-			return errors.New("events: packed index row: bad id-count uvarint")
-		}
-		val = val[n:]
-		// Each ID takes ≥1 byte, so a count beyond the remaining bytes is
-		// structurally impossible — reject before allocating for it.
-		if count == 0 || count > uint64(len(val)) {
-			return fmt.Errorf("events: packed index row: id count %d exceeds %d remaining bytes", count, len(val))
-		}
-		ids = ids[:0]
-		var prev uint64
-		for i := uint64(0); i < count; i++ {
-			v, n := binary.Uvarint(val)
-			if n <= 0 {
-				return errors.New("events: packed index row: bad event-id uvarint")
-			}
-			val = val[n:]
-			abs := v
-			if i > 0 {
-				if v == 0 {
-					return errors.New("events: packed index row: zero delta")
-				}
-				abs = prev + v
-			}
-			if abs > math.MaxUint32 {
-				return fmt.Errorf("events: packed index row: event id %d overflows uint32", abs)
-			}
-			ids = append(ids, uint32(abs))
-			prev = abs
-		}
-		add(term, ids)
-	}
-	return nil
+	return events.DecodePackedRow(val, add)
 }
 
 func encodeOffsetKey(ledgerSeq uint32) []byte {

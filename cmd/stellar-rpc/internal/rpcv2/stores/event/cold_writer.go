@@ -124,6 +124,15 @@ func (w *ColdWriter) Append(p events.Payload) error {
 	return w.pw.AppendItem(b)
 }
 
+// AppendMarshaled writes an ALREADY-MARSHALED payload verbatim — the
+// freeze-by-merge path streams events_data CF values here, which are the
+// same canonical MarshalInto bytes Append would produce, so the resulting
+// pack is byte-identical to a walk-driven build. The same eventID-order
+// contract as Append applies.
+func (w *ColdWriter) AppendMarshaled(b []byte) error {
+	return w.pw.AppendItem(b)
+}
+
 // Finish serializes offsets as packfile app data and finalizes
 // events.pack. After Finish returns nil, the file is fsync'd and
 // safe to fence with an atomic durability flag.

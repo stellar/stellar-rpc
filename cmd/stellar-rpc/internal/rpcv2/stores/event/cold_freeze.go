@@ -1,0 +1,191 @@
+package event
+
+// cold_freeze.go — freeze-by-merge: build a completed hot chunk's cold events
+// artifacts DIRECTLY from its hot DB's column families instead of re-deriving
+// them from raw ledgers. The hot tier already holds exactly what cold needs:
+//
+//   - events_data values ARE the canonical marshaled payloads (the same
+//     MarshalInto bytes ColdWriter.Append would produce) → stream them into
+//     events.pack verbatim, in eventID order (the CF's BE-key order).
+//   - events_offsets IS the per-ledger count sequence → events.LedgerOffsets.
+//   - events_index packed rows are term-sorted runs → window-merge them into
+//     spill runs and finalize through WriteColdIndexFromRuns.
+//
+// This deletes the freeze's ExtractLedgerEvents shaping, TermsForBytes
+// hashing, and every per-term allocation from the window where the freeze
+// runs BESIDE live ingestion — the design's freeze-synergy lens
+// (~/bench-artifacts/cold-ingest-design.md). Artifacts remain byte-identical
+// to the walk-derived build by construction of each input.
+
+import (
+	"context"
+	"encoding/binary"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events/runspill"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
+)
+
+// freezeIndexWindowBytes caps how many packed-row bytes accumulate in the
+// window map before it flushes as one spill run. ~32MB keeps freeze memory
+// bounded (window + map overhead) while producing ~40-80 runs for a
+// worst-case chunk — well inside the merge's comfort zone.
+const freezeIndexWindowBytes = 32 << 20
+
+// FreezeColdFromStore builds all three cold events artifacts for chunkID in
+// bucketDir from the chunk's (read-only) hot store. scratchDir hosts the
+// intermediate spill runs and terms.run; it is wiped on entry and removed on
+// success. opts tunes the events.pack writer exactly as the walk-driven
+// build does.
+func FreezeColdFromStore(
+	ctx context.Context,
+	chunkID chunk.ID,
+	store *rocksdb.Store,
+	scratchDir, bucketDir string,
+	opts ColdWriterOptions,
+) (err error) {
+	if err := os.RemoveAll(scratchDir); err != nil {
+		return fmt.Errorf("events: wipe freeze scratch %s: %w", scratchDir, err)
+	}
+	if err := os.MkdirAll(scratchDir, 0o755); err != nil {
+		return fmt.Errorf("events: mkdir freeze scratch %s: %w", scratchDir, err)
+	}
+
+	// ── events.pack: verbatim DataCF copy in eventID order. ──
+	w, err := NewColdWriter(chunkID, bucketDir, opts)
+	if err != nil {
+		return err
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			err2 := w.Close()
+			if err == nil {
+				err = err2
+			}
+		}
+	}()
+
+	var copied uint64
+	next := uint32(0)
+	for entry, ierr := range store.Iterate(DataCF, nil) {
+		if ierr != nil {
+			return fmt.Errorf("events: freeze scan %s: %w", DataCF, ierr)
+		}
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		if len(entry.Key) != dataKeyLen {
+			return fmt.Errorf("events: freeze %s key length %d (want %d)", DataCF, len(entry.Key), dataKeyLen)
+		}
+		// The hot writer assigns dense chunk-relative IDs; a gap here is real
+		// corruption, and events.pack positions must equal IDs.
+		if id := binary.BigEndian.Uint32(entry.Key); id != next {
+			return fmt.Errorf("events: freeze %s: event id %d, expected %d", DataCF, id, next)
+		}
+		next++
+		copied++
+		if aerr := w.AppendMarshaled(entry.Value); aerr != nil {
+			return aerr
+		}
+	}
+
+	// ── offsets: OffsetsCF replay with the warmup path's validations. ──
+	offsets := events.NewLedgerOffsets(chunkID.FirstLedger())
+	for entry, ierr := range store.Iterate(OffsetsCF, nil) {
+		if ierr != nil {
+			return fmt.Errorf("events: freeze scan %s: %w", OffsetsCF, ierr)
+		}
+		if len(entry.Key) != offsetKeyLen || len(entry.Value) != offsetValLen {
+			return fmt.Errorf("events: freeze %s row shape %d/%d", OffsetsCF, len(entry.Key), len(entry.Value))
+		}
+		ledger := binary.BigEndian.Uint32(entry.Key)
+		count := binary.BigEndian.Uint32(entry.Value)
+		if ledger > chunkID.LastLedger() {
+			return fmt.Errorf("events: freeze offsets: ledger %d past chunk %s", ledger, chunkID)
+		}
+		if uint64(offsets.TotalEvents())+uint64(count) > math.MaxUint32 {
+			return fmt.Errorf("events: freeze offsets: cumulative overflow at ledger %d", ledger)
+		}
+		// Append validates the in-sequence invariant itself (untrusted rows).
+		if aerr := offsets.Append(ledger, count); aerr != nil {
+			return fmt.Errorf("events: freeze offsets: %w", aerr)
+		}
+	}
+	if total := uint64(offsets.TotalEvents()); total != copied {
+		return fmt.Errorf("events: freeze: offsets count %d events, data CF holds %d", total, copied)
+	}
+	if err := w.Finish(offsets); err != nil {
+		return fmt.Errorf("events: freeze Finish: %w", err)
+	}
+	closed = true
+
+	// ── index: window-merge IndexCF packed rows into spill runs. ──
+	runs, err := freezeIndexRuns(ctx, store, scratchDir)
+	if err != nil {
+		return err
+	}
+	if err := WriteColdIndexFromRuns(ctx, chunkID, runs, scratchDir, bucketDir); err != nil {
+		return err
+	}
+	return os.RemoveAll(scratchDir)
+}
+
+// freezeIndexRuns scans the IndexCF's per-ledger packed rows, unions them in
+// a byte-bounded window map, and flushes each full window as one spill run.
+// Every row is term-sorted with per-term ascending IDs, and ledger rows
+// arrive in ledger order, so per-term appends stay ascending within a
+// window; cross-window duplicates union in the merge.
+func freezeIndexRuns(ctx context.Context, store *rocksdb.Store, scratchDir string) ([]string, error) {
+	var (
+		window      = make(map[events.TermKey][]uint32, 1<<16)
+		windowBytes int
+		runs        []string
+		payload     []byte
+	)
+	flush := func() error {
+		if len(window) == 0 {
+			return nil
+		}
+		payload = events.AppendPackedRow(payload[:0], window)
+		path := filepath.Join(scratchDir, fmt.Sprintf("freeze-%06d.run", len(runs)))
+		if werr := runspill.WriteRun(path, payload); werr != nil {
+			return werr
+		}
+		runs = append(runs, path)
+		clear(window)
+		windowBytes = 0
+		return nil
+	}
+	for entry, ierr := range store.Iterate(IndexCF, nil) {
+		if ierr != nil {
+			return nil, fmt.Errorf("events: freeze scan %s: %w", IndexCF, ierr)
+		}
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, cerr
+		}
+		if len(entry.Key) != packedIndexKeyLen {
+			return nil, fmt.Errorf("events: freeze %s key length %d (want %d)", IndexCF, len(entry.Key), packedIndexKeyLen)
+		}
+		if derr := events.DecodePackedRow(entry.Value, func(term events.TermKey, ids []uint32) {
+			window[term] = append(window[term], ids...)
+		}); derr != nil {
+			return nil, fmt.Errorf("events: freeze ledger %d row: %w", binary.BigEndian.Uint32(entry.Key), derr)
+		}
+		windowBytes += len(entry.Value)
+		if windowBytes >= freezeIndexWindowBytes {
+			if ferr := flush(); ferr != nil {
+				return nil, ferr
+			}
+		}
+	}
+	if err := flush(); err != nil {
+		return nil, err
+	}
+	return runs, nil
+}
