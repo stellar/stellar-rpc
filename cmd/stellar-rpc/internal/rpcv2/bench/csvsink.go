@@ -198,6 +198,12 @@ type csvSink struct {
 	// LastCommitted measures each committed ledger's lag against it. Nil in
 	// every other run — cold, or unpaced hot — which records no pace_lag.
 	schedule *paceSchedule
+
+	// trace, when non-nil (--trace), streams one CSV row per ingested ledger:
+	// HotPhase feeds it each phase duration and LastCommitted (which the loop
+	// calls right after each ledger's burst) flushes the row under seq.
+	// Guarded by mu.
+	trace *hotTrace
 }
 
 var (
@@ -239,6 +245,9 @@ func (s *csvSink) HotPhase(phase hotchunk.Phase, d time.Duration, items int, _ e
 	}
 	s.hotBurst += d
 	total := s.hotBurst
+	if s.trace != nil {
+		s.trace.recordPhase(phase, d)
+	}
 	s.mu.Unlock()
 
 	if phase == hotchunk.PhaseApply {
@@ -280,12 +289,21 @@ func (s *csvSink) Rebuild(d time.Duration) {
 }
 
 // LastCommitted tracks the hot loop's per-ledger committed gauge (see lastSeq),
-// and — for a paced run — records that ledger's lag behind the close schedule.
+// for a paced run records that ledger's lag behind the close schedule, and —
+// with --trace — flushes the ledger's accumulated phase burst as one trace row
+// (the loop calls LastCommitted right after each ledger's burst, so the pending
+// row is exactly this seq's).
 func (s *csvSink) LastCommitted(lastCommitted uint32) {
 	s.lastSeq.Store(lastCommitted)
+	var lag time.Duration
 	if s.schedule != nil {
-		s.recordPaceLag(lastCommitted)
+		lag = s.recordPaceLag(lastCommitted)
 	}
+	s.mu.Lock()
+	if s.trace != nil {
+		s.trace.writeRow(lastCommitted, lag)
+	}
+	s.mu.Unlock()
 }
 
 // The remaining observability signals carry no useful bench signal and are
@@ -344,13 +362,15 @@ func (s *csvSink) sumDriver(name string) time.Duration {
 // with items=1. On pace, a ledger starts at its due time, so its lag at
 // commit ≈ its own ingest time; a lag that grows across the run means
 // ingestion cannot keep up with the close cadence and the backlog is growing.
-func (s *csvSink) recordPaceLag(seq uint32) {
+// The lag is also returned so LastCommitted can hand it to the --trace row.
+func (s *csvSink) recordPaceLag(seq uint32) time.Duration {
 	due, ok := s.schedule.dueForSeq(seq)
 	if !ok {
-		return
+		return 0
 	}
 	lag := max(s.schedule.clock().Sub(due), 0)
 	s.observe(fileDriver, driverPaceLag, lag, 1)
+	return lag
 }
 
 // row is one aggregated CSV row.
