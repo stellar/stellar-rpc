@@ -56,6 +56,12 @@ type hotOptions struct {
 
 	// OutDir receives the CSV report.
 	OutDir string
+
+	// TraceFile, when non-empty, streams a per-ledger trace CSV to this path:
+	// one wall-clock-stamped row per ingested ledger with every phase duration,
+	// for correlating individual slow ledgers against external timelines
+	// (RocksDB LOG flush events, iostat). Empty = no trace.
+	TraceFile string
 }
 
 // validate checks the flags and chunk range before runHot touches the
@@ -80,6 +86,23 @@ func (o hotOptions) validate() error {
 	return nil
 }
 
+// prepareHotRun validates opts and readies the out dir and hot root, so an
+// unwritable path surfaces before the expensive run, not after it.
+func prepareHotRun(opts hotOptions) (geometry.Layout, error) {
+	if err := opts.validate(); err != nil {
+		return geometry.Layout{}, err
+	}
+	if err := os.MkdirAll(opts.OutDir, 0o755); err != nil {
+		return geometry.Layout{}, fmt.Errorf("create --out dir %s: %w", opts.OutDir, err)
+	}
+	layout := geometry.NewLayout(opts.HotRoot)
+	// Create + fsync the hot root up front — the daemon's own root prep.
+	if err := config.PrepareRoots(layout.HotRoot()); err != nil {
+		return geometry.Layout{}, fmt.Errorf("prepare --hot-dir hot root: %w", err)
+	}
+	return layout, nil
+}
+
 // runHot benchmarks the hot path: the daemon's ingestion loop (via
 // rpcv2.RunBoundedIngestionLoop) over the range's ledgers, into fresh hot
 // DBs opened through a scratch catalog. A no-op boundary discards completed
@@ -91,17 +114,9 @@ func (o hotOptions) validate() error {
 // close cadence: the run measures steady-state keep-up rather than catch-up
 // throughput, recording per-ledger pace_lag.
 func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) error {
-	if err := opts.validate(); err != nil {
+	layout, err := prepareHotRun(opts)
+	if err != nil {
 		return err
-	}
-	// Surface an unwritable --out before the expensive run, not after it.
-	if err := os.MkdirAll(opts.OutDir, 0o755); err != nil {
-		return fmt.Errorf("create --out dir %s: %w", opts.OutDir, err)
-	}
-	layout := geometry.NewLayout(opts.HotRoot)
-	// Create + fsync the hot root up front — the daemon's own root prep.
-	if err := config.PrepareRoots(layout.HotRoot()); err != nil {
-		return fmt.Errorf("prepare --hot-dir hot root: %w", err)
 	}
 	catalogBase := opts.CatalogDir
 	if catalogBase == "" {
@@ -131,6 +146,20 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 	sink := newCSVSink()
 	stream, schedule := buildHotStream(backend, first, last, opts.CloseInterval)
 	sink.schedule = schedule
+	if opts.TraceFile != "" {
+		trace, terr := newHotTrace(opts.TraceFile)
+		if terr != nil {
+			return terr
+		}
+		// Close on every exit so a failed run keeps its partial trace; a trace
+		// write error is logged, never a run failure (the trace is diagnostics).
+		defer func() {
+			if cerr := trace.close(); cerr != nil {
+				logger.Warnf("per-ledger trace: %v", cerr)
+			}
+		}()
+		sink.trace = trace
+	}
 
 	start := time.Now()
 	err = rpcv2.RunBoundedIngestionLoop(ctx, rpcv2.BoundedIngestConfig{

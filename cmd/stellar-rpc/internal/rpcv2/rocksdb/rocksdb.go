@@ -102,6 +102,12 @@ type Store struct {
 	cache *grocksdb.Cache
 	bbtos []*grocksdb.BlockBasedTableOptions
 
+	// statsEnabled records that RocksDB statistics collection was switched on
+	// at open (STELLAR_RPC_ROCKSDB_STATS=1 — a debug/bench knob, never set by
+	// production config); Close then dumps the tickers + histograms to
+	// STATISTICS.txt in the DB dir.
+	statsEnabled bool
+
 	// mu is a lifecycle / memory-safety lock at the C boundary, not
 	// a data-consistency lock (RocksDB is already thread-safe).
 	// Every op (Put/Get/Delete/Iterate/Batch/Flush) takes RLock for
@@ -434,6 +440,18 @@ func (s *Store) Close() error {
 		}
 	}
 
+	// Statistics were requested at open (STELLAR_RPC_ROCKSDB_STATS): dump them
+	// before the C teardown below invalidates opts. Best-effort — a failed dump
+	// warns and Close proceeds.
+	if s.statsEnabled {
+		statsPath := filepath.Join(s.cfg.Path, "STATISTICS.txt")
+		if werr := os.WriteFile(statsPath, []byte(s.opts.GetStatisticsString()), 0o644); werr != nil {
+			s.cfg.Logger.WithError(werr).Warnf("rocksdb: writing %s", statsPath)
+		} else {
+			s.cfg.Logger.Infof("rocksdb: statistics dumped to %s", statsPath)
+		}
+	}
+
 	for _, cfh := range s.cfHandles {
 		cfh.Destroy()
 	}
@@ -519,6 +537,15 @@ func (s *Store) constructAndOpen() error {
 	if !s.cfg.ReadOnly && !s.cfg.MustExist {
 		opts.SetCreateIfMissing(true)
 		opts.SetCreateIfMissingColumnFamilies(true)
+	}
+	// STELLAR_RPC_ROCKSDB_STATS=1 — debug/bench knob: collect RocksDB
+	// statistics (tickers + histograms: WAL sync micros, write micros, stall
+	// micros, ...) and dump them to STATISTICS.txt in the DB dir on Close.
+	// Costs a few percent of write throughput; intentionally not a Tuning
+	// field so production configs can never turn it on.
+	if os.Getenv("STELLAR_RPC_ROCKSDB_STATS") == "1" {
+		opts.EnableStatistics()
+		s.statsEnabled = true
 	}
 
 	cfOpts := make([]*grocksdb.Options, len(cfNames))
