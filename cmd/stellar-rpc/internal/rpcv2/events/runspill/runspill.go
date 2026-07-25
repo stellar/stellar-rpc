@@ -31,12 +31,12 @@ import (
 const RecordSize = 16 + 4
 
 // runMagic heads every run file; a version bump changes the letter.
-var runMagic = [4]byte{'E', 'V', 'R', '1'}
+var runMagic = [4]byte{'E', 'V', 'R', '1'} //nolint:gochecknoglobals // fixed format tag
 
 // HeaderLen is the run-file header size: magic (4) ‖ u64 payload length (8).
 // Record offsets within the payload are relative to the END of this header —
-// exported so consumers that pread records directly stay aligned with the
-// framing if it ever changes.
+// exported so consumers that pread records directly (the hot index's sealed-run
+// lookup) stay aligned with the framing if it ever changes.
 const HeaderLen = 12
 
 // crcTable is CRC-32C (Castagnoli), the stdlib-available integrity check for
@@ -53,7 +53,6 @@ var ErrCorruptRun = errors.New("runspill: corrupt run file")
 // background sorter (double-buffering is the caller's composition).
 type Slab struct {
 	buf []byte
-	cap int
 }
 
 // NewSlab returns a slab that accepts records until capBytes is reached.
@@ -61,13 +60,13 @@ type Slab struct {
 // handed-off slab's memory is stable for the background sorter.
 func NewSlab(capBytes int) *Slab {
 	capBytes -= capBytes % RecordSize
-	return &Slab{buf: make([]byte, 0, capBytes), cap: capBytes}
+	return &Slab{buf: make([]byte, 0, capBytes)}
 }
 
 // Append adds one record. It reports false — WITHOUT appending — when the
 // slab is full; the caller rotates slabs and retries on the fresh one.
 func (s *Slab) Append(term events.TermKey, id uint32) bool {
-	if len(s.buf)+RecordSize > s.cap {
+	if len(s.buf)+RecordSize > cap(s.buf) {
 		return false
 	}
 	s.buf = append(s.buf, term[:]...)
@@ -119,7 +118,7 @@ func (s *Slab) SortEncode(dst []byte) []byte {
 			dst = events.AppendTermPostings(dst, curTerm, ids)
 		}
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		rec := s.buf[i*RecordSize : (i+1)*RecordSize]
 		if prevRec != nil && bytes.Equal(prevRec, rec) {
 			continue // exact duplicate record (defensive; ingest never emits them)
@@ -145,42 +144,100 @@ func (s *Slab) SortEncode(dst []byte) []byte {
 // written via a temp name and renamed, then synced — runs are scratch, but a
 // half-written file must never be mistaken for a short valid one.
 func WriteRun(path string, payload []byte) error {
-	tmp := path + ".tmp"
-	f, err := os.Create(tmp)
+	rw, err := NewRunWriter(path)
 	if err != nil {
-		return fmt.Errorf("runspill: create %s: %w", tmp, err)
+		return err
+	}
+	// One raw write through RunWriter's framing (incremental CRC, patched
+	// header, temp+rename in Close) — byte-identical to the historical
+	// whole-payload writer, with a single implementation of the container.
+	if werr := rw.writeRaw(payload); werr != nil {
+		_ = rw.f.Close()
+		_ = os.Remove(rw.path + ".tmp")
+		return fmt.Errorf("runspill: write %s: %w", path, werr)
+	}
+	return rw.Close()
+}
+
+// RunWriter streams records into a run file without buffering the payload:
+// incremental CRC, header length patched at Close, temp+rename like WriteRun.
+// The record-at-a-time transient replaces WriteRun's whole-payload buffer —
+// the hot tier's late-chunk merges write ~GBs through here.
+type RunWriter struct {
+	path    string
+	f       *os.File
+	w       *bufio.Writer
+	crc     uint32
+	written uint64
+	buf     []byte
+}
+
+// NewRunWriter creates path (via a temp name) with a placeholder header.
+func NewRunWriter(path string) (*RunWriter, error) {
+	f, err := os.Create(path + ".tmp")
+	if err != nil {
+		return nil, fmt.Errorf("runspill: create %s.tmp: %w", path, err)
 	}
 	w := bufio.NewWriterSize(f, 1<<20)
 	var hdr [HeaderLen]byte
 	copy(hdr[:4], runMagic[:])
-	binary.BigEndian.PutUint64(hdr[4:], uint64(len(payload)))
-	_, err = w.Write(hdr[:])
-	if err == nil {
-		_, err = w.Write(payload)
+	if _, err := w.Write(hdr[:]); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path + ".tmp")
+		return nil, fmt.Errorf("runspill: write header %s.tmp: %w", path, err)
 	}
-	if err == nil {
-		var tr [4]byte
-		binary.BigEndian.PutUint32(tr[:], crc32.Checksum(payload, crcTable))
-		_, err = w.Write(tr[:])
+	return &RunWriter{path: path, f: f, w: w}, nil
+}
+
+// Append writes one term's postings record. Terms must arrive in ascending
+// order with ascending IDs — the merge's natural emission order.
+func (rw *RunWriter) Append(term events.TermKey, ids []uint32) error {
+	rw.buf = events.AppendTermPostings(rw.buf[:0], term, ids)
+	return rw.writeRaw(rw.buf)
+}
+
+// Close writes the trailer, patches the header's payload length, syncs, and
+// renames into place. On error the temp file is removed.
+func (rw *RunWriter) Close() error {
+	fail := func(err error) error {
+		_ = rw.f.Close()
+		_ = os.Remove(rw.path + ".tmp")
+		return err
 	}
-	if err == nil {
-		err = w.Flush()
+	var tr [4]byte
+	binary.BigEndian.PutUint32(tr[:], rw.crc)
+	if _, err := rw.w.Write(tr[:]); err != nil {
+		return fail(fmt.Errorf("runspill: write trailer: %w", err))
 	}
-	if err == nil {
-		err = f.Sync()
+	if err := rw.w.Flush(); err != nil {
+		return fail(fmt.Errorf("runspill: flush: %w", err))
 	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
+	var lenb [8]byte
+	binary.BigEndian.PutUint64(lenb[:], rw.written)
+	if _, err := rw.f.WriteAt(lenb[:], 4); err != nil {
+		return fail(fmt.Errorf("runspill: patch header: %w", err))
 	}
-	if err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("runspill: write %s: %w", tmp, err)
+	if err := rw.f.Sync(); err != nil {
+		return fail(fmt.Errorf("runspill: sync: %w", err))
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("runspill: rename %s: %w", path, err)
+	if err := rw.f.Close(); err != nil {
+		return fail(err)
+	}
+	if err := os.Rename(rw.path+".tmp", rw.path); err != nil {
+		_ = os.Remove(rw.path + ".tmp")
+		return fmt.Errorf("runspill: rename %s: %w", rw.path, err)
 	}
 	return nil
+}
+
+// writeRaw sends pre-encoded payload bytes through the container accounting —
+// incremental CRC, payload-length tally, buffered write. The ONE site that
+// touches those fields, so Append and WriteRun cannot drift.
+func (rw *RunWriter) writeRaw(p []byte) error {
+	rw.crc = crc32.Update(rw.crc, crcTable, p)
+	rw.written += uint64(len(p))
+	_, err := rw.w.Write(p)
+	return err
 }
 
 // RunReader streams a run file's (term, ids) records in term order. The
@@ -242,26 +299,19 @@ func (r *RunReader) Next() (events.TermKey, []uint32, error) {
 	if count == 0 || count > r.remain {
 		return term, nil, fmt.Errorf("%w: id count %d exceeds %d remaining", ErrCorruptRun, count, r.remain)
 	}
-	r.ids = r.ids[:0]
-	var prev uint64
-	for i := uint64(0); i < count; i++ {
-		v, err := r.uvarint()
-		if err != nil {
-			return term, nil, err
+	// The ID-stream validation (raw-varint reject before accumulation, zero
+	// deltas, uint32 overflow) is the shared events.DecodeAscendingIDs core —
+	// one definition site for both this streaming decoder and the slice-based
+	// DecodePackedRow. r.uvarint feeds it through the CRC/budget accounting.
+	ids, err := events.DecodeAscendingIDs(r.uvarint, count, r.ids[:0])
+	if err != nil {
+		if !errors.Is(err, ErrCorruptRun) { // r.uvarint errors arrive pre-wrapped
+			//nolint:errorlint // opaque on purpose: io.EOF inside corruption must not read as clean EOF
+			err = fmt.Errorf("%w: %v", ErrCorruptRun, err)
 		}
-		abs := v
-		if i > 0 {
-			if v == 0 {
-				return term, nil, fmt.Errorf("%w: zero delta", ErrCorruptRun)
-			}
-			abs = prev + v
-		}
-		if abs > 0xFFFFFFFF {
-			return term, nil, fmt.Errorf("%w: id overflows uint32", ErrCorruptRun)
-		}
-		r.ids = append(r.ids, uint32(abs))
-		prev = abs
+		return term, nil, err
 	}
+	r.ids = ids
 	return term, r.ids, nil
 }
 
@@ -275,6 +325,7 @@ func (r *RunReader) consume(p []byte) error {
 		return fmt.Errorf("%w: truncated payload", ErrCorruptRun)
 	}
 	if _, err := io.ReadFull(r.br, p); err != nil {
+		//nolint:errorlint // opaque on purpose: io.EOF inside corruption must not read as clean EOF
 		return fmt.Errorf("%w: %v", ErrCorruptRun, err)
 	}
 	r.crc = crc32.Update(r.crc, crcTable, p)
@@ -282,25 +333,27 @@ func (r *RunReader) consume(p []byte) error {
 	return nil
 }
 
-// uvarint reads one payload uvarint through the CRC accounting.
+// uvarint reads one payload uvarint through the CRC accounting, delegating
+// the varint state machine to the stdlib via the crcByteReader adapter.
 func (r *RunReader) uvarint() (uint64, error) {
-	var v uint64
-	var shift uint
-	var one [1]byte
-	for {
-		if err := r.consume(one[:]); err != nil {
-			return 0, err
-		}
-		b := one[0]
-		if shift >= 64 || (shift == 63 && b > 1) {
-			return 0, fmt.Errorf("%w: uvarint overflow", ErrCorruptRun)
-		}
-		v |= uint64(b&0x7f) << shift
-		if b < 0x80 {
-			return v, nil
-		}
-		shift += 7
+	v, err := binary.ReadUvarint((*crcByteReader)(r))
+	if err != nil {
+		//nolint:errorlint // opaque on purpose: io.EOF inside corruption must not read as clean EOF
+		return 0, fmt.Errorf("%w: uvarint: %v", ErrCorruptRun, err)
 	}
+	return v, nil
+}
+
+// crcByteReader adapts RunReader's consume (payload budget + CRC accounting)
+// to io.ByteReader for binary.ReadUvarint.
+type crcByteReader RunReader
+
+func (c *crcByteReader) ReadByte() (byte, error) {
+	var one [1]byte
+	if err := (*RunReader)(c).consume(one[:]); err != nil {
+		return 0, err
+	}
+	return one[0], nil
 }
 
 // verifyTrailer reads and checks the CRC after the payload is exhausted.

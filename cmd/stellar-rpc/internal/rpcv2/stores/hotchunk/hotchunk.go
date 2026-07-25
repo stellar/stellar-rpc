@@ -258,8 +258,14 @@ func (d *DB) Source() ledgerbackend.LedgerStream {
 }
 
 // Close releases the shared store exactly once. Idempotent. Must not be called
-// concurrently with in-flight reads/writes.
-func (d *DB) Close() error { return d.store.Close() }
+// concurrently with in-flight reads/writes. The events facade's background
+// seal is drained first so no goroutine outlives the store.
+func (d *DB) Close() error {
+	if d.events != nil {
+		d.events.Shutdown()
+	}
+	return d.store.Close()
+}
 
 // MaxCommittedSeq returns the single authoritative per-chunk last-committed ledger: the
 // highest seq durably committed, from the ledgers CF's last key. Under decision
@@ -280,9 +286,11 @@ func (d *DB) MaxCommittedSeq() (uint32, bool, error) {
 //     finished within the other steps' window;
 //   - PhaseCommit: the RocksDB batch write (WAL append + fsync + memtable) = the
 //     whole Batch call minus the three queue steps — the fsync wait pprof can't see.
-//   - PhaseApply: the post-commit in-memory mirror/offsets apply (the events
-//     copy-on-write bitmap clones). It runs only after the batch is durable, so it
-//     is emitted on the success path only and Failed is never PhaseApply.
+//   - PhaseApply: the post-commit events hot-index apply (window retention,
+//     dense-overlay feed, seal folding). It runs only after the batch is
+//     durable; the apply hook is fallible, so an error here reports
+//     Failed = PhaseApply — the ledger IS committed, and a restart rebuilds
+//     the index deterministically from the committed rows.
 type Phase uint8
 
 const (
@@ -417,7 +425,7 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 	// never a duplicate — the hook is always non-nil on success. Each facade's queue
 	// step is timed individually; Commit (below) is the whole Batch minus those —
 	// the RocksDB write (WAL append + fsync + memtable).
-	var applyEvents func()
+	var applyEvents func() error
 	// A batch error not attributed to a specific queue step below is the commit
 	// itself (the RocksDB write); a queue-step error narrows Failed to its phase.
 	failed := PhaseCommit
@@ -466,12 +474,17 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 		return rep, fmt.Errorf("commit ledger %d to chunk %s: %w", seq, d.chunkID, cerr)
 	}
 
-	// Batch is durable — now and only now apply the events mirror/offsets update.
-	// PhaseApply times this post-commit in-memory work (the events mirror's
-	// copy-on-write bitmap clones), which otherwise lands in no phase.
+	// Batch is durable — now and only now apply the events hot-index update
+	// (window retention, dense-overlay feed, seal folding). PhaseApply times
+	// this post-commit work; an apply error is restartable (warmup rebuilds
+	// deterministically from the committed rows).
 	applyStart := time.Now()
-	applyEvents()
+	aerr := applyEvents()
 	rep.Phases[PhaseApply].Dur = time.Since(applyStart)
+	if aerr != nil {
+		rep.Failed = PhaseApply
+		return rep, fmt.Errorf("apply events index for ledger %d: %w", seq, aerr)
+	}
 	return rep, nil
 }
 

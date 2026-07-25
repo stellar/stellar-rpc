@@ -3,6 +3,8 @@ package event
 import (
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -24,7 +26,7 @@ func TestWarmup_FreshChunkProducesEmptyMirrorsViaNewWithStore(t *testing.T) {
 
 	// A fresh mirror is empty: probing any term is a clean miss
 	// (nil bitmap, no error).
-	bm, err := h.store.mirror.Get(events.ComputeTermKey([]byte("any"), events.FieldContractID))
+	bm, err := h.store.hotIdx.Get(events.ComputeTermKey([]byte("any"), events.FieldContractID))
 	require.NoError(t, err)
 	assert.Nil(t, bm)
 	assert.Zero(t, h.store.offsets.LedgerCount())
@@ -59,7 +61,7 @@ func TestWarmup_RebuildsMirrorFromIngestedRows(t *testing.T) {
 	}
 	expected := make(map[events.TermKey]uint64)
 	for _, k := range seededKeys {
-		bm, err := hot1.mirror.Get(k)
+		bm, err := hot1.hotIdx.Get(k)
 		require.NoError(t, err)
 		require.NotNil(t, bm, "seeded term missing from the pre-close mirror")
 		expected[k] = bm.GetCardinality()
@@ -71,7 +73,7 @@ func TestWarmup_RebuildsMirrorFromIngestedRows(t *testing.T) {
 
 	got := make(map[events.TermKey]uint64)
 	for k := range expected {
-		bm, err := hot2.mirror.Get(k)
+		bm, err := hot2.hotIdx.Get(k)
 		require.NoError(t, err)
 		require.NotNil(t, bm, "seeded term missing from the reopened mirror")
 		got[k] = bm.GetCardinality()
@@ -185,6 +187,59 @@ func TestWarmup_RejectsOffsetsGap(t *testing.T) {
 	require.ErrorContains(t, err, "expected ledger 3, got 4")
 }
 
+// TestWarmup_FailedOpenLeavesDurableStateUntouched pins the seal-arming gate
+// end-to-end: a tail longer than the seal window replays during warmup
+// WITHOUT sealing, so a poisoned tail row fails the open with the consistency
+// tripwire on EVERY attempt — no warmup seal may advance the durable frontier
+// past the poison and blind a later open's tripwire. (The orphan sweep may
+// still remove unreferenced run files — idempotent garbage collection; the
+// manifest and CFs must be untouched.)
+func TestWarmup_FailedOpenLeavesDurableStateUntouched(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir := t.TempDir()
+
+	// A full seal window and change, one event per ledger — enough rows that
+	// the reopen's replay crosses the seal trigger.
+	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
+	first := chunkID.FirstLedger()
+	const n = windowLedgers + 20
+	for i := range uint32(n) {
+		p, _ := makePayload("x")
+		require.NoError(t, ingestLedgerEvents(hot1, first+i, []events.Payload{p}))
+	}
+	hot1.Shutdown()
+	require.NoError(t, raw1.Close())
+
+	// The crashed-with-long-unsealed-tail shape: erase the sealed frontier so
+	// the reopen replays the ENTIRE tail, and poison its last row with an
+	// event ID far beyond the committed total.
+	poisoned := events.AppendPackedRow(nil, map[events.TermKey][]uint32{{0xEE}: {1 << 20}})
+	corruptHotChunk(t, dir, chunkID, func(raw *rocksdb.Store) {
+		require.NoError(t, raw.Delete("", hotIndexManifestKey))
+		require.NoError(t, raw.Put(IndexCF, encodePackedIndexKey(first+n-1), poisoned))
+	})
+
+	_, _, err := tryOpenHotStoreForTest(t, dir, chunkID)
+	require.ErrorContains(t, err, "index references event")
+
+	// The failed open wrote nothing durable: no run files (the pre-existing
+	// ones were swept as unreferenced garbage, none created), manifest absent.
+	runDir := filepath.Join(dir, chunkID.String(), hotIndexRunDir)
+	if entries, rerr := os.ReadDir(runDir); rerr == nil {
+		require.Empty(t, entries, "failed open must not create run files")
+	}
+	corruptHotChunk(t, dir, chunkID, func(raw *rocksdb.Store) {
+		_, ok, gerr := raw.Get("", hotIndexManifestKey)
+		require.NoError(t, gerr)
+		require.False(t, ok, "failed open must not write the manifest")
+	})
+
+	// Same rows, same tripwire, same loud failure: the corruption gate
+	// cannot be blinded by a prior failed attempt.
+	_, _, err = tryOpenHotStoreForTest(t, dir, chunkID)
+	require.ErrorContains(t, err, "index references event")
+}
+
 func TestWarmup_RejectsOffsetsOverflow(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
@@ -259,7 +314,8 @@ func TestWarmup_RejectsIndexBeyondCommitted(t *testing.T) {
 	corruptHotChunk(t, dir, chunkID, func(raw *rocksdb.Store) {
 		var term events.TermKey
 		term[0] = 0x99
-		require.NoError(t, raw.Put(IndexCF, encodeIndexKey(term, 2), nil))
+		require.NoError(t, raw.Put(IndexCF, encodePackedIndexKey(4),
+			events.AppendPackedRow(nil, map[events.TermKey][]uint32{term: {2}})))
 	})
 
 	_, _, err := tryOpenHotStoreForTest(t, dir, chunkID)
@@ -303,7 +359,8 @@ func TestWarmup_RejectsIndexRowAtMaxUint32(t *testing.T) {
 	corruptHotChunk(t, dir, chunkID, func(raw *rocksdb.Store) {
 		var term events.TermKey
 		term[0] = 0x99
-		require.NoError(t, raw.Put(IndexCF, encodeIndexKey(term, math.MaxUint32), nil))
+		require.NoError(t, raw.Put(IndexCF, encodePackedIndexKey(4),
+			events.AppendPackedRow(nil, map[events.TermKey][]uint32{term: {math.MaxUint32}})))
 	})
 
 	_, _, err := tryOpenHotStoreForTest(t, dir, chunkID)

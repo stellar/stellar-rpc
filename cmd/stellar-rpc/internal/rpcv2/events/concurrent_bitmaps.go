@@ -98,8 +98,10 @@ type ConcurrentBitmaps struct {
 }
 
 // NewConcurrentBitmapsFromBitmaps takes ownership of a single-threaded
-// Bitmaps (typically built via warmup or backfill) and wraps it as a
-// ConcurrentBitmaps. Each per-term bitmap is marked CopyOnWrite so
+// Bitmaps and wraps it as a ConcurrentBitmaps. Production only ever passes
+// an empty Bitmaps today (the hot index's dense overlay starts empty and
+// self-fills via promotion); the conversion path is kept for tests that pin
+// its ownership contract. Each per-term bitmap is marked CopyOnWrite so
 // merge snapshots share containers via lazy COW.
 //
 // The input Bitmaps must not be used after this call returns.
@@ -193,6 +195,15 @@ func (s *ConcurrentBitmaps) Get(key TermKey) (*roaring.Bitmap, error) {
 	}
 	st.mat.CompareAndSwap(nil, m)
 	return st.mat.Load(), nil
+}
+
+// Has reports whether key is tracked, without materializing anything — the
+// hot index's per-ledger dense-overlay membership probe.
+func (s *ConcurrentBitmaps) Has(key TermKey) bool {
+	s.rwmu.RLock()
+	_, ok := s.terms[key]
+	s.rwmu.RUnlock()
+	return ok
 }
 
 // AddTo records each eventID under key. Idempotent: callers

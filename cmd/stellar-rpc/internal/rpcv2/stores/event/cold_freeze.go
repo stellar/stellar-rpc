@@ -27,9 +27,64 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events/runspill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 )
+
+// replayOffsets rebuilds the chunk's ledger offsets from OffsetsCF through
+// the shared scanner (one shape/decode trust boundary with warmup); range,
+// overflow, and sequencing checks stay beside the accumulator they guard.
+func replayOffsets(store *rocksdb.Store, chunkID chunk.ID) (*events.LedgerOffsets, error) {
+	offsets := events.NewLedgerOffsets(chunkID.FirstLedger())
+	if err := scanOffsetsCF(store, func(ledger, count uint32) error {
+		if ledger > chunkID.LastLedger() {
+			return fmt.Errorf("events: freeze offsets: ledger %d past chunk %s", ledger, chunkID)
+		}
+		if uint64(offsets.TotalEvents())+uint64(count) > math.MaxUint32 {
+			return fmt.Errorf("events: freeze offsets: cumulative overflow at ledger %d", ledger)
+		}
+		// Append validates the in-sequence invariant itself (untrusted rows).
+		if aerr := offsets.Append(ledger, count); aerr != nil {
+			return fmt.Errorf("events: freeze offsets: %w", aerr)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return offsets, nil
+}
+
+// copyDataCF streams the DataCF verbatim into the cold writer in eventID
+// order, enforcing key shape and ID density, and returns the copied count.
+func copyDataCF(ctx context.Context, store *rocksdb.Store, w *ColdWriter) (uint64, error) {
+	var copied uint64
+	next := uint32(0)
+	for entry, ierr := range store.Iterate(DataCF, nil) {
+		if ierr != nil {
+			return copied, fmt.Errorf("events: freeze scan %s: %w", DataCF, ierr)
+		}
+		// ctx.Err takes a mutex; polling per event costs real time over
+		// millions of events. Same cadence as the sibling freeze scans.
+		if next%256 == 0 {
+			if cerr := ctx.Err(); cerr != nil {
+				return copied, cerr
+			}
+		}
+		if len(entry.Key) != dataKeyLen {
+			return copied, fmt.Errorf("events: freeze %s key length %d (want %d)", DataCF, len(entry.Key), dataKeyLen)
+		}
+		// The hot writer assigns dense chunk-relative IDs; a gap here is real
+		// corruption, and events.pack positions must equal IDs.
+		if id := binary.BigEndian.Uint32(entry.Key); id != next {
+			return copied, fmt.Errorf("events: freeze %s: event id %d, expected %d", DataCF, id, next)
+		}
+		next++
+		copied++
+		if aerr := w.AppendMarshaled(entry.Value); aerr != nil {
+			return copied, aerr
+		}
+	}
+	return copied, nil
+}
 
 // freezeIndexWindowBytes caps how many packed-row bytes accumulate in the
 // window map before it flushes as one spill run. ~32MB keeps freeze memory
@@ -49,6 +104,9 @@ func FreezeColdFromStore(
 	scratchDir, bucketDir string,
 	opts ColdWriterOptions,
 ) (err error) {
+	if err := os.MkdirAll(bucketDir, 0o755); err != nil {
+		return fmt.Errorf("events: mkdir freeze bucket %s: %w", bucketDir, err)
+	}
 	if err := os.RemoveAll(scratchDir); err != nil {
 		return fmt.Errorf("events: wipe freeze scratch %s: %w", scratchDir, err)
 	}
@@ -71,51 +129,17 @@ func FreezeColdFromStore(
 		}
 	}()
 
-	var copied uint64
-	next := uint32(0)
-	for entry, ierr := range store.Iterate(DataCF, nil) {
-		if ierr != nil {
-			return fmt.Errorf("events: freeze scan %s: %w", DataCF, ierr)
-		}
-		if cerr := ctx.Err(); cerr != nil {
-			return cerr
-		}
-		if len(entry.Key) != dataKeyLen {
-			return fmt.Errorf("events: freeze %s key length %d (want %d)", DataCF, len(entry.Key), dataKeyLen)
-		}
-		// The hot writer assigns dense chunk-relative IDs; a gap here is real
-		// corruption, and events.pack positions must equal IDs.
-		if id := binary.BigEndian.Uint32(entry.Key); id != next {
-			return fmt.Errorf("events: freeze %s: event id %d, expected %d", DataCF, id, next)
-		}
-		next++
-		copied++
-		if aerr := w.AppendMarshaled(entry.Value); aerr != nil {
-			return aerr
-		}
+	copied, err := copyDataCF(ctx, store, w)
+	if err != nil {
+		return err
 	}
 
-	// ── offsets: OffsetsCF replay with the warmup path's validations. ──
-	offsets := events.NewLedgerOffsets(chunkID.FirstLedger())
-	for entry, ierr := range store.Iterate(OffsetsCF, nil) {
-		if ierr != nil {
-			return fmt.Errorf("events: freeze scan %s: %w", OffsetsCF, ierr)
-		}
-		if len(entry.Key) != offsetKeyLen || len(entry.Value) != offsetValLen {
-			return fmt.Errorf("events: freeze %s row shape %d/%d", OffsetsCF, len(entry.Key), len(entry.Value))
-		}
-		ledger := binary.BigEndian.Uint32(entry.Key)
-		count := binary.BigEndian.Uint32(entry.Value)
-		if ledger > chunkID.LastLedger() {
-			return fmt.Errorf("events: freeze offsets: ledger %d past chunk %s", ledger, chunkID)
-		}
-		if uint64(offsets.TotalEvents())+uint64(count) > math.MaxUint32 {
-			return fmt.Errorf("events: freeze offsets: cumulative overflow at ledger %d", ledger)
-		}
-		// Append validates the in-sequence invariant itself (untrusted rows).
-		if aerr := offsets.Append(ledger, count); aerr != nil {
-			return fmt.Errorf("events: freeze offsets: %w", aerr)
-		}
+	// ── offsets: OffsetsCF replay through the shared scanner (one shape/
+	// decode trust boundary with warmup); range, overflow, and sequencing
+	// checks stay here with the accumulator they guard. ──
+	offsets, err := replayOffsets(store, chunkID)
+	if err != nil {
+		return err
 	}
 	if total := uint64(offsets.TotalEvents()); total != copied {
 		return fmt.Errorf("events: freeze: offsets count %d events, data CF holds %d", total, copied)
@@ -146,15 +170,16 @@ func freezeIndexRuns(ctx context.Context, store *rocksdb.Store, scratchDir strin
 		window      = make(map[events.TermKey][]uint32, 1<<16)
 		windowBytes int
 		runs        []string
-		payload     []byte
 	)
 	flush := func() error {
 		if len(window) == 0 {
 			return nil
 		}
-		payload = events.AppendPackedRow(payload[:0], window)
+		// Stream the window in sorted-term order through the seal path's
+		// shared writer — no whole-payload buffer (the same trim the
+		// seal/merge path got in the streaming rework).
 		path := filepath.Join(scratchDir, fmt.Sprintf("freeze-%06d.run", len(runs)))
-		if werr := runspill.WriteRun(path, payload); werr != nil {
+		if werr := writeSortedRun(window, path); werr != nil {
 			return werr
 		}
 		runs = append(runs, path)

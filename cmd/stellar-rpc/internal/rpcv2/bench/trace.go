@@ -29,8 +29,9 @@ type hotTrace struct {
 
 	// pending accumulates the current ledger's phase durations; wallStart
 	// stamps the burst's first signal. complete latches on PhaseApply — the
-	// burst's terminal phase, emitted on success only — so writeRow never
-	// emits a half-observed ledger.
+	// burst's terminal phase. PhaseApply is also emitted when the apply
+	// itself fails, but the ingest loop then aborts before LastCommitted,
+	// so writeRow still never attributes a partial burst to a committed seq.
 	pending   [hotchunk.NumPhases]time.Duration
 	wallStart time.Time
 	complete  bool
@@ -56,7 +57,7 @@ func newHotTrace(path string) (*hotTrace, error) {
 
 // recordPhase folds one phase signal into the pending row. PhaseExtract (the
 // burst's first signal) resets the row and stamps its wall time; PhaseApply
-// (terminal, success-only) marks it complete for writeRow.
+// (terminal) marks it complete for writeRow.
 func (t *hotTrace) recordPhase(phase hotchunk.Phase, d time.Duration) {
 	if phase == hotchunk.PhaseExtract {
 		t.pending = [hotchunk.NumPhases]time.Duration{}
