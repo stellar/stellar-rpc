@@ -76,7 +76,12 @@ func FreezeColdChunk(
 		}
 		if err := freezeArm(sink, dataTypeLedgers, func() (int, error) {
 			// Concurrency is meaningless in PreCompressed mode (no encoder);
-			// writeback smoothing applies as in every batch build.
+			// writeback smoothing applies as in every batch build. The copy
+			// runs at full speed and is CORRECT on any topology; the
+			// RECOMMENDED deployment puts cold artifacts on their own device,
+			// because on a shared disk an unpaced copy stream queues ahead of
+			// the hot WAL fdatasync (measured: ~50ms median fsync waits →
+			// co-located ingest commit p50 +28ms for the arm's duration).
 			return db.FreezeLedgersCold(ctx, dirs.LedgerPack, ledger.ColdWriterOptions{
 				BytesPerSync: coldBytesPerSync,
 			})

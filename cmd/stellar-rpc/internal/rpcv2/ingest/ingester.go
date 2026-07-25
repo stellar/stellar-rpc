@@ -10,6 +10,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 )
 
 // coldChunk is one chunk's set of cold writers — one concrete field per data
@@ -195,5 +196,5 @@ const (
 	// coldBytesPerSync triggers background writeback every 1 MiB so Commit/Finish
 	// doesn't flush a whole pack's dirty pages at once (a large win on networked
 	// storage, per the writer docs).
-	coldBytesPerSync = 1 << 20
+	coldBytesPerSync = packfile.DefaultBytesPerSync
 )

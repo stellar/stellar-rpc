@@ -22,7 +22,33 @@ func NewCommand() *cobra.Command {
 		Use:   "bench-ingest",
 		Short: "Benchmark full-history ingestion",
 	}
-	cmd.AddCommand(newColdCommand(), newHotCommand(), newFreezeCommand())
+	cmd.AddCommand(newColdCommand(), newHotCommand(), newFreezeCommand(), newTxindexCommand())
+	return cmd
+}
+
+func newTxindexCommand() *cobra.Command {
+	var (
+		opts txindexOptions
+		prof profileFlags
+	)
+	cmd := &cobra.Command{
+		Use:   "txindex",
+		Short: "Benchmark the rolling txhash index build (BuildColdIndex over a window of .bin files)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cmd.SilenceUsage = true
+			ctx, stop, logger := benchContext()
+			defer stop()
+			return prof.around(logger, func() error { return runTxindex(ctx, logger, opts) })
+		},
+	}
+	fs := cmd.Flags()
+	fs.StringVar(&opts.BinDir, "bin-dir", "", "dir of <chunkID:08d>.bin window inputs (required)")
+	fs.IntVar(&opts.NumBins, "num-bins", 0, "cap on .bins taken in chunk order (0 = all)")
+	fs.StringVar(&opts.IndexOut, "index-out", "", ".idx output path (required; overwritten)")
+	fs.StringVar(&opts.OutDir, "out", "bench-out", "CSV output dir")
+	prof.bind(cmd)
+	markRequired(cmd, "bin-dir", "index-out")
 	return cmd
 }
 
