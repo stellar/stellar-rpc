@@ -59,6 +59,38 @@ type Compressor struct {
 	ctx *C.ZSTD_CCtx
 }
 
+// EncoderState pairs one compressor with its retained destination buffer —
+// the reuse idiom for zstd encode state (a CGo context is expensive to
+// create; a fresh worst-case dst per Encode was measured at 43% of hot
+// ingestion's allocations before reuse). NOT safe for concurrent use: the
+// owner serializes Encodes (the ledger hot store's single-flight
+// compression). Deliberately NOT a sync.Pool: the state is one expensive,
+// long-lived object, and sync.Pool's GC-emptied semantics were measured
+// dropping it ~1-in-5 ledgers under per-ledger GC cadence — a ~15MB dst
+// re-allocation plus a CGo context re-init each time. Callers' consumers
+// must copy synchronously (e.g. rocksdb BatchWriter.Put, packfile
+// AppendItem do).
+type EncoderState struct {
+	comp *Compressor
+	buf  []byte
+}
+
+// NewEncoderState returns a default-configured encoder state.
+func NewEncoderState() *EncoderState {
+	return &EncoderState{comp: NewCompressor()}
+}
+
+// Encode compresses src into the retained buffer and returns the encoded
+// bytes, which are valid until this state's next Encode.
+func (s *EncoderState) Encode(src []byte) ([]byte, error) {
+	out, err := s.comp.Encode(s.buf[:0], src)
+	if err != nil {
+		return nil, err
+	}
+	s.buf = out[:cap(out)]
+	return out, nil
+}
+
 // CompressorOption configures a Compressor.
 type CompressorOption func(*compressorConfig)
 

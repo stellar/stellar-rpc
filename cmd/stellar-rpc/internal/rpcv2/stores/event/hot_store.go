@@ -1,12 +1,14 @@
 package event
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"iter"
 	"math"
+	"slices"
 
 	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/linxGnu/grocksdb"
@@ -31,12 +33,17 @@ const (
 //     typically 2-3× on XDR) and read in batches via
 //     BatchedMultiGetCF. Larger blocks give zstd more context per
 //     compression unit and align with batch-fetch shapes.
-//   - IndexCF stores 20-byte (term_hash || event_id) keys with
-//     empty values — nothing in the values to compress, and small
-//     blocks reduce wasted I/O per random Lookup miss (each Lookup
-//     reads one block to find one key).
+//   - IndexCF stores ONE packed row per ledger (4-byte ledger_seq key,
+//     value = sorted term_hash ‖ uvarint event-ID runs — see
+//     appendPackedIndexRow). One skiplist insert per ledger instead of
+//     one per (term, event) pair — the per-(term,event) 20-byte-key
+//     format it replaces put tens of thousands of keys per ledger into
+//     the shared commit batch's memtable insert, which dominated hot
+//     commit latency. Only warmup reads this CF (queries hit the
+//     in-memory mirror), so block size just needs to suit a sequential
+//     scan of ~100-300KB values.
 //   - OffsetsCF stores 8-byte (ledger_seq -> event_count) rows in
-//     the tens-of-thousands per chunk — same shape as IndexCF.
+//     the tens-of-thousands per chunk.
 const (
 	dataCFBlockSize    = 32 * 1024
 	indexCFBlockSize   = 4 * 1024
@@ -63,10 +70,17 @@ func CFNames() []string { return []string{DataCF, IndexCF, OffsetsCF} }
 func CFOptions() map[string]rocksdb.CFOptions { return hotStoreCFOptions() }
 
 const (
-	dataKeyLen   = 4      // event_id (chunk encoded by per-Chunk DB directory)
-	indexKeyLen  = 16 + 4 // term hash || event_id
-	offsetKeyLen = 4      // ledger_seq
-	offsetValLen = 4      // per-ledger event count (uint32 BE)
+	dataKeyLen = 4 // event_id (chunk encoded by per-Chunk DB directory)
+	// indexKeyLen is the LEGACY per-(term,event) index key: term hash ||
+	// event_id, one row per pair. Still read by warmup (a restarted daemon
+	// may hold a chunk with legacy rows) but no longer written.
+	indexKeyLen = 16 + 4
+	// packedIndexKeyLen is the current per-ledger packed index key: the
+	// ledger sequence. The key length is the format discriminator in
+	// warmupIndex — legacy rows are 20 bytes, packed rows 4.
+	packedIndexKeyLen = 4
+	offsetKeyLen      = 4 // ledger_seq
+	offsetValLen      = 4 // per-ledger event count (uint32 BE)
 )
 
 // ErrLedgerOutOfRange is returned by IngestLedgerToBatch when the
@@ -425,7 +439,11 @@ func (h *HotStore) IngestLedgerToBatch(
 	// Marshal + queue each event directly into b. BatchWriter.Put copies
 	// synchronously, so ONE reused scratch buffer serves every event — the caller
 	// opens exactly one batch per ledger, so no row must outlive this call.
+	// The per-term event-ID lists are accumulated once here and serve BOTH the
+	// packed index row and the post-commit mirror apply (which previously
+	// rebuilt the same grouping).
 	var scratch []byte
+	perKeyIDs := make(map[TermKey][]uint32, 64)
 	for i := range payloads {
 		blob, err := payloads[i].MarshalInto(scratch[:0])
 		if err != nil {
@@ -435,13 +453,22 @@ func (h *HotStore) IngestLedgerToBatch(
 		eventID := startID + uint32(i)
 		b.Put(DataCF, encodeDataKey(eventID), blob)
 		for _, key := range termKeys[i] {
-			b.Put(IndexCF, encodeIndexKey(key, eventID), nil)
+			perKeyIDs[key] = append(perKeyIDs[key], eventID)
 		}
+	}
+	// ONE packed index row per ledger (see appendPackedIndexRow) instead of a
+	// row per (term, event) — the memtable insert cost of the shared commit
+	// batch scales with key count, and this removes tens of thousands of keys
+	// per ledger from it. A ledger with no events writes no index row.
+	if len(perKeyIDs) > 0 {
+		b.Put(IndexCF, encodePackedIndexKey(ledgerSeq), appendPackedIndexRow(nil, perKeyIDs))
 	}
 	//nolint:gosec // len bounded by the overflow guard above
 	b.Put(OffsetsCF, encodeOffsetKey(ledgerSeq), encodeLedgerEventCount(uint32(len(payloads))))
 
-	return func() { h.applyLedger(startID, termKeys) }, nil
+	//nolint:gosec // len bounded by the overflow guard above
+	eventCount := uint32(len(payloads))
+	return func() { h.applyLedger(perKeyIDs, eventCount) }, nil
 }
 
 // index returns the in-memory term mirror. Test-only write hook: no production
@@ -458,22 +485,15 @@ func (h *HotStore) index() *ConcurrentBitmaps { return h.mirror }
 // offsets then reads the mirror must see either the prior state or a consistent
 // later one. Reversing it would let a reader see an offsets count including IDs
 // the mirror hasn't published — FetchEvents would then miss them, silently.
-func (h *HotStore) applyLedger(startID uint32, termKeys [][]TermKey) {
-	// Batch by key so each AddTo clones at most once per (key, ledger), not per
-	// (key, event) — turns N COW clones into 1 for popular terms. Cap 64 ≈ a few
-	// × unique-terms per ledger; the map grows past that.
-	perKeyIDs := make(map[TermKey][]uint32, 64)
-	for i, keys := range termKeys {
-		eventID := startID + uint32(i)
-		for _, key := range keys {
-			perKeyIDs[key] = append(perKeyIDs[key], eventID)
-		}
-	}
+func (h *HotStore) applyLedger(perKeyIDs map[TermKey][]uint32, eventCount uint32) {
+	// perKeyIDs is the write path's per-term grouping, reused here so each
+	// AddTo clones at most once per (key, ledger), not per (key, event) —
+	// N COW clones become 1 for popular terms, and the grouping work itself
+	// happens once per ledger instead of twice.
 	for key, ids := range perKeyIDs {
 		h.mirror.AddTo(key, ids...)
 	}
-	//nolint:gosec // len bounded by IngestLedgerToBatch's overflow guard
-	h.offsets.Append(uint32(len(termKeys)))
+	h.offsets.Append(eventCount)
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -559,18 +579,17 @@ func verifyChunkConsistency(chunkStore *rocksdb.Store, total uint32, indexUpperB
 	return nil
 }
 
-// warmupIndex scans the events_index CF and replays every
-// (TermKey, eventID) row into a fresh ConcurrentBitmaps.
-// Design doc §12 step 3.
+// warmupIndex scans the events_index CF and replays every index row into a
+// fresh ConcurrentBitmaps. Design doc §12 step 3. Two row formats
+// (discriminated by key length): the current packed per-ledger row — one key
+// per ledger, terms with ID runs in the value — and the legacy
+// per-(term,event) row a pre-upgrade daemon may have left in the same chunk.
 //
-// Implementation: build into a single-threaded Bitmaps via
-// per-term batching (rocksdb's byte-sorted iteration delivers all
-// rows for term K consecutively, so a small buffer flushes when the
-// term changes), then convert to ConcurrentBitmaps at the end. This
-// avoids paying the per-row Clone cost the concurrent ConcurrentBitmaps.AddTo
-// would do for popular terms — without batching, warmup of a
-// 10M-event chunk does ~50M Clones (one per index row) and saturates
-// GC for many minutes.
+// Implementation: build into a single-threaded Bitmaps, then convert
+// to ConcurrentBitmaps at the end — the concurrent AddTo's per-call COW Clone
+// would otherwise saturate GC on big chunks. Packed rows arrive pre-grouped
+// per term; legacy rows are grouped via the prevTerm/buf accumulator
+// (byte-sorted iteration delivers a term's legacy rows consecutively).
 //
 // Also returns the exclusive upper bound of indexed event IDs (max + 1,
 // or 0 if the index is empty; uint64 so max+1 can't wrap — see
@@ -596,22 +615,41 @@ func warmupIndex(chunkStore *rocksdb.Store) (*ConcurrentBitmaps, uint64, error) 
 		if err != nil {
 			return nil, 0, fmt.Errorf("events: warmup scan %s: %w", IndexCF, err)
 		}
-		if len(entry.Key) != indexKeyLen {
-			return nil, 0, fmt.Errorf("events: warmup unexpected %s key length %d (want %d)",
-				IndexCF, len(entry.Key), indexKeyLen)
-		}
-		var term TermKey
-		copy(term[:], entry.Key[0:16])
-		eventID := binary.BigEndian.Uint32(entry.Key[16:20])
-		if uint64(eventID)+1 > indexUpperBound {
-			indexUpperBound = uint64(eventID) + 1
-		}
-		if hasPrev && term != prevTerm {
+		switch len(entry.Key) {
+		case packedIndexKeyLen:
+			// Packed per-ledger row: replay every term's ID run. Flush the
+			// legacy accumulator first — AddTo appends, so a term split
+			// across formats merges correctly either way; flushing just
+			// keeps the legacy batching invariant simple.
 			flush()
+			if derr := decodePackedIndexRow(entry.Value, func(term TermKey, ids []uint32) {
+				builder.AddTo(term, ids...)
+				if last := uint64(ids[len(ids)-1]) + 1; last > indexUpperBound {
+					indexUpperBound = last
+				}
+			}); derr != nil {
+				return nil, 0, fmt.Errorf("events: warmup %s ledger %d: %w",
+					IndexCF, binary.BigEndian.Uint32(entry.Key), derr)
+			}
+		case indexKeyLen:
+			// Legacy per-(term,event) row — written by pre-packed-format
+			// daemons; a chunk can hold both after a mid-chunk upgrade.
+			var term TermKey
+			copy(term[:], entry.Key[0:16])
+			eventID := binary.BigEndian.Uint32(entry.Key[16:20])
+			if uint64(eventID)+1 > indexUpperBound {
+				indexUpperBound = uint64(eventID) + 1
+			}
+			if hasPrev && term != prevTerm {
+				flush()
+			}
+			prevTerm = term
+			hasPrev = true
+			buf = append(buf, eventID)
+		default:
+			return nil, 0, fmt.Errorf("events: warmup unexpected %s key length %d (want %d or %d)",
+				IndexCF, len(entry.Key), packedIndexKeyLen, indexKeyLen)
 		}
-		prevTerm = term
-		hasPrev = true
-		buf = append(buf, eventID)
 	}
 	flush()
 
@@ -676,11 +714,102 @@ func encodeDataKey(eventID uint32) []byte {
 	return key[:]
 }
 
+// encodeIndexKey builds a LEGACY per-(term,event) index key. Kept for warmup
+// tests and the dual-format read path; the write path emits packed rows.
 func encodeIndexKey(term TermKey, eventID uint32) []byte {
 	var key [indexKeyLen]byte
 	copy(key[:16], term[:])
 	binary.BigEndian.PutUint32(key[16:], eventID)
 	return key[:]
+}
+
+func encodePackedIndexKey(ledgerSeq uint32) []byte {
+	var key [packedIndexKeyLen]byte
+	binary.BigEndian.PutUint32(key[:], ledgerSeq)
+	return key[:]
+}
+
+// appendPackedIndexRow appends one ledger's packed index-row value to dst and
+// returns it: for each term (byte-sorted, so the encoding is deterministic),
+//
+//	16-byte term hash ‖ uvarint id-count ‖ ids as uvarints
+//	(first absolute, then strictly-positive deltas)
+//
+// Event IDs are appended by the caller in ascending order per term, so the
+// deltas are always ≥ 1 — decodePackedIndexRow rejects a zero delta as
+// corruption. Delta-varint keeps the run for a term with k sequential IDs to
+// ~1 byte per ID.
+func appendPackedIndexRow(dst []byte, perKeyIDs map[TermKey][]uint32) []byte {
+	terms := make([]TermKey, 0, len(perKeyIDs))
+	for k := range perKeyIDs {
+		terms = append(terms, k)
+	}
+	slices.SortFunc(terms, func(a, b TermKey) int { return bytes.Compare(a[:], b[:]) })
+	for _, t := range terms {
+		ids := perKeyIDs[t]
+		dst = append(dst, t[:]...)
+		dst = binary.AppendUvarint(dst, uint64(len(ids)))
+		var prev uint32
+		for j, id := range ids {
+			if j == 0 {
+				dst = binary.AppendUvarint(dst, uint64(id))
+			} else {
+				dst = binary.AppendUvarint(dst, uint64(id-prev))
+			}
+			prev = id
+		}
+	}
+	return dst
+}
+
+// decodePackedIndexRow parses a packed index-row value, yielding each term's
+// absolute event-ID list into add. IDs within a term must be strictly
+// increasing (zero deltas rejected); every structural violation is an error —
+// on-disk rows are untrusted input to warmup. ids is reused across terms; add
+// must consume it before returning (warmup's builder.AddTo copies).
+func decodePackedIndexRow(val []byte, add func(term TermKey, ids []uint32)) error {
+	var ids []uint32
+	for len(val) > 0 {
+		if len(val) < 16 {
+			return fmt.Errorf("events: packed index row: %d trailing bytes, want 16-byte term", len(val))
+		}
+		var term TermKey
+		copy(term[:], val[:16])
+		val = val[16:]
+		count, n := binary.Uvarint(val)
+		if n <= 0 {
+			return errors.New("events: packed index row: bad id-count uvarint")
+		}
+		val = val[n:]
+		// Each ID takes ≥1 byte, so a count beyond the remaining bytes is
+		// structurally impossible — reject before allocating for it.
+		if count == 0 || count > uint64(len(val)) {
+			return fmt.Errorf("events: packed index row: id count %d exceeds %d remaining bytes", count, len(val))
+		}
+		ids = ids[:0]
+		var prev uint64
+		for i := uint64(0); i < count; i++ {
+			v, n := binary.Uvarint(val)
+			if n <= 0 {
+				return errors.New("events: packed index row: bad event-id uvarint")
+			}
+			val = val[n:]
+			abs := v
+			if i > 0 {
+				if v == 0 {
+					return errors.New("events: packed index row: zero delta")
+				}
+				abs = prev + v
+			}
+			if abs > math.MaxUint32 {
+				return fmt.Errorf("events: packed index row: event id %d overflows uint32", abs)
+			}
+			ids = append(ids, uint32(abs))
+			prev = abs
+		}
+		add(term, ids)
+	}
+	return nil
 }
 
 func encodeOffsetKey(ledgerSeq uint32) []byte {
