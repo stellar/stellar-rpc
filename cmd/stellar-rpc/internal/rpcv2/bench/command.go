@@ -190,6 +190,7 @@ func newHotCommand() *cobra.Command {
 		hotDir        string
 		catalogDir    string
 		closeInterval time.Duration
+		traceFile     string
 		prof          profileFlags
 	)
 	cmd := newBenchCommand("hot",
@@ -205,6 +206,7 @@ func newHotCommand() *cobra.Command {
 				CatalogDir:    catalogDir,
 				CloseInterval: closeInterval,
 				OutDir:        outDir,
+				TraceFile:     traceFile,
 			})
 		})
 	fs := cmd.Flags()
@@ -219,6 +221,9 @@ func newHotCommand() *cobra.Command {
 	fs.DurationVar(&closeInterval, "close-interval", 0,
 		"assumed time between ledger closes; >0 paces ingestion to that steady-state cadence "+
 			"and reports pace_lag (0 = ingest back-to-back, catch-up throughput)")
+	fs.StringVar(&traceFile, "trace", "",
+		"per-ledger trace CSV path: one wall-clock-stamped row per ingested ledger "+
+			"with every phase duration (empty = off)")
 	markRequired(cmd, "start-chunk", "hot-dir")
 	return cmd
 }
