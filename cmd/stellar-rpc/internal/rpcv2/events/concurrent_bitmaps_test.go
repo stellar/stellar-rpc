@@ -456,13 +456,31 @@ func TestNewConcurrentBitmapsFromBitmaps_DirectlyPinsContract(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, bmNil, "nil source entries must be skipped, not panicked")
 
-	// Subsequent AddTo on the converted index produces a new
-	// termState whose bitmap still has CopyOnWrite (inherited via
-	// Clone). This pins that the AddTo dense path doesn't lose the
-	// COW flag.
+	// Subsequent AddTo on the converted index goes down the tail-delta
+	// path: the BASE bitmap is reused untouched (same pointer, same COW
+	// flag, same cardinality) and the new ID rides in the tail; Get sees
+	// the union.
 	cb.AddTo(keyA, 5)
-	post := cb.terms[keyA].Load().bm
-	require.NotNil(t, post)
-	assert.True(t, post.GetCopyOnWrite())
-	assert.Equal(t, uint64(6), post.GetCardinality())
+	st := cb.terms[keyA].Load()
+	require.NotNil(t, st.bm)
+	assert.Same(t, bmA, st.bm, "tail-delta AddTo must reuse the base, not clone it")
+	assert.Equal(t, []uint32{5}, st.tail)
+	got, err := cb.Get(keyA)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(6), got.GetCardinality())
+
+	// A merge (tail crossing tailMergeThreshold) Clones the base; the COW
+	// flag must survive the merge so later merges stay shallow.
+	bulk := make([]uint32, tailMergeThreshold)
+	for i := range bulk {
+		bulk[i] = uint32(6 + i)
+	}
+	cb.AddTo(keyA, bulk...)
+	merged := cb.terms[keyA].Load()
+	require.NotNil(t, merged.bm)
+	assert.Empty(t, merged.tail)
+	assert.NotSame(t, bmA, merged.bm)
+	assert.True(t, merged.bm.GetCopyOnWrite(),
+		"merge must preserve CopyOnWrite so subsequent merges Clone via the fast shallow path")
+	assert.Equal(t, uint64(6+tailMergeThreshold), merged.bm.GetCardinality())
 }
