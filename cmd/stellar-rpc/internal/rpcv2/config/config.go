@@ -343,12 +343,21 @@ const (
 
 	DefaultMaxHealthyLedgerLatency time.Duration = 30 * time.Second
 
-	DefaultGetEventsMaxItemsPerResponse           uint = 10000
+	// DefaultGetEventsMaxItemsPerResponse and the getLedgers pair below are the
+	// two deliberate breaks from v1's page sizes (TODO: revisit both under the
+	// v2 benchmarking epic):
+	//   - getEvents max is 1000, not v1's 10000 — the finalized getEvents v2
+	//     API fixes the page cap at 1,000 as a spec constant
+	//     (github.com/orgs/stellar/discussions/1872).
+	//   - getLedgers is 20/5, not v1's 200/50 — the item here is a full
+	//     LedgerCloseMeta (megabytes each on a busy pubnet ledger), so v1's
+	//     200-item page could exceed a hundred MB of XDR in one response.
+	DefaultGetEventsMaxItemsPerResponse           uint = 1000
 	DefaultGetEventsDefaultItemsPerResponse       uint = 100
 	DefaultGetTransactionsMaxItemsPerResponse     uint = 200
 	DefaultGetTransactionsDefaultItemsPerResponse uint = 50
-	DefaultGetLedgersMaxItemsPerResponse          uint = 200
-	DefaultGetLedgersDefaultItemsPerResponse      uint = 50
+	DefaultGetLedgersMaxItemsPerResponse          uint = 20
+	DefaultGetLedgersDefaultItemsPerResponse      uint = 5
 
 	DefaultClassicFeeWindowLedgers          uint32 = 10
 	DefaultSorobanInclusionFeeWindowLedgers uint32 = 50

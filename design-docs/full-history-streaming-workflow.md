@@ -73,7 +73,7 @@ Every TOML leaf is also settable from the command line:
 **[service.methods.\<methodName\>]** — one table per served method (getHealth, getNetwork, getVersionInfo, getLatestLedger, getTransaction, getTransactions, getLedgers, getEvents, getFeeStats):
 
 - Every method: `queue_limit` and `max_execution_duration`. v1's defaults: 1000 / 5s, except getFeeStats's queue is 100, and getLedgers/getEvents get 10s.
-- The three paginated methods (getTransactions, getLedgers, getEvents) add `max_items_per_response` / `default_items_per_response`.
+- The three paginated methods (getTransactions, getLedgers, getEvents) add `max_items_per_response` / `default_items_per_response`. Two deliberate breaks from v1's page sizes (TODO: revisit under the v2 benchmarking epic): getEvents max is 1000 (the v2 API's spec constant, not v1's 10000), and getLedgers is 20/5 (one item is a full ledger's meta — megabytes each — so v1's 200/50 could produce >100MB responses).
 - getHealth adds `max_healthy_ledger_latency` (default `"30s"`).
 - Bare `queue_limit` / `max_execution_duration` keys directly on `[service.methods]` form an optional methods-wide default tier: per-method value → wide default → compiled default.
 - Not here: sendTransaction, simulateTransaction, getLedgerEntries and the preflight knobs — they arrive with the captive-core-endpoints work.
@@ -83,7 +83,7 @@ Every TOML leaf is also settable from the command line:
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `retention_chunks` | uint32 | `0` | Retention window in chunks. `0` = full history. |
-| `earliest_ledger` | uint32 \| `"genesis"` \| `"now"` | `"genesis"` | Earliest ledger this daemon will ever have data for — a fixed lower floor on history. Must be chunk-aligned; `"now"` resolves to the backfill backend's frontier chunk at first start. Resolved and pinned on the first start (a reachable backend is required, to resolve `"now"` and to reject a numeric floor past the tip; see `validateConfig`), immutable thereafter. Setting it above genesis typically skips upfront backfill — useful when no fast backfill source is available and the daemon only follows the live network (`earliest_ledger = "now"`). |
+| `earliest_ledger` | `"<number>"` \| `"genesis"` \| `"now"` (always a string — a bare TOML integer fails to parse) | `"genesis"` | Earliest ledger this daemon will ever have data for — a fixed lower floor on history. Must be chunk-aligned; `"now"` resolves to the backfill backend's frontier chunk at first start. Resolved and pinned on the first start (a reachable backend is required, to resolve `"now"` and to reject a numeric floor past the tip; see `validateConfig`), immutable thereafter. Setting it above genesis typically skips upfront backfill — useful when no fast backfill source is available and the daemon only follows the live network (`earliest_ledger = "now"`). |
 
 **[storage]** — the data root plus one optional path per on-disk tree; an unset per-store key defaults under `{default_data_dir}`:
 

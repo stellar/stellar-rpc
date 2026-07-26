@@ -55,9 +55,13 @@ default_data_dir = "/var/stellar/rpc-v2"
 # The earliest ledger this daemon will EVER have data for. One of:
 #   "genesis"  — full history from the network's first ledger (the default)
 #   "now"      — start from the chunk containing the network tip at first boot
-#   <number>   — a chunk-aligned ledger sequence (e.g. 50002)
+#   "<number>" — a chunk-aligned ledger sequence, IN QUOTES (e.g. "50002";
+#                a bare integer fails to parse — the key is a string)
 # PINNED: written immutably on first start and checked on every restart —
 # changing it once data exists aborts startup (wipe the data dir to change it).
+# Set pinned keys HERE, not via one-off CLI flags: a node first started with
+# --retention.earliest_ledger and later restarted without it aborts on the
+# pin mismatch.
 earliest_ledger = "genesis"
 
 # Sliding retention window in CHUNKS (10,000 ledgers each); 0 = keep
@@ -147,13 +151,16 @@ default_items_per_response = 50
 [service.methods.getLedgers]
 queue_limit = 1000
 max_execution_duration = "10s"
-max_items_per_response = 200
-default_items_per_response = 50
+# Smaller than v1's 200/50 on purpose: one item is a full ledger's meta,
+# megabytes each on a busy ledger.
+max_items_per_response = 20
+default_items_per_response = 5
 
 [service.methods.getEvents]
 queue_limit = 1000
 max_execution_duration = "10s"
-max_items_per_response = 10000
+# The getEvents v2 API caps pages at 1,000 (spec constant), unlike v1's 10000.
+max_items_per_response = 1000
 default_items_per_response = 100
 
 [service.methods.getFeeStats]
