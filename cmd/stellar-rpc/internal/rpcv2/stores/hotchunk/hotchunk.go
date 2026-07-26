@@ -32,8 +32,8 @@ import (
 )
 
 // DB is one chunk's hot tier: a single multi-CF rocksdb.Store plus the typed
-// facades composed over it — all three on a read-write open; a read-only open
-// leaves events nil (see OpenReadOnly). It owns the store (Close closes it
+// facades composed over it — all three warmed on a read-write open; a read-only
+// open leaves events nil and txhash query-disabled (see OpenReadOnly). It owns the store (Close closes it
 // once); the facades wrap it without owning it.
 //
 // Concurrency: ingestion is single-writer; IngestLedger is not safe to call
@@ -67,9 +67,12 @@ func dbTuning() rocksdb.Tuning {
 		MaxBackgroundJobs: 8,
 		MaxOpenFiles:      10_000,
 
-		// 512 MB block cache — txhash bloom-filter blocks are the hot
-		// working set; the cache needs to hold recently-touched bloom
-		// blocks at scale.
+		// 512 MB block cache. Sized when the txhash CF's bloom blocks were
+		// the hot working set; the packed-row redesign removed that CF's
+		// bloom entirely (queries are served by the in-RAM txhash HotIndex,
+		// never CF point-reads), so today the cache mostly holds events
+		// data/offsets blocks and scan readahead. Kept at 512 until a
+		// measured resize says otherwise.
 		BlockCacheMB: 512,
 
 		// 1 GB WAL cap. Graceful Close auto-Flushes (see
@@ -120,15 +123,17 @@ func OpenExisting(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB,
 // refinement DEPENDS on that replay to read a correct MaxCommittedSeq. (An
 // unsynced tail is exactly what a crash loses, and is not recovered.)
 //
-// A read-only open is a LEDGERS-ONLY view: it composes the ledger + txhash facades
-// but SKIPS the events facade, because neither read-only caller needs it warm —
-// the freeze scans CFs directly through the shared store (FreezeColdFromStore
-// takes d.store, not a facade), and the startup refiner reads only
-// MaxCommittedSeq(). Both touch facade state for the ledgers CF alone.
-// Composing the events facade would run the event store's unconditional warmup — a full
-// index-CF scan plus bitmap/offsets rebuild — discarded unread at Close (#834). The
-// skip is enforced structurally: a read-only DB has no events facade, so Events()
-// panics and IngestLedger errors rather than serving a cold, unwarmed surface.
+// A read-only open is a LEDGERS-ONLY view: it composes the ledger facade, a
+// QUERY-DISABLED txhash facade, and no events facade, because neither read-only
+// caller needs anything warm — the freeze scans CFs and run files directly
+// through the shared store (each FreezeColdFromStore takes d.store, not a
+// facade), and the startup refiner reads only MaxCommittedSeq(). Both touch
+// facade state for the ledgers CF alone. Composing the warmed facades would run
+// their unconditional warmups — the events index-CF scan plus bitmap/offsets
+// rebuild, and the txhash run reopen plus tail replay — discarded unread at
+// Close (#834). The skip is enforced structurally: a read-only DB has no events
+// facade (Events() panics), its txhash facade's Get panics, and IngestLedger
+// errors rather than serving a cold, unwarmed surface.
 func OpenReadOnly(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
 	return open(path, chunkID, logger, true, false)
 }
@@ -188,17 +193,26 @@ func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly, mus
 		store:   store,
 		chunkID: chunkID,
 		ledger:  ledger.NewWithStore(store),
-		txhash:  txhash.NewWithStore(store),
 	}
 	// A read-only open is a ledgers-only freeze/probe view (see OpenReadOnly): it
-	// never reads events, so skip composing the events facade and its unconditional
-	// warmup scan. Read-WRITE opens (ingestion) MUST warm — the write path assigns
-	// event IDs off the warmed offsets — so they always compose it.
+	// never queries events or txhash, so skip both warmups — txhash composes its
+	// query-disabled read-only variant (Get panics), events is absent entirely.
+	// Read-WRITE opens (ingestion) MUST warm both — the write paths assign event
+	// IDs off the warmed offsets and packed rows off the warmed dense chain — so
+	// they always compose the warmed facades.
 	if readOnly {
+		db.txhash = txhash.NewReadOnlyWithStore(store, chunkID)
 		return db, nil
 	}
+	th, err := txhash.NewWithStore(store, chunkID)
+	if err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("compose txhash facade for chunk %s: %w", chunkID, err)
+	}
+	db.txhash = th
 	es, err := event.NewWithStore(store, chunkID)
 	if err != nil {
+		th.Shutdown()
 		_ = store.Close()
 		return nil, fmt.Errorf("compose events facade for chunk %s: %w", chunkID, err)
 	}
@@ -220,6 +234,10 @@ func (d *DB) Ledgers() *ledger.HotStore { return d.ledger }
 // Write side feeds the ingestion loop; the read side has no production
 // caller yet — it's the intended hot read seam for the v2 cutover (#772),
 // exercised by tests until then.
+//
+// On a read-only DB the returned facade is query-disabled: its Get panics
+// (no warmup ran — see txhash.NewReadOnlyWithStore), the same structural
+// rule as Events() below.
 func (d *DB) Txhash() *txhash.HotStore { return d.txhash }
 
 // Events returns the events read/write facade over the shared store.
@@ -260,19 +278,25 @@ func (d *DB) FreezeLedgersCold(
 }
 
 // FreezeTxhashCold builds the chunk's cold txhash .bin at binPath by
-// streaming THIS hot DB's txhash CF, which is already in the .bin's sort
-// order. Valid on a read-only view; same completeness contract as the other
+// freeze-by-merge over THIS hot DB's durable txhash state: the
+// manifest-listed sealed runs plus the un-sealed packed-row tail, k-way
+// merged back into the .bin's hash order. Valid on a read-only view (it
+// never touches the query facade); same completeness contract as the other
 // freezes. Returns the entries written.
 func (d *DB) FreezeTxhashCold(ctx context.Context, binPath string) (int, error) {
 	return txhash.FreezeColdFromStore(ctx, d.chunkID, d.store, binPath)
 }
 
 // Close releases the shared store exactly once. Idempotent. Must not be called
-// concurrently with in-flight reads/writes. The events facade's background
-// seal is drained first so no goroutine outlives the store.
+// concurrently with in-flight reads/writes. Both facades' background seals
+// (events, txhash) are drained first so no goroutine outlives the store; the
+// two shutdowns are independent.
 func (d *DB) Close() error {
 	if d.events != nil {
 		d.events.Shutdown()
+	}
+	if d.txhash != nil {
+		d.txhash.Shutdown()
 	}
 	return d.store.Close()
 }
@@ -288,7 +312,7 @@ func (d *DB) MaxCommittedSeq() (uint32, bool, error) {
 // index into a fixed-size array (LedgerReport.Phases), so an out-of-table phase is
 // unrepresentable — no string label to mistype and no map lookup to nil-panic in a
 // sink. The phases partition the per-ledger wall-clock:
-//   - PhaseExtract: the shared ExtractLedgerEvents walk + txhash-entry build +
+//   - PhaseExtract: the shared ExtractLedgerEvents walk + txhash row pack +
 //     event shaping (all pre-batch — every decode failure lands here by construction);
 //   - PhaseLedgers/PhaseTxhash/PhaseEvents: each facade's queue-into-batch step.
 //     PhaseLedgers is the JOIN on the background ledger compression forked at
@@ -296,11 +320,12 @@ func (d *DB) MaxCommittedSeq() (uint32, bool, error) {
 //     finished within the other steps' window;
 //   - PhaseCommit: the RocksDB batch write (WAL append + fsync + memtable) = the
 //     whole Batch call minus the three queue steps — the fsync wait pprof can't see.
-//   - PhaseApply: the post-commit events hot-index apply (window retention,
-//     dense-overlay feed, seal folding). It runs only after the batch is
-//     durable; the apply hook is fallible, so an error here reports
-//     Failed = PhaseApply — the ledger IS committed, and a restart rebuilds
-//     the index deterministically from the committed rows.
+//   - PhaseApply: the post-commit hot-index applies — txhash first, then
+//     events (window retention, overlay/seal folding; the two are
+//     independent). They run only after the batch is durable; the hooks are
+//     fallible, so an error here reports Failed = PhaseApply — the ledger IS
+//     committed, and a restart rebuilds the indexes deterministically from
+//     the committed rows.
 type Phase uint8
 
 const (
@@ -353,8 +378,8 @@ type LedgerReport struct {
 
 // IngestLedger commits ONE ledger as a SINGLE atomic synced WriteBatch across all
 // hot CFs (decision (a)): queue ledgers, txhash, and events rows into one
-// BatchWriter, commit once, and only then apply the events in-memory mirror/offsets
-// update.
+// BatchWriter, commit once, and only then run the txhash and events in-memory
+// applies.
 //
 // lcm is a borrowed zero-copy view; every extractor copies what it retains, so
 // the view need not outlive this call. Store.Batch's lifecycle RLock + checkOpen
@@ -402,12 +427,16 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 		rep.Failed = PhaseExtract
 		return rep, fmt.Errorf("extract ledger events seq %d: %w", seq, err)
 	}
-	txEntries := make([]txhash.Entry, 0, len(txEvents))
-	for i := range txEvents {
-		txEntries = append(txEntries, txhash.Entry{Hash: txEvents[i].Hash, LedgerSeq: seq})
-		if txEvents[i].FeeBump {
-			txEntries = append(txEntries, txhash.Entry{Hash: txEvents[i].InnerHash, LedgerSeq: seq})
-		}
+	// Pack the ledger's tx hashes into the ONE sorted row the txhash CF
+	// stores per ledger. EncodeRow is fallible pre-batch work (sort +
+	// intra-ledger duplicate reject), so a corrupt ledger fails here, before
+	// the batch opens.
+	txHashes := ledgerTxHashes(txEvents)
+	txRow, err := txhash.EncodeRow(txHashes)
+	if err != nil {
+		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
+		rep.Failed = PhaseExtract
+		return rep, fmt.Errorf("pack tx hashes seq %d: %w", seq, err)
 	}
 
 	closedAt, err := lcm.LedgerCloseTime()
@@ -426,16 +455,17 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 	rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
 	// Per-type write volume lives on the write phases (emitted on success).
 	rep.Phases[PhaseLedgers].Items = 1
-	rep.Phases[PhaseTxhash].Items = len(txEntries)
+	rep.Phases[PhaseTxhash].Items = len(txHashes)
 	rep.Phases[PhaseEvents].Items = len(payloads)
 
 	// The events facade validates + marshals inside the batch callback (so a
 	// rejected ledger never leaves committed rows) and returns the post-commit
-	// apply hook. Under decision (a) resume is always MaxCommittedSeq+1, so seq is
-	// never a duplicate — the hook is always non-nil on success. Each facade's queue
+	// apply hook; the txhash facade queues its pre-validated packed row and
+	// returns its own. Under decision (a) resume is always MaxCommittedSeq+1, so seq is
+	// never a duplicate — the hooks are always non-nil on success. Each facade's queue
 	// step is timed individually; Commit (below) is the whole Batch minus those —
 	// the RocksDB write (WAL append + fsync + memtable).
-	var applyEvents func() error
+	var applyTxhash, applyEvents func() error
 	// A batch error not attributed to a specific queue step below is the commit
 	// itself (the RocksDB write); a queue-step error narrows Failed to its phase.
 	failed := PhaseCommit
@@ -446,10 +476,10 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 		// join usually waits ~0. Rows land in one atomic batch regardless of
 		// queue order; only the emission order of the phase metrics is fixed
 		// (by the Phase constants), not the execution order here.
+		// One packed-row Put per ledger — EVERY ledger, an empty row for a
+		// tx-less one, keeping the txhash CF's dense chain.
 		ts := time.Now()
-		if len(txEntries) > 0 {
-			d.txhash.AddEntriesToBatch(b, txEntries)
-		}
+		applyTxhash = d.txhash.AddLedgerToBatch(b, seq, txRow, len(txHashes))
 		rep.Phases[PhaseTxhash].Dur = time.Since(ts)
 
 		es := time.Now()
@@ -484,16 +514,38 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 		return rep, fmt.Errorf("commit ledger %d to chunk %s: %w", seq, d.chunkID, cerr)
 	}
 
-	// Batch is durable — now and only now apply the events hot-index update
-	// (window retention, dense-overlay feed, seal folding). PhaseApply times
-	// this post-commit work; an apply error is restartable (warmup rebuilds
-	// deterministically from the committed rows).
+	// Batch is durable — now and only now run the post-commit hot-index
+	// applies: txhash first (window publish + seal folding), then events
+	// (window retention, dense-overlay feed, seal folding). The two applies
+	// are INDEPENDENT — each publishes its own index from its own rows, and
+	// each publish is the ONLY thing making its data hot-queryable — so
+	// txhash-first is convention, not a dependency. PhaseApply times this
+	// post-commit work; either failure reports Failed = PhaseApply — the
+	// ledger IS committed, and a restart rebuilds both indexes
+	// deterministically from the committed rows.
 	applyStart := time.Now()
-	aerr := applyEvents()
+	aerr := applyTxhash()
+	if aerr == nil {
+		aerr = applyEvents()
+	}
 	rep.Phases[PhaseApply].Dur = time.Since(applyStart)
 	if aerr != nil {
 		rep.Failed = PhaseApply
-		return rep, fmt.Errorf("apply events index for ledger %d: %w", seq, aerr)
+		return rep, fmt.Errorf("apply hot indexes for ledger %d: %w", seq, aerr)
 	}
 	return rep, nil
+}
+
+// ledgerTxHashes collects one ledger's indexable tx hashes in apply order —
+// a fee-bump transaction contributes BOTH its outer and inner hash (#862),
+// so either resolves to the ledger.
+func ledgerTxHashes(txEvents []sdkingest.LedgerTransactionEvents) [][32]byte {
+	hashes := make([][32]byte, 0, len(txEvents))
+	for i := range txEvents {
+		hashes = append(hashes, txEvents[i].Hash)
+		if txEvents[i].FeeBump {
+			hashes = append(hashes, txEvents[i].InnerHash)
+		}
+	}
+	return hashes
 }
