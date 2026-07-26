@@ -100,11 +100,37 @@ func config(path string, logger *supportlog.Entry, readOnly, mustExist bool) roc
 	}
 }
 
+// Tuning is the caller-supplied half of the shared hot DB's configuration —
+// the knobs the daemon config (and the bench harness) own, as opposed to the
+// calibrated internal dbTuning. Write opens (Open / OpenExisting /
+// OpenReadyWrite) take it; read-only opens don't (a read-only view never
+// encodes, so no tuning applies).
+type Tuning struct {
+	// ZstdEncodeWorkers is the ledger-frame encode parallelism
+	// (zstd.WithWorkers): 0 = single-threaded, >=1 = libzstd's internal
+	// multithreading. FORMAT-AFFECTING for the STORED ledger frames, not a
+	// casual performance knob: single-threaded and multithreaded encodes
+	// produce different frame bytes, the freeze copies hot frames into the
+	// cold pack VERBATIM, and the walk/backfill materializer re-encodes the
+	// same ledgers independently — so hot ingest and walk/backfill must
+	// encode with the SAME value or the same chunk's pack stops being
+	// byte-identical across materializers (the artifact model's identity
+	// contract, pinned by the freeze-vs-walk gates). Change it only as a
+	// deliberate, deployment-wide decision.
+	ZstdEncodeWorkers int
+}
+
+// DefaultTuning returns the settled production tuning
+// (ledger.DefaultZstdEncodeWorkers).
+func DefaultTuning() Tuning {
+	return Tuning{ZstdEncodeWorkers: ledger.DefaultZstdEncodeWorkers}
+}
+
 // Open opens (or creates) the chunk's shared multi-CF hot DB read-WRITE
 // (ingestion's handle for a NEW chunk) and composes the three facades over it. On
 // any facade-construction failure the shared store is closed before returning.
-func Open(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return open(path, chunkID, logger, false, false)
+func Open(path string, chunkID chunk.ID, logger *supportlog.Entry, tun Tuning) (*DB, error) {
+	return open(path, chunkID, logger, tun, false, false)
 }
 
 // OpenExisting opens an EXISTING hot DB read-WRITE with create-if-missing OFF —
@@ -112,8 +138,8 @@ func Open(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) 
 // A missing or gutted DB fails the open instead of silently fabricating a fresh
 // empty one (the "never auto-heal" rule); the caller treats that failure as an
 // ordinary restartable error.
-func OpenExisting(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return open(path, chunkID, logger, false, true)
+func OpenExisting(path string, chunkID chunk.ID, logger *supportlog.Entry, tun Tuning) (*DB, error) {
+	return open(path, chunkID, logger, tun, false, true)
 }
 
 // OpenReadOnly opens an EXISTING hot DB read-only — the freeze source's view AND
@@ -135,21 +161,25 @@ func OpenExisting(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB,
 // facade (Events() panics), its txhash facade's Get panics, and IngestLedger
 // errors rather than serving a cold, unwarmed surface.
 func OpenReadOnly(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return open(path, chunkID, logger, true, false)
+	// Zero Tuning: a read-only view composes the ledger facade for reads
+	// alone — its encoder is never invoked, so no encode tuning applies.
+	return open(path, chunkID, logger, Tuning{}, true, false)
 }
 
 // OpenReadyWrite opens a "ready" chunk's hot DB read-WRITE — ingestion's handle
 // for a resumed chunk (OpenExisting underneath). openReady enforces the ready-open
 // rule.
-func OpenReadyWrite(state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return openReady(state, path, chunkID, logger, false)
+func OpenReadyWrite(
+	state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry, tun Tuning,
+) (*DB, error) {
+	return openReady(state, path, chunkID, logger, tun, false)
 }
 
 // OpenReadyView opens a "ready" chunk's hot DB read-only — the freeze source's
 // and the last-committed refiner's view (OpenReadOnly underneath). openReady
 // enforces the ready-open rule.
 func OpenReadyView(state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return openReady(state, path, chunkID, logger, true)
+	return openReady(state, path, chunkID, logger, Tuning{}, true)
 }
 
 // openReady is the single enforcement site for the "ready key ⇒ must-exist,
@@ -160,13 +190,13 @@ func OpenReadyView(state geometry.HotState, path string, chunkID chunk.ID, logge
 // the open — never auto-healed into a fresh empty one — wrapped in the uniform
 // won't-open error so every ready-open site reports it identically.
 func openReady(
-	state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly bool,
+	state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry, tun Tuning, readOnly bool,
 ) (*DB, error) {
 	if state != geometry.HotReady {
 		return nil, fmt.Errorf(
 			"hotchunk: ready-open requires chunk %s key %q, got %q", chunkID, geometry.HotReady, state)
 	}
-	openFn := OpenExisting
+	openFn := func(p string, c chunk.ID, l *supportlog.Entry) (*DB, error) { return OpenExisting(p, c, l, tun) }
 	if readOnly {
 		openFn = OpenReadOnly
 	}
@@ -177,12 +207,15 @@ func openReady(
 	return db, nil
 }
 
-func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly, mustExist bool) (*DB, error) {
+func open(path string, chunkID chunk.ID, logger *supportlog.Entry, tun Tuning, readOnly, mustExist bool) (*DB, error) {
 	if path == "" {
 		return nil, stores.ErrInvalidConfig
 	}
 	if logger == nil {
 		return nil, stores.ErrInvalidConfig
+	}
+	if tun.ZstdEncodeWorkers < 0 {
+		return nil, fmt.Errorf("%w: Tuning.ZstdEncodeWorkers must be >= 0", stores.ErrInvalidConfig)
 	}
 	store, err := rocksdb.New(config(path, logger, readOnly, mustExist))
 	if err != nil {
@@ -192,7 +225,7 @@ func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly, mus
 	db := &DB{
 		store:   store,
 		chunkID: chunkID,
-		ledger:  ledger.NewWithStore(store),
+		ledger:  ledger.NewWithStore(store, tun.ZstdEncodeWorkers),
 	}
 	// A read-only open is a ledgers-only freeze/probe view (see OpenReadOnly): it
 	// never queries events or txhash, so skip both warmups — txhash composes its

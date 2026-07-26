@@ -35,6 +35,10 @@ func validateConfig(
 	if maxRetries < 0 {
 		return 0, fmt.Errorf("max_retries must be >= 0 (got %d) — 0 means run once, no retry", maxRetries)
 	}
+	if w := deref(cfg.Storage.ZstdEncodeWorkers); w < 0 {
+		return 0, fmt.Errorf(
+			"storage.zstd_encode_workers must be >= 0 (got %d) — 0 means single-threaded ledger-frame encode", w)
+	}
 	// logging.format silently means text unless it is exactly "json", so reject any
 	// other value rather than let a typo drop the operator to text logging. Empty is
 	// the unset sentinel WithDefaults resolves to text, so it is not a typo.

@@ -38,7 +38,7 @@ func silentLogger() *supportlog.Entry {
 // openTestDB opens a fresh hot DB bound to chunk 0 (every test uses chunk 0).
 func openTestDB(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(t.TempDir(), chunk.ID(0), silentLogger())
+	db, err := Open(t.TempDir(), chunk.ID(0), silentLogger(), DefaultTuning())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	return db
@@ -89,10 +89,10 @@ func TestConfig_DBWideTuningStaysShared(t *testing.T) {
 }
 
 func TestOpen_ValidatesInputs(t *testing.T) {
-	_, err := Open("", chunk.ID(0), silentLogger())
+	_, err := Open("", chunk.ID(0), silentLogger(), DefaultTuning())
 	require.ErrorIs(t, err, stores.ErrInvalidConfig)
 
-	_, err = Open(t.TempDir(), chunk.ID(0), nil)
+	_, err = Open(t.TempDir(), chunk.ID(0), nil, DefaultTuning())
 	require.ErrorIs(t, err, stores.ErrInvalidConfig)
 }
 
@@ -211,7 +211,7 @@ func TestIngestLedger_MidBatchCommitFailurePersistsNothing(t *testing.T) {
 	first := chunkID.FirstLedger()
 	dir := t.TempDir()
 
-	db, err := Open(dir, chunkID, silentLogger())
+	db, err := Open(dir, chunkID, silentLogger(), DefaultTuning())
 	require.NoError(t, err)
 
 	// Commit one good ledger so there is a known last committed seq, then close the DB.
@@ -221,7 +221,7 @@ func TestIngestLedger_MidBatchCommitFailurePersistsNothing(t *testing.T) {
 	require.NoError(t, db.Close())
 
 	// Reopen and confirm the last committed seq survived (sync=true durability).
-	db2, err := Open(dir, chunkID, silentLogger())
+	db2, err := Open(dir, chunkID, silentLogger(), DefaultTuning())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db2.Close() })
 
@@ -239,7 +239,7 @@ func TestIngestLedger_MidBatchCommitFailurePersistsNothing(t *testing.T) {
 
 	// Reopen a third time: the failed ledger left NO trace in any CF, and the
 	// last committed seq is still the last good seq.
-	db3, err := Open(dir, chunkID, silentLogger())
+	db3, err := Open(dir, chunkID, silentLogger(), DefaultTuning())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db3.Close() })
 
@@ -374,14 +374,14 @@ func TestReopen_RecoversEventsMirror(t *testing.T) {
 	first := chunkID.FirstLedger()
 	dir := t.TempDir()
 
-	db, err := Open(dir, chunkID, silentLogger())
+	db, err := Open(dir, chunkID, silentLogger(), DefaultTuning())
 	require.NoError(t, err)
 	raw, hash, _ := lcmWithEvent(t, first)
 	_, err = db.IngestLedger(first, xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
-	db2, err := Open(dir, chunkID, silentLogger())
+	db2, err := Open(dir, chunkID, silentLogger(), DefaultTuning())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db2.Close() })
 	assert.Equal(t, uint32(1), eventCount(t, db2.Events()), "warmup recovered the events offsets")
@@ -400,7 +400,7 @@ func TestOpenReadOnly_ReadsCommittedAndRejectsWrites(t *testing.T) {
 	dir := t.TempDir()
 
 	// Writer: ingest two ledgers, then close (flushes the WAL into SST).
-	db, err := Open(dir, chunkID, silentLogger())
+	db, err := Open(dir, chunkID, silentLogger(), DefaultTuning())
 	require.NoError(t, err)
 	for _, seq := range []uint32{first, first + 1} {
 		_, ierr := db.IngestLedger(seq, xdr.LedgerCloseMetaView(zeroTxLCM(t, seq)))
@@ -435,7 +435,7 @@ func TestOpenReadOnly_SkipsEventsWarmup(t *testing.T) {
 	dir := t.TempDir()
 
 	// Writer: ingest two ledgers, capture the exact wire bytes, then close.
-	db, err := Open(dir, chunkID, silentLogger())
+	db, err := Open(dir, chunkID, silentLogger(), DefaultTuning())
 	require.NoError(t, err)
 	want := map[uint32][]byte{}
 	for _, seq := range []uint32{first, first + 1} {
@@ -455,7 +455,7 @@ func TestOpenReadOnly_SkipsEventsWarmup(t *testing.T) {
 	require.NoError(t, raw.Close())
 
 	// Read-WRITE open warms → the poisoned index row fails the scan.
-	_, werr := OpenExisting(dir, chunkID, silentLogger())
+	_, werr := OpenExisting(dir, chunkID, silentLogger(), DefaultTuning())
 	require.ErrorContains(t, werr, "events_index key length",
 		"a read-write open must run the events warmup scan and reject the poison")
 
@@ -498,7 +498,7 @@ func TestOpenReadOnly_TxhashFreezeWorksWithoutQueries(t *testing.T) {
 	first := chunkID.FirstLedger()
 	dir := t.TempDir()
 
-	db, err := Open(dir, chunkID, silentLogger())
+	db, err := Open(dir, chunkID, silentLogger(), DefaultTuning())
 	require.NoError(t, err)
 	hashes := make([][32]byte, 0, 2)
 	for _, seq := range []uint32{first, first + 1} {
@@ -587,7 +587,7 @@ func TestIngestLedger_TxhashVisibleAtReturnAndSkipRejected(t *testing.T) {
 // rocksdb.ErrStoreClosed.
 func TestIngestLedger_ClosedDBFails(t *testing.T) {
 	chunkID := chunk.ID(0)
-	db, err := Open(t.TempDir(), chunkID, silentLogger())
+	db, err := Open(t.TempDir(), chunkID, silentLogger(), DefaultTuning())
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 

@@ -128,7 +128,7 @@ func loopConfig(
 ) (ingestionLoopConfig, *recordingBoundary) {
 	t.Helper()
 	rec := &recordingBoundary{}
-	db, err := openHotDBForChunk(cat, chunk.IDFromLedger(resume), silentLogger())
+	db, err := openHotDBForChunk(cat, chunk.IDFromLedger(resume), silentLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	return ingestionLoopConfig{
 		Stream:   stream,
@@ -158,7 +158,7 @@ func impliedResume(t *testing.T, db *hotchunk.DB) uint32 {
 // production opener, returning the handle and the catalog it lives under.
 func openLiveHotDB(t *testing.T, cat *catalog.Catalog, c chunk.ID) *hotchunk.DB {
 	t.Helper()
-	db, err := openHotDBForChunk(cat, c, silentLogger())
+	db, err := openHotDBForChunk(cat, c, silentLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	return db
 }
@@ -191,7 +191,7 @@ func TestOpenHotTier_CreatesBracketAndDir(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(3)
 
-	db, err := openHotDBForChunk(cat, c, silentLogger())
+	db, err := openHotDBForChunk(cat, c, silentLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -214,7 +214,7 @@ func TestOpenHotTier_ReadyButDirMissingFailsOpen(t *testing.T) {
 	require.NoError(t, cat.PutHotTransient(c))
 	require.NoError(t, cat.FlipHotReady(c)) // key says ready, but no dir created
 
-	_, err := openHotDBForChunk(cat, c, silentLogger())
+	_, err := openHotDBForChunk(cat, c, silentLogger(), hotchunk.DefaultTuning())
 	require.Error(t, err)
 }
 
@@ -225,7 +225,7 @@ func TestOpenHotTier_TransientRecreatesFresh(t *testing.T) {
 	c := chunk.ID(2)
 	require.NoError(t, cat.PutHotTransient(c)) // a crash left a transient key
 
-	db, err := openHotDBForChunk(cat, c, silentLogger())
+	db, err := openHotDBForChunk(cat, c, silentLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -258,7 +258,7 @@ func TestRunIngestionLoop_LedgerLandsAcrossAllCFs(t *testing.T) {
 	require.Error(t, err, "stream ran past the prefix and errored")
 
 	// Reopen the (loop-closed) DB and assert every CF advanced together.
-	reopened, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
+	reopened, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = reopened.Close() })
 
@@ -351,7 +351,7 @@ type fencePublisher struct {
 func (p *fencePublisher) Publish(c chunk.ID) {
 	// (1) The closed chunk's write handle must be released: OpenExisting is read-write
 	// and takes the LOCK, so it succeeds only if the loop already closed the handle.
-	db, err := hotchunk.OpenExisting(p.cat.Layout().HotChunkPath(c), c, silentLogger())
+	db, err := hotchunk.OpenExisting(p.cat.Layout().HotChunkPath(c), c, silentLogger(), hotchunk.DefaultTuning())
 	released := err == nil
 	if db != nil {
 		_ = db.Close()
@@ -383,7 +383,7 @@ func TestRunIngestionLoop_HandoffFenceClosesBeforeNextKey(t *testing.T) {
 	}, endErr: errors.New("end")}
 
 	// Build the loop config manually so the boundary publisher is our fence checker.
-	db, err := openHotDBForChunk(cat, chunk.IDFromLedger(resume), silentLogger())
+	db, err := openHotDBForChunk(cat, chunk.IDFromLedger(resume), silentLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	fence := &fencePublisher{cat: cat}
 	cfg := ingestionLoopConfig{
@@ -496,7 +496,7 @@ func TestRunIngestionLoop_RestartResumesFromLastCommitted(t *testing.T) {
 
 	// The durable last-committed ledger now implies resume first+3 — exactly what
 	// startup would derive on restart. Close the handle before the loop reopens the dir.
-	db2, err := openHotDBForChunk(cat, c, silentLogger())
+	db2, err := openHotDBForChunk(cat, c, silentLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	resume := impliedResume(t, db2)
 	assert.Equal(t, first+3, resume, "restart resumes one past the durable last-committed ledger")
@@ -510,7 +510,7 @@ func TestRunIngestionLoop_RestartResumesFromLastCommitted(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, first+3, stream2.firstSeen.Load(), "second run resumed at last-committed+1")
 
-	reopened, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
+	reopened, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = reopened.Close() })
 	maxSeq, ok, err := reopened.MaxCommittedSeq()

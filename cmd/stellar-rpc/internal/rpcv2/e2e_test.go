@@ -418,7 +418,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	// writer closed (the same transient a production reader retries through).
 	var liveDB *hotchunk.DB
 	require.Eventually(t, func() bool {
-		db, oerr := hotchunk.Open(postCat.Layout().HotChunkPath(c2), c2, silentLogger())
+		db, oerr := hotchunk.Open(postCat.Layout().HotChunkPath(c2), c2, silentLogger(), hotchunk.DefaultTuning())
 		if oerr != nil {
 			return false
 		}

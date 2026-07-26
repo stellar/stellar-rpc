@@ -59,16 +59,41 @@ type HotStore struct {
 	encBusy atomic.Bool
 }
 
+// DefaultZstdEncodeWorkers is the settled ledger-frame encode parallelism
+// (zstd.WithWorkers): 2 measured equal to 3 within noise on the hot-ingest
+// cell (total p50 33.4 -> 29.2ms, join 7.35 -> 1.9ms vs single-threaded)
+// while claiming one fewer core. It is the default every configuration
+// surface resolves to (daemon TOML, bench --zstd-workers, hotchunk
+// DefaultTuning).
+const DefaultZstdEncodeWorkers = 2
+
 // NewWithStore wraps an ALREADY-OPEN rocksdb.Store as a ledger HotStore on
 // LedgersCF. The store is owned by the caller — in production, hotchunk.DB
 // composes this facade over the shared multi-CF DB and closes that DB once. The
 // store must have LedgersCF registered.
-func NewWithStore(store *rocksdb.Store) *HotStore {
+//
+// zstdEncodeWorkers is FORMAT-AFFECTING (see hotchunk.Tuning's field doc):
+// it selects the stored ledger frames' encode mode (0 = single-threaded,
+// >=1 = libzstd multithreaded — a different frame byte stream), and the
+// walk/backfill cold writer must encode with the SAME value because the
+// freeze copies these frames into the cold pack verbatim.
+func NewWithStore(store *rocksdb.Store, zstdEncodeWorkers int) *HotStore {
 	return &HotStore{
 		store: store,
 		dec:   zstd.NewDecompressor(),
-		enc:   zstd.NewEncoderState(),
+		enc:   zstd.NewEncoderState(encoderOptions(zstdEncodeWorkers)...),
 	}
+}
+
+// encoderOptions maps the resolved workers count to the encoder's option set:
+// <=0 = single-threaded encode, >=1 = libzstd's internal multithreading
+// (zstd.WithWorkers). Validation (>=0) lives at the configuration
+// boundaries; here any non-positive value is simply single-threaded.
+func encoderOptions(workers int) []zstd.CompressorOption {
+	if workers > 0 {
+		return []zstd.CompressorOption{zstd.WithWorkers(workers)}
+	}
+	return nil
 }
 
 // PendingCompression is an in-flight background compression started by

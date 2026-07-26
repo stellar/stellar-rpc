@@ -15,6 +15,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
 // hotOptions configures one hot-ingest benchmark run.
@@ -62,6 +63,12 @@ type hotOptions struct {
 	// for correlating individual slow ledgers against external timelines
 	// (RocksDB LOG flush events, iostat). Empty = no trace.
 	TraceFile string
+
+	// ZstdWorkers is the hot tier's ledger-frame encode parallelism
+	// (--zstd-workers; 0 = single-threaded). FORMAT-AFFECTING in production
+	// (see hotchunk.Tuning); for a hot bench it selects which production
+	// shape the run measures — default ledger.DefaultZstdEncodeWorkers.
+	ZstdWorkers int
 }
 
 // validate checks the flags and chunk range before runHot touches the
@@ -82,6 +89,9 @@ func (o hotOptions) validate() error {
 	}
 	if o.CloseInterval < 0 {
 		return fmt.Errorf("--close-interval must be >= 0, got %s", o.CloseInterval)
+	}
+	if o.ZstdWorkers < 0 {
+		return fmt.Errorf("--zstd-workers must be >= 0 (0 = single-threaded), got %d", o.ZstdWorkers)
 	}
 	return nil
 }
@@ -170,6 +180,7 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 		Logger:   logger,
 		Metrics:  sink,
 		Sink:     sink,
+		Tuning:   hotchunk.Tuning{ZstdEncodeWorkers: opts.ZstdWorkers},
 	})
 	// VmHWM never decreases, so it can be read right here — before the
 	// completion check — and a failed run's partial CSV still gets the row.
