@@ -27,7 +27,7 @@ const legTitle = "Go endpoint benchmarks"
 // benchDenylist is the set of benchmarks to exclude from the suite.
 var benchDenylist = []string{
 	"BenchmarkGetLedgerEntries", // is an integration test
-	"BenchmarkTransactionFetch", // is currently broken on main
+	"BenchmarkTransactionFetch", // is broken in current baseline release
 }
 
 // instantiate is the instance half after the bootstrap, which runs the benches
@@ -251,7 +251,7 @@ func uploadRawLogs(
 			Body:        bytes.NewReader(body),
 			ContentType: aws.String("text/plain"),
 		}); err != nil {
-			logger.Warnf("uploading s3://%s/%s: %v", bucket, key, err)
+			logger.Infof("uploading s3://%s/%s: %v", bucket, key, err)
 			continue
 		}
 		uploaded = append(uploaded, name)

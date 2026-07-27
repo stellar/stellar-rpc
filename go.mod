@@ -13,7 +13,7 @@ require (
 	github.com/creachadair/jrpc2 v1.3.3
 	github.com/fsouza/fake-gcs-server v1.49.2
 	github.com/go-chi/chi v4.1.2+incompatible
-	github.com/mattn/go-sqlite3 v1.14.17
+	github.com/mattn/go-sqlite3 v1.14.48
 	github.com/montanaflynn/stats v0.7.1
 	github.com/pelletier/go-toml v1.9.5
 	github.com/prometheus/client_golang v1.23.2

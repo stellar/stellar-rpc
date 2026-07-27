@@ -1,5 +1,5 @@
 # Go endpoint benchmark leg. Relies on bootstrap-common.sh's env, helpers,
-# bootstrap_box, and run_leg. The runner benches the candidate checkout against 
+# bootstrap_box, and run_leg. The runner benches the candidate checkout against
 # BASELINE_REF and publishes a benchstat comparison.
 LEG_TITLE="Go endpoint benchmarks"
 
