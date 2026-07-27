@@ -12,14 +12,15 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
-// termsViaAll is the golden sweep's INDEPENDENT reference derivation: the
+// termsViaScan is the golden sweep's INDEPENDENT reference derivation: the
 // same cid/body navigation as AppendTerms, but with the topics walked
-// through the generated All() slice — every element sized eagerly, so its
-// whole-vec validation matches the production Count()+Raw() walk while
-// sharing none of its offset arithmetic. (This was TermsForBytes' body
-// before it converged onto AppendTerms.)
-func termsViaAll(eventBytes []byte) ([]TermKey, error) {
-	ev := xdr.ContractEventView(eventBytes)
+// through the generated Scan() iterator over EVERY element — not just the
+// indexed prefix — so its whole-vec validation matches the production
+// Len()+Raw() walk (Raw on the vec sizes every element) while sharing none
+// of its offset arithmetic. Cur views are exact-extent, so MustRaw is a
+// slice operation and the hashed bytes are exactly the topic's wire XDR.
+func termsViaScan(eventBytes []byte) ([]TermKey, error) {
+	ev := xdr.NewContractEventView(eventBytes)
 	var keys []TermKey
 	cidOpt, err := ev.ContractId()
 	if err != nil {
@@ -47,7 +48,7 @@ func termsViaAll(eventBytes []byte) ([]TermKey, error) {
 	if bodyV != 0 {
 		return nil, fmt.Errorf("unsupported ContractEvent body version %d", bodyV)
 	}
-	v0, err := body.V0()
+	v0, err := body.ArmV0()
 	if err != nil {
 		return nil, err
 	}
@@ -55,22 +56,21 @@ func termsViaAll(eventBytes []byte) ([]TermKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	topicViews, err := topics.All()
-	if err != nil {
-		return nil, err
-	}
-	for i, topic := range topicViews {
-		if i >= protocol.MaxTopicCount {
-			break
+	sc := topics.Scan()
+	for i := 0; sc.Next(); i++ {
+		if i < protocol.MaxTopicCount {
+			keys = append(keys, ComputeTermKey(sc.Cur().MustRaw(), topicField(i)))
 		}
-		keys = append(keys, ComputeTermKey([]byte(topic), topicField(i)))
+	}
+	if serr := sc.Err(); serr != nil {
+		return nil, serr
 	}
 	return keys, nil
 }
 
-// TestAppendTerms_GoldenAgainstAllReference is the Count()+Raw() walk's
+// TestAppendTerms_GoldenAgainstScanReference is the Len()+Raw() walk's
 // golden gate: AppendTerms (and with it TermsForBytes, which delegates)
-// must be observably identical to the All()-slice reference —
+// must be observably identical to the Scan()-based reference —
 // byte-identical TermKeys on
 // every accept, reject exactly when the reference rejects. The sweep
 // truncates each fixture's raw XDR at EVERY length, which covers the
@@ -78,7 +78,7 @@ func termsViaAll(eventBytes []byte) ([]TermKey, error) {
 // truncation inside an over-cap topic (the overCap fixture's topics 4 and 5
 // — Raw sizes every element, so over-cap truncation must still reject), and
 // harmless truncation past the topics array (both paths accept).
-func TestAppendTerms_GoldenAgainstAllReference(t *testing.T) {
+func TestAppendTerms_GoldenAgainstScanReference(t *testing.T) {
 	var cid xdr.ContractId
 	cid[0], cid[1] = 0xab, 0xcd
 	fixtures := map[string]xdr.ContractEvent{
@@ -94,7 +94,7 @@ func TestAppendTerms_GoldenAgainstAllReference(t *testing.T) {
 			sawReject := false
 			for n := 0; n <= len(raw); n++ {
 				prefix := raw[:n]
-				want, wantErr := termsViaAll(prefix)
+				want, wantErr := termsViaScan(prefix)
 				got, gotErr := AppendTerms(nil, prefix)
 				if wantErr != nil {
 					sawReject = true

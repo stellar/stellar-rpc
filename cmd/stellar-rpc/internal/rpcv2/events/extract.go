@@ -9,8 +9,8 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
-// PayloadShaper shapes a per-transaction event feed — one
-// ingest.LedgerTransactionEvents at a time, in apply order — into one Payload per emitted
+// PayloadShaper shapes a streamed per-transaction event feed — the
+// ingest.StreamLedgerEvents callback delivery — into one Payload per emitted
 // contract event, in ASCENDING getEvents cursor order — the order the SQLite
 // path serves (ORDER BY id ASC in sqlitedb/event.go). The event store serves in write
 // order (event IDs are assigned by arrival position and the term bitmaps iterate
@@ -39,15 +39,16 @@ import (
 // assignment the SQLite path makes (sqlitedb/event.go), so the trailing
 // <TOID>-<eventIdx> component of the v1 getEvents ID matches across backends.
 // The navigation, per-tx hashing, and event grouping live in the SDK
-// (ingest.ExtractLedgerEvents — one TxProcessing walk yields hash + events
+// (ingest.StreamLedgerEvents — one TxProcessing walk yields hash + events
 // together). The shaper adds only the RPC-specific Payload shape, the
 // Stage→(TxIdx, OpIdx) cursor-sentinel mapping, EventIdx, and the cursor
 // ordering.
 //
-// Feeding per transaction (rather than re-walking a view) lets a caller
-// that also needs the paired tx hashes — the hot ingest path and the cold
-// materializer — feed BOTH txhash and events from ONE ExtractLedgerEvents
-// walk. ledgerSeq and ledgerClosedAt are the view's
+// Feeding on the stream's per-tx delivery (rather than a materialized
+// whole-ledger slice) lets a caller that also needs the paired tx hashes —
+// the hot ingest path and the cold materializer — feed BOTH txhash and
+// events from ONE StreamLedgerEvents walk with no intermediate
+// []LedgerTransactionEvents. ledgerSeq and ledgerClosedAt are the view's
 // header values (cheap reads, not a walk).
 type PayloadShaper struct {
 	ledgerSeq      uint32
@@ -70,8 +71,8 @@ func NewPayloadShaper(ledgerSeq uint32, ledgerClosedAt int64) PayloadShaper {
 	return PayloadShaper{ledgerSeq: ledgerSeq, ledgerClosedAt: ledgerClosedAt}
 }
 
-// Begin presizes the buckets from the ledger's transaction count. Under
-// CAP-67 every protocol-23+
+// Begin presizes the buckets from the stream's validated transaction count —
+// the StreamLedgerEvents begin hook. Under CAP-67 every protocol-23+
 // transaction emits its fee event into the BeforeAllTxs group, so before
 // scales with the tx count; mid gets at least the refund events plus every
 // op event (growth beyond txCount is amortized append). AfterAllTxs events
@@ -81,8 +82,8 @@ func (s *PayloadShaper) Begin(txCount int) {
 	s.mid = make([]Payload, 0, txCount)
 }
 
-// Add shapes one transaction's events into the buckets. txIdx is the tx's
-// dense apply-order
+// Add shapes one streamed transaction's events into the buckets — the
+// StreamLedgerEvents per-tx hook. txIdx is the stream's dense apply-order
 // index. An UNKNOWN top-level event stage errors here (via StageSentinels
 // inside appendStageEventPayloads), so a new protocol stage can never be
 // silently dropped.
@@ -166,7 +167,7 @@ func appendStageEventPayloads(
 	txHash xdr.Hash, applyIdx, ledgerSeq uint32, ledgerClosedAt int64, eventIdx *uint32,
 ) ([]Payload, error) {
 	for _, raw := range txEventRaws {
-		tev := xdr.TransactionEventView(raw)
+		tev := xdr.NewTransactionEventView(raw)
 		stageView, err := tev.Stage()
 		if err != nil {
 			return nil, fmt.Errorf("events: tx event Stage: %w", err)

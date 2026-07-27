@@ -2,13 +2,13 @@
 // (wire-format xdr.LedgerCloseMeta bytes) from an injected ledger stream
 // and writes the three data types — ledgers, txhashes, contract events —
 // into the full-history stores, one chunk at a time, via the zero-copy
-// view extractors in the go-stellar-sdk ingest package and the
+// streaming extractor in the go-stellar-sdk ingest package and the
 // RPC-side events.PayloadShaper.
 //
-// Both tiers extract each ledger with a SINGLE ExtractLedgerEvents walk
-// (the hot DB's IngestLedger, the cold coldChunk.ingest) — one pass over
-// its output accumulates txhash's paired hashes and shapes the same
-// delivery into event payloads — but they
+// Both tiers extract each ledger with a SINGLE StreamLedgerEvents walk
+// (the hot DB's IngestLedger, the cold coldChunk.ingest) — the per-tx
+// hook accumulates txhash's paired hashes and shapes the same delivery
+// into event payloads — but they
 // differ in everything else:
 //
 //   - Hot (HotService): one ledger at a time into the long-lived,

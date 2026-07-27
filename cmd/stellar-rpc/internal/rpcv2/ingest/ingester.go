@@ -89,11 +89,11 @@ func openColdChunk(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Config)
 // contiguous counter (the in-order contract is enforced at the source).
 //
 // When txhash or events is enabled, the bytes are walked ONCE (the shared
-// ExtractLedgerEvents, mirroring the hot path's IngestLedger): one pass over
-// its output accumulates the indexable hashes for txhash and shapes the
-// event payloads
-// (events.PayloadShaper) for events together — halving cold
-// per-ledger extraction (issue #836). The walk-or-not
+// StreamLedgerEvents, mirroring the hot path's IngestLedger): the per-tx hook
+// accumulates the indexable hashes for txhash and shapes the event payloads
+// (events.PayloadShaper) for events in the same pass — halving cold
+// per-ledger extraction (issue #836) with no whole-ledger
+// []LedgerTransactionEvents. The walk-or-not
 // decision is structural: no consumer of the walk → no walk, so a ledgers-only
 // chunk never pays it and an enabled events writer can never miss it. The walk
 // (accumulation and shaping included) is metered as the ledger-scoped
@@ -111,24 +111,19 @@ func (c *coldChunk) ingest(seq uint32, raw []byte) error {
 	// signal fires for it — the error-carrying ColdExtract (with the partial
 	// walk's duration) is its one metric, mirroring hot's PhaseExtract failure.
 	start := time.Now()
-	lcm := xdr.LedgerCloseMetaView(raw)
+	lcm := xdr.NewLedgerCloseMetaView(raw)
 	closedAt, err := lcm.LedgerCloseTime()
 	if err != nil {
 		c.sink.ColdExtract(time.Since(start), 0, err)
 		return fmt.Errorf("ledger close time seq %d: %w", seq, err)
 	}
-	txEvents, err := sdkingest.ExtractLedgerEvents(lcm)
+	shaper := events.NewPayloadShaper(seq, closedAt)
+	txCount, hashes, err := c.walk(lcm, &shaper)
 	if err != nil {
 		c.sink.ColdExtract(time.Since(start), 0, err)
 		return fmt.Errorf("extract ledger events seq %d: %w", seq, err)
 	}
-	shaper := events.NewPayloadShaper(seq, closedAt)
-	hashes, err := c.walk(txEvents, &shaper)
-	if err != nil {
-		c.sink.ColdExtract(time.Since(start), 0, err)
-		return fmt.Errorf("shape events seq %d: %w", seq, err)
-	}
-	c.sink.ColdExtract(time.Since(start), len(txEvents), nil)
+	c.sink.ColdExtract(time.Since(start), txCount, nil)
 	if c.txhash != nil {
 		if err := c.txhash.write(seq, hashes); err != nil {
 			return err
@@ -142,39 +137,44 @@ func (c *coldChunk) ingest(seq uint32, raw []byte) error {
 	return nil
 }
 
-// walk runs ONE pass over the extracted slice, accumulating the
+// walk runs the ONE shared StreamLedgerEvents pass over lcm, accumulating the
 // indexable tx hashes (outer, plus inner for a fee-bump — #862) when txhash is
-// enabled and feeding shaper when events is enabled. It returns the
-// accumulated hashes (nil when txhash is
-// disabled); hashes are value copies, the shaper's payload bytes alias the
-// walked buffer.
-func (c *coldChunk) walk(
-	txEvents []sdkingest.LedgerTransactionEvents, shaper *events.PayloadShaper,
-) ([][32]byte, error) {
-	var hashes [][32]byte
+// enabled and feeding shaper when events is enabled. It returns the walk's
+// validated transaction count and the accumulated hashes (nil when txhash is
+// disabled); everything returned aliases or copies per the stream's contract —
+// hashes are value copies, the shaper's payload bytes alias lcm's buffer.
+func (c *coldChunk) walk(lcm xdr.LedgerCloseMetaView, shaper *events.PayloadShaper) (int, [][32]byte, error) {
+	var (
+		txCount int
+		hashes  [][32]byte
+	)
 	collectHashes, shapeEvents := c.txhash != nil, c.events != nil
-	if collectHashes {
-		// Fee-bump slack: each fee-bump contributes its inner hash too
-		// (#862), so a flat cap would regrow on the first one.
-		hashes = make([][32]byte, 0, len(txEvents)+len(txEvents)/8+1)
-	}
-	if shapeEvents {
-		shaper.Begin(len(txEvents))
-	}
-	for i := range txEvents {
-		if collectHashes {
-			hashes = append(hashes, txEvents[i].Hash)
-			if txEvents[i].FeeBump {
-				hashes = append(hashes, txEvents[i].InnerHash)
+	err := sdkingest.StreamLedgerEvents(lcm,
+		func(n int) error {
+			txCount = n
+			if collectHashes {
+				// Fee-bump slack: each fee-bump contributes its inner hash too
+				// (#862), so a flat n cap would regrow on the first one.
+				hashes = make([][32]byte, 0, n+n/8+1)
 			}
-		}
-		if shapeEvents {
-			if err := shaper.Add(i, txEvents[i]); err != nil {
-				return nil, err
+			if shapeEvents {
+				shaper.Begin(n)
 			}
-		}
-	}
-	return hashes, nil
+			return nil
+		},
+		func(txIdx int, ev sdkingest.LedgerTransactionEvents) error {
+			if collectHashes {
+				hashes = append(hashes, ev.Hash)
+				if ev.FeeBump {
+					hashes = append(hashes, ev.InnerHash)
+				}
+			}
+			if shapeEvents {
+				return shaper.Add(txIdx, ev)
+			}
+			return nil
+		})
+	return txCount, hashes, err
 }
 
 // finalize commits each enabled writer's chunk artifact, in canonical order.

@@ -11,7 +11,7 @@ package event
 //   - events_index packed rows are term-sorted runs → window-merge them into
 //     spill runs and finalize through WriteColdIndexFromRuns.
 //
-// This deletes the freeze's ExtractLedgerEvents shaping, TermsForBytes
+// This deletes the freeze's ledger-walk event shaping, TermsForBytes
 // hashing, and every per-term allocation from the window where the freeze
 // runs BESIDE live ingestion — the design's freeze-synergy lens
 // (~/bench-artifacts/cold-ingest-design.md). Artifacts remain byte-identical

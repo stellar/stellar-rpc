@@ -165,7 +165,7 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		// latches readiness, and the close time drives the health staleness check.
 		// A committed ledger's close time always decodes; skip the signal on the
 		// near-impossible decode error rather than fail an already-durable commit.
-		if closeUnix, cerr := xdr.LedgerCloseMetaView(raw).LedgerCloseTime(); cerr == nil {
+		if closeUnix, cerr := xdr.NewLedgerCloseMetaView(raw).LedgerCloseTime(); cerr == nil {
 			cfg.Health.observe(closeUnix)
 		}
 

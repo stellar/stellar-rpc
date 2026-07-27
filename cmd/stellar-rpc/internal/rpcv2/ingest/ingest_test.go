@@ -400,41 +400,39 @@ func testLogger() *supportlog.Entry {
 }
 
 // hashesFor accumulates one raw ledger's indexable tx hashes (outer, plus
-// inner for a fee-bump) off the shared ExtractLedgerEvents walk — what
+// inner for a fee-bump) off the shared StreamLedgerEvents walk — what
 // coldChunk.ingest hands the txhash writer. Tests that drive the writer
 // directly (no coldChunk) use it in place of the walk.
 func hashesFor(t *testing.T, raw []byte) [][32]byte {
 	t.Helper()
-	txEvents, err := sdkingest.ExtractLedgerEvents(xdr.LedgerCloseMetaView(raw))
-	require.NoError(t, err)
 	var hashes [][32]byte
-	for i := range txEvents {
-		hashes = append(hashes, txEvents[i].Hash)
-		if txEvents[i].FeeBump {
-			hashes = append(hashes, txEvents[i].InnerHash)
-		}
-	}
+	err := sdkingest.StreamLedgerEvents(xdr.NewLedgerCloseMetaView(raw), nil,
+		func(_ int, ev sdkingest.LedgerTransactionEvents) error {
+			hashes = append(hashes, ev.Hash)
+			if ev.FeeBump {
+				hashes = append(hashes, ev.InnerHash)
+			}
+			return nil
+		})
+	require.NoError(t, err)
 	return hashes
 }
 
 // payloadsFor shapes one raw ledger's events into cursor-ordered payloads
-// (events.PayloadShaper off the shared ExtractLedgerEvents walk) — what
+// (events.PayloadShaper off the shared StreamLedgerEvents walk) — what
 // coldChunk.ingest hands the events writer. Tests that drive the writer
 // directly (no coldChunk) use it in place of the walk.
 func payloadsFor(t *testing.T, raw []byte) []events.Payload {
 	t.Helper()
-	view := xdr.LedgerCloseMetaView(raw)
+	view := xdr.NewLedgerCloseMetaView(raw)
 	seq, err := view.LedgerSequence()
 	require.NoError(t, err)
 	closedAt, err := view.LedgerCloseTime()
 	require.NoError(t, err)
-	txEvents, err := sdkingest.ExtractLedgerEvents(view)
-	require.NoError(t, err)
 	shaper := events.NewPayloadShaper(seq, closedAt)
-	shaper.Begin(len(txEvents))
-	for i := range txEvents {
-		require.NoError(t, shaper.Add(i, txEvents[i]))
-	}
+	require.NoError(t, sdkingest.StreamLedgerEvents(view,
+		func(txCount int) error { shaper.Begin(txCount); return nil },
+		shaper.Add))
 	return shaper.Finish()
 }
 
@@ -922,7 +920,7 @@ func eventRichLedger(t *testing.T, seq uint32) []byte {
 // reference computations:
 //
 //   - txhash .bin vs. sorted, truncated entries derived from a test-local
-//     ExtractLedgerEvents collect (hashesFor) — independent of the coldChunk
+//     StreamLedgerEvents collect (hashesFor) — independent of the coldChunk
 //     plumbing — so an entry-by-entry match proves the writer's
 //     accumulation, truncation, and sort changed no byte.
 //   - events per-term bitmaps + count vs. an independent PayloadShaper
@@ -1203,7 +1201,7 @@ func TestHotService_ExtractFailureLandsOnExtractPhase(t *testing.T) {
 	sink := &testSink{}
 	svc := NewHotService(db, sink)
 	first := chunk.ID(0).FirstLedger()
-	// Garbage bytes fail XDR decode in the ExtractLedgerEvents walk, before any batch opens.
+	// Garbage bytes fail XDR decode in the StreamLedgerEvents walk, before any batch opens.
 	garbage := bytes.Repeat([]byte{0xff}, 16)
 	require.Error(t, svc.Ingest(context.Background(), first, garbage))
 

@@ -50,7 +50,7 @@ func newTxhashCold(binPath string, chunkID chunk.ID, sink MetricSink) (*txhashCo
 
 // write accumulates one ledger's tx hashes — one entry per indexable hash,
 // already including a fee-bump's inner hash. They come from coldChunk's
-// shared ExtractLedgerEvents walk, in apply order (outer, then inner for a
+// shared StreamLedgerEvents walk, in apply order (outer, then inner for a
 // fee-bump). Each is truncated to ColdKeySize
 // and appended STRAIGHT into the
 // accumulator — no per-ledger entry slice; over a ~3M-tx chunk

@@ -94,7 +94,7 @@ func eventsScratchDir(eventsDir string, c chunk.ID) string {
 const indexSpillSlabBytes = 32 << 20
 
 // write ingests one ledger's already-shaped payloads from the shared walk
-// (coldChunk.ingest walks the ledger once; its events.PayloadShaper output
+// (coldChunk.ingest streams the ledger once; its events.PayloadShaper output
 // lands here). The payloads' ContractEventBytes alias the source stream's
 // borrowed buffer, valid only
 // for this call — everything retained is copied synchronously (see ingestSeq).
@@ -168,12 +168,12 @@ func (e *eventsCold) close() error {
 }
 
 // ingestSeq writes one ledger's cursor-ordered payloads and returns the count
-// written. The payloads come from coldChunk's shared ExtractLedgerEvents walk,
+// written. The payloads come from coldChunk's shared StreamLedgerEvents walk,
 // shaped by events.PayloadShaper — the SAME shaper the hot tier uses, so
 // event-ID assignment is byte-identical to the hot path (same shaping). A
 // pre-Soroban (V0) ledger yields zero payloads, recorded like any event-free
-// ledger. Shaping happens beside the walk in coldChunk.ingest, so it is
-// metered inside the ledger-scoped ColdExtract signal with the extraction.
+// ledger. Shaping rides the walk, so it is metered inside the ledger-scoped
+// ColdExtract signal along with the extraction itself.
 func (e *eventsCold) ingestSeq(seq uint32, payloads []events.Payload) (int, error) {
 	startID := e.offsets.TotalEvents()
 	if uint64(startID)+uint64(len(payloads)) > math.MaxUint32 {
@@ -218,8 +218,8 @@ func (e *eventsCold) ingestSeq(seq uint32, payloads []events.Payload) (int, erro
 
 	// offsets.Append LAST — it is the commit point for the ledger. Its cost folds
 	// into the write stage, so term_index and write are the two per-ledger stages
-	// this writer emits. The shared ExtractLedgerEvents walk (payload shaping
-	// included — it runs beside the walk in coldChunk.ingest) is metered once,
+	// this writer emits. The shared StreamLedgerEvents walk (payload shaping
+	// included — it rides the walk's per-tx hook) is metered once,
 	// ledger-scoped, by the ColdExtract
 	// signal (cold_extract_duration_seconds). uint32(len(payloads)) is 0 for an
 	// empty ledger — an explicit Append(seq, 0) that records the empty ledger.

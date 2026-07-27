@@ -21,7 +21,7 @@ const (
 // the rpc-hack bench collectors measured (per-stage term-index / store-write
 // samples plus a per-chunk finish), so a CSV sink can reproduce those reports
 // from production writers without re-instrumenting. The shared per-ledger
-// ExtractLedgerEvents walk is NOT a stage: it belongs to no single data type,
+// StreamLedgerEvents walk is NOT a stage: it belongs to no single data type,
 // so it is its own ledger-scoped signal (MetricSink.ColdExtract), mirroring the
 // hot path's type-less extract phase.
 const (
@@ -76,7 +76,7 @@ type MetricSink interface {
 	// the drain of the source stream, every ingest and finalize, to the
 	// deferred close.
 	ColdChunkTotal(d time.Duration)
-	// ColdExtract reports the ONE shared per-ledger ExtractLedgerEvents walk the
+	// ColdExtract reports the ONE shared per-ledger StreamLedgerEvents walk the
 	// cold chunk runs and both txhash and events read (issue #836) — ledger-scoped,
 	// not per data type, mirroring the hot path's type-less extract phase. items
 	// is the walk's transaction count (0 on failure); err is non-nil when the
@@ -311,7 +311,7 @@ func NewPrometheusSink(registry *prometheus.Registry, namespace string) *Prometh
 	coldExtract := prometheus.NewHistogram(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,
 		Name: "cold_extract_duration_seconds",
-		Help: "the shared per-ledger ExtractLedgerEvents walk (one per ledger, read by " +
+		Help: "the shared per-ledger StreamLedgerEvents walk (one per ledger, read by " +
 			"txhash and events; ledger-scoped, so no data_type)",
 		Buckets: coldStageBuckets,
 	})

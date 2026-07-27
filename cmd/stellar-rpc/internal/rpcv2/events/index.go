@@ -63,9 +63,9 @@ const MaxTermsPerEvent = 1 + protocol.MaxTopicCount
 // events makes this path allocation-free (the hot ingest loop's shape).
 // This is THE term derivation — TermsForBytes delegates here — and the
 // golden sweep in append_terms_test.go pins its accept/reject decisions and
-// key bytes against an independent All()-slice reference.
+// key bytes against an independent Scan()-based reference.
 func AppendTerms(dst []TermKey, eventBytes []byte) ([]TermKey, error) {
-	ev := xdr.ContractEventView(eventBytes)
+	ev := xdr.NewContractEventView(eventBytes)
 
 	cidOpt, err := ev.ContractId()
 	if err != nil {
@@ -98,7 +98,7 @@ func AppendTerms(dst []TermKey, eventBytes []byte) ([]TermKey, error) {
 	if bodyVVal != 0 {
 		return nil, fmt.Errorf("events: unsupported ContractEvent body version %d", bodyVVal)
 	}
-	v0, err := body.V0()
+	v0, err := body.ArmV0()
 	if err != nil {
 		return nil, fmt.Errorf("events: view Body.V0: %w", err)
 	}
@@ -110,21 +110,23 @@ func AppendTerms(dst []TermKey, eventBytes []byte) ([]TermKey, error) {
 }
 
 // appendTopicTerms hashes the first protocol.MaxTopicCount topics into dst
-// via a manual Count()+Raw() walk — the allocation-free replacement for
-// TopicsView.All (which builds a per-event view slice). Correctness of the
-// walk rests on two view-API facts:
+// via a manual Len()+Raw() walk — allocation-free and, unlike a scan
+// stopped at the indexing cap, validating
+// the WHOLE vec. Correctness of the walk rests on two view-API facts:
 //
-//   - Raw() sizes EVERY element of the vec — including ones past the
+//   - Raw() on the vec sizes EVERY element — including ones past the
 //     indexing cap — and errors when the total extent overruns the buffer,
 //     so an event truncated anywhere inside its topics array is rejected
-//     exactly like All() rejected it.
-//   - At()/Iter() yield UNTRIMMED views (fat slices running to the end of
-//     the buffer); only exact-extent Raw() bytes may be hashed, or trailing
-//     bytes would fold into the term key.
+//     even when the truncation sits past the last hashed topic (an early
+//     iterator break would silently accept it).
+//   - NewScValView(raw[off:]).Raw() trims each element to its exact
+//     extent; only those exact bytes may be hashed, or trailing bytes would
+//     fold into the term key.
 func appendTopicTerms(dst []TermKey, topics xdr.ContractEventV0TopicsView) ([]TermKey, error) {
-	// Count() applies the checked count-vs-buffer guard All() applied, so a
+	// Len() applies the checked count-vs-buffer guard the generated
+	// iteration forms apply, so a
 	// hostile count rejects here before any element walk.
-	count, err := topics.Count()
+	count, err := topics.Len()
 	if err != nil {
 		return nil, fmt.Errorf("events: view Body.V0.Topics count: %w", err)
 	}
@@ -133,8 +135,8 @@ func appendTopicTerms(dst []TermKey, topics xdr.ContractEventV0TopicsView) ([]Te
 		return nil, fmt.Errorf("events: view Body.V0.Topics raw: %w", err)
 	}
 	off := 4 // the vec's count header; raw is trimmed to the vec's exact extent
-	for i := range min(count, protocol.MaxTopicCount) {
-		topic, terr := xdr.ScValView(raw[off:]).Raw()
+	for i := range min(int(count), protocol.MaxTopicCount) {
+		topic, terr := xdr.NewScValView(raw[off:]).Raw()
 		if terr != nil {
 			return nil, fmt.Errorf("events: view Body.V0.Topics[%d] raw: %w", i, terr)
 		}

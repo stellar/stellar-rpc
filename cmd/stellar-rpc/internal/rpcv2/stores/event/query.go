@@ -539,7 +539,7 @@ func planFilters(filters []Filter) filterPlan {
 //
 //nolint:gocognit // linear clause loop with two-level lazy cache; splitting helpers fragments the lazy invariant
 func matchesAnyFilterView(raw []byte, filters []Filter, plan *filterPlan) (bool, error) {
-	ev := xdr.ContractEventView(raw)
+	ev := xdr.NewContractEventView(raw)
 	var (
 		cidBytes     []byte
 		cidPresent   bool
@@ -613,9 +613,10 @@ func resolveViewContractID(ev xdr.ContractEventView) (bool, []byte, error) {
 // collectTopicViewBytes walks the ContractEventView's Body.V0.Topics
 // once linearly and captures each constrained position's .Raw() bytes
 // into topicRaw. Stops after the highest constrained position so the
-// walk is O(plan.maxTopicIdx+1) rather than the O(MaxTopicCount²)
-// that calling .At(j) for each j would produce (ScVecView.At is a
-// prefix walk under the hood). Body.V != 0 → no V0.Topics → topicRaw
+// walk is O(plan.maxTopicIdx+1) — one Scan() pass (the error-returning
+// iteration form; this query path must not panic), each Cur view
+// already trimmed to its exact extent (Raw() is a slice operation).
+// Body.V != 0 → no V0.Topics → topicRaw
 // stays zero (every constrained position will mismatch downstream).
 func collectTopicViewBytes(
 	ev xdr.ContractEventView,
@@ -636,7 +637,7 @@ func collectTopicViewBytes(
 	if bodyV != 0 {
 		return nil
 	}
-	v0, err := body.V0()
+	v0, err := body.ArmV0()
 	if err != nil {
 		return fmt.Errorf("events: post-filter view Body.V0: %w", err)
 	}
@@ -644,22 +645,21 @@ func collectTopicViewBytes(
 	if err != nil {
 		return fmt.Errorf("events: post-filter view Body.V0.Topics: %w", err)
 	}
-	i := 0
-	for topic, ierr := range topicsArr.Iter() {
-		if ierr != nil {
-			return fmt.Errorf("events: post-filter view topic iter: %w", ierr)
-		}
+	sc := topicsArr.Scan()
+	for i := 0; sc.Next(); i++ {
 		if i > plan.maxTopicIdx || i >= protocol.MaxTopicCount {
 			break
 		}
 		if plan.needsTopic[i] {
-			rawBytes, err := topic.Raw()
+			rawBytes, err := sc.Cur().Raw()
 			if err != nil {
 				return fmt.Errorf("events: post-filter view topic[%d].Raw: %w", i, err)
 			}
 			topicRaw[i] = rawBytes
 		}
-		i++
+	}
+	if err := sc.Err(); err != nil {
+		return fmt.Errorf("events: post-filter view topic scan: %w", err)
 	}
 	return nil
 }

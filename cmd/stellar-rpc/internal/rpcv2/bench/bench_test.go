@@ -160,7 +160,7 @@ func TestRunColdFromPack(t *testing.T) {
 	assert.EqualValues(t, txLedgers, driver["txhash_total"]["n_items"])
 	assert.EqualValues(t, txLedgers, driver["events_total"]["n_items"])
 
-	// The shared per-ledger ExtractLedgerEvents walk is ledger-scoped (no data
+	// The shared per-ledger StreamLedgerEvents walk is ledger-scoped (no data
 	// type), so it reports as its own driver row; per-ledger samples bound
 	// loosely (sub-tick walks are excluded).
 	require.Contains(t, driver, "cold_extract")

@@ -95,7 +95,7 @@ func (r *TxReader) scan(
 			continue
 		}
 
-		txv, found, err := ingest.LedgerTransactionViewByHash(xdr.LedgerCloseMetaView(raw), hash, r.passphrase)
+		txv, found, err := ingest.LedgerTransactionViewByHash(xdr.NewLedgerCloseMetaView(raw), hash, r.passphrase)
 		if err != nil {
 			if exact {
 				return ingest.LedgerTransactionView{}, false, fmt.Errorf("txhash: extract tx from ledger %d: %w", seq, err)
