@@ -165,12 +165,16 @@ epoch-based retired-run release (small code, ~-0.5GB).
    workers knob is already a config field — `storage.zstd_encode_workers`
    / bench `--zstd-workers`, default 2 — threaded to BOTH the hot and
    walk encoders, which must agree because it is format-affecting.)
-1. **2-disk validation campaign** (the reason for the new machine):
-   mount hot DB and cold artifacts on separate devices; re-run:
-   `bench-ingest hot` solo (expect 63-65 p99) → `bench-ingest freeze`
-   beside paced hot (expect window p99 ~66-70, no pacing anywhere) →
-   hot-beside-txindex-build colo (expect ~unchanged vs single-disk — its
-   damage is bandwidth, not disk).
+1. **RESOLVED (2026-07-27): hardware class supersedes the 2-disk campaign.**
+   Cross-box measurement on a c6id.8xlarge (16 physical cores, 1.9TB NVMe)
+   showed single-disk co-location meets every gate with no pacing: freeze
+   beside hot = +~3ms window p99 (device queue never saturates), full
+   999-chunk txindex rebuild beside hot = p99 48.3ms, zero >100ms (memory-
+   bandwidth knee never approached; build itself 35.9M keys/s, RSS 351MB).
+   Production recommendation: c6id.8xlarge-class or better; separate disks
+   and the BuildColdIndex pacer remain documented mitigations for smaller
+   classes only. The interference-channel fingerprints (disk-queue vs
+   bandwidth vs SMT) are recorded above for diagnosing any new class.
 2. **Implement + validate the BuildColdIndex pacer** (design above). Wire
    as a parameter production passes from the backfill call site; bench flag
    for A/B; probe scripts in scripts/probe/ rebuild the duty-response curve
