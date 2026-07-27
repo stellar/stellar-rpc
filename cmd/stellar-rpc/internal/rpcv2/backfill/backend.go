@@ -37,14 +37,17 @@ type Backend interface {
 // them into an unset [backfill.bsb] section and the bench command uses them as
 // its flag defaults — the values are defined once, here.
 //
-// The buffer and worker defaults are deliberately modest, sized for a daemon
-// that shares its host with serving. The rpc-hack bulk-ingest benchmarking
-// converged on much larger values (buffer 5000, 50 workers) for dedicated
-// backfill runs — raise [backfill.bsb] in the config when download throughput
-// matters more than memory and connection footprint.
+// The buffer and worker values are the BACKFILL-workload numbers the rpc-hack
+// bulk-ingest benchmarking converged on: the pubnet lake stores one ledger per
+// object, so download throughput is request-latency-bound and scales with
+// workers, and a deep prefetch buffer keeps the download overlapped with
+// ingest. They apply PER BSB INSTANCE — each backfill chunk task opens its own
+// stream — so aggregate connections and prefetch RAM scale with
+// [backfill].workers. TODO: revisit once the #800 ingestion experiments sweep
+// buffer depth and worker count for real.
 const (
-	DefaultBSBBufferSize = 100
-	DefaultBSBNumWorkers = 10
+	DefaultBSBBufferSize = 5000
+	DefaultBSBNumWorkers = 50
 	DefaultBSBMaxRetries = 3
 	DefaultBSBRetryWait  = 5 * time.Second
 )

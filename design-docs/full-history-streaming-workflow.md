@@ -113,8 +113,8 @@ Every TOML leaf is also settable from the command line:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `buffer_size` | uint32 | `100` | Downloaded ledgers buffered in memory; >= 1. |
-| `num_workers` | uint32 | `10` | Concurrent object downloads; >= 1. |
+| `buffer_size` | uint32 | `5000` | Downloaded ledgers buffered in memory; >= 1. Per BSB instance — each backfill chunk task opens its own stream. |
+| `num_workers` | uint32 | `50` | Concurrent object downloads; >= 1 and <= `buffer_size`. Per BSB instance. |
 | `max_retries` | uint32 | `3` | Retries of ONE object download after a transient error; `0` = fail on the first error. Distinct from `[backfill].max_retries`, which re-runs a whole chunk task. |
 | `retry_wait` | duration | `"5s"` | Pause between retries of one object download; >= 1ms. |
 

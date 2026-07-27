@@ -213,8 +213,8 @@ files_per_partition = 64000
 # attempts — a different knob from [backfill].max_retries above, which re-runs
 # a whole chunk task.
 [backfill.bsb]
-buffer_size = 100    # downloaded ledgers buffered in memory; >= 1
-num_workers = 10     # concurrent object downloads; >= 1
+buffer_size = 5000   # downloaded ledgers buffered in memory; >= 1
+num_workers = 50     # concurrent object downloads; >= 1 and <= buffer_size
 max_retries = 3      # retries per object download; 0 = fail on first error
 retry_wait = "5s"    # pause between retries of one object download
 
