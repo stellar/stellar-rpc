@@ -16,7 +16,7 @@ rebuild window**, and the settled architecture (below) closes that too:
 
 | regime | ingest p99 | notes |
 |---|---|---|
-| solo steady-state | 63.7-64.1ms | flat per-decile across a full 10k chunk; ~1.5GB RSS |
+| solo steady-state | 63.7-64.1ms | flat per-decile across a full 10k chunk; RSS: steady ~2.0-3.3GB, transient merge-generation peaks to ~5.2GB unpaced (see RAM anchor below) |
 | during freeze (unpaced, single disk, post-review) | 111.0 | commit p99 82; 1.25% ledgers >100ms; co-located freeze wall ~8min; pre-review basis was ~122-134 — the streamed .bin improved it |
 | during freeze (old walk freeze, like-for-like) | 141.9 | for the full 10min cycle — the new freeze is strictly better |
 | during txindex rebuild (single disk) | ~152, p50 +29 | recurs EVERY chunk boundary; see architecture |
@@ -80,6 +80,24 @@ boundary builds and
 passes `-race` standalone; byte-identity gates (freeze-written vs
 walk-written artifacts, per-store AND full-composition) pass and must stay
 as permanent gates.
+
+**RAM anchor (corrected 2026-07-27; the earlier "~1.5GB" was a 1k-ledger
+number that ends before the first run-merge).** Full-chunk hot RSS is
+merge-generation PEAKS, not a floor: steady state runs ~1.5-2.1GB and spikes
+at each sorted-run merge (~every 2,300 ledgers; largest at chunk end:
+~5.2GB unpaced, lower when paced — the unpaced bench inflates the seal
+backlog). Decomposition at peak: merged-run drain transients (fingerprint
+slice ~264MB + jumbo concurrent seal fold) x2 GC headroom + ~1GB flat
+native; RocksDB metadata is FLAT (write path never populates the block
+cache) and the dense-term overlay measured zero on this dataset. Two budget
+notes: run blooms exceed the design's worst-case on stress-density term
+cardinality (241MB vs 120MB budgeted) and displaced generations' blooms are
+freed only at chunk Close (~40-60%% of late-chunk bloom memory is retired
+routing state — a known, bounded wart). DANGER: GOGC=1000 composes with
+~2.2GB merge-window live heap into a >20GB target — never ship raised GOGC
+without GOMEMLIMIT. Optional caps if a smaller box ever demands them:
+GOMEMLIMIT ~3.5GiB (env-only; peak -> ~3.5-4GB), one-pass bloom build and
+epoch-based retired-run release (small code, ~-0.5GB).
 
 ## The settled architecture (tamir's rulings)
 
