@@ -3,8 +3,6 @@ package ingest
 import (
 	"context"
 
-	"github.com/stellar/go-stellar-sdk/xdr"
-
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
@@ -23,7 +21,8 @@ func NewHotService(db *hotchunk.DB, sink MetricSink) *HotService {
 	return &HotService{db: db, sink: orNop(sink)}
 }
 
-// Ingest commits lcm to the shared hot DB in one atomic synced WriteBatch
+// Ingest commits one ledger's raw wire bytes to the shared hot DB in one
+// atomic synced WriteBatch
 // (decision (a)) and emits one HotPhase per phase from the ledger report. Each
 // phase carries its own wall-clock (the phases partition the per-ledger total),
 // the write phases carry per-type item volume on success, and the outcome lands on
@@ -31,8 +30,8 @@ func NewHotService(db *hotchunk.DB, sink MetricSink) *HotService {
 // commit failure on PhaseCommit — so there is no mislabeled batch-scoped error.
 // On failure only phases [0, Failed] ran, so only those are emitted (and with zero
 // items — nothing landed durably); on success every phase is emitted.
-func (s *HotService) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
-	rep, err := s.db.IngestLedger(seq, lcm)
+func (s *HotService) Ingest(_ context.Context, seq uint32, raw []byte) error {
+	rep, err := s.db.IngestLedger(seq, raw)
 
 	last := hotchunk.NumPhases - 1
 	if err != nil {

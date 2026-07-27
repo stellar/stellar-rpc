@@ -399,24 +399,43 @@ func testLogger() *supportlog.Entry {
 	return l
 }
 
-// viewOf marshals a zero-tx LCM fixture and returns it as a view.
-func viewOf(t *testing.T, seq uint32) xdr.LedgerCloseMetaView {
+// hashesFor accumulates one raw ledger's indexable tx hashes (outer, plus
+// inner for a fee-bump) off the shared ExtractLedgerEvents walk — what
+// coldChunk.ingest hands the txhash writer. Tests that drive the writer
+// directly (no coldChunk) use it in place of the walk.
+func hashesFor(t *testing.T, raw []byte) [][32]byte {
 	t.Helper()
-	return xdr.LedgerCloseMetaView(marshalLCM(t, seq))
+	txEvents, err := sdkingest.ExtractLedgerEvents(xdr.LedgerCloseMetaView(raw))
+	require.NoError(t, err)
+	var hashes [][32]byte
+	for i := range txEvents {
+		hashes = append(hashes, txEvents[i].Hash)
+		if txEvents[i].FeeBump {
+			hashes = append(hashes, txEvents[i].InnerHash)
+		}
+	}
+	return hashes
 }
 
-// extractFor runs the shared ExtractLedgerEvents walk plus the close-time read
-// over one raw ledger — what coldChunk.ingest hands the txhash/events writers.
-// Tests that drive a single writer directly (no coldChunk) use it in place of
-// the walk.
-func extractFor(t *testing.T, raw []byte) ([]sdkingest.LedgerTransactionEvents, int64) {
+// payloadsFor shapes one raw ledger's events into cursor-ordered payloads
+// (events.PayloadShaper off the shared ExtractLedgerEvents walk) — what
+// coldChunk.ingest hands the events writer. Tests that drive the writer
+// directly (no coldChunk) use it in place of the walk.
+func payloadsFor(t *testing.T, raw []byte) []events.Payload {
 	t.Helper()
 	view := xdr.LedgerCloseMetaView(raw)
-	txEvents, err := sdkingest.ExtractLedgerEvents(view)
+	seq, err := view.LedgerSequence()
 	require.NoError(t, err)
 	closedAt, err := view.LedgerCloseTime()
 	require.NoError(t, err)
-	return txEvents, closedAt
+	txEvents, err := sdkingest.ExtractLedgerEvents(view)
+	require.NoError(t, err)
+	shaper := events.NewPayloadShaper(seq, closedAt)
+	shaper.Begin(len(txEvents))
+	for i := range txEvents {
+		require.NoError(t, shaper.Add(i, txEvents[i]))
+	}
+	return shaper.Finish()
 }
 
 // marshalV0LCM builds a minimal V0 (pre-Soroban) LedgerCloseMeta with no
@@ -506,8 +525,7 @@ func TestTxhashColdWriter_Bin(t *testing.T) {
 
 	for _, seq := range []uint32{first, first + 1} {
 		raw, _, _ := marshalLCMWithEvent(t, seq)
-		txEvents, _ := extractFor(t, raw)
-		require.NoError(t, ing.write(seq, txEvents))
+		require.NoError(t, ing.write(seq, hashesFor(t, raw)))
 	}
 	require.NoError(t, ing.finalize(context.Background()))
 
@@ -530,8 +548,7 @@ func TestEventsColdWriter_Readback(t *testing.T) {
 	for _, seq := range []uint32{first, first + 1} {
 		raw, _, tk := marshalLCMWithEvent(t, seq)
 		term = tk
-		txEvents, closedAt := extractFor(t, raw)
-		require.NoError(t, ing.write(seq, closedAt, txEvents))
+		require.NoError(t, ing.write(seq, payloadsFor(t, raw)))
 	}
 	require.NoError(t, ing.finalize(context.Background()))
 
@@ -564,12 +581,10 @@ func TestEventsColdWriter_V0KeepsOffsetsContiguous(t *testing.T) {
 	defer func() { require.NoError(t, ing.close()) }()
 
 	// Ledger `first`: V0 → zero events, no error.
-	v0Events, v0ClosedAt := extractFor(t, marshalV0LCM(t, first))
-	require.NoError(t, ing.write(first, v0ClosedAt, v0Events))
+	require.NoError(t, ing.write(first, payloadsFor(t, marshalV0LCM(t, first))))
 	// Ledger `first+1`: one contract event.
 	rawEv, _, term := marshalLCMWithEvent(t, first+1)
-	evEvents, evClosedAt := extractFor(t, rawEv)
-	require.NoError(t, ing.write(first+1, evClosedAt, evEvents))
+	require.NoError(t, ing.write(first+1, payloadsFor(t, rawEv)))
 	require.NoError(t, ing.finalize(context.Background()))
 
 	bucketDir := filepath.Join(coldDir, chunkID.BucketID())
@@ -673,7 +688,7 @@ func TestColdChunk_Success(t *testing.T) {
 	for _, seq := range []uint32{first, first + 1} {
 		raw, _, tk := marshalLCMWithEvent(t, seq)
 		term = tk
-		require.NoError(t, cc.ingest(seq, xdr.LedgerCloseMetaView(raw)))
+		require.NoError(t, cc.ingest(seq, raw))
 	}
 	require.NoError(t, cc.finalize(context.Background()))
 
@@ -740,8 +755,9 @@ func TestColdChunk_Success(t *testing.T) {
 }
 
 // TestColdChunk_MidChunkFailure_NoArtifact aborts a chunk mid-ingest: the first
-// ledger lands in both writers, then the second ledger's shared extract walk
-// fails on garbage LCM bytes — AFTER the ledgers writer already appended them
+// ledger lands in both writers, then the second ledger's extract window (the
+// close-time header read ahead of the shared walk) rejects the garbage LCM
+// bytes — AFTER the ledgers writer already appended them
 // (the raw append does not decode). finalize must not run (coldChunk contract);
 // close drops the partial ledger pack, so no finalized artifact remains, and
 // neither writer emits a per-writer ColdIngest: each ingested cleanly (no
@@ -756,12 +772,13 @@ func TestColdChunk_MidChunkFailure_NoArtifact(t *testing.T) {
 	cc, err := openColdChunk(coldDirsAt(coldDir, chunkID), chunkID, sink, Config{Ledgers: true, Events: true})
 	require.NoError(t, err)
 
-	require.NoError(t, cc.ingest(first, viewOf(t, first)))
+	require.NoError(t, cc.ingest(first, marshalLCM(t, first)))
 
 	garbage := bytes.Repeat([]byte{0xff}, 16)
-	err = cc.ingest(first+1, xdr.LedgerCloseMetaView(garbage))
+	err = cc.ingest(first+1, garbage)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "extract ledger events", "the shared walk rejects the garbage ledger")
+	require.Contains(t, err.Error(), "ledger close time",
+		"the extract window rejects the garbage ledger (header read precedes the walk)")
 
 	// The failed walk is metered: an error-carrying ColdExtract (its one metric —
 	// no writer ran for that ledger), after the first ledger's clean one.
@@ -802,7 +819,7 @@ func TestColdWriter_Failure_RecordsErrorMetric(t *testing.T) {
 	// so it records its firstErr and emits the error-carrying ColdIngest. (drain
 	// would never feed this — the test targets the writer's metric path directly.)
 	wrongSeq := chunkID.FirstLedger() + 5
-	require.Error(t, cc.ingest(wrongSeq, viewOf(t, wrongSeq)))
+	require.Error(t, cc.ingest(wrongSeq, marshalLCM(t, wrongSeq)))
 	require.Equal(t, 1, sink.coldDataTypes()[dataTypeLedgers], "the failed write emits its ColdIngest immediately")
 
 	// finalize is skipped on this path; close emits nothing more.
@@ -904,15 +921,14 @@ func eventRichLedger(t *testing.T, seq uint32) []byte {
 // several rich sentinel ledgers and compares the artifacts to INDEPENDENT
 // reference computations:
 //
-//   - txhash .bin vs. sorted, truncated ExtractTxHashes output. ExtractTxHashes
-//     is the OLD txhash extractor — a separate SDK walk from the shared
-//     ExtractLedgerEvents the ingester now reads — so an entry-by-entry match
-//     proves the switch to `.Hash` off the shared walk changed no byte.
+//   - txhash .bin vs. sorted, truncated entries derived from a test-local
+//     ExtractLedgerEvents collect (hashesFor) — independent of the coldChunk
+//     plumbing — so an entry-by-entry match proves the writer's
+//     accumulation, truncation, and sort changed no byte.
 //   - events per-term bitmaps + count vs. an independent PayloadShaper
-//     shaping, with chunk-relative event IDs assigned in ingest (ascending-seq)
-//     order — proving the event-ID assignment is unchanged.
-//
-//nolint:funlen // one invariant, two inline reference computations — splitting would obscure it
+//     shaping (payloadsFor), with chunk-relative event IDs assigned in
+//     ingest (ascending-seq) order — proving the event-ID assignment is
+//     unchanged.
 func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
@@ -940,19 +956,11 @@ func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 	// hash (outer, plus a fee-bump's inner) over the sentinels.
 	var wantEntries []txhash.ColdEntry
 	for _, seq := range sentinels {
-		txEvents, err := sdkingest.ExtractLedgerEvents(xdr.LedgerCloseMetaView(raws[seq]))
-		require.NoError(t, err)
-		for i := range txEvents {
+		for _, h := range hashesFor(t, raws[seq]) {
 			var ke txhash.ColdEntry
-			copy(ke.Key[:], txEvents[i].Hash[:txhash.ColdKeySize])
+			copy(ke.Key[:], h[:txhash.ColdKeySize])
 			ke.Seq = seq
 			wantEntries = append(wantEntries, ke)
-			if txEvents[i].FeeBump {
-				var ike txhash.ColdEntry
-				copy(ike.Key[:], txEvents[i].InnerHash[:txhash.ColdKeySize])
-				ike.Seq = seq
-				wantEntries = append(wantEntries, ike)
-			}
 		}
 	}
 	slices.SortFunc(wantEntries, func(a, b txhash.ColdEntry) int { return bytes.Compare(a.Key[:], b.Key[:]) })
@@ -964,17 +972,7 @@ func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 	wantTermIDs := map[events.TermKey][]uint32{}
 	var nextID uint32
 	for _, seq := range sentinels {
-		view := xdr.LedgerCloseMetaView(raws[seq])
-		txEvents, err := sdkingest.ExtractLedgerEvents(view)
-		require.NoError(t, err)
-		closedAt, err := view.LedgerCloseTime()
-		require.NoError(t, err)
-		shaper := events.NewPayloadShaper(seq, closedAt)
-		shaper.Begin(len(txEvents))
-		for i := range txEvents {
-			require.NoError(t, shaper.Add(i, txEvents[i]))
-		}
-		payloads := shaper.Finish()
+		payloads := payloadsFor(t, raws[seq])
 		for i := range payloads {
 			keys, kerr := events.TermsForBytes(payloads[i].ContractEventBytes)
 			require.NoError(t, kerr)
@@ -1157,7 +1155,7 @@ func TestHotService_EmitsEveryPhaseOnSuccess(t *testing.T) {
 	svc := NewHotService(db, sink)
 	first := chunk.ID(0).FirstLedger()
 	raw, _, _ := marshalLCMWithEvent(t, first) // one tx, one event
-	require.NoError(t, svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(raw)))
+	require.NoError(t, svc.Ingest(context.Background(), first, raw))
 
 	require.Len(t, sink.hotPhases, int(hotchunk.NumPhases), "every phase emitted once on success")
 	items := sink.hotPhaseItems()
@@ -1183,7 +1181,7 @@ func TestHotService_CommitErrorLandsOnCommitPhase(t *testing.T) {
 	svc := NewHotService(db, sink)
 	first := chunk.ID(0).FirstLedger()
 	raw, _, _ := marshalLCMWithEvent(t, first)
-	require.Error(t, svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(raw)))
+	require.Error(t, svc.Ingest(context.Background(), first, raw))
 
 	phase, hadErr := sink.hotPhaseErr()
 	require.True(t, hadErr, "the failure must be reported on a phase")
@@ -1205,9 +1203,9 @@ func TestHotService_ExtractFailureLandsOnExtractPhase(t *testing.T) {
 	sink := &testSink{}
 	svc := NewHotService(db, sink)
 	first := chunk.ID(0).FirstLedger()
-	// Garbage bytes fail XDR decode in ExtractLedgerEvents, before any batch opens.
+	// Garbage bytes fail XDR decode in the ExtractLedgerEvents walk, before any batch opens.
 	garbage := bytes.Repeat([]byte{0xff}, 16)
-	require.Error(t, svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(garbage)))
+	require.Error(t, svc.Ingest(context.Background(), first, garbage))
 
 	phase, hadErr := sink.hotPhaseErr()
 	require.True(t, hadErr, "the decode failure must be reported on a phase")
@@ -1232,7 +1230,7 @@ func TestHotService_EventsQueueFailureLandsOnEventsPhase(t *testing.T) {
 	// chunk's first ledger and rejects first+5 as out of order (ErrLedgerOutOfOrder).
 	// The ledger + txhash queue steps do not sequence-check, so they run first.
 	raw, _, _ := marshalLCMWithEvent(t, first+5)
-	require.Error(t, svc.Ingest(context.Background(), first+5, xdr.LedgerCloseMetaView(raw)))
+	require.Error(t, svc.Ingest(context.Background(), first+5, raw))
 
 	phase, hadErr := sink.hotPhaseErr()
 	require.True(t, hadErr, "the queue failure must be reported on a phase")
@@ -1255,7 +1253,7 @@ func TestHotService_FailedPhaseCarriesPartialDuration(t *testing.T) {
 	svc := NewHotService(db, sink)
 	first := chunk.ID(0).FirstLedger()
 	raw, _, _ := marshalLCMWithEvent(t, first+5)
-	require.Error(t, svc.Ingest(context.Background(), first+5, xdr.LedgerCloseMetaView(raw)))
+	require.Error(t, svc.Ingest(context.Background(), first+5, raw))
 
 	durs := sink.hotPhaseDurs()
 	assert.Positive(t, durs[hotchunk.PhaseExtract], "a completed earlier phase carries its wall-clock")
@@ -1286,8 +1284,7 @@ func TestTxhashColdWriter_BinContent(t *testing.T) {
 		var key [txhash.ColdKeySize]byte
 		copy(key[:], hash[:txhash.ColdKeySize])
 		wantSeqByKey[key] = seq
-		txEvents, _ := extractFor(t, raw)
-		require.NoError(t, ing.write(seq, txEvents))
+		require.NoError(t, ing.write(seq, hashesFor(t, raw)))
 	}
 	require.NoError(t, ing.finalize(context.Background()))
 
@@ -1450,8 +1447,7 @@ func TestEventsCold_FinishThenIndexFails_LeavesInertPack(t *testing.T) {
 	// Ingest one event-bearing ledger so the mirror is non-empty, exercising a
 	// real (non-empty) MPHF build.
 	rawEv, _, _ := marshalLCMWithEvent(t, first)
-	txEvents, closedAt := extractFor(t, rawEv)
-	require.NoError(t, ing.write(first, closedAt, txEvents))
+	require.NoError(t, ing.write(first, payloadsFor(t, rawEv)))
 
 	// Plant a DIRECTORY where index.hash must be written → buildMPHF fails.
 	bucketDir := filepath.Join(coldDir, chunkID.BucketID())
@@ -1486,11 +1482,11 @@ func TestEventsCold_FinalizeAfterFailedIngest_Refuses(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
-	// A garbage top-level TransactionEvent fails the shaper's Stage
-	// decode inside write — the walk itself is coldChunk's job, so the
-	// per-writer failure is a shaping error over the shared walk's output.
-	bad := []sdkingest.LedgerTransactionEvents{{TransactionEvents: [][]byte{{0xff, 0xff}}}}
-	require.Error(t, ing.write(chunkID.FirstLedger(), 0, bad))
+	// A garbage ContractEvent payload fails TermsForBytes inside write — the
+	// walk and shaping are coldChunk's job now, so the per-writer failure is
+	// a term-derivation error over the shaped payloads.
+	bad := []events.Payload{{ContractEventBytes: []byte{0xff, 0xff}}}
+	require.Error(t, ing.write(chunkID.FirstLedger(), bad))
 
 	ferr := ing.finalize(context.Background())
 	require.Error(t, ferr)
@@ -1520,7 +1516,7 @@ func TestColdChunk_Finalize_FirstErrorStopsRemaining(t *testing.T) {
 	require.NoError(t, err)
 
 	raw, _, _ := marshalLCMWithEvent(t, first)
-	require.NoError(t, cc.ingest(first, xdr.LedgerCloseMetaView(raw)))
+	require.NoError(t, cc.ingest(first, raw))
 
 	// Plant a DIRECTORY at the .bin path: txhash's finalize (WriteColdBin's
 	// os.Create) fails after the ledgers finalize already ran.
@@ -1710,8 +1706,7 @@ func TestTxhashColdWriter_FeeBumpBothHashes(t *testing.T) {
 	lcm, outerHash, innerHash := buildLCMWithFeeBump(t, seq)
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
-	txEvents, _ := extractFor(t, raw)
-	require.NoError(t, ing.write(seq, txEvents))
+	require.NoError(t, ing.write(seq, hashesFor(t, raw)))
 	require.NoError(t, ing.finalize(context.Background()))
 
 	entries := rpcv2test.ReadColdBin(t, txhashBinPath(coldDir))

@@ -345,8 +345,9 @@ func (d *DB) MaxCommittedSeq() (uint32, bool, error) {
 // index into a fixed-size array (LedgerReport.Phases), so an out-of-table phase is
 // unrepresentable — no string label to mistype and no map lookup to nil-panic in a
 // sink. The phases partition the per-ledger wall-clock:
-//   - PhaseExtract: the shared ExtractLedgerEvents walk + txhash row pack +
-//     event shaping (all pre-batch — every decode failure lands here by construction);
+//   - PhaseExtract: the shared ExtractLedgerEvents walk (hash accumulation +
+//     event shaping consume its output in one pass) + txhash row pack (all
+//     pre-batch — every decode failure lands here by construction);
 //   - PhaseLedgers/PhaseTxhash/PhaseEvents: each facade's queue-into-batch step.
 //     PhaseLedgers is the JOIN on the background ledger compression forked at
 //     IngestLedger entry (wait-for-encode + Put) — near-zero when the encode
@@ -414,10 +415,11 @@ type LedgerReport struct {
 // BatchWriter, commit once, and only then run the txhash and events in-memory
 // applies.
 //
-// lcm is a borrowed zero-copy view; every extractor copies what it retains, so
-// the view need not outlive this call. Store.Batch's lifecycle RLock + checkOpen
+// raw is the ledger's borrowed wire bytes (LedgerCloseMeta XDR); every
+// extractor copies what it retains, so the bytes need not outlive this call.
+// Store.Batch's lifecycle RLock + checkOpen
 // is the authoritative closed-store guard, so there is no separate pre-check here.
-func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport, error) {
+func (d *DB) IngestLedger(seq uint32, raw []byte) (LedgerReport, error) {
 	var rep LedgerReport
 
 	// A read-only (ledgers-only) DB has no events facade to assign event IDs, and
@@ -430,60 +432,56 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 
 	// Fork the ledger-bytes zstd encode FIRST: it is independent of every other
 	// step and, unforked, was the second-largest serial slice (~20ms). It runs
-	// concurrent with extract and the queue steps (all read-only on lcm) and is
+	// concurrent with extract and the queue steps (all read-only on raw) and is
 	// joined as the batch's LAST queue step, by which point it has usually
 	// finished — PhaseLedgers then measures only the join wait + Put. The
-	// deferred Discard bounds the borrowed lcm view on every early-error path:
-	// both join and Discard block until the encoder is done with the bytes.
-	pending := d.ledger.StartCompress(ledger.Entry{Seq: seq, Bytes: []byte(lcm)})
+	// deferred Discard bounds the borrowed bytes on every early-error path:
+	// both join and Discard block until the encoder is done with them.
+	pending := d.ledger.StartCompress(ledger.Entry{Seq: seq, Bytes: raw})
 	defer pending.Discard()
 
 	// Pre-extract anything that can fail BEFORE opening the batch, so a decode
 	// error rejects the ledger without a half-built batch.
 	//
-	// ONE TxProcessing walk feeds BOTH hot data types: ExtractLedgerEvents yields,
-	// per transaction in apply order, the tx hash AND its contract events. txhash
-	// reads each element's Hash and events shapes the same slice
-	// (events.PayloadShaper), so the two share one walk instead of the two
-	// (ExtractTxHashes + a second ExtractLedgerEvents walk) they would each run —
-	// halving per-ledger extraction. Shaping the already-extracted slice (not
-	// re-walking) keeps the event-ID assignment order identical to a per-view
-	// shaping.
+	// ONE TxProcessing walk feeds BOTH hot data types: ExtractLedgerEvents
+	// yields, per transaction in apply order, the tx hash AND its contract
+	// events; one pass over the slice appends the hashes (outer, plus inner
+	// for a fee-bump) and shapes the events (events.PayloadShaper) together.
+	// Consuming in apply order keeps the event-ID assignment identical to
+	// the whole-slice shaping (the shaper's buckets ARE the old passes).
 	// Every failure below stamps the failed phase's PARTIAL duration before
 	// returning — a phase that blocked and then failed is signal (mirrors
 	// RunBackfill's "reported even on failure"), so the error is never emitted with
 	// a zero-duration sample.
 	extractStart := time.Now()
-	txEvents, err := sdkingest.ExtractLedgerEvents(lcm)
-	if err != nil {
-		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
-		rep.Failed = PhaseExtract
-		return rep, fmt.Errorf("extract ledger events seq %d: %w", seq, err)
-	}
-	// Pack the ledger's tx hashes into the ONE sorted row the txhash CF
-	// stores per ledger. EncodeRow is fallible pre-batch work (sort +
-	// intra-ledger duplicate reject), so a corrupt ledger fails here, before
-	// the batch opens.
-	txHashes := ledgerTxHashes(txEvents)
-	txRow, err := txhash.EncodeRow(txHashes)
-	if err != nil {
-		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
-		rep.Failed = PhaseExtract
-		return rep, fmt.Errorf("pack tx hashes seq %d: %w", seq, err)
-	}
-
+	lcm := xdr.LedgerCloseMetaView(raw)
 	closedAt, err := lcm.LedgerCloseTime()
 	if err != nil {
 		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
 		rep.Failed = PhaseExtract
 		return rep, fmt.Errorf("ledger close time seq %d: %w", seq, err)
 	}
-	// A pre-Soroban ledger yields zero payloads, no error.
-	payloads, err := shapePayloads(seq, closedAt, txEvents)
+	txEvents, err := sdkingest.ExtractLedgerEvents(lcm)
+	if err != nil {
+		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
+		rep.Failed = PhaseExtract
+		return rep, fmt.Errorf("extract ledger events seq %d: %w", seq, err)
+	}
+	txHashes, payloads, err := hashesAndPayloads(seq, closedAt, txEvents)
 	if err != nil {
 		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
 		rep.Failed = PhaseExtract
 		return rep, fmt.Errorf("shape events seq %d: %w", seq, err)
+	}
+	// Pack the ledger's tx hashes into the ONE sorted row the txhash CF
+	// stores per ledger. EncodeRow is fallible pre-batch work (sort +
+	// intra-ledger duplicate reject), so a corrupt ledger fails here, before
+	// the batch opens.
+	txRow, err := txhash.EncodeRow(txHashes)
+	if err != nil {
+		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
+		rep.Failed = PhaseExtract
+		return rep, fmt.Errorf("pack tx hashes seq %d: %w", seq, err)
 	}
 	rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
 	// Per-type write volume lives on the write phases (emitted on success).
@@ -569,32 +567,25 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 	return rep, nil
 }
 
-// shapePayloads drives events.PayloadShaper over the extracted slice — one
-// Add per transaction in apply order, the same cursor-ordered output the
-// whole-slice shaping produced.
-func shapePayloads(
+// hashesAndPayloads is the ONE pass over the extracted slice: it accumulates
+// the ledger's indexable tx hashes (outer, plus inner for a fee-bump — #862;
+// slack-presized so a few fee-bumps don't regrow the slice) and feeds
+// events.PayloadShaper in the same loop. A pre-Soroban ledger yields zero
+// payloads.
+func hashesAndPayloads(
 	seq uint32, closedAt int64, txEvents []sdkingest.LedgerTransactionEvents,
-) ([]events.Payload, error) {
+) ([][32]byte, []events.Payload, error) {
+	txHashes := make([][32]byte, 0, len(txEvents)+len(txEvents)/8+1)
 	shaper := events.NewPayloadShaper(seq, closedAt)
 	shaper.Begin(len(txEvents))
 	for i := range txEvents {
-		if err := shaper.Add(i, txEvents[i]); err != nil {
-			return nil, err
-		}
-	}
-	return shaper.Finish(), nil
-}
-
-// ledgerTxHashes collects one ledger's indexable tx hashes in apply order —
-// a fee-bump transaction contributes BOTH its outer and inner hash (#862),
-// so either resolves to the ledger.
-func ledgerTxHashes(txEvents []sdkingest.LedgerTransactionEvents) [][32]byte {
-	hashes := make([][32]byte, 0, len(txEvents))
-	for i := range txEvents {
-		hashes = append(hashes, txEvents[i].Hash)
+		txHashes = append(txHashes, txEvents[i].Hash)
 		if txEvents[i].FeeBump {
-			hashes = append(hashes, txEvents[i].InnerHash)
+			txHashes = append(txHashes, txEvents[i].InnerHash)
+		}
+		if err := shaper.Add(i, txEvents[i]); err != nil {
+			return nil, nil, err
 		}
 	}
-	return hashes
+	return txHashes, shaper.Finish(), nil
 }

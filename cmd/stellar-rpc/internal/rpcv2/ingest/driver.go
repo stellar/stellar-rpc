@@ -8,12 +8,11 @@ import (
 	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
-	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
 
-// drain feeds each of the chunk's raw ledgers (as a borrowed view) to the cold
+// drain feeds each of the chunk's raw ledgers (as borrowed bytes) to the cold
 // chunk on a local sequence counter, then verifies the full [first,last] range
 // was consumed — this runs before finalize, so a short stream never finalizes a
 // truncated artifact. The in-order contract is enforced at the SOURCE
@@ -35,7 +34,7 @@ func drain(ledgers iter.Seq2[[]byte, error], chunkID chunk.ID, cc *coldChunk) er
 			return fmt.Errorf("ingest: stream for chunk %d yielded a ledger past %d (chunk overrun)",
 				uint32(chunkID), last)
 		}
-		if err := cc.ingest(seq, xdr.LedgerCloseMetaView(raw)); err != nil {
+		if err := cc.ingest(seq, raw); err != nil {
 			return err
 		}
 		seq++

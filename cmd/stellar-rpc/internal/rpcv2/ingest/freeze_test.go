@@ -8,8 +8,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go-stellar-sdk/xdr"
-
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
@@ -48,7 +46,7 @@ func TestFreezeColdChunk_ByteIdenticalToWalk(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	svc := NewHotService(db, nil)
 	for i, raw := range fixtures {
-		require.NoError(t, svc.Ingest(ctx, first+uint32(i), xdr.LedgerCloseMetaView(raw)))
+		require.NoError(t, svc.Ingest(ctx, first+uint32(i), raw))
 	}
 
 	// The walk half must encode ledger frames with the SAME workers value the

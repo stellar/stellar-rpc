@@ -9,8 +9,6 @@ import (
 	"slices"
 	"time"
 
-	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
-
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
@@ -50,31 +48,25 @@ func newTxhashCold(binPath string, chunkID chunk.ID, sink MetricSink) (*txhashCo
 	}, nil
 }
 
-// write accumulates one ledger's tx hashes — one entry per hash, two for a
-// fee-bump (outer + inner). They come from coldChunk's shared
-// ExtractLedgerEvents walk, in apply order. Each is truncated to ColdKeySize
+// write accumulates one ledger's tx hashes — one entry per indexable hash,
+// already including a fee-bump's inner hash. They come from coldChunk's
+// shared ExtractLedgerEvents walk, in apply order (outer, then inner for a
+// fee-bump). Each is truncated to ColdKeySize
 // and appended STRAIGHT into the
-// accumulator — no intermediate per-ledger entry slice; over a ~3M-tx chunk
+// accumulator — no per-ledger entry slice; over a ~3M-tx chunk
 // that intermediate would be hundreds of MB of transient garbage. The
 // extraction itself is metered once, ledger-scoped, as the ColdExtract signal;
 // this cheap truncate-append folds into the per-writer ColdIngest total (its
 // per-chunk cost is the finalize sort + .bin write).
-func (t *txhashCold) write(seq uint32, txEvents []sdkingest.LedgerTransactionEvents) error {
+func (t *txhashCold) write(seq uint32, hashes [][32]byte) error {
 	start := time.Now()
-	before := len(t.entries)
-	for i := range txEvents {
+	for i := range hashes {
 		var ke txhash.ColdEntry
-		copy(ke.Key[:], txEvents[i].Hash[:txhash.ColdKeySize])
+		copy(ke.Key[:], hashes[i][:txhash.ColdKeySize])
 		ke.Seq = seq
 		t.entries = append(t.entries, ke)
-		if txEvents[i].FeeBump {
-			var ike txhash.ColdEntry
-			copy(ike.Key[:], txEvents[i].InnerHash[:txhash.ColdKeySize])
-			ike.Seq = seq
-			t.entries = append(t.entries, ike)
-		}
 	}
-	t.metrics.observe(time.Since(start), len(t.entries)-before, nil)
+	t.metrics.observe(time.Since(start), len(hashes), nil)
 	return nil
 }
 

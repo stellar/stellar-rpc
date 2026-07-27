@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"time"
 
-	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
-
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events/runspill"
@@ -95,25 +93,14 @@ func eventsScratchDir(eventsDir string, c chunk.ID) string {
 // chunk's unique-term count.
 const indexSpillSlabBytes = 32 << 20
 
-// write ingests one ledger's events from the shared walk's output. txEvents
-// and its byte slices alias the source stream's borrowed buffer, valid only
+// write ingests one ledger's already-shaped payloads from the shared walk
+// (coldChunk.ingest walks the ledger once; its events.PayloadShaper output
+// lands here). The payloads' ContractEventBytes alias the source stream's
+// borrowed buffer, valid only
 // for this call — everything retained is copied synchronously (see ingestSeq).
-// Shaping (events.PayloadShaper, the SAME shaper the hot tier drives, so
-// event-ID assignment is byte-identical) runs here, per transaction; a
-// shaping error is terminal like any write error.
-func (e *eventsCold) write(seq uint32, closedAt int64, txEvents []sdkingest.LedgerTransactionEvents) error {
+func (e *eventsCold) write(seq uint32, payloads []events.Payload) error {
 	start := time.Now()
-	shaper := events.NewPayloadShaper(seq, closedAt)
-	shaper.Begin(len(txEvents))
-	for i := range txEvents {
-		if serr := shaper.Add(i, txEvents[i]); serr != nil {
-			serr = fmt.Errorf("shape events seq %d: %w", seq, serr)
-			e.metrics.observe(time.Since(start), 0, serr)
-			e.failed = true // refuse a post-failure finalize
-			return serr
-		}
-	}
-	n, ierr := e.ingestSeq(seq, shaper.Finish())
+	n, ierr := e.ingestSeq(seq, payloads)
 	e.metrics.observe(time.Since(start), n, ierr) // terminal on err: observe emits the per-writer signal
 	if ierr != nil {
 		e.failed = true // refuse a post-failure finalize
@@ -180,11 +167,13 @@ func (e *eventsCold) close() error {
 	return e.writer.Close()
 }
 
-// ingestSeq writes one ledger's cursor-ordered payloads (write's shaper
-// output) and returns the count written. A
+// ingestSeq writes one ledger's cursor-ordered payloads and returns the count
+// written. The payloads come from coldChunk's shared ExtractLedgerEvents walk,
+// shaped by events.PayloadShaper — the SAME shaper the hot tier uses, so
+// event-ID assignment is byte-identical to the hot path (same shaping). A
 // pre-Soroban (V0) ledger yields zero payloads, recorded like any event-free
-// ledger. Shaping folds into the per-writer ColdIngest total; the extraction
-// itself is metered once, ledger-scoped, as the ColdExtract signal.
+// ledger. Shaping happens beside the walk in coldChunk.ingest, so it is
+// metered inside the ledger-scoped ColdExtract signal with the extraction.
 func (e *eventsCold) ingestSeq(seq uint32, payloads []events.Payload) (int, error) {
 	startID := e.offsets.TotalEvents()
 	if uint64(startID)+uint64(len(payloads)) > math.MaxUint32 {
@@ -229,9 +218,9 @@ func (e *eventsCold) ingestSeq(seq uint32, payloads []events.Payload) (int, erro
 
 	// offsets.Append LAST — it is the commit point for the ledger. Its cost folds
 	// into the write stage, so term_index and write are the two per-ledger stages
-	// this writer emits. The shaping in write folds into
-	// the ColdIngest total without its own stage; the shared
-	// ExtractLedgerEvents walk is metered once, ledger-scoped, by the ColdExtract
+	// this writer emits. The shared ExtractLedgerEvents walk (payload shaping
+	// included — it runs beside the walk in coldChunk.ingest) is metered once,
+	// ledger-scoped, by the ColdExtract
 	// signal (cold_extract_duration_seconds). uint32(len(payloads)) is 0 for an
 	// empty ledger — an explicit Append(seq, 0) that records the empty ledger.
 	wstart := time.Now()

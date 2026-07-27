@@ -131,11 +131,11 @@ func TestIngestLedger_AllCFsAdvanceTogether(t *testing.T) {
 	rawA, hashA, termA := lcmWithEvent(t, first)
 	rawB, hashB, _ := lcmWithEvent(t, first+1)
 
-	repA, err := db.IngestLedger(first, xdr.LedgerCloseMetaView(rawA))
+	repA, err := db.IngestLedger(first, rawA)
 	require.NoError(t, err)
 	assertWriteItems(t, repA, 1)
 
-	repB, err := db.IngestLedger(first+1, xdr.LedgerCloseMetaView(rawB))
+	repB, err := db.IngestLedger(first+1, rawB)
 	require.NoError(t, err)
 	assertWriteItems(t, repB, 1)
 
@@ -179,7 +179,7 @@ func TestIngestLedger_RejectedLedgerPersistsNothingAcrossAnyCF(t *testing.T) {
 	badSeq := chunkID.LastLedger() + 1
 	raw, hash, term := lcmWithEvent(t, badSeq)
 
-	_, err := db.IngestLedger(badSeq, xdr.LedgerCloseMetaView(raw))
+	_, err := db.IngestLedger(badSeq, raw)
 	require.Error(t, err)
 	require.ErrorIs(t, err, event.ErrLedgerOutOfRange)
 
@@ -216,7 +216,7 @@ func TestIngestLedger_MidBatchCommitFailurePersistsNothing(t *testing.T) {
 
 	// Commit one good ledger so there is a known last committed seq, then close the DB.
 	rawGood, hashGood, _ := lcmWithEvent(t, first)
-	_, err = db.IngestLedger(first, xdr.LedgerCloseMetaView(rawGood))
+	_, err = db.IngestLedger(first, rawGood)
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
@@ -234,7 +234,7 @@ func TestIngestLedger_MidBatchCommitFailurePersistsNothing(t *testing.T) {
 	// store: the commit fails, and nothing for that ledger persists anywhere.
 	require.NoError(t, db2.Close())
 	rawNext, hashNext, _ := lcmWithEvent(t, first+1)
-	_, err = db2.IngestLedger(first+1, xdr.LedgerCloseMetaView(rawNext))
+	_, err = db2.IngestLedger(first+1, rawNext)
 	require.Error(t, err)
 
 	// Reopen a third time: the failed ledger left NO trace in any CF, and the
@@ -310,7 +310,7 @@ func TestIngestLedger_WritesEveryHotType(t *testing.T) {
 	db := openTestDB(t)
 
 	raw, hash, term := lcmWithEvent(t, first)
-	rep, err := db.IngestLedger(first, xdr.LedgerCloseMetaView(raw))
+	rep, err := db.IngestLedger(first, raw)
 	require.NoError(t, err)
 	assertWriteItems(t, rep, 1)
 
@@ -329,7 +329,8 @@ func TestIngestLedger_WritesEveryHotType(t *testing.T) {
 
 // TestIngestLedger_EventlessTxStillIndexesHash pins the post-merge txhash
 // completeness invariant: after #18 folded the txhash and events walks into one
-// ExtractLedgerEvents pass, txhash coverage rests entirely on that walk yielding
+// extraction pass (ExtractLedgerEvents), txhash coverage rests
+// entirely on that walk yielding
 // an element per APPLIED tx — hash included — even for an event-less transaction
 // (the common classic-only case). Every other hotchunk test uses one-tx-one-event
 // ledgers, so nothing else pins it: an SDK change that dropped event-less txs from
@@ -351,7 +352,7 @@ func TestIngestLedger_EventlessTxStillIndexesHash(t *testing.T) {
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 
-	rep, err := db.IngestLedger(first, xdr.LedgerCloseMetaView(raw))
+	rep, err := db.IngestLedger(first, raw)
 	require.NoError(t, err)
 	assertWriteItems(t, rep, 2) // both hashes indexed (event-less included); one event
 
@@ -377,7 +378,7 @@ func TestReopen_RecoversEventsMirror(t *testing.T) {
 	db, err := Open(dir, chunkID, silentLogger(), DefaultTuning())
 	require.NoError(t, err)
 	raw, hash, _ := lcmWithEvent(t, first)
-	_, err = db.IngestLedger(first, xdr.LedgerCloseMetaView(raw))
+	_, err = db.IngestLedger(first, raw)
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
@@ -403,7 +404,7 @@ func TestOpenReadOnly_ReadsCommittedAndRejectsWrites(t *testing.T) {
 	db, err := Open(dir, chunkID, silentLogger(), DefaultTuning())
 	require.NoError(t, err)
 	for _, seq := range []uint32{first, first + 1} {
-		_, ierr := db.IngestLedger(seq, xdr.LedgerCloseMetaView(zeroTxLCM(t, seq)))
+		_, ierr := db.IngestLedger(seq, zeroTxLCM(t, seq))
 		require.NoError(t, ierr)
 	}
 	require.NoError(t, db.Close())
@@ -419,7 +420,7 @@ func TestOpenReadOnly_ReadsCommittedAndRejectsWrites(t *testing.T) {
 	assert.Equal(t, first+1, seq, "read-only handle sees the committed data")
 
 	// A write through the read-only handle must fail — the freeze never mutates.
-	_, err = ro.IngestLedger(first+2, xdr.LedgerCloseMetaView(zeroTxLCM(t, first+2)))
+	_, err = ro.IngestLedger(first+2, zeroTxLCM(t, first+2))
 	require.Error(t, err, "read-only DB must reject writes")
 }
 
@@ -441,7 +442,7 @@ func TestOpenReadOnly_SkipsEventsWarmup(t *testing.T) {
 	for _, seq := range []uint32{first, first + 1} {
 		raw := zeroTxLCM(t, seq)
 		want[seq] = raw
-		_, ierr := db.IngestLedger(seq, xdr.LedgerCloseMetaView(raw))
+		_, ierr := db.IngestLedger(seq, raw)
 		require.NoError(t, ierr)
 	}
 	require.NoError(t, db.Close())
@@ -504,7 +505,7 @@ func TestOpenReadOnly_TxhashFreezeWorksWithoutQueries(t *testing.T) {
 	for _, seq := range []uint32{first, first + 1} {
 		raw, hash, _ := lcmWithEvent(t, seq)
 		hashes = append(hashes, hash)
-		_, ierr := db.IngestLedger(seq, xdr.LedgerCloseMetaView(raw))
+		_, ierr := db.IngestLedger(seq, raw)
 		require.NoError(t, ierr)
 	}
 	require.NoError(t, db.Close())
@@ -554,7 +555,7 @@ func TestIngestLedger_TxhashVisibleAtReturnAndSkipRejected(t *testing.T) {
 	db := openTestDB(t)
 
 	rawA, hashA, _ := lcmWithEvent(t, first)
-	_, err := db.IngestLedger(first, xdr.LedgerCloseMetaView(rawA))
+	_, err := db.IngestLedger(first, rawA)
 	require.NoError(t, err)
 	seq, err := db.Txhash().Get(hashA)
 	require.NoError(t, err, "hash must be hot-queryable the moment IngestLedger returns")
@@ -562,7 +563,7 @@ func TestIngestLedger_TxhashVisibleAtReturnAndSkipRejected(t *testing.T) {
 
 	// Skip first+1: loud reject, nothing committed anywhere.
 	rawSkip, hashSkip, _ := lcmWithEvent(t, first+2)
-	rep, err := db.IngestLedger(first+2, xdr.LedgerCloseMetaView(rawSkip))
+	rep, err := db.IngestLedger(first+2, rawSkip)
 	require.ErrorIs(t, err, event.ErrLedgerOutOfOrder)
 	assert.Equal(t, PhaseEvents, rep.Failed, "the in-batch sequence guard rejects pre-commit")
 	_, gerr := db.Txhash().Get(hashSkip)
@@ -574,7 +575,7 @@ func TestIngestLedger_TxhashVisibleAtReturnAndSkipRejected(t *testing.T) {
 
 	// The dense chain is intact: the correct next ledger commits and serves.
 	rawB, hashB, _ := lcmWithEvent(t, first+1)
-	_, err = db.IngestLedger(first+1, xdr.LedgerCloseMetaView(rawB))
+	_, err = db.IngestLedger(first+1, rawB)
 	require.NoError(t, err)
 	seq, err = db.Txhash().Get(hashB)
 	require.NoError(t, err)
@@ -592,7 +593,7 @@ func TestIngestLedger_ClosedDBFails(t *testing.T) {
 	require.NoError(t, db.Close())
 
 	raw := zeroTxLCM(t, chunkID.FirstLedger())
-	_, err = db.IngestLedger(chunkID.FirstLedger(), xdr.LedgerCloseMetaView(raw))
+	_, err = db.IngestLedger(chunkID.FirstLedger(), raw)
 	require.ErrorIs(t, err, rocksdb.ErrStoreClosed)
 }
 
