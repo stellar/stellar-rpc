@@ -11,6 +11,7 @@ import (
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
 
@@ -51,8 +52,10 @@ func (f *sourceFlags) bind(cmd *cobra.Command) {
 		"BSB prefetch buffer depth PER worker (0 = backfill default)")
 	fs.Uint32Var(&f.bsbNumWorkers, "bsb-num-workers", 0,
 		"BSB download workers PER worker (0 = backfill default)")
-	fs.Uint32Var(&f.retryLimit, "retry-limit", 0, "BSB retry attempts on transient failure (0 = backfill default)")
-	fs.DurationVar(&f.retryWait, "retry-wait", 0, "BSB delay between retries (0 = backfill default)")
+	fs.Uint32Var(&f.retryLimit, "retry-limit", backfill.DefaultBSBMaxRetries,
+		"BSB retry attempts per object download (0 = no retries)")
+	fs.DurationVar(&f.retryWait, "retry-wait", backfill.DefaultBSBRetryWait,
+		"BSB delay between per-object retries")
 	fs.StringVar(&f.datastoreType, "datastore-type", "GCS",
 		"BSB datastore type: GCS | S3 | Filesystem (used iff --source=bsb)")
 	fs.StringVar(&f.region, "region", "", "bucket region for --datastore-type=S3, e.g. us-east-2")

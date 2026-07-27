@@ -45,21 +45,20 @@ type sourceConfig struct {
 
 	// BufferSize is the BSB prefetch buffer depth PER WORKER: total prefetch
 	// multiplies by the cold driver's Workers. Zero falls back to the backfill
-	// package's benchmarked default.
+	// package's default.
 	BufferSize uint32
 
 	// NumWorkers is the BSB download concurrency PER WORKER: total downloads
 	// in flight multiply by the cold driver's Workers. Zero falls back to the
-	// backfill package's benchmarked default.
+	// backfill package's default.
 	NumWorkers uint32
 
-	// RetryLimit caps BSB download retries on transient datastore errors.
-	// Zero falls back to the backfill package's default — retries cannot be
-	// disabled.
+	// RetryLimit caps BSB download retries on transient datastore errors,
+	// used verbatim: zero means no retries (the flag defaults to the backfill
+	// package's default, not zero).
 	RetryLimit uint32
 
-	// RetryWait is the pause between BSB download retries. Zero falls back to
-	// the backfill package's default.
+	// RetryWait is the pause between BSB download retries, used verbatim.
 	RetryWait time.Duration
 
 	// DatastoreType selects the SDK datastore backing the BSB source:
@@ -98,7 +97,7 @@ func (c sourceConfig) validate() error {
 //   - pack: a packBackend over the frozen ledgers tree under PackDir. Local and
 //     fully repeatable.
 //   - bsb: the production BSB source (backfill.NewBSBBackendFromConfig) over a
-//     GCS, S3, or Filesystem datastore, with its benchmarked default tuning.
+//     GCS, S3, or Filesystem datastore.
 //     Each RawLedgers call owns an independent datastore + prefetch lifecycle,
 //     so concurrent workers do not contend on shared cursor state.
 func openSource(ctx context.Context, cfg sourceConfig) (backfill.Backend, func(), error) {

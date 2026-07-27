@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/limits"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
@@ -25,25 +27,9 @@ func validateConfig(
 		return 0, errors.New("validateConfig requires a non-nil Catalog")
 	}
 
-	workers := deref(cfg.Backfill.Workers)
-	maxRetries := deref(cfg.Backfill.MaxRetries)
-
-	// --- 1. Form validation. ---
-	if workers < 1 {
-		return 0, fmt.Errorf("workers must be >= 1 (got %d) — a zero pool deadlocks executePlan", workers)
-	}
-	if maxRetries < 0 {
-		return 0, fmt.Errorf("max_retries must be >= 0 (got %d) — 0 means run once, no retry", maxRetries)
-	}
-	// logging.format silently means text unless it is exactly "json", so reject any
-	// other value rather than let a typo drop the operator to text logging. Empty is
-	// the unset sentinel WithDefaults resolves to text, so it is not a typo.
-	if f := cfg.Logging.Format; f != "" && f != config.DefaultLogFormat && f != config.LogFormatJSON {
-		return 0, fmt.Errorf("logging.format must be %q or %q; got %q",
-			config.DefaultLogFormat, config.LogFormatJSON, f)
-	}
-	// Form-validate here so the numeric case avoids chunk.IDFromLedger's sub-genesis panic below.
-	if err := validateEarliestForm(cfg.Retention.EarliestLedger); err != nil {
+	// --- 1. Form validation (runDaemonWith already ran this right after config
+	// load; re-run so validateConfig stays a complete gate on its own). ---
+	if err := validateForm(cfg); err != nil {
 		return 0, err
 	}
 
@@ -69,6 +55,169 @@ func validateConfig(
 		return 0, fmt.Errorf("pin earliest ledger (earliest=%d): %w", earliest, err)
 	}
 	return earliest, nil
+}
+
+// validateForm runs every check that needs only the parsed config — no catalog,
+// no backend, no filesystem. It runs AFTER WithDefaults (pointers non-nil) and
+// BEFORE the daemon opens anything, so a malformed config is rejected without
+// side effects.
+func validateForm(cfg config.Config) error {
+	if workers := deref(cfg.Backfill.Workers); workers < 1 {
+		return fmt.Errorf("workers must be >= 1 (got %d) — a zero pool deadlocks executePlan", workers)
+	}
+	if maxRetries := deref(cfg.Backfill.MaxRetries); maxRetries < 0 {
+		return fmt.Errorf("max_retries must be >= 0 (got %d) — 0 means run once, no retry", maxRetries)
+	}
+	if err := validateBSB(cfg.Backfill.BSB); err != nil {
+		return err
+	}
+	// logging.format silently means text unless it is exactly "json", so reject any
+	// other value rather than let a typo drop the operator to text logging. Empty is
+	// the unset sentinel WithDefaults resolves to text, so it is not a typo.
+	if f := cfg.Logging.Format; f != "" && f != config.DefaultLogFormat && f != config.LogFormatJSON {
+		return fmt.Errorf("logging.format must be %q or %q; got %q",
+			config.DefaultLogFormat, config.LogFormatJSON, f)
+	}
+	// Form-validate here so validateConfig's numeric path can't hit
+	// chunk.IDFromLedger's sub-genesis panic.
+	if err := validateEarliestForm(cfg.Retention.EarliestLedger); err != nil {
+		return err
+	}
+	return validateService(cfg.Service)
+}
+
+// minConfiguredDuration guards go-toml v1's nanosecond trap: a bare integer
+// duration decodes as NANOSECONDS (max_execution_duration = 10 → 10ns), so any
+// configured duration under 1ms is a near-certain typo for the string form
+// ("10s"). Zero is rejected by the same check — a zero execution budget or
+// warning threshold is never intended.
+const minConfiguredDuration = time.Millisecond
+
+// validateBSB form-validates [backfill.bsb]. It runs AFTER WithDefaults, so
+// every pointer is non-nil. max_retries needs no check — any uint32 is valid,
+// including 0 (no retries).
+func validateBSB(bsb config.BSBConfig) error {
+	if *bsb.BufferSize < 1 {
+		return errors.New("[backfill.bsb].buffer_size must be >= 1")
+	}
+	if *bsb.NumWorkers < 1 {
+		return errors.New("[backfill.bsb].num_workers must be >= 1")
+	}
+	if *bsb.NumWorkers > *bsb.BufferSize {
+		return fmt.Errorf("[backfill.bsb].num_workers (%d) cannot exceed buffer_size (%d) — "+
+			"each worker needs a buffer slot to download into", *bsb.NumWorkers, *bsb.BufferSize)
+	}
+	if *bsb.RetryWait < minConfiguredDuration {
+		return fmt.Errorf("[backfill.bsb].retry_wait is %v — durations below 1ms are rejected; "+
+			"a bare TOML integer parses as nanoseconds, write a string like \"5s\"", *bsb.RetryWait)
+	}
+	return nil
+}
+
+// validateService form-validates the [service] section. It runs AFTER
+// WithDefaults, so every pointer is non-nil and the checks cover all three
+// tiers of the methods cascade (an explicit zero at any tier lands here).
+func validateService(svc config.ServiceConfig) error {
+	if *svc.MaxConcurrentRequests < 1 {
+		return errors.New("[service].max_concurrent_requests must be >= 1")
+	}
+	durations := []struct {
+		name string
+		d    time.Duration
+	}{
+		{"[service].max_request_execution_duration", *svc.MaxRequestExecutionDuration},
+		{"[service].request_execution_warning_threshold", *svc.RequestExecutionWarningThreshold},
+		{"[service.methods.getHealth].max_healthy_ledger_latency", *svc.Methods.GetHealth.MaxHealthyLedgerLatency},
+	}
+	m := svc.Methods
+	if m.QueueLimit != nil && *m.QueueLimit < 1 {
+		return errors.New("[service.methods].queue_limit must be >= 1")
+	}
+	if m.MaxExecutionDuration != nil {
+		durations = append(durations, struct {
+			name string
+			d    time.Duration
+		}{"[service.methods].max_execution_duration", *m.MaxExecutionDuration})
+	}
+
+	methods := []struct {
+		name  string
+		queue uint
+		dur   time.Duration
+	}{
+		{"getHealth", *m.GetHealth.QueueLimit, *m.GetHealth.MaxExecutionDuration},
+		{"getNetwork", *m.GetNetwork.QueueLimit, *m.GetNetwork.MaxExecutionDuration},
+		{"getVersionInfo", *m.GetVersionInfo.QueueLimit, *m.GetVersionInfo.MaxExecutionDuration},
+		{"getLatestLedger", *m.GetLatestLedger.QueueLimit, *m.GetLatestLedger.MaxExecutionDuration},
+		{"getTransaction", *m.GetTransaction.QueueLimit, *m.GetTransaction.MaxExecutionDuration},
+		{"getTransactions", *m.GetTransactions.QueueLimit, *m.GetTransactions.MaxExecutionDuration},
+		{"getLedgers", *m.GetLedgers.QueueLimit, *m.GetLedgers.MaxExecutionDuration},
+		{"getEvents", *m.GetEvents.QueueLimit, *m.GetEvents.MaxExecutionDuration},
+		{"getFeeStats", *m.GetFeeStats.QueueLimit, *m.GetFeeStats.MaxExecutionDuration},
+	}
+	for _, mm := range methods {
+		if mm.queue < 1 {
+			return fmt.Errorf("[service.methods.%s].queue_limit must be >= 1", mm.name)
+		}
+		durations = append(durations, struct {
+			name string
+			d    time.Duration
+		}{"[service.methods." + mm.name + "].max_execution_duration", mm.dur})
+	}
+	for _, dd := range durations {
+		if dd.d < minConfiguredDuration {
+			return fmt.Errorf("%s is %v — durations below 1ms are rejected; "+
+				"a bare TOML integer parses as nanoseconds, write a string like \"10s\"", dd.name, dd.d)
+		}
+	}
+
+	if err := validatePaginatedMethods(m); err != nil {
+		return err
+	}
+	return validateFeeWindows(svc.FeeStats)
+}
+
+func validatePaginatedMethods(m config.MethodsConfig) error {
+	paginated := []struct {
+		name string
+		p    config.PaginatedMethodConfig
+	}{
+		{"getTransactions", m.GetTransactions},
+		{"getLedgers", m.GetLedgers},
+		{"getEvents", m.GetEvents},
+	}
+	for _, pp := range paginated {
+		if *pp.p.MaxItemsPerResponse < 1 {
+			return fmt.Errorf("[service.methods.%s].max_items_per_response must be >= 1", pp.name)
+		}
+		if *pp.p.DefaultItemsPerResponse < 1 {
+			return fmt.Errorf("[service.methods.%s].default_items_per_response must be >= 1", pp.name)
+		}
+		if *pp.p.DefaultItemsPerResponse > *pp.p.MaxItemsPerResponse {
+			return fmt.Errorf("[service.methods.%s].default_items_per_response (%d) cannot exceed max_items_per_response (%d)",
+				pp.name, *pp.p.DefaultItemsPerResponse, *pp.p.MaxItemsPerResponse)
+		}
+	}
+	return nil
+}
+
+func validateFeeWindows(fs config.FeeStatsConfig) error {
+	feeWindows := []struct {
+		name string
+		v    uint32
+	}{
+		{"[service.fee_stats].classic_fee_window_ledgers", *fs.ClassicFeeWindowLedgers},
+		{"[service.fee_stats].soroban_inclusion_fee_window_ledgers", *fs.SorobanInclusionFeeWindowLedgers},
+	}
+	for _, fw := range feeWindows {
+		if fw.v < 1 {
+			return fmt.Errorf("%s must be >= 1", fw.name)
+		}
+		if err := limits.ValidateFeeStatsRetentionWindow(fw.name, fw.v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // confirmEarliestUnchanged enforces earliest_ledger's restart immutability: genesis or

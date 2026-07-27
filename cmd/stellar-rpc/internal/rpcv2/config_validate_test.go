@@ -4,6 +4,7 @@ import (
 	"context"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -14,13 +15,15 @@ import (
 )
 
 // validCfg builds a valid Config; callers mutate one field to drive a rejection.
+// Defaults are applied, matching production (validateConfig's contract is a
+// post-WithDefaults config — every [service] pointer non-nil).
 func validCfg(workers, maxRetries int, earliest string) config.Config {
 	return config.Config{
-		Service:   config.ServiceConfig{DefaultDataDir: "/data"},
+		Storage:   config.StorageConfig{DefaultDataDir: "/data"},
 		Retention: config.RetentionConfig{EarliestLedger: earliest},
 		Backfill:  config.BackfillConfig{Workers: &workers, MaxRetries: &maxRetries},
 		Ingestion: config.IngestionConfig{CaptiveCoreConfig: "/cc"},
-	}
+	}.WithDefaults()
 }
 
 // readyTip returns a tip backend that always reports the given ledger.
@@ -125,6 +128,133 @@ func TestValidateConfig_RejectsMalformed(t *testing.T) {
 			assert.False(t, ok, "no earliest pin on a rejected config")
 		})
 	}
+}
+
+func TestValidateConfig_RejectsMalformedService(t *testing.T) {
+	uintPtr := func(v uint) *uint { return &v }
+	uint32Ptr := func(v uint32) *uint32 { return &v }
+	durPtr := func(v time.Duration) *time.Duration { return &v }
+
+	tests := []struct {
+		name   string
+		mutate func(*config.Config)
+		want   string
+	}{
+		{
+			"zero max_concurrent_requests",
+			func(c *config.Config) { c.Service.MaxConcurrentRequests = uintPtr(0) },
+			"max_concurrent_requests",
+		},
+		{
+			"zero per-method queue_limit",
+			func(c *config.Config) { c.Service.Methods.GetLedgers.QueueLimit = uintPtr(0) },
+			"[service.methods.getLedgers].queue_limit",
+		},
+		{
+			"zero wide-tier queue_limit",
+			func(c *config.Config) { c.Service.Methods.QueueLimit = uintPtr(0) },
+			"queue_limit",
+		},
+		{
+			// The nanosecond trap: a bare TOML integer 10 decodes as 10ns.
+			"sub-millisecond duration",
+			func(c *config.Config) { c.Service.Methods.GetEvents.MaxExecutionDuration = durPtr(10) },
+			"nanoseconds",
+		},
+		{
+			"zero global execution duration",
+			func(c *config.Config) { c.Service.MaxRequestExecutionDuration = durPtr(0) },
+			"max_request_execution_duration",
+		},
+		{
+			"default items above max",
+			func(c *config.Config) {
+				c.Service.Methods.GetLedgers.MaxItemsPerResponse = uintPtr(10)
+				c.Service.Methods.GetLedgers.DefaultItemsPerResponse = uintPtr(11)
+			},
+			"default_items_per_response",
+		},
+		{
+			"zero default items",
+			func(c *config.Config) { c.Service.Methods.GetEvents.DefaultItemsPerResponse = uintPtr(0) },
+			"default_items_per_response",
+		},
+		{
+			"fee window above the cap",
+			func(c *config.Config) { c.Service.FeeStats.ClassicFeeWindowLedgers = uint32Ptr(1001) },
+			"classic_fee_window_ledgers",
+		},
+		{
+			"zero fee window",
+			func(c *config.Config) { c.Service.FeeStats.SorobanInclusionFeeWindowLedgers = uint32Ptr(0) },
+			"soroban_inclusion_fee_window_ledgers",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cat, _ := testCatalog(t)
+			cfg := validCfg(4, 3, "genesis")
+			tc.mutate(&cfg)
+			_, err := callValidate(t, cfg, cat, downTip())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+func TestValidateConfig_RejectsMalformedBSB(t *testing.T) {
+	uint32Ptr := func(v uint32) *uint32 { return &v }
+	durPtr := func(v time.Duration) *time.Duration { return &v }
+
+	tests := []struct {
+		name   string
+		mutate func(*config.Config)
+		want   string
+	}{
+		{
+			"zero buffer_size",
+			func(c *config.Config) { c.Backfill.BSB.BufferSize = uint32Ptr(0) },
+			"[backfill.bsb].buffer_size",
+		},
+		{
+			"zero num_workers",
+			func(c *config.Config) { c.Backfill.BSB.NumWorkers = uint32Ptr(0) },
+			"[backfill.bsb].num_workers",
+		},
+		{
+			// The nanosecond trap again: retry_wait = 10 decodes as 10ns.
+			"sub-millisecond retry_wait",
+			func(c *config.Config) { c.Backfill.BSB.RetryWait = durPtr(10) },
+			"nanoseconds",
+		},
+		{
+			"num_workers above buffer_size",
+			func(c *config.Config) {
+				c.Backfill.BSB.BufferSize = uint32Ptr(10)
+				c.Backfill.BSB.NumWorkers = uint32Ptr(50)
+			},
+			"num_workers",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cat, _ := testCatalog(t)
+			cfg := validCfg(4, 3, "genesis")
+			tc.mutate(&cfg)
+			_, err := callValidate(t, cfg, cat, downTip())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+func TestValidateConfig_AcceptsZeroBSBMaxRetries(t *testing.T) {
+	uint32Ptr := func(v uint32) *uint32 { return &v }
+	cat, _ := testCatalog(t)
+	cfg := validCfg(4, 3, "genesis")
+	cfg.Backfill.BSB.MaxRetries = uint32Ptr(0)
+	_, err := callValidate(t, cfg, cat, downTip())
+	require.NoError(t, err)
 }
 
 // ---------------------------------------------------------------------------

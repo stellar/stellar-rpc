@@ -30,9 +30,11 @@ import (
 
 // RunDaemon is the full-history daemon's process entrypoint: load config, lock
 // storage roots, open the catalog, validateConfig, build boundaries, then run
-// the supervised run loop.
-func RunDaemon(ctx context.Context, configPath string) error {
-	return runDaemonWith(ctx, configPath, daemonOptions{})
+// the supervised run loop. flags carries the CLI overrides main registered via
+// config.BindFlags (nil = none); each set flag overlays its TOML key before
+// defaults resolve.
+func RunDaemon(ctx context.Context, configPath string, flags config.FlagOverrides) error {
+	return runDaemonWith(ctx, configPath, daemonOptions{Flags: flags})
 }
 
 // daemonOptions carries the daemon's injectable seams; production leaves every field zero.
@@ -64,6 +66,9 @@ type daemonOptions struct {
 	// IngestSink is the per-type cold-path ingest sink; nil ⇒ a *ingest.PrometheusSink.
 	IngestSink ingest.MetricSink
 
+	// Flags carries the CLI overrides registered by config.BindFlags; nil = none.
+	Flags config.FlagOverrides
+
 	// chunksPerTxhashIndex overrides the tx-hash index width (test-only). 0 ⇒ the
 	// fixed geometry.ChunksPerTxhashIndex. Tests set it to 1 so a single chunk's
 	// freeze is a terminal index (exercising the index rebuild + prune path cheaply).
@@ -77,12 +82,17 @@ const defaultRestartBackoff = 5 * time.Second
 //nolint:cyclop,funlen // linear startup sequence; each branch is one wiring step
 func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) error {
 	// --- Load + form-validate the config. ---
-	cfg, err := config.LoadConfig(configPath)
+	cfg, err := config.LoadConfigWithFlags(configPath, opts.Flags)
 	if err != nil {
 		return err
 	}
-	if cfg.Service.DefaultDataDir == "" {
-		return errors.New("[service].default_data_dir is required")
+	if cfg.Storage.DefaultDataDir == "" {
+		return errors.New("[storage].default_data_dir is required")
+	}
+	// Reject a malformed config before anything is opened (catalog, core,
+	// datastore). validateConfig re-runs these pure checks as part of its gate.
+	if err := validateForm(cfg); err != nil {
+		return err
 	}
 
 	logger := opts.Logger
@@ -121,7 +131,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// ingestion loop, and the no-lake backfill source is built from its stream. A
 	// bad [ingestion] config therefore surfaces before validateConfig's errors —
 	// cosmetic, both are fatal startup errors. ---
-	core, err := resolveCore(opts, cfg, logger)
+	core, networkPassphrase, err := resolveCore(opts, cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -143,7 +153,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// (which needs the tip) runs after this. ---
 	backend := opts.Backend
 	if backend == nil {
-		built, cleanup, berr := buildBackfillBackend(ctx, cfg, core, pool, logger)
+		built, cleanup, berr := buildBackfillBackend(ctx, cfg, core, pool, networkPassphrase, logger)
 		if berr != nil {
 			return fmt.Errorf("build backfill backend: %w", berr)
 		}
@@ -211,16 +221,18 @@ func openCatalog(paths config.Paths, opts daemonOptions, logger *supportlog.Entr
 }
 
 // resolveCore returns the injected CoreOpener (tests) or a production captive-core
-// opener built from [ingestion].
-func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry) (CoreOpener, error) {
+// opener built from [ingestion], plus the NETWORK_PASSPHRASE read back from the
+// captive-core file. An injected opener carries no passphrase — the empty string
+// means "unknown", which skips the datastore's wrong-network check.
+func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry) (CoreOpener, string, error) {
 	if opts.Core != nil {
-		return opts.Core, nil
+		return opts.Core, "", nil
 	}
-	built, err := newCaptiveCoreOpener(cfg.Ingestion, cfg.Service.DefaultDataDir, logger)
+	built, err := newCaptiveCoreOpener(cfg.Ingestion, cfg.Storage.DefaultDataDir, logger)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return built, nil
+	return built, built.config.NetworkPassphrase, nil
 }
 
 // startConfig assembles the StartConfig run consumes. run() builds the
@@ -317,11 +329,18 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // pinnable (#833). With neither it returns (nil, nil, nil) and runDaemonWith fails
 // startup with the config-shaped message. core must be non-nil (runDaemonWith
 // resolves the opener first).
+//
+// networkPassphrase is the one read back from the captive-core file; it is
+// copied into the SDK datastore config so a lake whose manifest names a
+// DIFFERENT network is rejected at startup (NewBSBBackendFromConfig's manifest
+// check). Empty means unknown and skips the check.
 func buildBackfillBackend(
-	ctx context.Context, cfg config.Config, core CoreOpener, pool rootHASGetter, logger *supportlog.Entry,
+	ctx context.Context, cfg config.Config, core CoreOpener, pool rootHASGetter,
+	networkPassphrase string, logger *supportlog.Entry,
 ) (backfill.Backend, func(), error) {
 	if cfg.Backfill.DataStore.Type != "" {
-		backend, cleanup, err := backfill.NewBSBBackendFromConfig(ctx, cfg.Backfill.DataStore, cfg.Backfill.BSB)
+		dsCfg := cfg.Backfill.DataStore.SDKConfig(networkPassphrase)
+		backend, cleanup, err := backfill.NewBSBBackendFromConfig(ctx, dsCfg, cfg.Backfill.BSB.SDKConfig())
 		if err != nil {
 			return nil, nil, err
 		}
