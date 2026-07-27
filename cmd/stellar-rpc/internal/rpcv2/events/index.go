@@ -61,9 +61,9 @@ const MaxTermsPerEvent = 1 + protocol.MaxTopicCount
 // returns the extended slice — TermsForBytes for arena callers: at most
 // MaxTermsPerEvent keys are appended, so a writer-owned dst reused across
 // events makes this path allocation-free (the hot ingest loop's shape).
-// Same accept/reject decisions and key bytes as TermsForBytes (the golden
-// sweep in append_terms_test.go pins the equivalence); only the topics walk
-// differs — see appendTopicTerms.
+// This is THE term derivation — TermsForBytes delegates here — and the
+// golden sweep in append_terms_test.go pins its accept/reject decisions and
+// key bytes against an independent All()-slice reference.
 func AppendTerms(dst []TermKey, eventBytes []byte) ([]TermKey, error) {
 	ev := xdr.ContractEventView(eventBytes)
 
@@ -92,7 +92,7 @@ func AppendTerms(dst []TermKey, eventBytes []byte) ([]TermKey, error) {
 		return nil, fmt.Errorf("events: view Body.V: %w", err)
 	}
 	// Only Body discriminant V=0 carries topics. A future body version is a
-	// hard error matching TermsForBytes (and the SQLite backend) — a silently
+	// hard error matching the SQLite backend (sqlitedb/event.go) — a silently
 	// contractID-only index would make topic queries miss real events with no
 	// signal.
 	if bodyVVal != 0 {
@@ -145,65 +145,12 @@ func appendTopicTerms(dst []TermKey, topics xdr.ContractEventV0TopicsView) ([]Te
 }
 
 // TermsForBytes returns the term keys (contract ID + topics
-// 0..MaxTopicCount-1) for a marshaled ContractEvent, navigating the raw
-// XDR via xdr.ContractEventView instead of a full UnmarshalBinary.
+// 0..MaxTopicCount-1) for a marshaled ContractEvent — AppendTerms without a
+// caller-owned arena (a fresh slice per event). One derivation serves both
+// entry points, so the accept/reject decisions and key bytes cannot drift
+// between the arena-owning hot path and the per-call cold/test path.
 func TermsForBytes(eventBytes []byte) ([]TermKey, error) {
-	ev := xdr.ContractEventView(eventBytes)
-	var keys []TermKey
-
-	cidOpt, err := ev.ContractId()
-	if err != nil {
-		return nil, fmt.Errorf("events: view ContractId: %w", err)
-	}
-	cidView, present, err := cidOpt.Unwrap()
-	if err != nil {
-		return nil, fmt.Errorf("events: view ContractId unwrap: %w", err)
-	}
-	if present {
-		cid, err := cidView.Value()
-		if err != nil {
-			return nil, fmt.Errorf("events: view ContractId value: %w", err)
-		}
-		keys = append(keys, ComputeTermKey(cid[:], FieldContractID))
-	}
-
-	body, err := ev.Body()
-	if err != nil {
-		return nil, fmt.Errorf("events: view ContractEvent.Body: %w", err)
-	}
-	bodyVVal, err := body.V()
-	if err != nil {
-		return nil, fmt.Errorf("events: view Body.V: %w", err)
-	}
-	// Only Body discriminant V=0 carries topics. A future body version
-	// is a hard error matching the SQLite backend (sqlitedb/event.go) — a
-	// silently contractID-only index would make topic queries miss
-	// real events with no signal.
-	if bodyVVal != 0 {
-		return nil, fmt.Errorf("events: unsupported ContractEvent body version %d", bodyVVal)
-	}
-	v0, err := body.V0()
-	if err != nil {
-		return nil, fmt.Errorf("events: view Body.V0: %w", err)
-	}
-	topics, err := v0.Topics()
-	if err != nil {
-		return nil, fmt.Errorf("events: view Body.V0.Topics: %w", err)
-	}
-	topicViews, err := topics.All()
-	if err != nil {
-		return nil, fmt.Errorf("events: view Body.V0.Topics.All: %w", err)
-	}
-	for i, topic := range topicViews {
-		if i >= protocol.MaxTopicCount {
-			break
-		}
-		// All returns each element trimmed to its exact size, so the
-		// ScValView bytes are already the topic's raw XDR — hash them
-		// directly rather than calling Raw() (which re-walks size).
-		keys = append(keys, ComputeTermKey([]byte(topic), topicField(i)))
-	}
-	return keys, nil
+	return AppendTerms(nil, eventBytes)
 }
 
 // topicField maps a topic position (0..MaxTopicCount-1) to its

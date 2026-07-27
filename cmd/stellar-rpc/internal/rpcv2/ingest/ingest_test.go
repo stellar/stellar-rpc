@@ -908,7 +908,7 @@ func eventRichLedger(t *testing.T, seq uint32) []byte {
 //     is the OLD txhash extractor — a separate SDK walk from the shared
 //     ExtractLedgerEvents the ingester now reads — so an entry-by-entry match
 //     proves the switch to `.Hash` off the shared walk changed no byte.
-//   - events per-term bitmaps + count vs. an independent PayloadsFromLedgerEvents
+//   - events per-term bitmaps + count vs. an independent PayloadShaper
 //     shaping, with chunk-relative event IDs assigned in ingest (ascending-seq)
 //     order — proving the event-ID assignment is unchanged.
 //
@@ -959,7 +959,7 @@ func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 	gotEntries := rpcv2test.ReadColdBin(t, txhashBinPath(filepath.Join(coldDir, dataTypeTxhash)))
 	require.Equal(t, wantEntries, gotEntries, "cold .bin must hold every resolvable hash, sorted and truncated")
 
-	// Reference #2 — events: PayloadsFromLedgerEvents with chunk-relative IDs
+	// Reference #2 — events: PayloadShaper output with chunk-relative IDs
 	// assigned in ingest (ascending-seq) order, mapped to their term keys.
 	wantTermIDs := map[events.TermKey][]uint32{}
 	var nextID uint32
@@ -969,8 +969,12 @@ func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 		require.NoError(t, err)
 		closedAt, err := view.LedgerCloseTime()
 		require.NoError(t, err)
-		payloads, err := events.PayloadsFromLedgerEvents(txEvents, seq, closedAt)
-		require.NoError(t, err)
+		shaper := events.NewPayloadShaper(seq, closedAt)
+		shaper.Begin(len(txEvents))
+		for i := range txEvents {
+			require.NoError(t, shaper.Add(i, txEvents[i]))
+		}
+		payloads := shaper.Finish()
 		for i := range payloads {
 			keys, kerr := events.TermsForBytes(payloads[i].ContractEventBytes)
 			require.NoError(t, kerr)
@@ -1482,7 +1486,7 @@ func TestEventsCold_FinalizeAfterFailedIngest_Refuses(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
-	// A garbage top-level TransactionEvent fails PayloadsFromLedgerEvents' Stage
+	// A garbage top-level TransactionEvent fails the shaper's Stage
 	// decode inside write — the walk itself is coldChunk's job, so the
 	// per-writer failure is a shaping error over the shared walk's output.
 	bad := []sdkingest.LedgerTransactionEvents{{TransactionEvents: [][]byte{{0xff, 0xff}}}}

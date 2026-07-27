@@ -26,9 +26,9 @@ const testPassphrase = "Test SDF Network ; September 2015"
 
 // lcmViewToPayloads is the view→payloads convenience the cursor-contract tests
 // need to run from raw LCM bytes: the header reads plus the single
-// ExtractLedgerEvents walk, fed to PayloadsFromLedgerEvents. Test-only —
-// production walks once at a higher level (hot IngestLedger, cold coldChunk.ingest)
-// and calls PayloadsFromLedgerEvents directly.
+// ExtractLedgerEvents walk feeding events.PayloadShaper. Test-only —
+// production walks once at a higher level (hot IngestLedger, cold
+// coldChunk.ingest) and drives the shaper from that same walk's output.
 func lcmViewToPayloads(lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
 	seq, err := lcm.LedgerSequence()
 	if err != nil {
@@ -42,7 +42,14 @@ func lcmViewToPayloads(lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
 	if err != nil {
 		return nil, err
 	}
-	return events.PayloadsFromLedgerEvents(txEvents, seq, closedAt)
+	shaper := events.NewPayloadShaper(seq, closedAt)
+	shaper.Begin(len(txEvents))
+	for i := range txEvents {
+		if err := shaper.Add(i, txEvents[i]); err != nil {
+			return nil, err
+		}
+	}
+	return shaper.Finish(), nil
 }
 
 // buildContractEvent returns a ContractEvent with a contractID and a

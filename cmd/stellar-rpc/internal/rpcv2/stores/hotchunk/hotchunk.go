@@ -444,7 +444,7 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 	// ONE TxProcessing walk feeds BOTH hot data types: ExtractLedgerEvents yields,
 	// per transaction in apply order, the tx hash AND its contract events. txhash
 	// reads each element's Hash and events shapes the same slice
-	// (PayloadsFromLedgerEvents), so the two share one walk instead of the two
+	// (events.PayloadShaper), so the two share one walk instead of the two
 	// (ExtractTxHashes + a second ExtractLedgerEvents walk) they would each run —
 	// halving per-ledger extraction. Shaping the already-extracted slice (not
 	// re-walking) keeps the event-ID assignment order identical to a per-view
@@ -479,7 +479,7 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 		return rep, fmt.Errorf("ledger close time seq %d: %w", seq, err)
 	}
 	// A pre-Soroban ledger yields zero payloads, no error.
-	payloads, err := events.PayloadsFromLedgerEvents(txEvents, seq, closedAt)
+	payloads, err := shapePayloads(seq, closedAt, txEvents)
 	if err != nil {
 		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
 		rep.Failed = PhaseExtract
@@ -567,6 +567,22 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 		return rep, fmt.Errorf("apply hot indexes for ledger %d: %w", seq, aerr)
 	}
 	return rep, nil
+}
+
+// shapePayloads drives events.PayloadShaper over the extracted slice — one
+// Add per transaction in apply order, the same cursor-ordered output the
+// whole-slice shaping produced.
+func shapePayloads(
+	seq uint32, closedAt int64, txEvents []sdkingest.LedgerTransactionEvents,
+) ([]events.Payload, error) {
+	shaper := events.NewPayloadShaper(seq, closedAt)
+	shaper.Begin(len(txEvents))
+	for i := range txEvents {
+		if err := shaper.Add(i, txEvents[i]); err != nil {
+			return nil, err
+		}
+	}
+	return shaper.Finish(), nil
 }
 
 // ledgerTxHashes collects one ledger's indexable tx hashes in apply order —

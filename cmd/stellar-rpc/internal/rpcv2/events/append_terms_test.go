@@ -2,24 +2,83 @@ package events
 
 import (
 	"encoding/binary"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
-// TestAppendTerms_GoldenAgainstTermsForBytes is the Count()+Raw() walk's
-// golden gate: AppendTerms must be observably identical to the
-// TopicsView.All path TermsForBytes still uses — byte-identical TermKeys on
-// every accept, reject exactly when the old path rejects. The sweep
+// termsViaAll is the golden sweep's INDEPENDENT reference derivation: the
+// same cid/body navigation as AppendTerms, but with the topics walked
+// through the generated All() slice — every element sized eagerly, so its
+// whole-vec validation matches the production Count()+Raw() walk while
+// sharing none of its offset arithmetic. (This was TermsForBytes' body
+// before it converged onto AppendTerms.)
+func termsViaAll(eventBytes []byte) ([]TermKey, error) {
+	ev := xdr.ContractEventView(eventBytes)
+	var keys []TermKey
+	cidOpt, err := ev.ContractId()
+	if err != nil {
+		return nil, err
+	}
+	cidView, present, err := cidOpt.Unwrap()
+	if err != nil {
+		return nil, err
+	}
+	if present {
+		cid, cerr := cidView.Value()
+		if cerr != nil {
+			return nil, cerr
+		}
+		keys = append(keys, ComputeTermKey(cid[:], FieldContractID))
+	}
+	body, err := ev.Body()
+	if err != nil {
+		return nil, err
+	}
+	bodyV, err := body.V()
+	if err != nil {
+		return nil, err
+	}
+	if bodyV != 0 {
+		return nil, fmt.Errorf("unsupported ContractEvent body version %d", bodyV)
+	}
+	v0, err := body.V0()
+	if err != nil {
+		return nil, err
+	}
+	topics, err := v0.Topics()
+	if err != nil {
+		return nil, err
+	}
+	topicViews, err := topics.All()
+	if err != nil {
+		return nil, err
+	}
+	for i, topic := range topicViews {
+		if i >= protocol.MaxTopicCount {
+			break
+		}
+		keys = append(keys, ComputeTermKey([]byte(topic), topicField(i)))
+	}
+	return keys, nil
+}
+
+// TestAppendTerms_GoldenAgainstAllReference is the Count()+Raw() walk's
+// golden gate: AppendTerms (and with it TermsForBytes, which delegates)
+// must be observably identical to the All()-slice reference —
+// byte-identical TermKeys on
+// every accept, reject exactly when the reference rejects. The sweep
 // truncates each fixture's raw XDR at EVERY length, which covers the
 // mandated cases by construction: truncation inside an in-cap topic,
 // truncation inside an over-cap topic (the overCap fixture's topics 4 and 5
 // — Raw sizes every element, so over-cap truncation must still reject), and
 // harmless truncation past the topics array (both paths accept).
-func TestAppendTerms_GoldenAgainstTermsForBytes(t *testing.T) {
+func TestAppendTerms_GoldenAgainstAllReference(t *testing.T) {
 	var cid xdr.ContractId
 	cid[0], cid[1] = 0xab, 0xcd
 	fixtures := map[string]xdr.ContractEvent{
@@ -35,14 +94,14 @@ func TestAppendTerms_GoldenAgainstTermsForBytes(t *testing.T) {
 			sawReject := false
 			for n := 0; n <= len(raw); n++ {
 				prefix := raw[:n]
-				want, wantErr := TermsForBytes(prefix)
+				want, wantErr := termsViaAll(prefix)
 				got, gotErr := AppendTerms(nil, prefix)
 				if wantErr != nil {
 					sawReject = true
-					require.Error(t, gotErr, "prefix of %d bytes: old path rejected, new must too", n)
+					require.Error(t, gotErr, "prefix of %d bytes: reference rejected, production must too", n)
 					continue
 				}
-				require.NoError(t, gotErr, "prefix of %d bytes: old path accepted, new must too", n)
+				require.NoError(t, gotErr, "prefix of %d bytes: reference accepted, production must too", n)
 				assert.Equal(t, want, got, "keys diverged at prefix of %d bytes", n)
 			}
 			require.True(t, sawReject, "sweep must hit at least one truncation reject")
