@@ -292,23 +292,23 @@ func TestValidateConfig_RejectsMalformedCoreHTTP(t *testing.T) {
 			// sendTransaction off it, so 0 is a broken deployment.
 			"zero core_http_port",
 			func(c *config.Config) { c.Ingestion.CoreHTTPPort = uintPtr(0) },
-			"[ingestion].core_http_port",
+			"[ingestion]." + keyCoreHTTPPort,
 		},
 		{
 			// The captive-core toml carries these as uint16.
 			"core_http_query_port above 65535",
 			func(c *config.Config) { c.Ingestion.CoreHTTPQueryPort = uintPtr(70000) },
-			"[ingestion].core_http_query_port",
+			"[ingestion]." + keyCoreHTTPQueryPort,
 		},
 		{
 			"thread pool above 65535",
 			func(c *config.Config) { c.Ingestion.CoreHTTPQueryThreadPoolSize = uintPtr(65536) },
-			"core_http_query_thread_pool_size",
+			keyCoreQueryThreadPoolSize,
 		},
 		{
 			"zero snapshot ledgers",
 			func(c *config.Config) { c.Ingestion.CoreHTTPQuerySnapshotLedgers = uintPtr(0) },
-			"core_http_query_snapshot_ledgers",
+			keyCoreQuerySnapshotLedgers,
 		},
 		{
 			"both servers on one port",
@@ -323,6 +323,23 @@ func TestValidateConfig_RejectsMalformedCoreHTTP(t *testing.T) {
 			"sub-millisecond core_request_timeout",
 			func(c *config.Config) { c.Ingestion.CoreRequestTimeout = durPtr(2) },
 			wantNanosecondHint,
+		},
+		{
+			// Easy to write, given the sibling key is a bare port. Without this
+			// check every submission fails at request time, not at startup.
+			"core_url without a scheme",
+			func(c *config.Config) { c.Ingestion.CoreURL = "core.internal:11626" },
+			"must start with http:// or https://",
+		},
+		{
+			"core_url with no host",
+			func(c *config.Config) { c.Ingestion.CoreURL = "http://" },
+			"names no host",
+		},
+		{
+			"core_url that is not a URL at all",
+			func(c *config.Config) { c.Ingestion.CoreURL = "http://[::1" },
+			"core_url",
 		},
 	}
 	for _, tc := range tests {

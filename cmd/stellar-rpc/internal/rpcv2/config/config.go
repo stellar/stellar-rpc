@@ -456,6 +456,7 @@ const (
 // worker count and queue size, and core's query-server thread pool. Wrapped so
 // the defaulting and the tests that assert it read the same value.
 func NumCPU() uint {
+	//nolint:gosec // runtime.NumCPU() is always non-negative and realistically well below uint limits
 	return uint(runtime.NumCPU())
 }
 

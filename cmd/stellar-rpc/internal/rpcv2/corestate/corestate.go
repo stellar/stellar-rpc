@@ -113,6 +113,11 @@ func New(cfg Config) (*Daemon, error) {
 
 	// One client per server, each with its own http.Client so a slow submission
 	// cannot consume a connection the query path needs.
+	//
+	// TODO(#889): the submission client is unwrapped, so v2 does not yet publish
+	// v1's two txsub metrics (soroban_rpc_txsub_submission_duration_seconds and
+	// _operation_count). v1's wrapper for them lives in internal/rpcv1/daemon and
+	// has to move to a shared package before sendTransaction is served.
 	return &Daemon{
 		registry:  cfg.Registry,
 		namespace: namespace,

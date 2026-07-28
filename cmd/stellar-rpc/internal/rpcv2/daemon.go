@@ -215,7 +215,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	defer preflightPool.Close()
 	logger.WithFields(supportlog.F{
 		"core_url":             cfg.Ingestion.CoreURL,
-		"core_http_query_port": deref(cfg.Ingestion.CoreHTTPQueryPort),
+		keyCoreHTTPQueryPort:   deref(cfg.Ingestion.CoreHTTPQueryPort),
 		"preflight_workers":    deref(cfg.Service.Preflight.WorkerCount),
 		"stellar_core_version": coreDaemon.CoreVersion(),
 	}).Info("wired the captive-core-backed endpoints")
@@ -506,14 +506,15 @@ func newCaptiveCoreOpeners(
 	if err != nil {
 		return resolvedCore{}, fmt.Errorf("read captive_core_config %q: %w", ing.CaptiveCoreConfig, err)
 	}
-	var peek struct {
-		NetworkPassphrase string `toml:"NETWORK_PASSPHRASE"`
-	}
+	var peek coreFilePeek
 	if perr := toml.Unmarshal(data, &peek); perr != nil {
 		return resolvedCore{}, fmt.Errorf("parse captive_core_config %q: %w", ing.CaptiveCoreConfig, perr)
 	}
 	if peek.NetworkPassphrase == "" {
 		return resolvedCore{}, fmt.Errorf("captive_core_config %q must define NETWORK_PASSPHRASE", ing.CaptiveCoreConfig)
+	}
+	if cerr := peek.checkNoHTTPConflict(ing); cerr != nil {
+		return resolvedCore{}, cerr
 	}
 
 	// stellar-core binary: explicit path, else the one on PATH (RPC daemon default).
@@ -548,6 +549,7 @@ func newCaptiveCoreOpeners(
 	if err != nil {
 		return resolvedCore{}, err
 	}
+	disableHTTPServers(backfillOpener.config.Toml)
 
 	httpPort := *ing.CoreHTTPPort
 	params.HTTPPort = &httpPort
@@ -571,6 +573,77 @@ func newCaptiveCoreOpeners(
 		networkPassphrase: peek.NetworkPassphrase,
 		binaryPath:        binaryPath,
 	}, nil
+}
+
+// disableHTTPServers strips core's two HTTP servers from a toml, so a core
+// started with it binds no ports at all. This is what makes the backfill cores
+// of a no-lake deployment safe to run in parallel — several of them replaying
+// different chunks at once cannot all bind the same two ports.
+//
+// Simply not asking for the servers is NOT enough, which is why this exists:
+// when the operator's captive-core file declares HTTP_QUERY_PORT itself, the SDK
+// keeps that value (it only overwrites the query keys when the caller passes
+// query-server params), and the bounded-replay config it generates clears
+// HTTP_PORT but never the query port. Clearing the fields on the built toml is
+// how the SDK itself disables ports (see CaptiveCoreToml.CatchupToml).
+func disableHTTPServers(coreToml *ledgerbackend.CaptiveCoreToml) {
+	coreToml.HTTPPort = 0 // 0 means "no admin server", the same value CatchupToml writes
+	coreToml.HTTPQueryPort = nil
+	coreToml.QueryThreadPoolSize = nil
+	coreToml.QuerySnapshotLedgers = nil
+}
+
+// coreFilePeek is the handful of captive-core file keys the daemon reads for
+// itself before handing the file to the SDK: the network it describes, and the
+// four HTTP-server settings that [ingestion] also owns. (go-toml ignores every
+// other key in the file.)
+type coreFilePeek struct {
+	NetworkPassphrase    string `toml:"NETWORK_PASSPHRASE"`
+	HTTPPort             *uint  `toml:"HTTP_PORT"`
+	HTTPQueryPort        *uint  `toml:"HTTP_QUERY_PORT"`
+	QueryThreadPoolSize  *uint  `toml:"QUERY_THREAD_POOL_SIZE"`
+	QuerySnapshotLedgers *uint  `toml:"QUERY_SNAPSHOT_LEDGERS"`
+}
+
+// checkNoHTTPConflict rejects a captive-core file that sets one of core's four
+// HTTP-server keys to a DIFFERENT value than the matching [ingestion] key. A
+// value that agrees is left alone, so a config carried over from v1 (where these
+// were commonly written into the core file) still starts.
+//
+// The SDK checks this too, but two of its checks are unusable: its three
+// query-server mismatch branches format the error with params.PeerPort, which
+// this daemon never sets, so they panic on a nil pointer instead of reporting
+// the conflict (go-stellar-sdk ingest/ledgerbackend/toml.go). Catching the
+// conflict here turns a nil-pointer stack trace into a startup error naming both
+// sides of the disagreement.
+func (p coreFilePeek) checkNoHTTPConflict(ing config.IngestionConfig) error {
+	conflicts := []struct {
+		fileKey    string
+		configKey  string
+		inFile     *uint
+		configured uint
+	}{
+		{"HTTP_PORT", keyCoreHTTPPort, p.HTTPPort, *ing.CoreHTTPPort},
+		{"HTTP_QUERY_PORT", keyCoreHTTPQueryPort, p.HTTPQueryPort, *ing.CoreHTTPQueryPort},
+		{
+			"QUERY_THREAD_POOL_SIZE", keyCoreQueryThreadPoolSize,
+			p.QueryThreadPoolSize, *ing.CoreHTTPQueryThreadPoolSize,
+		},
+		{
+			"QUERY_SNAPSHOT_LEDGERS", keyCoreQuerySnapshotLedgers,
+			p.QuerySnapshotLedgers, *ing.CoreHTTPQuerySnapshotLedgers,
+		},
+	}
+	for _, c := range conflicts {
+		if c.inFile == nil || *c.inFile == c.configured {
+			continue
+		}
+		return fmt.Errorf("captive_core_config sets %s = %d, but [ingestion].%s is %d — "+
+			"core's HTTP settings are configured in [ingestion]; remove %s from the "+
+			"captive-core file or set the two to the same value",
+			c.fileKey, *c.inFile, c.configKey, c.configured, c.fileKey)
+	}
+	return nil
 }
 
 // newCaptiveCoreOpener builds one opener from the captive-core file's bytes.

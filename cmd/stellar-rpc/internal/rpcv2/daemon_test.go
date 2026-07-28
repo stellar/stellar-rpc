@@ -472,12 +472,15 @@ func TestSupervise_FirstStartNoTipRetries(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // writeCaptiveCoreFile writes a captive-core config with the network passphrase
-// and a quorum set — the minimum the SDK's toml builder accepts.
-func writeCaptiveCoreFile(t *testing.T) string {
+// and a quorum set — the minimum the SDK's toml builder accepts. extra is
+// appended as top-level keys, for the cases where the operator's file also sets
+// one of core's HTTP keys.
+func writeCaptiveCoreFile(t *testing.T, extra string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "captive-core.toml")
 	body := fmt.Sprintf(`
 NETWORK_PASSPHRASE = %q
+%s
 
 [[HOME_DOMAINS]]
 HOME_DOMAIN = "testnet.stellar.org"
@@ -488,9 +491,22 @@ NAME = "sdf_testnet_1"
 HOME_DOMAIN = "testnet.stellar.org"
 PUBLIC_KEY = "GDKXE2OZMJIPOSLNA6N6F2BVCI3O777I2OOC4BV7VOYUEHYX7RTRYA7Y"
 ADDRESS = "core-testnet1.stellar.org"
-`, network.TestNetworkPassphrase)
+`, network.TestNetworkPassphrase, extra)
 	require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
 	return path
+}
+
+// coreFileIngestion is a defaulted [ingestion] section pointed at corePath. The
+// binary path is one that does not exist: nothing execs it in these tests (the
+// SDK's version probe ignores a failed lookup), and it keeps them off whatever
+// stellar-core happens to be on PATH.
+func coreFileIngestion(t *testing.T, corePath string) config.IngestionConfig {
+	t.Helper()
+	return config.Config{Ingestion: config.IngestionConfig{
+		CaptiveCoreConfig:     corePath,
+		HistoryArchiveURLs:    []string{"https://archive.example"},
+		StellarCoreBinaryPath: filepath.Join(t.TempDir(), "stellar-core"),
+	}}.WithDefaults().Ingestion
 }
 
 // The live ingestion core gets core's two HTTP servers; the backfill cores must
@@ -499,14 +515,7 @@ ADDRESS = "core-testnet1.stellar.org"
 // — and nothing ever queries a backfill core.
 func TestNewCaptiveCoreOpeners_PortsOnLiveCoreOnly(t *testing.T) {
 	uintPtr := func(v uint) *uint { return &v }
-	ing := config.IngestionConfig{
-		CaptiveCoreConfig:  writeCaptiveCoreFile(t),
-		HistoryArchiveURLs: []string{"https://archive.example"},
-		// A path that does not exist: nothing execs it here (the SDK's version
-		// probe ignores a failed lookup), and it keeps the test off whatever
-		// stellar-core happens to be on PATH.
-		StellarCoreBinaryPath: filepath.Join(t.TempDir(), "stellar-core"),
-	}
+	ing := coreFileIngestion(t, writeCaptiveCoreFile(t, ""))
 	ing.CoreHTTPPort = uintPtr(21626)
 	ing.CoreHTTPQueryPort = uintPtr(21628)
 	ing.CoreHTTPQueryThreadPoolSize = uintPtr(7)
@@ -544,6 +553,82 @@ func TestNewCaptiveCoreOpeners_PortsOnLiveCoreOnly(t *testing.T) {
 	assert.Equal(t, ing.StellarCoreBinaryPath, core.binaryPath)
 	assert.Equal(t, live.config.NetworkPassphrase, backfill.config.NetworkPassphrase)
 	assert.Equal(t, live.config.StoragePath, backfill.config.StoragePath)
+}
+
+// A captive-core file that declares core's ports ITSELF must not leak them into
+// the backfill cores. The SDK keeps a file-declared HTTP_QUERY_PORT (it
+// overwrites the query keys only when the caller passes query-server params),
+// and its bounded-replay config clears HTTP_PORT but never the query port — so
+// without disableHTTPServers every parallel replay would try to bind it.
+func TestNewCaptiveCoreOpeners_BackfillPortlessEvenWhenCoreFileDeclaresPorts(t *testing.T) {
+	// The values must AGREE with [ingestion] or startup is rejected outright; the
+	// point here is that agreeing values still do not reach a backfill core.
+	extra := "HTTP_PORT = 11626\nHTTP_QUERY_PORT = 11628\nQUERY_THREAD_POOL_SIZE = 2\n"
+	ing := coreFileIngestion(t, writeCaptiveCoreFile(t, extra))
+	poolSize := uint(2)
+	ing.CoreHTTPQueryThreadPoolSize = &poolSize
+
+	core, err := newCaptiveCoreOpeners(ing, t.TempDir(), silentLogger())
+	require.NoError(t, err)
+
+	backfill, ok := core.backfill.(*captiveCoreOpener)
+	require.True(t, ok)
+	assert.Nil(t, backfill.config.Toml.HTTPQueryPort)
+	assert.Nil(t, backfill.config.Toml.QueryThreadPoolSize)
+	assert.Nil(t, backfill.config.Toml.QuerySnapshotLedgers)
+	assert.Zero(t, backfill.config.Toml.HTTPPort)
+
+	// The generated file is what core actually reads, so assert on it too — for
+	// both the direct and the bounded-replay (catchup) form.
+	raw, err := backfill.config.Toml.Marshal()
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "HTTP_QUERY_PORT")
+	catchup, err := backfill.config.Toml.CatchupToml()
+	require.NoError(t, err)
+	rawCatchup, err := catchup.Marshal()
+	require.NoError(t, err)
+	assert.NotContains(t, string(rawCatchup), "HTTP_QUERY_PORT")
+
+	// The live core still gets both servers.
+	live, ok := core.live.(*captiveCoreOpener)
+	require.True(t, ok)
+	require.NotNil(t, live.config.Toml.HTTPQueryPort)
+	assert.Equal(t, uint(11628), *live.config.Toml.HTTPQueryPort)
+}
+
+// A captive-core file that sets one of core's HTTP keys to a DIFFERENT value
+// than [ingestion] is rejected with a message naming both sides. Without this
+// check the SDK's own comparison is reached instead, and three of its branches
+// format the error with a params field this daemon never sets — a nil-pointer
+// panic in place of an error.
+func TestNewCaptiveCoreOpeners_RejectsCoreFileHTTPConflict(t *testing.T) {
+	tests := []struct {
+		name  string
+		extra string
+		want  string
+	}{
+		{"admin port", "HTTP_PORT = 11625\n", keyCoreHTTPPort},
+		{"query port", "HTTP_QUERY_PORT = 11111\n", keyCoreHTTPQueryPort},
+		{"thread pool", "QUERY_THREAD_POOL_SIZE = 999\n", keyCoreQueryThreadPoolSize},
+		{"snapshot ledgers", "QUERY_SNAPSHOT_LEDGERS = 77\n", keyCoreQuerySnapshotLedgers},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ing := coreFileIngestion(t, writeCaptiveCoreFile(t, tc.extra))
+			_, err := newCaptiveCoreOpeners(ing, t.TempDir(), silentLogger())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+			assert.Contains(t, err.Error(), "captive_core_config sets")
+		})
+	}
+}
+
+// A file value that AGREES with [ingestion] is fine — configs carried over from
+// v1, where these keys commonly lived in the core file, still start.
+func TestNewCaptiveCoreOpeners_AcceptsAgreeingCoreFileHTTPKeys(t *testing.T) {
+	ing := coreFileIngestion(t, writeCaptiveCoreFile(t, "HTTP_PORT = 11626\n"))
+	_, err := newCaptiveCoreOpeners(ing, t.TempDir(), silentLogger())
+	require.NoError(t, err)
 }
 
 // An injected opener (every rpcv2 test) serves both roles, so nothing in the

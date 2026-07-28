@@ -144,6 +144,7 @@ Every TOML leaf is also settable from the command line:
 
 - The six `core_*` keys govern the HTTP surface of the same captive-core process the keys above configure, which is why they live here rather than under `[service]` (#884).
 - Both ports must be in `1..65535` and must differ from each other. Unlike v1, `0` is not accepted as "disable core's HTTP server": v2 always serves sendTransaction off the admin port and getLedgerEntries off the query port, so a disabled server is a broken deployment rather than a mode.
+- These four keys are owned by `[ingestion]`, the opposite of `NETWORK_PASSPHRASE`, which the captive-core file owns. A captive-core file that also sets `HTTP_PORT` / `HTTP_QUERY_PORT` / `QUERY_THREAD_POOL_SIZE` / `QUERY_SNAPSHOT_LEDGERS` must agree with it; a disagreement is a startup error naming both sides (the daemon checks this itself — the SDK's own comparison panics rather than reporting, since it formats the message with a field this daemon never sets).
 - They are written into the **live** ingestion core's toml only. A no-lake backfill starts one bounded-replay core per chunk, in parallel, so a fixed port there would have every one of them contend on binding it — and nothing ever queries a backfill core.
 
 **[logging]** — optional `level` (`debug`/`info`/`warn`/`error`, default `info`) and `format` (`text`/`json`, default `text`).

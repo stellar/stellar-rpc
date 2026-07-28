@@ -290,6 +290,11 @@ history_archive_urls = ["https://history.stellar.org/prd/core-live/core_live_001
 # written into the LIVE ingestion core's config only: the bounded replay cores a
 # no-lake backfill runs are started in parallel, so a fixed port would have them
 # all fight over binding it.
+#
+# These four keys are owned HERE, not by the captive-core file — the opposite of
+# NETWORK_PASSPHRASE, which the captive-core file owns. If that file also sets
+# HTTP_PORT, HTTP_QUERY_PORT, QUERY_THREAD_POOL_SIZE or QUERY_SNAPSHOT_LEDGERS,
+# the two must agree; a disagreement is a startup error naming both sides.
 
 core_http_port = 11626
 core_http_query_port = 11628

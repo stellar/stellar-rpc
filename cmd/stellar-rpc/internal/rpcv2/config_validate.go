@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -89,6 +90,17 @@ func validateForm(cfg config.Config) error {
 	return validateService(cfg.Service)
 }
 
+// The [ingestion] core-HTTP key names, spelled once. Both the range checks in
+// validateIngestion and newCaptiveCoreOpeners' file-conflict check name these in
+// operator-facing errors, and a reader who greps an error message should land on
+// one definition. They mirror the toml tags on config.IngestionConfig.
+const (
+	keyCoreHTTPPort             = "core_http_port"
+	keyCoreHTTPQueryPort        = "core_http_query_port"
+	keyCoreQueryThreadPoolSize  = "core_http_query_thread_pool_size"
+	keyCoreQuerySnapshotLedgers = "core_http_query_snapshot_ledgers"
+)
+
 // validateIngestion form-validates the [ingestion] captive-core HTTP settings.
 // It runs AFTER WithDefaults, so every pointer is non-nil.
 //
@@ -104,10 +116,10 @@ func validateIngestion(ing config.IngestionConfig) error {
 		name string
 		v    uint
 	}{
-		{"core_http_port", *ing.CoreHTTPPort},
-		{"core_http_query_port", *ing.CoreHTTPQueryPort},
-		{"core_http_query_thread_pool_size", *ing.CoreHTTPQueryThreadPoolSize},
-		{"core_http_query_snapshot_ledgers", *ing.CoreHTTPQuerySnapshotLedgers},
+		{keyCoreHTTPPort, *ing.CoreHTTPPort},
+		{keyCoreHTTPQueryPort, *ing.CoreHTTPQueryPort},
+		{keyCoreQueryThreadPoolSize, *ing.CoreHTTPQueryThreadPoolSize},
+		{keyCoreQuerySnapshotLedgers, *ing.CoreHTTPQuerySnapshotLedgers},
 	}
 	for _, p := range ports {
 		if p.v < 1 || p.v > config.MaxPort {
@@ -121,6 +133,19 @@ func validateIngestion(ing config.IngestionConfig) error {
 	if *ing.CoreRequestTimeout < minConfiguredDuration {
 		return fmt.Errorf("[ingestion].core_request_timeout is %v — durations below 1ms are rejected; "+
 			"a bare TOML integer parses as nanoseconds, write a string like \"2s\"", *ing.CoreRequestTimeout)
+	}
+	// core_url is the one new key that is not a number, and an unusable one fails
+	// only later, per request, while the daemon still reports healthy. The easy
+	// mistake is omitting the scheme ("core.internal:11626"), which the HTTP
+	// client rejects at send time with "unsupported protocol scheme".
+	u, err := url.Parse(ing.CoreURL)
+	switch {
+	case err != nil:
+		return fmt.Errorf("[ingestion].core_url %q is not a URL: %w", ing.CoreURL, err)
+	case u.Scheme != "http" && u.Scheme != "https":
+		return fmt.Errorf("[ingestion].core_url %q must start with http:// or https://", ing.CoreURL)
+	case u.Host == "":
+		return fmt.Errorf("[ingestion].core_url %q names no host", ing.CoreURL)
 	}
 	return nil
 }
