@@ -11,7 +11,7 @@ import (
 )
 
 // TestStateAsOf_RepeatableAcrossWrites pins that an artifact state read through a
-// snapshot keeps the value as of admission while a live read tracks later writes.
+// snapshot keeps the value as of acquisition while a live read tracks later writes.
 func TestStateAsOf_RepeatableAcrossWrites(t *testing.T) {
 	cat, _ := testCatalog(t)
 	const c chunk.ID = 42
@@ -81,7 +81,7 @@ func TestStateAsOf_Miss(t *testing.T) {
 }
 
 // TestReadyHotChunkKeysAsOf_FrontierPinned pins that the ready-hot frontier a
-// query derives its floor from is fixed at admission: a chunk opened after the
+// query derives its floor from is fixed at acquisition: a chunk opened after the
 // snapshot does not raise it, and one discarded after does not lower it.
 func TestReadyHotChunkKeysAsOf_FrontierPinned(t *testing.T) {
 	cat, _ := testCatalog(t)
@@ -150,7 +150,7 @@ func TestTxHashIndexKeysAsOf_RepeatableAcrossRebuild(t *testing.T) {
 }
 
 // TestFrozenTxHashIndexAsOf_PinnedAcrossRebuild pins that "the index" a probe
-// resolves is fixed at admission across a rebuild. Each view holds exactly one
+// resolves is fixed at acquisition across a rebuild. Each view holds exactly one
 // frozen coverage, so INV-2 is respected in both.
 func TestFrozenTxHashIndexAsOf_PinnedAcrossRebuild(t *testing.T) {
 	cat, _ := testCatalog(t)
@@ -167,7 +167,7 @@ func TestFrozenTxHashIndexAsOf_PinnedAcrossRebuild(t *testing.T) {
 	cov, ok, err := cat.FrozenTxHashIndexAsOf(snap, w)
 	require.NoError(t, err)
 	require.True(t, ok)
-	assert.Equal(t, chunk.ID(42), cov.Hi, "the snapshot resolves the coverage frozen at admission")
+	assert.Equal(t, chunk.ID(42), cov.Hi, "the snapshot resolves the coverage frozen at acquisition")
 
 	cov, ok, err = cat.FrozenTxHashIndex(w)
 	require.NoError(t, err)

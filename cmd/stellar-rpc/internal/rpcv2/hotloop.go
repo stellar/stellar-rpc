@@ -93,9 +93,9 @@ type ingestionLoopConfig struct {
 	Metrics  observability.Metrics
 	Sink     ingest.MetricSink
 	Health   *healthState
-	// Router, when set, receives the serving watermark after each ledger commits.
+	// Registry, when set, receives the served latest ledger after each commit.
 	// The bounded backfill loop leaves it nil: backfill serves no queries.
-	Router *serving.Router
+	Registry *serving.Registry
 }
 
 // runIngestionLoop is the hot tier's writer: the single goroutine that opens,
@@ -107,11 +107,11 @@ type ingestionLoopConfig struct {
 // ctx-canceled return is a clean shutdown; any other error is RESTARTABLE (startup
 // re-derives the last-committed ledger, losing nothing).
 //
-// HANDOFF: with a Router set (the live daemon), the loop does NOT close the
-// completed chunk's DB at the boundary — it transfers ownership to the router, so
+// HANDOFF: with a Registry set (the live daemon), the loop does NOT close the
+// completed chunk's DB at the boundary — it transfers ownership to the registry, so
 // queries and the freeze read the completed chunk through its shared handle, and
 // the lifecycle closes it at discard once cold coverage exists (deferred deletion's
-// CloseIfIdle drains any in-flight reader). With no Router (the bounded backfill
+// CloseIfIdle drains any in-flight reader). With no Registry (the bounded backfill
 // loop, which serves no queries) the loop keeps the old fence: it closes the
 // completed DB before the next chunk's key is created, since the DB would otherwise
 // have no owner. Either way the next DB is opened and its handle published before
@@ -122,12 +122,12 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 	// Take ownership of the resume hot DB run() opened as the loop's FIRST statement,
 	// so the deferred close sits ahead of any early return. hotDB tracks the current
 	// write target, reassigned at each boundary; on a normal exit that is the live
-	// chunk, and completed chunks are the router's to close (live loop) or were
+	// chunk, and completed chunks are the registry's to close (live loop) or were
 	// closed at their boundary (bounded loop). The exception is a boundary whose
-	// openHotDBForChunk fails: hotDB still points at the just-completed, router-
-	// published chunk, so the defer closes a handle the router also holds — harmless,
+	// openHotDBForChunk fails: hotDB still points at the just-completed, registry-
+	// published chunk, so the defer closes a handle the registry also holds — harmless,
 	// since Close is blocking (drains any in-flight freeze read) and idempotent, and
-	// the ensuing restart rebuilds the router. No writer races the close — the loop
+	// the ensuing restart rebuilds the registry. No writer races the close — the loop
 	// has stopped on every exit path.
 	hotDB := cfg.HotDB
 	defer func() {
@@ -138,8 +138,8 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 
 	// Publish the live chunk's handle so queries can read the tip. Nil in the bounded
 	// backfill loop, which serves no queries.
-	if cfg.Router != nil {
-		cfg.Router.PublishHandle(chunk.IDFromLedger(cfg.Resume), hotDB)
+	if cfg.Registry != nil {
+		cfg.Registry.PublishHandle(chunk.IDFromLedger(cfg.Resume), hotDB)
 	}
 
 	// hotService binds the metrics sink to THIS hotDB instance; the boundary handoff
@@ -167,11 +167,11 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		// The tick must not touch it — its chunk-aligned value would regress it.
 		metrics.LastCommitted(seq)
 
-		// Advance the serving watermark last, once the ledger is fully queryable:
+		// Advance the served latest ledger last, once the ledger is fully queryable:
 		// IngestLedger completes the in-memory events apply before returning, so a
-		// query admitted after this can serve seq from every hot store.
-		if cfg.Router != nil {
-			cfg.Router.SetWatermark(seq)
+		// read view acquired after this can serve seq from every hot store.
+		if cfg.Registry != nil {
+			cfg.Registry.SetLatestLedger(seq)
 		}
 
 		// Feed the readiness/health signal from the SAME commit: the first commit
@@ -185,11 +185,11 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		// Chunk boundary: this seq is the chunk's last ledger.
 		if closed := chunk.IDFromLedger(seq); seq == closed.LastLedger() {
 			next := closed + 1
-			// With no router, keep the old fence: close the completed DB before the
+			// With no registry, keep the old fence: close the completed DB before the
 			// next chunk's key exists, since it would otherwise have no owner. With a
-			// router, do NOT close — ownership transfers to the router (the handle was
+			// registry, do NOT close — ownership transfers to the registry (the handle was
 			// published at open); the lifecycle closes it at discard.
-			if cfg.Router == nil {
+			if cfg.Registry == nil {
 				_ = hotDB.Close() // Close never fails; flush errors are logged inside
 			}
 
@@ -201,8 +201,8 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 			hotService = ingest.NewHotService(hotDB, cfg.Sink)
 			// Publish the next chunk's handle before its first ledger commits, then
 			// announce the completed chunk to the lifecycle.
-			if cfg.Router != nil {
-				cfg.Router.PublishHandle(next, nextDB)
+			if cfg.Registry != nil {
+				cfg.Registry.PublishHandle(next, nextDB)
 			}
 			cfg.Boundary.Publish(closed)
 

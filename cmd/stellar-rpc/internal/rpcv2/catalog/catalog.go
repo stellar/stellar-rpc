@@ -76,7 +76,7 @@ func (c *Catalog) State(chunkID chunk.ID, kind geometry.Kind) (geometry.State, e
 	return decodeState(c.get(geometry.ChunkKey(chunkID, kind)))
 }
 
-// StateAsOf is State read through an admission snapshot.
+// StateAsOf is State read through a read view's snapshot.
 func (c *Catalog) StateAsOf(snap *rocksdb.Snapshot, chunkID chunk.ID, kind geometry.Kind) (geometry.State, error) {
 	return decodeState(c.getAsOf(snap, geometry.ChunkKey(chunkID, kind)))
 }
@@ -91,7 +91,7 @@ func (c *Catalog) HotState(chunkID chunk.ID) (geometry.HotState, error) {
 	return decodeHotState(c.get(geometry.HotChunkKey(chunkID)))
 }
 
-// HotStateAsOf is HotState read through an admission snapshot.
+// HotStateAsOf is HotState read through a read view's snapshot.
 func (c *Catalog) HotStateAsOf(snap *rocksdb.Snapshot, chunkID chunk.ID) (geometry.HotState, error) {
 	return decodeHotState(c.getAsOf(snap, geometry.HotChunkKey(chunkID)))
 }
@@ -142,7 +142,7 @@ func (c *Catalog) TxHashIndexKeys(w geometry.TxHashIndexID) ([]geometry.TxHashIn
 	return c.txhashIndexKeysByPrefix(nil, geometry.TxHashIndexPrefixFor(w))
 }
 
-// TxHashIndexKeysAsOf is TxHashIndexKeys read through an admission snapshot.
+// TxHashIndexKeysAsOf is TxHashIndexKeys read through a read view's snapshot.
 func (c *Catalog) TxHashIndexKeysAsOf(
 	snap *rocksdb.Snapshot, w geometry.TxHashIndexID,
 ) ([]geometry.TxHashIndexCoverage, error) {
@@ -162,7 +162,7 @@ func (c *Catalog) ReadyHotChunkKeys() ([]chunk.ID, error) {
 	return c.hotChunkKeysWith(nil, isReadyHot)
 }
 
-// ReadyHotChunkKeysAsOf is ReadyHotChunkKeys read through an admission snapshot.
+// ReadyHotChunkKeysAsOf is ReadyHotChunkKeys read through a read view's snapshot.
 func (c *Catalog) ReadyHotChunkKeysAsOf(snap *rocksdb.Snapshot) ([]chunk.ID, error) {
 	return c.hotChunkKeysWith(snap, isReadyHot)
 }
@@ -174,7 +174,7 @@ func (c *Catalog) AllTxHashIndexKeys() ([]geometry.TxHashIndexCoverage, error) {
 	return c.txhashIndexKeysByPrefix(nil, geometry.TxHashIndexPrefix)
 }
 
-// AllTxHashIndexKeysAsOf is AllTxHashIndexKeys read through an admission snapshot.
+// AllTxHashIndexKeysAsOf is AllTxHashIndexKeys read through a read view's snapshot.
 func (c *Catalog) AllTxHashIndexKeysAsOf(snap *rocksdb.Snapshot) ([]geometry.TxHashIndexCoverage, error) {
 	return c.txhashIndexKeysByPrefix(snap, geometry.TxHashIndexPrefix)
 }
@@ -187,7 +187,7 @@ func (c *Catalog) FrozenTxHashIndex(w geometry.TxHashIndexID) (geometry.TxHashIn
 	return c.frozenTxHashIndex(nil, w)
 }
 
-// FrozenTxHashIndexAsOf is FrozenTxHashIndex read through an admission snapshot.
+// FrozenTxHashIndexAsOf is FrozenTxHashIndex read through a read view's snapshot.
 func (c *Catalog) FrozenTxHashIndexAsOf(
 	snap *rocksdb.Snapshot, w geometry.TxHashIndexID,
 ) (geometry.TxHashIndexCoverage, bool, error) {

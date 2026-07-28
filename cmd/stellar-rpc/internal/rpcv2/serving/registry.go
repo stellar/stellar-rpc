@@ -1,6 +1,6 @@
 // Package serving is the query read side: it routes each requested chunk to its
 // serving store (frozen cold files or a ready hot database) against a consistent
-// snapshot of the catalog taken when the request is admitted. See
+// snapshot of the catalog taken when the read view is acquired. See
 // design-docs/query-routing-design.md.
 package serving
 
@@ -19,23 +19,23 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
-// Router owns the two pieces of serving state that cannot live in the catalog:
-// the latest watermark, which advances every ledger, and the open hot-database
+// Registry owns the two pieces of serving state that cannot live in the catalog:
+// the latest ledger, which advances every commit, and the open hot-database
 // handles, which are live objects. Everything else a query needs is read from
-// the catalog through an admission snapshot.
+// the catalog through the read view's snapshot.
 //
-// The Router does not own the catalog; the daemon constructs and closes it.
-type Router struct {
+// The Registry does not own the catalog; the daemon constructs and closes it.
+type Registry struct {
 	catalog   *catalog.Catalog
 	retention geometry.Retention
 
-	// watermark is the newest fully ingested ledger visible to queries. The ingest
-	// loop advances it as the final step of each per-ledger cycle. Queries read a
-	// frozen copy at admission (Admission.Latest), never this live value.
-	watermark atomic.Uint32
+	// latestLedger is the newest fully ingested ledger visible to queries. The
+	// ingest loop advances it as the final step of each per-ledger cycle. Queries
+	// read a frozen copy (ReadView.LatestLedger), never this live value.
+	latestLedger atomic.Uint32
 
 	// handles is the copy-on-write map of open hot-database handles, published
-	// atomically. A query loads it once at admission.
+	// atomically. A read view loads it once at acquisition.
 	handles atomic.Pointer[hotHandles]
 
 	// mu serializes handle updates (publish/discard/close) so a lost update cannot
@@ -44,7 +44,7 @@ type Router struct {
 
 	// closing holds handles unpublished by DiscardHandle but not yet closed because
 	// a reader was still in flight. CloseDiscarded retries them across lifecycle
-	// runs until they drain; Router.Close drains them at shutdown. Keeping the
+	// runs until they drain; Registry.Close drains them at shutdown. Keeping the
 	// handle here (not just its chunk id) is what lets the close actually retry —
 	// once unpublished, it is the only remaining reference. Guarded by mu.
 	closing map[chunk.ID]*hotchunk.DB
@@ -65,10 +65,10 @@ func (h *hotHandles) clone() *hotHandles {
 	return &hotHandles{byChunk: m}
 }
 
-// NewRouter binds a Router to the catalog and retention policy, starting with an
-// empty handle map and a zero watermark.
-func NewRouter(cat *catalog.Catalog, retention geometry.Retention) *Router {
-	r := &Router{catalog: cat, retention: retention, closing: map[chunk.ID]*hotchunk.DB{}}
+// NewRegistry binds a Registry to the catalog and retention policy, starting with
+// an empty handle map and latest ledger zero.
+func NewRegistry(cat *catalog.Catalog, retention geometry.Retention) *Registry {
+	r := &Registry{catalog: cat, retention: retention, closing: map[chunk.ID]*hotchunk.DB{}}
 	r.handles.Store(&hotHandles{byChunk: map[chunk.ID]*hotchunk.DB{}})
 	return r
 }
@@ -77,9 +77,9 @@ func NewRouter(cat *catalog.Catalog, retention geometry.Retention) *Router {
 // except liveChunk, which the ingestion loop opens and publishes itself. These are
 // completed chunks a prior run left ready (not yet discarded); queries read them
 // hot until the freeze covers them cold. They are opened read-write so the events
-// facade is warmed (a read-only open is ledgers-only), and the router closes them
-// at discard. Runs at startup before any query is admitted.
-func (r *Router) PublishReadyHandles(liveChunk chunk.ID, logger *supportlog.Entry) error {
+// facade is warmed (a read-only open is ledgers-only), and the registry closes them
+// at discard. Runs at startup before any read view is acquired.
+func (r *Registry) PublishReadyHandles(liveChunk chunk.ID, logger *supportlog.Entry) error {
 	ready, err := r.catalog.ReadyHotChunkKeys()
 	if err != nil {
 		return fmt.Errorf("bootstrap: read ready hot chunks: %w", err)
@@ -97,25 +97,26 @@ func (r *Router) PublishReadyHandles(liveChunk chunk.ID, logger *supportlog.Entr
 	return nil
 }
 
-// SetWatermark publishes the newest fully ingested ledger; the ingest loop calls
+// SetLatestLedger publishes the newest fully ingested ledger; the ingest loop calls
 // it as the final step of each per-ledger cycle.
-func (r *Router) SetWatermark(seq uint32) { r.watermark.Store(seq) }
+func (r *Registry) SetLatestLedger(seq uint32) { r.latestLedger.Store(seq) }
 
-// Watermark returns the live watermark. Queries do not call this — they read the
-// frozen Admission.Latest captured at admission (see the watermark field).
-func (r *Router) Watermark() uint32 { return r.watermark.Load() }
+// LatestLedger returns the live latest ledger. Queries do not call this — they
+// read the frozen ReadView.LatestLedger captured at acquisition (see the
+// latestLedger field).
+func (r *Registry) LatestLedger() uint32 { return r.latestLedger.Load() }
 
 // Handle returns the currently published hot database for chunk c, if any. The
 // freeze source reads a completed chunk through this shared handle rather than
 // opening a second reader against the still-open writer.
-func (r *Router) Handle(c chunk.ID) (*hotchunk.DB, bool) {
+func (r *Registry) Handle(c chunk.ID) (*hotchunk.DB, bool) {
 	db, ok := r.handles.Load().byChunk[c]
 	return db, ok
 }
 
 // PublishHandle adds or replaces the hot database for chunk c and publishes the
 // new set atomically.
-func (r *Router) PublishHandle(c chunk.ID, db *hotchunk.DB) {
+func (r *Registry) PublishHandle(c chunk.ID, db *hotchunk.DB) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	next := r.handles.Load().clone()
@@ -123,11 +124,11 @@ func (r *Router) PublishHandle(c chunk.ID, db *hotchunk.DB) {
 	r.handles.Store(next)
 }
 
-// DiscardHandle unpublishes chunk c's handle so new admissions stop routing to it,
+// DiscardHandle unpublishes chunk c's handle so new read views stop routing to it,
 // moving it to the closing set for CloseDiscarded to close once idle. Idempotent:
 // a repeat call (the retry re-collecting the transient key) is a no-op, since the
 // handle is no longer published.
-func (r *Router) DiscardHandle(c chunk.ID) {
+func (r *Registry) DiscardHandle(c chunk.ID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	cur := r.handles.Load()
@@ -149,10 +150,10 @@ func (r *Router) DiscardHandle(c chunk.ID) {
 // the chunk's files.
 //
 // The close runs under mu, so a successful close's memtable flush briefly blocks a
-// concurrent boundary PublishHandle. Admissions are unaffected (they load handles
-// without mu), and the stall is rare (a discard overlapping a boundary) and bounded
-// (one memtable), so it is not worth closing outside the lock.
-func (r *Router) CloseDiscarded(c chunk.ID) bool {
+// concurrent boundary PublishHandle. Read-view acquisition is unaffected (it loads
+// handles without mu), and the stall is rare (a discard overlapping a boundary)
+// and bounded (one memtable), so it is not worth closing outside the lock.
+func (r *Registry) CloseDiscarded(c chunk.ID) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	db, ok := r.closing[c]
@@ -171,7 +172,7 @@ func (r *Router) CloseDiscarded(c chunk.ID) bool {
 // ingestion and lifecycle have stopped, so nothing races it; handle Close is
 // idempotent, so the live chunk (also closed by the ingestion loop) double-closes
 // harmlessly. The catalog is caller-owned and is not closed here.
-func (r *Router) Close() {
+func (r *Registry) Close() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, db := range r.handles.Load().byChunk {
@@ -184,59 +185,60 @@ func (r *Router) Close() {
 	}
 }
 
-// Admission is one query's consistent view of serving state, held for the
-// request's lifetime and released when it completes. It carries the admitted
-// watermark and retention floor, the handle set loaded at admission, and the
+// ReadView is one query's consistent view of serving state, held for the
+// request's lifetime and released when it completes. It carries the latest ledger
+// and retention floor as of acquisition, the handle set loaded then, and the
 // catalog snapshot the routing reads run against.
-type Admission struct {
-	latest  uint32
-	floor   chunk.ID
-	handles *hotHandles
-	snap    *rocksdb.Snapshot
-	catalog *catalog.Catalog
+type ReadView struct {
+	latestLedger uint32
+	floor        chunk.ID
+	handles      *hotHandles
+	snap         *rocksdb.Snapshot
+	catalog      *catalog.Catalog
 }
 
-// Admit captures a query's view of serving state with three loads, in this order:
-// latest first, the handle set second, the catalog snapshot last. The order makes
-// the snapshot's metadata the newest of the three, so any skew between the handle
-// set and the snapshot resolves safely (see the design's Admission section).
+// AcquireReadView captures a query's view of serving state with three loads, in
+// this order: the latest ledger first, the handle set second, the catalog snapshot
+// last. The order makes the snapshot's metadata the newest of the three, so any
+// skew between the handle set and the snapshot resolves safely (see the design's
+// Admission section).
 //
 // The caller MUST call Release when the request completes, including on error
 // paths.
-func (r *Router) Admit() (*Admission, error) {
-	latest := r.watermark.Load()
+func (r *Registry) AcquireReadView() (*ReadView, error) {
+	latest := r.latestLedger.Load()
 	handles := r.handles.Load()
 	snap, err := r.catalog.NewSnapshot()
 	if err != nil {
 		return nil, err
 	}
-	frontier, err := hotFrontier(r.catalog, snap)
+	lastComplete, err := lastCompleteChunk(r.catalog, snap)
 	if err != nil {
 		r.catalog.ReleaseSnapshot(snap)
 		return nil, err
 	}
-	return &Admission{
-		latest:  latest,
-		floor:   r.retention.FloorAt(frontier),
-		handles: handles,
-		snap:    snap,
-		catalog: r.catalog,
+	return &ReadView{
+		latestLedger: latest,
+		floor:        r.retention.FloorAt(lastComplete),
+		handles:      handles,
+		snap:         snap,
+		catalog:      r.catalog,
 	}, nil
 }
 
-func (a *Admission) Latest() uint32 { return a.latest }
+func (a *ReadView) LatestLedger() uint32 { return a.latestLedger }
 
-func (a *Admission) Floor() chunk.ID { return a.floor }
+func (a *ReadView) FloorChunk() chunk.ID { return a.floor }
 
-// Release releases the admission snapshot back to the catalog.
-func (a *Admission) Release() { a.catalog.ReleaseSnapshot(a.snap) }
+// Release releases the read view's snapshot back to the catalog.
+func (a *ReadView) Release() { a.catalog.ReleaseSnapshot(a.snap) }
 
-// hotFrontier is the last-complete-chunk anchor the floor is derived from: the
-// highest ready hot chunk in the snapshot minus one (the highest ready chunk is
-// the live, still-ingesting chunk, so the one below it is the last complete one).
-// Returns -1 when no hot chunk is ready, meaning nothing is complete yet — the
-// signed convention Retention.FloorAt expects.
-func hotFrontier(cat *catalog.Catalog, snap *rocksdb.Snapshot) (int64, error) {
+// lastCompleteChunk returns the anchor the floor is derived from: the highest
+// ready hot chunk in the snapshot minus one (the highest ready chunk is the live,
+// still-ingesting chunk, so the one below it is the last complete one). Returns -1
+// when no hot chunk is ready, meaning nothing is complete yet — the signed
+// convention Retention.FloorAt expects.
+func lastCompleteChunk(cat *catalog.Catalog, snap *rocksdb.Snapshot) (int64, error) {
 	ready, err := cat.ReadyHotChunkKeysAsOf(snap)
 	if err != nil {
 		return 0, err

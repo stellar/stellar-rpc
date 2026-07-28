@@ -57,7 +57,7 @@ func TestReaderRetention_WindowStraddlingFloorServesInRangeNotBelow(t *testing.T
 	require.Equal(t, fk.Key, survives.Key)
 
 	// The below-floor chunks 0,1 ARE pruned (chunk family); the in-range chunks
-	// 2,3 survive — exactly the data the floor admits.
+	// 2,3 survive — exactly the data the floor allows.
 	for c := chunk.ID(0); c <= 1; c++ {
 		ledgers, serr := cat.State(c, geometry.KindLedgers)
 		require.NoError(t, serr)

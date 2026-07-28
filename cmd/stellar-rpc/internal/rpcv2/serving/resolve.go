@@ -12,7 +12,7 @@ import (
 )
 
 // ErrUnavailable means a chunk has no serving store for the requested kind in the
-// admitted snapshot: neither a frozen cold artifact nor a ready hot database. It
+// read view's snapshot: neither a frozen cold artifact nor a ready hot database. It
 // is R1 in effect — a freezing, pruning, or transient resource is invisible to
 // routing regardless of what is on disk.
 var ErrUnavailable = errors.New("serving: chunk has no serving store")
@@ -26,7 +26,7 @@ type LedgerReader interface {
 	IterateLedgers(start, end uint32) iter.Seq2[ledger.Entry, error]
 }
 
-// tier is which storage serves a chunk for a kind under the admitted snapshot.
+// tier is which storage serves a chunk for a kind under the read view's snapshot.
 type tier int
 
 const (
@@ -36,13 +36,13 @@ const (
 )
 
 // resolveTier is the single routing-decision site: for chunk c and kind k, read
-// the artifact and hot states through the admission snapshot and apply the serving
-// rules once. A frozen artifact wins (cold), even when the chunk is also hot
-// (cold-wins during the freeze-to-discard overlap); otherwise a ready hot database
-// whose handle the admission loaded serves it (hot); otherwise none. States other
-// than "frozen"/"ready" are never served (R1). The hot DB is returned only for
-// tierHot.
-func (a *Admission) resolveTier(c chunk.ID, k geometry.Kind) (tier, *hotchunk.DB, error) {
+// the artifact and hot states through the read view's snapshot and apply the
+// serving rules once. A frozen artifact wins (cold), even when the chunk is also
+// hot (cold-wins during the freeze-to-discard overlap); otherwise a ready hot
+// database whose handle the read view loaded serves it (hot); otherwise none.
+// States other than "frozen"/"ready" are never served (R1). The hot DB is
+// returned only for tierHot.
+func (a *ReadView) resolveTier(c chunk.ID, k geometry.Kind) (tier, *hotchunk.DB, error) {
 	st, err := a.catalog.StateAsOf(a.snap, c, k)
 	if err != nil {
 		return tierNone, nil, err
@@ -62,10 +62,10 @@ func (a *Admission) resolveTier(c chunk.ID, k geometry.Kind) (tier, *hotchunk.DB
 	return tierNone, nil, nil
 }
 
-// LedgerReader resolves chunk c's ledger store for this request. The returned
-// close releases a cold reader; for the hot tier it is a no-op (the router owns
+// Ledgers resolves chunk c's ledger store for this request. The returned
+// close releases a cold reader; for the hot tier it is a no-op (the registry owns
 // the handle). Returns ErrUnavailable when c has no serving home.
-func (a *Admission) LedgerReader(c chunk.ID) (LedgerReader, func() error, error) {
+func (a *ReadView) Ledgers(c chunk.ID) (LedgerReader, func() error, error) {
 	t, db, err := a.resolveTier(c, geometry.KindLedgers)
 	if err != nil {
 		return nil, nil, err
@@ -84,12 +84,12 @@ func (a *Admission) LedgerReader(c chunk.ID) (LedgerReader, func() error, error)
 	}
 }
 
-// EventReader resolves chunk c's event store as the common event.Reader the
+// Events resolves chunk c's event store as the common event.Reader the
 // query engine consumes, uniform across tiers. The returned close releases a cold
 // reader; the hot tier is a no-op. Returns ErrUnavailable when c has no serving
-// home. The hot facade is safe here because the router holds read-write handles,
+// home. The hot facade is safe here because the registry holds read-write handles,
 // whose events store is warmed (a read-only open would have none).
-func (a *Admission) EventReader(c chunk.ID) (event.Reader, func() error, error) {
+func (a *ReadView) Events(c chunk.ID) (event.Reader, func() error, error) {
 	t, db, err := a.resolveTier(c, geometry.KindEvents)
 	if err != nil {
 		return nil, nil, err

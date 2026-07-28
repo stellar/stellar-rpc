@@ -11,7 +11,7 @@ import (
 // StartupSweep destroys resources a crashed run left demoted, before the daemon
 // resumes serving. The catalog demotions are the durable work list: a "transient"
 // hot key or a "pruning" cold key marks a deletion that never finished. The destroy
-// is immediate (no grace wait): it runs before any query is admitted, so nothing
+// is immediate (no grace wait): it runs before any read view is acquired, so nothing
 // holds a handle to what it removes.
 //
 // TODO(#772): supervise() calls run() — and thus StartupSweep — on each supervised
@@ -21,7 +21,7 @@ import (
 //
 // It skips chunks at or above liveChunk: a "transient" key there is a mid-CREATE
 // leftover (openHotDBForChunk recreates it), not a mid-discard one. Runs before
-// the lifecycle goroutine and before any query is admitted.
+// the lifecycle goroutine and before any read view is acquired.
 func StartupSweep(cat *catalog.Catalog, liveChunk chunk.ID) error {
 	if err := sweepTransientHotChunks(cat, liveChunk); err != nil {
 		return err

@@ -13,14 +13,14 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
-// admitFor sets up a router over a fresh catalog, runs setup against the catalog
-// and router, then admits — returning the admission for resolveTier assertions.
-func admitFor(t *testing.T, setup func(cat *catalog.Catalog, r *Router)) (*Admission, *catalog.Catalog) {
+// viewFor sets up a registry over a fresh catalog, runs setup against the catalog
+// and registry, then acquires a read view — returned for resolveTier assertions.
+func viewFor(t *testing.T, setup func(cat *catalog.Catalog, r *Registry)) (*ReadView, *catalog.Catalog) {
 	t.Helper()
 	cat := openTestCatalog(t, silentLogger())
-	r := NewRouter(cat, geometry.NewRetention(0, 0))
+	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 	setup(cat, r)
-	a, err := r.Admit()
+	a, err := r.AcquireReadView()
 	require.NoError(t, err)
 	t.Cleanup(a.Release)
 	return a, cat
@@ -35,7 +35,7 @@ func TestResolveTier_Matrix(t *testing.T) {
 	for _, kind := range []geometry.Kind{geometry.KindLedgers, geometry.KindEvents} {
 		t.Run(string(kind), func(t *testing.T) {
 			t.Run("frozen artifact wins", func(t *testing.T) {
-				a, _ := admitFor(t, func(cat *catalog.Catalog, _ *Router) {
+				a, _ := viewFor(t, func(cat *catalog.Catalog, _ *Registry) {
 					require.NoError(t, cat.FlipChunkFrozen(c, kind))
 				})
 				got, db, err := a.resolveTier(c, kind)
@@ -45,7 +45,7 @@ func TestResolveTier_Matrix(t *testing.T) {
 			})
 
 			t.Run("ready hot with handle serves hot", func(t *testing.T) {
-				a, _ := admitFor(t, func(cat *catalog.Catalog, r *Router) {
+				a, _ := viewFor(t, func(cat *catalog.Catalog, r *Registry) {
 					require.NoError(t, cat.FlipHotReady(c))
 					r.PublishHandle(c, &hotchunk.DB{})
 				})
@@ -56,7 +56,7 @@ func TestResolveTier_Matrix(t *testing.T) {
 			})
 
 			t.Run("frozen wins over hot (freeze-to-discard overlap)", func(t *testing.T) {
-				a, _ := admitFor(t, func(cat *catalog.Catalog, r *Router) {
+				a, _ := viewFor(t, func(cat *catalog.Catalog, r *Registry) {
 					require.NoError(t, cat.FlipChunkFrozen(c, kind))
 					require.NoError(t, cat.FlipHotReady(c))
 					r.PublishHandle(c, &hotchunk.DB{})
@@ -67,7 +67,7 @@ func TestResolveTier_Matrix(t *testing.T) {
 			})
 
 			t.Run("freezing artifact is not served (R1)", func(t *testing.T) {
-				a, _ := admitFor(t, func(cat *catalog.Catalog, _ *Router) {
+				a, _ := viewFor(t, func(cat *catalog.Catalog, _ *Registry) {
 					require.NoError(t, cat.MarkChunkFreezing(c, kind))
 				})
 				got, _, err := a.resolveTier(c, kind)
@@ -76,7 +76,7 @@ func TestResolveTier_Matrix(t *testing.T) {
 			})
 
 			t.Run("ready hot without a published handle is unreachable", func(t *testing.T) {
-				a, _ := admitFor(t, func(cat *catalog.Catalog, _ *Router) {
+				a, _ := viewFor(t, func(cat *catalog.Catalog, _ *Registry) {
 					require.NoError(t, cat.FlipHotReady(c)) // ready key, but no handle published
 				})
 				got, _, err := a.resolveTier(c, kind)
@@ -85,7 +85,7 @@ func TestResolveTier_Matrix(t *testing.T) {
 			})
 
 			t.Run("absent chunk is unroutable", func(t *testing.T) {
-				a, _ := admitFor(t, func(*catalog.Catalog, *Router) {})
+				a, _ := viewFor(t, func(*catalog.Catalog, *Registry) {})
 				got, _, err := a.resolveTier(c, kind)
 				require.NoError(t, err)
 				assert.Equal(t, tierNone, got)
@@ -95,11 +95,11 @@ func TestResolveTier_Matrix(t *testing.T) {
 }
 
 // TestLedgerReader_Hot resolves a ready hot chunk with a real committed ledger and
-// reads it back through the hot facade; the closer is a no-op (router-owned).
+// reads it back through the hot facade; the closer is a no-op (registry-owned).
 func TestLedgerReader_Hot(t *testing.T) {
 	const c chunk.ID = 5
 	cat := openTestCatalog(t, silentLogger())
-	r := NewRouter(cat, geometry.NewRetention(0, 0))
+	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
@@ -108,11 +108,11 @@ func TestLedgerReader_Hot(t *testing.T) {
 	require.NoError(t, cat.FlipHotReady(c))
 	r.PublishHandle(c, db)
 
-	a, err := r.Admit()
+	a, err := r.AcquireReadView()
 	require.NoError(t, err)
 	defer a.Release()
 
-	lr, closeFn, err := a.LedgerReader(c)
+	lr, closeFn, err := a.Ledgers(c)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, closeFn()) }()
 	raw, err := lr.GetLedgerRaw(c.FirstLedger())
@@ -125,7 +125,7 @@ func TestLedgerReader_Hot(t *testing.T) {
 func TestEventReader_Hot(t *testing.T) {
 	const c chunk.ID = 5
 	cat := openTestCatalog(t, silentLogger())
-	r := NewRouter(cat, geometry.NewRetention(0, 0))
+	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
@@ -134,11 +134,11 @@ func TestEventReader_Hot(t *testing.T) {
 	require.NoError(t, cat.FlipHotReady(c))
 	r.PublishHandle(c, db)
 
-	a, err := r.Admit()
+	a, err := r.AcquireReadView()
 	require.NoError(t, err)
 	defer a.Release()
 
-	er, closeFn, err := a.EventReader(c)
+	er, closeFn, err := a.Events(c)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, closeFn()) }()
 	n, err := er.EventCount()
@@ -153,10 +153,10 @@ func TestEventReader_Hot(t *testing.T) {
 // pack is covered by the ledger store tests and the daemon e2e.
 func TestLedgerReader_ColdRoutesToColdOpen(t *testing.T) {
 	const c chunk.ID = 9
-	a, cat := admitFor(t, func(cat *catalog.Catalog, _ *Router) {
+	a, cat := viewFor(t, func(cat *catalog.Catalog, _ *Registry) {
 		require.NoError(t, cat.FlipChunkFrozen(c, geometry.KindLedgers))
 	})
-	lr, closeFn, err := a.LedgerReader(c)
+	lr, closeFn, err := a.Ledgers(c)
 	require.NoError(t, err, "frozen routes to the cold tier; the cold reader opens lazily")
 	require.NotNil(t, lr)
 	t.Cleanup(func() { _ = closeFn() })
@@ -174,10 +174,10 @@ func TestLedgerReader_ColdRoutesToColdOpen(t *testing.T) {
 // on both read paths.
 func TestReaders_Unavailable(t *testing.T) {
 	const c chunk.ID = 3
-	a, _ := admitFor(t, func(*catalog.Catalog, *Router) {})
+	a, _ := viewFor(t, func(*catalog.Catalog, *Registry) {})
 
-	_, _, err := a.LedgerReader(c)
+	_, _, err := a.Ledgers(c)
 	require.ErrorIs(t, err, ErrUnavailable)
-	_, _, err = a.EventReader(c)
+	_, _, err = a.Events(c)
 	require.ErrorIs(t, err, ErrUnavailable)
 }

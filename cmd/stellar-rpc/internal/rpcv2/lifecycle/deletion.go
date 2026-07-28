@@ -35,12 +35,12 @@ func (p *pendingDeletions) add(label string, destroy func() error) {
 	p.items = append(p.items, deferredDestroy{label: label, destroy: destroy})
 }
 
-// demoteHotChunk unpublishes chunk c's handle (so new admissions stop routing to
+// demoteHotChunk unpublishes chunk c's handle (so new read views stop routing to
 // it) and marks it transient, then queues the destroy: close the handle, then
-// remove the dir and key. router may be nil (bounded backfill / tests).
-func (p *pendingDeletions) demoteHotChunk(router HandleRetirer, cat *catalog.Catalog, c chunk.ID) error {
-	if router != nil {
-		router.DiscardHandle(c)
+// remove the dir and key. registry may be nil (bounded backfill / tests).
+func (p *pendingDeletions) demoteHotChunk(registry HandleRetirer, cat *catalog.Catalog, c chunk.ID) error {
+	if registry != nil {
+		registry.DiscardHandle(c)
 	}
 	if err := cat.PutHotTransient(c); err != nil {
 		return err
@@ -48,10 +48,10 @@ func (p *pendingDeletions) demoteHotChunk(router HandleRetirer, cat *catalog.Cat
 	p.add("hot chunk "+c.String(), func() error {
 		// Close the handle before removing files. A reader still in flight leaves
 		// the transient key for a later run: CloseDiscarded reports false, the next
-		// discard scan re-collects the key, and the router keeps the handle in its
+		// discard scan re-collects the key, and the registry keeps the handle in its
 		// closing set until it drains — so the close itself retries, not just the
 		// catalog cleanup.
-		if router != nil && !router.CloseDiscarded(c) {
+		if registry != nil && !registry.CloseDiscarded(c) {
 			return errReaderInFlight
 		}
 		return cat.DestroyHotChunk(c)
@@ -79,10 +79,10 @@ func (p *pendingDeletions) demoteTxHashIndex(cat *catalog.Catalog, cov geometry.
 	return nil
 }
 
-// run waits the grace period once, then runs every queued destroy. A destroy that
+// destroyAll waits the grace period once, then runs every queued destroy. A destroy that
 // fails is logged and left for the next run's scan to re-discover via its still-
 // demoted key.
-func (p *pendingDeletions) run(ctx context.Context, cfg Config) {
+func (p *pendingDeletions) destroyAll(ctx context.Context, cfg Config) {
 	if len(p.items) == 0 {
 		return
 	}
@@ -101,11 +101,11 @@ func (p *pendingDeletions) run(ctx context.Context, cfg Config) {
 	}
 }
 
-// HandleRetirer is the slice of the router the discard path uses: unpublish a hot
+// HandleRetirer is the slice of the registry the discard path uses: unpublish a hot
 // handle (DiscardHandle), then close it once idle (CloseDiscarded), retried across
 // runs until it drains. An interface so the lifecycle does not depend on the whole
 // serving package (a nil retirer is the bounded backfill / test case).
-// *serving.Router satisfies it.
+// *serving.Registry satisfies it.
 type HandleRetirer interface {
 	DiscardHandle(c chunk.ID)
 	CloseDiscarded(c chunk.ID) bool

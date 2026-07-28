@@ -21,7 +21,7 @@ func collectIterateSnap(t *testing.T, s *Store, snap *Snapshot, prefix []byte) [
 }
 
 // TestSnapshot_RepeatableReadUnderConcurrentWrites pins the core guarantee the
-// query catalog relies on: a snapshot taken at admission keeps reading the state
+// query catalog relies on: a snapshot taken at read-view acquisition keeps reading the state
 // as of that instant, even as writes land afterward.
 func TestSnapshot_RepeatableReadUnderConcurrentWrites(t *testing.T) {
 	s := openTestStore(t, nil)
@@ -94,7 +94,7 @@ func TestSnapshot_ReleaseSemantics(t *testing.T) {
 
 	// Reads through a released snapshot fail cleanly instead of crashing.
 	_, _, err = s.GetAsOf(snap, "", []byte("k"))
-	require.ErrorIs(t, err, ErrNilSnapshot)
+	require.ErrorIs(t, err, ErrSnapshotReleased)
 
 	yields := 0
 	var sawErr error
@@ -103,7 +103,7 @@ func TestSnapshot_ReleaseSemantics(t *testing.T) {
 		sawErr = err
 	}
 	assert.Equal(t, 1, yields)
-	require.ErrorIs(t, sawErr, ErrNilSnapshot)
+	require.ErrorIs(t, sawErr, ErrSnapshotReleased)
 
 	// Double release and nil release are no-ops.
 	s.ReleaseSnapshot(snap)
@@ -115,7 +115,7 @@ func TestSnapshot_NilSnapshotArgs(t *testing.T) {
 	s := openTestStore(t, nil)
 
 	_, _, err := s.GetAsOf(nil, "", []byte("k"))
-	require.ErrorIs(t, err, ErrNilSnapshot)
+	require.ErrorIs(t, err, ErrSnapshotReleased)
 
 	yields := 0
 	var sawErr error
@@ -124,7 +124,7 @@ func TestSnapshot_NilSnapshotArgs(t *testing.T) {
 		sawErr = err
 	}
 	assert.Equal(t, 1, yields)
-	require.ErrorIs(t, sawErr, ErrNilSnapshot)
+	require.ErrorIs(t, sawErr, ErrSnapshotReleased)
 }
 
 // TestSnapshot_ClosedStore pins that acquisition fails on a closed store, and a

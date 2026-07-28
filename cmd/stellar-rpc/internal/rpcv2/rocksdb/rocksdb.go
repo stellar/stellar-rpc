@@ -22,10 +22,10 @@ import (
 )
 
 var (
-	ErrInvalidConfig = errors.New("rocksdb: invalid config")
-	ErrCFNotFound    = errors.New("rocksdb: column family not configured at open")
-	ErrStoreClosed   = errors.New("rocksdb: store is closed")
-	ErrNilSnapshot   = errors.New("rocksdb: nil or released snapshot")
+	ErrInvalidConfig    = errors.New("rocksdb: invalid config")
+	ErrCFNotFound       = errors.New("rocksdb: column family not configured at open")
+	ErrStoreClosed      = errors.New("rocksdb: store is closed")
+	ErrSnapshotReleased = errors.New("rocksdb: nil or released snapshot")
 )
 
 const (
@@ -366,7 +366,7 @@ func (s *Store) NewSnapshot() (*Snapshot, error) {
 // ReleaseSnapshot releases a snapshot acquired from NewSnapshot. Nil-safe, and
 // idempotent for the owning request (a second sequential release is a no-op).
 // Releasing the same snapshot from two goroutines at once is NOT safe — it would
-// double-free and skew snapRefs — but the one-snapshot-per-admission contract
+// double-free and skew snapRefs — but the one-snapshot-per-read-view contract
 // precludes it. If the store already tore down its C DB, the release is skipped:
 // teardown already freed the snapshot along with the DB, so there is nothing left
 // to release.
@@ -384,10 +384,10 @@ func (s *Store) ReleaseSnapshot(snap *Snapshot) {
 }
 
 // GetAsOf is Get pinned to snap's view. A nil or released snapshot returns
-// ErrNilSnapshot.
+// ErrSnapshotReleased.
 func (s *Store) GetAsOf(snap *Snapshot, cf string, key []byte) ([]byte, bool, error) {
 	if snap == nil || snap.snap == nil {
-		return nil, false, ErrNilSnapshot
+		return nil, false, ErrSnapshotReleased
 	}
 	// Fresh ReadOptions: setting the snapshot on shared s.ro would surface it
 	// to every concurrent live reader (same reason as BatchMultiGet).
@@ -399,11 +399,11 @@ func (s *Store) GetAsOf(snap *Snapshot, cf string, key []byte) ([]byte, bool, er
 
 // IterateAsOf is Iterate pinned to snap's view: the whole prefix scan is
 // unaffected by concurrent writes. A nil or released snapshot yields
-// ErrNilSnapshot once.
+// ErrSnapshotReleased once.
 func (s *Store) IterateAsOf(snap *Snapshot, cf string, prefix []byte) iter.Seq2[Entry, error] {
 	return func(yield func(Entry, error) bool) {
 		if snap == nil || snap.snap == nil {
-			yield(Entry{}, ErrNilSnapshot)
+			yield(Entry{}, ErrSnapshotReleased)
 			return
 		}
 		ro := grocksdb.NewDefaultReadOptions()

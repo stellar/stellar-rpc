@@ -44,10 +44,10 @@ func openTestCatalog(t *testing.T, logger *supportlog.Entry) *catalog.Catalog {
 	return cat
 }
 
-func newTestRouter(t *testing.T, size uint32, earliest chunk.ID) (*Router, *catalog.Catalog) {
+func newTestRegistry(t *testing.T, size uint32, earliest chunk.ID) (*Registry, *catalog.Catalog) {
 	t.Helper()
 	cat := openTestCatalog(t, silentLogger())
-	return NewRouter(cat, geometry.NewRetention(size, earliest)), cat
+	return NewRegistry(cat, geometry.NewRetention(size, earliest)), cat
 }
 
 // makeReadyHotChunk creates a real hot DB dir for chunk c and marks its key ready,
@@ -64,7 +64,7 @@ func makeReadyHotChunk(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 // chunk except the live one (which the ingestion loop publishes).
 func TestPublishReadyHandles(t *testing.T) {
 	cat := openTestCatalog(t, silentLogger())
-	r := NewRouter(cat, geometry.NewRetention(0, 0))
+	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 	for _, c := range []chunk.ID{5, 6, 7} {
 		makeReadyHotChunk(t, cat, c)
 	}
@@ -78,7 +78,7 @@ func TestPublishReadyHandles(t *testing.T) {
 	assert.True(t, ok6, "completed ready chunk published")
 	assert.False(t, ok7, "live chunk skipped; the ingestion loop publishes it")
 
-	// The router owns the bootstrapped handles; close them (no loop here).
+	// The registry owns the bootstrapped handles; close them (no loop here).
 	for _, c := range []chunk.ID{5, 6} {
 		if db, ok := r.Handle(c); ok {
 			_ = db.Close()
@@ -86,16 +86,16 @@ func TestPublishReadyHandles(t *testing.T) {
 	}
 }
 
-func TestSetWatermark(t *testing.T) {
-	r, _ := newTestRouter(t, 0, 0)
-	assert.Equal(t, uint32(0), r.Watermark())
-	r.SetWatermark(42)
-	assert.Equal(t, uint32(42), r.Watermark())
+func TestSetLatestLedger(t *testing.T) {
+	r, _ := newTestRegistry(t, 0, 0)
+	assert.Equal(t, uint32(0), r.LatestLedger())
+	r.SetLatestLedger(42)
+	assert.Equal(t, uint32(42), r.LatestLedger())
 }
 
-// TestAdmit_FloorDerivation pins that the admitted floor is Retention.FloorAt
+// TestAcquireReadView_FloorDerivation pins that the view floor is Retention.FloorAt
 // anchored on the highest ready hot chunk minus one.
-func TestAdmit_FloorDerivation(t *testing.T) {
+func TestAcquireReadView_FloorDerivation(t *testing.T) {
 	tests := []struct {
 		name     string
 		size     uint32
@@ -110,72 +110,72 @@ func TestAdmit_FloorDerivation(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			r, cat := newTestRouter(t, tc.size, tc.earliest)
+			r, cat := newTestRegistry(t, tc.size, tc.earliest)
 			for _, c := range tc.ready {
 				require.NoError(t, cat.FlipHotReady(c))
 			}
-			a, err := r.Admit()
+			a, err := r.AcquireReadView()
 			require.NoError(t, err)
 			defer a.Release()
-			assert.Equal(t, tc.want, a.Floor())
+			assert.Equal(t, tc.want, a.FloorChunk())
 		})
 	}
 }
 
-// TestAdmit_FloorPinnedToSnapshot pins that the floor is fixed at the admission
-// instant: a chunk opened after admission raises a later admission's floor but
+// TestAcquireReadView_FloorPinnedToSnapshot pins that the floor is fixed at the acquisition
+// instant: a chunk opened after acquisition raises a later view.s floor but
 // never the earlier one's.
-func TestAdmit_FloorPinnedToSnapshot(t *testing.T) {
-	r, cat := newTestRouter(t, 2, 0) // sliding window of 2 chunks
+func TestAcquireReadView_FloorPinnedToSnapshot(t *testing.T) {
+	r, cat := newTestRegistry(t, 2, 0) // sliding window of 2 chunks
 	require.NoError(t, cat.FlipHotReady(5))
 	require.NoError(t, cat.FlipHotReady(6)) // live chunk 6, frontier 5
 
-	a1, err := r.Admit()
+	a1, err := r.AcquireReadView()
 	require.NoError(t, err)
 	defer a1.Release()
-	assert.Equal(t, chunk.ID(4), a1.Floor()) // 5-2+1
+	assert.Equal(t, chunk.ID(4), a1.FloorChunk()) // 5-2+1
 
 	require.NoError(t, cat.FlipHotReady(7)) // live chunk advances to 7, frontier 6
 
-	a2, err := r.Admit()
+	a2, err := r.AcquireReadView()
 	require.NoError(t, err)
 	defer a2.Release()
-	assert.Equal(t, chunk.ID(5), a2.Floor(), "a fresh admission sees the advanced frontier")
-	assert.Equal(t, chunk.ID(4), a1.Floor(), "the earlier admission's floor is unchanged")
+	assert.Equal(t, chunk.ID(5), a2.FloorChunk(), "a fresh view sees the advanced frontier")
+	assert.Equal(t, chunk.ID(4), a1.FloorChunk(), "the earlier view.s floor is unchanged")
 }
 
-// TestAdmit_CapturesStateAtAdmissionInstant pins that all three loads are frozen
-// at admission: watermark and handle set reflect the instant Admit ran, not later
+// TestAcquireReadView_CapturesStateAtAcquisitionInstant pins that all three loads are frozen
+// at acquisition: latest ledger and handle set reflect the instant AcquireReadView ran, not later
 // mutations.
-func TestAdmit_CapturesStateAtAdmissionInstant(t *testing.T) {
-	r, cat := newTestRouter(t, 0, 0)
+func TestAcquireReadView_CapturesStateAtAcquisitionInstant(t *testing.T) {
+	r, cat := newTestRegistry(t, 0, 0)
 	require.NoError(t, cat.FlipHotReady(5))
 	require.NoError(t, cat.FlipHotReady(6))
-	r.SetWatermark(65_000)
+	r.SetLatestLedger(65_000)
 	r.PublishHandle(5, &hotchunk.DB{})
 
-	a, err := r.Admit()
+	a, err := r.AcquireReadView()
 	require.NoError(t, err)
 	defer a.Release()
 
-	// Mutate every piece of serving state after admission.
-	r.SetWatermark(70_000)
+	// Mutate every piece of serving state after acquisition.
+	r.SetLatestLedger(70_000)
 	require.NoError(t, cat.FlipHotReady(7))
 	r.PublishHandle(7, &hotchunk.DB{})
 	r.DiscardHandle(5)
 
-	assert.Equal(t, uint32(65_000), a.Latest(), "watermark frozen at admission")
+	assert.Equal(t, uint32(65_000), a.LatestLedger(), "latest ledger frozen at acquisition")
 
 	_, has5 := a.handles.byChunk[5]
 	_, has7 := a.handles.byChunk[7]
-	assert.True(t, has5, "handle present at admission is retained")
-	assert.False(t, has7, "handle published after admission is not visible")
+	assert.True(t, has5, "handle present at acquisition is retained")
+	assert.False(t, has7, "handle published after acquisition is not visible")
 }
 
 // TestHotHandles_CopyOnWrite pins that publish/discard replace the map wholesale
 // and never mutate a map already loaded by a query.
 func TestHotHandles_CopyOnWrite(t *testing.T) {
-	r, _ := newTestRouter(t, 0, 0)
+	r, _ := newTestRegistry(t, 0, 0)
 	r.PublishHandle(5, &hotchunk.DB{})
 
 	loaded := r.handles.Load()
@@ -197,7 +197,7 @@ func TestHotHandles_CopyOnWrite(t *testing.T) {
 }
 
 // publishReadyHandle makes a ready on-disk chunk and publishes an open handle to it.
-func publishReadyHandle(t *testing.T, r *Router, cat *catalog.Catalog, c chunk.ID) {
+func publishReadyHandle(t *testing.T, r *Registry, cat *catalog.Catalog, c chunk.ID) {
 	t.Helper()
 	makeReadyHotChunk(t, cat, c)
 	db, err := hotchunk.OpenExisting(cat.Layout().HotChunkPath(c), c, silentLogger())
@@ -212,7 +212,7 @@ func publishReadyHandle(t *testing.T, r *Router, cat *catalog.Catalog, c chunk.I
 // discard and the (later) close.
 func TestDiscardThenCloseDiscarded(t *testing.T) {
 	cat := openTestCatalog(t, silentLogger())
-	r := NewRouter(cat, geometry.NewRetention(0, 0))
+	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 	publishReadyHandle(t, r, cat, 5)
 
 	r.DiscardHandle(5)
@@ -233,7 +233,7 @@ func TestDiscardThenCloseDiscarded(t *testing.T) {
 // removes it. A parked ledger scan holds the store's lock to force the busy path.
 func TestCloseDiscarded_BusyRetainsThenRetryDrains(t *testing.T) {
 	cat := openTestCatalog(t, silentLogger())
-	r := NewRouter(cat, geometry.NewRetention(0, 0))
+	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 	const c chunk.ID = 5
 
 	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
@@ -281,7 +281,7 @@ func TestCloseDiscarded_BusyRetainsThenRetryDrains(t *testing.T) {
 // no-op (idempotent handle Close, e.g. the live chunk the ingestion loop closes).
 func TestClose_ClosesAndClearsHandles(t *testing.T) {
 	cat := openTestCatalog(t, silentLogger())
-	r := NewRouter(cat, geometry.NewRetention(0, 0))
+	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 	publishReadyHandle(t, r, cat, 5)
 	publishReadyHandle(t, r, cat, 6)
 
@@ -299,14 +299,14 @@ func TestClose_ClosesAndClearsHandles(t *testing.T) {
 	r.Close() // idempotent
 }
 
-// TestAdmit_ReleaseFreesSnapshot pins that Release returns the snapshot, so a
-// clean admit/release cycle leaves no leak at catalog close.
-func TestAdmit_ReleaseFreesSnapshot(t *testing.T) {
+// TestAcquireReadView_ReleaseFreesSnapshot pins that Release returns the snapshot, so a
+// clean acquire/release cycle leaves no leak at catalog close.
+func TestAcquireReadView_ReleaseFreesSnapshot(t *testing.T) {
 	var buf bytes.Buffer
 	cat := openTestCatalog(t, newTestLogger(&buf))
-	r := NewRouter(cat, geometry.NewRetention(0, 0))
+	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 
-	a, err := r.Admit()
+	a, err := r.AcquireReadView()
 	require.NoError(t, err)
 	a.Release()
 
@@ -314,14 +314,14 @@ func TestAdmit_ReleaseFreesSnapshot(t *testing.T) {
 	assert.NotContains(t, buf.String(), "unreleased snapshot")
 }
 
-// TestAdmit_LeakedSnapshotWarnsAtClose pins the other direction: an admission
+// TestAcquireReadView_LeakedSnapshotWarnsAtClose pins the other direction: a read view
 // never released is reported as a leak when the catalog closes.
-func TestAdmit_LeakedSnapshotWarnsAtClose(t *testing.T) {
+func TestAcquireReadView_LeakedSnapshotWarnsAtClose(t *testing.T) {
 	var buf bytes.Buffer
 	cat := openTestCatalog(t, newTestLogger(&buf))
-	r := NewRouter(cat, geometry.NewRetention(0, 0))
+	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 
-	_, err := r.Admit()
+	_, err := r.AcquireReadView()
 	require.NoError(t, err) // deliberately not released
 
 	require.NoError(t, cat.Close())

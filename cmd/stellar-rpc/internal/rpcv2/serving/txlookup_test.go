@@ -15,11 +15,11 @@ import (
 // newest chunk first, and that an empty handle set yields no indexes.
 func TestHotTxIndexes(t *testing.T) {
 	cat := openTestCatalog(t, silentLogger())
-	r := NewRouter(cat, geometry.NewRetention(0, 0))
+	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 
-	empty, err := r.Admit()
+	empty, err := r.AcquireReadView()
 	require.NoError(t, err)
-	assert.Empty(t, empty.HotTxIndexes(), "no handles → no hot indexes")
+	assert.Empty(t, empty.HotTxHashIndexes(), "no handles → no hot indexes")
 	empty.Release()
 
 	dbs := map[chunk.ID]*hotchunk.DB{}
@@ -31,11 +31,11 @@ func TestHotTxIndexes(t *testing.T) {
 		dbs[c] = db
 	}
 
-	a, err := r.Admit()
+	a, err := r.AcquireReadView()
 	require.NoError(t, err)
 	defer a.Release()
 
-	got := a.HotTxIndexes()
+	got := a.HotTxHashIndexes()
 	require.Len(t, got, 3)
 	assert.Equal(t, dbs[7].Txhash(), got[0], "newest chunk first")
 	assert.Equal(t, dbs[5].Txhash(), got[2], "oldest chunk last")
@@ -45,7 +45,7 @@ func TestHotTxIndexes(t *testing.T) {
 // (by upper chunk) first, and freezing debris is excluded.
 func TestTxHashCoverages(t *testing.T) {
 	cat := openTestCatalog(t, silentLogger())
-	r := NewRouter(cat, geometry.NewRetention(0, 0))
+	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 
 	// One frozen coverage per window 0,1,2 (distinct upper chunk), each the sole
 	// coverage of its window so there is no predecessor to demote.
@@ -60,11 +60,11 @@ func TestTxHashCoverages(t *testing.T) {
 	_, err := cat.MarkTxHashIndexFreezing(3, debris, debris)
 	require.NoError(t, err)
 
-	a, err := r.Admit()
+	a, err := r.AcquireReadView()
 	require.NoError(t, err)
 	defer a.Release()
 
-	covs, err := a.TxHashCoverages()
+	covs, err := a.TxHashIndexCoverages()
 	require.NoError(t, err)
 	require.Len(t, covs, 3, "only the frozen coverages, not the freezing debris")
 	for _, cov := range covs {

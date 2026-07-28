@@ -34,7 +34,7 @@ func TestPendingDeletions_ColdArtifactDeferred(t *testing.T) {
 	assert.FileExists(t, cat.Layout().LedgerPackPath(c), "file survives until end-of-run destroy")
 
 	// End of run: file and key are gone.
-	pending.run(context.Background(), lifecycleTestConfig(t, cat, 0))
+	pending.destroyAll(context.Background(), lifecycleTestConfig(t, cat, 0))
 	st, err = cat.State(c, geometry.KindLedgers)
 	require.NoError(t, err)
 	assert.Equal(t, geometry.State(""), st, "key destroyed at end of run")
@@ -186,8 +186,8 @@ func TestRunLifecycleTick_DiscardGatedOnIndexCoverage(t *testing.T) {
 
 	// Demote then destroy, as a run does across its discard stage and its end.
 	var pending pendingDeletions
-	require.NoError(t, pending.demoteHotChunk(cfg.Router, cat, 0))
-	pending.run(context.Background(), cfg)
+	require.NoError(t, pending.demoteHotChunk(cfg.Registry, cat, 0))
+	pending.destroyAll(context.Background(), cfg)
 
 	has, err := hotKeyExists(cat, 0)
 	require.NoError(t, err)

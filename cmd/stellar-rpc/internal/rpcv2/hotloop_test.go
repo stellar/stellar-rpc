@@ -295,9 +295,9 @@ func TestRunIngestionLoop_LastCommittedGaugeAdvancesPerLedger(t *testing.T) {
 		"the loop sets the last-committed gauge per committed ledger, not chunk-aligned")
 }
 
-// TestRunIngestionLoop_AdvancesServingWatermark: when a router is wired, the loop
-// advances its serving watermark per committed ledger, ending at the last one.
-func TestRunIngestionLoop_AdvancesServingWatermark(t *testing.T) {
+// TestRunIngestionLoop_AdvancesLatestLedger: when a registry is wired, the loop
+// advances its latest ledger per committed ledger, ending at the last one.
+func TestRunIngestionLoop_AdvancesLatestLedger(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(0)
 	first := c.FirstLedger()
@@ -305,12 +305,12 @@ func TestRunIngestionLoop_AdvancesServingWatermark(t *testing.T) {
 	stream := streamForSeqs(t, first, first+2)
 	stream.endErr = errors.New("end")
 	cfg, _ := loopConfig(t, stream, cat, first)
-	router := serving.NewRouter(cat, geometry.NewRetention(0, 0))
-	cfg.Router = router
+	registry := serving.NewRegistry(cat, geometry.NewRetention(0, 0))
+	cfg.Registry = registry
 
 	require.Error(t, runIngestionLoop(context.Background(), cfg))
 
-	assert.Equal(t, first+2, router.Watermark(), "the watermark advanced to the last committed ledger")
+	assert.Equal(t, first+2, registry.LatestLedger(), "the latest ledger advanced to the last committed one")
 }
 
 // ---------------------------------------------------------------------------
@@ -416,10 +416,10 @@ func TestRunIngestionLoop_HandoffFenceClosesBeforeNextKey(t *testing.T) {
 	require.Equal(t, []bool{true}, fence.nextReady, "the next chunk's hot key was ready before publish")
 }
 
-// TestRunIngestionLoop_BoundaryTransfersOwnershipToRouter: with a router set, the
-// boundary does NOT close the completed chunk's DB — the router keeps it open (for
+// TestRunIngestionLoop_BoundaryTransfersOwnershipToRegistry: with a registry set, the
+// boundary does NOT close the completed chunk's DB — the registry keeps it open (for
 // queries and the freeze) and the next chunk's handle is published too.
-func TestRunIngestionLoop_BoundaryTransfersOwnershipToRouter(t *testing.T) {
+func TestRunIngestionLoop_BoundaryTransfersOwnershipToRegistry(t *testing.T) {
 	t.Parallel() // seeds a near-full chunk (one synced commit per ledger)
 	cat, _ := testCatalog(t)
 	c := chunk.ID(0)
@@ -433,19 +433,19 @@ func TestRunIngestionLoop_BoundaryTransfersOwnershipToRouter(t *testing.T) {
 
 	db, err := openHotDBForChunk(cat, chunk.IDFromLedger(resume), silentLogger())
 	require.NoError(t, err)
-	router := serving.NewRouter(cat, geometry.NewRetention(0, 0))
+	registry := serving.NewRegistry(cat, geometry.NewRetention(0, 0))
 	cfg := ingestionLoopConfig{
 		Stream: stream, Resume: resume, HotDB: db, Catalog: cat,
-		Boundary: &recordingBoundary{}, Logger: silentLogger(), Router: router,
+		Boundary: &recordingBoundary{}, Logger: silentLogger(), Registry: registry,
 	}
 
 	require.Error(t, runIngestionLoop(context.Background(), cfg), "stream ran dry")
 
-	// The completed chunk stays in the router, still open (the loop closed only the
+	// The completed chunk stays in the registry, still open (the loop closed only the
 	// live chunk on exit), and the next chunk's handle was published.
-	completed, ok := router.Handle(c)
-	require.True(t, ok, "completed chunk's handle retained in the router")
-	_, ok = router.Handle(c1)
+	completed, ok := registry.Handle(c)
+	require.True(t, ok, "completed chunk's handle retained in the registry")
+	_, ok = registry.Handle(c1)
 	require.True(t, ok, "next chunk's handle published")
 
 	maxSeq, present, err := completed.MaxCommittedSeq()
@@ -453,7 +453,7 @@ func TestRunIngestionLoop_BoundaryTransfersOwnershipToRouter(t *testing.T) {
 	require.True(t, present)
 	assert.Equal(t, c.LastLedger(), maxSeq, "the retained handle still answers reads")
 
-	_ = completed.Close() // router-owned; not closed by the loop
+	_ = completed.Close() // registry-owned; not closed by the loop
 }
 
 // ---------------------------------------------------------------------------

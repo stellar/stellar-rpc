@@ -120,18 +120,18 @@ func run(ctx context.Context, cfg StartConfig) error {
 		boundary.Publish(chunk.ID(seed)) //nolint:gosec // seed >= 0
 	}
 
-	// The serving router holds the query watermark, advanced by the ingestion loop
-	// below. It also owns the shared hot-database handles: the loop publishes them,
+	// The serving registry holds the served latest ledger, advanced by the ingestion
+	// loop below. It also owns the shared hot-database handles: the loop publishes them,
 	// the freeze reads completed chunks through them (HotHandle), and the lifecycle
-	// unpublishes them at discard (Router) for deferred deletion to close. It will
+	// unpublishes them at discard (Registry) for deferred deletion to close. It will
 	// back the read server in later work; for now nothing reads it. Constructed per
-	// run — no query survives a restart, so a fresh router each run is fine.
-	router := serving.NewRouter(cat, cfg.Retention)
-	cfg.Exec.Process.HotHandle = router.Handle
-	// Close the router's hot handles on the way out (after g.Wait joins the loops
-	// below), flushing each completed chunk the router still holds. The live
+	// run — no query survives a restart, so a fresh registry each run is fine.
+	registry := serving.NewRegistry(cat, cfg.Retention)
+	cfg.Exec.Process.HotHandle = registry.Handle
+	// Close the registry's hot handles on the way out (after g.Wait joins the loops
+	// below), flushing each completed chunk the registry still holds. The live
 	// chunk is also closed by the ingestion loop; handle Close is idempotent.
-	defer router.Close()
+	defer registry.Close()
 
 	// Before serving: destroy any resources a crashed run left demoted, then open
 	// and publish the handles for ready hot chunks below the live one (completed
@@ -140,25 +140,25 @@ func run(ctx context.Context, cfg StartConfig) error {
 	if err := lifecycle.StartupSweep(cat, liveChunk); err != nil {
 		return fmt.Errorf("startup sweep: %w", err)
 	}
-	if err := router.PublishReadyHandles(liveChunk, logger); err != nil {
+	if err := registry.PublishReadyHandles(liveChunk, logger); err != nil {
 		return fmt.Errorf("startup publish ready handles: %w", err)
 	}
 
-	// Seed the router's live state so a query admitted before the ingestion loop's
-	// first commit is correct: publish the already-open resume DB as the live
-	// chunk's handle (PublishReadyHandles skips the live chunk), and set the
-	// watermark to the last committed ledger — it would otherwise read 0, making the
-	// admitted range invalid on a restart with data. The loop republishes the handle
-	// (idempotent) and advances the watermark from here.
-	router.PublishHandle(liveChunk, hotDB)
-	router.SetWatermark(lastCommitted)
+	// Seed the registry's live state so a read view acquired before the ingestion
+	// loop's first commit is correct: publish the already-open resume DB as the live
+	// chunk's handle (PublishReadyHandles skips the live chunk), and set the latest
+	// ledger to the last committed one — it would otherwise read 0, making the
+	// served range invalid on a restart with data. The loop republishes the handle
+	// (idempotent) and advances the latest ledger from here.
+	registry.PublishHandle(liveChunk, hotDB)
+	registry.SetLatestLedger(lastCommitted)
 
 	// The lifecycle config draws on the SAME Exec wiring backfill uses, so the two
 	// share one catalog/pool by construction.
 	lifecycleCfg := lifecycle.Config{
 		ExecConfig: cfg.Exec,
 		Retention:  cfg.Retention,
-		Router:     router,
+		Registry:   registry,
 		Grace:      cfg.lifecycleGrace,
 	}.WithLifecycleDefaults()
 
@@ -189,7 +189,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 			Metrics:  metrics,
 			Sink:     cfg.Exec.Process.Sink,
 			Health:   cfg.health,
-			Router:   router,
+			Registry: registry,
 		})
 		if err == nil {
 			// WithContext cancels gctx (unblocking the lifecycle sibling in g.Wait)

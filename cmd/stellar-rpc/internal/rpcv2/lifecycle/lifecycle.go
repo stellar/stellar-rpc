@@ -37,10 +37,10 @@ type Config struct {
 	// earliest_ledger pin.
 	Retention geometry.Retention
 
-	// Router unpublishes a discarded hot chunk's handle and closes it once idle so
+	// Registry unpublishes a discarded hot chunk's handle and closes it once idle so
 	// deferred deletion can retire it (see deletion.go). Nil in the bounded
 	// backfill / test case, where no handle is published.
-	Router HandleRetirer
+	Registry HandleRetirer
 
 	// Grace is the deferred-deletion wait before destroying demoted resources.
 	// Unset (<= 0) takes defaultGrace via WithLifecycleDefaults; tests override it
@@ -160,7 +160,7 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	}
 	demoteOps := make([]func() error, len(discardChunks))
 	for i, c := range discardChunks {
-		demoteOps[i] = func() error { return pending.demoteHotChunk(cfg.Router, cat, c) }
+		demoteOps[i] = func() error { return pending.demoteHotChunk(cfg.Registry, cat, c) }
 	}
 	// Meter the DBs actually demoted (one op per DB) BEFORE the error check, so a
 	// mid-scan failure still counts what completed rather than losing it: the demoted
@@ -216,7 +216,7 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 
 	// End of run: destroy everything demoted this run — discarded hot handles and
 	// pruned cold files — after one grace wait (design: wait once, then delete).
-	pending.run(ctx, cfg)
+	pending.destroyAll(ctx, cfg)
 	return nil
 }
 
