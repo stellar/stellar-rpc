@@ -208,10 +208,8 @@ func backfillSource(
 func resolveHotSource(
 	chunkID chunk.ID, cfg ProcessConfig,
 ) (ledgerbackend.LedgerStream, func() error, bool, error) {
-	// Prefer the registry's shared handle when it holds this chunk: the completed
-	// chunk's writer is still open under the live daemon, so a second read-only open
-	// would race its ledger-CF background compaction. Read through the one handle,
-	// and never close it — the registry owns it.
+	// Prefer the registry's shared handle when it holds this chunk; read through it
+	// and never close it — the registry owns the handle.
 	if cfg.HotHandle != nil {
 		if db, ok := cfg.HotHandle(chunkID); ok {
 			return db.Source(), func() error { return nil }, true, nil

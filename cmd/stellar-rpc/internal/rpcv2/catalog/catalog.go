@@ -51,8 +51,7 @@ func (c *Catalog) Close() error { return c.store.Close() }
 
 // NewSnapshot pins a repeatable-read view of the catalog for a query's lifetime;
 // the query reads routing state through the *AsOf accessors. The caller MUST
-// release it via ReleaseSnapshot when done, including on error paths — a leaked
-// snapshot is never reclaimed until the store closes.
+// release it via ReleaseSnapshot when done.
 func (c *Catalog) NewSnapshot() (*rocksdb.Snapshot, error) { return c.store.NewSnapshot() }
 
 // ReleaseSnapshot releases a snapshot acquired from NewSnapshot. Nil-safe.
@@ -96,9 +95,8 @@ func (c *Catalog) HotStateAsOf(snap *rocksdb.Snapshot, chunkID chunk.ID) (geomet
 	return decodeHotState(c.getAsOf(snap, geometry.HotChunkKey(chunkID)))
 }
 
-// decodeState / decodeHotState turn a raw KV read into a typed lifecycle state,
-// mapping a clean miss (ok == false) to the empty state so live and snapshot
-// reads share one decode.
+// decodeState and decodeHotState turn a raw KV read into a typed lifecycle state.
+// A clean miss (ok == false) becomes the empty state.
 func decodeState(v string, ok bool, err error) (geometry.State, error) {
 	if err != nil || !ok {
 		return "", err
