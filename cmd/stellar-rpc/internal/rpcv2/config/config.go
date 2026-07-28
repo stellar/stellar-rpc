@@ -44,7 +44,7 @@ type Config struct {
 }
 
 // ServiceConfig is [service] — the JSON-RPC read-serving policy (issue #882).
-// Most of it is dormant today: the read server arrives with #772, and #881 wires
+// Most of it is dormant today: the read server arrives with #889, and #881 wires
 // [service.fee_stats] into live ingestion — until then those values are only
 // parsed, defaulted, and validated. [service.preflight] is the exception; the
 // daemon sizes its preflight pool from it at startup. The whole section is

@@ -313,7 +313,7 @@ type StartConfig struct {
 	runBackfill func(ctx context.Context, exec backfill.ExecConfig, lo, hi chunk.ID) error
 
 	// health is the readiness/health signal the ingestion loop feeds per commit;
-	// #772's read server consumes it (as HealthSignal). nil ⇒ observe is a no-op.
+	// #889's read server consumes it (as HealthSignal). nil ⇒ observe is a no-op.
 	health *healthState
 }
 

@@ -53,7 +53,8 @@ type daemonOptions struct {
 	Core CoreOpener
 
 	// ServeReads launches the RPC read server; it must return promptly, not block.
-	// nil ⇒ the #772 no-op placeholder (reads still come from the v1 SQLite daemon).
+	// nil ⇒ a no-op placeholder until #889 builds v2's read server. Reads come from
+	// the v1 SQLite daemon until the #772 cutover.
 	ServeReads func(ctx context.Context) error
 
 	// RestartBackoff is the supervised loop's inter-restart sleep; zero ⇒ defaultRestartBackoff.
@@ -108,7 +109,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// Readiness/health signal, fed by the ingestion loop per commit; both signals
 	// derive from the last committed ledger. Created outside the supervised run
 	// loop so it survives restarts (readiness stays latched across them).
-	// TODO(#772): serve it from the read server (as HealthSignal).
+	// TODO(#889): serve it from the read server (as HealthSignal).
 	hs := &healthState{}
 
 	paths := cfg.ResolvePaths()
@@ -174,7 +175,8 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	serveReads := opts.ServeReads
 	if serveReads == nil {
-		// TODO(#772): wire the full-history RPC read server; no-op until the cutover.
+		// TODO(#889): build v2's read server — the method table, the listener on
+		// [service].endpoint, and the admin endpoint. No-op until then.
 		serveReads = func(context.Context) error { return nil }
 	}
 
@@ -190,7 +192,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	// Control-plane Metrics and the ingest sink share ONE registry, built after the
 	// validateConfig gate (it registers Prometheus collectors).
-	// TODO(#772): expose it on the read server's /metrics.
+	// TODO(#889): expose it on the read server's /metrics.
 	registry := prometheus.NewRegistry()
 	metrics, sink := buildSinks(opts, registry)
 
