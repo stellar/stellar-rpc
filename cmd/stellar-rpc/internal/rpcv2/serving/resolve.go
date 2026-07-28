@@ -62,37 +62,39 @@ func (a *ReadView) resolveTier(c chunk.ID, k geometry.Kind) (tier, *hotchunk.DB,
 	return tierNone, nil, nil
 }
 
-// Ledgers resolves chunk c's ledger store for this request. The returned
-// close releases a cold reader; for the hot tier it is a no-op (the registry owns
-// the handle). Returns ErrUnavailable when c has no serving home.
-func (a *ReadView) Ledgers(c chunk.ID) (LedgerReader, func() error, error) {
+// Ledgers resolves chunk c's ledger store for this request. A cold reader is
+// view-owned — Release closes it; the hot facade is registry-owned. Returns
+// ErrUnavailable when c has no serving home.
+func (a *ReadView) Ledgers(c chunk.ID) (LedgerReader, error) {
 	t, db, err := a.resolveTier(c, geometry.KindLedgers)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	switch t {
 	case tierCold:
 		cr, err := ledger.OpenColdReader(a.catalog.Layout().LedgerPackPath(c))
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		return cr, cr.Close, nil
+		a.closers = append(a.closers, cr.Close)
+		return cr, nil
 	case tierHot:
-		return db.Ledgers(), noClose, nil
+		return db.Ledgers(), nil
 	default:
-		return nil, nil, ErrUnavailable
+		return nil, ErrUnavailable
 	}
 }
 
 // Events resolves chunk c's event store as the common event.Reader the
-// query engine consumes, uniform across tiers. The returned close releases a cold
-// reader; the hot tier is a no-op. Returns ErrUnavailable when c has no serving
-// home. The hot facade is safe here because the registry holds read-write handles,
-// whose events store is warmed (a read-only open would have none).
-func (a *ReadView) Events(c chunk.ID) (event.Reader, func() error, error) {
+// query engine consumes, uniform across tiers. A cold reader is view-owned —
+// Release closes it; the hot facade is registry-owned. Returns ErrUnavailable
+// when c has no serving home. The hot facade is safe here because the registry
+// holds read-write handles, whose events store is warmed (a read-only open
+// would have none).
+func (a *ReadView) Events(c chunk.ID) (event.Reader, error) {
 	t, db, err := a.resolveTier(c, geometry.KindEvents)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	switch t {
 	case tierCold:
@@ -101,14 +103,13 @@ func (a *ReadView) Events(c chunk.ID) (event.Reader, func() error, error) {
 		// decide whether it is config-driven or caller-supplied. Default for now.
 		cr, err := event.OpenColdReader(c, a.catalog.Layout().EventsBucketDir(c), event.ColdReaderOptions{})
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		return cr, cr.Close, nil
+		a.closers = append(a.closers, cr.Close)
+		return cr, nil
 	case tierHot:
-		return db.Events(), noClose, nil
+		return db.Events(), nil
 	default:
-		return nil, nil, ErrUnavailable
+		return nil, ErrUnavailable
 	}
 }
-
-func noClose() error { return nil }

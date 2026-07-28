@@ -112,9 +112,8 @@ func TestLedgerReader_Hot(t *testing.T) {
 	require.NoError(t, err)
 	defer a.Release()
 
-	lr, closeFn, err := a.Ledgers(c)
+	lr, err := a.Ledgers(c)
 	require.NoError(t, err)
-	defer func() { require.NoError(t, closeFn()) }()
 	raw, err := lr.GetLedgerRaw(c.FirstLedger())
 	require.NoError(t, err)
 	assert.NotEmpty(t, raw, "the hot facade returns the committed ledger")
@@ -138,9 +137,8 @@ func TestEventReader_Hot(t *testing.T) {
 	require.NoError(t, err)
 	defer a.Release()
 
-	er, closeFn, err := a.Events(c)
+	er, err := a.Events(c)
 	require.NoError(t, err)
-	defer func() { require.NoError(t, closeFn()) }()
 	n, err := er.EventCount()
 	require.NoError(t, err)
 	assert.Equal(t, uint32(0), n)
@@ -156,10 +154,9 @@ func TestLedgerReader_ColdRoutesToColdOpen(t *testing.T) {
 	a, cat := viewFor(t, func(cat *catalog.Catalog, _ *Registry) {
 		require.NoError(t, cat.FlipChunkFrozen(c, geometry.KindLedgers))
 	})
-	lr, closeFn, err := a.Ledgers(c)
+	lr, err := a.Ledgers(c)
 	require.NoError(t, err, "frozen routes to the cold tier; the cold reader opens lazily")
 	require.NotNil(t, lr)
-	t.Cleanup(func() { _ = closeFn() })
 
 	// The lazy cold reader validates on first use; with no pack on disk the read
 	// fails at the chunk's pack path — proving the cold branch (not hot /
@@ -176,8 +173,36 @@ func TestReaders_Unavailable(t *testing.T) {
 	const c chunk.ID = 3
 	a, _ := viewFor(t, func(*catalog.Catalog, *Registry) {})
 
-	_, _, err := a.Ledgers(c)
+	_, err := a.Ledgers(c)
 	require.ErrorIs(t, err, ErrUnavailable)
-	_, _, err = a.Events(c)
+	_, err = a.Events(c)
 	require.ErrorIs(t, err, ErrUnavailable)
+}
+
+// TestRelease_ClosesViewOwnedReaders pins the ownership contract: a cold reader
+// opened through the view is registered for closing and Release drains the list;
+// a hot facade never registers (it is registry-owned).
+func TestRelease_ClosesViewOwnedReaders(t *testing.T) {
+	const cold, hot chunk.ID = 9, 10
+	a, _ := viewFor(t, func(cat *catalog.Catalog, r *Registry) {
+		require.NoError(t, cat.FlipChunkFrozen(cold, geometry.KindLedgers))
+		require.NoError(t, cat.FlipHotReady(hot))
+		r.PublishHandle(hot, &hotchunk.DB{})
+	})
+
+	_, err := a.Ledgers(cold) // lazy cold open: no pack needed until first use
+	require.NoError(t, err)
+	require.Len(t, a.closers, 1, "the cold reader is view-owned")
+
+	_, err = a.Ledgers(hot)
+	require.NoError(t, err)
+	require.Len(t, a.closers, 1, "the hot facade is registry-owned, not view-owned")
+
+	// A sentinel closer proves Release invokes what was registered; the double
+	// Release from viewFor's cleanup is a no-op (closers drained, snapshot inert).
+	closed := false
+	a.closers = append(a.closers, func() error { closed = true; return nil })
+	a.Release()
+	assert.True(t, closed, "Release runs the view-owned closers")
+	assert.Nil(t, a.closers, "the closer list is drained")
 }

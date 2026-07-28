@@ -195,6 +195,12 @@ type ReadView struct {
 	handles      *hotHandles
 	snap         *rocksdb.Snapshot
 	catalog      *catalog.Catalog
+
+	// closers releases every cold reader this view opened (hot facades are
+	// registry-owned and never appear here). Appended by the resolve methods,
+	// drained by Release — a view's resources live exactly as long as the view.
+	// A ReadView serves one request on one goroutine; no locking.
+	closers []func() error
 }
 
 // AcquireReadView captures a query's view of serving state with three loads, in
@@ -230,8 +236,18 @@ func (a *ReadView) LatestLedger() uint32 { return a.latestLedger }
 
 func (a *ReadView) FloorChunk() chunk.ID { return a.floor }
 
-// Release releases the read view's snapshot back to the catalog.
-func (a *ReadView) Release() { a.catalog.ReleaseSnapshot(a.snap) }
+// Release closes every reader the view opened, then releases the snapshot back
+// to the catalog. Close failures are logged, not returned: a close error on a
+// read-only reader is not actionable by the caller.
+func (a *ReadView) Release() {
+	for _, c := range a.closers {
+		if err := c(); err != nil {
+			a.catalog.Logger().WithError(err).Warn("serving: close view-owned reader")
+		}
+	}
+	a.closers = nil
+	a.catalog.ReleaseSnapshot(a.snap)
+}
 
 // lastCompleteChunk returns the anchor the floor is derived from: the highest
 // ready hot chunk in the snapshot minus one (the highest ready chunk is the live,
