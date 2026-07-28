@@ -205,13 +205,6 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 	var ingestCfg ingest.Config
 	daemon.ingestService, ingestCfg = createIngestService(cfg, logger, daemon, feewindows, historyArchive, rw)
 	if cfg.Backfill {
-		// Swap in a backfill-tuned session for the backfill phase
-		tunedSession, err := db.OpenSQLiteBackfillSession(cfg.SQLiteDBPath)
-		if err != nil {
-			logger.WithError(err).Fatal("failed to open backfill-tuned database session")
-		}
-		servingSession := daemon.db.UseSession(tunedSession)
-
 		// On a fresh DB, reshape the schema for the bulk-load; FinalizeBulkLoad
 		// restores it below
 		if _, err := db.NewLedgerReader(daemon.db).GetLedgerRange(context.Background()); errors.Is(err, db.ErrEmptyDB) {
@@ -222,29 +215,9 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 			logger.WithError(err).Fatal("failed to check database emptiness for backfill")
 		}
 
-		backfillMeta, err := ingest.NewBackfillMeta(
-			logger,
-			daemon.ingestService,
-			db.NewLedgerReader(daemon.db),
-			daemon.dataStore,
-			daemon.dataStoreSchema,
-		)
-		if err != nil {
-			logger.WithError(err).Fatal("failed to create backfill metadata")
-		}
-		if err := backfillMeta.RunBackfill(cfg); err != nil {
-			logger.WithError(err).Fatal("failed to backfill ledgers")
-		}
-
-		// Restore the serving session
-		daemon.db.UseSession(servingSession)
-		if err := tunedSession.Close(); err != nil {
-			logger.WithError(err).Warn("could not close backfill-tuned database session")
-		}
-		// Clear the DB cache and fee windows so they re-populate from the database
-		daemon.db.ResetCache()
-		feewindows.Reset()
+		daemon.mustBackfill(cfg, feewindows)
 	}
+
 	// Restore the canonical schema after a bulk-load, including one interrupted
 	// by a crash. Must finish before ingestService.Start to avoid starving it.
 	finalizeStart := time.Now()
@@ -253,35 +226,11 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 	}
 	// The backfill perf-eval runner keys off this line; keep it stable
 	logger.WithField("duration", time.Since(finalizeStart).String()).Info("Bulk-load finalize complete")
-	// EXPERIMENT (do not commit): top-up frontfill after finalize so captive
-	// core starts near the live tip instead of fill+finalize hours behind
-	if cfg.Backfill {
-		topUpStart := time.Now()
-		topUp, err := ingest.NewBackfillMeta(
-			logger,
-			daemon.ingestService,
-			db.NewLedgerReader(daemon.db),
-			daemon.dataStore,
-			daemon.dataStoreSchema,
-		)
-		if err != nil {
-			logger.WithError(err).Fatal("failed to create top-up backfill metadata")
-		}
-		if err := topUp.RunBackfill(cfg); err != nil {
-			logger.WithError(err).Fatal("failed to top-up frontfill")
-		}
-		daemon.db.ResetCache()
-		feewindows.Reset()
-		logger.WithField("duration", time.Since(topUpStart).String()).
-			Info("Post-finalize frontfill top-up complete")
-	}
-	// Settle point: captive core's catchup allocates several GB while the
-	// kernel may still hold a large dirty-page backlog from the bulk writes
-	if _, err := daemon.db.ExecRaw(context.Background(), "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		logger.WithError(err).Warn("could not checkpoint WAL before ingestion")
-	}
-	syscall.Sync()
 
+	if cfg.Backfill {
+		// Top-up frontfill after finalize so captive core starts nearer the live tip
+		daemon.mustBackfill(cfg, feewindows)
+	}
 	// Start ingestion service only after backfill is complete
 	daemon.ingestService.Start(ingestCfg)
 
@@ -580,6 +529,26 @@ func (d *Daemon) mustInitializeStorage(cfg *config.Config) *feewindow.FeeWindows
 	}
 
 	return feeWindows
+}
+
+func (d *Daemon) mustBackfill(cfg *config.Config, feeWindows *feewindow.FeeWindows) {
+	backfillMeta, err := ingest.NewBackfillMeta(
+		d.logger,
+		d.ingestService,
+		db.NewLedgerReader(d.db),
+		d.dataStore,
+		d.dataStoreSchema,
+	)
+	if err != nil {
+		d.logger.WithError(err).Fatal("failed to create backfill metadata")
+	}
+	if err := backfillMeta.RunBackfill(cfg); err != nil {
+		d.logger.WithError(err).Fatal("failed to backfill ledgers")
+	}
+
+	// Clear the DB cache and fee windows so they re-populate from the database
+	d.db.ResetCache()
+	feeWindows.Reset()
 }
 
 func (d *Daemon) buildMigrations(ctx context.Context, cfg *config.Config, retentionRange db.LedgerSeqRange,
