@@ -253,13 +253,6 @@ func (rw *RunWriter) writeRaw(p []byte) error {
 // exhausted — a consumer that reads to io.EOF has verified integrity; a
 // consumer that stops early has not (fine for the merge, which always
 // drains or aborts the whole build).
-//
-// Varints are decoded from a peeked-ahead window of the buffered reader with
-// batched CRC/budget/position accounting (Peek/Discard) instead of per-byte
-// reads. The fast path can only succeed where the per-byte decoder would
-// have — any varint the window cannot fully satisfy is replayed through the
-// historical per-byte reader, so every truncation and overflow error
-// surfaces from the same code at exactly the same input point as before.
 type RunReader struct {
 	f       *os.File
 	br      *bufio.Reader
@@ -267,14 +260,6 @@ type RunReader struct {
 	crc     uint32
 	ids     []uint32
 	trailer bool
-
-	// Batched-decode window: win is a Peek view into br whose first `used`
-	// bytes have been consumed by the varint decoder but not yet folded into
-	// the CRC or Discarded from br. remain IS already decremented for them
-	// (eager), so every structural budget check sees exact values. Any direct
-	// br read (term, trailer, per-byte fallback) must flushWin first.
-	win  []byte
-	used int
 }
 
 // OpenRun opens path and validates its header.
@@ -300,9 +285,6 @@ func OpenRun(path string) (*RunReader, error) {
 // calls — consume before the next Next. Returns io.EOF after the last
 // record, at which point the CRC has been verified.
 func (r *RunReader) Next() (events.TermKey, []uint32, error) {
-	// Settle the previous record's window accounting first: the budget checks
-	// below and the term/trailer reads need br, crc, and remain in sync.
-	r.flushWin()
 	var term events.TermKey
 	if r.remain == 0 {
 		if !r.trailer {
@@ -359,61 +341,15 @@ func (r *RunReader) consume(p []byte) error {
 	return nil
 }
 
-// uvarint reads one payload uvarint. Fast path: decode straight from the
-// peeked window (accounting batched — folded in at the next flushWin). The
-// fast path succeeds only when a terminated varint lies wholly inside the
-// window, which never exceeds the payload budget or the file's real bytes —
-// exactly the inputs the per-byte reader accepts, with the same value. Every
-// other case (payload/file tail, 10-byte overflow) falls back to the
-// historical per-byte reader below, so truncation and overflow keep
-// byte-identical error semantics at the same input points.
+// uvarint reads one payload uvarint through the CRC accounting, delegating
+// the varint state machine to the stdlib via the crcByteReader adapter.
 func (r *RunReader) uvarint() (uint64, error) {
-	avail := uint64(len(r.win) - r.used) //nolint:gosec // used <= len(win) by construction
-	if avail < binary.MaxVarintLen64 && avail < r.remain {
-		r.refillWin()
-	}
-	if v, n := binary.Uvarint(r.win[r.used:]); n > 0 {
-		r.used += n
-		r.remain -= uint64(n)
-		return v, nil
-	}
-	// Slow path: the window cannot hold this varint — replay through the
-	// per-byte CRC/budget accounting for the exact historical errors.
-	r.flushWin()
 	v, err := binary.ReadUvarint((*crcByteReader)(r))
 	if err != nil {
 		//nolint:errorlint // opaque on purpose: io.EOF inside corruption must not read as clean EOF
 		return 0, fmt.Errorf("%w: uvarint: %v", ErrCorruptRun, err)
 	}
 	return v, nil
-}
-
-// flushWin folds the window's consumed prefix into the CRC and advances br
-// past it — the batched equivalent of consume's per-byte accounting (remain
-// was already decremented when the bytes were decoded). Idempotent.
-func (r *RunReader) flushWin() {
-	if r.used > 0 {
-		r.crc = crc32.Update(r.crc, crcTable, r.win[:r.used])
-		_, _ = r.br.Discard(r.used) // cannot fall short: the bytes are buffered
-	}
-	r.win, r.used = nil, 0
-}
-
-// refillWin re-peeks the decode window at the current logical position: up
-// to a full buffer, never past the payload budget. A short peek at the file
-// tail is fine — varints the short window cannot satisfy take the per-byte
-// fallback, which owns those error points.
-func (r *RunReader) refillWin() {
-	r.flushWin()
-	want := min(r.remain, uint64(r.br.Size())) //nolint:gosec // Size() is positive
-	// When the buffer already holds a whole varint's worth, peek only that:
-	// asking for more would force a top-up read per record instead of one
-	// fill per drained buffer.
-	buffered := uint64(r.br.Buffered()) //nolint:gosec // Buffered() >= 0
-	if buffered >= binary.MaxVarintLen64 && buffered < want {
-		want = buffered
-	}
-	r.win, _ = r.br.Peek(int(want)) //nolint:gosec // capped at br.Size()
 }
 
 // crcByteReader adapts RunReader's consume (payload budget + CRC accounting)
