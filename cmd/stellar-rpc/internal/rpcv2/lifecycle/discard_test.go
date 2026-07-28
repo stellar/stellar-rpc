@@ -10,15 +10,17 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
 
-// TestDiscardHotTier_RemovesDirAndKey retires the bracket: the key is deleted
-// and the dir is gone. A second discard is a no-op.
+// TestDiscardHotTier_RemovesDirAndKey retires the bracket via the demote+destroy
+// split a lifecycle run performs: the key is deleted and the dir is gone. A
+// second destroy is a no-op.
 func TestDiscardHotTier_RemovesDirAndKey(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(4)
 	db := openLiveHotDB(t, cat, c)
 	require.NoError(t, db.Close())
 
-	require.NoError(t, cat.DiscardHotChunk(c))
+	require.NoError(t, cat.PutHotTransient(c))
+	require.NoError(t, cat.DestroyHotChunk(c))
 
 	has, err := hotKeyExists(cat, c)
 	require.NoError(t, err)
@@ -26,5 +28,5 @@ func TestDiscardHotTier_RemovesDirAndKey(t *testing.T) {
 	_, statErr := os.Stat(cat.Layout().HotChunkPath(c))
 	assert.True(t, os.IsNotExist(statErr), "the dir is removed")
 
-	require.NoError(t, cat.DiscardHotChunk(c), "second discard is a no-op")
+	require.NoError(t, cat.DestroyHotChunk(c), "second destroy is a no-op")
 }

@@ -147,29 +147,10 @@ func (c *Catalog) DestroyTxHashIndexKey(cov geometry.TxHashIndexCoverage) error 
 	return nil
 }
 
-// DiscardHotChunk retires a chunk's hot DB once its cold artifacts are durable
-// (or it fell past retention), following the same crash order as the two sweeps
-// above: mark "transient" -> rmdir -> fsync(parent) -> delete key. The key
-// outlives the durable rmdir, so a crash anywhere leaves the key "transient" for
-// the next scan to finish — idempotent, and an absent key is a no-op. The caller
-// MUST have closed the chunk's hot write handle (discard runs after the freeze).
-func (c *Catalog) DiscardHotChunk(chunkID chunk.ID) error {
-	state, err := c.HotState(chunkID)
-	if err != nil {
-		return fmt.Errorf("read hot key chunk %s: %w", chunkID, err)
-	}
-	if state == "" {
-		return nil
-	}
-	if err := c.PutHotTransient(chunkID); err != nil {
-		return fmt.Errorf("mark hot transient chunk %s: %w", chunkID, err)
-	}
-	return c.DestroyHotChunk(chunkID)
-}
-
 // DestroyHotChunk removes a hot chunk's dir and key — the destroy half of the
-// discard, split out for deferred deletion (which demotes during a stage, then
-// destroys at end of run). It re-reads the hot key first: a chunk not marked
+// discard (deferred deletion marks the chunk "transient" during a stage, then
+// destroys at end of run), following the same crash order as the two sweeps
+// above: rmdir -> fsync(parent) -> delete key. It re-reads the hot key first: a chunk not marked
 // "transient" is skipped with a warning so an un-demoted key cannot delete a live
 // hot DB, and an absent key is a no-op (already destroyed). The caller MUST have
 // closed the chunk's hot handle. rmdir is made durable BEFORE the key delete, so

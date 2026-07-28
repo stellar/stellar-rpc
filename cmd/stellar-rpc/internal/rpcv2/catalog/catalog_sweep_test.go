@@ -108,11 +108,11 @@ func TestSweepEmptyRefsNoop(t *testing.T) {
 	require.NoError(t, cat.SweepChunkArtifacts(nil))
 }
 
-// TestDiscardHotChunkResumesTransient mirrors the sweep siblings' crash-resume
+// TestDestroyHotChunkResumesTransient mirrors the sweep siblings' crash-resume
 // coverage for the hot-DB discard: a "transient" key (a discard that crashed after
 // marking transient but before deleting the key) plus a leftover dir must be
-// finished by the next DiscardHotChunk — the dir removed and the key deleted.
-func TestDiscardHotChunkResumesTransient(t *testing.T) {
+// finished by the next run's DestroyHotChunk — the dir removed and the key deleted.
+func TestDestroyHotChunkResumesTransient(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(4)
 
@@ -121,7 +121,7 @@ func TestDiscardHotChunkResumesTransient(t *testing.T) {
 	dir := cat.layout.HotChunkPath(c)
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 
-	require.NoError(t, cat.DiscardHotChunk(c))
+	require.NoError(t, cat.DestroyHotChunk(c))
 
 	// The resume completed it: key gone, dir gone.
 	state, err := cat.HotState(c)
@@ -130,11 +130,11 @@ func TestDiscardHotChunkResumesTransient(t *testing.T) {
 	require.NoDirExists(t, dir, "leftover hot dir swept")
 }
 
-// TestDiscardHotChunkAbsentKeyNoop: an absent hot key is a clean no-op (nothing
+// TestDestroyHotChunkAbsentKeyNoop: an absent hot key is a clean no-op (nothing
 // to finish).
-func TestDiscardHotChunkAbsentKeyNoop(t *testing.T) {
+func TestDestroyHotChunkAbsentKeyNoop(t *testing.T) {
 	cat, _ := testCatalog(t)
-	require.NoError(t, cat.DiscardHotChunk(chunk.ID(9)))
+	require.NoError(t, cat.DestroyHotChunk(chunk.ID(9)))
 }
 
 // TestDestroyChunkArtifacts_SkipsUndemoted pins the exported-API guard: a "frozen"

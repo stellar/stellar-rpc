@@ -1,10 +1,9 @@
 package serving
 
 import (
-	"slices"
-
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )

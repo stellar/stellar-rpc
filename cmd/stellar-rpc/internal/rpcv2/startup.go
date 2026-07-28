@@ -130,7 +130,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 
 	// Bootstrap before the loops start, so a read view acquired before the first
 	// commit is correct.
-	if err := bootstrapServing(registry, cat, resumeLedger, lastCommitted, hotDB, logger); err != nil {
+	if err := bootstrapServing(registry, resumeLedger, lastCommitted, hotDB, logger); err != nil {
 		return err
 	}
 
@@ -202,22 +202,25 @@ func requirePinnedEarliest(cat *catalog.Catalog) (uint32, error) {
 	return earliest, nil
 }
 
-// bootstrapServing readies the registry before the loops start. First destroy any
-// resources a crashed run left demoted, then open and publish the handles for
-// ready hot chunks below the live one (completed chunks a prior run had not yet
-// discarded). Then seed the live state: publish the already-open resume DB as the
-// live chunk's handle (PublishReadyHandles skips the live chunk), and set the
-// latest ledger to the last committed one — it would otherwise read 0, making the
-// served range invalid on a restart with data. The ingestion loop republishes the
-// handle (idempotent) and advances the latest ledger from here.
+// bootstrapServing readies the registry before the loops start. Open and publish
+// the handles for ready hot chunks below the live one (completed chunks a prior
+// run had not yet discarded), then seed the live state: publish the already-open
+// resume DB as the live chunk's handle (PublishReadyHandles skips the live
+// chunk), and set the latest ledger to the last committed one — it would
+// otherwise read 0, making the served range invalid on a restart with data. The
+// ingestion loop republishes the handle (idempotent) and advances the latest
+// ledger from here.
+//
+// Demotions a crashed run left behind need no startup pass: the boundary seed
+// fires a lifecycle run right after boot, and its discard/prune scans re-collect
+// every demoted key — the same re-discovery that recovers a crash mid-run. A
+// "transient" key is never a ready read source, and a "pruning" artifact is
+// never served, so the leftovers are invisible to routing until then.
 func bootstrapServing(
-	registry *serving.Registry, cat *catalog.Catalog, resumeLedger, lastCommitted uint32,
+	registry *serving.Registry, resumeLedger, lastCommitted uint32,
 	hotDB *hotchunk.DB, logger *supportlog.Entry,
 ) error {
 	liveChunk := chunk.IDFromLedger(resumeLedger)
-	if err := lifecycle.StartupSweep(cat, liveChunk); err != nil {
-		return fmt.Errorf("startup sweep: %w", err)
-	}
 	if err := registry.PublishReadyHandles(liveChunk, logger); err != nil {
 		return fmt.Errorf("startup publish ready handles: %w", err)
 	}
