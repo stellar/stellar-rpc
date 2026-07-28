@@ -16,6 +16,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
@@ -338,4 +339,30 @@ func TestNewReadView_NoReadyChunkErrors(t *testing.T) {
 	r, _ := newTestRegistry(t, 3, 2) // no ready keys at all
 	_, err := r.NewReadView()
 	require.ErrorIs(t, err, errNoReadyHotChunk)
+}
+
+// TestNewReadView_LoadOrderPinned pins the three-load order the design's skew
+// argument depends on: the latest ledger and the handle set are loaded BEFORE
+// the catalog snapshot. The hook mutates both from inside the snapshot call —
+// with the correct order the view holds the pre-hook values; with the loads
+// swapped it would observe the mutations and this test fails.
+func TestNewReadView_LoadOrderPinned(t *testing.T) {
+	r, cat := newTestRegistry(t, 0, 0)
+	require.NoError(t, cat.FlipHotReady(5))
+	r.SetLatestLedger(100)
+
+	inner := r.newSnapshot
+	r.newSnapshot = func() (*rocksdb.Snapshot, error) {
+		r.SetLatestLedger(200)             // lands after the latest-ledger load
+		r.PublishHandle(6, &hotchunk.DB{}) // lands after the handle-set load
+		return inner()
+	}
+
+	a, err := r.NewReadView()
+	require.NoError(t, err)
+	defer a.Release()
+
+	assert.Equal(t, uint32(100), a.LatestLedger(), "latest ledger loaded before the snapshot")
+	_, has6 := a.handles.byChunk[6]
+	assert.False(t, has6, "handle set loaded before the snapshot")
 }

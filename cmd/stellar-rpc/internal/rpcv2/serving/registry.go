@@ -49,6 +49,13 @@ type Registry struct {
 	// handle here (not just its chunk id) is what lets the close actually retry —
 	// once unpublished, it is the only remaining reference. Guarded by mu.
 	closing map[chunk.ID]*hotchunk.DB
+
+	// newSnapshot is the snapshot constructor NewReadView uses — a test seam
+	// defaulting to catalog.NewSnapshot. The load-order test hooks it to mutate
+	// the registry from inside the snapshot call, pinning that the latest ledger
+	// and the handle set are loaded BEFORE the snapshot (the ordering the
+	// design's skew argument depends on, otherwise unobservable).
+	newSnapshot func() (*rocksdb.Snapshot, error)
 }
 
 // hotHandles is an immutable map of open hot-database handles keyed by chunk,
@@ -69,7 +76,12 @@ func (h *hotHandles) clone() *hotHandles {
 // NewRegistry binds a Registry to the catalog and retention policy, starting with
 // an empty handle map and latest ledger zero.
 func NewRegistry(cat *catalog.Catalog, retention geometry.Retention) *Registry {
-	r := &Registry{catalog: cat, retention: retention, closing: map[chunk.ID]*hotchunk.DB{}}
+	r := &Registry{
+		catalog:     cat,
+		retention:   retention,
+		closing:     map[chunk.ID]*hotchunk.DB{},
+		newSnapshot: cat.NewSnapshot,
+	}
 	r.handles.Store(&hotHandles{byChunk: map[chunk.ID]*hotchunk.DB{}})
 	return r
 }
@@ -215,7 +227,7 @@ type ReadView struct {
 func (r *Registry) NewReadView() (*ReadView, error) {
 	latest := r.latestLedger.Load()
 	handles := r.handles.Load()
-	snap, err := r.catalog.NewSnapshot()
+	snap, err := r.newSnapshot()
 	if err != nil {
 		return nil, err
 	}
