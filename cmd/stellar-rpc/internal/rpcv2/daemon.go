@@ -194,11 +194,10 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	registry := prometheus.NewRegistry()
 	metrics, sink := buildSinks(opts, registry)
 
-	// --- The current-ledger-state boundary the three captive-core-backed
-	// endpoints read through, plus the preflight pool simulateTransaction runs
-	// on. Built ONCE here, outside the supervised loop: the pool registers
-	// collectors on the registry above, and a second registration of the same
-	// collector panics. #889 hands both to the read server's method table. ---
+	// --- Captive-core state access for the three endpoints that need it, plus
+	// simulateTransaction's preflight pool. Built once, outside the supervised
+	// loop: the pool registers collectors on the registry above, and registering
+	// the same collector twice panics. #889 hands both to the method table. ---
 	coreDaemon, err := corestate.New(corestate.Config{
 		CoreURL:               cfg.Ingestion.CoreURL,
 		QueryPort:             deref(cfg.Ingestion.CoreHTTPQueryPort),
@@ -249,33 +248,30 @@ func openCatalog(paths config.Paths, opts daemonOptions, logger *supportlog.Entr
 	return cat, nil
 }
 
-// resolvedCore is everything runDaemonWith gets out of resolving captive core:
-// the two openers, and the two facts read off the resolution that other wiring
-// needs (the network the core runs on, and where its binary is).
+// resolvedCore is the result of resolving captive core: two openers, plus the
+// network and binary path read off the resolution.
 type resolvedCore struct {
 	// live opens the stream the ingestion loop follows. Its toml enables core's
 	// two HTTP servers, because the serving endpoints query them.
 	live CoreOpener
 
 	// backfill opens the bounded per-chunk replays of a no-lake deployment. Its
-	// toml is PORTLESS: those replays run in parallel, one core per chunk, so a
-	// fixed port in the toml would have every one of them fight over binding it.
-	// (Nothing queries a backfill core — only the live one is ever addressed.)
+	// toml has no ports: those replays run one core per chunk in parallel, so a
+	// fixed port would have them all fight over binding it. Nothing queries a
+	// backfill core.
 	backfill CoreOpener
 
-	// networkPassphrase is read back from the captive-core file. Empty means
-	// "unknown" (an injected opener), which skips the datastore's wrong-network
-	// check.
+	// networkPassphrase comes from the captive-core file. Empty means unknown (an
+	// injected opener) and skips the datastore's wrong-network check.
 	networkPassphrase string
 
-	// binaryPath is the resolved stellar-core binary — an explicit
-	// stellar_core_binary_path, or the one found on PATH. Empty for an injected
-	// opener; corestate then reports no core version.
+	// binaryPath is the resolved stellar-core binary. Empty for an injected
+	// opener, which makes corestate report no core version.
 	binaryPath string
 }
 
-// resolveCore returns the injected CoreOpener (tests, used for both roles) or
-// the production pair built from [ingestion].
+// resolveCore returns the injected opener (tests use it for both roles) or the
+// production pair built from [ingestion].
 func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry) (resolvedCore, error) {
 	if opts.Core != nil {
 		return resolvedCore{live: opts.Core, backfill: opts.Core}, nil
@@ -311,12 +307,9 @@ func startConfig(
 	}
 }
 
-// newPreflightPool starts the worker pool simulateTransaction's preflights run
-// on, sized by [service.preflight]. The caller owns Close.
-//
-// networkPassphrase is the one read back from the captive-core file. It is empty
-// only when the core opener was injected by a test, which also means no request
-// ever reaches the pool; a real deployment always has it.
+// newPreflightPool starts simulateTransaction's worker pool, sized by
+// [service.preflight]. The caller owns Close. networkPassphrase is empty only
+// for an injected (test) opener, where nothing reaches the pool anyway.
 func newPreflightPool(
 	cfg config.Config, coreDaemon *corestate.Daemon, networkPassphrase string, logger *supportlog.Entry,
 ) *preflight.WorkerPool {
@@ -477,17 +470,16 @@ type captiveCoreOpener struct {
 	config ledgerbackend.CaptiveCoreConfig
 }
 
-// newCaptiveCoreOpeners resolves the captive-core config, treating the
-// captive_core_config FILE as the single source of truth: NETWORK_PASSPHRASE is
-// read back from it, and the stellar-core binary defaults to the one on PATH.
-// Only the plain history-archive URLs (not derivable from the file's [HISTORY.*]
-// get-commands) come from [ingestion].history_archive_urls. The toml params
-// mirror the RPC daemon (strict, unified events, soroban diagnostic/meta
-// enforcement) so the ingested meta is what the events + txhash stores need.
+// newCaptiveCoreOpeners resolves the captive-core config. The
+// captive_core_config file is the source of truth for core-side settings:
+// NETWORK_PASSPHRASE is read back from it, and the binary defaults to the one on
+// PATH. Only the history-archive URLs come from [ingestion], since the file's
+// [HISTORY.*] entries are shell commands, not URLs. The toml params mirror the
+// v1 daemon (strict, unified events, soroban diagnostic/meta enforcement) so the
+// ingested meta suits the events + txhash stores.
 //
-// It returns TWO openers over one read of the file, differing only in whether
-// core's HTTP servers are enabled — see resolvedCore for why the backfill one
-// must stay portless.
+// It returns two openers over one read of the file, differing only in whether
+// core's HTTP servers are enabled — see resolvedCore.
 func newCaptiveCoreOpeners(
 	ing config.IngestionConfig, dataDir string, logger *supportlog.Entry,
 ) (resolvedCore, error) {
@@ -498,10 +490,8 @@ func newCaptiveCoreOpeners(
 		return resolvedCore{}, errors.New("[ingestion].history_archive_urls is required for live ingestion")
 	}
 
-	// NETWORK_PASSPHRASE lives in the captive-core file; read it back so the
-	// operator configures it in one place. (go-toml v1 ignores the other fields.)
-	// Read ONCE: both openers are built from these bytes, so they cannot end up
-	// describing two different networks if the file changes underneath us.
+	// Read the file ONCE: both openers are built from these bytes, so they cannot
+	// describe two different networks if the file changes underneath us.
 	data, err := os.ReadFile(ing.CaptiveCoreConfig)
 	if err != nil {
 		return resolvedCore{}, fmt.Errorf("read captive_core_config %q: %w", ing.CaptiveCoreConfig, err)
@@ -533,7 +523,7 @@ func newCaptiveCoreOpeners(
 		storagePath = filepath.Join(dataDir, "captive-core")
 	}
 
-	// The params both openers share; the live one then adds the HTTP ports.
+	// Shared params; the live opener then adds the HTTP ports.
 	params := ledgerbackend.CaptiveCoreTomlParams{
 		HistoryArchiveURLs:                 ing.HistoryArchiveURLs,
 		NetworkPassphrase:                  peek.NetworkPassphrase,
@@ -575,28 +565,24 @@ func newCaptiveCoreOpeners(
 	}, nil
 }
 
-// disableHTTPServers strips core's two HTTP servers from a toml, so a core
-// started with it binds no ports at all. This is what makes the backfill cores
-// of a no-lake deployment safe to run in parallel — several of them replaying
-// different chunks at once cannot all bind the same two ports.
+// disableHTTPServers strips core's two HTTP servers from a toml, so a core run
+// with it binds no ports — what makes parallel backfill replays safe.
 //
-// Simply not asking for the servers is NOT enough, which is why this exists:
-// when the operator's captive-core file declares HTTP_QUERY_PORT itself, the SDK
-// keeps that value (it only overwrites the query keys when the caller passes
-// query-server params), and the bounded-replay config it generates clears
-// HTTP_PORT but never the query port. Clearing the fields on the built toml is
-// how the SDK itself disables ports (see CaptiveCoreToml.CatchupToml).
+// Not asking for the servers is not enough: when the operator's captive-core
+// file declares HTTP_QUERY_PORT itself, the SDK keeps that value (it overwrites
+// the query keys only when given query-server params), and the bounded-replay
+// config it generates clears HTTP_PORT but never the query port. Clearing the
+// fields is how the SDK disables ports itself (CaptiveCoreToml.CatchupToml).
 func disableHTTPServers(coreToml *ledgerbackend.CaptiveCoreToml) {
-	coreToml.HTTPPort = 0 // 0 means "no admin server", the same value CatchupToml writes
+	coreToml.HTTPPort = 0 // no admin server, the value CatchupToml writes
 	coreToml.HTTPQueryPort = nil
 	coreToml.QueryThreadPoolSize = nil
 	coreToml.QuerySnapshotLedgers = nil
 }
 
-// coreFilePeek is the handful of captive-core file keys the daemon reads for
-// itself before handing the file to the SDK: the network it describes, and the
-// four HTTP-server settings that [ingestion] also owns. (go-toml ignores every
-// other key in the file.)
+// coreFilePeek is the captive-core file keys the daemon reads itself before
+// handing the file to the SDK: the network, and the four HTTP-server settings
+// [ingestion] also owns. go-toml ignores every other key.
 type coreFilePeek struct {
 	NetworkPassphrase    string `toml:"NETWORK_PASSPHRASE"`
 	HTTPPort             *uint  `toml:"HTTP_PORT"`
@@ -606,16 +592,14 @@ type coreFilePeek struct {
 }
 
 // checkNoHTTPConflict rejects a captive-core file that sets one of core's four
-// HTTP-server keys to a DIFFERENT value than the matching [ingestion] key. A
-// value that agrees is left alone, so a config carried over from v1 (where these
-// were commonly written into the core file) still starts.
+// HTTP keys to a different value than the matching [ingestion] key. A value that
+// agrees is fine, so configs carried over from v1 (which commonly set these in
+// the core file) still start.
 //
-// The SDK checks this too, but two of its checks are unusable: its three
-// query-server mismatch branches format the error with params.PeerPort, which
-// this daemon never sets, so they panic on a nil pointer instead of reporting
-// the conflict (go-stellar-sdk ingest/ledgerbackend/toml.go). Catching the
-// conflict here turns a nil-pointer stack trace into a startup error naming both
-// sides of the disagreement.
+// The SDK checks this too, but unusably: its three query-server mismatch
+// branches format the error with params.PeerPort, which this daemon never sets,
+// so they panic on a nil pointer instead of reporting the conflict. Checking
+// here turns that crash into an error naming both sides.
 func (p coreFilePeek) checkNoHTTPConflict(ing config.IngestionConfig) error {
 	conflicts := []struct {
 		fileKey    string
@@ -647,12 +631,11 @@ func (p coreFilePeek) checkNoHTTPConflict(ing config.IngestionConfig) error {
 }
 
 // newCaptiveCoreOpener builds one opener from the captive-core file's bytes.
-// data is what was read from ing.CaptiveCoreConfig; params carries the caller's
-// choice of whether core's HTTP servers are enabled.
+// params decides whether core's HTTP servers are enabled.
 //
-// The toml is built from the bytes rather than the path: NewCaptiveCoreTomlFromFile
-// would read the file again and could observe a different NETWORK_PASSPHRASE than
-// the caller peeked, surfacing as the SDK's confusing mismatch error.
+// It builds from the bytes, not the path: NewCaptiveCoreTomlFromFile would read
+// the file again and could see a different NETWORK_PASSPHRASE than the caller
+// peeked, surfacing as the SDK's confusing mismatch error.
 func newCaptiveCoreOpener(
 	ing config.IngestionConfig, data []byte, params ledgerbackend.CaptiveCoreTomlParams,
 	binaryPath, storagePath, networkPassphrase string, logger *supportlog.Entry,

@@ -15,8 +15,7 @@ import (
 )
 
 // wantNanosecondHint is the fragment every sub-millisecond-duration rejection
-// carries: a bare TOML integer decodes as nanoseconds, so the error tells the
-// operator to write the string form instead.
+// carries, telling the operator to write the string form instead.
 const wantNanosecondHint = "nanoseconds"
 
 // validCfg builds a valid Config; callers mutate one field to drive a rejection.
@@ -288,8 +287,7 @@ func TestValidateConfig_RejectsMalformedCoreHTTP(t *testing.T) {
 		want   string
 	}{
 		{
-			// v1 read 0 as "don't run core's HTTP server"; v2 serves
-			// sendTransaction off it, so 0 is a broken deployment.
+			// v1 read 0 as "don't run core's HTTP server".
 			"zero core_http_port",
 			func(c *config.Config) { c.Ingestion.CoreHTTPPort = uintPtr(0) },
 			"[ingestion]." + keyCoreHTTPPort,
@@ -325,8 +323,7 @@ func TestValidateConfig_RejectsMalformedCoreHTTP(t *testing.T) {
 			wantNanosecondHint,
 		},
 		{
-			// Easy to write, given the sibling key is a bare port. Without this
-			// check every submission fails at request time, not at startup.
+			// Otherwise every submission fails at request time, not at startup.
 			"core_url without a scheme",
 			func(c *config.Config) { c.Ingestion.CoreURL = "core.internal:11626" },
 			"must start with http:// or https://",

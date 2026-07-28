@@ -22,11 +22,11 @@ type Daemon interface {
 	CoreClient() CoreClient
 	FastCoreClient() FastCoreClient
 
-	// CoreVersion is the version string of the stellar-core BINARY this daemon
-	// runs — the first line of `stellar-core version`. It describes the binary,
-	// not a running process, so an implementation can answer it by looking at the
-	// configured binary path alone; getVersionInfo is its only consumer. An
-	// implementation that cannot determine the version returns "".
+	// CoreVersion is the version of the stellar-core binary this daemon runs —
+	// the first line of `stellar-core version`. It describes the binary, not a
+	// running process, so an implementation can answer from the configured path
+	// alone. Returns "" if the version is unknown. getVersionInfo is its only
+	// consumer.
 	CoreVersion() string
 }
 

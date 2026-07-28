@@ -90,10 +90,9 @@ func validateForm(cfg config.Config) error {
 	return validateService(cfg.Service)
 }
 
-// The [ingestion] core-HTTP key names, spelled once. Both the range checks in
-// validateIngestion and newCaptiveCoreOpeners' file-conflict check name these in
-// operator-facing errors, and a reader who greps an error message should land on
-// one definition. They mirror the toml tags on config.IngestionConfig.
+// The [ingestion] core-HTTP key names, spelled once: validateIngestion and
+// newCaptiveCoreOpeners both name them in errors. They mirror the toml tags on
+// config.IngestionConfig.
 const (
 	keyCoreHTTPPort             = "core_http_port"
 	keyCoreHTTPQueryPort        = "core_http_query_port"
@@ -102,16 +101,14 @@ const (
 )
 
 // validateIngestion form-validates the [ingestion] captive-core HTTP settings.
-// It runs AFTER WithDefaults, so every pointer is non-nil.
+// It runs after WithDefaults, so every pointer is non-nil.
 //
-// The four counts are configured as uint but reach the captive-core toml as
-// uint16, so each is range-checked here — this is the single place that rule
-// lives, and newCaptiveCoreOpeners narrows the values on the strength of it.
+// The four counts are uint here but uint16 in the captive-core toml, so each is
+// range-checked; newCaptiveCoreOpeners narrows them on the strength of it.
 func validateIngestion(ing config.IngestionConfig) error {
-	// Both ports must be usable: unlike v1, where port 0 meant "don't run core's
-	// HTTP server", v2 always serves sendTransaction off the admin port and
-	// getLedgerEntries off the query port, so a disabled server is a broken
-	// deployment rather than a mode.
+	// Both ports must be usable. v1 read port 0 as "don't run core's HTTP
+	// server"; v2 always serves sendTransaction off the admin port and
+	// getLedgerEntries off the query port, so 0 is a broken deployment, not a mode.
 	ports := []struct {
 		name string
 		v    uint
@@ -134,10 +131,8 @@ func validateIngestion(ing config.IngestionConfig) error {
 		return fmt.Errorf("[ingestion].core_request_timeout is %v — durations below 1ms are rejected; "+
 			"a bare TOML integer parses as nanoseconds, write a string like \"2s\"", *ing.CoreRequestTimeout)
 	}
-	// core_url is the one new key that is not a number, and an unusable one fails
-	// only later, per request, while the daemon still reports healthy. The easy
-	// mistake is omitting the scheme ("core.internal:11626"), which the HTTP
-	// client rejects at send time with "unsupported protocol scheme".
+	// A bad core_url otherwise fails per request, while the daemon reports
+	// healthy. The easy mistake is omitting the scheme ("core.internal:11626").
 	u, err := url.Parse(ing.CoreURL)
 	switch {
 	case err != nil:
@@ -247,9 +242,9 @@ func validateService(svc config.ServiceConfig) error {
 	return validateFeeWindows(svc.FeeStats)
 }
 
-// validatePreflight form-validates [service.preflight]. A zero worker count
-// means no goroutine ever picks a request up, and a zero queue size means the
-// pool is full the moment it is built — both reject every simulateTransaction.
+// validatePreflight form-validates [service.preflight]. Zero workers means
+// nothing picks requests up; a zero queue means the pool is full from the start.
+// Either rejects every simulateTransaction.
 func validatePreflight(p config.PreflightConfig) error {
 	if *p.WorkerCount < 1 {
 		return errors.New("[service.preflight].worker_count must be >= 1")

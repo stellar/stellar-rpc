@@ -52,10 +52,9 @@ func BindFlags(fs *pflag.FlagSet) {
 		case kindString:
 			fs.String(path, "", usage)
 		case kindBool:
-			// Registered as a normal (non-shorthand) bool flag, so both
-			// --service.preflight.enable_debug and the explicit
-			// --service.preflight.enable_debug=false work. The false default here
-			// is irrelevant: ApplyFlags reads a flag only when the user set it.
+			// The false default is irrelevant — ApplyFlags reads a flag only when
+			// the user set it. Turning a true-by-default key off needs --key=false,
+			// since a bare --key sets true.
 			fs.Bool(path, false, usage)
 		case kindUint:
 			fs.Uint(path, 0, usage)

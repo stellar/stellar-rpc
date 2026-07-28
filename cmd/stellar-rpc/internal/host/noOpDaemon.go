@@ -41,8 +41,7 @@ func (d *NoOpDaemon) FastCoreClient() FastCoreClient {
 	return d.coreClient
 }
 
-// CoreVersion reports no version: there is no stellar-core binary behind a
-// no-op daemon.
+// CoreVersion is empty: there is no core binary behind a no-op daemon.
 func (d *NoOpDaemon) CoreVersion() string {
 	return ""
 }
