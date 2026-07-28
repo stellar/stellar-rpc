@@ -79,16 +79,10 @@ func (d *DB) ResetCache() {
 	d.cache.firstLedgerCloseTime = 0
 }
 
-// Serving DSN pragmas. WAL journaling with auto-checkpointing disabled (we
-// checkpoint after every write transaction); synchronous=NORMAL is safe in WAL.
-const serveSQLitePragmas = "_journal_mode=WAL&_wal_autocheckpoint=0&_synchronous=NORMAL"
-
-// Backfill DSN pragmas. synchronous=OFF is safe since backfill is restartable
-// + gap-checked and the 1 GiB cache leaves most RAM to the OS page cache.
-const backfillSQLitePragmas = "_journal_mode=WAL&_wal_autocheckpoint=0&_synchronous=OFF" + "&_cache_size=-1048576"
-
-// Index-build DSN pragmas. A 512 MiB cache feeds the CREATE INDEX sorter.
-const indexBuildSQLitePragmas = serveSQLitePragmas + "&_cache_size=-524288"
+const (
+	serveSQLitePragmas      = "_journal_mode=WAL&_synchronous=NORMAL"
+	indexBuildSQLitePragmas = serveSQLitePragmas + "&_cache_size=-32768" // size CREATE INDEX sorter's memory budget
+)
 
 func openSQLiteDB(dbFilePath string) (*db.Session, error) {
 	session, err := db.Open("sqlite3", fmt.Sprintf("file:%s?%s", dbFilePath, serveSQLitePragmas))
@@ -103,37 +97,13 @@ func openSQLiteDB(dbFilePath string) (*db.Session, error) {
 	return session, nil
 }
 
-// OpenSQLiteBackfillSession opens a backfill-tuned session to the same SQLite
-// file, without running migrations. Swap onto the *DB with UseSession.
-func OpenSQLiteBackfillSession(dbFilePath string) (db.SessionInterface, error) {
-	session, err := db.Open("sqlite3", fmt.Sprintf("file:%s?%s", dbFilePath, backfillSQLitePragmas))
-	if err != nil {
-		return nil, fmt.Errorf("open backfill session failed: %w", err)
-	}
-	return session, nil
-}
-
-// UseSession swaps the underlying session, returning the previous one. Not
-// safe for concurrent use.
-func (d *DB) UseSession(s db.SessionInterface) db.SessionInterface {
-	prev := d.SessionInterface
-	d.SessionInterface = s
-	return prev
-}
-
-const idxLedgerSequenceName = "index_ledger_sequence"
-
-// deferredIndexNames are the secondary indexes dropped during a fresh-DB
-// backfill bulk-load and rebuilt by FinalizeBulkLoad. Their DDL comes from
-// migratedSchemaSQL; a migration touching them or the transactions table must
-// tolerate their absence/twin form during an unfinalized backfill.
+// deferredIndexNames are the secondary indexes dropped during a bulk-load backfill.
 //
 //nolint:gochecknoglobals // effectively-constant name list
-var deferredIndexNames = []string{"idx_id_contract_id", "idx_id_topic1", idxLedgerSequenceName}
+var deferredIndexNames = []string{"idx_id_contract_id", "idx_id_topic1", "index_ledger_sequence"}
 
 // migratedSchemaSQL runs the embedded migrations against a throwaway in-memory
-// DB and returns each named object's sqlite_master DDL, the ground truth for
-// the bulk-load schema swaps.
+// DB and returns each named object's sqlite_master DDL.
 func migratedSchemaSQL(ctx context.Context, names ...string) (map[string]string, error) {
 	ref, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
@@ -201,7 +171,7 @@ func PrepareBulkLoad(ctx context.Context, session db.SessionInterface, logger *l
 		return fmt.Errorf("could not create bulk transactions table: %w", err)
 	}
 	// Same-named ledger_sequence index for the per-commit trims
-	if _, err := session.ExecRaw(ctx, ddls[idxLedgerSequenceName]); err != nil {
+	if _, err := session.ExecRaw(ctx, ddls["index_ledger_sequence"]); err != nil {
 		return fmt.Errorf("could not index bulk transactions table: %w", err)
 	}
 	logger.Infof("Swapped transactions table for its indexless bulk-load twin")
@@ -241,7 +211,7 @@ func FinalizeBulkLoad(ctx context.Context, d *DB, dbFilePath string, logger *log
 		if err := restoreTransactionsTable(ctx, session, ddls[transactionTableName], logger); err != nil {
 			return err
 		}
-		if err := checkpointWAL(ctx, session); err != nil {
+		if _, err := session.ExecRaw(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 			return err
 		}
 		// The restore drops the twin's index_ledger_sequence, so recompute
@@ -255,7 +225,7 @@ func FinalizeBulkLoad(ctx context.Context, d *DB, dbFilePath string, logger *log
 		if _, err := session.ExecRaw(ctx, ddls[name]); err != nil {
 			return fmt.Errorf("could not build index %s: %w", name, err)
 		}
-		if err := checkpointWAL(ctx, session); err != nil {
+		if _, err := session.ExecRaw(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 			return fmt.Errorf("could not checkpoint after building index %s: %w", name, err)
 		}
 		logger.WithField("duration", time.Since(startTime).String()).
@@ -279,8 +249,8 @@ func restoreTransactionsTable(
 	}()
 
 	stmts := []string{
-		"DROP TABLE IF EXISTS transactions_bulk",        // leftover from an interrupted restore
-		"DROP INDEX IF EXISTS " + idxLedgerSequenceName, // the twin's; rebuilt on the canonical table after
+		"DROP TABLE IF EXISTS transactions_bulk",     // leftover from an interrupted restore
+		"DROP INDEX IF EXISTS index_ledger_sequence", // the twin's, rebuilt on the canonical table after
 		"ALTER TABLE " + transactionTableName + " RENAME TO transactions_bulk",
 		canonicalDDL,
 	}
@@ -311,9 +281,7 @@ func restoreTransactionsTable(
 	return nil
 }
 
-// transactionsNeedRestore reports whether the transactions table is the
-// bulk-load twin. An unrecognized shape is an error: a migration changed the
-// table underneath an unfinalized backfill.
+// transactionsNeedRestore reports if the transactions table is the bulk-load twin.
 func transactionsNeedRestore(ctx context.Context, d *DB, canonicalDDL, bulkDDL string) (bool, error) {
 	var sqls []string
 	err := d.SelectRaw(ctx, &sqls,
@@ -334,6 +302,7 @@ func transactionsNeedRestore(ctx context.Context, d *DB, canonicalDDL, bulkDDL s
 	}
 }
 
+// missingDeferredIndexes returns the names of any deferred indexes that aren't present in the DB.
 func missingDeferredIndexes(ctx context.Context, d *DB) ([]string, error) {
 	var missing []string
 	for _, name := range deferredIndexNames {
@@ -351,8 +320,7 @@ func missingDeferredIndexes(ctx context.Context, d *DB) ([]string, error) {
 }
 
 // openIndexBuildSession opens the single-connection session used for bulk
-// schema restoration (see indexBuildSQLitePragmas), with the multithreaded
-// sorter enabled.
+// schema restoration, with the multithreaded sorter enabled.
 func openIndexBuildSession(ctx context.Context, dbFilePath string) (*db.Session, error) {
 	session, err := db.Open("sqlite3", fmt.Sprintf("file:%s?%s", dbFilePath, indexBuildSQLitePragmas))
 	if err != nil {
@@ -365,12 +333,6 @@ func openIndexBuildSession(ctx context.Context, dbFilePath string) (*db.Session,
 		return nil, fmt.Errorf("could not enable multithreaded sorter: %w", err)
 	}
 	return session, nil
-}
-
-// checkpointWAL truncates the accumulated WAL into the main DB file.
-func checkpointWAL(ctx context.Context, session db.SessionInterface) error {
-	_, err := session.ExecRaw(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
-	return err
 }
 
 func OpenSQLiteDBWithPrometheusMetrics(dbFilePath string, namespace string, sub db.Subservice,
