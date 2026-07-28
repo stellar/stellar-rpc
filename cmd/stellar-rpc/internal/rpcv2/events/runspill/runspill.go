@@ -196,6 +196,14 @@ func (rw *RunWriter) Append(term events.TermKey, ids []uint32) error {
 	return rw.writeRaw(rw.buf)
 }
 
+// Written returns the payload bytes appended so far — i.e. the NEXT record's
+// payload-relative offset. Consumers that build routing state (fences) in the
+// same pass as the write read it before each Append, so their offsets can
+// never drift from the bytes actually written.
+func (rw *RunWriter) Written() int64 {
+	return int64(rw.written) //nolint:gosec // payload length, far below 2^63
+}
+
 // Close writes the trailer, patches the header's payload length, syncs, and
 // renames into place. On error the temp file is removed.
 func (rw *RunWriter) Close() error {

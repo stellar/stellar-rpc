@@ -96,6 +96,7 @@ type sealedRun struct {
 	path   string
 	bloom  bloomFilter
 	fences []fence // sorted by term; one per fenceEvery records + final end sentinel
+	terms  int     // record count; sizes a future merge output's bloom up front
 	file   *os.File
 }
 

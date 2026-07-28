@@ -142,8 +142,58 @@ func (h *HotIndex) reapSeal(block bool) error {
 	return nil
 }
 
-// sealWindow folds window rows into one run file and builds its in-RAM
-// routing state. Runs on the background goroutine over immutable inputs.
+// runRouting accumulates a freshly written run's in-RAM routing state (bloom
+// + fences + record count) record by record, in the SAME pass that writes the
+// file — freshly written runs are trusted without a post-write re-read
+// (owner-accepted: RocksDB/file-level integrity plus the corruption gates
+// cover it). The open-time drain-verify of PRE-EXISTING files at warmup
+// (openSealedRun) is untouched; it remains the crash-recovery trust anchor.
+//
+// The bloom is sized up front so fingerprints stream straight into it and no
+// whole-run fp accumulation is ever retained: seals size from the window
+// map's exact term count, merges from the inputs' summed counts — an upper
+// bound on the union, which newBloom's power-of-two rounding absorbs (an
+// over-sized bloom only lowers the false-positive rate).
+type runRouting struct {
+	bloom  bloomFilter
+	fences []fence
+	terms  int
+}
+
+func newRunRouting(expectedTerms int) *runRouting {
+	return &runRouting{bloom: newBloom(max(expectedTerms, 1))}
+}
+
+// observe records one written record: term, at payload-relative offset off.
+// Must be called once per record, in emission order, with the writer's
+// pre-Append offset.
+func (rt *runRouting) observe(term events.TermKey, off int64) {
+	if rt.terms%fenceEvery == 0 {
+		rt.fences = append(rt.fences, fence{term: term, off: off})
+	}
+	rt.bloom.add(fp64(term))
+	rt.terms++
+}
+
+// open finalizes the routing state over the just-closed run file at path:
+// the end-sentinel fence at payloadLen plus the open handle for lookups.
+func (rt *runRouting) open(path string, payloadLen int64) (*sealedRun, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	return &sealedRun{
+		path:   path,
+		bloom:  rt.bloom,
+		fences: append(rt.fences, fence{off: payloadLen}),
+		terms:  rt.terms,
+		file:   f,
+	}, nil
+}
+
+// sealWindow folds window rows into one run file, building its in-RAM
+// routing state in the same pass as the write. Runs on the background
+// goroutine over immutable inputs.
 func sealWindow(rows []windowRow, path string) (*sealedRun, error) {
 	window := make(map[events.TermKey][]uint32, 1<<15)
 	for i := range rows {
@@ -153,17 +203,23 @@ func sealWindow(rows []windowRow, path string) (*sealedRun, error) {
 			return nil, err
 		}
 	}
-	if err := writeSortedRun(window, path); err != nil {
+	rt := newRunRouting(len(window)) // exact: one record per window term
+	payloadLen, err := writeSortedRun(window, path, rt.observe)
+	if err != nil {
 		return nil, err
 	}
-	return openSealedRun(path)
+	return rt.open(path, payloadLen)
 }
 
 // writeSortedRun streams a folded (term → ids) window to path as one
-// term-sorted run file — no whole-payload buffer. Shared by the seal and by
-// the events freeze's window flushes, so the fold-and-stream shape has one
-// implementation.
-func writeSortedRun(window map[events.TermKey][]uint32, path string) error {
+// term-sorted run file — no whole-payload buffer — and returns the payload
+// length. observe, when non-nil, sees each record's term and payload-relative
+// offset just before it is written (one-pass routing-state construction).
+// Shared by the seal and by the events freeze's window flushes (observe=nil),
+// so the fold-and-stream shape has one implementation.
+func writeSortedRun(
+	window map[events.TermKey][]uint32, path string, observe func(term events.TermKey, off int64),
+) (int64, error) {
 	terms := make([]events.TermKey, 0, len(window))
 	for k := range window {
 		terms = append(terms, k)
@@ -171,25 +227,34 @@ func writeSortedRun(window map[events.TermKey][]uint32, path string) error {
 	slices.SortFunc(terms, func(a, b events.TermKey) int { return bytes.Compare(a[:], b[:]) })
 	rw, err := runspill.NewRunWriter(path)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	for _, t := range terms {
+		if observe != nil {
+			observe(t, rw.Written())
+		}
 		if err := rw.Append(t, window[t]); err != nil {
 			_ = rw.Close()
 			_ = os.Remove(path)
-			return err
+			return 0, err
 		}
 	}
-	return rw.Close()
+	return rw.Written(), rw.Close()
 }
 
 // mergeSealedRuns merges live runs into one new run file (union semantics —
-// runspill.MergeRuns), returning it plus the now-obsolete inputs.
+// runspill.MergeRuns), returning it plus the now-obsolete inputs. Routing
+// state is built as records stream out — no post-write re-read, no whole-run
+// fingerprint accumulation (the old fps slice was the merge window's largest
+// RSS transient).
 func mergeSealedRuns(runs []*sealedRun, path string) (*sealedRun, []*sealedRun, error) {
 	paths := make([]string, len(runs))
+	expected := 0
 	for i, r := range runs {
 		paths[i] = r.path
+		expected += r.terms
 	}
+	rt := newRunRouting(expected) // upper bound on the union's term count
 	// Stream the merged output straight to disk: the merged run can cover
 	// most of the chunk's terms (~GBs late-chunk), and buffering it whole was
 	// the acceptance run's only RSS spike.
@@ -197,25 +262,32 @@ func mergeSealedRuns(runs []*sealedRun, path string) (*sealedRun, []*sealedRun, 
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := runspill.MergeRuns(paths, rw.Append); err != nil {
+	emit := func(term events.TermKey, ids []uint32) error {
+		rt.observe(term, rw.Written())
+		return rw.Append(term, ids)
+	}
+	if err := runspill.MergeRuns(paths, emit); err != nil {
 		_ = rw.Close()
 		_ = os.Remove(path)
 		return nil, nil, err
 	}
+	payloadLen := rw.Written()
 	if err := rw.Close(); err != nil {
 		return nil, nil, err
 	}
-	merged, err := openSealedRun(path)
+	merged, err := rt.open(path, payloadLen)
 	if err != nil {
 		return nil, nil, err
 	}
 	return merged, runs, nil
 }
 
-// openSealedRun drains a run file (verifying its CRC), building the bloom +
-// fences + open file handle for lookups. Used at seal, merge, and warmup —
-// the routing state is always rebuilt from the verified file, never trusted
-// from elsewhere.
+// openSealedRun drains a PRE-EXISTING run file (verifying its CRC), building
+// the bloom + fences + open file handle for lookups. Warmup-only: it is the
+// crash-recovery trust anchor for files that survived a restart — routing
+// state for those is always rebuilt from the verified file, never trusted
+// from elsewhere. Freshly WRITTEN runs (seal/merge) build routing in the
+// write pass instead (runRouting) and are not re-read.
 func openSealedRun(path string) (*sealedRun, error) {
 	r, err := runspill.OpenRun(path)
 	if err != nil {
@@ -258,7 +330,7 @@ func openSealedRun(path string) (*sealedRun, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &sealedRun{path: path, bloom: bloom, fences: fences, file: f}, nil
+	return &sealedRun{path: path, bloom: bloom, fences: fences, terms: nTerms, file: f}, nil
 }
 
 // lookup probes the run for one term: bloom reject → fence window → pread →
