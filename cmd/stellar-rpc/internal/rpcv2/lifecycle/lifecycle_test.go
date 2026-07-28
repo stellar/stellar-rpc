@@ -285,3 +285,31 @@ func TestRunLifecycleTick_FailureReturnsError(t *testing.T) {
 	err := runLifecycle(context.Background(), cfg, cat, 0) // plan range [0,0], the failing build
 	require.Error(t, err, "a genuine op failure surfaces up the call stack")
 }
+
+// TestRunLifecycleTick_FailedFreezeDoesNotWedgeReclaim pins stage independence:
+// stage 1 fails (the same unproducible chunk-0 build as FailureReturnsError) and
+// the error surfaces, but the prune scan and the end-of-run destroys run anyway,
+// reclaiming a demoted artifact a "prior run" left behind. Without this, a
+// persistently failing freeze (a full disk is the sharp case) would also wedge
+// the very reclamation that could clear it.
+func TestRunLifecycleTick_FailedFreezeDoesNotWedgeReclaim(t *testing.T) {
+	cat, _ := smallTxHashIndexCatalog(t, 1)
+	cfg := lifecycleTestConfig(t, cat, 0)
+	makeReadyHotDirNoData(t, cat, 1)           // ready live chunk 1 => chunk 0 complete
+	require.NoError(t, cat.PutHotTransient(0)) // chunk 0 unproducible: stage 1 fails
+
+	// A demoted cold artifact from a prior run: "pruning" key, file still on disk.
+	freezeKinds(t, cat, 0, geometry.KindLedgers)
+	writeArtifact(t, cat.Layout().LedgerPackPath(0))
+	require.NoError(t, cat.DemoteChunkArtifacts(
+		[]catalog.ArtifactRef{{Chunk: 0, Kind: geometry.KindLedgers, State: geometry.StateFrozen}}))
+
+	err := runLifecycle(context.Background(), cfg, cat, 0)
+	require.Error(t, err, "the failed build still surfaces")
+
+	st, serr := cat.State(0, geometry.KindLedgers)
+	require.NoError(t, serr)
+	assert.Equal(t, geometry.State(""), st, "the demoted key was reclaimed despite the failed freeze")
+	assert.NoFileExists(t, cat.Layout().LedgerPackPath(0),
+		"the demoted file was reclaimed despite the failed freeze")
+}

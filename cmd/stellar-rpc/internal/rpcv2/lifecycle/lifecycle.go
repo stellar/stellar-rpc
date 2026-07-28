@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -119,9 +120,19 @@ func runOps(ctx context.Context, cfg Config, ops []func() error) (int, error) {
 // [floor, lastChunk] (start raised to storage); discard/prune key off lastChunk.
 // Every stage compares in the chunk domain.
 //
-// It returns the first stage error WITHOUT classifying it: Loop propagates it to
-// run's errgroup and supervise decides clean-vs-restart (a canceled ctx surfaces
-// as a ctx error supervise treats as a clean shutdown).
+// The stages run INDEPENDENTLY and their errors are joined at the end: each scan
+// reads only durable state, so a failed freeze must not gate the discard/prune
+// scans or the end-of-run destroys — otherwise a persistently failing stage (a
+// full disk failing the freeze is the sharp case) would also wedge the very
+// reclamation that could clear it. A chunk whose freeze failed is protected by
+// eligibility, not by ordering: nothing is discardable without durably frozen
+// artifacts and coverage. executePlan joins its workers before returning
+// (errgroup), so no build is in flight when the debris scan runs after a failed
+// stage 1. A canceled ctx still aborts everything, including the grace wait.
+//
+// It returns the joined stage errors WITHOUT classifying them: Loop propagates
+// them to run's errgroup and supervise decides clean-vs-restart (a canceled ctx
+// surfaces as a ctx error supervise treats as a clean shutdown).
 func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChunk chunk.ID) error {
 	metrics := observability.MetricsOrNop(cfg.Metrics)
 	logger := cfg.Logger
@@ -144,9 +155,10 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	// needed is the empty-range check (floor above lastChunk when retention outran
 	// production). An empty range emits no Freeze sample — the Discard/Prune samples
 	// below carry empty-tick visibility.
+	var errs []error
 	if floor <= lastChunk {
 		if eerr := backfill.RunBackfill(ctx, cfg.ExecConfig, floor, lastChunk); eerr != nil {
-			return fmt.Errorf("run backfill [%s,%s]: %w", floor, lastChunk, eerr)
+			errs = append(errs, fmt.Errorf("run backfill [%s,%s]: %w", floor, lastChunk, eerr))
 		}
 	}
 
@@ -156,7 +168,7 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	discardStart := time.Now()
 	discardChunks, err := eligibleDiscardChunks(cat, floor, lastChunk)
 	if err != nil {
-		return fmt.Errorf("eligible discard chunks: %w", err)
+		errs = append(errs, fmt.Errorf("eligible discard chunks: %w", err))
 	}
 	demoteOps := make([]func() error, len(discardChunks))
 	for i, c := range discardChunks {
@@ -170,25 +182,25 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	discarded, err := runOps(ctx, cfg, demoteOps)
 	metrics.Discard(discarded, time.Since(discardStart))
 	if err != nil {
-		return fmt.Errorf("discard demote: %w", err)
+		errs = append(errs, fmt.Errorf("discard demote: %w", err))
 	}
 	if discarded > 0 {
 		logger.WithField("discarded", discarded).Info("lifecycle discard stage complete")
 	}
 
 	// Live hot-chunk gauge after the discard stage.
-	hot, err := cat.HotChunkKeys()
-	if err != nil {
-		return fmt.Errorf("read hot chunk keys: %w", err)
+	if hot, herr := cat.HotChunkKeys(); herr != nil {
+		errs = append(errs, fmt.Errorf("read hot chunk keys: %w", herr))
+	} else {
+		metrics.LiveHotChunks(len(hot))
 	}
-	metrics.LiveHotChunks(len(hot))
 
 	// Stage 3 — prune scan. Demote each eligible cold artifact (mark it pruning) and
 	// defer its file/key destroy to end of run, alongside the discarded hot chunks.
 	pruneStart := time.Now()
 	idxCovs, chunkRefs, err := eligiblePruneTargets(cat, floor)
 	if err != nil {
-		return fmt.Errorf("eligible prune targets: %w", err)
+		errs = append(errs, fmt.Errorf("eligible prune targets: %w", err))
 	}
 	// One demote op per index coverage, one batched op for the chunk family; each
 	// op carries its artifact weight so the meter sums only the ops that ran.
@@ -210,7 +222,7 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	}
 	metrics.Prune(prunedArtifacts, time.Since(pruneStart))
 	if err != nil {
-		return fmt.Errorf("prune demote: %w", err)
+		errs = append(errs, fmt.Errorf("prune demote: %w", err))
 	}
 	if prunedArtifacts > 0 {
 		logger.WithField("pruned", prunedArtifacts).Info("lifecycle prune stage complete")
@@ -218,8 +230,9 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 
 	// End of run: destroy everything demoted this run — discarded hot handles and
 	// pruned cold files — after one grace wait (design: wait once, then delete).
+	// Reached even when stages errored, so a failing freeze cannot wedge reclaim.
 	pending.destroyAll(ctx, cfg)
-	return nil
+	return errors.Join(errs...)
 }
 
 // BoundarySignal couples ingestion (the producer) to the lifecycle Loop (the
