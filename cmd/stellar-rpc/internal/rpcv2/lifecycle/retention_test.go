@@ -46,7 +46,8 @@ func TestReaderRetention_WindowStraddlingFloorServesInRangeNotBelow(t *testing.T
 	idxCovs, chunkRefs, err := eligiblePruneTargets(cat, floor)
 	require.NoError(t, err)
 	for _, cov := range idxCovs {
-		require.NoError(t, cat.SweepTxHashIndexKey(cov))
+		require.NoError(t, cat.DemoteTxHashIndexKey(cov))
+		require.NoError(t, cat.DestroyTxHashIndexKey(cov))
 	}
 	require.NoError(t, cat.SweepChunkArtifacts(chunkRefs))
 

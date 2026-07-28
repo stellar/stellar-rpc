@@ -10,8 +10,9 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 )
 
-// Key-driven sweeps — the ONLY two deletion bodies in the system, one per key
-// family. Both follow the same load-bearing order:
+// Key-driven deletion bodies, one per key family (chunk artifacts, index
+// coverages, hot chunks). Every file deleter in the system goes through here.
+// All follow the same load-bearing order:
 //
 //	demote-if-still-"frozen" -> unlink file(s) -> fsyncDir(parent) -> delete key
 //
@@ -90,16 +91,6 @@ func (c *Catalog) DestroyChunkArtifacts(refs []ArtifactRef) error {
 		}
 		return nil
 	})
-}
-
-// SweepTxHashIndexKey deletes one index coverage's file and key, as one immediate
-// demote-then-destroy. Deferred deletion instead calls DemoteTxHashIndexKey during
-// a stage and DestroyTxHashIndexKey at end of run.
-func (c *Catalog) SweepTxHashIndexKey(cov geometry.TxHashIndexCoverage) error {
-	if err := c.DemoteTxHashIndexKey(cov); err != nil {
-		return err
-	}
-	return c.DestroyTxHashIndexKey(cov)
 }
 
 // DemoteTxHashIndexKey demotes a "frozen" coverage to "pruning" so no unlink later

@@ -79,7 +79,8 @@ func TestSweepIndexKey(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 
-	require.NoError(t, cat.SweepTxHashIndexKey(frozen))
+	require.NoError(t, cat.DemoteTxHashIndexKey(frozen))
+	require.NoError(t, cat.DestroyTxHashIndexKey(frozen))
 
 	require.NoFileExists(t, idxPath)
 	keys, err := cat.TxHashIndexKeys(5)
@@ -96,7 +97,8 @@ func TestSweepIndexKeyFreezingDebris(t *testing.T) {
 	idxPath := cat.layout.TxHashIndexFilePath(cov)
 	writeArtifact(t, idxPath)
 
-	require.NoError(t, cat.SweepTxHashIndexKey(cov))
+	require.NoError(t, cat.DemoteTxHashIndexKey(cov))
+	require.NoError(t, cat.DestroyTxHashIndexKey(cov))
 	require.NoFileExists(t, idxPath)
 	keys, err := cat.TxHashIndexKeys(5)
 	require.NoError(t, err)

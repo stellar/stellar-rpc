@@ -75,7 +75,8 @@ func pendingArtifacts(c chunk.ID, cat *catalog.Catalog, covers bool) (catalog.Ar
 	return need, nil
 }
 
-// eligiblePruneTargets is the system's only file-deleter scan, key-driven,
+// eligiblePruneTargets is the file-deleter scan for query-visible artifacts
+// (the one exception is backfill's eager .bin sweep, which no query reads), key-driven,
 // covering both key families. It returns the index coverages to sweep (one each)
 // and the batched per-chunk refs to sweep. "Below the floor" is the gate predicate
 // shared with the discard scan and read path, so prune deletes exactly what the

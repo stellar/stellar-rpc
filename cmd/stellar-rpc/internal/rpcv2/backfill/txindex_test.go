@@ -202,17 +202,24 @@ func TestBuildThenSweep_RollingPredecessorDemotedAndSwept(t *testing.T) {
 		require.Equal(t, chunk.ID(0), frozen.Lo)
 		require.Equal(t, hi, frozen.Hi)
 
-		// Exactly ONE coverage key remains — the predecessor was demoted and the
-		// eager sweep removed it (key + file).
+		// The predecessors linger as "pruning" debris: the old .idx is
+		// query-visible, so its deletion waits for a lifecycle run's grace-
+		// protected destroy — the build never unlinks it. One frozen coverage
+		// plus hi pruning predecessors.
 		keys, err := cat.TxHashIndexKeys(0)
 		require.NoError(t, err)
-		require.Len(t, keys, 1, "exactly one coverage key after the eager sweep")
-		require.Equal(t, frozen.Key, keys[0].Key)
-		require.Equal(t, geometry.StateFrozen, keys[0].State)
+		require.Len(t, keys, int(hi)+1, "one frozen coverage plus the pruning predecessors")
+		for _, k := range keys {
+			if k.Key == frozen.Key {
+				require.Equal(t, geometry.StateFrozen, k.State)
+			} else {
+				require.Equal(t, geometry.StatePruning, k.State, "predecessor %s demoted, not swept", k.Key)
+			}
+		}
 
-		// The predecessor file is gone.
+		// The predecessor file survives for the grace period.
 		if prevPath != "" {
-			require.NoFileExists(t, prevPath)
+			require.FileExists(t, prevPath)
 		}
 		prevPath = cat.Layout().TxHashIndexFilePath(frozen)
 		require.FileExists(t, prevPath)
@@ -419,11 +426,16 @@ func TestBuildCrashMatrix_AfterMarkBeforeCommit(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, chunk.ID(2), frozen.Hi)
-	// The predecessor [0,1] was demoted by the commit and swept eagerly.
+	// The predecessor [0,1] was demoted by the commit; its key and file wait
+	// for a lifecycle run's grace-protected destroy.
 	keys, err = cat.TxHashIndexKeys(0)
 	require.NoError(t, err)
-	require.Len(t, keys, 1, "exactly one coverage after recovery")
-	require.Equal(t, geometry.TxHashIndexKey(0, 0, 2), keys[0].Key)
+	states = map[string]geometry.State{}
+	for _, k := range keys {
+		states[k.Key] = k.State
+	}
+	require.Equal(t, geometry.StateFrozen, states[geometry.TxHashIndexKey(0, 0, 2)])
+	require.Equal(t, geometry.StatePruning, states[geometry.TxHashIndexKey(0, 0, 1)], "predecessor demoted, not swept")
 	assertCoverageQueryable(t, cat, []txEntry{
 		{hashAt(500), seqIn(0, 2)}, {hashAt(501), seqIn(1, 2)}, {hashAt(502), seqIn(2, 2)},
 	})
@@ -474,9 +486,11 @@ func TestBuildCrashMatrix_AfterCommitBeforeSweep(t *testing.T) {
 	}
 
 	// Recovery: re-run buildThenSweep for [0,3]. buildTxhashIndex SKIPS (already
-	// frozen) and the eager sweeps finish the demoted predecessor + inputs.
+	// frozen) and the eager sweep finishes the demoted .bin inputs. The demoted
+	// predecessor coverage is NOT swept: its .idx is query-visible and waits for
+	// a lifecycle run's grace-protected destroy.
 	require.NoError(t, buildThenSweep(context.Background(), IndexBuild{Index: 0, Lo: 0, Hi: 3}, cfg))
-	require.NoFileExists(t, predPath)
+	require.FileExists(t, predPath, "the superseded .idx survives until a lifecycle run")
 	for c := chunk.ID(0); c <= 3; c++ {
 		require.NoFileExists(t, cat.Layout().TxHashBinPath(c))
 		s, serr := cat.State(c, geometry.KindTxHash)
@@ -485,8 +499,12 @@ func TestBuildCrashMatrix_AfterCommitBeforeSweep(t *testing.T) {
 	}
 	keys, err = cat.TxHashIndexKeys(0)
 	require.NoError(t, err)
-	require.Len(t, keys, 1)
-	require.Equal(t, geometry.StateFrozen, keys[0].State)
+	states = map[string]geometry.State{}
+	for _, k := range keys {
+		states[k.Key] = k.State
+	}
+	require.Equal(t, geometry.StateFrozen, states[geometry.TxHashIndexKey(0, 0, 3)])
+	require.Equal(t, geometry.StatePruning, states[geometry.TxHashIndexKey(0, 0, 2)])
 }
 
 // Row "mid-sweep": a "pruning" key whose durable unlink completed but whose key

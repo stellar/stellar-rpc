@@ -255,7 +255,8 @@ func TestRunLifecycleTick_PrunesTransientIndexDebris(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, idxCovs, 1, "the freezing debris is swept")
 	require.Empty(t, chunkRefs, "no chunk-family debris")
-	require.NoError(t, cat.SweepTxHashIndexKey(idxCovs[0]))
+	require.NoError(t, cat.DemoteTxHashIndexKey(idxCovs[0]))
+	require.NoError(t, cat.DestroyTxHashIndexKey(idxCovs[0]))
 
 	covs, err := cat.AllTxHashIndexKeys()
 	require.NoError(t, err)
