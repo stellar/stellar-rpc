@@ -175,7 +175,7 @@ func (s *Store) Put(cf string, key, value []byte) error {
 // Get returns (value, true, nil) on hit, (nil, false, nil) on miss.
 // Returned value is a fresh copy the caller owns.
 func (s *Store) Get(cf string, key []byte) ([]byte, bool, error) {
-	return s.getRO(s.ro, cf, key)
+	return s.getWith(s.ro, cf, key)
 }
 
 // BatchMultiGet reads many keys from cf in a single batched call.
@@ -258,7 +258,7 @@ type Entry struct {
 // Up-front errors (closed/never-opened/unknown CF) and mid-walk
 // RocksDB errors yield once with (Entry{}, err).
 func (s *Store) Iterate(cf string, prefix []byte) iter.Seq2[Entry, error] {
-	return s.iterateRO(s.ro, cf, prefix)
+	return s.iterateWith(s.ro, cf, prefix)
 }
 
 // LastKey returns the largest key in cf. If cf has no keys this is not an
@@ -394,7 +394,7 @@ func (s *Store) GetAsOf(snap *Snapshot, cf string, key []byte) ([]byte, bool, er
 	ro := grocksdb.NewDefaultReadOptions()
 	ro.SetSnapshot(snap.snap)
 	defer ro.Destroy()
-	return s.getRO(ro, cf, key)
+	return s.getWith(ro, cf, key)
 }
 
 // IterateAsOf is Iterate pinned to snap's view: the whole prefix scan is
@@ -409,7 +409,7 @@ func (s *Store) IterateAsOf(snap *Snapshot, cf string, prefix []byte) iter.Seq2[
 		ro := grocksdb.NewDefaultReadOptions()
 		ro.SetSnapshot(snap.snap)
 		defer ro.Destroy()
-		s.iterateRO(ro, cf, prefix)(yield)
+		s.iterateWith(ro, cf, prefix)(yield)
 	}
 }
 
@@ -504,9 +504,9 @@ func (s *Store) teardownLocked() {
 	s.db = nil // latch: a second teardown no-ops
 }
 
-// getRO is the shared body for Get and GetAsOf; ro selects the read view
+// getWith is the shared body for Get and GetAsOf; ro selects the read view
 // (s.ro for a live read, a snapshot-pinned ReadOptions for GetAsOf).
-func (s *Store) getRO(ro *grocksdb.ReadOptions, cf string, key []byte) ([]byte, bool, error) {
+func (s *Store) getWith(ro *grocksdb.ReadOptions, cf string, key []byte) ([]byte, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if err := s.checkOpen(); err != nil {
@@ -530,9 +530,9 @@ func (s *Store) getRO(ro *grocksdb.ReadOptions, cf string, key []byte) ([]byte, 
 	return out, true, nil
 }
 
-// iterateRO is the shared body for Iterate and IterateAsOf; ro selects the read
+// iterateWith is the shared body for Iterate and IterateAsOf; ro selects the read
 // view (s.ro for a live scan, a snapshot-pinned ReadOptions for IterateAsOf).
-func (s *Store) iterateRO(ro *grocksdb.ReadOptions, cf string, prefix []byte) iter.Seq2[Entry, error] {
+func (s *Store) iterateWith(ro *grocksdb.ReadOptions, cf string, prefix []byte) iter.Seq2[Entry, error] {
 	return func(yield func(Entry, error) bool) {
 		s.mu.RLock()
 		defer s.mu.RUnlock()

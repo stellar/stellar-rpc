@@ -36,7 +36,7 @@ type Registry struct {
 
 	// handles is the copy-on-write map of open hot-database handles, published
 	// atomically. A read view loads it once at acquisition.
-	handles atomic.Pointer[hotHandles]
+	handles atomic.Pointer[handleSet]
 
 	// mu serializes handle updates (publish/discard/close) so a lost update cannot
 	// drop a concurrently published handle. Also guards closing.
@@ -57,19 +57,19 @@ type Registry struct {
 	newSnapshot func() (*rocksdb.Snapshot, error)
 }
 
-// hotHandles is an immutable map of open hot-database handles keyed by chunk,
+// handleSet is an immutable map of open hot-database handles keyed by chunk,
 // replaced wholesale on every publish or discard so a query that loaded one keeps
 // reading it.
-type hotHandles struct {
+type handleSet struct {
 	byChunk map[chunk.ID]*hotchunk.DB
 }
 
 // clone returns a deep copy so a copy-on-write update never mutates a map a query
 // is already reading.
-func (h *hotHandles) clone() *hotHandles {
+func (h *handleSet) clone() *handleSet {
 	m := make(map[chunk.ID]*hotchunk.DB, len(h.byChunk))
 	maps.Copy(m, h.byChunk)
-	return &hotHandles{byChunk: m}
+	return &handleSet{byChunk: m}
 }
 
 // NewRegistry binds a Registry to the catalog and retention policy, starting with
@@ -81,7 +81,7 @@ func NewRegistry(cat *catalog.Catalog, retention geometry.Retention) *Registry {
 		closing:     map[chunk.ID]*hotchunk.DB{},
 		newSnapshot: cat.NewSnapshot,
 	}
-	r.handles.Store(&hotHandles{byChunk: map[chunk.ID]*hotchunk.DB{}})
+	r.handles.Store(&handleSet{byChunk: map[chunk.ID]*hotchunk.DB{}})
 	return r
 }
 
@@ -190,7 +190,7 @@ func (r *Registry) Close() {
 	for _, db := range r.handles.Load().byChunk {
 		_ = db.Close()
 	}
-	r.handles.Store(&hotHandles{byChunk: map[chunk.ID]*hotchunk.DB{}})
+	r.handles.Store(&handleSet{byChunk: map[chunk.ID]*hotchunk.DB{}})
 	for c, db := range r.closing {
 		_ = db.Close()
 		delete(r.closing, c)
@@ -204,7 +204,7 @@ func (r *Registry) Close() {
 type ReadView struct {
 	latestLedger uint32
 	floor        chunk.ID
-	handles      *hotHandles
+	handles      *handleSet
 	snap         *rocksdb.Snapshot
 	catalog      *catalog.Catalog
 

@@ -94,7 +94,7 @@ type Registry struct {
     retention geometry.Retention
 
     latestLedger atomic.Uint32
-    handles      atomic.Pointer[hotHandles] // copy-on-write map[chunk.ID]*hotchunk.DB
+    handles      atomic.Pointer[handleSet] // copy-on-write map[chunk.ID]*hotchunk.DB
     mu           sync.Mutex                 // serializes handle-set updates
     closing      map[chunk.ID]*hotchunk.DB  // unpublished handles awaiting an idle close
 }
@@ -102,7 +102,7 @@ type Registry struct {
 type ReadView struct {
     latestLedger uint32
     floor        chunk.ID
-    handles      *hotHandles
+    handles      *handleSet
     snap         *rocksdb.Snapshot
     catalog      *catalog.Catalog
     closers      []func() error // cold readers this view opened; Release closes them
