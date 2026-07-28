@@ -1,0 +1,36 @@
+# To fill in and use by the backfill leg's runner (instantiate.go renderConfig),
+# which substitutes the placeholders below via os.Expand before the daemon reads
+# it -- not a standalone config.
+
+NETWORK_PASSPHRASE = "Public Global Stellar Network ; September 2015"
+HISTORY_ARCHIVE_URLS = ["https://history.stellar.org/prd/core-live/core_live_001"]
+ENDPOINT = "localhost:8000"
+LOG_LEVEL = "info"
+
+# Captive core is constructed at startup (so the binary + config must exist)
+# even though backfill itself reads from the datastore below.
+CAPTIVE_CORE_CONFIG_PATH = "${CAPTIVE_CORE_CONFIG_PATH}"
+STELLAR_CORE_BINARY_PATH = "${STELLAR_CORE_BINARY_PATH}"
+CAPTIVE_CORE_STORAGE_PATH = "${CAPTIVE_CORE_STORAGE_PATH}"
+CHECKPOINT_FREQUENCY = 64
+
+DB_PATH = "${DB_PATH}"
+
+# Backfill the retention window from the datastore on startup, then stop (the
+# leg kills the daemon at the completion log line).
+BACKFILL = true
+SERVE_LEDGERS_FROM_DATASTORE = true
+HISTORY_RETENTION_WINDOW = ${HISTORY_RETENTION_WINDOW}
+INGESTION_TIMEOUT = "50m0s"
+
+[datastore_config]
+  type = "S3"
+
+  [datastore_config.params]
+    destination_bucket_path = "aws-public-blockchain/v1.1/stellar/ledgers/pubnet"
+    region = "us-east-2"
+
+  [datastore_config.schema]
+    FileExtension = "zst"
+    files_per_partition = 64000
+    ledgers_per_file = 1

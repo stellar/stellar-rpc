@@ -1,0 +1,173 @@
+name: Load test coordinator
+# Drives the ephemeral load test(s) for a release: resolves the release context,
+# fans out one ec2-leg call per planned leg, then aggregates one consolidated
+# sticky comment on the release PR. Owns reporting of perf eval results to the PR.
+# Legs report through S3 at runs/<run_id>/<run_label>/result.json; adding a leg
+# is one roster entry in the plan job plus its box script.
+
+defaults:
+  run:
+    shell: bash
+
+on:
+  push:
+    branches: [release/**]
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: 'Ref/branch/SHA to load test (default: triggering ref)'
+        required: false
+        type: string
+        default: ''
+      pr_number:
+        description: 'PR to report results to (default: inferred from the tested branch)'
+        required: false
+        type: string
+        default: ''
+
+# Keyed on the release ref so a new push to the same branch supersedes an
+# in-flight test. Each leg's self-terminate ceiling backstops its box.
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.target_ref || github.ref }}
+  cancel-in-progress: true
+
+# Held here and granted to every leg (secrets: inherit) + the report job
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  plan:
+    name: Resolve release context
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      target_sha: ${{ steps.ctx.outputs.target_sha }}
+      pr_number: ${{ steps.ctx.outputs.pr_number }}
+      legs: ${{ steps.ctx.outputs.legs }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_ref || github.ref }}
+      - name: Resolve context
+        id: ctx
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.target_ref || github.ref_name }}
+          PR: ${{ inputs.pr_number }}
+        run: |
+          SHA="$(git rev-parse HEAD)"
+          if [ -z "$PR" ]; then
+            PR="$(gh pr list --repo "${{ github.repository }}" --state open \
+                    --head "$REF" --json number --jq '.[0].number // ""' 2>/dev/null || true)"
+          fi
+          LEGS='[
+            {"label":"Apply-load ingestion","run_label":"apply-load","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh","budget":225},
+            {"label":"Backfill ingestion","run_label":"backfill","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/run-backfill.sh","budget":345}
+          ]'
+          {
+            echo "target_sha=$SHA"
+            echo "pr_number=$PR"
+            echo "legs=$(jq -c . <<<"$LEGS")"
+          } >> "$GITHUB_OUTPUT"
+
+  # The fan-out: one matrix entry per leg.
+  load-test:
+    name: ${{ matrix.leg.label }}
+    needs: plan
+    strategy:
+      fail-fast: false # stops one leg's failure from cancelling other legs
+      matrix:
+        leg: ${{ fromJSON(needs.plan.outputs.legs) }}
+    uses: ./.github/workflows/ec2-leg.yml
+    secrets: inherit
+    with:
+      target_ref: ${{ needs.plan.outputs.target_sha }}
+      run_label: ${{ matrix.leg.run_label }}
+      leg_script: ${{ matrix.leg.script }}
+      budget_minutes: ${{ matrix.leg.budget }}
+
+  report:
+    name: Aggregate + report
+    needs: [plan, load-test]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Default checkout (github.sha): run renderer at workflow version even
+      # when the legs benchmark another target_sha.
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-go
+
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
+          aws-region: us-east-1
+
+      # coordinator-runner does the rendering + history fold (it fetches each leg's
+      # S3 result and emits the new comment body, under unit test). the gh api calls
+      # stay here. Renderer failures abort before posting.
+      - name: Render + post sticky report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ needs.plan.outputs.pr_number }}
+          REPO: ${{ github.repository }}
+          AWS_REGION: us-east-1
+          TARGET_SHA: ${{ needs.plan.outputs.target_sha }}
+          TARGET_REF: ${{ inputs.target_ref || github.ref_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PLANNED_LEGS: ${{ needs.plan.outputs.legs }}
+          BUCKET: stellar-rpc-ci-load-test # must match ec2-leg.yml
+        run: |
+          set -uo pipefail
+          MARKER='<!-- load-test-results -->'
+          PERF_EVAL=./cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval
+
+          # Read the existing sticky comment (id + body), if any.
+          CID=""; PREV=""
+          if [ -n "$PR" ]; then
+            CID=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+              --jq "map(select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\")))) | .[0].id // empty" || true)
+            [ -n "$CID" ] && PREV=$(gh api "repos/$REPO/issues/comments/$CID" --jq '.body' || true)
+          fi
+
+          # Note result locations are deterministic (runs/<run_id>/<run_label>/result.json)
+          LEGS=$(jq -c --arg pfx "runs/$GITHUB_RUN_ID" --arg b "$BUCKET" \
+            'map({label, bucket: $b, key: ($pfx + "/" + .run_label + "/result.json")})' <<<"$PLANNED_LEGS")
+          export LEGS
+
+          # Render the new body (fetches each leg's S3 result, folds prior runs).
+          if ! printf '%s' "$PREV" | go run "$PERF_EVAL" > /tmp/comment.md; then
+            echo "::error::renderer failed; leaving sticky comment untouched"
+            exit 1
+          fi
+          cat /tmp/comment.md >> "$GITHUB_STEP_SUMMARY"
+
+          # Post / edit the sticky comment (skip if the render produced nothing).
+          if [ ! -s /tmp/comment.md ]; then
+            echo "::warning::render produced no output, skipping comment post"
+          elif [ -n "$PR" ]; then
+            jq -Rs '{body: .}' /tmp/comment.md > /tmp/payload.json
+            if [ -n "$CID" ]; then
+              gh api -X PATCH "repos/$REPO/issues/comments/$CID" --input /tmp/payload.json >/dev/null \
+                && echo "updated sticky comment $CID on PR #$PR" \
+                || echo "::warning::failed to update sticky comment on PR #$PR"
+            else
+              gh api -X POST "repos/$REPO/issues/$PR/comments" --input /tmp/payload.json >/dev/null \
+                && echo "created sticky comment on PR #$PR" \
+                || echo "::warning::failed to create sticky comment on PR #$PR"
+            fi
+          fi
+
+      # Authoritative gate: reflects the load-test legs, independent of whether
+      # the comment posted.
+      - name: Set overall status
+        if: always()
+        run: |
+          if [ "${{ needs.load-test.result }}" != "success" ]; then
+            echo "::error::one or more legs did not pass (aggregate result: ${{ needs.load-test.result }})"
+            exit 1
+          fi
+          echo "all load-test legs passed"

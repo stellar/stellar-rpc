@@ -51,6 +51,16 @@ type dbCache struct {
 
 	latestLedgerSeq       uint32
 	latestLedgerCloseTime int64
+	// firstLedgerSeq/firstLedgerCloseTime cache the oldest retained ledger's
+	// range scalars. Without this, GetLedgerRange decodes the entire oldest
+	// LedgerCloseMeta blob on every call (e.g. on every getTransaction) just to
+	// read a sequence + close time. A value of 0 means "unknown" -- it is
+	// populated lazily on the first GetLedgerRange after a reset or after the
+	// cached oldest ledger has been trimmed away (see Commit), so the expensive
+	// oldest-ledger decode happens at most once per trim (~once per ledger
+	// once retention is full) instead of once per read.
+	firstLedgerSeq       uint32
+	firstLedgerCloseTime int64
 }
 
 type DB struct {
@@ -64,6 +74,8 @@ func (d *DB) ResetCache() {
 	defer d.cache.Unlock()
 	d.cache.latestLedgerSeq = 0
 	d.cache.latestLedgerCloseTime = 0
+	d.cache.firstLedgerSeq = 0
+	d.cache.firstLedgerCloseTime = 0
 }
 
 func openSQLiteDB(dbFilePath string) (*db.Session, error) {
@@ -338,6 +350,19 @@ func (w writeTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta, durationMetrics map
 		if ledgerSeq > w.globalCache.latestLedgerSeq {
 			w.globalCache.latestLedgerSeq = ledgerSeq
 			w.globalCache.latestLedgerCloseTime = ledgerCloseTime
+		}
+		// Invalidate the cached oldest-ledger scalars when trimLedgers (run
+		// above with this same retention window) has removed the ledger they
+		// describe. cutoff mirrors trimLedgers: rows with sequence < cutoff are
+		// deleted. Only invalidate when retention is actually trimming and the
+		// cached oldest was at/below the cutoff, so the lazy recompute happens
+		// at most once per trim rather than on every read.
+		if w.historyRetentionWindow != 0 && ledgerSeq+1 > w.historyRetentionWindow {
+			cutoff := ledgerSeq + 1 - w.historyRetentionWindow
+			if w.globalCache.firstLedgerSeq != 0 && w.globalCache.firstLedgerSeq < cutoff {
+				w.globalCache.firstLedgerSeq = 0
+				w.globalCache.firstLedgerCloseTime = 0
+			}
 		}
 		return nil
 	}

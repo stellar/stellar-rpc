@@ -22,6 +22,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/clients/stellarcore"
 	"github.com/stellar/go-stellar-sdk/historyarchive"
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	"github.com/stellar/go-stellar-sdk/ingest/loadtest"
 	"github.com/stellar/go-stellar-sdk/support/datastore"
 	supporthttp "github.com/stellar/go-stellar-sdk/support/http"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -322,14 +323,36 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 		logger.WithError(err).Error("could not run ingestion. Retrying")
 	}
 
+	var backend ledgerbackend.LedgerBackend = daemon.core
+	if cfg.IngestLoadTest.Enabled() {
+		// CustomSetValue/MarshalTOML doesn't apply DefaultValue, so fall back here.
+		frequency := cfg.IngestLoadTest.Frequency
+		if frequency == 0 {
+			frequency = config.DefaultIngestLoadTestFrequency
+		}
+		logger.
+			WithField("files", cfg.IngestLoadTest.Files).
+			WithField("max_ledgers_per_file", cfg.IngestLoadTest.MaxLedgersPerFile).
+			WithField("close_time", frequency).
+			Warn("Ingestion will run with load testing")
+
+		backend = loadtest.NewLedgerBackend(loadtest.LedgerBackendConfig{
+			NetworkPassphrase:   cfg.NetworkPassphrase,
+			LedgersFilePaths:    cfg.IngestLoadTest.Files,
+			LedgerCloseDuration: frequency,
+			MaxLedgersPerFile:   cfg.IngestLoadTest.MaxLedgersPerFile,
+		})
+	}
+
 	ingestCfg := ingest.Config{
 		Logger:            logger,
 		DB:                rw,
 		NetworkPassPhrase: cfg.NetworkPassphrase,
 		Archive:           *historyArchive,
-		LedgerBackend:     daemon.core,
+		LedgerBackend:     backend,
 		Timeout:           cfg.IngestionTimeout,
 		OnIngestionRetry:  onIngestionRetry,
+		OnLedgerIngested:  cfg.IngestLoadTest.OnLedgerIngested,
 		Daemon:            daemon,
 		FeeWindows:        feewindows,
 	}
@@ -430,6 +453,12 @@ func (d *Daemon) mustInitializeStorage(cfg *config.Config) *feewindow.FeeWindows
 		cfg.NetworkPassphrase,
 		d.db,
 	)
+
+	// In load-test mode the existing DB is treated as opaque carrier state for
+	// ingestion timing; skip the fee-stat / migration backfill
+	if cfg.IngestLoadTest.Enabled() {
+		return feeWindows
+	}
 
 	// 1. First, identify the ledger range for database migrations based on the
 	//    ledger retention window. Since we don't do "partial" migrations (all or

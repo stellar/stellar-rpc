@@ -139,6 +139,12 @@ func TestRoundTrip(t *testing.T) {
 			*v = logrus.InfoLevel
 		case *LogFormat:
 			*v = LogFormatText
+		case *IngestLoadTestConfig:
+			*v = IngestLoadTestConfig{
+				Files:             []string{"a.xdr.zstd", "b.xdr.zstd"},
+				Frequency:         5 * time.Second,
+				MaxLedgersPerFile: 100,
+			}
 		case *ledgerbackend.BufferedStorageBackendConfig:
 			*v = defaultBufferedStorageBackendConfig()
 		case *datastore.DataStoreConfig:
