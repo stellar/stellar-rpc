@@ -211,6 +211,11 @@ func (b *BackfillMeta) runFrontfill(ctx context.Context, bounds fillBounds) (fil
 			return fillBounds{}, errors.Wrap(err, "could not get latest ledger number from cloud datastore")
 		}
 		bounds.frontfill.Last = bounds.checkpointAligner.PrevCheckpoint(currentTipLedger)
+		// Leave final checkpoint for either core catchup or next iteration of backfill
+		freq := bounds.checkpointAligner.GetCheckpointFrequency()
+		if bounds.frontfill.Last > freq { // guard genesis underflow
+			bounds.frontfill.Last -= freq
+		}
 		if bounds.frontfill.First < bounds.frontfill.Last {
 			b.logger.Infof("Frontfilling to the most recent checkpoint ledger in datastore, ledgers [%d -> %d]",
 				bounds.frontfill.First, bounds.frontfill.Last)
@@ -280,11 +285,12 @@ func (b *BackfillMeta) backfillChunks(ctx context.Context, bounds fillBounds) (f
 		if err != nil {
 			return fillBounds{}, errors.Wrap(err, "couldn't create backend")
 		}
-		defer func() {
+		// Close explicitly to close each chunk's backend open per iteration
+		closeTempBackend := func() {
 			if err := tempBackend.Close(); err != nil {
 				b.logger.WithError(err).Error("error closing temporary backend")
 			}
-		}()
+		}
 
 		lChunkBound := lBound
 		// Underflow-safe check for setting left chunk bound
@@ -295,11 +301,14 @@ func (b *BackfillMeta) backfillChunks(ctx context.Context, bounds fillBounds) (f
 		b.logger.Infof("Backfill: filling ledgers [%d, %d]", lChunkBound, rChunkBound)
 		chunkRange := ledgerbackend.BoundedRange(lChunkBound, rChunkBound)
 		if err := tempBackend.PrepareRange(ctx, chunkRange); err != nil {
+			closeTempBackend()
 			return fillBounds{}, err
 		}
 		if err := b.ingestService.ingestRange(ctx, tempBackend, chunkRange); err != nil {
+			closeTempBackend()
 			return fillBounds{}, errors.Wrapf(err, "couldn't fill chunk [%d, %d]", lChunkBound, rChunkBound)
 		}
+		closeTempBackend()
 		b.logger.Infof("Backfill: committed ledgers [%d, %d]; %d%% done",
 			lChunkBound, rChunkBound, 100*(rBound-lChunkBound)/max(rBound-lBound, 1))
 
