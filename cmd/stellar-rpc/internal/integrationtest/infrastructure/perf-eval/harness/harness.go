@@ -24,6 +24,20 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
 
+// GetEnv reads the common leg environment.
+func GetEnv() map[string]string {
+	return map[string]string{
+		"BUCKET":       Env("BUCKET", "stellar-rpc-ci-load-test"),
+		"REGION":       Env("REGION", "us-east-1"),
+		"WORK_DIR":     Env("WORK_DIR", "/data"),
+		"RESULTS_FILE": Env("RESULTS_FILE", "/tmp/results.md"),
+		"RESULT_KEY":   os.Getenv("RESULT_KEY"),
+		"TARGET_SHA":   os.Getenv("TARGET_SHA"),
+		"RUN_ID":       Env("RUN_ID", "manual"),
+		"REPO":         Env("REPO", "stellar/stellar-rpc"),
+	}
+}
+
 // NewLogger returns an Info-level logger (supportlog.New starts at WARN). Each
 // leg's runner uses one for its own messages.
 func NewLogger() *supportlog.Entry {
@@ -48,21 +62,6 @@ func Env(key, def string) string {
 		return v
 	}
 	return def
-}
-
-// RequireEnv returns the values of keys in order, erroring with every unset one.
-func RequireEnv(keys ...string) ([]string, error) {
-	vals := make([]string, len(keys))
-	var missing []string
-	for i, k := range keys {
-		if vals[i] = os.Getenv(k); vals[i] == "" {
-			missing = append(missing, k)
-		}
-	}
-	if len(missing) > 0 {
-		return nil, fmt.Errorf("missing required env: %s", strings.Join(missing, ", "))
-	}
-	return vals, nil
 }
 
 // appendOutputs appends lines to the GitHub Actions step-output file.
