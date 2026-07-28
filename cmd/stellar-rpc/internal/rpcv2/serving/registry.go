@@ -220,7 +220,7 @@ type ReadView struct {
 // this order: the latest ledger first, the handle set second, the catalog snapshot
 // last. The order makes the snapshot's metadata the newest of the three, so any
 // skew between the handle set and the snapshot resolves safely (see the design's
-// Admission section).
+// Read views section).
 //
 // The caller MUST call Release when the request completes, including on error
 // paths.
