@@ -9,13 +9,16 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/serving"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
 // run is the daemon's startup, in two steps: (1) BACKFILL to the tip, then
@@ -37,15 +40,9 @@ func run(ctx context.Context, cfg StartConfig) error {
 	cat := cfg.Exec.Catalog
 	logger := cfg.Exec.Logger
 
-	// earliest_ledger must already be pinned by validateConfig: an absent pin reads
-	// as 0 and mis-classifies a first start as a restart, so refuse it loudly.
-	earliest, pinned, err := cat.EarliestLedger()
+	earliest, err := requirePinnedEarliest(cat)
 	if err != nil {
-		return fmt.Errorf("startup read earliest ledger: %w", err)
-	}
-	if !pinned {
-		return errors.New("startup requires config:earliest_ledger pinned " +
-			"(validateConfig pins it before run; not done here)")
+		return err
 	}
 
 	// Derived, never stored: highest durably-committed ledger (frozen cold artifacts
@@ -63,7 +60,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 	metrics.RetentionFloor(retentionFloorLedger(cfg.Retention, lastCommitted))
 	logger.WithField("last_committed", lastCommitted).
 		WithField("earliest", earliest).
-		WithField("pinned", pinned).
+		WithField("pinned", true).
 		Info("startup — last-committed derived, beginning backfill")
 
 	// Step 1: backfill to the tip.
@@ -120,12 +117,10 @@ func run(ctx context.Context, cfg StartConfig) error {
 		boundary.Publish(chunk.ID(seed)) //nolint:gosec // seed >= 0
 	}
 
-	// The serving registry holds the served latest ledger, advanced by the ingestion
-	// loop below. It also owns the shared hot-database handles: the loop publishes them,
-	// the freeze reads completed chunks through them (HotHandle), and the lifecycle
-	// unpublishes them at discard (Registry) for deferred deletion to close. It will
-	// back the read server in later work; for now nothing reads it. Constructed per
-	// run — no query survives a restart, so a fresh registry each run is fine.
+	// The serving registry: the ingestion loop advances its latest ledger and
+	// publishes hot handles, the freeze reads through them (HotHandle), and the
+	// lifecycle retires them at discard. Constructed per run — no query survives
+	// a restart. It will back the read server (#772); for now nothing reads it.
 	registry := serving.NewRegistry(cat, cfg.Retention)
 	cfg.Exec.Process.HotHandle = registry.Handle
 	// Close the registry's hot handles on the way out (after g.Wait joins the loops
@@ -133,25 +128,11 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// chunk is also closed by the ingestion loop; handle Close is idempotent.
 	defer registry.Close()
 
-	// Before serving: destroy any resources a crashed run left demoted, then open
-	// and publish the handles for ready hot chunks below the live one (completed
-	// chunks a prior run had not yet discarded). Both complete before the loops start.
-	liveChunk := chunk.IDFromLedger(resumeLedger)
-	if err := lifecycle.StartupSweep(cat, liveChunk); err != nil {
-		return fmt.Errorf("startup sweep: %w", err)
+	// Bootstrap before the loops start, so a read view acquired before the first
+	// commit is correct.
+	if err := bootstrapServing(registry, cat, resumeLedger, lastCommitted, hotDB, logger); err != nil {
+		return err
 	}
-	if err := registry.PublishReadyHandles(liveChunk, logger); err != nil {
-		return fmt.Errorf("startup publish ready handles: %w", err)
-	}
-
-	// Seed the registry's live state so a read view acquired before the ingestion
-	// loop's first commit is correct: publish the already-open resume DB as the live
-	// chunk's handle (PublishReadyHandles skips the live chunk), and set the latest
-	// ledger to the last committed one — it would otherwise read 0, making the
-	// served range invalid on a restart with data. The loop republishes the handle
-	// (idempotent) and advances the latest ledger from here.
-	registry.PublishHandle(liveChunk, hotDB)
-	registry.SetLatestLedger(lastCommitted)
 
 	// The lifecycle config draws on the SAME Exec wiring backfill uses, so the two
 	// share one catalog/pool by construction.
@@ -204,6 +185,45 @@ func run(ctx context.Context, cfg StartConfig) error {
 		return lifecycle.Loop(gctx, lifecycleCfg, cat, boundary)
 	})
 	return g.Wait()
+}
+
+// requirePinnedEarliest returns the pinned earliest_ledger, erroring when the pin
+// is absent: an absent pin reads as 0 and mis-classifies a first start as a
+// restart, so refuse it loudly. validateConfig pins it before run; not done here.
+func requirePinnedEarliest(cat *catalog.Catalog) (uint32, error) {
+	earliest, pinned, err := cat.EarliestLedger()
+	if err != nil {
+		return 0, fmt.Errorf("startup read earliest ledger: %w", err)
+	}
+	if !pinned {
+		return 0, errors.New("startup requires config:earliest_ledger pinned " +
+			"(validateConfig pins it before run; not done here)")
+	}
+	return earliest, nil
+}
+
+// bootstrapServing readies the registry before the loops start. First destroy any
+// resources a crashed run left demoted, then open and publish the handles for
+// ready hot chunks below the live one (completed chunks a prior run had not yet
+// discarded). Then seed the live state: publish the already-open resume DB as the
+// live chunk's handle (PublishReadyHandles skips the live chunk), and set the
+// latest ledger to the last committed one — it would otherwise read 0, making the
+// served range invalid on a restart with data. The ingestion loop republishes the
+// handle (idempotent) and advances the latest ledger from here.
+func bootstrapServing(
+	registry *serving.Registry, cat *catalog.Catalog, resumeLedger, lastCommitted uint32,
+	hotDB *hotchunk.DB, logger *supportlog.Entry,
+) error {
+	liveChunk := chunk.IDFromLedger(resumeLedger)
+	if err := lifecycle.StartupSweep(cat, liveChunk); err != nil {
+		return fmt.Errorf("startup sweep: %w", err)
+	}
+	if err := registry.PublishReadyHandles(liveChunk, logger); err != nil {
+		return fmt.Errorf("startup publish ready handles: %w", err)
+	}
+	registry.PublishHandle(liveChunk, hotDB)
+	registry.SetLatestLedger(lastCommitted)
+	return nil
 }
 
 // backfillToTip runs the backfill loop, returning lastCommitted as backfill makes

@@ -88,7 +88,7 @@ func TestClampRange_Descending(t *testing.T) {
 }
 
 // floor chunk 5 (oldest 50002), latest chunk 7 mid (70500 → chunk 7). Chunks 5..7
-// overlap the view.s range.
+// overlap the view's range.
 func TestChunksForRange(t *testing.T) {
 	a := viewWithLatest(70500) // latest in chunk 7
 

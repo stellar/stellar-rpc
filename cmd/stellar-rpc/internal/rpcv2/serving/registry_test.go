@@ -14,9 +14,9 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
@@ -123,7 +123,7 @@ func TestAcquireReadView_FloorDerivation(t *testing.T) {
 }
 
 // TestAcquireReadView_FloorPinnedToSnapshot pins that the floor is fixed at the acquisition
-// instant: a chunk opened after acquisition raises a later view.s floor but
+// instant: a chunk opened after acquisition raises a later view's floor but
 // never the earlier one's.
 func TestAcquireReadView_FloorPinnedToSnapshot(t *testing.T) {
 	r, cat := newTestRegistry(t, 2, 0) // sliding window of 2 chunks
@@ -141,7 +141,7 @@ func TestAcquireReadView_FloorPinnedToSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	defer a2.Release()
 	assert.Equal(t, chunk.ID(5), a2.FloorChunk(), "a fresh view sees the advanced frontier")
-	assert.Equal(t, chunk.ID(4), a1.FloorChunk(), "the earlier view.s floor is unchanged")
+	assert.Equal(t, chunk.ID(4), a1.FloorChunk(), "the earlier view's floor is unchanged")
 }
 
 // TestAcquireReadView_CapturesStateAtAcquisitionInstant pins that all three loads are frozen
