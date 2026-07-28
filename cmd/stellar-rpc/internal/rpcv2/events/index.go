@@ -1,6 +1,7 @@
 package events
 
 import (
+	"encoding/binary"
 	"fmt"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
@@ -21,6 +22,8 @@ const (
 	FieldTopic1     Field = 2
 	FieldTopic2     Field = 3
 	FieldTopic3     Field = 4
+	FieldEventType  Field = 5
+	FieldTopicCount Field = 6
 )
 
 // ComputeTermKey computes a 16-byte term key by hashing the field byte
@@ -50,12 +53,81 @@ func ComputeTermKey(value []byte, field Field) TermKey {
 	return key
 }
 
-// TermsForBytes returns the term keys (contract ID + topics
-// 0..MaxTopicCount-1) for a marshaled ContractEvent, navigating the raw
-// XDR via xdr.ContractEventView instead of a full UnmarshalBinary.
+// EventTypeTermKey returns the term key for eventType. Every event
+// carries one, so a query for a rare type resolves through the index
+// instead of scanning a chunk to find the few events that have it.
+func EventTypeTermKey(eventType xdr.ContractEventType) TermKey {
+	var value [4]byte
+	binary.BigEndian.PutUint32(value[:], uint32(eventType)) //nolint:gosec // enum keeps its own XDR width
+	return ComputeTermKey(value[:], FieldEventType)
+}
+
+// topicCountOverflowBucket holds every event carrying more topics than
+// a getEvents filter can name. Those events cannot be told apart by any
+// filter, and closing the bucket space keeps the union covering
+// "n or more" bounded.
+const topicCountOverflowBucket = protocol.MaxTopicCount + 1
+
+// The bucket space is written into cold chunks that are never rewritten,
+// so MaxTopicCount fixes what every bucket in an existing artifact means.
+// Growing it would silently redefine the overflow bucket: what was
+// written as "MaxTopicCount or more" would be read back as an exact
+// count. Fail the build instead, the way topicField panics when the
+// constant outgrows the topic Fields.
+const (
+	_ uint = protocol.MaxTopicCount - 4
+	_ uint = 4 - protocol.MaxTopicCount
+)
+
+// TopicCountTermKey returns the term key for the bucket holding events
+// with n topics. Every event carries one, which is what makes topic
+// arity answerable from the index: it is an absence property, and value
+// terms can only say what an event has.
+func TopicCountTermKey(n int) TermKey {
+	// n is a slice length here and a validated filter field on the query
+	// side, so it is never negative.
+	bucket := min(n, topicCountOverflowBucket)
+	return ComputeTermKey([]byte{byte(bucket)}, FieldTopicCount) //nolint:gosec // 0..overflow bucket
+}
+
+// TopicCountTermKeysAtLeast returns the buckets whose union holds every
+// event with n topics or more. The overflow bucket closes the union, so
+// an event carrying more topics than a filter can name is still in it.
+func TopicCountTermKeysAtLeast(n int) []TermKey {
+	low := min(n, topicCountOverflowBucket)
+	keys := make([]TermKey, 0, topicCountOverflowBucket-low+1)
+	for bucket := low; bucket <= topicCountOverflowBucket; bucket++ {
+		keys = append(keys, TopicCountTermKey(bucket))
+	}
+	return keys
+}
+
+// maxTermsPerEvent is what TermsForBytes emits for an event carrying
+// the most topics a filter can name: type, topic count, contract ID,
+// and one term per topic position.
+const maxTermsPerEvent = 3 + protocol.MaxTopicCount
+
+// TermsForBytes returns the term keys for a marshaled ContractEvent,
+// navigating the raw XDR via xdr.ContractEventView instead of a full
+// UnmarshalBinary: its type, its topic count, its contract ID when it
+// has one, and its topics 0..MaxTopicCount-1.
 func TermsForBytes(eventBytes []byte) ([]TermKey, error) {
 	ev := xdr.ContractEventView(eventBytes)
-	var keys []TermKey
+	keys := make([]TermKey, 0, maxTermsPerEvent)
+
+	typeView, err := ev.Type()
+	if err != nil {
+		return nil, fmt.Errorf("events: view Type: %w", err)
+	}
+	// A type outside the enum is a hard indexing error, the same call the
+	// unsupported body version below makes: the alternative is indexing
+	// the event under a bucket no filter can name, which reads as "no
+	// such events" rather than as a protocol the binary cannot serve.
+	eventType, err := typeView.Value()
+	if err != nil {
+		return nil, fmt.Errorf("events: view Type value: %w", err)
+	}
+	keys = append(keys, EventTypeTermKey(eventType))
 
 	cidOpt, err := ev.ContractId()
 	if err != nil {
@@ -100,6 +172,7 @@ func TermsForBytes(eventBytes []byte) ([]TermKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("events: view Body.V0.Topics.All: %w", err)
 	}
+	keys = append(keys, TopicCountTermKey(len(topicViews)))
 	for i, topic := range topicViews {
 		if i >= protocol.MaxTopicCount {
 			break

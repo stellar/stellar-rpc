@@ -61,11 +61,21 @@ type queryFixture struct {
 // dataSym labels the event so tests can match against the layout above.
 func payloadFor(t *testing.T, cid xdr.ContractId, dataSym string, topics ...xdr.ScVal) events.Payload {
 	t.Helper()
+	return typedPayloadFor(t, cid, xdr.ContractEventTypeContract, dataSym, topics...)
+}
+
+// typedPayloadFor is payloadFor with the event type spelled out, for
+// the tests that filter on it.
+func typedPayloadFor(
+	t *testing.T, cid xdr.ContractId, eventType xdr.ContractEventType,
+	dataSym string, topics ...xdr.ScVal,
+) events.Payload {
+	t.Helper()
 	sym := xdr.ScSymbol(dataSym)
 	cidCopy := cid
 	ev := xdr.ContractEvent{
 		ContractId: &cidCopy,
-		Type:       xdr.ContractEventTypeContract,
+		Type:       eventType,
 		Body: xdr.ContractEventBody{
 			V: 0,
 			V0: &xdr.ContractEventV0{
@@ -760,6 +770,324 @@ func makeSimplePayload(t *testing.T, dataSymbol string) events.Payload {
 	}
 }
 
+// ─── Event type and topic count ─────────────────────────────────────────
+
+// typeArityFixture seeds a hot chunk with events that differ in type
+// and in how many topics they carry, including one that carries more
+// than a filter can name.
+//
+// Layout:
+//
+//	id 0: contract, topics [alpha]                             → "c-1"
+//	id 1: system,   topics [alpha]                             → "s-1"
+//	id 2: contract, topics [alpha, beta]                       → "c-2"
+//	id 3: contract, topics []                                  → "c-0"
+//	id 4: contract, topics [alpha, beta, gamma, delta, epslon] → "c-5"
+//	id 5: contract, topics [alpha, beta, gamma, delta]         → "c-4"
+//	id 6: contract, topics [alpha .. zeta]                     → "c-6"
+//
+// "c-5" and "c-6" share the overflow bucket, so an exact count there is a
+// superset the post-filter has to narrow.
+type typeArityFixture struct {
+	store    *HotStore
+	contract xdr.ContractId
+	alphaRaw []byte
+}
+
+func newTypeArityFixture(t *testing.T) *typeArityFixture {
+	t.Helper()
+	const chunkID = chunk.ID(0)
+	h := openHotStoreForTest(t, chunkID)
+	fx := &typeArityFixture{store: h.store}
+	fx.contract[0] = 0x07
+
+	topic := func(name string) xdr.ScVal {
+		sym := xdr.ScSymbol(name)
+		return xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym}
+	}
+	alpha, beta := topic("alpha"), topic("beta")
+	gamma, delta, epsilon, zeta := topic("gamma"), topic("delta"), topic("epsilon"), topic("zeta")
+	var err error
+	fx.alphaRaw, err = alpha.MarshalBinary()
+	require.NoError(t, err)
+
+	require.NoError(t, ingestLedgerEvents(fx.store, chunkID.FirstLedger(), []events.Payload{
+		payloadFor(t, fx.contract, "c-1", alpha),
+		typedPayloadFor(t, fx.contract, xdr.ContractEventTypeSystem, "s-1", alpha),
+		payloadFor(t, fx.contract, "c-2", alpha, beta),
+		payloadFor(t, fx.contract, "c-0"),
+		payloadFor(t, fx.contract, "c-5", alpha, beta, gamma, delta, epsilon),
+		payloadFor(t, fx.contract, "c-4", alpha, beta, gamma, delta),
+		payloadFor(t, fx.contract, "c-6", alpha, beta, gamma, delta, epsilon, zeta),
+	}))
+	return fx
+}
+
+// query runs filters over the whole chunk and returns the matched
+// events by label.
+func (fx *typeArityFixture) query(t *testing.T, filters ...Filter) []string {
+	t.Helper()
+	got, err := Query(context.Background(), fx.store, filters,
+		QueryOptions{Range: wholeChunk(t, fx.store)})
+	require.NoError(t, err)
+	return dataSyms(t, got)
+}
+
+func TestQuery_EventTypeFilter(t *testing.T) {
+	fx := newTypeArityFixture(t)
+	system, contract := xdr.ContractEventTypeSystem, xdr.ContractEventTypeContract
+	diagnostic := xdr.ContractEventTypeDiagnostic
+
+	for name, tc := range map[string]struct {
+		filter Filter
+		want   []string
+	}{
+		"system": {
+			Filter{EventType: &system},
+			[]string{"s-1"},
+		},
+		"contract": {
+			Filter{EventType: &contract},
+			[]string{"c-1", "c-2", "c-0", "c-5", "c-4", "c-6"},
+		},
+		"type and topic value": {
+			Filter{EventType: &system, Topics: [protocol.MaxTopicCount][]byte{fx.alphaRaw}},
+			[]string{"s-1"},
+		},
+		// A type nobody emitted is missing from the index, which empties
+		// the filter rather than widening it.
+		"type absent from the chunk": {
+			Filter{EventType: &diagnostic},
+			[]string{},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, fx.query(t, tc.filter))
+		})
+	}
+}
+
+// TestQuery_TopicCountFilter covers getEvents v1's topic arity. Every count a
+// filter can name has its own bucket and the overflow bucket holds the rest,
+// so "at least n" reaches "c-5", which carries more topics than a filter can
+// name, while an exact count never returns it.
+func TestQuery_TopicCountFilter(t *testing.T) {
+	fx := newTypeArityFixture(t)
+	contract := xdr.ContractEventTypeContract
+	const top = protocol.MaxTopicCount
+
+	for name, tc := range map[string]struct {
+		filter Filter
+		want   []string
+	}{
+		"exactly 0":                   {Filter{TopicCount: TopicCountFilter{Count: 0, Exact: true}}, []string{"c-0"}},
+		"exactly 1":                   {Filter{TopicCount: TopicCountFilter{Count: 1, Exact: true}}, []string{"c-1", "s-1"}},
+		"exactly 2":                   {Filter{TopicCount: TopicCountFilter{Count: 2, Exact: true}}, []string{"c-2"}},
+		"exactly 3":                   {Filter{TopicCount: TopicCountFilter{Count: 3, Exact: true}}, []string{}},
+		"exactly the top count":       {Filter{TopicCount: TopicCountFilter{Count: top, Exact: true}}, []string{"c-4"}},
+		"exactly above the top count": {Filter{TopicCount: TopicCountFilter{Count: top + 1, Exact: true}}, []string{"c-5"}},
+
+		"at least 1": {
+			Filter{TopicCount: TopicCountFilter{Count: 1}},
+			[]string{"c-1", "s-1", "c-2", "c-5", "c-4", "c-6"},
+		},
+		"at least 2": {
+			Filter{TopicCount: TopicCountFilter{Count: 2}},
+			[]string{"c-2", "c-5", "c-4", "c-6"},
+		},
+		"at least 3":                   {Filter{TopicCount: TopicCountFilter{Count: 3}}, []string{"c-5", "c-4", "c-6"}},
+		"at least the top count":       {Filter{TopicCount: TopicCountFilter{Count: top}}, []string{"c-5", "c-4", "c-6"}},
+		"at least above the top count": {Filter{TopicCount: TopicCountFilter{Count: top + 1}}, []string{"c-5", "c-6"}},
+		"at least two above the top":   {Filter{TopicCount: TopicCountFilter{Count: top + 2}}, []string{"c-6"}},
+		"at least beyond every event":  {Filter{TopicCount: TopicCountFilter{Count: top + 3}}, []string{}},
+
+		"count alongside every other field": {
+			Filter{
+				EventType:  &contract,
+				ContractID: fx.contract[:],
+				Topics:     [protocol.MaxTopicCount][]byte{fx.alphaRaw},
+				TopicCount: TopicCountFilter{Count: 2},
+			},
+			[]string{"c-2", "c-5", "c-4", "c-6"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, fx.query(t, tc.filter))
+		})
+	}
+}
+
+// TestQuery_TypeAndCountIndexTerms pins what each filter shape asks the index
+// for. A wildcard topic count constrains nothing and keeps the match-all
+// short-circuit; every other shape resolves through the index. An "at least"
+// count already implied by a constrained topic position fetches no bucket at
+// all, since the buckets are chunk-sized bitmaps.
+func TestQuery_TypeAndCountIndexTerms(t *testing.T) {
+	fx := newTypeArityFixture(t)
+	system := xdr.ContractEventTypeSystem
+	const top = protocol.MaxTopicCount
+
+	for name, tc := range map[string]struct {
+		filter    Filter
+		wantCalls int
+		wantKeys  int
+	}{
+		"wildcard count stays match-all":      {Filter{}, 0, 0},
+		"type alone":                          {Filter{EventType: &system}, 1, 1},
+		"exact count alone":                   {Filter{TopicCount: TopicCountFilter{Count: 1, Exact: true}}, 1, 1},
+		"at least 1 unions every bucket":      {Filter{TopicCount: TopicCountFilter{Count: 1}}, 1, top + 1},
+		"at least the top count":              {Filter{TopicCount: TopicCountFilter{Count: top}}, 1, 2},
+		"at least beyond what a filter names": {Filter{TopicCount: TopicCountFilter{Count: 9}}, 1, 1},
+		"count on top of a contract": {
+			Filter{ContractID: fx.contract[:], TopicCount: TopicCountFilter{Count: 3}},
+			1, 1 + 3,
+		},
+		"count implied by a topic position": {
+			Filter{
+				Topics:     [protocol.MaxTopicCount][]byte{fx.alphaRaw},
+				TopicCount: TopicCountFilter{Count: 1},
+			},
+			1, 1,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cr := &countingReader{Reader: fx.store}
+			_, err := Query(context.Background(), cr, []Filter{tc.filter},
+				QueryOptions{Range: wholeChunk(t, fx.store)})
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantCalls, cr.lookupKeysCalls)
+			assert.Equal(t, tc.wantKeys, cr.totalKeys)
+		})
+	}
+}
+
+// TestQuery_TopicCountImpliedByTopicChangesNothing pins that eliding an
+// implied bucket group is a no-op in both directions: a filter returns the
+// same events whether or not it carries the count its topic position already
+// guarantees.
+func TestQuery_TopicCountImpliedByTopicChangesNothing(t *testing.T) {
+	fx := newTypeArityFixture(t)
+	topics := [protocol.MaxTopicCount][]byte{fx.alphaRaw}
+
+	withCount := fx.query(t, Filter{Topics: topics, TopicCount: TopicCountFilter{Count: 1}})
+	assert.Equal(t, fx.query(t, Filter{Topics: topics}), withCount)
+	assert.Equal(t, []string{"c-1", "s-1", "c-2", "c-5", "c-4", "c-6"}, withCount)
+}
+
+// TestQuery_TopicCountWithRangeAndOrder puts the bucket union and the elided
+// group through the rest of the query contract, which the whole-chunk
+// ascending cases above never exercise: the caller's pinned window, descending
+// order, and MaxEvents.
+func TestQuery_TopicCountWithRangeAndOrder(t *testing.T) {
+	fx := newTypeArityFixture(t)
+	atLeast2 := Filter{TopicCount: TopicCountFilter{Count: 2}}
+	// Count 1 is implied by topic0, so this filter's bucket group is elided.
+	implied := Filter{
+		Topics:     [protocol.MaxTopicCount][]byte{fx.alphaRaw},
+		TopicCount: TopicCountFilter{Count: 1},
+	}
+	// Ids 2..5: drops "c-6" (id 6) and the single-topic events at 0 and 1.
+	window := IDRange{Start: 2, End: 6}
+
+	for name, tc := range map[string]struct {
+		filter Filter
+		opts   QueryOptions
+		want   []string
+	}{
+		"descending": {
+			atLeast2,
+			QueryOptions{Range: wholeChunk(t, fx.store), Descending: true},
+			[]string{"c-6", "c-4", "c-5", "c-2"},
+		},
+		"narrower window": {
+			atLeast2,
+			QueryOptions{Range: window},
+			[]string{"c-2", "c-5", "c-4"},
+		},
+		"narrower window, elided group": {
+			implied,
+			QueryOptions{Range: window},
+			[]string{"c-2", "c-5", "c-4"},
+		},
+		"max events keeps the lowest ids": {
+			atLeast2,
+			QueryOptions{Range: wholeChunk(t, fx.store), MaxEvents: 2},
+			[]string{"c-2", "c-5"},
+		},
+		"max events descending keeps the highest ids": {
+			atLeast2,
+			QueryOptions{Range: wholeChunk(t, fx.store), MaxEvents: 2, Descending: true},
+			[]string{"c-6", "c-4"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := Query(context.Background(), fx.store, []Filter{tc.filter}, tc.opts)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, dataSyms(t, got))
+		})
+	}
+}
+
+// TestQuery_UnionOfTypeAndCountFilters covers the two new fields across the
+// union rather than within one filter: each filter narrows on its own and the
+// results merge in event-ID order.
+func TestQuery_UnionOfTypeAndCountFilters(t *testing.T) {
+	fx := newTypeArityFixture(t)
+	system := xdr.ContractEventTypeSystem
+
+	assert.Equal(t, []string{"s-1", "c-0"}, fx.query(t,
+		Filter{EventType: &system},
+		Filter{TopicCount: TopicCountFilter{Count: 0, Exact: true}}))
+}
+
+// TestQuery_InvalidFilterRejected covers the values that would key a term no
+// event is indexed under, which would otherwise return nothing with no signal.
+func TestQuery_InvalidFilterRejected(t *testing.T) {
+	fx := newTypeArityFixture(t)
+	unknownType := xdr.ContractEventType(99)
+
+	for name, tc := range map[string]struct {
+		filter  Filter
+		wantErr string
+	}{
+		"negative topic count": {
+			Filter{TopicCount: TopicCountFilter{Count: -1}},
+			"TopicCount.Count must be non-negative",
+		},
+		"unknown event type": {
+			Filter{EventType: &unknownType},
+			"not a known event type",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Query(context.Background(), fx.store, []Filter{tc.filter},
+				QueryOptions{Range: wholeChunk(t, fx.store)})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
+
+// TestUnionSlots covers the OR-within-a-group step directly, including the
+// all-absent case a fixture cannot reach: the topic-count buckets are the only
+// multi-term group, and the overflow bucket is populated in any chunk holding
+// an event with topics.
+func TestUnionSlots(t *testing.T) {
+	first := roaring.BitmapOf(1, 2)
+	second := roaring.BitmapOf(3)
+	bitmaps := []*roaring.Bitmap{first, nil, second, nil}
+
+	assert.Same(t, first, unionSlots(bitmaps, []int{0}),
+		"a lone bitmap is borrowed, not cloned")
+	assert.Nil(t, unionSlots(bitmaps, []int{1}))
+	assert.Nil(t, unionSlots(bitmaps, []int{1, 3}),
+		"a group absent from the index empties the filter")
+	assert.Same(t, second, unionSlots(bitmaps, []int{1, 2}),
+		"the one present bitmap in a group is borrowed too")
+	assert.Equal(t, []uint32{1, 2, 3}, unionSlots(bitmaps, []int{0, 2}).ToArray())
+	assert.Equal(t, []uint32{1, 2}, first.ToArray(), "inputs must not be mutated")
+}
+
 // ─── Cold-reader parity coverage ────────────────────────────────────────
 //
 // The hot tests above prove Query works against *HotStore. The whole
@@ -803,7 +1131,7 @@ func makeSimplePayload(t *testing.T, dataSymbol string) events.Payload {
 // can't be used to recover ledger boundaries.
 //
 //nolint:unparam // chunkID is conceptually a fixture knob even though tests use chunk.ID(0) today
-func freezeFixtureToColdReader(t *testing.T, fx *queryFixture, chunkID chunk.ID) *ColdReader {
+func freezeFixtureToColdReader(t *testing.T, hot *HotStore, chunkID chunk.ID) *ColdReader {
 	t.Helper()
 	dir := t.TempDir()
 
@@ -817,7 +1145,7 @@ func freezeFixtureToColdReader(t *testing.T, fx *queryFixture, chunkID chunk.ID)
 	// Read the hot store's offsets snapshot so we know exactly how many
 	// events sit in each ledger. Walking per-ledger via FetchRange lets
 	// us drive the cold writer in the same shape the freeze loop would.
-	hotOffsets, err := fx.store.Offsets()
+	hotOffsets, err := hot.Offsets()
 	require.NoError(t, err)
 
 	eventID := uint32(0)
@@ -837,7 +1165,7 @@ func freezeFixtureToColdReader(t *testing.T, fx *queryFixture, chunkID chunk.ID)
 		// Pull this ledger's events in order. FetchRange yields borrowed
 		// bytes — clone before handing to the cold writer and the term
 		// indexer.
-		for p, err := range fx.store.FetchRange(context.Background(), eventID, count) {
+		for p, err := range hot.FetchRange(context.Background(), eventID, count) {
 			require.NoError(t, err)
 			p.ContractEventBytes = bytes.Clone(p.ContractEventBytes)
 			require.NoError(t, cw.Append(p))
@@ -861,7 +1189,7 @@ func freezeFixtureToColdReader(t *testing.T, fx *queryFixture, chunkID chunk.ID)
 
 func TestQuery_ColdReaderParity_MatchAllAscending(t *testing.T) {
 	hotFx := newQueryFixture(t)
-	cr := freezeFixtureToColdReader(t, hotFx, chunk.ID(0))
+	cr := freezeFixtureToColdReader(t, hotFx.store, chunk.ID(0))
 
 	got, err := Query(context.Background(), cr, nil,
 		QueryOptions{Range: wholeChunk(t, cr)})
@@ -873,7 +1201,7 @@ func TestQuery_ColdReaderParity_MatchAllAscending(t *testing.T) {
 
 func TestQuery_ColdReaderParity_MatchAllDescendingWithCap(t *testing.T) {
 	hotFx := newQueryFixture(t)
-	cr := freezeFixtureToColdReader(t, hotFx, chunk.ID(0))
+	cr := freezeFixtureToColdReader(t, hotFx.store, chunk.ID(0))
 
 	got, err := Query(context.Background(), cr, nil,
 		QueryOptions{Descending: true, MaxEvents: 2, Range: wholeChunk(t, cr)})
@@ -883,7 +1211,7 @@ func TestQuery_ColdReaderParity_MatchAllDescendingWithCap(t *testing.T) {
 
 func TestQuery_ColdReaderParity_ContractIDOnly(t *testing.T) {
 	hotFx := newQueryFixture(t)
-	cr := freezeFixtureToColdReader(t, hotFx, chunk.ID(0))
+	cr := freezeFixtureToColdReader(t, hotFx.store, chunk.ID(0))
 
 	got, err := Query(context.Background(), cr,
 		[]Filter{{ContractID: hotFx.contractA[:]}},
@@ -894,7 +1222,7 @@ func TestQuery_ColdReaderParity_ContractIDOnly(t *testing.T) {
 
 func TestQuery_ColdReaderParity_ContractAndTopicAnd(t *testing.T) {
 	hotFx := newQueryFixture(t)
-	cr := freezeFixtureToColdReader(t, hotFx, chunk.ID(0))
+	cr := freezeFixtureToColdReader(t, hotFx.store, chunk.ID(0))
 
 	// contract A AND topic0 == alpha → ids 0, 1. Exercises FastAnd
 	// over two cold-loaded bitmaps.
@@ -907,7 +1235,7 @@ func TestQuery_ColdReaderParity_ContractAndTopicAnd(t *testing.T) {
 
 func TestQuery_ColdReaderParity_UnionOfTwoFilters(t *testing.T) {
 	hotFx := newQueryFixture(t)
-	cr := freezeFixtureToColdReader(t, hotFx, chunk.ID(0))
+	cr := freezeFixtureToColdReader(t, hotFx.store, chunk.ID(0))
 
 	// A∩topic1=gamma → id 1; B∩topic1=beta → id 2.
 	got, err := Query(context.Background(), cr, []Filter{
@@ -920,7 +1248,7 @@ func TestQuery_ColdReaderParity_UnionOfTwoFilters(t *testing.T) {
 
 func TestQuery_ColdReaderParity_RangeAndFilter(t *testing.T) {
 	hotFx := newMultiLedgerQueryFixture(t)
-	cr := freezeFixtureToColdReader(t, hotFx, chunk.ID(0))
+	cr := freezeFixtureToColdReader(t, hotFx.store, chunk.ID(0))
 	first := chunk.ID(0).FirstLedger()
 
 	// contractA filtered, second ledger only → 2 extra events.
@@ -933,7 +1261,7 @@ func TestQuery_ColdReaderParity_RangeAndFilter(t *testing.T) {
 
 func TestQuery_ColdReaderParity_DescendingRangeWithCap(t *testing.T) {
 	hotFx := newMultiLedgerQueryFixture(t)
-	cr := freezeFixtureToColdReader(t, hotFx, chunk.ID(0))
+	cr := freezeFixtureToColdReader(t, hotFx.store, chunk.ID(0))
 	first := chunk.ID(0).FirstLedger()
 
 	// contractA, whole chunk, descending capped to 2 → highest two A's = ids 6, 5.
@@ -990,7 +1318,7 @@ func TestIDRangeForLedgers_OutOfRangeLedgerErrors(t *testing.T) {
 
 func TestQuery_ColdReaderParity_FilterWithUnknownContract(t *testing.T) {
 	hotFx := newQueryFixture(t)
-	cr := freezeFixtureToColdReader(t, hotFx, chunk.ID(0))
+	cr := freezeFixtureToColdReader(t, hotFx.store, chunk.ID(0))
 
 	// Cold path: LookupKeys returns nil for the missing term (no panic,
 	// no error — same as hot). The filter contributes nothing, union is
@@ -1002,4 +1330,42 @@ func TestQuery_ColdReaderParity_FilterWithUnknownContract(t *testing.T) {
 		QueryOptions{Range: wholeChunk(t, cr)})
 	require.NoError(t, err)
 	assert.Empty(t, got)
+}
+
+// TestQuery_ColdReaderParity_EventType checks the type term through the
+// MPHF, where a term the chunk never saw resolves to some other term's
+// slot and is caught by the fingerprint.
+func TestQuery_ColdReaderParity_EventType(t *testing.T) {
+	hotFx := newTypeArityFixture(t)
+	cr := freezeFixtureToColdReader(t, hotFx.store, chunk.ID(0))
+	system, diagnostic := xdr.ContractEventTypeSystem, xdr.ContractEventTypeDiagnostic
+
+	got, err := Query(context.Background(), cr, []Filter{{EventType: &system}},
+		QueryOptions{Range: wholeChunk(t, cr)})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"s-1"}, dataSyms(t, got))
+
+	got, err = Query(context.Background(), cr, []Filter{{EventType: &diagnostic}},
+		QueryOptions{Range: wholeChunk(t, cr)})
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+// TestQuery_ColdReaderParity_TopicCount runs the bucket union and the
+// exact-count narrowing against the cold index.
+func TestQuery_ColdReaderParity_TopicCount(t *testing.T) {
+	hotFx := newTypeArityFixture(t)
+	cr := freezeFixtureToColdReader(t, hotFx.store, chunk.ID(0))
+
+	got, err := Query(context.Background(), cr,
+		[]Filter{{TopicCount: TopicCountFilter{Count: 2}}},
+		QueryOptions{Range: wholeChunk(t, cr)})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"c-2", "c-5", "c-4", "c-6"}, dataSyms(t, got))
+
+	got, err = Query(context.Background(), cr,
+		[]Filter{{TopicCount: TopicCountFilter{Count: protocol.MaxTopicCount, Exact: true}}},
+		QueryOptions{Range: wholeChunk(t, cr)})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"c-4"}, dataSyms(t, got))
 }
