@@ -16,7 +16,7 @@ rebuild window**, and the settled architecture (below) closes that too:
 
 | regime | ingest p99 | notes |
 |---|---|---|
-| solo steady-state | 63.7-64.1ms | flat per-decile across a full 10k chunk; RSS: steady ~2.0-3.3GB, transient merge-generation peaks to ~5.2GB unpaced (see RAM anchor below) |
+| solo steady-state | 63.7-64.1ms | flat per-decile across a full 10k chunk; RSS: steady ~2GB, transient merge-generation peaks ~4.6GB (see RAM anchor below) |
 | during freeze (unpaced, single disk, post-review) | 111.0 | commit p99 82; 1.25% ledgers >100ms; co-located freeze wall ~8min; pre-review basis was ~122-134 — the streamed .bin improved it |
 | during freeze (old walk freeze, like-for-like) | 141.9 | for the full 10min cycle — the new freeze is strictly better |
 | during txindex rebuild (single disk) | ~152, p50 +29 | recurs EVERY chunk boundary; see architecture |
@@ -85,9 +85,9 @@ as permanent gates.
 number that ends before the first run-merge).** Full-chunk hot RSS is
 merge-generation PEAKS, not a floor: steady state runs ~1.5-2.1GB and spikes
 at each sorted-run merge (~every 2,300 ledgers; largest at chunk end:
-~5.2GB; a paced full-chunk run on a second box peaked at 5.1GB, so the
-seal-backlog share of the peak is smaller than the unpaced analysis
-predicted — the peak is ~5GB at either pacing). Decomposition at peak: merged-run drain transients (fingerprint
+~4.6GB since the one-pass bloom/fence construction landed (pre-change:
+5.22GB unpaced here, 5.1GB paced on a second box — pacing barely moves
+the peak; the one-pass change is what cut it). Decomposition at peak: merged-run drain transients (fingerprint
 slice ~264MB + jumbo concurrent seal fold) x2 GC headroom + ~1GB flat
 native; RocksDB metadata is FLAT (write path never populates the block
 cache) and the dense-term overlay measured zero on this dataset. Two budget
