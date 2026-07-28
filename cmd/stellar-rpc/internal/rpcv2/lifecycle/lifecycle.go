@@ -162,9 +162,11 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	for i, c := range discardChunks {
 		demoteOps[i] = func() error { return pending.demoteHotChunk(cfg.Registry, cat, c) }
 	}
-	// Meter the DBs actually demoted (one op per DB) BEFORE the error check, so a
-	// mid-scan failure still counts what completed rather than losing it: the demoted
-	// DBs carry a transient key that won't re-list as ready next scan.
+	// Meter the demote ops that completed (one per DB) BEFORE the error check, so a
+	// mid-scan failure still counts what finished. This counts demotes, not destroys:
+	// a chunk whose destroy stays reader-busy re-lists next run (the retry path) and
+	// is re-counted — rare, since the grace wait outlasts requests, and it
+	// self-reports via the destroy-skipped warning.
 	discarded, err := runOps(ctx, cfg, demoteOps)
 	metrics.Discard(discarded, time.Since(discardStart))
 	if err != nil {
