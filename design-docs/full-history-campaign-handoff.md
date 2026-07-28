@@ -85,8 +85,9 @@ as permanent gates.
 number that ends before the first run-merge).** Full-chunk hot RSS is
 merge-generation PEAKS, not a floor: steady state runs ~1.5-2.1GB and spikes
 at each sorted-run merge (~every 2,300 ledgers; largest at chunk end:
-~5.2GB unpaced, lower when paced — the unpaced bench inflates the seal
-backlog). Decomposition at peak: merged-run drain transients (fingerprint
+~5.2GB; a paced full-chunk run on a second box peaked at 5.1GB, so the
+seal-backlog share of the peak is smaller than the unpaced analysis
+predicted — the peak is ~5GB at either pacing). Decomposition at peak: merged-run drain transients (fingerprint
 slice ~264MB + jumbo concurrent seal fold) x2 GC headroom + ~1GB flat
 native; RocksDB metadata is FLAT (write path never populates the block
 cache) and the dense-term overlay measured zero on this dataset. Two budget
