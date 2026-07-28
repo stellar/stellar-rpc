@@ -111,11 +111,9 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// with ingestion — all derived from durable keys.
 	boundary := lifecycle.NewBoundarySignal()
 
-	// Seed the first tick with the last complete chunk at the resume point so it
-	// fires at once. Skipped on a young network where no chunk is complete.
-	if seed := chunk.LastCompleteChunkAt(lastCommitted); seed >= 0 {
-		boundary.Publish(chunk.ID(seed)) //nolint:gosec // seed >= 0
-	}
+	// Seed the first tick so it fires at once; the tick derives its anchor from
+	// the catalog and no-ops on a young network where no chunk is complete.
+	boundary.Publish()
 
 	// The serving registry: the ingestion loop advances its latest ledger and
 	// publishes hot handles, the freeze reads through them (HotHandle), and the

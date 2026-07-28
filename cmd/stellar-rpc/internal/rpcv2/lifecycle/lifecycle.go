@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync/atomic"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -236,15 +235,15 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 }
 
 // BoundarySignal couples ingestion (the producer) to the lifecycle Loop (the
-// consumer): ingestion stores the latest completed chunk id and pings a
-// 1-buffered wake; the Loop blocks on the wake, then reads the latest id. A
-// latest-CELL (not a queue) means a slow lifecycle can never fall behind — one
-// tick over [floor, latest] subsumes every skipped boundary — so there is no
-// bounded buffer to overflow and thus no "fell behind" fatal path. Safe for one
-// producer and one consumer.
+// consumer) as a pure wake-up: ingestion pings a 1-buffered wake at each chunk
+// boundary, and the woken tick derives its anchor (the last complete chunk) from
+// the catalog itself — the same derivation read-view acquisition runs against its
+// snapshot. The signal carries no value, so a slow lifecycle can never fall
+// behind — one tick subsumes every skipped boundary — and there is no bounded
+// buffer to overflow and thus no "fell behind" fatal path. Safe for one producer
+// and one consumer.
 type BoundarySignal struct {
-	latest atomic.Uint32
-	wake   chan struct{}
+	wake chan struct{}
 }
 
 // NewBoundarySignal returns a ready signal with an empty latest cell.
@@ -252,27 +251,23 @@ func NewBoundarySignal() *BoundarySignal {
 	return &BoundarySignal{wake: make(chan struct{}, 1)}
 }
 
-// Publish records c as the latest completed chunk and wakes the Loop. The wake is
-// non-blocking: a pending wake already covers this boundary (the Loop will read
-// the newest latest when it runs), so a full buffer is dropped, never blocked on.
-func (s *BoundarySignal) Publish(c chunk.ID) {
-	s.latest.Store(uint32(c))
+// Publish wakes the Loop. The wake is non-blocking: a pending wake already covers
+// this boundary (the woken tick derives the newest anchor from the catalog), so a
+// full buffer is dropped, never blocked on.
+func (s *BoundarySignal) Publish() {
 	select {
 	case s.wake <- struct{}{}:
 	default:
 	}
 }
 
-// latestChunk returns the most recently published completed chunk id. A wake is
-// only ever sent by Publish, AFTER it stores the cell, so a received wake proves a
-// value is present — no separate "was anything published" flag is needed.
-func (s *BoundarySignal) latestChunk() chunk.ID {
-	return chunk.ID(s.latest.Load())
-}
-
 // Loop is the event-driven lifecycle goroutine. It blocks on the boundary signal's
-// wake, reads the latest completed chunk id, and runs one tick over
-// [floor, lastChunk] (which subsumes every boundary skipped while it was busy). It
+// wake, derives the last complete chunk from the live catalog (the same
+// LastCompleteChunkAsOf derivation read-view acquisition runs against its
+// snapshot, so the run and the queries share one floor-anchor implementation),
+// and runs one tick over [floor, lastChunk] (which subsumes every boundary
+// skipped while it was busy). The frontier at tick start may be newer than the
+// boundary that woke it, which only pulls the next tick's work forward. It
 // selects on ctx.Done() too, so it never blocks past shutdown.
 //
 // It returns the first tick error to its caller (run() joins it with ingestion in
@@ -285,7 +280,16 @@ func Loop(ctx context.Context, cfg Config, cat *catalog.Catalog, sig *BoundarySi
 		case <-ctx.Done():
 			return nil
 		case <-sig.wake:
-			if err := runLifecycle(ctx, cfg, cat, sig.latestChunk()); err != nil {
+			lastComplete, err := cat.LastCompleteChunkAsOf(nil)
+			if err != nil {
+				// Includes ErrNoReadyHotChunk: the live chunk's key exists before
+				// the loops start, so an empty scan marks a broken catalog.
+				return fmt.Errorf("derive last complete chunk: %w", err)
+			}
+			if lastComplete < 0 {
+				continue // young network: nothing complete yet
+			}
+			if err := runLifecycle(ctx, cfg, cat, chunk.ID(lastComplete)); err != nil { //nolint:gosec // >= 0
 				return err
 			}
 		}

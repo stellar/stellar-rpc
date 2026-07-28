@@ -71,11 +71,12 @@ func openHotDBForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlo
 	return db, nil
 }
 
-// boundaryPublisher is the ingestion loop's handoff sink: it publishes the
-// just-completed chunk id to the lifecycle at each boundary.
-// *lifecycle.BoundarySignal is the production impl; tests inject a recorder.
+// boundaryPublisher is the ingestion loop's handoff sink: it wakes the lifecycle
+// at each chunk boundary; the woken tick derives the completed chunk from the
+// catalog. *lifecycle.BoundarySignal is the production impl; tests inject a
+// recorder.
 type boundaryPublisher interface {
-	Publish(c chunk.ID)
+	Publish()
 }
 
 // ingestionLoopConfig bundles the ingestion loop's dependencies. run() opens the
@@ -204,7 +205,7 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 			if cfg.Registry != nil {
 				cfg.Registry.PublishHandle(next, nextDB)
 			}
-			cfg.Boundary.Publish(closed)
+			cfg.Boundary.Publish()
 
 			// Boundary observability (the woken tick reports the freeze/discard/prune).
 			metrics.ChunkBoundary()
@@ -238,7 +239,7 @@ type BoundedIngestConfig struct {
 	// Resume is the first ledger to ingest; its chunk's hot DB is opened fresh.
 	Resume  uint32
 	Catalog *catalog.Catalog
-	// Boundary receives the id of each chunk the loop completes, as in the
+	// Boundary is woken at each chunk the loop completes, as in the
 	// daemon's loop.
 	Boundary boundaryPublisher
 	Logger   *supportlog.Entry

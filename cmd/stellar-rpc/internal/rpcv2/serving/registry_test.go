@@ -338,7 +338,7 @@ func TestNewReadView_LeakedSnapshotWarnsAtClose(t *testing.T) {
 func TestNewReadView_NoReadyChunkErrors(t *testing.T) {
 	r, _ := newTestRegistry(t, 3, 2) // no ready keys at all
 	_, err := r.NewReadView()
-	require.ErrorIs(t, err, errNoReadyHotChunk)
+	require.ErrorIs(t, err, catalog.ErrNoReadyHotChunk)
 }
 
 // TestNewReadView_LoadOrderPinned pins the three-load order the design's skew

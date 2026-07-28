@@ -100,24 +100,24 @@ func streamForSeqs(t *testing.T, from, to uint32) *fakeCoreStream {
 	return s
 }
 
-// recordingBoundary is a test boundaryPublisher capturing the completed chunk ids
-// the loop publishes at each boundary, so a test can assert the handoff without
-// wiring a real lifecycle Loop.
+// recordingBoundary is a test boundaryPublisher counting the boundary wakes the
+// loop fires, so a test can assert the handoff without wiring a real lifecycle
+// Loop (the wake carries no value; the tick derives the chunk from the catalog).
 type recordingBoundary struct {
-	mu  sync.Mutex
-	ids []chunk.ID
+	mu    sync.Mutex
+	wakes int
 }
 
-func (r *recordingBoundary) Publish(c chunk.ID) {
+func (r *recordingBoundary) Publish() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.ids = append(r.ids, c)
+	r.wakes++
 }
 
-func (r *recordingBoundary) list() []chunk.ID {
+func (r *recordingBoundary) count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]chunk.ID(nil), r.ids...)
+	return r.wakes
 }
 
 // loopConfig builds an ingestionLoopConfig for a test: the stream + resume point +
@@ -314,12 +314,15 @@ func TestRunIngestionLoop_AdvancesLatestLedger(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// runIngestionLoop — boundary notifications carry the completed chunk id.
+// runIngestionLoop — a boundary wakes the lifecycle; the derivable frontier at
+// wake time names the completed chunk.
 // ---------------------------------------------------------------------------
 
 // TestRunIngestionLoop_BoundaryNotifiesCompletedChunk: crossing the chunk 0 -> 1
-// boundary publishes chunk 0 to the lifecycle. The last committed seq is seeded just below
-// the boundary so the stream crosses it in one step.
+// boundary wakes the lifecycle exactly once, and at that instant the catalog
+// derivation (highest ready - 1) resolves the completed chunk 0. The last
+// committed seq is seeded just below the boundary so the stream crosses it in
+// one step.
 func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 	t.Parallel() // seeds a near-full chunk (one synced commit per ledger)
 	cat, _ := testCatalog(t)
@@ -345,7 +348,10 @@ func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 		t.Fatal("ingestion loop deadlocked")
 	}
 
-	assert.Equal(t, []chunk.ID{c}, rec.list(), "the completed chunk id was published at the boundary")
+	assert.Equal(t, 1, rec.count(), "one boundary wake was published")
+	lastComplete, err := cat.LastCompleteChunkAsOf(nil)
+	require.NoError(t, err)
+	assert.Equal(t, int64(c), lastComplete, "the derivable frontier names the completed chunk")
 }
 
 // ---------------------------------------------------------------------------
@@ -367,7 +373,20 @@ type fencePublisher struct {
 	nextReady      []bool // per boundary: the next chunk's hot key was already ready
 }
 
-func (p *fencePublisher) Publish(c chunk.ID) {
+func (p *fencePublisher) Publish() {
+	// The wake carries no value: derive the just-closed chunk the way the woken
+	// tick would (highest ready - 1). The next chunk's key must already exist for
+	// the derivation to name c, which is itself part of the fence being checked.
+	lastComplete, err := p.cat.LastCompleteChunkAsOf(nil)
+	if err != nil || lastComplete < 0 {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		p.published = append(p.published, chunk.ID(0))
+		p.closedReleased = append(p.closedReleased, false)
+		p.nextReady = append(p.nextReady, false)
+		return
+	}
+	c := chunk.ID(lastComplete)
 	// (1) The closed chunk's write handle must be released: OpenExisting is read-write
 	// and takes the LOCK, so it succeeds only if the loop already closed the handle.
 	db, err := hotchunk.OpenExisting(p.cat.Layout().HotChunkPath(c), c, silentLogger())

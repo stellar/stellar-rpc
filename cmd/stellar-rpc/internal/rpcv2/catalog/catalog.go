@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -163,6 +164,28 @@ func (c *Catalog) ReadyHotChunkKeys() ([]chunk.ID, error) {
 // ReadyHotChunkKeysAsOf is ReadyHotChunkKeys read through a read view's snapshot.
 func (c *Catalog) ReadyHotChunkKeysAsOf(snap *rocksdb.Snapshot) ([]chunk.ID, error) {
 	return c.hotChunkKeysWith(snap, isReadyHot)
+}
+
+// ErrNoReadyHotChunk means a catalog view held no ready hot chunk at all. That
+// cannot happen in a working daemon (the live chunk's key is created before
+// serving starts and is never demoted), so it marks a broken catalog.
+var ErrNoReadyHotChunk = errors.New("catalog: no ready hot chunk")
+
+// LastCompleteChunkAsOf returns the view's last complete chunk: the highest ready
+// hot chunk minus one (the highest ready chunk is the live, still-ingesting one).
+// A young store (only chunk 0 ready, nothing complete) yields -1, the signed
+// convention Retention.FloorAt expects; an empty ready scan is ErrNoReadyHotChunk.
+// A nil snap reads live. Both the lifecycle run (live) and read-view acquisition
+// (snapshot) derive their floor anchor here, so the two cannot disagree.
+func (c *Catalog) LastCompleteChunkAsOf(snap *rocksdb.Snapshot) (int64, error) {
+	ready, err := c.hotChunkKeysWith(snap, isReadyHot)
+	if err != nil {
+		return 0, err
+	}
+	if len(ready) == 0 {
+		return 0, ErrNoReadyHotChunk
+	}
+	return int64(ready[len(ready)-1]) - 1, nil
 }
 
 func isReadyHot(s geometry.HotState) bool { return s == geometry.HotReady }
