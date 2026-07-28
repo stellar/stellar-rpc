@@ -1,6 +1,8 @@
 package serving
 
 import (
+	"slices"
+
 	"errors"
 	"fmt"
 
@@ -90,21 +92,15 @@ func (a *ReadView) ChunksForRange(dir Direction, lo, hi uint32) ([]chunk.ID, err
 	return chunksBetween(chunk.IDFromLedger(lo), chunk.IDFromLedger(hi), dir), nil
 }
 
-// chunksBetween returns the inclusive chunk ids from first..last in scan order
-// (first <= last). Descending counts down without underflowing at chunk 0.
+// chunksBetween returns the inclusive chunk ids from first..last (first <= last)
+// in scan order.
 func chunksBetween(first, last chunk.ID, dir Direction) []chunk.ID {
 	out := make([]chunk.ID, 0, int(last-first)+1)
-	if dir == Descending {
-		for c := last; ; c-- {
-			out = append(out, c)
-			if c == first {
-				break
-			}
-		}
-		return out
-	}
 	for c := first; c <= last; c++ {
 		out = append(out, c)
+	}
+	if dir == Descending {
+		slices.Reverse(out)
 	}
 	return out
 }

@@ -20,7 +20,7 @@ func viewFor(t *testing.T, setup func(cat *catalog.Catalog, r *Registry)) (*Read
 	cat := openTestCatalog(t, silentLogger())
 	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 	setup(cat, r)
-	a, err := r.AcquireReadView()
+	a, err := r.NewReadView()
 	require.NoError(t, err)
 	t.Cleanup(a.Release)
 	return a, cat
@@ -108,7 +108,7 @@ func TestLedgerReader_Hot(t *testing.T) {
 	require.NoError(t, cat.FlipHotReady(c))
 	r.PublishHandle(c, db)
 
-	a, err := r.AcquireReadView()
+	a, err := r.NewReadView()
 	require.NoError(t, err)
 	defer a.Release()
 
@@ -133,7 +133,7 @@ func TestEventReader_Hot(t *testing.T) {
 	require.NoError(t, cat.FlipHotReady(c))
 	r.PublishHandle(c, db)
 
-	a, err := r.AcquireReadView()
+	a, err := r.NewReadView()
 	require.NoError(t, err)
 	defer a.Release()
 

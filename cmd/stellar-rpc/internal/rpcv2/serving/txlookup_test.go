@@ -17,7 +17,7 @@ func TestHotTxIndexes(t *testing.T) {
 	cat := openTestCatalog(t, silentLogger())
 	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 
-	empty, err := r.AcquireReadView()
+	empty, err := r.NewReadView()
 	require.NoError(t, err)
 	assert.Empty(t, empty.HotTxHashIndexes(), "no handles → no hot indexes")
 	empty.Release()
@@ -31,7 +31,7 @@ func TestHotTxIndexes(t *testing.T) {
 		dbs[c] = db
 	}
 
-	a, err := r.AcquireReadView()
+	a, err := r.NewReadView()
 	require.NoError(t, err)
 	defer a.Release()
 
@@ -60,7 +60,7 @@ func TestTxHashCoverages(t *testing.T) {
 	_, err := cat.MarkTxHashIndexFreezing(3, debris, debris)
 	require.NoError(t, err)
 
-	a, err := r.AcquireReadView()
+	a, err := r.NewReadView()
 	require.NoError(t, err)
 	defer a.Release()
 

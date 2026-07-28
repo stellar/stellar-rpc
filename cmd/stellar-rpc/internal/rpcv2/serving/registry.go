@@ -203,7 +203,7 @@ type ReadView struct {
 	closers []func() error
 }
 
-// AcquireReadView captures a query's view of serving state with three loads, in
+// NewReadView captures a query's view of serving state with three loads, in
 // this order: the latest ledger first, the handle set second, the catalog snapshot
 // last. The order makes the snapshot's metadata the newest of the three, so any
 // skew between the handle set and the snapshot resolves safely (see the design's
@@ -211,14 +211,14 @@ type ReadView struct {
 //
 // The caller MUST call Release when the request completes, including on error
 // paths.
-func (r *Registry) AcquireReadView() (*ReadView, error) {
+func (r *Registry) NewReadView() (*ReadView, error) {
 	latest := r.latestLedger.Load()
 	handles := r.handles.Load()
 	snap, err := r.catalog.NewSnapshot()
 	if err != nil {
 		return nil, err
 	}
-	lastComplete, err := lastCompleteChunk(r.catalog, snap)
+	lastComplete, err := lastCompleteChunkAsOf(r.catalog, snap)
 	if err != nil {
 		r.catalog.ReleaseSnapshot(snap)
 		return nil, err
@@ -249,12 +249,12 @@ func (a *ReadView) Release() {
 	a.catalog.ReleaseSnapshot(a.snap)
 }
 
-// lastCompleteChunk returns the anchor the floor is derived from: the highest
+// lastCompleteChunkAsOf returns the anchor the floor is derived from: the highest
 // ready hot chunk in the snapshot minus one (the highest ready chunk is the live,
 // still-ingesting chunk, so the one below it is the last complete one). Returns -1
 // when no hot chunk is ready, meaning nothing is complete yet — the signed
 // convention Retention.FloorAt expects.
-func lastCompleteChunk(cat *catalog.Catalog, snap *rocksdb.Snapshot) (int64, error) {
+func lastCompleteChunkAsOf(cat *catalog.Catalog, snap *rocksdb.Snapshot) (int64, error) {
 	ready, err := cat.ReadyHotChunkKeysAsOf(snap)
 	if err != nil {
 		return 0, err

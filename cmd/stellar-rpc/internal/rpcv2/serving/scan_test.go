@@ -45,7 +45,7 @@ func borderFixture(t *testing.T) (*Registry, chunk.ID, chunk.ID) {
 
 func collectSeqs(t *testing.T, r *Registry, lo, hi uint32) []uint32 {
 	t.Helper()
-	a, err := r.AcquireReadView()
+	a, err := r.NewReadView()
 	require.NoError(t, err)
 	defer a.Release()
 	scan, err := a.ScanLedgers(lo, hi)
@@ -96,7 +96,7 @@ func TestScanLedgers_UnroutableChunkFailsUpFront(t *testing.T) {
 	seedHotLedgers(t, cat, r, c1, c1.FirstLedger())
 	r.SetLatestLedger(c1.FirstLedger())
 
-	a, err := r.AcquireReadView()
+	a, err := r.NewReadView()
 	require.NoError(t, err)
 	defer a.Release()
 
@@ -109,7 +109,7 @@ func TestScanLedgers_UnroutableChunkFailsUpFront(t *testing.T) {
 // malformed input as ErrInvertedRange, same as calling ClampRange directly.
 func TestScanLedgers_InvertedInputRejected(t *testing.T) {
 	r, c0, _ := borderFixture(t)
-	a, err := r.AcquireReadView()
+	a, err := r.NewReadView()
 	require.NoError(t, err)
 	defer a.Release()
 	_, err = a.ScanLedgers(c0.FirstLedger()+1, c0.FirstLedger())
@@ -120,7 +120,7 @@ func TestScanLedgers_InvertedInputRejected(t *testing.T) {
 // scan order, intersected bounds, one part per overlapping chunk.
 func TestEventParts(t *testing.T) {
 	r, c0, c1 := borderFixture(t)
-	a, err := r.AcquireReadView()
+	a, err := r.NewReadView()
 	require.NoError(t, err)
 	defer a.Release()
 

@@ -2,9 +2,9 @@ package serving
 
 import (
 	"cmp"
+	"maps"
 	"slices"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
@@ -27,11 +27,8 @@ import (
 // floor (a handle that predates this view); the lookup's floor/latest gate on
 // the resolved ledger is the only thing that keeps such a match from being served.
 func (a *ReadView) HotTxHashIndexes() []txhash.HashIndex {
-	ids := make([]chunk.ID, 0, len(a.handles.byChunk))
-	for c := range a.handles.byChunk {
-		ids = append(ids, c)
-	}
-	slices.SortFunc(ids, func(x, y chunk.ID) int { return cmp.Compare(y, x) }) // newest first
+	ids := slices.Sorted(maps.Keys(a.handles.byChunk))
+	slices.Reverse(ids) // newest first
 
 	idxs := make([]txhash.HashIndex, 0, len(ids))
 	for _, c := range ids {

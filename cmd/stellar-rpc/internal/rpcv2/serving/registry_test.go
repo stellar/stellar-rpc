@@ -114,7 +114,7 @@ func TestAcquireReadView_FloorDerivation(t *testing.T) {
 			for _, c := range tc.ready {
 				require.NoError(t, cat.FlipHotReady(c))
 			}
-			a, err := r.AcquireReadView()
+			a, err := r.NewReadView()
 			require.NoError(t, err)
 			defer a.Release()
 			assert.Equal(t, tc.want, a.FloorChunk())
@@ -130,14 +130,14 @@ func TestAcquireReadView_FloorPinnedToSnapshot(t *testing.T) {
 	require.NoError(t, cat.FlipHotReady(5))
 	require.NoError(t, cat.FlipHotReady(6)) // live chunk 6, frontier 5
 
-	a1, err := r.AcquireReadView()
+	a1, err := r.NewReadView()
 	require.NoError(t, err)
 	defer a1.Release()
 	assert.Equal(t, chunk.ID(4), a1.FloorChunk()) // 5-2+1
 
 	require.NoError(t, cat.FlipHotReady(7)) // live chunk advances to 7, frontier 6
 
-	a2, err := r.AcquireReadView()
+	a2, err := r.NewReadView()
 	require.NoError(t, err)
 	defer a2.Release()
 	assert.Equal(t, chunk.ID(5), a2.FloorChunk(), "a fresh view sees the advanced frontier")
@@ -145,7 +145,7 @@ func TestAcquireReadView_FloorPinnedToSnapshot(t *testing.T) {
 }
 
 // TestAcquireReadView_CapturesStateAtAcquisitionInstant pins that all three loads are frozen
-// at acquisition: latest ledger and handle set reflect the instant AcquireReadView ran, not later
+// at acquisition: latest ledger and handle set reflect the instant NewReadView ran, not later
 // mutations.
 func TestAcquireReadView_CapturesStateAtAcquisitionInstant(t *testing.T) {
 	r, cat := newTestRegistry(t, 0, 0)
@@ -154,7 +154,7 @@ func TestAcquireReadView_CapturesStateAtAcquisitionInstant(t *testing.T) {
 	r.SetLatestLedger(65_000)
 	r.PublishHandle(5, &hotchunk.DB{})
 
-	a, err := r.AcquireReadView()
+	a, err := r.NewReadView()
 	require.NoError(t, err)
 	defer a.Release()
 
@@ -306,7 +306,7 @@ func TestAcquireReadView_ReleaseFreesSnapshot(t *testing.T) {
 	cat := openTestCatalog(t, newTestLogger(&buf))
 	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 
-	a, err := r.AcquireReadView()
+	a, err := r.NewReadView()
 	require.NoError(t, err)
 	a.Release()
 
@@ -321,7 +321,7 @@ func TestAcquireReadView_LeakedSnapshotWarnsAtClose(t *testing.T) {
 	cat := openTestCatalog(t, newTestLogger(&buf))
 	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 
-	_, err := r.AcquireReadView()
+	_, err := r.NewReadView()
 	require.NoError(t, err) // deliberately not released
 
 	require.NoError(t, cat.Close())
