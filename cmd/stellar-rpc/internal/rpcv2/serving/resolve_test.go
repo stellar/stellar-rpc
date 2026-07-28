@@ -19,6 +19,9 @@ func viewFor(t *testing.T, setup func(cat *catalog.Catalog, r *Registry)) (*Read
 	t.Helper()
 	cat := openTestCatalog(t, silentLogger())
 	r := NewRegistry(cat, geometry.NewRetention(0, 0))
+	// A working daemon always has a ready live chunk; seed one well above the
+	// chunks the tests route, so acquisition succeeds without affecting them.
+	require.NoError(t, cat.FlipHotReady(999))
 	setup(cat, r)
 	a, err := r.NewReadView()
 	require.NoError(t, err)

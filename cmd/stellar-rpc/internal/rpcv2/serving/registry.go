@@ -5,6 +5,7 @@
 package serving
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"sync"
@@ -249,18 +250,25 @@ func (a *ReadView) Release() {
 	a.catalog.ReleaseSnapshot(a.snap)
 }
 
+// errNoReadyHotChunk means a snapshot held no ready hot chunk at all. That cannot
+// happen in a working daemon — the live chunk's key is created before serving
+// starts and is never demoted — so it marks a broken catalog. Failing the
+// acquisition is safer than the alternative, which would derive the widest
+// possible floor from broken state. TODO(#772): count these on an alarm metric.
+var errNoReadyHotChunk = errors.New("serving: no ready hot chunk in snapshot (broken catalog)")
+
 // lastCompleteChunkAsOf returns the anchor the floor is derived from: the highest
 // ready hot chunk in the snapshot minus one (the highest ready chunk is the live,
-// still-ingesting chunk, so the one below it is the last complete one). Returns -1
-// when no hot chunk is ready, meaning nothing is complete yet — the signed
-// convention Retention.FloorAt expects.
+// still-ingesting chunk, so the one below it is the last complete one). A young
+// store — only chunk 0 ready, nothing complete — correctly yields -1, the signed
+// convention Retention.FloorAt expects. An EMPTY scan is errNoReadyHotChunk.
 func lastCompleteChunkAsOf(cat *catalog.Catalog, snap *rocksdb.Snapshot) (int64, error) {
 	ready, err := cat.ReadyHotChunkKeysAsOf(snap)
 	if err != nil {
 		return 0, err
 	}
 	if len(ready) == 0 {
-		return -1, nil
+		return 0, errNoReadyHotChunk
 	}
 	return int64(ready[len(ready)-1]) - 1, nil
 }

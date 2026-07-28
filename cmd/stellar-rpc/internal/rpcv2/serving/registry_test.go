@@ -93,9 +93,9 @@ func TestSetLatestLedger(t *testing.T) {
 	assert.Equal(t, uint32(42), r.LatestLedger())
 }
 
-// TestAcquireReadView_FloorDerivation pins that the view floor is Retention.FloorAt
+// TestNewReadView_FloorDerivation pins that the view floor is Retention.FloorAt
 // anchored on the highest ready hot chunk minus one.
-func TestAcquireReadView_FloorDerivation(t *testing.T) {
+func TestNewReadView_FloorDerivation(t *testing.T) {
 	tests := []struct {
 		name     string
 		size     uint32
@@ -104,9 +104,9 @@ func TestAcquireReadView_FloorDerivation(t *testing.T) {
 		want     chunk.ID
 	}{
 		{"full history ignores the frontier", 0, 3, []chunk.ID{5, 6}, 3},
-		{"sliding window from the frontier", 3, 0, []chunk.ID{5, 6, 7}, 4}, // frontier 6, 6-3+1
-		{"sliding clamped to earliest", 10, 2, []chunk.ID{5, 6, 7}, 2},     // 6-10+1 < 2
-		{"no ready hot chunk", 3, 2, nil, 2},                               // frontier -1
+		{"sliding window from the frontier", 3, 0, []chunk.ID{5, 6, 7}, 4},       // frontier 6, 6-3+1
+		{"sliding clamped to earliest", 10, 2, []chunk.ID{5, 6, 7}, 2},           // 6-10+1 < 2
+		{"young store: chunk 0 ready, nothing complete", 3, 2, []chunk.ID{0}, 2}, // anchor -1
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -122,10 +122,10 @@ func TestAcquireReadView_FloorDerivation(t *testing.T) {
 	}
 }
 
-// TestAcquireReadView_FloorPinnedToSnapshot pins that the floor is fixed at the acquisition
+// TestNewReadView_FloorPinnedToSnapshot pins that the floor is fixed at the acquisition
 // instant: a chunk opened after acquisition raises a later view's floor but
 // never the earlier one's.
-func TestAcquireReadView_FloorPinnedToSnapshot(t *testing.T) {
+func TestNewReadView_FloorPinnedToSnapshot(t *testing.T) {
 	r, cat := newTestRegistry(t, 2, 0) // sliding window of 2 chunks
 	require.NoError(t, cat.FlipHotReady(5))
 	require.NoError(t, cat.FlipHotReady(6)) // live chunk 6, frontier 5
@@ -144,10 +144,10 @@ func TestAcquireReadView_FloorPinnedToSnapshot(t *testing.T) {
 	assert.Equal(t, chunk.ID(4), a1.FloorChunk(), "the earlier view's floor is unchanged")
 }
 
-// TestAcquireReadView_CapturesStateAtAcquisitionInstant pins that all three loads are frozen
+// TestNewReadView_CapturesStateAtAcquisitionInstant pins that all three loads are frozen
 // at acquisition: latest ledger and handle set reflect the instant NewReadView ran, not later
 // mutations.
-func TestAcquireReadView_CapturesStateAtAcquisitionInstant(t *testing.T) {
+func TestNewReadView_CapturesStateAtAcquisitionInstant(t *testing.T) {
 	r, cat := newTestRegistry(t, 0, 0)
 	require.NoError(t, cat.FlipHotReady(5))
 	require.NoError(t, cat.FlipHotReady(6))
@@ -299,12 +299,13 @@ func TestClose_ClosesAndClearsHandles(t *testing.T) {
 	r.Close() // idempotent
 }
 
-// TestAcquireReadView_ReleaseFreesSnapshot pins that Release returns the snapshot, so a
+// TestNewReadView_ReleaseFreesSnapshot pins that Release returns the snapshot, so a
 // clean acquire/release cycle leaves no leak at catalog close.
-func TestAcquireReadView_ReleaseFreesSnapshot(t *testing.T) {
+func TestNewReadView_ReleaseFreesSnapshot(t *testing.T) {
 	var buf bytes.Buffer
 	cat := openTestCatalog(t, newTestLogger(&buf))
 	r := NewRegistry(cat, geometry.NewRetention(0, 0))
+	require.NoError(t, cat.FlipHotReady(0)) // a working daemon always has a ready live chunk
 
 	a, err := r.NewReadView()
 	require.NoError(t, err)
@@ -314,16 +315,27 @@ func TestAcquireReadView_ReleaseFreesSnapshot(t *testing.T) {
 	assert.NotContains(t, buf.String(), "unreleased snapshot")
 }
 
-// TestAcquireReadView_LeakedSnapshotWarnsAtClose pins the other direction: a read view
+// TestNewReadView_LeakedSnapshotWarnsAtClose pins the other direction: a read view
 // never released is reported as a leak when the catalog closes.
-func TestAcquireReadView_LeakedSnapshotWarnsAtClose(t *testing.T) {
+func TestNewReadView_LeakedSnapshotWarnsAtClose(t *testing.T) {
 	var buf bytes.Buffer
 	cat := openTestCatalog(t, newTestLogger(&buf))
 	r := NewRegistry(cat, geometry.NewRetention(0, 0))
+	require.NoError(t, cat.FlipHotReady(0))
 
 	_, err := r.NewReadView()
 	require.NoError(t, err) // deliberately not released
 
 	require.NoError(t, cat.Close())
 	assert.Contains(t, buf.String(), "unreleased snapshot")
+}
+
+// TestNewReadView_NoReadyChunkErrors pins that an EMPTY ready scan fails the
+// acquisition: it cannot happen in a working daemon (the live chunk's key exists
+// before serving starts and is never demoted), so it marks a broken catalog, and
+// erroring beats deriving the widest possible floor from broken state.
+func TestNewReadView_NoReadyChunkErrors(t *testing.T) {
+	r, _ := newTestRegistry(t, 3, 2) // no ready keys at all
+	_, err := r.NewReadView()
+	require.ErrorIs(t, err, errNoReadyHotChunk)
 }

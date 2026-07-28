@@ -16,6 +16,7 @@ import (
 func TestHotTxIndexes(t *testing.T) {
 	cat := openTestCatalog(t, silentLogger())
 	r := NewRegistry(cat, geometry.NewRetention(0, 0))
+	require.NoError(t, cat.FlipHotReady(999)) // acquisition needs a ready live chunk
 
 	empty, err := r.NewReadView()
 	require.NoError(t, err)
@@ -47,6 +48,7 @@ func TestTxHashCoverages(t *testing.T) {
 	cat := openTestCatalog(t, silentLogger())
 	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 
+	require.NoError(t, cat.FlipHotReady(999)) // acquisition needs a ready live chunk
 	// One frozen coverage per window 0,1,2 (distinct upper chunk), each the sole
 	// coverage of its window so there is no predecessor to demote.
 	for _, w := range []geometry.TxHashIndexID{0, 1, 2} {
