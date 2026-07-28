@@ -53,8 +53,10 @@ type daemonOptions struct {
 	Core CoreOpener
 
 	// ServeReads launches the RPC read server; it must return promptly, not block.
-	// nil ⇒ a no-op placeholder until #889 builds v2's read server. Reads come from
-	// the v1 SQLite daemon until the #772 cutover.
+	// nil ⇒ a no-op placeholder, which is what production uses today: v2 serves
+	// nothing. Serving arrives across #772's sub-tasks — #889 builds the server and
+	// the method table, over the router-backed store readers (#885-#887) the
+	// handlers need. Reads stay on the v1 SQLite daemon until the #772 cutover.
 	ServeReads func(ctx context.Context) error
 
 	// RestartBackoff is the supervised loop's inter-restart sleep; zero ⇒ defaultRestartBackoff.
@@ -176,7 +178,8 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	serveReads := opts.ServeReads
 	if serveReads == nil {
 		// TODO(#889): build v2's read server — the method table, the listener on
-		// [service].endpoint, and the admin endpoint. No-op until then.
+		// [service].endpoint, and the admin endpoint. The handlers it registers also
+		// need the router-backed store readers (#885-#887). No-op until then.
 		serveReads = func(context.Context) error { return nil }
 	}
 
