@@ -199,8 +199,9 @@ max_execution_duration = "5s"
 #worker_queue_size = 8
 
 # Include detailed diagnostics in preflight errors. Costly to produce — v1
-# advises against it in production. Default true.
-enable_debug = true
+# advises against it in production. The default is true; this sample is a
+# production starting point, so it turns it off.
+enable_debug = false
 
 # NOT here (by design): friendbot_url, which arrives with the getNetwork handler.
 
@@ -294,14 +295,16 @@ history_archive_urls = ["https://history.stellar.org/prd/core-live/core_live_001
 # These four keys are owned HERE, not by the captive-core file — the opposite of
 # NETWORK_PASSPHRASE, which the captive-core file owns. If that file also sets
 # HTTP_PORT, HTTP_QUERY_PORT, QUERY_THREAD_POOL_SIZE or QUERY_SNAPSHOT_LEDGERS,
-# the two must agree; a disagreement is a startup error naming both sides.
+# the values below win and core is run with them; the daemon logs a warning
+# naming both, so nothing about the override is silent.
 
 core_http_port = 11626
 core_http_query_port = 11628
 
 # Where transactions are submitted. Default: http://localhost:{core_http_port},
 # so setting core_http_port alone is enough. Set this only if core's admin
-# server is reachable somewhere other than localhost.
+# server is reachable somewhere other than localhost — a core_url pointing at
+# this host must name core_http_port, and startup rejects it otherwise.
 #core_url = "http://localhost:11626"
 
 # Timeout for every request to either server above.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"time"
@@ -103,8 +104,8 @@ const (
 // validateIngestion form-validates the [ingestion] captive-core HTTP settings.
 // It runs after WithDefaults, so every pointer is non-nil.
 //
-// The four counts are uint here but uint16 in the captive-core toml, so each is
-// range-checked; newCaptiveCoreOpeners narrows them on the strength of it.
+// The four counts are uint here but 16-bit fields in core's toml, so each is
+// range-checked to fail as a config error rather than inside core.
 func validateIngestion(ing config.IngestionConfig) error {
 	// Both ports must be usable. v1 read port 0 as "don't run core's HTTP
 	// server"; v2 always serves sendTransaction off the admin port and
@@ -142,7 +143,28 @@ func validateIngestion(ing config.IngestionConfig) error {
 	case u.Host == "":
 		return fmt.Errorf("[ingestion].core_url %q names no host", ing.CoreURL)
 	}
+	// This daemon starts the core it submits to, and that core binds
+	// core_http_port, so a local core_url on any other port reaches something
+	// else — often a second daemon's captive core, which would accept the
+	// transaction — with neither startup nor getHealth reporting a problem. A
+	// non-local core_url is left alone: that is the reason to set it at all.
+	if isLoopbackHost(u.Hostname()) && u.Port() != strconv.FormatUint(uint64(*ing.CoreHTTPPort), 10) {
+		return fmt.Errorf("[ingestion].core_url %q points at this host but not at %s (%d) — "+
+			"the captive core this daemon starts listens on that port. Leave core_url unset to "+
+			"derive it, or give it a non-local address if core's admin server really is elsewhere",
+			ing.CoreURL, keyCoreHTTPPort, *ing.CoreHTTPPort)
+	}
 	return nil
+}
+
+// isLoopbackHost reports whether host refers to this machine. url.URL.Hostname
+// has already stripped an IPv6 literal's brackets, so "[::1]" arrives as "::1".
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // minConfiguredDuration guards go-toml v1's nanosecond trap: a bare integer

@@ -32,11 +32,17 @@ const testCPI = geometry.ChunksPerTxhashIndex
 const preGenesisLedger = uint32(chunk.FirstLedgerSeq - 1)
 
 func silentLogger() *supportlog.Entry {
-	var buf bytes.Buffer
+	logger, _ := capturingLogger()
+	return logger
+}
+
+// capturingLogger is silentLogger plus access to what was logged.
+func capturingLogger() (*supportlog.Entry, *bytes.Buffer) {
+	buf := &bytes.Buffer{}
 	log := supportlog.New()
 	log.SetLevel(logrus.DebugLevel)
-	log.SetOutput(&buf)
-	return log
+	log.SetOutput(buf)
+	return log, buf
 }
 
 // newTestCatalog builds a Catalog over a real KV store on temp dirs with

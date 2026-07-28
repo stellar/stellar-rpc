@@ -39,7 +39,8 @@ func TestSampleConfig_ParsesStrict(t *testing.T) {
 	assert.Equal(t, config.DefaultCoreMethodMaxExecutionDuration,
 		*cfg.Service.Methods.SimulateTransaction.MaxExecutionDuration)
 	assert.Equal(t, config.DefaultMethodQueueLimit, *cfg.Service.Methods.GetLedgerEntries.QueueLimit)
-	assert.True(t, *cfg.Service.Preflight.EnableDebug)
+	assert.False(t, *cfg.Service.Preflight.EnableDebug,
+		"the sample deliberately departs from the true default: it is a production starting point")
 
 	assert.Equal(t, config.DefaultCoreHTTPPort, *cfg.Ingestion.CoreHTTPPort)
 	assert.Equal(t, config.DefaultCoreHTTPQueryPort, *cfg.Ingestion.CoreHTTPQueryPort)

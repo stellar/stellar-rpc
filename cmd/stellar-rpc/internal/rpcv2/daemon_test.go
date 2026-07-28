@@ -548,8 +548,6 @@ func TestNewCaptiveCoreOpeners_PortsOnLiveCoreOnly(t *testing.T) {
 }
 
 func TestNewCaptiveCoreOpeners_BackfillPortlessEvenWhenCoreFileDeclaresPorts(t *testing.T) {
-	// These must agree with [ingestion] or startup is rejected; the point is that
-	// agreeing values still do not reach a backfill core.
 	extra := "HTTP_PORT = 11626\nHTTP_QUERY_PORT = 11628\nQUERY_THREAD_POOL_SIZE = 2\n"
 	ing := coreFileIngestion(t, writeCaptiveCoreFile(t, extra))
 	poolSize := uint(2)
@@ -582,34 +580,68 @@ func TestNewCaptiveCoreOpeners_BackfillPortlessEvenWhenCoreFileDeclaresPorts(t *
 	assert.Equal(t, uint(11628), *live.config.Toml.HTTPQueryPort)
 }
 
-// Without this check the SDK's own comparison is reached, where three branches
-// panic on a nil pointer instead of reporting the conflict.
-func TestNewCaptiveCoreOpeners_RejectsCoreFileHTTPConflict(t *testing.T) {
+func TestNewCaptiveCoreOpeners_OverridesCoreFileHTTPSettings(t *testing.T) {
 	tests := []struct {
-		name  string
-		extra string
-		want  string
+		name    string
+		extra   string
+		fileKey string
+		read    func(*ledgerbackend.CaptiveCoreToml) uint
+		want    uint
 	}{
-		{"admin port", "HTTP_PORT = 11625\n", keyCoreHTTPPort},
-		{"query port", "HTTP_QUERY_PORT = 11111\n", keyCoreHTTPQueryPort},
-		{"thread pool", "QUERY_THREAD_POOL_SIZE = 999\n", keyCoreQueryThreadPoolSize},
-		{"snapshot ledgers", "QUERY_SNAPSHOT_LEDGERS = 77\n", keyCoreQuerySnapshotLedgers},
+		{
+			"admin port", "HTTP_PORT = 11625\n", keyCoreHTTPPort,
+			func(c *ledgerbackend.CaptiveCoreToml) uint { return c.HTTPPort },
+			config.DefaultCoreHTTPPort,
+		},
+		{
+			"query port", "HTTP_QUERY_PORT = 11111\n", keyCoreHTTPQueryPort,
+			func(c *ledgerbackend.CaptiveCoreToml) uint { return *c.HTTPQueryPort },
+			config.DefaultCoreHTTPQueryPort,
+		},
+		{
+			"snapshot ledgers", "QUERY_SNAPSHOT_LEDGERS = 77\n", keyCoreQuerySnapshotLedgers,
+			func(c *ledgerbackend.CaptiveCoreToml) uint { return *c.QuerySnapshotLedgers },
+			config.DefaultCoreHTTPQuerySnapshotLedgers,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			logger, logs := capturingLogger()
 			ing := coreFileIngestion(t, writeCaptiveCoreFile(t, tc.extra))
-			_, err := newCaptiveCoreOpeners(ing, t.TempDir(), silentLogger())
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tc.want)
-			assert.Contains(t, err.Error(), "captive_core_config sets")
+
+			core, err := newCaptiveCoreOpeners(ing, t.TempDir(), logger)
+			require.NoError(t, err)
+
+			live, ok := core.live.(*captiveCoreOpener)
+			require.True(t, ok)
+			assert.Equal(t, tc.want, tc.read(live.config.Toml))
+			assert.Contains(t, logs.String(), tc.fileKey)
 		})
 	}
 }
 
-func TestNewCaptiveCoreOpeners_AcceptsAgreeingCoreFileHTTPKeys(t *testing.T) {
-	ing := coreFileIngestion(t, writeCaptiveCoreFile(t, "HTTP_PORT = 11626\n"))
-	_, err := newCaptiveCoreOpeners(ing, t.TempDir(), silentLogger())
+func TestNewCaptiveCoreOpeners_OverridesCoreFileThreadPoolSize(t *testing.T) {
+	logger, logs := capturingLogger()
+	ing := coreFileIngestion(t, writeCaptiveCoreFile(t, "QUERY_THREAD_POOL_SIZE = 999\n"))
+
+	core, err := newCaptiveCoreOpeners(ing, t.TempDir(), logger)
 	require.NoError(t, err)
+
+	live, ok := core.live.(*captiveCoreOpener)
+	require.True(t, ok)
+	require.NotNil(t, live.config.Toml.QueryThreadPoolSize)
+	assert.Equal(t, config.NumCPU(), *live.config.Toml.QueryThreadPoolSize)
+	assert.Contains(t, logs.String(), keyCoreQueryThreadPoolSize)
+}
+
+func TestNewCaptiveCoreOpeners_SilentWhenCoreFileAgrees(t *testing.T) {
+	logger, logs := capturingLogger()
+	extra := fmt.Sprintf("HTTP_PORT = %d\n", config.DefaultCoreHTTPPort)
+	ing := coreFileIngestion(t, writeCaptiveCoreFile(t, extra))
+
+	_, err := newCaptiveCoreOpeners(ing, t.TempDir(), logger)
+	require.NoError(t, err)
+	assert.NotContains(t, logs.String(), keyCoreHTTPPort)
 }
 
 func TestResolveCore_InjectedOpenerServesBothRoles(t *testing.T) {

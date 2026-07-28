@@ -15,15 +15,17 @@
 package corestate
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/stellar/go-stellar-sdk/clients/stellarcore"
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
@@ -76,8 +78,9 @@ type Daemon struct {
 // binary's version.
 //
 // A failed version lookup is not an error — the version is only a field in
-// getVersionInfo's response, so the daemon starts anyway and reports "".
-func New(cfg Config) (*Daemon, error) {
+// getVersionInfo's response, so the daemon starts anyway and reports "". ctx
+// bounds that lookup and nothing else; the Daemon does not retain it.
+func New(ctx context.Context, cfg Config) (*Daemon, error) {
 	if cfg.CoreURL == "" {
 		return nil, errors.New("corestate: CoreURL is required (default http://localhost:{core_http_port})")
 	}
@@ -96,8 +99,12 @@ func New(cfg Config) (*Daemon, error) {
 		namespace = host.PrometheusNamespace
 	}
 
-	// Separate http.Clients so a slow submission cannot tie up a connection the
-	// query path needs.
+	// One http.Client per server. This is not connection-pool isolation: both
+	// leave Transport nil, so both use http.DefaultTransport and share its single
+	// pool. That pool keys idle connections by host:port, and the two servers are
+	// different host:port pairs, so submissions and queries already stay off each
+	// other's connections — one shared Client would behave the same way. The two
+	// Clients exist so the submission path can be wrapped on its own.
 	//
 	// TODO(#889): the submission client is unwrapped, so v2 does not yet publish
 	// v1's txsub metrics. v1's wrapper for them lives in internal/rpcv1/daemon and
@@ -113,7 +120,7 @@ func New(cfg Config) (*Daemon, error) {
 			URL:  fmt.Sprintf("http://localhost:%d", cfg.QueryPort),
 			HTTP: &http.Client{Timeout: cfg.RequestTimeout},
 		},
-		coreVersion: readCoreVersion(cfg.StellarCoreBinaryPath, cfg.Logger),
+		coreVersion: readCoreVersion(ctx, cfg.StellarCoreBinaryPath, cfg.Logger),
 	}, nil
 }
 
@@ -155,12 +162,25 @@ func (d *Daemon) LedgerEntryGetter(latestLedgerReader store.LedgerReader) ledger
 	return ledgerentries.NewLedgerEntryGetter(d.FastCoreClient(), latestLedgerReader)
 }
 
+const coreVersionTimeout = 5 * time.Second
+
 // readCoreVersion runs `stellar-core version` once; an empty path skips it.
-func readCoreVersion(binaryPath string, logger *supportlog.Entry) string {
+//
+// Not ledgerbackend.CoreBuildVersion, which execs with no context: this runs at
+// startup before anything is logged, so a binary that never returns (a wrapper
+// script, a stalled mount) would freeze the daemon silently and ignore Ctrl-C.
+func readCoreVersion(ctx context.Context, binaryPath string, logger *supportlog.Entry) string {
 	if binaryPath == "" {
 		return ""
 	}
-	version, err := ledgerbackend.CoreBuildVersion(binaryPath)
+	ctx, cancel := context.WithTimeout(ctx, coreVersionTimeout)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, binaryPath, "version").Output()
+	version, _, _ := strings.Cut(string(out), "\n")
+	if err == nil && version == "" {
+		err = errors.New("stellar-core version printed no output")
+	}
 	if err != nil {
 		if logger != nil {
 			logger.WithError(err).WithField("binary_path", binaryPath).

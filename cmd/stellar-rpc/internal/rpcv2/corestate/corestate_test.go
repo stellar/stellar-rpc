@@ -42,7 +42,7 @@ func TestNew_WiresBothClientsAtTheirPorts(t *testing.T) {
 	cfg.RequestTimeout = 7 * time.Second
 	cfg.Registry = registry
 
-	d, err := New(cfg)
+	d, err := New(context.Background(), cfg)
 	require.NoError(t, err)
 
 	submit, ok := d.CoreClient().(*stellarcore.Client)
@@ -58,7 +58,7 @@ func TestNew_WiresBothClientsAtTheirPorts(t *testing.T) {
 	assert.Equal(t, 7*time.Second, query.HTTP.(*http.Client).Timeout) //nolint:forcetypeassert
 
 	assert.NotSame(t, submit.HTTP, query.HTTP,
-		"one http.Client per server, so a slow submission cannot starve the query path")
+		"one http.Client per server, so the submission path can be wrapped without touching queries")
 	assert.Same(t, registry, d.MetricsRegistry(),
 		"handlers must register on the daemon's real registry, not a throwaway")
 	assert.Equal(t, host.PrometheusNamespace, d.MetricsNamespace())
@@ -67,7 +67,7 @@ func TestNew_WiresBothClientsAtTheirPorts(t *testing.T) {
 func TestNew_NamespaceOverride(t *testing.T) {
 	cfg := validConfig()
 	cfg.Namespace = "custom_ns"
-	d, err := New(cfg)
+	d, err := New(context.Background(), cfg)
 	require.NoError(t, err)
 	assert.Equal(t, "custom_ns", d.MetricsNamespace())
 }
@@ -88,7 +88,7 @@ func TestNew_RejectsIncompleteConfig(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := validConfig()
 			tc.mutate(&cfg)
-			_, err := New(cfg)
+			_, err := New(context.Background(), cfg)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.want)
 		})
@@ -108,13 +108,13 @@ func TestCoreVersion_ReadFromTheBinary(t *testing.T) {
 	cfg := validConfig()
 	cfg.StellarCoreBinaryPath = fakeCoreBinary(t, "#!/bin/sh\necho 'stellar-core 22.1.0 (deadbeef)'\n")
 
-	d, err := New(cfg)
+	d, err := New(context.Background(), cfg)
 	require.NoError(t, err)
 	assert.Equal(t, "stellar-core 22.1.0 (deadbeef)", d.CoreVersion())
 }
 
 func TestCoreVersion_EmptyWhenNoBinaryPath(t *testing.T) {
-	d, err := New(validConfig())
+	d, err := New(context.Background(), validConfig())
 	require.NoError(t, err)
 	assert.Empty(t, d.CoreVersion())
 }
@@ -125,7 +125,18 @@ func TestCoreVersion_UnreadableBinaryIsNotFatal(t *testing.T) {
 	cfg := validConfig()
 	cfg.StellarCoreBinaryPath = filepath.Join(t.TempDir(), "does-not-exist")
 
-	d, err := New(cfg)
+	d, err := New(context.Background(), cfg)
+	require.NoError(t, err)
+	assert.Empty(t, d.CoreVersion())
+}
+
+func TestCoreVersion_HangingBinaryDoesNotBlockStartup(t *testing.T) {
+	cfg := validConfig()
+	cfg.StellarCoreBinaryPath = fakeCoreBinary(t, "#!/bin/sh\nsleep 300\n")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	d, err := New(ctx, cfg)
 	require.NoError(t, err)
 	assert.Empty(t, d.CoreVersion())
 }
@@ -175,7 +186,7 @@ func TestLedgerEntryGetter_QueriesTheQueryPortAtTheDaemonsLedger(t *testing.T) {
 	// on the query port fails the test rather than passing by accident.
 	cfg.CoreURL = "http://127.0.0.1:1"
 
-	d, err := New(cfg)
+	d, err := New(context.Background(), cfg)
 	require.NoError(t, err)
 
 	getter := d.LedgerEntryGetter(stubLedgerReader{latest: 1234})

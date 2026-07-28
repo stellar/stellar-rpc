@@ -203,7 +203,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// simulateTransaction's preflight pool. Built once, outside the supervised
 	// loop: the pool registers collectors on the registry above, and registering
 	// the same collector twice panics. #889 hands both to the method table. ---
-	coreDaemon, err := corestate.New(corestate.Config{
+	coreDaemon, err := corestate.New(ctx, corestate.Config{
 		CoreURL:               cfg.Ingestion.CoreURL,
 		QueryPort:             deref(cfg.Ingestion.CoreHTTPQueryPort),
 		RequestTimeout:        deref(cfg.Ingestion.CoreRequestTimeout),
@@ -481,7 +481,8 @@ type captiveCoreOpener struct {
 // PATH. Only the history-archive URLs come from [ingestion], since the file's
 // [HISTORY.*] entries are shell commands, not URLs. The toml params mirror the
 // v1 daemon (strict, unified events, soroban diagnostic/meta enforcement) so the
-// ingested meta suits the events + txhash stores.
+// ingested meta suits the events + txhash stores. Core's four HTTP-server
+// settings are the exception: [ingestion] owns those, see applyHTTPServers.
 //
 // It returns two openers over one read of the file, differing only in whether
 // core's HTTP servers are enabled — see resolvedCore.
@@ -508,9 +509,7 @@ func newCaptiveCoreOpeners(
 	if peek.NetworkPassphrase == "" {
 		return resolvedCore{}, fmt.Errorf("captive_core_config %q must define NETWORK_PASSPHRASE", ing.CaptiveCoreConfig)
 	}
-	if cerr := peek.checkNoHTTPConflict(ing); cerr != nil {
-		return resolvedCore{}, cerr
-	}
+	peek.warnHTTPSettingsOverridden(ing, logger)
 
 	// stellar-core binary: explicit path, else the one on PATH (RPC daemon default).
 	binaryPath := ing.StellarCoreBinaryPath
@@ -528,7 +527,8 @@ func newCaptiveCoreOpeners(
 		storagePath = filepath.Join(dataDir, "captive-core")
 	}
 
-	// Shared params; the live opener then adds the HTTP ports.
+	// One set of params for both openers; the HTTP settings are applied per toml
+	// below, not passed here.
 	params := ledgerbackend.CaptiveCoreTomlParams{
 		HistoryArchiveURLs:                 ing.HistoryArchiveURLs,
 		NetworkPassphrase:                  peek.NetworkPassphrase,
@@ -546,21 +546,12 @@ func newCaptiveCoreOpeners(
 	}
 	disableHTTPServers(backfillOpener.config.Toml)
 
-	httpPort := *ing.CoreHTTPPort
-	params.HTTPPort = &httpPort
-	params.HTTPQueryServerParams = &ledgerbackend.HTTPQueryServerParams{
-		//nolint:gosec // validateIngestion rejects any of these above 65535
-		Port: uint16(*ing.CoreHTTPQueryPort),
-		//nolint:gosec // same range check
-		ThreadPoolSize: uint16(*ing.CoreHTTPQueryThreadPoolSize),
-		//nolint:gosec // same range check
-		SnapshotLedgers: uint16(*ing.CoreHTTPQuerySnapshotLedgers),
-	}
 	liveOpener, err := newCaptiveCoreOpener(
 		ing, data, params, binaryPath, storagePath, peek.NetworkPassphrase, logger)
 	if err != nil {
 		return resolvedCore{}, err
 	}
+	applyHTTPServers(liveOpener.config.Toml, ing)
 
 	return resolvedCore{
 		live:              liveOpener,
@@ -587,7 +578,7 @@ func disableHTTPServers(coreToml *ledgerbackend.CaptiveCoreToml) {
 
 // coreFilePeek is the captive-core file keys the daemon reads itself before
 // handing the file to the SDK: the network, and the four HTTP-server settings
-// [ingestion] also owns. go-toml ignores every other key.
+// [ingestion] overrides. go-toml ignores every other key.
 type coreFilePeek struct {
 	NetworkPassphrase    string `toml:"NETWORK_PASSPHRASE"`
 	HTTPPort             *uint  `toml:"HTTP_PORT"`
@@ -596,21 +587,16 @@ type coreFilePeek struct {
 	QuerySnapshotLedgers *uint  `toml:"QUERY_SNAPSHOT_LEDGERS"`
 }
 
-// checkNoHTTPConflict rejects a captive-core file that sets one of core's four
-// HTTP keys to a different value than the matching [ingestion] key. A value that
-// agrees is fine, so configs carried over from v1 (which commonly set these in
-// the core file) still start.
-//
-// The SDK checks this too, but unusably: its three query-server mismatch
-// branches format the error with params.PeerPort, which this daemon never sets,
-// so they panic on a nil pointer instead of reporting the conflict. Checking
-// here turns that crash into an error naming both sides.
-func (p coreFilePeek) checkNoHTTPConflict(ing config.IngestionConfig) error {
-	conflicts := []struct {
-		fileKey    string
-		configKey  string
-		inFile     *uint
-		configured uint
+// warnHTTPSettingsOverridden logs each of core's four HTTP keys the captive-core
+// file sets to something other than what core will run with. Overriding silently
+// would be the trap: an operator carrying a v1 file with HTTP_PORT = 11625 may
+// have firewall rules or a monitoring scrape pointed at 11625.
+func (p coreFilePeek) warnHTTPSettingsOverridden(ing config.IngestionConfig, logger *supportlog.Entry) {
+	settings := []struct {
+		fileKey   string
+		configKey string
+		inFile    *uint
+		used      uint
 	}{
 		{"HTTP_PORT", keyCoreHTTPPort, p.HTTPPort, *ing.CoreHTTPPort},
 		{"HTTP_QUERY_PORT", keyCoreHTTPQueryPort, p.HTTPQueryPort, *ing.CoreHTTPQueryPort},
@@ -623,16 +609,34 @@ func (p coreFilePeek) checkNoHTTPConflict(ing config.IngestionConfig) error {
 			p.QuerySnapshotLedgers, *ing.CoreHTTPQuerySnapshotLedgers,
 		},
 	}
-	for _, c := range conflicts {
-		if c.inFile == nil || *c.inFile == c.configured {
+	for _, s := range settings {
+		if s.inFile == nil || *s.inFile == s.used {
 			continue
 		}
-		return fmt.Errorf("captive_core_config sets %s = %d, but [ingestion].%s is %d — "+
-			"core's HTTP settings are configured in [ingestion]; remove %s from the "+
-			"captive-core file or set the two to the same value",
-			c.fileKey, *c.inFile, c.configKey, c.configured, c.fileKey)
+		logger.Warnf("captive_core_config sets %s = %d, but [ingestion].%s owns core's HTTP "+
+			"settings — running core with %d. Remove %s from the captive-core file to silence this.",
+			s.fileKey, *s.inFile, s.configKey, s.used, s.fileKey)
 	}
-	return nil
+}
+
+// applyHTTPServers points the live core's two HTTP servers at the [ingestion]
+// settings, overriding whatever the captive-core file said.
+//
+// The values are written onto the generated toml instead of passed in
+// CaptiveCoreTomlParams because the SDK treats params as a cross-check, not an
+// override: it rejects a file that disagrees rather than preferring the params,
+// and its three query-server mismatch branches format that error with
+// params.PeerPort, which this daemon never sets, so they panic on a nil pointer.
+// Passing no HTTP params leaves those branches unreachable.
+func applyHTTPServers(coreToml *ledgerbackend.CaptiveCoreToml, ing config.IngestionConfig) {
+	queryPort := *ing.CoreHTTPQueryPort
+	threadPoolSize := *ing.CoreHTTPQueryThreadPoolSize
+	snapshotLedgers := *ing.CoreHTTPQuerySnapshotLedgers
+
+	coreToml.HTTPPort = *ing.CoreHTTPPort
+	coreToml.HTTPQueryPort = &queryPort
+	coreToml.QueryThreadPoolSize = &threadPoolSize
+	coreToml.QuerySnapshotLedgers = &snapshotLedgers
 }
 
 // newCaptiveCoreOpener builds one opener from the captive-core file's bytes.
