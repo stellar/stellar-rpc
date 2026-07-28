@@ -468,6 +468,98 @@ func TestSupervise_FirstStartNoTipRetries(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Captive-core resolution: HTTP ports on the live core only.
+// ---------------------------------------------------------------------------
+
+// writeCaptiveCoreFile writes a captive-core config with the network passphrase
+// and a quorum set — the minimum the SDK's toml builder accepts.
+func writeCaptiveCoreFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "captive-core.toml")
+	body := fmt.Sprintf(`
+NETWORK_PASSPHRASE = %q
+
+[[HOME_DOMAINS]]
+HOME_DOMAIN = "testnet.stellar.org"
+QUALITY = "HIGH"
+
+[[VALIDATORS]]
+NAME = "sdf_testnet_1"
+HOME_DOMAIN = "testnet.stellar.org"
+PUBLIC_KEY = "GDKXE2OZMJIPOSLNA6N6F2BVCI3O777I2OOC4BV7VOYUEHYX7RTRYA7Y"
+ADDRESS = "core-testnet1.stellar.org"
+`, network.TestNetworkPassphrase)
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
+	return path
+}
+
+// The live ingestion core gets core's two HTTP servers; the backfill cores must
+// not. A no-lake backfill runs one bounded-replay core per chunk IN PARALLEL, so
+// a fixed port in their toml would have every one of them contend on binding it
+// — and nothing ever queries a backfill core.
+func TestNewCaptiveCoreOpeners_PortsOnLiveCoreOnly(t *testing.T) {
+	uintPtr := func(v uint) *uint { return &v }
+	ing := config.IngestionConfig{
+		CaptiveCoreConfig:  writeCaptiveCoreFile(t),
+		HistoryArchiveURLs: []string{"https://archive.example"},
+		// A path that does not exist: nothing execs it here (the SDK's version
+		// probe ignores a failed lookup), and it keeps the test off whatever
+		// stellar-core happens to be on PATH.
+		StellarCoreBinaryPath: filepath.Join(t.TempDir(), "stellar-core"),
+	}
+	ing.CoreHTTPPort = uintPtr(21626)
+	ing.CoreHTTPQueryPort = uintPtr(21628)
+	ing.CoreHTTPQueryThreadPoolSize = uintPtr(7)
+	ing.CoreHTTPQuerySnapshotLedgers = uintPtr(9)
+
+	core, err := newCaptiveCoreOpeners(ing, t.TempDir(), silentLogger())
+	require.NoError(t, err)
+
+	live, ok := core.live.(*captiveCoreOpener)
+	require.True(t, ok, "the live opener is the production captive-core opener")
+	backfill, ok := core.backfill.(*captiveCoreOpener)
+	require.True(t, ok)
+
+	// Live: both servers enabled, on the configured ports.
+	assert.Equal(t, uint(21626), live.config.Toml.HTTPPort)
+	require.NotNil(t, live.config.Toml.HTTPQueryPort)
+	assert.Equal(t, uint(21628), *live.config.Toml.HTTPQueryPort)
+	require.NotNil(t, live.config.Toml.QueryThreadPoolSize)
+	assert.Equal(t, uint(7), *live.config.Toml.QueryThreadPoolSize)
+	require.NotNil(t, live.config.Toml.QuerySnapshotLedgers)
+	assert.Equal(t, uint(9), *live.config.Toml.QuerySnapshotLedgers)
+
+	// Backfill: the query server is never configured at all...
+	assert.Nil(t, backfill.config.Toml.HTTPQueryPort,
+		"a backfill core must not bind the query port")
+	assert.Nil(t, backfill.config.Toml.QueryThreadPoolSize)
+	// ...and its admin port is dropped by the bounded-replay (catchup) mode those
+	// cores run in — which is what makes the parallel replays safe.
+	catchup, err := backfill.config.Toml.CatchupToml()
+	require.NoError(t, err)
+	assert.Zero(t, catchup.HTTPPort, "bounded replay runs core with no admin server")
+
+	// Both openers describe the same core on the same network.
+	assert.Equal(t, network.TestNetworkPassphrase, core.networkPassphrase)
+	assert.Equal(t, ing.StellarCoreBinaryPath, core.binaryPath)
+	assert.Equal(t, live.config.NetworkPassphrase, backfill.config.NetworkPassphrase)
+	assert.Equal(t, live.config.StoragePath, backfill.config.StoragePath)
+}
+
+// An injected opener (every rpcv2 test) serves both roles, so nothing in the
+// test suite depends on a real core process or a resolvable binary.
+func TestResolveCore_InjectedOpenerServesBothRoles(t *testing.T) {
+	injected := &fakeCore{}
+	core, err := resolveCore(daemonOptions{Core: injected}, config.Config{}, silentLogger())
+	require.NoError(t, err)
+
+	assert.Same(t, injected, core.live)
+	assert.Same(t, injected, core.backfill)
+	assert.Empty(t, core.networkPassphrase, "an injected opener carries no passphrase")
+	assert.Empty(t, core.binaryPath, "and no binary path, so no core version is reported")
+}
+
+// ---------------------------------------------------------------------------
 // buildBackfillBackend — the no-lake (no datastore) paths.
 // ---------------------------------------------------------------------------
 
@@ -482,7 +574,7 @@ func TestBuildBackfillBackend_NoSourcesNoBackend(t *testing.T) {
 }
 
 // A daemon with no bulk source at all (no datastore, no archives; the injected
-// Core bypasses newCaptiveCoreOpener's own archive-URL requirement) fails fast at
+// Core bypasses newCaptiveCoreOpeners' own archive-URL requirement) fails fast at
 // startup with the config-shaped message — not at the first backfill pass.
 func TestRunDaemon_NoBulkSourceFailsFast(t *testing.T) {
 	configPath, _ := writeTempConfig(t, "")

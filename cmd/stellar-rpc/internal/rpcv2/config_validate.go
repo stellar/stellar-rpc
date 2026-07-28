@@ -83,7 +83,46 @@ func validateForm(cfg config.Config) error {
 	if err := validateEarliestForm(cfg.Retention.EarliestLedger); err != nil {
 		return err
 	}
+	if err := validateIngestion(cfg.Ingestion); err != nil {
+		return err
+	}
 	return validateService(cfg.Service)
+}
+
+// validateIngestion form-validates the [ingestion] captive-core HTTP settings.
+// It runs AFTER WithDefaults, so every pointer is non-nil.
+//
+// The four counts are configured as uint but reach the captive-core toml as
+// uint16, so each is range-checked here — this is the single place that rule
+// lives, and newCaptiveCoreOpeners narrows the values on the strength of it.
+func validateIngestion(ing config.IngestionConfig) error {
+	// Both ports must be usable: unlike v1, where port 0 meant "don't run core's
+	// HTTP server", v2 always serves sendTransaction off the admin port and
+	// getLedgerEntries off the query port, so a disabled server is a broken
+	// deployment rather than a mode.
+	ports := []struct {
+		name string
+		v    uint
+	}{
+		{"core_http_port", *ing.CoreHTTPPort},
+		{"core_http_query_port", *ing.CoreHTTPQueryPort},
+		{"core_http_query_thread_pool_size", *ing.CoreHTTPQueryThreadPoolSize},
+		{"core_http_query_snapshot_ledgers", *ing.CoreHTTPQuerySnapshotLedgers},
+	}
+	for _, p := range ports {
+		if p.v < 1 || p.v > config.MaxPort {
+			return fmt.Errorf("[ingestion].%s must be between 1 and %d (got %d)", p.name, config.MaxPort, p.v)
+		}
+	}
+	if *ing.CoreHTTPPort == *ing.CoreHTTPQueryPort {
+		return fmt.Errorf("[ingestion].core_http_port and core_http_query_port are both %d — "+
+			"core runs two servers and cannot bind one port twice", *ing.CoreHTTPPort)
+	}
+	if *ing.CoreRequestTimeout < minConfiguredDuration {
+		return fmt.Errorf("[ingestion].core_request_timeout is %v — durations below 1ms are rejected; "+
+			"a bare TOML integer parses as nanoseconds, write a string like \"2s\"", *ing.CoreRequestTimeout)
+	}
+	return nil
 }
 
 // minConfiguredDuration guards go-toml v1's nanosecond trap: a bare integer
@@ -154,6 +193,9 @@ func validateService(svc config.ServiceConfig) error {
 		{"getLedgers", *m.GetLedgers.QueueLimit, *m.GetLedgers.MaxExecutionDuration},
 		{"getEvents", *m.GetEvents.QueueLimit, *m.GetEvents.MaxExecutionDuration},
 		{"getFeeStats", *m.GetFeeStats.QueueLimit, *m.GetFeeStats.MaxExecutionDuration},
+		{"sendTransaction", *m.SendTransaction.QueueLimit, *m.SendTransaction.MaxExecutionDuration},
+		{"simulateTransaction", *m.SimulateTransaction.QueueLimit, *m.SimulateTransaction.MaxExecutionDuration},
+		{"getLedgerEntries", *m.GetLedgerEntries.QueueLimit, *m.GetLedgerEntries.MaxExecutionDuration},
 	}
 	for _, mm := range methods {
 		if mm.queue < 1 {
@@ -174,7 +216,23 @@ func validateService(svc config.ServiceConfig) error {
 	if err := validatePaginatedMethods(m); err != nil {
 		return err
 	}
+	if err := validatePreflight(svc.Preflight); err != nil {
+		return err
+	}
 	return validateFeeWindows(svc.FeeStats)
+}
+
+// validatePreflight form-validates [service.preflight]. A zero worker count
+// means no goroutine ever picks a request up, and a zero queue size means the
+// pool is full the moment it is built — both reject every simulateTransaction.
+func validatePreflight(p config.PreflightConfig) error {
+	if *p.WorkerCount < 1 {
+		return errors.New("[service.preflight].worker_count must be >= 1")
+	}
+	if *p.WorkerQueueSize < 1 {
+		return errors.New("[service.preflight].worker_queue_size must be >= 1")
+	}
+	return nil
 }
 
 func validatePaginatedMethods(m config.MethodsConfig) error {

@@ -53,7 +53,7 @@ Every TOML leaf is also settable from the command line:
 - `--config` stays required — the file is the source of truth, flags are one-off overrides.
 - No environment variables.
 
-**[service]** — the JSON-RPC read-serving policy (#882; entirely dormant today — the read server arrives with #772, and #881 wires `[service.fee_stats]` into live ingestion). Key naming: camelCase only for the JSON-RPC method table names, snake_case elsewhere. Durations are strings (`"10s"`); any duration under 1ms is rejected (a bare TOML integer parses as nanoseconds).
+**[service]** — the JSON-RPC read-serving policy (#882; mostly dormant today — the read server arrives with #772, and #881 wires `[service.fee_stats]` into live ingestion; `[service.preflight]` already sizes the preflight worker pool at startup). Key naming: camelCase only for the JSON-RPC method table names, snake_case elsewhere. Durations are strings (`"10s"`); any duration under 1ms is rejected (a bare TOML integer parses as nanoseconds).
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -70,13 +70,22 @@ Every TOML leaf is also settable from the command line:
 | `classic_fee_window_ledgers` | `10` |
 | `soroban_inclusion_fee_window_ledgers` | `50` |
 
-**[service.methods.\<methodName\>]** — one table per served method (getHealth, getNetwork, getVersionInfo, getLatestLedger, getTransaction, getTransactions, getLedgers, getEvents, getFeeStats):
+**[service.methods.\<methodName\>]** — one table per served method (getHealth, getNetwork, getVersionInfo, getLatestLedger, getTransaction, getTransactions, getLedgers, getEvents, getFeeStats, sendTransaction, simulateTransaction, getLedgerEntries):
 
 - Every method: `queue_limit` and `max_execution_duration`. v1's defaults: 1000 / 5s, except getFeeStats's queue is 100, and getLedgers/getEvents get 10s.
+- The three captive-core-backed methods (#884) keep v1's values too: sendTransaction 500 / `"15s"`, simulateTransaction 100 / `"15s"`, getLedgerEntries 1000 / `"5s"`. The two 15s budgets are wider because both wait on work outside this process — core's own submission, and the Rust preflight library.
 - The three paginated methods (getTransactions, getLedgers, getEvents) add `max_items_per_response` / `default_items_per_response`. Two deliberate breaks from v1's page sizes (TODO: revisit under the v2 benchmarking epic): getEvents max is 1000 (the v2 API's spec constant, not v1's 10000), and getLedgers is 20/5 (one item is a full ledger's meta — megabytes each — so v1's 200/50 could produce >100MB responses).
 - getHealth adds `max_healthy_ledger_latency` (default `"30s"`).
 - Bare `queue_limit` / `max_execution_duration` keys directly on `[service.methods]` form an optional methods-wide default tier: per-method value → wide default → compiled default.
-- Not here: sendTransaction, simulateTransaction, getLedgerEntries and the preflight knobs — they arrive with the captive-core-endpoints work.
+- Not here: `friendbot_url`, which arrives with the getNetwork handler.
+
+**[service.preflight]** — the worker pool that runs simulateTransaction's preflights (the Rust libpreflight call). It sits under `[service]`, not under the simulateTransaction method table, for the same reason `[service.fee_stats]` does: it is a process-wide resource sized once at startup, not a per-request limit.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `worker_count` | uint | `NumCPU` | Concurrent preflights; >= 1. |
+| `worker_queue_size` | uint | `NumCPU` | Requests that may wait for a free worker before the pool rejects them; >= 1. |
+| `enable_debug` | bool | `true` | Detailed diagnostics in preflight errors. Costly to produce; v1 advises against it in production. The config schema's first bool — `leafKind`/`BindFlags`/`setLeaf`/`FlagOverrides` gained bool support with it. |
 
 **[retention]** — the two inputs to the retention floor; the effective floor is the higher of the two:
 
@@ -124,8 +133,18 @@ Every TOML leaf is also settable from the command line:
 |---|---|---|---|
 | `captive_core_config` | string | **required** | Path to the CaptiveStellarCore config file. Must define `NETWORK_PASSPHRASE`. |
 | `history_archive_urls` | []string | **required** | History-archive URLs for the SDK's archive client. Not derivable from the captive-core file, whose `[HISTORY.*]` entries are shell commands. |
-| `stellar_core_binary_path` | string | `stellar-core` on `PATH` | Path to the stellar-core binary. |
+| `stellar_core_binary_path` | string | `stellar-core` on `PATH` | Path to the stellar-core binary. Also what `getVersionInfo`'s captive-core version string is read from (`stellar-core version`, once at startup). |
 | `captive_core_storage_path` | string | `{default_data_dir}/captive-core` | Captive core's working directory. |
+| `core_http_port` | uint | `11626` | Core's admin HTTP port — sendTransaction's submission target. Also the base for `core_url`. |
+| `core_url` | string | `http://localhost:{core_http_port}` | Base URL transactions are submitted to. Set it only when core's admin server is reachable somewhere other than localhost. |
+| `core_request_timeout` | duration | `"2s"` | HTTP timeout for every request to either core server; >= 1ms. |
+| `core_http_query_port` | uint | `11628` | Core's high-performance query port, serving `/getledgerentry` for getLedgerEntries and for preflight's entry lookups. |
+| `core_http_query_thread_pool_size` | uint | `NumCPU` | Threads core's query server uses. |
+| `core_http_query_snapshot_ledgers` | uint | `4` | Recent ledgers core's query server keeps queryable snapshots of. |
+
+- The six `core_*` keys govern the HTTP surface of the same captive-core process the keys above configure, which is why they live here rather than under `[service]` (#884).
+- Both ports must be in `1..65535` and must differ from each other. Unlike v1, `0` is not accepted as "disable core's HTTP server": v2 always serves sendTransaction off the admin port and getLedgerEntries off the query port, so a disabled server is a broken deployment rather than a mode.
+- They are written into the **live** ingestion core's toml only. A no-lake backfill starts one bounded-replay core per chunk, in parallel, so a fixed port there would have every one of them contend on binding it — and nothing ever queries a backfill core.
 
 **[logging]** — optional `level` (`debug`/`info`/`warn`/`error`, default `info`) and `format` (`text`/`json`, default `text`).
 

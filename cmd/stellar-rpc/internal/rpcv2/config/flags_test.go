@@ -52,6 +52,15 @@ func TestBindFlags_LockstepWithTOMLSchema(t *testing.T) {
 		"service.methods.getLedgers.max_items_per_response",
 		"service.methods.getHealth.max_healthy_ledger_latency",
 		"service.methods.getFeeStats.max_execution_duration",
+		"service.methods.sendTransaction.queue_limit",
+		"service.methods.simulateTransaction.max_execution_duration",
+		"service.methods.getLedgerEntries.queue_limit",
+		"service.preflight.worker_count",
+		"service.preflight.enable_debug",
+		"ingestion.core_http_port",
+		"ingestion.core_url",
+		"ingestion.core_request_timeout",
+		"ingestion.core_http_query_port",
 	} {
 		assert.NotNil(t, fs.Lookup(name), "expected flag --%s", name)
 	}
@@ -112,6 +121,49 @@ func TestApplyFlags_OverridesFileValues(t *testing.T) {
 	assert.Equal(t, 3, *cfg.Backfill.Workers)
 	assert.Equal(t, []string{"https://a.example", "https://b.example"}, cfg.Ingestion.HistoryArchiveURLs)
 	assert.Equal(t, 7*time.Second, *cfg.Backfill.BSB.RetryWait)
+}
+
+func TestApplyFlags_BoolOverride(t *testing.T) {
+	// enable_debug defaults to true, so the only override worth testing is the
+	// one that turns it off — and it has to be spelled --flag=false, since a bare
+	// --flag sets a bool to true.
+	fs := newBoundFlagSet(t)
+	require.NoError(t, fs.Parse([]string{"--service.preflight.enable_debug=false"}))
+
+	cfg, err := DecodeConfig([]byte(minimalValidConfig))
+	require.NoError(t, err)
+	require.Nil(t, cfg.Service.Preflight.EnableDebug)
+	require.NoError(t, ApplyFlags(&cfg, fs))
+	cfg = cfg.WithDefaults()
+
+	assert.False(t, *cfg.Service.Preflight.EnableDebug)
+}
+
+func TestApplyFlags_BoolLeftAloneKeepsTheDefault(t *testing.T) {
+	fs := newBoundFlagSet(t)
+	require.NoError(t, fs.Parse(nil))
+
+	cfg, err := DecodeConfig([]byte(minimalValidConfig))
+	require.NoError(t, err)
+	require.NoError(t, ApplyFlags(&cfg, fs))
+	cfg = cfg.WithDefaults()
+
+	assert.True(t, *cfg.Service.Preflight.EnableDebug,
+		"the flag's own false default must not leak in when the user never set it")
+}
+
+func TestApplyFlags_CoreHTTPPortMovesTheDerivedURL(t *testing.T) {
+	fs := newBoundFlagSet(t)
+	require.NoError(t, fs.Parse([]string{"--ingestion.core_http_port=31626"}))
+
+	cfg, err := DecodeConfig([]byte(minimalValidConfig))
+	require.NoError(t, err)
+	require.NoError(t, ApplyFlags(&cfg, fs))
+	cfg = cfg.WithDefaults()
+
+	assert.Equal(t, uint(31626), *cfg.Ingestion.CoreHTTPPort)
+	assert.Equal(t, "http://localhost:31626", cfg.Ingestion.CoreURL,
+		"the URL is derived after flags are overlaid, so a port flag moves it")
 }
 
 func TestApplyFlags_MapFlagMergesPerKey(t *testing.T) {

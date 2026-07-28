@@ -71,10 +71,11 @@ retention_chunks = 0
 # -----------------------------------------------------------------------------
 # [service] — the JSON-RPC read-serving policy (issue #882)
 # -----------------------------------------------------------------------------
-# Dormant today: the v2 read server does not exist yet, and live ingestion
-# starts consuming [service.fee_stats] when issue #881 lands. Naming rule:
-# camelCase table keys only where the key IS a JSON-RPC method name;
-# snake_case elsewhere.
+# Mostly dormant today: the v2 read server does not exist yet, and live
+# ingestion starts consuming [service.fee_stats] when issue #881 lands.
+# [service.preflight] is already live — the daemon sizes its preflight worker
+# pool from it at startup. Naming rule: camelCase table keys only where the key
+# IS a JSON-RPC method name; snake_case elsewhere.
 [service]
 
 # Address the JSON-RPC server listens on.
@@ -107,8 +108,8 @@ soroban_inclusion_fee_window_ledgers = 50
 # field: explicit per-method value → methods-wide default → compiled default
 # (the values shown in the tables below, identical to v1's).
 [service.methods]
-#queue_limit = 200              # default queue_limit for all nine methods
-#max_execution_duration = "8s"  # default execution budget for all nine methods
+#queue_limit = 200              # default queue_limit for every method below
+#max_execution_duration = "8s"  # default execution budget for every method below
 
 # Each method's table, keyed by the method's wire name:
 #   queue_limit             — max outstanding requests for this method
@@ -167,10 +168,41 @@ default_items_per_response = 100
 queue_limit = 100
 max_execution_duration = "5s"
 
-# NOT here (by design): sendTransaction, simulateTransaction, getLedgerEntries
-# and the preflight worker settings — those methods are captive-core-backed
-# and arrive with the captive-core-endpoints work. friendbot_url arrives with
-# the getNetwork handler.
+# The three captive-core-backed methods. They read CURRENT ledger state from
+# captive core (the bucket list) over the HTTP ports set in [ingestion] below,
+# not from this daemon's stores. sendTransaction and simulateTransaction get
+# v1's wider 15s budget because each waits on work outside this process — core's
+# own transaction submission, and the Rust preflight library.
+
+[service.methods.sendTransaction]
+queue_limit = 500
+max_execution_duration = "15s"
+
+[service.methods.simulateTransaction]
+queue_limit = 100
+max_execution_duration = "15s"
+
+[service.methods.getLedgerEntries]
+queue_limit = 1000
+max_execution_duration = "5s"
+
+# --- The preflight worker pool (simulateTransaction) -------------------------
+# Preflights run the Rust libpreflight in a pool of goroutines, sized once at
+# startup. The pool lives here rather than under simulateTransaction for the
+# same reason [service.fee_stats] does: it is a process-wide resource, not a
+# per-request limit.
+[service.preflight]
+
+# Concurrent preflights, and how many requests may wait for a free worker
+# before the pool rejects them; both >= 1. Default: the CPU count.
+#worker_count = 8
+#worker_queue_size = 8
+
+# Include detailed diagnostics in preflight errors. Costly to produce — v1
+# advises against it in production. Default true.
+enable_debug = true
+
+# NOT here (by design): friendbot_url, which arrives with the getNetwork handler.
 
 # -----------------------------------------------------------------------------
 # [backfill] — bulk history download into local storage
@@ -225,7 +257,7 @@ retry_wait = "5s"    # pause between retries of one object download
 # core-side — this differs from v1, where NETWORK_PASSPHRASE was an RPC config
 # key of its own. Here the daemon READS the passphrase back from the file
 # below at startup (it must define NETWORK_PASSPHRASE). v1's `network`
-# convenience macro and the captive-core HTTP-port knobs do not exist in v2.
+# convenience macro does not exist in v2.
 [ingestion]
 
 # REQUIRED for live ingestion. Path to the stellar-core config used by captive
@@ -244,6 +276,37 @@ history_archive_urls = ["https://history.stellar.org/prd/core-live/core_live_001
 
 # Captive core's working/bucket directory. Default: {default_data_dir}/captive-core.
 #captive_core_storage_path = ""
+
+# --- Core's HTTP surface ------------------------------------------------------
+# The keys below govern the two HTTP servers the captive-core process above runs,
+# and they are what the three captive-core-backed methods talk to:
+#
+#   * the admin server (core_http_port) accepts transaction submissions —
+#     sendTransaction's only path to the network;
+#   * the query server (core_http_query_port) answers ledger-entry lookups for
+#     getLedgerEntries and for every entry a preflight touches.
+#
+# Both ports must be free on this host and must differ from each other. They are
+# written into the LIVE ingestion core's config only: the bounded replay cores a
+# no-lake backfill runs are started in parallel, so a fixed port would have them
+# all fight over binding it.
+
+core_http_port = 11626
+core_http_query_port = 11628
+
+# Where transactions are submitted. Default: http://localhost:{core_http_port},
+# so setting core_http_port alone is enough. Set this only if core's admin
+# server is reachable somewhere other than localhost.
+#core_url = "http://localhost:11626"
+
+# Timeout for every request to either server above.
+core_request_timeout = "2s"
+
+# Threads core's query server uses (default: the CPU count), and how many recent
+# ledgers it keeps queryable snapshots of. Leave snapshot_ledgers alone unless
+# you know what core does with it.
+#core_http_query_thread_pool_size = 8
+core_http_query_snapshot_ledgers = 4
 
 # -----------------------------------------------------------------------------
 # [logging]

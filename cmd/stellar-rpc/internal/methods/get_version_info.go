@@ -18,11 +18,12 @@ func NewGetVersionInfoHandler(
 	ledgerReader store.LedgerReader,
 	daemon host.Daemon,
 ) jrpc2.Handler {
-	core := daemon.GetCore()
-
 	coreHandler := func(ctx context.Context, _ protocol.GetVersionInfoRequest,
 	) (protocol.GetVersionInfoResponse, error) {
-		captiveCoreVersion := core.GetCoreVersion()
+		// Asked per request, not once at construction: the daemon learns the
+		// version when it starts stellar-core, which is after the handlers are
+		// built, so a value captured here would always be empty.
+		captiveCoreVersion := daemon.CoreVersion()
 		protocolVersion, err := getProtocolVersion(ctx, ledgerReader)
 		if err != nil {
 			logger.WithError(err).Error("failed to fetch protocol version")

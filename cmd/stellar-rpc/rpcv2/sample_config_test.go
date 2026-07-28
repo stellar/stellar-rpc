@@ -35,6 +35,19 @@ func TestSampleConfig_ParsesStrict(t *testing.T) {
 	assert.Equal(t, config.DefaultMaxHealthyLedgerLatency, *cfg.Service.Methods.GetHealth.MaxHealthyLedgerLatency)
 	assert.Equal(t, 30*time.Second, *cfg.Service.Methods.GetHealth.MaxHealthyLedgerLatency)
 
+	assert.Equal(t, config.DefaultSendTransactionQueueLimit, *cfg.Service.Methods.SendTransaction.QueueLimit)
+	assert.Equal(t, config.DefaultCoreMethodMaxExecutionDuration,
+		*cfg.Service.Methods.SimulateTransaction.MaxExecutionDuration)
+	assert.Equal(t, config.DefaultMethodQueueLimit, *cfg.Service.Methods.GetLedgerEntries.QueueLimit)
+	assert.True(t, *cfg.Service.Preflight.EnableDebug)
+
+	assert.Equal(t, config.DefaultCoreHTTPPort, *cfg.Ingestion.CoreHTTPPort)
+	assert.Equal(t, config.DefaultCoreHTTPQueryPort, *cfg.Ingestion.CoreHTTPQueryPort)
+	assert.Equal(t, config.DefaultCoreRequestTimeout, *cfg.Ingestion.CoreRequestTimeout)
+	assert.Equal(t, config.DefaultCoreHTTPQuerySnapshotLedgers, *cfg.Ingestion.CoreHTTPQuerySnapshotLedgers)
+	assert.Equal(t, "http://localhost:11626", cfg.Ingestion.CoreURL,
+		"the sample leaves core_url commented out, so it derives from core_http_port")
+
 	assert.Equal(t, uint32(backfill.DefaultBSBBufferSize), *cfg.Backfill.BSB.BufferSize)
 	assert.Equal(t, uint32(backfill.DefaultBSBNumWorkers), *cfg.Backfill.BSB.NumWorkers)
 	assert.Equal(t, uint32(backfill.DefaultBSBMaxRetries), *cfg.Backfill.BSB.MaxRetries)

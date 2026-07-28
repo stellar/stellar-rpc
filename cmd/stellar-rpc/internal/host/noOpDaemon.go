@@ -5,7 +5,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	proto "github.com/stellar/go-stellar-sdk/protocols/stellarcore"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
@@ -16,7 +15,6 @@ type NoOpDaemon struct {
 	metricsRegistry  *prometheus.Registry
 	metricsNamespace string
 	coreClient       noOpCoreClient
-	core             *ledgerbackend.CaptiveStellarCore
 }
 
 func MakeNoOpDaemon() *NoOpDaemon {
@@ -43,8 +41,10 @@ func (d *NoOpDaemon) FastCoreClient() FastCoreClient {
 	return d.coreClient
 }
 
-func (d *NoOpDaemon) GetCore() *ledgerbackend.CaptiveStellarCore {
-	return d.core
+// CoreVersion reports no version: there is no stellar-core binary behind a
+// no-op daemon.
+func (d *NoOpDaemon) CoreVersion() string {
+	return ""
 }
 
 type noOpCoreClient struct{}

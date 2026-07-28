@@ -14,6 +14,11 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 )
 
+// wantNanosecondHint is the fragment every sub-millisecond-duration rejection
+// carries: a bare TOML integer decodes as nanoseconds, so the error tells the
+// operator to write the string form instead.
+const wantNanosecondHint = "nanoseconds"
+
 // validCfg builds a valid Config; callers mutate one field to drive a rejection.
 // Defaults are applied, matching production (validateConfig's contract is a
 // post-WithDefaults config — every [service] pointer non-nil).
@@ -159,7 +164,7 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 			// The nanosecond trap: a bare TOML integer 10 decodes as 10ns.
 			"sub-millisecond duration",
 			func(c *config.Config) { c.Service.Methods.GetEvents.MaxExecutionDuration = durPtr(10) },
-			"nanoseconds",
+			wantNanosecondHint,
 		},
 		{
 			"zero global execution duration",
@@ -188,6 +193,31 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 			"zero fee window",
 			func(c *config.Config) { c.Service.FeeStats.SorobanInclusionFeeWindowLedgers = uint32Ptr(0) },
 			"soroban_inclusion_fee_window_ledgers",
+		},
+		{
+			"zero sendTransaction queue_limit",
+			func(c *config.Config) { c.Service.Methods.SendTransaction.QueueLimit = uintPtr(0) },
+			"[service.methods.sendTransaction].queue_limit",
+		},
+		{
+			"sub-millisecond simulateTransaction duration",
+			func(c *config.Config) { c.Service.Methods.SimulateTransaction.MaxExecutionDuration = durPtr(15) },
+			wantNanosecondHint,
+		},
+		{
+			"zero getLedgerEntries queue_limit",
+			func(c *config.Config) { c.Service.Methods.GetLedgerEntries.QueueLimit = uintPtr(0) },
+			"[service.methods.getLedgerEntries].queue_limit",
+		},
+		{
+			"zero preflight worker_count",
+			func(c *config.Config) { c.Service.Preflight.WorkerCount = uintPtr(0) },
+			"[service.preflight].worker_count",
+		},
+		{
+			"zero preflight worker_queue_size",
+			func(c *config.Config) { c.Service.Preflight.WorkerQueueSize = uintPtr(0) },
+			"[service.preflight].worker_queue_size",
 		},
 	}
 	for _, tc := range tests {
@@ -225,7 +255,7 @@ func TestValidateConfig_RejectsMalformedBSB(t *testing.T) {
 			// The nanosecond trap again: retry_wait = 10 decodes as 10ns.
 			"sub-millisecond retry_wait",
 			func(c *config.Config) { c.Backfill.BSB.RetryWait = durPtr(10) },
-			"nanoseconds",
+			wantNanosecondHint,
 		},
 		{
 			"num_workers above buffer_size",
@@ -234,6 +264,65 @@ func TestValidateConfig_RejectsMalformedBSB(t *testing.T) {
 				c.Backfill.BSB.NumWorkers = uint32Ptr(50)
 			},
 			"num_workers",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cat, _ := testCatalog(t)
+			cfg := validCfg(4, 3, "genesis")
+			tc.mutate(&cfg)
+			_, err := callValidate(t, cfg, cat, downTip())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+func TestValidateConfig_RejectsMalformedCoreHTTP(t *testing.T) {
+	uintPtr := func(v uint) *uint { return &v }
+	durPtr := func(v time.Duration) *time.Duration { return &v }
+
+	tests := []struct {
+		name   string
+		mutate func(*config.Config)
+		want   string
+	}{
+		{
+			// v1 read 0 as "don't run core's HTTP server"; v2 serves
+			// sendTransaction off it, so 0 is a broken deployment.
+			"zero core_http_port",
+			func(c *config.Config) { c.Ingestion.CoreHTTPPort = uintPtr(0) },
+			"[ingestion].core_http_port",
+		},
+		{
+			// The captive-core toml carries these as uint16.
+			"core_http_query_port above 65535",
+			func(c *config.Config) { c.Ingestion.CoreHTTPQueryPort = uintPtr(70000) },
+			"[ingestion].core_http_query_port",
+		},
+		{
+			"thread pool above 65535",
+			func(c *config.Config) { c.Ingestion.CoreHTTPQueryThreadPoolSize = uintPtr(65536) },
+			"core_http_query_thread_pool_size",
+		},
+		{
+			"zero snapshot ledgers",
+			func(c *config.Config) { c.Ingestion.CoreHTTPQuerySnapshotLedgers = uintPtr(0) },
+			"core_http_query_snapshot_ledgers",
+		},
+		{
+			"both servers on one port",
+			func(c *config.Config) {
+				c.Ingestion.CoreHTTPPort = uintPtr(11626)
+				c.Ingestion.CoreHTTPQueryPort = uintPtr(11626)
+			},
+			"cannot bind one port twice",
+		},
+		{
+			// The nanosecond trap once more: core_request_timeout = 2 is 2ns.
+			"sub-millisecond core_request_timeout",
+			func(c *config.Config) { c.Ingestion.CoreRequestTimeout = durPtr(2) },
+			wantNanosecondHint,
 		},
 	}
 	for _, tc := range tests {

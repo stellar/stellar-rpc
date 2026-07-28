@@ -227,6 +227,70 @@ func TestParseConfig_ServiceDefaults(t *testing.T) {
 	assert.Equal(t, DefaultGetEventsDefaultItemsPerResponse, *m.GetEvents.DefaultItemsPerResponse)
 	assert.Equal(t, DefaultGetTransactionsMaxItemsPerResponse, *m.GetTransactions.MaxItemsPerResponse)
 	assert.Equal(t, DefaultGetLedgersMaxItemsPerResponse, *m.GetLedgers.MaxItemsPerResponse)
+
+	assert.Equal(t, DefaultSendTransactionQueueLimit, *m.SendTransaction.QueueLimit)
+	assert.Equal(t, DefaultCoreMethodMaxExecutionDuration, *m.SendTransaction.MaxExecutionDuration)
+	assert.Equal(t, DefaultSimulateTransactionQueueLimit, *m.SimulateTransaction.QueueLimit)
+	assert.Equal(t, DefaultCoreMethodMaxExecutionDuration, *m.SimulateTransaction.MaxExecutionDuration)
+	assert.Equal(t, DefaultMethodQueueLimit, *m.GetLedgerEntries.QueueLimit)
+	assert.Equal(t, DefaultMethodMaxExecutionDuration, *m.GetLedgerEntries.MaxExecutionDuration)
+}
+
+func TestParseConfig_PreflightDefaults(t *testing.T) {
+	cfg, err := ParseConfig([]byte(minimalValidConfig))
+	require.NoError(t, err)
+
+	p := cfg.Service.Preflight
+	assert.Equal(t, NumCPU(), *p.WorkerCount)
+	assert.Equal(t, NumCPU(), *p.WorkerQueueSize)
+	assert.True(t, *p.EnableDebug)
+}
+
+func TestParseConfig_PreflightExplicitValues(t *testing.T) {
+	cfg, err := ParseConfig([]byte(minimalValidConfig + `
+[service.preflight]
+worker_count = 3
+worker_queue_size = 7
+enable_debug = false
+`))
+	require.NoError(t, err)
+
+	p := cfg.Service.Preflight
+	assert.Equal(t, uint(3), *p.WorkerCount)
+	assert.Equal(t, uint(7), *p.WorkerQueueSize)
+	assert.False(t, *p.EnableDebug, "an explicit false must survive the true default")
+}
+
+func TestParseConfig_CoreHTTPDefaults(t *testing.T) {
+	cfg, err := ParseConfig([]byte(minimalValidConfig))
+	require.NoError(t, err)
+
+	ing := cfg.Ingestion
+	assert.Equal(t, DefaultCoreHTTPPort, *ing.CoreHTTPPort)
+	assert.Equal(t, "http://localhost:11626", ing.CoreURL)
+	assert.Equal(t, DefaultCoreRequestTimeout, *ing.CoreRequestTimeout)
+	assert.Equal(t, DefaultCoreHTTPQueryPort, *ing.CoreHTTPQueryPort)
+	assert.Equal(t, NumCPU(), *ing.CoreHTTPQueryThreadPoolSize)
+	assert.Equal(t, DefaultCoreHTTPQuerySnapshotLedgers, *ing.CoreHTTPQuerySnapshotLedgers)
+}
+
+func TestParseConfig_CoreURLFollowsCoreHTTPPort(t *testing.T) {
+	cfg, err := ParseConfig([]byte(minimalValidConfig + "\ncore_http_port = 21626\n"))
+	require.NoError(t, err)
+
+	assert.Equal(t, "http://localhost:21626", cfg.Ingestion.CoreURL,
+		"moving the admin port alone must move the submission URL with it")
+}
+
+func TestParseConfig_ExplicitCoreURLWins(t *testing.T) {
+	cfg, err := ParseConfig([]byte(minimalValidConfig + `
+core_http_port = 21626
+core_url = "http://core.internal:8080"
+`))
+	require.NoError(t, err)
+
+	assert.Equal(t, "http://core.internal:8080", cfg.Ingestion.CoreURL)
+	assert.Equal(t, uint(21626), *cfg.Ingestion.CoreHTTPPort)
 }
 
 func TestParseConfig_MethodsCascade(t *testing.T) {
@@ -247,6 +311,11 @@ func TestParseConfig_MethodsCascade(t *testing.T) {
 		// getLedgers' duration was not set per-method, so the wide tier wins over
 		// its compiled 10s default.
 		assert.Equal(t, 8*time.Second, *m.GetLedgers.MaxExecutionDuration)
+		// Same for the captive-core-backed methods: the wide tier beats their
+		// compiled 500/15s and 100/15s.
+		assert.Equal(t, uint(200), *m.SendTransaction.QueueLimit)
+		assert.Equal(t, 8*time.Second, *m.SimulateTransaction.MaxExecutionDuration)
+		assert.Equal(t, uint(200), *m.GetLedgerEntries.QueueLimit)
 	})
 
 	t.Run("no wide tier: compiled per-method defaults", func(t *testing.T) {
