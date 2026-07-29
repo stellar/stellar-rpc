@@ -34,7 +34,6 @@ type blasterEnv struct {
 	CatchupTimeout time.Duration `env:"CATCHUP_TIMEOUT" envDefault:"60m"`
 	BudgetMinutes  int           `env:"BUDGET_MINUTES"`
 	BlasterRepo    string        `env:"BLASTER_REPO"    envDefault:"stellar/stellar-rpc-blaster"`
-	BlasterRef     string        `env:"BLASTER_REF"     envDefault:"dev"`
 }
 
 // instantiate is the instance's blast task: it receives the chained peer's serving
@@ -62,7 +61,7 @@ func instantiate(ctx context.Context) error {
 
 	// fetch + build overlap the target box's catchup
 	blasterDir := filepath.Join(leg.WorkDir, "stellar-rpc-blaster")
-	blasterBin, blasterSHA, err := fetchBlaster(ctx, blasterDir, cfg.BlasterRepo, cfg.BlasterRef)
+	blasterBin, blasterSHA, err := fetchBlaster(ctx, blasterDir, cfg.BlasterRepo)
 	if err != nil {
 		return leg.Bail("%v", err)
 	}
@@ -118,21 +117,15 @@ func instantiate(ctx context.Context) error {
 	return nil
 }
 
-// fetchBlaster checks-out and builds stellar-rpc-blaster
-func fetchBlaster(ctx context.Context, dir, repo, ref string) (string, string, error) {
-	logger.Infof("fetching stellar-rpc-blaster (%s@%s)", repo, ref)
+// fetchBlaster clones and builds stellar-rpc-blaster at dev HEAD
+func fetchBlaster(ctx context.Context, dir, repo string) (string, string, error) {
+	logger.Infof("fetching stellar-rpc-blaster (%s@dev)", repo)
 	if err := os.RemoveAll(dir); err != nil {
 		return "", "", err
 	}
-	for _, args := range [][]string{
-		{"init", "-q", dir},
-		{"-C", dir, "remote", "add", "origin", "https://github.com/" + repo + ".git"},
-		{"-C", dir, "fetch", "--depth", "1", "origin", ref},
-		{"-C", dir, "checkout", "-q", "--detach", "FETCH_HEAD"},
-	} {
-		if err := harness.RunStreaming(ctx, "", nil, 20, "git", args...); err != nil {
-			return "", "", fmt.Errorf("git %s failed: %w", args[0], err)
-		}
+	if err := harness.RunStreaming(ctx, "", nil, 20, "git", "clone", "-q", "--depth", "1",
+		"--branch", "dev", "https://github.com/"+repo+".git", dir); err != nil {
+		return "", "", fmt.Errorf("git clone failed: %w", err)
 	}
 	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "HEAD").Output()
 	if err != nil {
