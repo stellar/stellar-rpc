@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
@@ -62,6 +63,39 @@ func Env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// RequireEnv returns the values of keys in order, erroring with every unset one.
+func RequireEnv(keys ...string) ([]string, error) {
+	vals := make([]string, len(keys))
+	var missing []string
+	for i, k := range keys {
+		if vals[i] = os.Getenv(k); vals[i] == "" {
+			missing = append(missing, k)
+		}
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("missing required env: %s", strings.Join(missing, ", "))
+	}
+	return vals, nil
+}
+
+// BootDeadline returns the instant a box-side runner should bail by: budget
+// minutes after box boot, minus margin. ok is false when the budget is unset.
+func BootDeadline(budgetMinutes int, margin time.Duration) (time.Time, bool) {
+	if budgetMinutes <= 0 {
+		return time.Time{}, false
+	}
+	up, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		return time.Time{}, false
+	}
+	var uptimeSecs float64
+	if _, err := fmt.Sscanf(string(up), "%f", &uptimeSecs); err != nil {
+		return time.Time{}, false
+	}
+	boot := time.Now().Add(-time.Duration(uptimeSecs * float64(time.Second)))
+	return boot.Add(time.Duration(budgetMinutes)*time.Minute - margin), true
 }
 
 // appendOutputs appends lines to the GitHub Actions step-output file.
