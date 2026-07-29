@@ -77,7 +77,6 @@ func NewEventReader(log *log.Entry, db db.SessionInterface, passphrase string) E
 	return &eventHandler{log: log, db: db, passphrase: passphrase}
 }
 
-//nolint:gocognit
 func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 	txCount := lcm.CountTransactions()
 
@@ -123,18 +122,9 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 	//  - Post-application events have a TOID with { ledger seq, -1, 0 }
 	// where -1 is actually the largest possible uint32.
 	//
-	var beforeIndex, afterIndex uint32
-
-	for {
-		var tx ingest.LedgerTransaction
-		tx, err = txReader.Read()
-		if errors.Is(err, io.EOF) {
-			err = nil
-			break
-		} else if err != nil {
-			return err
-		}
-
+	var indices txEventIndices
+	var tx ingest.LedgerTransaction
+	for tx, err = txReader.Read(); err == nil; tx, err = txReader.Read() {
 		// Note that we do not skip failed transactions because they still
 		// contain events (e.g., fees are paid regardless of success).
 		var allEvents ingest.TransactionEvents
@@ -146,54 +136,24 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 		opEvents := allEvents.OperationEvents
 		txEvents := allEvents.TransactionEvents
 
-		var afterTxIndex uint32
+		indices.afterTx = 0 // post-tx events number from 0 within each tx
 
 		// First, gather the transaction-level application events, tracking
 		// indices individually for each category.
 		for _, event := range txEvents {
-			insertedEvent := dbEvent{
+			cursor, cursorErr := indices.cursor(event.Stage, lcm.LedgerSequence(), tx.Index)
+			if cursorErr != nil {
+				return cursorErr
+			}
+			eventHandler.pending = append(eventHandler.pending, dbEvent{
 				TxHash: tx.Hash,
 				Event: xdr.DiagnosticEvent{
 					InSuccessfulContractCall: tx.Successful(),
 					Event:                    event.Event,
 				}, // fake diagnostic event since that's what the DB expects
+				Cursor:    cursor.String(),
 				CloseTime: lcm.LedgerCloseTime(),
-			}
-
-			switch event.Stage {
-			case xdr.TransactionEventStageTransactionEventStageBeforeAllTxs:
-				insertedEvent.Cursor = protocol.Cursor{
-					Ledger: lcm.LedgerSequence(),
-					Tx:     0, // min value
-					Op:     0,
-					Event:  beforeIndex,
-				}.String()
-				beforeIndex++
-
-			case xdr.TransactionEventStageTransactionEventStageAfterAllTxs:
-				insertedEvent.Cursor = protocol.Cursor{
-					Ledger: lcm.LedgerSequence(),
-					Tx:     toid.TransactionMask, // max value
-					Op:     0,
-					Event:  afterIndex,
-				}.String()
-				afterIndex++
-
-			case xdr.TransactionEventStageTransactionEventStageAfterTx:
-				insertedEvent.Cursor = protocol.Cursor{
-					Ledger: lcm.LedgerSequence(),
-					Tx:     tx.Index,           // matches op event list
-					Op:     toid.OperationMask, // max value, post-ops
-					Event:  afterTxIndex,
-				}.String()
-				afterTxIndex++
-
-			default:
-				err = fmt.Errorf("unhandled event phase: %s", event.Stage.String())
-				return err
-			}
-
-			eventHandler.pending = append(eventHandler.pending, insertedEvent)
+			})
 		}
 
 		// Then, gather all of the operation events.
@@ -224,8 +184,39 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 			}
 		}
 	}
-
+	if !errors.Is(err, io.EOF) {
+		return err
+	}
 	return nil
+}
+
+// txEventIndices tracks per-stage counters for a ledger's transaction-level
+// events.
+type txEventIndices struct{ beforeAll, afterAll, afterTx uint32 }
+
+// cursor returns the cursor for a transaction-level event, advancing its
+// stage's counter.
+func (indices *txEventIndices) cursor(
+	stage xdr.TransactionEventStage, ledgerSeq, txIndex uint32,
+) (protocol.Cursor, error) {
+	cursor := protocol.Cursor{Ledger: ledgerSeq} // Tx 0 = min value
+	switch stage {
+	case xdr.TransactionEventStageTransactionEventStageBeforeAllTxs:
+		cursor.Event = indices.beforeAll
+		indices.beforeAll++
+	case xdr.TransactionEventStageTransactionEventStageAfterAllTxs:
+		cursor.Tx = toid.TransactionMask // max value
+		cursor.Event = indices.afterAll
+		indices.afterAll++
+	case xdr.TransactionEventStageTransactionEventStageAfterTx:
+		cursor.Tx = txIndex            // matches op event list
+		cursor.Op = toid.OperationMask // max value, post-ops
+		cursor.Event = indices.afterTx
+		indices.afterTx++
+	default:
+		return protocol.Cursor{}, fmt.Errorf("unhandled event phase: %s", stage.String())
+	}
+	return cursor, nil
 }
 
 func (eventHandler *eventHandler) flush(n int) error {

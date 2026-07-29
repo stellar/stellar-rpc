@@ -553,39 +553,12 @@ func (w writeTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta, durationMetrics map
 	ledgerSeq := ledgerCloseMeta.LedgerSequence()
 	ledgerCloseTime := ledgerCloseMeta.LedgerCloseTime()
 
-	flushStart := time.Now()
-	if err := w.txWriter.flushPending(); err != nil {
+	if err := w.flushWriters(durationMetrics); err != nil {
 		return err
-	}
-	if err := w.eventWriter.flushPending(); err != nil {
-		return err
-	}
-	if durationMetrics != nil {
-		durationMetrics["flush"] = time.Since(flushStart)
 	}
 
-	startTime := time.Now()
-	if err := w.ledgerWriter.trimLedgers(ledgerSeq, w.historyRetentionWindow); err != nil {
+	if err := w.trimTables(ledgerSeq, durationMetrics); err != nil {
 		return err
-	}
-	if durationMetrics != nil {
-		durationMetrics["trim_ledgers"] = time.Since(startTime)
-	}
-
-	startTime = time.Now()
-	if err := w.txWriter.trimTransactions(ledgerSeq, w.historyRetentionWindow); err != nil {
-		return err
-	}
-	if durationMetrics != nil {
-		durationMetrics["trim_transactions"] = time.Since(startTime)
-	}
-
-	startTime = time.Now()
-	if err := w.eventWriter.trimEvents(ledgerSeq, w.historyRetentionWindow); err != nil {
-		return err
-	}
-	if durationMetrics != nil {
-		durationMetrics["trim_events"] = time.Since(startTime)
 	}
 
 	// We need to make the cache update atomic with the transaction commit.
@@ -616,7 +589,7 @@ func (w writeTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta, durationMetrics map
 		}
 		return nil
 	}
-	startTime = time.Now()
+	startTime := time.Now()
 	if err := commitAndUpdateCache(); err != nil {
 		return err
 	}
@@ -636,6 +609,47 @@ func (w writeTx) Rollback() error {
 		return nil
 	}
 	return err
+}
+
+func (w writeTx) flushWriters(durationMetrics map[string]time.Duration) error {
+	flushStart := time.Now()
+	if err := w.txWriter.flushPending(); err != nil {
+		return err
+	}
+	if err := w.eventWriter.flushPending(); err != nil {
+		return err
+	}
+	if durationMetrics != nil {
+		durationMetrics["flush"] = time.Since(flushStart)
+	}
+	return nil
+}
+
+func (w writeTx) trimTables(ledgerSeq uint32, durationMetrics map[string]time.Duration) error {
+	startTime := time.Now()
+	if err := w.ledgerWriter.trimLedgers(ledgerSeq, w.historyRetentionWindow); err != nil {
+		return err
+	}
+	if durationMetrics != nil {
+		durationMetrics["trim_ledgers"] = time.Since(startTime)
+	}
+
+	startTime = time.Now()
+	if err := w.txWriter.trimTransactions(ledgerSeq, w.historyRetentionWindow); err != nil {
+		return err
+	}
+	if durationMetrics != nil {
+		durationMetrics["trim_transactions"] = time.Since(startTime)
+	}
+
+	startTime = time.Now()
+	if err := w.eventWriter.trimEvents(ledgerSeq, w.historyRetentionWindow); err != nil {
+		return err
+	}
+	if durationMetrics != nil {
+		durationMetrics["trim_events"] = time.Since(startTime)
+	}
+	return nil
 }
 
 func runSQLMigrations(db *sql.DB, dialect string) error {
