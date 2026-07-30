@@ -8,10 +8,43 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
+
+// TestPendingDeletions_ColdArtifactDeferred pins that a pruned cold artifact is
+// demoted (marked pruning) during the stage but its file survives until the
+// end-of-run destroy — the design's "demote now, delete at end of run" split.
+func TestPendingDeletions_ColdArtifactDeferred(t *testing.T) {
+	cat, _ := smallTxHashIndexCatalog(t, 1)
+	c := chunk.ID(0)
+	freezeKinds(t, cat, c, geometry.KindLedgers)
+	writeArtifact(t, cat.Layout().LedgerPackPath(c))
+	ref := catalog.ArtifactRef{Chunk: c, Kind: geometry.KindLedgers, State: geometry.StateFrozen}
+
+	var pending pendingDeletions
+	require.NoError(t, pending.demoteChunkArtifacts(cat, []catalog.ArtifactRef{ref}))
+
+	// After demote: key is pruning, but the file is still on disk (destroy deferred).
+	st, err := cat.State(c, geometry.KindLedgers)
+	require.NoError(t, err)
+	assert.Equal(t, geometry.StatePruning, st, "demote marks pruning")
+	assert.FileExists(t, cat.Layout().LedgerPackPath(c), "file survives until end-of-run destroy")
+
+	// End of run: file and key are gone.
+	pending.destroyAll(context.Background(), lifecycleTestConfig(t, cat, 0))
+	st, err = cat.State(c, geometry.KindLedgers)
+	require.NoError(t, err)
+	assert.Equal(t, geometry.State(""), st, "key destroyed at end of run")
+	assert.NoFileExists(t, cat.Layout().LedgerPackPath(c), "file destroyed at end of run")
+}
 
 // tickMetricsRecorder counts the two gauges the lifecycle tick could touch, to pin
 // which one it owns. Embeds NopMetrics for every other signal (Discard/Prune/etc.).
@@ -141,9 +174,9 @@ func TestRunLifecycleTick_DiscardGatedOnIndexCoverage(t *testing.T) {
 	// txhash is frozen, ledgers/events frozen, but the window has no FROZEN coverage
 	// yet => indexCovers(0) is false => NOT discarded (still needed for lookups via
 	// its .bin/hot DB until the index folds it in).
-	ops, err := eligibleDiscardOps(cat, floorFor(t, cfg, lastChunk.LastLedger()), lastChunk)
+	chunks, err := eligibleDiscardChunks(cat, floorFor(t, cfg, lastChunk.LastLedger()), lastChunk)
 	require.NoError(t, err)
-	require.Empty(t, ops, "no index coverage yet: the hot DB stays")
+	require.Empty(t, chunks, "no index coverage yet: the hot DB stays")
 
 	// Now finalize the window's index so it covers chunk 0 (terminal needs chunk
 	// 1's .bin too; build a non-terminal-but-covering frozen coverage [0,0]).
@@ -152,10 +185,14 @@ func TestRunLifecycleTick_DiscardGatedOnIndexCoverage(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, covered)
 
-	ops, err = eligibleDiscardOps(cat, floorFor(t, cfg, lastChunk.LastLedger()), lastChunk)
+	chunks, err = eligibleDiscardChunks(cat, floorFor(t, cfg, lastChunk.LastLedger()), lastChunk)
 	require.NoError(t, err)
-	require.Len(t, ops, 1, "covered + nothing pending => discard eligible")
-	require.NoError(t, ops[0]())
+	require.Equal(t, []chunk.ID{0}, chunks, "covered + nothing pending => discard eligible")
+
+	// Demote then destroy, as a run does across its discard stage and its end.
+	var pending pendingDeletions
+	require.NoError(t, pending.demoteHotChunk(cfg.Registry, cat, 0))
+	pending.destroyAll(context.Background(), cfg)
 
 	has, err := hotKeyExists(cat, 0)
 	require.NoError(t, err)
@@ -219,11 +256,12 @@ func TestRunLifecycleTick_PrunesTransientIndexDebris(t *testing.T) {
 	require.NoError(t, err)
 
 	// Nothing durable and no hot keys ⇒ through sits at the pre-genesis sentinel.
-	ops, weights, err := eligiblePruneOps(cat, floorFor(t, cfg, chunk.PreGenesisLedger))
+	idxCovs, chunkRefs, err := eligiblePruneTargets(cat, floorFor(t, cfg, chunk.PreGenesisLedger))
 	require.NoError(t, err)
-	require.Len(t, ops, 1, "the freezing debris is swept")
-	require.Equal(t, []int{1}, weights, "one index artifact swept")
-	require.NoError(t, ops[0]())
+	require.Len(t, idxCovs, 1, "the freezing debris is swept")
+	require.Empty(t, chunkRefs, "no chunk-family debris")
+	require.NoError(t, cat.DemoteTxHashIndexKey(idxCovs[0]))
+	require.NoError(t, cat.DestroyTxHashIndexKey(idxCovs[0]))
 
 	covs, err := cat.AllTxHashIndexKeys()
 	require.NoError(t, err)
@@ -252,4 +290,110 @@ func TestRunLifecycleTick_FailureReturnsError(t *testing.T) {
 
 	err := runLifecycle(context.Background(), cfg, cat, 0) // plan range [0,0], the failing build
 	require.Error(t, err, "a genuine op failure surfaces up the call stack")
+}
+
+// TestRunLifecycleTick_FailedFreezeDoesNotWedgeReclaim pins stage independence:
+// stage 1 fails (the same unproducible chunk-0 build as FailureReturnsError) and
+// the error surfaces, but the prune scan and the end-of-run destroys run anyway,
+// reclaiming a demoted artifact a "prior run" left behind. Without this, a
+// persistently failing freeze (a full disk is the sharp case) would also wedge
+// the very reclamation that could clear it.
+func TestRunLifecycleTick_FailedFreezeDoesNotWedgeReclaim(t *testing.T) {
+	cat, _ := smallTxHashIndexCatalog(t, 1)
+	cfg := lifecycleTestConfig(t, cat, 0)
+	makeReadyHotDirNoData(t, cat, 1)           // ready live chunk 1 => chunk 0 complete
+	require.NoError(t, cat.PutHotTransient(0)) // chunk 0 unproducible: stage 1 fails
+
+	// A demoted cold artifact from a prior run: "pruning" key, file still on disk.
+	freezeKinds(t, cat, 0, geometry.KindLedgers)
+	writeArtifact(t, cat.Layout().LedgerPackPath(0))
+	require.NoError(t, cat.DemoteChunkArtifacts(
+		[]catalog.ArtifactRef{{Chunk: 0, Kind: geometry.KindLedgers, State: geometry.StateFrozen}}))
+
+	err := runLifecycle(context.Background(), cfg, cat, 0)
+	require.Error(t, err, "the failed build still surfaces")
+
+	st, serr := cat.State(0, geometry.KindLedgers)
+	require.NoError(t, serr)
+	assert.Equal(t, geometry.State(""), st, "the demoted key was reclaimed despite the failed freeze")
+	assert.NoFileExists(t, cat.Layout().LedgerPackPath(0),
+		"the demoted file was reclaimed despite the failed freeze")
+}
+
+// TestDeferredDeletion_BusyHandleRetriedAcrossRuns pins the recovery seam the
+// design leans on, END TO END: a reader-busy destroy leaves the transient key
+// durable and the handle retained in the registry; the next run's discard scan
+// re-collects the key, and that run's destroy closes the drained handle and
+// removes the chunk. Each half is pinned in isolation elsewhere; this wires them.
+func TestDeferredDeletion_BusyHandleRetriedAcrossRuns(t *testing.T) {
+	cat, _ := smallTxHashIndexCatalog(t, 1)
+	cfg := lifecycleTestConfig(t, cat, 0)
+	reg := query.NewRegistry(cat, geometry.NewRetention(0, 0))
+	cfg.Registry = reg
+
+	// Chunk 0: discard-eligible (all kinds frozen, terminal coverage) with a
+	// REAL hot DB, one committed ledger, published in the registry.
+	const c chunk.ID = 0
+	freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindTxHash)
+	freezeCoverage(t, cat, cat.TxHashIndexLayout().TxHashIndexID(c), c, c)
+	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
+	require.NoError(t, err)
+	_, err = db.IngestLedger(c.FirstLedger(), rpcv2test.ZeroTxLCMBytes(t, c.FirstLedger()))
+	require.NoError(t, err)
+	require.NoError(t, cat.FlipHotReady(c))
+	reg.PublishHandle(c, db)
+
+	floor := floorFor(t, cfg, c.LastLedger())
+	got, err := eligibleDiscardChunks(cat, floor, c)
+	require.NoError(t, err)
+	require.Equal(t, []chunk.ID{c}, got, "chunk 0 is discard-eligible")
+
+	// Park a reader inside the hot DB so run 1's destroy reports busy.
+	parked, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		first := true
+		for _, ierr := range db.Source().RawLedgers(
+			context.Background(), ledgerbackend.BoundedRange(c.FirstLedger(), c.FirstLedger()),
+		) {
+			if ierr != nil {
+				return
+			}
+			if first {
+				close(parked)
+				<-release
+				first = false
+			}
+		}
+	}()
+	<-parked
+
+	// Run 1: demote, then the end-of-run destroy — busy, so it is skipped.
+	var run1 pendingDeletions
+	require.NoError(t, run1.demoteHotChunk(reg, cat, c))
+	run1.destroyAll(context.Background(), cfg)
+
+	hs, err := cat.HotState(c)
+	require.NoError(t, err)
+	require.Equal(t, geometry.HotTransient, hs, "the demoted key survives the busy destroy")
+	require.DirExists(t, cat.Layout().HotChunkPath(c), "the dir survives the busy destroy")
+
+	// The reader drains; run 2's scan re-collects the transient key and its
+	// destroy closes the retained handle and finishes the removal.
+	close(release)
+	<-done
+
+	got, err = eligibleDiscardChunks(cat, floor, c)
+	require.NoError(t, err)
+	require.Equal(t, []chunk.ID{c}, got, "the next run re-collects the demoted chunk")
+
+	var run2 pendingDeletions
+	require.NoError(t, run2.demoteHotChunk(reg, cat, c)) // DiscardHandle is a no-op now
+	run2.destroyAll(context.Background(), cfg)
+
+	assert.True(t, reg.TryCloseHandle(c), "nothing left pending: the retry closed the retained handle")
+	has, err := hotKeyExists(cat, c)
+	require.NoError(t, err)
+	assert.False(t, has, "the key is gone")
+	require.NoDirExists(t, cat.Layout().HotChunkPath(c), "the dir is gone")
 }

@@ -118,7 +118,8 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 		retentionFloor:  gauge("retention_floor_ledger", "effective retention floor — lowest in-window ledger"),
 		liveHotChunks:   gauge("live_hot_chunks", "count of hot-chunk DBs currently on disk"),
 		chunkBoundaries: counter("chunk_boundaries_total", "ingestion chunk-boundary handoffs"),
-		discarded:       counter("discarded_hot_chunks_total", "hot DBs retired by the discard stage"),
+		discarded: counter("discarded_hot_chunks_total", "hot DBs demoted by the discard stage "+
+			"(a chunk whose deferred destroy stays reader-busy recounts on later runs)"),
 		pruned: counter("pruned_artifacts_total", "artifacts swept by the prune stage (below-floor artifacts, "+
 			"transient index debris, in-retention demotions, and redundant txhash keys)"),
 		phaseDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{

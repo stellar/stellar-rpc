@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -78,7 +79,8 @@ func TestSweepIndexKey(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 
-	require.NoError(t, cat.SweepTxHashIndexKey(frozen))
+	require.NoError(t, cat.DemoteTxHashIndexKey(frozen))
+	require.NoError(t, cat.DestroyTxHashIndexKey(frozen))
 
 	require.NoFileExists(t, idxPath)
 	keys, err := cat.TxHashIndexKeys(5)
@@ -95,7 +97,8 @@ func TestSweepIndexKeyFreezingDebris(t *testing.T) {
 	idxPath := cat.layout.TxHashIndexFilePath(cov)
 	writeArtifact(t, idxPath)
 
-	require.NoError(t, cat.SweepTxHashIndexKey(cov))
+	require.NoError(t, cat.DemoteTxHashIndexKey(cov))
+	require.NoError(t, cat.DestroyTxHashIndexKey(cov))
 	require.NoFileExists(t, idxPath)
 	keys, err := cat.TxHashIndexKeys(5)
 	require.NoError(t, err)
@@ -107,11 +110,11 @@ func TestSweepEmptyRefsNoop(t *testing.T) {
 	require.NoError(t, cat.SweepChunkArtifacts(nil))
 }
 
-// TestDiscardHotChunkResumesTransient mirrors the sweep siblings' crash-resume
+// TestDestroyHotChunkResumesTransient mirrors the sweep siblings' crash-resume
 // coverage for the hot-DB discard: a "transient" key (a discard that crashed after
 // marking transient but before deleting the key) plus a leftover dir must be
-// finished by the next DiscardHotChunk — the dir removed and the key deleted.
-func TestDiscardHotChunkResumesTransient(t *testing.T) {
+// finished by the next run's DestroyHotChunk — the dir removed and the key deleted.
+func TestDestroyHotChunkResumesTransient(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(4)
 
@@ -120,7 +123,7 @@ func TestDiscardHotChunkResumesTransient(t *testing.T) {
 	dir := cat.layout.HotChunkPath(c)
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 
-	require.NoError(t, cat.DiscardHotChunk(c))
+	require.NoError(t, cat.DestroyHotChunk(c))
 
 	// The resume completed it: key gone, dir gone.
 	state, err := cat.HotState(c)
@@ -129,9 +132,124 @@ func TestDiscardHotChunkResumesTransient(t *testing.T) {
 	require.NoDirExists(t, dir, "leftover hot dir swept")
 }
 
-// TestDiscardHotChunkAbsentKeyNoop: an absent hot key is a clean no-op (nothing
+// TestDestroyHotChunkAbsentKeyNoop: an absent hot key is a clean no-op (nothing
 // to finish).
-func TestDiscardHotChunkAbsentKeyNoop(t *testing.T) {
+func TestDestroyHotChunkAbsentKeyNoop(t *testing.T) {
 	cat, _ := testCatalog(t)
-	require.NoError(t, cat.DiscardHotChunk(chunk.ID(9)))
+	require.NoError(t, cat.DestroyHotChunk(chunk.ID(9)))
+}
+
+// TestDestroyChunkArtifacts_SkipsUndemoted pins the exported-API guard: a "frozen"
+// (un-demoted) ref passed by mistake is left intact — files and key survive; only
+// after demotion does the same ref get destroyed.
+func TestDestroyChunkArtifacts_SkipsUndemoted(t *testing.T) {
+	cat, _ := testCatalog(t)
+	const c chunk.ID = 3
+	kind := geometry.KindLedgers
+	for _, p := range cat.Layout().ArtifactPaths(c, kind) {
+		writeArtifact(t, p)
+	}
+	require.NoError(t, cat.FlipChunkFrozen(c, kind))
+	ref := ArtifactRef{Chunk: c, Kind: kind, State: geometry.StateFrozen}
+
+	// Guard: a frozen (un-demoted) ref is not destroyed.
+	require.NoError(t, cat.DestroyChunkArtifacts([]ArtifactRef{ref}))
+	st, err := cat.State(c, kind)
+	require.NoError(t, err)
+	require.Equal(t, geometry.StateFrozen, st, "frozen ref left intact")
+	for _, p := range cat.Layout().ArtifactPaths(c, kind) {
+		require.FileExists(t, p)
+	}
+
+	// After demotion, the same ref is destroyed.
+	require.NoError(t, cat.DemoteChunkArtifacts([]ArtifactRef{ref}))
+	require.NoError(t, cat.DestroyChunkArtifacts([]ArtifactRef{ref}))
+	st, err = cat.State(c, kind)
+	require.NoError(t, err)
+	require.Equal(t, geometry.State(""), st, "demoted ref destroyed")
+	for _, p := range cat.Layout().ArtifactPaths(c, kind) {
+		require.NoFileExists(t, p)
+	}
+}
+
+// TestDestroyChunkArtifacts_DestroysFreezingDebris pins the guard's other allowed
+// state: "freezing" debris (a crashed build, never demoted) is destroyed directly.
+// A regression tightening the guard to "pruning"-only would silently strand this
+// debris — its key re-collected by every prune scan, the destroy skipping it.
+func TestDestroyChunkArtifacts_DestroysFreezingDebris(t *testing.T) {
+	cat, _ := testCatalog(t)
+	const c chunk.ID = 4
+	kind := geometry.KindLedgers
+	for _, p := range cat.Layout().ArtifactPaths(c, kind) {
+		writeArtifact(t, p)
+	}
+	require.NoError(t, cat.MarkChunkFreezing(c, kind))
+	ref := ArtifactRef{Chunk: c, Kind: kind, State: geometry.StateFreezing}
+
+	require.NoError(t, cat.DestroyChunkArtifacts([]ArtifactRef{ref}))
+	st, err := cat.State(c, kind)
+	require.NoError(t, err)
+	require.Equal(t, geometry.State(""), st, "freezing debris destroyed")
+	for _, p := range cat.Layout().ArtifactPaths(c, kind) {
+		require.NoFileExists(t, p)
+	}
+}
+
+// TestDestroyTxHashIndexKey_SkipsUndemoted pins the same guard on the index
+// family: a coverage whose key is still "frozen" is not destroyed; after the
+// demote the same coverage is.
+func TestDestroyTxHashIndexKey_SkipsUndemoted(t *testing.T) {
+	cat, _ := testCatalog(t)
+	w := geometry.TxHashIndexID(0)
+	require.NoError(t, cat.put(geometry.TxHashIndexKey(w, 0, 1), string(geometry.StateFrozen)))
+	covs, err := cat.TxHashIndexKeys(w)
+	require.NoError(t, err)
+	require.Len(t, covs, 1)
+	cov := covs[0]
+	idxPath := cat.Layout().TxHashIndexFilePath(cov)
+	writeArtifact(t, idxPath)
+
+	// Guard: the frozen (un-demoted) coverage is not destroyed.
+	require.NoError(t, cat.DestroyTxHashIndexKey(cov))
+	require.FileExists(t, idxPath, "frozen coverage's file left intact")
+	live, err := cat.TxHashIndexKeys(w)
+	require.NoError(t, err)
+	require.Len(t, live, 1, "frozen coverage's key left intact")
+
+	// After demotion, the same coverage is destroyed.
+	require.NoError(t, cat.DemoteTxHashIndexKey(cov))
+	require.NoError(t, cat.DestroyTxHashIndexKey(cov))
+	require.NoFileExists(t, idxPath)
+	live, err = cat.TxHashIndexKeys(w)
+	require.NoError(t, err)
+	require.Empty(t, live)
+}
+
+// TestDestroyHotChunk_SkipsUnmarked pins the guard on the hot family: a chunk
+// whose key is still "ready" keeps its dir and key; once marked transient the
+// same chunk is destroyed. An absent key stays a quiet no-op.
+func TestDestroyHotChunk_SkipsUnmarked(t *testing.T) {
+	cat, _ := testCatalog(t)
+	const c chunk.ID = 6
+	marker := filepath.Join(cat.Layout().HotChunkPath(c), "CURRENT")
+	writeArtifact(t, marker)
+	require.NoError(t, cat.FlipHotReady(c))
+
+	// Guard: a ready (unmarked) chunk is not destroyed.
+	require.NoError(t, cat.DestroyHotChunk(c))
+	require.FileExists(t, marker, "ready chunk's dir left intact")
+	hs, err := cat.HotState(c)
+	require.NoError(t, err)
+	require.Equal(t, geometry.HotReady, hs, "ready key left intact")
+
+	// After the transient mark, the same chunk is destroyed.
+	require.NoError(t, cat.PutHotTransient(c))
+	require.NoError(t, cat.DestroyHotChunk(c))
+	require.NoFileExists(t, marker)
+	hs, err = cat.HotState(c)
+	require.NoError(t, err)
+	require.Equal(t, geometry.HotState(""), hs)
+
+	// Absent key: quiet no-op.
+	require.NoError(t, cat.DestroyHotChunk(c))
 }

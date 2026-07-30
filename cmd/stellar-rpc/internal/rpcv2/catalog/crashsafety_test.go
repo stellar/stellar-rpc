@@ -59,8 +59,10 @@ func TestCrashSafety_FileWrittenKeyNotFlipped(t *testing.T) {
 	require.Len(t, keys, 1)
 	require.Equal(t, geometry.StateFreezing, keys[0].State)
 
-	// Recovery for the index "freezing" debris is the sweep: delete file + key.
-	require.NoError(t, cat.SweepTxHashIndexKey(keys[0]))
+	// Recovery for the index "freezing" debris is the prune scan's demote+destroy:
+	// delete file + key.
+	require.NoError(t, cat.DemoteTxHashIndexKey(keys[0]))
+	require.NoError(t, cat.DestroyTxHashIndexKey(keys[0]))
 	require.NoFileExists(t, idxPath)
 	// And after the sweep, INV-3 still holds for what remains.
 	assertEveryFileHasKey(t, cat, root)
