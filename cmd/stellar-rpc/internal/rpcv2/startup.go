@@ -9,7 +9,6 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
-	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
@@ -18,7 +17,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
 // run is the daemon's startup, in two steps: (1) BACKFILL to the tip, then
@@ -115,22 +113,21 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// the catalog and no-ops on a young network where no chunk is complete.
 	boundary.Publish()
 
-	// The serving registry: the ingestion loop advances its latest ledger and
-	// publishes hot handles, the freeze reads through them (HotHandle), and the
-	// lifecycle retires them at discard. Constructed per run — no query survives
-	// a restart. It will back the read server (#772); for now nothing reads it.
-	registry := query.NewRegistry(cat, cfg.Retention)
+	// The serving registry: OpenRegistry returns it serving-ready (ready handles
+	// published, the live chunk's handle and latest ledger seeded), so a read view
+	// acquired before the first commit is correct. The ingestion loop advances the
+	// latest ledger and publishes handles from here, the freeze reads through them
+	// (HotHandle), and the lifecycle retires them at discard. Constructed per run —
+	// no query survives a restart. It will back the read server (#772).
+	registry, err := query.OpenRegistry(cat, cfg.Retention, hotDB, lastCommitted)
+	if err != nil {
+		return fmt.Errorf("startup open registry: %w", err)
+	}
 	cfg.Exec.Process.HotHandle = registry.Handle
 	// Close the registry's hot handles on the way out (after g.Wait joins the loops
 	// below), flushing each completed chunk the registry still holds. The live
 	// chunk is also closed by the ingestion loop; handle Close is idempotent.
 	defer registry.Close()
-
-	// Bootstrap before the loops start, so a read view acquired before the first
-	// commit is correct.
-	if err := bootstrapServing(registry, resumeLedger, lastCommitted, hotDB, logger); err != nil {
-		return err
-	}
 
 	// The lifecycle config draws on the SAME Exec wiring backfill uses, so the two
 	// share one catalog/pool by construction.
@@ -198,33 +195,6 @@ func requirePinnedEarliest(cat *catalog.Catalog) (uint32, error) {
 			"(validateConfig pins it before run; not done here)")
 	}
 	return earliest, nil
-}
-
-// bootstrapServing readies the registry before the loops start. Open and publish
-// the handles for ready hot chunks below the live one (completed chunks a prior
-// run had not yet discarded), then seed the live state: publish the already-open
-// resume DB as the live chunk's handle (PublishReadyHandles skips the live
-// chunk), and set the latest ledger to the last committed one — it would
-// otherwise read 0, making the served range invalid on a restart with data. The
-// ingestion loop republishes the handle (idempotent) and advances the latest
-// ledger from here.
-//
-// Demotions a crashed run left behind need no startup pass: the boundary seed
-// fires a lifecycle run right after boot, and its discard/prune scans re-collect
-// every demoted key — the same re-discovery that recovers a crash mid-run. A
-// "transient" key is never a ready read source, and a "pruning" artifact is
-// never served, so the leftovers are invisible to routing until then.
-func bootstrapServing(
-	registry *query.Registry, resumeLedger, lastCommitted uint32,
-	hotDB *hotchunk.DB, logger *supportlog.Entry,
-) error {
-	liveChunk := chunk.IDFromLedger(resumeLedger)
-	if err := registry.PublishReadyHandles(liveChunk, logger); err != nil {
-		return fmt.Errorf("startup publish ready handles: %w", err)
-	}
-	registry.PublishHandle(liveChunk, hotDB)
-	registry.SetLatestLedger(lastCommitted)
-	return nil
 }
 
 // backfillToTip runs the backfill loop, returning lastCommitted as backfill makes

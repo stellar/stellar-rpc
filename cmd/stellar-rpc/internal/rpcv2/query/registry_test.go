@@ -51,7 +51,7 @@ func newTestRegistry(t *testing.T, size uint32, earliest chunk.ID) (*Registry, *
 }
 
 // makeReadyHotChunk creates a real hot DB dir for chunk c and marks its key ready,
-// leaving no open handle — the on-disk state PublishReadyHandles reopens.
+// leaving no open handle — the on-disk state OpenRegistry reopens.
 func makeReadyHotChunk(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 	t.Helper()
 	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
@@ -60,30 +60,30 @@ func makeReadyHotChunk(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 	require.NoError(t, cat.FlipHotReady(c))
 }
 
-// TestPublishReadyHandles pins that startup publishes a handle for every ready hot
-// chunk except the live one (which the ingestion loop publishes).
-func TestPublishReadyHandles(t *testing.T) {
+// TestOpenRegistry pins that the constructor returns a serving-ready registry:
+// every completed ready chunk's handle reopened and published, the caller's live
+// handle published under its own chunk (not a second open), and the latest
+// ledger seeded — no half-initialized state is observable.
+func TestOpenRegistry(t *testing.T) {
 	cat := openTestCatalog(t, silentLogger())
-	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 	for _, c := range []chunk.ID{5, 6, 7} {
 		makeReadyHotChunk(t, cat, c)
 	}
+	live, err := hotchunk.OpenExisting(cat.Layout().HotChunkPath(7), 7, silentLogger())
+	require.NoError(t, err)
 
-	require.NoError(t, r.PublishReadyHandles(7, silentLogger()))
+	r, err := OpenRegistry(cat, geometry.NewRetention(0, 0), live, 70_500)
+	require.NoError(t, err)
+	defer r.Close()
 
 	_, ok5 := r.Handle(5)
 	_, ok6 := r.Handle(6)
-	_, ok7 := r.Handle(7)
+	got7, ok7 := r.Handle(7)
 	assert.True(t, ok5, "completed ready chunk published")
 	assert.True(t, ok6, "completed ready chunk published")
-	assert.False(t, ok7, "live chunk skipped; the ingestion loop publishes it")
-
-	// The registry owns the bootstrapped handles; close them (no loop here).
-	for _, c := range []chunk.ID{5, 6} {
-		if db, ok := r.Handle(c); ok {
-			_ = db.Close()
-		}
-	}
+	require.True(t, ok7, "live chunk published")
+	assert.Same(t, live, got7, "the live handle is the caller's, not a second open")
+	assert.Equal(t, uint32(70_500), r.LatestLedger(), "latest ledger seeded")
 }
 
 func TestSetLatestLedger(t *testing.T) {

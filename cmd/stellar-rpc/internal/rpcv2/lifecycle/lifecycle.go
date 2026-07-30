@@ -38,8 +38,8 @@ type Config struct {
 	Retention geometry.Retention
 
 	// Registry unpublishes a discarded hot chunk's handle and closes it once idle so
-	// deferred deletion can retire it (see deletion.go). Nil in the bounded
-	// backfill / test case, where no handle is published.
+	// deferred deletion can retire it (see deletion.go). Nil in tests, where no
+	// handle is published (the bench runs no lifecycle).
 	Registry HandleRetirer
 
 	// Grace is the deferred-deletion wait before destroying demoted resources.

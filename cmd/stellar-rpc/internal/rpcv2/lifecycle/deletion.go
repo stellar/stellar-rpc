@@ -37,7 +37,7 @@ func (p *pendingDeletions) add(label string, destroy func() error) {
 
 // demoteHotChunk unpublishes chunk c's handle (so new read views stop routing to
 // it) and marks it transient, then queues the destroy: close the handle, then
-// remove the dir and key. registry may be nil (bounded backfill / tests).
+// remove the dir and key. registry may be nil (tests only; the bench runs no lifecycle).
 func (p *pendingDeletions) demoteHotChunk(registry HandleRetirer, cat *catalog.Catalog, c chunk.ID) error {
 	if registry != nil {
 		registry.DiscardHandle(c)

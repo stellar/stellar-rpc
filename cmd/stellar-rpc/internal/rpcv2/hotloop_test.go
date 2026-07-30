@@ -138,6 +138,7 @@ func loopConfig(
 		Catalog:  cat,
 		Boundary: rec,
 		Logger:   silentLogger(),
+		Registry: &closingSink{},
 	}, rec
 }
 
@@ -358,12 +359,13 @@ func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 // runIngestionLoop — handoff fence: close-before-next-key, publish-after-open.
 // ---------------------------------------------------------------------------
 
-// fencePublisher verifies the loop's HANDOFF FENCE from inside Publish. At each
-// boundary it checks, for the just-closed chunk c: (1) c's write handle was released
-// BEFORE the publish — a read-WRITE OpenExisting on c's path takes the RocksDB LOCK,
-// which would fail if the writer still held it; and (2) the NEXT chunk's hot key is
-// already "ready" (its DB was opened before publish). Outcomes are recorded per
-// boundary for the test to assert after the loop.
+// fencePublisher verifies the bounded loop's HANDOFF FENCE from inside the
+// boundary wake. At each boundary it checks, for the just-closed chunk c: (1) c's
+// write handle was released BEFORE the wake — the closingSink closes it when the
+// next chunk's handle is published, and a read-WRITE OpenExisting on c's path
+// takes the RocksDB LOCK, which would fail if a writer still held it; and (2) the
+// NEXT chunk's hot key is already "ready" (its DB was opened before the wake).
+// Outcomes are recorded per boundary for the test to assert after the loop.
 type fencePublisher struct {
 	cat *catalog.Catalog
 
@@ -405,9 +407,10 @@ func (p *fencePublisher) Publish() {
 	p.nextReady = append(p.nextReady, ready)
 }
 
-// TestRunIngestionLoop_HandoffFenceClosesBeforeNextKey pins the boundary handoff order:
-// the just-closed chunk's write handle is released before the completed chunk is
-// published, and the next chunk's hot key is already "ready" at publish time.
+// TestRunIngestionLoop_HandoffFenceClosesBeforeNextKey pins the bounded loop's
+// boundary handoff order: the closingSink has released the just-closed chunk's
+// write handle before the boundary wake fires, and the next chunk's hot key is
+// already "ready" at wake time.
 func TestRunIngestionLoop_HandoffFenceClosesBeforeNextKey(t *testing.T) {
 	t.Parallel() // seeds a near-full chunk (one synced commit per ledger)
 	cat, _ := testCatalog(t)
@@ -426,6 +429,7 @@ func TestRunIngestionLoop_HandoffFenceClosesBeforeNextKey(t *testing.T) {
 	fence := &fencePublisher{cat: cat}
 	cfg := ingestionLoopConfig{
 		Stream: stream, Resume: resume, HotDB: db, Catalog: cat, Boundary: fence, Logger: silentLogger(),
+		Registry: &closingSink{},
 	}
 
 	require.Error(t, runIngestionLoop(context.Background(), cfg), "stream ran dry")

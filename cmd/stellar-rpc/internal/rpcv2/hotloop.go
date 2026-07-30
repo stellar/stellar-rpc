@@ -14,7 +14,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
@@ -94,10 +93,36 @@ type ingestionLoopConfig struct {
 	Metrics  observability.Metrics
 	Sink     ingest.MetricSink
 	Health   *healthState
-	// Registry, when set, receives the served latest ledger after each commit.
-	// The bounded backfill loop leaves it nil: backfill serves no queries.
-	Registry *query.Registry
+	// Registry receives the loop's serving handoffs: every opened hot DB's
+	// handle and every fully committed ledger. The sink owns each published
+	// handle — the loop's single ownership story. The daemon passes the real
+	// query.Registry; the bounded bench loop passes a closingSink.
+	Registry handleSink
 }
+
+// handleSink is the slice of the registry the loop publishes into. The daemon's
+// query.Registry keeps handles open for reads and the lifecycle's retire;
+// closingSink (the bounded bench loop, which serves no queries) closes each
+// completed chunk's DB as the next one is published.
+type handleSink interface {
+	PublishHandle(c chunk.ID, db *hotchunk.DB)
+	SetLatestLedger(seq uint32)
+}
+
+// closingSink is the bounded bench loop's handleSink: each completed chunk's DB
+// is closed as soon as the next chunk's handle is published (no queries exist to
+// read it), and the latest ledger is discarded. The final published handle (the
+// live chunk's) is closed by the loop's own deferred close.
+type closingSink struct{ prev *hotchunk.DB }
+
+func (s *closingSink) PublishHandle(_ chunk.ID, db *hotchunk.DB) {
+	if s.prev != nil && s.prev != db {
+		_ = s.prev.Close() // Close never fails; flush errors are logged inside
+	}
+	s.prev = db
+}
+
+func (s *closingSink) SetLatestLedger(uint32) {}
 
 // runIngestionLoop is the hot tier's writer: the single goroutine that opens,
 // writes, and hands off the per-chunk hot DBs. It consumes ONE continuous
@@ -108,23 +133,21 @@ type ingestionLoopConfig struct {
 // ctx-canceled return is a clean shutdown; any other error is RESTARTABLE (startup
 // re-derives the last-committed ledger, losing nothing).
 //
-// HANDOFF: with a Registry set (the live daemon), the loop does NOT close the
-// completed chunk's DB at the boundary — it transfers ownership to the registry, so
-// queries and the freeze read the completed chunk through its shared handle, and
-// the lifecycle closes it at discard once cold coverage exists (deferred deletion's
-// CloseIfIdle drains any in-flight reader). With no Registry (the bounded backfill
-// loop, which serves no queries) the loop keeps the old fence: it closes the
-// completed DB before the next chunk's key is created, since the DB would otherwise
-// have no owner. Either way the next DB is opened and its handle published before
-// the completed chunk is announced, and the HotService is rebuilt each boundary.
+// HANDOFF: the loop never closes a completed chunk's DB at the boundary — it
+// publishes every handle into the Registry sink, which owns closing. The daemon's
+// registry keeps the handle open (queries and the freeze read the completed chunk
+// through it; the lifecycle closes it at discard once cold coverage exists, with
+// deferred deletion's CloseIfIdle draining any in-flight reader); the bounded
+// bench loop's closingSink closes it as the next chunk's handle is published. The
+// next DB is opened and its handle published before the completed chunk is
+// announced, and the HotService is rebuilt each boundary.
 func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 	metrics := observability.MetricsOrNop(cfg.Metrics)
 
 	// Take ownership of the resume hot DB run() opened as the loop's FIRST statement,
 	// so the deferred close sits ahead of any early return. hotDB tracks the current
 	// write target, reassigned at each boundary; on a normal exit that is the live
-	// chunk, and completed chunks are the registry's to close (live loop) or were
-	// closed at their boundary (bounded loop). The exception is a boundary whose
+	// chunk, and completed chunks are the sink's to close. The exception is a boundary whose
 	// openHotDBForChunk fails: hotDB still points at the just-completed, registry-
 	// published chunk, so the defer closes a handle the registry also holds — harmless,
 	// since Close is blocking (drains any in-flight freeze read) and idempotent, and
@@ -137,11 +160,8 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		}
 	}()
 
-	// Publish the live chunk's handle so queries can read the tip. Nil in the bounded
-	// backfill loop, which serves no queries.
-	if cfg.Registry != nil {
-		cfg.Registry.PublishHandle(chunk.IDFromLedger(cfg.Resume), hotDB)
-	}
+	// Publish the live chunk's handle so queries can read the tip.
+	cfg.Registry.PublishHandle(chunk.IDFromLedger(cfg.Resume), hotDB)
 
 	// hotService binds the metrics sink to THIS hotDB instance; the boundary handoff
 	// rebuilds it for the reopened chunk DB below.
@@ -171,9 +191,7 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		// Advance the served latest ledger last, once the ledger is fully queryable:
 		// IngestLedger completes the in-memory events apply before returning, so a
 		// read view acquired after this can serve seq from every hot store.
-		if cfg.Registry != nil {
-			cfg.Registry.SetLatestLedger(seq)
-		}
+		cfg.Registry.SetLatestLedger(seq)
 
 		// Feed the readiness/health signal from the SAME commit: the first commit
 		// latches readiness, and the close time drives the health staleness check.
@@ -186,25 +204,16 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		// Chunk boundary: this seq is the chunk's last ledger.
 		if closed := chunk.IDFromLedger(seq); seq == closed.LastLedger() {
 			next := closed + 1
-			// With no registry, keep the old fence: close the completed DB before the
-			// next chunk's key exists, since it would otherwise have no owner. With a
-			// registry, do NOT close — ownership transfers to the registry (the handle was
-			// published at open); the lifecycle closes it at discard.
-			if cfg.Registry == nil {
-				_ = hotDB.Close() // Close never fails; flush errors are logged inside
-			}
-
 			nextDB, oerr := openHotDBForChunk(cfg.Catalog, next, cfg.Logger)
 			if oerr != nil {
 				return fmt.Errorf("open hot DB for chunk %s at boundary: %w", next, oerr)
 			}
 			hotDB = nextDB
 			hotService = ingest.NewHotService(hotDB, cfg.Sink)
-			// Publish the next chunk's handle before its first ledger commits, then
-			// announce the completed chunk to the lifecycle.
-			if cfg.Registry != nil {
-				cfg.Registry.PublishHandle(next, nextDB)
-			}
+			// Publish the next chunk's handle before its first ledger commits (the
+			// completed chunk's owner is the sink from here), then announce the
+			// completed chunk to the lifecycle.
+			cfg.Registry.PublishHandle(next, nextDB)
 			cfg.Boundary.Publish()
 
 			// Boundary observability (the woken tick reports the freeze/discard/prune).
@@ -257,7 +266,8 @@ func RunBoundedIngestionLoop(ctx context.Context, cfg BoundedIngestConfig) error
 	if err != nil {
 		return fmt.Errorf("open hot DB for resume ledger %d: %w", cfg.Resume, err)
 	}
-	// The loop's first deferred statement takes ownership of the close.
+	// The loop's first deferred statement takes ownership of the close; the
+	// closingSink closes each completed chunk at its boundary.
 	err = runIngestionLoop(ctx, ingestionLoopConfig{
 		Stream:   cfg.Stream,
 		Resume:   cfg.Resume,
@@ -267,6 +277,7 @@ func RunBoundedIngestionLoop(ctx context.Context, cfg BoundedIngestConfig) error
 		Logger:   cfg.Logger,
 		Metrics:  cfg.Metrics,
 		Sink:     cfg.Sink,
+		Registry: &closingSink{},
 	})
 	if errors.Is(err, errStreamEnded) {
 		return nil

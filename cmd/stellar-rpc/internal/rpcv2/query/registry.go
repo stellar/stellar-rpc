@@ -73,8 +73,33 @@ func (h *handleSet) clone() *handleSet {
 	return &handleSet{byChunk: m}
 }
 
-// NewRegistry binds a Registry to the catalog and retention policy, starting with
-// an empty handle map and latest ledger zero.
+// OpenRegistry constructs a serving-ready registry in one call: it opens and
+// publishes a handle for every ready hot chunk below the live one, publishes the
+// caller's live handle, and seeds the latest ledger — so a half-initialized
+// registry is never representable in the daemon and the startup ordering cannot
+// be gotten wrong. The live chunk comes from live.ChunkID() (passing it
+// separately could disagree with the handle) and the logger from the catalog.
+// The live DB stays the caller's to open: creating a chunk and flipping its
+// catalog key is ingestion's transition, not the read side's. lastCommitted is
+// passed because the live DB is empty on a fresh boundary; the value comes from
+// the caller's whole-catalog derivation. On error, every handle the call opened
+// is closed.
+func OpenRegistry(
+	cat *catalog.Catalog, retention geometry.Retention, live *hotchunk.DB, lastCommitted uint32,
+) (*Registry, error) {
+	r := NewRegistry(cat, retention)
+	if err := r.publishReadyHandles(live.ChunkID(), cat.Logger()); err != nil {
+		r.Close()
+		return nil, err
+	}
+	r.PublishHandle(live.ChunkID(), live)
+	r.SetLatestLedger(lastCommitted)
+	return r, nil
+}
+
+// NewRegistry binds a bare Registry to the catalog and retention policy: an empty
+// handle map and latest ledger zero. The daemon uses OpenRegistry; this is the
+// seam for the ingestion loop's tests and benches, which publish their own state.
 func NewRegistry(cat *catalog.Catalog, retention geometry.Retention) *Registry {
 	r := &Registry{
 		catalog:     cat,
@@ -87,13 +112,14 @@ func NewRegistry(cat *catalog.Catalog, retention geometry.Retention) *Registry {
 	return r
 }
 
-// PublishReadyHandles opens and publishes a handle for every ready hot chunk
-// except liveChunk, which the ingestion loop opens and publishes itself. These are
-// completed chunks a prior run left ready (not yet discarded); queries read them
-// hot until the freeze covers them cold. They are opened read-write so the events
-// facade is warmed (a read-only open is ledgers-only), and the registry closes them
-// at discard. Runs at startup before any read view is acquired.
-func (r *Registry) PublishReadyHandles(liveChunk chunk.ID, logger *supportlog.Entry) error {
+// publishReadyHandles opens and publishes a handle for every ready hot chunk
+// except liveChunk, whose handle OpenRegistry publishes from the caller's open.
+// These are completed chunks a prior run left ready (not yet discarded); queries
+// read them hot until the freeze covers them cold. They are opened read-write so
+// the events facade is warmed (a read-only open is ledgers-only), and the
+// registry closes them at discard. Runs at startup before any read view is
+// acquired.
+func (r *Registry) publishReadyHandles(liveChunk chunk.ID, logger *supportlog.Entry) error {
 	ready, err := r.catalog.ReadyHotChunkKeys()
 	if err != nil {
 		return fmt.Errorf("bootstrap: read ready hot chunks: %w", err)
