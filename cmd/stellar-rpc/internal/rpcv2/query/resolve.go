@@ -66,22 +66,36 @@ func (a *ReadView) resolveTier(c chunk.ID, k geometry.Kind) (tier, *hotchunk.DB,
 // view-owned — Release closes it; the hot facade is registry-owned. Returns
 // ErrUnavailable when c has no serving home.
 func (a *ReadView) Ledgers(c chunk.ID) (LedgerReader, error) {
-	t, db, err := a.resolveTier(c, geometry.KindLedgers)
+	r, closeFn, err := a.resolveLedgers(c)
 	if err != nil {
 		return nil, err
+	}
+	if closeFn != nil {
+		a.closers = append(a.closers, closeFn)
+	}
+	return r, nil
+}
+
+// resolveLedgers is Ledgers without the view registration: the returned close is
+// the CALLER's to run (nil for the registry-owned hot facade). ScanLedgers uses
+// it to close each cold reader as the walk passes its chunk instead of holding
+// every reader until Release.
+func (a *ReadView) resolveLedgers(c chunk.ID) (LedgerReader, func() error, error) {
+	t, db, err := a.resolveTier(c, geometry.KindLedgers)
+	if err != nil {
+		return nil, nil, err
 	}
 	switch t {
 	case tierCold:
 		cr, err := ledger.OpenColdReader(a.catalog.Layout().LedgerPackPath(c))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		a.closers = append(a.closers, cr.Close)
-		return cr, nil
+		return cr, cr.Close, nil
 	case tierHot:
-		return db.Ledgers(), nil
+		return db.Ledgers(), nil, nil
 	default:
-		return nil, ErrUnavailable
+		return nil, nil, ErrUnavailable
 	}
 }
 
