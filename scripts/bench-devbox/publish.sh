@@ -76,12 +76,26 @@ case "$DEST" in
 esac
 
 # --- immutability check ----------------------------------------------------------
-# Published runs are immutable. A nonexistent prefix errors on both CLIs, so a
-# failed listing counts as empty; any output means the destination is occupied.
+# Published runs are immutable: a destination that already holds objects is
+# only written to with --force. Both CLIs report an empty prefix through a
+# nonzero exit — aws s3 ls says nothing at all, gcloud storage ls says the URL
+# matched no objects — so those two signatures mean "empty" and every other
+# failure (auth, network, missing bucket) aborts instead of being read as empty.
 if [ "$FORCE" -eq 0 ]; then
   printf '  $ %s\n' "${ls_cmd[*]}"
-  if [ "$DRY" -eq 0 ] && out=$("${ls_cmd[@]}" 2>/dev/null) && [ -n "$out" ]; then
-    die "destination already has objects: $DEST — published runs are immutable; pass --force to overwrite"
+  if [ "$DRY" -eq 0 ]; then
+    err_file=$(mktemp)
+    if out=$("${ls_cmd[@]}" 2>"$err_file"); then rc=0; else rc=$?; fi
+    err=$(cat "$err_file")
+    rm -f "$err_file"
+    if [ "$rc" -ne 0 ]; then
+      case "$err" in
+        '' | *"matched no objects"*) ;;
+        *) die "cannot list destination $DEST (exit $rc): $err" ;;
+      esac
+    elif [ -n "$out" ]; then
+      die "destination already has objects: $DEST — published runs are immutable; pass --force to overwrite"
+    fi
   fi
 fi
 

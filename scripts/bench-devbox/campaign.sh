@@ -24,7 +24,8 @@
 # so the bundle survives an instance stop). When PUBLISH_URI is set the bundle
 # is also uploaded to <PUBLISH_URI>/<NAME>-<sha>-<stamp>/ by publish.sh.
 #
-# Config keys (the config is a sourced bash fragment; set only these):
+# Config keys (the config is a bash fragment that is checked before it is
+# sourced: only comments and assignments to these keys are accepted):
 #   NAME             campaign name (required; charset [A-Za-z0-9._-])
 #   REF              git ref to benchmark (default: the current checkout).
 #                    The script builds REF into $BENCH/bin/stellar-rpc-<sha>,
@@ -112,16 +113,32 @@ HOT_NUM_LEDGERS=0
 PUBLISH_URI=
 DATASETS=()
 
-_pre="$(compgen -v | sort)"
+CFG_KEYS='NAME|REF|INGEST|QUERY|CLOSE_INTERVAL|RUNS|QC|COLD_ITERS|HOT_ITERS|WORKERS|HOT_NUM_LEDGERS|PUBLISH_URI|DATASETS'
+# The config is sourced, so an unexpected assignment would silently overwrite
+# one of this script's own variables (REPO, BENCH, BIN, ...). Check the file's
+# text before sourcing it: blank lines, comments, and assignments to the
+# documented keys only (plus the continuation lines of the DATASETS array).
+_re_cfg_key="^($CFG_KEYS)="
+_in_array=0
+_lineno=0
+while IFS= read -r _line || [ -n "$_line" ]; do
+  _lineno=$((_lineno + 1))
+  _stripped=${_line#"${_line%%[![:space:]]*}"}
+  if [ "$_in_array" -eq 1 ]; then
+    case "$_stripped" in *')'*) _in_array=0 ;; esac
+    continue
+  fi
+  case "$_stripped" in '' | '#'*) continue ;; esac
+  [[ $_stripped =~ $_re_cfg_key ]] ||
+    die "config: line $_lineno is not a comment or an assignment to a documented key: '$_line' (allowed keys: ${CFG_KEYS//|/ })"
+  _value=${_stripped#*=}
+  if [ "${_value:0:1}" = '(' ] && [[ $_value != *')'* ]]; then
+    _in_array=1
+  fi
+done <"$CFG"
+[ "$_in_array" -eq 0 ] || die "config: unterminated array assignment (missing ')')"
 # shellcheck disable=SC1090
 source "$CFG"
-_post="$(compgen -v | sort)"
-for v in $(comm -13 <(printf '%s\n' "$_pre") <(printf '%s\n' "$_post")); do
-  case "$v" in
-    _pre | _post) ;;
-    *) die "config: unknown key '$v' (allowed: NAME REF INGEST QUERY CLOSE_INTERVAL RUNS QC COLD_ITERS HOT_ITERS WORKERS HOT_NUM_LEDGERS PUBLISH_URI DATASETS)" ;;
-  esac
-done
 
 re_name='^[A-Za-z0-9._-]+$'
 re_int='^[0-9]+$'
@@ -220,9 +237,15 @@ STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 RES=$BENCH/results/$NAME-$SHA-$STAMP
 TARBALL=/tmp/bench-results-$NAME-$SHA-$STAMP.tgz
 
-# Without this the AWS SDK signs S3 requests with the box's IAM role and the
-# public bucket 403s; with no creds it falls back to anonymous access.
-export AWS_EC2_METADATA_DISABLED=true
+# build_rpc_v2 builds the current checkout into $BIN through the Makefile, so
+# the binary carries the repo's GOLDFLAGS (version, commit, branch, build
+# timestamp) that `stellar-rpc-v2 version` and invocation.json report. The
+# target writes ./stellar-rpc-v2 in the repo root (gitignored); move it into
+# the versioned path the campaign runs.
+build_rpc_v2() {
+  run make build-rpc-v2
+  run mv stellar-rpc-v2 "$BIN"
+}
 
 build_binary() {
   if [ "$DRY" -eq 0 ] && [ -n "$REF" ] && [ -x "$BIN" ]; then
@@ -232,19 +255,21 @@ build_binary() {
   note "build $([ -n "$REF" ] && echo "REF=$REF" || echo "current checkout") → $BIN"
   if [ -z "$REF" ]; then
     run make build-libs
-    run go build -o "$BIN" ./cmd/stellar-rpc/rpcv2
+    build_rpc_v2
     return
   fi
   local orig
   orig=$(git symbolic-ref -q --short HEAD || git rev-parse HEAD)
   if [ "$DRY" -eq 0 ]; then
-    [ -z "$(git status --porcelain | grep -v '^??' || true)" ] ||
-      die "work tree has uncommitted changes — commit or stash before benchmarking REF=$REF"
+    # Untracked .go files are compiled too, so any dirty entry — tracked or
+    # not — makes the binary something other than BUILT_COMMIT.
+    [ -z "$(git status --porcelain)" ] ||
+      die "work tree is not clean (tracked or untracked changes) — commit, stash, or clean before benchmarking REF=$REF"
     trap 'git checkout -q "'"$orig"'" || true' EXIT
   fi
   run git -c advice.detachedHead=false checkout -q "$BUILT_COMMIT"
   run make build-libs
-  run go build -o "$BIN" ./cmd/stellar-rpc/rpcv2
+  build_rpc_v2
   run git checkout -q "$orig"
   if [ "$DRY" -eq 0 ]; then
     trap - EXIT
@@ -284,7 +309,12 @@ prepare_dataset() { # prepare_dataset INDEX
         run rm -rf "$root.partial"
         for c in "${chunks[@]}"; do
           note "dataset $name: golden backfill of chunk $c from S3 (untimed)"
-          run "$BIN" bench-ingest cold \
+          # AWS_EC2_METADATA_DISABLED is set on this command only: without it
+          # the SDK signs requests with the box's IAM role and the public
+          # bucket 403s, but exporting it globally would also hide those same
+          # instance-role credentials from publish.sh's `aws s3` calls.
+          run env AWS_EC2_METADATA_DISABLED=true \
+            "$BIN" bench-ingest cold \
             --source=bsb --datastore-type=S3 --region=us-east-2 \
             --bucket-path="$loc" \
             --start-chunk="$c" --num-chunks=1 \
@@ -458,59 +488,79 @@ write_machine_metadata() {
 # each --out directory's invocation.json; this file records what no single
 # invocation knows.
 write_campaign_metadata() {
-  local i token itype iid cpus chunks datasets_json=
-  local -a hw=()
-  for i in "${!DS_NAME[@]}"; do
-    chunks=${DS_CHUNKS[$i]// /, }
-    [ -z "$datasets_json" ] || datasets_json+=$',\n'
-    datasets_json+="    {\"name\": \"${DS_NAME[$i]}\", \"kind\": \"${DS_KIND[$i]}\", \"location\": \"${DS_LOC[$i]}\", \"chunks\": [$chunks]}"
-  done
+  local i token datasets_json hardware_json
+  local itype='' iid='' cpus='' mem=''
+  local -a chunks
+  datasets_json=$(
+    for i in "${!DS_NAME[@]}"; do
+      read -r -a chunks <<<"${DS_CHUNKS[$i]}"
+      jq -n --arg name "${DS_NAME[$i]}" --arg kind "${DS_KIND[$i]}" \
+        --arg location "${DS_LOC[$i]}" --args \
+        '{name: $name, kind: $kind, location: $location, chunks: ($ARGS.positional | map(tonumber))}' \
+        "${chunks[@]}"
+    done | jq -s .
+  )
   if token=$(curl -m 2 -sf -X PUT http://169.254.169.254/latest/api/token \
     -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null); then
     itype=$(curl -m 2 -sH "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/instance-type 2>/dev/null || true)
     iid=$(curl -m 2 -sH "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || true)
-    [ -z "$itype" ] || hw+=("\"instance_type\": \"$itype\"")
-    [ -z "$iid" ] || hw+=("\"instance_id\": \"$iid\"")
   fi
-  hw+=("\"uname\": \"$(uname -srm)\"")
-  if cpus=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null); then
-    hw+=("\"cpus\": $cpus")
-  fi
+  cpus=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || true)
   if [ -f /proc/meminfo ]; then
-    hw+=("\"mem_total_kb\": $(awk '/^MemTotal:/ {print $2}' /proc/meminfo)")
+    mem=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
   fi
-  local hardware_json
-  hardware_json=$(printf '    %s,\n' "${hw[@]}")
-  cat >"$RES/metadata.json" <<EOF
-{
-  "schema_version": 1,
-  "run_id": "$NAME-$SHA-$STAMP",
-  "campaign": {
-    "name": "$NAME",
-    "config_file": "$(basename "$CFG")",
-    "ref": "$REF",
-    "built_commit": "$BUILT_COMMIT",
-    "ingest": "$INGEST",
-    "query": "$QUERY",
-    "close_interval": "$CLOSE_INTERVAL",
-    "runs": $RUNS,
-    "query_concurrency": "$QC",
-    "cold_iters": $COLD_ITERS,
-    "hot_iters": $HOT_ITERS,
-    "workers": $WORKERS,
-    "hot_num_ledgers": $HOT_NUM_LEDGERS
-  },
-  "datasets": [
-$datasets_json
-  ],
-  "hardware": {
-${hardware_json%,}
-  },
-  "hostname": "$(hostname)",
-  "started_at": "$STARTED_AT",
-  "finished_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-}
-EOF
+  # Empty fields are dropped, so an unavailable fact is absent rather than "".
+  hardware_json=$(jq -n \
+    --arg instance_type "$itype" --arg instance_id "$iid" \
+    --arg uname "$(uname -srm)" --arg cpus "$cpus" --arg mem_total_kb "$mem" \
+    '[{instance_type: $instance_type}, {instance_id: $instance_id}, {uname: $uname},
+      {cpus: ($cpus | if . == "" then null else tonumber end)},
+      {mem_total_kb: ($mem_total_kb | if . == "" then null else tonumber end)}]
+     | add | with_entries(select(.value != null and .value != ""))')
+  jq -n \
+    --arg run_id "$NAME-$SHA-$STAMP" \
+    --arg name "$NAME" \
+    --arg config_file "$(basename "$CFG")" \
+    --arg ref "$REF" \
+    --arg built_commit "$BUILT_COMMIT" \
+    --arg ingest "$INGEST" \
+    --arg query "$QUERY" \
+    --arg close_interval "$CLOSE_INTERVAL" \
+    --argjson runs "$RUNS" \
+    --arg query_concurrency "$QC" \
+    --argjson cold_iters "$COLD_ITERS" \
+    --argjson hot_iters "$HOT_ITERS" \
+    --argjson workers "$WORKERS" \
+    --argjson hot_num_ledgers "$HOT_NUM_LEDGERS" \
+    --argjson datasets "$datasets_json" \
+    --argjson hardware "$hardware_json" \
+    --arg hostname "$(hostname)" \
+    --arg started_at "$STARTED_AT" \
+    --arg finished_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{
+      schema_version: 1,
+      run_id: $run_id,
+      campaign: {
+        name: $name,
+        config_file: $config_file,
+        ref: $ref,
+        built_commit: $built_commit,
+        ingest: $ingest,
+        query: $query,
+        close_interval: $close_interval,
+        runs: $runs,
+        query_concurrency: $query_concurrency,
+        cold_iters: $cold_iters,
+        hot_iters: $hot_iters,
+        workers: $workers,
+        hot_num_ledgers: $hot_num_ledgers
+      },
+      datasets: $datasets,
+      hardware: $hardware,
+      hostname: $hostname,
+      started_at: $started_at,
+      finished_at: $finished_at
+    }' >"$RES/metadata.json"
 }
 
 # --- campaign --------------------------------------------------------------------

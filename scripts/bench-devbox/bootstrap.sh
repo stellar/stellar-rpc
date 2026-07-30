@@ -53,6 +53,14 @@ sudo apt-get update -qq
 sudo apt-get install -y -qq build-essential git jq pkg-config cmake ninja-build \
   tmux libsnappy-dev liblz4-dev zlib1g-dev
 
+# --- cloud CLIs: only some campaigns need them, so warn rather than fail -----
+# gcloud: packs-gs datasets and gs:// publishing. aws: bsb-s3 datasets and
+# s3:// publishing. Neither ships in apt in a form worth installing here.
+command -v gcloud >/dev/null 2>&1 ||
+  echo "WARNING: gcloud not found — packs-gs datasets and gs:// PUBLISH_URI will fail; install it: https://cloud.google.com/sdk/docs/install" >&2
+command -v aws >/dev/null 2>&1 ||
+  echo "WARNING: aws not found — bsb-s3 datasets and s3:// PUBLISH_URI will fail; install it: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html" >&2
+
 # --- Go (>= 1.26; Noble's apt Go is too old) ---------------------------------
 if ! /usr/local/go/bin/go version 2>/dev/null | grep -Eq 'go1\.(2[6-9]|[3-9][0-9])'; then
   note "installing Go"
