@@ -337,7 +337,7 @@ func parseEvents(allEvents ingest.TransactionEvents, tx *Transaction) error {
 type transactionTableMigration struct {
 	firstLedger uint32
 	lastLedger  uint32
-	writer      TransactionWriter
+	writer      *transactionHandler
 }
 
 func (t *transactionTableMigration) ApplicableRange() LedgerSeqRange {
@@ -349,6 +349,10 @@ func (t *transactionTableMigration) ApplicableRange() LedgerSeqRange {
 
 func (t *transactionTableMigration) Apply(_ context.Context, meta xdr.LedgerCloseMeta) error {
 	return t.writer.InsertTransactions(meta)
+}
+
+func (t *transactionTableMigration) flushPending() error {
+	return t.writer.flushPending()
 }
 
 func newTransactionTableMigration(

@@ -452,7 +452,7 @@ func (eventHandler *eventHandler) GetEvents(
 type eventTableMigration struct {
 	firstLedger uint32
 	lastLedger  uint32
-	writer      EventWriter
+	writer      *eventHandler
 }
 
 func (e *eventTableMigration) ApplicableRange() LedgerSeqRange {
@@ -464,6 +464,10 @@ func (e *eventTableMigration) ApplicableRange() LedgerSeqRange {
 
 func (e *eventTableMigration) Apply(_ context.Context, meta xdr.LedgerCloseMeta) error {
 	return e.writer.InsertEvents(meta)
+}
+
+func (e *eventTableMigration) flushPending() error {
+	return e.writer.flushPending()
 }
 
 func newEventTableMigration(

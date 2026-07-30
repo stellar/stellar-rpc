@@ -177,6 +177,12 @@ func (g *guardedMigration) Commit(ctx context.Context) error {
 	if g.alreadyMigrated {
 		return nil
 	}
+	// flush rows still buffered by a batching writer before setting the guard
+	if flusher, ok := g.migration.(interface{ flushPending() error }); ok {
+		if err := flusher.flushPending(); err != nil {
+			return err
+		}
+	}
 	return setMetaBool(ctx, g.db, g.guardMetaKey, true)
 }
 
