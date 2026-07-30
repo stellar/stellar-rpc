@@ -45,6 +45,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -417,7 +418,7 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []events.TermKey) ([]*
 		}
 		return nil
 	}); err != nil {
-		return nil, fmt.Errorf("events: LookupKeys read for chunk %s: %w", c.chunkID, err)
+		return nil, fmt.Errorf("events: LookupKeys read for chunk %s: %w", c.chunkID, translateReaderErr(err))
 	}
 
 	return results, nil
@@ -471,7 +472,7 @@ func (c *ColdReader) FetchEvents(ctx context.Context, eventIDs []uint32) ([]even
 		if errors.Is(err, packfile.ErrPositionsUnsorted) {
 			return nil, fmt.Errorf("%w: %w", ErrUnsortedEventIDs, err)
 		}
-		return nil, fmt.Errorf("events: fetch from chunk %s: %w", c.chunkID, err)
+		return nil, fmt.Errorf("events: fetch from chunk %s: %w", c.chunkID, translateReaderErr(err))
 	}
 	return results, nil
 }
@@ -514,7 +515,7 @@ func (c *ColdReader) FetchRange(ctx context.Context, start, count uint32) iter.S
 		// decode each on the fly.
 		for raw, err := range c.events.ReadRange(int(start), int(count)) {
 			if err != nil {
-				yield(events.Payload{}, fmt.Errorf("events: scan chunk %s: %w", c.chunkID, err))
+				yield(events.Payload{}, fmt.Errorf("events: scan chunk %s: %w", c.chunkID, translateReaderErr(err)))
 				return
 			}
 			if err := ctx.Err(); err != nil {
@@ -569,7 +570,7 @@ func (c *ColdReader) All(ctx context.Context) iter.Seq2[events.Payload, error] {
 func (c *ColdReader) loadMeta(eventsPath string) (coldMeta, error) {
 	tr, err := c.events.Trailer()
 	if err != nil {
-		return coldMeta{}, fmt.Errorf("events: open %s: %w", eventsPath, err)
+		return coldMeta{}, fmt.Errorf("events: open %s: %w", eventsPath, translateReaderErr(err))
 	}
 	// Check the trailer's Format before touching any record: a
 	// mis-pointed pack fails at open, not mid-query with an opaque
@@ -581,7 +582,7 @@ func (c *ColdReader) loadMeta(eventsPath string) (coldMeta, error) {
 	total := tr.TotalItems
 	appData, err := c.events.AppData()
 	if err != nil {
-		return coldMeta{}, fmt.Errorf("events: read app data from %s: %w", eventsPath, err)
+		return coldMeta{}, fmt.Errorf("events: read app data from %s: %w", eventsPath, translateReaderErr(err))
 	}
 	offsets, err := DecodeLedgerOffsets(appData)
 	if err != nil {
@@ -605,4 +606,18 @@ func (c *ColdReader) loadMeta(eventsPath string) (coldMeta, error) {
 			eventsPath, offsets.TotalEvents(), total)
 	}
 	return coldMeta{count: total, offsets: offsets}, nil
+}
+
+// translateReaderErr maps packfile- and os-level errors to the stores
+// sentinels, mirroring the ledger store. index.pack and events.pack both
+// report a failed integrity check as packfile.ErrChecksum, which wraps
+// ErrCorrupt; without this the house sentinel would never see it.
+func translateReaderErr(err error) error {
+	if errors.Is(err, os.ErrClosed) {
+		return stores.ErrStoreClosed
+	}
+	if errors.Is(err, packfile.ErrCorrupt) {
+		return fmt.Errorf("%w: %w", stores.ErrCorrupt, err)
+	}
+	return err
 }
