@@ -39,7 +39,7 @@ var (
 
 // knownFlags is the bitmask of trailer flags this version of the reader
 // understands. Files with unknown bits set are rejected as corrupt.
-const knownFlags = flagContentHash
+const knownFlags = flagContentHash | flagRecordChecksum
 
 // readBufPool is a process-wide pool of 1 MiB read buffers used to coalesce
 // consecutive record reads in ReadRange and ReadItems.
@@ -149,6 +149,9 @@ type Reader struct {
 	itemsPerRecord int
 	concurrency    int
 	recordDecoder  RecordDecoder
+	// recordChecksum mirrors trailer.HasRecordChecksum, hoisted out of the
+	// cold trailer struct because record.decode reads it per record.
+	recordChecksum bool
 
 	// Cold-ish state: populated by waitOpen, read on metadata accessors and
 	// Verify but not the per-record hot path.
@@ -194,6 +197,7 @@ func Open(path string, opts ReaderOptions) *Reader {
 		r.appData = res.appData
 		r.totalItems = res.totalItems
 		r.itemsPerRecord = res.itemsPerRecord
+		r.recordChecksum = res.trailer.HasRecordChecksum
 		return nil
 	})
 	// Drive the open from a background goroutine; later waitOpen() calls

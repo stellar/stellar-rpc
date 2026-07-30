@@ -65,12 +65,19 @@ func (r *record) itemsInRecord(recordIdx int) int {
 // decode populates this record's per-item state from one record's on-disk
 // bytes. After decode succeeds, item(i) returns the i-th item's bytes.
 //
-// On disk a multi-item record is [payload][forIndex] where payload is the
-// (possibly encoded) record bytes and forIndex is [packed][1B W][4B min][4B
-// crc32c]. decode strips and verifies the FOR index (if itemsPerRecord > 1),
-// then runs the Reader's RecordDecoder over the payload, or aliases
-// the input verbatim in passthrough mode. itemsPerRecord == 1 records have
-// no forIndex and the entire record is the single item's bytes.
+// On disk a multi-item record is [payload][forIndex][4B crc32c] where payload
+// is the (possibly encoded) record bytes and forIndex is [packed][1B W][4B
+// min]. decode strips and verifies the FOR index (if itemsPerRecord > 1), then
+// runs the Reader's RecordDecoder over the payload, or aliases the input
+// verbatim in passthrough mode. itemsPerRecord == 1 records have no forIndex,
+// and no crc32c either unless the file carries a record checksum, so the
+// entire record is the single item's bytes.
+//
+// What that crc32c covers depends on the file: the FOR index alone, or the
+// whole record when the trailer sets flagRecordChecksum. The widened form is
+// verified up front, before the FOR index is parsed, so the range checked is
+// the one the offsets index implies rather than one the record's own bytes
+// select.
 //
 // In passthrough mode r.current aliases the caller's input slice (r.payload
 // stays owned and untouched); r.item's "valid until next decode" contract
@@ -81,11 +88,20 @@ func (r *record) itemsInRecord(recordIdx int) int {
 func (r *record) decode(data []byte, recordIdx int) error {
 	n := r.itemsInRecord(recordIdx)
 	itemsPerRecord := r.reader.itemsPerRecord
+	recordChecksum := r.reader.recordChecksum
+
+	if recordChecksum {
+		verified, err := verifyRecordCRC(data)
+		if err != nil {
+			return fmt.Errorf("record %d: %w", recordIdx, err)
+		}
+		data = verified
+	}
 
 	if itemsPerRecord > 1 {
 		// decodeForIndex is defined alongside its inverse encodeForIndex in
 		// writer.go so the on-disk FOR-index wire format lives in one place.
-		sizes, payload, err := decodeForIndex(data, n, r.sizes)
+		sizes, payload, err := decodeForIndex(data, n, r.sizes, recordChecksum)
 		if err != nil {
 			return err
 		}

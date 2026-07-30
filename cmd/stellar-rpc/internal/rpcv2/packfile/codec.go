@@ -18,11 +18,13 @@ import "io"
 type Format uint32
 
 // RecordEncoder transforms one record (the concatenation of items in a record)
-// before it's written to disk. Typical implementations compress (e.g. zstd,
-// which carries its own per-frame checksum) or add integrity (e.g. raw + a
-// trailing CRC32C, for codecs that don't include a checksum). The library
-// doesn't interpret the output bytes — readers dispatch on the trailer's
-// Format field to apply the matching decoder.
+// before it's written to disk. The typical implementation compresses, e.g.
+// zstd. The library doesn't interpret the output bytes — readers dispatch on
+// the trailer's Format field to apply the matching decoder.
+//
+// Integrity is not a codec: a record's checksum is selected by
+// WriterOptions.RecordChecksum, recorded in the trailer, and applied to the
+// bytes this encoder produces.
 //
 // Encode writes the encoded bytes into dst (growing the slice if dst's
 // capacity is insufficient) and returns the result. Pass nil or an empty
@@ -44,10 +46,9 @@ type RecordEncoder interface {
 
 // RecordDecoder is the read-side counterpart of RecordEncoder. It transforms
 // one record's on-disk bytes back into the original record payload (the
-// concatenation of items in the record). Typical implementations decompress
-// (e.g. zstd) or strip a trailing CRC32C wrapper. Passthrough mode (nil
-// decoder) reads bytes verbatim — symmetric to the writer's nil
-// NewRecordEncoder.
+// concatenation of items in the record). The typical implementation
+// decompresses, e.g. zstd. Passthrough mode (nil decoder) reads bytes
+// verbatim — symmetric to the writer's nil NewRecordEncoder.
 //
 // Decode writes the decoded bytes into dst (growing the slice if dst's
 // capacity is insufficient) and returns the result. The returned slice is

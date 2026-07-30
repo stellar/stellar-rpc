@@ -159,10 +159,19 @@ func WriteColdIndex(
 	// measurably (~3.6× lookup latency in measurement) for marginal
 	// byte savings. Contrast events.pack, where XDR payloads grouped
 	// at 128/record offer plenty of compression headroom.
+	//
+	// Skipping compression also skips the checksum a compressed frame
+	// would have carried, hence ChecksumCRC32C. A flipped bit inside a
+	// serialized bitmap unmarshals cleanly into a DIFFERENT posting set,
+	// so an unchecked index answers queries wrongly instead of failing.
+	// It costs no disk here (the CRC32C shares the four bytes a
+	// multi-item record already ends with) and one pass over bytes
+	// already read, around 1.5% of the I/O that fetched them.
 	pw, err := packfile.Create(indexPackPath, packfile.WriterOptions{
 		Format:         indexPackFormat,
 		ItemsPerRecord: indexPackItemsPerRecord,
 		Overwrite:      true,
+		RecordChecksum: packfile.ChecksumCRC32C,
 	})
 	if err != nil {
 		return fmt.Errorf("events: create index.pack at %s: %w", indexPackPath, err)
