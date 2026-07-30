@@ -206,6 +206,11 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 			return fmt.Errorf("events: %s: expected format %#x, got %#x (mis-pointed or foreign pack)",
 				indexPackPath, indexPackFormat, tr.Format)
 		}
+		// Serving an index whose bitmaps are unchecked is the silent-wrong-answer
+		// case indexPackChecksum exists to prevent, and the reader can tell.
+		if indexPackChecksum != packfile.ChecksumNone && !tr.HasRecordChecksum {
+			return fmt.Errorf("events: %s: built without a record checksum (stale build)", indexPackPath)
+		}
 		if uint64(tr.TotalItems) != idx.numKeys() {
 			return fmt.Errorf(
 				"events: index pair mismatch for chunk %s: index.hash holds %d keys "+
@@ -608,9 +613,7 @@ func (c *ColdReader) loadMeta(eventsPath string) (coldMeta, error) {
 }
 
 // translateReaderErr maps packfile- and os-level errors to the stores
-// sentinels, mirroring the ledger store. index.pack and events.pack both
-// report a failed integrity check as packfile.ErrChecksum, which wraps
-// ErrCorrupt; without this the house sentinel would never see it.
+// sentinels.
 func translateReaderErr(err error) error {
 	if errors.Is(err, os.ErrClosed) {
 		return stores.ErrStoreClosed

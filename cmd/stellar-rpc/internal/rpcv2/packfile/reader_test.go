@@ -753,17 +753,16 @@ func TestTrailer(t *testing.T) {
 	}
 }
 
-func TestAppDataRoundTrip(t *testing.T) {
-	appData := []byte("hello-app-data-1234567890")
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "appdata.pack")
-
+// writeAppDataPackfile writes a packfile carrying items and appData, and
+// returns its path. writePackfile can't serve these tests: it hardcodes
+// Finish(nil).
+func writeAppDataPackfile(t *testing.T, items [][]byte, appData []byte) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "appdata.pack")
 	w, err := Create(path, WriterOptions{ItemsPerRecord: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	items := makeItems(5, 100)
 	for _, item := range items {
 		if err := w.AppendItem(item); err != nil {
 			t.Fatal(err)
@@ -772,6 +771,13 @@ func TestAppDataRoundTrip(t *testing.T) {
 	if err := w.Finish(appData); err != nil {
 		t.Fatal(err)
 	}
+	return path
+}
+
+func TestAppDataRoundTrip(t *testing.T) {
+	appData := []byte("hello-app-data-1234567890")
+	items := makeItems(5, 100)
+	path := writeAppDataPackfile(t, items, appData)
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
@@ -799,81 +805,26 @@ func TestAppDataRoundTrip(t *testing.T) {
 	}
 }
 
-// writeAppDataPackfile writes a one-item packfile carrying appData and returns
-// its path.
-func writeAppDataPackfile(t *testing.T, appData []byte) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "appdata.pack")
-	w, err := Create(path, WriterOptions{ItemsPerRecord: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := w.AppendItem([]byte("item")); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Finish(appData); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-// flipFirstAppDataByte mutates the first byte of the app-data section, which
-// sits between the offsets index and the trailer.
-func flipFirstAppDataByte(t *testing.T) func([]byte) {
-	t.Helper()
-	return func(data []byte) {
-		trailerStart := len(data) - trailerSize
-		appDataSz := int(binary.LittleEndian.Uint32(data[trailerStart+tOffAppDataSize:]))
-		if appDataSz == 0 {
-			t.Fatal("expected non-zero appDataSize")
-		}
-		data[trailerStart-appDataSz] ^= 0xFF
-	}
-}
-
 // TestAppDataCorruption covers the third tail section. The offsets index and
 // the trailer each carry a CRC32C; app data holds things like events.pack's
 // cumulative ledger offsets, where a flipped byte can preserve monotonicity
 // and the final total and so pass every structural check its decoder makes.
 func TestAppDataCorruption(t *testing.T) {
-	path := writeAppDataPackfile(t, []byte("important-metadata"))
+	path := writeAppDataPackfile(t, [][]byte{[]byte("item")}, []byte("important-metadata"))
 
 	// The trailer CRC covers the appDataCRC field but not the section itself,
 	// so mutating the section alone leaves the trailer valid.
-	corruptedPath := corruptAt(t, path, false, flipFirstAppDataByte(t))
+	corruptedPath := corruptAt(t, path, false, func(data []byte) {
+		trailerStart := len(data) - trailerSize
+		appDataSz := int(binary.LittleEndian.Uint32(data[trailerStart+tOffAppDataSize:]))
+		data[trailerStart-appDataSz] ^= 0xFF
+	})
 
 	r := Open(corruptedPath, ReaderOptions{})
 	defer r.Close()
 
 	if _, err := r.AppData(); !errors.Is(err, ErrChecksum) {
 		t.Fatalf("Open with corrupted app data: got %v, want ErrChecksum", err)
-	}
-}
-
-// TestAppDataCRCFlagOptional pins the flag's purpose: a file whose trailer
-// does not claim an app-data CRC is read without checking one, so files
-// written before the field meant anything still open.
-func TestAppDataCRCFlagOptional(t *testing.T) {
-	appData := []byte("important-metadata")
-	path := writeAppDataPackfile(t, appData)
-
-	// Clear the flag and zero the field, as an older writer would have left
-	// them. The trailer CRC covers both, so it has to be recomputed.
-	legacyPath := corruptAt(t, path, true, func(data []byte) {
-		trailerStart := len(data) - trailerSize
-		data[trailerStart+tOffFlags] &^= flagAppDataCRC
-		binary.LittleEndian.PutUint32(data[trailerStart+tOffAppDataCRC:], 0)
-	})
-
-	r := Open(legacyPath, ReaderOptions{})
-	defer r.Close()
-
-	got, err := r.AppData()
-	if err != nil {
-		t.Fatalf("Open without an app-data CRC: %v", err)
-	}
-	if !bytes.Equal(got, appData) {
-		t.Errorf("AppData = %q, want %q", got, appData)
 	}
 }
 

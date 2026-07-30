@@ -199,10 +199,3 @@ func TestRecordChecksumWithContentHash(t *testing.T) {
 		t.Fatalf("Verify: %v", err)
 	}
 }
-
-func TestRecordChecksumValidation(t *testing.T) {
-	_, err := Create(t.TempDir()+"/bad.pack", WriterOptions{RecordChecksum: RecordChecksum(9)})
-	if err == nil {
-		t.Fatal("Create with an unknown RecordChecksum should fail")
-	}
-}

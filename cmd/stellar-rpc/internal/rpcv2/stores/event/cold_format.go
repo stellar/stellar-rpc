@@ -77,6 +77,18 @@ const (
 	indexPackFormat  packfile.Format = 0xFE1E000B // "Fellow Events 0xB"
 )
 
+// indexPackChecksum belongs to index.pack's on-disk identity, so it lives here
+// with the format ID rather than at the writer's call site: every builder of
+// this artifact has to agree on it, and the cold reader rejects an index.pack
+// that lacks it.
+//
+// index.pack is the artifact that needs one. It stores records uncompressed,
+// so no frame checksum covers them, and a flipped bit inside a serialized
+// bitmap unmarshals cleanly into a DIFFERENT posting set — a wrong query
+// answer rather than a failure. events.pack gets the same protection from its
+// zstd frames.
+const indexPackChecksum = packfile.ChecksumCRC32C
+
 // IndexRecordFingerprintLen is the byte width of the leading
 // fingerprint in every index.pack record. The cold reader checks
 // this against the queried term's first four bytes to filter MPHF
