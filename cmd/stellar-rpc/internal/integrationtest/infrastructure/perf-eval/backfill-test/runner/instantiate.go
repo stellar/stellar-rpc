@@ -28,8 +28,11 @@ const (
 
 const ledgerThreshold = 384 // mirrors ingest.ledgerThreshold in backfill.go
 
-// backfillDoneRe matches the terminal line emitted on backfill's completion
+// backfillDoneRe matches the line ending the ingest phase of backfill
 var backfillDoneRe = regexp.MustCompile(`Backfill process complete, ledgers \[(\d+) -> (\d+)\]`)
+
+// finalizeDoneRe matches the line ending the finalize phase
+var finalizeDoneRe = regexp.MustCompile(`Bulk-load finalize complete`)
 
 // backfillEnv is the leg's env-derived config.
 type backfillEnv struct {
@@ -88,7 +91,7 @@ func instantiate(ctx context.Context) error {
 	}
 
 	logger.Infof("starting backfill (retention=%s, deadline=%s, serve-after=%t)", retention, cfg.Deadline, cfg.ServeAfter)
-	elapsed, lo, hi, daemon, err := runBackfill(ctx, cfg.Deadline, binaryPath, cfgPath, cfg.ServeAfter)
+	timings, lo, hi, daemon, err := runBackfill(ctx, cfg.Deadline, binaryPath, cfgPath, cfg.ServeAfter)
 	if err != nil {
 		return bail("%v", err)
 	}
@@ -99,9 +102,11 @@ func instantiate(ctx context.Context) error {
 	if ingested+ledgerThreshold < cfg.Retention {
 		return bail("backfill reported complete but ingested %d of %s ledgers", ingested, retention)
 	}
-	logger.Infof("backfill complete: %d ledgers [%d -> %d] in %s", ingested, lo, hi, elapsed.Round(time.Second))
+	logger.Infof("backfill complete: %d ledgers [%d -> %d] in %s (ingest %s + finalize %s)",
+		ingested, lo, hi, timings.total().Round(time.Second),
+		timings.ingest.Round(time.Second), timings.finalize.Round(time.Second))
 
-	md := renderMarkdown(cfg.TargetSHA, retention, lo, hi, ingested, elapsed)
+	md := renderMarkdown(cfg.TargetSHA, retention, lo, hi, ingested, timings)
 	if err := os.WriteFile(cfg.ResultsFile, []byte(md), 0o644); err != nil {
 		return bail("writing results: %v", err)
 	}
@@ -195,13 +200,35 @@ func (d *daemonHandle) Stop() {
 	}
 }
 
+// phaseTimings holds the measured wall-clock of the daemon's backfill phases.
+type phaseTimings struct {
+	ingest   time.Duration
+	finalize time.Duration
+}
+
+func (t phaseTimings) total() time.Duration { return t.ingest + t.finalize }
+
+// scanUntil tees lines to the box user-data log (SSM debug tail) until re
+// matches, returning the submatches, or nil if the output ended first.
+func scanUntil(scanner *bufio.Scanner, re *regexp.Regexp) []string {
+	for scanner.Scan() {
+		line := scanner.Text()
+		fmt.Fprintln(os.Stderr, line)
+		if m := re.FindStringSubmatch(line); m != nil {
+			return m
+		}
+	}
+	return nil
+}
+
 // runBackfill launches the daemon and streams its output (teeing to the box log)
-// until the backfill-complete line fires, recording the wall-clock.
+// through the bulk-load finalize line, recording per-phase wall-clock.
 func runBackfill(
 	ctx context.Context, deadline time.Duration, binary, cfgPath string, keepAlive bool,
-) (time.Duration, int, int, *daemonHandle, error) {
+) (phaseTimings, int, int, *daemonHandle, error) {
+	var timings phaseTimings
 	runCtx, cancel := context.WithCancel(ctx)
-	// deadline covers only the backfill phase, which the daemon may outlive
+	// deadline covers the backfill + finalize phases, which the daemon may outlive
 	watchdog := time.AfterFunc(deadline, cancel)
 
 	cmd := exec.CommandContext(runCtx, binary, "--config-path", cfgPath)
@@ -210,7 +237,7 @@ func runBackfill(
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		cancel()
-		return 0, 0, 0, nil, err
+		return timings, 0, 0, nil, err
 	}
 	cmd.Stdout, cmd.Stderr = pw, pw
 
@@ -219,35 +246,38 @@ func runBackfill(
 		pw.Close()
 		pr.Close()
 		cancel()
-		return 0, 0, 0, nil, fmt.Errorf("starting daemon: %w", err)
+		return timings, 0, 0, nil, fmt.Errorf("starting daemon: %w", err)
 	}
 	pw.Close() // the child holds the write end and we read until it dies
 
-	var elapsed time.Duration
-	var lo, hi int
 	scanner := bufio.NewScanner(pr)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		fmt.Fprintln(os.Stderr, line) // tee to the box user-data log (SSM debug tail)
-		if m := backfillDoneRe.FindStringSubmatch(line); m != nil {
-			elapsed = time.Since(start)
-			lo, _ = strconv.Atoi(m[1])
-			hi, _ = strconv.Atoi(m[2])
-			watchdog.Stop()
-			break
-		}
-	}
-
-	if elapsed == 0 { // daemon died, read failure, or the watchdog killed it
+	// daemon died, read failure, or the watchdog killed it
+	bail := func(phase string) error {
 		cancel()
 		pr.Close()
 		_ = cmd.Wait()
 		if scanErr := scanner.Err(); scanErr != nil {
-			return 0, 0, 0, nil, fmt.Errorf("reading daemon output: %w", scanErr)
+			return fmt.Errorf("reading daemon output: %w", scanErr)
 		}
-		return 0, 0, 0, nil, fmt.Errorf("daemon exited or hit the %s deadline before backfill completed", deadline)
+		return fmt.Errorf("daemon exited or hit the %s deadline before %s completed", deadline, phase)
 	}
+
+	var lo, hi int
+	m := scanUntil(scanner, backfillDoneRe)
+	if m == nil {
+		return timings, 0, 0, nil, bail("backfill")
+	}
+	timings.ingest = time.Since(start)
+	lo, _ = strconv.Atoi(m[1])
+	hi, _ = strconv.Atoi(m[2])
+
+	finalizeStart := time.Now()
+	if scanUntil(scanner, finalizeDoneRe) == nil {
+		return timings, 0, 0, nil, bail("bulk-load finalize")
+	}
+	timings.finalize = time.Since(finalizeStart)
+	watchdog.Stop()
 
 	// keep draining the pipe (the daemon blocks on it once full) and teeing
 	// its catchup/ingestion output to the box log until it dies
@@ -262,26 +292,29 @@ func runBackfill(
 	}()
 	daemon := &daemonHandle{cancel: cancel, done: done}
 	if !keepAlive {
-		daemon.Stop() // stop the daemon before it starts live ingestion
-		return elapsed, lo, hi, nil, nil
+		daemon.Stop() // stop the daemon before the frontfill top-up and live ingestion
+		return timings, lo, hi, nil, nil
 	}
-	return elapsed, lo, hi, daemon, nil
+	return timings, lo, hi, daemon, nil
 }
 
-func renderMarkdown(sha, retention string, lo, hi, ingested int, elapsed time.Duration) string {
+func renderMarkdown(sha, retention string, lo, hi, ingested int, timings phaseTimings) string {
 	shortSHA := sha
 	if len(shortSHA) > 12 {
 		shortSHA = shortSHA[:12]
 	}
 	lps := 0.0
-	if s := elapsed.Seconds(); s > 0 {
+	if s := timings.ingest.Seconds(); s > 0 {
 		lps = float64(ingested) / s
 	}
 	return fmt.Sprintf("### ⏳ Backfill ingestion — `%s`\n\n"+
 		"| Metric | Value |\n|---|---|\n"+
 		"| Ledgers ingested | %d (`[%d -> %d]`) |\n"+
 		"| Retention window | %s |\n"+
-		"| Wall-clock | %s |\n"+
-		"| Ledgers/sec | %.1f |\n",
-		shortSHA, ingested, lo, hi, retention, elapsed.Round(time.Second), lps)
+		"| Wall-clock (total) | %s |\n"+
+		"| Ingest phase | %s |\n"+
+		"| Bulk-load finalize phase | %s |\n"+
+		"| Ledgers/sec (ingest) | %.1f |\n",
+		shortSHA, ingested, lo, hi, retention, timings.total().Round(time.Second),
+		timings.ingest.Round(time.Second), timings.finalize.Round(time.Second), lps)
 }
