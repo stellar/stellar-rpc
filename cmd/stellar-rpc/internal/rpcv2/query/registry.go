@@ -112,31 +112,6 @@ func NewRegistry(cat *catalog.Catalog, retention geometry.Retention) *Registry {
 	return r
 }
 
-// publishReadyHandles opens and publishes a handle for every ready hot chunk
-// except liveChunk, whose handle OpenRegistry publishes from the caller's open.
-// These are completed chunks a prior run left ready (not yet discarded); queries
-// read them hot until the freeze covers them cold. They are opened read-write so
-// the events facade is warmed (a read-only open is ledgers-only), and the
-// registry closes them at discard. Runs at startup before any read view is
-// acquired.
-func (r *Registry) publishReadyHandles(liveChunk chunk.ID, logger *supportlog.Entry) error {
-	ready, err := r.catalog.ReadyHotChunkKeys()
-	if err != nil {
-		return fmt.Errorf("bootstrap: read ready hot chunks: %w", err)
-	}
-	for _, c := range ready {
-		if c == liveChunk {
-			continue
-		}
-		db, err := hotchunk.OpenReadyWrite(geometry.HotReady, r.catalog.Layout().HotChunkPath(c), c, logger)
-		if err != nil {
-			return fmt.Errorf("bootstrap: open hot chunk %s: %w", c, err)
-		}
-		r.PublishHandle(c, db)
-	}
-	return nil
-}
-
 // SetLatestLedger publishes the newest fully ingested ledger; the ingest loop calls
 // it as the final step of each per-ledger cycle.
 func (r *Registry) SetLatestLedger(seq uint32) { r.latestLedger.Store(seq) }
@@ -271,6 +246,31 @@ func (r *Registry) NewReadView() (*ReadView, error) {
 		snap:         snap,
 		catalog:      r.catalog,
 	}, nil
+}
+
+// publishReadyHandles opens and publishes a handle for every ready hot chunk
+// except liveChunk, whose handle OpenRegistry publishes from the caller's open.
+// These are completed chunks a prior run left ready (not yet discarded); queries
+// read them hot until the freeze covers them cold. They are opened read-write so
+// the events facade is warmed (a read-only open is ledgers-only), and the
+// registry closes them at discard. Runs at startup before any read view is
+// acquired.
+func (r *Registry) publishReadyHandles(liveChunk chunk.ID, logger *supportlog.Entry) error {
+	ready, err := r.catalog.ReadyHotChunkKeys()
+	if err != nil {
+		return fmt.Errorf("bootstrap: read ready hot chunks: %w", err)
+	}
+	for _, c := range ready {
+		if c == liveChunk {
+			continue
+		}
+		db, err := hotchunk.OpenReadyWrite(geometry.HotReady, r.catalog.Layout().HotChunkPath(c), c, logger)
+		if err != nil {
+			return fmt.Errorf("bootstrap: open hot chunk %s: %w", c, err)
+		}
+		r.PublishHandle(c, db)
+	}
+	return nil
 }
 
 func (a *ReadView) LatestLedger() uint32 { return a.latestLedger }

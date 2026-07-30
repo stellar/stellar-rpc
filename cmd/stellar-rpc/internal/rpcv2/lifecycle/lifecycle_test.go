@@ -8,10 +8,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
 // TestPendingDeletions_ColdArtifactDeferred pins that a pruned cold artifact is
@@ -313,4 +318,82 @@ func TestRunLifecycleTick_FailedFreezeDoesNotWedgeReclaim(t *testing.T) {
 	assert.Equal(t, geometry.State(""), st, "the demoted key was reclaimed despite the failed freeze")
 	assert.NoFileExists(t, cat.Layout().LedgerPackPath(0),
 		"the demoted file was reclaimed despite the failed freeze")
+}
+
+// TestDeferredDeletion_BusyHandleRetriedAcrossRuns pins the recovery seam the
+// design leans on, END TO END: a reader-busy destroy leaves the transient key
+// durable and the handle retained in the registry; the next run's discard scan
+// re-collects the key, and that run's destroy closes the drained handle and
+// removes the chunk. Each half is pinned in isolation elsewhere; this wires them.
+func TestDeferredDeletion_BusyHandleRetriedAcrossRuns(t *testing.T) {
+	cat, _ := smallTxHashIndexCatalog(t, 1)
+	cfg := lifecycleTestConfig(t, cat, 0)
+	reg := query.NewRegistry(cat, geometry.NewRetention(0, 0))
+	cfg.Registry = reg
+
+	// Chunk 0: discard-eligible (all kinds frozen, terminal coverage) with a
+	// REAL hot DB, one committed ledger, published in the registry.
+	const c chunk.ID = 0
+	freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindTxHash)
+	freezeCoverage(t, cat, cat.TxHashIndexLayout().TxHashIndexID(c), c, c)
+	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
+	require.NoError(t, err)
+	_, err = db.IngestLedger(c.FirstLedger(), rpcv2test.ZeroTxLCMBytes(t, c.FirstLedger()))
+	require.NoError(t, err)
+	require.NoError(t, cat.FlipHotReady(c))
+	reg.PublishHandle(c, db)
+
+	floor := floorFor(t, cfg, c.LastLedger())
+	got, err := eligibleDiscardChunks(cat, floor, c)
+	require.NoError(t, err)
+	require.Equal(t, []chunk.ID{c}, got, "chunk 0 is discard-eligible")
+
+	// Park a reader inside the hot DB so run 1's destroy reports busy.
+	parked, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		first := true
+		for _, ierr := range db.Source().RawLedgers(
+			context.Background(), ledgerbackend.BoundedRange(c.FirstLedger(), c.FirstLedger()),
+		) {
+			if ierr != nil {
+				return
+			}
+			if first {
+				close(parked)
+				<-release
+				first = false
+			}
+		}
+	}()
+	<-parked
+
+	// Run 1: demote, then the end-of-run destroy — busy, so it is skipped.
+	var run1 pendingDeletions
+	require.NoError(t, run1.demoteHotChunk(reg, cat, c))
+	run1.destroyAll(context.Background(), cfg)
+
+	hs, err := cat.HotState(c)
+	require.NoError(t, err)
+	require.Equal(t, geometry.HotTransient, hs, "the demoted key survives the busy destroy")
+	require.DirExists(t, cat.Layout().HotChunkPath(c), "the dir survives the busy destroy")
+
+	// The reader drains; run 2's scan re-collects the transient key and its
+	// destroy closes the retained handle and finishes the removal.
+	close(release)
+	<-done
+
+	got, err = eligibleDiscardChunks(cat, floor, c)
+	require.NoError(t, err)
+	require.Equal(t, []chunk.ID{c}, got, "the next run re-collects the demoted chunk")
+
+	var run2 pendingDeletions
+	require.NoError(t, run2.demoteHotChunk(reg, cat, c)) // DiscardHandle is a no-op now
+	run2.destroyAll(context.Background(), cfg)
+
+	assert.True(t, reg.TryCloseHandle(c), "nothing left pending: the retry closed the retained handle")
+	has, err := hotKeyExists(cat, c)
+	require.NoError(t, err)
+	assert.False(t, has, "the key is gone")
+	require.NoDirExists(t, cat.Layout().HotChunkPath(c), "the dir is gone")
 }

@@ -189,17 +189,6 @@ var ErrNoReadyHotChunk = errors.New("catalog: no ready hot chunk")
 // derive their floor anchor here, so the two cannot disagree.
 func (c *Catalog) LastCompleteChunk() (int64, error) { return c.lastCompleteChunk(nil) }
 
-func (c *Catalog) lastCompleteChunk(snap *rocksdb.Snapshot) (int64, error) {
-	ready, err := c.hotChunkKeysWith(snap, isReadyHot)
-	if err != nil {
-		return 0, err
-	}
-	if len(ready) == 0 {
-		return 0, ErrNoReadyHotChunk
-	}
-	return int64(ready[len(ready)-1]) - 1, nil
-}
-
 func isReadyHot(s geometry.HotState) bool { return s == geometry.HotReady }
 
 // AllTxHashIndexKeys is TxHashIndexKeys across all indexes.
@@ -327,6 +316,17 @@ func (c *Catalog) hotChunkKeysWith(snap *rocksdb.Snapshot, keep func(geometry.Ho
 	// the slice is already ascending; sort defensively against a width change.
 	slices.Sort(ids)
 	return ids, nil
+}
+
+func (c *Catalog) lastCompleteChunk(snap *rocksdb.Snapshot) (int64, error) {
+	ready, err := c.hotChunkKeysWith(snap, isReadyHot)
+	if err != nil {
+		return 0, err
+	}
+	if len(ready) == 0 {
+		return 0, ErrNoReadyHotChunk
+	}
+	return int64(ready[len(ready)-1]) - 1, nil
 }
 
 // txhashIndexKeysByPrefix scans coverage keys under prefix, attaching each scanned

@@ -209,3 +209,26 @@ func TestRelease_ClosesViewOwnedReaders(t *testing.T) {
 	assert.True(t, closed, "Release runs the view-owned closers")
 	assert.Nil(t, a.closers, "the closer list is drained")
 }
+
+// TestEventReader_ColdRoutesToColdOpen pins that a frozen events chunk routes to
+// the cold tier: the reader targets the chunk's bucket dir (proven by the lazy
+// first-use failure naming it) and is view-owned (its closer is registered for
+// Release). A wrong dir or a dropped closer fails here.
+func TestEventReader_ColdRoutesToColdOpen(t *testing.T) {
+	const c chunk.ID = 9
+	a, cat := viewFor(t, func(cat *catalog.Catalog, _ *Registry) {
+		require.NoError(t, cat.FlipChunkFrozen(c, geometry.KindEvents))
+	})
+
+	before := len(a.closers)
+	er, err := a.Events(c)
+	require.NoError(t, err, "frozen routes to the cold tier; the cold reader opens lazily")
+	require.NotNil(t, er)
+	require.Len(t, a.closers, before+1, "the cold events reader is view-owned")
+
+	// The lazy reader validates on first use; with no bucket on disk the read
+	// fails inside the chunk's bucket dir — proving the cold branch and target.
+	_, err = er.EventCount()
+	require.Error(t, err)
+	require.ErrorContains(t, err, cat.Layout().EventsBucketDir(c), "cold reads target the chunk's bucket dir")
+}

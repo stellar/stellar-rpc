@@ -1,6 +1,8 @@
 package query
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -11,6 +13,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 )
 
 // seedHotLedgers opens chunk c's hot DB, commits the given (contiguous) seqs,
@@ -161,4 +164,60 @@ func TestEventParts(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, parts)
 	})
+}
+
+// TestScanLedgers_ColdHotBorder pins the cold-to-hot border at the scan level,
+// by payload bytes: chunk c0 is BOTH frozen-cold and ready-hot (an empty hot DB
+// is published for it), so the marker bytes written only to the cold pack prove
+// cold-wins tier selection; c1's bytes round-trip the hot store. A border read
+// served from the wrong tier cannot pass.
+func TestScanLedgers_ColdHotBorder(t *testing.T) {
+	cat := openTestCatalog(t, silentLogger())
+	r := NewRegistry(cat, geometry.NewRetention(0, 0))
+	const c0, c1 = chunk.ID(5), chunk.ID(6)
+
+	// c0's cold pack: two marker payloads at the chunk's last two ledgers. The
+	// pack covers only what the scan requests; AppendLedger stores raw bytes.
+	packPath := cat.Layout().LedgerPackPath(c0)
+	require.NoError(t, os.MkdirAll(filepath.Dir(packPath), 0o755))
+	cw, err := ledger.NewColdWriter(packPath, c0.LastLedger()-1, ledger.ColdWriterOptions{})
+	require.NoError(t, err)
+	coldA, coldB := []byte("cold-payload-a"), []byte("cold-payload-b")
+	require.NoError(t, cw.AppendLedger(c0.LastLedger()-1, coldA))
+	require.NoError(t, cw.AppendLedger(c0.LastLedger(), coldB))
+	require.NoError(t, cw.Commit())
+	require.NoError(t, cat.FlipChunkFrozen(c0, geometry.KindLedgers))
+
+	// c0 is ALSO ready-hot with a published (empty) handle: cold must win.
+	emptyHot, err := hotchunk.Open(cat.Layout().HotChunkPath(c0), c0, silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = emptyHot.Close() })
+	require.NoError(t, cat.FlipHotReady(c0))
+	r.PublishHandle(c0, emptyHot)
+
+	// c1 is hot with real committed ledgers.
+	seedHotLedgers(t, cat, r, c1, c1.FirstLedger(), c1.FirstLedger()+1)
+	r.SetLatestLedger(c1.FirstLedger() + 1)
+
+	a, err := r.NewReadView()
+	require.NoError(t, err)
+	defer a.Release()
+
+	scan, err := a.ScanLedgers(c0.LastLedger()-1, c1.FirstLedger()+1)
+	require.NoError(t, err)
+	var seqs []uint32
+	var payloads [][]byte
+	for e, ierr := range scan {
+		require.NoError(t, ierr)
+		seqs = append(seqs, e.Seq)
+		payloads = append(payloads, append([]byte(nil), e.Bytes...)) // Bytes is borrowed
+	}
+
+	require.Equal(t, []uint32{
+		c0.LastLedger() - 1, c0.LastLedger(), c1.FirstLedger(), c1.FirstLedger() + 1,
+	}, seqs, "the flat walk crosses the cold-to-hot border")
+	assert.Equal(t, coldA, payloads[0], "c0 served from the cold pack (cold-wins), not the empty hot DB")
+	assert.Equal(t, coldB, payloads[1])
+	assert.Equal(t, rpcv2test.ZeroTxLCMBytes(t, c1.FirstLedger()), payloads[2], "c1 round-trips the hot store")
+	assert.Equal(t, rpcv2test.ZeroTxLCMBytes(t, c1.FirstLedger()+1), payloads[3])
 }
