@@ -221,3 +221,110 @@ func TestScanLedgers_ColdHotBorder(t *testing.T) {
 	assert.Equal(t, rpcv2test.ZeroTxLCMBytes(t, c1.FirstLedger()), payloads[2], "c1 round-trips the hot store")
 	assert.Equal(t, rpcv2test.ZeroTxLCMBytes(t, c1.FirstLedger()+1), payloads[3])
 }
+
+// coldMarkerPack writes a one-entry cold pack for chunk c at its first ledger
+// and freezes the ledgers kind, so the chunk routes cold.
+func coldMarkerPack(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
+	t.Helper()
+	packPath := cat.Layout().LedgerPackPath(c)
+	require.NoError(t, os.MkdirAll(filepath.Dir(packPath), 0o755))
+	cw, err := ledger.NewColdWriter(packPath, c.FirstLedger(), ledger.ColdWriterOptions{})
+	require.NoError(t, err)
+	require.NoError(t, cw.AppendLedger(c.FirstLedger(), []byte("cold")))
+	require.NoError(t, cw.Commit())
+	require.NoError(t, cat.FlipChunkFrozen(c, geometry.KindLedgers))
+}
+
+// TestScanLedgers_LateChunkFailureSurfacesAtPosition pins the walker's lazy
+// branch: a scan spanning three chunks whose THIRD has no serving store yields
+// the first two chunks' entries and then the failure at its own position — the
+// one-ahead prefetch drops the error and the walk retries and surfaces it when
+// it reaches the chunk.
+func TestScanLedgers_LateChunkFailureSurfacesAtPosition(t *testing.T) {
+	cat := openTestCatalog(t, silentLogger())
+	r := NewRegistry(cat, geometry.NewRetention(0, 0))
+	const c0, c1, c2 = chunk.ID(5), chunk.ID(6), chunk.ID(7)
+	seedHotLedgers(t, cat, r, c0, c0.FirstLedger(), c0.FirstLedger()+1)
+	seedHotLedgers(t, cat, r, c1, c1.FirstLedger(), c1.FirstLedger()+1)
+	// c2: nothing at all — unroutable, but only discovered mid-stream.
+	r.SetLatestLedger(c2.FirstLedger())
+
+	a, err := r.NewReadView()
+	require.NoError(t, err)
+	defer a.Release()
+
+	scan, err := a.ScanLedgers(c0.FirstLedger(), c2.FirstLedger())
+	require.NoError(t, err, "the first two chunks resolve at call time; the third does not fail the call")
+
+	var seqs []uint32
+	var scanErr error
+	for e, ierr := range scan {
+		if ierr != nil {
+			scanErr = ierr
+			break
+		}
+		seqs = append(seqs, e.Seq)
+	}
+	assert.Equal(t, []uint32{
+		c0.FirstLedger(), c0.FirstLedger() + 1, c1.FirstLedger(), c1.FirstLedger() + 1,
+	}, seqs, "everything before the broken chunk streams out first")
+	require.ErrorIs(t, scanErr, ErrUnavailable, "the failure surfaces at the chunk's own position")
+}
+
+// TestLedgerWalk_WindowAndBackstop pins the walker's reader window directly: at
+// most two chunks are open at any step, passing a chunk closes its cold reader,
+// and closeAll (the Release backstop) drains whatever is still held — proven
+// with a sentinel closer — and is idempotent.
+func TestLedgerWalk_WindowAndBackstop(t *testing.T) {
+	a, _ := viewFor(t, func(cat *catalog.Catalog, _ *Registry) {
+		for _, c := range []chunk.ID{5, 6, 7} {
+			coldMarkerPack(t, cat, c)
+		}
+	})
+
+	w := &ledgerWalk{view: a, chunks: []chunk.ID{5, 6, 7}}
+	require.NoError(t, w.open(0))
+	require.NoError(t, w.open(1))
+	assert.Len(t, w.readers, 2, "the window holds two readers")
+	assert.Len(t, w.closers, 2, "both are cold, both owed a close")
+
+	// Advance past chunk index 0: its reader closes, the window slides.
+	w.closeChunk(0)
+	require.NoError(t, w.open(2))
+	assert.Len(t, w.readers, 2, "the window never exceeds two readers")
+
+	// The backstop drains everything still held; the sentinel proves the
+	// closers actually run, and a second closeAll is a no-op.
+	closed := false
+	w.closers[9] = func() error { closed = true; return nil } //nolint:unparam // sentinel matches the closer signature
+	require.NoError(t, w.closeAll())
+	assert.True(t, closed, "closeAll runs the held closers")
+	assert.Empty(t, w.closers, "the walk owes nothing after closeAll")
+	require.NoError(t, w.closeAll())
+}
+
+// TestScanLedgers_EarlyBreakThenRelease pins the backstop through the public
+// surface: breaking out of a scan mid-chunk leaves cold readers held, and
+// Release drains them (the registered backstop) without error.
+func TestScanLedgers_EarlyBreakThenRelease(t *testing.T) {
+	cat := openTestCatalog(t, silentLogger())
+	r := NewRegistry(cat, geometry.NewRetention(0, 0))
+	require.NoError(t, cat.FlipHotReady(999)) // acquisition needs a ready live chunk
+	for _, c := range []chunk.ID{5, 6} {
+		coldMarkerPack(t, cat, c)
+	}
+	r.SetLatestLedger(chunk.ID(6).LastLedger())
+
+	a, err := r.NewReadView()
+	require.NoError(t, err)
+
+	scan, err := a.ScanLedgers(chunk.ID(5).FirstLedger(), chunk.ID(6).FirstLedger())
+	require.NoError(t, err)
+	for range scan {
+		break // abandon the scan with both cold readers open
+	}
+	require.Len(t, a.closers, 1, "the walk's backstop is registered with the view")
+	a.Release() // must close the held readers; a double release stays a no-op
+	assert.Nil(t, a.closers)
+	a.Release()
+}

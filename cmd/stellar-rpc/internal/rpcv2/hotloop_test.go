@@ -609,3 +609,31 @@ func eventCount(t *testing.T, r interface{ EventCount() (uint32, error) }) uint3
 	require.NoError(t, err)
 	return n
 }
+
+// TestClosingSink pins the bounded loop's sink contract directly: publishing the
+// next chunk's handle closes the previous one, a same-handle republish is a
+// no-op (the loop republishes nothing today, but the guard keeps the sink safe
+// against one), and the latest-ledger advance is discarded. The final handle
+// stays open — the loop's own deferred close owns it.
+func TestClosingSink(t *testing.T) {
+	cat, _ := testCatalog(t)
+	a, err := openHotDBForChunk(cat, 0, silentLogger())
+	require.NoError(t, err)
+	b, err := openHotDBForChunk(cat, 1, silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = b.Close() })
+
+	s := &closingSink{}
+	s.PublishHandle(0, a)
+	s.PublishHandle(0, a) // same-handle republish: must not close a
+	_, _, err = a.MaxCommittedSeq()
+	require.NoError(t, err, "a survives its own republish")
+
+	s.PublishHandle(1, b) // the next chunk's publish closes the previous handle
+	_, _, err = a.MaxCommittedSeq()
+	require.Error(t, err, "a is closed once b is published")
+	_, _, err = b.MaxCommittedSeq()
+	require.NoError(t, err, "the newest handle stays open for the loop's deferred close")
+
+	s.SetLatestLedger(42) // discarded; must not panic
+}

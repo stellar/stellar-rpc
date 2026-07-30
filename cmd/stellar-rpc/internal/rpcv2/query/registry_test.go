@@ -389,3 +389,28 @@ func TestNewReadView_LatestBeforeHandles(t *testing.T) {
 
 	assert.Equal(t, uint32(100), a.LatestLedger(), "latest ledger loaded before the handle set")
 }
+
+// TestOpenRegistry_ErrorClosesOpenedHandles pins the constructor's error path: a
+// ready chunk that will not open fails the call with the bootstrap wrap, every
+// handle opened before the failure is closed (a fresh read-write open would
+// otherwise be blocked by the leaked LOCK), and the caller's live handle — never
+// published before the failure — stays the caller's and stays usable.
+func TestOpenRegistry_ErrorClosesOpenedHandles(t *testing.T) {
+	cat := openTestCatalog(t, silentLogger())
+	makeReadyHotChunk(t, cat, 5)            // opens fine
+	require.NoError(t, cat.FlipHotReady(6)) // ready key with NO dir: the open fails
+	live, err := hotchunk.Open(cat.Layout().HotChunkPath(9), 9, silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = live.Close() })
+
+	_, err = OpenRegistry(cat, geometry.NewRetention(0, 0), live, 100)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "bootstrap: open hot chunk")
+
+	db5, err := hotchunk.OpenExisting(cat.Layout().HotChunkPath(5), 5, silentLogger())
+	require.NoError(t, err, "chunk 5's LOCK is free: the error path closed the handle it opened")
+	_ = db5.Close()
+
+	_, _, err = live.MaxCommittedSeq()
+	require.NoError(t, err, "the live handle was not closed by the failed constructor")
+}
