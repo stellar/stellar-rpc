@@ -71,10 +71,7 @@ func (r *record) itemsInRecord(recordIdx int) int {
 // entire record is the single item's bytes.
 //
 // What that crc32c covers depends on the file: the FOR index alone, or the
-// whole record when the trailer sets flagRecordChecksum. The widened form is
-// verified up front, before the FOR index is parsed, so the range checked is
-// the one the offsets index implies rather than one the record's own bytes
-// select.
+// whole record when the trailer sets flagRecordChecksum.
 //
 // In passthrough mode r.current aliases the caller's input slice (r.payload
 // stays owned and untouched); r.item's "valid until next decode" contract

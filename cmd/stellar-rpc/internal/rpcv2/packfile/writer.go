@@ -141,17 +141,14 @@ type hashResult struct {
 	err    error
 }
 
-// encodeForIndex packs the per-record item sizes into a FOR group. This is the
-// on-disk wire format for the per-record item-size index appended to
-// multi-item records; decodeForIndex is the inverse. sealRecord appends the
-// CRC32C that follows it.
+// encodeForIndex packs the per-record item sizes into the FOR group that
+// decodeForIndex reads back. sealRecord appends the CRC32C that follows it.
 func encodeForIndex(sizes []uint32) []byte {
 	return intpack.EncodeGroup(sizes)
 }
 
-// sealRecord appends a record's trailing CRC32C to data, which must be the
-// fully assembled record: the encoded-or-raw payload followed by its FOR
-// group, whose length is forLen (0 for a single-item record).
+// sealRecord assembles a record from its encoded-or-raw payload and its FOR
+// group (nil for a single-item record) and appends the trailing CRC32C.
 //
 // wide selects what the checksum covers. Widened, it covers every preceding
 // byte, so it protects the payload; otherwise it covers the FOR group alone,
@@ -159,15 +156,18 @@ func encodeForIndex(sizes []uint32) []byte {
 // with the same width, which is why widening costs a multi-item record
 // nothing, and the trailer's flagRecordChecksum tells the reader which range
 // to check.
-func sealRecord(data []byte, forLen int, wide bool) []byte {
-	covered := data
-	if !wide {
-		if forLen == 0 {
-			return data
-		}
-		covered = data[len(data)-forLen:]
+//
+// Both are appended into payload, which buildRecord pre-sized for them so the
+// pooled buffer round-trips to writeRecord.
+func sealRecord(payload, forIndex []byte, wide bool) []byte {
+	payload = append(payload, forIndex...)
+	if wide {
+		return binary.LittleEndian.AppendUint32(payload, crc32c(payload))
 	}
-	return binary.LittleEndian.AppendUint32(data, crc32c(covered))
+	if len(forIndex) == 0 {
+		return payload
+	}
+	return binary.LittleEndian.AppendUint32(payload, crc32c(forIndex))
 }
 
 // verifyRecordCRC checks a widened record CRC32C against the bytes it covers
@@ -175,8 +175,8 @@ func sealRecord(data []byte, forLen int, wide bool) []byte {
 //
 // The covered range is everything up to the checksum, so it follows from the
 // record bounds in the offsets index, which Open has already verified. Nothing
-// in the record's own bytes selects it, which is what lets this run before any
-// parsing.
+// in the record's own bytes selects it, which is what lets this run before the
+// FOR index is parsed.
 func verifyRecordCRC(data []byte) ([]byte, error) {
 	if len(data) < recordCRCLen {
 		return nil, fmt.Errorf("%w: record shorter than its CRC32C (%d bytes)", ErrCorrupt, len(data))
@@ -198,16 +198,14 @@ func verifyRecordCRC(data []byte) ([]byte, error) {
 // stripped). On a CRC mismatch returns ErrChecksum; on a malformed group
 // returns wrapped ErrCorrupt.
 //
-// crcSealed says the record's trailing CRC32C has already been verified and
-// stripped by verifyRecordCRC, leaving data ending at the FOR group. That is
-// the widened layout, where those four bytes cover the payload too and can be
-// checked before anything parses. Otherwise data still ends with a CRC32C over
+// wide says verifyRecordCRC already checked and stripped the trailing CRC32C,
+// so data ends at the FOR group. Otherwise data still ends with a CRC32C over
 // the FOR group alone, which cannot be located until DecodeGroup reports how
 // long the group is.
-func decodeForIndex(data []byte, n int, dst []uint32, crcSealed bool) ([]uint32, []byte, error) {
+func decodeForIndex(data []byte, n int, dst []uint32, wide bool) ([]uint32, []byte, error) {
 	forBuf := data
 	var storedCRC uint32
-	if !crcSealed {
+	if !wide {
 		if len(data) < recordCRCLen {
 			return nil, nil, fmt.Errorf("%w: record too short", ErrCorrupt)
 		}
@@ -219,7 +217,7 @@ func decodeForIndex(data []byte, n int, dst []uint32, crcSealed bool) ([]uint32,
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %w", ErrCorrupt, err)
 	}
-	if !crcSealed && storedCRC != crc32c(forBuf[len(forBuf)-consumed:]) {
+	if !wide && storedCRC != crc32c(forBuf[len(forBuf)-consumed:]) {
 		return nil, nil, fmt.Errorf("%w: FOR index CRC32C", ErrChecksum)
 	}
 	return sizes, forBuf[:len(forBuf)-consumed], nil
@@ -509,7 +507,7 @@ func (w *Writer) recordWorker() {
 		// actually land on disk.
 		w.resultCh <- processedRecord{
 			ordinal: work.ordinal,
-			data:    sealRecord(append(work.data, work.forIndex...), len(work.forIndex), w.recordChecksum),
+			data:    sealRecord(work.data, work.forIndex, w.recordChecksum),
 			digest:  digest,
 		}
 	}
@@ -692,8 +690,7 @@ func (w *Writer) flush() error {
 	if w.workCh == nil {
 		// Pure passthrough: no workers, no hash. Write directly.
 		payload, forIndex := w.buildRecord()
-		rec := sealRecord(append(payload, forIndex...), len(forIndex), w.recordChecksum)
-		return w.writeRecord(rec)
+		return w.writeRecord(sealRecord(payload, forIndex, w.recordChecksum))
 	}
 
 	var hashSizes []uint32
@@ -819,7 +816,6 @@ func (w *Writer) writeTrailer(indexSize, appDataSize uint32, fileHash [32]byte, 
 		HasContentHash:    w.contentHash,
 		HasRecordChecksum: w.recordChecksum,
 		AppDataCRC:        appDataCRC,
-		HasAppDataCRC:     true,
 	}
 
 	var trailer [trailerSize]byte
