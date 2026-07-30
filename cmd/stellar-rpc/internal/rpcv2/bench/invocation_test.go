@@ -74,9 +74,9 @@ func TestCaptureFlags(t *testing.T) {
 	cmd.Flags().Bool("bool-flag", false, "a bool")
 
 	// Set some flags
-	cmd.Flags().Set("string-flag", "custom-val")
-	cmd.Flags().Set("int-flag", "100")
-	cmd.Flags().Set("bool-flag", "true")
+	require.NoError(t, cmd.Flags().Set("string-flag", "custom-val"))
+	require.NoError(t, cmd.Flags().Set("int-flag", "100"))
+	require.NoError(t, cmd.Flags().Set("bool-flag", "true"))
 
 	flags := captureFlags(cmd)
 

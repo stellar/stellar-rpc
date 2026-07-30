@@ -225,7 +225,7 @@ func TestCSVSinkPaceLagMixed(t *testing.T) {
 	assert.EqualValues(t, 3, driver["pace_lag"]["n"])
 	assert.EqualValues(t, 3, driver["pace_lag"]["n_items"])
 	assert.EqualValues(t, 0, driver["pace_lag"]["p50_ns"]) // 2 of 3 ledgers on time
-	assert.EqualValues(t, (100 * time.Millisecond).Nanoseconds(), driver["pace_lag"]["max_ns"])
+	assert.Equal(t, (100 * time.Millisecond).Nanoseconds(), driver["pace_lag"]["max_ns"])
 }
 
 // TestCSVSinkPaceLagUnanchored: a commit arriving before the schedule anchors

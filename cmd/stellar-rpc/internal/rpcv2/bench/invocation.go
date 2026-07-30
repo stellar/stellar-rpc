@@ -14,21 +14,24 @@ import (
 )
 
 // invocationRecord holds metadata about a benchmark invocation.
+// The snake_case JSON keys match the metadata.json schema written by
+// scripts/bench-devbox/campaign.sh, which sits next to invocation.json.
 type invocationRecord struct {
-	SchemaVersion int               `json:"schema_version"`
+	SchemaVersion int               `json:"schema_version"` //nolint:tagliatelle
 	Command       string            `json:"command"`
 	Flags         map[string]string `json:"flags"`
 	Binary        binaryInfo        `json:"binary"`
 	Hostname      string            `json:"hostname"`
-	StartedAt     string            `json:"started_at"`
-	FinishedAt    string            `json:"finished_at"`
+	StartedAt     string            `json:"started_at"`  //nolint:tagliatelle
+	FinishedAt    string            `json:"finished_at"` //nolint:tagliatelle
 }
 
 // binaryInfo holds build-time information about the binary.
+// snake_case keys for the same reason as invocationRecord.
 type binaryInfo struct {
 	Version        string `json:"version"`
-	CommitHash     string `json:"commit_hash"`
-	BuildTimestamp string `json:"build_timestamp"`
+	CommitHash     string `json:"commit_hash"`     //nolint:tagliatelle
+	BuildTimestamp string `json:"build_timestamp"` //nolint:tagliatelle
 	Branch         string `json:"branch"`
 }
 
@@ -64,7 +67,7 @@ func writeInvocationJSON(
 	}
 
 	path := filepath.Join(outDir, "invocation.json")
-	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write invocation.json: %w", err)
 	}
 	return nil
