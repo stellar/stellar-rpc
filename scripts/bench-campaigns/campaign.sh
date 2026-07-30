@@ -2,9 +2,10 @@
 #
 # Config-driven benchmark campaign runner for the full-history bench
 # subcommands. It reads a campaign config, validates it, builds the requested
-# ref into a versioned binary, prepares each dataset's cold pack tree, and
-# runs the configured ingest and query loops. Every benchmark invocation is a
-# fresh process with its own --out directory.
+# ref into a versioned binary (in a persistent build clone under
+# $BENCH_ROOT/src), prepares each dataset's cold pack tree, and runs the
+# configured ingest and query loops. Every benchmark invocation is a fresh
+# process with its own --out directory.
 #
 # Usage:
 #   ./scripts/bench-campaigns/campaign.sh <path/to/campaign.cfg> [--dry-run]
@@ -28,10 +29,11 @@
 # Config keys (the config is a bash fragment that is checked before it is
 # sourced: only comments and assignments to these keys are accepted):
 #   NAME             campaign name (required; charset [A-Za-z0-9._-])
-#   REF              git ref to benchmark (default: the current checkout).
-#                    The script builds REF into $BENCH_ROOT/bin/stellar-rpc-<sha>,
-#                    restores the original checkout, and uses only that
-#                    binary. REF selects the binary under test, nothing else.
+#   REF              git ref to benchmark (default: HEAD of the checkout the
+#                    script runs from). REF is built in the persistent clone
+#                    at $BENCH_ROOT/src into $BENCH_ROOT/bin/stellar-rpc-<sha>;
+#                    the checkout the script runs from is never modified, and
+#                    only committed state can be benchmarked.
 #   INGEST           cold | hot | both | none (required)
 #   QUERY            yes | no (required). Query-cold runs against each
 #                    dataset's frozen pack root. Query-hot needs the hot DB a
@@ -227,54 +229,54 @@ cd "$REPO"
 if [ -n "$REF" ]; then
   git rev-parse --verify --quiet "$REF^{commit}" >/dev/null || die "REF '$REF' does not resolve to a commit"
   BUILT_COMMIT=$(git rev-parse "$REF^{commit}")
-  SHA=$(git rev-parse --short=8 "$BUILT_COMMIT")
 else
   BUILT_COMMIT=$(git rev-parse HEAD)
-  SHA=$(git describe --always --dirty --abbrev=8)
+  # Builds run from committed state in $SRC, so uncommitted changes — tracked
+  # or untracked, .go files get compiled too — would silently not be part of
+  # the benchmarked binary.
+  if [ "$DRY" -eq 0 ] && [ -n "$(git status --porcelain)" ]; then
+    die "work tree has uncommitted changes and REF is unset — commit or stash them, or set REF"
+  fi
 fi
+SHA=$(git rev-parse --short=8 "$BUILT_COMMIT")
+SRC=$BENCH_ROOT/src
 BIN=$BENCH_ROOT/bin/stellar-rpc-$SHA
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 RES=$BENCH_ROOT/results/$NAME-$SHA-$STAMP
 TARBALL=/tmp/bench-results-$NAME-$SHA-$STAMP.tgz
 
-# build_rpc_v2 builds the current checkout into $BIN through the Makefile, so
-# the binary carries the repo's GOLDFLAGS (version, commit, branch, build
-# timestamp) that `stellar-rpc-v2 version` and invocation.json report. The
-# target writes ./stellar-rpc-v2 in the repo root (gitignored); move it into
-# the versioned path the campaign runs.
-build_rpc_v2() {
-  run make build-rpc-v2
-  run mv stellar-rpc-v2 "$BIN"
+# ensure_src converges the persistent build clone at $SRC onto BUILT_COMMIT.
+# It clones once from the operator's checkout (so unpushed local refs
+# resolve), then per campaign fetches that checkout's refs and hard-resets.
+# Gitignored build caches (cargo target/, Go cache) survive the reset, so
+# rebuilding a nearby commit is incremental; the operator's checkout is never
+# modified.
+ensure_src() {
+  if [ ! -d "$SRC/.git" ]; then
+    run git clone "$REPO" "$SRC"
+  fi
+  run git -C "$SRC" fetch -q "$REPO" HEAD '+refs/heads/*:refs/remotes/operator/*' '+refs/tags/*:refs/tags/*'
+  run git -C "$SRC" reset -q --hard
+  run git -C "$SRC" clean -qfd
+  run git -C "$SRC" -c advice.detachedHead=false checkout -q --detach "$BUILT_COMMIT"
 }
 
 build_binary() {
-  if [ "$DRY" -eq 0 ] && [ -n "$REF" ] && [ -x "$BIN" ]; then
+  if [ "$DRY" -eq 0 ] && [ -x "$BIN" ]; then
     note "binary $BIN already built — skipping build"
     return
   fi
-  note "build $([ -n "$REF" ] && echo "REF=$REF" || echo "current checkout") → $BIN"
-  if [ -z "$REF" ]; then
-    run make build-libs
-    build_rpc_v2
-    return
-  fi
-  local orig
-  orig=$(git symbolic-ref -q --short HEAD || git rev-parse HEAD)
-  if [ "$DRY" -eq 0 ]; then
-    # Untracked .go files are compiled too, so any dirty entry — tracked or
-    # not — makes the binary something other than BUILT_COMMIT.
-    [ -z "$(git status --porcelain)" ] ||
-      die "work tree is not clean (tracked or untracked changes) — commit, stash, or clean before benchmarking REF=$REF"
-    trap 'git checkout -q "'"$orig"'" || true' EXIT
-  fi
-  run git -c advice.detachedHead=false checkout -q "$BUILT_COMMIT"
-  run make build-libs
-  build_rpc_v2
-  run git checkout -q "$orig"
-  if [ "$DRY" -eq 0 ]; then
-    trap - EXIT
-  fi
+  note "build ${REF:-HEAD} ($SHA) → $BIN"
+  ensure_src
+  run make -C "$SRC" build-libs
+  # build-rpc-v2 goes through the Makefile so the binary carries the repo's
+  # GOLDFLAGS (version, commit, branch, build timestamp) that
+  # `stellar-rpc-v2 version` and invocation.json report. The target writes
+  # ./stellar-rpc-v2 in the clone root; move it into the versioned path the
+  # campaign runs.
+  run make -C "$SRC" build-rpc-v2
+  run mv "$SRC/stellar-rpc-v2" "$BIN"
 }
 
 # --- dataset preparation: converge every kind on a local cold pack root ---------
