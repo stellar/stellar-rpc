@@ -226,7 +226,7 @@ func (b *BackfillMeta) runFrontfill(ctx context.Context, bounds fillBounds) (fil
 			b.logger.Infof("No extra filling needed, local DB head already at most recent checkpoint in datastore")
 		}
 		// Update frontfill.First for next iteration (if any)
-		bounds.frontfill.First = bounds.frontfill.Last + 1
+		bounds.frontfill.First = max(bounds.frontfill.First, bounds.frontfill.Last+1)
 	}
 	b.dbInfo.sequences.Last = max(bounds.frontfill.First-1, b.dbInfo.sequences.Last)
 	b.logger.Infof("Forward backfill of recent ledgers complete")
@@ -241,6 +241,7 @@ func (b *BackfillMeta) verifyBounds(nBackfill, minSeq, maxSeq uint32) error {
 			"got %d ledgers (exceeds acceptable threshold of %d missing ledgers)", nBackfill, count, ledgerThreshold)
 		b.logger.Warn("You may wish to run backfill again to avoid a long post-backfill catch-up period")
 	}
+	// The backfill perf-eval runner keys off this line; keep it stable
 	b.logger.Infof("Backfill process complete, ledgers [%d -> %d] are now in local DB", minSeq, maxSeq)
 	return nil
 }
