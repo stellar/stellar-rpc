@@ -764,7 +764,7 @@ func (w *Writer) Finish(appData []byte) error {
 		}
 	}
 	//nolint:gosec // both sizes bounds-checked above
-	if err := w.writeTrailer(uint32(len(indexBytes)), uint32(len(appData)), fileHash); err != nil {
+	if err := w.writeTrailer(uint32(len(indexBytes)), uint32(len(appData)), fileHash, crc32c(appData)); err != nil {
 		return err
 	}
 	return w.finalize()
@@ -803,7 +803,7 @@ func (w *Writer) drainPipeline() error {
 }
 
 //nolint:funcorder // helper for Finish
-func (w *Writer) writeTrailer(indexSize, appDataSize uint32, fileHash [32]byte) error {
+func (w *Writer) writeTrailer(indexSize, appDataSize uint32, fileHash [32]byte, appDataCRC uint32) error {
 	t := Trailer{
 		Version: version,
 		Format:  w.format,
@@ -818,6 +818,8 @@ func (w *Writer) writeTrailer(indexSize, appDataSize uint32, fileHash [32]byte) 
 		ContentHash:       fileHash,
 		HasContentHash:    w.contentHash,
 		HasRecordChecksum: w.recordChecksum,
+		AppDataCRC:        appDataCRC,
+		HasAppDataCRC:     true,
 	}
 
 	var trailer [trailerSize]byte

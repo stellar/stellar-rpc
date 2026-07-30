@@ -30,7 +30,7 @@ const (
 //	28:32 indexSize       uint32
 //	32:36 appDataSize     uint32
 //	36:68 contentHash     [32]byte (zero when flagContentHash unset)
-//	68:72 reserved
+//	68:72 appDataCRC      uint32   (zero when flagAppDataCRC unset)
 //	72:76 crc32c          uint32   (over trailer[:trailerCRCEnd])
 const (
 	tOffMagic          = 0
@@ -45,6 +45,7 @@ const (
 	tOffAppDataSize    = 32
 	tOffContentHash    = 36
 	tEndContentHash    = 68
+	tOffAppDataCRC     = 68
 	tOffCRC            = 72
 	trailerCRCEnd      = tOffCRC // bytes [0:trailerCRCEnd] are CRC-covered
 )
@@ -57,6 +58,11 @@ const (
 	// to cover the whole record instead of the FOR-encoded item sizes alone.
 	// See RecordChecksum for the two layouts.
 	flagRecordChecksum uint8 = 1 << 1
+	// flagAppDataCRC says the trailer's appDataCRC field holds a CRC32C over
+	// the app-data section. The writer always sets it; the flag exists so a
+	// file written before the field did anything is read without checking a
+	// CRC nobody computed.
+	flagAppDataCRC uint8 = 1 << 2
 )
 
 // ErrContentHashMismatch is returned when a file's content hash does not match
@@ -83,6 +89,8 @@ type Trailer struct {
 	ContentHash       [32]byte
 	HasContentHash    bool
 	HasRecordChecksum bool
+	AppDataCRC        uint32 // CRC32C over the app-data section; meaningful only when HasAppDataCRC
+	HasAppDataCRC     bool
 	Checksum          uint32 // CRC32C over the leading bytes of the on-disk trailer; validated by unmarshalTrailer
 }
 
@@ -97,6 +105,9 @@ func (t Trailer) marshal(dst []byte) {
 	if t.HasRecordChecksum {
 		flags |= flagRecordChecksum
 	}
+	if t.HasAppDataCRC {
+		flags |= flagAppDataCRC
+	}
 	binary.LittleEndian.PutUint32(dst[tOffMagic:], magic)
 	dst[tOffVersion] = t.Version
 	dst[tOffFlags] = flags
@@ -108,6 +119,7 @@ func (t Trailer) marshal(dst []byte) {
 	binary.LittleEndian.PutUint32(dst[tOffIndexSize:], t.IndexSize)
 	binary.LittleEndian.PutUint32(dst[tOffAppDataSize:], t.AppDataSize)
 	copy(dst[tOffContentHash:tEndContentHash], t.ContentHash[:])
+	binary.LittleEndian.PutUint32(dst[tOffAppDataCRC:], t.AppDataCRC)
 	binary.LittleEndian.PutUint32(dst[tOffCRC:], crc32c(dst[:trailerCRCEnd]))
 }
 
@@ -161,6 +173,8 @@ func unmarshalTrailer(src []byte) (Trailer, error) {
 		ContentHash:       contentHash,
 		HasContentHash:    hasContentHash,
 		HasRecordChecksum: flags&flagRecordChecksum != 0,
+		AppDataCRC:        binary.LittleEndian.Uint32(tb[tOffAppDataCRC:]),
+		HasAppDataCRC:     flags&flagAppDataCRC != 0,
 		Checksum:          storedCRC,
 	}, nil
 }
