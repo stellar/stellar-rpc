@@ -180,7 +180,7 @@ func TestBuildTxhashIndex_AllEmptyWindowFreezes(t *testing.T) {
 // AND swept; exactly one frozen coverage exists at every instant.
 // ---------------------------------------------------------------------------
 
-func TestBuildThenSweep_RollingPredecessorDemotedAndSwept(t *testing.T) {
+func TestBuildThenSweep_RollingPredecessorDemotedNotSwept(t *testing.T) {
 	cat, _ := smallTxHashIndexCatalog(t, 10) // window 0 = chunks [0,9]
 	cfg := testBuildConfig(cat)
 

@@ -44,7 +44,7 @@ func TestHotTxIndexes(t *testing.T) {
 
 // TestTxHashCoverages pins that only frozen window coverages are returned, newest
 // (by upper chunk) first, and freezing debris is excluded.
-func TestTxHashCoverages(t *testing.T) {
+func TestColdTxHashIndexCoverages(t *testing.T) {
 	cat := openTestCatalog(t, silentLogger())
 	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 
@@ -66,7 +66,7 @@ func TestTxHashCoverages(t *testing.T) {
 	require.NoError(t, err)
 	defer a.Release()
 
-	covs, err := a.TxHashIndexCoverages()
+	covs, err := a.ColdTxHashIndexCoverages()
 	require.NoError(t, err)
 	require.Len(t, covs, 3, "only the frozen coverages, not the freezing debris")
 	for _, cov := range covs {

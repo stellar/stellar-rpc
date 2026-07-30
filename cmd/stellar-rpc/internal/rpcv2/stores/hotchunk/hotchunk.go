@@ -207,24 +207,20 @@ func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly, mus
 	return db, nil
 }
 
-// ChunkID returns the chunk this DB is bound to. No production caller yet —
-// the intended read seam for the v2 cutover (#772), exercised by tests until then.
+// ChunkID returns the chunk this DB is bound to.
 func (d *DB) ChunkID() chunk.ID { return d.chunkID }
 
-// Ledgers returns the ledger read/write facade over the shared store. Production
-// ingestion and the freeze source reach the facade through DB's own methods, so
-// this accessor has no production caller yet — it's the intended read seam for the
-// v2 cutover (#772), exercised by tests until then.
+// Ledgers returns the ledger read/write facade over the shared store. The read
+// side serves hot ledgers through it (query.ReadView.Ledgers).
 func (d *DB) Ledgers() *ledger.HotStore { return d.ledger }
 
-// Txhash returns the txhash read/write facade over the shared store.
-// Write side feeds the ingestion loop; the read side has no production
-// caller yet — it's the intended hot read seam for the v2 cutover (#772),
-// exercised by tests until then.
+// Txhash returns the txhash read/write facade over the shared store. The write
+// side feeds the ingestion loop; the read side probes it via
+// query.ReadView.HotTxHashIndexes.
 func (d *DB) Txhash() *txhash.HotStore { return d.txhash }
 
-// Events returns the events read/write facade over the shared store.
-// Same status as Txhash: writes feed ingestion, reads are the #772 seam.
+// Events returns the events read/write facade over the shared store. Writes feed
+// ingestion; the read side serves hot events through it (query.ReadView.Events).
 //
 // Panics on a read-only DB: OpenReadOnly composes a ledgers-only view with no
 // events facade (#834), so reaching for events there is a programming error — a
@@ -239,7 +235,9 @@ func (d *DB) Events() *event.HotStore {
 
 // Source streams the chunk's LCMs from the ledgers CF as a ledgerbackend.LedgerStream
 // the cold writer (backfill's WriteColdChunk) drains, so a just-closed chunk freezes
-// straight from its hot DB without a refetch. The freeze opens the DB read-only.
+// straight from its hot DB without a refetch. The freeze reads through the
+// registry's shared handle when one is published; the read-only reopen is the
+// fallback for the startup catch-up, where no writer is open.
 func (d *DB) Source() ledgerbackend.LedgerStream {
 	return &hotLedgerStream{store: d.ledger}
 }

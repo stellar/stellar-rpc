@@ -43,18 +43,20 @@ type Registry struct {
 	mu sync.Mutex
 
 	// closing holds handles unpublished by DiscardHandle but not yet closed because
-	// a reader was still in flight. CloseDiscarded retries them across lifecycle
+	// a reader was still in flight. TryCloseHandle retries them across lifecycle
 	// runs until they drain; Registry.Close drains them at shutdown. Keeping the
 	// handle here (not just its chunk id) is what lets the close actually retry —
 	// once unpublished, it is the only remaining reference. Guarded by mu.
 	closing map[chunk.ID]*hotchunk.DB
 
-	// newSnapshot is the snapshot constructor NewReadView uses — a test seam
-	// defaulting to catalog.NewSnapshot. The load-order test hooks it to mutate
-	// the registry from inside the snapshot call, pinning that the latest ledger
-	// and the handle set are loaded BEFORE the snapshot (the ordering the
-	// design's skew argument depends on, otherwise unobservable).
+	// newSnapshot and loadHandles are the seams the load-order tests hook —
+	// defaulting to catalog.NewSnapshot and handles.Load. Together they pin the
+	// full three-load order the design's skew argument depends on (latest ledger,
+	// then handles, then snapshot), which is otherwise unobservable: the
+	// newSnapshot hook catches either load drifting after the snapshot, and the
+	// loadHandles hook catches the latest ledger drifting after the handle set.
 	newSnapshot func() (*rocksdb.Snapshot, error)
+	loadHandles func() *handleSet
 }
 
 // handleSet is an immutable map of open hot-database handles keyed by chunk,
@@ -81,6 +83,7 @@ func NewRegistry(cat *catalog.Catalog, retention geometry.Retention) *Registry {
 		closing:     map[chunk.ID]*hotchunk.DB{},
 		newSnapshot: cat.NewSnapshot,
 	}
+	r.loadHandles = r.handles.Load
 	r.handles.Store(&handleSet{byChunk: map[chunk.ID]*hotchunk.DB{}})
 	return r
 }
@@ -137,7 +140,7 @@ func (r *Registry) PublishHandle(c chunk.ID, db *hotchunk.DB) {
 }
 
 // DiscardHandle unpublishes chunk c's handle so new read views stop routing to it,
-// moving it to the closing set for CloseDiscarded to close once idle. Idempotent:
+// moving it to the closing set for TryCloseHandle to close once idle. Idempotent:
 // a repeat call (the retry re-collecting the transient key) is a no-op, since the
 // handle is no longer published.
 func (r *Registry) DiscardHandle(c chunk.ID) {
@@ -154,18 +157,19 @@ func (r *Registry) DiscardHandle(c chunk.ID) {
 	r.closing[c] = db
 }
 
-// CloseDiscarded closes chunk c's discarded handle when no operation is in flight,
-// returning true once it is closed (or there was none pending). False means a
-// reader is still in flight; the caller leaves the chunk's transient key so a
-// later run re-collects it and retries — the handle stays in closing until it
-// drains. Deferred deletion calls this after the grace period, before unlinking
-// the chunk's files.
+// TryCloseHandle closes chunk c's handle when no operation is in flight,
+// returning whether it is closed (true also when nothing was pending). It only
+// ever closes a handle DiscardHandle already unpublished — never a published one.
+// False means a reader is still in flight; the caller leaves the chunk's
+// transient key so a later run re-collects it and retries — the handle stays in
+// closing until it drains. Deferred deletion calls this after the grace period,
+// before unlinking the chunk's files.
 //
 // The close runs under mu, so a successful close's memtable flush briefly blocks a
 // concurrent boundary PublishHandle. Read-view acquisition is unaffected (it loads
 // handles without mu), and the stall is rare (a discard overlapping a boundary)
 // and bounded (one memtable), so it is not worth closing outside the lock.
-func (r *Registry) CloseDiscarded(c chunk.ID) bool {
+func (r *Registry) TryCloseHandle(c chunk.ID) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	db, ok := r.closing[c]
@@ -225,7 +229,7 @@ type ReadView struct {
 // paths.
 func (r *Registry) NewReadView() (*ReadView, error) {
 	latest := r.latestLedger.Load()
-	handles := r.handles.Load()
+	handles := r.loadHandles()
 	snap, err := r.newSnapshot()
 	if err != nil {
 		return nil, err

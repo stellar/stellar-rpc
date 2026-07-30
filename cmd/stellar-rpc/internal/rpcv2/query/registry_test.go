@@ -206,12 +206,12 @@ func publishReadyHandle(t *testing.T, r *Registry, cat *catalog.Catalog, c chunk
 	r.PublishHandle(c, db)
 }
 
-// TestDiscardThenCloseDiscarded pins the retire path: DiscardHandle unpublishes the
-// handle into the closing set, CloseDiscarded closes the idle handle, and a repeat
-// CloseDiscarded is a no-op (nothing left pending). This is the close-retry seam
+// TestDiscardThenTryCloseHandle pins the retire path: DiscardHandle unpublishes the
+// handle into the closing set, TryCloseHandle closes the idle handle, and a repeat
+// TryCloseHandle is a no-op (nothing left pending). This is the close-retry seam
 // the deferred-deletion fix relies on — the handle survives in closing across the
 // discard and the (later) close.
-func TestDiscardThenCloseDiscarded(t *testing.T) {
+func TestDiscardThenTryCloseHandle(t *testing.T) {
 	cat := openTestCatalog(t, silentLogger())
 	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 	publishReadyHandle(t, r, cat, 5)
@@ -220,16 +220,16 @@ func TestDiscardThenCloseDiscarded(t *testing.T) {
 	_, ok := r.Handle(5)
 	assert.False(t, ok, "discarded handle is unpublished")
 
-	assert.True(t, r.CloseDiscarded(5), "idle discarded handle closes")
-	assert.True(t, r.CloseDiscarded(5), "second call: nothing pending")
+	assert.True(t, r.TryCloseHandle(5), "idle discarded handle closes")
+	assert.True(t, r.TryCloseHandle(5), "second call: nothing pending")
 
 	// DiscardHandle for a chunk not published is a harmless no-op (the retry case).
 	r.DiscardHandle(5)
-	assert.True(t, r.CloseDiscarded(5), "no-op discard leaves nothing to close")
+	assert.True(t, r.TryCloseHandle(5), "no-op discard leaves nothing to close")
 }
 
 // TestCloseDiscarded_BusyRetainsThenRetryDrains pins the retry behavior the fix
-// promises: while a reader is in flight, CloseDiscarded reports false and keeps the
+// promises: while a reader is in flight, TryCloseHandle reports false and keeps the
 // handle in the closing set; once the reader drains, a later call closes it and
 // removes it. A parked ledger scan holds the store's lock to force the busy path.
 func TestCloseDiscarded_BusyRetainsThenRetryDrains(t *testing.T) {
@@ -244,7 +244,7 @@ func TestCloseDiscarded_BusyRetainsThenRetryDrains(t *testing.T) {
 	r.PublishHandle(c, db)
 
 	// Park a reader inside the ledger stream so the store's read-lock stays held,
-	// which makes CloseIfIdle (under CloseDiscarded) report busy.
+	// which makes CloseIfIdle (under TryCloseHandle) report busy.
 	parked, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(done)
@@ -265,14 +265,14 @@ func TestCloseDiscarded_BusyRetainsThenRetryDrains(t *testing.T) {
 	<-parked
 
 	r.DiscardHandle(c)
-	require.False(t, r.CloseDiscarded(c), "reader in flight → close deferred")
+	require.False(t, r.TryCloseHandle(c), "reader in flight → close deferred")
 	_, retained := r.closing[c]
 	assert.True(t, retained, "the handle is retained in closing for a later retry")
 
 	close(release)
 	<-done
 
-	require.True(t, r.CloseDiscarded(c), "after the reader drains, the retained handle closes")
+	require.True(t, r.TryCloseHandle(c), "after the reader drains, the retained handle closes")
 	_, stillThere := r.closing[c]
 	assert.False(t, stillThere, "closing is drained once the handle closes")
 }
@@ -293,9 +293,9 @@ func TestClose_ClosesAndClearsHandles(t *testing.T) {
 
 	_, ok5 := r.Handle(5)
 	assert.False(t, ok5, "published handle cleared on close")
-	// The discarded-but-unclosed handle is drained too: a later CloseDiscarded finds
+	// The discarded-but-unclosed handle is drained too: a later TryCloseHandle finds
 	// nothing pending.
-	assert.True(t, r.CloseDiscarded(6), "closing set drained on close")
+	assert.True(t, r.TryCloseHandle(6), "closing set drained on close")
 
 	r.Close() // idempotent
 }
@@ -365,4 +365,28 @@ func TestNewReadView_LoadOrderPinned(t *testing.T) {
 	assert.Equal(t, uint32(100), a.LatestLedger(), "latest ledger loaded before the snapshot")
 	_, has6 := a.handles.byChunk[6]
 	assert.False(t, has6, "handle set loaded before the snapshot")
+}
+
+// TestNewReadView_LatestBeforeHandles pins the half of the load order the
+// snapshot seam cannot see: the latest ledger is loaded BEFORE the handle set.
+// Swapped, a boundary between the loads leaves the view's latestLedger pointing
+// into a chunk its handle set predates — resolveTier would return ErrUnavailable
+// for an in-range tip ledger. The hook advances the latest ledger from inside the
+// handle-set load; with the correct order the view holds the pre-hook value.
+func TestNewReadView_LatestBeforeHandles(t *testing.T) {
+	r, cat := newTestRegistry(t, 0, 0)
+	require.NoError(t, cat.FlipHotReady(5))
+	r.SetLatestLedger(100)
+
+	inner := r.loadHandles
+	r.loadHandles = func() *handleSet {
+		r.SetLatestLedger(200) // lands after the latest-ledger load
+		return inner()
+	}
+
+	a, err := r.NewReadView()
+	require.NoError(t, err)
+	defer a.Release()
+
+	assert.Equal(t, uint32(100), a.LatestLedger(), "latest ledger loaded before the handle set")
 }

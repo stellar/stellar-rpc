@@ -70,7 +70,7 @@ func TestScanLedgers_CrossesChunkBorder(t *testing.T) {
 
 // TestScanLedgers_ClampsAtLatest pins that the internal clamp truncates the
 // trailing edge: c1's FirstLedger()+1 is committed and would be yielded, but
-// latest sits one below it, so a caller cannot iterate past the admitted latest.
+// latest sits one below it, so a caller cannot iterate past the view's latestLedger.
 func TestScanLedgers_ClampsAtLatest(t *testing.T) {
 	r, c0, c1 := borderFixture(t)
 	got := collectSeqs(t, r, c0.FirstLedger()+1, c1.FirstLedger()+500)

@@ -37,12 +37,12 @@ func (a *ReadView) HotTxHashIndexes() []txhash.HashIndex {
 	return idxs
 }
 
-// TxHashIndexCoverages returns the frozen window index coverages in the view's
+// ColdTxHashIndexCoverages returns the frozen window index coverages in the view's
 // snapshot, newest coverage first (by upper chunk). Each names a generation of an
 // on-disk .idx the lookup opens as it probes; a cold match is a fingerprinted
 // candidate. Reading them through the snapshot keeps the probe set fixed for the
 // request even as an index rebuild swaps a coverage concurrently.
-func (a *ReadView) TxHashIndexCoverages() ([]geometry.TxHashIndexCoverage, error) {
+func (a *ReadView) ColdTxHashIndexCoverages() ([]geometry.TxHashIndexCoverage, error) {
 	all, err := a.catalog.AllTxHashIndexKeysAsOf(a.snap)
 	if err != nil {
 		return nil, err

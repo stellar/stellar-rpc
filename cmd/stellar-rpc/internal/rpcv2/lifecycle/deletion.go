@@ -47,11 +47,11 @@ func (p *pendingDeletions) demoteHotChunk(registry HandleRetirer, cat *catalog.C
 	}
 	p.add("hot chunk "+c.String(), func() error {
 		// Close the handle before removing files. A reader still in flight leaves
-		// the transient key for a later run: CloseDiscarded reports false, the next
+		// the transient key for a later run: TryCloseHandle reports false, the next
 		// discard scan re-collects the key, and the registry keeps the handle in its
 		// closing set until it drains — so the close itself retries, not just the
 		// catalog cleanup.
-		if registry != nil && !registry.CloseDiscarded(c) {
+		if registry != nil && !registry.TryCloseHandle(c) {
 			return errReaderInFlight
 		}
 		return cat.DestroyHotChunk(c)
@@ -102,11 +102,11 @@ func (p *pendingDeletions) destroyAll(ctx context.Context, cfg Config) {
 }
 
 // HandleRetirer is the slice of the registry the discard path uses: unpublish a hot
-// handle (DiscardHandle), then close it once idle (CloseDiscarded), retried across
+// handle (DiscardHandle), then close it once idle (TryCloseHandle), retried across
 // runs until it drains. An interface so the lifecycle does not depend on the whole
 // query package (a nil retirer is the test case).
 // *query.Registry satisfies it.
 type HandleRetirer interface {
 	DiscardHandle(c chunk.ID)
-	CloseDiscarded(c chunk.ID) bool
+	TryCloseHandle(c chunk.ID) bool
 }

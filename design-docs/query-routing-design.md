@@ -6,7 +6,7 @@ This document is the read-side counterpart to the [streaming workflow](./full-hi
 
 Every query runs against a consistent snapshot of serving state, acquired as a **read view** before any routing decision. Acquisition loads the current `latestLedger`, the current set of open hot database handles, and a RocksDB snapshot of the **catalog**. The query uses that view for its entire lifetime and releases it when the request completes. The snapshot gives the query a repeatable read of the routing metadata: which chunks are frozen, which hot databases are ready, and which index generation covers each window. There is no second copy of that metadata to maintain: queries read the same catalog the lifecycle writes, pinned at acquisition time.
 
-A small in-memory **registry** owns only what cannot live in the catalog: the `latestLedger` value and the shared hot database handles. It changes only when a hot database opens or is discarded.
+A small in-memory **registry** owns only what cannot live in the catalog: the `latestLedger` value and the shared hot database handles. `latestLedger` advances every commit; the handle set changes only when a hot database opens or is discarded.
 
 Deletion is deferred rather than reader-tracked. Every request runs under a fixed deadline. Once a resource is demoted in the catalog, no newly acquired view routes to it, and physical destruction waits out a grace period longer than the maximum request lifetime, so requests whose views predate the demotion can finish against it ([Deferred deletion](#deferred-deletion)).
 
