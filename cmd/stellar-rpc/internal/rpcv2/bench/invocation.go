@@ -15,7 +15,7 @@ import (
 
 // invocationRecord holds metadata about a benchmark invocation.
 // The snake_case JSON keys match the metadata.json schema written by
-// scripts/bench-devbox/campaign.sh, which sits next to invocation.json.
+// scripts/bench-campaigns/campaign.sh, which sits next to invocation.json.
 type invocationRecord struct {
 	SchemaVersion int               `json:"schema_version"` //nolint:tagliatelle
 	Command       string            `json:"command"`

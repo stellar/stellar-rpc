@@ -7,22 +7,23 @@
 # fresh process with its own --out directory.
 #
 # Usage:
-#   ./scripts/bench-devbox/campaign.sh <path/to/campaign.cfg> [--dry-run]
+#   ./scripts/bench-campaigns/campaign.sh <path/to/campaign.cfg> [--dry-run]
 #
 # --dry-run prints every command the campaign would execute, with resolved
 # paths and flags. It performs no builds, downloads, or benchmark runs.
 #
 # Environment:
 #   BENCH  storage root for datasets, scratch space, and results
-#          (default /mnt/nvme/bench, the devbox NVMe; on other machines set
-#          it to a writable path, e.g. BENCH=/tmp/bench)
+#          (default /mnt/nvme/bench, the benchmark machine's NVMe; on other
+#          machines set it to a writable path, e.g. BENCH=/tmp/bench)
 #
 # Results land in $BENCH/results/<NAME>-<sha>-<stamp>/ together with the
 # campaign config, the benchmarked binary's identity (binary.txt),
 # machine-metadata.txt, and metadata.json. The results directory is bundled to
-# /tmp/bench-results-<NAME>-<sha>-<stamp>.tgz (the EBS root on the devbox,
-# so the bundle survives an instance stop). When PUBLISH_URI is set the bundle
-# is also uploaded to <PUBLISH_URI>/<NAME>-<sha>-<stamp>/ by publish.sh.
+# /tmp/bench-results-<NAME>-<sha>-<stamp>.tgz (the EBS root on the benchmark
+# machine, so the bundle survives an instance stop). When PUBLISH_URI is set
+# the bundle is also uploaded to <PUBLISH_URI>/<NAME>-<sha>-<stamp>/ by
+# publish.sh.
 #
 # Config keys (the config is a bash fragment that is checked before it is
 # sourced: only comments and assignments to these keys are accepted):
@@ -310,7 +311,7 @@ prepare_dataset() { # prepare_dataset INDEX
         for c in "${chunks[@]}"; do
           note "dataset $name: golden backfill of chunk $c from S3 (untimed)"
           # AWS_EC2_METADATA_DISABLED is set on this command only: without it
-          # the SDK signs requests with the box's IAM role and the public
+          # the SDK signs requests with the machine's IAM role and the public
           # bucket 403s, but exporting it globally would also hide those same
           # instance-role credentials from publish.sh's `aws s3` calls.
           run env AWS_EC2_METADATA_DISABLED=true \

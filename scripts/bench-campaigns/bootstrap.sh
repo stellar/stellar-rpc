@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# Idempotent bootstrap for a full-history benchmark dev box: an EC2 instance
+# Idempotent bootstrap for a full-history benchmark machine: an EC2 instance
 # with a local NVMe instance store (e.g. m6id.2xlarge) running Ubuntu 24.04.
 # Safe to re-run any time — in particular after an instance stop/start, which
 # wipes the NVMe instance store (golden packs are re-downloaded by
 # campaign.sh).
 #
-# Usage (on the box):
-#   ./scripts/bench-devbox/bootstrap.sh
+# Usage (on the machine):
+#   ./scripts/bench-campaigns/bootstrap.sh
 #
 # Overridable: NVME_DEV (default /dev/nvme1n1), REPO (default ~/stellar-rpc),
 # BRANCH (default main).
@@ -39,7 +39,7 @@ if ! mountpoint -q "$MOUNT"; then
 fi
 mkdir -p "$MOUNT"/bench/{golden,scratch,hot,results}
 
-# --- fsync honesty probe: the whole reason this box exists ------------------
+# --- fsync honesty probe: the whole reason this machine exists --------------
 probe=$(dd if=/dev/zero of="$MOUNT/.fsync-probe" bs=4k count=2000 oflag=dsync 2>&1 | tail -1)
 rm -f "$MOUNT/.fsync-probe"
 note "fsync probe: $probe"
@@ -90,9 +90,9 @@ fi
   (cd "$REPO" && PREFIX="$HOME/.rocksdb" ZSTD_HOME="$HOME/.zstd" ./scripts/install-rocksdb.sh)
 
 # --- environment: persist for future shells, set for this run ----------------
-if ! grep -q '# bench-devbox env' "$HOME/.bashrc"; then
+if ! grep -q '# bench-campaigns env' "$HOME/.bashrc"; then
   cat >> "$HOME/.bashrc" <<'EOF'
-# bench-devbox env
+# bench-campaigns env
 export PATH=/usr/local/go/bin:$HOME/go/bin:$HOME/.cargo/bin:$PATH
 export CGO_CFLAGS="-I$HOME/.zstd/include -I$HOME/.rocksdb/include"
 export CGO_LDFLAGS="-L$HOME/.zstd/lib -L$HOME/.rocksdb/lib"

@@ -7,7 +7,7 @@
 # write into a destination that already holds objects unless --force is given.
 #
 # Usage:
-#   ./scripts/bench-devbox/publish.sh <results-dir> [<dest-root-uri>] [--dry-run] [--force]
+#   ./scripts/bench-campaigns/publish.sh <results-dir> [<dest-root-uri>] [--dry-run] [--force]
 #
 # Arguments:
 #   <results-dir>    a campaign bundle ($BENCH/results/<run_id>/). Its basename
