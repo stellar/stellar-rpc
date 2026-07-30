@@ -155,6 +155,13 @@ func runHot(ctx context.Context, logger *supportlog.Entry, cmd *cobra.Command, o
 	}
 	if err != nil {
 		writePartialCSVs(logger, sink, opts.OutDir)
+		// The partial CSVs get the same identity metadata a completed run's do;
+		// a write failure here must not hide the run's own error.
+		if werr := writeInvocationJSON(
+			opts.OutDir, cmd, captureFlags(cmd), startedAt, time.Now().UTC(), err,
+		); werr != nil {
+			logger.Warnf("writing invocation.json: %v", werr)
+		}
 		return err
 	}
 	sink.observe(fileDriver, driverRunWall, time.Since(start), int(last-first+1))
@@ -163,7 +170,7 @@ func runHot(ctx context.Context, logger *supportlog.Entry, cmd *cobra.Command, o
 	if err != nil {
 		return err
 	}
-	if err := writeInvocationJSON(opts.OutDir, cmd, captureFlags(cmd), startedAt, time.Now().UTC()); err != nil {
+	if err := writeInvocationJSON(opts.OutDir, cmd, captureFlags(cmd), startedAt, time.Now().UTC(), nil); err != nil {
 		return err
 	}
 	logger.Infof("wrote %d CSVs to %s", len(written), opts.OutDir)

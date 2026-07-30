@@ -3,6 +3,7 @@ package bench
 import (
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -366,6 +367,7 @@ func TestRunHotIncompleteStream(t *testing.T) {
 	const packed = 50
 	chunkID := chunk.ID(0)
 	packDir, _ := writeSourcePack(t, t.TempDir(), chunkID, packed)
+	csvDir := filepath.Join(t.TempDir(), "csv")
 
 	err := runHot(context.Background(), testLogger(), &cobra.Command{Use: "test"}, hotOptions{
 		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
@@ -373,13 +375,21 @@ func TestRunHotIncompleteStream(t *testing.T) {
 		NumChunks:  1,
 		NumLedgers: packed + 10, // asks for more than the pack holds
 		HotRoot:    t.TempDir(),
-		OutDir:     filepath.Join(t.TempDir(), "csv"),
+		OutDir:     csvDir,
 	})
 	// Seqs are fixture-determined: 50 ledgers from chunk 0 → coverage [2, 51];
 	// packed+10 requested → [2, 61]. Both bounds are deterministic, so pinning
 	// them is exact rather than volatile.
 	require.ErrorContains(t, err, "ingestion stream: stores: out of range: "+
 		"requested [2, 61] outside store coverage [2, 51]")
+
+	// The failed run's output dir is still self-describing, and the record
+	// names the failure.
+	data, readErr := os.ReadFile(filepath.Join(csvDir, "invocation.json"))
+	require.NoError(t, readErr)
+	var record invocationRecord
+	require.NoError(t, json.Unmarshal(data, &record))
+	assert.Equal(t, err.Error(), record.Error)
 }
 
 // TestRunHotPaced is the end-to-end paced hot path: a capped run with a small
