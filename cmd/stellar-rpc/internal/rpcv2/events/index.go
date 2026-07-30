@@ -71,9 +71,9 @@ const topicCountOverflowBucket = protocol.MaxTopicCount + 1
 // The bucket space is written into cold chunks that are never rewritten,
 // so MaxTopicCount fixes what every bucket in an existing artifact means.
 // Growing it would silently redefine the overflow bucket: what was
-// written as "MaxTopicCount or more" would be read back as an exact
-// count. Fail the build instead, the way topicField panics when the
-// constant outgrows the topic Fields.
+// written as "more topics than MaxTopicCount" would be read back as an
+// exact count. Fail the build instead, the way topicField panics when
+// the constant outgrows the topic Fields.
 const (
 	_ uint = protocol.MaxTopicCount - 4
 	_ uint = 4 - protocol.MaxTopicCount

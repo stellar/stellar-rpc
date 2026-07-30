@@ -82,10 +82,10 @@ func (f TopicCountFilter) matches(n int) bool {
 	return n >= f.Count
 }
 
-// termKeys returns the topic-count buckets whose union covers f. An
-// exact count above what a filter can name shares the overflow bucket
-// with every other such count, so it is a superset the post-filter
-// narrows.
+// termKeys returns the topic-count buckets whose union covers f. Every
+// count validateFilters admits has a bucket of its own, and an "at
+// least" union is closed by the overflow bucket, so the union never
+// holds an event f does not match.
 func (f TopicCountFilter) termKeys() []events.TermKey {
 	if f.isWildcard() {
 		return nil
@@ -453,6 +453,17 @@ func validateFilters(filters []Filter) error {
 			return fmt.Errorf(
 				"events: filter[%d].TopicCount.Count must be non-negative, got %d",
 				fi, f.TopicCount.Count)
+		}
+		// Above MaxTopicCount the index cannot answer a count exactly: every
+		// such count shares the overflow bucket, so the terms would return a
+		// superset and the post-filter would narrow it. MaxEvents is applied
+		// before the post-filter, so that page can come back empty while
+		// matches remain, leaving no delivered position to resume from. A
+		// getEvents filter cannot name that many topics anyway.
+		if f.TopicCount.Count > protocol.MaxTopicCount {
+			return fmt.Errorf(
+				"events: filter[%d].TopicCount.Count must be at most %d, got %d",
+				fi, protocol.MaxTopicCount, f.TopicCount.Count)
 		}
 	}
 	return nil

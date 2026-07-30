@@ -782,12 +782,13 @@ func makeSimplePayload(t *testing.T, dataSymbol string) events.Payload {
 //	id 1: system,   topics [alpha]                             → "s-1"
 //	id 2: contract, topics [alpha, beta]                       → "c-2"
 //	id 3: contract, topics []                                  → "c-0"
-//	id 4: contract, topics [alpha, beta, gamma, delta, epslon] → "c-5"
+//	id 4: contract, topics [alpha, beta, gamma, delta, epsilon] → "c-5"
 //	id 5: contract, topics [alpha, beta, gamma, delta]         → "c-4"
 //	id 6: contract, topics [alpha .. zeta]                     → "c-6"
 //
-// "c-5" and "c-6" share the overflow bucket, so an exact count there is a
-// superset the post-filter has to narrow.
+// "c-5" and "c-6" both carry more topics than a filter can name, so they
+// share the overflow bucket: they are what an "at least" union has to reach
+// and what an exact count must not return.
 type typeArityFixture struct {
 	store    *HotStore
 	contract xdr.ContractId
@@ -880,12 +881,11 @@ func TestQuery_TopicCountFilter(t *testing.T) {
 		filter Filter
 		want   []string
 	}{
-		"exactly 0":                   {Filter{TopicCount: TopicCountFilter{Count: 0, Exact: true}}, []string{"c-0"}},
-		"exactly 1":                   {Filter{TopicCount: TopicCountFilter{Count: 1, Exact: true}}, []string{"c-1", "s-1"}},
-		"exactly 2":                   {Filter{TopicCount: TopicCountFilter{Count: 2, Exact: true}}, []string{"c-2"}},
-		"exactly 3":                   {Filter{TopicCount: TopicCountFilter{Count: 3, Exact: true}}, []string{}},
-		"exactly the top count":       {Filter{TopicCount: TopicCountFilter{Count: top, Exact: true}}, []string{"c-4"}},
-		"exactly above the top count": {Filter{TopicCount: TopicCountFilter{Count: top + 1, Exact: true}}, []string{"c-5"}},
+		"exactly 0":             {Filter{TopicCount: TopicCountFilter{Count: 0, Exact: true}}, []string{"c-0"}},
+		"exactly 1":             {Filter{TopicCount: TopicCountFilter{Count: 1, Exact: true}}, []string{"c-1", "s-1"}},
+		"exactly 2":             {Filter{TopicCount: TopicCountFilter{Count: 2, Exact: true}}, []string{"c-2"}},
+		"exactly 3":             {Filter{TopicCount: TopicCountFilter{Count: 3, Exact: true}}, []string{}},
+		"exactly the top count": {Filter{TopicCount: TopicCountFilter{Count: top, Exact: true}}, []string{"c-4"}},
 
 		"at least 1": {
 			Filter{TopicCount: TopicCountFilter{Count: 1}},
@@ -895,11 +895,8 @@ func TestQuery_TopicCountFilter(t *testing.T) {
 			Filter{TopicCount: TopicCountFilter{Count: 2}},
 			[]string{"c-2", "c-5", "c-4", "c-6"},
 		},
-		"at least 3":                   {Filter{TopicCount: TopicCountFilter{Count: 3}}, []string{"c-5", "c-4", "c-6"}},
-		"at least the top count":       {Filter{TopicCount: TopicCountFilter{Count: top}}, []string{"c-5", "c-4", "c-6"}},
-		"at least above the top count": {Filter{TopicCount: TopicCountFilter{Count: top + 1}}, []string{"c-5", "c-6"}},
-		"at least two above the top":   {Filter{TopicCount: TopicCountFilter{Count: top + 2}}, []string{"c-6"}},
-		"at least beyond every event":  {Filter{TopicCount: TopicCountFilter{Count: top + 3}}, []string{}},
+		"at least 3":             {Filter{TopicCount: TopicCountFilter{Count: 3}}, []string{"c-5", "c-4", "c-6"}},
+		"at least the top count": {Filter{TopicCount: TopicCountFilter{Count: top}}, []string{"c-5", "c-4", "c-6"}},
 
 		"count alongside every other field": {
 			Filter{
@@ -932,12 +929,11 @@ func TestQuery_TypeAndCountIndexTerms(t *testing.T) {
 		wantCalls int
 		wantKeys  int
 	}{
-		"wildcard count stays match-all":      {Filter{}, 0, 0},
-		"type alone":                          {Filter{EventType: &system}, 1, 1},
-		"exact count alone":                   {Filter{TopicCount: TopicCountFilter{Count: 1, Exact: true}}, 1, 1},
-		"at least 1 unions every bucket":      {Filter{TopicCount: TopicCountFilter{Count: 1}}, 1, top + 1},
-		"at least the top count":              {Filter{TopicCount: TopicCountFilter{Count: top}}, 1, 2},
-		"at least beyond what a filter names": {Filter{TopicCount: TopicCountFilter{Count: 9}}, 1, 1},
+		"wildcard count stays match-all": {Filter{}, 0, 0},
+		"type alone":                     {Filter{EventType: &system}, 1, 1},
+		"exact count alone":              {Filter{TopicCount: TopicCountFilter{Count: 1, Exact: true}}, 1, 1},
+		"at least 1 unions every bucket": {Filter{TopicCount: TopicCountFilter{Count: 1}}, 1, top + 1},
+		"at least the top count":         {Filter{TopicCount: TopicCountFilter{Count: top}}, 1, 2},
 		"count on top of a contract": {
 			Filter{ContractID: fx.contract[:], TopicCount: TopicCountFilter{Count: 3}},
 			1, 1 + 3,
@@ -1057,6 +1053,18 @@ func TestQuery_InvalidFilterRejected(t *testing.T) {
 		"unknown event type": {
 			Filter{EventType: &unknownType},
 			"not a known event type",
+		},
+		// The index shares one bucket across every count above what a filter
+		// can name, so serving these would mean returning a superset and
+		// letting the post-filter narrow it, which MaxEvents can turn into an
+		// empty page with matches still ahead.
+		"topic count above what a filter can name": {
+			Filter{TopicCount: TopicCountFilter{Count: protocol.MaxTopicCount + 1}},
+			"must be at most 4",
+		},
+		"exact topic count above what a filter can name": {
+			Filter{TopicCount: TopicCountFilter{Count: protocol.MaxTopicCount + 1, Exact: true}},
+			"must be at most 4",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
