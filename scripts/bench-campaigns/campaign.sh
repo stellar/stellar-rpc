@@ -13,11 +13,11 @@
 # paths and flags. It performs no builds, downloads, or benchmark runs.
 #
 # Environment:
-#   BENCH  storage root for datasets, scratch space, and results
+#   BENCH_ROOT  storage root for datasets, scratch space, and results
 #          (default /mnt/nvme/bench, the benchmark machine's NVMe; on other
-#          machines set it to a writable path, e.g. BENCH=/tmp/bench)
+#          machines set it to a writable path, e.g. BENCH_ROOT=/tmp/bench)
 #
-# Results land in $BENCH/results/<NAME>-<sha>-<stamp>/ together with the
+# Results land in $BENCH_ROOT/results/<NAME>-<sha>-<stamp>/ together with the
 # campaign config, the benchmarked binary's identity (binary.txt),
 # machine-metadata.txt, and metadata.json. The results directory is bundled to
 # /tmp/bench-results-<NAME>-<sha>-<stamp>.tgz (the EBS root on the benchmark
@@ -29,7 +29,7 @@
 # sourced: only comments and assignments to these keys are accepted):
 #   NAME             campaign name (required; charset [A-Za-z0-9._-])
 #   REF              git ref to benchmark (default: the current checkout).
-#                    The script builds REF into $BENCH/bin/stellar-rpc-<sha>,
+#                    The script builds REF into $BENCH_ROOT/bin/stellar-rpc-<sha>,
 #                    restores the original checkout, and uses only that
 #                    binary. REF selects the binary under test, nothing else.
 #   INGEST           cold | hot | both | none (required)
@@ -53,22 +53,22 @@
 #                      (the directory that contains ledgers/, events/,
 #                      txhash/).
 #                    kind=packs-gs: location is a gs:// prefix of the same
-#                      tree; fetched once into $BENCH/golden/<name>/.
+#                      tree; fetched once into $BENCH_ROOT/golden/<name>/.
 #                    kind=bsb-s3: location is an S3 bucket path; an untimed
-#                      cold backfill materializes $BENCH/golden/<name>/.
+#                      cold backfill materializes $BENCH_ROOT/golden/<name>/.
 #                    kind=fixture: location is the per-chunk ledger count for
 #                      bench-ingest fixture (0 = whole chunk; a partial chunk
 #                      cannot be frozen, so the count must be 0 or >= 10000).
 #                      A generated fixture pack plus an untimed cold ingest
-#                      materialize $BENCH/golden/<name>/.
+#                      materialize $BENCH_ROOT/golden/<name>/.
 #                    chunks is a space-separated chunk-ID list.
 #
-# To force a re-fetch of a golden dataset: rm -rf $BENCH/golden/<name>.
+# To force a re-fetch of a golden dataset: rm -rf $BENCH_ROOT/golden/<name>.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/../.." && pwd)"
-BENCH="${BENCH:-/mnt/nvme/bench}"
+BENCH_ROOT="${BENCH_ROOT:-/mnt/nvme/bench}"
 
 die() { echo "error: $*" >&2; exit 1; }
 note() { echo "== [$(date -u +%H:%M:%S)] $*"; }
@@ -95,8 +95,8 @@ done
 [ -f "$CFG_ARG" ] || die "config not found: $CFG_ARG"
 CFG="$(cd "$(dirname "$CFG_ARG")" && pwd)/$(basename "$CFG_ARG")"
 
-if [ "$BENCH" = /mnt/nvme/bench ] && command -v mountpoint >/dev/null 2>&1; then
-  mountpoint -q /mnt/nvme || die "/mnt/nvme not mounted — run bootstrap.sh first, or set BENCH"
+if [ "$BENCH_ROOT" = /mnt/nvme/bench ] && command -v mountpoint >/dev/null 2>&1; then
+  mountpoint -q /mnt/nvme || die "/mnt/nvme not mounted — run bootstrap.sh first, or set BENCH_ROOT"
 fi
 
 # --- config: defaults, source, key validation -----------------------------------
@@ -116,7 +116,7 @@ DATASETS=()
 
 CFG_KEYS='NAME|REF|INGEST|QUERY|CLOSE_INTERVAL|RUNS|QC|COLD_ITERS|HOT_ITERS|WORKERS|HOT_NUM_LEDGERS|PUBLISH_URI|DATASETS'
 # The config is sourced, so an unexpected assignment would silently overwrite
-# one of this script's own variables (REPO, BENCH, BIN, ...). Check the file's
+# one of this script's own variables (REPO, BENCH_ROOT, BIN, ...). Check the file's
 # text before sourcing it: blank lines, comments, and assignments to the
 # documented keys only (plus the continuation lines of the DATASETS array).
 _re_cfg_key="^($CFG_KEYS)="
@@ -187,16 +187,16 @@ for entry in "${DATASETS[@]}"; do
       ;;
     packs-gs)
       [[ $d_loc == gs://* ]] || die "config: dataset '$d_name': packs-gs location must start with gs:// (got '$d_loc')"
-      d_root=$BENCH/golden/$d_name
+      d_root=$BENCH_ROOT/golden/$d_name
       ;;
     bsb-s3)
       [ -n "$d_loc" ] || die "config: dataset '$d_name': bsb-s3 location must be an S3 bucket path"
-      d_root=$BENCH/golden/$d_name
+      d_root=$BENCH_ROOT/golden/$d_name
       ;;
     fixture)
       [[ $d_loc =~ $re_int ]] || die "config: dataset '$d_name': fixture location must be the per-chunk ledger count (got '$d_loc')"
       [ "$d_loc" -eq 0 ] || [ "$d_loc" -ge 10000 ] || die "config: dataset '$d_name': fixture ledger count must be 0 or >= 10000 — the cold freeze streams the whole 10,000-ledger chunk (got '$d_loc')"
-      d_root=$BENCH/golden/$d_name
+      d_root=$BENCH_ROOT/golden/$d_name
       ;;
     *)
       die "config: dataset '$d_name': kind must be packs-local|packs-gs|bsb-s3|fixture (got '$d_kind')"
@@ -232,10 +232,10 @@ else
   BUILT_COMMIT=$(git rev-parse HEAD)
   SHA=$(git describe --always --dirty --abbrev=8)
 fi
-BIN=$BENCH/bin/stellar-rpc-$SHA
+BIN=$BENCH_ROOT/bin/stellar-rpc-$SHA
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-RES=$BENCH/results/$NAME-$SHA-$STAMP
+RES=$BENCH_ROOT/results/$NAME-$SHA-$STAMP
 TARBALL=/tmp/bench-results-$NAME-$SHA-$STAMP.tgz
 
 # build_rpc_v2 builds the current checkout into $BIN through the Makefile, so
@@ -329,9 +329,9 @@ prepare_dataset() { # prepare_dataset INDEX
       if golden_present "$root"; then
         note "dataset $name: golden packs already at $root — skipping generation"
       else
-        stage=$BENCH/fixture/$name/ledgers
+        stage=$BENCH_ROOT/fixture/$name/ledgers
         note "dataset $name: generate a fixture pack tree"
-        run rm -rf "$BENCH/fixture/$name" "$root.partial"
+        run rm -rf "$BENCH_ROOT/fixture/$name" "$root.partial"
         for c in "${chunks[@]}"; do
           note "dataset $name: generate fixture chunk $c ($loc ledgers)"
           run "$BIN" bench-ingest fixture \
@@ -363,11 +363,11 @@ run_ingest_cold() {
     for c in "${chunks[@]}"; do
       for r in $(seq 1 "$RUNS"); do
         note "ingest-cold $name chunk $c run $r/$RUNS"
-        run rm -rf "$BENCH/scratch/$name/$c"
+        run rm -rf "$BENCH_ROOT/scratch/$name/$c"
         run "$BIN" bench-ingest cold \
           --source=pack --pack-dir="$root/ledgers" \
           --start-chunk="$c" --num-chunks=1 --workers="$WORKERS" \
-          --cold-out-dir="$BENCH/scratch/$name/$c" \
+          --cold-out-dir="$BENCH_ROOT/scratch/$name/$c" \
           --out="$RES/ingest-cold-$name-c$c-run$r"
       done
     done
@@ -384,10 +384,10 @@ run_ingest_hot() {
     for c in "${chunks[@]}"; do
       for r in $(seq 1 "$RUNS"); do
         note "ingest-hot $name chunk $c run $r/$RUNS"
-        run rm -rf "$BENCH/hot/$name/$c"
+        run rm -rf "$BENCH_ROOT/hot/$name/$c"
         cmd=("$BIN" bench-ingest hot
           --source=pack --pack-dir="$root/ledgers"
-          --start-chunk="$c" --hot-dir="$BENCH/hot/$name/$c"
+          --start-chunk="$c" --hot-dir="$BENCH_ROOT/hot/$name/$c"
           --close-interval="$CLOSE_INTERVAL")
         if [ "$HOT_NUM_LEDGERS" -gt 0 ]; then
           cmd+=(--num-ledgers="$HOT_NUM_LEDGERS")
@@ -426,7 +426,7 @@ run_query_hot() {
       for r in $(seq 1 "$RUNS"); do
         note "query-hot $name chunk $c run $r/$RUNS"
         cmd=("$BIN" bench-query hot
-          --hot-dir="$BENCH/hot/$name/$c" --chunk="$c"
+          --hot-dir="$BENCH_ROOT/hot/$name/$c" --chunk="$c"
           "--types=ledgers,txpage,txhash,events"
           --query-concurrency="$QC" --iters="$HOT_ITERS" --warmup=20)
         # A capped hot ingest leaves a truncated DB; keep the query sampler
@@ -474,12 +474,12 @@ write_machine_metadata() {
     echo "campaign: $NAME · ingest: $INGEST · query: $QUERY · runs: $RUNS · concurrency: $QC"
     echo "cold-iters: $COLD_ITERS · hot-iters: $HOT_ITERS · close-interval: $CLOSE_INTERVAL · workers: $WORKERS · hot-num-ledgers: $HOT_NUM_LEDGERS"
     echo -n "fsync probe: "
-    if probe=$(dd if=/dev/zero of="$BENCH/.fsync-probe" bs=4k count=2000 oflag=dsync 2>&1); then
+    if probe=$(dd if=/dev/zero of="$BENCH_ROOT/.fsync-probe" bs=4k count=2000 oflag=dsync 2>&1); then
       echo "$probe" | tail -1
     else
       echo "unavailable (dd has no oflag=dsync on this platform)"
     fi
-    rm -f "$BENCH/.fsync-probe"
+    rm -f "$BENCH_ROOT/.fsync-probe"
   } >"$RES/machine-metadata.txt" 2>&1
 }
 
@@ -569,7 +569,7 @@ note "campaign $NAME → $RES"
 if [ "$DRY" -eq 1 ]; then
   note "dry run: printing commands only — nothing is built, downloaded, or executed"
 else
-  mkdir -p "$BENCH"/bin "$BENCH"/golden "$BENCH"/scratch "$BENCH"/hot "$BENCH"/fixture "$RES"
+  mkdir -p "$BENCH_ROOT"/bin "$BENCH_ROOT"/golden "$BENCH_ROOT"/scratch "$BENCH_ROOT"/hot "$BENCH_ROOT"/fixture "$RES"
   cp "$CFG" "$RES/"
 fi
 
@@ -601,7 +601,7 @@ fi
 
 write_machine_metadata
 write_campaign_metadata
-tar -C "$BENCH/results" -czf "$TARBALL" "$NAME-$SHA-$STAMP"
+tar -C "$BENCH_ROOT/results" -czf "$TARBALL" "$NAME-$SHA-$STAMP"
 note "campaign done: $TARBALL"
 
 # Publishing is a separate final step: the data is already safe in $RES and

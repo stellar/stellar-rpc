@@ -10,7 +10,7 @@
 #   ./scripts/bench-campaigns/publish.sh <results-dir> [<dest-root-uri>] [--dry-run] [--force]
 #
 # Arguments:
-#   <results-dir>    a campaign bundle ($BENCH/results/<run_id>/). Its basename
+#   <results-dir>    a campaign bundle ($BENCH_ROOT/results/<run_id>/). Its basename
 #                    is the run_id and the last path component of the upload.
 #   <dest-root-uri>  object-storage root to publish under (default: $PUBLISH_URI).
 #                    gs://… uploads with `gcloud storage rsync -r`; s3://… with
