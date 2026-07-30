@@ -799,14 +799,11 @@ func TestAppDataRoundTrip(t *testing.T) {
 	}
 }
 
-// TestAppDataCorruption verifies that app-data corruption is NOT detected by
-// packfile (callers are responsible for their own app-data integrity).
-func TestAppDataCorruption(t *testing.T) {
-	appData := []byte("important-metadata")
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "appdata.pack")
-
+// writeAppDataPackfile writes a one-item packfile carrying appData and returns
+// its path.
+func writeAppDataPackfile(t *testing.T, appData []byte) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "appdata.pack")
 	w, err := Create(path, WriterOptions{ItemsPerRecord: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -817,27 +814,66 @@ func TestAppDataCorruption(t *testing.T) {
 	if err := w.Finish(appData); err != nil {
 		t.Fatal(err)
 	}
+	return path
+}
 
-	// App data is uncovered by the trailer CRC, so we mutate the data
-	// section directly without recomputing the CRC.
-	corruptedPath := corruptAt(t, path, false, func(data []byte) {
+// flipFirstAppDataByte mutates the first byte of the app-data section, which
+// sits between the offsets index and the trailer.
+func flipFirstAppDataByte(t *testing.T) func([]byte) {
+	t.Helper()
+	return func(data []byte) {
 		trailerStart := len(data) - trailerSize
 		appDataSz := int(binary.LittleEndian.Uint32(data[trailerStart+tOffAppDataSize:]))
 		if appDataSz == 0 {
 			t.Fatal("expected non-zero appDataSize")
 		}
 		data[trailerStart-appDataSz] ^= 0xFF
-	})
+	}
+}
+
+// TestAppDataCorruption covers the third tail section. The offsets index and
+// the trailer each carry a CRC32C; app data holds things like events.pack's
+// cumulative ledger offsets, where a flipped byte can preserve monotonicity
+// and the final total and so pass every structural check its decoder makes.
+func TestAppDataCorruption(t *testing.T) {
+	path := writeAppDataPackfile(t, []byte("important-metadata"))
+
+	// The trailer CRC covers the appDataCRC field but not the section itself,
+	// so mutating the section alone leaves the trailer valid.
+	corruptedPath := corruptAt(t, path, false, flipFirstAppDataByte(t))
 
 	r := Open(corruptedPath, ReaderOptions{})
 	defer r.Close()
 
+	if _, err := r.AppData(); !errors.Is(err, ErrChecksum) {
+		t.Fatalf("Open with corrupted app data: got %v, want ErrChecksum", err)
+	}
+}
+
+// TestAppDataCRCFlagOptional pins the flag's purpose: a file whose trailer
+// does not claim an app-data CRC is read without checking one, so files
+// written before the field meant anything still open.
+func TestAppDataCRCFlagOptional(t *testing.T) {
+	appData := []byte("important-metadata")
+	path := writeAppDataPackfile(t, appData)
+
+	// Clear the flag and zero the field, as an older writer would have left
+	// them. The trailer CRC covers both, so it has to be recomputed.
+	legacyPath := corruptAt(t, path, true, func(data []byte) {
+		trailerStart := len(data) - trailerSize
+		data[trailerStart+tOffFlags] &^= flagAppDataCRC
+		binary.LittleEndian.PutUint32(data[trailerStart+tOffAppDataCRC:], 0)
+	})
+
+	r := Open(legacyPath, ReaderOptions{})
+	defer r.Close()
+
 	got, err := r.AppData()
 	if err != nil {
-		t.Fatalf("unexpected error opening file with corrupted app data: %v", err)
+		t.Fatalf("Open without an app-data CRC: %v", err)
 	}
-	if string(got) == string(appData) {
-		t.Error("expected corrupted app data to differ from original")
+	if !bytes.Equal(got, appData) {
+		t.Errorf("AppData = %q, want %q", got, appData)
 	}
 }
 

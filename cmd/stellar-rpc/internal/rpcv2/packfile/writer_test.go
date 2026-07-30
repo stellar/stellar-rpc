@@ -30,6 +30,7 @@ type parsedTrailer struct {
 	indexSize      uint32
 	appDataSize    uint32
 	contentHash    [32]byte
+	appDataCRC     uint32
 	crc            uint32
 }
 
@@ -53,6 +54,7 @@ func readTrailer(t *testing.T, path string) (parsedTrailer, int64) {
 		indexGroupSize: binary.LittleEndian.Uint16(buf[tOffIndexGroupSize:]),
 		indexSize:      binary.LittleEndian.Uint32(buf[tOffIndexSize:]),
 		appDataSize:    binary.LittleEndian.Uint32(buf[tOffAppDataSize:]),
+		appDataCRC:     binary.LittleEndian.Uint32(buf[tOffAppDataCRC:]),
 		crc:            binary.LittleEndian.Uint32(buf[tOffCRC:]),
 	}
 	copy(tr.contentHash[:], buf[tOffContentHash:tEndContentHash])
@@ -250,7 +252,7 @@ func TestTrailerFields(t *testing.T) {
 			opts:            WriterOptions{Format: 5},
 			numItems:        100,
 			itemSize:        16,
-			wantFlags:       0,
+			wantFlags:       flagAppDataCRC,
 			wantItemsPerRec: defaultItemsPerRecord,
 			wantFormat:      5,
 		},
@@ -259,7 +261,7 @@ func TestTrailerFields(t *testing.T) {
 			opts:            WriterOptions{Format: 1, NewRecordEncoder: newXorEncoder, ContentHash: true},
 			numItems:        50,
 			itemSize:        32,
-			wantFlags:       flagContentHash,
+			wantFlags:       flagContentHash | flagAppDataCRC,
 			wantItemsPerRec: defaultItemsPerRecord,
 			wantFormat:      1,
 		},
@@ -268,7 +270,7 @@ func TestTrailerFields(t *testing.T) {
 			opts:            WriterOptions{Format: 42, ItemsPerRecord: 64},
 			numItems:        200,
 			itemSize:        8,
-			wantFlags:       0,
+			wantFlags:       flagAppDataCRC,
 			wantItemsPerRec: 64,
 			wantFormat:      42,
 		},

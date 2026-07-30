@@ -39,7 +39,7 @@ var (
 
 // knownFlags is the bitmask of trailer flags this version of the reader
 // understands. Files with unknown bits set are rejected as corrupt.
-const knownFlags = flagContentHash | flagRecordChecksum
+const knownFlags = flagContentHash | flagRecordChecksum | flagAppDataCRC
 
 // readBufPool is a process-wide pool of 1 MiB read buffers used to coalesce
 // consecutive record reads in ReadRange and ReadItems.
@@ -285,6 +285,19 @@ func doOpen(path string) openResult {
 		if appDataSize > 0 {
 			appData = make([]byte, appDataSize)
 			copy(appData, buf[indexSize:indexSize+appDataSize])
+		}
+	}
+
+	// The offsets index carries its own CRC32C, checked by decodeIndex, and
+	// the trailer's covers itself. App data is the third tail section and its
+	// bytes are as load-bearing as the other two: a flipped byte inside
+	// events.pack's cumulative ledger offsets, say, can preserve monotonicity
+	// and the final total and so pass every structural check its decoder makes,
+	// silently shifting the ledger a query resolves to.
+	if trailer.HasAppDataCRC {
+		if computed := crc32c(appData); computed != trailer.AppDataCRC {
+			return openResult{err: fmt.Errorf("%w: app data CRC32C (stored %08x, computed %08x)",
+				ErrChecksum, trailer.AppDataCRC, computed)}
 		}
 	}
 
