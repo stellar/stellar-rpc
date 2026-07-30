@@ -280,7 +280,7 @@ func Loop(ctx context.Context, cfg Config, cat *catalog.Catalog, sig *BoundarySi
 		case <-ctx.Done():
 			return nil
 		case <-sig.wake:
-			lastComplete, err := cat.LastCompleteChunkAsOf(nil)
+			lastComplete, err := cat.LastCompleteChunk()
 			if err != nil {
 				// Includes ErrNoReadyHotChunk: the live chunk's key exists before
 				// the loops start, so an empty scan marks a broken catalog.

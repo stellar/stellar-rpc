@@ -18,8 +18,8 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
@@ -349,7 +349,7 @@ func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 	}
 
 	assert.Equal(t, 1, rec.count(), "one boundary wake was published")
-	lastComplete, err := cat.LastCompleteChunkAsOf(nil)
+	lastComplete, err := cat.LastCompleteChunk()
 	require.NoError(t, err)
 	assert.Equal(t, int64(c), lastComplete, "the derivable frontier names the completed chunk")
 }
@@ -377,7 +377,7 @@ func (p *fencePublisher) Publish() {
 	// The wake carries no value: derive the just-closed chunk the way the woken
 	// tick would (highest ready - 1). The next chunk's key must already exist for
 	// the derivation to name c, which is itself part of the fence being checked.
-	lastComplete, err := p.cat.LastCompleteChunkAsOf(nil)
+	lastComplete, err := p.cat.LastCompleteChunk()
 	if err != nil || lastComplete < 0 {
 		p.mu.Lock()
 		defer p.mu.Unlock()

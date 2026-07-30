@@ -50,13 +50,45 @@ func Open(
 // Close releases the backing store. Idempotent.
 func (c *Catalog) Close() error { return c.store.Close() }
 
-// NewSnapshot pins a repeatable-read view of the catalog for a query's lifetime;
-// the query reads routing state through the *AsOf accessors. The caller MUST
-// release it via ReleaseSnapshot when done.
-func (c *Catalog) NewSnapshot() (*rocksdb.Snapshot, error) { return c.store.NewSnapshot() }
+// Snapshot is a pinned, repeatable-read view of the catalog for a query's
+// lifetime: the routing reads a query needs, as methods over one RocksDB
+// snapshot. Acquire with NewSnapshot; the holder MUST call Release when done.
+type Snapshot struct {
+	c    *Catalog
+	snap *rocksdb.Snapshot
+}
 
-// ReleaseSnapshot releases a snapshot acquired from NewSnapshot. Nil-safe.
-func (c *Catalog) ReleaseSnapshot(snap *rocksdb.Snapshot) { c.store.ReleaseSnapshot(snap) }
+// NewSnapshot pins a repeatable-read view of the catalog.
+func (c *Catalog) NewSnapshot() (*Snapshot, error) {
+	snap, err := c.store.NewSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	return &Snapshot{c: c, snap: snap}, nil
+}
+
+// Release returns the snapshot to the store. Sequentially idempotent.
+func (s *Snapshot) Release() { s.c.store.ReleaseSnapshot(s.snap) }
+
+// State is Catalog.State read through the snapshot.
+func (s *Snapshot) State(chunkID chunk.ID, kind geometry.Kind) (geometry.State, error) {
+	return decodeState(s.c.getAsOf(s.snap, geometry.ChunkKey(chunkID, kind)))
+}
+
+// HotState is Catalog.HotState read through the snapshot.
+func (s *Snapshot) HotState(chunkID chunk.ID) (geometry.HotState, error) {
+	return decodeHotState(s.c.getAsOf(s.snap, geometry.HotChunkKey(chunkID)))
+}
+
+// AllTxHashIndexKeys is Catalog.AllTxHashIndexKeys read through the snapshot.
+func (s *Snapshot) AllTxHashIndexKeys() ([]geometry.TxHashIndexCoverage, error) {
+	return s.c.txhashIndexKeysByPrefix(s.snap, geometry.TxHashIndexPrefix)
+}
+
+// LastCompleteChunk is Catalog.LastCompleteChunk read through the snapshot.
+func (s *Snapshot) LastCompleteChunk() (int64, error) {
+	return s.c.lastCompleteChunk(s.snap)
+}
 
 // Logger returns the logger the catalog was opened with — the one derived
 // reads (the last-committed refinement's read-only hot-DB open) reuse.
@@ -76,11 +108,6 @@ func (c *Catalog) State(chunkID chunk.ID, kind geometry.Kind) (geometry.State, e
 	return decodeState(c.get(geometry.ChunkKey(chunkID, kind)))
 }
 
-// StateAsOf is State read through a read view's snapshot.
-func (c *Catalog) StateAsOf(snap *rocksdb.Snapshot, chunkID chunk.ID, kind geometry.Kind) (geometry.State, error) {
-	return decodeState(c.getAsOf(snap, geometry.ChunkKey(chunkID, kind)))
-}
-
 // HotState returns the HotState of a chunk's hot-DB key, or empty (key absent).
 // The key's mere existence (any value) marks the chunk as owned by ingestion, and
 // most consumers branch on the value: the freeze source and last-committed
@@ -89,11 +116,6 @@ func (c *Catalog) StateAsOf(snap *rocksdb.Snapshot, chunkID chunk.ID, kind geome
 // value-blind (any state means "a hot dir may exist, sweep it").
 func (c *Catalog) HotState(chunkID chunk.ID) (geometry.HotState, error) {
 	return decodeHotState(c.get(geometry.HotChunkKey(chunkID)))
-}
-
-// HotStateAsOf is HotState read through a read view's snapshot.
-func (c *Catalog) HotStateAsOf(snap *rocksdb.Snapshot, chunkID chunk.ID) (geometry.HotState, error) {
-	return decodeHotState(c.getAsOf(snap, geometry.HotChunkKey(chunkID)))
 }
 
 // decodeState and decodeHotState turn a raw KV read into a typed lifecycle state.
@@ -141,13 +163,6 @@ func (c *Catalog) TxHashIndexKeys(w geometry.TxHashIndexID) ([]geometry.TxHashIn
 	return c.txhashIndexKeysByPrefix(nil, geometry.TxHashIndexPrefixFor(w))
 }
 
-// TxHashIndexKeysAsOf is TxHashIndexKeys read through a read view's snapshot.
-func (c *Catalog) TxHashIndexKeysAsOf(
-	snap *rocksdb.Snapshot, w geometry.TxHashIndexID,
-) ([]geometry.TxHashIndexCoverage, error) {
-	return c.txhashIndexKeysByPrefix(snap, geometry.TxHashIndexPrefixFor(w))
-}
-
 // HotChunkKeys returns every hot-DB chunk id (value-blind), sorted ascending.
 // The highest is the live chunk — the ingestion/lifecycle partition boundary.
 func (c *Catalog) HotChunkKeys() ([]chunk.ID, error) {
@@ -161,23 +176,20 @@ func (c *Catalog) ReadyHotChunkKeys() ([]chunk.ID, error) {
 	return c.hotChunkKeysWith(nil, isReadyHot)
 }
 
-// ReadyHotChunkKeysAsOf is ReadyHotChunkKeys read through a read view's snapshot.
-func (c *Catalog) ReadyHotChunkKeysAsOf(snap *rocksdb.Snapshot) ([]chunk.ID, error) {
-	return c.hotChunkKeysWith(snap, isReadyHot)
-}
-
 // ErrNoReadyHotChunk means a catalog view held no ready hot chunk at all. That
 // cannot happen in a working daemon (the live chunk's key is created before
 // serving starts and is never demoted), so it marks a broken catalog.
 var ErrNoReadyHotChunk = errors.New("catalog: no ready hot chunk")
 
-// LastCompleteChunkAsOf returns the view's last complete chunk: the highest ready
-// hot chunk minus one (the highest ready chunk is the live, still-ingesting one).
-// A young store (only chunk 0 ready, nothing complete) yields -1, the signed
-// convention Retention.FloorAt expects; an empty ready scan is ErrNoReadyHotChunk.
-// A nil snap reads live. Both the lifecycle run (live) and read-view acquisition
-// (snapshot) derive their floor anchor here, so the two cannot disagree.
-func (c *Catalog) LastCompleteChunkAsOf(snap *rocksdb.Snapshot) (int64, error) {
+// LastCompleteChunk returns the last complete chunk: the highest ready hot chunk
+// minus one (the highest ready chunk is the live, still-ingesting one). A young
+// store (only chunk 0 ready, nothing complete) yields -1, the signed convention
+// Retention.FloorAt expects; an empty ready scan is ErrNoReadyHotChunk. Both the
+// lifecycle run (live) and read-view acquisition (Snapshot.LastCompleteChunk)
+// derive their floor anchor here, so the two cannot disagree.
+func (c *Catalog) LastCompleteChunk() (int64, error) { return c.lastCompleteChunk(nil) }
+
+func (c *Catalog) lastCompleteChunk(snap *rocksdb.Snapshot) (int64, error) {
 	ready, err := c.hotChunkKeysWith(snap, isReadyHot)
 	if err != nil {
 		return 0, err
@@ -195,24 +207,12 @@ func (c *Catalog) AllTxHashIndexKeys() ([]geometry.TxHashIndexCoverage, error) {
 	return c.txhashIndexKeysByPrefix(nil, geometry.TxHashIndexPrefix)
 }
 
-// AllTxHashIndexKeysAsOf is AllTxHashIndexKeys read through a read view's snapshot.
-func (c *Catalog) AllTxHashIndexKeysAsOf(snap *rocksdb.Snapshot) ([]geometry.TxHashIndexCoverage, error) {
-	return c.txhashIndexKeysByPrefix(snap, geometry.TxHashIndexPrefix)
-}
-
 // FrozenTxHashIndex returns the index's UNIQUE "frozen" coverage — the key
 // readers resolve as "the index" — or ok=false if the index has none
 // yet. It asserts INV-2 (at most one frozen coverage per index at any moment)
 // by erroring if it observes two — a detectable bug, not a tie-break to resolve.
 func (c *Catalog) FrozenTxHashIndex(w geometry.TxHashIndexID) (geometry.TxHashIndexCoverage, bool, error) {
 	return c.frozenTxHashIndex(nil, w)
-}
-
-// FrozenTxHashIndexAsOf is FrozenTxHashIndex read through a read view's snapshot.
-func (c *Catalog) FrozenTxHashIndexAsOf(
-	snap *rocksdb.Snapshot, w geometry.TxHashIndexID,
-) (geometry.TxHashIndexCoverage, bool, error) {
-	return c.frozenTxHashIndex(snap, w)
 }
 
 // FrozenIndexCoversRange reports whether index w's UNIQUE frozen coverage spans

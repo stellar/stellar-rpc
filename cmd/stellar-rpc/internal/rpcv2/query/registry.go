@@ -15,7 +15,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
@@ -55,7 +54,7 @@ type Registry struct {
 	// then handles, then snapshot), which is otherwise unobservable: the
 	// newSnapshot hook catches either load drifting after the snapshot, and the
 	// loadHandles hook catches the latest ledger drifting after the handle set.
-	newSnapshot func() (*rocksdb.Snapshot, error)
+	newSnapshot func() (*catalog.Snapshot, error)
 	loadHandles func() *handleSet
 }
 
@@ -209,7 +208,7 @@ type ReadView struct {
 	latestLedger uint32
 	floor        chunk.ID
 	handles      *handleSet
-	snap         *rocksdb.Snapshot
+	snap         *catalog.Snapshot
 	catalog      *catalog.Catalog
 
 	// closers releases every cold reader this view opened (hot facades are
@@ -234,9 +233,9 @@ func (r *Registry) NewReadView() (*ReadView, error) {
 	if err != nil {
 		return nil, err
 	}
-	lastComplete, err := r.catalog.LastCompleteChunkAsOf(snap)
+	lastComplete, err := snap.LastCompleteChunk()
 	if err != nil {
-		r.catalog.ReleaseSnapshot(snap)
+		snap.Release()
 		return nil, err
 	}
 	return &ReadView{
@@ -262,5 +261,5 @@ func (a *ReadView) Release() {
 		}
 	}
 	a.closers = nil
-	a.catalog.ReleaseSnapshot(a.snap)
+	a.snap.Release()
 }

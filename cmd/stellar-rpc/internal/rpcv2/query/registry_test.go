@@ -16,7 +16,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
@@ -352,7 +351,7 @@ func TestNewReadView_LoadOrderPinned(t *testing.T) {
 	r.SetLatestLedger(100)
 
 	inner := r.newSnapshot
-	r.newSnapshot = func() (*rocksdb.Snapshot, error) {
+	r.newSnapshot = func() (*catalog.Snapshot, error) {
 		r.SetLatestLedger(200)             // lands after the latest-ledger load
 		r.PublishHandle(6, &hotchunk.DB{}) // lands after the handle-set load
 		return inner()

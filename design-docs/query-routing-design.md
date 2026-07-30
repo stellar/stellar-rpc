@@ -128,10 +128,11 @@ func (r *Registry) NewReadView() (*ReadView, error) {
         return nil, err
     }
     // The floor anchor is the highest ready hot chunk in the snapshot minus
-    // one: the same last-complete-chunk anchor the lifecycle run uses.
-    lastComplete, err := lastCompleteChunkAsOf(r.catalog, snap)
+    // one: the same last-complete-chunk anchor the lifecycle run uses
+    // (Catalog.LastCompleteChunk live, Snapshot.LastCompleteChunk here).
+    lastComplete, err := snap.LastCompleteChunk()
     if err != nil {
-        r.catalog.ReleaseSnapshot(snap)
+        snap.Release()
         return nil, err
     }
     return &ReadView{latestLedger: latest, floor: r.retention.FloorAt(lastComplete),
@@ -160,14 +161,14 @@ Routing resolves each chunk independently, reading its state through the view's 
 
 ```go
 func (a *ReadView) resolveTier(c chunk.ID, k geometry.Kind) (tier, *hotchunk.DB, error) {
-    st, err := a.catalog.StateAsOf(a.snap, c, k)
+    st, err := a.snap.State(c, k)
     if err != nil {
         return tierNone, nil, err
     }
     if st == geometry.StateFrozen {
         return tierCold, nil, nil
     }
-    hst, err := a.catalog.HotStateAsOf(a.snap, c)
+    hst, err := a.snap.HotState(c)
     if err != nil {
         return tierNone, nil, err
     }
@@ -442,7 +443,7 @@ This change allows queries to access hot databases without opening additional Ro
 
 ### Catalog snapshot support
 
-The rocksdb wrapper gains snapshot support: acquire and release (`NewSnapshot`, `ReleaseSnapshot`) and snapshot-pinned reads and iteration (`GetAsOf`, `IterateAsOf`), under the same lifecycle-lock discipline as its other operations. The catalog store uses them for read views.
+The rocksdb wrapper gains snapshot support: acquire and release (`NewSnapshot`, `ReleaseSnapshot`) and snapshot-pinned reads and iteration (`GetAsOf`, `IterateAsOf`), under the same lifecycle-lock discipline as its other operations. The catalog wraps them in a `Snapshot` type whose routing reads are methods (`State`, `HotState`, `AllTxHashIndexKeys`, `LastCompleteChunk`), released with `Release`: the surface read views hold.
 
 ### `latestLedger`
 

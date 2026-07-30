@@ -43,14 +43,14 @@ const (
 // States other than "frozen"/"ready" are never served (R1). The hot DB is
 // returned only for tierHot.
 func (a *ReadView) resolveTier(c chunk.ID, k geometry.Kind) (tier, *hotchunk.DB, error) {
-	st, err := a.catalog.StateAsOf(a.snap, c, k)
+	st, err := a.snap.State(c, k)
 	if err != nil {
 		return tierNone, nil, err
 	}
 	if st == geometry.StateFrozen {
 		return tierCold, nil, nil
 	}
-	hst, err := a.catalog.HotStateAsOf(a.snap, c)
+	hst, err := a.snap.HotState(c)
 	if err != nil {
 		return tierNone, nil, err
 	}

@@ -43,7 +43,7 @@ func (a *ReadView) HotTxHashIndexes() []txhash.HashIndex {
 // candidate. Reading them through the snapshot keeps the probe set fixed for the
 // request even as an index rebuild swaps a coverage concurrently.
 func (a *ReadView) ColdTxHashIndexCoverages() ([]geometry.TxHashIndexCoverage, error) {
-	all, err := a.catalog.AllTxHashIndexKeysAsOf(a.snap)
+	all, err := a.snap.AllTxHashIndexKeys()
 	if err != nil {
 		return nil, err
 	}
