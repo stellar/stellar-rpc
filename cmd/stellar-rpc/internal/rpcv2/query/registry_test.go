@@ -227,11 +227,11 @@ func TestDiscardThenTryCloseHandle(t *testing.T) {
 	assert.True(t, r.TryCloseHandle(5), "no-op discard leaves nothing to close")
 }
 
-// TestCloseDiscarded_BusyRetainsThenRetryDrains pins the retry behavior the fix
+// TestTryCloseHandle_BusyRetainsThenRetryDrains pins the retry behavior the fix
 // promises: while a reader is in flight, TryCloseHandle reports false and keeps the
 // handle in the closing set; once the reader drains, a later call closes it and
 // removes it. A parked ledger scan holds the store's lock to force the busy path.
-func TestCloseDiscarded_BusyRetainsThenRetryDrains(t *testing.T) {
+func TestTryCloseHandle_BusyRetainsThenRetryDrains(t *testing.T) {
 	cat := openTestCatalog(t, silentLogger())
 	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 	const c chunk.ID = 5

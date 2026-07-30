@@ -10,11 +10,11 @@ import (
 
 // The range helpers the endpoint adapters build on. Both clamp the raw request
 // range themselves (RangeError / ErrInvertedRange surface here) and resolve the
-// overlapping chunks. Page limits cap every request at two chunks, but the
-// two-chunk assumption is not structural for every caller — getTransaction's
-// scan shape is (cursor, latestLedger), which on a deep-history node spans
-// thousands of chunks — so the helpers must be cheap at any count, not just
-// correct.
+// overlapping chunks. EventParts opens everything up front: getEvents' 10,000-
+// ledger protocol cap makes its chunk count structural. ScanLedgers cannot lean
+// on that — getTransactions' scan shape is (cursor, latestLedger), which on a
+// deep-history node spans thousands of chunks — so it must be cheap at any
+// count, not just correct.
 
 // ScanLedgers returns a flat ascending iterator over the raw ledgers in
 // [lo, hi] clamped to the view's range. The per-chunk intersect lives here, so

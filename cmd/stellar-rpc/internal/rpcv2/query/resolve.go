@@ -15,7 +15,7 @@ import (
 // read view's snapshot: neither a frozen cold artifact nor a ready hot database. It
 // is R1 in effect — a freezing, pruning, or transient resource is invisible to
 // routing regardless of what is on disk.
-var ErrUnavailable = errors.New("serving: chunk has no serving store")
+var ErrUnavailable = errors.New("query: chunk has no serving store")
 
 // LedgerReader is the per-chunk ledger read surface the range queries consume,
 // satisfied by both the hot store and the cold pack reader. It deliberately omits

@@ -11,9 +11,9 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
-// TestHotTxIndexes pins that every published hot chunk's tx index is returned,
+// TestHotTxHashIndexes pins that every published hot chunk's tx index is returned,
 // newest chunk first, and that an empty handle set yields no indexes.
-func TestHotTxIndexes(t *testing.T) {
+func TestHotTxHashIndexes(t *testing.T) {
 	cat := openTestCatalog(t, silentLogger())
 	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 	require.NoError(t, cat.FlipHotReady(999)) // acquisition needs a ready live chunk

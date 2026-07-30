@@ -160,8 +160,9 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		}
 	}()
 
-	// Publish the live chunk's handle so queries can read the tip.
-	cfg.Registry.PublishHandle(chunk.IDFromLedger(cfg.Resume), hotDB)
+	// Publish the live chunk's handle so queries can read the tip, keyed by the
+	// handle's own chunk so the two cannot disagree.
+	cfg.Registry.PublishHandle(hotDB.ChunkID(), hotDB)
 
 	// hotService binds the metrics sink to THIS hotDB instance; the boundary handoff
 	// rebuilds it for the reopened chunk DB below.

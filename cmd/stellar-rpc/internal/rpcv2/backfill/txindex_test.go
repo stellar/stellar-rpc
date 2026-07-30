@@ -177,7 +177,8 @@ func TestBuildTxhashIndex_AllEmptyWindowFreezes(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // Rolling case: hi advances by one each boundary; the predecessor is demoted
-// AND swept; exactly one frozen coverage exists at every instant.
+// (NOT swept — its .idx waits out the grace period); exactly one frozen
+// coverage exists at every instant.
 // ---------------------------------------------------------------------------
 
 func TestBuildThenSweep_RollingPredecessorDemotedNotSwept(t *testing.T) {

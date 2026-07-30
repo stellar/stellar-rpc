@@ -91,7 +91,7 @@ func TestScanLedgers_BeyondLatestIsEmpty(t *testing.T) {
 }
 
 // TestScanLedgers_UnroutableChunkFailsUpFront pins that a chunk with no serving
-// store fails at ScanLedgers, not mid-stream: the readers are resolved eagerly.
+// store fails at ScanLedgers, not mid-stream: the first two chunks resolve at call time.
 func TestScanLedgers_UnroutableChunkFailsUpFront(t *testing.T) {
 	cat := openTestCatalog(t, silentLogger())
 	r := NewRegistry(cat, geometry.NewRetention(0, 0))

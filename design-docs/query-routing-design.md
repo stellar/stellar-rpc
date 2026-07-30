@@ -103,7 +103,7 @@ type ReadView struct {
     latestLedger uint32
     floor        chunk.ID
     handles      *handleSet
-    snap         *rocksdb.Snapshot
+    snap         *catalog.Snapshot
     catalog      *catalog.Catalog
     closers      []func() error // cold readers this view opened; Release closes them
 }
@@ -257,7 +257,7 @@ Most lifecycle transitions need no serving-side action at all: they commit to th
 | Transaction index rebuild (`buildTxhashIndex`): a single atomic catalog write freezes the new coverage and demotes its predecessor to `"pruning"` | None. New views see the new coverage. The predecessor's file is deleted at the end of the run, after the grace period. | Coverage file names encode their `Lo-Hi` range, so a view that read the old coverage opens its own generation of the index, never the replacement. |
 | Hot database discard: demote to `"transient"`, then deferred `DestroyHotChunk` | Remove the handle from the handle set. | Remove the handle and demote only after cold coverage is committed; destruction happens at the end of the run, after the grace period. |
 | Retention prune | None. Demotions only; the floor is derived at acquisition, not published. | Gate on the derived floor, demote, and destroy at the end of the run. |
-| Startup bootstrap (`bootstrapServing`) | Build the handle set from `"ready"` hot keys; seed the live chunk's handle and `latestLedger`. | Complete before the lifecycle goroutine starts and before any read view is acquired. Leftover demotions from a crashed run wait for the first lifecycle run's scans. |
+| Startup bootstrap (`OpenRegistry`) | Build the handle set from `"ready"` hot keys; seed the live chunk's handle and `latestLedger`. | Complete before the lifecycle goroutine starts and before any read view is acquired. Leftover demotions from a crashed run wait for the first lifecycle run's scans. |
 
 Three ordering notes matter:
 
@@ -393,7 +393,7 @@ A candidate is served only if `floor <= ledger <= latestLedger`, both from the v
 The read view supplies `TxReader` with:
 
 - the hot transaction indexes (`HotTxHashIndexes`, newest first),
-- the window index coverages (`TxHashIndexCoverages`), read from the view's snapshot, whose `.idx` files the lookup opens as it probes, and
+- the window index coverages (`ColdTxHashIndexCoverages`), read from the view's snapshot, whose `.idx` files the lookup opens as it probes, and
 - a ledger source backed by `Ledgers(chunk)`.
 
 This preserves the existing lookup semantics while allowing `TxReader` to operate across both hot and cold storage.

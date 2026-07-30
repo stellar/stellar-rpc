@@ -12,7 +12,7 @@ import (
 // clamping. It is distinct from the valid empty case (lo > hi after clamping,
 // meaning the request lies beyond latest): an inverted input is a malformed
 // request, not an empty-but-valid one.
-var ErrInvertedRange = errors.New("serving: inverted range (lo > hi)")
+var ErrInvertedRange = errors.New("query: inverted range (lo > hi)")
 
 // Direction is a range request's scan direction.
 type Direction int
@@ -34,7 +34,7 @@ type RangeError struct {
 
 func (e *RangeError) Error() string {
 	return fmt.Sprintf(
-		"serving: ledger %d is below the retention floor; available range is [%d, %d]",
+		"query: ledger %d is below the retention floor; available range is [%d, %d]",
 		e.Requested, e.Oldest, e.Latest)
 }
 

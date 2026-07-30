@@ -263,7 +263,7 @@ func (s *BoundarySignal) Publish() {
 
 // Loop is the event-driven lifecycle goroutine. It blocks on the boundary signal's
 // wake, derives the last complete chunk from the live catalog (the same
-// LastCompleteChunkAsOf derivation read-view acquisition runs against its
+// Catalog.LastCompleteChunk derivation read-view acquisition runs against its
 // snapshot, so the run and the queries share one floor-anchor implementation),
 // and runs one tick over [floor, lastChunk] (which subsumes every boundary
 // skipped while it was busy). The frontier at tick start may be newer than the

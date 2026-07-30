@@ -99,7 +99,8 @@ func OpenRegistry(
 
 // NewRegistry binds a bare Registry to the catalog and retention policy: an empty
 // handle map and latest ledger zero. The daemon uses OpenRegistry; this is the
-// seam for the ingestion loop's tests and benches, which publish their own state.
+// seam for tests, which publish their own state (the bench publishes into a
+// closingSink, not a Registry).
 func NewRegistry(cat *catalog.Catalog, retention geometry.Retention) *Registry {
 	r := &Registry{
 		catalog:     cat,
@@ -213,9 +214,10 @@ type ReadView struct {
 	catalog      *catalog.Catalog
 
 	// closers releases every cold reader this view opened (hot facades are
-	// registry-owned and never appear here). Appended by the resolve methods,
-	// drained by Release — a view's resources live exactly as long as the view.
-	// A ReadView serves one request on one goroutine; no locking.
+	// registry-owned and never appear here). Appended by the resolve methods and
+	// by ScanLedgers' walk backstop, drained by Release — a view's resources live
+	// exactly as long as the view. A ReadView serves one request on one
+	// goroutine; no locking.
 	closers []func() error
 }
 
@@ -283,7 +285,7 @@ func (a *ReadView) FloorChunk() chunk.ID { return a.floor }
 func (a *ReadView) Release() {
 	for _, c := range a.closers {
 		if err := c(); err != nil {
-			a.catalog.Logger().WithError(err).Warn("serving: close view-owned reader")
+			a.catalog.Logger().WithError(err).Warn("query: close view-owned reader")
 		}
 	}
 	a.closers = nil

@@ -110,7 +110,10 @@ func run(ctx context.Context, cfg StartConfig) error {
 	boundary := lifecycle.NewBoundarySignal()
 
 	// Seed the first tick so it fires at once; the tick derives its anchor from
-	// the catalog and no-ops on a young network where no chunk is complete.
+	// the catalog and no-ops on a young network where no chunk is complete. This
+	// seed is also why crash leftovers need no startup pass: demotions a crashed
+	// run left behind are re-collected by this first run's scans and destroyed
+	// after the usual grace period, staying invisible to routing meanwhile (R1).
 	boundary.Publish()
 
 	// The serving registry: OpenRegistry returns it serving-ready (ready handles
