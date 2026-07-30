@@ -109,7 +109,7 @@ func migratedSchemaSQL(ctx context.Context, names ...string) (map[string]string,
 	if err != nil {
 		return nil, fmt.Errorf("could not open schema reference DB: %w", err)
 	}
-	defer func() { _ = ref.Close() }()
+	defer ref.Close()
 	// Each new pooled connection to :memory: is a distinct empty DB
 	ref.SetMaxOpenConns(1)
 	if err := runSQLMigrations(ref, "sqlite3"); err != nil {
