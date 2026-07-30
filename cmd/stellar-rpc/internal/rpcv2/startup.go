@@ -17,7 +17,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/serving"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
@@ -119,7 +119,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// publishes hot handles, the freeze reads through them (HotHandle), and the
 	// lifecycle retires them at discard. Constructed per run — no query survives
 	// a restart. It will back the read server (#772); for now nothing reads it.
-	registry := serving.NewRegistry(cat, cfg.Retention)
+	registry := query.NewRegistry(cat, cfg.Retention)
 	cfg.Exec.Process.HotHandle = registry.Handle
 	// Close the registry's hot handles on the way out (after g.Wait joins the loops
 	// below), flushing each completed chunk the registry still holds. The live
@@ -215,7 +215,7 @@ func requirePinnedEarliest(cat *catalog.Catalog) (uint32, error) {
 // "transient" key is never a ready read source, and a "pruning" artifact is
 // never served, so the leftovers are invisible to routing until then.
 func bootstrapServing(
-	registry *serving.Registry, resumeLedger, lastCommitted uint32,
+	registry *query.Registry, resumeLedger, lastCommitted uint32,
 	hotDB *hotchunk.DB, logger *supportlog.Entry,
 ) error {
 	liveChunk := chunk.IDFromLedger(resumeLedger)

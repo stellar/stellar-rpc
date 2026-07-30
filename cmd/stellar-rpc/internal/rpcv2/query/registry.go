@@ -1,8 +1,8 @@
-// Package serving is the query read side: it routes each requested chunk to its
+// Package query is the read side of the daemon: it routes each requested chunk to its
 // serving store (frozen cold files or a ready hot database) against a consistent
 // snapshot of the catalog taken when the read view is acquired. See
 // design-docs/query-routing-design.md.
-package serving
+package query
 
 import (
 	"fmt"

@@ -14,7 +14,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/serving"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
@@ -96,7 +96,7 @@ type ingestionLoopConfig struct {
 	Health   *healthState
 	// Registry, when set, receives the served latest ledger after each commit.
 	// The bounded backfill loop leaves it nil: backfill serves no queries.
-	Registry *serving.Registry
+	Registry *query.Registry
 }
 
 // runIngestionLoop is the hot tier's writer: the single goroutine that opens,

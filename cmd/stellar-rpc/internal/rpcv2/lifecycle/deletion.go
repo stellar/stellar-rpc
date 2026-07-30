@@ -104,8 +104,8 @@ func (p *pendingDeletions) destroyAll(ctx context.Context, cfg Config) {
 // HandleRetirer is the slice of the registry the discard path uses: unpublish a hot
 // handle (DiscardHandle), then close it once idle (CloseDiscarded), retried across
 // runs until it drains. An interface so the lifecycle does not depend on the whole
-// serving package (a nil retirer is the bounded backfill / test case).
-// *serving.Registry satisfies it.
+// query package (a nil retirer is the test case).
+// *query.Registry satisfies it.
 type HandleRetirer interface {
 	DiscardHandle(c chunk.ID)
 	CloseDiscarded(c chunk.ID) bool

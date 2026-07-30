@@ -19,7 +19,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/serving"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
@@ -305,7 +305,7 @@ func TestRunIngestionLoop_AdvancesLatestLedger(t *testing.T) {
 	stream := streamForSeqs(t, first, first+2)
 	stream.endErr = errors.New("end")
 	cfg, _ := loopConfig(t, stream, cat, first)
-	registry := serving.NewRegistry(cat, geometry.NewRetention(0, 0))
+	registry := query.NewRegistry(cat, geometry.NewRetention(0, 0))
 	cfg.Registry = registry
 
 	require.Error(t, runIngestionLoop(context.Background(), cfg))
@@ -452,7 +452,7 @@ func TestRunIngestionLoop_BoundaryTransfersOwnershipToRegistry(t *testing.T) {
 
 	db, err := openHotDBForChunk(cat, chunk.IDFromLedger(resume), silentLogger())
 	require.NoError(t, err)
-	registry := serving.NewRegistry(cat, geometry.NewRetention(0, 0))
+	registry := query.NewRegistry(cat, geometry.NewRetention(0, 0))
 	cfg := ingestionLoopConfig{
 		Stream: stream, Resume: resume, HotDB: db, Catalog: cat,
 		Boundary: &recordingBoundary{}, Logger: silentLogger(), Registry: registry,
