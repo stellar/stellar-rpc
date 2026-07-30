@@ -97,10 +97,10 @@ export CGO_LDFLAGS="-L$HOME/.zstd/lib -L$HOME/.rocksdb/lib"
 export LD_LIBRARY_PATH="$HOME/.zstd/lib:$HOME/.rocksdb/lib"
 
 # --- build + verify -----------------------------------------------------------
-note "build (make install → ~/go/bin/stellar-rpc)"
+note "build (make install → ~/go/bin/stellar-rpc, ~/go/bin/stellar-rpc-v2)"
 cd "$REPO"
 make install
 note "bench package tests under -race"
-go test -race ./cmd/stellar-rpc/internal/fullhistory/bench/...
-stellar-rpc version
+go test -race ./cmd/stellar-rpc/internal/rpcv2/bench/...
+stellar-rpc-v2 version
 note "bootstrap OK"

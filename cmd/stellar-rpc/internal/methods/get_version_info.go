@@ -8,15 +8,15 @@ import (
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/support/log"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version"
 )
 
 func NewGetVersionInfoHandler(
 	logger *log.Entry,
-	ledgerReader db.LedgerReader,
-	daemon interfaces.Daemon,
+	ledgerReader store.LedgerReader,
+	daemon host.Daemon,
 ) jrpc2.Handler {
 	core := daemon.GetCore()
 
@@ -29,9 +29,9 @@ func NewGetVersionInfoHandler(
 		}
 
 		return protocol.GetVersionInfoResponse{
-			Version:            config.Version,
-			CommitHash:         config.CommitHash,
-			BuildTimestamp:     config.BuildTimestamp,
+			Version:            version.Version,
+			CommitHash:         version.CommitHash,
+			BuildTimestamp:     version.BuildTimestamp,
 			CaptiveCoreVersion: captiveCoreVersion,
 			ProtocolVersion:    protocolVersion,
 		}, nil

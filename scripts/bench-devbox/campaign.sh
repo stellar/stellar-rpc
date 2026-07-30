@@ -232,7 +232,7 @@ build_binary() {
   note "build $([ -n "$REF" ] && echo "REF=$REF" || echo "current checkout") → $BIN"
   if [ -z "$REF" ]; then
     run make build-libs
-    run go build -o "$BIN" ./cmd/stellar-rpc
+    run go build -o "$BIN" ./cmd/stellar-rpc/rpcv2
     return
   fi
   local orig
@@ -244,7 +244,7 @@ build_binary() {
   fi
   run git -c advice.detachedHead=false checkout -q "$BUILT_COMMIT"
   run make build-libs
-  run go build -o "$BIN" ./cmd/stellar-rpc
+  run go build -o "$BIN" ./cmd/stellar-rpc/rpcv2
   run git checkout -q "$orig"
   if [ "$DRY" -eq 0 ]; then
     trap - EXIT

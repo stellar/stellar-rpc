@@ -14,7 +14,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 )
 
@@ -23,8 +23,8 @@ func TestGetTransaction(t *testing.T) {
 	var (
 		ctx          = context.TODO()
 		log          = log.DefaultLogger
-		store        = db.NewMockTransactionStore("passphrase")
-		ledgerReader = db.NewMockLedgerReader(store)
+		store        = sqlitedb.NewMockTransactionStore("passphrase")
+		ledgerReader = sqlitedb.NewMockLedgerReader(store)
 	)
 	log.SetLevel(logrus.DebugLevel)
 
@@ -405,8 +405,8 @@ func emptyTxMeta(acctSeq uint32) xdr.LedgerCloseMeta {
 }
 
 func TestGetTransaction_JSONFormat(t *testing.T) {
-	mockDBReader := db.NewMockTransactionStore(NetworkPassphrase)
-	mockLedgerReader := db.NewMockLedgerReader(mockDBReader)
+	mockDBReader := sqlitedb.NewMockTransactionStore(NetworkPassphrase)
+	mockLedgerReader := sqlitedb.NewMockLedgerReader(mockDBReader)
 	var lookupHash string
 	var lookupEnv xdr.TransactionEnvelope
 	for i := 1; i <= 3; i++ {
@@ -435,7 +435,7 @@ func TestGetTransaction_JSONFormat(t *testing.T) {
 	jsBytes, err := json.Marshal(txResp)
 	require.NoError(t, err)
 
-	var tx map[string]interface{}
+	var tx map[string]any
 	require.NoError(t, json.Unmarshal(jsBytes, &tx))
 
 	require.Nilf(t, tx["envelopeXdr"], "field: 'envelopeXdr'")
@@ -450,14 +450,14 @@ func TestGetTransaction_JSONFormat(t *testing.T) {
 	envJs, err := xdr2json.ConvertInterface(lookupEnv)
 	require.NoError(t, err)
 
-	var envelope map[string]interface{}
+	var envelope map[string]any
 	require.NoError(t, json.Unmarshal(envJs, &envelope))
 	require.Equal(t, envelope, tx["envelopeJson"])
 }
 
 func BenchmarkJSONTransactions(b *testing.B) {
-	mockDBReader := db.NewMockTransactionStore(NetworkPassphrase)
-	mockLedgerReader := db.NewMockLedgerReader(mockDBReader)
+	mockDBReader := sqlitedb.NewMockTransactionStore(NetworkPassphrase)
+	mockLedgerReader := sqlitedb.NewMockLedgerReader(mockDBReader)
 
 	var lookupHash string
 	var lookupEnv xdr.TransactionEnvelope

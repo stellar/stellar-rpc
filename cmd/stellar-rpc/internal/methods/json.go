@@ -5,11 +5,11 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 )
 
-func transactionToJSON(tx db.Transaction) (
+func transactionToJSON(tx store.Transaction) (
 	[]byte,
 	[]byte,
 	[]byte,
@@ -36,7 +36,7 @@ func transactionToJSON(tx db.Transaction) (
 	return result, envelope, resultMeta, nil
 }
 
-func ledgerToJSON(chunk *db.LedgerMetadataChunk) ([]byte, []byte, error) {
+func ledgerToJSON(chunk *store.LedgerMetadataChunk) ([]byte, []byte, error) {
 	var err error
 	var closeMetaJSON, headerJSON []byte
 
@@ -53,7 +53,7 @@ func ledgerToJSON(chunk *db.LedgerMetadataChunk) ([]byte, []byte, error) {
 	return closeMetaJSON, headerJSON, nil
 }
 
-func jsonifySlice(xdr interface{}, values [][]byte) ([]json.RawMessage, error) {
+func jsonifySlice(xdr any, values [][]byte) ([]json.RawMessage, error) {
 	result := make([]json.RawMessage, len(values))
 	var err error
 
@@ -68,7 +68,7 @@ func jsonifySlice(xdr interface{}, values [][]byte) ([]json.RawMessage, error) {
 }
 
 // helper function to jsonify slices of slices like ContractEvents
-func jsonifySliceOfSlices(xdr interface{}, values [][][]byte) ([][]json.RawMessage, error) {
+func jsonifySliceOfSlices(xdr any, values [][][]byte) ([][]json.RawMessage, error) {
 	jsonResult := make([][]json.RawMessage, 0, len(values))
 	for _, slice := range values {
 		convertedSlice, err := jsonifySlice(xdr, slice)

@@ -37,12 +37,12 @@ RS_ENV_VERSION_PREV := "$(call RS_ENV_VERSION,soroban-env-host-prev)"
 RS_ENV_VERSION_CURR := "$(call RS_ENV_VERSION,soroban-env-host-curr)"
 
 BUILD_TIMESTAMP ?= $(shell date '+%Y-%m-%dT%H:%M:%S')
-GOLDFLAGS :=	-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.Version=${REPOSITORY_VERSION}' \
-				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.CommitHash=${REPOSITORY_COMMIT_HASH}' \
-				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.BuildTimestamp=${BUILD_TIMESTAMP}' \
-				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.Branch=${REPOSITORY_BRANCH}' \
-				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.RSSorobanEnvVersionPrev=${RS_ENV_VERSION_PREV}' \
-				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.RSSorobanEnvVersionCurr=${RS_ENV_VERSION_CURR}'
+GOLDFLAGS :=	-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version.Version=${REPOSITORY_VERSION}' \
+				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version.CommitHash=${REPOSITORY_COMMIT_HASH}' \
+				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version.BuildTimestamp=${BUILD_TIMESTAMP}' \
+				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version.Branch=${REPOSITORY_BRANCH}' \
+				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version.RSSorobanEnvVersionPrev=${RS_ENV_VERSION_PREV}' \
+				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version.RSSorobanEnvVersionCurr=${RS_ENV_VERSION_CURR}'
 
 
 # The following works around incompatibility between the rust and the go linkers -
@@ -61,15 +61,23 @@ endif
 # (libpreflight.a is put at target/release-with-panic-unwind/ when not cross compiling)
 CARGO_BUILD_TARGET ?= $(shell rustc -vV | sed -n 's|host: ||p')
 
-STELLAR_RPC_BINARY := stellar-rpc
+# unchanged name: the Jenkins packager, apt packaging, and Dockerfile.release consume it
+STELLAR_RPC_V1_BINARY := stellar-rpc
+STELLAR_RPC_V2_BINARY := stellar-rpc-v2
 
 
 # update the Cargo.lock every time the Cargo.toml changes.
 Cargo.lock: Cargo.toml
 	cargo update --workspace
 
+# go install ./... would install binaries named after the package dirs (rpcv1,
+# rpcv2), so build each with -o to keep the installed names. INSTALL_BIN mirrors
+# go install's destination: GOBIN when set, GOPATH/bin otherwise.
+INSTALL_BIN := $(or $(shell go env GOBIN),$(shell go env GOPATH)/bin)
+
 install: build-libs
-	go install -ldflags="${GOLDFLAGS}" ./...
+	go build -ldflags="${GOLDFLAGS}" -o "$(INSTALL_BIN)/${STELLAR_RPC_V1_BINARY}" ./cmd/stellar-rpc/rpcv1
+	go build -ldflags="${GOLDFLAGS}" -o "$(INSTALL_BIN)/${STELLAR_RPC_V2_BINARY}" ./cmd/stellar-rpc/rpcv2
 
 build: build-libs
 	go build -ldflags="${GOLDFLAGS}" ./...
@@ -108,17 +116,27 @@ clean:
 	cargo clean
 	go clean ./...
 
-# the build-stellar-rpc build target is an optimized build target used by
+build-rpc-v1: build-libs
+	go build -ldflags="${GOLDFLAGS}" ${MACOS_MIN_VER} -o ${STELLAR_RPC_V1_BINARY} -trimpath -v ./cmd/stellar-rpc/rpcv1
+
+# kept as an alias: the optimized build target invoked by name from
 # https://github.com/stellar/pipelines/blob/master/stellar-rpc/Jenkinsfile-stellar-rpc-package-builder
 # as part of the package building.
-build-stellar-rpc: build-libs
-	go build -ldflags="${GOLDFLAGS}" ${MACOS_MIN_VER} -o ${STELLAR_RPC_BINARY} -trimpath -v ./cmd/stellar-rpc
+build-stellar-rpc: build-rpc-v1
+
+# no build-libs prerequisite: nothing under rpcv2 links the rust preflight or
+# xdr2json bindings yet; #884 adds the prerequisite when it first does.
+build-rpc-v2:
+	go build -ldflags="${GOLDFLAGS}" ${MACOS_MIN_VER} -o ${STELLAR_RPC_V2_BINARY} -trimpath -v ./cmd/stellar-rpc/rpcv2
+
+# Override for feature branches, e.g. `make go-check-branch BASE=origin/feature/full-history`.
+BASE ?= origin/main
 
 go-check-branch:
-	golangci-lint run ./... --new-from-rev $$(git rev-parse origin/main)
+	golangci-lint run ./... --new-from-rev $$(git rev-parse $(BASE))
 
 go-check:
 	golangci-lint run ./...
 
 # PHONY lists all the targets that aren't file names, so that make would skip the timestamp based check.
-.PHONY: clean fmt watch test rust-test go-test check rust-check go-check install build build-stellar-rpc build-libs lint lint-changes
+.PHONY: all clean fmt watch bench test rust-test go-test check rust-check go-check go-check-branch install build build-stellar-rpc build-rpc-v1 build-rpc-v2 build-libs

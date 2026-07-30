@@ -13,15 +13,15 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 //nolint:funlen
 func GetTransaction(
 	ctx context.Context,
 	log *log.Entry,
-	reader db.TransactionReader,
-	ledgerReader db.LedgerReader,
+	reader store.TransactionReader,
+	ledgerReader store.LedgerReader,
 	request protocol.GetTransactionRequest,
 ) (protocol.GetTransactionResponse, error) {
 	if err := protocol.IsValidFormat(request.Format); err != nil {
@@ -68,7 +68,7 @@ func GetTransaction(
 		},
 	}
 
-	if errors.Is(getTxErr, db.ErrNoTransaction) {
+	if errors.Is(getTxErr, store.ErrNoTransaction) {
 		response.Status = protocol.TransactionStatusNotFound
 		return response, nil
 	} else if getTxErr != nil {
@@ -131,7 +131,7 @@ func GetTransaction(
 }
 
 // BuildEventsXDRFromTransaction encodes events into base64 xdr format
-func BuildEventsXDRFromTransaction(tx db.Transaction) protocol.Events {
+func BuildEventsXDRFromTransaction(tx store.Transaction) protocol.Events {
 	var events protocol.Events
 	events.TransactionEventsXDR = base64EncodeSlice(tx.TransactionEvents)
 	events.ContractEventsXDR = base64EncodeSliceOfSlices(tx.ContractEvents)
@@ -140,7 +140,7 @@ func BuildEventsXDRFromTransaction(tx db.Transaction) protocol.Events {
 }
 
 // BuildEventsJSONFromTransaction encodes events into json format
-func BuildEventsJSONFromTransaction(tx db.Transaction) (protocol.Events, error) {
+func BuildEventsJSONFromTransaction(tx store.Transaction) (protocol.Events, error) {
 	var events protocol.Events
 	var err error
 
@@ -157,8 +157,8 @@ func BuildEventsJSONFromTransaction(tx db.Transaction) (protocol.Events, error) 
 
 // NewGetTransactionHandler returns a get transaction json rpc handler
 
-func NewGetTransactionHandler(logger *log.Entry, getter db.TransactionReader,
-	ledgerReader db.LedgerReader,
+func NewGetTransactionHandler(logger *log.Entry, getter store.TransactionReader,
+	ledgerReader store.LedgerReader,
 ) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, request protocol.GetTransactionRequest,
 	) (protocol.GetTransactionResponse, error) {

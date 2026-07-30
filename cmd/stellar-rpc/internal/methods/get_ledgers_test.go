@@ -13,9 +13,9 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 var expectedLedgerInfo = protocol.LedgerInfo{
@@ -26,12 +26,12 @@ var expectedLedgerInfo = protocol.LedgerInfo{
 	LedgerMetadata:  "AAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAAAAAAAAAAAAAEAAAACAAABAIAAAAAAAAAAPww0v5OtDZlx0EzMkPcFURyDiq2XNKSi+w16A/x/6JoAAAABAAAAAP///50AAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAEzmSAb0wlZuZ7vERyxkacbwbERSS/IM82EYhemLKdUAAAAAAAAABkAAAAAAAAAAAAAAAAAAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==", //nolint:lll
 }
 
-func setupTestDB(t *testing.T, numLedgers int) *db.DB {
+func setupTestDB(t *testing.T, numLedgers int) *sqlitedb.DB {
 	testDB := NewTestDB(t)
-	daemon := interfaces.MakeNoOpDeamon()
+	daemon := host.MakeNoOpDaemon()
 	for sequence := 1; sequence <= numLedgers; sequence++ {
 		ledgerCloseMeta := txMeta(uint32(sequence)-100, true)
-		tx, err := db.
+		tx, err := sqlitedb.
 			NewReadWriter(log.DefaultLogger, testDB, daemon, 100, passphrase).
 			NewTx(t.Context())
 		require.NoError(t, err)
@@ -44,7 +44,7 @@ func setupTestDB(t *testing.T, numLedgers int) *db.DB {
 func TestGetLedgers_DefaultLimit(t *testing.T) {
 	testDB := setupTestDB(t, 50)
 	handler := ledgersHandler{
-		ledgerReader: db.NewLedgerReader(testDB),
+		ledgerReader: sqlitedb.NewLedgerReader(testDB),
 		maxLimit:     100,
 		defaultLimit: 5,
 	}
@@ -70,7 +70,7 @@ func TestGetLedgers_DefaultLimit(t *testing.T) {
 func TestGetLedgers_CustomLimit(t *testing.T) {
 	testDB := setupTestDB(t, 40)
 	handler := ledgersHandler{
-		ledgerReader: db.NewLedgerReader(testDB),
+		ledgerReader: sqlitedb.NewLedgerReader(testDB),
 		maxLimit:     100,
 		defaultLimit: 5,
 	}
@@ -95,7 +95,7 @@ func TestGetLedgers_CustomLimit(t *testing.T) {
 func TestGetLedgers_WithCursor(t *testing.T) {
 	testDB := setupTestDB(t, 10)
 	handler := ledgersHandler{
-		ledgerReader: db.NewLedgerReader(testDB),
+		ledgerReader: sqlitedb.NewLedgerReader(testDB),
 		maxLimit:     100,
 		defaultLimit: 5,
 	}
@@ -120,7 +120,7 @@ func TestGetLedgers_WithCursor(t *testing.T) {
 func TestGetLedgers_InvalidStartLedger(t *testing.T) {
 	testDB := setupTestDB(t, 10)
 	handler := ledgersHandler{
-		ledgerReader: db.NewLedgerReader(testDB),
+		ledgerReader: sqlitedb.NewLedgerReader(testDB),
 		maxLimit:     100,
 		defaultLimit: 5,
 	}
@@ -137,7 +137,7 @@ func TestGetLedgers_InvalidStartLedger(t *testing.T) {
 func TestGetLedgers_LimitExceedsMaxLimit(t *testing.T) {
 	testDB := setupTestDB(t, 10)
 	handler := ledgersHandler{
-		ledgerReader: db.NewLedgerReader(testDB),
+		ledgerReader: sqlitedb.NewLedgerReader(testDB),
 		maxLimit:     100,
 		defaultLimit: 5,
 	}
@@ -157,7 +157,7 @@ func TestGetLedgers_LimitExceedsMaxLimit(t *testing.T) {
 func TestGetLedgers_InvalidCursor(t *testing.T) {
 	testDB := setupTestDB(t, 10)
 	handler := ledgersHandler{
-		ledgerReader: db.NewLedgerReader(testDB),
+		ledgerReader: sqlitedb.NewLedgerReader(testDB),
 		maxLimit:     100,
 		defaultLimit: 5,
 	}
@@ -176,7 +176,7 @@ func TestGetLedgers_InvalidCursor(t *testing.T) {
 func TestGetLedgers_JSONFormat(t *testing.T) {
 	testDB := setupTestDB(t, 10)
 	handler := ledgersHandler{
-		ledgerReader: db.NewLedgerReader(testDB),
+		ledgerReader: sqlitedb.NewLedgerReader(testDB),
 		maxLimit:     100,
 		defaultLimit: 5,
 	}
@@ -197,12 +197,12 @@ func TestGetLedgers_JSONFormat(t *testing.T) {
 	assert.NotEmpty(t, ledger.LedgerMetadataJSON)
 	assert.Empty(t, ledger.LedgerMetadata)
 
-	var headerJSON map[string]interface{}
+	var headerJSON map[string]any
 	err = json.Unmarshal(ledger.LedgerHeaderJSON, &headerJSON)
 	require.NoError(t, err)
 	assert.NotEmpty(t, headerJSON)
 
-	var metaJSON map[string]interface{}
+	var metaJSON map[string]any
 	err = json.Unmarshal(ledger.LedgerMetadataJSON, &metaJSON)
 	require.NoError(t, err)
 	assert.NotEmpty(t, metaJSON)
@@ -211,7 +211,7 @@ func TestGetLedgers_JSONFormat(t *testing.T) {
 func TestGetLedgers_NoLedgers(t *testing.T) {
 	testDB := setupTestDB(t, 0)
 	handler := ledgersHandler{
-		ledgerReader: db.NewLedgerReader(testDB),
+		ledgerReader: sqlitedb.NewLedgerReader(testDB),
 		maxLimit:     100,
 		defaultLimit: 5,
 	}
@@ -228,7 +228,7 @@ func TestGetLedgers_NoLedgers(t *testing.T) {
 func TestGetLedgers_CursorGreaterThanLatestLedger(t *testing.T) {
 	testDB := setupTestDB(t, 10)
 	handler := ledgersHandler{
-		ledgerReader: db.NewLedgerReader(testDB),
+		ledgerReader: sqlitedb.NewLedgerReader(testDB),
 		maxLimit:     100,
 		defaultLimit: 5,
 	}
@@ -247,7 +247,7 @@ func TestGetLedgers_CursorGreaterThanLatestLedger(t *testing.T) {
 func BenchmarkGetLedgers(b *testing.B) {
 	testDB := setupBenchmarkingDB(b)
 	handler := ledgersHandler{
-		ledgerReader: db.NewLedgerReader(testDB),
+		ledgerReader: sqlitedb.NewLedgerReader(testDB),
 		maxLimit:     200,
 		defaultLimit: 5,
 	}
@@ -267,10 +267,10 @@ func BenchmarkGetLedgers(b *testing.B) {
 	}
 }
 
-func setupBenchmarkingDB(b *testing.B) *db.DB {
+func setupBenchmarkingDB(b *testing.B) *sqlitedb.DB {
 	testDB := NewTestDB(b)
 	logger := log.DefaultLogger
-	writer := db.NewReadWriter(logger, testDB, interfaces.MakeNoOpDeamon(),
+	writer := sqlitedb.NewReadWriter(logger, testDB, host.MakeNoOpDaemon(),
 		1_000_000, passphrase)
 	write, err := writer.NewTx(context.TODO())
 	require.NoError(b, err)
@@ -311,9 +311,9 @@ func getLedgerRange(sequences []uint32) []xdr.LedgerCloseMeta {
 }
 
 func TestGetLedgers(t *testing.T) {
-	localRange := ledgerbucketwindow.LedgerRange{
-		FirstLedger: ledgerbucketwindow.LedgerInfo{Sequence: 100},
-		LastLedger:  ledgerbucketwindow.LedgerInfo{Sequence: 200},
+	localRange := store.LedgerRange{
+		FirstLedger: store.LedgerInfo{Sequence: 100},
+		LastLedger:  store.LedgerInfo{Sequence: 200},
 	}
 
 	tests := []struct {
@@ -409,7 +409,7 @@ func TestFetchLedgersErrors(t *testing.T) {
 	t.Run("DB error", func(t *testing.T) {
 		mockTx := new(MockLedgerReaderTx)
 		mockTx.On("BatchGetLedgers", ctx, uint32(150), uint32(151)).
-			Return([]db.LedgerMetadataChunk(nil), errors.New("db error"))
+			Return([]store.LedgerMetadataChunk(nil), errors.New("db error"))
 
 		handler := ledgersHandler{}
 		_, err := handler.fetchLedgers(ctx, 150, 151, "default", mockTx, localRange)
@@ -462,9 +462,9 @@ func TestGetLedgers_EmptyBatchGetLedgersResult(t *testing.T) {
 			defaultLimit: 5,
 		}
 
-		localRange := ledgerbucketwindow.LedgerRange{
-			FirstLedger: ledgerbucketwindow.LedgerInfo{Sequence: 100},
-			LastLedger:  ledgerbucketwindow.LedgerInfo{Sequence: 200},
+		localRange := store.LedgerRange{
+			FirstLedger: store.LedgerInfo{Sequence: 100},
+			LastLedger:  store.LedgerInfo{Sequence: 200},
 		}
 
 		mockReader.On("NewTx", ctx).Return(mockReaderTx, nil)
@@ -472,7 +472,7 @@ func TestGetLedgers_EmptyBatchGetLedgersResult(t *testing.T) {
 		mockReaderTx.On("GetLedgerRange", ctx).Return(localRange, nil)
 		// BatchGetLedgers returns empty slice even though GetLedgerRange indicates data exists
 		mockReaderTx.On("BatchGetLedgers", ctx, uint32(151), uint32(155)).
-			Return([]db.LedgerMetadataChunk{}, nil)
+			Return([]store.LedgerMetadataChunk{}, nil)
 
 		request := protocol.GetLedgersRequest{
 			Pagination: &protocol.LedgerPaginationOptions{
@@ -502,9 +502,9 @@ func TestGetLedgers_EmptyBatchGetLedgersResult(t *testing.T) {
 			defaultLimit: 5,
 		}
 
-		localRange := ledgerbucketwindow.LedgerRange{
-			FirstLedger: ledgerbucketwindow.LedgerInfo{Sequence: 100},
-			LastLedger:  ledgerbucketwindow.LedgerInfo{Sequence: 200},
+		localRange := store.LedgerRange{
+			FirstLedger: store.LedgerInfo{Sequence: 100},
+			LastLedger:  store.LedgerInfo{Sequence: 200},
 		}
 
 		mockReader.On("NewTx", ctx).Return(mockReaderTx, nil)
@@ -512,7 +512,7 @@ func TestGetLedgers_EmptyBatchGetLedgersResult(t *testing.T) {
 		mockReaderTx.On("GetLedgerRange", ctx).Return(localRange, nil)
 		// BatchGetLedgers returns empty slice even though GetLedgerRange indicates data exists
 		mockReaderTx.On("BatchGetLedgers", ctx, uint32(100), uint32(104)).
-			Return([]db.LedgerMetadataChunk{}, nil)
+			Return([]store.LedgerMetadataChunk{}, nil)
 
 		request := protocol.GetLedgersRequest{
 			StartLedger: 100,

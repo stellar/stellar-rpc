@@ -27,14 +27,14 @@ func TestConversion(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, rawJs := range []json.RawMessage{jsi, jsb} {
-		var dest map[string]interface{}
+		var dest map[string]any
 		require.NoError(t, json.Unmarshal(rawJs, &dest))
 
 		require.Contains(t, dest, "credit_alphanum4")
 		require.Contains(t, dest["credit_alphanum4"], "asset_code")
 		require.Contains(t, dest["credit_alphanum4"], "issuer")
-		require.IsType(t, map[string]interface{}{}, dest["credit_alphanum4"])
-		if converted, ok := dest["credit_alphanum4"].(map[string]interface{}); assert.True(t, ok) {
+		require.IsType(t, map[string]any{}, dest["credit_alphanum4"])
+		if converted, ok := dest["credit_alphanum4"].(map[string]any); assert.True(t, ok) {
 			require.Equal(t, pubkey.Address(), converted["issuer"])
 		}
 	}

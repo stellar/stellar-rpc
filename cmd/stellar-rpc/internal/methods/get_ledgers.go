@@ -13,12 +13,12 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 type ledgersHandler struct {
-	ledgerReader          db.LedgerReader
+	ledgerReader          store.LedgerReader
 	maxLimit              uint
 	defaultLimit          uint
 	datastoreLedgerReader rpcdatastore.LedgerReader
@@ -26,7 +26,7 @@ type ledgersHandler struct {
 }
 
 // NewGetLedgersHandler returns a jrpc2.Handler for the getLedgers method.
-func NewGetLedgersHandler(ledgerReader db.LedgerReader, maxLimit, defaultLimit uint,
+func NewGetLedgersHandler(ledgerReader store.LedgerReader, maxLimit, defaultLimit uint,
 	datastoreLedgerReader rpcdatastore.LedgerReader, logger *log.Entry,
 ) jrpc2.Handler {
 	return NewHandler((&ledgersHandler{
@@ -56,7 +56,7 @@ func (h ledgersHandler) getLedgers(
 
 	ledgerRange, err := readTx.GetLedgerRange(ctx)
 	switch {
-	case errors.Is(err, db.ErrEmptyDB):
+	case errors.Is(err, store.ErrEmptyDB):
 		// TODO: Support datastore-only mode (no local DB).
 		fallthrough
 	case err != nil:
@@ -175,13 +175,13 @@ func (h ledgersHandler) parseCursor(cursor string, ledgerRange protocol.LedgerSe
 func (h ledgersHandler) fetchLedgers(
 	ctx context.Context,
 	start, end uint32, format string,
-	readTx db.LedgerReaderTx,
+	readTx store.LedgerReaderTx,
 	localLedgerRange protocol.LedgerSeqRange,
 ) ([]protocol.LedgerInfo, error) {
 	limit := end - start + 1
 	result := make([]protocol.LedgerInfo, 0, limit)
 
-	addToResult := func(ledgers []db.LedgerMetadataChunk) error {
+	addToResult := func(ledgers []store.LedgerMetadataChunk) error {
 		// Transform them all into JSON responses.
 		for _, chunk := range ledgers {
 			if len(result) >= int(limit) {
@@ -262,7 +262,7 @@ func (h ledgersHandler) fetchLedgers(
 
 // parseLedgerInfo extracts and formats the ledger metadata and header
 // information. In the error case, it returns a jrcp2.Error.
-func parseLedgerInfo(ledger db.LedgerMetadataChunk, format string) (protocol.LedgerInfo, error) {
+func parseLedgerInfo(ledger store.LedgerMetadataChunk, format string) (protocol.LedgerInfo, error) {
 	header := ledger.Header
 	ledgerInfo := protocol.LedgerInfo{
 		Hash:            header.Hash.HexString(),
@@ -291,15 +291,15 @@ func parseLedgerInfo(ledger db.LedgerMetadataChunk, format string) (protocol.Led
 	return ledgerInfo, nil
 }
 
-func metaToChunk(meta []xdr.LedgerCloseMeta) ([]db.LedgerMetadataChunk, error) {
-	result := make([]db.LedgerMetadataChunk, 0, len(meta))
+func metaToChunk(meta []xdr.LedgerCloseMeta) ([]store.LedgerMetadataChunk, error) {
+	result := make([]store.LedgerMetadataChunk, 0, len(meta))
 	for _, lcm := range meta {
 		raw, err := lcm.MarshalBinary()
 		if err != nil {
 			return nil, err
 		}
 
-		result = append(result, db.LedgerMetadataChunk{
+		result = append(result, store.LedgerMetadataChunk{
 			Lcm:    raw,
 			Header: lcm.LedgerHeaderHistoryEntry(),
 		})
