@@ -221,6 +221,7 @@ func runDaemonInBackground(
 		Metrics:              metrics,
 		RestartBackoff:       10 * time.Millisecond,
 		chunksPerTxhashIndex: 1,
+		lifecycleGrace:       time.Millisecond, // don't park the run on the 5m default
 	}
 	go func() { errCh <- runDaemonWith(ctx, cfgPath, opts) }()
 	return cancelFn, errCh
@@ -463,16 +464,25 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	pruneMetrics := &e2eMetrics{}
 	cancel3, done3 := runDaemonInBackground(t, prunedCfg, core, &served, pruneMetrics)
 
-	// The prune scan runs on the first lifecycle tick (the at-start BoundarySignal ring).
+	// The prune scan runs on the first lifecycle tick. prunedCount rises when the
+	// stage DEMOTES chunk 0; the destroy is deferred to end-of-run (after the grace
+	// wait). Wait for the on-disk index file to be unlinked — proof the destroy ran
+	// — BEFORE shutting the daemon down: a shutdown mid-grace would skip the destroy
+	// (the demoted keys would then persist for the next run's startup sweep).
 	require.Eventually(t, func() bool {
 		return pruneMetrics.prunedCount() > 0
 	}, 60*time.Second, 50*time.Millisecond, "retention prune scan must sweep chunk 0")
+	require.Eventually(t, func() bool {
+		_, statErr := os.Stat(prunedIdxPath)
+		return os.IsNotExist(statErr)
+	}, 10*time.Second, 50*time.Millisecond, "the pruned cold index file is unlinked while the daemon runs")
 
 	waitClean(t, cancel3, done3)
 	pruneCat, closePrune := e2eReadCatalog(t, dataDir)
 	defer closePrune()
 
-	// Chunk 0's per-chunk artifact keys (ledgers + events) vanished.
+	// The destroy above ran the whole end-of-run batch, so chunk 0's per-chunk
+	// artifact keys (ledgers + events) vanished with the index file.
 	ledgers, err := pruneCat.State(c0, geometry.KindLedgers)
 	require.NoError(t, err)
 	ev, err := pruneCat.State(c0, geometry.KindEvents)
@@ -484,12 +494,6 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	c1lfs, err := pruneCat.State(c1, geometry.KindLedgers)
 	require.NoError(t, err)
 	assert.Equal(t, geometry.StateFrozen, c1lfs, "chunk 1 is at the retention floor and survives")
-
-	// The on-disk cold index file is gone too (prune unlinks the files, not just keys).
-	require.Eventually(t, func() bool {
-		_, statErr := os.Stat(prunedIdxPath)
-		return os.IsNotExist(statErr)
-	}, 10*time.Second, 50*time.Millisecond, "the pruned cold index file is unlinked")
 
 	// "pruned read is not-found": after prune the window has no frozen coverage
 	// (ok=false) — the read layer's "no coverage ⇒ not-found" gate.

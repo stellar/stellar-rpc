@@ -2,8 +2,8 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"sync/atomic"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -37,6 +37,17 @@ type Config struct {
 	// earliest_ledger pin.
 	Retention geometry.Retention
 
+	// Registry unpublishes a discarded hot chunk's handle and closes it once idle so
+	// deferred deletion can retire it (see deletion.go). Nil in tests, where no
+	// handle is published (the bench runs no lifecycle).
+	Registry HandleRetirer
+
+	// Grace is the deferred-deletion wait before destroying demoted resources.
+	// Unset (<= 0) takes defaultGrace via WithLifecycleDefaults; tests override it
+	// small. TODO(#772): derive from the read server's request deadline
+	// (T = max request timeout + margin) and boot-validate T exceeds that timeout.
+	Grace time.Duration
+
 	// opRetryAttempts / opRetryBackoff bound the per-op retry the discard/prune
 	// sweeps use (see runOps). Not config-wired: production always runs the
 	// WithLifecycleDefaults constants, so these are unexported internals (a test
@@ -49,6 +60,11 @@ type Config struct {
 const (
 	defaultOpRetryAttempts = 3
 	defaultOpRetryBackoff  = 5 * time.Second
+	// defaultGrace is the placeholder deferred-deletion wait until the read server
+	// derives it from the request deadline (#772). Chosen to comfortably outlast
+	// any plausible request; the wait falls once per run, minutes against runs
+	// hours apart.
+	defaultGrace = 5 * time.Minute
 )
 
 // WithLifecycleDefaults returns a copy with the embedded ExecConfig defaults and
@@ -60,6 +76,9 @@ func (cfg Config) WithLifecycleDefaults() Config {
 	}
 	if cfg.opRetryBackoff <= 0 {
 		cfg.opRetryBackoff = defaultOpRetryBackoff
+	}
+	if cfg.Grace <= 0 {
+		cfg.Grace = defaultGrace
 	}
 	return cfg
 }
@@ -100,9 +119,19 @@ func runOps(ctx context.Context, cfg Config, ops []func() error) (int, error) {
 // [floor, lastChunk] (start raised to storage); discard/prune key off lastChunk.
 // Every stage compares in the chunk domain.
 //
-// It returns the first stage error WITHOUT classifying it: Loop propagates it to
-// run's errgroup and supervise decides clean-vs-restart (a canceled ctx surfaces
-// as a ctx error supervise treats as a clean shutdown).
+// The stages run INDEPENDENTLY and their errors are joined at the end: each scan
+// reads only durable state, so a failed freeze must not gate the discard/prune
+// scans or the end-of-run destroys — otherwise a persistently failing stage (a
+// full disk failing the freeze is the sharp case) would also wedge the very
+// reclamation that could clear it. A chunk whose freeze failed is protected by
+// eligibility, not by ordering: nothing is discardable without durably frozen
+// artifacts and coverage. executePlan joins its workers before returning
+// (errgroup), so no build is in flight when the debris scan runs after a failed
+// stage 1. A canceled ctx still aborts everything, including the grace wait.
+//
+// It returns the joined stage errors WITHOUT classifying them: Loop propagates
+// them to run's errgroup and supervise decides clean-vs-restart (a canceled ctx
+// surfaces as a ctx error supervise treats as a clean shutdown).
 func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChunk chunk.ID) error {
 	metrics := observability.MetricsOrNop(cfg.Metrics)
 	logger := cfg.Logger
@@ -125,46 +154,66 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	// needed is the empty-range check (floor above lastChunk when retention outran
 	// production). An empty range emits no Freeze sample — the Discard/Prune samples
 	// below carry empty-tick visibility.
+	var errs []error
 	if floor <= lastChunk {
 		if eerr := backfill.RunBackfill(ctx, cfg.ExecConfig, floor, lastChunk); eerr != nil {
-			return fmt.Errorf("run backfill [%s,%s]: %w", floor, lastChunk, eerr)
+			errs = append(errs, fmt.Errorf("run backfill [%s,%s]: %w", floor, lastChunk, eerr))
 		}
 	}
 
-	// Stage 2 — discard scan.
+	// Stage 2 — discard scan. Demote each eligible hot chunk (unpublish its handle,
+	// mark it transient) and collect it in pending for destruction at end of run.
+	var pending pendingDeletions
 	discardStart := time.Now()
-	discardOps, err := eligibleDiscardOps(cat, floor, lastChunk)
+	discardChunks, err := eligibleDiscardChunks(cat, floor, lastChunk)
 	if err != nil {
-		return fmt.Errorf("eligible discard ops: %w", err)
+		errs = append(errs, fmt.Errorf("eligible discard chunks: %w", err))
 	}
-	// Meter the DBs actually retired (one op per DB) BEFORE the error check, so a
-	// mid-scan failure still counts what completed rather than losing it: the retired
-	// DBs won't re-list next scan.
-	discarded, err := runOps(ctx, cfg, discardOps)
+	demoteOps := make([]func() error, len(discardChunks))
+	for i, c := range discardChunks {
+		demoteOps[i] = func() error { return pending.demoteHotChunk(cfg.Registry, cat, c) }
+	}
+	// Meter the demote ops that completed (one per DB) BEFORE the error check, so a
+	// mid-scan failure still counts what finished. This counts demotes, not destroys:
+	// a chunk whose destroy stays reader-busy re-lists next run (the retry path) and
+	// is re-counted — rare, since the grace wait outlasts requests, and it
+	// self-reports via the destroy-skipped warning.
+	discarded, err := runOps(ctx, cfg, demoteOps)
 	metrics.Discard(discarded, time.Since(discardStart))
 	if err != nil {
-		return fmt.Errorf("discard op: %w", err)
+		errs = append(errs, fmt.Errorf("discard demote: %w", err))
 	}
 	if discarded > 0 {
 		logger.WithField("discarded", discarded).Info("lifecycle discard stage complete")
 	}
 
 	// Live hot-chunk gauge after the discard stage.
-	hot, err := cat.HotChunkKeys()
-	if err != nil {
-		return fmt.Errorf("read hot chunk keys: %w", err)
+	if hot, herr := cat.HotChunkKeys(); herr != nil {
+		errs = append(errs, fmt.Errorf("read hot chunk keys: %w", herr))
+	} else {
+		metrics.LiveHotChunks(len(hot))
 	}
-	metrics.LiveHotChunks(len(hot))
 
-	// Stage 3 — prune scan.
+	// Stage 3 — prune scan. Demote each eligible cold artifact (mark it pruning) and
+	// defer its file/key destroy to end of run, alongside the discarded hot chunks.
 	pruneStart := time.Now()
-	pruneOps, pruneWeights, err := eligiblePruneOps(cat, floor)
+	idxCovs, chunkRefs, err := eligiblePruneTargets(cat, floor)
 	if err != nil {
-		return fmt.Errorf("eligible prune ops: %w", err)
+		errs = append(errs, fmt.Errorf("eligible prune targets: %w", err))
 	}
-	// Sum the artifacts swept by the ops that actually completed (each op carries its
-	// own artifact weight — the chunk family collapses many artifacts into one op).
-	// Metered BEFORE the error check so a mid-sweep failure keeps the completed count.
+	// One demote op per index coverage, one batched op for the chunk family; each
+	// op carries its artifact weight so the meter sums only the ops that ran.
+	pruneOps := make([]func() error, 0, len(idxCovs)+1)
+	pruneWeights := make([]int, 0, len(idxCovs)+1)
+	for _, cov := range idxCovs {
+		pruneOps = append(pruneOps, func() error { return pending.demoteTxHashIndex(cat, cov) })
+		pruneWeights = append(pruneWeights, 1)
+	}
+	if len(chunkRefs) > 0 {
+		pruneOps = append(pruneOps, func() error { return pending.demoteChunkArtifacts(cat, chunkRefs) })
+		pruneWeights = append(pruneWeights, len(chunkRefs))
+	}
+	// Metered BEFORE the error check so a mid-scan failure keeps the completed count.
 	completed, err := runOps(ctx, cfg, pruneOps)
 	prunedArtifacts := 0
 	for _, w := range pruneWeights[:completed] {
@@ -172,24 +221,29 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	}
 	metrics.Prune(prunedArtifacts, time.Since(pruneStart))
 	if err != nil {
-		return fmt.Errorf("prune op: %w", err)
+		errs = append(errs, fmt.Errorf("prune demote: %w", err))
 	}
 	if prunedArtifacts > 0 {
 		logger.WithField("pruned", prunedArtifacts).Info("lifecycle prune stage complete")
 	}
-	return nil
+
+	// End of run: destroy everything demoted this run — discarded hot handles and
+	// pruned cold files — after one grace wait (design: wait once, then delete).
+	// Reached even when stages errored, so a failing freeze cannot wedge reclaim.
+	pending.destroyAll(ctx, cfg)
+	return errors.Join(errs...)
 }
 
 // BoundarySignal couples ingestion (the producer) to the lifecycle Loop (the
-// consumer): ingestion stores the latest completed chunk id and pings a
-// 1-buffered wake; the Loop blocks on the wake, then reads the latest id. A
-// latest-CELL (not a queue) means a slow lifecycle can never fall behind — one
-// tick over [floor, latest] subsumes every skipped boundary — so there is no
-// bounded buffer to overflow and thus no "fell behind" fatal path. Safe for one
-// producer and one consumer.
+// consumer) as a pure wake-up: ingestion pings a 1-buffered wake at each chunk
+// boundary, and the woken tick derives its anchor (the last complete chunk) from
+// the catalog itself — the same derivation read-view acquisition runs against its
+// snapshot. The signal carries no value, so a slow lifecycle can never fall
+// behind — one tick subsumes every skipped boundary — and there is no bounded
+// buffer to overflow and thus no "fell behind" fatal path. Safe for one producer
+// and one consumer.
 type BoundarySignal struct {
-	latest atomic.Uint32
-	wake   chan struct{}
+	wake chan struct{}
 }
 
 // NewBoundarySignal returns a ready signal with an empty latest cell.
@@ -197,27 +251,23 @@ func NewBoundarySignal() *BoundarySignal {
 	return &BoundarySignal{wake: make(chan struct{}, 1)}
 }
 
-// Publish records c as the latest completed chunk and wakes the Loop. The wake is
-// non-blocking: a pending wake already covers this boundary (the Loop will read
-// the newest latest when it runs), so a full buffer is dropped, never blocked on.
-func (s *BoundarySignal) Publish(c chunk.ID) {
-	s.latest.Store(uint32(c))
+// Publish wakes the Loop. The wake is non-blocking: a pending wake already covers
+// this boundary (the woken tick derives the newest anchor from the catalog), so a
+// full buffer is dropped, never blocked on.
+func (s *BoundarySignal) Publish() {
 	select {
 	case s.wake <- struct{}{}:
 	default:
 	}
 }
 
-// latestChunk returns the most recently published completed chunk id. A wake is
-// only ever sent by Publish, AFTER it stores the cell, so a received wake proves a
-// value is present — no separate "was anything published" flag is needed.
-func (s *BoundarySignal) latestChunk() chunk.ID {
-	return chunk.ID(s.latest.Load())
-}
-
 // Loop is the event-driven lifecycle goroutine. It blocks on the boundary signal's
-// wake, reads the latest completed chunk id, and runs one tick over
-// [floor, lastChunk] (which subsumes every boundary skipped while it was busy). It
+// wake, derives the last complete chunk from the live catalog (the same
+// Catalog.LastCompleteChunk derivation read-view acquisition runs against its
+// snapshot, so the run and the queries share one floor-anchor implementation),
+// and runs one tick over [floor, lastChunk] (which subsumes every boundary
+// skipped while it was busy). The frontier at tick start may be newer than the
+// boundary that woke it, which only pulls the next tick's work forward. It
 // selects on ctx.Done() too, so it never blocks past shutdown.
 //
 // It returns the first tick error to its caller (run() joins it with ingestion in
@@ -230,7 +280,16 @@ func Loop(ctx context.Context, cfg Config, cat *catalog.Catalog, sig *BoundarySi
 		case <-ctx.Done():
 			return nil
 		case <-sig.wake:
-			if err := runLifecycle(ctx, cfg, cat, sig.latestChunk()); err != nil {
+			lastComplete, err := cat.LastCompleteChunk()
+			if err != nil {
+				// Includes ErrNoReadyHotChunk: the live chunk's key exists before
+				// the loops start, so an empty scan marks a broken catalog.
+				return fmt.Errorf("derive last complete chunk: %w", err)
+			}
+			if lastComplete < 0 {
+				continue // young network: nothing complete yet
+			}
+			if err := runLifecycle(ctx, cfg, cat, chunk.ID(lastComplete)); err != nil { //nolint:gosec // >= 0
 				return err
 			}
 		}

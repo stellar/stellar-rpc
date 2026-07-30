@@ -114,11 +114,16 @@ func buildTxhashIndex(ctx context.Context, w geometry.TxHashIndexID, lo, hi chun
 	return nil
 }
 
-// buildThenSweep runs an IndexBuild (rule 4), then eagerly sweeps this window's
-// superseded ("pruning") coverages plus (terminal builds) its demoted .bin inputs —
-// freeing disk without waiting for a prune tick. Window-local, so concurrent windows'
-// sweeps don't collide; a crash mid-sweep is finished by the next run. Abandoned
-// "freezing" debris from a crashed earlier build is the lifecycle prune stage's job.
+// buildThenSweep runs an IndexBuild (rule 4), then eagerly sweeps (terminal
+// builds) the window's demoted .bin inputs — freeing disk without waiting for a
+// prune tick, which is safe because no query ever reads a .bin. The superseded
+// ("pruning") coverage the build demoted is NOT swept here: the old .idx is
+// query-visible (a read view acquired before the rebuild opens its generation as
+// it probes), so the file must outlive the grace period. The lifecycle prune
+// scan collects the demoted key and the end-of-run destroy removes it.
+// Window-local, so concurrent windows' sweeps don't collide; a crash mid-sweep
+// is finished by the next run. Abandoned "freezing" debris from a crashed
+// earlier build is the lifecycle prune stage's job.
 func buildThenSweep(ctx context.Context, b IndexBuild, cfg BuildConfig) error {
 	if err := cfg.validate(); err != nil {
 		return err
@@ -129,26 +134,9 @@ func buildThenSweep(ctx context.Context, b IndexBuild, cfg BuildConfig) error {
 		return err
 	}
 
-	// Eager sweep: reclaim the now-redundant inputs the fresh .idx supersedes.
+	// Eager sweep: reclaim the demoted .bin inputs the fresh terminal .idx
+	// supersedes.
 	sweepStart := time.Now()
-	swept := 0
-
-	covs, err := cat.TxHashIndexKeys(b.Index)
-	if err != nil {
-		return fmt.Errorf("buildThenSweep read index keys window %s: %w", b.Index, err)
-	}
-	for _, cov := range covs {
-		// Sweep the superseded ("pruning") coverages this build just demoted. The
-		// coverage just built is "frozen" now, so it's skipped.
-		if cov.State != geometry.StatePruning {
-			continue
-		}
-		if serr := cat.SweepTxHashIndexKey(cov); serr != nil {
-			return fmt.Errorf("buildThenSweep sweep coverage %s: %w", cov.Key, serr)
-		}
-		swept++
-	}
-
 	demoted, err := demotedTxhashRefs(cat, b.Index)
 	if err != nil {
 		return err
@@ -156,10 +144,9 @@ func buildThenSweep(ctx context.Context, b IndexBuild, cfg BuildConfig) error {
 	if serr := cat.SweepChunkArtifacts(demoted); serr != nil {
 		return fmt.Errorf("buildThenSweep sweep demoted inputs window %s: %w", b.Index, serr)
 	}
-	swept += len(demoted)
 
 	// Meter the sweep on the success path only — a mid-sweep failure aborts the plan.
-	observability.MetricsOrNop(cfg.Metrics).Prune(swept, time.Since(sweepStart))
+	observability.MetricsOrNop(cfg.Metrics).Prune(len(demoted), time.Since(sweepStart))
 	return nil
 }
 

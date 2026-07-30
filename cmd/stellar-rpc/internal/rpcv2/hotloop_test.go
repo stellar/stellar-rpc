@@ -18,6 +18,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
@@ -99,24 +100,24 @@ func streamForSeqs(t *testing.T, from, to uint32) *fakeCoreStream {
 	return s
 }
 
-// recordingBoundary is a test boundaryPublisher capturing the completed chunk ids
-// the loop publishes at each boundary, so a test can assert the handoff without
-// wiring a real lifecycle Loop.
+// recordingBoundary is a test boundaryPublisher counting the boundary wakes the
+// loop fires, so a test can assert the handoff without wiring a real lifecycle
+// Loop (the wake carries no value; the tick derives the chunk from the catalog).
 type recordingBoundary struct {
-	mu  sync.Mutex
-	ids []chunk.ID
+	mu    sync.Mutex
+	wakes int
 }
 
-func (r *recordingBoundary) Publish(c chunk.ID) {
+func (r *recordingBoundary) Publish() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.ids = append(r.ids, c)
+	r.wakes++
 }
 
-func (r *recordingBoundary) list() []chunk.ID {
+func (r *recordingBoundary) count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]chunk.ID(nil), r.ids...)
+	return r.wakes
 }
 
 // loopConfig builds an ingestionLoopConfig for a test: the stream + resume point +
@@ -137,6 +138,7 @@ func loopConfig(
 		Catalog:  cat,
 		Boundary: rec,
 		Logger:   silentLogger(),
+		Registry: &closingSink{},
 	}, rec
 }
 
@@ -294,13 +296,34 @@ func TestRunIngestionLoop_LastCommittedGaugeAdvancesPerLedger(t *testing.T) {
 		"the loop sets the last-committed gauge per committed ledger, not chunk-aligned")
 }
 
+// TestRunIngestionLoop_AdvancesLatestLedger: when a registry is wired, the loop
+// advances its latest ledger per committed ledger, ending at the last one.
+func TestRunIngestionLoop_AdvancesLatestLedger(t *testing.T) {
+	cat, _ := testCatalog(t)
+	c := chunk.ID(0)
+	first := c.FirstLedger()
+
+	stream := streamForSeqs(t, first, first+2)
+	stream.endErr = errors.New("end")
+	cfg, _ := loopConfig(t, stream, cat, first)
+	registry := query.NewRegistry(cat, geometry.NewRetention(0, 0))
+	cfg.Registry = registry
+
+	require.Error(t, runIngestionLoop(context.Background(), cfg))
+
+	assert.Equal(t, first+2, registry.LatestLedger(), "the latest ledger advanced to the last committed one")
+}
+
 // ---------------------------------------------------------------------------
-// runIngestionLoop — boundary notifications carry the completed chunk id.
+// runIngestionLoop — a boundary wakes the lifecycle; the derivable frontier at
+// wake time names the completed chunk.
 // ---------------------------------------------------------------------------
 
 // TestRunIngestionLoop_BoundaryNotifiesCompletedChunk: crossing the chunk 0 -> 1
-// boundary publishes chunk 0 to the lifecycle. The last committed seq is seeded just below
-// the boundary so the stream crosses it in one step.
+// boundary wakes the lifecycle exactly once, and at that instant the catalog
+// derivation (highest ready - 1) resolves the completed chunk 0. The last
+// committed seq is seeded just below the boundary so the stream crosses it in
+// one step.
 func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 	t.Parallel() // seeds a near-full chunk (one synced commit per ledger)
 	cat, _ := testCatalog(t)
@@ -326,19 +349,23 @@ func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 		t.Fatal("ingestion loop deadlocked")
 	}
 
-	assert.Equal(t, []chunk.ID{c}, rec.list(), "the completed chunk id was published at the boundary")
+	assert.Equal(t, 1, rec.count(), "one boundary wake was published")
+	lastComplete, err := cat.LastCompleteChunk()
+	require.NoError(t, err)
+	assert.Equal(t, int64(c), lastComplete, "the derivable frontier names the completed chunk")
 }
 
 // ---------------------------------------------------------------------------
 // runIngestionLoop — handoff fence: close-before-next-key, publish-after-open.
 // ---------------------------------------------------------------------------
 
-// fencePublisher verifies the loop's HANDOFF FENCE from inside Publish. At each
-// boundary it checks, for the just-closed chunk c: (1) c's write handle was released
-// BEFORE the publish — a read-WRITE OpenExisting on c's path takes the RocksDB LOCK,
-// which would fail if the writer still held it; and (2) the NEXT chunk's hot key is
-// already "ready" (its DB was opened before publish). Outcomes are recorded per
-// boundary for the test to assert after the loop.
+// fencePublisher verifies the bounded loop's HANDOFF FENCE from inside the
+// boundary wake. At each boundary it checks, for the just-closed chunk c: (1) c's
+// write handle was released BEFORE the wake — the closingSink closes it when the
+// next chunk's handle is published, and a read-WRITE OpenExisting on c's path
+// takes the RocksDB LOCK, which would fail if a writer still held it; and (2) the
+// NEXT chunk's hot key is already "ready" (its DB was opened before the wake).
+// Outcomes are recorded per boundary for the test to assert after the loop.
 type fencePublisher struct {
 	cat *catalog.Catalog
 
@@ -348,7 +375,20 @@ type fencePublisher struct {
 	nextReady      []bool // per boundary: the next chunk's hot key was already ready
 }
 
-func (p *fencePublisher) Publish(c chunk.ID) {
+func (p *fencePublisher) Publish() {
+	// The wake carries no value: derive the just-closed chunk the way the woken
+	// tick would (highest ready - 1). The next chunk's key must already exist for
+	// the derivation to name c, which is itself part of the fence being checked.
+	lastComplete, err := p.cat.LastCompleteChunk()
+	if err != nil || lastComplete < 0 {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		p.published = append(p.published, chunk.ID(0))
+		p.closedReleased = append(p.closedReleased, false)
+		p.nextReady = append(p.nextReady, false)
+		return
+	}
+	c := chunk.ID(lastComplete)
 	// (1) The closed chunk's write handle must be released: OpenExisting is read-write
 	// and takes the LOCK, so it succeeds only if the loop already closed the handle.
 	db, err := hotchunk.OpenExisting(p.cat.Layout().HotChunkPath(c), c, silentLogger())
@@ -367,9 +407,10 @@ func (p *fencePublisher) Publish(c chunk.ID) {
 	p.nextReady = append(p.nextReady, ready)
 }
 
-// TestRunIngestionLoop_HandoffFenceClosesBeforeNextKey pins the boundary handoff order:
-// the just-closed chunk's write handle is released before the completed chunk is
-// published, and the next chunk's hot key is already "ready" at publish time.
+// TestRunIngestionLoop_HandoffFenceClosesBeforeNextKey pins the bounded loop's
+// boundary handoff order: the closingSink has released the just-closed chunk's
+// write handle before the boundary wake fires, and the next chunk's hot key is
+// already "ready" at wake time.
 func TestRunIngestionLoop_HandoffFenceClosesBeforeNextKey(t *testing.T) {
 	t.Parallel() // seeds a near-full chunk (one synced commit per ledger)
 	cat, _ := testCatalog(t)
@@ -388,6 +429,7 @@ func TestRunIngestionLoop_HandoffFenceClosesBeforeNextKey(t *testing.T) {
 	fence := &fencePublisher{cat: cat}
 	cfg := ingestionLoopConfig{
 		Stream: stream, Resume: resume, HotDB: db, Catalog: cat, Boundary: fence, Logger: silentLogger(),
+		Registry: &closingSink{},
 	}
 
 	require.Error(t, runIngestionLoop(context.Background(), cfg), "stream ran dry")
@@ -395,6 +437,46 @@ func TestRunIngestionLoop_HandoffFenceClosesBeforeNextKey(t *testing.T) {
 	require.Equal(t, []chunk.ID{c}, fence.published, "the completed chunk was published at the boundary")
 	require.Equal(t, []bool{true}, fence.closedReleased, "the closed chunk's write LOCK was released before publish")
 	require.Equal(t, []bool{true}, fence.nextReady, "the next chunk's hot key was ready before publish")
+}
+
+// TestRunIngestionLoop_BoundaryTransfersOwnershipToRegistry: with a registry set, the
+// boundary does NOT close the completed chunk's DB — the registry keeps it open (for
+// queries and the freeze) and the next chunk's handle is published too.
+func TestRunIngestionLoop_BoundaryTransfersOwnershipToRegistry(t *testing.T) {
+	t.Parallel() // seeds a near-full chunk (one synced commit per ledger)
+	cat, _ := testCatalog(t)
+	c := chunk.ID(0)
+	c1 := c + 1
+	resume := seedLastCommitted(t, cat, c, c.LastLedger()-1) // == c.LastLedger()
+
+	stream := &fakeCoreStream{frames: map[uint32][]byte{
+		c.LastLedger():   rpcv2test.ZeroTxLCMBytes(t, c.LastLedger()),   // boundary 0->1
+		c1.FirstLedger(): rpcv2test.ZeroTxLCMBytes(t, c1.FirstLedger()), // a ledger in chunk 1
+	}, endErr: errors.New("end")}
+
+	db, err := openHotDBForChunk(cat, chunk.IDFromLedger(resume), silentLogger())
+	require.NoError(t, err)
+	registry := query.NewRegistry(cat, geometry.NewRetention(0, 0))
+	cfg := ingestionLoopConfig{
+		Stream: stream, Resume: resume, HotDB: db, Catalog: cat,
+		Boundary: &recordingBoundary{}, Logger: silentLogger(), Registry: registry,
+	}
+
+	require.Error(t, runIngestionLoop(context.Background(), cfg), "stream ran dry")
+
+	// The completed chunk stays in the registry, still open (the loop closed only the
+	// live chunk on exit), and the next chunk's handle was published.
+	completed, ok := registry.Handle(c)
+	require.True(t, ok, "completed chunk's handle retained in the registry")
+	_, ok = registry.Handle(c1)
+	require.True(t, ok, "next chunk's handle published")
+
+	maxSeq, present, err := completed.MaxCommittedSeq()
+	require.NoError(t, err)
+	require.True(t, present)
+	assert.Equal(t, c.LastLedger(), maxSeq, "the retained handle still answers reads")
+
+	_ = completed.Close() // registry-owned; not closed by the loop
 }
 
 // ---------------------------------------------------------------------------
@@ -526,4 +608,32 @@ func eventCount(t *testing.T, r interface{ EventCount() (uint32, error) }) uint3
 	n, err := r.EventCount()
 	require.NoError(t, err)
 	return n
+}
+
+// TestClosingSink pins the bounded loop's sink contract directly: publishing the
+// next chunk's handle closes the previous one, a same-handle republish is a
+// no-op (the loop republishes nothing today, but the guard keeps the sink safe
+// against one), and the latest-ledger advance is discarded. The final handle
+// stays open — the loop's own deferred close owns it.
+func TestClosingSink(t *testing.T) {
+	cat, _ := testCatalog(t)
+	a, err := openHotDBForChunk(cat, 0, silentLogger())
+	require.NoError(t, err)
+	b, err := openHotDBForChunk(cat, 1, silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = b.Close() })
+
+	s := &closingSink{}
+	s.PublishHandle(0, a)
+	s.PublishHandle(0, a) // same-handle republish: must not close a
+	_, _, err = a.MaxCommittedSeq()
+	require.NoError(t, err, "a survives its own republish")
+
+	s.PublishHandle(1, b) // the next chunk's publish closes the previous handle
+	_, _, err = a.MaxCommittedSeq()
+	require.Error(t, err, "a is closed once b is published")
+	_, _, err = b.MaxCommittedSeq()
+	require.NoError(t, err, "the newest handle stays open for the loop's deferred close")
+
+	s.SetLatestLedger(42) // discarded; must not panic
 }

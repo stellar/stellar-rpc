@@ -201,4 +201,4 @@ func (b boundedStream) RawLedgers(
 // off to a freeze — keeping the hot measurement isolated from the cold path.
 type nopBoundary struct{}
 
-func (nopBoundary) Publish(chunk.ID) {}
+func (nopBoundary) Publish() {}

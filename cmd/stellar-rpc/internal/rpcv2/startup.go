@@ -11,10 +11,12 @@ import (
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 )
 
 // run is the daemon's startup, in two steps: (1) BACKFILL to the tip, then
@@ -36,15 +38,9 @@ func run(ctx context.Context, cfg StartConfig) error {
 	cat := cfg.Exec.Catalog
 	logger := cfg.Exec.Logger
 
-	// earliest_ledger must already be pinned by validateConfig: an absent pin reads
-	// as 0 and mis-classifies a first start as a restart, so refuse it loudly.
-	earliest, pinned, err := cat.EarliestLedger()
+	earliest, err := requirePinnedEarliest(cat)
 	if err != nil {
-		return fmt.Errorf("startup read earliest ledger: %w", err)
-	}
-	if !pinned {
-		return errors.New("startup requires config:earliest_ledger pinned " +
-			"(validateConfig pins it before run; not done here)")
+		return err
 	}
 
 	// Derived, never stored: highest durably-committed ledger (frozen cold artifacts
@@ -62,7 +58,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 	metrics.RetentionFloor(retentionFloorLedger(cfg.Retention, lastCommitted))
 	logger.WithField("last_committed", lastCommitted).
 		WithField("earliest", earliest).
-		WithField("pinned", pinned).
+		WithField("pinned", true).
 		Info("startup — last-committed derived, beginning backfill")
 
 	// Step 1: backfill to the tip.
@@ -113,17 +109,36 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// with ingestion — all derived from durable keys.
 	boundary := lifecycle.NewBoundarySignal()
 
-	// Seed the first tick with the last complete chunk at the resume point so it
-	// fires at once. Skipped on a young network where no chunk is complete.
-	if seed := chunk.LastCompleteChunkAt(lastCommitted); seed >= 0 {
-		boundary.Publish(chunk.ID(seed)) //nolint:gosec // seed >= 0
+	// Seed the first tick so it fires at once; the tick derives its anchor from
+	// the catalog and no-ops on a young network where no chunk is complete. This
+	// seed is also why crash leftovers need no startup pass: demotions a crashed
+	// run left behind are re-collected by this first run's scans and destroyed
+	// after the usual grace period, staying invisible to routing meanwhile (R1).
+	boundary.Publish()
+
+	// The serving registry: OpenRegistry returns it serving-ready (ready handles
+	// published, the live chunk's handle and latest ledger seeded), so a read view
+	// acquired before the first commit is correct. The ingestion loop advances the
+	// latest ledger and publishes handles from here, the freeze reads through them
+	// (HotHandle), and the lifecycle retires them at discard. Constructed per run —
+	// no query survives a restart. It will back the read server (#772).
+	registry, err := query.OpenRegistry(cat, cfg.Retention, hotDB, lastCommitted)
+	if err != nil {
+		return fmt.Errorf("startup open registry: %w", err)
 	}
+	cfg.Exec.Process.HotHandle = registry.Handle
+	// Close the registry's hot handles on the way out (after g.Wait joins the loops
+	// below), flushing each completed chunk the registry still holds. The live
+	// chunk is also closed by the ingestion loop; handle Close is idempotent.
+	defer registry.Close()
 
 	// The lifecycle config draws on the SAME Exec wiring backfill uses, so the two
 	// share one catalog/pool by construction.
 	lifecycleCfg := lifecycle.Config{
 		ExecConfig: cfg.Exec,
 		Retention:  cfg.Retention,
+		Registry:   registry,
+		Grace:      cfg.lifecycleGrace,
 	}.WithLifecycleDefaults()
 
 	// Begin serving reads (injected) BEFORE launching the loops; it must return
@@ -153,6 +168,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 			Metrics:  metrics,
 			Sink:     cfg.Exec.Process.Sink,
 			Health:   cfg.health,
+			Registry: registry,
 		})
 		if err == nil {
 			// WithContext cancels gctx (unblocking the lifecycle sibling in g.Wait)
@@ -167,6 +183,21 @@ func run(ctx context.Context, cfg StartConfig) error {
 		return lifecycle.Loop(gctx, lifecycleCfg, cat, boundary)
 	})
 	return g.Wait()
+}
+
+// requirePinnedEarliest returns the pinned earliest_ledger, erroring when the pin
+// is absent: an absent pin reads as 0 and mis-classifies a first start as a
+// restart, so refuse it loudly. validateConfig pins it before run; not done here.
+func requirePinnedEarliest(cat *catalog.Catalog) (uint32, error) {
+	earliest, pinned, err := cat.EarliestLedger()
+	if err != nil {
+		return 0, fmt.Errorf("startup read earliest ledger: %w", err)
+	}
+	if !pinned {
+		return 0, errors.New("startup requires config:earliest_ledger pinned " +
+			"(validateConfig pins it before run; not done here)")
+	}
+	return earliest, nil
 }
 
 // backfillToTip runs the backfill loop, returning lastCommitted as backfill makes
@@ -311,6 +342,11 @@ type StartConfig struct {
 
 	// runBackfill is a test-only seam for one backfill pass; nil ⇒ backfill.RunBackfill.
 	runBackfill func(ctx context.Context, exec backfill.ExecConfig, lo, hi chunk.ID) error
+
+	// lifecycleGrace overrides the deferred-deletion wait; 0 ⇒ lifecycle's
+	// defaultGrace. Tests set it small so a run's end-of-run destroy does not park
+	// for minutes.
+	lifecycleGrace time.Duration
 
 	// health is the readiness/health signal the ingestion loop feeds per commit;
 	// #889's read server consumes it (as HealthSignal). nil ⇒ observe is a no-op.

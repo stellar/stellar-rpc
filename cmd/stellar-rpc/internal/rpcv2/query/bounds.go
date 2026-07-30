@@ -1,0 +1,106 @@
+package query
+
+import (
+	"errors"
+	"fmt"
+	"slices"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+)
+
+// ErrInvertedRange rejects a request whose low edge exceeds its high edge before
+// clamping. It is distinct from the valid empty case (lo > hi after clamping,
+// meaning the request lies beyond latest): an inverted input is a malformed
+// request, not an empty-but-valid one.
+var ErrInvertedRange = errors.New("query: inverted range (lo > hi)")
+
+// Direction is a range request's scan direction.
+type Direction int
+
+const (
+	Ascending  Direction = iota // results begin at the low edge and rise
+	Descending                  // results begin at the high edge and fall
+)
+
+// RangeError reports a request whose leading edge falls below the view's
+// retention floor. It carries the available range so the handler can report it,
+// matching v1's out-of-range behavior. Silently clamping is wrong here: it would
+// drop the first results the caller asked for.
+type RangeError struct {
+	Requested uint32 // the leading-edge ledger that fell below the floor
+	Oldest    uint32 // oldest servable ledger in the view's range
+	Latest    uint32 // newest servable ledger in the view's range
+}
+
+func (e *RangeError) Error() string {
+	return fmt.Sprintf(
+		"query: ledger %d is below the retention floor; available range is [%d, %d]",
+		e.Requested, e.Oldest, e.Latest)
+}
+
+// OldestLedger is the oldest ledger this request may serve: the first ledger of
+// the view's retention-floor chunk.
+func (a *ReadView) OldestLedger() uint32 { return a.floor.FirstLedger() }
+
+// ClampRange validates a request's leading edge against the view's floor and
+// clamps its trailing edge into the view's range [OldestLedger, LatestLedger]. A
+// leading edge — where results begin, lo for ascending and hi for descending —
+// below the oldest servable ledger is rejected with *RangeError (not clamped); a
+// descending leading edge above latest is truncated to it, since nothing exists
+// there to drop. The trailing edge is truncated: an ascending scan stops at
+// latest, a descending scan terminates at the floor. It returns the clamped [lo, hi]; lo > hi in the
+// result means the request lies entirely beyond latest, so there is nothing to
+// serve yet. An inverted input (lo > hi before clamping) is rejected with
+// ErrInvertedRange, so callers never confuse a malformed range with an empty one.
+func (a *ReadView) ClampRange(dir Direction, lo, hi uint32) (uint32, uint32, error) {
+	if lo > hi {
+		return 0, 0, fmt.Errorf("%w: [%d, %d]", ErrInvertedRange, lo, hi)
+	}
+	oldest, latest := a.OldestLedger(), a.latestLedger
+
+	leading := lo
+	if dir == Descending {
+		leading = hi
+	}
+	if leading < oldest {
+		return 0, 0, &RangeError{Requested: leading, Oldest: oldest, Latest: latest}
+	}
+
+	if hi > latest {
+		hi = latest // truncate beyond the tip
+	}
+	if lo < oldest {
+		lo = oldest // terminate at the floor
+	}
+	return lo, hi, nil
+}
+
+// ChunksForRange clamps the requested ledger range (ClampRange) and returns the
+// chunks overlapping the clamped range in scan order — the sequence a range query
+// walks, resolving each chunk to its serving store. A leading edge below the floor
+// is rejected with *RangeError; an empty result means the request lies beyond
+// latest (nothing to serve yet). Each chunk belongs to exactly one serving store
+// per path, so multi-chunk results are concatenated, not merged.
+func (a *ReadView) ChunksForRange(dir Direction, lo, hi uint32) ([]chunk.ID, error) {
+	lo, hi, err := a.ClampRange(dir, lo, hi)
+	if err != nil {
+		return nil, err
+	}
+	if lo > hi {
+		return nil, nil // entirely beyond latest
+	}
+	return chunksBetween(chunk.IDFromLedger(lo), chunk.IDFromLedger(hi), dir), nil
+}
+
+// chunksBetween returns the inclusive chunk ids from first..last (first <= last)
+// in scan order.
+func chunksBetween(first, last chunk.ID, dir Direction) []chunk.ID {
+	out := make([]chunk.ID, 0, int(last-first)+1)
+	for c := first; c <= last; c++ {
+		out = append(out, c)
+	}
+	if dir == Descending {
+		slices.Reverse(out)
+	}
+	return out
+}
