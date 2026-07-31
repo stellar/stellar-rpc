@@ -126,8 +126,21 @@ func (s *closingSink) SetLatestLedger(uint32, int64) {}
 
 // servingSink is the daemon's handleSink: handles and latest-ledger stamps go
 // to the registry, and every real stamp also feeds the readiness/health signal.
-// Both consumers of a commit's close time sit behind this one write, so they
-// cannot drift — the loop publishes each commit exactly once.
+//
+// Why this exists: two things want each committed ledger's close time — the
+// registry's latest-ledger stamp (so getLedgerRange can answer without a point
+// read) and the health signal (readiness latch + staleness check). The loop
+// used to call each one separately, which meant a future edit could update one
+// call and forget the other, and the two would quietly report different close
+// times. Routing both through this single write makes that impossible.
+//
+// Why they stay TWO stores behind the one write, instead of one merged store:
+// their lifetimes are deliberately different. The registry is torn down and
+// rebuilt on every supervised restart (no query survives a restart), while the
+// health signal lives for the whole process so its readiness latch — "this
+// deploy has proven it can commit a ledger" — survives restarts. Merging them
+// would either unlatch readiness on every restart or leak per-run serving
+// state across runs.
 type servingSink struct {
 	sink   handleSink
 	health *healthState
