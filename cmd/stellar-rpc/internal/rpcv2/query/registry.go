@@ -28,10 +28,18 @@ type Registry struct {
 	catalog   *catalog.Catalog
 	retention geometry.Retention
 
-	// latestLedger is the newest fully ingested ledger visible to queries. The
-	// ingest loop advances it as the final step of each per-ledger cycle. Queries
-	// read a frozen copy (ReadView.LatestLedger), never this live value.
-	latestLedger atomic.Uint32
+	// latest is the newest fully ingested ledger visible to queries, paired with
+	// its close time so both publish atomically. The ingest loop advances it as
+	// the final step of each per-ledger cycle. Queries read a frozen copy
+	// (ReadView.LatestLedger / LatestCloseTime), never this live value.
+	latest atomic.Pointer[ledgerStamp]
+
+	// oldest is a read-through cache of the retention floor's first ledger and
+	// its close time. Adapters populate it after a fallback point read
+	// (RecordOldestCloseTime); readers trust it only while its seq still equals
+	// the view's floor first ledger, so a moved floor invalidates it by
+	// construction — no explicit invalidation.
+	oldest atomic.Pointer[ledgerStamp]
 
 	// handles is the copy-on-write map of open hot-database handles, published
 	// atomically. A read view loads it once at acquisition.
@@ -56,6 +64,15 @@ type Registry struct {
 	// loadHandles hook catches the latest ledger drifting after the handle set.
 	newSnapshot func() (*catalog.Snapshot, error)
 	loadHandles func() *handleSet
+}
+
+// ledgerStamp pairs a ledger sequence with its close time (unix seconds).
+// closeTime 0 means "not known yet": OpenRegistry seeds the latest stamp from
+// the catalog (which has no close times), and the oldest cache starts empty.
+// Consumers fall back to a point read when the close time is 0.
+type ledgerStamp struct {
+	seq       uint32
+	closeTime int64
 }
 
 // handleSet is an immutable map of open hot-database handles keyed by chunk,
@@ -93,7 +110,10 @@ func OpenRegistry(
 		return nil, err
 	}
 	r.PublishHandle(live.ChunkID(), live)
-	r.SetLatestLedger(lastCommitted)
+	// lastCommitted comes from the catalog, which has no close times, so the
+	// stamp starts with close time 0 (unknown): adapters fall back to one point
+	// read until the first ingested ledger stamps a real value.
+	r.SetLatestLedger(lastCommitted, 0)
 	return r, nil
 }
 
@@ -110,17 +130,30 @@ func NewRegistry(cat *catalog.Catalog, retention geometry.Retention) *Registry {
 	}
 	r.loadHandles = r.handles.Load
 	r.handles.Store(&handleSet{byChunk: map[chunk.ID]*hotchunk.DB{}})
+	r.latest.Store(&ledgerStamp{})
 	return r
 }
 
-// SetLatestLedger publishes the newest fully ingested ledger; the ingest loop calls
-// it as the final step of each per-ledger cycle.
-func (r *Registry) SetLatestLedger(seq uint32) { r.latestLedger.Store(seq) }
+// SetLatestLedger publishes the newest fully ingested ledger together with its
+// close time (unix seconds; 0 = unknown, consumers fall back to a point read);
+// the ingest loop calls it as the final step of each per-ledger cycle.
+func (r *Registry) SetLatestLedger(seq uint32, closeTimeUnix int64) {
+	r.latest.Store(&ledgerStamp{seq: seq, closeTime: closeTimeUnix})
+}
 
 // LatestLedger returns the live latest ledger. Queries do not call this — they
 // read the frozen ReadView.LatestLedger captured at acquisition (see the
-// latestLedger field).
-func (r *Registry) LatestLedger() uint32 { return r.latestLedger.Load() }
+// latest field).
+func (r *Registry) LatestLedger() uint32 { return r.latest.Load().seq }
+
+// RecordOldestCloseTime caches the retention floor's first ledger and its close
+// time so getLedgerRange stops paying a point read (a cold packfile open in the
+// common case) per request. A plain Store is enough: concurrent writers can only
+// race about the same immutable close time (or a newer floor's, which the seq
+// check on the read side handles), so last-write-wins is always correct.
+func (r *Registry) RecordOldestCloseTime(seq uint32, closeTimeUnix int64) {
+	r.oldest.Store(&ledgerStamp{seq: seq, closeTime: closeTimeUnix})
+}
 
 // Handle returns the currently published hot database for chunk c, if any. The
 // freeze source reads a completed chunk through this shared handle rather than
@@ -203,15 +236,19 @@ func (r *Registry) Close() {
 }
 
 // ReadView is one query's consistent view of serving state, held for the
-// request's lifetime and released when it completes. It carries the latest ledger
-// and retention floor as of acquisition, the handle set loaded then, and the
-// catalog snapshot the routing reads run against.
+// request's lifetime and released when it completes. It carries the latest
+// ledger stamp and retention floor as of acquisition, the handle set loaded
+// then, and the catalog snapshot the routing reads run against.
 type ReadView struct {
-	latestLedger uint32
-	floor        chunk.ID
-	handles      *handleSet
-	snap         *catalog.Snapshot
-	catalog      *catalog.Catalog
+	latest ledgerStamp
+	// oldestStamp is the oldest-close-time cache entry captured at acquisition.
+	// It is trusted only while its seq equals the view's OldestLedger (see
+	// OldestCloseTime).
+	oldestStamp ledgerStamp
+	floor       chunk.ID
+	handles     *handleSet
+	snap        *catalog.Snapshot
+	catalog     *catalog.Catalog
 
 	// closers releases every cold reader this view opened (hot facades are
 	// registry-owned and never appear here). Appended by the resolve methods and
@@ -222,15 +259,15 @@ type ReadView struct {
 }
 
 // NewReadView captures a query's view of serving state with three loads, in
-// this order: the latest ledger first, the handle set second, the catalog snapshot
-// last. The order makes the snapshot's metadata the newest of the three, so any
-// skew between the handle set and the snapshot resolves safely (see the design's
-// Read views section).
+// this order: the latest ledger stamp first, the handle set second, the catalog
+// snapshot last. The order makes the snapshot's metadata the newest of the
+// three, so any skew between the handle set and the snapshot resolves safely
+// (see the design's Read views section).
 //
 // The caller MUST call Release when the request completes, including on error
 // paths.
 func (r *Registry) NewReadView() (*ReadView, error) {
-	latest := r.latestLedger.Load()
+	latest := r.latest.Load()
 	handles := r.loadHandles()
 	snap, err := r.newSnapshot()
 	if err != nil {
@@ -241,13 +278,20 @@ func (r *Registry) NewReadView() (*ReadView, error) {
 		snap.Release()
 		return nil, err
 	}
-	return &ReadView{
-		latestLedger: latest,
-		floor:        r.retention.FloorAt(lastComplete),
-		handles:      handles,
-		snap:         snap,
-		catalog:      r.catalog,
-	}, nil
+	view := &ReadView{
+		latest:  *latest,
+		floor:   r.retention.FloorAt(lastComplete),
+		handles: handles,
+		snap:    snap,
+		catalog: r.catalog,
+	}
+	// The oldest-close-time cache rides along outside the three-load order: it
+	// is a pure optimization whose staleness the seq check in OldestCloseTime
+	// already handles, so it cannot participate in any skew argument.
+	if s := r.oldest.Load(); s != nil {
+		view.oldestStamp = *s
+	}
+	return view, nil
 }
 
 // publishReadyHandles opens and publishes a handle for every ready hot chunk
@@ -275,14 +319,37 @@ func (r *Registry) publishReadyHandles(liveChunk chunk.ID, logger *supportlog.En
 	return nil
 }
 
-func (a *ReadView) LatestLedger() uint32 { return a.latestLedger }
+func (a *ReadView) LatestLedger() uint32 { return a.latest.seq }
+
+// LatestCloseTime returns the latest ledger's close time captured at
+// acquisition. ok is false when the stamp predates any real commit (OpenRegistry
+// seeds close time 0 from the catalog) — the caller point-reads instead.
+func (a *ReadView) LatestCloseTime() (int64, bool) {
+	return a.latest.closeTime, a.latest.closeTime != 0
+}
+
+// OldestCloseTime returns the cached close time of the view's oldest servable
+// ledger. ok is false when nothing was recorded yet or the recorded seq no
+// longer equals the view's OldestLedger (the retention floor moved since the
+// cache was written) — the caller point-reads and re-records.
+func (a *ReadView) OldestCloseTime() (int64, bool) {
+	if a.oldestStamp.closeTime == 0 || a.oldestStamp.seq != a.OldestLedger() {
+		return 0, false
+	}
+	return a.oldestStamp.closeTime, true
+}
 
 func (a *ReadView) FloorChunk() chunk.ID { return a.floor }
 
 // Release closes every reader the view opened, then releases the snapshot back
 // to the catalog. Close failures are logged, not returned: a close error on a
-// read-only reader is not actionable by the caller.
+// read-only reader is not actionable by the caller. Idempotent: a second call
+// is a no-op — releasing the RocksDB snapshot twice would be a C-side
+// double-free, and guarding here is cheaper than auditing every caller forever.
 func (a *ReadView) Release() {
+	if a.snap == nil {
+		return // already released
+	}
 	for _, c := range a.closers {
 		if err := c(); err != nil {
 			a.catalog.Logger().WithError(err).Warn("query: close view-owned reader")
@@ -290,4 +357,5 @@ func (a *ReadView) Release() {
 	}
 	a.closers = nil
 	a.snap.Release()
+	a.snap = nil
 }

@@ -92,11 +92,11 @@ type ingestionLoopConfig struct {
 	Logger   *supportlog.Entry
 	Metrics  observability.Metrics
 	Sink     ingest.MetricSink
-	Health   *healthState
 	// Registry receives the loop's serving handoffs: every opened hot DB's
 	// handle and every fully committed ledger. The sink owns each published
-	// handle — the loop's single ownership story. The daemon passes the real
-	// query.Registry; the bounded bench loop passes a closingSink.
+	// handle — the loop's single ownership story. The daemon passes a
+	// servingSink (registry + health signal); the bounded bench loop passes a
+	// closingSink.
 	Registry handleSink
 }
 
@@ -106,7 +106,7 @@ type ingestionLoopConfig struct {
 // completed chunk's DB as the next one is published.
 type handleSink interface {
 	PublishHandle(c chunk.ID, db *hotchunk.DB)
-	SetLatestLedger(seq uint32)
+	SetLatestLedger(seq uint32, closeTimeUnix int64)
 }
 
 // closingSink is the bounded bench loop's handleSink: each completed chunk's DB
@@ -122,7 +122,41 @@ func (s *closingSink) PublishHandle(_ chunk.ID, db *hotchunk.DB) {
 	s.prev = db
 }
 
-func (s *closingSink) SetLatestLedger(uint32) {}
+func (s *closingSink) SetLatestLedger(uint32, int64) {}
+
+// servingSink is the daemon's handleSink: handles and latest-ledger stamps go
+// to the registry, and every real stamp also feeds the readiness/health signal.
+//
+// Why this exists: two things want each committed ledger's close time — the
+// registry's latest-ledger stamp (so getLedgerRange can answer without a point
+// read) and the health signal (readiness latch + staleness check). The loop
+// used to call each one separately, which meant a future edit could update one
+// call and forget the other, and the two would quietly report different close
+// times. Routing both through this single write makes that impossible.
+//
+// Why they stay TWO stores behind the one write, instead of one merged store:
+// their lifetimes are deliberately different. The registry is torn down and
+// rebuilt on every supervised restart (no query survives a restart), while the
+// health signal lives for the whole process so its readiness latch — "this
+// deploy has proven it can commit a ledger" — survives restarts. Merging them
+// would either unlatch readiness on every restart or leak per-run serving
+// state across runs.
+type servingSink struct {
+	sink   handleSink
+	health *healthState
+}
+
+func (s *servingSink) PublishHandle(c chunk.ID, db *hotchunk.DB) { s.sink.PublishHandle(c, db) }
+
+func (s *servingSink) SetLatestLedger(seq uint32, closeTimeUnix int64) {
+	s.sink.SetLatestLedger(seq, closeTimeUnix)
+	// Close time 0 means "unknown" (a failed decode, or a boot seed): readers
+	// fall back to a point read, and readiness must latch only on a real
+	// commit's close time — so 0 is stored but never observed.
+	if closeTimeUnix != 0 {
+		s.health.observe(closeTimeUnix)
+	}
+}
 
 // runIngestionLoop is the hot tier's writer: the single goroutine that opens,
 // writes, and hands off the per-chunk hot DBs. It consumes ONE continuous
@@ -189,18 +223,22 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		// The tick must not touch it — its chunk-aligned value would regress it.
 		metrics.LastCommitted(seq)
 
+		// A committed ledger's close time always decodes; on the near-impossible
+		// decode error, publish 0 (readers fall back to a point read, and the
+		// serving sink skips the health signal) rather than fail an
+		// already-durable commit.
+		closeUnix, cerr := view.LedgerCloseTime()
+		if cerr != nil {
+			closeUnix = 0
+		}
+
 		// Advance the served latest ledger last, once the ledger is fully queryable:
 		// IngestLedger completes the in-memory events apply before returning, so a
-		// read view acquired after this can serve seq from every hot store.
-		cfg.Registry.SetLatestLedger(seq)
-
-		// Feed the readiness/health signal from the SAME commit: the first commit
-		// latches readiness, and the close time drives the health staleness check.
-		// A committed ledger's close time always decodes; skip the signal on the
-		// near-impossible decode error rather than fail an already-durable commit.
-		if closeUnix, cerr := view.LedgerCloseTime(); cerr == nil {
-			cfg.Health.observe(closeUnix)
-		}
+		// read view acquired after this can serve seq from every hot store. This one
+		// write carries everything derived from the commit — the sequence, its close
+		// time (so getLedgerRange never point-reads the tip), and through the
+		// daemon's servingSink the readiness/health signal.
+		cfg.Registry.SetLatestLedger(seq, closeUnix)
 
 		// Chunk boundary: this seq is the chunk's last ledger.
 		if closed := chunk.IDFromLedger(seq); seq == closed.LastLedger() {

@@ -29,11 +29,30 @@ func TestHealthState_ReadyLatches(t *testing.T) {
 	assert.True(t, hs.Ready(), "ready stays latched after a stale commit")
 }
 
-// TestHealthState_ObserveNilSafe: the ingestion loop calls observe unconditionally,
+// TestHealthState_ObserveNilSafe: the serving sink calls observe unconditionally,
 // so a nil healthState (tests build the loop without one) must be a no-op, not a panic.
 func TestHealthState_ObserveNilSafe(t *testing.T) {
 	var hs *healthState
 	require.NotPanics(t, func() { hs.observe(time.Now().Unix()) })
+}
+
+// TestServingSink_ZeroCloseTimeStampsButNeverLatches: a close time of 0 means
+// "unknown" (boot seed or failed decode) — the stamp must still reach the inner
+// sink, but readiness must latch only on a real close time.
+func TestServingSink_ZeroCloseTimeStampsButNeverLatches(t *testing.T) {
+	hs := &healthState{}
+	inner := &closingSink{}
+	sink := &servingSink{sink: inner, health: hs}
+
+	sink.SetLatestLedger(100, 0)
+	assert.False(t, hs.Ready(), "an unknown close time must not latch readiness")
+
+	closeUnix := time.Now().Unix()
+	sink.SetLatestLedger(101, closeUnix)
+	assert.True(t, hs.Ready())
+	got, ok := hs.LastCommitClose()
+	require.True(t, ok)
+	assert.Equal(t, closeUnix, got.Unix())
 }
 
 // TestRunIngestionLoop_FeedsHealthFromCommit: the ingestion loop feeds the
@@ -54,7 +73,7 @@ func TestRunIngestionLoop_FeedsHealthFromCommit(t *testing.T) {
 
 	cfg, _ := loopConfig(t, stream, cat, first)
 	hs := &healthState{}
-	cfg.Health = hs
+	cfg.Registry = &servingSink{sink: cfg.Registry, health: hs}
 
 	require.Error(t, runIngestionLoop(context.Background(), cfg))
 

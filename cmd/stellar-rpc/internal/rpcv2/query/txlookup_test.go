@@ -1,14 +1,20 @@
 package query
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
 // TestHotTxHashIndexes pins that every published hot chunk's tx index is returned,
@@ -66,7 +72,7 @@ func TestColdTxHashIndexCoverages(t *testing.T) {
 	require.NoError(t, err)
 	defer a.Release()
 
-	covs, err := a.ColdTxHashIndexCoverages()
+	covs, err := a.coldTxHashIndexCoverages()
 	require.NoError(t, err)
 	require.Len(t, covs, 3, "only the frozen coverages, not the freezing debris")
 	for _, cov := range covs {
@@ -75,4 +81,64 @@ func TestColdTxHashIndexCoverages(t *testing.T) {
 	assert.Equal(t, chunk.ID(2*geometry.ChunksPerTxhashIndex), covs[0].Hi, "newest coverage first")
 	assert.Equal(t, chunk.ID(geometry.ChunksPerTxhashIndex), covs[1].Hi)
 	assert.Equal(t, chunk.ID(0), covs[2].Hi)
+}
+
+// writeColdTxIndex builds a real one-entry .idx at the coverage's layout path,
+// so ColdTxIndexes has an artifact to open.
+func writeColdTxIndex(
+	t *testing.T, cat *catalog.Catalog, cov geometry.TxHashIndexCoverage, hash [32]byte, seq uint32,
+) {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), txhash.ColdBinName(cov.Lo))
+	var entry txhash.ColdEntry
+	copy(entry.Key[:], hash[:txhash.ColdKeySize])
+	entry.Seq = seq
+	require.NoError(t, txhash.WriteColdBin(bin, []txhash.ColdEntry{entry}))
+
+	idxPath := cat.Layout().TxHashIndexFilePath(cov)
+	require.NoError(t, os.MkdirAll(filepath.Dir(idxPath), 0o755))
+	require.NoError(t, txhash.BuildColdIndex(
+		context.Background(), []string{bin}, idxPath, cov.Lo.FirstLedger(), cov.Hi.LastLedger()))
+}
+
+func TestColdTxIndexes(t *testing.T) {
+	cat := openTestCatalog(t, silentLogger())
+	r := NewRegistry(cat, geometry.NewRetention(0, 0))
+	require.NoError(t, cat.FlipHotReady(999)) // acquisition needs a ready live chunk
+
+	hashes := map[geometry.TxHashIndexID][32]byte{}
+	seqs := map[geometry.TxHashIndexID]uint32{}
+	for _, w := range []geometry.TxHashIndexID{0, 1} {
+		c := chunk.ID(uint32(w) * geometry.ChunksPerTxhashIndex)
+		cov, err := cat.MarkTxHashIndexFreezing(w, c, c)
+		require.NoError(t, err)
+		var h [32]byte
+		h[0] = byte(w) + 1
+		hashes[w], seqs[w] = h, c.FirstLedger()+5
+		writeColdTxIndex(t, cat, cov, h, seqs[w])
+		require.NoError(t, cat.CommitTxHashIndex(cov))
+	}
+	// Freezing debris in window 3 — excluded from the probe set, so its missing
+	// .idx file must never be opened.
+	debris := chunk.ID(3 * geometry.ChunksPerTxhashIndex)
+	_, err := cat.MarkTxHashIndexFreezing(3, debris, debris)
+	require.NoError(t, err)
+
+	a, err := r.NewReadView()
+	require.NoError(t, err)
+
+	idxs, err := a.ColdTxIndexes()
+	require.NoError(t, err)
+	require.Len(t, idxs, 2, "one reader per frozen coverage, freezing debris excluded")
+
+	got, err := idxs[0].Get(hashes[1])
+	require.NoError(t, err)
+	assert.Equal(t, seqs[1], got, "newest coverage's reader first")
+	got, err = idxs[1].Get(hashes[0])
+	require.NoError(t, err)
+	assert.Equal(t, seqs[0], got)
+
+	a.Release()
+	_, err = idxs[0].Get(hashes[1])
+	assert.ErrorIs(t, err, stores.ErrStoreClosed, "readers are view-owned: Release closes them")
 }

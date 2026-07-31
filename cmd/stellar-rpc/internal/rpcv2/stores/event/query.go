@@ -27,6 +27,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -173,35 +174,86 @@ var topicFieldByPosition = [protocol.MaxTopicCount]events.Field{
 //     consistent with getEvents.
 //
 // See QueryOptions / IDRange for the window, cap, and order
-// contract.
+// contract. Callers that page with MaxEvents should use QueryPage —
+// returned payloads carry no event IDs, so Query alone gives no way
+// to resume, and a short page does not prove the window is done.
+func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) ([]events.Payload, error) {
+	page, err := queryPage(ctx, r, filters, opts)
+	return page.Payloads, err
+}
+
+// Page is one QueryPage result: the matching payloads plus the exact resume
+// state only the engine can compute — payloads carry no event IDs, and
+// MaxEvents applies before the defensive post-filter, so from outside a capped
+// page is indistinguishable from an exhausted window.
+type Page struct {
+	Payloads []events.Payload
+	// NextStart is the next page's Range.Start: one past the last SELECTED
+	// event ID, so post-filter drops still advance the walk. Equals Range.End
+	// when Exhausted.
+	NextStart uint32
+	// Exhausted means the selection was not truncated by MaxEvents: the window
+	// holds no matches beyond this page.
+	Exhausted bool
+}
+
+// QueryPage is Query for pagers: same matching semantics, plus where the next
+// page resumes and whether the window is exhausted. Ascending only — a
+// descending resume runs on the opposite bound and has no consumer.
+//
+// Usage:
+//
+//	pos := rng.Start
+//	for {
+//	    page, err := event.QueryPage(ctx, r, filters,
+//	        event.QueryOptions{Range: event.IDRange{Start: pos, End: rng.End}, MaxEvents: batch})
+//	    if err != nil {
+//	        return err
+//	    }
+//	    ...consume page.Payloads...
+//	    if page.Exhausted {
+//	        return nil
+//	    }
+//	    pos = page.NextStart
+//	}
+func QueryPage(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (Page, error) {
+	if opts.Descending {
+		return Page{}, errors.New("events: QueryPage is ascending-only")
+	}
+	return queryPage(ctx, r, filters, opts)
+}
+
+// queryPage is the shared engine core. The resume fields are computed for
+// ascending only; Query, the sole descending caller, discards them.
 //
 //nolint:gocognit,cyclop,funlen
-func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) ([]events.Payload, error) {
+func queryPage(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (Page, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return Page{}, err
 	}
 	if opts.MaxEvents < 0 {
-		return nil, fmt.Errorf("events: MaxEvents must be non-negative, got %d", opts.MaxEvents)
+		return Page{}, fmt.Errorf("events: MaxEvents must be non-negative, got %d", opts.MaxEvents)
 	}
 	if err := opts.Range.check(); err != nil {
-		return nil, err
+		return Page{}, err
 	}
+	exhausted := Page{NextStart: opts.Range.End, Exhausted: true}
 	if opts.Range.isEmpty() {
-		return nil, nil
+		return exhausted, nil
 	}
 	if err := validateFilters(filters); err != nil {
-		return nil, err
+		return Page{}, err
 	}
 
 	eventCount, err := r.EventCount()
 	if err != nil {
-		return nil, fmt.Errorf("events: query event count: %w", err)
+		return Page{}, fmt.Errorf("events: query event count: %w", err)
 	}
 	// Snapshot-isolation contract: a properly-pinned End is ≤ the
 	// chunk's current EventCount. Exceeding it signals a caller bug
 	// (wrong chunk's offsets, stale snapshot) — surface it loudly.
 	if opts.Range.End > eventCount {
-		return nil, fmt.Errorf(
+		return Page{}, fmt.Errorf(
 			"events: Range.End (%d) exceeds chunk EventCount (%d)",
 			opts.Range.End, eventCount)
 	}
@@ -213,7 +265,18 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	// directly to a contiguous FetchRange call. Cheaper than building
 	// the full chunk bitmap just to truncate to MaxEvents.
 	if hasMatchAllFilter(filters) {
-		return fetchAllInRange(ctx, r, start, end, opts.MaxEvents, descending)
+		payloads, ferr := fetchAllInRange(ctx, r, start, end, opts.MaxEvents, descending)
+		if ferr != nil {
+			return Page{}, ferr
+		}
+		page := Page{Payloads: payloads, NextStart: end, Exhausted: true}
+		// The dense range truncates at exactly start+MaxEvents when it is
+		// longer than the cap.
+		if !descending && opts.MaxEvents > 0 && uint64(end-start) > uint64(opts.MaxEvents) {
+			page.NextStart = start + uint32(opts.MaxEvents) //nolint:gosec // < end-start, fits uint32
+			page.Exhausted = false
+		}
+		return page, nil
 	}
 
 	// ───── 1. Dedupe terms across filters ─────
@@ -236,7 +299,7 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	// ───── 2. Single batched lookup for all unique terms ─────
 	bitmaps, err := r.LookupKeys(ctx, uniqueKeys)
 	if err != nil {
-		return nil, fmt.Errorf("events: query lookup: %w", err)
+		return Page{}, fmt.Errorf("events: query lookup: %w", err)
 	}
 
 	// ───── 3. Per-filter intersect ─────
@@ -282,7 +345,7 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	}
 
 	if len(perFilter) == 0 {
-		return nil, nil
+		return exhausted, nil
 	}
 
 	// ───── 4. Union across filters ─────
@@ -314,7 +377,7 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	}
 
 	if union.IsEmpty() {
-		return nil, nil
+		return exhausted, nil
 	}
 
 	// ───── 6. Fetch payloads ─────
@@ -330,17 +393,27 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	ids := selectEventIDs(union, opts.MaxEvents, descending)
 	payloads, err := r.FetchEvents(ctx, ids)
 	if err != nil {
-		return nil, err
+		return Page{}, err
 	}
 	// Drop bitmap-side false positives (see postFilter for the rationale).
 	matched, err := postFilter(payloads, filters)
 	if err != nil {
-		return nil, err
+		return Page{}, err
 	}
 	if descending {
 		slices.Reverse(matched)
+		return Page{Payloads: matched}, nil // resume fields are ascending-only; Query discards them
 	}
-	return matched, nil
+	page := Page{Payloads: matched, NextStart: end, Exhausted: true}
+	// selectEventIDs keeps the lowest MaxEvents ids, so the selection was
+	// truncated exactly when the window's match count exceeds the cap; ids is
+	// then non-empty and its last entry is the resume boundary. NextStart moves
+	// past post-filter drops too — they were selected and verified non-matching.
+	if opts.MaxEvents > 0 && union.GetCardinality() > uint64(opts.MaxEvents) {
+		page.NextStart = ids[len(ids)-1] + 1
+		page.Exhausted = false
+	}
+	return page, nil
 }
 
 // validateFilters rejects filters that would silently never match

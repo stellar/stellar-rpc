@@ -635,5 +635,5 @@ func TestClosingSink(t *testing.T) {
 	_, _, err = b.MaxCommittedSeq()
 	require.NoError(t, err, "the newest handle stays open for the loop's deferred close")
 
-	s.SetLatestLedger(42) // discarded; must not panic
+	s.SetLatestLedger(42, 0) // discarded; must not panic
 }
