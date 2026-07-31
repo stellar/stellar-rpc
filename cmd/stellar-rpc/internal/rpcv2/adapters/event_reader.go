@@ -31,8 +31,10 @@ const defaultEventScanBatch = 512
 type EventReader struct {
 	registry *query.Registry
 
-	// scanBatch is the per-query candidate cap (defaultEventScanBatch outside
-	// tests); the scan loop grows it when a single ledger holds more matches.
+	// scanBatch is how many candidate events each engine query fetches
+	// (defaultEventScanBatch outside tests). It is a fetch size, not a result
+	// cap: a ledger holding more matches than one batch is simply served
+	// across several pages, because QueryPage's NextStart resumes mid-ledger.
 	scanBatch int
 }
 
@@ -211,11 +213,12 @@ func (e *emitter) emit(res []events.Payload) (bool, error) {
 		if e.types != nil && !e.types[int(ev.Type)] {
 			continue
 		}
-		// TODO: InSuccessfulContractCall is hardcoded true. The stored payload
-		// does not carry its transaction's success bit today; the planned
-		// payload-format rework adds it. Until then the value is knowingly
-		// wrong for a failed transaction's events — do NOT compensate by
-		// deriving it from the ledger's transactions here.
+		// TODO(#774): InSuccessfulContractCall is hardcoded true. The stored
+		// payload does not carry its transaction's success bit today; the
+		// payload-format rework (in-progress PR
+		// https://github.com/stellar/stellar-rpc/pull/904) adds it. Until then
+		// the value is knowingly wrong for a failed transaction's events — do
+		// NOT compensate by deriving it from the ledger's transactions here.
 		diag := xdr.DiagnosticEvent{InSuccessfulContractCall: true, Event: ev}
 		txHash := p.TxHash
 		if !e.f(diag, cur, p.LedgerClosedAt, &txHash) {

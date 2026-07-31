@@ -243,6 +243,56 @@ func marshalV2LCM(
 	return raw
 }
 
+// lcmV1WithClassicTx builds a V1 LedgerCloseMeta — the shape full history
+// serves for pre-V2 ledgers — holding one successful classic (non-Soroban)
+// transaction, returning (bytes, tx hash).
+func lcmV1WithClassicTx(t *testing.T, seq uint32) ([]byte, xdr.Hash) {
+	t.Helper()
+	envelope := xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1: &xdr.TransactionV1Envelope{
+			Tx: xdr.Transaction{
+				SourceAccount: xdr.MustMuxedAddress(keypair.MustRandom().Address()),
+			},
+		},
+	}
+	hash, err := network.HashTransactionInEnvelope(envelope, network.PublicNetworkPassphrase)
+	require.NoError(t, err)
+	opResults := []xdr.OperationResult{}
+	result := xdr.TransactionResult{
+		FeeCharged: 100,
+		Result:     xdr.TransactionResultResult{Code: xdr.TransactionResultCodeTxSuccess, Results: &opResults},
+	}
+	comp := []xdr.TxSetComponent{{
+		Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
+		TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
+			Txs: []xdr.TransactionEnvelope{envelope},
+		},
+	}}
+	lcm := xdr.LedgerCloseMeta{
+		V: 1,
+		V1: &xdr.LedgerCloseMetaV1{
+			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
+				Header: xdr.LedgerHeader{
+					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(closeTimeFor(seq))},
+					LedgerSeq: xdr.Uint32(seq),
+				},
+			},
+			TxSet: xdr.GeneralizedTransactionSet{
+				V:       1,
+				V1TxSet: &xdr.TransactionSetV1{Phases: []xdr.TransactionPhase{{V: 0, V0Components: &comp}}},
+			},
+			TxProcessing: []xdr.TransactionResultMeta{{
+				Result:            xdr.TransactionResultPair{TransactionHash: hash, Result: result},
+				TxApplyProcessing: xdr.TransactionMeta{V: 3, V3: &xdr.TransactionMetaV3{}},
+			}},
+		},
+	}
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+	return raw, hash
+}
+
 func contractEventFixture(contractByte byte, topic string) xdr.ContractEvent {
 	var contractID xdr.ContractId
 	contractID[0] = contractByte

@@ -32,7 +32,7 @@ func TestGetEvents_MatchAllAscending(t *testing.T) {
 	lcm1, txs1 := lcmWithTxs(t, first, txSpec{events: []xdr.ContractEvent{evA, evB}})
 	lcm2, txs2 := lcmWithTxs(t, first+1, txSpec{events: []xdr.ContractEvent{evC}})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm1, lcm2)
-	r.SetLatestLedger(first + 1)
+	r.SetLatestLedger(first+1, closeTimeFor(first+1))
 
 	var got []scannedEvent
 	err := reader.GetEvents(context.Background(), wholeWindow(first, first+1),
@@ -59,7 +59,7 @@ func TestGetEvents_ScanFunctionFalseStopsEarly(t *testing.T) {
 		contractEventFixture(0xab, "transfer"), contractEventFixture(0xab, "mint"),
 	}})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm1)
-	r.SetLatestLedger(first)
+	r.SetLatestLedger(first, closeTimeFor(first))
 
 	calls := 0
 	err := reader.GetEvents(context.Background(), wholeWindow(first, first), nil, nil, nil,
@@ -78,7 +78,7 @@ func TestGetEvents_ResumeSkipsAtAndBeforeStart(t *testing.T) {
 		contractEventFixture(0xab, "a"), contractEventFixture(0xab, "b"), contractEventFixture(0xab, "c"),
 	}})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm1)
-	r.SetLatestLedger(first)
+	r.SetLatestLedger(first, closeTimeFor(first))
 
 	// The handler resumes with the last returned cursor's Event incremented, so
 	// Start itself is inclusive: resuming after event 0 must emit exactly 1 and 2.
@@ -103,7 +103,7 @@ func TestGetEvents_ContractAndTopicFiltersCross(t *testing.T) {
 		contractEventFixture(0xcd, "burn"),
 	}})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm1)
-	r.SetLatestLedger(first)
+	r.SetLatestLedger(first, closeTimeFor(first))
 
 	var contractAB xdr.ContractId
 	contractAB[0] = 0xab
@@ -140,7 +140,7 @@ func TestGetEvents_EventTypeFilter(t *testing.T) {
 		contractEventFixture(0xab, "transfer"), systemEvent,
 	}})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm1)
-	r.SetLatestLedger(first)
+	r.SetLatestLedger(first, closeTimeFor(first))
 
 	var got []scannedEvent
 	err := reader.GetEvents(context.Background(), wholeWindow(first, first),
@@ -162,7 +162,7 @@ func TestGetEvents_InSuccessfulContractCallHardcodedTrue(t *testing.T) {
 		txSpec{events: []xdr.ContractEvent{contractEventFixture(0xab, "transfer")}},
 	)
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm1)
-	r.SetLatestLedger(first)
+	r.SetLatestLedger(first, closeTimeFor(first))
 
 	var got []scannedEvent
 	err := reader.GetEvents(context.Background(), wholeWindow(first, first),
@@ -195,7 +195,7 @@ func TestGetEvents_PagingAcrossTheChunkSeam(t *testing.T) {
 	lcm3, _ := lcmWithTxs(t, c1.FirstLedger(), txSpec{events: []xdr.ContractEvent{other, ab("d")}})
 	lcm4, _ := lcmWithTxs(t, c1.FirstLedger()+1, txSpec{events: []xdr.ContractEvent{ab("e")}})
 	seedHotChunkLCMs(t, cat, r, c1, lcm3, lcm4)
-	r.SetLatestLedger(c1.FirstLedger() + 1)
+	r.SetLatestLedger(c1.FirstLedger()+1, closeTimeFor(c1.FirstLedger()+1))
 
 	var contractAB xdr.ContractId
 	contractAB[0] = 0xab
@@ -240,7 +240,7 @@ func TestGetEvents_BelowFloorIsRangeError(t *testing.T) {
 	first := testChunk.FirstLedger()
 	lcm1, _ := lcmWithTxs(t, first, txSpec{events: []xdr.ContractEvent{contractEventFixture(0xab, "a")}})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm1)
-	r.SetLatestLedger(first)
+	r.SetLatestLedger(first, closeTimeFor(first))
 
 	var rangeErr *query.RangeError
 	err := reader.GetEvents(context.Background(), wholeWindow(2, first),
@@ -255,7 +255,7 @@ func TestGetEvents_EndLedgerIsExclusive(t *testing.T) {
 	lcm1, _ := lcmWithTxs(t, first, txSpec{events: []xdr.ContractEvent{contractEventFixture(0xab, "in")}})
 	lcm2, _ := lcmWithTxs(t, first+1, txSpec{events: []xdr.ContractEvent{contractEventFixture(0xab, "out")}})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm1, lcm2)
-	r.SetLatestLedger(first + 1)
+	r.SetLatestLedger(first+1, closeTimeFor(first+1))
 
 	var got []scannedEvent
 	err := reader.GetEvents(context.Background(), protocol.CursorRange{
@@ -286,7 +286,7 @@ func TestGetEvents_ColdChunkServes(t *testing.T) {
 		contractEventFixture(0xab, "b"),
 	}})
 	seedFrozenEventChunk(t, cat, testChunk, lcm1, lcm2)
-	r.SetLatestLedger(first + 1)
+	r.SetLatestLedger(first+1, closeTimeFor(first+1))
 
 	var contractAB xdr.ContractId
 	contractAB[0] = 0xab
@@ -299,10 +299,24 @@ func TestGetEvents_ColdChunkServes(t *testing.T) {
 	assert.Equal(t, first+1, got[1].cursor.Ledger)
 }
 
-// TestGetEvents_BatchSmallerThanOneLedger drives the scan loop's growth and
-// settle paths: with a 2-candidate batch, a 5-event ledger forces the batch to
-// double until it clears the ledger, and the boundary re-scans must not emit
-// duplicates.
+func TestGetEvents_V1LedgerCloseMetaHasNoEvents(t *testing.T) {
+	reader, r, cat := eventReaderFixture(t)
+	first := testChunk.FirstLedger()
+	raw, _ := lcmV1WithClassicTx(t, first)
+	seedHotChunkLCMs(t, cat, r, testChunk, raw)
+	r.SetLatestLedger(first, closeTimeFor(first))
+
+	var got []scannedEvent
+	err := reader.GetEvents(context.Background(), wholeWindow(first, first),
+		nil, nil, nil, collectInto(&got))
+	require.NoError(t, err)
+	assert.Empty(t, got, "a classic pre-Soroban ledger scans clean: no events, no error")
+}
+
+// TestGetEvents_BatchSmallerThanOneLedger pins paging inside a single ledger:
+// with a 2-candidate batch, the 5-event ledger arrives over several pages
+// (QueryPage's NextStart resumes mid-ledger), and the pages must cover every
+// event exactly once — no duplicates, no gaps.
 func TestGetEvents_BatchSmallerThanOneLedger(t *testing.T) {
 	reader, r, cat := eventReaderFixture(t)
 	reader.scanBatch = 2
@@ -317,7 +331,7 @@ func TestGetEvents_BatchSmallerThanOneLedger(t *testing.T) {
 		contractEventFixture(0xab, "f"), contractEventFixture(0xab, "g"),
 	}})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm1, lcm2)
-	r.SetLatestLedger(first + 1)
+	r.SetLatestLedger(first+1, closeTimeFor(first+1))
 
 	var contractAB xdr.ContractId
 	contractAB[0] = 0xab

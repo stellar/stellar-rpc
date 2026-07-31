@@ -89,8 +89,58 @@ func TestOpenRegistry(t *testing.T) {
 func TestSetLatestLedger(t *testing.T) {
 	r, _ := newTestRegistry(t, 0, 0)
 	assert.Equal(t, uint32(0), r.LatestLedger())
-	r.SetLatestLedger(42)
+	r.SetLatestLedger(42, 4242)
 	assert.Equal(t, uint32(42), r.LatestLedger())
+}
+
+func TestReadView_LatestCloseTime(t *testing.T) {
+	r, cat := newTestRegistry(t, 0, 0)
+	require.NoError(t, cat.FlipHotReady(5))
+
+	r.SetLatestLedger(42, 0) // the boot seeding: close time unknown
+	a, err := r.NewReadView()
+	require.NoError(t, err)
+	_, ok := a.LatestCloseTime()
+	assert.False(t, ok, "a zero close time means unknown, not midnight 1970")
+	a.Release()
+
+	r.SetLatestLedger(43, 4343)
+	a, err = r.NewReadView()
+	require.NoError(t, err)
+	defer a.Release()
+	assert.Equal(t, uint32(43), a.LatestLedger())
+	ct, ok := a.LatestCloseTime()
+	assert.True(t, ok)
+	assert.Equal(t, int64(4343), ct, "seq and close time publish as one pair")
+}
+
+func TestReadView_OldestCloseTime(t *testing.T) {
+	r, cat := newTestRegistry(t, 0, 3) // full history, floor pinned at chunk 3
+	require.NoError(t, cat.FlipHotReady(5))
+
+	a, err := r.NewReadView()
+	require.NoError(t, err)
+	_, ok := a.OldestCloseTime()
+	assert.False(t, ok, "nothing recorded yet")
+	a.Release()
+
+	r.RecordOldestCloseTime(chunk.ID(3).FirstLedger(), 333)
+	a, err = r.NewReadView()
+	require.NoError(t, err)
+	ct, ok := a.OldestCloseTime()
+	assert.True(t, ok)
+	assert.Equal(t, int64(333), ct)
+	a.Release()
+
+	// A recorded seq that no longer matches the view's floor (a stale entry
+	// from before the floor moved) must read as a miss, never as the wrong
+	// ledger's close time.
+	r.RecordOldestCloseTime(chunk.ID(2).FirstLedger(), 222)
+	a, err = r.NewReadView()
+	require.NoError(t, err)
+	defer a.Release()
+	_, ok = a.OldestCloseTime()
+	assert.False(t, ok, "stale seq is a miss")
 }
 
 // TestNewReadView_FloorDerivation pins that the view floor is Retention.FloorAt
@@ -122,6 +172,16 @@ func TestNewReadView_FloorDerivation(t *testing.T) {
 	}
 }
 
+func TestReadViewRelease_Idempotent(t *testing.T) {
+	r, cat := newTestRegistry(t, 0, 0)
+	require.NoError(t, cat.FlipHotReady(5))
+
+	a, err := r.NewReadView()
+	require.NoError(t, err)
+	a.Release()
+	a.Release() // must be a no-op: releasing the snapshot twice is a double-free
+}
+
 // TestNewReadView_FloorPinnedToSnapshot pins that the floor is fixed at the acquisition
 // instant: a chunk opened after acquisition raises a later view's floor but
 // never the earlier one's.
@@ -151,7 +211,7 @@ func TestNewReadView_CapturesStateAtAcquisitionInstant(t *testing.T) {
 	r, cat := newTestRegistry(t, 0, 0)
 	require.NoError(t, cat.FlipHotReady(5))
 	require.NoError(t, cat.FlipHotReady(6))
-	r.SetLatestLedger(65_000)
+	r.SetLatestLedger(65_000, 650)
 	r.PublishHandle(5, &hotchunk.DB{})
 
 	a, err := r.NewReadView()
@@ -159,7 +219,7 @@ func TestNewReadView_CapturesStateAtAcquisitionInstant(t *testing.T) {
 	defer a.Release()
 
 	// Mutate every piece of serving state after acquisition.
-	r.SetLatestLedger(70_000)
+	r.SetLatestLedger(70_000, 700)
 	require.NoError(t, cat.FlipHotReady(7))
 	r.PublishHandle(7, &hotchunk.DB{})
 	r.DiscardHandle(5)
@@ -348,11 +408,11 @@ func TestNewReadView_NoReadyChunkErrors(t *testing.T) {
 func TestNewReadView_LoadOrderPinned(t *testing.T) {
 	r, cat := newTestRegistry(t, 0, 0)
 	require.NoError(t, cat.FlipHotReady(5))
-	r.SetLatestLedger(100)
+	r.SetLatestLedger(100, 0)
 
 	inner := r.newSnapshot
 	r.newSnapshot = func() (*catalog.Snapshot, error) {
-		r.SetLatestLedger(200)             // lands after the latest-ledger load
+		r.SetLatestLedger(200, 0)          // lands after the latest-ledger load
 		r.PublishHandle(6, &hotchunk.DB{}) // lands after the handle-set load
 		return inner()
 	}
@@ -375,11 +435,11 @@ func TestNewReadView_LoadOrderPinned(t *testing.T) {
 func TestNewReadView_LatestBeforeHandles(t *testing.T) {
 	r, cat := newTestRegistry(t, 0, 0)
 	require.NoError(t, cat.FlipHotReady(5))
-	r.SetLatestLedger(100)
+	r.SetLatestLedger(100, 0)
 
 	inner := r.loadHandles
 	r.loadHandles = func() *handleSet {
-		r.SetLatestLedger(200) // lands after the latest-ledger load
+		r.SetLatestLedger(200, 0) // lands after the latest-ledger load
 		return inner()
 	}
 

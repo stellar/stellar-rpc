@@ -28,7 +28,7 @@ func sparseFixture(t *testing.T) (*LedgerReader, chunk.ID, chunk.ID) {
 	c0, c1 := testChunk, testChunk+1
 	seedHotLedgers(t, cat, r, c0, seqRange(c0.FirstLedger(), c0.FirstLedger()+3)...)
 	seedHotLedgers(t, cat, r, c1, c1.FirstLedger(), c1.FirstLedger()+1)
-	r.SetLatestLedger(c1.FirstLedger())
+	r.SetLatestLedger(c1.FirstLedger(), closeTimeFor(c1.FirstLedger()))
 	return NewLedgerReader(r), c0, c1
 }
 
@@ -41,7 +41,7 @@ func emptyFixture(t *testing.T) *LedgerReader {
 	cat := openTestCatalog(t)
 	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
 	seedHotLedgers(t, cat, r, testChunk)
-	r.SetLatestLedger(testChunk.FirstLedger() - 1)
+	r.SetLatestLedger(testChunk.FirstLedger()-1, 0)
 	return NewLedgerReader(r)
 }
 
@@ -74,6 +74,31 @@ func TestGetLedgerRange_EmptyStore(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrEmptyDB)
 }
 
+func TestGetLedgerRange_BootStampFallsBackThenCaches(t *testing.T) {
+	cat := openTestCatalog(t)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
+	seedHotLedgers(t, cat, r, testChunk, testChunk.FirstLedger(), testChunk.FirstLedger()+1)
+	// The boot seeding: OpenRegistry stamps the latest seq with close time 0
+	// because the catalog knows no close times.
+	r.SetLatestLedger(testChunk.FirstLedger()+1, 0)
+	reader := NewLedgerReader(r)
+
+	got, err := reader.GetLedgerRange(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, closeTimeFor(testChunk.FirstLedger()), got.FirstLedger.CloseTime,
+		"a stamp miss still serves the real close time via the point read")
+	assert.Equal(t, closeTimeFor(testChunk.FirstLedger()+1), got.LastLedger.CloseTime)
+
+	// The fallback recorded the oldest edge, so the next view serves it from
+	// memory.
+	view, err := r.NewReadView()
+	require.NoError(t, err)
+	defer view.Release()
+	ct, ok := view.OldestCloseTime()
+	assert.True(t, ok, "first GetLedgerRange populates the oldest cache")
+	assert.Equal(t, closeTimeFor(testChunk.FirstLedger()), ct)
+}
+
 func TestGetLedger_PointRead(t *testing.T) {
 	reader, c0, _ := sparseFixture(t)
 	lcm, ok, err := reader.GetLedger(context.Background(), c0.FirstLedger()+2)
@@ -101,6 +126,21 @@ func TestGetLedger_OutsideWindow(t *testing.T) {
 		assert.NoError(t, err)
 		assert.False(t, ok)
 	}
+}
+
+func TestGetLedger_V1LedgerCloseMeta(t *testing.T) {
+	cat := openTestCatalog(t)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
+	raw, _ := lcmV1WithClassicTx(t, testChunk.FirstLedger())
+	seedHotChunkLCMs(t, cat, r, testChunk, raw)
+	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
+	reader := NewLedgerReader(r)
+
+	lcm, ok, err := reader.GetLedger(context.Background(), testChunk.FirstLedger())
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, testChunk.FirstLedger(), lcm.LedgerSequence())
+	assert.Equal(t, closeTimeFor(testChunk.FirstLedger()), lcm.LedgerCloseTime())
 }
 
 func TestStreamLedgerRange(t *testing.T) {
@@ -261,12 +301,14 @@ func TestTxDone_WithAndWithoutPriming(t *testing.T) {
 	tx, err := reader.NewTx(context.Background())
 	require.NoError(t, err)
 	assert.NoError(t, tx.Done())
+	assert.NoError(t, tx.Done(), "a second Done must be a no-op, not a double release")
 
 	tx, err = reader.NewTx(context.Background())
 	require.NoError(t, err)
 	_, _, err = tx.GetLedger(context.Background(), c0.FirstLedger())
 	require.NoError(t, err)
 	assert.NoError(t, tx.Done())
+	assert.NoError(t, tx.Done(), "a second Done must be a no-op, not a double release")
 }
 
 // TestTxGetLedger_WalkCrossesChunkBorder seeds chunk 5 densely (the walk
@@ -281,7 +323,7 @@ func TestTxGetLedger_WalkCrossesChunkBorder(t *testing.T) {
 	c0, c1 := testChunk, testChunk+1
 	seedHotLedgers(t, cat, r, c0, seqRange(c0.FirstLedger(), c0.LastLedger())...)
 	seedHotLedgers(t, cat, r, c1, c1.FirstLedger(), c1.FirstLedger()+1)
-	r.SetLatestLedger(c1.FirstLedger() + 1)
+	r.SetLatestLedger(c1.FirstLedger()+1, closeTimeFor(c1.FirstLedger()+1))
 	reader := NewLedgerReader(r)
 
 	tx, err := reader.NewTx(context.Background())
@@ -294,6 +336,37 @@ func TestTxGetLedger_WalkCrossesChunkBorder(t *testing.T) {
 		require.True(t, ok, "ledger %d", seq)
 		assert.Equal(t, seq, lcm.LedgerSequence())
 	}
+}
+
+// TestTxGetLedger_WalkPastSpanCapIsExhaustedNotNonSequential drives a
+// sequential walk one step past the primed span: the error must say the span
+// ran out, not accuse the caller of skipping around.
+func TestTxGetLedger_WalkPastSpanCapIsExhaustedNotNonSequential(t *testing.T) {
+	if testing.Short() {
+		t.Skip("seeds a full 10k-ledger chunk")
+	}
+	cat := openTestCatalog(t)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
+	c0, c1 := testChunk, testChunk+1
+	seedHotLedgers(t, cat, r, c0, seqRange(c0.FirstLedger(), c0.LastLedger())...)
+	seedHotLedgers(t, cat, r, c1, c1.FirstLedger(), c1.FirstLedger()+1, c1.FirstLedger()+2)
+	r.SetLatestLedger(c1.FirstLedger()+2, closeTimeFor(c1.FirstLedger()+2))
+	reader := NewLedgerReader(r)
+
+	tx, err := reader.NewTx(context.Background())
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	start := c0.FirstLedger()
+	for seq := start; seq <= start+walkSpanCap; seq++ {
+		_, ok, err := tx.GetLedger(context.Background(), seq)
+		require.NoError(t, err, "ledger %d", seq)
+		require.True(t, ok, "ledger %d", seq)
+	}
+
+	_, _, err = tx.GetLedger(context.Background(), start+walkSpanCap+1)
+	require.ErrorContains(t, err, "exhausted its primed")
+	assert.NotContains(t, err.Error(), "non-sequential")
 }
 
 func TestBatchGetLedgers_ClonesBorrowedBytes(t *testing.T) {

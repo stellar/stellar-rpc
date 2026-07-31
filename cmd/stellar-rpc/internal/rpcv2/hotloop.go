@@ -106,7 +106,7 @@ type ingestionLoopConfig struct {
 // completed chunk's DB as the next one is published.
 type handleSink interface {
 	PublishHandle(c chunk.ID, db *hotchunk.DB)
-	SetLatestLedger(seq uint32)
+	SetLatestLedger(seq uint32, closeTimeUnix int64)
 }
 
 // closingSink is the bounded bench loop's handleSink: each completed chunk's DB
@@ -122,7 +122,7 @@ func (s *closingSink) PublishHandle(_ chunk.ID, db *hotchunk.DB) {
 	s.prev = db
 }
 
-func (s *closingSink) SetLatestLedger(uint32) {}
+func (s *closingSink) SetLatestLedger(uint32, int64) {}
 
 // runIngestionLoop is the hot tier's writer: the single goroutine that opens,
 // writes, and hands off the per-chunk hot DBs. It consumes ONE continuous
@@ -189,16 +189,23 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		// The tick must not touch it — its chunk-aligned value would regress it.
 		metrics.LastCommitted(seq)
 
+		// A committed ledger's close time always decodes; on the near-impossible
+		// decode error, publish 0 (readers fall back to a point read) and skip
+		// the health signal rather than fail an already-durable commit.
+		closeUnix, cerr := view.LedgerCloseTime()
+		if cerr != nil {
+			closeUnix = 0
+		}
+
 		// Advance the served latest ledger last, once the ledger is fully queryable:
 		// IngestLedger completes the in-memory events apply before returning, so a
-		// read view acquired after this can serve seq from every hot store.
-		cfg.Registry.SetLatestLedger(seq)
+		// read view acquired after this can serve seq from every hot store. The
+		// close time rides along so getLedgerRange never point-reads the tip.
+		cfg.Registry.SetLatestLedger(seq, closeUnix)
 
 		// Feed the readiness/health signal from the SAME commit: the first commit
 		// latches readiness, and the close time drives the health staleness check.
-		// A committed ledger's close time always decodes; skip the signal on the
-		// near-impossible decode error rather than fail an already-durable commit.
-		if closeUnix, cerr := view.LedgerCloseTime(); cerr == nil {
+		if cerr == nil {
 			cfg.Health.observe(closeUnix)
 		}
 

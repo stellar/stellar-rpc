@@ -68,7 +68,7 @@ func (r *LedgerReader) GetLedgerRange(_ context.Context) (store.LedgerRange, err
 		return store.LedgerRange{}, err
 	}
 	defer view.Release()
-	return getLedgerRange(view)
+	return getLedgerRange(view, r.registry)
 }
 
 func (r *LedgerReader) StreamLedgerRange(
@@ -107,7 +107,7 @@ func (r *LedgerReader) NewTx(_ context.Context) (store.LedgerReaderTx, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ledgerReaderTx{view: view}, nil
+	return &ledgerReaderTx{view: view, registry: r.registry}, nil
 }
 
 // ledgerReaderTx satisfies store.LedgerReaderTx over one read view. GetLedger
@@ -116,6 +116,9 @@ func (r *LedgerReader) NewTx(_ context.Context) (store.LedgerReaderTx, error) {
 // BatchGetLedgers read through the same view but never touch that iterator.
 type ledgerReaderTx struct {
 	view *query.ReadView
+	// registry outlives the view; GetLedgerRange writes the oldest-close-time
+	// cache through it.
+	registry *query.Registry
 
 	// next/stop are the pull ends of the walk iterator; nil until the first
 	// GetLedger primes them.
@@ -152,11 +155,21 @@ func (tx *ledgerReaderTx) GetLedger(_ context.Context, sequence uint32) (xdr.Led
 	if err != nil {
 		return xdr.LedgerCloseMeta{}, false, err
 	}
-	if !ok || entry.Seq != sequence {
+	if !ok {
+		// The iterator ran dry: the caller walked sequentially but past the
+		// span primed above. Not the caller misbehaving — the request's ledger
+		// range is too wide, and the handler must cap it (#889).
+		return xdr.LedgerCloseMeta{}, false, fmt.Errorf(
+			"adapters: ledger walk exhausted its primed %d-ledger span at ledger %d"+
+				" — the handler must cap the request's ledger range (#889)",
+			walkSpanCap, sequence)
+	}
+	if entry.Seq != sequence {
 		// The walk contract (ascending, contiguous from the priming sequence)
 		// was broken. Fail loudly rather than serve the wrong ledger's data.
 		return xdr.LedgerCloseMeta{}, false, fmt.Errorf(
-			"adapters: non-sequential GetLedger: asked for ledger %d", sequence)
+			"adapters: non-sequential GetLedger: asked for ledger %d, the walk is at ledger %d",
+			sequence, entry.Seq)
 	}
 	var lcm xdr.LedgerCloseMeta
 	if err := lcm.UnmarshalBinary(entry.Bytes); err != nil {
@@ -166,7 +179,7 @@ func (tx *ledgerReaderTx) GetLedger(_ context.Context, sequence uint32) (xdr.Led
 }
 
 func (tx *ledgerReaderTx) GetLedgerRange(_ context.Context) (store.LedgerRange, error) {
-	return getLedgerRange(tx.view)
+	return getLedgerRange(tx.view, tx.registry)
 }
 
 func (tx *ledgerReaderTx) BatchGetLedgers(
@@ -231,9 +244,13 @@ func getLedger(view *query.ReadView, sequence uint32) (xdr.LedgerCloseMeta, bool
 	return lcm, true, nil
 }
 
-// getLedgerRange reads the window's edge sequences from the view and their
-// close times with two point reads — nothing caches close times.
-func getLedgerRange(view *query.ReadView) (store.LedgerRange, error) {
+// getLedgerRange reads the window's edge sequences from the view. Close times
+// come from the registry's in-memory stamps in the common case — the ingest
+// loop stamps the tip on every commit, and the oldest edge is cached after one
+// read per floor move (close times are immutable, and the floor moves once per
+// chunk). Only a stamp miss pays a point read, of just the close time off the
+// raw bytes.
+func getLedgerRange(view *query.ReadView, registry *query.Registry) (store.LedgerRange, error) {
 	oldest, latest := view.OldestLedger(), view.LatestLedger()
 	// Reachable on a genuine first start: with earliest_ledger pinned at a
 	// chunk boundary, the last committed ledger is earliest-1, so oldest is
@@ -241,22 +258,52 @@ func getLedgerRange(view *query.ReadView) (store.LedgerRange, error) {
 	if oldest > latest {
 		return store.LedgerRange{}, store.ErrEmptyDB
 	}
-	first, ok, err := getLedger(view, oldest)
-	if err != nil {
-		return store.LedgerRange{}, err
-	}
+	firstCT, ok := view.OldestCloseTime()
 	if !ok {
-		return store.LedgerRange{}, fmt.Errorf("adapters: oldest ledger %d missing from its store", oldest)
+		var err error
+		if firstCT, err = readCloseTime(view, oldest, "oldest"); err != nil {
+			return store.LedgerRange{}, err
+		}
+		registry.RecordOldestCloseTime(oldest, firstCT)
 	}
-	last, ok, err := getLedger(view, latest)
-	if err != nil {
-		return store.LedgerRange{}, err
-	}
+	lastCT, ok := view.LatestCloseTime()
 	if !ok {
-		return store.LedgerRange{}, fmt.Errorf("adapters: latest ledger %d missing from its store", latest)
+		// Only reachable right after boot (the seed stamp carries no close
+		// time). No cache write — the next commit stamps the tip.
+		var err error
+		if lastCT, err = readCloseTime(view, latest, "latest"); err != nil {
+			return store.LedgerRange{}, err
+		}
 	}
 	return store.LedgerRange{
-		FirstLedger: store.LedgerInfo{Sequence: oldest, CloseTime: first.LedgerCloseTime()},
-		LastLedger:  store.LedgerInfo{Sequence: latest, CloseTime: last.LedgerCloseTime()},
+		FirstLedger: store.LedgerInfo{Sequence: oldest, CloseTime: firstCT},
+		LastLedger:  store.LedgerInfo{Sequence: latest, CloseTime: lastCT},
 	}, nil
+}
+
+// readCloseTime point-reads one ledger and decodes only its close time off the
+// raw bytes — no full LedgerCloseMeta unmarshal. which names the window edge
+// ("oldest"/"latest") in the missing-ledger error.
+func readCloseTime(view *query.ReadView, seq uint32, which string) (int64, error) {
+	// chunk.IDFromLedger panics below ledger 2; the window edges are always ≥ 2,
+	// so this is purely defensive.
+	if seq < chunk.FirstLedgerSeq {
+		return 0, fmt.Errorf("adapters: %s ledger %d is below genesis", which, seq)
+	}
+	reader, err := view.Ledgers(chunk.IDFromLedger(seq))
+	if err != nil {
+		return 0, err
+	}
+	raw, err := reader.GetLedgerRaw(seq)
+	if errors.Is(err, stores.ErrNotFound) {
+		return 0, fmt.Errorf("adapters: %s ledger %d missing from its store", which, seq)
+	}
+	if err != nil {
+		return 0, err
+	}
+	closeTime, err := xdr.LedgerCloseMetaView(raw).LedgerCloseTime()
+	if err != nil {
+		return 0, fmt.Errorf("adapters: decode close time of ledger %d: %w", seq, err)
+	}
+	return closeTime, nil
 }

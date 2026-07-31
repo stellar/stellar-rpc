@@ -56,7 +56,7 @@ func (a *ReadView) ClampRange(dir Direction, lo, hi uint32) (uint32, uint32, err
 	if lo > hi {
 		return 0, 0, fmt.Errorf("%w: [%d, %d]", ErrInvertedRange, lo, hi)
 	}
-	oldest, latest := a.OldestLedger(), a.latestLedger
+	oldest, latest := a.OldestLedger(), a.latest.seq
 
 	leading := lo
 	if dir == Descending {

@@ -21,7 +21,7 @@ func TestGetTransaction_HotHit(t *testing.T) {
 	lcm, txs := lcmWithTxs(t, testChunk.FirstLedger(),
 		txSpec{events: []xdr.ContractEvent{contractEventFixture(0xab, "transfer")}})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
-	r.SetLatestLedger(testChunk.FirstLedger())
+	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
 	reader := NewTransactionReader(r, network.PublicNetworkPassphrase)
 
 	got, err := reader.GetTransaction(context.Background(), txs[0].hash)
@@ -49,7 +49,7 @@ func TestGetTransaction_MissIsErrNoTransaction(t *testing.T) {
 	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
 	lcm, _ := lcmWithTxs(t, testChunk.FirstLedger(), txSpec{})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
-	r.SetLatestLedger(testChunk.FirstLedger())
+	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
 	reader := NewTransactionReader(r, network.PublicNetworkPassphrase)
 
 	_, err := reader.GetTransaction(context.Background(), xdr.Hash{0xde, 0xad})
@@ -64,7 +64,7 @@ func TestGetTransaction_AboveLatestIsGated(t *testing.T) {
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm1, lcm2)
 	// The second ledger is committed but above the view's frozen latest; only
 	// the adapter's gate, not the store, can produce the miss.
-	r.SetLatestLedger(testChunk.FirstLedger())
+	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
 	reader := NewTransactionReader(r, network.PublicNetworkPassphrase)
 
 	_, err := reader.GetTransaction(context.Background(), txs2[0].hash)
@@ -80,7 +80,7 @@ func TestGetTransaction_BelowFloorIsGated(t *testing.T) {
 	lcm6, txs6 := lcmWithTxs(t, (testChunk + 1).FirstLedger(), txSpec{})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm5)
 	seedHotChunkLCMs(t, cat, r, testChunk+1, lcm6)
-	r.SetLatestLedger((testChunk + 1).FirstLedger())
+	r.SetLatestLedger((testChunk + 1).FirstLedger(), closeTimeFor((testChunk + 1).FirstLedger()))
 	reader := NewTransactionReader(r, network.PublicNetworkPassphrase)
 
 	_, err := reader.GetTransaction(context.Background(), txs5[0].hash)
@@ -93,8 +93,9 @@ func TestGetTransaction_BelowFloorIsGated(t *testing.T) {
 
 // coldFixture serves testChunk's ledgers from a frozen pack (no hot handle, so
 // the hot indexes are empty) and probes through a frozen window index covering
-// chunks [testChunk, testChunk+2]. The index also maps orphanHash to a ledger in
-// testChunk+2, which has no serving store.
+// chunks [testChunk, testChunk+2]. The index also maps orphanHash to a ledger
+// in testChunk+2, which is inside the servable window (latest sits there) but
+// has no serving store — the shape that must stay an error, not a miss.
 func coldFixture(t *testing.T) (*TransactionReader, []fixtureTx, xdr.Hash) {
 	t.Helper()
 	cat := openTestCatalog(t)
@@ -109,7 +110,9 @@ func coldFixture(t *testing.T) (*TransactionReader, []fixtureTx, xdr.Hash) {
 		txs[0].hash: testChunk.FirstLedger(),
 		orphanHash:  (testChunk + 2).FirstLedger(),
 	})
-	r.SetLatestLedger(testChunk.FirstLedger())
+	// Latest sits in testChunk+2 so the orphan candidate is in-window; a
+	// candidate outside the window would be gated to a clean miss instead.
+	r.SetLatestLedger((testChunk + 2).FirstLedger(), closeTimeFor((testChunk + 2).FirstLedger()))
 	return NewTransactionReader(r, network.PublicNetworkPassphrase), txs, orphanHash
 }
 
@@ -147,12 +150,54 @@ func TestGetTransaction_UnresolvableCandidateIsAnError(t *testing.T) {
 	assert.ErrorContains(t, err, "lookup incomplete")
 }
 
+func TestGetTransaction_V1LedgerCloseMeta(t *testing.T) {
+	cat := openTestCatalog(t)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
+	raw, hash := lcmV1WithClassicTx(t, testChunk.FirstLedger())
+	seedHotChunkLCMs(t, cat, r, testChunk, raw)
+	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
+	reader := NewTransactionReader(r, network.PublicNetworkPassphrase)
+
+	got, err := reader.GetTransaction(context.Background(), hash)
+	require.NoError(t, err)
+	assert.Equal(t, hash.HexString(), got.TransactionHash)
+	assert.Equal(t, store.LedgerInfo{
+		Sequence: testChunk.FirstLedger(), CloseTime: closeTimeFor(testChunk.FirstLedger()),
+	}, got.Ledger)
+	assert.True(t, got.Successful)
+	assert.False(t, got.FeeBump)
+}
+
+func TestGetTransaction_AgedOutColdCandidateIsCleanMiss(t *testing.T) {
+	cat := openTestCatalog(t)
+	// Floor at testChunk+1: testChunk fell out of retention and its ledger
+	// files are gone (never written here — the same observable state as
+	// pruned). The frozen window index [testChunk, testChunk+2] still names its
+	// transactions, because an index is pruned only when the WHOLE window falls
+	// below the floor. The lookup must answer not-found, not an error.
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk+1))
+	require.NoError(t, cat.FlipHotReady(999)) // acquisition needs a ready live chunk
+
+	agedHash := xdr.Hash{0x42}
+	writeFrozenTxIndex(t, cat, testChunk, testChunk+2, map[xdr.Hash]uint32{
+		agedHash: testChunk.FirstLedger(),
+	})
+	lcm, _ := lcmWithTxs(t, (testChunk + 1).FirstLedger(), txSpec{})
+	writeFrozenLedgerPack(t, cat, testChunk+1, lcm)
+	r.SetLatestLedger((testChunk + 1).FirstLedger(), closeTimeFor((testChunk + 1).FirstLedger()))
+
+	reader := NewTransactionReader(r, network.PublicNetworkPassphrase)
+	_, err := reader.GetTransaction(context.Background(), agedHash)
+	assert.ErrorIs(t, err, store.ErrNoTransaction,
+		"an aged-out transaction is a clean miss, not a lookup-incomplete error")
+}
+
 func TestGetTransaction_FeeBumpByEitherHash(t *testing.T) {
 	cat := openTestCatalog(t)
 	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
 	lcm, outerHash, innerHash := feeBumpLCM(t, testChunk.FirstLedger())
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
-	r.SetLatestLedger(testChunk.FirstLedger())
+	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
 	reader := NewTransactionReader(r, network.PublicNetworkPassphrase)
 
 	for _, hash := range []xdr.Hash{outerHash, innerHash} {
