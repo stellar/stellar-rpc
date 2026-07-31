@@ -124,9 +124,9 @@ build-rpc-v1: build-libs
 # as part of the package building.
 build-stellar-rpc: build-rpc-v1
 
-# no build-libs prerequisite: nothing under rpcv2 links the rust preflight or
-# xdr2json bindings yet; #884 adds the prerequisite when it first does.
-build-rpc-v2:
+# build-libs is required: rpcv2 wires internal/preflight, which links the rust
+# preflight library through cgo (#884).
+build-rpc-v2: build-libs
 	go build -ldflags="${GOLDFLAGS}" ${MACOS_MIN_VER} -o ${STELLAR_RPC_V2_BINARY} -trimpath -v ./cmd/stellar-rpc/rpcv2
 
 # Override for feature branches, e.g. `make go-check-branch BASE=origin/feature/full-history`.

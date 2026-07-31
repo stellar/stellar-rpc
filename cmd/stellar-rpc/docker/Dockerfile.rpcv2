@@ -40,8 +40,8 @@ RUN apt update && apt install -y build-essential curl git jq && apt clean
 RUN curl -sSfL "https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz" \
     | tar -C /usr/local -xzf -
 
-# build-rpc-v2 doesn't need Rust yet; kept because #884 links the rust
-# preflight bindings into the v2 binary.
+# Rust is required: build-rpc-v2 depends on build-libs, which cargo-builds the
+# preflight library the v2 binary links through cgo.
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain $RUST_TOOLCHAIN_VERSION
 
 COPY --from=zstd-build /usr/local/include/ /usr/local/include/

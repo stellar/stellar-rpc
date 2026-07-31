@@ -19,10 +19,12 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/storage"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/corestate"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
@@ -51,7 +53,10 @@ type daemonOptions struct {
 	Core CoreOpener
 
 	// ServeReads launches the RPC read server; it must return promptly, not block.
-	// nil ⇒ the #772 no-op placeholder (reads still come from the v1 SQLite daemon).
+	// nil ⇒ a no-op placeholder, which is what production uses today: v2 serves
+	// nothing. Serving arrives across #772's sub-tasks — #889 builds the server and
+	// the method table, over the router-backed store readers (#885-#887) the
+	// handlers need. Reads stay on the v1 SQLite daemon until the #772 cutover.
 	ServeReads func(ctx context.Context) error
 
 	// RestartBackoff is the supervised loop's inter-restart sleep; zero ⇒ defaultRestartBackoff.
@@ -111,7 +116,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// Readiness/health signal, fed by the ingestion loop per commit; both signals
 	// derive from the last committed ledger. Created outside the supervised run
 	// loop so it survives restarts (readiness stays latched across them).
-	// TODO(#772): serve it from the read server (as HealthSignal).
+	// TODO(#889): serve it from the read server (as HealthSignal).
 	hs := &healthState{}
 
 	paths := cfg.ResolvePaths()
@@ -136,7 +141,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// ingestion loop, and the no-lake backfill source is built from its stream. A
 	// bad [ingestion] config therefore surfaces before validateConfig's errors —
 	// cosmetic, both are fatal startup errors. ---
-	core, networkPassphrase, err := resolveCore(opts, cfg, logger)
+	core, err := resolveCore(opts, cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -158,7 +163,8 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// (which needs the tip) runs after this. ---
 	backend := opts.Backend
 	if backend == nil {
-		built, cleanup, berr := buildBackfillBackend(ctx, cfg, core, pool, networkPassphrase, logger)
+		built, cleanup, berr := buildBackfillBackend(
+			ctx, cfg, core.backfill, pool, core.networkPassphrase, logger)
 		if berr != nil {
 			return fmt.Errorf("build backfill backend: %w", berr)
 		}
@@ -168,7 +174,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 		backend = built
 	}
 	if backend == nil {
-		// In production newCaptiveCoreOpener already rejects missing archive URLs;
+		// In production newCaptiveCoreOpeners already rejects missing archive URLs;
 		// this config-shaped message covers an injected Core bypassing that gate.
 		return errors.New("no bulk ledger source configured: set [backfill.datastore] " +
 			"or [ingestion].history_archive_urls")
@@ -176,7 +182,9 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	serveReads := opts.ServeReads
 	if serveReads == nil {
-		// TODO(#772): wire the full-history RPC read server; no-op until the cutover.
+		// TODO(#889): build v2's read server — the method table, the listener on
+		// [service].endpoint, and the admin endpoint. The handlers it registers also
+		// need the router-backed store readers (#885-#887). No-op until then.
 		serveReads = func(context.Context) error { return nil }
 	}
 
@@ -192,13 +200,38 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	// Control-plane Metrics and the ingest sink share ONE registry, built after the
 	// validateConfig gate (it registers Prometheus collectors).
-	// TODO(#772): expose it on the read server's /metrics.
+	// TODO(#889): expose it on the read server's /metrics.
 	registry := prometheus.NewRegistry()
 	metrics, sink := buildSinks(opts, registry)
 
+	// --- Captive-core state access for the three endpoints that need it, plus
+	// simulateTransaction's preflight pool. Built once, outside the supervised
+	// loop: the pool registers collectors on the registry above, and registering
+	// the same collector twice panics. #889 hands both to the method table. ---
+	coreDaemon, err := corestate.New(ctx, corestate.Config{
+		CoreURL:               cfg.Ingestion.CoreURL,
+		QueryPort:             deref(cfg.Ingestion.CoreHTTPQueryPort),
+		RequestTimeout:        deref(cfg.Ingestion.CoreRequestTimeout),
+		StellarCoreBinaryPath: core.binaryPath,
+		Registry:              registry,
+		Namespace:             host.PrometheusNamespace,
+		Logger:                logger,
+	})
+	if err != nil {
+		return err
+	}
+	preflightPool := newPreflightPool(cfg, coreDaemon, core.networkPassphrase, logger)
+	defer preflightPool.Close()
+	logger.WithFields(supportlog.F{
+		"core_url":             cfg.Ingestion.CoreURL,
+		keyCoreHTTPQueryPort:   deref(cfg.Ingestion.CoreHTTPQueryPort),
+		"preflight_workers":    deref(cfg.Service.Preflight.WorkerCount),
+		"stellar_core_version": coreDaemon.CoreVersion(),
+	}).Info("wired the captive-core-backed endpoints")
+
 	// --- Assemble the StartConfig and run the supervised run loop. ---
 	start := startConfig(
-		cfg, cat, logger, backend, core, serveReads, metrics, sink, hs, retention)
+		cfg, cat, logger, backend, core.live, serveReads, metrics, sink, hs, retention)
 	start.lifecycleGrace = opts.lifecycleGrace
 
 	backoff := opts.RestartBackoff
@@ -226,19 +259,35 @@ func openCatalog(paths config.Paths, opts daemonOptions, logger *supportlog.Entr
 	return cat, nil
 }
 
-// resolveCore returns the injected CoreOpener (tests) or a production captive-core
-// opener built from [ingestion], plus the NETWORK_PASSPHRASE read back from the
-// captive-core file. An injected opener carries no passphrase — the empty string
-// means "unknown", which skips the datastore's wrong-network check.
-func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry) (CoreOpener, string, error) {
+// resolvedCore is the result of resolving captive core: two openers, plus the
+// network and binary path read off the resolution.
+type resolvedCore struct {
+	// live opens the stream the ingestion loop follows. Its toml enables core's
+	// two HTTP servers, because the serving endpoints query them.
+	live CoreOpener
+
+	// backfill opens the bounded per-chunk replays of a no-lake deployment. Its
+	// toml has no ports: those replays run one core per chunk in parallel, so a
+	// fixed port would have them all fight over binding it. Nothing queries a
+	// backfill core.
+	backfill CoreOpener
+
+	// networkPassphrase comes from the captive-core file. Empty means unknown (an
+	// injected opener) and skips the datastore's wrong-network check.
+	networkPassphrase string
+
+	// binaryPath is the resolved stellar-core binary. Empty for an injected
+	// opener, which makes corestate report no core version.
+	binaryPath string
+}
+
+// resolveCore returns the injected opener (tests use it for both roles) or the
+// production pair built from [ingestion].
+func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry) (resolvedCore, error) {
 	if opts.Core != nil {
-		return opts.Core, "", nil
+		return resolvedCore{live: opts.Core, backfill: opts.Core}, nil
 	}
-	built, err := newCaptiveCoreOpener(cfg.Ingestion, cfg.Storage.DefaultDataDir, logger)
-	if err != nil {
-		return nil, "", err
-	}
-	return built, built.config.NetworkPassphrase, nil
+	return newCaptiveCoreOpeners(cfg.Ingestion, cfg.Storage.DefaultDataDir, logger)
 }
 
 // startConfig assembles the StartConfig run consumes. run() builds the
@@ -267,6 +316,23 @@ func startConfig(
 		ServeReads: serveReads,
 		health:     hs,
 	}
+}
+
+// newPreflightPool starts simulateTransaction's worker pool, sized by
+// [service.preflight]. The caller owns Close. networkPassphrase is empty only
+// for an injected (test) opener, where nothing reaches the pool anyway.
+func newPreflightPool(
+	cfg config.Config, coreDaemon *corestate.Daemon, networkPassphrase string, logger *supportlog.Entry,
+) *preflight.WorkerPool {
+	p := cfg.Service.Preflight
+	return preflight.NewPreflightWorkerPool(preflight.WorkerPoolConfig{
+		Daemon:            coreDaemon,
+		WorkerCount:       deref(p.WorkerCount),
+		JobQueueCapacity:  deref(p.WorkerQueueSize),
+		EnableDebug:       deref(p.EnableDebug),
+		NetworkPassphrase: networkPassphrase,
+		Logger:            logger,
+	})
 }
 
 // buildSinks resolves the control-plane Metrics + per-type ingest sink, defaulting
@@ -415,45 +481,48 @@ type captiveCoreOpener struct {
 	config ledgerbackend.CaptiveCoreConfig
 }
 
-// newCaptiveCoreOpener resolves the captive-core config, treating the
-// captive_core_config FILE as the single source of truth: NETWORK_PASSPHRASE is
-// read back from it, and the stellar-core binary defaults to the one on PATH.
-// Only the plain history-archive URLs (not derivable from the file's [HISTORY.*]
-// get-commands) come from [ingestion].history_archive_urls. The toml params
-// mirror the RPC daemon (strict, unified events, soroban diagnostic/meta
-// enforcement) so the ingested meta is what the events + txhash stores need.
-func newCaptiveCoreOpener(
+// newCaptiveCoreOpeners resolves the captive-core config. The
+// captive_core_config file is the source of truth for core-side settings:
+// NETWORK_PASSPHRASE is read back from it, and the binary defaults to the one on
+// PATH. Only the history-archive URLs come from [ingestion], since the file's
+// [HISTORY.*] entries are shell commands, not URLs. The toml params mirror the
+// v1 daemon (strict, unified events, soroban diagnostic/meta enforcement) so the
+// ingested meta suits the events + txhash stores. Core's four HTTP-server
+// settings are the exception: [ingestion] owns those, see applyHTTPServers.
+//
+// It returns two openers over one read of the file, differing only in whether
+// core's HTTP servers are enabled — see resolvedCore.
+func newCaptiveCoreOpeners(
 	ing config.IngestionConfig, dataDir string, logger *supportlog.Entry,
-) (*captiveCoreOpener, error) {
+) (resolvedCore, error) {
 	if ing.CaptiveCoreConfig == "" {
-		return nil, errors.New("[ingestion].captive_core_config is required for live ingestion")
+		return resolvedCore{}, errors.New("[ingestion].captive_core_config is required for live ingestion")
 	}
 	if len(ing.HistoryArchiveURLs) == 0 {
-		return nil, errors.New("[ingestion].history_archive_urls is required for live ingestion")
+		return resolvedCore{}, errors.New("[ingestion].history_archive_urls is required for live ingestion")
 	}
 
-	// NETWORK_PASSPHRASE lives in the captive-core file; read it back so the
-	// operator configures it in one place. (go-toml v1 ignores the other fields.)
+	// Read the file ONCE: both openers are built from these bytes, so they cannot
+	// describe two different networks if the file changes underneath us.
 	data, err := os.ReadFile(ing.CaptiveCoreConfig)
 	if err != nil {
-		return nil, fmt.Errorf("read captive_core_config %q: %w", ing.CaptiveCoreConfig, err)
+		return resolvedCore{}, fmt.Errorf("read captive_core_config %q: %w", ing.CaptiveCoreConfig, err)
 	}
-	var peek struct {
-		NetworkPassphrase string `toml:"NETWORK_PASSPHRASE"`
-	}
+	var peek coreFilePeek
 	if perr := toml.Unmarshal(data, &peek); perr != nil {
-		return nil, fmt.Errorf("parse captive_core_config %q: %w", ing.CaptiveCoreConfig, perr)
+		return resolvedCore{}, fmt.Errorf("parse captive_core_config %q: %w", ing.CaptiveCoreConfig, perr)
 	}
 	if peek.NetworkPassphrase == "" {
-		return nil, fmt.Errorf("captive_core_config %q must define NETWORK_PASSPHRASE", ing.CaptiveCoreConfig)
+		return resolvedCore{}, fmt.Errorf("captive_core_config %q must define NETWORK_PASSPHRASE", ing.CaptiveCoreConfig)
 	}
+	peek.warnHTTPSettingsOverridden(ing, logger)
 
 	// stellar-core binary: explicit path, else the one on PATH (RPC daemon default).
 	binaryPath := ing.StellarCoreBinaryPath
 	if binaryPath == "" {
 		found, lerr := exec.LookPath("stellar-core")
 		if lerr != nil {
-			return nil, fmt.Errorf(
+			return resolvedCore{}, fmt.Errorf(
 				"[ingestion].stellar_core_binary_path unset and stellar-core not found on PATH: %w", lerr)
 		}
 		binaryPath = found
@@ -464,11 +533,9 @@ func newCaptiveCoreOpener(
 		storagePath = filepath.Join(dataDir, "captive-core")
 	}
 
-	// Build the toml from the bytes already read, not the path — re-reading via
-	// NewCaptiveCoreTomlFromFile would parse the file twice and, worse, could
-	// observe a different NETWORK_PASSPHRASE than the one peeked above if the file
-	// changed between the two reads (surfacing as the SDK's confusing mismatch error).
-	coreToml, err := ledgerbackend.NewCaptiveCoreTomlFromData(data, ledgerbackend.CaptiveCoreTomlParams{
+	// One set of params for both openers; the HTTP settings are applied per toml
+	// below, not passed here.
+	params := ledgerbackend.CaptiveCoreTomlParams{
 		HistoryArchiveURLs:                 ing.HistoryArchiveURLs,
 		NetworkPassphrase:                  peek.NetworkPassphrase,
 		Strict:                             true,
@@ -476,16 +543,127 @@ func newCaptiveCoreOpener(
 		EnforceSorobanTransactionMetaExtV1: true,
 		EmitUnifiedEvents:                  true,
 		CoreBinaryPath:                     binaryPath,
-	})
+	}
+
+	backfillOpener, err := newCaptiveCoreOpener(
+		ing, data, params, binaryPath, storagePath, peek.NetworkPassphrase, logger)
+	if err != nil {
+		return resolvedCore{}, err
+	}
+	disableHTTPServers(backfillOpener.config.Toml)
+
+	liveOpener, err := newCaptiveCoreOpener(
+		ing, data, params, binaryPath, storagePath, peek.NetworkPassphrase, logger)
+	if err != nil {
+		return resolvedCore{}, err
+	}
+	applyHTTPServers(liveOpener.config.Toml, ing)
+
+	return resolvedCore{
+		live:              liveOpener,
+		backfill:          backfillOpener,
+		networkPassphrase: peek.NetworkPassphrase,
+		binaryPath:        binaryPath,
+	}, nil
+}
+
+// disableHTTPServers strips core's two HTTP servers from a toml, so a core run
+// with it binds no ports — what makes parallel backfill replays safe.
+//
+// Not asking for the servers is not enough: when the operator's captive-core
+// file declares HTTP_QUERY_PORT itself, the SDK keeps that value (it overwrites
+// the query keys only when given query-server params), and the bounded-replay
+// config it generates clears HTTP_PORT but never the query port. Clearing the
+// fields is how the SDK disables ports itself (CaptiveCoreToml.CatchupToml).
+func disableHTTPServers(coreToml *ledgerbackend.CaptiveCoreToml) {
+	coreToml.HTTPPort = 0 // no admin server, the value CatchupToml writes
+	coreToml.HTTPQueryPort = nil
+	coreToml.QueryThreadPoolSize = nil
+	coreToml.QuerySnapshotLedgers = nil
+}
+
+// coreFilePeek is the captive-core file keys the daemon reads itself before
+// handing the file to the SDK: the network, and the four HTTP-server settings
+// [ingestion] overrides. go-toml ignores every other key.
+type coreFilePeek struct {
+	NetworkPassphrase    string `toml:"NETWORK_PASSPHRASE"`
+	HTTPPort             *uint  `toml:"HTTP_PORT"`
+	HTTPQueryPort        *uint  `toml:"HTTP_QUERY_PORT"`
+	QueryThreadPoolSize  *uint  `toml:"QUERY_THREAD_POOL_SIZE"`
+	QuerySnapshotLedgers *uint  `toml:"QUERY_SNAPSHOT_LEDGERS"`
+}
+
+// warnHTTPSettingsOverridden logs each of core's four HTTP keys the captive-core
+// file sets to something other than what core will run with. Overriding silently
+// would be the trap: an operator carrying a v1 file with HTTP_PORT = 11625 may
+// have firewall rules or a monitoring scrape pointed at 11625.
+func (p coreFilePeek) warnHTTPSettingsOverridden(ing config.IngestionConfig, logger *supportlog.Entry) {
+	settings := []struct {
+		fileKey   string
+		configKey string
+		inFile    *uint
+		used      uint
+	}{
+		{"HTTP_PORT", keyCoreHTTPPort, p.HTTPPort, *ing.CoreHTTPPort},
+		{"HTTP_QUERY_PORT", keyCoreHTTPQueryPort, p.HTTPQueryPort, *ing.CoreHTTPQueryPort},
+		{
+			"QUERY_THREAD_POOL_SIZE", keyCoreQueryThreadPoolSize,
+			p.QueryThreadPoolSize, *ing.CoreHTTPQueryThreadPoolSize,
+		},
+		{
+			"QUERY_SNAPSHOT_LEDGERS", keyCoreQuerySnapshotLedgers,
+			p.QuerySnapshotLedgers, *ing.CoreHTTPQuerySnapshotLedgers,
+		},
+	}
+	for _, s := range settings {
+		if s.inFile == nil || *s.inFile == s.used {
+			continue
+		}
+		logger.Warnf("captive_core_config sets %s = %d, but [ingestion].%s owns core's HTTP "+
+			"settings — running core with %d. Remove %s from the captive-core file to silence this.",
+			s.fileKey, *s.inFile, s.configKey, s.used, s.fileKey)
+	}
+}
+
+// applyHTTPServers points the live core's two HTTP servers at the [ingestion]
+// settings, overriding whatever the captive-core file said.
+//
+// The values are written onto the generated toml instead of passed in
+// CaptiveCoreTomlParams because the SDK treats params as a cross-check, not an
+// override: it rejects a file that disagrees rather than preferring the params,
+// and its three query-server mismatch branches format that error with
+// params.PeerPort, which this daemon never sets, so they panic on a nil pointer.
+// Passing no HTTP params leaves those branches unreachable.
+func applyHTTPServers(coreToml *ledgerbackend.CaptiveCoreToml, ing config.IngestionConfig) {
+	queryPort := *ing.CoreHTTPQueryPort
+	threadPoolSize := *ing.CoreHTTPQueryThreadPoolSize
+	snapshotLedgers := *ing.CoreHTTPQuerySnapshotLedgers
+
+	coreToml.HTTPPort = *ing.CoreHTTPPort
+	coreToml.HTTPQueryPort = &queryPort
+	coreToml.QueryThreadPoolSize = &threadPoolSize
+	coreToml.QuerySnapshotLedgers = &snapshotLedgers
+}
+
+// newCaptiveCoreOpener builds one opener from the captive-core file's bytes.
+// params decides whether core's HTTP servers are enabled.
+//
+// It builds from the bytes, not the path: NewCaptiveCoreTomlFromFile would read
+// the file again and could see a different NETWORK_PASSPHRASE than the caller
+// peeked, surfacing as the SDK's confusing mismatch error.
+func newCaptiveCoreOpener(
+	ing config.IngestionConfig, data []byte, params ledgerbackend.CaptiveCoreTomlParams,
+	binaryPath, storagePath, networkPassphrase string, logger *supportlog.Entry,
+) (*captiveCoreOpener, error) {
+	coreToml, err := ledgerbackend.NewCaptiveCoreTomlFromData(data, params)
 	if err != nil {
 		return nil, fmt.Errorf("invalid captive-core toml %q: %w", ing.CaptiveCoreConfig, err)
 	}
-
 	return &captiveCoreOpener{
 		config: ledgerbackend.CaptiveCoreConfig{
 			BinaryPath:         binaryPath,
 			StoragePath:        storagePath,
-			NetworkPassphrase:  peek.NetworkPassphrase,
+			NetworkPassphrase:  networkPassphrase,
 			HistoryArchiveURLs: ing.HistoryArchiveURLs,
 			Log:                logger.WithField("subservice", "stellar-core"),
 			Toml:               coreToml,

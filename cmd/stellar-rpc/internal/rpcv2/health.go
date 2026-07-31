@@ -6,7 +6,7 @@ import (
 )
 
 // HealthSignal is the read side of the daemon's readiness/health signal — the
-// seam #772's read server consumes (the way v1's getHealth is a method on the
+// seam #889's read server consumes (the way v1's getHealth is a method on the
 // main server). It exposes exactly the raw signal: the readiness latch and the
 // last committed ledger's close time. The staleness judgment (close-time age vs
 // a latency threshold, the v1 getHealth semantic) is check policy that lives

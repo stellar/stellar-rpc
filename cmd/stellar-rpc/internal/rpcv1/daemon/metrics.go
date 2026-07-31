@@ -9,7 +9,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
 	"github.com/stellar/go-stellar-sdk/clients/stellarcore"
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	proto "github.com/stellar/go-stellar-sdk/protocols/stellarcore"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/support/logmetrics"
@@ -122,8 +121,8 @@ func (d *Daemon) FastCoreClient() host.FastCoreClient {
 	return d.coreQueryingClient
 }
 
-func (d *Daemon) GetCore() *ledgerbackend.CaptiveStellarCore {
-	return d.core
+func (d *Daemon) CoreVersion() string {
+	return d.core.GetCoreVersion()
 }
 
 func (d *Daemon) Logger() *supportlog.Entry {

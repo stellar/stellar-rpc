@@ -5,7 +5,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	proto "github.com/stellar/go-stellar-sdk/protocols/stellarcore"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
@@ -22,7 +21,13 @@ type Daemon interface {
 	MetricsNamespace() string
 	CoreClient() CoreClient
 	FastCoreClient() FastCoreClient
-	GetCore() *ledgerbackend.CaptiveStellarCore
+
+	// CoreVersion is the version of the stellar-core binary this daemon runs —
+	// the first line of `stellar-core version`. It describes the binary, not a
+	// running process, so an implementation can answer from the configured path
+	// alone. Returns "" if the version is unknown. getVersionInfo is its only
+	// consumer.
+	CoreVersion() string
 }
 
 type CoreClient interface {

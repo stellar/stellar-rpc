@@ -34,6 +34,7 @@ import (
 type FlagOverrides interface {
 	Changed(name string) bool
 	GetString(name string) (string, error)
+	GetBool(name string) (bool, error)
 	GetUint(name string) (uint, error)
 	GetUint32(name string) (uint32, error)
 	GetInt(name string) (int, error)
@@ -50,6 +51,11 @@ func BindFlags(fs *pflag.FlagSet) {
 		switch leafKind(f.Type()) {
 		case kindString:
 			fs.String(path, "", usage)
+		case kindBool:
+			// The false default is irrelevant — ApplyFlags reads a flag only when
+			// the user set it. Turning a true-by-default key off needs --key=false,
+			// since a bare --key sets true.
+			fs.Bool(path, false, usage)
 		case kindUint:
 			fs.Uint(path, 0, usage)
 		case kindUint32:
@@ -93,6 +99,12 @@ func setLeaf(f reflect.Value, path string, fs FlagOverrides) error {
 	switch leafKind(f.Type()) {
 	case kindString:
 		v, err := fs.GetString(path)
+		if err != nil {
+			return fail(err)
+		}
+		setPossiblyPointer(f, reflect.ValueOf(v))
+	case kindBool:
+		v, err := fs.GetBool(path)
 		if err != nil {
 			return fail(err)
 		}
@@ -165,6 +177,7 @@ type kind int
 const (
 	kindUnsupported kind = iota
 	kindString
+	kindBool
 	kindUint
 	kindUint32
 	kindInt
@@ -189,6 +202,8 @@ func leafKind(t reflect.Type) kind {
 	switch t.Kind() {
 	case reflect.String:
 		return kindString
+	case reflect.Bool:
+		return kindBool
 	case reflect.Uint:
 		return kindUint
 	case reflect.Uint32:

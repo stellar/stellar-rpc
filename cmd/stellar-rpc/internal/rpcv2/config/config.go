@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/pelletier/go-toml"
@@ -43,10 +44,12 @@ type Config struct {
 }
 
 // ServiceConfig is [service] — the JSON-RPC read-serving policy (issue #882).
-// Everything here is dormant today: the read server arrives with #772, and
-// #881 wires [service.fee_stats] into live ingestion — until then the values
-// are only parsed, defaulted, and validated. The whole section is optional:
-// absent keys get v1's defaults in WithDefaults.
+// Most of it is dormant today: #889 builds the read server that reads these
+// serving limits (over the store readers its handlers need), and #881 wires
+// [service.fee_stats] into live ingestion — until then those values are only
+// parsed, defaulted, and validated. [service.preflight] is the exception; the
+// daemon sizes its preflight pool from it at startup. The whole section is
+// optional: absent keys get v1's defaults in WithDefaults.
 //
 // Key naming rule: camelCase table keys ONLY where the key is a wire identifier
 // (the [service.methods.<methodName>] tables, named after the JSON-RPC method);
@@ -68,8 +71,25 @@ type ServiceConfig struct {
 	MaxRequestExecutionDuration      *time.Duration `toml:"max_request_execution_duration"`
 	RequestExecutionWarningThreshold *time.Duration `toml:"request_execution_warning_threshold"`
 
-	FeeStats FeeStatsConfig `toml:"fee_stats"`
-	Methods  MethodsConfig  `toml:"methods"`
+	FeeStats  FeeStatsConfig  `toml:"fee_stats"`
+	Preflight PreflightConfig `toml:"preflight"`
+	Methods   MethodsConfig   `toml:"methods"`
+}
+
+// PreflightConfig is [service.preflight] — the worker pool that runs
+// simulateTransaction's preflights. It sits under [service] rather than under the
+// simulateTransaction method table because the pool is sized once at startup,
+// not per request (the same reason [service.fee_stats] lives where it does).
+type PreflightConfig struct {
+	// WorkerCount is how many goroutines run preflights concurrently; >= 1.
+	// Default NumCPU.
+	WorkerCount *uint `toml:"worker_count"`
+	// WorkerQueueSize is how many preflight requests may wait for a free worker
+	// before the pool starts rejecting them; >= 1. Default NumCPU.
+	WorkerQueueSize *uint `toml:"worker_queue_size"`
+	// EnableDebug adds detailed diagnostics to preflight errors — expensive to
+	// produce, and v1 warns against it in production. Default true.
+	EnableDebug *bool `toml:"enable_debug"`
 }
 
 // FeeStatsConfig is [service.fee_stats] — the sizes, in ledgers, of the two
@@ -109,6 +129,13 @@ type MethodsConfig struct {
 	GetLedgers      PaginatedMethodConfig `toml:"getLedgers"`
 	GetEvents       PaginatedMethodConfig `toml:"getEvents"`
 	GetFeeStats     MethodConfig          `toml:"getFeeStats"`
+
+	// The three methods that read current ledger state through captive core
+	// rather than this daemon's stores (#884). Their serving knobs belong here;
+	// the core ports they reach over live in [ingestion].
+	SendTransaction     MethodConfig `toml:"sendTransaction"`
+	SimulateTransaction MethodConfig `toml:"simulateTransaction"`
+	GetLedgerEntries    MethodConfig `toml:"getLedgerEntries"`
 }
 
 // MethodConfig is one method's serving knobs: the per-method request backlog
@@ -295,6 +322,37 @@ type IngestionConfig struct {
 	// CaptiveCoreStoragePath is captive core's BUCKET_DIR_PATH base; optional,
 	// defaults to {default_data_dir}/captive-core.
 	CaptiveCoreStoragePath string `toml:"captive_core_storage_path"`
+
+	// The six keys below configure the two HTTP servers of the same captive-core
+	// process the keys above describe, which is why they live here even though
+	// their consumers are serving endpoints (#884): the admin server takes
+	// transaction submissions, and the query server answers ledger-entry lookups
+	// for getLedgerEntries and preflight.
+	//
+	// They are set on the LIVE core's toml only — the backfill cores of a no-lake
+	// deployment run in parallel, so fixed ports there would collide.
+
+	// CoreHTTPPort is core's admin HTTP port (v1's stellar-captive-core-http-port).
+	// Default 11626. Also the base for the default CoreURL.
+	CoreHTTPPort *uint `toml:"core_http_port"`
+	// CoreURL is where transactions are submitted (v1's stellar-core-url). Default
+	// "http://localhost:{core_http_port}"; set it only when core's admin server is
+	// not on localhost.
+	CoreURL string `toml:"core_url"`
+	// CoreRequestTimeout is the HTTP timeout for every request to either core
+	// server (v1's stellar-core-timeout). Default "2s"; >= 1ms.
+	CoreRequestTimeout *time.Duration `toml:"core_request_timeout"`
+	// CoreHTTPQueryPort is core's query port, serving /getledgerentry (v1's
+	// stellar-captive-core-http-query-port). Default 11628, and must differ from
+	// CoreHTTPPort.
+	CoreHTTPQueryPort *uint `toml:"core_http_query_port"`
+	// CoreHTTPQueryThreadPoolSize is how many threads core's query server uses.
+	// Default NumCPU.
+	CoreHTTPQueryThreadPoolSize *uint `toml:"core_http_query_thread_pool_size"`
+	// CoreHTTPQuerySnapshotLedgers is how many recent ledgers core's query server
+	// keeps snapshots for. Default 4; leave it alone unless you know what core
+	// does with it.
+	CoreHTTPQuerySnapshotLedgers *uint `toml:"core_http_query_snapshot_ledgers"`
 }
 
 // LoggingConfig is [logging].
@@ -341,6 +399,15 @@ const (
 	// getEvents and getLedgers, which scan wider ranges.
 	DefaultScanMethodMaxExecutionDuration time.Duration = 10 * time.Second
 
+	// DefaultSendTransactionQueueLimit and DefaultSimulateTransactionQueueLimit are
+	// v1's values; getLedgerEntries keeps the ordinary DefaultMethodQueueLimit.
+	DefaultSendTransactionQueueLimit     uint = 500
+	DefaultSimulateTransactionQueueLimit uint = 100
+	// DefaultCoreMethodMaxExecutionDuration is v1's wider budget for the two
+	// methods that wait on work outside this process: core's own submission, and
+	// the Rust preflight call.
+	DefaultCoreMethodMaxExecutionDuration time.Duration = 15 * time.Second
+
 	DefaultMaxHealthyLedgerLatency time.Duration = 30 * time.Second
 
 	// DefaultGetEventsMaxItemsPerResponse and the getLedgers pair below are the
@@ -361,7 +428,29 @@ const (
 
 	DefaultClassicFeeWindowLedgers          uint32 = 10
 	DefaultSorobanInclusionFeeWindowLedgers uint32 = 50
+
+	DefaultPreflightEnableDebug = true
 )
+
+// [ingestion] captive-core HTTP defaults — v1's values.
+const (
+	DefaultCoreHTTPPort                 uint          = 11626
+	DefaultCoreHTTPQueryPort            uint          = 11628
+	DefaultCoreHTTPQuerySnapshotLedgers uint          = 4
+	DefaultCoreRequestTimeout           time.Duration = 2 * time.Second
+
+	// MaxPort is the highest legal TCP port. The captive-core toml carries these
+	// settings as uint16, so validateConfig rejects anything above it before the
+	// daemon narrows the configured uint.
+	MaxPort uint = 65535
+)
+
+// NumCPU is the default for the three keys v1 sizes by CPU count: the preflight
+// worker count and queue size, and core's query-server thread pool.
+func NumCPU() uint {
+	//nolint:gosec // runtime.NumCPU() is always non-negative and realistically well below uint limits
+	return uint(runtime.NumCPU())
+}
 
 // LoadConfigWithFlags reads and parses the TOML config at path, with CLI
 // overrides: decode the file (strict), overlay every flag the user actually set
@@ -458,6 +547,20 @@ func (cfg Config) WithDefaults() Config {
 	fillDuration(&svc.RequestExecutionWarningThreshold, DefaultRequestExecutionWarningThreshold)
 	fillUint32(&svc.FeeStats.ClassicFeeWindowLedgers, DefaultClassicFeeWindowLedgers)
 	fillUint32(&svc.FeeStats.SorobanInclusionFeeWindowLedgers, DefaultSorobanInclusionFeeWindowLedgers)
+	fillUint(&svc.Preflight.WorkerCount, NumCPU())
+	fillUint(&svc.Preflight.WorkerQueueSize, NumCPU())
+	fillBool(&svc.Preflight.EnableDebug, DefaultPreflightEnableDebug)
+
+	// The port fills FIRST, so setting only core_http_port moves core_url with it.
+	ing := &cfg.Ingestion
+	fillUint(&ing.CoreHTTPPort, DefaultCoreHTTPPort)
+	if ing.CoreURL == "" {
+		ing.CoreURL = fmt.Sprintf("http://localhost:%d", *ing.CoreHTTPPort)
+	}
+	fillDuration(&ing.CoreRequestTimeout, DefaultCoreRequestTimeout)
+	fillUint(&ing.CoreHTTPQueryPort, DefaultCoreHTTPQueryPort)
+	fillUint(&ing.CoreHTTPQueryThreadPoolSize, NumCPU())
+	fillUint(&ing.CoreHTTPQuerySnapshotLedgers, DefaultCoreHTTPQuerySnapshotLedgers)
 
 	// The methods cascade. queue/dur fill one per-method field: an explicit
 	// per-method value stays; else the [service.methods] wide default applies;
@@ -519,10 +622,25 @@ func (cfg Config) WithDefaults() Config {
 	queue(&m.GetFeeStats.QueueLimit, DefaultGetFeeStatsQueueLimit)
 	dur(&m.GetFeeStats.MaxExecutionDuration, DefaultMethodMaxExecutionDuration)
 
+	queue(&m.SendTransaction.QueueLimit, DefaultSendTransactionQueueLimit)
+	dur(&m.SendTransaction.MaxExecutionDuration, DefaultCoreMethodMaxExecutionDuration)
+
+	queue(&m.SimulateTransaction.QueueLimit, DefaultSimulateTransactionQueueLimit)
+	dur(&m.SimulateTransaction.MaxExecutionDuration, DefaultCoreMethodMaxExecutionDuration)
+
+	queue(&m.GetLedgerEntries.QueueLimit, DefaultMethodQueueLimit)
+	dur(&m.GetLedgerEntries.MaxExecutionDuration, DefaultMethodMaxExecutionDuration)
+
 	return cfg
 }
 
 func fillUint(p **uint, v uint) {
+	if *p == nil {
+		*p = &v
+	}
+}
+
+func fillBool(p **bool, v bool) {
 	if *p == nil {
 		*p = &v
 	}

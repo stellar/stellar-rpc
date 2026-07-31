@@ -18,11 +18,11 @@ func NewGetVersionInfoHandler(
 	ledgerReader store.LedgerReader,
 	daemon host.Daemon,
 ) jrpc2.Handler {
-	core := daemon.GetCore()
-
 	coreHandler := func(ctx context.Context, _ protocol.GetVersionInfoRequest,
 	) (protocol.GetVersionInfoResponse, error) {
-		captiveCoreVersion := core.GetCoreVersion()
+		// Per request, not captured at construction: the daemon only learns the
+		// version once it starts core, which is after handlers are built.
+		captiveCoreVersion := daemon.CoreVersion()
 		protocolVersion, err := getProtocolVersion(ctx, ledgerReader)
 		if err != nil {
 			logger.WithError(err).Error("failed to fetch protocol version")

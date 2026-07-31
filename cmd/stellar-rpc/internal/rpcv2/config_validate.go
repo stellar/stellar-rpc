@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/limits"
@@ -83,7 +86,110 @@ func validateForm(cfg config.Config) error {
 	if err := validateEarliestForm(cfg.Retention.EarliestLedger); err != nil {
 		return err
 	}
+	if err := validateIngestion(cfg.Ingestion); err != nil {
+		return err
+	}
 	return validateService(cfg.Service)
+}
+
+// The [ingestion] core-HTTP key names, spelled once: validateIngestion and
+// newCaptiveCoreOpeners both name them in errors. They mirror the toml tags on
+// config.IngestionConfig.
+const (
+	keyCoreHTTPPort             = "core_http_port"
+	keyCoreHTTPQueryPort        = "core_http_query_port"
+	keyCoreQueryThreadPoolSize  = "core_http_query_thread_pool_size"
+	keyCoreQuerySnapshotLedgers = "core_http_query_snapshot_ledgers"
+)
+
+// validateIngestion form-validates the [ingestion] captive-core HTTP settings.
+// It runs after WithDefaults, so every pointer is non-nil.
+//
+// The four counts are uint here but 16-bit fields in core's toml, so each is
+// range-checked to fail as a config error rather than inside core.
+func validateIngestion(ing config.IngestionConfig) error {
+	// Both ports must be usable. v1 read port 0 as "don't run core's HTTP
+	// server"; v2 always serves sendTransaction off the admin port and
+	// getLedgerEntries off the query port, so 0 is a broken deployment, not a mode.
+	ports := []struct {
+		name string
+		v    uint
+	}{
+		{keyCoreHTTPPort, *ing.CoreHTTPPort},
+		{keyCoreHTTPQueryPort, *ing.CoreHTTPQueryPort},
+		{keyCoreQueryThreadPoolSize, *ing.CoreHTTPQueryThreadPoolSize},
+		{keyCoreQuerySnapshotLedgers, *ing.CoreHTTPQuerySnapshotLedgers},
+	}
+	for _, p := range ports {
+		if p.v < 1 || p.v > config.MaxPort {
+			return fmt.Errorf("[ingestion].%s must be between 1 and %d (got %d)", p.name, config.MaxPort, p.v)
+		}
+	}
+	if *ing.CoreHTTPPort == *ing.CoreHTTPQueryPort {
+		return fmt.Errorf("[ingestion].core_http_port and core_http_query_port are both %d — "+
+			"core runs two servers and cannot bind one port twice", *ing.CoreHTTPPort)
+	}
+	if *ing.CoreRequestTimeout < minConfiguredDuration {
+		return fmt.Errorf("[ingestion].core_request_timeout is %v — durations below 1ms are rejected; "+
+			"a bare TOML integer parses as nanoseconds, write a string like \"2s\"", *ing.CoreRequestTimeout)
+	}
+	return validateCoreURL(ing.CoreURL, *ing.CoreHTTPPort)
+}
+
+// validateCoreURL form-validates [ingestion].core_url against the admin port the
+// captive core will bind. A bad core_url otherwise fails per request, while the
+// daemon reports healthy. The easy mistake is omitting the scheme
+// ("core.internal:11626").
+func validateCoreURL(coreURL string, adminPort uint) error {
+	u, err := url.Parse(coreURL)
+	switch {
+	case err != nil:
+		return fmt.Errorf("[ingestion].core_url %q is not a URL: %w", coreURL, err)
+	case u.Scheme != "http" && u.Scheme != "https":
+		return fmt.Errorf("[ingestion].core_url %q must start with http:// or https://", coreURL)
+	case u.Host == "":
+		return fmt.Errorf("[ingestion].core_url %q names no host", coreURL)
+	}
+	// url.Parse only checks that an explicit port is numeric, so a port past
+	// 65535 parses fine here and fails at dial time on every submission.
+	if p := u.Port(); p != "" {
+		if n, err := strconv.Atoi(p); err != nil || n < 1 || n > int(config.MaxPort) {
+			return fmt.Errorf("[ingestion].core_url %q has port %s — ports run 1 to %d",
+				coreURL, p, config.MaxPort)
+		}
+	}
+	// This daemon starts the core it submits to, and that core binds
+	// core_http_port, so a local core_url on any other port reaches something
+	// else — often a second daemon's captive core, which would accept the
+	// transaction — with neither startup nor getHealth reporting a problem. A
+	// non-local core_url is left alone: that is the reason to set it at all.
+	if isLoopbackHost(u.Hostname()) {
+		if u.Scheme == "https" {
+			return fmt.Errorf("[ingestion].core_url %q is https to this host, but the captive core "+
+				"this daemon starts serves plain HTTP — every submission would fail its TLS handshake. "+
+				"Use http://, or a non-local address if core's admin server really is elsewhere",
+				coreURL)
+		}
+		if u.Port() != strconv.FormatUint(uint64(adminPort), 10) {
+			return fmt.Errorf("[ingestion].core_url %q points at this host but not at %s (%d) — "+
+				"the captive core this daemon starts listens on that port. Leave core_url unset to "+
+				"derive it, or give it a non-local address if core's admin server really is elsewhere",
+				coreURL, keyCoreHTTPPort, adminPort)
+		}
+	}
+	return nil
+}
+
+// isLoopbackHost reports whether host refers to this machine. url.URL.Hostname
+// has already stripped an IPv6 literal's brackets, so "[::1]" arrives as "::1".
+// DNS names are case-insensitive and may carry a trailing root dot, so
+// "LOCALHOST" and "localhost." count too.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // minConfiguredDuration guards go-toml v1's nanosecond trap: a bare integer
@@ -154,6 +260,9 @@ func validateService(svc config.ServiceConfig) error {
 		{"getLedgers", *m.GetLedgers.QueueLimit, *m.GetLedgers.MaxExecutionDuration},
 		{"getEvents", *m.GetEvents.QueueLimit, *m.GetEvents.MaxExecutionDuration},
 		{"getFeeStats", *m.GetFeeStats.QueueLimit, *m.GetFeeStats.MaxExecutionDuration},
+		{"sendTransaction", *m.SendTransaction.QueueLimit, *m.SendTransaction.MaxExecutionDuration},
+		{"simulateTransaction", *m.SimulateTransaction.QueueLimit, *m.SimulateTransaction.MaxExecutionDuration},
+		{"getLedgerEntries", *m.GetLedgerEntries.QueueLimit, *m.GetLedgerEntries.MaxExecutionDuration},
 	}
 	for _, mm := range methods {
 		if mm.queue < 1 {
@@ -174,7 +283,23 @@ func validateService(svc config.ServiceConfig) error {
 	if err := validatePaginatedMethods(m); err != nil {
 		return err
 	}
+	if err := validatePreflight(svc.Preflight); err != nil {
+		return err
+	}
 	return validateFeeWindows(svc.FeeStats)
+}
+
+// validatePreflight form-validates [service.preflight]. Zero workers means
+// nothing picks requests up; a zero queue means the pool is full from the start.
+// Either rejects every simulateTransaction.
+func validatePreflight(p config.PreflightConfig) error {
+	if *p.WorkerCount < 1 {
+		return errors.New("[service.preflight].worker_count must be >= 1")
+	}
+	if *p.WorkerQueueSize < 1 {
+		return errors.New("[service.preflight].worker_queue_size must be >= 1")
+	}
+	return nil
 }
 
 func validatePaginatedMethods(m config.MethodsConfig) error {
