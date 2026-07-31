@@ -92,11 +92,11 @@ type ingestionLoopConfig struct {
 	Logger   *supportlog.Entry
 	Metrics  observability.Metrics
 	Sink     ingest.MetricSink
-	Health   *healthState
 	// Registry receives the loop's serving handoffs: every opened hot DB's
 	// handle and every fully committed ledger. The sink owns each published
-	// handle — the loop's single ownership story. The daemon passes the real
-	// query.Registry; the bounded bench loop passes a closingSink.
+	// handle — the loop's single ownership story. The daemon passes a
+	// servingSink (registry + health signal); the bounded bench loop passes a
+	// closingSink.
 	Registry handleSink
 }
 
@@ -123,6 +123,27 @@ func (s *closingSink) PublishHandle(_ chunk.ID, db *hotchunk.DB) {
 }
 
 func (s *closingSink) SetLatestLedger(uint32, int64) {}
+
+// servingSink is the daemon's handleSink: handles and latest-ledger stamps go
+// to the registry, and every real stamp also feeds the readiness/health signal.
+// Both consumers of a commit's close time sit behind this one write, so they
+// cannot drift — the loop publishes each commit exactly once.
+type servingSink struct {
+	sink   handleSink
+	health *healthState
+}
+
+func (s *servingSink) PublishHandle(c chunk.ID, db *hotchunk.DB) { s.sink.PublishHandle(c, db) }
+
+func (s *servingSink) SetLatestLedger(seq uint32, closeTimeUnix int64) {
+	s.sink.SetLatestLedger(seq, closeTimeUnix)
+	// Close time 0 means "unknown" (a failed decode, or a boot seed): readers
+	// fall back to a point read, and readiness must latch only on a real
+	// commit's close time — so 0 is stored but never observed.
+	if closeTimeUnix != 0 {
+		s.health.observe(closeTimeUnix)
+	}
+}
 
 // runIngestionLoop is the hot tier's writer: the single goroutine that opens,
 // writes, and hands off the per-chunk hot DBs. It consumes ONE continuous
@@ -190,8 +211,9 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		metrics.LastCommitted(seq)
 
 		// A committed ledger's close time always decodes; on the near-impossible
-		// decode error, publish 0 (readers fall back to a point read) and skip
-		// the health signal rather than fail an already-durable commit.
+		// decode error, publish 0 (readers fall back to a point read, and the
+		// serving sink skips the health signal) rather than fail an
+		// already-durable commit.
 		closeUnix, cerr := view.LedgerCloseTime()
 		if cerr != nil {
 			closeUnix = 0
@@ -199,15 +221,11 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 
 		// Advance the served latest ledger last, once the ledger is fully queryable:
 		// IngestLedger completes the in-memory events apply before returning, so a
-		// read view acquired after this can serve seq from every hot store. The
-		// close time rides along so getLedgerRange never point-reads the tip.
+		// read view acquired after this can serve seq from every hot store. This one
+		// write carries everything derived from the commit — the sequence, its close
+		// time (so getLedgerRange never point-reads the tip), and through the
+		// daemon's servingSink the readiness/health signal.
 		cfg.Registry.SetLatestLedger(seq, closeUnix)
-
-		// Feed the readiness/health signal from the SAME commit: the first commit
-		// latches readiness, and the close time drives the health staleness check.
-		if cerr == nil {
-			cfg.Health.observe(closeUnix)
-		}
 
 		// Chunk boundary: this seq is the chunk's last ledger.
 		if closed := chunk.IDFromLedger(seq); seq == closed.LastLedger() {

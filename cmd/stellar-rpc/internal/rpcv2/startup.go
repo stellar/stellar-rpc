@@ -167,8 +167,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 			Logger:   logger,
 			Metrics:  metrics,
 			Sink:     cfg.Exec.Process.Sink,
-			Health:   cfg.health,
-			Registry: registry,
+			Registry: &servingSink{sink: registry, health: cfg.health},
 		})
 		if err == nil {
 			// WithContext cancels gctx (unblocking the lifecycle sibling in g.Wait)
