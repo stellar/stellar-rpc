@@ -849,3 +849,29 @@ func TestColdReader_RejectsNonEmptyIndexOnEventlessChunk(t *testing.T) {
 	_, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
 	require.ErrorContains(t, err, "eventless")
 }
+
+// TestColdReader_CorruptIndexOffsetsIsCorrupt covers the other half of
+// index.pack. A record-level flip surfaces through LookupKeys' read; a flip in
+// the offsets index or the trailer surfaces at open, through validateMPHF,
+// which is a different path and has to reach the same sentinel.
+func TestColdReader_CorruptIndexOffsetsIsCorrupt(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
+
+	// The offsets index sits between the last record and the trailer; app data
+	// is empty for index.pack, so it ends 76 bytes before EOF.
+	indexPath := filepath.Join(dir, IndexPackName(chunkID))
+	b, err := os.ReadFile(indexPath)
+	require.NoError(t, err)
+	tr, err := packfile.Open(indexPath, packfile.ReaderOptions{}).Trailer()
+	require.NoError(t, err)
+	require.Positive(t, tr.IndexSize)
+	flipByteAt(t, indexPath, len(b)-76-int(tr.IndexSize))
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	_, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
+	require.ErrorIs(t, err, stores.ErrCorrupt)
+}
