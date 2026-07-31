@@ -45,7 +45,8 @@ const (
 	// on disk; a single-item record, which has no FOR index, grows by four.
 	//
 	// The reader learns which layout it is looking at from a trailer flag, so
-	// this needs no matching reader-side option.
+	// this needs no matching reader-side option. That flag is itself under the
+	// trailer CRC32C, so corruption cannot turn the check off.
 	ChecksumCRC32C
 )
 

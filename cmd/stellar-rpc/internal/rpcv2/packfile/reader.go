@@ -293,9 +293,7 @@ func doOpen(path string) openResult {
 	// structurally, and a consumer's own decoder cannot tell plausible
 	// corruption from real data.
 	if computed := crc32c(appData); computed != trailer.AppDataCRC {
-		return openResult{err: fmt.Errorf(
-			"%w: app data CRC32C (stored %08x, computed %08x); a file written before "+
-				"app data was checksummed fails here and has to be rebuilt",
+		return openResult{err: fmt.Errorf("%w: app data CRC32C (stored %08x, computed %08x)",
 			ErrChecksum, trailer.AppDataCRC, computed)}
 	}
 
@@ -304,7 +302,9 @@ func doOpen(path string) openResult {
 		return openResult{err: err}
 	}
 
-	if itemsPerRecord <= 0 && recordCount > 0 {
+	// Not gated on recordCount: a trailer claiming items but no itemsPerRecord
+	// would otherwise pass Open and index past the offsets slice on first read.
+	if itemsPerRecord <= 0 && (recordCount > 0 || totalItems > 0) {
 		return openResult{err: fmt.Errorf("%w: invalid itemsPerRecord %d in trailer",
 			ErrCorrupt, itemsPerRecord)}
 	}

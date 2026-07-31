@@ -817,6 +817,9 @@ func TestAppDataCorruption(t *testing.T) {
 	corruptedPath := corruptAt(t, path, false, func(data []byte) {
 		trailerStart := len(data) - trailerSize
 		appDataSz := int(binary.LittleEndian.Uint32(data[trailerStart+tOffAppDataSize:]))
+		if appDataSz == 0 {
+			t.Fatal("expected non-zero appDataSize")
+		}
 		data[trailerStart-appDataSz] ^= 0xFF
 	})
 

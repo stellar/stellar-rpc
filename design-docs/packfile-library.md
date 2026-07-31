@@ -193,6 +193,7 @@ type WriterOptions struct {
     // Called once per worker goroutine; the writer invokes Encode once per
     // record before write and Close on shutdown. Pass nil for passthrough
     // records (no encoding).
+    NewRecordEncoder func() RecordEncoder
 
     // RecordChecksum selects the per-record integrity check
     // (ChecksumNone | ChecksumCRC32C). Defaults to ChecksumNone. Set it for
@@ -200,7 +201,6 @@ type WriterOptions struct {
     // self-checksummed. The reader learns the layout from a trailer flag, so
     // there is no matching reader-side option.
     RecordChecksum RecordChecksum
-    NewRecordEncoder func() RecordEncoder
 
     // ContentHash enables SHA-256 content hashing over the logical item
     // stream. The digest is stored in the trailer.
@@ -614,11 +614,11 @@ The `Checksum` at offset 72 covers `trailer[0:72]`.
 
 **Trailer checksum:** CRC32C of `trailer[0:72]` protects all structural fields, including `appDataCRC`.
 
-**App data checksum:** CRC32C of the app-data section, stored in the trailer and verified on open, unconditionally. The section is opaque to the library, so nothing here can check it structurally, and a consumer's own decoder cannot tell plausible corruption from real data. A file written before app data was checksummed fails to open and has to be rebuilt.
+**App data checksum:** CRC32C of the app-data section, stored in the trailer and verified on open, unconditionally. The section is opaque to the library, so nothing here can check it structurally, and a consumer's own decoder cannot tell plausible corruption from real data. An artifact built before this fails to open and gets rebuilt.
 
 **Trailer validation:** On open: flags against `knownFlags`, `itemsPerRecord > 0`, `ceil(totalItems / itemsPerRecord) == recordCount`.
 
-**Record checksum:** Each multi-item record carries a CRC32C in its last four bytes, verified before the payload is passed to the decoder. `WriterOptions.RecordChecksum` selects whether it covers the item size index alone or the whole record including the payload; the trailer records which. See [Records](#records).
+**Record checksum:** Each multi-item record carries a CRC32C in its last four bytes, verified on every record read, before the payload is passed to the decoder. `Verify` does not cover it — that method recomputes the content hash and returns immediately when a file has none. `WriterOptions.RecordChecksum` selects whether it covers the item size index alone or the whole record including the payload; the trailer records which. See [Records](#records).
 
 **Content hash verification:** `Verify(ctx)` recomputes the chunked SHA-256 by streaming all items (applying `ReaderOptions.ContentHashExtract` if set) and compares to the stored hash. Mismatched extract on read produces `ErrContentHashMismatch`.
 

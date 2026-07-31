@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -144,12 +145,15 @@ func TestRecordChecksumVerifiesBeforeParsing(t *testing.T) {
 	items := makeItems(32, 50)
 
 	for _, tc := range []struct {
-		name    string
-		sum     RecordChecksum
-		wantErr error
+		name string
+		sum  RecordChecksum
+		// ErrChecksum wraps ErrCorrupt, so the narrow row states what it must
+		// NOT be as well; ErrCorrupt alone would pass on either path.
+		wantErr    error
+		wantNotErr error
 	}{
-		{"widened rejects before parsing", ChecksumCRC32C, ErrChecksum},
-		{"narrow parses first", ChecksumNone, ErrCorrupt},
+		{"widened rejects before parsing", ChecksumCRC32C, ErrChecksum, nil},
+		{"narrow parses first", ChecksumNone, ErrCorrupt, ErrChecksum},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writePackfile(t, WriterOptions{ItemsPerRecord: 16, RecordChecksum: tc.sum}, items)
@@ -165,6 +169,10 @@ func TestRecordChecksumVerifiesBeforeParsing(t *testing.T) {
 			err := readAllItems(t, corrupt, nil)
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("read record with corrupt FOR width: got %v, want %v", err, tc.wantErr)
+			}
+			if tc.wantNotErr != nil && errors.Is(err, tc.wantNotErr) {
+				t.Fatalf("read record with corrupt FOR width: got %v, want it not to be %v",
+					err, tc.wantNotErr)
 			}
 		})
 	}
@@ -197,5 +205,75 @@ func TestRecordChecksumWithContentHash(t *testing.T) {
 	}
 	if err := r.Verify(context.Background()); err != nil {
 		t.Fatalf("Verify: %v", err)
+	}
+}
+
+// growEncoder emits more bytes than it consumes, which is the case
+// buildRecord's pre-size cannot cover: recordWorker reallocs, and the record
+// still has to be sealed and read back correctly.
+type growEncoder struct{}
+
+func (growEncoder) Encode(dst, src []byte) ([]byte, error) {
+	dst = append(dst[:0], src...)
+	return append(dst, make([]byte, 97)...), nil
+}
+func (growEncoder) Close() error { return nil }
+
+type shrinkDecoder struct{}
+
+func (shrinkDecoder) Decode(dst, src []byte) ([]byte, error) {
+	return append(dst[:0], src[:len(src)-97]...), nil
+}
+
+// TestRecordChecksumWithAppDataAndGrowingCodec covers two gaps at once: a
+// checksummed file that also carries app data, so both new CRCs are exercised
+// on one artifact, and an encoder whose output exceeds its input, so the
+// pooled record buffer is forced to realloc before sealing.
+func TestRecordChecksumWithAppDataAndGrowingCodec(t *testing.T) {
+	items := makeItems(300, 137)
+	appData := []byte("app-data-alongside-a-record-checksum")
+
+	path := filepath.Join(t.TempDir(), "grow.pack")
+	w, err := Create(path, WriterOptions{
+		ItemsPerRecord:   32,
+		RecordChecksum:   ChecksumCRC32C,
+		NewRecordEncoder: func() RecordEncoder { return growEncoder{} },
+		Concurrency:      4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, item := range items {
+		if err := w.AppendItem(item); err != nil {
+			t.Fatalf("AppendItem %d: %v", i, err)
+		}
+	}
+	if err := w.Finish(appData); err != nil {
+		t.Fatal(err)
+	}
+
+	r := Open(path, ReaderOptions{RecordDecoder: shrinkDecoder{}})
+	defer r.Close()
+
+	got, err := r.AppData()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, appData) {
+		t.Fatalf("AppData = %q, want %q", got, appData)
+	}
+
+	i := 0
+	for item, err := range r.ReadRange(0, len(items)) {
+		if err != nil {
+			t.Fatalf("item %d: %v", i, err)
+		}
+		if !bytes.Equal(item, items[i]) {
+			t.Fatalf("item %d mismatch", i)
+		}
+		i++
+	}
+	if i != len(items) {
+		t.Fatalf("read %d items, want %d", i, len(items))
 	}
 }

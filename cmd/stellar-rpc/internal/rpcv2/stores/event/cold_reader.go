@@ -201,16 +201,19 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		// empty-index check above).
 		tr, terr := c.index.Trailer()
 		if terr != nil {
-			return fmt.Errorf("events: open %s: %w", indexPackPath, terr)
+			return fmt.Errorf("events: open %s: %w", indexPackPath, translateReaderErr(terr))
 		}
 		if tr.Format != indexPackFormat {
 			return fmt.Errorf("events: %s: expected format %#x, got %#x (mis-pointed or foreign pack)",
 				indexPackPath, indexPackFormat, tr.Format)
 		}
 		// Serving an index whose bitmaps are unchecked is the silent-wrong-answer
-		// case indexPackChecksum exists to prevent, and the reader can tell.
-		if indexPackChecksum != packfile.ChecksumNone && !tr.HasRecordChecksum {
-			return fmt.Errorf("events: %s: built without a record checksum (stale build)", indexPackPath)
+		// case indexPackChecksum exists to prevent, and the reader can tell. It is
+		// stores.ErrCorrupt for the same reason a failed checksum is: the artifact
+		// cannot answer queries and has to be rebuilt.
+		if !tr.HasRecordChecksum {
+			return fmt.Errorf("%w: %s: built without a record checksum (stale build)",
+				stores.ErrCorrupt, indexPackPath)
 		}
 		if uint64(tr.TotalItems) != idx.numKeys() {
 			return fmt.Errorf(
