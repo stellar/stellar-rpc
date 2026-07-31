@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/limits"
@@ -132,35 +133,59 @@ func validateIngestion(ing config.IngestionConfig) error {
 		return fmt.Errorf("[ingestion].core_request_timeout is %v — durations below 1ms are rejected; "+
 			"a bare TOML integer parses as nanoseconds, write a string like \"2s\"", *ing.CoreRequestTimeout)
 	}
-	// A bad core_url otherwise fails per request, while the daemon reports
-	// healthy. The easy mistake is omitting the scheme ("core.internal:11626").
-	u, err := url.Parse(ing.CoreURL)
+	return validateCoreURL(ing.CoreURL, *ing.CoreHTTPPort)
+}
+
+// validateCoreURL form-validates [ingestion].core_url against the admin port the
+// captive core will bind. A bad core_url otherwise fails per request, while the
+// daemon reports healthy. The easy mistake is omitting the scheme
+// ("core.internal:11626").
+func validateCoreURL(coreURL string, adminPort uint) error {
+	u, err := url.Parse(coreURL)
 	switch {
 	case err != nil:
-		return fmt.Errorf("[ingestion].core_url %q is not a URL: %w", ing.CoreURL, err)
+		return fmt.Errorf("[ingestion].core_url %q is not a URL: %w", coreURL, err)
 	case u.Scheme != "http" && u.Scheme != "https":
-		return fmt.Errorf("[ingestion].core_url %q must start with http:// or https://", ing.CoreURL)
+		return fmt.Errorf("[ingestion].core_url %q must start with http:// or https://", coreURL)
 	case u.Host == "":
-		return fmt.Errorf("[ingestion].core_url %q names no host", ing.CoreURL)
+		return fmt.Errorf("[ingestion].core_url %q names no host", coreURL)
+	}
+	// url.Parse only checks that an explicit port is numeric, so a port past
+	// 65535 parses fine here and fails at dial time on every submission.
+	if p := u.Port(); p != "" {
+		if n, err := strconv.Atoi(p); err != nil || n < 1 || n > int(config.MaxPort) {
+			return fmt.Errorf("[ingestion].core_url %q has port %s — ports run 1 to %d",
+				coreURL, p, config.MaxPort)
+		}
 	}
 	// This daemon starts the core it submits to, and that core binds
 	// core_http_port, so a local core_url on any other port reaches something
 	// else — often a second daemon's captive core, which would accept the
 	// transaction — with neither startup nor getHealth reporting a problem. A
 	// non-local core_url is left alone: that is the reason to set it at all.
-	if isLoopbackHost(u.Hostname()) && u.Port() != strconv.FormatUint(uint64(*ing.CoreHTTPPort), 10) {
-		return fmt.Errorf("[ingestion].core_url %q points at this host but not at %s (%d) — "+
-			"the captive core this daemon starts listens on that port. Leave core_url unset to "+
-			"derive it, or give it a non-local address if core's admin server really is elsewhere",
-			ing.CoreURL, keyCoreHTTPPort, *ing.CoreHTTPPort)
+	if isLoopbackHost(u.Hostname()) {
+		if u.Scheme == "https" {
+			return fmt.Errorf("[ingestion].core_url %q is https to this host, but the captive core "+
+				"this daemon starts serves plain HTTP — every submission would fail its TLS handshake. "+
+				"Use http://, or a non-local address if core's admin server really is elsewhere",
+				coreURL)
+		}
+		if u.Port() != strconv.FormatUint(uint64(adminPort), 10) {
+			return fmt.Errorf("[ingestion].core_url %q points at this host but not at %s (%d) — "+
+				"the captive core this daemon starts listens on that port. Leave core_url unset to "+
+				"derive it, or give it a non-local address if core's admin server really is elsewhere",
+				coreURL, keyCoreHTTPPort, adminPort)
+		}
 	}
 	return nil
 }
 
 // isLoopbackHost reports whether host refers to this machine. url.URL.Hostname
 // has already stripped an IPv6 literal's brackets, so "[::1]" arrives as "::1".
+// DNS names are case-insensitive and may carry a trailing root dot, so
+// "LOCALHOST" and "localhost." count too.
 func isLoopbackHost(host string) bool {
-	if host == "localhost" {
+	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
 		return true
 	}
 	ip := net.ParseIP(host)

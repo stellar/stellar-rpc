@@ -176,7 +176,12 @@ func readCoreVersion(ctx context.Context, binaryPath string, logger *supportlog.
 	ctx, cancel := context.WithTimeout(ctx, coreVersionTimeout)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, binaryPath, "version").Output()
+	cmd := exec.CommandContext(ctx, binaryPath, "version")
+	// The timeout kills only the direct process. If that was a wrapper whose
+	// child inherited stdout, Output would still wait for pipe EOF — WaitDelay
+	// forces the pipe closed so the hang stays bounded.
+	cmd.WaitDelay = time.Second
+	out, err := cmd.Output()
 	version, _, _ := strings.Cut(string(out), "\n")
 	if err == nil && version == "" {
 		err = errors.New("stellar-core version printed no output")

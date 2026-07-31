@@ -322,37 +322,6 @@ func TestValidateConfig_RejectsMalformedCoreHTTP(t *testing.T) {
 			func(c *config.Config) { c.Ingestion.CoreRequestTimeout = durPtr(2) },
 			wantNanosecondHint,
 		},
-		{
-			// Otherwise every submission fails at request time, not at startup.
-			"core_url without a scheme",
-			func(c *config.Config) { c.Ingestion.CoreURL = "core.internal:11626" },
-			"must start with http:// or https://",
-		},
-		{
-			"core_url with no host",
-			func(c *config.Config) { c.Ingestion.CoreURL = "http://" },
-			"names no host",
-		},
-		{
-			"core_url that is not a URL at all",
-			func(c *config.Config) { c.Ingestion.CoreURL = "http://[::1" },
-			"core_url",
-		},
-		{
-			"core_url on this host but not on core_http_port",
-			func(c *config.Config) { c.Ingestion.CoreURL = "http://localhost:21626" },
-			"points at this host but not at " + keyCoreHTTPPort,
-		},
-		{
-			"core_url on a loopback address but not on core_http_port",
-			func(c *config.Config) { c.Ingestion.CoreURL = "http://127.0.0.1:8080" },
-			"points at this host but not at " + keyCoreHTTPPort,
-		},
-		{
-			"core_url on this host with no port",
-			func(c *config.Config) { c.Ingestion.CoreURL = "http://localhost" },
-			"points at this host but not at " + keyCoreHTTPPort,
-		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -366,12 +335,85 @@ func TestValidateConfig_RejectsMalformedCoreHTTP(t *testing.T) {
 	}
 }
 
+// A bad core_url otherwise fails per request, not at startup.
+func TestValidateConfig_RejectsMisroutableCoreURLs(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{
+			"without a scheme",
+			"core.internal:11626",
+			"must start with http:// or https://",
+		},
+		{
+			"no host",
+			"http://",
+			"names no host",
+		},
+		{
+			"not a URL at all",
+			"http://[::1",
+			"core_url",
+		},
+		{
+			"this host but not core_http_port",
+			"http://localhost:21626",
+			"points at this host but not at " + keyCoreHTTPPort,
+		},
+		{
+			"a loopback address but not core_http_port",
+			"http://127.0.0.1:8080",
+			"points at this host but not at " + keyCoreHTTPPort,
+		},
+		{
+			"this host with no port",
+			"http://localhost",
+			"points at this host but not at " + keyCoreHTTPPort,
+		},
+		{
+			"this host in uppercase but not core_http_port",
+			"http://LOCALHOST:21626",
+			"points at this host but not at " + keyCoreHTTPPort,
+		},
+		{
+			"this host with a trailing dot but not core_http_port",
+			"http://localhost.:21626",
+			"points at this host but not at " + keyCoreHTTPPort,
+		},
+		{
+			// The local captive core serves plain HTTP, so https can never work.
+			"https to this host",
+			"https://localhost:11626",
+			"TLS handshake",
+		},
+		{
+			"a port past 65535",
+			"http://core.internal:70000",
+			"ports run 1 to",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cat, _ := testCatalog(t)
+			cfg := validCfg(4, 3, "genesis")
+			cfg.Ingestion.CoreURL = tc.url
+			_, err := callValidate(t, cfg, cat, downTip())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
 func TestValidateConfig_AcceptsCoreURLsThatCannotMisroute(t *testing.T) {
 	corePort := strconv.FormatUint(uint64(config.DefaultCoreHTTPPort), 10)
 	urls := []string{
 		"http://core.internal:8080",
 		"https://core.internal",
 		"http://localhost:" + corePort,
+		"http://LOCALHOST:" + corePort,
+		"http://localhost.:" + corePort,
 		"http://127.0.0.1:" + corePort,
 		"http://[::1]:" + corePort,
 	}

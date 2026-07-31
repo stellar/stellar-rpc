@@ -133,12 +133,29 @@ func TestCoreVersion_UnreadableBinaryIsNotFatal(t *testing.T) {
 func TestCoreVersion_HangingBinaryDoesNotBlockStartup(t *testing.T) {
 	cfg := validConfig()
 	cfg.StellarCoreBinaryPath = fakeCoreBinary(t, "#!/bin/sh\nsleep 300\n")
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
 
+	start := time.Now()
 	d, err := New(ctx, cfg)
 	require.NoError(t, err)
 	assert.Empty(t, d.CoreVersion())
+	assert.Less(t, time.Since(start), 30*time.Second,
+		"a binary that never exits must be killed at the deadline, not waited out")
+}
+
+func TestCoreVersion_WrapperChildHoldingStdoutDoesNotBlockStartup(t *testing.T) {
+	cfg := validConfig()
+	// The wrapper exits at once, but its background child inherits stdout and
+	// holds the pipe open — only WaitDelay unblocks the read.
+	cfg.StellarCoreBinaryPath = fakeCoreBinary(t, "#!/bin/sh\necho 'stellar-core 99.0.0'\nsleep 300 &\n")
+
+	start := time.Now()
+	d, err := New(context.Background(), cfg)
+	require.NoError(t, err)
+	assert.Empty(t, d.CoreVersion())
+	assert.Less(t, time.Since(start), 30*time.Second,
+		"a grandchild holding the stdout pipe must not stall startup")
 }
 
 // stubLedgerReader answers only GetLatestLedgerSequence; the entry getter needs
