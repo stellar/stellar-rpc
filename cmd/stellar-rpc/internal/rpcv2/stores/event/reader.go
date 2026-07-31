@@ -166,6 +166,16 @@ type Reader interface {
 	All(ctx context.Context) iter.Seq2[events.Payload, error]
 }
 
+// BoundedReader is one chunk's Reader together with the clipped, inclusive
+// ledger bounds a range query may read from it — the per-chunk input shape the
+// events query engine consumes. Callers translate [From, To] into an event-ID
+// window via Offsets before querying.
+type BoundedReader struct {
+	Reader
+
+	From, To uint32
+}
+
 // validateSortedEventIDs returns a wrapped ErrUnsortedEventIDs if
 // eventIDs contains a non-strictly-ascending pair. O(N), no
 // allocation. Empty input is valid (caller short-circuits).

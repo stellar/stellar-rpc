@@ -2,6 +2,7 @@ package query
 
 import (
 	"cmp"
+	"fmt"
 	"maps"
 	"slices"
 
@@ -13,9 +14,9 @@ import (
 // so routing cannot resolve it directly; instead the getTransaction path probes
 // the hot transaction indexes (a match is definitive) and then the frozen window
 // indexes (a match is a candidate, verified against the full hash). These two
-// methods supply what that path needs from the read view — the hot indexes
-// and the window coverages — leaving the probe order, per-coverage .idx opening,
-// candidate verification, and the floor/latest gate to the lookup itself.
+// methods supply what that path needs from the read view — the hot indexes and
+// the opened cold window indexes — leaving the probe order, candidate
+// verification, and the floor/latest gate to the lookup itself.
 
 // HotTxHashIndexes returns the transaction hash index of every published hot chunk,
 // newest chunk first. A hot match is exact and definitive, so the newest indexes
@@ -37,12 +38,32 @@ func (a *ReadView) HotTxHashIndexes() []txhash.HashIndex {
 	return idxs
 }
 
-// ColdTxHashIndexCoverages returns the frozen window index coverages in the view's
+// ColdTxIndexes opens a reader for every frozen window index in the view's
+// snapshot, newest coverage first — a cold match is a fingerprinted candidate,
+// so the lookup verifies it against the full hash. The readers are view-owned:
+// Release closes them (also the ones already opened when a later open fails).
+func (a *ReadView) ColdTxIndexes() ([]txhash.HashIndex, error) {
+	covs, err := a.coldTxHashIndexCoverages()
+	if err != nil {
+		return nil, err
+	}
+	idxs := make([]txhash.HashIndex, 0, len(covs))
+	for _, cov := range covs {
+		r, err := txhash.OpenColdReader(a.catalog.Layout().TxHashIndexFilePath(cov))
+		if err != nil {
+			return nil, fmt.Errorf("query: open cold tx index [%s, %s]: %w", cov.Lo, cov.Hi, err)
+		}
+		a.closers = append(a.closers, r.Close)
+		idxs = append(idxs, r)
+	}
+	return idxs, nil
+}
+
+// coldTxHashIndexCoverages returns the frozen window index coverages in the view's
 // snapshot, newest coverage first (by upper chunk). Each names a generation of an
-// on-disk .idx the lookup opens as it probes; a cold match is a fingerprinted
-// candidate. Reading them through the snapshot keeps the probe set fixed for the
+// on-disk .idx. Reading them through the snapshot keeps the probe set fixed for the
 // request even as an index rebuild swaps a coverage concurrently.
-func (a *ReadView) ColdTxHashIndexCoverages() ([]geometry.TxHashIndexCoverage, error) {
+func (a *ReadView) coldTxHashIndexCoverages() ([]geometry.TxHashIndexCoverage, error) {
 	all, err := a.snap.AllTxHashIndexKeys()
 	if err != nil {
 		return nil, err
