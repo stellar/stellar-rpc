@@ -100,12 +100,14 @@ func writePartialCSVs(logger *supportlog.Entry, sink *csvSink, outDir string) {
 }
 
 // newBenchCommand builds one bench-ingest subcommand skeleton — no positional
-// args, SIGINT-canceled context, Info-level logger, profiling around run —
-// with the source and profile flag sets bound.
+// args, SIGINT-canceled context, Info-level logger, profiling around run, an
+// invocation.json record written to --out after the run — with the source,
+// profile, and --out flags bound.
 func newBenchCommand(
 	use, short string, src *sourceFlags, prof *profileFlags,
-	run func(ctx context.Context, logger *supportlog.Entry) error,
+	run func(ctx context.Context, logger *supportlog.Entry, outDir string) error,
 ) *cobra.Command {
+	var outDir string
 	cmd := &cobra.Command{
 		Use:   use,
 		Short: short,
@@ -114,9 +116,24 @@ func newBenchCommand(
 			cmd.SilenceUsage = true
 			ctx, stop, logger := benchContext()
 			defer stop()
-			return prof.around(logger, func() error { return run(ctx, logger) })
+			startedAt := time.Now().UTC()
+			runErr := prof.around(logger, func() error { return run(ctx, logger, outDir) })
+			// The --out dir is created by the run itself, so a run that
+			// failed early (e.g. in validation) leaves nowhere to write the
+			// record and this write fails too. In that case only warn about
+			// the write: the error the user needs to see is the run's own.
+			if err := writeInvocationJSON(
+				outDir, cmd, captureFlags(cmd), startedAt, time.Now().UTC(), runErr,
+			); err != nil {
+				if runErr == nil {
+					return err
+				}
+				logger.Warnf("writing invocation.json: %v", err)
+			}
+			return runErr
 		},
 	}
+	cmd.Flags().StringVar(&outDir, "out", "bench-out", "output dir for the CSV report and invocation.json")
 	src.bind(cmd)
 	prof.bind(cmd)
 	return cmd
@@ -130,13 +147,12 @@ func newColdCommand() *cobra.Command {
 		workers    int
 		coldOutDir string
 		catalogDir string
-		outDir     string
 		prof       profileFlags
 	)
 	cmd := newBenchCommand("cold",
 		"Benchmark cold ingestion: the daemon's backfill (chunk freezes + txhash index builds) over a chunk range",
 		&src, &prof,
-		func(ctx context.Context, logger *supportlog.Entry) error {
+		func(ctx context.Context, logger *supportlog.Entry, outDir string) error {
 			return runCold(ctx, logger, coldOptions{
 				Source:     src.config(),
 				StartChunk: chunk.ID(startChunk),
@@ -156,7 +172,6 @@ func newColdCommand() *cobra.Command {
 			"re-runs overwrite, but leftovers from other ranges are never swept)")
 	fs.StringVar(&catalogDir, "catalog-dir", "",
 		"base dir for the run's scratch catalog; default: --cold-out-dir")
-	fs.StringVar(&outDir, "out", "bench-out", "CSV output dir")
 	markRequired(cmd, "start-chunk", "cold-out-dir")
 	return cmd
 }
@@ -170,13 +185,12 @@ func newHotCommand() *cobra.Command {
 		hotDir        string
 		catalogDir    string
 		closeInterval time.Duration
-		outDir        string
 		prof          profileFlags
 	)
 	cmd := newBenchCommand("hot",
 		"Benchmark hot ingestion: the daemon's live ingestion loop over a chunk range",
 		&src, &prof,
-		func(ctx context.Context, logger *supportlog.Entry) error {
+		func(ctx context.Context, logger *supportlog.Entry, outDir string) error {
 			return runHot(ctx, logger, hotOptions{
 				Source:        src.config(),
 				StartChunk:    chunk.ID(startChunk),
@@ -200,7 +214,6 @@ func newHotCommand() *cobra.Command {
 	fs.DurationVar(&closeInterval, "close-interval", 0,
 		"assumed time between ledger closes; >0 paces ingestion to that steady-state cadence "+
 			"and reports pace_lag (0 = ingest back-to-back, catch-up throughput)")
-	fs.StringVar(&outDir, "out", "bench-out", "CSV output dir")
 	markRequired(cmd, "start-chunk", "hot-dir")
 	return cmd
 }
