@@ -26,15 +26,10 @@ package txhash
 // intra-ledger duplicate was rejected at write time and cannot reach here.
 
 import (
-	"slices"
-	"bufio"
 	"bytes"
+	"slices"
 	"context"
-	"encoding/binary"
 	"fmt"
-	"hash"
-	"hash/crc64"
-	"io"
 	"os"
 	"path/filepath"
 
@@ -50,13 +45,19 @@ const freezeCtxPollEvery = 4096
 
 // FreezeColdFromStore builds the chunk's cold txhash .bin at binPath from
 // the chunk's hot store (read-only opens included — nothing here needs a
-// warmed facade, and nothing is mutated). The source merge yields entries in
-// RAW-key order; each key is blinded at emit (stores.BlindKey — the walk
-// writer's rule), which destroys that order, so the blinded entries are
-// collected and re-sorted before the write: the .bin's contract is lex order
-// BY BLINDED KEY. The accumulator is the same size class the walk path
-// already carries for its finalize sort; the bytes are identical to
-// WriteColdBin's over the same entries. Returns the entries written.
+// warmed facade, and nothing is mutated). Entries stream from the source
+// merge straight to the .bin — no whole-chunk accumulator; the header's
+// leading count is patched in once the merge completes. Serialization is the
+// walk path's own writer (coldBinStream, which WriteColdBin loops a whole
+// slice over), so the byte-parity gate's only remaining subject is the entry
+// ORDER this merge produces. Returns the entries written.
+// secret is the chunk's per-index routing secret: every stored key is
+// stores.BlindKey(secret, hash[:ColdKeySize]) — the walk writer's rule.
+// Blinding destroys the merge's raw-key order, so the blinded entries are
+// collected and re-sorted before the write (the .bin's contract is lex order
+// BY BLINDED KEY; the sort is STABLE so duplicate full hashes keep the
+// merge's global ledger-order tie-break). The accumulator is the same size
+// class the walk path already carries for its finalize sort.
 func FreezeColdFromStore(
 	ctx context.Context,
 	chunkID chunk.ID,
@@ -76,8 +77,6 @@ func FreezeColdFromStore(
 	if err != nil {
 		return 0, err
 	}
-	// STABLE: duplicate full hashes share a blinded key; the merge emitted
-	// them in global ledger order and the .bin keeps that tie-break.
 	slices.SortStableFunc(entries, func(a, b ColdEntry) int {
 		return bytes.Compare(a.Key[:], b.Key[:])
 	})
@@ -85,13 +84,13 @@ func FreezeColdFromStore(
 	if err != nil {
 		return 0, err
 	}
-	defer w.abort()
-	for _, ce := range entries {
-		if werr := w.append(ce); werr != nil {
+	defer w.close()
+	for i := range entries {
+		if werr := w.append(entries[i]); werr != nil {
 			return 0, werr
 		}
 	}
-	if ferr := w.finish(); ferr != nil {
+	if ferr := w.commit(); ferr != nil {
 		return 0, ferr
 	}
 	return len(entries), nil
@@ -139,7 +138,10 @@ func collectTailSources(
 		if ierr != nil {
 			return nil, fmt.Errorf("txhash freeze %s: scan %s: %w", chunkID, txhashCF, ierr)
 		}
-		if cerr := pollCtx(ctx, len(sources)); cerr != nil {
+		// Per row, like the events twin's tail scan: len(sources) counts
+		// APPENDED sources, not iterations, so it cannot drive pollCtx's
+		// cadence (tx-less ledgers never bump it).
+		if cerr := ctx.Err(); cerr != nil {
 			return nil, cerr
 		}
 		if len(entry.Key) != rowKeyLen {
@@ -166,9 +168,12 @@ func collectTailSources(
 }
 
 // mergeFreezeSources runs the k-way merge, emitting each record as a cold
-// entry: hash truncated to ColdKeySize and BLINDED with the index secret,
+// entry: hash truncated to ColdKeySize, seq range-checked against the chunk.
+// mergeFreezeSources runs the k-way merge, emitting each record as a cold
+// entry — hash truncated to ColdKeySize and BLINDED with the index secret —
 // seq range-checked against the chunk. The returned slice is in the merge's
-// raw-key order — the caller owns the blinded-order sort.
+// raw-key order (global ledger order on ties); the caller owns the
+// blinded-order sort.
 func mergeFreezeSources(
 	ctx context.Context, chunkID chunk.ID, sources []freezeSource, secret [stores.SecretLen]byte,
 ) ([]ColdEntry, error) {
@@ -182,13 +187,14 @@ func mergeFreezeSources(
 		if cerr := pollCtx(ctx, len(entries)); cerr != nil {
 			return nil, cerr
 		}
-		src := h.min()
-		seq := src.seq()
+		hash, seq := h.min()
 		if seq < first || seq > last {
 			return nil, fmt.Errorf("txhash freeze %s: entry seq %d outside [%d, %d]", chunkID, seq, first, last)
 		}
+		// BlindKey hashes the source's buffer BEFORE the step invalidates it
+		// (the blind is itself the truncate-and-copy).
 		entries = append(entries, ColdEntry{
-			Key: stores.BlindKey(secret, src.hash()[:ColdKeySize]),
+			Key: stores.BlindKey(secret, hash[:ColdKeySize]),
 			Seq: seq,
 		})
 		if serr := h.step(); serr != nil {
@@ -209,9 +215,9 @@ func pollCtx(ctx context.Context, i int) error {
 // ─────────────────────────── merge sources ───────────────────────────
 
 // freezeSource is one hash-sorted stream of (full hash, seq) records feeding
-// the freeze merge: a sealed run file or a single un-sealed tail row.
-// Sources start positioned BEFORE their first record; advance steps to the
-// next one.
+// the freeze merge: a sealed run file (runSource, run_reader.go) or a single
+// un-sealed tail row. Sources start positioned BEFORE their first record;
+// advance steps to the next one.
 type freezeSource interface {
 	// hash returns the current record's full 32-byte hash — valid only
 	// until the next advance.
@@ -232,77 +238,6 @@ func closeFreezeSources(sources []freezeSource) {
 		s.close()
 	}
 }
-
-// runSource streams one sealed run file sequentially through a 128KiB
-// buffer, folding CRC64 over the drain: the CRC (and the header count vs
-// file size) is verified by the time the source reports end-of-stream, so a
-// torn or corrupt run fails the freeze loudly before the .bin is finished.
-// Per-record hash order is checked as it streams (the merge's correctness
-// AND the .bin's sort order both ride on it).
-type runSource struct {
-	path      string
-	f         *os.File
-	br        *bufio.Reader
-	crc       hash.Hash64
-	hdr       runHeader
-	records   int
-	remaining int
-	rec       [runRecordLen]byte
-	prev      [rowHashLen]byte
-}
-
-// openRunSource opens and structurally validates a run for sequential
-// draining (header magic/range, count vs file size — the same gates
-// openSealedRun applies before ITS drain).
-func openRunSource(path string) (*runSource, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("run %s: %w", path, err)
-	}
-	hdr, err := readRunHeader(f, path)
-	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	records, err := runRecordCount(f, path, hdr)
-	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	return &runSource{
-		path: path, f: f, br: bufio.NewReaderSize(f, 128<<10),
-		crc: crc64.New(crcRunTable), hdr: hdr, records: records, remaining: records,
-	}, nil
-}
-
-func (r *runSource) hash() []byte { return r.rec[:rowHashLen] }
-
-func (r *runSource) seq() uint32 { return binary.LittleEndian.Uint32(r.rec[rowHashLen:]) }
-
-func (r *runSource) advance() (bool, error) {
-	if r.remaining == 0 {
-		if r.crc.Sum64() != r.hdr.crc {
-			return false, fmt.Errorf("run %s: payload crc mismatch (file %016x, computed %016x)",
-				r.path, r.hdr.crc, r.crc.Sum64())
-		}
-		return false, nil
-	}
-	idx := r.records - r.remaining
-	if idx > 0 {
-		copy(r.prev[:], r.rec[:rowHashLen])
-	}
-	if _, err := io.ReadFull(r.br, r.rec[:]); err != nil {
-		return false, fmt.Errorf("run %s: record %d: %w", r.path, idx, err)
-	}
-	_, _ = r.crc.Write(r.rec[:])
-	if idx > 0 && bytes.Compare(r.prev[:], r.rec[:rowHashLen]) > 0 {
-		return false, fmt.Errorf("run %s: record %d out of hash order", r.path, idx)
-	}
-	r.remaining--
-	return true, nil
-}
-
-func (r *runSource) close() { _ = r.f.Close() }
 
 // tailRowSource walks one retained packed row (32-byte stride, already
 // hash-sorted by EncodeRow) with a fixed ledger. off starts at -rowHashLen
@@ -326,92 +261,65 @@ func (t *tailRowSource) close() {}
 
 // ─────────────────────────── merge heap ───────────────────────────
 
-// freezeHeap is a slice-backed min-heap of source indices ordered by
-// (current hash, source index) — the same shape as the seal path's
-// mergeHeap, over freezeSources instead of window rows. The index tie-break
-// emits equal cross-source duplicate hashes in source order (runs oldest
-// first, then tail rows in ledger order), and equal hashes WITHIN a run are
-// already in ledger order from the seal merge — so global duplicate order is
-// ascending ledger, deterministically.
+// freezeHeap is the package's shared hash heap (merge_heap.go) over
+// freezeSources: entries carry each live source's CURRENT hash beside its
+// source index, so a compare never calls back through the freezeSource
+// interface. The index tie-break emits equal cross-source duplicate hashes in
+// source order (runs oldest first, then tail rows in ledger order), and equal
+// hashes WITHIN a run are already in ledger order from the seal merge — so
+// global duplicate order is ascending ledger, deterministically.
+//
+// A cached hash is the source's own buffer, valid only until that source
+// advances: runSource.hash() aliases the record buffer it re-reads into, and
+// tailRowSource.hash() re-slices as its offset moves. Only the root's source
+// ever advances, and step refreshes the root's entry from it before sifting,
+// so no entry outlives its bytes.
 type freezeHeap struct {
 	sources []freezeSource
-	heap    []int
+	heap    hashHeap
 }
 
 // newFreezeHeap primes every source (first advance) and heapifies the
 // non-empty ones. An empty source that fails its end-of-stream verification
 // (torn empty run) fails here.
 func newFreezeHeap(sources []freezeSource) (*freezeHeap, error) {
-	h := &freezeHeap{sources: sources, heap: make([]int, 0, len(sources))}
+	h := &freezeHeap{sources: sources, heap: make(hashHeap, 0, len(sources))}
 	for i, s := range sources {
 		ok, err := s.advance()
 		if err != nil {
 			return nil, err
 		}
 		if ok {
-			h.heap = append(h.heap, i)
-			h.up(len(h.heap) - 1)
+			h.heap = append(h.heap, hashEntry{hash: s.hash(), idx: i})
 		}
 	}
+	h.heap.heapify()
 	return h, nil
 }
 
 func (h *freezeHeap) len() int { return len(h.heap) }
 
-// min returns the source holding the smallest current record.
-func (h *freezeHeap) min() freezeSource { return h.sources[h.heap[0]] }
+// min returns the smallest current record — its cached hash (valid until the
+// next step) and its ledger.
+func (h *freezeHeap) min() ([]byte, uint32) {
+	e := h.heap[0]
+	return e.hash, h.sources[e.idx].seq()
+}
 
-// step advances the minimum source past its emitted record, dropping the
-// source once drained (its end-of-stream verification ran inside advance).
+// step advances the minimum source past its emitted record, refilling the root
+// with its next hash — or dropping the source once drained (its end-of-stream
+// verification ran inside advance).
 func (h *freezeHeap) step() error {
-	ok, err := h.sources[h.heap[0]].advance()
+	src := h.sources[h.heap[0].idx]
+	ok, err := src.advance()
 	if err != nil {
 		return err
 	}
 	if !ok {
-		lastIdx := len(h.heap) - 1
-		h.heap[0] = h.heap[lastIdx]
-		h.heap = h.heap[:lastIdx]
+		h.heap = h.heap.dropRoot()
+		return nil
 	}
-	if len(h.heap) > 0 {
-		h.down(0)
-	}
+	h.heap[0].hash = src.hash()
+	h.heap.siftDown(0)
 	return nil
-}
-
-// less orders heap positions a, b by (current hash, source index).
-func (h *freezeHeap) less(a, b int) bool {
-	sa, sb := h.heap[a], h.heap[b]
-	if c := bytes.Compare(h.sources[sa].hash(), h.sources[sb].hash()); c != 0 {
-		return c < 0
-	}
-	return sa < sb
-}
-
-func (h *freezeHeap) up(pos int) {
-	for pos > 0 {
-		parent := (pos - 1) / 2
-		if !h.less(pos, parent) {
-			return
-		}
-		h.heap[pos], h.heap[parent] = h.heap[parent], h.heap[pos]
-		pos = parent
-	}
-}
-
-func (h *freezeHeap) down(pos int) {
-	for {
-		child := 2*pos + 1
-		if child >= len(h.heap) {
-			return
-		}
-		if r := child + 1; r < len(h.heap) && h.less(r, child) {
-			child = r
-		}
-		if !h.less(child, pos) {
-			return
-		}
-		h.heap[pos], h.heap[child] = h.heap[child], h.heap[pos]
-		pos = child
-	}
 }

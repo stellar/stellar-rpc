@@ -51,7 +51,7 @@ func makeColdPayload(ledgerSeq, txIdx uint32, symbol string) Payload {
 	}
 }
 
-func TestWriter_AppendThenFinishProducesReadablePackfile(t *testing.T) {
+func TestWriter_AppendThenCommitProducesReadablePackfile(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
 
@@ -73,7 +73,7 @@ func TestWriter_AppendThenFinishProducesReadablePackfile(t *testing.T) {
 	require.NoError(t, offsets.Append(2, 2))
 	require.NoError(t, offsets.Append(3, 1))
 	require.NoError(t, offsets.Append(4, 0)) // empty ledger
-	require.NoError(t, w.Finish(offsets))
+	require.NoError(t, w.Commit(offsets))
 
 	// Read back via packfile.Reader.
 	path := filepath.Join(dir, EventsPackName(chunkID))
@@ -123,7 +123,7 @@ func TestWriter_EmptyChunkStillFinalizes(t *testing.T) {
 	require.NoError(t, err)
 
 	offsets := NewLedgerOffsets(chunkID.FirstLedger())
-	require.NoError(t, w.Finish(offsets))
+	require.NoError(t, w.Commit(offsets))
 
 	reader := packfile.Open(
 		filepath.Join(dir, EventsPackName(chunkID)),
@@ -141,26 +141,26 @@ func TestWriter_EmptyChunkStillFinalizes(t *testing.T) {
 	assert.Equal(t, uint32(0), decoded.TotalEvents())
 }
 
-func TestWriter_AppendAfterFinishErrors(t *testing.T) {
+func TestWriter_AppendAfterCommitErrors(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	w, err := NewColdWriter(chunkID, t.TempDir(), ColdWriterOptions{})
 	require.NoError(t, err)
 
 	offsets := NewLedgerOffsets(chunkID.FirstLedger())
-	require.NoError(t, w.Finish(offsets))
+	require.NoError(t, w.Commit(offsets))
 
 	err = w.Append(makeColdPayload(2, 1, "x"))
-	require.ErrorIs(t, err, packfile.ErrWriterClosed, "Append after Finish must return packfile.ErrWriterClosed")
+	require.ErrorIs(t, err, packfile.ErrWriterClosed, "Append after Commit must return packfile.ErrWriterClosed")
 
-	err = w.Finish(offsets)
-	require.ErrorIs(t, err, packfile.ErrWriterClosed, "double Finish must return packfile.ErrWriterClosed")
+	err = w.Commit(offsets)
+	require.ErrorIs(t, err, packfile.ErrWriterClosed, "double Commit must return packfile.ErrWriterClosed")
 }
 
-func TestWriter_FailedFinishCleansUpViaClose(t *testing.T) {
-	// Regression: if Finish errors, a subsequent Close (typical defer
+func TestWriter_FailedCommitCleansUpViaClose(t *testing.T) {
+	// Regression: if Commit errors, a subsequent Close (typical defer
 	// pattern) must still tear down the underlying packfile.Writer
 	// and remove the partial events.pack file. A previous version of
-	// Finish set w.closed=true before invoking pw.Finish, which made
+	// Commit set w.closed=true before invoking pw.Finish, which made
 	// the deferred Close a no-op and leaked workers + the partial file.
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
@@ -170,18 +170,18 @@ func TestWriter_FailedFinishCleansUpViaClose(t *testing.T) {
 	require.NoError(t, err)
 
 	// Force an encode error by passing nil offsets.
-	require.Error(t, w.Finish(nil))
+	require.Error(t, w.Commit(nil))
 
 	// Deferred-style cleanup. After Close, the partial events.pack
 	// must be gone (packfile.Writer.Close removes the file unless
-	// Finish succeeded).
+	// Commit succeeded).
 	require.NoError(t, w.Close())
 	_, statErr := os.Stat(path)
 	assert.True(t, os.IsNotExist(statErr),
-		"events.pack should be removed after a failed Finish + Close, got stat err = %v", statErr)
+		"events.pack should be removed after a failed Commit + Close, got stat err = %v", statErr)
 }
 
-func TestWriter_CloseWithoutFinishAborts(t *testing.T) {
+func TestWriter_CloseWithoutCommitAborts(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
 	w, err := NewColdWriter(chunkID, dir, ColdWriterOptions{})
@@ -214,7 +214,7 @@ func TestWriter_PreservesEventIDOrder(t *testing.T) {
 	}
 	offsets := NewLedgerOffsets(chunkID.FirstLedger())
 	require.NoError(t, offsets.Append(chunkID.FirstLedger(), uint32(n)))
-	require.NoError(t, w.Finish(offsets))
+	require.NoError(t, w.Commit(offsets))
 
 	reader := packfile.Open(
 		filepath.Join(dir, EventsPackName(chunkID)),
@@ -264,7 +264,7 @@ func TestEventsPack_TrailerPinsFormatAndRecordSize(t *testing.T) {
 	require.NoError(t, w.Append(makeColdPayload(chunkID.FirstLedger(), 1, "x")))
 	offsets := NewLedgerOffsets(chunkID.FirstLedger())
 	require.NoError(t, offsets.Append(chunkID.FirstLedger(), 1))
-	require.NoError(t, w.Finish(offsets))
+	require.NoError(t, w.Commit(offsets))
 
 	reader := packfile.Open(
 		filepath.Join(dir, EventsPackName(chunkID)),

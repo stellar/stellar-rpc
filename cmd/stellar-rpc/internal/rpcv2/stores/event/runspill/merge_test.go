@@ -20,8 +20,7 @@ func spillRun(t *testing.T, dir, name string, recs map[[16]byte][]uint32) string
 		}
 	}
 	path := filepath.Join(dir, name)
-	payload, records := slab.SortEncode(nil)
-	require.NoError(t, WriteRun(path, payload, records))
+	spillSlab(t, slab, path)
 	return path
 }
 

@@ -18,7 +18,9 @@ package txhash
 //   - RUNS: immutable flat files beside the chunk DB (TXHRUN01 format:
 //     36-byte hash‖seq records, hash-sorted, CRC64-framed), sealed from the
 //     window every sealEvery ledgers on a background goroutine, each with
-//     an in-RAM bloom + page ladder rebuilt from the verified file bytes.
+//     an in-RAM bloom + page ladder built in the seal's write pass and
+//     rebuilt from the verified file bytes at warmup (one funnel:
+//     runRouting, hotindex_seal.go).
 //
 // Reads are exact: every route ends in a full 32-byte hash compare before a
 // sequence is returned. The row chain is DENSE — one row per ledger, empty
@@ -40,7 +42,10 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/durable"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/bloom"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/internal/runset"
 )
 
 // windowLedgers is the seal cadence: rows retained before a background seal
@@ -67,11 +72,11 @@ type windowRow struct {
 
 // sealedRun is one live run file with its in-RAM routing state and an open
 // handle for concurrent ReadAt lookups. first/last is the ledger range the
-// run covers; records is the drain-verified payload record count (it bounds
-// the final page's pread).
+// run covers; records is the payload record count — observed by the write
+// pass at seal, drain-verified at warmup (it bounds the final page's pread).
 type sealedRun struct {
 	path    string
-	bloom   bloomFilter
+	bloom   bloom.Filter
 	ladder  [][ladderKeyLen]byte // first 16B of each page's first record
 	file    *os.File
 	first   uint32
@@ -85,13 +90,27 @@ type HotIndex struct {
 	view atomic.Pointer[hotIndexView]
 
 	// Writer-owned state (single-writer contract). sealEvery defaults to
-	// windowLedgers; tests shrink it to exercise seals with small inputs.
-	sealEvery       int
-	ledgersInWindow int
-	sealSeq         int
-	pendingSeal     chan sealResult // capacity 1: at most one seal in flight
-	sealInFlight    bool
-	manifest        manifestStore
+	// windowLedgers; tests shrink it to exercise seals with small inputs. The
+	// seal trigger compares it against len(view.rows), which IS the window's
+	// ledger count — the row chain is dense, one row per ApplyRow (see the
+	// file doc), so no separate counter can drift from it.
+	sealEvery    int
+	sealSeq      int
+	pendingSeal  chan sealResult // capacity 1: at most one seal in flight
+	sealInFlight bool
+	manifest     runset.Manifest
+
+	// fsyncDir runs at the tail of the background seal, making the fresh
+	// run's dirent durable BEFORE the hand-back can reach reapSeal: PutRuns
+	// rides a synced write, so without the barrier a crash could leave the
+	// manifest durably naming a run whose dirent was never journaled — an
+	// unrecoverable warmup failure. Production is durable.FsyncDir; a
+	// vanished dir counts as success there, which is tolerable because the
+	// dir only vanishes at chunk teardown, taking the manifest with it —
+	// any surviving manifest naming the vanished run fails the next warmup
+	// loudly. Tests swap in a recorder to pin the barrier-before-PutRuns
+	// order — the same seam as the events twin.
+	fsyncDir func(dir string) error
 
 	// sealArmed gates the seal trigger. The engine starts DISARMED so an
 	// open's warmup replay is pure in-memory reconstruction — no run files,
@@ -115,8 +134,8 @@ type HotIndex struct {
 
 // sealResult is the background sealer's hand-back. An errored result carries
 // no resources (run is nil whenever err is set) — the same contract as the
-// events twin, held structurally here since sealWindow is the only fallible
-// step and returns no run on failure.
+// events twin: sealWindow returns no run on failure, and a failed dirent
+// barrier disposes of the just-sealed run before handing back (startSeal).
 type sealResult struct {
 	run     *sealedRun
 	rows    int    // number of window rows the seal covered
@@ -124,8 +143,10 @@ type sealResult struct {
 	err     error
 }
 
-// NewHotIndex creates the engine for a fresh chunk. dir is created.
-func NewHotIndex(dir string, manifest manifestStore) (*HotIndex, error) {
+// NewHotIndex creates the engine for a fresh chunk. dir is created. The
+// manifest (rocksdbManifest in production, hotindex_seal.go) is the
+// crash-recovery authority on which runs are live — see runset.Manifest.
+func NewHotIndex(dir string, manifest runset.Manifest) (*HotIndex, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("txhash: hotindex mkdir %s: %w", dir, err)
 	}
@@ -133,6 +154,7 @@ func NewHotIndex(dir string, manifest manifestStore) (*HotIndex, error) {
 		dir:         dir,
 		pendingSeal: make(chan sealResult, 1),
 		manifest:    manifest,
+		fsyncDir:    durable.FsyncDir,
 		sealEvery:   windowLedgers,
 	}
 	h.view.Store(&hotIndexView{})
@@ -171,9 +193,8 @@ func (h *HotIndex) ApplyRow(seq uint32, rowBytes []byte, count int) error {
 	rows = append(rows, windowRow{seq: seq, bytes: rowBytes})
 	h.view.Store(&hotIndexView{rows: rows, runs: old.runs})
 	h.expectedNext = seq + 1
-	h.ledgersInWindow++
 
-	if h.sealArmed && h.ledgersInWindow >= h.sealEvery && !h.sealInFlight {
+	if h.sealArmed && len(rows) >= h.sealEvery && !h.sealInFlight {
 		h.startSeal(rows)
 	}
 	return nil
@@ -217,9 +238,7 @@ func (h *HotIndex) Close() {
 				res.run.close()
 			}
 		}
-		for _, r := range h.view.Load().runs {
-			r.close()
-		}
+		closeRuns(h.view.Load().runs)
 	})
 }
 

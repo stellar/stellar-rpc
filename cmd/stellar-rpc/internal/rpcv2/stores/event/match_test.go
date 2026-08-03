@@ -571,11 +571,11 @@ func TestMatches_PostFilterRejectsTermHashCollision(t *testing.T) {
 	require.True(t, before.Contains(1), "fixture sanity: id=1 indexes topic1=gamma")
 	require.False(t, before.Contains(4), "fixture sanity: id=4 not yet in topic1=gamma bitmap")
 
-	// Inject through the dense overlay (the overlay() hook). An overlay entry
-	// SHADOWS window+runs for its term, so it must be complete — the engine's
+	// Inject through the hot index's dense overlay. An overlay entry SHADOWS
+	// window+runs for its term, so it must be complete — the engine's
 	// promotion path guarantees this via history backfill; the injection
 	// mirrors that by carrying the legitimate id=1 alongside the collision.
-	fx.store.overlay().AddTo(gammaKey, 1, 4)
+	fx.store.hotIdx.overlay.AddTo(gammaKey, 1, 4)
 
 	after := lookupOne(t, fx.store, gammaKey)
 	require.True(t, after.Contains(4), "fixture sanity: collision id=4 is now in the bitmap")
@@ -1276,7 +1276,7 @@ func freezeFixtureToColdReader(t *testing.T, hot *HotStore, chunkID chunk.ID) *C
 		}
 	}
 
-	require.NoError(t, cw.Finish(coldOffsets))
+	require.NoError(t, cw.Commit(coldOffsets))
 	require.NoError(t, WriteColdIndex(context.Background(), chunkID, idx, dir, testIndexSecret))
 
 	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
@@ -1622,7 +1622,7 @@ func TestMatches_DropsAreInvisible(t *testing.T) {
 	gammaKey := ComputeTermKey(fx.t0cRaw, FieldTopic1)
 	// An overlay entry holds the term's FULL id set, so the injection carries
 	// the true id 1 alongside the false positives.
-	fx.store.overlay().AddTo(gammaKey, 1, 2, 3, 4)
+	fx.store.hotIdx.overlay.AddTo(gammaKey, 1, 2, 3, 4)
 	filters := []Filter{{Topics: [protocol.MaxTopicCount][]byte{nil, fx.t0cRaw}}}
 
 	for _, batch := range []int{512, 1} {
@@ -1685,9 +1685,9 @@ func TestMatches_WindowANDLeavesBorrowedBitmapUntouched(t *testing.T) {
 	// Promote contract A's term (real matches: ids 0, 1, 4) to dense
 	// mode. The injected ids sit above the chunk's EventCount and every
 	// window below, so they are clipped before any fetch.
-	fx.store.overlay().AddTo(key, 0, 1, 4)
+	fx.store.hotIdx.overlay.AddTo(key, 0, 1, 4)
 	for id := uint32(100); id < 200; id++ {
-		fx.store.overlay().AddTo(key, id)
+		fx.store.hotIdx.overlay.AddTo(key, id)
 	}
 	before := lookupOne(t, fx.store, key)
 	require.GreaterOrEqual(t, before.GetCardinality(), uint64(100),

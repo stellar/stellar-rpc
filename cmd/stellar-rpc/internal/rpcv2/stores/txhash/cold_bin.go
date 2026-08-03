@@ -47,10 +47,10 @@ const (
 	coldBinEntrySize = ColdKeySize + coldBinSeqSize
 	// coldBinCountSize is the leading uint64 LE entry count.
 	coldBinCountSize = 8
-	// coldBinHeaderSize is the count followed by the index secret the keys were
-	// blinded with (stores.SecretLen). The build reads the secret back and
-	// adopts it, so an index can never be built under a secret that disagrees
-	// with the one its .bin keys were keyed with (see BuildColdIndex).
+	// coldBinHeaderSize is the count followed by the index secret the keys
+	// were blinded with (stores.SecretLen). The build reads the secret back
+	// and adopts it, so an index can never be built under a secret that
+	// disagrees with the one its .bin keys were keyed with (BuildColdIndex).
 	coldBinHeaderSize = coldBinCountSize + stores.SecretLen
 )
 
@@ -67,65 +67,26 @@ func ColdBinName(chunkID chunk.ID) string {
 	return chunkID.String() + ".bin"
 }
 
-// WriteColdBin writes the .bin file directly to path, truncating any prior
-// attempt's file (os.Create is O_TRUNC). There is no tmp+rename step: the
-// orchestrator's completion record — written only after WriteColdBin returns —
-// is the sole authority on whether the artifact exists, so a partial file
-// from a failed or crashed attempt is inert scratch the retry overwrites
-// (and scanBinHeader's header-vs-size check rejects loudly if one is
-// ever opened).
-//
-// secret is the index secret entries' keys were blinded with; it is recorded in
-// the header so the deferred build adopts it instead of re-deriving one that
-// might disagree.
+// WriteColdBin writes the .bin file at path from entries the caller already
+// holds whole — the walk path's finalize accumulator, which exists for its
+// sort anyway. It is a loop over the same coldBinStream the freeze drives, so
+// walk-path and freeze-path bytes are identical by construction; see that
+// type for the create semantics and commit for the durability ladder.
 //
 // entries must already be sorted (lex by Key, non-decreasing); this function
 // writes them verbatim.
-//
-// Sync runs before Close, and the Close error is explicitly checked: the
-// completion record must only be written once the data is durable, and on
-// many filesystems ENOSPC/EIO only surface at fd close — a silently
-// truncated .bin would produce a wrong index without any signal.
 func WriteColdBin(path string, secret [stores.SecretLen]byte, entries []ColdEntry) error {
-	f, cerr := os.Create(path)
-	if cerr != nil {
-		return fmt.Errorf("txhash: create %s: %w", path, cerr)
+	w, err := newColdBinStream(path, secret)
+	if err != nil {
+		return err
 	}
-	// closed guards the deferred Close against double-closing after the
-	// explicit error-checked Close below.
-	closed := false
-	defer func() {
-		if !closed {
-			_ = f.Close()
-		}
-	}()
-
-	bw := bufio.NewWriterSize(f, 1<<20)
-	var header [coldBinHeaderSize]byte
-	binary.LittleEndian.PutUint64(header[:coldBinCountSize], uint64(len(entries)))
-	copy(header[coldBinCountSize:], secret[:])
-	if _, werr := bw.Write(header[:]); werr != nil {
-		return fmt.Errorf("txhash: write header: %w", werr)
-	}
-	var entryBuf [coldBinEntrySize]byte
-	for _, e := range entries {
-		copy(entryBuf[:ColdKeySize], e.Key[:])
-		binary.LittleEndian.PutUint32(entryBuf[ColdKeySize:], e.Seq)
-		if _, werr := bw.Write(entryBuf[:]); werr != nil {
-			return fmt.Errorf("txhash: write entry: %w", werr)
+	defer w.close() // a no-op once commit has consumed the fd
+	for i := range entries {
+		if aerr := w.append(entries[i]); aerr != nil {
+			return aerr
 		}
 	}
-	if ferr := bw.Flush(); ferr != nil {
-		return fmt.Errorf("txhash: flush: %w", ferr)
-	}
-	if serr := f.Sync(); serr != nil {
-		return fmt.Errorf("txhash: sync %s: %w", path, serr)
-	}
-	closed = true
-	if clerr := f.Close(); clerr != nil {
-		return fmt.Errorf("txhash: close %s: %w", path, clerr)
-	}
-	return nil
+	return w.commit()
 }
 
 // coldBinCount validates a .bin file's byte size against its declared header
@@ -148,17 +109,32 @@ func coldBinCount(path string, size int64, count uint64) (uint64, error) {
 	return count, nil
 }
 
-// coldBinStream writes a .bin incrementally: header with a placeholder
-// count (the secret is written up front — it is known before the first
-// entry), streamed entries, then finish patches the leading count and syncs
-// — byte-identical to WriteColdBin's output without holding a chunk's
-// entries in memory. The freeze is its user; the walk path keeps the
-// slice-based writer (its accumulator exists anyway for the finalize sort).
+// coldBinStream is THE .bin writer: placeholder header, entries appended in
+// caller order, then commit patches the leading count and makes the file
+// durable. It has two entry points and no second implementation — the freeze
+// streams its merge output straight in, WriteColdBin loops a whole slice
+// through it — so the freeze's byte parity with the walk path is structural
+// rather than a property two serializers have to keep agreeing on.
+//
+// The file is created with os.Create, truncating any prior attempt (O_TRUNC).
+// There is no tmp+rename step: the artifact's completion record — written
+// only after the writer returns — is the sole authority on whether the
+// artifact exists, so a partial file from a failed or crashed attempt is
+// inert scratch the retry overwrites (and scanBinHeader's header-vs-size
+// check rejects loudly if one is ever opened).
+//
+// Two-phase commit/close like the domain's other writers — runspill.RunWriter
+// carries the pattern doc.
 type coldBinStream struct {
-	f     *os.File
-	bw    *bufio.Writer
-	count uint64
-	done  bool
+	f  *os.File
+	bw *bufio.Writer
+	// entryBuf is the per-append encode scratch. It lives on the writer
+	// because bufio can hand the slice through to the underlying io.Writer,
+	// which escapes a local array to the heap — an allocation per entry over
+	// a ~3M-entry chunk.
+	entryBuf [coldBinEntrySize]byte
+	count    uint64
+	done     bool
 }
 
 func newColdBinStream(path string, secret [stores.SecretLen]byte) (*coldBinStream, error) {
@@ -167,7 +143,7 @@ func newColdBinStream(path string, secret [stores.SecretLen]byte) (*coldBinStrea
 		return nil, fmt.Errorf("txhash: create %s: %w", path, err)
 	}
 	bw := bufio.NewWriterSize(f, 1<<20)
-	var header [coldBinHeaderSize]byte // count patched in finish; secret final
+	var header [coldBinHeaderSize]byte // count patched in commit; secret is final
 	copy(header[coldBinCountSize:], secret[:])
 	if _, werr := bw.Write(header[:]); werr != nil {
 		_ = f.Close()
@@ -177,24 +153,32 @@ func newColdBinStream(path string, secret [stores.SecretLen]byte) (*coldBinStrea
 }
 
 func (w *coldBinStream) append(e ColdEntry) error {
-	var buf [coldBinEntrySize]byte
-	copy(buf[:ColdKeySize], e.Key[:])
-	binary.LittleEndian.PutUint32(buf[ColdKeySize:], e.Seq)
-	if _, err := w.bw.Write(buf[:]); err != nil {
+	copy(w.entryBuf[:ColdKeySize], e.Key[:])
+	binary.LittleEndian.PutUint32(w.entryBuf[ColdKeySize:], e.Seq)
+	if _, err := w.bw.Write(w.entryBuf[:]); err != nil {
 		return fmt.Errorf("txhash: write entry: %w", err)
 	}
 	w.count++
 	return nil
 }
 
-// finish flushes, patches the header count, syncs, and closes — the same
-// durability ladder as WriteColdBin (sync before close, close error checked).
-func (w *coldBinStream) finish() error {
+// commit completes the file: flush the buffer, patch the leading count now
+// that it is known, then the durability ladder every .bin depends on — Sync
+// before Close, with the Close error explicitly checked. Every step of that
+// order is load-bearing. The flush precedes the patch because a short chunk
+// leaves the placeholder header sitting in the buffer, and flushing after the
+// WriteAt would lay those zeros back over the count. The patch precedes the
+// Sync so one Sync covers the header and the entries. The Sync precedes the
+// Close, and the Close error is not discarded, because the artifact's
+// completion record must only be written once the data is durable and on many
+// filesystems ENOSPC/EIO only surface at fd close — a silently truncated .bin
+// would produce a wrong index without any signal.
+func (w *coldBinStream) commit() error {
 	if err := w.bw.Flush(); err != nil {
 		return fmt.Errorf("txhash: flush: %w", err)
 	}
-	// Patch ONLY the count field: the secret was written at create time and
-	// a whole-header rewrite would wipe it.
+	// Patch ONLY the count: the secret was written at create time and a
+	// whole-header rewrite would wipe it.
 	var count [coldBinCountSize]byte
 	binary.LittleEndian.PutUint64(count[:], w.count)
 	if _, err := w.f.WriteAt(count[:], 0); err != nil {
@@ -204,14 +188,17 @@ func (w *coldBinStream) finish() error {
 		return fmt.Errorf("txhash: sync %s: %w", w.f.Name(), err)
 	}
 	// done only once Close consumes the fd — an earlier error must leave
-	// abort() responsible for releasing it.
+	// close() responsible for releasing it.
 	w.done = true
-	return w.f.Close()
+	if err := w.f.Close(); err != nil {
+		return fmt.Errorf("txhash: close %s: %w", w.f.Name(), err)
+	}
+	return nil
 }
 
-// abort releases the file on the error path; a no-op after finish. The
+// close releases the file on the error path; a no-op after commit. The
 // partial file is inert scratch per the artifact model (retry overwrites).
-func (w *coldBinStream) abort() {
+func (w *coldBinStream) close() {
 	if !w.done {
 		_ = w.f.Close()
 	}

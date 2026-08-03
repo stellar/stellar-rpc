@@ -77,7 +77,7 @@ func buildColdFixture(t *testing.T, chunkID chunk.ID, eventsPerLedger, ledgersPe
 		require.NoError(t, offsets.Append(ledgerSeq, count))
 	}
 
-	require.NoError(t, cw.Finish(offsets))
+	require.NoError(t, cw.Commit(offsets))
 	require.NoError(t, WriteColdIndex(context.Background(), chunkID, idx, dir, testIndexSecret))
 	return dir, payloads
 }
@@ -717,11 +717,11 @@ func TestColdReader_RejectsMispairedOffsets(t *testing.T) {
 	for i := range 3 {
 		require.NoError(t, cw.Append(makeColdPayload(first, 1, fmt.Sprintf("e%d", i))))
 	}
-	// Offsets sum to 2 events; the pack holds 3. ColdWriter.Finish takes
+	// Offsets sum to 2 events; the pack holds 3. ColdWriter.Commit takes
 	// the caller's offsets on trust — the reader-side check is the guard.
 	offsets := NewLedgerOffsets(first)
 	require.NoError(t, offsets.Append(first, 2))
-	require.NoError(t, cw.Finish(offsets))
+	require.NoError(t, cw.Commit(offsets))
 
 	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
 	require.NoError(t, err)

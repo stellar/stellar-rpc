@@ -16,48 +16,10 @@ import (
 	"slices"
 	"sort"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/bloom"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event/runspill"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/internal/runset"
 )
-
-// ─────────────────────────── bloom filter ───────────────────────────
-
-// bloomFilter is a plain double-hashed bloom over term fp64s: ~10 bits/key,
-// 7 probes. Pointerless (one []uint64), GC-invisible.
-type bloomFilter struct {
-	bits []uint64
-	mask uint64
-}
-
-const bloomProbes = 7
-
-// newBloom sizes for n keys at ~10 bits/key, rounded up to a power of two
-// (mask-indexable).
-func newBloom(n int) bloomFilter {
-	bits := 1
-	for bits < n*10 {
-		bits <<= 1
-	}
-	return bloomFilter{bits: make([]uint64, bits/64+1), mask: uint64(bits - 1)} //nolint:gosec // bits >= 1
-}
-
-func (b *bloomFilter) add(fp uint64) {
-	h2 := fp>>33 | fp<<31 | 1 // odd second hash
-	for i := range bloomProbes {
-		bit := (fp + uint64(i)*h2) & b.mask
-		b.bits[bit/64] |= 1 << (bit % 64)
-	}
-}
-
-func (b *bloomFilter) mayContain(fp uint64) bool {
-	h2 := fp>>33 | fp<<31 | 1
-	for i := range bloomProbes {
-		bit := (fp + uint64(i)*h2) & b.mask
-		if b.bits[bit/64]&(1<<(bit%64)) == 0 {
-			return false
-		}
-	}
-	return true
-}
 
 // ─────────────────────────── sealing ───────────────────────────
 
@@ -68,16 +30,20 @@ func (b *bloomFilter) mayContain(fp uint64) bool {
 func (h *HotIndex) startSeal(rows []windowRow) {
 	runsSnapshot := h.view.Load().runs
 	sealed := len(rows)
+	// Both run names follow runset.NextSealSeq's grammar (<prefix>-%06d.run,
+	// the prefixes OpenHotIndex resumes from); changing either shape silently
+	// breaks the seal-sequence resume.
 	name := filepath.Join(h.dir, fmt.Sprintf("seal-%06d.run", h.sealSeq))
 	h.sealSeq++
 	h.sealInFlight = true
 	go func() {
 		res := sealResult{rows: sealed, lastSeq: rows[sealed-1].seq}
-		res.run, res.err = sealWindow(rows, name)
+		res.run, res.err = sealWindow(rows, name, h.fsyncDir)
 		if res.err == nil && len(runsSnapshot)+1 > h.maxRuns {
 			merged, obsolete, merr := mergeSealedRuns(
 				append(append([]*sealedRun{}, runsSnapshot...), res.run),
-				filepath.Join(h.dir, fmt.Sprintf("merge-%06d.run", h.sealSeq)))
+				filepath.Join(h.dir, fmt.Sprintf("merge-%06d.run", h.sealSeq)), // NextSealSeq's grammar
+				h.fsyncDir)
 			if merr != nil {
 				// The sealed run just became garbage — dispose of it here,
 				// while it is known to be unpublished (see sealResult:
@@ -121,26 +87,19 @@ func (h *HotIndex) reapSeal(block bool) error {
 	}
 
 	old := h.view.Load()
-	var runs []*sealedRun
+	// A merge fold's run replaces ALL live runs; a plain seal joins them.
+	live := old.runs
 	if res.replaceAll {
-		runs = []*sealedRun{res.run}
-	} else {
-		runs = append(append([]*sealedRun{}, old.runs...), res.run)
+		live = nil
 	}
-	names := make([]string, len(runs))
-	for i, r := range runs {
-		names[i] = filepath.Base(r.path)
-	}
-	if err := h.manifest.PutRuns(names, res.lastSeq); err != nil {
-		// The un-listed run is unpublished: dispose of it like any failed
-		// job's output. The obsolete inputs stay untouched — they are still
-		// live in the view and listed by the manifest.
-		res.run.close()
-		_ = os.Remove(res.run.path)
+	// A failed Publish disposes of the un-listed run itself (errors carry no
+	// resources); the obsolete inputs stay untouched — they are still live
+	// in the view and listed by the manifest.
+	if err := runset.Publish(h.manifest, live, res.run, res.lastSeq); err != nil {
 		return fmt.Errorf("events: hotindex manifest: %w", err)
 	}
+	runs := append(append([]*sealedRun{}, live...), res.run)
 	h.view.Store(&hotIndexView{rows: old.rows[res.rows:], runs: runs})
-	h.ledgersInWindow -= res.rows
 	// Unlink obsolete runs now (the merged run replaces them durably) but do
 	// NOT close their handles: a lock-free reader may still hold the previous
 	// view and probe them mid-lookup. The open handle keeps the unlinked file
@@ -163,17 +122,17 @@ func (h *HotIndex) reapSeal(block bool) error {
 // The bloom is sized up front so fingerprints stream straight into it and no
 // whole-run fp accumulation is ever retained: seals size from the window
 // map's exact term count, merges from the inputs' summed counts — an upper
-// bound on the union, which newBloom's power-of-two rounding absorbs (an
+// bound on the union, which bloom.New's power-of-two rounding absorbs (an
 // over-sized bloom only lowers the false-positive rate) — and warmup from
 // the header's validated record count.
 type runRouting struct {
-	bloom bloomFilter
+	bloom bloom.Filter
 	fb    fenceBuilder
 }
 
 func newRunRouting(expectedTerms int) *runRouting {
 	return &runRouting{
-		bloom: newBloom(max(expectedTerms, 1)),
+		bloom: bloom.New(max(expectedTerms, 1)),
 		// Cadence fences + sentinel; byte-cap extras may tail-grow. Matters
 		// at merge scale (~1M fences), where regrowing from nil churned
 		// ~100MB of transient allocation.
@@ -186,7 +145,7 @@ func newRunRouting(expectedTerms int) *runRouting {
 // pre-Append offset.
 func (rt *runRouting) observe(term TermKey, off int64) {
 	rt.fb.observe(term, off)
-	rt.bloom.add(fp64(term))
+	rt.bloom.Add(fp64(term))
 }
 
 // open finalizes the routing state over the just-closed run file at path:
@@ -203,6 +162,28 @@ func (rt *runRouting) open(path string, payloadLen int64) (*sealedRun, error) {
 		terms:  rt.fb.records,
 		file:   f,
 	}, nil
+}
+
+// openDurable is the seal's and the merge's shared post-Commit epilogue: the
+// fsyncDir dirent barrier first — the hand-back's next stop is the manifest
+// write that names the run (see HotIndex.fsyncDir) — then the open handle for
+// lookups. Either failure unlinks the committed artifact rather than
+// stranding it until the next warmup's orphan sweep, and neither leaves a
+// handle open, so an error carries no resources (sealResult contract).
+// Warmup opens through rt.open instead: those files are already durable.
+func (rt *runRouting) openDurable(
+	path string, payloadLen int64, fsyncDir func(string) error,
+) (*sealedRun, error) {
+	if err := fsyncDir(filepath.Dir(path)); err != nil {
+		_ = os.Remove(path)
+		return nil, err
+	}
+	run, err := rt.open(path, payloadLen)
+	if err != nil {
+		_ = os.Remove(path)
+		return nil, err
+	}
+	return run, nil
 }
 
 // fenceBuilder accumulates a run's fence array under two caps: fenceEvery
@@ -257,9 +238,10 @@ func (fb *fenceBuilder) finish(payloadLen int64) []fence {
 }
 
 // sealWindow folds window rows into one run file, building its in-RAM
-// routing state in the same pass as the write. Runs on the background
-// goroutine over immutable inputs.
-func sealWindow(rows []windowRow, path string) (*sealedRun, error) {
+// routing state in the same pass as the write, and hands back through
+// openDurable — so the run's dirent is durable before the caller ever sees
+// it. Runs on the background goroutine over immutable inputs.
+func sealWindow(rows []windowRow, path string, fsyncDir func(string) error) (*sealedRun, error) {
 	window := make(map[TermKey][]uint32, 1<<15)
 	for i := range rows {
 		if err := DecodePackedRow(rows[i].bytes, func(term TermKey, ids []uint32) {
@@ -273,12 +255,7 @@ func sealWindow(rows []windowRow, path string) (*sealedRun, error) {
 	if err != nil {
 		return nil, err
 	}
-	run, err := rt.open(path, payloadLen)
-	if err != nil {
-		_ = os.Remove(path)
-		return nil, err
-	}
-	return run, nil
+	return rt.openDurable(path, payloadLen, fsyncDir)
 }
 
 // writeSortedRun streams a folded (term → ids) window to path as one
@@ -299,7 +276,7 @@ func writeSortedRun(
 	if err != nil {
 		return 0, err
 	}
-	defer rw.Discard()
+	defer rw.Close()
 	for _, t := range terms {
 		if observe != nil {
 			observe(t, rw.Written())
@@ -312,11 +289,14 @@ func writeSortedRun(
 }
 
 // mergeSealedRuns merges live runs into one new run file (union semantics —
-// runspill.MergeRuns), returning it plus the now-obsolete inputs. Routing
+// runspill.MergeRuns), returning it plus the now-obsolete inputs; like
+// sealWindow it hands back through openDurable's dirent barrier. Routing
 // state is built as records stream out — no post-write re-read, no whole-run
 // fingerprint accumulation (the old fps slice was the merge window's largest
 // RSS transient).
-func mergeSealedRuns(runs []*sealedRun, path string) (*sealedRun, []*sealedRun, error) {
+func mergeSealedRuns(
+	runs []*sealedRun, path string, fsyncDir func(string) error,
+) (*sealedRun, []*sealedRun, error) {
 	paths := make([]string, len(runs))
 	expected := 0
 	for i, r := range runs {
@@ -331,7 +311,7 @@ func mergeSealedRuns(runs []*sealedRun, path string) (*sealedRun, []*sealedRun, 
 	if err != nil {
 		return nil, nil, err
 	}
-	defer rw.Discard()
+	defer rw.Close()
 	emit := func(rawTerm [16]byte, ids []uint32) error {
 		term := TermKey(rawTerm)
 		rt.observe(term, rw.Written())
@@ -344,11 +324,8 @@ func mergeSealedRuns(runs []*sealedRun, path string) (*sealedRun, []*sealedRun, 
 	if err := rw.Commit(); err != nil {
 		return nil, nil, err
 	}
-	merged, err := rt.open(path, payloadLen)
+	merged, err := rt.openDurable(path, payloadLen, fsyncDir)
 	if err != nil {
-		// Committed but unopenable: discard the artifact rather than strand
-		// it until the next warmup's orphan sweep.
-		_ = os.Remove(path)
 		return nil, nil, err
 	}
 	return merged, runs, nil
@@ -391,7 +368,7 @@ func openSealedRun(path string) (*sealedRun, error) {
 // lookup probes the run for one term: bloom reject → fence window → pread →
 // linear decode with full-term verification. Concurrent-safe (ReadAt).
 func (r *sealedRun) lookup(term TermKey) ([]uint32, error) {
-	if !r.bloom.mayContain(fp64(term)) {
+	if !r.bloom.MayContain(fp64(term)) {
 		return nil, nil
 	}
 	// Last fence with fence.term <= term (fences[0].off == 0 always).
@@ -428,6 +405,11 @@ func (r *sealedRun) close() {
 	}
 }
 
+// runset.Run adapters: the publish protocol addresses a sealed run only by
+// path and disposal.
+func (r *sealedRun) RunPath() string { return r.path }
+func (r *sealedRun) CloseRun()       { r.close() }
+
 // ─────────────────────────── warmup ───────────────────────────
 
 // OpenHotIndex rebuilds the engine from its manifest after a restart: every
@@ -437,7 +419,7 @@ func (r *sealedRun) close() {
 // (ledgers past the sealed frontier) through ApplyLedger. The dense overlay
 // starts empty and self-heals: a firehose term re-promotes on its first
 // ledger, backfilling its history from window+runs.
-func OpenHotIndex(dir string, manifest manifestStore) (*HotIndex, uint32, error) {
+func OpenHotIndex(dir string, manifest runset.Manifest) (*HotIndex, uint32, error) {
 	h, err := NewHotIndex(dir, manifest)
 	if err != nil {
 		return nil, 0, err
@@ -446,7 +428,6 @@ func OpenHotIndex(dir string, manifest manifestStore) (*HotIndex, uint32, error)
 	if err != nil {
 		return nil, 0, fmt.Errorf("events: hotindex manifest read: %w", err)
 	}
-	referenced := make(map[string]bool, len(names))
 	runs := make([]*sealedRun, 0, len(names))
 	// Cleanup is exit-invariant: any return before the caller takes ownership
 	// releases every run opened so far, however the open failed.
@@ -457,38 +438,18 @@ func OpenHotIndex(dir string, manifest manifestStore) (*HotIndex, uint32, error)
 		}
 	}()
 	for _, name := range names {
-		referenced[name] = true
 		r, oerr := openSealedRun(filepath.Join(dir, name))
 		if oerr != nil {
 			return nil, 0, fmt.Errorf("events: hotindex: manifest run %s: %w", name, oerr)
 		}
 		runs = append(runs, r)
 	}
-	// Orphan sweep: files present but unreferenced are garbage by definition
-	// (crash between rename and manifest, or between manifest and delete).
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+	if err := runset.SweepOrphans(dir, names); err != nil {
 		return nil, 0, err
 	}
-	for _, e := range entries {
-		if !e.IsDir() && !referenced[e.Name()] {
-			_ = os.Remove(filepath.Join(dir, e.Name()))
-		}
-	}
 	h.view.Store(&hotIndexView{runs: runs})
-	// Resume the name sequence past every live run so a future seal can never
-	// overwrite one (numeric suffixes are monotone within each prefix).
-	maxSeq := 0
-	for _, name := range names {
-		var n int
-		if _, serr := fmt.Sscanf(name, "seal-%06d.run", &n); serr == nil && n > maxSeq {
-			maxSeq = n
-		}
-		if _, serr := fmt.Sscanf(name, "merge-%06d.run", &n); serr == nil && n > maxSeq {
-			maxSeq = n
-		}
-	}
-	h.sealSeq = maxSeq + 1
+	// Both run-name prefixes this engine writes (startSeal).
+	h.sealSeq = runset.NextSealSeq(names, "seal", "merge")
 	opened = true
 	return h, lastSealed, nil
 }

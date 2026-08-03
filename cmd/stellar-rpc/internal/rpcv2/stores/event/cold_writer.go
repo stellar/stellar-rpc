@@ -11,7 +11,7 @@ package event
 //
 // ColdWriter is intentionally thin: it owns no closed-state of its
 // own. Lifecycle, idempotency of Close, removal of the partial file
-// on abort, and rejection of Append / Finish after the writer is
+// on abort, and rejection of Append / Commit after the writer is
 // done all delegate to packfile.Writer (see packfile/writer.go).
 
 import (
@@ -32,22 +32,22 @@ import (
 // serialized as packfile app data so the cold reader can resolve
 // ledger→eventID ranges without a second file.
 //
-// ColdWriter.Finish takes the LedgerOffsets externally rather than
+// ColdWriter.Commit takes the LedgerOffsets externally rather than
 // inferring boundaries from the payload stream. This honestly
 // represents the contract: the caller knows ledger boundaries
 // (including any empty ledgers that produce no Append calls) and
 // supplies them at finalization. Both consumers fit this naturally:
 //
 //   - Freeze: hot.Offsets() already has entries for every ledger
-//     in the Chunk, including empty ones. Hand it to Finish.
+//     in the Chunk, including empty ones. Hand it to Commit.
 //   - Backfill: maintains a *LedgerOffsets incrementally as it
-//     processes LCMs. Hand it to Finish.
+//     processes LCMs. Hand it to Commit.
 //
 // ColdWriter doesn't produce the index files (index.pack +
 // index.hash). Those come from WriteColdIndex below.
 //
 // Concurrency: ColdWriter is not safe for concurrent use. Append,
-// Finish, and Close must be called from a single goroutine (or with
+// Commit, and Close must be called from a single goroutine (or with
 // external synchronization). The underlying packfile.Writer has its
 // own internal worker pool for compression, but the writer's
 // public API is single-producer.
@@ -69,7 +69,7 @@ type ColdWriterOptions struct {
 	Concurrency int
 
 	// BytesPerSync triggers background fdatasync every N bytes during
-	// the write so the final Finish doesn't flush all dirty pages at
+	// the write so the final Commit doesn't flush all dirty pages at
 	// once. Zero disables (single final fdatasync). On networked
 	// storage (EBS) a 1 MB cadence (1<<20) cuts the final-flush
 	// latency dramatically; on NVMe the win is smaller but still
@@ -81,7 +81,7 @@ type ColdWriterOptions struct {
 // bucketDir must already exist — like the sibling stores, directory
 // creation belongs to the ingest layer. The filename is
 // {chunkID:08d}-events.pack per the backfill design doc. The returned
-// ColdWriter must be closed via either Finish (on success) or Close
+// ColdWriter must be closed via either Commit (on success) or Close
 // (on abort) — leaving a ColdWriter open leaks the underlying
 // packfile.Writer's worker goroutines.
 //
@@ -110,7 +110,7 @@ func NewColdWriter(chunkID chunk.ID, bucketDir string, opts ColdWriterOptions) (
 // order — packfile records this as item position 0, 1, 2, ... and
 // the cold reader reads them back the same way.
 //
-// Returns packfile.ErrWriterClosed if called after Finish or Close.
+// Returns packfile.ErrWriterClosed if called after Commit or Close.
 func (w *ColdWriter) Append(p Payload) error {
 	// Marshal into a reusable scratch buffer. AppendItem copies the bytes
 	// into the packfile's record buffer synchronously, so the scratch is
@@ -132,13 +132,15 @@ func (w *ColdWriter) AppendMarshaled(b []byte) error {
 	return w.pw.AppendItem(b)
 }
 
-// Finish serializes offsets as packfile app data and finalizes
-// events.pack. After Finish returns nil, the file is fsync'd and
-// safe to fence with an atomic durability flag.
+// Commit serializes offsets as packfile app data and finalizes
+// events.pack — the publication half of the two-phase writer pair the
+// domain writers share (runspill.RunWriter carries the pattern doc).
+// After Commit returns nil, the file is fsync'd and safe to fence with
+// an atomic durability flag.
 //
-// Finish must not be called more than once. A second call (or a
+// Commit must not be called more than once. A second call (or a
 // call after Close) returns packfile.ErrWriterClosed.
-func (w *ColdWriter) Finish(offsets *LedgerOffsets) error {
+func (w *ColdWriter) Commit(offsets *LedgerOffsets) error {
 	appData, err := encodeLedgerOffsets(offsets)
 	if err != nil {
 		return fmt.Errorf("events: encode offsets: %w", err)
@@ -147,8 +149,8 @@ func (w *ColdWriter) Finish(offsets *LedgerOffsets) error {
 }
 
 // Close aborts the ColdWriter, releasing the underlying
-// packfile.Writer's resources. If Finish has succeeded, Close is a
-// no-op (the file remains as a valid packfile). If Finish has not
+// packfile.Writer's resources. If Commit has succeeded, Close is a
+// no-op (the file remains as a valid packfile). If Commit has not
 // succeeded, Close removes the partial events.pack file. Idempotent;
 // safe to call from defer paths.
 func (w *ColdWriter) Close() error {
