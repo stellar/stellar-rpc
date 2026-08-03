@@ -55,7 +55,7 @@ var coldPackDecoder = zstd.NewDecompressor()
 // before invoking it, matching the underlying packfile.Reader.Close
 // contract.
 type ColdReader struct {
-	r    *packfile.Reader
+	r    *stores.PackReader
 	path string
 	init func() (coldHeader, error)
 }
@@ -77,15 +77,10 @@ func OpenColdReader(path string) (*ColdReader, error) {
 		return nil, stores.ErrInvalidConfig
 	}
 	c := &ColdReader{
-		r:    packfile.Open(path, packfile.ReaderOptions{RecordDecoder: coldPackDecoder}),
+		r:    stores.OpenPack(path, packfile.ReaderOptions{RecordDecoder: coldPackDecoder}),
 		path: path,
 	}
-	// Every error loadHeader can produce reaches callers through init, so the
-	// L2 translation belongs here rather than at each of its return points.
-	c.init = sync.OnceValues(func() (coldHeader, error) {
-		h, err := c.loadHeader()
-		return h, stores.TranslatePackErr(err)
-	})
+	c.init = sync.OnceValues(c.loadHeader)
 	return c, nil
 }
 
@@ -148,7 +143,7 @@ func (c *ColdReader) WithLedger(seq uint32, fn func(raw []byte) error) error {
 	case fnErr != nil:
 		return fnErr
 	case rerr != nil:
-		return stores.TranslatePackErr(rerr)
+		return rerr
 	}
 	return nil
 }
@@ -183,7 +178,7 @@ func (c *ColdReader) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 		seq := start
 		for item, err := range c.r.ReadRange(startPos, count) {
 			if err != nil {
-				yield(Entry{}, stores.TranslatePackErr(err))
+				yield(Entry{}, err)
 				return
 			}
 			// Entry.Bytes is the packfile's: valid only until the loop body
@@ -196,8 +191,4 @@ func (c *ColdReader) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 	}
 }
 
-func (c *ColdReader) Close() error {
-	// Close waits for the background open, so it can be the first place an
-	// open-time failure surfaces on a reader that was never read.
-	return stores.TranslatePackErr(c.r.Close())
-}
+func (c *ColdReader) Close() error { return c.r.Close() }

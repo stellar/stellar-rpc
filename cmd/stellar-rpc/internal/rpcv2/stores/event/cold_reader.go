@@ -73,8 +73,8 @@ import (
 type ColdReader struct {
 	chunkID chunk.ID
 
-	events *packfile.Reader // opened in the background by packfile.Open; reads await it
-	index  *packfile.Reader // opened in the background by packfile.Open; reads await it
+	events *stores.PackReader // opened in the background by packfile.Open; reads await it
+	index  *stores.PackReader // opened in the background by packfile.Open; reads await it
 
 	// waitMeta returns the events.pack metadata (count + offsets),
 	// decoded on first call from the events.pack trailer + AppData.
@@ -143,11 +143,11 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 
 	c := &ColdReader{
 		chunkID: chunkID,
-		events: packfile.Open(eventsPath, packfile.ReaderOptions{
+		events: stores.OpenPack(eventsPath, packfile.ReaderOptions{
 			RecordDecoder: eventsPackDecoder,
 			Concurrency:   opts.Concurrency,
 		}),
-		index: packfile.Open(indexPackPath, packfile.ReaderOptions{
+		index: stores.OpenPack(indexPackPath, packfile.ReaderOptions{
 			Concurrency: opts.Concurrency,
 		}),
 	}
@@ -199,7 +199,7 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		// empty-index check above).
 		tr, terr := c.index.Trailer()
 		if terr != nil {
-			return fmt.Errorf("events: open %s: %w", indexPackPath, stores.TranslatePackErr(terr))
+			return fmt.Errorf("events: open %s: %w", indexPackPath, terr)
 		}
 		if tr.Format != indexPackFormat {
 			return fmt.Errorf("events: %s: expected format %#x, got %#x (mis-pointed or foreign pack)",
@@ -264,13 +264,11 @@ func (c *ColdReader) Close() error {
 			first = fmt.Errorf("events: close index.hash: %w", err)
 		}
 	}
-	// Close waits for each background open, so it can be the first place an
-	// open-time failure surfaces on a reader that was never read.
 	if err := c.index.Close(); err != nil && first == nil {
-		first = fmt.Errorf("events: close index.pack: %w", stores.TranslatePackErr(err))
+		first = fmt.Errorf("events: close index.pack: %w", err)
 	}
 	if err := c.events.Close(); err != nil && first == nil {
-		first = fmt.Errorf("events: close events.pack: %w", stores.TranslatePackErr(err))
+		first = fmt.Errorf("events: close events.pack: %w", err)
 	}
 	return first
 }
@@ -426,7 +424,7 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring
 		}
 		return nil
 	}); err != nil {
-		return nil, fmt.Errorf("events: LookupKeys read for chunk %s: %w", c.chunkID, stores.TranslatePackErr(err))
+		return nil, fmt.Errorf("events: LookupKeys read for chunk %s: %w", c.chunkID, err)
 	}
 
 	return results, nil
@@ -480,7 +478,7 @@ func (c *ColdReader) FetchEvents(ctx context.Context, eventIDs []uint32) ([]Payl
 		if errors.Is(err, packfile.ErrPositionsUnsorted) {
 			return nil, fmt.Errorf("%w: %w", ErrUnsortedEventIDs, err)
 		}
-		return nil, fmt.Errorf("events: fetch from chunk %s: %w", c.chunkID, stores.TranslatePackErr(err))
+		return nil, fmt.Errorf("events: fetch from chunk %s: %w", c.chunkID, err)
 	}
 	return results, nil
 }
@@ -523,7 +521,7 @@ func (c *ColdReader) FetchRange(ctx context.Context, start, count uint32) iter.S
 		// decode each on the fly.
 		for raw, err := range c.events.ReadRange(int(start), int(count)) {
 			if err != nil {
-				yield(Payload{}, fmt.Errorf("events: scan chunk %s: %w", c.chunkID, stores.TranslatePackErr(err)))
+				yield(Payload{}, fmt.Errorf("events: scan chunk %s: %w", c.chunkID, err))
 				return
 			}
 			if err := ctx.Err(); err != nil {
@@ -578,7 +576,7 @@ func (c *ColdReader) All(ctx context.Context) iter.Seq2[Payload, error] {
 func (c *ColdReader) loadMeta(eventsPath string) (coldMeta, error) {
 	tr, err := c.events.Trailer()
 	if err != nil {
-		return coldMeta{}, fmt.Errorf("events: open %s: %w", eventsPath, stores.TranslatePackErr(err))
+		return coldMeta{}, fmt.Errorf("events: open %s: %w", eventsPath, err)
 	}
 	// Check the trailer's Format before touching any record: a
 	// mis-pointed pack fails at open, not mid-query with an opaque
@@ -590,7 +588,7 @@ func (c *ColdReader) loadMeta(eventsPath string) (coldMeta, error) {
 	total := tr.TotalItems
 	appData, err := c.events.AppData()
 	if err != nil {
-		return coldMeta{}, fmt.Errorf("events: read app data from %s: %w", eventsPath, stores.TranslatePackErr(err))
+		return coldMeta{}, fmt.Errorf("events: read app data from %s: %w", eventsPath, err)
 	}
 	offsets, err := DecodeLedgerOffsets(appData)
 	if err != nil {
