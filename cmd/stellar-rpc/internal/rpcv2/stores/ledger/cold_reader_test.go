@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -307,4 +308,42 @@ func TestColdReader_SharedDecompressorAcrossPacks(t *testing.T) {
 	got, err := cB.GetLedgerRaw(9_002)
 	require.NoError(t, err)
 	assert.Equal(t, rawB[2], got)
+}
+
+// TestColdReader_CorruptAppDataIsCorrupt covers the metadata-open path, which
+// reaches the packfile through Trailer/AppData rather than a record read. Its
+// errors have to carry the same sentinel: a caller distinguishing corruption
+// from a missing file cannot be asked to know which of a reader's internals
+// happened to fail.
+func TestColdReader_CorruptAppDataIsCorrupt(t *testing.T) {
+	path, _ := writeFixturePack(t, 100, 8)
+
+	// App data sits immediately before the 76-byte trailer; the reader now
+	// covers it with a CRC32C, so one flipped bit must fail the open.
+	b, err := os.ReadFile(path)
+	require.NoError(t, err)
+	const trailerSize = 76
+	b[len(b)-trailerSize-1] ^= 0x01
+	require.NoError(t, os.WriteFile(path, b, 0o600))
+
+	for _, tc := range []struct {
+		name string
+		call func(c *ColdReader) error
+	}{
+		{"LastSeq", func(c *ColdReader) error { _, err := c.LastSeq(); return err }},
+		{"GetLedgerRaw", func(c *ColdReader) error { _, err := c.GetLedgerRaw(100); return err }},
+		{"IterateLedgers", func(c *ColdReader) error {
+			for _, err := range c.IterateLedgers(100, 101) {
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestColdReader(t, path)
+			require.ErrorIs(t, tc.call(c), stores.ErrCorrupt)
+		})
+	}
 }

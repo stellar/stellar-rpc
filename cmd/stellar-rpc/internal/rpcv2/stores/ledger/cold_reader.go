@@ -2,11 +2,9 @@ package ledger
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"iter"
 	"math"
-	"os"
 	"sync"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
@@ -66,7 +64,12 @@ func OpenColdReader(path string) (*ColdReader, error) {
 		r:    packfile.Open(path, packfile.ReaderOptions{RecordDecoder: coldPackDecoder}),
 		path: path,
 	}
-	c.init = sync.OnceValues(c.loadHeader)
+	// Every error loadHeader can produce reaches callers through init, so the
+	// L2 translation belongs here rather than at each of its return points.
+	c.init = sync.OnceValues(func() (coldHeader, error) {
+		h, err := c.loadHeader()
+		return h, stores.TranslatePackErr(err)
+	})
 	return c, nil
 }
 
@@ -125,7 +128,7 @@ func (c *ColdReader) GetLedgerRaw(seq uint32) ([]byte, error) {
 		return nil
 	})
 	if rerr != nil {
-		return nil, translateReaderErr(rerr)
+		return nil, stores.TranslatePackErr(rerr)
 	}
 	return out, nil
 }
@@ -160,7 +163,7 @@ func (c *ColdReader) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 		seq := start
 		for item, err := range c.r.ReadRange(startPos, count) {
 			if err != nil {
-				yield(Entry{}, translateReaderErr(err))
+				yield(Entry{}, stores.TranslatePackErr(err))
 				return
 			}
 			// Entry.Bytes is BORROWED from packfile and valid only until the
@@ -176,15 +179,3 @@ func (c *ColdReader) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 }
 
 func (c *ColdReader) Close() error { return c.r.Close() }
-
-// translateReaderErr maps packfile- and os-level errors to the
-// stores sentinels.
-func translateReaderErr(err error) error {
-	if errors.Is(err, os.ErrClosed) {
-		return stores.ErrStoreClosed
-	}
-	if errors.Is(err, packfile.ErrCorrupt) {
-		return fmt.Errorf("%w: %w", stores.ErrCorrupt, err)
-	}
-	return err
-}
