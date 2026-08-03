@@ -877,3 +877,26 @@ func TestColdReader_CorruptIndexOffsetsIsCorrupt(t *testing.T) {
 	_, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
 	require.ErrorIs(t, err, stores.ErrCorrupt)
 }
+
+// TestColdReader_CloseOnlySurfacesCorrupt covers the reader that is opened and
+// closed without a read. Close waits for the background open, so it is the
+// first and only place the corruption can surface, and it owes callers the
+// same sentinel every other method gives them.
+func TestColdReader_CloseOnlySurfacesCorrupt(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, _ := buildColdFixture(t, chunkID, 4, 1)
+
+	indexPath := filepath.Join(dir, IndexPackName(chunkID))
+	b, err := os.ReadFile(indexPath)
+	require.NoError(t, err)
+	pr := packfile.Open(indexPath, packfile.ReaderOptions{})
+	t.Cleanup(func() { _ = pr.Close() })
+	tr, err := pr.Trailer()
+	require.NoError(t, err)
+	require.Positive(t, tr.IndexSize)
+	flipByteAt(t, indexPath, len(b)-76-int(tr.IndexSize))
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	require.ErrorIs(t, cr.Close(), stores.ErrCorrupt)
+}

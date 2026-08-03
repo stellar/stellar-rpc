@@ -196,4 +196,8 @@ func (c *ColdReader) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 	}
 }
 
-func (c *ColdReader) Close() error { return c.r.Close() }
+func (c *ColdReader) Close() error {
+	// Close waits for the background open, so it can be the first place an
+	// open-time failure surfaces on a reader that was never read.
+	return stores.TranslatePackErr(c.r.Close())
+}
