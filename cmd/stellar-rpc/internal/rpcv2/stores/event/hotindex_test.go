@@ -1,15 +1,33 @@
 package event
 
 import (
+	"bytes"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// runsFromMap converts a per-term map to the termRuns view ApplyLedger
+// takes, in the byte-sorted term order AppendPackedRow emits.
+func runsFromMap(per map[TermKey][]uint32) termRuns {
+	terms := make([]TermKey, 0, len(per))
+	for k := range per {
+		terms = append(terms, k)
+	}
+	slices.SortFunc(terms, func(a, b TermKey) int { return bytes.Compare(a[:], b[:]) })
+	var runs termRuns
+	runs.reset()
+	for _, k := range terms {
+		runs.addRun(k, per[k])
+	}
+	return runs
+}
 
 // fakeManifest is an in-memory manifestStore.
 type fakeManifest struct {
@@ -68,7 +86,7 @@ func (hh *hotIndexHarness) ledger(fire TermKey, mids []TermKey, eventsN int) {
 		per[single] = append(per[single], id)
 	}
 	row := AppendPackedRow(nil, per)
-	require.NoError(hh.t, hh.h.ApplyLedger(hh.seq, row, per))
+	require.NoError(hh.t, hh.h.ApplyLedger(hh.seq, row, runsFromMap(per)))
 	for k, ids := range per {
 		hh.ref[k] = append(hh.ref[k], ids...)
 	}
@@ -171,7 +189,7 @@ func TestHotIndex_WarmupRebuild(t *testing.T) {
 	h2.sealEvery, h2.maxRuns = 8, 3
 	for i, row := range tailRows {
 		seq := lastSealed + 1 + uint32(i)
-		require.NoError(t, h2.ApplyLedger(seq, row, tailPer[i]))
+		require.NoError(t, h2.ApplyLedger(seq, row, runsFromMap(tailPer[i])))
 	}
 	h2.ArmSealing() // production order: replay disarmed, verify, then arm
 	hh.h = h2

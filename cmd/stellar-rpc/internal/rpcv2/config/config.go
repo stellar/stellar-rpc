@@ -15,6 +15,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 )
 
 // Config is the on-disk --config TOML schema for the full-history daemon (design
@@ -217,8 +218,8 @@ type RetentionConfig struct {
 
 // StorageConfig is [storage]: the data root plus one optional path per on-disk
 // tree (consolidating what were the separate [catalog] / [immutable_storage.*] /
-// [streaming.hot_storage] sections). An empty per-store value defaults under
-// default_data_dir.
+// [streaming.hot_storage] sections), plus the stored-format settings of those
+// trees. An empty per-store value defaults under default_data_dir.
 type StorageConfig struct {
 	// Base dir for the catalog and default storage paths. Required.
 	// (Moved here from [service] in #882 — it governs storage placement.)
@@ -230,6 +231,21 @@ type StorageConfig struct {
 	TxhashRaw   string `toml:"txhash_raw"`   // transient txhash .bin root
 	TxhashIndex string `toml:"txhash_index"` // frozen txhash .idx root
 	Hot         string `toml:"hot"`          // per-chunk hot RocksDB root
+
+	// ZstdEncodeWorkers is the ledger-frame zstd encode parallelism: 0 =
+	// single-threaded, >=1 = libzstd's internal multithreading (>= 1 requires
+	// a ZSTD_MULTITHREAD libzstd build). Default
+	// ledger.DefaultZstdEncodeWorkers (2).
+	//
+	// FORMAT-AFFECTING, not a casual performance knob: single- and
+	// multi-threaded encodes produce different frame bytes for the SAME
+	// ledger, the freeze copies hot frames into the cold pack verbatim, and
+	// walk/backfill re-encodes independently — this one value feeds both
+	// encoders (hotchunk.Tuning and the backfill cold writer) precisely so
+	// they agree and a chunk's pack stays byte-identical whichever
+	// materializer built it. Change it only as a deliberate, deployment-wide
+	// decision.
+	ZstdEncodeWorkers *int `toml:"zstd_encode_workers"`
 }
 
 // BackfillConfig is [backfill] plus the nested [backfill.datastore] and [backfill.bsb].
@@ -558,6 +574,10 @@ func (cfg Config) WithDefaults() Config {
 	if cfg.Backfill.Workers == nil {
 		v := backfill.DefaultWorkers()
 		cfg.Backfill.Workers = &v
+	}
+	if cfg.Storage.ZstdEncodeWorkers == nil {
+		v := ledger.DefaultZstdEncodeWorkers
+		cfg.Storage.ZstdEncodeWorkers = &v
 	}
 	if cfg.Backfill.MaxRetries == nil {
 		v := DefaultMaxRetries

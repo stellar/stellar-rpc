@@ -58,7 +58,7 @@ func seedEventChunks(
 	r := NewRegistry(cat, geometry.NewRetention(0, earliest))
 	dbs := make(map[chunk.ID]*hotchunk.DB, len(specs))
 	for _, s := range specs {
-		db, err := hotchunk.Open(cat.Layout().HotChunkPath(s.c), s.c, silentLogger())
+		db, err := hotchunk.Open(cat.Layout().HotChunkPath(s.c), s.c, silentLogger(), hotchunk.DefaultTuning())
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = db.Close() })
 		for i, evs := range s.ledgers {

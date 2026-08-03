@@ -10,13 +10,18 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/zstd"
 )
 
-// newColdPackEncoder constructs a fresh zstd encoder for one
-// packfile writer goroutine. packfile.RecordEncoder is not safe for
-// concurrent use, so the writer invokes this per worker.
-func newColdPackEncoder() packfile.RecordEncoder { return zstd.NewCompressor() }
+// newColdPackEncoder constructs a fresh zstd encoder (with the
+// FORMAT-AFFECTING workers setting applied) for one packfile writer
+// goroutine. packfile.RecordEncoder is not safe for concurrent use, so the
+// writer invokes this per worker.
+func newColdPackEncoder(zstdWorkers int) func() packfile.RecordEncoder {
+	return func() packfile.RecordEncoder {
+		return zstd.NewCompressor(encoderOptions(zstdWorkers)...)
+	}
+}
 
 // ColdWriterOptions configures the underlying packfile writer.
-// The zero value is a sensible default (serial encoding, no
+// The zero value is a sensible default (serial single-threaded encoding, no
 // background writeback).
 type ColdWriterOptions struct {
 	// Concurrency sets parallel record-encoder workers. 0 means 1
@@ -24,6 +29,15 @@ type ColdWriterOptions struct {
 	// CPU-bound; pick a value <= NumCPU. Ignored in PreCompressed
 	// mode (there is no encoder to parallelize).
 	Concurrency int
+
+	// ZstdEncodeWorkers is the per-frame libzstd multithreading setting
+	// (0 = single-threaded; see zstd.WithWorkers). FORMAT-AFFECTING: it
+	// selects the frame byte stream, and a chunk pack must be
+	// byte-identical whichever materializer built it — the freeze copies
+	// hot frames verbatim, so a raw-mode (walk/backfill) writer MUST pass
+	// the same value the hot tier encodes with (hotchunk.Tuning's field
+	// doc owns the contract). Ignored in PreCompressed mode.
+	ZstdEncodeWorkers int
 
 	// BytesPerSync triggers background dirty-page writeback every
 	// N bytes (Linux: sync_file_range, non-blocking). Spreads I/O
@@ -74,12 +88,14 @@ func NewColdWriter(path string, firstSeq uint32, opts ColdWriterOptions) (*ColdW
 	if path == "" {
 		return nil, stores.ErrInvalidConfig
 	}
-	if opts.Concurrency < 0 || opts.BytesPerSync < 0 {
-		return nil, fmt.Errorf("%w: Concurrency and BytesPerSync must be non-negative", stores.ErrInvalidConfig)
+	if opts.Concurrency < 0 || opts.BytesPerSync < 0 || opts.ZstdEncodeWorkers < 0 {
+		return nil, fmt.Errorf(
+			"%w: Concurrency, BytesPerSync, and ZstdEncodeWorkers must be non-negative", stores.ErrInvalidConfig)
 	}
 	// PreCompressed appends final on-disk bytes, so the record encoder is
-	// nil (packfile passthrough); raw mode compresses per record.
-	newEncoder := newColdPackEncoder
+	// nil (packfile passthrough); raw mode compresses per record with the
+	// format-affecting workers setting.
+	newEncoder := newColdPackEncoder(opts.ZstdEncodeWorkers)
 	if opts.PreCompressed {
 		newEncoder = nil
 	}

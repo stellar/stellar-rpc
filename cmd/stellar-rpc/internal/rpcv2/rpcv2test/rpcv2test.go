@@ -76,7 +76,7 @@ func SeedHotChunkLCMs(
 	t *testing.T, cat *catalog.Catalog, c chunk.ID, publish func(*hotchunk.DB), lcms ...[]byte,
 ) {
 	t.Helper()
-	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, SilentLogger())
+	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, SilentLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	for i, raw := range lcms {

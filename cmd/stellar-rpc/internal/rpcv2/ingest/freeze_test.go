@@ -13,6 +13,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 )
 
 // TestFreezeColdChunk_ByteIdenticalToWalk is the composition half of the
@@ -42,7 +43,7 @@ func TestFreezeColdChunk_ByteIdenticalToWalk(t *testing.T) {
 	// Hot DB populated through the production ingest service (compression,
 	// extraction, and CF layout exactly as a live chunk's).
 	ctx := context.Background()
-	db, err := hotchunk.Open(t.TempDir(), chunkID, hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunkID, hotTestLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	svc := NewHotService(db, nil, nil)
@@ -51,9 +52,14 @@ func TestFreezeColdChunk_ByteIdenticalToWalk(t *testing.T) {
 		require.NoError(t, ierr)
 	}
 
+	// The walk half must encode ledger frames with the SAME workers value the
+	// hot DB above was opened with (DefaultTuning) — the setting is
+	// format-affecting and this test is the freeze-vs-walk identity arbiter.
 	cfgAll := Config{
 		Ledgers: true, Txhash: true, Events: true,
-		TxhashSecret: testTxhashSecretBytes(), EventsSecret: testEventsSecretBytes(),
+		ZstdEncodeWorkers: ledger.DefaultZstdEncodeWorkers,
+		TxhashSecret:      testTxhashSecretBytes(),
+		EventsSecret:      testEventsSecretBytes(),
 	}
 	dirsFor := func(root string) ColdDirs {
 		return ColdDirs{

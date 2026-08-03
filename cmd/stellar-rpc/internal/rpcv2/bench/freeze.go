@@ -15,6 +15,8 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 )
 
 // freezeOptions configures one freeze benchmark run.
@@ -126,7 +128,10 @@ func runFreeze(ctx context.Context, logger *supportlog.Entry, opts freezeOptions
 		Metrics: sink,
 		// Backend deliberately nil — see the function comment: the complete
 		// hot DB must be the source, or the run fails.
-		Process: backfill.ProcessConfig{Sink: sink},
+		// The default encode workers on BOTH halves (the populate below and this
+		// cold walk) — the format-affecting value must agree across them (see
+		// hotchunk.Tuning).
+		Process: backfill.ProcessConfig{Sink: sink, ZstdEncodeWorkers: ledger.DefaultZstdEncodeWorkers},
 		Workers: 1,
 		// Benchmarks measure one clean attempt; retries would fold failure +
 		// backoff time into the samples.
@@ -188,6 +193,7 @@ func populateHotChunk(
 		Logger:   logger,
 		Metrics:  setupSink,
 		Sink:     setupSink,
+		Tuning:   hotchunk.DefaultTuning(),
 	}); err != nil {
 		return fmt.Errorf("populate hot chunk %s: %w", opts.Chunk, err)
 	}

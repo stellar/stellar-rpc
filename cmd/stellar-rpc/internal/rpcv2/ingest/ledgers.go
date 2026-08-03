@@ -26,14 +26,18 @@ type ledgerCold struct {
 // caller's geometry.Layout.LedgerPackPath(chunkID), so the write path is Layout's
 // single derivation, not a second copy. The writer opts into the batch tuning
 // (coldEncoderConcurrency/coldBytesPerSync): WriteColdChunk, the sole production
-// caller, is always a batch freeze/backfill.
-func newLedgerCold(packPath string, chunkID chunk.ID, sink MetricSink) (*ledgerCold, error) {
+// caller, is always a batch freeze/backfill. zstdWorkers is the
+// FORMAT-AFFECTING frame encode setting (Config.ZstdEncodeWorkers) — it must
+// match the hot tier's so the walk-built pack is byte-identical to a
+// freeze-built one.
+func newLedgerCold(packPath string, chunkID chunk.ID, sink MetricSink, zstdWorkers int) (*ledgerCold, error) {
 	if err := os.MkdirAll(filepath.Dir(packPath), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(packPath), err)
 	}
 	w, err := ledger.NewColdWriter(packPath, chunkID.FirstLedger(), ledger.ColdWriterOptions{
-		Concurrency:  coldEncoderConcurrency,
-		BytesPerSync: coldBytesPerSync,
+		Concurrency:       coldEncoderConcurrency,
+		BytesPerSync:      coldBytesPerSync,
+		ZstdEncodeWorkers: zstdWorkers,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ledger.NewColdWriter %s: %w", packPath, err)

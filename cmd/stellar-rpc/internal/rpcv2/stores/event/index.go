@@ -119,6 +119,138 @@ const maxTermsPerEvent = 3 + protocol.MaxTopicCount
 // navigating the raw XDR via xdr.ContractEventView instead of a full
 // UnmarshalBinary: its type, its topic count, its contract ID when it
 // has one, and its topics 0..MaxTopicCount-1.
+// MaxTermsPerEvent is the most term keys one event can contribute to the
+// index: its type, its topic count, its contract ID, and topics
+// 0..protocol.MaxTopicCount-1 — the protocol bound on queryable topic
+// positions (topicField's panic guard pins the mapping to exactly that
+// range). Arena-owning callers size per-ledger scratch with it.
+const MaxTermsPerEvent = 3 + protocol.MaxTopicCount
+
+// AppendTerms appends a marshaled ContractEvent's term keys to dst and
+// returns the extended slice — TermsForBytes for arena callers: at most
+// MaxTermsPerEvent keys are appended, so a writer-owned dst reused across
+// events makes this path allocation-free (the hot ingest loop's shape).
+// Same accept/reject decisions and key bytes as TermsForBytes (the golden
+// sweep in append_terms_test.go pins the equivalence); only the topics walk
+// differs — see appendTopicTerms.
+func AppendTerms(dst []TermKey, eventBytes []byte) ([]TermKey, error) {
+	return appendTerms(dst, eventBytes, nil)
+}
+
+// appendTerms is AppendTerms' walk with one divergence: a non-nil lanes
+// DIVERTS the two closed-alphabet terms — the event's type and its
+// topic-count bucket — out of dst and into lanes as lane indices, hashing
+// neither (see termlanes.go). Both entry points share this body so the
+// accept/reject decisions the golden sweep pins cannot drift between them.
+func appendTerms(dst []TermKey, eventBytes []byte, lanes *eventLanes) ([]TermKey, error) {
+	ev := xdr.ContractEventView(eventBytes)
+
+	typeView, err := ev.Type()
+	if err != nil {
+		return nil, fmt.Errorf("events: view Type: %w", err)
+	}
+	// A type outside the enum is a hard indexing error — the alternative is
+	// indexing under a bucket no filter can name (see TermsForBytes).
+	eventType, err := typeView.Value()
+	if err != nil {
+		return nil, fmt.Errorf("events: view Type value: %w", err)
+	}
+	if lanes != nil {
+		lanes.eventType = eventTypeLane(eventType)
+	} else {
+		dst = append(dst, EventTypeTermKey(eventType))
+	}
+
+	cidOpt, err := ev.ContractId()
+	if err != nil {
+		return nil, fmt.Errorf("events: view ContractId: %w", err)
+	}
+	cidView, present, err := cidOpt.Unwrap()
+	if err != nil {
+		return nil, fmt.Errorf("events: view ContractId unwrap: %w", err)
+	}
+	if present {
+		cid, cerr := cidView.Value()
+		if cerr != nil {
+			return nil, fmt.Errorf("events: view ContractId value: %w", cerr)
+		}
+		dst = append(dst, ComputeTermKey(cid[:], FieldContractID))
+	}
+
+	body, err := ev.Body()
+	if err != nil {
+		return nil, fmt.Errorf("events: view ContractEvent.Body: %w", err)
+	}
+	bodyVVal, err := body.V()
+	if err != nil {
+		return nil, fmt.Errorf("events: view Body.V: %w", err)
+	}
+	// Only Body discriminant V=0 carries topics. A future body version is a
+	// hard error matching TermsForBytes (and the SQLite backend) — a silently
+	// contractID-only index would make topic queries miss real events with no
+	// signal.
+	if bodyVVal != 0 {
+		return nil, fmt.Errorf("events: unsupported ContractEvent body version %d", bodyVVal)
+	}
+	v0, err := body.V0()
+	if err != nil {
+		return nil, fmt.Errorf("events: view Body.V0: %w", err)
+	}
+	topics, err := v0.Topics()
+	if err != nil {
+		return nil, fmt.Errorf("events: view Body.V0.Topics: %w", err)
+	}
+	return appendTopicTerms(dst, topics, lanes)
+}
+
+// appendTopicTerms hashes the first protocol.MaxTopicCount topics into dst
+// via a manual Count()+Raw() walk — the allocation-free replacement for
+// TopicsView.All (which builds a per-event view slice). Correctness of the
+// walk rests on two view-API facts:
+//
+//   - Raw() sizes EVERY element of the vec — including ones past the
+//     indexing cap — and errors when the total extent overruns the buffer,
+//     so an event truncated anywhere inside its topics array is rejected
+//     exactly like All() rejected it.
+//   - At()/Iter() yield UNTRIMMED views (fat slices running to the end of
+//     the buffer); only exact-extent Raw() bytes may be hashed, or trailing
+//     bytes would fold into the term key.
+//
+// lanes carries appendTerms' divert through: a non-nil one takes the
+// topic-count term, never a topic term.
+func appendTopicTerms(
+	dst []TermKey, topics xdr.ContractEventV0TopicsView, lanes *eventLanes,
+) ([]TermKey, error) {
+	// Count() applies the checked count-vs-buffer guard All() applied, so a
+	// hostile count rejects here before any element walk.
+	count, err := topics.Count()
+	if err != nil {
+		return nil, fmt.Errorf("events: view Body.V0.Topics count: %w", err)
+	}
+	raw, err := topics.Raw()
+	if err != nil {
+		return nil, fmt.Errorf("events: view Body.V0.Topics raw: %w", err)
+	}
+	if lanes != nil {
+		lanes.topicCount = topicCountLane(int(count))
+	} else {
+		dst = append(dst, TopicCountTermKey(int(count)))
+	}
+	off := 4 // the vec's count header; raw is trimmed to the vec's exact extent
+	for i := range min(count, protocol.MaxTopicCount) {
+		topic, terr := xdr.ScValView(raw[off:]).Raw()
+		if terr != nil {
+			return nil, fmt.Errorf("events: view Body.V0.Topics[%d] raw: %w", i, terr)
+		}
+		dst = append(dst, ComputeTermKey(topic, topicField(i)))
+		off += len(topic)
+	}
+	return dst, nil
+}
+
+// TermsForBytes returns the term keys (contract ID + topics
+// 0..MaxTopicCount-1) for a marshaled ContractEvent, navigating the raw
+// XDR via xdr.ContractEventView instead of a full UnmarshalBinary.
 func TermsForBytes(eventBytes []byte) ([]TermKey, error) {
 	ev := xdr.ContractEventView(eventBytes)
 	keys := make([]TermKey, 0, maxTermsPerEvent)

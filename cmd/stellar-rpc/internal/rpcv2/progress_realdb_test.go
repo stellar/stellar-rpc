@@ -25,7 +25,7 @@ func seedLedgersCF(t *testing.T, cat *catalog.Catalog, c chunk.ID, entries ...le
 		Logger:         silentLogger(),
 	})
 	require.NoError(t, err)
-	h := ledger.NewWithStore(store)
+	h := ledger.NewWithStore(store, ledger.DefaultZstdEncodeWorkers)
 	require.NoError(t, store.Batch(func(b *rocksdb.BatchWriter) error {
 		for _, e := range entries {
 			if berr := h.AddLedgerToBatch(b, e); berr != nil {

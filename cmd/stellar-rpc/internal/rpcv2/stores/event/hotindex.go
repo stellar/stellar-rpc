@@ -193,9 +193,11 @@ func fp64(term TermKey) uint64 { return xxhash.Sum64(term[:]) }
 
 // ApplyLedger ingests one committed ledger's index state: rowBytes is the
 // SAME packed-row slice the commit batch carried (retained, not copied —
-// the caller must not reuse it), perKeyIDs the per-term grouping the write
-// path already built. Writer goroutine only.
-func (h *HotIndex) ApplyLedger(seq uint32, rowBytes []byte, perKeyIDs map[TermKey][]uint32) error {
+// the caller must not reuse it), runs the per-term view the write path
+// already built. runs is BORROWED — consumed synchronously, never retained
+// (the overlay copies every ID it keeps), so callers may back it with
+// reused arenas. Writer goroutine only.
+func (h *HotIndex) ApplyLedger(seq uint32, rowBytes []byte, runs termRuns) error {
 	// Fold any completed seal FIRST so its run becomes visible before the
 	// window trims past its ledgers on this call's publish.
 	if err := h.reapSeal(false); err != nil {
@@ -203,7 +205,12 @@ func (h *HotIndex) ApplyLedger(seq uint32, rowBytes []byte, perKeyIDs map[TermKe
 	}
 
 	// Dense admission + overlay feed: promoted terms get their IDs in RAM.
-	for term, ids := range perKeyIDs {
+	// Per-term decisions are independent, so iterating byte-sorted runs
+	// instead of the retired map changes nothing — the overlay-equivalence
+	// differential in termsort_test.go pins it.
+	for r := range runs.terms {
+		term := runs.terms[r]
+		ids := runs.run(r)
 		if h.overlay.Has(term) {
 			h.overlay.AddTo(term, ids...)
 		} else if len(ids) >= densePromoteWindowCount {
@@ -219,7 +226,7 @@ func (h *HotIndex) ApplyLedger(seq uint32, rowBytes []byte, perKeyIDs map[TermKe
 		}
 	}
 
-	row := buildWindowRow(rowBytes, len(perKeyIDs))
+	row := buildWindowRow(rowBytes, len(runs.terms))
 	row.seq = seq
 	old := h.view.Load()
 	rows := make([]windowRow, 0, len(old.rows)+1)
@@ -237,7 +244,7 @@ func (h *HotIndex) ApplyLedger(seq uint32, rowBytes []byte, perKeyIDs map[TermKe
 // buildWindowRow scans a packed row once, emitting the accel arrays. The row
 // is term-sorted, so fps comes out sorted (fp64 is not order-preserving, so
 // we sort the pair arrays — ~24k entries, microseconds). nTerms sizes the
-// scratch (the caller's perKeyIDs count is exact); this runs post-commit on
+// scratch (the caller's run count is exact); this runs post-commit on
 // the ingest goroutine, inside per-ledger latency.
 func buildWindowRow(rowBytes []byte, nTerms int) windowRow {
 	type pair struct {

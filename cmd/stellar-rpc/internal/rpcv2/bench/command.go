@@ -13,6 +13,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 )
 
 // NewCommand returns the `bench-ingest` command tree: `cold` benchmarks the
@@ -217,6 +218,7 @@ func newHotCommand() *cobra.Command {
 		catalogDir    string
 		closeInterval time.Duration
 		traceFile     string
+		zstdWorkers   int
 		prof          profileFlags
 	)
 	cmd := newBenchCommand("hot",
@@ -233,6 +235,7 @@ func newHotCommand() *cobra.Command {
 				CloseInterval: closeInterval,
 				OutDir:        outDir,
 				TraceFile:     traceFile,
+				ZstdWorkers:   zstdWorkers,
 			})
 		})
 	fs := cmd.Flags()
@@ -250,6 +253,9 @@ func newHotCommand() *cobra.Command {
 	fs.StringVar(&traceFile, "trace", "",
 		"per-ledger trace CSV path: one wall-clock-stamped row per ingested ledger "+
 			"with every phase duration (empty = off)")
+	fs.IntVar(&zstdWorkers, "zstd-workers", ledger.DefaultZstdEncodeWorkers,
+		"hot ledger-frame zstd encode workers (0 = single-threaded; format-affecting "+
+			"in production — see hotchunk.Tuning)")
 	markRequired(cmd, "start-chunk", "hot-dir")
 	return cmd
 }

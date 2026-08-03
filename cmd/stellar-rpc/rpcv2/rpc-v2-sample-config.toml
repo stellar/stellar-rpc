@@ -47,6 +47,14 @@ default_data_dir = "/var/stellar/rpc-v2"
 #txhash_index = ""   # {default_data_dir}/txhash/index    — frozen per-window .idx files
 #hot = ""            # {default_data_dir}/hot             — per-chunk hot RocksDB databases
 
+# Ledger-frame zstd encode parallelism: 0 = single-threaded, >= 1 uses libzstd's
+# internal multithreading (requires a ZSTD_MULTITHREAD build). FORMAT-AFFECTING,
+# not a casual performance knob: the same value feeds the hot encoder and the
+# walk/backfill cold writer so a chunk's pack stays byte-identical whichever
+# materializer built it — change it only as a deliberate, deployment-wide
+# decision. Default 2.
+#zstd_encode_workers = 2
+
 # -----------------------------------------------------------------------------
 # [retention] — how much history this daemon keeps
 # -----------------------------------------------------------------------------
