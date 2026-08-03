@@ -40,16 +40,16 @@ type eventsCold struct {
 	// identity end to end.
 	secret  [stores.SecretLen]byte
 	metrics coldMetrics
-	// failed latches any write error. A failed write can leave the mirror
-	// and the pack ahead of offsets (offsets is the per-ledger commit point,
-	// appended last), so a subsequent finalize would commit an index whose
-	// bitmaps reference event IDs past offsets.TotalEvents(). The latch makes
-	// finalize refuse instead — the chunk must be abandoned via close and
+	// failed latches any write error. A failed write can leave the spilled
+	// runs and the pack ahead of offsets (offsets is the per-ledger commit
+	// point, appended last), so a subsequent finalize would build an index
+	// whose bitmaps reference event IDs past offsets.TotalEvents(). The
+	// latch makes finalize refuse instead — the chunk must be abandoned via close and
 	// retried from scratch (see coldChunk's contract).
 	failed bool
 }
 
-// newEventsCold opens a per-chunk event.pack cold writer in bucketDir —
+// newEventsCold opens a per-chunk events.pack cold writer in bucketDir —
 // the caller's geometry.Layout.EventsBucketDir(chunkID), so the write path is
 // Layout's single derivation. The writer opts into the batch tuning
 // (coldEncoderConcurrency/coldBytesPerSync): WriteColdChunk, the sole
@@ -136,7 +136,7 @@ func newEventsFreeze(
 	}, nil
 }
 
-// finalize builds event.pack + index.pack + index.hash from the hot DB. One
+// finalize builds events.pack + index.pack + index.hash from the hot DB. One
 // ColdIngest sample covers the whole build (there are no per-ledger writes to
 // observe on this path).
 func (e *eventsFreeze) finalize(ctx context.Context) error {
@@ -172,8 +172,8 @@ func (e *eventsCold) write(seq uint32, closedAt int64, txParts []sdkingest.Ledge
 	return nil
 }
 
-// finalize writes the event.pack trailer (Finish) + materializes the cold
-// index (WriteColdIndex). An eventless chunk (zero terms — the common case
+// finalize writes the events.pack trailer (Finish) + materializes the cold
+// index from the spilled runs (WriteColdIndexFromRuns). An eventless chunk (zero terms — the common case
 // for pre-Soroban backfill ranges) is handled inside WriteColdIndex, which
 // publishes a valid empty index, so all three cold artifacts exist for every
 // finalized chunk. An error from either step means the chunk did not durably
@@ -199,7 +199,7 @@ func (e *eventsCold) finalize(ctx context.Context) error {
 		return err
 	}
 	if err := event.WriteColdIndexFromRuns(ctx, e.chunkID, runs, e.scratchDir, e.bucketDir, e.secret); err != nil {
-		// Finish already committed event.pack; the index-less pack is left
+		// Finish already committed events.pack; the index-less pack is left
 		// in place — without the orchestrator's completion record it is
 		// inert scratch (see the package doc's artifact model), and the
 		// retry's overwrite is the cleanup.
@@ -219,7 +219,7 @@ func (e *eventsCold) finalize(ctx context.Context) error {
 	return nil
 }
 
-// close drops the partial event.pack when finalize never ran, and the index
+// close drops the partial events.pack when finalize never ran, and the index
 // spill scratch with it. It does NOT emit the cold metric: a terminal write
 // error or finalize already emitted it, and a writer that never got that far
 // (a rolled-back build) must produce no phantom sample. The writer.Close
@@ -250,7 +250,7 @@ func (e *eventsCold) ingestSeq(seq uint32, closedAt int64, txParts []sdkingest.L
 
 	// Per payload: derive term keys from the raw ContractEvent XDR and AddTo the
 	// in-memory mirror under the chunk-relative event ID (term_index stage), then
-	// append the payload to event.pack (write stage). Both reads of the borrowed
+	// append the payload to events.pack (write stage). Both reads of the borrowed
 	// ContractEventBytes are synchronous (TermsForBytes does not retain them;
 	// Append marshals into a scratch buffer copied synchronously), so the borrow
 	// is safe. On any error here offsets is not advanced below — but the mirror and

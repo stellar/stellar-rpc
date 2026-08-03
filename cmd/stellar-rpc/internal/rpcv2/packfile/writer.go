@@ -28,6 +28,14 @@ const recordCRCLen = 4
 // been closed (successfully finalized or aborted).
 var ErrWriterClosed = errors.New("packfile: writer is closed")
 
+// DefaultBytesPerSync is the writeback cadence every production cold-artifact
+// writer uses (1 MiB): frequent enough that Finish's fsync never flushes a
+// multi-GB accumulation in one burst — the packfile writer docs' networked/
+// slow-storage rationale — and coarse enough to stay off the write hot path.
+// It lives here so the per-package constants that opt in cannot silently
+// diverge.
+const DefaultBytesPerSync = 1 << 20
+
 // RecordChecksum selects the integrity check a record carries. It is an axis
 // of its own rather than a codec: whether the bytes on disk are already
 // self-checking is a property of the encoded bytes, not of the Format the

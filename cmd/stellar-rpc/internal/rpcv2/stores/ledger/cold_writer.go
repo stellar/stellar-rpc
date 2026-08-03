@@ -15,13 +15,31 @@ import (
 // concurrent use, so the writer invokes this per worker.
 func newColdPackEncoder() packfile.RecordEncoder { return zstd.NewCompressor() }
 
+// extractRawLedger recovers a stored frame's raw LCM bytes for the content
+// hasher. It is the PreCompressed writer's ContentHashExtract, so it may run
+// on several packfile worker goroutines at once; the shared cold-pack
+// Decompressor is a context pool and safe for exactly that. Each call
+// allocates its own destination: the extracted bytes are held until the
+// hasher has consumed them, and a shared buffer would be racing.
+func extractRawLedger(frame []byte) ([]byte, error) {
+	raw, err := coldPackDecoder.Decode(nil, frame)
+	if err != nil {
+		return nil, fmt.Errorf("cold: decompress frame for content hash: %w", err)
+	}
+	return raw, nil
+}
+
 // ColdWriterOptions configures the underlying packfile writer.
 // The zero value is a sensible default (serial encoding, no
 // background writeback).
 type ColdWriterOptions struct {
-	// Concurrency sets parallel record-encoder workers. 0 means 1
+	// Concurrency sets the packfile's parallel record workers. 0 means 1
 	// (serial). Bump for large backfills where zstd encoding is
-	// CPU-bound; pick a value <= NumCPU.
+	// CPU-bound; pick a value <= NumCPU. It applies in PreCompressed
+	// mode too, where there is no encoder to run: the content hash is
+	// over RAW ledger bytes, so each worker's hash goroutine decompresses
+	// the frame it hashes, and these workers are what parallelizes that
+	// decode.
 	Concurrency int
 
 	// BytesPerSync triggers background dirty-page writeback every
@@ -29,6 +47,17 @@ type ColdWriterOptions struct {
 	// across the write phase so the final fsync in Commit has less
 	// to flush. 0 disables.
 	BytesPerSync int
+
+	// PreCompressed selects the verbatim-frame write mode: the caller
+	// appends ledgers ALREADY compressed as internal/rpcv2/zstd frames (the hot
+	// ledgers CF's values) via AppendCompressedLedger, and the packfile
+	// records them untouched (nil record encoder). The on-disk pack is
+	// structurally identical to raw mode's — one zstd frame per record,
+	// same format constant — and is read by the same ColdReader; only who
+	// ran the compressor differs. AppendLedger errors in this mode, and
+	// AppendCompressedLedger errors outside it, so a mode mismatch is an
+	// immediate API-time failure rather than a corrupt pack.
+	PreCompressed bool
 }
 
 // ColdWriter is two-phase: Commit finalizes; Close cleans up a
@@ -45,10 +74,11 @@ type ColdWriterOptions struct {
 //	}
 //	return w.Commit()
 type ColdWriter struct {
-	pw       *packfile.Writer
-	firstSeq uint32
-	nextSeq  uint32
-	path     string
+	pw            *packfile.Writer
+	firstSeq      uint32
+	nextSeq       uint32
+	path          string
+	preCompressed bool
 }
 
 // NewColdWriter truncates any pre-existing file at path so a crashed
@@ -64,40 +94,69 @@ func NewColdWriter(path string, firstSeq uint32, opts ColdWriterOptions) (*ColdW
 	if opts.Concurrency < 0 || opts.BytesPerSync < 0 {
 		return nil, fmt.Errorf("%w: Concurrency and BytesPerSync must be non-negative", stores.ErrInvalidConfig)
 	}
+	// PreCompressed appends final on-disk bytes, so the record encoder is
+	// nil (packfile passthrough); raw mode compresses per record.
+	newEncoder := newColdPackEncoder
+	var extract func([]byte) ([]byte, error)
+	if opts.PreCompressed {
+		newEncoder = nil
+		// The content hash is over RAW LCM bytes, which is what makes it
+		// canonical — independent of the zstd encoder version, so a frozen
+		// pack and a walked pack of the same ledgers carry the same hash.
+		// Raw mode gets that for free (AppendItem receives raw bytes and the
+		// encoder runs after the hasher). PreCompressed hands the writer the
+		// FRAME, so the hash input has to be recovered by decompressing it.
+		extract = extractRawLedger
+	}
 	pw, err := packfile.Create(path, packfile.WriterOptions{
 		ItemsPerRecord:   1,
 		Format:           formatLedgerCold,
 		Overwrite:        true,
-		NewRecordEncoder: newColdPackEncoder,
-		// Items reach AppendItem as raw LCM bytes, so the content hash is
+		NewRecordEncoder: newEncoder,
+		// Items reach the hasher as raw LCM bytes, so the content hash is
 		// independent of the zstd encoder version.
-		ContentHash:  true,
-		Concurrency:  opts.Concurrency,
-		BytesPerSync: opts.BytesPerSync,
+		ContentHash:        true,
+		ContentHashExtract: extract,
+		Concurrency:        opts.Concurrency,
+		BytesPerSync:       opts.BytesPerSync,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("cold: create packfile %q: %w", path, err)
 	}
 	return &ColdWriter{
-		pw:       pw,
-		firstSeq: firstSeq,
-		nextSeq:  firstSeq,
-		path:     path,
+		pw:            pw,
+		firstSeq:      firstSeq,
+		nextSeq:       firstSeq,
+		path:          path,
+		preCompressed: opts.PreCompressed,
 	}, nil
 }
 
-// AppendLedger appends one ledger. seq must equal the writer's
-// current nextSeq; a gap or out-of-order seq returns an error
-// without advancing internal state.
+// AppendLedger appends one RAW ledger (the record encoder compresses it).
+// seq must equal the writer's current nextSeq; a gap or out-of-order seq
+// returns an error without advancing internal state. Errors in
+// PreCompressed mode — use AppendCompressedLedger there.
 func (w *ColdWriter) AppendLedger(seq uint32, ledgerBytes []byte) error {
-	if seq != w.nextSeq {
-		return fmt.Errorf("cold %q: expected seq %d, got %d", w.path, w.nextSeq, seq)
+	if w.preCompressed {
+		return fmt.Errorf("cold %q: AppendLedger on a PreCompressed writer", w.path)
 	}
-	if err := w.pw.AppendItem(ledgerBytes); err != nil {
-		return translateWriterErr(err)
+	return w.append(seq, ledgerBytes)
+}
+
+// AppendCompressedLedger appends one ledger already compressed as an
+// internal/rpcv2/zstd frame (a hot ledgers-CF value), written to the pack
+// verbatim. Only valid on a PreCompressed writer. Beyond the shared
+// seq-contiguity check, the frame header is validated (magic, recorded
+// content size, no dictionary, checksum flag) so the coupling to the hot
+// tier's compression shape fails HERE, at freeze time, not at cold read.
+func (w *ColdWriter) AppendCompressedLedger(seq uint32, frame []byte) error {
+	if !w.preCompressed {
+		return fmt.Errorf("cold %q: AppendCompressedLedger on a raw-mode writer", w.path)
 	}
-	w.nextSeq++
-	return nil
+	if err := zstd.FrameHeaderValid(frame); err != nil {
+		return fmt.Errorf("cold %q: ledger %d: %w", w.path, seq, err)
+	}
+	return w.append(seq, frame)
 }
 
 // Commit writes firstSeq into AppData, finalizes the trailer, and
@@ -125,4 +184,17 @@ func translateWriterErr(err error) error {
 		return stores.ErrStoreClosed
 	}
 	return err
+}
+
+// append is the shared tail of both append modes: contiguity check, item
+// write, seq advance.
+func (w *ColdWriter) append(seq uint32, item []byte) error {
+	if seq != w.nextSeq {
+		return fmt.Errorf("cold %q: expected seq %d, got %d", w.path, w.nextSeq, seq)
+	}
+	if err := w.pw.AppendItem(item); err != nil {
+		return translateWriterErr(err)
+	}
+	w.nextSeq++
+	return nil
 }
