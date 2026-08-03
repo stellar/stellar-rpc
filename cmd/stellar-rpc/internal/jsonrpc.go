@@ -148,6 +148,9 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 	bridgeOptions := jhttp.BridgeOptions{
 		Server: &jrpc2.ServerOptions{
 			Logger: func(text string) { params.Logger.Debug(text) },
+			// Disable built-in rpc.* methods (e.g. rpc.serverInfo) that
+			// bypass the handler allowlist and request limiters.
+			DisableBuiltin: true,
 		},
 	}
 

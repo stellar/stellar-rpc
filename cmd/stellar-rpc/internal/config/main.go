@@ -81,14 +81,42 @@ type Config struct {
 	MaxSendTransactionExecutionDuration            time.Duration
 	MaxSimulateTransactionExecutionDuration        time.Duration
 	MaxGetFeeStatsExecutionDuration                time.Duration
-	ServeLedgersFromDatastore                      bool
-	BufferedStorageBackendConfig                   ledgerbackend.BufferedStorageBackendConfig
-	DataStoreConfig                                datastore.DataStoreConfig
+
+	ServeLedgersFromDatastore    bool
+	BufferedStorageBackendConfig ledgerbackend.BufferedStorageBackendConfig
+	DataStoreConfig              datastore.DataStoreConfig
+
+	IngestLoadTest IngestLoadTestConfig
 
 	// We memoize these, so they bind to pflags correctly
 	optionsCache *Options
 	flagset      *pflag.FlagSet
 }
+
+// IngestLoadTestConfig groups the options for ingesting from pre-generated synthetic
+// ledger bundles. If no files are given, normal captive-core ingestion runs.
+type IngestLoadTestConfig struct {
+	// Files are .xdr.zstd bundles of LedgerCloseMeta records produced by
+	// stellar-core's apply-load, replayed in order.
+	Files []string `toml:"files"`
+	// Frequency paces ingestion, replaying one synthetic ledger per duration.
+	// Zero means "use DefaultIngestLoadTestFrequency".
+	Frequency time.Duration `toml:"frequency"`
+	// MaxLedgersPerFile optionally caps how many ledgers are replayed from each
+	// file in Files. Zero replays every ledger in every file.
+	MaxLedgersPerFile uint32 `toml:"max_ledgers_per_file"`
+	// OnLedgerIngested is a test-only seam, never set from TOML/flags (hence
+	// toml:"-"): the load-test harness sets it so the daemon reports exact
+	// per-ledger ingest timing via ingest.Config.OnLedgerIngested. Nil in
+	// production.
+	OnLedgerIngested func(seq uint32, d time.Duration) `toml:"-"`
+}
+
+func (cfg IngestLoadTestConfig) Enabled() bool {
+	return len(cfg.Files) > 0
+}
+
+const DefaultIngestLoadTestFrequency = 2 * time.Second
 
 func (cfg *Config) ExtendedUserAgent(extension string) string {
 	if cfg.HistoryArchiveUserAgent == "" {

@@ -42,18 +42,16 @@ mod curr {
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
 
-    // Builds the recording auth mode for this protocol version. The shape of
-    // `RecordingInvocationAuthMode::Recording` differs between soroban versions,
-    // so each version-specific module provides its own constructor and
-    // `shared.rs` calls into it via `super::`. From protocol 27
-    // the recording params also carry `use_address_v2`, which we leave `false`
-    // at this layer until v28.
-    pub(crate) fn recording_auth_mode(
+    // Constructs the recording auth mode for this protocol version. The current
+    // protocol's soroban-env can emit either v1 (`Address`) or v2 (`AddressV2`)
+    // credentials, selected by `use_upgraded_auth`.
+    pub(crate) fn make_recording_auth_mode(
         disable_non_root_auth: bool,
+        use_upgraded_auth: bool,
     ) -> soroban_env_host::e2e_invoke::RecordingInvocationAuthMode {
         soroban_env_host::e2e_invoke::RecordingInvocationAuthMode::recording(
             disable_non_root_auth,
-            false,
+            use_upgraded_auth,
         )
     }
 }
@@ -68,16 +66,17 @@ mod prev {
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
 
-    // See the matching `curr::recording_auth_mode`. Now that `-prev` has
-    // been shifted from soroban-env-host 26.1.2 to 27.0.0, the recording
-    // auth mode is the v27 shape — a `RecordingInvocationAuthParams` struct
-    // carrying both `disable_non_root_auth` and `use_address_v2`.
-    pub(crate) fn recording_auth_mode(
+    // See the matching `curr::make_recording_auth_mode`. `-prev` is now
+    // soroban-env-host 27.x, which supports v2 (`AddressV2`) credentials, so
+    // `use_upgraded_auth` passes through — matching simulateTransaction's
+    // behavior on a protocol-27 ledger (`UseUpgradedAuth` shipped in v27.1.0).
+    pub(crate) fn make_recording_auth_mode(
         disable_non_root_auth: bool,
+        use_upgraded_auth: bool,
     ) -> soroban_env_host::e2e_invoke::RecordingInvocationAuthMode {
         soroban_env_host::e2e_invoke::RecordingInvocationAuthMode::recording(
             disable_non_root_auth,
-            false,
+            use_upgraded_auth,
         )
     }
 }
@@ -208,6 +207,7 @@ pub extern "C" fn preflight_invoke_hf_op(
     resource_config: CResourceConfig,
     enable_debug: bool,
     auth_mode: u32,
+    use_upgraded_auth: bool,
 ) -> *mut CPreflightResult {
     let proto = ledger_info.protocol_version;
     catch_preflight_panic(&move || {
@@ -220,6 +220,7 @@ pub extern "C" fn preflight_invoke_hf_op(
                 resource_config,
                 enable_debug,
                 auth_mode.into(),
+                use_upgraded_auth,
             )
         } else if proto == curr::PROTOCOL {
             curr::shared::preflight_invoke_hf_op_or_maybe_panic(
@@ -230,6 +231,7 @@ pub extern "C" fn preflight_invoke_hf_op(
                 resource_config,
                 enable_debug,
                 auth_mode.into(),
+                use_upgraded_auth,
             )
         } else {
             bail!("unsupported protocol version: {proto}")

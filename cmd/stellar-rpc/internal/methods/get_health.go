@@ -45,7 +45,9 @@ func NewHealthCheck(
 		result := protocol.GetHealthResponse{
 			Status:                "healthy",
 			LatestLedger:          ledgerRange.LastLedger.Sequence,
+			LatestLedgerCloseTime: ledgerRange.LastLedger.CloseTime,
 			OldestLedger:          ledgerRange.FirstLedger.Sequence,
+			OldestLedgerCloseTime: ledgerRange.FirstLedger.CloseTime,
 			LedgerRetentionWindow: retentionWindow,
 		}
 		return result, nil

@@ -249,10 +249,29 @@ func getPreflightParameters(t testing.TB, protocolVersion uint32) Parameters {
 		NetworkPassphrase: "foo",
 		LedgerEntryGetter: ledgerEntryGetter,
 		BucketListSize:    200,
+		LedgerTime:        1_700_000_123,
 		ProtocolVersion:   protocolVersion,
 		AuthMode:          protocol.AuthModeRecord,
 	}
 	return params
+}
+
+func TestGetLedgerInfoUsesProvidedLedgerTime(t *testing.T) {
+	params := Parameters{
+		NetworkPassphrase: "Standalone Network ; February 2017",
+		LedgerSeq:         42,
+		LedgerTime:        1_700_000_123,
+		ProtocolVersion:   25,
+		BucketListSize:    200,
+	}
+
+	ledgerInfo := getLedgerInfo(params)
+	defer freeLedgerInfo(ledgerInfo)
+
+	require.EqualValues(t, params.LedgerTime, ledgerInfo.timestamp)
+	require.EqualValues(t, params.LedgerSeq, ledgerInfo.sequence_number)
+	require.EqualValues(t, params.ProtocolVersion, ledgerInfo.protocol_version)
+	require.EqualValues(t, params.BucketListSize, ledgerInfo.bucket_list_size)
 }
 
 func TestGetPreflight(t *testing.T) {
@@ -301,4 +320,21 @@ func BenchmarkGetPreflight(b *testing.B) {
 		require.NoError(b, err)
 		require.Empty(b, result.Error)
 	}
+}
+
+// TestGetPreflightUseUpgradedAuthOnPrevProtocol locks in the behavior that
+// requesting v2 (AddressV2) credentials on the protocol served by the prev
+// soroban-env host succeeds. Since the P28 rotation the prev host is 27.x,
+// which supports v2 credentials (UseUpgradedAuth shipped in v27.1.0), so the
+// flag passes through to the host rather than being silently dropped — the
+// pre-P28 "silently ignored" contract applied only while the prev host
+// predated v2 credentials. (Asserting the credential version itself requires
+// an auth-recording contract; that is covered by the integration tests.)
+func TestGetPreflightUseUpgradedAuthOnPrevProtocol(t *testing.T) {
+	prevHostProtocol := supportedProtocolVersions[0]
+	params := getPreflightParameters(t, prevHostProtocol)
+	params.UseUpgradedAuth = true
+	result, err := GetPreflight(t.Context(), params)
+	require.NoError(t, err)
+	require.Empty(t, result.Error)
 }

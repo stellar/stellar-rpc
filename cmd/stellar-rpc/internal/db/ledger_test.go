@@ -171,6 +171,54 @@ func TestGetLedgerRange_SingleDBRow(t *testing.T) {
 	assert.Equal(t, ledgerCloseTime(1334), ledgerRange.LastLedger.CloseTime)
 }
 
+// TestGetLedgerRange_OldestCacheInvalidatedOnTrim verifies that the cached
+// oldest-ledger scalars are refreshed once the retention window trims the
+// ledger they describe -- so GetLedgerRange keeps reporting the true oldest
+// ledger rather than a stale cached one, while still avoiding the per-call
+// oldest-ledger decode in steady state.
+func TestGetLedgerRange_OldestCacheInvalidatedOnTrim(t *testing.T) {
+	const retentionWindow = 10
+	db := NewTestDB(t)
+	ctx := context.TODO()
+	writer := NewReadWriter(logger, db, interfaces.MakeNoOpDeamon(), retentionWindow, passphrase)
+	reader := NewLedgerReader(db)
+
+	ingest := func(base uint32, count int) {
+		write, err := writer.NewTx(ctx)
+		require.NoError(t, err)
+		ledgerW, txW := write.LedgerWriter(), write.TransactionWriter()
+		var last xdr.LedgerCloseMeta
+		for i := range count {
+			lcm := txMeta(base+uint32(i), true)
+			require.NoError(t, ledgerW.InsertLedger(lcm))
+			require.NoError(t, txW.InsertTransactions(lcm))
+			last = lcm
+		}
+		require.NoError(t, write.Commit(last, nil))
+	}
+
+	// Phase 1: ingest exactly the retention window (sequences 1334..1343); no
+	// trimming yet, oldest = 1334. The read populates the oldest cache.
+	ingest(1234, retentionWindow)
+	ledgerRange, err := reader.GetLedgerRange(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(1334), ledgerRange.FirstLedger.Sequence)
+	assert.Equal(t, ledgerCloseTime(1334), ledgerRange.FirstLedger.CloseTime)
+	assert.Equal(t, uint32(1343), ledgerRange.LastLedger.Sequence)
+
+	// Phase 2: ingest 5 more (sequences 1344..1348). With retention 10 and
+	// latest 1348, the cutoff is 1339, trimming 1334..1338 -- which includes the
+	// cached oldest (1334), so the cache must invalidate and the next read must
+	// report the new oldest (1339), not the stale 1334.
+	ingest(1244, 5)
+	ledgerRange, err = reader.GetLedgerRange(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(1339), ledgerRange.FirstLedger.Sequence)
+	assert.Equal(t, ledgerCloseTime(1339), ledgerRange.FirstLedger.CloseTime)
+	assert.Equal(t, uint32(1348), ledgerRange.LastLedger.Sequence)
+	assert.Equal(t, ledgerCloseTime(1348), ledgerRange.LastLedger.CloseTime)
+}
+
 func TestGetLedgerRange_EmptyDB(t *testing.T) {
 	db := NewTestDB(t)
 	ctx := context.TODO()
