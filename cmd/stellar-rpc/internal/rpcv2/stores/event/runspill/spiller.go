@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 )
 
-// Spiller is the double-buffered producer facade over Slab + WriteRun: the
+// Spiller is the double-buffered producer facade over Slab + RunWriter: the
 // ingest goroutine Adds records; when the active slab fills, the Spiller
 // swaps in the spare and sorts+spills the full one on a background
 // goroutine, so ingest never stalls on a sort or a write (it can only stall
@@ -20,9 +20,8 @@ type Spiller struct {
 	dir      string
 	active   *Slab
 	spare    *Slab
-	encBuf   []byte // reused SortEncode destination, handed between spills
 	inflight chan error
-	pending  bool // a spill goroutine is running; encBuf/spare are its
+	pending  bool // a spill goroutine is running; the spare slab is its
 	runs     []string
 	failed   error
 }
@@ -68,6 +67,9 @@ func (s *Spiller) Add(term [16]byte, id uint32) error {
 
 // Finish spills the remaining records, waits everything out, and returns
 // the ordered run paths for MergeRuns. The Spiller is spent afterwards.
+// Finish hands results back; it is NOT the writers' publication verb (that
+// is RunWriter.Commit), so the name deliberately stays outside the domain
+// writers' Commit/abandon algebra.
 func (s *Spiller) Finish() ([]string, error) {
 	if s.failed != nil {
 		return nil, s.failed
@@ -91,7 +93,9 @@ func (s *Spiller) Cleanup() error {
 }
 
 // rotate waits for any in-flight spill, swaps slabs, and kicks the full one
-// off to the background spill goroutine.
+// off to the background spill goroutine. The goroutine touches nothing but
+// the slab it was handed and the channel — no Spiller field is shared with
+// it, so the slab hand-off is the whole concurrency story.
 func (s *Spiller) rotate() error {
 	if err := s.wait(); err != nil {
 		return err
@@ -103,21 +107,32 @@ func (s *Spiller) rotate() error {
 	path := filepath.Join(s.dir, fmt.Sprintf("%06d.run", len(s.runs)))
 	s.runs = append(s.runs, path)
 
-	buf := s.encBuf[:0]
 	s.pending = true
 	go func() {
-		payload, records := full.SortEncode(buf)
-		err := WriteRun(path, payload, records)
-		s.encBuf = payload // safe: producer reads encBuf only after the
-		s.inflight <- err  // blocking receive below (channel happens-before)
+		s.inflight <- spill(path, full)
 	}()
 	return nil
 }
 
+// spill sorts the full slab and streams it to path as one committed run:
+// NewRunWriter, EmitSorted into Append, Commit — the same write path every
+// other run producer takes, record at a time, no whole-payload buffer.
+func spill(path string, full *Slab) error {
+	rw, err := NewRunWriter(path)
+	if err != nil {
+		return err
+	}
+	defer rw.Close()
+	if err := full.EmitSorted(rw.Append); err != nil {
+		return fmt.Errorf("runspill: write %s: %w", path, err)
+	}
+	return rw.Commit()
+}
+
 // wait blocks out any in-flight spill. At most one is pending by
 // construction (rotate waits before kicking the next), so one receive
-// settles it; the channel receive is the happens-before edge that makes the
-// goroutine's encBuf hand-back visible to the producer.
+// settles it; the channel receive is the happens-before edge that hands the
+// spilled slab (buf and ids both) back to the producer for reuse.
 func (s *Spiller) wait() error {
 	if s.pending {
 		if err := <-s.inflight; err != nil && s.failed == nil {

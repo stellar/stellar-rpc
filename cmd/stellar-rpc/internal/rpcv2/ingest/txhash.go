@@ -11,7 +11,6 @@ import (
 
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
@@ -29,8 +28,7 @@ import (
 // this package) turns these .bin files into the queryable cold MPHF index.
 type txhashCold struct {
 	binPath string
-	chunkID chunk.ID
-	secret  [stores.SecretLen]byte
+	secret [stores.SecretLen]byte
 	entries []txhash.ColdEntry
 	metrics coldMetrics
 }
@@ -41,9 +39,7 @@ type txhashCold struct {
 // (overwriting any prior attempt's file — see the package doc's artifact model).
 // secret is the chunk's per-index secret — the same one the index build derives
 // (txhash.ColdIndexSecret) — that the stored keys are blinded with.
-func newTxhashCold(
-	binPath string, chunkID chunk.ID, sink MetricSink, secret [stores.SecretLen]byte,
-) (*txhashCold, error) {
+func newTxhashCold(binPath string, sink MetricSink, secret [stores.SecretLen]byte) (*txhashCold, error) {
 	if err := os.MkdirAll(filepath.Dir(binPath), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(binPath), err)
 	}
@@ -52,7 +48,6 @@ func newTxhashCold(
 	// and a busy chunk just pays a few amortized growths.
 	t := &txhashCold{
 		binPath: binPath,
-		chunkID: chunkID,
 		entries: make([]txhash.ColdEntry, 0, 1<<16),
 		metrics: newColdMetrics(sink, dataTypeTxhash),
 	}

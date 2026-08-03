@@ -154,6 +154,8 @@ func Union(ps []Postings) Postings {
 // mergeAscending appends the union of two ascending deduped lists to dst.
 // Merging pairwise beats a k-way heap for the handful of inputs a filter set
 // produces: 5 lists of 1024 measure 46us pairwise against 96us through a heap.
+// Deliberate duplicate of runspill.unionAscending (runspill/merge.go), which
+// documents the ownership-contract split that keeps the two separate.
 func mergeAscending(dst, a, b []uint32) []uint32 {
 	i, j := 0, 0
 	for i < len(a) && j < len(b) {

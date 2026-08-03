@@ -30,6 +30,12 @@ type mergeSource struct {
 }
 
 // heapEntry is one heap slot: the source index, ordered by (term, idx).
+//
+// This stays a copy of the discipline, not an import of it. txhash's two
+// BACKGROUND merges now share one heap (stores/txhash/merge_heap.go) because
+// they share a package; hoisting siftDown across the engine boundary would
+// first have to hold cold_merge.go's 30-36M keys/s under a benchstat of the
+// bench `txindex` cell (bench/txindex.go) — that is the loop that pays.
 type heapEntry struct {
 	term [16]byte
 	idx  int
@@ -157,6 +163,11 @@ func advanceSource(s *mergeSource) (bool, error) {
 // (which the caller owns), preserving ascending order and dropping
 // cross-list duplicates. The common cases — acc empty, or disjoint ranges —
 // stay O(len(b)).
+//
+// Deliberate duplicate of events.mergeAscending (events/intersect.go): the
+// two carry different ownership contracts — an accumulator this one owns and
+// may extend in place, versus a caller-supplied dst over read-only Postings
+// backing — so there is nothing to version in lockstep.
 func unionAscending(acc, b []uint32) []uint32 {
 	if len(acc) == 0 {
 		return append(acc, b...)

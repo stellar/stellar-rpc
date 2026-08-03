@@ -12,10 +12,15 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
 // writeFixtureBin writes chunk c's synthetic sorted .bin with n entries.
+// benchTestSecret keys the bench fixtures — any fixed non-zero value works;
+// BuildColdIndex adopts whatever secret the .bin headers carry.
+var benchTestSecret = [stores.SecretLen]byte{3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3}
+
 func writeFixtureBin(t *testing.T, dir string, c chunk.ID, n int) {
 	t.Helper()
 	entries := make([]txhash.ColdEntry, n)
@@ -32,7 +37,7 @@ func writeFixtureBin(t *testing.T, dir string, c chunk.ID, n int) {
 		entries[i].Seq = c.FirstLedger() + uint32(state%uint64(chunk.LedgersPerChunk))
 	}
 	slices.SortFunc(entries, func(a, b txhash.ColdEntry) int { return bytes.Compare(a.Key[:], b.Key[:]) })
-	require.NoError(t, txhash.WriteColdBin(filepath.Join(dir, fmt.Sprintf("%08d.bin", uint32(c))), entries))
+	require.NoError(t, txhash.WriteColdBin(filepath.Join(dir, fmt.Sprintf("%08d.bin", uint32(c))), benchTestSecret, entries))
 }
 
 // TestRunTxindex: a three-chunk window builds through the production

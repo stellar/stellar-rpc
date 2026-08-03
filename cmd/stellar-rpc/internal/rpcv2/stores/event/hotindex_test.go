@@ -13,6 +13,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/internal/runset"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/internal/runset/runsettest"
 )
 
 // runsFromMap converts a per-term map to the termRuns view ApplyLedger
@@ -31,8 +34,8 @@ func runsFromMap(per map[TermKey][]uint32) termRuns {
 	return runs
 }
 
-// fakeManifest is an in-memory manifestStore. putErr, when set, fails every
-// PutRuns without recording anything.
+// fakeManifest is an in-memory runset.Manifest. putErr, when set, fails
+// every PutRuns without recording anything.
 type fakeManifest struct {
 	mu         sync.Mutex
 	names      []string
@@ -131,7 +134,7 @@ func (hh *hotIndexHarness) settle() {
 	require.NoError(hh.t, hh.h.reapSeal(true))
 }
 
-func testHotIndex(t *testing.T, dir string, m manifestStore) *HotIndex {
+func testHotIndex(t *testing.T, dir string, m runset.Manifest) *HotIndex {
 	h, err := NewHotIndex(dir, m)
 	require.NoError(t, err)
 	h.sealEvery = 8 // tiny window: many seals
@@ -437,10 +440,11 @@ func TestRunFences_ByteCapAndIsolation(t *testing.T) {
 	defer reopened.close()
 
 	// The write pass and the warmup drain must route identically — fences,
-	// record count, and the bloom's size (the header count feeds it at reopen).
+	// record count, and the bloom bit for bit (its size comes from the window
+	// map's term count on the write pass, the header count at reopen).
 	require.Equal(t, written.fences, reopened.fences)
 	require.Equal(t, written.terms, reopened.terms)
-	require.Equal(t, written.bloom.mask, reopened.bloom.mask)
+	require.Equal(t, written.bloom, reopened.bloom)
 
 	recs, total := runExtents(window)
 	require.Equal(t, payloadLen, total)
@@ -581,11 +585,134 @@ func TestHotIndex_CloseClosesUnreapedSealHandbacks(t *testing.T) {
 	require.ErrorIs(t, sealed.file.Close(), os.ErrClosed, "drained result's obsolete handles must be closed")
 }
 
-// TestHotIndex_ManifestFailureDisposesRun pins reapSeal's manifest-failure
-// branch: a run the manifest never listed is unpublished and must be closed
-// and removed, while the obsolete inputs (still live in the view, still
-// manifest-listed) stay open.
-func TestHotIndex_ManifestFailureDisposesRun(t *testing.T) {
+// TestHotIndex_DirentBarrierPrecedesManifestPut drives this engine through
+// both of its publish shapes — three plain seals, then the merge fold at
+// maxRuns — and pins the dirent-barrier-before-PutRuns order with the shared
+// runsettest helper (the rationale lives on AssertBarrierPrecedesEveryPut;
+// the txhash twin pins the same invariant over its one shape).
+func TestHotIndex_DirentBarrierPrecedesManifestPut(t *testing.T) {
+	dir := t.TempDir()
+	log := &runsettest.PublishLog{}
+	m := &runsettest.RecordingManifest{Log: log}
+	h := testHotIndex(t, dir, m) // sealEvery=8, maxRuns=3
+	defer h.Close()
+	h.fsyncDir = log.FsyncDir
+	hh := newHarness(t, h)
+
+	fire := hiKey(hh.rng)
+	mids := []TermKey{hiKey(hh.rng)}
+	for range 4 { // three plain seals, then one that folds in a merge
+		for range 8 {
+			hh.ledger(fire, mids, 20)
+		}
+		hh.settle()
+	}
+	require.Len(t, h.view.Load().runs, 1, "the fourth cycle must have merged")
+
+	runsettest.AssertBarrierPrecedesEveryPut(t, log, dir, 4)
+}
+
+// TestRocksdbManifest_PublishGoldenBytes pins the manifest VALUE bytes end
+// to end through runset.Publish and this engine's codec: 4B BE lastSealed ‖
+// csv of run basenames — live order then fresh for a plain seal, the merged
+// run alone for a replaceAll fold. No byte-identity gate covers manifest
+// values (all six are cold-artifact gates), so this golden value is the
+// compatibility pin for warmups reading manifests written before the
+// publish protocol moved into runset. (Publish's dispose-on-failure contract
+// is pinned structurally in the runset package's own tests.)
+func TestRocksdbManifest_PublishGoldenBytes(t *testing.T) {
+	raw := openRawHotChunkForTest(t, t.TempDir(), 0)
+	defer func() { require.NoError(t, raw.Close()) }()
+	m := rocksdbManifest{store: raw}
+	dir := t.TempDir()
+	live := mkStagedRun(t, dir, "seal-000001.run")
+	defer live.close()
+	fresh := mkStagedRun(t, dir, "seal-000002.run")
+	defer fresh.close()
+
+	require.NoError(t, runset.Publish(m, []*sealedRun{live}, fresh, 0x01020304))
+	val, found, err := raw.Get("", hotIndexManifestKey)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, append([]byte{0x01, 0x02, 0x03, 0x04}, "seal-000001.run,seal-000002.run"...), val)
+
+	// The merge fold's replaceAll shape: the merged run is the only survivor.
+	merged := mkStagedRun(t, dir, "merge-000003.run")
+	defer merged.close()
+	require.NoError(t, runset.Publish(m, nil, merged, 0x01020305))
+	val, found, err = raw.Get("", hotIndexManifestKey)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, append([]byte{0x01, 0x02, 0x03, 0x05}, "merge-000003.run"...), val)
+}
+
+// TestHotIndex_BarrierFailureDisposesRun pins openDurable's barrier branch in
+// BOTH publish shapes: a run whose directory fsync failed was never made
+// durable, so the background job disposes of it — nothing new left in the run
+// dir, nothing new named in the manifest, and the seal surfaces the error to
+// the writer. The live runs a failed merge was folding are untouched: they
+// are still in the view and still manifest-listed.
+func TestHotIndex_BarrierFailureDisposesRun(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cycles int // settled seal cycles before the failing one
+		failOn int // the barrier call that fails, counted from the failing cycle
+	}{
+		{name: "plain seal", cycles: 0, failOn: 1},
+		{name: "merge fold", cycles: 3, failOn: 2}, // seal barrier ok, merge's fails
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			m := &fakeManifest{}
+			h := testHotIndex(t, dir, m) // sealEvery=8, maxRuns=3
+			defer h.Close()
+			hh := newHarness(t, h)
+			fire := hiKey(hh.rng)
+			mids := []TermKey{hiKey(hh.rng)}
+			for range tc.cycles {
+				for range 8 {
+					hh.ledger(fire, mids, 20)
+				}
+				hh.settle()
+			}
+			namesBefore, sealedBefore, err := m.GetRuns()
+			require.NoError(t, err)
+
+			calls := 0
+			h.fsyncDir = func(string) error {
+				calls++
+				if calls >= tc.failOn {
+					return errors.New("dirent barrier failed")
+				}
+				return nil
+			}
+			for range 8 {
+				hh.ledger(fire, mids, 20)
+			}
+			require.ErrorContains(t, h.reapSeal(true), "dirent barrier failed",
+				"a failed dirent barrier must fail the seal")
+
+			onDisk, err := os.ReadDir(dir)
+			require.NoError(t, err)
+			require.Len(t, onDisk, tc.cycles, "only the previously published runs may remain")
+			names, lastSealed, err := m.GetRuns()
+			require.NoError(t, err)
+			require.Equal(t, namesBefore, names, "an undurable run must never be named")
+			require.Equal(t, sealedBefore, lastSealed)
+			require.Len(t, h.view.Load().runs, tc.cycles, "the view keeps exactly its live runs")
+		})
+	}
+}
+
+// TestHotIndex_ManifestFailureLeavesObsoleteRuns pins the engine-local half
+// of reapSeal's manifest-failure branch, the half runset.Publish cannot see:
+// a merge fold's obsolete inputs are still live in the view and still named
+// by the previous manifest value, so a failed publish must leave their
+// handles open and their files on disk — the unlink and the retired append
+// happen only once the merged run is durably named. (Publish's own contract,
+// disposing of the un-listed fresh run, is pinned by runset's
+// TestPublish_FailureDisposesFresh.)
+func TestHotIndex_ManifestFailureLeavesObsoleteRuns(t *testing.T) {
 	dir := t.TempDir()
 	m := &fakeManifest{}
 	h := testHotIndex(t, dir, m)
@@ -597,12 +724,9 @@ func TestHotIndex_ManifestFailureDisposesRun(t *testing.T) {
 	h.sealInFlight = true
 	m.putErr = errors.New("manifest unavailable")
 
-	err := h.reapSeal(true)
-	require.ErrorContains(t, err, "hotindex manifest")
-	require.ErrorIs(t, merged.file.Close(), os.ErrClosed, "un-listed run's handle must be closed")
-	_, serr := os.Stat(merged.path)
-	require.ErrorIs(t, serr, os.ErrNotExist, "un-listed run's file must be removed")
+	require.ErrorContains(t, h.reapSeal(true), "hotindex manifest")
 	require.NoError(t, obsolete.file.Close(), "obsolete inputs must stay open for live readers")
-	_, serr = os.Stat(obsolete.path)
+	_, serr := os.Stat(obsolete.path)
 	require.NoError(t, serr, "obsolete inputs' files must remain")
+	require.Empty(t, h.retired, "nothing retires until the merged run is durably named")
 }

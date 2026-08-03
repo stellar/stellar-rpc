@@ -149,6 +149,12 @@ func newBatchPool() chan *mergeBatch {
 // mergeEntry is one source's heap slot: the two big-endian halves of its
 // current 16-byte key plus the source index (into the readers/streams
 // slice of the owning merge node).
+//
+// Deliberately NOT the package's shared hash heap (merge_heap.go), which the
+// seal and freeze merges do share: that one compares byte slices, this one two
+// uint64s, and this is the tree's hottest loop (30-36M keys/s) rather than a
+// background merge. Folding the two together is gated on a benchstat of the
+// bench `txindex` cell (bench/txindex.go) holding that baseline.
 type mergeEntry struct {
 	k0, k1 uint64
 	idx    int

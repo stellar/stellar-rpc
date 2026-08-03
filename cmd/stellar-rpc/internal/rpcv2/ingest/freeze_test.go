@@ -11,7 +11,9 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 )
@@ -20,16 +22,19 @@ import (
 // cross-path identity gate: one full chunk ingested hot through the
 // production service, then materialized cold BOTH ways — WriteColdChunk
 // draining the raw fixtures (the derivation path) and FreezeColdChunk
-// scanning the hot DB's CFs (the zero-decompression path) — must produce
-// byte-identical artifacts for all three kinds. This also retroactively
-// gates the already-landed events freeze-by-merge against the walk build.
+// scanning the hot DB's durable state (the zero-decompression path) — must
+// produce byte-identical artifacts for all three kinds. The fixture is dense
+// enough (eventEvery=10 → 1,000 event-bearing index rows) that the events
+// engine seals at its production 256-row cadence several times, so the
+// events freeze consumes manifest-listed sealed runs — asserted at the
+// bottom — not just the un-sealed tail.
 //
 // The populate is a full LedgersPerChunk pass with a synced WriteBatch per
 // ledger, so this is one of the package's slower tests.
 func TestFreezeColdChunk_ByteIdenticalToWalk(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first, last := chunkID.FirstLedger(), chunkID.LastLedger()
-	const eventEvery = 100 // every eventEvery-th ledger carries one tx + one contract event
+	const eventEvery = 10 // every eventEvery-th ledger carries one tx + one contract event
 
 	fixtures := make([][]byte, 0, chunk.LedgersPerChunk)
 	for seq := first; seq <= last; seq++ {
@@ -43,7 +48,8 @@ func TestFreezeColdChunk_ByteIdenticalToWalk(t *testing.T) {
 	// Hot DB populated through the production ingest service (compression,
 	// extraction, and CF layout exactly as a live chunk's).
 	ctx := context.Background()
-	db, err := hotchunk.Open(t.TempDir(), chunkID, hotTestLogger(), hotchunk.DefaultTuning())
+	dbPath := t.TempDir()
+	db, err := hotchunk.Open(dbPath, chunkID, hotTestLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	svc := NewHotService(db, nil, nil)
@@ -95,6 +101,25 @@ func TestFreezeColdChunk_ByteIdenticalToWalk(t *testing.T) {
 	for _, name := range walkNames {
 		requireSameBytes(t, filepath.Join(walkDirs.EventsDir, name), filepath.Join(freezeDirs.EventsDir, name))
 	}
+
+	// Tripwire: the fixture must actually have crossed the events engine's
+	// sealed frontier — a non-empty run manifest — or this gate silently
+	// stops covering the freeze's manifest-runs input shape and regresses to
+	// tail-only coverage. Read the manifest from a bare re-open of the
+	// frozen DB (the closed hot DB's durable state, exactly what a
+	// production freeze source sees).
+	require.NoError(t, db.Close())
+	raw, err := rocksdb.New(rocksdb.Config{
+		Path:           dbPath,
+		ColumnFamilies: hotchunk.ColumnFamilies(),
+		Logger:         hotTestLogger(),
+		ReadOnly:       true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = raw.Close() })
+	sealedRuns, _, err := event.ManifestRuns(raw)
+	require.NoError(t, err)
+	require.NotEmpty(t, sealedRuns, "full-chunk fixture must publish sealed runs for the freeze to consume")
 }
 
 // TestEventsScratchDir_SharedAcrossMaterializers pins the scratch-lifecycle

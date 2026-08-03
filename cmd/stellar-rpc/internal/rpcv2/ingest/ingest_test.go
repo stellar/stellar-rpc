@@ -518,7 +518,7 @@ func TestTxhashColdWriter_Bin(t *testing.T) {
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := newTxhashCold(txhashBinPath(coldDir), chunkID, nil, testTxhashSecret())
+	ing, err := newTxhashCold(txhashBinPath(coldDir), nil, testTxhashSecret())
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
@@ -1374,7 +1374,7 @@ func TestTxhashColdWriter_BinContent(t *testing.T) {
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := newTxhashCold(txhashBinPath(coldDir), chunkID, nil, testTxhashSecret())
+	ing, err := newTxhashCold(txhashBinPath(coldDir), nil, testTxhashSecret())
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
@@ -1532,15 +1532,15 @@ func TestWriteColdChunk_ConstructorFailure_EmitsAggregate(t *testing.T) {
 	require.Zero(t, countCleanColdIngests(sink), "no clean ColdIngest on the rollback path")
 }
 
-// ───────────────────────── events Finish-then-WriteColdIndex failure ─────────────────────────
+// ───────────────────────── events Commit-then-WriteColdIndex failure ─────────────────────────
 
-// TestEventsCold_FinishThenIndexFails_LeavesInertPack forces WriteColdIndex to
-// fail AFTER writer.Finish has committed events.pack, by planting a directory
+// TestEventsCold_CommitThenIndexFails_LeavesInertPack forces WriteColdIndex to
+// fail AFTER writer.Commit has published events.pack, by planting a directory
 // where the index.hash file must be written (buildMPHF then hits EISDIR).
 // Finalize must surface the error; the index-less events.pack stays on disk —
 // without the orchestrator's completion record it is inert scratch (see the
 // package doc's artifact model), and a retry's overwrite is the cleanup.
-func TestEventsCold_FinishThenIndexFails_LeavesInertPack(t *testing.T) {
+func TestEventsCold_CommitThenIndexFails_LeavesInertPack(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
@@ -1563,7 +1563,7 @@ func TestEventsCold_FinishThenIndexFails_LeavesInertPack(t *testing.T) {
 	require.Error(t, ferr, "Finalize must fail when WriteColdIndex fails")
 	require.Contains(t, ferr.Error(), "WriteColdIndex")
 
-	// The committed events.pack stays in place as inert scratch (Finish ran,
+	// The committed events.pack stays in place as inert scratch (Commit ran,
 	// so the later Close does not drop it either).
 	packPath := filepath.Join(bucketDir, event.EventsPackName(chunkID))
 	_, statErr := os.Stat(packPath)
@@ -1572,7 +1572,7 @@ func TestEventsCold_FinishThenIndexFails_LeavesInertPack(t *testing.T) {
 	// Close is still safe/idempotent afterwards and does not remove the pack.
 	require.NoError(t, ing.close())
 	_, statErr = os.Stat(packPath)
-	require.NoError(t, statErr, "close after a committed Finish must not drop the pack")
+	require.NoError(t, statErr, "close after a successful Commit must not drop the pack")
 }
 
 // TestEventsCold_FinalizeAfterFailedIngest_Refuses asserts the failed-write
@@ -1807,7 +1807,7 @@ func TestTxhashColdWriter_FeeBumpBothHashes(t *testing.T) {
 	seq := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := newTxhashCold(txhashBinPath(coldDir), chunkID, nil, testTxhashSecret())
+	ing, err := newTxhashCold(txhashBinPath(coldDir), nil, testTxhashSecret())
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 

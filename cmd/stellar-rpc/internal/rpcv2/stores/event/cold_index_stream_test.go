@@ -169,3 +169,19 @@ func TestWriteColdIndexFromRuns_ReadsBack(t *testing.T) {
 		break // slot resolution exercised; full read path is covered by cold_reader tests
 	}
 }
+
+// TestSlotHeapPopClearsVacatedRef pins popMin's tail clear: without it the
+// vacated slot in the capacity tail keeps an already-emitted body reachable,
+// and no black-box test can see the difference (output is byte-identical
+// either way — this retention is memory-only).
+func TestSlotHeapPopClearsVacatedRef(t *testing.T) {
+	var h slotHeap
+	h.push(slotRecord{slot: 2, body: []byte{2}})
+	h.push(slotRecord{slot: 1, body: []byte{1}})
+	got := h.popMin()
+	require.Equal(t, uint32(1), got.slot)
+	require.Equal(t, uint32(2), h[0].slot, "root must be the surviving record")
+	require.NotNil(t, h[0].body, "surviving record keeps its body")
+	tail := h[:cap(h)][len(h)]
+	require.Equal(t, slotRecord{}, tail, "vacated slot must be fully zeroed — a stale record would pin an emitted body")
+}

@@ -2,7 +2,7 @@ package txhash
 
 import (
 	"encoding/binary"
-	"errors"
+	"hash/crc64"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -14,23 +14,20 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/internal/runset"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/internal/runset/runsettest"
 )
 
-// fakeManifest is an in-memory manifestStore. putErr, when set, fails every
-// PutRuns without recording anything.
+// fakeManifest is an in-memory runset.Manifest.
 type fakeManifest struct {
 	mu         sync.Mutex
 	names      []string
 	lastSealed uint32
-	putErr     error
 }
 
 func (m *fakeManifest) PutRuns(names []string, lastSealed uint32) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.putErr != nil {
-		return m.putErr
-	}
 	m.names = append([]string(nil), names...)
 	m.lastSealed = lastSealed
 	return nil
@@ -124,7 +121,7 @@ func (hh *hotIndexHarness) settle() {
 	require.NoError(hh.t, hh.h.reapSeal(true))
 }
 
-func testHotIndex(t *testing.T, dir string, m manifestStore) *HotIndex {
+func testHotIndex(t *testing.T, dir string, m runset.Manifest) *HotIndex {
 	h, err := NewHotIndex(dir, m)
 	require.NoError(t, err)
 	h.sealEvery = 8 // tiny window: many seals
@@ -156,6 +153,95 @@ func TestHotIndex_EquivalenceAcrossSeals(t *testing.T) {
 	hh.verifyAll()
 	// No merge tier: runs only accumulate, none are ever displaced.
 	assert.GreaterOrEqual(t, len(h.view.Load().runs), 2)
+}
+
+// repeatedHash builds the hash whose 32 bytes are all b — hand-written
+// fixtures whose sort order is obvious by inspection.
+func repeatedHash(b byte) [32]byte {
+	var h [32]byte
+	for i := range h {
+		h[i] = b
+	}
+	return h
+}
+
+// TestWriteRun_CrossRowDuplicateGoldenBytes pins EVERY byte of a run whose
+// window carries the same full hash in THREE different ledgers alongside a
+// tx-less ledger — the seal merge's duplicate contract, which nothing else
+// gates directly. TestHotIndex_EquivalenceAcrossSeals only asserts a
+// duplicate resolves to SOME containing ledger (require.Contains is
+// order-blind) and the run reader only checks hashes are non-decreasing, so
+// intra-run duplicate ORDER — the (hash, row) tie-break that emits equal
+// hashes oldest-ledger-first — was otherwise protected solely by RNG draws in
+// the freeze fixture, transitively and by accident.
+//
+// The expectation is written out by hand as (hash, seq) pairs in emission
+// order, so it pins the order the format PROMISES rather than whatever the
+// merge currently produces.
+func TestWriteRun_CrossRowDuplicateGoldenBytes(t *testing.T) {
+	encode := func(hashes ...[32]byte) []byte {
+		row, err := EncodeRow(hashes)
+		require.NoError(t, err)
+		return row
+	}
+	a, b, c := repeatedHash(0x11), repeatedHash(0x22), repeatedHash(0x33)
+	rows := []windowRow{
+		{seq: 100, bytes: encode(a, b)},
+		{seq: 101, bytes: encode()}, // tx-less ledger: the empty row, skipped
+		{seq: 102, bytes: encode(c, a)},
+		{seq: 103, bytes: encode(b, a)},
+	}
+	path := filepath.Join(t.TempDir(), "seal-000000.run")
+	_, err := writeRun(rows, path)
+	require.NoError(t, err)
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	// Ascending hash; equal hashes in ASCENDING LEDGER.
+	emitted := []struct {
+		hash [32]byte
+		seq  uint32
+	}{
+		{a, 100},
+		{a, 102},
+		{a, 103},
+		{b, 100},
+		{b, 103},
+		{c, 102},
+	}
+	payload := make([]byte, 0, len(emitted)*runRecordLen)
+	for _, e := range emitted {
+		payload = append(payload, e.hash[:]...)
+		payload = binary.LittleEndian.AppendUint32(payload, e.seq)
+	}
+	// The 40-byte header is written out with LITERAL magic and offsets, not
+	// the writer's own constants: a version bump or a relayout has to be
+	// re-declared here rather than passing silently on both sides.
+	want := make([]byte, 40, 40+len(payload))
+	copy(want, "TXHRUN01")
+	binary.LittleEndian.PutUint64(want[8:], uint64(len(emitted)))
+	binary.LittleEndian.PutUint32(want[16:], 100)
+	binary.LittleEndian.PutUint32(want[20:], 103)
+	binary.LittleEndian.PutUint64(want[24:], crc64.Checksum(payload, crcRunTable))
+	want = append(want, payload...)
+	require.Equal(t, want, got, "run bytes drifted from the pinned seal output")
+
+	// The pinned bytes are a VALID run: the drain re-verifies CRC64, hash
+	// order, seq containment and the header's promised count.
+	run, err := openSealedRun(path)
+	require.NoError(t, err)
+	defer run.close()
+	assert.Equal(t, len(emitted), run.records)
+
+	// The magic is a gate nothing else in the package covers. Corrupt the
+	// FIXED prefix, so this case outlives any version bump — the "TXHRUN01"
+	// literal above is the version pin.
+	bad := append([]byte(nil), got...)
+	bad[0] = 'X'
+	badPath := filepath.Join(t.TempDir(), "seal-000001.run")
+	require.NoError(t, os.WriteFile(badPath, bad, 0o644))
+	_, err = openSealedRun(badPath)
+	require.ErrorContains(t, err, "bad magic", "a foreign magic must not be parsed with our offsets")
 }
 
 // TestHotIndex_DenseChainViolationRejected pins ApplyRow's write-time
@@ -437,6 +523,57 @@ func TestHotIndex_LadderBoundaryTie(t *testing.T) {
 	require.ErrorIs(t, err, stores.ErrNotFound)
 }
 
+// TestHotIndex_WritePassRoutingEqualsDrainRebuild pins the one-pass trust
+// rule (runRouting): the routing state sealWindow builds while WRITING a run
+// — no post-write re-read — deep-equals what the warmup drain
+// (openSealedRun) rebuilds from the verified file: bloom bits, ladder
+// contents, record count, ledger range. The crafted window spans three
+// pages, splits equal-16-byte-prefix ranges across both page boundaries
+// (the ladder's tie geometry), and spreads the hashes over two ledgers so
+// the merge heap — not input order — dictates observation order.
+func TestHotIndex_WritePassRoutingEqualsDrainRebuild(t *testing.T) {
+	// 120 hashes with prefix 0x11, 120 with 0x22, 60 with 0x33: 300 records
+	// = two full pages + a tail, with the page boundaries (records 113 and
+	// 226) inside the 0x11 and 0x22 ranges respectively.
+	all := make([][32]byte, 0, 300)
+	for i := range uint32(120) {
+		all = append(all, prefixedHash(0x11, i))
+	}
+	for i := range uint32(120) {
+		all = append(all, prefixedHash(0x22, i))
+	}
+	for i := range uint32(60) {
+		all = append(all, prefixedHash(0x33, i))
+	}
+	var a, b [][32]byte
+	for i, h := range all {
+		if i%2 == 0 {
+			a = append(a, h)
+		} else {
+			b = append(b, h)
+		}
+	}
+	rowA, err := EncodeRow(a)
+	require.NoError(t, err)
+	rowB, err := EncodeRow(b)
+	require.NoError(t, err)
+
+	path := filepath.Join(t.TempDir(), "seal-000000.run")
+	fresh, err := sealWindow([]windowRow{{seq: 9, bytes: rowA}, {seq: 10, bytes: rowB}}, path)
+	require.NoError(t, err)
+	defer fresh.close()
+	require.Len(t, fresh.ladder, 3, "crafted run must span three pages")
+
+	reread, err := openSealedRun(path)
+	require.NoError(t, err)
+	defer reread.close()
+	assert.Equal(t, reread.bloom, fresh.bloom, "write-pass bloom diverges from drain rebuild")
+	assert.Equal(t, reread.ladder, fresh.ladder, "write-pass ladder diverges from drain rebuild")
+	assert.Equal(t, reread.records, fresh.records)
+	assert.Equal(t, reread.first, fresh.first)
+	assert.Equal(t, reread.last, fresh.last)
+}
+
 // TestHotIndex_WriterReaderRace: concurrent Gets (present + absent) while
 // the writer applies and seals. Run with -race.
 func TestHotIndex_WriterReaderRace(t *testing.T) {
@@ -473,6 +610,31 @@ func TestHotIndex_WriterReaderRace(t *testing.T) {
 	hh.verifyAll()
 }
 
+// TestHotIndex_DirentBarrierPrecedesManifestPut drives this engine through
+// its one publish shape — plain seals; no merge tier — and pins the
+// dirent-barrier-before-PutRuns order with the shared runsettest helper (the
+// rationale lives on AssertBarrierPrecedesEveryPut; the events twin pins the
+// same invariant over both of its shapes).
+func TestHotIndex_DirentBarrierPrecedesManifestPut(t *testing.T) {
+	dir := t.TempDir()
+	log := &runsettest.PublishLog{}
+	m := &runsettest.RecordingManifest{Log: log}
+	h := testHotIndex(t, dir, m) // sealEvery=8
+	defer h.Close()
+	h.fsyncDir = log.FsyncDir
+	hh := newHarness(t, h, 100)
+
+	for range 3 {
+		for range 8 {
+			hh.randomLedger(5, 0)
+		}
+		hh.settle()
+	}
+	require.Len(t, h.view.Load().runs, 3, "three settled cycles must have sealed three runs")
+
+	runsettest.AssertBarrierPrecedesEveryPut(t, log, dir, 3)
+}
+
 // TestRocksdbManifest_RoundTrip covers the RocksDB-backed manifest the
 // integration layer will hand to OpenHotIndex in step 2.
 func TestRocksdbManifest_RoundTrip(t *testing.T) {
@@ -505,27 +667,35 @@ func TestRocksdbManifest_RoundTrip(t *testing.T) {
 	assert.Equal(t, uint32(7), lastSealed)
 }
 
-// TestHotIndex_ManifestFailureDisposesRun pins reapSeal's manifest-failure
-// branch: a run the manifest never listed is unpublished and must be closed
-// and removed — the twin of the events contract.
-func TestHotIndex_ManifestFailureDisposesRun(t *testing.T) {
-	dir := t.TempDir()
-	m := &fakeManifest{}
-	h := testHotIndex(t, dir, m)
-	defer h.Close()
+// TestRocksdbManifest_PublishGoldenBytes pins the manifest VALUE bytes end
+// to end through runset.Publish and this engine's codec: 4B BE lastSealed ‖
+// csv of run basenames, live order then fresh. No byte-identity gate covers
+// manifest values (all six are cold-artifact gates), so this golden value is
+// the compatibility pin for warmups reading manifests written before the
+// publish protocol moved into runset. (Publish's dispose-on-failure contract
+// is pinned structurally in the runset package's own tests.)
+func TestRocksdbManifest_PublishGoldenBytes(t *testing.T) {
+	store, err := rocksdb.New(rocksdb.Config{
+		Path:           t.TempDir(),
+		ColumnFamilies: CFNames(),
+		Logger:         silentLogger(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
 
+	dir := t.TempDir()
 	row, err := EncodeRow([][32]byte{{1}, {2}})
 	require.NoError(t, err)
-	run, err := sealWindow([]windowRow{{seq: 5, bytes: row}}, filepath.Join(dir, "seal-000009.run"))
+	live, err := sealWindow([]windowRow{{seq: 4, bytes: row}}, filepath.Join(dir, "seal-000000.run"))
 	require.NoError(t, err)
+	defer live.close()
+	fresh, err := sealWindow([]windowRow{{seq: 5, bytes: row}}, filepath.Join(dir, "seal-000001.run"))
+	require.NoError(t, err)
+	defer fresh.close()
 
-	h.pendingSeal <- sealResult{run: run, rows: 1, lastSeq: 5}
-	h.sealInFlight = true
-	m.putErr = errors.New("manifest unavailable")
-
-	err = h.reapSeal(true)
-	require.ErrorContains(t, err, "hotindex manifest")
-	require.ErrorIs(t, run.file.Close(), os.ErrClosed, "un-listed run's handle must be closed")
-	_, serr := os.Stat(run.path)
-	require.ErrorIs(t, serr, os.ErrNotExist, "un-listed run's file must be removed")
+	require.NoError(t, runset.Publish(rocksdbManifest{store: store}, []*sealedRun{live}, fresh, 0x01020304))
+	val, found, err := store.Get("", txhashManifestKey)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, append([]byte{0x01, 0x02, 0x03, 0x04}, "seal-000000.run,seal-000001.run"...), val)
 }

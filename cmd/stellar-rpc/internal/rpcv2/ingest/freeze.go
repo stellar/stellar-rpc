@@ -4,9 +4,9 @@ package ingest
 // for the ONE case where the chunk's source is its own complete hot DB. Where
 // WriteColdChunk drains a raw-ledger stream (decompressing every hot frame to
 // feed derivation writers), this entry point takes NO ledger stream at all:
-// each artifact kind is built by a sequential scan of the CF that already
-// holds it in final form — ledgers as verbatim zstd frames, txhash as a
-// pre-sorted entry stream, events by CF merge (the landed freeze-by-merge).
+// each artifact kind is built from the hot state that already holds it in
+// final form — ledgers as verbatim zstd frames, txhash and events by merging
+// each engine's manifest-listed sealed runs with its un-sealed CF tail.
 // The signature is the invariant: with no stream parameter there is nothing
 // to drain, so the freeze cannot decompress by accident.
 //
