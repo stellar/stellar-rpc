@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"iter"
 	"math"
-	"os"
 	"sync"
 	"sync/atomic"
 
@@ -81,7 +80,12 @@ func OpenColdReader(path string) (*ColdReader, error) {
 		r:    packfile.Open(path, packfile.ReaderOptions{RecordDecoder: coldPackDecoder}),
 		path: path,
 	}
-	c.init = sync.OnceValues(c.loadHeader)
+	// Every error loadHeader can produce reaches callers through init, so the
+	// L2 translation belongs here rather than at each of its return points.
+	c.init = sync.OnceValues(func() (coldHeader, error) {
+		h, err := c.loadHeader()
+		return h, stores.TranslatePackErr(err)
+	})
 	return c, nil
 }
 
@@ -144,7 +148,7 @@ func (c *ColdReader) WithLedger(seq uint32, fn func(raw []byte) error) error {
 	case fnErr != nil:
 		return fnErr
 	case rerr != nil:
-		return translateReaderErr(rerr)
+		return stores.TranslatePackErr(rerr)
 	}
 	return nil
 }
@@ -179,7 +183,7 @@ func (c *ColdReader) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 		seq := start
 		for item, err := range c.r.ReadRange(startPos, count) {
 			if err != nil {
-				yield(Entry{}, translateReaderErr(err))
+				yield(Entry{}, stores.TranslatePackErr(err))
 				return
 			}
 			// Entry.Bytes is the packfile's: valid only until the loop body
@@ -193,15 +197,3 @@ func (c *ColdReader) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 }
 
 func (c *ColdReader) Close() error { return c.r.Close() }
-
-// translateReaderErr maps packfile- and os-level errors to the
-// stores sentinels.
-func translateReaderErr(err error) error {
-	if errors.Is(err, os.ErrClosed) {
-		return stores.ErrStoreClosed
-	}
-	if errors.Is(err, packfile.ErrCorrupt) {
-		return fmt.Errorf("%w: %w", stores.ErrCorrupt, err)
-	}
-	return err
-}
