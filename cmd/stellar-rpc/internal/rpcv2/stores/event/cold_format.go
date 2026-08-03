@@ -107,6 +107,13 @@ const eventsPackItemsPerRecord = 128
 // anyway.
 const indexPackItemsPerRecord = 128
 
+// indexPackBytesPerSync smooths the index.pack build's dirty pages into
+// 1MiB background-writeback initiations, matching the events.pack build's
+// coldBytesPerSync and the packfile writer docs' rationale: spreading
+// writeback keeps the final Finish fsync from flushing a multi-GB burst,
+// a large win on networked/slow cold storage.
+const indexPackBytesPerSync = packfile.DefaultBytesPerSync
+
 // newEventsPackEncoder constructs a fresh zstd encoder for one
 // packfile writer goroutine. RecordEncoder is not safe for concurrent
 // use, so the packfile writer invokes this per worker.

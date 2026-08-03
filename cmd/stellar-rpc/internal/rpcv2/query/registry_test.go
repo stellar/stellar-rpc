@@ -2,7 +2,6 @@ package query
 
 import (
 	"bytes"
-	"context"
 	"path/filepath"
 	"testing"
 
@@ -10,7 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
@@ -247,9 +245,7 @@ func TestTryCloseHandle_BusyRetainsThenRetryDrains(t *testing.T) {
 	go func() {
 		defer close(done)
 		first := true
-		for _, ierr := range db.Source().RawLedgers(
-			context.Background(), ledgerbackend.BoundedRange(c.FirstLedger(), c.FirstLedger()),
-		) {
+		for _, ierr := range db.Ledgers().IterateLedgers(c.FirstLedger(), c.FirstLedger()) {
 			if ierr != nil {
 				return
 			}

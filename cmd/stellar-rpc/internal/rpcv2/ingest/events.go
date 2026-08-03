@@ -34,11 +34,11 @@ type eventsCold struct {
 	offsets    *events.LedgerOffsets
 	bucketDir  string
 	metrics    coldMetrics
-	// failed latches any write error. A failed write can leave the mirror
-	// and the pack ahead of offsets (offsets is the per-ledger commit point,
-	// appended last), so a subsequent finalize would commit an index whose
-	// bitmaps reference event IDs past offsets.TotalEvents(). The latch makes
-	// finalize refuse instead — the chunk must be abandoned via close and
+	// failed latches any write error. A failed write can leave the spilled
+	// runs and the pack ahead of offsets (offsets is the per-ledger commit
+	// point, appended last), so a subsequent finalize would build an index
+	// whose bitmaps reference event IDs past offsets.TotalEvents(). The
+	// latch makes finalize refuse instead — the chunk must be abandoned via close and
 	// retried from scratch (see coldChunk's contract).
 	failed bool
 }
@@ -156,7 +156,7 @@ func (e *eventsCold) write(seq uint32, closedAt int64, txParts []sdkingest.Ledge
 }
 
 // finalize writes the events.pack trailer (Finish) + materializes the cold
-// index (WriteColdIndex). An eventless chunk (zero terms — the common case
+// index from the spilled runs (WriteColdIndexFromRuns). An eventless chunk (zero terms — the common case
 // for pre-Soroban backfill ranges) is handled inside WriteColdIndex, which
 // publishes a valid empty index, so all three cold artifacts exist for every
 // finalized chunk. An error from either step means the chunk did not durably

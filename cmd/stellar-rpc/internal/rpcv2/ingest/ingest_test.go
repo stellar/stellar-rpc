@@ -1093,9 +1093,10 @@ func TestWriteColdChunk_EventsCold_Readback(t *testing.T) {
 // ───────────────────────── drain stream errors ─────────────────────────
 //
 // The per-seq order guard the shared cursor used to run in drain moved to the
-// SOURCE (packStream reads positionally; hotLedgerStream key-checks its keyspace,
-// see TestSource_RejectsGap; the SDK backends validate their own output), so drain
-// keeps only its overrun + completeness checks on a local counter. The tests that
+// SOURCE (packStream reads positionally; the SDK backends validate their own
+// output; the hot-DB freeze path takes no stream at all — FreezeColdChunk
+// scans CFs with its own key-derived checks), so drain keeps only its overrun
+// + completeness checks on a local counter. The tests that
 // fed an artificially mis-ordered stream to drain were deleted with the cursor.
 
 // TestWriteColdChunk_DrainStreamError_NoArtifact exercises the drain mid-stream error
