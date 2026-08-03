@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+## [v28.0.0](https://github.com/stellar/stellar-rpc/compare/v27.1.1...v28.0.0)
+
+### Added
+* XDR has been updated to support Protocol 28 (CAP-0083, CAP-0085) ([#913](https://github.com/stellar/stellar-rpc/pull/913)).
+* The preflight hosts have been rotated to soroban-env-host 28.0.1 (27.0.1 for the previous protocol) and integration tests now run against stellar-core 28.0.0 ([#913](https://github.com/stellar/stellar-rpc/pull/913)).
 
 ## [v27.0.0](https://github.com/stellar/stellar-rpc/compare/v26.0.1...v27.0.0)
 
