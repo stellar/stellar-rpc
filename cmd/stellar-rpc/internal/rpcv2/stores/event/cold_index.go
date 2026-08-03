@@ -50,9 +50,12 @@ import (
 // hit a slow (*Bitmap).lazyOR path at query time and K≥12 regresses
 // catastrophically.
 //
-// Both cold backfill and the live-chunk freeze build a Bitmaps single-threaded by
-// re-deriving terms from raw LCMs (per-event events.TermsForBytes + Bitmaps.AddTo) and
-// hand it directly here.
+// PRODUCTION-DEAD, KEPT AS THE ORACLE: no shipping path calls this anymore —
+// both cold backfill and the live-chunk freeze stream from spill runs via
+// WriteColdIndexFromRuns. This in-memory builder is retained because the
+// byte-identity gate (cold_index_stream_test.go) pins the streaming build's
+// output against it; a format change must be mirrored here or the gate stops
+// meaning anything.
 //
 // index.hash is the MPHF serialized via buildMPHF.
 //

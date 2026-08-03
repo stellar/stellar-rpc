@@ -163,6 +163,11 @@ func resolveCFNames(cfg Config) []string {
 	return out
 }
 
+// Path returns the store's on-disk directory (as configured; not
+// canonicalized). The events hot index places its run files under it so the
+// chunk lifecycle's directory wipe covers them too.
+func (s *Store) Path() string { return s.cfg.Path }
+
 // Put writes one (key, value) to cf. cf == "" normalizes to "default".
 // For atomic multi-write, use Batch.
 func (s *Store) Put(cf string, key, value []byte) error {
@@ -490,7 +495,7 @@ func (s *Store) teardownLocked() {
 	// warns and Close proceeds.
 	if s.statsEnabled {
 		statsPath := filepath.Join(s.cfg.Path, "STATISTICS.txt")
-		if werr := os.WriteFile(statsPath, []byte(s.opts.GetStatisticsString()), 0o644); werr != nil {
+		if werr := os.WriteFile(statsPath, []byte(s.opts.GetStatisticsString()), 0o600); werr != nil {
 			s.cfg.Logger.WithError(werr).Warnf("rocksdb: writing %s", statsPath)
 		} else {
 			s.cfg.Logger.Infof("rocksdb: statistics dumped to %s", statsPath)
