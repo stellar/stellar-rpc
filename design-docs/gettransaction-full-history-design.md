@@ -76,16 +76,30 @@ Window 0 spans ledgers 2–10,000,001 (chunks 0–999), window N spans N×10M+2 
 
 ### 5.1 Storage
 
-The hot tier is a plain key-value table, one per chunk, stored as a `txhash` column family in that chunk's RocksDB:
+The hot tier is a packed-row engine, one per chunk, layered over a `txhash`
+column family in that chunk's RocksDB (the hot-latency campaign's wave 2
+replaced the original one-key-per-hash table, whose ~6,000 random 32-byte
+memtable keys per ledger dominated commit latency):
 
-- **Key**: the full 32-byte transaction hash.
-- **Value**: the 4-byte ledger sequence.
+- **CF row**: one seq-keyed row per ledger holding that ledger's hashes,
+  sorted (`hot_rows.go`); written in the same atomic batch as the rest of
+  the ledger, so a ledger's hashes remain all-or-nothing.
+- **In-memory window**: the last 256 ledgers' rows, merged and sealed into
+  checksummed, hash-sorted run files (`TXHRUN01`) with bloom + page-ladder
+  routing built in the write pass; a manifest names the live runs and
+  warmup drain-verifies them (see `stores/txhash/hotindex_seal.go`).
 
-Storing the full hash makes the hot tier **exact**: a lookup either finds the hash or it doesn't. There are no false positives to screen out and nothing to verify. The table is tuned for point lookups.
+Full 32-byte hashes are stored throughout, so the hot tier stays **exact**:
+a lookup either finds the hash or it doesn't — bloom routing only prunes
+which run is read, never what a probe verifies against.
 
 ### 5.2 Write path
 
-Writing is straightforward. As each ledger is ingested, one `(hash, seq)` entry is added for every transaction hash in it — two entries for a fee-bump (outer and inner) — in the same atomic write that stores the rest of the ledger. So a ledger's hashes are written all-or-nothing, together with the rest of the ledger.
+As each ledger is ingested, its transaction hashes — two for a fee-bump
+(outer and inner) — are encoded into that ledger's packed row in the same
+atomic write that stores the rest of the ledger. Every 256 ledgers the
+window seals into a run file off the ingest goroutine; the freeze later
+merges the manifest-listed runs with the un-sealed tail rows verbatim.
 
 ### 5.3 Lifetime
 
