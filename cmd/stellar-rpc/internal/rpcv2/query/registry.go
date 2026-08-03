@@ -130,9 +130,10 @@ func (h *handleSet) clone() *handleSet {
 // is closed.
 func OpenRegistry(
 	cat *catalog.Catalog, retention geometry.Retention, live *hotchunk.DB, lastCommitted uint32,
+	tuning hotchunk.Tuning,
 ) (*Registry, error) {
 	r := NewRegistry(cat, retention)
-	if err := r.publishReadyHandles(live.ChunkID(), cat.Logger()); err != nil {
+	if err := r.publishReadyHandles(live.ChunkID(), cat.Logger(), tuning); err != nil {
 		r.Close()
 		return nil, err
 	}
@@ -347,7 +348,9 @@ func (r *Registry) NewReadView() (*ReadView, error) {
 // the events facade is warmed (a read-only open is ledgers-only), and the
 // registry closes them at discard. Runs at startup before any read view is
 // acquired.
-func (r *Registry) publishReadyHandles(liveChunk chunk.ID, logger *supportlog.Entry) error {
+func (r *Registry) publishReadyHandles(
+	liveChunk chunk.ID, logger *supportlog.Entry, tuning hotchunk.Tuning,
+) error {
 	ready, err := r.catalog.ReadyHotChunkKeys()
 	if err != nil {
 		return fmt.Errorf("bootstrap: read ready hot chunks: %w", err)
@@ -356,7 +359,8 @@ func (r *Registry) publishReadyHandles(liveChunk chunk.ID, logger *supportlog.En
 		if c == liveChunk {
 			continue
 		}
-		db, err := hotchunk.OpenReadyWrite(geometry.HotReady, r.catalog.Layout().HotChunkPath(c), c, logger)
+		db, err := hotchunk.OpenReadyWrite(
+			geometry.HotReady, r.catalog.Layout().HotChunkPath(c), c, logger, tuning)
 		if err != nil {
 			return fmt.Errorf("bootstrap: open hot chunk %s: %w", c, err)
 		}

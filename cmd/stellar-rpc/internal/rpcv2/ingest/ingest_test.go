@@ -489,7 +489,7 @@ func TestLedgerColdWriter_Readback(t *testing.T) {
 	raw := marshalLCM(t, seq)
 	coldDir := t.TempDir()
 
-	ing, err := newLedgerCold(packPath(coldDir, chunkID), chunkID, nil)
+	ing, err := newLedgerCold(packPath(coldDir, chunkID), chunkID, nil, ledger.DefaultZstdEncodeWorkers)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
@@ -1170,7 +1170,7 @@ func hotTestLogger() *supportlog.Entry {
 // TestHotService_FeedsFeeWindowsAfterCommit: a successfully committed ledger's
 // fee observations land in the injected windows.
 func TestHotService_FeedsFeeWindowsAfterCommit(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger(), hotchunk.Tuning{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1192,7 +1192,7 @@ func TestHotService_FeedsFeeWindowsAfterCommit(t *testing.T) {
 // next-expected seq) contributes nothing to the windows, so its retry cannot
 // double-count.
 func TestHotService_RejectedLedgerFeedsNoFees(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger(), hotchunk.Tuning{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1219,7 +1219,7 @@ func TestHotService_RejectedLedgerFeedsNoFees(t *testing.T) {
 // the ledger is durably committed, the windows stay unfed, and the loop's
 // caller sees the error (tip-only trusted input, mirroring extract failures).
 func TestHotService_FeeClassificationErrorFailsCommittedLedger(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger(), hotchunk.Tuning{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1243,7 +1243,7 @@ func TestHotService_FeeClassificationErrorFailsCommittedLedger(t *testing.T) {
 // once, the write phases carry per-type volume (extract/commit/apply carry none),
 // and no phase carries an error.
 func TestHotService_EmitsEveryPhaseOnSuccess(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1270,7 +1270,7 @@ func TestHotService_EmitsEveryPhaseOnSuccess(t *testing.T) {
 // DB) surfaces the error on the commit phase — by construction, not by a
 // separately-maintained label — and emits no items on the failure path.
 func TestHotService_CommitErrorLandsOnCommitPhase(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	require.NoError(t, db.Close()) // closed => the batch commit fails
 
@@ -1294,7 +1294,7 @@ func TestHotService_CommitErrorLandsOnCommitPhase(t *testing.T) {
 // failure lands by construction — and emits ONLY that phase (no batch was opened, so
 // no later phase ran).
 func TestHotService_ExtractFailureLandsOnExtractPhase(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1318,7 +1318,7 @@ func TestHotService_ExtractFailureLandsOnExtractPhase(t *testing.T) {
 // Failed's zero value, a NON-zero Failed is the discriminator that proves the phase was
 // actually assigned rather than defaulted.
 func TestHotService_EventsQueueFailureLandsOnEventsPhase(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1345,7 +1345,7 @@ func TestHotService_EventsQueueFailureLandsOnEventsPhase(t *testing.T) {
 // that completed earlier phases carry theirs too. Uses the same out-of-order failure as
 // above, whose failed phase is the events queue.
 func TestHotService_FailedPhaseCarriesPartialDuration(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 

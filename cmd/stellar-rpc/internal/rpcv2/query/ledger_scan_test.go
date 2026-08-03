@@ -20,11 +20,14 @@ import (
 // zero-tx ledgers, marks the chunk ready, and publishes the handle on r.
 func seedHotLedgers(t *testing.T, cat *catalog.Catalog, r *Registry, c chunk.ID, seqs ...uint32) {
 	t.Helper()
-	lcms := make([][]byte, 0, len(seqs))
+	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger(), hotchunk.DefaultTuning())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
 	for _, seq := range seqs {
-		lcms = append(lcms, rpcv2test.ZeroTxLCMBytes(t, seq))
+		rpcv2test.IngestLedger(t, db, seq, rpcv2test.ZeroTxLCMBytes(t, seq))
 	}
-	rpcv2test.SeedHotChunkLCMs(t, cat, c, func(db *hotchunk.DB) { r.PublishHandle(c, db) }, lcms...)
+	require.NoError(t, cat.FlipHotReady(c))
+	r.PublishHandle(c, db)
 }
 
 // borderFixture seeds two adjacent hot chunks, each with its first two ledgers
@@ -138,7 +141,7 @@ func TestScanLedgers_ColdHotBorder(t *testing.T) {
 	require.NoError(t, cat.FlipChunkFrozen(c0, geometry.KindLedgers))
 
 	// c0 is ALSO ready-hot with a published (empty) handle: cold must win.
-	emptyHot, err := hotchunk.Open(cat.Layout().HotChunkPath(c0), c0, silentLogger())
+	emptyHot, err := hotchunk.Open(cat.Layout().HotChunkPath(c0), c0, silentLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = emptyHot.Close() })
 	require.NoError(t, cat.FlipHotReady(c0))

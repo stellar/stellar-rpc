@@ -104,7 +104,7 @@ func TestLedgerReader_Hot(t *testing.T) {
 	const c chunk.ID = 5
 	cat := openTestCatalog(t, silentLogger())
 	r := NewRegistry(cat, geometry.NewRetention(0, 0))
-	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
+	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	rpcv2test.IngestLedger(t, db, c.FirstLedger(), rpcv2test.ZeroTxLCMBytes(t, c.FirstLedger()))
@@ -129,7 +129,7 @@ func TestEventReader_Hot(t *testing.T) {
 	const c chunk.ID = 5
 	cat := openTestCatalog(t, silentLogger())
 	r := NewRegistry(cat, geometry.NewRetention(0, 0))
-	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
+	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	rpcv2test.IngestLedger(t, db, c.FirstLedger(), rpcv2test.ZeroTxLCMBytes(t, c.FirstLedger()))
@@ -257,7 +257,7 @@ func TestUnavailableResolves_CountsNoServingStore(t *testing.T) {
 func TestReadViewWithLedger_SubGenesisIsNotFound(t *testing.T) {
 	const c chunk.ID = 5
 	a, _ := viewFor(t, func(cat *catalog.Catalog, r *Registry) {
-		db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
+		db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger(), hotchunk.DefaultTuning())
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = db.Close() })
 		require.NoError(t, cat.FlipHotReady(c))

@@ -28,10 +28,20 @@ type Config struct {
 	// index's routing — the caller derives it (event.ColdIndexSecret) so the
 	// build is deterministic. Required when Events is set — no unkeyed fallback.
 	EventsSecret []byte
+
+	// ZstdEncodeWorkers is the walk materializer's ledger-frame encode
+	// parallelism (0 = single-threaded). FORMAT-AFFECTING: it must equal the
+	// hot tier's hotchunk.Tuning value, because the freeze copies hot frames
+	// into the cold pack verbatim while the walk re-encodes the same ledgers
+	// — the same chunk's pack must be byte-identical whichever materializer
+	// built it (the freeze-vs-walk identity gates arbitrate). One resolved
+	// daemon-config value (storage.zstd_encode_workers) feeds both. Ignored
+	// by FreezeColdChunk (verbatim copy, no encoder).
+	ZstdEncodeWorkers int
 }
 
-// validate rejects a Config with no enabled data types, or a txhash/events
-// config missing its cold-index secret.
+// validate rejects a Config with no enabled data types, a txhash/events
+// config missing its cold-index secret, or a negative encode-workers count.
 func (c Config) validate() error {
 	if !c.Ledgers && !c.Txhash && !c.Events {
 		return errors.New("ingest: Config enables no data types (set at least one of Ledgers/Txhash/Events)")
@@ -52,6 +62,9 @@ func (c Config) validate() error {
 	}
 	if c.Events && isZeroSecret(c.EventsSecret) {
 		return errors.New("ingest: EventsSecret is all zero (blinding disabled — derive a per-index secret)")
+	}
+	if c.ZstdEncodeWorkers < 0 {
+		return errors.New("ingest: Config.ZstdEncodeWorkers must be >= 0 (0 = single-threaded)")
 	}
 	return nil
 }

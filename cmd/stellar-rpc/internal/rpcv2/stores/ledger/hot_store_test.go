@@ -46,7 +46,7 @@ func openTestHotStoreAt(t *testing.T, path string) (*HotStore, *rocksdb.Store) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
-	return NewWithStore(store), store
+	return NewWithStore(store, DefaultZstdEncodeWorkers), store
 }
 
 func TestHotStore_AddGetRoundTripVerbatim(t *testing.T) {
@@ -555,7 +555,7 @@ func readLedgerRaw(r interface {
 // predecessor was measured losing it ~1-in-5 ledgers to sync.Pool's
 // GC-emptying, re-allocating a worst-case dst (~15MB at stress) each time.
 func TestStartCompress_StateSurvivesGC(t *testing.T) {
-	h := NewWithStore(nil)                                  // StartCompress/Discard never touch the store
+	h := NewWithStore(nil, DefaultZstdEncodeWorkers)        // StartCompress/Discard never touch the store
 	payload := bytes.Repeat([]byte("ledger bytes "), 1<<16) // ~832KB
 
 	warm := h.StartCompress(Entry{Seq: 1, Bytes: payload})
@@ -581,7 +581,7 @@ func TestStartCompress_StateSurvivesGC(t *testing.T) {
 // second in-flight compression panics loudly instead of racing the owned
 // state; the latch releases on join/Discard.
 func TestStartCompress_SingleFlightGuard(t *testing.T) {
-	h := NewWithStore(nil)
+	h := NewWithStore(nil, DefaultZstdEncodeWorkers)
 	payload := []byte("x")
 
 	first := h.StartCompress(Entry{Seq: 1, Bytes: payload})
