@@ -169,6 +169,10 @@ func WriteColdIndex(
 		Format:         indexPackFormat,
 		ItemsPerRecord: indexPackItemsPerRecord,
 		Overwrite:      true,
+		// Smooth the multi-GB build's dirty pages into background writeback
+		// instead of one Finish-time flush burst (the burst stalls a
+		// co-located hot tier's WAL fdatasync — 2026-07-24 freeze traces).
+		BytesPerSync: indexPackBytesPerSync,
 	})
 	if err != nil {
 		return fmt.Errorf("events: create index.pack at %s: %w", indexPackPath, err)

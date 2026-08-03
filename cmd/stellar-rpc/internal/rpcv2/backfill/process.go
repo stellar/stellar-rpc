@@ -124,23 +124,27 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 		return fmt.Errorf("mark freezing chunk %s %s: %w", chunkID, artifacts, merr)
 	}
 
-	// one-write:create — materialize this chunk's cold artifacts from the resolved
-	// source's raw ledger iterator. WriteColdChunk is source-blind.
+	// one-write:create — materialize this chunk's cold artifacts. Two
+	// materializers, dispatched on what backfillSource resolved: a complete
+	// hot DB freezes by CF scan/merge (FreezeColdChunk — no raw walk, no
+	// decompression; the closeSource defer keeps the DB open through the
+	// pass), any other source re-derives from its raw ledger iterator
+	// (WriteColdChunk, which is source-blind).
 	dirs := ingest.ColdDirs{
 		LedgerPack: layout.LedgerPackPath(chunkID),
 		TxhashBin:  layout.TxHashBinPath(chunkID),
 		EventsDir:  layout.EventsBucketDir(chunkID),
 	}
-	raw := src.RawLedgers(ctx, ledgerbackend.BoundedRange(chunkID.FirstLedger(), chunkID.LastLedger()))
-	// When the source IS the chunk's complete hot DB, the events artifacts are
-	// built by merging its CFs (freeze-by-merge) rather than re-deriving from
-	// the raw walk; the closeSource defer keeps the DB open through finalize.
 	icfg := ingestConfigFor(artifacts, chunkID, cfg)
-	icfg.EventsFreezeDB = hotDB
-	if rerr := ingest.WriteColdChunk(
-		ctx, cfg.Logger, chunkID, raw, dirs, cfg.Sink, icfg,
-	); rerr != nil {
-		return fmt.Errorf("cold ingest chunk %s %s: %w", chunkID, artifacts, rerr)
+	if hotDB != nil {
+		if rerr := ingest.FreezeColdChunk(ctx, cfg.Logger, chunkID, hotDB, dirs, cfg.Sink, icfg); rerr != nil {
+			return fmt.Errorf("freeze chunk %s %s: %w", chunkID, artifacts, rerr)
+		}
+	} else {
+		raw := src.RawLedgers(ctx, ledgerbackend.BoundedRange(chunkID.FirstLedger(), chunkID.LastLedger()))
+		if rerr := ingest.WriteColdChunk(ctx, cfg.Logger, chunkID, raw, dirs, cfg.Sink, icfg); rerr != nil {
+			return fmt.Errorf("cold ingest chunk %s %s: %w", chunkID, artifacts, rerr)
+		}
 	}
 
 	// one-write:barrier — fsync each file and its dirents before the keys flip.
@@ -161,7 +165,7 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 	return nil
 }
 
-// backfillSource picks a chunk's ledger source (+ a closer for an opened hot DB;
+// backfillSource picks a chunk's source (+ a closer for an opened hot DB;
 // no-op otherwise), in preference order:
 //  1. a ready, COMPLETE hot tier (decision (a): maxCommittedSeq >= last ledger);
 //     incomplete-but-present is staleness that falls through (re-derivation
@@ -169,6 +173,11 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 //     (read-only open, never auto-healed);
 //  2. the frozen local .pack, unless ledgers is itself requested (circular);
 //  3. the bulk backend, gated by a bounded waitForCoverage on its Tip.
+//
+// EXACTLY ONE of (stream, hot DB) is non-nil on success: the hot branch
+// returns the DB alone (its chunks freeze by CF scan — FreezeColdChunk —
+// with no ledger stream in existence), the other branches return a raw
+// stream alone. processChunk dispatches its materializer on that.
 func backfillSource(
 	ctx context.Context, chunkID chunk.ID, artifacts catalog.ArtifactSet, cfg ProcessConfig,
 ) (ledgerbackend.LedgerStream, func() error, *hotchunk.DB, error) {
@@ -178,15 +187,15 @@ func backfillSource(
 
 	// (1) Hot branch: only when the hot key is "ready". A "transient" key (mid-op
 	// or recovery-demoted) is not a read source; an absent key falls through.
-	// The hot DB handle rides along so the freeze can build the cold events
-	// artifacts by merging its CFs (freeze-by-merge) instead of re-deriving.
-	hot, src, closer, used, herr := resolveHotSource(chunkID, cfg)
+	// A complete hot DB is returned WITHOUT a stream: all of its chunk's
+	// artifacts freeze straight from its CFs.
+	hot, closer, used, herr := resolveHotSource(chunkID, cfg)
 	if herr != nil {
 		return nil, noClose, nil, herr // hot-DB open failure — fails the run, never auto-healed
 	}
 	if used {
 		cfg.Logger.Debugf("backfillSource: chunk %s from complete hot tier", chunkID)
-		return src, closer, hot, nil
+		return nil, closer, hot, nil
 	}
 
 	// (2) Frozen local .pack, only when ledgers is not requested (producing ledgers
@@ -225,26 +234,26 @@ func backfillSource(
 }
 
 // resolveHotSource applies the hot branch end to end: it reads the hot key and,
-// only when "ready", tries the hot tier. used=true → src/closer are the hot
+// only when "ready", tries the hot tier. used=true → the DB/closer are the hot
 // source; used=false → no "ready" key or present-but-incomplete (caller falls
 // through); err → a "ready" DB that won't open (fails the run). Keeps backfillSource's
 // hot branch flat.
 func resolveHotSource(
 	chunkID chunk.ID, cfg ProcessConfig,
-) (*hotchunk.DB, ledgerbackend.LedgerStream, func() error, bool, error) {
+) (*hotchunk.DB, func() error, bool, error) {
 	// Prefer the registry's shared handle when it holds this chunk; read through it
 	// and never close it — the registry owns the handle.
 	if cfg.HotHandle != nil {
 		if db, ok := cfg.HotHandle(chunkID); ok {
-			return db, db.Source(), func() error { return nil }, true, nil
+			return db, func() error { return nil }, true, nil
 		}
 	}
 	hotState, err := cfg.Catalog.HotState(chunkID)
 	if err != nil {
-		return nil, nil, nil, false, fmt.Errorf("read hot state chunk %s: %w", chunkID, err)
+		return nil, nil, false, fmt.Errorf("read hot state chunk %s: %w", chunkID, err)
 	}
 	if hotState != geometry.HotReady {
-		return nil, nil, nil, false, nil // "transient"/absent: not a read source
+		return nil, nil, false, nil // "transient"/absent: not a read source
 	}
 	return tryHotSource(hotState, chunkID, cfg)
 }
@@ -256,31 +265,31 @@ func resolveHotSource(
 // — an ordinary run-failing error, detected lazily on the open.
 func tryHotSource(
 	state geometry.HotState, chunkID chunk.ID, cfg ProcessConfig,
-) (*hotchunk.DB, ledgerbackend.LedgerStream, func() error, bool, error) {
+) (*hotchunk.DB, func() error, bool, error) {
 	dir := cfg.Catalog.Layout().HotChunkPath(chunkID)
 	// Open the chunk's shared multi-CF DB READ-ONLY via the single ready-open
-	// enforcement site: the freeze reads its ledgers to re-derive the cold artifacts
+	// enforcement site: the freeze scans its CFs to build the cold artifacts
 	// and must never mutate it (the read-only open replays any un-synced WAL into
 	// memtables but persists nothing). An absent or gutted "ready" DB fails the open
 	// — fails the run, never auto-created.
 	hot, err := hotchunk.OpenReadyView(state, dir, chunkID, cfg.Logger)
 	if err != nil {
-		return nil, nil, nil, false, err
+		return nil, nil, false, err
 	}
 	maxSeq, present, merr := hot.MaxCommittedSeq()
 	if merr != nil {
 		_ = hot.Close()
 		// A read error against an opened DB: the DB opened but cannot answer its
 		// own progress. Surface it (fails the run), don't treat as staleness.
-		return nil, nil, nil, false, fmt.Errorf("chunk %s: read hot max committed seq: %w", chunkID, merr)
+		return nil, nil, false, fmt.Errorf("chunk %s: read hot max committed seq: %w", chunkID, merr)
 	}
 	// decision (a): complete iff the single DB's maxCommittedSeq reaches the chunk's
 	// last ledger. An empty DB (present==false) cannot be complete.
 	if present && maxSeq >= chunkID.LastLedger() {
-		return hot, hot.Source(), hot.Close, true, nil
+		return hot, hot.Close, true, nil
 	}
 	// Present but incomplete: legitimate staleness — caller falls through.
 	cfg.Logger.Debugf("backfillSource: chunk %s hot tier present but incomplete; falling through", chunkID)
 	_ = hot.Close()
-	return nil, nil, nil, false, nil
+	return nil, nil, false, nil
 }

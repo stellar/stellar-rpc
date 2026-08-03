@@ -27,6 +27,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event/runspill"
 	"hash/crc32"
 	"io"
 	"io/fs"
@@ -35,11 +36,11 @@ import (
 
 	"github.com/RoaringBitmap/roaring/v2"
 
+	"github.com/stellar/streamhash"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event/runspill"
-	"github.com/stellar/streamhash"
 )
 
 // maxReorderEntries bounds pass B's slot-reorder heap by RECORD COUNT — the
@@ -90,35 +91,10 @@ func WriteColdIndexFromRuns(
 		}
 	}()
 
-	// Pass A: keys → SortedBuilder → index.hash. Options must mirror
-	// buildMPHF's exactly (metadata included) — that is what pins
-	// byte-identity with the unsorted oracle's output.
-	builder, err := streamhash.NewSortedBuilder(ctx, indexHashPath, total,
-		streamhash.WithMetadata(encodeEventsMeta(secret)))
-	if err != nil {
-		return fmt.Errorf("events: create sorted streamhash builder: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			_ = builder.Close()
-		}
-	}()
-	var fed int
-	if err = streamTermsRun(termsRunPath, func(term TermKey, _ []byte) error {
-		// ctx.Err takes a mutex; per-term polling costs tens of ms over
-		// millions of terms. Poll on the freeze scans' shared cadence.
-		if fed%256 == 0 {
-			if cerr := ctx.Err(); cerr != nil {
-				return cerr
-			}
-		}
-		fed++
-		return builder.AddKey(term[:], 0)
-	}); err != nil {
-		return fmt.Errorf("events: feed sorted builder: %w", err)
-	}
-	if err = builder.Finish(); err != nil {
-		return fmt.Errorf("events: finalize index.hash at %s: %w", indexHashPath, err)
+	// Pass A: keys → SortedBuilder → index.hash. The run keys are already
+	// blinded (see the function doc); the secret rides only in the metadata.
+	if err = buildSortedHash(ctx, termsRunPath, indexHashPath, total, secret); err != nil {
+		return err
 	}
 	m, err := openMPHF(indexHashPath)
 	if err != nil {
@@ -131,6 +107,9 @@ func WriteColdIndexFromRuns(
 		Format:         indexPackFormat,
 		ItemsPerRecord: indexPackItemsPerRecord,
 		Overwrite:      true,
+		// Same smoothing rationale as the non-streaming builder: never let
+		// the index.pack accumulate as one Finish-time flush burst.
+		BytesPerSync: indexPackBytesPerSync,
 	})
 	if err != nil {
 		return fmt.Errorf("events: create index.pack at %s: %w", indexPackPath, err)
@@ -141,6 +120,47 @@ func WriteColdIndexFromRuns(
 		}
 		return err
 	}
+	return nil
+}
+
+// buildSortedHash is pass A: every terms.run key feeds a SortedBuilder and
+// index.hash is finalized. Default options only — that is what pins
+// byte-identity with buildMPHF's unsorted output.
+func buildSortedHash(
+	ctx context.Context, termsRunPath, indexHashPath string, total uint64,
+	secret [stores.SecretLen]byte,
+) error {
+	// Options must mirror buildMPHF's exactly (metadata included) — that is
+	// what pins byte-identity with the unsorted oracle's output.
+	builder, err := streamhash.NewSortedBuilder(ctx, indexHashPath, total,
+		streamhash.WithMetadata(encodeEventsMeta(secret)))
+	if err != nil {
+		return fmt.Errorf("events: create sorted streamhash builder: %w", err)
+	}
+	finished := false
+	defer func() {
+		if !finished {
+			_ = builder.Close()
+		}
+	}()
+	var fed int
+	if err := streamTermsRun(termsRunPath, func(term TermKey, _ []byte) error {
+		// ctx.Err takes a mutex; per-term polling costs tens of ms over
+		// millions of terms. Poll on the freeze scans' shared cadence.
+		if fed%256 == 0 {
+			if cerr := ctx.Err(); cerr != nil {
+				return cerr
+			}
+		}
+		fed++
+		return builder.AddKey(term[:], 0)
+	}); err != nil {
+		return fmt.Errorf("events: feed sorted builder: %w", err)
+	}
+	if err := builder.Finish(); err != nil {
+		return fmt.Errorf("events: finalize index.hash at %s: %w", indexHashPath, err)
+	}
+	finished = true
 	return nil
 }
 
@@ -178,7 +198,7 @@ func writeTermsRun(path string, runPaths []string) (uint64, error) {
 			}
 			recBuf = recBuf[:0]
 			recBuf = append(recBuf, term[:]...)
-			recBuf = binary.AppendUvarint(recBuf, uint64(bmBuf.Len()))
+			recBuf = binary.AppendUvarint(recBuf, uint64(bmBuf.Len())) //nolint:gosec // Len is non-negative
 			recBuf = append(recBuf, bmBuf.Bytes()...)
 			crc = crc32.Update(crc, termsRunCRC, recBuf)
 			count++
@@ -192,7 +212,8 @@ func writeTermsRun(path string, runPaths []string) (uint64, error) {
 	}
 	var tr [4]byte
 	binary.BigEndian.PutUint32(tr[:], crc)
-	if _, err := w.Write(tr[:]); err == nil {
+	_, err = w.Write(tr[:])
+	if err == nil {
 		err = w.Flush()
 	}
 	if err == nil {
@@ -212,7 +233,7 @@ func writeTermsRun(path string, runPaths []string) (uint64, error) {
 }
 
 var (
-	termsRunMagic = [4]byte{'E', 'T', 'R', '1'}
+	termsRunMagic = [4]byte{'E', 'T', 'R', '1'}       //nolint:gochecknoglobals // fixed format tag
 	termsRunCRC   = crc32.MakeTable(crc32.Castagnoli) //nolint:gochecknoglobals // fixed table
 )
 
@@ -256,17 +277,17 @@ func streamTermsRun(path string, emit func(term TermKey, bitmapBytes []byte) err
 		crc uint32
 		buf []byte
 	)
-	for i := uint64(0); i < count; i++ {
+	for i := range count {
 		var term TermKey
 		if _, err := io.ReadFull(br, term[:]); err != nil {
-			return fmt.Errorf("%w: record %d term: %v", errCorruptTermsRun, i, err)
+			return fmt.Errorf("%w: record %d term: %w", errCorruptTermsRun, i, err)
 		}
 		crc = crc32.Update(crc, termsRunCRC, term[:])
 		// stdlib varint over a CRC-folding ByteReader.
 		cbr := &crcFoldReader{br: br, crc: crc}
 		length, rerr := binary.ReadUvarint(cbr)
 		if rerr != nil {
-			return fmt.Errorf("%w: record %d length: %v", errCorruptTermsRun, i, rerr)
+			return fmt.Errorf("%w: record %d length: %w", errCorruptTermsRun, i, rerr)
 		}
 		crc = cbr.crc
 		if length > 1<<31 {
@@ -277,7 +298,7 @@ func streamTermsRun(path string, emit func(term TermKey, bitmapBytes []byte) err
 		}
 		buf = buf[:length]
 		if _, err := io.ReadFull(br, buf); err != nil {
-			return fmt.Errorf("%w: record %d bitmap: %v", errCorruptTermsRun, i, err)
+			return fmt.Errorf("%w: record %d bitmap: %w", errCorruptTermsRun, i, err)
 		}
 		crc = crc32.Update(crc, termsRunCRC, buf)
 		if err := emit(term, buf); err != nil {
@@ -304,12 +325,18 @@ type slotRecord struct {
 
 type slotHeap []slotRecord
 
-func (h slotHeap) Len() int           { return len(h) }
-func (h slotHeap) Less(i, j int) bool { return h[i].slot < h[j].slot }
-func (h slotHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *slotHeap) Push(x any)        { *h = append(*h, x.(slotRecord)) }
-func (h *slotHeap) Pop() any          { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
-func (h slotHeap) peek() slotRecord   { return h[0] }
+func (h *slotHeap) Len() int           { return len(*h) }
+func (h *slotHeap) Less(i, j int) bool { return (*h)[i].slot < (*h)[j].slot }
+func (h *slotHeap) Swap(i, j int)      { (*h)[i], (*h)[j] = (*h)[j], (*h)[i] }
+func (h *slotHeap) Push(x any) {
+	rec, ok := x.(slotRecord)
+	if !ok { // heap.Push only ever receives slotRecord
+		panic("events: foreign type pushed into slotHeap")
+	}
+	*h = append(*h, rec)
+}
+func (h *slotHeap) Pop() any         { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
+func (h *slotHeap) peek() slotRecord { return (*h)[0] }
 
 // writeSlotOrdered replays terms.run, looks up each term's dense slot, and
 // appends records to pw in exact slot order via the bounded reorder heap.
@@ -320,7 +347,10 @@ func writeSlotOrdered(pw *packfile.Writer, termsRunPath string, m *mphf) error {
 	)
 	flush := func() error {
 		for len(h) > 0 && h.peek().slot == next {
-			rec := heap.Pop(&h).(slotRecord)
+			rec, ok := heap.Pop(&h).(slotRecord)
+			if !ok { // Push admits only slotRecord
+				panic("events: slotHeap yielded a foreign type")
+			}
 			if err := pw.AppendItem(rec.fp[:], rec.bm); err != nil {
 				return fmt.Errorf("events: write slot %d to index.pack: %w", rec.slot, err)
 			}

@@ -32,6 +32,7 @@ package zstd
 import "C"
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math"
@@ -289,4 +290,54 @@ func (d *Decompressor) Decode(dst, src []byte) ([]byte, error) {
 // Allocates a context per call. Use Decompressor for hot paths.
 func Decode(dst, src []byte) ([]byte, error) {
 	return NewDecompressor().Decode(dst, src)
+}
+
+// Frame_Header_Descriptor bit layout (RFC 8878 §3.1.1.1.1): bits 0-1 are the
+// Dictionary_ID_flag, bit 2 the Content_Checksum_flag.
+const (
+	frameDescriptorDictIDMask   = 0x03
+	frameDescriptorChecksumFlag = 0x04
+)
+
+// frameMagic is the zstd frame magic number 0xFD2FB528 as it appears on disk
+// (little-endian).
+var frameMagic = []byte{0x28, 0xB5, 0x2F, 0xFD} //nolint:gochecknoglobals // immutable format constant
+
+// FrameHeaderValid checks — without decompressing — that src is a single
+// zstd frame this package's other half can serve: magic number, a recorded
+// frame content size (present and <= MaxUint32, the bound packfile item
+// lengths live under), no dictionary ID (the shared Decompressor is
+// dictionary-less), and the content checksum flag set (Compressor's default;
+// the checksum is what makes a later corrupt read loud).
+//
+// This is the freeze-time guard for verbatim frame copies (hot ledgers CF →
+// cold pack): it pins the invariant that hot ledger values remain plain,
+// dictionary-less, content-sized, checksummed single frames. Any hot-side
+// change that breaks one of these must revisit the cold ledger format in the
+// same commit.
+func FrameHeaderValid(src []byte) error {
+	if len(src) < 5 {
+		return fmt.Errorf("zstd: frame header: %d bytes, want >= 5", len(src))
+	}
+	if !bytes.Equal(src[:4], frameMagic) {
+		return errors.New("zstd: frame header: bad magic")
+	}
+	descriptor := src[4]
+	if descriptor&frameDescriptorDictIDMask != 0 {
+		return errors.New("zstd: frame header: dictionary ID present; the shared decompressor is dictionary-less")
+	}
+	if descriptor&frameDescriptorChecksumFlag == 0 {
+		return errors.New("zstd: frame header: content checksum flag unset")
+	}
+	fcs := C.ZSTD_getFrameContentSize(unsafe.Pointer(&src[0]), C.size_t(len(src)))
+	switch fcs {
+	case C.ZSTD_CONTENTSIZE_ERROR:
+		return errors.New("zstd: frame header invalid")
+	case C.ZSTD_CONTENTSIZE_UNKNOWN:
+		return errors.New("zstd: frame header carries no content size")
+	}
+	if uint64(fcs) > math.MaxUint32 {
+		return fmt.Errorf("zstd: frame claims content size %d > MaxUint32", uint64(fcs))
+	}
+	return nil
 }
