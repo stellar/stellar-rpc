@@ -14,8 +14,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/streamhash"
-
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
@@ -321,32 +319,6 @@ func TestBuildColdIndex_CoverageSpanExceedsBudgetErrors(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "payload budget")
 	assert.NoFileExists(t, idxPath)
-}
-
-func TestBuildColdIndex_CallerOptsCannotOverrideFormat(t *testing.T) {
-	// A caller opt that tries to repoint the cold format (here, bogus
-	// metadata) must not win — ColdBuildOptions is pinned last, so the
-	// reader still recovers the real coverage and resolves seqs correctly.
-	dir := t.TempDir()
-	entries := makeFixtureEntries(64)
-	inputs := writeFixtureBins(t, dir, entries)
-	idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
-	err := BuildColdIndex(context.Background(), inputs, idxPath,
-		fixtureMinLedger(), fixtureMaxLedger(), streamhash.WithMetadata(EncodeLedgerRange(7, 7)))
-	require.NoError(t, err)
-
-	r, err := OpenColdReader(idxPath)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = r.Close() })
-
-	gotMin, gotMax := r.MinLedger(), r.MaxLedger()
-	assert.Equal(t, fixtureMinLedger(), gotMin, "pinned metadata must win over a caller's WithMetadata")
-	assert.Equal(t, fixtureMaxLedger(), gotMax)
-	for _, e := range entries {
-		got, err := r.Get(e.hash)
-		require.NoError(t, err)
-		assert.Equal(t, e.seq, got)
-	}
 }
 
 func TestBuildColdIndex_TruncatedFileErrors(t *testing.T) {

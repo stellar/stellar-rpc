@@ -3,6 +3,8 @@ package txhash
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
+	"hash/crc64"
 	"os"
 	"path/filepath"
 	"slices"
@@ -175,7 +177,8 @@ func TestFreezeColdFromStore_IdenticalAcrossCrashStates(t *testing.T) {
 	tailRows := append([]windowRow(nil), sC.hotIdx.view.Load().rows...)
 	require.NotEmpty(t, tailRows, "population must leave a tail to orphan")
 	orphan := filepath.Join(storeC.Path(), txhashRunDir, "seal-000099.run")
-	require.NoError(t, writeRun(tailRows, orphan))
+	_, err := writeRun(tailRows, orphan)
+	require.NoError(t, err)
 	sC.Shutdown()
 	require.NoError(t, storeC.Close())
 	require.Equal(t, want, reopenAndFreeze(pathC), "orphan-run state diverged")
@@ -210,11 +213,12 @@ func TestFreezeColdFromStore_RejectsOutOfRangeSeq(t *testing.T) {
 	require.NoError(t, err)
 	runDir := filepath.Join(store.Path(), txhashRunDir)
 	require.NoError(t, os.MkdirAll(runDir, 0o755))
-	require.NoError(t, writeRun([]windowRow{{seq: badSeq, bytes: row}}, filepath.Join(runDir, "seal-000000.run")))
+	_, err = writeRun([]windowRow{{seq: badSeq, bytes: row}}, filepath.Join(runDir, "seal-000000.run"))
+	require.NoError(t, err)
 	require.NoError(t, rocksdbManifest{store: store}.PutRuns([]string{"seal-000000.run"}, badSeq))
 
 	_, err = FreezeColdFromStore(context.Background(), chunkID, store, filepath.Join(t.TempDir(), "x.bin"))
-	require.ErrorContains(t, err, "outside")
+	require.ErrorContains(t, err, "entry seq ", "the merge's chunk-range check owns this rejection")
 }
 
 // TestFreezeColdFromStore_RejectsMalformedRow: a wrong-shape CF row fails
@@ -288,6 +292,53 @@ func TestFreezeColdFromStore_RejectsCorruptRunCRC(t *testing.T) {
 	reopened := openBareStore(t, path)
 	_, err = FreezeColdFromStore(context.Background(), chunkID, reopened, filepath.Join(t.TempDir(), "x.bin"))
 	require.ErrorContains(t, err, "crc mismatch")
+}
+
+// TestFreezeAndWarmup_RejectSeqOutsideRunHeaderRange pins the run reader's
+// per-record seq tripwire on BOTH its drivers: a record whose seq falls
+// outside the run header's [first,last] — but INSIDE the chunk's ledger
+// range, so the freeze's coarser chunk-range emit check cannot catch it —
+// must fail the warmup drain and the freeze merge alike. The header CRC64
+// is re-patched over the corrupted payload, so the failure is attributable
+// to the seq-range check alone (the same attribution discipline as
+// TestFreezeColdFromStore_RejectsCorruptRunCRC).
+func TestFreezeAndWarmup_RejectSeqOutsideRunHeaderRange(t *testing.T) {
+	chunkID := chunk.ID(0)
+	first := chunkID.FirstLedger()
+	path := t.TempDir()
+	ledgers := freezePopulation(16) // seals two full runs, no tail
+	s, store := openPackedStoreAt(t, path, chunkID, 8)
+	populateDeterministic(t, s, first, ledgers)
+	names, _, err := rocksdbManifest{store: store}.GetRuns()
+	require.NoError(t, err)
+	require.NotEmpty(t, names)
+	s.Shutdown()
+	require.NoError(t, store.Close())
+
+	// Rewrite record 0's seq to one past the run's own ledger range and
+	// re-patch the payload CRC over the corrupted bytes. The bad seq stays
+	// inside the chunk range by construction: the run covers an 8-ledger
+	// prefix of a 10k-ledger chunk.
+	runPath := filepath.Join(path, txhashRunDir, names[0])
+	raw, err := os.ReadFile(runPath)
+	require.NoError(t, err)
+	badSeq := binary.LittleEndian.Uint32(raw[runLastOff:]) + 1
+	require.Less(t, badSeq, chunkID.LastLedger(), "bad seq must stay inside the chunk range")
+	binary.LittleEndian.PutUint32(raw[runHeaderLen+rowHashLen:], badSeq)
+	crc := crc64.New(crcRunTable)
+	_, _ = crc.Write(raw[runHeaderLen:])
+	binary.LittleEndian.PutUint64(raw[runCRCOff:], crc.Sum64())
+	require.NoError(t, os.WriteFile(runPath, raw, 0o644))
+
+	reopened := openBareStore(t, path)
+	_, _, err = OpenHotIndex(filepath.Join(path, txhashRunDir), first, rocksdbManifest{store: reopened})
+	// "record N seq" is the run reader's own tripwire (run_reader.go); the
+	// merge's chunk-range check says "entry seq", so matching bare "outside"
+	// would let either mechanism satisfy both halves.
+	require.ErrorContains(t, err, "record 0 seq ", "warmup must reject the out-of-header-range seq")
+
+	_, err = FreezeColdFromStore(context.Background(), chunkID, reopened, filepath.Join(t.TempDir(), "x.bin"))
+	require.ErrorContains(t, err, "record 0 seq ", "freeze must reject the out-of-header-range seq")
 }
 
 // TestFreezeAndGet_OuterInnerResolveAcrossTiers is the #862 gate under the

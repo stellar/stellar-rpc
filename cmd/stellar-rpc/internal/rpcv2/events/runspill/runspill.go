@@ -61,6 +61,10 @@ var ErrCorruptRun = errors.New("runspill: corrupt run file")
 // background sorter (double-buffering is the caller's composition).
 type Slab struct {
 	buf []byte
+	// ids is EmitSorted's reused postings buffer. Slab-owned so that its
+	// lifetime rides the same hand-off that protects buf: whoever holds the
+	// slab holds the buffer, and nothing else can touch either.
+	ids []uint32
 }
 
 // NewSlab returns a slab that accepts records until capBytes is reached.
@@ -108,26 +112,27 @@ func (r *slabRecords) Swap(i, j int) {
 	copy(b, r.scratch[:])
 }
 
-// SortEncode sorts the slab in place (unstable — duplicates are collapsed
-// anyway), dedups exact duplicate records, and encodes the result as
-// packed-row postings into dst (reused across spills), returning it plus the
-// number of encoded records (WriteRun's header count). IDs within a term
-// come out ascending by construction of the composite order.
-func (s *Slab) SortEncode(dst []byte) ([]byte, uint64) {
+// EmitSorted sorts the slab in place (unstable — exact duplicate records are
+// collapsed anyway), dedups, and walks the result grouped by term: one emit
+// per unique term, terms ascending, IDs within a term ascending by
+// construction of the composite record order. The ids slice is slab-owned
+// and reused across emits — consume it before the next call. Streamed into
+// RunWriter.Append this IS the spill: the same record-at-a-time idiom every
+// other run producer uses, with no whole-payload buffer in between.
+func (s *Slab) EmitSorted(emit func(term events.TermKey, ids []uint32) error) error {
 	sort.Sort(&slabRecords{buf: s.buf})
 	n := s.Records()
 	var (
 		curTerm  events.TermKey
-		ids      []uint32
 		haveTerm bool
 		prevRec  []byte
-		encoded  uint64
 	)
-	flush := func() {
-		if haveTerm {
-			dst = events.AppendTermPostings(dst, curTerm, ids)
-			encoded++
+	s.ids = s.ids[:0]
+	flush := func() error {
+		if !haveTerm {
+			return nil
 		}
+		return emit(curTerm, s.ids)
 	}
 	for i := range n {
 		rec := s.buf[i*RecordSize : (i+1)*RecordSize]
@@ -139,46 +144,40 @@ func (s *Slab) SortEncode(dst []byte) ([]byte, uint64) {
 		copy(term[:], rec[:16])
 		id := binary.BigEndian.Uint32(rec[16:])
 		if !haveTerm || term != curTerm {
-			flush()
+			if err := flush(); err != nil {
+				return err
+			}
 			curTerm = term
 			haveTerm = true
-			ids = ids[:0]
+			s.ids = s.ids[:0]
 		}
-		ids = append(ids, id)
+		s.ids = append(s.ids, id)
 	}
-	flush()
-	return dst, encoded
-}
-
-// WriteRun writes payload (a SortEncode result of records records) to path as
-// one run file: magic ‖ u64 payload length ‖ u64 record count ‖ payload ‖
-// CRC-32C(payload). The file is written via a temp name and renamed, then
-// synced — runs are scratch, but a half-written file must never be mistaken
-// for a short valid one.
-func WriteRun(path string, payload []byte, records uint64) error {
-	rw, err := NewRunWriter(path)
-	if err != nil {
-		return err
-	}
-	defer rw.Discard()
-	// One raw write through RunWriter's framing (incremental CRC, patched
-	// header, temp+rename in Commit) — one implementation of the container.
-	if werr := rw.writeRaw(payload); werr != nil {
-		return fmt.Errorf("runspill: write %s: %w", path, werr)
-	}
-	rw.records = records
-	return rw.Commit()
+	return flush()
 }
 
 // RunWriter streams records into a run file without buffering the payload:
-// incremental CRC, header patched at Commit, temp+rename like WriteRun. The
-// record-at-a-time transient replaces WriteRun's whole-payload buffer — the
-// hot tier's late-chunk merges write ~GBs through here.
+// incremental CRC, header patched at Commit. Everything that produces a run
+// writes through here — the spiller's sorted-slab walk, the seal, the hot
+// tier's late-chunk merges (~GBs), the freeze scan — one write path, one
+// container implementation.
 //
-// Two-phase lifecycle: nothing is visible at the final name until Commit;
-// Discard (a no-op once either has run) removes the temp file, so call sites
-// `defer rw.Discard()` and commit explicitly on success — abandonment is the
-// default, publication the deliberate act.
+// Two-phase lifecycle: the file is created at its FINAL name and is not a run
+// until Commit — flush, patch header, fsync, close — has returned nil; Close
+// (a no-op once either has run) unlinks it. Call sites `defer rw.Close()` and
+// commit explicitly on success: abandonment is the default, publication the
+// deliberate act.
+//
+// There is no tmp+rename step, because nothing anywhere trusts a run by NAME
+// — the discipline the rest of the tree already follows (ingest/doc.go's
+// artifact model, txhash's run ladder). The hot engines trust only the
+// manifest, which may name a run solely after its Commit and the dirent
+// barrier that follows (stores/internal/runset), and warmup deletes every
+// file the manifest does not list; the cold build's runs live in a scratch
+// dir wiped before its first write (NewSpiller, FreezeColdFromStore), so a
+// crashed attempt's leftovers cannot be mistaken for this attempt's; and a
+// torn payload fails the drain's CRC. A half-written file under a final name
+// is garbage nothing reads, exactly as its .tmp form was.
 type RunWriter struct {
 	path    string
 	f       *os.File
@@ -190,19 +189,24 @@ type RunWriter struct {
 	done    bool
 }
 
-// NewRunWriter creates path (via a temp name) with a placeholder header.
+// NewRunWriter creates path — the run's FINAL name — with a placeholder
+// header. os.Create truncates, which is safe because a run name is never
+// reused while a run of that name exists: the hot engines' seal sequence
+// resumes past every manifest-listed run (runset.NextSealSeq) and only rises
+// within a process, and the cold build's scratch dirs are wiped before their
+// first write.
 func NewRunWriter(path string) (*RunWriter, error) {
-	f, err := os.Create(path + ".tmp")
+	f, err := os.Create(path)
 	if err != nil {
-		return nil, fmt.Errorf("runspill: create %s.tmp: %w", path, err)
+		return nil, fmt.Errorf("runspill: create %s: %w", path, err)
 	}
 	w := bufio.NewWriterSize(f, 1<<20)
 	var hdr [HeaderLen]byte
 	copy(hdr[:4], runMagic[:])
 	if _, err := w.Write(hdr[:]); err != nil {
 		_ = f.Close()
-		_ = os.Remove(path + ".tmp")
-		return nil, fmt.Errorf("runspill: write header %s.tmp: %w", path, err)
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("runspill: write header %s: %w", path, err)
 	}
 	return &RunWriter{path: path, f: f, w: w}, nil
 }
@@ -223,11 +227,18 @@ func (rw *RunWriter) Written() int64 {
 	return int64(rw.written) //nolint:gosec // payload length, far below 2^63
 }
 
-// Commit writes the trailer, patches the header's payload length and record
-// count, syncs, and renames into place. On error the temp file is removed.
+// Commit publishes the run: trailer, patched header (payload length and
+// record count), fsync, close — the same ladder txhash's writeRun and the
+// cold .bin stream writer run, and the reason no run needs a rename. Every
+// step is load-bearing: the flush precedes the WriteAt because the
+// placeholder header may still be sitting in the buffer and a later flush
+// would lay it back over the patch; the patch precedes the Sync so one Sync
+// covers header and payload; the Close error is checked because on many
+// filesystems ENOSPC/EIO surface only when the fd is consumed. Any failure
+// routes through Close, so a failed Commit leaves nothing behind.
 func (rw *RunWriter) Commit() error {
 	fail := func(err error) error {
-		rw.Discard()
+		rw.Close()
 		return err
 	}
 	var tr [4]byte
@@ -248,30 +259,32 @@ func (rw *RunWriter) Commit() error {
 		return fail(fmt.Errorf("runspill: sync: %w", err))
 	}
 	if err := rw.f.Close(); err != nil {
-		return fail(err)
-	}
-	if err := os.Rename(rw.path+".tmp", rw.path); err != nil {
-		return fail(fmt.Errorf("runspill: rename %s: %w", rw.path, err))
+		return fail(fmt.Errorf("runspill: close %s: %w", rw.path, err))
 	}
 	rw.done = true
 	return nil
 }
 
-// Discard closes the writer and removes its temp file — abandonment without
-// publication. A no-op after Commit or a prior Discard, so it is safe to
-// defer unconditionally.
-func (rw *RunWriter) Discard() {
+// Close abandons the run: it closes the writer and unlinks the file. Every
+// other two-phase writer in the tree spells the abandonment verb the same
+// way (packfile.Writer, ledger.ColdWriter, event.ColdWriter, txhash's cold
+// .bin stream); the first three unlink too, while the .bin stream only
+// closes — its completion record, not the file's absence, is the authority
+// on existence, so the partial is inert scratch the retry overwrites.
+// A no-op after Commit or a prior Close, so call sites defer it
+// unconditionally.
+func (rw *RunWriter) Close() {
 	if rw.done {
 		return
 	}
 	rw.done = true
 	_ = rw.f.Close()
-	_ = os.Remove(rw.path + ".tmp")
+	_ = os.Remove(rw.path)
 }
 
 // writeRaw sends pre-encoded payload bytes through the container accounting —
 // incremental CRC, payload-length tally, buffered write. The ONE site that
-// touches those fields, so Append and WriteRun cannot drift.
+// touches those fields: whatever grows the payload grows the CRC with it.
 func (rw *RunWriter) writeRaw(p []byte) error {
 	rw.crc = crc32.Update(rw.crc, crcTable, p)
 	rw.written += uint64(len(p))

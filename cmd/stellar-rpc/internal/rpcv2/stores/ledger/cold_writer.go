@@ -58,9 +58,11 @@ type ColdWriterOptions struct {
 }
 
 // ColdWriter is two-phase: Commit finalizes; Close cleans up a
-// partial pack when Commit hasn't run. A ColdWriter must be used by
-// a single goroutine — AppendLedger, Commit, and Close are not safe
-// for concurrent invocation. Idiomatic use:
+// partial pack when Commit hasn't run — the lifecycle every domain
+// writer here shares (runspill.RunWriter carries the pattern doc).
+// A ColdWriter must be used by a single goroutine — AppendLedger,
+// Commit, and Close are not safe for concurrent invocation.
+// Idiomatic use:
 //
 //	w, _ := NewColdWriter(path, firstSeq, ledger.ColdWriterOptions{})
 //	defer w.Close()

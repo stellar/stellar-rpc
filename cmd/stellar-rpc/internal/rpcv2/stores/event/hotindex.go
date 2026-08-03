@@ -44,7 +44,10 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/durable"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/bloom"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/internal/runset"
 )
 
 const (
@@ -101,7 +104,7 @@ type windowRow struct {
 // handle for concurrent ReadAt lookups.
 type sealedRun struct {
 	path   string
-	bloom  bloomFilter
+	bloom  bloom.Filter
 	fences []fence // sorted by term; placed by fenceBuilder + final end sentinel
 	terms  int     // record count; sizes a future merge output's bloom up front
 	file   *os.File
@@ -116,20 +119,39 @@ type fence struct {
 
 // HotIndex is the engine. One per open hot chunk (read-write opens).
 type HotIndex struct {
-	dir     string // run-file directory (inside the chunk's DB dir)
+	dir string // run-file directory (inside the chunk's DB dir)
+	// overlay is a PARTIAL view: it holds only promoted (dense) terms, so a
+	// lookup against it alone silently misses every sparse term (those live
+	// in the window rows and sealed runs). Read through Get.
 	overlay *events.ConcurrentBitmaps
 	view    atomic.Pointer[hotIndexView]
 
 	// Writer-owned state (single-writer contract). sealEvery/maxRuns default
 	// to the package consts; tests shrink them to exercise seals and merges
-	// with small inputs.
-	sealEvery       int
-	maxRuns         int
-	ledgersInWindow int
-	sealSeq         int
-	pendingSeal     chan sealResult // capacity 1: at most one seal in flight
-	sealInFlight    bool
-	manifest        manifestStore
+	// with small inputs. The seal trigger compares sealEvery against
+	// len(view.rows) — exactly one row per ApplyLedger, and a reap trims the
+	// rows it sealed — so the window size is structural here, not a counter
+	// that could drift from it. Note the cadence is in ROWS, i.e. in
+	// event-bearing ledgers: an eventless ledger writes no index row at all
+	// (hot_store.go), unlike the txhash twin's dense chain.
+	sealEvery    int
+	maxRuns      int
+	sealSeq      int
+	pendingSeal  chan sealResult // capacity 1: at most one seal in flight
+	sealInFlight bool
+	manifest     runset.Manifest
+
+	// fsyncDir runs in every background job (openDurable), making the fresh
+	// run's dirent durable BEFORE the hand-back can reach reapSeal: PutRuns
+	// rides a synced write, so without the barrier a crash could leave the
+	// manifest durably naming a run whose dirent was never journaled — an
+	// unrecoverable warmup failure. Production is durable.FsyncDir, which
+	// counts a vanished dir as success (no dirent left to journal) —
+	// tolerable only because the follow-on open fails loudly when the
+	// directory, and the run with it, is gone. Tests swap in a recorder to
+	// pin the barrier-before-PutRuns order. Neither engine barriers h.dir's
+	// own dirent in its parent.
+	fsyncDir func(dir string) error
 
 	// sealArmed gates the seal trigger. The engine starts DISARMED so an
 	// open's warmup replay is pure in-memory reconstruction — no run files,
@@ -164,20 +186,10 @@ type sealResult struct {
 	err        error
 }
 
-// manifestStore persists which runs are live — the crash-recovery authority.
-// Implemented over the chunk's RocksDB by the integration layer; faked in
-// tests.
-type manifestStore interface {
-	// PutRuns atomically replaces the live-run list and records the highest
-	// sealed ledger (warmup replays packed rows PAST it).
-	PutRuns(names []string, lastSealed uint32) error
-	// GetRuns returns the live-run list and the sealed frontier (zero when
-	// nothing sealed).
-	GetRuns() ([]string, uint32, error)
-}
-
-// NewHotIndex creates the engine for a fresh chunk. dir is created.
-func NewHotIndex(dir string, manifest manifestStore) (*HotIndex, error) {
+// NewHotIndex creates the engine for a fresh chunk. dir is created. The
+// manifest (rocksdbManifest in production, hot_store.go) is the
+// crash-recovery authority on which runs are live — see runset.Manifest.
+func NewHotIndex(dir string, manifest runset.Manifest) (*HotIndex, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("events: hotindex mkdir %s: %w", dir, err)
 	}
@@ -186,6 +198,7 @@ func NewHotIndex(dir string, manifest manifestStore) (*HotIndex, error) {
 		overlay:     events.NewConcurrentBitmapsFromBitmaps(events.Bitmaps{}),
 		pendingSeal: make(chan sealResult, 1),
 		manifest:    manifest,
+		fsyncDir:    durable.FsyncDir,
 		sealEvery:   windowLedgers,
 		maxRuns:     maxLiveRuns,
 	}
@@ -246,9 +259,8 @@ func (h *HotIndex) ApplyLedger(seq uint32, rowBytes []byte, runs termRuns) error
 	rows = append(rows, old.rows...)
 	rows = append(rows, row)
 	h.view.Store(&hotIndexView{rows: rows, runs: old.runs})
-	h.ledgersInWindow++
 
-	if h.sealArmed && h.ledgersInWindow >= h.sealEvery && !h.sealInFlight {
+	if h.sealArmed && len(rows) >= h.sealEvery && !h.sealInFlight {
 		h.startSeal(rows)
 	}
 	return nil
@@ -308,13 +320,6 @@ func decodeRecordIDs(rec []byte) ([]uint32, error) {
 	return out, err
 }
 
-// dedupAscendingIDs dedups an ascending-with-possible-overlap ID list (a
-// dense term's postings appear in both a run and the overlay path never hits
-// here; window/run overlap cannot happen — but keep reads defensive).
-func dedupAscendingIDs(ids []uint32) []uint32 {
-	return slices.Compact(ids)
-}
-
 // Close drains any in-flight seal (discarding its result — warmup rebuilds
 // deterministically) and releases every run handle this index still owns:
 // the live view's runs, the handles retired by merge folds (kept open for
@@ -368,5 +373,9 @@ func (h *HotIndex) lookupSparse(v *hotIndexView, term events.TermKey) ([]uint32,
 			out = append(out, ids...)
 		}
 	}
-	return dedupAscendingIDs(out), nil
+	// Compact is the whole dedup: out is ascending, and the only possible
+	// duplicates are adjacent. Runs cover strictly older ledgers than the
+	// window, so window/run overlap cannot happen, and a dense term never
+	// reaches here (the overlay serves it) — reads stay defensive anyway.
+	return slices.Compact(out), nil
 }

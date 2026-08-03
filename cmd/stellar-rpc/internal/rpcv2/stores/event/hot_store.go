@@ -358,12 +358,12 @@ func (h *HotStore) FetchRange(ctx context.Context, start, count uint32) iter.Seq
 }
 
 // All streams every event in this Chunk in chunk-relative eventID
-// order — the Reader full-scan. The freeze re-derives cold event
-// artifacts from raw LCMs and never calls this, so it has no
-// production caller yet: it's the intended read seam for the v2
-// cutover (#772), exercised by tests until then. Thin wrapper over
-// FetchRange; its yielded Payloads are likewise borrowed (valid only
-// for the step).
+// order — the Reader full-scan. The freeze builds cold event
+// artifacts directly from the hot DB's durable state (cold_freeze.go)
+// and never calls this, so it has no production caller yet: it's the
+// intended read seam for the v2 cutover (#772), exercised by tests
+// until then. Thin wrapper over FetchRange; its yielded Payloads are
+// likewise borrowed (valid only for the step).
 //
 // The committed event count is read inside the returned closure body, so a
 // concurrent ingest between r.All(ctx) returning the Seq2 and the
@@ -525,6 +525,17 @@ func (m rocksdbManifest) GetRuns() ([]string, uint32, error) {
 	return strings.Split(rest, ","), lastSealed, nil
 }
 
+// ManifestRuns reads the chunk store's hot-index run manifest — the run
+// names and sealed frontier, the same read the freeze anchors its index
+// inputs on (freezeIndexInputs) and warmup anchors its replay on. Exported
+// for the composition identity gate (ingest's freeze_test.go), which asserts
+// its fixture actually crosses the sealed frontier — a non-empty manifest —
+// so the freeze-vs-walk comparison keeps covering the manifest-runs input
+// shape and cannot silently regress to tail-only coverage.
+func ManifestRuns(store *rocksdb.Store) ([]string, uint32, error) {
+	return rocksdbManifest{store: store}.GetRuns()
+}
+
 // Shutdown drains the hot index's background seal. hotchunk.DB.Close calls it
 // before closing the shared store so no seal goroutine outlives the DB.
 func (h *HotStore) Shutdown() { h.hotIdx.Close() }
@@ -576,13 +587,6 @@ func verifyChunkConsistency(chunkStore *rocksdb.Store, total uint32, indexUpperB
 	}
 	return nil
 }
-
-// overlay returns the hot index's dense-term overlay — a PARTIAL view
-// holding only promoted (dense) terms; sparse terms live in the window rows
-// and sealed runs and are absent here. Test-only write hook: no production
-// path reads it, and no read path should — a lookup against the overlay
-// alone silently misses every sparse term (use HotIndex.Get / LookupKeys).
-func (h *HotStore) overlay() *events.ConcurrentBitmaps { return h.hotIdx.overlay }
 
 // ──────────────────────────────────────────────────────────────────
 // Warmup — reconstructs the in-memory mirror + offsets from the

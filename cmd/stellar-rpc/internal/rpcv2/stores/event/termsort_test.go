@@ -247,8 +247,7 @@ func applyLedgerFromMap(h *HotIndex, seq uint32, rowBytes []byte, per map[events
 	rows = append(rows, old.rows...)
 	rows = append(rows, row)
 	h.view.Store(&hotIndexView{rows: rows, runs: old.runs})
-	h.ledgersInWindow++
-	if h.sealArmed && h.ledgersInWindow >= h.sealEvery && !h.sealInFlight {
+	if h.sealArmed && len(rows) >= h.sealEvery && !h.sealInFlight {
 		h.startSeal(rows)
 	}
 	return nil

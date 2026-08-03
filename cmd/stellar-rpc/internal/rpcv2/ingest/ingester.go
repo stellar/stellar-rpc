@@ -62,7 +62,7 @@ func openColdChunk(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Config)
 		if dirs.TxhashBin == "" {
 			return fail(errors.New("ingest: txhash enabled but its ColdDirs path is empty"))
 		}
-		w, err := newTxhashCold(dirs.TxhashBin, chunkID, sink)
+		w, err := newTxhashCold(dirs.TxhashBin, sink)
 		if err != nil {
 			return fail(fmt.Errorf("open txhash cold writer: %w", err))
 		}

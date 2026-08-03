@@ -29,15 +29,14 @@ import (
 // (MinLedger/MaxLedger report it). The span must fit the 3-byte payload.
 //
 // The .bin files are k-way merged (cold_merge.go) and fed single-pass to
-// streamhash. By default the block build uses runtime.NumCPU()/2 workers
-// (~2.7x over single-threaded); caller opts override. Removes the partial
-// output on error, and honors ctx cancellation.
+// streamhash. The block build uses runtime.NumCPU()/2 workers (~2.7x over
+// single-threaded). Removes the partial output on error, and honors ctx
+// cancellation.
 func BuildColdIndex(
 	ctx context.Context,
 	inputs []string,
 	outputPath string,
 	minLedger, maxLedger uint32,
-	opts ...streamhash.BuildOption,
 ) (err error) {
 	if maxLedger < minLedger {
 		return fmt.Errorf("txhash: maxLedger %d < minLedger %d", maxLedger, minLedger)
@@ -52,13 +51,9 @@ func BuildColdIndex(
 		return err
 	}
 
-	// The cold format options go last so they win: a caller can override the
-	// default WithWorkers (its opt precedes the format ones, which don't set
-	// workers) but cannot change the pinned payload/fingerprint/metadata.
-	buildOpts := make([]streamhash.BuildOption, 0, len(opts)+4)
-	buildOpts = append(buildOpts, streamhash.WithWorkers(defaultBuildWorkers()))
-	buildOpts = append(buildOpts, opts...)
-	buildOpts = append(buildOpts, ColdBuildOptions(minLedger, maxLedger)...)
+	buildOpts := append(
+		[]streamhash.BuildOption{streamhash.WithWorkers(defaultBuildWorkers())},
+		ColdBuildOptions(minLedger, maxLedger)...)
 	builder, berr := streamhash.NewSortedBuilder(ctx, outputPath, total, buildOpts...)
 	if berr != nil {
 		return fmt.Errorf("txhash: create cold index builder at %s: %w", outputPath, berr)
@@ -93,9 +88,8 @@ func BuildColdIndex(
 	return nil
 }
 
-// defaultBuildWorkers is the streamhash block-build parallelism used when
-// the caller doesn't override it. NumCPU/2 — see maxMergeLeaves for the
-// joint (leaves, workers) sweep that picked it.
+// defaultBuildWorkers is the streamhash block-build parallelism. NumCPU/2 —
+// see maxMergeLeaves for the joint (leaves, workers) sweep that picked it.
 func defaultBuildWorkers() int {
 	return max(1, runtime.NumCPU()/2)
 }

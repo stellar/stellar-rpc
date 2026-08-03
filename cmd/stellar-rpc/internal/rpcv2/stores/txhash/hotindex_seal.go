@@ -15,8 +15,9 @@ package txhash
 //	payload:      count × 36B records hash[32] ‖ seq u32 LE (equal hashes:
 //	              ledger order)
 //
-// Durability ladder: buffered payload → flush → patch CRC → fsync file →
-// fsync the run DIRECTORY → only then may the manifest name the run
+// Durability ladder: buffered payload → flush → patch CRC → fsync file
+// (writeRun) → fsync the run DIRECTORY (the h.fsyncDir barrier at the seal
+// goroutine's tail, startSeal) → only then may the manifest name the run
 // (reapSeal) → only then does the view swap trim the sealed rows. Until the
 // manifest lists a file it is an unreferenced orphan warmup sweeps, so no
 // temp+rename dance is needed.
@@ -34,47 +35,9 @@ import (
 	"strings"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/bloom"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/internal/runset"
 )
-
-// ─────────────────────────── bloom filter ───────────────────────────
-
-// bloomFilter is a plain double-hashed bloom over hash fp64s: ~10 bits/key,
-// 7 probes. Pointerless (one []uint64), GC-invisible.
-type bloomFilter struct {
-	bits []uint64
-	mask uint64
-}
-
-const bloomProbes = 7
-
-// newBloom sizes for n keys at ~10 bits/key, rounded up to a power of two
-// (mask-indexable).
-func newBloom(n int) bloomFilter {
-	bits := 1
-	for bits < n*10 {
-		bits <<= 1
-	}
-	return bloomFilter{bits: make([]uint64, bits/64+1), mask: uint64(bits - 1)} //nolint:gosec // bits >= 1
-}
-
-func (b *bloomFilter) add(fp uint64) {
-	h2 := fp>>33 | fp<<31 | 1 // odd second hash
-	for i := range bloomProbes {
-		bit := (fp + uint64(i)*h2) & b.mask
-		b.bits[bit/64] |= 1 << (bit % 64)
-	}
-}
-
-func (b *bloomFilter) mayContain(fp uint64) bool {
-	h2 := fp>>33 | fp<<31 | 1
-	for i := range bloomProbes {
-		bit := (fp + uint64(i)*h2) & b.mask
-		if b.bits[bit/64]&(1<<(bit%64)) == 0 {
-			return false
-		}
-	}
-	return true
-}
 
 // ─────────────────────────── run format ───────────────────────────
 
@@ -115,15 +78,29 @@ type runHeader struct {
 // ─────────────────────────── sealing ───────────────────────────
 
 // startSeal kicks the background job: fold the given window rows into one
-// run. Writer goroutine only; h.sealInFlight guards the single-job
-// invariant.
+// run and make its dirent durable (the h.fsyncDir barrier) before the
+// hand-back — reapSeal's next stop is the manifest write that names it.
+// Writer goroutine only; h.sealInFlight guards the single-job invariant.
 func (h *HotIndex) startSeal(rows []windowRow) {
+	// The name follows runset.NextSealSeq's grammar (<prefix>-%06d.run, the
+	// prefix OpenHotIndex resumes from); changing its shape silently breaks
+	// the seal-sequence resume.
 	name := filepath.Join(h.dir, fmt.Sprintf("seal-%06d.run", h.sealSeq))
 	h.sealSeq++
 	h.sealInFlight = true
 	go func() {
 		res := sealResult{rows: len(rows), lastSeq: rows[len(rows)-1].seq}
 		res.run, res.err = sealWindow(rows, name)
+		// The ladder's dirent barrier — the manifest may only ever name a
+		// run whose existence survives a crash (see HotIndex.fsyncDir).
+		if res.err == nil {
+			if err := h.fsyncDir(h.dir); err != nil {
+				res.run.close() // errors carry no resources (sealResult contract)
+				_ = os.Remove(res.run.path)
+				res.run = nil
+				res.err = err
+			}
+		}
 		h.pendingSeal <- res
 	}()
 }
@@ -152,60 +129,129 @@ func (h *HotIndex) reapSeal(block bool) error {
 	}
 
 	old := h.view.Load()
-	runs := append(append([]*sealedRun{}, old.runs...), res.run)
-	names := make([]string, len(runs))
-	for i, r := range runs {
-		names[i] = filepath.Base(r.path)
-	}
-	if err := h.manifest.PutRuns(names, res.lastSeq); err != nil {
-		// The un-listed run is unpublished: dispose of it like any failed
-		// job's output.
-		res.run.close()
-		_ = os.Remove(res.run.path)
+	// A failed Publish disposes of the un-listed run itself (errors carry no
+	// resources); the view is untouched.
+	if err := runset.Publish(h.manifest, old.runs, res.run, res.lastSeq); err != nil {
 		return fmt.Errorf("txhash: hotindex manifest: %w", err)
 	}
+	runs := append(append([]*sealedRun{}, old.runs...), res.run)
 	h.view.Store(&hotIndexView{rows: old.rows[res.rows:], runs: runs})
-	h.ledgersInWindow -= res.rows
 	return nil
 }
 
-// sealWindow folds window rows into one run file and drain-verifies the
-// result open. Runs on the background goroutine over immutable inputs.
-func sealWindow(rows []windowRow, path string) (*sealedRun, error) {
-	if err := writeRun(rows, path); err != nil {
-		return nil, err
-	}
-	return openSealedRun(path)
+// runRouting accumulates a run's in-RAM routing state (bloom + page ladder +
+// record count) record by record in one pass. The seal feeds it in the SAME
+// pass that writes the file (writeRunPayload) — freshly written runs are
+// trusted without a post-write re-read (owner-accepted, the events ruling
+// extended to this engine: file-level integrity plus the corruption gates
+// and the freeze's independent CRC64 drain of every cold-feeding run cover
+// it) — and warmup (openSealedRun) feeds it from the drain-verify of
+// pre-existing files, which remains the crash-recovery trust anchor.
+//
+// The bloom is sized up front so fingerprints stream straight into it: the
+// seal sizes from the summed window-row hash counts (exactly the count the
+// header writes), warmup from the header's validated record count. Seal and
+// warmup build routing through this one type — ladder cadence and bloom
+// geometry cannot drift between a freshly written run and its reopened form.
+type runRouting struct {
+	bloom  bloom.Filter
+	ladder [][ladderKeyLen]byte
+	n      int // records observed so far
 }
 
-// writeRun streams the window rows' records into path, hash-sorted, honoring
-// the durability ladder: the file AND its directory entry must be durable
-// before the caller may name the run in the manifest.
-func writeRun(rows []windowRow, path string) error {
+// newRunRouting sizes the routing state for records payload records.
+func newRunRouting(records int) *runRouting {
+	return &runRouting{
+		bloom:  bloom.New(max(records, 1)),
+		ladder: make([][ladderKeyLen]byte, 0, records/pageRecords+1),
+	}
+}
+
+// observe folds in one payload record (hash[32] ‖ seq u32 LE). Must be
+// called once per record, in emission order — the ladder keys page
+// boundaries by observation index.
+func (rt *runRouting) observe(rec *[runRecordLen]byte) {
+	if rt.n%pageRecords == 0 {
+		rt.ladder = append(rt.ladder, [ladderKeyLen]byte(rec[:ladderKeyLen]))
+	}
+	rt.bloom.Add(fp64([rowHashLen]byte(rec[:rowHashLen])))
+	rt.n++
+}
+
+// run finalizes the routing state into a sealedRun covering ledgers
+// [first,last]. The caller attaches the open file handle.
+func (rt *runRouting) run(path string, first, last uint32) *sealedRun {
+	return &sealedRun{
+		path: path, bloom: rt.bloom, ladder: rt.ladder,
+		first: first, last: last, records: rt.n,
+	}
+}
+
+// sealWindow folds window rows into one run file, building its in-RAM
+// routing state in the same pass as the write (runRouting) — no post-write
+// re-read — then opens the run for lookups. If that open fails, the durable
+// file is deliberately left behind: errors carry no resources (the
+// sealResult contract), a failed seal publishes nothing so the manifest
+// never names the file, and warmup's orphan sweep owns unlisted files — the
+// same posture writeRun's sync/close failures already take. Runs on the
+// background goroutine over immutable inputs.
+func sealWindow(rows []windowRow, path string) (*sealedRun, error) {
+	rt, err := writeRun(rows, path)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("txhash: open run %s: %w", path, err)
+	}
+	run := rt.run(path, rows[0].seq, rows[len(rows)-1].seq)
+	run.file = f
+	return run, nil
+}
+
+// writeRun streams the window rows' records into path, hash-sorted, and
+// fsyncs the file. The dirent half of the durability ladder is NOT here: the
+// seal goroutine runs the h.fsyncDir barrier after sealWindow returns
+// (startSeal), strictly before the hand-back that can reach PutRuns — so
+// the manifest still never names a run whose dirent could vanish with a
+// crash. This engine barriers AFTER its open, unlike the events twin
+// (openDurable barriers before opening), because sealWindow fuses write and
+// open; the shared runsettest pin gates the invariant that matters —
+// barrier before PutRuns — in both engines. Returns the routing state the
+// write pass accumulated (writeRunPayload).
+func writeRun(rows []windowRow, path string) (*runRouting, error) {
 	f, err := os.Create(path)
 	if err != nil {
-		return fmt.Errorf("txhash: create run %s: %w", path, err)
+		return nil, fmt.Errorf("txhash: create run %s: %w", path, err)
 	}
-	if err := writeRunPayload(f, rows); err != nil {
+	rt, err := writeRunPayload(f, rows)
+	if err != nil {
 		_ = f.Close()
 		_ = os.Remove(path)
-		return fmt.Errorf("txhash: write run %s: %w", path, err)
+		return nil, fmt.Errorf("txhash: write run %s: %w", path, err)
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("txhash: sync run %s: %w", path, err)
+		return nil, fmt.Errorf("txhash: sync run %s: %w", path, err)
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("txhash: close run %s: %w", path, err)
+		return nil, fmt.Errorf("txhash: close run %s: %w", path, err)
 	}
-	return syncDir(filepath.Dir(path))
+	return rt, nil
 }
 
 // writeRunPayload writes the header and the k-way-merged records (each row
 // is already sorted; ≤window-size cursors), then patches the payload CRC
-// into the header. No whole-payload buffer: the merge streams straight
-// through a bufio writer.
-func writeRunPayload(f *os.File, rows []windowRow) error {
+// into the header, feeding every record through the run's routing state
+// beside the CRC (runRouting — one-pass construction). No whole-payload
+// buffer: the merge streams straight through a bufio writer.
+//
+// The merge is the package's shared hash heap (merge_heap.go) over the rows'
+// hash cursors: offs[i] is row i's byte offset and the heap caches each live
+// row's CURRENT hash beside its row index. Rows arrive in ledger order, so the
+// (hash, row) tie-break emits equal cross-ledger duplicate hashes in ledger
+// order — the run's byte-level duplicate contract.
+func writeRunPayload(f *os.File, rows []windowRow) (*runRouting, error) {
 	count := 0
 	for i := range rows {
 		count += len(rows[i].bytes) / rowHashLen
@@ -216,150 +262,92 @@ func writeRunPayload(f *os.File, rows []windowRow) error {
 	binary.LittleEndian.PutUint32(hdr[runFirstOff:], rows[0].seq)
 	binary.LittleEndian.PutUint32(hdr[runLastOff:], rows[len(rows)-1].seq)
 	if _, err := f.Write(hdr); err != nil {
-		return err
+		return nil, err
 	}
+	rt := newRunRouting(count)
 	w := bufio.NewWriterSize(f, 128<<10)
 	crc := crc64.New(crcRunTable)
 	var rec [runRecordLen]byte
-	for m := newMergeHeap(rows); ; {
-		hash, seq, ok := m.next()
-		if !ok {
-			break
-		}
-		copy(rec[:rowHashLen], hash)
-		binary.LittleEndian.PutUint32(rec[rowHashLen:], seq)
-		_, _ = crc.Write(rec[:])
-		if _, err := w.Write(rec[:]); err != nil {
-			return err
+	offs := make([]int, len(rows))
+	h := make(hashHeap, 0, len(rows))
+	for i := range rows {
+		if len(rows[i].bytes) > 0 { // a tx-less ledger's row holds no hash
+			h = append(h, hashEntry{hash: rows[i].bytes[:rowHashLen], idx: i})
 		}
 	}
+	h.heapify()
+	for len(h) > 0 {
+		row := h[0].idx
+		// Emit-copy before the advance: the entry's hash is a slice INTO the
+		// row, and the refill below repoints it.
+		copy(rec[:rowHashLen], h[0].hash)
+		binary.LittleEndian.PutUint32(rec[rowHashLen:], rows[row].seq)
+		_, _ = crc.Write(rec[:])
+		rt.observe(&rec)
+		if _, err := w.Write(rec[:]); err != nil {
+			return nil, err
+		}
+		offs[row] += rowHashLen
+		if offs[row] == len(rows[row].bytes) {
+			h = h.dropRoot()
+			continue
+		}
+		h[0].hash = rows[row].bytes[offs[row] : offs[row]+rowHashLen]
+		h.siftDown(0)
+	}
+	// The header promised count records; the merge must have emitted exactly
+	// that (the seal-time cross-check the deleted re-read used to run).
+	if rt.n != count {
+		return nil, fmt.Errorf("merged %d records, header claims %d", rt.n, count)
+	}
 	if err := w.Flush(); err != nil {
-		return err
+		return nil, err
 	}
 	var crcb [8]byte
 	binary.LittleEndian.PutUint64(crcb[:], crc.Sum64())
-	_, err := f.WriteAt(crcb[:], runCRCOff)
-	return err
-}
-
-// syncDir fsyncs a directory so a just-written file's entry is durable — the
-// manifest may only ever name a run whose existence survives a crash.
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("txhash: open dir %s: %w", dir, err)
+	if _, err := f.WriteAt(crcb[:], runCRCOff); err != nil {
+		return nil, err
 	}
-	if err := d.Sync(); err != nil {
-		_ = d.Close()
-		return fmt.Errorf("txhash: sync dir %s: %w", dir, err)
-	}
-	return d.Close()
-}
-
-// mergeHeap is a slice-backed binary min-heap of window-row cursors ordered
-// by (current hash, row index): the row-index tie-break emits equal
-// cross-ledger duplicate hashes in ledger order, so run bytes are
-// deterministic.
-type mergeHeap struct {
-	rows []windowRow
-	offs []int // per-row cursor: byte offset of the row's current hash
-	heap []int // row indices, min-heap by (current hash, row index)
-}
-
-func newMergeHeap(rows []windowRow) *mergeHeap {
-	m := &mergeHeap{rows: rows, offs: make([]int, len(rows)), heap: make([]int, 0, len(rows))}
-	for i := range rows {
-		if len(rows[i].bytes) > 0 {
-			m.heap = append(m.heap, i)
-			m.up(len(m.heap) - 1)
-		}
-	}
-	return m
-}
-
-// next pops the smallest current record — its hash (a slice into the
-// immutable row bytes) and its row's ledger — advancing that cursor;
-// ok=false when every row is drained.
-func (m *mergeHeap) next() ([]byte, uint32, bool) {
-	if len(m.heap) == 0 {
-		return nil, 0, false
-	}
-	i := m.heap[0]
-	hash := m.cur(i)
-	m.offs[i] += rowHashLen
-	if m.offs[i] == len(m.rows[i].bytes) {
-		last := len(m.heap) - 1
-		m.heap[0] = m.heap[last]
-		m.heap = m.heap[:last]
-	}
-	if len(m.heap) > 0 {
-		m.down(0)
-	}
-	return hash, m.rows[i].seq, true
-}
-
-func (m *mergeHeap) cur(row int) []byte {
-	return m.rows[row].bytes[m.offs[row] : m.offs[row]+rowHashLen]
-}
-
-// less orders heap positions a, b.
-func (m *mergeHeap) less(a, b int) bool {
-	ra, rb := m.heap[a], m.heap[b]
-	if c := bytes.Compare(m.cur(ra), m.cur(rb)); c != 0 {
-		return c < 0
-	}
-	return ra < rb
-}
-
-func (m *mergeHeap) up(pos int) {
-	for pos > 0 {
-		parent := (pos - 1) / 2
-		if !m.less(pos, parent) {
-			return
-		}
-		m.heap[pos], m.heap[parent] = m.heap[parent], m.heap[pos]
-		pos = parent
-	}
-}
-
-func (m *mergeHeap) down(pos int) {
-	for {
-		child := 2*pos + 1
-		if child >= len(m.heap) {
-			return
-		}
-		if r := child + 1; r < len(m.heap) && m.less(r, child) {
-			child = r
-		}
-		if !m.less(child, pos) {
-			return
-		}
-		m.heap[pos], m.heap[child] = m.heap[child], m.heap[pos]
-		pos = child
-	}
+	return rt, nil
 }
 
 // ─────────────────────────── sealed runs ───────────────────────────
 
-// openSealedRun drain-verifies a run file and builds its lookup state plus
-// an open handle. Used at seal completion and warmup — corruption is a loud
-// failure, never auto-healed.
+// openSealedRun drain-verifies a PRE-EXISTING run file and builds its lookup
+// state plus an open handle. Warmup-only: it is the crash-recovery trust
+// anchor for files that survived a restart — corruption is a loud failure,
+// never auto-healed. Freshly WRITTEN runs (sealWindow) build routing in the
+// write pass instead (runRouting) and are not re-read.
+//
+// The drain is the one TXHRUN01 streaming reader (runSource, run_reader.go)
+// — the same verify loop the freeze merges through — with every verified
+// record folded through the write pass's runRouting funnel: routing state
+// for runs that crossed a restart is always rebuilt from the verified file
+// bytes, never trusted from elsewhere. Clean end-of-stream means CRC64 and
+// record count checked; the drained fd is handed off to serve the lookup
+// preads.
 func openSealedRun(path string) (*sealedRun, error) {
-	f, err := os.Open(path)
+	rs, err := openRunSource(path)
 	if err != nil {
-		return nil, fmt.Errorf("txhash: open run %s: %w", path, err)
-	}
-	hdr, err := readRunHeader(f, path)
-	if err != nil {
-		_ = f.Close()
 		return nil, err
 	}
-	run, err := drainRun(f, path, hdr)
-	if err != nil {
-		_ = f.Close()
-		return nil, err
+	// The validated header count sizes the routing state up front — the same
+	// one-pass runRouting shape the write side uses, here fed from the
+	// verified drain.
+	rt := newRunRouting(rs.records)
+	for {
+		ok, aerr := rs.advance()
+		if aerr != nil {
+			rs.close()
+			return nil, aerr
+		}
+		if !ok {
+			break
+		}
+		rt.observe(&rs.rec)
 	}
-	run.file = f
+	run := rt.run(path, rs.hdr.first, rs.hdr.last)
+	run.file = rs.handoff() // last: nothing may fail past the handoff
 	return run, nil
 }
 
@@ -399,56 +387,11 @@ func runRecordCount(f *os.File, path string, hdr runHeader) (int, error) {
 	return int(payload / runRecordLen), nil
 }
 
-// drainRun reads and verifies the WHOLE payload — CRC64, record count vs
-// file size, hash sortedness (non-decreasing: equal cross-ledger duplicate
-// hashes are legal within one window), per-record seq ∈ [first,last] — and
-// builds the bloom and ladder FROM THE VERIFIED BYTES ONLY: routing state is
-// always rebuilt from the verified file, never trusted from elsewhere.
-func drainRun(f *os.File, path string, hdr runHeader) (*sealedRun, error) {
-	records, err := runRecordCount(f, path, hdr)
-	if err != nil {
-		return nil, err
-	}
-	br := bufio.NewReaderSize(f, 128<<10)
-	crc := crc64.New(crcRunTable)
-	// The validated header count sizes the bloom up front.
-	bloom := newBloom(max(records, 1))
-	ladder := make([][ladderKeyLen]byte, 0, records/pageRecords+1)
-	var rec [runRecordLen]byte
-	var prev [rowHashLen]byte
-	for i := range records {
-		if _, rerr := io.ReadFull(br, rec[:]); rerr != nil {
-			return nil, fmt.Errorf("txhash: run %s: record %d: %w", path, i, rerr)
-		}
-		_, _ = crc.Write(rec[:])
-		if i > 0 && bytes.Compare(prev[:], rec[:rowHashLen]) > 0 {
-			return nil, fmt.Errorf("txhash: run %s: record %d out of hash order", path, i)
-		}
-		copy(prev[:], rec[:rowHashLen])
-		if seq := binary.LittleEndian.Uint32(rec[rowHashLen:]); seq < hdr.first || seq > hdr.last {
-			return nil, fmt.Errorf("txhash: run %s: record %d seq %d outside [%d,%d]",
-				path, i, seq, hdr.first, hdr.last)
-		}
-		if i%pageRecords == 0 {
-			ladder = append(ladder, [ladderKeyLen]byte(rec[:ladderKeyLen]))
-		}
-		bloom.add(fp64([rowHashLen]byte(rec[:rowHashLen])))
-	}
-	if crc.Sum64() != hdr.crc {
-		return nil, fmt.Errorf("txhash: run %s: payload crc mismatch (file %016x, computed %016x)",
-			path, hdr.crc, crc.Sum64())
-	}
-	return &sealedRun{
-		path: path, bloom: bloom, ladder: ladder,
-		first: hdr.first, last: hdr.last, records: records,
-	}, nil
-}
-
 // lookup probes the run for one hash: bloom reject → ladder route → one
 // record-aligned page pread (two on a boundary tie) → in-buffer stride
 // binary search → full 32-byte verify → LE seq. Concurrent-safe (ReadAt).
 func (r *sealedRun) lookup(hash [32]byte) (uint32, bool, error) {
-	if len(r.ladder) == 0 || !r.bloom.mayContain(fp64(hash)) {
+	if len(r.ladder) == 0 || !r.bloom.MayContain(fp64(hash)) {
 		return 0, false, nil
 	}
 	page, pages := r.route(hash)
@@ -495,19 +438,12 @@ func (r *sealedRun) close() {
 	}
 }
 
-// ─────────────────────────── manifest ───────────────────────────
+// runset.Run adapters: the publish protocol addresses a sealed run only by
+// path and disposal.
+func (r *sealedRun) RunPath() string { return r.path }
+func (r *sealedRun) CloseRun()       { r.close() }
 
-// manifestStore persists which runs are live — the crash-recovery authority.
-// Implemented over the chunk's RocksDB by the integration layer; faked in
-// tests.
-type manifestStore interface {
-	// PutRuns atomically replaces the live-run list and records the highest
-	// sealed ledger (warmup replays packed rows PAST it).
-	PutRuns(names []string, lastSealed uint32) error
-	// GetRuns returns the live-run list and the sealed frontier (zero when
-	// nothing sealed).
-	GetRuns() ([]string, uint32, error)
-}
+// ─────────────────────────── manifest ───────────────────────────
 
 // rocksdbManifest persists the live-run list in the chunk DB's default CF
 // under one key. Every Put rides the store's pinned synced WriteOptions, so
@@ -554,12 +490,17 @@ func (m rocksdbManifest) GetRuns() ([]string, uint32, error) {
 // arms sealing: the engine returns DISARMED, so a failed open writes nothing
 // durable and every retry faces the same state.
 //
+// The dense chain is the run half of that judgement: consecutive seals cover
+// consecutive ledger ranges and the newest run ends exactly at the sealed
+// frontier. A violated chain means the manifest and the run files disagree
+// about history — a loud open failure, like every other warmup inconsistency.
+//
 // firstLedger anchors the dense chain for a chunk with nothing sealed yet:
 // expectedNext = max(lastSealed+1, firstLedger), so a fresh/empty-manifest
 // chunk demands exactly the chunk's first ledger as its first row — an
 // unanchored engine would instead let an arbitrary mis-sequenced first row
 // anchor the whole chain.
-func OpenHotIndex(dir string, firstLedger uint32, manifest manifestStore) (*HotIndex, uint32, error) {
+func OpenHotIndex(dir string, firstLedger uint32, manifest runset.Manifest) (*HotIndex, uint32, error) {
 	h, err := NewHotIndex(dir, manifest)
 	if err != nil {
 		return nil, 0, err
@@ -568,83 +509,44 @@ func OpenHotIndex(dir string, firstLedger uint32, manifest manifestStore) (*HotI
 	if err != nil {
 		return nil, 0, fmt.Errorf("txhash: hotindex manifest read: %w", err)
 	}
-	runs, err := openManifestRuns(dir, names, lastSealed)
-	if err != nil {
-		return nil, 0, err
+	runs := make([]*sealedRun, 0, len(names))
+	// Cleanup is exit-invariant: any return before the caller takes ownership
+	// releases every run opened so far, however the open failed.
+	opened := false
+	defer func() {
+		if !opened {
+			closeRuns(runs)
+		}
+	}()
+	for _, name := range names {
+		r, oerr := openSealedRun(filepath.Join(dir, name))
+		if oerr != nil {
+			return nil, 0, fmt.Errorf("txhash: hotindex: manifest run %s: %w", name, oerr)
+		}
+		// Append BEFORE the chain check so the defer covers this handle too.
+		runs = append(runs, r)
+		if n := len(runs); n > 1 && r.first != runs[n-2].last+1 {
+			return nil, 0, fmt.Errorf("txhash: hotindex: run %s starts at %d, previous run ends at %d",
+				name, r.first, runs[n-2].last)
+		}
 	}
-	if err := sweepOrphans(dir, names); err != nil {
-		closeRuns(runs)
-		return nil, 0, err
+	if n := len(runs); n > 0 && runs[n-1].last != lastSealed {
+		return nil, 0, fmt.Errorf("txhash: hotindex: newest run ends at %d, sealed frontier is %d",
+			runs[n-1].last, lastSealed)
+	}
+	if err := runset.SweepOrphans(dir, names); err != nil {
+		return nil, 0, fmt.Errorf("txhash: hotindex: %w", err)
 	}
 	h.view.Store(&hotIndexView{runs: runs})
 	h.expectedNext = max(lastSealed+1, firstLedger)
-	h.sealSeq = nextSealSeq(names)
+	// The only run-name prefix this engine writes (startSeal).
+	h.sealSeq = runset.NextSealSeq(names, "seal")
+	opened = true
 	return h, lastSealed, nil
-}
-
-// openManifestRuns drain-verifies every manifest-listed run and checks the
-// chain is dense: consecutive seals cover consecutive ledger ranges and the
-// newest run ends exactly at the sealed frontier. A violated chain means the
-// manifest and the run files disagree about history — a loud open failure,
-// like every other warmup inconsistency.
-func openManifestRuns(dir string, names []string, lastSealed uint32) ([]*sealedRun, error) {
-	runs := make([]*sealedRun, 0, len(names))
-	for _, name := range names {
-		r, err := openSealedRun(filepath.Join(dir, name))
-		if err != nil {
-			closeRuns(runs)
-			return nil, fmt.Errorf("txhash: hotindex: manifest run %s: %w", name, err)
-		}
-		if n := len(runs); n > 0 && r.first != runs[n-1].last+1 {
-			closeRuns(append(runs, r))
-			return nil, fmt.Errorf("txhash: hotindex: run %s starts at %d, previous run ends at %d",
-				name, r.first, runs[n-1].last)
-		}
-		runs = append(runs, r)
-	}
-	if n := len(runs); n > 0 && runs[n-1].last != lastSealed {
-		closeRuns(runs)
-		return nil, fmt.Errorf("txhash: hotindex: newest run ends at %d, sealed frontier is %d",
-			runs[n-1].last, lastSealed)
-	}
-	return runs, nil
 }
 
 func closeRuns(runs []*sealedRun) {
 	for _, r := range runs {
 		r.close()
 	}
-}
-
-// sweepOrphans deletes files present in dir but unreferenced by the
-// manifest — garbage by definition (a crash between run write and manifest
-// Put).
-func sweepOrphans(dir string, names []string) error {
-	referenced := make(map[string]bool, len(names))
-	for _, name := range names {
-		referenced[name] = true
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return fmt.Errorf("txhash: hotindex sweep %s: %w", dir, err)
-	}
-	for _, e := range entries {
-		if !e.IsDir() && !referenced[e.Name()] {
-			_ = os.Remove(filepath.Join(dir, e.Name()))
-		}
-	}
-	return nil
-}
-
-// nextSealSeq resumes the run-name sequence past every live run so a future
-// seal can never overwrite one (numeric suffixes are monotone).
-func nextSealSeq(names []string) int {
-	maxSeq := 0
-	for _, name := range names {
-		var n int
-		if _, err := fmt.Sscanf(name, "seal-%06d.run", &n); err == nil && n > maxSeq {
-			maxSeq = n
-		}
-	}
-	return maxSeq + 1
 }

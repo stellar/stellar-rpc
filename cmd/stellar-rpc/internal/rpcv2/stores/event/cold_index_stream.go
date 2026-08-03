@@ -22,7 +22,6 @@ package event
 import (
 	"bufio"
 	"bytes"
-	"container/heap"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -301,20 +300,61 @@ type slotRecord struct {
 	body []byte // owned copy
 }
 
+// slotHeap is a typed slice-backed binary min-heap of buffered records keyed
+// by MPHF slot — a value heap, so a push neither boxes the record into an
+// `any` nor routes its compare through an interface. Dense MPHF slots are
+// unique, so the key needs no tie-break and the pop order is the slot order.
 type slotHeap []slotRecord
 
-func (h *slotHeap) Len() int           { return len(*h) }
-func (h *slotHeap) Less(i, j int) bool { return (*h)[i].slot < (*h)[j].slot }
-func (h *slotHeap) Swap(i, j int)      { (*h)[i], (*h)[j] = (*h)[j], (*h)[i] }
-func (h *slotHeap) Push(x any) {
-	rec, ok := x.(slotRecord)
-	if !ok { // heap.Push only ever receives slotRecord
-		panic("events: foreign type pushed into slotHeap")
-	}
-	*h = append(*h, rec)
-}
-func (h *slotHeap) Pop() any         { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
 func (h *slotHeap) peek() slotRecord { return (*h)[0] }
+
+func (h *slotHeap) push(rec slotRecord) {
+	*h = append(*h, rec)
+	h.siftUp(len(*h) - 1)
+}
+
+// popMin removes and returns the lowest-slot record.
+func (h *slotHeap) popMin() slotRecord {
+	old := *h
+	minRec := old[0]
+	last := len(old) - 1
+	old[0] = old[last]
+	*h = old[:last]
+	h.siftDown(0)
+	return minRec
+}
+
+func (h *slotHeap) siftUp(i int) {
+	h2 := *h
+	for i > 0 {
+		parent := (i - 1) / 2
+		if h2[parent].slot <= h2[i].slot {
+			break
+		}
+		h2[i], h2[parent] = h2[parent], h2[i]
+		i = parent
+	}
+}
+
+func (h *slotHeap) siftDown(i int) {
+	h2 := *h
+	n := len(h2)
+	for {
+		left := 2*i + 1
+		if left >= n {
+			break
+		}
+		j := left
+		if right := left + 1; right < n && h2[right].slot < h2[j].slot {
+			j = right
+		}
+		if h2[i].slot <= h2[j].slot { // heap property already holds
+			break
+		}
+		h2[i], h2[j] = h2[j], h2[i]
+		i = j
+	}
+}
 
 // writeSlotOrdered replays terms.run, looks up each term's dense slot, and
 // appends records to pw in exact slot order via the bounded reorder heap.
@@ -326,10 +366,7 @@ func writeSlotOrdered(pw *packfile.Writer, termsRunPath string, m *mphf) error {
 	)
 	flush := func() error {
 		for len(h) > 0 && h.peek().slot == next {
-			rec, ok := heap.Pop(&h).(slotRecord)
-			if !ok { // Push admits only slotRecord
-				panic("events: slotHeap yielded a foreign type")
-			}
+			rec := h.popMin()
 			heapBytes -= len(rec.body)
 			if err := pw.AppendItem(rec.fp[:], rec.body); err != nil {
 				return fmt.Errorf("events: write slot %d to index.pack: %w", rec.slot, err)
@@ -359,7 +396,7 @@ func writeSlotOrdered(pw *packfile.Writer, termsRunPath string, m *mphf) error {
 			return fmt.Errorf("events: slot reorder buffer exceeded %d bytes at slot %d — pathological MPHF block",
 				reorderByteCap, slot)
 		}
-		heap.Push(&h, slotRecord{slot: slot, fp: fp, body: append([]byte(nil), body...)})
+		h.push(slotRecord{slot: slot, fp: fp, body: append([]byte(nil), body...)})
 		return nil
 	})
 	if err != nil {

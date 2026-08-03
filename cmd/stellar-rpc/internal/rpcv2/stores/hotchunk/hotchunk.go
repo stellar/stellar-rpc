@@ -284,12 +284,14 @@ func (d *DB) Events() *event.HotStore {
 }
 
 // FreezeEventsCold builds the chunk's three cold events artifacts in
-// bucketDir directly from THIS hot DB's events CFs — freeze-by-merge: the
-// data CF's values are the canonical marshaled payloads, the offsets CF is
-// the ledger-count sequence, and the packed index rows are term-sorted runs,
-// so no ledger re-extraction (and no per-term memory) is needed. Valid on a
-// read-only view; the DB must be complete through the chunk's last ledger
-// (the freeze's source resolution already guarantees it).
+// bucketDir directly from THIS hot DB's durable events state — freeze-by-
+// merge, the same shape as FreezeTxhashCold: the data CF's values are the
+// canonical marshaled payloads, the offsets CF is the ledger-count sequence,
+// and the term index replays the hot engine's manifest-listed sealed runs
+// plus the un-sealed packed-row tail through the cold run merge — no ledger
+// re-extraction, no whole-chunk index re-derivation, no per-term memory.
+// Valid on a read-only view; the DB must be complete through the chunk's
+// last ledger (the freeze's source resolution already guarantees it).
 func (d *DB) FreezeEventsCold(
 	ctx context.Context, scratchDir, bucketDir string, opts event.ColdWriterOptions,
 ) error {

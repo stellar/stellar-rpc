@@ -22,6 +22,17 @@ func key(b byte) events.TermKey {
 	return k
 }
 
+// spillSlab writes slab to path through the production write path — one
+// RunWriter, EmitSorted streaming into Append, Commit.
+func spillSlab(t *testing.T, slab *Slab, path string) {
+	t.Helper()
+	rw, err := NewRunWriter(path)
+	require.NoError(t, err)
+	defer rw.Close()
+	require.NoError(t, slab.EmitSorted(rw.Append))
+	require.NoError(t, rw.Commit())
+}
+
 // drain reads a run file fully, asserting clean EOF (which verifies CRC).
 func drain(t *testing.T, path string) map[events.TermKey][]uint32 {
 	t.Helper()
@@ -57,8 +68,7 @@ func TestSlab_SpillRoundTrip(t *testing.T) {
 		}
 	}
 	path := filepath.Join(t.TempDir(), "00.run")
-	payload, records := slab.SortEncode(nil)
-	require.NoError(t, WriteRun(path, payload, records))
+	spillSlab(t, slab, path)
 	assert.Equal(t, want, drain(t, path))
 }
 
@@ -78,9 +88,40 @@ func TestSlab_DedupsExactDuplicates(t *testing.T) {
 	require.True(t, slab.Append(key(9), 5))
 	require.True(t, slab.Append(key(9), 6))
 	path := filepath.Join(t.TempDir(), "d.run")
-	payload, records := slab.SortEncode(nil)
-	require.NoError(t, WriteRun(path, payload, records))
+	spillSlab(t, slab, path)
 	assert.Equal(t, map[events.TermKey][]uint32{key(9): {5, 6}}, drain(t, path))
+}
+
+// TestSlab_EmitSortedContract pins the emit callback's two contract points:
+// an emit error aborts the walk and surfaces unchanged, and the ids slice is
+// the slab's reused buffer — valid only until the next call.
+func TestSlab_EmitSortedContract(t *testing.T) {
+	slab := NewSlab(1 << 12)
+	require.True(t, slab.Append(key(2), 7))
+	require.True(t, slab.Append(key(1), 5))
+	require.True(t, slab.Append(key(1), 6))
+
+	boom := errors.New("boom")
+	calls := 0
+	err := slab.EmitSorted(func(events.TermKey, []uint32) error {
+		calls++
+		return boom
+	})
+	require.ErrorIs(t, err, boom)
+	assert.Equal(t, 1, calls, "an emit error must abort the walk")
+
+	var first *uint32
+	emits := 0
+	require.NoError(t, slab.EmitSorted(func(_ events.TermKey, ids []uint32) error {
+		emits++
+		if first == nil {
+			first = &ids[0]
+		} else {
+			assert.Same(t, first, &ids[0], "ids must be the slab's reused buffer")
+		}
+		return nil
+	}))
+	assert.Equal(t, 2, emits)
 }
 
 func TestRunReader_DetectsCorruption(t *testing.T) {
@@ -90,8 +131,7 @@ func TestRunReader_DetectsCorruption(t *testing.T) {
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.run")
-	payload, records := slab.SortEncode(nil)
-	require.NoError(t, WriteRun(path, payload, records))
+	spillSlab(t, slab, path)
 
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -145,8 +185,7 @@ func TestSlab_OutputIsTermSorted(t *testing.T) {
 		require.True(t, slab.Append(key(byte(i)), uint32(i)))
 	}
 	path := filepath.Join(t.TempDir(), "s.run")
-	payload, records := slab.SortEncode(nil)
-	require.NoError(t, WriteRun(path, payload, records))
+	spillSlab(t, slab, path)
 	r, err := OpenRun(path)
 	require.NoError(t, err)
 	defer r.Close()
@@ -166,9 +205,9 @@ func TestSlab_OutputIsTermSorted(t *testing.T) {
 	}
 }
 
-// TestRunHeader_RecordCount pins the header's record-count field: written by
-// both writer paths, exposed pre-drain, bounded at open, and cross-checked
-// against the actual drain at EOF.
+// TestRunHeader_RecordCount pins the header's record-count field: counted by
+// Append, patched in at Commit, exposed pre-drain, bounded at open, and
+// cross-checked against the actual drain at EOF.
 func TestRunHeader_RecordCount(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "h.run")
 	rw, err := NewRunWriter(path)
@@ -238,41 +277,69 @@ func TestRunHeader_RecordCount(t *testing.T) {
 	require.ErrorIs(t, err, ErrCorruptRun)
 }
 
-// TestRunWriter_DiscardLeavesNothing pins the two-phase lifecycle: a
-// discarded writer publishes nothing and leaves no temp file, and Discard
-// after Commit must not touch the committed file.
-func TestRunWriter_DiscardLeavesNothing(t *testing.T) {
+// dirEntries lists dir's entry names (os.ReadDir sorts them).
+func dirEntries(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// TestRunWriter_CloseLeavesNothing pins the two-phase lifecycle now that a
+// writer creates its file at the FINAL name: the run is visible while it is
+// still being written (visibility is not validity — nothing trusts a run by
+// name), no sidecar is ever created, an abandoned writer leaves nothing at
+// all, and Close after Commit must not touch the committed run.
+func TestRunWriter_CloseLeavesNothing(t *testing.T) {
 	dir := t.TempDir()
 
 	path := filepath.Join(dir, "aborted.run")
 	rw, err := NewRunWriter(path)
 	require.NoError(t, err)
 	require.NoError(t, rw.Append(key(1), []uint32{1}))
-	rw.Discard()
+	assert.Equal(t, []string{"aborted.run"}, dirEntries(t, dir), "the run is written under its final name")
+	rw.Close()
 	_, err = os.Stat(path)
-	require.ErrorIs(t, err, os.ErrNotExist, "discarded run must not be published")
-	_, err = os.Stat(path + ".tmp")
-	require.ErrorIs(t, err, os.ErrNotExist, "discarded run must not leave its temp file")
+	require.ErrorIs(t, err, os.ErrNotExist, "an abandoned run must not survive")
+	assert.Empty(t, dirEntries(t, dir), "abandonment must leave nothing behind")
 
 	committed := filepath.Join(dir, "committed.run")
 	rw2, err := NewRunWriter(committed)
 	require.NoError(t, err)
 	require.NoError(t, rw2.Append(key(2), []uint32{4, 9}))
 	require.NoError(t, rw2.Commit())
-	rw2.Discard() // deferred-Discard idiom: must be a no-op now
+	rw2.Close() // deferred-Close idiom: must be a no-op now
 	assert.Equal(t, map[events.TermKey][]uint32{key(2): {4, 9}}, drain(t, committed))
 }
 
-// TestRunWriter_CommitFailureRemovesTemp forces Commit's rename step to fail
-// (the final name is occupied by a directory) and requires the failed Commit
-// to surface the error without leaving its temp file behind.
-func TestRunWriter_CommitFailureRemovesTemp(t *testing.T) {
+// TestRunWriter_CommitFailureRemovesTheFile: the rename that used to be the
+// convenient fault-injection point is gone, so the fault is closing the fd
+// underneath the writer, which fails Commit at its flush. The run is written
+// past the bufio capacity first, so real bytes are already on disk under the
+// final name when Commit fails — the exposure create-at-final-name introduces
+// — and the error must surface with nothing left at that name.
+func TestRunWriter_CommitFailureRemovesTheFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "blocked.run")
 	rw, err := NewRunWriter(path)
 	require.NoError(t, err)
-	require.NoError(t, rw.Append(key(1), []uint32{1}))
-	require.NoError(t, os.Mkdir(path, 0o755)) // rename's destination is now a directory
+	// Exceed the writer's 1MiB buffer so at least one flush has hit the disk.
+	ids := make([]uint32, 4<<10)
+	for i := range ids {
+		ids[i] = uint32(i + 1)
+	}
+	for i := 0; rw.written < 2<<20; i++ {
+		require.NoError(t, rw.Append(key(byte(i)), ids))
+	}
+	st, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Positive(t, st.Size(), "flushed bytes must already sit at the final name")
+	require.NoError(t, rw.f.Close()) // the tail of the payload is still buffered
 	require.Error(t, rw.Commit())
-	_, serr := os.Stat(path + ".tmp")
-	require.ErrorIs(t, serr, os.ErrNotExist, "failed Commit must remove the temp file")
+	_, serr := os.Stat(path)
+	require.ErrorIs(t, serr, os.ErrNotExist,
+		"failed Commit must remove the file, including bytes already flushed")
 }

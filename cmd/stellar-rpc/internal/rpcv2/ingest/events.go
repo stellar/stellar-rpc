@@ -20,7 +20,7 @@ import (
 // ───────────────────────── Cold writer ─────────────────────────
 
 // eventsCold models the backfill path: shared-walk output → payloads →
-// term-index spill + cold append, then chunk-end Finish + the external
+// term-index spill + cold append, then chunk-end Commit + the external
 // streaming index build (WriteColdIndexFromRuns). No HotStore is involved —
 // and no in-memory term mirror either: (term, eventID) pairs spill through a
 // runspill.Spiller (bounded double-buffered slabs → sorted scratch runs), so
@@ -155,7 +155,7 @@ func (e *eventsCold) write(seq uint32, closedAt int64, txParts []sdkingest.Ledge
 	return nil
 }
 
-// finalize writes the events.pack trailer (Finish) + materializes the cold
+// finalize writes the events.pack trailer (Commit) + materializes the cold
 // index from the spilled runs (WriteColdIndexFromRuns). An eventless chunk (zero terms — the common case
 // for pre-Soroban backfill ranges) is handled inside WriteColdIndex, which
 // publishes a valid empty index, so all three cold artifacts exist for every
@@ -170,8 +170,8 @@ func (e *eventsCold) finalize(ctx context.Context) error {
 		// chunk whose mirror/pack may be ahead of the offsets commit point.
 		return fmt.Errorf("events cold writer for chunk %s: finalize after failed write", e.chunkID)
 	}
-	if err := e.writer.Finish(e.offsets); err != nil {
-		err = fmt.Errorf("events ColdWriter.Finish: %w", err)
+	if err := e.writer.Commit(e.offsets); err != nil {
+		err = fmt.Errorf("events ColdWriter.Commit: %w", err)
 		e.metrics.emit(time.Since(start), err)
 		return err
 	}
@@ -182,7 +182,7 @@ func (e *eventsCold) finalize(ctx context.Context) error {
 		return err
 	}
 	if err := event.WriteColdIndexFromRuns(ctx, e.chunkID, runs, e.scratchDir, e.bucketDir); err != nil {
-		// Finish already committed events.pack; the index-less pack is left
+		// Commit already published events.pack; the index-less pack is left
 		// in place — without the orchestrator's completion record it is
 		// inert scratch (see the package doc's artifact model), and the
 		// retry's overwrite is the cleanup.
