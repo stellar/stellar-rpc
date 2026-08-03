@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
 // Config selects which data types the ingest drivers write. At least one of
@@ -26,6 +27,15 @@ type Config struct {
 	// index's routing — the caller derives it (event.ColdIndexSecret) so the
 	// build is deterministic. Required when Events is set — no unkeyed fallback.
 	EventsSecret []byte
+
+	// EventsFreezeDB, when non-nil, switches the events writer to
+	// freeze-by-merge: cold events artifacts are built directly from this
+	// (complete, read-only) hot chunk DB's CFs at finalize instead of from
+	// the raw-ledger walk — no per-ledger events shaping, no term memory.
+	// Only the freeze path sets it (its source IS this hot DB, so the CFs
+	// cover exactly the chunk); backfill leaves it nil. Ignored unless
+	// Events is enabled.
+	EventsFreezeDB *hotchunk.DB
 }
 
 // validate rejects a Config with no enabled data types, or a txhash/events

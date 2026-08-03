@@ -302,7 +302,7 @@ func TestBackfillSource_PrefersFrozenPackWhenLFSNotRequested(t *testing.T) {
 	cfg.Backend = bulk
 
 	set := catalog.NewArtifactSet(geometry.KindEvents, geometry.KindTxHash) // ledgers NOT requested
-	src, closeSrc, err := backfillSource(context.Background(), chunkID, set, cfg)
+	src, closeSrc, _, err := backfillSource(context.Background(), chunkID, set, cfg)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, closeSrc()) }()
 	// It is a pack stream (re-derivation without download); the bulk backend was
@@ -327,7 +327,7 @@ func TestBackfillSource_DoesNotUsePackWhenLFSRequested(t *testing.T) {
 
 	// ledgers IS requested — the pack branch is skipped (circular), so it goes to
 	// the bulk backend (whose tip covers the chunk, so the wait passes).
-	src, closeSrc, err := backfillSource(context.Background(), chunkID, catalog.AllArtifacts(), cfg)
+	src, closeSrc, _, err := backfillSource(context.Background(), chunkID, catalog.AllArtifacts(), cfg)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, closeSrc()) }()
 	require.Same(t, bulk, src)
@@ -343,7 +343,7 @@ func TestBackfillSource_BulkCoverageErrorAborts(t *testing.T) {
 	chunkID := chunk.ID(0)
 	cfg.Backend = &fakeBackend{t: t, gen: rpcv2test.ZeroTxLCMBytes, tipErr: errors.New("boom")}
 
-	_, _, err := backfillSource(context.Background(), chunkID, catalog.AllArtifacts(), cfg)
+	_, _, _, err := backfillSource(context.Background(), chunkID, catalog.AllArtifacts(), cfg)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "backend tip query")
 }
@@ -353,7 +353,7 @@ func TestBackfillSource_NoBackendConfigured(t *testing.T) {
 	cfg := testProcessConfig(t, cat)
 	cfg.Backend = nil
 
-	_, _, err := backfillSource(context.Background(), chunk.ID(0), catalog.AllArtifacts(), cfg)
+	_, _, _, err := backfillSource(context.Background(), chunk.ID(0), catalog.AllArtifacts(), cfg)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no bulk backend")
 }

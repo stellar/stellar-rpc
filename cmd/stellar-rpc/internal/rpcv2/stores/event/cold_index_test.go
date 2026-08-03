@@ -15,6 +15,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
 // indexTestChunkID is the chunk ID every WriteColdIndex test uses for
@@ -117,15 +118,16 @@ func TestWriteIndex_RoundTripsBitmapsPerTerm(t *testing.T) {
 			fmt.Appendf(nil, "term-%d", i),
 			FieldContractID,
 		)
-		slot, err := m.Lookup(term)
+		slot, rk, err := m.Lookup(term)
 		require.NoError(t, err, "lookup term-%d", i)
 
 		record, ok := records[int(slot)]
 		require.True(t, ok, "record missing at slot %d (term-%d)", slot, i)
 		require.GreaterOrEqual(t, len(record), IndexRecordFingerprintLen, "record at slot %d too short", slot)
 
-		// Fingerprint must match term[:4].
-		assert.Equal(t, term[:IndexRecordFingerprintLen], record[:IndexRecordFingerprintLen],
+		// Fingerprint must match the ROUTED (blinded) key's prefix — the one
+		// identity both builders and the reader share.
+		assert.Equal(t, rk[:IndexRecordFingerprintLen], record[:IndexRecordFingerprintLen],
 			"fingerprint mismatch at slot %d", slot)
 
 		// Deserialize bitmap.
@@ -161,7 +163,7 @@ func TestWriteIndex_UnseenTermFingerprintMismatches(t *testing.T) {
 			fmt.Appendf(nil, "never-seen-%d", i),
 			FieldTopic0,
 		)
-		slot, err := m.Lookup(unseen)
+		slot, unseenRK, err := m.Lookup(unseen)
 		if errors.Is(err, ErrKeyNotFound) {
 			continue
 		}
@@ -171,7 +173,7 @@ func TestWriteIndex_UnseenTermFingerprintMismatches(t *testing.T) {
 		record, ok := records[int(slot)]
 		require.True(t, ok)
 		recordFP := record[:IndexRecordFingerprintLen]
-		if string(recordFP) != string(unseen[:IndexRecordFingerprintLen]) {
+		if string(recordFP) != string(unseenRK[:IndexRecordFingerprintLen]) {
 			mismatches++
 		}
 	}
@@ -223,7 +225,7 @@ func TestWriteIndex_ZeroTerms_WritesEmptyIndex(t *testing.T) {
 	m, err := openMPHF(filepath.Join(dir, IndexHashName(indexTestChunkID)))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = m.Close() })
-	_, lerr := m.Lookup(ComputeTermKey([]byte("anything"), FieldContractID))
+	_, _, lerr := m.Lookup(ComputeTermKey([]byte("anything"), FieldContractID))
 	assert.ErrorIs(t, lerr, ErrKeyNotFound)
 }
 
@@ -266,7 +268,7 @@ func TestWriteIndex_SlotsAreDense(t *testing.T) {
 					fmt.Appendf(nil, "term-%d", i),
 					FieldContractID,
 				)
-				slot, err := m.Lookup(term)
+				slot, _, err := m.Lookup(term)
 				require.NoError(t, err)
 				assert.Less(t, slot, uint32(n))
 				seen[slot] = struct{}{}
@@ -299,16 +301,16 @@ func TestWriteIndex_LargeIndex(t *testing.T) {
 			fmt.Appendf(nil, "term-%d", i),
 			FieldContractID,
 		)
-		slot, err := m.Lookup(term)
+		slot, rk, err := m.Lookup(term)
 		require.NoError(t, err)
 		record, ok := records[int(slot)]
 		require.True(t, ok)
-		assert.Equal(t, term[:IndexRecordFingerprintLen], record[:IndexRecordFingerprintLen])
+		assert.Equal(t, rk[:IndexRecordFingerprintLen], record[:IndexRecordFingerprintLen])
 	}
 }
 
 func TestWriteIndex_RecordEncoding(t *testing.T) {
-	// Lock the on-disk record format: fingerprint || roaring bitmap.
+	// Lock the on-disk record format: routed-key fingerprint || roaring bitmap.
 	// Future readers (PR-3a) rely on this layout; if it ever changes
 	// silently, this test fails.
 	dir := t.TempDir()
@@ -324,7 +326,8 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	require.Greater(t, len(record), IndexRecordFingerprintLen)
 
 	term := ComputeTermKey([]byte("only"), FieldContractID)
-	assert.Equal(t, term[:IndexRecordFingerprintLen], record[:IndexRecordFingerprintLen])
+	rk := TermKey(stores.BlindKey(testIndexSecret, term[:]))
+	assert.Equal(t, rk[:IndexRecordFingerprintLen], record[:IndexRecordFingerprintLen])
 
 	bm := roaring.New()
 	require.NoError(t, bm.UnmarshalBinary(record[IndexRecordFingerprintLen:]))

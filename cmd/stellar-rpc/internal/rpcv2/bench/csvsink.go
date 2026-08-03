@@ -226,10 +226,11 @@ func newCSVSink() *csvSink {
 // The phases partition the per-ledger IngestLedger wall-clock, so their sum IS
 // the per-ledger total — a number per-phase percentiles can't recover
 // (percentiles don't sum). PhaseExtract (always first) resets the accumulator
-// for a new ledger; PhaseApply (terminal, emitted on the success path only —
-// never the failed phase) records one ingest_total sample with items=1. A
-// failed ledger never reaches PhaseApply, so it contributes nothing (the run
-// aborts and partial CSVs are written anyway).
+// for a new ledger; PhaseApply (terminal) records one ingest_total sample
+// with items=1. A ledger that fails before the apply never reaches
+// PhaseApply and contributes nothing; an apply-phase failure contributes its
+// one sample to an already-aborted run's partial CSV — harmless, the run
+// stops there.
 //
 // The accumulator is mutex-guarded so the sink stays safe under the MetricSink
 // contract regardless; only the production single-writer pattern yields

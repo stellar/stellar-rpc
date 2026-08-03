@@ -58,8 +58,14 @@ type ConcurrentBitmaps struct {
 	terms map[TermKey]*atomic.Pointer[termState]
 }
 
-// NewConcurrentBitmapsFromBitmaps takes ownership of a Bitmaps built
-// by warmup or backfill. The input must not be used afterwards.
+// NewConcurrentBitmapsFromBitmaps takes ownership of b. The input must not
+// be used afterwards.
+//
+// It is the only constructor, and production's only caller hands it an EMPTY
+// Bitmaps: the hot index's dense overlay starts empty and self-fills via
+// promotion, and a warmed-up chunk rebuilds the overlay by replaying its rows
+// and sealed runs, never by handing a built Bitmaps over. The conversion path
+// below is what the tests that pin the ownership contract drive.
 //
 // Terms below promotionThreshold become sparse lists, the same
 // representation AddTo gives them. Terms at or above it keep their
@@ -116,6 +122,15 @@ func (s *ConcurrentBitmaps) Get(key TermKey) (*roaring.Bitmap, error) {
 	bm := roaring.New()
 	bm.AddMany(st.ids)
 	return bm, nil
+}
+
+// Has reports whether key is tracked, without materializing anything — the
+// hot index's per-ledger dense-overlay membership probe.
+func (s *ConcurrentBitmaps) Has(key TermKey) bool {
+	s.rwmu.RLock()
+	_, ok := s.terms[key]
+	s.rwmu.RUnlock()
+	return ok
 }
 
 // snapshot returns the term's current immutable bitmap. If a write
