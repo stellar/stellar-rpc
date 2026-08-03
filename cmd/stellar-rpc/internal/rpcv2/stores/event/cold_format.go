@@ -387,7 +387,9 @@ func openMPHF(path string) (*mphf, error) {
 	return &mphf{idx: idx, secret: secret}, nil
 }
 
-// Lookup returns the dense slot in [0, N) that key maps to.
+// Lookup blinds key with the index's routing secret and returns its
+// dense slot in [0, N) plus the routed key — the identity every
+// record and fingerprint downstream is keyed by.
 //
 // streamhash returns ErrKeyNotFound for keys its routing-stage check
 // can prove were never in the build set; callers should treat this
@@ -396,8 +398,16 @@ func openMPHF(path string) (*mphf, error) {
 // 4-byte fingerprint stored alongside the bitmap at that slot in
 // index.pack — an MPHF can map an unseen key to a valid build-set
 // slot, and only the fingerprint catches that residual collision.
-func (m *mphf) Lookup(key TermKey) (uint32, error) {
-	rk := stores.BlindKey(m.secret, key[:])
+func (m *mphf) Lookup(key TermKey) (uint32, TermKey, error) {
+	rk := TermKey(stores.BlindKey(m.secret, key[:]))
+	slot, err := m.LookupRouted(rk)
+	return slot, rk, err
+}
+
+// LookupRouted returns the dense slot for an ALREADY-ROUTED key. The
+// streaming build's pass B feeds run keys that were blinded when they
+// entered the spill (ingest keys the runs), so it must not blind again.
+func (m *mphf) LookupRouted(rk TermKey) (uint32, error) {
 	slot, err := m.idx.QueryRank(rk[:])
 	if err != nil {
 		if errors.Is(err, streamhash.ErrNotFound) {

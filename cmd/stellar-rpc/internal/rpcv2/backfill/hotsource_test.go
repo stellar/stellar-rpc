@@ -46,7 +46,7 @@ func TestBackfillSource_HotComplete(t *testing.T) {
 	c := chunk.ID(0)
 	seedReadyHotChunk(t, cat, c, c.LastLedger()) // complete: maxSeq == last ledger
 
-	src, closeSrc, err := backfillSource(context.Background(), c, catalog.AllArtifacts(), cfg)
+	src, closeSrc, _, err := backfillSource(context.Background(), c, catalog.AllArtifacts(), cfg)
 	require.NoError(t, err, "complete hot tier is used; no bulk backend needed")
 	require.NotNil(t, src)
 	require.NoError(t, closeSrc())
@@ -62,7 +62,7 @@ func TestBackfillSource_HotIncompleteFallsThrough(t *testing.T) {
 	c := chunk.ID(0)
 	seedReadyHotChunk(t, cat, c, c.FirstLedger()) // incomplete: maxSeq < last ledger
 
-	_, _, err := backfillSource(context.Background(), c, catalog.AllArtifacts(), cfg)
+	_, _, _, err := backfillSource(context.Background(), c, catalog.AllArtifacts(), cfg)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no bulk backend",
 		"an incomplete hot tier falls through; it is not itself an error")
@@ -79,7 +79,7 @@ func TestBackfillSource_HotReadyButDirMissing(t *testing.T) {
 	require.NoError(t, cat.PutHotTransient(c))
 	require.NoError(t, cat.FlipHotReady(c)) // ready key, NO dir on disk
 
-	_, _, err := backfillSource(context.Background(), c, catalog.AllArtifacts(), cfg)
+	_, _, _, err := backfillSource(context.Background(), c, catalog.AllArtifacts(), cfg)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "won't open")
 }

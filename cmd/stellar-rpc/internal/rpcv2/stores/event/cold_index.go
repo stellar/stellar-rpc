@@ -4,7 +4,7 @@ package event
 // produces index.pack (per-slot bitmap records) + index.hash (the
 // serialized MPHF) inside a Chunk's cold directory.
 //
-// The events.pack writer half lives in cold_writer.go. Shared format
+// The pack writer half lives in cold_writer.go. Shared format
 // constants, the LedgerOffsets app-data wire format, and the
 // MPHF wrapper live in cold_format.go.
 
@@ -61,9 +61,12 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 // hit a slow (*Bitmap).lazyOR path at query time and K≥12 regresses
 // catastrophically.
 //
-// Both cold backfill and the live-chunk freeze build a Bitmaps single-threaded by
-// re-deriving terms from raw LCMs (per-event TermsForBytes + Bitmaps.AddTo) and
-// hand it directly here.
+// PRODUCTION-DEAD, KEPT AS THE ORACLE: no shipping path calls this anymore —
+// both cold backfill and the live-chunk freeze stream from spill runs via
+// WriteColdIndexFromRuns. This in-memory builder is retained because the
+// byte-identity gate (cold_index_stream_test.go) pins the streaming build's
+// output against it; a format change must be mirrored here or the gate stops
+// meaning anything.
 //
 // index.hash is the MPHF serialized via buildMPHF.
 //
@@ -124,13 +127,16 @@ func WriteColdIndex(
 
 	entries := make([]indexEntry, 0, len(bitmaps))
 	for term, bitmap := range bitmaps {
-		slot, lerr := m.Lookup(term)
+		slot, rk, lerr := m.Lookup(term)
 		if lerr != nil {
 			return fmt.Errorf("events: MPHF lookup during index.pack build: %w", lerr)
 		}
-		// App fingerprint stays on the ORIGINAL term key, not the routed key.
+		// App fingerprint comes from the ROUTED (blinded) key: the streaming
+		// twin's pass B only ever holds run keys, which are blinded at ingest,
+		// so the blinded bytes are the one identity both builders share (and
+		// the reader compares against the routed query key).
 		var fp [IndexRecordFingerprintLen]byte
-		copy(fp[:], term[:IndexRecordFingerprintLen])
+		copy(fp[:], rk[:IndexRecordFingerprintLen])
 		// Mutate in place — bitmaps is uniquely owned by the caller, built
 		// single-threaded either way: cold backfill from the .pack, or the freeze
 		// from the read-only hot DB.
@@ -157,7 +163,7 @@ func WriteColdIndex(
 	// container-encodes (array / bitmap / RLE) the underlying data,
 	// and a second compression pass slows the query hot path
 	// measurably (~3.6× lookup latency in measurement) for marginal
-	// byte savings. Contrast events.pack, where XDR payloads grouped
+	// byte savings. Contrast pack, where XDR payloads grouped
 	// at 128/record offer plenty of compression headroom.
 	pw, err := packfile.Create(indexPackPath, packfile.WriterOptions{
 		Format:         indexPackFormat,

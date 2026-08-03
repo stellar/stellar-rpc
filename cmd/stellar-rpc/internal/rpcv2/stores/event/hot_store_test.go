@@ -164,8 +164,8 @@ func TestHotStore_IngestLedgerWritesAllCFs(t *testing.T) {
 	idxVal, found, err := h.store.chunkStore.Get(IndexCF, encodePackedIndexKey(2))
 	require.NoError(t, err)
 	require.True(t, found, "missing packed index row for ledger 2")
-	decodedTerms := map[events.TermKey][]uint32{}
-	require.NoError(t, decodePackedIndexRow(idxVal, func(term events.TermKey, ids []uint32) {
+	decodedTerms := map[TermKey][]uint32{}
+	require.NoError(t, DecodePackedRow(idxVal, func(term TermKey, ids []uint32) {
 		decodedTerms[term] = append([]uint32(nil), ids...)
 	}))
 	for _, key := range keys {
@@ -722,7 +722,7 @@ func ingestLedgerEvents(h *HotStore, ledgerSeq uint32, payloads []Payload) error
 	if h.chunkStore.IsClosed() {
 		return stores.ErrStoreClosed
 	}
-	var apply func()
+	var apply func() error
 	if err := h.chunkStore.Batch(func(b *rocksdb.BatchWriter) error {
 		a, aerr := h.IngestLedgerToBatch(b, ledgerSeq, payloads)
 		apply = a
@@ -731,7 +731,7 @@ func ingestLedgerEvents(h *HotStore, ledgerSeq uint32, payloads []Payload) error
 		return err
 	}
 	if apply != nil {
-		apply()
+		return apply()
 	}
 	return nil
 }

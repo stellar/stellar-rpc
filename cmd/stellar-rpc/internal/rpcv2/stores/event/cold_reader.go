@@ -304,7 +304,8 @@ func (c *ColdReader) Offsets() (*LedgerOffsets, error) {
 }
 
 // verifyAndDeserializeBitmap checks the index.pack record's leading
-// fingerprint against key's prefix and, on match, unmarshals a fresh
+// fingerprint against the ROUTED (blinded) key's prefix — the identity
+// the builders fingerprint by — and, on match, unmarshals a fresh
 // bitmap. On fingerprint mismatch (residual MPHF collision on an
 // unseen key) it returns (nil, nil) — the caller treats nil as
 // not-found. record is valid only inside ReadItem's callback;
@@ -369,17 +370,18 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring
 	type pendingKey struct {
 		outIdx int
 		slot   uint32
+		routed TermKey // blinded key — what records and fingerprints are keyed by
 	}
 	pending := make([]pendingKey, 0, len(keys))
 	for i, key := range keys {
-		slot, err := mphf.Lookup(key)
+		slot, rk, err := mphf.Lookup(key)
 		if err != nil {
 			if errors.Is(err, ErrKeyNotFound) {
 				continue // result[i] stays nil
 			}
 			return nil, fmt.Errorf("events: LookupKeys MPHF for chunk %s: %w", c.chunkID, err)
 		}
-		pending = append(pending, pendingKey{outIdx: i, slot: slot})
+		pending = append(pending, pendingKey{outIdx: i, slot: slot, routed: rk})
 	}
 	if len(pending) == 0 {
 		return results, nil
@@ -408,7 +410,7 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring
 		// leaving results[outIdx] = nil for misses.
 		for _, pIdx := range pendingBySlot[readIdx] {
 			p := pending[pIdx]
-			bm, err := verifyAndDeserializeBitmap(record, keys[p.outIdx], p.slot)
+			bm, err := verifyAndDeserializeBitmap(record, p.routed, p.slot)
 			if err != nil {
 				return err
 			}

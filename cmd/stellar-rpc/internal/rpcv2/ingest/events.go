@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"time"
 
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
@@ -12,23 +13,31 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event/runspill"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
 // ───────────────────────── Cold writer ─────────────────────────
 
 // eventsCold models the backfill path: shared-walk output → payloads →
-// term-index accumulate + cold append, then chunk-end Finish + WriteColdIndex.
-// No HotStore is involved — it maintains an in-memory event.Bitmaps mirror via
-// NewBitmaps + per-event TermsForBytes, and an event.LedgerOffsets to assign
-// chunk-relative event IDs.
+// term-index spill + cold append, then chunk-end Finish + the external
+// streaming index build (WriteColdIndexFromRuns). No HotStore is involved —
+// and no in-memory term mirror either: (term, eventID) pairs spill through a
+// runspill.Spiller (bounded double-buffered slabs → sorted scratch runs), so
+// the build's memory is O(slab), not O(unique terms). An
+// event.LedgerOffsets assigns chunk-relative event IDs as before.
 type eventsCold struct {
-	chunkID   chunk.ID
-	writer    *event.ColdWriter
-	mirror    event.Bitmaps
-	offsets   *event.LedgerOffsets
-	bucketDir string
-	// secret is the chunk's deterministic routing secret (event.ColdIndexSecret),
-	// handed to WriteColdIndex at finalize.
+	chunkID    chunk.ID
+	writer     *event.ColdWriter
+	spiller    *runspill.Spiller
+	scratchDir string
+	offsets    *event.LedgerOffsets
+	bucketDir  string
+	// secret is the chunk's deterministic routing secret (event.ColdIndexSecret).
+	// Every term key is blinded with it BEFORE it reaches the spiller, so the
+	// runs — and everything downstream of them (merge order, index.hash routing,
+	// index.pack record order and fingerprints) — are keyed by the blinded
+	// identity end to end.
 	secret  [stores.SecretLen]byte
 	metrics coldMetrics
 	// failed latches any write error. A failed write can leave the mirror
@@ -40,7 +49,7 @@ type eventsCold struct {
 	failed bool
 }
 
-// newEventsCold opens a per-chunk events.pack cold writer in bucketDir —
+// newEventsCold opens a per-chunk event.pack cold writer in bucketDir —
 // the caller's geometry.Layout.EventsBucketDir(chunkID), so the write path is
 // Layout's single derivation. The writer opts into the batch tuning
 // (coldEncoderConcurrency/coldBytesPerSync): WriteColdChunk, the sole
@@ -58,16 +67,96 @@ func newEventsCold(
 	if err != nil {
 		return nil, fmt.Errorf("event.NewColdWriter: %w", err)
 	}
+	// Index-spill scratch lives beside the artifacts (same NVMe), wiped by
+	// NewSpiller on entry so a crashed attempt's runs never leak into this
+	// one, and removed at finalize/close.
+	scratchDir := eventsScratchDir(bucketDir, chunkID)
+	sp, err := runspill.NewSpiller(scratchDir, indexSpillSlabBytes)
+	if err != nil {
+		_ = w.Close()
+		return nil, fmt.Errorf("runspill.NewSpiller: %w", err)
+	}
 	return &eventsCold{
+		chunkID:    chunkID,
+		writer:     w,
+		spiller:    sp,
+		scratchDir: scratchDir,
+		offsets:    event.NewLedgerOffsets(chunkID.FirstLedger()),
+		bucketDir:  bucketDir,
+		secret:     secret,
+		metrics:    newColdMetrics(sink, dataTypeEvents),
+	}, nil
+}
+
+// eventsScratchDir is THE scratch location for chunk c's events index build
+// under eventsDir — ONE name, shared by every materializer of this chunk, so
+// whichever build runs next wipes a crashed attempt's remains on entry (each
+// build wipes this dir before use and removes it at finalize). Scratch has
+// no catalog key — the key-driven sweeps can never find it — so the shared
+// deterministic name is what keeps a crashed attempt's multi-GB spill dir
+// from stranding invisibly in the cold bucket.
+func eventsScratchDir(eventsDir string, c chunk.ID) string {
+	return filepath.Join(eventsDir, ".events-scratch-"+c.String())
+}
+
+// indexSpillSlabBytes sizes each of the Spiller's two slabs. 32MB holds
+// ~1.6M (term, id) records per side — a spill every ~130 worst-case ledgers
+// — keeping steady-state index memory ~64MB + sort scratch regardless of the
+// chunk's unique-term count.
+const indexSpillSlabBytes = 32 << 20
+
+// eventsFreeze is the freeze-by-merge events writer: it takes NO per-ledger
+// feed (openColdChunk leaves coldChunk.events nil, so the walk never shapes
+// events for it) and produces all three cold events artifacts at finalize
+// straight from the complete hot chunk DB's CFs (hotchunk.FreezeEventsCold).
+type eventsFreeze struct {
+	chunkID   chunk.ID
+	db        *hotchunk.DB
+	bucketDir string
+	// secret is the chunk's routing secret (event.ColdIndexSecret) — the
+	// freeze build blinds term keys with it at its run boundary, mirroring
+	// the walk path's blind-before-spill.
+	secret  [stores.SecretLen]byte
+	metrics coldMetrics
+}
+
+func newEventsFreeze(
+	bucketDir string, chunkID chunk.ID, db *hotchunk.DB, sink MetricSink,
+	secret [stores.SecretLen]byte,
+) (*eventsFreeze, error) {
+	if err := os.MkdirAll(bucketDir, 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir %s: %w", bucketDir, err)
+	}
+	return &eventsFreeze{
 		chunkID:   chunkID,
-		writer:    w,
-		mirror:    event.NewBitmaps(),
-		offsets:   event.NewLedgerOffsets(chunkID.FirstLedger()),
+		db:        db,
 		bucketDir: bucketDir,
 		secret:    secret,
 		metrics:   newColdMetrics(sink, dataTypeEvents),
 	}, nil
 }
+
+// finalize builds event.pack + index.pack + index.hash from the hot DB. One
+// ColdIngest sample covers the whole build (there are no per-ledger writes to
+// observe on this path).
+func (e *eventsFreeze) finalize(ctx context.Context) error {
+	start := time.Now()
+	scratch := filepath.Join(e.bucketDir, ".freeze-scratch-"+e.chunkID.String())
+	err := e.db.FreezeEventsCold(ctx, scratch, e.bucketDir, e.secret, event.ColdWriterOptions{
+		Concurrency:  coldEncoderConcurrency,
+		BytesPerSync: coldBytesPerSync,
+	})
+	if err != nil {
+		err = fmt.Errorf("freeze events from hot DB: %w", err)
+	}
+	e.metrics.emit(time.Since(start), err)
+	return err
+}
+
+// close is a no-op: the freeze writer holds no partial state of its own —
+// artifact overwrite-on-retry and scratch wiping are FreezeColdFromStore's
+// contract, and the hot DB is owned by the caller.
+func (e *eventsFreeze) close() error { return nil }
 
 // write ingests one ledger's events from the shared walk's output. txParts
 // aliases the source stream's borrowed buffer, valid only for this call —
@@ -83,7 +172,7 @@ func (e *eventsCold) write(seq uint32, closedAt int64, txParts []sdkingest.Ledge
 	return nil
 }
 
-// finalize writes the events.pack trailer (Finish) + materializes the cold
+// finalize writes the event.pack trailer (Finish) + materializes the cold
 // index (WriteColdIndex). An eventless chunk (zero terms — the common case
 // for pre-Soroban backfill ranges) is handled inside WriteColdIndex, which
 // publishes a valid empty index, so all three cold artifacts exist for every
@@ -103,12 +192,25 @@ func (e *eventsCold) finalize(ctx context.Context) error {
 		e.metrics.emit(time.Since(start), err)
 		return err
 	}
-	if err := event.WriteColdIndex(ctx, e.chunkID, e.mirror, e.bucketDir, e.secret); err != nil {
-		// Finish already committed events.pack; the index-less pack is left
+	runs, err := e.spiller.Finish()
+	if err != nil {
+		err = fmt.Errorf("index spill finish: %w", err)
+		e.metrics.emit(time.Since(start), err)
+		return err
+	}
+	if err := event.WriteColdIndexFromRuns(ctx, e.chunkID, runs, e.scratchDir, e.bucketDir, e.secret); err != nil {
+		// Finish already committed event.pack; the index-less pack is left
 		// in place — without the orchestrator's completion record it is
 		// inert scratch (see the package doc's artifact model), and the
 		// retry's overwrite is the cleanup.
-		err = fmt.Errorf("WriteColdIndex: %w", err)
+		err = fmt.Errorf("WriteColdIndexFromRuns: %w", err)
+		e.metrics.emit(time.Since(start), err)
+		return err
+	}
+	if err := e.spiller.Cleanup(); err != nil {
+		// Scratch removal is best-effort: the artifacts are already durable,
+		// and the next attempt's NewSpiller wipes this dir anyway.
+		err = fmt.Errorf("index spill cleanup: %w", err)
 		e.metrics.emit(time.Since(start), err)
 		return err
 	}
@@ -117,11 +219,14 @@ func (e *eventsCold) finalize(ctx context.Context) error {
 	return nil
 }
 
-// close drops the partial events.pack when finalize never ran. It does NOT emit
-// the cold metric: a terminal write error or finalize already emitted it, and a
-// writer that never got that far (a rolled-back build) must produce no phantom
-// sample. The writer.Close error is returned unchanged.
+// close drops the partial event.pack when finalize never ran, and the index
+// spill scratch with it. It does NOT emit the cold metric: a terminal write
+// error or finalize already emitted it, and a writer that never got that far
+// (a rolled-back build) must produce no phantom sample. The writer.Close
+// error is returned unchanged; scratch removal is best-effort (the next
+// attempt's NewSpiller wipes the dir regardless).
 func (e *eventsCold) close() error {
+	_ = e.spiller.Cleanup()
 	return e.writer.Close()
 }
 
@@ -145,7 +250,7 @@ func (e *eventsCold) ingestSeq(seq uint32, closedAt int64, txParts []sdkingest.L
 
 	// Per payload: derive term keys from the raw ContractEvent XDR and AddTo the
 	// in-memory mirror under the chunk-relative event ID (term_index stage), then
-	// append the payload to events.pack (write stage). Both reads of the borrowed
+	// append the payload to event.pack (write stage). Both reads of the borrowed
 	// ContractEventBytes are synchronous (TermsForBytes does not retain them;
 	// Append marshals into a scratch buffer copied synchronously), so the borrow
 	// is safe. On any error here offsets is not advanced below — but the mirror and
@@ -166,7 +271,11 @@ func (e *eventsCold) ingestSeq(seq uint32, closedAt int64, txParts []sdkingest.L
 		}
 		eventID := startID + uint32(i)
 		for _, k := range keys {
-			e.mirror.AddTo(k, eventID)
+			// The spilled key is the BLINDED routing identity (see the struct
+			// doc); raw term keys never reach the runs or the artifacts.
+			if serr := e.spiller.Add(stores.BlindKey(e.secret, k[:]), eventID); serr != nil {
+				return 0, fmt.Errorf("index spill seq %d eventIdx %d: %w", seq, i, serr)
+			}
 		}
 		termDur += time.Since(tstart)
 		wstart := time.Now()
