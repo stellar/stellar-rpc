@@ -76,9 +76,9 @@ type EncoderState struct {
 	buf  []byte
 }
 
-// NewEncoderState returns a default-configured encoder state.
-func NewEncoderState() *EncoderState {
-	return &EncoderState{comp: NewCompressor()}
+// NewEncoderState returns an encoder state with the given compressor options.
+func NewEncoderState(opts ...CompressorOption) *EncoderState {
+	return &EncoderState{comp: NewCompressor(opts...)}
 }
 
 // Encode compresses src into the retained buffer and returns the encoded
@@ -97,6 +97,18 @@ type CompressorOption func(*compressorConfig)
 
 type compressorConfig struct {
 	checksum bool
+	workers  int
+}
+
+// WithWorkers enables zstd's internal multithreaded compression (n worker
+// threads inside libzstd). The output is ONE standard frame — same header
+// shape FrameHeaderValid gates, deterministic for fixed input+params — so
+// the cold-inherits-hot frame contract is unaffected; the trade is a ≲1%
+// ratio cost from job splitting. Requires a ZSTD_MULTITHREAD build of
+// libzstd; NewCompressor panics loudly if the library refuses the
+// parameter (a silent single-threaded fallback would fake the experiment).
+func WithWorkers(n int) CompressorOption {
+	return func(c *compressorConfig) { c.workers = n }
 }
 
 // WithoutChecksum disables the zstd content checksum.
@@ -123,6 +135,11 @@ func NewCompressor(opts ...CompressorOption) *Compressor {
 	var flag C.int
 	if cfg.checksum {
 		flag = 1
+	}
+	if cfg.workers > 0 {
+		if rc := C.ZSTD_CCtx_setParameter(ctx, C.ZSTD_c_nbWorkers, C.int(cfg.workers)); C.ZSTD_isError(rc) != 0 {
+			panic("zstd: libzstd built without ZSTD_MULTITHREAD — WithWorkers unavailable")
+		}
 	}
 	if rc := C.ZSTD_CCtx_setParameter(ctx, C.ZSTD_c_checksumFlag, flag); C.ZSTD_isError(rc) != 0 {
 		C.ZSTD_freeCCtx(ctx)

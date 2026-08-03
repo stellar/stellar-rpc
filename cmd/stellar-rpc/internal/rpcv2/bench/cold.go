@@ -15,6 +15,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 )
 
 // maxChunkID is the last chunk ID whose LastLedger fits in a uint32 ledger
@@ -131,7 +132,10 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 		Catalog: cat,
 		Logger:  logger,
 		Metrics: sink,
-		Process: backfill.ProcessConfig{Sink: sink, Backend: backend},
+		// The production-default encode workers: the backfill cell measures (and
+		// produces) production-shape packs (see hotchunk.Tuning on why the value
+		// is format-affecting).
+		Process: backfill.ProcessConfig{Sink: sink, Backend: backend, ZstdEncodeWorkers: ledger.DefaultZstdEncodeWorkers},
 		Workers: opts.Workers,
 		// Benchmarks measure one clean attempt; retries would fold failure +
 		// backoff time into the samples.

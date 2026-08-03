@@ -52,7 +52,7 @@ func openColdChunk(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Config)
 		if dirs.LedgerPack == "" {
 			return fail(errors.New("ingest: ledgers enabled but its ColdDirs path is empty"))
 		}
-		w, err := newLedgerCold(dirs.LedgerPack, chunkID, sink)
+		w, err := newLedgerCold(dirs.LedgerPack, chunkID, sink, cfg.ZstdEncodeWorkers)
 		if err != nil {
 			return fail(fmt.Errorf("open ledgers cold writer: %w", err))
 		}

@@ -20,7 +20,7 @@ import (
 // marks the chunk ready, and publishes the handle.
 func seedHotLedgers(t *testing.T, cat *catalog.Catalog, r *Registry, c chunk.ID, seqs ...uint32) {
 	t.Helper()
-	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
+	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	for _, seq := range seqs {
@@ -188,7 +188,7 @@ func TestScanLedgers_ColdHotBorder(t *testing.T) {
 	require.NoError(t, cat.FlipChunkFrozen(c0, geometry.KindLedgers))
 
 	// c0 is ALSO ready-hot with a published (empty) handle: cold must win.
-	emptyHot, err := hotchunk.Open(cat.Layout().HotChunkPath(c0), c0, silentLogger())
+	emptyHot, err := hotchunk.Open(cat.Layout().HotChunkPath(c0), c0, silentLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = emptyHot.Close() })
 	require.NoError(t, cat.FlipHotReady(c0))

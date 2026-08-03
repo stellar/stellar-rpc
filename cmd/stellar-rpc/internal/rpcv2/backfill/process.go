@@ -42,6 +42,12 @@ type ProcessConfig struct {
 	// compaction and read a just-deleted file. Nil during the startup catch-up
 	// (before ingestion starts, so no writer is open), where a read-only reopen is safe.
 	HotHandle func(chunk.ID) (*hotchunk.DB, bool)
+
+	// ZstdEncodeWorkers is the walk materializer's ledger-frame encode
+	// parallelism, resolved from the same daemon-config value that tunes the
+	// hot tier (FORMAT-AFFECTING — the two must agree; see hotchunk.Tuning
+	// and ingest.Config.ZstdEncodeWorkers, which this feeds).
+	ZstdEncodeWorkers int
 }
 
 func (cfg ProcessConfig) validate() error {
@@ -54,13 +60,15 @@ func (cfg ProcessConfig) validate() error {
 	return nil
 }
 
-// ingestConfigFor maps an artifact set to ingest.Config. It lives here, not on
+// ingestConfigFor maps an artifact set (plus the walk's format-affecting
+// encode setting) to ingest.Config. It lives here, not on
 // catalog.ArtifactSet, so catalog needn't import ingest (the #824 split invariant).
-func ingestConfigFor(s catalog.ArtifactSet) ingest.Config {
+func ingestConfigFor(s catalog.ArtifactSet, zstdWorkers int) ingest.Config {
 	return ingest.Config{
-		Ledgers: s.Has(geometry.KindLedgers),
-		Txhash:  s.Has(geometry.KindTxHash),
-		Events:  s.Has(geometry.KindEvents),
+		Ledgers:           s.Has(geometry.KindLedgers),
+		Txhash:            s.Has(geometry.KindTxHash),
+		Events:            s.Has(geometry.KindEvents),
+		ZstdEncodeWorkers: zstdWorkers,
 	}
 }
 
@@ -118,7 +126,7 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 		TxhashBin:  layout.TxHashBinPath(chunkID),
 		EventsDir:  layout.EventsBucketDir(chunkID),
 	}
-	icfg := ingestConfigFor(artifacts)
+	icfg := ingestConfigFor(artifacts, cfg.ZstdEncodeWorkers)
 	if hotDB != nil {
 		if rerr := ingest.FreezeColdChunk(ctx, cfg.Logger, chunkID, hotDB, dirs, cfg.Sink, icfg); rerr != nil {
 			return fmt.Errorf("freeze chunk %s %s: %w", chunkID, artifacts, rerr)

@@ -115,12 +115,11 @@ type HotStore struct {
 	hotIdx     *HotIndex
 	offsets    *events.ConcurrentLedgerOffsets
 
-	// prevTermCount carries the previous ledger's unique-term count as the
-	// next ledger's map-size hint: successive ledgers at a given load have
-	// similar term density, and a fixed small hint costs ~9 incremental
-	// rehashes of a ~24k-entry map per stress-density ledger, pre-commit.
-	// Writer goroutine only (single-writer ingest contract).
-	prevTermCount int
+	// scratch holds the writer-owned flat-pairs arenas reused across ledgers
+	// (single-writer ingest contract). The post-commit hook borrows views over
+	// it, so the hook for ledger N must run before IngestLedgerToBatch for
+	// N+1 — the hotchunk driver's ingest → commit → hook sequence.
+	scratch ledgerScratch
 }
 
 // Compile-time guard: *HotStore satisfies Reader.
@@ -386,14 +385,16 @@ func (h *HotStore) All(ctx context.Context) iter.Seq2[events.Payload, error] {
 
 // IngestLedgerToBatch validates one ledger's events, marshals them, and queues
 // their CF Puts into the SHARED batch b, returning the post-commit apply hook the
-// caller runs AFTER b commits (decision (a)). Validation + term derivation happen
-// before any Put; on any error Store.Batch discards the whole WriteBatch, so a
-// rejected ledger never leaves committed rows behind.
+// caller runs AFTER b commits (decision (a)). Sequence validation happens before
+// any Put; marshal and term derivation are fused per event, and on any error
+// Store.Batch discards the whole WriteBatch, so a rejected ledger never leaves
+// committed rows behind.
 //
 // payloads is produced by events.PayloadsFromLedgerEvents, which emits each ledger's
 // events in ascending getEvents cursor order — write order here IS the cursor
 // contract (event IDs are assigned by arrival position). Terms are derived via
-// events.TermsForBytes on each payload's ContractEventBytes.
+// events.AppendTerms on each payload's ContractEventBytes into the writer-owned
+// pair arenas.
 //
 // Sequence validation, before any Put or mirror mutation:
 //
@@ -412,8 +413,9 @@ func (h *HotStore) All(ctx context.Context) iter.Seq2[events.Payload, error] {
 func (h *HotStore) IngestLedgerToBatch(
 	b *rocksdb.BatchWriter, ledgerSeq uint32, payloads []events.Payload,
 ) (func() error, error) {
-	// Validate BEFORE any Put. On error Store.Batch discards the whole WriteBatch,
-	// so a mid-loop failure never orphans rows — no separate staging buffer needed.
+	// Sequence validation BEFORE any Put. Per-event errors below are equally
+	// safe: on any error Store.Batch discards the whole WriteBatch, so a
+	// mid-loop failure never orphans rows — no separate staging buffer needed.
 	if ledgerSeq < h.chunkID.FirstLedger() || ledgerSeq > h.chunkID.LastLedger() {
 		return nil, fmt.Errorf("%w: ledger %d not in chunk %s [%d, %d]",
 			ErrLedgerOutOfRange, ledgerSeq, h.chunkID,
@@ -425,31 +427,23 @@ func (h *HotStore) IngestLedgerToBatch(
 			ErrLedgerOutOfOrder, expected, ledgerSeq)
 	}
 
-	// Derive term keys per payload up front (a TermsForBytes error rejects the
-	// ledger without any Put) and retain them for the post-commit mirror update.
-	termKeys := make([][]events.TermKey, len(payloads))
-	for i := range payloads {
-		keys, err := events.TermsForBytes(payloads[i].ContractEventBytes)
-		if err != nil {
-			return nil, fmt.Errorf("derive terms for payload %d in ledger %d: %w", i, ledgerSeq, err)
-		}
-		termKeys[i] = keys
-	}
-
 	startID := h.offsets.TotalEvents()
 	if uint64(startID)+uint64(len(payloads)) > math.MaxUint32 {
 		return nil, fmt.Errorf("chunk %s would overflow uint32 event-id space at ledger %d",
 			h.chunkID, ledgerSeq)
 	}
 
-	// Marshal + queue each event directly into b. BatchWriter.Put copies
-	// synchronously, so ONE reused scratch buffer serves every event — the caller
-	// opens exactly one batch per ledger, so no row must outlive this call.
-	// The per-term event-ID lists are accumulated once here and serve BOTH the
-	// packed index row and the post-commit mirror apply (which previously
-	// rebuilt the same grouping).
+	// Marshal + derive terms + queue each event in ONE pass over the payload
+	// bytes. BatchWriter.Put copies key and value synchronously, so one reused
+	// value scratch AND one reused 4-byte key scratch serve every event (the
+	// per-call encodeDataKey array escaped to the heap once per event — ~6k
+	// 4-byte objects/ledger). Term derivation appends flat (term, eventID)
+	// pairs into the writer-owned arenas — no per-ledger map, no per-event
+	// key slices. Event IDs are assigned strictly increasing here; the sort
+	// in buildRuns depends on that arrival order for per-term ID order.
 	var scratch []byte
-	perKeyIDs := make(map[events.TermKey][]uint32, max(64, h.prevTermCount))
+	var dataKey [dataKeyLen]byte
+	h.scratch.reset()
 	for i := range payloads {
 		blob, err := payloads[i].MarshalInto(scratch[:0])
 		if err != nil {
@@ -457,28 +451,23 @@ func (h *HotStore) IngestLedgerToBatch(
 		}
 		scratch = blob
 		eventID := startID + uint32(i)
-		b.Put(DataCF, encodeDataKey(eventID), blob)
-		for _, key := range termKeys[i] {
-			perKeyIDs[key] = append(perKeyIDs[key], eventID)
+		binary.BigEndian.PutUint32(dataKey[:], eventID)
+		b.Put(DataCF, dataKey[:], blob)
+		if err := h.scratch.appendEventTerms(eventID, payloads[i].ContractEventBytes); err != nil {
+			return nil, fmt.Errorf("derive terms for payload %d in ledger %d: %w", i, ledgerSeq, err)
 		}
 	}
-	// ONE packed index row per ledger (events.AppendPackedRow) instead of a
-	// row per (term, event) — the memtable insert cost of the shared commit
-	// batch scales with key count, and this removes tens of thousands of keys
-	// per ledger from it. A ledger with no events writes no index row. The
-	// row bytes are RETAINED for the post-commit hot-index apply (the window
-	// keeps the slice; BatchWriter.Put copied it into the batch already).
-	h.prevTermCount = len(perKeyIDs)
+	// ONE packed index row per ledger instead of a row per (term, event) —
+	// the memtable insert cost of the shared commit batch scales with key
+	// count, and this removes tens of thousands of keys per ledger from it.
+	// A ledger with no events writes no index row. The row bytes are RETAINED
+	// for the post-commit hot-index apply (the window keeps the slice;
+	// BatchWriter.Put copied it into the batch already), so rowLen's exact
+	// sizing is retained memory, not just churn.
+	runs := h.scratch.buildRuns()
 	var rowBytes []byte
-	if len(perKeyIDs) > 0 {
-		// Exact-size the row: one right-sized allocation instead of ~18
-		// doubling regrows for a stress-density ledger — and since the window
-		// RETAINS this slice, exact fit is retained memory, not just churn.
-		size := 0
-		for _, ids := range perKeyIDs {
-			size += events.TermPostingsLen(ids)
-		}
-		rowBytes = events.AppendPackedRow(make([]byte, 0, size), perKeyIDs)
+	if len(runs.terms) > 0 {
+		rowBytes = runs.appendRow(make([]byte, 0, runs.rowLen()))
 		b.Put(IndexCF, encodePackedIndexKey(ledgerSeq), rowBytes)
 	}
 	//nolint:gosec // len bounded by the overflow guard above
@@ -487,8 +476,11 @@ func (h *HotStore) IngestLedgerToBatch(
 	//nolint:gosec // len bounded by the overflow guard above
 	eventCount := uint32(len(payloads))
 	return func() error {
+		// runs borrows the writer-owned arenas — valid here because the
+		// driver runs the hook before the next IngestLedgerToBatch resets
+		// them, and ApplyLedger does not retain the view.
 		if rowBytes != nil {
-			if err := h.hotIdx.ApplyLedger(ledgerSeq, rowBytes, perKeyIDs); err != nil {
+			if err := h.hotIdx.ApplyLedger(ledgerSeq, rowBytes, runs); err != nil {
 				return err
 			}
 		}
@@ -632,6 +624,9 @@ func warmup(
 	// replayed tail; the tripwire is an upper bound, so a tail-only value
 	// can under-approximate but never false-alarm.
 	var indexUpperBound uint64
+	// runs arenas are reused across rows: ApplyLedger borrows the view and
+	// never retains it — the same contract the ingest-path scratch relies on.
+	var runs termRuns
 	for entry, ierr := range chunkStore.IterateRange(IndexCF, rocksdb.EncodeUint32(lastSealed+1), nil) {
 		if ierr != nil {
 			hotIdx.Close()
@@ -643,9 +638,9 @@ func warmup(
 				IndexCF, len(entry.Key), packedIndexKeyLen)
 		}
 		seq := binary.BigEndian.Uint32(entry.Key)
-		per := make(map[events.TermKey][]uint32, 1<<10)
+		runs.reset()
 		if derr := events.DecodePackedRow(entry.Value, func(term events.TermKey, ids []uint32) {
-			per[term] = append([]uint32(nil), ids...)
+			runs.addRun(term, ids)
 			if last := uint64(ids[len(ids)-1]) + 1; last > indexUpperBound {
 				indexUpperBound = last
 			}
@@ -653,7 +648,7 @@ func warmup(
 			hotIdx.Close()
 			return nil, nil, fmt.Errorf("events: warmup %s ledger %d: %w", IndexCF, seq, derr)
 		}
-		if aerr := hotIdx.ApplyLedger(seq, append([]byte(nil), entry.Value...), per); aerr != nil {
+		if aerr := hotIdx.ApplyLedger(seq, append([]byte(nil), entry.Value...), runs); aerr != nil {
 			hotIdx.Close()
 			return nil, nil, aerr
 		}
