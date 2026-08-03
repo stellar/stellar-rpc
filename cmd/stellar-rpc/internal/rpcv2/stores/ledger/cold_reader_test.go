@@ -332,6 +332,10 @@ func TestColdReader_CorruptAppDataIsCorrupt(t *testing.T) {
 	}{
 		{"LastSeq", func(c *ColdReader) error { _, err := c.LastSeq(); return err }},
 		{"GetLedgerRaw", func(c *ColdReader) error { _, err := c.GetLedgerRaw(100); return err }},
+		// Close waits for the background open, so on a reader that is
+		// closed without being read it is the FIRST place corruption
+		// surfaces — and the only one, since nothing else ran.
+		{"Close", func(c *ColdReader) error { return c.Close() }},
 		{"IterateLedgers", func(c *ColdReader) error {
 			for _, err := range c.IterateLedgers(100, 101) {
 				if err != nil {

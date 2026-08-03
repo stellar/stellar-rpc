@@ -265,11 +265,13 @@ func (c *ColdReader) Close() error {
 			first = fmt.Errorf("events: close index.hash: %w", err)
 		}
 	}
+	// Close waits for each background open, so it can be the first place an
+	// open-time failure surfaces on a reader that was never read.
 	if err := c.index.Close(); err != nil && first == nil {
-		first = fmt.Errorf("events: close index.pack: %w", err)
+		first = fmt.Errorf("events: close index.pack: %w", stores.TranslatePackErr(err))
 	}
 	if err := c.events.Close(); err != nil && first == nil {
-		first = fmt.Errorf("events: close events.pack: %w", err)
+		first = fmt.Errorf("events: close events.pack: %w", stores.TranslatePackErr(err))
 	}
 	return first
 }
