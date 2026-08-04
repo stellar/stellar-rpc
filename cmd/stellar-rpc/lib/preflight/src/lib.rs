@@ -66,13 +66,18 @@ mod prev {
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
 
-    // The previous protocol's soroban-env predates v2 Address credentials, so
-    // `use_upgraded_auth` is ignored and v1 `Address` credentials are always used.
+    // See the matching `curr::make_recording_auth_mode`. `-prev` is now
+    // soroban-env-host 27.x, which supports v2 (`AddressV2`) credentials, so
+    // `use_upgraded_auth` passes through — matching simulateTransaction's
+    // behavior on a protocol-27 ledger (`UseUpgradedAuth` shipped in v27.1.0).
     pub(crate) fn make_recording_auth_mode(
         disable_non_root_auth: bool,
-        _use_upgraded_auth: bool,
+        use_upgraded_auth: bool,
     ) -> soroban_env_host::e2e_invoke::RecordingInvocationAuthMode {
-        soroban_env_host::e2e_invoke::RecordingInvocationAuthMode::Recording(disable_non_root_auth)
+        soroban_env_host::e2e_invoke::RecordingInvocationAuthMode::recording(
+            disable_non_root_auth,
+            use_upgraded_auth,
+        )
     }
 }
 

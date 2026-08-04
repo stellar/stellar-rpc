@@ -212,10 +212,10 @@ func (m inMemoryLedgerEntryGetter) Done() error {
 }
 
 // supportedProtocolVersions are the protocol versions the bundled soroban hosts
-// can simulate: the previous host (prev) handles protocol 26 and the current
-// host (curr) handles protocol 27. Preflight switches between them at runtime
+// can simulate: the previous host (prev) handles protocol 27 and the current
+// host (curr) handles protocol 28. Preflight switches between them at runtime
 // based on the ledger's protocol version, so the tests exercise both paths.
-var supportedProtocolVersions = []uint32{26, 27}
+var supportedProtocolVersions = []uint32{27, 28}
 
 func getPreflightParameters(t testing.TB, protocolVersion uint32) Parameters {
 	ledgerEntryGetter, err := newInMemoryLedgerEntryGetter(mockLedgerEntries, latestSimulateTransactionLedgerSeq)
@@ -322,15 +322,16 @@ func BenchmarkGetPreflight(b *testing.B) {
 	}
 }
 
-// TestGetPreflightUseUpgradedAuthSilentlyIgnoredOnPrevProtocol locks in the agreed
-// behavior that requesting v2 (AddressV2) credentials on a protocol served by
-// the prev soroban-env host -- which predates v2 credentials -- is silently
-// ignored rather than rejected: v1 behavior is used and no error is returned.
-// It runs at protocol 26, which routes to the prev host. (Asserting the
-// credential version itself requires an auth-recording contract on the curr
-// host; that is covered by the integration tests.)
-func TestGetPreflightUseUpgradedAuthSilentlyIgnoredOnPrevProtocol(t *testing.T) {
-	const prevHostProtocol = 26
+// TestGetPreflightUseUpgradedAuthOnPrevProtocol locks in the behavior that
+// requesting v2 (AddressV2) credentials on the protocol served by the prev
+// soroban-env host succeeds. Since the P28 rotation the prev host is 27.x,
+// which supports v2 credentials (UseUpgradedAuth shipped in v27.1.0), so the
+// flag passes through to the host rather than being silently dropped — the
+// pre-P28 "silently ignored" contract applied only while the prev host
+// predated v2 credentials. (Asserting the credential version itself requires
+// an auth-recording contract; that is covered by the integration tests.)
+func TestGetPreflightUseUpgradedAuthOnPrevProtocol(t *testing.T) {
+	prevHostProtocol := supportedProtocolVersions[0]
 	params := getPreflightParameters(t, prevHostProtocol)
 	params.UseUpgradedAuth = true
 	result, err := GetPreflight(t.Context(), params)
