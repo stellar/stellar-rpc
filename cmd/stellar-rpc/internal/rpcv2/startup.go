@@ -31,6 +31,8 @@ import (
 // warns on and retries with backoff (a first start with no reachable backend, a
 // backfill/ingest/lifecycle failure, or a "ready" hot DB that won't open — none are
 // auto-healed, all are re-attempted).
+//
+//nolint:funlen // linear startup sequence; each step is one wiring stage
 func run(ctx context.Context, cfg StartConfig) error {
 	if err := cfg.validate(); err != nil {
 		return err
@@ -132,6 +134,14 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// below), flushing each completed chunk the registry still holds. The live
 	// chunk is also closed by the ingestion loop; handle Close is idempotent.
 	defer registry.Close()
+
+	// Refill the fee windows from committed history BEFORE the ingestion loop
+	// launches below (#888): the replay covers [start, lastCommitted] and the
+	// loop feeds the same windows from lastCommitted+1, so running them
+	// concurrently would count the boundary ledger twice.
+	if err := replayFeeWindows(registry, cfg.FeeWindows, lastCommitted); err != nil {
+		return fmt.Errorf("startup fee-window replay: %w", err)
+	}
 
 	// The lifecycle config draws on the SAME Exec wiring backfill uses, so the two
 	// share one catalog/pool by construction.
