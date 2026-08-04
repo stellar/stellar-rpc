@@ -436,8 +436,19 @@ type LedgerReport struct {
 // copies what it retains, so neither need outlive this call. Store.Batch's
 // lifecycle RLock + checkOpen is the authoritative closed-store guard, so there
 // is no separate pre-check here.
+// StartCompress forks the ledger-bytes zstd encode. The caller starts it
+// BEFORE its own TxProcessing walk so the encode overlaps that walk — the
+// walk is the largest step the encode can hide behind, and forking inside
+// IngestLedger (after the caller has already walked) forfeits it. The
+// returned handle is consumed by IngestLedger, which owns its Discard; a
+// caller that fails before calling IngestLedger must Discard it itself.
+func (d *DB) StartCompress(seq uint32, lcmView xdr.LedgerCloseMetaView) *ledger.PendingCompression {
+	return d.ledger.StartCompress(ledger.Entry{Seq: seq, Bytes: []byte(lcmView)})
+}
+
 func (d *DB) IngestLedger(
 	seq uint32, lcmView xdr.LedgerCloseMetaView, txParts []sdkingest.LedgerTxParts,
+	pending *ledger.PendingCompression,
 ) (LedgerReport, error) {
 	var rep LedgerReport
 
@@ -456,7 +467,6 @@ func (d *DB) IngestLedger(
 	// finished — PhaseLedgers then measures only the join wait + Put. The
 	// deferred Discard bounds the borrowed lcmView on every early-error path:
 	// both join and Discard block until the encoder is done with the bytes.
-	pending := d.ledger.StartCompress(ledger.Entry{Seq: seq, Bytes: []byte(lcmView)})
 	defer pending.Discard()
 
 	// Pre-extract anything that can fail BEFORE opening the batch, so a decode

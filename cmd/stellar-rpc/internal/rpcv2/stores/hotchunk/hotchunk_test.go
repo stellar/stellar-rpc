@@ -42,7 +42,8 @@ func ingestRaw(t *testing.T, db *DB, seq uint32, raw []byte) (LedgerReport, erro
 	t.Helper()
 	txParts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err)
-	return db.IngestLedger(seq, xdr.LedgerCloseMetaView(raw), txParts)
+	return db.IngestLedger(seq, xdr.LedgerCloseMetaView(raw), txParts,
+		db.StartCompress(seq, xdr.LedgerCloseMetaView(raw)))
 }
 
 // openTestDB opens a fresh hot DB bound to chunk 0 (every test uses chunk 0).
