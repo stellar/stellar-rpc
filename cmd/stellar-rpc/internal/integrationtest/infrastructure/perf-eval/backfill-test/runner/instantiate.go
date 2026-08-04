@@ -36,16 +36,15 @@ var finalizeDoneRe = regexp.MustCompile(`Bulk-load finalize complete`)
 
 // backfillEnv is the leg's env-derived config.
 type backfillEnv struct {
-	Bucket      string `env:"BUCKET"       envDefault:"stellar-rpc-ci-load-test"`
-	Region      string `env:"REGION"       envDefault:"us-east-1"`
-	WorkDir     string `env:"WORK_DIR"     envDefault:"/data"`
-	ResultsFile string `env:"RESULTS_FILE" envDefault:"/tmp/results.md"`
-	ResultKey   string `env:"RESULT_KEY"`
-	TargetSHA   string `env:"TARGET_SHA"`
-	RunID       string `env:"RUN_ID"       envDefault:"manual"`
-	// ~1 day by default for cheap test runs; the full week is 120960.
-	Retention int           `env:"HISTORY_RETENTION_WINDOW" envDefault:"17280"`
-	Deadline  time.Duration `env:"BACKFILL_DEADLINE"        envDefault:"4h"`
+	Bucket      string        `env:"BUCKET"       envDefault:"stellar-rpc-ci-load-test"`
+	Region      string        `env:"REGION"       envDefault:"us-east-1"`
+	WorkDir     string        `env:"WORK_DIR"     envDefault:"/data"`
+	ResultsFile string        `env:"RESULTS_FILE" envDefault:"/tmp/results.md"`
+	ResultKey   string        `env:"RESULT_KEY"`
+	TargetSHA   string        `env:"TARGET_SHA"`
+	RunID       string        `env:"RUN_ID"       envDefault:"manual"`
+	Retention   int           `env:"HISTORY_RETENTION_WINDOW" envDefault:"120960"`
+	Deadline    time.Duration `env:"BACKFILL_DEADLINE"        envDefault:"4h"`
 	// serve on a non-loopback bind after the backfill completes
 	ServeAfter bool `env:"SERVE_AFTER_BACKFILL"`
 }
