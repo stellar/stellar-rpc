@@ -112,6 +112,9 @@ func (mm MultiMigration) Commit(ctx context.Context) error {
 			err = errors.Join(err, localErr, mm.db.Rollback())
 		}
 	}
+	if err != nil {
+		return err
+	}
 	return mm.db.Commit()
 }
 

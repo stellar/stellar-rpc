@@ -262,7 +262,8 @@ func restoreTransactionsTable(
 	// Hash order builds the key's B-tree append-only; the WHERE applies the
 	// retention floor.
 	result, err := session.ExecRaw(ctx,
-		"INSERT INTO "+transactionTableName+" SELECT hash, ledger_sequence, application_order "+
+		"INSERT INTO "+transactionTableName+" (hash, ledger_sequence, application_order) "+
+			"SELECT hash, ledger_sequence, application_order "+
 			"FROM transactions_bulk "+
 			"WHERE ledger_sequence >= (SELECT COALESCE(MIN(sequence), 0) FROM "+ledgerCloseMetaTableName+") "+
 			"ORDER BY hash")
