@@ -28,7 +28,7 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/pflag v1.0.5
-	github.com/stellar/go-stellar-sdk v0.7.1
+	github.com/stellar/go-stellar-sdk v0.7.2-0.20260805060836-46c4f74bf53a
 	github.com/stellar/streamhash v0.0.0-20260713164615-c72a4e6f578d
 	github.com/stretchr/testify v1.11.1
 )
