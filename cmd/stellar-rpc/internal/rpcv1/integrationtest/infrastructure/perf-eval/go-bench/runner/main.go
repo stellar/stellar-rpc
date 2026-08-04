@@ -1,5 +1,6 @@
-// Command runner runs the backfill ingestion benchmark on the box (then keeps
-// serving in handoff mode).
+// Command runner runs the audited endpoint Go benchmarks on the box for the
+// release candidate and a baseline release, and publishes a benchstat
+// comparison of the two.
 package main
 
 import "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/harness"
