@@ -3,8 +3,8 @@ package query
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
-	"fmt"
 	"math"
 	"reflect"
 	"strings"
@@ -22,102 +22,144 @@ func testContract(b byte) []byte { return bytes.Repeat([]byte{b}, contractIDLen)
 
 func testTopic(b byte) []byte { return bytes.Repeat([]byte{b}, 8) }
 
-var cursorRoundTripCases = []struct {
-	name string
-	env  EventCursor
-}{
-	{
-		name: "ascending with position, zero filters (match-all)",
-		env: EventCursor{
-			Query:         EventCursorQuery{MinLedger: 100, MaxLedger: 200, Dir: Ascending},
-			Position:      &EventPosition{Ledger: 150, Tx: 3, Op: 1, Event: 2, K: 41},
-			ScannedLedger: 150,
-		},
-	},
-	{
-		name: "ascending watermark-only (nil position)",
-		env: EventCursor{
-			Query:         EventCursorQuery{MinLedger: 100, MaxLedger: 200, Dir: Ascending},
-			ScannedLedger: 175,
-		},
-	},
-	{
-		name: "descending with position, contract-only filter",
-		env: EventCursor{
-			Query: EventCursorQuery{
-				MinLedger: 50, MaxLedger: 900, Dir: Descending,
-				Filters: []event.Filter{{ContractID: testContract(0xC1)}},
-			},
-			Position:      &EventPosition{Ledger: 700, Tx: 12, Op: 0, Event: 5, K: 9},
-			ScannedLedger: 700,
-		},
-	},
-	{
-		name: "descending watermark-only, topics with gaps (t0 and t2 set)",
-		env: EventCursor{
-			Query: EventCursorQuery{
-				MinLedger: 1, MaxLedger: 10, Dir: Descending,
-				Filters: []event.Filter{{
-					Topics: [protocol.MaxTopicCount][]byte{testTopic(0xA0), nil, testTopic(0xA2), nil},
-				}},
-			},
-			ScannedLedger: 4,
-		},
-	},
-	{
-		name: "full filter",
-		env: EventCursor{
-			Query: EventCursorQuery{
-				MinLedger: 20002, MaxLedger: 30001, Dir: Ascending,
-				Filters: []event.Filter{{
-					ContractID: testContract(0xC2),
-					Topics: [protocol.MaxTopicCount][]byte{
-						testTopic(1), testTopic(2), testTopic(3), testTopic(4),
-					},
-				}},
-			},
-			Position:      &EventPosition{Ledger: 25000, Tx: 1, Op: 1, Event: 0, K: 0},
-			ScannedLedger: 25000,
-		},
-	},
-	{
-		name: "multiple filters including an empty match-all filter",
-		env: EventCursor{
-			Query: EventCursorQuery{
-				MinLedger: 5, MaxLedger: 6, Dir: Descending,
-				Filters: []event.Filter{
-					{ContractID: testContract(0xC3)},
-					{Topics: [protocol.MaxTopicCount][]byte{nil, testTopic(0xB1), nil, nil}},
-					{},
-				},
-			},
-			Position:      &EventPosition{Ledger: 6, Tx: 2, Op: 3, Event: 4, K: 5},
-			ScannedLedger: 5,
-		},
-	},
-	{
-		// A present all-zero position must stay distinct from nil.
-		name: "all-zero position",
-		env: EventCursor{
-			Query:    EventCursorQuery{MinLedger: 1, MaxLedger: 2, Dir: Ascending},
-			Position: &EventPosition{},
-		},
-	},
-	{
-		name: "max uint32 field values",
-		env: EventCursor{
-			Query: EventCursorQuery{MinLedger: math.MaxUint32, MaxLedger: math.MaxUint32, Dir: Ascending},
-			Position: &EventPosition{
-				Ledger: math.MaxUint32, Tx: math.MaxUint32, Op: math.MaxUint32,
-				Event: math.MaxUint32, K: math.MaxUint32,
-			},
-			ScannedLedger: math.MaxUint32,
-		},
-	},
+func maxPtr(v uint32) *uint32 { return new(v) }
+
+// tokV1 wraps a raw body in the version-1 prefix so the failure under test
+// is the body, not the prefix.
+func tokV1(body []byte) string {
+	return cursorPrefixV1 + base64.RawURLEncoding.EncodeToString(body)
+}
+
+func be16(v uint16) []byte { return binary.BigEndian.AppendUint16(nil, v) }
+
+func be32(v uint32) []byte { return binary.BigEndian.AppendUint32(nil, v) }
+
+func cat(parts ...[]byte) []byte {
+	var out []byte
+	for _, p := range parts {
+		out = append(out, p...)
+	}
+	return out
 }
 
 func TestCursorRoundTrip(t *testing.T) {
-	for _, tc := range cursorRoundTripCases {
+	cases := []cursorRoundTripCase{
+		{
+			name: "ascending unbounded (nil max), watermark-only, match-all",
+			env: EventCursor{
+				Query:         EventCursorQuery{MinLedger: 100, Dir: Ascending},
+				ScannedLedger: 175,
+			},
+		},
+		{
+			name: "ascending unbounded with position",
+			env: EventCursor{
+				Query:         EventCursorQuery{MinLedger: 100, Dir: Ascending},
+				Position:      &EventPosition{Ledger: 150, Tx: 3, Op: 1, Event: 2, LedgerOrdinal: 41},
+				ScannedLedger: 150,
+			},
+		},
+		{
+			name: "ascending bounded with position, zero filters (match-all)",
+			env: EventCursor{
+				Query:         EventCursorQuery{MinLedger: 100, MaxLedger: maxPtr(200), Dir: Ascending},
+				Position:      &EventPosition{Ledger: 150, Tx: 3, Op: 1, Event: 2, LedgerOrdinal: 41},
+				ScannedLedger: 150,
+			},
+		},
+		{
+			// A present all-zero position must stay distinct from nil.
+			name: "all-zero position",
+			env: EventCursor{
+				Query:    EventCursorQuery{MinLedger: 1, MaxLedger: maxPtr(2), Dir: Ascending},
+				Position: &EventPosition{},
+			},
+		},
+		{
+			name: "max uint32 field values",
+			env: EventCursor{
+				Query: EventCursorQuery{
+					MinLedger: math.MaxUint32, MaxLedger: maxPtr(math.MaxUint32), Dir: Ascending,
+				},
+				Position: &EventPosition{
+					Ledger: math.MaxUint32, Tx: math.MaxUint32, Op: math.MaxUint32,
+					Event: math.MaxUint32, LedgerOrdinal: math.MaxUint32,
+				},
+				ScannedLedger: math.MaxUint32,
+			},
+		},
+	}
+	runCursorRoundTrips(t, cases)
+}
+
+func TestCursorRoundTripFilters(t *testing.T) {
+	cases := []cursorRoundTripCase{
+		{
+			name: "descending with position, contract-only filter",
+			env: EventCursor{
+				Query: EventCursorQuery{
+					MinLedger: 50, MaxLedger: maxPtr(900), Dir: Descending,
+					Filters: []event.Filter{{ContractID: testContract(0xC1)}},
+				},
+				Position:      &EventPosition{Ledger: 700, Tx: 12, Op: 0, Event: 5, LedgerOrdinal: 9},
+				ScannedLedger: 700,
+			},
+		},
+		{
+			name: "descending watermark-only, topics with gaps (t0 and t2 set)",
+			env: EventCursor{
+				Query: EventCursorQuery{
+					MinLedger: 1, MaxLedger: maxPtr(10), Dir: Descending,
+					Filters: []event.Filter{{
+						Topics: [protocol.MaxTopicCount][]byte{testTopic(0xA0), nil, testTopic(0xA2), nil},
+					}},
+				},
+				ScannedLedger: 4,
+			},
+		},
+		{
+			name: "full filter",
+			env: EventCursor{
+				Query: EventCursorQuery{
+					MinLedger: 20002, MaxLedger: maxPtr(30001), Dir: Ascending,
+					Filters: []event.Filter{{
+						ContractID: testContract(0xC2),
+						Topics: [protocol.MaxTopicCount][]byte{
+							testTopic(1), testTopic(2), testTopic(3), testTopic(4),
+						},
+					}},
+				},
+				Position:      &EventPosition{Ledger: 25000, Tx: 1, Op: 1, Event: 0, LedgerOrdinal: 0},
+				ScannedLedger: 25000,
+			},
+		},
+		{
+			name: "multiple filters including an empty match-all filter",
+			env: EventCursor{
+				Query: EventCursorQuery{
+					MinLedger: 5, MaxLedger: maxPtr(6), Dir: Descending,
+					Filters: []event.Filter{
+						{ContractID: testContract(0xC3)},
+						{Topics: [protocol.MaxTopicCount][]byte{nil, testTopic(0xB1), nil, nil}},
+						{},
+					},
+				},
+				Position:      &EventPosition{Ledger: 6, Tx: 2, Op: 3, Event: 4, LedgerOrdinal: 5},
+				ScannedLedger: 5,
+			},
+		},
+	}
+	runCursorRoundTrips(t, cases)
+}
+
+type cursorRoundTripCase struct {
+	name string
+	env  EventCursor
+}
+
+func runCursorRoundTrips(t *testing.T, cases []cursorRoundTripCase) {
+	t.Helper()
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			enc, err := tc.env.Encode()
 			require.NoError(t, err)
@@ -128,16 +170,74 @@ func TestCursorRoundTrip(t *testing.T) {
 	}
 }
 
-func TestCursorVersionRejection(t *testing.T) {
-	env := EventCursor{Query: EventCursorQuery{MinLedger: 1, MaxLedger: 2, Dir: Ascending}}
-	enc, err := env.Encode()
-	require.NoError(t, err)
-	for _, version := range []byte{0, 2} {
-		t.Run(fmt.Sprintf("version %d", version), func(t *testing.T) {
-			raw, err := base64.RawURLEncoding.DecodeString(enc)
+// TestCursorGoldenV1 pins the version-1 layout against literal bytes:
+// round-trip tests pass a layout change in lockstep, the literals do not.
+// The minimal vector doubles as the unbounded-ascending shape (no max bit),
+// likely the most common cursor in the wild.
+func TestCursorGoldenV1(t *testing.T) {
+	cases := []struct {
+		name string
+		env  EventCursor
+		body []byte
+	}{
+		{
+			name: "minimal: ascending unbounded, watermark-only, match-all",
+			env: EventCursor{
+				Query:         EventCursorQuery{MinLedger: 100, Dir: Ascending},
+				ScannedLedger: 175,
+			},
+			body: cat(
+				[]byte{0x00}, // flags: ascending, no max, no position
+				be32(100),    // min
+				be32(175),    // scanned
+				be16(0),      // filter count
+			),
+		},
+		{
+			name: "full: descending, max, position, contract+topic1 filter",
+			env: EventCursor{
+				Query: EventCursorQuery{
+					MinLedger: 1, MaxLedger: maxPtr(2), Dir: Descending,
+					Filters: []event.Filter{{
+						ContractID: testContract(0xC5),
+						Topics:     [protocol.MaxTopicCount][]byte{nil, testTopic(0xB2), nil, nil},
+					}},
+				},
+				Position:      &EventPosition{Ledger: 3, Tx: 4, Op: 5, Event: 6, LedgerOrdinal: 7},
+				ScannedLedger: 8,
+			},
+			body: cat(
+				[]byte{0x07},                                // flags: descending | hasMax | hasPos
+				be32(1),                                     // min
+				be32(2),                                     // max
+				be32(3), be32(4), be32(5), be32(6), be32(7), // position
+				be32(8),            // scanned
+				be16(1),            // filter count
+				[]byte{0x05},       // fflags: contract | topic1
+				testContract(0xC5), // contract
+				be32(8),            // topic1 length
+				testTopic(0xB2),    // topic1
+			),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			enc, err := tc.env.Encode()
 			require.NoError(t, err)
-			raw[0] = version
-			got, err := DecodeEventCursor(base64.RawURLEncoding.EncodeToString(raw))
+			assert.Equal(t, tokV1(tc.body), enc)
+
+			got, err := DecodeEventCursor(tokV1(tc.body))
+			require.NoError(t, err)
+			assert.Equal(t, &tc.env, got)
+		})
+	}
+}
+
+func TestCursorVersionRejection(t *testing.T) {
+	payload := base64.RawURLEncoding.EncodeToString(cat([]byte{0x00}, be32(1), be32(0), be16(0)))
+	for _, version := range []string{"0", "2", "42", "01"} {
+		t.Run("version "+version, func(t *testing.T) {
+			got, err := DecodeEventCursor("gec" + version + "_" + payload)
 			require.ErrorIs(t, err, ErrCursorUnknownVersion)
 			assert.Nil(t, got)
 		})
@@ -145,196 +245,109 @@ func TestCursorVersionRejection(t *testing.T) {
 }
 
 func TestCursorMalformedInputs(t *testing.T) {
-	b64 := func(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
-	// v1 wraps a raw body in a valid version byte so the failure under test is
-	// the body, not the version.
-	v1 := func(body string) string { return b64(append([]byte{cursorVersion}, body...)) }
-	contract31 := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 31))
-	overCap := `{"query":{"min":1,"max":2,"dir":"asc","filters":[` +
-		strings.TrimSuffix(strings.Repeat(`{},`, maxCursorFilters+1), ",") +
-		`]},"scanned":0}`
+	// minimalBody is a valid ascending unbounded envelope to mutate.
+	minimalBody := cat([]byte{0x00}, be32(1), be32(0), be16(0))
+	minimalToken := tokV1(minimalBody)
+
+	// A structurally valid token over the size cap: only the cap rejects it.
+	overCapToken := tokV1(cat([]byte{0x00}, be32(1), be32(0), be16(1),
+		[]byte{0x02}, be32(maxCursorBytes), bytes.Repeat([]byte{7}, maxCursorBytes)))
+
+	// A valid token with a newline the base64 decoder would silently skip:
+	// only the whitespace check rejects it.
+	newlineToken := minimalToken[:len(minimalToken)-4] + "\n" + minimalToken[len(minimalToken)-4:]
+
+	// The minimal token with a padding bit set in its final character: it
+	// decodes to the same body under lenient base64, so only Strict rejects
+	// this second spelling.
+	const b64url = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	last := strings.IndexByte(b64url, minimalToken[len(minimalToken)-1])
+	nonCanonicalToken := minimalToken[:len(minimalToken)-1] + string(b64url[last|1])
+	require.NotEqual(t, minimalToken, nonCanonicalToken)
 
 	cases := []struct {
 		name string
 		in   string
-		want error
 	}{
-		{"empty string", "", ErrCursorMalformed},
-		{"not base64", "not base64!!", ErrCursorMalformed},
-		{"garbage bytes", b64([]byte{0x9B, 0x00, 0xFF, 0x13, 0x37}), ErrCursorUnknownVersion},
-		{"valid version byte, invalid JSON", v1("{{{not json"), ErrCursorMalformed},
-		{
-			"unknown dir",
-			v1(`{"query":{"min":1,"max":2,"dir":"sideways","filters":[]},"scanned":0}`),
-			ErrCursorMalformed,
-		},
-		{
-			"contract of 31 bytes",
-			v1(`{"query":{"min":1,"max":2,"dir":"asc","filters":[{"contract":"` +
-				contract31 + `","topics":[null,null,null,null]}]},"scanned":0}`),
-			ErrCursorMalformed,
-		},
-		{
-			"contract of invalid base64",
-			v1(`{"query":{"min":1,"max":2,"dir":"asc","filters":[{"contract":"!!!not-b64",` +
-				`"topics":[null,null,null,null]}]},"scanned":0}`),
-			ErrCursorMalformed,
-		},
-		{
-			"topic of invalid base64",
-			v1(`{"query":{"min":1,"max":2,"dir":"asc","filters":[{"topics":["!!!not-b64",` +
-				`null,null,null]}]},"scanned":0}`),
-			ErrCursorMalformed,
-		},
+		{"empty string", ""},
+		{"oversized input", "gec1_" + strings.Repeat("A", maxCursorBytes)},
+		{"oversized but structurally valid", overCapToken},
+		{"newline inside a valid payload", newlineToken},
+		{"non-canonical base64 trailing bits", nonCanonicalToken},
+		{"not a gec token", "opaque"},
+		{"v1-style base64 without prefix", base64.RawURLEncoding.EncodeToString(minimalBody)},
+		{"empty version", "gec_" + base64.RawURLEncoding.EncodeToString(minimalBody)},
+		{"non-digit version", "gecx_AAAA"},
+		{"no version separator", "gec1"},
+		{"bad base64", "gec1_!!!"},
+		{"padding in payload", "gec1_AAAA=="},
+		{"newline in payload", "gec1_AA\nAA"},
+		{"carriage return in payload", "gec1_AA\rAA"},
+		{"empty body", "gec1_"},
+		{"truncated after flags", tokV1([]byte{0x00})},
+		{"truncated inside position", tokV1(cat([]byte{0x04}, be32(1), be32(2), be32(3)))},
+		{"truncated before filter count", tokV1(cat([]byte{0x00}, be32(1), be32(0)))},
+		{"reserved envelope flag bit", tokV1(cat([]byte{0x08}, be32(1), be32(0), be16(0)))},
+		{"descending without max", tokV1(cat([]byte{0x01}, be32(1), be32(0), be16(0)))},
 		{
 			"min greater than max",
-			v1(`{"query":{"min":3,"max":2,"dir":"asc","filters":[]},"scanned":0}`),
-			ErrCursorMalformed,
-		},
-		{"filter count over cap", v1(overCap), ErrCursorMalformed},
-		// Rejected by the pre-unmarshal brace guard: a quarter-million empty
-		// filters fit the size cap but must not reach json.Unmarshal.
-		{
-			"quarter-million empty filters",
-			v1(`{"query":{"min":1,"max":2,"dir":"asc","filters":[` +
-				strings.TrimSuffix(strings.Repeat(`{},`, 250_000), ",") +
-				`]},"scanned":0}`),
-			ErrCursorMalformed,
-		},
-		{"oversized input", strings.Repeat("A", maxCursorBytes+1), ErrCursorMalformed},
-		{"empty body after version byte", v1(""), ErrCursorMalformed},
-		// A structurally empty body must never decode to a usable zero
-		// envelope; the dir check is what rejects it.
-		{"empty JSON object body", v1(`{}`), ErrCursorMalformed},
-		// Numeric strictness is inherited from encoding/json; pinned so a
-		// lenient unmarshaller swap cannot change it.
-		{
-			"uint32 overflow",
-			v1(`{"query":{"min":1,"max":4294967296,"dir":"asc","filters":[]},"scanned":0}`),
-			ErrCursorMalformed,
+			tokV1(cat([]byte{0x02}, be32(3), be32(2), be32(0), be16(0))),
 		},
 		{
-			"negative number",
-			v1(`{"query":{"min":-1,"max":2,"dir":"asc","filters":[]},"scanned":0}`),
-			ErrCursorMalformed,
+			"filter count over cap",
+			tokV1(cat([]byte{0x00}, be32(1), be32(0), be16(maxCursorFilters+1))),
 		},
 		{
-			"non-integer number",
-			v1(`{"query":{"min":1.5,"max":2,"dir":"asc","filters":[]},"scanned":0}`),
-			ErrCursorMalformed,
+			// Valid empty filters follow the over-cap count: only the cap
+			// check rejects this before allocation.
+			"filter count over cap with filter bytes present",
+			tokV1(cat([]byte{0x00}, be32(1), be32(0), be16(maxCursorFilters+1),
+				bytes.Repeat([]byte{0x00}, maxCursorFilters+1))),
+		},
+		{
+			"filter count without filter bytes",
+			tokV1(cat([]byte{0x00}, be32(1), be32(0), be16(1))),
+		},
+		{
+			"reserved filter flag bit",
+			tokV1(cat([]byte{0x00}, be32(1), be32(0), be16(1), []byte{0x20})),
+		},
+		{
+			"topic bit set with zero length",
+			tokV1(cat([]byte{0x00}, be32(1), be32(0), be16(1), []byte{0x02}, be32(0))),
+		},
+		{
+			"topic length past end of body",
+			tokV1(cat([]byte{0x00}, be32(1), be32(0), be16(1), []byte{0x02}, be32(1000))),
+		},
+		{
+			"contract shorter than 32 bytes",
+			tokV1(cat([]byte{0x00}, be32(1), be32(0), be16(1), []byte{0x01}, testTopic(0xC0))),
+		},
+		{
+			"trailing bytes",
+			tokV1(cat(minimalBody, []byte{0x00})),
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := DecodeEventCursor(tc.in)
-			require.ErrorIs(t, err, tc.want)
+			require.ErrorIs(t, err, ErrCursorMalformed)
 			assert.Nil(t, got)
 		})
 	}
 }
 
-// TestCursorGoldenV1 pins the version-1 body against literal JSON: round-trip
-// tests pass a tag rename in lockstep, the literals do not. The minimal
-// vector pins the absent-field shapes ("filters":[], no "position" key).
-func TestCursorGoldenV1(t *testing.T) {
-	contract := testContract(0xC5)
-	topic := testTopic(0xB2)
-	cases := []struct {
-		name string
-		env  EventCursor
-		body string
-	}{
-		{
-			name: "full envelope",
-			env: EventCursor{
-				Query: EventCursorQuery{
-					MinLedger: 1, MaxLedger: 2, Dir: Ascending,
-					Filters: []event.Filter{{
-						ContractID: contract,
-						Topics:     [protocol.MaxTopicCount][]byte{nil, topic, nil, nil},
-					}},
-				},
-				Position:      &EventPosition{Ledger: 3, Tx: 4, Op: 5, Event: 6, K: 7},
-				ScannedLedger: 8,
-			},
-			body: fmt.Sprintf(
-				`{"query":{"min":1,"max":2,"dir":"asc","filters":[{"contract":%q,"topics":[null,%q,null,null]}]},`+
-					`"position":{"ledger":3,"tx":4,"op":5,"event":6,"k":7},"scanned":8}`,
-				base64.StdEncoding.EncodeToString(contract),
-				base64.StdEncoding.EncodeToString(topic),
-			),
-		},
-		{
-			name: "minimal watermark-only match-all",
-			env: EventCursor{
-				Query:         EventCursorQuery{MinLedger: 100, MaxLedger: 200, Dir: Descending},
-				ScannedLedger: 175,
-			},
-			body: `{"query":{"min":100,"max":200,"dir":"desc","filters":[]},"scanned":175}`,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			enc, err := tc.env.Encode()
-			require.NoError(t, err)
-			raw, err := base64.RawURLEncoding.DecodeString(enc)
-			require.NoError(t, err)
-			require.NotEmpty(t, raw)
-			assert.Equal(t, byte(cursorVersion), raw[0])
-			assert.Equal(t, tc.body, string(raw[1:]))
-
-			golden := base64.RawURLEncoding.EncodeToString(append([]byte{cursorVersion}, tc.body...))
-			got, err := DecodeEventCursor(golden)
-			require.NoError(t, err)
-			assert.Equal(t, &tc.env, got)
-		})
-	}
-}
-
-// Go's JSON decoder drops extra "topics" elements and zero-fills missing
-// ones; only a forger can produce either. Pinned so a stricter unmarshaller
-// cannot change the behavior undetected.
-func TestCursorTopicsArityLenient(t *testing.T) {
-	v1 := func(body string) string {
-		return base64.RawURLEncoding.EncodeToString(append([]byte{cursorVersion}, body...))
-	}
-	topic := base64.StdEncoding.EncodeToString(testTopic(0xA7))
-
-	t.Run("five elements: fifth dropped", func(t *testing.T) {
-		got, err := DecodeEventCursor(v1(
-			`{"query":{"min":1,"max":2,"dir":"asc","filters":[{"topics":[` +
-				fmt.Sprintf("%q", topic) + `,null,null,null,` + fmt.Sprintf("%q", topic) +
-				`]}]},"scanned":0}`))
-		require.NoError(t, err)
-		require.Len(t, got.Query.Filters, 1)
-		assert.Equal(t, testTopic(0xA7), got.Query.Filters[0].Topics[0])
-		for i := 1; i < protocol.MaxTopicCount; i++ {
-			assert.Nil(t, got.Query.Filters[0].Topics[i])
-		}
-	})
-	t.Run("two elements: rest zero-filled", func(t *testing.T) {
-		got, err := DecodeEventCursor(v1(
-			`{"query":{"min":1,"max":2,"dir":"asc","filters":[{"topics":[null,` +
-				fmt.Sprintf("%q", topic) + `]}]},"scanned":0}`))
-		require.NoError(t, err)
-		require.Len(t, got.Query.Filters, 1)
-		assert.Nil(t, got.Query.Filters[0].Topics[0])
-		assert.Equal(t, testTopic(0xA7), got.Query.Filters[0].Topics[1])
-		assert.Nil(t, got.Query.Filters[0].Topics[2])
-		assert.Nil(t, got.Query.Filters[0].Topics[3])
-	})
-}
-
 func TestCursorEncodeDeterministic(t *testing.T) {
 	env := EventCursor{
 		Query: EventCursorQuery{
-			MinLedger: 1, MaxLedger: 1000, Dir: Descending,
+			MinLedger: 1, MaxLedger: maxPtr(1000), Dir: Descending,
 			Filters: []event.Filter{{
 				ContractID: testContract(0xC4),
 				Topics:     [protocol.MaxTopicCount][]byte{testTopic(1), nil, testTopic(3), nil},
 			}},
 		},
-		Position:      &EventPosition{Ledger: 500, Tx: 1, Op: 2, Event: 3, K: 4},
+		Position:      &EventPosition{Ledger: 500, Tx: 1, Op: 2, Event: 3, LedgerOrdinal: 4},
 		ScannedLedger: 500,
 	}
 	first, err := env.Encode()
@@ -344,42 +357,70 @@ func TestCursorEncodeDeterministic(t *testing.T) {
 	assert.Equal(t, first, second)
 }
 
-func TestCursorEncodeRejectsBadContractLength(t *testing.T) {
-	env := EventCursor{
-		Query: EventCursorQuery{
-			MinLedger: 1, MaxLedger: 2, Dir: Ascending,
-			Filters: []event.Filter{{ContractID: bytes.Repeat([]byte{1}, 31)}},
+// Encode fails a minting bug on the page that has it: everything it rejects
+// is something no decode accepts, and none of its errors carry the decode
+// sentinels the handler maps to client-facing cursor errors.
+func TestCursorEncodeRejects(t *testing.T) {
+	cases := []struct {
+		name string
+		env  EventCursor
+	}{
+		{
+			name: "invalid direction",
+			env:  EventCursor{Query: EventCursorQuery{MinLedger: 1, Dir: Direction(99)}},
+		},
+		{
+			name: "descending without max",
+			env:  EventCursor{Query: EventCursorQuery{MinLedger: 1, Dir: Descending}},
+		},
+		{
+			name: "min greater than max",
+			env:  EventCursor{Query: EventCursorQuery{MinLedger: 3, MaxLedger: maxPtr(2), Dir: Ascending}},
+		},
+		{
+			name: "bad contract length",
+			env: EventCursor{
+				Query: EventCursorQuery{
+					MinLedger: 1, Dir: Ascending,
+					Filters: []event.Filter{{ContractID: bytes.Repeat([]byte{1}, 31)}},
+				},
+			},
+		},
+		{
+			name: "too many filters",
+			env: EventCursor{
+				Query: EventCursorQuery{
+					MinLedger: 1, Dir: Ascending,
+					Filters: make([]event.Filter, maxCursorFilters+1),
+				},
+			},
+		},
+		{
+			// Legitimate traffic cannot reach the size cap, hence the
+			// oversized topic.
+			name: "oversized output",
+			env: EventCursor{
+				Query: EventCursorQuery{
+					MinLedger: 1, Dir: Ascending,
+					Filters: []event.Filter{{
+						Topics: [protocol.MaxTopicCount][]byte{bytes.Repeat([]byte{7}, maxCursorBytes)},
+					}},
+				},
+			},
 		},
 	}
-	_, err := env.Encode()
-	require.Error(t, err)
-}
-
-func TestCursorEncodeRejectsInvalidDirection(t *testing.T) {
-	env := EventCursor{Query: EventCursorQuery{MinLedger: 1, MaxLedger: 2, Dir: Direction(99)}}
-	_, err := env.Encode()
-	require.Error(t, err)
-}
-
-// Encode refuses output DecodeEventCursor would reject. Legitimate traffic
-// cannot reach the cap, hence the oversized topic.
-func TestCursorEncodeRejectsOversized(t *testing.T) {
-	env := EventCursor{
-		Query: EventCursorQuery{
-			MinLedger: 1, MaxLedger: 2, Dir: Ascending,
-			Filters: []event.Filter{{
-				Topics: [protocol.MaxTopicCount][]byte{bytes.Repeat([]byte{7}, maxCursorBytes)},
-			}},
-		},
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.env.Encode()
+			require.Error(t, err)
+			require.NotErrorIs(t, err, ErrCursorMalformed)
+			require.NotErrorIs(t, err, ErrCursorUnknownVersion)
+		})
 	}
-	_, err := env.Encode()
-	require.Error(t, err)
-	require.NotErrorIs(t, err, ErrCursorMalformed)
 }
 
-// The logged worst-case size (256 full filters) feeds the plan's
-// JSON-versus-binary decision. No size is asserted; the envelope must
-// round-trip.
+// The logged worst-case size (256 full filters) records the frozen format's
+// practical maximum. No size is asserted; the envelope must round-trip.
 func TestCursorSizeWorstCase(t *testing.T) {
 	filters := make([]event.Filter, maxCursorFilters)
 	for i := range filters {
@@ -389,10 +430,12 @@ func TestCursorSizeWorstCase(t *testing.T) {
 		}
 	}
 	env := EventCursor{
-		Query: EventCursorQuery{MinLedger: 1, MaxLedger: math.MaxUint32, Dir: Ascending, Filters: filters},
+		Query: EventCursorQuery{
+			MinLedger: 1, MaxLedger: maxPtr(math.MaxUint32), Dir: Ascending, Filters: filters,
+		},
 		Position: &EventPosition{
 			Ledger: math.MaxUint32, Tx: math.MaxUint32, Op: math.MaxUint32,
-			Event: math.MaxUint32, K: math.MaxUint32,
+			Event: math.MaxUint32, LedgerOrdinal: math.MaxUint32,
 		},
 		ScannedLedger: math.MaxUint32,
 	}
@@ -404,45 +447,70 @@ func TestCursorSizeWorstCase(t *testing.T) {
 	require.Equal(t, &env, got)
 }
 
-// Trips when event.Filter grows a field the conversions do not map, which
-// would silently drop that constraint from minted cursors. Adding a field?
-// Map it in filterJSON (keys are reserved there), extend the golden vector,
-// and update the count.
-func TestCursorJSONCoversFilter(t *testing.T) {
+// Trips when event.Filter grows a field the codec does not map, which would
+// silently drop that constraint from minted cursors. Adding a field? Map it
+// in appendFilter and readFilter under a version bump (the #904 fields take
+// the reserved fflags bits), extend the golden vector, and update the count.
+func TestCursorCodecCoversFilter(t *testing.T) {
 	require.Equal(t, 2, reflect.TypeFor[event.Filter]().NumField(),
 		"event.Filter has fields the cursor body does not carry")
 }
 
-// canonicalizationSlack bounds how much larger a decoded envelope's
-// canonical re-encoding can be than the accepted input: omitted optional
-// keys reappear on encode, at most a few dozen bytes per filter. Within
-// this distance of maxCursorBytes, a forged non-canonical input can decode
-// yet re-encode past the cap.
-const canonicalizationSlack = 64 << 10
+// Zero-length non-nil values encode as absent, byte-identically to nil. The
+// wire cannot represent them: a set topic bit must carry a nonzero length.
+func TestCursorEmptyValuesEncodeAsAbsent(t *testing.T) {
+	withEmpty := EventCursor{
+		Query: EventCursorQuery{
+			MinLedger: 1, MaxLedger: maxPtr(2), Dir: Ascending,
+			Filters: []event.Filter{{
+				ContractID: []byte{},
+				Topics:     [protocol.MaxTopicCount][]byte{{}, {}, {}, {}},
+			}},
+		},
+	}
+	withNil := EventCursor{
+		Query: EventCursorQuery{
+			MinLedger: 1, MaxLedger: maxPtr(2), Dir: Ascending,
+			Filters: []event.Filter{{}},
+		},
+	}
+	encEmpty, err := withEmpty.Encode()
+	require.NoError(t, err)
+	encNil, err := withNil.Encode()
+	require.NoError(t, err)
+	require.Equal(t, encNil, encEmpty)
+}
 
 // FuzzDecodeEventCursor pins the codec's hostile-input promise: decode never
-// panics, and anything it accepts is stable under re-encode and re-decode,
-// except forged input within canonicalizationSlack of the size cap.
+// panics, errors are always typed, and any accepted token re-encodes to the
+// exact input bytes — one envelope, one encoding, no exceptions.
 func FuzzDecodeEventCursor(f *testing.F) {
 	valid := EventCursor{
 		Query: EventCursorQuery{
-			MinLedger: 1, MaxLedger: 2, Dir: Ascending,
+			MinLedger: 1, MaxLedger: maxPtr(2), Dir: Ascending,
 			Filters: []event.Filter{{ContractID: testContract(0xC0)}},
 		},
-		Position:      &EventPosition{Ledger: 1, Tx: 2, Op: 3, Event: 4, K: 5},
+		Position:      &EventPosition{Ledger: 1, Tx: 2, Op: 3, Event: 4, LedgerOrdinal: 5},
 		ScannedLedger: 1,
 	}
 	seed, err := valid.Encode()
 	if err != nil {
 		f.Fatal(err)
 	}
+	unbounded := EventCursor{Query: EventCursorQuery{MinLedger: 9, Dir: Ascending}}
+	seed2, err := unbounded.Encode()
+	if err != nil {
+		f.Fatal(err)
+	}
 	f.Add(seed)
+	f.Add(seed2)
 	f.Add("")
-	f.Add("not base64!!")
-	f.Add(base64.RawURLEncoding.EncodeToString([]byte{cursorVersion}))
-	f.Add(base64.RawURLEncoding.EncodeToString(append([]byte{cursorVersion}, `{}`...)))
-	f.Add(base64.RawURLEncoding.EncodeToString(append([]byte{cursorVersion},
-		`{"query":{"min":1,"max":2,"dir":"asc","filters":[{"topics":["AQ==","","","",""]}]},"scanned":0}`...)))
+	f.Add("gec1_")
+	f.Add("gec2_AAAA")
+	f.Add("not a cursor")
+	f.Add(tokV1(cat([]byte{0x00}, be32(1), be32(0), be16(0))))
+	f.Add(tokV1(cat([]byte{0x07}, be32(1), be32(2), be32(3), be32(4), be32(5), be32(6),
+		be32(7), be32(8), be16(1), []byte{0x05}, testContract(0xC5), be32(8), testTopic(0xB2))))
 	f.Fuzz(func(t *testing.T, s string) {
 		env, err := DecodeEventCursor(s)
 		if err != nil {
@@ -453,61 +521,10 @@ func FuzzDecodeEventCursor(f *testing.F) {
 		}
 		enc, err := env.Encode()
 		if err != nil {
-			if len(s) > maxCursorBytes-canonicalizationSlack {
-				return
-			}
 			t.Fatalf("accepted envelope failed to re-encode: %v", err)
 		}
-		again, err := DecodeEventCursor(enc)
-		if err != nil {
-			t.Fatalf("re-encoded cursor failed to decode: %v", err)
+		if enc != s {
+			t.Fatalf("re-encode is not byte-identical:\n in: %q\nout: %q", s, enc)
 		}
-		require.Equal(t, env, again)
 	})
-}
-
-func TestCursorEncodeRejectsTooManyFilters(t *testing.T) {
-	env := EventCursor{
-		Query: EventCursorQuery{
-			MinLedger: 1, MaxLedger: 2, Dir: Ascending,
-			Filters: make([]event.Filter, maxCursorFilters+1),
-		},
-	}
-	_, err := env.Encode()
-	require.Error(t, err)
-	require.NotErrorIs(t, err, ErrCursorMalformed)
-}
-
-// Empty non-nil values normalize to nil in both codec directions: a body
-// carrying "" values decodes to nil fields, and an envelope minted with
-// empty non-nil values encodes byte-identically to its nil form.
-func TestCursorEmptyValuesNormalizeToNil(t *testing.T) {
-	body := `{"query":{"min":1,"max":2,"dir":"asc","filters":[{"contract":"",` +
-		`"topics":["","","",""]}]},"scanned":0}`
-	enc := base64.RawURLEncoding.EncodeToString(append([]byte{cursorVersion}, body...))
-	got, err := DecodeEventCursor(enc)
-	require.NoError(t, err)
-	require.Len(t, got.Query.Filters, 1)
-	require.Equal(t, event.Filter{}, got.Query.Filters[0])
-
-	withEmpty := EventCursor{
-		Query: EventCursorQuery{
-			MinLedger: 1, MaxLedger: 2, Dir: Ascending,
-			Filters: []event.Filter{{
-				ContractID: []byte{},
-				Topics:     [protocol.MaxTopicCount][]byte{{}, {}, {}, {}},
-			}},
-		},
-	}
-	withNil := EventCursor{
-		Query: EventCursorQuery{
-			MinLedger: 1, MaxLedger: 2, Dir: Ascending,
-			Filters: []event.Filter{{}},
-		},
-	}
-	encEmpty, err := withEmpty.Encode()
-	require.NoError(t, err)
-	encNil, err := withNil.Encode()
-	require.NoError(t, err)
-	require.Equal(t, encNil, encEmpty)
 }
