@@ -17,6 +17,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
@@ -172,12 +173,12 @@ func openLiveHotDB(t *testing.T, cat *catalog.Catalog, c chunk.ID) *hotchunk.DB 
 // itself. Returns the resume point (seq+1) a boundary test drives the loop from.
 // Seeding a near-full chunk costs one synced commit per ledger, so its callers run
 // t.Parallel().
-func seedLastCommitted(t *testing.T, cat *catalog.Catalog, c chunk.ID, seq uint32) uint32 {
+func seedLastCommitted(t *testing.T, cat *catalog.Catalog, seq uint32) uint32 {
 	t.Helper()
+	c := chunk.IDFromLedger(seq)
 	db := openLiveHotDB(t, cat, c)
 	for s := c.FirstLedger(); s <= seq; s++ {
-		_, err := db.IngestLedger(s, rpcv2test.ZeroTxLCMBytes(t, s))
-		require.NoError(t, err)
+		rpcv2test.IngestLedger(t, db, s, rpcv2test.ZeroTxLCMBytes(t, s))
 	}
 	require.NoError(t, db.Close())
 	return seq + 1
@@ -329,7 +330,7 @@ func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(0)
 	c1 := c + 1
-	resume := seedLastCommitted(t, cat, c, c.LastLedger()-1) // == c.LastLedger()
+	resume := seedLastCommitted(t, cat, c.LastLedger()-1) // == c.LastLedger()
 
 	stream := &fakeCoreStream{frames: map[uint32][]byte{
 		c.LastLedger():   rpcv2test.ZeroTxLCMBytes(t, c.LastLedger()),   // boundary 0->1
@@ -353,6 +354,38 @@ func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 	lastComplete, err := cat.LastCompleteChunk()
 	require.NoError(t, err)
 	assert.Equal(t, int64(c), lastComplete, "the derivable frontier names the completed chunk")
+}
+
+// TestRunIngestionLoop_FeeWindowsSurviveChunkBoundary pins issue #881's
+// daemon-owned-windows invariant: the loop rebuilds its HotService at every
+// chunk boundary, and that rebuild must NOT wipe the fee windows — getFeeStats
+// would otherwise serve empty distributions for up to a window after every
+// boundary. Three fee-bearing ledgers straddle the 0→1 boundary; all three
+// must be in the windows afterwards, the pre-boundary one included.
+func TestRunIngestionLoop_FeeWindowsSurviveChunkBoundary(t *testing.T) {
+	t.Parallel() // seeds a near-full chunk (one synced commit per ledger)
+	cat, _ := testCatalog(t)
+	c := chunk.ID(0)
+	c1 := c + 1
+	resume := seedLastCommitted(t, cat, c.LastLedger()-1) // == c.LastLedger()
+
+	stream := &fakeCoreStream{frames: map[uint32][]byte{
+		c.LastLedger():       rpcv2test.FeeTxLCMBytes(t, c.LastLedger(), 100), // pre-boundary
+		c1.FirstLedger():     rpcv2test.FeeTxLCMBytes(t, c1.FirstLedger(), 200),
+		c1.FirstLedger() + 1: rpcv2test.FeeTxLCMBytes(t, c1.FirstLedger()+1, 300),
+	}, endErr: errors.New("end")}
+	cfg, _ := loopConfig(t, stream, cat, resume)
+	windows := feewindow.NewFeeWindows(10, 10)
+	cfg.FeeWindows = windows
+
+	require.Error(t, runIngestionLoop(context.Background(), cfg), "stream ran dry")
+
+	classic := windows.ClassicFeeDistribution()
+	assert.Equal(t, uint32(3), classic.LedgerCount,
+		"all three ledgers counted — the boundary HotService rebuild must not reset the windows")
+	assert.Equal(t, uint32(3), classic.FeeCount)
+	assert.Equal(t, uint64(100), classic.Min, "the pre-boundary ledger's fee survived the boundary")
+	assert.Equal(t, uint64(300), classic.Max)
 }
 
 // ---------------------------------------------------------------------------
@@ -416,7 +449,7 @@ func TestRunIngestionLoop_HandoffFenceClosesBeforeNextKey(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(0)
 	c1 := c + 1
-	resume := seedLastCommitted(t, cat, c, c.LastLedger()-1) // == c.LastLedger()
+	resume := seedLastCommitted(t, cat, c.LastLedger()-1) // == c.LastLedger()
 
 	stream := &fakeCoreStream{frames: map[uint32][]byte{
 		c.LastLedger():   rpcv2test.ZeroTxLCMBytes(t, c.LastLedger()),   // boundary 0->1
@@ -447,7 +480,7 @@ func TestRunIngestionLoop_BoundaryTransfersOwnershipToRegistry(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(0)
 	c1 := c + 1
-	resume := seedLastCommitted(t, cat, c, c.LastLedger()-1) // == c.LastLedger()
+	resume := seedLastCommitted(t, cat, c.LastLedger()-1) // == c.LastLedger()
 
 	stream := &fakeCoreStream{frames: map[uint32][]byte{
 		c.LastLedger():   rpcv2test.ZeroTxLCMBytes(t, c.LastLedger()),   // boundary 0->1

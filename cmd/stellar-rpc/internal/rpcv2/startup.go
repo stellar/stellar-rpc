@@ -13,6 +13,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
@@ -159,16 +160,17 @@ func run(ctx context.Context, cfg StartConfig) error {
 	loopOwnsDB = true
 	g.Go(func() error {
 		err := runIngestionLoop(gctx, ingestionLoopConfig{
-			Stream:   stream,
-			Resume:   resumeLedger,
-			HotDB:    hotDB,
-			Catalog:  cat,
-			Boundary: boundary,
-			Logger:   logger,
-			Metrics:  metrics,
-			Sink:     cfg.Exec.Process.Sink,
-			Health:   cfg.health,
-			Registry: registry,
+			Stream:     stream,
+			Resume:     resumeLedger,
+			HotDB:      hotDB,
+			Catalog:    cat,
+			Boundary:   boundary,
+			Logger:     logger,
+			Metrics:    metrics,
+			Sink:       cfg.Exec.Process.Sink,
+			Health:     cfg.health,
+			Registry:   registry,
+			FeeWindows: cfg.FeeWindows,
 		})
 		if err == nil {
 			// WithContext cancels gctx (unblocking the lifecycle sibling in g.Wait)
@@ -351,6 +353,12 @@ type StartConfig struct {
 	// health is the readiness/health signal the ingestion loop feeds per commit;
 	// #889's read server consumes it (as HealthSignal). nil ⇒ observe is a no-op.
 	health *healthState
+
+	// FeeWindows is the daemon-owned getFeeStats state ([service.fee_stats]
+	// sizes) the ingestion loop feeds per committed ledger. The daemon builds it
+	// once, outside the supervised run loop; nil (tests without a fee consumer)
+	// means the loop never computes fees.
+	FeeWindows *feewindow.FeeWindows
 }
 
 // withDefaults fills the embedded Exec defaults (Workers -> GOMAXPROCS). The

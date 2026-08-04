@@ -11,6 +11,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
@@ -98,6 +99,12 @@ type ingestionLoopConfig struct {
 	// handle — the loop's single ownership story. The daemon passes the real
 	// query.Registry; the bounded bench loop passes a closingSink.
 	Registry handleSink
+
+	// FeeWindows is the daemon-owned getFeeStats state every committed ledger's
+	// fees fold into. The loop only LENDS it to each HotService it builds —
+	// boundary rebuilds must not wipe fee history — and never resets it. nil
+	// (the bounded bench loop) means fees are never computed.
+	FeeWindows *feewindow.FeeWindows
 }
 
 // handleSink is the slice of the registry the loop publishes into. The daemon's
@@ -165,8 +172,9 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 	cfg.Registry.PublishHandle(hotDB.ChunkID(), hotDB)
 
 	// hotService binds the metrics sink to THIS hotDB instance; the boundary handoff
-	// rebuilds it for the reopened chunk DB below.
-	hotService := ingest.NewHotService(hotDB, cfg.Sink)
+	// rebuilds it for the reopened chunk DB below. The fee windows are borrowed
+	// daemon state, handed to every rebuild unchanged.
+	hotService := ingest.NewHotService(hotDB, cfg.FeeWindows, cfg.Sink)
 
 	// One continuous stream from the resume ledger, consumed on a local sequence
 	// counter. The in-order contract is enforced at the SOURCE — captive core (and
@@ -210,7 +218,7 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 				return fmt.Errorf("open hot DB for chunk %s at boundary: %w", next, oerr)
 			}
 			hotDB = nextDB
-			hotService = ingest.NewHotService(hotDB, cfg.Sink)
+			hotService = ingest.NewHotService(hotDB, cfg.FeeWindows, cfg.Sink)
 			// Publish the next chunk's handle before its first ledger commits (the
 			// completed chunk's owner is the sink from here), then announce the
 			// completed chunk to the lifecycle.

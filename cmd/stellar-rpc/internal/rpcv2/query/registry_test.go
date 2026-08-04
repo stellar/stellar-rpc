@@ -238,8 +238,7 @@ func TestTryCloseHandle_BusyRetainsThenRetryDrains(t *testing.T) {
 
 	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
 	require.NoError(t, err)
-	_, err = db.IngestLedger(c.FirstLedger(), rpcv2test.ZeroTxLCMBytes(t, c.FirstLedger()))
-	require.NoError(t, err)
+	rpcv2test.IngestLedger(t, db, c.FirstLedger(), rpcv2test.ZeroTxLCMBytes(t, c.FirstLedger()))
 	r.PublishHandle(c, db)
 
 	// Park a reader inside the ledger stream so the store's read-lock stays held,

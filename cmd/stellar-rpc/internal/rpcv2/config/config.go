@@ -44,12 +44,13 @@ type Config struct {
 }
 
 // ServiceConfig is [service] — the JSON-RPC read-serving policy (issue #882).
-// Most of it is dormant today: #889 builds the read server that reads these
-// serving limits (over the store readers its handlers need), and #881 wires
-// [service.fee_stats] into live ingestion — until then those values are only
-// parsed, defaulted, and validated. [service.preflight] is the exception; the
-// daemon sizes its preflight pool from it at startup. The whole section is
-// optional: absent keys get v1's defaults in WithDefaults.
+// The serving limits are dormant until #889 builds the read server that reads
+// them (over the store readers its handlers need) — those values are only
+// parsed, defaulted, and validated. [service.fee_stats] and
+// [service.preflight] are live: ingestion feeds the fee windows sized by the
+// former (#881), and the daemon sizes its preflight pool from the latter at
+// startup. The whole section is optional: absent keys get v1's defaults in
+// WithDefaults.
 //
 // Key naming rule: camelCase table keys ONLY where the key is a wire identifier
 // (the [service.methods.<methodName>] tables, named after the JSON-RPC method);
@@ -93,11 +94,11 @@ type PreflightConfig struct {
 }
 
 // FeeStatsConfig is [service.fee_stats] — the sizes, in ledgers, of the two
-// in-memory fee windows behind getFeeStats. Live ingestion will feed them when
-// #881 lands; nothing consumes them yet. They live here and NOT in the
-// getFeeStats method table because they size ingestion-time memory, not
-// request handling. Both must be positive and are capped at
-// limits.MaxFeeStatsRetentionWindow.
+// in-memory fee windows behind getFeeStats. Live ingestion feeds them per
+// committed ledger, and the restart replay refills them on boot (#881/#888).
+// They live here and NOT in the getFeeStats method table because they size
+// ingestion-time memory, not request handling. Both must be positive and are
+// capped at limits.MaxFeeStatsRetentionWindow.
 type FeeStatsConfig struct {
 	ClassicFeeWindowLedgers          *uint32 `toml:"classic_fee_window_ledgers"`
 	SorobanInclusionFeeWindowLedgers *uint32 `toml:"soroban_inclusion_fee_window_ledgers"`

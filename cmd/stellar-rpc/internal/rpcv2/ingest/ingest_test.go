@@ -26,6 +26,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
@@ -1143,6 +1144,128 @@ func hotTestLogger() *supportlog.Entry {
 	return l
 }
 
+// feeLCMBytes builds a one-tx V2 LCM whose result carries feeCharged and ONE
+// op result, so FeesFromTxParts observes exactly one classic per-op fee of
+// feeCharged. The shared successResult() fixture carries an EMPTY op-result
+// list, which the classification skips as a never-ran transaction — useless
+// for fee tests.
+func feeLCMBytes(t *testing.T, seq uint32, feeCharged int64) []byte {
+	t.Helper()
+	envelope := xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1: &xdr.TransactionV1Envelope{
+			Tx: xdr.Transaction{
+				SourceAccount: xdr.MustMuxedAddress(keypair.MustRandom().Address()),
+			},
+		},
+	}
+	hash, err := network.HashTransactionInEnvelope(envelope, testPassphrase)
+	require.NoError(t, err)
+	opResults := []xdr.OperationResult{{Code: xdr.OperationResultCodeOpNotSupported}}
+	comp := []xdr.TxSetComponent{{
+		Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
+		TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
+			Txs: []xdr.TransactionEnvelope{envelope},
+		},
+	}}
+	lcm := xdr.LedgerCloseMeta{
+		V: 2,
+		V2: &xdr.LedgerCloseMetaV2{
+			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
+				Header: xdr.LedgerHeader{
+					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(0)},
+					LedgerSeq: xdr.Uint32(seq),
+				},
+			},
+			TxSet: xdr.GeneralizedTransactionSet{
+				V:       1,
+				V1TxSet: &xdr.TransactionSetV1{Phases: []xdr.TransactionPhase{{V: 0, V0Components: &comp}}},
+			},
+			TxProcessing: []xdr.TransactionResultMetaV1{{
+				TxApplyProcessing: xdr.TransactionMeta{V: 4, V4: &xdr.TransactionMetaV4{}},
+				Result: xdr.TransactionResultPair{
+					TransactionHash: hash,
+					Result: xdr.TransactionResult{
+						FeeCharged: xdr.Int64(feeCharged),
+						Result: xdr.TransactionResultResult{
+							Code:    xdr.TransactionResultCodeTxFailed,
+							Results: &opResults,
+						},
+					},
+				},
+			}},
+		},
+	}
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+	return raw
+}
+
+// TestHotService_FeedsFeeWindowsAfterCommit: a successfully committed ledger's
+// fee observations land in the injected windows.
+func TestHotService_FeedsFeeWindowsAfterCommit(t *testing.T) {
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	windows := feewindow.NewFeeWindows(10, 10)
+	svc := NewHotService(db, windows, &testSink{})
+	first := chunk.ID(0).FirstLedger()
+	require.NoError(t, svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(feeLCMBytes(t, first, 500))))
+
+	classic := windows.ClassicFeeDistribution()
+	assert.Equal(t, uint32(1), classic.LedgerCount)
+	assert.Equal(t, uint32(1), classic.FeeCount)
+	assert.Equal(t, uint64(500), classic.Max)
+}
+
+// TestHotService_RejectedLedgerFeedsNoFees pins the append-after-commit
+// ordering: a ledger the store rejects (skipping ahead of the chunk's
+// next-expected seq) contributes nothing to the windows, so its retry cannot
+// double-count.
+func TestHotService_RejectedLedgerFeedsNoFees(t *testing.T) {
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	windows := feewindow.NewFeeWindows(10, 10)
+	svc := NewHotService(db, windows, &testSink{})
+	first := chunk.ID(0).FirstLedger()
+
+	require.Error(t, svc.Ingest(context.Background(), first+5, xdr.LedgerCloseMetaView(feeLCMBytes(t, first+5, 500))))
+	assert.Zero(t, windows.ClassicFeeDistribution().LedgerCount, "a rejected ledger must not feed the windows")
+
+	// The "retry" (the in-order ledger) is then counted exactly once.
+	require.NoError(t, svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(feeLCMBytes(t, first, 200))))
+	classic := windows.ClassicFeeDistribution()
+	assert.Equal(t, uint32(1), classic.LedgerCount)
+	assert.Equal(t, uint64(200), classic.Max)
+}
+
+// TestHotService_FeeClassificationErrorFailsCommittedLedger: a corrupt fee
+// shape (negative FeeCharged) fails the ledger loudly AFTER the store write —
+// the ledger is durably committed, the windows stay unfed, and the loop's
+// caller sees the error (tip-only trusted input, mirroring extract failures).
+func TestHotService_FeeClassificationErrorFailsCommittedLedger(t *testing.T) {
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	windows := feewindow.NewFeeWindows(10, 10)
+	svc := NewHotService(db, windows, &testSink{})
+	first := chunk.ID(0).FirstLedger()
+
+	err = svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(feeLCMBytes(t, first, -1)))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "fees")
+
+	maxSeq, ok, err := db.MaxCommittedSeq()
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, first, maxSeq, "the store write already committed when classification failed")
+	assert.Zero(t, windows.ClassicFeeDistribution().LedgerCount, "no partial fee state lands")
+}
+
 // TestHotService_EmitsEveryPhaseOnSuccess constructs a HotService over a real hot
 // DB with a recording sink and asserts one successful ingest emits every phase
 // once, the write phases carry per-type volume (extract/commit/apply carry none),
@@ -1153,7 +1276,7 @@ func TestHotService_EmitsEveryPhaseOnSuccess(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	sink := &testSink{}
-	svc := NewHotService(db, sink)
+	svc := NewHotService(db, nil, sink)
 	first := chunk.ID(0).FirstLedger()
 	raw, _, _ := marshalLCMWithEvent(t, first) // one tx, one event
 	require.NoError(t, svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(raw)))
@@ -1179,7 +1302,7 @@ func TestHotService_CommitErrorLandsOnCommitPhase(t *testing.T) {
 	require.NoError(t, db.Close()) // closed => the batch commit fails
 
 	sink := &testSink{}
-	svc := NewHotService(db, sink)
+	svc := NewHotService(db, nil, sink)
 	first := chunk.ID(0).FirstLedger()
 	raw, _, _ := marshalLCMWithEvent(t, first)
 	require.Error(t, svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(raw)))
@@ -1202,7 +1325,7 @@ func TestHotService_ExtractFailureLandsOnExtractPhase(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	sink := &testSink{}
-	svc := NewHotService(db, sink)
+	svc := NewHotService(db, nil, sink)
 	first := chunk.ID(0).FirstLedger()
 	// Garbage bytes fail XDR decode in ExtractLedgerTxParts, before any batch opens.
 	garbage := bytes.Repeat([]byte{0xff}, 16)
@@ -1225,7 +1348,7 @@ func TestHotService_EventsQueueFailureLandsOnEventsPhase(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	sink := &testSink{}
-	svc := NewHotService(db, sink)
+	svc := NewHotService(db, nil, sink)
 	first := chunk.ID(0).FirstLedger()
 	// A valid LCM but a seq that skips ahead: the events facade expects the empty
 	// chunk's first ledger and rejects first+5 as out of order (ErrLedgerOutOfOrder).
@@ -1251,7 +1374,7 @@ func TestHotService_FailedPhaseCarriesPartialDuration(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	sink := &testSink{}
-	svc := NewHotService(db, sink)
+	svc := NewHotService(db, nil, sink)
 	first := chunk.ID(0).FirstLedger()
 	raw, _, _ := marshalLCMWithEvent(t, first+5)
 	require.Error(t, svc.Ingest(context.Background(), first+5, xdr.LedgerCloseMetaView(raw)))

@@ -262,9 +262,11 @@ func (d *DB) MaxCommittedSeq() (uint32, bool, error) {
 // index into a fixed-size array (LedgerReport.Phases), so an out-of-table phase is
 // unrepresentable — no string label to mistype and no map lookup to nil-panic in a
 // sink. The phases partition the per-ledger wall-clock:
-//   - PhaseExtract: the shared ExtractLedgerTxParts walk + its products
-//     (txhash-entry build, events extraction, event shaping — all pre-batch, so
-//     every decode failure lands here by construction);
+//   - PhaseExtract: the product reads over the caller's shared
+//     ExtractLedgerTxParts walk (txhash-entry build, events extraction, event
+//     shaping — all pre-batch, so every decode failure lands here by
+//     construction); HotService.Ingest folds the walk's own duration into this
+//     phase, keeping it "the walk + product reads";
 //   - PhaseLedgers/PhaseTxhash/PhaseEvents: each facade's queue-into-batch step;
 //   - PhaseCommit: the RocksDB batch write (WAL append + fsync + memtable) = the
 //     whole Batch call minus the three queue steps — the fsync wait pprof can't see.
@@ -326,10 +328,19 @@ type LedgerReport struct {
 // BatchWriter, commit once, and only then apply the events in-memory mirror/offsets
 // update.
 //
-// lcmView is a borrowed zero-copy view; every extractor copies what it retains, so
-// the view need not outlive this call. Store.Batch's lifecycle RLock + checkOpen
-// is the authoritative closed-store guard, so there is no separate pre-check here.
-func (d *DB) IngestLedger(seq uint32, lcmView xdr.LedgerCloseMetaView) (LedgerReport, error) {
+// txParts is the caller's ExtractLedgerTxParts output for lcmView. The walk
+// lives one level up (HotService.Ingest) because its output feeds BOTH this
+// storage write and the fee product — hotchunk is a storage type and holds no
+// serving state. lcmView is still needed for the raw-ledgers write and the
+// close time.
+//
+// lcmView is a borrowed zero-copy view and txParts aliases it; every extractor
+// copies what it retains, so neither need outlive this call. Store.Batch's
+// lifecycle RLock + checkOpen is the authoritative closed-store guard, so there
+// is no separate pre-check here.
+func (d *DB) IngestLedger(
+	seq uint32, lcmView xdr.LedgerCloseMetaView, txParts []sdkingest.LedgerTxParts,
+) (LedgerReport, error) {
 	var rep LedgerReport
 
 	// A read-only (ledgers-only) DB has no events facade to assign event IDs, and
@@ -343,28 +354,21 @@ func (d *DB) IngestLedger(seq uint32, lcmView xdr.LedgerCloseMetaView) (LedgerRe
 	// Pre-extract anything that can fail BEFORE opening the batch, so a decode
 	// error rejects the ledger without a half-built batch.
 	//
-	// ONE TxProcessing walk feeds BOTH hot data types: ExtractLedgerTxParts
-	// yields, per transaction in apply order, the tx hashes plus result/meta
-	// views, and every product is a plain read over that slice — txhash builds
-	// entries from each element's Hash/InnerHash, EventsFromTxParts pulls the
-	// contract events off the already-located meta views, and
-	// PayloadsFromLedgerEvents shapes the pair. One walk instead of one per
-	// product halves per-ledger extraction, and shaping the already-extracted
-	// slices (not re-walking) keeps the event-ID assignment order identical to a
-	// per-view shaping. The atomic batch below serializes only the commit; the
-	// extractors are independent and could run concurrently into the same batch if
-	// catch-up profiling ever demands it — sequential is right at live cadence.
+	// The caller's ONE TxProcessing walk (txParts) feeds BOTH hot data types:
+	// every product is a plain read over that slice — txhash builds entries
+	// from each element's Hash/InnerHash, EventsFromTxParts pulls the contract
+	// events off the already-located meta views, and PayloadsFromLedgerEvents
+	// shapes the pair. One walk instead of one per product halves per-ledger
+	// extraction, and shaping the already-extracted slices (not re-walking)
+	// keeps the event-ID assignment order identical to a per-view shaping. The
+	// atomic batch below serializes only the commit; the product reads are
+	// independent and could run concurrently into the same batch if catch-up
+	// profiling ever demands it — sequential is right at live cadence.
 	// Every failure below stamps the failed phase's PARTIAL duration before
 	// returning — a phase that blocked and then failed is signal (mirrors
 	// RunBackfill's "reported even on failure"), so the error is never emitted with
 	// a zero-duration sample.
 	extractStart := time.Now()
-	txParts, err := sdkingest.ExtractLedgerTxParts(lcmView)
-	if err != nil {
-		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
-		rep.Failed = PhaseExtract
-		return rep, fmt.Errorf("extract ledger tx parts seq %d: %w", seq, err)
-	}
 	txEvents, err := sdkingest.EventsFromTxParts(txParts)
 	if err != nil {
 		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
