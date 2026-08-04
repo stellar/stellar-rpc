@@ -262,8 +262,9 @@ func (d *DB) MaxCommittedSeq() (uint32, bool, error) {
 // index into a fixed-size array (LedgerReport.Phases), so an out-of-table phase is
 // unrepresentable — no string label to mistype and no map lookup to nil-panic in a
 // sink. The phases partition the per-ledger wall-clock:
-//   - PhaseExtract: the shared ExtractLedgerEvents walk + txhash-entry build +
-//     event shaping (all pre-batch — every decode failure lands here by construction);
+//   - PhaseExtract: the shared ExtractLedgerTxParts walk + its products
+//     (txhash-entry build, events extraction, event shaping — all pre-batch, so
+//     every decode failure lands here by construction);
 //   - PhaseLedgers/PhaseTxhash/PhaseEvents: each facade's queue-into-batch step;
 //   - PhaseCommit: the RocksDB batch write (WAL append + fsync + memtable) = the
 //     whole Batch call minus the three queue steps — the fsync wait pprof can't see.
@@ -325,10 +326,10 @@ type LedgerReport struct {
 // BatchWriter, commit once, and only then apply the events in-memory mirror/offsets
 // update.
 //
-// lcm is a borrowed zero-copy view; every extractor copies what it retains, so
+// lcmView is a borrowed zero-copy view; every extractor copies what it retains, so
 // the view need not outlive this call. Store.Batch's lifecycle RLock + checkOpen
 // is the authoritative closed-store guard, so there is no separate pre-check here.
-func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport, error) {
+func (d *DB) IngestLedger(seq uint32, lcmView xdr.LedgerCloseMetaView) (LedgerReport, error) {
 	var rep LedgerReport
 
 	// A read-only (ledgers-only) DB has no events facade to assign event IDs, and
@@ -342,14 +343,15 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 	// Pre-extract anything that can fail BEFORE opening the batch, so a decode
 	// error rejects the ledger without a half-built batch.
 	//
-	// ONE TxProcessing walk feeds BOTH hot data types: ExtractLedgerEvents yields,
-	// per transaction in apply order, the tx hash AND its contract events. txhash
-	// reads each element's Hash and events shapes the same slice
-	// (PayloadsFromLedgerEvents), so the two share one walk instead of the two
-	// (ExtractTxHashes + a second ExtractLedgerEvents walk) they would each run —
-	// halving per-ledger extraction. Shaping the already-extracted slice (not
-	// re-walking) keeps the event-ID assignment order identical to a per-view
-	// shaping. The atomic batch below serializes only the commit; the
+	// ONE TxProcessing walk feeds BOTH hot data types: ExtractLedgerTxParts
+	// yields, per transaction in apply order, the tx hashes plus result/meta
+	// views, and every product is a plain read over that slice — txhash builds
+	// entries from each element's Hash/InnerHash, EventsFromTxParts pulls the
+	// contract events off the already-located meta views, and
+	// PayloadsFromLedgerEvents shapes the pair. One walk instead of one per
+	// product halves per-ledger extraction, and shaping the already-extracted
+	// slices (not re-walking) keeps the event-ID assignment order identical to a
+	// per-view shaping. The atomic batch below serializes only the commit; the
 	// extractors are independent and could run concurrently into the same batch if
 	// catch-up profiling ever demands it — sequential is right at live cadence.
 	// Every failure below stamps the failed phase's PARTIAL duration before
@@ -357,28 +359,34 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 	// RunBackfill's "reported even on failure"), so the error is never emitted with
 	// a zero-duration sample.
 	extractStart := time.Now()
-	txEvents, err := sdkingest.ExtractLedgerEvents(lcm)
+	txParts, err := sdkingest.ExtractLedgerTxParts(lcmView)
+	if err != nil {
+		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
+		rep.Failed = PhaseExtract
+		return rep, fmt.Errorf("extract ledger tx parts seq %d: %w", seq, err)
+	}
+	txEvents, err := sdkingest.EventsFromTxParts(txParts)
 	if err != nil {
 		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
 		rep.Failed = PhaseExtract
 		return rep, fmt.Errorf("extract ledger events seq %d: %w", seq, err)
 	}
-	txEntries := make([]txhash.Entry, 0, len(txEvents))
-	for i := range txEvents {
-		txEntries = append(txEntries, txhash.Entry{Hash: txEvents[i].Hash, LedgerSeq: seq})
-		if txEvents[i].FeeBump {
-			txEntries = append(txEntries, txhash.Entry{Hash: txEvents[i].InnerHash, LedgerSeq: seq})
+	txEntries := make([]txhash.Entry, 0, len(txParts))
+	for i := range txParts {
+		txEntries = append(txEntries, txhash.Entry{Hash: txParts[i].Hash, LedgerSeq: seq})
+		if txParts[i].FeeBump {
+			txEntries = append(txEntries, txhash.Entry{Hash: txParts[i].InnerHash, LedgerSeq: seq})
 		}
 	}
 
-	closedAt, err := lcm.LedgerCloseTime()
+	closedAt, err := lcmView.LedgerCloseTime()
 	if err != nil {
 		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
 		rep.Failed = PhaseExtract
 		return rep, fmt.Errorf("ledger close time seq %d: %w", seq, err)
 	}
 	// A pre-Soroban ledger yields zero payloads, no error.
-	payloads, err := events.PayloadsFromLedgerEvents(txEvents, seq, closedAt)
+	payloads, err := events.PayloadsFromLedgerEvents(txParts, txEvents, seq, closedAt)
 	if err != nil {
 		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
 		rep.Failed = PhaseExtract
@@ -403,7 +411,7 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 	batchStart := time.Now()
 	cerr := d.store.Batch(func(b *rocksdb.BatchWriter) error {
 		ls := time.Now()
-		if err := d.ledger.AddLedgerToBatch(b, ledger.Entry{Seq: seq, Bytes: []byte(lcm)}); err != nil {
+		if err := d.ledger.AddLedgerToBatch(b, ledger.Entry{Seq: seq, Bytes: []byte(lcmView)}); err != nil {
 			rep.Phases[PhaseLedgers].Dur = time.Since(ls)
 			failed = PhaseLedgers
 			return fmt.Errorf("queue ledger seq %d: %w", seq, err)

@@ -63,12 +63,15 @@ func newEventsCold(bucketDir string, chunkID chunk.ID, sink MetricSink) (*events
 	}, nil
 }
 
-// write ingests one ledger's events from the shared walk's output. txEvents
-// and its byte slices alias the source stream's borrowed buffer, valid only
-// for this call — everything retained is copied synchronously (see ingestSeq).
-func (e *eventsCold) write(seq uint32, closedAt int64, txEvents []sdkingest.LedgerTransactionEvents) error {
+// write ingests one ledger's events from the shared walk's output: the
+// index-aligned txParts + txEvents pair. Both alias the source stream's
+// borrowed buffer, valid only for this call — everything retained is copied
+// synchronously (see ingestSeq).
+func (e *eventsCold) write(
+	seq uint32, closedAt int64, txParts []sdkingest.LedgerTxParts, txEvents []sdkingest.TxEvents,
+) error {
 	start := time.Now()
-	n, ierr := e.ingestSeq(seq, closedAt, txEvents)
+	n, ierr := e.ingestSeq(seq, closedAt, txParts, txEvents)
 	e.metrics.observe(time.Since(start), n, ierr) // terminal on err: observe emits the per-writer signal
 	if ierr != nil {
 		e.failed = true // refuse a post-failure finalize
@@ -120,14 +123,16 @@ func (e *eventsCold) close() error {
 }
 
 // ingestSeq writes one ledger's events and returns the count written. It shapes
-// coldChunk's shared ExtractLedgerEvents walk into cursor-ordered payloads
+// coldChunk's shared ExtractLedgerTxParts walk output into cursor-ordered payloads
 // via events.PayloadsFromLedgerEvents — the SAME function the hot tier uses, so
 // event-ID assignment is byte-identical to the hot path (same shaping). A
 // pre-Soroban (V0) ledger yields zero payloads, recorded like any event-free
 // ledger. Shaping folds into the per-writer ColdIngest total; the extraction
 // itself is metered once, ledger-scoped, as the ColdExtract signal.
-func (e *eventsCold) ingestSeq(seq uint32, closedAt int64, txEvents []sdkingest.LedgerTransactionEvents) (int, error) {
-	payloads, err := events.PayloadsFromLedgerEvents(txEvents, seq, closedAt)
+func (e *eventsCold) ingestSeq(
+	seq uint32, closedAt int64, txParts []sdkingest.LedgerTxParts, txEvents []sdkingest.TxEvents,
+) (int, error) {
+	payloads, err := events.PayloadsFromLedgerEvents(txParts, txEvents, seq, closedAt)
 	if err != nil {
 		return 0, fmt.Errorf("shape events seq %d: %w", seq, err)
 	}
@@ -175,7 +180,7 @@ func (e *eventsCold) ingestSeq(seq uint32, closedAt int64, txEvents []sdkingest.
 	// into the write stage, so term_index and write are the two per-ledger stages
 	// this writer emits. The PayloadsFromLedgerEvents shaping at the top of the
 	// function folds into the ColdIngest total without its own stage; the shared
-	// ExtractLedgerEvents walk is metered once, ledger-scoped, by the ColdExtract
+	// ExtractLedgerTxParts walk is metered once, ledger-scoped, by the ColdExtract
 	// signal (cold_extract_duration_seconds). uint32(len(payloads)) is 0 for an
 	// empty ledger — an explicit Append(seq, 0) that records the empty ledger.
 	wstart := time.Now()

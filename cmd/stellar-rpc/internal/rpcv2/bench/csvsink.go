@@ -41,7 +41,7 @@ const (
 	driverIndexRebuild = "index_rebuild" // cold only: one txhash index build incl. eager sweep (Metrics.Rebuild)
 	driverChunkTotal   = "chunk_total"   // ColdChunkTotal: per-chunk ColdService lifetime
 	driverTotalSuffix  = "_total"        // ColdIngest per data type: "<type>_total"
-	// cold only: the shared per-ledger ExtractLedgerEvents walk (ColdExtract),
+	// cold only: the shared per-ledger ExtractLedgerTxParts walk (ColdExtract),
 	// ledger-scoped and belonging to no single data type, so it lands in
 	// driver.csv.
 	driverColdExtract = "cold_extract"
@@ -256,7 +256,7 @@ func (s *csvSink) ColdChunkTotal(d time.Duration) {
 	s.observe(fileDriver, driverChunkTotal, d, 0)
 }
 
-// ColdExtract records the shared per-ledger ExtractLedgerEvents walk —
+// ColdExtract records the shared per-ledger ExtractLedgerTxParts walk —
 // ledger-scoped and type-less, so it lands in driver.csv (see
 // driverColdExtract).
 func (s *csvSink) ColdExtract(d time.Duration, items int, _ error) {

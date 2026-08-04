@@ -375,7 +375,7 @@ func TestIngestLedger_WritesEveryHotType(t *testing.T) {
 
 // TestIngestLedger_EventlessTxStillIndexesHash pins the post-merge txhash
 // completeness invariant: after #18 folded the txhash and events walks into one
-// ExtractLedgerEvents pass, txhash coverage rests entirely on that walk yielding
+// ExtractLedgerTxParts pass, txhash coverage rests entirely on that walk yielding
 // an element per APPLIED tx — hash included — even for an event-less transaction
 // (the common classic-only case). Every other hotchunk test uses one-tx-one-event
 // ledgers, so nothing else pins it: an SDK change that dropped event-less txs from
