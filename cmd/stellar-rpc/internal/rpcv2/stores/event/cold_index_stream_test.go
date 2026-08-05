@@ -2,6 +2,7 @@ package event
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -59,6 +60,24 @@ func spillBlinded(t *testing.T, sp *runspill.Spiller, k TermKey, id uint32) {
 func TestWriteColdIndexFromRuns_ByteIdentical(t *testing.T) {
 	const chunkID = chunk.ID(3)
 	corpus := synthTerms(2000, 42)
+
+	// Add terms sitting either side of deltaPostingMaxCardinality. The two
+	// builders pick a codec from cardinality independently — one from
+	// len(ids), one from a bitmap built out of the same ids — so the threshold
+	// is where they could disagree, and synthTerms alone never lands near it.
+	for i, card := range []int{
+		deltaPostingMaxCardinality - 1,
+		deltaPostingMaxCardinality,
+		deltaPostingMaxCardinality + 1,
+		deltaPostingMaxCardinality + 2,
+	} {
+		k := ComputeTermKey(fmt.Appendf(nil, "straddle-%d", i), FieldTopic1)
+		ids := make([]uint32, card)
+		for j := range ids {
+			ids[j] = uint32(j * 3)
+		}
+		corpus[k] = ids
+	}
 
 	// Reference: today's in-memory mirror path.
 	refDir := t.TempDir()

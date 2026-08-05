@@ -27,10 +27,10 @@ func TestConcurrentBitmaps_SnapshotSurvivesMultiContainerWrites(t *testing.T) {
 
 	held, err := s.Get(key)
 	require.NoError(t, err)
-	require.NotNil(t, held)
-	heldCard := held.GetCardinality()
+	require.True(t, held.Present())
+	heldCard := held.Cardinality()
 	require.Equal(t, uint64(promotionThreshold), heldCard)
-	heldCopy := held.ToArray()
+	heldCopy := held.Bitmap().ToArray()
 
 	// 1_000 more ids spread over 16 fresh containers, written one
 	// small batch per "ledger" so the writer touches an already-shared
@@ -45,9 +45,9 @@ func TestConcurrentBitmaps_SnapshotSurvivesMultiContainerWrites(t *testing.T) {
 		added = append(added, ids...)
 	}
 
-	assert.Equal(t, heldCard, held.GetCardinality(),
+	assert.Equal(t, heldCard, held.Cardinality(),
 		"a snapshot returned by Get must not be mutated by later AddTo calls")
-	assert.Equal(t, heldCopy, held.ToArray(),
+	assert.Equal(t, heldCopy, held.Bitmap().ToArray(),
 		"a snapshot returned by Get must keep exactly its original ids")
 	for _, id := range added {
 		assert.False(t, held.Contains(id),
@@ -56,8 +56,8 @@ func TestConcurrentBitmaps_SnapshotSurvivesMultiContainerWrites(t *testing.T) {
 
 	fresh, err := s.Get(key)
 	require.NoError(t, err)
-	require.NotNil(t, fresh)
-	assert.Equal(t, heldCard+uint64(len(added)), fresh.GetCardinality(),
+	require.True(t, fresh.Present())
+	assert.Equal(t, heldCard+uint64(len(added)), fresh.Cardinality(),
 		"a Get after AddTo must observe every write")
 	for _, id := range added {
 		require.True(t, fresh.Contains(id), "fresh snapshot missing id %d", id)
@@ -76,8 +76,8 @@ func TestConcurrentBitmaps_GetAfterAddToIsFresh(t *testing.T) {
 		s.AddTo(key, i)
 		bm, err := s.Get(key)
 		require.NoError(t, err)
-		require.NotNil(t, bm)
-		require.Equal(t, uint64(i+1), bm.GetCardinality(),
+		require.True(t, bm.Present())
+		require.Equal(t, uint64(i+1), bm.Cardinality(),
 			"Get after AddTo(%d) must see every id added so far", i)
 		require.True(t, bm.Contains(i))
 	}
@@ -100,6 +100,14 @@ func TestConcurrentBitmaps_WriterReaderRace(t *testing.T) {
 	const perLedger = 8
 	const numReaders = 8
 	const minReads = 64
+	// The writer's ids stride across containers instead of packing into one:
+	// each term ends up spanning numContainers roaring containers, so a
+	// publish has to copy a multi-container bitmap while the readers are
+	// inside it. ledgersPerContainer keeps the ids ASCENDING (AddTo's sparse
+	// mode drops an id that does not exceed the last one), which a
+	// round-robin over containers would not.
+	const numContainers = 16
+	const ledgersPerContainer = numLedgers / numContainers
 
 	keys := make([]TermKey, numTerms)
 	for i := range keys {
@@ -114,13 +122,15 @@ func TestConcurrentBitmaps_WriterReaderRace(t *testing.T) {
 	wg.Go(func() {
 		defer done.Store(true)
 		ready.Wait()
-		var next uint32
-		for range numLedgers {
+		for ledger := range numLedgers {
+			// Container index advances every ledgersPerContainer ledgers;
+			// within one container the ids climb by perLedger per ledger.
+			base := uint32(ledger/ledgersPerContainer)*65_536 +
+				uint32(ledger%ledgersPerContainer)*perLedger
 			for _, key := range keys {
 				ids := make([]uint32, perLedger)
 				for j := range ids {
-					ids[j] = next
-					next++
+					ids[j] = base + uint32(j)
 				}
 				s.AddTo(key, ids...)
 			}
@@ -133,14 +143,14 @@ func TestConcurrentBitmaps_WriterReaderRace(t *testing.T) {
 			for i, n := 0, 0; !done.Load() || n < minReads; i++ {
 				key := keys[(i+r)%numTerms]
 				bm, err := s.Get(key)
-				if err != nil || bm == nil {
+				if err != nil || !bm.Present() {
 					continue
 				}
 				n++
 				reads.Add(1)
-				_ = bm.GetCardinality()
+				_ = bm.Cardinality()
 				_ = bm.Contains(uint32(i))
-				it := bm.Iterator()
+				it := bm.Bitmap().Iterator()
 				for n := 0; n < 64 && it.HasNext(); n++ {
 					_ = it.Next()
 				}
@@ -156,8 +166,8 @@ func TestConcurrentBitmaps_WriterReaderRace(t *testing.T) {
 	for _, key := range keys {
 		bm, err := s.Get(key)
 		require.NoError(t, err)
-		require.NotNil(t, bm)
-		assert.Equal(t, want, bm.GetCardinality())
+		require.True(t, bm.Present())
+		assert.Equal(t, want, bm.Cardinality())
 	}
 }
 
@@ -195,12 +205,12 @@ func TestConcurrentBitmaps_PromotionMidStreamUnderReaders(t *testing.T) {
 			var last uint64
 			for n := 0; !done.Load() || n < minReads; {
 				bm, err := s.Get(key)
-				if err != nil || bm == nil {
+				if err != nil || !bm.Present() {
 					continue
 				}
 				n++
 				reads.Add(1)
-				card := bm.GetCardinality()
+				card := bm.Cardinality()
 				assert.GreaterOrEqual(t, card, last,
 					"a term's observed cardinality must never go backwards")
 				assert.LessOrEqual(t, card, uint64(writes.Load())+1,
@@ -216,8 +226,8 @@ func TestConcurrentBitmaps_PromotionMidStreamUnderReaders(t *testing.T) {
 
 	bm, err := s.Get(key)
 	require.NoError(t, err)
-	require.NotNil(t, bm)
-	assert.Equal(t, uint64(total), bm.GetCardinality())
+	require.True(t, bm.Present())
+	assert.Equal(t, uint64(total), bm.Cardinality())
 }
 
 // TestConcurrentBitmaps_WarmupThenAddToThenGet covers the warmup
@@ -242,24 +252,24 @@ func TestConcurrentBitmaps_WarmupThenAddToThenGet(t *testing.T) {
 	// Read first, then write, then read again.
 	first, err := cb.Get(keyRead)
 	require.NoError(t, err)
-	require.NotNil(t, first)
-	require.Equal(t, uint64(len(seed)), first.GetCardinality())
+	require.True(t, first.Present())
+	require.Equal(t, uint64(len(seed)), first.Cardinality())
 	cb.AddTo(keyRead, 999_999)
-	assert.Equal(t, uint64(len(seed)), first.GetCardinality(),
+	assert.Equal(t, uint64(len(seed)), first.Cardinality(),
 		"the warmup snapshot handed out earlier must stay immutable")
 	second, err := cb.Get(keyRead)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(len(seed)+1), second.GetCardinality())
+	assert.Equal(t, uint64(len(seed)+1), second.Cardinality())
 	assert.True(t, second.Contains(999_999))
 
 	// Write before the first read ever happens.
 	cb.AddTo(keyWrite, 888_888)
 	only, err := cb.Get(keyWrite)
 	require.NoError(t, err)
-	require.NotNil(t, only)
-	assert.Equal(t, uint64(len(seed)+1), only.GetCardinality())
+	require.True(t, only.Present())
+	assert.Equal(t, uint64(len(seed)+1), only.Cardinality())
 	assert.True(t, only.Contains(888_888))
-	assert.True(t, only.GetCopyOnWrite(),
+	assert.True(t, only.Bitmap().GetCopyOnWrite(),
 		"warmup snapshots must keep CopyOnWrite so republishing stays shallow")
 }
 
@@ -293,16 +303,16 @@ func TestConcurrentBitmaps_UnreadTermNeverClones(t *testing.T) {
 
 	bm, err := s.Get(key)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(promotionThreshold+5_000), bm.GetCardinality())
+	assert.Equal(t, uint64(promotionThreshold+5_000), bm.Cardinality())
 	assert.Same(t, entry, s.terms[key].Load(),
 		"a dense term's termState is published once and never replaced")
-	assert.Same(t, bm, d.pub.Load(),
+	assert.Same(t, bm.Bitmap(), d.pub.Load(),
 		"the first Get after writes must publish the snapshot it returns")
 
 	// A second Get with no intervening write returns the same pointer.
 	again, err := s.Get(key)
 	require.NoError(t, err)
-	assert.Same(t, bm, again,
+	assert.Same(t, bm.Bitmap(), again.Bitmap(),
 		"Get must return the same pointer when nothing changed")
 }
 
@@ -326,7 +336,7 @@ func TestConcurrentBitmaps_DenseStateAfterAddToAndGet(t *testing.T) {
 
 	first, err := s.Get(key)
 	require.NoError(t, err)
-	assert.Same(t, first, d.pub.Load(),
+	assert.Same(t, first.Bitmap(), d.pub.Load(),
 		"the publishing reader stores the snapshot it returns")
 
 	s.AddTo(key, 12_345)
@@ -336,7 +346,7 @@ func TestConcurrentBitmaps_DenseStateAfterAddToAndGet(t *testing.T) {
 	second, err := s.Get(key)
 	require.NoError(t, err)
 	assert.True(t, second.Contains(12_345), "the next Get observes the write")
-	assert.Same(t, second, d.pub.Load())
+	assert.Same(t, second.Bitmap(), d.pub.Load())
 	assert.False(t, first.Contains(12_345), "the earlier snapshot is still frozen")
 }
 
@@ -434,7 +444,7 @@ func TestConcurrentBitmaps_FreshnessUnderConcurrentPublishers(t *testing.T) {
 					continue
 				}
 				bm, err := s.Get(key)
-				if err != nil || bm == nil {
+				if err != nil || !bm.Present() {
 					continue
 				}
 				reads.Add(1)
@@ -446,7 +456,7 @@ func TestConcurrentBitmaps_FreshnessUnderConcurrentPublishers(t *testing.T) {
 				if !bm.Contains(want) {
 					t.Errorf("Get returned a snapshot missing id %d, "+
 						"committed before this Get started (cardinality %d)",
-						want, bm.GetCardinality())
+						want, bm.Cardinality())
 					return
 				}
 				storeMax(&observed, want)
@@ -483,7 +493,7 @@ func TestConcurrentBitmaps_WarmupSubThresholdTermStaysSparse(t *testing.T) {
 
 	bm, err := cb.Get(key)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(len(seed)), bm.GetCardinality())
+	assert.Equal(t, uint64(len(seed)), bm.Cardinality())
 
 	next := seed[len(seed)-1] + 1
 	cb.AddTo(key, next)
@@ -493,6 +503,6 @@ func TestConcurrentBitmaps_WarmupSubThresholdTermStaysSparse(t *testing.T) {
 	require.NotNil(t, cb.terms[key].Load().dense, "reaching the threshold promotes")
 	bm, err = cb.Get(key)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(len(seed)+2), bm.GetCardinality())
+	assert.Equal(t, uint64(len(seed)+2), bm.Cardinality())
 	assert.True(t, bm.Contains(next+1))
 }
