@@ -186,7 +186,7 @@ func freezeIndexRuns(
 		// shared writer — no whole-payload buffer (the same trim the
 		// seal/merge path got in the streaming rework).
 		path := filepath.Join(scratchDir, fmt.Sprintf("freeze-%06d.run", len(runs)))
-		if werr := writeSortedRun(window, path); werr != nil {
+		if _, werr := writeSortedRun(window, path, nil); werr != nil {
 			return werr
 		}
 		runs = append(runs, path)

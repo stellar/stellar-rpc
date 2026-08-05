@@ -158,6 +158,10 @@ func (h *HotIndex) reapSeal(block bool) error {
 		names[i] = filepath.Base(r.path)
 	}
 	if err := h.manifest.PutRuns(names, res.lastSeq); err != nil {
+		// The un-listed run is unpublished: dispose of it like any failed
+		// job's output.
+		res.run.close()
+		_ = os.Remove(res.run.path)
 		return fmt.Errorf("txhash: hotindex manifest: %w", err)
 	}
 	h.view.Store(&hotIndexView{rows: old.rows[res.rows:], runs: runs})
@@ -407,7 +411,8 @@ func drainRun(f *os.File, path string, hdr runHeader) (*sealedRun, error) {
 	}
 	br := bufio.NewReaderSize(f, 128<<10)
 	crc := crc64.New(crcRunTable)
-	fps := make([]uint64, 0, records)
+	// The validated header count sizes the bloom up front.
+	bloom := newBloom(max(records, 1))
 	ladder := make([][ladderKeyLen]byte, 0, records/pageRecords+1)
 	var rec [runRecordLen]byte
 	var prev [rowHashLen]byte
@@ -427,15 +432,11 @@ func drainRun(f *os.File, path string, hdr runHeader) (*sealedRun, error) {
 		if i%pageRecords == 0 {
 			ladder = append(ladder, [ladderKeyLen]byte(rec[:ladderKeyLen]))
 		}
-		fps = append(fps, fp64([rowHashLen]byte(rec[:rowHashLen])))
+		bloom.add(fp64([rowHashLen]byte(rec[:rowHashLen])))
 	}
 	if crc.Sum64() != hdr.crc {
 		return nil, fmt.Errorf("txhash: run %s: payload crc mismatch (file %016x, computed %016x)",
 			path, hdr.crc, crc.Sum64())
-	}
-	bloom := newBloom(max(len(fps), 1))
-	for _, fp := range fps {
-		bloom.add(fp)
 	}
 	return &sealedRun{
 		path: path, bloom: bloom, ladder: ladder,

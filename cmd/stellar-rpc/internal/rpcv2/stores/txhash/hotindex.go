@@ -113,7 +113,10 @@ type HotIndex struct {
 	closed sync.Once
 }
 
-// sealResult is the background sealer's hand-back.
+// sealResult is the background sealer's hand-back. An errored result carries
+// no resources (run is nil whenever err is set) — the same contract as the
+// events twin, held structurally here since sealWindow is the only fallible
+// step and returns no run on failure.
 type sealResult struct {
 	run     *sealedRun
 	rows    int    // number of window rows the seal covered

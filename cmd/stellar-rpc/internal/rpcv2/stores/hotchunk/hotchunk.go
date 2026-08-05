@@ -13,13 +13,11 @@ package hotchunk
 import (
 	"context"
 	"fmt"
-	"iter"
 	"maps"
 	"slices"
 	"time"
 
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
@@ -296,13 +294,6 @@ func (d *DB) FreezeEventsCold(
 	opts event.ColdWriterOptions,
 ) error {
 	return event.FreezeColdFromStore(ctx, d.chunkID, d.store, scratchDir, bucketDir, secret, opts)
-}
-
-// Source streams the chunk's LCMs from the ledgers CF as a ledgerbackend.LedgerStream.
-// The freeze no longer uses it (it copies CF frames verbatim); it remains the seam
-// tests drive a hot DB's ledgers through.
-func (d *DB) Source() ledgerbackend.LedgerStream {
-	return &hotLedgerStream{store: d.ledger}
 }
 
 // FreezeLedgersCold builds the chunk's cold ledger .pack at packPath by
@@ -606,60 +597,4 @@ func ledgerTxHashes(txParts []sdkingest.LedgerTxParts) [][32]byte {
 		}
 	}
 	return hashes
-}
-
-// hotLedgerStream is a ledgerbackend.LedgerStream over a ledger.HotStore, so the
-// source-blind cold pipeline freezes a just-closed chunk from its hot DB.
-type hotLedgerStream struct {
-	store *ledger.HotStore
-}
-
-var _ ledgerbackend.LedgerStream = (*hotLedgerStream)(nil)
-
-// RawLedgers yields the range's wire bytes from the hot store. IterateLedgers
-// yields BORROWED buffers (valid only to the next step); the drain loop consumes
-// each fully before the next yield, so the borrow is safe. ctx cancellation is
-// observed between ledgers (the LedgerStream contract drain relies on).
-//
-// It enforces the LedgerStream in-order contract at the source (so the shared
-// cursor could be deleted): the hot store is the SOLE writer of recent history, so
-// a gap in its keyspace is a real defect, caught here by a key-derived seq check
-// (no XDR parse). An unbounded range self-bounds at the store's committed frontier
-// (LastSeq), mirroring packStream, so callers can pass UnboundedRange(from).
-func (st *hotLedgerStream) RawLedgers(
-	ctx context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
-) iter.Seq2[[]byte, error] {
-	return func(yield func([]byte, error) bool) {
-		to := r.To()
-		if !r.Bounded() {
-			maxSeq, ok, err := st.store.LastSeq()
-			if err != nil {
-				yield(nil, fmt.Errorf("hotLedgerStream: read committed frontier: %w", err))
-				return
-			}
-			if !ok {
-				return // empty store: nothing to yield
-			}
-			to = maxSeq
-		}
-		expected := r.From()
-		for e, ierr := range st.store.IterateLedgers(r.From(), to) {
-			if cerr := ctx.Err(); cerr != nil {
-				yield(nil, cerr)
-				return
-			}
-			if ierr != nil {
-				yield(nil, ierr)
-				return
-			}
-			if e.Seq != expected {
-				yield(nil, fmt.Errorf("hotLedgerStream: gap at seq %d, expected %d", e.Seq, expected))
-				return
-			}
-			if !yield(e.Bytes, nil) {
-				return
-			}
-			expected++
-		}
-	}
 }

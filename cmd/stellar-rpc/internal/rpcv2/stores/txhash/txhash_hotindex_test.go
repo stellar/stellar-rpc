@@ -2,6 +2,7 @@ package txhash
 
 import (
 	"encoding/binary"
+	"errors"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -15,16 +16,21 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
-// fakeManifest is an in-memory manifestStore.
+// fakeManifest is an in-memory manifestStore. putErr, when set, fails every
+// PutRuns without recording anything.
 type fakeManifest struct {
 	mu         sync.Mutex
 	names      []string
 	lastSealed uint32
+	putErr     error
 }
 
 func (m *fakeManifest) PutRuns(names []string, lastSealed uint32) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.putErr != nil {
+		return m.putErr
+	}
 	m.names = append([]string(nil), names...)
 	m.lastSealed = lastSealed
 	return nil
@@ -497,4 +503,29 @@ func TestRocksdbManifest_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, names)
 	assert.Equal(t, uint32(7), lastSealed)
+}
+
+// TestHotIndex_ManifestFailureDisposesRun pins reapSeal's manifest-failure
+// branch: a run the manifest never listed is unpublished and must be closed
+// and removed — the twin of the events contract.
+func TestHotIndex_ManifestFailureDisposesRun(t *testing.T) {
+	dir := t.TempDir()
+	m := &fakeManifest{}
+	h := testHotIndex(t, dir, m)
+	defer h.Close()
+
+	row, err := EncodeRow([][32]byte{{1}, {2}})
+	require.NoError(t, err)
+	run, err := sealWindow([]windowRow{{seq: 5, bytes: row}}, filepath.Join(dir, "seal-000009.run"))
+	require.NoError(t, err)
+
+	h.pendingSeal <- sealResult{run: run, rows: 1, lastSeq: 5}
+	h.sealInFlight = true
+	m.putErr = errors.New("manifest unavailable")
+
+	err = h.reapSeal(true)
+	require.ErrorContains(t, err, "hotindex manifest")
+	require.ErrorIs(t, run.file.Close(), os.ErrClosed, "un-listed run's handle must be closed")
+	_, serr := os.Stat(run.path)
+	require.ErrorIs(t, serr, os.ErrNotExist, "un-listed run's file must be removed")
 }
