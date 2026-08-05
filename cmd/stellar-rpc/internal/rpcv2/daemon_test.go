@@ -136,7 +136,7 @@ func someTxBackend(t *testing.T) *fakeBackend {
 }
 
 // oneTxLCMBytes is rpcv2test.ZeroTxLCMBytes plus one tx (per-seq SeqNum ⇒ unique hash) so
-// ExtractTxHashes yields exactly one key for seq. Returns the wire bytes and the
+// ExtractLedgerTxParts yields exactly one hash for seq. Returns the wire bytes and the
 // real, network-hashed transaction hash (the hash the daemon commits for seq), so
 // callers can assert a getTransaction-style hash→seq lookup.
 func oneTxLCMBytes(t *testing.T, seq uint32, src xdr.MuxedAccount) ([]byte, [32]byte) {

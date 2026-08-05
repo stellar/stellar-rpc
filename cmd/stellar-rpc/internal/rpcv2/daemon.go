@@ -25,6 +25,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/corestate"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
@@ -198,6 +199,17 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// validateConfig's return — pinned and chunk-aligned.
 	retention := geometry.NewRetention(deref(cfg.Retention.RetentionChunks), chunk.IDFromLedger(earliest))
 
+	// The getFeeStats windows, sized by [service.fee_stats] (validated 1..1000
+	// by validateConfig just above). Owned here at daemon level: live ingestion
+	// feeds them per committed ledger, each run's restart replay (#888) refills
+	// them, and the hot loop's per-boundary HotService rebuilds only borrow them
+	// — so chunk boundaries and supervised restarts never lose fee history.
+	// #889's method table serves them as the store.FeeStats behind getFeeStats.
+	feeWindows := feewindow.NewFeeWindows(
+		deref(cfg.Service.FeeStats.ClassicFeeWindowLedgers),
+		deref(cfg.Service.FeeStats.SorobanInclusionFeeWindowLedgers),
+	)
+
 	// Control-plane Metrics and the ingest sink share ONE registry, built after the
 	// validateConfig gate (it registers Prometheus collectors).
 	// TODO(#889): expose it on the read server's /metrics.
@@ -233,6 +245,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	start := startConfig(
 		cfg, cat, logger, backend, core.live, serveReads, metrics, sink, hs, retention)
 	start.lifecycleGrace = opts.lifecycleGrace
+	start.FeeWindows = feeWindows
 
 	backoff := opts.RestartBackoff
 	if backoff <= 0 {

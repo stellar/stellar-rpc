@@ -71,11 +71,11 @@ retention_chunks = 0
 # -----------------------------------------------------------------------------
 # [service] — the JSON-RPC read-serving policy (issue #882)
 # -----------------------------------------------------------------------------
-# Mostly dormant today: the v2 read server does not exist yet, and live
-# ingestion starts consuming [service.fee_stats] when issue #881 lands.
-# [service.preflight] is already live — the daemon sizes its preflight worker
-# pool from it at startup. Naming rule: camelCase table keys only where the key
-# IS a JSON-RPC method name; snake_case elsewhere.
+# The serving limits are dormant until the v2 read server lands. Already live:
+# ingestion feeds the fee windows sized by [service.fee_stats] (issue #881),
+# and the daemon sizes its preflight worker pool from [service.preflight] at
+# startup. Naming rule: camelCase table keys only where the key IS a JSON-RPC
+# method name; snake_case elsewhere.
 [service]
 
 # Address the JSON-RPC server listens on.
@@ -93,7 +93,7 @@ max_concurrent_requests = 5000
 max_request_execution_duration = "25s"    # global 504 timeout
 request_execution_warning_threshold = "5s" # slower requests log a warning
 
-# --- Fee statistics windows (to be consumed by live ingestion — issue #881) --
+# --- Fee statistics windows (fed by live ingestion — issue #881) ------------
 # Sizes, in LEDGERS, of the two in-memory windows behind getFeeStats. They
 # live here — not under getFeeStats — because they size ingestion-time
 # memory, not request handling. Both must be 1..1000; larger windows slow

@@ -96,8 +96,7 @@ func ingestFullHotChunk(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 		} else {
 			raw = rpcv2test.ZeroTxLCMBytes(t, seq)
 		}
-		_, err := db.IngestLedger(seq, xdr.LedgerCloseMetaView(raw))
-		require.NoError(t, err)
+		rpcv2test.IngestLedger(t, db, seq, raw)
 	}
 	require.NoError(t, db.Close()) // release the write handle (boundary handoff)
 }

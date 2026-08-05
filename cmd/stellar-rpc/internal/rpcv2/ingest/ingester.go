@@ -78,21 +78,25 @@ func openColdChunk(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Config)
 	return cc, nil
 }
 
-// ingest writes one ledger into every enabled writer, in canonical order. lcm
+// ingest writes one ledger into every enabled writer, in canonical order. lcmView
 // is a borrowed view over the source stream's buffer, valid only for this call
 // — each writer copies what it retains. seq is the ledger sequence on drain's
 // contiguous counter (the in-order contract is enforced at the source).
 //
 // When txhash or events is enabled, the view is walked ONCE (the shared
-// ExtractLedgerEvents, mirroring the hot path's IngestLedger) and both read the
+// ExtractLedgerTxParts, mirroring the hot path's IngestLedger) and both read the
 // result — halving cold per-ledger extraction (issue #836). The walk-or-not
 // decision is structural: no consumer of the walk → no walk, so a ledgers-only
-// chunk never pays it and an enabled events writer can never miss it. The walk
-// is metered as the ledger-scoped ColdExtract signal. The first error aborts
-// the ledger.
-func (c *coldChunk) ingest(seq uint32, lcm xdr.LedgerCloseMetaView) error {
+// chunk never pays it and an enabled events writer can never miss it. The same
+// goes per product: fees are never computed here because backfill serves no
+// getFeeStats — no consumer → no FeesFromTxParts call — and the events product
+// is read inside the events writer's shaping (PayloadsFromLedgerEvents), so it
+// runs only when that writer is enabled and its cost lands in the writer's own
+// ColdIngest total. The walk itself is metered as the ledger-scoped
+// ColdExtract signal. The first error aborts the ledger.
+func (c *coldChunk) ingest(seq uint32, lcmView xdr.LedgerCloseMetaView) error {
 	if c.ledgers != nil {
-		if err := c.ledgers.write(seq, []byte(lcm)); err != nil {
+		if err := c.ledgers.write(seq, []byte(lcmView)); err != nil {
 			return err
 		}
 	}
@@ -103,24 +107,24 @@ func (c *coldChunk) ingest(seq uint32, lcm xdr.LedgerCloseMetaView) error {
 	// signal fires for it — the error-carrying ColdExtract (with the partial
 	// walk's duration) is its one metric, mirroring hot's PhaseExtract failure.
 	start := time.Now()
-	txEvents, err := sdkingest.ExtractLedgerEvents(lcm)
+	txParts, err := sdkingest.ExtractLedgerTxParts(lcmView)
 	if err != nil {
 		c.sink.ColdExtract(time.Since(start), 0, err)
-		return fmt.Errorf("extract ledger events seq %d: %w", seq, err)
+		return fmt.Errorf("extract ledger tx parts seq %d: %w", seq, err)
 	}
-	closedAt, err := lcm.LedgerCloseTime()
+	closedAt, err := lcmView.LedgerCloseTime()
 	if err != nil {
 		c.sink.ColdExtract(time.Since(start), 0, err)
 		return fmt.Errorf("ledger close time seq %d: %w", seq, err)
 	}
-	c.sink.ColdExtract(time.Since(start), len(txEvents), nil)
+	c.sink.ColdExtract(time.Since(start), len(txParts), nil)
 	if c.txhash != nil {
-		if err := c.txhash.write(seq, txEvents); err != nil {
+		if err := c.txhash.write(seq, txParts); err != nil {
 			return err
 		}
 	}
 	if c.events != nil {
-		if err := c.events.write(seq, closedAt, txEvents); err != nil {
+		if err := c.events.write(seq, closedAt, txParts); err != nil {
 			return err
 		}
 	}

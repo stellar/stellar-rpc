@@ -12,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -19,8 +20,21 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
+
+// IngestLedger commits one raw ledger into db the way production does: the
+// shared ExtractLedgerTxParts walk, then hotchunk's atomic write over its
+// output. Tests that just need ledgers in a hot DB use this instead of
+// hand-running the walk.
+func IngestLedger(t *testing.T, db *hotchunk.DB, seq uint32, raw []byte) {
+	t.Helper()
+	txParts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
+	require.NoError(t, err)
+	_, err = db.IngestLedger(seq, xdr.LedgerCloseMetaView(raw), txParts)
+	require.NoError(t, err)
+}
 
 // RetentionFor builds a geometry.Retention over cat's earliest_ledger pin, or
 // chunk 0 (full history) when a test has not pinned one.
@@ -130,6 +144,64 @@ func EventLCMBytes(t *testing.T, seq uint32) []byte {
 						FeeCharged: 100,
 						Result: xdr.TransactionResultResult{
 							Code:    xdr.TransactionResultCodeTxSuccess,
+							Results: &opResults,
+						},
+					},
+				},
+			}},
+		},
+	}
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+	return raw
+}
+
+// FeeTxLCMBytes returns the marshaled bytes of a single-transaction
+// LedgerCloseMeta (V2) for ledger seq whose result carries feeCharged and ONE
+// op result, so fee extraction (ingest.FeesFromTxParts) observes exactly one
+// classic per-op fee of feeCharged. The other fixtures carry EMPTY op-result
+// lists, which the fee classification skips as never-ran transactions —
+// fee-window tests need this one.
+func FeeTxLCMBytes(t *testing.T, seq uint32, feeCharged int64) []byte {
+	t.Helper()
+	envelope := xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1: &xdr.TransactionV1Envelope{
+			Tx: xdr.Transaction{
+				SourceAccount: xdr.MustMuxedAddress(keypair.MustRandom().Address()),
+			},
+		},
+	}
+	hash, err := network.HashTransactionInEnvelope(envelope, network.PublicNetworkPassphrase)
+	require.NoError(t, err)
+	opResults := []xdr.OperationResult{{Code: xdr.OperationResultCodeOpNotSupported}}
+	comp := []xdr.TxSetComponent{{
+		Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
+		TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
+			Txs: []xdr.TransactionEnvelope{envelope},
+		},
+	}}
+	lcm := xdr.LedgerCloseMeta{
+		V: 2,
+		V2: &xdr.LedgerCloseMetaV2{
+			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
+				Header: xdr.LedgerHeader{
+					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(0)},
+					LedgerSeq: xdr.Uint32(seq),
+				},
+			},
+			TxSet: xdr.GeneralizedTransactionSet{
+				V:       1,
+				V1TxSet: &xdr.TransactionSetV1{Phases: []xdr.TransactionPhase{{V: 0, V0Components: &comp}}},
+			},
+			TxProcessing: []xdr.TransactionResultMetaV1{{
+				TxApplyProcessing: xdr.TransactionMeta{V: 4, V4: &xdr.TransactionMetaV4{}},
+				Result: xdr.TransactionResultPair{
+					TransactionHash: hash,
+					Result: xdr.TransactionResult{
+						FeeCharged: xdr.Int64(feeCharged),
+						Result: xdr.TransactionResultResult{
+							Code:    xdr.TransactionResultCodeTxFailed,
 							Results: &opResults,
 						},
 					},

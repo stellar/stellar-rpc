@@ -24,8 +24,7 @@ func seedHotLedgers(t *testing.T, cat *catalog.Catalog, r *Registry, c chunk.ID,
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	for _, seq := range seqs {
-		_, err = db.IngestLedger(seq, rpcv2test.ZeroTxLCMBytes(t, seq))
-		require.NoError(t, err)
+		rpcv2test.IngestLedger(t, db, seq, rpcv2test.ZeroTxLCMBytes(t, seq))
 	}
 	require.NoError(t, cat.FlipHotReady(c))
 	r.PublishHandle(c, db)

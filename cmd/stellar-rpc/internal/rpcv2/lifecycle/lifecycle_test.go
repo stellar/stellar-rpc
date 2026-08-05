@@ -338,8 +338,7 @@ func TestDeferredDeletion_BusyHandleRetriedAcrossRuns(t *testing.T) {
 	freezeCoverage(t, cat, cat.TxHashIndexLayout().TxHashIndexID(c), c, c)
 	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
 	require.NoError(t, err)
-	_, err = db.IngestLedger(c.FirstLedger(), rpcv2test.ZeroTxLCMBytes(t, c.FirstLedger()))
-	require.NoError(t, err)
+	rpcv2test.IngestLedger(t, db, c.FirstLedger(), rpcv2test.ZeroTxLCMBytes(t, c.FirstLedger()))
 	require.NoError(t, cat.FlipHotReady(c))
 	reg.PublishHandle(c, db)
 
