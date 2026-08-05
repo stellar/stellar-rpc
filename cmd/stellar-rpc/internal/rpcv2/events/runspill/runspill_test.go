@@ -2,6 +2,7 @@ package runspill
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"math/rand"
@@ -56,7 +57,8 @@ func TestSlab_SpillRoundTrip(t *testing.T) {
 		}
 	}
 	path := filepath.Join(t.TempDir(), "00.run")
-	require.NoError(t, WriteRun(path, slab.SortEncode(nil)))
+	payload, records := slab.SortEncode(nil)
+	require.NoError(t, WriteRun(path, payload, records))
 	assert.Equal(t, want, drain(t, path))
 }
 
@@ -76,7 +78,8 @@ func TestSlab_DedupsExactDuplicates(t *testing.T) {
 	require.True(t, slab.Append(key(9), 5))
 	require.True(t, slab.Append(key(9), 6))
 	path := filepath.Join(t.TempDir(), "d.run")
-	require.NoError(t, WriteRun(path, slab.SortEncode(nil)))
+	payload, records := slab.SortEncode(nil)
+	require.NoError(t, WriteRun(path, payload, records))
 	assert.Equal(t, map[events.TermKey][]uint32{key(9): {5, 6}}, drain(t, path))
 }
 
@@ -87,7 +90,8 @@ func TestRunReader_DetectsCorruption(t *testing.T) {
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.run")
-	require.NoError(t, WriteRun(path, slab.SortEncode(nil)))
+	payload, records := slab.SortEncode(nil)
+	require.NoError(t, WriteRun(path, payload, records))
 
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -118,24 +122,21 @@ func TestRunReader_DetectsCorruption(t *testing.T) {
 		assert.True(t, sawErr, "corruption at byte %d must surface an error", pos)
 	}
 
-	// Truncation must also fail.
+	// Truncation must also fail — at open now that the header's payload
+	// length is bounded by the file's actual capacity.
 	p := filepath.Join(dir, "trunc.run")
 	require.NoError(t, os.WriteFile(p, raw[:len(raw)-9], 0o644))
-	r, err := OpenRun(p)
-	require.NoError(t, err)
-	sawErr := false
-	for {
-		_, _, nerr := r.Next()
-		if errors.Is(nerr, io.EOF) {
-			break
-		}
-		if nerr != nil {
-			sawErr = true
-			break
-		}
-	}
-	_ = r.Close()
-	assert.True(t, sawErr, "truncated run must surface an error")
+	_, err = OpenRun(p)
+	require.ErrorIs(t, err, ErrCorruptRun, "truncated run must surface an error")
+
+	// The magic is a version gate: the header relayout rode the EVR1→EVR2
+	// bump, so the old tag must be rejected, not parsed with new offsets.
+	prev := append([]byte(nil), raw...)
+	prev[3] = '1'
+	pPrev := filepath.Join(dir, "evr1.run")
+	require.NoError(t, os.WriteFile(pPrev, prev, 0o644))
+	_, err = OpenRun(pPrev)
+	require.ErrorIs(t, err, ErrCorruptRun, "EVR1 magic must be rejected")
 }
 
 func TestSlab_OutputIsTermSorted(t *testing.T) {
@@ -144,7 +145,8 @@ func TestSlab_OutputIsTermSorted(t *testing.T) {
 		require.True(t, slab.Append(key(byte(i)), uint32(i)))
 	}
 	path := filepath.Join(t.TempDir(), "s.run")
-	require.NoError(t, WriteRun(path, slab.SortEncode(nil)))
+	payload, records := slab.SortEncode(nil)
+	require.NoError(t, WriteRun(path, payload, records))
 	r, err := OpenRun(path)
 	require.NoError(t, err)
 	defer r.Close()
@@ -162,4 +164,115 @@ func TestSlab_OutputIsTermSorted(t *testing.T) {
 		prev = term
 		first = false
 	}
+}
+
+// TestRunHeader_RecordCount pins the header's record-count field: written by
+// both writer paths, exposed pre-drain, bounded at open, and cross-checked
+// against the actual drain at EOF.
+func TestRunHeader_RecordCount(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "h.run")
+	rw, err := NewRunWriter(path)
+	require.NoError(t, err)
+	require.NoError(t, rw.Append(key(1), []uint32{1, 2}))
+	require.NoError(t, rw.Append(key(2), []uint32{7}))
+	require.NoError(t, rw.Commit())
+
+	r, err := OpenRun(path)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2), r.Records())
+	require.NoError(t, r.Close())
+	assert.Len(t, drain(t, path), 2)
+
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	// A count beyond the payload's structural capacity is rejected at open,
+	// before it can size anything.
+	big := append([]byte(nil), raw...)
+	binary.BigEndian.PutUint64(big[12:], 1<<40)
+	pBig := filepath.Join(t.TempDir(), "big.run")
+	require.NoError(t, os.WriteFile(pBig, big, 0o644))
+	_, err = OpenRun(pBig)
+	require.ErrorIs(t, err, ErrCorruptRun)
+
+	// A plausible-but-wrong count passes open and is caught by the drain
+	// cross-check at EOF (the payload and CRC are intact).
+	off := append([]byte(nil), raw...)
+	binary.BigEndian.PutUint64(off[12:], 1)
+	pOff := filepath.Join(t.TempDir(), "off.run")
+	require.NoError(t, os.WriteFile(pOff, off, 0o644))
+	r2, err := OpenRun(pOff)
+	require.NoError(t, err)
+	sawErr := false
+	for {
+		_, _, nerr := r2.Next()
+		if errors.Is(nerr, io.EOF) {
+			break
+		}
+		if nerr != nil {
+			require.ErrorIs(t, nerr, ErrCorruptRun)
+			sawErr = true
+			break
+		}
+	}
+	assert.True(t, sawErr, "count mismatch must fail the drain")
+	_, _, again := r2.Next()
+	require.ErrorIs(t, again, ErrCorruptRun, "the failure must be sticky, not a clean EOF")
+	_ = r2.Close()
+
+	// A payload length beyond the file's capacity is rejected at open.
+	long := append([]byte(nil), raw...)
+	binary.BigEndian.PutUint64(long[4:], uint64(len(raw)))
+	pLong := filepath.Join(t.TempDir(), "long.run")
+	require.NoError(t, os.WriteFile(pLong, long, 0o644))
+	_, err = OpenRun(pLong)
+	require.ErrorIs(t, err, ErrCorruptRun)
+
+	// The capacity bound accounts for the trailer: one byte past the true
+	// payload length must already be rejected.
+	graze := append([]byte(nil), raw...)
+	binary.BigEndian.PutUint64(graze[4:], uint64(len(raw)-HeaderLen-4+1))
+	pGraze := filepath.Join(t.TempDir(), "graze.run")
+	require.NoError(t, os.WriteFile(pGraze, graze, 0o644))
+	_, err = OpenRun(pGraze)
+	require.ErrorIs(t, err, ErrCorruptRun)
+}
+
+// TestRunWriter_DiscardLeavesNothing pins the two-phase lifecycle: a
+// discarded writer publishes nothing and leaves no temp file, and Discard
+// after Commit must not touch the committed file.
+func TestRunWriter_DiscardLeavesNothing(t *testing.T) {
+	dir := t.TempDir()
+
+	path := filepath.Join(dir, "aborted.run")
+	rw, err := NewRunWriter(path)
+	require.NoError(t, err)
+	require.NoError(t, rw.Append(key(1), []uint32{1}))
+	rw.Discard()
+	_, err = os.Stat(path)
+	require.ErrorIs(t, err, os.ErrNotExist, "discarded run must not be published")
+	_, err = os.Stat(path + ".tmp")
+	require.ErrorIs(t, err, os.ErrNotExist, "discarded run must not leave its temp file")
+
+	committed := filepath.Join(dir, "committed.run")
+	rw2, err := NewRunWriter(committed)
+	require.NoError(t, err)
+	require.NoError(t, rw2.Append(key(2), []uint32{4, 9}))
+	require.NoError(t, rw2.Commit())
+	rw2.Discard() // deferred-Discard idiom: must be a no-op now
+	assert.Equal(t, map[events.TermKey][]uint32{key(2): {4, 9}}, drain(t, committed))
+}
+
+// TestRunWriter_CommitFailureRemovesTemp forces Commit's rename step to fail
+// (the final name is occupied by a directory) and requires the failed Commit
+// to surface the error without leaving its temp file behind.
+func TestRunWriter_CommitFailureRemovesTemp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "blocked.run")
+	rw, err := NewRunWriter(path)
+	require.NoError(t, err)
+	require.NoError(t, rw.Append(key(1), []uint32{1}))
+	require.NoError(t, os.Mkdir(path, 0o755)) // rename's destination is now a directory
+	require.Error(t, rw.Commit())
+	_, serr := os.Stat(path + ".tmp")
+	require.ErrorIs(t, serr, os.ErrNotExist, "failed Commit must remove the temp file")
 }

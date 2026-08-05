@@ -31,13 +31,21 @@ import (
 const RecordSize = 16 + 4
 
 // runMagic heads every run file; a version bump changes the letter.
-var runMagic = [4]byte{'E', 'V', 'R', '1'} //nolint:gochecknoglobals // fixed format tag
+var runMagic = [4]byte{'E', 'V', 'R', '2'} //nolint:gochecknoglobals // fixed format tag
 
-// HeaderLen is the run-file header size: magic (4) ‖ u64 payload length (8).
-// Record offsets within the payload are relative to the END of this header —
-// exported so consumers that pread records directly (the hot index's sealed-run
-// lookup) stay aligned with the framing if it ever changes.
-const HeaderLen = 12
+// HeaderLen is the run-file header size: magic (4) ‖ u64 payload length (8) ‖
+// u64 record count (8). Record offsets within the payload are relative to the
+// END of this header — exported so consumers that pread records directly (the
+// hot index's sealed-run lookup) stay aligned with the framing if it ever
+// changes. The record count lets a reopen size its routing state (bloom,
+// fences) exactly before draining, instead of buffering per-record state for
+// a second pass; OpenRun bounds it and the drain cross-checks it.
+const HeaderLen = 20
+
+// minRecordBytes is the smallest possible encoded record: 16-byte term ‖
+// 1-byte id count ‖ 1-byte id. Bounds how many records a payload can hold,
+// so a corrupt header count is rejected before it can size an allocation.
+const minRecordBytes = 18
 
 // crcTable is CRC-32C (Castagnoli), the stdlib-available integrity check for
 // scratch runs.
@@ -102,9 +110,10 @@ func (r *slabRecords) Swap(i, j int) {
 
 // SortEncode sorts the slab in place (unstable — duplicates are collapsed
 // anyway), dedups exact duplicate records, and encodes the result as
-// packed-row postings into dst (reused across spills), returning it. IDs
-// within a term come out ascending by construction of the composite order.
-func (s *Slab) SortEncode(dst []byte) []byte {
+// packed-row postings into dst (reused across spills), returning it plus the
+// number of encoded records (WriteRun's header count). IDs within a term
+// come out ascending by construction of the composite order.
+func (s *Slab) SortEncode(dst []byte) ([]byte, uint64) {
 	sort.Sort(&slabRecords{buf: s.buf})
 	n := s.Records()
 	var (
@@ -112,10 +121,12 @@ func (s *Slab) SortEncode(dst []byte) []byte {
 		ids      []uint32
 		haveTerm bool
 		prevRec  []byte
+		encoded  uint64
 	)
 	flush := func() {
 		if haveTerm {
 			dst = events.AppendTermPostings(dst, curTerm, ids)
+			encoded++
 		}
 	}
 	for i := range n {
@@ -136,40 +147,47 @@ func (s *Slab) SortEncode(dst []byte) []byte {
 		ids = append(ids, id)
 	}
 	flush()
-	return dst
+	return dst, encoded
 }
 
-// WriteRun writes payload (a SortEncode result) to path as one run file:
-// magic ‖ u64 payload length ‖ payload ‖ CRC-32C(payload). The file is
-// written via a temp name and renamed, then synced — runs are scratch, but a
-// half-written file must never be mistaken for a short valid one.
-func WriteRun(path string, payload []byte) error {
+// WriteRun writes payload (a SortEncode result of records records) to path as
+// one run file: magic ‖ u64 payload length ‖ u64 record count ‖ payload ‖
+// CRC-32C(payload). The file is written via a temp name and renamed, then
+// synced — runs are scratch, but a half-written file must never be mistaken
+// for a short valid one.
+func WriteRun(path string, payload []byte, records uint64) error {
 	rw, err := NewRunWriter(path)
 	if err != nil {
 		return err
 	}
+	defer rw.Discard()
 	// One raw write through RunWriter's framing (incremental CRC, patched
-	// header, temp+rename in Close) — byte-identical to the historical
-	// whole-payload writer, with a single implementation of the container.
+	// header, temp+rename in Commit) — one implementation of the container.
 	if werr := rw.writeRaw(payload); werr != nil {
-		_ = rw.f.Close()
-		_ = os.Remove(rw.path + ".tmp")
 		return fmt.Errorf("runspill: write %s: %w", path, werr)
 	}
-	return rw.Close()
+	rw.records = records
+	return rw.Commit()
 }
 
 // RunWriter streams records into a run file without buffering the payload:
-// incremental CRC, header length patched at Close, temp+rename like WriteRun.
-// The record-at-a-time transient replaces WriteRun's whole-payload buffer —
-// the hot tier's late-chunk merges write ~GBs through here.
+// incremental CRC, header patched at Commit, temp+rename like WriteRun. The
+// record-at-a-time transient replaces WriteRun's whole-payload buffer — the
+// hot tier's late-chunk merges write ~GBs through here.
+//
+// Two-phase lifecycle: nothing is visible at the final name until Commit;
+// Discard (a no-op once either has run) removes the temp file, so call sites
+// `defer rw.Discard()` and commit explicitly on success — abandonment is the
+// default, publication the deliberate act.
 type RunWriter struct {
 	path    string
 	f       *os.File
 	w       *bufio.Writer
 	crc     uint32
 	written uint64
+	records uint64
 	buf     []byte
+	done    bool
 }
 
 // NewRunWriter creates path (via a temp name) with a placeholder header.
@@ -193,15 +211,23 @@ func NewRunWriter(path string) (*RunWriter, error) {
 // order with ascending IDs — the merge's natural emission order.
 func (rw *RunWriter) Append(term events.TermKey, ids []uint32) error {
 	rw.buf = events.AppendTermPostings(rw.buf[:0], term, ids)
+	rw.records++
 	return rw.writeRaw(rw.buf)
 }
 
-// Close writes the trailer, patches the header's payload length, syncs, and
-// renames into place. On error the temp file is removed.
-func (rw *RunWriter) Close() error {
+// Written returns the payload bytes appended so far — i.e. the NEXT record's
+// payload-relative offset. Consumers that build routing state (fences) in the
+// same pass as the write read it before each Append, so their offsets can
+// never drift from the bytes actually written.
+func (rw *RunWriter) Written() int64 {
+	return int64(rw.written) //nolint:gosec // payload length, far below 2^63
+}
+
+// Commit writes the trailer, patches the header's payload length and record
+// count, syncs, and renames into place. On error the temp file is removed.
+func (rw *RunWriter) Commit() error {
 	fail := func(err error) error {
-		_ = rw.f.Close()
-		_ = os.Remove(rw.path + ".tmp")
+		rw.Discard()
 		return err
 	}
 	var tr [4]byte
@@ -212,9 +238,10 @@ func (rw *RunWriter) Close() error {
 	if err := rw.w.Flush(); err != nil {
 		return fail(fmt.Errorf("runspill: flush: %w", err))
 	}
-	var lenb [8]byte
-	binary.BigEndian.PutUint64(lenb[:], rw.written)
-	if _, err := rw.f.WriteAt(lenb[:], 4); err != nil {
+	var hdr [16]byte
+	binary.BigEndian.PutUint64(hdr[:8], rw.written)
+	binary.BigEndian.PutUint64(hdr[8:], rw.records)
+	if _, err := rw.f.WriteAt(hdr[:], 4); err != nil {
 		return fail(fmt.Errorf("runspill: patch header: %w", err))
 	}
 	if err := rw.f.Sync(); err != nil {
@@ -224,10 +251,22 @@ func (rw *RunWriter) Close() error {
 		return fail(err)
 	}
 	if err := os.Rename(rw.path+".tmp", rw.path); err != nil {
-		_ = os.Remove(rw.path + ".tmp")
-		return fmt.Errorf("runspill: rename %s: %w", rw.path, err)
+		return fail(fmt.Errorf("runspill: rename %s: %w", rw.path, err))
 	}
+	rw.done = true
 	return nil
+}
+
+// Discard closes the writer and removes its temp file — abandonment without
+// publication. A no-op after Commit or a prior Discard, so it is safe to
+// defer unconditionally.
+func (rw *RunWriter) Discard() {
+	if rw.done {
+		return
+	}
+	rw.done = true
+	_ = rw.f.Close()
+	_ = os.Remove(rw.path + ".tmp")
 }
 
 // writeRaw sends pre-encoded payload bytes through the container accounting —
@@ -246,31 +285,66 @@ func (rw *RunWriter) writeRaw(p []byte) error {
 // consumer that stops early has not (fine for the merge, which always
 // drains or aborts the whole build).
 type RunReader struct {
-	f       *os.File
-	br      *bufio.Reader
-	remain  uint64
-	crc     uint32
-	ids     []uint32
-	trailer bool
+	f          *os.File
+	br         *bufio.Reader
+	payloadLen uint64
+	remain     uint64
+	records    uint64
+	read       uint64
+	crc        uint32
+	ids        []uint32
+	trailer    bool
 }
 
-// OpenRun opens path and validates its header.
+// OpenRun opens path and validates its header: magic, payload length against
+// the file's actual size, and record count against the smallest possible
+// record — both bounds hold for any file the writer produced, so a violation
+// is corruption caught before either number can size anything.
 func OpenRun(path string) (*RunReader, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("runspill: open %s: %w", path, err)
 	}
+	fail := func(format string, args ...any) (*RunReader, error) {
+		_ = f.Close()
+		return nil, fmt.Errorf("%w: %s: %s", ErrCorruptRun, path, fmt.Sprintf(format, args...))
+	}
 	br := bufio.NewReaderSize(f, 1<<20)
 	var hdr [HeaderLen]byte
 	if _, err := io.ReadFull(br, hdr[:]); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("%w: %s: short header", ErrCorruptRun, path)
+		return fail("short header")
 	}
 	if !bytes.Equal(hdr[:4], runMagic[:]) {
-		_ = f.Close()
-		return nil, fmt.Errorf("%w: %s: bad magic", ErrCorruptRun, path)
+		return fail("bad magic")
 	}
-	return &RunReader{f: f, br: br, remain: binary.BigEndian.Uint64(hdr[4:])}, nil
+	payloadLen := binary.BigEndian.Uint64(hdr[4:12])
+	records := binary.BigEndian.Uint64(hdr[12:20])
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("runspill: stat %s: %w", path, err)
+	}
+	maxPayload := fi.Size() - HeaderLen - 4
+	if maxPayload < 0 || payloadLen > uint64(maxPayload) {
+		return fail("payload length %d exceeds file capacity %d", payloadLen, max(maxPayload, 0))
+	}
+	if records > payloadLen/minRecordBytes {
+		return fail("record count %d exceeds payload capacity %d", records, payloadLen/minRecordBytes)
+	}
+	return &RunReader{f: f, br: br, payloadLen: payloadLen, remain: payloadLen, records: records}, nil
+}
+
+// Records returns the header's record count: how many Next calls a full
+// drain yields. Validated against payload capacity at open and against the
+// actual drain at io.EOF, so routing state may be sized from it up front.
+func (r *RunReader) Records() uint64 { return r.records }
+
+// Offset returns payload bytes consumed so far — between Next calls, the
+// payload-relative offset of the next record, the read side of
+// RunWriter.Written. Consumers that build routing state read it before each
+// Next, mirroring the write pass, so offsets cannot drift between the two.
+func (r *RunReader) Offset() int64 {
+	return int64(r.payloadLen - r.remain) //nolint:gosec // bounded by payloadLen, checked against file size at open
 }
 
 // Next returns the next term's postings. The ids slice is reused across
@@ -279,10 +353,8 @@ func OpenRun(path string) (*RunReader, error) {
 func (r *RunReader) Next() (events.TermKey, []uint32, error) {
 	var term events.TermKey
 	if r.remain == 0 {
-		if !r.trailer {
-			if err := r.verifyTrailer(); err != nil {
-				return term, nil, err
-			}
+		if err := r.finish(); err != nil {
+			return term, nil, err
 		}
 		return term, nil, io.EOF
 	}
@@ -312,6 +384,7 @@ func (r *RunReader) Next() (events.TermKey, []uint32, error) {
 		return term, nil, err
 	}
 	r.ids = ids
+	r.read++
 	return term, r.ids, nil
 }
 
@@ -356,14 +429,22 @@ func (c *crcByteReader) ReadByte() (byte, error) {
 	return one[0], nil
 }
 
-// verifyTrailer reads and checks the CRC after the payload is exhausted.
-func (r *RunReader) verifyTrailer() error {
+// finish runs the end-of-payload checks: the CRC trailer, then the header's
+// record count against the records actually drained. The latch is set only
+// once every check has passed.
+func (r *RunReader) finish() error {
+	if r.trailer {
+		return nil
+	}
 	var tr [4]byte
 	if _, err := io.ReadFull(r.br, tr[:]); err != nil {
 		return fmt.Errorf("%w: short trailer", ErrCorruptRun)
 	}
 	if got := binary.BigEndian.Uint32(tr[:]); got != r.crc {
 		return fmt.Errorf("%w: crc mismatch (file %08x, computed %08x)", ErrCorruptRun, got, r.crc)
+	}
+	if r.read != r.records {
+		return fmt.Errorf("%w: header says %d records, drained %d", ErrCorruptRun, r.records, r.read)
 	}
 	r.trailer = true
 	return nil
