@@ -8,18 +8,16 @@
 // v1 has its own internal/rpcv1/feewindow and the two are DELIBERATELY
 // separate, not a shared package: v1 classifies fees from parsed LCMs and
 // envelopes (network passphrase, SQLite migration adapter), v2 from the
-// TxProcessing walk's LedgerFees — the only overlap is the distribution math,
-// which is copied verbatim (with v1's differential test) rather than shared.
-// The #883 parity harness, not a shared package, is what keeps the two
-// services' getFeeStats comparable. The store.FeeStats interface both satisfy
-// stays shared because the getFeeStats HANDLER (internal/methods) is shared.
-//
-//nolint:mnd // percentile numbers are not really magical
+// TxProcessing walk's LedgerFees. What the two DO share lives in
+// internal/store, because it is genuinely common: the store.FeeStats
+// interface (the shared getFeeStats handler's contract) and
+// store.ComputeFeeDistribution (the pure percentile math both services'
+// numbers come out of — the one place where silent drift would matter).
+// End-to-end agreement between the services is #883's parity harness's job.
 package feewindow
 
 import (
 	"fmt"
-	"slices"
 	"sync"
 
 	"github.com/stellar/go-stellar-sdk/ingest"
@@ -133,7 +131,7 @@ func (w *feeWindow) append(seq uint32, fees []uint64) error {
 	for i := range w.buckets {
 		allFees = append(allFees, w.buckets[i].fees...)
 	}
-	w.dist = computeFeeDistribution(allFees, uint32(len(w.buckets))) //nolint:gosec // len ≤ retentionWindow ≤ 1000
+	w.dist = store.ComputeFeeDistribution(allFees, uint32(len(w.buckets))) //nolint:gosec // len ≤ retentionWindow ≤ 1000
 	return nil
 }
 
@@ -149,66 +147,4 @@ func (w *feeWindow) distribution() store.FeeDistribution {
 	w.lock.RLock()
 	defer w.lock.RUnlock()
 	return w.dist
-}
-
-// computeFeeDistribution is copied verbatim from internal/rpcv1/feewindow (see
-// the package doc for why the duplication is deliberate); the differential
-// test against the stats library came along with it.
-func computeFeeDistribution(fees []uint64, ledgerCount uint32) store.FeeDistribution {
-	if len(fees) == 0 {
-		return store.FeeDistribution{}
-	}
-	slices.Sort(fees)
-	mode := fees[0]
-	lastVal := fees[0]
-	maxRepetitions := 0
-	localRepetitions := 0
-	for i := 1; i < len(fees); i++ {
-		if fees[i] == lastVal {
-			localRepetitions++
-			continue
-		}
-
-		// new cluster of values
-
-		if localRepetitions > maxRepetitions {
-			maxRepetitions = localRepetitions
-			mode = lastVal
-		}
-		lastVal = fees[i]
-		localRepetitions = 0
-	}
-
-	if localRepetitions > maxRepetitions {
-		// the last cluster of values was the longest
-		mode = fees[len(fees)-1]
-	}
-
-	count := len(fees)
-	countUint64 := uint64(count)
-	// nearest-rank percentile
-	percentile := func(p uint64) uint64 {
-		// ceiling(p*count/100)
-		kth := ((p * countUint64) + 100 - 1) / 100
-		return fees[kth-1]
-	}
-	return store.FeeDistribution{
-		Max:  fees[len(fees)-1],
-		Min:  fees[0],
-		Mode: mode,
-		P10:  percentile(10),
-		P20:  percentile(20),
-		P30:  percentile(30),
-		P40:  percentile(40),
-		P50:  percentile(50),
-		P60:  percentile(60),
-		P70:  percentile(70),
-		P80:  percentile(80),
-		P90:  percentile(90),
-		P95:  percentile(95),
-		P99:  percentile(99),
-		//nolint:gosec // len() is non-negative and bounded by available memory
-		FeeCount:    uint32(count),
-		LedgerCount: ledgerCount,
-	}
 }

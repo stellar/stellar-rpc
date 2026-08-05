@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"slices"
 	"sync"
 
 	"github.com/stellar/go-stellar-sdk/ingest"
@@ -41,7 +40,7 @@ func (fw *FeeWindow) AppendLedgerFees(fees ledgerbucketwindow.LedgerBucket[[]uin
 	for i := range fw.feesPerLedger.Len() {
 		allFees = append(allFees, fw.feesPerLedger.Get(i).BucketContent...)
 	}
-	fw.distribution = computeFeeDistribution(allFees, fw.feesPerLedger.Len())
+	fw.distribution = store.ComputeFeeDistribution(allFees, fw.feesPerLedger.Len())
 
 	return nil
 }
@@ -52,65 +51,6 @@ func (fw *FeeWindow) Reset() {
 	defer fw.lock.Unlock()
 	fw.feesPerLedger.Reset()
 	fw.distribution = store.FeeDistribution{}
-}
-
-func computeFeeDistribution(fees []uint64, ledgerCount uint32) store.FeeDistribution {
-	if len(fees) == 0 {
-		return store.FeeDistribution{}
-	}
-	slices.Sort(fees)
-	mode := fees[0]
-	lastVal := fees[0]
-	maxRepetitions := 0
-	localRepetitions := 0
-	for i := 1; i < len(fees); i++ {
-		if fees[i] == lastVal {
-			localRepetitions++
-			continue
-		}
-
-		// new cluster of values
-
-		if localRepetitions > maxRepetitions {
-			maxRepetitions = localRepetitions
-			mode = lastVal
-		}
-		lastVal = fees[i]
-		localRepetitions = 0
-	}
-
-	if localRepetitions > maxRepetitions {
-		// the last cluster of values was the longest
-		mode = fees[len(fees)-1]
-	}
-
-	count := len(fees)
-	countUint64 := uint64(count)
-	// nearest-rank percentile
-	percentile := func(p uint64) uint64 {
-		// ceiling(p*count/100)
-		kth := ((p * countUint64) + 100 - 1) / 100
-		return fees[kth-1]
-	}
-	return store.FeeDistribution{
-		Max:  fees[len(fees)-1],
-		Min:  fees[0],
-		Mode: mode,
-		P10:  percentile(10),
-		P20:  percentile(20),
-		P30:  percentile(30),
-		P40:  percentile(40),
-		P50:  percentile(50),
-		P60:  percentile(60),
-		P70:  percentile(70),
-		P80:  percentile(80),
-		P90:  percentile(90),
-		P95:  percentile(95),
-		P99:  percentile(99),
-		//nolint:gosec // len() is non-negative and bounded by available memory
-		FeeCount:    uint32(count),
-		LedgerCount: ledgerCount,
-	}
 }
 
 func int64ToUint64(value int64, fieldName string) (uint64, error) {
