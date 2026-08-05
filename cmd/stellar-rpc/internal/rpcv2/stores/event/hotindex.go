@@ -62,9 +62,17 @@ const (
 	densePromoteWindowCount = 32
 
 	// fenceEvery is the record granularity of a run's fence array: one
-	// (term, offset) fence per fenceEvery records bounds a probe's pread +
-	// decode span.
+	// (term, offset) fence per fenceEvery records bounds a probe's decode
+	// walk.
 	fenceEvery = 64
+
+	// fenceSpanBytes byte-caps a fence window on top of fenceEvery's record
+	// cap: a window closes once it spans this much payload, and a single
+	// record this large or larger is fenced into a window of its own. Keeps
+	// a probe's pread under ~2x this for multi-record windows — dense
+	// terms' records in merged runs reach megabytes, and every term sorting
+	// beside one would otherwise pread (and varint-skip) it on each lookup.
+	fenceSpanBytes = 64 << 10
 )
 
 // hotIndexView is the immutable read view: everything a query needs, swapped
@@ -92,7 +100,8 @@ type windowRow struct {
 type sealedRun struct {
 	path   string
 	bloom  bloomFilter
-	fences []fence // sorted by term; one per fenceEvery records + final end sentinel
+	fences []fence // sorted by term; placed by fenceBuilder + final end sentinel
+	terms  int     // record count; sizes a future merge output's bloom up front
 	file   *os.File
 }
 
@@ -140,7 +149,10 @@ type HotIndex struct {
 	closed sync.Once
 }
 
-// sealResult is the background sealer's hand-back.
+// sealResult is the background sealer's hand-back. An errored result carries
+// no resources: the goroutine disposes of anything it opened before handing
+// back, so run is nil and obsolete empty whenever err is set and the
+// consumers need no cleanup on the error path.
 type sealResult struct {
 	run        *sealedRun
 	rows       int    // number of window rows the seal covered
@@ -315,17 +327,11 @@ func (h *HotIndex) Close() {
 			h.sealInFlight = false
 			if res.err == nil {
 				res.run.close()
-				for _, r := range res.obsolete {
-					r.close()
-				}
+				closeRuns(res.obsolete)
 			}
 		}
-		for _, r := range h.view.Load().runs {
-			r.close()
-		}
-		for _, r := range h.retired {
-			r.close()
-		}
+		closeRuns(h.view.Load().runs)
+		closeRuns(h.retired)
 		h.retired = nil
 	})
 }

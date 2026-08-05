@@ -106,8 +106,8 @@ func (s *Spiller) rotate() error {
 	buf := s.encBuf[:0]
 	s.pending = true
 	go func() {
-		payload := full.SortEncode(buf)
-		err := WriteRun(path, payload)
+		payload, records := full.SortEncode(buf)
+		err := WriteRun(path, payload, records)
 		s.encBuf = payload // safe: producer reads encBuf only after the
 		s.inflight <- err  // blocking receive below (channel happens-before)
 	}()
