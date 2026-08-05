@@ -5,10 +5,10 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -97,104 +97,88 @@ func openSQLiteDB(dbFilePath string) (*db.Session, error) {
 	return session, nil
 }
 
-// deferredIndexNames are the secondary indexes dropped during a bulk-load backfill.
+// Backfilled DBs carry the transactions hash key as an explicit unique index
+// instead of the migrations' PRIMARY KEY since an explicit index can be dropped
+// for the load and built at finalize.
+const bulkTransactionsDDL = `CREATE TABLE transactions (
+    hash BLOB NOT NULL, -- 32-byte binary
+    ledger_sequence INTEGER NOT NULL,
+    application_order INTEGER NOT NULL
+)`
+
+// Recreated with the table at prepare; the bulk load's per-commit trims need it.
+const ledgerSequenceIndexDDL = "CREATE INDEX index_ledger_sequence ON transactions(ledger_sequence)"
+
+// pendingIndexesMetaKey holds the JSON list of indexes still to be built by
+// FinalizeBulkLoad, written at prepare and cleared at finalize.
+const pendingIndexesMetaKey = "BulkLoadPendingIndexes"
+
+// deferredIndex is one index absent during a bulk load, built by FinalizeBulkLoad.
+type deferredIndex struct {
+	Name string `json:"name"`
+	DDL  string `json:"ddl"`
+}
+
+// deferredIndexes are the indexes dropped by PrepareBulkLoad.
 //
-//nolint:gochecknoglobals // effectively-constant name list
-var deferredIndexNames = []string{"idx_id_contract_id", "idx_id_topic1", "index_ledger_sequence"}
-
-// migratedSchemaSQL runs the embedded migrations against a throwaway in-memory
-// DB and returns each named object's sqlite_master DDL.
-func migratedSchemaSQL(ctx context.Context, names ...string) (map[string]string, error) {
-	ref, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		return nil, fmt.Errorf("could not open schema reference DB: %w", err)
-	}
-	defer ref.Close()
-	// Each new pooled connection to :memory: is a distinct empty DB
-	ref.SetMaxOpenConns(1)
-	if err := runSQLMigrations(ref, "sqlite3"); err != nil {
-		return nil, fmt.Errorf("could not migrate schema reference DB: %w", err)
-	}
-	ddls := make(map[string]string, len(names))
-	for _, name := range names {
-		var ddl string
-		if err := ref.QueryRowContext(ctx,
-			"SELECT sql FROM sqlite_master WHERE name = ?", name).Scan(&ddl); err != nil {
-			return nil, fmt.Errorf("could not read migrated DDL of %s: %w", name, err)
-		}
-		ddls[name] = ddl
-	}
-	return ddls, nil
+//nolint:gochecknoglobals // effectively-constant list
+var deferredIndexes = []deferredIndex{
+	{Name: "idx_transactions_hash", DDL: "CREATE UNIQUE INDEX idx_transactions_hash ON transactions(hash)"},
+	{Name: "idx_id_contract_id", DDL: "CREATE INDEX idx_id_contract_id ON events (contract_id, id)"},
+	{Name: "idx_id_topic1", DDL: "CREATE INDEX idx_id_topic1 ON events (topic1, id)"},
 }
 
-// bulkDDLFromCanonical derives the indexless bulk-load twin's DDL: the
-// canonical transactions table minus its hash key, so inserts append.
-func bulkDDLFromCanonical(canonical string) (string, error) {
-	const pk = " PRIMARY KEY"
-	if strings.Count(canonical, pk) != 1 {
-		return "", fmt.Errorf("expected exactly one PRIMARY KEY in %q", canonical)
-	}
-	return strings.Replace(canonical, pk, "", 1), nil
-}
-
-// bulkLoadDDLs returns the migrated DDL of the transactions table and the
-// deferred indexes, plus the derived twin DDL.
-func bulkLoadDDLs(ctx context.Context) (map[string]string, string, error) {
-	ddls, err := migratedSchemaSQL(ctx, append([]string{transactionTableName}, deferredIndexNames...)...)
-	if err != nil {
-		return nil, "", err
-	}
-	bulkDDL, err := bulkDDLFromCanonical(ddls[transactionTableName])
-	if err != nil {
-		return nil, "", err
-	}
-	return ddls, bulkDDL, nil
-}
-
-// PrepareBulkLoad drops the deferred indexes and swaps the transactions table
-// for its indexless twin, undone by FinalizeBulkLoad. Requires an empty DB.
+// PrepareBulkLoad idempotently reshapes an empty DB for a backfill by deferring
+// the creation of the indexes that would otherwise slow down the load.
 func PrepareBulkLoad(ctx context.Context, session db.SessionInterface, logger *log.Entry) error {
-	ddls, bulkDDL, err := bulkLoadDDLs(ctx)
+	pending, err := json.Marshal(deferredIndexes)
 	if err != nil {
-		return err
+		return fmt.Errorf("could not encode deferred index record: %w", err)
 	}
-	for _, name := range deferredIndexNames {
-		if _, err := session.ExecRaw(ctx, "DROP INDEX IF EXISTS "+name); err != nil {
-			return fmt.Errorf("could not drop index %s: %w", name, err)
+	if err := session.Begin(ctx); err != nil {
+		return fmt.Errorf("could not begin bulk-load prepare: %w", err)
+	}
+	defer func() {
+		_ = session.Rollback() // no-op after commit
+	}()
+
+	stmts := make([]string, 0, len(deferredIndexes)+3)
+	for _, idx := range deferredIndexes {
+		stmts = append(stmts, "DROP INDEX IF EXISTS "+idx.Name)
+	}
+	stmts = append(stmts,
+		"DROP TABLE IF EXISTS "+transactionTableName,
+		bulkTransactionsDDL,
+		ledgerSequenceIndexDDL,
+	)
+	for _, stmt := range stmts {
+		if _, err := session.ExecRaw(ctx, stmt); err != nil {
+			return fmt.Errorf("bulk-load prepare failed on %q: %w", stmt, err)
 		}
-		logger.Infof("Dropped index %s for backfill bulk-load", name)
 	}
-	if _, err := session.ExecRaw(ctx, "DROP TABLE IF EXISTS "+transactionTableName); err != nil {
-		return fmt.Errorf("could not drop transactions table: %w", err)
+	query := sq.Replace(metaTableName).Values(pendingIndexesMetaKey, string(pending))
+	if _, err := session.Exec(ctx, query); err != nil {
+		return fmt.Errorf("could not record deferred indexes: %w", err)
 	}
-	if _, err := session.ExecRaw(ctx, bulkDDL); err != nil {
-		return fmt.Errorf("could not create bulk transactions table: %w", err)
+	if err := session.Commit(); err != nil {
+		return fmt.Errorf("could not commit bulk-load prepare: %w", err)
 	}
-	// Same-named ledger_sequence index for the per-commit trims
-	if _, err := session.ExecRaw(ctx, ddls["index_ledger_sequence"]); err != nil {
-		return fmt.Errorf("could not index bulk transactions table: %w", err)
-	}
-	logger.Infof("Swapped transactions table for its indexless bulk-load twin")
+	logger.Infof("Reshaped empty DB for backfill bulk-load, deferring %d indexes", len(deferredIndexes))
 	return nil
 }
 
-// FinalizeBulkLoad restores the canonical schema after a bulk-load. Runs at every
-// startup (cheap when nothing to do) and must finish before live ingestion.
+// FinalizeBulkLoad builds the indexes deferred by PrepareBulkLoad and clears
+// the record.
 func FinalizeBulkLoad(ctx context.Context, d *DB, dbFilePath string, logger *log.Entry) error {
-	ddls, bulkDDL, err := bulkLoadDDLs(ctx)
-	if err != nil {
-		return err
-	}
-	needsRestore, err := transactionsNeedRestore(ctx, d, ddls[transactionTableName], bulkDDL)
-	if err != nil {
-		return err
-	}
-	missing, err := missingDeferredIndexes(ctx, d)
-	if err != nil {
-		return err
-	}
-	if !needsRestore && len(missing) == 0 {
+	pendingJSON, err := getMetaValue(ctx, d, pendingIndexesMetaKey)
+	if errors.Is(err, ErrEmptyDB) {
 		return nil
+	} else if err != nil {
+		return fmt.Errorf("could not read deferred index record: %w", err)
+	}
+	var pending []deferredIndex
+	if err := json.Unmarshal([]byte(pendingJSON), &pending); err != nil {
+		return fmt.Errorf("could not decode deferred index record %q: %w", pendingJSON, err)
 	}
 
 	session, err := openIndexBuildSession(ctx, dbFilePath)
@@ -207,117 +191,31 @@ func FinalizeBulkLoad(ctx context.Context, d *DB, dbFilePath string, logger *log
 		}
 	}()
 
-	if needsRestore {
-		if err := restoreTransactionsTable(ctx, session, ddls[transactionTableName], logger); err != nil {
-			return err
+	for _, idx := range pending {
+		var count int
+		if err := session.GetRaw(ctx, &count,
+			"SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?", idx.Name); err != nil {
+			return fmt.Errorf("could not check index %s: %w", idx.Name, err)
 		}
-		if _, err := session.ExecRaw(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-			return err
+		if count > 0 { // built before an earlier finalize was interrupted
+			continue
 		}
-		// The restore drops the twin's index_ledger_sequence, so recompute
-		if missing, err = missingDeferredIndexes(ctx, d); err != nil {
-			return err
-		}
-	}
-	for _, name := range missing {
-		logger.Infof("Building index %s (may take minutes, no progress output)", name)
+		logger.Infof("Building index %s (may take minutes, no progress output)", idx.Name)
 		startTime := time.Now()
-		if _, err := session.ExecRaw(ctx, ddls[name]); err != nil {
-			return fmt.Errorf("could not build index %s: %w", name, err)
+		if _, err := session.ExecRaw(ctx, idx.DDL); err != nil {
+			return fmt.Errorf("could not build index %s: %w", idx.Name, err)
 		}
 		if _, err := session.ExecRaw(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-			return fmt.Errorf("could not checkpoint after building index %s: %w", name, err)
+			return fmt.Errorf("could not checkpoint after building index %s: %w", idx.Name, err)
 		}
 		logger.WithField("duration", time.Since(startTime).String()).
-			Infof("Built index %s", name)
+			Infof("Built index %s", idx.Name)
+	}
+	if _, err := session.ExecRaw(ctx,
+		"DELETE FROM "+metaTableName+" WHERE key = ?", pendingIndexesMetaKey); err != nil {
+		return fmt.Errorf("could not clear deferred index record: %w", err)
 	}
 	return nil
-}
-
-// restoreTransactionsTable atomically replaces the bulk-load twin with the
-// canonical table, copying rows in hash order and applying the retention floor.
-func restoreTransactionsTable(
-	ctx context.Context, session db.SessionInterface, canonicalDDL string, logger *log.Entry,
-) error {
-	logger.Infof("Restoring transactions table from its bulk-load twin (may take minutes, no progress output)")
-	startTime := time.Now()
-	if err := session.Begin(ctx); err != nil {
-		return fmt.Errorf("could not begin transactions restore: %w", err)
-	}
-	defer func() {
-		_ = session.Rollback() // no-op after commit
-	}()
-
-	stmts := []string{
-		"DROP TABLE IF EXISTS transactions_bulk",     // leftover from an interrupted restore
-		"DROP INDEX IF EXISTS index_ledger_sequence", // the twin's, rebuilt on the canonical table after
-		"ALTER TABLE " + transactionTableName + " RENAME TO transactions_bulk",
-		canonicalDDL,
-	}
-	for _, stmt := range stmts {
-		if _, err := session.ExecRaw(ctx, stmt); err != nil {
-			return fmt.Errorf("transactions restore failed on %q: %w", stmt, err)
-		}
-	}
-	// Hash order builds the key's B-tree append-only; the WHERE applies the
-	// retention floor.
-	result, err := session.ExecRaw(ctx,
-		"INSERT INTO "+transactionTableName+" (hash, ledger_sequence, application_order) "+
-			"SELECT hash, ledger_sequence, application_order "+
-			"FROM transactions_bulk "+
-			"WHERE ledger_sequence >= (SELECT COALESCE(MIN(sequence), 0) FROM "+ledgerCloseMetaTableName+") "+
-			"ORDER BY hash")
-	if err != nil {
-		return fmt.Errorf("could not copy rows into transactions table: %w", err)
-	}
-	if _, err := session.ExecRaw(ctx, "DROP TABLE transactions_bulk"); err != nil {
-		return fmt.Errorf("could not drop bulk transactions table: %w", err)
-	}
-	if err := session.Commit(); err != nil {
-		return fmt.Errorf("could not commit transactions restore: %w", err)
-	}
-	rows, _ := result.RowsAffected()
-	logger.WithField("duration", time.Since(startTime).String()).
-		Infof("Restored transactions table (%d rows)", rows)
-	return nil
-}
-
-// transactionsNeedRestore reports if the transactions table is the bulk-load twin.
-func transactionsNeedRestore(ctx context.Context, d *DB, canonicalDDL, bulkDDL string) (bool, error) {
-	var sqls []string
-	err := d.SelectRaw(ctx, &sqls,
-		"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", transactionTableName)
-	if err != nil {
-		return false, fmt.Errorf("could not check transactions table shape: %w", err)
-	}
-	if len(sqls) == 0 {
-		return false, errors.New("transactions table missing")
-	}
-	switch sqls[0] {
-	case canonicalDDL:
-		return false, nil
-	case bulkDDL:
-		return true, nil
-	default:
-		return false, fmt.Errorf("unexpected transactions table schema %q", sqls[0])
-	}
-}
-
-// missingDeferredIndexes returns the names of any deferred indexes that aren't present in the DB.
-func missingDeferredIndexes(ctx context.Context, d *DB) ([]string, error) {
-	var missing []string
-	for _, name := range deferredIndexNames {
-		var count int
-		err := d.GetRaw(ctx, &count,
-			"SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?", name)
-		if err != nil {
-			return nil, fmt.Errorf("could not check index %s: %w", name, err)
-		}
-		if count == 0 {
-			missing = append(missing, name)
-		}
-	}
-	return missing, nil
 }
 
 // openIndexBuildSession opens the single-connection session used for bulk

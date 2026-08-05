@@ -7,8 +7,8 @@ CREATE TABLE transactions (
     application_order INTEGER NOT NULL
 );
 
--- This table and index are swapped/deferred during a backfill bulk-load, so
--- renaming or reshaping them here affects deferredIndexNames in db.go.
+-- A backfill bulk-load recreates this table and index, so reshaping them here
+-- affects the bulk-load DDL in db.go.
 CREATE INDEX index_ledger_sequence ON transactions(ledger_sequence);
 
 -- +migrate Down
