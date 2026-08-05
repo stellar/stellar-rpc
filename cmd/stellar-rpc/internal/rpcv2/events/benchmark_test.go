@@ -6,6 +6,9 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 // BenchmarkEventIndex_10M measures heap at full chunk scale.
@@ -34,12 +37,20 @@ func BenchmarkEventIndex_10M(b *testing.B) {
 }
 
 // buildIndex10M simulates a full chunk based on real production data:
-// ~9M events, ~2M unique terms, ~35M total adds.
+// ~9M events, ~2M unique terms, ~35M adds for the contract-ID and topic
+// terms, plus the 2 adds per event the type and topic-count families
+// contribute.
+//
+// Adds are grouped by term within a ledger, the way HotStore.applyLedger
+// batches them. Feeding a chunk-wide term one event at a time instead
+// pays ConcurrentBitmaps.AddTo's COW clone per event and costs several
+// times the build time, which no production path does.
 func buildIndex10M() *ConcurrentBitmaps {
 	const (
-		totalEvents  = 9_000_000
-		numContracts = 10_000
-		numTopicVals = 3_000_000
+		totalEvents     = 9_000_000
+		numContracts    = 10_000
+		numTopicVals    = 3_000_000
+		eventsPerLedger = 900
 	)
 
 	idx := NewConcurrentBitmapsFromBitmaps(NewBitmaps())
@@ -57,13 +68,43 @@ func buildIndex10M() *ConcurrentBitmaps {
 
 	zipf := rand.NewZipf(rng, 1.01, 1.0, uint64(numTopicVals-1))
 
-	for eventID := range uint32(totalEvents) {
-		idx.AddTo(contractKeys[eventID%uint32(numContracts)], eventID)
-		numTopics := 1 + rng.Intn(4)
-		for range numTopics {
-			idx.AddTo(topicKeys[zipf.Uint64()], eventID)
+	// Type is near-degenerate in real data: system events exist only on
+	// contract upgrades, so one bitmap is near-full and the other
+	// near-empty. Topic count spreads the chunk across every bucket,
+	// including the empty-topic and overflow ones, since how that family
+	// partitions decides whether it is cheap or not.
+	const systemEventEvery = 100_000
+	contractType := EventTypeTermKey(xdr.ContractEventTypeContract)
+	systemType := EventTypeTermKey(xdr.ContractEventTypeSystem)
+
+	perKeyIDs := make(map[TermKey][]uint32, 64)
+	flush := func() {
+		for key, ids := range perKeyIDs {
+			idx.AddTo(key, ids...)
+			delete(perKeyIDs, key)
 		}
 	}
+	add := func(key TermKey, eventID uint32) {
+		perKeyIDs[key] = append(perKeyIDs[key], eventID)
+	}
+
+	for eventID := range uint32(totalEvents) {
+		add(contractKeys[eventID%uint32(numContracts)], eventID)
+		numTopics := rng.Intn(protocol.MaxTopicCount + 2)
+		for range numTopics {
+			add(topicKeys[zipf.Uint64()], eventID)
+		}
+		if eventID%systemEventEvery == 0 {
+			add(systemType, eventID)
+		} else {
+			add(contractType, eventID)
+		}
+		add(TopicCountTermKey(numTopics), eventID)
+		if (eventID+1)%eventsPerLedger == 0 {
+			flush()
+		}
+	}
+	flush()
 
 	return idx
 }
