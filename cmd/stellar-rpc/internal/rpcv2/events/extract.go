@@ -9,10 +9,9 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
-// PayloadsFromLedgerEvents shapes an already-extracted ledger — the
-// ingest.ExtractLedgerTxParts walk output plus its ingest.EventsFromTxParts
-// events product, index-aligned — into one Payload per emitted contract event,
-// in ASCENDING getEvents cursor order — the order the SQLite
+// PayloadsFromLedgerEvents shapes an already-walked ledger — the
+// ingest.ExtractLedgerTxParts output — into one Payload per emitted contract
+// event, in ASCENDING getEvents cursor order — the order the SQLite
 // path serves (ORDER BY id ASC in sqlitedb/event.go). The event store serves in write
 // order (event IDs are assigned by arrival position and the term bitmaps iterate
 // in ID order), so emission order here IS the cursor contract. Concretely, per
@@ -40,23 +39,24 @@ import (
 // Payload shape, the Stage→(TxIdx, OpIdx) cursor-sentinel mapping, EventIdx,
 // and the cursor ordering.
 //
-// Taking the already-extracted txParts + txEvents (rather than re-walking a
-// view) lets a caller that already holds them — the hot ingest path and the
-// cold materializer, both of which also need the tx hashes (txParts[i].Hash) —
+// Taking the already-extracted txParts (rather than re-walking a view) lets a
+// caller that already holds them — the hot ingest path and the cold
+// materializer, both of which also need the tx hashes (txParts[i].Hash) —
 // feed BOTH txhash and events from ONE ExtractLedgerTxParts walk instead of
-// walking TxProcessing twice. The slimmed TxEvents carries no hash, so the
-// shaping reads each payload's TxHash off txParts at the same index — the two
-// slices MUST be index-aligned (txEvents = EventsFromTxParts(txParts)).
+// walking TxProcessing twice. The events product (ingest.EventsFromTxParts,
+// a cheap read over the already-located meta views, not a walk) is derived
+// HERE, not passed in: the slimmed TxEvents carries no hash, so each payload's
+// TxHash must come from txParts at the same index, and deriving internally
+// makes that alignment structural — no caller can pair the wrong slices.
 // ledgerSeq and ledgerClosedAt are the view's header values (cheap reads, not
 // a walk).
 func PayloadsFromLedgerEvents(
-	txParts []ingest.LedgerTxParts, txEvents []ingest.TxEvents, ledgerSeq uint32, ledgerClosedAt int64,
+	txParts []ingest.LedgerTxParts, ledgerSeq uint32, ledgerClosedAt int64,
 ) ([]Payload, error) {
-	if len(txParts) != len(txEvents) {
-		return nil, fmt.Errorf("events: %d txParts vs %d txEvents — the slices must be index-aligned",
-			len(txParts), len(txEvents))
+	txEvents, err := ingest.EventsFromTxParts(txParts)
+	if err != nil {
+		return nil, fmt.Errorf("events: extract ledger events: %w", err)
 	}
-	var err error
 	at := func(i int) (uint32, xdr.Hash) {
 		return uint32(i) + 1, xdr.Hash(txParts[i].Hash) //nolint:gosec // 1-based, matching ingest reader's tx.Index
 	}

@@ -356,11 +356,11 @@ func (d *DB) IngestLedger(
 	//
 	// The caller's ONE TxProcessing walk (txParts) feeds BOTH hot data types:
 	// every product is a plain read over that slice — txhash builds entries
-	// from each element's Hash/InnerHash, EventsFromTxParts pulls the contract
-	// events off the already-located meta views, and PayloadsFromLedgerEvents
-	// shapes the pair. One walk instead of one per product halves per-ledger
-	// extraction, and shaping the already-extracted slices (not re-walking)
-	// keeps the event-ID assignment order identical to a per-view shaping. The
+	// from each element's Hash/InnerHash, and PayloadsFromLedgerEvents pulls
+	// the contract events off the already-located meta views and shapes them.
+	// One walk instead of one per product halves per-ledger extraction, and
+	// shaping the already-extracted slice (not re-walking) keeps the event-ID
+	// assignment order identical to a per-view shaping. The
 	// atomic batch below serializes only the commit; the product reads are
 	// independent and could run concurrently into the same batch if catch-up
 	// profiling ever demands it — sequential is right at live cadence.
@@ -369,12 +369,6 @@ func (d *DB) IngestLedger(
 	// RunBackfill's "reported even on failure"), so the error is never emitted with
 	// a zero-duration sample.
 	extractStart := time.Now()
-	txEvents, err := sdkingest.EventsFromTxParts(txParts)
-	if err != nil {
-		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
-		rep.Failed = PhaseExtract
-		return rep, fmt.Errorf("extract ledger events seq %d: %w", seq, err)
-	}
 	txEntries := make([]txhash.Entry, 0, len(txParts))
 	for i := range txParts {
 		txEntries = append(txEntries, txhash.Entry{Hash: txParts[i].Hash, LedgerSeq: seq})
@@ -390,7 +384,7 @@ func (d *DB) IngestLedger(
 		return rep, fmt.Errorf("ledger close time seq %d: %w", seq, err)
 	}
 	// A pre-Soroban ledger yields zero payloads, no error.
-	payloads, err := events.PayloadsFromLedgerEvents(txParts, txEvents, seq, closedAt)
+	payloads, err := events.PayloadsFromLedgerEvents(txParts, seq, closedAt)
 	if err != nil {
 		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
 		rep.Failed = PhaseExtract

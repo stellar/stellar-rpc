@@ -90,9 +90,10 @@ func openColdChunk(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Config)
 // chunk never pays it and an enabled events writer can never miss it. The same
 // goes per product: fees are never computed here because backfill serves no
 // getFeeStats — no consumer → no FeesFromTxParts call — and the events product
-// is read only when the events writer is enabled. The walk + product reads are
-// metered together as the ledger-scoped ColdExtract signal. The first error
-// aborts the ledger.
+// is read inside the events writer's shaping (PayloadsFromLedgerEvents), so it
+// runs only when that writer is enabled and its cost lands in the writer's own
+// ColdIngest total. The walk itself is metered as the ledger-scoped
+// ColdExtract signal. The first error aborts the ledger.
 func (c *coldChunk) ingest(seq uint32, lcmView xdr.LedgerCloseMetaView) error {
 	if c.ledgers != nil {
 		if err := c.ledgers.write(seq, []byte(lcmView)); err != nil {
@@ -111,14 +112,6 @@ func (c *coldChunk) ingest(seq uint32, lcmView xdr.LedgerCloseMetaView) error {
 		c.sink.ColdExtract(time.Since(start), 0, err)
 		return fmt.Errorf("extract ledger tx parts seq %d: %w", seq, err)
 	}
-	var txEvents []sdkingest.TxEvents
-	if c.events != nil {
-		txEvents, err = sdkingest.EventsFromTxParts(txParts)
-		if err != nil {
-			c.sink.ColdExtract(time.Since(start), 0, err)
-			return fmt.Errorf("extract ledger events seq %d: %w", seq, err)
-		}
-	}
 	closedAt, err := lcmView.LedgerCloseTime()
 	if err != nil {
 		c.sink.ColdExtract(time.Since(start), 0, err)
@@ -131,7 +124,7 @@ func (c *coldChunk) ingest(seq uint32, lcmView xdr.LedgerCloseMetaView) error {
 		}
 	}
 	if c.events != nil {
-		if err := c.events.write(seq, closedAt, txParts, txEvents); err != nil {
+		if err := c.events.write(seq, closedAt, txParts); err != nil {
 			return err
 		}
 	}
