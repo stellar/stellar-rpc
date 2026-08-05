@@ -52,8 +52,13 @@ func NewHotService(db *hotchunk.DB, windows *feewindow.FeeWindows, sink MetricSi
 // retried by the hot loop, and fees appended before a failed write would be
 // counted again on the retry. A fee classification error (negative fee,
 // resource fee above FeeCharged) fails the ledger loudly like any extract
-// failure — tip-only trusted input — even though the store write is already
-// durable; the restart replay refills the windows.
+// failure — tip-only trusted input. Unlike an extract failure the ledger is
+// already durably committed, but the outcome is the same: the failure is
+// permanent until a code fix ships. Classification is deterministic over the
+// committed bytes, and the failed ledger is now the last-committed frontier,
+// so every restart's fee replay re-runs the same classification over the same
+// ledger and fails run() before the loop starts — the daemon wedges rather
+// than serve fee stats that silently miss a ledger.
 func (s *HotService) Ingest(_ context.Context, seq uint32, lcmView xdr.LedgerCloseMetaView) error {
 	walkStart := time.Now()
 	txParts, err := sdkingest.ExtractLedgerTxParts(lcmView)

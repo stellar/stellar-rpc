@@ -1144,63 +1144,6 @@ func hotTestLogger() *supportlog.Entry {
 	return l
 }
 
-// feeLCMBytes builds a one-tx V2 LCM whose result carries feeCharged and ONE
-// op result, so FeesFromTxParts observes exactly one classic per-op fee of
-// feeCharged. The shared successResult() fixture carries an EMPTY op-result
-// list, which the classification skips as a never-ran transaction — useless
-// for fee tests.
-func feeLCMBytes(t *testing.T, seq uint32, feeCharged int64) []byte {
-	t.Helper()
-	envelope := xdr.TransactionEnvelope{
-		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
-		V1: &xdr.TransactionV1Envelope{
-			Tx: xdr.Transaction{
-				SourceAccount: xdr.MustMuxedAddress(keypair.MustRandom().Address()),
-			},
-		},
-	}
-	hash, err := network.HashTransactionInEnvelope(envelope, testPassphrase)
-	require.NoError(t, err)
-	opResults := []xdr.OperationResult{{Code: xdr.OperationResultCodeOpNotSupported}}
-	comp := []xdr.TxSetComponent{{
-		Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
-		TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
-			Txs: []xdr.TransactionEnvelope{envelope},
-		},
-	}}
-	lcm := xdr.LedgerCloseMeta{
-		V: 2,
-		V2: &xdr.LedgerCloseMetaV2{
-			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
-				Header: xdr.LedgerHeader{
-					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(0)},
-					LedgerSeq: xdr.Uint32(seq),
-				},
-			},
-			TxSet: xdr.GeneralizedTransactionSet{
-				V:       1,
-				V1TxSet: &xdr.TransactionSetV1{Phases: []xdr.TransactionPhase{{V: 0, V0Components: &comp}}},
-			},
-			TxProcessing: []xdr.TransactionResultMetaV1{{
-				TxApplyProcessing: xdr.TransactionMeta{V: 4, V4: &xdr.TransactionMetaV4{}},
-				Result: xdr.TransactionResultPair{
-					TransactionHash: hash,
-					Result: xdr.TransactionResult{
-						FeeCharged: xdr.Int64(feeCharged),
-						Result: xdr.TransactionResultResult{
-							Code:    xdr.TransactionResultCodeTxFailed,
-							Results: &opResults,
-						},
-					},
-				},
-			}},
-		},
-	}
-	raw, err := lcm.MarshalBinary()
-	require.NoError(t, err)
-	return raw
-}
-
 // TestHotService_FeedsFeeWindowsAfterCommit: a successfully committed ledger's
 // fee observations land in the injected windows.
 func TestHotService_FeedsFeeWindowsAfterCommit(t *testing.T) {
@@ -1211,7 +1154,8 @@ func TestHotService_FeedsFeeWindowsAfterCommit(t *testing.T) {
 	windows := feewindow.NewFeeWindows(10, 10)
 	svc := NewHotService(db, windows, &testSink{})
 	first := chunk.ID(0).FirstLedger()
-	require.NoError(t, svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(feeLCMBytes(t, first, 500))))
+	raw := rpcv2test.FeeTxLCMBytes(t, first, 500)
+	require.NoError(t, svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(raw)))
 
 	classic := windows.ClassicFeeDistribution()
 	assert.Equal(t, uint32(1), classic.LedgerCount)
@@ -1232,11 +1176,13 @@ func TestHotService_RejectedLedgerFeedsNoFees(t *testing.T) {
 	svc := NewHotService(db, windows, &testSink{})
 	first := chunk.ID(0).FirstLedger()
 
-	require.Error(t, svc.Ingest(context.Background(), first+5, xdr.LedgerCloseMetaView(feeLCMBytes(t, first+5, 500))))
+	skipped := rpcv2test.FeeTxLCMBytes(t, first+5, 500)
+	require.Error(t, svc.Ingest(context.Background(), first+5, xdr.LedgerCloseMetaView(skipped)))
 	assert.Zero(t, windows.ClassicFeeDistribution().LedgerCount, "a rejected ledger must not feed the windows")
 
 	// The "retry" (the in-order ledger) is then counted exactly once.
-	require.NoError(t, svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(feeLCMBytes(t, first, 200))))
+	retried := rpcv2test.FeeTxLCMBytes(t, first, 200)
+	require.NoError(t, svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(retried)))
 	classic := windows.ClassicFeeDistribution()
 	assert.Equal(t, uint32(1), classic.LedgerCount)
 	assert.Equal(t, uint64(200), classic.Max)
@@ -1255,7 +1201,7 @@ func TestHotService_FeeClassificationErrorFailsCommittedLedger(t *testing.T) {
 	svc := NewHotService(db, windows, &testSink{})
 	first := chunk.ID(0).FirstLedger()
 
-	err = svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(feeLCMBytes(t, first, -1)))
+	err = svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(rpcv2test.FeeTxLCMBytes(t, first, -1)))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "fees")
 
