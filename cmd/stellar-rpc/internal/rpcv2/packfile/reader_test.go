@@ -753,17 +753,16 @@ func TestTrailer(t *testing.T) {
 	}
 }
 
-func TestAppDataRoundTrip(t *testing.T) {
-	appData := []byte("hello-app-data-1234567890")
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "appdata.pack")
-
+// writeAppDataPackfile writes a packfile carrying items and appData, and
+// returns its path. writePackfile can't serve these tests: it hardcodes
+// Finish(nil).
+func writeAppDataPackfile(t *testing.T, items [][]byte, appData []byte) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "appdata.pack")
 	w, err := Create(path, WriterOptions{ItemsPerRecord: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	items := makeItems(5, 100)
 	for _, item := range items {
 		if err := w.AppendItem(item); err != nil {
 			t.Fatal(err)
@@ -772,6 +771,13 @@ func TestAppDataRoundTrip(t *testing.T) {
 	if err := w.Finish(appData); err != nil {
 		t.Fatal(err)
 	}
+	return path
+}
+
+func TestAppDataRoundTrip(t *testing.T) {
+	appData := []byte("hello-app-data-1234567890")
+	items := makeItems(5, 100)
+	path := writeAppDataPackfile(t, items, appData)
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
@@ -799,27 +805,15 @@ func TestAppDataRoundTrip(t *testing.T) {
 	}
 }
 
-// TestAppDataCorruption verifies that app-data corruption is NOT detected by
-// packfile (callers are responsible for their own app-data integrity).
+// TestAppDataCorruption covers the third tail section. The offsets index and
+// the trailer each carry a CRC32C; app data holds things like events.pack's
+// cumulative ledger offsets, where a flipped byte can preserve monotonicity
+// and the final total and so pass every structural check its decoder makes.
 func TestAppDataCorruption(t *testing.T) {
-	appData := []byte("important-metadata")
+	path := writeAppDataPackfile(t, [][]byte{[]byte("item")}, []byte("important-metadata"))
 
-	dir := t.TempDir()
-	path := filepath.Join(dir, "appdata.pack")
-
-	w, err := Create(path, WriterOptions{ItemsPerRecord: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := w.AppendItem([]byte("item")); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Finish(appData); err != nil {
-		t.Fatal(err)
-	}
-
-	// App data is uncovered by the trailer CRC, so we mutate the data
-	// section directly without recomputing the CRC.
+	// The trailer CRC covers the appDataCRC field but not the section itself,
+	// so mutating the section alone leaves the trailer valid.
 	corruptedPath := corruptAt(t, path, false, func(data []byte) {
 		trailerStart := len(data) - trailerSize
 		appDataSz := int(binary.LittleEndian.Uint32(data[trailerStart+tOffAppDataSize:]))
@@ -832,12 +826,8 @@ func TestAppDataCorruption(t *testing.T) {
 	r := Open(corruptedPath, ReaderOptions{})
 	defer r.Close()
 
-	got, err := r.AppData()
-	if err != nil {
-		t.Fatalf("unexpected error opening file with corrupted app data: %v", err)
-	}
-	if string(got) == string(appData) {
-		t.Error("expected corrupted app data to differ from original")
+	if _, err := r.AppData(); !errors.Is(err, ErrChecksum) {
+		t.Fatalf("Open with corrupted app data: got %v, want ErrChecksum", err)
 	}
 }
 

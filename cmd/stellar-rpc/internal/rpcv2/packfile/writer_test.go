@@ -151,6 +151,7 @@ func TestCreateValidation(t *testing.T) {
 			WriterOptions{ItemsPerRecord: math.MaxUint32 + 1},
 			"exceeds uint32 max",
 		},
+		{"unknown RecordChecksum", WriterOptions{RecordChecksum: RecordChecksum(9)}, "unknown RecordChecksum"},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -74,8 +74,8 @@ import (
 type ColdReader struct {
 	chunkID chunk.ID
 
-	events *packfile.Reader // opened in the background by packfile.Open; reads await it
-	index  *packfile.Reader // opened in the background by packfile.Open; reads await it
+	events *stores.PackReader // opened in the background by packfile.Open; reads await it
+	index  *stores.PackReader // opened in the background by packfile.Open; reads await it
 
 	// waitMeta returns the events.pack metadata (count + offsets),
 	// decoded on first call from the events.pack trailer + AppData.
@@ -144,11 +144,11 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 
 	c := &ColdReader{
 		chunkID: chunkID,
-		events: packfile.Open(eventsPath, packfile.ReaderOptions{
+		events: stores.OpenPack(eventsPath, packfile.ReaderOptions{
 			RecordDecoder: eventsPackDecoder,
 			Concurrency:   opts.Concurrency,
 		}),
-		index: packfile.Open(indexPackPath, packfile.ReaderOptions{
+		index: stores.OpenPack(indexPackPath, packfile.ReaderOptions{
 			Concurrency: opts.Concurrency,
 		}),
 	}
@@ -205,6 +205,14 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		if tr.Format != indexPackFormat {
 			return fmt.Errorf("events: %s: expected format %#x, got %#x (mis-pointed or foreign pack)",
 				indexPackPath, indexPackFormat, tr.Format)
+		}
+		// Serving an index whose bitmaps are unchecked is the silent-wrong-answer
+		// case indexPackChecksum exists to prevent, and the reader can tell. It is
+		// stores.ErrCorrupt for the same reason a failed checksum is: the artifact
+		// cannot answer queries and has to be rebuilt.
+		if !tr.HasRecordChecksum {
+			return fmt.Errorf("%w: %s: built without a record checksum (stale build)",
+				stores.ErrCorrupt, indexPackPath)
 		}
 		if uint64(tr.TotalItems) != idx.numKeys() {
 			return fmt.Errorf(

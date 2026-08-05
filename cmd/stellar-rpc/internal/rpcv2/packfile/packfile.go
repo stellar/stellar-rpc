@@ -30,7 +30,7 @@ const (
 //	28:32 indexSize       uint32
 //	32:36 appDataSize     uint32
 //	36:68 contentHash     [32]byte (zero when flagContentHash unset)
-//	68:72 reserved
+//	68:72 appDataCRC      uint32   (CRC32C of the app-data section)
 //	72:76 crc32c          uint32   (over trailer[:trailerCRCEnd])
 const (
 	tOffMagic          = 0
@@ -45,14 +45,19 @@ const (
 	tOffAppDataSize    = 32
 	tOffContentHash    = 36
 	tEndContentHash    = 68
+	tOffAppDataCRC     = 68
 	tOffCRC            = 72
 	trailerCRCEnd      = tOffCRC // bytes [0:trailerCRCEnd] are CRC-covered
 )
 
-// On-disk flag bits (uint8 at trailer offset 5). Only one flag is currently
-// defined; the remaining bits are reserved for future use.
+// On-disk flag bits (uint8 at trailer offset 5). The remaining bits are
+// reserved for future use.
 const (
 	flagContentHash uint8 = 1 << 0
+	// flagRecordChecksum widens the CRC32C in each record's last four bytes
+	// to cover the whole record instead of the FOR-encoded item sizes alone.
+	// See RecordChecksum for the two layouts.
+	flagRecordChecksum uint8 = 1 << 1
 )
 
 // ErrContentHashMismatch is returned when a file's content hash does not match
@@ -64,9 +69,9 @@ var ErrContentHashMismatch = errors.New("packfile: content hash mismatch")
 // (e.g. for diagnostic dumps or for verifying a stored Checksum against an
 // independent recomputation).
 //
-// HasContentHash is the typed view of the only currently-defined flag bit;
-// the raw flags byte itself is not exposed because no caller can act on
-// unknown bits (Open rejects them via knownFlags).
+// The Has* fields are the typed views of the defined flag bits; the raw flags
+// byte itself is not exposed because no caller can act on unknown bits (Open
+// rejects them via knownFlags).
 type Trailer struct {
 	Version           uint8
 	Format            Format
@@ -78,6 +83,8 @@ type Trailer struct {
 	AppDataSize       uint32
 	ContentHash       [32]byte
 	HasContentHash    bool
+	HasRecordChecksum bool
+	AppDataCRC        uint32 // CRC32C over the app-data section; validated by doOpen
 	Checksum          uint32 // CRC32C over the leading bytes of the on-disk trailer; validated by unmarshalTrailer
 }
 
@@ -88,6 +95,9 @@ func (t Trailer) marshal(dst []byte) {
 	var flags uint8
 	if t.HasContentHash {
 		flags |= flagContentHash
+	}
+	if t.HasRecordChecksum {
+		flags |= flagRecordChecksum
 	}
 	binary.LittleEndian.PutUint32(dst[tOffMagic:], magic)
 	dst[tOffVersion] = t.Version
@@ -100,6 +110,7 @@ func (t Trailer) marshal(dst []byte) {
 	binary.LittleEndian.PutUint32(dst[tOffIndexSize:], t.IndexSize)
 	binary.LittleEndian.PutUint32(dst[tOffAppDataSize:], t.AppDataSize)
 	copy(dst[tOffContentHash:tEndContentHash], t.ContentHash[:])
+	binary.LittleEndian.PutUint32(dst[tOffAppDataCRC:], t.AppDataCRC)
 	binary.LittleEndian.PutUint32(dst[tOffCRC:], crc32c(dst[:trailerCRCEnd]))
 }
 
@@ -152,6 +163,8 @@ func unmarshalTrailer(src []byte) (Trailer, error) {
 		AppDataSize:       binary.LittleEndian.Uint32(tb[tOffAppDataSize:]),
 		ContentHash:       contentHash,
 		HasContentHash:    hasContentHash,
+		HasRecordChecksum: flags&flagRecordChecksum != 0,
+		AppDataCRC:        binary.LittleEndian.Uint32(tb[tOffAppDataCRC:]),
 		Checksum:          storedCRC,
 	}, nil
 }
