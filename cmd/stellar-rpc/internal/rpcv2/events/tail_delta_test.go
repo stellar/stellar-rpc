@@ -15,15 +15,15 @@ func tdKey(b byte) TermKey {
 	return k
 }
 
-// mustGet fetches key's bitmap, failing the test on error.
+// mustGet fetches key's postings, failing the test on error.
 func mustGet(t *testing.T, cb *ConcurrentBitmaps, key TermKey) []uint32 {
 	t.Helper()
-	bm, err := cb.Get(key)
+	post, err := cb.Get(key)
 	require.NoError(t, err)
-	if bm == nil {
+	if !post.Present() {
 		return nil
 	}
-	return bm.ToArray()
+	return post.Bitmap().ToArray()
 }
 
 // TestTailDelta_ContentEquivalence drives one term through every
@@ -103,10 +103,10 @@ func TestTailDelta_SnapshotImmutability(t *testing.T) {
 	}
 	var snaps []snap
 	take := func() {
-		bm, err := cb.Get(key)
+		post, err := cb.Get(key)
 		require.NoError(t, err)
-		if bm != nil {
-			snaps = append(snaps, snap{got: bm.ToArray(), card: bm.GetCardinality()})
+		if post.Present() {
+			snaps = append(snaps, snap{got: post.Bitmap().ToArray(), card: post.Cardinality()})
 		}
 	}
 
@@ -143,14 +143,30 @@ func TestTailDelta_GetMemoized(t *testing.T) {
 	require.NoError(t, err)
 	m2, err := cb.Get(key)
 	require.NoError(t, err)
-	assert.Same(t, m1, m2, "materialization must be memoized per state")
+	assert.Same(t, m1.Bitmap(), m2.Bitmap(), "materialization must be memoized per state")
 
 	// A new publish invalidates the memo (fresh state, fresh memo).
 	cb.AddTo(key, promotionThreshold+1)
 	m3, err := cb.Get(key)
 	require.NoError(t, err)
-	assert.NotSame(t, m1, m3)
-	assert.EqualValues(t, promotionThreshold+2, m3.GetCardinality())
+	assert.NotSame(t, m1.Bitmap(), m3.Bitmap())
+	assert.EqualValues(t, promotionThreshold+2, m3.Cardinality())
+}
+
+// sumPostings reads every posting, in whichever form was published.
+func sumPostings(p Postings) uint64 {
+	var sum uint64
+	if ids := p.IDs(); ids != nil {
+		for _, id := range ids {
+			sum += uint64(id)
+		}
+		return sum
+	}
+	it := p.Bitmap().Iterator()
+	for it.HasNext() {
+		sum += uint64(it.Next())
+	}
+	return sum
 }
 
 // TestTailDelta_WriterReaderRace hammers one dense term with the single
@@ -185,16 +201,11 @@ func TestTailDelta_WriterReaderRace(t *testing.T) {
 					return
 				default:
 				}
-				bm, err := cb.Get(key)
-				if err != nil || bm == nil {
+				post, err := cb.Get(key)
+				if err != nil || !post.Present() {
 					continue
 				}
-				var sum uint64
-				it := bm.Iterator()
-				for it.HasNext() {
-					sum += uint64(it.Next())
-				}
-				heldByReader[r] = append(heldByReader[r], held{card: bm.GetCardinality(), sum: sum})
+				heldByReader[r] = append(heldByReader[r], held{card: post.Cardinality(), sum: sumPostings(post)})
 				if len(heldByReader[r]) > 64 {
 					heldByReader[r] = heldByReader[r][32:] // keep some old snapshots live
 				}
@@ -260,11 +271,11 @@ func TestTailDelta_WriterReaderRace_MultiContainer(t *testing.T) {
 					return
 				default:
 				}
-				bm, err := cb.Get(key)
-				if err != nil || bm == nil {
+				post, err := cb.Get(key)
+				if err != nil || !post.Present() {
 					continue
 				}
-				_ = bm.GetCardinality()
+				_ = post.Cardinality()
 			}
 		})
 	}

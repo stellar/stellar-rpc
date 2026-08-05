@@ -121,11 +121,14 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 	return cb
 }
 
-// Get returns the bitmap for the given term key, or (nil, nil) when
-// the key is not indexed. The returned bitmap is an immutable
-// snapshot: writers publish new termStates via atomic.Store, so the
-// pointer this method returns will never be mutated by anyone — but
-// only if callers respect the "read-only" half of the contract.
+// Get returns the postings for the given term key, or the zero Postings when
+// the key is not indexed. What comes back is an immutable snapshot: writers
+// publish new termStates via atomic.Store, and neither a published bitmap nor
+// a published id slice is ever written afterwards — but only if callers
+// respect the "read-only" half of the contract.
+//
+// A sparse entry is returned as its id slice, un-materialized, since that is
+// the form it is stored in and the form events.Intersect can drive from.
 //
 // Forbidden caller-side methods on the returned bitmap (these have
 // side effects on the bitmap's internal needCopyOnWrite[] array,
@@ -138,6 +141,8 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 //   - SetCopyOnWrite
 //   - Any *Writable* accessor on the underlying roaringArray
 //
+// The same rule applies to a returned id slice: read it, never write to it.
+//
 // Safe caller-side methods (used by event.Query today): any
 // non-mutating read — Contains, GetCardinality, Iterator,
 // ToArray, IsEmpty, Minimum, Maximum — plus the non-mutating
@@ -147,7 +152,7 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 // ≥2-input qualifier on FastAnd/FastOr: with a single input the
 // roaring library has historically taken a Clone-the-input
 // shortcut, so callers MUST avoid passing a singleton slice to
-// those aggregators (the event store's Query guards its single-input
+// those aggregators (Intersect and Union guard their single-input
 // cases before calling FastAnd/FastOr).
 //
 // Callers may hold the pointer arbitrarily long. A subsequent Get
@@ -158,43 +163,41 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 // Concurrency: the RLock is held only for the map lookup. Once the
 // per-entry pointer is captured, the lock is released; the atomic
 // load on the entry happens lock-free.
-func (s *ConcurrentBitmaps) Get(key TermKey) (*roaring.Bitmap, error) {
+func (s *ConcurrentBitmaps) Get(key TermKey) (Postings, error) {
 	s.rwmu.RLock()
 	p := s.terms[key]
 	s.rwmu.RUnlock()
 	if p == nil {
-		return nil, nil //nolint:nilnil // not-found is signaled by nil bitmap, no error
+		return Postings{}, nil
 	}
 	// The pointer is always Stored with a non-nil termState holding a
 	// non-nil bm or non-empty ids before it is published to the map.
 	st := p.Load()
 	if st.bm != nil && len(st.tail) == 0 {
-		return st.bm, nil
+		return BitmapPostings(st.bm), nil
 	}
-	// Tail-bearing dense state or sparse state: materialize base∪tail (or
-	// the id list) once per published state, memoized in st.mat. Racing
-	// readers build content-identical bitmaps from the same immutable
-	// inputs; the CAS loser discards a duplicate — wasted work, never
-	// divergent state. Construction uses only reader-safe operations:
-	// roaring.FastOr with two inputs, which READS st.bm's COW bookkeeping
-	// but writes nothing through it — safe because published bitmaps are
-	// never written after publication (the writer Clones only its private
-	// wbm twin; see termState). NEVER base.Clone here — Clone WRITES the
-	// receiver's COW bookkeeping and would race every other reader.
+	if st.bm == nil {
+		// Sparse: hand out the published id list. AddTo never appends into a
+		// published slice, so holding it is safe.
+		return IDPostings(st.ids), nil
+	}
+	// Tail-bearing dense state: materialize base∪tail once per published
+	// state, memoized in st.mat. Racing readers build content-identical
+	// bitmaps from the same immutable inputs; the CAS loser discards a
+	// duplicate — wasted work, never divergent state. Construction uses only
+	// reader-safe operations: roaring.FastOr with two inputs, which READS
+	// st.bm's COW bookkeeping but writes nothing through it — safe because
+	// published bitmaps are never written after publication (the writer
+	// Clones only its private wbm twin; see termState). NEVER base.Clone
+	// here — Clone WRITES the receiver's COW bookkeeping and would race
+	// every other reader.
 	if m := st.mat.Load(); m != nil {
-		return m, nil
+		return BitmapPostings(m), nil
 	}
-	var m *roaring.Bitmap
-	if st.bm != nil {
-		tb := roaring.New()
-		tb.AddMany(st.tail)
-		m = roaring.FastOr(st.bm, tb)
-	} else {
-		m = roaring.New()
-		m.AddMany(st.ids)
-	}
-	st.mat.CompareAndSwap(nil, m)
-	return st.mat.Load(), nil
+	tb := roaring.New()
+	tb.AddMany(st.tail)
+	st.mat.CompareAndSwap(nil, roaring.FastOr(st.bm, tb))
+	return BitmapPostings(st.mat.Load()), nil
 }
 
 // Has reports whether key is tracked, without materializing anything — the

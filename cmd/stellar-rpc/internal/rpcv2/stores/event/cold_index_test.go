@@ -3,6 +3,7 @@ package event
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -123,16 +124,14 @@ func TestWriteIndex_RoundTripsBitmapsPerTerm(t *testing.T) {
 
 		record, ok := records[int(slot)]
 		require.True(t, ok, "record missing at slot %d (term-%d)", slot, i)
-		require.GreaterOrEqual(t, len(record), IndexRecordFingerprintLen, "record at slot %d too short", slot)
 
-		// Fingerprint must match term[:4].
-		assert.Equal(t, term[:IndexRecordFingerprintLen], record[:IndexRecordFingerprintLen],
-			"fingerprint mismatch at slot %d", slot)
-
-		// Deserialize bitmap.
-		bm := roaring.New()
-		require.NoError(t, bm.UnmarshalBinary(record[IndexRecordFingerprintLen:]))
-		assert.Equal(t, uint64(2), bm.GetCardinality(), "term-%d bitmap card", i)
+		// Read it back the way the cold reader does, which also checks the
+		// fingerprint against term[:4] and dispatches on the codec byte.
+		post, derr := verifyAndDecodePostings(record, term, slot)
+		require.NoError(t, derr, "term-%d", i)
+		require.True(t, post.Present(), "term-%d must resolve, not read as a fingerprint miss", i)
+		bm := post.Bitmap()
+		assert.Equal(t, uint64(2), post.Cardinality(), "term-%d posting count", i)
 		assert.True(t, bm.Contains(uint32(i*10)), "term-%d missing event id %d", i, i*10)
 		assert.True(t, bm.Contains(uint32(i*10+1)), "term-%d missing event id %d", i, i*10+1)
 	}
@@ -308,9 +307,9 @@ func TestWriteIndex_LargeIndex(t *testing.T) {
 }
 
 func TestWriteIndex_RecordEncoding(t *testing.T) {
-	// Lock the on-disk record format: fingerprint || roaring bitmap.
-	// Future readers (PR-3a) rely on this layout; if it ever changes
-	// silently, this test fails.
+	// Lock the on-disk record format: fingerprint || codec || postings.
+	// The cold reader relies on this layout; if it ever changes silently,
+	// this test fails.
 	dir := t.TempDir()
 	idx := events.NewBitmaps()
 	idx.AddTo(events.ComputeTermKey([]byte("only"), events.FieldContractID), 42)
@@ -326,13 +325,124 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	term := events.ComputeTermKey([]byte("only"), events.FieldContractID)
 	assert.Equal(t, term[:IndexRecordFingerprintLen], record[:IndexRecordFingerprintLen])
 
-	bm := roaring.New()
-	require.NoError(t, bm.UnmarshalBinary(record[IndexRecordFingerprintLen:]))
-	assert.Equal(t, uint64(1), bm.GetCardinality())
-	assert.True(t, bm.Contains(42))
+	// A single-posting term takes the delta codec, and its body is the codec
+	// byte plus events.AppendPostings output — no roaring container framing.
+	assert.Equal(t, itemCodecDelta, record[IndexRecordFingerprintLen],
+		"a 1-posting term must use the delta codec")
+	post, derr := verifyAndDecodePostings(record, term, 0)
+	require.NoError(t, derr)
+	require.True(t, post.Present())
+	assert.Equal(t, uint64(1), post.Cardinality())
+	assert.True(t, post.Contains(42))
+	assert.NotNil(t, post.IDs(), "a delta term must come back as an ID list")
 
 	// Defensive: the fingerprint occupies bytes 0..3 in little-endian
 	// the way events.TermKey itself encodes — read it back via binary helpers
 	// just to lock the endianness contract.
 	_ = binary.LittleEndian.Uint32(record[:IndexRecordFingerprintLen])
+}
+
+// TestDeltaPostingThresholdPinned pins the threshold's value. Every other
+// assertion names the constant symbolically, so they all hold at any value,
+// including one that would silently cost 40% of the pack.
+func TestDeltaPostingThresholdPinned(t *testing.T) {
+	require.Equal(t, 1024, deltaPostingMaxCardinality,
+		"retuning the threshold changes index.pack size materially; re-measure a real pubnet chunk first")
+}
+
+// TestWriteIndex_CodecDispatch pins the cardinality dispatch at the threshold
+// and round-trips both codecs through the real cold reader.
+func TestWriteIndex_CodecDispatch(t *testing.T) {
+	dir := t.TempDir()
+	idx := events.NewBitmaps()
+
+	term := func(name string, card int) events.TermKey {
+		k := events.ComputeTermKey([]byte(name), events.FieldContractID)
+		ids := make([]uint32, card)
+		for i := range ids {
+			ids[i] = uint32(i * 7)
+		}
+		idx.AddTo(k, ids...)
+		return k
+	}
+	single := term("single", 1)
+	atThreshold := term("at", deltaPostingMaxCardinality)
+	overThreshold := term("over", deltaPostingMaxCardinality+1)
+
+	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir))
+
+	m, err := openMPHF(filepath.Join(dir, IndexHashName(indexTestChunkID)))
+	require.NoError(t, err)
+	defer m.Close()
+	records := loadIndexPack(t, filepath.Join(dir, IndexPackName(indexTestChunkID)))
+
+	codecOf := func(k events.TermKey) byte {
+		slot, lerr := m.Lookup(k)
+		require.NoError(t, lerr)
+		return records[int(slot)][IndexRecordFingerprintLen]
+	}
+	assert.Equal(t, itemCodecDelta, codecOf(atThreshold),
+		"exactly deltaPostingMaxCardinality postings must still be delta")
+	assert.Equal(t, itemCodecRoaring, codecOf(overThreshold),
+		"one posting past the threshold must be roaring")
+
+	// Both codecs must come back through the reader's dispatch with the right
+	// postings. (The full ColdReader path over a complete artifact set is
+	// covered by TestWriteColdIndexFromRuns_ReadsBack, whose small terms
+	// exercise the delta codec end to end.)
+	wantCard := []uint64{1, deltaPostingMaxCardinality, deltaPostingMaxCardinality + 1}
+	for i, k := range []events.TermKey{single, atThreshold, overThreshold} {
+		want := wantCard[i]
+		slot, lerr := m.Lookup(k)
+		require.NoError(t, lerr)
+		post, derr := verifyAndDecodePostings(records[int(slot)], k, slot)
+		require.NoError(t, derr, "term %d", i)
+		require.True(t, post.Present(), "term %d must resolve", i)
+		assert.Equal(t, want, post.Cardinality(), "term %d cardinality", i)
+		assert.True(t, post.Contains(0), "term %d must hold its first posting", i)
+		assert.Equal(t, want <= deltaPostingMaxCardinality, post.IDs() != nil,
+			"term %d form must follow its codec", i)
+	}
+
+	// An unknown codec byte must fail loudly rather than decode as something.
+	bad := append([]byte(nil), records[0]...)
+	bad[IndexRecordFingerprintLen] = 0x7f
+	var key events.TermKey
+	copy(key[:], bad[:IndexRecordFingerprintLen])
+	_, derr := verifyAndDecodePostings(bad, key, 0)
+	require.ErrorContains(t, derr, "unknown codec")
+}
+
+// TestEncodeIndexBodyRejectsEmpty pins that the encoder refuses a term with no
+// postings rather than writing a record the reader cannot decode: the delta
+// codec's count is a uvarint and DecodePostings rejects zero.
+func TestEncodeIndexBodyRejectsEmpty(t *testing.T) {
+	_, err := encodeIndexBody(nil, nil)
+	require.Error(t, err)
+
+	body, err := encodeIndexBody(nil, []uint32{7})
+	require.NoError(t, err)
+	ids, err := events.DecodePostings(body[1:])
+	require.NoError(t, err, "one posting must round-trip")
+	require.Equal(t, []uint32{7}, ids)
+}
+
+// TestVerifyAndDecodePostings_RejectsInvalidBitmap pins the trust boundary.
+// roaring's UnmarshalBinary accepts a run container holding no intervals, which
+// reads back as a bitmap with containers but no postings — a shape no producer
+// makes, so it means the record is corrupt. It must be rejected here, naming
+// the slot, rather than reaching a caller that assumes a present term holds at
+// least one posting.
+func TestVerifyAndDecodePostings_RejectsInvalidBitmap(t *testing.T) {
+	body, err := hex.DecodeString("3b3000000100008713000000008713")
+	require.NoError(t, err)
+	require.NoError(t, roaring.New().UnmarshalBinary(body),
+		"roaring must accept these bytes, else this test proves nothing")
+
+	key := events.ComputeTermKey([]byte("corrupt"), events.FieldContractID)
+	record := append(append([]byte{}, key[:IndexRecordFingerprintLen]...), itemCodecRoaring)
+	record = append(record, body...)
+
+	_, derr := verifyAndDecodePostings(record, key, 7)
+	require.ErrorContains(t, derr, "invalid bitmap at slot 7")
 }

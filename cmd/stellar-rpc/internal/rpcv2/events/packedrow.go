@@ -49,6 +49,13 @@ func AppendPackedRow(dst []byte, perKeyIDs map[TermKey][]uint32) []byte {
 // in already-sorted order (the cold build's spill slab and run merge).
 func AppendTermPostings(dst []byte, term TermKey, ids []uint32) []byte {
 	dst = append(dst, term[:]...)
+	return AppendPostings(dst, ids)
+}
+
+// AppendPostings appends one term's ID list — uvarint count, then the IDs
+// (first absolute, then strictly-positive deltas) — WITHOUT the 16-byte term
+// prefix, for consumers that already know which term they are reading.
+func AppendPostings(dst []byte, ids []uint32) []byte {
 	dst = binary.AppendUvarint(dst, uint64(len(ids)))
 	var prev uint32
 	for j, id := range ids {
@@ -69,33 +76,14 @@ func AppendTermPostings(dst []byte, term TermKey, ids []uint32) []byte {
 // terms; add must consume it before returning (callers copy or fold).
 func DecodePackedRow(val []byte, add func(term TermKey, ids []uint32)) error {
 	var ids []uint32
-	next := func() (uint64, error) {
-		v, n := binary.Uvarint(val)
-		if n <= 0 {
-			return 0, errors.New("bad event-id uvarint")
-		}
-		val = val[n:]
-		return v, nil
-	}
 	for len(val) > 0 {
 		if len(val) < 16 {
 			return fmt.Errorf("events: packed row: %d trailing bytes, want 16-byte term", len(val))
 		}
 		var term TermKey
 		copy(term[:], val[:16])
-		val = val[16:]
-		count, n := binary.Uvarint(val)
-		if n <= 0 {
-			return errors.New("events: packed row: bad id-count uvarint")
-		}
-		val = val[n:]
-		// Each ID takes ≥1 byte, so a count beyond the remaining bytes is
-		// structurally impossible — reject before allocating for it.
-		if count == 0 || count > uint64(len(val)) {
-			return fmt.Errorf("events: packed row: id count %d exceeds %d remaining bytes", count, len(val))
-		}
 		var err error
-		if ids, err = DecodeAscendingIDs(next, count, ids[:0]); err != nil {
+		if ids, val, err = decodePostings(val[16:], ids); err != nil {
 			return fmt.Errorf("events: packed row: %w", err)
 		}
 		add(term, ids)
@@ -103,14 +91,48 @@ func DecodePackedRow(val []byte, add func(term TermKey, ids []uint32)) error {
 	return nil
 }
 
+// decodePostings decodes the posting list at the head of b — uvarint count,
+// then the IDs — into ids, and returns the unconsumed remainder. Errors are
+// unwrapped; callers add their own context, matching DecodeAscendingIDs.
+func decodePostings(b []byte, ids []uint32) ([]uint32, []byte, error) {
+	count, n := binary.Uvarint(b)
+	if n <= 0 {
+		return nil, nil, errors.New("bad id-count uvarint")
+	}
+	b = b[n:]
+	// Each ID takes ≥1 byte, so a count beyond the remaining bytes is
+	// structurally impossible — reject before allocating for it.
+	if count == 0 || count > uint64(len(b)) {
+		return nil, nil, fmt.Errorf("id count %d exceeds %d remaining bytes", count, len(b))
+	}
+	next := func() (uint64, error) {
+		v, k := binary.Uvarint(b)
+		if k <= 0 {
+			return 0, errors.New("bad event-id uvarint")
+		}
+		b = b[k:]
+		return v, nil
+	}
+	// Grow once rather than letting append double its way there. count is
+	// bounded by the remaining bytes above, so it cannot force a large
+	// allocation from a small record.
+	if uint64(cap(ids)) < count {
+		ids = make([]uint32, 0, count)
+	}
+	out, err := DecodeAscendingIDs(next, count, ids[:0])
+	if err != nil {
+		return nil, nil, err
+	}
+	return out, b, nil
+}
+
 // DecodeAscendingIDs decodes count event IDs (first absolute, then
 // strictly-positive deltas) into ids, drawing raw uvarints from next. It is
 // THE validation core for the packed-row ID stream — the slice-based
-// DecodePackedRow above and runspill's streaming RunReader both delegate
-// here, so the security-relevant invariants (raw-varint reject BEFORE
-// accumulation, zero-delta reject, uint32 overflow) cannot drift between the
-// two decoders again (the near-2^64 wrap fix once had to be applied to
-// both). Errors are unwrapped; callers add their own context.
+// decodePostings above and runspill's streaming RunReader both delegate here,
+// so the security-relevant invariants (raw-varint reject BEFORE accumulation,
+// zero-delta reject, uint32 overflow) cannot drift between decoders again (the
+// near-2^64 wrap fix once had to be applied to both). Errors are unwrapped; callers add their own context.
 func DecodeAscendingIDs(next func() (uint64, error), count uint64, ids []uint32) ([]uint32, error) {
 	var prev uint64
 	for i := range count {
@@ -138,6 +160,24 @@ func DecodeAscendingIDs(next func() (uint64, error), count uint64, ids []uint32)
 		prev = abs
 	}
 	return ids, nil
+}
+
+// DecodePostings decodes one term's ID list as written by AppendPostings. b
+// must hold exactly one posting list and nothing else: trailing bytes are
+// rejected, because the cold index sizes its records from the writer and any
+// slack means the record was not written by this codec.
+//
+// The result is freshly allocated, so it can outlive the buffer it was decoded
+// from and cannot alias a sibling decode.
+func DecodePostings(b []byte) ([]uint32, error) {
+	out, rest, err := decodePostings(b, nil)
+	if err != nil {
+		return nil, fmt.Errorf("events: postings: %w", err)
+	}
+	if len(rest) != 0 {
+		return nil, fmt.Errorf("events: postings: %d trailing bytes", len(rest))
+	}
+	return out, nil
 }
 
 // PackedRecordLen returns the byte length of the packed record at the head

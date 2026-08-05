@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -28,7 +27,7 @@ type countingReader struct {
 	totalKeys       int
 }
 
-func (c *countingReader) LookupKeys(ctx context.Context, keys []events.TermKey) ([]*roaring.Bitmap, error) {
+func (c *countingReader) LookupKeys(ctx context.Context, keys []events.TermKey) ([]events.Postings, error) {
 	c.lookupKeysCalls++
 	c.totalKeys += len(keys)
 	return c.Reader.LookupKeys(ctx, keys)

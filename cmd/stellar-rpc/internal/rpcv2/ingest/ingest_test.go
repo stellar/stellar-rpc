@@ -543,10 +543,10 @@ func TestEventsColdWriter_Readback(t *testing.T) {
 	cnt, err := cr.EventCount()
 	require.NoError(t, err)
 	require.Equal(t, uint32(2), cnt)
-	bms, err := cr.LookupKeys(context.Background(), []events.TermKey{term})
+	post, err := cr.LookupKeys(context.Background(), []events.TermKey{term})
 	require.NoError(t, err)
-	require.NotNil(t, bms[0])
-	require.Equal(t, uint64(2), bms[0].GetCardinality())
+	require.True(t, post[0].Present())
+	require.Equal(t, uint64(2), post[0].Cardinality())
 }
 
 // ───────────────────────── V0 (pre-Soroban) events handling ─────────────────────────
@@ -601,8 +601,8 @@ func TestEventsColdWriter_V0KeepsOffsetsContiguous(t *testing.T) {
 	// And the event is queryable by its term.
 	bms, err := cr.LookupKeys(context.Background(), []events.TermKey{term})
 	require.NoError(t, err)
-	require.NotNil(t, bms[0])
-	require.Equal(t, uint64(1), bms[0].GetCardinality())
+	require.True(t, bms[0].Present())
+	require.Equal(t, uint64(1), bms[0].Cardinality())
 }
 
 // TestWriteColdChunk_EventlessChunk_FullyReadable drives a full cold chunk of V0
@@ -647,7 +647,7 @@ func TestWriteColdChunk_EventlessChunk_FullyReadable(t *testing.T) {
 	anyKey := events.ComputeTermKey([]byte("any"), events.FieldContractID)
 	bms, lerr := cr.LookupKeys(context.Background(), []events.TermKey{anyKey})
 	require.NoError(t, lerr)
-	require.Nil(t, bms[0], "a term with no matching events misses cleanly (nil bitmap)")
+	require.False(t, bms[0].Present(), "a term with no matching events misses cleanly")
 
 	// Metrics still fired: one aggregate per-chunk, one (clean) per-ingester.
 	require.Equal(t, 1, sink.coldChunkTotals, "ColdChunkTotal must fire for an eventless chunk")
@@ -697,7 +697,7 @@ func TestColdChunk_Success(t *testing.T) {
 	defer func() { require.NoError(t, ecr.Close()) }()
 	bms, err := ecr.LookupKeys(context.Background(), []events.TermKey{term})
 	require.NoError(t, err)
-	require.Equal(t, uint64(2), bms[0].GetCardinality())
+	require.Equal(t, uint64(2), bms[0].Cardinality())
 
 	// Txhash .bin count.
 	binEntries := rpcv2test.ReadColdBin(t, txhashBinPath(filepath.Join(coldDir, dataTypeTxhash)))
@@ -999,8 +999,8 @@ func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 	bms, err := ecr.LookupKeys(context.Background(), terms)
 	require.NoError(t, err)
 	for i, k := range terms {
-		require.NotNil(t, bms[i], "term %d present in reference must resolve", i)
-		require.Equal(t, wantTermIDs[k], bms[i].ToArray(),
+		require.True(t, bms[i].Present(), "term %d present in reference must resolve", i)
+		require.Equal(t, wantTermIDs[k], bms[i].Bitmap().ToArray(),
 			"cold term bitmap must carry the same event IDs as the shaping reference")
 	}
 }
@@ -1086,8 +1086,8 @@ func TestWriteColdChunk_EventsCold_Readback(t *testing.T) {
 	require.Equal(t, uint32(len(evSeqs)), cnt)
 	bms, err := cr.LookupKeys(context.Background(), []events.TermKey{term})
 	require.NoError(t, err)
-	require.NotNil(t, bms[0])
-	require.Equal(t, uint64(len(evSeqs)), bms[0].GetCardinality())
+	require.True(t, bms[0].Present())
+	require.Equal(t, uint64(len(evSeqs)), bms[0].Cardinality())
 }
 
 // ───────────────────────── drain stream errors ─────────────────────────
