@@ -11,7 +11,6 @@ import (
 
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
@@ -26,7 +25,6 @@ import (
 // this package) turns these .bin files into the queryable cold MPHF index.
 type txhashCold struct {
 	binPath string
-	chunkID chunk.ID
 	entries []txhash.ColdEntry
 	metrics coldMetrics
 }
@@ -35,7 +33,7 @@ type txhashCold struct {
 // sorted .bin at binPath — the caller's geometry.Layout.TxHashBinPath(chunkID),
 // so the write path is Layout's single derivation — written at finalize
 // (overwriting any prior attempt's file — see the package doc's artifact model).
-func newTxhashCold(binPath string, chunkID chunk.ID, sink MetricSink) (*txhashCold, error) {
+func newTxhashCold(binPath string, sink MetricSink) (*txhashCold, error) {
 	if err := os.MkdirAll(filepath.Dir(binPath), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(binPath), err)
 	}
@@ -44,7 +42,6 @@ func newTxhashCold(binPath string, chunkID chunk.ID, sink MetricSink) (*txhashCo
 	// and a busy chunk just pays a few amortized growths.
 	return &txhashCold{
 		binPath: binPath,
-		chunkID: chunkID,
 		entries: make([]txhash.ColdEntry, 0, 1<<16),
 		metrics: newColdMetrics(sink, dataTypeTxhash),
 	}, nil

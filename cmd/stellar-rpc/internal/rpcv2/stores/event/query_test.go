@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -28,7 +27,7 @@ type countingReader struct {
 	totalKeys       int
 }
 
-func (c *countingReader) LookupKeys(ctx context.Context, keys []events.TermKey) ([]*roaring.Bitmap, error) {
+func (c *countingReader) LookupKeys(ctx context.Context, keys []events.TermKey) ([]events.Postings, error) {
 	c.lookupKeysCalls++
 	c.totalKeys += len(keys)
 	return c.Reader.LookupKeys(ctx, keys)
@@ -538,10 +537,11 @@ func TestQuery_PostFilterRejectsTermHashCollision(t *testing.T) {
 	require.True(t, before.Contains(1), "fixture sanity: id=1 indexes topic1=gamma")
 	require.False(t, before.Contains(4), "fixture sanity: id=4 not yet in topic1=gamma bitmap")
 
-	// ConcurrentBitmaps.AddTo is the writer-side API the ingest path uses
-	// to register (term, eventID) pairs. No concurrent ingest is running
-	// in this test, so the single-writer contract is satisfied.
-	fx.store.index().AddTo(gammaKey, 4)
+	// Inject through the hot index's dense overlay. An overlay entry SHADOWS
+	// window+runs for its term, so it must be complete — the engine's
+	// promotion path guarantees this via history backfill; the injection
+	// mirrors that by carrying the legitimate id=1 alongside the collision.
+	fx.store.hotIdx.overlay.AddTo(gammaKey, 1, 4)
 
 	after := lookupOne(t, fx.store, gammaKey)
 	require.True(t, after.Contains(4), "fixture sanity: collision id=4 is now in the bitmap")
@@ -850,7 +850,7 @@ func freezeFixtureToColdReader(t *testing.T, fx *queryFixture, chunkID chunk.ID)
 		}
 	}
 
-	require.NoError(t, cw.Finish(coldOffsets))
+	require.NoError(t, cw.Commit(coldOffsets))
 	require.NoError(t, WriteColdIndex(context.Background(), chunkID, idx, dir))
 
 	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})

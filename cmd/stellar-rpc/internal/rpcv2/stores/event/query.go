@@ -18,19 +18,15 @@ package event
 //     (match-all in the chunk), matching the getEvents convention.
 //
 // Optimization shape: terms are deduped across filters and issued
-// as a single Reader.LookupKeys call; per-filter intersections re-use
-// the returned bitmaps. On the cold path this collapses what would
+// as a single Reader.LookupKeys call. On the cold path this collapses what would
 // otherwise be one MPHF+index.pack round trip per filter into a
 // single coalesced read.
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"fmt"
 	"slices"
-
-	"github.com/RoaringBitmap/roaring/v2"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -175,7 +171,7 @@ var topicFieldByPosition = [protocol.MaxTopicCount]events.Field{
 // See QueryOptions / IDRange for the window, cap, and order
 // contract.
 //
-//nolint:gocognit,cyclop,funlen
+//nolint:cyclop
 func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) ([]events.Payload, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -234,100 +230,61 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	}
 
 	// ───── 2. Single batched lookup for all unique terms ─────
-	bitmaps, err := r.LookupKeys(ctx, uniqueKeys)
+	postings, err := r.LookupKeys(ctx, uniqueKeys)
 	if err != nil {
 		return nil, fmt.Errorf("events: query lookup: %w", err)
 	}
 
 	// ───── 3. Per-filter intersect ─────
 	//
-	// If any term in a filter is absent from the index (bitmaps[s] is
-	// nil), that filter's intersection is empty — skip it without
-	// contributing to the union.
 	//
-	// Bitmap ownership in perFilter is mixed:
-	//   - Single-constraint filter: we borrow bitmaps[s] directly (a
-	//     mirror snapshot from LookupKeys), skipping FastAnd's Clone.
-	//   - Multi-constraint filter: FastAnd allocates a fresh result.
-	// Either way the downstream union (FastOr) and selection never
-	// mutate their inputs, so a borrowed entry stays valid through
-	// the rest of the function. FastAnd never mutates its inputs
-	// either, so the same bitmap may appear across multiple filters
-	// safely.
-	perFilter := make([]*roaring.Bitmap, 0, len(filterPlans))
+	// Entries may be BORROWED store state, and stay borrowed to the end:
+	// Intersect and Union both pass a lone input through, and ClipRange can
+	// return its receiver. That is safe because nothing downstream writes to
+	// them (see Postings), and FetchEvents takes the ids read-only.
+	perFilter := make([]events.Postings, 0, len(filterPlans))
 	for _, slots := range filterPlans {
-		inputs := make([]*roaring.Bitmap, 0, len(slots))
-		missed := false
+		// Fresh slice per filter: Intersect sorts what it is given, and
+		// postings is indexed by slot for every filter, so handing it over
+		// directly would scramble the slot mapping.
+		inputs := make([]events.Postings, 0, len(slots))
 		for _, s := range slots {
-			if bitmaps[s] == nil {
-				missed = true
-				break
-			}
-			inputs = append(inputs, bitmaps[s])
+			inputs = append(inputs, postings[s])
 		}
-		if missed {
-			continue
+		// Intersect returns absent if any term missed, so a filter naming an
+		// unindexed term drops out of the union here.
+		if hits := events.Intersect(inputs); hits.Present() {
+			perFilter = append(perFilter, hits)
 		}
-		if len(inputs) == 1 {
-			perFilter = append(perFilter, inputs[0])
-			continue
-		}
-		// FastAnd intersects left-to-right — putting the smallest
-		// bitmap first shrinks the accumulator fastest. roaring's own
-		// docs call this out as the recommended caller-side prep.
-		slices.SortFunc(inputs, func(a, b *roaring.Bitmap) int {
-			return cmp.Compare(a.GetCardinality(), b.GetCardinality())
-		})
-		perFilter = append(perFilter, roaring.FastAnd(inputs...))
 	}
 
 	if len(perFilter) == 0 {
 		return nil, nil
 	}
 
-	// ───── 4. Union across filters ─────
-	// Single-filter case: FastOr would Clone — skip it and use the
-	// already-computed bitmap directly. That bitmap may be borrowed
-	// (from LookupKeys), so step 5's range And uses the fresh-result
-	// variant on that path to avoid mutating shared state.
-	var union *roaring.Bitmap
-	singleFilter := len(perFilter) == 1
-	if singleFilter {
-		union = perFilter[0]
-	} else {
-		union = roaring.FastOr(perFilter...)
-	}
+	// ───── 4. Union across filters, clipped to the range ─────
+	union := events.Union(perFilter)
 
 	// ───── 5. Apply event-ID range ─────
 	//
-	// The range AND enforces the caller's pinned window. It also clips
-	// phantom IDs from a concurrent hot-store ingest: the mirror
-	// publishes entries before offsets, so LookupKeys can briefly
-	// surface IDs past EventCount. The AND keeps Query's result
-	// strictly within the snapshot the caller pinned at request entry.
-	rangeBM := roaring.New()
-	rangeBM.AddRange(uint64(start), uint64(end))
-	if singleFilter {
-		union = roaring.And(union, rangeBM) // fresh result; union may be borrowed
-	} else {
-		union.And(rangeBM) // FastOr output is owned; in-place is fine
-	}
-
-	if union.IsEmpty() {
+	// The clip enforces the caller's pinned window. It also drops phantom
+	// IDs from a concurrent hot-store ingest: the mirror publishes entries
+	// before offsets, so LookupKeys can briefly surface IDs past EventCount.
+	// This keeps Query's result strictly within the snapshot the caller
+	// pinned at request entry.
+	union = union.ClipRange(start, end)
+	if !union.Present() {
 		return nil, nil
 	}
 
 	// ───── 6. Fetch payloads ─────
 	//
-	// selectEventIDs drains the union into the ascending []uint32
-	// FetchEvents requires, keeping the lowest IDs (ascending) or
-	// highest IDs (descending) when MaxEvents caps. FetchEvents
-	// returns owned payloads in ascending order; the defensive
-	// post-filter preserves that order, and we reverse once at the
-	// end for descending output.
+	// FetchEvents returns owned payloads in ascending order; the
+	// defensive post-filter preserves that order, and we reverse once
+	// at the end for descending output.
 	// NOTE: the MaxEvents cap lands here, BEFORE postFilter — a short
 	// page does not mean exhaustion (see QueryOptions.MaxEvents).
-	ids := selectEventIDs(union, opts.MaxEvents, descending)
+	ids := union.SelectIDs(opts.MaxEvents, descending)
 	payloads, err := r.FetchEvents(ctx, ids)
 	if err != nil {
 		return nil, err
@@ -423,46 +380,6 @@ func fetchAllInRange(
 		slices.Reverse(out)
 	}
 	return out, nil
-}
-
-// selectEventIDs drains bm into the sorted-ascending []uint32 that
-// Reader.FetchEvents requires, applying MaxEvents. When the cap bites
-// it keeps the lowest IDs for ascending and the highest for
-// descending; the returned slice is always ascending (the caller
-// reverses materialized payloads for descending output).
-//
-// The descending-capped branch pulls exactly `limit` IDs off the
-// reverse iterator (O(limit)) rather than draining the whole bitmap,
-// then sorts them ascending. Every other case walks the forward
-// ManyIterator, which yields strictly ascending, deduplicated uint32s.
-func selectEventIDs(bm *roaring.Bitmap, maxEvents int, descending bool) []uint32 {
-	card := bm.GetCardinality()
-	limit := card
-	if maxEvents > 0 && uint64(maxEvents) < limit {
-		limit = uint64(maxEvents)
-	}
-	// limit ≤ card (a chunk's event-id space, max ~10M today) and ≤
-	// maxEvents (int), so int conversions below are safe.
-	if descending && limit < card {
-		ids := make([]uint32, 0, limit)
-		ri := bm.ReverseIterator()
-		for ri.HasNext() && uint64(len(ids)) < limit {
-			ids = append(ids, ri.Next())
-		}
-		slices.Reverse(ids) // reverse-iterator order is descending → ascending
-		return ids
-	}
-	ids := make([]uint32, limit)
-	mi := bm.ManyIterator()
-	filled := 0
-	for filled < int(limit) { //nolint:gosec // limit ≤ maxEvents (int) ≤ MaxInt
-		n := mi.NextMany(ids[filled:])
-		if n == 0 {
-			break
-		}
-		filled += n
-	}
-	return ids[:filled]
 }
 
 // postFilter is the collision-defense pass: TermKey is

@@ -3,6 +3,7 @@ package ledger
 import (
 	"bytes"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -44,7 +45,7 @@ func openTestHotStoreAt(t *testing.T, path string) (*HotStore, *rocksdb.Store) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
-	return NewWithStore(store), store
+	return NewWithStore(store, DefaultZstdEncodeWorkers), store
 }
 
 func TestHotStore_AddGetRoundTripVerbatim(t *testing.T) {
@@ -251,13 +252,16 @@ func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 
 	var wg sync.WaitGroup
 	var stop atomic.Bool
-	const workers = 4
-	for w := range workers {
-		wg.Go(func() {
-			for i := uint32(0); !stop.Load(); i++ {
-				_ = addLedgers(h, Entry{Seq: uint32(w)*1_000_000 + i, Bytes: []byte("v")})
-			}
-		})
+	const readers = 4
+	// The write side is SINGLE-FLIGHT by contract: exactly one writer
+	// goroutine. Reads stay fully concurrent — with each other, with the
+	// writer, and with Close.
+	wg.Go(func() {
+		for i := uint32(0); !stop.Load(); i++ {
+			_ = addLedgers(h, Entry{Seq: 1_000_000 + i, Bytes: []byte("v")})
+		}
+	})
+	for range readers {
 		wg.Go(func() {
 			for i := uint32(0); !stop.Load(); i++ {
 				_, _ = h.GetLedgerRaw(i % 50)
@@ -453,4 +457,48 @@ func addLedgers(h *HotStore, entries ...Entry) error {
 		}
 		return nil
 	}))
+}
+
+// TestStartCompress_StateSurvivesGC pins the owned-state guarantee that
+// replaced the sync.Pool: the encode state (CGo context + retained dst
+// buffer) must survive arbitrary GC cycles between ledgers. The pool
+// predecessor was measured losing it ~1-in-5 ledgers to sync.Pool's
+// GC-emptying, re-allocating a worst-case dst (~15MB at stress) each time.
+func TestStartCompress_StateSurvivesGC(t *testing.T) {
+	h := NewWithStore(nil, DefaultZstdEncodeWorkers)        // StartCompress/Discard never touch the store
+	payload := bytes.Repeat([]byte("ledger bytes "), 1<<16) // ~832KB
+
+	warm := h.StartCompress(Entry{Seq: 1, Bytes: payload})
+	warm.Discard()
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	for i := range 20 {
+		runtime.GC()
+		runtime.GC() // two cycles: what evicted the sync.Pool state
+		p := h.StartCompress(Entry{Seq: uint32(i + 2), Bytes: payload})
+		p.Discard()
+	}
+	runtime.ReadMemStats(&after)
+	// 20 encodes may allocate goroutine/pending scaffolding (KBs) but must
+	// never re-allocate a dst-buffer-sized block.
+	require.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(len(payload)),
+		"encode state was dropped and re-allocated across GC cycles")
+}
+
+// TestStartCompress_SingleFlightGuard pins the narrowed write contract: a
+// second in-flight compression panics loudly instead of racing the owned
+// state; the latch releases on join/Discard.
+func TestStartCompress_SingleFlightGuard(t *testing.T) {
+	h := NewWithStore(nil, DefaultZstdEncodeWorkers)
+	payload := []byte("x")
+
+	first := h.StartCompress(Entry{Seq: 1, Bytes: payload})
+	require.Panics(t, func() { h.StartCompress(Entry{Seq: 2, Bytes: payload}) },
+		"second in-flight StartCompress must trip the single-flight latch")
+	first.Discard()
+
+	third := h.StartCompress(Entry{Seq: 3, Bytes: payload})
+	third.Discard() // latch released by the join — reusable again
 }

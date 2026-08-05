@@ -29,6 +29,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
 // RunDaemon is the full-history daemon's process entrypoint: load config, lock
@@ -311,6 +312,11 @@ func startConfig(
 	backend backfill.Backend, core CoreOpener, serveReads func(context.Context) error,
 	metrics observability.Metrics, sink ingest.MetricSink, hs *healthState, retention geometry.Retention,
 ) StartConfig {
+	// ONE resolved zstd_encode_workers value feeds BOTH ledger-frame encoders
+	// — the hot tier's (HotTuning) and the walk/backfill cold writer's
+	// (Process.ZstdEncodeWorkers) — because the setting is FORMAT-AFFECTING
+	// and the two must agree (see hotchunk.Tuning).
+	zstdWorkers := deref(cfg.Storage.ZstdEncodeWorkers)
 	exec := backfill.ExecConfig{
 		Catalog:    cat,
 		Logger:     logger,
@@ -318,8 +324,9 @@ func startConfig(
 		Workers:    deref(cfg.Backfill.Workers),
 		MaxRetries: deref(cfg.Backfill.MaxRetries),
 		Process: backfill.ProcessConfig{
-			Backend: backend,
-			Sink:    sink,
+			Backend:           backend,
+			Sink:              sink,
+			ZstdEncodeWorkers: zstdWorkers,
 		},
 	}
 	return StartConfig{
@@ -328,6 +335,7 @@ func startConfig(
 		Core:       core,
 		ServeReads: serveReads,
 		health:     hs,
+		HotTuning:  hotchunk.Tuning{ZstdEncodeWorkers: zstdWorkers},
 	}
 }
 

@@ -8,8 +8,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
-
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
@@ -336,7 +334,7 @@ func TestDeferredDeletion_BusyHandleRetriedAcrossRuns(t *testing.T) {
 	const c chunk.ID = 0
 	freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindTxHash)
 	freezeCoverage(t, cat, cat.TxHashIndexLayout().TxHashIndexID(c), c, c)
-	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
+	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	rpcv2test.IngestLedger(t, db, c.FirstLedger(), rpcv2test.ZeroTxLCMBytes(t, c.FirstLedger()))
 	require.NoError(t, cat.FlipHotReady(c))
@@ -352,9 +350,7 @@ func TestDeferredDeletion_BusyHandleRetriedAcrossRuns(t *testing.T) {
 	go func() {
 		defer close(done)
 		first := true
-		for _, ierr := range db.Source().RawLedgers(
-			context.Background(), ledgerbackend.BoundedRange(c.FirstLedger(), c.FirstLedger()),
-		) {
+		for _, ierr := range db.Ledgers().IterateLedgers(c.FirstLedger(), c.FirstLedger()) {
 			if ierr != nil {
 				return
 			}

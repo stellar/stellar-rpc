@@ -304,35 +304,59 @@ func (c *ColdReader) Offsets() (*events.LedgerOffsets, error) {
 	return m.offsets, nil
 }
 
-// verifyAndDeserializeBitmap checks the index.pack record's leading
-// fingerprint against key's prefix and, on match, unmarshals a fresh
-// bitmap. On fingerprint mismatch (residual MPHF collision on an
-// unseen key) it returns (nil, nil) — the caller treats nil as
-// not-found. record is valid only inside ReadItem's callback;
-// UnmarshalBinary copies into roaring's internal state so the
-// returned bitmap outlives the callback safely.
-func verifyAndDeserializeBitmap(record []byte, key events.TermKey, slot uint32) (*roaring.Bitmap, error) {
-	if len(record) < IndexRecordFingerprintLen {
-		return nil, fmt.Errorf("events: index.pack record at slot %d truncated (%d bytes)", slot, len(record))
+// verifyAndDecodePostings checks the index.pack record's leading fingerprint
+// against key's prefix and, on match, decodes its postings. On fingerprint
+// mismatch (residual MPHF collision on an unseen key) it returns the zero
+// Postings, which the caller treats as not-found.
+//
+// A delta term is returned un-materialized (see events.Intersect). record is
+// valid only inside ReadItems' callback, and neither codec aliases it, so the
+// result outlives the callback safely.
+func verifyAndDecodePostings(record []byte, key events.TermKey, slot uint32) (events.Postings, error) {
+	if len(record) <= IndexRecordFingerprintLen {
+		return events.Postings{}, fmt.Errorf(
+			"events: index.pack record at slot %d truncated (%d bytes)", slot, len(record))
 	}
 	if !bytes.Equal(record[:IndexRecordFingerprintLen], key[:IndexRecordFingerprintLen]) {
-		return nil, nil //nolint:nilnil // not-found signaled by nil bitmap, no error
+		return events.Postings{}, nil
 	}
-	bm := roaring.New()
-	if err := bm.UnmarshalBinary(record[IndexRecordFingerprintLen:]); err != nil {
-		return nil, fmt.Errorf("events: unmarshal bitmap at slot %d: %w", slot, err)
+	body := record[IndexRecordFingerprintLen:]
+	switch body[0] {
+	case itemCodecRoaring:
+		bm := roaring.New()
+		if err := bm.UnmarshalBinary(body[1:]); err != nil {
+			return events.Postings{}, fmt.Errorf("events: unmarshal bitmap at slot %d: %w", slot, err)
+		}
+		// UnmarshalBinary accepts shapes that are structurally invalid rather
+		// than merely unexpected, such as a run container holding no
+		// intervals, which reads back as a bitmap with containers but no
+		// postings. Reject them here, where the bytes are untrusted and the
+		// slot is known, rather than downstream where a caller assuming a
+		// present term holds at least one posting would fault.
+		if err := bm.Validate(); err != nil {
+			return events.Postings{}, fmt.Errorf("events: invalid bitmap at slot %d: %w", slot, err)
+		}
+		return events.BitmapPostings(bm), nil
+	case itemCodecDelta:
+		ids, err := events.DecodePostings(body[1:])
+		if err != nil {
+			return events.Postings{}, fmt.Errorf("events: decode postings at slot %d: %w", slot, err)
+		}
+		return events.IDPostings(ids), nil
+	default:
+		return events.Postings{}, fmt.Errorf(
+			"events: index.pack record at slot %d has unknown codec 0x%02x", slot, body[0])
 	}
-	return bm, nil
 }
 
-// LookupKeys returns bitmaps for each key, aligned positionally with
-// the input slice (result[i] corresponds to keys[i]). See
-// Reader.LookupKeys for the semantics.
+// LookupKeys returns each key's postings, aligned positionally with the input
+// slice (result[i] corresponds to keys[i]). See Reader.LookupKeys for the
+// semantics.
 //
 // Cold-side implementation:
 //
 //  1. MPHF-resolve every key. Keys rejected at the routing stage
-//     (streamhash ErrKeyNotFound) get result[i] = nil and never
+//     (streamhash ErrKeyNotFound) leave result[i] absent and never
 //     touch index.pack.
 //  2. Sort the surviving (key, slot) pairs by slot and dedupe —
 //     pathological residual collisions can map two distinct keys
@@ -342,11 +366,11 @@ func verifyAndDeserializeBitmap(record []byte, key events.TermKey, slot uint32) 
 //     calls and fans out across the worker count configured via
 //     ColdReaderOptions.Concurrency.
 //  4. In the callback, verify each pending key's fingerprint
-//     against the record header and unmarshal a fresh bitmap per
-//     match. Misses (fingerprint mismatch) leave result[i] = nil.
+//     against the record header and decode its postings per match.
+//     Misses (fingerprint mismatch) leave result[i] absent.
 //
 //nolint:cyclop // the four documented steps above, inline; splitting obscures the pass structure
-func (c *ColdReader) LookupKeys(ctx context.Context, keys []events.TermKey) ([]*roaring.Bitmap, error) {
+func (c *ColdReader) LookupKeys(ctx context.Context, keys []events.TermKey) ([]events.Postings, error) {
 	if c.closed.Load() {
 		return nil, stores.ErrStoreClosed
 	}
@@ -365,7 +389,7 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []events.TermKey) ([]*
 		return nil, err
 	}
 
-	results := make([]*roaring.Bitmap, len(keys))
+	results := make([]events.Postings, len(keys))
 
 	type pendingKey struct {
 		outIdx int
@@ -376,7 +400,7 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []events.TermKey) ([]*
 		slot, err := mphf.Lookup(key)
 		if err != nil {
 			if errors.Is(err, ErrKeyNotFound) {
-				continue // result[i] stays nil
+				continue
 			}
 			return nil, fmt.Errorf("events: LookupKeys MPHF for chunk %s: %w", c.chunkID, err)
 		}
@@ -404,16 +428,15 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []events.TermKey) ([]*
 
 	if err := c.index.ReadItems(ctx, positions, func(readIdx int, record []byte) error {
 		// Multiple pending keys may share this slot (residual MPHF
-		// collision). verifyAndDeserializeBitmap returns a fresh
-		// bitmap per match and (nil, nil) on fingerprint mismatch —
-		// leaving results[outIdx] = nil for misses.
+		// collision). verifyAndDecodePostings decodes per match and returns
+		// the zero Postings on fingerprint mismatch, leaving that key absent.
 		for _, pIdx := range pendingBySlot[readIdx] {
 			p := pending[pIdx]
-			bm, err := verifyAndDeserializeBitmap(record, keys[p.outIdx], p.slot)
+			post, err := verifyAndDecodePostings(record, keys[p.outIdx], p.slot)
 			if err != nil {
 				return err
 			}
-			results[p.outIdx] = bm
+			results[p.outIdx] = post
 		}
 		return nil
 	}); err != nil {

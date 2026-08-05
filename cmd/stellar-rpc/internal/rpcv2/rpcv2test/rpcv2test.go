@@ -32,7 +32,8 @@ func IngestLedger(t *testing.T, db *hotchunk.DB, seq uint32, raw []byte) {
 	t.Helper()
 	txParts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err)
-	_, err = db.IngestLedger(seq, xdr.LedgerCloseMetaView(raw), txParts)
+	_, err = db.IngestLedger(seq, xdr.LedgerCloseMetaView(raw), txParts,
+		db.StartCompress(seq, xdr.LedgerCloseMetaView(raw)))
 	require.NoError(t, err)
 }
 

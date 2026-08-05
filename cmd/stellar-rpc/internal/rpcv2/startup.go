@@ -18,6 +18,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
 // run is the daemon's startup, in two steps: (1) BACKFILL to the tip, then
@@ -85,7 +86,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// deferred close owns it (and g.Wait joins before run returns, so there is no
 	// window where neither owns it). Restarts re-enter run() from the top, so this
 	// stays the single initial-open site; the loop still reopens at each boundary.
-	hotDB, err := openHotDBForChunk(cat, chunk.IDFromLedger(resumeLedger), logger)
+	hotDB, err := openHotDBForChunk(cat, chunk.IDFromLedger(resumeLedger), logger, cfg.HotTuning)
 	if err != nil {
 		return fmt.Errorf("startup open resume hot tier for ledger %d: %w", resumeLedger, err)
 	}
@@ -125,7 +126,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// latest ledger and publishes handles from here, the freeze reads through them
 	// (HotHandle), and the lifecycle retires them at discard. Constructed per run —
 	// no query survives a restart. It will back the read server (#772).
-	registry, err := query.OpenRegistry(cat, cfg.Retention, hotDB, lastCommitted)
+	registry, err := query.OpenRegistry(cat, cfg.Retention, hotDB, lastCommitted, cfg.HotTuning)
 	if err != nil {
 		return fmt.Errorf("startup open registry: %w", err)
 	}
@@ -181,6 +182,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 			Health:     cfg.health,
 			Registry:   registry,
 			FeeWindows: cfg.FeeWindows,
+			Tuning:     cfg.HotTuning,
 		})
 		if err == nil {
 			// WithContext cancels gctx (unblocking the lifecycle sibling in g.Wait)
@@ -348,6 +350,13 @@ type StartConfig struct {
 
 	// Core starts captive core and yields the ingestion getter. Required.
 	Core CoreOpener
+
+	// HotTuning is the write-open tuning for every hot DB the daemon opens
+	// (the startup resume open and the loop's boundary reopens). Its
+	// ZstdEncodeWorkers field is FORMAT-AFFECTING (see hotchunk.Tuning) and
+	// resolves from the daemon config's storage.zstd_encode_workers; the
+	// backfill Exec carries the matching value for the walk's cold encode.
+	HotTuning hotchunk.Tuning
 
 	// ServeReads begins serving reads; it must return promptly, not block. Required.
 	ServeReads func(ctx context.Context) error
