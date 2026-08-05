@@ -42,7 +42,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/cespare/xxhash/v2"
 )
 
@@ -271,22 +270,19 @@ func buildWindowRow(rowBytes []byte, nTerms int) windowRow {
 	return row
 }
 
-// Get returns the term's bitmap (nil if absent): dense overlay fast path,
-// else window+runs materialization. Concurrent-safe.
-func (h *HotIndex) Get(term TermKey) (*roaring.Bitmap, error) {
-	if bm, err := h.overlay.Get(term); err != nil || bm != nil {
-		return bm, err
+// Get returns the term's postings (the zero value if absent): overlay fast
+// path, else window+runs. Concurrent-safe.
+//
+// Neither path materializes an id list into a bitmap.
+func (h *HotIndex) Get(term TermKey) (Postings, error) {
+	if post, err := h.overlay.Get(term); err != nil || post.Present() {
+		return post, err
 	}
 	ids, err := h.lookupSparse(h.view.Load(), term)
 	if err != nil {
-		return nil, err
+		return Postings{}, err
 	}
-	if len(ids) == 0 {
-		return nil, nil //nolint:nilnil // absent term = nil bitmap, like the mirror
-	}
-	bm := roaring.New()
-	bm.AddMany(ids)
-	return bm, nil
+	return IDPostings(ids), nil
 }
 
 // decodeRecordIDs decodes ONE packed record's ID list.

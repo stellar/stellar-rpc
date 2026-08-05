@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/linxGnu/grocksdb"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
@@ -184,12 +183,10 @@ func (h *HotStore) Offsets() (*LedgerOffsets, error) {
 	return h.offsets.View(), nil
 }
 
-// LookupKeys returns bitmaps for each key, aligned positionally with
-// the input slice. result[i] is nil if keys[i] has no matching
-//
-//	See Reader.LookupKeys for the semantics — in particular
-//
-// the borrowed-bitmap contract (callers must not mutate).
+// LookupKeys returns each key's postings, aligned positionally with the input
+// slice. result[i] is the zero Postings if keys[i] has no matching
+// events. See Reader.LookupKeys for the semantics — in particular the
+// borrowed-result contract (callers must not mutate).
 //
 // Hot-side implementation is N hot-index lookups: dense terms answer
 // from the in-memory overlay; sparse terms materialize from the
@@ -197,7 +194,7 @@ func (h *HotStore) Offsets() (*LedgerOffsets, error) {
 // cheap, but NOT I/O-free. Exposing this method satisfies the Reader
 // interface so callers can program against batched lookups
 // uniformly.
-func (h *HotStore) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.Bitmap, error) {
+func (h *HotStore) LookupKeys(ctx context.Context, keys []TermKey) ([]Postings, error) {
 	if h.chunkStore.IsClosed() {
 		return nil, stores.ErrStoreClosed
 	}
@@ -207,13 +204,13 @@ func (h *HotStore) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.B
 	if len(keys) == 0 {
 		return nil, nil
 	}
-	results := make([]*roaring.Bitmap, len(keys))
+	results := make([]Postings, len(keys))
 	for i, key := range keys {
-		bm, err := h.hotIdx.Get(key)
+		p, err := h.hotIdx.Get(key)
 		if err != nil {
 			return nil, fmt.Errorf("events: LookupKeys for chunk %s: %w", h.chunkID, err)
 		}
-		results[i] = bm // nil for misses — Get already returns nil bitmap for not-found
+		results[i] = p
 	}
 	return results, nil
 }

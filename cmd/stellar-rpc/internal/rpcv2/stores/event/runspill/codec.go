@@ -13,6 +13,13 @@ import (
 // in already-sorted order (the cold build's spill slab and run merge).
 func AppendTermPostings(dst []byte, term [16]byte, ids []uint32) []byte {
 	dst = append(dst, term[:]...)
+	return AppendPostings(dst, ids)
+}
+
+// AppendPostings appends one term's ID list — uvarint count, then the IDs
+// (first absolute, then strictly-positive deltas) — WITHOUT the 16-byte term
+// prefix, for consumers that already know which term they are reading.
+func AppendPostings(dst []byte, ids []uint32) []byte {
 	dst = binary.AppendUvarint(dst, uint64(len(ids)))
 	var prev uint32
 	for j, id := range ids {

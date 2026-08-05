@@ -465,9 +465,10 @@ func requireIndexesEquivalent(
 		require.NoError(t, gerr)
 		bmRuns, gerr := hRuns.Get(term)
 		require.NoError(t, gerr)
-		require.NotNil(t, bmMap, "term %x missing from map-path index", term)
-		require.NotNil(t, bmRuns, "term %x missing from runs-path index", term)
-		assert.Equal(t, bmMap.ToArray(), bmRuns.ToArray(), "contents diverged for term %x", term)
+		require.True(t, bmMap.Present(), "term %x missing from map-path index", term)
+		require.True(t, bmRuns.Present(), "term %x missing from runs-path index", term)
+		assert.Equal(t, bmMap.Bitmap().ToArray(), bmRuns.Bitmap().ToArray(),
+			"contents diverged for term %x", term)
 	}
 	for range 20 {
 		absent := hiKey(rng)
@@ -475,7 +476,7 @@ func requireIndexesEquivalent(
 		require.NoError(t, gerr)
 		bmRuns, gerr := hRuns.Get(absent)
 		require.NoError(t, gerr)
-		assert.Nil(t, bmMap)
-		assert.Nil(t, bmRuns)
+		assert.False(t, bmMap.Present())
+		assert.False(t, bmRuns.Present())
 	}
 }

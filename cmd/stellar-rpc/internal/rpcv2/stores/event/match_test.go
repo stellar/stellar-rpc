@@ -7,7 +7,6 @@ import (
 	"iter"
 	"testing"
 
-	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -54,7 +53,7 @@ type countingReader struct {
 	totalKeys       int
 }
 
-func (c *countingReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.Bitmap, error) {
+func (c *countingReader) LookupKeys(ctx context.Context, keys []TermKey) ([]Postings, error) {
 	c.lookupKeysCalls++
 	c.totalKeys += len(keys)
 	return c.Reader.LookupKeys(ctx, keys)
@@ -1172,19 +1171,19 @@ func TestQuery_InvalidFilterRejected(t *testing.T) {
 // multi-term group, and the overflow bucket is populated in any chunk holding
 // an event with topics.
 func TestUnionSlots(t *testing.T) {
-	first := roaring.BitmapOf(1, 2)
-	second := roaring.BitmapOf(3)
-	bitmaps := []*roaring.Bitmap{first, nil, second, nil}
+	first := IDPostings([]uint32{1, 2})
+	second := IDPostings([]uint32{3})
+	postings := []Postings{first, {}, second, {}}
 
-	assert.Same(t, first, unionSlots(bitmaps, []int{0}),
-		"a lone bitmap is borrowed, not cloned")
-	assert.Nil(t, unionSlots(bitmaps, []int{1}))
-	assert.Nil(t, unionSlots(bitmaps, []int{1, 3}),
+	assert.Equal(t, first, unionSlots(postings, []int{0}),
+		"a lone postings entry is borrowed, not cloned")
+	assert.False(t, unionSlots(postings, []int{1}).Present())
+	assert.False(t, unionSlots(postings, []int{1, 3}).Present(),
 		"a group absent from the index empties the filter")
-	assert.Same(t, second, unionSlots(bitmaps, []int{1, 2}),
-		"the one present bitmap in a group is borrowed too")
-	assert.Equal(t, []uint32{1, 2, 3}, unionSlots(bitmaps, []int{0, 2}).ToArray())
-	assert.Equal(t, []uint32{1, 2}, first.ToArray(), "inputs must not be mutated")
+	assert.Equal(t, second, unionSlots(postings, []int{1, 2}),
+		"the one present entry in a group is borrowed too")
+	assert.Equal(t, []uint32{1, 2, 3}, unionSlots(postings, []int{0, 2}).SelectIDs(0, false))
+	assert.Equal(t, []uint32{1, 2}, first.SelectIDs(0, false), "inputs must not be mutated")
 }
 
 // ─── Cold-reader parity coverage ────────────────────────────────────────

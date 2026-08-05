@@ -24,10 +24,10 @@ func TestWarmup_FreshChunkProducesEmptyMirrorsViaNewWithStore(t *testing.T) {
 	h := openHotStoreForTest(t, chunkID)
 
 	// A fresh mirror is empty: probing any term is a clean miss
-	// (nil bitmap, no error).
-	bm, err := h.store.hotIdx.Get(ComputeTermKey([]byte("any"), FieldContractID))
+	// (absent postings, no error).
+	post, err := h.store.hotIdx.Get(ComputeTermKey([]byte("any"), FieldContractID))
 	require.NoError(t, err)
-	assert.Nil(t, bm)
+	assert.False(t, post.Present())
 	assert.Zero(t, h.store.offsets.LedgerCount())
 	assert.Equal(t, uint32(0), h.store.offsets.TotalEvents())
 	assert.Equal(t, chunkID.FirstLedger(), h.store.offsets.StartLedger())
@@ -60,10 +60,10 @@ func TestWarmup_RebuildsMirrorFromIngestedRows(t *testing.T) {
 	}
 	expected := make(map[TermKey]uint64)
 	for _, k := range seededKeys {
-		bm, err := hot1.hotIdx.Get(k)
+		post, err := hot1.hotIdx.Get(k)
 		require.NoError(t, err)
-		require.NotNil(t, bm, "seeded term missing from the pre-close mirror")
-		expected[k] = bm.GetCardinality()
+		require.True(t, post.Present(), "seeded term missing from the pre-close mirror")
+		expected[k] = post.Cardinality()
 	}
 	require.NoError(t, raw1.Close())
 
@@ -72,10 +72,10 @@ func TestWarmup_RebuildsMirrorFromIngestedRows(t *testing.T) {
 
 	got := make(map[TermKey]uint64)
 	for k := range expected {
-		bm, err := hot2.hotIdx.Get(k)
+		post, err := hot2.hotIdx.Get(k)
 		require.NoError(t, err)
-		require.NotNil(t, bm, "seeded term missing from the reopened mirror")
-		got[k] = bm.GetCardinality()
+		require.True(t, post.Present(), "seeded term missing from the reopened mirror")
+		got[k] = post.Cardinality()
 	}
 	assert.Equal(t, expected, got)
 }

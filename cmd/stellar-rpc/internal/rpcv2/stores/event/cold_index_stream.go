@@ -6,8 +6,9 @@ package event
 // Bitmaps — the piece that removes the cold build's O(unique terms)
 // RAM. Shape (design doc: ~/bench-artifacts/cold-ingest-design.md):
 //
-//  1. MergeRuns → one scratch terms.run: per unique term, the RunOptimize'd
-//     serialized bitmap (16B term ‖ uvarint len ‖ bitmap bytes), CRC-framed.
+//  1. MergeRuns → one scratch terms.run: per unique term, the final
+//     index.pack item body under a 16B term and a uvarint length, CRC-framed,
+//     so pass B copies the body through untouched.
 //     Unique-term count N falls out — streamhash needs it exactly, up front.
 //  2. Pass A: stream terms.run keys → streamhash.NewSortedBuilder(N) →
 //     index.hash. Memcmp-sorted 16-byte keys are valid block-sorted input,
@@ -33,8 +34,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-
-	"github.com/RoaringBitmap/roaring/v2"
 
 	"github.com/stellar/streamhash"
 
@@ -165,9 +164,9 @@ func buildSortedHash(
 }
 
 // writeTermsRun merges the spill runs into one terms.run scratch file and
-// returns the unique-term count. Record: 16B term ‖ uvarint len ‖
-// RunOptimize'd serialized bitmap. File framing: magic ‖ u64 record count ‖
-// records ‖ CRC-32C(records) — the count doubles as streamhash's totalKeys.
+// returns the unique-term count. Record: 16B term ‖ uvarint len ‖ the
+// index.pack item body. File framing: magic ‖ u64 record count ‖ records ‖
+// CRC-32C(records) — the count doubles as streamhash's totalKeys.
 func writeTermsRun(path string, runPaths []string) (uint64, error) {
 	f, err := os.Create(path)
 	if err != nil {
@@ -184,22 +183,18 @@ func writeTermsRun(path string, runPaths []string) (uint64, error) {
 	var (
 		count   uint64
 		crc     uint32
-		bm      = roaring.New()
-		bmBuf   bytes.Buffer
+		bodyBuf []byte
 		recBuf  []byte
 		mergeED = func(rawTerm [16]byte, ids []uint32) error {
 			term := TermKey(rawTerm)
-			bm.Clear()
-			bm.AddMany(ids)
-			bm.RunOptimize() // canonical serialization — the byte-identity keystone
-			bmBuf.Reset()
-			if _, werr := bm.WriteTo(&bmBuf); werr != nil {
-				return fmt.Errorf("events: serialize bitmap: %w", werr)
+			var berr error
+			if bodyBuf, berr = encodeIndexBody(bodyBuf[:0], ids); berr != nil {
+				return berr
 			}
 			recBuf = recBuf[:0]
 			recBuf = append(recBuf, term[:]...)
-			recBuf = binary.AppendUvarint(recBuf, uint64(bmBuf.Len())) //nolint:gosec // Len is non-negative
-			recBuf = append(recBuf, bmBuf.Bytes()...)
+			recBuf = binary.AppendUvarint(recBuf, uint64(len(bodyBuf)))
+			recBuf = append(recBuf, bodyBuf...)
 			crc = crc32.Update(crc, termsRunCRC, recBuf)
 			count++
 			_, werr := w.Write(recBuf)
@@ -254,10 +249,10 @@ func (c *crcFoldReader) ReadByte() (byte, error) {
 }
 
 // streamTermsRun replays terms.run, calling emit per record with the term
-// and the serialized bitmap bytes (reused buffer). Integrity (CRC over all
+// and the item body (reused buffer). Integrity (CRC over all
 // records) is verified before returning nil — both passes fully drain, so a
 // corrupt scratch can never produce artifacts.
-func streamTermsRun(path string, emit func(term TermKey, bitmapBytes []byte) error) error {
+func streamTermsRun(path string, emit func(term TermKey, body []byte) error) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("events: open %s: %w", path, err)
@@ -291,14 +286,14 @@ func streamTermsRun(path string, emit func(term TermKey, bitmapBytes []byte) err
 		}
 		crc = cbr.crc
 		if length > 1<<31 {
-			return fmt.Errorf("%w: record %d bitmap length %d", errCorruptTermsRun, i, length)
+			return fmt.Errorf("%w: record %d body length %d", errCorruptTermsRun, i, length)
 		}
 		if uint64(cap(buf)) < length {
 			buf = make([]byte, length)
 		}
 		buf = buf[:length]
 		if _, err := io.ReadFull(br, buf); err != nil {
-			return fmt.Errorf("%w: record %d bitmap: %w", errCorruptTermsRun, i, err)
+			return fmt.Errorf("%w: record %d body: %w", errCorruptTermsRun, i, err)
 		}
 		crc = crc32.Update(crc, termsRunCRC, buf)
 		if err := emit(term, buf); err != nil {
@@ -320,7 +315,7 @@ func streamTermsRun(path string, emit func(term TermKey, bitmapBytes []byte) err
 type slotRecord struct {
 	slot uint32
 	fp   [IndexRecordFingerprintLen]byte
-	bm   []byte // owned copy
+	body []byte // owned copy
 }
 
 type slotHeap []slotRecord
@@ -351,14 +346,14 @@ func writeSlotOrdered(pw *packfile.Writer, termsRunPath string, m *mphf) error {
 			if !ok { // Push admits only slotRecord
 				panic("events: slotHeap yielded a foreign type")
 			}
-			if err := pw.AppendItem(rec.fp[:], rec.bm); err != nil {
+			if err := pw.AppendItem(rec.fp[:], rec.body); err != nil {
 				return fmt.Errorf("events: write slot %d to index.pack: %w", rec.slot, err)
 			}
 			next++
 		}
 		return nil
 	}
-	err := streamTermsRun(termsRunPath, func(term TermKey, bitmapBytes []byte) error {
+	err := streamTermsRun(termsRunPath, func(term TermKey, body []byte) error {
 		slot, lerr := m.LookupRouted(term)
 		if lerr != nil {
 			return fmt.Errorf("events: MPHF lookup during index.pack build: %w", lerr)
@@ -368,7 +363,7 @@ func writeSlotOrdered(pw *packfile.Writer, termsRunPath string, m *mphf) error {
 		if slot == next {
 			// Fast path: already in order — write through, then drain any
 			// buffered successors.
-			if err := pw.AppendItem(fp[:], bitmapBytes); err != nil {
+			if err := pw.AppendItem(fp[:], body); err != nil {
 				return fmt.Errorf("events: write slot %d to index.pack: %w", slot, err)
 			}
 			next++
@@ -378,7 +373,7 @@ func writeSlotOrdered(pw *packfile.Writer, termsRunPath string, m *mphf) error {
 			return fmt.Errorf("events: slot reorder heap exceeded %d records at slot %d — "+
 				"MPHF slots deviate beyond one block (non-dense or corrupt index.hash)", maxReorderEntries, slot)
 		}
-		heap.Push(&h, slotRecord{slot: slot, fp: fp, bm: append([]byte(nil), bitmapBytes...)})
+		heap.Push(&h, slotRecord{slot: slot, fp: fp, body: append([]byte(nil), body...)})
 		return nil
 	})
 	if err != nil {

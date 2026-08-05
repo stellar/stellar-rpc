@@ -98,16 +98,16 @@ func (hh *hotIndexHarness) ledger(fire TermKey, mids []TermKey, eventsN int) {
 func (hh *hotIndexHarness) verifyAll() {
 	hh.t.Helper()
 	for k, want := range hh.ref {
-		bm, err := hh.h.Get(k)
+		post, err := hh.h.Get(k)
 		require.NoError(hh.t, err)
-		require.NotNil(hh.t, bm, "term %x missing", k)
-		require.Equal(hh.t, want, bm.ToArray(), "term %x wrong ids", k)
+		require.True(hh.t, post.Present(), "term %x missing", k)
+		require.Equal(hh.t, want, post.Bitmap().ToArray(), "term %x wrong ids", k)
 	}
 	for range 20 {
 		absent := hiKey(hh.rng)
-		bm, err := hh.h.Get(absent)
+		post, err := hh.h.Get(absent)
 		require.NoError(hh.t, err)
-		assert.Nil(hh.t, bm, "absent term %x must miss", absent)
+		assert.False(hh.t, post.Present(), "absent term %x must miss", absent)
 	}
 }
 
@@ -290,8 +290,8 @@ func TestHotIndex_WriterReaderRace(t *testing.T) {
 					return
 				default:
 				}
-				if bm, err := h.Get(fire); err == nil && bm != nil {
-					_ = bm.GetCardinality() // full read of a held snapshot
+				if post, err := h.Get(fire); err == nil && post.Present() {
+					_ = post.Cardinality() // full read of a held snapshot
 				}
 				_, _ = h.Get(hiKey(rng)) // absent probes exercise blooms/fences
 			}
