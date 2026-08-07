@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -78,13 +79,13 @@ func (d *DB) ResetCache() {
 	d.cache.firstLedgerCloseTime = 0
 }
 
+const (
+	serveSQLitePragmas      = "_journal_mode=WAL&_synchronous=NORMAL"
+	indexBuildSQLitePragmas = serveSQLitePragmas + "&_cache_size=-32768" // size CREATE INDEX sorter's memory budget
+)
+
 func openSQLiteDB(dbFilePath string) (*db.Session, error) {
-	// 1. Use Write-Ahead Logging (WAL).
-	// 2. Disable WAL auto-checkpointing (we will do the checkpointing ourselves with wal_checkpoint pragmas
-	//    after every write transaction).
-	// 3. Use synchronous=NORMAL, which is faster and still safe in WAL mode.
-	session, err := db.Open("sqlite3",
-		fmt.Sprintf("file:%s?_journal_mode=WAL&_wal_autocheckpoint=0&_synchronous=NORMAL", dbFilePath))
+	session, err := db.Open("sqlite3", fmt.Sprintf("file:%s?%s", dbFilePath, serveSQLitePragmas))
 	if err != nil {
 		return nil, fmt.Errorf("open failed: %w", err)
 	}
@@ -92,6 +93,143 @@ func openSQLiteDB(dbFilePath string) (*db.Session, error) {
 	if err = runSQLMigrations(session.DB.DB, "sqlite3"); err != nil {
 		_ = session.Close()
 		return nil, fmt.Errorf("could not run SQL migrations: %w", err)
+	}
+	return session, nil
+}
+
+// Backfilled DBs carry the transactions hash key as an explicit unique index
+// instead of the migrations' PRIMARY KEY since an explicit index can be dropped
+// for the load and built at finalize.
+const bulkTransactionsDDL = `CREATE TABLE transactions (
+    hash BLOB NOT NULL, -- 32-byte binary
+    ledger_sequence INTEGER NOT NULL,
+    application_order INTEGER NOT NULL
+)`
+
+// Recreated with the table at prepare; the bulk load's per-commit trims need it.
+const ledgerSequenceIndexDDL = "CREATE INDEX index_ledger_sequence ON transactions(ledger_sequence)"
+
+// pendingIndexesMetaKey holds the JSON list of indexes still to be built by
+// FinalizeBulkLoad, written at prepare and cleared at finalize.
+const pendingIndexesMetaKey = "BulkLoadPendingIndexes"
+
+// deferredIndex is one index absent during a bulk load, built by FinalizeBulkLoad.
+type deferredIndex struct {
+	Name string `json:"name"`
+	DDL  string `json:"ddl"`
+}
+
+// deferredIndexes are the indexes dropped by PrepareBulkLoad.
+//
+//nolint:gochecknoglobals // effectively-constant list
+var deferredIndexes = []deferredIndex{
+	{Name: "idx_transactions_hash", DDL: "CREATE UNIQUE INDEX idx_transactions_hash ON transactions(hash)"},
+	{Name: "idx_id_contract_id", DDL: "CREATE INDEX idx_id_contract_id ON events (contract_id, id)"},
+	{Name: "idx_id_topic1", DDL: "CREATE INDEX idx_id_topic1 ON events (topic1, id)"},
+}
+
+// PrepareBulkLoad idempotently reshapes an empty DB for a backfill by deferring
+// the creation of the indexes that would otherwise slow down the load.
+func PrepareBulkLoad(ctx context.Context, session db.SessionInterface, logger *log.Entry) error {
+	pending, err := json.Marshal(deferredIndexes)
+	if err != nil {
+		return fmt.Errorf("could not encode deferred index record: %w", err)
+	}
+	if err := session.Begin(ctx); err != nil {
+		return fmt.Errorf("could not begin bulk-load prepare: %w", err)
+	}
+	defer func() {
+		_ = session.Rollback() // no-op after commit
+	}()
+
+	stmts := make([]string, 0, len(deferredIndexes)+3)
+	for _, idx := range deferredIndexes {
+		stmts = append(stmts, "DROP INDEX IF EXISTS "+idx.Name)
+	}
+	stmts = append(stmts,
+		"DROP TABLE IF EXISTS "+transactionTableName,
+		bulkTransactionsDDL,
+		ledgerSequenceIndexDDL,
+	)
+	for _, stmt := range stmts {
+		if _, err := session.ExecRaw(ctx, stmt); err != nil {
+			return fmt.Errorf("bulk-load prepare failed on %q: %w", stmt, err)
+		}
+	}
+	query := sq.Replace(metaTableName).Values(pendingIndexesMetaKey, string(pending))
+	if _, err := session.Exec(ctx, query); err != nil {
+		return fmt.Errorf("could not record deferred indexes: %w", err)
+	}
+	if err := session.Commit(); err != nil {
+		return fmt.Errorf("could not commit bulk-load prepare: %w", err)
+	}
+	logger.Infof("Reshaped empty DB for backfill bulk-load, deferring %d indexes", len(deferredIndexes))
+	return nil
+}
+
+// FinalizeBulkLoad builds the indexes deferred by PrepareBulkLoad and clears
+// the record.
+func FinalizeBulkLoad(ctx context.Context, d *DB, dbFilePath string, logger *log.Entry) error {
+	pendingJSON, err := getMetaValue(ctx, d, pendingIndexesMetaKey)
+	if errors.Is(err, ErrEmptyDB) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("could not read deferred index record: %w", err)
+	}
+	var pending []deferredIndex
+	if err := json.Unmarshal([]byte(pendingJSON), &pending); err != nil {
+		return fmt.Errorf("could not decode deferred index record %q: %w", pendingJSON, err)
+	}
+
+	session, err := openIndexBuildSession(ctx, dbFilePath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := session.Close(); err != nil {
+			logger.WithError(err).Warn("could not close index build session")
+		}
+	}()
+
+	for _, idx := range pending {
+		var count int
+		if err := session.GetRaw(ctx, &count,
+			"SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?", idx.Name); err != nil {
+			return fmt.Errorf("could not check index %s: %w", idx.Name, err)
+		}
+		if count > 0 { // built before an earlier finalize was interrupted
+			continue
+		}
+		logger.Infof("Building index %s (may take minutes, no progress output)", idx.Name)
+		startTime := time.Now()
+		if _, err := session.ExecRaw(ctx, idx.DDL); err != nil {
+			return fmt.Errorf("could not build index %s: %w", idx.Name, err)
+		}
+		if _, err := session.ExecRaw(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+			return fmt.Errorf("could not checkpoint after building index %s: %w", idx.Name, err)
+		}
+		logger.WithField("duration", time.Since(startTime).String()).
+			Infof("Built index %s", idx.Name)
+	}
+	if _, err := session.ExecRaw(ctx,
+		"DELETE FROM "+metaTableName+" WHERE key = ?", pendingIndexesMetaKey); err != nil {
+		return fmt.Errorf("could not clear deferred index record: %w", err)
+	}
+	return nil
+}
+
+// openIndexBuildSession opens the single-connection session used for bulk
+// schema restoration, with the multithreaded sorter enabled.
+func openIndexBuildSession(ctx context.Context, dbFilePath string) (*db.Session, error) {
+	session, err := db.Open("sqlite3", fmt.Sprintf("file:%s?%s", dbFilePath, indexBuildSQLitePragmas))
+	if err != nil {
+		return nil, fmt.Errorf("open index build session failed: %w", err)
+	}
+	// Single connection so the threads pragma applies to later statements
+	session.DB.SetMaxOpenConns(1)
+	if _, err := session.ExecRaw(ctx, "PRAGMA threads=4"); err != nil {
+		_ = session.Close()
+		return nil, fmt.Errorf("could not enable multithreaded sorter: %w", err)
 	}
 	return session, nil
 }
@@ -267,13 +405,13 @@ func (rw *readWriter) NewTx(ctx context.Context) (WriteTx, error) {
 		historyRetentionWindow: rw.historyRetentionWindow,
 		ledgerWriter:           ledgerWriter{stmtCache: stmtCache},
 
-		txWriter: transactionHandler{
+		txWriter: &transactionHandler{
 			log:        rw.log,
 			db:         txSession,
 			stmtCache:  stmtCache,
 			passphrase: rw.passphrase,
 		},
-		eventWriter: eventHandler{
+		eventWriter: &eventHandler{
 			log:        rw.log,
 			db:         txSession,
 			stmtCache:  stmtCache,
@@ -293,8 +431,8 @@ type writeTx struct {
 	tx                     db.SessionInterface
 	stmtCache              *sq.StmtCache
 	ledgerWriter           ledgerWriter
-	txWriter               transactionHandler
-	eventWriter            eventHandler
+	txWriter               *transactionHandler
+	eventWriter            *eventHandler
 	historyRetentionWindow uint32
 }
 
@@ -303,39 +441,23 @@ func (w writeTx) LedgerWriter() LedgerWriter {
 }
 
 func (w writeTx) TransactionWriter() TransactionWriter {
-	return &w.txWriter
+	return w.txWriter
 }
 
 func (w writeTx) EventWriter() EventWriter {
-	return &w.eventWriter
+	return w.eventWriter
 }
 
 func (w writeTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta, durationMetrics map[string]time.Duration) error {
 	ledgerSeq := ledgerCloseMeta.LedgerSequence()
 	ledgerCloseTime := ledgerCloseMeta.LedgerCloseTime()
 
-	startTime := time.Now()
-	if err := w.ledgerWriter.trimLedgers(ledgerSeq, w.historyRetentionWindow); err != nil {
+	if err := w.flushWriters(durationMetrics); err != nil {
 		return err
-	}
-	if durationMetrics != nil {
-		durationMetrics["trim_ledgers"] = time.Since(startTime)
 	}
 
-	startTime = time.Now()
-	if err := w.txWriter.trimTransactions(ledgerSeq, w.historyRetentionWindow); err != nil {
+	if err := w.trimTables(ledgerSeq, durationMetrics); err != nil {
 		return err
-	}
-	if durationMetrics != nil {
-		durationMetrics["trim_transactions"] = time.Since(startTime)
-	}
-
-	startTime = time.Now()
-	if err := w.eventWriter.trimEvents(ledgerSeq, w.historyRetentionWindow); err != nil {
-		return err
-	}
-	if durationMetrics != nil {
-		durationMetrics["trim_events"] = time.Since(startTime)
 	}
 
 	// We need to make the cache update atomic with the transaction commit.
@@ -366,7 +488,7 @@ func (w writeTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta, durationMetrics map
 		}
 		return nil
 	}
-	startTime = time.Now()
+	startTime := time.Now()
 	if err := commitAndUpdateCache(); err != nil {
 		return err
 	}
@@ -386,6 +508,47 @@ func (w writeTx) Rollback() error {
 		return nil
 	}
 	return err
+}
+
+func (w writeTx) flushWriters(durationMetrics map[string]time.Duration) error {
+	flushStart := time.Now()
+	if err := w.txWriter.flushPending(); err != nil {
+		return err
+	}
+	if err := w.eventWriter.flushPending(); err != nil {
+		return err
+	}
+	if durationMetrics != nil {
+		durationMetrics["flush"] = time.Since(flushStart)
+	}
+	return nil
+}
+
+func (w writeTx) trimTables(ledgerSeq uint32, durationMetrics map[string]time.Duration) error {
+	startTime := time.Now()
+	if err := w.ledgerWriter.trimLedgers(ledgerSeq, w.historyRetentionWindow); err != nil {
+		return err
+	}
+	if durationMetrics != nil {
+		durationMetrics["trim_ledgers"] = time.Since(startTime)
+	}
+
+	startTime = time.Now()
+	if err := w.txWriter.trimTransactions(ledgerSeq, w.historyRetentionWindow); err != nil {
+		return err
+	}
+	if durationMetrics != nil {
+		durationMetrics["trim_transactions"] = time.Since(startTime)
+	}
+
+	startTime = time.Now()
+	if err := w.eventWriter.trimEvents(ledgerSeq, w.historyRetentionWindow); err != nil {
+		return err
+	}
+	if durationMetrics != nil {
+		durationMetrics["trim_events"] = time.Since(startTime)
+	}
+	return nil
 }
 
 func runSQLMigrations(db *sql.DB, dialect string) error {
