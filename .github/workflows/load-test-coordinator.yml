@@ -11,9 +11,7 @@ defaults:
 
 on:
   push:
-    # temporary scaffolding: before merge to main, replace with line
-    # branches: [release/**]
-    branches: [release/**, optimize-backfill]
+    branches: [release/**]
   workflow_dispatch:
     inputs:
       target_ref:
@@ -59,7 +57,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REF: ${{ inputs.target_ref || github.ref_name }}
           PR: ${{ inputs.pr_number }}
-        # TODO: Restore relevant legs before merging (removed apply load + bench leg)
         run: |
           SHA="$(git rev-parse HEAD)"
           if [ -z "$PR" ]; then
@@ -78,16 +75,13 @@ jobs:
           # One roster (comment order) drives both the report job and the
           # matrix fan-out: entries carrying a script ride the matrix; the
           # chained backfill + blaster pair runs as explicit jobs below.
-          # Unquoted heredoc so $BASELINE and $PERF_EVAL expand
-          PERF_EVAL=cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval
-          # {"label":"Apply-load ingestion","run_label":"apply-load","budget":225,
-          #  "script":"$PERF_EVAL/ingest-load-test/run-load-test.sh"},
-          # {"label":"Go endpoint benchmarks","run_label":"go-bench","budget":120,"root_volume_gb":50,
-          #  "script":"$PERF_EVAL/go-bench/run-go-bench.sh","extra_env":"export BASELINE_REF=$BASELINE"}
+          # Unquoted heredoc so $BASELINE expands into the go-bench entry;
           LEGS="$(jq -c . <<EOF
           [
+            {"label":"Apply-load ingestion","run_label":"apply-load","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh","budget":225},
             {"label":"Backfill ingestion","run_label":"backfill"},
-            {"label":"Endpoint load test","run_label":"blaster"}
+            {"label":"Endpoint load test","run_label":"blaster"},
+            {"label":"Go endpoint benchmarks","run_label":"go-bench","script":"cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/go-bench/run-go-bench.sh","budget":120,"root_volume_gb":50,"extra_env":"export BASELINE_REF=$BASELINE"}
           ]
           EOF
           )"
@@ -192,7 +186,7 @@ jobs:
           if [ -n "$PR" ]; then
             CID=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
               --jq "map(select(.user.login == \"github-actions[bot]\" and
-                       (.body | startswith(\"$MARKER\")))) | .[0].id // empty" || true)
+                              (.body | startswith(\"$MARKER\")))) | .[0].id // empty" || true)
             [ -n "$CID" ] && PREV=$(gh api "repos/$REPO/issues/comments/$CID" --jq '.body' || true)
           fi
 
