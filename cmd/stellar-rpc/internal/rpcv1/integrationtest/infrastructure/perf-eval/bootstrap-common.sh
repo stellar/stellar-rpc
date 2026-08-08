@@ -34,7 +34,16 @@ DEFAULT_BRANCH=main
 log "installing aws cli + jq"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq --no-install-recommends awscli jq curl ca-certificates
+apt-get install -y -qq --no-install-recommends jq curl ca-certificates unzip
+# Ubuntu 22.04 ships awscli as an apt package; 24.04 dropped it, so fall back
+# to the AWS CLI v2 bundle there. Failures before this point cannot publish a
+# verdict — the poller's budget deadline is what catches those.
+if ! apt-get install -y -qq --no-install-recommends awscli; then
+  log "no awscli apt package; installing AWS CLI v2 from the bundle"
+  curl -sSfL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
+  unzip -q /tmp/awscliv2.zip -d /tmp
+  /tmp/aws/install
+fi
 
 # upload_result publishes {verdict, markdown} as the run's result object so the
 # gatherer (polling S3) sees a verdict. Covers the fail paths.
