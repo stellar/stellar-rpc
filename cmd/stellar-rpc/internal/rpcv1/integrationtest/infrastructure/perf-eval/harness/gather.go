@@ -85,7 +85,8 @@ func Gather(ctx context.Context) error {
 		time.Sleep(pollInterval)
 	}
 
-	return writeTimeoutComment(ctx, runner, githubOutput, instanceID, resultsTimeout, debugLogLines)
+	headline := fmt.Sprintf("❌ Load test did not produce results within %.0fs.", resultsTimeout.Seconds())
+	return writeNoVerdictComment(ctx, runner, githubOutput, instanceID, headline, debugLogLines)
 }
 
 // ssmRunner runs shell commands on one instance over SSM RunShellScript.
@@ -137,17 +138,17 @@ func (r *ssmRunner) debugTail(ctx context.Context, n int) string {
 	return out
 }
 
-// writeTimeoutComment is the no-verdict path: it writes a comment to
-// /tmp/timeout-comment.md and records found=false.
-func writeTimeoutComment(
+// writeNoVerdictComment is the no-verdict path: it writes the caller's
+// headline plus the box context to /tmp/timeout-comment.md and records
+// found=false.
+func writeNoVerdictComment(
 	ctx context.Context,
 	runner *ssmRunner,
-	githubOutput, instanceID string,
-	resultsTimeout time.Duration,
+	githubOutput, instanceID, headline string,
 	debugLogLines int,
 ) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "❌ Load test did not produce results within %.0fs.\n\n", resultsTimeout.Seconds())
+	fmt.Fprintf(&b, "%s\n\n", headline)
 	fmt.Fprintf(&b, "Instance: `%s`\n", instanceID)
 	srv, repo, run := os.Getenv("GITHUB_SERVER_URL"), os.Getenv("GITHUB_REPOSITORY"), os.Getenv("GITHUB_RUN_ID")
 	if srv != "" && repo != "" && run != "" {
