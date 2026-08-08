@@ -1,0 +1,98 @@
+name: Bench box reaper
+# Terminates bench-campaign boxes whose deadline tag has passed. It is the
+# backstop behind bench-campaign.yml's cleanup job and the box's own
+# self-terminate ceiling: those cover a cancelled or crashed workflow and a
+# healthy box respectively, but neither covers a box whose shutdown was never
+# scheduled (e.g. user-data died before bootstrap-common.sh ran).
+# bench-campaign.yml sets the deadline tag at launch to the box's self-terminate
+# ceiling plus a margin, so it always expires after that shutdown would have
+# fired.
+
+on:
+  # Schedules only fire from the default branch, so this is inert until it lands
+  # on main; workflow_dispatch is how it gets tested before then.
+  schedule:
+    - cron: '17,47 * * * *'
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # OIDC AssumeRole into the GHA role
+  contents: read
+
+concurrency:
+  group: bench-reaper
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  reap:
+    name: Reap expired bench boxes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      AWS_REGION: us-east-1
+    steps:
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 900
+
+      - name: Terminate boxes past their deadline
+        id: reap
+        run: |
+          NOW=$(date +%s)
+          # shellcheck disable=SC2016 # the backticks in the JMESPath query are literals, not command substitution
+          BOXES=$(aws ec2 describe-instances \
+            --filters "Name=tag:rpc-bench,Values=true" \
+                      "Name=instance-state-name,Values=pending,running" \
+            --query 'Reservations[].Instances[].{id:InstanceId,deadline:Tags[?Key==`deadline`]|[0].Value}' \
+            --output json)
+
+          # An untagged box is not this workflow's business to kill — it may be a
+          # hand-launched debugging box. Report it instead.
+          UNTAGGED=$(jq -r '[.[] | select(.deadline == null or .deadline == "" or (.deadline | test("^[0-9]+$") | not)) | .id] | join(" ")' <<<"$BOXES")
+          [ -z "$UNTAGGED" ] || echo "::warning::rpc-bench boxes without a usable deadline tag, left alone: $UNTAGGED"
+
+          EXPIRED=$(jq -r --argjson now "$NOW" \
+            '[.[] | select(.deadline != null and (.deadline | test("^[0-9]+$")) and (.deadline | tonumber) < $now) | .id] | join(" ")' \
+            <<<"$BOXES")
+          if [ -z "$EXPIRED" ]; then
+            echo "no expired rpc-bench boxes"
+            echo "terminated=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "terminating past-deadline boxes: $EXPIRED"
+          # shellcheck disable=SC2086 # EXPIRED is a space-separated id list by construction
+          aws ec2 terminate-instances --instance-ids $EXPIRED >/dev/null
+          echo "terminated=$EXPIRED" >> "$GITHUB_OUTPUT"
+
+      # A reap means a campaign box outlived every in-band ceiling, which is worth
+      # a human look. Same degrade-to-warning rule as bench-campaign.yml: the
+      # webhook secret is not provisioned yet and must not fail this job.
+      - name: Alert on reaped boxes
+        if: steps.reap.outputs.terminated != ''
+        env:
+          TERMINATED: ${{ steps.reap.outputs.terminated }}
+          WEBHOOK: ${{ secrets.SLACK_BENCH_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          TEXT="⚠️ bench reaper terminated past-deadline box(es): $TERMINATED · $RUN_URL"
+          echo "$TEXT"
+          echo "$TEXT" >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "$WEBHOOK" ]; then
+            echo "::warning::SLACK_BENCH_WEBHOOK_URL is unset; alert not delivered"
+            exit 0
+          fi
+          jq -n --arg text "$TEXT" '{text: $text}' > /tmp/slack.json
+          if curl -fsS -X POST -H 'Content-Type: application/json' \
+               --data @/tmp/slack.json "$WEBHOOK" >/dev/null; then
+            echo "slack notified"
+          else
+            echo "::warning::slack alert failed"
+          fi
