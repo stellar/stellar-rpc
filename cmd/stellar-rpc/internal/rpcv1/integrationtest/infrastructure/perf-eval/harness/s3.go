@@ -23,7 +23,7 @@ import (
 // a 404.
 type Result struct {
 	SchemaVersion int             `json:"schemaVersion"`
-	Verdict       string          `json:"verdict"` // "ok" or "fail"
+	Verdict       string          `json:"verdict"` // "ok" or "fail"; bench-campaign launches also seed a "pending" marker
 	Markdown      string          `json:"markdown"`
 	Bench         json.RawMessage `json:"bench,omitempty"`
 	RunID         string          `json:"runId"`
