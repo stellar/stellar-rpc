@@ -40,7 +40,7 @@ RUN wget -O /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-sn
 RUN echo 'deb http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main' > /etc/apt/sources.list.d/llvm.list
 RUN echo 'deb-src http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main' >> /etc/apt/sources.list.d/llvm.list
 
-RUN apt update && apt install -y stellar-core=${STELLAR_CORE_VERSION}
+RUN apt update && apt install -y --no-install-recommends stellar-core=${STELLAR_CORE_VERSION}
 RUN apt clean
 
 # Copy the binary from the build stage
