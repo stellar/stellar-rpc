@@ -8,6 +8,10 @@
 * XDR has been updated to support Protocol 28 (CAP-0083, CAP-0085) ([#913](https://github.com/stellar/stellar-rpc/pull/913)).
 * The preflight hosts have been rotated to soroban-env-host 28.0.1 (27.0.1 for the previous protocol) and integration tests now run against stellar-core 28.0.0 ([#913](https://github.com/stellar/stellar-rpc/pull/913)).
 
+### Fixed
+* Backfill ingestion is significantly faster: the bulk load defers index creation and batches its writes ([#854](https://github.com/stellar/stellar-rpc/pull/854)).
+* Bumped dependencies to latest versions, and the release image no longer installs recommended packages ([#928](https://github.com/stellar/stellar-rpc/pull/928)).
+
 ## [v27.1.1](https://github.com/stellar/stellar-rpc/compare/v27.1.0...v27.1.1)
 
 ### Fixed
