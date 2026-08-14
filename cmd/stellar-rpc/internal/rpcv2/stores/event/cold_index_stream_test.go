@@ -47,6 +47,40 @@ func synthTerms(n int, seed int64) map[events.TermKey][]uint32 {
 	return out
 }
 
+func TestStreamTermsRun_Offsets(t *testing.T) {
+	corpus := synthTerms(100, 27)
+	scratch := t.TempDir()
+	sp, err := runspill.NewSpiller(scratch, 1<<14)
+	require.NoError(t, err)
+	for term, ids := range corpus {
+		for _, id := range ids {
+			require.NoError(t, sp.Add(term, id))
+		}
+	}
+	runs, err := sp.Finish()
+	require.NoError(t, err)
+
+	termsRunPath := filepath.Join(scratch, "terms.run")
+	count, err := writeTermsRun(termsRunPath, runs)
+	require.NoError(t, err)
+	require.Equal(t, uint64(len(corpus)), count)
+
+	termsRun, err := os.Open(termsRunPath)
+	require.NoError(t, err)
+	defer termsRun.Close()
+
+	var streamed int
+	require.NoError(t, streamTermsRun(termsRunPath, func(_ events.TermKey, body []byte, bodyOff int64) error {
+		got := make([]byte, len(body))
+		_, readErr := termsRun.ReadAt(got, bodyOff)
+		require.NoError(t, readErr)
+		require.Equal(t, body, got)
+		streamed++
+		return nil
+	}))
+	require.Equal(t, len(corpus), streamed)
+}
+
 // TestWriteColdIndexFromRuns_ByteIdentical is the cold design's gate: the
 // streaming build's index.pack + index.hash must be bit-for-bit equal to
 // WriteColdIndex fed the equivalent in-memory Bitmaps.
