@@ -1,11 +1,16 @@
 package event
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,6 +19,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events/runspill"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 )
 
 // synthTerms builds a synthetic term→ids corpus: a firehose term holding
@@ -45,6 +51,134 @@ func synthTerms(n int, seed int64) map[events.TermKey][]uint32 {
 		out[single] = append(out[single], id)
 	}
 	return out
+}
+
+func largeTermsCorpus(seed int64, count int) ([]events.TermKey, *rand.Rand) {
+	rng := rand.New(rand.NewSource(seed))
+	keys := make([]events.TermKey, count)
+	for i := range keys {
+		_, _ = rng.Read(keys[i][:])
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return bytes.Compare(keys[i][:], keys[j][:]) < 0
+	})
+	return keys, rng
+}
+
+func writeLargeTermsRun(t *testing.T, path string, seed int64, count, bodySize int) []events.TermKey {
+	t.Helper()
+	keys, rng := largeTermsCorpus(seed, count)
+	f, err := os.Create(path)
+	require.NoError(t, err)
+	defer f.Close()
+	w := bufio.NewWriterSize(f, 1<<20)
+
+	var hdr [12]byte
+	copy(hdr[:4], termsRunMagic[:])
+	binary.BigEndian.PutUint64(hdr[4:], uint64(count))
+	_, err = w.Write(hdr[:])
+	require.NoError(t, err)
+
+	body := make([]byte, bodySize)
+	length := binary.AppendUvarint(nil, uint64(bodySize))
+	var crc uint32
+	for _, key := range keys {
+		_, err = rng.Read(body)
+		require.NoError(t, err)
+		crc = crc32.Update(crc, termsRunCRC, key[:])
+		crc = crc32.Update(crc, termsRunCRC, length)
+		crc = crc32.Update(crc, termsRunCRC, body)
+		_, err = w.Write(key[:])
+		require.NoError(t, err)
+		_, err = w.Write(length)
+		require.NoError(t, err)
+		_, err = w.Write(body)
+		require.NoError(t, err)
+	}
+	var trailer [4]byte
+	binary.BigEndian.PutUint32(trailer[:], crc)
+	_, err = w.Write(trailer[:])
+	require.NoError(t, err)
+	require.NoError(t, w.Flush())
+	require.NoError(t, f.Close())
+	return keys
+}
+
+func formerReorderPeak(t *testing.T, keys []events.TermKey, bodySize int, m *mphf) int64 {
+	t.Helper()
+	waiting := make(map[uint32]int64, len(keys))
+	var next uint32
+	var buffered, peak int64
+	for _, key := range keys {
+		slot, err := m.Lookup(key)
+		require.NoError(t, err)
+		if slot != next {
+			waiting[slot] = int64(bodySize)
+			buffered += int64(bodySize)
+		} else {
+			next++
+			for {
+				n, ok := waiting[next]
+				if !ok {
+					break
+				}
+				delete(waiting, next)
+				buffered -= n
+				next++
+			}
+		}
+		peak = max(peak, buffered)
+	}
+	return peak
+}
+
+func TestWriteSlotOrdered_BuffersBeyondFormerByteCap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("writes about 200 MiB of temporary data")
+	}
+	const (
+		seed     = int64(29)
+		count    = 20
+		bodySize = 5 << 20
+	)
+	dir := t.TempDir()
+	termsRunPath := filepath.Join(dir, "terms.run")
+	hashPath := filepath.Join(dir, "index.hash")
+	packPath := filepath.Join(dir, "index.pack")
+	keys := writeLargeTermsRun(t, termsRunPath, seed, count, bodySize)
+
+	require.NoError(t, buildSortedHash(context.Background(), termsRunPath, hashPath, count))
+	m, err := openMPHF(hashPath)
+	require.NoError(t, err)
+	defer m.Close()
+	peak := formerReorderPeak(t, keys, bodySize, m)
+	require.Greater(t, peak, int64(64<<20), "corpus must exceed the former copied-body cap")
+
+	pw, err := packfile.Create(packPath, packfile.WriterOptions{
+		Format:         indexPackFormat,
+		ItemsPerRecord: indexPackItemsPerRecord,
+		Overwrite:      true,
+		BytesPerSync:   indexPackBytesPerSync,
+	})
+	require.NoError(t, err)
+	defer pw.Close()
+	require.NoError(t, writeSlotOrdered(pw, termsRunPath, m))
+
+	records := loadIndexPack(t, packPath)
+	require.Len(t, records, count)
+	verifyKeys, rng := largeTermsCorpus(seed, count)
+	body := make([]byte, bodySize)
+	want := make([]byte, IndexRecordFingerprintLen+bodySize)
+	for _, key := range verifyKeys {
+		_, err = rng.Read(body)
+		require.NoError(t, err)
+		copy(want, key[:IndexRecordFingerprintLen])
+		copy(want[IndexRecordFingerprintLen:], body)
+		slot, lookupErr := m.Lookup(key)
+		require.NoError(t, lookupErr)
+		require.Equal(t, want, records[int(slot)])
+	}
+	t.Logf("former reorder peak: %d bytes (seed %d)", peak, seed)
 }
 
 func TestStreamTermsRun_Offsets(t *testing.T) {
