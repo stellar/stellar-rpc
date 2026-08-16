@@ -10,7 +10,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -59,8 +59,8 @@ func largeTermsCorpus(seed int64, count int) ([]events.TermKey, *rand.Rand) {
 	for i := range keys {
 		_, _ = rng.Read(keys[i][:])
 	}
-	sort.Slice(keys, func(i, j int) bool {
-		return bytes.Compare(keys[i][:], keys[j][:]) < 0
+	slices.SortFunc(keys, func(a, b events.TermKey) int {
+		return bytes.Compare(a[:], b[:])
 	})
 	return keys, rng
 }
@@ -163,6 +163,9 @@ func TestWriteSlotOrdered_BuffersBeyondFormerByteCap(t *testing.T) {
 	require.NoError(t, err)
 	defer pw.Close()
 	require.NoError(t, writeSlotOrdered(pw, termsRunPath, m))
+	// writeSlotOrdered only emits records; the writer's lifecycle stays
+	// with whoever created it (WriteColdIndexFromRuns in production).
+	require.NoError(t, pw.Finish(nil))
 
 	records := loadIndexPack(t, packPath)
 	require.Len(t, records, count)
@@ -183,6 +186,19 @@ func TestWriteSlotOrdered_BuffersBeyondFormerByteCap(t *testing.T) {
 
 func TestStreamTermsRun_Offsets(t *testing.T) {
 	corpus := synthTerms(100, 27)
+	// One body past 127 bytes so a length varint spans two bytes: the
+	// offset accounting (crcFoldReader.n) is otherwise exercised only for
+	// single-byte varints. Premise-checked below.
+	fat := events.ComputeTermKey([]byte("offsets-two-byte-varint"), events.FieldTopic1)
+	fatIDs := make([]uint32, 300)
+	for j := range fatIDs {
+		fatIDs[j] = uint32(j * 7)
+	}
+	corpus[fat] = fatIDs
+	fatBody, err := encodeIndexBody(nil, fatIDs)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(fatBody), 128, "corpus must include a two-byte length varint")
+
 	scratch := t.TempDir()
 	sp, err := runspill.NewSpiller(scratch, 1<<14)
 	require.NoError(t, err)
@@ -204,7 +220,7 @@ func TestStreamTermsRun_Offsets(t *testing.T) {
 	defer termsRun.Close()
 
 	var streamed int
-	require.NoError(t, streamTermsRun(termsRunPath, func(_ events.TermKey, body []byte, bodyOff int64) error {
+	require.NoError(t, streamTermsRun(termsRun, func(_ events.TermKey, body []byte, bodyOff int64) error {
 		got := make([]byte, len(body))
 		_, readErr := termsRun.ReadAt(got, bodyOff)
 		require.NoError(t, readErr)
@@ -239,6 +255,26 @@ func TestWriteColdIndexFromRuns_ByteIdentical(t *testing.T) {
 		}
 		corpus[k] = ids
 	}
+
+	// Add roaring-coded terms sitting either side of inlineBodyMax, so this
+	// one build drains a heap holding BOTH inline and reference records —
+	// pinning the discriminator and readBuf reuse across mixed pops. The
+	// straddle is premise-checked below, not assumed.
+	minBody, maxBody := int(^uint(0)>>1), 0
+	for i, card := range []int{2400, 2500, 2600, 2700} {
+		k := events.ComputeTermKey(fmt.Appendf(nil, "inline-straddle-%d", i), events.FieldTopic1)
+		ids := make([]uint32, card)
+		for j := range ids {
+			ids[j] = uint32(j*3 + 1)
+		}
+		corpus[k] = ids
+		body, berr := encodeIndexBody(nil, ids)
+		require.NoError(t, berr)
+		minBody = min(minBody, len(body))
+		maxBody = max(maxBody, len(body))
+	}
+	require.LessOrEqual(t, minBody, inlineBodyMax, "corpus must include an inline-path roaring body")
+	require.Greater(t, maxBody, inlineBodyMax, "corpus must include a reference-path roaring body")
 
 	// Reference: today's in-memory mirror path.
 	refDir := t.TempDir()
@@ -276,6 +312,22 @@ func TestWriteColdIndexFromRuns_ByteIdentical(t *testing.T) {
 	// terms.run scratch must be gone on success.
 	_, serr := os.Stat(filepath.Join(scratch, "terms.run"))
 	assert.True(t, os.IsNotExist(serr), "terms.run scratch must be removed")
+}
+
+// TestSlotHeapPopClearsVacatedRef pins popMin's tail clear: without it the
+// vacated slot in the capacity tail keeps an already-emitted inline body
+// reachable, and no black-box test can see the difference (output is
+// byte-identical either way — this retention is memory-only).
+func TestSlotHeapPopClearsVacatedRef(t *testing.T) {
+	var h slotHeap
+	h.push(slotRecord{slot: 2, inline: []byte{2}})
+	h.push(slotRecord{slot: 1, inline: []byte{1}})
+	got := h.popMin()
+	require.Equal(t, uint32(1), got.slot)
+	require.Equal(t, uint32(2), h[0].slot, "root must be the surviving record")
+	require.NotNil(t, h[0].inline, "surviving record keeps its body")
+	tail := h[:cap(h)][len(h)]
+	require.Equal(t, slotRecord{}, tail, "vacated slot must be fully zeroed — a stale header would pin an emitted body")
 }
 
 // TestWriteColdIndexFromRuns_EmptyChunk mirrors the eventless-chunk contract:

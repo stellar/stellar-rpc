@@ -104,7 +104,9 @@ const (
 // deltas than as roaring. The proxy holds on pubnet event postings because
 // cardinality correlates with run structure there, fat terms being the
 // clustered ones. That is a property of the data, so re-measure before
-// retuning.
+// retuning — and retuning also moves inlineBodyMax (cold_index_stream.go),
+// which scales the reorder heap's corrupt-index inline ceiling
+// (backstop × inlineBodyMax): redo that RAM math in the same change.
 const deltaPostingMaxCardinality = 1024
 
 // IndexRecordFingerprintLen is the byte width of the leading
@@ -401,6 +403,12 @@ func (m *mphf) Lookup(key events.TermKey) (uint32, error) {
 func (m *mphf) Close() error {
 	return m.idx.Close()
 }
+
+// MaxBlockKeys reports the opened index's format-level per-block key
+// ceiling (streamhash.Index.MaxBlockKeys). The streaming builder's pass B
+// derives its reorder backstop from it, so the bound tracks the artifact's
+// format instead of transcribing a streamhash internal here.
+func (m *mphf) MaxBlockKeys() uint32 { return m.idx.MaxBlockKeys() }
 
 // isEmpty reports whether the index holds zero terms (an eventless chunk).
 func (m *mphf) isEmpty() bool { return m.numKeys() == 0 }
