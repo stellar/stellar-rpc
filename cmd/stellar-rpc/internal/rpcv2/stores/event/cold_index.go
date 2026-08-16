@@ -171,6 +171,11 @@ func WriteColdIndex(
 	}
 
 	writerErr := writeIndexPackEntries(pw, entries)
+	if writerErr == nil {
+		if finishErr := pw.Finish(nil); finishErr != nil {
+			writerErr = fmt.Errorf("events: finish index.pack: %w", finishErr)
+		}
+	}
 	if writerErr != nil {
 		// pw.Close removes the partial index.pack. Join its error so a
 		// cleanup failure surfaces alongside the original write error,
@@ -223,12 +228,14 @@ func encodeIndexBody(dst []byte, ids []uint32) ([]byte, error) {
 }
 
 // writeIndexPackEntries appends every assembled record to the index.pack
-// writer in slot order and finishes the pack.
+// writer in slot order. The caller owns the writer's lifecycle (Finish
+// beside Create) — the same convention as the streaming twin's
+// writeSlotOrdered, so neither emitter can ship an unfinalized pack.
 func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
 	for _, e := range entries {
 		if err := pw.AppendItem(e.fp[:], e.body); err != nil {
 			return fmt.Errorf("events: write slot %d to index.pack: %w", e.slot, err)
 		}
 	}
-	return pw.Finish(nil)
+	return nil
 }

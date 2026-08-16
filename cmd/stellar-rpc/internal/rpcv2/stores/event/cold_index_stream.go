@@ -15,10 +15,13 @@ package event
 //     and with default options the result is byte-identical to the unsorted
 //     builder's (pinned by streamhash's own lifecycle tests).
 //  3. Pass B: re-stream terms.run → mphf.Lookup per term → index.pack in
-//     dense slot order via a bounded reorder heap (slots deviate from key
-//     order only within one MPHF block; an entry-count backstop turns a
-//     corrupt slot assignment into a loud abort — the chunk retry
-//     contract).
+//     dense slot order via a bounded reorder heap: bodies at or under
+//     inlineBodyMax ride the heap inline (every delta-coded body does, by
+//     construction), larger ones are buffered as references and re-read
+//     from terms.run at emit. Slots deviate from key order only within one
+//     MPHF block; an entry-count backstop bounds the heap's RAM when slot
+//     assignment is corrupt, and a stranded-records check catches
+//     non-dense output.
 
 import (
 	"bufio"
@@ -41,14 +44,23 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
-// maxReorderEntries bounds pass B's slot-reorder heap by RECORD COUNT — the
-// quantity the block contract actually bounds: slots stray from stream order
-// only within one MPHF block, and streamhash blocks hold at most 65,535 keys
-// (per-block cumulative counts are uint16). Crossing this means non-dense or
-// corrupt slot assignment — abort loudly, the retry contract rebuilds. A
-// byte bound would be wrong in kind: a legitimate block's byte mass is
-// unbounded (few terms with multi-MiB bodies), only its key count is capped.
-const maxReorderEntries = 1 << 16
+// inlineBodyMax is the copy/reference boundary for buffered records: bodies
+// at or under it are copied into the heap entry at push time, larger ones
+// are re-read from terms.run at emit. It is derived so that EVERY
+// delta-coded body inlines by construction — 1 codec byte, a count varint,
+// and up to deltaPostingMaxCardinality posting varints — and moves with
+// that constant if the codec split is ever retuned; only roaring bodies
+// — multi-MiB at the extreme, and unbounded in aggregate per block —
+// take the reference path. Straying into the heap is the norm, not the
+// exception (~99.7% of records: within-block slot order is effectively
+// random), so without the inline copy every record pays an emit-time pread
+// — measured on sac-6000 (c6id.8xlarge NVMe, page-cache-hot) at ~1.4µs
+// each = +29% on the freeze's events arm. Re-measure before retuning.
+// RAM: the heap provably drains at every block boundary, so occupancy is
+// one MPHF block (≲3.5K entries ≈ 17MB inline); the enforced ceiling —
+// the derived backstop × inlineBodyMax ≈ 320MiB — is reachable only with
+// a corrupt index.hash, which the backstop then turns into a loud abort.
+const inlineBodyMax = 1 + binary.MaxVarintLen32 + deltaPostingMaxCardinality*binary.MaxVarintLen32
 
 var errCorruptTermsRun = errors.New("events: corrupt terms.run scratch")
 
@@ -112,11 +124,25 @@ func WriteColdIndexFromRuns(
 	if err != nil {
 		return fmt.Errorf("events: create index.pack at %s: %w", indexPackPath, err)
 	}
-	if err = writeSlotOrdered(pw, termsRunPath, m); err != nil {
+	// ONE cleanup for every post-Create failure (Close after a successful
+	// Finish is a no-op, so success passes through untouched); pw.Close
+	// removes the partial index.pack.
+	defer func() {
+		if err == nil {
+			return
+		}
 		if closeErr := pw.Close(); closeErr != nil {
 			err = errors.Join(err, fmt.Errorf("events: close partial index.pack: %w", closeErr))
 		}
+	}()
+	if err = writeSlotOrdered(pw, termsRunPath, m); err != nil {
 		return err
+	}
+	// Finish lives beside Create: writeSlotOrdered only emits records, so
+	// no early return added to it can ever ship an unfinalized index.pack
+	// that reports success.
+	if err = pw.Finish(nil); err != nil {
+		return fmt.Errorf("events: finish index.pack: %w", err)
 	}
 	return nil
 }
@@ -141,8 +167,13 @@ func buildSortedHash(
 			_ = builder.Close()
 		}
 	}()
+	f, err := os.Open(termsRunPath)
+	if err != nil {
+		return fmt.Errorf("events: open %s: %w", termsRunPath, err)
+	}
+	defer f.Close()
 	var fed int
-	if err := streamTermsRun(termsRunPath, func(term TermKey, _ []byte) error {
+	if err := streamTermsRun(f, func(term TermKey, _ []byte, _ int64) error {
 		// ctx.Err takes a mutex; per-term polling costs tens of ms over
 		// millions of terms. Poll on the freeze scans' shared cadence.
 		if fed%256 == 0 {
@@ -234,8 +265,10 @@ var (
 // crcFoldReader is an io.ByteReader that folds every byte it yields into the
 // running CRC — binary.ReadUvarint's adapter for CRC-framed streams.
 type crcFoldReader struct {
-	br  *bufio.Reader
-	crc uint32
+	br      *bufio.Reader
+	crc     uint32
+	n       int64
+	scratch [1]byte
 }
 
 func (c *crcFoldReader) ReadByte() (byte, error) {
@@ -243,20 +276,25 @@ func (c *crcFoldReader) ReadByte() (byte, error) {
 	if err != nil {
 		return 0, err
 	}
-	c.crc = crc32.Update(c.crc, termsRunCRC, []byte{b})
+	c.scratch[0] = b
+	c.crc = crc32.Update(c.crc, termsRunCRC, c.scratch[:])
+	c.n++
 	return b, nil
 }
 
-// streamTermsRun replays terms.run, calling emit per record with the term
-// and the item body (reused buffer). Integrity (CRC over all
-// records) is verified before returning nil — both passes fully drain, so a
-// corrupt scratch can never produce artifacts.
-func streamTermsRun(path string, emit func(term TermKey, body []byte) error) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("events: open %s: %w", path, err)
+// streamTermsRun replays terms.run from f (opened and owned by the caller,
+// which lets pass B share ONE fd between this sequential scan and its
+// positional emit re-reads — same inode by construction), calling emit per
+// record with the term, item body (reused buffer), and absolute file offset
+// of the body. Integrity (CRC over all records) is verified before
+// returning nil — both passes fully drain, so a CRC-detectable corrupt
+// scratch can never yield a completed build. Bytes re-read positionally at
+// emit are covered by this scan's verification of the same fd, not
+// re-hashed at emit.
+func streamTermsRun(f *os.File, emit func(term TermKey, body []byte, bodyOff int64) error) error {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("events: seek %s: %w", f.Name(), err)
 	}
-	defer f.Close()
 	br := bufio.NewReaderSize(f, 1<<20)
 	var hdr [12]byte
 	if _, err := io.ReadFull(br, hdr[:]); err != nil {
@@ -268,8 +306,12 @@ func streamTermsRun(path string, emit func(term TermKey, body []byte) error) err
 	count := binary.BigEndian.Uint64(hdr[4:])
 
 	var (
-		crc uint32
-		buf []byte
+		crc     uint32
+		buf     []byte
+		fileOff int64 = 12
+		// One CRC-folding varint reader for the whole replay — per-record
+		// state is reset in place, so the loop allocates nothing for it.
+		cbr = &crcFoldReader{br: br}
 	)
 	for i := range count {
 		var term TermKey
@@ -277,13 +319,15 @@ func streamTermsRun(path string, emit func(term TermKey, body []byte) error) err
 			return fmt.Errorf("%w: record %d term: %w", errCorruptTermsRun, i, err)
 		}
 		crc = crc32.Update(crc, termsRunCRC, term[:])
-		// stdlib varint over a CRC-folding ByteReader.
-		cbr := &crcFoldReader{br: br, crc: crc}
+		fileOff += int64(len(term))
+		// stdlib varint over the CRC-folding ByteReader.
+		cbr.crc, cbr.n = crc, 0
 		length, rerr := binary.ReadUvarint(cbr)
 		if rerr != nil {
 			return fmt.Errorf("%w: record %d length: %w", errCorruptTermsRun, i, rerr)
 		}
 		crc = cbr.crc
+		fileOff += cbr.n
 		if length > 1<<31 {
 			return fmt.Errorf("%w: record %d body length %d", errCorruptTermsRun, i, length)
 		}
@@ -295,9 +339,10 @@ func streamTermsRun(path string, emit func(term TermKey, body []byte) error) err
 			return fmt.Errorf("%w: record %d body: %w", errCorruptTermsRun, i, err)
 		}
 		crc = crc32.Update(crc, termsRunCRC, buf)
-		if err := emit(term, buf); err != nil {
+		if err := emit(term, buf, fileOff); err != nil {
 			return err
 		}
+		fileOff += int64(length)
 	}
 	var tr [4]byte
 	if _, err := io.ReadFull(br, tr[:]); err != nil {
@@ -309,12 +354,34 @@ func streamTermsRun(path string, emit func(term TermKey, body []byte) error) err
 	return nil
 }
 
-// slotRecord is one reorder-heap element: an assembled index.pack record
-// waiting for its slot's turn.
+// materializeBody returns rec's index.pack item body: the inline copy when
+// the record carries one, otherwise a positional re-read from terms.run
+// into readBuf — grown as needed and returned for the caller to reuse.
+func materializeBody(termsRun *os.File, rec slotRecord, readBuf []byte) ([]byte, []byte, error) {
+	if rec.inline != nil {
+		return rec.inline, readBuf, nil
+	}
+	if cap(readBuf) < int(rec.n) {
+		readBuf = make([]byte, rec.n)
+	}
+	body := readBuf[:rec.n]
+	if _, err := termsRun.ReadAt(body, rec.off); err != nil {
+		return nil, readBuf, fmt.Errorf("events: read slot %d body at offset %d: %w", rec.slot, rec.off, err)
+	}
+	return body, readBuf, nil
+}
+
+// slotRecord is one reorder-heap element waiting for its slot's turn: a
+// small body rides inline (copied at push), a large one is referenced and
+// re-read from terms.run at (off, n) on emit.
 type slotRecord struct {
 	slot uint32
 	fp   [IndexRecordFingerprintLen]byte
-	body []byte // owned copy
+	off  int64
+	n    uint32
+	// inline holds the body copied at buffering time when it fits
+	// inlineBodyMax; nil means emit re-reads terms.run at (off, n).
+	inline []byte
 }
 
 // slotHeap is a typed slice-backed binary min-heap of buffered records keyed
@@ -336,8 +403,9 @@ func (h *slotHeap) popMin() slotRecord {
 	minRec := old[0]
 	last := len(old) - 1
 	old[0] = old[last]
-	// Zero the vacated slot: a stale record lingering in the capacity tail
-	// would pin its body allocation until the heap regrows over it.
+	// Zero the vacated slot: stale headers lingering in the capacity tail
+	// would pin already-emitted inline bodies (and any heap-backed field
+	// slotRecord grows later) until the heap regrows over them.
 	old[last] = slotRecord{}
 	*h = old[:last]
 	h.siftDown(0)
@@ -379,21 +447,47 @@ func (h *slotHeap) siftDown(i int) {
 // writeSlotOrdered replays terms.run, looks up each term's dense slot, and
 // appends records to pw in exact slot order via the bounded reorder heap.
 func writeSlotOrdered(pw *packfile.Writer, termsRunPath string, m *mphf) error {
+	// ONE fd serves both the sequential scan (streamTermsRun) and the
+	// emit-time positional re-reads: pread leaves the file offset alone,
+	// and sharing the handle pins scan and re-read to the same inode.
+	termsRun, err := os.Open(termsRunPath)
+	if err != nil {
+		return fmt.Errorf("events: open %s for slot reorder: %w", termsRunPath, err)
+	}
+	defer termsRun.Close()
+
+	// The heap's backstop, derived from the artifact itself: sorted keys
+	// route to non-decreasing blocks and a block's minimum-slot key always
+	// takes the fast path, so a legal heap never holds more than
+	// MaxBlockKeys−1 records. One more push is provably impossible —
+	// corrupt slot assignment — and aborts loudly (the chunk retry
+	// contract rebuilds). Deriving the bound from the opened index keeps
+	// it correct across format revisions with no transcribed constant.
+	maxBuffered := int(m.MaxBlockKeys()) - 1
+
 	var (
-		h    slotHeap
-		next uint32
+		h       slotHeap
+		next    uint32
+		readBuf []byte
 	)
 	flush := func() error {
 		for len(h) > 0 && h.peek().slot == next {
 			rec := h.popMin()
-			if err := pw.AppendItem(rec.fp[:], rec.body); err != nil {
+			body, buf, rerr := materializeBody(termsRun, rec, readBuf)
+			if rerr != nil {
+				return rerr
+			}
+			readBuf = buf
+			// The streaming pass folds these bytes into the CRC and fully drains
+			// before the build succeeds; positional reads need not fold them again.
+			if err := pw.AppendItem(rec.fp[:], body); err != nil {
 				return fmt.Errorf("events: write slot %d to index.pack: %w", rec.slot, err)
 			}
 			next++
 		}
 		return nil
 	}
-	err := streamTermsRun(termsRunPath, func(term TermKey, body []byte) error {
+	err = streamTermsRun(termsRun, func(term TermKey, body []byte, bodyOff int64) error {
 		slot, lerr := m.LookupRouted(term)
 		if lerr != nil {
 			return fmt.Errorf("events: MPHF lookup during index.pack build: %w", lerr)
@@ -409,11 +503,16 @@ func writeSlotOrdered(pw *packfile.Writer, termsRunPath string, m *mphf) error {
 			next++
 			return flush()
 		}
-		if len(h) >= maxReorderEntries {
+		if len(h) >= maxBuffered {
 			return fmt.Errorf("events: slot reorder heap exceeded %d records at slot %d — "+
-				"MPHF slots deviate beyond one block (non-dense or corrupt index.hash)", maxReorderEntries, slot)
+				"MPHF slots deviate beyond one block (non-dense or corrupt index.hash)", maxBuffered, slot)
 		}
-		h.push(slotRecord{slot: slot, fp: fp, body: append([]byte(nil), body...)})
+		n := uint32(len(body)) //nolint:gosec // streamTermsRun limits body lengths to 1 << 31.
+		rec := slotRecord{slot: slot, fp: fp, off: bodyOff, n: n}
+		if n <= inlineBodyMax {
+			rec.inline = append([]byte(nil), body...)
+		}
+		h.push(rec)
 		return nil
 	})
 	if err != nil {
@@ -425,5 +524,5 @@ func writeSlotOrdered(pw *packfile.Writer, termsRunPath string, m *mphf) error {
 	if len(h) != 0 {
 		return fmt.Errorf("events: %d index.pack records stranded (non-dense MPHF slots?)", len(h))
 	}
-	return pw.Finish(nil)
+	return nil
 }
