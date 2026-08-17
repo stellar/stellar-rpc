@@ -157,7 +157,8 @@ func buildColdReader(t *testing.T, baseChunk chunk.ID, entries []fixtureEntry) *
 	}
 	inputs := writeFixtureBins(t, dir, entries)
 	idxPath := filepath.Join(dir, indexFileName(baseChunk))
-	require.NoError(t, BuildColdIndex(context.Background(), inputs, idxPath, minSeq, maxSeq))
+	require.NoError(t, BuildColdIndex(
+		context.Background(), inputs, idxPath, minSeq, maxSeq))
 	rd, err := OpenColdReader(idxPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rd.Close() })

@@ -34,6 +34,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/zstd"
 )
 
@@ -224,9 +225,47 @@ func DecodeLedgerOffsets(data []byte) (*LedgerOffsets, error) {
 // supplied key — they take the first 16 bytes as the routing
 // identity. TermKey is already a uniformly distributed 16-byte
 // xxh3-128 value (produced by ComputeTermKey via
-// streamhash.PreHashInPlace), so the wrapper passes TermKey[:]
-// through. No double-hashing.
+// streamhash.PreHashInPlace), but xxh3 is unkeyed, so an attacker
+// could grind terms into one streamhash block and abort the build
+// (see stores/blind.go). The wrapper therefore feeds
+// streamhash stores.BlindKey(secret, TermKey) at both build and
+// query, with the deterministic per-chunk secret (ColdIndexSecret)
+// stored in index.hash's user metadata. The 4-byte app fingerprint in index.pack and the
+// downstream post-filter stay on the ORIGINAL TermKey bytes.
 // ──────────────────────────────────────────────────────────────────
+
+// index.hash user-metadata wire format (streamhash WithMetadata):
+//
+//	offset  size  field
+//	0       1     version (0x01)
+//	1       16    routing secret (SipHash-2-4-128 key)
+const (
+	eventsMetaVersion byte = 0x01
+	eventsMetaLen          = 1 + stores.SecretLen
+)
+
+// errBadIndexMetadata is returned when index.hash carries user
+// metadata this binary cannot parse.
+var errBadIndexMetadata = errors.New("malformed index.hash metadata")
+
+func encodeEventsMeta(secret [stores.SecretLen]byte) []byte {
+	buf := make([]byte, eventsMetaLen)
+	buf[0] = eventsMetaVersion
+	copy(buf[1:], secret[:])
+	return buf
+}
+
+func decodeEventsMeta(data []byte) ([stores.SecretLen]byte, error) {
+	var secret [stores.SecretLen]byte
+	if len(data) != eventsMetaLen {
+		return secret, fmt.Errorf("%w: %d bytes, want %d", errBadIndexMetadata, len(data), eventsMetaLen)
+	}
+	if data[0] != eventsMetaVersion {
+		return secret, fmt.Errorf("%w: unknown version 0x%02x", errBadIndexMetadata, data[0])
+	}
+	copy(secret[:], data[1:])
+	return secret, nil
+}
 
 // ErrKeyNotFound is returned by Lookup when streamhash decides the
 // supplied key was not in the build set. Vanilla MPHF semantics
@@ -242,7 +281,8 @@ var ErrKeyNotFound = errors.New("events: key not in build set")
 // mphf wraps a streamhash MPHF index, suitable for repeated Lookup
 // against term keys.
 type mphf struct {
-	idx *streamhash.Index
+	idx    *streamhash.Index
+	secret [stores.SecretLen]byte
 }
 
 // buildMPHF constructs an MPHF over every TermKey in bitmaps,
@@ -266,8 +306,15 @@ type mphf struct {
 // ctx between keys so cancellation surfaces promptly on large
 // inputs.
 //
+// secret is the chunk's deterministic routing secret (ColdIndexSecret),
+// stored in metadata so readers route identically. Because it is fixed
+// per chunk, an ErrBlockOverflow is non-retryable: a rebuild routes the
+// same keys to the same blocks.
+//
 //nolint:nonamedreturns // named err carries through to the deferred builder.Close
-func buildMPHF(ctx context.Context, bitmaps Bitmaps, outputPath string) (m *mphf, err error) {
+func buildMPHF(
+	ctx context.Context, bitmaps Bitmaps, outputPath string, secret [stores.SecretLen]byte,
+) (m *mphf, err error) {
 	total := len(bitmaps)
 
 	tmpDir, terr := os.MkdirTemp("", "eventstore-unsorted-")
@@ -276,7 +323,8 @@ func buildMPHF(ctx context.Context, bitmaps Bitmaps, outputPath string) (m *mphf
 	}
 	defer os.RemoveAll(tmpDir)
 
-	builder, builderErr := streamhash.NewUnsortedBuilder(ctx, outputPath, uint64(total), tmpDir)
+	builder, builderErr := streamhash.NewUnsortedBuilder(ctx, outputPath, uint64(total), tmpDir,
+		streamhash.WithMetadata(encodeEventsMeta(secret)))
 	if builderErr != nil {
 		return nil, fmt.Errorf("events: create streamhash builder: %w", builderErr)
 	}
@@ -295,7 +343,8 @@ func buildMPHF(ctx context.Context, bitmaps Bitmaps, outputPath string) (m *mphf
 		if err = ctx.Err(); err != nil {
 			return nil, fmt.Errorf("events: build MPHF canceled after %d keys: %w", i, err)
 		}
-		if err = builder.AddKey(key[:], 0); err != nil {
+		rk := stores.BlindKey(secret, key[:])
+		if err = builder.AddKey(rk[:], 0); err != nil {
 			return nil, fmt.Errorf("events: add key %d: %w", i, err)
 		}
 		i++
@@ -330,7 +379,12 @@ func openMPHF(path string) (*mphf, error) {
 	if err != nil {
 		return nil, fmt.Errorf("events: parse %s: %w", path, err)
 	}
-	return &mphf{idx: idx}, nil
+	secret, merr := decodeEventsMeta(idx.UserMetadata())
+	if merr != nil {
+		_ = idx.Close()
+		return nil, fmt.Errorf("events: parse %s: %w", path, merr)
+	}
+	return &mphf{idx: idx, secret: secret}, nil
 }
 
 // Lookup returns the dense slot in [0, N) that key maps to.
@@ -343,7 +397,8 @@ func openMPHF(path string) (*mphf, error) {
 // index.pack — an MPHF can map an unseen key to a valid build-set
 // slot, and only the fingerprint catches that residual collision.
 func (m *mphf) Lookup(key TermKey) (uint32, error) {
-	slot, err := m.idx.QueryRank(key[:])
+	rk := stores.BlindKey(m.secret, key[:])
+	slot, err := m.idx.QueryRank(rk[:])
 	if err != nil {
 		if errors.Is(err, streamhash.ErrNotFound) {
 			return 0, ErrKeyNotFound

@@ -26,6 +26,14 @@ func testBuildConfig(cat *catalog.Catalog) BuildConfig {
 	return BuildConfig{Catalog: cat, Logger: silentLogger()}
 }
 
+// chunkSecret is the routing secret chunkID's .bin entries are keyed with —
+// the same derivation (over the catalog's minted secret) ingest and the index
+// build use.
+func chunkSecret(cat *catalog.Catalog, chunkID chunk.ID) [stores.SecretLen]byte {
+	master := cat.Secret()
+	return txhash.ColdIndexSecret(master[:], uint32(cat.TxHashIndexLayout().TxHashIndexID(chunkID)))
+}
+
 // txEntry is a (full 32-byte tx hash, ledger seq) pair a test wants resolvable
 // through the cold index.
 type txEntry struct {
@@ -48,15 +56,14 @@ func hashAt(tag uint64) [32]byte {
 func freezeChunkBin(t *testing.T, cat *catalog.Catalog, chunkID chunk.ID, entries []txEntry) {
 	t.Helper()
 
+	secret := chunkSecret(cat, chunkID)
 	cold := make([]txhash.ColdEntry, len(entries))
 	for i, e := range entries {
 		require.GreaterOrEqual(t, e.seq, chunkID.FirstLedger(), "seq in chunk range")
 		require.LessOrEqual(t, e.seq, chunkID.LastLedger(), "seq in chunk range")
-		var key [txhash.ColdKeySize]byte
-		copy(key[:], e.hash[:txhash.ColdKeySize])
-		cold[i] = txhash.ColdEntry{Key: key, Seq: e.seq}
+		cold[i] = txhash.ColdEntry{Key: stores.BlindKey(secret, e.hash[:txhash.ColdKeySize]), Seq: e.seq}
 	}
-	// WriteColdBin writes entries verbatim; they must be sorted lex by key.
+	// WriteColdBin writes entries verbatim; they must be sorted lex by (keyed) key.
 	sort.Slice(cold, func(i, j int) bool {
 		return string(cold[i].Key[:]) < string(cold[j].Key[:])
 	})
@@ -64,7 +71,7 @@ func freezeChunkBin(t *testing.T, cat *catalog.Catalog, chunkID chunk.ID, entrie
 	path := cat.Layout().TxHashBinPath(chunkID)
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 	require.NoError(t, cat.MarkChunkFreezing(chunkID, geometry.KindTxHash))
-	require.NoError(t, txhash.WriteColdBin(path, cold))
+	require.NoError(t, txhash.WriteColdBin(path, secret, cold))
 	require.NoError(t, durable.BarrierNewFile(path))
 	require.NoError(t, cat.FlipChunkFrozen(chunkID, geometry.KindTxHash))
 }

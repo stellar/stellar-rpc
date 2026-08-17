@@ -10,6 +10,7 @@ import (
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 )
 
@@ -26,7 +27,10 @@ type eventsCold struct {
 	mirror    event.Bitmaps
 	offsets   *event.LedgerOffsets
 	bucketDir string
-	metrics   coldMetrics
+	// secret is the chunk's deterministic routing secret (event.ColdIndexSecret),
+	// handed to WriteColdIndex at finalize.
+	secret  [stores.SecretLen]byte
+	metrics coldMetrics
 	// failed latches any write error. A failed write can leave the mirror
 	// and the pack ahead of offsets (offsets is the per-ledger commit point,
 	// appended last), so a subsequent finalize would commit an index whose
@@ -41,7 +45,9 @@ type eventsCold struct {
 // Layout's single derivation. The writer opts into the batch tuning
 // (coldEncoderConcurrency/coldBytesPerSync): WriteColdChunk, the sole
 // production caller, is always a batch freeze/backfill.
-func newEventsCold(bucketDir string, chunkID chunk.ID, sink MetricSink) (*eventsCold, error) {
+func newEventsCold(
+	bucketDir string, chunkID chunk.ID, sink MetricSink, secret [stores.SecretLen]byte,
+) (*eventsCold, error) {
 	if err := os.MkdirAll(bucketDir, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", bucketDir, err)
 	}
@@ -58,6 +64,7 @@ func newEventsCold(bucketDir string, chunkID chunk.ID, sink MetricSink) (*events
 		mirror:    event.NewBitmaps(),
 		offsets:   event.NewLedgerOffsets(chunkID.FirstLedger()),
 		bucketDir: bucketDir,
+		secret:    secret,
 		metrics:   newColdMetrics(sink, dataTypeEvents),
 	}, nil
 }
@@ -96,7 +103,7 @@ func (e *eventsCold) finalize(ctx context.Context) error {
 		e.metrics.emit(time.Since(start), err)
 		return err
 	}
-	if err := event.WriteColdIndex(ctx, e.chunkID, e.mirror, e.bucketDir); err != nil {
+	if err := event.WriteColdIndex(ctx, e.chunkID, e.mirror, e.bucketDir, e.secret); err != nil {
 		// Finish already committed events.pack; the index-less pack is left
 		// in place — without the orchestrator's completion record it is
 		// inert scratch (see the package doc's artifact model), and the

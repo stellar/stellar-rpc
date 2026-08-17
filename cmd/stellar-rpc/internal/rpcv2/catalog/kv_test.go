@@ -214,6 +214,9 @@ func TestKV_PrefixScanEmptyPrefixWalksWholeStore(t *testing.T) {
 	var seen []string
 	for e, err := range c.prefixScan("") {
 		require.NoError(t, err)
+		if e.Key == catalogSecretStoreKey {
+			continue // minted by Open, not part of this test's data
+		}
 		seen = append(seen, e.Key+"="+e.Value)
 	}
 	assert.Equal(t, []string{"a=1", "b=2", "c=3"}, seen)
