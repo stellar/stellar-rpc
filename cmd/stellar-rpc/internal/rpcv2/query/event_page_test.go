@@ -560,7 +560,7 @@ func TestQueryEvents_OpensOnlyScannedChunks(t *testing.T) {
 		Scope: EventCursorQuery{MinLedger: f5, MaxLedger: &maxL, Dir: Descending},
 	}}
 
-	var got []string
+	got := make([]string, 0, 3)
 	for range 3 {
 		got = append(got, labels(t, d.next().Events)...)
 	}
