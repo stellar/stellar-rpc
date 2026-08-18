@@ -11,7 +11,8 @@ defaults:
 
 on:
   push:
-    branches: [release/**]
+    # use-blaster-update: temporary full-run trigger for the blaster-update PR
+    branches: [release/**, use-blaster-update]
   workflow_dispatch:
     inputs:
       target_ref:
