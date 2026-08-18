@@ -84,21 +84,41 @@ func EventLCMBytes(t *testing.T, seq uint32) []byte {
 	t.Helper()
 	var contractID xdr.ContractId
 	contractID[0] = 0xab
-	sym := xdr.ScSymbol("fhtest")
-	ev := xdr.ContractEvent{
+	return EventsLCMBytes(t, seq, SymbolContractEvent(contractID, "fhtest", "fhtest"))
+}
+
+// SymbolContractEvent returns a contract event whose topics and data
+// are ScSymbols: the shape event-query tests build fixtures from and
+// later match against by the data label.
+func SymbolContractEvent(contractID xdr.ContractId, data string, topics ...string) xdr.ContractEvent {
+	topicVals := make([]xdr.ScVal, len(topics))
+	for i := range topics {
+		sym := xdr.ScSymbol(topics[i])
+		topicVals[i] = xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym}
+	}
+	dataSym := xdr.ScSymbol(data)
+	return xdr.ContractEvent{
 		ContractId: &contractID,
 		Type:       xdr.ContractEventTypeContract,
 		Body: xdr.ContractEventBody{
 			V: 0,
 			V0: &xdr.ContractEventV0{
-				Topics: []xdr.ScVal{{Type: xdr.ScValTypeScvSymbol, Sym: &sym}},
-				Data:   xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym},
+				Topics: topicVals,
+				Data:   xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &dataSym},
 			},
 		},
 	}
+}
+
+// EventsLCMBytes returns the marshaled bytes of a single-transaction
+// LedgerCloseMeta (V2) for ledger seq whose transaction carries evs as
+// the events of one operation. The random source account gives each
+// call a distinct, valid pubnet transaction hash.
+func EventsLCMBytes(t *testing.T, seq uint32, evs ...xdr.ContractEvent) []byte {
+	t.Helper()
 	meta := xdr.TransactionMeta{
 		V:  4,
-		V4: &xdr.TransactionMetaV4{Operations: []xdr.OperationMetaV2{{Events: []xdr.ContractEvent{ev}}}},
+		V4: &xdr.TransactionMetaV4{Operations: []xdr.OperationMetaV2{{Events: evs}}},
 	}
 
 	envelope := xdr.TransactionEnvelope{

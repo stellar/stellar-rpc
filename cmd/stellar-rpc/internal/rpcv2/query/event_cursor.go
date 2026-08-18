@@ -100,7 +100,7 @@ type EventCursorQuery struct {
 // delivered event, and the scanned-ledger watermark. A nil Position means no
 // event has been delivered yet, so resume starts from the watermark alone.
 type EventCursor struct {
-	Query         EventCursorQuery
+	Scope         EventCursorQuery
 	Position      *EventPosition
 	ScannedLedger uint32
 }
@@ -116,34 +116,34 @@ type EventCursor struct {
 // encodes as absent and decodes back as nil (no exact round-trip for them).
 func (e *EventCursor) Encode() (string, error) {
 	var flags byte
-	switch e.Query.Dir {
+	switch e.Scope.Dir {
 	case Ascending:
 	case Descending:
 		flags |= flagDescending
 	default:
-		return "", fmt.Errorf("query: encode cursor: invalid direction %d", e.Query.Dir)
+		return "", fmt.Errorf("query: encode cursor: invalid direction %d", e.Scope.Dir)
 	}
-	if e.Query.MaxLedger != nil {
+	if e.Scope.MaxLedger != nil {
 		flags |= flagHasMax
-		if e.Query.MinLedger > *e.Query.MaxLedger {
+		if e.Scope.MinLedger > *e.Scope.MaxLedger {
 			return "", fmt.Errorf("query: encode cursor: min ledger %d > max ledger %d",
-				e.Query.MinLedger, *e.Query.MaxLedger)
+				e.Scope.MinLedger, *e.Scope.MaxLedger)
 		}
-	} else if e.Query.Dir == Descending {
+	} else if e.Scope.Dir == Descending {
 		return "", errors.New("query: encode cursor: descending without a max ledger")
 	}
 	if e.Position != nil {
 		flags |= flagHasPos
 	}
-	if len(e.Query.Filters) > maxCursorFilters {
+	if len(e.Scope.Filters) > maxCursorFilters {
 		return "", fmt.Errorf("query: encode cursor: %d filters exceeds the %d-filter cap",
-			len(e.Query.Filters), maxCursorFilters)
+			len(e.Scope.Filters), maxCursorFilters)
 	}
 
 	body := []byte{flags}
-	body = binary.BigEndian.AppendUint32(body, e.Query.MinLedger)
-	if e.Query.MaxLedger != nil {
-		body = binary.BigEndian.AppendUint32(body, *e.Query.MaxLedger)
+	body = binary.BigEndian.AppendUint32(body, e.Scope.MinLedger)
+	if e.Scope.MaxLedger != nil {
+		body = binary.BigEndian.AppendUint32(body, *e.Scope.MaxLedger)
 	}
 	if e.Position != nil {
 		for _, v := range [...]uint32{
@@ -153,11 +153,11 @@ func (e *EventCursor) Encode() (string, error) {
 		}
 	}
 	body = binary.BigEndian.AppendUint32(body, e.ScannedLedger)
-	count := uint16(len(e.Query.Filters)) //nolint:gosec // capped at maxCursorFilters above
+	count := uint16(len(e.Scope.Filters)) //nolint:gosec // capped at maxCursorFilters above
 	body = binary.BigEndian.AppendUint16(body, count)
-	for i := range e.Query.Filters {
+	for i := range e.Scope.Filters {
 		var err error
-		if body, err = appendFilter(body, &e.Query.Filters[i]); err != nil {
+		if body, err = appendFilter(body, &e.Scope.Filters[i]); err != nil {
 			return "", fmt.Errorf("query: encode cursor filter %d: %w", i, err)
 		}
 	}
@@ -309,9 +309,9 @@ func readEnvelope(r *cursorReader) (*EventCursor, error) {
 	}
 	env := &EventCursor{}
 	if flags&flagDescending != 0 {
-		env.Query.Dir = Descending
+		env.Scope.Dir = Descending
 	}
-	if env.Query.MinLedger, err = r.u32(); err != nil {
+	if env.Scope.MinLedger, err = r.u32(); err != nil {
 		return nil, err
 	}
 	switch {
@@ -320,11 +320,11 @@ func readEnvelope(r *cursorReader) (*EventCursor, error) {
 		if err != nil {
 			return nil, err
 		}
-		if env.Query.MinLedger > maxLedger {
+		if env.Scope.MinLedger > maxLedger {
 			return nil, fmt.Errorf("%w: min ledger %d > max ledger %d",
-				ErrCursorMalformed, env.Query.MinLedger, maxLedger)
+				ErrCursorMalformed, env.Scope.MinLedger, maxLedger)
 		}
-		env.Query.MaxLedger = &maxLedger
+		env.Scope.MaxLedger = &maxLedger
 	case flags&flagDescending != 0:
 		return nil, fmt.Errorf("%w: descending without a max ledger", ErrCursorMalformed)
 	}
@@ -340,7 +340,7 @@ func readEnvelope(r *cursorReader) (*EventCursor, error) {
 	if env.ScannedLedger, err = r.u32(); err != nil {
 		return nil, err
 	}
-	if env.Query.Filters, err = readFilters(r); err != nil {
+	if env.Scope.Filters, err = readFilters(r); err != nil {
 		return nil, err
 	}
 	return env, nil
