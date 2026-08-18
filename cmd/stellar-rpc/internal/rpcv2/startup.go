@@ -181,7 +181,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 			Logger:     logger,
 			Metrics:    metrics,
 			Sink:       cfg.Exec.Process.Sink,
-			Registry:   &servingSink{sink: registry, health: cfg.health},
+			Registry:   registry,
 			FeeWindows: cfg.FeeWindows,
 		})
 		if err == nil {
@@ -365,11 +365,6 @@ type StartConfig struct {
 	// defaultGrace. Tests set it small so a run's end-of-run destroy does not park
 	// for minutes.
 	lifecycleGrace time.Duration
-
-	// health is the readiness/health signal the ingestion loop feeds per commit.
-	// getHealth is served from the registry's close-time stamps instead; this is
-	// the process-level readiness seam (HealthSignal). nil ⇒ observe is a no-op.
-	health *healthState
 
 	// FeeWindows is the daemon-owned getFeeStats state ([service.fee_stats]
 	// sizes) the ingestion loop feeds per committed ledger. The daemon builds it

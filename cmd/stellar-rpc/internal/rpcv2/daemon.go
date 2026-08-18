@@ -117,14 +117,6 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 		}
 	}
 
-	// Readiness/health signal, fed by the ingestion loop per commit; both signals
-	// derive from the last committed ledger. Created outside the supervised run
-	// loop so it survives restarts (readiness stays latched across them). The
-	// getHealth METHOD is served from the ledger adapter instead (the registry's
-	// close-time stamps carry the same signal); this stays the process-level
-	// readiness seam (HealthSignal) for a future probe endpoint.
-	hs := &healthState{}
-
 	paths := cfg.ResolvePaths()
 
 	// --- Reject shared roots, then create + fsync any missing ones. Single-
@@ -270,7 +262,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	// --- Assemble the StartConfig and run the supervised run loop. ---
 	start := startConfig(
-		cfg, cat, logger, backend, core.live, serveReads, metrics, sink, hs, retention)
+		cfg, cat, logger, backend, core.live, serveReads, metrics, sink, retention)
 	start.lifecycleGrace = opts.lifecycleGrace
 	if start.lifecycleGrace <= 0 {
 		start.lifecycleGrace = deriveLifecycleGrace(cfg.Service)
@@ -352,7 +344,7 @@ func startConfig(
 	cfg config.Config, cat *catalog.Catalog, logger *supportlog.Entry,
 	backend backfill.Backend, core CoreOpener,
 	serveReads func(context.Context, *query.Registry) (func(), error),
-	metrics observability.Metrics, sink ingest.MetricSink, hs *healthState, retention geometry.Retention,
+	metrics observability.Metrics, sink ingest.MetricSink, retention geometry.Retention,
 ) StartConfig {
 	exec := backfill.ExecConfig{
 		Catalog:    cat,
@@ -370,7 +362,6 @@ func startConfig(
 		Retention:  retention,
 		Core:       core,
 		ServeReads: serveReads,
-		health:     hs,
 	}
 }
 
