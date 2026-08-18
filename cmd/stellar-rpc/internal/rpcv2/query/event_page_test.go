@@ -543,6 +543,35 @@ func TestQueryEvents_OldestReachedContinuesOnDeeperNode(t *testing.T) {
 	assert.Equal(t, ScanComplete, status)
 }
 
+// TestQueryEvents_OpensOnlyScannedChunks pins lazy chunk resolution: a
+// page that fills inside the walk's first chunk never resolves the
+// chunks behind it. The far chunk has no serving store here, so an
+// eager open would fail every page; the pager only fails once the walk
+// actually reaches it.
+func TestQueryEvents_OpensOnlyScannedChunks(t *testing.T) {
+	const c5, c6 = chunk.ID(5), chunk.ID(6)
+	f5, f6 := c5.FirstLedger(), c6.FirstLedger()
+	r, _ := seedEventChunks(t, c5, f6+1, eventChunkSpec{c: c6, ledgers: [][]xdr.ContractEvent{
+		{symEvent(cidA, "q0"), symEvent(cidA, "q1")},
+		{symEvent(cidB, "q2")},
+	}})
+	maxL := f6 + 1
+	d := &pageDriver{t: t, r: r, limit: 1, cursor: EventCursor{
+		Scope: EventCursorQuery{MinLedger: f5, MaxLedger: &maxL, Dir: Descending},
+	}}
+
+	var got []string
+	for range 3 {
+		got = append(got, labels(t, d.next().Events)...)
+	}
+	assert.Equal(t, []string{"q2", "q1", "q0"}, got,
+		"chunk 6 pages serve while chunk 5 has no store")
+
+	_, err := d.tryNext()
+	require.ErrorIs(t, err, ErrUnavailable,
+		"the unserved chunk resolves only when the walk reaches it")
+}
+
 // The watermark-derived resume point waits the same way: covered
 // through f+6 means f+5 is next in walk order, and this view does not
 // serve it yet.

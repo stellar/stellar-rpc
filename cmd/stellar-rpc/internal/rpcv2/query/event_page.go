@@ -90,11 +90,11 @@ func (a *ReadView) QueryEvents(ctx context.Context, cursor EventCursor, limit in
 		return &EventPage{Next: cursor, Status: ScanWaitingForLedgers}, nil
 	}
 
-	parts, err := a.EventParts(cursor.Scope.Dir, lo, hi)
+	chunks, err := a.ChunksForRange(cursor.Scope.Dir, lo, hi)
 	if err != nil {
 		return nil, err
 	}
-	walk, err := walkChunks(ctx, parts, cursor.Scope.Filters, reenter, desc, limit)
+	walk, err := a.walkChunks(ctx, chunks, lo, hi, cursor.Scope.Filters, reenter, desc, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -202,31 +202,43 @@ type walkResult struct {
 	finished       bool
 }
 
-func walkChunks(
-	ctx context.Context, parts []EventPart, filters []event.Filter,
+// walkChunks scans the clamped range chunk by chunk. Each chunk's
+// reader is resolved only when the walk reaches it: a page usually
+// fills within the first chunk, and the scope can span the node's
+// whole retention.
+func (a *ReadView) walkChunks(
+	ctx context.Context, chunks []chunk.ID, lo, hi uint32, filters []event.Filter,
 	reenter *EventPosition, desc bool, limit int,
 ) (walkResult, error) {
 	var walk walkResult
-	for i, part := range parts {
+	for i, c := range chunks {
 		if i > 0 {
 			reenter = nil // the resume point is always in the first chunk
 		}
-		chunk, err := scanChunk(ctx, part, filters, reenter, desc, limit-len(walk.events))
+		r, err := a.Events(c)
 		if err != nil {
 			return walkResult{}, err
 		}
-		walk.events = append(walk.events, chunk.events...)
-		if chunk.last != nil {
-			walk.last = chunk.last
+		part := EventPart{
+			Chunk: c, Reader: r,
+			From: max(lo, c.FirstLedger()), To: min(hi, c.LastLedger()),
 		}
-		if chunk.nextUnserved != nil {
-			walk.nextUnserved = chunk.nextUnserved
+		res, err := scanChunk(ctx, part, filters, reenter, desc, limit-len(walk.events))
+		if err != nil {
+			return walkResult{}, err
+		}
+		walk.events = append(walk.events, res.events...)
+		if res.last != nil {
+			walk.last = res.last
+		}
+		if res.nextUnserved != nil {
+			walk.nextUnserved = res.nextUnserved
 			return walk, nil
 		}
-		if chunk.coveredThrough != nil {
-			walk.coveredThrough = chunk.coveredThrough
+		if res.coveredThrough != nil {
+			walk.coveredThrough = res.coveredThrough
 		}
-		if len(walk.events) >= limit && i < len(parts)-1 {
+		if len(walk.events) >= limit && i < len(chunks)-1 {
 			return walk, nil // full exactly at a chunk boundary, range remaining
 		}
 	}
@@ -261,14 +273,12 @@ func scanChunk(
 	// no-op: latest never exceeds a serving chunk's ingested range. It
 	// keeps test fixtures with partially ingested chunks from turning
 	// into IDRangeForLedgers errors.
-	pLo := max(part.From, ofs.StartLedger())
-	pHi := part.To
-	if end := ofs.EndLedger(); end == ofs.StartLedger() || pHi > end-1 {
-		if end == ofs.StartLedger() {
-			return chunkResult{}, nil // nothing ingested yet
-		}
-		pHi = end - 1
+	end := ofs.EndLedger()
+	if end == ofs.StartLedger() {
+		return chunkResult{}, nil // nothing ingested yet
 	}
+	pLo := max(part.From, ofs.StartLedger())
+	pHi := min(part.To, end-1)
 	if pLo > pHi {
 		return chunkResult{}, nil
 	}
@@ -399,7 +409,8 @@ func watermark(cursor *EventCursor, walk walkResult, clo, chi uint32, desc bool)
 			return v
 		}
 	case walk.nextUnserved != nil:
-		if v := *walk.nextUnserved - 1; *walk.nextUnserved > 0 && v >= clo {
+		// No underflow: a match's ledger is at least genesis (2).
+		if v := *walk.nextUnserved - 1; v >= clo {
 			return v
 		}
 	case walk.coveredThrough != nil:
