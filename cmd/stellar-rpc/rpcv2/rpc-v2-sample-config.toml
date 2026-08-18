@@ -71,7 +71,8 @@ retention_chunks = 0
 # -----------------------------------------------------------------------------
 # [service] — the JSON-RPC read-serving policy (issue #882)
 # -----------------------------------------------------------------------------
-# The serving limits are dormant until the v2 read server lands. Already live:
+# Everything here is live: the read server listens on endpoint, the admin
+# server on admin_endpoint, the method table enforces the per-method limits,
 # ingestion feeds the fee windows sized by [service.fee_stats] (issue #881),
 # and the daemon sizes its preflight worker pool from [service.preflight] at
 # startup. Naming rule: camelCase table keys only where the key IS a JSON-RPC

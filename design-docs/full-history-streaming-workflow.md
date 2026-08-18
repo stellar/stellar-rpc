@@ -53,7 +53,7 @@ Every TOML leaf is also settable from the command line:
 - `--config` stays required — the file is the source of truth, flags are one-off overrides.
 - No environment variables.
 
-**[service]** — the JSON-RPC read-serving policy (#882; the serving limits are dormant until the read server arrives with #772, while live ingestion feeds the `[service.fee_stats]` windows — #881). Key naming: camelCase only for the JSON-RPC method table names, snake_case elsewhere. Durations are strings (`"10s"`); any duration under 1ms is rejected (a bare TOML integer parses as nanoseconds).
+**[service]** — the JSON-RPC read-serving policy (#882; the read server enforces the serving limits — #908 — and live ingestion feeds the `[service.fee_stats]` windows — #881). Key naming: camelCase only for the JSON-RPC method table names, snake_case elsewhere. Durations are strings (`"10s"`); any duration under 1ms is rejected (a bare TOML integer parses as nanoseconds).
 
 | Key | Type | Default | Description |
 |---|---|---|---|

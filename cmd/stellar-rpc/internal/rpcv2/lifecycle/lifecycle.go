@@ -43,9 +43,10 @@ type Config struct {
 	Registry HandleRetirer
 
 	// Grace is the deferred-deletion wait before destroying demoted resources.
-	// Unset (<= 0) takes defaultGrace via WithLifecycleDefaults; tests override it
-	// small. TODO(#772): derive from the read server's request deadline
-	// (T = max request timeout + margin) and boot-validate T exceeds that timeout.
+	// The daemon derives it from the serving timeouts (rpcv2.deriveLifecycleGrace:
+	// max request timeout + margin) so no request can outlive it; tests override
+	// it small. Unset (<= 0) takes defaultGrace via WithLifecycleDefaults —
+	// callers that run no read server (the bench).
 	Grace time.Duration
 
 	// opRetryAttempts / opRetryBackoff bound the per-op retry the discard/prune
@@ -60,10 +61,10 @@ type Config struct {
 const (
 	defaultOpRetryAttempts = 3
 	defaultOpRetryBackoff  = 5 * time.Second
-	// defaultGrace is the placeholder deferred-deletion wait until the read server
-	// derives it from the request deadline (#772). Chosen to comfortably outlast
-	// any plausible request; the wait falls once per run, minutes against runs
-	// hours apart.
+	// defaultGrace is the deferred-deletion wait for callers that pass no Grace —
+	// those running no read server (the bench). The daemon always passes the
+	// derived value instead (see Config.Grace). Chosen to comfortably outlast
+	// any plausible request; the wait falls once per run.
 	defaultGrace = 5 * time.Minute
 )
 

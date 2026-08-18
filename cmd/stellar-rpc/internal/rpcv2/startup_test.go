@@ -17,6 +17,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 )
 
@@ -103,7 +104,7 @@ func startTestConfig(
 		Exec:       exec,
 		Retention:  rpcv2test.RetentionFor(t, cat, 0),
 		Core:       core,
-		ServeReads: func(context.Context) error { return nil },
+		ServeReads: func(context.Context, *query.Registry) (func(), error) { return func() {}, nil },
 	}
 	if recordPlan != nil {
 		cfg.runBackfill = func(_ context.Context, _ backfill.ExecConfig, lo, hi chunk.ID) error {
@@ -399,7 +400,7 @@ func TestRun_FirstStartServeIngestCleanShutdown(t *testing.T) {
 	core := &fakeCore{stream: &fakeCoreStream{frames: map[uint32][]byte{}, blockOnCtx: true}}
 	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}} // young: no backfill
 	cfg := startTestConfig(t, cat, tip, core, nil)
-	cfg.ServeReads = func(context.Context) error { served.Add(1); return nil }
+	cfg.ServeReads = func(context.Context, *query.Registry) (func(), error) { served.Add(1); return func() {}, nil }
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -466,7 +467,7 @@ func TestRun_ServeReadsErrorSurfaces(t *testing.T) {
 	core := &fakeCore{stream: &fakeCoreStream{frames: map[uint32][]byte{}, blockOnCtx: true}}
 	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}}
 	cfg := startTestConfig(t, cat, tip, core, nil)
-	cfg.ServeReads = func(context.Context) error { return errors.New("rpc bind failed") }
+	cfg.ServeReads = func(context.Context, *query.Registry) (func(), error) { return nil, errors.New("rpc bind failed") }
 
 	err := run(context.Background(), cfg)
 	require.Error(t, err)
@@ -496,12 +497,12 @@ func TestRun_OpensHotDBAndCoreBeforeServe(t *testing.T) {
 
 	var stateAtServe geometry.HotState
 	var coreAtServe int32
-	cfg.ServeReads = func(context.Context) error {
+	cfg.ServeReads = func(context.Context, *query.Registry) (func(), error) {
 		st, herr := cat.HotState(resumeChunk)
 		require.NoError(t, herr)
 		stateAtServe = st
 		coreAtServe = core.openedCount.Load()
-		return errors.New("stop before the blocking loop")
+		return nil, errors.New("stop before the blocking loop")
 	}
 
 	err := run(context.Background(), cfg)
@@ -521,7 +522,7 @@ func TestRun_FirstStartNoTipErrors(t *testing.T) {
 	core := &fakeCore{}
 	tip := &fakeTipBackend{tips: []uint32{0}}
 	cfg := startTestConfig(t, cat, tip, core, nil)
-	cfg.ServeReads = func(context.Context) error { served.Add(1); return nil }
+	cfg.ServeReads = func(context.Context, *query.Registry) (func(), error) { served.Add(1); return func() {}, nil }
 
 	err := run(context.Background(), cfg)
 	require.Error(t, err)

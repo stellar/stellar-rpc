@@ -124,6 +124,8 @@ func (*recordingMetrics) Rebuild(time.Duration)      {}
 func (*recordingMetrics) Prune(int, time.Duration)   {}
 func (*recordingMetrics) LiveHotChunks(int)          {}
 func (*recordingMetrics) Discard(int, time.Duration) {}
+func (*recordingMetrics) FailedDestroy()             {}
+func (*recordingMetrics) StoreClosedServed()         {}
 
 // lastCommittedSeq returns the values the last-committed gauge was set to, in order.
 func (r *recordingMetrics) lastCommittedSeq() []uint32 {

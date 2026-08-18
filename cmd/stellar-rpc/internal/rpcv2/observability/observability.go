@@ -42,6 +42,17 @@ type Metrics interface {
 	Discard(count int, d time.Duration)
 	// Prune counts swept artifacts and records the sweep's wall-clock.
 	Prune(count int, d time.Duration)
+
+	// FailedDestroy counts one deferred destroy that failed and was left for the
+	// next lifecycle run's scan — most commonly a hot handle whose close found a
+	// reader still in flight. A handle stuck forever recounts every run, so a
+	// climbing counter is the stuck-handle alarm the logs alone cannot raise.
+	FailedDestroy()
+
+	// StoreClosedServed counts one request that failed because a store was
+	// closed underneath it. Reaching a client at all means the request outlived
+	// the deletion grace period, so a non-flat rate says the grace is mis-sized.
+	StoreClosedServed()
 }
 
 // NopMetrics discards every signal — the default when a config carries no Metrics.
@@ -56,6 +67,8 @@ func (NopMetrics) Freeze(time.Duration)       {}
 func (NopMetrics) Rebuild(time.Duration)      {}
 func (NopMetrics) Discard(int, time.Duration) {}
 func (NopMetrics) Prune(int, time.Duration)   {}
+func (NopMetrics) FailedDestroy()             {}
+func (NopMetrics) StoreClosedServed()         {}
 
 // MetricsOrNop returns m, or NopMetrics{} when nil, so call sites never nil-check.
 func MetricsOrNop(m Metrics) Metrics {
@@ -83,9 +96,11 @@ type PrometheusMetrics struct {
 	liveHotChunks  prometheus.Gauge
 
 	// Counters — monotonic tallies.
-	chunkBoundaries prometheus.Counter
-	discarded       prometheus.Counter
-	pruned          prometheus.Counter
+	chunkBoundaries   prometheus.Counter
+	discarded         prometheus.Counter
+	pruned            prometheus.Counter
+	failedDestroys    prometheus.Counter
+	storeClosedServed prometheus.Counter
 
 	// Durations — per-phase wall-clock histogram, keyed by phase label.
 	phaseDuration *prometheus.HistogramVec
@@ -122,6 +137,10 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 			"(a chunk whose deferred destroy stays reader-busy recounts on later runs)"),
 		pruned: counter("pruned_artifacts_total", "artifacts swept by the prune stage (below-floor artifacts, "+
 			"transient index debris, in-retention demotions, and redundant txhash keys)"),
+		failedDestroys: counter("failed_destroys_total", "deferred destroys that failed and were left for the "+
+			"next lifecycle run (a stuck hot handle recounts every run)"),
+		storeClosedServed: counter("store_closed_reads_total", "requests that failed because a store was closed "+
+			"underneath them (the request outlived the deletion grace period)"),
 		phaseDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace, Subsystem: subsystem,
 			Name: "phase_duration_seconds", Help: "wall-clock of a daemon phase action",
@@ -132,6 +151,7 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 	registry.MustRegister(
 		m.lastCommitted, m.retentionFloor, m.liveHotChunks,
 		m.chunkBoundaries, m.discarded, m.pruned,
+		m.failedDestroys, m.storeClosedServed,
 		m.phaseDuration,
 	)
 	return m
@@ -167,6 +187,10 @@ func (m *PrometheusMetrics) Discard(count int, d time.Duration) {
 	}
 	m.phaseDuration.WithLabelValues(phaseDiscard).Observe(d.Seconds())
 }
+
+func (m *PrometheusMetrics) FailedDestroy() { m.failedDestroys.Inc() }
+
+func (m *PrometheusMetrics) StoreClosedServed() { m.storeClosedServed.Inc() }
 
 func (m *PrometheusMetrics) Prune(count int, d time.Duration) {
 	if count > 0 {

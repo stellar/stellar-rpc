@@ -17,6 +17,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 const (
@@ -336,4 +337,59 @@ func setupDBNoTxs(t *testing.T, numLedgers int) *sqlitedb.DB {
 		require.NoError(t, tx.Commit(ledgerCloseMeta, nil))
 	}
 	return testDB
+}
+
+// sparseLedgerReader serves an arbitrarily wide range of empty ledgers,
+// counting point reads, so a test can observe how far the handler walks.
+type sparseLedgerReader struct {
+	latest uint32
+	gets   int
+}
+
+func (r *sparseLedgerReader) GetLedger(_ context.Context, seq uint32) (xdr.LedgerCloseMeta, bool, error) {
+	r.gets++
+	return createEmptyTestLedger(seq), true, nil
+}
+
+func (r *sparseLedgerReader) GetLedgerRange(context.Context) (store.LedgerRange, error) {
+	return store.LedgerRange{
+		FirstLedger: store.LedgerInfo{Sequence: 1, CloseTime: 100},
+		LastLedger:  store.LedgerInfo{Sequence: r.latest, CloseTime: 200},
+	}, nil
+}
+
+func (r *sparseLedgerReader) BatchGetLedgers(context.Context, uint32, uint32) ([]store.LedgerMetadataChunk, error) {
+	return nil, nil
+}
+
+func (r *sparseLedgerReader) StreamLedgerRange(context.Context, uint32, uint32, store.StreamLedgerFn) error {
+	return nil
+}
+
+func (r *sparseLedgerReader) GetLatestLedgerSequence(context.Context) (uint32, error) {
+	return r.latest, nil
+}
+
+func (r *sparseLedgerReader) NewTx(context.Context) (store.LedgerReaderTx, error) { return r, nil }
+
+func (r *sparseLedgerReader) Done() error { return nil }
+
+func TestGetTransactions_SparseRangeCapsAtLedgerScanLimit(t *testing.T) {
+	reader := &sparseLedgerReader{latest: 50_000}
+	handler := transactionsRPCHandler{
+		ledgerReader:      reader,
+		maxLimit:          100,
+		defaultLimit:      10,
+		networkPassphrase: NetworkPassphrase,
+	}
+
+	response, err := handler.getTransactionsByLedgerSequence(
+		context.TODO(), protocol.GetTransactionsRequest{StartLedger: 1})
+	require.NoError(t, err)
+
+	assert.Empty(t, response.Transactions)
+	assert.Equal(t, LedgerScanLimit, reader.gets, "the walk stops at the scan limit, not the latest ledger")
+	assert.Equal(t, toid.New(LedgerScanLimit, 0, 1).String(), response.Cursor,
+		"the cursor points at the last scanned ledger so the client can page on")
+	assert.Equal(t, uint32(50_000), response.LatestLedger)
 }

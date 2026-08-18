@@ -255,8 +255,14 @@ func (h transactionsRPCHandler) getTransactionsByLedgerSequence(ctx context.Cont
 	txns := make([]protocol.TransactionInfo, 0, limit)
 	var done bool
 	cursor := toid.New(0, 0, 0)
-	//nolint:gosec // TOID ledger sequences are int32 by design; uint32 overflow needs a 2^31 ledger
-	for ledgerSeq := start.LedgerSequence; ledgerSeq <= int32(ledgerRange.LastLedger.Sequence); ledgerSeq++ {
+	// Bound the walk the way getEvents bounds its scan (LedgerScanLimit): over a
+	// sparse range the response is a short page and the client pages on from the
+	// returned cursor, instead of the handler walking unboundedly toward the tip.
+	endLedger := int64(ledgerRange.LastLedger.Sequence)
+	if spanEnd := int64(start.LedgerSequence) + LedgerScanLimit - 1; spanEnd < endLedger {
+		endLedger = spanEnd
+	}
+	for ledgerSeq := start.LedgerSequence; int64(ledgerSeq) <= endLedger; ledgerSeq++ {
 		if ledgerSeq < 0 {
 			return protocol.GetTransactionsResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InvalidParams,

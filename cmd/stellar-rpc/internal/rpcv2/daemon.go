@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +30,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 )
 
 // RunDaemon is the full-history daemon's process entrypoint: load config, lock
@@ -53,12 +55,13 @@ type daemonOptions struct {
 	// [ingestion] (a complete production opener). Tests inject a fake getter.
 	Core CoreOpener
 
-	// ServeReads launches the RPC read server; it must return promptly, not block.
-	// nil ⇒ a no-op placeholder, which is what production uses today: v2 serves
-	// nothing. Serving arrives across #772's sub-tasks — #889 builds the server and
-	// the method table, over the router-backed store readers (#885-#887) the
-	// handlers need. Reads stay on the v1 SQLite daemon until the #772 cutover.
-	ServeReads func(ctx context.Context) error
+	// ServeReads launches the RPC read server over one supervised attempt's
+	// query registry; it must return promptly, not block. The returned stop shuts
+	// the server down — run() calls it before the attempt's registry closes.
+	// nil ⇒ the production server (newServeReads): the shared method table over
+	// the router-backed adapters, listening on [service].endpoint. Tests inject
+	// recorders.
+	ServeReads func(ctx context.Context, reg *query.Registry) (func(), error)
 
 	// RestartBackoff is the supervised loop's inter-restart sleep; zero ⇒ defaultRestartBackoff.
 	RestartBackoff time.Duration
@@ -80,9 +83,9 @@ type daemonOptions struct {
 	// freeze is a terminal index (exercising the index rebuild + prune path cheaply).
 	chunksPerTxhashIndex uint32
 
-	// lifecycleGrace overrides the deferred-deletion wait (test-only). 0 ⇒ the
-	// lifecycle's defaultGrace. Tests that drive discard/prune set it small so the
-	// end-of-run destroy does not park for minutes.
+	// lifecycleGrace overrides the deferred-deletion wait (test-only). 0 ⇒
+	// derived from the serving timeouts (deriveLifecycleGrace). Tests that drive
+	// discard/prune set it small so the end-of-run destroy does not park.
 	lifecycleGrace time.Duration
 }
 
@@ -116,8 +119,10 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	// Readiness/health signal, fed by the ingestion loop per commit; both signals
 	// derive from the last committed ledger. Created outside the supervised run
-	// loop so it survives restarts (readiness stays latched across them).
-	// TODO(#889): serve it from the read server (as HealthSignal).
+	// loop so it survives restarts (readiness stays latched across them). The
+	// getHealth METHOD is served from the ledger adapter instead (the registry's
+	// close-time stamps carry the same signal); this stays the process-level
+	// readiness seam (HealthSignal) for a future probe endpoint.
 	hs := &healthState{}
 
 	paths := cfg.ResolvePaths()
@@ -181,14 +186,6 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 			"or [ingestion].history_archive_urls")
 	}
 
-	serveReads := opts.ServeReads
-	if serveReads == nil {
-		// TODO(#889): build v2's read server — the method table, the listener on
-		// [service].endpoint, and the admin endpoint. The handlers it registers also
-		// need the router-backed store readers (#885-#887). No-op until then.
-		serveReads = func(context.Context) error { return nil }
-	}
-
 	// --- validateConfig: pin/confirm the layout, resolve the earliest floor. ---
 	earliest, err := validateConfig(ctx, cfg, cat, backend.Tip)
 	if err != nil {
@@ -211,15 +208,15 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	)
 
 	// Control-plane Metrics and the ingest sink share ONE registry, built after the
-	// validateConfig gate (it registers Prometheus collectors).
-	// TODO(#889): expose it on the read server's /metrics.
+	// validateConfig gate (it registers Prometheus collectors). The admin server's
+	// /metrics serves it, alongside the per-attempt serving collectors.
 	registry := prometheus.NewRegistry()
 	metrics, sink := buildSinks(opts, registry)
 
 	// --- Captive-core state access for the three endpoints that need it, plus
 	// simulateTransaction's preflight pool. Built once, outside the supervised
 	// loop: the pool registers collectors on the registry above, and registering
-	// the same collector twice panics. #889 hands both to the method table. ---
+	// the same collector twice panics. The method table consumes both. ---
 	coreDaemon, err := corestate.New(ctx, corestate.Config{
 		CoreURL:               cfg.Ingestion.CoreURL,
 		QueryPort:             deref(cfg.Ingestion.CoreHTTPQueryPort),
@@ -241,10 +238,41 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 		"stellar_core_version": coreDaemon.CoreVersion(),
 	}).Info("wired the captive-core-backed endpoints")
 
+	// --- The two HTTP servers. The admin server (pprof, /metrics) is
+	// process-wide; the JSON-RPC server is per supervised attempt (its handlers
+	// hold that attempt's query registry), so ServeReads builds it inside run().
+	// attempts is the bridge between the two lifetimes: /metrics reads the
+	// current attempt's serving collectors through it. ---
+	attempts := &attemptGatherer{}
+	if cfg.Service.AdminEndpoint != "" {
+		stopAdmin, aerr := startAdminServer(ctx, cfg.Service.AdminEndpoint, logger, registry, attempts)
+		if aerr != nil {
+			return aerr
+		}
+		defer stopAdmin()
+	}
+	serveReads := opts.ServeReads
+	if serveReads == nil {
+		serveReads = newServeReads(readServerDeps{
+			cfg:               cfg,
+			logger:            logger,
+			daemon:            coreDaemon,
+			metrics:           metrics,
+			preflightGetter:   preflightPool,
+			feeWindows:        feeWindows,
+			networkPassphrase: core.networkPassphrase,
+			retentionWindow:   retentionLedgers(deref(cfg.Retention.RetentionChunks)),
+			attempts:          attempts,
+		})
+	}
+
 	// --- Assemble the StartConfig and run the supervised run loop. ---
 	start := startConfig(
 		cfg, cat, logger, backend, core.live, serveReads, metrics, sink, hs, retention)
 	start.lifecycleGrace = opts.lifecycleGrace
+	if start.lifecycleGrace <= 0 {
+		start.lifecycleGrace = deriveLifecycleGrace(cfg.Service)
+	}
 	start.FeeWindows = feeWindows
 
 	backoff := opts.RestartBackoff
@@ -303,12 +331,28 @@ func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry
 	return newCaptiveCoreOpeners(cfg.Ingestion, cfg.Storage.DefaultDataDir, logger)
 }
 
+// retentionLedgers converts the retention_chunks knob into getHealth's
+// ledger-count retention window. 0 chunks means full history; report the
+// widest representable window rather than 0, which would read as "keeps
+// nothing".
+func retentionLedgers(chunks uint32) uint32 {
+	if chunks == 0 {
+		return math.MaxUint32
+	}
+	ledgers := uint64(chunks) * uint64(chunk.LedgersPerChunk)
+	if ledgers > math.MaxUint32 {
+		return math.MaxUint32
+	}
+	return uint32(ledgers)
+}
+
 // startConfig assembles the StartConfig run consumes. run() builds the
 // lifecycle.Config from Exec + Retention, so backfill and the lifecycle
 // goroutine share ONE catalog, worker pool, and retention floor by construction.
 func startConfig(
 	cfg config.Config, cat *catalog.Catalog, logger *supportlog.Entry,
-	backend backfill.Backend, core CoreOpener, serveReads func(context.Context) error,
+	backend backfill.Backend, core CoreOpener,
+	serveReads func(context.Context, *query.Registry) (func(), error),
 	metrics observability.Metrics, sink ingest.MetricSink, hs *healthState, retention geometry.Retention,
 ) StartConfig {
 	exec := backfill.ExecConfig{

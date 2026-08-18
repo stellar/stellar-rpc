@@ -55,6 +55,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
@@ -216,7 +217,7 @@ func runDaemonInBackground(
 	opts := daemonOptions{
 		Backend:              &fakeBackend{tip: chunk.FirstLedgerSeq + 5}, // young: no backfill
 		Core:                 core,
-		ServeReads:           func(context.Context) error { served.Add(1); return nil },
+		ServeReads:           func(context.Context, *query.Registry) (func(), error) { served.Add(1); return func() {}, nil },
 		Logger:               silentLogger(),
 		Metrics:              metrics,
 		RestartBackoff:       10 * time.Millisecond,

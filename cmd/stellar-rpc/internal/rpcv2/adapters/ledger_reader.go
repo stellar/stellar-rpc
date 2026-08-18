@@ -23,7 +23,7 @@ import (
 // 10,000 ledgers (one chunk) the span covers at most two chunks, so ScanLedgers
 // resolves every reader at call time and an unroutable chunk fails before any
 // row is returned instead of mid-walk. getTransactions' handler-level span cap
-// (#889) keeps requests inside this window.
+// (methods.LedgerScanLimit, the same 10,000) keeps requests inside this window.
 const walkSpanCap = 10_000
 
 // LedgerReader satisfies store.LedgerReader over the query router. Each method
@@ -53,22 +53,24 @@ func (r *LedgerReader) GetLatestLedgerSequence(_ context.Context) (uint32, error
 	return view.LatestLedger(), nil
 }
 
-func (r *LedgerReader) GetLedger(_ context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
+func (r *LedgerReader) GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
 	view, err := r.registry.NewReadView()
 	if err != nil {
 		return xdr.LedgerCloseMeta{}, false, err
 	}
 	defer view.Release()
-	return getLedger(view, sequence)
+	lcm, found, err := getLedger(view, sequence)
+	return lcm, found, markErr(ctx, err)
 }
 
-func (r *LedgerReader) GetLedgerRange(_ context.Context) (store.LedgerRange, error) {
+func (r *LedgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRange, error) {
 	view, err := r.registry.NewReadView()
 	if err != nil {
 		return store.LedgerRange{}, err
 	}
 	defer view.Release()
-	return getLedgerRange(view, r.registry)
+	lr, err := getLedgerRange(view, r.registry)
+	return lr, markErr(ctx, err)
 }
 
 func (r *LedgerReader) StreamLedgerRange(
@@ -82,11 +84,11 @@ func (r *LedgerReader) StreamLedgerRange(
 
 	scan, err := view.ScanLedgers(startLedger, endLedger)
 	if err != nil {
-		return err
+		return markErr(ctx, err)
 	}
 	for entry, err := range scan {
 		if err != nil {
-			return err
+			return markErr(ctx, err)
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -129,7 +131,7 @@ type ledgerReaderTx struct {
 // Compile-time interface check, same reason as LedgerReader's above.
 var _ store.LedgerReaderTx = (*ledgerReaderTx)(nil)
 
-func (tx *ledgerReaderTx) GetLedger(_ context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
+func (tx *ledgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
 	// chunk.IDFromLedger panics below ledger 2, and sequence comes from a
 	// client-supplied cursor, so the guard is load-bearing, not defensive.
 	if sequence < chunk.FirstLedgerSeq {
@@ -146,22 +148,23 @@ func (tx *ledgerReaderTx) GetLedger(_ context.Context, sequence uint32) (xdr.Led
 	if tx.next == nil {
 		scan, err := tx.view.ScanLedgers(sequence, min(tx.view.LatestLedger(), sequence+walkSpanCap))
 		if err != nil {
-			return xdr.LedgerCloseMeta{}, false, err
+			return xdr.LedgerCloseMeta{}, false, markErr(ctx, err)
 		}
 		tx.next, tx.stop = iter.Pull2(scan)
 	}
 
 	entry, err, ok := tx.next()
 	if err != nil {
-		return xdr.LedgerCloseMeta{}, false, err
+		return xdr.LedgerCloseMeta{}, false, markErr(ctx, err)
 	}
 	if !ok {
-		// The iterator ran dry: the caller walked sequentially but past the
-		// span primed above. Not the caller misbehaving — the request's ledger
-		// range is too wide, and the handler must cap it (#889).
+		// The iterator ran dry: the caller walked sequentially but past the span
+		// primed above. getTransactions' span cap (methods.LedgerScanLimit) keeps
+		// its walks inside the span, so reaching this means a new caller without
+		// that cap. Fail loudly rather than serve a wrong-position read.
 		return xdr.LedgerCloseMeta{}, false, fmt.Errorf(
 			"adapters: ledger walk exhausted its primed %d-ledger span at ledger %d"+
-				" — the handler must cap the request's ledger range (#889)",
+				" — the calling handler must cap the request's ledger range",
 			walkSpanCap, sequence)
 	}
 	if entry.Seq != sequence {
@@ -178,21 +181,22 @@ func (tx *ledgerReaderTx) GetLedger(_ context.Context, sequence uint32) (xdr.Led
 	return lcm, true, nil
 }
 
-func (tx *ledgerReaderTx) GetLedgerRange(_ context.Context) (store.LedgerRange, error) {
-	return getLedgerRange(tx.view, tx.registry)
+func (tx *ledgerReaderTx) GetLedgerRange(ctx context.Context) (store.LedgerRange, error) {
+	lr, err := getLedgerRange(tx.view, tx.registry)
+	return lr, markErr(ctx, err)
 }
 
 func (tx *ledgerReaderTx) BatchGetLedgers(
-	_ context.Context, start, end uint32,
+	ctx context.Context, start, end uint32,
 ) ([]store.LedgerMetadataChunk, error) {
 	scan, err := tx.view.ScanLedgers(start, end)
 	if err != nil {
-		return nil, err
+		return nil, markErr(ctx, err)
 	}
 	var out []store.LedgerMetadataChunk
 	for entry, err := range scan {
 		if err != nil {
-			return nil, err
+			return nil, markErr(ctx, err)
 		}
 		var lcm xdr.LedgerCloseMeta
 		if err := lcm.UnmarshalBinary(entry.Bytes); err != nil {

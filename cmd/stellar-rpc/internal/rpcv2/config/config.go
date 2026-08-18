@@ -44,13 +44,11 @@ type Config struct {
 }
 
 // ServiceConfig is [service] — the JSON-RPC read-serving policy (issue #882).
-// The serving limits are dormant until #889 builds the read server that reads
-// them (over the store readers its handlers need) — those values are only
-// parsed, defaulted, and validated. [service.fee_stats] and
-// [service.preflight] are live: ingestion feeds the fee windows sized by the
-// former (#881), and the daemon sizes its preflight pool from the latter at
-// startup. The whole section is optional: absent keys get v1's defaults in
-// WithDefaults.
+// Everything here is live: the read server listens on endpoint, the admin
+// server on admin_endpoint, the method table enforces the per-method limits,
+// ingestion feeds the fee windows sized by [service.fee_stats] (#881), and the
+// daemon sizes its preflight pool from [service.preflight] at startup. The
+// whole section is optional: absent keys get v1's defaults in WithDefaults.
 //
 // Key naming rule: camelCase table keys ONLY where the key is a wire identifier
 // (the [service.methods.<methodName>] tables, named after the JSON-RPC method);

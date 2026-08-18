@@ -31,7 +31,7 @@ func NewTransactionReader(registry *query.Registry, networkPassphrase string) *T
 	return &TransactionReader{registry: registry, passphrase: networkPassphrase}
 }
 
-func (r *TransactionReader) GetTransaction(_ context.Context, hash xdr.Hash) (store.Transaction, error) {
+func (r *TransactionReader) GetTransaction(ctx context.Context, hash xdr.Hash) (store.Transaction, error) {
 	view, err := r.registry.NewReadView()
 	if err != nil {
 		return store.Transaction{}, err
@@ -52,7 +52,7 @@ func (r *TransactionReader) GetTransaction(_ context.Context, hash xdr.Hash) (st
 	}
 	txv, found, err := probe.GetTransaction(hash)
 	if err != nil {
-		return store.Transaction{}, err
+		return store.Transaction{}, markErr(ctx, err)
 	}
 	if !found {
 		return store.Transaction{}, store.ErrNoTransaction

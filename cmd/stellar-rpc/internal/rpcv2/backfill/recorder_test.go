@@ -48,4 +48,8 @@ func (*recordingMetrics) BackfillPass(time.Duration) {}
 func (*recordingMetrics) LiveHotChunks(int)          {}
 func (*recordingMetrics) Discard(int, time.Duration) {}
 
+func (*recordingMetrics) FailedDestroy() {}
+
+func (*recordingMetrics) StoreClosedServed() {}
+
 var _ observability.Metrics = (*recordingMetrics)(nil)
