@@ -8,8 +8,13 @@ import (
 	"strings"
 )
 
-// endpointStats is one endpoint's row of the report, distilled from blaster's
-// results JSON (percentile keys there are "p50.0", "p95.0", "p99.0", "p99.9").
+// expectedTrafficProfile is the traffic-model version blaster stamps on modeled
+// endpoints at the pinned commit; a mismatch breaks cross-run comparability.
+const expectedTrafficProfile = 2
+
+// endpointStats is one reporting stream's row of the report, distilled from
+// blaster's results JSON (percentile keys there are "p50.0", "p95.0", "p99.0",
+// "p99.9"). getEvents reports one stream per traffic archetype.
 type endpointStats struct {
 	Name      string
 	TargetRPS float64
@@ -22,17 +27,22 @@ type endpointStats struct {
 	P999      float64
 }
 
-// summarize turns blaster's results JSON into per-endpoint rows.
+// streamResult is one reporting stream in blaster's results JSON.
+//
+//nolint:tagliatelle // external schema: blaster emits snake_case
+type streamResult struct {
+	TotalRequests uint64             `json:"total_requests"`
+	Errors        uint64             `json:"errors"`
+	TargetRPS     float64            `json:"target_rps"`
+	Limit         uint64             `json:"limit"`
+	Profile       int                `json:"traffic_profile"`
+	Percentiles   map[string]float64 `json:"percentiles_ms"`
+}
+
+// summarize turns blaster's results JSON into per-stream rows.
 func summarize(data []byte) ([]endpointStats, error) {
 	var res struct {
-		//nolint:tagliatelle // external schema: blaster emits snake_case
-		Endpoints map[string]struct {
-			TotalRequests uint64             `json:"total_requests"`
-			Errors        uint64             `json:"errors"`
-			TargetRPS     float64            `json:"target_rps"`
-			Limit         uint64             `json:"limit"`
-			Percentiles   map[string]float64 `json:"percentiles_ms"`
-		} `json:"endpoints"`
+		Endpoints map[string]json.RawMessage `json:"endpoints"`
 	}
 	if err := json.Unmarshal(data, &res); err != nil {
 		return nil, err
@@ -42,18 +52,45 @@ func summarize(data []byte) ([]endpointStats, error) {
 	}
 
 	rows := make([]endpointStats, 0, len(res.Endpoints))
-	for name, ep := range res.Endpoints {
-		rows = append(rows, endpointStats{
-			Name:      name,
-			TargetRPS: ep.TargetRPS,
-			Limit:     ep.Limit,
-			Requests:  ep.TotalRequests,
-			Errors:    ep.Errors,
-			P50:       ep.Percentiles["p50.0"],
-			P95:       ep.Percentiles["p95.0"],
-			P99:       ep.Percentiles["p99.0"],
-			P999:      ep.Percentiles["p99.9"],
-		})
+	profiled := false
+	for name, raw := range res.Endpoints {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			return nil, fmt.Errorf("endpoint %s: %w", name, err)
+		}
+		streams := map[string]json.RawMessage{name: raw}
+		if _, monolithic := fields["total_requests"]; !monolithic {
+			// getEvents nests one stats object per archetype
+			streams = make(map[string]json.RawMessage, len(fields))
+			for stream, sub := range fields {
+				streams[name+"/"+stream] = sub
+			}
+		}
+		for rowName, sub := range streams {
+			var ep streamResult
+			if err := json.Unmarshal(sub, &ep); err != nil {
+				return nil, fmt.Errorf("endpoint %s: %w", rowName, err)
+			}
+			if ep.Profile != 0 && ep.Profile != expectedTrafficProfile {
+				return nil, fmt.Errorf("endpoint %s reports traffic profile %d, want %d",
+					rowName, ep.Profile, expectedTrafficProfile)
+			}
+			profiled = profiled || ep.Profile != 0
+			rows = append(rows, endpointStats{
+				Name:      rowName,
+				TargetRPS: ep.TargetRPS,
+				Limit:     ep.Limit,
+				Requests:  ep.TotalRequests,
+				Errors:    ep.Errors,
+				P50:       ep.Percentiles["p50.0"],
+				P95:       ep.Percentiles["p95.0"],
+				P99:       ep.Percentiles["p99.0"],
+				P999:      ep.Percentiles["p99.9"],
+			})
+		}
+	}
+	if !profiled {
+		return nil, fmt.Errorf("no endpoint reports traffic profile %d", expectedTrafficProfile)
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 	return rows, nil
