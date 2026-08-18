@@ -24,14 +24,26 @@ import (
 // stored event on this node; the client must restart the query.
 var ErrPositionMismatch = errors.New("query: cursor position does not match stored events")
 
+// maxScanLedgers bounds the ledgers one page may scan, so a filter
+// that matches nothing cannot walk the node's whole retention in one
+// call: the page stops at the window's edge and returns ScanHasMore
+// with the watermark advanced through it. At 10,000 ledgers a page
+// touches at most two chunks. A var, not a const, so tests can shrink
+// it to force window seams; production never writes it. The value may
+// become configuration.
+//
+//nolint:gochecknoglobals // test seam; production never writes it
+var maxScanLedgers = uint32(10_000)
+
 // ScanStatus is where a page's walk stopped; the handler maps it to
 // the wire scanStatus.
 type ScanStatus int
 
 const (
-	// ScanHasMore: more range remains. Either the page filled, or the
-	// walk is waiting: a descending resume point is above this view's
-	// latest ledger, so the page is empty and the cursor unchanged.
+	// ScanHasMore: more range remains. The page filled, the page's
+	// scan window ended with scope beyond it, or the walk is waiting:
+	// a descending resume point is above this view's latest ledger, so
+	// the page is empty and the cursor unchanged.
 	ScanHasMore ScanStatus = iota
 	// ScanComplete: the walk finished the cursor's bounds within
 	// served history.
@@ -89,6 +101,17 @@ func (a *ReadView) QueryEvents(ctx context.Context, cursor EventCursor, limit in
 		// resume moved past it, or a fresh scope is entirely above it.
 		return &EventPage{Next: cursor, Status: ScanWaitingForLedgers}, nil
 	}
+	// Bound the page's scan window to maxScanLedgers. The window keeps
+	// the leading edge (the resume point) and gives up the far end; a
+	// truncated page is never terminal, so the next page continues.
+	truncated := hi-lo+1 > maxScanLedgers
+	if truncated {
+		if desc {
+			lo = hi - maxScanLedgers + 1
+		} else {
+			hi = lo + maxScanLedgers - 1
+		}
+	}
 
 	chunks, err := a.ChunksForRange(cursor.Scope.Dir, lo, hi)
 	if err != nil {
@@ -98,7 +121,7 @@ func (a *ReadView) QueryEvents(ctx context.Context, cursor EventCursor, limit in
 	if err != nil {
 		return nil, err
 	}
-	return assemblePage(cursor, walk, lo, hi, a.OldestLedger(), a.LatestLedger(), desc), nil
+	return assemblePage(cursor, walk, lo, hi, a.OldestLedger(), a.LatestLedger(), desc, truncated), nil
 }
 
 func validateCursor(cursor *EventCursor, limit int) error {
@@ -382,7 +405,7 @@ func resumeOrdinal(
 // walk's facts: the advanced bookmarks never regress and the watermark
 // never leaves the clamped window [clo, chi].
 func assemblePage(
-	cursor EventCursor, walk walkResult, clo, chi, oldest, latest uint32, desc bool,
+	cursor EventCursor, walk walkResult, clo, chi, oldest, latest uint32, desc, truncated bool,
 ) *EventPage {
 	next := cursor
 	if walk.last != nil {
@@ -391,7 +414,8 @@ func assemblePage(
 	next.ScannedLedger = watermark(&cursor, walk, clo, chi, desc)
 
 	status := ScanHasMore
-	if walk.finished {
+	if walk.finished && !truncated {
+		// A truncated window is never terminal: scope remains beyond it.
 		status = terminalStatus(&cursor.Scope, desc, oldest, latest)
 	}
 	return &EventPage{Events: walk.events, Next: next, Status: status}

@@ -146,8 +146,7 @@ func (f *Filter) impliesTopicCount() bool {
 // its range from the same ledger bounds via IDRangeForLedgers, which
 // is identical over ledgers committed before the first page (the
 // store is append-only) and extends only over newly committed
-// ledgers. See design-docs/getevents-v2-implementation-plan.md,
-// "Reconciling the cursor with the store's End-pinning contract".
+// ledgers.
 //
 // End > EventCount is rejected as a caller bug (wrong chunk's
 // offsets or stale snapshot) — under the snapshot-isolation contract

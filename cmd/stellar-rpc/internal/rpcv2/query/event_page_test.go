@@ -543,6 +543,40 @@ func TestQueryEvents_OldestReachedContinuesOnDeeperNode(t *testing.T) {
 	assert.Equal(t, ScanComplete, status)
 }
 
+// TestQueryEvents_ScanBudget pins the per-page scan window: a filter
+// that matches nothing advances the watermark one window per page
+// (empty pages, ScanHasMore) instead of scanning the whole scope in
+// one call, and delivery stays gapless across window seams.
+func TestQueryEvents_ScanBudget(t *testing.T) {
+	defer func(n uint32) { maxScanLedgers = n }(maxScanLedgers)
+	maxScanLedgers = 2
+
+	r, _, f := singleChunkFixture(t)
+	maxL := f + 3
+
+	// Match-nothing filter: two windows cover the scope, no events.
+	d := &pageDriver{t: t, r: r, limit: 10, cursor: EventCursor{Scope: EventCursorQuery{
+		MinLedger: f, MaxLedger: &maxL,
+		Filters: []event.Filter{{ContractID: cidC[:]}},
+	}}}
+	page := d.next()
+	assert.Empty(t, page.Events)
+	assert.Equal(t, ScanHasMore, page.Status)
+	assert.Equal(t, f+1, page.Next.ScannedLedger, "first window covered")
+	page = d.next()
+	assert.Empty(t, page.Events)
+	assert.Equal(t, ScanComplete, page.Status)
+	assert.Equal(t, f+3, page.Next.ScannedLedger)
+
+	// Match-all descending: the windows walk down without gaps.
+	d = &pageDriver{t: t, r: r, limit: 10, cursor: EventCursor{Scope: EventCursorQuery{
+		MinLedger: f, MaxLedger: &maxL, Dir: Descending,
+	}}}
+	all, status := d.drain()
+	assert.Equal(t, []string{"a3", "b1", "a2", "b0", "a1", "a0"}, all)
+	assert.Equal(t, ScanComplete, status)
+}
+
 // TestQueryEvents_OpensOnlyScannedChunks pins lazy chunk resolution: a
 // page that fills inside the walk's first chunk never resolves the
 // chunks behind it. The far chunk has no serving store here, so an
