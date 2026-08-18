@@ -36,9 +36,6 @@ func TestHealthState_ObserveNilSafe(t *testing.T) {
 	require.NotPanics(t, func() { hs.observe(time.Now().Unix()) })
 }
 
-// TestServingSink_ZeroCloseTimeStampsButNeverLatches: a close time of 0 means
-// "unknown" (boot seed or failed decode) — the stamp must still reach the inner
-// sink, but readiness must latch only on a real close time.
 func TestServingSink_ZeroCloseTimeStampsButNeverLatches(t *testing.T) {
 	hs := &healthState{}
 	inner := &closingSink{}

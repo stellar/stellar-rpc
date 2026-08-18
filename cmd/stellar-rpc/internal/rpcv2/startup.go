@@ -124,7 +124,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// acquired before the first commit is correct. The ingestion loop advances the
 	// latest ledger and publishes handles from here, the freeze reads through them
 	// (HotHandle), and the lifecycle retires them at discard. Constructed per run —
-	// no query survives a restart. It will back the read server (#772).
+	// no query survives a restart; ServeReads below serves this run's reads from it.
 	registry, err := query.OpenRegistry(cat, cfg.Retention, hotDB, lastCommitted)
 	if err != nil {
 		return fmt.Errorf("startup open registry: %w", err)

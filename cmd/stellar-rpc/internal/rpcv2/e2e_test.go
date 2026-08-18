@@ -24,8 +24,9 @@ package rpcv2
 //       cross their injected interfaces (CoreOpener / backfill.Backend) and are
 //       fed synthetic-but-well-formed LedgerCloseMeta. No captive core, no
 //       object store, no network.
-//     - ServeReads is a no-op recorder (the read cutover is #772). The read PATH
-//       exercised is the txhash index lookup getTransaction will sit on.
+//     - ServeReads is a no-op recorder (the real server binds a port and is
+//       covered by its own tests). The read PATH exercised is the txhash index
+//       lookup getTransaction sits on.
 //
 // cpi=1 (the chunksPerTxhashIndex test seam) makes every one-chunk window
 // terminal the instant its chunk freezes, so the freeze→fold→discard→prune
