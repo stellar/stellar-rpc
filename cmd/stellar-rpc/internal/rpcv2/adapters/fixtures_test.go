@@ -16,23 +16,18 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 
-	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
-	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 const testChunk = chunk.ID(5)
@@ -392,77 +387,4 @@ func writeFrozenTxIndex(t *testing.T, cat *catalog.Catalog, lo, hi chunk.ID, ent
 	require.NoError(t, txhash.BuildColdIndex(
 		context.Background(), []string{bin}, idxPath, lo.FirstLedger(), hi.LastLedger()))
 	require.NoError(t, cat.CommitTxHashIndex(cov))
-}
-
-// seedFrozenEventChunk materializes chunk c's frozen events bucket and ledgers
-// pack from the given LCMs, mirroring ingest's cold path (same payload shaping
-// and term indexing), so the adapter serves the chunk entirely cold.
-func seedFrozenEventChunk(t *testing.T, cat *catalog.Catalog, c chunk.ID, lcms ...[]byte) {
-	t.Helper()
-	dir := cat.Layout().EventsBucketDir(c)
-	require.NoError(t, os.MkdirAll(dir, 0o755))
-	cw, err := event.NewColdWriter(c, dir, event.ColdWriterOptions{})
-	require.NoError(t, err)
-	defer func() { _ = cw.Close() }()
-
-	mirror := events.NewBitmaps()
-	offsets := events.NewLedgerOffsets(c.FirstLedger())
-	eventID := uint32(0)
-	for i, raw := range lcms {
-		seq := c.FirstLedger() + uint32(i)
-		view := xdr.LedgerCloseMetaView(raw)
-		txEvents, err := sdkingest.ExtractLedgerEvents(view)
-		require.NoError(t, err)
-		closedAt, err := view.LedgerCloseTime()
-		require.NoError(t, err)
-		payloads, err := events.PayloadsFromLedgerEvents(txEvents, seq, closedAt)
-		require.NoError(t, err)
-		for i := range payloads {
-			require.NoError(t, cw.Append(payloads[i]))
-			keys, err := events.TermsForBytes(payloads[i].ContractEventBytes)
-			require.NoError(t, err)
-			for _, k := range keys {
-				mirror.AddTo(k, eventID)
-			}
-			eventID++
-		}
-		require.NoError(t, offsets.Append(seq, uint32(len(payloads))))
-	}
-	require.NoError(t, cw.Finish(offsets))
-	require.NoError(t, event.WriteColdIndex(context.Background(), c, mirror, dir))
-	require.NoError(t, cat.FlipChunkFrozen(c, geometry.KindEvents))
-
-	writeFrozenLedgerPack(t, cat, c, lcms...)
-}
-
-// ───────────────────────── Scan collectors ─────────────────────────
-
-type scannedEvent struct {
-	event     xdr.DiagnosticEvent
-	cursor    protocol.Cursor
-	closeTime int64
-	txHash    xdr.Hash
-}
-
-func collectInto(got *[]scannedEvent) store.ScanFunction {
-	return func(event xdr.DiagnosticEvent, cursor protocol.Cursor, closeTime int64, txHash *xdr.Hash) bool {
-		*got = append(*got, scannedEvent{event: event, cursor: cursor, closeTime: closeTime, txHash: *txHash})
-		return true
-	}
-}
-
-func collectLimit(got *[]scannedEvent, limit int) store.ScanFunction {
-	return func(event xdr.DiagnosticEvent, cursor protocol.Cursor, closeTime int64, txHash *xdr.Hash) bool {
-		*got = append(*got, scannedEvent{event: event, cursor: cursor, closeTime: closeTime, txHash: *txHash})
-		return len(*got) < limit
-	}
-}
-
-// wholeWindow is the cursor range covering [lo, hi] inclusively, mirroring the
-// handler's construction (End's ledger is exclusive).
-func wholeWindow(lo, hi uint32) protocol.CursorRange {
-	return protocol.CursorRange{
-		Start: protocol.Cursor{Ledger: lo},
-		End:   protocol.Cursor{Ledger: hi + 1},
-	}
 }

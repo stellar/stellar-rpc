@@ -10,7 +10,7 @@ import (
 
 // The range helpers the endpoint adapters build on. Both clamp the raw request
 // range themselves (RangeError / ErrInvertedRange surface here) and resolve the
-// overlapping chunks. EventReaders opens everything up front: getEvents' 10,000-
+// overlapping chunks. EventParts opens everything up front: getEvents' 10,000-
 // ledger protocol cap makes its chunk count structural. ScanLedgers cannot lean
 // on that — getTransactions' scan shape is (cursor, latestLedger), which on a
 // deep-history node spans thousands of chunks — so it must be cheap at any
@@ -134,10 +134,18 @@ func (w *ledgerWalk) closeAll() error {
 	return nil
 }
 
-// EventReaders resolves the clamped [lo, hi] into per-chunk bounded readers in
-// scan order (one or two under the page limits). An empty result means the
-// request lies beyond latest.
-func (a *ReadView) EventReaders(dir Direction, lo, hi uint32) ([]event.BoundedReader, error) {
+// EventPart is one chunk's slice of a clamped range: the reader plus the
+// intersected ledger bounds — the input shape the events query engine consumes.
+type EventPart struct {
+	Chunk    chunk.ID
+	Reader   event.Reader
+	From, To uint32
+}
+
+// EventParts resolves the clamped [lo, hi] into per-chunk parts in scan order
+// (one or two under the page limits). An empty result means the request lies
+// beyond latest.
+func (a *ReadView) EventParts(dir Direction, lo, hi uint32) ([]EventPart, error) {
 	lo, hi, err := a.ClampRange(dir, lo, hi)
 	if err != nil {
 		return nil, err
@@ -146,15 +154,15 @@ func (a *ReadView) EventReaders(dir Direction, lo, hi uint32) ([]event.BoundedRe
 		return nil, nil // beyond latest: nothing to serve yet
 	}
 	chunks := chunksBetween(chunk.IDFromLedger(lo), chunk.IDFromLedger(hi), dir)
-	parts := make([]event.BoundedReader, 0, len(chunks))
+	parts := make([]EventPart, 0, len(chunks))
 	for _, c := range chunks {
 		r, err := a.Events(c)
 		if err != nil {
 			return nil, err
 		}
-		parts = append(parts, event.BoundedReader{
-			Reader: r,
-			From:   max(lo, c.FirstLedger()), To: min(hi, c.LastLedger()),
+		parts = append(parts, EventPart{
+			Chunk: c, Reader: r,
+			From: max(lo, c.FirstLedger()), To: min(hi, c.LastLedger()),
 		})
 	}
 	return parts, nil

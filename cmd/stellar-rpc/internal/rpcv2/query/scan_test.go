@@ -119,9 +119,9 @@ func TestScanLedgers_InvertedInputRejected(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvertedRange)
 }
 
-// TestEventReaders pins the per-chunk bounded-reader shape the events engine
-// consumes: scan order, intersected bounds, one reader per overlapping chunk.
-func TestEventReaders(t *testing.T) {
+// TestEventParts pins the per-chunk parts shape the events engine consumes:
+// scan order, intersected bounds, one part per overlapping chunk.
+func TestEventParts(t *testing.T) {
 	r, c0, c1 := borderFixture(t)
 	a, err := r.NewReadView()
 	require.NoError(t, err)
@@ -130,13 +130,13 @@ func TestEventReaders(t *testing.T) {
 	lo, hi := c0.FirstLedger()+1, c1.FirstLedger()
 
 	t.Run("ascending two parts with intersected bounds", func(t *testing.T) {
-		parts, err := a.EventReaders(Ascending, lo, hi)
+		parts, err := a.EventParts(Ascending, lo, hi)
 		require.NoError(t, err)
 		require.Len(t, parts, 2)
-		assert.Equal(t, c0, parts[0].ChunkID())
+		assert.Equal(t, c0, parts[0].Chunk)
 		assert.Equal(t, lo, parts[0].From)
 		assert.Equal(t, c0.LastLedger(), parts[0].To, "first part ends at its chunk border")
-		assert.Equal(t, c1, parts[1].ChunkID())
+		assert.Equal(t, c1, parts[1].Chunk)
 		assert.Equal(t, c1.FirstLedger(), parts[1].From, "second part starts at its chunk border")
 		assert.Equal(t, hi, parts[1].To)
 		assert.NotNil(t, parts[0].Reader)
@@ -144,23 +144,23 @@ func TestEventReaders(t *testing.T) {
 	})
 
 	t.Run("descending reverses the parts, not the bounds", func(t *testing.T) {
-		parts, err := a.EventReaders(Descending, lo, hi)
+		parts, err := a.EventParts(Descending, lo, hi)
 		require.NoError(t, err)
 		require.Len(t, parts, 2)
-		assert.Equal(t, c1, parts[0].ChunkID())
-		assert.Equal(t, c0, parts[1].ChunkID())
+		assert.Equal(t, c1, parts[0].Chunk)
+		assert.Equal(t, c0, parts[1].Chunk)
 		assert.Equal(t, lo, parts[1].From, "bounds stay ascending within a part")
 	})
 
 	t.Run("single chunk yields one part", func(t *testing.T) {
-		parts, err := a.EventReaders(Ascending, c0.FirstLedger(), c0.FirstLedger()+1)
+		parts, err := a.EventParts(Ascending, c0.FirstLedger(), c0.FirstLedger()+1)
 		require.NoError(t, err)
 		require.Len(t, parts, 1)
-		assert.Equal(t, c0, parts[0].ChunkID())
+		assert.Equal(t, c0, parts[0].Chunk)
 	})
 
 	t.Run("beyond latest yields no parts", func(t *testing.T) {
-		parts, err := a.EventReaders(Ascending, c1.FirstLedger()+100, c1.FirstLedger()+200)
+		parts, err := a.EventParts(Ascending, c1.FirstLedger()+100, c1.FirstLedger()+200)
 		require.NoError(t, err)
 		assert.Empty(t, parts)
 	})

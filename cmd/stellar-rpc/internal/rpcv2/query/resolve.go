@@ -17,13 +17,6 @@ import (
 // routing regardless of what is on disk.
 var ErrUnavailable = errors.New("query: chunk has no serving store")
 
-// eventColdReadConcurrency fans a cold events reader's packfile fetches across
-// this many goroutines. A serving request's scattered index.pack/events.pack
-// reads benefit from a small NVMe queue depth without starving concurrent
-// requests; it is a fixed starting point, to become config-driven only if
-// serving-path profiling demands it.
-const eventColdReadConcurrency = 4
-
 // LedgerReader is the per-chunk ledger read surface the range queries consume,
 // satisfied by both the hot store and the cold pack reader. It deliberately omits
 // LastSeq (the two tiers' signatures differ) since routing reads within an
@@ -119,8 +112,10 @@ func (a *ReadView) Events(c chunk.ID) (event.Reader, error) {
 	}
 	switch t {
 	case tierCold:
-		cr, err := event.OpenColdReader(c, a.catalog.Layout().EventsBucketDir(c),
-			event.ColdReaderOptions{Concurrency: eventColdReadConcurrency})
+		// TODO(events adapter / #772): thread read concurrency
+		// (ColdReaderOptions.Concurrency → the packfile ReadItems concurrency) here;
+		// decide whether it is config-driven or caller-supplied. Default for now.
+		cr, err := event.OpenColdReader(c, a.catalog.Layout().EventsBucketDir(c), event.ColdReaderOptions{})
 		if err != nil {
 			return nil, err
 		}
