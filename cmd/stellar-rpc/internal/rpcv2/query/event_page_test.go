@@ -656,8 +656,14 @@ func TestQueryEvents_CursorValidation(t *testing.T) {
 		"zero limit":        {EventCursor{Scope: EventCursorQuery{MinLedger: f}}, 0, nil},
 		"descending no max": {EventCursor{Scope: EventCursorQuery{MinLedger: f, Dir: Descending}}, 1, ErrCursorMalformed},
 		"invalid direction": {EventCursor{Scope: EventCursorQuery{MinLedger: f, Dir: Direction(9)}}, 1, ErrCursorMalformed},
-		"min above max":     {EventCursor{Scope: EventCursorQuery{MinLedger: minAboveMax, MaxLedger: &maxL}}, 1, ErrInvertedRange},
-		"min below genesis": {EventCursor{Scope: EventCursorQuery{MinLedger: chunk.FirstLedgerSeq - 1}}, 1, ErrCursorMalformed},
+		"min above max": {
+			EventCursor{Scope: EventCursorQuery{MinLedger: minAboveMax, MaxLedger: &maxL}},
+			1, ErrInvertedRange,
+		},
+		"min below genesis": {
+			EventCursor{Scope: EventCursorQuery{MinLedger: chunk.FirstLedgerSeq - 1}},
+			1, ErrCursorMalformed,
+		},
 		// The server mints scope and bookmarks together, so a bookmark
 		// outside the scope's own bounds is forged or corrupt.
 		"position below min": {EventCursor{

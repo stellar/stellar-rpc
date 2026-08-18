@@ -105,34 +105,47 @@ func validateCursor(cursor *EventCursor, limit int) error {
 	if limit <= 0 {
 		return fmt.Errorf("query: page limit must be positive, got %d", limit)
 	}
-	switch cursor.Scope.Dir {
+	if err := validateScope(&cursor.Scope); err != nil {
+		return err
+	}
+	return validateBookmarks(cursor)
+}
+
+// validateScope rejects scope shapes the server never mints.
+func validateScope(scope *EventCursorQuery) error {
+	switch scope.Dir {
 	case Ascending:
 	case Descending:
-		if cursor.Scope.MaxLedger == nil {
+		if scope.MaxLedger == nil {
 			return fmt.Errorf("%w: descending scope without a max ledger", ErrCursorMalformed)
 		}
 	default:
-		return fmt.Errorf("%w: invalid direction %d", ErrCursorMalformed, cursor.Scope.Dir)
+		return fmt.Errorf("%w: invalid direction %d", ErrCursorMalformed, scope.Dir)
 	}
-	if cursor.Scope.MaxLedger != nil && cursor.Scope.MinLedger > *cursor.Scope.MaxLedger {
-		return fmt.Errorf("%w: [%d, %d]", ErrInvertedRange, cursor.Scope.MinLedger, *cursor.Scope.MaxLedger)
+	if scope.MaxLedger != nil && scope.MinLedger > *scope.MaxLedger {
+		return fmt.Errorf("%w: [%d, %d]", ErrInvertedRange, scope.MinLedger, *scope.MaxLedger)
 	}
 	// No ledger exists below genesis. A scope that starts below it can
 	// never finish: a descending walk would report OldestReached
 	// forever. The server never mints such a scope.
-	if cursor.Scope.MinLedger < chunk.FirstLedgerSeq {
+	if scope.MinLedger < chunk.FirstLedgerSeq {
 		return fmt.Errorf("%w: min ledger %d is below genesis (%d)",
-			ErrCursorMalformed, cursor.Scope.MinLedger, chunk.FirstLedgerSeq)
+			ErrCursorMalformed, scope.MinLedger, chunk.FirstLedgerSeq)
 	}
 	// Checked here so a bad cursor fails on every path. Matches also
 	// checks, but only when a chunk is scanned; the empty-range and
 	// waiting paths scan none.
-	if err := event.ValidateFilters(cursor.Scope.Filters); err != nil {
+	if err := event.ValidateFilters(scope.Filters); err != nil {
 		return fmt.Errorf("%w: %w", ErrCursorMalformed, err)
 	}
-	// The server mints scope and bookmarks together, always consistent.
-	// A bookmark outside the scope's own bounds can only come from a
-	// forged or corrupted cursor. Refuse it rather than guess.
+	return nil
+}
+
+// validateBookmarks rejects bookmarks outside the scope's bounds. The
+// server mints scope and bookmarks together, always consistent, so a
+// bookmark outside them can only come from a forged or corrupted
+// cursor. Refuse it rather than guess.
+func validateBookmarks(cursor *EventCursor) error {
 	if pos := cursor.Position; pos != nil {
 		if pos.Ledger < cursor.Scope.MinLedger ||
 			(cursor.Scope.MaxLedger != nil && pos.Ledger > *cursor.Scope.MaxLedger) {
