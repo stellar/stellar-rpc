@@ -17,7 +17,7 @@ import (
 const blasterCfg = "cmd/stellar-rpc-blaster/internal/config/config.profile.toml"
 
 // blasterPin is the pinned stellar-rpc-blaster commit (realistic-traffic-profile).
-const blasterPin = "c20f77b998a1fa79595d29d364dca40d1363169a"
+const blasterPin = "dd8f7c36c0f5e40aff78c4d52ebab2f0dc49c8b5"
 
 // blasterEnv is the leg's env-derived config.
 type blasterEnv struct {
@@ -105,13 +105,13 @@ func instantiate(ctx context.Context) error {
 	if err != nil {
 		return leg.Bail("reading blaster results: %v", err)
 	}
-	rows, err := summarize(data)
+	rows, archRows, err := summarize(data)
 	if err != nil {
 		return leg.Bail("summarizing blaster results: %v", err)
 	}
 
 	md := renderMarkdown(leg.TargetSHA, blasterSHA, cfg.RampUp, cfg.Duration,
-		health.OldestLedger, health.LatestLedger, handoffSecs, rows)
+		health.OldestLedger, health.LatestLedger, handoffSecs, rows, archRows)
 	if err := os.WriteFile(leg.ResultsFile, []byte(md), 0o644); err != nil {
 		return leg.Bail("writing results: %v", err)
 	}
