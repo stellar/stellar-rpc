@@ -33,10 +33,6 @@ type LedgerReader struct {
 	registry *query.Registry
 }
 
-// Compile-time interface check: no handler consumes this type until #889 wires
-// the v2 method table, so nothing else would catch a signature drift.
-var _ store.LedgerReader = (*LedgerReader)(nil)
-
 func NewLedgerReader(registry *query.Registry) *LedgerReader {
 	return &LedgerReader{registry: registry}
 }
@@ -127,9 +123,6 @@ type ledgerReaderTx struct {
 	next func() (ledger.Entry, error, bool)
 	stop func()
 }
-
-// Compile-time interface check, same reason as LedgerReader's above.
-var _ store.LedgerReaderTx = (*ledgerReaderTx)(nil)
 
 func (tx *ledgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
 	// chunk.IDFromLedger panics below ledger 2, and sequence comes from a

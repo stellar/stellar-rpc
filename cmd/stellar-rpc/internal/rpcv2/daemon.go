@@ -201,7 +201,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// feeds them per committed ledger, each run's restart replay (#888) refills
 	// them, and the hot loop's per-boundary HotService rebuilds only borrow them
 	// — so chunk boundaries and supervised restarts never lose fee history.
-	// #889's method table serves them as the store.FeeStats behind getFeeStats.
+	// The method table serves them as the store.FeeStats behind getFeeStats.
 	feeWindows := feewindow.NewFeeWindows(
 		deref(cfg.Service.FeeStats.ClassicFeeWindowLedgers),
 		deref(cfg.Service.FeeStats.SorobanInclusionFeeWindowLedgers),

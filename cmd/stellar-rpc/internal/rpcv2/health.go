@@ -5,12 +5,14 @@ import (
 	"time"
 )
 
-// HealthSignal is the read side of the daemon's readiness/health signal — the
-// seam #889's read server consumes (the way v1's getHealth is a method on the
-// main server). It exposes exactly the raw signal: the readiness latch and the
-// last committed ledger's close time. The staleness judgment (close-time age vs
-// a latency threshold, the v1 getHealth semantic) is check policy that lives
-// with the consumer.
+// HealthSignal is the read side of the daemon's readiness/health signal. The
+// getHealth METHOD does not consume it — the method table serves getHealth
+// from the registry's close-time stamps, which the ingestion loop feeds in the
+// same commit that feeds this. This is the process-level seam for a future
+// readiness probe. It exposes exactly the raw signal: the readiness latch and
+// the last committed ledger's close time. The staleness judgment (close-time
+// age vs a latency threshold, the v1 getHealth semantic) is check policy that
+// lives with the consumer.
 type HealthSignal interface {
 	Ready() bool
 	LastCommitClose() (time.Time, bool)

@@ -152,8 +152,9 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 			RequestDurationLimit: deref(m.GetFeeStats.MaxExecutionDuration),
 		},
 	}
+	metrics := observability.MetricsOrNop(p.metrics)
 	for i := range specs {
-		specs[i].Handler = mapAdapterErrors(specs[i].Handler, p.metrics)
+		specs[i].Handler = mapAdapterErrors(specs[i].Handler, metrics)
 	}
 
 	return jsonrpc.NewHandler(jsonrpc.Params{

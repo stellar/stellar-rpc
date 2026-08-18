@@ -23,10 +23,6 @@ type TransactionReader struct {
 	passphrase string
 }
 
-// Compile-time interface check: no handler consumes this type until #889 wires
-// the v2 method table, so nothing else would catch a signature drift.
-var _ store.TransactionReader = (*TransactionReader)(nil)
-
 func NewTransactionReader(registry *query.Registry, networkPassphrase string) *TransactionReader {
 	return &TransactionReader{registry: registry, passphrase: networkPassphrase}
 }

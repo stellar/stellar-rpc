@@ -368,8 +368,9 @@ type StartConfig struct {
 	// for minutes.
 	lifecycleGrace time.Duration
 
-	// health is the readiness/health signal the ingestion loop feeds per commit;
-	// #889's read server consumes it (as HealthSignal). nil ⇒ observe is a no-op.
+	// health is the readiness/health signal the ingestion loop feeds per commit.
+	// getHealth is served from the registry's close-time stamps instead; this is
+	// the process-level readiness seam (HealthSignal). nil ⇒ observe is a no-op.
 	health *healthState
 
 	// FeeWindows is the daemon-owned getFeeStats state ([service.fee_stats]
