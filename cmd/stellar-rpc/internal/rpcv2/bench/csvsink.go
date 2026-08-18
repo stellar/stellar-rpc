@@ -41,7 +41,7 @@ const (
 	driverIndexRebuild = "index_rebuild" // cold only: one txhash index build incl. eager sweep (Metrics.Rebuild)
 	driverChunkTotal   = "chunk_total"   // ColdChunkTotal: per-chunk ColdService lifetime
 	driverTotalSuffix  = "_total"        // ColdIngest per data type: "<type>_total"
-	// cold only: the shared per-ledger ExtractLedgerEvents walk (ColdExtract),
+	// cold only: the shared per-ledger ExtractLedgerTxParts walk (ColdExtract),
 	// ledger-scoped and belonging to no single data type, so it lands in
 	// driver.csv.
 	driverColdExtract = "cold_extract"
@@ -256,7 +256,7 @@ func (s *csvSink) ColdChunkTotal(d time.Duration) {
 	s.observe(fileDriver, driverChunkTotal, d, 0)
 }
 
-// ColdExtract records the shared per-ledger ExtractLedgerEvents walk —
+// ColdExtract records the shared per-ledger ExtractLedgerTxParts walk —
 // ledger-scoped and type-less, so it lands in driver.csv (see
 // driverColdExtract).
 func (s *csvSink) ColdExtract(d time.Duration, items int, _ error) {
@@ -367,13 +367,14 @@ type row struct {
 
 // aggregate reduces a series to a row, filtering out zero-duration samples so
 // work too fast for the timer (an empty ledger's stage) doesn't skew the
-// percentiles. ok is false when no sample survives the filter — the row is
-// suppressed.
-func aggregate(name string, s *series) (row, bool) {
+// percentiles. For pace_lag, zeros are always included (they represent
+// on-time ledgers and are part of the lag distribution). ok is false when no
+// sample survives the filter — the row is suppressed.
+func aggregate(name string, s *series, includeZeros bool) (row, bool) {
 	durs := make([]time.Duration, 0, len(s.samples))
 	items := 0
 	for _, sm := range s.samples {
-		if sm.d > 0 {
+		if sm.d > 0 || includeZeros {
 			durs = append(durs, sm.d)
 			items += sm.items
 		}
@@ -450,7 +451,8 @@ func (s *csvSink) files() []file {
 		var rows []row
 		for _, label := range withUnknown(rowOrders[name], byRow) {
 			if sr := byRow[label]; sr != nil {
-				if r, ok := aggregate(label, sr); ok {
+				// pace_lag is for paced runs; include zero-lag samples (on-time ledgers).
+				if r, ok := aggregate(label, sr, label == driverPaceLag); ok {
 					rows = append(rows, r)
 				}
 			}

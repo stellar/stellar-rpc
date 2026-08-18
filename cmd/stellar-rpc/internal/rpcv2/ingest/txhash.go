@@ -52,24 +52,24 @@ func newTxhashCold(binPath string, chunkID chunk.ID, sink MetricSink) (*txhashCo
 
 // write accumulates one ledger's tx hashes — one entry per hash, two for a
 // fee-bump (outer + inner). They come from coldChunk's shared
-// ExtractLedgerEvents walk, in apply order. Each is truncated to ColdKeySize
+// ExtractLedgerTxParts walk, in apply order. Each is truncated to ColdKeySize
 // and appended STRAIGHT into the
 // accumulator — no intermediate per-ledger entry slice; over a ~3M-tx chunk
 // that intermediate would be hundreds of MB of transient garbage. The
 // extraction itself is metered once, ledger-scoped, as the ColdExtract signal;
 // this cheap truncate-append folds into the per-writer ColdIngest total (its
 // per-chunk cost is the finalize sort + .bin write).
-func (t *txhashCold) write(seq uint32, txEvents []sdkingest.LedgerTransactionEvents) error {
+func (t *txhashCold) write(seq uint32, txParts []sdkingest.LedgerTxParts) error {
 	start := time.Now()
 	before := len(t.entries)
-	for i := range txEvents {
+	for i := range txParts {
 		var ke txhash.ColdEntry
-		copy(ke.Key[:], txEvents[i].Hash[:txhash.ColdKeySize])
+		copy(ke.Key[:], txParts[i].Hash[:txhash.ColdKeySize])
 		ke.Seq = seq
 		t.entries = append(t.entries, ke)
-		if txEvents[i].FeeBump {
+		if txParts[i].FeeBump {
 			var ike txhash.ColdEntry
-			copy(ike.Key[:], txEvents[i].InnerHash[:txhash.ColdKeySize])
+			copy(ike.Key[:], txParts[i].InnerHash[:txhash.ColdKeySize])
 			ike.Seq = seq
 			t.entries = append(t.entries, ike)
 		}

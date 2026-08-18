@@ -13,6 +13,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
@@ -30,6 +31,8 @@ import (
 // warns on and retries with backoff (a first start with no reachable backend, a
 // backfill/ingest/lifecycle failure, or a "ready" hot DB that won't open — none are
 // auto-healed, all are re-attempted).
+//
+//nolint:funlen // linear startup sequence; each step is one wiring stage
 func run(ctx context.Context, cfg StartConfig) error {
 	if err := cfg.validate(); err != nil {
 		return err
@@ -132,6 +135,14 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// chunk is also closed by the ingestion loop; handle Close is idempotent.
 	defer registry.Close()
 
+	// Refill the fee windows from committed history BEFORE the ingestion loop
+	// launches below (#888): the replay covers [start, lastCommitted] and the
+	// loop feeds the same windows from lastCommitted+1, so running them
+	// concurrently would count the boundary ledger twice.
+	if err := replayFeeWindows(registry, cfg.FeeWindows, lastCommitted); err != nil {
+		return fmt.Errorf("startup fee-window replay: %w", err)
+	}
+
 	// The lifecycle config draws on the SAME Exec wiring backfill uses, so the two
 	// share one catalog/pool by construction.
 	lifecycleCfg := lifecycle.Config{
@@ -159,15 +170,16 @@ func run(ctx context.Context, cfg StartConfig) error {
 	loopOwnsDB = true
 	g.Go(func() error {
 		err := runIngestionLoop(gctx, ingestionLoopConfig{
-			Stream:   stream,
-			Resume:   resumeLedger,
-			HotDB:    hotDB,
-			Catalog:  cat,
-			Boundary: boundary,
-			Logger:   logger,
-			Metrics:  metrics,
-			Sink:     cfg.Exec.Process.Sink,
-			Registry: &servingSink{sink: registry, health: cfg.health},
+			Stream:     stream,
+			Resume:     resumeLedger,
+			HotDB:      hotDB,
+			Catalog:    cat,
+			Boundary:   boundary,
+			Logger:     logger,
+			Metrics:    metrics,
+			Sink:       cfg.Exec.Process.Sink,
+			Registry:   &servingSink{sink: registry, health: cfg.health},
+			FeeWindows: cfg.FeeWindows,
 		})
 		if err == nil {
 			// WithContext cancels gctx (unblocking the lifecycle sibling in g.Wait)
@@ -350,6 +362,12 @@ type StartConfig struct {
 	// health is the readiness/health signal the ingestion loop feeds per commit;
 	// #889's read server consumes it (as HealthSignal). nil ⇒ observe is a no-op.
 	health *healthState
+
+	// FeeWindows is the daemon-owned getFeeStats state ([service.fee_stats]
+	// sizes) the ingestion loop feeds per committed ledger. The daemon builds it
+	// once, outside the supervised run loop; nil (tests without a fee consumer)
+	// means the loop never computes fees.
+	FeeWindows *feewindow.FeeWindows
 }
 
 // withDefaults fills the embedded Exec defaults (Workers -> GOMAXPROCS). The

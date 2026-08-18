@@ -5,10 +5,10 @@
 // view extractors in the go-stellar-sdk ingest package and the RPC-side
 // events.PayloadsFromLedgerEvents emitter.
 //
-// Both tiers extract each ledger with a SINGLE ExtractLedgerEvents walk
+// Both tiers extract each ledger with a SINGLE ExtractLedgerTxParts walk
 // (the hot DB's IngestLedger, the cold coldChunk.ingest) — txhash reads
-// each element's paired Hash and events shapes the same slice — but they
-// differ in everything else:
+// each element's Hash and events shapes its EventsFromTxParts product —
+// but they differ in everything else:
 //
 //   - Hot (HotService): one ledger at a time into the long-lived,
 //     caller-owned per-chunk hot DB, driven by the daemon's live

@@ -1,4 +1,4 @@
-package feewindow
+package store
 
 import (
 	"math/rand"
@@ -8,22 +8,20 @@ import (
 	"github.com/montanaflynn/stats"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 func TestBasicComputeFeeDistribution(t *testing.T) {
 	testCases := []struct {
 		name   string
 		input  []uint64
-		output store.FeeDistribution
+		output FeeDistribution
 	}{
-		{"nil", nil, store.FeeDistribution{}},
-		{"empty", []uint64{}, store.FeeDistribution{}},
+		{"nil", nil, FeeDistribution{}},
+		{"empty", []uint64{}, FeeDistribution{}},
 		{
 			"one",
 			[]uint64{100},
-			store.FeeDistribution{
+			FeeDistribution{
 				Max: 100, Min: 100, Mode: 100,
 				P10: 100, P20: 100, P30: 100, P40: 100, P50: 100,
 				P60: 100, P70: 100, P80: 100, P90: 100, P95: 100, P99: 100,
@@ -33,7 +31,7 @@ func TestBasicComputeFeeDistribution(t *testing.T) {
 		{
 			"even number of elements: four 100s and six 1000s",
 			[]uint64{100, 100, 100, 1000, 100, 1000, 1000, 1000, 1000, 1000},
-			store.FeeDistribution{
+			FeeDistribution{
 				Max: 1000, Min: 100, Mode: 1000,
 				P10: 100, P20: 100, P30: 100, P40: 100, P50: 1000,
 				P60: 1000, P70: 1000, P80: 1000, P90: 1000, P95: 1000, P99: 1000,
@@ -43,7 +41,7 @@ func TestBasicComputeFeeDistribution(t *testing.T) {
 		{
 			"odd number of elements: five 100s and six 1000s",
 			[]uint64{100, 100, 100, 1000, 100, 1000, 1000, 1000, 1000, 1000, 100},
-			store.FeeDistribution{
+			FeeDistribution{
 				Max: 1000, Min: 100, Mode: 1000,
 				P10: 100, P20: 100, P30: 100, P40: 100, P50: 1000,
 				P60: 1000, P70: 1000, P80: 1000, P90: 1000, P95: 1000, P99: 1000,
@@ -53,7 +51,7 @@ func TestBasicComputeFeeDistribution(t *testing.T) {
 		{
 			"multiple modes favors the smallest value",
 			[]uint64{100, 1000},
-			store.FeeDistribution{
+			FeeDistribution{
 				Max: 1000, Min: 100, Mode: 100,
 				P10: 100, P20: 100, P30: 100, P40: 100, P50: 100,
 				P60: 1000, P70: 1000, P80: 1000, P90: 1000, P95: 1000, P99: 1000,
@@ -63,7 +61,7 @@ func TestBasicComputeFeeDistribution(t *testing.T) {
 		{
 			"random distribution with a repetition",
 			[]uint64{515, 245, 245, 530, 221, 262, 927},
-			store.FeeDistribution{
+			FeeDistribution{
 				Max: 927, Min: 221, Mode: 245,
 				P10: 221, P20: 245, P30: 245, P40: 245, P50: 262,
 				P60: 515, P70: 515, P80: 530, P90: 927, P95: 927, P99: 927,
@@ -73,7 +71,7 @@ func TestBasicComputeFeeDistribution(t *testing.T) {
 		{
 			"random distribution with a repetition of its largest value",
 			[]uint64{515, 245, 530, 221, 262, 927, 927},
-			store.FeeDistribution{
+			FeeDistribution{
 				Max: 927, Min: 221, Mode: 927,
 				P10: 221, P20: 245, P30: 262, P40: 262, P50: 515,
 				P60: 530, P70: 530, P80: 927, P90: 927, P95: 927, P99: 927,
@@ -84,7 +82,7 @@ func TestBasicComputeFeeDistribution(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result := computeFeeDistribution(tc.input, 0)
+			result := ComputeFeeDistribution(tc.input, 0)
 			assert.Equal(t, tc.output, result)
 		})
 	}
@@ -93,14 +91,10 @@ func TestBasicComputeFeeDistribution(t *testing.T) {
 func TestComputeFeeDistributionAgainstAlternative(t *testing.T) {
 	for range 100_000 {
 		fees := generateFees(nil)
-		feesCopy1 := make([]uint64, len(fees))
-		feesCopy2 := make([]uint64, len(fees))
-		for i := range fees {
-			feesCopy1[i] = fees[i]
-			feesCopy2[i] = fees[i]
-		}
-		actual := computeFeeDistribution(feesCopy2, 0)
-		expected, err := alternativeComputeFeeDistribution(feesCopy2, 0)
+		feesCopy := make([]uint64, len(fees))
+		copy(feesCopy, fees)
+		actual := ComputeFeeDistribution(feesCopy, 0)
+		expected, err := alternativeComputeFeeDistribution(feesCopy, 0)
 		require.NoError(t, err)
 		assert.Equalf(t, expected, actual, "input fees: %v", fees)
 	}
@@ -132,9 +126,9 @@ func generateFees(l *int) []uint64 {
 func BenchmarkComputeFeeDistribution(b *testing.B) {
 	length := 5000
 	fees := generateFees(&length)
-	b.Run("computeFeeDistribution", func(b *testing.B) {
+	b.Run("ComputeFeeDistribution", func(b *testing.B) {
 		for b.Loop() {
-			computeFeeDistribution(fees, 0)
+			ComputeFeeDistribution(fees, 0)
 		}
 	})
 	b.Run("alternativeComputeFeeDistribution", func(b *testing.B) {
@@ -145,24 +139,24 @@ func BenchmarkComputeFeeDistribution(b *testing.B) {
 	})
 }
 
-func alternativeComputeFeeDistribution(fees []uint64, ledgerCount uint32) (store.FeeDistribution, error) {
+func alternativeComputeFeeDistribution(fees []uint64, ledgerCount uint32) (FeeDistribution, error) {
 	if len(fees) == 0 {
-		return store.FeeDistribution{}, nil
+		return FeeDistribution{}, nil
 	}
 
 	input := stats.LoadRawData(fees)
 
 	maxValue, minValue, mode, err := computeBasicStats(input, fees)
 	if err != nil {
-		return store.FeeDistribution{}, err
+		return FeeDistribution{}, err
 	}
 
 	percentiles, err := computePercentiles(input)
 	if err != nil {
-		return store.FeeDistribution{}, err
+		return FeeDistribution{}, err
 	}
 
-	return store.FeeDistribution{
+	return FeeDistribution{
 		Max:         uint64(maxValue),
 		Min:         uint64(minValue),
 		Mode:        mode,

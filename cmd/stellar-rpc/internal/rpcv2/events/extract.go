@@ -9,9 +9,9 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
-// PayloadsFromLedgerEvents shapes an already-extracted per-transaction event
-// slice (ingest.ExtractLedgerEvents output) into one Payload per emitted
-// contract event, in ASCENDING getEvents cursor order — the order the SQLite
+// PayloadsFromLedgerEvents shapes an already-walked ledger — the
+// ingest.ExtractLedgerTxParts output — into one Payload per emitted contract
+// event, in ASCENDING getEvents cursor order — the order the SQLite
 // path serves (ORDER BY id ASC in sqlitedb/event.go). The event store serves in write
 // order (event IDs are assigned by arrival position and the term bitmaps iterate
 // in ID order), so emission order here IS the cursor contract. Concretely, per
@@ -34,23 +34,31 @@ import (
 // assignment the SQLite path makes (sqlitedb/event.go), so the trailing
 // <TOID>-<eventIdx> component of the v1 getEvents ID matches across backends.
 // The navigation, per-tx hashing, and event grouping live in the SDK
-// (ingest.ExtractLedgerEvents — one TxProcessing walk yields hash + events
-// together). This function adds only the RPC-specific Payload shape, the
-// Stage→(TxIdx, OpIdx) cursor-sentinel mapping, EventIdx, and the cursor
-// ordering.
+// (ingest.ExtractLedgerTxParts — one TxProcessing walk — and its
+// ingest.EventsFromTxParts product). This function adds only the RPC-specific
+// Payload shape, the Stage→(TxIdx, OpIdx) cursor-sentinel mapping, EventIdx,
+// and the cursor ordering.
 //
-// Taking the already-extracted txEvents (rather than re-walking a view) lets a
-// caller that already holds them — the hot ingest path and the cold materializer,
-// both of which also need the paired tx hashes (txEvents[i].Hash) — feed BOTH
-// txhash and events from ONE ExtractLedgerEvents call instead of walking
-// TxProcessing twice. ledgerSeq and ledgerClosedAt are the view's header values
-// (cheap reads, not a walk).
+// Taking the already-extracted txParts (rather than re-walking a view) lets a
+// caller that already holds them — the hot ingest path and the cold
+// materializer, both of which also need the tx hashes (txParts[i].Hash) —
+// feed BOTH txhash and events from ONE ExtractLedgerTxParts walk instead of
+// walking TxProcessing twice. The events product (ingest.EventsFromTxParts,
+// a cheap read over the already-located meta views, not a walk) is derived
+// HERE, not passed in: the slimmed TxEvents carries no hash, so each payload's
+// TxHash must come from txParts at the same index, and deriving internally
+// makes that alignment structural — no caller can pair the wrong slices.
+// ledgerSeq and ledgerClosedAt are the view's header values (cheap reads, not
+// a walk).
 func PayloadsFromLedgerEvents(
-	txEvents []ingest.LedgerTransactionEvents, ledgerSeq uint32, ledgerClosedAt int64,
+	txParts []ingest.LedgerTxParts, ledgerSeq uint32, ledgerClosedAt int64,
 ) ([]Payload, error) {
-	var err error
+	txEvents, err := ingest.EventsFromTxParts(txParts)
+	if err != nil {
+		return nil, fmt.Errorf("events: extract ledger events: %w", err)
+	}
 	at := func(i int) (uint32, xdr.Hash) {
-		return uint32(i) + 1, xdr.Hash(txEvents[i].Hash) //nolint:gosec // 1-based, matching ingest reader's tx.Index
+		return uint32(i) + 1, xdr.Hash(txParts[i].Hash) //nolint:gosec // 1-based, matching ingest reader's tx.Index
 	}
 	// Every top-level TransactionEvent emits exactly one payload (in whichever
 	// pass matches its stage) and every per-op event one more, so the total is
@@ -116,7 +124,7 @@ func PayloadsFromLedgerEvents(
 // countPayloads sums the per-tx top-level event + per-op event counts — the
 // exact number of payloads PayloadsFromLedgerEvents emits across its three passes,
 // used to size the result slice once.
-func countPayloads(txEvents []ingest.LedgerTransactionEvents) int {
+func countPayloads(txEvents []ingest.TxEvents) int {
 	total := 0
 	for i := range txEvents {
 		total += len(txEvents[i].TransactionEvents)

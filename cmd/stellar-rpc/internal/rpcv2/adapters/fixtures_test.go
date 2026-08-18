@@ -25,6 +25,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
@@ -323,8 +324,7 @@ func seedHotLedgers(t *testing.T, cat *catalog.Catalog, r *query.Registry, c chu
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	for _, seq := range seqs {
-		_, err = db.IngestLedger(seq, lcmBytes(t, seq))
-		require.NoError(t, err)
+		rpcv2test.IngestLedger(t, db, seq, lcmBytes(t, seq))
 	}
 	require.NoError(t, cat.FlipHotReady(c))
 	r.PublishHandle(c, db)
@@ -339,8 +339,7 @@ func seedHotChunkLCMs(t *testing.T, cat *catalog.Catalog, r *query.Registry, c c
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	for i, raw := range lcms {
-		_, err = db.IngestLedger(c.FirstLedger()+uint32(i), raw)
-		require.NoError(t, err)
+		rpcv2test.IngestLedger(t, db, c.FirstLedger()+uint32(i), raw)
 	}
 	require.NoError(t, cat.FlipHotReady(c))
 	r.PublishHandle(c, db)

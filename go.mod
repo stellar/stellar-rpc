@@ -12,6 +12,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.89.1
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.69.3
 	github.com/aws/smithy-go v1.27.1
+	github.com/caarlos0/env/v11 v11.4.1
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/creachadair/jrpc2 v1.3.3
 	github.com/dustin/go-humanize v1.0.1
@@ -27,7 +28,7 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/pflag v1.0.5
-	github.com/stellar/go-stellar-sdk v0.6.1-0.20260716145807-2bfffb159f36
+	github.com/stellar/go-stellar-sdk v0.7.1
 	github.com/stellar/streamhash v0.0.0-20260713164615-c72a4e6f578d
 	github.com/stretchr/testify v1.11.1
 )
