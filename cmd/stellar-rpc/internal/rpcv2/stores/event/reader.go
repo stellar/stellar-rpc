@@ -107,7 +107,7 @@ type Reader interface {
 	// atomic.Pointer COW, so a returned pointer will never be
 	// mutated by anyone. The cold path returns freshly-unmarshaled
 	// bitmaps logically owned by the caller. Either way callers
-	// must not mutate; event.Query is the only consumer today
+	// must not mutate; event.Matches is the only consumer today
 	// and never mutates, and downstream roaring.FastAnd/FastOr never
 	// mutate inputs.
 	//

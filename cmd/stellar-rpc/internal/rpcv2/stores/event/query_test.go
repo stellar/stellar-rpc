@@ -17,9 +17,35 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 )
 
+// Query and QueryOptions are the engine's historical one-shot surface
+// (#796), kept test-side as a shim over Matches so the matching-
+// semantics tests below keep their original call sites. MaxEvents
+// truncates the stream (0 = all), which for these fixtures equals the
+// old candidate cap: only injected index false positives could make
+// the two differ, and those tests drive Matches directly.
+type QueryOptions struct {
+	MaxEvents  int
+	Descending bool
+	Range      IDRange
+}
+
+func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) ([]events.Payload, error) {
+	var out []events.Payload
+	for m, err := range Matches(ctx, r, filters, opts.Range, opts.Descending) {
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m.Payload)
+		if opts.MaxEvents > 0 && len(out) == opts.MaxEvents {
+			break
+		}
+	}
+	return out, nil
+}
+
 // countingReader wraps a Reader and counts LookupKeys traffic so a
-// test can pin Query's term-dedupe behavior — without a wrapper the
-// best we can do is assert correctness, not the number of unique
+// test can pin the engine's term-dedupe behavior. Without a wrapper
+// the best we can do is assert correctness, not the number of unique
 // keys handed to the storage layer.
 type countingReader struct {
 	Reader
@@ -294,21 +320,19 @@ func TestQuery_CanceledContextReturnsError(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
-func TestQuery_NegativeMaxEventsRejected(t *testing.T) {
-	fx := newQueryFixture(t)
-	_, err := Query(context.Background(), fx.store, nil, QueryOptions{MaxEvents: -1})
-	require.Error(t, err)
-}
-
 func TestQuery_ShortContractIDRejected(t *testing.T) {
 	fx := newQueryFixture(t)
 	// A 31-byte ContractID would silently never match every event; the
 	// query layer must surface this loudly rather than accept it.
-	// Pin a non-empty Range so the validation actually runs (an empty
-	// range short-circuits before filter validation).
 	bogus := make([]byte, 31)
 	_, err := Query(context.Background(), fx.store, []Filter{{ContractID: bogus}},
 		QueryOptions{Range: wholeChunk(t, fx.store)})
+	require.Error(t, err)
+
+	// Validation runs before the empty-range short-circuit, so even an
+	// empty window surfaces the malformed filter.
+	_, err = Query(context.Background(), fx.store, []Filter{{ContractID: bogus}},
+		QueryOptions{Range: IDRange{Start: 3, End: 3}})
 	require.Error(t, err)
 }
 
@@ -524,46 +548,6 @@ func TestQuery_DescendingWithRange(t *testing.T) {
 	assert.Equal(t,
 		[]string{"evt-extra-1", "evt-extra-0", "evt-a-b", "evt-b-a", "evt-b-ab", "evt-a-ac", "evt-a-ab"},
 		dataSyms(t, got))
-}
-
-// TestQuery_PostFilterRejectsTermHashCollision pins the defensive
-// post-filter: if a bitmap entry survives the index lookup but the
-// underlying event's bytes don't actually match the filter clause,
-// Query must drop it. TermKey is xxh3_128(field || value), a
-// non-cryptographic hash on attacker-controllable values; a
-// collision (or a corrupt index) could otherwise leak the wrong
-// event through Query.
-//
-// We force the case by injecting a false-positive entry directly
-// into the mirror's bitmap for the "topic1 == gamma" term —
-// equivalent to what a real collision would produce.
-func TestQuery_PostFilterRejectsTermHashCollision(t *testing.T) {
-	fx := newQueryFixture(t)
-
-	// gamma's term legitimately matches id=1 only (evt-a-ac with
-	// topic1=gamma). Inject id=4 (evt-a-b — topic0=beta only,
-	// no topic1) into the same bitmap to simulate a collision.
-	gammaKey := events.ComputeTermKey(fx.t0cRaw, events.FieldTopic1)
-	before := lookupOne(t, fx.store, gammaKey)
-	require.True(t, before.Contains(1), "fixture sanity: id=1 indexes topic1=gamma")
-	require.False(t, before.Contains(4), "fixture sanity: id=4 not yet in topic1=gamma bitmap")
-
-	// ConcurrentBitmaps.AddTo is the writer-side API the ingest path uses
-	// to register (term, eventID) pairs. No concurrent ingest is running
-	// in this test, so the single-writer contract is satisfied.
-	fx.store.index().AddTo(gammaKey, 4)
-
-	after := lookupOne(t, fx.store, gammaKey)
-	require.True(t, after.Contains(4), "fixture sanity: collision id=4 is now in the bitmap")
-
-	// Query with the colliding term: only id=1 should survive the
-	// post-filter; id=4's bytes don't actually have topic1=gamma.
-	got, err := Query(context.Background(), fx.store,
-		[]Filter{{Topics: [protocol.MaxTopicCount][]byte{nil, fx.t0cRaw}}},
-		QueryOptions{Range: wholeChunk(t, fx.store)})
-	require.NoError(t, err)
-	assert.Equal(t, []string{"evt-a-ac"}, dataSyms(t, got),
-		"post-filter must drop the collision-injected id=4")
 }
 
 // ─── Additional coverage: gap-closing tests ────────────────────────────────
@@ -1434,4 +1418,241 @@ func TestQuery_ColdReaderParity_TopicCount(t *testing.T) {
 		QueryOptions{Range: wholeChunk(t, cr)})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"c-4"}, dataSyms(t, got))
+}
+
+// ─── Stream-contract coverage: what Matches adds over the one-shot view ────
+
+func collectMatches(t *testing.T, r Reader, filters []Filter, window IDRange, descending bool) []Match {
+	t.Helper()
+	var out []Match
+	for m, err := range Matches(context.Background(), r, filters, window, descending) {
+		require.NoError(t, err)
+		out = append(out, m)
+	}
+	return out
+}
+
+func matchOrdinals(ms []Match) []uint32 {
+	out := make([]uint32, len(ms))
+	for i, m := range ms {
+		out[i] = m.Ordinal
+	}
+	return out
+}
+
+// TestMatches_OrdinalsBothDirections pins that every yielded match
+// carries its chunk-relative event ID, aligned with its own payload,
+// in walk order.
+func TestMatches_OrdinalsBothDirections(t *testing.T) {
+	fx := newQueryFixture(t)
+	filters := []Filter{{ContractID: fx.contractA[:]}} // ids 0, 1, 4
+
+	asc := collectMatches(t, fx.store, filters, wholeChunk(t, fx.store), false)
+	assert.Equal(t, []uint32{0, 1, 4}, matchOrdinals(asc))
+	assert.Equal(t, "evt-a-b", dataSym(t, asc[2].Payload), "ordinal 4 carries its own payload")
+
+	desc := collectMatches(t, fx.store, filters, wholeChunk(t, fx.store), true)
+	assert.Equal(t, []uint32{4, 1, 0}, matchOrdinals(desc))
+}
+
+// TestMatches_BatchSizeIsInvisible pins that the internal fetch
+// granularity never changes what the stream yields: a BatchSize-1 walk
+// equals the default walk, in both directions and on both the filtered
+// and match-all paths.
+func TestMatches_BatchSizeIsInvisible(t *testing.T) {
+	fx := newQueryFixture(t)
+	for _, filters := range [][]Filter{nil, {{ContractID: fx.contractA[:]}}} {
+		for _, descending := range []bool{false, true} {
+			want := collectMatches(t, fx.store, filters, wholeChunk(t, fx.store), descending)
+			got := func() []Match {
+				defer func(n int) { matchBatchSize = n }(matchBatchSize)
+				matchBatchSize = 1
+				return collectMatches(t, fx.store, filters, wholeChunk(t, fx.store), descending)
+			}()
+			assert.Equal(t, matchOrdinals(want), matchOrdinals(got),
+				"filters=%v descending=%v", filters != nil, descending)
+		}
+	}
+}
+
+// TestMatches_DropsAreInvisible is the successor of the batch API's
+// livelock contract: candidates the post-filter rejects advance the
+// stream internally with no yield, so a consumer sees exactly the true
+// matches no matter how many false positives the index returns between
+// them. False positives are injected directly into the term bitmap,
+// the same technique as TestQuery_PostFilterRejectsTermHashCollision.
+func TestMatches_DropsAreInvisible(t *testing.T) {
+	fx := newQueryFixture(t)
+	// topic1 == gamma legitimately matches id 1 only. Inject ids 2, 3,
+	// and 4 as false positives, so the candidate set is {1, 2, 3, 4}
+	// and every candidate after the true match drops.
+	gammaKey := events.ComputeTermKey(fx.t0cRaw, events.FieldTopic1)
+	for _, fp := range []uint32{2, 3, 4} {
+		fx.store.index().AddTo(gammaKey, fp)
+	}
+	filters := []Filter{{Topics: [protocol.MaxTopicCount][]byte{nil, fx.t0cRaw}}}
+
+	for _, batch := range []int{512, 1} {
+		defer func(n int) { matchBatchSize = n }(matchBatchSize)
+		matchBatchSize = batch
+		got := collectMatches(t, fx.store, filters, wholeChunk(t, fx.store), false)
+		require.Len(t, got, 1, "batch=%d", batch)
+		assert.Equal(t, uint32(1), got[0].Ordinal)
+		assert.Equal(t, "evt-a-ac", dataSym(t, got[0].Payload))
+	}
+}
+
+// TestMatches_EarlyBreakStops pins that a consumer may abandon the
+// stream mid-stream (the pager's page-full stop) without draining it.
+func TestMatches_EarlyBreakStops(t *testing.T) {
+	fx := newQueryFixture(t)
+	var got []Match
+	defer func(n int) { matchBatchSize = n }(matchBatchSize)
+	matchBatchSize = 2
+	for m, err := range Matches(context.Background(), fx.store, nil, wholeChunk(t, fx.store), false) {
+		require.NoError(t, err)
+		got = append(got, m)
+		if len(got) == 3 {
+			break
+		}
+	}
+	assert.Equal(t, []uint32{0, 1, 2}, matchOrdinals(got))
+}
+
+// TestMatches_EmptyStreams pins the two nothing-to-yield shapes: an
+// empty window, and a term with no index entry. Both end silently with
+// no error.
+func TestMatches_EmptyStreams(t *testing.T) {
+	fx := newQueryFixture(t)
+	assert.Empty(t, collectMatches(t, fx.store, nil, IDRange{Start: 3, End: 3}, false))
+
+	var unknown [32]byte
+	unknown[0] = 0x77
+	assert.Empty(t, collectMatches(t, fx.store, []Filter{{ContractID: unknown[:]}},
+		wholeChunk(t, fx.store), false))
+}
+
+// TestMatches_WindowANDLeavesBorrowedBitmapUntouched pins the
+// singleFilter branch of the window AND: a single-constraint filter
+// borrows the hot mirror's bitmap directly from LookupKeys, and the
+// narrowing AND must allocate a fresh result rather than shrink the
+// mirror's live state in place.
+//
+// The borrow only exists for DENSE terms (the mirror's sparse mode
+// materializes a fresh bitmap per Get, which no mutation can corrupt),
+// so the term is first promoted past the mirror's promotion threshold
+// with injected ids outside the query window (never fetched).
+// TestQuery_DoesNotMutateMirrorBitmaps cannot catch the mutation:
+// its filters carry two constraints (FastAnd-owned inputs) and it
+// compares only cardinality over whole-chunk ranges, where the AND is
+// a no-op.
+func TestMatches_WindowANDLeavesBorrowedBitmapUntouched(t *testing.T) {
+	fx := newQueryFixture(t)
+	key := events.ComputeTermKey(fx.contractA[:], events.FieldContractID)
+	// Promote contract A's term (real matches: ids 0, 1, 4) to dense
+	// mode. The injected ids sit above the chunk's EventCount and every
+	// window below, so they are clipped before any fetch.
+	for id := uint32(100); id < 200; id++ {
+		fx.store.index().AddTo(key, id)
+	}
+	before := lookupOne(t, fx.store, key)
+	require.GreaterOrEqual(t, before.GetCardinality(), uint64(100),
+		"fixture sanity: the term must be dense so LookupKeys borrows")
+	snapshot := before.Clone()
+
+	// Single filter, single constraint, narrowing range: the borrowed
+	// path with an AND that actually removes ids.
+	got := collectMatches(t, fx.store, []Filter{{ContractID: fx.contractA[:]}},
+		IDRange{Start: 0, End: 2}, false)
+	assert.Equal(t, []uint32{0, 1}, matchOrdinals(got))
+
+	after := lookupOne(t, fx.store, key)
+	assert.True(t, snapshot.Equals(after),
+		"the window AND must not mutate the mirror's term bitmap in place")
+
+	// End to end: the same filter over the whole chunk still sees the
+	// ids an in-place AND would have destroyed.
+	full := collectMatches(t, fx.store, []Filter{{ContractID: fx.contractA[:]}},
+		wholeChunk(t, fx.store), false)
+	assert.Equal(t, []uint32{0, 1, 4}, matchOrdinals(full))
+}
+
+// TestQuery_PostFilterRejectsTermHashCollision pins the defensive
+// post-filter: if a bitmap entry survives the index lookup but the
+// underlying event's bytes don't actually match the filter clause,
+// Query must drop it. TermKey is xxh3_128(field || value), a
+// non-cryptographic hash on attacker-controllable values; a
+// collision (or a corrupt index) could otherwise leak the wrong
+// event through Query.
+//
+// We force the case by injecting a false-positive entry directly
+// into the mirror's bitmap for the "topic1 == gamma" term,
+// equivalent to what a real collision would produce.
+func TestQuery_PostFilterRejectsTermHashCollision(t *testing.T) {
+	fx := newQueryFixture(t)
+
+	// gamma's term legitimately matches id=1 only (evt-a-ac with
+	// topic1=gamma). Inject id=4 (evt-a-b: topic0=beta only,
+	// no topic1) into the same bitmap to simulate a collision.
+	gammaKey := events.ComputeTermKey(fx.t0cRaw, events.FieldTopic1)
+	before := lookupOne(t, fx.store, gammaKey)
+	require.True(t, before.Contains(1), "fixture sanity: id=1 indexes topic1=gamma")
+	require.False(t, before.Contains(4), "fixture sanity: id=4 not yet in topic1=gamma bitmap")
+
+	filters := []Filter{{Topics: [protocol.MaxTopicCount][]byte{nil, fx.t0cRaw}}}
+	want, err := Query(context.Background(), fx.store, filters,
+		QueryOptions{Range: wholeChunk(t, fx.store)})
+	require.NoError(t, err)
+	require.Len(t, want, 1, "fixture sanity: exactly one true match before injection")
+
+	// ConcurrentBitmaps.AddTo is the writer-side API the ingest path uses
+	// to register (term, eventID) pairs. No concurrent ingest is running
+	// in this test, so the single-writer contract is satisfied.
+	fx.store.index().AddTo(gammaKey, 4)
+
+	after := lookupOne(t, fx.store, gammaKey)
+	require.True(t, after.Contains(4), "fixture sanity: collision id=4 is now in the bitmap")
+
+	// Query with the colliding term: the result must be invariant under
+	// the injection: only id=1 survives the post-filter, since id=4's
+	// bytes don't actually have topic1=gamma.
+	got, err := Query(context.Background(), fx.store, filters,
+		QueryOptions{Range: wholeChunk(t, fx.store)})
+	require.NoError(t, err)
+	assert.Equal(t, dataSyms(t, want), dataSyms(t, got),
+		"post-filter must drop the collision-injected id=4")
+}
+
+// TestPostFilter_OrdinalAlignmentWithLeadingDrop pins that a surviving
+// match carries its own ordinal when a dropped candidate is at a
+// LOWER ordinal in the same batch. Survivor-index alignment (the
+// natural rewrite mistake, ids[len(out)] instead of ids[i]) would hand
+// the dropped candidate's ordinal to the true match. This is a direct
+// unit test because the scenario cannot be staged through the hot
+// mirror: AddTo only accepts ascending ids, so an injected false
+// positive can never precede a real match, but a genuine xxh3
+// collision can sit at any ordinal, so the alignment is load-bearing.
+func TestPostFilter_OrdinalAlignmentWithLeadingDrop(t *testing.T) {
+	var cid xdr.ContractId
+	cid[0] = 0x01
+	g := xdr.ScSymbol("gamma")
+	b := xdr.ScSymbol("beta")
+	gammaVal := xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &g}
+	betaVal := xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &b}
+	gammaRaw, err := gammaVal.MarshalBinary()
+	require.NoError(t, err)
+
+	// Candidate batch [7, 9]: ordinal 7's bytes do not match the filter
+	// (topic0 = beta), ordinal 9's do: a leading drop.
+	payloads := []events.Payload{
+		payloadFor(t, cid, "drop", betaVal),
+		payloadFor(t, cid, "keep", gammaVal),
+	}
+	got, err := postFilter(payloads, []uint32{7, 9},
+		[]Filter{{Topics: [protocol.MaxTopicCount][]byte{gammaRaw}}})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, uint32(9), got[0].Ordinal,
+		"the survivor must carry its own ordinal, not the dropped candidate's")
+	assert.Equal(t, "keep", dataSym(t, got[0].Payload))
 }
