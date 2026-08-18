@@ -29,14 +29,16 @@ func TestServeReads_ServesAndRebindsAcrossAttempts(t *testing.T) {
 	cfg.Service.Endpoint = freeEndpoint(t)
 
 	serve := newServeReads(readServerDeps{
-		cfg:               cfg,
-		logger:            silentLogger(),
-		daemon:            host.MakeNoOpDaemon(),
-		metrics:           observability.NopMetrics{},
-		feeWindows:        feewindow.NewFeeWindows(10, 10),
-		networkPassphrase: "test passphrase",
-		retentionWindow:   1,
-		attempts:          &attemptGatherer{},
+		cfg: cfg,
+		params: handlerParams{
+			daemon:            host.MakeNoOpDaemon(),
+			logger:            silentLogger(),
+			metrics:           observability.NopMetrics{},
+			feeWindows:        feewindow.NewFeeWindows(10, 10),
+			networkPassphrase: "test passphrase",
+			retentionWindow:   1,
+		},
+		attempts: &attemptGatherer{},
 	})
 
 	url := "http://" + cfg.Service.Endpoint

@@ -17,11 +17,8 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 )
 
@@ -66,15 +63,12 @@ func (d attemptDaemon) MetricsRegistry() *prometheus.Registry { return d.registr
 // per-attempt query.Registry. All of it is built once per process in
 // runDaemonWith; only the registry changes across supervised attempts.
 type readServerDeps struct {
-	cfg               config.Config
-	logger            *supportlog.Entry
-	daemon            host.Daemon
-	metrics           observability.Metrics
-	preflightGetter   methods.PreflightGetter
-	feeWindows        *feewindow.FeeWindows
-	networkPassphrase string
-	retentionWindow   uint32
-	attempts          *attemptGatherer
+	// params carries the process-wide handler inputs; newServeReads overrides
+	// the per-attempt pieces (the daemon's metrics registry, the two readers)
+	// on its copy each attempt.
+	params   handlerParams
+	cfg      config.Config
+	attempts *attemptGatherer
 }
 
 // newServeReads returns the production ServeReads: per supervised attempt it
@@ -85,17 +79,11 @@ type readServerDeps struct {
 func newServeReads(deps readServerDeps) func(context.Context, *query.Registry) (func(), error) {
 	return func(ctx context.Context, reg *query.Registry) (func(), error) {
 		attemptReg := prometheus.NewRegistry()
-		handler := newJSONRPCHandler(deps.cfg, handlerParams{
-			daemon:            attemptDaemon{Daemon: deps.daemon, registry: attemptReg},
-			logger:            deps.logger,
-			metrics:           deps.metrics,
-			ledgerReader:      adapters.NewLedgerReader(reg),
-			transactionReader: adapters.NewTransactionReader(reg, deps.networkPassphrase),
-			feeWindows:        deps.feeWindows,
-			preflightGetter:   deps.preflightGetter,
-			networkPassphrase: deps.networkPassphrase,
-			retentionWindow:   deps.retentionWindow,
-		})
+		p := deps.params
+		p.daemon = attemptDaemon{Daemon: deps.params.daemon, registry: attemptReg}
+		p.ledgerReader = adapters.NewLedgerReader(reg)
+		p.transactionReader = adapters.NewTransactionReader(reg, p.networkPassphrase)
+		handler := newJSONRPCHandler(deps.cfg, p)
 
 		var lc net.ListenConfig
 		listener, err := lc.Listen(ctx, "tcp", deps.cfg.Service.Endpoint)
@@ -108,10 +96,10 @@ func newServeReads(deps readServerDeps) func(context.Context, *query.Registry) (
 		server := &http.Server{Handler: handler, ReadTimeout: httpReadTimeout}
 		go func() {
 			if serr := server.Serve(listener); serr != nil && !errors.Is(serr, http.ErrServerClosed) {
-				deps.logger.WithError(serr).Warn("read server exited")
+				deps.params.logger.WithError(serr).Warn("read server exited")
 			}
 		}()
-		deps.logger.WithField("endpoint", deps.cfg.Service.Endpoint).Info("read server listening")
+		deps.params.logger.WithField("endpoint", deps.cfg.Service.Endpoint).Info("read server listening")
 
 		// stop runs during teardown, when the attempt's ctx is typically already
 		// canceled — a fresh Background timeout is what bounds the drain.

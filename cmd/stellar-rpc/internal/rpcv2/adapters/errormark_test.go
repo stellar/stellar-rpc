@@ -19,37 +19,25 @@ func TestMarkErr_NoMarkInstalled(t *testing.T) {
 	assert.NoError(t, markErr(context.Background(), nil))
 }
 
-func TestMarkErr_RecordsSentinels(t *testing.T) {
-	t.Run("unavailable", func(t *testing.T) {
-		ctx, mark := WithErrorMark(context.Background())
-		wrapped := fmt.Errorf("resolve chunk: %w", query.ErrUnavailable)
-		assert.Same(t, wrapped, markErr(ctx, wrapped))
-		assert.True(t, mark.Transient())
-		assert.False(t, mark.StoreClosed())
-	})
+func TestMarkErr_PreservesTheErrorThroughTheContext(t *testing.T) {
+	ctx, mark := WithErrorMark(context.Background())
+	require.NoError(t, mark.Err())
 
-	t.Run("store closed", func(t *testing.T) {
-		ctx, mark := WithErrorMark(context.Background())
-		wrapped := fmt.Errorf("read ledger 5: %w", stores.ErrStoreClosed)
-		require.Same(t, wrapped, markErr(ctx, wrapped))
-		assert.True(t, mark.Transient())
-		assert.True(t, mark.StoreClosed())
-	})
+	wrapped := fmt.Errorf("read ledger 5: %w", stores.ErrStoreClosed)
+	assert.Same(t, wrapped, markErr(ctx, wrapped))
+	assert.ErrorIs(t, mark.Err(), stores.ErrStoreClosed)
 
-	t.Run("range error", func(t *testing.T) {
-		ctx, mark := WithErrorMark(context.Background())
-		rangeErr := &query.RangeError{Requested: 1, Oldest: 10, Latest: 20}
-		wrapped := fmt.Errorf("scan: %w", rangeErr)
-		require.Same(t, wrapped, markErr(ctx, wrapped))
-		assert.Same(t, rangeErr, mark.RangeError())
-		assert.False(t, mark.Transient())
-	})
+	rangeErr := &query.RangeError{Requested: 1, Oldest: 10, Latest: 20}
+	_ = markErr(ctx, fmt.Errorf("scan: %w", rangeErr))
+	var got *query.RangeError
+	require.ErrorAs(t, mark.Err(), &got)
+	assert.Same(t, rangeErr, got)
+}
 
-	t.Run("unrelated error leaves the mark clean", func(t *testing.T) {
-		ctx, mark := WithErrorMark(context.Background())
-		_ = markErr(ctx, errors.New("disk on fire"))
-		assert.False(t, mark.Transient())
-		assert.False(t, mark.StoreClosed())
-		assert.Nil(t, mark.RangeError())
-	})
+func TestMarkErr_LastErrorWins(t *testing.T) {
+	ctx, mark := WithErrorMark(context.Background())
+	_ = markErr(ctx, query.ErrUnavailable)
+	_ = markErr(ctx, stores.ErrStoreClosed)
+	assert.ErrorIs(t, mark.Err(), stores.ErrStoreClosed)
+	assert.NotErrorIs(t, mark.Err(), query.ErrUnavailable)
 }

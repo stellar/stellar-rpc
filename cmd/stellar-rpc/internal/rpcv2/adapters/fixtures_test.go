@@ -315,19 +315,15 @@ func mustMarshal(t *testing.T, v interface{ MarshalBinary() ([]byte, error) }) [
 
 // ───────────────────────── Hot seeding ─────────────────────────
 
-// seedHotLedgers opens chunk c's hot DB, commits the given seqs (which must
-// start at the chunk's first ledger — the events CF requires it), marks the
-// chunk ready, and publishes the handle.
+// seedHotLedgers commits the given seqs (which must start at the chunk's first
+// ledger — the events CF requires it) as minimal zero-tx ledgers.
 func seedHotLedgers(t *testing.T, cat *catalog.Catalog, r *query.Registry, c chunk.ID, seqs ...uint32) {
 	t.Helper()
-	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	lcms := make([][]byte, 0, len(seqs))
 	for _, seq := range seqs {
-		rpcv2test.IngestLedger(t, db, seq, lcmBytes(t, seq))
+		lcms = append(lcms, lcmBytes(t, seq))
 	}
-	require.NoError(t, cat.FlipHotReady(c))
-	r.PublishHandle(c, db)
+	seedHotChunkLCMs(t, cat, r, c, lcms...)
 }
 
 // seedHotChunkLCMs ingests raw LCMs contiguously from c's first ledger (the

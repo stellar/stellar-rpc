@@ -11,6 +11,7 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
@@ -380,4 +381,9 @@ func TestBatchGetLedgers_ClonesBorrowedBytes(t *testing.T) {
 	require.Len(t, got, 2)
 	assert.False(t, bytes.Equal(got[0].Lcm, got[1].Lcm),
 		"two entries decoding identically would mean both alias one scratch buffer")
+}
+
+func TestWalkSpanCapCoversTheHandlerScanLimit(t *testing.T) {
+	assert.GreaterOrEqual(t, walkSpanCap, methods.LedgerScanLimit,
+		"getTransactions' handler-side cap must fit inside the walk's primed span")
 }

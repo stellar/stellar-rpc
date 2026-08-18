@@ -254,15 +254,17 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	serveReads := opts.ServeReads
 	if serveReads == nil {
 		serveReads = newServeReads(readServerDeps{
-			cfg:               cfg,
-			logger:            logger,
-			daemon:            coreDaemon,
-			metrics:           metrics,
-			preflightGetter:   preflightPool,
-			feeWindows:        feeWindows,
-			networkPassphrase: core.networkPassphrase,
-			retentionWindow:   retentionLedgers(deref(cfg.Retention.RetentionChunks)),
-			attempts:          attempts,
+			cfg: cfg,
+			params: handlerParams{
+				daemon:            coreDaemon,
+				logger:            logger,
+				metrics:           metrics,
+				preflightGetter:   preflightPool,
+				feeWindows:        feeWindows,
+				networkPassphrase: core.networkPassphrase,
+				retentionWindow:   retentionLedgers(deref(cfg.Retention.RetentionChunks)),
+			},
+			attempts: attempts,
 		})
 	}
 
@@ -339,11 +341,8 @@ func retentionLedgers(chunks uint32) uint32 {
 	if chunks == 0 {
 		return math.MaxUint32
 	}
-	ledgers := uint64(chunks) * uint64(chunk.LedgersPerChunk)
-	if ledgers > math.MaxUint32 {
-		return math.MaxUint32
-	}
-	return uint32(ledgers)
+	ledgers := min(uint64(chunks)*uint64(chunk.LedgersPerChunk), math.MaxUint32)
+	return uint32(ledgers) //nolint:gosec // min clamps to MaxUint32
 }
 
 // startConfig assembles the StartConfig run consumes. run() builds the

@@ -258,10 +258,7 @@ func (h transactionsRPCHandler) getTransactionsByLedgerSequence(ctx context.Cont
 	// Bound the walk the way getEvents bounds its scan (LedgerScanLimit): over a
 	// sparse range the response is a short page and the client pages on from the
 	// returned cursor, instead of the handler walking unboundedly toward the tip.
-	endLedger := int64(ledgerRange.LastLedger.Sequence)
-	if spanEnd := int64(start.LedgerSequence) + LedgerScanLimit - 1; spanEnd < endLedger {
-		endLedger = spanEnd
-	}
+	endLedger := min(int64(ledgerRange.LastLedger.Sequence), int64(start.LedgerSequence)+LedgerScanLimit-1)
 	for ledgerSeq := start.LedgerSequence; int64(ledgerSeq) <= endLedger; ledgerSeq++ {
 		if ledgerSeq < 0 {
 			return protocol.GetTransactionsResponse{}, &jrpc2.Error{

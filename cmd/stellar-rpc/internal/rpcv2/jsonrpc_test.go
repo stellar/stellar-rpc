@@ -51,6 +51,12 @@ func servingRegistry(t *testing.T) (*query.Registry, *hotchunk.DB) {
 	return r, db
 }
 
+func seedServingRegistry(t *testing.T) *query.Registry {
+	t.Helper()
+	r, _ := servingRegistry(t)
+	return r
+}
+
 func testHandlerParams(t *testing.T, r *query.Registry) handlerParams {
 	t.Helper()
 	return handlerParams{
@@ -63,6 +69,17 @@ func testHandlerParams(t *testing.T, r *query.Registry) handlerParams {
 		networkPassphrase: "test passphrase",
 		retentionWindow:   1,
 	}
+}
+
+func newTestRPCServer(t *testing.T, r *query.Registry) string {
+	t.Helper()
+	handler := newJSONRPCHandler(defaultsConfig(t), testHandlerParams(t, r))
+	srv := httptest.NewServer(handler)
+	t.Cleanup(func() {
+		srv.Close()
+		handler.Close()
+	})
+	return srv.URL
 }
 
 type rpcError struct {
@@ -87,26 +104,18 @@ func postRPC(t *testing.T, url, method, params string) rpcResponse {
 }
 
 func TestJSONRPCHandler_GetEventsIsExplicitlyNotImplemented(t *testing.T) {
-	r, _ := servingRegistry(t)
-	handler := newJSONRPCHandler(defaultsConfig(t), testHandlerParams(t, r))
-	defer handler.Close()
-	srv := httptest.NewServer(handler)
-	defer srv.Close()
+	url := newTestRPCServer(t, seedServingRegistry(t))
 
-	out := postRPC(t, srv.URL, "getEvents", `{"startLedger":2}`)
+	out := postRPC(t, url, "getEvents", `{"startLedger":2}`)
 	require.NotNil(t, out.Error)
 	assert.EqualValues(t, jrpc2.MethodNotFound, out.Error.Code)
 	assert.Contains(t, out.Error.Message, "#774")
 }
 
 func TestJSONRPCHandler_ServesLatestLedgerFromRegistry(t *testing.T) {
-	r, _ := servingRegistry(t)
-	handler := newJSONRPCHandler(defaultsConfig(t), testHandlerParams(t, r))
-	defer handler.Close()
-	srv := httptest.NewServer(handler)
-	defer srv.Close()
+	url := newTestRPCServer(t, seedServingRegistry(t))
 
-	out := postRPC(t, srv.URL, "getLatestLedger", `{}`)
+	out := postRPC(t, url, "getLatestLedger", `{}`)
 	require.Nil(t, out.Error)
 	var result struct {
 		Sequence uint32 `json:"sequence"`
@@ -116,13 +125,9 @@ func TestJSONRPCHandler_ServesLatestLedgerFromRegistry(t *testing.T) {
 }
 
 func TestJSONRPCHandler_HealthyOverFreshRegistryStamp(t *testing.T) {
-	r, _ := servingRegistry(t)
-	handler := newJSONRPCHandler(defaultsConfig(t), testHandlerParams(t, r))
-	defer handler.Close()
-	srv := httptest.NewServer(handler)
-	defer srv.Close()
+	url := newTestRPCServer(t, seedServingRegistry(t))
 
-	out := postRPC(t, srv.URL, "getHealth", `{}`)
+	out := postRPC(t, url, "getHealth", `{}`)
 	require.Nil(t, out.Error)
 	var result struct {
 		Status string `json:"status"`

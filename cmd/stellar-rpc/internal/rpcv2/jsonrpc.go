@@ -2,6 +2,7 @@ package rpcv2
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/creachadair/jrpc2"
@@ -18,6 +19,8 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
@@ -179,11 +182,12 @@ func notImplemented(message string) jrpc2.Handler {
 
 // mapAdapterErrors rewrites the routing/lifecycle failures the shared handlers
 // can only report as generic internal errors. The shared handlers flatten
-// every store error (see adapters.WithErrorMark for the mechanism that
-// preserves them anyway):
+// every store error, so the adapters preserve the original through a context
+// mark (adapters.WithErrorMark) and this wrapper classifies it after the
+// handler fails:
 //
-//   - a request that raced a store handoff (adapters hit query.ErrUnavailable
-//     or stores.ErrStoreClosed) becomes -32002 "temporarily unavailable" — both
+//   - a request that raced a store handoff (query.ErrUnavailable or
+//     stores.ErrStoreClosed) becomes -32002 "temporarily unavailable" — both
 //     conditions self-heal, so retry is the honest instruction;
 //   - a scan the router rejected as below the servable window
 //     (*query.RangeError) becomes the v1-style invalid-request rejection;
@@ -199,14 +203,16 @@ func mapAdapterErrors(h jrpc2.Handler, metrics observability.Metrics) jrpc2.Hand
 		if err == nil {
 			return result, nil
 		}
-		if mark.StoreClosed() {
+		marked := mark.Err()
+		var rangeErr *query.RangeError
+		switch {
+		case errors.As(marked, &rangeErr):
+			return nil, &jrpc2.Error{Code: jrpc2.InvalidRequest, Message: rangeErr.Error()}
+		case errors.Is(marked, stores.ErrStoreClosed):
 			metrics.StoreClosedServed()
-		}
-		if rangeErr := mark.RangeError(); rangeErr != nil {
-			return result, &jrpc2.Error{Code: jrpc2.InvalidRequest, Message: rangeErr.Error()}
-		}
-		if mark.Transient() {
-			return result, &jrpc2.Error{
+			fallthrough
+		case errors.Is(marked, query.ErrUnavailable):
+			return nil, &jrpc2.Error{
 				Code:    errCodeTemporarilyUnavailable,
 				Message: "temporarily unavailable — a store serving this request was being replaced; retry",
 			}
@@ -235,23 +241,6 @@ func deriveLifecycleGrace(svc config.ServiceConfig) time.Duration {
 	// The global HTTP-layer limit bounds every request, including any future
 	// method only it covers, so it participates in the max alongside the
 	// per-method budgets.
-	m := svc.Methods
-	longest := deref(svc.MaxRequestExecutionDuration)
-	for _, d := range []*time.Duration{
-		m.GetHealth.MaxExecutionDuration,
-		m.GetNetwork.MaxExecutionDuration,
-		m.GetVersionInfo.MaxExecutionDuration,
-		m.GetLatestLedger.MaxExecutionDuration,
-		m.GetTransaction.MaxExecutionDuration,
-		m.GetTransactions.MaxExecutionDuration,
-		m.GetLedgers.MaxExecutionDuration,
-		m.GetEvents.MaxExecutionDuration,
-		m.GetFeeStats.MaxExecutionDuration,
-		m.SendTransaction.MaxExecutionDuration,
-		m.SimulateTransaction.MaxExecutionDuration,
-		m.GetLedgerEntries.MaxExecutionDuration,
-	} {
-		longest = max(longest, deref(d))
-	}
+	longest := max(deref(svc.MaxRequestExecutionDuration), svc.Methods.LongestExecutionDuration())
 	return longest + graceMargin
 }

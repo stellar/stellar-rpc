@@ -159,9 +159,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 	if err != nil {
 		return fmt.Errorf("startup serve reads: %w", err)
 	}
-	if stopReads != nil {
-		defer stopReads()
-	}
+	defer stopReads()
 
 	// Ingestion and the lifecycle run as a joined pair under errgroup.WithContext:
 	// gctx cancels as soon as EITHER returns — and WithContext records the returning

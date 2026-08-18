@@ -30,13 +30,13 @@ func NewTransactionReader(registry *query.Registry, networkPassphrase string) *T
 func (r *TransactionReader) GetTransaction(ctx context.Context, hash xdr.Hash) (store.Transaction, error) {
 	view, err := r.registry.NewReadView()
 	if err != nil {
-		return store.Transaction{}, err
+		return store.Transaction{}, markErr(ctx, err)
 	}
 	defer view.Release()
 
 	cold, err := view.ColdTxIndexes()
 	if err != nil {
-		return store.Transaction{}, err
+		return store.Transaction{}, markErr(ctx, err)
 	}
 	gated := make([]txhash.HashIndex, 0, len(cold))
 	for _, idx := range cold {
@@ -44,20 +44,20 @@ func (r *TransactionReader) GetTransaction(ctx context.Context, hash xdr.Hash) (
 	}
 	probe, err := txhash.NewTxReader(view.HotTxHashIndexes(), gated, &viewLedgerSource{view: view}, r.passphrase)
 	if err != nil {
-		return store.Transaction{}, err
+		return store.Transaction{}, markErr(ctx, err)
 	}
 	txv, found, err := probe.GetTransaction(hash)
 	if err != nil {
 		return store.Transaction{}, markErr(ctx, err)
 	}
 	if !found {
-		return store.Transaction{}, store.ErrNoTransaction
+		return store.Transaction{}, markErr(ctx, store.ErrNoTransaction)
 	}
 	// HotTxHashIndexes is deliberately unfiltered, so a hot handle predating the
 	// view's floor can resolve a ledger outside the servable window; a not-found
 	// keeps retention observable behavior, not handle lifecycle.
-	if txv.LedgerSequence < view.OldestLedger() || txv.LedgerSequence > view.LatestLedger() {
-		return store.Transaction{}, store.ErrNoTransaction
+	if !inWindow(view, txv.LedgerSequence) {
+		return store.Transaction{}, markErr(ctx, store.ErrNoTransaction)
 	}
 	return transactionFromView(txv), nil
 }
@@ -87,7 +87,7 @@ func (g *windowGatedIndex) Get(hash [32]byte) (uint32, error) {
 	if err != nil {
 		return 0, err
 	}
-	if seq < g.view.OldestLedger() || seq > g.view.LatestLedger() {
+	if !inWindow(g.view, seq) {
 		return 0, stores.ErrNotFound
 	}
 	return seq, nil

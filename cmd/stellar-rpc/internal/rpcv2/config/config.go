@@ -137,6 +137,33 @@ type MethodsConfig struct {
 	GetLedgerEntries    MethodConfig `toml:"getLedgerEntries"`
 }
 
+// LongestExecutionDuration is the largest per-method execution budget. The
+// deferred-deletion grace period derives from it, so the enumeration lives
+// here, next to the fields: adding a method to MethodsConfig without updating
+// this silently shortens the grace below that method's budget.
+func (m MethodsConfig) LongestExecutionDuration() time.Duration {
+	var longest time.Duration
+	for _, d := range []*time.Duration{
+		m.GetHealth.MaxExecutionDuration,
+		m.GetNetwork.MaxExecutionDuration,
+		m.GetVersionInfo.MaxExecutionDuration,
+		m.GetLatestLedger.MaxExecutionDuration,
+		m.GetTransaction.MaxExecutionDuration,
+		m.GetTransactions.MaxExecutionDuration,
+		m.GetLedgers.MaxExecutionDuration,
+		m.GetEvents.MaxExecutionDuration,
+		m.GetFeeStats.MaxExecutionDuration,
+		m.SendTransaction.MaxExecutionDuration,
+		m.SimulateTransaction.MaxExecutionDuration,
+		m.GetLedgerEntries.MaxExecutionDuration,
+	} {
+		if d != nil && *d > longest {
+			longest = *d
+		}
+	}
+	return longest
+}
+
 // MethodConfig is one method's serving knobs: the per-method request backlog
 // cap and the per-method execution budget (v1's request-backlog-*-queue-limit /
 // max-*-execution-duration pairs).
