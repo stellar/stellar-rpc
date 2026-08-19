@@ -715,9 +715,10 @@ func TestQueryEvents_CursorValidation(t *testing.T) {
 	for name, tc := range map[string]struct {
 		cursor  EventCursor
 		limit   int
-		wantErr error // nil: any error; the handler maps on these sentinels
+		wantErr error // the handler maps on these sentinels
 	}{
-		"zero limit":        {EventCursor{Scope: EventCursorQuery{MinLedger: f}}, 0, nil},
+		"zero limit":        {EventCursor{Scope: EventCursorQuery{MinLedger: f}}, 0, ErrInvalidLimit},
+		"negative limit":    {EventCursor{Scope: EventCursorQuery{MinLedger: f}}, -3, ErrInvalidLimit},
 		"descending no max": {EventCursor{Scope: EventCursorQuery{MinLedger: f, Dir: Descending}}, 1, ErrCursorMalformed},
 		"invalid direction": {EventCursor{Scope: EventCursorQuery{MinLedger: f, Dir: Direction(9)}}, 1, ErrCursorMalformed},
 		"min above max": {
@@ -763,6 +764,14 @@ func TestQueryEvents_CursorValidation(t *testing.T) {
 			Scope:         EventCursorQuery{MinLedger: f, MaxLedger: &maxHigh, Dir: Descending},
 			Position:      &EventPosition{Ledger: f},
 			ScannedLedger: f + 2,
+		}, 1, ErrCursorMalformed},
+		// A scope above the codec's filter cap would do the page's work
+		// and then fail to encode the advanced cursor: refused up front.
+		"more filters than the codec cap": {EventCursor{
+			Scope: EventCursorQuery{
+				MinLedger: f,
+				Filters:   make([]event.Filter, maxCursorFilters+1),
+			},
 		}, 1, ErrCursorMalformed},
 		// Malformed filters fail up front, even on a range this view
 		// would not scan (beyond latest).

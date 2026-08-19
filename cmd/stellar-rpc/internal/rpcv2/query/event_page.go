@@ -24,6 +24,11 @@ import (
 // stored event on this node; the client must restart the query.
 var ErrPositionMismatch = errors.New("query: cursor position does not match stored events")
 
+// ErrInvalidLimit rejects a non-positive page limit. Its own sentinel,
+// not ErrCursorMalformed: the limit is a per-request parameter, not
+// part of the cursor, and the handler maps the two differently.
+var ErrInvalidLimit = errors.New("query: page limit must be positive")
+
 // maxScanLedgers bounds the ledgers one page may scan, so a filter
 // that matches nothing cannot walk the node's whole retention in one
 // call: the page stops at the window's edge and returns ScanHasMore
@@ -69,7 +74,7 @@ type EventPage struct {
 
 // QueryEvents advances cursor by one page of at most limit events.
 // Errors: ErrCursorMalformed for a malformed cursor, ErrInvertedRange
-// for an inverted scope, a plain error for a non-positive limit,
+// for an inverted scope, ErrInvalidLimit for a non-positive limit,
 // *RangeError for a resume point below the view's retention floor,
 // and ErrPositionMismatch for a Position no stored event matches.
 // Anything else is a store failure.
@@ -126,7 +131,7 @@ func (a *ReadView) QueryEvents(ctx context.Context, cursor EventCursor, limit in
 
 func validateCursor(cursor *EventCursor, limit int) error {
 	if limit <= 0 {
-		return fmt.Errorf("query: page limit must be positive, got %d", limit)
+		return fmt.Errorf("%w: got %d", ErrInvalidLimit, limit)
 	}
 	if err := validateScope(&cursor.Scope); err != nil {
 		return err
@@ -154,6 +159,13 @@ func validateScope(scope *EventCursorQuery) error {
 	if scope.MinLedger < chunk.FirstLedgerSeq {
 		return fmt.Errorf("%w: min ledger %d is below genesis (%d)",
 			ErrCursorMalformed, scope.MinLedger, chunk.FirstLedgerSeq)
+	}
+	// The codec caps the filter count; a scope above it would do the
+	// page's full work and then fail to encode the advanced cursor, an
+	// internal error where a client error belongs. Refuse it up front.
+	if len(scope.Filters) > maxCursorFilters {
+		return fmt.Errorf("%w: %d filters exceeds the %d-filter cap",
+			ErrCursorMalformed, len(scope.Filters), maxCursorFilters)
 	}
 	// Checked here so a bad cursor fails on every path. Matches also
 	// checks, but only when a chunk is scanned; the empty-range and
