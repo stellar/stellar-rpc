@@ -9,13 +9,11 @@ import (
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
-	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
@@ -40,109 +38,41 @@ type handlerParams struct {
 	retentionWindow   uint32
 }
 
-// newJSONRPCHandler maps the v2 config onto the shared method-spec list and
-// hands it to the shared jsonrpc builder — the v2 counterpart of
-// rpcv1.NewJSONRPCHandler. The handlers are the shared internal/methods
-// constructors, unmodified; only their inputs are v2's (the router-backed
-// adapters, the daemon-owned fee windows, captive-core state). getEvents is
-// the one exception: a stub that reports not-implemented until #774 ships it.
-//
-//nolint:funlen // one spec entry per served method, mirroring rpcv1
+// newJSONRPCHandler maps the v2 config onto the shared method-spec builder —
+// the v2 counterpart of rpcv1.NewJSONRPCHandler. The handlers are the shared
+// internal/methods constructors, unmodified; only their inputs are v2's (the
+// router-backed adapters, the daemon-owned fee windows, captive-core state).
+// getEvents is the one exception: a stub that reports not-implemented until
+// #774 ships it.
 func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 	m := cfg.Service.Methods
-	// getLedgers can fall back to a bulk datastore for ledgers below local
-	// retention; the full-history daemon IS the deep-history store, so none is
-	// configured and the handler serves everything locally.
-	var noDatastore rpcdatastore.LedgerReader
+	specs := jsonrpc.BuildHandlerSpecs(
+		jsonrpc.SpecDeps{
+			Daemon:            p.daemon,
+			Logger:            p.logger,
+			PreflightGetter:   p.preflightGetter,
+			LedgerReader:      p.ledgerReader,
+			TransactionReader: p.transactionReader,
+			FeeStats:          p.feeWindows,
 
-	specs := []jsonrpc.HandlerSpec{
-		{
-			MethodName: protocol.GetHealthMethodName,
-			Handler: methods.NewHealthCheck(
-				p.retentionWindow, p.ledgerReader, deref(m.GetHealth.MaxHealthyLedgerLatency)),
-			QueueLimit:           deref(m.GetHealth.QueueLimit),
-			RequestDurationLimit: deref(m.GetHealth.MaxExecutionDuration),
-		},
-		{
-			MethodName: protocol.GetEventsMethodName,
-			Handler: notImplemented("getEvents is not implemented by this service yet (issue #774 adds it);" +
+			GetEventsHandler: notImplemented("getEvents is not implemented by this service yet (issue #774 adds it);" +
 				" use the existing RPC service for events meanwhile"),
-			QueueLimit:           deref(m.GetEvents.QueueLimit),
-			RequestDurationLimit: deref(m.GetEvents.MaxExecutionDuration),
+
+			// No DataStoreLedgerReader: getLedgers can fall back to a bulk
+			// datastore for ledgers below local retention, but the full-history
+			// daemon IS the deep-history store, so it serves everything locally.
+			NetworkPassphrase: p.networkPassphrase,
+			FriendbotURL:      m.GetNetwork.FriendbotURL,
+
+			RetentionWindow:         p.retentionWindow,
+			MaxHealthyLedgerLatency: deref(m.GetHealth.MaxHealthyLedgerLatency),
+
+			MaxLedgersLimit:          deref(m.GetLedgers.MaxItemsPerResponse),
+			DefaultLedgersLimit:      deref(m.GetLedgers.DefaultItemsPerResponse),
+			MaxTransactionsLimit:     deref(m.GetTransactions.MaxItemsPerResponse),
+			DefaultTransactionsLimit: deref(m.GetTransactions.DefaultItemsPerResponse),
 		},
-		{
-			MethodName: protocol.GetNetworkMethodName,
-			// No friendbot URL: the full-history daemon serves history networks,
-			// and v2 has no friendbot config key. The handler omits the field.
-			Handler:              methods.NewGetNetworkHandler(p.networkPassphrase, "", p.ledgerReader),
-			QueueLimit:           deref(m.GetNetwork.QueueLimit),
-			RequestDurationLimit: deref(m.GetNetwork.MaxExecutionDuration),
-		},
-		{
-			MethodName:           protocol.GetVersionInfoMethodName,
-			Handler:              methods.NewGetVersionInfoHandler(p.logger, p.ledgerReader, p.daemon),
-			QueueLimit:           deref(m.GetVersionInfo.QueueLimit),
-			RequestDurationLimit: deref(m.GetVersionInfo.MaxExecutionDuration),
-		},
-		{
-			MethodName:           protocol.GetLatestLedgerMethodName,
-			Handler:              methods.NewGetLatestLedgerHandler(p.ledgerReader),
-			QueueLimit:           deref(m.GetLatestLedger.QueueLimit),
-			RequestDurationLimit: deref(m.GetLatestLedger.MaxExecutionDuration),
-		},
-		{
-			MethodName: protocol.GetLedgersMethodName,
-			Handler: methods.NewGetLedgersHandler(p.ledgerReader,
-				deref(m.GetLedgers.MaxItemsPerResponse), deref(m.GetLedgers.DefaultItemsPerResponse),
-				noDatastore, p.logger),
-			QueueLimit:           deref(m.GetLedgers.QueueLimit),
-			RequestDurationLimit: deref(m.GetLedgers.MaxExecutionDuration),
-		},
-		{
-			MethodName: protocol.GetLedgerEntriesMethodName,
-			Handler: methods.NewGetLedgerEntriesHandler(p.logger,
-				p.daemon.FastCoreClient(), p.ledgerReader,
-				xdr.DecodeOptions{MaxMemoryBytes: jsonrpc.LedgerKeyDecodeMaxMemory}),
-			QueueLimit:           deref(m.GetLedgerEntries.QueueLimit),
-			RequestDurationLimit: deref(m.GetLedgerEntries.MaxExecutionDuration),
-		},
-		{
-			MethodName:           protocol.GetTransactionMethodName,
-			Handler:              methods.NewGetTransactionHandler(p.logger, p.transactionReader, p.ledgerReader),
-			QueueLimit:           deref(m.GetTransaction.QueueLimit),
-			RequestDurationLimit: deref(m.GetTransaction.MaxExecutionDuration),
-		},
-		{
-			MethodName: protocol.GetTransactionsMethodName,
-			Handler: methods.NewGetTransactionsHandler(p.logger, p.ledgerReader,
-				deref(m.GetTransactions.MaxItemsPerResponse), deref(m.GetTransactions.DefaultItemsPerResponse),
-				p.networkPassphrase),
-			QueueLimit:           deref(m.GetTransactions.QueueLimit),
-			RequestDurationLimit: deref(m.GetTransactions.MaxExecutionDuration),
-		},
-		{
-			MethodName: protocol.SendTransactionMethodName,
-			Handler: methods.NewSendTransactionHandler(
-				p.daemon, p.logger, p.ledgerReader, p.networkPassphrase,
-				xdr.DecodeOptions{MaxMemoryBytes: jsonrpc.TransactionDecodeMaxMemory}),
-			QueueLimit:           deref(m.SendTransaction.QueueLimit),
-			RequestDurationLimit: deref(m.SendTransaction.MaxExecutionDuration),
-		},
-		{
-			MethodName: protocol.SimulateTransactionMethodName,
-			Handler: methods.NewSimulateTransactionHandler(
-				p.logger, p.ledgerReader, p.daemon.FastCoreClient(), p.preflightGetter,
-				xdr.DecodeOptions{MaxMemoryBytes: jsonrpc.TransactionDecodeMaxMemory}),
-			QueueLimit:           deref(m.SimulateTransaction.QueueLimit),
-			RequestDurationLimit: deref(m.SimulateTransaction.MaxExecutionDuration),
-		},
-		{
-			MethodName:           protocol.GetFeeStatsMethodName,
-			Handler:              methods.NewGetFeeStatsHandler(p.feeWindows, p.ledgerReader, p.logger),
-			QueueLimit:           deref(m.GetFeeStats.QueueLimit),
-			RequestDurationLimit: deref(m.GetFeeStats.MaxExecutionDuration),
-		},
-	}
+		specLimits(m))
 	metrics := observability.MetricsOrNop(p.metrics)
 	for i := range specs {
 		specs[i].Handler = mapAdapterErrors(specs[i].Handler, metrics)
@@ -156,6 +86,30 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 		GlobalDurationWarning: deref(cfg.Service.RequestExecutionWarningThreshold),
 		GlobalDurationLimit:   deref(cfg.Service.MaxRequestExecutionDuration),
 	})
+}
+
+// specLimits maps [service.methods] onto the shared limits table. Both the
+// method table and the deletion grace (deriveLifecycleGrace) read it, so the
+// two cannot disagree on a method's budget.
+func specLimits(m config.MethodsConfig) jsonrpc.SpecLimits {
+	lim := func(queue *uint, dur *time.Duration) jsonrpc.MethodLimits {
+		return jsonrpc.MethodLimits{QueueLimit: deref(queue), RequestDurationLimit: deref(dur)}
+	}
+	return jsonrpc.SpecLimits{
+		protocol.GetHealthMethodName:        lim(m.GetHealth.QueueLimit, m.GetHealth.MaxExecutionDuration),
+		protocol.GetEventsMethodName:        lim(m.GetEvents.QueueLimit, m.GetEvents.MaxExecutionDuration),
+		protocol.GetNetworkMethodName:       lim(m.GetNetwork.QueueLimit, m.GetNetwork.MaxExecutionDuration),
+		protocol.GetVersionInfoMethodName:   lim(m.GetVersionInfo.QueueLimit, m.GetVersionInfo.MaxExecutionDuration),
+		protocol.GetLatestLedgerMethodName:  lim(m.GetLatestLedger.QueueLimit, m.GetLatestLedger.MaxExecutionDuration),
+		protocol.GetLedgersMethodName:       lim(m.GetLedgers.QueueLimit, m.GetLedgers.MaxExecutionDuration),
+		protocol.GetLedgerEntriesMethodName: lim(m.GetLedgerEntries.QueueLimit, m.GetLedgerEntries.MaxExecutionDuration),
+		protocol.GetTransactionMethodName:   lim(m.GetTransaction.QueueLimit, m.GetTransaction.MaxExecutionDuration),
+		protocol.GetTransactionsMethodName:  lim(m.GetTransactions.QueueLimit, m.GetTransactions.MaxExecutionDuration),
+		protocol.SendTransactionMethodName:  lim(m.SendTransaction.QueueLimit, m.SendTransaction.MaxExecutionDuration),
+		protocol.SimulateTransactionMethodName: lim(
+			m.SimulateTransaction.QueueLimit, m.SimulateTransaction.MaxExecutionDuration),
+		protocol.GetFeeStatsMethodName: lim(m.GetFeeStats.QueueLimit, m.GetFeeStats.MaxExecutionDuration),
+	}
 }
 
 // notImplemented is the stub for a method in the table but not built yet. An
@@ -226,6 +180,6 @@ func deriveLifecycleGrace(svc config.ServiceConfig) time.Duration {
 	// The global HTTP-layer limit bounds every request, including any future
 	// method only it covers, so it participates in the max alongside the
 	// per-method budgets.
-	longest := max(deref(svc.MaxRequestExecutionDuration), svc.Methods.LongestExecutionDuration())
+	longest := max(deref(svc.MaxRequestExecutionDuration), specLimits(svc.Methods).LongestDuration())
 	return longest + graceMargin
 }

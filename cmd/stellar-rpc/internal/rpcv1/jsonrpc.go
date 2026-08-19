@@ -3,7 +3,6 @@ package rpcv1
 import (
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/support/log"
-	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
@@ -29,107 +28,82 @@ type HandlerParams struct {
 }
 
 // NewJSONRPCHandler constructs a Handler instance: it maps the v1 config onto
-// the plain method-spec list and hands that to the shared jsonrpc builder.
-//
-//nolint:funlen
+// the shared method-spec builder and hands the result to the shared jsonrpc
+// assembly.
 func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
-	retentionWindow := cfg.HistoryRetentionWindow
+	specs := jsonrpc.BuildHandlerSpecs(
+		jsonrpc.SpecDeps{
+			Daemon:                params.Daemon,
+			Logger:                params.Logger,
+			PreflightGetter:       params.PreflightGetter,
+			LedgerReader:          params.LedgerReader,
+			TransactionReader:     params.TransactionReader,
+			EventReader:           params.EventReader,
+			FeeStats:              params.FeeStatWindows,
+			DataStoreLedgerReader: params.DataStoreLedgerReader,
 
-	specs := []jsonrpc.HandlerSpec{
-		{
-			MethodName: protocol.GetHealthMethodName,
-			Handler: methods.NewHealthCheck(
-				retentionWindow, params.LedgerReader, cfg.MaxHealthyLedgerLatency),
-			QueueLimit:           cfg.RequestBacklogGetHealthQueueLimit,
-			RequestDurationLimit: cfg.MaxGetHealthExecutionDuration,
+			NetworkPassphrase:       cfg.NetworkPassphrase,
+			FriendbotURL:            cfg.FriendbotURL,
+			RetentionWindow:         cfg.HistoryRetentionWindow,
+			MaxHealthyLedgerLatency: cfg.MaxHealthyLedgerLatency,
+
+			MaxEventsLimit:           cfg.MaxEventsLimit,
+			DefaultEventsLimit:       cfg.DefaultEventsLimit,
+			MaxLedgersLimit:          cfg.MaxLedgersLimit,
+			DefaultLedgersLimit:      cfg.DefaultLedgersLimit,
+			MaxTransactionsLimit:     cfg.MaxTransactionsLimit,
+			DefaultTransactionsLimit: cfg.DefaultTransactionsLimit,
 		},
-		{
-			MethodName: protocol.GetEventsMethodName,
-			Handler: methods.NewGetEventsHandler(
-				params.Logger,
-				params.EventReader,
-				cfg.MaxEventsLimit,
-				cfg.DefaultEventsLimit,
-				params.LedgerReader,
-			),
-			QueueLimit:           cfg.RequestBacklogGetEventsQueueLimit,
-			RequestDurationLimit: cfg.MaxGetEventsExecutionDuration,
-		},
-		{
-			MethodName: protocol.GetNetworkMethodName,
-			Handler: methods.NewGetNetworkHandler(
-				cfg.NetworkPassphrase,
-				cfg.FriendbotURL,
-				params.LedgerReader,
-			),
-			QueueLimit:           cfg.RequestBacklogGetNetworkQueueLimit,
-			RequestDurationLimit: cfg.MaxGetNetworkExecutionDuration,
-		},
-		{
-			MethodName: protocol.GetVersionInfoMethodName,
-			Handler: methods.NewGetVersionInfoHandler(params.Logger,
-				params.LedgerReader, params.Daemon),
-			QueueLimit:           cfg.RequestBacklogGetVersionInfoQueueLimit,
-			RequestDurationLimit: cfg.MaxGetVersionInfoExecutionDuration,
-		},
-		{
-			MethodName:           protocol.GetLatestLedgerMethodName,
-			Handler:              methods.NewGetLatestLedgerHandler(params.LedgerReader),
-			QueueLimit:           cfg.RequestBacklogGetLatestLedgerQueueLimit,
-			RequestDurationLimit: cfg.MaxGetLatestLedgerExecutionDuration,
-		},
-		{
-			MethodName: protocol.GetLedgersMethodName,
-			Handler: methods.NewGetLedgersHandler(params.LedgerReader,
-				cfg.MaxLedgersLimit, cfg.DefaultLedgersLimit, params.DataStoreLedgerReader, params.Logger),
-			QueueLimit:           cfg.RequestBacklogGetLedgersQueueLimit,
-			RequestDurationLimit: cfg.MaxGetLedgersExecutionDuration,
-		},
-		{
-			MethodName: protocol.GetLedgerEntriesMethodName,
-			Handler: methods.NewGetLedgerEntriesHandler(params.Logger,
-				params.Daemon.FastCoreClient(), params.LedgerReader,
-				xdr.DecodeOptions{MaxMemoryBytes: jsonrpc.LedgerKeyDecodeMaxMemory}),
-			QueueLimit:           cfg.RequestBacklogGetLedgerEntriesQueueLimit,
-			RequestDurationLimit: cfg.MaxGetLedgerEntriesExecutionDuration,
-		},
-		{
-			MethodName:           protocol.GetTransactionMethodName,
-			Handler:              methods.NewGetTransactionHandler(params.Logger, params.TransactionReader, params.LedgerReader),
-			QueueLimit:           cfg.RequestBacklogGetTransactionQueueLimit,
-			RequestDurationLimit: cfg.MaxGetTransactionExecutionDuration,
-		},
-		{
-			MethodName: protocol.GetTransactionsMethodName,
-			Handler: methods.NewGetTransactionsHandler(params.Logger, params.LedgerReader,
-				cfg.MaxTransactionsLimit, cfg.DefaultTransactionsLimit, cfg.NetworkPassphrase),
-			QueueLimit:           cfg.RequestBacklogGetTransactionsQueueLimit,
-			RequestDurationLimit: cfg.MaxGetTransactionsExecutionDuration,
-		},
-		{
-			MethodName: protocol.SendTransactionMethodName,
-			Handler: methods.NewSendTransactionHandler(
-				params.Daemon, params.Logger, params.LedgerReader, cfg.NetworkPassphrase,
-				xdr.DecodeOptions{MaxMemoryBytes: jsonrpc.TransactionDecodeMaxMemory}),
-			QueueLimit:           cfg.RequestBacklogSendTransactionQueueLimit,
-			RequestDurationLimit: cfg.MaxSendTransactionExecutionDuration,
-		},
-		{
-			MethodName: protocol.SimulateTransactionMethodName,
-			Handler: methods.NewSimulateTransactionHandler(
-				params.Logger, params.LedgerReader,
-				params.Daemon.FastCoreClient(), params.PreflightGetter,
-				xdr.DecodeOptions{MaxMemoryBytes: jsonrpc.TransactionDecodeMaxMemory}),
-			QueueLimit:           cfg.RequestBacklogSimulateTransactionQueueLimit,
-			RequestDurationLimit: cfg.MaxSimulateTransactionExecutionDuration,
-		},
-		{
-			MethodName:           protocol.GetFeeStatsMethodName,
-			Handler:              methods.NewGetFeeStatsHandler(params.FeeStatWindows, params.LedgerReader, params.Logger),
-			QueueLimit:           cfg.RequestBacklogGetFeeStatsTransactionQueueLimit,
-			RequestDurationLimit: cfg.MaxGetFeeStatsExecutionDuration,
-		},
-	}
+		jsonrpc.SpecLimits{
+			protocol.GetHealthMethodName: {
+				QueueLimit:           cfg.RequestBacklogGetHealthQueueLimit,
+				RequestDurationLimit: cfg.MaxGetHealthExecutionDuration,
+			},
+			protocol.GetEventsMethodName: {
+				QueueLimit:           cfg.RequestBacklogGetEventsQueueLimit,
+				RequestDurationLimit: cfg.MaxGetEventsExecutionDuration,
+			},
+			protocol.GetNetworkMethodName: {
+				QueueLimit:           cfg.RequestBacklogGetNetworkQueueLimit,
+				RequestDurationLimit: cfg.MaxGetNetworkExecutionDuration,
+			},
+			protocol.GetVersionInfoMethodName: {
+				QueueLimit:           cfg.RequestBacklogGetVersionInfoQueueLimit,
+				RequestDurationLimit: cfg.MaxGetVersionInfoExecutionDuration,
+			},
+			protocol.GetLatestLedgerMethodName: {
+				QueueLimit:           cfg.RequestBacklogGetLatestLedgerQueueLimit,
+				RequestDurationLimit: cfg.MaxGetLatestLedgerExecutionDuration,
+			},
+			protocol.GetLedgersMethodName: {
+				QueueLimit:           cfg.RequestBacklogGetLedgersQueueLimit,
+				RequestDurationLimit: cfg.MaxGetLedgersExecutionDuration,
+			},
+			protocol.GetLedgerEntriesMethodName: {
+				QueueLimit:           cfg.RequestBacklogGetLedgerEntriesQueueLimit,
+				RequestDurationLimit: cfg.MaxGetLedgerEntriesExecutionDuration,
+			},
+			protocol.GetTransactionMethodName: {
+				QueueLimit:           cfg.RequestBacklogGetTransactionQueueLimit,
+				RequestDurationLimit: cfg.MaxGetTransactionExecutionDuration,
+			},
+			protocol.GetTransactionsMethodName: {
+				QueueLimit:           cfg.RequestBacklogGetTransactionsQueueLimit,
+				RequestDurationLimit: cfg.MaxGetTransactionsExecutionDuration,
+			},
+			protocol.SendTransactionMethodName: {
+				QueueLimit:           cfg.RequestBacklogSendTransactionQueueLimit,
+				RequestDurationLimit: cfg.MaxSendTransactionExecutionDuration,
+			},
+			protocol.SimulateTransactionMethodName: {
+				QueueLimit:           cfg.RequestBacklogSimulateTransactionQueueLimit,
+				RequestDurationLimit: cfg.MaxSimulateTransactionExecutionDuration,
+			},
+			protocol.GetFeeStatsMethodName: {
+				QueueLimit:           cfg.RequestBacklogGetFeeStatsTransactionQueueLimit,
+				RequestDurationLimit: cfg.MaxGetFeeStatsExecutionDuration,
+			},
+		})
 
 	return jsonrpc.NewHandler(jsonrpc.Params{
 		Daemon:                params.Daemon,

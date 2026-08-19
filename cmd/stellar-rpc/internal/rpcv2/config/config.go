@@ -120,7 +120,7 @@ type MethodsConfig struct {
 	MaxExecutionDuration *time.Duration `toml:"max_execution_duration"`
 
 	GetHealth       HealthMethodConfig    `toml:"getHealth"`
-	GetNetwork      MethodConfig          `toml:"getNetwork"`
+	GetNetwork      NetworkMethodConfig   `toml:"getNetwork"`
 	GetVersionInfo  MethodConfig          `toml:"getVersionInfo"`
 	GetLatestLedger MethodConfig          `toml:"getLatestLedger"`
 	GetTransaction  MethodConfig          `toml:"getTransaction"`
@@ -135,33 +135,6 @@ type MethodsConfig struct {
 	SendTransaction     MethodConfig `toml:"sendTransaction"`
 	SimulateTransaction MethodConfig `toml:"simulateTransaction"`
 	GetLedgerEntries    MethodConfig `toml:"getLedgerEntries"`
-}
-
-// LongestExecutionDuration is the largest per-method execution budget. The
-// deferred-deletion grace period derives from it, so the enumeration lives
-// here, next to the fields: adding a method to MethodsConfig without updating
-// this silently shortens the grace below that method's budget.
-func (m MethodsConfig) LongestExecutionDuration() time.Duration {
-	var longest time.Duration
-	for _, d := range []*time.Duration{
-		m.GetHealth.MaxExecutionDuration,
-		m.GetNetwork.MaxExecutionDuration,
-		m.GetVersionInfo.MaxExecutionDuration,
-		m.GetLatestLedger.MaxExecutionDuration,
-		m.GetTransaction.MaxExecutionDuration,
-		m.GetTransactions.MaxExecutionDuration,
-		m.GetLedgers.MaxExecutionDuration,
-		m.GetEvents.MaxExecutionDuration,
-		m.GetFeeStats.MaxExecutionDuration,
-		m.SendTransaction.MaxExecutionDuration,
-		m.SimulateTransaction.MaxExecutionDuration,
-		m.GetLedgerEntries.MaxExecutionDuration,
-	} {
-		if d != nil && *d > longest {
-			longest = *d
-		}
-	}
-	return longest
 }
 
 // MethodConfig is one method's serving knobs: the per-method request backlog
@@ -183,6 +156,17 @@ type PaginatedMethodConfig struct {
 
 	MaxItemsPerResponse     *uint `toml:"max_items_per_response"`
 	DefaultItemsPerResponse *uint `toml:"default_items_per_response"`
+}
+
+// NetworkMethodConfig extends MethodConfig for getNetwork with the friendbot
+// URL the method echoes to clients. Empty (the default) omits the field from
+// the getNetwork response — the sensible state for a history network with no
+// friendbot.
+type NetworkMethodConfig struct {
+	QueueLimit           *uint          `toml:"queue_limit"`
+	MaxExecutionDuration *time.Duration `toml:"max_execution_duration"`
+
+	FriendbotURL string `toml:"friendbot_url"`
 }
 
 // HealthMethodConfig extends MethodConfig for getHealth with the staleness

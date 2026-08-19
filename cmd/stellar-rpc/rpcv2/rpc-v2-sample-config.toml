@@ -126,6 +126,10 @@ max_healthy_ledger_latency = "30s"
 [service.methods.getNetwork]
 queue_limit = 1000
 max_execution_duration = "5s"
+# getNetwork only: friendbot URL echoed to clients. Leave unset (or empty) to
+# omit the field from the response — the sensible state for a history network
+# with no friendbot.
+#friendbot_url = "https://friendbot.example.org"
 
 [service.methods.getVersionInfo]
 queue_limit = 1000
@@ -203,8 +207,6 @@ max_execution_duration = "5s"
 # advises against it in production. The default is true; this sample is a
 # production starting point, so it turns it off.
 enable_debug = false
-
-# NOT here (by design): friendbot_url, which arrives with the getNetwork handler.
 
 # -----------------------------------------------------------------------------
 # [backfill] — bulk history download into local storage
