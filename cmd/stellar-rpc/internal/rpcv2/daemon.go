@@ -20,6 +20,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/storage"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
@@ -199,9 +200,9 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 		deref(cfg.Service.FeeStats.SorobanInclusionFeeWindowLedgers),
 	)
 
-	// Control-plane Metrics and the ingest sink share ONE registry, built after the
-	// validateConfig gate (it registers Prometheus collectors). The admin server's
-	// /metrics serves it, alongside the per-attempt serving collectors.
+	// Control-plane Metrics, the ingest sink, and the serving collectors share
+	// ONE registry, built after the validateConfig gate (it registers Prometheus
+	// collectors). The admin server's /metrics serves it.
 	registry := prometheus.NewRegistry()
 	metrics, sink := buildSinks(opts, registry)
 
@@ -232,12 +233,9 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	// --- The two HTTP servers. The admin server (pprof, /metrics) is
 	// process-wide; the JSON-RPC server is per supervised attempt (its handlers
-	// hold that attempt's query registry), so ServeReads builds it inside run().
-	// attempts is the bridge between the two lifetimes: /metrics reads the
-	// current attempt's serving collectors through it. ---
-	attempts := &attemptGatherer{}
+	// hold that attempt's query registry), so ServeReads builds it inside run(). ---
 	if cfg.Service.AdminEndpoint != "" {
-		stopAdmin, aerr := startAdminServer(ctx, cfg.Service.AdminEndpoint, logger, registry, attempts)
+		stopAdmin, aerr := startAdminServer(ctx, cfg.Service.AdminEndpoint, logger, registry)
 		if aerr != nil {
 			return aerr
 		}
@@ -250,13 +248,13 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 			params: handlerParams{
 				daemon:            coreDaemon,
 				logger:            logger,
+				handlerMetrics:    jsonrpc.NewHandlerMetrics(host.PrometheusNamespace, registry),
 				metrics:           metrics,
 				preflightGetter:   preflightPool,
 				feeWindows:        feeWindows,
 				networkPassphrase: core.networkPassphrase,
 				retentionWindow:   retentionLedgers(deref(cfg.Retention.RetentionChunks)),
 			},
-			attempts: attempts,
 		})
 	}
 

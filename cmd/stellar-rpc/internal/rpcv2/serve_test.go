@@ -5,10 +5,12 @@ import (
 	"net"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 )
@@ -33,12 +35,12 @@ func TestServeReads_ServesAndRebindsAcrossAttempts(t *testing.T) {
 		params: handlerParams{
 			daemon:            host.MakeNoOpDaemon(),
 			logger:            silentLogger(),
+			handlerMetrics:    jsonrpc.NewHandlerMetrics("test", prometheus.NewRegistry()),
 			metrics:           observability.NopMetrics{},
 			feeWindows:        feewindow.NewFeeWindows(10, 10),
 			networkPassphrase: "test passphrase",
 			retentionWindow:   1,
 		},
-		attempts: &attemptGatherer{},
 	})
 
 	url := "http://" + cfg.Service.Endpoint
@@ -50,8 +52,9 @@ func TestServeReads_ServesAndRebindsAcrossAttempts(t *testing.T) {
 	assert.Nil(t, out.Error)
 	stop()
 
-	// Second attempt on the same port: rebinding must succeed and the fresh
-	// per-attempt metrics registry must not collide with the first attempt's.
+	// Second attempt on the same port: rebinding must succeed, and rebuilding
+	// the method table over the shared per-process metrics must not panic on a
+	// duplicate collector registration.
 	stop, err = serve(context.Background(), r)
 	require.NoError(t, err)
 	defer stop()

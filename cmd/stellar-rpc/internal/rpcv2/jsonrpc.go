@@ -29,6 +29,7 @@ import (
 type handlerParams struct {
 	daemon            host.Daemon
 	logger            *supportlog.Entry
+	handlerMetrics    *jsonrpc.HandlerMetrics
 	metrics           observability.Metrics
 	ledgerReader      store.LedgerReader
 	transactionReader store.TransactionReader
@@ -90,6 +91,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 	return jsonrpc.NewHandler(jsonrpc.Params{
 		Daemon:                p.daemon,
 		Logger:                p.logger,
+		Metrics:               p.handlerMetrics,
 		Specs:                 specs,
 		GlobalQueueLimit:      deref(cfg.Service.MaxConcurrentRequests),
 		GlobalDurationWarning: deref(cfg.Service.RequestExecutionWarningThreshold),
