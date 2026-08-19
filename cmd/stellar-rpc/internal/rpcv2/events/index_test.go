@@ -2,6 +2,7 @@ package events
 
 import (
 	"encoding/binary"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -182,8 +183,8 @@ func symTopicEvent(contractID *xdr.ContractId, topics ...string) xdr.ContractEve
 
 // TestTermsForBytes_ContractIDAndTopicTerms pins the full term set for the
 // common case: an event with a contract ID and one topic yields exactly the
-// contract-ID term followed by the topic-0 term, each derived with the same
-// ComputeTermKey the readers use.
+// type term, the contract-ID term, the topic-count term, and the topic-0
+// term, each derived with the same helpers the readers use.
 func TestTermsForBytes_ContractIDAndTopicTerms(t *testing.T) {
 	var cid xdr.ContractId
 	cid[0], cid[1] = 0xab, 0xcd
@@ -195,23 +196,28 @@ func TestTermsForBytes_ContractIDAndTopicTerms(t *testing.T) {
 	topicBytes, err := ev.Body.V0.Topics[0].MarshalBinary()
 	require.NoError(t, err)
 	assert.Equal(t, []TermKey{
+		EventTypeTermKey(xdr.ContractEventTypeContract),
 		ComputeTermKey(cid[:], FieldContractID),
+		TopicCountTermKey(1),
 		ComputeTermKey(topicBytes, FieldTopic0),
 	}, keys)
 }
 
 // TestTermsForBytes_NoContractIDOnlyTopicTerms exercises the nil-contract-ID
-// guard: an event without a contract ID emits only topic terms.
+// guard: an event without a contract ID emits no contract-ID term.
 func TestTermsForBytes_NoContractIDOnlyTopicTerms(t *testing.T) {
 	ev := symTopicEvent(nil, "only-topic")
 
 	keys, err := TermsForBytes(marshaledEvent(t, ev))
 	require.NoError(t, err)
-	require.Len(t, keys, 1, "no contract ID → only the topic term")
 
 	topicBytes, err := ev.Body.V0.Topics[0].MarshalBinary()
 	require.NoError(t, err)
-	assert.Equal(t, ComputeTermKey(topicBytes, FieldTopic0), keys[0])
+	assert.Equal(t, []TermKey{
+		EventTypeTermKey(xdr.ContractEventTypeContract),
+		TopicCountTermKey(1),
+		ComputeTermKey(topicBytes, FieldTopic0),
+	}, keys)
 }
 
 // TestTermsForBytes_SameTopicValueDistinctFields asserts that the SAME value
@@ -222,20 +228,21 @@ func TestTermsForBytes_SameTopicValueDistinctFields(t *testing.T) {
 
 	keys, err := TermsForBytes(marshaledEvent(t, ev))
 	require.NoError(t, err)
-	require.Len(t, keys, 2)
-	assert.NotEqual(t, keys[0], keys[1],
+	require.Len(t, keys, 4) // type, topic count, topic0, topic1
+	assert.NotEqual(t, keys[2], keys[3],
 		"same value in different topic positions must produce different term keys")
 
 	topicBytes, err := ev.Body.V0.Topics[0].MarshalBinary()
 	require.NoError(t, err)
-	assert.Equal(t, ComputeTermKey(topicBytes, FieldTopic0), keys[0])
-	assert.Equal(t, ComputeTermKey(topicBytes, FieldTopic1), keys[1])
+	assert.Equal(t, ComputeTermKey(topicBytes, FieldTopic0), keys[2])
+	assert.Equal(t, ComputeTermKey(topicBytes, FieldTopic1), keys[3])
 }
 
 // TestTermsForBytes_TopicCountClippedToMax asserts topics past
 // protocol.MaxTopicCount are not indexed (they are not queryable by a
 // getEvents filter, so indexing them would be unreachable storage): an event
-// with 6 topics and a contract ID yields 1 + MaxTopicCount terms.
+// with 6 topics and a contract ID yields the type, contract-ID and
+// topic-count terms plus MaxTopicCount topic terms.
 func TestTermsForBytes_TopicCountClippedToMax(t *testing.T) {
 	var cid xdr.ContractId
 	cid[0] = 0xfe
@@ -243,8 +250,90 @@ func TestTermsForBytes_TopicCountClippedToMax(t *testing.T) {
 
 	keys, err := TermsForBytes(marshaledEvent(t, ev))
 	require.NoError(t, err)
-	assert.Len(t, keys, 1+protocol.MaxTopicCount,
-		"1 contract-ID term + MaxTopicCount topic terms (extras dropped)")
+	assert.Len(t, keys, 3+protocol.MaxTopicCount,
+		"type + contract-ID + topic-count terms, then MaxTopicCount topic terms (extras dropped)")
+}
+
+// TestTermsForBytes_EventTypeTerm pins the type term to the event's own type:
+// a system event and a contract event must land in different buckets, or a
+// type filter would return the wrong one.
+func TestTermsForBytes_EventTypeTerm(t *testing.T) {
+	contractEv := symTopicEvent(nil, "transfer")
+	systemEv := symTopicEvent(nil, "transfer")
+	systemEv.Type = xdr.ContractEventTypeSystem
+
+	contractKeys, err := TermsForBytes(marshaledEvent(t, contractEv))
+	require.NoError(t, err)
+	systemKeys, err := TermsForBytes(marshaledEvent(t, systemEv))
+	require.NoError(t, err)
+
+	assert.Equal(t, EventTypeTermKey(xdr.ContractEventTypeContract), contractKeys[0])
+	assert.Equal(t, EventTypeTermKey(xdr.ContractEventTypeSystem), systemKeys[0])
+	assert.NotEqual(t, contractKeys[0], systemKeys[0])
+}
+
+// TestTermsForBytes_TopicCountTermBuckets covers the bucket every event
+// carries. Every count a getEvents filter can name gets its own bucket, and
+// everything above shares the overflow bucket, so a query unioning the buckets
+// from n upwards cannot miss an event that carries more topics than a filter
+// can name.
+func TestTermsForBytes_TopicCountTermBuckets(t *testing.T) {
+	topicCountTerm := func(t *testing.T, topicCount int) TermKey {
+		t.Helper()
+		topics := make([]string, topicCount)
+		for i := range topics {
+			topics[i] = fmt.Sprintf("t%d", i)
+		}
+		keys, err := TermsForBytes(marshaledEvent(t, symTopicEvent(nil, topics...)))
+		require.NoError(t, err)
+		return keys[1] // no contract ID, so the count term follows the type term
+	}
+
+	for n := range protocol.MaxTopicCount + 1 {
+		assert.Equal(t, TopicCountTermKey(n), topicCountTerm(t, n),
+			"an event with %d topics belongs in its own bucket", n)
+	}
+
+	overflow := topicCountTerm(t, protocol.MaxTopicCount+1)
+	assert.Equal(t, overflow, topicCountTerm(t, protocol.MaxTopicCount+2))
+	assert.NotEqual(t, TopicCountTermKey(protocol.MaxTopicCount), overflow,
+		"the overflow bucket must be distinct, so an exact top count is not a superset")
+
+	distinct := map[TermKey]struct{}{}
+	for n := range protocol.MaxTopicCount + 2 {
+		distinct[TopicCountTermKey(n)] = struct{}{}
+	}
+	assert.Len(t, distinct, protocol.MaxTopicCount+2,
+		"every bucket up to and including the overflow one must be its own term")
+}
+
+// TestTopicCountTermKeysAtLeast pins the union an "at least n" filter reads:
+// the buckets from n up to and including the overflow one.
+func TestTopicCountTermKeysAtLeast(t *testing.T) {
+	assert.Equal(t, []TermKey{
+		TopicCountTermKey(protocol.MaxTopicCount),
+		TopicCountTermKey(protocol.MaxTopicCount + 1),
+	}, TopicCountTermKeysAtLeast(protocol.MaxTopicCount))
+
+	assert.Len(t, TopicCountTermKeysAtLeast(0), protocol.MaxTopicCount+2)
+	assert.Equal(t,
+		[]TermKey{TopicCountTermKey(protocol.MaxTopicCount + 1)},
+		TopicCountTermKeysAtLeast(99),
+		"a count no filter can name needs only the overflow bucket")
+}
+
+// TestTermsForBytes_UnknownEventTypeHardFails pins the same decision for a
+// future ContractEventType: indexing it under a bucket no filter can name
+// would read as "no such events" rather than as a protocol this binary cannot
+// serve, so ingestion of the ledger fails instead.
+func TestTermsForBytes_UnknownEventTypeHardFails(t *testing.T) {
+	// Layout without a contract ID:
+	// ext.V (4) || contractId flag (4, =0) || type (4) || body.V (4).
+	raw := marshaledEvent(t, symTopicEvent(nil, "transfer"))
+	binary.BigEndian.PutUint32(raw[8:12], 99)
+
+	_, err := TermsForBytes(raw)
+	require.ErrorContains(t, err, "view Type value")
 }
 
 // TestTermsForBytes_UnsupportedBodyVersionHardFails pins the decision that a

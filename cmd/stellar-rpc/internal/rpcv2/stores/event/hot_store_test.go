@@ -452,12 +452,10 @@ func TestHotStore_IngestLedgerEvents_DuplicateLedgerErrors(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.Equal(t, "a", dataSym(t, got[0]), "original event must survive the rejected re-ingest")
 
-	// The rejected payload must not reach the mirror. makePayload emits
-	// [contractID, topic0, ...]; contractID is shared across symbols
-	// (hardcoded 0xab), so we check topic0 (index 1), which is symbol-specific.
-	_, secondKeys := makePayload("b")
-	require.GreaterOrEqual(t, len(secondKeys), 2, "test fixture expected to have a topic0 term")
-	assert.Nil(t, lookupOne(t, h.store, secondKeys[1]),
+	// The rejected payload must not reach the mirror. makePayload shares
+	// its contract ID, type and topic count across symbols, so topic0 is
+	// the term that tells the two payloads apart.
+	assert.Nil(t, lookupOne(t, h.store, topic0TermKey(t, p2)),
 		"the rejected payload's topic0 term must not appear in the mirror")
 }
 
