@@ -136,11 +136,6 @@ func (tx *ledgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.L
 	if err := ctx.Err(); err != nil {
 		return xdr.LedgerCloseMeta{}, false, markErr(ctx, err)
 	}
-	// chunk.IDFromLedger panics below ledger 2, and sequence comes from a
-	// client-supplied cursor, so the guard is load-bearing, not defensive.
-	if sequence < chunk.FirstLedgerSeq {
-		return xdr.LedgerCloseMeta{}, false, nil
-	}
 	// ClampRange is the only place the servable window is enforced and no
 	// point-read path calls it, so gate here: without this a view acquired
 	// between ingestion's commit and its SetLatestLedger could return a ledger
@@ -226,6 +221,8 @@ func (tx *ledgerReaderTx) Done() error {
 
 // inWindow reports whether seq falls inside the view's servable window
 // [OldestLedger, LatestLedger] — the one gate every point read must apply.
+// OldestLedger is always ≥ 2 (the floor sits on a chunk, and chunk 0 starts at
+// ledger 2), so this also rejects the sequences chunk.IDFromLedger panics on.
 func inWindow(view *query.ReadView, seq uint32) bool {
 	return seq >= view.OldestLedger() && seq <= view.LatestLedger()
 }
@@ -234,9 +231,6 @@ func inWindow(view *query.ReadView, seq uint32) bool {
 // GetLedgerRaw against the sequence's chunk. A hot-store miss inside the window
 // maps to (false, nil), matching v1's absent-ledger shape.
 func getLedger(view *query.ReadView, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
-	if sequence < chunk.FirstLedgerSeq {
-		return xdr.LedgerCloseMeta{}, false, nil
-	}
 	if !inWindow(view, sequence) {
 		return xdr.LedgerCloseMeta{}, false, nil
 	}

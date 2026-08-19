@@ -2,7 +2,6 @@ package adapters
 
 import (
 	"context"
-	"sync/atomic"
 )
 
 // The shared JSON-RPC handlers flatten every adapter error into a generic
@@ -33,10 +32,11 @@ import (
 type errorMarkKey struct{}
 
 // ErrorMark preserves the last error the adapters returned while serving one
-// request. Written by the adapters, read by the method table. Atomic so a
-// future fan-out adapter can write from worker goroutines without a data race.
+// request. Written by the adapters, read by the method table. Like the
+// ReadView the adapters read through, it serves one request on one goroutine —
+// no locking.
 type ErrorMark struct {
-	err atomic.Pointer[error]
+	err error
 }
 
 // WithErrorMark installs a fresh mark on ctx and returns both. The adapters
@@ -50,10 +50,7 @@ func WithErrorMark(ctx context.Context) (context.Context, *ErrorMark) {
 // handler retries past a failure, the recorded error is the one closest to
 // the handler's final failure.
 func (m *ErrorMark) Err() error {
-	if p := m.err.Load(); p != nil {
-		return *p
-	}
-	return nil
+	return m.err
 }
 
 // markErr records err on ctx's mark (when one is installed) and returns err
@@ -65,7 +62,7 @@ func markErr(ctx context.Context, err error) error {
 		return nil
 	}
 	if mark, ok := ctx.Value(errorMarkKey{}).(*ErrorMark); ok {
-		mark.err.Store(&err)
+		mark.err = err
 	}
 	return err
 }
