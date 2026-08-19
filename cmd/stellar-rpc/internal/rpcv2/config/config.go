@@ -127,7 +127,10 @@ type MethodsConfig struct {
 	GetTransactions PaginatedMethodConfig `toml:"getTransactions"`
 	GetLedgers      PaginatedMethodConfig `toml:"getLedgers"`
 	GetEvents       PaginatedMethodConfig `toml:"getEvents"`
-	GetFeeStats     MethodConfig          `toml:"getFeeStats"`
+	// GetEventsV2 is the one method v2 serves that v1 does not; it defaults to
+	// getEvents' values.
+	GetEventsV2 PaginatedMethodConfig `toml:"getEventsV2"`
+	GetFeeStats MethodConfig          `toml:"getFeeStats"`
 
 	// The three methods that read current ledger state through captive core
 	// rather than this daemon's stores (#884). Their serving knobs belong here;
@@ -628,6 +631,11 @@ func (cfg Config) WithDefaults() Config {
 	dur(&m.GetEvents.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
 	fillUint(&m.GetEvents.MaxItemsPerResponse, DefaultGetEventsMaxItemsPerResponse)
 	fillUint(&m.GetEvents.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
+
+	queue(&m.GetEventsV2.QueueLimit, DefaultMethodQueueLimit)
+	dur(&m.GetEventsV2.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
+	fillUint(&m.GetEventsV2.MaxItemsPerResponse, DefaultGetEventsMaxItemsPerResponse)
+	fillUint(&m.GetEventsV2.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
 
 	queue(&m.GetFeeStats.QueueLimit, DefaultGetFeeStatsQueueLimit)
 	dur(&m.GetFeeStats.MaxExecutionDuration, DefaultMethodMaxExecutionDuration)

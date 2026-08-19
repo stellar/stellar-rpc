@@ -38,6 +38,10 @@ type handlerParams struct {
 	retentionWindow   uint32
 }
 
+// getEventsV2MethodName is the one method v2 serves that v1 does not, so no
+// shared protocol constant exists for it yet.
+const getEventsV2MethodName = "getEventsV2"
+
 // newJSONRPCHandler maps the v2 config onto the shared method-spec builder —
 // the v2 counterpart of rpcv1.NewJSONRPCHandler. The handlers are the shared
 // internal/methods constructors, unmodified; only their inputs are v2's (the
@@ -72,7 +76,12 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 			MaxTransactionsLimit:     deref(m.GetTransactions.MaxItemsPerResponse),
 			DefaultTransactionsLimit: deref(m.GetTransactions.DefaultItemsPerResponse),
 		},
-		specLimits(m))
+		specLimits(m),
+		jsonrpc.ExtraMethod{
+			MethodName: getEventsV2MethodName,
+			Handler: notImplemented("getEventsV2 is not implemented by this service yet (issue #774 adds it);" +
+				" use the existing RPC service for events meanwhile"),
+		})
 	metrics := observability.MetricsOrNop(p.metrics)
 	for i := range specs {
 		specs[i].Handler = mapAdapterErrors(specs[i].Handler, metrics)
@@ -98,6 +107,7 @@ func specLimits(m config.MethodsConfig) jsonrpc.SpecLimits {
 	return jsonrpc.SpecLimits{
 		protocol.GetHealthMethodName:        lim(m.GetHealth.QueueLimit, m.GetHealth.MaxExecutionDuration),
 		protocol.GetEventsMethodName:        lim(m.GetEvents.QueueLimit, m.GetEvents.MaxExecutionDuration),
+		getEventsV2MethodName:               lim(m.GetEventsV2.QueueLimit, m.GetEventsV2.MaxExecutionDuration),
 		protocol.GetNetworkMethodName:       lim(m.GetNetwork.QueueLimit, m.GetNetwork.MaxExecutionDuration),
 		protocol.GetVersionInfoMethodName:   lim(m.GetVersionInfo.QueueLimit, m.GetVersionInfo.MaxExecutionDuration),
 		protocol.GetLatestLedgerMethodName:  lim(m.GetLatestLedger.QueueLimit, m.GetLatestLedger.MaxExecutionDuration),

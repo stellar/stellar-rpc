@@ -81,10 +81,20 @@ func (l SpecLimits) LongestDuration() time.Duration {
 	return longest
 }
 
+// ExtraMethod is a method one daemon serves beyond the shared table (e.g.
+// v2-only methods). Its limits come from the same SpecLimits map as the
+// shared methods, so it participates in the missing/unserved validation and
+// in LongestDuration.
+type ExtraMethod struct {
+	MethodName string
+	Handler    jrpc2.Handler
+}
+
 // BuildHandlerSpecs builds the method table both daemons serve: the shared
-// internal/methods handlers over deps, each paired with its limits. The result
-// feeds Params.Specs, after any daemon-specific per-handler wrapping.
-func BuildHandlerSpecs(deps SpecDeps, limits SpecLimits) []HandlerSpec {
+// internal/methods handlers over deps, each paired with its limits, plus any
+// daemon-specific extra methods. The result feeds Params.Specs, after any
+// daemon-specific per-handler wrapping.
+func BuildHandlerSpecs(deps SpecDeps, limits SpecLimits, extra ...ExtraMethod) []HandlerSpec {
 	getEvents := deps.GetEventsHandler
 	if getEvents == nil {
 		getEvents = methods.NewGetEventsHandler(deps.Logger, deps.EventReader,
@@ -104,7 +114,7 @@ func BuildHandlerSpecs(deps SpecDeps, limits SpecLimits) []HandlerSpec {
 			RequestDurationLimit: l.RequestDurationLimit,
 		}
 	}
-	specs := []HandlerSpec{
+	specs := []HandlerSpec{ //nolint:prealloc // built once per daemon startup; the append below is trivial
 		spec(protocol.GetHealthMethodName,
 			methods.NewHealthCheck(deps.RetentionWindow, deps.LedgerReader, deps.MaxHealthyLedgerLatency)),
 		spec(protocol.GetEventsMethodName, getEvents),
@@ -133,6 +143,9 @@ func BuildHandlerSpecs(deps SpecDeps, limits SpecLimits) []HandlerSpec {
 				deps.PreflightGetter, xdr.DecodeOptions{MaxMemoryBytes: TransactionDecodeMaxMemory})),
 		spec(protocol.GetFeeStatsMethodName,
 			methods.NewGetFeeStatsHandler(deps.FeeStats, deps.LedgerReader, deps.Logger)),
+	}
+	for _, e := range extra {
+		specs = append(specs, spec(e.MethodName, e.Handler))
 	}
 	for name := range limits {
 		if !used[name] {

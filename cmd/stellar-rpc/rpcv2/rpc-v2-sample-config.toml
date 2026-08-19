@@ -169,6 +169,13 @@ max_execution_duration = "10s"
 max_items_per_response = 1000
 default_items_per_response = 100
 
+# The one method this daemon serves that v1 does not; same defaults as getEvents.
+[service.methods.getEventsV2]
+queue_limit = 1000
+max_execution_duration = "10s"
+max_items_per_response = 1000
+default_items_per_response = 100
+
 [service.methods.getFeeStats]
 queue_limit = 100
 max_execution_duration = "5s"

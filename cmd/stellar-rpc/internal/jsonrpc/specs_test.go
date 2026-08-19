@@ -1,9 +1,11 @@
 package jsonrpc
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"github.com/creachadair/jrpc2"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 
@@ -65,6 +67,29 @@ func TestBuildHandlerSpecs_PanicsOnLimitsForAnUnservedMethod(t *testing.T) {
 	limits["getFoo"] = MethodLimits{QueueLimit: 1, RequestDurationLimit: time.Second}
 	assert.PanicsWithValue(t, "jsonrpc: limits configured for unserved method getFoo", func() {
 		BuildHandlerSpecs(SpecDeps{Daemon: stubDaemon{}}, limits)
+	})
+}
+
+func TestBuildHandlerSpecs_AppendsExtraMethodsWithTheirLimits(t *testing.T) {
+	limits := fullSpecLimits()
+	limits["getFoo"] = MethodLimits{QueueLimit: 7, RequestDurationLimit: time.Minute}
+	stub := func(context.Context, *jrpc2.Request) (any, error) { return "ok", nil }
+
+	specs := BuildHandlerSpecs(SpecDeps{Daemon: stubDaemon{}}, limits,
+		ExtraMethod{MethodName: "getFoo", Handler: stub})
+
+	assert.Len(t, specs, len(limits))
+	last := specs[len(specs)-1]
+	assert.Equal(t, "getFoo", last.MethodName)
+	assert.Equal(t, uint(7), last.QueueLimit)
+	assert.Equal(t, time.Minute, last.RequestDurationLimit)
+}
+
+func TestBuildHandlerSpecs_PanicsOnAnExtraMethodWithoutLimits(t *testing.T) {
+	stub := func(context.Context, *jrpc2.Request) (any, error) { return "ok", nil }
+	assert.PanicsWithValue(t, "jsonrpc: no limits configured for method getFoo", func() {
+		BuildHandlerSpecs(SpecDeps{Daemon: stubDaemon{}}, fullSpecLimits(),
+			ExtraMethod{MethodName: "getFoo", Handler: stub})
 	})
 }
 

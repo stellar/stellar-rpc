@@ -113,6 +113,15 @@ func TestJSONRPCHandler_GetEventsIsExplicitlyNotImplemented(t *testing.T) {
 	assert.Contains(t, out.Error.Message, "#774")
 }
 
+func TestJSONRPCHandler_GetEventsV2IsExplicitlyNotImplemented(t *testing.T) {
+	url := newTestRPCServer(t, seedServingRegistry(t))
+
+	out := postRPC(t, url, "getEventsV2", `{"startLedger":2}`)
+	require.NotNil(t, out.Error)
+	assert.EqualValues(t, jrpc2.MethodNotFound, out.Error.Code)
+	assert.Contains(t, out.Error.Message, "#774")
+}
+
 func TestJSONRPCHandler_ServesLatestLedgerFromRegistry(t *testing.T) {
 	url := newTestRPCServer(t, seedServingRegistry(t))
 
