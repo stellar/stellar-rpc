@@ -337,9 +337,6 @@ func TestTxDone_WithAndWithoutPriming(t *testing.T) {
 	assert.NoError(t, tx.Done(), "a second Done must be a no-op, not a double release")
 }
 
-// TestTxGetLedger_WalkCrossesChunkBorder seeds chunk 5 densely (the walk
-// contract assumes contiguous ledgers, so the border is only reachable through
-// a full chunk) and walks the seam ledger by ledger.
 func TestTxGetLedger_WalkCrossesChunkBorder(t *testing.T) {
 	if testing.Short() {
 		t.Skip("seeds a full 10k-ledger chunk")
@@ -364,9 +361,6 @@ func TestTxGetLedger_WalkCrossesChunkBorder(t *testing.T) {
 	}
 }
 
-// TestTxGetLedger_WalkPastSpanCapIsExhaustedNotNonSequential drives a
-// sequential walk one step past the primed span: the error must say the span
-// ran out, not accuse the caller of skipping around.
 func TestTxGetLedger_WalkPastSpanCapIsExhaustedNotNonSequential(t *testing.T) {
 	if testing.Short() {
 		t.Skip("seeds a full 10k-ledger chunk")
@@ -409,8 +403,8 @@ func TestBatchGetLedgers_ClonesBorrowedBytes(t *testing.T) {
 }
 
 func TestWalkSpanCapCoversTheHandlerScanLimit(t *testing.T) {
-	assert.GreaterOrEqual(t, walkSpanCap, methods.LedgerScanLimit,
-		"getTransactions' handler-side cap must fit inside the walk's primed span")
+	assert.GreaterOrEqual(t, int(walkSpanCap), methods.LedgerScanLimit,
+		"handler scan limits must never exceed one chunk's worth of ledgers")
 }
 
 func TestLedgerReaderTx_GetLedgerStopsOnCanceledContext(t *testing.T) {
@@ -427,4 +421,18 @@ func TestLedgerReaderTx_GetLedgerStopsOnCanceledContext(t *testing.T) {
 	cancel()
 	_, _, err = tx.GetLedger(ctx, c0.FirstLedger()+1)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestLedgerReaderTx_BatchGetLedgersStopsOnCanceledContext(t *testing.T) {
+	r, first := sharedViewFixture(t)
+	reader := NewLedgerReader(r)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	tx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+	cancel()
+
+	_, err = tx.BatchGetLedgers(ctx, first, first+2)
+	assert.ErrorIs(t, err, context.Canceled)
 }

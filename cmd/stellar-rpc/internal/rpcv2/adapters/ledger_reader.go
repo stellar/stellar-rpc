@@ -19,12 +19,11 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
-// walkSpanCap bounds the range primed for LedgerReaderTx.GetLedger's walk. At
-// 10,000 ledgers (one chunk) the span covers at most two chunks, so ScanLedgers
-// resolves every reader at call time and an unroutable chunk fails before any
-// row is returned instead of mid-walk. getTransactions' handler-level span cap
-// (methods.LedgerScanLimit, the same 10,000) keeps requests inside this window.
-const walkSpanCap = 10_000
+// walkSpanCap bounds every primed walk span to one chunk's worth of ledgers —
+// touching at most two chunks when the span straddles a boundary — so
+// ScanLedgers resolves every reader at call time. Handler scan limits
+// (methods.LedgerScanLimit) must stay ≤ this cap; the pairing test enforces it.
+const walkSpanCap = chunk.LedgersPerChunk
 
 // LedgerReader satisfies store.LedgerReader over the query router. Every
 // method reads through the request's shared view (see WithSharedView), or its
@@ -197,6 +196,9 @@ func (tx *ledgerReaderTx) BatchGetLedgers(
 		if err != nil {
 			return nil, markErr(ctx, err)
 		}
+		if err := ctx.Err(); err != nil {
+			return nil, markErr(ctx, err)
+		}
 		header, err := headerFromLCMBytes(entry.Bytes)
 		if err != nil {
 			return nil, markErr(ctx, fmt.Errorf("adapters: decode ledger %d header: %w", entry.Seq, err))
@@ -310,11 +312,6 @@ func getLedgerRange(view *query.ReadView, registry *query.Registry) (store.Ledge
 // raw bytes — no full LedgerCloseMeta unmarshal. which names the window edge
 // ("oldest"/"latest") in the missing-ledger error.
 func readCloseTime(view *query.ReadView, seq uint32, which string) (int64, error) {
-	// chunk.IDFromLedger panics below ledger 2; the window edges are always ≥ 2,
-	// so this is purely defensive.
-	if seq < chunk.FirstLedgerSeq {
-		return 0, fmt.Errorf("adapters: %s ledger %d is below genesis", which, seq)
-	}
 	reader, err := view.Ledgers(chunk.IDFromLedger(seq))
 	if err != nil {
 		return 0, err
