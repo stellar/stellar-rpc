@@ -13,12 +13,10 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
-	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
@@ -27,27 +25,14 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
 const testChunk = chunk.ID(5)
 
-func silentLogger() *supportlog.Entry {
-	log := supportlog.New()
-	log.SetLevel(logrus.PanicLevel)
-	return log
-}
-
 func openTestCatalog(t *testing.T) *catalog.Catalog {
 	t.Helper()
-	idxLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
-	require.NoError(t, err)
-	cat, err := catalog.Open(
-		filepath.Join(t.TempDir(), "rocksdb"), geometry.NewLayout(t.TempDir()), idxLayout, silentLogger(),
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = cat.Close() })
+	cat, _ := rpcv2test.OpenTestCatalog(t, geometry.ChunksPerTxhashIndex)
 	return cat
 }
 
@@ -67,24 +52,7 @@ func seqRange(lo, hi uint32) []uint32 {
 
 func lcmBytes(t *testing.T, seq uint32) []byte {
 	t.Helper()
-	lcm := xdr.LedgerCloseMeta{
-		V: 2,
-		V2: &xdr.LedgerCloseMetaV2{
-			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
-				Header: xdr.LedgerHeader{
-					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(closeTimeFor(seq))},
-					LedgerSeq: xdr.Uint32(seq),
-				},
-			},
-			TxSet: xdr.GeneralizedTransactionSet{
-				V:       1,
-				V1TxSet: &xdr.TransactionSetV1{Phases: nil},
-			},
-		},
-	}
-	raw, err := lcm.MarshalBinary()
-	require.NoError(t, err)
-	return raw
+	return rpcv2test.ZeroTxLCMBytesAt(t, seq, closeTimeFor(seq))
 }
 
 // txSpec describes one transaction of a fixture ledger: its success, its
@@ -289,23 +257,6 @@ func lcmV1WithClassicTx(t *testing.T, seq uint32) ([]byte, xdr.Hash) {
 	return raw, hash
 }
 
-func contractEventFixture(contractByte byte, topic string) xdr.ContractEvent {
-	var contractID xdr.ContractId
-	contractID[0] = contractByte
-	sym := xdr.ScSymbol(topic)
-	return xdr.ContractEvent{
-		ContractId: &contractID,
-		Type:       xdr.ContractEventTypeContract,
-		Body: xdr.ContractEventBody{
-			V: 0,
-			V0: &xdr.ContractEventV0{
-				Topics: []xdr.ScVal{{Type: xdr.ScValTypeScvSymbol, Sym: &sym}},
-				Data:   xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym},
-			},
-		},
-	}
-}
-
 func mustMarshal(t *testing.T, v interface{ MarshalBinary() ([]byte, error) }) []byte {
 	t.Helper()
 	raw, err := v.MarshalBinary()
@@ -326,38 +277,14 @@ func seedHotLedgers(t *testing.T, cat *catalog.Catalog, r *query.Registry, c chu
 	seedHotChunkLCMs(t, cat, r, c, lcms...)
 }
 
-// seedHotChunkLCMs ingests raw LCMs contiguously from c's first ledger (the
-// events CF requires a chunk to start at its first ledger), marks the chunk
-// ready, and publishes the handle.
+// seedHotChunkLCMs ingests raw LCMs contiguously from c's first ledger, marks
+// the chunk ready, and publishes the handle on r.
 func seedHotChunkLCMs(t *testing.T, cat *catalog.Catalog, r *query.Registry, c chunk.ID, lcms ...[]byte) {
 	t.Helper()
-	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	for i, raw := range lcms {
-		rpcv2test.IngestLedger(t, db, c.FirstLedger()+uint32(i), raw)
-	}
-	require.NoError(t, cat.FlipHotReady(c))
-	r.PublishHandle(c, db)
+	rpcv2test.SeedHotChunkLCMs(t, cat, c, func(db *hotchunk.DB) { r.PublishHandle(c, db) }, lcms...)
 }
 
 // ───────────────────────── Frozen artifacts ─────────────────────────
-
-// writeFrozenLedgerPack writes a real cold ledgers.pack holding lcms from c's
-// first ledger and flips the chunk's ledgers artifact frozen.
-func writeFrozenLedgerPack(t *testing.T, cat *catalog.Catalog, c chunk.ID, lcms ...[]byte) {
-	t.Helper()
-	path := cat.Layout().LedgerPackPath(c)
-	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
-	w, err := ledger.NewColdWriter(path, c.FirstLedger(), ledger.ColdWriterOptions{})
-	require.NoError(t, err)
-	defer func() { _ = w.Close() }()
-	for i, raw := range lcms {
-		require.NoError(t, w.AppendLedger(c.FirstLedger()+uint32(i), raw))
-	}
-	require.NoError(t, w.Commit())
-	require.NoError(t, cat.FlipChunkFrozen(c, geometry.KindLedgers))
-}
 
 // writeFrozenTxIndex builds a real .idx for window 0 covering [lo, hi] with the
 // given hash→seq entries and commits its coverage frozen.

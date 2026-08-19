@@ -12,6 +12,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
@@ -19,7 +20,7 @@ func TestGetTransaction_HotHit(t *testing.T) {
 	cat := openTestCatalog(t)
 	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
 	lcm, txs := lcmWithTxs(t, testChunk.FirstLedger(),
-		txSpec{events: []xdr.ContractEvent{contractEventFixture(0xab, "transfer")}})
+		txSpec{events: []xdr.ContractEvent{rpcv2test.ContractEventFixture(0xab, "transfer")}})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
 	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
 	reader := NewTransactionReader(r, network.PublicNetworkPassphrase)
@@ -103,7 +104,7 @@ func coldFixture(t *testing.T) (*TransactionReader, []fixtureTx, xdr.Hash) {
 	require.NoError(t, cat.FlipHotReady(999)) // acquisition needs a ready live chunk
 
 	lcm, txs := lcmWithTxs(t, testChunk.FirstLedger(), txSpec{})
-	writeFrozenLedgerPack(t, cat, testChunk, lcm)
+	rpcv2test.WriteFrozenLedgerPack(t, cat, testChunk, lcm)
 
 	orphanHash := xdr.Hash{0x77}
 	writeFrozenTxIndex(t, cat, testChunk, testChunk+2, map[xdr.Hash]uint32{
@@ -183,7 +184,7 @@ func TestGetTransaction_AgedOutColdCandidateIsCleanMiss(t *testing.T) {
 		agedHash: testChunk.FirstLedger(),
 	})
 	lcm, _ := lcmWithTxs(t, (testChunk + 1).FirstLedger(), txSpec{})
-	writeFrozenLedgerPack(t, cat, testChunk+1, lcm)
+	rpcv2test.WriteFrozenLedgerPack(t, cat, testChunk+1, lcm)
 	r.SetLatestLedger((testChunk + 1).FirstLedger(), closeTimeFor((testChunk + 1).FirstLedger()))
 
 	reader := NewTransactionReader(r, network.PublicNetworkPassphrase)

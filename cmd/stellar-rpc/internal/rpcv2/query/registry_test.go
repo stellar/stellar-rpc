@@ -3,7 +3,6 @@ package query
 import (
 	"bytes"
 	"context"
-	"path/filepath"
 	"testing"
 
 	"github.com/sirupsen/logrus"
@@ -28,19 +27,12 @@ func newTestLogger(buf *bytes.Buffer) *supportlog.Entry {
 }
 
 func silentLogger() *supportlog.Entry {
-	var buf bytes.Buffer
-	return newTestLogger(&buf)
+	return rpcv2test.SilentLogger()
 }
 
 func openTestCatalog(t *testing.T, logger *supportlog.Entry) *catalog.Catalog {
 	t.Helper()
-	idxLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
-	require.NoError(t, err)
-	cat, err := catalog.Open(
-		filepath.Join(t.TempDir(), "rocksdb"), geometry.NewLayout(t.TempDir()), idxLayout, logger,
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = cat.Close() })
+	cat, _ := rpcv2test.OpenTestCatalogWith(t, geometry.ChunksPerTxhashIndex, logger)
 	return cat
 }
 

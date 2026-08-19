@@ -1,13 +1,10 @@
 package lifecycle
 
 import (
-	"bytes"
 	"fmt"
 	"os"
-	"path/filepath"
 	"testing"
 
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -15,6 +12,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
@@ -30,38 +28,14 @@ import (
 const testCPI = geometry.ChunksPerTxhashIndex
 
 func silentLogger() *supportlog.Entry {
-	var buf bytes.Buffer
-	log := supportlog.New()
-	log.SetLevel(logrus.DebugLevel)
-	log.SetOutput(&buf)
-	return log
-}
-
-// newTestCatalog builds a Catalog over a real KV store on temp dirs with
-// cpi-wide tx-hash indexes; returns the catalog (closed via t.Cleanup) and
-// artifact root.
-func newTestCatalog(t *testing.T, cpi uint32) (*catalog.Catalog, string) {
-	t.Helper()
-	metaDir := t.TempDir()
-	artifactRoot := t.TempDir()
-
-	idxLayout, err := geometry.NewTxHashIndexLayout(cpi)
-	require.NoError(t, err)
-
-	cat, err := catalog.Open(
-		filepath.Join(metaDir, "rocksdb"), geometry.NewLayout(artifactRoot), idxLayout, silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = cat.Close() })
-
-	return cat, artifactRoot
+	return rpcv2test.SilentLogger()
 }
 
 // testCatalog builds a catalog with the default (wide) tx-hash index, returning it
 // and the artifact root.
 func testCatalog(t *testing.T) (*catalog.Catalog, string) {
 	t.Helper()
-	cat, root := newTestCatalog(t, testCPI)
-	return cat, root
+	return rpcv2test.OpenTestCatalog(t, testCPI)
 }
 
 // smallTxHashIndexCatalog builds a test catalog whose indexes are cpi chunks
@@ -69,8 +43,7 @@ func testCatalog(t *testing.T) (*catalog.Catalog, string) {
 // catalog and the artifact root.
 func smallTxHashIndexCatalog(t *testing.T, cpi uint32) (*catalog.Catalog, string) {
 	t.Helper()
-	cat, root := newTestCatalog(t, cpi)
-	return cat, root
+	return rpcv2test.OpenTestCatalog(t, cpi)
 }
 
 // freezeKinds flips the given per-chunk kinds to "frozen" via the one-write protocol.

@@ -44,12 +44,11 @@ func servingRegistry(t *testing.T) (*query.Registry, *hotchunk.DB) {
 	cat, _ := testCatalog(t)
 	r := query.NewRegistry(cat, geometry.NewRetention(0, 0))
 	const c = chunk.ID(0)
-	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	rpcv2test.IngestLedger(t, db, chunk.FirstLedgerSeq, rpcv2test.ZeroTxLCMBytes(t, chunk.FirstLedgerSeq))
-	require.NoError(t, cat.FlipHotReady(c))
-	r.PublishHandle(c, db)
+	var db *hotchunk.DB
+	rpcv2test.SeedHotChunkLCMs(t, cat, c, func(d *hotchunk.DB) {
+		db = d
+		r.PublishHandle(c, d)
+	}, rpcv2test.ZeroTxLCMBytes(t, chunk.FirstLedgerSeq))
 	r.SetLatestLedger(chunk.FirstLedgerSeq, time.Now().Unix())
 	return r, db
 }

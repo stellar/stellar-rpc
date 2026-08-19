@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"iter"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +19,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 )
 
 // testCPI is the tx-hash index width tests build layouts with; equals the
@@ -32,8 +32,7 @@ const testCPI = geometry.ChunksPerTxhashIndex
 const preGenesisLedger = uint32(chunk.FirstLedgerSeq - 1)
 
 func silentLogger() *supportlog.Entry {
-	logger, _ := capturingLogger()
-	return logger
+	return rpcv2test.SilentLogger()
 }
 
 // capturingLogger is silentLogger plus access to what was logged.
@@ -45,30 +44,11 @@ func capturingLogger() (*supportlog.Entry, *bytes.Buffer) {
 	return log, buf
 }
 
-// newTestCatalog builds a Catalog over a real KV store on temp dirs with
-// cpi-wide tx-hash indexes; returns the catalog (closed via t.Cleanup) and
-// artifact root.
-func newTestCatalog(t *testing.T, cpi uint32) (*catalog.Catalog, string) {
-	t.Helper()
-	metaDir := t.TempDir()
-	artifactRoot := t.TempDir()
-
-	idxLayout, err := geometry.NewTxHashIndexLayout(cpi)
-	require.NoError(t, err)
-
-	cat, err := catalog.Open(
-		filepath.Join(metaDir, "rocksdb"), geometry.NewLayout(artifactRoot), idxLayout, silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = cat.Close() })
-
-	return cat, artifactRoot
-}
-
 // testCatalog builds a catalog with the default (wide) tx-hash index, returning it
 // and the artifact root.
 func testCatalog(t *testing.T) (*catalog.Catalog, string) {
 	t.Helper()
-	return newTestCatalog(t, testCPI)
+	return rpcv2test.OpenTestCatalog(t, testCPI)
 }
 
 // freezeKinds flips the given per-chunk kinds to "frozen" via the one-write protocol.

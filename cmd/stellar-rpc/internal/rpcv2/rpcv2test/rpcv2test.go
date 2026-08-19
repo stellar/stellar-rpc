@@ -8,21 +8,117 @@ import (
 	"encoding/binary"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
+
+// SilentLogger returns a logger that drops everything below panic level — for
+// tests that need a logger wired through but never read its output.
+func SilentLogger() *supportlog.Entry {
+	log := supportlog.New()
+	log.SetLevel(logrus.PanicLevel)
+	return log
+}
+
+// OpenTestCatalog opens a throwaway catalog — RocksDB under one temp dir,
+// artifacts under another, cpi-wide tx-hash indexes, silent logger, closed on
+// test cleanup. Returns the catalog and the artifact root. Most tests pass
+// geometry.ChunksPerTxhashIndex for cpi.
+func OpenTestCatalog(t *testing.T, cpi uint32) (*catalog.Catalog, string) {
+	t.Helper()
+	return OpenTestCatalogWith(t, cpi, SilentLogger())
+}
+
+// OpenTestCatalogWith is OpenTestCatalog with the caller's logger, for tests
+// that assert on what the catalog logs.
+func OpenTestCatalogWith(t *testing.T, cpi uint32, logger *supportlog.Entry) (*catalog.Catalog, string) {
+	t.Helper()
+	artifactRoot := t.TempDir()
+	idxLayout, err := geometry.NewTxHashIndexLayout(cpi)
+	require.NoError(t, err)
+	cat, err := catalog.Open(
+		filepath.Join(t.TempDir(), "rocksdb"), geometry.NewLayout(artifactRoot), idxLayout, logger)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.Close() })
+	return cat, artifactRoot
+}
+
+// SeedHotChunkLCMs opens chunk c's hot DB under cat's layout, ingests lcms
+// contiguously from the chunk's first ledger (the events CF requires a chunk
+// to start there), flips the chunk ready, then hands the open DB to publish —
+// the caller's registry hookup, since this package cannot import the query
+// package (query's own tests import this one). The DB closes on test cleanup.
+//
+//	rpcv2test.SeedHotChunkLCMs(t, cat, c,
+//		func(db *hotchunk.DB) { registry.PublishHandle(c, db) },
+//		lcms...)
+func SeedHotChunkLCMs(
+	t *testing.T, cat *catalog.Catalog, c chunk.ID, publish func(*hotchunk.DB), lcms ...[]byte,
+) {
+	t.Helper()
+	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, SilentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	for i, raw := range lcms {
+		IngestLedger(t, db, c.FirstLedger()+uint32(i), raw)
+	}
+	require.NoError(t, cat.FlipHotReady(c))
+	publish(db)
+}
+
+// WriteFrozenLedgerPack writes a real cold ledgers.pack for chunk c holding
+// lcms from the chunk's first ledger, and flips the chunk's ledgers artifact
+// frozen. AppendLedger stores raw bytes, so marker payloads work as well as
+// real LCMs.
+func WriteFrozenLedgerPack(t *testing.T, cat *catalog.Catalog, c chunk.ID, lcms ...[]byte) {
+	t.Helper()
+	path := cat.Layout().LedgerPackPath(c)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	w, err := ledger.NewColdWriter(path, c.FirstLedger(), ledger.ColdWriterOptions{})
+	require.NoError(t, err)
+	defer func() { _ = w.Close() }()
+	for i, raw := range lcms {
+		require.NoError(t, w.AppendLedger(c.FirstLedger()+uint32(i), raw))
+	}
+	require.NoError(t, w.Commit())
+	require.NoError(t, cat.FlipChunkFrozen(c, geometry.KindLedgers))
+}
+
+// ContractEventFixture builds a minimal operation-level contract event whose
+// contract id starts with contractByte and whose single topic and data are
+// both the symbol topic.
+func ContractEventFixture(contractByte byte, topic string) xdr.ContractEvent {
+	var contractID xdr.ContractId
+	contractID[0] = contractByte
+	sym := xdr.ScSymbol(topic)
+	return xdr.ContractEvent{
+		ContractId: &contractID,
+		Type:       xdr.ContractEventTypeContract,
+		Body: xdr.ContractEventBody{
+			V: 0,
+			V0: &xdr.ContractEventV0{
+				Topics: []xdr.ScVal{{Type: xdr.ScValTypeScvSymbol, Sym: &sym}},
+				Data:   xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym},
+			},
+		},
+	}
+}
 
 // IngestLedger commits one raw ledger into db the way production does: the
 // shared ExtractLedgerTxParts walk, then hotchunk's atomic write over its
@@ -54,12 +150,20 @@ func RetentionFor(t *testing.T, cat *catalog.Catalog, size uint32) geometry.Rete
 // tests feed in when they need a valid but empty ledger.
 func ZeroTxLCMBytes(t *testing.T, seq uint32) []byte {
 	t.Helper()
+	return ZeroTxLCMBytesAt(t, seq, 0)
+}
+
+// ZeroTxLCMBytesAt is ZeroTxLCMBytes with an explicit close time, for tests
+// that assert against a known close-time value.
+func ZeroTxLCMBytesAt(t *testing.T, seq uint32, closeTimeUnix int64) []byte {
+	t.Helper()
 	lcm := xdr.LedgerCloseMeta{
 		V: 2,
 		V2: &xdr.LedgerCloseMetaV2{
 			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
 				Header: xdr.LedgerHeader{
-					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(0)},
+					//nolint:gosec // test close times are small positives
+					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(closeTimeUnix)},
 					LedgerSeq: xdr.Uint32(seq),
 				},
 			},
@@ -82,20 +186,7 @@ func ZeroTxLCMBytes(t *testing.T, seq uint32) []byte {
 // each call a distinct, valid pubnet transaction hash.
 func EventLCMBytes(t *testing.T, seq uint32) []byte {
 	t.Helper()
-	var contractID xdr.ContractId
-	contractID[0] = 0xab
-	sym := xdr.ScSymbol("fhtest")
-	ev := xdr.ContractEvent{
-		ContractId: &contractID,
-		Type:       xdr.ContractEventTypeContract,
-		Body: xdr.ContractEventBody{
-			V: 0,
-			V0: &xdr.ContractEventV0{
-				Topics: []xdr.ScVal{{Type: xdr.ScValTypeScvSymbol, Sym: &sym}},
-				Data:   xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym},
-			},
-		},
-	}
+	ev := ContractEventFixture(0xab, "fhtest")
 	meta := xdr.TransactionMeta{
 		V:  4,
 		V4: &xdr.TransactionMetaV4{Operations: []xdr.OperationMetaV2{{Events: []xdr.ContractEvent{ev}}}},

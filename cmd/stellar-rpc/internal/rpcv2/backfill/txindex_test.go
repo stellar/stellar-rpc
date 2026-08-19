@@ -15,6 +15,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/durable"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
@@ -295,7 +296,7 @@ func TestBuildThenSweep_TerminalDemotesAndSweepsAllInputs(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildTxhashIndex_SkipsWhenCoverageAlreadyFrozen(t *testing.T) {
-	cat, _ := newStreamingTestCatalog(t, 4)
+	cat, _ := rpcv2test.OpenTestCatalog(t, 4)
 	cfg := testBuildConfig(cat)
 
 	e := txEntry{hashAt(300), seqIn(0, 3)}
