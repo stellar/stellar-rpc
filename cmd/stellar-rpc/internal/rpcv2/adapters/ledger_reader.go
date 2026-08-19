@@ -125,6 +125,15 @@ type ledgerReaderTx struct {
 }
 
 func (tx *ledgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
+	// The request duration limiter answers the client at the deadline but only
+	// abandons the handler goroutine — it cannot stop it. Without this check
+	// the abandoned getTransactions walk would keep decoding the rest of its
+	// primed span (up to a whole chunk) while holding its read view, and the
+	// deletion grace margin is sized assuming walks stop within one iteration
+	// of their deadline.
+	if err := ctx.Err(); err != nil {
+		return xdr.LedgerCloseMeta{}, false, markErr(ctx, err)
+	}
 	// chunk.IDFromLedger panics below ledger 2, and sequence comes from a
 	// client-supplied cursor, so the guard is load-bearing, not defensive.
 	if sequence < chunk.FirstLedgerSeq {

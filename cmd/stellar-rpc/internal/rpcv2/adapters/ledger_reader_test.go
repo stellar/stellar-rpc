@@ -387,3 +387,19 @@ func TestWalkSpanCapCoversTheHandlerScanLimit(t *testing.T) {
 	assert.GreaterOrEqual(t, walkSpanCap, methods.LedgerScanLimit,
 		"getTransactions' handler-side cap must fit inside the walk's primed span")
 }
+
+func TestLedgerReaderTx_GetLedgerStopsOnCanceledContext(t *testing.T) {
+	reader, c0, _ := sparseFixture(t)
+	tx, err := reader.NewTx(context.Background())
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	_, found, err := tx.GetLedger(ctx, c0.FirstLedger())
+	require.NoError(t, err)
+	require.True(t, found)
+
+	cancel()
+	_, _, err = tx.GetLedger(ctx, c0.FirstLedger()+1)
+	require.ErrorIs(t, err, context.Canceled)
+}
