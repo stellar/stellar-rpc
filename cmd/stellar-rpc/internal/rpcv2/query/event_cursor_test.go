@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 )
@@ -23,6 +24,8 @@ func testContract(b byte) []byte { return bytes.Repeat([]byte{b}, contractIDLen)
 func testTopic(b byte) []byte { return bytes.Repeat([]byte{b}, 8) }
 
 func maxPtr(v uint32) *uint32 { return new(v) }
+
+func eventTypePtr(v xdr.ContractEventType) *xdr.ContractEventType { return new(v) }
 
 // tokV1 wraps a raw body in the version-1 prefix so the failure under test
 // is the body, not the prefix.
@@ -127,10 +130,26 @@ func TestCursorRoundTripFilters(t *testing.T) {
 						Topics: [protocol.MaxTopicCount][]byte{
 							testTopic(1), testTopic(2), testTopic(3), testTopic(4),
 						},
+						EventType:  eventTypePtr(xdr.ContractEventTypeContract),
+						TopicCount: event.TopicCountFilter{Count: protocol.MaxTopicCount},
 					}},
 				},
 				Position:      &EventPosition{Ledger: 25000, Tx: 1, Op: 1, Event: 0, LedgerOrdinal: 0},
 				ScannedLedger: 25000,
+			},
+		},
+		{
+			name: "type-only filter and exact-count filter",
+			env: EventCursor{
+				Scope: EventCursorQuery{
+					MinLedger: 3, MaxLedger: maxPtr(9), Dir: Descending,
+					Filters: []event.Filter{
+						{EventType: eventTypePtr(xdr.ContractEventTypeSystem)},
+						{TopicCount: event.TopicCountFilter{Count: 0, Exact: true}},
+						{TopicCount: event.TopicCountFilter{Count: 2, Exact: true}},
+					},
+				},
+				ScannedLedger: 7,
 			},
 		},
 		{
@@ -217,6 +236,31 @@ func TestCursorGoldenV1(t *testing.T) {
 				testContract(0xC5), // contract
 				be32(8),            // topic1 length
 				testTopic(0xB2),    // topic1
+			),
+		},
+		{
+			name: "the #904 fields: system type, exactly-2 count, contract",
+			env: EventCursor{
+				Scope: EventCursorQuery{
+					MinLedger: 9, MaxLedger: maxPtr(10), Dir: Ascending,
+					Filters: []event.Filter{{
+						ContractID: testContract(0xC6),
+						EventType:  eventTypePtr(xdr.ContractEventTypeSystem),
+						TopicCount: event.TopicCountFilter{Count: 2, Exact: true},
+					}},
+				},
+				ScannedLedger: 9,
+			},
+			body: cat(
+				[]byte{0x02},       // flags: ascending | hasMax
+				be32(9),            // min
+				be32(10),           // max
+				be32(9),            // scanned
+				be16(1),            // filter count
+				[]byte{0xE1},       // fflags: contract | type | count | exact
+				[]byte{0x00},       // event type: system
+				[]byte{0x02},       // topic count
+				testContract(0xC6), // contract
 			),
 		},
 	}
@@ -309,8 +353,25 @@ func TestCursorMalformedInputs(t *testing.T) {
 			tokV1(cat([]byte{0x00}, be32(1), be32(0), be16(1))),
 		},
 		{
-			"reserved filter flag bit",
+			"type bit without a type byte",
 			tokV1(cat([]byte{0x00}, be32(1), be32(0), be16(1), []byte{0x20})),
+		},
+		{
+			"unknown event type",
+			tokV1(cat([]byte{0x00}, be32(1), be32(0), be16(1), []byte{0x20, 0x63})),
+		},
+		{
+			"exact bit without a topic count",
+			tokV1(cat([]byte{0x00}, be32(1), be32(0), be16(1), []byte{0x80})),
+		},
+		{
+			"topic count above the maximum",
+			tokV1(cat([]byte{0x00}, be32(1), be32(0), be16(1), []byte{0x40, 0x05})),
+		},
+		{
+			// "At least zero" is the wildcard, which encodes as absent.
+			"topic count zero without the exact bit",
+			tokV1(cat([]byte{0x00}, be32(1), be32(0), be16(1), []byte{0x40, 0x00})),
 		},
 		{
 			"topic bit set with zero length",
@@ -428,6 +489,8 @@ func TestCursorSizeWorstCase(t *testing.T) {
 		for j := range filters[i].Topics {
 			filters[i].Topics[j] = bytes.Repeat([]byte{byte(i + j)}, 64)
 		}
+		filters[i].EventType = eventTypePtr(xdr.ContractEventTypeContract)
+		filters[i].TopicCount = event.TopicCountFilter{Count: protocol.MaxTopicCount, Exact: true}
 	}
 	env := EventCursor{
 		Scope: EventCursorQuery{
@@ -448,11 +511,11 @@ func TestCursorSizeWorstCase(t *testing.T) {
 }
 
 // Trips when event.Filter grows a field the codec does not map, which would
-// silently drop that constraint from minted cursors. Adding a field? Map it
-// in appendFilter and readFilter under a version bump (the #904 fields take
-// the reserved fflags bits), extend the golden vector, and update the count.
+// silently drop that constraint from minted cursors. Adding a field? Every
+// fflags bit is assigned, so map it under a version bump, extend the golden
+// vectors, and update the count.
 func TestCursorCodecCoversFilter(t *testing.T) {
-	require.Equal(t, 2, reflect.TypeFor[event.Filter]().NumField(),
+	require.Equal(t, 4, reflect.TypeFor[event.Filter]().NumField(),
 		"event.Filter has fields the cursor body does not carry")
 }
 

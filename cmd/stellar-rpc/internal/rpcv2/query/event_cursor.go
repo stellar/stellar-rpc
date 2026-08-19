@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 )
@@ -55,9 +56,11 @@ const contractIDLen = 32
 // Version-1 body layout, big-endian, in field order: flags u8, minLedger
 // u32, maxLedger u32 if flagHasMax, position 5xu32 (ledger, tx, op, event,
 // ledgerOrdinal) if flagHasPos, scannedLedger u32, filter count u16, then per filter:
-// fflags u8, contract 32 bytes if fflagContract, and per set topic bit a
-// nonzero u32 length plus that many bytes. Reserved bits must be zero; the
-// #904 filter fields take the next fflags bits under a version bump.
+// fflags u8, event type u8 if fflagType, topic count u8 if fflagCount
+// (fflagExact marks the count exact and requires fflagCount), contract 32
+// bytes if fflagContract, and per set topic bit a nonzero u32 length plus
+// that many bytes. Reserved envelope flag bits must be zero; every fflags
+// bit is assigned, so the next filter field takes a version bump.
 // One envelope has one encoding: decode consumes the body exactly and
 // re-encodes byte-identically.
 const (
@@ -67,7 +70,9 @@ const (
 	flagsKnown     = byte(flagDescending | flagHasMax | flagHasPos)
 
 	fflagContract = 1 << 0
-	fflagsKnown   = byte(fflagContract | ((1<<protocol.MaxTopicCount)-1)<<1)
+	fflagType     = 1 << 5
+	fflagCount    = 1 << 6
+	fflagExact    = 1 << 7
 )
 
 func topicBit(i int) byte { return 1 << (1 + i) } //nolint:mnd // bit 0 is the contract
@@ -170,20 +175,51 @@ func (e *EventCursor) Encode() (string, error) {
 	return enc, nil
 }
 
-func appendFilter(body []byte, f *event.Filter) ([]byte, error) {
+// filterFlags validates f's fields and computes its fflags byte.
+func filterFlags(f *event.Filter) (byte, error) {
 	var fflags byte
 	if n := len(f.ContractID); n > 0 {
 		if n != contractIDLen {
-			return nil, fmt.Errorf("contract ID is %d bytes, want %d", n, contractIDLen)
+			return 0, fmt.Errorf("contract ID is %d bytes, want %d", n, contractIDLen)
 		}
 		fflags |= fflagContract
+	}
+	if f.EventType != nil {
+		if !f.EventType.ValidEnum(int32(*f.EventType)) {
+			return 0, fmt.Errorf("event type %d is not a known event type", *f.EventType)
+		}
+		fflags |= fflagType
+	}
+	if f.TopicCount != (event.TopicCountFilter{}) {
+		if f.TopicCount.Count < 0 || f.TopicCount.Count > protocol.MaxTopicCount {
+			return 0, fmt.Errorf("topic count %d outside [0, %d]",
+				f.TopicCount.Count, protocol.MaxTopicCount)
+		}
+		fflags |= fflagCount
+		if f.TopicCount.Exact {
+			fflags |= fflagExact
+		}
 	}
 	for i := range f.Topics {
 		if len(f.Topics[i]) > 0 {
 			fflags |= topicBit(i)
 		}
 	}
+	return fflags, nil
+}
+
+func appendFilter(body []byte, f *event.Filter) ([]byte, error) {
+	fflags, err := filterFlags(f)
+	if err != nil {
+		return nil, err
+	}
 	body = append(body, fflags)
+	if fflags&fflagType != 0 {
+		body = append(body, byte(*f.EventType)) //nolint:gosec // ValidEnum above bounds it
+	}
+	if fflags&fflagCount != 0 {
+		body = append(body, byte(f.TopicCount.Count)) //nolint:gosec // bounded above
+	}
 	if fflags&fflagContract != 0 {
 		body = append(body, f.ContractID...)
 	}
@@ -367,13 +403,49 @@ func readFilters(r *cursorReader) ([]event.Filter, error) {
 	return filters, nil
 }
 
+// readFilterTypeCount decodes the event-type and topic-count bytes
+// fflags declares, validating the values and the flag combinations.
+func readFilterTypeCount(r *cursorReader, fflags byte, f *event.Filter) error {
+	if fflags&fflagExact != 0 && fflags&fflagCount == 0 {
+		return fmt.Errorf("%w: exact bit without a topic count", ErrCursorMalformed)
+	}
+	if fflags&fflagType != 0 {
+		b, err := r.u8()
+		if err != nil {
+			return err
+		}
+		eventType := xdr.ContractEventType(b)
+		if !eventType.ValidEnum(int32(b)) {
+			return fmt.Errorf("%w: event type %d", ErrCursorMalformed, b)
+		}
+		f.EventType = &eventType
+	}
+	if fflags&fflagCount != 0 {
+		b, err := r.u8()
+		if err != nil {
+			return err
+		}
+		if int(b) > protocol.MaxTopicCount {
+			return fmt.Errorf("%w: topic count %d above %d",
+				ErrCursorMalformed, b, protocol.MaxTopicCount)
+		}
+		exact := fflags&fflagExact != 0
+		if b == 0 && !exact {
+			// "At least zero" is the wildcard, which encodes as absent.
+			return fmt.Errorf("%w: topic count 0 without the exact bit", ErrCursorMalformed)
+		}
+		f.TopicCount = event.TopicCountFilter{Count: int(b), Exact: exact}
+	}
+	return nil
+}
+
 func readFilter(r *cursorReader, f *event.Filter) error {
 	fflags, err := r.u8()
 	if err != nil {
 		return err
 	}
-	if fflags&^fflagsKnown != 0 {
-		return fmt.Errorf("%w: reserved filter flag bits in %#02x", ErrCursorMalformed, fflags)
+	if err := readFilterTypeCount(r, fflags, f); err != nil {
+		return err
 	}
 	if fflags&fflagContract != 0 {
 		if f.ContractID, err = r.take(contractIDLen); err != nil {
