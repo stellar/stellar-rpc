@@ -44,19 +44,16 @@ func WithSharedView(ctx context.Context) (context.Context, func()) {
 // Release. Callers defer the returned release either way.
 func acquireView(ctx context.Context, registry *query.Registry) (*query.ReadView, func(), error) {
 	h, ok := ctx.Value(sharedViewKey{}).(*sharedView)
-	if !ok {
-		view, err := registry.NewReadView()
-		if err != nil {
-			return nil, nil, err
-		}
-		return view, view.Release, nil
+	if ok && h.view != nil {
+		return h.view, func() {}, nil
 	}
-	if h.view == nil {
-		view, err := registry.NewReadView()
-		if err != nil {
-			return nil, nil, err
-		}
+	view, err := registry.NewReadView()
+	if err != nil {
+		return nil, nil, err
+	}
+	if ok {
 		h.view = view
+		return view, func() {}, nil
 	}
-	return h.view, func() {}, nil
+	return view, view.Release, nil
 }

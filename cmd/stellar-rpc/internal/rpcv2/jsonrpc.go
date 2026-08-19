@@ -157,8 +157,11 @@ func wrapAdapterRequest(h jrpc2.Handler, metrics observability.Metrics) jrpc2.Ha
 	return func(ctx context.Context, req *jrpc2.Request) (any, error) {
 		ctx, mark := adapters.WithErrorMark(ctx)
 		ctx, releaseView := adapters.WithSharedView(ctx)
+		// Deferred so a panicking handler cannot leak the view: the duration
+		// limiter recovers panics above this frame and keeps the process
+		// serving, so a skipped release would orphan the RocksDB snapshot.
+		defer releaseView()
 		result, err := h(ctx, req)
-		releaseView()
 		if err == nil {
 			return result, nil
 		}

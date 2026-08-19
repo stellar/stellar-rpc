@@ -201,6 +201,29 @@ func TestMapAdapterErrors_StoreClosedIsRetryableAndCounted(t *testing.T) {
 	assert.Equal(t, int32(1), metrics.served.Load())
 }
 
+func TestWrapAdapterRequest_PanicReleasesSharedView(t *testing.T) {
+	logger, buf := capturingLogger()
+	cat, _ := rpcv2test.OpenTestCatalogWith(t, testCPI, logger)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, 0))
+	rpcv2test.SeedHotChunkLCMs(t, cat, chunk.ID(0),
+		func(d *hotchunk.DB) { r.PublishHandle(chunk.ID(0), d) },
+		rpcv2test.ZeroTxLCMBytes(t, chunk.FirstLedgerSeq))
+	r.SetLatestLedger(chunk.FirstLedgerSeq, time.Now().Unix())
+	reader := adapters.NewLedgerReader(r)
+
+	wrapped := wrapAdapterRequest(func(ctx context.Context, _ *jrpc2.Request) (any, error) {
+		_, err := reader.GetLatestLedgerSequence(ctx)
+		require.NoError(t, err)
+		panic("handler panic after acquiring the shared view")
+	}, observability.NopMetrics{})
+
+	assert.Panics(t, func() { _, _ = wrapped(context.Background(), nil) })
+
+	require.NoError(t, cat.Close())
+	assert.NotContains(t, buf.String(), "unreleased snapshot",
+		"the deferred release must run during the panic unwind")
+}
+
 func TestMapAdapterErrors_UnmarkedErrorPassesThrough(t *testing.T) {
 	inner := &jrpc2.Error{Code: jrpc2.InternalError, Message: "disk on fire"}
 	wrapped := wrapAdapterRequest(func(context.Context, *jrpc2.Request) (any, error) {
