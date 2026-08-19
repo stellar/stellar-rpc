@@ -45,17 +45,17 @@ var maxScanLedgers = uint32(10_000)
 type ScanStatus int
 
 const (
-	// ScanHasMore: more range remains. The page filled, the page's
-	// scan window ended with scope beyond it, or the walk is waiting:
-	// a descending resume point is above this view's latest ledger, so
-	// the page is empty and the cursor unchanged.
+	// ScanHasMore: more range remains. The page filled, or the page's
+	// scan window ended with scope beyond it.
 	ScanHasMore ScanStatus = iota
 	// ScanComplete: the walk finished the cursor's bounds within
 	// served history.
 	ScanComplete
-	// ScanWaitingForLedgers: the scope extends past the view's last
-	// committed ledger. Either an ascending walk reached it, or the
-	// whole scope is still above it.
+	// ScanWaitingForLedgers: the scope needs ledgers past the view's
+	// last committed one. An ascending walk reached it, the whole
+	// scope is still above it, or a descending scope's top edge is
+	// above it: descending never revisits a ledger, so the page waits
+	// (empty, cursor unchanged) rather than clamp the top away.
 	ScanWaitingForLedgers
 	// ScanOldestReached: a descending walk reached the oldest served
 	// ledger, and the scope extends below it.
@@ -89,13 +89,12 @@ func (a *ReadView) QueryEvents(ctx context.Context, cursor EventCursor, limit in
 		// Resume moved past the scope's far bound: nothing is left to serve.
 		return &EventPage{Next: cursor, Status: ScanComplete}, nil
 	}
-	if desc && hi > a.LatestLedger() &&
-		(cursor.Position != nil || cursor.ScannedLedger > 0) {
-		// A bookmark above this view's latest ledger proves more
-		// ledgers exist; another node already served them. A descending
-		// walk never goes back up, so serving now would skip those
-		// ledgers forever. Wait until this view has them.
-		return &EventPage{Next: cursor, Status: ScanHasMore}, nil
+	if desc && hi > a.LatestLedger() {
+		// The scope's top edge is above this view's latest ledger. A
+		// descending walk never goes back up, so clamping would skip
+		// [latest+1, hi] forever. Wait until this view has those
+		// ledgers; fresh and resumed scopes follow the same rule.
+		return &EventPage{Next: cursor, Status: ScanWaitingForLedgers}, nil
 	}
 	lo, hi, err := a.ClampRange(cursor.Scope.Dir, lo, hi)
 	if err != nil {
@@ -209,9 +208,9 @@ func validateBookmarkPair(cursor *EventCursor) error {
 		return nil
 	}
 	if cursor.Scope.Dir == Descending {
-		// A zero watermark is unchecked: it pairs with a position in
-		// the first ledger the walk served, and descending that is the
-		// clamped top, which the cursor does not record.
+		// A zero watermark pairs with a position in the first ledger
+		// the walk served: the scope's own MaxLedger, since a
+		// descending walk waits for its top instead of clamping it.
 		if mark != 0 && pos.Ledger < mark-1 {
 			return fmt.Errorf("%w: position ledger %d behind scanned ledger %d",
 				ErrCursorMalformed, pos.Ledger, mark)

@@ -478,8 +478,8 @@ func TestQueryEvents_EndStabilityAcrossIngest(t *testing.T) {
 // above this view's latest. A descending walk never revisits a
 // ledger, so clamping and serving would skip the resume ledger's
 // remainder and every ledger in between forever. The page waits
-// instead: empty, cursor unchanged, ScanHasMore. Once the view
-// catches up, the walk continues with no gap and no duplicates.
+// instead: empty, cursor unchanged, ScanWaitingForLedgers. Once the
+// view catches up, the walk continues with no gap and no duplicates.
 func TestQueryEvents_DescendingResumeAboveLatestWaits(t *testing.T) {
 	r, db, f := singleChunkFixture(t) // latest = f+3
 	ingestEvents(t, db, f+4, []xdr.ContractEvent{symEvent(cidC, "c0")})
@@ -501,7 +501,7 @@ func TestQueryEvents_DescendingResumeAboveLatestWaits(t *testing.T) {
 	before := d.cursor
 	page = d.next()
 	assert.Empty(t, page.Events)
-	assert.Equal(t, ScanHasMore, page.Status)
+	assert.Equal(t, ScanWaitingForLedgers, page.Status)
 	assert.Equal(t, before, d.cursor, "waiting must not move the bookmarks")
 
 	// Caught up: the walk continues at b2 with no gap and no duplicates.
@@ -621,8 +621,33 @@ func TestQueryEvents_DescendingWatermarkAboveLatestWaits(t *testing.T) {
 	}, 10)
 	require.NoError(t, err)
 	assert.Empty(t, page.Events)
-	assert.Equal(t, ScanHasMore, page.Status)
+	assert.Equal(t, ScanWaitingForLedgers, page.Status)
 	assert.Equal(t, f+6, page.Next.ScannedLedger)
+}
+
+// TestQueryEvents_DescendingFreshScopeAboveLatestWaits: a fresh
+// descending scope whose MaxLedger is above this view's latest waits
+// the same way. Clamping the top on page 1 would leave
+// [latest+1, MaxLedger] unreachable on this cursor forever, with
+// ScanComplete claiming otherwise; fresh and resumed scopes follow
+// one rule, the one the proposal's Bounds section names.
+func TestQueryEvents_DescendingFreshScopeAboveLatestWaits(t *testing.T) {
+	r, db, f := singleChunkFixture(t) // latest = f+3
+	maxL := f + 5
+	d := &pageDriver{t: t, r: r, limit: 10, cursor: EventCursor{
+		Scope: EventCursorQuery{MinLedger: f, MaxLedger: &maxL, Dir: Descending},
+	}}
+	page := d.next()
+	assert.Empty(t, page.Events)
+	assert.Equal(t, ScanWaitingForLedgers, page.Status)
+
+	// The chain reaches MaxLedger: the whole scope serves, top first.
+	ingestEvents(t, db, f+4, nil)
+	ingestEvents(t, db, f+5, []xdr.ContractEvent{symEvent(cidA, "a4")})
+	r.SetLatestLedger(f + 5)
+	all, status := d.drain()
+	assert.Equal(t, []string{"a4", "a3", "b1", "a2", "b0", "a1", "a0"}, all)
+	assert.Equal(t, ScanComplete, status)
 }
 
 // TestQueryEvents_WatermarkStaysInsideWindow pins the watermark
