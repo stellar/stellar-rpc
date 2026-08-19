@@ -201,6 +201,27 @@ func TestMapAdapterErrors_StoreClosedIsRetryableAndCounted(t *testing.T) {
 	assert.Equal(t, int32(1), metrics.served.Load())
 }
 
+func TestMapAdapterErrors_StoreClosedWithDeadContextIsNotCounted(t *testing.T) {
+	r, db := servingRegistry(t)
+	require.NoError(t, db.Close())
+	reader := adapters.NewLedgerReader(r)
+	metrics := &storeClosedCounter{}
+
+	// The context dies AFTER the store read fails but before the wrapper
+	// classifies — the teardown/duration-limiter straggler sequence. Canceling
+	// up front would never reach the store: the adapter returns ctx.Err() first.
+	ctx, cancel := context.WithCancel(context.Background())
+	wrapped := wrapAdapterRequest(flatteningHandler(t, func(ctx context.Context) error {
+		_, _, err := reader.GetLedger(ctx, chunk.FirstLedgerSeq)
+		cancel()
+		return err
+	}), metrics)
+
+	_, err := wrapped(ctx, nil)
+	assert.Equal(t, error(network.ErrTemporarilyUnavailable), err)
+	assert.Equal(t, int32(0), metrics.served.Load())
+}
+
 func TestWrapAdapterRequest_PanicReleasesSharedView(t *testing.T) {
 	logger, buf := capturingLogger()
 	cat, _ := rpcv2test.OpenTestCatalogWith(t, testCPI, logger)

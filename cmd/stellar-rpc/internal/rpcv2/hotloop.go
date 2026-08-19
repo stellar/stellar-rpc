@@ -156,10 +156,12 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 	// write target, reassigned at each boundary; on a normal exit that is the live
 	// chunk, and completed chunks are the sink's to close. The exception is a boundary whose
 	// openHotDBForChunk fails: hotDB still points at the just-completed, registry-
-	// published chunk, so the defer closes a handle the registry also holds — harmless,
-	// since Close is blocking (drains any in-flight freeze read) and idempotent, and
-	// the ensuing restart rebuilds the registry. No writer races the close — the loop
-	// has stopped on every exit path.
+	// published chunk, so the defer closes a handle the registry also holds while
+	// reads are still live — until the restart's stopReads runs moments later, reads
+	// hitting that chunk answer the retryable -32002. Safe (Close is blocking,
+	// draining any in-flight freeze read, and idempotent; the ensuing restart
+	// rebuilds the registry) but briefly visible, not a no-op. No writer races the
+	// close — the loop has stopped on every exit path.
 	hotDB := cfg.HotDB
 	defer func() {
 		if hotDB != nil {

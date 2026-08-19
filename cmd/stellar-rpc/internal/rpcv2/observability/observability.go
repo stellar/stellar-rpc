@@ -52,6 +52,9 @@ type Metrics interface {
 	// StoreClosedServed counts one request that failed because a store was
 	// closed underneath it. Reaching a client at all means the request outlived
 	// the deletion grace period, so a non-flat rate says the grace is mis-sized.
+	// Stragglers whose context is already dead are excluded — teardown or the
+	// duration limiter has cut them off from the client, so they reach no one
+	// and say nothing about the grace.
 	StoreClosedServed()
 }
 

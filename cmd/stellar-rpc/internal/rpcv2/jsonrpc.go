@@ -151,8 +151,11 @@ func notImplemented(message string) jrpc2.Handler {
 //   - everything else passes through untouched.
 //
 // A store closed under an in-flight request also counts on the
-// StoreClosedServed metric: reaching a client at all means the request
-// outlived the deletion grace period, which operators must see.
+// StoreClosedServed metric, but only while the request's context is still
+// live: reaching a client means the request outlived the deletion grace
+// period, which operators must see, whereas a straggler whose context is
+// already dead (teardown, or the duration limiter answered at the deadline)
+// reaches no one and says nothing about the grace.
 func wrapAdapterRequest(h jrpc2.Handler, metrics observability.Metrics) jrpc2.Handler {
 	return func(ctx context.Context, req *jrpc2.Request) (any, error) {
 		ctx, mark := adapters.WithErrorMark(ctx)
@@ -171,7 +174,13 @@ func wrapAdapterRequest(h jrpc2.Handler, metrics observability.Metrics) jrpc2.Ha
 		case errors.As(marked, &rangeErr):
 			return nil, &jrpc2.Error{Code: jrpc2.InvalidRequest, Message: rangeErr.Error()}
 		case errors.Is(marked, stores.ErrStoreClosed):
-			metrics.StoreClosedServed()
+			// Count only while the context is live: a dead context means no
+			// client can receive this response — teardown closed the
+			// connection, or the duration limiter already answered at the
+			// deadline — so the grace period is not implicated.
+			if ctx.Err() == nil {
+				metrics.StoreClosedServed()
+			}
 			fallthrough
 		case errors.Is(marked, query.ErrUnavailable):
 			return nil, network.ErrTemporarilyUnavailable
