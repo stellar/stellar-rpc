@@ -141,7 +141,7 @@ func newQueryFixture(t *testing.T) *queryFixture {
 
 	first := chunkID.FirstLedger()
 	require.NoError(t, ingestLedgerEvents(fx.store, first, []events.Payload{
-		payloadFor(t, fx.contractA, "evt-a-ab", fx.t0a, fx.t0b),
+		payloadFor(t, fx.contractA, evtAAB, fx.t0a, fx.t0b),
 		payloadFor(t, fx.contractA, "evt-a-ac", fx.t0a, fx.t0c),
 		payloadFor(t, fx.contractB, "evt-b-ab", fx.t0a, fx.t0b),
 		payloadFor(t, fx.contractB, "evt-b-a", fx.t0a),
@@ -194,7 +194,7 @@ func TestQuery_MatchAllOnEmptyFiltersSlice(t *testing.T) {
 		QueryOptions{Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	assert.Equal(t,
-		[]string{"evt-a-ab", "evt-a-ac", "evt-b-ab", "evt-b-a", "evt-a-b"},
+		[]string{evtAAB, "evt-a-ac", "evt-b-ab", "evt-b-a", "evt-a-b"},
 		dataSyms(t, got))
 }
 
@@ -212,7 +212,7 @@ func TestQuery_ContractIDOnly(t *testing.T) {
 		{ContractID: fx.contractA[:]},
 	}, QueryOptions{Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"evt-a-ab", "evt-a-ac", "evt-a-b"}, dataSyms(t, got))
+	assert.Equal(t, []string{evtAAB, "evt-a-ac", "evt-a-b"}, dataSyms(t, got))
 }
 
 func TestQuery_SingleTopic(t *testing.T) {
@@ -222,7 +222,7 @@ func TestQuery_SingleTopic(t *testing.T) {
 	}, QueryOptions{Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	// topic1 == beta: id 0 (a,ab) and id 2 (b,ab).
-	assert.Equal(t, []string{"evt-a-ab", "evt-b-ab"}, dataSyms(t, got))
+	assert.Equal(t, []string{evtAAB, "evt-b-ab"}, dataSyms(t, got))
 }
 
 func TestQuery_ContractIDAndTopicIntersection(t *testing.T) {
@@ -232,7 +232,7 @@ func TestQuery_ContractIDAndTopicIntersection(t *testing.T) {
 	}, QueryOptions{Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	// contract A AND topic0 == alpha: id 0 and id 1.
-	assert.Equal(t, []string{"evt-a-ab", "evt-a-ac"}, dataSyms(t, got))
+	assert.Equal(t, []string{evtAAB, "evt-a-ac"}, dataSyms(t, got))
 }
 
 func TestQuery_UnionOfTwoFilters(t *testing.T) {
@@ -285,7 +285,7 @@ func TestQuery_DuplicateTermsAcrossFiltersDedupedInLookup(t *testing.T) {
 	}, QueryOptions{Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	// A∩topic0=alpha → ids 0,1; B∩topic0=alpha → ids 2,3. Union → all four.
-	assert.Equal(t, []string{"evt-a-ab", "evt-a-ac", "evt-b-ab", "evt-b-a"},
+	assert.Equal(t, []string{evtAAB, "evt-a-ac", "evt-b-ab", "evt-b-a"},
 		dataSyms(t, got))
 	assert.Equal(t, 1, cr.lookupKeysCalls, "Query must batch all terms into one LookupKeys call")
 	assert.Equal(t, 3, cr.totalKeys, "Query must dedupe the shared topic0=alpha term")
@@ -410,7 +410,7 @@ func newMultiLedgerQueryFixture(t *testing.T) *queryFixture {
 	fx := newQueryFixture(t)
 	first := chunk.ID(0).FirstLedger()
 	require.NoError(t, ingestLedgerEvents(fx.store, first+1, []events.Payload{
-		payloadFor(t, fx.contractA, "evt-extra-0", fx.t0a),
+		payloadFor(t, fx.contractA, evtExtra0, fx.t0a),
 		payloadFor(t, fx.contractA, "evt-extra-1", fx.t0a),
 	}))
 	return fx
@@ -449,7 +449,7 @@ func TestQuery_RangeIntersectsWithFilter(t *testing.T) {
 		[]Filter{{ContractID: fx.contractA[:]}},
 		QueryOptions{Range: eventIDRangeFor(t, fx, first+1, first+1)})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"evt-extra-0", "evt-extra-1"}, dataSyms(t, got))
+	assert.Equal(t, []string{evtExtra0, "evt-extra-1"}, dataSyms(t, got))
 }
 
 func TestQuery_MaxEventsTruncates(t *testing.T) {
@@ -459,7 +459,7 @@ func TestQuery_MaxEventsTruncates(t *testing.T) {
 		QueryOptions{MaxEvents: 2, Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	require.Len(t, got, 2)
-	assert.Equal(t, []string{"evt-a-ab", "evt-a-ac"}, dataSyms(t, got))
+	assert.Equal(t, []string{evtAAB, "evt-a-ac"}, dataSyms(t, got))
 }
 
 func TestQuery_MaxEventsZeroMeansUnlimited(t *testing.T) {
@@ -491,7 +491,7 @@ func TestQuery_MaxEventsAppliesToFilteredPath(t *testing.T) {
 		QueryOptions{MaxEvents: 2, Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	require.Len(t, got, 2)
-	assert.Equal(t, []string{"evt-a-ab", "evt-a-ac"}, dataSyms(t, got))
+	assert.Equal(t, []string{evtAAB, "evt-a-ac"}, dataSyms(t, got))
 }
 
 // ─── Descending-order coverage (added in this PR; rpc-hack was asc-only) ───
@@ -502,7 +502,7 @@ func TestQuery_DescendingMatchAll(t *testing.T) {
 		QueryOptions{Descending: true, Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	assert.Equal(t,
-		[]string{"evt-a-b", "evt-b-a", "evt-b-ab", "evt-a-ac", "evt-a-ab"},
+		[]string{"evt-a-b", "evt-b-a", "evt-b-ab", "evt-a-ac", evtAAB},
 		dataSyms(t, got))
 }
 
@@ -523,7 +523,7 @@ func TestQuery_DescendingFiltered(t *testing.T) {
 		[]Filter{{ContractID: fx.contractA[:]}},
 		QueryOptions{Descending: true, Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"evt-a-b", "evt-a-ac", "evt-a-ab"}, dataSyms(t, got))
+	assert.Equal(t, []string{"evt-a-b", "evt-a-ac", evtAAB}, dataSyms(t, got))
 }
 
 func TestQuery_DescendingFilteredWithMaxEventsKeepsHighestIDs(t *testing.T) {
@@ -546,7 +546,7 @@ func TestQuery_DescendingWithRange(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t,
-		[]string{"evt-extra-1", "evt-extra-0", "evt-a-b", "evt-b-a", "evt-b-ab", "evt-a-ac", "evt-a-ab"},
+		[]string{"evt-extra-1", evtExtra0, "evt-a-b", "evt-b-a", "evt-b-ab", "evt-a-ac", evtAAB},
 		dataSyms(t, got))
 }
 
@@ -581,7 +581,7 @@ func TestQuery_MixedSuccessFilterList(t *testing.T) {
 		{ContractID: fx.contractB[:], Topics: [protocol.MaxTopicCount][]byte{missingRaw}},
 	}, QueryOptions{Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"evt-a-ab", "evt-a-ac", "evt-a-b"}, dataSyms(t, got),
+	assert.Equal(t, []string{evtAAB, "evt-a-ac", "evt-a-b"}, dataSyms(t, got),
 		"missing-term filter must be skipped, but the succeeding filter's events must still surface")
 }
 
@@ -639,7 +639,7 @@ func TestQuery_DescendingWithRangeAndMaxEvents(t *testing.T) {
 			Range:      eventIDRangeFor(t, fx, first, first+1),
 		})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"evt-extra-1", "evt-extra-0"}, dataSyms(t, got))
+	assert.Equal(t, []string{"evt-extra-1", evtExtra0}, dataSyms(t, got))
 
 	// Narrow further: restrict to the second ledger only. contractA has
 	// 2 events there. Cap to 1 descending: highest = id 6 = "evt-extra-1".
@@ -798,9 +798,9 @@ func newTypeArityFixture(t *testing.T) *typeArityFixture {
 
 	require.NoError(t, ingestLedgerEvents(fx.store, chunkID.FirstLedger(), []events.Payload{
 		payloadFor(t, fx.contract, "c-1", alpha),
-		typedPayloadFor(t, fx.contract, xdr.ContractEventTypeSystem, "s-1", alpha),
+		typedPayloadFor(t, fx.contract, xdr.ContractEventTypeSystem, labelS1, alpha),
 		payloadFor(t, fx.contract, "c-2", alpha, beta),
-		payloadFor(t, fx.contract, "c-0"),
+		payloadFor(t, fx.contract, labelC0),
 		payloadFor(t, fx.contract, "c-5", alpha, beta, gamma, delta, epsilon),
 		payloadFor(t, fx.contract, "c-4", alpha, beta, gamma, delta),
 		payloadFor(t, fx.contract, "c-6", alpha, beta, gamma, delta, epsilon, zeta),
@@ -829,15 +829,15 @@ func TestQuery_EventTypeFilter(t *testing.T) {
 	}{
 		"system": {
 			Filter{EventType: &system},
-			[]string{"s-1"},
+			[]string{labelS1},
 		},
 		"contract": {
 			Filter{EventType: &contract},
-			[]string{"c-1", "c-2", "c-0", "c-5", "c-4", "c-6"},
+			[]string{"c-1", "c-2", labelC0, "c-5", "c-4", "c-6"},
 		},
 		"type and topic value": {
 			Filter{EventType: &system, Topics: [protocol.MaxTopicCount][]byte{fx.alphaRaw}},
-			[]string{"s-1"},
+			[]string{labelS1},
 		},
 		// A type nobody emitted is missing from the index, which empties
 		// the filter rather than widening it.
@@ -865,15 +865,15 @@ func TestQuery_TopicCountFilter(t *testing.T) {
 		filter Filter
 		want   []string
 	}{
-		"exactly 0":             {Filter{TopicCount: TopicCountFilter{Count: 0, Exact: true}}, []string{"c-0"}},
-		"exactly 1":             {Filter{TopicCount: TopicCountFilter{Count: 1, Exact: true}}, []string{"c-1", "s-1"}},
+		"exactly 0":             {Filter{TopicCount: TopicCountFilter{Count: 0, Exact: true}}, []string{labelC0}},
+		"exactly 1":             {Filter{TopicCount: TopicCountFilter{Count: 1, Exact: true}}, []string{"c-1", labelS1}},
 		"exactly 2":             {Filter{TopicCount: TopicCountFilter{Count: 2, Exact: true}}, []string{"c-2"}},
 		"exactly 3":             {Filter{TopicCount: TopicCountFilter{Count: 3, Exact: true}}, []string{}},
 		"exactly the top count": {Filter{TopicCount: TopicCountFilter{Count: top, Exact: true}}, []string{"c-4"}},
 
 		"at least 1": {
 			Filter{TopicCount: TopicCountFilter{Count: 1}},
-			[]string{"c-1", "s-1", "c-2", "c-5", "c-4", "c-6"},
+			[]string{"c-1", labelS1, "c-2", "c-5", "c-4", "c-6"},
 		},
 		"at least 2": {
 			Filter{TopicCount: TopicCountFilter{Count: 2}},
@@ -968,7 +968,7 @@ func TestQuery_TopicCountImpliedByTopicChangesNothing(t *testing.T) {
 
 	withCount := fx.query(t, Filter{Topics: topics, TopicCount: TopicCountFilter{Count: 1}})
 	assert.Equal(t, fx.query(t, Filter{Topics: topics}), withCount)
-	assert.Equal(t, []string{"c-1", "s-1", "c-2", "c-5", "c-4", "c-6"}, withCount)
+	assert.Equal(t, []string{"c-1", labelS1, "c-2", "c-5", "c-4", "c-6"}, withCount)
 }
 
 // TestQuery_TopicCountWithRangeAndOrder puts the bucket union and the elided
@@ -1032,7 +1032,7 @@ func TestQuery_UnionOfTypeAndCountFilters(t *testing.T) {
 	fx := newTypeArityFixture(t)
 	system := xdr.ContractEventTypeSystem
 
-	assert.Equal(t, []string{"s-1", "c-0"}, fx.query(t,
+	assert.Equal(t, []string{labelS1, labelC0}, fx.query(t,
 		Filter{EventType: &system},
 		Filter{TopicCount: TopicCountFilter{Count: 0, Exact: true}}))
 }
@@ -1042,6 +1042,14 @@ func TestQuery_UnionOfTypeAndCountFilters(t *testing.T) {
 // never reaches them with a mismatch: they fire only when a union clause falls
 // through to the next one, or when a term hash collides. Nothing else in the
 // package covers them, and every other test passes with either check disabled.
+// Labels the tests repeat enough for goconst to insist on names.
+const (
+	evtAAB    = "evt-a-ab"
+	evtExtra0 = "evt-extra-0"
+	labelS1   = "s-1"
+	labelC0   = "c-0"
+)
+
 func TestMatchesAnyFilterView_TypeAndCount(t *testing.T) {
 	// Only arity matters here, so both events carry the same topic value.
 	var cid xdr.ContractId
@@ -1245,7 +1253,7 @@ func TestQuery_ColdReaderParity_MatchAllAscending(t *testing.T) {
 		QueryOptions{Range: wholeChunk(t, cr)})
 	require.NoError(t, err)
 	assert.Equal(t,
-		[]string{"evt-a-ab", "evt-a-ac", "evt-b-ab", "evt-b-a", "evt-a-b"},
+		[]string{evtAAB, "evt-a-ac", "evt-b-ab", "evt-b-a", "evt-a-b"},
 		dataSyms(t, got))
 }
 
@@ -1267,7 +1275,7 @@ func TestQuery_ColdReaderParity_ContractIDOnly(t *testing.T) {
 		[]Filter{{ContractID: hotFx.contractA[:]}},
 		QueryOptions{Range: wholeChunk(t, cr)})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"evt-a-ab", "evt-a-ac", "evt-a-b"}, dataSyms(t, got))
+	assert.Equal(t, []string{evtAAB, "evt-a-ac", "evt-a-b"}, dataSyms(t, got))
 }
 
 func TestQuery_ColdReaderParity_ContractAndTopicAnd(t *testing.T) {
@@ -1280,7 +1288,7 @@ func TestQuery_ColdReaderParity_ContractAndTopicAnd(t *testing.T) {
 		{ContractID: hotFx.contractA[:], Topics: [protocol.MaxTopicCount][]byte{hotFx.t0aRaw}},
 	}, QueryOptions{Range: wholeChunk(t, cr)})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"evt-a-ab", "evt-a-ac"}, dataSyms(t, got))
+	assert.Equal(t, []string{evtAAB, "evt-a-ac"}, dataSyms(t, got))
 }
 
 func TestQuery_ColdReaderParity_UnionOfTwoFilters(t *testing.T) {
@@ -1306,7 +1314,7 @@ func TestQuery_ColdReaderParity_RangeAndFilter(t *testing.T) {
 		[]Filter{{ContractID: hotFx.contractA[:]}},
 		QueryOptions{Range: eventIDRangeFor(t, hotFx, first+1, first+1)})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"evt-extra-0", "evt-extra-1"}, dataSyms(t, got))
+	assert.Equal(t, []string{evtExtra0, "evt-extra-1"}, dataSyms(t, got))
 }
 
 func TestQuery_ColdReaderParity_DescendingRangeWithCap(t *testing.T) {
@@ -1323,7 +1331,7 @@ func TestQuery_ColdReaderParity_DescendingRangeWithCap(t *testing.T) {
 			Range:      eventIDRangeFor(t, hotFx, first, first+1),
 		})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"evt-extra-1", "evt-extra-0"}, dataSyms(t, got))
+	assert.Equal(t, []string{"evt-extra-1", evtExtra0}, dataSyms(t, got))
 }
 
 // ─── IDRangeForLedgers helper coverage ──────────────────────────────
@@ -1393,7 +1401,7 @@ func TestQuery_ColdReaderParity_EventType(t *testing.T) {
 	got, err := Query(context.Background(), cr, []Filter{{EventType: &system}},
 		QueryOptions{Range: wholeChunk(t, cr)})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"s-1"}, dataSyms(t, got))
+	assert.Equal(t, []string{labelS1}, dataSyms(t, got))
 
 	got, err = Query(context.Background(), cr, []Filter{{EventType: &diagnostic}},
 		QueryOptions{Range: wholeChunk(t, cr)})
