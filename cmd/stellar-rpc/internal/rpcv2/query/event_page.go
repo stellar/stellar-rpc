@@ -182,6 +182,40 @@ func validateBookmarks(cursor *EventCursor) error {
 		return fmt.Errorf("%w: scanned ledger %d outside scope bounds",
 			ErrCursorMalformed, mark)
 	}
+	return validateBookmarkPair(cursor)
+}
+
+// validateBookmarkPair rejects Position and ScannedLedger combinations
+// no walk mints together. A walk that delivered into a ledger has
+// covered everything before it in walk order, so the watermark trails
+// the position by at most one ledger. A pair further apart leaves the
+// ledgers between the two bookmarks unaccounted, and resuming from it
+// would silently skip them.
+func validateBookmarkPair(cursor *EventCursor) error {
+	pos, mark := cursor.Position, cursor.ScannedLedger
+	if pos == nil {
+		return nil
+	}
+	if cursor.Scope.Dir == Descending {
+		// A zero watermark is unchecked: it pairs with a position in
+		// the first ledger the walk served, and descending that is the
+		// clamped top, which the cursor does not record.
+		if mark != 0 && pos.Ledger < mark-1 {
+			return fmt.Errorf("%w: position ledger %d behind scanned ledger %d",
+				ErrCursorMalformed, pos.Ledger, mark)
+		}
+		return nil
+	}
+	switch {
+	case mark != 0 && pos.Ledger > mark+1:
+		return fmt.Errorf("%w: position ledger %d ahead of scanned ledger %d",
+			ErrCursorMalformed, pos.Ledger, mark)
+	case mark == 0 && pos.Ledger != cursor.Scope.MinLedger:
+		// Ascending, a zero watermark only pairs with a position in
+		// the scope's first ledger.
+		return fmt.Errorf("%w: position ledger %d with no scanned ledger",
+			ErrCursorMalformed, pos.Ledger)
+	}
 	return nil
 }
 

@@ -710,6 +710,7 @@ func TestQueryEvents_CursorValidation(t *testing.T) {
 	require.NoError(t, err)
 	defer a.Release()
 	maxL := f
+	maxHigh := f + 3
 	minAboveMax := f + 5
 	for name, tc := range map[string]struct {
 		cursor  EventCursor
@@ -744,6 +745,24 @@ func TestQueryEvents_CursorValidation(t *testing.T) {
 		"watermark below min": {EventCursor{
 			Scope:         EventCursorQuery{MinLedger: f},
 			ScannedLedger: f - 1,
+		}, 1, ErrCursorMalformed},
+		// The pair must also be mintable together: a walk that
+		// delivered into a ledger covered everything before it, so the
+		// watermark trails the position by at most one ledger. Wider
+		// pairs would resume past unaccounted ledgers.
+		"position ahead of watermark": {EventCursor{
+			Scope:         EventCursorQuery{MinLedger: f},
+			Position:      &EventPosition{Ledger: f + 2},
+			ScannedLedger: f,
+		}, 1, ErrCursorMalformed},
+		"position with zero watermark off the scope start": {EventCursor{
+			Scope:    EventCursorQuery{MinLedger: f},
+			Position: &EventPosition{Ledger: f + 1},
+		}, 1, ErrCursorMalformed},
+		"position behind watermark descending": {EventCursor{
+			Scope:         EventCursorQuery{MinLedger: f, MaxLedger: &maxHigh, Dir: Descending},
+			Position:      &EventPosition{Ledger: f},
+			ScannedLedger: f + 2,
 		}, 1, ErrCursorMalformed},
 		// Malformed filters fail up front, even on a range this view
 		// would not scan (beyond latest).
