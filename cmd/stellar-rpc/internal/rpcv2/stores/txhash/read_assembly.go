@@ -29,12 +29,19 @@ type LedgerSource interface {
 
 type TxReader struct {
 	hot        []HashIndex
-	cold       []HashIndex
+	cold       func() ([]HashIndex, error)
 	ledgers    LedgerSource
 	passphrase string
 }
 
-func NewTxReader(hot, cold []HashIndex, ledgers LedgerSource, passphrase string) (*TxReader, error) {
+// NewTxReader builds the two-tier probe. cold supplies the fingerprinted cold
+// indexes on demand rather than as a ready slice: enumerating the cold tier
+// costs a store scan, and the common case — a recent transaction resolved by
+// the hot tier — must not pay it, so the probe calls cold() only after every
+// hot index missed. A nil cold means there is no cold tier.
+func NewTxReader(
+	hot []HashIndex, cold func() ([]HashIndex, error), ledgers LedgerSource, passphrase string,
+) (*TxReader, error) {
 	if ledgers == nil {
 		return nil, fmt.Errorf("txhash: nil ledger source: %w", stores.ErrInvalidConfig)
 	}
@@ -44,15 +51,19 @@ func NewTxReader(hot, cold []HashIndex, ledgers LedgerSource, passphrase string)
 	return &TxReader{hot: hot, cold: cold, ledgers: ledgers, passphrase: passphrase}, nil
 }
 
-// GetTransaction resolves hash, scanning the exact hot tier before the cold
-// tier. found is false on a miss; an exact index naming a ledger without the tx
-// yields ErrInconsistent.
+// GetTransaction resolves hash, scanning the exact hot tier first and touching
+// the cold tier only on a hot miss. found is false on a miss; an exact index
+// naming a ledger without the tx yields ErrInconsistent.
 func (r *TxReader) GetTransaction(hash [32]byte) (ingest.LedgerTransactionView, bool, error) {
 	var softErr error
 	if txv, found, err := r.scan(hash, r.hot, true, &softErr); found || err != nil {
 		return txv, found, err
 	}
-	if txv, found, err := r.scan(hash, r.cold, false, &softErr); found || err != nil {
+	cold, err := r.coldIndexes()
+	if err != nil {
+		return ingest.LedgerTransactionView{}, false, err
+	}
+	if txv, found, err := r.scan(hash, cold, false, &softErr); found || err != nil {
 		return txv, found, err
 	}
 	if softErr != nil {
@@ -66,6 +77,13 @@ func (r *TxReader) GetTransaction(hash [32]byte) (ingest.LedgerTransactionView, 
 		return ingest.LedgerTransactionView{}, false, fmt.Errorf("txhash: lookup incomplete: %w", softErr)
 	}
 	return ingest.LedgerTransactionView{}, false, nil
+}
+
+func (r *TxReader) coldIndexes() ([]HashIndex, error) {
+	if r.cold == nil {
+		return nil, nil
+	}
+	return r.cold()
 }
 
 func (r *TxReader) scan(

@@ -92,6 +92,27 @@ func TestGetTransaction_BelowFloorIsGated(t *testing.T) {
 	assert.Equal(t, (testChunk + 1).FirstLedger(), got.Ledger.Sequence)
 }
 
+func TestGetTransaction_PrunedDuringAcquisitionIsCleanMiss(t *testing.T) {
+	cat := openTestCatalog(t)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk+1))
+	lcm5, txs5 := lcmWithTxs(t, testChunk.FirstLedger(), txSpec{})
+	lcm6, _ := lcmWithTxs(t, (testChunk + 1).FirstLedger(), txSpec{})
+	seedHotChunkLCMs(t, cat, r, testChunk, lcm5)
+	seedHotChunkLCMs(t, cat, r, testChunk+1, lcm6)
+	r.SetLatestLedger((testChunk + 1).FirstLedger(), closeTimeFor((testChunk + 1).FirstLedger()))
+
+	// The mid-prune race a view can observe: testChunk's handle is still
+	// published (loaded before the prune) while the catalog snapshot already
+	// says the chunk serves nothing. The hot index hit must gate to a clean
+	// miss, never reach the unresolvable ledger read.
+	require.NoError(t, cat.PutHotTransient(testChunk))
+
+	reader := NewTransactionReader(r, network.PublicNetworkPassphrase)
+	_, err := reader.GetTransaction(context.Background(), txs5[0].hash)
+	assert.ErrorIs(t, err, store.ErrNoTransaction,
+		"a just-pruned transaction is a clean miss, not a retryable failure")
+}
+
 // coldFixture serves testChunk's ledgers from a frozen pack (no hot handle, so
 // the hot indexes are empty) and probes through a frozen window index covering
 // chunks [testChunk, testChunk+2]. The index also maps orphanHash to a ledger

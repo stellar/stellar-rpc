@@ -164,9 +164,13 @@ func buildColdReader(t *testing.T, baseChunk chunk.ID, entries []fixtureEntry) *
 	return rd
 }
 
-func coldTier(t *testing.T, fl fixtureLedgers) []HashIndex {
+func coldTier(t *testing.T, fl fixtureLedgers) func() ([]HashIndex, error) {
 	t.Helper()
-	return []HashIndex{buildColdReader(t, chunk.ID(5), fl.entries)}
+	return fixedCold([]HashIndex{buildColdReader(t, chunk.ID(5), fl.entries)})
+}
+
+func fixedCold(idxs []HashIndex) func() ([]HashIndex, error) {
+	return func() ([]HashIndex, error) { return idxs, nil }
 }
 
 func TestNewTxReader_ValidatesInputs(t *testing.T) {
@@ -224,7 +228,7 @@ func TestTxReader_RejectsCandidateNotInLedger(t *testing.T) {
 
 	var queried [32]byte // not among the ledger's transactions
 	queried[0] = 0x01
-	cold := []HashIndex{fakeIndex{out: map[[32]byte]uint32{queried: base}}}
+	cold := fixedCold([]HashIndex{fakeIndex{out: map[[32]byte]uint32{queried: base}}})
 	reader, err := NewTxReader(nil, cold, fl.src, network.TestNetworkPassphrase)
 	require.NoError(t, err)
 
@@ -243,10 +247,10 @@ func TestTxReader_SkipsUnservableCandidateThenResolves(t *testing.T) {
 	}
 
 	// First index points at an unservable ledger (skipped); the second has the real seq.
-	cold := []HashIndex{
+	cold := fixedCold([]HashIndex{
 		fakeIndex{out: map[[32]byte]uint32{h: 999_999}},
 		fakeIndex{out: map[[32]byte]uint32{h: realSeq}},
-	}
+	})
 	reader, err := NewTxReader(nil, cold, fl.src, network.TestNetworkPassphrase)
 	require.NoError(t, err)
 
@@ -261,7 +265,7 @@ func TestTxReader_UnavailableColdCandidateIsIncomplete(t *testing.T) {
 	// A cold candidate whose ledger can't be served isn't a provable miss, so a
 	// lookup that resolves nowhere surfaces as incomplete, not not-found.
 	h := [32]byte{0x07}
-	cold := []HashIndex{fakeIndex{out: map[[32]byte]uint32{h: 555}}}
+	cold := fixedCold([]HashIndex{fakeIndex{out: map[[32]byte]uint32{h: 555}}})
 	reader, err := NewTxReader(nil, cold, mapLedgerSource{}, network.TestNetworkPassphrase)
 	require.NoError(t, err)
 
@@ -273,7 +277,7 @@ func TestTxReader_UnavailableColdCandidateIsIncomplete(t *testing.T) {
 func TestTxReader_ColdCandidateReadErrorIsIncomplete(t *testing.T) {
 	// A corrupt/transient ledger error on a cold candidate is soft, not fatal.
 	h := [32]byte{0x09}
-	cold := []HashIndex{fakeIndex{out: map[[32]byte]uint32{h: 7}}}
+	cold := fixedCold([]HashIndex{fakeIndex{out: map[[32]byte]uint32{h: 7}}})
 	reader, err := NewTxReader(nil, cold, errLedgerSource{err: stores.ErrCorrupt}, network.TestNetworkPassphrase)
 	require.NoError(t, err)
 
@@ -285,7 +289,7 @@ func TestTxReader_ColdCandidateReadErrorIsIncomplete(t *testing.T) {
 func TestTxReader_SurfacesSourceErrorOnMiss(t *testing.T) {
 	// A transient index error with nothing else to resolve surfaces as an error, not a false miss.
 	sentinel := errors.New("index down")
-	cold := []HashIndex{fakeIndex{err: sentinel}}
+	cold := fixedCold([]HashIndex{fakeIndex{err: sentinel}})
 	reader, err := NewTxReader(nil, cold, mapLedgerSource{}, network.TestNetworkPassphrase)
 	require.NoError(t, err)
 
@@ -311,6 +315,38 @@ func TestTxReader_SourceErrorFallsThroughToCold(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	assert.Equal(t, coldSeq, txv.LedgerSequence)
+}
+
+func TestTxReader_HotHitSkipsColdEnumeration(t *testing.T) {
+	hotSeq := chunk.ID(10).FirstLedger()
+	fl := buildLedgers(t, []uint32{hotSeq}, 1)
+	var h [32]byte
+	for hh := range fl.byHash {
+		h = hh
+	}
+
+	hot := []HashIndex{fakeIndex{out: map[[32]byte]uint32{h: hotSeq}}}
+	cold := func() ([]HashIndex, error) {
+		return nil, errors.New("cold tier enumerated despite a hot hit")
+	}
+	reader, err := NewTxReader(hot, cold, fl.src, network.TestNetworkPassphrase)
+	require.NoError(t, err)
+
+	txv, found, err := reader.GetTransaction(h)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, hotSeq, txv.LedgerSequence)
+}
+
+func TestTxReader_ColdProviderErrorIsHard(t *testing.T) {
+	sentinel := errors.New("cold enumeration failed")
+	cold := func() ([]HashIndex, error) { return nil, sentinel }
+	reader, err := NewTxReader(nil, cold, mapLedgerSource{}, network.TestNetworkPassphrase)
+	require.NoError(t, err)
+
+	_, found, err := reader.GetTransaction([32]byte{0x01})
+	assert.False(t, found)
+	require.ErrorIs(t, err, sentinel)
 }
 
 func TestTxReader_ExactSourceNotInLedgerErrors(t *testing.T) {
@@ -378,10 +414,10 @@ func TestTxReader_FanOutAcrossColdIndexes(t *testing.T) {
 	flA := buildLedgers(t, []uint32{chunk.ID(5).FirstLedger()}, 1)
 	flB := buildLedgers(t, []uint32{chunk.ID(2000).FirstLedger()}, 1)
 
-	cold := []HashIndex{
+	cold := fixedCold([]HashIndex{
 		buildColdReader(t, chunk.ID(5), flA.entries),
 		buildColdReader(t, chunk.ID(2000), flB.entries),
-	}
+	})
 	src := mapLedgerSource{}
 	maps.Copy(src, flA.src)
 	maps.Copy(src, flB.src)

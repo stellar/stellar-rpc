@@ -25,8 +25,9 @@ import (
 //
 // It is deliberately unfiltered — every published handle, regardless of the
 // view's floor/latest. A match can therefore name a ledger in a chunk below the
-// floor (a handle that predates this view); the lookup's floor/latest gate on
-// the resolved ledger is the only thing that keeps such a match from being served.
+// floor (a handle that predates this view); the caller's window gate, wrapped
+// around every index it hands the probe, is the only thing that keeps such a
+// match from being served.
 func (a *ReadView) HotTxHashIndexes() []txhash.HashIndex {
 	ids := slices.Sorted(maps.Keys(a.handles.byChunk))
 	slices.Reverse(ids) // newest first

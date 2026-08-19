@@ -15,9 +15,10 @@ import (
 )
 
 // TransactionReader satisfies store.TransactionReader over the query router:
-// each GetTransaction probes the hot tx-hash indexes and then the frozen window
-// indexes through one read view, verifies candidates against the full hash, and
-// gates the result to the view's servable window.
+// each GetTransaction probes the hot tx-hash indexes and — only when every hot
+// index misses — the frozen window indexes, through one read view, verifying
+// candidates against the full hash. Every index in both tiers is wrapped in
+// the servable-window gate (see windowGatedIndex).
 type TransactionReader struct {
 	registry   *query.Registry
 	passphrase string
@@ -34,15 +35,16 @@ func (r *TransactionReader) GetTransaction(ctx context.Context, hash xdr.Hash) (
 	}
 	defer release()
 
-	cold, err := view.ColdTxIndexes()
-	if err != nil {
-		return store.Transaction{}, markErr(ctx, err)
+	coldIndexes := func() ([]txhash.HashIndex, error) {
+		cold, err := view.ColdTxIndexes()
+		if err != nil {
+			return nil, err
+		}
+		return gateIndexes(view, cold), nil
 	}
-	gated := make([]txhash.HashIndex, 0, len(cold))
-	for _, idx := range cold {
-		gated = append(gated, &windowGatedIndex{inner: idx, view: view})
-	}
-	probe, err := txhash.NewTxReader(view.HotTxHashIndexes(), gated, &viewLedgerSource{view: view}, r.passphrase)
+	probe, err := txhash.NewTxReader(
+		gateIndexes(view, view.HotTxHashIndexes()), coldIndexes,
+		&viewLedgerSource{view: view}, r.passphrase)
 	if err != nil {
 		return store.Transaction{}, markErr(ctx, err)
 	}
@@ -53,30 +55,44 @@ func (r *TransactionReader) GetTransaction(ctx context.Context, hash xdr.Hash) (
 	if !found {
 		return store.Transaction{}, markErr(ctx, store.ErrNoTransaction)
 	}
-	// HotTxHashIndexes is deliberately unfiltered, so a hot handle predating the
-	// view's floor can resolve a ledger outside the servable window; a not-found
-	// keeps retention observable behavior, not handle lifecycle.
-	if !inWindow(view, txv.LedgerSequence) {
-		return store.Transaction{}, markErr(ctx, store.ErrNoTransaction)
-	}
 	return transactionFromView(txv), nil
 }
 
-// windowGatedIndex wraps a cold tx-hash index so a hit outside the view's
-// servable window [OldestLedger, LatestLedger] reads as a plain miss.
+func gateIndexes(view *query.ReadView, idxs []txhash.HashIndex) []txhash.HashIndex {
+	gated := make([]txhash.HashIndex, 0, len(idxs))
+	for _, idx := range idxs {
+		gated = append(gated, &windowGatedIndex{inner: idx, view: view})
+	}
+	return gated
+}
+
+// windowGatedIndex wraps a tx-hash index — hot or cold — so a hit outside the
+// view's servable window [OldestLedger, LatestLedger] reads as a plain miss.
+// Gating BEFORE the probe fetches the candidate's ledger matters because both
+// tiers can name a ledger whose files are already gone, and an ungated probe
+// turns that failed fetch into an error where the truthful answer is
+// not-found:
 //
-// Why this gate exists: a frozen tx-hash index covers 1000 chunks and is
-// deleted only when its WHOLE window falls below the retention floor, but each
-// chunk's ledger files are deleted as soon as that one chunk falls below the
-// floor. So for most of its life a frozen index names transactions whose
-// ledgers no longer exist. Example: the index covers chunks 0–999 and the
-// floor sits at chunk 500. A client asks for a transaction that lived in
-// chunk 3. The index still answers with chunk 3's ledger, but chunk 3's files
-// are gone — without this gate the probe records "candidate could not be
-// verified" and the client gets an internal error ("lookup incomplete") where
-// v1 answers NOT_FOUND. Skipping the candidate here is safe: even a fully
-// verified below-floor match would be turned into ErrNoTransaction by the
-// window gate in GetTransaction, so not-found is the answer either way.
+//   - Cold: a frozen tx-hash index covers 1000 chunks and is deleted only when
+//     its WHOLE window falls below the retention floor, but each chunk's
+//     ledger files are deleted as soon as that one chunk falls below the
+//     floor. So for most of its life a frozen index names transactions whose
+//     ledgers no longer exist. Example: the index covers chunks 0–999 and the
+//     floor sits at chunk 500; a lookup for a transaction in chunk 3 still
+//     answers with chunk 3's ledger, whose files are gone — ungated, the
+//     client gets an internal error ("lookup incomplete") where v1 answers
+//     NOT_FOUND.
+//   - Hot: the view's handle set loads before its catalog snapshot, so a
+//     request racing a prune can hold the handle of a chunk the snapshot
+//     already retired. The hot index hits, the ledger read fails as
+//     query.ErrUnavailable, and — hot indexes being exact — the probe treats
+//     that as hard: the client is told "retry" (-32002) for a transaction
+//     that is simply pruned. Gated, the below-floor hit is the miss it truly
+//     is, and the next view's coherent state is never even needed.
+//
+// Skipping a candidate here is safe in both tiers: even a fully verified
+// out-of-window match must be answered ErrNoTransaction — retention is the
+// observable behavior, not handle or file lifecycle.
 type windowGatedIndex struct {
 	inner txhash.HashIndex
 	view  *query.ReadView
