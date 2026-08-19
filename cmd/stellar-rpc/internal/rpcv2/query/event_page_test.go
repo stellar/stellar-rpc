@@ -39,7 +39,10 @@ func testContractID(b byte) xdr.ContractId {
 }
 
 // eventChunkSpec seeds one hot chunk: ledgers[i] holds the events of
-// ledger c.FirstLedger()+i (nil = a committed, empty ledger).
+// ledger c.FirstLedger()+i (nil = a committed, empty ledger). Ingest
+// is contiguous from the chunk's first ledger (the store enforces it),
+// and a seeded chunk must cover every ledger a test's walk needs: the
+// pager refuses a window its offsets do not cover.
 type eventChunkSpec struct {
 	c       chunk.ID
 	ledgers [][]xdr.ContractEvent
@@ -107,26 +110,30 @@ func singleChunkFixture(t *testing.T) (*Registry, *hotchunk.DB, uint32) {
 	return r, dbs[c], f
 }
 
-// borderFixtureEvents spans the chunk 5 / chunk 6 seam. Chunk 5 is
-// deliberately short-ingested (the offsets clip covers its tail);
-// latest = chunk 6's second ledger. Match-all order:
-// x0 x1 y0 x2 | x3 y1 x4.
-func borderFixtureEvents(t *testing.T) (*Registry, uint32, uint32) {
+// fullChunkSeamFixture stages the real chunk 5 / chunk 6 seam: chunk 5
+// fully ingested (its last three ledgers hold events, everything
+// before them committed empty), chunk 6 holding two event ledgers,
+// latest = chunk 6's second ledger. The full ingest costs ~42s at
+// ~4.2ms per ledger through the real path, so the seam tests run in
+// one testing.Short()-guarded test, like the e2e lifecycle test.
+// Match-all order: x0 x1 y0 x2 | x3 y1 x4.
+func fullChunkSeamFixture(t *testing.T) (*Registry, uint32, uint32) {
 	t.Helper()
 	const c5, c6 = chunk.ID(5), chunk.ID(6)
-	f5, f6 := c5.FirstLedger(), c6.FirstLedger()
+	f6 := c6.FirstLedger()
+	lo := f6 - 3
+	chunk5 := make([][]xdr.ContractEvent, chunk.LedgersPerChunk)
+	chunk5[chunk.LedgersPerChunk-3] = []xdr.ContractEvent{symEvent(cidA, "x0")}
+	chunk5[chunk.LedgersPerChunk-2] = []xdr.ContractEvent{symEvent(cidA, "x1"), symEvent(cidB, "y0")}
+	chunk5[chunk.LedgersPerChunk-1] = []xdr.ContractEvent{symEvent(cidA, "x2")}
 	r, _ := seedEventChunks(t, c5, f6+1,
-		eventChunkSpec{c: c5, ledgers: [][]xdr.ContractEvent{
-			{symEvent(cidA, "x0")},
-			{symEvent(cidA, "x1"), symEvent(cidB, "y0")},
-			{symEvent(cidA, "x2")},
-		}},
+		eventChunkSpec{c: c5, ledgers: chunk5},
 		eventChunkSpec{c: c6, ledgers: [][]xdr.ContractEvent{
 			{symEvent(cidA, "x3"), symEvent(cidB, "y1")},
 			{symEvent(cidA, "x4")},
 		}},
 	)
-	return r, f5, f6
+	return r, lo, f6
 }
 
 func labels(t *testing.T, payloads []events.Payload) []string {
@@ -264,9 +271,15 @@ func TestQueryEvents_FilteredMidLedgerResume(t *testing.T) {
 	assert.Equal(t, ScanComplete, page.Status, "the walk finished the bounds as the page filled")
 }
 
-func TestQueryEvents_CrossChunkWalks(t *testing.T) {
-	r, f5, f6 := borderFixtureEvents(t)
+func TestQueryEvents_ChunkSeamFullChunk(t *testing.T) {
+	if testing.Short() {
+		t.Skip("the seam fixture ingests a full 10k-ledger chunk; skipped in -short")
+	}
+	r, lo, f6 := fullChunkSeamFixture(t)
 	maxL := f6 + 1
+
+	// Cross-chunk walks: both directions at limits that break pages
+	// inside chunks, at the seam, and not at all.
 	asc := []string{"x0", "x1", "y0", "x2", "x3", "y1", "x4"}
 	desc := []string{"x4", "y1", "x3", "x2", "y0", "x1", "x0"}
 	for _, tc := range []struct {
@@ -274,10 +287,10 @@ func TestQueryEvents_CrossChunkWalks(t *testing.T) {
 		want []string
 	}{{Ascending, asc}, {Descending, desc}} {
 		for _, limit := range []int{2, 3, 7} {
-			t.Run(fmt.Sprintf("dir=%d/limit=%d", tc.dir, limit), func(t *testing.T) {
+			t.Run(fmt.Sprintf("walk/dir=%d/limit=%d", tc.dir, limit), func(t *testing.T) {
 				d := &pageDriver{
 					t: t, r: r, limit: limit,
-					cursor: EventCursor{Scope: EventCursorQuery{MinLedger: f5, MaxLedger: &maxL, Dir: tc.dir}},
+					cursor: EventCursor{Scope: EventCursorQuery{MinLedger: lo, MaxLedger: &maxL, Dir: tc.dir}},
 				}
 				got, status := d.drain()
 				assert.Equal(t, tc.want, got)
@@ -285,30 +298,81 @@ func TestQueryEvents_CrossChunkWalks(t *testing.T) {
 			})
 		}
 	}
+
+	// Chunk-end resume: the page break lands exactly at the seam; the
+	// resume enters the next chunk, whose ordinals restart at 0.
+	t.Run("resume at the seam", func(t *testing.T) {
+		d := &pageDriver{
+			t: t, r: r, limit: 4,
+			cursor: EventCursor{Scope: EventCursorQuery{MinLedger: lo, MaxLedger: &maxL}},
+		}
+		page := d.next()
+		assert.Equal(t, []string{"x0", "x1", "y0", "x2"}, labels(t, page.Events),
+			"page 1 is exactly chunk 5's events")
+		assert.Equal(t, ScanHasMore, page.Status)
+		assert.Equal(t, lo+2, page.Next.ScannedLedger,
+			"the finished part's watermark survives the page break at the seam")
+		page = d.next()
+		assert.Equal(t, []string{"x3", "y1", "x4"}, labels(t, page.Events))
+		assert.Equal(t, ScanComplete, page.Status)
+		require.NotNil(t, page.Next.Position)
+		assert.Equal(t, f6+1, page.Next.Position.Ledger)
+		assert.Equal(t, uint32(0), page.Next.Position.LedgerOrdinal)
+	})
+
+	// ScanOldestReached is a per-node stop, not a scope stop: a node
+	// with deeper retention (the full-chunk registry) resumes the same
+	// cursor from the watermark and finishes the scope. The shallow
+	// node serves chunk 6 only.
+	t.Run("deeper node continues after OldestReached", func(t *testing.T) {
+		const c6 = chunk.ID(6)
+		shallow, _ := seedEventChunks(t, c6, f6+1, eventChunkSpec{c: c6, ledgers: [][]xdr.ContractEvent{
+			{symEvent(cidA, "x3"), symEvent(cidB, "y1")},
+			{symEvent(cidA, "x4")},
+		}})
+		d := &pageDriver{t: t, r: shallow, limit: 10, cursor: EventCursor{
+			Scope: EventCursorQuery{MinLedger: lo, MaxLedger: &maxL, Dir: Descending},
+		}}
+		page := d.next()
+		assert.Equal(t, []string{"x4", "y1", "x3"}, labels(t, page.Events))
+		require.Equal(t, ScanOldestReached, page.Status)
+		require.Equal(t, f6, page.Next.ScannedLedger, "covered down to the shallow node's floor")
+
+		d.r = r
+		all, status := d.drain()
+		assert.Equal(t, []string{"x2", "y0", "x1", "x0"}, all)
+		assert.Equal(t, ScanComplete, status)
+	})
 }
 
-// TestQueryEvents_ChunkEndResume forces the page break exactly at the
-// chunk seam: the resume enters the next chunk, whose ordinals restart
-// at 0.
-func TestQueryEvents_ChunkEndResume(t *testing.T) {
-	r, f5, f6 := borderFixtureEvents(t)
-	maxL := f6 + 1
-	d := &pageDriver{
-		t: t, r: r, limit: 4,
-		cursor: EventCursor{Scope: EventCursorQuery{MinLedger: f5, MaxLedger: &maxL}},
-	}
-	page := d.next()
-	assert.Equal(t, []string{"x0", "x1", "y0", "x2"}, labels(t, page.Events),
-		"page 1 is exactly chunk 5's events")
-	assert.Equal(t, ScanHasMore, page.Status)
-	assert.Equal(t, f5+2, page.Next.ScannedLedger,
-		"the finished part's watermark survives the page break at the seam")
-	page = d.next()
-	assert.Equal(t, []string{"x3", "y1", "x4"}, labels(t, page.Events))
-	assert.Equal(t, ScanComplete, page.Status)
-	require.NotNil(t, page.Next.Position)
-	assert.Equal(t, f6+1, page.Next.Position.Ledger)
-	assert.Equal(t, uint32(0), page.Next.Position.LedgerOrdinal)
+// TestQueryEvents_UncoveredWindowFailsLoud pins the offsets coverage
+// check: a walk that needs ledgers a chunk's offsets do not cover is a
+// store bug (backfill is chunk-aligned, latest never exceeds ingested
+// range), and quietly clipping would let the watermark claim ledgers
+// nothing scanned. The fixture stages the impossible state directly: a
+// registry whose latest is beyond a short-seeded chunk.
+func TestQueryEvents_UncoveredWindowFailsLoud(t *testing.T) {
+	const c = chunk.ID(5)
+	f := c.FirstLedger()
+	r, _ := seedEventChunks(t, c, f+10, eventChunkSpec{c: c, ledgers: [][]xdr.ContractEvent{
+		{symEvent(cidA, "a0")},
+	}})
+	a, err := r.NewReadView()
+	require.NoError(t, err)
+	defer a.Release()
+	_, err = a.QueryEvents(context.Background(),
+		EventCursor{Scope: EventCursorQuery{MinLedger: f}}, 10)
+	require.ErrorContains(t, err, "offsets cover")
+
+	// Head side: ingest enforces chunk-aligned starts, so this state
+	// cannot be staged through a real store; scanChunk is checked
+	// directly with offsets that begin past the part's From.
+	ofs := events.NewLedgerOffsets(f + 8)
+	require.NoError(t, ofs.Append(f+8, 1))
+	_, err = scanChunk(context.Background(),
+		EventPart{Chunk: c, Reader: &fakeEventReader{chunkID: c, ofs: ofs}, From: f, To: f + 8},
+		nil, nil, false, 10)
+	require.ErrorContains(t, err, "offsets cover")
 }
 
 // TestQueryEvents_FollowsTheTip pins the open-upper-bound walk: an
@@ -508,38 +572,6 @@ func TestQueryEvents_DescendingResumeAboveLatestWaits(t *testing.T) {
 	r.SetLatestLedger(f + 5)
 	all, status := d.drain()
 	assert.Equal(t, []string{"b2", "c0", "a3", "b1", "a2", "b0", "a1", "a0"}, all)
-	assert.Equal(t, ScanComplete, status)
-}
-
-// TestQueryEvents_OldestReachedContinuesOnDeeperNode: ScanOldestReached
-// is a per-node stop, not a scope stop: a node with deeper retention
-// resumes the same cursor from the watermark and finishes the scope.
-func TestQueryEvents_OldestReachedContinuesOnDeeperNode(t *testing.T) {
-	const c4, c5 = chunk.ID(4), chunk.ID(5)
-	f4, f5 := c4.FirstLedger(), c5.FirstLedger()
-	chunk5 := eventChunkSpec{c: c5, ledgers: [][]xdr.ContractEvent{
-		{symEvent(cidA, "q0"), symEvent(cidA, "q1")},
-		{symEvent(cidB, "q2")},
-	}}
-	chunk4 := eventChunkSpec{c: c4, ledgers: [][]xdr.ContractEvent{
-		{symEvent(cidA, "p0")},
-		{symEvent(cidA, "p1")},
-	}}
-	shallow, _ := seedEventChunks(t, c5, f5+1, chunk5)
-	deep, _ := seedEventChunks(t, c4, f5+1, chunk4, chunk5)
-
-	maxL := f5 + 1
-	d := &pageDriver{t: t, r: shallow, limit: 10, cursor: EventCursor{
-		Scope: EventCursorQuery{MinLedger: f4, MaxLedger: &maxL, Dir: Descending},
-	}}
-	page := d.next()
-	assert.Equal(t, []string{"q2", "q1", "q0"}, labels(t, page.Events))
-	require.Equal(t, ScanOldestReached, page.Status)
-	require.Equal(t, f5, page.Next.ScannedLedger, "covered down to the shallow node's floor")
-
-	d.r = deep
-	all, status := d.drain()
-	assert.Equal(t, []string{"p1", "p0"}, all)
 	assert.Equal(t, ScanComplete, status)
 }
 

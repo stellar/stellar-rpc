@@ -337,20 +337,18 @@ func scanChunk(
 	if err != nil {
 		return chunkResult{}, err
 	}
-	// Clip to the offsets snapshot's coverage. In production this is a
-	// no-op: latest never exceeds a serving chunk's ingested range. It
-	// keeps test fixtures with partially ingested chunks from turning
-	// into IDRangeForLedgers errors.
+	// The offsets snapshot must cover the walk's whole window. Backfill
+	// is chunk-aligned and latest never exceeds a serving chunk's
+	// ingested range, so a shortfall on either side is a store bug;
+	// clipping would let the walk continue past never-scanned ledgers
+	// and claim them covered.
 	end := ofs.EndLedger()
-	if end == ofs.StartLedger() {
-		return chunkResult{}, nil // nothing ingested yet
+	if end == ofs.StartLedger() || part.From < ofs.StartLedger() || part.To > end-1 {
+		return chunkResult{}, fmt.Errorf(
+			"query: chunk %s offsets cover [%d, %d] but the walk needs [%d, %d]",
+			part.Chunk, ofs.StartLedger(), end-1, part.From, part.To)
 	}
-	pLo := max(part.From, ofs.StartLedger())
-	pHi := min(part.To, end-1)
-	if pLo > pHi {
-		return chunkResult{}, nil
-	}
-	window, err := chunkWindow(ctx, part.Reader, ofs, pLo, pHi, reenter, desc)
+	window, err := chunkWindow(ctx, part.Reader, ofs, part.From, part.To, reenter, desc)
 	if err != nil {
 		return chunkResult{}, err
 	}
@@ -378,11 +376,12 @@ func scanChunk(
 			LedgerOrdinal: m.Ordinal - lStart,
 		}
 	}
-	// Stream ended: every candidate in [pLo, pHi] was checked, so the
-	// chunk's far ledger is fully covered even when nothing was delivered.
-	covered := pHi
+	// Stream ended: every candidate in [part.From, part.To] was checked,
+	// so the chunk's far ledger is fully covered even when nothing was
+	// delivered.
+	covered := part.To
 	if desc {
-		covered = pLo
+		covered = part.From
 	}
 	out.coveredThrough = &covered
 	return out, nil
