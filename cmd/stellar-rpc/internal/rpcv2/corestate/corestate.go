@@ -69,7 +69,7 @@ type Config struct {
 type Daemon struct {
 	registry       *prometheus.Registry
 	namespace      string
-	coreClient     *stellarcore.Client
+	coreClient     *host.CoreClientWithMetrics
 	fastCoreClient *stellarcore.Client
 	coreVersion    string
 }
@@ -104,18 +104,15 @@ func New(ctx context.Context, cfg Config) (*Daemon, error) {
 	// pool. That pool keys idle connections by host:port, and the two servers are
 	// different host:port pairs, so submissions and queries already stay off each
 	// other's connections — one shared Client would behave the same way. The two
-	// Clients exist so the submission path can be wrapped on its own.
-	//
-	// TODO(#889): the submission client is unwrapped, so v2 does not yet publish
-	// v1's txsub metrics. v1's wrapper for them lives in internal/rpcv1/daemon and
-	// must move to a shared package before sendTransaction is served.
+	// Clients exist so the submission path can carry the txsub metrics wrapper
+	// while queries stay bare.
 	return &Daemon{
 		registry:  cfg.Registry,
 		namespace: namespace,
-		coreClient: &stellarcore.Client{
+		coreClient: host.NewCoreClientWithMetrics(stellarcore.Client{
 			URL:  cfg.CoreURL,
 			HTTP: &http.Client{Timeout: cfg.RequestTimeout},
-		},
+		}, cfg.Registry, namespace),
 		fastCoreClient: &stellarcore.Client{
 			URL:  fmt.Sprintf("http://localhost:%d", cfg.QueryPort),
 			HTTP: &http.Client{Timeout: cfg.RequestTimeout},

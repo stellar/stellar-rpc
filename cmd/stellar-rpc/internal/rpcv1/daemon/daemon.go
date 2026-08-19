@@ -49,7 +49,7 @@ const (
 
 type Daemon struct {
 	core                *ledgerbackend.CaptiveStellarCore
-	coreClient          *CoreClientWithMetrics
+	coreClient          *host.CoreClientWithMetrics
 	coreQueryingClient  host.FastCoreClient
 	ingestService       *ingest.Service
 	db                  *sqlitedb.DB
@@ -182,7 +182,8 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 		db:                 mustOpenDatabase(cfg, logger, metricsRegistry),
 		done:               make(chan struct{}),
 		metricsRegistry:    metricsRegistry,
-		coreClient:         newCoreClientWithMetrics(createStellarCoreClient(cfg), metricsRegistry),
+		coreClient: host.NewCoreClientWithMetrics(
+			createStellarCoreClient(cfg), metricsRegistry, host.PrometheusNamespace),
 		coreQueryingClient: createHighperfStellarCoreClient(cfg),
 	}
 

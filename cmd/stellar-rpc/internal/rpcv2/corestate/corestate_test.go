@@ -45,8 +45,8 @@ func TestNew_WiresBothClientsAtTheirPorts(t *testing.T) {
 	d, err := New(context.Background(), cfg)
 	require.NoError(t, err)
 
-	submit, ok := d.CoreClient().(*stellarcore.Client)
-	require.True(t, ok)
+	submit, ok := d.CoreClient().(*host.CoreClientWithMetrics)
+	require.True(t, ok, "the submission path must carry the txsub metrics wrapper")
 	assert.Equal(t, "http://core.internal:8080", submit.URL,
 		"submissions go to the configured admin URL")
 	assert.Equal(t, 7*time.Second, submit.HTTP.(*http.Client).Timeout) //nolint:forcetypeassert
@@ -58,10 +58,54 @@ func TestNew_WiresBothClientsAtTheirPorts(t *testing.T) {
 	assert.Equal(t, 7*time.Second, query.HTTP.(*http.Client).Timeout) //nolint:forcetypeassert
 
 	assert.NotSame(t, submit.HTTP, query.HTTP,
-		"one http.Client per server, so the submission path can be wrapped without touching queries")
+		"one http.Client per server, so the metrics-wrapped submission path never shares a Client with queries")
 	assert.Same(t, registry, d.MetricsRegistry(),
 		"handlers must register on the daemon's real registry, not a throwaway")
 	assert.Equal(t, host.PrometheusNamespace, d.MetricsNamespace())
+}
+
+func TestCoreClient_PublishesTxsubMetrics(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"status":"PENDING"}`)
+	}))
+	defer srv.Close()
+
+	registry := prometheus.NewRegistry()
+	cfg := validConfig()
+	cfg.CoreURL = srv.URL
+	cfg.Registry = registry
+
+	d, err := New(context.Background(), cfg)
+	require.NoError(t, err)
+
+	envelope := xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1: &xdr.TransactionV1Envelope{
+			Tx: xdr.Transaction{
+				SourceAccount: xdr.MustMuxedAddress("GDKXE2OZMJIPOSLNA6N6F2BVCI3O777I2OOC4BV7VOYUEHYX7RTRYA7Y"),
+				Operations: []xdr.Operation{{Body: xdr.OperationBody{
+					Type:           xdr.OperationTypeBumpSequence,
+					BumpSequenceOp: &xdr.BumpSequenceOp{BumpTo: 1},
+				}}},
+			},
+		},
+	}
+	blob, err := xdr.MarshalBase64(envelope)
+	require.NoError(t, err)
+
+	resp, err := d.CoreClient().SubmitTransaction(context.Background(), blob)
+	require.NoError(t, err)
+	assert.Equal(t, "PENDING", resp.Status)
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	names := make([]string, 0, len(families))
+	for _, family := range families {
+		names = append(names, family.GetName())
+	}
+	assert.Contains(t, names, "soroban_rpc_txsub_submission_duration_seconds")
+	assert.Contains(t, names, "soroban_rpc_txsub_operation_count")
 }
 
 func TestNew_NamespaceOverride(t *testing.T) {
