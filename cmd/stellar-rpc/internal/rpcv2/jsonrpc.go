@@ -75,13 +75,13 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 			DefaultLedgersLimit:      deref(m.GetLedgers.DefaultItemsPerResponse),
 			MaxTransactionsLimit:     deref(m.GetTransactions.MaxItemsPerResponse),
 			DefaultTransactionsLimit: deref(m.GetTransactions.DefaultItemsPerResponse),
-		},
-		specLimits(m),
-		jsonrpc.ExtraMethod{
-			MethodName: getEventsV2MethodName,
-			Handler: notImplemented("getEventsV2 is not implemented by this service yet (issue #774 adds it);" +
-				" use the existing RPC service for events meanwhile"),
 		})
+	specs = append(specs, jsonrpc.HandlerSpec{
+		MethodName: getEventsV2MethodName,
+		Handler: notImplemented("getEventsV2 is not implemented by this service yet (issue #774 adds it);" +
+			" use the existing RPC service for events meanwhile"),
+	})
+	specs = specLimits(m).Apply(specs)
 	metrics := observability.MetricsOrNop(p.metrics)
 	for i := range specs {
 		specs[i].Handler = mapAdapterErrors(specs[i].Handler, metrics)

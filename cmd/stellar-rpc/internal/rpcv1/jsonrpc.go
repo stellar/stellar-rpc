@@ -53,57 +53,57 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 			DefaultLedgersLimit:      cfg.DefaultLedgersLimit,
 			MaxTransactionsLimit:     cfg.MaxTransactionsLimit,
 			DefaultTransactionsLimit: cfg.DefaultTransactionsLimit,
-		},
-		jsonrpc.SpecLimits{
-			protocol.GetHealthMethodName: {
-				QueueLimit:           cfg.RequestBacklogGetHealthQueueLimit,
-				RequestDurationLimit: cfg.MaxGetHealthExecutionDuration,
-			},
-			protocol.GetEventsMethodName: {
-				QueueLimit:           cfg.RequestBacklogGetEventsQueueLimit,
-				RequestDurationLimit: cfg.MaxGetEventsExecutionDuration,
-			},
-			protocol.GetNetworkMethodName: {
-				QueueLimit:           cfg.RequestBacklogGetNetworkQueueLimit,
-				RequestDurationLimit: cfg.MaxGetNetworkExecutionDuration,
-			},
-			protocol.GetVersionInfoMethodName: {
-				QueueLimit:           cfg.RequestBacklogGetVersionInfoQueueLimit,
-				RequestDurationLimit: cfg.MaxGetVersionInfoExecutionDuration,
-			},
-			protocol.GetLatestLedgerMethodName: {
-				QueueLimit:           cfg.RequestBacklogGetLatestLedgerQueueLimit,
-				RequestDurationLimit: cfg.MaxGetLatestLedgerExecutionDuration,
-			},
-			protocol.GetLedgersMethodName: {
-				QueueLimit:           cfg.RequestBacklogGetLedgersQueueLimit,
-				RequestDurationLimit: cfg.MaxGetLedgersExecutionDuration,
-			},
-			protocol.GetLedgerEntriesMethodName: {
-				QueueLimit:           cfg.RequestBacklogGetLedgerEntriesQueueLimit,
-				RequestDurationLimit: cfg.MaxGetLedgerEntriesExecutionDuration,
-			},
-			protocol.GetTransactionMethodName: {
-				QueueLimit:           cfg.RequestBacklogGetTransactionQueueLimit,
-				RequestDurationLimit: cfg.MaxGetTransactionExecutionDuration,
-			},
-			protocol.GetTransactionsMethodName: {
-				QueueLimit:           cfg.RequestBacklogGetTransactionsQueueLimit,
-				RequestDurationLimit: cfg.MaxGetTransactionsExecutionDuration,
-			},
-			protocol.SendTransactionMethodName: {
-				QueueLimit:           cfg.RequestBacklogSendTransactionQueueLimit,
-				RequestDurationLimit: cfg.MaxSendTransactionExecutionDuration,
-			},
-			protocol.SimulateTransactionMethodName: {
-				QueueLimit:           cfg.RequestBacklogSimulateTransactionQueueLimit,
-				RequestDurationLimit: cfg.MaxSimulateTransactionExecutionDuration,
-			},
-			protocol.GetFeeStatsMethodName: {
-				QueueLimit:           cfg.RequestBacklogGetFeeStatsTransactionQueueLimit,
-				RequestDurationLimit: cfg.MaxGetFeeStatsExecutionDuration,
-			},
 		})
+	specs = jsonrpc.SpecLimits{
+		protocol.GetHealthMethodName: {
+			QueueLimit:           cfg.RequestBacklogGetHealthQueueLimit,
+			RequestDurationLimit: cfg.MaxGetHealthExecutionDuration,
+		},
+		protocol.GetEventsMethodName: {
+			QueueLimit:           cfg.RequestBacklogGetEventsQueueLimit,
+			RequestDurationLimit: cfg.MaxGetEventsExecutionDuration,
+		},
+		protocol.GetNetworkMethodName: {
+			QueueLimit:           cfg.RequestBacklogGetNetworkQueueLimit,
+			RequestDurationLimit: cfg.MaxGetNetworkExecutionDuration,
+		},
+		protocol.GetVersionInfoMethodName: {
+			QueueLimit:           cfg.RequestBacklogGetVersionInfoQueueLimit,
+			RequestDurationLimit: cfg.MaxGetVersionInfoExecutionDuration,
+		},
+		protocol.GetLatestLedgerMethodName: {
+			QueueLimit:           cfg.RequestBacklogGetLatestLedgerQueueLimit,
+			RequestDurationLimit: cfg.MaxGetLatestLedgerExecutionDuration,
+		},
+		protocol.GetLedgersMethodName: {
+			QueueLimit:           cfg.RequestBacklogGetLedgersQueueLimit,
+			RequestDurationLimit: cfg.MaxGetLedgersExecutionDuration,
+		},
+		protocol.GetLedgerEntriesMethodName: {
+			QueueLimit:           cfg.RequestBacklogGetLedgerEntriesQueueLimit,
+			RequestDurationLimit: cfg.MaxGetLedgerEntriesExecutionDuration,
+		},
+		protocol.GetTransactionMethodName: {
+			QueueLimit:           cfg.RequestBacklogGetTransactionQueueLimit,
+			RequestDurationLimit: cfg.MaxGetTransactionExecutionDuration,
+		},
+		protocol.GetTransactionsMethodName: {
+			QueueLimit:           cfg.RequestBacklogGetTransactionsQueueLimit,
+			RequestDurationLimit: cfg.MaxGetTransactionsExecutionDuration,
+		},
+		protocol.SendTransactionMethodName: {
+			QueueLimit:           cfg.RequestBacklogSendTransactionQueueLimit,
+			RequestDurationLimit: cfg.MaxSendTransactionExecutionDuration,
+		},
+		protocol.SimulateTransactionMethodName: {
+			QueueLimit:           cfg.RequestBacklogSimulateTransactionQueueLimit,
+			RequestDurationLimit: cfg.MaxSimulateTransactionExecutionDuration,
+		},
+		protocol.GetFeeStatsMethodName: {
+			QueueLimit:           cfg.RequestBacklogGetFeeStatsTransactionQueueLimit,
+			RequestDurationLimit: cfg.MaxGetFeeStatsExecutionDuration,
+		},
+	}.Apply(specs)
 
 	return jsonrpc.NewHandler(jsonrpc.Params{
 		Daemon:                params.Daemon,

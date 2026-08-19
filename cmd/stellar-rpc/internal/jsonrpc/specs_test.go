@@ -43,9 +43,9 @@ func fullSpecLimits() SpecLimits {
 	return limits
 }
 
-func TestBuildHandlerSpecs_ServesEveryLimitedMethod(t *testing.T) {
+func TestApply_FillsEveryServedMethodsLimits(t *testing.T) {
 	limits := fullSpecLimits()
-	specs := BuildHandlerSpecs(SpecDeps{Daemon: stubDaemon{}}, limits)
+	specs := limits.Apply(BuildHandlerSpecs(SpecDeps{Daemon: stubDaemon{}}))
 	assert.Len(t, specs, len(limits))
 	for _, s := range specs {
 		assert.Equal(t, limits[s.MethodName].QueueLimit, s.QueueLimit)
@@ -54,29 +54,30 @@ func TestBuildHandlerSpecs_ServesEveryLimitedMethod(t *testing.T) {
 	}
 }
 
-func TestBuildHandlerSpecs_PanicsOnAMethodWithoutLimits(t *testing.T) {
+func TestApply_PanicsOnAMethodWithoutLimits(t *testing.T) {
 	limits := fullSpecLimits()
 	delete(limits, protocol.GetFeeStatsMethodName)
 	assert.PanicsWithValue(t, "jsonrpc: no limits configured for method getFeeStats", func() {
-		BuildHandlerSpecs(SpecDeps{Daemon: stubDaemon{}}, limits)
+		limits.Apply(BuildHandlerSpecs(SpecDeps{Daemon: stubDaemon{}}))
 	})
 }
 
-func TestBuildHandlerSpecs_PanicsOnLimitsForAnUnservedMethod(t *testing.T) {
+func TestApply_PanicsOnLimitsForAnUnservedMethod(t *testing.T) {
 	limits := fullSpecLimits()
 	limits["getFoo"] = MethodLimits{QueueLimit: 1, RequestDurationLimit: time.Second}
 	assert.PanicsWithValue(t, "jsonrpc: limits configured for unserved method getFoo", func() {
-		BuildHandlerSpecs(SpecDeps{Daemon: stubDaemon{}}, limits)
+		limits.Apply(BuildHandlerSpecs(SpecDeps{Daemon: stubDaemon{}}))
 	})
 }
 
-func TestBuildHandlerSpecs_AppendsExtraMethodsWithTheirLimits(t *testing.T) {
+func TestApply_CoversDaemonAppendedMethods(t *testing.T) {
 	limits := fullSpecLimits()
 	limits["getFoo"] = MethodLimits{QueueLimit: 7, RequestDurationLimit: time.Minute}
 	stub := func(context.Context, *jrpc2.Request) (any, error) { return "ok", nil }
 
-	specs := BuildHandlerSpecs(SpecDeps{Daemon: stubDaemon{}}, limits,
-		ExtraMethod{MethodName: "getFoo", Handler: stub})
+	specs := BuildHandlerSpecs(SpecDeps{Daemon: stubDaemon{}})
+	specs = append(specs, HandlerSpec{MethodName: "getFoo", Handler: stub})
+	specs = limits.Apply(specs)
 
 	assert.Len(t, specs, len(limits))
 	last := specs[len(specs)-1]
@@ -85,11 +86,12 @@ func TestBuildHandlerSpecs_AppendsExtraMethodsWithTheirLimits(t *testing.T) {
 	assert.Equal(t, time.Minute, last.RequestDurationLimit)
 }
 
-func TestBuildHandlerSpecs_PanicsOnAnExtraMethodWithoutLimits(t *testing.T) {
+func TestApply_PanicsOnAnAppendedMethodWithoutLimits(t *testing.T) {
 	stub := func(context.Context, *jrpc2.Request) (any, error) { return "ok", nil }
+	specs := BuildHandlerSpecs(SpecDeps{Daemon: stubDaemon{}})
+	specs = append(specs, HandlerSpec{MethodName: "getFoo", Handler: stub})
 	assert.PanicsWithValue(t, "jsonrpc: no limits configured for method getFoo", func() {
-		BuildHandlerSpecs(SpecDeps{Daemon: stubDaemon{}}, fullSpecLimits(),
-			ExtraMethod{MethodName: "getFoo", Handler: stub})
+		fullSpecLimits().Apply(specs)
 	})
 }
 

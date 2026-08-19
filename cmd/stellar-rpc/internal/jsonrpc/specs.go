@@ -63,12 +63,12 @@ type MethodLimits struct {
 	RequestDurationLimit time.Duration
 }
 
-// SpecLimits maps each served method's wire name to its limits. Key by the
-// protocol.*MethodName constants. BuildHandlerSpecs panics on a table missing
-// a served method or naming an unserved one, so a daemon's limits mapping
-// cannot silently drift from the method table: adding a method to
-// BuildHandlerSpecs fails both daemons' startup (and their handler tests)
-// until each supplies the new method's limits.
+// SpecLimits maps each served method's wire name to its limits. Key shared
+// methods by the protocol.*MethodName constants. Apply panics on a table
+// missing a served method or naming an unserved one, so a daemon's limits
+// mapping cannot silently drift from its method list: adding a method fails
+// that daemon's startup (and its handler tests) until it supplies the new
+// method's limits.
 type SpecLimits map[string]MethodLimits
 
 // LongestDuration is the largest per-method execution budget in the table.
@@ -81,40 +81,44 @@ func (l SpecLimits) LongestDuration() time.Duration {
 	return longest
 }
 
-// ExtraMethod is a method one daemon serves beyond the shared table (e.g.
-// v2-only methods). Its limits come from the same SpecLimits map as the
-// shared methods, so it participates in the missing/unserved validation and
-// in LongestDuration.
-type ExtraMethod struct {
-	MethodName string
-	Handler    jrpc2.Handler
+// Apply pairs each spec with its limits from the table and returns the
+// completed list — the step that makes a method list servable. Run it over a
+// daemon's COMPLETE list (the shared BuildHandlerSpecs result plus any methods
+// that daemon appended). A served method missing from the table, or a table
+// entry no spec claims, panics at startup.
+func (l SpecLimits) Apply(specs []HandlerSpec) []HandlerSpec {
+	used := make(map[string]bool, len(l))
+	for i := range specs {
+		limits, ok := l[specs[i].MethodName]
+		if !ok {
+			panic("jsonrpc: no limits configured for method " + specs[i].MethodName)
+		}
+		used[specs[i].MethodName] = true
+		specs[i].QueueLimit = limits.QueueLimit
+		specs[i].RequestDurationLimit = limits.RequestDurationLimit
+	}
+	for name := range l {
+		if !used[name] {
+			panic("jsonrpc: limits configured for unserved method " + name)
+		}
+	}
+	return specs
 }
 
-// BuildHandlerSpecs builds the method table both daemons serve: the shared
-// internal/methods handlers over deps, each paired with its limits, plus any
-// daemon-specific extra methods. The result feeds Params.Specs, after any
-// daemon-specific per-handler wrapping.
-func BuildHandlerSpecs(deps SpecDeps, limits SpecLimits, extra ...ExtraMethod) []HandlerSpec {
+// BuildHandlerSpecs builds the method list both daemons share: the
+// internal/methods handlers over deps, without limits. A daemon appends its
+// own methods to the result, then fills every spec's limits with
+// SpecLimits.Apply before serving.
+func BuildHandlerSpecs(deps SpecDeps) []HandlerSpec {
 	getEvents := deps.GetEventsHandler
 	if getEvents == nil {
 		getEvents = methods.NewGetEventsHandler(deps.Logger, deps.EventReader,
 			deps.MaxEventsLimit, deps.DefaultEventsLimit, deps.LedgerReader)
 	}
-	used := make(map[string]bool, len(limits))
 	spec := func(name string, h jrpc2.Handler) HandlerSpec {
-		l, ok := limits[name]
-		if !ok {
-			panic("jsonrpc: no limits configured for method " + name)
-		}
-		used[name] = true
-		return HandlerSpec{
-			MethodName:           name,
-			Handler:              h,
-			QueueLimit:           l.QueueLimit,
-			RequestDurationLimit: l.RequestDurationLimit,
-		}
+		return HandlerSpec{MethodName: name, Handler: h}
 	}
-	specs := []HandlerSpec{ //nolint:prealloc // built once per daemon startup; the append below is trivial
+	return []HandlerSpec{
 		spec(protocol.GetHealthMethodName,
 			methods.NewHealthCheck(deps.RetentionWindow, deps.LedgerReader, deps.MaxHealthyLedgerLatency)),
 		spec(protocol.GetEventsMethodName, getEvents),
@@ -144,13 +148,4 @@ func BuildHandlerSpecs(deps SpecDeps, limits SpecLimits, extra ...ExtraMethod) [
 		spec(protocol.GetFeeStatsMethodName,
 			methods.NewGetFeeStatsHandler(deps.FeeStats, deps.LedgerReader, deps.Logger)),
 	}
-	for _, e := range extra {
-		specs = append(specs, spec(e.MethodName, e.Handler))
-	}
-	for name := range limits {
-		if !used[name] {
-			panic("jsonrpc: limits configured for unserved method " + name)
-		}
-	}
-	return specs
 }
