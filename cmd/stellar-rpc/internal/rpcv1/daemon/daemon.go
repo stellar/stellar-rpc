@@ -177,11 +177,11 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 	metricsRegistry := prometheus.NewRegistry()
 
 	daemon := &Daemon{
-		logger:             logger,
-		core:               core,
-		db:                 mustOpenDatabase(cfg, logger, metricsRegistry),
-		done:               make(chan struct{}),
-		metricsRegistry:    metricsRegistry,
+		logger:          logger,
+		core:            core,
+		db:              mustOpenDatabase(cfg, logger, metricsRegistry),
+		done:            make(chan struct{}),
+		metricsRegistry: metricsRegistry,
 		coreClient: host.NewCoreClientWithMetrics(
 			createStellarCoreClient(cfg), metricsRegistry, host.PrometheusNamespace),
 		coreQueryingClient: createHighperfStellarCoreClient(cfg),

@@ -197,18 +197,35 @@ func (tx *ledgerReaderTx) BatchGetLedgers(
 		if err != nil {
 			return nil, markErr(ctx, err)
 		}
-		var lcm xdr.LedgerCloseMeta
-		if err := lcm.UnmarshalBinary(entry.Bytes); err != nil {
-			return nil, markErr(ctx, fmt.Errorf("adapters: unmarshal ledger %d: %w", entry.Seq, err))
+		header, err := headerFromLCMBytes(entry.Bytes)
+		if err != nil {
+			return nil, markErr(ctx, fmt.Errorf("adapters: decode ledger %d header: %w", entry.Seq, err))
 		}
 		out = append(out, store.LedgerMetadataChunk{
-			Header: lcm.LedgerHeaderHistoryEntry(),
+			Header: header,
 			// Entry.Bytes aliases the reader's scratch buffer and is
 			// overwritten on the next iteration step; clone what we keep.
 			Lcm: bytes.Clone(entry.Bytes),
 		})
 	}
 	return out, nil
+}
+
+// headerFromLCMBytes decodes only the LedgerHeaderHistoryEntry out of raw LCM
+// bytes. The consumer (getLedgers) reads identity fields from the header and
+// sends the metadata as the raw bytes themselves, so unmarshaling the whole
+// LedgerCloseMeta — potentially MBs of transactions per ledger — is pure waste.
+func headerFromLCMBytes(raw []byte) (xdr.LedgerHeaderHistoryEntry, error) {
+	var header xdr.LedgerHeaderHistoryEntry
+	view, err := xdr.LedgerCloseMetaView(raw).LedgerHeader()
+	if err != nil {
+		return header, err
+	}
+	headerRaw, err := view.Raw()
+	if err != nil {
+		return header, err
+	}
+	return header, header.UnmarshalBinary(headerRaw)
 }
 
 func (tx *ledgerReaderTx) Done() error {

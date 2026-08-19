@@ -274,6 +274,31 @@ func TestTxBatchGetLedgers(t *testing.T) {
 	}
 }
 
+func TestTxBatchGetLedgers_HeaderMatchesFullDecode(t *testing.T) {
+	cat := openTestCatalog(t)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
+	rawV1, _ := lcmV1WithClassicTx(t, testChunk.FirstLedger())
+	rawV2, _ := lcmWithTxs(t, testChunk.FirstLedger()+1, txSpec{})
+	seedHotChunkLCMs(t, cat, r, testChunk, rawV1, rawV2)
+	r.SetLatestLedger(testChunk.FirstLedger()+1, closeTimeFor(testChunk.FirstLedger()+1))
+	reader := NewLedgerReader(r)
+
+	tx, err := reader.NewTx(context.Background())
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	got, err := tx.BatchGetLedgers(context.Background(), testChunk.FirstLedger(), testChunk.FirstLedger()+1)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	for i, raw := range [][]byte{rawV1, rawV2} {
+		var full xdr.LedgerCloseMeta
+		require.NoError(t, full.UnmarshalBinary(raw))
+		assert.Equal(t, full.LedgerHeaderHistoryEntry(), got[i].Header,
+			"the header-only decode must produce what the full decode would")
+		assert.Equal(t, raw, got[i].Lcm)
+	}
+}
+
 func TestTxBatchGetLedgers_BelowFloorIsRangeError(t *testing.T) {
 	reader, c0, _ := sparseFixture(t)
 	tx, err := reader.NewTx(context.Background())
