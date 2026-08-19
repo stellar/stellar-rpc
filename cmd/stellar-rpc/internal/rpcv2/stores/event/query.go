@@ -221,6 +221,19 @@ var topicFieldByPosition = [protocol.MaxTopicCount]events.Field{
 // LookupKeys result.
 type termPlan [][]int
 
+// batchSizes resolves the first and following internal batch sizes
+// from the caller's hint. The hint applies only when it is positive
+// and below the default. Both results are clamped positive, so a zero
+// test seam cannot stall a stream (a zero step never advances).
+func batchSizes(hint int) (first, rest int) {
+	rest = max(1, matchBatchSize)
+	first = rest
+	if hint > 0 && hint < rest {
+		first = hint
+	}
+	return first, rest
+}
+
 // Matches yields the events in window matching filters, in
 // chunk-relative ordinal order (reversed when descending), each
 // verified by the post-filter. Yielded payloads are owned by the
@@ -240,8 +253,15 @@ type termPlan [][]int
 // consumed before r closes, also mirroring FetchRange. Post-filter
 // drops are invisible: the iterator advances past them internally, so
 // consumers never see or reason about resume state.
+//
+// firstBatch sizes the first internal fetch batch. A consumer that
+// will stop after N matches passes N, so the first round trip fetches
+// no more than it needs; 0 or any out-of-range value uses the
+// default. Later batches use the default size. The hint changes I/O
+// counts only, never what the stream yields.
 func Matches(
-	ctx context.Context, r Reader, filters []Filter, window IDRange, descending bool,
+	ctx context.Context, r Reader, filters []Filter, window IDRange,
+	descending bool, firstBatch int,
 ) iter.Seq2[Match, error] {
 	return func(yield func(Match, error) bool) {
 		if err := validateMatchCall(ctx, r, filters, window); err != nil {
@@ -260,13 +280,13 @@ func Matches(
 		// index for no terms. Serves without touching the index: the
 		// window is dense, so it streams Reader.FetchRange directly.
 		if matchAll {
-			streamRange(ctx, r, window, descending, yield)
+			streamRange(ctx, r, window, descending, firstBatch, yield)
 			return
 		}
 		if union.IsEmpty() {
 			return
 		}
-		streamUnion(ctx, r, filters, union, descending, yield)
+		streamUnion(ctx, r, filters, union, descending, firstBatch, yield)
 	}
 }
 
@@ -425,26 +445,30 @@ func unionForFilters(
 	return union, false, nil
 }
 
-// streamUnion walks the union bitmap in internal batches: collect up
-// to matchBatchSize candidate ordinals, fetch, post-filter, yield the
-// survivors. Drops advance the walk with no yield.
+// streamUnion walks the union bitmap in internal batches: collect
+// candidate ordinals up to the batch size, fetch, post-filter, yield
+// the survivors. Drops advance the walk with no yield. The first
+// batch is sized to firstBatch (see Matches); later batches use the
+// default.
 //
 // FetchEvents requires ascending ids, so a descending batch is
 // collected highest-first and flipped before the fetch, then the
 // fetched matches are flipped back. Stepping one id at a time is fine
 // here: the fetch I/O dominates a 512-step loop.
 func streamUnion(
-	ctx context.Context, r Reader, filters []Filter,
-	union *roaring.Bitmap, descending bool, yield func(Match, error) bool,
+	ctx context.Context, r Reader, filters []Filter, union *roaring.Bitmap,
+	descending bool, firstBatch int, yield func(Match, error) bool,
 ) {
 	var it interface {
 		HasNext() bool
 		Next() uint32
-	} = union.Iterator()
+	}
 	if descending {
 		it = union.ReverseIterator()
+	} else {
+		it = union.Iterator()
 	}
-	batch := matchBatchSize
+	batch, rest := batchSizes(firstBatch)
 	ids := make([]uint32, 0, batch)
 	for {
 		if err := ctx.Err(); err != nil {
@@ -455,6 +479,7 @@ func streamUnion(
 		for it.HasNext() && len(ids) < batch {
 			ids = append(ids, it.Next())
 		}
+		batch = rest
 		if len(ids) == 0 {
 			return
 		}
@@ -558,14 +583,16 @@ func indexOfOrAddTerm(keys *[]events.TermKey, key events.TermKey) int {
 
 // streamRange serves the match-all path: every ordinal in the window
 // matches, so it streams Reader.FetchRange with no index work.
-// Ascending is one streaming pass; descending walks the window
-// top-down one internal batch at a time, yielding each fetched block
-// in reverse. FetchRange lends its buffer, so payload bytes are cloned
-// before they leave (yielded payloads are owned).
+// Ascending is one streaming pass, so the firstBatch hint applies
+// only to descending, which walks the window top-down one internal
+// block at a time, yielding each fetched block in reverse; the first
+// block is sized to the hint (see Matches). FetchRange lends its
+// buffer, so payload bytes are cloned before they leave (yielded
+// payloads are owned).
 func streamRange(
-	ctx context.Context, r Reader, window IDRange, descending bool, yield func(Match, error) bool,
+	ctx context.Context, r Reader, window IDRange, descending bool,
+	firstBatch int, yield func(Match, error) bool,
 ) {
-	batch := matchBatchSize
 	start, end := window.Start, window.End
 	if !descending {
 		ord := start
@@ -582,14 +609,16 @@ func streamRange(
 		}
 		return
 	}
+	batch, rest := batchSizes(firstBatch)
 	block := make([]Match, 0, batch)
 	for hi := end; hi > start; {
 		// uint64 compare avoids the uint32(batch) truncation footgun for
 		// batch sizes beyond uint32 range.
 		step := hi - start
-		if uint64(batch) < uint64(step) { //nolint:gosec // positive test-seam var
+		if uint64(batch) < uint64(step) { //nolint:gosec // batchSizes clamps positive
 			step = uint32(batch) //nolint:gosec // < step, fits uint32
 		}
+		batch = rest
 		lo := hi - step
 		block = block[:0]
 		ord := lo

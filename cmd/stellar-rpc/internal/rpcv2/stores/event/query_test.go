@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"iter"
 	"testing"
 
 	"github.com/RoaringBitmap/roaring/v2"
@@ -31,7 +32,7 @@ type QueryOptions struct {
 
 func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) ([]events.Payload, error) {
 	var out []events.Payload
-	for m, err := range Matches(ctx, r, filters, opts.Range, opts.Descending) {
+	for m, err := range Matches(ctx, r, filters, opts.Range, opts.Descending, 0) {
 		if err != nil {
 			return nil, err
 		}
@@ -1433,7 +1434,7 @@ func TestQuery_ColdReaderParity_TopicCount(t *testing.T) {
 func collectMatches(t *testing.T, r Reader, filters []Filter, window IDRange, descending bool) []Match {
 	t.Helper()
 	var out []Match
-	for m, err := range Matches(context.Background(), r, filters, window, descending) {
+	for m, err := range Matches(context.Background(), r, filters, window, descending, 0) {
 		require.NoError(t, err)
 		out = append(out, m)
 	}
@@ -1465,22 +1466,107 @@ func TestMatches_OrdinalsBothDirections(t *testing.T) {
 
 // TestMatches_BatchSizeIsInvisible pins that the internal fetch
 // granularity never changes what the stream yields: a BatchSize-1 walk
-// equals the default walk, in both directions and on both the filtered
-// and match-all paths.
+// and every firstBatch hint equal the default walk, in both directions
+// and on both the filtered and match-all paths. A zero seam is also
+// covered: batchSizes clamps it, so the stream still ends.
 func TestMatches_BatchSizeIsInvisible(t *testing.T) {
 	fx := newQueryFixture(t)
 	for _, filters := range [][]Filter{nil, {{ContractID: fx.contractA[:]}}} {
 		for _, descending := range []bool{false, true} {
 			want := collectMatches(t, fx.store, filters, wholeChunk(t, fx.store), descending)
-			got := func() []Match {
-				defer func(n int) { matchBatchSize = n }(matchBatchSize)
-				matchBatchSize = 1
-				return collectMatches(t, fx.store, filters, wholeChunk(t, fx.store), descending)
-			}()
-			assert.Equal(t, matchOrdinals(want), matchOrdinals(got),
-				"filters=%v descending=%v", filters != nil, descending)
+			for _, batch := range []int{1, 0} {
+				got := func() []Match {
+					defer func(n int) { matchBatchSize = n }(matchBatchSize)
+					matchBatchSize = batch
+					return collectMatches(t, fx.store, filters, wholeChunk(t, fx.store), descending)
+				}()
+				assert.Equal(t, matchOrdinals(want), matchOrdinals(got),
+					"batch=%d filters=%v descending=%v", batch, filters != nil, descending)
+			}
+			for _, hint := range []int{-5, 1, 3, 512, 100000} {
+				var got []Match
+				for m, err := range Matches(context.Background(), fx.store, filters,
+					wholeChunk(t, fx.store), descending, hint) {
+					require.NoError(t, err)
+					got = append(got, m)
+				}
+				assert.Equal(t, matchOrdinals(want), matchOrdinals(got),
+					"hint=%d filters=%v descending=%v", hint, filters != nil, descending)
+			}
 		}
 	}
+}
+
+// fetchCountingReader records the size of each FetchEvents and
+// FetchRange call so a test can pin the engine's fetch shape, not
+// just its results.
+type fetchCountingReader struct {
+	Reader
+
+	fetchSizes []int // len(ids) per FetchEvents call
+	rangeSizes []int // count per FetchRange call
+}
+
+func (c *fetchCountingReader) FetchEvents(ctx context.Context, ids []uint32) ([]events.Payload, error) {
+	c.fetchSizes = append(c.fetchSizes, len(ids))
+	return c.Reader.FetchEvents(ctx, ids)
+}
+
+func (c *fetchCountingReader) FetchRange(ctx context.Context, start, count uint32) iter.Seq2[events.Payload, error] {
+	c.rangeSizes = append(c.rangeSizes, int(count))
+	return c.Reader.FetchRange(ctx, start, count)
+}
+
+// TestMatches_FirstBatchHintSizesIO pins the hint's whole point: the
+// first fetch is sized to the consumer's need, and only the first.
+func TestMatches_FirstBatchHintSizesIO(t *testing.T) {
+	fx := newQueryFixture(t)
+	filters := []Filter{{ContractID: fx.contractA[:]}} // ids 0, 1, 4
+
+	// Filtered path, consumer stops after 2: one FetchEvents of exactly 2.
+	cr := &fetchCountingReader{Reader: fx.store}
+	var got []Match
+	for m, err := range Matches(context.Background(), cr, filters, wholeChunk(t, fx.store), false, 2) {
+		require.NoError(t, err)
+		got = append(got, m)
+		if len(got) == 2 {
+			break
+		}
+	}
+	assert.Equal(t, []uint32{0, 1}, matchOrdinals(got))
+	assert.Equal(t, []int{2}, cr.fetchSizes)
+
+	// Filtered path, consumer drains with hint 1 and seam 2: the first
+	// fetch honors the hint, the next one the default.
+	defer func(n int) { matchBatchSize = n }(matchBatchSize)
+	matchBatchSize = 2
+	cr = &fetchCountingReader{Reader: fx.store}
+	got = collectMatches(t, cr, filters, wholeChunk(t, fx.store), false)
+	require.Len(t, got, 3, "hintless drain still yields everything under the seam")
+	cr = &fetchCountingReader{Reader: fx.store}
+	got = got[:0]
+	for m, err := range Matches(context.Background(), cr, filters, wholeChunk(t, fx.store), false, 1) {
+		require.NoError(t, err)
+		got = append(got, m)
+	}
+	assert.Equal(t, []uint32{0, 1, 4}, matchOrdinals(got))
+	assert.Equal(t, []int{1, 2}, cr.fetchSizes,
+		"first batch honors the hint, the next one the default")
+
+	// Match-all descending, consumer stops after 2: one FetchRange
+	// block of exactly 2, cut from the window's top.
+	matchBatchSize = 512
+	cr = &fetchCountingReader{Reader: fx.store}
+	got = got[:0]
+	for m, err := range Matches(context.Background(), cr, nil, wholeChunk(t, fx.store), true, 2) {
+		require.NoError(t, err)
+		got = append(got, m)
+		if len(got) == 2 {
+			break
+		}
+	}
+	assert.Equal(t, []uint32{4, 3}, matchOrdinals(got))
+	assert.Equal(t, []int{2}, cr.rangeSizes)
 }
 
 // TestMatches_DropsAreInvisible is the successor of the batch API's
@@ -1517,7 +1603,7 @@ func TestMatches_EarlyBreakStops(t *testing.T) {
 	var got []Match
 	defer func(n int) { matchBatchSize = n }(matchBatchSize)
 	matchBatchSize = 2
-	for m, err := range Matches(context.Background(), fx.store, nil, wholeChunk(t, fx.store), false) {
+	for m, err := range Matches(context.Background(), fx.store, nil, wholeChunk(t, fx.store), false, 0) {
 		require.NoError(t, err)
 		got = append(got, m)
 		if len(got) == 3 {

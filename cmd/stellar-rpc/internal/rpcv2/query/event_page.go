@@ -354,7 +354,9 @@ func scanChunk(
 	}
 
 	var out chunkResult
-	for m, merr := range event.Matches(ctx, part.Reader, filters, window, desc) {
+	// room+1: the walk reads one match past the room to learn
+	// nextUnserved, so a page that fills is one right-sized fetch.
+	for m, merr := range event.Matches(ctx, part.Reader, filters, window, desc, room+1) {
 		if merr != nil {
 			return chunkResult{}, merr
 		}
