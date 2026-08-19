@@ -19,11 +19,16 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
+
+// defaultResultsFile is where the pollers drop the box's markdown; the
+// workflow summary step reads it, and legs default RESULTS_FILE to it.
+const defaultResultsFile = "/tmp/results.md"
 
 // GetEnv reads the common leg environment.
 func GetEnv() map[string]string {
@@ -31,7 +36,7 @@ func GetEnv() map[string]string {
 		"BUCKET":       Env("BUCKET", "stellar-rpc-ci-load-test"),
 		"REGION":       Env("REGION", "us-east-1"),
 		"WORK_DIR":     Env("WORK_DIR", "/data"),
-		"RESULTS_FILE": Env("RESULTS_FILE", "/tmp/results.md"),
+		"RESULTS_FILE": Env("RESULTS_FILE", defaultResultsFile),
 		"RESULT_KEY":   os.Getenv("RESULT_KEY"),
 		"TARGET_SHA":   os.Getenv("TARGET_SHA"),
 		"RUN_ID":       Env("RUN_ID", "manual"),
@@ -78,6 +83,36 @@ func RequireEnv(keys ...string) ([]string, error) {
 		return nil, fmt.Errorf("missing required env: %s", strings.Join(missing, ", "))
 	}
 	return vals, nil
+}
+
+// RequireEnvInts returns the integer values of keys, requiring each to be set
+// and parseable.
+func RequireEnvInts(keys ...string) (map[string]int, error) {
+	vals, err := RequireEnv(keys...)
+	if err != nil {
+		return nil, err
+	}
+	ints := make(map[string]int, len(keys))
+	for i, k := range keys {
+		n, cerr := strconv.Atoi(vals[i])
+		if cerr != nil {
+			return nil, fmt.Errorf("%s: %w", k, cerr)
+		}
+		ints[k] = n
+	}
+	return ints, nil
+}
+
+// requirePositive errors when any of keys maps to a value below 1. The poll
+// loops divide and sleep by these, so zero or negative is a mis-plumbed
+// workflow, not a slow one.
+func requirePositive(ints map[string]int, keys ...string) error {
+	for _, k := range keys {
+		if ints[k] < 1 {
+			return fmt.Errorf("%s must be positive, got %d", k, ints[k])
+		}
+	}
+	return nil
 }
 
 // BootDeadline returns the instant a box-side runner should bail by: budget
