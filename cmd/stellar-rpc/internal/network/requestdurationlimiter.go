@@ -304,9 +304,20 @@ func (q *RPCRequestDurationLimiter) Handle(ctx context.Context, req *jrpc2.Reque
 	}
 }
 
+// The three errors below are this repo's implementation-defined JSON-RPC
+// codes, kept together so the -3200x band has one registry.
+
 var ErrRequestExceededProcessingLimitThreshold = jrpc2.Error{
 	Code:    -32001,
 	Message: "request exceeded processing limit threshold",
+}
+
+// ErrTemporarilyUnavailable reports a request that failed against serving
+// state mid-handoff (a store being replaced or retired underneath it) and
+// will succeed on retry.
+var ErrTemporarilyUnavailable = jrpc2.Error{
+	Code:    -32002,
+	Message: "temporarily unavailable; retry the request",
 }
 
 var ErrFailToProcessDueToInternalIssue = jrpc2.Error{

@@ -14,6 +14,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
@@ -22,19 +23,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
-)
-
-const (
-	// Decoded output size limits for XDR unmarshaling of user-supplied input
-	// (v1's values, internal/rpcv1/jsonrpc.go).
-	ledgerKeyDecodeMaxMemory   = 16 * 1024   // 16 KB
-	transactionDecodeMaxMemory = 1024 * 1024 // 1 MB
-
-	// errCodeTemporarilyUnavailable is this repo's implementation-defined
-	// JSON-RPC code for a request that failed against a store mid-handoff and
-	// will succeed on retry. Sits in the -3200x band next to the network
-	// package's -32001 (request timeout) and -32003 (internal issue).
-	errCodeTemporarilyUnavailable = -32002
 )
 
 // handlerParams carries everything newJSONRPCHandler composes into the method
@@ -114,7 +102,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 			MethodName: protocol.GetLedgerEntriesMethodName,
 			Handler: methods.NewGetLedgerEntriesHandler(p.logger,
 				p.daemon.FastCoreClient(), p.ledgerReader,
-				xdr.DecodeOptions{MaxMemoryBytes: ledgerKeyDecodeMaxMemory}),
+				xdr.DecodeOptions{MaxMemoryBytes: jsonrpc.LedgerKeyDecodeMaxMemory}),
 			QueueLimit:           deref(m.GetLedgerEntries.QueueLimit),
 			RequestDurationLimit: deref(m.GetLedgerEntries.MaxExecutionDuration),
 		},
@@ -136,7 +124,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 			MethodName: protocol.SendTransactionMethodName,
 			Handler: methods.NewSendTransactionHandler(
 				p.daemon, p.logger, p.ledgerReader, p.networkPassphrase,
-				xdr.DecodeOptions{MaxMemoryBytes: transactionDecodeMaxMemory}),
+				xdr.DecodeOptions{MaxMemoryBytes: jsonrpc.TransactionDecodeMaxMemory}),
 			QueueLimit:           deref(m.SendTransaction.QueueLimit),
 			RequestDurationLimit: deref(m.SendTransaction.MaxExecutionDuration),
 		},
@@ -144,7 +132,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 			MethodName: protocol.SimulateTransactionMethodName,
 			Handler: methods.NewSimulateTransactionHandler(
 				p.logger, p.ledgerReader, p.daemon.FastCoreClient(), p.preflightGetter,
-				xdr.DecodeOptions{MaxMemoryBytes: transactionDecodeMaxMemory}),
+				xdr.DecodeOptions{MaxMemoryBytes: jsonrpc.TransactionDecodeMaxMemory}),
 			QueueLimit:           deref(m.SimulateTransaction.QueueLimit),
 			RequestDurationLimit: deref(m.SimulateTransaction.MaxExecutionDuration),
 		},
@@ -187,7 +175,7 @@ func notImplemented(message string) jrpc2.Handler {
 // handler fails:
 //
 //   - a request that raced a store handoff (query.ErrUnavailable or
-//     stores.ErrStoreClosed) becomes -32002 "temporarily unavailable" — both
+//     stores.ErrStoreClosed) becomes network.ErrTemporarilyUnavailable — both
 //     conditions self-heal, so retry is the honest instruction;
 //   - a scan the router rejected as below the servable window
 //     (*query.RangeError) becomes the v1-style invalid-request rejection;
@@ -212,10 +200,7 @@ func mapAdapterErrors(h jrpc2.Handler, metrics observability.Metrics) jrpc2.Hand
 			metrics.StoreClosedServed()
 			fallthrough
 		case errors.Is(marked, query.ErrUnavailable):
-			return nil, &jrpc2.Error{
-				Code:    errCodeTemporarilyUnavailable,
-				Message: "temporarily unavailable — a store serving this request was being replaced; retry",
-			}
+			return nil, network.ErrTemporarilyUnavailable
 		}
 		return result, err
 	}

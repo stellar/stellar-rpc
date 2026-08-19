@@ -14,12 +14,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
-const (
-	// Decoded output size limits for XDR unmarshaling of user-supplied input.
-	ledgerKeyDecodeMaxMemory   = 16 * 1024   // 16 KB
-	transactionDecodeMaxMemory = 1024 * 1024 // 1 MB
-)
-
 // Handler is the HTTP handler which serves the Soroban JSON RPC responses
 type Handler = jsonrpc.Handler
 
@@ -95,7 +89,7 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 			MethodName: protocol.GetLedgerEntriesMethodName,
 			Handler: methods.NewGetLedgerEntriesHandler(params.Logger,
 				params.Daemon.FastCoreClient(), params.LedgerReader,
-				xdr.DecodeOptions{MaxMemoryBytes: ledgerKeyDecodeMaxMemory}),
+				xdr.DecodeOptions{MaxMemoryBytes: jsonrpc.LedgerKeyDecodeMaxMemory}),
 			QueueLimit:           cfg.RequestBacklogGetLedgerEntriesQueueLimit,
 			RequestDurationLimit: cfg.MaxGetLedgerEntriesExecutionDuration,
 		},
@@ -116,7 +110,7 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 			MethodName: protocol.SendTransactionMethodName,
 			Handler: methods.NewSendTransactionHandler(
 				params.Daemon, params.Logger, params.LedgerReader, cfg.NetworkPassphrase,
-				xdr.DecodeOptions{MaxMemoryBytes: transactionDecodeMaxMemory}),
+				xdr.DecodeOptions{MaxMemoryBytes: jsonrpc.TransactionDecodeMaxMemory}),
 			QueueLimit:           cfg.RequestBacklogSendTransactionQueueLimit,
 			RequestDurationLimit: cfg.MaxSendTransactionExecutionDuration,
 		},
@@ -125,7 +119,7 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 			Handler: methods.NewSimulateTransactionHandler(
 				params.Logger, params.LedgerReader,
 				params.Daemon.FastCoreClient(), params.PreflightGetter,
-				xdr.DecodeOptions{MaxMemoryBytes: transactionDecodeMaxMemory}),
+				xdr.DecodeOptions{MaxMemoryBytes: jsonrpc.TransactionDecodeMaxMemory}),
 			QueueLimit:           cfg.RequestBacklogSimulateTransactionQueueLimit,
 			RequestDurationLimit: cfg.MaxSimulateTransactionExecutionDuration,
 		},

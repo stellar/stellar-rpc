@@ -7,17 +7,13 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/http/pprof"
 	"os"
 	"os/signal"
-	runtimePprof "runtime/pprof"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/go-chi/chi"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/stellar/go-stellar-sdk/clients/stellarcore"
 	"github.com/stellar/go-stellar-sdk/historyarchive"
@@ -30,6 +26,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1"
@@ -42,7 +39,6 @@ import (
 )
 
 const (
-	defaultReadTimeout         = 5 * time.Second
 	defaultShutdownGracePeriod = 10 * time.Second
 
 	// Since our default retention window will be 7 days (7*17,280 ledgers),
@@ -404,7 +400,7 @@ func (d *Daemon) setupHTTPServers(cfg *config.Config) {
 	}
 	d.server = &http.Server{
 		Handler:     createHTTPHandler(d.logger, d.jsonRPCHandler),
-		ReadTimeout: defaultReadTimeout,
+		ReadTimeout: jsonrpc.DefaultHTTPReadTimeout,
 	}
 
 	if cfg.AdminEndpoint != "" {
@@ -420,27 +416,13 @@ func createHTTPHandler(logger *supportlog.Entry, jsonRPCHandler *rpcv1.Handler) 
 
 func (d *Daemon) setupAdminServer(cfg *config.Config) {
 	var err error
-	adminMux := createAdminMux(d.logger, d.metricsRegistry)
+	adminMux := jsonrpc.NewAdminMux(d.logger, d.metricsRegistry)
 	var listenConfig net.ListenConfig
 	d.adminListener, err = listenConfig.Listen(context.Background(), "tcp", cfg.AdminEndpoint)
 	if err != nil {
 		d.logger.WithError(err).WithField("endpoint", cfg.AdminEndpoint).Fatal("cannot listen on admin endpoint")
 	}
 	d.adminServer = &http.Server{Handler: adminMux} //nolint:gosec
-}
-
-func createAdminMux(logger *supportlog.Entry, metricsRegistry *prometheus.Registry) *chi.Mux {
-	adminMux := supporthttp.NewMux(logger)
-	adminMux.HandleFunc("/debug/pprof/", pprof.Index)
-	adminMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	adminMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-	adminMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-	adminMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-	for _, profile := range runtimePprof.Profiles() {
-		adminMux.Handle("/debug/pprof/"+profile.Name(), pprof.Handler(profile.Name()))
-	}
-	adminMux.Handle("/metrics", promhttp.HandlerFor(metricsRegistry, promhttp.HandlerOpts{}))
-	return adminMux
 }
 
 // mustInitializeStorage initializes the storage using what was on the DB

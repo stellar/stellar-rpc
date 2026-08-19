@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
@@ -170,9 +171,7 @@ func TestMapAdapterErrors_UnavailableChunkBecomesRetryable(t *testing.T) {
 	}), observability.NopMetrics{})
 
 	_, err := wrapped(context.Background(), nil)
-	var rpcErr *jrpc2.Error
-	require.ErrorAs(t, err, &rpcErr)
-	assert.EqualValues(t, errCodeTemporarilyUnavailable, rpcErr.Code)
+	assert.Equal(t, error(network.ErrTemporarilyUnavailable), err)
 }
 
 func TestMapAdapterErrors_StoreClosedIsRetryableAndCounted(t *testing.T) {
@@ -187,9 +186,7 @@ func TestMapAdapterErrors_StoreClosedIsRetryableAndCounted(t *testing.T) {
 	}), metrics)
 
 	_, err := wrapped(context.Background(), nil)
-	var rpcErr *jrpc2.Error
-	require.ErrorAs(t, err, &rpcErr)
-	assert.EqualValues(t, errCodeTemporarilyUnavailable, rpcErr.Code)
+	assert.Equal(t, error(network.ErrTemporarilyUnavailable), err)
 	assert.Equal(t, int32(1), metrics.served.Load())
 }
 

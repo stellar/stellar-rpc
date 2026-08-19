@@ -30,6 +30,13 @@ import (
 )
 
 const (
+	// LedgerKeyDecodeMaxMemory and TransactionDecodeMaxMemory bound the decoded
+	// output size when XDR-unmarshaling user-supplied input, shared by both
+	// daemons' method tables so the two cannot drift on a security-relevant
+	// bound.
+	LedgerKeyDecodeMaxMemory   = 16 * 1024   // 16 KB
+	TransactionDecodeMaxMemory = 1024 * 1024 // 1 MB
+
 	// metric label/subsystem names shared across the assembly below
 	subsystemNetwork = "network"
 	labelStatus      = "status"

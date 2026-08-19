@@ -6,30 +6,25 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/http/pprof"
 	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	dto "github.com/prometheus/client_model/go"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 )
 
-const (
-	// httpReadTimeout mirrors v1's read-server ReadTimeout.
-	httpReadTimeout = 5 * time.Second
-	// readShutdownTimeout bounds the graceful drain when a supervised attempt
-	// ends; whatever is still in flight after it is cut off. The next attempt
-	// cannot bind the port until this returns, so it stays short.
-	readShutdownTimeout = 5 * time.Second
-)
+// readShutdownTimeout bounds the graceful drain when a supervised attempt
+// ends; whatever is still in flight after it is cut off. The next attempt
+// cannot bind the port until this returns, so it stays short.
+const readShutdownTimeout = 5 * time.Second
 
 // The JSON-RPC server is rebuilt every supervised attempt (its handlers hold
 // that attempt's query.Registry — "no query survives a restart"), and the
@@ -93,7 +88,7 @@ func newServeReads(deps readServerDeps) func(context.Context, *query.Registry) (
 		}
 		deps.attempts.reg.Store(attemptReg)
 
-		server := &http.Server{Handler: handler, ReadTimeout: httpReadTimeout}
+		server := &http.Server{Handler: handler, ReadTimeout: jsonrpc.DefaultHTTPReadTimeout}
 		go func() {
 			if serr := server.Serve(listener); serr != nil && !errors.Is(serr, http.ErrServerClosed) {
 				deps.params.logger.WithError(serr).Warn("read server exited")
@@ -123,21 +118,14 @@ func startAdminServer(
 	ctx context.Context, endpoint string, logger *supportlog.Entry,
 	processRegistry *prometheus.Registry, attempts *attemptGatherer,
 ) (func(), error) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/debug/pprof/", pprof.Index)
-	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-	mux.Handle("/metrics", promhttp.HandlerFor(
-		prometheus.Gatherers{processRegistry, attempts}, promhttp.HandlerOpts{}))
+	mux := jsonrpc.NewAdminMux(logger, prometheus.Gatherers{processRegistry, attempts})
 
 	var lc net.ListenConfig
 	listener, err := lc.Listen(ctx, "tcp", endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("admin server listen on %q: %w", endpoint, err)
 	}
-	server := &http.Server{Handler: mux, ReadTimeout: httpReadTimeout}
+	server := &http.Server{Handler: mux, ReadTimeout: jsonrpc.DefaultHTTPReadTimeout}
 	go func() {
 		if serr := server.Serve(listener); serr != nil && !errors.Is(serr, http.ErrServerClosed) {
 			logger.WithError(serr).Warn("admin server exited")
