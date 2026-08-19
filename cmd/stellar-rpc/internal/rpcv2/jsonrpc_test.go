@@ -177,7 +177,7 @@ func TestMapAdapterErrors_UnavailableChunkBecomesRetryable(t *testing.T) {
 	r.SetLatestLedger(chunk.FirstLedgerSeq, 0)
 	reader := adapters.NewLedgerReader(r)
 
-	wrapped := mapAdapterErrors(flatteningHandler(t, func(ctx context.Context) error {
+	wrapped := wrapAdapterRequest(flatteningHandler(t, func(ctx context.Context) error {
 		_, _, err := reader.GetLedger(ctx, chunk.FirstLedgerSeq)
 		return err
 	}), observability.NopMetrics{})
@@ -192,7 +192,7 @@ func TestMapAdapterErrors_StoreClosedIsRetryableAndCounted(t *testing.T) {
 	reader := adapters.NewLedgerReader(r)
 	metrics := &storeClosedCounter{}
 
-	wrapped := mapAdapterErrors(flatteningHandler(t, func(ctx context.Context) error {
+	wrapped := wrapAdapterRequest(flatteningHandler(t, func(ctx context.Context) error {
 		_, _, err := reader.GetLedger(ctx, chunk.FirstLedgerSeq)
 		return err
 	}), metrics)
@@ -204,7 +204,7 @@ func TestMapAdapterErrors_StoreClosedIsRetryableAndCounted(t *testing.T) {
 
 func TestMapAdapterErrors_UnmarkedErrorPassesThrough(t *testing.T) {
 	inner := &jrpc2.Error{Code: jrpc2.InternalError, Message: "disk on fire"}
-	wrapped := mapAdapterErrors(func(context.Context, *jrpc2.Request) (any, error) {
+	wrapped := wrapAdapterRequest(func(context.Context, *jrpc2.Request) (any, error) {
 		return nil, inner
 	}, observability.NopMetrics{})
 

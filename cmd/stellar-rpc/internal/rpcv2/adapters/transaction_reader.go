@@ -28,11 +28,11 @@ func NewTransactionReader(registry *query.Registry, networkPassphrase string) *T
 }
 
 func (r *TransactionReader) GetTransaction(ctx context.Context, hash xdr.Hash) (store.Transaction, error) {
-	view, err := r.registry.NewReadView()
+	view, release, err := acquireView(ctx, r.registry)
 	if err != nil {
 		return store.Transaction{}, markErr(ctx, err)
 	}
-	defer view.Release()
+	defer release()
 
 	cold, err := view.ColdTxIndexes()
 	if err != nil {

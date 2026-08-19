@@ -85,7 +85,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 	specs = specLimits(m).Apply(specs)
 	metrics := observability.MetricsOrNop(p.metrics)
 	for i := range specs {
-		specs[i].Handler = mapAdapterErrors(specs[i].Handler, metrics)
+		specs[i].Handler = wrapAdapterRequest(specs[i].Handler, metrics)
 	}
 
 	return jsonrpc.NewHandler(jsonrpc.Params{
@@ -134,11 +134,14 @@ func notImplemented(message string) jrpc2.Handler {
 	}
 }
 
-// mapAdapterErrors rewrites the routing/lifecycle failures the shared handlers
-// can only report as generic internal errors. The shared handlers flatten
-// every store error, so the adapters preserve the original through a context
-// mark (adapters.WithErrorMark) and this wrapper classifies it after the
-// handler fails:
+// wrapAdapterRequest is the per-request scope around every handler: it plants
+// the adapters' shared read view (adapters.WithSharedView, released after the
+// handler returns — every store read in one request sees one snapshot) and
+// rewrites the routing/lifecycle failures the shared handlers can only report
+// as generic internal errors. The shared handlers flatten every store error,
+// so the adapters preserve the original through a context mark
+// (adapters.WithErrorMark) and this wrapper classifies it after the handler
+// fails:
 //
 //   - a request that raced a store handoff (query.ErrUnavailable or
 //     stores.ErrStoreClosed) becomes network.ErrTemporarilyUnavailable — both
@@ -150,10 +153,12 @@ func notImplemented(message string) jrpc2.Handler {
 // A store closed under an in-flight request also counts on the
 // StoreClosedServed metric: reaching a client at all means the request
 // outlived the deletion grace period, which operators must see.
-func mapAdapterErrors(h jrpc2.Handler, metrics observability.Metrics) jrpc2.Handler {
+func wrapAdapterRequest(h jrpc2.Handler, metrics observability.Metrics) jrpc2.Handler {
 	return func(ctx context.Context, req *jrpc2.Request) (any, error) {
 		ctx, mark := adapters.WithErrorMark(ctx)
+		ctx, releaseView := adapters.WithSharedView(ctx)
 		result, err := h(ctx, req)
+		releaseView()
 		if err == nil {
 			return result, nil
 		}

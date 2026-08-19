@@ -26,9 +26,10 @@ import (
 // (methods.LedgerScanLimit, the same 10,000) keeps requests inside this window.
 const walkSpanCap = 10_000
 
-// LedgerReader satisfies store.LedgerReader over the query router. Each method
-// takes its own read view; NewTx returns a handle that holds one view across
-// calls and releases it on Done.
+// LedgerReader satisfies store.LedgerReader over the query router. Every
+// method reads through the request's shared view (see WithSharedView), or its
+// own when the context carries none; NewTx returns a handle that keeps one
+// view across calls until Done.
 type LedgerReader struct {
 	registry *query.Registry
 }
@@ -38,11 +39,11 @@ func NewLedgerReader(registry *query.Registry) *LedgerReader {
 }
 
 func (r *LedgerReader) GetLatestLedgerSequence(ctx context.Context) (uint32, error) {
-	view, err := r.registry.NewReadView()
+	view, release, err := acquireView(ctx, r.registry)
 	if err != nil {
 		return 0, markErr(ctx, err)
 	}
-	defer view.Release()
+	defer release()
 	if view.OldestLedger() > view.LatestLedger() {
 		return 0, markErr(ctx, store.ErrEmptyDB)
 	}
@@ -50,21 +51,21 @@ func (r *LedgerReader) GetLatestLedgerSequence(ctx context.Context) (uint32, err
 }
 
 func (r *LedgerReader) GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
-	view, err := r.registry.NewReadView()
+	view, release, err := acquireView(ctx, r.registry)
 	if err != nil {
 		return xdr.LedgerCloseMeta{}, false, markErr(ctx, err)
 	}
-	defer view.Release()
+	defer release()
 	lcm, found, err := getLedger(view, sequence)
 	return lcm, found, markErr(ctx, err)
 }
 
 func (r *LedgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRange, error) {
-	view, err := r.registry.NewReadView()
+	view, release, err := acquireView(ctx, r.registry)
 	if err != nil {
 		return store.LedgerRange{}, markErr(ctx, err)
 	}
-	defer view.Release()
+	defer release()
 	lr, err := getLedgerRange(view, r.registry)
 	return lr, markErr(ctx, err)
 }
@@ -72,11 +73,11 @@ func (r *LedgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRange, e
 func (r *LedgerReader) StreamLedgerRange(
 	ctx context.Context, startLedger, endLedger uint32, f store.StreamLedgerFn,
 ) error {
-	view, err := r.registry.NewReadView()
+	view, release, err := acquireView(ctx, r.registry)
 	if err != nil {
 		return markErr(ctx, err)
 	}
-	defer view.Release()
+	defer release()
 
 	scan, err := view.ScanLedgers(startLedger, endLedger)
 	if err != nil {
@@ -101,11 +102,11 @@ func (r *LedgerReader) StreamLedgerRange(
 }
 
 func (r *LedgerReader) NewTx(ctx context.Context) (store.LedgerReaderTx, error) {
-	view, err := r.registry.NewReadView()
+	view, release, err := acquireView(ctx, r.registry)
 	if err != nil {
 		return nil, markErr(ctx, err)
 	}
-	return &ledgerReaderTx{view: view, registry: r.registry}, nil
+	return &ledgerReaderTx{view: view, release: release, registry: r.registry}, nil
 }
 
 // ledgerReaderTx satisfies store.LedgerReaderTx over one read view. GetLedger
@@ -113,7 +114,8 @@ func (r *LedgerReader) NewTx(ctx context.Context) (store.LedgerReaderTx, error) 
 // a single ScanLedgers iterator primed on the first call; GetLedgerRange and
 // BatchGetLedgers read through the same view but never touch that iterator.
 type ledgerReaderTx struct {
-	view *query.ReadView
+	view    *query.ReadView
+	release func()
 	// registry outlives the view; GetLedgerRange writes the oldest-close-time
 	// cache through it.
 	registry *query.Registry
@@ -218,7 +220,7 @@ func (tx *ledgerReaderTx) Done() error {
 	if tx.stop != nil {
 		tx.stop()
 	}
-	tx.view.Release()
+	tx.release()
 	return nil
 }
 
