@@ -86,20 +86,14 @@ func (a *ReadView) QueryEvents(ctx context.Context, cursor EventCursor, limit in
 		// Resume moved past the scope's far bound: nothing is left to serve.
 		return &EventPage{Next: cursor, Status: ScanComplete}, nil
 	}
-	if desc && hi > a.LatestLedger() {
-		// The scope's top edge is above this view's latest ledger. A
-		// descending walk never goes back up, so clamping would skip
-		// [latest+1, hi] forever. Wait until this view has those
-		// ledgers; fresh and resumed scopes follow the same rule.
-		return &EventPage{Next: cursor, Status: ScanWaitingForLedgers}, nil
-	}
 	lo, hi, err := a.ClampRange(cursor.Scope.Dir, lo, hi)
 	if err != nil {
 		return nil, err
 	}
 	if lo > hi {
-		// Beyond latest: nothing to scan yet. Either an ascending
-		// resume moved past it, or a fresh scope is entirely above it.
+		// Nothing servable yet: the range is beyond latest, or a
+		// descending top is above it, which ClampRange never truncates
+		// (a descending walk could not come back for skipped ledgers).
 		return &EventPage{Next: cursor, Status: ScanWaitingForLedgers}, nil
 	}
 	// Bound the page's scan window. The window keeps the leading edge
@@ -118,10 +112,7 @@ func (a *ReadView) QueryEvents(ctx context.Context, cursor EventCursor, limit in
 		}
 	}
 
-	chunks, err := a.ChunksForRange(cursor.Scope.Dir, lo, hi)
-	if err != nil {
-		return nil, err
-	}
+	chunks := chunksBetween(chunk.IDFromLedger(lo), chunk.IDFromLedger(hi), cursor.Scope.Dir)
 	walk, err := a.walkChunks(ctx, chunks, lo, hi, cursor.Scope.Filters, reenter, desc, limit)
 	if err != nil {
 		return nil, err

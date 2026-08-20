@@ -42,16 +42,20 @@ func (e *RangeError) Error() string {
 // the view's retention-floor chunk.
 func (a *ReadView) OldestLedger() uint32 { return a.floor.FirstLedger() }
 
-// ClampRange validates a request's leading edge against the view's floor and
-// clamps its trailing edge into the view's range [OldestLedger, LatestLedger]. A
-// leading edge — where results begin, lo for ascending and hi for descending —
-// below the oldest servable ledger is rejected with *RangeError (not clamped); a
-// descending leading edge above latest is truncated to it, since nothing exists
-// there to drop. The trailing edge is truncated: an ascending scan stops at
-// latest, a descending scan terminates at the floor. It returns the clamped [lo, hi]; lo > hi in the
-// result means the request lies entirely beyond latest, so there is nothing to
-// serve yet. An inverted input (lo > hi before clamping) is rejected with
-// ErrInvertedRange, so callers never confuse a malformed range with an empty one.
+// ClampRange validates a request's leading edge (where results begin:
+// lo ascending, hi descending) and clamps its trailing edge into the
+// view's range [OldestLedger, LatestLedger]. A leading edge below the
+// oldest servable ledger is rejected with *RangeError, not clamped.
+// The trailing edge is truncated: an ascending scan stops at latest, a
+// descending scan ends at the floor.
+//
+// lo > hi in the result means nothing is servable yet: the range lies
+// beyond latest, or a descending top is above latest. That top is
+// never truncated: a descending scan cannot revisit a ledger, so
+// serving below a top this view lacks would skip [latest+1, hi]
+// forever. Callers wait instead. An inverted input (lo > hi before
+// clamping) is rejected with ErrInvertedRange, so a malformed range is
+// never confused with an empty one.
 func (a *ReadView) ClampRange(dir Direction, lo, hi uint32) (uint32, uint32, error) {
 	if lo > hi {
 		return 0, 0, fmt.Errorf("%w: [%d, %d]", ErrInvertedRange, lo, hi)
@@ -67,29 +71,15 @@ func (a *ReadView) ClampRange(dir Direction, lo, hi uint32) (uint32, uint32, err
 	}
 
 	if hi > latest {
+		if dir == Descending {
+			return latest + 1, latest, nil // top above latest: wait
+		}
 		hi = latest // truncate beyond the tip
 	}
 	if lo < oldest {
 		lo = oldest // terminate at the floor
 	}
 	return lo, hi, nil
-}
-
-// ChunksForRange clamps the requested ledger range (ClampRange) and returns the
-// chunks overlapping the clamped range in scan order — the sequence a range query
-// walks, resolving each chunk to its serving store. A leading edge below the floor
-// is rejected with *RangeError; an empty result means the request lies beyond
-// latest (nothing to serve yet). Each chunk belongs to exactly one serving store
-// per path, so multi-chunk results are concatenated, not merged.
-func (a *ReadView) ChunksForRange(dir Direction, lo, hi uint32) ([]chunk.ID, error) {
-	lo, hi, err := a.ClampRange(dir, lo, hi)
-	if err != nil {
-		return nil, err
-	}
-	if lo > hi {
-		return nil, nil // entirely beyond latest
-	}
-	return chunksBetween(chunk.IDFromLedger(lo), chunk.IDFromLedger(hi), dir), nil
 }
 
 // chunksBetween returns the inclusive chunk ids from first..last (first <= last)
