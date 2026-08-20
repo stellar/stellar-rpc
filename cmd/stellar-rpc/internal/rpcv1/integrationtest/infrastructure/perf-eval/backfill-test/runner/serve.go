@@ -5,46 +5,70 @@ import (
 	"fmt"
 	"os/exec"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v11"
 )
 
-const rpcPort = "8000" // rpcPort is where the daemon serves, crosses VPC
+const (
+	rpcPort               = "8000"
+	serveSnapshotInterval = 2 * time.Minute
+)
 
-// serveEnv is the serve phase's env-derived config.
 type serveEnv struct {
 	Ceiling   time.Duration `env:"SERVE_CEILING" envDefault:"6h"`
-	Bucket    string        `env:"BUCKET"`
+	Bucket    string        `env:"BUCKET"        envDefault:"stellar-rpc-ci-load-test"`
 	ResultKey string        `env:"RESULT_KEY"`
 }
 
-// servePhase parks the box serving for the blaster leg, which gets this box's
-// IP through the coordinator. Termination is through other job's adopt cleanup.
+// servePhase keeps the daemon available to the blaster leg.
 func servePhase(ctx context.Context, daemon *daemonHandle) {
-	// on the backstop path the leg script's EXIT trap gets a minute to upload
-	// the box log before poweroff
-	defer rescheduleShutdown(ctx, 1, "serve phase over")
-	defer daemon.Stop()
-
 	cfg, err := env.ParseAs[serveEnv]()
 	if err != nil {
 		logger.Warnf("parsing serve env: %v", err)
 		cfg.Ceiling = 6 * time.Hour
 	}
 
-	// the boot-time self-terminate (budget+15m) can predate the blast's end
-	rescheduleShutdown(ctx, int(cfg.Ceiling.Minutes()), "serve ceiling")
+	defer rescheduleShutdown(ctx, 1, "serve phase over")
+	defer snapshotBoxLog(context.WithoutCancel(ctx), cfg.Bucket, cfg.ResultKey)
+	defer daemon.Stop()
 
-	// the happy-path hard kill skips the EXIT-trap upload, persist the log up to now
+	rescheduleShutdown(ctx, int(cfg.Ceiling.Minutes()), "serve ceiling")
 	snapshotBoxLog(ctx, cfg.Bucket, cfg.ResultKey)
 
 	logger.Infof("serving :%s until external termination (ceiling %s)", rpcPort, cfg.Ceiling)
-	select {
-	case <-ctx.Done():
-	case <-time.After(cfg.Ceiling):
-		logger.Warnf("serve ceiling passed without external termination") // backstops orphaned runs
+	ceiling := time.After(cfg.Ceiling)
+	ticker := time.NewTicker(serveSnapshotInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ceiling:
+			logger.Warnf("serve ceiling passed without external termination")
+			return
+		case <-daemon.done:
+			logger.Warnf("serving daemon exited")
+			dumpDmesgTail(ctx)
+			return
+		case <-ticker.C:
+			snapshotBoxLog(ctx, cfg.Bucket, cfg.ResultKey)
+		}
 	}
+}
+
+func dumpDmesgTail(ctx context.Context) {
+	out, err := exec.CommandContext(ctx, "dmesg").CombinedOutput()
+	if err != nil {
+		logger.Warnf("dumping dmesg tail: %v (%s)", err, out)
+		return
+	}
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(lines) > 100 {
+		lines = lines[len(lines)-100:]
+	}
+	logger.Warnf("dmesg tail:\n%s", strings.Join(lines, "\n"))
 }
 
 // snapshotBoxLog copies the box log so far next to the result object.

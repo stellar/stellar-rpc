@@ -258,7 +258,7 @@ func runBackfill(
 			fmt.Fprintln(os.Stderr, scanner.Text())
 		}
 		pr.Close()
-		_ = cmd.Wait() // reap; a kill from cancel surfaces here and is expected
+		logger.Infof("daemon exited: %v", cmd.Wait())
 	}()
 	daemon := &daemonHandle{cancel: cancel, done: done}
 	if !keepAlive {

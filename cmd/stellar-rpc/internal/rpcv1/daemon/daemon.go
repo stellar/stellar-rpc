@@ -40,6 +40,7 @@ import (
 
 const (
 	defaultShutdownGracePeriod = 10 * time.Second
+	defaultIdleTimeout         = 2 * time.Minute
 
 	// Since our default retention window will be 7 days (7*17,280 ledgers),
 	// choose a random 5-digit prime to have irregular logging intervals at each
@@ -402,6 +403,7 @@ func (d *Daemon) setupHTTPServers(cfg *config.Config) {
 	d.server = &http.Server{
 		Handler:     createHTTPHandler(d.logger, d.jsonRPCHandler),
 		ReadTimeout: jsonrpc.DefaultHTTPReadTimeout,
+		IdleTimeout: defaultIdleTimeout,
 	}
 
 	if cfg.AdminEndpoint != "" {
