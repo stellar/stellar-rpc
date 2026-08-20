@@ -5,10 +5,13 @@
 package rpcv2test
 
 import (
+	"bytes"
+	"context"
 	"encoding/binary"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/sirupsen/logrus"
@@ -157,6 +160,26 @@ func ZeroTxLCMBytes(t *testing.T, seq uint32) []byte {
 // that assert against a known close-time value.
 func ZeroTxLCMBytesAt(t *testing.T, seq uint32, closeTimeUnix int64) []byte {
 	t.Helper()
+	return V2LCMBytes(t, seq, closeTimeUnix, nil, nil)
+}
+
+// V2LCMBytes returns the marshaled bytes of a V2 LedgerCloseMeta for ledger
+// seq: the given close time, the envelopes as the txset's one phase (no phase
+// at all when empty), and processing as the apply results. Every V2 fixture
+// builder delegates here so the skeleton exists once.
+func V2LCMBytes(
+	t *testing.T, seq uint32, closeTimeUnix int64,
+	envelopes []xdr.TransactionEnvelope, processing []xdr.TransactionResultMetaV1,
+) []byte {
+	t.Helper()
+	var phases []xdr.TransactionPhase
+	if len(envelopes) > 0 {
+		comp := []xdr.TxSetComponent{{
+			Type:                  xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
+			TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{Txs: envelopes},
+		}}
+		phases = []xdr.TransactionPhase{{V: 0, V0Components: &comp}}
+	}
 	lcm := xdr.LedgerCloseMeta{
 		V: 2,
 		V2: &xdr.LedgerCloseMetaV2{
@@ -169,14 +192,39 @@ func ZeroTxLCMBytesAt(t *testing.T, seq uint32, closeTimeUnix int64) []byte {
 			},
 			TxSet: xdr.GeneralizedTransactionSet{
 				V:       1,
-				V1TxSet: &xdr.TransactionSetV1{Phases: nil},
+				V1TxSet: &xdr.TransactionSetV1{Phases: phases},
 			},
-			TxProcessing: nil,
+			TxProcessing: processing,
 		},
 	}
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 	return raw
+}
+
+// WriteColdTxIndexFile builds a real cold tx-hash .idx at cov's layout path
+// from the given hash→seq entries, through the production WriteColdBin +
+// BuildColdIndex pipeline. Catalog state (freezing/frozen coverage keys) stays
+// the caller's to manage.
+func WriteColdTxIndexFile(
+	t *testing.T, cat *catalog.Catalog, cov geometry.TxHashIndexCoverage, entries map[xdr.Hash]uint32,
+) {
+	t.Helper()
+	cold := make([]txhash.ColdEntry, 0, len(entries))
+	for h, seq := range entries {
+		var e txhash.ColdEntry
+		copy(e.Key[:], h[:txhash.ColdKeySize])
+		e.Seq = seq
+		cold = append(cold, e)
+	}
+	slices.SortFunc(cold, func(a, b txhash.ColdEntry) int { return bytes.Compare(a.Key[:], b.Key[:]) })
+	bin := filepath.Join(t.TempDir(), txhash.ColdBinName(cov.Lo))
+	require.NoError(t, txhash.WriteColdBin(bin, cold))
+
+	idxPath := cat.Layout().TxHashIndexFilePath(cov)
+	require.NoError(t, os.MkdirAll(filepath.Dir(idxPath), 0o755))
+	require.NoError(t, txhash.BuildColdIndex(
+		context.Background(), []string{bin}, idxPath, cov.Lo.FirstLedger(), cov.Hi.LastLedger()))
 }
 
 // EventLCMBytes returns the marshaled bytes of a single-transaction
@@ -208,43 +256,20 @@ func EventLCMBytes(t *testing.T, seq uint32) []byte {
 	require.NoError(t, err)
 
 	opResults := []xdr.OperationResult{}
-	comp := []xdr.TxSetComponent{{
-		Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
-		TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
-			Txs: []xdr.TransactionEnvelope{envelope},
+	processing := []xdr.TransactionResultMetaV1{{
+		TxApplyProcessing: meta,
+		Result: xdr.TransactionResultPair{
+			TransactionHash: hash,
+			Result: xdr.TransactionResult{
+				FeeCharged: 100,
+				Result: xdr.TransactionResultResult{
+					Code:    xdr.TransactionResultCodeTxSuccess,
+					Results: &opResults,
+				},
+			},
 		},
 	}}
-	lcm := xdr.LedgerCloseMeta{
-		V: 2,
-		V2: &xdr.LedgerCloseMetaV2{
-			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
-				Header: xdr.LedgerHeader{
-					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(0)},
-					LedgerSeq: xdr.Uint32(seq),
-				},
-			},
-			TxSet: xdr.GeneralizedTransactionSet{
-				V:       1,
-				V1TxSet: &xdr.TransactionSetV1{Phases: []xdr.TransactionPhase{{V: 0, V0Components: &comp}}},
-			},
-			TxProcessing: []xdr.TransactionResultMetaV1{{
-				TxApplyProcessing: meta,
-				Result: xdr.TransactionResultPair{
-					TransactionHash: hash,
-					Result: xdr.TransactionResult{
-						FeeCharged: 100,
-						Result: xdr.TransactionResultResult{
-							Code:    xdr.TransactionResultCodeTxSuccess,
-							Results: &opResults,
-						},
-					},
-				},
-			}},
-		},
-	}
-	raw, err := lcm.MarshalBinary()
-	require.NoError(t, err)
-	return raw
+	return V2LCMBytes(t, seq, 0, []xdr.TransactionEnvelope{envelope}, processing)
 }
 
 // FeeTxLCMBytes returns the marshaled bytes of a single-transaction
@@ -266,43 +291,20 @@ func FeeTxLCMBytes(t *testing.T, seq uint32, feeCharged int64) []byte {
 	hash, err := network.HashTransactionInEnvelope(envelope, network.PublicNetworkPassphrase)
 	require.NoError(t, err)
 	opResults := []xdr.OperationResult{{Code: xdr.OperationResultCodeOpNotSupported}}
-	comp := []xdr.TxSetComponent{{
-		Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
-		TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
-			Txs: []xdr.TransactionEnvelope{envelope},
+	processing := []xdr.TransactionResultMetaV1{{
+		TxApplyProcessing: xdr.TransactionMeta{V: 4, V4: &xdr.TransactionMetaV4{}},
+		Result: xdr.TransactionResultPair{
+			TransactionHash: hash,
+			Result: xdr.TransactionResult{
+				FeeCharged: xdr.Int64(feeCharged),
+				Result: xdr.TransactionResultResult{
+					Code:    xdr.TransactionResultCodeTxFailed,
+					Results: &opResults,
+				},
+			},
 		},
 	}}
-	lcm := xdr.LedgerCloseMeta{
-		V: 2,
-		V2: &xdr.LedgerCloseMetaV2{
-			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
-				Header: xdr.LedgerHeader{
-					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(0)},
-					LedgerSeq: xdr.Uint32(seq),
-				},
-			},
-			TxSet: xdr.GeneralizedTransactionSet{
-				V:       1,
-				V1TxSet: &xdr.TransactionSetV1{Phases: []xdr.TransactionPhase{{V: 0, V0Components: &comp}}},
-			},
-			TxProcessing: []xdr.TransactionResultMetaV1{{
-				TxApplyProcessing: xdr.TransactionMeta{V: 4, V4: &xdr.TransactionMetaV4{}},
-				Result: xdr.TransactionResultPair{
-					TransactionHash: hash,
-					Result: xdr.TransactionResult{
-						FeeCharged: xdr.Int64(feeCharged),
-						Result: xdr.TransactionResultResult{
-							Code:    xdr.TransactionResultCodeTxFailed,
-							Results: &opResults,
-						},
-					},
-				},
-			}},
-		},
-	}
-	raw, err := lcm.MarshalBinary()
-	require.NoError(t, err)
-	return raw
+	return V2LCMBytes(t, seq, 0, []xdr.TransactionEnvelope{envelope}, processing)
 }
 
 // ReadColdBin reads back a cold txhash .bin file written by

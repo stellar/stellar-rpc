@@ -261,8 +261,15 @@ type ReadView struct {
 // NewReadView captures a query's view of serving state with three loads, in
 // this order: the latest ledger stamp first, the handle set second, the catalog
 // snapshot last. The order makes the snapshot's metadata the newest of the
-// three, so any skew between the handle set and the snapshot resolves safely
-// (see the design's Read views section).
+// three, so the servable window derived from it is never staler than the
+// handles. The ordering alone does NOT make handle/snapshot skew safe — at a
+// chunk boundary the hot key can flip ready before the handle publishes, and a
+// prune can retire a chunk whose handle this view already loaded. What keeps
+// skewed reads correct are the gates downstream: every lookup is checked
+// against the view's window (the adapters' inWindow / windowGatedIndex), and a
+// chunk without a serving store resolves to ErrUnavailable. A read path that
+// skips those gates cannot lean on this ordering. (See the design's Read views
+// section.)
 //
 // The caller MUST call Release when the request completes, including on error
 // paths.

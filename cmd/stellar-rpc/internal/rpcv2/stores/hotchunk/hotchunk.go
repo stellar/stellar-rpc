@@ -242,8 +242,9 @@ func (d *DB) Source() ledgerbackend.LedgerStream {
 	return &hotLedgerStream{store: d.ledger}
 }
 
-// Close releases the shared store exactly once. Idempotent. Must not be called
-// concurrently with in-flight reads/writes.
+// Close releases the shared store exactly once. Idempotent, and safe against
+// in-flight reads/writes: the store drains them under its lock before freeing,
+// and any operation arriving after gets ErrStoreClosed.
 func (d *DB) Close() error { return d.store.Close() }
 
 // CloseIfIdle is the non-blocking Close deferred deletion uses to reclaim a

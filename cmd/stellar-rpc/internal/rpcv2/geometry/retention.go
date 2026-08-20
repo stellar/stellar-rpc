@@ -1,6 +1,8 @@
 package geometry
 
 import (
+	"math"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
 
@@ -29,4 +31,12 @@ func (r Retention) FloorAt(frontier int64) chunk.ID {
 		sliding = frontier - int64(r.size) + 1
 	}
 	return chunk.ID(max(sliding, int64(r.earliestChunk))) //nolint:gosec // max >= earliestChunk >= 0, fits uint32
+}
+
+// RetentionWindow is the configured window's width in ledgers — the
+// retention_chunks knob in ledger units. 0 means full history (nothing is ever
+// pruned); a size whose ledger count exceeds uint32 clamps to the maximum.
+func (r Retention) RetentionWindow() uint32 {
+	ledgers := min(uint64(r.size)*uint64(chunk.LedgersPerChunk), math.MaxUint32)
+	return uint32(ledgers) //nolint:gosec // min clamps to MaxUint32
 }

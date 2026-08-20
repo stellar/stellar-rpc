@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -266,10 +265,4 @@ func TestDeriveLifecycleGrace_TracksARaisedMethodBudget(t *testing.T) {
 	long := 2 * time.Minute
 	cfg.Service.Methods.SimulateTransaction.MaxExecutionDuration = &long
 	assert.Equal(t, long+graceMargin, deriveLifecycleGrace(cfg.Service))
-}
-
-func TestRetentionLedgers(t *testing.T) {
-	assert.Equal(t, uint32(math.MaxUint32), retentionLedgers(0), "full history reports the widest window")
-	assert.Equal(t, uint32(30_000), retentionLedgers(3))
-	assert.Equal(t, uint32(math.MaxUint32), retentionLedgers(math.MaxUint32), "overflow clamps")
 }

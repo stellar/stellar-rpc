@@ -6,11 +6,6 @@ package adapters
 // test may seed lives here.
 
 import (
-	"bytes"
-	"context"
-	"os"
-	"path/filepath"
-	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -25,7 +20,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
 const testChunk = chunk.ID(5)
@@ -120,7 +114,7 @@ func lcmWithTxs(t *testing.T, seq uint32, specs ...txSpec) ([]byte, []fixtureTx)
 		}
 		txs[i] = fixtureTx{hash: hash, envelope: envelope, result: result, meta: meta}
 	}
-	return marshalV2LCM(t, seq, envelopes, processing), txs
+	return rpcv2test.V2LCMBytes(t, seq, closeTimeFor(seq), envelopes, processing), txs
 }
 
 // feeBumpLCM builds a V2 LedgerCloseMeta for seq holding one successful
@@ -172,39 +166,8 @@ func feeBumpLCM(t *testing.T, seq uint32) ([]byte, xdr.Hash, xdr.Hash) {
 		Result:            xdr.TransactionResultPair{TransactionHash: outerHash, Result: result},
 		TxApplyProcessing: xdr.TransactionMeta{V: 4, V4: &xdr.TransactionMetaV4{}},
 	}}
-	raw := marshalV2LCM(t, seq, []xdr.TransactionEnvelope{envelope}, processing)
+	raw := rpcv2test.V2LCMBytes(t, seq, closeTimeFor(seq), []xdr.TransactionEnvelope{envelope}, processing)
 	return raw, outerHash, innerHash
-}
-
-func marshalV2LCM(
-	t *testing.T, seq uint32, envelopes []xdr.TransactionEnvelope, processing []xdr.TransactionResultMetaV1,
-) []byte {
-	t.Helper()
-	comp := []xdr.TxSetComponent{{
-		Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
-		TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
-			Txs: envelopes,
-		},
-	}}
-	lcm := xdr.LedgerCloseMeta{
-		V: 2,
-		V2: &xdr.LedgerCloseMetaV2{
-			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
-				Header: xdr.LedgerHeader{
-					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(closeTimeFor(seq))},
-					LedgerSeq: xdr.Uint32(seq),
-				},
-			},
-			TxSet: xdr.GeneralizedTransactionSet{
-				V:       1,
-				V1TxSet: &xdr.TransactionSetV1{Phases: []xdr.TransactionPhase{{V: 0, V0Components: &comp}}},
-			},
-			TxProcessing: processing,
-		},
-	}
-	raw, err := lcm.MarshalBinary()
-	require.NoError(t, err)
-	return raw
 }
 
 // lcmV1WithClassicTx builds a V1 LedgerCloseMeta — the shape full history
@@ -292,21 +255,6 @@ func writeFrozenTxIndex(t *testing.T, cat *catalog.Catalog, lo, hi chunk.ID, ent
 	t.Helper()
 	cov, err := cat.MarkTxHashIndexFreezing(0, lo, hi)
 	require.NoError(t, err)
-
-	cold := make([]txhash.ColdEntry, 0, len(entries))
-	for h, seq := range entries {
-		var e txhash.ColdEntry
-		copy(e.Key[:], h[:txhash.ColdKeySize])
-		e.Seq = seq
-		cold = append(cold, e)
-	}
-	slices.SortFunc(cold, func(a, b txhash.ColdEntry) int { return bytes.Compare(a.Key[:], b.Key[:]) })
-	bin := filepath.Join(t.TempDir(), txhash.ColdBinName(lo))
-	require.NoError(t, txhash.WriteColdBin(bin, cold))
-
-	idxPath := cat.Layout().TxHashIndexFilePath(cov)
-	require.NoError(t, os.MkdirAll(filepath.Dir(idxPath), 0o755))
-	require.NoError(t, txhash.BuildColdIndex(
-		context.Background(), []string{bin}, idxPath, lo.FirstLedger(), hi.LastLedger()))
+	rpcv2test.WriteColdTxIndexFile(t, cat, cov, entries)
 	require.NoError(t, cat.CommitTxHashIndex(cov))
 }

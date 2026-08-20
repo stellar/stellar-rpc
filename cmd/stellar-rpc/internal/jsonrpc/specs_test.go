@@ -6,21 +6,12 @@ import (
 	"time"
 
 	"github.com/creachadair/jrpc2"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 )
-
-type stubDaemon struct{}
-
-func (stubDaemon) MetricsRegistry() *prometheus.Registry { return prometheus.NewRegistry() }
-func (stubDaemon) MetricsNamespace() string              { return "test" }
-func (stubDaemon) CoreClient() host.CoreClient           { return nil }
-func (stubDaemon) FastCoreClient() host.FastCoreClient   { return nil }
-func (stubDaemon) CoreVersion() string                   { return "" }
 
 func fullSpecLimits() SpecLimits {
 	limits := SpecLimits{}
@@ -45,7 +36,7 @@ func fullSpecLimits() SpecLimits {
 
 func TestApply_FillsEveryServedMethodsLimits(t *testing.T) {
 	limits := fullSpecLimits()
-	specs := limits.Apply(BuildHandlerSpecs(SpecDeps{Daemon: stubDaemon{}}))
+	specs := limits.Apply(BuildHandlerSpecs(SpecDeps{Daemon: host.MakeNoOpDaemon()}))
 	assert.Len(t, specs, len(limits))
 	for _, s := range specs {
 		assert.Equal(t, limits[s.MethodName].QueueLimit, s.QueueLimit)
@@ -58,7 +49,7 @@ func TestApply_PanicsOnAMethodWithoutLimits(t *testing.T) {
 	limits := fullSpecLimits()
 	delete(limits, protocol.GetFeeStatsMethodName)
 	assert.PanicsWithValue(t, "jsonrpc: no limits configured for method getFeeStats", func() {
-		limits.Apply(BuildHandlerSpecs(SpecDeps{Daemon: stubDaemon{}}))
+		limits.Apply(BuildHandlerSpecs(SpecDeps{Daemon: host.MakeNoOpDaemon()}))
 	})
 }
 
@@ -66,7 +57,7 @@ func TestApply_PanicsOnLimitsForAnUnservedMethod(t *testing.T) {
 	limits := fullSpecLimits()
 	limits["getFoo"] = MethodLimits{QueueLimit: 1, RequestDurationLimit: time.Second}
 	assert.PanicsWithValue(t, "jsonrpc: limits configured for unserved method getFoo", func() {
-		limits.Apply(BuildHandlerSpecs(SpecDeps{Daemon: stubDaemon{}}))
+		limits.Apply(BuildHandlerSpecs(SpecDeps{Daemon: host.MakeNoOpDaemon()}))
 	})
 }
 
@@ -75,7 +66,7 @@ func TestApply_CoversDaemonAppendedMethods(t *testing.T) {
 	limits["getFoo"] = MethodLimits{QueueLimit: 7, RequestDurationLimit: time.Minute}
 	stub := func(context.Context, *jrpc2.Request) (any, error) { return "ok", nil }
 
-	specs := BuildHandlerSpecs(SpecDeps{Daemon: stubDaemon{}})
+	specs := BuildHandlerSpecs(SpecDeps{Daemon: host.MakeNoOpDaemon()})
 	specs = append(specs, HandlerSpec{MethodName: "getFoo", Handler: stub})
 	specs = limits.Apply(specs)
 
@@ -88,7 +79,7 @@ func TestApply_CoversDaemonAppendedMethods(t *testing.T) {
 
 func TestApply_PanicsOnAnAppendedMethodWithoutLimits(t *testing.T) {
 	stub := func(context.Context, *jrpc2.Request) (any, error) { return "ok", nil }
-	specs := BuildHandlerSpecs(SpecDeps{Daemon: stubDaemon{}})
+	specs := BuildHandlerSpecs(SpecDeps{Daemon: host.MakeNoOpDaemon()})
 	specs = append(specs, HandlerSpec{MethodName: "getFoo", Handler: stub})
 	assert.PanicsWithValue(t, "jsonrpc: no limits configured for method getFoo", func() {
 		fullSpecLimits().Apply(specs)

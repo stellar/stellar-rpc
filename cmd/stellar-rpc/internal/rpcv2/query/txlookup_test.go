@@ -1,20 +1,18 @@
 package query
 
 import (
-	"context"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
+	"github.com/stellar/go-stellar-sdk/xdr"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
 // TestHotTxHashIndexes pins that every published hot chunk's tx index is returned,
@@ -83,24 +81,6 @@ func TestColdTxHashIndexCoverages(t *testing.T) {
 	assert.Equal(t, chunk.ID(0), covs[2].Hi)
 }
 
-// writeColdTxIndex builds a real one-entry .idx at the coverage's layout path,
-// so ColdTxIndexes has an artifact to open.
-func writeColdTxIndex(
-	t *testing.T, cat *catalog.Catalog, cov geometry.TxHashIndexCoverage, hash [32]byte, seq uint32,
-) {
-	t.Helper()
-	bin := filepath.Join(t.TempDir(), txhash.ColdBinName(cov.Lo))
-	var entry txhash.ColdEntry
-	copy(entry.Key[:], hash[:txhash.ColdKeySize])
-	entry.Seq = seq
-	require.NoError(t, txhash.WriteColdBin(bin, []txhash.ColdEntry{entry}))
-
-	idxPath := cat.Layout().TxHashIndexFilePath(cov)
-	require.NoError(t, os.MkdirAll(filepath.Dir(idxPath), 0o755))
-	require.NoError(t, txhash.BuildColdIndex(
-		context.Background(), []string{bin}, idxPath, cov.Lo.FirstLedger(), cov.Hi.LastLedger()))
-}
-
 func TestColdTxIndexes(t *testing.T) {
 	cat := openTestCatalog(t, silentLogger())
 	r := NewRegistry(cat, geometry.NewRetention(0, 0))
@@ -115,7 +95,7 @@ func TestColdTxIndexes(t *testing.T) {
 		var h [32]byte
 		h[0] = byte(w) + 1
 		hashes[w], seqs[w] = h, c.FirstLedger()+5
-		writeColdTxIndex(t, cat, cov, h, seqs[w])
+		rpcv2test.WriteColdTxIndexFile(t, cat, cov, map[xdr.Hash]uint32{xdr.Hash(h): seqs[w]})
 		require.NoError(t, cat.CommitTxHashIndex(cov))
 	}
 	// Freezing debris in window 3 — excluded from the probe set, so its missing

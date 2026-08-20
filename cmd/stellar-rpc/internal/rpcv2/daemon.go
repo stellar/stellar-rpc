@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -253,7 +252,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 				preflightGetter:   preflightPool,
 				feeWindows:        feeWindows,
 				networkPassphrase: core.networkPassphrase,
-				retentionWindow:   retentionLedgers(deref(cfg.Retention.RetentionChunks)),
+				retentionWindow:   retention.RetentionWindow(),
 			},
 		})
 	}
@@ -321,18 +320,6 @@ func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry
 		return resolvedCore{live: opts.Core, backfill: opts.Core}, nil
 	}
 	return newCaptiveCoreOpeners(cfg.Ingestion, cfg.Storage.DefaultDataDir, logger)
-}
-
-// retentionLedgers converts the retention_chunks knob into getHealth's
-// ledger-count retention window. 0 chunks means full history; report the
-// widest representable window rather than 0, which would read as "keeps
-// nothing".
-func retentionLedgers(chunks uint32) uint32 {
-	if chunks == 0 {
-		return math.MaxUint32
-	}
-	ledgers := min(uint64(chunks)*uint64(chunk.LedgersPerChunk), math.MaxUint32)
-	return uint32(ledgers) //nolint:gosec // min clamps to MaxUint32
 }
 
 // startConfig assembles the StartConfig run consumes. run() builds the
