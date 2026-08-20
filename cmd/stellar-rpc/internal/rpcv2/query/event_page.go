@@ -117,7 +117,7 @@ func (a *ReadView) QueryEvents(ctx context.Context, cursor EventCursor, limit in
 	if err != nil {
 		return nil, err
 	}
-	return assemblePage(cursor, walk, lo, hi, a.OldestLedger(), a.LatestLedger(), desc, truncated), nil
+	return a.assemblePage(cursor, walk, lo, hi, truncated), nil
 }
 
 func validateCursor(cursor *EventCursor, limit int) error {
@@ -456,9 +456,10 @@ func resumeOrdinal(
 // assemblePage is the one place cursor outputs are derived from the
 // walk's facts: the advanced bookmarks never regress and the watermark
 // never leaves the clamped window [clo, chi].
-func assemblePage(
-	cursor EventCursor, walk walkResult, clo, chi, oldest, latest uint32, desc, truncated bool,
+func (a *ReadView) assemblePage(
+	cursor EventCursor, walk walkResult, clo, chi uint32, truncated bool,
 ) *EventPage {
+	desc := cursor.Scope.Dir == Descending
 	next := cursor
 	if walk.last != nil {
 		next.Position = walk.last
@@ -468,7 +469,7 @@ func assemblePage(
 	status := ScanHasMore
 	if walk.finished && !truncated {
 		// A truncated window is never terminal: scope remains beyond it.
-		status = terminalStatus(&cursor.Scope, desc, oldest, latest)
+		status = terminalStatus(&cursor.Scope, desc, a.OldestLedger(), a.LatestLedger())
 	}
 	return &EventPage{Events: walk.events, Next: next, Status: status}
 }
