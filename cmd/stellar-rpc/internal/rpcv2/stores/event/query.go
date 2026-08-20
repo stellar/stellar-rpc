@@ -533,11 +533,10 @@ func ValidateFilters(filters []Filter) error {
 				"events: filter[%d].TopicCount.Count must be non-negative, got %d",
 				fi, f.TopicCount.Count)
 		}
-		// Above MaxTopicCount the index cannot answer a count exactly: every
-		// such count shares the overflow bucket, so the terms would return a
-		// superset and the post-filter would narrow it, which can leave a
-		// consumer's page short while matches remain. A getEvents filter
-		// cannot name that many topics anyway.
+		// Above MaxTopicCount the index cannot answer a count exactly:
+		// every such count shares the overflow bucket. No getEvents
+		// filter shape can name that many topics, and the cursor codec
+		// carries the count in one byte.
 		if f.TopicCount.Count > protocol.MaxTopicCount {
 			return fmt.Errorf(
 				"events: filter[%d].TopicCount.Count must be at most %d, got %d",
