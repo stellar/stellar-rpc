@@ -209,21 +209,18 @@ func validateBookmarkPair(cursor *EventCursor) error {
 	if pos == nil {
 		return nil
 	}
-	ok := false
-	if cursor.Scope.Dir == Descending {
-		if mark == 0 {
-			ok = pos.Ledger == *cursor.Scope.MaxLedger
-		} else {
-			ok = pos.Ledger == mark-1
-		}
-	} else {
-		if mark == 0 {
-			ok = pos.Ledger == cursor.Scope.MinLedger
-		} else {
-			ok = pos.Ledger == mark+1
-		}
+	var want uint32
+	switch {
+	case cursor.Scope.Dir == Descending && mark == 0:
+		want = *cursor.Scope.MaxLedger
+	case cursor.Scope.Dir == Descending:
+		want = mark - 1
+	case mark == 0:
+		want = cursor.Scope.MinLedger
+	default:
+		want = mark + 1
 	}
-	if !ok {
+	if pos.Ledger != want {
 		return fmt.Errorf("%w: position ledger %d does not pair with scanned ledger %d",
 			ErrCursorMalformed, pos.Ledger, mark)
 	}
