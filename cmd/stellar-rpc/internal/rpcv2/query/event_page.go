@@ -279,8 +279,8 @@ type eventPart struct {
 
 // walkChunks scans the clamped range chunk by chunk. Each chunk's
 // reader is resolved only when the walk reaches it: a page usually
-// fills within the first chunk, so the second (the scan window spans
-// at most two) often goes unopened.
+// fills within the first chunk, so at the default scan window (at
+// most two chunks) the second often goes unopened.
 func (a *ReadView) walkChunks(
 	ctx context.Context, chunks []chunk.ID, lo, hi uint32, filters []event.Filter,
 	reenter *EventPosition, desc bool, limit int,

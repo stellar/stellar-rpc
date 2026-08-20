@@ -286,9 +286,9 @@ func (c *ColdReader) EventCount() (uint32, error) {
 }
 
 // Offsets returns the in-memory ledger-offset cache decoded from
-// events.pack's app data on first metadata access. The coordinator
-// uses this to stitch a multi-ledger query range into
-// chunk-relative event-id ranges (see Reader.Offsets).
+// events.pack's app data on first metadata access, the query side's
+// source for translating ledger bounds into event-id windows (see
+// Reader.Offsets).
 //
 // Returns (nil, stores.ErrStoreClosed) after Close. Callers must treat the
 // returned value as read-only — mutations would corrupt every

@@ -128,9 +128,11 @@ type Reader interface {
 	// ctx cancels in-flight I/O; the cold path checks ctx between
 	// scattered-read batches, the hot path checks between Gets.
 	//
-	// A missing row is an error: eventIDs only reach this path
-	// through LookupKeys, so a miss signals corruption or a
-	// writer/reader mismatch, not a normal not-found case.
+	// A missing row is an error: every caller passes ids that name
+	// stored events (bitmap ids come from LookupKeys; the pager's
+	// resume ordinal is bounds-checked against its ledger's ID range
+	// first), so a miss signals corruption or a writer/reader
+	// mismatch, not a normal not-found case.
 	FetchEvents(ctx context.Context, eventIDs []uint32) ([]events.Payload, error)
 
 	// FetchRange streams count events starting at chunk-relative
