@@ -580,10 +580,8 @@ func TestQueryEvents_DescendingResumeAboveLatestWaits(t *testing.T) {
 // (empty pages, ScanHasMore) instead of scanning the whole scope in
 // one call, and delivery stays gapless across window seams.
 func TestQueryEvents_ScanBudget(t *testing.T) {
-	defer func(n uint32) { maxScanLedgers = n }(maxScanLedgers)
-	maxScanLedgers = 2
-
 	r, _, f := singleChunkFixture(t)
+	r.maxScanLedgers = 2
 	maxL := f + 3
 
 	// Match-nothing filter: two windows cover the scope, no events.

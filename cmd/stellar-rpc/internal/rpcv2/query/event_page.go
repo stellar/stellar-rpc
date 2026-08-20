@@ -29,16 +29,13 @@ var ErrPositionMismatch = errors.New("query: cursor position does not match stor
 // part of the cursor, and the handler maps the two differently.
 var ErrInvalidLimit = errors.New("query: page limit must be positive")
 
-// maxScanLedgers bounds the ledgers one page may scan, so a filter
-// that matches nothing cannot walk the node's whole retention in one
-// call: the page stops at the window's edge and returns ScanHasMore
-// with the watermark advanced through it. At 10,000 ledgers a page
-// touches at most two chunks. A var, not a const, so tests can shrink
-// it to force window seams; production never writes it. The value may
-// become configuration.
-//
-//nolint:gochecknoglobals // test seam; production never writes it
-var maxScanLedgers = uint32(10_000)
+// defaultMaxScanLedgers bounds the ledgers one page may scan, so a
+// filter that matches nothing cannot walk the node's whole retention
+// in one call: the page stops at the window's edge and returns
+// ScanHasMore with the watermark advanced through it. At 10,000
+// ledgers a page touches at most two chunks. Registry.maxScanLedgers
+// overrides it per instance; the value may become configuration.
+const defaultMaxScanLedgers = uint32(10_000)
 
 // ScanStatus is where a page's walk stopped; the handler maps it to
 // the wire scanStatus.
@@ -105,15 +102,19 @@ func (a *ReadView) QueryEvents(ctx context.Context, cursor EventCursor, limit in
 		// resume moved past it, or a fresh scope is entirely above it.
 		return &EventPage{Next: cursor, Status: ScanWaitingForLedgers}, nil
 	}
-	// Bound the page's scan window to maxScanLedgers. The window keeps
-	// the leading edge (the resume point) and gives up the far end; a
-	// truncated page is never terminal, so the next page continues.
-	truncated := hi-lo+1 > maxScanLedgers
+	// Bound the page's scan window. The window keeps the leading edge
+	// (the resume point) and gives up the far end; a truncated page is
+	// never terminal, so the next page continues.
+	window := a.maxScanLedgers
+	if window == 0 {
+		window = defaultMaxScanLedgers
+	}
+	truncated := hi-lo+1 > window
 	if truncated {
 		if desc {
-			lo = hi - maxScanLedgers + 1
+			lo = hi - window + 1
 		} else {
-			hi = lo + maxScanLedgers - 1
+			hi = lo + window - 1
 		}
 	}
 
