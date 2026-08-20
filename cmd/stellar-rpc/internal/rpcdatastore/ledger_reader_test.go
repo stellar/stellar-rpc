@@ -16,7 +16,7 @@ type mockLedgerBackend struct {
 	mock.Mock
 }
 
-var _ ledgerbackend.LedgerBackend = (*mockLedgerBackend)(nil)
+var _ ledgerbackend.RawLedgerBackend = (*mockLedgerBackend)(nil)
 
 func (m *mockLedgerBackend) GetLatestLedgerSequence(ctx context.Context) (uint32, error) {
 	args := m.Called(ctx)
@@ -28,9 +28,9 @@ func (m *mockLedgerBackend) GetLedger(ctx context.Context, seq uint32) (xdr.Ledg
 	return args.Get(0).(xdr.LedgerCloseMeta), args.Error(1) //nolint:forcetypeassert
 }
 
-func (m *mockLedgerBackend) GetLedgerRaw(ctx context.Context, seq uint32) ([]byte, error) {
+func (m *mockLedgerBackend) GetLedgerView(ctx context.Context, seq uint32) (xdr.LedgerCloseMetaView, error) {
 	args := m.Called(ctx, seq)
-	return args.Get(0).([]byte), args.Error(1) //nolint:forcetypeassert
+	return args.Get(0).(xdr.LedgerCloseMetaView), args.Error(1) //nolint:forcetypeassert
 }
 
 func (m *mockLedgerBackend) PrepareRange(ctx context.Context, r ledgerbackend.Range) error {
@@ -61,6 +61,12 @@ func createLedgerCloseMeta(ledgerSeq uint32) xdr.LedgerCloseMeta {
 	}
 }
 
+func createLedgerCloseMetaView(t *testing.T, ledgerSeq uint32) xdr.LedgerCloseMetaView {
+	raw, err := createLedgerCloseMeta(ledgerSeq).MarshalBinary()
+	require.NoError(t, err)
+	return xdr.LedgerCloseMetaView(raw)
+}
+
 type mockBackendFactory struct {
 	mock.Mock
 }
@@ -68,9 +74,9 @@ type mockBackendFactory struct {
 func (m *mockBackendFactory) NewBufferedBackend(cfg ledgerbackend.BufferedStorageBackendConfig,
 	ds datastore.DataStore,
 	schema datastore.DataStoreSchema,
-) (ledgerbackend.LedgerBackend, error) {
+) (ledgerbackend.RawLedgerBackend, error) {
 	args := m.Called(cfg, ds, schema)
-	return args.Get(0).(ledgerbackend.LedgerBackend), args.Error(1) //nolint:forcetypeassert
+	return args.Get(0).(ledgerbackend.RawLedgerBackend), args.Error(1) //nolint:forcetypeassert
 }
 
 func TestLedgerReaderGetLedgers(t *testing.T) {
@@ -82,11 +88,12 @@ func TestLedgerReaderGetLedgers(t *testing.T) {
 	start := uint32(100)
 	end := uint32(102)
 
-	var expected []xdr.LedgerCloseMeta
+	var borrowed, expected []xdr.LedgerCloseMetaView
 	for seq := start; seq <= end; seq++ {
-		meta := createLedgerCloseMeta(seq)
-		mockBackend.On("GetLedger", ctx, seq).Return(meta, nil)
-		expected = append(expected, meta)
+		view := createLedgerCloseMetaView(t, seq)
+		mockBackend.On("GetLedgerView", ctx, seq).Return(view, nil)
+		borrowed = append(borrowed, view)
+		expected = append(expected, createLedgerCloseMetaView(t, seq))
 	}
 	bsbConfig := ledgerbackend.BufferedStorageBackendConfig{
 		BufferSize: 10,
@@ -104,6 +111,12 @@ func TestLedgerReaderGetLedgers(t *testing.T) {
 
 	ledgers, err := reader.GetLedgers(ctx, start, end)
 	require.NoError(t, err)
+	require.Equal(t, expected, ledgers)
+
+	// Backend views are borrowed so the returned ledgers must own their bytes.
+	for _, view := range borrowed {
+		clear(view)
+	}
 	require.Equal(t, expected, ledgers)
 
 	mockBackend.AssertExpectations(t)
