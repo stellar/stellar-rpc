@@ -29,11 +29,11 @@ import (
 // chunks resolve at call time, so their failures surface here; a later chunk's
 // failure surfaces mid-stream at its own position.
 func (a *ReadView) ScanLedgers(lo, hi uint32) (iter.Seq2[ledger.Entry, error], error) {
-	lo, hi, err := a.ClampRange(Ascending, lo, hi)
+	lo, hi, outcome, err := a.ClampRange(Ascending, lo, hi)
 	if err != nil {
 		return nil, err
 	}
-	if lo > hi {
+	if outcome != RangeServe {
 		return func(func(ledger.Entry, error) bool) {}, nil // beyond latest: empty
 	}
 	chunks := chunksBetween(chunk.IDFromLedger(lo), chunk.IDFromLedger(hi), Ascending)

@@ -497,9 +497,21 @@ func TestQueryEvents_OldestReachedDescending(t *testing.T) {
 	assert.Equal(t, ScanOldestReached, page.Status,
 		"bounds extend below the retention floor")
 	assert.Equal(t, f, page.Next.ScannedLedger)
+
+	// A re-pull of the cursor the floor page minted stays OldestReached:
+	// empty page, bookmarks unmoved, never an out-of-range error.
+	before := d.cursor
+	page = d.next()
+	assert.Empty(t, page.Events)
+	assert.Equal(t, ScanOldestReached, page.Status)
+	assert.Equal(t, before, d.cursor)
 }
 
-func TestQueryEvents_LeadingEdgeBelowFloorErrors(t *testing.T) {
+// TestQueryEvents_BelowFloorByDirection pins the proposal's asymmetry
+// at the floor: an ascending scan starting below it is an out-of-range
+// error, a descending scan whose remaining range is below it reports
+// an empty OldestReached page instead.
+func TestQueryEvents_BelowFloorByDirection(t *testing.T) {
 	r, _, f := singleChunkFixture(t)
 	a, err := r.NewReadView()
 	require.NoError(t, err)
@@ -511,14 +523,27 @@ func TestQueryEvents_LeadingEdgeBelowFloorErrors(t *testing.T) {
 	var re *RangeError
 	require.ErrorAs(t, err, &re)
 
+	// Fresh descending scope entirely below the floor: legal and empty.
+	lowMax := f - 1
+	page, err := a.QueryEvents(context.Background(), EventCursor{
+		Scope: EventCursorQuery{MinLedger: 2, MaxLedger: &lowMax, Dir: Descending},
+	}, 10)
+	require.NoError(t, err)
+	assert.Empty(t, page.Events)
+	assert.Equal(t, ScanOldestReached, page.Status)
+
 	// Descending resume whose watermark stepped below the floor: the
-	// client wants older ledgers than the node serves.
+	// same empty OldestReached page, not an error.
 	maxL := f + 3
-	_, err = a.QueryEvents(context.Background(), EventCursor{
+	cur := EventCursor{
 		Scope:         EventCursorQuery{MinLedger: 2, MaxLedger: &maxL, Dir: Descending},
 		ScannedLedger: f,
-	}, 10)
-	require.ErrorAs(t, err, &re)
+	}
+	page, err = a.QueryEvents(context.Background(), cur, 10)
+	require.NoError(t, err)
+	assert.Empty(t, page.Events)
+	assert.Equal(t, ScanOldestReached, page.Status)
+	assert.Equal(t, cur, page.Next, "the cursor is unchanged")
 }
 
 // TestQueryEvents_ConsumedRangeCompletes: resume already moved past the

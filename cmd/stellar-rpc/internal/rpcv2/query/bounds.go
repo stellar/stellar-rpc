@@ -42,23 +42,39 @@ func (e *RangeError) Error() string {
 // the view's retention-floor chunk.
 func (a *ReadView) OldestLedger() uint32 { return a.floor.FirstLedger() }
 
+// RangeOutcome classifies a clamped range: servable now, or empty for
+// one of the two edge reasons a caller reports differently.
+type RangeOutcome int
+
+const (
+	// RangeServe: the returned [lo, hi] is servable now.
+	RangeServe RangeOutcome = iota
+	// RangeBeyondLatest: nothing is servable yet. The range lies past
+	// the view's latest ledger, or a descending top is above it. That
+	// top is never truncated: a descending scan cannot revisit a
+	// ledger, so serving below a top this view lacks would skip
+	// [latest+1, hi] forever. Callers wait.
+	RangeBeyondLatest
+	// RangeBelowFloor: a descending range's remaining top is below the
+	// view's oldest servable ledger. Per the proposal, a descending
+	// scan never gets an out-of-range error: it reports OldestReached.
+	// Ascending keeps *RangeError for the same shape, per the same
+	// table.
+	RangeBelowFloor
+)
+
 // ClampRange validates a request's leading edge (where results begin:
 // lo ascending, hi descending) and clamps its trailing edge into the
-// view's range [OldestLedger, LatestLedger]. A leading edge below the
-// oldest servable ledger is rejected with *RangeError, not clamped.
-// The trailing edge is truncated: an ascending scan stops at latest, a
-// descending scan ends at the floor.
-//
-// lo > hi in the result means nothing is servable yet: the range lies
-// beyond latest, or a descending top is above latest. That top is
-// never truncated: a descending scan cannot revisit a ledger, so
-// serving below a top this view lacks would skip [latest+1, hi]
-// forever. Callers wait instead. An inverted input (lo > hi before
-// clamping) is rejected with ErrInvertedRange, so a malformed range is
-// never confused with an empty one.
-func (a *ReadView) ClampRange(dir Direction, lo, hi uint32) (uint32, uint32, error) {
+// view's range [OldestLedger, LatestLedger]. The returned bounds are
+// meaningful only for RangeServe: an ascending scan stops at latest, a
+// descending scan ends at the floor. The two empty outcomes are
+// documented on RangeOutcome. An ascending leading edge below the
+// oldest servable ledger is rejected with *RangeError, and an inverted
+// input (lo > hi) with ErrInvertedRange, so a malformed range is never
+// confused with an empty one.
+func (a *ReadView) ClampRange(dir Direction, lo, hi uint32) (uint32, uint32, RangeOutcome, error) {
 	if lo > hi {
-		return 0, 0, fmt.Errorf("%w: [%d, %d]", ErrInvertedRange, lo, hi)
+		return 0, 0, RangeServe, fmt.Errorf("%w: [%d, %d]", ErrInvertedRange, lo, hi)
 	}
 	oldest, latest := a.OldestLedger(), a.latestLedger
 
@@ -67,19 +83,25 @@ func (a *ReadView) ClampRange(dir Direction, lo, hi uint32) (uint32, uint32, err
 		leading = hi
 	}
 	if leading < oldest {
-		return 0, 0, &RangeError{Requested: leading, Oldest: oldest, Latest: latest}
+		if dir == Descending {
+			return 0, 0, RangeBelowFloor, nil
+		}
+		return 0, 0, RangeServe, &RangeError{Requested: leading, Oldest: oldest, Latest: latest}
 	}
 
 	if hi > latest {
 		if dir == Descending {
-			return latest + 1, latest, nil // top above latest: wait
+			return 0, 0, RangeBeyondLatest, nil
 		}
 		hi = latest // truncate beyond the tip
+	}
+	if lo > hi {
+		return 0, 0, RangeBeyondLatest, nil // ascending start past latest
 	}
 	if lo < oldest {
 		lo = oldest // terminate at the floor
 	}
-	return lo, hi, nil
+	return lo, hi, RangeServe, nil
 }
 
 // chunksBetween returns the inclusive chunk ids from first..last (first <= last)

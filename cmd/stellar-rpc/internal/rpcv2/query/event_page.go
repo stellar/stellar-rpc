@@ -86,15 +86,19 @@ func (a *ReadView) QueryEvents(ctx context.Context, cursor EventCursor, limit in
 		// Resume moved past the scope's far bound: nothing is left to serve.
 		return &EventPage{Next: cursor, Status: ScanComplete}, nil
 	}
-	lo, hi, err := a.ClampRange(cursor.Scope.Dir, lo, hi)
+	lo, hi, outcome, err := a.ClampRange(cursor.Scope.Dir, lo, hi)
 	if err != nil {
 		return nil, err
 	}
-	if lo > hi {
-		// Nothing servable yet: the range is beyond latest, or a
-		// descending top is above it, which ClampRange never truncates
-		// (a descending walk could not come back for skipped ledgers).
+	switch outcome {
+	case RangeBeyondLatest:
 		return &EventPage{Next: cursor, Status: ScanWaitingForLedgers}, nil
+	case RangeBelowFloor:
+		// Descending only: the remaining range is below the floor. Per
+		// the proposal a descending scan never errors out of range; it
+		// reports OldestReached, and a re-pull reports it again.
+		return &EventPage{Next: cursor, Status: ScanOldestReached}, nil
+	case RangeServe:
 	}
 	// Bound the page's scan window. The window keeps the leading edge
 	// (the resume point) and gives up the far end; a truncated page is
