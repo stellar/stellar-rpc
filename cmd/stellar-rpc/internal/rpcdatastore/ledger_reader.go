@@ -16,7 +16,7 @@ type LedgerBackendFactory interface {
 		config ledgerbackend.BufferedStorageBackendConfig,
 		store datastore.DataStore,
 		schema datastore.DataStoreSchema,
-	) (ledgerbackend.LedgerBackend, error)
+	) (ledgerbackend.RawLedgerBackend, error)
 }
 
 type bufferedBackendFactory struct{}
@@ -26,14 +26,14 @@ func (f *bufferedBackendFactory) NewBufferedBackend(
 	config ledgerbackend.BufferedStorageBackendConfig,
 	store datastore.DataStore,
 	schema datastore.DataStoreSchema,
-) (ledgerbackend.LedgerBackend, error) {
+) (ledgerbackend.RawLedgerBackend, error) {
 	return ledgerbackend.NewBufferedStorageBackend(config, store, schema)
 }
 
 // LedgerReader provides access to historical ledger data
 // stored in a remote object store (e.g., S3 or GCS) via buffered storage backend.
 type LedgerReader interface {
-	GetLedgers(ctx context.Context, start, end uint32) ([]xdr.LedgerCloseMeta, error)
+	GetLedgers(ctx context.Context, start, end uint32) ([]xdr.LedgerCloseMetaView, error)
 	GetAvailableLedgerRange(ctx context.Context) (protocol.LedgerSeqRange, error)
 }
 
@@ -62,7 +62,8 @@ func NewLedgerReader(storageBackendConfig ledgerbackend.BufferedStorageBackendCo
 // GetLedgers retrieves a contiguous batch of ledgers in the range [start, end] (inclusive)
 // from the configured datastore using a buffered storage backend.
 // Returns an error if any ledger in the specified range is unavailable.
-func (r *ledgerReader) GetLedgers(ctx context.Context, start, end uint32) ([]xdr.LedgerCloseMeta, error) {
+// Each returned view owns its bytes.
+func (r *ledgerReader) GetLedgers(ctx context.Context, start, end uint32) ([]xdr.LedgerCloseMetaView, error) {
 	bufferedBackend, err := r.ledgerBackendFactory.NewBufferedBackend(r.storageBackendConfig, r.dataStore, r.schema)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create buffered storage backend: %w", err)
@@ -76,13 +77,17 @@ func (r *ledgerReader) GetLedgers(ctx context.Context, start, end uint32) ([]xdr
 	}
 
 	// Fetch each ledger in the range
-	ledgers := make([]xdr.LedgerCloseMeta, 0, end-start+1)
+	ledgers := make([]xdr.LedgerCloseMetaView, 0, end-start+1)
 	for sequence := ledgerRange.From(); sequence <= ledgerRange.To(); sequence++ {
-		ledger, err := bufferedBackend.GetLedger(ctx, sequence)
+		ledger, err := bufferedBackend.GetLedgerView(ctx, sequence)
 		if err != nil {
 			return nil, err
 		}
-		ledgers = append(ledgers, ledger)
+		owned, err := ledger.Copy() // must copy to own the bytes
+		if err != nil {
+			return nil, fmt.Errorf("copying ledger %d: %w", sequence, err)
+		}
+		ledgers = append(ledgers, owned)
 	}
 
 	return ledgers, nil
