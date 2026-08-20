@@ -4,7 +4,6 @@ import (
 	"iter"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 )
 
@@ -131,14 +130,4 @@ func (w *ledgerWalk) closeAll() error {
 		w.closeChunk(i)
 	}
 	return nil
-}
-
-// EventPart is one chunk's slice of a clamped range: the reader plus the
-// intersected ledger bounds, the input shape the events query engine
-// consumes. The pager builds one part at a time in walkChunks, so a
-// reader opens only when the walk reaches its chunk.
-type EventPart struct {
-	Chunk    chunk.ID
-	Reader   event.Reader
-	From, To uint32
 }

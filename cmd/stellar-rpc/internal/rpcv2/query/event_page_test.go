@@ -370,7 +370,7 @@ func TestQueryEvents_UncoveredWindowFailsLoud(t *testing.T) {
 	ofs := events.NewLedgerOffsets(f + 8)
 	require.NoError(t, ofs.Append(f+8, 1))
 	_, err = scanChunk(context.Background(),
-		EventPart{Chunk: c, Reader: &fakeEventReader{chunkID: c, ofs: ofs}, From: f, To: f + 8},
+		eventPart{Chunk: c, Reader: &fakeEventReader{chunkID: c, ofs: ofs}, From: f, To: f + 8},
 		nil, nil, false, 10)
 	require.ErrorContains(t, err, "offsets cover")
 }
@@ -939,7 +939,7 @@ func TestEventScan_DropsDoNotStallTheChunk(t *testing.T) {
 	fake.bitmaps[events.ComputeTermKey(cidA[:], events.FieldContractID)] = all
 
 	got, err := scanChunk(context.Background(),
-		EventPart{Chunk: c, Reader: fake, From: f, To: f},
+		eventPart{Chunk: c, Reader: fake, From: f, To: f},
 		[]event.Filter{{ContractID: cidA[:]}}, nil, false, 5)
 	require.NoError(t, err)
 	assert.Nil(t, got.nextUnserved, "the stream ended; the page did not fill")

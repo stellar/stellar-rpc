@@ -271,6 +271,14 @@ type walkResult struct {
 	finished       bool
 }
 
+// eventPart is one chunk's slice of a clamped range: the reader plus
+// the intersected ledger bounds, the input shape scanChunk consumes.
+type eventPart struct {
+	Chunk    chunk.ID
+	Reader   event.Reader
+	From, To uint32
+}
+
 // walkChunks scans the clamped range chunk by chunk. Each chunk's
 // reader is resolved only when the walk reaches it: a page usually
 // fills within the first chunk, and the scope can span the node's
@@ -288,7 +296,7 @@ func (a *ReadView) walkChunks(
 		if err != nil {
 			return walkResult{}, err
 		}
-		part := EventPart{
+		part := eventPart{
 			Chunk: c, Reader: r,
 			From: max(lo, c.FirstLedger()), To: min(hi, c.LastLedger()),
 		}
@@ -331,7 +339,7 @@ type chunkResult struct {
 }
 
 func scanChunk(
-	ctx context.Context, part EventPart, filters []event.Filter,
+	ctx context.Context, part eventPart, filters []event.Filter,
 	reenter *EventPosition, desc bool, room int,
 ) (chunkResult, error) {
 	ofs, err := part.Reader.Offsets()
