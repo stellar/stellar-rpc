@@ -346,7 +346,7 @@ Each chunk belongs to exactly one serving store for a given query path. Multi-ch
 
 Ascending requests visit chunks in ascending order. Descending requests reverse the traversal.
 
-Two helpers implement the traversal once, so the chunk border is crossed (and tested) in one place. `ScanLedgers` yields a flat ledger iterator with the per-chunk intersect inside, so a caller cannot read past the view's `latestLedger` or below its floor. `EventParts` returns the per-chunk readers with intersected bounds, the shape the events engine consumes. Both open their chunk readers up front (view-owned), so the border chunk's open overlaps the first chunk's streaming.
+Two helpers implement the traversal once, so the chunk border is crossed (and tested) in one place. `ScanLedgers` yields a flat ledger iterator with the per-chunk intersect inside, so a caller cannot read past the view's `latestLedger` or below its floor. It keeps a rolling two-chunk window: chunks 0 and 1 open before the iterator returns, so an open failure reaches the caller instead of the stream, and the border chunk's open overlaps the first chunk's streaming. `ChunksForRange` serves the events path. It returns the chunk ids that overlap a clamped range, and the caller resolves each id through `ReadView.Events` as the walk reaches it, building one `EventPart` per step with intersected bounds. Nothing opens ahead of the walk: a page that fills inside its first chunk never resolves the chunks behind it, so a chunk with no serving store cannot fail a page that does not read it. Cold readers are view-owned on both paths and released by `Release`.
 
 The following diagram illustrates the running example used throughout this section.
 
@@ -402,7 +402,7 @@ This preserves the existing lookup semantics while allowing `TxReader` to operat
 
 `getEvents` searches rather than fetches data.
 
-Each page establishes a scan window, resolves the overlapping chunks through `EventParts`, and invokes the existing event query engine for each part.
+Each page establishes a scan window, lists the overlapping chunks through `ChunksForRange`, and invokes the existing event query engine on each chunk as the walk reaches it.
 
 The event query engine operates on the common `event.Reader` interface, so routing is identical for hot and cold readers.
 

@@ -621,9 +621,9 @@ func TestQuery_ChunkWithLedgersButZeroEvents(t *testing.T) {
 
 // TestQuery_DescendingWithRangeAndMaxEvents covers the
 // three-way combination — order × range × cap — that no other test
-// hits together. Forces the descending-capped branch of
-// selectEventIDs (ReverseIterator → reverse) over a range-narrowed
-// union, then the final descending-reverse in Query.
+// hits together. Forces the descending branch of streamUnion
+// (ReverseIterator with a per-batch flip) over a range-narrowed
+// union, then the shim's MaxEvents truncation.
 func TestQuery_DescendingWithRangeAndMaxEvents(t *testing.T) {
 	fx := newMultiLedgerQueryFixture(t)
 	first := chunk.ID(0).FirstLedger()
@@ -1159,14 +1159,14 @@ func TestUnionSlots(t *testing.T) {
 // Coverage choices: we don't replay every hot test — once the engine
 // is shown to go through both readers' LookupKeys/FetchEvents/FetchRange
 // surfaces correctly, additional scenarios add little. The selected
-// subset hits each major code path through Query:
+// subset hits each major code path through Matches:
 //
-//   - match-all asc                  → fetchAllInRange + cold FetchRange
-//   - match-all desc + cap           → reversed range + slices.Reverse
-//   - single-filter (contractID)     → LookupKeys + selectEventIDs asc
+//   - match-all asc                  → streamRange + cold FetchRange
+//   - match-all desc + cap           → streamRange top-down, slices.Backward
+//   - single-filter (contractID)     → LookupKeys + streamUnion asc
 //   - multi-term filter (AND)        → FastAnd over multiple cold bitmaps
 //   - cross-filter (OR)              → FastOr across filters
-//   - ledger range + filter          → ledgerRangeBitmap And on cold ids
+//   - ledger range + filter          → roaring.And with the range bitmap
 //   - descending + range + cap       → ReverseIterator on cold-derived
 //                                      union, single-filter And path
 //
