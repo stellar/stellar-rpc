@@ -149,8 +149,9 @@ func labels(t *testing.T, payloads []events.Payload) []string {
 }
 
 // pageDriver plays the handler role across pages: a fresh ReadView per
-// page, the cursor advanced with each result: exactly the wire loop,
-// minus the encode/decode round trip.
+// page, each minted cursor encoded and decoded before the next call.
+// Exactly the wire loop, so every pager test also enforces the codec
+// contract.
 type pageDriver struct {
 	t      *testing.T
 	r      *Registry
@@ -174,7 +175,13 @@ func (d *pageDriver) tryNext() (*EventPage, error) {
 	if err != nil {
 		return nil, err
 	}
-	d.cursor = page.Next
+	// Every minted cursor rides the wire codec, so each pager test also
+	// enforces the encode/decode contract.
+	enc, err := page.Next.Encode()
+	require.NoError(d.t, err)
+	dec, err := DecodeEventCursor(enc)
+	require.NoError(d.t, err)
+	d.cursor = *dec
 	return page, nil
 }
 
@@ -269,6 +276,34 @@ func TestQueryEvents_FilteredMidLedgerResume(t *testing.T) {
 	page = d.next()
 	assert.Equal(t, []string{"a2", "a3"}, labels(t, page.Events))
 	assert.Equal(t, ScanComplete, page.Status, "the walk finished the bounds as the page filled")
+}
+
+// TestQueryEvents_DescendingFilteredMidLedgerResume is the descending
+// mirror: page 1 stops between two matches inside ledger f, so page 2
+// re-enters that ledger below the position.
+func TestQueryEvents_DescendingFilteredMidLedgerResume(t *testing.T) {
+	r, _, f := singleChunkFixture(t)
+	maxL := f + 3
+	d := &pageDriver{
+		t: t, r: r, limit: 3,
+		cursor: EventCursor{Scope: EventCursorQuery{
+			MinLedger: f, MaxLedger: &maxL, Dir: Descending,
+			Filters: []event.Filter{{ContractID: cidA[:]}},
+		}},
+	}
+
+	page := d.next()
+	assert.Equal(t, []string{"a3", "a2", "a1"}, labels(t, page.Events))
+	assert.Equal(t, ScanHasMore, page.Status)
+	assert.Equal(t, f+1, page.Next.ScannedLedger,
+		"the next match is in f, so f+1 and everything above are fully covered")
+	require.NotNil(t, page.Next.Position)
+	assert.Equal(t, f, page.Next.Position.Ledger)
+	assert.Equal(t, uint32(1), page.Next.Position.LedgerOrdinal, "a1 is ledger f's second stored event")
+
+	page = d.next()
+	assert.Equal(t, []string{"a0"}, labels(t, page.Events))
+	assert.Equal(t, ScanComplete, page.Status)
 }
 
 func TestQueryEvents_ChunkSeamFullChunk(t *testing.T) {
@@ -707,16 +742,17 @@ func TestQueryEvents_WatermarkStaysInsideWindow(t *testing.T) {
 	assert.Equal(t, []string{"a3", "b1"}, labels(t, page.Events))
 	assert.Equal(t, f+3, page.Next.ScannedLedger)
 
-	// Ascending, page fills after draining all of ledger f: the next
-	// match is in f+2, so f and the empty f+1 are covered. Never f-1,
-	// which would be below the query's own MinLedger.
+	// Ascending, stop inside the very first ledger examined: the next
+	// match is still in ledger f, so the echo keeps the fresh cursor's
+	// zero watermark. Never f-1, which would be below the query's own
+	// MinLedger.
 	d = &pageDriver{
-		t: t, r: r, limit: 3,
+		t: t, r: r, limit: 1,
 		cursor: EventCursor{Scope: EventCursorQuery{MinLedger: f, MaxLedger: &maxL}},
 	}
 	page = d.next()
-	assert.Equal(t, []string{"a0", "a1", "b0"}, labels(t, page.Events))
-	assert.Equal(t, f+1, page.Next.ScannedLedger)
+	assert.Equal(t, []string{"a0"}, labels(t, page.Events))
+	assert.Zero(t, page.Next.ScannedLedger, "no ledger fully covered; never MinLedger-1")
 }
 
 // TestQueryEvents_ResumeMismatchFailsLoud pins the fail-loud resume
