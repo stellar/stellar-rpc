@@ -203,6 +203,12 @@ func validateBookmarkPair(cursor *EventCursor) error {
 		// A zero watermark pairs with a position in the first ledger
 		// the walk served: the scope's own MaxLedger, since a
 		// descending walk waits for its top instead of clamping it.
+		// validateScope already refused a descending scope without a
+		// MaxLedger, so the dereference is safe.
+		if mark == 0 && pos.Ledger != *cursor.Scope.MaxLedger {
+			return fmt.Errorf("%w: position ledger %d with no scanned ledger",
+				ErrCursorMalformed, pos.Ledger)
+		}
 		if mark != 0 && pos.Ledger < mark-1 {
 			return fmt.Errorf("%w: position ledger %d behind scanned ledger %d",
 				ErrCursorMalformed, pos.Ledger, mark)

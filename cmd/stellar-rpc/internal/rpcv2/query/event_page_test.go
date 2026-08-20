@@ -820,6 +820,10 @@ func TestQueryEvents_CursorValidation(t *testing.T) {
 			Position:      &EventPosition{Ledger: f},
 			ScannedLedger: f + 2,
 		}, 1, ErrCursorMalformed},
+		"position with zero watermark off the scope top descending": {EventCursor{
+			Scope:    EventCursorQuery{MinLedger: f, MaxLedger: &maxHigh, Dir: Descending},
+			Position: &EventPosition{Ledger: f + 1},
+		}, 1, ErrCursorMalformed},
 		// A scope above the codec's filter cap would do the page's work
 		// and then fail to encode the advanced cursor: refused up front.
 		"more filters than the codec cap": {EventCursor{
