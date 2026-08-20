@@ -225,9 +225,9 @@ type termPlan [][]int
 // from the caller's hint. The hint applies only when it is positive
 // and below the default. Both results are clamped positive, so a zero
 // test seam cannot stall a stream (a zero step never advances).
-func batchSizes(hint int) (first, rest int) {
-	rest = max(1, matchBatchSize)
-	first = rest
+func batchSizes(hint int) (int, int) {
+	rest := max(1, matchBatchSize)
+	first := rest
 	if hint > 0 && hint < rest {
 		first = hint
 	}
