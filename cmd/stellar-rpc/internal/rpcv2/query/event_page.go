@@ -3,8 +3,9 @@ package query
 // The cross-chunk getEvents pager. QueryEvents advances a cursor by
 // one page. The cursor carries the request's pinned Scope (bounds,
 // direction, filters) and two bookmarks: Position, the last event
-// delivered, and ScannedLedger, the last ledger fully covered. A page
-// resumes from whichever bookmark is further along, walks the range
+// delivered while its ledger is only partly served, and ScannedLedger,
+// the last ledger fully covered. A page re-enters at Position when one
+// is present and resumes past ScannedLedger otherwise, walks the range
 // chunk by chunk through event.Matches, and returns the events plus
 // the advanced cursor, ready to encode. The server keeps nothing
 // between pages.
@@ -61,8 +62,9 @@ const (
 
 // EventPage is one page of results: the events in walk order and the
 // advanced cursor. Next carries the same Scope with moved bookmarks:
-// Position moves only when events were delivered, ScannedLedger only
-// when ledgers were covered.
+// ScannedLedger advances only when ledgers were covered, and Position
+// is present only while it leads the watermark (assemblePage drops a
+// passed one).
 type EventPage struct {
 	Events []events.Payload
 	Next   EventCursor
@@ -193,51 +195,43 @@ func validateBookmarks(cursor *EventCursor) error {
 }
 
 // validateBookmarkPair rejects Position and ScannedLedger combinations
-// no walk mints together. A walk that delivered into a ledger has
-// covered everything before it in walk order, so the watermark trails
-// the position by at most one ledger. A pair further apart leaves the
-// ledgers between the two bookmarks unaccounted, and resuming from it
-// would silently skip them.
+// no walk mints together. assemblePage drops a Position once the
+// watermark passes it, so a present Position is exactly the one live
+// mid-ledger re-entry point: one ledger past the mark in walk order,
+// or the zero-watermark anchor, the first ledger the walk serves
+// (MinLedger ascending; MaxLedger descending, which validateScope has
+// already guaranteed, so the dereference is safe).
 func validateBookmarkPair(cursor *EventCursor) error {
 	pos, mark := cursor.Position, cursor.ScannedLedger
 	if pos == nil {
 		return nil
 	}
+	ok := false
 	if cursor.Scope.Dir == Descending {
-		// A zero watermark pairs with a position in the first ledger
-		// the walk served: the scope's own MaxLedger, since a
-		// descending walk waits for its top instead of clamping it.
-		// validateScope already refused a descending scope without a
-		// MaxLedger, so the dereference is safe.
-		if mark == 0 && pos.Ledger != *cursor.Scope.MaxLedger {
-			return fmt.Errorf("%w: position ledger %d with no scanned ledger",
-				ErrCursorMalformed, pos.Ledger)
+		if mark == 0 {
+			ok = pos.Ledger == *cursor.Scope.MaxLedger
+		} else {
+			ok = pos.Ledger == mark-1
 		}
-		if mark != 0 && pos.Ledger < mark-1 {
-			return fmt.Errorf("%w: position ledger %d behind scanned ledger %d",
-				ErrCursorMalformed, pos.Ledger, mark)
+	} else {
+		if mark == 0 {
+			ok = pos.Ledger == cursor.Scope.MinLedger
+		} else {
+			ok = pos.Ledger == mark+1
 		}
-		return nil
 	}
-	switch {
-	case mark != 0 && pos.Ledger > mark+1:
-		return fmt.Errorf("%w: position ledger %d ahead of scanned ledger %d",
+	if !ok {
+		return fmt.Errorf("%w: position ledger %d does not pair with scanned ledger %d",
 			ErrCursorMalformed, pos.Ledger, mark)
-	case mark == 0 && pos.Ledger != cursor.Scope.MinLedger:
-		// Ascending, a zero watermark only pairs with a position in
-		// the scope's first ledger.
-		return fmt.Errorf("%w: position ledger %d with no scanned ledger",
-			ErrCursorMalformed, pos.Ledger)
 	}
 	return nil
 }
 
 // resumeBounds narrows the scope's bounds by the bookmarks and
-// returns the pre-clamp window [lo, hi]. When Position is further
-// along than ScannedLedger, its ledger was only partially served: the
-// window starts at that ledger and Position is returned for the
-// re-entry clip. validateCursor already refused bookmarks outside the
-// scope's bounds.
+// returns the pre-clamp window [lo, hi]. A present Position is the one
+// live mid-ledger re-entry point (validateBookmarkPair): the window
+// starts at its ledger and Position is returned for the re-entry
+// clip. Otherwise the walk resumes just past the watermark.
 func resumeBounds(cursor *EventCursor) (uint32, uint32, *EventPosition) {
 	lo, hi := cursor.Scope.MinLedger, uint32(math.MaxUint32)
 	if cursor.Scope.MaxLedger != nil {
@@ -246,7 +240,7 @@ func resumeBounds(cursor *EventCursor) (uint32, uint32, *EventPosition) {
 	pos, mark := cursor.Position, cursor.ScannedLedger
 	if cursor.Scope.Dir == Descending {
 		switch {
-		case pos != nil && (mark == 0 || pos.Ledger < mark):
+		case pos != nil:
 			return lo, pos.Ledger, pos
 		case mark > 0:
 			hi = min(hi, mark-1)
@@ -254,7 +248,7 @@ func resumeBounds(cursor *EventCursor) (uint32, uint32, *EventPosition) {
 		return lo, hi, nil
 	}
 	switch {
-	case pos != nil && pos.Ledger > mark:
+	case pos != nil:
 		return pos.Ledger, hi, pos
 	case mark > 0:
 		lo = max(lo, mark+1)
@@ -469,6 +463,19 @@ func (a *ReadView) assemblePage(
 		next.Position = walk.last
 	}
 	next.ScannedLedger = watermark(&cursor, walk, clo, chi, desc)
+	// Drop a Position the watermark has passed: resumeBounds re-enters
+	// only from a leading Position, so a passed one would never be read
+	// again. Every cursor carries either a bare watermark or the one
+	// live mid-ledger re-entry point.
+	if pos := next.Position; pos != nil {
+		passed := pos.Ledger <= next.ScannedLedger
+		if desc {
+			passed = next.ScannedLedger != 0 && pos.Ledger >= next.ScannedLedger
+		}
+		if passed {
+			next.Position = nil
+		}
+	}
 
 	status := ScanHasMore
 	if walk.finished && !truncated {

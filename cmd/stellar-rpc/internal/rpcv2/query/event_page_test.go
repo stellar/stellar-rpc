@@ -214,9 +214,7 @@ func TestQueryEvents_SinglePageComplete(t *testing.T) {
 	assert.Equal(t, []string{"a0", "a1", "b0", "a2", "b1", "a3"}, labels(t, page.Events))
 	assert.Equal(t, ScanComplete, page.Status)
 	assert.Equal(t, f+3, page.Next.ScannedLedger)
-	require.NotNil(t, page.Next.Position)
-	assert.Equal(t, f+3, page.Next.Position.Ledger)
-	assert.Equal(t, uint32(1), page.Next.Position.LedgerOrdinal, "a3 is its ledger's second stored event")
+	assert.Nil(t, page.Next.Position, "the watermark passed the last delivery")
 }
 
 // TestQueryEvents_PagingSeamMatrix walks the whole fixture at every
@@ -248,11 +246,10 @@ func TestQueryEvents_PagingSeamMatrix(t *testing.T) {
 	}
 }
 
-// TestQueryEvents_FilteredMidLedgerResume pins the mid-ledger resume
-// arithmetic on the filtered path, including the page-boundary
-// watermark: page 1 stops knowing the next match is in F+2, so F
-// and the empty F+1 count as covered, and the position carries the
-// within-ledger progress.
+// TestQueryEvents_FilteredMidLedgerResume pins the page-boundary
+// watermark on the filtered path: page 1 stops knowing the next match
+// is in F+2, so F and the empty F+1 count as covered, and the position
+// is dropped because the watermark passed it.
 func TestQueryEvents_FilteredMidLedgerResume(t *testing.T) {
 	r, _, f := singleChunkFixture(t)
 	maxL := f + 3
@@ -269,9 +266,7 @@ func TestQueryEvents_FilteredMidLedgerResume(t *testing.T) {
 	assert.Equal(t, ScanHasMore, page.Status)
 	assert.Equal(t, f+1, page.Next.ScannedLedger,
 		"the next match is in F+2, so F and the empty F+1 are fully covered")
-	require.NotNil(t, page.Next.Position)
-	assert.Equal(t, f, page.Next.Position.Ledger)
-	assert.Equal(t, uint32(1), page.Next.Position.LedgerOrdinal)
+	assert.Nil(t, page.Next.Position, "the watermark passed it")
 
 	page = d.next()
 	assert.Equal(t, []string{"a2", "a3"}, labels(t, page.Events))
@@ -350,9 +345,7 @@ func TestQueryEvents_ChunkSeamFullChunk(t *testing.T) {
 		page = d.next()
 		assert.Equal(t, []string{"x3", "y1", "x4"}, labels(t, page.Events))
 		assert.Equal(t, ScanComplete, page.Status)
-		require.NotNil(t, page.Next.Position)
-		assert.Equal(t, f6+1, page.Next.Position.Ledger)
-		assert.Equal(t, uint32(0), page.Next.Position.LedgerOrdinal)
+		assert.Nil(t, page.Next.Position, "the watermark passed the last delivery")
 	})
 
 	// ScanOldestReached is a per-node stop, not a scope stop: a node
@@ -555,17 +548,15 @@ func TestQueryEvents_ConsumedRangeCompletes(t *testing.T) {
 	require.NoError(t, err)
 	defer a.Release()
 	maxL := f + 3
-	pos := &EventPosition{Ledger: f + 3, Tx: 1, Op: 1, Event: 1, LedgerOrdinal: 1}
 	page, err := a.QueryEvents(context.Background(), EventCursor{
 		Scope:         EventCursorQuery{MinLedger: f, MaxLedger: &maxL},
-		Position:      pos,
 		ScannedLedger: f + 3,
 	}, 10)
 	require.NoError(t, err)
 	assert.Empty(t, page.Events)
 	assert.Equal(t, ScanComplete, page.Status)
 	assert.Equal(t, f+3, page.Next.ScannedLedger)
-	assert.Equal(t, pos, page.Next.Position)
+	assert.Nil(t, page.Next.Position, "a completed cursor is a bare watermark")
 }
 
 // TestQueryEvents_EndStabilityAcrossIngest is the plan's End-pinning
@@ -863,10 +854,15 @@ func TestQueryEvents_CursorValidation(t *testing.T) {
 			Scope:         EventCursorQuery{MinLedger: f},
 			ScannedLedger: f - 1,
 		}, 1, ErrCursorMalformed},
-		// The pair must also be mintable together: a walk that
-		// delivered into a ledger covered everything before it, so the
-		// watermark trails the position by at most one ledger. Wider
-		// pairs would resume past unaccounted ledgers.
+		// The pair must also be mintable together: a present position
+		// sits exactly one ledger past the watermark in walk order (or
+		// at the zero-watermark anchor), since assemblePage drops a
+		// passed one. Any other pair is forged.
+		"position behind watermark ascending": {EventCursor{
+			Scope:         EventCursorQuery{MinLedger: f},
+			Position:      &EventPosition{Ledger: f},
+			ScannedLedger: f + 1,
+		}, 1, ErrCursorMalformed},
 		"position ahead of watermark": {EventCursor{
 			Scope:         EventCursorQuery{MinLedger: f},
 			Position:      &EventPosition{Ledger: f + 2},
