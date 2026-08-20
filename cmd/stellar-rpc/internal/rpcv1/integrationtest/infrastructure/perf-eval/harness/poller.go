@@ -17,16 +17,11 @@ const maxConsecutiveFetchErrors = 10
 // appears or the window closes. Gather and Relay share it; they differ only in
 // the window they poll and in what they report afterwards.
 type resultPoller struct {
-	s3Client    *s3.Client
-	runner      *ssmRunner
-	bucket, key string
-	runID       string
-	interval    time.Duration
-	// keySeeded marks a key the launch job pre-writes with a pending marker, so
-	// a 404 is a fault (a silent seed failure or a mistyped key) rather than a
-	// campaign that has not published yet. Legs publish only at the end, so
-	// their gatherer leaves this false and 404s stay normal.
-	keySeeded       bool
+	s3Client        *s3.Client
+	runner          *ssmRunner
+	bucket, key     string
+	runID           string
+	interval        time.Duration
 	debugLogLines   int
 	debugEveryPolls int
 }
@@ -39,13 +34,8 @@ func (p *resultPoller) poll(ctx context.Context, until time.Time) (*Result, erro
 	for pollCount := 1; time.Now().Before(until); pollCount++ {
 		res, err := p.checkOnce(ctx)
 		switch {
-		// checkOnce already logged the wait.
 		case errors.Is(err, ErrResultNotReady):
-			if p.keySeeded {
-				fetchErrs++ // a seeded key that 404s is a fault, not a wait
-			} else {
-				fetchErrs = 0 // legs publish at the end, so a 404 is a healthy answer
-			}
+			fetchErrs++
 		case err != nil:
 			fetchErrs++
 			logger.Warnf("result fetch failed (%d/%d); retrying: %v", fetchErrs, maxConsecutiveFetchErrors, err)
@@ -103,7 +93,7 @@ func (p *resultPoller) giveUpErr(fetchErrs int, last error) error {
 	if errors.Is(last, ErrResultNotReady) {
 		return fmt.Errorf(
 			"❌ Gave up: s3://%s/%s was absent on %d consecutive polls. "+
-				"The launch job seeds this key, so this is a seeding or config fault, not a pending campaign",
+				"The workflow seeds this key, so this is a seeding or config fault, not a pending campaign",
 			p.bucket, p.key, fetchErrs)
 	}
 	return fmt.Errorf(
