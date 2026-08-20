@@ -209,6 +209,16 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 			"[service.methods.getLedgerEntries].queue_limit",
 		},
 		{
+			"zero getEventsV2 queue_limit",
+			func(c *config.Config) { c.Service.Methods.GetEventsV2.QueueLimit = uintPtr(0) },
+			"[service.methods.getEventsV2].queue_limit",
+		},
+		{
+			"zero getEventsV2 max_items_per_response",
+			func(c *config.Config) { c.Service.Methods.GetEventsV2.MaxItemsPerResponse = uintPtr(0) },
+			"[service.methods.getEventsV2].max_items_per_response",
+		},
+		{
 			"zero preflight worker_count",
 			func(c *config.Config) { c.Service.Preflight.WorkerCount = uintPtr(0) },
 			"[service.preflight].worker_count",

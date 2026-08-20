@@ -259,6 +259,7 @@ func validateService(svc config.ServiceConfig) error {
 		{"getTransactions", *m.GetTransactions.QueueLimit, *m.GetTransactions.MaxExecutionDuration},
 		{"getLedgers", *m.GetLedgers.QueueLimit, *m.GetLedgers.MaxExecutionDuration},
 		{"getEvents", *m.GetEvents.QueueLimit, *m.GetEvents.MaxExecutionDuration},
+		{"getEventsV2", *m.GetEventsV2.QueueLimit, *m.GetEventsV2.MaxExecutionDuration},
 		{"getFeeStats", *m.GetFeeStats.QueueLimit, *m.GetFeeStats.MaxExecutionDuration},
 		{"sendTransaction", *m.SendTransaction.QueueLimit, *m.SendTransaction.MaxExecutionDuration},
 		{"simulateTransaction", *m.SimulateTransaction.QueueLimit, *m.SimulateTransaction.MaxExecutionDuration},
@@ -310,6 +311,7 @@ func validatePaginatedMethods(m config.MethodsConfig) error {
 		{"getTransactions", m.GetTransactions},
 		{"getLedgers", m.GetLedgers},
 		{"getEvents", m.GetEvents},
+		{"getEventsV2", m.GetEventsV2},
 	}
 	for _, pp := range paginated {
 		if *pp.p.MaxItemsPerResponse < 1 {
