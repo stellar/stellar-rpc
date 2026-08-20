@@ -5,6 +5,7 @@ import (
 	"context"
 	"iter"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,8 +20,27 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 )
+
+// countingServeReads is a no-op ServeReads that counts its calls — for tests
+// that only care that serving started.
+func countingServeReads(served *atomic.Int32) func(context.Context, *query.Registry) (func(), <-chan error, error) {
+	return func(context.Context, *query.Registry) (func(), <-chan error, error) {
+		served.Add(1)
+		return func() {}, nil, nil
+	}
+}
+
+// signalingServeReads is countingServeReads' channel twin, for tests that
+// sequence on the moment serving starts.
+func signalingServeReads(servedCh chan struct{}) func(context.Context, *query.Registry) (func(), <-chan error, error) {
+	return func(context.Context, *query.Registry) (func(), <-chan error, error) {
+		servedCh <- struct{}{}
+		return func() {}, nil, nil
+	}
+}
 
 // testCPI is the tx-hash index width tests build layouts with; equals the
 // production constant so on-disk geometry reads back identically.

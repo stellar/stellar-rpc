@@ -82,7 +82,7 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 	opts := daemonOptions{
 		Backend:    &fakeBackend{tip: chunk.FirstLedgerSeq + 10},
 		Core:       &fakeCore{}, // default getter blocks until ctx cancel
-		ServeReads: func(context.Context, *query.Registry) (func(), error) { served.Add(1); return func() {}, nil },
+		ServeReads: countingServeReads(&served),
 		Logger:     silentLogger(),
 	}
 
@@ -216,7 +216,7 @@ func TestRunDaemon_BackfillMaterializesAllColdTypesAndIndex(t *testing.T) {
 			// The network tip is derived from this same backend's Tip.
 			Backend:    someTxBackend(t),
 			Core:       &fakeCore{}, // default getter blocks until ctx cancel
-			ServeReads: func(context.Context, *query.Registry) (func(), error) { servedCh <- struct{}{}; return func() {}, nil },
+			ServeReads: signalingServeReads(servedCh),
 			Logger:     silentLogger(),
 		})
 	}()
@@ -337,7 +337,7 @@ func TestRunDaemon_LockContentionFailsFast(t *testing.T) {
 	var served atomic.Int32
 	err := runDaemonWith(context.Background(), configPath, daemonOptions{
 		Backend:    &fakeBackend{tip: chunk.FirstLedgerSeq + 10},
-		ServeReads: func(context.Context, *query.Registry) (func(), error) { served.Add(1); return func() {}, nil },
+		ServeReads: countingServeReads(&served),
 		Logger:     silentLogger(),
 	})
 	require.Error(t, err)
@@ -414,9 +414,9 @@ func TestSupervise_RetriesThenCleanShutdown(t *testing.T) {
 	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}} // young: no backfill
 	start := startTestConfig(t, cat, tip, &fakeCore{}, nil)
 	// An always-erroring ServeReads makes each attempt a restartable failure.
-	start.ServeReads = func(context.Context, *query.Registry) (func(), error) {
+	start.ServeReads = func(context.Context, *query.Registry) (func(), <-chan error, error) {
 		attempts.Add(1)
-		return nil, errors.New("transient serve failure")
+		return nil, nil, errors.New("transient serve failure")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -815,7 +815,7 @@ history_archive_urls = [%q]
 			// NO Backend injected: the daemon wires the captive source itself from
 			// the injected core opener + the file:// archive pool.
 			Core:       &streamCore{stream: &coreReplayStream{t: t, gen: someTxGen(t)}},
-			ServeReads: func(context.Context, *query.Registry) (func(), error) { servedCh <- struct{}{}; return func() {}, nil },
+			ServeReads: signalingServeReads(servedCh),
 			Logger:     silentLogger(),
 		})
 	}()

@@ -104,7 +104,7 @@ func startTestConfig(
 		Exec:       exec,
 		Retention:  rpcv2test.RetentionFor(t, cat, 0),
 		Core:       core,
-		ServeReads: func(context.Context, *query.Registry) (func(), error) { return func() {}, nil },
+		ServeReads: func(context.Context, *query.Registry) (func(), <-chan error, error) { return func() {}, nil, nil },
 	}
 	if recordPlan != nil {
 		cfg.runBackfill = func(_ context.Context, _ backfill.ExecConfig, lo, hi chunk.ID) error {
@@ -400,7 +400,7 @@ func TestRun_FirstStartServeIngestCleanShutdown(t *testing.T) {
 	core := &fakeCore{stream: &fakeCoreStream{frames: map[uint32][]byte{}, blockOnCtx: true}}
 	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}} // young: no backfill
 	cfg := startTestConfig(t, cat, tip, core, nil)
-	cfg.ServeReads = func(context.Context, *query.Registry) (func(), error) { served.Add(1); return func() {}, nil }
+	cfg.ServeReads = countingServeReads(&served)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -457,6 +457,34 @@ func TestRun_IngestionCleanEndSurfacesErrorNotHang(t *testing.T) {
 	}
 }
 
+// A read server dying AFTER serving started (its accept loop failing, reported
+// on the ServeReads channel) fails the whole attempt: ingestion must not keep
+// running behind an endpoint nothing can reach.
+func TestRun_ReadServerDeathFailsTheAttempt(t *testing.T) {
+	cat, _ := testCatalog(t)
+	pinGenesis(t, cat)
+	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}} // young ⇒ no backfill
+	cfg := startTestConfig(t, cat, tip, &fakeCore{}, nil)
+
+	died := make(chan error, 1)
+	cfg.ServeReads = func(context.Context, *query.Registry) (func(), <-chan error, error) {
+		return func() {}, died, nil
+	}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- run(context.Background(), cfg) }()
+	died <- errors.New("accept loop broke")
+
+	select {
+	case err := <-errCh:
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "read server died")
+		require.NotErrorIs(t, err, context.Canceled, "a dead read server is restartable, not a clean shutdown")
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not fail after the read server died")
+	}
+}
+
 // A ServeReads error is surfaced wrapped as a restartable failure (NOT clean).
 // run() opens the resume hot DB and starts core BEFORE serving; a serve error
 // after those returns via run()'s defer, which closes the DB (the loop never took
@@ -467,7 +495,9 @@ func TestRun_ServeReadsErrorSurfaces(t *testing.T) {
 	core := &fakeCore{stream: &fakeCoreStream{frames: map[uint32][]byte{}, blockOnCtx: true}}
 	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}}
 	cfg := startTestConfig(t, cat, tip, core, nil)
-	cfg.ServeReads = func(context.Context, *query.Registry) (func(), error) { return nil, errors.New("rpc bind failed") }
+	cfg.ServeReads = func(context.Context, *query.Registry) (func(), <-chan error, error) {
+		return nil, nil, errors.New("rpc bind failed")
+	}
 
 	err := run(context.Background(), cfg)
 	require.Error(t, err)
@@ -497,12 +527,12 @@ func TestRun_OpensHotDBAndCoreBeforeServe(t *testing.T) {
 
 	var stateAtServe geometry.HotState
 	var coreAtServe int32
-	cfg.ServeReads = func(context.Context, *query.Registry) (func(), error) {
+	cfg.ServeReads = func(context.Context, *query.Registry) (func(), <-chan error, error) {
 		st, herr := cat.HotState(resumeChunk)
 		require.NoError(t, herr)
 		stateAtServe = st
 		coreAtServe = core.openedCount.Load()
-		return nil, errors.New("stop before the blocking loop")
+		return nil, nil, errors.New("stop before the blocking loop")
 	}
 
 	err := run(context.Background(), cfg)
@@ -522,7 +552,7 @@ func TestRun_FirstStartNoTipErrors(t *testing.T) {
 	core := &fakeCore{}
 	tip := &fakeTipBackend{tips: []uint32{0}}
 	cfg := startTestConfig(t, cat, tip, core, nil)
-	cfg.ServeReads = func(context.Context, *query.Registry) (func(), error) { served.Add(1); return func() {}, nil }
+	cfg.ServeReads = countingServeReads(&served)
 
 	err := run(context.Background(), cfg)
 	require.Error(t, err)

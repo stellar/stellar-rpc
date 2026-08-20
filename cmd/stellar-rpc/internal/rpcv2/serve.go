@@ -37,9 +37,11 @@ type readServerDeps struct {
 // builds the method table over that attempt's registry, binds
 // [service].endpoint, and serves until the returned stop function runs. run()
 // calls stop before its registry closes, so the port is released before the
-// next attempt binds and no handler outlives its stores.
-func newServeReads(deps readServerDeps) func(context.Context, *query.Registry) (func(), error) {
-	return func(ctx context.Context, reg *query.Registry) (func(), error) {
+// next attempt binds and no handler outlives its stores. A Serve failure that
+// is NOT the graceful shutdown (v1 treats these as fatal) lands on the
+// returned channel, failing the attempt so the supervisor rebinds.
+func newServeReads(deps readServerDeps) func(context.Context, *query.Registry) (func(), <-chan error, error) {
+	return func(ctx context.Context, reg *query.Registry) (func(), <-chan error, error) {
 		p := deps.params
 		p.ledgerReader = adapters.NewLedgerReader(reg)
 		p.transactionReader = adapters.NewTransactionReader(reg, p.networkPassphrase)
@@ -49,13 +51,17 @@ func newServeReads(deps readServerDeps) func(context.Context, *query.Registry) (
 		listener, err := lc.Listen(ctx, "tcp", deps.cfg.Service.Endpoint)
 		if err != nil {
 			handler.Close()
-			return nil, fmt.Errorf("read server listen on %q: %w", deps.cfg.Service.Endpoint, err)
+			return nil, nil, fmt.Errorf("read server listen on %q: %w", deps.cfg.Service.Endpoint, err)
 		}
 
 		server := &http.Server{Handler: handler, ReadTimeout: jsonrpc.DefaultHTTPReadTimeout}
+		// Buffered so the send never blocks: after a graceful stop the watcher
+		// in run() is already gone. ErrServerClosed (the graceful path) is
+		// filtered here, so nothing is ever sent for a clean shutdown.
+		died := make(chan error, 1)
 		go func() {
 			if serr := server.Serve(listener); serr != nil && !errors.Is(serr, http.ErrServerClosed) {
-				deps.params.logger.WithError(serr).Warn("read server exited")
+				died <- serr
 			}
 		}()
 		deps.params.logger.WithField("endpoint", deps.cfg.Service.Endpoint).Info("read server listening")
@@ -70,7 +76,7 @@ func newServeReads(deps readServerDeps) func(context.Context, *query.Registry) (
 			}
 			handler.Close()
 		}
-		return stop, nil
+		return stop, died, nil
 	}
 }
 
@@ -91,8 +97,10 @@ func startAdminServer(
 	}
 	server := &http.Server{Handler: mux, ReadTimeout: jsonrpc.DefaultHTTPReadTimeout}
 	go func() {
+		// Log-only on purpose, matching v1: a dead admin server (pprof,
+		// /metrics) must not take down a node that is still serving reads.
 		if serr := server.Serve(listener); serr != nil && !errors.Is(serr, http.ErrServerClosed) {
-			logger.WithError(serr).Warn("admin server exited")
+			logger.WithError(serr).Error("admin server exited")
 		}
 	}()
 	logger.WithField("endpoint", endpoint).Info("admin server listening (pprof, /metrics)")

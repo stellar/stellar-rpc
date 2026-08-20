@@ -61,7 +61,7 @@ type daemonOptions struct {
 	// nil ⇒ the production server (newServeReads): the shared method table over
 	// the router-backed adapters, listening on [service].endpoint. Tests inject
 	// recorders.
-	ServeReads func(ctx context.Context, reg *query.Registry) (func(), error)
+	ServeReads func(ctx context.Context, reg *query.Registry) (func(), <-chan error, error)
 
 	// RestartBackoff is the supervised loop's inter-restart sleep; zero ⇒ defaultRestartBackoff.
 	RestartBackoff time.Duration
@@ -328,7 +328,7 @@ func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry
 func startConfig(
 	cfg config.Config, cat *catalog.Catalog, logger *supportlog.Entry,
 	backend backfill.Backend, core CoreOpener,
-	serveReads func(context.Context, *query.Registry) (func(), error),
+	serveReads func(context.Context, *query.Registry) (func(), <-chan error, error),
 	metrics observability.Metrics, sink ingest.MetricSink, retention geometry.Retention,
 ) StartConfig {
 	exec := backfill.ExecConfig{

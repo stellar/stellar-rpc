@@ -155,7 +155,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// Begin serving reads (injected) BEFORE launching the loops; it must return
 	// promptly (launch, not block). Its deferred stop runs before the deferred
 	// registry.Close above (LIFO), so the server is down before its stores go.
-	stopReads, err := cfg.ServeReads(ctx, registry)
+	stopReads, readsDied, err := cfg.ServeReads(ctx, registry)
 	if err != nil {
 		return fmt.Errorf("startup serve reads: %w", err)
 	}
@@ -195,6 +195,19 @@ func run(ctx context.Context, cfg StartConfig) error {
 	})
 	g.Go(func() error {
 		return lifecycle.Loop(gctx, lifecycleCfg, cat, boundary)
+	})
+	g.Go(func() error {
+		// A read server that dies on its own fails the whole attempt: without
+		// this, ingestion would keep running behind an endpoint nothing can
+		// reach, and the supervisor would never rebind it. Graceful shutdown
+		// never sends here — stopReads runs after g.Wait joins, and its
+		// ErrServerClosed is filtered at the sender.
+		select {
+		case serr := <-readsDied:
+			return fmt.Errorf("read server died: %w", serr)
+		case <-gctx.Done():
+			return gctx.Err()
+		}
 	})
 	return g.Wait()
 }
@@ -355,8 +368,13 @@ type StartConfig struct {
 	// promptly, not block. The returned stop shuts the server down — run() calls
 	// it (via defer) before the registry closes, so no handler outlives its
 	// stores and the listener is released before the next supervised attempt
-	// binds it again. Required.
-	ServeReads func(ctx context.Context, reg *query.Registry) (func(), error)
+	// binds it again. The returned channel reports the server dying on its own
+	// (a Serve failure that is not the graceful shutdown): run() joins it into
+	// the attempt's errgroup, so a dead accept loop fails the attempt and the
+	// supervisor rebinds — instead of the endpoint staying down while ingestion
+	// keeps running. A nil channel means the server never reports (tests).
+	// Required.
+	ServeReads func(ctx context.Context, reg *query.Registry) (func(), <-chan error, error)
 
 	// runBackfill is a test-only seam for one backfill pass; nil ⇒ backfill.RunBackfill.
 	runBackfill func(ctx context.Context, exec backfill.ExecConfig, lo, hi chunk.ID) error
