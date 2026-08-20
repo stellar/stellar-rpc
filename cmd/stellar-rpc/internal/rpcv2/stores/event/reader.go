@@ -68,10 +68,9 @@ type Reader interface {
 	EventCount() (uint32, error)
 
 	// Offsets returns a point-in-time *LedgerOffsets covering the
-	// chunk. The coordinator uses this to stitch a multi-ledger query
-	// range into chunk-relative event-id ranges: call EventIDs(ledger)
-	// per ledger in the query, then union the per-ledger [start, end)
-	// ranges before fetching events.
+	// chunk. The query side uses it to translate ledger bounds into a
+	// chunk-relative event-id window (IDRangeForLedgers reads the first
+	// and last ledger's entries) and to resolve single-ledger lookups.
 	//
 	// Implementations:
 	//   - HotStore returns a View sharing the live
@@ -79,7 +78,7 @@ type Reader interface {
 	//     visible at call time. A concurrent ingest may extend the
 	//     underlying state after Offsets returns, but the returned
 	//     view reflects what was visible at call time. Callers
-	//     (Query) take the view once at entry and pass it through
+	//     (Matches) take the view once at entry and pass it through
 	//     their helpers.
 	//   - ColdReader returns the lazily-decoded LedgerOffsets cached
 	//     on the reader; the same pointer is returned to every

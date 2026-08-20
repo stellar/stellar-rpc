@@ -74,8 +74,9 @@ type EventPage struct {
 // QueryEvents advances cursor by one page of at most limit events.
 // Errors: ErrCursorMalformed for a malformed cursor, ErrInvertedRange
 // for an inverted scope, ErrInvalidLimit for a non-positive limit,
-// *RangeError for a resume point below the view's retention floor,
-// and ErrPositionMismatch for a Position no stored event matches.
+// *RangeError for an ascending resume point below the view's
+// retention floor (descending reports OldestReached instead), and
+// ErrPositionMismatch for a Position no stored event matches.
 // Anything else is a store failure.
 func (a *ReadView) QueryEvents(ctx context.Context, cursor EventCursor, limit int) (*EventPage, error) {
 	if err := validateCursor(&cursor, limit); err != nil {
@@ -185,10 +186,12 @@ func validateBookmarks(cursor *EventCursor) error {
 				ErrCursorMalformed, pos.Ledger)
 		}
 	}
+	// MaxUint32 is rejected for its own reason: no ledger carries that
+	// number, and an ascending resume would compute mark+1, which wraps.
 	if mark := cursor.ScannedLedger; mark == math.MaxUint32 ||
 		(mark != 0 && mark < cursor.Scope.MinLedger) ||
 		(cursor.Scope.MaxLedger != nil && mark > *cursor.Scope.MaxLedger) {
-		return fmt.Errorf("%w: scanned ledger %d outside scope bounds",
+		return fmt.Errorf("%w: scanned ledger %d is not a servable ledger",
 			ErrCursorMalformed, mark)
 	}
 	return validateBookmarkPair(cursor)
@@ -276,8 +279,8 @@ type eventPart struct {
 
 // walkChunks scans the clamped range chunk by chunk. Each chunk's
 // reader is resolved only when the walk reaches it: a page usually
-// fills within the first chunk, and the scope can span the node's
-// whole retention.
+// fills within the first chunk, so the second (the scan window spans
+// at most two) often goes unopened.
 func (a *ReadView) walkChunks(
 	ctx context.Context, chunks []chunk.ID, lo, hi uint32, filters []event.Filter,
 	reenter *EventPosition, desc bool, limit int,

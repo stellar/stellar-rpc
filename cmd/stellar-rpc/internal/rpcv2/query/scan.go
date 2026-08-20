@@ -9,10 +9,10 @@ import (
 
 // The range helpers the endpoint adapters build on. They clamp the raw
 // request range themselves (RangeError / ErrInvertedRange surface here) and
-// resolve the overlapping chunks lazily: a cursor-driven scan can span
-// thousands of chunks on a deep-history node, so a reader opens only when the
-// walk reaches its chunk. ScanLedgers holds at most two readers; the events
-// pager's walkChunks resolves one chunk at a time.
+// resolve the overlapping chunks lazily, so a reader opens only when the
+// walk reaches its chunk. ScanLedgers is unwindowed (a scan can span
+// thousands of chunks on a deep-history node) and holds at most two
+// readers; the events pager's walkChunks resolves one chunk at a time.
 
 // ScanLedgers returns a flat ascending iterator over the raw ledgers in
 // [lo, hi] clamped to the view's range. The per-chunk intersect lives here, so

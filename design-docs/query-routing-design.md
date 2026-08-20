@@ -151,7 +151,7 @@ The snapshot is loaded last, so the metadata is the newest of the three. Any ske
 
 The floor is derived from the snapshot: the anchor is the highest ready hot chunk minus one (`Snapshot.LastCompleteChunk`), the same anchor the lifecycle run reads through `Catalog.LastCompleteChunk`. Floor and index coverage therefore come from the same read and cannot disagree. A snapshot with no ready hot chunk at all fails the acquisition: the live chunk's key exists before serving starts and is never demoted, so an empty scan marks a broken catalog, and failing the request beats deriving the widest possible floor from broken state.
 
-After acquisition, the query validates and clamps its requested range against the view's `[floor, latestLedger]`. Requests whose leading edge falls below the floor are rejected with an error carrying the available range. Requests extending beyond `latestLedger` are truncated.
+After acquisition, the query validates and clamps its requested range against the view's `[floor, latestLedger]`, per the edge rules in the range-traversal section: ascending below the floor is an error, descending below it is an empty OLDEST_REACHED page, a descending top above `latestLedger` waits, and ascending ranges truncate at `latestLedger`.
 
 Every request must release its view when it completes, including on error paths; release also closes the cold readers the view opened. A leaked snapshot pins catalog compaction until process exit; snapshot age is worth a metric.
 
@@ -324,15 +324,15 @@ The acquisition protocol is described in [Read views](#read-views).
 
 Every request validates its leading edge and clamps its trailing edge against the view's range `[floor, latestLedger]`. An inverted input range (`lo > hi`) is rejected as malformed rather than treated as an empty result.
 
-The leading edge determines where results begin. A range request whose leading edge falls below the view's retention floor is rejected with an error that carries the available range, matching v1's out-of-range behavior. Silently clamping would drop the first results the caller asked for.
+The leading edge determines where results begin. An ascending request whose leading edge falls below the view's retention floor is rejected with an error that carries the available range, matching v1's out-of-range behavior; silently clamping would drop the first results the caller asked for. A descending request below the floor is not an error: it reports an empty OLDEST_REACHED page, per the proposal's errors table. A descending request whose top is above `latestLedger` waits instead of being truncated: a descending scan cannot revisit a ledger, so serving below a missing top would skip those ledgers forever.
 
-The trailing edge determines where the scan ends. Requests extending beyond `latestLedger` are truncated, and descending scans terminate at the retention floor.
+The trailing edge determines where the scan ends. Ascending requests extending beyond `latestLedger` are truncated, and descending scans terminate at the retention floor.
 
 ### Cursors
 
 Pagination cursors obey five rules:
 
-- A cursor encodes ledger coordinates (ledger, transaction, operation, event), never a store, tier, or internal event ID, so stores can change between pages without invalidating it.
+- A cursor encodes ledger coordinates (ledger, transaction, operation, event, and the event's index within its ledger), never a store, tier, or chunk-internal event ID, so stores can change between pages without invalidating it.
 - Resume is exclusive in the scan direction: strictly after the cursor position ascending, strictly before it descending, so a retried page never duplicates results.
 - The request's bounds and filters travel in the cursor; the floor does not. Each page gates against its own view's floor, and a cursor whose position has aged below it is rejected with the available range.
 - `latestLedger` is re-read at each page's acquisition, so an ascending scan that catches up to the tip finds more ledgers under the same cursor later.
@@ -346,7 +346,7 @@ Each chunk belongs to exactly one serving store for a given query path. Multi-ch
 
 Ascending requests visit chunks in ascending order. Descending requests reverse the traversal.
 
-Two helpers implement the traversal once, so the chunk border is crossed (and tested) in one place. `ScanLedgers` yields a flat ledger iterator with the per-chunk intersect inside, so a caller cannot read past the view's `latestLedger` or below its floor. It keeps a rolling two-chunk window: chunks 0 and 1 open before the iterator returns, so an open failure reaches the caller instead of the stream, and the border chunk's open overlaps the first chunk's streaming. `ChunksForRange` serves the events path. It returns the chunk ids that overlap a clamped range, and the caller resolves each id through `ReadView.Events` as the walk reaches it, pairing each reader with its intersected bounds for that step. Nothing opens ahead of the walk: a page that fills inside its first chunk never resolves the chunks behind it, so a chunk with no serving store cannot fail a page that does not read it. Cold readers are view-owned on both paths and released by `Release`.
+Each path walks the overlapping chunks itself, intersecting the clamped range with each chunk's bounds at its own step. `ScanLedgers` yields a flat ledger iterator, so a caller cannot read past the view's `latestLedger` or below its floor. It keeps a rolling two-chunk window: chunks 0 and 1 open before the iterator returns, so an open failure reaches the caller instead of the stream, and the border chunk's open overlaps the first chunk's streaming. The events pager lists the overlapping chunk ids and resolves each through `ReadView.Events` as its walk reaches it. Nothing opens ahead of that walk: a page that fills inside its first chunk never resolves the chunks behind it, so a chunk with no serving store cannot fail a page that does not read it. Cold readers are view-owned on both paths and released by `Release`.
 
 The following diagram illustrates the running example used throughout this section.
 
@@ -402,7 +402,7 @@ This preserves the existing lookup semantics while allowing `TxReader` to operat
 
 `getEvents` searches rather than fetches data.
 
-Each page establishes a scan window, lists the overlapping chunks through `ChunksForRange`, and invokes the existing event query engine on each chunk as the walk reaches it.
+Each page establishes a scan window, lists the overlapping chunks, and invokes the existing event query engine on each chunk as the walk reaches it.
 
 The event query engine operates on the common `event.Reader` interface, so routing is identical for hot and cold readers.
 

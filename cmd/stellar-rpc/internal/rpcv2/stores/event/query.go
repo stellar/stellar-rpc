@@ -650,18 +650,13 @@ func streamRange(
 //
 // Within a clause: AND across constrained fields. Across clauses: OR.
 // The match-all short-circuit upstream means this is only reached
-// when at least one filter clause has a constraint. ids is
+// when at least one filter clause has a constraint, so filters is
+// never empty here. ids is
 // positionally aligned with payloads (both come from the same
 // candidate batch); survivors carry their ordinal out as
 // Match.Ordinal.
 func postFilter(payloads []events.Payload, ids []uint32, filters []Filter) ([]Match, error) {
 	out := make([]Match, 0, len(payloads))
-	if len(filters) == 0 {
-		for i := range payloads {
-			out = append(out, Match{Payload: payloads[i], Ordinal: ids[i]})
-		}
-		return out, nil
-	}
 	plan := planFilters(filters)
 	for i := range payloads {
 		ok, err := matchesAnyFilterView(payloads[i].ContractEventBytes, filters, &plan)
