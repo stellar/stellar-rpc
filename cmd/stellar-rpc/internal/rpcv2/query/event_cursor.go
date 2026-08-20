@@ -101,9 +101,11 @@ type EventCursorQuery struct {
 }
 
 // EventCursor is the envelope: the server-minted structure inside the opaque
-// cursor string, holding the original query, the position of the last
-// delivered event, and the scanned-ledger watermark. A nil Position means no
-// event has been delivered yet, so resume starts from the watermark alone.
+// cursor string, holding the original query, the scanned-ledger watermark,
+// and a Position only while a ledger is partly served (the pager drops a
+// Position the watermark has passed). A nil Position is the ordinary state:
+// resume starts just past the watermark. A present one is the mid-ledger
+// re-entry point.
 type EventCursor struct {
 	Scope         EventCursorQuery
 	Position      *EventPosition

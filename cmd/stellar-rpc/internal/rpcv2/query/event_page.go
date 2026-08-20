@@ -328,8 +328,8 @@ type chunkResult struct {
 	nextUnserved *uint32
 	// coveredThrough is the chunk's far ledger in walk order, set when
 	// the stream ended: every candidate in the chunk's window was
-	// checked, even if nothing was delivered. Nil when the window was
-	// empty; an empty window claims no coverage.
+	// checked, even if nothing was delivered. Nil only when the page
+	// filled first (nextUnserved is set instead).
 	coveredThrough *uint32
 }
 
