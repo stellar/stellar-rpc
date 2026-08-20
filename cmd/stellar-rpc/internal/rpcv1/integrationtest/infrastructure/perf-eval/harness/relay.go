@@ -47,7 +47,7 @@ func Relay(ctx context.Context) error {
 	poller := &resultPoller{
 		s3Client: s3Client, runner: runner,
 		bucket: cfg.bucket, key: cfg.resultKey, runID: cfg.runID,
-		interval: cfg.pollInterval, keySeeded: true,
+		interval:      cfg.pollInterval,
 		debugLogLines: cfg.debugLogLines, debugEveryPolls: cfg.debugEveryPolls,
 	}
 	res, err := poller.poll(ctx, windowEnd)

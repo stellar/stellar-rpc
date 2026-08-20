@@ -19,21 +19,21 @@ import (
 )
 
 // Result is the structured run outcome the box publishes to S3 as an atomic
-// object. The gatherer polls for it and reads either a complete object or
-// a 404.
+// object, overwriting the pending marker its workflow seeded. Pollers always
+// read a complete object.
 type Result struct {
 	SchemaVersion int             `json:"schemaVersion"`
-	Verdict       string          `json:"verdict"` // "ok" or "fail"; bench-campaign launches also seed a "pending" marker
+	Verdict       string          `json:"verdict"` // "ok" or "fail"; the workflows also seed a "pending" marker
 	Markdown      string          `json:"markdown"`
 	Bench         json.RawMessage `json:"bench,omitempty"`
 	RunID         string          `json:"runId"`
 	TargetSHA     string          `json:"targetSha"`
 }
 
-// Verdict values a box publishes (the bench-campaign launch job also seeds
-// VerdictPending so the result object exists for the campaign's whole life:
-// pending reads as still-running, and persistent fetch errors are a real
-// fault, not a not-yet-published object).
+// Verdict values a box publishes. The workflows (each leg job and the
+// campaign launch) seed VerdictPending first, so the result object exists for
+// the whole run: pending reads as still-running, and persistent fetch errors
+// are a real fault, not a not-yet-published object.
 const (
 	VerdictOK      = "ok"
 	VerdictPending = "pending"
