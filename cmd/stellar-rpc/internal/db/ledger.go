@@ -256,7 +256,7 @@ func (r ledgerReader) GetLatestLedgerSequence(ctx context.Context) (uint32, erro
 	return getLatestLedgerSequence(ctx, r, r.db.cache)
 }
 
-// Parses a raw ledger close meta blob into a LedgerHeaderHistoryEntry.
+// ParseLedgerHeaderFromMeta parses a raw LCM object into a LedgerHeaderHistoryEntry.
 func (r RawLedger) ParseLedgerHeaderFromMeta() (xdr.LedgerHeaderHistoryEntry, error) {
 	raw, err := xdr.Try(func() []byte {
 		m := xdr.LedgerCloseMetaView(r)
