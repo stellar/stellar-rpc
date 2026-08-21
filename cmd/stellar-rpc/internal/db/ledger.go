@@ -363,8 +363,7 @@ func (l ledgerWriter) trimLedgers(latestLedgerSeq uint32, retentionWindow uint32
 	return err
 }
 
-// getLedgerFromDB is a helper function that encapsulates the common logic
-// for fetching a single ledger from the database
+// getLedgerFromDB fetches a single ledger from the database.
 func getLedgerFromDB(ctx context.Context, db readDB, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
 	raw, found, err := getLedgerRawFromDB(ctx, db, sequence)
 	if err != nil || !found {
@@ -378,7 +377,7 @@ func getLedgerFromDB(ctx context.Context, db readDB, sequence uint32) (xdr.Ledge
 }
 
 // getLedgerRawFromDB is a helper function that encapsulates the common logic
-// for fetching a single ledger's bytes from the database
+// for fetching a single ledger's bytes from the database.
 func getLedgerRawFromDB(ctx context.Context, db readDB, sequence uint32) ([]byte, bool, error) {
 	sql := sq.Select("meta").From(ledgerCloseMetaTableName).Where(sq.Eq{"sequence": sequence})
 	var results [][]byte
