@@ -127,10 +127,10 @@ type MethodsConfig struct {
 	GetTransactions PaginatedMethodConfig `toml:"getTransactions"`
 	GetLedgers      PaginatedMethodConfig `toml:"getLedgers"`
 	GetEvents       EventsMethodConfig    `toml:"getEvents"`
-	// GetEventsV2 is the one method v2 serves that v1 does not; it defaults to
-	// getEvents' values.
-	GetEventsV2 PaginatedMethodConfig `toml:"getEventsV2"`
-	GetFeeStats MethodConfig          `toml:"getFeeStats"`
+	// GetEventsV2 is the one method v2 serves that v1 does not; it carries
+	// getEvents' knob set and defaults.
+	GetEventsV2 EventsMethodConfig `toml:"getEventsV2"`
+	GetFeeStats MethodConfig       `toml:"getFeeStats"`
 
 	// The three methods that read current ledger state through captive core
 	// rather than this daemon's stores (#884). Their serving knobs belong here;
@@ -172,9 +172,10 @@ type NetworkMethodConfig struct {
 	FriendbotURL string `toml:"friendbot_url"`
 }
 
-// EventsMethodConfig adds getEvents' own knobs such as term_budget
-// which are not for other methods. The decoder flattens the embedded
-// fields, keeping the method's TOML table flat.
+// EventsMethodConfig adds the events methods' own knobs such as
+// term_budget, which no other method has. Both getEvents and
+// getEventsV2 carry it. The decoder flattens the embedded fields,
+// keeping the method's TOML table flat.
 //
 // Known trade-off of embedding: the decoder also accepts the shared
 // keys through a table named after the embedded type, in any casing,
@@ -660,6 +661,7 @@ func (cfg Config) WithDefaults() Config {
 	dur(&m.GetEventsV2.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
 	fillUint(&m.GetEventsV2.MaxItemsPerResponse, DefaultGetEventsMaxItemsPerResponse)
 	fillUint(&m.GetEventsV2.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
+	fillUint(&m.GetEventsV2.TermBudget, DefaultGetEventsTermBudget)
 
 	queue(&m.GetFeeStats.QueueLimit, DefaultGetFeeStatsQueueLimit)
 	dur(&m.GetFeeStats.MaxExecutionDuration, DefaultMethodMaxExecutionDuration)

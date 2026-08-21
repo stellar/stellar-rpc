@@ -284,7 +284,10 @@ func validateService(svc config.ServiceConfig) error {
 	if err := validatePaginatedMethods(m); err != nil {
 		return err
 	}
-	if err := validateEventsMethod(m.GetEvents); err != nil {
+	if err := validateEventsMethod("getEvents", m.GetEvents); err != nil {
+		return err
+	}
+	if err := validateEventsMethod("getEventsV2", m.GetEventsV2); err != nil {
 		return err
 	}
 	if err := validatePreflight(svc.Preflight); err != nil {
@@ -314,7 +317,7 @@ func validatePaginatedMethods(m config.MethodsConfig) error {
 		{"getTransactions", m.GetTransactions},
 		{"getLedgers", m.GetLedgers},
 		{"getEvents", m.GetEvents.PaginatedMethodConfig},
-		{"getEventsV2", m.GetEventsV2},
+		{"getEventsV2", m.GetEventsV2.PaginatedMethodConfig},
 	}
 	for _, pp := range paginated {
 		if *pp.p.MaxItemsPerResponse < 1 {
@@ -331,10 +334,10 @@ func validatePaginatedMethods(m config.MethodsConfig) error {
 	return nil
 }
 
-// validateEventsMethod form-validates getEvents' v2 knobs.
-func validateEventsMethod(e config.EventsMethodConfig) error {
+// validateEventsMethod form-validates one events method's v2 knobs.
+func validateEventsMethod(name string, e config.EventsMethodConfig) error {
 	if *e.TermBudget < 1 {
-		return errors.New("[service.methods.getEvents].term_budget must be >= 1")
+		return fmt.Errorf("[service.methods.%s].term_budget must be >= 1", name)
 	}
 	return nil
 }
