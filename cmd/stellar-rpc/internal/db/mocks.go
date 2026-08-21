@@ -101,22 +101,18 @@ func (m *MockLedgerReader) GetLedger(_ context.Context, sequence uint32) (xdr.Le
 func (m *MockLedgerReader) GetLedgerRaw(
 	_ context.Context,
 	sequence uint32,
-) ([]byte, xdr.LedgerHeaderHistoryEntry, bool, error) {
+) ([]byte, bool, error) {
 	lcm, ok := m.txn.ledgerSeqToMeta[sequence]
 	if !ok {
-		return nil, xdr.LedgerHeaderHistoryEntry{}, false, nil
+		return nil, false, nil
 	}
 	var buf bytes.Buffer
 	_, err := xdr.Marshal(&buf, lcm)
 	rawMeta := buf.Bytes()
 	if err != nil {
-		return nil, xdr.LedgerHeaderHistoryEntry{}, false, err
+		return nil, false, err
 	}
-	header, err := parseLedgerHeaderFromMeta(rawMeta)
-	if err != nil {
-		return nil, xdr.LedgerHeaderHistoryEntry{}, false, err
-	}
-	return rawMeta, header, true, nil
+	return rawMeta, true, nil
 }
 
 func (m *MockLedgerReader) StreamAllLedgers(_ context.Context, _ StreamLedgerFn) error {

@@ -57,16 +57,16 @@ func (ledgerReader *ConstantLedgerReader) GetLedger(_ context.Context,
 
 func (ledgerReader *ConstantLedgerReader) GetLedgerRaw(_ context.Context,
 	sequence uint32,
-) ([]byte, xdr.LedgerHeaderHistoryEntry, bool, error) {
+) ([]byte, bool, error) {
 	lcm := createLedger(expectedLatestLedgerHashBytes,
 		sequence,
 		expectedLatestLedgerProtocolVersion,
 		expectedLatestLedgerCloseTime)
 	var buf bytes.Buffer
 	if _, err := xdr.Marshal(&buf, lcm); err != nil {
-		return nil, xdr.LedgerHeaderHistoryEntry{}, false, err
+		return nil, false, err
 	}
-	return buf.Bytes(), lcm.V1.LedgerHeader, true, nil
+	return buf.Bytes(), true, nil
 }
 
 func (ledgerReader *ConstantLedgerReader) StreamAllLedgers(_ context.Context, _ db.StreamLedgerFn) error {

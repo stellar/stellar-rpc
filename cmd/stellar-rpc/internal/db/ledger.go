@@ -24,7 +24,7 @@ type StreamLedgerFn func(xdr.LedgerCloseMeta) error
 
 type LedgerReader interface {
 	GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error)
-	GetLedgerRaw(ctx context.Context, sequence uint32) ([]byte, xdr.LedgerHeaderHistoryEntry, bool, error)
+	GetLedgerRaw(ctx context.Context, sequence uint32) ([]byte, bool, error)
 	StreamAllLedgers(ctx context.Context, f StreamLedgerFn) error
 	GetLedgerRange(ctx context.Context) (ledgerbucketwindow.LedgerRange, error)
 	GetLedgerCountInRange(ctx context.Context, start uint32, end uint32) (uint32, uint32, uint32, error)
@@ -92,7 +92,7 @@ func (l ledgerReaderTx) BatchGetLedgers(
 
 	batch := make([]LedgerMetadataChunk, len(results))
 	for i, meta := range results {
-		header, err := parseLedgerHeaderFromMeta(meta)
+		header, err := ParseLedgerHeaderFromMeta(meta)
 		if err != nil {
 			return nil, err
 		}
@@ -185,19 +185,12 @@ func (r ledgerReader) GetLedger(ctx context.Context, sequence uint32) (xdr.Ledge
 }
 
 // GetLedgerRaw fetches a single ledger from the db and returns its bytes, its header, and whether it was found.
-func (r ledgerReader) GetLedgerRaw(
-	ctx context.Context,
-	sequence uint32,
-) ([]byte, xdr.LedgerHeaderHistoryEntry, bool, error) {
+func (r ledgerReader) GetLedgerRaw(ctx context.Context, sequence uint32) ([]byte, bool, error) {
 	meta, found, err := getLedgerRawFromDB(ctx, r.db, sequence)
 	if err != nil || !found {
-		return nil, xdr.LedgerHeaderHistoryEntry{}, found, err
+		return nil, found, err
 	}
-	header, err := parseLedgerHeaderFromMeta(meta)
-	if err != nil {
-		return nil, xdr.LedgerHeaderHistoryEntry{}, false, err
-	}
-	return meta, header, true, nil
+	return meta, true, nil
 }
 
 // GetLedgerRange pulls the min/max ledger sequence numbers from the meta table.
@@ -396,7 +389,7 @@ func getLedgerRawFromDB(ctx context.Context, db readDB, sequence uint32) ([]byte
 }
 
 // Parses a raw ledger close meta blob into a LedgerHeaderHistoryEntry.
-func parseLedgerHeaderFromMeta(meta []byte) (xdr.LedgerHeaderHistoryEntry, error) {
+func ParseLedgerHeaderFromMeta(meta []byte) (xdr.LedgerHeaderHistoryEntry, error) {
 	raw, err := xdr.Try(func() []byte {
 		m := xdr.LedgerCloseMetaView(meta)
 		switch m.MustV() {
