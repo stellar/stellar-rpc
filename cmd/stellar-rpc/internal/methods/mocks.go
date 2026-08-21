@@ -28,9 +28,9 @@ func (m *MockLedgerReader) GetLedger(ctx context.Context, sequence uint32) (xdr.
 	return args.Get(0).(xdr.LedgerCloseMeta), args.Bool(1), args.Error(2) //nolint:forcetypeassert
 }
 
-func (m *MockLedgerReader) GetLedgerRaw(ctx context.Context, sequence uint32) ([]byte, bool, error) {
+func (m *MockLedgerReader) GetLedgerRaw(ctx context.Context, sequence uint32) (db.RawLedger, bool, error) {
 	args := m.Called(ctx, sequence)
-	return args.Get(0).([]byte), args.Bool(1), args.Error(2) //nolint:forcetypeassert
+	return args.Get(0).(db.RawLedger), args.Bool(1), args.Error(2) //nolint:forcetypeassert
 }
 
 func (m *MockLedgerReader) StreamAllLedgers(ctx context.Context, f db.StreamLedgerFn) error {

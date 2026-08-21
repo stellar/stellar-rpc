@@ -31,7 +31,7 @@ func NewGetLatestLedgerHandler(ledgerReader db.LedgerReader) jrpc2.Handler {
 				Message: "could not get latest ledger",
 			}
 		}
-		header, err := db.ParseLedgerHeaderFromMeta(latestLedgerRaw)
+		header, err := latestLedgerRaw.ParseLedgerHeaderFromMeta()
 		if err != nil {
 			return protocol.GetLatestLedgerResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InternalError,

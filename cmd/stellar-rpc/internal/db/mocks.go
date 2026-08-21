@@ -98,10 +98,7 @@ func (m *MockLedgerReader) GetLedger(_ context.Context, sequence uint32) (xdr.Le
 	return *lcm, true, nil
 }
 
-func (m *MockLedgerReader) GetLedgerRaw(
-	_ context.Context,
-	sequence uint32,
-) ([]byte, bool, error) {
+func (m *MockLedgerReader) GetLedgerRaw(_ context.Context, sequence uint32) (RawLedger, bool, error) {
 	lcm, ok := m.txn.ledgerSeqToMeta[sequence]
 	if !ok {
 		return nil, false, nil

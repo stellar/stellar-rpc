@@ -55,9 +55,10 @@ func (ledgerReader *ConstantLedgerReader) GetLedger(_ context.Context,
 		true, nil
 }
 
-func (ledgerReader *ConstantLedgerReader) GetLedgerRaw(_ context.Context,
+func (ledgerReader *ConstantLedgerReader) GetLedgerRaw(
+	_ context.Context,
 	sequence uint32,
-) ([]byte, bool, error) {
+) (db.RawLedger, bool, error) {
 	lcm := createLedger(expectedLatestLedgerHashBytes,
 		sequence,
 		expectedLatestLedgerProtocolVersion,
