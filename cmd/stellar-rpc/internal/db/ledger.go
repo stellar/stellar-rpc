@@ -91,27 +91,35 @@ func (l ledgerReaderTx) BatchGetLedgers(
 
 	batch := make([]LedgerMetadataChunk, len(results))
 	for i, meta := range results {
-		batch[i] = LedgerMetadataChunk{Lcm: meta}
-
-		var v xdr.Int32
-		rd := bytes.NewReader(meta)
-		if _, err := xdr.Unmarshal(rd, &v); err != nil {
+		header, err := l.parseLedgerHeaderFromMeta(meta)
+		if err != nil {
 			return nil, err
 		}
-
-		if v > 0 { // V0 has no extension
-			var ext xdr.LedgerCloseMetaExt
-			if _, err := xdr.Unmarshal(rd, &ext); err != nil { // skipped
-				return nil, err
-			}
-		}
-
-		if _, err := xdr.Unmarshal(rd, &batch[i].Header); err != nil {
-			return nil, err
-		}
+		batch[i] = LedgerMetadataChunk{Header: header, Lcm: meta}
 	}
 
 	return batch, nil
+}
+
+func (l ledgerReaderTx) parseLedgerHeaderFromMeta(meta []byte) (xdr.LedgerHeaderHistoryEntry, error) {
+	var v xdr.Int32
+	rd := bytes.NewReader(meta)
+	if _, err := xdr.Unmarshal(rd, &v); err != nil {
+		return xdr.LedgerHeaderHistoryEntry{}, err
+	}
+
+	if v > 0 { // V0 has no extension
+		var ext xdr.LedgerCloseMetaExt
+		if _, err := xdr.Unmarshal(rd, &ext); err != nil { // skipped
+			return xdr.LedgerHeaderHistoryEntry{}, err
+		}
+	}
+
+	var header xdr.LedgerHeaderHistoryEntry
+	if _, err := xdr.Unmarshal(rd, &header); err != nil {
+		return xdr.LedgerHeaderHistoryEntry{}, err
+	}
+	return header, nil
 }
 
 // GetLedger fetches a single ledger from the db using a transaction.
