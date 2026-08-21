@@ -68,10 +68,9 @@ type Reader interface {
 	EventCount() (uint32, error)
 
 	// Offsets returns a point-in-time *LedgerOffsets covering the
-	// chunk. The coordinator uses this to stitch a multi-ledger query
-	// range into chunk-relative event-id ranges: call EventIDs(ledger)
-	// per ledger in the query, then union the per-ledger [start, end)
-	// ranges before fetching events.
+	// chunk. The query side uses it to translate ledger bounds into a
+	// chunk-relative event-id window (IDRangeForLedgers reads the first
+	// and last ledger's entries) and to resolve single-ledger lookups.
 	//
 	// Implementations:
 	//   - HotStore returns a View sharing the live
@@ -79,7 +78,7 @@ type Reader interface {
 	//     visible at call time. A concurrent ingest may extend the
 	//     underlying state after Offsets returns, but the returned
 	//     view reflects what was visible at call time. Callers
-	//     (Query) take the view once at entry and pass it through
+	//     (Matches) take the view once at entry and pass it through
 	//     their helpers.
 	//   - ColdReader returns the lazily-decoded LedgerOffsets cached
 	//     on the reader; the same pointer is returned to every
@@ -107,7 +106,7 @@ type Reader interface {
 	// atomic.Pointer COW, so a returned pointer will never be
 	// mutated by anyone. The cold path returns freshly-unmarshaled
 	// bitmaps logically owned by the caller. Either way callers
-	// must not mutate; event.Query is the only consumer today
+	// must not mutate; event.Matches is the only consumer today
 	// and never mutates, and downstream roaring.FastAnd/FastOr never
 	// mutate inputs.
 	//
@@ -129,9 +128,11 @@ type Reader interface {
 	// ctx cancels in-flight I/O; the cold path checks ctx between
 	// scattered-read batches, the hot path checks between Gets.
 	//
-	// A missing row is an error: eventIDs only reach this path
-	// through LookupKeys, so a miss signals corruption or a
-	// writer/reader mismatch, not a normal not-found case.
+	// A missing row is an error: every caller passes ids that name
+	// stored events (bitmap ids come from LookupKeys; the pager's
+	// resume ordinal is bounds-checked against its ledger's ID range
+	// first), so a miss signals corruption or a writer/reader
+	// mismatch, not a normal not-found case.
 	FetchEvents(ctx context.Context, eventIDs []uint32) ([]events.Payload, error)
 
 	// FetchRange streams count events starting at chunk-relative
