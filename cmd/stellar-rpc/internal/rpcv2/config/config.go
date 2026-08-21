@@ -128,7 +128,7 @@ type MethodsConfig struct {
 	GetTransaction  MethodConfig          `toml:"getTransaction"`
 	GetTransactions PaginatedMethodConfig `toml:"getTransactions"`
 	GetLedgers      PaginatedMethodConfig `toml:"getLedgers"`
-	GetEvents       PaginatedMethodConfig `toml:"getEvents"`
+	GetEvents       EventsMethodConfig    `toml:"getEvents"`
 	GetFeeStats     MethodConfig          `toml:"getFeeStats"`
 
 	// The three methods that read current ledger state through captive core
@@ -158,6 +158,24 @@ type PaginatedMethodConfig struct {
 
 	MaxItemsPerResponse     *uint `toml:"max_items_per_response"`
 	DefaultItemsPerResponse *uint `toml:"default_items_per_response"`
+}
+
+// EventsMethodConfig adds getEvents' own knobs such as term_budget
+// which are not for other methods. The decoder flattens the embedded
+// fields, keeping the method's TOML table flat.
+//
+// Known trade-off of embedding: the decoder also accepts the shared
+// keys through a table named after the embedded type, in any casing,
+// and strict mode cannot reject it. Accepted over duplicating the
+// fields: the config is trusted input, and nobody writes a Go type
+// name into TOML by hand.
+type EventsMethodConfig struct {
+	PaginatedMethodConfig
+
+	// TermBudget caps the distinct index terms one request may look
+	// up; over budget fails with the v2 invalid_params error. Must be
+	// >= 1: a zero budget would reject every filtered request.
+	TermBudget *uint `toml:"term_budget"`
 }
 
 // HealthMethodConfig extends MethodConfig for getHealth with the staleness
@@ -420,8 +438,13 @@ const (
 	//   - getLedgers is 20/5, not v1's 200/50 — the item here is a full
 	//     LedgerCloseMeta (megabytes each on a busy pubnet ledger), so v1's
 	//     200-item page could exceed a hundred MB of XDR in one response.
-	DefaultGetEventsMaxItemsPerResponse           uint = 1000
-	DefaultGetEventsDefaultItemsPerResponse       uint = 100
+	DefaultGetEventsMaxItemsPerResponse     uint = 1000
+	DefaultGetEventsDefaultItemsPerResponse uint = 100
+
+	// DefaultGetEventsTermBudget is the getEvents v2 proposal's default
+	// (github.com/orgs/stellar/discussions/1872).
+	DefaultGetEventsTermBudget uint = 15
+
 	DefaultGetTransactionsMaxItemsPerResponse     uint = 200
 	DefaultGetTransactionsDefaultItemsPerResponse uint = 50
 	DefaultGetLedgersMaxItemsPerResponse          uint = 20
@@ -619,6 +642,7 @@ func (cfg Config) WithDefaults() Config {
 	dur(&m.GetEvents.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
 	fillUint(&m.GetEvents.MaxItemsPerResponse, DefaultGetEventsMaxItemsPerResponse)
 	fillUint(&m.GetEvents.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
+	fillUint(&m.GetEvents.TermBudget, DefaultGetEventsTermBudget)
 
 	queue(&m.GetFeeStats.QueueLimit, DefaultGetFeeStatsQueueLimit)
 	dur(&m.GetFeeStats.MaxExecutionDuration, DefaultMethodMaxExecutionDuration)

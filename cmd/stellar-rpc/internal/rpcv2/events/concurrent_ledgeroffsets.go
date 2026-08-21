@@ -89,7 +89,7 @@ func (m *ConcurrentLedgerOffsets) EndLedger() uint32 {
 
 // View returns a *LedgerOffsets sharing the live backing array,
 // capped to the count visible at call time. Used by HotStore on
-// the query hot path: each Query allocates one View (~24 bytes:
+// the query hot path: each Matches call allocates one View (~24 bytes:
 // slice header + startLedger) instead of a 40KB deep copy of the
 // full backing array.
 //

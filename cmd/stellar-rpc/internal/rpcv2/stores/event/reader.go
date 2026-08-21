@@ -40,9 +40,9 @@ var ErrFetchRangeOutOfBounds = errors.New("events: FetchRange out of bounds")
 // Reader is the unified read surface for one Chunk's events,
 // implemented by both HotStore (RocksDB + in-memory caches) and
 // ColdReader (mmap'd events.pack + index.pack + index.hash).
-// Consumers like the query coordinator (PR-3c) work against this
-// interface so they don't need to branch on hot-vs-cold beyond
-// reader construction.
+// Consumers like the events pager work against this interface so
+// they don't need to branch on hot-vs-cold beyond reader
+// construction.
 //
 // All implementations return events in chunk-relative eventID
 // order. EventIDs are dense in `[0, EventCount())`.
@@ -119,11 +119,11 @@ type Reader interface {
 	// eventIDs and returns them positionally aligned with the input
 	// slice (result[i] corresponds to eventIDs[i]).
 	//
-	// eventIDs MUST be sorted ascending with no duplicates. The
-	// coordinator iterating a bitmap intersection
-	// (roaring.Bitmap.Iterator yields ascending) satisfies this for
-	// free. Both implementations validate the precondition up front
-	// and return a wrapped ErrUnsortedEventIDs on violation.
+	// eventIDs MUST be sorted ascending with no duplicates. Matches
+	// iterating a bitmap intersection (roaring.Bitmap.Iterator yields
+	// ascending) satisfies this for free. Both implementations
+	// validate the precondition up front and return a wrapped
+	// ErrUnsortedEventIDs on violation.
 	//
 	// ctx cancels in-flight I/O; the cold path checks ctx between
 	// scattered-read batches, the hot path checks between Gets.

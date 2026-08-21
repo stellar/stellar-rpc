@@ -107,7 +107,7 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 // ≥2-input qualifier on FastAnd/FastOr: with a single input the
 // roaring library has historically taken a Clone-the-input
 // shortcut, so callers MUST avoid passing a singleton slice to
-// those aggregators (the event store's Query guards its single-input
+// those aggregators (the event store's Matches guards its single-input
 // cases before calling FastAnd/FastOr).
 //
 // Callers may hold the pointer arbitrarily long. A subsequent Get

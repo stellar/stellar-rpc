@@ -529,7 +529,7 @@ func TestHotStore_ReopenRecoversState(t *testing.T) {
 func TestHotStore_SatisfiesReader(t *testing.T) {
 	// Compile-time guard already enforces this via the package-level
 	// var declaration; this test demonstrates callers can hold a
-	// *HotStore as a Reader for the freeze path and query coordinator.
+	// *HotStore as a Reader for the freeze path and the events pager.
 	h := openHotStoreForTest(t, 0)
 	var r Reader = h.store
 	assert.Equal(t, chunk.ID(0), r.ChunkID())

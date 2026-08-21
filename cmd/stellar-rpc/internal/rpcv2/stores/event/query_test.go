@@ -178,7 +178,7 @@ func eventIDRangeFor(t *testing.T, fx *queryFixture, startLedger, endLedger uint
 
 // wholeChunk returns the IDRange covering everything r has
 // ingested at this moment — the test-side equivalent of the
-// snapshot the multi-chunk coordinator pins at request entry.
+// snapshot the events pager pins at request entry.
 // Each test that wants "scan the whole chunk" pins its OWN snapshot
 // via this helper rather than relying on a hidden engine default,
 // keeping the snapshot-isolation contract visible at every call site.
@@ -703,8 +703,8 @@ func TestQuery_EmptyLeadingLedgerRangeStaysEmpty(t *testing.T) {
 	}))
 
 	// IDRangeForLedgers translates the empty-prefix request to
-	// IDRange{0, 0}. This is what the future adapter / coordinator
-	// will hand to Query for a getEvents call restricted to ledger `first`.
+	// IDRange{0, 0}: what the pager hands to Matches for a getEvents
+	// call restricted to ledger `first`.
 	ofs, err := h.store.Offsets()
 	require.NoError(t, err)
 	emptyRange, err := IDRangeForLedgers(ofs, first, first)
@@ -1749,4 +1749,34 @@ func TestPostFilter_OrdinalAlignmentWithLeadingDrop(t *testing.T) {
 	assert.Equal(t, uint32(9), got[0].Ordinal,
 		"the survivor must carry its own ordinal, not the dropped candidate's")
 	assert.Equal(t, "keep", dataSym(t, got[0].Payload))
+}
+
+// TestCountDistinctTerms pins the term-budget denomination: distinct
+// (field, value) pairs, deduped across filters the same way the
+// engine dedups its lookup batch.
+func TestCountDistinctTerms(t *testing.T) {
+	cid := bytes.Repeat([]byte{0x0a}, 32)
+	alpha, beta := []byte("alpha"), []byte("beta")
+
+	assert.Equal(t, 0, CountDistinctTerms(nil), "no filters look up nothing")
+	assert.Equal(t, 0, CountDistinctTerms([]Filter{{}}), "a match-all filter looks up nothing")
+	assert.Equal(t, 3, CountDistinctTerms([]Filter{
+		{ContractID: cid, Topics: [protocol.MaxTopicCount][]byte{alpha, nil, beta}},
+	}))
+	assert.Equal(t, 3, CountDistinctTerms([]Filter{
+		{ContractID: cid, Topics: [protocol.MaxTopicCount][]byte{alpha}},
+		{ContractID: cid, Topics: [protocol.MaxTopicCount][]byte{beta}},
+	}), "the shared contract term counts once")
+	assert.Equal(t, 2, CountDistinctTerms([]Filter{
+		{Topics: [protocol.MaxTopicCount][]byte{alpha, alpha}},
+	}), "the same value at two positions is two terms")
+
+	system := xdr.ContractEventTypeSystem
+	assert.Equal(t, 2, CountDistinctTerms([]Filter{
+		{EventType: &system, Topics: [protocol.MaxTopicCount][]byte{alpha}},
+		{EventType: &system},
+	}), "the shared type term counts once")
+	assert.Equal(t, 1, CountDistinctTerms([]Filter{
+		{ContractID: cid, TopicCount: TopicCountFilter{Count: 1}},
+	}), "topic-count buckets are not value terms and are not counted")
 }

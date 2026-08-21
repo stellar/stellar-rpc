@@ -36,8 +36,8 @@ package event
 //     logging, metrics, or error context after closing the reader.
 //
 // Caching, pooling, or per-query lifecycle policy is the consumer's
-// problem (e.g., the serving read side, PR-3c). ColdReader is a
-// primitive: New (well, Open) and Close.
+// problem (the query ReadView owns cold readers today). ColdReader
+// is a primitive: New (well, Open) and Close.
 
 import (
 	"bytes"

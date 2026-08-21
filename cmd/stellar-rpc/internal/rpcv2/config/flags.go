@@ -231,6 +231,8 @@ func leafKind(t reflect.Type) kind {
 //     become a settable file key with no flag — the one way the file schema
 //     and the flag set could drift apart (see DataStoreConfig for the same
 //     concern with embedded SDK structs);
+//   - an untagged anonymous struct field recurses with the SAME
+//     prefix, matching the decoder's flattening of embedded structs;
 //   - a tagged struct field recurses with its tag as a path segment;
 //   - a tagged leaf of an unsupported type PANICS at BindFlags time — adding a
 //     config field of a new type must extend leafKind, not silently lose its flag.
@@ -242,6 +244,10 @@ func walkLeaves(v reflect.Value, prefix string, visit func(path string, f reflec
 			continue
 		}
 		tag := field.Tag.Get("toml")
+		if tag == "" && field.Anonymous && field.Type.Kind() == reflect.Struct {
+			walkLeaves(v.Field(i), prefix, visit)
+			continue
+		}
 		if tag == "" {
 			panic(fmt.Sprintf("config flags: exported field %s.%s has no toml tag — go-toml would "+
 				"accept it as a file key by field name, but it would get no flag; "+
