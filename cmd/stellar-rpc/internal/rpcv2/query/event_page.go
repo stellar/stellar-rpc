@@ -138,7 +138,7 @@ func validateCursor(cursor *EventCursor, limit int) error {
 }
 
 // validateScope rejects scope shapes the server never mints.
-func validateScope(scope *EventCursorQuery) error {
+func validateScope(scope *EventScope) error {
 	switch scope.Dir {
 	case Ascending:
 	case Descending:
@@ -510,7 +510,7 @@ func watermark(cursor *EventCursor, walk walkResult, clo, chi uint32, desc bool)
 // terminalStatus classifies a walk that finished its clamped window:
 // either the scope's own bound was reached (complete), or the walk
 // stopped at the edge of the node's serving range [oldest, latest].
-func terminalStatus(scope *EventCursorQuery, desc bool, oldest, latest uint32) ScanStatus {
+func terminalStatus(scope *EventScope, desc bool, oldest, latest uint32) ScanStatus {
 	if desc {
 		if scope.MinLedger >= oldest {
 			return ScanComplete

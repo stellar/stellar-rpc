@@ -208,7 +208,7 @@ func TestQueryEvents_SinglePageComplete(t *testing.T) {
 	maxL := f + 3
 	d := &pageDriver{
 		t: t, r: r, limit: 10,
-		cursor: EventCursor{Scope: EventCursorQuery{MinLedger: f, MaxLedger: &maxL}},
+		cursor: EventCursor{Scope: EventScope{MinLedger: f, MaxLedger: &maxL}},
 	}
 	page := d.next()
 	assert.Equal(t, []string{"a0", "a1", "b0", "a2", "b1", "a3"}, labels(t, page.Events))
@@ -232,7 +232,7 @@ func TestQueryEvents_PagingSeamMatrix(t *testing.T) {
 			t.Run(fmt.Sprintf("dir=%d/limit=%d", dir, limit), func(t *testing.T) {
 				d := &pageDriver{
 					t: t, r: r, limit: limit,
-					cursor: EventCursor{Scope: EventCursorQuery{MinLedger: f, MaxLedger: &maxL, Dir: dir}},
+					cursor: EventCursor{Scope: EventScope{MinLedger: f, MaxLedger: &maxL, Dir: dir}},
 				}
 				got, status := d.drain()
 				want := asc
@@ -255,7 +255,7 @@ func TestQueryEvents_FilteredMidLedgerResume(t *testing.T) {
 	maxL := f + 3
 	d := &pageDriver{
 		t: t, r: r, limit: 2,
-		cursor: EventCursor{Scope: EventCursorQuery{
+		cursor: EventCursor{Scope: EventScope{
 			MinLedger: f, MaxLedger: &maxL,
 			Filters: []event.Filter{{ContractID: cidA[:]}},
 		}},
@@ -281,7 +281,7 @@ func TestQueryEvents_DescendingFilteredMidLedgerResume(t *testing.T) {
 	maxL := f + 3
 	d := &pageDriver{
 		t: t, r: r, limit: 3,
-		cursor: EventCursor{Scope: EventCursorQuery{
+		cursor: EventCursor{Scope: EventScope{
 			MinLedger: f, MaxLedger: &maxL, Dir: Descending,
 			Filters: []event.Filter{{ContractID: cidA[:]}},
 		}},
@@ -320,7 +320,7 @@ func TestQueryEvents_ChunkSeamFullChunk(t *testing.T) {
 			t.Run(fmt.Sprintf("walk/dir=%d/limit=%d", tc.dir, limit), func(t *testing.T) {
 				d := &pageDriver{
 					t: t, r: r, limit: limit,
-					cursor: EventCursor{Scope: EventCursorQuery{MinLedger: lo, MaxLedger: &maxL, Dir: tc.dir}},
+					cursor: EventCursor{Scope: EventScope{MinLedger: lo, MaxLedger: &maxL, Dir: tc.dir}},
 				}
 				got, status := d.drain()
 				assert.Equal(t, tc.want, got)
@@ -334,7 +334,7 @@ func TestQueryEvents_ChunkSeamFullChunk(t *testing.T) {
 	t.Run("resume at the seam", func(t *testing.T) {
 		d := &pageDriver{
 			t: t, r: r, limit: 4,
-			cursor: EventCursor{Scope: EventCursorQuery{MinLedger: lo, MaxLedger: &maxL}},
+			cursor: EventCursor{Scope: EventScope{MinLedger: lo, MaxLedger: &maxL}},
 		}
 		page := d.next()
 		assert.Equal(t, []string{"x0", "x1", "y0", "x2"}, labels(t, page.Events),
@@ -359,7 +359,7 @@ func TestQueryEvents_ChunkSeamFullChunk(t *testing.T) {
 			{symEvent(cidA, "x4")},
 		}})
 		d := &pageDriver{t: t, r: shallow, limit: 10, cursor: EventCursor{
-			Scope: EventCursorQuery{MinLedger: lo, MaxLedger: &maxL, Dir: Descending},
+			Scope: EventScope{MinLedger: lo, MaxLedger: &maxL, Dir: Descending},
 		}}
 		page := d.next()
 		assert.Equal(t, []string{"x4", "y1", "x3"}, labels(t, page.Events))
@@ -389,7 +389,7 @@ func TestQueryEvents_UncoveredWindowFailsLoud(t *testing.T) {
 	require.NoError(t, err)
 	defer a.Release()
 	_, err = a.QueryEvents(context.Background(),
-		EventCursor{Scope: EventCursorQuery{MinLedger: f}}, 10)
+		EventCursor{Scope: EventScope{MinLedger: f}}, 10)
 	require.ErrorContains(t, err, "offsets cover")
 
 	// Head side: ingest enforces chunk-aligned starts, so this state
@@ -409,7 +409,7 @@ func TestQueryEvents_UncoveredWindowFailsLoud(t *testing.T) {
 // delivers exactly the newly committed events.
 func TestQueryEvents_FollowsTheTip(t *testing.T) {
 	r, db, f := singleChunkFixture(t)
-	d := &pageDriver{t: t, r: r, limit: 10, cursor: EventCursor{Scope: EventCursorQuery{MinLedger: f}}}
+	d := &pageDriver{t: t, r: r, limit: 10, cursor: EventCursor{Scope: EventScope{MinLedger: f}}}
 
 	page := d.next()
 	assert.Len(t, page.Events, 6)
@@ -433,7 +433,7 @@ func TestQueryEvents_WatermarkOnlyResume(t *testing.T) {
 	r, db, f := singleChunkFixture(t)
 	d := &pageDriver{
 		t: t, r: r, limit: 10,
-		cursor: EventCursor{Scope: EventCursorQuery{
+		cursor: EventCursor{Scope: EventScope{
 			MinLedger: f,
 			Filters:   []event.Filter{{ContractID: cidC[:]}},
 		}},
@@ -458,7 +458,7 @@ func TestQueryEvents_BoundBeyondLatestWaits(t *testing.T) {
 	maxL := f + 10 // beyond latest (f+3)
 	d := &pageDriver{
 		t: t, r: r, limit: 10,
-		cursor: EventCursor{Scope: EventCursorQuery{MinLedger: f, MaxLedger: &maxL}},
+		cursor: EventCursor{Scope: EventScope{MinLedger: f, MaxLedger: &maxL}},
 	}
 	page := d.next()
 	assert.Len(t, page.Events, 6)
@@ -470,7 +470,7 @@ func TestQueryEvents_MinLedgerBeyondLatestIsEmptyWait(t *testing.T) {
 	r, _, f := singleChunkFixture(t)
 	d := &pageDriver{
 		t: t, r: r, limit: 10,
-		cursor: EventCursor{Scope: EventCursorQuery{MinLedger: f + 100}},
+		cursor: EventCursor{Scope: EventScope{MinLedger: f + 100}},
 	}
 	page := d.next()
 	assert.Empty(t, page.Events)
@@ -483,7 +483,7 @@ func TestQueryEvents_OldestReachedDescending(t *testing.T) {
 	maxL := f + 3
 	d := &pageDriver{
 		t: t, r: r, limit: 10,
-		cursor: EventCursor{Scope: EventCursorQuery{MinLedger: 2, MaxLedger: &maxL, Dir: Descending}},
+		cursor: EventCursor{Scope: EventScope{MinLedger: 2, MaxLedger: &maxL, Dir: Descending}},
 	}
 	page := d.next()
 	assert.Len(t, page.Events, 6)
@@ -512,14 +512,14 @@ func TestQueryEvents_BelowFloorByDirection(t *testing.T) {
 
 	// Fresh ascending query starting below the floor.
 	_, err = a.QueryEvents(context.Background(),
-		EventCursor{Scope: EventCursorQuery{MinLedger: 2}}, 10)
+		EventCursor{Scope: EventScope{MinLedger: 2}}, 10)
 	var re *RangeError
 	require.ErrorAs(t, err, &re)
 
 	// Fresh descending scope entirely below the floor: legal and empty.
 	lowMax := f - 1
 	page, err := a.QueryEvents(context.Background(), EventCursor{
-		Scope: EventCursorQuery{MinLedger: 2, MaxLedger: &lowMax, Dir: Descending},
+		Scope: EventScope{MinLedger: 2, MaxLedger: &lowMax, Dir: Descending},
 	}, 10)
 	require.NoError(t, err)
 	assert.Empty(t, page.Events)
@@ -529,7 +529,7 @@ func TestQueryEvents_BelowFloorByDirection(t *testing.T) {
 	// same empty OldestReached page, not an error.
 	maxL := f + 3
 	cur := EventCursor{
-		Scope:         EventCursorQuery{MinLedger: 2, MaxLedger: &maxL, Dir: Descending},
+		Scope:         EventScope{MinLedger: 2, MaxLedger: &maxL, Dir: Descending},
 		ScannedLedger: f,
 	}
 	page, err = a.QueryEvents(context.Background(), cur, 10)
@@ -549,7 +549,7 @@ func TestQueryEvents_ConsumedRangeCompletes(t *testing.T) {
 	defer a.Release()
 	maxL := f + 3
 	page, err := a.QueryEvents(context.Background(), EventCursor{
-		Scope:         EventCursorQuery{MinLedger: f, MaxLedger: &maxL},
+		Scope:         EventScope{MinLedger: f, MaxLedger: &maxL},
 		ScannedLedger: f + 3,
 	}, 10)
 	require.NoError(t, err)
@@ -565,7 +565,7 @@ func TestQueryEvents_ConsumedRangeCompletes(t *testing.T) {
 // identically while newly committed ones are visited exactly once.
 func TestQueryEvents_EndStabilityAcrossIngest(t *testing.T) {
 	r, db, f := singleChunkFixture(t)
-	d := &pageDriver{t: t, r: r, limit: 2, cursor: EventCursor{Scope: EventCursorQuery{MinLedger: f}}}
+	d := &pageDriver{t: t, r: r, limit: 2, cursor: EventCursor{Scope: EventScope{MinLedger: f}}}
 
 	page := d.next()
 	assert.Equal(t, []string{"a0", "a1"}, labels(t, page.Events))
@@ -605,7 +605,7 @@ func TestQueryEvents_DescendingResumeAboveLatestWaits(t *testing.T) {
 	maxL := f + 5
 	d := &pageDriver{
 		t: t, r: r, limit: 1,
-		cursor: EventCursor{Scope: EventCursorQuery{MinLedger: f, MaxLedger: &maxL, Dir: Descending}},
+		cursor: EventCursor{Scope: EventScope{MinLedger: f, MaxLedger: &maxL, Dir: Descending}},
 	}
 	page := d.next()
 	require.Equal(t, []string{"a4"}, labels(t, page.Events))
@@ -636,7 +636,7 @@ func TestQueryEvents_ScanBudget(t *testing.T) {
 	maxL := f + 3
 
 	// Match-nothing filter: two windows cover the scope, no events.
-	d := &pageDriver{t: t, r: r, limit: 10, cursor: EventCursor{Scope: EventCursorQuery{
+	d := &pageDriver{t: t, r: r, limit: 10, cursor: EventCursor{Scope: EventScope{
 		MinLedger: f, MaxLedger: &maxL,
 		Filters: []event.Filter{{ContractID: cidC[:]}},
 	}}}
@@ -650,7 +650,7 @@ func TestQueryEvents_ScanBudget(t *testing.T) {
 	assert.Equal(t, f+3, page.Next.ScannedLedger)
 
 	// Match-all descending: the windows walk down without gaps.
-	d = &pageDriver{t: t, r: r, limit: 10, cursor: EventCursor{Scope: EventCursorQuery{
+	d = &pageDriver{t: t, r: r, limit: 10, cursor: EventCursor{Scope: EventScope{
 		MinLedger: f, MaxLedger: &maxL, Dir: Descending,
 	}}}
 	all, status := d.drain()
@@ -672,7 +672,7 @@ func TestQueryEvents_OpensOnlyScannedChunks(t *testing.T) {
 	}})
 	maxL := f6 + 1
 	d := &pageDriver{t: t, r: r, limit: 1, cursor: EventCursor{
-		Scope: EventCursorQuery{MinLedger: f5, MaxLedger: &maxL, Dir: Descending},
+		Scope: EventScope{MinLedger: f5, MaxLedger: &maxL, Dir: Descending},
 	}}
 
 	got := make([]string, 0, 3)
@@ -697,7 +697,7 @@ func TestQueryEvents_DescendingWatermarkAboveLatestWaits(t *testing.T) {
 	defer a.Release()
 	maxL := f + 8
 	page, err := a.QueryEvents(context.Background(), EventCursor{
-		Scope:         EventCursorQuery{MinLedger: f, MaxLedger: &maxL, Dir: Descending},
+		Scope:         EventScope{MinLedger: f, MaxLedger: &maxL, Dir: Descending},
 		ScannedLedger: f + 6,
 	}, 10)
 	require.NoError(t, err)
@@ -716,7 +716,7 @@ func TestQueryEvents_DescendingFreshScopeAboveLatestWaits(t *testing.T) {
 	r, db, f := singleChunkFixture(t) // latest = f+3
 	maxL := f + 5
 	d := &pageDriver{t: t, r: r, limit: 10, cursor: EventCursor{
-		Scope: EventCursorQuery{MinLedger: f, MaxLedger: &maxL, Dir: Descending},
+		Scope: EventScope{MinLedger: f, MaxLedger: &maxL, Dir: Descending},
 	}}
 	page := d.next()
 	assert.Empty(t, page.Events)
@@ -743,7 +743,7 @@ func TestQueryEvents_WatermarkStaysInsideWindow(t *testing.T) {
 	// fully covered, so the fresh cursor's zero watermark is kept.
 	d := &pageDriver{
 		t: t, r: r, limit: 1,
-		cursor: EventCursor{Scope: EventCursorQuery{MinLedger: f, MaxLedger: &maxL, Dir: Descending}},
+		cursor: EventCursor{Scope: EventScope{MinLedger: f, MaxLedger: &maxL, Dir: Descending}},
 	}
 	page := d.next()
 	assert.Equal(t, []string{"a3"}, labels(t, page.Events))
@@ -752,7 +752,7 @@ func TestQueryEvents_WatermarkStaysInsideWindow(t *testing.T) {
 	// Descending, page fills after draining all of ledger f+3: covered.
 	d = &pageDriver{
 		t: t, r: r, limit: 2,
-		cursor: EventCursor{Scope: EventCursorQuery{MinLedger: f, MaxLedger: &maxL, Dir: Descending}},
+		cursor: EventCursor{Scope: EventScope{MinLedger: f, MaxLedger: &maxL, Dir: Descending}},
 	}
 	page = d.next()
 	assert.Equal(t, []string{"a3", "b1"}, labels(t, page.Events))
@@ -764,7 +764,7 @@ func TestQueryEvents_WatermarkStaysInsideWindow(t *testing.T) {
 	// MinLedger.
 	d = &pageDriver{
 		t: t, r: r, limit: 1,
-		cursor: EventCursor{Scope: EventCursorQuery{MinLedger: f, MaxLedger: &maxL}},
+		cursor: EventCursor{Scope: EventScope{MinLedger: f, MaxLedger: &maxL}},
 	}
 	page = d.next()
 	assert.Equal(t, []string{"a0"}, labels(t, page.Events))
@@ -779,7 +779,7 @@ func TestQueryEvents_WatermarkStaysInsideWindow(t *testing.T) {
 // chunk-relative slot arithmetic is pinned too.
 func TestQueryEvents_ResumeMismatchFailsLoud(t *testing.T) {
 	r, _, f := singleChunkFixture(t)
-	d := &pageDriver{t: t, r: r, limit: 5, cursor: EventCursor{Scope: EventCursorQuery{MinLedger: f}}}
+	d := &pageDriver{t: t, r: r, limit: 5, cursor: EventCursor{Scope: EventScope{MinLedger: f}}}
 	page := d.next()
 	require.Equal(t, []string{"a0", "a1", "b0", "a2", "b1"}, labels(t, page.Events))
 	require.Equal(t, uint32(0), page.Next.Position.LedgerOrdinal, "b1 opens ledger f+3")
@@ -801,7 +801,7 @@ func TestQueryEvents_ResumeMismatchFailsLoud(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			bad := corrupt(*page.Next.Position)
 			d2 := &pageDriver{t: t, r: r, limit: 5, cursor: EventCursor{
-				Scope:         EventCursorQuery{MinLedger: f},
+				Scope:         EventScope{MinLedger: f},
 				Position:      &bad,
 				ScannedLedger: page.Next.ScannedLedger,
 			}}
@@ -824,34 +824,34 @@ func TestQueryEvents_CursorValidation(t *testing.T) {
 		limit   int
 		wantErr error // the handler maps on these sentinels
 	}{
-		"zero limit":        {EventCursor{Scope: EventCursorQuery{MinLedger: f}}, 0, ErrInvalidLimit},
-		"negative limit":    {EventCursor{Scope: EventCursorQuery{MinLedger: f}}, -3, ErrInvalidLimit},
-		"descending no max": {EventCursor{Scope: EventCursorQuery{MinLedger: f, Dir: Descending}}, 1, ErrCursorMalformed},
-		"invalid direction": {EventCursor{Scope: EventCursorQuery{MinLedger: f, Dir: Direction(9)}}, 1, ErrCursorMalformed},
+		"zero limit":        {EventCursor{Scope: EventScope{MinLedger: f}}, 0, ErrInvalidLimit},
+		"negative limit":    {EventCursor{Scope: EventScope{MinLedger: f}}, -3, ErrInvalidLimit},
+		"descending no max": {EventCursor{Scope: EventScope{MinLedger: f, Dir: Descending}}, 1, ErrCursorMalformed},
+		"invalid direction": {EventCursor{Scope: EventScope{MinLedger: f, Dir: Direction(9)}}, 1, ErrCursorMalformed},
 		"min above max": {
-			EventCursor{Scope: EventCursorQuery{MinLedger: minAboveMax, MaxLedger: &maxL}},
+			EventCursor{Scope: EventScope{MinLedger: minAboveMax, MaxLedger: &maxL}},
 			1, ErrInvertedRange,
 		},
 		"min below genesis": {
-			EventCursor{Scope: EventCursorQuery{MinLedger: chunk.FirstLedgerSeq - 1}},
+			EventCursor{Scope: EventScope{MinLedger: chunk.FirstLedgerSeq - 1}},
 			1, ErrCursorMalformed,
 		},
 		// The server mints scope and bookmarks together, so a bookmark
 		// outside the scope's own bounds is forged or corrupt.
 		"position below min": {EventCursor{
-			Scope:    EventCursorQuery{MinLedger: f},
+			Scope:    EventScope{MinLedger: f},
 			Position: &EventPosition{Ledger: f - 1},
 		}, 1, ErrCursorMalformed},
 		"position above max": {EventCursor{
-			Scope:    EventCursorQuery{MinLedger: f, MaxLedger: &maxL},
+			Scope:    EventScope{MinLedger: f, MaxLedger: &maxL},
 			Position: &EventPosition{Ledger: maxL + 1},
 		}, 1, ErrCursorMalformed},
 		"watermark above max": {EventCursor{
-			Scope:         EventCursorQuery{MinLedger: f, MaxLedger: &maxL},
+			Scope:         EventScope{MinLedger: f, MaxLedger: &maxL},
 			ScannedLedger: maxL + 1,
 		}, 1, ErrCursorMalformed},
 		"watermark below min": {EventCursor{
-			Scope:         EventCursorQuery{MinLedger: f},
+			Scope:         EventScope{MinLedger: f},
 			ScannedLedger: f - 1,
 		}, 1, ErrCursorMalformed},
 		// The pair must also be mintable together: a present position
@@ -859,32 +859,32 @@ func TestQueryEvents_CursorValidation(t *testing.T) {
 		// at the zero-watermark anchor), since assemblePage drops a
 		// passed one. Any other pair is forged.
 		"position behind watermark ascending": {EventCursor{
-			Scope:         EventCursorQuery{MinLedger: f},
+			Scope:         EventScope{MinLedger: f},
 			Position:      &EventPosition{Ledger: f},
 			ScannedLedger: f + 1,
 		}, 1, ErrCursorMalformed},
 		"position ahead of watermark": {EventCursor{
-			Scope:         EventCursorQuery{MinLedger: f},
+			Scope:         EventScope{MinLedger: f},
 			Position:      &EventPosition{Ledger: f + 2},
 			ScannedLedger: f,
 		}, 1, ErrCursorMalformed},
 		"position with zero watermark off the scope start": {EventCursor{
-			Scope:    EventCursorQuery{MinLedger: f},
+			Scope:    EventScope{MinLedger: f},
 			Position: &EventPosition{Ledger: f + 1},
 		}, 1, ErrCursorMalformed},
 		"position behind watermark descending": {EventCursor{
-			Scope:         EventCursorQuery{MinLedger: f, MaxLedger: &maxHigh, Dir: Descending},
+			Scope:         EventScope{MinLedger: f, MaxLedger: &maxHigh, Dir: Descending},
 			Position:      &EventPosition{Ledger: f},
 			ScannedLedger: f + 2,
 		}, 1, ErrCursorMalformed},
 		"position with zero watermark off the scope top descending": {EventCursor{
-			Scope:    EventCursorQuery{MinLedger: f, MaxLedger: &maxHigh, Dir: Descending},
+			Scope:    EventScope{MinLedger: f, MaxLedger: &maxHigh, Dir: Descending},
 			Position: &EventPosition{Ledger: f + 1},
 		}, 1, ErrCursorMalformed},
 		// A scope above the codec's filter cap would do the page's work
 		// and then fail to encode the advanced cursor: refused up front.
 		"more filters than the codec cap": {EventCursor{
-			Scope: EventCursorQuery{
+			Scope: EventScope{
 				MinLedger: f,
 				Filters:   make([]event.Filter, maxCursorFilters+1),
 			},
@@ -892,13 +892,13 @@ func TestQueryEvents_CursorValidation(t *testing.T) {
 		// Malformed filters fail up front, even on a range this view
 		// would not scan (beyond latest).
 		"malformed filter on an unscanned range": {EventCursor{
-			Scope: EventCursorQuery{
+			Scope: EventScope{
 				MinLedger: f + 100,
 				Filters:   []event.Filter{{ContractID: []byte{0x0a, 0x0b}}},
 			},
 		}, 1, ErrCursorMalformed},
 		"watermark overflow sentinel": {EventCursor{
-			Scope:         EventCursorQuery{MinLedger: f},
+			Scope:         EventScope{MinLedger: f},
 			ScannedLedger: math.MaxUint32,
 		}, 1, ErrCursorMalformed},
 	} {

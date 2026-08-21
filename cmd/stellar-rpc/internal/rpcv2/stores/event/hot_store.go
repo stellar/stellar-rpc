@@ -151,10 +151,10 @@ func (h *HotStore) EventCount() (uint32, error) {
 //
 // Implementation: returns a *LedgerOffsets sharing the live
 // backing array, capped at the count visible at call time
-// (~24-byte allocation per Query). A concurrent IngestLedgerToBatch
+// (~24-byte allocation per Matches call). A concurrent IngestLedgerToBatch
 // may extend the backing past the cap, but the returned view's
 // slice stays bounded to what was visible when Offsets returned.
-// Callers (Query) take the view once at entry and pass it through
+// Callers (Matches) take the view once at entry and pass it through
 // their helpers.
 //
 // Read-only: the returned view's underlying slice shares memory
@@ -455,7 +455,7 @@ func (h *HotStore) index() *events.ConcurrentBitmaps { return h.mirror }
 // single-writer contract); the only non-completion is a crash, after which warmup
 // rebuilds.
 //
-// Ordering invariant: mirror BEFORE offsets. A concurrent Query that snapshots
+// Ordering invariant: mirror BEFORE offsets. A concurrent Matches call that snapshots
 // offsets then reads the mirror must see either the prior state or a consistent
 // later one. Reversing it would let a reader see an offsets count including IDs
 // the mirror hasn't published — FetchEvents would then miss them, silently.
