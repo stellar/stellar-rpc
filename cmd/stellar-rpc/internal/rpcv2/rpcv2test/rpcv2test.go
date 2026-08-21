@@ -103,21 +103,24 @@ func WriteFrozenLedgerPack(t *testing.T, cat *catalog.Catalog, c chunk.ID, lcms 
 	require.NoError(t, cat.FlipChunkFrozen(c, geometry.KindLedgers))
 }
 
-// ContractEventFixture builds a minimal operation-level contract event whose
-// contract id starts with contractByte and whose single topic and data are
-// both the symbol topic.
-func ContractEventFixture(contractByte byte, topic string) xdr.ContractEvent {
-	var contractID xdr.ContractId
-	contractID[0] = contractByte
-	sym := xdr.ScSymbol(topic)
+// SymbolContractEvent returns a contract event whose topics and data
+// are ScSymbols: the shape event-query tests build fixtures from and
+// later match against by the data label.
+func SymbolContractEvent(contractID xdr.ContractId, data string, topics ...string) xdr.ContractEvent {
+	topicVals := make([]xdr.ScVal, len(topics))
+	for i := range topics {
+		sym := xdr.ScSymbol(topics[i])
+		topicVals[i] = xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym}
+	}
+	dataSym := xdr.ScSymbol(data)
 	return xdr.ContractEvent{
 		ContractId: &contractID,
 		Type:       xdr.ContractEventTypeContract,
 		Body: xdr.ContractEventBody{
 			V: 0,
 			V0: &xdr.ContractEventV0{
-				Topics: []xdr.ScVal{{Type: xdr.ScValTypeScvSymbol, Sym: &sym}},
-				Data:   xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym},
+				Topics: topicVals,
+				Data:   xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &dataSym},
 			},
 		},
 	}
@@ -234,10 +237,20 @@ func WriteColdTxIndexFile(
 // each call a distinct, valid pubnet transaction hash.
 func EventLCMBytes(t *testing.T, seq uint32) []byte {
 	t.Helper()
-	ev := ContractEventFixture(0xab, "fhtest")
+	var contractID xdr.ContractId
+	contractID[0] = 0xab
+	return EventsLCMBytes(t, seq, SymbolContractEvent(contractID, "fhtest", "fhtest"))
+}
+
+// EventsLCMBytes returns the marshaled bytes of a single-transaction
+// LedgerCloseMeta (V2) for ledger seq whose transaction carries evs as
+// the events of one operation. The random source account gives each
+// call a distinct, valid pubnet transaction hash.
+func EventsLCMBytes(t *testing.T, seq uint32, evs ...xdr.ContractEvent) []byte {
+	t.Helper()
 	meta := xdr.TransactionMeta{
 		V:  4,
-		V4: &xdr.TransactionMetaV4{Operations: []xdr.OperationMetaV2{{Events: []xdr.ContractEvent{ev}}}},
+		V4: &xdr.TransactionMetaV4{Operations: []xdr.OperationMetaV2{{Events: evs}}},
 	}
 
 	envelope := xdr.TransactionEnvelope{

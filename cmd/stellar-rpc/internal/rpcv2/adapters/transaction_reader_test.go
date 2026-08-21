@@ -20,7 +20,7 @@ func TestGetTransaction_HotHit(t *testing.T) {
 	cat := openTestCatalog(t)
 	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
 	lcm, txs := lcmWithTxs(t, testChunk.FirstLedger(),
-		txSpec{events: []xdr.ContractEvent{rpcv2test.ContractEventFixture(0xab, "transfer")}})
+		txSpec{events: []xdr.ContractEvent{rpcv2test.SymbolContractEvent(xdr.ContractId{0xab}, "transfer", "transfer")}})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
 	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
 	reader := NewTransactionReader(r, network.PublicNetworkPassphrase)
