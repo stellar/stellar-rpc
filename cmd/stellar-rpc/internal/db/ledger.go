@@ -367,37 +367,33 @@ func (l ledgerWriter) trimLedgers(latestLedgerSeq uint32, retentionWindow uint32
 // for fetching a single ledger from the database
 func getLedgerFromDB(ctx context.Context, db readDB, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
 	raw, found, err := getLedgerRawFromDB(ctx, db, sequence)
-	if err != nil {
+	if err != nil || !found {
 		return xdr.LedgerCloseMeta{}, false, err
 	}
-	if !found {
-		return xdr.LedgerCloseMeta{}, false, nil
-	}
-
-	var results []xdr.LedgerCloseMeta
-	if _, err := xdr.Unmarshal(bytes.NewReader(raw), &results); err != nil {
+	var lcm xdr.LedgerCloseMeta
+	if _, err := xdr.Unmarshal(bytes.NewReader(raw), &lcm); err != nil {
 		return xdr.LedgerCloseMeta{}, false, err
 	}
-	switch len(results) {
-	case 0:
-		return xdr.LedgerCloseMeta{}, false, nil
-	case 1:
-		return results[0], true, nil
-	default:
-		return xdr.LedgerCloseMeta{}, false, fmt.Errorf("multiple lcm entries (%d) for sequence %d in table %q",
-			len(results), sequence, ledgerCloseMetaTableName)
-	}
+	return lcm, true, nil
 }
 
 // getLedgerRawFromDB is a helper function that encapsulates the common logic
 // for fetching a single ledger's bytes from the database
 func getLedgerRawFromDB(ctx context.Context, db readDB, sequence uint32) ([]byte, bool, error) {
 	sql := sq.Select("meta").From(ledgerCloseMetaTableName).Where(sq.Eq{"sequence": sequence})
-	var result []byte
-	if err := db.Select(ctx, &result, sql); err != nil || len(result) == 0 {
+	var results [][]byte
+	if err := db.Select(ctx, &results, sql); err != nil {
 		return nil, false, err
 	}
-	return result, true, nil
+	switch len(results) {
+	case 0:
+		return nil, false, nil
+	case 1:
+		return results[0], true, nil
+	default:
+		return nil, false, fmt.Errorf("multiple lcm entries (%d) for sequence %d in table %q",
+			len(results), sequence, ledgerCloseMetaTableName)
+	}
 }
 
 // Parses a raw ledger close meta blob into a LedgerHeaderHistoryEntry.
