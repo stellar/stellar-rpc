@@ -98,7 +98,7 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 //   - SetCopyOnWrite
 //   - Any *Writable* accessor on the underlying roaringArray
 //
-// Safe caller-side methods (used by event.Query today): any
+// Safe caller-side methods (used by event.Matches today): any
 // non-mutating read — Contains, GetCardinality, Iterator,
 // ToArray, IsEmpty, Minimum, Maximum — plus the non-mutating
 // aggregation entry points roaring.And, roaring.FastAnd (≥2

@@ -28,6 +28,13 @@ type Registry struct {
 	catalog   *catalog.Catalog
 	retention geometry.Retention
 
+	// maxScanLedgers caps the ledgers one event page may scan. Zero means
+	// defaultMaxScanLedgers, resolved by QueryEvents. Held here rather than in a
+	// package var so two registries can differ and so a test shrinking the
+	// window cannot leak into another test's pages. The value may become
+	// configuration.
+	maxScanLedgers uint32
+
 	// latest is the newest fully ingested ledger visible to queries, paired with
 	// its close time so both publish atomically. The ingest loop advances it as
 	// the final step of each per-ledger cycle. Queries read a frozen copy
@@ -250,6 +257,11 @@ type ReadView struct {
 	snap        *catalog.Snapshot
 	catalog     *catalog.Catalog
 
+	// maxScanLedgers is the registry's window, copied at acquisition so one
+	// page's bound cannot change mid-request. Zero means defaultMaxScanLedgers,
+	// so a view built without it still bounds its pages.
+	maxScanLedgers uint32
+
 	// closers releases every cold reader this view opened (hot facades are
 	// registry-owned and never appear here). Appended by the resolve methods and
 	// by ScanLedgers' walk backstop, drained by Release — a view's resources live
@@ -286,11 +298,12 @@ func (r *Registry) NewReadView() (*ReadView, error) {
 		return nil, err
 	}
 	view := &ReadView{
-		latest:  *latest,
-		floor:   r.retention.FloorAt(lastComplete),
-		handles: handles,
-		snap:    snap,
-		catalog: r.catalog,
+		latest:         *latest,
+		maxScanLedgers: r.maxScanLedgers,
+		floor:          r.retention.FloorAt(lastComplete),
+		handles:        handles,
+		snap:           snap,
+		catalog:        r.catalog,
 	}
 	// The oldest-close-time cache rides along outside the three-load order: it
 	// is a pure optimization whose staleness the seq check in OldestCloseTime

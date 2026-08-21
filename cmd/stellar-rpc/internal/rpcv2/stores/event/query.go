@@ -1,33 +1,22 @@
 package event
 
-// query.go is the events-side coordinator that turns a {filters,
-// Range, MaxEvents, Descending} spec into matching events for one
+// query.go is the events-side read surface: Matches turns a
+// {filters, window} spec into a stream of verified matches for one
 // Chunk. It is built on the Reader interface, so it works against
-// HotStore and ColdReader without branching.
+// HotStore and ColdReader without branching. Filter semantics are on
+// Matches.
 //
-// Semantics:
-//
-//   - A Filter is a conjunction of equality constraints on the
-//     indexed fields (contract ID + topics 0..3). A field left
-//     nil/empty is a wildcard.
-//   - The query result is the union of the per-filter intersections,
-//     intersected with QueryOptions.Range, then truncated to
-//     QueryOptions.MaxEvents (when non-zero). Ascending order keeps
-//     the lowest event IDs; descending keeps the highest.
-//   - An empty []Filter is treated as one wildcard filter
-//     (match-all in the chunk), matching the getEvents convention.
-//
-// Optimization shape: terms are deduped across filters and issued
-// as a single Reader.LookupKeys call; per-filter intersections re-use
-// the returned bitmaps. On the cold path this collapses what would
-// otherwise be one MPHF+index.pack round trip per filter into a
-// single coalesced read.
+// Optimization shape: terms are deduped across filters and issued as
+// a single Reader.LookupKeys call at iteration start; payload fetches
+// then stream in internal batches. On the cold path this is one
+// MPHF+index.pack round trip per Matches call, not per batch.
 
 import (
 	"bytes"
 	"cmp"
 	"context"
 	"fmt"
+	"iter"
 	"slices"
 
 	"github.com/RoaringBitmap/roaring/v2"
@@ -38,44 +27,110 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 )
 
-// Filter is one item in the union of an events Query. Within a
-// single filter, every non-empty field is an equality constraint
-// AND-ed together against the corresponding indexed field of an
-// event. nil or empty slices are wildcards.
+// Filter is one item in the union of an events query. Within a
+// single filter, every constrained field is AND-ed together against
+// the corresponding indexed field of an event. Fields left at their
+// zero value are wildcards.
 //
 // Topics[i] constrains topic position i. Positions beyond
 // protocol.MaxTopicCount are not indexed (see events.TermsForBytes).
 type Filter struct {
 	ContractID []byte
 	Topics     [protocol.MaxTopicCount][]byte
+	// EventType constrains the event's type. A nil pointer is a
+	// wildcard. A filter accepting several types is several filters.
+	EventType *xdr.ContractEventType
+	// TopicCount constrains how many topics the event carries.
+	TopicCount TopicCountFilter
 }
 
-// isMatchAll reports whether f has no constraints (every field is a wildcard).
-func (f *Filter) isMatchAll() bool {
-	if len(f.ContractID) > 0 {
+// TopicCountFilter constrains an event's topic count to at least
+// Count, or to exactly Count when Exact is set. Its zero value, "at
+// least zero", is the wildcard.
+//
+// This is getEvents v1's topic arity: a topic filter ending in "**"
+// matches events with at least as many topics as the filter names, and
+// one that does not match events with exactly that many.
+type TopicCountFilter struct {
+	Count int
+	Exact bool
+}
+
+func (f TopicCountFilter) isWildcard() bool { return f == TopicCountFilter{} }
+
+// matches reports whether an event carrying n topics satisfies f. A
+// negative n stands for an event with no V0 body, which carries no
+// topics at all and satisfies no constraint.
+func (f TopicCountFilter) matches(n int) bool {
+	if n < 0 {
 		return false
 	}
-	for _, t := range f.Topics {
-		if len(t) > 0 {
-			return false
-		}
+	if f.Exact {
+		return n == f.Count
 	}
-	return true
+	return n >= f.Count
 }
 
-// termKeys returns the indexed (field, value) terms this filter constrains.
-func (f *Filter) termKeys() []events.TermKey {
-	var keys []events.TermKey
+// termKeys returns the topic-count buckets whose union covers f. Every
+// count ValidateFilters admits has a bucket of its own, and an "at
+// least" union is closed by the overflow bucket, so the union never
+// holds an event f does not match.
+func (f TopicCountFilter) termKeys() []events.TermKey {
+	if f.isWildcard() {
+		return nil
+	}
+	if f.Exact {
+		return []events.TermKey{events.TopicCountTermKey(f.Count)}
+	}
+	return events.TopicCountTermKeysAtLeast(f.Count)
+}
+
+// termGroups returns the indexed terms this filter constrains, grouped
+// by field: the bitmaps within a group are OR-ed and the groups are
+// AND-ed. Only the topic-count group ever holds more than one term.
+func (f *Filter) termGroups() [][]events.TermKey {
+	var groups [][]events.TermKey
 	if len(f.ContractID) > 0 {
-		keys = append(keys, events.ComputeTermKey(f.ContractID, events.FieldContractID))
+		groups = append(groups, []events.TermKey{
+			events.ComputeTermKey(f.ContractID, events.FieldContractID),
+		})
+	}
+	if f.EventType != nil {
+		groups = append(groups, []events.TermKey{events.EventTypeTermKey(*f.EventType)})
 	}
 	for tIdx, t := range f.Topics {
 		if len(t) == 0 {
 			continue
 		}
-		keys = append(keys, events.ComputeTermKey(t, topicFieldByPosition[tIdx]))
+		groups = append(groups, []events.TermKey{
+			events.ComputeTermKey(t, topicFieldByPosition[tIdx]),
+		})
 	}
-	return keys
+	// A constrained topic position already implies an "at least" count at
+	// or below it, since a topic term is only indexed for events carrying
+	// that position. Skipping the group there keeps the common
+	// ["a", "**"] shape from OR-ing chunk-sized bucket bitmaps; the
+	// post-filter enforces the count either way.
+	if !f.impliesTopicCount() {
+		if keys := f.TopicCount.termKeys(); len(keys) > 0 {
+			groups = append(groups, keys)
+		}
+	}
+	return groups
+}
+
+// impliesTopicCount reports whether f's constrained topic positions
+// already guarantee its topic-count bound.
+func (f *Filter) impliesTopicCount() bool {
+	if f.TopicCount.Exact {
+		return false
+	}
+	for i, t := range f.Topics {
+		if len(t) > 0 && i+1 >= f.TopicCount.Count {
+			return true
+		}
+	}
+	return false
 }
 
 // IDRange is a literal half-open chunk-relative event-ID window
@@ -83,10 +138,15 @@ func (f *Filter) termKeys() []events.TermKey {
 //
 // Snapshot-isolation contract: the caller pins End once at request
 // entry from a snapshot of the chunk's offsets
-// (LedgerOffsets.TotalEvents()) and threads it through every Query
+// (LedgerOffsets.TotalEvents()) and threads it through every Matches
 // call for that request. Events ingested after the snapshot are
 // invisible to the in-flight request. Multi-page paginated requests
-// MUST share the same End across pages.
+// MUST share the same End across pages, either literally or in the
+// ledger-level form the cross-chunk pager uses: each page re-derives
+// its range from the same ledger bounds via IDRangeForLedgers, which
+// is identical over ledgers committed before the first page (the
+// store is append-only) and extends only over newly committed
+// ledgers.
 //
 // End > EventCount is rejected as a caller bug (wrong chunk's
 // offsets or stale snapshot) — under the snapshot-isolation contract
@@ -101,7 +161,7 @@ func (r IDRange) isEmpty() bool { return r.Start == r.End }
 
 // check validates the structural invariant Start <= End. Does NOT
 // check End against the chunk's EventCount — that requires a Reader
-// and is enforced by Query.
+// and is enforced by Matches.
 func (r IDRange) check() error {
 	if r.End < r.Start {
 		return fmt.Errorf(
@@ -128,26 +188,22 @@ func IDRangeForLedgers(ofs *events.LedgerOffsets, startLedger, endLedger uint32)
 	return IDRange{Start: firstID, End: lastID}, nil
 }
 
-// QueryOptions configures a Query call.
+// matchBatchSize is the internal fetch granularity of one Matches
+// batch: candidates fetched and verified per storage round trip. A
+// var, not a const, so in-package tests can shrink it to force batch
+// seams; it never changes what a stream yields.
 //
-// MaxEvents caps the result size (0 = unlimited; must be non-negative).
-// Ascending keeps the lowest IDs; descending keeps the highest.
-//
-// MaxEvents is applied BEFORE the defensive post-filter drops residual
-// false positives, so a page can come back shorter than MaxEvents while
-// in-range matches remain. Pagers (the #772 getEvents wiring) MUST NOT
-// treat `len(result) < limit` as exhausted — resume from the last
-// returned event's position instead.
-//
-// Descending selects descending event-ID order; the zero value (false)
-// is ascending — the getEvents v1 default.
-//
-// Range is REQUIRED. See IDRange for the snapshot-isolation
-// contract.
-type QueryOptions struct {
-	MaxEvents  int
-	Descending bool
-	Range      IDRange
+//nolint:gochecknoglobals // test seam; production never writes it
+var matchBatchSize = 512
+
+// Match is a payload plus Ordinal, its chunk-relative event ID. A
+// consumer that stops mid-stream needs the ordinal to know where it
+// stopped; it cannot be recovered from the payload, which carries
+// chain data only.
+type Match struct {
+	events.Payload
+
+	Ordinal uint32
 }
 
 // topicFieldByPosition maps topic position 0..MaxTopicCount-1 to its
@@ -161,87 +217,155 @@ var topicFieldByPosition = [protocol.MaxTopicCount]events.Field{
 	events.FieldTopic3,
 }
 
-// Query runs filters against r under opts and returns the matching
-// events in chunk-relative event-ID order.
+// termPlan is a filter's termGroups resolved to slots in the batched
+// LookupKeys result.
+type termPlan [][]int
+
+// batchSizes resolves the first and following internal batch sizes
+// from the caller's hint. The hint applies only when it is positive
+// and below the default. Both results are clamped positive, so a zero
+// test seam cannot stall a stream (a zero step never advances).
+func batchSizes(hint int) (int, int) {
+	rest := max(1, matchBatchSize)
+	first := rest
+	if hint > 0 && hint < rest {
+		first = hint
+	}
+	return first, rest
+}
+
+// Matches yields the events in window matching filters, in
+// chunk-relative ordinal order (reversed when descending), each
+// verified by the post-filter. Yielded payloads are owned by the
+// consumer. window is pinned once per call; see IDRange for the
+// snapshot-isolation contract.
 //
 // Semantics:
 //
-//   - Within a filter: AND of equality constraints on each non-empty
-//     field. A filter with all fields empty matches every event.
+//   - Within a filter: AND of the constraints on each constrained
+//     field. A filter with no constraints matches every event.
 //   - Across filters: union of per-filter matches.
 //   - len(filters) == 0 is treated as a single match-all filter,
 //     consistent with getEvents.
 //
-// See QueryOptions / IDRange for the window, cap, and order
-// contract.
+// Errors, validation failures included, are yielded as (Match{}, err)
+// and end the stream, mirroring Reader.FetchRange; the stream must be
+// consumed before r closes, also mirroring FetchRange. Post-filter
+// drops are invisible: the iterator advances past them internally, so
+// consumers never see or reason about resume state.
 //
-//nolint:gocognit,cyclop,funlen
-func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) ([]events.Payload, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+// firstBatch sizes the first internal fetch batch. A consumer that
+// will stop after N matches passes N, so the first round trip fetches
+// no more than it needs; 0 or any out-of-range value uses the
+// default. Later batches use the default size. The hint changes I/O
+// counts only, never what the stream yields.
+func Matches(
+	ctx context.Context, r Reader, filters []Filter, window IDRange,
+	descending bool, firstBatch int,
+) iter.Seq2[Match, error] {
+	return func(yield func(Match, error) bool) {
+		if err := validateMatchCall(ctx, r, filters, window); err != nil {
+			yield(Match{}, err)
+			return
+		}
+		if window.isEmpty() {
+			return
+		}
+		union, matchAll, err := unionForFilters(ctx, r, filters, window)
+		if err != nil {
+			yield(Match{}, err)
+			return
+		}
+		// Match-all path: empty filter slice or any filter that asks the
+		// index for no terms. Serves without touching the index: the
+		// window is dense, so it streams Reader.FetchRange directly.
+		if matchAll {
+			streamRange(ctx, r, window, descending, firstBatch, yield)
+			return
+		}
+		if union.IsEmpty() {
+			return
+		}
+		streamUnion(ctx, r, filters, union, descending, firstBatch, yield)
 	}
-	if opts.MaxEvents < 0 {
-		return nil, fmt.Errorf("events: MaxEvents must be non-negative, got %d", opts.MaxEvents)
-	}
-	if err := opts.Range.check(); err != nil {
-		return nil, err
-	}
-	if opts.Range.isEmpty() {
-		return nil, nil
-	}
-	if err := validateFilters(filters); err != nil {
-		return nil, err
-	}
+}
 
+func validateMatchCall(ctx context.Context, r Reader, filters []Filter, window IDRange) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := window.check(); err != nil {
+		return err
+	}
+	if err := ValidateFilters(filters); err != nil {
+		return err
+	}
 	eventCount, err := r.EventCount()
 	if err != nil {
-		return nil, fmt.Errorf("events: query event count: %w", err)
+		return fmt.Errorf("events: query event count: %w", err)
 	}
 	// Snapshot-isolation contract: a properly-pinned End is ≤ the
 	// chunk's current EventCount. Exceeding it signals a caller bug
 	// (wrong chunk's offsets, stale snapshot) — surface it loudly.
-	if opts.Range.End > eventCount {
-		return nil, fmt.Errorf(
+	if window.End > eventCount {
+		return fmt.Errorf(
 			"events: Range.End (%d) exceeds chunk EventCount (%d)",
-			opts.Range.End, eventCount)
+			window.End, eventCount)
 	}
-	start, end := opts.Range.Start, opts.Range.End
-	descending := opts.Descending
+	return nil
+}
 
-	// Match-all path: empty filter slice or any all-wildcard filter.
-	// Serves without touching the index — translates the range
-	// directly to a contiguous FetchRange call. Cheaper than building
-	// the full chunk bitmap just to truncate to MaxEvents.
-	if hasMatchAllFilter(filters) {
-		return fetchAllInRange(ctx, r, start, end, opts.MaxEvents, descending)
-	}
-
+// unionForFilters runs the index side once per Matches call (the
+// numbered steps below). matchAll reports that some filter (or the
+// empty slice) constrains nothing, detected before any index I/O; the
+// caller then streams the window directly. Otherwise the result is
+// empty when no candidate falls in the window, and is never a
+// borrowed mirror snapshot (the window AND allocates on the borrowing
+// path), so downstream iteration is safe.
+func unionForFilters(
+	ctx context.Context, r Reader, filters []Filter, window IDRange,
+) (*roaring.Bitmap, bool, error) {
 	// ───── 1. Dedupe terms across filters ─────
 	//
-	// filterPlans[i] holds the indices into uniqueKeys that filter i
-	// requires intersected. Empty plans were handled by the match-all
-	// short-circuit above.
-	filterPlans := make([][]int, len(filters))
+	// filterPlans[i] holds the slots filter i needs out of the batched
+	// lookup: the bitmaps within a group are OR-ed, the groups AND-ed.
+	//
+	// A filter that asks the index for no terms constrains nothing, and
+	// so does an empty filter slice: both take the match-all path.
+	// Reading the condition off the term groups themselves is what keeps
+	// an unconstrained filter from intersecting nothing and coming back
+	// empty instead.
+	if len(filters) == 0 {
+		return nil, true, nil
+	}
+	filterPlans := make([]termPlan, len(filters))
 	var uniqueKeys []events.TermKey
 
 	for i := range filters {
-		keys := filters[i].termKeys()
-		slots := make([]int, len(keys))
-		for j, key := range keys {
-			slots[j] = indexOfOrAddTerm(&uniqueKeys, key)
+		groups := filters[i].termGroups()
+		if len(groups) == 0 {
+			return nil, true, nil
 		}
-		filterPlans[i] = slots
+		plan := make(termPlan, len(groups))
+		for g, keys := range groups {
+			slots := make([]int, len(keys))
+			for j, key := range keys {
+				slots[j] = indexOfOrAddTerm(&uniqueKeys, key)
+			}
+			plan[g] = slots
+		}
+		filterPlans[i] = plan
 	}
 
 	// ───── 2. Single batched lookup for all unique terms ─────
 	bitmaps, err := r.LookupKeys(ctx, uniqueKeys)
 	if err != nil {
-		return nil, fmt.Errorf("events: query lookup: %w", err)
+		return nil, false, fmt.Errorf("events: query lookup: %w", err)
 	}
 
 	// ───── 3. Per-filter intersect ─────
 	//
-	// If any term in a filter is absent from the index (bitmaps[s] is
+	// If a whole group is absent from the index (every bitmap in it is
 	// nil), that filter's intersection is empty — skip it without
 	// contributing to the union.
 	//
@@ -249,21 +373,22 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	//   - Single-constraint filter: we borrow bitmaps[s] directly (a
 	//     mirror snapshot from LookupKeys), skipping FastAnd's Clone.
 	//   - Multi-constraint filter: FastAnd allocates a fresh result.
-	// Either way the downstream union (FastOr) and selection never
+	// Either way the downstream union (FastOr) and the window AND never
 	// mutate their inputs, so a borrowed entry stays valid through
 	// the rest of the function. FastAnd never mutates its inputs
 	// either, so the same bitmap may appear across multiple filters
 	// safely.
 	perFilter := make([]*roaring.Bitmap, 0, len(filterPlans))
-	for _, slots := range filterPlans {
-		inputs := make([]*roaring.Bitmap, 0, len(slots))
+	for _, plan := range filterPlans {
+		inputs := make([]*roaring.Bitmap, 0, len(plan))
 		missed := false
-		for _, s := range slots {
-			if bitmaps[s] == nil {
+		for _, slots := range plan {
+			group := unionSlots(bitmaps, slots)
+			if group == nil {
 				missed = true
 				break
 			}
-			inputs = append(inputs, bitmaps[s])
+			inputs = append(inputs, group)
 		}
 		if missed {
 			continue
@@ -282,13 +407,13 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	}
 
 	if len(perFilter) == 0 {
-		return nil, nil
+		return roaring.New(), false, nil
 	}
 
 	// ───── 4. Union across filters ─────
 	// Single-filter case: FastOr would Clone — skip it and use the
 	// already-computed bitmap directly. That bitmap may be borrowed
-	// (from LookupKeys), so step 5's range And uses the fresh-result
+	// (from LookupKeys), so step 5's window And uses the fresh-result
 	// variant on that path to avoid mutating shared state.
 	var union *roaring.Bitmap
 	singleFilter := len(perFilter) == 1
@@ -298,80 +423,151 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 		union = roaring.FastOr(perFilter...)
 	}
 
-	// ───── 5. Apply event-ID range ─────
+	// ───── 5. Apply the event-ID window ─────
 	//
-	// The range AND enforces the caller's pinned window. It also clips
+	// The window AND enforces the caller's pinned range. It also clips
 	// phantom IDs from a concurrent hot-store ingest: the mirror
 	// publishes entries before offsets, so LookupKeys can briefly
-	// surface IDs past EventCount. The AND keeps Query's result
-	// strictly within the snapshot the caller pinned at request entry.
+	// surface IDs past EventCount. The AND keeps the stream strictly
+	// within the snapshot the caller pinned at request entry.
+	//
+	// This covers the multi-term group too. Its bitmaps are separate
+	// mirror snapshots taken at different instants, but an event never
+	// moves between the terms of one group once ingested, so a torn read
+	// across them can only surface IDs past the pinned End.
 	rangeBM := roaring.New()
-	rangeBM.AddRange(uint64(start), uint64(end))
+	rangeBM.AddRange(uint64(window.Start), uint64(window.End))
 	if singleFilter {
 		union = roaring.And(union, rangeBM) // fresh result; union may be borrowed
 	} else {
 		union.And(rangeBM) // FastOr output is owned; in-place is fine
 	}
-
-	if union.IsEmpty() {
-		return nil, nil
-	}
-
-	// ───── 6. Fetch payloads ─────
-	//
-	// selectEventIDs drains the union into the ascending []uint32
-	// FetchEvents requires, keeping the lowest IDs (ascending) or
-	// highest IDs (descending) when MaxEvents caps. FetchEvents
-	// returns owned payloads in ascending order; the defensive
-	// post-filter preserves that order, and we reverse once at the
-	// end for descending output.
-	// NOTE: the MaxEvents cap lands here, BEFORE postFilter — a short
-	// page does not mean exhaustion (see QueryOptions.MaxEvents).
-	ids := selectEventIDs(union, opts.MaxEvents, descending)
-	payloads, err := r.FetchEvents(ctx, ids)
-	if err != nil {
-		return nil, err
-	}
-	// Drop bitmap-side false positives (see postFilter for the rationale).
-	matched, err := postFilter(payloads, filters)
-	if err != nil {
-		return nil, err
-	}
-	if descending {
-		slices.Reverse(matched)
-	}
-	return matched, nil
+	return union, false, nil
 }
 
-// validateFilters rejects filters that would silently never match
+// streamUnion walks the union bitmap in internal batches: collect
+// candidate ordinals up to the batch size, fetch, post-filter, yield
+// the survivors. Drops advance the walk with no yield. The first
+// batch is sized to firstBatch (see Matches); later batches use the
+// default.
+//
+// FetchEvents requires ascending ids, so a descending batch is
+// collected highest-first and flipped before the fetch, then the
+// fetched matches are flipped back. Stepping one id at a time is fine
+// here: the fetch I/O dominates a 512-step loop.
+func streamUnion(
+	ctx context.Context, r Reader, filters []Filter, union *roaring.Bitmap,
+	descending bool, firstBatch int, yield func(Match, error) bool,
+) {
+	var it interface {
+		HasNext() bool
+		Next() uint32
+	}
+	if descending {
+		it = union.ReverseIterator()
+	} else {
+		it = union.Iterator()
+	}
+	batch, rest := batchSizes(firstBatch)
+	ids := make([]uint32, 0, batch)
+	for {
+		if err := ctx.Err(); err != nil {
+			yield(Match{}, err)
+			return
+		}
+		ids = ids[:0]
+		for it.HasNext() && len(ids) < batch {
+			ids = append(ids, it.Next())
+		}
+		batch = rest
+		if len(ids) == 0 {
+			return
+		}
+		if descending {
+			slices.Reverse(ids)
+		}
+		payloads, err := r.FetchEvents(ctx, ids)
+		if err != nil {
+			yield(Match{}, err)
+			return
+		}
+		// Drop bitmap-side false positives (see postFilter for the rationale).
+		matched, err := postFilter(payloads, ids, filters)
+		if err != nil {
+			yield(Match{}, err)
+			return
+		}
+		if descending {
+			slices.Reverse(matched)
+		}
+		for i := range matched {
+			if !yield(matched[i], nil) {
+				return
+			}
+		}
+	}
+}
+
+// ValidateFilters rejects filters that would silently never match
 // because of a malformed value. ContractId must be the canonical
 // 32-byte xdr.Hash form (or absent); a short ContractId would
 // bytes.Equal-mismatch every event without surfacing the bug to the
-// caller. Empty/wildcard fields are allowed.
-func validateFilters(filters []Filter) error {
+// caller. A negative topic count is meaningless, and an event type
+// outside the enum is one no event can carry: both key a term nothing
+// is indexed under. Empty/wildcard fields are allowed. Exported so
+// the pager can refuse a malformed cursor up front, on every path;
+// Matches runs this check only when a chunk is actually scanned.
+func ValidateFilters(filters []Filter) error {
 	for fi := range filters {
 		f := &filters[fi]
 		if l := len(f.ContractID); l != 0 && l != 32 {
 			return fmt.Errorf(
 				"events: filter[%d].ContractID must be 0 or 32 bytes, got %d", fi, l)
 		}
+		if f.EventType != nil && !f.EventType.ValidEnum(int32(*f.EventType)) {
+			return fmt.Errorf(
+				"events: filter[%d].EventType %d is not a known event type", fi, *f.EventType)
+		}
+		if f.TopicCount.Count < 0 {
+			return fmt.Errorf(
+				"events: filter[%d].TopicCount.Count must be non-negative, got %d",
+				fi, f.TopicCount.Count)
+		}
+		// Above MaxTopicCount the index cannot answer a count exactly:
+		// every such count shares the overflow bucket. No getEvents
+		// filter shape can name that many topics, and the cursor codec
+		// carries the count in one byte.
+		if f.TopicCount.Count > protocol.MaxTopicCount {
+			return fmt.Errorf(
+				"events: filter[%d].TopicCount.Count must be at most %d, got %d",
+				fi, protocol.MaxTopicCount, f.TopicCount.Count)
+		}
 	}
 	return nil
 }
 
-// hasMatchAllFilter reports whether any filter in filters is the
-// match-all filter (no contract ID, no topics). An empty filters
-// slice also counts (consistent with getEvents).
-func hasMatchAllFilter(filters []Filter) bool {
-	if len(filters) == 0 {
-		return true
+// unionSlots ORs the bitmaps at slots, and returns nil when every one
+// of them is absent from the index. A lone present bitmap is borrowed
+// rather than cloned, like the single-constraint path in
+// unionForFilters.
+func unionSlots(bitmaps []*roaring.Bitmap, slots []int) *roaring.Bitmap {
+	if len(slots) == 1 {
+		return bitmaps[slots[0]]
 	}
-	for i := range filters {
-		if filters[i].isMatchAll() {
-			return true
+	present := make([]*roaring.Bitmap, 0, len(slots))
+	for _, s := range slots {
+		if bitmaps[s] != nil {
+			present = append(present, bitmaps[s])
 		}
 	}
-	return false
+	switch len(present) {
+	case 0:
+		return nil
+	case 1:
+		return present[0]
+	default:
+		return roaring.FastOr(present...)
+	}
 }
 
 // indexOfOrAddTerm returns the index of key inside *keys, appending
@@ -384,85 +580,63 @@ func indexOfOrAddTerm(keys *[]events.TermKey, key events.TermKey) int {
 	return len(*keys) - 1
 }
 
-// fetchAllInRange returns every event in the chunk-relative event-ID
-// window [start, end), truncated to maxEvents (0 = unlimited) and
-// ordered per descending. Used for the match-all short-circuit. Streams
-// via Reader.FetchRange — no []uint32{0..count} materialization, and
-// on the cold path one direct ReadRange call instead of the
-// per-position coalescing logic FetchEvents would run.
-//
-// Caller contract: start < end (the [start, end) window is non-empty)
-// and both bounds are valid chunk-relative event IDs. Query enforces
-// both via its empty-range short-circuit and the End ≤ EventCount
-// check before dispatching here.
-func fetchAllInRange(
-	ctx context.Context, r Reader,
-	start, end uint32, maxEvents int, descending bool,
-) ([]events.Payload, error) {
-	count := end - start
-	// uint64 compare avoids the uint32(maxEvents) truncation footgun:
-	// for maxEvents > MaxUint32, uint32() would wrap to a small value
-	// (or 0 for exact multiples of 2^32) and over-cap the result.
-	if maxEvents > 0 && uint64(count) > uint64(maxEvents) {
-		count = uint32(maxEvents) //nolint:gosec // uint64(count)>uint64(maxEvents)>0 so maxEvents fits uint32
-	}
-	fetchStart := start
-	if descending {
-		fetchStart = end - count // keep the highest `count` event IDs
-	}
-	out := make([]events.Payload, 0, count)
-	for p, err := range r.FetchRange(ctx, fetchStart, count) {
-		if err != nil {
-			return nil, err
+// streamRange serves the match-all path: every ordinal in the window
+// matches, so it streams Reader.FetchRange with no index work.
+// Ascending is one streaming pass, so the firstBatch hint applies
+// only to descending, which walks the window top-down one internal
+// block at a time, yielding each fetched block in reverse; the first
+// block is sized to the hint (see Matches). FetchRange lends its
+// buffer, so payload bytes are cloned before they leave (yielded
+// payloads are owned).
+func streamRange(
+	ctx context.Context, r Reader, window IDRange, descending bool,
+	firstBatch int, yield func(Match, error) bool,
+) {
+	start, end := window.Start, window.End
+	if !descending {
+		ord := start
+		for p, err := range r.FetchRange(ctx, start, end-start) {
+			if err != nil {
+				yield(Match{}, err)
+				return
+			}
+			p.ContractEventBytes = bytes.Clone(p.ContractEventBytes)
+			if !yield(Match{Payload: p, Ordinal: ord}, nil) {
+				return
+			}
+			ord++
 		}
-		// Retained past this step → clone the borrowed bytes.
-		p.ContractEventBytes = bytes.Clone(p.ContractEventBytes)
-		out = append(out, p)
+		return
 	}
-	if descending {
-		slices.Reverse(out)
-	}
-	return out, nil
-}
-
-// selectEventIDs drains bm into the sorted-ascending []uint32 that
-// Reader.FetchEvents requires, applying MaxEvents. When the cap bites
-// it keeps the lowest IDs for ascending and the highest for
-// descending; the returned slice is always ascending (the caller
-// reverses materialized payloads for descending output).
-//
-// The descending-capped branch pulls exactly `limit` IDs off the
-// reverse iterator (O(limit)) rather than draining the whole bitmap,
-// then sorts them ascending. Every other case walks the forward
-// ManyIterator, which yields strictly ascending, deduplicated uint32s.
-func selectEventIDs(bm *roaring.Bitmap, maxEvents int, descending bool) []uint32 {
-	card := bm.GetCardinality()
-	limit := card
-	if maxEvents > 0 && uint64(maxEvents) < limit {
-		limit = uint64(maxEvents)
-	}
-	// limit ≤ card (a chunk's event-id space, max ~10M today) and ≤
-	// maxEvents (int), so int conversions below are safe.
-	if descending && limit < card {
-		ids := make([]uint32, 0, limit)
-		ri := bm.ReverseIterator()
-		for ri.HasNext() && uint64(len(ids)) < limit {
-			ids = append(ids, ri.Next())
+	batch, rest := batchSizes(firstBatch)
+	block := make([]Match, 0, batch)
+	for hi := end; hi > start; {
+		// uint64 compare avoids the uint32(batch) truncation footgun for
+		// batch sizes beyond uint32 range.
+		step := hi - start
+		if uint64(batch) < uint64(step) { //nolint:gosec // batchSizes clamps positive
+			step = uint32(batch) //nolint:gosec // < step, fits uint32
 		}
-		slices.Reverse(ids) // reverse-iterator order is descending → ascending
-		return ids
-	}
-	ids := make([]uint32, limit)
-	mi := bm.ManyIterator()
-	filled := 0
-	for filled < int(limit) { //nolint:gosec // limit ≤ maxEvents (int) ≤ MaxInt
-		n := mi.NextMany(ids[filled:])
-		if n == 0 {
-			break
+		batch = rest
+		lo := hi - step
+		block = block[:0]
+		ord := lo
+		for p, err := range r.FetchRange(ctx, lo, step) {
+			if err != nil {
+				yield(Match{}, err)
+				return
+			}
+			p.ContractEventBytes = bytes.Clone(p.ContractEventBytes)
+			block = append(block, Match{Payload: p, Ordinal: ord})
+			ord++
 		}
-		filled += n
+		for _, m := range slices.Backward(block) {
+			if !yield(m, nil) {
+				return
+			}
+		}
+		hi = lo
 	}
-	return ids[:filled]
 }
 
 // postFilter is the collision-defense pass: TermKey is
@@ -474,24 +648,23 @@ func selectEventIDs(bm *roaring.Bitmap, maxEvents int, descending bool) []uint32
 // hash becomes load-bearing only for narrowing efficiency, not for
 // result correctness.
 //
-// Within a clause: AND across non-empty fields. Across clauses: OR.
+// Within a clause: AND across constrained fields. Across clauses: OR.
 // The match-all short-circuit upstream means this is only reached
-// when at least one filter clause has a constraint. The result slice
-// aliases the input — safe because the write cursor is always ≤ the
-// read cursor, and the input is owned (Reader.FetchEvents).
-func postFilter(payloads []events.Payload, filters []Filter) ([]events.Payload, error) {
-	if len(filters) == 0 {
-		return payloads, nil
-	}
+// when at least one filter clause has a constraint, so filters is
+// never empty here. ids is
+// positionally aligned with payloads (both come from the same
+// candidate batch); survivors carry their ordinal out as
+// Match.Ordinal.
+func postFilter(payloads []events.Payload, ids []uint32, filters []Filter) ([]Match, error) {
+	out := make([]Match, 0, len(payloads))
 	plan := planFilters(filters)
-	out := payloads[:0]
 	for i := range payloads {
 		ok, err := matchesAnyFilterView(payloads[i].ContractEventBytes, filters, &plan)
 		if err != nil {
 			return nil, err
 		}
 		if ok {
-			out = append(out, payloads[i])
+			out = append(out, Match{Payload: payloads[i], Ordinal: ids[i]})
 		}
 	}
 	return out, nil
@@ -525,42 +698,76 @@ func planFilters(filters []Filter) filterPlan {
 	return plan
 }
 
+// eventFields holds the decoded fields matchesAnyFilterView pulls out
+// of one event, each resolved at most once and only when some clause
+// asks for it.
+type eventFields struct {
+	contractID     []byte
+	contractIDDone bool
+
+	eventType     xdr.ContractEventType
+	eventTypeDone bool
+
+	topicCount     int
+	topicCountDone bool
+
+	topics     [protocol.MaxTopicCount][]byte
+	topicsDone bool
+}
+
 // matchesAnyFilterView reports whether the event encoded in raw
-// satisfies at least one filter clause. It lazily resolves
-// ContractId and each constrained topic position via
-// xdr.ContractEventView navigation, byte-comparing aliased .Raw()
-// slices against the filter clauses. Zero per-event allocation —
-// every byte slice involved aliases into raw.
+// satisfies at least one filter clause. It resolves each field a
+// clause constrains via xdr.ContractEventView navigation,
+// byte-comparing aliased .Raw() slices against the filter clauses.
+// Zero per-event allocation — every byte slice involved aliases into
+// raw.
 //
-// Lazy resolution: events that fail every clause's ContractId check
-// never trigger the topic walk; events that pass do exactly one
-// linear walk over Topics up to the highest constrained position
-// (single-call cache, multi-clause queries reuse).
+// Fields are resolved at most once and only when a clause asks for
+// them, cheapest first: events that fail every clause's type or
+// ContractId check never trigger the topic walk, and events that pass
+// do exactly one linear walk over Topics up to the highest constrained
+// position.
 //
-//nolint:gocognit // linear clause loop with two-level lazy cache; splitting helpers fragments the lazy invariant
+//nolint:gocognit,cyclop // linear clause loop with per-field lazy caches; helpers would fragment the invariant
 func matchesAnyFilterView(raw []byte, filters []Filter, plan *filterPlan) (bool, error) {
 	ev := xdr.ContractEventView(raw)
-	var (
-		cidBytes     []byte
-		cidPresent   bool
-		cidResolved  bool
-		topicRaw     [protocol.MaxTopicCount][]byte
-		topicsWalked bool
-	)
+	var got eventFields
 
 	for fi := range filters {
 		f := &filters[fi]
-		if len(f.ContractID) > 0 {
-			if !cidResolved {
-				present, b, err := resolveViewContractID(ev)
+		if f.EventType != nil {
+			if !got.eventTypeDone {
+				eventType, err := resolveViewEventType(ev)
 				if err != nil {
 					return false, err
 				}
-				cidResolved = true
-				cidPresent = present
-				cidBytes = b
+				got.eventType, got.eventTypeDone = eventType, true
 			}
-			if !cidPresent || !bytes.Equal(cidBytes, f.ContractID) {
+			if got.eventType != *f.EventType {
+				continue
+			}
+		}
+		if len(f.ContractID) > 0 {
+			if !got.contractIDDone {
+				cid, err := resolveViewContractID(ev)
+				if err != nil {
+					return false, err
+				}
+				got.contractID, got.contractIDDone = cid, true
+			}
+			if !bytes.Equal(got.contractID, f.ContractID) {
+				continue
+			}
+		}
+		if !f.TopicCount.isWildcard() {
+			if !got.topicCountDone {
+				n, err := resolveViewTopicCount(ev)
+				if err != nil {
+					return false, err
+				}
+				got.topicCount, got.topicCountDone = n, true
+			}
+			if !f.TopicCount.matches(got.topicCount) {
 				continue
 			}
 		}
@@ -569,13 +776,13 @@ func matchesAnyFilterView(raw []byte, filters []Filter, plan *filterPlan) (bool,
 			if len(want) == 0 {
 				continue
 			}
-			if !topicsWalked {
-				if err := collectTopicViewBytes(ev, plan, &topicRaw); err != nil {
+			if !got.topicsDone {
+				if err := collectTopicViewBytes(ev, plan, &got.topics); err != nil {
 					return false, err
 				}
-				topicsWalked = true
+				got.topicsDone = true
 			}
-			g := topicRaw[i]
+			g := got.topics[i]
 			if g == nil || !bytes.Equal(g, want) {
 				matched = false
 				break
@@ -588,26 +795,77 @@ func matchesAnyFilterView(raw []byte, filters []Filter, plan *filterPlan) (bool,
 	return false, nil
 }
 
-// resolveViewContractID extracts the optional ContractId from a
-// ContractEventView. Returns (present, bytes, err); when present is
-// false, bytes is nil.
-func resolveViewContractID(ev xdr.ContractEventView) (bool, []byte, error) {
+func resolveViewEventType(ev xdr.ContractEventView) (xdr.ContractEventType, error) {
+	typeView, err := ev.Type()
+	if err != nil {
+		return 0, fmt.Errorf("events: post-filter view Type: %w", err)
+	}
+	eventType, err := typeView.Value()
+	if err != nil {
+		return 0, fmt.Errorf("events: post-filter view Type value: %w", err)
+	}
+	return eventType, nil
+}
+
+// resolveViewTopics returns the event's Body.V0.Topics. ok is false for
+// a body version that carries no topics at all.
+func resolveViewTopics(ev xdr.ContractEventView) (xdr.ContractEventV0TopicsView, bool, error) {
+	body, err := ev.Body()
+	if err != nil {
+		return nil, false, fmt.Errorf("events: post-filter view Body: %w", err)
+	}
+	bodyV, err := body.V()
+	if err != nil {
+		return nil, false, fmt.Errorf("events: post-filter view Body.V: %w", err)
+	}
+	if bodyV != 0 {
+		return nil, false, nil
+	}
+	v0, err := body.V0()
+	if err != nil {
+		return nil, false, fmt.Errorf("events: post-filter view Body.V0: %w", err)
+	}
+	topics, err := v0.Topics()
+	if err != nil {
+		return nil, false, fmt.Errorf("events: post-filter view Body.V0.Topics: %w", err)
+	}
+	return topics, true, nil
+}
+
+// resolveViewTopicCount returns how many topics the event carries, or
+// -1 when it has no V0 body, which TopicCountFilter.matches rejects for
+// every constraint.
+func resolveViewTopicCount(ev xdr.ContractEventView) (int, error) {
+	topics, ok, err := resolveViewTopics(ev)
+	if err != nil || !ok {
+		return -1, err
+	}
+	count, err := topics.Count()
+	if err != nil {
+		return 0, fmt.Errorf("events: post-filter view Body.V0.Topics.Count: %w", err)
+	}
+	return count, nil
+}
+
+// resolveViewContractID returns the event's ContractId aliased into the
+// raw buffer, or nil when it has none.
+func resolveViewContractID(ev xdr.ContractEventView) ([]byte, error) {
 	cidOpt, err := ev.ContractId()
 	if err != nil {
-		return false, nil, fmt.Errorf("events: post-filter view ContractId opt: %w", err)
+		return nil, fmt.Errorf("events: post-filter view ContractId opt: %w", err)
 	}
 	cidView, present, err := cidOpt.Unwrap()
 	if err != nil {
-		return false, nil, fmt.Errorf("events: post-filter view ContractId unwrap: %w", err)
+		return nil, fmt.Errorf("events: post-filter view ContractId unwrap: %w", err)
 	}
 	if !present {
-		return false, nil, nil
+		return nil, nil
 	}
-	cid, err := cidView.Value()
+	cid, err := cidView.Raw()
 	if err != nil {
-		return false, nil, fmt.Errorf("events: post-filter view ContractId value: %w", err)
+		return nil, fmt.Errorf("events: post-filter view ContractId raw: %w", err)
 	}
-	return true, cid[:], nil
+	return cid, nil
 }
 
 // collectTopicViewBytes walks the ContractEventView's Body.V0.Topics
@@ -615,8 +873,8 @@ func resolveViewContractID(ev xdr.ContractEventView) (bool, []byte, error) {
 // into topicRaw. Stops after the highest constrained position so the
 // walk is O(plan.maxTopicIdx+1) rather than the O(MaxTopicCount²)
 // that calling .At(j) for each j would produce (ScVecView.At is a
-// prefix walk under the hood). Body.V != 0 → no V0.Topics → topicRaw
-// stays zero (every constrained position will mismatch downstream).
+// prefix walk under the hood). A body version with no topics leaves
+// topicRaw zero (every constrained position will mismatch downstream).
 func collectTopicViewBytes(
 	ev xdr.ContractEventView,
 	plan *filterPlan,
@@ -625,24 +883,9 @@ func collectTopicViewBytes(
 	if !plan.anyTopic {
 		return nil
 	}
-	body, err := ev.Body()
-	if err != nil {
-		return fmt.Errorf("events: post-filter view Body: %w", err)
-	}
-	bodyV, err := body.V()
-	if err != nil {
-		return fmt.Errorf("events: post-filter view Body.V: %w", err)
-	}
-	if bodyV != 0 {
-		return nil
-	}
-	v0, err := body.V0()
-	if err != nil {
-		return fmt.Errorf("events: post-filter view Body.V0: %w", err)
-	}
-	topicsArr, err := v0.Topics()
-	if err != nil {
-		return fmt.Errorf("events: post-filter view Body.V0.Topics: %w", err)
+	topicsArr, ok, err := resolveViewTopics(ev)
+	if err != nil || !ok {
+		return err
 	}
 	i := 0
 	for topic, ierr := range topicsArr.Iter() {

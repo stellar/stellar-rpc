@@ -145,9 +145,9 @@ func (h *HotStore) EventCount() (uint32, error) {
 	return h.offsets.TotalEvents(), nil
 }
 
-// Offsets returns a point-in-time view of the ledger-offset cache.
-// The coordinator uses this to stitch a multi-ledger query range
-// into chunk-relative event-id ranges (see Reader.Offsets).
+// Offsets returns a point-in-time view of the ledger-offset cache,
+// the query side's source for translating ledger bounds into
+// event-id windows (see Reader.Offsets).
 //
 // Implementation: returns a *LedgerOffsets sharing the live
 // backing array, capped at the count visible at call time
@@ -213,10 +213,10 @@ func (h *HotStore) LookupKeys(ctx context.Context, keys []events.TermKey) ([]*ro
 // honored at the top of the call; the underlying CGO call is not
 // cancellable mid-flight.
 //
-// A missing row is an error: eventIDs only reach this path through
-// LookupKeys, which only returns IDs the mirror knows about —
-// implying RocksDB also has them. A miss indicates corruption or a
-// writer/reader mismatch, not a normal not-found case.
+// A missing row is an error: every caller passes ids that name
+// stored events (see Reader.FetchEvents), implying RocksDB has
+// them. A miss indicates corruption or a writer/reader mismatch,
+// not a normal not-found case.
 //
 // After the caller-owned store is closed, returns stores.ErrStoreClosed.
 func (h *HotStore) FetchEvents(ctx context.Context, eventIDs []uint32) ([]events.Payload, error) {
