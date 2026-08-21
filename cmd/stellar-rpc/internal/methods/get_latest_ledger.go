@@ -42,7 +42,7 @@ func NewGetLatestLedgerHandler(ledgerReader db.LedgerReader) jrpc2.Handler {
 			Hash:            header.Hash.HexString(),
 			ProtocolVersion: uint32(header.Header.LedgerVersion),
 			Sequence:        latestSequence,
-			LedgerCloseTime: int64(header.Header.ScpValue.CloseTime),
+			LedgerCloseTime: int64(header.Header.ScpValue.CloseTime), //nolint:gosec // safe for ~292B years
 			LedgerHeader:    headerB64,
 			LedgerMetadata:  base64.StdEncoding.EncodeToString(latestLedgerRaw),
 		}, nil

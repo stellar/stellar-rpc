@@ -374,17 +374,18 @@ func getLedgerFromDB(ctx context.Context, db readDB, sequence uint32) (xdr.Ledge
 		return xdr.LedgerCloseMeta{}, false, nil
 	}
 
-	var lcm []xdr.LedgerCloseMeta
-	if _, err := xdr.Unmarshal(bytes.NewReader(raw), &lcm); err != nil {
+	var results []xdr.LedgerCloseMeta
+	if _, err := xdr.Unmarshal(bytes.NewReader(raw), &results); err != nil {
 		return xdr.LedgerCloseMeta{}, false, err
 	}
-	switch len(lcm) {
+	switch len(results) {
 	case 0:
 		return xdr.LedgerCloseMeta{}, false, nil
 	case 1:
-		return lcm[0], true, nil
+		return results[0], true, nil
 	default:
-		return xdr.LedgerCloseMeta{}, false, fmt.Errorf("unexpectedly found %d ledgers for sequence %d", len(lcm), sequence)
+		return xdr.LedgerCloseMeta{}, false, fmt.Errorf("multiple lcm entries (%d) for sequence %d in table %q",
+			len(results), sequence, ledgerCloseMetaTableName)
 	}
 }
 
