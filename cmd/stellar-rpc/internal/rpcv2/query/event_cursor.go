@@ -88,12 +88,12 @@ type EventPosition struct {
 	Ledger, Tx, Op, Event, LedgerOrdinal uint32
 }
 
-// EventCursorQuery is the canonical (engine) form of the original query the
+// EventScope is the canonical (engine) form of the original query the
 // cursor pins: ledger bounds, direction, and the engine's filters. A nil
 // MaxLedger is the proposal's open upper bound: an ascending query that
 // follows the chain tip across pages. Descending queries always carry one,
 // pinned at query start.
-type EventCursorQuery struct {
+type EventScope struct {
 	MinLedger uint32
 	MaxLedger *uint32
 	Dir       Direction
@@ -107,7 +107,7 @@ type EventCursorQuery struct {
 // resume starts just past the watermark. A present one is the mid-ledger
 // re-entry point.
 type EventCursor struct {
-	Scope         EventCursorQuery
+	Scope         EventScope
 	Position      *EventPosition
 	ScannedLedger uint32
 }

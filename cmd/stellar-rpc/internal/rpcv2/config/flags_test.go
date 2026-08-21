@@ -275,6 +275,18 @@ captive_core_config = "/cc"
 		assert.Equal(t, DefaultGetFeeStatsQueueLimit, *m.GetFeeStats.QueueLimit, "tier 3: compiled default")
 	})
 
+	t.Run("term_budget is flag-settable and file-settable", func(t *testing.T) {
+		cfg := load(t, `
+[storage]
+default_data_dir = "/d"
+[service.methods.getEvents]
+term_budget = 20
+[ingestion]
+captive_core_config = "/cc"
+`, "--service.methods.getEvents.term_budget=30")
+		assert.Equal(t, uint(30), *cfg.Service.Methods.GetEvents.TermBudget, "CLI beats file")
+	})
+
 	t.Run("example D: durations cascade the same way", func(t *testing.T) {
 		cfg := load(t, `
 [storage]

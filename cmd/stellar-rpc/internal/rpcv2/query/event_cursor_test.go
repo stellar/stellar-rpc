@@ -50,14 +50,14 @@ func TestCursorRoundTrip(t *testing.T) {
 		{
 			name: "ascending unbounded (nil max), watermark-only, match-all",
 			env: EventCursor{
-				Scope:         EventCursorQuery{MinLedger: 100, Dir: Ascending},
+				Scope:         EventScope{MinLedger: 100, Dir: Ascending},
 				ScannedLedger: 175,
 			},
 		},
 		{
 			name: "ascending unbounded with position",
 			env: EventCursor{
-				Scope:         EventCursorQuery{MinLedger: 100, Dir: Ascending},
+				Scope:         EventScope{MinLedger: 100, Dir: Ascending},
 				Position:      &EventPosition{Ledger: 150, Tx: 3, Op: 1, Event: 2, LedgerOrdinal: 41},
 				ScannedLedger: 150,
 			},
@@ -65,7 +65,7 @@ func TestCursorRoundTrip(t *testing.T) {
 		{
 			name: "ascending bounded with position, zero filters (match-all)",
 			env: EventCursor{
-				Scope:         EventCursorQuery{MinLedger: 100, MaxLedger: maxPtr(200), Dir: Ascending},
+				Scope:         EventScope{MinLedger: 100, MaxLedger: maxPtr(200), Dir: Ascending},
 				Position:      &EventPosition{Ledger: 150, Tx: 3, Op: 1, Event: 2, LedgerOrdinal: 41},
 				ScannedLedger: 150,
 			},
@@ -74,14 +74,14 @@ func TestCursorRoundTrip(t *testing.T) {
 			// A present all-zero position must stay distinct from nil.
 			name: "all-zero position",
 			env: EventCursor{
-				Scope:    EventCursorQuery{MinLedger: 1, MaxLedger: maxPtr(2), Dir: Ascending},
+				Scope:    EventScope{MinLedger: 1, MaxLedger: maxPtr(2), Dir: Ascending},
 				Position: &EventPosition{},
 			},
 		},
 		{
 			name: "max uint32 field values",
 			env: EventCursor{
-				Scope: EventCursorQuery{
+				Scope: EventScope{
 					MinLedger: math.MaxUint32, MaxLedger: maxPtr(math.MaxUint32), Dir: Ascending,
 				},
 				Position: &EventPosition{
@@ -100,7 +100,7 @@ func TestCursorRoundTripFilters(t *testing.T) {
 		{
 			name: "descending with position, contract-only filter",
 			env: EventCursor{
-				Scope: EventCursorQuery{
+				Scope: EventScope{
 					MinLedger: 50, MaxLedger: maxPtr(900), Dir: Descending,
 					Filters: []event.Filter{{ContractID: testContract(0xC1)}},
 				},
@@ -111,7 +111,7 @@ func TestCursorRoundTripFilters(t *testing.T) {
 		{
 			name: "descending watermark-only, topics with gaps (t0 and t2 set)",
 			env: EventCursor{
-				Scope: EventCursorQuery{
+				Scope: EventScope{
 					MinLedger: 1, MaxLedger: maxPtr(10), Dir: Descending,
 					Filters: []event.Filter{{
 						Topics: [protocol.MaxTopicCount][]byte{testTopic(0xA0), nil, testTopic(0xA2), nil},
@@ -123,7 +123,7 @@ func TestCursorRoundTripFilters(t *testing.T) {
 		{
 			name: "full filter",
 			env: EventCursor{
-				Scope: EventCursorQuery{
+				Scope: EventScope{
 					MinLedger: 20002, MaxLedger: maxPtr(30001), Dir: Ascending,
 					Filters: []event.Filter{{
 						ContractID: testContract(0xC2),
@@ -141,7 +141,7 @@ func TestCursorRoundTripFilters(t *testing.T) {
 		{
 			name: "type-only filter and exact-count filter",
 			env: EventCursor{
-				Scope: EventCursorQuery{
+				Scope: EventScope{
 					MinLedger: 3, MaxLedger: maxPtr(9), Dir: Descending,
 					Filters: []event.Filter{
 						{EventType: eventTypePtr(xdr.ContractEventTypeSystem)},
@@ -155,7 +155,7 @@ func TestCursorRoundTripFilters(t *testing.T) {
 		{
 			name: "multiple filters including an empty match-all filter",
 			env: EventCursor{
-				Scope: EventCursorQuery{
+				Scope: EventScope{
 					MinLedger: 5, MaxLedger: maxPtr(6), Dir: Descending,
 					Filters: []event.Filter{
 						{ContractID: testContract(0xC3)},
@@ -202,7 +202,7 @@ func TestCursorGoldenV1(t *testing.T) {
 		{
 			name: "minimal: ascending unbounded, watermark-only, match-all",
 			env: EventCursor{
-				Scope:         EventCursorQuery{MinLedger: 100, Dir: Ascending},
+				Scope:         EventScope{MinLedger: 100, Dir: Ascending},
 				ScannedLedger: 175,
 			},
 			body: cat(
@@ -215,7 +215,7 @@ func TestCursorGoldenV1(t *testing.T) {
 		{
 			name: "full: descending, max, position, contract+topic1 filter",
 			env: EventCursor{
-				Scope: EventCursorQuery{
+				Scope: EventScope{
 					MinLedger: 1, MaxLedger: maxPtr(2), Dir: Descending,
 					Filters: []event.Filter{{
 						ContractID: testContract(0xC5),
@@ -241,7 +241,7 @@ func TestCursorGoldenV1(t *testing.T) {
 		{
 			name: "the #904 fields: system type, exactly-2 count, contract",
 			env: EventCursor{
-				Scope: EventCursorQuery{
+				Scope: EventScope{
 					MinLedger: 9, MaxLedger: maxPtr(10), Dir: Ascending,
 					Filters: []event.Filter{{
 						ContractID: testContract(0xC6),
@@ -401,7 +401,7 @@ func TestCursorMalformedInputs(t *testing.T) {
 
 func TestCursorEncodeDeterministic(t *testing.T) {
 	env := EventCursor{
-		Scope: EventCursorQuery{
+		Scope: EventScope{
 			MinLedger: 1, MaxLedger: maxPtr(1000), Dir: Descending,
 			Filters: []event.Filter{{
 				ContractID: testContract(0xC4),
@@ -428,20 +428,20 @@ func TestCursorEncodeRejects(t *testing.T) {
 	}{
 		{
 			name: "invalid direction",
-			env:  EventCursor{Scope: EventCursorQuery{MinLedger: 1, Dir: Direction(99)}},
+			env:  EventCursor{Scope: EventScope{MinLedger: 1, Dir: Direction(99)}},
 		},
 		{
 			name: "descending without max",
-			env:  EventCursor{Scope: EventCursorQuery{MinLedger: 1, Dir: Descending}},
+			env:  EventCursor{Scope: EventScope{MinLedger: 1, Dir: Descending}},
 		},
 		{
 			name: "min greater than max",
-			env:  EventCursor{Scope: EventCursorQuery{MinLedger: 3, MaxLedger: maxPtr(2), Dir: Ascending}},
+			env:  EventCursor{Scope: EventScope{MinLedger: 3, MaxLedger: maxPtr(2), Dir: Ascending}},
 		},
 		{
 			name: "bad contract length",
 			env: EventCursor{
-				Scope: EventCursorQuery{
+				Scope: EventScope{
 					MinLedger: 1, Dir: Ascending,
 					Filters: []event.Filter{{ContractID: bytes.Repeat([]byte{1}, 31)}},
 				},
@@ -450,7 +450,7 @@ func TestCursorEncodeRejects(t *testing.T) {
 		{
 			name: "too many filters",
 			env: EventCursor{
-				Scope: EventCursorQuery{
+				Scope: EventScope{
 					MinLedger: 1, Dir: Ascending,
 					Filters: make([]event.Filter, maxCursorFilters+1),
 				},
@@ -461,7 +461,7 @@ func TestCursorEncodeRejects(t *testing.T) {
 			// oversized topic.
 			name: "oversized output",
 			env: EventCursor{
-				Scope: EventCursorQuery{
+				Scope: EventScope{
 					MinLedger: 1, Dir: Ascending,
 					Filters: []event.Filter{{
 						Topics: [protocol.MaxTopicCount][]byte{bytes.Repeat([]byte{7}, maxCursorBytes)},
@@ -493,7 +493,7 @@ func TestCursorSizeWorstCase(t *testing.T) {
 		filters[i].TopicCount = event.TopicCountFilter{Count: protocol.MaxTopicCount, Exact: true}
 	}
 	env := EventCursor{
-		Scope: EventCursorQuery{
+		Scope: EventScope{
 			MinLedger: 1, MaxLedger: maxPtr(math.MaxUint32), Dir: Ascending, Filters: filters,
 		},
 		Position: &EventPosition{
@@ -523,7 +523,7 @@ func TestCursorCodecCoversFilter(t *testing.T) {
 // wire cannot represent them: a set topic bit must carry a nonzero length.
 func TestCursorEmptyValuesEncodeAsAbsent(t *testing.T) {
 	withEmpty := EventCursor{
-		Scope: EventCursorQuery{
+		Scope: EventScope{
 			MinLedger: 1, MaxLedger: maxPtr(2), Dir: Ascending,
 			Filters: []event.Filter{{
 				ContractID: []byte{},
@@ -532,7 +532,7 @@ func TestCursorEmptyValuesEncodeAsAbsent(t *testing.T) {
 		},
 	}
 	withNil := EventCursor{
-		Scope: EventCursorQuery{
+		Scope: EventScope{
 			MinLedger: 1, MaxLedger: maxPtr(2), Dir: Ascending,
 			Filters: []event.Filter{{}},
 		},
@@ -549,7 +549,7 @@ func TestCursorEmptyValuesEncodeAsAbsent(t *testing.T) {
 // exact input bytes — one envelope, one encoding, no exceptions.
 func FuzzDecodeEventCursor(f *testing.F) {
 	valid := EventCursor{
-		Scope: EventCursorQuery{
+		Scope: EventScope{
 			MinLedger: 1, MaxLedger: maxPtr(2), Dir: Ascending,
 			Filters: []event.Filter{{ContractID: testContract(0xC0)}},
 		},
@@ -560,7 +560,7 @@ func FuzzDecodeEventCursor(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
-	unbounded := EventCursor{Scope: EventCursorQuery{MinLedger: 9, Dir: Ascending}}
+	unbounded := EventCursor{Scope: EventScope{MinLedger: 9, Dir: Ascending}}
 	seed2, err := unbounded.Encode()
 	if err != nil {
 		f.Fatal(err)

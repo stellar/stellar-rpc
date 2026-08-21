@@ -284,6 +284,9 @@ func validateService(svc config.ServiceConfig) error {
 	if err := validatePaginatedMethods(m); err != nil {
 		return err
 	}
+	if err := validateEventsMethod(m.GetEvents); err != nil {
+		return err
+	}
 	if err := validatePreflight(svc.Preflight); err != nil {
 		return err
 	}
@@ -310,7 +313,7 @@ func validatePaginatedMethods(m config.MethodsConfig) error {
 	}{
 		{"getTransactions", m.GetTransactions},
 		{"getLedgers", m.GetLedgers},
-		{"getEvents", m.GetEvents},
+		{"getEvents", m.GetEvents.PaginatedMethodConfig},
 		{"getEventsV2", m.GetEventsV2},
 	}
 	for _, pp := range paginated {
@@ -324,6 +327,14 @@ func validatePaginatedMethods(m config.MethodsConfig) error {
 			return fmt.Errorf("[service.methods.%s].default_items_per_response (%d) cannot exceed max_items_per_response (%d)",
 				pp.name, *pp.p.DefaultItemsPerResponse, *pp.p.MaxItemsPerResponse)
 		}
+	}
+	return nil
+}
+
+// validateEventsMethod form-validates getEvents' v2 knobs.
+func validateEventsMethod(e config.EventsMethodConfig) error {
+	if *e.TermBudget < 1 {
+		return errors.New("[service.methods.getEvents].term_budget must be >= 1")
 	}
 	return nil
 }

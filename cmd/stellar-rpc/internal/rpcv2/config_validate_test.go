@@ -184,6 +184,11 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 			"default_items_per_response",
 		},
 		{
+			"zero term_budget",
+			func(c *config.Config) { c.Service.Methods.GetEvents.TermBudget = uintPtr(0) },
+			"[service.methods.getEvents].term_budget",
+		},
+		{
 			"fee window above the cap",
 			func(c *config.Config) { c.Service.FeeStats.ClassicFeeWindowLedgers = uint32Ptr(1001) },
 			"classic_fee_window_ledgers",
