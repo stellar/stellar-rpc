@@ -45,7 +45,7 @@ type LedgerWriter interface {
 }
 
 type readDB interface {
-	Select(ctx context.Context, dest interface{}, query sq.Sqlizer) error
+	Select(ctx context.Context, dest any, query sq.Sqlizer) error
 }
 
 type ledgerReader struct {
@@ -397,24 +397,23 @@ func getLedgerRawFromDB(ctx context.Context, db readDB, sequence uint32) ([]byte
 
 // Parses a raw ledger close meta blob into a LedgerHeaderHistoryEntry.
 func parseLedgerHeaderFromMeta(meta []byte) (xdr.LedgerHeaderHistoryEntry, error) {
-	var v xdr.Int32
-	rd := bytes.NewReader(meta)
-	if _, err := xdr.Unmarshal(rd, &v); err != nil {
-		return xdr.LedgerHeaderHistoryEntry{}, err
-	}
-
-	if v > 0 { // V0 has no extension
-		var ext xdr.LedgerCloseMetaExt
-		if _, err := xdr.Unmarshal(rd, &ext); err != nil { // skipped
-			return xdr.LedgerHeaderHistoryEntry{}, err
+	raw, err := xdr.Try(func() []byte {
+		m := xdr.LedgerCloseMetaView(meta)
+		switch m.MustV() {
+		case 0:
+			return m.MustV0().MustLedgerHeader().MustRaw()
+		case 1:
+			return m.MustV1().MustLedgerHeader().MustRaw()
+		default:
+			return m.MustV2().MustLedgerHeader().MustRaw()
 		}
-	}
-
+	})
 	var header xdr.LedgerHeaderHistoryEntry
-	if _, err := xdr.Unmarshal(rd, &header); err != nil {
-		return xdr.LedgerHeaderHistoryEntry{}, err
+	if err != nil {
+		return header, err
 	}
-	return header, nil
+	err = header.UnmarshalBinary(raw)
+	return header, err
 }
 
 // InsertLedger inserts a ledger in the db.
