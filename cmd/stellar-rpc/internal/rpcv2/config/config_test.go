@@ -225,6 +225,7 @@ func TestParseConfig_ServiceDefaults(t *testing.T) {
 
 	assert.Equal(t, DefaultGetEventsMaxItemsPerResponse, *m.GetEvents.MaxItemsPerResponse)
 	assert.Equal(t, DefaultGetEventsDefaultItemsPerResponse, *m.GetEvents.DefaultItemsPerResponse)
+	assert.Equal(t, DefaultGetEventsTermBudget, *m.GetEvents.TermBudget)
 	assert.Equal(t, DefaultGetTransactionsMaxItemsPerResponse, *m.GetTransactions.MaxItemsPerResponse)
 	assert.Equal(t, DefaultGetLedgersMaxItemsPerResponse, *m.GetLedgers.MaxItemsPerResponse)
 
@@ -540,4 +541,17 @@ func TestValidateRoots(t *testing.T) {
 		p.Events = "/data/ledgers/events"
 		require.NoError(t, p.ValidateRoots())
 	})
+}
+
+// TestEventsMethodConfig_TypeNameAlias documents a known, accepted
+// quirk of embedding PaginatedMethodConfig (see the struct doc): the
+// decoder also accepts the shared keys through a table named after
+// the embedded type, and strict mode cannot reject it. If this test
+// ever fails, the alias got closed: delete it and the doc note.
+func TestEventsMethodConfig_TypeNameAlias(t *testing.T) {
+	cfg, err := DecodeConfig([]byte(
+		"[service.methods.getEvents.PaginatedMethodConfig]\nqueue_limit = 3\n"))
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Service.Methods.GetEvents.QueueLimit)
+	assert.Equal(t, uint(3), *cfg.Service.Methods.GetEvents.QueueLimit)
 }

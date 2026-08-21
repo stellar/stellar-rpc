@@ -163,6 +163,9 @@ max_execution_duration = "10s"
 # The getEvents v2 API caps pages at 1,000 (spec constant), unlike v1's 10000.
 max_items_per_response = 1000
 default_items_per_response = 100
+# Cap on distinct index terms one request may look up. Over budget fails
+# with invalid_params; the client splits the query and merges results.
+term_budget = 15
 
 [service.methods.getFeeStats]
 queue_limit = 100

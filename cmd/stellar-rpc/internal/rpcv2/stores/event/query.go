@@ -85,26 +85,36 @@ func (f TopicCountFilter) termKeys() []events.TermKey {
 	return events.TopicCountTermKeysAtLeast(f.Count)
 }
 
-// termGroups returns the indexed terms this filter constrains, grouped
-// by field: the bitmaps within a group are OR-ed and the groups are
-// AND-ed. Only the topic-count group ever holds more than one term.
-func (f *Filter) termGroups() [][]events.TermKey {
-	var groups [][]events.TermKey
+// valueTermKeys returns one term per constrained value field
+// (contract ID, event type, topics): the single enumeration
+// termGroups and CountDistinctTerms share, so the two cannot drift
+// over which values a filter names. The topic-count buckets are not
+// value terms; termGroups adds them separately and the budget does
+// not count them.
+func (f *Filter) valueTermKeys() []events.TermKey {
+	var keys []events.TermKey
 	if len(f.ContractID) > 0 {
-		groups = append(groups, []events.TermKey{
-			events.ComputeTermKey(f.ContractID, events.FieldContractID),
-		})
+		keys = append(keys, events.ComputeTermKey(f.ContractID, events.FieldContractID))
 	}
 	if f.EventType != nil {
-		groups = append(groups, []events.TermKey{events.EventTypeTermKey(*f.EventType)})
+		keys = append(keys, events.EventTypeTermKey(*f.EventType))
 	}
 	for tIdx, t := range f.Topics {
 		if len(t) == 0 {
 			continue
 		}
-		groups = append(groups, []events.TermKey{
-			events.ComputeTermKey(t, topicFieldByPosition[tIdx]),
-		})
+		keys = append(keys, events.ComputeTermKey(t, topicFieldByPosition[tIdx]))
+	}
+	return keys
+}
+
+// termGroups returns the indexed terms this filter constrains, grouped
+// by field: the bitmaps within a group are OR-ed and the groups are
+// AND-ed. Only the topic-count group ever holds more than one term.
+func (f *Filter) termGroups() [][]events.TermKey {
+	var groups [][]events.TermKey
+	for _, key := range f.valueTermKeys() {
+		groups = append(groups, []events.TermKey{key})
 	}
 	// A constrained topic position already implies an "at least" count at
 	// or below it, since a topic term is only indexed for events carrying
@@ -544,6 +554,25 @@ func ValidateFilters(filters []Filter) error {
 		}
 	}
 	return nil
+}
+
+// CountDistinctTerms returns how many distinct value terms the
+// filters name, deduped by field and value together: one contract ID
+// in five filters counts once, the same bytes in two topic positions
+// count twice. Topic-count buckets are excluded: they are an
+// implementation detail of the engine's grouping, not a value the
+// client named. Exported for the v2 handler's term-budget check. It
+// lives here, beside termGroups, so the budget and the engine's
+// lookups agree on what a value term is: TermKey over the store's
+// canonical bytes.
+func CountDistinctTerms(filters []Filter) int {
+	unique := make(map[events.TermKey]struct{})
+	for i := range filters {
+		for _, key := range filters[i].valueTermKeys() {
+			unique[key] = struct{}{}
+		}
+	}
+	return len(unique)
 }
 
 // unionSlots ORs the bitmaps at slots, and returns nil when every one
