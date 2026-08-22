@@ -8,6 +8,7 @@ import (
 	"github.com/creachadair/jrpc2"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 )
@@ -23,39 +24,35 @@ func NewGetLatestLedgerHandler(ledgerReader db.LedgerReader) jrpc2.Handler {
 				Message: "could not get latest ledger sequence",
 			}
 		}
-		latestLedger, found, err := ledgerReader.GetLedger(ctx, latestSequence)
+		latestLedgerRaw, found, err := ledgerReader.GetLedgerRaw(ctx, latestSequence)
 		if (err != nil) || (!found) {
 			return protocol.GetLatestLedgerResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
 				Message: "could not get latest ledger",
 			}
 		}
-		header := latestLedger.LedgerHeaderHistoryEntry().Header
-		headerBytes, err := header.MarshalBinary()
+		header, err := latestLedgerRaw.ParseLedgerHeaderFromMeta()
+		if err != nil {
+			return protocol.GetLatestLedgerResponse{}, &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: "could not parse latest ledger header",
+			}
+		}
+		headerB64, err := xdr.MarshalBase64(header.Header)
 		if err != nil {
 			return protocol.GetLatestLedgerResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
 				Message: fmt.Sprintf("could not marshal latest ledger header: %v", err),
 			}
 		}
-		response := protocol.GetLatestLedgerResponse{
-			Hash:            latestLedger.LedgerHash().HexString(),
-			ProtocolVersion: latestLedger.ProtocolVersion(),
+		return protocol.GetLatestLedgerResponse{
+			Hash:            header.Hash.HexString(),
+			ProtocolVersion: uint32(header.Header.LedgerVersion),
 			Sequence:        latestSequence,
-			LedgerCloseTime: latestLedger.LedgerCloseTime(),
-			LedgerHeader:    base64.StdEncoding.EncodeToString(headerBytes),
-		}
-
-		raw, err := latestLedger.MarshalBinary()
-		if err != nil {
-			return protocol.GetLatestLedgerResponse{}, &jrpc2.Error{
-				Code:    jrpc2.InternalError,
-				Message: fmt.Sprintf("could not marshal latest ledger metadata: %v", err),
-			}
-		}
-		response.LedgerMetadata = base64.StdEncoding.EncodeToString(raw)
-
-		return response, nil
+			LedgerCloseTime: int64(header.Header.ScpValue.CloseTime), //nolint:gosec // safe for ~292B years
+			LedgerHeader:    headerB64,
+			LedgerMetadata:  base64.StdEncoding.EncodeToString(latestLedgerRaw),
+		}, nil
 	}
 	return NewHandler(coreHandler)
 }

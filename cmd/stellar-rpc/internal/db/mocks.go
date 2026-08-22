@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -95,6 +96,20 @@ func (m *MockLedgerReader) GetLedger(_ context.Context, sequence uint32) (xdr.Le
 		return xdr.LedgerCloseMeta{}, false, nil
 	}
 	return *lcm, true, nil
+}
+
+func (m *MockLedgerReader) GetLedgerRaw(_ context.Context, sequence uint32) (RawLedger, bool, error) {
+	lcm, ok := m.txn.ledgerSeqToMeta[sequence]
+	if !ok {
+		return nil, false, nil
+	}
+	var buf bytes.Buffer
+	_, err := xdr.Marshal(&buf, lcm)
+	rawMeta := buf.Bytes()
+	if err != nil {
+		return nil, false, err
+	}
+	return rawMeta, true, nil
 }
 
 func (m *MockLedgerReader) StreamAllLedgers(_ context.Context, _ StreamLedgerFn) error {
