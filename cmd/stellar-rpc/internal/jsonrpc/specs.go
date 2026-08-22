@@ -26,13 +26,13 @@ type SpecDeps struct {
 
 	LedgerReader      store.LedgerReader
 	TransactionReader store.TransactionReader
-	EventReader       store.EventReader
 	FeeStats          store.FeeStats
 
-	// GetEventsHandler, when non-nil, is served for getEvents instead of the
-	// handler built from EventReader and the events limits below. The
-	// full-history daemon sets it to a not-implemented stub until #774 wires
-	// its event store.
+	// GetEventsHandler serves getEvents. Required: events handlers are
+	// per-daemon — the two daemons' event stores share no interface, so each
+	// builds its own handler (v1 wraps its database reader via
+	// methods.NewGetEventsHandler; the full-history daemon serves a stub until
+	// #774 wires its event store) and the shared table only mounts it.
 	GetEventsHandler jrpc2.Handler
 
 	// DataStoreLedgerReader is getLedgers' bulk fallback for ledgers below
@@ -48,8 +48,6 @@ type SpecDeps struct {
 	RetentionWindow         uint32
 	MaxHealthyLedgerLatency time.Duration
 
-	MaxEventsLimit           uint
-	DefaultEventsLimit       uint
 	MaxLedgersLimit          uint
 	DefaultLedgersLimit      uint
 	MaxTransactionsLimit     uint
@@ -110,10 +108,8 @@ func (l SpecLimits) Apply(specs []HandlerSpec) []HandlerSpec {
 // own methods to the result, then fills every spec's limits with
 // SpecLimits.Apply before serving.
 func BuildHandlerSpecs(deps SpecDeps) []HandlerSpec {
-	getEvents := deps.GetEventsHandler
-	if getEvents == nil {
-		getEvents = methods.NewGetEventsHandler(deps.Logger, deps.EventReader,
-			deps.MaxEventsLimit, deps.DefaultEventsLimit, deps.LedgerReader)
+	if deps.GetEventsHandler == nil {
+		panic("jsonrpc: SpecDeps.GetEventsHandler is required — events handlers are per-daemon")
 	}
 	spec := func(name string, h jrpc2.Handler) HandlerSpec {
 		return HandlerSpec{MethodName: name, Handler: h}
@@ -121,7 +117,7 @@ func BuildHandlerSpecs(deps SpecDeps) []HandlerSpec {
 	return []HandlerSpec{
 		spec(protocol.GetHealthMethodName,
 			methods.NewHealthCheck(deps.RetentionWindow, deps.LedgerReader, deps.MaxHealthyLedgerLatency)),
-		spec(protocol.GetEventsMethodName, getEvents),
+		spec(protocol.GetEventsMethodName, deps.GetEventsHandler),
 		spec(protocol.GetNetworkMethodName,
 			methods.NewGetNetworkHandler(deps.NetworkPassphrase, deps.FriendbotURL, deps.LedgerReader)),
 		spec(protocol.GetVersionInfoMethodName,

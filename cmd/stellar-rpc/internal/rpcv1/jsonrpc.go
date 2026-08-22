@@ -38,17 +38,17 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 			PreflightGetter:       params.PreflightGetter,
 			LedgerReader:          params.LedgerReader,
 			TransactionReader:     params.TransactionReader,
-			EventReader:           params.EventReader,
 			FeeStats:              params.FeeStatWindows,
 			DataStoreLedgerReader: params.DataStoreLedgerReader,
+
+			GetEventsHandler: methods.NewGetEventsHandler(params.Logger, params.EventReader,
+				cfg.MaxEventsLimit, cfg.DefaultEventsLimit, params.LedgerReader),
 
 			NetworkPassphrase:       cfg.NetworkPassphrase,
 			FriendbotURL:            cfg.FriendbotURL,
 			RetentionWindow:         cfg.HistoryRetentionWindow,
 			MaxHealthyLedgerLatency: cfg.MaxHealthyLedgerLatency,
 
-			MaxEventsLimit:           cfg.MaxEventsLimit,
-			DefaultEventsLimit:       cfg.DefaultEventsLimit,
 			MaxLedgersLimit:          cfg.MaxLedgersLimit,
 			DefaultLedgersLimit:      cfg.DefaultLedgersLimit,
 			MaxTransactionsLimit:     cfg.MaxTransactionsLimit,
