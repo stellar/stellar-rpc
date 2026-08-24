@@ -58,6 +58,10 @@ func ConvertInterface(xdr encoding.BinaryMarshaler) (json.RawMessage, error) {
 	return convertAnyBytes(xdrTypeName, data)
 }
 
+// maxJSONInputLen mirrors DEFAULT_XDR_RW_LIMITS.len in
+// lib/xdr2json/src/lib.rs, which stays authoritative for direct FFI callers.
+const maxJSONInputLen = 32 * 1024 * 1024
+
 // ConvertJSON is the inverse of ConvertBytes: it takes an XDR object (`xdr`,
 // used only to determine the name of the structure, as in ConvertBytes) and
 // the JSON serialization of a value of that type, in the encoding
@@ -71,6 +75,13 @@ func ConvertJSON(xdr any, js json.RawMessage) ([]byte, error) {
 	// zero-length allocation, whose pointer may be null.
 	if len(js) == 0 {
 		return nil, errors.New("JSON input is empty")
+	}
+
+	// Reject oversized input before C.CBytes copies it into C memory, so an
+	// over-limit value cannot force an unbounded native allocation.
+	if len(js) > maxJSONInputLen {
+		return nil, errors.Errorf(
+			"JSON input is %d bytes, over the %d-byte limit", len(js), maxJSONInputLen)
 	}
 
 	xdrTypeName := reflect.TypeOf(xdr).Name()
