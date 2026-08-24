@@ -107,3 +107,30 @@ func TestNewBSBBackendFromConfig_ManifestlessLakeNeedsSchema(t *testing.T) {
 		assert.Contains(t, err.Error(), "manifest")
 	})
 }
+
+// TestFillBSBDefaults pins the per-task defaults: fill only what is unset,
+// honor explicit values, and keep downloads within the object bound.
+func TestFillBSBDefaults(t *testing.T) {
+	got := FillBSBDefaults(ledgerbackend.BufferedStorageBackendConfig{})
+	assert.EqualValues(t, DefaultBSBPrefetchObjects, got.BufferSize)
+	assert.EqualValues(t, DefaultBSBDownloads, got.NumWorkers)
+	assert.EqualValues(t, DefaultBSBPrefetchBytes, got.BufferBytes,
+		"zero means unset — there is no way to disable the byte cap")
+
+	got = FillBSBDefaults(ledgerbackend.BufferedStorageBackendConfig{BufferSize: 1000, BufferBytes: 7 << 20})
+	assert.EqualValues(t, 1000, got.BufferSize, "an explicit depth must survive")
+	assert.EqualValues(t, 7<<20, got.BufferBytes)
+
+	got = FillBSBDefaults(ledgerbackend.BufferedStorageBackendConfig{BufferSize: 3})
+	assert.EqualValues(t, 3, got.NumWorkers,
+		"more downloads than buffer slots would leave workers with nowhere to put results")
+}
+
+// TestByteBudgetCoversItsDownloads: the default budget must at least hold what
+// its downloads dispatch, or concurrency silently drops below NumWorkers. The
+// worst tip object measured 457 KB; its pooled buffer is ~571 KB.
+func TestByteBudgetCoversItsDownloads(t *testing.T) {
+	const worstCaseBuffer = (457 << 10) * 5 / 4
+	perDownload := int64(DefaultBSBPrefetchBytes) / int64(DefaultBSBDownloads)
+	assert.GreaterOrEqual(t, perDownload, int64(worstCaseBuffer))
+}

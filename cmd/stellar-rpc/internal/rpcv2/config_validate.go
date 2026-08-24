@@ -206,6 +206,13 @@ func validateBSB(bsb config.BSBConfig) error {
 	if *bsb.BufferSize < 1 {
 		return errors.New("[backfill.bsb].buffer_size must be >= 1")
 	}
+	// There is no off switch: unset (nil, filled with the default by
+	// WithDefaults) or a positive budget. An operator wanting it effectively
+	// unbounded sets a huge value — visibly, in bytes.
+	if bytes := deref(bsb.BufferBytes); bytes < 1 {
+		return fmt.Errorf("[backfill.bsb].buffer_bytes (%d) must be >= 1; "+
+			"delete the key to use the default", bytes)
+	}
 	if *bsb.NumWorkers < 1 {
 		return errors.New("[backfill.bsb].num_workers must be >= 1")
 	}

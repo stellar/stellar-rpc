@@ -108,6 +108,7 @@ func TestApplyFlags_OverridesFileValues(t *testing.T) {
 		"--backfill.workers=3",
 		"--ingestion.history_archive_urls=https://a.example,https://b.example",
 		"--backfill.bsb.retry_wait=7s",
+		"--backfill.bsb.buffer_bytes=1024",
 	}))
 
 	cfg, err := DecodeConfig([]byte(minimalValidConfig))
@@ -121,6 +122,8 @@ func TestApplyFlags_OverridesFileValues(t *testing.T) {
 	assert.Equal(t, 3, *cfg.Backfill.Workers)
 	assert.Equal(t, []string{"https://a.example", "https://b.example"}, cfg.Ingestion.HistoryArchiveURLs)
 	assert.Equal(t, 7*time.Second, *cfg.Backfill.BSB.RetryWait)
+	assert.EqualValues(t, 1024, *cfg.Backfill.BSB.BufferBytes,
+		"an explicit budget must survive WithDefaults, not be replaced by the default")
 }
 
 func TestApplyFlags_BoolOverride(t *testing.T) {

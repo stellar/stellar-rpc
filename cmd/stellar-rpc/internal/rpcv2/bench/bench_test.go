@@ -261,6 +261,9 @@ func TestBenchRejectsInvalidSourceEarly(t *testing.T) {
 	require.ErrorContains(t, err, "expected pack|bsb")
 
 	require.ErrorContains(t, sourceConfig{Kind: sourceBSB}.validate(), "--bucket-path is required")
+	require.ErrorContains(t,
+		sourceConfig{Kind: sourceBSB, BucketPath: "b", BufferBytes: -1}.validate(),
+		"cannot be negative")
 
 	for _, dir := range []string{coldRoot, hotRoot, outDir} {
 		require.NoDirExists(t, dir, "invalid invocation must not create %s", dir)

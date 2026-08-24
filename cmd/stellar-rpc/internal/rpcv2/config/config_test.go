@@ -134,8 +134,9 @@ func TestParseConfig_MinimalAppliesDefaults(t *testing.T) {
 	// Documented defaults filled.
 	assert.Equal(t, runtime.GOMAXPROCS(0), *cfg.Backfill.Workers)
 	assert.Equal(t, DefaultMaxRetries, *cfg.Backfill.MaxRetries)
-	assert.Equal(t, uint32(backfill.DefaultBSBBufferSize), *cfg.Backfill.BSB.BufferSize)
-	assert.Equal(t, uint32(backfill.DefaultBSBNumWorkers), *cfg.Backfill.BSB.NumWorkers)
+	assert.Equal(t, uint32(backfill.DefaultBSBPrefetchObjects), *cfg.Backfill.BSB.BufferSize)
+	assert.Equal(t, uint32(backfill.DefaultBSBDownloads), *cfg.Backfill.BSB.NumWorkers)
+	assert.Equal(t, int64(backfill.DefaultBSBPrefetchBytes), *cfg.Backfill.BSB.BufferBytes)
 	assert.Equal(t, uint32(backfill.DefaultBSBMaxRetries), *cfg.Backfill.BSB.MaxRetries)
 	assert.Equal(t, backfill.DefaultBSBRetryWait, *cfg.Backfill.BSB.RetryWait)
 	assert.Equal(t, uint32(0), *cfg.Retention.RetentionChunks)

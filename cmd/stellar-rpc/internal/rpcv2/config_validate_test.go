@@ -248,6 +248,7 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 
 func TestValidateConfig_RejectsMalformedBSB(t *testing.T) {
 	uint32Ptr := func(v uint32) *uint32 { return &v }
+	int64Ptr := func(v int64) *int64 { return &v }
 	durPtr := func(v time.Duration) *time.Duration { return &v }
 
 	tests := []struct {
@@ -278,6 +279,18 @@ func TestValidateConfig_RejectsMalformedBSB(t *testing.T) {
 				c.Backfill.BSB.NumWorkers = uint32Ptr(50)
 			},
 			"num_workers",
+		},
+		{
+			"negative buffer_bytes",
+			func(c *config.Config) { c.Backfill.BSB.BufferBytes = int64Ptr(-1) },
+			"[backfill.bsb].buffer_bytes",
+		},
+		{
+			// There is no off switch; zero would silently mean "cap off" at the
+			// SDK, which is the configuration that caused #895.
+			"zero buffer_bytes",
+			func(c *config.Config) { c.Backfill.BSB.BufferBytes = int64Ptr(0) },
+			"[backfill.bsb].buffer_bytes",
 		},
 	}
 	for _, tc := range tests {

@@ -255,14 +255,30 @@ ledgers_per_file = 1
 files_per_partition = 64000
 
 # --- Buffered reads over the datastore ---------------------------------------
-# Tunes the buffered-storage stream that downloads ledger objects from
-# [backfill.datastore]. max_retries here retries ONE object download (a single
-# ledger file) after a transient datastore error, waiting retry_wait between
-# attempts — a different knob from [backfill].max_retries above, which re-runs
-# a whole chunk task.
+# Tunes how each of the [backfill].workers chunk tasks downloads ledger objects
+# from [backfill.datastore]. max_retries here retries ONE object download (a
+# single ledger file) after a transient datastore error, waiting retry_wait
+# between attempts — a different knob from [backfill].max_retries above, which
+# re-runs a whole chunk task.
 [backfill.bsb]
-buffer_size = 5000   # downloaded ledgers buffered in memory; >= 1
-num_workers = 50     # concurrent object downloads; >= 1 and <= buffer_size
+# Every key below is per chunk task, so totals multiply by [backfill].workers.
+# Unset is the intended configuration.
+#
+# buffer_bytes: prefetch budget in bytes for one chunk task — sizes how far
+# downloads run ahead, and is the bound that tracks memory: a pubnet object
+# grew from 295 bytes in early history to ~210 KB near the tip, so an object
+# count says nothing about bytes. Not a hard ceiling — in-flight downloads and
+# reused buffers sit on top.
+#buffer_bytes = 33_554_432 # 32 MiB (the default)
+#
+# num_workers: concurrent object downloads inside one chunk task.
+#num_workers = 25
+#
+# buffer_size: prefetch depth of one chunk task in datastore OBJECTS (not
+# ledgers — an object holds ledgers_per_file of them). Bounds per-object
+# overhead; memory is buffer_bytes' job.
+#buffer_size = 5000
+
 max_retries = 3      # retries per object download; 0 = fail on first error
 retry_wait = "5s"    # pause between retries of one object download
 

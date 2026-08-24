@@ -38,6 +38,7 @@ type FlagOverrides interface {
 	GetUint(name string) (uint, error)
 	GetUint32(name string) (uint32, error)
 	GetInt(name string) (int, error)
+	GetInt64(name string) (int64, error)
 	GetDuration(name string) (time.Duration, error)
 	GetStringSlice(name string) ([]string, error)
 	GetStringToString(name string) (map[string]string, error)
@@ -62,6 +63,8 @@ func BindFlags(fs *pflag.FlagSet) {
 			fs.Uint32(path, 0, usage)
 		case kindInt:
 			fs.Int(path, 0, usage)
+		case kindInt64:
+			fs.Int64(path, 0, usage)
 		case kindDuration:
 			fs.Duration(path, 0, usage)
 		case kindStringSlice:
@@ -93,68 +96,58 @@ func ApplyFlags(cfg *Config, fs FlagOverrides) error {
 	return firstErr
 }
 
-//nolint:cyclop // one case per supported leaf type; splitting hides the correspondence
 func setLeaf(f reflect.Value, path string, fs FlagOverrides) error {
-	fail := func(err error) error { return fmt.Errorf("apply flag --%s: %w", path, err) }
+	// Every scalar kind does the same three things and differs only in which
+	// getter it calls, so each case is that one call and the shared get-check-
+	// assign lives once, below.
+	var (
+		v   any
+		err error
+	)
 	switch leafKind(f.Type()) {
 	case kindString:
-		v, err := fs.GetString(path)
-		if err != nil {
-			return fail(err)
-		}
-		setPossiblyPointer(f, reflect.ValueOf(v))
+		v, err = fs.GetString(path)
 	case kindBool:
-		v, err := fs.GetBool(path)
-		if err != nil {
-			return fail(err)
-		}
-		setPossiblyPointer(f, reflect.ValueOf(v))
+		v, err = fs.GetBool(path)
 	case kindUint:
-		v, err := fs.GetUint(path)
-		if err != nil {
-			return fail(err)
-		}
-		setPossiblyPointer(f, reflect.ValueOf(v))
+		v, err = fs.GetUint(path)
 	case kindUint32:
-		v, err := fs.GetUint32(path)
-		if err != nil {
-			return fail(err)
-		}
-		setPossiblyPointer(f, reflect.ValueOf(v))
+		v, err = fs.GetUint32(path)
 	case kindInt:
-		v, err := fs.GetInt(path)
-		if err != nil {
-			return fail(err)
-		}
-		setPossiblyPointer(f, reflect.ValueOf(v))
+		v, err = fs.GetInt(path)
+	case kindInt64:
+		v, err = fs.GetInt64(path)
 	case kindDuration:
-		v, err := fs.GetDuration(path)
-		if err != nil {
-			return fail(err)
-		}
-		setPossiblyPointer(f, reflect.ValueOf(v))
+		v, err = fs.GetDuration(path)
 	case kindStringSlice:
-		v, err := fs.GetStringSlice(path)
-		if err != nil {
-			return fail(err)
-		}
-		setPossiblyPointer(f, reflect.ValueOf(v))
+		v, err = fs.GetStringSlice(path)
 	case kindStringMap:
-		v, err := fs.GetStringToString(path)
-		if err != nil {
-			return fail(err)
-		}
-		// Merge per key, don't replace the map: a map flag names individual
-		// entries, and clobbering the file's sibling entries is never what the
-		// operator meant.
-		if f.IsNil() {
-			f.Set(reflect.MakeMap(f.Type()))
-		}
-		for k, val := range v {
-			f.SetMapIndex(reflect.ValueOf(k), reflect.ValueOf(val))
-		}
+		// The one kind that is not a plain assignment.
+		return setMapLeaf(f, path, fs)
 	case kindUnsupported:
 		// unreachable: walkLeaves panics on an unsupported leaf before visiting
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("apply flag --%s: %w", path, err)
+	}
+	setPossiblyPointer(f, reflect.ValueOf(v))
+	return nil
+}
+
+// setMapLeaf merges per key rather than replacing the map: a map flag names
+// individual entries, and clobbering the file's sibling entries is never what
+// the operator meant.
+func setMapLeaf(f reflect.Value, path string, fs FlagOverrides) error {
+	v, err := fs.GetStringToString(path)
+	if err != nil {
+		return fmt.Errorf("apply flag --%s: %w", path, err)
+	}
+	if f.IsNil() {
+		f.Set(reflect.MakeMap(f.Type()))
+	}
+	for k, val := range v {
+		f.SetMapIndex(reflect.ValueOf(k), reflect.ValueOf(val))
 	}
 	return nil
 }
@@ -181,6 +174,7 @@ const (
 	kindUint
 	kindUint32
 	kindInt
+	kindInt64
 	kindDuration
 	kindStringSlice
 	kindStringMap
@@ -210,6 +204,9 @@ func leafKind(t reflect.Type) kind {
 		return kindUint32
 	case reflect.Int:
 		return kindInt
+	case reflect.Int64:
+		// time.Duration is also Int64-kinded and is matched above, before this.
+		return kindInt64
 	case reflect.Slice:
 		if t.Elem().Kind() == reflect.String {
 			return kindStringSlice
