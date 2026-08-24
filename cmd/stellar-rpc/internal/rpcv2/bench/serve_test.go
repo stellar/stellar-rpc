@@ -405,6 +405,78 @@ func TestServeAdoptsWidestIndexCoverage(t *testing.T) {
 	assert.Equal(t, seq, got.Ledger)
 }
 
+// TestServeSeedsWindowCloseTimes pins the stamping the daemon's startup does
+// before it serves (adapters.SeedCloseTimes): both edges of the servable window
+// carry a close time by the time the port binds, so the first request that
+// reports an edge does not pay a point read for it.
+//
+// The assertion is on the read view's presence flags, not on a served response
+// field. The fallback point read fills the same values in, so a response cannot
+// tell a seeded window from an unseeded one — only the flags separate "already
+// stamped" from "will be point-read".
+func TestServeSeedsWindowCloseTimes(t *testing.T) {
+	// A dedicated dataset, because the shared fixture stamps close time 0 on
+	// every ledger: a seeded 0 is indistinguishable from an unseeded edge, since
+	// the presence flags are exactly "close time != 0". These ledgers carry real
+	// close times, so a stamped edge is observable.
+	const c = chunk.ID(1)
+	const numLedgers = 4
+	cat0, root := rpcv2test.OpenTestCatalog(t, geometry.ChunksPerTxhashIndex)
+	lcms := make([][]byte, numLedgers)
+	for i := range lcms {
+		seq := c.FirstLedger() + uint32(i)
+		lcms[i] = rpcv2test.V2LCMBytes(t, seq, int64(1700000000+i), nil, nil)
+	}
+	rpcv2test.WriteFrozenLedgerPack(t, cat0, c, lcms...)
+	// Drop the catalog: the artifacts must be adopted from disk, as in every
+	// other serve test. No tx-hash index is written — this test reads no hashes,
+	// and adoption only warns when none is found.
+	require.NoError(t, cat0.Close())
+
+	opts := serveOptions{
+		ColdRoot:     root,
+		CatalogDir:   filepath.Join(t.TempDir(), "catalog"),
+		StartChunk:   c,
+		NumChunks:    1,
+		LatestLedger: c.FirstLedger() + numLedgers - 1,
+	}
+	logger := rpcv2test.SilentLogger()
+
+	layout := opts.layout()
+	require.NoError(t, os.MkdirAll(opts.CatalogDir, 0o755))
+	txLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
+	require.NoError(t, err)
+	cat, err := catalog.Open(layout.CatalogPath(), layout, txLayout, logger)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.Close() })
+
+	reg, err := buildServingRegistry(cat, logger, opts)
+	require.NoError(t, err)
+	t.Cleanup(reg.Close)
+
+	// Unseeded: buildServingRegistry stamps the tip with close time 0 and
+	// records no oldest edge, so both edges would be point-read on demand.
+	before, err := reg.NewReadView()
+	require.NoError(t, err)
+	_, latestOK := before.LatestCloseTime()
+	_, oldestOK := before.OldestCloseTime()
+	before.Release()
+	require.False(t, latestOK, "the tip close time starts unstamped")
+	require.False(t, oldestOK, "the oldest close time starts unrecorded")
+
+	require.NoError(t, seedCloseTimes(reg))
+
+	after, err := reg.NewReadView()
+	require.NoError(t, err)
+	latestCT, latestOK := after.LatestCloseTime()
+	oldestCT, oldestOK := after.OldestCloseTime()
+	after.Release()
+	assert.True(t, latestOK, "the tip close time is stamped before serving")
+	assert.True(t, oldestOK, "the oldest close time is stamped before serving")
+	assert.Positive(t, latestCT)
+	assert.Positive(t, oldestCT)
+}
+
 func TestParseIndexFileName(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

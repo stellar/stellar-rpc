@@ -15,6 +15,7 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
@@ -278,9 +279,34 @@ func runServe(ctx context.Context, logger *supportlog.Entry, opts serveOptions) 
 	defer reg.Close()
 
 	if !opts.replaying() {
+		if err := seedCloseTimes(reg); err != nil {
+			return err
+		}
 		return rpcv2.BenchServeReads(ctx, opts.serveConfig(reg, logger))
 	}
 	return runServeWithReplay(ctx, logger, cat, reg, opts)
+}
+
+// seedCloseTimes stamps both servable-window edges' close times before the port
+// binds, as the daemon's startup does (adapters.SeedCloseTimes, called from
+// run() before ServeReads). Without it the first request that reports a window
+// edge pays one point read per edge — a cold packfile open in the common case —
+// and a read benchmark would charge that one-off cost to whichever request
+// happened to land first.
+//
+// Two orderings are load-bearing, which is why this is called per serve path
+// rather than at the end of buildServingRegistry. It must run AFTER some hot
+// chunk is ready: it acquires a read view, and an empty ready scan is
+// ErrNoReadyHotChunk. A static run has the frontier marker by then; a replay
+// run has no ready chunk until BenchOpenReplayChunk, so it seeds there. And it
+// must run BEFORE a replay leg starts, because it writes the latest-ledger
+// stamp itself — racing a leg that already advanced the tip would move the
+// served tip backwards.
+func seedCloseTimes(reg *query.Registry) error {
+	if err := adapters.SeedCloseTimes(reg); err != nil {
+		return fmt.Errorf("seed window close times: %w", err)
+	}
+	return nil
 }
 
 func (o serveOptions) serveConfig(reg *query.Registry, logger *supportlog.Entry) rpcv2.BenchServeConfig {
@@ -327,6 +353,11 @@ func runServeWithReplay(
 	}
 	hotDB, err := rpcv2.BenchOpenReplayChunk(cat, first, reg, logger)
 	if err != nil {
+		return err
+	}
+	// The replay chunk's ready key now exists, so a read view can be acquired;
+	// the leg has not started, so nothing races the latest stamp.
+	if err := seedCloseTimes(reg); err != nil {
 		return err
 	}
 	logger.WithField("chunk", replayChunk.String()).
