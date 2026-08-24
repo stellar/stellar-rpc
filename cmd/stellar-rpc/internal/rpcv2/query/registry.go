@@ -29,10 +29,11 @@ type Registry struct {
 	retention geometry.Retention
 
 	// maxScanLedgers caps the ledgers one event page may scan. Zero means
-	// defaultMaxScanLedgers, resolved by QueryEvents. Held here rather than in a
-	// package var so two registries can differ and so a test shrinking the
-	// window cannot leak into another test's pages. The value may become
-	// configuration.
+	// defaultMaxScanLedgers, resolved by QueryEvents. A test-only shrink:
+	// production always runs the per-request scan bound (see
+	// chunk.LedgersPerChunk) — the bound is an invariant, not configuration.
+	// Held here rather than in a package var so a test shrinking the window
+	// cannot leak into another test's pages.
 	maxScanLedgers uint32
 
 	// latest is the newest fully ingested ledger visible to queries, paired with

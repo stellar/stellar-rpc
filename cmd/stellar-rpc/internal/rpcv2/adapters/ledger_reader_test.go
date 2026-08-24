@@ -403,8 +403,9 @@ func TestBatchGetLedgers_ClonesBorrowedBytes(t *testing.T) {
 }
 
 func TestWalkSpanCapCoversTheHandlerScanLimit(t *testing.T) {
-	assert.GreaterOrEqual(t, int(walkSpanCap), methods.LedgerScanLimit,
-		"handler scan limits must never exceed one chunk's worth of ledgers")
+	assert.Equal(t, int(walkSpanCap), methods.LedgerScanLimit,
+		"the per-request scan bound has one value (chunk.LedgersPerChunk); "+
+			"methods.LedgerScanLimit cannot derive from it (shared v1 code), so it is pinned here")
 }
 
 func TestLedgerReaderTx_GetLedgerStopsOnCanceledContext(t *testing.T) {
