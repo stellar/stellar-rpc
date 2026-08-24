@@ -96,6 +96,8 @@ func TestJSONConversionRoundTrip(t *testing.T) {
 		},
 		Storage: m,
 	}
+	nonce := xdr.ScNonceKey{Nonce: xdr.Int64(-7)}
+	execTag := xdr.ScString("tag")
 
 	for name, val := range map[string]xdr.ScVal{
 		"void":              {Type: xdr.ScValTypeScvVoid},
@@ -119,6 +121,11 @@ func TestJSONConversionRoundTrip(t *testing.T) {
 		"account address":   {Type: xdr.ScValTypeScvAddress, Address: &accountAddr},
 		"contract address":  {Type: xdr.ScValTypeScvAddress, Address: &contractAddr},
 		"contract instance": {Type: xdr.ScValTypeScvContractInstance, Instance: &instance},
+		"ledger key contract instance": {
+			Type: xdr.ScValTypeScvLedgerKeyContractInstance,
+		},
+		"ledger key nonce": {Type: xdr.ScValTypeScvLedgerKeyNonce, NonceKey: &nonce},
+		"executable tag":   {Type: xdr.ScValTypeScvExecutableTag, ExecutableTag: &execTag},
 	} {
 		t.Run(name, func(t *testing.T) {
 			rawBytes, err := val.MarshalBinary()
@@ -189,6 +196,16 @@ func TestJSONConversionErrors(t *testing.T) {
 	type notAnXdrType struct{}
 	_, err := ConvertJSON(notAnXdrType{}, json.RawMessage(`{}`))
 	require.ErrorContains(t, err, "couldn't match type notAnXdrType")
+}
+
+// TestJSONConversionUnknownFields checks that fields the deserialization
+// would silently drop are rejected instead: a filter value with a typo'd
+// field must fail loudly, not query something other than what was written.
+func TestJSONConversionUnknownFields(t *testing.T) {
+	js := json.RawMessage(`{"map":[{"key":"void","val":"void","extra":1}]}`)
+	_, err := ConvertJSON(xdr.ScVal{}, js)
+	require.ErrorContains(t, err, "unknown JSON fields")
+	require.ErrorContains(t, err, "extra")
 }
 
 func nestedScVec(depth int) xdr.ScVal {

@@ -40,9 +40,10 @@ version = "=28.0.0"
 # `type_enum` provides the `Type`/`TypeVariant` reflection enums used by
 # xdr2json. It was enabled by default in stellar-xdr v26 but is opt-in since
 # v27. The former `cap_0083`/`cap_0085_executable_ref` gates are gone: both
-# CAPs ship ungated in stellar-xdr 28.0.0. `serde_json` provides
-# `Type::from_json`, the parsing direction of xdr2json.
-features = ["serde", "type_enum", "serde_json"]
+# CAPs ship ungated in stellar-xdr 28.0.0. `serde_json` and `serde_ignored`
+# provide `Type::from_json_collecting_ignored_fields`, the parsing direction
+# of xdr2json.
+features = ["serde", "type_enum", "serde_json", "serde_ignored"]
 
 [workspace.dependencies.rand]
 version = "0.8.5"

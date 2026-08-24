@@ -154,8 +154,29 @@ pub unsafe extern "C" fn json_to_xdr(
             .map_err(|e| anyhow!("couldn't match type {type_str}: {e}"))?;
 
         let json_bytearray = unsafe { from_c_xdr(json) };
-        let t = xdr::Type::from_json(the_type, json_bytearray.as_slice())
-            .map_err(|e| anyhow!("couldn't parse {type_str}: {e}"))?;
+        let (t, ignored) =
+            xdr::Type::from_json_collecting_ignored_fields(the_type, json_bytearray.as_slice())
+                .map_err(|e| anyhow!("couldn't parse {type_str}: {e}"))?;
+
+        // Unknown fields mean the value differs from what the caller wrote;
+        // reject them like the stellar-xdr CLI does rather than silently
+        // dropping them. Cap the message: the path list is input-sized.
+        if !ignored.is_empty() {
+            let shown = ignored
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let elided = ignored.len().saturating_sub(5);
+            return Err(if elided > 0 {
+                anyhow!(
+                    "couldn't parse {type_str}: unknown JSON fields: {shown}, and {elided} more"
+                )
+            } else {
+                anyhow!("couldn't parse {type_str}: unknown JSON fields: {shown}")
+            });
+        }
 
         t.to_xdr(DEFAULT_XDR_RW_LIMITS.clone())
             .map_err(|e| anyhow!("couldn't serialize {type_str}: {e}"))
