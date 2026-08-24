@@ -142,17 +142,18 @@ func (s *closingSink) SetLatestLedger(uint32, int64) {}
 func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 	metrics := observability.MetricsOrNop(cfg.Metrics)
 
-	// Take ownership of the resume hot DB run() opened as the loop's FIRST statement,
-	// so the deferred close sits ahead of any early return. hotDB tracks the current
-	// write target, reassigned at each boundary; on a normal exit that is the live
-	// chunk, and completed chunks are the sink's to close. The exception is a boundary whose
-	// openHotDBForChunk fails: hotDB still points at the just-completed, registry-
-	// published chunk, so the defer closes a handle the registry also holds while
-	// reads are still live — until the restart's stopReads runs moments later, reads
-	// hitting that chunk answer the retryable -32002. Safe (Close is blocking,
-	// draining any in-flight freeze read, and idempotent; the ensuing restart
-	// rebuilds the registry) but briefly visible, not a no-op. No writer races the
-	// close — the loop has stopped on every exit path.
+	// Take ownership of the resume hot DB the caller opened, as the loop's
+	// FIRST statement, so the deferred close sits ahead of any early return.
+	// hotDB tracks the current write target and is reassigned at each boundary.
+	// On a normal exit it is the live chunk; completed chunks are the sink's to
+	// close. One exception: when openHotDBForChunk fails at a boundary, hotDB
+	// still points at the just-completed, registry-published chunk, so the
+	// defer closes a handle the registry also holds while reads are still live.
+	// Until the restart's stopReads runs moments later, reads hitting that
+	// chunk answer the retryable -32002. This is safe — Close blocks, draining
+	// any in-flight freeze read, and is idempotent; the restart rebuilds the
+	// registry — but briefly visible, not a no-op. No writer races the close:
+	// the loop has stopped on every exit path.
 	hotDB := cfg.HotDB
 	defer func() {
 		if hotDB != nil {

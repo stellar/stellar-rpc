@@ -19,10 +19,11 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
-// walkSpanCap bounds every primed walk span to one chunk's worth of ledgers —
-// touching at most two chunks when the span straddles a boundary — so
-// ScanLedgers resolves every reader at call time. Handler scan limits
-// (methods.LedgerScanLimit) must stay ≤ this cap; the pairing test enforces it.
+// walkSpanCap bounds the ledger span ledgerReaderTx.GetLedger primes its walk
+// iterator with: one chunk's worth of ledgers, touching at most two chunks
+// when the span straddles a boundary, so view.ScanLedgers can resolve every
+// reader up front. Handler scan limits (methods.LedgerScanLimit) must stay
+// ≤ this cap; the pairing test enforces it.
 const walkSpanCap = chunk.LedgersPerChunk
 
 // LedgerReader satisfies store.LedgerReader over the query router. Every

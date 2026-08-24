@@ -45,11 +45,12 @@ func run(ctx context.Context, cfg StartConfig) error {
 		return err
 	}
 
-	// Derived, never stored: highest durably-committed ledger (frozen cold artifacts
-	// vs the highest ready hot DB's max committed seq), clamped by earliest-1. The
-	// derivation refines with one read-only open of the highest ready hot DB before
-	// ingestion opens a writer; a read-only open replays any synced WAL from an
-	// ungraceful crash into memtables, so MaxCommittedSeq is correct.
+	// The highest durably-committed ledger is derived, never stored: frozen
+	// cold artifacts vs the highest ready hot DB's max committed seq, clamped
+	// by earliest-1. The derivation refines with one read-only open of the
+	// highest ready hot DB before ingestion opens a writer; a read-only open
+	// replays any synced WAL from an ungraceful crash into memtables, so
+	// MaxCommittedSeq is correct.
 	lastCommitted, err := lastCommittedLedger(cat)
 	if err != nil {
 		return fmt.Errorf("startup derive last-committed: %w", err)
