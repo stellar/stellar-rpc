@@ -214,6 +214,10 @@ func (s stubLedgerReader) GetLedger(context.Context, uint32) (xdr.LedgerCloseMet
 	return xdr.LedgerCloseMeta{}, false, errors.New("unused")
 }
 
+func (s stubLedgerReader) GetLedgerView(context.Context, uint32) (xdr.LedgerCloseMetaView, bool, error) {
+	return nil, false, errors.New("unused")
+}
+
 func (s stubLedgerReader) GetLedgerRange(context.Context) (store.LedgerRange, error) {
 	return store.LedgerRange{}, errors.New("unused")
 }

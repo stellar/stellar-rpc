@@ -36,6 +36,7 @@ func (lr LedgerRange) ToLedgerSeqRange() protocol.LedgerSeqRange {
 // implements. Handlers depend on this interface, never on a concrete backend.
 type LedgerReader interface {
 	GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error)
+	GetLedgerView(ctx context.Context, sequence uint32) (xdr.LedgerCloseMetaView, bool, error)
 	GetLedgerRange(ctx context.Context) (LedgerRange, error)
 	StreamLedgerRange(ctx context.Context, startLedger uint32, endLedger uint32, f StreamLedgerFn) error
 	NewTx(ctx context.Context) (LedgerReaderTx, error)

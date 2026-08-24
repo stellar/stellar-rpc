@@ -55,6 +55,30 @@ func (r *LedgerReader) GetLedger(ctx context.Context, sequence uint32) (xdr.Ledg
 	return lcm, found, err
 }
 
+// GetLedgerView is GetLedger without the decode: the raw bytes are copied
+// out of the read's loan, so the view may outlive the call.
+func (r *LedgerReader) GetLedgerView(ctx context.Context, sequence uint32) (xdr.LedgerCloseMetaView, bool, error) {
+	view, err := query.ViewFrom(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	if !inWindow(view, sequence) {
+		return nil, false, nil
+	}
+	var raw []byte
+	err = view.WithLedger(sequence, func(b []byte) error {
+		raw = bytes.Clone(b)
+		return nil
+	})
+	if errors.Is(err, stores.ErrNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return xdr.LedgerCloseMetaView(raw), true, nil
+}
+
 func (r *LedgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRange, error) {
 	view, err := query.ViewFrom(ctx)
 	if err != nil {

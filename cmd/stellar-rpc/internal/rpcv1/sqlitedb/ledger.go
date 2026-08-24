@@ -74,28 +74,15 @@ func (l ledgerReaderTx) BatchGetLedgers(
 
 	batch := make([]store.LedgerMetadataChunk, len(results))
 	for i, meta := range results {
-		batch[i] = store.LedgerMetadataChunk{Lcm: meta}
-
-		var v xdr.Int32
-		rd := bytes.NewReader(meta)
-		if _, err := xdr.Unmarshal(rd, &v); err != nil {
-			return nil, err
-		}
-
-		if v > 0 { // V0 has no extension
-			var ext xdr.LedgerCloseMetaExt
-			if _, err := xdr.Unmarshal(rd, &ext); err != nil { // skipped
-				return nil, err
-			}
-		}
-
-		hdrStart := len(meta) - rd.Len()
-		var hdr xdr.LedgerHeaderHistoryEntry
-		n, err := xdr.Unmarshal(rd, &hdr)
+		headerView, err := xdr.LedgerCloseMetaView(meta).LedgerHeader()
 		if err != nil {
 			return nil, err
 		}
-		batch[i].HeaderRaw = meta[hdrStart : hdrStart+n]
+		headerRaw, err := headerView.Raw()
+		if err != nil {
+			return nil, err
+		}
+		batch[i] = store.LedgerMetadataChunk{HeaderRaw: headerRaw, Lcm: meta}
 	}
 
 	return batch, nil
@@ -161,6 +148,15 @@ func (r ledgerReader) StreamLedgerRange(
 // GetLedger fetches a single ledger from the db.
 func (r ledgerReader) GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
 	return getLedgerFromDB(ctx, r.db, sequence)
+}
+
+// GetLedgerView fetches a single ledger from the db and returns its view and whether it was found.
+func (r ledgerReader) GetLedgerView(ctx context.Context, sequence uint32) (xdr.LedgerCloseMetaView, bool, error) {
+	meta, found, err := getLedgerRawFromDB(ctx, r.db, sequence)
+	if err != nil || !found {
+		return nil, found, err
+	}
+	return xdr.LedgerCloseMetaView(meta), true, nil
 }
 
 // GetLedgerRange pulls the min/max ledger sequence numbers from the meta table.
@@ -351,21 +347,34 @@ func (l ledgerWriter) trimLedgers(latestLedgerSeq uint32, retentionWindow uint32
 	return err
 }
 
-// getLedgerFromDB is a helper function that encapsulates the common logic
-// for fetching a single ledger from the database
+// getLedgerFromDB fetches a single ledger from the database.
 func getLedgerFromDB(ctx context.Context, db readDB, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
-	sql := sq.Select("meta").From(ledgerCloseMetaTableName).Where(sq.Eq{"sequence": sequence})
-	var results []xdr.LedgerCloseMeta
-	if err := db.Select(ctx, &results, sql); err != nil {
+	raw, found, err := getLedgerRawFromDB(ctx, db, sequence)
+	if err != nil || !found {
 		return xdr.LedgerCloseMeta{}, false, err
+	}
+	var lcm xdr.LedgerCloseMeta
+	if _, err := xdr.Unmarshal(bytes.NewReader(raw), &lcm); err != nil {
+		return xdr.LedgerCloseMeta{}, false, err
+	}
+	return lcm, true, nil
+}
+
+// getLedgerRawFromDB is a helper function that encapsulates the common logic
+// for fetching a single ledger's bytes from the database.
+func getLedgerRawFromDB(ctx context.Context, db readDB, sequence uint32) ([]byte, bool, error) {
+	sql := sq.Select("meta").From(ledgerCloseMetaTableName).Where(sq.Eq{"sequence": sequence})
+	var results [][]byte
+	if err := db.Select(ctx, &results, sql); err != nil {
+		return nil, false, err
 	}
 	switch len(results) {
 	case 0:
-		return xdr.LedgerCloseMeta{}, false, nil
+		return nil, false, nil
 	case 1:
 		return results[0], true, nil
 	default:
-		return xdr.LedgerCloseMeta{}, false, fmt.Errorf("multiple lcm entries (%d) for sequence %d in table %q",
+		return nil, false, fmt.Errorf("multiple lcm entries (%d) for sequence %d in table %q",
 			len(results), sequence, ledgerCloseMetaTableName)
 	}
 }

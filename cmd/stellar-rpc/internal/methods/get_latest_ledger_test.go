@@ -45,6 +45,20 @@ func (ledgerReader *ConstantLedgerReader) GetLedger(_ context.Context,
 		true, nil
 }
 
+func (ledgerReader *ConstantLedgerReader) GetLedgerView(
+	_ context.Context,
+	sequence uint32,
+) (xdr.LedgerCloseMetaView, bool, error) {
+	lcm := createLedger(expectedLatestLedgerHashBytes,
+		sequence,
+		expectedLatestLedgerCloseTime)
+	raw, err := lcm.MarshalBinary()
+	if err != nil {
+		return nil, false, err
+	}
+	return xdr.LedgerCloseMetaView(raw), true, nil
+}
+
 func (ledgerReader *ConstantLedgerReader) StreamLedgerRange(
 	_ context.Context,
 	_ uint32,
