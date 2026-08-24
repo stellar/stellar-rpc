@@ -28,7 +28,7 @@ func freeEndpoint(t *testing.T) string {
 }
 
 func TestServeReads_ServesAndRebindsAcrossAttempts(t *testing.T) {
-	r, _ := servingRegistry(t)
+	r := seedServingRegistry(t)
 	cfg := defaultsConfig(t)
 	cfg.Service.Endpoint = freeEndpoint(t)
 

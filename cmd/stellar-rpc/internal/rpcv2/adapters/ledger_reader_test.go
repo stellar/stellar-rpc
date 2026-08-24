@@ -407,7 +407,7 @@ func TestBatchGetLedgers_ClonesBorrowedBytes(t *testing.T) {
 }
 
 func TestWalkSpanCapCoversTheHandlerScanLimit(t *testing.T) {
-	assert.Equal(t, int(walkSpanCap), methods.LedgerScanLimit,
+	assert.Equal(t, methods.LedgerScanLimit, int(walkSpanCap),
 		"the per-request scan bound has one value (chunk.LedgersPerChunk); "+
 			"methods.LedgerScanLimit cannot derive from it (shared v1 code), so it is pinned here")
 }

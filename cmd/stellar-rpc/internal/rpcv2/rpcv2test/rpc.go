@@ -1,9 +1,10 @@
 package rpcv2test
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -29,7 +30,10 @@ type RPCResponse struct {
 func PostRPC(t *testing.T, url, method, params string) RPCResponse {
 	t.Helper()
 	body := `{"jsonrpc":"2.0","id":1,"method":"` + method + `","params":` + params + `}`
-	resp, err := http.Post(url, "application/json", bytes.NewReader([]byte(body))) //nolint:noctx
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, strings.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	var out RPCResponse

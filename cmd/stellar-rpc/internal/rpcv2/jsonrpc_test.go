@@ -32,25 +32,17 @@ func defaultsConfig(t *testing.T) config.Config {
 	return cfg
 }
 
-// servingRegistry seeds one hot-ready chunk-0 ledger (seq 2) and returns a
-// registry serving it, plus the hot DB so tests can close it underneath a read.
-func servingRegistry(t *testing.T) (*query.Registry, *hotchunk.DB) {
+// seedServingRegistry seeds one hot-ready chunk-0 ledger (seq 2) and returns a
+// registry serving it.
+func seedServingRegistry(t *testing.T) *query.Registry {
 	t.Helper()
 	cat, _ := testCatalog(t)
 	r := query.NewRegistry(cat, geometry.NewRetention(0, 0))
 	const c = chunk.ID(0)
-	var db *hotchunk.DB
 	rpcv2test.SeedHotChunkLCMs(t, cat, c, func(d *hotchunk.DB) {
-		db = d
 		r.PublishHandle(c, d)
 	}, rpcv2test.ZeroTxLCMBytes(t, chunk.FirstLedgerSeq))
 	r.SetLatestLedger(chunk.FirstLedgerSeq, time.Now().Unix())
-	return r, db
-}
-
-func seedServingRegistry(t *testing.T) *query.Registry {
-	t.Helper()
-	r, _ := servingRegistry(t)
 	return r
 }
 

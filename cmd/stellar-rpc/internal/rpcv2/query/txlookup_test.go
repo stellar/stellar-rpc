@@ -43,7 +43,11 @@ func TestHotTxHashIndexes(t *testing.T) {
 
 	got := a.HotTxHashIndexes()
 	require.Len(t, got, 3)
-	inner := func(i int) txhash.HashIndex { return got[i].(*windowGatedIndex).inner }
+	inner := func(i int) txhash.HashIndex {
+		gated, ok := got[i].(*windowGatedIndex)
+		require.True(t, ok)
+		return gated.inner
+	}
 	assert.Equal(t, dbs[7].Txhash(), inner(0), "newest chunk first")
 	assert.Equal(t, dbs[5].Txhash(), inner(2), "oldest chunk last")
 }

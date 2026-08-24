@@ -173,9 +173,8 @@ func (tx *ledgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.L
 	return lcm, true, nil
 }
 
-func (tx *ledgerReaderTx) GetLedgerRange(ctx context.Context) (store.LedgerRange, error) {
-	lr, err := getLedgerRange(tx.view)
-	return lr, err
+func (tx *ledgerReaderTx) GetLedgerRange(_ context.Context) (store.LedgerRange, error) {
+	return getLedgerRange(tx.view)
 }
 
 func (tx *ledgerReaderTx) BatchGetLedgers(
