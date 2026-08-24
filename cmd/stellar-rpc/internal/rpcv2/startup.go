@@ -21,10 +21,9 @@ import (
 )
 
 // run is the daemon's startup, in two steps: (1) BACKFILL to the tip, then
-// (2) SERVE + INGEST — open the resume chunk's hot DB (so a broken hot tier fails
-// startup, not behind a crash-looping loop), start captive core (injected), begin
-// serving reads (injected), then run the live ingestion loop (handed the open hot
-// DB) and the lifecycle loop as a joined errgroup pair (whichever returns first
+// (2) SERVE + INGEST — open the resume chunk's hot DB, start captive core
+// (injected), begin serving reads (injected), then run the live ingestion loop
+// (handed the open hot DB) and the lifecycle loop as a joined errgroup pair (whichever returns first
 // cancels the other; g.Wait surfaces the first error). Never returns nil: a clean
 // shutdown (ctx canceled mid-run) surfaces as a ctx-canceled error that supervise
 // classifies via ctx.Err(); any other return is a restartable error the supervisor
@@ -130,9 +129,8 @@ func run(ctx context.Context, cfg StartConfig) error {
 		return fmt.Errorf("startup open registry: %w", err)
 	}
 	cfg.Exec.Process.HotHandle = registry.Handle
-	// Close the registry's hot handles on the way out (after g.Wait joins the loops
-	// below), flushing each completed chunk the registry still holds. The live
-	// chunk is also closed by the ingestion loop; handle Close is idempotent.
+	// Runs after g.Wait joins the loops below; Registry.Close owns the
+	// double-close story.
 	defer registry.Close()
 
 	// Refill the fee windows from committed history BEFORE the ingestion loop
