@@ -115,6 +115,25 @@ func TestLedgers(t *testing.T) {
 	assertLedgerRange(t, reader, 8, 12)
 }
 
+// TestLedgerInfoFromRow_PrefixFallback covers a meta prefix too short to reach
+// the close time, which must fall back to reading the full blob.
+func TestLedgerInfoFromRow_PrefixFallback(t *testing.T) {
+	db := NewTestDB(t)
+	tx, err := NewReadWriter(logger, db, host.MakeNoOpDaemon(), 15, passphrase).NewTx(t.Context())
+	require.NoError(t, err)
+	lcm := createLedger(42)
+	require.NoError(t, tx.LedgerWriter().InsertLedger(lcm))
+	require.NoError(t, tx.Commit(lcm, nil))
+
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+
+	info, err := ledgerInfoFromRow(t.Context(), db, ledgerRangeRow{Sequence: 42, MetaPrefix: raw[:8]})
+	require.NoError(t, err)
+	assert.Equal(t, uint32(42), info.Sequence)
+	assert.Equal(t, lcm.LedgerCloseTime(), info.CloseTime)
+}
+
 func TestGetLedgerRange_NonEmptyDB(t *testing.T) {
 	db := NewTestDB(t)
 	ctx := context.TODO()

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
-	"fmt"
 
 	"github.com/creachadair/jrpc2"
 
@@ -36,7 +35,7 @@ func NewGetLatestLedgerHandler(ledgerReader store.LedgerReader) jrpc2.Handler {
 		if err != nil {
 			return protocol.GetLatestLedgerResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
-				Message: fmt.Sprintf("could not read latest ledger meta: %v", err),
+				Message: "could not parse latest ledger header",
 			}
 		}
 		return response, nil

@@ -219,38 +219,61 @@ func (r ledgerReader) GetLatestLedgerSequence(ctx context.Context) (uint32, erro
 	return getLatestLedgerSequence(ctx, r, r.db.cache)
 }
 
+// ledgerCloseTimePrefixBytes is the fast-path meta prefix fetched for range
+// endpoints. Parsing falls back to the full blob if the header extends past it.
+const ledgerCloseTimePrefixBytes = 1024
+
+// ledgerRangeRow is one endpoint of the stored ledger range.
+type ledgerRangeRow struct {
+	Sequence   uint32 `db:"sequence"`
+	MetaPrefix []byte `db:"meta_prefix"`
+}
+
+// ledgerInfoFromRow reads the close time out of the row's meta prefix,
+// refetching the full blob for rare metas whose close time lies beyond it.
+func ledgerInfoFromRow(ctx context.Context, db readDB, row ledgerRangeRow) (store.LedgerInfo, error) {
+	closeTime, err := xdr.LedgerCloseMetaView(row.MetaPrefix).LedgerCloseTime()
+	if err != nil {
+		meta, found, dbErr := getLedgerRawFromDB(ctx, db, row.Sequence)
+		if dbErr != nil {
+			return store.LedgerInfo{}, dbErr
+		}
+		if !found {
+			return store.LedgerInfo{}, fmt.Errorf("couldn't get ledger %d close time: %w", row.Sequence, err)
+		}
+		closeTime, err = xdr.LedgerCloseMetaView(meta).LedgerCloseTime()
+		if err != nil {
+			return store.LedgerInfo{}, fmt.Errorf("couldn't get ledger %d close time: %w", row.Sequence, err)
+		}
+	}
+	return store.LedgerInfo{Sequence: row.Sequence, CloseTime: closeTime}, nil
+}
+
 // getLedgerRangeWithCache uses the latest ledger cache to optimize the query.
 // It only needs to look up the first ledger since we have the latest cached.
 func getLedgerRangeWithCache(ctx context.Context, db readDB,
 	latestSeq uint32, latestTime int64,
 ) (store.LedgerRange, error) {
-	query := sq.Select("meta").
+	query := sq.Select("sequence", fmt.Sprintf("substr(meta, 1, %d) AS meta_prefix", ledgerCloseTimePrefixBytes)).
 		From(ledgerCloseMetaTableName).
 		Where(
 			fmt.Sprintf("sequence = (SELECT MIN(sequence) FROM %s)", ledgerCloseMetaTableName),
 		)
-	var lcmRaw []xdr.LedgerCloseMetaView
-	if err := db.Select(ctx, &lcmRaw, query); err != nil {
+	var rows []ledgerRangeRow
+	if err := db.Select(ctx, &rows, query); err != nil {
 		return store.LedgerRange{}, fmt.Errorf("couldn't query ledger range: %w", err)
 	}
 
-	if len(lcmRaw) == 0 {
+	if len(rows) == 0 {
 		return store.LedgerRange{}, store.ErrEmptyDB
 	}
-	firstSeq, err := lcmRaw[0].LedgerSequence()
+	firstLedger, err := ledgerInfoFromRow(ctx, db, rows[0])
 	if err != nil {
-		return store.LedgerRange{}, fmt.Errorf("couldn't get first ledger sequence: %w", err)
-	}
-	firstCloseTime, err := lcmRaw[0].LedgerCloseTime()
-	if err != nil {
-		return store.LedgerRange{}, fmt.Errorf("couldn't get first ledger close time: %w", err)
+		return store.LedgerRange{}, err
 	}
 
 	return store.LedgerRange{
-		FirstLedger: store.LedgerInfo{
-			Sequence:  firstSeq,
-			CloseTime: firstCloseTime,
-		},
+		FirstLedger: firstLedger,
 		LastLedger: store.LedgerInfo{
 			Sequence:  latestSeq,
 			CloseTime: latestTime,
@@ -260,48 +283,34 @@ func getLedgerRangeWithCache(ctx context.Context, db readDB,
 
 // getLedgerRangeWithoutCache queries both the first and last ledger when cache isn't available
 func getLedgerRangeWithoutCache(ctx context.Context, db readDB) (store.LedgerRange, error) {
-	query := sq.Select("lcm.meta").
+	query := sq.Select("lcm.sequence", fmt.Sprintf("substr(lcm.meta, 1, %d) AS meta_prefix", ledgerCloseTimePrefixBytes)).
 		From(ledgerCloseMetaTableName + " as lcm").
 		Where(sq.Or{
 			sq.Expr("lcm.sequence = (?)", sq.Select("MIN(sequence)").From(ledgerCloseMetaTableName)),
 			sq.Expr("lcm.sequence = (?)", sq.Select("MAX(sequence)").From(ledgerCloseMetaTableName)),
 		}).OrderBy("lcm.sequence ASC")
 
-	var lcms []xdr.LedgerCloseMetaView
-	if err := db.Select(ctx, &lcms, query); err != nil {
+	var rows []ledgerRangeRow
+	if err := db.Select(ctx, &rows, query); err != nil {
 		return store.LedgerRange{}, fmt.Errorf("couldn't query ledger range: %w", err)
 	}
 
-	if len(lcms) == 0 {
+	if len(rows) == 0 {
 		return store.LedgerRange{}, store.ErrEmptyDB
 	}
 
-	firstSeq, err := lcms[0].LedgerSequence()
+	firstLedger, err := ledgerInfoFromRow(ctx, db, rows[0])
 	if err != nil {
-		return store.LedgerRange{}, fmt.Errorf("couldn't get first ledger sequence: %w", err)
+		return store.LedgerRange{}, err
 	}
-	firstCloseTime, err := lcms[0].LedgerCloseTime()
+	lastLedger, err := ledgerInfoFromRow(ctx, db, rows[len(rows)-1])
 	if err != nil {
-		return store.LedgerRange{}, fmt.Errorf("couldn't get first ledger close time: %w", err)
-	}
-	lastSeq, err := lcms[len(lcms)-1].LedgerSequence()
-	if err != nil {
-		return store.LedgerRange{}, fmt.Errorf("couldn't get last ledger sequence: %w", err)
-	}
-	lastCloseTime, err := lcms[len(lcms)-1].LedgerCloseTime()
-	if err != nil {
-		return store.LedgerRange{}, fmt.Errorf("couldn't get last ledger close time: %w", err)
+		return store.LedgerRange{}, err
 	}
 
 	return store.LedgerRange{
-		FirstLedger: store.LedgerInfo{
-			Sequence:  firstSeq,
-			CloseTime: firstCloseTime,
-		},
-		LastLedger: store.LedgerInfo{
-			Sequence:  lastSeq,
-			CloseTime: lastCloseTime,
-		},
+		FirstLedger: firstLedger,
+		LastLedger:  lastLedger,
 	}, nil
 }
 
