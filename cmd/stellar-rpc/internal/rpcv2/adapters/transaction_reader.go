@@ -20,12 +20,11 @@ import (
 // candidates against the full hash. Every index in both tiers is wrapped in
 // the servable-window gate (see windowGatedIndex).
 type TransactionReader struct {
-	registry   *query.Registry
 	passphrase string
 }
 
-func NewTransactionReader(registry *query.Registry, networkPassphrase string) *TransactionReader {
-	return &TransactionReader{registry: registry, passphrase: networkPassphrase}
+func NewTransactionReader(networkPassphrase string) *TransactionReader {
+	return &TransactionReader{passphrase: networkPassphrase}
 }
 
 func (r *TransactionReader) GetTransaction(ctx context.Context, hash xdr.Hash) (store.Transaction, error) {

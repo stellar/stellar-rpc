@@ -30,7 +30,7 @@ func sparseFixture(t *testing.T) (context.Context, *LedgerReader, chunk.ID, chun
 	seedHotLedgers(t, cat, r, c0, seqRange(c0.FirstLedger(), c0.FirstLedger()+3)...)
 	seedHotLedgers(t, cat, r, c1, c1.FirstLedger(), c1.FirstLedger()+1)
 	r.SetLatestLedger(c1.FirstLedger(), closeTimeFor(c1.FirstLedger()))
-	return viewCtx(t, r), NewLedgerReader(r), c0, c1
+	return viewCtx(t, r), NewLedgerReader(), c0, c1
 }
 
 // emptyFixture is a genuine first start: the live chunk's key is ready (a
@@ -43,7 +43,7 @@ func emptyFixture(t *testing.T) (context.Context, *LedgerReader) {
 	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
 	seedHotLedgers(t, cat, r, testChunk)
 	r.SetLatestLedger(testChunk.FirstLedger()-1, 0)
-	return viewCtx(t, r), NewLedgerReader(r)
+	return viewCtx(t, r), NewLedgerReader()
 }
 
 func TestGetLatestLedgerSequence(t *testing.T) {
@@ -82,7 +82,7 @@ func TestGetLedgerRange_BootStampFallsBackThenCaches(t *testing.T) {
 	// The boot seeding: OpenRegistry stamps the latest seq with close time 0
 	// because the catalog knows no close times.
 	r.SetLatestLedger(testChunk.FirstLedger()+1, 0)
-	reader := NewLedgerReader(r)
+	reader := NewLedgerReader()
 
 	got, err := reader.GetLedgerRange(viewCtx(t, r))
 	require.NoError(t, err)
@@ -135,7 +135,7 @@ func TestGetLedger_V1LedgerCloseMeta(t *testing.T) {
 	raw, _ := lcmV1WithClassicTx(t, testChunk.FirstLedger())
 	seedHotChunkLCMs(t, cat, r, testChunk, raw)
 	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
-	reader := NewLedgerReader(r)
+	reader := NewLedgerReader()
 
 	lcm, ok, err := reader.GetLedger(viewCtx(t, r), testChunk.FirstLedger())
 	require.NoError(t, err)
@@ -283,7 +283,7 @@ func TestTxBatchGetLedgers_HeaderMatchesFullDecode(t *testing.T) {
 	rawV2, _ := lcmWithTxs(t, testChunk.FirstLedger()+1, txSpec{})
 	seedHotChunkLCMs(t, cat, r, testChunk, rawV1, rawV2)
 	r.SetLatestLedger(testChunk.FirstLedger()+1, closeTimeFor(testChunk.FirstLedger()+1))
-	reader := NewLedgerReader(r)
+	reader := NewLedgerReader()
 
 	tx, err := reader.NewTx(viewCtx(t, r))
 	require.NoError(t, err)
@@ -351,7 +351,7 @@ func TestTxGetLedger_WalkCrossesChunkBorder(t *testing.T) {
 	seedHotLedgers(t, cat, r, c0, seqRange(c0.FirstLedger(), c0.LastLedger())...)
 	seedHotLedgers(t, cat, r, c1, c1.FirstLedger(), c1.FirstLedger()+1)
 	r.SetLatestLedger(c1.FirstLedger()+1, closeTimeFor(c1.FirstLedger()+1))
-	reader := NewLedgerReader(r)
+	reader := NewLedgerReader()
 
 	tx, err := reader.NewTx(viewCtx(t, r))
 	require.NoError(t, err)
@@ -375,7 +375,7 @@ func TestTxGetLedger_WalkPastSpanCapIsExhaustedNotNonSequential(t *testing.T) {
 	seedHotLedgers(t, cat, r, c0, seqRange(c0.FirstLedger(), c0.LastLedger())...)
 	seedHotLedgers(t, cat, r, c1, c1.FirstLedger(), c1.FirstLedger()+1, c1.FirstLedger()+2)
 	r.SetLatestLedger(c1.FirstLedger()+2, closeTimeFor(c1.FirstLedger()+2))
-	reader := NewLedgerReader(r)
+	reader := NewLedgerReader()
 
 	tx, err := reader.NewTx(viewCtx(t, r))
 	require.NoError(t, err)
@@ -430,7 +430,7 @@ func TestLedgerReaderTx_GetLedgerStopsOnCanceledContext(t *testing.T) {
 
 func TestLedgerReaderTx_BatchGetLedgersStopsOnCanceledContext(t *testing.T) {
 	r, first := sharedViewFixture(t)
-	reader := NewLedgerReader(r)
+	reader := NewLedgerReader()
 
 	ctx, cancel := context.WithCancel(viewCtx(t, r))
 	tx, err := reader.NewTx(ctx)

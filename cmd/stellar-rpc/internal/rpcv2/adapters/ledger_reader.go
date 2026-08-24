@@ -29,12 +29,10 @@ const walkSpanCap = chunk.LedgersPerChunk
 // LedgerReader satisfies store.LedgerReader over the query router. Every
 // method reads through the request's read view (see WithView); NewTx returns
 // a handle that runs its walk against that same view until Done.
-type LedgerReader struct {
-	registry *query.Registry
-}
+type LedgerReader struct{}
 
-func NewLedgerReader(registry *query.Registry) *LedgerReader {
-	return &LedgerReader{registry: registry}
+func NewLedgerReader() *LedgerReader {
+	return &LedgerReader{}
 }
 
 func (r *LedgerReader) GetLatestLedgerSequence(ctx context.Context) (uint32, error) {
@@ -62,7 +60,7 @@ func (r *LedgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRange, e
 	if err != nil {
 		return store.LedgerRange{}, markErr(ctx, err)
 	}
-	lr, err := getLedgerRange(view, r.registry)
+	lr, err := getLedgerRange(view)
 	return lr, markErr(ctx, err)
 }
 
@@ -101,7 +99,7 @@ func (r *LedgerReader) NewTx(ctx context.Context) (store.LedgerReaderTx, error) 
 	if err != nil {
 		return nil, markErr(ctx, err)
 	}
-	return &ledgerReaderTx{view: view, registry: r.registry}, nil
+	return &ledgerReaderTx{view: view}, nil
 }
 
 // ledgerReaderTx satisfies store.LedgerReaderTx over the request's read view
@@ -111,9 +109,6 @@ func (r *LedgerReader) NewTx(ctx context.Context) (store.LedgerReaderTx, error) 
 // BatchGetLedgers read through the same view but never touch that iterator.
 type ledgerReaderTx struct {
 	view *query.ReadView
-	// registry outlives the view; GetLedgerRange writes the oldest-close-time
-	// cache through it.
-	registry *query.Registry
 
 	// next/stop are the pull ends of the walk iterator; nil until the first
 	// GetLedger primes them.
@@ -179,7 +174,7 @@ func (tx *ledgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.L
 }
 
 func (tx *ledgerReaderTx) GetLedgerRange(ctx context.Context) (store.LedgerRange, error) {
-	lr, err := getLedgerRange(tx.view, tx.registry)
+	lr, err := getLedgerRange(tx.view)
 	return lr, markErr(ctx, err)
 }
 
@@ -267,7 +262,7 @@ func getLedger(view *query.ReadView, sequence uint32) (xdr.LedgerCloseMeta, bool
 // come from the registry's in-memory stamps in the common case (see the
 // Registry's latest and oldest fields); only a stamp miss pays a point read,
 // of just the close time off the raw bytes.
-func getLedgerRange(view *query.ReadView, registry *query.Registry) (store.LedgerRange, error) {
+func getLedgerRange(view *query.ReadView) (store.LedgerRange, error) {
 	oldest, latest := view.OldestLedger(), view.LatestLedger()
 	// Reachable on a genuine first start: with earliest_ledger pinned at a
 	// chunk boundary, the last committed ledger is earliest-1, so oldest is
@@ -281,7 +276,7 @@ func getLedgerRange(view *query.ReadView, registry *query.Registry) (store.Ledge
 		if firstCT, err = readCloseTime(view, oldest, "oldest"); err != nil {
 			return store.LedgerRange{}, err
 		}
-		registry.RecordOldestCloseTime(oldest, firstCT)
+		view.RecordOldestCloseTime(firstCT)
 	}
 	lastCT, ok := view.LatestCloseTime()
 	if !ok {

@@ -43,10 +43,10 @@ type Registry struct {
 	latest atomic.Pointer[ledgerStamp]
 
 	// oldest is a read-through cache of the retention floor's first ledger and
-	// its close time. Adapters populate it after a fallback point read
-	// (RecordOldestCloseTime); readers trust it only while its seq still equals
-	// the view's floor first ledger, so a moved floor invalidates it by
-	// construction — no explicit invalidation.
+	// its close time. Views populate it after a fallback point read
+	// (ReadView.RecordOldestCloseTime); readers trust it only while its seq
+	// still equals the view's floor first ledger, so a moved floor invalidates
+	// it by construction — no explicit invalidation.
 	oldest atomic.Pointer[ledgerStamp]
 
 	// handles is the copy-on-write map of open hot-database handles, published
@@ -150,15 +150,6 @@ func (r *Registry) SetLatestLedger(seq uint32, closeTimeUnix int64) {
 // latest field).
 func (r *Registry) LatestLedger() uint32 { return r.latest.Load().seq }
 
-// RecordOldestCloseTime caches the retention floor's first ledger and its close
-// time so getLedgerRange stops paying a point read (a cold packfile open in the
-// common case) per request. A plain Store is enough: concurrent writers can only
-// race about the same immutable close time (or a newer floor's, which the seq
-// check on the read side handles), so last-write-wins is always correct.
-func (r *Registry) RecordOldestCloseTime(seq uint32, closeTimeUnix int64) {
-	r.oldest.Store(&ledgerStamp{seq: seq, closeTime: closeTimeUnix})
-}
-
 // Handle returns the currently published hot database for chunk c, if any. The
 // freeze source reads a completed chunk through this shared handle rather than
 // opening a second reader against the still-open writer.
@@ -255,6 +246,10 @@ type ReadView struct {
 	snap        *catalog.Snapshot
 	catalog     *catalog.Catalog
 
+	// oldest points at the registry's oldest-close-time cache so the view can
+	// write it back after a fallback point read (RecordOldestCloseTime).
+	oldest *atomic.Pointer[ledgerStamp]
+
 	// maxScanLedgers is the registry's window, copied at acquisition so one
 	// page's bound cannot change mid-request. Zero means defaultMaxScanLedgers,
 	// so a view built without it still bounds its pages.
@@ -301,6 +296,7 @@ func (r *Registry) NewReadView() (*ReadView, error) {
 		handles:        handles,
 		snap:           snap,
 		catalog:        r.catalog,
+		oldest:         &r.oldest,
 	}
 	// The oldest-close-time cache rides along outside the three-load order: it
 	// is a pure optimization whose staleness the seq check in OldestCloseTime
@@ -354,6 +350,17 @@ func (a *ReadView) OldestCloseTime() (int64, bool) {
 		return 0, false
 	}
 	return a.oldestStamp.closeTime, true
+}
+
+// RecordOldestCloseTime caches the close time of the view's oldest servable
+// ledger so later views stop paying a point read (a cold packfile open in the
+// common case) per request. The seq is the view's own OldestLedger, so a
+// caller cannot stamp the wrong ledger. A plain Store is enough: concurrent
+// writers can only race about the same immutable close time (or a newer
+// floor's, which the seq check in OldestCloseTime handles), so
+// last-write-wins is always correct.
+func (a *ReadView) RecordOldestCloseTime(closeTimeUnix int64) {
+	a.oldest.Store(&ledgerStamp{seq: a.OldestLedger(), closeTime: closeTimeUnix})
 }
 
 func (a *ReadView) FloorChunk() chunk.ID { return a.floor }

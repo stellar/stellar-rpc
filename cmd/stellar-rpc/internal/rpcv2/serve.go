@@ -44,8 +44,8 @@ func newServeReads(deps readServerDeps) func(context.Context, *query.Registry) (
 	return func(ctx context.Context, reg *query.Registry) (func(), <-chan error, error) {
 		p := deps.params
 		p.registry = reg
-		p.ledgerReader = adapters.NewLedgerReader(reg)
-		p.transactionReader = adapters.NewTransactionReader(reg, p.networkPassphrase)
+		p.ledgerReader = adapters.NewLedgerReader()
+		p.transactionReader = adapters.NewTransactionReader(p.networkPassphrase)
 		handler := newJSONRPCHandler(deps.cfg, p)
 
 		var lc net.ListenConfig

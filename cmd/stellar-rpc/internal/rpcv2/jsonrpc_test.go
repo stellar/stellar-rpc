@@ -66,8 +66,8 @@ func testHandlerParams(t *testing.T, r *query.Registry) handlerParams {
 		handlerMetrics:    jsonrpc.NewHandlerMetrics("test", prometheus.NewRegistry()),
 		metrics:           observability.NopMetrics{},
 		registry:          r,
-		ledgerReader:      adapters.NewLedgerReader(r),
-		transactionReader: adapters.NewTransactionReader(r, "test passphrase"),
+		ledgerReader:      adapters.NewLedgerReader(),
+		transactionReader: adapters.NewTransactionReader("test passphrase"),
 		feeWindows:        feewindow.NewFeeWindows(10, 10),
 		networkPassphrase: "test passphrase",
 		retentionWindow:   1,
@@ -174,7 +174,7 @@ func TestMapAdapterErrors_UnavailableChunkBecomesRetryable(t *testing.T) {
 	// serving store and the adapter surfaces query.ErrUnavailable.
 	require.NoError(t, cat.FlipHotReady(chunk.ID(0)))
 	r.SetLatestLedger(chunk.FirstLedgerSeq, 0)
-	reader := adapters.NewLedgerReader(r)
+	reader := adapters.NewLedgerReader()
 
 	wrapped := wrapAdapterRequest(flatteningHandler(t, func(ctx context.Context) error {
 		_, _, err := reader.GetLedger(ctx, chunk.FirstLedgerSeq)
@@ -188,7 +188,7 @@ func TestMapAdapterErrors_UnavailableChunkBecomesRetryable(t *testing.T) {
 func TestMapAdapterErrors_StoreClosedIsRetryableAndCounted(t *testing.T) {
 	r, db := servingRegistry(t)
 	require.NoError(t, db.Close())
-	reader := adapters.NewLedgerReader(r)
+	reader := adapters.NewLedgerReader()
 	metrics := &storeClosedCounter{}
 
 	wrapped := wrapAdapterRequest(flatteningHandler(t, func(ctx context.Context) error {
@@ -204,7 +204,7 @@ func TestMapAdapterErrors_StoreClosedIsRetryableAndCounted(t *testing.T) {
 func TestMapAdapterErrors_StoreClosedWithDeadContextIsNotCounted(t *testing.T) {
 	r, db := servingRegistry(t)
 	require.NoError(t, db.Close())
-	reader := adapters.NewLedgerReader(r)
+	reader := adapters.NewLedgerReader()
 	metrics := &storeClosedCounter{}
 
 	// The context dies AFTER the store read fails but before the wrapper
@@ -230,7 +230,7 @@ func TestWrapAdapterRequest_PanicReleasesSharedView(t *testing.T) {
 		func(d *hotchunk.DB) { r.PublishHandle(chunk.ID(0), d) },
 		rpcv2test.ZeroTxLCMBytes(t, chunk.FirstLedgerSeq))
 	r.SetLatestLedger(chunk.FirstLedgerSeq, time.Now().Unix())
-	reader := adapters.NewLedgerReader(r)
+	reader := adapters.NewLedgerReader()
 
 	wrapped := wrapAdapterRequest(func(ctx context.Context, _ *jrpc2.Request) (any, error) {
 		_, err := reader.GetLatestLedgerSequence(ctx)

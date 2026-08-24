@@ -114,20 +114,21 @@ func TestReadView_OldestCloseTime(t *testing.T) {
 	require.NoError(t, err)
 	_, ok := a.OldestCloseTime()
 	assert.False(t, ok, "nothing recorded yet")
+	a.RecordOldestCloseTime(333)
 	a.Release()
 
-	r.RecordOldestCloseTime(chunk.ID(3).FirstLedger(), 333)
 	a, err = r.NewReadView()
 	require.NoError(t, err)
 	ct, ok := a.OldestCloseTime()
 	assert.True(t, ok)
-	assert.Equal(t, int64(333), ct)
+	assert.Equal(t, int64(333), ct, "a view's record reaches later views")
 	a.Release()
 
 	// A recorded seq that no longer matches the view's floor (a stale entry
 	// from before the floor moved) must read as a miss, never as the wrong
-	// ledger's close time.
-	r.RecordOldestCloseTime(chunk.ID(2).FirstLedger(), 222)
+	// ledger's close time. The view API cannot write a stale seq (it stamps its
+	// own floor), so simulate the moved floor by writing the cache directly.
+	r.oldest.Store(&ledgerStamp{seq: chunk.ID(2).FirstLedger(), closeTime: 222})
 	a, err = r.NewReadView()
 	require.NoError(t, err)
 	defer a.Release()
