@@ -306,7 +306,7 @@ func (s *csvSink) Prune(int, time.Duration) {}
 
 func (s *csvSink) FailedDestroy() {}
 
-func (s *csvSink) StoreClosedServed() {}
+func (s *csvSink) TxIndexInconsistency() {}
 
 // observe appends one sample to the (file, row) series, creating it on first
 // use. Every recording method lands here. (funcorder pins it below the

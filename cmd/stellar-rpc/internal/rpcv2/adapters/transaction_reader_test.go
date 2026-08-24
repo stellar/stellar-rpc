@@ -2,6 +2,7 @@ package adapters
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -11,6 +12,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
@@ -23,7 +25,7 @@ func TestGetTransaction_HotHit(t *testing.T) {
 		txSpec{events: []xdr.ContractEvent{rpcv2test.SymbolContractEvent(xdr.ContractId{0xab}, "transfer", "transfer")}})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
 	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
-	reader := NewTransactionReader(network.PublicNetworkPassphrase)
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 
 	got, err := reader.GetTransaction(viewCtx(t, r), txs[0].hash)
 	require.NoError(t, err)
@@ -51,7 +53,7 @@ func TestGetTransaction_MissIsErrNoTransaction(t *testing.T) {
 	lcm, _ := lcmWithTxs(t, testChunk.FirstLedger(), txSpec{})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
 	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
-	reader := NewTransactionReader(network.PublicNetworkPassphrase)
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 
 	_, err := reader.GetTransaction(viewCtx(t, r), xdr.Hash{0xde, 0xad})
 	assert.ErrorIs(t, err, store.ErrNoTransaction)
@@ -66,7 +68,7 @@ func TestGetTransaction_AboveLatestIsGated(t *testing.T) {
 	// The second ledger is committed but above the view's frozen latest; only
 	// the adapter's gate, not the store, can produce the miss.
 	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
-	reader := NewTransactionReader(network.PublicNetworkPassphrase)
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 
 	_, err := reader.GetTransaction(viewCtx(t, r), txs2[0].hash)
 	assert.ErrorIs(t, err, store.ErrNoTransaction)
@@ -82,7 +84,7 @@ func TestGetTransaction_BelowFloorIsGated(t *testing.T) {
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm5)
 	seedHotChunkLCMs(t, cat, r, testChunk+1, lcm6)
 	r.SetLatestLedger((testChunk + 1).FirstLedger(), closeTimeFor((testChunk + 1).FirstLedger()))
-	reader := NewTransactionReader(network.PublicNetworkPassphrase)
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 	ctx := viewCtx(t, r)
 
 	_, err := reader.GetTransaction(ctx, txs5[0].hash)
@@ -108,7 +110,7 @@ func TestGetTransaction_PrunedDuringAcquisitionIsCleanMiss(t *testing.T) {
 	// miss, never reach the unresolvable ledger read.
 	require.NoError(t, cat.PutHotTransient(testChunk))
 
-	reader := NewTransactionReader(network.PublicNetworkPassphrase)
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 	_, err := reader.GetTransaction(viewCtx(t, r), txs5[0].hash)
 	assert.ErrorIs(t, err, store.ErrNoTransaction,
 		"a just-pruned transaction is a clean miss, not a retryable failure")
@@ -136,7 +138,7 @@ func coldFixture(t *testing.T) (context.Context, *TransactionReader, []fixtureTx
 	// Latest sits in testChunk+2 so the orphan candidate is in-window; a
 	// candidate outside the window would be gated to a clean miss instead.
 	r.SetLatestLedger((testChunk + 2).FirstLedger(), closeTimeFor((testChunk + 2).FirstLedger()))
-	return viewCtx(t, r), NewTransactionReader(network.PublicNetworkPassphrase), txs, orphanHash
+	return viewCtx(t, r), NewTransactionReader(network.PublicNetworkPassphrase, nil), txs, orphanHash
 }
 
 func TestGetTransaction_ColdIndexHit(t *testing.T) {
@@ -179,7 +181,7 @@ func TestGetTransaction_V1LedgerCloseMeta(t *testing.T) {
 	raw, hash := lcmV1WithClassicTx(t, testChunk.FirstLedger())
 	seedHotChunkLCMs(t, cat, r, testChunk, raw)
 	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
-	reader := NewTransactionReader(network.PublicNetworkPassphrase)
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 
 	got, err := reader.GetTransaction(viewCtx(t, r), hash)
 	require.NoError(t, err)
@@ -209,7 +211,7 @@ func TestGetTransaction_AgedOutColdCandidateIsCleanMiss(t *testing.T) {
 	rpcv2test.WriteFrozenLedgerPack(t, cat, testChunk+1, lcm)
 	r.SetLatestLedger((testChunk + 1).FirstLedger(), closeTimeFor((testChunk + 1).FirstLedger()))
 
-	reader := NewTransactionReader(network.PublicNetworkPassphrase)
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 	_, err := reader.GetTransaction(viewCtx(t, r), agedHash)
 	assert.ErrorIs(t, err, store.ErrNoTransaction,
 		"an aged-out transaction is a clean miss, not a lookup-incomplete error")
@@ -221,7 +223,7 @@ func TestGetTransaction_FeeBumpByEitherHash(t *testing.T) {
 	lcm, outerHash, innerHash := feeBumpLCM(t, testChunk.FirstLedger())
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
 	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
-	reader := NewTransactionReader(network.PublicNetworkPassphrase)
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 	ctx := viewCtx(t, r)
 
 	for _, hash := range []xdr.Hash{outerHash, innerHash} {
@@ -231,4 +233,33 @@ func TestGetTransaction_FeeBumpByEitherHash(t *testing.T) {
 		assert.Equal(t, outerHash.HexString(), got.TransactionHash,
 			"an inner-hash lookup still reports the outer (result-pair) hash, matching v1")
 	}
+}
+
+type inconsistencyCounter struct {
+	observability.NopMetrics
+
+	n atomic.Int32
+}
+
+func (c *inconsistencyCounter) TxIndexInconsistency() { c.n.Add(1) }
+
+func TestGetTransaction_HotIndexInconsistencyIsCounted(t *testing.T) {
+	cat := openTestCatalog(t)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
+	lcm, txs := lcmWithTxs(t, testChunk.FirstLedger(), txSpec{})
+	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
+	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
+
+	// A frozen ledger pack for the same chunk WITHOUT the transaction: routing
+	// serves cold (cold-wins), the exact hot index still hits, and the fetched
+	// ledger lacks the transaction — the corruption shape the counter exists
+	// for. Only a broken freeze can produce this pack in production.
+	rpcv2test.WriteFrozenLedgerPack(t, cat, testChunk, lcmBytes(t, testChunk.FirstLedger()))
+
+	metrics := &inconsistencyCounter{}
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, metrics)
+	_, err := reader.GetTransaction(viewCtx(t, r), txs[0].hash)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, store.ErrNoTransaction)
+	assert.Equal(t, int32(1), metrics.n.Load())
 }

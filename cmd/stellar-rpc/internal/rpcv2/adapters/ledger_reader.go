@@ -38,10 +38,10 @@ func NewLedgerReader() *LedgerReader {
 func (r *LedgerReader) GetLatestLedgerSequence(ctx context.Context) (uint32, error) {
 	view, err := viewFrom(ctx)
 	if err != nil {
-		return 0, markErr(ctx, err)
+		return 0, err
 	}
 	if view.OldestLedger() > view.LatestLedger() {
-		return 0, markErr(ctx, store.ErrEmptyDB)
+		return 0, store.ErrEmptyDB
 	}
 	return view.LatestLedger(), nil
 }
@@ -49,19 +49,19 @@ func (r *LedgerReader) GetLatestLedgerSequence(ctx context.Context) (uint32, err
 func (r *LedgerReader) GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
 	view, err := viewFrom(ctx)
 	if err != nil {
-		return xdr.LedgerCloseMeta{}, false, markErr(ctx, err)
+		return xdr.LedgerCloseMeta{}, false, err
 	}
 	lcm, found, err := getLedger(view, sequence)
-	return lcm, found, markErr(ctx, err)
+	return lcm, found, err
 }
 
 func (r *LedgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRange, error) {
 	view, err := viewFrom(ctx)
 	if err != nil {
-		return store.LedgerRange{}, markErr(ctx, err)
+		return store.LedgerRange{}, err
 	}
 	lr, err := getLedgerRange(view)
-	return lr, markErr(ctx, err)
+	return lr, err
 }
 
 func (r *LedgerReader) StreamLedgerRange(
@@ -69,23 +69,23 @@ func (r *LedgerReader) StreamLedgerRange(
 ) error {
 	view, err := viewFrom(ctx)
 	if err != nil {
-		return markErr(ctx, err)
+		return err
 	}
 
 	scan, err := view.ScanLedgers(startLedger, endLedger)
 	if err != nil {
-		return markErr(ctx, err)
+		return err
 	}
 	for entry, err := range scan {
 		if err != nil {
-			return markErr(ctx, err)
+			return err
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		var lcm xdr.LedgerCloseMeta
 		if err := lcm.UnmarshalBinary(entry.Bytes); err != nil {
-			return markErr(ctx, fmt.Errorf("adapters: unmarshal ledger %d: %w", entry.Seq, err))
+			return fmt.Errorf("adapters: unmarshal ledger %d: %w", entry.Seq, err)
 		}
 		if err := f(lcm); err != nil {
 			return err
@@ -97,7 +97,7 @@ func (r *LedgerReader) StreamLedgerRange(
 func (r *LedgerReader) NewTx(ctx context.Context) (store.LedgerReaderTx, error) {
 	view, err := viewFrom(ctx)
 	if err != nil {
-		return nil, markErr(ctx, err)
+		return nil, err
 	}
 	return &ledgerReaderTx{view: view}, nil
 }
@@ -124,7 +124,7 @@ func (tx *ledgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.L
 	// deletion grace margin is sized assuming walks stop within one iteration
 	// of their deadline.
 	if err := ctx.Err(); err != nil {
-		return xdr.LedgerCloseMeta{}, false, markErr(ctx, err)
+		return xdr.LedgerCloseMeta{}, false, err
 	}
 	// ClampRange is the only place the servable window is enforced and no
 	// point-read path calls it, so gate here: without this a view acquired
@@ -140,42 +140,42 @@ func (tx *ledgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.L
 		// reader, not two.
 		scan, err := tx.view.ScanLedgers(sequence, min(tx.view.LatestLedger(), sequence+walkSpanCap-1))
 		if err != nil {
-			return xdr.LedgerCloseMeta{}, false, markErr(ctx, err)
+			return xdr.LedgerCloseMeta{}, false, err
 		}
 		tx.next, tx.stop = iter.Pull2(scan)
 	}
 
 	entry, err, ok := tx.next()
 	if err != nil {
-		return xdr.LedgerCloseMeta{}, false, markErr(ctx, err)
+		return xdr.LedgerCloseMeta{}, false, err
 	}
 	if !ok {
 		// The iterator ran dry: the caller walked sequentially but past the span
 		// primed above. getTransactions' span cap (methods.LedgerScanLimit) keeps
 		// its walks inside the span, so reaching this means a new caller without
 		// that cap. Fail loudly rather than serve a wrong-position read.
-		return xdr.LedgerCloseMeta{}, false, markErr(ctx, fmt.Errorf(
+		return xdr.LedgerCloseMeta{}, false, fmt.Errorf(
 			"adapters: ledger walk exhausted its primed %d-ledger span at ledger %d"+
 				" — the calling handler must cap the request's ledger range",
-			walkSpanCap, sequence))
+			walkSpanCap, sequence)
 	}
 	if entry.Seq != sequence {
 		// The walk contract (ascending, contiguous from the priming sequence)
 		// was broken. Fail loudly rather than serve the wrong ledger's data.
-		return xdr.LedgerCloseMeta{}, false, markErr(ctx, fmt.Errorf(
+		return xdr.LedgerCloseMeta{}, false, fmt.Errorf(
 			"adapters: non-sequential GetLedger: asked for ledger %d, the walk is at ledger %d",
-			sequence, entry.Seq))
+			sequence, entry.Seq)
 	}
 	var lcm xdr.LedgerCloseMeta
 	if err := lcm.UnmarshalBinary(entry.Bytes); err != nil {
-		return xdr.LedgerCloseMeta{}, false, markErr(ctx, fmt.Errorf("adapters: unmarshal ledger %d: %w", sequence, err))
+		return xdr.LedgerCloseMeta{}, false, fmt.Errorf("adapters: unmarshal ledger %d: %w", sequence, err)
 	}
 	return lcm, true, nil
 }
 
 func (tx *ledgerReaderTx) GetLedgerRange(ctx context.Context) (store.LedgerRange, error) {
 	lr, err := getLedgerRange(tx.view)
-	return lr, markErr(ctx, err)
+	return lr, err
 }
 
 func (tx *ledgerReaderTx) BatchGetLedgers(
@@ -183,19 +183,19 @@ func (tx *ledgerReaderTx) BatchGetLedgers(
 ) ([]store.LedgerMetadataChunk, error) {
 	scan, err := tx.view.ScanLedgers(start, end)
 	if err != nil {
-		return nil, markErr(ctx, err)
+		return nil, err
 	}
 	out := make([]store.LedgerMetadataChunk, 0, end-start+1)
 	for entry, err := range scan {
 		if err != nil {
-			return nil, markErr(ctx, err)
+			return nil, err
 		}
 		if err := ctx.Err(); err != nil {
-			return nil, markErr(ctx, err)
+			return nil, err
 		}
 		headerRaw, err := rawHeaderFromLCMBytes(entry.Bytes)
 		if err != nil {
-			return nil, markErr(ctx, fmt.Errorf("adapters: slice ledger %d header: %w", entry.Seq, err))
+			return nil, fmt.Errorf("adapters: slice ledger %d header: %w", entry.Seq, err)
 		}
 		// Entry.Bytes aliases the reader's scratch buffer and is overwritten
 		// on the next iteration step; clone what we keep.

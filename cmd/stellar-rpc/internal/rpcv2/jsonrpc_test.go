@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,7 +16,6 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
@@ -67,7 +65,7 @@ func testHandlerParams(t *testing.T, r *query.Registry) handlerParams {
 		metrics:           observability.NopMetrics{},
 		registry:          r,
 		ledgerReader:      adapters.NewLedgerReader(),
-		transactionReader: adapters.NewTransactionReader("test passphrase"),
+		transactionReader: adapters.NewTransactionReader("test passphrase", nil),
 		feeWindows:        feewindow.NewFeeWindows(10, 10),
 		networkPassphrase: "test passphrase",
 		retentionWindow:   1,
@@ -148,80 +146,6 @@ func TestJSONRPCHandler_HealthyOverFreshRegistryStamp(t *testing.T) {
 	assert.Equal(t, "healthy", result.Status)
 }
 
-type storeClosedCounter struct {
-	observability.NopMetrics
-
-	served atomic.Int32
-}
-
-func (c *storeClosedCounter) StoreClosedServed() { c.served.Add(1) }
-
-// flatteningHandler mimics what every shared handler does with an adapter
-// error: replace it with a generic jrpc2 internal error, losing the chain.
-func flatteningHandler(t *testing.T, call func(ctx context.Context) error) jrpc2.Handler {
-	t.Helper()
-	return func(ctx context.Context, _ *jrpc2.Request) (any, error) {
-		err := call(ctx)
-		require.Error(t, err)
-		return nil, &jrpc2.Error{Code: jrpc2.InternalError, Message: "could not read stores"}
-	}
-}
-
-func TestMapAdapterErrors_UnavailableChunkBecomesRetryable(t *testing.T) {
-	cat, _ := testCatalog(t)
-	r := query.NewRegistry(cat, geometry.NewRetention(0, 0))
-	// Hot-ready in the catalog but no published handle: resolveTier finds no
-	// serving store and the adapter surfaces query.ErrUnavailable.
-	require.NoError(t, cat.FlipHotReady(chunk.ID(0)))
-	r.SetLatestLedger(chunk.FirstLedgerSeq, 0)
-	reader := adapters.NewLedgerReader()
-
-	wrapped := wrapAdapterRequest(flatteningHandler(t, func(ctx context.Context) error {
-		_, _, err := reader.GetLedger(ctx, chunk.FirstLedgerSeq)
-		return err
-	}), r, observability.NopMetrics{})
-
-	_, err := wrapped(context.Background(), nil)
-	assert.Equal(t, error(network.ErrTemporarilyUnavailable), err)
-}
-
-func TestMapAdapterErrors_StoreClosedIsRetryableAndCounted(t *testing.T) {
-	r, db := servingRegistry(t)
-	require.NoError(t, db.Close())
-	reader := adapters.NewLedgerReader()
-	metrics := &storeClosedCounter{}
-
-	wrapped := wrapAdapterRequest(flatteningHandler(t, func(ctx context.Context) error {
-		_, _, err := reader.GetLedger(ctx, chunk.FirstLedgerSeq)
-		return err
-	}), r, metrics)
-
-	_, err := wrapped(context.Background(), nil)
-	assert.Equal(t, error(network.ErrTemporarilyUnavailable), err)
-	assert.Equal(t, int32(1), metrics.served.Load())
-}
-
-func TestMapAdapterErrors_StoreClosedWithDeadContextIsNotCounted(t *testing.T) {
-	r, db := servingRegistry(t)
-	require.NoError(t, db.Close())
-	reader := adapters.NewLedgerReader()
-	metrics := &storeClosedCounter{}
-
-	// The context dies AFTER the store read fails but before the wrapper
-	// classifies — the teardown/duration-limiter straggler sequence. Canceling
-	// up front would never reach the store: the adapter returns ctx.Err() first.
-	ctx, cancel := context.WithCancel(context.Background())
-	wrapped := wrapAdapterRequest(flatteningHandler(t, func(ctx context.Context) error {
-		_, _, err := reader.GetLedger(ctx, chunk.FirstLedgerSeq)
-		cancel()
-		return err
-	}), r, metrics)
-
-	_, err := wrapped(ctx, nil)
-	assert.Equal(t, error(network.ErrTemporarilyUnavailable), err)
-	assert.Equal(t, int32(0), metrics.served.Load())
-}
-
 func TestWrapAdapterRequest_PanicReleasesSharedView(t *testing.T) {
 	logger, buf := capturingLogger()
 	cat, _ := rpcv2test.OpenTestCatalogWith(t, testCPI, logger)
@@ -236,23 +160,13 @@ func TestWrapAdapterRequest_PanicReleasesSharedView(t *testing.T) {
 		_, err := reader.GetLatestLedgerSequence(ctx)
 		require.NoError(t, err)
 		panic("handler panic after acquiring the shared view")
-	}, r, observability.NopMetrics{})
+	}, r)
 
 	assert.Panics(t, func() { _, _ = wrapped(context.Background(), nil) })
 
 	require.NoError(t, cat.Close())
 	assert.NotContains(t, buf.String(), "unreleased snapshot",
 		"the deferred release must run during the panic unwind")
-}
-
-func TestMapAdapterErrors_UnmarkedErrorPassesThrough(t *testing.T) {
-	inner := &jrpc2.Error{Code: jrpc2.InternalError, Message: "disk on fire"}
-	wrapped := wrapAdapterRequest(func(context.Context, *jrpc2.Request) (any, error) {
-		return nil, inner
-	}, seedServingRegistry(t), observability.NopMetrics{})
-
-	_, err := wrapped(context.Background(), nil)
-	require.Same(t, error(inner), err)
 }
 
 func TestDeriveLifecycleGrace_DefaultsGive55Seconds(t *testing.T) {

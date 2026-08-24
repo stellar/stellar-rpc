@@ -2,7 +2,6 @@ package rpcv2
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/creachadair/jrpc2"
@@ -13,13 +12,11 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
@@ -84,9 +81,8 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 			" use the existing RPC service for events meanwhile"),
 	})
 	specs = specLimits(m).Apply(specs)
-	metrics := observability.MetricsOrNop(p.metrics)
 	for i := range specs {
-		specs[i].Handler = wrapAdapterRequest(specs[i].Handler, p.registry, metrics)
+		specs[i].Handler = wrapAdapterRequest(specs[i].Handler, p.registry)
 	}
 
 	return jsonrpc.NewHandler(jsonrpc.Params{
@@ -137,62 +133,27 @@ func notImplemented(message string) jrpc2.Handler {
 
 // wrapAdapterRequest is the per-request scope around every handler: it
 // acquires the request's read view up front, plants it on the context
-// (adapters.WithView) and releases it after the handler returns, and rewrites
-// the routing/lifecycle failures the shared handlers can only report as
-// generic internal errors. The original error survives the handler through a
-// context mark (see adapters.WithErrorMark); remapAdapterError classifies it
-// after the handler fails, and classifies a view-acquisition failure directly.
-func wrapAdapterRequest(h jrpc2.Handler, registry *query.Registry, metrics observability.Metrics) jrpc2.Handler {
+// (adapters.WithView), and releases it after the handler returns.
+//
+// The wrapper does NOT classify adapter errors. The routing and lifecycle
+// failures it used to remap to "retry" are unreachable within the serving
+// model (validation shares the scan's snapshot; coverage publishes before
+// discard; the window gates close the prune race; a request old enough to see
+// a deferred close was answered by the duration limiter long before). Each
+// condition is counted at its production site instead — see the
+// serving-invariant counters in observability.NewPrometheusMetrics.
+func wrapAdapterRequest(h jrpc2.Handler, registry *query.Registry) jrpc2.Handler {
 	return func(ctx context.Context, req *jrpc2.Request) (any, error) {
 		view, err := registry.NewReadView()
 		if err != nil {
-			if remapped, ok := remapAdapterError(ctx, err, metrics); ok {
-				return nil, remapped
-			}
 			return nil, err
 		}
 		// Deferred so a panicking handler cannot leak the view: the duration
 		// limiter recovers panics above this frame and keeps the process
 		// serving, so a skipped release would orphan the RocksDB snapshot.
 		defer view.Release()
-		ctx, mark := adapters.WithErrorMark(ctx)
-		ctx = adapters.WithView(ctx, view)
-		result, err := h(ctx, req)
-		if err == nil {
-			return result, nil
-		}
-		if remapped, ok := remapAdapterError(ctx, mark.Err(), metrics); ok {
-			return nil, remapped
-		}
-		return result, err
+		return h(adapters.WithView(ctx, view), req)
 	}
-}
-
-// remapAdapterError maps the failures the wrapper answers differently:
-//
-//   - a request that raced a store handoff (query.ErrUnavailable or
-//     stores.ErrStoreClosed) becomes network.ErrTemporarilyUnavailable — both
-//     conditions self-heal, so retry is the honest instruction;
-//   - a scan the router rejected as below the servable window
-//     (*query.RangeError) becomes the v1-style invalid-request rejection.
-//
-// ok is false for everything else: the caller passes the original through.
-func remapAdapterError(ctx context.Context, err error, metrics observability.Metrics) (error, bool) {
-	var rangeErr *query.RangeError
-	switch {
-	case errors.As(err, &rangeErr):
-		return &jrpc2.Error{Code: jrpc2.InvalidRequest, Message: rangeErr.Error()}, true
-	case errors.Is(err, stores.ErrStoreClosed):
-		// A dead context reaches no client and says nothing about the
-		// grace period (see observability.Metrics.StoreClosedServed).
-		if ctx.Err() == nil {
-			metrics.StoreClosedServed()
-		}
-		return network.ErrTemporarilyUnavailable, true
-	case errors.Is(err, query.ErrUnavailable):
-		return network.ErrTemporarilyUnavailable, true
-	}
-	return nil, false
 }
 
 // graceMargin is the slack deriveLifecycleGrace adds on top of the longest

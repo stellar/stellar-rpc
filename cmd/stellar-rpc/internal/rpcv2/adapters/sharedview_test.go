@@ -51,7 +51,7 @@ func TestWithView_OneSnapshotPerRequest(t *testing.T) {
 
 func TestWithView_SharedAcrossAdapters(t *testing.T) {
 	r, first := sharedViewFixture(t)
-	txReader := NewTransactionReader(network.PublicNetworkPassphrase)
+	txReader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 	ledgerReader := NewLedgerReader()
 	ctx := viewCtx(t, r)
 
@@ -68,7 +68,7 @@ func TestWithView_SharedAcrossAdapters(t *testing.T) {
 
 func TestViewFrom_ContextWithoutViewIsAnError(t *testing.T) {
 	ledgerReader := NewLedgerReader()
-	txReader := NewTransactionReader(network.PublicNetworkPassphrase)
+	txReader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 
 	_, err := ledgerReader.GetLatestLedgerSequence(context.Background())
 	assert.ErrorIs(t, err, errNoView)

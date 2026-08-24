@@ -50,6 +50,6 @@ func (*recordingMetrics) Discard(int, time.Duration) {}
 
 func (*recordingMetrics) FailedDestroy() {}
 
-func (*recordingMetrics) StoreClosedServed() {}
+func (*recordingMetrics) TxIndexInconsistency() {}
 
 var _ observability.Metrics = (*recordingMetrics)(nil)

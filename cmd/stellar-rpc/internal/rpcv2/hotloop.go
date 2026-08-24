@@ -150,8 +150,8 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 	// still points at the just-completed, registry-published chunk, so the
 	// defer closes a handle the registry also holds while reads are still live.
 	// Until the restart's stopReads runs moments later, reads hitting that
-	// chunk answer the retryable -32002. This is safe — Close blocks, draining
-	// any in-flight freeze read, and is idempotent; the restart rebuilds the
+	// chunk fail as store-closed. This is safe — Close blocks, draining any
+	// in-flight freeze read, and is idempotent; the restart rebuilds the
 	// registry — but briefly visible, not a no-op. No writer races the close:
 	// the loop has stopped on every exit path.
 	hotDB := cfg.HotDB

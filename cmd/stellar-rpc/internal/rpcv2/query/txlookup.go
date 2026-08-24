@@ -75,10 +75,12 @@ func (a *ReadView) ColdTxIndexes() ([]txhash.HashIndex, error) {
 //   - Hot: the view's handle set loads before its catalog snapshot, so a
 //     request racing a prune can hold the handle of a chunk the snapshot
 //     already retired. The hot index hits, the ledger read fails as
-//     query.ErrUnavailable, and — hot indexes being exact — the probe treats
-//     that as hard: the client is told "retry" (-32002) for a transaction
-//     that is simply pruned. Gated, the below-floor hit is the miss it truly
-//     is, and the next view's coherent state is never even needed.
+//     ErrUnavailable, and — hot indexes being exact — the probe treats that
+//     as hard: the request fails for a transaction that is simply pruned.
+//     Gated, the below-floor hit is the miss it truly is, and the next view's
+//     coherent state is never even needed. This gate is also what makes an
+//     in-window ErrUnavailable a violated invariant worth counting (see
+//     ErrUnavailable).
 //
 // Skipping a candidate here is safe in both tiers: even a fully verified
 // out-of-window match must be answered not-found — retention is the

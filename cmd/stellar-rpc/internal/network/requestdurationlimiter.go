@@ -312,14 +312,6 @@ var ErrRequestExceededProcessingLimitThreshold = jrpc2.Error{
 	Message: "request exceeded processing limit threshold",
 }
 
-// ErrTemporarilyUnavailable reports a request that failed against serving
-// state mid-handoff (a store being replaced or retired underneath it) and
-// will succeed on retry.
-var ErrTemporarilyUnavailable = jrpc2.Error{
-	Code:    -32002,
-	Message: "temporarily unavailable; retry the request",
-}
-
 var ErrFailToProcessDueToInternalIssue = jrpc2.Error{
 	Code:    -32003, // internal error
 	Message: "request failed to process due to internal issue",
