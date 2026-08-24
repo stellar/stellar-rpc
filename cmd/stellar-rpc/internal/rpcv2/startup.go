@@ -23,8 +23,9 @@ import (
 // run is the daemon's startup, in two steps: (1) BACKFILL to the tip, then
 // (2) SERVE + INGEST — open the resume chunk's hot DB, start captive core
 // (injected), begin serving reads (injected), then run the live ingestion loop
-// (handed the open hot DB) and the lifecycle loop as a joined errgroup pair (whichever returns first
-// cancels the other; g.Wait surfaces the first error). Never returns nil: a clean
+// (handed the open hot DB) and the lifecycle loop as a joined errgroup pair
+// (whichever returns first cancels the other; g.Wait surfaces the first
+// error). Never returns nil: a clean
 // shutdown (ctx canceled mid-run) surfaces as a ctx-canceled error that supervise
 // classifies via ctx.Err(); any other return is a restartable error the supervisor
 // warns on and retries with backoff (a first start with no reachable backend, a

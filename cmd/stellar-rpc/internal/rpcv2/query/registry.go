@@ -140,7 +140,7 @@ func NewRegistry(cat *catalog.Catalog, retention geometry.Retention) *Registry {
 }
 
 // SetLatestLedger publishes seq together with its close time (unix seconds;
-// 0 = unknown, see ledgerStamp). See the latest field for who calls it when.
+// 0 = unknown, see ledgerStamp); the latest field documents the caller.
 func (r *Registry) SetLatestLedger(seq uint32, closeTimeUnix int64) {
 	r.latest.Store(&ledgerStamp{seq: seq, closeTime: closeTimeUnix})
 }
