@@ -182,7 +182,8 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 
 		// One atomic synced WriteBatch across all hot CFs (via hotDB.IngestLedger).
 		view := xdr.LedgerCloseMetaView(raw)
-		if ierr := hotService.Ingest(ctx, seq, view); ierr != nil {
+		closeUnix, ierr := hotService.Ingest(seq, view)
+		if ierr != nil {
 			return fmt.Errorf("ingest ledger %d: %w", seq, ierr)
 		}
 		// The ingestion loop owns the last-committed gauge: this is the TRUE
@@ -190,19 +191,11 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		// The tick must not touch it — its chunk-aligned value would regress it.
 		metrics.LastCommitted(seq)
 
-		// A committed ledger's close time always decodes; on the near-impossible
-		// decode error, publish 0 (readers fall back to a point read) rather
-		// than fail an already-durable commit.
-		closeUnix, cerr := view.LedgerCloseTime()
-		if cerr != nil {
-			closeUnix = 0
-		}
-
-		// Advance the served latest ledger last, once the ledger is fully queryable:
-		// IngestLedger completes the in-memory events apply before returning, so a
-		// read view acquired after this can serve seq from every hot store. This one
-		// write carries everything derived from the commit — the sequence and its
-		// close time (so getLedgerRange never point-reads the tip).
+		// Advance the served latest ledger last, once the ledger is fully
+		// queryable: IngestLedger completes the in-memory events apply before
+		// returning, so a read view acquired after this can serve seq from
+		// every hot store. This one write carries the sequence and its close
+		// time, so getLedgerRange never point-reads the tip.
 		cfg.Registry.SetLatestLedger(seq, closeUnix)
 
 		// Chunk boundary: this seq is the chunk's last ledger.

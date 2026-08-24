@@ -304,7 +304,10 @@ func TestRunIngestionLoop_AdvancesLatestLedger(t *testing.T) {
 	c := chunk.ID(0)
 	first := c.FirstLedger()
 
-	stream := streamForSeqs(t, first, first+2)
+	stream := &fakeCoreStream{frames: map[uint32][]byte{}}
+	for seq := first; seq <= first+2; seq++ {
+		stream.frames[seq] = rpcv2test.ZeroTxLCMBytesAt(t, seq, int64(seq)*7)
+	}
 	stream.endErr = errors.New("end")
 	cfg, _ := loopConfig(t, stream, cat, first)
 	registry := query.NewRegistry(cat, geometry.NewRetention(0, 0))
@@ -313,6 +316,12 @@ func TestRunIngestionLoop_AdvancesLatestLedger(t *testing.T) {
 	require.Error(t, runIngestionLoop(context.Background(), cfg))
 
 	assert.Equal(t, first+2, registry.LatestLedger(), "the latest ledger advanced to the last committed one")
+	view, err := registry.NewReadView()
+	require.NoError(t, err)
+	defer view.Release()
+	ct, ok := view.LatestCloseTime()
+	assert.True(t, ok)
+	assert.Equal(t, int64(first+2)*7, ct, "the stamp carries the committed ledger's close time")
 }
 
 // ---------------------------------------------------------------------------
