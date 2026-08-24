@@ -3,12 +3,15 @@ package bench
 import (
 	"context"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/stellar/go-stellar-sdk/network"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
@@ -138,11 +141,23 @@ func TestQuerySpecs(t *testing.T) {
 	require.Equal(t, []string{"total_c1", "total_c4"}, byName["ledgers"])
 	require.Equal(t, []string{"total_c1", "total_c4"}, byName["events"])
 	require.Equal(t, []string{
-		"open",
+		"open", "evict",
 		"ledgers_c1", "ledgers_c4",
 		"events_c1", "events_c4",
 		"peak_rss_bytes",
 	}, byName["driver"])
+}
+
+// TestQuerySpecsTxHashStages pins the found/miss rows the txhash file carries
+// beside the blended cell the converter reads.
+func TestQuerySpecsTxHashStages(t *testing.T) {
+	specs := querySpecs([]string{queryTypeTxHash}, []int{1, 4})
+	require.Equal(t, queryTypeTxHash, specs[0].name)
+	require.Equal(t, []string{
+		"total_c1", "total_c4",
+		"found_c1", "found_c4",
+		"miss_c1", "miss_c4",
+	}, specs[0].rowOrder)
 }
 
 // TestQuerySinkWritesContractRows records one cell per type and checks the
@@ -236,14 +251,135 @@ func TestOpenColdFixtureServesFrozenChunks(t *testing.T) {
 	assert.Equal(t, chunkID, coverages[0].Hi)
 }
 
-// TestRunQueryColdWritesSetupReport drives runQueryCold over a real frozen
-// chunk with the sweep the campaign runner asks for. The per-type bodies are
-// #856 B2, so the sweep stops at the first cell and the run writes the PARTIAL
-// report: this pins that the setup rows still land and that the error names the
-// type. Replace the unimplemented assertions with the per-cell rows when B2
-// fills the bodies in.
-func TestRunQueryColdWritesSetupReport(t *testing.T) {
+// testQueryPlan is the sweep the end-to-end tests run: every type, two
+// concurrency levels, few enough iterations to stay quick. The spans are small
+// because the fixture chunk is synthetic, and the miss fraction is high enough
+// that a short cell reliably produces both a found and a not-found lookup.
+func testQueryPlan(iters int) queryPlan {
+	return queryPlan{
+		Types:        allQueryTypes,
+		Concurrency:  []int{1, 2},
+		Iters:        iters,
+		LedgersSpan:  4,
+		TxPageSpan:   2,
+		TxPageLimit:  10,
+		EventsLimit:  10,
+		MissFraction: 0.5,
+		Passphrase:   network.PublicNetworkPassphrase,
+		Seed:         defaultSeed,
+	}
+}
+
+// TestRunQueryCold is the cold end-to-end: ingest a chunk, then sweep every
+// query type over its frozen artifacts and check the report the results
+// converter will read — one CSV per type carrying a total_c<W> row per
+// concurrency level, and driver.csv carrying the matching cell walls plus the
+// setup rows.
+func TestRunQueryCold(t *testing.T) {
+	const iters = 5
 	chunkID := chunk.ID(0)
+	coldRoot := ingestColdChunk(t, chunkID)
+
+	csvDir := filepath.Join(t.TempDir(), "csv")
+	plan := testQueryPlan(iters)
+	plan.Evict = true
+	require.NoError(t, runQueryCold(context.Background(), testLogger(), coldQueryOptions{
+		ColdRoot:   coldRoot,
+		StartChunk: chunkID,
+		NumChunks:  1,
+		Plan:       plan,
+		OutDir:     csvDir,
+	}))
+
+	assertQueryReport(t, csvDir, plan, iters)
+
+	driver := readCSV(t, filepath.Join(csvDir, "driver.csv"))
+	require.Contains(t, driver, "open")
+	assert.EqualValues(t, 1, driver["open"]["n_items"], "one chunk opened")
+	// One eviction pass runs per cell, but the sink drops zero-duration samples
+	// and off Linux the pass is a no-op that finishes inside a timer tick — so
+	// the row's presence and the artifacts it named are what can be asserted
+	// everywhere, not the sample count.
+	require.Contains(t, driver, "evict", "a cold cell evicts before it measures")
+	assert.LessOrEqual(t, driver["evict"]["n"], int64(len(plan.Types)*len(plan.Concurrency)),
+		"at most one eviction pass per cell")
+	assert.Positive(t, driver["evict"]["n_items"], "the eviction pass named some artifacts")
+}
+
+// TestRunQueryHot is the hot end-to-end: ingest a chunk into a hot database,
+// then sweep every query type against it. It also covers the warmup pass, which
+// only the hot tier runs.
+func TestRunQueryHot(t *testing.T) {
+	const (
+		ingested = 400
+		iters    = 5
+	)
+	chunkID := chunk.ID(0)
+	packDir, _ := writeSourcePack(t, t.TempDir(), chunkID, ingested)
+	hotRoot := t.TempDir()
+	require.NoError(t, runHot(context.Background(), testLogger(), hotOptions{
+		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
+		StartChunk: chunkID,
+		NumChunks:  1,
+		NumLedgers: ingested,
+		HotRoot:    hotRoot,
+		OutDir:     filepath.Join(t.TempDir(), "csv"),
+	}))
+
+	csvDir := filepath.Join(t.TempDir(), "csv")
+	plan := testQueryPlan(iters)
+	plan.Warmup = 2
+	require.NoError(t, runQueryHot(context.Background(), testLogger(), hotQueryOptions{
+		HotRoot: hotRoot,
+		Chunk:   chunkID,
+		Plan:    plan,
+		OutDir:  csvDir,
+	}))
+
+	assertQueryReport(t, csvDir, plan, iters)
+
+	driver := readCSV(t, filepath.Join(csvDir, "driver.csv"))
+	assert.NotContains(t, driver, "evict", "a hot run has no page-cache artifacts to evict")
+}
+
+// assertQueryReport checks a finished run's CSVs against the converter's
+// contract: every swept cell present, its sample count exactly what the sweep
+// promised (workers × iters), and every cell wall recorded in driver.csv. It
+// also checks txhash's found/miss rows partition the blended row, which is the
+// property that lets the split be reported without touching the cell the
+// converter reads.
+func assertQueryReport(t *testing.T, csvDir string, plan queryPlan, iters int) {
+	t.Helper()
+	driver := readCSV(t, filepath.Join(csvDir, "driver.csv"))
+
+	for _, qtype := range plan.Types {
+		rows := readCSV(t, filepath.Join(csvDir, qtype+".csv"))
+		for _, w := range plan.Concurrency {
+			cell := queryCellRow(w)
+			require.Contains(t, rows, cell, "%s is missing its c%d cell", qtype, w)
+			assert.EqualValues(t, w*iters, rows[cell]["n"],
+				"%s c%d must hold one sample per request", qtype, w)
+
+			wall := queryDriverRow(qtype, w)
+			require.Contains(t, driver, wall, "driver.csv is missing %s", wall)
+			assert.Positive(t, driver[wall]["total_ns"], "%s took no time", wall)
+		}
+		if qtype != queryTypeTxHash {
+			continue
+		}
+		for _, w := range plan.Concurrency {
+			found := rows[txHashStageFound+"_c"+strconv.Itoa(w)]
+			miss := rows[txHashStageMiss+"_c"+strconv.Itoa(w)]
+			assert.Equal(t, rows[queryCellRow(w)]["n"], found["n"]+miss["n"],
+				"txhash c%d: the found and miss rows must partition the blended row", w)
+		}
+	}
+}
+
+// ingestColdChunk runs bench-ingest cold over a synthetic pack and returns the
+// frozen artifact root, which is what a cold query run reads.
+func ingestColdChunk(t *testing.T, chunkID chunk.ID) string {
+	t.Helper()
 	packDir, _ := writeSourcePack(t, t.TempDir(), chunkID, chunk.LedgersPerChunk)
 	coldRoot := t.TempDir()
 	require.NoError(t, runCold(context.Background(), testLogger(), coldOptions{
@@ -254,22 +390,39 @@ func TestRunQueryColdWritesSetupReport(t *testing.T) {
 		ColdRoot:   coldRoot,
 		OutDir:     filepath.Join(t.TempDir(), "csv"),
 	}))
+	return coldRoot
+}
 
-	csvDir := filepath.Join(t.TempDir(), "csv")
+// TestQueryRejectsWrongPassphrase pins the corpus build failing loudly on a
+// passphrase the dataset was not signed under. Without the check every lookup
+// would report not-found and the run would publish the miss path's latency
+// under the hit path's name.
+func TestQueryRejectsWrongPassphrase(t *testing.T) {
+	chunkID := chunk.ID(0)
+	coldRoot := ingestColdChunk(t, chunkID)
+
+	plan := testQueryPlan(2)
+	plan.Types = []string{queryTypeTxHash}
+	plan.Passphrase = network.TestNetworkPassphrase
 	err := runQueryCold(context.Background(), testLogger(), coldQueryOptions{
 		ColdRoot:   coldRoot,
 		StartChunk: chunkID,
 		NumChunks:  1,
-		Plan:       queryPlan{Types: allQueryTypes, Concurrency: []int{1, 4, 16}, Iters: 100},
-		OutDir:     csvDir,
+		Plan:       plan,
+		OutDir:     filepath.Join(t.TempDir(), "csv"),
 	})
-	require.ErrorIs(t, err, errQueryTypeUnimplemented)
-	require.ErrorContains(t, err, queryTypeLedgers, "the error names the type that stopped the sweep")
+	require.ErrorContains(t, err, "--network-passphrase")
+}
 
-	driver := readCSV(t, filepath.Join(csvDir, "driver.csv"))
-	require.Contains(t, driver, "open")
-	assert.EqualValues(t, 1, driver["open"]["n"])
-	assert.EqualValues(t, 1, driver["open"]["n_items"], "one chunk opened")
+// TestEvictionStateRecordsPlatform pins what invocation.json says about
+// eviction: what was asked for, and whether this platform could do it.
+func TestEvictionStateRecordsPlatform(t *testing.T) {
+	assert.Equal(t, "off", evictionState(false))
+	if evictSupported {
+		assert.Equal(t, "on", evictionState(true))
+		return
+	}
+	assert.Equal(t, "unsupported-on-this-platform", evictionState(true))
 }
 
 // TestOpenColdFixtureRejectsMissingChunk pins the open failing with the chunk

@@ -30,21 +30,24 @@ func newQueryColdCommand() *cobra.Command {
 		startChunk uint32
 		numChunks  int
 		coldDir    string
+		evict      bool
 	)
 	cmd := newBenchCommand("cold",
 		"Benchmark cold reads: queries served from a chunk range's frozen artifacts",
 		&prof,
-		func(ctx context.Context, logger *supportlog.Entry, outDir string) error {
+		func(ctx context.Context, logger *supportlog.Entry, env runEnv) error {
 			plan, err := qf.plan()
 			if err != nil {
 				return err
 			}
+			plan.Evict = evict
+			env.Extra["pageCacheEviction"] = evictionState(evict)
 			return runQueryCold(ctx, logger, coldQueryOptions{
 				ColdRoot:   coldDir,
 				StartChunk: chunk.ID(startChunk),
 				NumChunks:  numChunks,
 				Plan:       plan,
-				OutDir:     outDir,
+				OutDir:     env.OutDir,
 			})
 		}, &qf)
 	fs := cmd.Flags()
@@ -52,8 +55,26 @@ func newQueryColdCommand() *cobra.Command {
 	fs.IntVar(&numChunks, "num-chunks", 1, "how many consecutive chunks to query starting at --start-chunk")
 	fs.StringVar(&coldDir, "cold-dir", "",
 		"root of the frozen artifact tree to query, as bench-ingest cold's --cold-out-dir laid it out (required)")
+	fs.BoolVar(&evict, "evict-page-cache", true,
+		"drop the cold artifacts from the OS page cache before each cell, so a cold read is really cold "+
+			"(Linux only; elsewhere the run records that it did not happen)")
 	markRequired(cmd, "start-chunk", "cold-dir")
 	return cmd
+}
+
+// evictionState is what invocation.json records about page-cache eviction: what
+// was asked for, and — since the syscall exists only on Linux — whether this
+// platform could honor it. A cold number measured without eviction is a warm
+// number, so that distinction has to reach the results.
+func evictionState(requested bool) string {
+	switch {
+	case !requested:
+		return "off"
+	case evictSupported:
+		return "on"
+	default:
+		return "unsupported-on-this-platform"
+	}
 }
 
 // coldQueryOptions configures one cold read benchmark run.
@@ -160,15 +181,46 @@ func openColdFixture(logger *supportlog.Entry, opts coldQueryOptions) (*queryFix
 	registry.SetLatestLedger(end.LastLedger())
 	f := &queryFixture{
 		registry:    registry,
+		Logger:      logger,
+		Layout:      layout,
+		Passphrase:  opts.Plan.Passphrase,
 		Chunks:      chunks,
 		FirstLedger: opts.StartChunk.FirstLedger(),
 		LastLedger:  end.LastLedger(),
+		EvictPaths:  coldArtifactPaths(cat, layout, chunks),
 	}
 	if err := f.verifyServes(); err != nil {
 		release()
 		return nil, nil, err
 	}
 	return f, release, nil
+}
+
+// coldArtifactPaths lists every file the benchmarked chunks are served from —
+// each chunk's artifacts plus the frozen tx-hash window indexes — so a cold cell
+// can drop them from the page cache. It reads the catalog rather than the disk,
+// so it names exactly what routing will open.
+func coldArtifactPaths(cat *catalog.Catalog, layout geometry.Layout, chunks []chunk.ID) []string {
+	var paths []string
+	for _, c := range chunks {
+		for _, kind := range geometry.AllKinds() {
+			state, err := cat.State(c, kind)
+			if err != nil || state != geometry.StateFrozen {
+				continue
+			}
+			paths = append(paths, layout.ArtifactPaths(c, kind)...)
+		}
+	}
+	covs, err := cat.AllTxHashIndexKeys()
+	if err != nil {
+		return paths
+	}
+	for _, cov := range covs {
+		if cov.State == geometry.StateFrozen {
+			paths = append(paths, layout.TxHashIndexFilePath(cov))
+		}
+	}
+	return paths
 }
 
 // freezeChunks runs the freeze bracket over each chunk for the artifact kinds

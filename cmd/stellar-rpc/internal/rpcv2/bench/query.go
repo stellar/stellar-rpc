@@ -12,9 +12,11 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/stellar/go-stellar-sdk/network"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 )
 
@@ -61,7 +63,8 @@ var allQueryTypes = []string{queryTypeLedgers, queryTypeTxPage, queryTypeTxHash,
 // carries the matching <qtype>_c<W> cell wall-clock plus the fixture open.
 const (
 	queryRowTotalPrefix = "total_c"
-	driverQueryOpen     = "open" // fixture open: catalog, handles, first read view
+	driverQueryOpen     = "open"  // fixture open: catalog, handles, first read view
+	driverQueryEvict    = "evict" // one page-cache eviction pass before a cold cell
 )
 
 // queryCellRow is a per-type CSV's row label for concurrency level w.
@@ -73,22 +76,38 @@ func queryDriverRow(qtype string, w int) string {
 	return qtype + "_c" + strconv.Itoa(w)
 }
 
-// errQueryTypeUnimplemented is what a sweep cell returns until #856 B2 fills in
-// the per-type bodies. It is deliberately loud: a run reaches it only after the
-// flag surface, the fixture, and the report schema have all been exercised, and
-// the PARTIAL report it leaves behind carries the setup rows.
-var errQueryTypeUnimplemented = errors.New("query bench body not implemented")
+// Defaults for the read-shape flags. The two span defaults are the v2 page caps
+// for their endpoints, so a default run reads what a client asks for; the miss
+// fraction matches the share of by-hash lookups a production node sees asking
+// for a hash that never landed.
+const (
+	defaultLedgersSpan  = 20
+	defaultTxPageSpan   = 5
+	defaultTxPageLimit  = 200
+	defaultEventsLimit  = 100
+	defaultMissFraction = 0.12
+	defaultSeed         = 1
+)
 
 // queryFlags is the sweep flag set both bench-query subcommands share, beyond
 // the --out and profiling flags newBenchCommand binds. The spellings and value
-// formats are the campaign runner's argv contract: --types is a comma-separated
-// type list, --query-concurrency a comma-separated reader-count list.
+// formats of --types, --query-concurrency, --iters, and --warmup are the
+// campaign runner's argv contract; the read-shape flags after them are
+// bench-side only, so the runner's argv keeps working untouched.
 type queryFlags struct {
 	types       string
 	concurrency string
 	iters       int
 	warmup      int
 	warmupBound bool // bind --warmup (hot only; a cold cell evicts instead of warming)
+
+	ledgersSpan  uint32
+	txPageSpan   uint32
+	txPageLimit  int
+	eventsLimit  int
+	missFraction float64
+	passphrase   string
+	seed         int64
 }
 
 func (f *queryFlags) bind(cmd *cobra.Command) {
@@ -102,15 +121,44 @@ func (f *queryFlags) bind(cmd *cobra.Command) {
 		fs.IntVar(&f.warmup, "warmup", f.warmup,
 			"unmeasured queries per cell before the measured ones, warming the store's caches")
 	}
+	fs.Uint32Var(&f.ledgersSpan, "ledgers-span", defaultLedgersSpan,
+		"ledgers one ledgers query scans (1 = a point read)")
+	fs.Uint32Var(&f.txPageSpan, "txpage-span", defaultTxPageSpan,
+		"ledgers one txpage query walks")
+	fs.IntVar(&f.txPageLimit, "txpage-limit", defaultTxPageLimit,
+		"transactions one txpage query materializes before it stops, as a page cap")
+	fs.IntVar(&f.eventsLimit, "events-limit", defaultEventsLimit,
+		"events one events page may return")
+	fs.Float64Var(&f.missFraction, "miss-fraction", defaultMissFraction,
+		"share of txhash lookups asking for a hash that never landed, in [0, 1] "+
+			"(a miss probes every index, so it is the path's worst case)")
+	fs.StringVar(&f.passphrase, "network-passphrase", network.PublicNetworkPassphrase,
+		"network passphrase the dataset's transactions were signed under; txhash and "+
+			"txpage need it to pair envelopes, and a wrong one fails the corpus build")
+	fs.Int64Var(&f.seed, "seed", defaultSeed,
+		"seed for the work each query picks, so a re-run reads the same ledgers")
 }
 
 // queryPlan is the validated sweep: which types, at which concurrency levels,
-// for how many queries per cell.
+// how many queries per cell, and the shape of each query.
 type queryPlan struct {
 	Types       []string
 	Concurrency []int
 	Iters       int
 	Warmup      int
+
+	LedgersSpan  uint32
+	TxPageSpan   uint32
+	TxPageLimit  int
+	EventsLimit  int
+	MissFraction float64
+	Passphrase   string
+	Seed         int64
+
+	// Evict drops the cold artifacts from the OS page cache before each cell's
+	// measured pass. Cold only: the hot tier's steady state is a warm cache, so
+	// its cells warm up instead.
+	Evict bool
 }
 
 // plan parses and validates the sweep flags.
@@ -123,13 +171,37 @@ func (f *queryFlags) plan() (queryPlan, error) {
 	if err != nil {
 		return queryPlan{}, err
 	}
-	if f.iters < 1 {
+	switch {
+	case f.iters < 1:
 		return queryPlan{}, fmt.Errorf("--iters must be >= 1, got %d", f.iters)
-	}
-	if f.warmup < 0 {
+	case f.warmup < 0:
 		return queryPlan{}, fmt.Errorf("--warmup must be >= 0, got %d", f.warmup)
+	case f.ledgersSpan < 1:
+		return queryPlan{}, fmt.Errorf("--ledgers-span must be >= 1, got %d", f.ledgersSpan)
+	case f.txPageSpan < 1:
+		return queryPlan{}, fmt.Errorf("--txpage-span must be >= 1, got %d", f.txPageSpan)
+	case f.txPageLimit < 1:
+		return queryPlan{}, fmt.Errorf("--txpage-limit must be >= 1, got %d", f.txPageLimit)
+	case f.eventsLimit < 1:
+		return queryPlan{}, fmt.Errorf("--events-limit must be >= 1, got %d", f.eventsLimit)
+	case f.missFraction < 0 || f.missFraction > 1:
+		return queryPlan{}, fmt.Errorf("--miss-fraction must be in [0, 1], got %v", f.missFraction)
+	case f.passphrase == "":
+		return queryPlan{}, errors.New("--network-passphrase is required")
 	}
-	return queryPlan{Types: types, Concurrency: concurrency, Iters: f.iters, Warmup: f.warmup}, nil
+	return queryPlan{
+		Types:        types,
+		Concurrency:  concurrency,
+		Iters:        f.iters,
+		Warmup:       f.warmup,
+		LedgersSpan:  f.ledgersSpan,
+		TxPageSpan:   f.txPageSpan,
+		TxPageLimit:  f.txPageLimit,
+		EventsLimit:  f.eventsLimit,
+		MissFraction: f.missFraction,
+		Passphrase:   f.passphrase,
+		Seed:         f.seed,
+	}, nil
 }
 
 // parseQueryTypes splits --types, keeping the caller's order and rejecting an
@@ -189,6 +261,21 @@ func parseConcurrency(s string) ([]int, error) {
 type queryFixture struct {
 	registry *query.Registry
 
+	// Logger reports what the fixture cannot return — a cold tx-hash index that
+	// failed to close after a request used it, for instance.
+	Logger *supportlog.Entry
+
+	// Layout resolves the dataset's paths. The by-hash benchmark needs it to
+	// open the frozen window indexes, and a cold run to evict them; both are
+	// jobs the read facade will own once its cold index accessor lands (see
+	// queryFixture.coldTxIndexes).
+	Layout geometry.Layout
+
+	// Passphrase is the network the dataset's transactions were signed under.
+	// Materializing a transaction pairs its envelope by hash, so txpage and
+	// txhash both need it and a wrong one makes every lookup a miss.
+	Passphrase string
+
 	// Chunks is the benchmarked chunk range, ascending.
 	Chunks []chunk.ID
 
@@ -196,6 +283,11 @@ type queryFixture struct {
 	// the chunk range's span for a cold fixture, and for a hot one what the hot
 	// database actually holds, narrowed further by --sample-ledgers.
 	FirstLedger, LastLedger uint32
+
+	// EvictPaths are the on-disk artifacts a cold cell drops from the page cache
+	// before it measures. Empty for a hot fixture, whose data lives in RocksDB's
+	// own caches rather than in files the bench can advise on.
+	EvictPaths []string
 }
 
 // view acquires one read view. Every measured query takes its own, as a served
@@ -223,45 +315,100 @@ func (f *queryFixture) verifyServes() error {
 	return nil
 }
 
+// evictColdArtifacts drops the fixture's cold artifacts from the OS page cache
+// and reports how many files it advised. Without it a cold cell after the first
+// reads what the previous cell just paged in, and the sweep would show a warming
+// curve rather than a concurrency curve.
+//
+// A file that cannot be opened is skipped rather than failing the run: the
+// artifact set is derived from the layout, so a kind the dataset never produced
+// is a legitimate absence.
+func (f *queryFixture) evictColdArtifacts() (int, error) {
+	evicted := 0
+	for _, path := range f.EvictPaths {
+		if err := evictFile(path); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return evicted, fmt.Errorf("evict %s from the page cache: %w", path, err)
+		}
+		evicted++
+	}
+	return evicted, nil
+}
+
 // runQuerySweep sweeps every requested type at every concurrency level against
 // the fixture, recording each cell's per-query distribution in the sink.
 //
-// The per-type bodies and the concurrency worker pool are #856 B2: each cell
-// currently returns errQueryTypeUnimplemented naming its type, so a run proves
-// out the flag surface, the fixture open, and the report schema, then writes a
-// PARTIAL report holding the setup rows.
+// A type's corpus is sampled once, before its first cell, and shared by every
+// concurrency level: re-sampling per level would make the levels read different
+// work and turn the concurrency curve into noise.
 func runQuerySweep(
 	ctx context.Context, logger *supportlog.Entry, f *queryFixture, p queryPlan, sink *csvSink,
 ) error {
 	for _, qtype := range p.Types {
+		req, err := newQueryRequest(ctx, logger, f, p, qtype)
+		if err != nil {
+			return fmt.Errorf("prepare the %s benchmark: %w", qtype, err)
+		}
 		for _, w := range p.Concurrency {
-			logger.Infof("query %s at concurrency %d: %d iters (warmup %d)", qtype, w, p.Iters, p.Warmup)
-			if err := runQueryCell(ctx, f, p, sink, qtype, w); err != nil {
+			if err := runQueryCell(logger, f, p, sink, qtype, w, req); err != nil {
 				return fmt.Errorf("query %s at concurrency %d: %w", qtype, w, err)
+			}
+			if err := ctx.Err(); err != nil {
+				return err
 			}
 		}
 	}
 	return nil
 }
 
-// runQueryCell runs one (type, concurrency) cell: p.Warmup unmeasured queries
-// then p.Iters measured ones, recording each query as a total_c<W> sample in
-// the type's CSV and the cell's wall-clock as driver.csv's <qtype>_c<W> row.
+// runQueryCell runs one (type, concurrency) cell: page-cache eviction for a
+// cold run, then p.Warmup unmeasured requests and p.Iters measured ones on each
+// of w workers.
 //
-// #856 B2 fills in the bodies against the ReadView seams — ScanLedgers for
-// ledgers and txpage, the read_assembly lookup for txhash, QueryEvents for
-// events — plus the worker pool that gives a level above 1 its readers, and the
-// page-cache eviction a cold cell runs first.
+// The cell's seed mixes in the type so two types do not read the same ledgers in
+// the same order, which would let the second inherit the first's warm cache.
 func runQueryCell(
-	_ context.Context, _ *queryFixture, _ queryPlan, _ *csvSink, qtype string, _ int,
+	logger *supportlog.Entry, f *queryFixture, p queryPlan, sink *csvSink,
+	qtype string, w int, req queryRequest,
 ) error {
-	switch qtype {
-	case queryTypeLedgers, queryTypeTxPage, queryTypeTxHash, queryTypeEvents:
-		return fmt.Errorf("%w: %s", errQueryTypeUnimplemented, qtype)
-	default:
-		// Unreachable: parseQueryTypes rejects anything else.
-		return fmt.Errorf("unknown query type %q", qtype)
+	if p.Evict {
+		start := time.Now()
+		evicted, err := f.evictColdArtifacts()
+		if err != nil {
+			return err
+		}
+		sink.observe(fileDriver, driverQueryEvict, time.Since(start), evicted)
 	}
+	logger.Infof("query %s at concurrency %d: %d iters, %d warmup", qtype, w, p.Iters, p.Warmup)
+
+	res := runSweep(w, p.Warmup, p.Iters, p.Seed+int64(len(qtype)), req)
+	if res.errs > 0 {
+		return fmt.Errorf("%d of %d requests failed", res.errs, w*p.Iters)
+	}
+	recordCell(sink, qtype, w, res)
+	return nil
+}
+
+// recordCell files one cell's samples into the report.
+//
+// Every sample lands in the type's total_c<W> row — the blended cell the results
+// converter reads — and a sample carrying a sub-stage additionally lands in a
+// <stage>_c<W> row of the same file. The converter ignores those extra rows
+// (it matches total_c<W> alone), so they cost the site nothing and give the CSV
+// and the log summary the split that matters locally: txhash's found and
+// not-found lookups do different amounts of work, and a blended p99 cannot say
+// which of them moved.
+func recordCell(sink *csvSink, qtype string, w int, res sweepResult) {
+	total := queryCellRow(w)
+	for _, s := range res.samples {
+		sink.observe(qtype, total, s.d, s.items)
+		if s.stage != "" {
+			sink.observe(qtype, s.stage+"_c"+strconv.Itoa(w), s.d, s.items)
+		}
+	}
+	sink.observe(fileDriver, queryDriverRow(qtype, w), res.wall, len(res.samples))
 }
 
 // runQueryBench is the body both bench-query subcommands share: prepare --out,

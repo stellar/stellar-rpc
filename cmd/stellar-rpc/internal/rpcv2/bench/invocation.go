@@ -24,6 +24,11 @@ type invocationRecord struct {
 	Hostname      string            `json:"hostname"`
 	StartedAt     string            `json:"startedAt"`
 	FinishedAt    string            `json:"finishedAt"`
+	// Extra carries facts the run resolved for itself rather than read off a
+	// flag — whether page-cache eviction actually ran, for instance, which
+	// depends on the platform as well as the flag. Absent when the run recorded
+	// none.
+	Extra map[string]string `json:"extra,omitempty"`
 	// Error carries a failed run's error message; absent on a successful run.
 	Error string `json:"error,omitempty"`
 }
@@ -43,7 +48,7 @@ type binaryInfo struct {
 func writeInvocationJSON(
 	outDir string,
 	cmd *cobra.Command,
-	flags map[string]string,
+	flags, extra map[string]string,
 	startedAt, finishedAt time.Time,
 	runErr error,
 ) error {
@@ -68,6 +73,9 @@ func writeInvocationJSON(
 		StartedAt:  startedAt.UTC().Format(time.RFC3339),
 		FinishedAt: finishedAt.UTC().Format(time.RFC3339),
 		Error:      errMsg,
+	}
+	if len(extra) > 0 {
+		record.Extra = extra
 	}
 
 	data, err := json.MarshalIndent(record, "", "  ")

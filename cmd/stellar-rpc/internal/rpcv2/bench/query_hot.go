@@ -35,7 +35,7 @@ func newQueryHotCommand() *cobra.Command {
 	cmd := newBenchCommand("hot",
 		"Benchmark hot reads: queries served from one chunk's hot database",
 		&prof,
-		func(ctx context.Context, logger *supportlog.Entry, outDir string) error {
+		func(ctx context.Context, logger *supportlog.Entry, env runEnv) error {
 			plan, err := qf.plan()
 			if err != nil {
 				return err
@@ -45,7 +45,7 @@ func newQueryHotCommand() *cobra.Command {
 				Chunk:         chunk.ID(chunkID),
 				SampleLedgers: sampleLedgers,
 				Plan:          plan,
-				OutDir:        outDir,
+				OutDir:        env.OutDir,
 			})
 		}, &qf)
 	fs := cmd.Flags()
@@ -175,6 +175,9 @@ func openHotFixture(logger *supportlog.Entry, opts hotQueryOptions) (*queryFixtu
 	}
 	f := &queryFixture{
 		registry:    registry,
+		Logger:      logger,
+		Layout:      layout,
+		Passphrase:  opts.Plan.Passphrase,
 		Chunks:      []chunk.ID{opts.Chunk},
 		FirstLedger: first,
 		LastLedger:  last,
