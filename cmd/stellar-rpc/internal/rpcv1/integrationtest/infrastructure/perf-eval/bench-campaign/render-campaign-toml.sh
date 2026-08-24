@@ -100,6 +100,14 @@ fi
 if [ "$INGEST" = none ] && [ "$QUERY" = no ]; then
   die "ingest=none with query=no is an empty campaign; pick an ingest mode or set query=yes"
 fi
+# The hot query legs read the hot database the hot ingest leg leaves behind: the
+# runner wipes that dir before each rep and keeps it after the last one for
+# exactly this reason. Without a hot ingest the dir never exists, and the leg
+# fails on the box — after the toolchain install, the build and the dataset sync,
+# an hour into a paid run. Fail here instead.
+if [ "$QUERY" = yes ] && [ "$INGEST" != both ] && [ "$INGEST" != hot ]; then
+  die "query legs need a hot DB: use ingest=both or ingest=hot, got ingest=$INGEST"
+fi
 
 # A leading `-` is rejected everywhere below: these values are passed as
 # arguments to commands on the box (`git checkout "$ref"`, the runner CLI, the
