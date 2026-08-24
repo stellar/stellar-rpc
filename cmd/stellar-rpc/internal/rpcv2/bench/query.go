@@ -16,7 +16,6 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 )
 
@@ -260,16 +259,6 @@ func parseConcurrency(s string) ([]int, error) {
 // that succeeds proves the intended tier served it.
 type queryFixture struct {
 	registry *query.Registry
-
-	// Logger reports what the fixture cannot return — a cold tx-hash index that
-	// failed to close after a request used it, for instance.
-	Logger *supportlog.Entry
-
-	// Layout resolves the dataset's paths. The by-hash benchmark needs it to
-	// open the frozen window indexes, and a cold run to evict them; both are
-	// jobs the read facade will own once its cold index accessor lands (see
-	// queryFixture.coldTxIndexes).
-	Layout geometry.Layout
 
 	// Passphrase is the network the dataset's transactions were signed under.
 	// Materializing a transaction pairs its envelope by hash, so txpage and

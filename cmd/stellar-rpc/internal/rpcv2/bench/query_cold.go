@@ -178,11 +178,9 @@ func openColdFixture(logger *supportlog.Entry, opts coldQueryOptions) (*queryFix
 	}
 
 	registry := query.NewRegistry(cat, geometry.NewRetention(0, opts.StartChunk))
-	registry.SetLatestLedger(end.LastLedger())
+	registry.SetLatestLedger(end.LastLedger(), 0)
 	f := &queryFixture{
 		registry:    registry,
-		Logger:      logger,
-		Layout:      layout,
 		Passphrase:  opts.Plan.Passphrase,
 		Chunks:      chunks,
 		FirstLedger: opts.StartChunk.FirstLedger(),

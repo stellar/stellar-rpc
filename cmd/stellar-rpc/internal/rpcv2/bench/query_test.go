@@ -2,6 +2,7 @@ package bench
 
 import (
 	"context"
+	"math/rand/v2"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -243,13 +244,26 @@ func TestOpenColdFixtureServesFrozenChunks(t *testing.T) {
 	assert.Equal(t, from+10, next, "the scan yielded every ledger in the range")
 
 	// The backfill built one partial window index; the fixture must have named
-	// it, else the by-hash lookup has nothing to probe.
-	coverages, err := view.ColdTxHashIndexCoverages()
+	// it, else the by-hash lookup has nothing to probe. The view opens the .idx
+	// on the first probe, not here, so resolving a hash the chunk really holds
+	// is what proves the fixture named the right window: a wrong coverage
+	// resolves to a path that does not exist and the probe fails.
+	idxs, err := view.ColdTxIndexes()
 	require.NoError(t, err)
-	require.Len(t, coverages, 1)
-	assert.Equal(t, chunkID, coverages[0].Lo)
-	assert.Equal(t, chunkID, coverages[0].Hi)
+	require.Len(t, idxs, 1)
+
+	hashes, err := sampleChunkTxHashes(view, chunkID, f.FirstLedger, f.LastLedger, testRNG())
+	require.NoError(t, err)
+	require.NotEmpty(t, hashes, "the synthetic chunk holds transactions to probe")
+	seq, err := idxs[0].Get(hashes[0])
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, seq, f.FirstLedger)
+	assert.LessOrEqual(t, seq, f.LastLedger)
 }
+
+// testRNG is a fixed-seed generator for the corpus samplers the tests drive
+// directly.
+func testRNG() *rand.Rand { return rand.New(rand.NewPCG(defaultSeed, defaultSeed)) }
 
 // testQueryPlan is the sweep the end-to-end tests run: every type, two
 // concurrency levels, few enough iterations to stay quick. The spans are small
