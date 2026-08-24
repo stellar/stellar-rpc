@@ -29,11 +29,10 @@ func NewTransactionReader(registry *query.Registry, networkPassphrase string) *T
 }
 
 func (r *TransactionReader) GetTransaction(ctx context.Context, hash xdr.Hash) (store.Transaction, error) {
-	view, release, err := acquireView(ctx, r.registry)
+	view, err := viewFrom(ctx)
 	if err != nil {
 		return store.Transaction{}, markErr(ctx, err)
 	}
-	defer release()
 
 	coldIndexes := func() ([]txhash.HashIndex, error) {
 		cold, err := view.ColdTxIndexes()

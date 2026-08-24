@@ -27,12 +27,10 @@ func sharedViewFixture(t *testing.T) (*query.Registry, uint32) {
 	return r, first
 }
 
-func TestSharedView_OneSnapshotPerRequest(t *testing.T) {
+func TestWithView_OneSnapshotPerRequest(t *testing.T) {
 	r, first := sharedViewFixture(t)
 	reader := NewLedgerReader(r)
-
-	ctx, release := WithSharedView(context.Background())
-	defer release()
+	ctx := viewCtx(t, r)
 
 	got, err := reader.GetLatestLedgerSequence(ctx)
 	require.NoError(t, err)
@@ -43,26 +41,19 @@ func TestSharedView_OneSnapshotPerRequest(t *testing.T) {
 	got, err = reader.GetLatestLedgerSequence(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, first+2, got,
-		"the request's snapshot froze at its first acquisition")
+		"the request's snapshot froze at acquisition")
 
 	_, found, err := reader.GetLedger(ctx, first+3)
 	require.NoError(t, err)
 	assert.False(t, found,
 		"a ledger committed after the snapshot is invisible to this request")
-
-	fresh, err := reader.GetLatestLedgerSequence(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, first+3, fresh,
-		"a context without a holder acquires its own fresh view")
 }
 
-func TestSharedView_SharedAcrossAdapters(t *testing.T) {
+func TestWithView_SharedAcrossAdapters(t *testing.T) {
 	r, first := sharedViewFixture(t)
 	txReader := NewTransactionReader(r, network.PublicNetworkPassphrase)
 	ledgerReader := NewLedgerReader(r)
-
-	ctx, release := WithSharedView(context.Background())
-	defer release()
+	ctx := viewCtx(t, r)
 
 	_, err := txReader.GetTransaction(ctx, xdr.Hash{1})
 	assert.ErrorIs(t, err, store.ErrNoTransaction)
@@ -72,15 +63,28 @@ func TestSharedView_SharedAcrossAdapters(t *testing.T) {
 	got, err := ledgerReader.GetLatestLedgerSequence(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, first+2, got,
-		"the ledger reader sees the snapshot the transaction reader acquired")
+		"both adapters read through the one view the context carries")
 }
 
-func TestSharedView_TxDoneLeavesTheRequestViewAlive(t *testing.T) {
+func TestViewFrom_ContextWithoutViewIsAnError(t *testing.T) {
+	r, _ := sharedViewFixture(t)
+	ledgerReader := NewLedgerReader(r)
+	txReader := NewTransactionReader(r, network.PublicNetworkPassphrase)
+
+	_, err := ledgerReader.GetLatestLedgerSequence(context.Background())
+	assert.ErrorIs(t, err, errNoView)
+
+	_, err = ledgerReader.NewTx(context.Background())
+	assert.ErrorIs(t, err, errNoView)
+
+	_, err = txReader.GetTransaction(context.Background(), xdr.Hash{1})
+	assert.ErrorIs(t, err, errNoView)
+}
+
+func TestWithView_TxDoneLeavesTheRequestViewAlive(t *testing.T) {
 	r, first := sharedViewFixture(t)
 	reader := NewLedgerReader(r)
-
-	ctx, release := WithSharedView(context.Background())
-	defer release()
+	ctx := viewCtx(t, r)
 
 	tx, err := reader.NewTx(ctx)
 	require.NoError(t, err)
@@ -90,9 +94,4 @@ func TestSharedView_TxDoneLeavesTheRequestViewAlive(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, found,
 		"Done releases nothing it does not own; the request's view still serves reads")
-}
-
-func TestSharedView_ReleaseWithoutAcquisitionIsANoOp(_ *testing.T) {
-	_, release := WithSharedView(context.Background())
-	release()
 }

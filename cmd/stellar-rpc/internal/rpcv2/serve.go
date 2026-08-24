@@ -28,7 +28,8 @@ const readShutdownTimeout = 5 * time.Second
 // runDaemonWith; only the registry changes across supervised attempts.
 type readServerDeps struct {
 	// params carries the process-wide handler inputs; newServeReads overrides
-	// the per-attempt pieces (the two readers) on its copy each attempt.
+	// the per-attempt pieces (the registry and the two readers) on its copy
+	// each attempt.
 	params handlerParams
 	cfg    config.Config
 }
@@ -42,6 +43,7 @@ type readServerDeps struct {
 func newServeReads(deps readServerDeps) func(context.Context, *query.Registry) (func(), <-chan error, error) {
 	return func(ctx context.Context, reg *query.Registry) (func(), <-chan error, error) {
 		p := deps.params
+		p.registry = reg
 		p.ledgerReader = adapters.NewLedgerReader(reg)
 		p.transactionReader = adapters.NewTransactionReader(reg, p.networkPassphrase)
 		handler := newJSONRPCHandler(deps.cfg, p)

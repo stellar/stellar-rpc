@@ -6,6 +6,7 @@ package adapters
 // test may seed lives here.
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -33,6 +34,17 @@ func openTestCatalog(t *testing.T) *catalog.Catalog {
 // closeTimeFor derives a per-ledger close time so range and point reads can
 // assert they decoded the right ledger, not just the right sequence.
 func closeTimeFor(seq uint32) int64 { return int64(seq) * 7 }
+
+// viewCtx does for a test what the serving wrapper does for a request:
+// acquires a read view from r and installs it on a context, released on
+// cleanup. Acquire it only after all seeding — the view freezes at acquisition.
+func viewCtx(t *testing.T, r *query.Registry) context.Context {
+	t.Helper()
+	view, err := r.NewReadView()
+	require.NoError(t, err)
+	t.Cleanup(view.Release)
+	return WithView(context.Background(), view)
+}
 
 func seqRange(lo, hi uint32) []uint32 {
 	out := make([]uint32, 0, hi-lo+1)

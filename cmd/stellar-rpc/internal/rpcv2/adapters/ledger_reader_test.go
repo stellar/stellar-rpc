@@ -22,7 +22,7 @@ import (
 // with latest pinned to chunk 6's first ledger — one below the last committed
 // one, so clamping at latest is distinguishable from data running out. The
 // retention floor is chunk 5, so OldestLedger sits on real data.
-func sparseFixture(t *testing.T) (*LedgerReader, chunk.ID, chunk.ID) {
+func sparseFixture(t *testing.T) (context.Context, *LedgerReader, chunk.ID, chunk.ID) {
 	t.Helper()
 	cat := openTestCatalog(t)
 	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
@@ -30,38 +30,38 @@ func sparseFixture(t *testing.T) (*LedgerReader, chunk.ID, chunk.ID) {
 	seedHotLedgers(t, cat, r, c0, seqRange(c0.FirstLedger(), c0.FirstLedger()+3)...)
 	seedHotLedgers(t, cat, r, c1, c1.FirstLedger(), c1.FirstLedger()+1)
 	r.SetLatestLedger(c1.FirstLedger(), closeTimeFor(c1.FirstLedger()))
-	return NewLedgerReader(r), c0, c1
+	return viewCtx(t, r), NewLedgerReader(r), c0, c1
 }
 
 // emptyFixture is a genuine first start: the live chunk's key is ready (a
 // catalog with no ready hot chunk at all is broken, and NewReadView rejects
 // it), but nothing is committed yet, so the last committed ledger is
 // earliest-1 and OldestLedger exceeds LatestLedger by one.
-func emptyFixture(t *testing.T) *LedgerReader {
+func emptyFixture(t *testing.T) (context.Context, *LedgerReader) {
 	t.Helper()
 	cat := openTestCatalog(t)
 	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
 	seedHotLedgers(t, cat, r, testChunk)
 	r.SetLatestLedger(testChunk.FirstLedger()-1, 0)
-	return NewLedgerReader(r)
+	return viewCtx(t, r), NewLedgerReader(r)
 }
 
 func TestGetLatestLedgerSequence(t *testing.T) {
-	reader, _, c1 := sparseFixture(t)
-	got, err := reader.GetLatestLedgerSequence(context.Background())
+	ctx, reader, _, c1 := sparseFixture(t)
+	got, err := reader.GetLatestLedgerSequence(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, c1.FirstLedger(), got)
 }
 
 func TestGetLatestLedgerSequence_EmptyStore(t *testing.T) {
-	reader := emptyFixture(t)
-	_, err := reader.GetLatestLedgerSequence(context.Background())
+	ctx, reader := emptyFixture(t)
+	_, err := reader.GetLatestLedgerSequence(ctx)
 	assert.ErrorIs(t, err, store.ErrEmptyDB)
 }
 
 func TestGetLedgerRange(t *testing.T) {
-	reader, c0, c1 := sparseFixture(t)
-	got, err := reader.GetLedgerRange(context.Background())
+	ctx, reader, c0, c1 := sparseFixture(t)
+	got, err := reader.GetLedgerRange(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, store.LedgerRange{
 		FirstLedger: store.LedgerInfo{Sequence: c0.FirstLedger(), CloseTime: closeTimeFor(c0.FirstLedger())},
@@ -70,8 +70,8 @@ func TestGetLedgerRange(t *testing.T) {
 }
 
 func TestGetLedgerRange_EmptyStore(t *testing.T) {
-	reader := emptyFixture(t)
-	_, err := reader.GetLedgerRange(context.Background())
+	ctx, reader := emptyFixture(t)
+	_, err := reader.GetLedgerRange(ctx)
 	assert.ErrorIs(t, err, store.ErrEmptyDB)
 }
 
@@ -84,7 +84,7 @@ func TestGetLedgerRange_BootStampFallsBackThenCaches(t *testing.T) {
 	r.SetLatestLedger(testChunk.FirstLedger()+1, 0)
 	reader := NewLedgerReader(r)
 
-	got, err := reader.GetLedgerRange(context.Background())
+	got, err := reader.GetLedgerRange(viewCtx(t, r))
 	require.NoError(t, err)
 	assert.Equal(t, closeTimeFor(testChunk.FirstLedger()), got.FirstLedger.CloseTime,
 		"a stamp miss still serves the real close time via the point read")
@@ -101,8 +101,8 @@ func TestGetLedgerRange_BootStampFallsBackThenCaches(t *testing.T) {
 }
 
 func TestGetLedger_PointRead(t *testing.T) {
-	reader, c0, _ := sparseFixture(t)
-	lcm, ok, err := reader.GetLedger(context.Background(), c0.FirstLedger()+2)
+	ctx, reader, c0, _ := sparseFixture(t)
+	lcm, ok, err := reader.GetLedger(ctx, c0.FirstLedger()+2)
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, c0.FirstLedger()+2, lcm.LedgerSequence())
@@ -110,20 +110,20 @@ func TestGetLedger_PointRead(t *testing.T) {
 }
 
 func TestGetLedger_SubGenesisDoesNotPanic(t *testing.T) {
-	reader, _, _ := sparseFixture(t)
+	ctx, reader, _, _ := sparseFixture(t)
 	for _, seq := range []uint32{0, 1} {
-		_, ok, err := reader.GetLedger(context.Background(), seq)
+		_, ok, err := reader.GetLedger(ctx, seq)
 		assert.NoError(t, err)
 		assert.False(t, ok)
 	}
 }
 
 func TestGetLedger_OutsideWindow(t *testing.T) {
-	reader, c0, c1 := sparseFixture(t)
+	ctx, reader, c0, c1 := sparseFixture(t)
 	// c1.FirstLedger()+1 is committed but above the view's latest; the gate,
 	// not the store, must produce the miss.
 	for _, seq := range []uint32{c0.FirstLedger() - 1, c1.FirstLedger() + 1} {
-		_, ok, err := reader.GetLedger(context.Background(), seq)
+		_, ok, err := reader.GetLedger(ctx, seq)
 		assert.NoError(t, err)
 		assert.False(t, ok)
 	}
@@ -137,7 +137,7 @@ func TestGetLedger_V1LedgerCloseMeta(t *testing.T) {
 	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
 	reader := NewLedgerReader(r)
 
-	lcm, ok, err := reader.GetLedger(context.Background(), testChunk.FirstLedger())
+	lcm, ok, err := reader.GetLedger(viewCtx(t, r), testChunk.FirstLedger())
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, testChunk.FirstLedger(), lcm.LedgerSequence())
@@ -145,9 +145,9 @@ func TestGetLedger_V1LedgerCloseMeta(t *testing.T) {
 }
 
 func TestStreamLedgerRange(t *testing.T) {
-	reader, c0, c1 := sparseFixture(t)
+	ctx, reader, c0, c1 := sparseFixture(t)
 	var seqs []uint32
-	err := reader.StreamLedgerRange(context.Background(), c0.FirstLedger(), c1.FirstLedger()+500,
+	err := reader.StreamLedgerRange(ctx, c0.FirstLedger(), c1.FirstLedger()+500,
 		func(lcm xdr.LedgerCloseMeta) error {
 			assert.Equal(t, closeTimeFor(lcm.LedgerSequence()), lcm.LedgerCloseTime())
 			seqs = append(seqs, lcm.LedgerSequence())
@@ -159,10 +159,10 @@ func TestStreamLedgerRange(t *testing.T) {
 }
 
 func TestStreamLedgerRange_CallbackErrorStopsStream(t *testing.T) {
-	reader, c0, _ := sparseFixture(t)
+	ctx, reader, c0, _ := sparseFixture(t)
 	boom := errors.New("boom")
 	calls := 0
-	err := reader.StreamLedgerRange(context.Background(), c0.FirstLedger(), c0.FirstLedger()+3,
+	err := reader.StreamLedgerRange(ctx, c0.FirstLedger(), c0.FirstLedger()+3,
 		func(xdr.LedgerCloseMeta) error {
 			calls++
 			return boom
@@ -172,9 +172,9 @@ func TestStreamLedgerRange_CallbackErrorStopsStream(t *testing.T) {
 }
 
 func TestStreamLedgerRange_BelowFloorIsRangeError(t *testing.T) {
-	reader, c0, _ := sparseFixture(t)
+	ctx, reader, c0, _ := sparseFixture(t)
 	var rangeErr *query.RangeError
-	err := reader.StreamLedgerRange(context.Background(), 2, c0.FirstLedger(),
+	err := reader.StreamLedgerRange(ctx, 2, c0.FirstLedger(),
 		func(xdr.LedgerCloseMeta) error { return nil })
 	require.ErrorAs(t, err, &rangeErr)
 	assert.Equal(t, uint32(2), rangeErr.Requested)
@@ -182,8 +182,8 @@ func TestStreamLedgerRange_BelowFloorIsRangeError(t *testing.T) {
 }
 
 func TestTxGetLedger_WalksContiguously(t *testing.T) {
-	reader, c0, _ := sparseFixture(t)
-	tx, err := reader.NewTx(context.Background())
+	ctx, reader, c0, _ := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
 	require.NoError(t, err)
 	defer func() { _ = tx.Done() }()
 
@@ -197,8 +197,8 @@ func TestTxGetLedger_WalksContiguously(t *testing.T) {
 }
 
 func TestTxGetLedger_NonSequentialFailsLoudly(t *testing.T) {
-	reader, c0, _ := sparseFixture(t)
-	tx, err := reader.NewTx(context.Background())
+	ctx, reader, c0, _ := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
 	require.NoError(t, err)
 	defer func() { _ = tx.Done() }()
 
@@ -213,8 +213,8 @@ func TestTxGetLedger_NonSequentialFailsLoudly(t *testing.T) {
 }
 
 func TestTxGetLedger_GuardsBeforePriming(t *testing.T) {
-	reader, c0, c1 := sparseFixture(t)
-	tx, err := reader.NewTx(context.Background())
+	ctx, reader, c0, c1 := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
 	require.NoError(t, err)
 	defer func() { _ = tx.Done() }()
 
@@ -233,8 +233,8 @@ func TestTxGetLedger_GuardsBeforePriming(t *testing.T) {
 }
 
 func TestTxGetLedgerRange_DoesNotDisturbTheWalk(t *testing.T) {
-	reader, c0, c1 := sparseFixture(t)
-	tx, err := reader.NewTx(context.Background())
+	ctx, reader, c0, c1 := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
 	require.NoError(t, err)
 	defer func() { _ = tx.Done() }()
 
@@ -252,8 +252,8 @@ func TestTxGetLedgerRange_DoesNotDisturbTheWalk(t *testing.T) {
 }
 
 func TestTxBatchGetLedgers(t *testing.T) {
-	reader, c0, c1 := sparseFixture(t)
-	tx, err := reader.NewTx(context.Background())
+	ctx, reader, c0, c1 := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
 	require.NoError(t, err)
 	defer func() { _ = tx.Done() }()
 
@@ -285,7 +285,7 @@ func TestTxBatchGetLedgers_HeaderMatchesFullDecode(t *testing.T) {
 	r.SetLatestLedger(testChunk.FirstLedger()+1, closeTimeFor(testChunk.FirstLedger()+1))
 	reader := NewLedgerReader(r)
 
-	tx, err := reader.NewTx(context.Background())
+	tx, err := reader.NewTx(viewCtx(t, r))
 	require.NoError(t, err)
 	defer func() { _ = tx.Done() }()
 
@@ -304,8 +304,8 @@ func TestTxBatchGetLedgers_HeaderMatchesFullDecode(t *testing.T) {
 }
 
 func TestTxBatchGetLedgers_BelowFloorIsRangeError(t *testing.T) {
-	reader, c0, _ := sparseFixture(t)
-	tx, err := reader.NewTx(context.Background())
+	ctx, reader, c0, _ := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
 	require.NoError(t, err)
 	defer func() { _ = tx.Done() }()
 
@@ -315,8 +315,8 @@ func TestTxBatchGetLedgers_BelowFloorIsRangeError(t *testing.T) {
 }
 
 func TestTxBatchGetLedgers_BeyondLatestIsEmpty(t *testing.T) {
-	reader, _, c1 := sparseFixture(t)
-	tx, err := reader.NewTx(context.Background())
+	ctx, reader, _, c1 := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
 	require.NoError(t, err)
 	defer func() { _ = tx.Done() }()
 
@@ -326,14 +326,14 @@ func TestTxBatchGetLedgers_BeyondLatestIsEmpty(t *testing.T) {
 }
 
 func TestTxDone_WithAndWithoutPriming(t *testing.T) {
-	reader, c0, _ := sparseFixture(t)
+	ctx, reader, c0, _ := sparseFixture(t)
 
-	tx, err := reader.NewTx(context.Background())
+	tx, err := reader.NewTx(ctx)
 	require.NoError(t, err)
 	assert.NoError(t, tx.Done())
 	assert.NoError(t, tx.Done(), "a second Done must be a no-op, not a double release")
 
-	tx, err = reader.NewTx(context.Background())
+	tx, err = reader.NewTx(ctx)
 	require.NoError(t, err)
 	_, _, err = tx.GetLedger(context.Background(), c0.FirstLedger())
 	require.NoError(t, err)
@@ -353,7 +353,7 @@ func TestTxGetLedger_WalkCrossesChunkBorder(t *testing.T) {
 	r.SetLatestLedger(c1.FirstLedger()+1, closeTimeFor(c1.FirstLedger()+1))
 	reader := NewLedgerReader(r)
 
-	tx, err := reader.NewTx(context.Background())
+	tx, err := reader.NewTx(viewCtx(t, r))
 	require.NoError(t, err)
 	defer func() { _ = tx.Done() }()
 
@@ -377,7 +377,7 @@ func TestTxGetLedger_WalkPastSpanCapIsExhaustedNotNonSequential(t *testing.T) {
 	r.SetLatestLedger(c1.FirstLedger()+2, closeTimeFor(c1.FirstLedger()+2))
 	reader := NewLedgerReader(r)
 
-	tx, err := reader.NewTx(context.Background())
+	tx, err := reader.NewTx(viewCtx(t, r))
 	require.NoError(t, err)
 	defer func() { _ = tx.Done() }()
 
@@ -394,8 +394,8 @@ func TestTxGetLedger_WalkPastSpanCapIsExhaustedNotNonSequential(t *testing.T) {
 }
 
 func TestBatchGetLedgers_ClonesBorrowedBytes(t *testing.T) {
-	reader, c0, _ := sparseFixture(t)
-	tx, err := reader.NewTx(context.Background())
+	ctx, reader, c0, _ := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
 	require.NoError(t, err)
 	defer func() { _ = tx.Done() }()
 
@@ -413,12 +413,12 @@ func TestWalkSpanCapCoversTheHandlerScanLimit(t *testing.T) {
 }
 
 func TestLedgerReaderTx_GetLedgerStopsOnCanceledContext(t *testing.T) {
-	reader, c0, _ := sparseFixture(t)
-	tx, err := reader.NewTx(context.Background())
+	baseCtx, reader, c0, _ := sparseFixture(t)
+	tx, err := reader.NewTx(baseCtx)
 	require.NoError(t, err)
 	defer func() { _ = tx.Done() }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(baseCtx)
 	_, found, err := tx.GetLedger(ctx, c0.FirstLedger())
 	require.NoError(t, err)
 	require.True(t, found)
@@ -432,7 +432,7 @@ func TestLedgerReaderTx_BatchGetLedgersStopsOnCanceledContext(t *testing.T) {
 	r, first := sharedViewFixture(t)
 	reader := NewLedgerReader(r)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(viewCtx(t, r))
 	tx, err := reader.NewTx(ctx)
 	require.NoError(t, err)
 	defer func() { _ = tx.Done() }()

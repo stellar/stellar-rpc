@@ -31,6 +31,7 @@ type handlerParams struct {
 	logger            *supportlog.Entry
 	handlerMetrics    *jsonrpc.HandlerMetrics
 	metrics           observability.Metrics
+	registry          *query.Registry
 	ledgerReader      store.LedgerReader
 	transactionReader store.TransactionReader
 	feeWindows        *feewindow.FeeWindows
@@ -85,7 +86,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 	specs = specLimits(m).Apply(specs)
 	metrics := observability.MetricsOrNop(p.metrics)
 	for i := range specs {
-		specs[i].Handler = wrapAdapterRequest(specs[i].Handler, metrics)
+		specs[i].Handler = wrapAdapterRequest(specs[i].Handler, p.registry, metrics)
 	}
 
 	return jsonrpc.NewHandler(jsonrpc.Params{
@@ -134,48 +135,64 @@ func notImplemented(message string) jrpc2.Handler {
 	}
 }
 
-// wrapAdapterRequest is the per-request scope around every handler: it plants
-// the adapters' shared read view (adapters.WithSharedView, released after the
-// handler returns) and rewrites the routing/lifecycle failures the shared
-// handlers can only report as generic internal errors. The original error
-// survives the handler through a context mark (see adapters.WithErrorMark);
-// this wrapper classifies it after the handler fails:
+// wrapAdapterRequest is the per-request scope around every handler: it
+// acquires the request's read view up front, plants it on the context
+// (adapters.WithView) and releases it after the handler returns, and rewrites
+// the routing/lifecycle failures the shared handlers can only report as
+// generic internal errors. The original error survives the handler through a
+// context mark (see adapters.WithErrorMark); remapAdapterError classifies it
+// after the handler fails, and classifies a view-acquisition failure directly.
+func wrapAdapterRequest(h jrpc2.Handler, registry *query.Registry, metrics observability.Metrics) jrpc2.Handler {
+	return func(ctx context.Context, req *jrpc2.Request) (any, error) {
+		view, err := registry.NewReadView()
+		if err != nil {
+			if remapped, ok := remapAdapterError(ctx, err, metrics); ok {
+				return nil, remapped
+			}
+			return nil, err
+		}
+		// Deferred so a panicking handler cannot leak the view: the duration
+		// limiter recovers panics above this frame and keeps the process
+		// serving, so a skipped release would orphan the RocksDB snapshot.
+		defer view.Release()
+		ctx, mark := adapters.WithErrorMark(ctx)
+		ctx = adapters.WithView(ctx, view)
+		result, err := h(ctx, req)
+		if err == nil {
+			return result, nil
+		}
+		if remapped, ok := remapAdapterError(ctx, mark.Err(), metrics); ok {
+			return nil, remapped
+		}
+		return result, err
+	}
+}
+
+// remapAdapterError maps the failures the wrapper answers differently:
 //
 //   - a request that raced a store handoff (query.ErrUnavailable or
 //     stores.ErrStoreClosed) becomes network.ErrTemporarilyUnavailable — both
 //     conditions self-heal, so retry is the honest instruction;
 //   - a scan the router rejected as below the servable window
-//     (*query.RangeError) becomes the v1-style invalid-request rejection;
-//   - everything else passes through untouched.
-func wrapAdapterRequest(h jrpc2.Handler, metrics observability.Metrics) jrpc2.Handler {
-	return func(ctx context.Context, req *jrpc2.Request) (any, error) {
-		ctx, mark := adapters.WithErrorMark(ctx)
-		ctx, releaseView := adapters.WithSharedView(ctx)
-		// Deferred so a panicking handler cannot leak the view: the duration
-		// limiter recovers panics above this frame and keeps the process
-		// serving, so a skipped release would orphan the RocksDB snapshot.
-		defer releaseView()
-		result, err := h(ctx, req)
-		if err == nil {
-			return result, nil
+//     (*query.RangeError) becomes the v1-style invalid-request rejection.
+//
+// ok is false for everything else: the caller passes the original through.
+func remapAdapterError(ctx context.Context, err error, metrics observability.Metrics) (error, bool) {
+	var rangeErr *query.RangeError
+	switch {
+	case errors.As(err, &rangeErr):
+		return &jrpc2.Error{Code: jrpc2.InvalidRequest, Message: rangeErr.Error()}, true
+	case errors.Is(err, stores.ErrStoreClosed):
+		// A dead context reaches no client and says nothing about the
+		// grace period (see observability.Metrics.StoreClosedServed).
+		if ctx.Err() == nil {
+			metrics.StoreClosedServed()
 		}
-		marked := mark.Err()
-		var rangeErr *query.RangeError
-		switch {
-		case errors.As(marked, &rangeErr):
-			return nil, &jrpc2.Error{Code: jrpc2.InvalidRequest, Message: rangeErr.Error()}
-		case errors.Is(marked, stores.ErrStoreClosed):
-			// A dead context reaches no client and says nothing about the
-			// grace period (see observability.Metrics.StoreClosedServed).
-			if ctx.Err() == nil {
-				metrics.StoreClosedServed()
-			}
-			fallthrough
-		case errors.Is(marked, query.ErrUnavailable):
-			return nil, network.ErrTemporarilyUnavailable
-		}
-		return result, err
+		return network.ErrTemporarilyUnavailable, true
+	case errors.Is(err, query.ErrUnavailable):
+		return network.ErrTemporarilyUnavailable, true
 	}
+	return nil, false
 }
 
 // graceMargin is the slack deriveLifecycleGrace adds on top of the longest

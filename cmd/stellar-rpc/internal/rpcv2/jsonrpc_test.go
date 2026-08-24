@@ -65,6 +65,7 @@ func testHandlerParams(t *testing.T, r *query.Registry) handlerParams {
 		logger:            silentLogger(),
 		handlerMetrics:    jsonrpc.NewHandlerMetrics("test", prometheus.NewRegistry()),
 		metrics:           observability.NopMetrics{},
+		registry:          r,
 		ledgerReader:      adapters.NewLedgerReader(r),
 		transactionReader: adapters.NewTransactionReader(r, "test passphrase"),
 		feeWindows:        feewindow.NewFeeWindows(10, 10),
@@ -178,7 +179,7 @@ func TestMapAdapterErrors_UnavailableChunkBecomesRetryable(t *testing.T) {
 	wrapped := wrapAdapterRequest(flatteningHandler(t, func(ctx context.Context) error {
 		_, _, err := reader.GetLedger(ctx, chunk.FirstLedgerSeq)
 		return err
-	}), observability.NopMetrics{})
+	}), r, observability.NopMetrics{})
 
 	_, err := wrapped(context.Background(), nil)
 	assert.Equal(t, error(network.ErrTemporarilyUnavailable), err)
@@ -193,7 +194,7 @@ func TestMapAdapterErrors_StoreClosedIsRetryableAndCounted(t *testing.T) {
 	wrapped := wrapAdapterRequest(flatteningHandler(t, func(ctx context.Context) error {
 		_, _, err := reader.GetLedger(ctx, chunk.FirstLedgerSeq)
 		return err
-	}), metrics)
+	}), r, metrics)
 
 	_, err := wrapped(context.Background(), nil)
 	assert.Equal(t, error(network.ErrTemporarilyUnavailable), err)
@@ -214,7 +215,7 @@ func TestMapAdapterErrors_StoreClosedWithDeadContextIsNotCounted(t *testing.T) {
 		_, _, err := reader.GetLedger(ctx, chunk.FirstLedgerSeq)
 		cancel()
 		return err
-	}), metrics)
+	}), r, metrics)
 
 	_, err := wrapped(ctx, nil)
 	assert.Equal(t, error(network.ErrTemporarilyUnavailable), err)
@@ -235,7 +236,7 @@ func TestWrapAdapterRequest_PanicReleasesSharedView(t *testing.T) {
 		_, err := reader.GetLatestLedgerSequence(ctx)
 		require.NoError(t, err)
 		panic("handler panic after acquiring the shared view")
-	}, observability.NopMetrics{})
+	}, r, observability.NopMetrics{})
 
 	assert.Panics(t, func() { _, _ = wrapped(context.Background(), nil) })
 
@@ -248,7 +249,7 @@ func TestMapAdapterErrors_UnmarkedErrorPassesThrough(t *testing.T) {
 	inner := &jrpc2.Error{Code: jrpc2.InternalError, Message: "disk on fire"}
 	wrapped := wrapAdapterRequest(func(context.Context, *jrpc2.Request) (any, error) {
 		return nil, inner
-	}, observability.NopMetrics{})
+	}, seedServingRegistry(t), observability.NopMetrics{})
 
 	_, err := wrapped(context.Background(), nil)
 	require.Same(t, error(inner), err)
