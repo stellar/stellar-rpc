@@ -50,7 +50,7 @@ const getEventsV2MethodName = "getEventsV2"
 func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 	m := cfg.Service.Methods
 	specs := jsonrpc.BuildHandlerSpecs(
-		jsonrpc.SpecDeps{
+		jsonrpc.HandlerDeps{
 			Daemon:            p.daemon,
 			Logger:            p.logger,
 			PreflightGetter:   p.preflightGetter,
@@ -80,7 +80,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 		Handler: notImplemented("getEventsV2 is not implemented by this service yet (issue #774 adds it);" +
 			" use the existing RPC service for events meanwhile"),
 	})
-	specs = specLimits(m).Apply(specs)
+	specs = limitsByMethod(m).Apply(specs)
 	for i := range specs {
 		specs[i].Handler = wrapAdapterRequest(specs[i].Handler, p.registry)
 	}
@@ -96,14 +96,14 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 	})
 }
 
-// specLimits maps [service.methods] onto the shared limits table. Both the
+// limitsByMethod maps [service.methods] onto the shared limits table. Both the
 // method table and the deletion grace (deriveLifecycleGrace) read it, so the
 // two cannot disagree on a method's budget.
-func specLimits(m config.MethodsConfig) jsonrpc.SpecLimits {
+func limitsByMethod(m config.MethodsConfig) jsonrpc.LimitsByMethod {
 	lim := func(queue *uint, dur *time.Duration) jsonrpc.MethodLimits {
 		return jsonrpc.MethodLimits{QueueLimit: deref(queue), RequestDurationLimit: deref(dur)}
 	}
-	return jsonrpc.SpecLimits{
+	return jsonrpc.LimitsByMethod{
 		protocol.GetHealthMethodName:        lim(m.GetHealth.QueueLimit, m.GetHealth.MaxExecutionDuration),
 		protocol.GetEventsMethodName:        lim(m.GetEvents.QueueLimit, m.GetEvents.MaxExecutionDuration),
 		getEventsV2MethodName:               lim(m.GetEventsV2.QueueLimit, m.GetEventsV2.MaxExecutionDuration),
@@ -176,6 +176,6 @@ func deriveLifecycleGrace(svc config.ServiceConfig) time.Duration {
 	// The global HTTP-layer limit bounds every request, including any future
 	// method only it covers, so it participates in the max alongside the
 	// per-method budgets.
-	longest := max(deref(svc.MaxRequestExecutionDuration), specLimits(svc.Methods).LongestDuration())
+	longest := max(deref(svc.MaxRequestExecutionDuration), limitsByMethod(svc.Methods).LongestDuration())
 	return longest + graceMargin
 }

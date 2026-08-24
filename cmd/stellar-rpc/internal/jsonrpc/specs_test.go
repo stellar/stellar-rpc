@@ -13,15 +13,15 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 )
 
-func testSpecDeps() SpecDeps {
-	return SpecDeps{
+func testHandlerDeps() HandlerDeps {
+	return HandlerDeps{
 		Daemon:           host.MakeNoOpDaemon(),
 		GetEventsHandler: func(context.Context, *jrpc2.Request) (any, error) { return "ok", nil },
 	}
 }
 
-func fullSpecLimits() SpecLimits {
-	limits := SpecLimits{}
+func fullLimitsByMethod() LimitsByMethod {
+	limits := LimitsByMethod{}
 	for _, name := range []string{
 		protocol.GetHealthMethodName,
 		protocol.GetEventsMethodName,
@@ -42,8 +42,8 @@ func fullSpecLimits() SpecLimits {
 }
 
 func TestApply_FillsEveryServedMethodsLimits(t *testing.T) {
-	limits := fullSpecLimits()
-	specs := limits.Apply(BuildHandlerSpecs(testSpecDeps()))
+	limits := fullLimitsByMethod()
+	specs := limits.Apply(BuildHandlerSpecs(testHandlerDeps()))
 	assert.Len(t, specs, len(limits))
 	for _, s := range specs {
 		assert.Equal(t, limits[s.MethodName].QueueLimit, s.QueueLimit)
@@ -53,27 +53,27 @@ func TestApply_FillsEveryServedMethodsLimits(t *testing.T) {
 }
 
 func TestApply_PanicsOnAMethodWithoutLimits(t *testing.T) {
-	limits := fullSpecLimits()
+	limits := fullLimitsByMethod()
 	delete(limits, protocol.GetFeeStatsMethodName)
 	assert.PanicsWithValue(t, "jsonrpc: no limits configured for method getFeeStats", func() {
-		limits.Apply(BuildHandlerSpecs(testSpecDeps()))
+		limits.Apply(BuildHandlerSpecs(testHandlerDeps()))
 	})
 }
 
 func TestApply_PanicsOnLimitsForAnUnservedMethod(t *testing.T) {
-	limits := fullSpecLimits()
+	limits := fullLimitsByMethod()
 	limits["getFoo"] = MethodLimits{QueueLimit: 1, RequestDurationLimit: time.Second}
 	assert.PanicsWithValue(t, "jsonrpc: limits configured for unserved method getFoo", func() {
-		limits.Apply(BuildHandlerSpecs(testSpecDeps()))
+		limits.Apply(BuildHandlerSpecs(testHandlerDeps()))
 	})
 }
 
 func TestApply_CoversDaemonAppendedMethods(t *testing.T) {
-	limits := fullSpecLimits()
+	limits := fullLimitsByMethod()
 	limits["getFoo"] = MethodLimits{QueueLimit: 7, RequestDurationLimit: time.Minute}
 	stub := func(context.Context, *jrpc2.Request) (any, error) { return "ok", nil }
 
-	specs := BuildHandlerSpecs(testSpecDeps())
+	specs := BuildHandlerSpecs(testHandlerDeps())
 	specs = append(specs, HandlerSpec{MethodName: "getFoo", Handler: stub})
 	specs = limits.Apply(specs)
 
@@ -86,23 +86,23 @@ func TestApply_CoversDaemonAppendedMethods(t *testing.T) {
 
 func TestApply_PanicsOnAnAppendedMethodWithoutLimits(t *testing.T) {
 	stub := func(context.Context, *jrpc2.Request) (any, error) { return "ok", nil }
-	specs := BuildHandlerSpecs(testSpecDeps())
+	specs := BuildHandlerSpecs(testHandlerDeps())
 	specs = append(specs, HandlerSpec{MethodName: "getFoo", Handler: stub})
 	assert.PanicsWithValue(t, "jsonrpc: no limits configured for method getFoo", func() {
-		fullSpecLimits().Apply(specs)
+		fullLimitsByMethod().Apply(specs)
 	})
 }
 
 func TestBuildHandlerSpecs_PanicsWithoutGetEventsHandler(t *testing.T) {
-	assert.PanicsWithValue(t, "jsonrpc: SpecDeps.GetEventsHandler is required — events handlers are per-daemon",
+	assert.PanicsWithValue(t, "jsonrpc: HandlerDeps.GetEventsHandler is required — events handlers are per-daemon",
 		func() {
-			BuildHandlerSpecs(SpecDeps{Daemon: host.MakeNoOpDaemon()})
+			BuildHandlerSpecs(HandlerDeps{Daemon: host.MakeNoOpDaemon()})
 		})
 }
 
-func TestSpecLimits_LongestDuration(t *testing.T) {
-	limits := fullSpecLimits()
+func TestLimitsByMethod_LongestDuration(t *testing.T) {
+	limits := fullLimitsByMethod()
 	limits[protocol.SimulateTransactionMethodName] = MethodLimits{QueueLimit: 1, RequestDurationLimit: time.Minute}
 	assert.Equal(t, time.Minute, limits.LongestDuration())
-	assert.Equal(t, time.Duration(0), SpecLimits{}.LongestDuration())
+	assert.Equal(t, time.Duration(0), LimitsByMethod{}.LongestDuration())
 }

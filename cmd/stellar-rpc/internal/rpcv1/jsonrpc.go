@@ -32,7 +32,7 @@ type HandlerParams struct {
 // assembly.
 func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 	specs := jsonrpc.BuildHandlerSpecs(
-		jsonrpc.SpecDeps{
+		jsonrpc.HandlerDeps{
 			Daemon:                params.Daemon,
 			Logger:                params.Logger,
 			PreflightGetter:       params.PreflightGetter,
@@ -54,7 +54,7 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 			MaxTransactionsLimit:     cfg.MaxTransactionsLimit,
 			DefaultTransactionsLimit: cfg.DefaultTransactionsLimit,
 		})
-	specs = jsonrpc.SpecLimits{
+	specs = jsonrpc.LimitsByMethod{
 		protocol.GetHealthMethodName: {
 			QueueLimit:           cfg.RequestBacklogGetHealthQueueLimit,
 			RequestDurationLimit: cfg.MaxGetHealthExecutionDuration,

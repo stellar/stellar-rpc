@@ -15,11 +15,11 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
-// SpecDeps carries every input the shared internal/methods constructors take.
+// HandlerDeps carries every input the shared internal/methods constructors take.
 // Each daemon fills it from its own config and wiring and hands it to
 // BuildHandlerSpecs, so the method table — which method runs which handler
 // with which decode limits — is written once instead of once per daemon.
-type SpecDeps struct {
+type HandlerDeps struct {
 	Daemon          host.Daemon
 	Logger          *log.Entry
 	PreflightGetter methods.PreflightGetter
@@ -61,17 +61,17 @@ type MethodLimits struct {
 	RequestDurationLimit time.Duration
 }
 
-// SpecLimits maps each served method's wire name to its limits. Key shared
+// LimitsByMethod maps each served method's wire name to its limits. Key shared
 // methods by the protocol.*MethodName constants. Apply panics on a table
 // missing a served method or naming an unserved one, so a daemon's limits
 // mapping cannot silently drift from its method list: adding a method fails
 // that daemon's startup (and its handler tests) until it supplies the new
 // method's limits.
-type SpecLimits map[string]MethodLimits
+type LimitsByMethod map[string]MethodLimits
 
 // LongestDuration is the largest per-method execution budget in the table.
 // The full-history daemon derives its deferred-deletion grace period from it.
-func (l SpecLimits) LongestDuration() time.Duration {
+func (l LimitsByMethod) LongestDuration() time.Duration {
 	var longest time.Duration
 	for _, limits := range l {
 		longest = max(longest, limits.RequestDurationLimit)
@@ -83,7 +83,7 @@ func (l SpecLimits) LongestDuration() time.Duration {
 // completed list — the step that makes a method list servable. Run it over a
 // daemon's COMPLETE list (the shared BuildHandlerSpecs result plus any methods
 // that daemon appended).
-func (l SpecLimits) Apply(specs []HandlerSpec) []HandlerSpec {
+func (l LimitsByMethod) Apply(specs []HandlerSpec) []HandlerSpec {
 	used := make(map[string]bool, len(l))
 	for i := range specs {
 		limits, ok := l[specs[i].MethodName]
@@ -105,10 +105,10 @@ func (l SpecLimits) Apply(specs []HandlerSpec) []HandlerSpec {
 // BuildHandlerSpecs builds the method list both daemons share: the
 // internal/methods handlers over deps, without limits. A daemon appends its
 // own methods to the result, then fills every spec's limits with
-// SpecLimits.Apply before serving.
-func BuildHandlerSpecs(deps SpecDeps) []HandlerSpec {
+// LimitsByMethod.Apply before serving.
+func BuildHandlerSpecs(deps HandlerDeps) []HandlerSpec {
 	if deps.GetEventsHandler == nil {
-		panic("jsonrpc: SpecDeps.GetEventsHandler is required — events handlers are per-daemon")
+		panic("jsonrpc: HandlerDeps.GetEventsHandler is required — events handlers are per-daemon")
 	}
 	spec := func(name string, h jrpc2.Handler) HandlerSpec {
 		return HandlerSpec{MethodName: name, Handler: h}
