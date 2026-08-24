@@ -1,10 +1,8 @@
 package rpcv2
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -83,31 +81,10 @@ func newTestRPCServer(t *testing.T, r *query.Registry) string {
 	return srv.URL
 }
 
-type rpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-type rpcResponse struct {
-	Result json.RawMessage `json:"result"`
-	Error  *rpcError       `json:"error"`
-}
-
-func postRPC(t *testing.T, url, method, params string) rpcResponse {
-	t.Helper()
-	body := `{"jsonrpc":"2.0","id":1,"method":"` + method + `","params":` + params + `}`
-	resp, err := http.Post(url, "application/json", bytes.NewReader([]byte(body))) //nolint:noctx
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	var out rpcResponse
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
-	return out
-}
-
 func TestJSONRPCHandler_GetEventsIsExplicitlyNotImplemented(t *testing.T) {
 	url := newTestRPCServer(t, seedServingRegistry(t))
 
-	out := postRPC(t, url, "getEvents", `{"startLedger":2}`)
+	out := rpcv2test.PostRPC(t, url, "getEvents", `{"startLedger":2}`)
 	require.NotNil(t, out.Error)
 	assert.EqualValues(t, jrpc2.MethodNotFound, out.Error.Code)
 	assert.Contains(t, out.Error.Message, "#774")
@@ -116,7 +93,7 @@ func TestJSONRPCHandler_GetEventsIsExplicitlyNotImplemented(t *testing.T) {
 func TestJSONRPCHandler_GetEventsV2IsExplicitlyNotImplemented(t *testing.T) {
 	url := newTestRPCServer(t, seedServingRegistry(t))
 
-	out := postRPC(t, url, "getEventsV2", `{"startLedger":2}`)
+	out := rpcv2test.PostRPC(t, url, "getEventsV2", `{"startLedger":2}`)
 	require.NotNil(t, out.Error)
 	assert.EqualValues(t, jrpc2.MethodNotFound, out.Error.Code)
 	assert.Contains(t, out.Error.Message, "#774")
@@ -125,7 +102,7 @@ func TestJSONRPCHandler_GetEventsV2IsExplicitlyNotImplemented(t *testing.T) {
 func TestJSONRPCHandler_ServesLatestLedgerFromRegistry(t *testing.T) {
 	url := newTestRPCServer(t, seedServingRegistry(t))
 
-	out := postRPC(t, url, "getLatestLedger", `{}`)
+	out := rpcv2test.PostRPC(t, url, "getLatestLedger", `{}`)
 	require.Nil(t, out.Error)
 	var result struct {
 		Sequence uint32 `json:"sequence"`
@@ -137,7 +114,7 @@ func TestJSONRPCHandler_ServesLatestLedgerFromRegistry(t *testing.T) {
 func TestJSONRPCHandler_HealthyOverFreshRegistryStamp(t *testing.T) {
 	url := newTestRPCServer(t, seedServingRegistry(t))
 
-	out := postRPC(t, url, "getHealth", `{}`)
+	out := rpcv2test.PostRPC(t, url, "getHealth", `{}`)
 	require.Nil(t, out.Error)
 	var result struct {
 		Status string `json:"status"`

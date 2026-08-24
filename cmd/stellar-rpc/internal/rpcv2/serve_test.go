@@ -14,6 +14,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 )
 
 func freeEndpoint(t *testing.T) string {
@@ -49,7 +50,7 @@ func TestServeReads_ServesAndRebindsAcrossAttempts(t *testing.T) {
 	// First attempt serves; stop releases the port.
 	stop, died, err := serve(context.Background(), r)
 	require.NoError(t, err)
-	out := postRPC(t, url, "getVersionInfo", `{}`)
+	out := rpcv2test.PostRPC(t, url, "getVersionInfo", `{}`)
 	assert.Nil(t, out.Error)
 	stop()
 
@@ -67,6 +68,6 @@ func TestServeReads_ServesAndRebindsAcrossAttempts(t *testing.T) {
 	stop, _, err = serve(context.Background(), r)
 	require.NoError(t, err)
 	defer stop()
-	out = postRPC(t, url, "getVersionInfo", `{}`)
+	out = rpcv2test.PostRPC(t, url, "getVersionInfo", `{}`)
 	assert.Nil(t, out.Error)
 }
