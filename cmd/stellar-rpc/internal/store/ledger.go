@@ -45,12 +45,12 @@ type LedgerReader interface {
 // LedgerReaderTx is a read-only snapshot of the ledger store. Call Done to
 // release it.
 //
-// GetLedger is a walk, not a free-form point read: call it with ascending,
-// contiguous sequences starting from the first call's sequence, and read at
-// most methods.LedgerScanLimit ledgers per Tx — getTransactions' pattern. The
-// v1 (SQL) backend happens to accept any access pattern, but the v2 backend
-// serves the walk from a forward iterator primed on the first call and fails
-// loudly on anything else.
+// GetLedger is a walk, not a free-form point read. Call it with ascending,
+// contiguous sequences, starting from the first call's sequence. Read at most
+// methods.LedgerScanLimit ledgers per Tx. This is getTransactions' access
+// pattern. The v1 (SQL) backend accepts any pattern; the v2 backend serves
+// the walk from a forward iterator primed on the first call and fails loudly
+// on anything else.
 type LedgerReaderTx interface {
 	GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error)
 	GetLedgerRange(ctx context.Context) (LedgerRange, error)
