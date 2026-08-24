@@ -163,11 +163,10 @@ func sampleChunkTxHashes(
 // the sampler just read out of a ledger. See buildTxHashCorpus for why a wrong
 // passphrase would otherwise pass silently.
 func verifyPassphrase(view *query.ReadView, f *queryFixture, hash [32]byte) error {
-	probe, release, err := f.txReader(view)
+	probe, err := f.txReader(view)
 	if err != nil {
 		return err
 	}
-	defer release()
 	_, found, err := probe.GetTransaction(hash)
 	if err != nil {
 		return fmt.Errorf("verify --network-passphrase: %w", err)

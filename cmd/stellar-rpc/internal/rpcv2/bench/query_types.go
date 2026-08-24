@@ -10,7 +10,6 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
@@ -20,9 +19,7 @@ import (
 // one models a served endpoint: it takes its own read view, issues the read
 // through query.ReadView, and returns how many items came back. None of them
 // touches a store reader that ReadView did not hand over, so the p99-campaign
-// refactor of the readers moves these numbers without moving this code — except
-// for the cold tx-hash index open, which ReadView does not expose yet (see
-// coldTxIndexes).
+// refactor of the readers moves these numbers without moving this code.
 
 // Sub-stage labels for the tx-hash distribution. The blended total_c<W> row is
 // what the results converter reads; these two additionally split it, since a
@@ -172,11 +169,10 @@ func txHashRequest(f *queryFixture, corpus *txHashCorpus) queryRequest {
 			}
 			defer view.Release()
 
-			probe, release, err := f.txReader(view)
+			probe, err := f.txReader(view)
 			if err != nil {
 				return 0, err
 			}
-			defer release()
 			_, found, err := probe.GetTransaction(hash)
 			if err != nil {
 				return 0, fmt.Errorf("look up transaction %x: %w", hash, err)
@@ -240,124 +236,32 @@ func (f *queryFixture) pickStart(rng *rand.Rand, span uint32) uint32 {
 	return f.FirstLedger + uint32(rng.IntN(int(room-span+1))) //nolint:gosec // room fits a chunk range
 }
 
-// txReader assembles the two-tier by-hash probe for one read view: the hot
-// indexes of every published chunk, then one reader per frozen cold window
-// index, with both tiers gated to the view's servable ledger range and the
-// candidate ledgers read back through the view. The returned release closes
-// whatever window indexes the probe actually opened; the caller MUST run it
-// when the request completes.
+// txReader assembles the two-tier by-hash probe for one read view, the way the
+// serving adapter does: the hot indexes of every published chunk, then the
+// frozen cold window indexes on demand, with the candidate ledgers read back
+// through the view.
 //
-// The gate has to sit between the index and the ledger read. A frozen cold
-// index covers a thousand chunks, but each chunk's ledger file is deleted once
-// that chunk falls below the retention floor, so for most of its life the index
-// names transactions whose ledgers are gone. Ungated, those become read
-// failures; gated, they are what they should be — not found.
-func (f *queryFixture) txReader(view *query.ReadView) (*txhash.TxReader, func(), error) {
-	cold, release, err := f.coldTxIndexes(view)
-	if err != nil {
-		return nil, nil, err
-	}
+// The view owns both tiers. It hands over each index already gated to the
+// servable ledger range, and it opens a cold .idx only on that index's first
+// probe and closes it on Release. Both properties are load-bearing for these
+// numbers, so the bench states what it depends on:
+//
+//   - The gate sits between the index probe and the ledger read. A frozen cold
+//     index covers a thousand chunks, but each chunk's ledger file goes as soon
+//     as that chunk falls below the retention floor, so for most of its life the
+//     index names transactions whose ledgers are gone. Ungated, those reads
+//     fail; gated, they are the not-found they should be.
+//   - Cold indexes open lazily, and the probe asks for them only after every hot
+//     index missed. A hot hit therefore pays no file open — which is the whole
+//     shape of the hot/cold split this benchmark reports.
+func (f *queryFixture) txReader(view *query.ReadView) (*txhash.TxReader, error) {
 	probe, err := txhash.NewTxReader(
-		gateIndexes(view, view.HotTxHashIndexes()), cold,
+		view.HotTxHashIndexes(), view.ColdTxIndexes,
 		&viewLedgerSource{view: view}, f.Passphrase)
 	if err != nil {
-		release()
-		return nil, nil, fmt.Errorf("assemble the by-hash probe: %w", err)
+		return nil, fmt.Errorf("assemble the by-hash probe: %w", err)
 	}
-	return probe, release, nil
-}
-
-// coldTxIndexes returns one gated, lazily opened reader per frozen window index
-// in the view's snapshot, newest coverage first, plus the release that closes
-// the ones a probe opened.
-//
-// Opening is deferred to the first probe because the common lookup resolves in
-// the hot tier and never reaches the cold one: opening every window index up
-// front would charge each hot hit for file opens a served request never makes.
-//
-// This composes what the read facade does not expose yet. The adapters branch
-// moves the same logic behind a query.ReadView method (ColdTxIndexes), where it
-// belongs — the layout and the view's closers are the view's own. Replace this
-// with that method once it lands, and the bench stops reaching for the layout.
-func (f *queryFixture) coldTxIndexes(view *query.ReadView) ([]txhash.HashIndex, func(), error) {
-	covs, err := view.ColdTxHashIndexCoverages()
-	if err != nil {
-		return nil, nil, fmt.Errorf("read the frozen tx-hash index coverages: %w", err)
-	}
-	idxs := make([]txhash.HashIndex, 0, len(covs))
-	lazies := make([]*lazyColdTxIndex, 0, len(covs))
-	for _, cov := range covs {
-		l := &lazyColdTxIndex{path: f.Layout.TxHashIndexFilePath(cov), cov: cov}
-		lazies = append(lazies, l)
-		idxs = append(idxs, gateIndex(view, l))
-	}
-	release := func() {
-		for _, l := range lazies {
-			if err := l.close(); err != nil {
-				f.Logger.WithError(err).Warn("bench-query: close cold tx-hash index")
-			}
-		}
-	}
-	return idxs, release, nil
-}
-
-// lazyColdTxIndex opens its window index on the first probe and keeps it for
-// the rest of the request. One request runs on one goroutine, as a read view
-// does, so it needs no locking.
-type lazyColdTxIndex struct {
-	path   string
-	cov    geometry.TxHashIndexCoverage
-	reader *txhash.ColdReader
-}
-
-func (l *lazyColdTxIndex) Get(hash [32]byte) (uint32, error) {
-	if l.reader == nil {
-		r, err := txhash.OpenColdReader(l.path)
-		if err != nil {
-			return 0, fmt.Errorf("open the cold tx-hash index [%s, %s]: %w", l.cov.Lo, l.cov.Hi, err)
-		}
-		l.reader = r
-	}
-	return l.reader.Get(hash)
-}
-
-// close releases the window index if a probe ever opened it.
-func (l *lazyColdTxIndex) close() error {
-	if l.reader == nil {
-		return nil
-	}
-	return l.reader.Close()
-}
-
-// gateIndexes wraps every index so a hit outside the view's servable ledger
-// range reads as a miss. See queryFixture.txReader for why.
-func gateIndexes(view *query.ReadView, idxs []txhash.HashIndex) []txhash.HashIndex {
-	gated := make([]txhash.HashIndex, 0, len(idxs))
-	for _, idx := range idxs {
-		gated = append(gated, gateIndex(view, idx))
-	}
-	return gated
-}
-
-func gateIndex(view *query.ReadView, idx txhash.HashIndex) txhash.HashIndex {
-	return &windowGatedIndex{inner: idx, view: view}
-}
-
-// windowGatedIndex drops a hit naming a ledger the view cannot serve.
-type windowGatedIndex struct {
-	inner txhash.HashIndex
-	view  *query.ReadView
-}
-
-func (g *windowGatedIndex) Get(hash [32]byte) (uint32, error) {
-	seq, err := g.inner.Get(hash)
-	if err != nil {
-		return 0, err
-	}
-	if seq < g.view.OldestLedger() || seq > g.view.LatestLedger() {
-		return 0, stores.ErrNotFound
-	}
-	return seq, nil
+	return probe, nil
 }
 
 // viewLedgerSource reads a candidate ledger through the read view, so the

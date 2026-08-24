@@ -164,7 +164,7 @@ func openHotFixture(logger *supportlog.Entry, opts hotQueryOptions) (*queryFixtu
 		release()
 		return nil, nil, fmt.Errorf("hot chunk %s holds no committed ledger: ingest it before querying it", opts.Chunk)
 	}
-	registry.SetLatestLedger(committed)
+	registry.SetLatestLedger(committed, 0)
 
 	first := opts.Chunk.FirstLedger()
 	last := committed
@@ -175,8 +175,6 @@ func openHotFixture(logger *supportlog.Entry, opts hotQueryOptions) (*queryFixtu
 	}
 	f := &queryFixture{
 		registry:    registry,
-		Logger:      logger,
-		Layout:      layout,
 		Passphrase:  opts.Plan.Passphrase,
 		Chunks:      []chunk.ID{opts.Chunk},
 		FirstLedger: first,
