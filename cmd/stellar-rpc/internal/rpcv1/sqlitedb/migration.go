@@ -112,7 +112,7 @@ func (mm MultiMigration) Apply(ctx context.Context, view xdr.LedgerCloseMetaView
 			decoded = true
 		}
 		if localErr := m.Apply(ctx, meta); localErr != nil {
-			err = errors.Join(applyErr, localErr, mm.db.Rollback())
+			applyErr = errors.Join(applyErr, localErr, mm.db.Rollback())
 		}
 	}
 	return applyErr
