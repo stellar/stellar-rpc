@@ -149,15 +149,22 @@ func newBenchCommand(
 // core.
 func NewServeCommand() *cobra.Command {
 	var (
-		opts       serveOptions
-		startChunk uint32
-		prof       profileFlags
+		opts        serveOptions
+		startChunk  uint32
+		hotChunk    int64
+		replayChunk int64
+		src         sourceFlags
+		prof        profileFlags
 	)
 	cmd := newBenchCommand("bench-serve",
 		"Serve a prepared full-history dataset over JSON-RPC for read benchmarks",
-		nil, &prof,
-		func(ctx context.Context, logger *supportlog.Entry, _ string) error {
+		&src, &prof,
+		func(ctx context.Context, logger *supportlog.Entry, outDir string) error {
 			opts.StartChunk = chunk.ID(startChunk)
+			opts.HotChunk = optionalChunkFrom(hotChunk)
+			opts.ReplayChunk = optionalChunkFrom(replayChunk)
+			opts.Source = src.config()
+			opts.OutDir = outDir
 			return runServe(ctx, logger, opts)
 		})
 	fs := cmd.Flags()
@@ -172,13 +179,23 @@ func NewServeCommand() *cobra.Command {
 	fs.Uint32Var(&startChunk, "start-chunk", 0, "first cold chunk ID to adopt (required)")
 	fs.IntVar(&opts.NumChunks, "num-chunks", 1,
 		"how many consecutive cold chunks to adopt starting at --start-chunk")
-	fs.Int64Var(&opts.HotChunk, "hot-chunk", -1,
+	fs.Int64Var(&hotChunk, "hot-chunk", -1,
 		"chunk ID of a pre-built hot DB under --hot-dir to serve as the hot tier (-1 = none)")
 	fs.Uint32Var(&opts.LatestLedger, "latest-ledger", 0,
 		"newest ledger reads may serve (0 = the highest adopted chunk's last ledger)")
 	fs.StringVar(&opts.Endpoint, "endpoint", "127.0.0.1:8000", "host:port the read server binds")
 	fs.StringVar(&opts.NetworkPassphrase, "network-passphrase", "",
 		"passphrase transaction hashes are computed against (required; must match the dataset's)")
+	fs.Int64Var(&replayChunk, "replay-chunk", -1,
+		"chunk to ingest live from --source while serving, measuring reads under ingest load "+
+			"(-1 = static run); its hot DB is created FRESH, wiping any leftover dir. "+
+			"Exclusive with --hot-chunk")
+	fs.Uint32Var(&opts.ReplayLedgers, "replay-ledgers", 0,
+		"cap on ledgers replayed from --replay-chunk's start (0 = the whole chunk)")
+	fs.DurationVar(&opts.CloseInterval, "close-interval", 0,
+		"pace the --replay-chunk ingest to this close cadence, as in bench-ingest hot "+
+			"(0 = back-to-back). Size it so the replay outlasts the load run: "+
+			"10,000 ledgers at 600ms is about 1h40m")
 	markRequired(cmd, "cold-dir", "catalog-dir", "start-chunk", "network-passphrase")
 	return cmd
 }

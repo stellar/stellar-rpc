@@ -7,14 +7,19 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
 // The read-only serving seam for `bench-serve`. The daemon's own entry
@@ -125,4 +130,127 @@ func BenchServeReads(ctx context.Context, cfg BenchServeConfig) error {
 	case serr := <-died:
 		return fmt.Errorf("bench serve read server: %w", serr)
 	}
+}
+
+// BenchOpenReplayChunk opens the hot DB the replay writes into and publishes
+// its handle, so serving can start with the hot tier already in place.
+//
+// Ordering matters and mirrors the daemon's: startup opens the resume chunk's
+// hot DB BEFORE it serves reads, because the ready key that open writes is what
+// read-view acquisition derives its frontier from. Opening after the port was
+// already bound would leave a window where every read fails.
+//
+// The open goes through the production bracket, so a chunk with no ready key is
+// WIPED and created fresh — which is what a replay wants, and why the caller
+// must not point it at a dataset it means to keep.
+func BenchOpenReplayChunk(
+	cat *catalog.Catalog, resume uint32, reg *query.Registry, logger *supportlog.Entry,
+) (*hotchunk.DB, error) {
+	c := chunk.IDFromLedger(resume)
+	db, err := openHotDBForChunk(cat, c, logger)
+	if err != nil {
+		return nil, fmt.Errorf("open hot DB for replay chunk %s: %w", c, err)
+	}
+	reg.PublishHandle(c, db)
+	return db, nil
+}
+
+// BenchReplayConfig configures BenchReplayIntoRegistry.
+type BenchReplayConfig struct {
+	// Stream is the bounded ledger stream to replay; its end stops the loop.
+	Stream ledgerbackend.LedgerStream
+
+	// Resume is the first ledger to ingest.
+	Resume uint32
+
+	// HotDB is the open write target from BenchOpenReplayChunk.
+	HotDB *hotchunk.DB
+
+	// Catalog is the adopted catalog; the loop reopens hot DBs through it at
+	// every chunk boundary.
+	Catalog *catalog.Catalog
+
+	// Registry is the SERVING registry. This is the whole point of the call:
+	// every handle the loop opens and every committed ledger's stamp lands
+	// here, so reads in flight see the tip advance.
+	Registry *query.Registry
+
+	Logger  *supportlog.Entry
+	Metrics observability.Metrics
+	Sink    ingest.MetricSink
+}
+
+func (c BenchReplayConfig) validate() error {
+	switch {
+	case c.Stream == nil:
+		return errors.New("bench replay: Stream is required")
+	case c.HotDB == nil:
+		return errors.New("bench replay: HotDB is required")
+	case c.Catalog == nil:
+		return errors.New("bench replay: Catalog is required")
+	case c.Registry == nil:
+		return errors.New("bench replay: Registry is required")
+	case c.Logger == nil:
+		return errors.New("bench replay: Logger is required")
+	}
+	return nil
+}
+
+// BenchReplayIntoRegistry runs the daemon's ingestion loop over a bounded
+// stream, publishing into the SERVING registry so reads observe the ingest as
+// it happens. A bounded stream ending is the expected termination and returns
+// nil.
+//
+// This differs from `bench-ingest hot` in exactly one way, and it is the way
+// that matters: RunBoundedIngestionLoop hands the loop a closingSink, which
+// discards every latest-ledger stamp and closes each completed chunk's DB
+// because nothing is reading it. Here the loop's handoffs go to the real
+// registry instead. The ingestion work itself is identical — the same
+// runIngestionLoop, the same per-ledger atomic synced batch.
+//
+// Fee windows are deliberately nil, as in the bounded bench loop: getFeeStats
+// is not under measurement and folding fees in would add per-ledger work the
+// daemon's own numbers do not attribute to reads.
+//
+// Chunk boundaries are published to a logging boundary, NOT to a lifecycle
+// runner, so no freeze, discard, or prune ever runs. That is a deliberate
+// limit: those operations delete files, and pointing them at an operator's
+// prepared dataset to satisfy a read benchmark is not a trade worth making.
+// What the benchmark measures — read latency while ingestion competes for the
+// box — does not depend on the freeze.
+func BenchReplayIntoRegistry(ctx context.Context, cfg BenchReplayConfig) error {
+	if err := cfg.validate(); err != nil {
+		return err
+	}
+	err := runIngestionLoop(ctx, ingestionLoopConfig{
+		Stream:   cfg.Stream,
+		Resume:   cfg.Resume,
+		HotDB:    cfg.HotDB,
+		Catalog:  cfg.Catalog,
+		Boundary: loggingBoundary{logger: cfg.Logger},
+		Logger:   cfg.Logger,
+		Metrics:  cfg.Metrics,
+		Sink:     cfg.Sink,
+		Registry: cfg.Registry,
+		// nil: see the fee-window note above.
+		FeeWindows: nil,
+	})
+	// A bounded stream running out is the expected end, not a failure — the
+	// same remap RunBoundedIngestionLoop applies. Without it the caller sees a
+	// spurious error, and worse, the loop's deferred close has already shut the
+	// hot DB, so every read that follows fails as temporarily-unavailable.
+	if errors.Is(err, errStreamEnded) {
+		return nil
+	}
+	return err
+}
+
+// loggingBoundary records chunk completions without acting on them — the
+// replay's stand-in for the lifecycle a serving daemon would wake. The loop has
+// already opened and published the next chunk's handle by the time this runs,
+// so reads continue across the boundary; only the cold-side freeze is absent.
+type loggingBoundary struct{ logger *supportlog.Entry }
+
+func (b loggingBoundary) Publish() {
+	b.logger.Info("bench replay: chunk boundary reached (no freeze: bench-serve runs no lifecycle)")
 }

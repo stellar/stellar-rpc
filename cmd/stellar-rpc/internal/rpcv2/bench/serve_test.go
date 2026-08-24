@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -132,33 +133,61 @@ func startServe(t *testing.T, opts serveOptions) string {
 	ctx, cancel := context.WithCancel(context.Background())
 	errs := make(chan error, 1)
 	go func() { errs <- runServe(ctx, rpcv2test.SilentLogger(), opts) }()
-	t.Cleanup(func() {
+
+	// stop is idempotent and returns the run's own error, so both the cleanup
+	// and the startup probe below can report the real cause instead of a bare
+	// "never answered".
+	stopped := false
+	stop := func() error {
+		if stopped {
+			return nil
+		}
+		stopped = true
 		cancel()
 		select {
 		case err := <-errs:
-			require.NoError(t, err, "bench-serve exited with an error")
+			return err
 		case <-time.After(30 * time.Second):
-			t.Error("bench-serve did not stop within 30s of cancellation")
+			return errors.New("bench-serve did not stop within 30s of cancellation")
 		}
-	})
+	}
+	t.Cleanup(func() { require.NoError(t, stop(), "bench-serve exited with an error") })
 
+	// Polled on the TEST goroutine on purpose: require.Eventually runs its
+	// condition on another goroutine, where a failed assertion is undefined
+	// behavior rather than a clean failure — and where an early exit could not
+	// abort the poll, turning a fast failure into a full timeout.
 	url := "http://" + opts.Endpoint
-	require.Eventually(t, func() bool {
+	deadline := time.Now().Add(30 * time.Second)
+	for !serveAnswers(url) {
 		select {
 		case err := <-errs:
-			t.Fatalf("bench-serve exited before serving: %v", err)
+			stopped = true
+			require.FailNowf(t, "bench-serve exited before serving", "%v", err)
 		default:
 		}
-		resp, err := http.Post(url, //nolint:noctx // polling probe, no deadline needed
-			"application/json", bytes.NewReader([]byte(`{"jsonrpc":"2.0","id":1,"method":"getHealth"}`)))
-		if err != nil {
-			return false
+		if time.Now().After(deadline) {
+			require.NoError(t, stop(), "bench-serve never answered getHealth")
+			require.FailNow(t, "bench-serve never answered getHealth within 30s")
 		}
-		_ = resp.Body.Close()
-		return resp.StatusCode == http.StatusOK
-	}, 30*time.Second, 50*time.Millisecond, "bench-serve never answered getHealth")
+		time.Sleep(50 * time.Millisecond)
+	}
 	return url
 }
+
+func serveAnswers(url string) bool {
+	resp, err := http.Post(url, //nolint:noctx // startup probe
+		"application/json", bytes.NewReader([]byte(`{"jsonrpc":"2.0","id":1,"method":"getHealth"}`)))
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+// chunkOpt names a chunk for serveOptions' optional chunk fields. Omitting
+// such a field means "absent", which is what most of these tests want.
+func chunkOpt(c chunk.ID) optionalChunk { return optionalChunkFrom(int64(c)) }
 
 func freePort(t *testing.T) string {
 	t.Helper()
@@ -212,7 +241,6 @@ func TestServeColdOnlyDatasetAnswersReads(t *testing.T) {
 		ColdRoot:     ds.Root,
 		StartChunk:   c,
 		NumChunks:    1,
-		HotChunk:     -1,
 		LatestLedger: ds.LastLedger,
 	})
 
@@ -294,7 +322,7 @@ func TestServeAdoptsPrebuiltHotChunk(t *testing.T) {
 		HotRoot:      ds.HotRoot,
 		StartChunk:   coldChunk,
 		NumChunks:    1,
-		HotChunk:     int64(hotChunk),
+		HotChunk:     chunkOpt(hotChunk),
 		LatestLedger: ds.LastLedger,
 	})
 
@@ -334,7 +362,6 @@ func TestServeRejectsChunkWithoutLedgerPack(t *testing.T) {
 		CatalogDir:        filepath.Join(t.TempDir(), "catalog"),
 		StartChunk:        chunk.ID(7), // never written
 		NumChunks:         1,
-		HotChunk:          -1,
 		Endpoint:          freePort(t),
 		NetworkPassphrase: network.PublicNetworkPassphrase,
 	})
@@ -365,7 +392,6 @@ func TestServeAdoptsWidestIndexCoverage(t *testing.T) {
 		ColdRoot:     ds.Root,
 		StartChunk:   chunk.ID(1),
 		NumChunks:    1,
-		HotChunk:     -1,
 		LatestLedger: ds.LastLedger,
 	})
 	hash, seq := ds.anyTxHash(t)
@@ -401,4 +427,208 @@ func TestParseIndexFileName(t *testing.T) {
 			}
 		})
 	}
+}
+
+// latestLedgerOf reads the served tip.
+func latestLedgerOf(t *testing.T, url string) uint32 {
+	t.Helper()
+	var got struct {
+		Sequence uint32 `json:"sequence"`
+	}
+	require.NoError(t, json.Unmarshal(
+		okResult(t, callRPC(t, url, "getLatestLedger", `{}`), "getLatestLedger"), &got))
+	return got.Sequence
+}
+
+// pollLatestLedger reads the served tip without failing the test, for use
+// inside a polling condition. require.Eventually runs its condition on another
+// goroutine, where a failed assertion is undefined behavior rather than a
+// clean failure, so the polling path must report and not assert.
+func pollLatestLedger(url string) (uint32, bool) {
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"getLatestLedger","params":{}}`)
+	resp, err := http.Post(url, "application/json", bytes.NewReader(body)) //nolint:noctx // polling probe
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Result struct {
+			Sequence uint32 `json:"sequence"`
+		} `json:"result"`
+		Error *rpcErrorBody `json:"error"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&out) != nil || out.Error != nil {
+		return 0, false
+	}
+	return out.Result.Sequence, true
+}
+
+// TestServeReplayAdvancesServedTip is the run-2 shape: reads served from an
+// adopted cold chunk while the ingestion loop writes the chunk above it.
+//
+// The assertion that matters is that the SERVED tip advances. `bench-ingest
+// hot` runs the same loop but hands it a closingSink, which throws every
+// latest-ledger stamp away and closes each completed chunk — so an identical
+// ingest would leave reads pinned at the cold tip forever. Publishing into the
+// serving registry instead is the whole difference, and this is what proves it.
+func TestServeReplayAdvancesServedTip(t *testing.T) {
+	const coldChunk = chunk.ID(1)
+	const replayChunk = chunk.ID(2)
+	const replayLedgers = 40
+
+	ds := buildColdDataset(t, coldChunk, 4)
+	packDir, _ := writeSourcePack(t, t.TempDir(), replayChunk, replayLedgers)
+
+	coldTip := ds.LastLedger
+	url := startServe(t, serveOptions{
+		ColdRoot:      ds.Root,
+		HotRoot:       filepath.Join(t.TempDir(), "hot"),
+		StartChunk:    coldChunk,
+		NumChunks:     1,
+		LatestLedger:  coldTip,
+		ReplayChunk:   chunkOpt(replayChunk),
+		ReplayLedgers: replayLedgers,
+		CloseInterval: 20 * time.Millisecond,
+		Source:        sourceConfig{Kind: sourcePack, PackDir: packDir},
+		OutDir:        filepath.Join(t.TempDir(), "csv"),
+	})
+
+	// Cold reads answer from the first request, before any replayed ledger
+	// commits: the hot DB was opened before the port bound.
+	var firstPage struct {
+		Ledgers []struct {
+			Sequence uint32 `json:"sequence"`
+		} `json:"ledgers"`
+	}
+	require.NoError(t, json.Unmarshal(
+		okResult(t, callRPC(t, url,
+			"getLedgers", fmt.Sprintf(`{"startLedger":%d,"pagination":{"limit":2}}`, ds.FirstLedger)),
+			"getLedgers"), &firstPage))
+	require.NotEmpty(t, firstPage.Ledgers)
+	assert.Equal(t, ds.FirstLedger, firstPage.Ledgers[0].Sequence)
+
+	// The tip climbs into the replayed chunk as ingestion commits.
+	wantTip := replayChunk.FirstLedger() + replayLedgers - 1
+	require.Eventually(t, func() bool {
+		seq, ok := pollLatestLedger(url)
+		return ok && seq >= replayChunk.FirstLedger()
+	}, 30*time.Second, 20*time.Millisecond, "served tip never entered the replayed chunk")
+	require.Eventually(t, func() bool {
+		seq, ok := pollLatestLedger(url)
+		return ok && seq == wantTip
+	}, 30*time.Second, 20*time.Millisecond, "served tip never reached the end of the replay")
+
+	// And the replayed ledgers are readable through the hot tier, not merely
+	// counted: the tip advancing without served data would be a lie.
+	var hotPage struct {
+		Ledgers []struct {
+			Sequence uint32 `json:"sequence"`
+		} `json:"ledgers"`
+	}
+	require.NoError(t, json.Unmarshal(
+		okResult(t, callRPC(t, url,
+			"getLedgers", fmt.Sprintf(`{"startLedger":%d,"pagination":{"limit":3}}`, replayChunk.FirstLedger())),
+			"getLedgers"), &hotPage))
+	require.Len(t, hotPage.Ledgers, 3)
+	assert.Equal(t, replayChunk.FirstLedger(), hotPage.Ledgers[0].Sequence)
+
+	// The cold chunk stays served throughout: the replay extends history, it
+	// does not replace it.
+	assert.Equal(t, ds.FirstLedger, firstPage.Ledgers[0].Sequence)
+	assert.Less(t, coldTip, latestLedgerOf(t, url))
+}
+
+// TestServeReplayRejectsColdOverlap pins the refusal to replay into a chunk
+// that is already frozen. Cold wins the tier decision, so those ledgers would
+// be written and then never read — a run that looks like it worked and measured
+// nothing.
+func TestServeReplayRejectsColdOverlap(t *testing.T) {
+	ds := buildColdDataset(t, chunk.ID(1), 2)
+	err := runServe(context.Background(), rpcv2test.SilentLogger(), serveOptions{
+		ColdRoot:          ds.Root,
+		HotRoot:           filepath.Join(t.TempDir(), "hot"),
+		CatalogDir:        filepath.Join(t.TempDir(), "catalog"),
+		StartChunk:        chunk.ID(1),
+		NumChunks:         2,
+		ReplayChunk:       chunkOpt(2), // inside [1, 2]
+		Endpoint:          freePort(t),
+		NetworkPassphrase: network.PublicNetworkPassphrase,
+		OutDir:            filepath.Join(t.TempDir(), "csv"),
+		Source:            sourceConfig{Kind: sourcePack, PackDir: ds.Root},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "inside the adopted cold range")
+}
+
+// TestServeReplayRejectsHotChunkCombination pins the two hot modes as
+// exclusive: one adopts a finished DB, the other wipes and rewrites one.
+func TestServeReplayRejectsHotChunkCombination(t *testing.T) {
+	err := serveOptions{
+		ColdRoot:          "/x",
+		CatalogDir:        "/y",
+		Endpoint:          "127.0.0.1:1",
+		NetworkPassphrase: "p",
+		NumChunks:         1,
+		HotRoot:           "/z",
+		HotChunk:          chunkOpt(2),
+		ReplayChunk:       chunkOpt(3),
+		OutDir:            "/o",
+	}.validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exclusive")
+}
+
+// TestServeReplayKeepsServingAfterLegEnds pins the reopen after the ingest leg
+// finishes.
+//
+// The ingestion loop closes its write handle on exit — right for the daemon,
+// where the loop stopping means the process is going down. Here serving
+// outlives the leg, so without a reopen the registry would keep pointing at a
+// closed handle and every read of the replayed chunk would fail
+// temporarily-unavailable for the rest of the run. There is a brief window at
+// the handoff where that is the honest answer, hence the retry.
+func TestServeReplayKeepsServingAfterLegEnds(t *testing.T) {
+	const coldChunk = chunk.ID(1)
+	const replayChunk = chunk.ID(2)
+	const replayLedgers = 12
+
+	ds := buildColdDataset(t, coldChunk, 3)
+	packDir, _ := writeSourcePack(t, t.TempDir(), replayChunk, replayLedgers)
+	csvDir := filepath.Join(t.TempDir(), "csv")
+
+	url := startServe(t, serveOptions{
+		ColdRoot:      ds.Root,
+		HotRoot:       filepath.Join(t.TempDir(), "hot"),
+		StartChunk:    coldChunk,
+		NumChunks:     1,
+		LatestLedger:  ds.LastLedger,
+		ReplayChunk:   chunkOpt(replayChunk),
+		ReplayLedgers: replayLedgers,
+		Source:        sourceConfig{Kind: sourcePack, PackDir: packDir},
+		OutDir:        csvDir,
+	})
+
+	// The leg is done once its CSV report lands.
+	require.Eventually(t, func() bool {
+		entries, err := os.ReadDir(csvDir)
+		return err == nil && len(entries) > 0
+	}, 30*time.Second, 20*time.Millisecond, "replay leg never wrote its CSV report")
+
+	// Reads of the replayed chunk keep working past the leg's end.
+	require.Eventually(t, func() bool {
+		seq, ok := pollLatestLedger(url)
+		return ok && seq == replayChunk.FirstLedger()+replayLedgers-1
+	}, 30*time.Second, 20*time.Millisecond, "served tip did not survive the leg ending")
+
+	var page struct {
+		Ledgers []struct {
+			Sequence uint32 `json:"sequence"`
+		} `json:"ledgers"`
+	}
+	require.NoError(t, json.Unmarshal(
+		okResult(t, callRPC(t, url,
+			"getLedgers", fmt.Sprintf(`{"startLedger":%d,"pagination":{"limit":2}}`, replayChunk.FirstLedger())),
+			"getLedgers"), &page))
+	require.Len(t, page.Ledgers, 2)
+	assert.Equal(t, replayChunk.FirstLedger(), page.Ledgers[0].Sequence)
 }

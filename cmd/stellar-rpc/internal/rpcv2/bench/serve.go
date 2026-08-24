@@ -8,6 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
@@ -42,6 +45,30 @@ import (
 // first, and a chunk missing its ledger pack fails the command rather than
 // being advertised as servable.
 
+// optionalChunk is a chunk ID that may be absent.
+//
+// The zero value is ABSENT, deliberately. A bare chunk.ID field cannot express
+// "no chunk" — chunk 0 is a real chunk — so a sentinel like -1 has to be
+// carried in a signed field, and then any struct literal that omits the field
+// silently means "chunk 0". That is a trap worth closing at the type: with this
+// type, forgetting the field can only ever mean "not set".
+type optionalChunk struct {
+	id  chunk.ID
+	set bool
+}
+
+// optionalChunkFrom converts the CLI's signed form, where any negative value
+// means absent.
+func optionalChunkFrom(v int64) optionalChunk {
+	if v < 0 {
+		return optionalChunk{}
+	}
+	return optionalChunk{id: chunk.ID(v), set: true}
+}
+
+func (o optionalChunk) get() (chunk.ID, bool) { return o.id, o.set }
+func (o optionalChunk) present() bool         { return o.set }
+
 // serveOptions configures one bench-serve run.
 type serveOptions struct {
 	// ColdRoot is the cold artifact root: the tree holding ledgers/, events/
@@ -64,11 +91,11 @@ type serveOptions struct {
 	StartChunk chunk.ID
 	NumChunks  int
 
-	// HotChunk is the chunk ID of a pre-built hot DB under HotRoot to serve as
-	// the hot tier, or -1 for none. `bench-ingest hot` leaves exactly this: a
-	// finished DB whose catalog was thrown away. It is adopted read-write
-	// (never through the create bracket, which would wipe it).
-	HotChunk int64
+	// HotChunk names a pre-built hot DB under HotRoot to serve as the hot tier.
+	// `bench-ingest hot` leaves exactly this: a finished DB whose catalog was
+	// thrown away. It is adopted read-write (never through the create bracket,
+	// which would wipe it).
+	HotChunk optionalChunk
 
 	// LatestLedger is the newest ledger reads may serve. Zero derives it from
 	// the highest adopted chunk. It must be set for anything to be servable at
@@ -83,7 +110,39 @@ type serveOptions struct {
 	// must match the passphrase the dataset was generated under, or every
 	// getTransaction lookup misses.
 	NetworkPassphrase string
+
+	// Source is the ledger source the replay leg reads from. Used only when
+	// ReplayChunk is set.
+	Source sourceConfig
+
+	// ReplayChunk is the chunk to ingest live while serving; absent means a
+	// static run. It turns the run into the reads-under-ingest-load
+	// measurement: the daemon's real ingestion loop writes this chunk while
+	// reads are served from the adopted cold chunks beside it.
+	//
+	// Its hot DB is created FRESH — the production open bracket wipes any
+	// leftover dir — so this must not name a chunk whose DB is wanted.
+	ReplayChunk optionalChunk
+
+	// ReplayLedgers caps how many ledgers are replayed from the chunk's start
+	// (0 = the whole chunk). A cap keeps a smoke run short without changing
+	// what each ledger costs.
+	ReplayLedgers uint32
+
+	// CloseInterval paces the replay to a steady-state close cadence, as in
+	// `bench-ingest hot`. It is what makes the ingest load realistic instead of
+	// a catch-up burst, and what makes the replay last long enough to blast
+	// against: 10,000 ledgers at 600ms is about 1h40m. Zero replays
+	// back-to-back, which finishes fast and measures reads against a saturating
+	// writer instead.
+	CloseInterval time.Duration
+
+	// OutDir receives the replay's CSV report.
+	OutDir string
 }
+
+// replaying reports whether the run has a live ingest leg.
+func (o serveOptions) replaying() bool { return o.ReplayChunk.present() }
 
 func (o serveOptions) validate() error {
 	switch {
@@ -102,13 +161,50 @@ func (o serveOptions) validate() error {
 		return fmt.Errorf("--start-chunk=%d with --num-chunks=%d ends at chunk %d, past the last valid chunk ID %d",
 			uint32(o.StartChunk), o.NumChunks, end, uint32(maxChunkID))
 	}
-	if o.HotChunk >= 0 {
+	if hot, ok := o.HotChunk.get(); ok {
 		if o.HotRoot == "" {
 			return errors.New("--hot-chunk needs --hot-dir")
 		}
-		if o.HotChunk > int64(maxChunkID) {
-			return fmt.Errorf("--hot-chunk=%d is past the last valid chunk ID %d", o.HotChunk, uint32(maxChunkID))
+		if hot > maxChunkID {
+			return fmt.Errorf("--hot-chunk=%s is past the last valid chunk ID %d", hot, uint32(maxChunkID))
 		}
+	}
+	return o.validateReplay()
+}
+
+// validateReplay checks the live-ingest leg. The two hot modes are mutually
+// exclusive: --hot-chunk adopts a finished DB read-write, --replay-chunk creates
+// one fresh and writes it, and allowing both would let a run silently replay
+// into the DB it was asked to preserve.
+func (o serveOptions) validateReplay() error {
+	if !o.replaying() {
+		return nil
+	}
+	replay, _ := o.ReplayChunk.get()
+	switch {
+	case o.HotChunk.present():
+		return errors.New("--replay-chunk and --hot-chunk are exclusive: " +
+			"the first creates a fresh hot DB, the second serves an existing one")
+	case o.HotRoot == "":
+		return errors.New("--replay-chunk needs --hot-dir")
+	case o.OutDir == "":
+		return errors.New("--replay-chunk needs --out for the replay's CSV report")
+	case replay > maxChunkID:
+		return fmt.Errorf("--replay-chunk=%s is past the last valid chunk ID %d", replay, uint32(maxChunkID))
+	case o.CloseInterval < 0:
+		return fmt.Errorf("--close-interval must be >= 0, got %s", o.CloseInterval)
+	}
+	if err := o.Source.validate(); err != nil {
+		return err
+	}
+	// The replay must extend the served history, not overwrite it: a chunk
+	// inside the adopted cold range already has frozen artifacts, and cold wins
+	// the tier decision, so its replayed ledgers would be written and then
+	// never read.
+	if replay >= o.StartChunk && replay <= o.lastColdChunk() {
+		return fmt.Errorf("--replay-chunk=%s is inside the adopted cold range [%s, %s]; "+
+			"cold wins the tier decision, so the replayed ledgers would never be served",
+			replay, o.StartChunk, o.lastColdChunk())
 	}
 	return nil
 }
@@ -123,8 +219,8 @@ func (o serveOptions) lastColdChunk() chunk.ID {
 // anchor for the derived latest ledger and the serving frontier.
 func (o serveOptions) highestChunk() chunk.ID {
 	highest := o.lastColdChunk()
-	if o.HotChunk >= 0 && chunk.ID(o.HotChunk) > highest {
-		highest = chunk.ID(o.HotChunk)
+	if hot, ok := o.HotChunk.get(); ok && hot > highest {
+		highest = hot
 	}
 	return highest
 }
@@ -176,13 +272,143 @@ func runServe(ctx context.Context, logger *supportlog.Entry, opts serveOptions) 
 	}
 	defer reg.Close()
 
-	return rpcv2.BenchServeReads(ctx, rpcv2.BenchServeConfig{
-		Endpoint:          opts.Endpoint,
-		NetworkPassphrase: opts.NetworkPassphrase,
+	if !opts.replaying() {
+		return rpcv2.BenchServeReads(ctx, opts.serveConfig(reg, logger))
+	}
+	return runServeWithReplay(ctx, logger, cat, reg, opts)
+}
+
+func (o serveOptions) serveConfig(reg *query.Registry, logger *supportlog.Entry) rpcv2.BenchServeConfig {
+	return rpcv2.BenchServeConfig{
+		Endpoint:          o.Endpoint,
+		NetworkPassphrase: o.NetworkPassphrase,
 		Registry:          reg,
 		Logger:            logger,
 		RetentionWindow:   0, // full history: nothing is pruned
+	}
+}
+
+// runServeWithReplay serves reads while the daemon's ingestion loop writes the
+// replay chunk — the reads-under-ingest-load measurement.
+//
+// The hot DB opens BEFORE the port binds, matching the daemon's startup order:
+// the ready key that open writes is what read-view acquisition derives its
+// frontier from, so binding first would leave a window where every read fails.
+//
+// The replay finishing does NOT end the run. A load generator is usually still
+// blasting, and cutting the server down mid-run would corrupt its numbers with
+// connection errors; worse, it would silently turn the tail of the measurement
+// into a static run. So the leg logs loudly and serving continues until the
+// operator interrupts. Size --close-interval so the replay outlasts the blast.
+func runServeWithReplay(
+	ctx context.Context, logger *supportlog.Entry,
+	cat *catalog.Catalog, reg *query.Registry, opts serveOptions,
+) error {
+	if err := os.MkdirAll(opts.OutDir, 0o755); err != nil {
+		return fmt.Errorf("create --out dir %s: %w", opts.OutDir, err)
+	}
+	backend, release, err := openSource(ctx, opts.Source)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	replayChunk, _ := opts.ReplayChunk.get()
+	first, last := replayChunk.FirstLedger(), replayChunk.LastLedger()
+	// Overflow-safe cap: compare against the chunk's span rather than adding a
+	// flag-supplied count to a ledger sequence.
+	if span := last - first + 1; opts.ReplayLedgers > 0 && opts.ReplayLedgers < span {
+		last = first + opts.ReplayLedgers - 1
+	}
+	hotDB, err := rpcv2.BenchOpenReplayChunk(cat, first, reg, logger)
+	if err != nil {
+		return err
+	}
+	logger.WithField("chunk", replayChunk.String()).
+		WithField("ledgers", fmt.Sprintf("%d-%d", first, last)).
+		WithField("close_interval", opts.CloseInterval.String()).
+		Info("bench-serve: replaying into the hot tier while serving")
+
+	sink := newCSVSink()
+	stream, schedule := buildHotStream(backend, first, last, opts.CloseInterval)
+	sink.schedule = schedule
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		return rpcv2.BenchServeReads(gctx, opts.serveConfig(reg, logger))
 	})
+	g.Go(func() error {
+		if err := runReplayLeg(gctx, logger, sink, opts, rpcv2.BenchReplayConfig{
+			Stream:   stream,
+			Resume:   first,
+			HotDB:    hotDB,
+			Catalog:  cat,
+			Registry: reg,
+			Logger:   logger,
+			Metrics:  sink,
+			Sink:     sink,
+		}, last); err != nil {
+			return err
+		}
+		return keepServingAfterReplay(gctx, cat, reg, logger, first)
+	})
+	return g.Wait()
+}
+
+// keepServingAfterReplay reopens the replayed chunk so reads survive the leg
+// ending.
+//
+// The ingestion loop closes its write handle on the way out — correct for the
+// daemon, where the loop stopping means the process is going down. Here serving
+// deliberately outlives the leg, and the registry still points at that closed
+// handle, so every read of the replayed chunk would fail as
+// temporarily-unavailable. Reopening republishes a live handle over the same
+// now-complete DB; the close flushed it, so nothing is missing.
+func keepServingAfterReplay(
+	ctx context.Context, cat *catalog.Catalog, reg *query.Registry,
+	logger *supportlog.Entry, resume uint32,
+) error {
+	if ctx.Err() != nil {
+		return nil // interrupted: the run is ending, not continuing
+	}
+	if _, err := rpcv2.BenchOpenReplayChunk(cat, resume, reg, logger); err != nil {
+		return fmt.Errorf("reopen replayed chunk for continued serving: %w", err)
+	}
+	logger.Warn("bench-serve: replay finished; STILL SERVING the now-static dataset. " +
+		"Reads from here on are NOT under ingest load — stop the load run, or interrupt to exit.")
+	<-ctx.Done()
+	return nil
+}
+
+// runReplayLeg runs the ingest leg and writes its CSV report. A replay that
+// ends short of `last` is reported as an error: it means the source ran dry, so
+// the ingest load stopped partway and the read numbers cover a window nobody
+// intended.
+func runReplayLeg(
+	ctx context.Context, logger *supportlog.Entry, sink *csvSink,
+	opts serveOptions, cfg rpcv2.BenchReplayConfig, last uint32,
+) error {
+	start := time.Now()
+	err := rpcv2.BenchReplayIntoRegistry(ctx, cfg)
+	// VmHWM never decreases, so a failed leg's partial CSV still gets the row.
+	recordPeakRSS(logger, sink, readPeakRSS)
+	// An interrupt is the expected way a serve run ends; the leg being cut
+	// short by it is not a failure.
+	if err == nil && ctx.Err() == nil && sink.lastCommittedSeq() != last {
+		err = fmt.Errorf("replay stream ended at seq %d, expected through %d", sink.lastCommittedSeq(), last)
+	}
+	if err != nil {
+		writePartialCSVs(logger, sink, opts.OutDir)
+		return err
+	}
+	sink.observe(fileDriver, driverRunWall, time.Since(start), int(last-cfg.Resume+1))
+	sink.logSummary(logger)
+	written, werr := sink.writeCSVs(opts.OutDir)
+	if werr != nil {
+		return werr
+	}
+	logger.Infof("wrote %d CSVs to %s", len(written), opts.OutDir)
+	return nil
 }
 
 // buildServingRegistry adopts the dataset's artifacts into cat and returns a
@@ -205,9 +431,14 @@ func buildServingRegistry(
 		reg.Close()
 		return nil, err
 	}
-	if err := markServingFrontier(cat, logger, opts.highestChunk()+1); err != nil {
-		reg.Close()
-		return nil, err
+	// A replay needs no frontier marker: the chunk it ingests becomes the ready
+	// live chunk itself, which is exactly what the marker stands in for. Adding
+	// one above it would also claim the still-ingesting chunk as complete.
+	if !opts.replaying() {
+		if err := markServingFrontier(cat, logger, opts.highestChunk()+1); err != nil {
+			reg.Close()
+			return nil, err
+		}
 	}
 
 	latest := opts.LatestLedger
@@ -404,10 +635,10 @@ func parseIndexFileName(name string) (lo, hi chunk.ID, ok bool) {
 func adoptHotChunk(
 	cat *catalog.Catalog, reg *query.Registry, logger *supportlog.Entry, opts serveOptions,
 ) error {
-	if opts.HotChunk < 0 {
+	c, ok := opts.HotChunk.get()
+	if !ok {
 		return nil
 	}
-	c := chunk.ID(opts.HotChunk)
 	dir := cat.Layout().HotChunkPath(c)
 	if _, err := os.Stat(dir); err != nil {
 		return fmt.Errorf("stat hot chunk dir %s: %w", dir, err)
