@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -142,24 +143,37 @@ var fileSpecs = func() []fileSpec {
 
 // querySpecs is the bench-query report schema for one run: one CSV per swept
 // query type, each holding a total_c<W> row per concurrency level, plus
-// driver.csv holding the fixture open, the per-cell wall-clocks
-// (<qtype>_c<W>), and the peak RSS. Unlike fileSpecs it is built per run, since
-// the row set is the --types × --query-concurrency sweep the flags asked for.
+// driver.csv holding the fixture open, the page-cache evictions, the per-cell
+// wall-clocks (<qtype>_c<W>), and the peak RSS. Unlike fileSpecs it is built per
+// run, since the row set is the --types × --query-concurrency sweep the flags
+// asked for.
 //
 // The labels are the results converter's contract, not a presentation choice:
 // it discovers the query types by globbing the run dir for CSVs other than
 // driver.csv, reads each cell from that type's total_c<W> row and the matching
 // <qtype>_c<W> driver row, and files every driver row WITHOUT a _c<W> suffix
-// (open, peak_rss_bytes) under "setup".
+// (open, evict, peak_rss_bytes) under "setup".
+//
+// txhash carries two more rows per concurrency level, found_c<W> and miss_c<W>,
+// splitting the same samples its total_c<W> row blends. The converter matches
+// total_c<W> alone, so the split is invisible to the site and exists for the CSV
+// and the log summary — see recordCell.
 func querySpecs(types []string, concurrency []int) []fileSpec {
 	specs := make([]fileSpec, 0, len(types)+1)
-	driverRows := make([]string, 0, len(types)*len(concurrency)+2)
-	driverRows = append(driverRows, driverQueryOpen)
+	driverRows := make([]string, 0, len(types)*len(concurrency)+3)
+	driverRows = append(driverRows, driverQueryOpen, driverQueryEvict)
 	for _, qtype := range types {
 		rows := make([]string, 0, len(concurrency))
 		for _, w := range concurrency {
 			rows = append(rows, queryCellRow(w))
 			driverRows = append(driverRows, queryDriverRow(qtype, w))
+		}
+		if qtype == queryTypeTxHash {
+			for _, stage := range []string{txHashStageFound, txHashStageMiss} {
+				for _, w := range concurrency {
+					rows = append(rows, stage+"_c"+strconv.Itoa(w))
+				}
+			}
 		}
 		specs = append(specs, fileSpec{name: qtype, rowOrder: rows})
 	}

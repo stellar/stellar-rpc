@@ -66,7 +66,9 @@ func TestWriteInvocationJSON(t *testing.T) {
 	startedAt := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
 	finishedAt := time.Date(2026, 7, 21, 12, 5, 30, 0, time.UTC)
 
-	err := writeInvocationJSON(outDir, cmd, flags, startedAt, finishedAt, nil)
+	extra := map[string]string{"pageCacheEviction": "on"}
+
+	err := writeInvocationJSON(outDir, cmd, flags, extra, startedAt, finishedAt, nil)
 	require.NoError(t, err)
 
 	// Verify the file exists and is readable
@@ -88,6 +90,9 @@ func TestWriteInvocationJSON(t *testing.T) {
 	assert.Equal(t, "1000", record.Flags["start-chunk"])
 	assert.Contains(t, record.Flags, "num-chunks")
 	assert.Equal(t, "10", record.Flags["num-chunks"])
+
+	// The run's own facts land beside the flags, not among them.
+	assert.Equal(t, "on", record.Extra["pageCacheEviction"])
 
 	// Verify timestamps
 	assert.Equal(t, "2026-07-21T12:00:00Z", record.StartedAt)
@@ -114,7 +119,7 @@ func TestWriteInvocationJSONWithError(t *testing.T) {
 	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
 
 	runErr := errors.New("backfill [chunk 3, chunk 3]: boom")
-	require.NoError(t, writeInvocationJSON(outDir, cmd, nil, now, now, runErr))
+	require.NoError(t, writeInvocationJSON(outDir, cmd, nil, nil, now, now, runErr))
 
 	data, err := os.ReadFile(filepath.Join(outDir, "invocation.json"))
 	require.NoError(t, err)
@@ -123,6 +128,11 @@ func TestWriteInvocationJSONWithError(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &record))
 	assert.Equal(t, runErr.Error(), record.Error)
 	assert.Equal(t, 1, record.SchemaVersion)
+
+	// A run that recorded no facts of its own omits the key entirely.
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &raw))
+	assert.NotContains(t, raw, "extra")
 }
 
 // TestCaptureFlags verifies that captureFlags extracts all flag values from

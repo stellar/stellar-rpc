@@ -110,6 +110,15 @@ type flagBinder interface {
 	bind(cmd *cobra.Command)
 }
 
+// runEnv is what a bench run gets from its command wrapper: where to write,
+// and a place to record facts the run resolves for itself — ones
+// invocation.json cannot read off a flag, such as whether page-cache eviction
+// is supported on this platform.
+type runEnv struct {
+	OutDir string
+	Extra  map[string]string
+}
+
 // newBenchCommand builds one bench subcommand skeleton — no positional args,
 // SIGINT-canceled context, Info-level logger, profiling around run, an
 // invocation.json record written to --out after the run — with --out, the
@@ -117,7 +126,7 @@ type flagBinder interface {
 // its ledger-source group, bench-query its sweep group.
 func newBenchCommand(
 	use, short string, prof *profileFlags,
-	run func(ctx context.Context, logger *supportlog.Entry, outDir string) error,
+	run func(ctx context.Context, logger *supportlog.Entry, env runEnv) error,
 	groups ...flagBinder,
 ) *cobra.Command {
 	var outDir string
@@ -130,13 +139,14 @@ func newBenchCommand(
 			ctx, stop, logger := benchContext()
 			defer stop()
 			startedAt := time.Now().UTC()
-			runErr := prof.around(logger, func() error { return run(ctx, logger, outDir) })
+			env := runEnv{OutDir: outDir, Extra: map[string]string{}}
+			runErr := prof.around(logger, func() error { return run(ctx, logger, env) })
 			// The --out dir is created by the run itself, so a run that
 			// failed early (e.g. in validation) leaves nowhere to write the
 			// record and this write fails too. In that case only warn about
 			// the write: the error the user needs to see is the run's own.
 			if err := writeInvocationJSON(
-				outDir, cmd, captureFlags(cmd), startedAt, time.Now().UTC(), runErr,
+				outDir, cmd, captureFlags(cmd), env.Extra, startedAt, time.Now().UTC(), runErr,
 			); err != nil {
 				if runErr == nil {
 					return err
@@ -167,7 +177,7 @@ func newColdCommand() *cobra.Command {
 	cmd := newBenchCommand("cold",
 		"Benchmark cold ingestion: the daemon's backfill (chunk freezes + txhash index builds) over a chunk range",
 		&prof,
-		func(ctx context.Context, logger *supportlog.Entry, outDir string) error {
+		func(ctx context.Context, logger *supportlog.Entry, env runEnv) error {
 			return runCold(ctx, logger, coldOptions{
 				Source:     src.config(),
 				StartChunk: chunk.ID(startChunk),
@@ -175,7 +185,7 @@ func newColdCommand() *cobra.Command {
 				Workers:    workers,
 				ColdRoot:   coldOutDir,
 				CatalogDir: catalogDir,
-				OutDir:     outDir,
+				OutDir:     env.OutDir,
 			})
 		}, &src)
 	fs := cmd.Flags()
@@ -205,7 +215,7 @@ func newHotCommand() *cobra.Command {
 	cmd := newBenchCommand("hot",
 		"Benchmark hot ingestion: the daemon's live ingestion loop over a chunk range",
 		&prof,
-		func(ctx context.Context, logger *supportlog.Entry, outDir string) error {
+		func(ctx context.Context, logger *supportlog.Entry, env runEnv) error {
 			return runHot(ctx, logger, hotOptions{
 				Source:        src.config(),
 				StartChunk:    chunk.ID(startChunk),
@@ -214,7 +224,7 @@ func newHotCommand() *cobra.Command {
 				HotRoot:       hotDir,
 				CatalogDir:    catalogDir,
 				CloseInterval: closeInterval,
-				OutDir:        outDir,
+				OutDir:        env.OutDir,
 			})
 		}, &src)
 	fs := cmd.Flags()
