@@ -99,10 +99,11 @@ func writePartialCSVs(logger *supportlog.Entry, sink *csvSink, outDir string) {
 	}
 }
 
-// newBenchCommand builds one bench-ingest subcommand skeleton — no positional
-// args, SIGINT-canceled context, Info-level logger, profiling around run, an
-// invocation.json record written to --out after the run — with the source,
-// profile, and --out flags bound.
+// newBenchCommand builds one bench subcommand skeleton — no positional args,
+// SIGINT-canceled context, Info-level logger, profiling around run, an
+// invocation.json record written to --out after the run — with the profile and
+// --out flags bound, plus the source flags when src is non-nil (bench-serve
+// needs no ledger source).
 func newBenchCommand(
 	use, short string, src *sourceFlags, prof *profileFlags,
 	run func(ctx context.Context, logger *supportlog.Entry, outDir string) error,
@@ -134,8 +135,51 @@ func newBenchCommand(
 		},
 	}
 	cmd.Flags().StringVar(&outDir, "out", "bench-out", "output dir for the CSV report and invocation.json")
-	src.bind(cmd)
+	if src != nil {
+		src.bind(cmd)
+	}
 	prof.bind(cmd)
+	return cmd
+}
+
+// NewServeCommand returns the `bench-serve` command: it adopts a prepared cold
+// dataset (and optionally a pre-built hot DB) into a persistent catalog and
+// serves the v2 read methods over HTTP, so a load generator can measure read
+// latency against a fixed corpus. It runs no ingestion and needs no captive
+// core.
+func NewServeCommand() *cobra.Command {
+	var (
+		opts       serveOptions
+		startChunk uint32
+		prof       profileFlags
+	)
+	cmd := newBenchCommand("bench-serve",
+		"Serve a prepared full-history dataset over JSON-RPC for read benchmarks",
+		nil, &prof,
+		func(ctx context.Context, logger *supportlog.Entry, _ string) error {
+			opts.StartChunk = chunk.ID(startChunk)
+			return runServe(ctx, logger, opts)
+		})
+	fs := cmd.Flags()
+	fs.StringVar(&opts.ColdRoot, "cold-dir", "",
+		"cold artifact root holding ledgers/, events/ and txhash/ (required; a dataset pack root "+
+			"or bench-ingest cold's --cold-out-dir)")
+	fs.StringVar(&opts.HotRoot, "hot-dir", "",
+		"root holding the per-chunk hot RocksDBs ({chunk:08d}); omit to serve cold chunks only")
+	fs.StringVar(&opts.CatalogDir, "catalog-dir", "",
+		"dir for the adopted catalog (required); unlike the ingest benchmarks this catalog PERSISTS, "+
+			"so a re-run over the same dataset reuses it")
+	fs.Uint32Var(&startChunk, "start-chunk", 0, "first cold chunk ID to adopt (required)")
+	fs.IntVar(&opts.NumChunks, "num-chunks", 1,
+		"how many consecutive cold chunks to adopt starting at --start-chunk")
+	fs.Int64Var(&opts.HotChunk, "hot-chunk", -1,
+		"chunk ID of a pre-built hot DB under --hot-dir to serve as the hot tier (-1 = none)")
+	fs.Uint32Var(&opts.LatestLedger, "latest-ledger", 0,
+		"newest ledger reads may serve (0 = the highest adopted chunk's last ledger)")
+	fs.StringVar(&opts.Endpoint, "endpoint", "127.0.0.1:8000", "host:port the read server binds")
+	fs.StringVar(&opts.NetworkPassphrase, "network-passphrase", "",
+		"passphrase transaction hashes are computed against (required; must match the dataset's)")
+	markRequired(cmd, "cold-dir", "catalog-dir", "start-chunk", "network-passphrase")
 	return cmd
 }
 
