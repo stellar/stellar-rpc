@@ -107,7 +107,7 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 	if catalogBase == "" {
 		catalogBase = opts.HotRoot
 	}
-	cat, releaseCat, err := openScratchCatalog(catalogBase, layout, logger)
+	cat, releaseCat, err := openScratchCatalog(catalogBase, scratchPrefixIngest, layout, logger)
 	if err != nil {
 		return err
 	}

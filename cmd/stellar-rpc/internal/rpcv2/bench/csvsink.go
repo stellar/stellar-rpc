@@ -84,7 +84,7 @@ type fileSpec struct {
 	rowOrder []string
 }
 
-// fileSpecs is the whole report schema, in file emission order:
+// fileSpecs is the bench-ingest report schema, in file emission order:
 //
 //   - one CSV per cold data type the ingest engine reports (ledgers.csv,
 //     txhash.csv, events.csv), one row per cold pipeline stage (term_index →
@@ -140,6 +140,33 @@ var fileSpecs = func() []fileSpec {
 	)
 }()
 
+// querySpecs is the bench-query report schema for one run: one CSV per swept
+// query type, each holding a total_c<W> row per concurrency level, plus
+// driver.csv holding the fixture open, the per-cell wall-clocks
+// (<qtype>_c<W>), and the peak RSS. Unlike fileSpecs it is built per run, since
+// the row set is the --types × --query-concurrency sweep the flags asked for.
+//
+// The labels are the results converter's contract, not a presentation choice:
+// it discovers the query types by globbing the run dir for CSVs other than
+// driver.csv, reads each cell from that type's total_c<W> row and the matching
+// <qtype>_c<W> driver row, and files every driver row WITHOUT a _c<W> suffix
+// (open, peak_rss_bytes) under "setup".
+func querySpecs(types []string, concurrency []int) []fileSpec {
+	specs := make([]fileSpec, 0, len(types)+1)
+	driverRows := make([]string, 0, len(types)*len(concurrency)+2)
+	driverRows = append(driverRows, driverQueryOpen)
+	for _, qtype := range types {
+		rows := make([]string, 0, len(concurrency))
+		for _, w := range concurrency {
+			rows = append(rows, queryCellRow(w))
+			driverRows = append(driverRows, queryDriverRow(qtype, w))
+		}
+		specs = append(specs, fileSpec{name: qtype, rowOrder: rows})
+	}
+	driverRows = append(driverRows, driverPeakRSS)
+	return append(specs, fileSpec{name: fileDriver, rowOrder: driverRows})
+}
+
 // sample is one observed (duration, item-count) pair.
 type sample struct {
 	d     time.Duration
@@ -184,6 +211,12 @@ type csvSink struct {
 	mu   sync.Mutex
 	rows map[rowKey]*series // every signal is one sample on a (file, row) key
 
+	// specs is the report schema this sink renders through: fileSpecs for an
+	// ingest run, querySpecs(...) for a query run, whose file and row set is the
+	// sweep the flags asked for rather than a fixed vocabulary. Read-only after
+	// construction.
+	specs []fileSpec
+
 	// hotBurst accumulates the current hot ledger's HotPhase durations so
 	// HotPhase can reconstruct the per-ledger end-to-end ingest_total (the
 	// phases partition the per-ledger total). Guarded by mu.
@@ -205,9 +238,15 @@ var (
 	_ observability.Metrics = (*csvSink)(nil)
 )
 
-// newCSVSink returns an empty recorder.
+// newCSVSink returns an empty recorder rendering through the bench-ingest
+// schema.
 func newCSVSink() *csvSink {
-	return &csvSink{rows: make(map[rowKey]*series)}
+	return newSchemaCSVSink(fileSpecs)
+}
+
+// newSchemaCSVSink returns an empty recorder rendering through specs.
+func newSchemaCSVSink(specs []fileSpec) *csvSink {
+	return &csvSink{rows: make(map[rowKey]*series), specs: specs}
 }
 
 // HotPhase records one phase of one hot ledger ingest into hot.csv, and
@@ -427,8 +466,8 @@ type file struct {
 	rows []row
 }
 
-// files aggregates every recorded series into the report's CSV files, in
-// fileSpecs order (a file outside the schema is appended after, sorted, its
+// files aggregates every recorded series into the report's CSV files, in the
+// sink's schema order (a file outside the schema is appended after, sorted, its
 // rows ordered by sorted label).
 func (s *csvSink) files() []file {
 	s.mu.Lock()
@@ -442,9 +481,9 @@ func (s *csvSink) files() []file {
 		byFile[k.file][k.row] = sr
 	}
 
-	names := make([]string, len(fileSpecs))
-	rowOrders := make(map[string][]string, len(fileSpecs))
-	for i, spec := range fileSpecs {
+	names := make([]string, len(s.specs))
+	rowOrders := make(map[string][]string, len(s.specs))
+	for i, spec := range s.specs {
 		names[i] = spec.name
 		rowOrders[spec.name] = spec.rowOrder
 	}

@@ -104,13 +104,21 @@ func writePartialCSVs(logger *supportlog.Entry, sink *csvSink, outDir string) {
 	}
 }
 
-// newBenchCommand builds one bench-ingest subcommand skeleton — no positional
-// args, SIGINT-canceled context, Info-level logger, profiling around run, an
-// invocation.json record written to --out after the run — with the source,
-// profile, and --out flags bound.
+// flagBinder is one flag group a subcommand binds — the shape sourceFlags,
+// profileFlags, and queryFlags share.
+type flagBinder interface {
+	bind(cmd *cobra.Command)
+}
+
+// newBenchCommand builds one bench subcommand skeleton — no positional args,
+// SIGINT-canceled context, Info-level logger, profiling around run, an
+// invocation.json record written to --out after the run — with --out, the
+// profile flags, and each caller-supplied flag group bound. bench-ingest passes
+// its ledger-source group, bench-query its sweep group.
 func newBenchCommand(
-	use, short string, src *sourceFlags, prof *profileFlags,
+	use, short string, prof *profileFlags,
 	run func(ctx context.Context, logger *supportlog.Entry, outDir string) error,
+	groups ...flagBinder,
 ) *cobra.Command {
 	var outDir string
 	cmd := &cobra.Command{
@@ -139,8 +147,10 @@ func newBenchCommand(
 		},
 	}
 	cmd.Flags().StringVar(&outDir, "out", "bench-out", "output dir for the CSV report and invocation.json")
-	src.bind(cmd)
 	prof.bind(cmd)
+	for _, g := range groups {
+		g.bind(cmd)
+	}
 	return cmd
 }
 
@@ -156,7 +166,7 @@ func newColdCommand() *cobra.Command {
 	)
 	cmd := newBenchCommand("cold",
 		"Benchmark cold ingestion: the daemon's backfill (chunk freezes + txhash index builds) over a chunk range",
-		&src, &prof,
+		&prof,
 		func(ctx context.Context, logger *supportlog.Entry, outDir string) error {
 			return runCold(ctx, logger, coldOptions{
 				Source:     src.config(),
@@ -167,7 +177,7 @@ func newColdCommand() *cobra.Command {
 				CatalogDir: catalogDir,
 				OutDir:     outDir,
 			})
-		})
+		}, &src)
 	fs := cmd.Flags()
 	fs.Uint32Var(&startChunk, "start-chunk", 0, "first chunk ID to backfill (required)")
 	fs.IntVar(&numChunks, "num-chunks", 1, "how many consecutive chunks to backfill starting at --start-chunk")
@@ -194,7 +204,7 @@ func newHotCommand() *cobra.Command {
 	)
 	cmd := newBenchCommand("hot",
 		"Benchmark hot ingestion: the daemon's live ingestion loop over a chunk range",
-		&src, &prof,
+		&prof,
 		func(ctx context.Context, logger *supportlog.Entry, outDir string) error {
 			return runHot(ctx, logger, hotOptions{
 				Source:        src.config(),
@@ -206,7 +216,7 @@ func newHotCommand() *cobra.Command {
 				CloseInterval: closeInterval,
 				OutDir:        outDir,
 			})
-		})
+		}, &src)
 	fs := cmd.Flags()
 	fs.Uint32Var(&startChunk, "start-chunk", 0, "first chunk ID to ingest (required)")
 	fs.IntVar(&numChunks, "num-chunks", 1,
