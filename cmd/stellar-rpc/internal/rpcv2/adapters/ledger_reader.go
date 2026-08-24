@@ -89,7 +89,7 @@ func (r *LedgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRange, e
 }
 
 func (r *LedgerReader) StreamLedgerRange(
-	ctx context.Context, startLedger, endLedger uint32, f store.StreamLedgerFn,
+	ctx context.Context, startLedger, endLedger uint32, f store.StreamLedgerViewFn,
 ) error {
 	view, err := query.ViewFrom(ctx)
 	if err != nil {
@@ -107,11 +107,10 @@ func (r *LedgerReader) StreamLedgerRange(
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		var lcm xdr.LedgerCloseMeta
-		if err := lcm.UnmarshalBinary(entry.Bytes); err != nil {
-			return fmt.Errorf("adapters: unmarshal ledger %d: %w", entry.Seq, err)
-		}
-		if err := f(lcm); err != nil {
+		// Entry.Bytes aliases the reader's scratch buffer and is overwritten
+		// on the next iteration step — exactly the StreamLedgerViewFn
+		// contract (the view is valid for the duration of the call only).
+		if err := f(xdr.LedgerCloseMetaView(entry.Bytes)); err != nil {
 			return err
 		}
 	}

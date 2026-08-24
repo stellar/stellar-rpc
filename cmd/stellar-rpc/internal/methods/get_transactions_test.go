@@ -401,7 +401,7 @@ func (r *sparseLedgerReader) BatchGetLedgers(context.Context, uint32, uint32) ([
 	return nil, nil
 }
 
-func (r *sparseLedgerReader) StreamLedgerRange(context.Context, uint32, uint32, store.StreamLedgerFn) error {
+func (r *sparseLedgerReader) StreamLedgerRange(context.Context, uint32, uint32, store.StreamLedgerViewFn) error {
 	return nil
 }
 

@@ -109,7 +109,7 @@ func (m *MockLedgerReader) GetLedgerView(_ context.Context, sequence uint32) (xd
 	return xdr.LedgerCloseMetaView(rawMeta), true, nil
 }
 
-func (m *MockLedgerReader) StreamLedgerRange(_ context.Context, _ uint32, _ uint32, _ store.StreamLedgerFn) error {
+func (m *MockLedgerReader) StreamLedgerRange(_ context.Context, _ uint32, _ uint32, _ store.StreamLedgerViewFn) error {
 	return nil
 }
 

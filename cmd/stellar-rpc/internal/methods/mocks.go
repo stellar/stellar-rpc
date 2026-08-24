@@ -41,7 +41,7 @@ func (m *MockLedgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRang
 }
 
 func (m *MockLedgerReader) StreamLedgerRange(ctx context.Context, startLedger, endLedger uint32,
-	f store.StreamLedgerFn,
+	f store.StreamLedgerViewFn,
 ) error {
 	args := m.Called(ctx, startLedger, endLedger, f)
 	return args.Error(0)

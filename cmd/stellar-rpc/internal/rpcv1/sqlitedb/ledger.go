@@ -121,7 +121,7 @@ func (r ledgerReader) StreamLedgerRange(
 	ctx context.Context,
 	startLedger uint32,
 	endLedger uint32,
-	f store.StreamLedgerFn,
+	f store.StreamLedgerViewFn,
 ) error {
 	sql := sq.Select("meta").From(ledgerCloseMetaTableName).
 		Where(sq.GtOrEq{"sequence": startLedger}).
@@ -134,7 +134,7 @@ func (r ledgerReader) StreamLedgerRange(
 	}
 	defer q.Close()
 	for q.Next() {
-		var closeMeta xdr.LedgerCloseMeta
+		var closeMeta xdr.LedgerCloseMetaView
 		if err = q.Scan(&closeMeta); err != nil {
 			return err
 		}

@@ -472,8 +472,11 @@ func (d *Daemon) mustInitializeStorage(cfg *config.Config) *feewindow.FeeWindows
 		readTxMetaCtx,
 		ledgerSeqRange.First,
 		ledgerSeqRange.Last,
-		func(txMeta xdr.LedgerCloseMeta) error {
-			currentSeq = txMeta.LedgerSequence()
+		func(txMeta xdr.LedgerCloseMetaView) error {
+			currentSeq, err := txMeta.LedgerSequence()
+			if err != nil {
+				return err
+			}
 			if initialSeq == 0 {
 				initialSeq = currentSeq
 				d.logger.

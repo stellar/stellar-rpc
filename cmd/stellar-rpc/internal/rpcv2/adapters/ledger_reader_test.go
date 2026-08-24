@@ -148,9 +148,13 @@ func TestStreamLedgerRange(t *testing.T) {
 	ctx, reader, c0, c1 := sparseFixture(t)
 	var seqs []uint32
 	err := reader.StreamLedgerRange(ctx, c0.FirstLedger(), c1.FirstLedger()+500,
-		func(lcm xdr.LedgerCloseMeta) error {
-			assert.Equal(t, closeTimeFor(lcm.LedgerSequence()), lcm.LedgerCloseTime())
-			seqs = append(seqs, lcm.LedgerSequence())
+		func(view xdr.LedgerCloseMetaView) error {
+			seq, err := view.LedgerSequence()
+			require.NoError(t, err)
+			closeTime, err := view.LedgerCloseTime()
+			require.NoError(t, err)
+			assert.Equal(t, closeTimeFor(seq), closeTime)
+			seqs = append(seqs, seq)
 			return nil
 		})
 	require.NoError(t, err)
@@ -163,7 +167,7 @@ func TestStreamLedgerRange_CallbackErrorStopsStream(t *testing.T) {
 	boom := errors.New("boom")
 	calls := 0
 	err := reader.StreamLedgerRange(ctx, c0.FirstLedger(), c0.FirstLedger()+3,
-		func(xdr.LedgerCloseMeta) error {
+		func(xdr.LedgerCloseMetaView) error {
 			calls++
 			return boom
 		})
@@ -175,7 +179,7 @@ func TestStreamLedgerRange_BelowFloorIsRangeError(t *testing.T) {
 	ctx, reader, c0, _ := sparseFixture(t)
 	var rangeErr *query.RangeError
 	err := reader.StreamLedgerRange(ctx, 2, c0.FirstLedger(),
-		func(xdr.LedgerCloseMeta) error { return nil })
+		func(xdr.LedgerCloseMetaView) error { return nil })
 	require.ErrorAs(t, err, &rangeErr)
 	assert.Equal(t, uint32(2), rangeErr.Requested)
 	assert.Equal(t, c0.FirstLedger(), rangeErr.Oldest)
