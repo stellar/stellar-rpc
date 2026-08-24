@@ -58,6 +58,39 @@ func ConvertInterface(xdr encoding.BinaryMarshaler) (json.RawMessage, error) {
 	return convertAnyBytes(xdrTypeName, data)
 }
 
+// ConvertJSON is the inverse of ConvertBytes: it takes an XDR object (`xdr`,
+// used only to determine the name of the structure, as in ConvertBytes) and
+// the JSON serialization of a value of that type, in the encoding
+// ConvertBytes produces, and returns the value's XDR byte encoding. Unlike
+// ConvertBytes, empty input is an error: it is not valid JSON. Inputs over
+// 32 MiB are rejected, and serde_json's recursion limit caps container
+// nesting at 63 levels, below the 500 the read direction allows, so the
+// deepest protocol-legal values only convert from their base64 form.
+func ConvertJSON(xdr any, js json.RawMessage) ([]byte, error) {
+	// Rejecting empty input here also keeps C.CBytes below from making a
+	// zero-length allocation, whose pointer may be null.
+	if len(js) == 0 {
+		return nil, errors.New("JSON input is empty")
+	}
+
+	xdrTypeName := reflect.TypeOf(xdr).Name()
+
+	goRawJSON := CXDR(js)
+	defer FreeGoXDR(goRawJSON)
+
+	b := C.CString(xdrTypeName)
+	defer C.free(unsafe.Pointer(b))
+
+	result := C.json_to_xdr(b, goRawJSON)
+	defer C.free_json_to_xdr_result(result)
+
+	if errStr := C.GoString(result.error); errStr != "" {
+		return nil, errors.New(errStr)
+	}
+
+	return C.GoBytes(unsafe.Pointer(result.xdr.xdr), C.int(result.xdr.len)), nil
+}
+
 func convertAnyBytes(xdrTypeName string, field []byte) (json.RawMessage, error) {
 	var jsonStr, errStr string
 	goRawXdr := CXDR(field)

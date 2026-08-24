@@ -4,8 +4,9 @@ extern crate stellar_xdr;
 
 use std::{panic, str::FromStr};
 use stellar_xdr as xdr;
+use stellar_xdr::WriteXdr;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
 // We really do need everything.
 #[allow(clippy::wildcard_imports)]
@@ -32,9 +33,10 @@ pub struct ConversionResult {
     error: *mut libc::c_char,
 }
 
-struct RustConversionResult {
-    json: String,
-    error: String,
+#[repr(C)]
+pub struct JsonToXdrResult {
+    xdr: CXDR,
+    error: *mut libc::c_char,
 }
 
 /// Takes in a string name of an XDR type in the Stellar Protocol (i.e. from the
@@ -48,7 +50,7 @@ struct RustConversionResult {
 ///
 /// # Panics
 ///
-/// This should never panic due to `catch_json_to_xdr_panic` catching and
+/// This should never panic due to `catch_conversion_panic` catching and
 /// unwinding all panics to stringified error messages.
 ///
 /// # Safety
@@ -62,7 +64,7 @@ pub unsafe extern "C" fn xdr_to_json(
     typename: *mut libc::c_char,
     xdr: CXDR,
 ) -> *mut ConversionResult {
-    let result = catch_json_to_xdr_panic(Box::new(move || {
+    let result = catch_conversion_panic("xdr_to_json()", move || {
         let type_str = unsafe { from_c_string(typename) };
         let the_type = match xdr::TypeVariant::from_str(&type_str) {
             Ok(t) => t,
@@ -77,16 +79,18 @@ pub unsafe extern "C" fn xdr_to_json(
             Err(e) => panic!("couldn't read {type_str}: {e}"),
         };
 
-        Ok(RustConversionResult {
-            json: serde_json::to_string(&t).unwrap(),
-            error: String::new(),
-        })
-    }));
+        Ok(serde_json::to_string(&t).unwrap())
+    });
+
+    let (json, error) = match result {
+        Ok(json) => (json, String::new()),
+        Err(error) => ("{}".to_string(), error),
+    };
 
     // Caller is responsible for calling free_conversion_result.
     Box::into_raw(Box::new(ConversionResult {
-        json: string_to_c(result.json),
-        error: string_to_c(result.error),
+        json: string_to_c(json),
+        error: string_to_c(error),
     }))
 }
 
@@ -108,34 +112,128 @@ pub unsafe extern "C" fn free_conversion_result(ptr: *mut ConversionResult) {
     }
 }
 
-/// Runs a JSON conversion operation and unwinds panics.
+/// The inverse of `xdr_to_json`: takes in a string name of an XDR type in the
+/// Stellar Protocol (i.e. from the `stellar_xdr` crate) as well as the JSON
+/// serialization of a value of that type (the encoding `xdr_to_json` emits)
+/// and returns a structure containing the value's XDR byte encoding.
 ///
-/// It is modeled after `catch_preflight_panic()` and will always return valid
-/// JSON in the result's `json` field and an error string in `error` if a panic
-/// occurs.
-fn catch_json_to_xdr_panic(
-    op: Box<dyn Fn() -> Result<RustConversionResult>>,
-) -> RustConversionResult {
+/// # Errors
+///
+/// On error, the struct's `error` field will be filled out with the failure
+/// message, and its `xdr` field is empty. Failures return errors rather than
+/// panicking because this function parses user-supplied values. Inputs over
+/// the 32 MiB limit are rejected before parsing, and `serde_json`'s recursion
+/// limit caps container nesting well below the 500 levels the XDR read
+/// direction allows (the Go tests pin the boundary).
+///
+/// # Safety
+///
+/// This relies on the function parameters to be valid structures. The
+/// `typename` must be a null-terminated C string. The `json` structure should
+/// have a valid pointer to an aligned byte array and have a matching size. If
+/// these aren't true there may be segfaults when trying to manage their memory.
+#[no_mangle]
+pub unsafe extern "C" fn json_to_xdr(
+    typename: *mut libc::c_char,
+    json: CXDR,
+) -> *mut JsonToXdrResult {
+    let result = catch_conversion_panic("json_to_xdr()", move || {
+        // The read direction bounds memory during decoding via Limited; the
+        // parse direction can only bound it up front, before serde_json
+        // materializes the whole value.
+        if json.len > DEFAULT_XDR_RW_LIMITS.len {
+            return Err(anyhow!(
+                "JSON input is {} bytes, over the {}-byte limit",
+                json.len,
+                DEFAULT_XDR_RW_LIMITS.len
+            ));
+        }
+
+        let type_str = unsafe { from_c_string(typename) };
+        let the_type = xdr::TypeVariant::from_str(&type_str)
+            .map_err(|e| anyhow!("couldn't match type {type_str}: {e}"))?;
+
+        let json_bytearray = unsafe { from_c_xdr(json) };
+        let t = xdr::Type::from_json(the_type, json_bytearray.as_slice())
+            .map_err(|e| anyhow!("couldn't parse {type_str}: {e}"))?;
+
+        t.to_xdr(DEFAULT_XDR_RW_LIMITS.clone())
+            .map_err(|e| anyhow!("couldn't serialize {type_str}: {e}"))
+    });
+
+    let (xdr, error) = match result {
+        Ok(bytes) => (vec_to_c_xdr(bytes), String::new()),
+        Err(error) => (CXDR::default(), error),
+    };
+
+    // Caller is responsible for calling free_json_to_xdr_result.
+    Box::into_raw(Box::new(JsonToXdrResult {
+        xdr,
+        error: string_to_c(error),
+    }))
+}
+
+/// Frees memory allocated for the corresponding conversion result.
+///
+/// # Safety
+///
+/// You should *only* use this to free the return value of `json_to_xdr`.
+#[no_mangle]
+pub unsafe extern "C" fn free_json_to_xdr_result(ptr: *mut JsonToXdrResult) {
+    if ptr.is_null() {
+        return;
+    }
+
+    unsafe {
+        let result = Box::from_raw(ptr);
+        free_c_xdr(result.xdr);
+        free_c_string(result.error);
+    }
+}
+
+/// Converts an owned byte vector into an FFI-compatible raw XDR structure,
+/// to be freed by `free_c_xdr`. Mirrors preflight's private `vec_to_c_array`,
+/// like the Go side mirrors preflight's cgo helpers.
+fn vec_to_c_xdr(v: Vec<u8>) -> CXDR {
+    let len = v.len();
+    let xdr = Box::into_raw(v.into_boxed_slice()).cast::<libc::c_uchar>();
+    CXDR { xdr, len }
+}
+
+/// Frees the memory previously allocated by `vec_to_c_xdr`.
+unsafe fn free_c_xdr(xdr: CXDR) {
+    if xdr.xdr.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+            xdr.xdr, xdr.len,
+        )));
+    }
+}
+
+/// Runs a conversion operation and unwinds panics into an error string.
+///
+/// It is modeled after `catch_preflight_panic()`. Only panic-derived messages
+/// get the `label` prefix; an ordinary `Err` from `op` passes through
+/// unprefixed.
+fn catch_conversion_panic<T>(label: &str, op: impl FnOnce() -> Result<T>) -> Result<T, String> {
     // catch panics before they reach foreign callers (which otherwise would result in
     // undefined behavior)
-    let res: std::thread::Result<Result<RustConversionResult>> =
-        panic::catch_unwind(panic::AssertUnwindSafe(op));
+    let res: std::thread::Result<Result<T>> = panic::catch_unwind(panic::AssertUnwindSafe(op));
 
     match res {
-        Err(panic) => match panic.downcast::<String>() {
-            Ok(panic_msg) => RustConversionResult {
-                json: "{}".to_string(),
-                error: format!("xdr_to_json() failed: {panic_msg}"),
-            },
-            Err(_) => RustConversionResult {
-                json: "{}".to_string(),
-                error: "xdr_to_json() failed: unknown cause".to_string(),
-            },
-        },
+        Err(panic) => {
+            // Payloads are String from format-style panics and &str from
+            // literal ones (e.g. assert! in dependencies).
+            let msg = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&'static str>().copied())
+                .unwrap_or("unknown cause");
+            Err(format!("{label} failed: {msg}"))
+        }
         // See https://docs.rs/anyhow/latest/anyhow/struct.Error.html#display-representations
-        Ok(r) => r.unwrap_or_else(|e| RustConversionResult {
-            json: "{}".to_string(),
-            error: format!("{e:?}"),
-        }),
+        Ok(r) => r.map_err(|e| format!("{e:#}")),
     }
 }
