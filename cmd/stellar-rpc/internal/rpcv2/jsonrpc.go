@@ -58,8 +58,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 			TransactionReader: p.transactionReader,
 			FeeStats:          p.feeWindows,
 
-			GetEventsHandler: notImplemented("getEvents is not implemented by this service yet (issue #774 adds it);" +
-				" use the existing RPC service for events meanwhile"),
+			GetEventsHandler: notImplemented(protocol.GetEventsMethodName),
 
 			// No DataStoreLedgerReader: getLedgers can fall back to a bulk
 			// datastore for ledgers below local retention, but the full-history
@@ -77,8 +76,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 		})
 	specs = append(specs, jsonrpc.HandlerSpec{
 		MethodName: getEventsV2MethodName,
-		Handler: notImplemented("getEventsV2 is not implemented by this service yet (issue #774 adds it);" +
-			" use the existing RPC service for events meanwhile"),
+		Handler:    notImplemented(getEventsV2MethodName),
 	})
 	specs = limitsByMethod(m).Apply(specs)
 	for i := range specs {
@@ -121,11 +119,14 @@ func limitsByMethod(m config.MethodsConfig) jsonrpc.LimitsByMethod {
 	}
 }
 
-// notImplemented is the stub for a method in the table but not built yet. An
-// explicit error, never an empty success: an empty page would tell a paging
-// client "nothing exists", which is a lie. jrpc2.MethodNotFound (-32601) is the
+// notImplemented is the stub for a method in the table but not built yet
+// (both current uses die when #774 ships the events handlers). An explicit
+// error, never an empty success: an empty page would tell a paging client
+// "nothing exists", which is a lie. jrpc2.MethodNotFound (-32601) is the
 // spec's "method does not exist / is not available".
-func notImplemented(message string) jrpc2.Handler {
+func notImplemented(method string) jrpc2.Handler {
+	message := method + " is not implemented by this service yet (issue #774 adds it);" +
+		" use the existing RPC service for events meanwhile"
 	return func(context.Context, *jrpc2.Request) (any, error) {
 		return nil, &jrpc2.Error{Code: jrpc2.MethodNotFound, Message: message}
 	}
