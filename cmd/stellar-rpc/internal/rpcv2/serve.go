@@ -33,13 +33,12 @@ type readServerDeps struct {
 	cfg    config.Config
 }
 
-// newServeReads returns the production ServeReads: per supervised attempt it
-// builds the method table over that attempt's registry, binds
-// [service].endpoint, and serves until the returned stop function runs. run()
-// calls stop before its registry closes, so the port is released before the
-// next attempt binds and no handler outlives its stores. A Serve failure that
-// is NOT the graceful shutdown (v1 treats these as fatal) lands on the
-// returned channel, failing the attempt so the supervisor rebinds.
+// newServeReads returns the production ServeReads (the contract lives on
+// StartConfig.ServeReads): per supervised attempt it builds the method table
+// over that attempt's registry, binds [service].endpoint, and serves until the
+// returned stop runs — releasing the port before the next attempt binds. A
+// Serve failure that is NOT the graceful shutdown (v1 treats these as fatal)
+// lands on the returned channel.
 func newServeReads(deps readServerDeps) func(context.Context, *query.Registry) (func(), <-chan error, error) {
 	return func(ctx context.Context, reg *query.Registry) (func(), <-chan error, error) {
 		p := deps.params

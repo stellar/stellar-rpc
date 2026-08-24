@@ -150,9 +150,9 @@ func run(ctx context.Context, cfg StartConfig) error {
 		Grace:      cfg.lifecycleGrace,
 	}.WithLifecycleDefaults()
 
-	// Begin serving reads (injected) BEFORE launching the loops; it must return
-	// promptly (launch, not block). Its deferred stop runs before the deferred
-	// registry.Close above (LIFO), so the server is down before its stores go.
+	// Begin serving reads (injected) BEFORE launching the loops. The deferred
+	// stop runs before the deferred registry.Close above (LIFO), so the server
+	// is down before its stores go.
 	stopReads, readsDied, err := cfg.ServeReads(ctx, registry)
 	if err != nil {
 		return fmt.Errorf("startup serve reads: %w", err)
@@ -195,11 +195,10 @@ func run(ctx context.Context, cfg StartConfig) error {
 		return lifecycle.Loop(gctx, lifecycleCfg, cat, boundary)
 	})
 	g.Go(func() error {
-		// A read server that dies on its own fails the whole attempt: without
-		// this, ingestion would keep running behind an endpoint nothing can
-		// reach, and the supervisor would never rebind it. Graceful shutdown
-		// never sends here — stopReads runs after g.Wait joins, and its
-		// ErrServerClosed is filtered at the sender.
+		// A dying read server fails the whole attempt (see
+		// StartConfig.ServeReads). Graceful shutdown never sends here —
+		// stopReads runs after g.Wait joins, and its ErrServerClosed is
+		// filtered at the sender.
 		select {
 		case serr := <-readsDied:
 			return fmt.Errorf("read server died: %w", serr)

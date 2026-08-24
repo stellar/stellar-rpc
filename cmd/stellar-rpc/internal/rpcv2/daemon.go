@@ -56,8 +56,7 @@ type daemonOptions struct {
 	Core CoreOpener
 
 	// ServeReads launches the RPC read server over one supervised attempt's
-	// query registry; it must return promptly, not block. The returned stop shuts
-	// the server down — run() calls it before the attempt's registry closes.
+	// query registry (the contract lives on StartConfig.ServeReads).
 	// nil ⇒ the production server (newServeReads): the shared method table over
 	// the router-backed adapters, listening on [service].endpoint. Tests inject
 	// recorders.
