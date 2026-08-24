@@ -198,14 +198,21 @@ func TestJSONConversionErrors(t *testing.T) {
 	require.ErrorContains(t, err, "couldn't match type notAnXdrType")
 }
 
-// TestJSONConversionUnknownFields checks that fields the deserialization
-// would silently drop are rejected instead: a filter value with a typo'd
-// field must fail loudly, not query something other than what was written.
+// TestJSONConversionUnknownFields pins that unknown fields inside nested
+// structures are dropped, not rejected: the crate's collecting variant
+// would allocate a path string per ignored field (a large memory amplifier
+// on adversarial input) and misses the untagged numeric arms anyway, so
+// strict rejection is deferred to the request handler.
 func TestJSONConversionUnknownFields(t *testing.T) {
+	void := xdr.ScVal{Type: xdr.ScValTypeScvVoid}
+	m := &xdr.ScMap{{Key: void, Val: void}}
+	want, err := xdr.ScVal{Type: xdr.ScValTypeScvMap, Map: &m}.MarshalBinary()
+	require.NoError(t, err)
+
 	js := json.RawMessage(`{"map":[{"key":"void","val":"void","extra":1}]}`)
-	_, err := ConvertJSON(xdr.ScVal{}, js)
-	require.ErrorContains(t, err, "unknown JSON fields")
-	require.ErrorContains(t, err, "extra")
+	got, err := ConvertJSON(xdr.ScVal{}, js)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
 }
 
 func nestedScVec(depth int) xdr.ScVal {

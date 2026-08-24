@@ -122,9 +122,10 @@ pub unsafe extern "C" fn free_conversion_result(ptr: *mut ConversionResult) {
 /// On error, the struct's `error` field will be filled out with the failure
 /// message, and its `xdr` field is empty. Failures return errors rather than
 /// panicking because this function parses user-supplied values. Inputs over
-/// the 32 MiB limit are rejected before parsing, and `serde_json`'s recursion
-/// limit caps container nesting well below the 500 levels the XDR read
-/// direction allows (the Go tests pin the boundary).
+/// the 32 MiB limit are rejected before parsing (the Go wrapper enforces the
+/// same bound first; this check covers direct FFI callers), and
+/// `serde_json`'s recursion limit caps container nesting well below the 500
+/// levels the XDR read direction allows (the Go tests pin that boundary).
 ///
 /// # Safety
 ///
@@ -154,29 +155,14 @@ pub unsafe extern "C" fn json_to_xdr(
             .map_err(|e| anyhow!("couldn't match type {type_str}: {e}"))?;
 
         let json_bytearray = unsafe { from_c_xdr(json) };
-        let (t, ignored) =
-            xdr::Type::from_json_collecting_ignored_fields(the_type, json_bytearray.as_slice())
-                .map_err(|e| anyhow!("couldn't parse {type_str}: {e}"))?;
-
-        // Unknown fields mean the value differs from what the caller wrote;
-        // reject them like the stellar-xdr CLI does rather than silently
-        // dropping them. Cap the message: the path list is input-sized.
-        if !ignored.is_empty() {
-            let shown = ignored
-                .iter()
-                .take(5)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ");
-            let elided = ignored.len().saturating_sub(5);
-            return Err(if elided > 0 {
-                anyhow!(
-                    "couldn't parse {type_str}: unknown JSON fields: {shown}, and {elided} more"
-                )
-            } else {
-                anyhow!("couldn't parse {type_str}: unknown JSON fields: {shown}")
-            });
-        }
+        // Unknown fields inside nested structures are dropped, not rejected:
+        // the crate's collecting variant allocates a path string per ignored
+        // field (a large input-to-heap amplifier on adversarial input) and
+        // never sees fields inside the untagged numeric arms anyway. Strict
+        // rejection is the request handler's job, where value sizes are
+        // tightly bounded.
+        let t = xdr::Type::from_json(the_type, json_bytearray.as_slice())
+            .map_err(|e| anyhow!("couldn't parse {type_str}: {e}"))?;
 
         t.to_xdr(DEFAULT_XDR_RW_LIMITS.clone())
             .map_err(|e| anyhow!("couldn't serialize {type_str}: {e}"))
