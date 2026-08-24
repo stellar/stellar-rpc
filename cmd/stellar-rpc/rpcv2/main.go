@@ -21,7 +21,7 @@ func main() {
 		Use:   "stellar-rpc-v2",
 		Short: "Run the full-history streaming ingestion daemon",
 		Run: func(cmd *cobra.Command, _ []string) {
-			// Cancel the supervised run loop on SIGINT/SIGTERM for a clean shutdown.
+			// Cancel the daemon on SIGINT/SIGTERM for a clean shutdown.
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 			if err := rpcv2.RunDaemon(ctx, configPath, cmd.Flags()); err != nil {

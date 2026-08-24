@@ -143,7 +143,7 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 // no-op otherwise), in preference order:
 //  1. a ready, COMPLETE hot tier (decision (a): maxCommittedSeq >= last ledger);
 //     incomplete-but-present is staleness that falls through (re-derivation
-//     recovers it); a "ready" DB that won't open is an ordinary restartable error
+//     recovers it); a "ready" DB that won't open is an ordinary run-failing error
 //     (read-only open, never auto-healed);
 //  2. the frozen local .pack, unless ledgers is itself requested (circular);
 //  3. the bulk backend, gated by a bounded waitForCoverage on its Tip.
@@ -158,7 +158,7 @@ func backfillSource(
 	// or recovery-demoted) is not a read source; an absent key falls through.
 	src, closer, used, herr := resolveHotSource(chunkID, cfg)
 	if herr != nil {
-		return nil, noClose, herr // hot-DB open failure — restartable, never auto-healed
+		return nil, noClose, herr // hot-DB open failure — fails the run, never auto-healed
 	}
 	if used {
 		cfg.Logger.Debugf("backfillSource: chunk %s from complete hot tier", chunkID)
@@ -203,7 +203,7 @@ func backfillSource(
 // resolveHotSource applies the hot branch end to end: it reads the hot key and,
 // only when "ready", tries the hot tier. used=true → src/closer are the hot
 // source; used=false → no "ready" key or present-but-incomplete (caller falls
-// through); err → a "ready" DB that won't open (restartable). Keeps backfillSource's
+// through); err → a "ready" DB that won't open (fails the run). Keeps backfillSource's
 // hot branch flat.
 func resolveHotSource(
 	chunkID chunk.ID, cfg ProcessConfig,
@@ -229,7 +229,7 @@ func resolveHotSource(
 // shared hot DB read-only (never auto-healed) straight from its Layout path.
 // used=true when present AND complete; used=false when present-but-incomplete
 // (staleness, caller falls through); err when a "ready" DB is absent or unopenable
-// — an ordinary restartable error, detected lazily on the open.
+// — an ordinary run-failing error, detected lazily on the open.
 func tryHotSource(
 	state geometry.HotState, chunkID chunk.ID, cfg ProcessConfig,
 ) (ledgerbackend.LedgerStream, func() error, bool, error) {
@@ -238,7 +238,7 @@ func tryHotSource(
 	// enforcement site: the freeze reads its ledgers to re-derive the cold artifacts
 	// and must never mutate it (the read-only open replays any un-synced WAL into
 	// memtables but persists nothing). An absent or gutted "ready" DB fails the open
-	// — restartable, never auto-created.
+	// — fails the run, never auto-created.
 	hot, err := hotchunk.OpenReadyView(state, dir, chunkID, cfg.Logger)
 	if err != nil {
 		return nil, nil, false, err
@@ -247,7 +247,7 @@ func tryHotSource(
 	if merr != nil {
 		_ = hot.Close()
 		// A read error against an opened DB: the DB opened but cannot answer its
-		// own progress. Surface it (restartable), don't treat as staleness.
+		// own progress. Surface it (fails the run), don't treat as staleness.
 		return nil, nil, false, fmt.Errorf("chunk %s: read hot max committed seq: %w", chunkID, merr)
 	}
 	// decision (a): complete iff the single DB's maxCommittedSeq reaches the chunk's

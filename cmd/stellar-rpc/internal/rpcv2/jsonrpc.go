@@ -21,12 +21,11 @@ import (
 )
 
 // handlerParams carries everything newJSONRPCHandler composes into the method
-// table besides the config: the per-attempt readers over the query router, the
+// table besides the config: the per-run readers over the query router, the
 // process-wide core-backed pieces, and the sinks.
 type handlerParams struct {
 	daemon            host.Daemon
 	logger            *supportlog.Entry
-	handlerMetrics    *jsonrpc.HandlerMetrics
 	metrics           observability.Metrics
 	registry          *query.Registry
 	ledgerReader      store.LedgerReader
@@ -86,7 +85,6 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 	return jsonrpc.NewHandler(jsonrpc.Params{
 		Daemon:                p.daemon,
 		Logger:                p.logger,
-		Metrics:               p.handlerMetrics,
 		Specs:                 specs,
 		GlobalQueueLimit:      deref(cfg.Service.MaxConcurrentRequests),
 		GlobalDurationWarning: deref(cfg.Service.RequestExecutionWarningThreshold),

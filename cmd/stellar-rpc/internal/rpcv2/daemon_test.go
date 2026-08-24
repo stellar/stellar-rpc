@@ -354,10 +354,9 @@ func TestRunDaemon_NowFloorRequiresTip(t *testing.T) {
 		// A never-ready bulk source (sub-genesis tip ⇒ fast permanent failure) means
 		// the network tip can't resolve "now". Core injected: the opener now resolves
 		// up front and the stub captive_core_config would otherwise error first.
-		Backend:        &fakeBackend{tip: 0},
-		Core:           &fakeCore{},
-		Logger:         silentLogger(),
-		RestartBackoff: time.Millisecond,
+		Backend: &fakeBackend{tip: 0},
+		Core:    &fakeCore{},
+		Logger:  silentLogger(),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "now")
@@ -401,71 +400,44 @@ func TestRunDaemon_MissingConfigFile(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// supervise — the top-level restart loop.
+// runBody — the one-shot daemon body and its clean-vs-crash classification.
 // ---------------------------------------------------------------------------
 
-// A restartable error retries on a backoff, then a clean ctx cancel during the
-// backoff returns nil (no restart after a shutdown request).
-func TestSupervise_RetriesThenCleanShutdown(t *testing.T) {
+// A ctx cancel during the run classifies as a clean shutdown (nil), not an
+// error — main exits 0 on SIGTERM.
+func TestRunBody_CleanShutdownOnCancel(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
-
-	var attempts atomic.Int32
 	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}} // young: no backfill
 	start := startTestConfig(t, cat, tip, &fakeCore{}, nil)
-	// An always-erroring ServeReads makes each attempt a restartable failure.
-	start.ServeReads = func(context.Context, *query.Registry) (func(), <-chan error, error) {
-		attempts.Add(1)
-		return nil, nil, errors.New("transient serve failure")
-	}
+	served := make(chan struct{}, 1)
+	start.ServeReads = signalingServeReads(served)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
-	go func() { errCh <- supervise(ctx, start, silentLogger(), 5*time.Millisecond) }()
-
-	// Let a few restarts happen, then cancel.
-	require.Eventually(t, func() bool {
-		return attempts.Load() >= 2
-	}, 3*time.Second, 5*time.Millisecond)
-	cancel()
-
-	select {
-	case err := <-errCh:
-		require.NoError(t, err, "ctx cancel during backoff returns nil")
-	case <-time.After(3 * time.Second):
-		t.Fatal("supervise did not return after cancel")
-	}
-	assert.GreaterOrEqual(t, attempts.Load(), int32(2), "restarted on the transient failure")
+	go func() { errCh <- runBody(ctx, start, silentLogger()) }()
+	<-served
+	waitClean(t, cancel, errCh)
 }
 
-// A first start with no reachable tip is now RESTARTABLE (previously a fatal
-// sentinel): supervise retries it on a backoff rather than surfacing it, and a
-// ctx cancel returns clean. Loss/misconfig can't be told from a transient inside
-// the process, so there is no fatal-and-exit class.
-func TestSupervise_FirstStartNoTipRetries(t *testing.T) {
+// Crash-only: a failing run with a live ctx surfaces its error to the caller —
+// the process exits and the orchestrator owns the restart; there is no
+// in-process retry.
+func TestRunBody_FailureSurfacesOnce(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
-	// A never-ready tip (sub-genesis ⇒ one permanent-failure poll per run, no
-	// retry sleeps) + no local progress: every run fails the first-start check,
-	// so callCount tracks the restart count.
-	tip := &fakeTipBackend{tips: []uint32{0}}
+	var binds atomic.Int32
+	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}}
 	start := startTestConfig(t, cat, tip, &fakeCore{}, nil)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() { errCh <- supervise(ctx, start, silentLogger(), 5*time.Millisecond) }()
-
-	require.Eventually(t, func() bool {
-		return tip.callCount() >= 2
-	}, 3*time.Second, 5*time.Millisecond, "first-start-no-tip is retried, not surfaced as fatal")
-	cancel()
-
-	select {
-	case err := <-errCh:
-		require.NoError(t, err, "ctx cancel returns clean, even though runs kept failing")
-	case <-time.After(3 * time.Second):
-		t.Fatal("supervise did not return after cancel")
+	start.ServeReads = func(context.Context, *query.Registry) (readRunner, error) {
+		binds.Add(1)
+		return nil, errors.New("bind failure")
 	}
+
+	err := runBody(context.Background(), start, silentLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bind failure")
+	assert.Equal(t, int32(1), binds.Load(), "one attempt, no in-process retry")
 }
 
 // ---------------------------------------------------------------------------

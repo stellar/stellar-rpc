@@ -67,7 +67,7 @@ func lastCommittedLedger(cat *catalog.Catalog) (uint32, error) {
 // refineWithHotDB opens the highest ready hot chunk read-only straight from its
 // Layout path and returns its MaxCommittedSeq, or LastLedgerOf(live-1) on an
 // empty DB. A "ready" key whose dir/DB is gone surfaces as an ordinary
-// (restartable) error — the read-only open never auto-heals it into a fresh empty
+// (run-failing) error — the read-only open never auto-heals it into a fresh empty
 // DB. A read-only open replays any crash-left synced WAL into memtables, so
 // MaxCommittedSeq is correct even after an ungraceful crash.
 func refineWithHotDB(cat *catalog.Catalog, live int64) (uint32, error) {

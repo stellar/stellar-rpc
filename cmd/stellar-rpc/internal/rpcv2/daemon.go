@@ -19,7 +19,6 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/storage"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
@@ -30,16 +29,29 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 )
 
 // RunDaemon is the full-history daemon's process entrypoint: load config, lock
 // storage roots, open the catalog, validateConfig, build boundaries, then run
-// the supervised run loop. flags carries the CLI overrides main registered via
+// the daemon body. flags carries the CLI overrides main registered via
 // config.BindFlags (nil = none); each set flag overlays its TOML key before
 // defaults resolve.
 func RunDaemon(ctx context.Context, configPath string, flags config.FlagOverrides) error {
-	return runDaemonWith(ctx, configPath, daemonOptions{Flags: flags})
+	// The whole daemon — including the pre-run startup phase (archive dial, tip
+	// sampling, core wiring) — runs on the signal-derived ctx, so a drain that
+	// lands mid-startup unwinds with ctx-shaped errors. Classify those as the
+	// clean shutdown they are; a nonzero exit must keep meaning failure.
+	err := runDaemonWith(ctx, configPath, daemonOptions{Flags: flags})
+	if ctx.Err() == nil {
+		return err
+	}
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		// A real startup failure raced the shutdown request: exit 0 is still
+		// right (the shutdown was asked for), but the failure must not vanish.
+		// stderr, not the structured logger — the earliest failures precede it.
+		fmt.Fprintln(os.Stderr, "shutdown requested while startup was failing:", err)
+	}
+	return nil
 }
 
 // daemonOptions carries the daemon's injectable seams; production leaves every field zero.
@@ -55,15 +67,11 @@ type daemonOptions struct {
 	// [ingestion] (a complete production opener). Tests inject a fake getter.
 	Core CoreOpener
 
-	// ServeReads launches the RPC read server over one supervised attempt's
-	// query registry (the contract lives on StartConfig.ServeReads).
+	// ServeReads overrides the read server (contract on StartConfig.ServeReads).
 	// nil ⇒ the production server (newServeReads): the shared method table over
 	// the router-backed adapters, listening on [service].endpoint. Tests inject
 	// recorders.
-	ServeReads func(ctx context.Context, reg *query.Registry) (func(), <-chan error, error)
-
-	// RestartBackoff is the supervised loop's inter-restart sleep; zero ⇒ defaultRestartBackoff.
-	RestartBackoff time.Duration
+	ServeReads serveReadsFn
 
 	// Logger overrides the daemon logger; nil ⇒ built from [logging].level/.format.
 	Logger *supportlog.Entry
@@ -87,8 +95,6 @@ type daemonOptions struct {
 	// discard/prune set it small so the end-of-run destroy does not park.
 	lifecycleGrace time.Duration
 }
-
-const defaultRestartBackoff = 5 * time.Second
 
 // runDaemonWith is RunDaemon with explicit options — the seam tests drive.
 //
@@ -189,9 +195,10 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	// The getFeeStats windows, sized by [service.fee_stats] (validated 1..1000
 	// by validateConfig just above). Owned here at daemon level: live ingestion
-	// feeds them per committed ledger, each run's restart replay (#888) refills
-	// them, and the hot loop's per-boundary HotService rebuilds only borrow them
-	// — so chunk boundaries and supervised restarts never lose fee history.
+	// feeds them per committed ledger, the startup replay (#888) refills them
+	// from committed history, and the hot loop's per-boundary HotService
+	// rebuilds only borrow them. Owned here because one instance is wired into
+	// both the serve deps and the ingestion loop below.
 	// The method table serves them as the store.FeeStats behind getFeeStats.
 	feeWindows := feewindow.NewFeeWindows(
 		deref(cfg.Service.FeeStats.ClassicFeeWindowLedgers),
@@ -205,8 +212,8 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	metrics, sink := buildSinks(opts, registry)
 
 	// --- Captive-core state access for the three endpoints that need it, plus
-	// simulateTransaction's preflight pool. Built once, outside the supervised
-	// loop: the pool registers collectors on the registry above, and registering
+	// simulateTransaction's preflight pool. Built once, before the daemon body:
+	// the pool registers collectors on the registry above, and registering
 	// the same collector twice panics. The method table consumes both. ---
 	coreDaemon, err := corestate.New(ctx, corestate.Config{
 		CoreURL:               cfg.Ingestion.CoreURL,
@@ -230,8 +237,8 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	}).Info("wired the captive-core-backed endpoints")
 
 	// --- The two HTTP servers. The admin server (pprof, /metrics) is
-	// process-wide; the JSON-RPC server is per supervised attempt (its handlers
-	// hold that attempt's query registry), so ServeReads builds it inside run(). ---
+	// process-wide; the JSON-RPC server is per run(): its handlers hold run()'s
+	// query registry, so ServeReads builds it there. ---
 	if cfg.Service.AdminEndpoint != "" {
 		stopAdmin, aerr := startAdminServer(ctx, cfg.Service.AdminEndpoint, logger, registry)
 		if aerr != nil {
@@ -241,22 +248,18 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	}
 	serveReads := opts.ServeReads
 	if serveReads == nil {
-		serveReads = newServeReads(readServerDeps{
-			cfg: cfg,
-			params: handlerParams{
-				daemon:            coreDaemon,
-				logger:            logger,
-				handlerMetrics:    jsonrpc.NewHandlerMetrics(host.PrometheusNamespace, registry),
-				metrics:           metrics,
-				preflightGetter:   preflightPool,
-				feeWindows:        feeWindows,
-				networkPassphrase: core.networkPassphrase,
-				retentionWindow:   retention.RetentionWindow(),
-			},
+		serveReads = newServeReads(cfg, handlerParams{
+			daemon:            coreDaemon,
+			logger:            logger,
+			metrics:           metrics,
+			preflightGetter:   preflightPool,
+			feeWindows:        feeWindows,
+			networkPassphrase: core.networkPassphrase,
+			retentionWindow:   retention.RetentionWindow(),
 		})
 	}
 
-	// --- Assemble the StartConfig and run the supervised run loop. ---
+	// --- Assemble the StartConfig and run the daemon body once. ---
 	start := startConfig(
 		cfg, cat, logger, backend, core.live, serveReads, metrics, sink, retention)
 	start.lifecycleGrace = opts.lifecycleGrace
@@ -265,11 +268,27 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	}
 	start.FeeWindows = feeWindows
 
-	backoff := opts.RestartBackoff
-	if backoff <= 0 {
-		backoff = defaultRestartBackoff
+	return runBody(ctx, start, logger)
+}
+
+// runBody executes the daemon body once, mapping a canceled ctx to nil so
+// main exits 0 on SIGTERM; any other error surfaces and crashes the process
+// (the crash-only rationale lives on run). The exit path is the failure
+// contract now, so the crash reason is logged structurally here — stderr in
+// main is not a structured sink — and a real failure that raced a shutdown
+// request is logged too instead of being discarded by the clean-exit mapping.
+func runBody(ctx context.Context, start StartConfig, logger *supportlog.Entry) error {
+	err := run(ctx, start)
+	if ctx.Err() == nil {
+		if err != nil {
+			logger.WithError(err).Error("daemon run failed; exiting for the orchestrator to restart")
+		}
+		return err
 	}
-	return supervise(ctx, start, logger, backoff)
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		logger.WithError(err).Warn("shutdown requested while a run failure was in flight")
+	}
+	return nil
 }
 
 // openCatalog resolves the tx-hash index width (test override, else the fixed
@@ -327,7 +346,7 @@ func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry
 func startConfig(
 	cfg config.Config, cat *catalog.Catalog, logger *supportlog.Entry,
 	backend backfill.Backend, core CoreOpener,
-	serveReads func(context.Context, *query.Registry) (func(), <-chan error, error),
+	serveReads serveReadsFn,
 	metrics observability.Metrics, sink ingest.MetricSink, retention geometry.Retention,
 ) StartConfig {
 	exec := backfill.ExecConfig{
@@ -378,45 +397,6 @@ func buildSinks(opts daemonOptions, registry *prometheus.Registry) (observabilit
 		sink = ingest.NewPrometheusSink(registry, host.PrometheusNamespace)
 	}
 	return metrics, sink
-}
-
-// supervise is the daemon's clean-vs-restart decision point ("startup is the
-// recovery path"): a ctx cancel is a clean shutdown, everything else is warned and
-// retried after a backoff. run() never returns nil (a clean shutdown surfaces as a
-// ctx-canceled error), so clean-vs-restart keys solely off ctx.Err(). There is
-// deliberately no fatal-and-exit class — genuine loss presents as a crash-loop with
-// a clear warn line. The never-auto-heal guarantee lives in the must-exist open
-// (openHotDBForChunk), not here.
-//
-//nolint:unparam // error-shaped for the caller's contract; nil-on-shutdown is the design above
-func supervise(
-	ctx context.Context, start StartConfig, logger *supportlog.Entry, backoff time.Duration,
-) error {
-	for {
-		err := run(ctx, start)
-		if ctx.Err() != nil {
-			return nil //nolint:nilerr // ctx canceled is a clean shutdown, not a run failure
-		}
-		logger.WithError(err).Warnf("daemon run failed; restarting in %s", backoff)
-		if sleepCtx(ctx, backoff) != nil {
-			return nil //nolint:nilerr // ctx canceled mid-backoff is a clean shutdown, not a failure
-		}
-	}
-}
-
-// sleepCtx blocks for d or until ctx is canceled, returning ctx.Err() if canceled
-// first and nil otherwise. supervise's clean-vs-restart loop can't be
-// a backoff.Retry, so it keeps a hand-rolled sleep — but shares this one helper
-// rather than re-rolling the timer/select (and its easy-to-forget timer.Stop).
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -503,7 +483,7 @@ func (s *captiveSource) Tip(context.Context) (uint32, error) {
 
 // captiveCoreOpener is the production CoreOpener. It holds a resolved
 // CaptiveCoreConfig and hands back a captive-core LedgerStream that builds a FRESH
-// core per run (each supervised restart reopens core anew) — the stream owns the
+// core per run (each process restart reopens core anew) — the stream owns the
 // process lifecycle, so there is no eager prepare or explicit closer here.
 // Construction mirrors the RPC daemon's newCaptiveCore so the full-history daemon
 // runs captive core and the ledgerbackend the same way (#772 can unify them at
@@ -704,7 +684,7 @@ func newCaptiveCoreOpener(
 }
 
 // OpenCore returns the live ingestion stream backed by captive stellar-core. A
-// fresh core per run keeps supervised restarts clean.
+// fresh core per run keeps process restarts clean.
 func (c *captiveCoreOpener) OpenCore(ctx context.Context) (ledgerbackend.LedgerStream, error) {
 	cfg := c.config
 	cfg.Context = ctx

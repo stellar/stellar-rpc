@@ -110,7 +110,7 @@ func Open(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) 
 // ingestion's handle for a chunk whose "ready" key promises the DB already exists.
 // A missing or gutted DB fails the open instead of silently fabricating a fresh
 // empty one (the "never auto-heal" rule); the caller treats that failure as an
-// ordinary restartable error.
+// ordinary run-failing error.
 func OpenExisting(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
 	return open(path, chunkID, logger, false, true)
 }

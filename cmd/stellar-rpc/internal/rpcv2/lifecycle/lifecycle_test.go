@@ -270,13 +270,13 @@ func TestRunLifecycleTick_PrunesTransientIndexDebris(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // ERROR PLUMBING: a failing tick RETURNS its error (no Fatalf / os.Exit).
-// supervise — not the tick — classifies ctx-cancel-is-clean vs restart (tested at
-// the daemon level: TestRunDaemon_LoadValidateWireStartCleanShutdown, TestSupervise_*).
+// The daemon — not the tick — classifies ctx-cancel-is-clean vs crash (tested at
+// the daemon level: TestRunDaemon_LoadValidateWireStartCleanShutdown, TestRunBody_*).
 // ---------------------------------------------------------------------------
 
 // TestRunLifecycleTick_FailureReturnsError: when a plan op fails, runLifecycle
 // returns the wrapped error rather than aborting the process — so Loop can
-// propagate it up through the errgroup to supervise. The chunk-0 build is
+// propagate it up through the errgroup to the daemon. The chunk-0 build is
 // GENUINELY unproducible: chunk 0 sits below a READY live chunk 1 (so it counts as
 // complete and the plan range [0,0] is non-empty), has no frozen artifacts, and
 // its hot key is "transient" (not a ready read source). With no bulk Backend

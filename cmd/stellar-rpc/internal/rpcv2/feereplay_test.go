@@ -56,9 +56,8 @@ func TestFeeWindowReplay_SpansChunkBoundary(t *testing.T) {
 	require.NoError(t, err)
 	defer registry.Close()
 
-	// Stale fees from "the previous run": a supervised in-process restart
-	// re-enters run() with the daemon-owned windows still populated. The replay
-	// must recompute from scratch, not stack on top.
+	// Already-populated windows: the replay's contract is to recompute from
+	// scratch on any input, not stack on top — pinned here on dirty windows.
 	windows := feewindow.NewFeeWindows(6, 4)
 	require.NoError(t, windows.AppendLedgerFees(c0.LastLedger(),
 		sdkingest.LedgerFees{ClassicFeesPerOp: []uint64{9999}}))

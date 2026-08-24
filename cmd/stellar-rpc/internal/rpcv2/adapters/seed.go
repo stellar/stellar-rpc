@@ -1,6 +1,8 @@
 package adapters
 
 import (
+	"errors"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 )
 
@@ -20,15 +22,19 @@ func SeedCloseTimes(registry *query.Registry) error {
 	if oldest > latest {
 		return nil
 	}
-	firstCT, err := readCloseTime(view, oldest, "oldest")
-	if err != nil {
-		return err
+	// The edges live in independent stores (cold pack vs hot DB), so attempt
+	// both even when one fails: the joined error shows every broken edge in
+	// the caller's one failure instead of one edge per restart.
+	var errs []error
+	if firstCT, err := readCloseTime(view, oldest, "oldest"); err != nil {
+		errs = append(errs, err)
+	} else {
+		view.RecordOldestCloseTime(firstCT)
 	}
-	view.RecordOldestCloseTime(firstCT)
-	lastCT, err := readCloseTime(view, latest, "latest")
-	if err != nil {
-		return err
+	if lastCT, err := readCloseTime(view, latest, "latest"); err != nil {
+		errs = append(errs, err)
+	} else {
+		registry.SetLatestLedger(latest, lastCT)
 	}
-	registry.SetLatestLedger(latest, lastCT)
-	return nil
+	return errors.Join(errs...)
 }

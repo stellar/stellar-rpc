@@ -108,7 +108,6 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 	return jsonrpc.NewHandler(jsonrpc.Params{
 		Daemon:                params.Daemon,
 		Logger:                params.Logger,
-		Metrics:               jsonrpc.NewHandlerMetrics(params.Daemon.MetricsNamespace(), params.Daemon.MetricsRegistry()),
 		Specs:                 specs,
 		GlobalQueueLimit:      cfg.RequestBacklogGlobalQueueLimit,
 		GlobalDurationWarning: cfg.RequestExecutionWarningThreshold,

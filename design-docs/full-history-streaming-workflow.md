@@ -632,7 +632,7 @@ func backfillTarget(tip, lastCommitted uint32) int64 {
 }
 ```
 
-A pass with no reachable tip fails the run rather than proceeding: the daemon never serves behind an unknown frontier, and the next run re-samples, so a transient backend outage self-heals.
+A pass with no reachable tip fails the run rather than proceeding: the daemon never serves behind an unknown frontier, and the restarted process re-samples (the daemon exits on failure; the orchestrator restarts it), so a transient backend outage self-heals.
 
 `validateConfig` checks the config and, on the first start, resolves and pins `earliest_ledger`. `fail` here rejects startup outright — including a first start whose backend is unreachable at pin time; unlike the per-pass tip sampling, nothing here retries in-process, so the daemon refuses to start rather than run against a wrong or unresolvable pin:
 

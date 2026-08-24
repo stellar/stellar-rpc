@@ -29,11 +29,11 @@ func replayFeeWindows(registry *query.Registry, windows *feewindow.FeeWindows, l
 	if windows == nil {
 		return nil // no fee consumer (tests) → nothing to refill
 	}
-	// A supervised in-process restart re-enters run() with the daemon-owned
-	// windows still holding the previous run's fees. The replay recomputes the
-	// full window from committed history, so reset first — appending on top
+	// The replay recomputes the full window from committed history, so start
+	// from empty regardless of the windows' current state — appending on top
 	// would double-count the overlap (and trip the windows' ledger-contiguity
-	// check).
+	// check). This keeps the function correct on any input, not just the
+	// freshly built windows run() hands it.
 	windows.Reset()
 
 	view, err := registry.NewReadView()

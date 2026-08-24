@@ -26,12 +26,13 @@ import (
 // (injected), begin serving reads (injected), then run the live ingestion loop
 // (handed the open hot DB) and the lifecycle loop as a joined errgroup pair
 // (whichever returns first cancels the other; g.Wait surfaces the first
-// error). Never returns nil: a clean
-// shutdown (ctx canceled mid-run) surfaces as a ctx-canceled error that supervise
-// classifies via ctx.Err(); any other return is a restartable error the supervisor
-// warns on and retries with backoff (a first start with no reachable backend, a
-// backfill/ingest/lifecycle failure, or a "ready" hot DB that won't open — none are
-// auto-healed, all are re-attempted).
+// error). run() is the process body — crash-only: a clean shutdown (ctx
+// canceled mid-run) surfaces as a ctx-canceled error the caller classifies via
+// ctx.Err(); any other return exits the process, and the orchestrator owns the
+// restart. Backfill's bounded retries and the lifecycle's rediscovery absorb
+// the expected transients, so an error escaping them (a first start with no
+// reachable backend, an ingest failure, a "ready" hot DB that won't open) is
+// persistent or unknown and belongs in a visible crash-loop.
 //
 //nolint:funlen // linear startup sequence; each step is one wiring stage
 func run(ctx context.Context, cfg StartConfig) error {
@@ -137,7 +138,11 @@ func run(ctx context.Context, cfg StartConfig) error {
 	defer registry.Close()
 
 	// Stamp both window edges' close times before serving begins, so the first
-	// requests don't pay the point reads (see adapters.SeedCloseTimes).
+	// requests don't pay the point reads (see adapters.SeedCloseTimes). An
+	// unreadable edge fails startup: every response stamps these edges, so a
+	// node that cannot read one would serve errors on every method while
+	// looking alive — crash-only says that surfaces as a visible crash-loop
+	// instead. A transient read blip at boot costs one orchestrator restart.
 	if err := adapters.SeedCloseTimes(registry); err != nil {
 		return fmt.Errorf("startup seed close times: %w", err)
 	}
@@ -159,22 +164,24 @@ func run(ctx context.Context, cfg StartConfig) error {
 		Grace:      cfg.lifecycleGrace,
 	}.WithLifecycleDefaults()
 
-	// Begin serving reads (injected) BEFORE launching the loops. The deferred
-	// stop runs before the deferred registry.Close above (LIFO), so the server
-	// is down before its stores go.
-	stopReads, readsDied, err := cfg.ServeReads(ctx, registry)
+	// Bind the read server (injected) BEFORE launching the loops; the contract
+	// lives on StartConfig.ServeReads. The runner owns the listener and bridge
+	// release, so it must reach the g.Go below — keep this gap free of fallible
+	// steps, or a failure here leaks the bound endpoint for the process's life.
+	serveRun, err := cfg.ServeReads(ctx, registry)
 	if err != nil {
 		return fmt.Errorf("startup serve reads: %w", err)
 	}
-	defer stopReads()
+	if serveRun == nil {
+		return errors.New("startup serve reads: nil runner")
+	}
 
 	// Ingestion and the lifecycle run as a joined pair under errgroup.WithContext:
 	// gctx cancels as soon as EITHER returns — and WithContext records the returning
 	// goroutine's error BEFORE canceling, so g.Wait surfaces the real cause, not the
-	// sibling's induced context-canceled. g.Wait joins both before run returns,
-	// restoring the single-lifecycle-goroutine invariant across supervisor restarts.
-	// supervise is the one clean-vs-restart decision point; a canceled parent ctx
-	// classifies as clean.
+	// sibling's induced context-canceled. g.Wait joins every goroutine before run
+	// returns. runBody is the one clean-vs-crash decision point; a canceled
+	// parent ctx classifies as clean.
 	g, gctx := errgroup.WithContext(ctx)
 	// The loop's deferred close now owns hotDB; g.Wait joins it before run returns.
 	loopOwnsDB = true
@@ -195,7 +202,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 			// WithContext cancels gctx (unblocking the lifecycle sibling in g.Wait)
 			// ONLY on a non-nil return. runIngestionLoop upholds that — every exit is
 			// an error, including a clean stream end — but guard it so a future nil
-			// return degrades to a supervised restart, never a silent g.Wait hang.
+			// return degrades to a process exit, never a silent g.Wait hang.
 			return errors.New("ingestion loop returned nil unexpectedly")
 		}
 		return err
@@ -204,16 +211,13 @@ func run(ctx context.Context, cfg StartConfig) error {
 		return lifecycle.Loop(gctx, lifecycleCfg, cat, boundary)
 	})
 	g.Go(func() error {
-		// A dying read server fails the whole attempt (see
-		// StartConfig.ServeReads). Graceful shutdown never sends here —
-		// stopReads runs after g.Wait joins, and its ErrServerClosed is
-		// filtered at the sender.
-		select {
-		case serr := <-readsDied:
-			return fmt.Errorf("read server died: %w", serr)
-		case <-gctx.Done():
-			return gctx.Err()
-		}
+		// Serves until gctx cancels or the accept loop dies (contract on
+		// StartConfig.ServeReads). The endpoint therefore drains at the FIRST
+		// sibling failure or SIGTERM; the rest of the unwind (an in-flight
+		// freeze finalize) runs without serving. Accepted under crash-only:
+		// the process is exiting, and serving through a doomed unwind is not
+		// worth the stop-after-Wait machinery it used to require.
+		return serveRun(gctx)
 	})
 	return g.Wait()
 }
@@ -260,7 +264,7 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted uint32) (
 		// The backend owns its frontier (the lake for bsbSource, the archives for
 		// captiveSource). A tip still unavailable after the bounded retry errors the
 		// pass rather than proceeding — the daemon must never serve behind an unknown
-		// frontier — and each supervised restart re-samples (a transient outage
+		// frontier — and each process restart re-samples (a transient outage
 		// self-heals).
 		tip, err := sampleTipWithRetry(
 			ctx, cfg.Exec.Process.Backend.Tip, defaultTipBackoff, defaultTipMaxAttempts)
@@ -370,17 +374,14 @@ type StartConfig struct {
 	// Core starts captive core and yields the ingestion getter. Required.
 	Core CoreOpener
 
-	// ServeReads begins serving reads over this run's registry; it must return
-	// promptly, not block. The returned stop shuts the server down — run() calls
-	// it (via defer) before the registry closes, so no handler outlives its
-	// stores and the listener is released before the next supervised attempt
-	// binds it again. The returned channel reports the server dying on its own
-	// (a Serve failure that is not the graceful shutdown): run() joins it into
-	// the attempt's errgroup, so a dead accept loop fails the attempt and the
-	// supervisor rebinds — instead of the endpoint staying down while ingestion
-	// keeps running. A nil channel means the server never reports (tests).
-	// Required.
-	ServeReads func(ctx context.Context, reg *query.Registry) (func(), <-chan error, error)
+	// ServeReads binds the read server over this run's registry and returns a
+	// runner; the bind must be synchronous (a taken port fails startup) and the
+	// runner must serve until its context cancels — draining before returning,
+	// so no handler outlives the stores — or return the accept loop's death as
+	// its error. run() joins the runner into the errgroup, so a dead accept
+	// loop fails the process (v1 classifies it fatal too). This comment is the
+	// contract's one authoritative statement. Required, non-nil runner.
+	ServeReads serveReadsFn
 
 	// runBackfill is a test-only seam for one backfill pass; nil ⇒ backfill.RunBackfill.
 	runBackfill func(ctx context.Context, exec backfill.ExecConfig, lo, hi chunk.ID) error
@@ -392,10 +393,18 @@ type StartConfig struct {
 
 	// FeeWindows is the daemon-owned getFeeStats state ([service.fee_stats]
 	// sizes) the ingestion loop feeds per committed ledger. The daemon builds it
-	// once, outside the supervised run loop; nil (tests without a fee consumer)
+	// once, before the daemon body; nil (tests without a fee consumer)
 	// means the loop never computes fees.
 	FeeWindows *feewindow.FeeWindows
 }
+
+// readRunner serves the bound read server until its context cancels; the
+// contract lives on StartConfig.ServeReads.
+type readRunner func(context.Context) error
+
+// serveReadsFn binds the read server over a run's registry and returns its
+// runner; the contract lives on StartConfig.ServeReads.
+type serveReadsFn func(ctx context.Context, reg *query.Registry) (readRunner, error)
 
 // withDefaults fills the embedded Exec defaults (Workers -> GOMAXPROCS). The
 // lifecycle.Config is assembled from Exec + Retention in run(); the tip retry

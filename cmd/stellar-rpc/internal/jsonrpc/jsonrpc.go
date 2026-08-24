@@ -73,46 +73,43 @@ type HandlerSpec struct {
 	RequestDurationLimit time.Duration
 }
 
-// HandlerMetrics is the set of collectors a Handler writes to. Create it ONCE
-// per process with NewHandlerMetrics — creating it is what registers the
-// collectors, and registering the same collector twice on one registry panics.
-// NewHandler only writes to it, so a daemon that rebuilds its handler (the
-// full-history daemon does, per supervised attempt) keeps counting on the same
-// series across rebuilds instead of resetting them.
-type HandlerMetrics struct {
-	requestDuration *prometheus.SummaryVec
-}
-
-// NewHandlerMetrics creates the handler collectors and registers them on reg.
-func NewHandlerMetrics(namespace string, reg prometheus.Registerer) *HandlerMetrics {
-	m := &HandlerMetrics{
-		requestDuration: prometheus.NewSummaryVec(prometheus.SummaryOpts{
-			Namespace:  namespace,
-			Subsystem:  "json_rpc",
-			Name:       "request_duration_seconds",
-			Help:       "JSON RPC request duration",
-			Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
-		}, []string{"endpoint", labelStatus}),
-	}
-	reg.MustRegister(m.requestDuration)
-	return m
-}
-
 // Params carries everything NewHandler needs besides the method specs: the
-// daemon (for metric namespacing), the per-process handler metrics, the
-// logger, and the global request limits applied across all methods.
+// daemon (for metric namespacing and registry), the logger, and the global
+// request limits applied across all methods.
 type Params struct {
 	Daemon                host.Daemon
 	Logger                *log.Entry
-	Metrics               *HandlerMetrics
 	Specs                 []HandlerSpec
 	GlobalQueueLimit      uint
 	GlobalDurationWarning time.Duration
 	GlobalDurationLimit   time.Duration
 }
 
-func decorateHandlers(metrics *HandlerMetrics, logger *log.Entry, m handler.Map) handler.Map {
-	requestMetric := metrics.requestDuration
+// decorateHandlers wraps every method with request logging and the duration
+// summary. Each daemon builds its handler once, so creating and registering
+// the collector here happens once per registry.
+func decorateHandlers(daemon host.Daemon, logger *log.Entry, m handler.Map) handler.Map {
+	requestMetric := prometheus.NewSummaryVec(prometheus.SummaryOpts{
+		Namespace:  daemon.MetricsNamespace(),
+		Subsystem:  "json_rpc",
+		Name:       "request_duration_seconds",
+		Help:       "JSON RPC request duration",
+		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
+	}, []string{"endpoint", labelStatus})
+	// Register-or-reuse: each daemon builds its handler once today, but a
+	// second build on the same registry (a future reload or re-bind) must keep
+	// counting on the existing series, not panic on duplicate registration.
+	if rerr := daemon.MetricsRegistry().Register(requestMetric); rerr != nil {
+		are := prometheus.AlreadyRegisteredError{}
+		if !errors.As(rerr, &are) {
+			panic(rerr)
+		}
+		existing, ok := are.ExistingCollector.(*prometheus.SummaryVec)
+		if !ok {
+			panic(rerr)
+		}
+		requestMetric = existing
+	}
 	decorated := handler.Map{}
 	for endpoint, h := range m {
 		decorated[endpoint] = handler.New(func(ctx context.Context, r *jrpc2.Request) (any, error) {
@@ -227,9 +224,6 @@ func wrapWithLimiters(spec HandlerSpec, daemon host.Daemon, logger *log.Entry) j
 
 // NewHandler constructs a Handler instance from the given method specs
 func NewHandler(params Params) Handler {
-	if params.Metrics == nil {
-		panic("jsonrpc: Params.Metrics is required — create it once per process with NewHandlerMetrics")
-	}
 	bridgeOptions := jhttp.BridgeOptions{
 		Server: &jrpc2.ServerOptions{
 			Logger: func(text string) { params.Logger.Debug(text) },
@@ -244,7 +238,7 @@ func NewHandler(params Params) Handler {
 		handlersMap[spec.MethodName] = wrapWithLimiters(spec, params.Daemon, params.Logger)
 	}
 	bridge := jhttp.NewBridge(decorateHandlers(
-		params.Metrics,
+		params.Daemon,
 		params.Logger,
 		handlersMap),
 		&bridgeOptions)

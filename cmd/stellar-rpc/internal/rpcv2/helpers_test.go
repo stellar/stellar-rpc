@@ -24,21 +24,34 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 )
 
-// countingServeReads is a no-op ServeReads that counts its calls — for tests
+// blockingRunner is the no-op read-server runner: it serves nothing and
+// returns when its context cancels, like the production runner's clean path.
+func blockingRunner(rc context.Context) error {
+	<-rc.Done()
+	return rc.Err()
+}
+
+// nopServeReads is the no-op ServeReads for tests that need serving wired but
+// never exercise it.
+func nopServeReads(context.Context, *query.Registry) (readRunner, error) {
+	return blockingRunner, nil
+}
+
+// countingServeReads is a no-op ServeReads that counts its binds — for tests
 // that only care that serving started.
-func countingServeReads(served *atomic.Int32) func(context.Context, *query.Registry) (func(), <-chan error, error) {
-	return func(context.Context, *query.Registry) (func(), <-chan error, error) {
+func countingServeReads(served *atomic.Int32) serveReadsFn {
+	return func(context.Context, *query.Registry) (readRunner, error) {
 		served.Add(1)
-		return func() {}, nil, nil
+		return blockingRunner, nil
 	}
 }
 
 // signalingServeReads is countingServeReads' channel twin, for tests that
 // sequence on the moment serving starts.
-func signalingServeReads(servedCh chan struct{}) func(context.Context, *query.Registry) (func(), <-chan error, error) {
-	return func(context.Context, *query.Registry) (func(), <-chan error, error) {
+func signalingServeReads(servedCh chan struct{}) serveReadsFn {
+	return func(context.Context, *query.Registry) (readRunner, error) {
 		servedCh <- struct{}{}
-		return func() {}, nil, nil
+		return blockingRunner, nil
 	}
 }
 
