@@ -4,15 +4,30 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io/fs"
 	"iter"
 	"math"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/zstd"
 )
+
+// missingPackOpens counts cold packs whose file was gone on first read.
+// Routing only opens packs the catalog snapshot holds, so each count is a
+// pack deleted underneath a reader that outlived the deletion grace period —
+// or a freeze/metadata bug. Process-wide by design — the metrics exporter
+// reads it via MissingPackOpens.
+//
+//nolint:gochecknoglobals // one tally across all readers; read-only outside this file
+var missingPackOpens atomic.Uint64
+
+// MissingPackOpens returns the process-wide count of cold-pack opens that
+// found no file. See missingPackOpens.
+func MissingPackOpens() uint64 { return missingPackOpens.Load() }
 
 // formatLedgerCold tags the packfile format used by the cold ledger
 // store. Shared by the reader and the writer (same package).
@@ -78,6 +93,9 @@ func OpenColdReader(path string) (*ColdReader, error) {
 func (c *ColdReader) loadHeader() (coldHeader, error) {
 	tr, err := c.r.Trailer()
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			missingPackOpens.Add(1)
+		}
 		return coldHeader{}, fmt.Errorf("cold: open %q: %w", c.path, err)
 	}
 	if tr.Format != formatLedgerCold {

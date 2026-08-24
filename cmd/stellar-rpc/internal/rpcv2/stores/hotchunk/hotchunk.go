@@ -242,8 +242,9 @@ func (d *DB) Source() ledgerbackend.LedgerStream {
 	return &hotLedgerStream{store: d.ledger}
 }
 
-// Close releases the shared store exactly once. Idempotent. Must not be called
-// concurrently with in-flight reads/writes.
+// Close releases the shared store exactly once. Idempotent, and safe against
+// in-flight reads/writes: the store drains them under its lock before freeing,
+// and any operation arriving after gets ErrStoreClosed.
 func (d *DB) Close() error { return d.store.Close() }
 
 // CloseIfIdle is the non-blocking Close deferred deletion uses to reclaim a
@@ -321,6 +322,10 @@ type LedgerReport struct {
 	Phases [NumPhases]PhaseSample
 	// Failed is meaningful only when IngestLedger returns a non-nil error.
 	Failed Phase
+	// CloseTime is the ledger's close time (unix seconds), decoded before the
+	// commit. The ingest loop stamps it on the registry, so nothing decodes
+	// the ledger twice.
+	CloseTime int64
 }
 
 // IngestLedger commits ONE ledger as a SINGLE atomic synced WriteBatch across all
@@ -383,6 +388,7 @@ func (d *DB) IngestLedger(
 		rep.Failed = PhaseExtract
 		return rep, fmt.Errorf("ledger close time seq %d: %w", seq, err)
 	}
+	rep.CloseTime = closedAt
 	// A pre-Soroban ledger yields zero payloads, no error.
 	payloads, err := events.PayloadsFromLedgerEvents(txParts, seq, closedAt)
 	if err != nil {

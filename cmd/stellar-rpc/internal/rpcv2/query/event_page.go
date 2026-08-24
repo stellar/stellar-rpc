@@ -33,10 +33,10 @@ var ErrInvalidLimit = errors.New("query: page limit must be positive")
 // defaultMaxScanLedgers bounds the ledgers one page may scan, so a
 // filter that matches nothing cannot walk the node's whole retention
 // in one call: the page stops at the window's edge and returns
-// ScanHasMore with the watermark advanced through it. At 10,000
-// ledgers a page touches at most two chunks. Registry.maxScanLedgers
-// overrides it per instance; the value may become configuration.
-const defaultMaxScanLedgers = uint32(10_000)
+// ScanHasMore with the watermark advanced through it. The value is the
+// per-request scan bound (see chunk.LedgersPerChunk): a page touches
+// at most two chunks. Registry.maxScanLedgers shrinks it in tests.
+const defaultMaxScanLedgers = chunk.LedgersPerChunk
 
 // ScanStatus is where a page's walk stopped; the handler maps it to
 // the wire scanStatus.

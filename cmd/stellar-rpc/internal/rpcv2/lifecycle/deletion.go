@@ -8,6 +8,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 )
 
 // Deferred deletion. A lifecycle run demotes each retired resource during a stage
@@ -95,6 +96,7 @@ func (p *pendingDeletions) destroyAll(ctx context.Context, cfg Config) {
 	}
 	for _, it := range p.items {
 		if err := it.destroy(); err != nil {
+			observability.MetricsOrNop(cfg.Metrics).FailedDestroy()
 			cfg.Logger.WithError(err).WithField("target", it.label).
 				Warn("lifecycle: deferred destroy skipped; retry next run")
 		}

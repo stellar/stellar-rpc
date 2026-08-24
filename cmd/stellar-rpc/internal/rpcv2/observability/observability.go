@@ -4,6 +4,10 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 )
 
 // Metrics is the daemon's control-plane sink — the derived-progress gauges plus
@@ -42,6 +46,18 @@ type Metrics interface {
 	Discard(count int, d time.Duration)
 	// Prune counts swept artifacts and records the sweep's wall-clock.
 	Prune(count int, d time.Duration)
+
+	// FailedDestroy counts one deferred destroy that failed and was left for the
+	// next lifecycle run's scan — most commonly a hot handle whose close found a
+	// reader still in flight. A handle stuck forever recounts every run, so a
+	// climbing counter is the stuck-handle alarm the logs alone cannot raise.
+	FailedDestroy()
+
+	// TxIndexInconsistency counts one lookup where an exact (hot) transaction
+	// index disagreed with the ledger store — the index named a ledger that
+	// lacks the transaction or cannot be served. Any count means corruption
+	// operators should see.
+	TxIndexInconsistency()
 }
 
 // NopMetrics discards every signal — the default when a config carries no Metrics.
@@ -56,6 +72,8 @@ func (NopMetrics) Freeze(time.Duration)       {}
 func (NopMetrics) Rebuild(time.Duration)      {}
 func (NopMetrics) Discard(int, time.Duration) {}
 func (NopMetrics) Prune(int, time.Duration)   {}
+func (NopMetrics) FailedDestroy()             {}
+func (NopMetrics) TxIndexInconsistency()      {}
 
 // MetricsOrNop returns m, or NopMetrics{} when nil, so call sites never nil-check.
 func MetricsOrNop(m Metrics) Metrics {
@@ -83,9 +101,11 @@ type PrometheusMetrics struct {
 	liveHotChunks  prometheus.Gauge
 
 	// Counters — monotonic tallies.
-	chunkBoundaries prometheus.Counter
-	discarded       prometheus.Counter
-	pruned          prometheus.Counter
+	chunkBoundaries        prometheus.Counter
+	discarded              prometheus.Counter
+	pruned                 prometheus.Counter
+	failedDestroys         prometheus.Counter
+	txIndexInconsistencies prometheus.Counter
 
 	// Durations — per-phase wall-clock histogram, keyed by phase label.
 	phaseDuration *prometheus.HistogramVec
@@ -122,6 +142,10 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 			"(a chunk whose deferred destroy stays reader-busy recounts on later runs)"),
 		pruned: counter("pruned_artifacts_total", "artifacts swept by the prune stage (below-floor artifacts, "+
 			"transient index debris, in-retention demotions, and redundant txhash keys)"),
+		failedDestroys: counter("failed_destroys_total", "deferred destroys that failed and were left for the "+
+			"next lifecycle run (a stuck hot handle recounts every run)"),
+		txIndexInconsistencies: counter("tx_index_inconsistencies_total", "lookups where an exact hot tx index "+
+			"disagreed with the ledger store (any count means corruption)"),
 		phaseDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace, Subsystem: subsystem,
 			Name: "phase_duration_seconds", Help: "wall-clock of a daemon phase action",
@@ -129,10 +153,33 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 		}, []string{"phase"}),
 	}
 
+	// Three serving-invariant counters are tallied where their condition is
+	// detected — deep in the store and routing packages, below any metrics
+	// plumbing — as package-level atomics. CounterFuncs export them; each
+	// should flatline at zero, so one alert rule per family is "rate > 0".
+	counterFunc := func(name, help string, read func() uint64) prometheus.CounterFunc {
+		return prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Namespace: namespace, Subsystem: subsystem, Name: name, Help: help,
+		}, func() float64 { return float64(read()) })
+	}
+
 	registry.MustRegister(
 		m.lastCommitted, m.retentionFloor, m.liveHotChunks,
 		m.chunkBoundaries, m.discarded, m.pruned,
+		m.failedDestroys, m.txIndexInconsistencies,
 		m.phaseDuration,
+		counterFunc("store_ops_after_deferred_close_total",
+			"operations refused because deferred deletion had closed the store "+
+				"(each one is a caller that outlived the deletion grace period)",
+			rocksdb.DeferredCloseOps),
+		counterFunc("unavailable_chunk_resolves_total",
+			"reads that found no serving store for a chunk "+
+				"(unreachable within the serving model; any count is an alarm)",
+			query.UnavailableResolves),
+		counterFunc("missing_cold_pack_opens_total",
+			"cold ledger packs whose file was gone on first read "+
+				"(routing only opens packs the catalog snapshot holds; any count is an alarm)",
+			ledger.MissingPackOpens),
 	)
 	return m
 }
@@ -167,6 +214,10 @@ func (m *PrometheusMetrics) Discard(count int, d time.Duration) {
 	}
 	m.phaseDuration.WithLabelValues(phaseDiscard).Observe(d.Seconds())
 }
+
+func (m *PrometheusMetrics) FailedDestroy() { m.failedDestroys.Inc() }
+
+func (m *PrometheusMetrics) TxIndexInconsistency() { m.txIndexInconsistencies.Inc() }
 
 func (m *PrometheusMetrics) Prune(count int, d time.Duration) {
 	if count > 0 {

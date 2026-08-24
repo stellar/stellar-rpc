@@ -16,18 +16,15 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 )
 
-// seedHotLedgers opens chunk c's hot DB, commits the given (contiguous) seqs,
-// marks the chunk ready, and publishes the handle.
+// seedHotLedgers commits the given seqs (contiguous from c's first ledger) as
+// zero-tx ledgers, marks the chunk ready, and publishes the handle on r.
 func seedHotLedgers(t *testing.T, cat *catalog.Catalog, r *Registry, c chunk.ID, seqs ...uint32) {
 	t.Helper()
-	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	lcms := make([][]byte, 0, len(seqs))
 	for _, seq := range seqs {
-		rpcv2test.IngestLedger(t, db, seq, rpcv2test.ZeroTxLCMBytes(t, seq))
+		lcms = append(lcms, rpcv2test.ZeroTxLCMBytes(t, seq))
 	}
-	require.NoError(t, cat.FlipHotReady(c))
-	r.PublishHandle(c, db)
+	rpcv2test.SeedHotChunkLCMs(t, cat, c, func(db *hotchunk.DB) { r.PublishHandle(c, db) }, lcms...)
 }
 
 // borderFixture seeds two adjacent hot chunks, each with its first two ledgers
@@ -41,7 +38,7 @@ func borderFixture(t *testing.T) (*Registry, chunk.ID, chunk.ID) {
 	const c0, c1 = chunk.ID(5), chunk.ID(6)
 	seedHotLedgers(t, cat, r, c0, c0.FirstLedger(), c0.FirstLedger()+1)
 	seedHotLedgers(t, cat, r, c1, c1.FirstLedger(), c1.FirstLedger()+1)
-	r.SetLatestLedger(c1.FirstLedger())
+	r.SetLatestLedger(c1.FirstLedger(), 0)
 	return r, c0, c1
 }
 
@@ -96,7 +93,7 @@ func TestScanLedgers_UnroutableChunkFailsUpFront(t *testing.T) {
 	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 	const c1 = chunk.ID(6)
 	seedHotLedgers(t, cat, r, c1, c1.FirstLedger())
-	r.SetLatestLedger(c1.FirstLedger())
+	r.SetLatestLedger(c1.FirstLedger(), 0)
 
 	a, err := r.NewReadView()
 	require.NoError(t, err)
@@ -149,7 +146,7 @@ func TestScanLedgers_ColdHotBorder(t *testing.T) {
 
 	// c1 is hot with real committed ledgers.
 	seedHotLedgers(t, cat, r, c1, c1.FirstLedger(), c1.FirstLedger()+1)
-	r.SetLatestLedger(c1.FirstLedger() + 1)
+	r.SetLatestLedger(c1.FirstLedger()+1, 0)
 
 	a, err := r.NewReadView()
 	require.NoError(t, err)
@@ -178,13 +175,7 @@ func TestScanLedgers_ColdHotBorder(t *testing.T) {
 // and freezes the ledgers kind, so the chunk routes cold.
 func coldMarkerPack(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 	t.Helper()
-	packPath := cat.Layout().LedgerPackPath(c)
-	require.NoError(t, os.MkdirAll(filepath.Dir(packPath), 0o755))
-	cw, err := ledger.NewColdWriter(packPath, c.FirstLedger(), ledger.ColdWriterOptions{})
-	require.NoError(t, err)
-	require.NoError(t, cw.AppendLedger(c.FirstLedger(), []byte("cold")))
-	require.NoError(t, cw.Commit())
-	require.NoError(t, cat.FlipChunkFrozen(c, geometry.KindLedgers))
+	rpcv2test.WriteFrozenLedgerPack(t, cat, c, []byte("cold"))
 }
 
 // TestScanLedgers_LateChunkFailureSurfacesAtPosition pins the walker's lazy
@@ -199,7 +190,7 @@ func TestScanLedgers_LateChunkFailureSurfacesAtPosition(t *testing.T) {
 	seedHotLedgers(t, cat, r, c0, c0.FirstLedger(), c0.FirstLedger()+1)
 	seedHotLedgers(t, cat, r, c1, c1.FirstLedger(), c1.FirstLedger()+1)
 	// c2: nothing at all — unroutable, but only discovered mid-stream.
-	r.SetLatestLedger(c2.FirstLedger())
+	r.SetLatestLedger(c2.FirstLedger(), 0)
 
 	a, err := r.NewReadView()
 	require.NoError(t, err)
@@ -265,7 +256,7 @@ func TestScanLedgers_EarlyBreakThenRelease(t *testing.T) {
 	for _, c := range []chunk.ID{5, 6} {
 		coldMarkerPack(t, cat, c)
 	}
-	r.SetLatestLedger(chunk.ID(6).LastLedger())
+	r.SetLatestLedger(chunk.ID(6).LastLedger(), 0)
 
 	a, err := r.NewReadView()
 	require.NoError(t, err)

@@ -28,6 +28,19 @@ var (
 	ErrSnapshotReleased = errors.New("rocksdb: nil or released snapshot")
 )
 
+// deferredCloseOps counts operations refused because deferred deletion
+// (CloseIfIdle) had already closed the store. Each count is a caller that
+// outlived the deletion grace period. Teardown closes (Close) are not
+// counted: restarts are routine and say nothing about the grace. Process-wide
+// by design — the metrics exporter reads it via DeferredCloseOps.
+//
+//nolint:gochecknoglobals // one tally across all stores; read-only outside this file
+var deferredCloseOps atomic.Uint64
+
+// DeferredCloseOps returns the process-wide count of operations refused after
+// a deferred close. See deferredCloseOps.
+func DeferredCloseOps() uint64 { return deferredCloseOps.Load() }
+
 const (
 	dirPerm       os.FileMode = 0o700
 	defaultCFName             = "default"
@@ -113,6 +126,11 @@ type Store struct {
 	mu sync.RWMutex
 
 	closed atomic.Bool
+	// deferredClose remembers that CloseIfIdle (deferred deletion) set the
+	// closed flag, so checkOpen can count stragglers without counting the
+	// routine ops a teardown Close cuts off. Set before closed so checkOpen
+	// never sees closed without it.
+	deferredClose atomic.Bool
 
 	// snapRefs counts snapshots not yet returned to ReleaseSnapshot; teardown
 	// logs a leak when it closes with snapRefs > 0.
@@ -449,6 +467,7 @@ func (s *Store) Close() error {
 // and a later retry tears down once it has drained. The closed flag is never
 // rolled back, which is safe only because this runs on a resource being deleted.
 func (s *Store) CloseIfIdle() (bool, error) {
+	s.deferredClose.Store(true)
 	s.closed.Store(true)
 	if !s.mu.TryLock() {
 		return false, nil
@@ -586,6 +605,9 @@ func (s *Store) doFlush() error {
 
 func (s *Store) checkOpen() error {
 	if s.closed.Load() {
+		if s.deferredClose.Load() {
+			deferredCloseOps.Add(1)
+		}
 		return ErrStoreClosed
 	}
 	return nil

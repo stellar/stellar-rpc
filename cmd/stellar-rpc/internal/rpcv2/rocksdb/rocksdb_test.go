@@ -790,3 +790,23 @@ func TestStore_IterateRange_BreakAndUnknownCF(t *testing.T) {
 		require.ErrorIs(t, sawErr, ErrCFNotFound)
 	})
 }
+
+func TestDeferredCloseOps_CountsOnlyDeferredCloses(t *testing.T) {
+	deferred := openTestStore(t, nil)
+	closed, err := deferred.CloseIfIdle()
+	require.NoError(t, err)
+	require.True(t, closed)
+
+	before := DeferredCloseOps()
+	require.ErrorIs(t, deferred.Put("", []byte("k"), []byte("v")), ErrStoreClosed)
+	assert.Equal(t, before+1, DeferredCloseOps(),
+		"an op after a deferred close is a caller that outlived the deletion grace")
+
+	teardown := openTestStore(t, nil)
+	require.NoError(t, teardown.Close())
+
+	before = DeferredCloseOps()
+	require.ErrorIs(t, teardown.Put("", []byte("k"), []byte("v")), ErrStoreClosed)
+	assert.Equal(t, before, DeferredCloseOps(),
+		"ops cut off by a teardown close are routine and must not count")
+}

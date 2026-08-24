@@ -308,3 +308,20 @@ func TestColdReader_SharedDecompressorAcrossPacks(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, rawB[2], got)
 }
+
+func TestMissingPackOpens_CountsAbsentFile(t *testing.T) {
+	c, err := OpenColdReader(filepath.Join(t.TempDir(), "gone.pack"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+
+	before := MissingPackOpens()
+	_, err = c.LastSeq()
+	require.Error(t, err)
+	assert.Equal(t, before+1, MissingPackOpens(),
+		"routing only opens packs the snapshot holds, so a missing file must count")
+
+	// The header load is cached; a second read must not double-count.
+	_, err = c.GetLedgerRaw(2)
+	require.Error(t, err)
+	assert.Equal(t, before+1, MissingPackOpens())
+}

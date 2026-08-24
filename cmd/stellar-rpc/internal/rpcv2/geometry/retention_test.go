@@ -1,6 +1,7 @@
 package geometry
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -8,6 +9,12 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
+
+func TestRetentionWindow(t *testing.T) {
+	assert.Equal(t, uint32(0), NewRetention(0, 0).RetentionWindow(), "0 = full history")
+	assert.Equal(t, uint32(30_000), NewRetention(3, 0).RetentionWindow())
+	assert.Equal(t, uint32(math.MaxUint32), NewRetention(math.MaxUint32, 0).RetentionWindow(), "overflow clamps")
+}
 
 func TestRetention_FloorAt(t *testing.T) {
 	tests := []struct {

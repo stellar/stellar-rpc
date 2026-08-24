@@ -10,6 +10,7 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
@@ -21,11 +22,11 @@ import (
 )
 
 // run is the daemon's startup, in two steps: (1) BACKFILL to the tip, then
-// (2) SERVE + INGEST — open the resume chunk's hot DB (so a broken hot tier fails
-// startup, not behind a crash-looping loop), start captive core (injected), begin
-// serving reads (injected), then run the live ingestion loop (handed the open hot
-// DB) and the lifecycle loop as a joined errgroup pair (whichever returns first
-// cancels the other; g.Wait surfaces the first error). Never returns nil: a clean
+// (2) SERVE + INGEST — open the resume chunk's hot DB, start captive core
+// (injected), begin serving reads (injected), then run the live ingestion loop
+// (handed the open hot DB) and the lifecycle loop as a joined errgroup pair
+// (whichever returns first cancels the other; g.Wait surfaces the first
+// error). Never returns nil: a clean
 // shutdown (ctx canceled mid-run) surfaces as a ctx-canceled error that supervise
 // classifies via ctx.Err(); any other return is a restartable error the supervisor
 // warns on and retries with backoff (a first start with no reachable backend, a
@@ -46,11 +47,12 @@ func run(ctx context.Context, cfg StartConfig) error {
 		return err
 	}
 
-	// Derived, never stored: highest durably-committed ledger (frozen cold artifacts
-	// vs the highest ready hot DB's max committed seq), clamped by earliest-1. The
-	// derivation refines with one read-only open of the highest ready hot DB before
-	// ingestion opens a writer; a read-only open replays any synced WAL from an
-	// ungraceful crash into memtables, so MaxCommittedSeq is correct.
+	// The highest durably-committed ledger is derived, never stored: frozen
+	// cold artifacts vs the highest ready hot DB's max committed seq, clamped
+	// by earliest-1. The derivation refines with one read-only open of the
+	// highest ready hot DB before ingestion opens a writer; a read-only open
+	// replays any synced WAL from an ungraceful crash into memtables, so
+	// MaxCommittedSeq is correct.
 	lastCommitted, err := lastCommittedLedger(cat)
 	if err != nil {
 		return fmt.Errorf("startup derive last-committed: %w", err)
@@ -124,16 +126,21 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// acquired before the first commit is correct. The ingestion loop advances the
 	// latest ledger and publishes handles from here, the freeze reads through them
 	// (HotHandle), and the lifecycle retires them at discard. Constructed per run —
-	// no query survives a restart. It will back the read server (#772).
+	// no query survives a restart; ServeReads below serves this run's reads from it.
 	registry, err := query.OpenRegistry(cat, cfg.Retention, hotDB, lastCommitted)
 	if err != nil {
 		return fmt.Errorf("startup open registry: %w", err)
 	}
 	cfg.Exec.Process.HotHandle = registry.Handle
-	// Close the registry's hot handles on the way out (after g.Wait joins the loops
-	// below), flushing each completed chunk the registry still holds. The live
-	// chunk is also closed by the ingestion loop; handle Close is idempotent.
+	// Runs after g.Wait joins the loops below; Registry.Close owns the
+	// double-close story.
 	defer registry.Close()
+
+	// Stamp both window edges' close times before serving begins, so the first
+	// requests don't pay the point reads (see adapters.SeedCloseTimes).
+	if err := adapters.SeedCloseTimes(registry); err != nil {
+		return fmt.Errorf("startup seed close times: %w", err)
+	}
 
 	// Refill the fee windows from committed history BEFORE the ingestion loop
 	// launches below (#888): the replay covers [start, lastCommitted] and the
@@ -152,11 +159,14 @@ func run(ctx context.Context, cfg StartConfig) error {
 		Grace:      cfg.lifecycleGrace,
 	}.WithLifecycleDefaults()
 
-	// Begin serving reads (injected) BEFORE launching the loops; it must return
-	// promptly (launch, not block).
-	if err := cfg.ServeReads(ctx); err != nil {
+	// Begin serving reads (injected) BEFORE launching the loops. The deferred
+	// stop runs before the deferred registry.Close above (LIFO), so the server
+	// is down before its stores go.
+	stopReads, readsDied, err := cfg.ServeReads(ctx, registry)
+	if err != nil {
 		return fmt.Errorf("startup serve reads: %w", err)
 	}
+	defer stopReads()
 
 	// Ingestion and the lifecycle run as a joined pair under errgroup.WithContext:
 	// gctx cancels as soon as EITHER returns — and WithContext records the returning
@@ -178,7 +188,6 @@ func run(ctx context.Context, cfg StartConfig) error {
 			Logger:     logger,
 			Metrics:    metrics,
 			Sink:       cfg.Exec.Process.Sink,
-			Health:     cfg.health,
 			Registry:   registry,
 			FeeWindows: cfg.FeeWindows,
 		})
@@ -193,6 +202,18 @@ func run(ctx context.Context, cfg StartConfig) error {
 	})
 	g.Go(func() error {
 		return lifecycle.Loop(gctx, lifecycleCfg, cat, boundary)
+	})
+	g.Go(func() error {
+		// A dying read server fails the whole attempt (see
+		// StartConfig.ServeReads). Graceful shutdown never sends here —
+		// stopReads runs after g.Wait joins, and its ErrServerClosed is
+		// filtered at the sender.
+		select {
+		case serr := <-readsDied:
+			return fmt.Errorf("read server died: %w", serr)
+		case <-gctx.Done():
+			return gctx.Err()
+		}
 	})
 	return g.Wait()
 }
@@ -349,8 +370,17 @@ type StartConfig struct {
 	// Core starts captive core and yields the ingestion getter. Required.
 	Core CoreOpener
 
-	// ServeReads begins serving reads; it must return promptly, not block. Required.
-	ServeReads func(ctx context.Context) error
+	// ServeReads begins serving reads over this run's registry; it must return
+	// promptly, not block. The returned stop shuts the server down — run() calls
+	// it (via defer) before the registry closes, so no handler outlives its
+	// stores and the listener is released before the next supervised attempt
+	// binds it again. The returned channel reports the server dying on its own
+	// (a Serve failure that is not the graceful shutdown): run() joins it into
+	// the attempt's errgroup, so a dead accept loop fails the attempt and the
+	// supervisor rebinds — instead of the endpoint staying down while ingestion
+	// keeps running. A nil channel means the server never reports (tests).
+	// Required.
+	ServeReads func(ctx context.Context, reg *query.Registry) (func(), <-chan error, error)
 
 	// runBackfill is a test-only seam for one backfill pass; nil ⇒ backfill.RunBackfill.
 	runBackfill func(ctx context.Context, exec backfill.ExecConfig, lo, hi chunk.ID) error
@@ -359,10 +389,6 @@ type StartConfig struct {
 	// defaultGrace. Tests set it small so a run's end-of-run destroy does not park
 	// for minutes.
 	lifecycleGrace time.Duration
-
-	// health is the readiness/health signal the ingestion loop feeds per commit;
-	// #889's read server consumes it (as HealthSignal). nil ⇒ observe is a no-op.
-	health *healthState
 
 	// FeeWindows is the daemon-owned getFeeStats state ([service.fee_stats]
 	// sizes) the ingestion loop feeds per committed ledger. The daemon builds it

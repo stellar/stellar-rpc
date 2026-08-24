@@ -1,7 +1,6 @@
 package ingest
 
 import (
-	"context"
 	"fmt"
 	"time"
 
@@ -38,7 +37,9 @@ func NewHotService(db *hotchunk.DB, windows *feewindow.FeeWindows, sink MetricSi
 }
 
 // Ingest commits lcmView to the shared hot DB in one atomic synced WriteBatch
-// (decision (a)) and emits one HotPhase per phase from the ledger report. Each
+// (decision (a)) and emits one HotPhase per phase from the ledger report. On
+// success it returns the committed ledger's close time (see
+// hotchunk.LedgerReport.CloseTime). Each
 // phase carries its own wall-clock (the phases partition the per-ledger total),
 // the write phases carry per-type item volume on success, and the outcome lands on
 // the phase that failed BY CONSTRUCTION — a decode failure on PhaseExtract, a
@@ -59,7 +60,7 @@ func NewHotService(db *hotchunk.DB, windows *feewindow.FeeWindows, sink MetricSi
 // so every restart's fee replay re-runs the same classification over the same
 // ledger and fails run() before the loop starts — the daemon wedges rather
 // than serve fee stats that silently miss a ledger.
-func (s *HotService) Ingest(_ context.Context, seq uint32, lcmView xdr.LedgerCloseMetaView) error {
+func (s *HotService) Ingest(seq uint32, lcmView xdr.LedgerCloseMetaView) (int64, error) {
 	walkStart := time.Now()
 	txParts, err := sdkingest.ExtractLedgerTxParts(lcmView)
 	walkDur := time.Since(walkStart)
@@ -67,7 +68,7 @@ func (s *HotService) Ingest(_ context.Context, seq uint32, lcmView xdr.LedgerClo
 		// The walk failed before any batch opened: the extract phase is the only
 		// one that ran, mirroring hotchunk's own pre-batch failures.
 		s.sink.HotPhase(hotchunk.PhaseExtract, walkDur, 0, err)
-		return fmt.Errorf("extract ledger tx parts seq %d: %w", seq, err)
+		return 0, fmt.Errorf("extract ledger tx parts seq %d: %w", seq, err)
 	}
 
 	rep, err := s.db.IngestLedger(seq, lcmView, txParts)
@@ -89,9 +90,9 @@ func (s *HotService) Ingest(_ context.Context, seq uint32, lcmView xdr.LedgerClo
 		s.sink.HotPhase(p, rep.Phases[p].Dur, items, perr)
 	}
 	if err != nil {
-		return err
+		return 0, err
 	}
-	return s.appendFees(seq, txParts)
+	return rep.CloseTime, s.appendFees(seq, txParts)
 }
 
 // appendFees folds the committed ledger's fee observations into the borrowed

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+* `getTransactions` now scans at most 10,000 ledgers per request. On a sparse range a page can come back short — or even empty — while still carrying a `cursor`, so a response shorter than `limit` no longer implies end-of-data. Every response carries a `cursor`; to tell a sparse scan window from the tip, compare the cursor's ledger part against `latestLedger` and keep paging while it is below ([#908](https://github.com/stellar/stellar-rpc/pull/908)).
+* `getEvents` now rejects malformed contract IDs in filters with `-32602`: a `C…` string with a valid checksum but wrong-length payload used to decode and silently match nothing, and now errors under the SDK's stricter SEP-23 strkey parsing ([#908](https://github.com/stellar/stellar-rpc/pull/908)).
+
 ## [v28.0.0](https://github.com/stellar/stellar-rpc/compare/v27.1.1...v28.0.0)
 
 ### Added

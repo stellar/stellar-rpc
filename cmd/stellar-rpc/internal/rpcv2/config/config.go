@@ -44,13 +44,11 @@ type Config struct {
 }
 
 // ServiceConfig is [service] — the JSON-RPC read-serving policy (issue #882).
-// The serving limits are dormant until #889 builds the read server that reads
-// them (over the store readers its handlers need) — those values are only
-// parsed, defaulted, and validated. [service.fee_stats] and
-// [service.preflight] are live: ingestion feeds the fee windows sized by the
-// former (#881), and the daemon sizes its preflight pool from the latter at
-// startup. The whole section is optional: absent keys get v1's defaults in
-// WithDefaults.
+// Everything here is live: the read server listens on endpoint, the admin
+// server on admin_endpoint, the method table enforces the per-method limits,
+// ingestion feeds the fee windows sized by [service.fee_stats] (#881), and the
+// daemon sizes its preflight pool from [service.preflight] at startup. The
+// whole section is optional: absent keys get v1's defaults in WithDefaults.
 //
 // Key naming rule: camelCase table keys ONLY where the key is a wire identifier
 // (the [service.methods.<methodName>] tables, named after the JSON-RPC method);
@@ -122,14 +120,16 @@ type MethodsConfig struct {
 	MaxExecutionDuration *time.Duration `toml:"max_execution_duration"`
 
 	GetHealth       HealthMethodConfig    `toml:"getHealth"`
-	GetNetwork      MethodConfig          `toml:"getNetwork"`
+	GetNetwork      NetworkMethodConfig   `toml:"getNetwork"`
 	GetVersionInfo  MethodConfig          `toml:"getVersionInfo"`
 	GetLatestLedger MethodConfig          `toml:"getLatestLedger"`
 	GetTransaction  MethodConfig          `toml:"getTransaction"`
 	GetTransactions PaginatedMethodConfig `toml:"getTransactions"`
 	GetLedgers      PaginatedMethodConfig `toml:"getLedgers"`
 	GetEvents       EventsMethodConfig    `toml:"getEvents"`
-	GetFeeStats     MethodConfig          `toml:"getFeeStats"`
+	// GetEventsV2 carries getEvents' knob set and defaults.
+	GetEventsV2 EventsMethodConfig `toml:"getEventsV2"`
+	GetFeeStats MethodConfig       `toml:"getFeeStats"`
 
 	// The three methods that read current ledger state through captive core
 	// rather than this daemon's stores (#884). Their serving knobs belong here;
@@ -160,9 +160,21 @@ type PaginatedMethodConfig struct {
 	DefaultItemsPerResponse *uint `toml:"default_items_per_response"`
 }
 
-// EventsMethodConfig adds getEvents' own knobs such as term_budget
-// which are not for other methods. The decoder flattens the embedded
-// fields, keeping the method's TOML table flat.
+// NetworkMethodConfig extends MethodConfig for getNetwork with the friendbot
+// URL the method echoes to clients. Empty (the default) omits the field from
+// the getNetwork response — the sensible state for a history network with no
+// friendbot.
+type NetworkMethodConfig struct {
+	QueueLimit           *uint          `toml:"queue_limit"`
+	MaxExecutionDuration *time.Duration `toml:"max_execution_duration"`
+
+	FriendbotURL string `toml:"friendbot_url"`
+}
+
+// EventsMethodConfig adds the events methods' own knobs such as
+// term_budget, which no other method has. Both getEvents and
+// getEventsV2 carry it. The decoder flattens the embedded fields,
+// keeping the method's TOML table flat.
 //
 // Known trade-off of embedding: the decoder also accepts the shared
 // keys through a table named after the embedded type, in any casing,
@@ -643,6 +655,12 @@ func (cfg Config) WithDefaults() Config {
 	fillUint(&m.GetEvents.MaxItemsPerResponse, DefaultGetEventsMaxItemsPerResponse)
 	fillUint(&m.GetEvents.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
 	fillUint(&m.GetEvents.TermBudget, DefaultGetEventsTermBudget)
+
+	queue(&m.GetEventsV2.QueueLimit, DefaultMethodQueueLimit)
+	dur(&m.GetEventsV2.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
+	fillUint(&m.GetEventsV2.MaxItemsPerResponse, DefaultGetEventsMaxItemsPerResponse)
+	fillUint(&m.GetEventsV2.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
+	fillUint(&m.GetEventsV2.TermBudget, DefaultGetEventsTermBudget)
 
 	queue(&m.GetFeeStats.QueueLimit, DefaultGetFeeStatsQueueLimit)
 	dur(&m.GetFeeStats.MaxExecutionDuration, DefaultMethodMaxExecutionDuration)

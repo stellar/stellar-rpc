@@ -1151,7 +1151,8 @@ func TestHotService_FeedsFeeWindowsAfterCommit(t *testing.T) {
 	svc := NewHotService(db, windows, &testSink{})
 	first := chunk.ID(0).FirstLedger()
 	raw := rpcv2test.FeeTxLCMBytes(t, first, 500)
-	require.NoError(t, svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(raw)))
+	_, err = svc.Ingest(first, xdr.LedgerCloseMetaView(raw))
+	require.NoError(t, err)
 
 	classic := windows.ClassicFeeDistribution()
 	assert.Equal(t, uint32(1), classic.LedgerCount)
@@ -1173,12 +1174,14 @@ func TestHotService_RejectedLedgerFeedsNoFees(t *testing.T) {
 	first := chunk.ID(0).FirstLedger()
 
 	skipped := rpcv2test.FeeTxLCMBytes(t, first+5, 500)
-	require.Error(t, svc.Ingest(context.Background(), first+5, xdr.LedgerCloseMetaView(skipped)))
+	_, err = svc.Ingest(first+5, xdr.LedgerCloseMetaView(skipped))
+	require.Error(t, err)
 	assert.Zero(t, windows.ClassicFeeDistribution().LedgerCount, "a rejected ledger must not feed the windows")
 
 	// The "retry" (the in-order ledger) is then counted exactly once.
 	retried := rpcv2test.FeeTxLCMBytes(t, first, 200)
-	require.NoError(t, svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(retried)))
+	_, err = svc.Ingest(first, xdr.LedgerCloseMetaView(retried))
+	require.NoError(t, err)
 	classic := windows.ClassicFeeDistribution()
 	assert.Equal(t, uint32(1), classic.LedgerCount)
 	assert.Equal(t, uint64(200), classic.Max)
@@ -1197,7 +1200,7 @@ func TestHotService_FeeClassificationErrorFailsCommittedLedger(t *testing.T) {
 	svc := NewHotService(db, windows, &testSink{})
 	first := chunk.ID(0).FirstLedger()
 
-	err = svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(rpcv2test.FeeTxLCMBytes(t, first, -1)))
+	_, err = svc.Ingest(first, xdr.LedgerCloseMetaView(rpcv2test.FeeTxLCMBytes(t, first, -1)))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "fees")
 
@@ -1221,7 +1224,8 @@ func TestHotService_EmitsEveryPhaseOnSuccess(t *testing.T) {
 	svc := NewHotService(db, nil, sink)
 	first := chunk.ID(0).FirstLedger()
 	raw, _, _ := marshalLCMWithEvent(t, first) // one tx, one event
-	require.NoError(t, svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(raw)))
+	_, err = svc.Ingest(first, xdr.LedgerCloseMetaView(raw))
+	require.NoError(t, err)
 
 	require.Len(t, sink.hotPhases, int(hotchunk.NumPhases), "every phase emitted once on success")
 	items := sink.hotPhaseItems()
@@ -1247,7 +1251,8 @@ func TestHotService_CommitErrorLandsOnCommitPhase(t *testing.T) {
 	svc := NewHotService(db, nil, sink)
 	first := chunk.ID(0).FirstLedger()
 	raw, _, _ := marshalLCMWithEvent(t, first)
-	require.Error(t, svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(raw)))
+	_, err = svc.Ingest(first, xdr.LedgerCloseMetaView(raw))
+	require.Error(t, err)
 
 	phase, hadErr := sink.hotPhaseErr()
 	require.True(t, hadErr, "the failure must be reported on a phase")
@@ -1271,7 +1276,8 @@ func TestHotService_ExtractFailureLandsOnExtractPhase(t *testing.T) {
 	first := chunk.ID(0).FirstLedger()
 	// Garbage bytes fail XDR decode in ExtractLedgerTxParts, before any batch opens.
 	garbage := bytes.Repeat([]byte{0xff}, 16)
-	require.Error(t, svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(garbage)))
+	_, err = svc.Ingest(first, xdr.LedgerCloseMetaView(garbage))
+	require.Error(t, err)
 
 	phase, hadErr := sink.hotPhaseErr()
 	require.True(t, hadErr, "the decode failure must be reported on a phase")
@@ -1296,7 +1302,8 @@ func TestHotService_EventsQueueFailureLandsOnEventsPhase(t *testing.T) {
 	// chunk's first ledger and rejects first+5 as out of order (ErrLedgerOutOfOrder).
 	// The ledger + txhash queue steps do not sequence-check, so they run first.
 	raw, _, _ := marshalLCMWithEvent(t, first+5)
-	require.Error(t, svc.Ingest(context.Background(), first+5, xdr.LedgerCloseMetaView(raw)))
+	_, err = svc.Ingest(first+5, xdr.LedgerCloseMetaView(raw))
+	require.Error(t, err)
 
 	phase, hadErr := sink.hotPhaseErr()
 	require.True(t, hadErr, "the queue failure must be reported on a phase")
@@ -1319,7 +1326,8 @@ func TestHotService_FailedPhaseCarriesPartialDuration(t *testing.T) {
 	svc := NewHotService(db, nil, sink)
 	first := chunk.ID(0).FirstLedger()
 	raw, _, _ := marshalLCMWithEvent(t, first+5)
-	require.Error(t, svc.Ingest(context.Background(), first+5, xdr.LedgerCloseMetaView(raw)))
+	_, err = svc.Ingest(first+5, xdr.LedgerCloseMetaView(raw))
+	require.Error(t, err)
 
 	durs := sink.hotPhaseDurs()
 	assert.Positive(t, durs[hotchunk.PhaseExtract], "a completed earlier phase carries its wall-clock")

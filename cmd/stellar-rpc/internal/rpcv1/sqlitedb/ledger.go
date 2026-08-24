@@ -89,9 +89,13 @@ func (l ledgerReaderTx) BatchGetLedgers(
 			}
 		}
 
-		if _, err := xdr.Unmarshal(rd, &batch[i].Header); err != nil {
+		hdrStart := len(meta) - rd.Len()
+		var hdr xdr.LedgerHeaderHistoryEntry
+		n, err := xdr.Unmarshal(rd, &hdr)
+		if err != nil {
 			return nil, err
 		}
+		batch[i].HeaderRaw = meta[hdrStart : hdrStart+n]
 	}
 
 	return batch, nil

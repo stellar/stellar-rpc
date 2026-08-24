@@ -19,6 +19,13 @@ const (
 	// LedgersPerChunk is the fixed number of ledgers per Chunk.
 	// Typed uint32 so arithmetic against ledger sequences (uint32)
 	// stays in the right space without per-call casts.
+	//
+	// It is also the per-request scan bound: one request never scans more
+	// than one chunk's span of ledgers, touching at most two stores when the
+	// span straddles a boundary. Every scan cap derives from this constant
+	// (adapters' walkSpanCap, the events pager's window); the one spelling
+	// that cannot — methods.LedgerScanLimit, in shared v1 code that must not
+	// import this package — is pinned equal by a pairing test.
 	LedgersPerChunk uint32 = 10_000
 
 	// FirstLedgerSeq is the first ledger sequence used by the chain.

@@ -3,6 +3,7 @@ package query
 import (
 	"errors"
 	"iter"
+	"sync/atomic"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
@@ -15,7 +16,33 @@ import (
 // read view's snapshot: neither a frozen cold artifact nor a ready hot database. It
 // is R1 in effect — a freezing, pruning, or transient resource is invisible to
 // routing regardless of what is on disk.
+//
+// Within the serving model this is unreachable for an in-window read: coverage
+// is published before the old store is discarded, routing prefers cold, and
+// the window gates keep below-floor and above-latest reads out. Every
+// occurrence is therefore counted and logged (see unavailable) so a violated
+// invariant is visible to operators instead of silent.
 var ErrUnavailable = errors.New("query: chunk has no serving store")
+
+// unavailableResolves counts reads that found no serving store for a chunk.
+// Process-wide by design — the metrics exporter reads it via
+// UnavailableResolves.
+//
+//nolint:gochecknoglobals // one tally across all views; read-only outside this file
+var unavailableResolves atomic.Uint64
+
+// UnavailableResolves returns the process-wide count of reads that found no
+// serving store. See ErrUnavailable.
+func UnavailableResolves() uint64 { return unavailableResolves.Load() }
+
+// unavailable counts and logs one no-serving-store read, then returns
+// ErrUnavailable. The chunk id goes in the log, not a metric label.
+func (a *ReadView) unavailable(c chunk.ID, k geometry.Kind) error {
+	unavailableResolves.Add(1)
+	a.catalog.Logger().WithField("chunk", c).WithField("kind", k).
+		Warn("query: chunk has no serving store (unreachable within the serving model)")
+	return ErrUnavailable
+}
 
 // LedgerReader is the per-chunk ledger read surface the range queries consume,
 // satisfied by both the hot store and the cold pack reader. It deliberately omits
@@ -95,7 +122,7 @@ func (a *ReadView) resolveLedgers(c chunk.ID) (LedgerReader, func() error, error
 	case tierHot:
 		return db.Ledgers(), nil, nil
 	default:
-		return nil, nil, ErrUnavailable
+		return nil, nil, a.unavailable(c, geometry.KindLedgers)
 	}
 }
 
@@ -124,6 +151,6 @@ func (a *ReadView) Events(c chunk.ID) (event.Reader, error) {
 	case tierHot:
 		return db.Events(), nil
 	default:
-		return nil, ErrUnavailable
+		return nil, a.unavailable(c, geometry.KindEvents)
 	}
 }

@@ -230,3 +230,20 @@ func TestEventReader_ColdRoutesToColdOpen(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorContains(t, err, cat.Layout().EventsBucketDir(c), "cold reads target the chunk's bucket dir")
 }
+
+func TestUnavailableResolves_CountsNoServingStore(t *testing.T) {
+	a, _ := viewFor(t, func(cat *catalog.Catalog, _ *Registry) {
+		// Hot-ready in the catalog but no published handle: no serving store.
+		require.NoError(t, cat.FlipHotReady(0))
+	})
+
+	before := UnavailableResolves()
+	_, err := a.Ledgers(0)
+	require.ErrorIs(t, err, ErrUnavailable)
+	assert.Equal(t, before+1, UnavailableResolves(),
+		"a no-serving-store read is a violated invariant and must count")
+
+	_, err = a.Events(0)
+	require.ErrorIs(t, err, ErrUnavailable)
+	assert.Equal(t, before+2, UnavailableResolves())
+}

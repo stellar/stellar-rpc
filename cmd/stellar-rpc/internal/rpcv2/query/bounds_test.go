@@ -13,7 +13,7 @@ import (
 // the given latest ledger — bounds tests read only those two fields, no catalog or
 // snapshot needed.
 func viewWithLatest(latest uint32) *ReadView {
-	return &ReadView{floor: 5, latestLedger: latest}
+	return &ReadView{floor: 5, latest: ledgerStamp{seq: latest}}
 }
 
 func TestOldestLedger(t *testing.T) {

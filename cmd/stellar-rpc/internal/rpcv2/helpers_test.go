@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"iter"
-	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,7 +20,27 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 )
+
+// countingServeReads is a no-op ServeReads that counts its calls — for tests
+// that only care that serving started.
+func countingServeReads(served *atomic.Int32) func(context.Context, *query.Registry) (func(), <-chan error, error) {
+	return func(context.Context, *query.Registry) (func(), <-chan error, error) {
+		served.Add(1)
+		return func() {}, nil, nil
+	}
+}
+
+// signalingServeReads is countingServeReads' channel twin, for tests that
+// sequence on the moment serving starts.
+func signalingServeReads(servedCh chan struct{}) func(context.Context, *query.Registry) (func(), <-chan error, error) {
+	return func(context.Context, *query.Registry) (func(), <-chan error, error) {
+		servedCh <- struct{}{}
+		return func() {}, nil, nil
+	}
+}
 
 // testCPI is the tx-hash index width tests build layouts with; equals the
 // production constant so on-disk geometry reads back identically.
@@ -32,8 +52,7 @@ const testCPI = geometry.ChunksPerTxhashIndex
 const preGenesisLedger = uint32(chunk.FirstLedgerSeq - 1)
 
 func silentLogger() *supportlog.Entry {
-	logger, _ := capturingLogger()
-	return logger
+	return rpcv2test.SilentLogger()
 }
 
 // capturingLogger is silentLogger plus access to what was logged.
@@ -45,30 +64,11 @@ func capturingLogger() (*supportlog.Entry, *bytes.Buffer) {
 	return log, buf
 }
 
-// newTestCatalog builds a Catalog over a real KV store on temp dirs with
-// cpi-wide tx-hash indexes; returns the catalog (closed via t.Cleanup) and
-// artifact root.
-func newTestCatalog(t *testing.T, cpi uint32) (*catalog.Catalog, string) {
-	t.Helper()
-	metaDir := t.TempDir()
-	artifactRoot := t.TempDir()
-
-	idxLayout, err := geometry.NewTxHashIndexLayout(cpi)
-	require.NoError(t, err)
-
-	cat, err := catalog.Open(
-		filepath.Join(metaDir, "rocksdb"), geometry.NewLayout(artifactRoot), idxLayout, silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = cat.Close() })
-
-	return cat, artifactRoot
-}
-
 // testCatalog builds a catalog with the default (wide) tx-hash index, returning it
 // and the artifact root.
 func testCatalog(t *testing.T) (*catalog.Catalog, string) {
 	t.Helper()
-	return newTestCatalog(t, testCPI)
+	return rpcv2test.OpenTestCatalog(t, testCPI)
 }
 
 // freezeKinds flips the given per-chunk kinds to "frozen" via the one-write protocol.
@@ -124,6 +124,8 @@ func (*recordingMetrics) Rebuild(time.Duration)      {}
 func (*recordingMetrics) Prune(int, time.Duration)   {}
 func (*recordingMetrics) LiveHotChunks(int)          {}
 func (*recordingMetrics) Discard(int, time.Duration) {}
+func (*recordingMetrics) FailedDestroy()             {}
+func (*recordingMetrics) TxIndexInconsistency()      {}
 
 // lastCommittedSeq returns the values the last-committed gauge was set to, in order.
 func (r *recordingMetrics) lastCommittedSeq() []uint32 {
