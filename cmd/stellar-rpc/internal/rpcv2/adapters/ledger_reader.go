@@ -280,8 +280,8 @@ func getLedgerRange(view *query.ReadView) (store.LedgerRange, error) {
 	}
 	lastCT, ok := view.LatestCloseTime()
 	if !ok {
-		// Only reachable right after boot (the seed stamp carries no close
-		// time). No cache write — the next commit stamps the tip.
+		// Backstop — SeedCloseTimes stamps the tip before serving begins. No
+		// cache write here: the next commit stamps the tip.
 		var err error
 		if lastCT, err = readCloseTime(view, latest, "latest"); err != nil {
 			return store.LedgerRange{}, err

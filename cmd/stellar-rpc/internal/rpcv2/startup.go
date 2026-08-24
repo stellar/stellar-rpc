@@ -10,6 +10,7 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
@@ -134,6 +135,12 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// Runs after g.Wait joins the loops below; Registry.Close owns the
 	// double-close story.
 	defer registry.Close()
+
+	// Stamp both window edges' close times before serving begins, so the first
+	// requests don't pay the point reads (see adapters.SeedCloseTimes).
+	if err := adapters.SeedCloseTimes(registry); err != nil {
+		return fmt.Errorf("startup seed close times: %w", err)
+	}
 
 	// Refill the fee windows from committed history BEFORE the ingestion loop
 	// launches below (#888): the replay covers [start, lastCommitted] and the
