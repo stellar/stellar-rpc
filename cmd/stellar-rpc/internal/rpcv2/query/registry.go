@@ -65,11 +65,10 @@ type Registry struct {
 	closing map[chunk.ID]*hotchunk.DB
 
 	// newSnapshot and loadHandles are the seams the load-order tests hook —
-	// defaulting to catalog.NewSnapshot and handles.Load. Together they pin the
-	// full three-load order the design's skew argument depends on (latest ledger,
-	// then handles, then snapshot), which is otherwise unobservable: the
-	// newSnapshot hook catches either load drifting after the snapshot, and the
-	// loadHandles hook catches the latest ledger drifting after the handle set.
+	// defaulting to catalog.NewSnapshot and handles.Load. They exist because
+	// NewReadView's three-load order is otherwise unobservable: the newSnapshot
+	// hook catches either load drifting after the snapshot, and the loadHandles
+	// hook catches the latest ledger drifting after the handle set.
 	newSnapshot func() (*catalog.Snapshot, error)
 	loadHandles func() *handleSet
 }
@@ -118,9 +117,7 @@ func OpenRegistry(
 		return nil, err
 	}
 	r.PublishHandle(live.ChunkID(), live)
-	// lastCommitted comes from the catalog, which has no close times, so the
-	// stamp starts with close time 0 (unknown): adapters fall back to one point
-	// read until the first ingested ledger stamps a real value.
+	// The catalog has no close times, so the seed stamp starts at 0 (unknown).
 	r.SetLatestLedger(lastCommitted, 0)
 	return r, nil
 }
@@ -142,9 +139,8 @@ func NewRegistry(cat *catalog.Catalog, retention geometry.Retention) *Registry {
 	return r
 }
 
-// SetLatestLedger publishes the newest fully ingested ledger together with its
-// close time (unix seconds; 0 = unknown, consumers fall back to a point read);
-// the ingest loop calls it as the final step of each per-ledger cycle.
+// SetLatestLedger publishes seq together with its close time (unix seconds;
+// 0 = unknown, see ledgerStamp). See the latest field for who calls it when.
 func (r *Registry) SetLatestLedger(seq uint32, closeTimeUnix int64) {
 	r.latest.Store(&ledgerStamp{seq: seq, closeTime: closeTimeUnix})
 }
@@ -246,7 +242,8 @@ func (r *Registry) Close() {
 // ReadView is one query's consistent view of serving state, held for the
 // request's lifetime and released when it completes. It carries the latest
 // ledger stamp and retention floor as of acquisition, the handle set loaded
-// then, and the catalog snapshot the routing reads run against.
+// then, and the catalog snapshot the routing reads run against. A view serves
+// one request on one goroutine, so nothing on it (or hanging off it) locks.
 type ReadView struct {
 	latest ledgerStamp
 	// oldestStamp is the oldest-close-time cache entry captured at acquisition.
@@ -266,8 +263,7 @@ type ReadView struct {
 	// closers releases every cold reader this view opened (hot facades are
 	// registry-owned and never appear here). Appended by the resolve methods and
 	// by ScanLedgers' walk backstop, drained by Release — a view's resources live
-	// exactly as long as the view. A ReadView serves one request on one
-	// goroutine; no locking.
+	// exactly as long as the view.
 	closers []func() error
 }
 

@@ -272,11 +272,9 @@ func getLedger(view *query.ReadView, sequence uint32) (xdr.LedgerCloseMeta, bool
 }
 
 // getLedgerRange reads the window's edge sequences from the view. Close times
-// come from the registry's in-memory stamps in the common case — the ingest
-// loop stamps the tip on every commit, and the oldest edge is cached after one
-// read per floor move (close times are immutable, and the floor moves once per
-// chunk). Only a stamp miss pays a point read, of just the close time off the
-// raw bytes.
+// come from the registry's in-memory stamps in the common case (see the
+// Registry's latest and oldest fields); only a stamp miss pays a point read,
+// of just the close time off the raw bytes.
 func getLedgerRange(view *query.ReadView, registry *query.Registry) (store.LedgerRange, error) {
 	oldest, latest := view.OldestLedger(), view.LatestLedger()
 	// Reachable on a genuine first start: with earliest_ledger pinned at a
