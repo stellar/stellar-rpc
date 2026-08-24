@@ -110,7 +110,7 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 	if catalogBase == "" {
 		catalogBase = opts.ColdRoot
 	}
-	cat, releaseCat, err := openScratchCatalog(catalogBase, layout, logger)
+	cat, releaseCat, err := openScratchCatalog(catalogBase, scratchPrefixIngest, layout, logger)
 	if err != nil {
 		return err
 	}

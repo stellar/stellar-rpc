@@ -13,15 +13,23 @@ import (
 
 const catalogBaseDirPerm os.FileMode = 0o755 // owner rwx, group/others rx
 
-// openScratchCatalog creates a fresh catalog in a temp dir under catalogBase
-// and returns a release func that closes it and removes that temp dir.
+// Temp-dir prefixes naming which bench owns a scratch catalog, so a leftover
+// dir says where it came from.
+const (
+	scratchPrefixIngest = "bench-ingest-catalog-"
+	scratchPrefixQuery  = "bench-query-catalog-"
+)
+
+// openScratchCatalog creates a fresh catalog in a temp dir named prefix* under
+// catalogBase and returns a release func that closes it and removes that temp
+// dir.
 func openScratchCatalog(
-	catalogBase string, layout geometry.Layout, logger *supportlog.Entry,
+	catalogBase, prefix string, layout geometry.Layout, logger *supportlog.Entry,
 ) (*catalog.Catalog, func(), error) {
 	if err := os.MkdirAll(catalogBase, catalogBaseDirPerm); err != nil {
 		return nil, nil, fmt.Errorf("create catalog base dir %s: %w", catalogBase, err)
 	}
-	dir, err := os.MkdirTemp(catalogBase, "bench-ingest-catalog-")
+	dir, err := os.MkdirTemp(catalogBase, prefix)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create scratch catalog dir: %w", err)
 	}
