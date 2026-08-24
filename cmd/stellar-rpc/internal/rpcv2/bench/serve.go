@@ -76,8 +76,11 @@ type serveOptions struct {
 	// root and `bench-ingest cold`'s --cold-out-dir are both this shape.
 	ColdRoot string
 
-	// HotRoot holds the per-chunk hot RocksDB dirs ({chunk:08d}). Empty means
-	// no hot tier: cold chunks alone are served.
+	// HotRoot is the same value `bench-ingest hot` takes for --hot-dir: the
+	// per-chunk DBs live one level below it, at <HotRoot>/hot/{chunk:08d}. The
+	// two commands must read one flag the same way, or a run that hands the hot
+	// leg's own --hot-dir straight over finds nothing. Empty means no hot tier:
+	// cold chunks alone are served.
 	HotRoot string
 
 	// CatalogDir is where the adopted catalog is created. Unlike the ingest
@@ -230,15 +233,17 @@ func (o serveOptions) highestChunk() chunk.ID {
 // The catalog is its own root: it is derived state, not part of the dataset.
 func (o serveOptions) layout() geometry.Layout {
 	cold := geometry.NewLayout(o.ColdRoot)
-	hotRoot := o.HotRoot
-	if hotRoot == "" {
-		// No hot tier: point the hot root at a path under the catalog rather
-		// than the dataset, so nothing can write into a read-only dataset dir.
-		hotRoot = filepath.Join(o.CatalogDir, "hot")
+	// No hot tier: derive the hot root under the catalog rather than the
+	// dataset, so nothing can write into a read-only dataset dir.
+	hotBase := o.HotRoot
+	if hotBase == "" {
+		hotBase = o.CatalogDir
 	}
 	return geometry.NewLayoutFromRoots(
 		filepath.Join(o.CatalogDir, "rocksdb"),
-		hotRoot,
+		// Same derivation bench-ingest hot applies to its --hot-dir, so one
+		// value works in both commands.
+		geometry.NewLayout(hotBase).HotRoot(),
 		cold.LedgersRoot(),
 		cold.EventsRoot(),
 		cold.TxHashRawRoot(),

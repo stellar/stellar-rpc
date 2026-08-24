@@ -172,7 +172,8 @@ func NewServeCommand() *cobra.Command {
 		"cold artifact root holding ledgers/, events/ and txhash/ (required; a dataset pack root "+
 			"or bench-ingest cold's --cold-out-dir)")
 	fs.StringVar(&opts.HotRoot, "hot-dir", "",
-		"root holding the per-chunk hot RocksDBs ({chunk:08d}); omit to serve cold chunks only")
+		"the same --hot-dir bench-ingest hot was given (per-chunk DBs sit at <dir>/hot/{chunk:08d}); "+
+			"omit to serve cold chunks only")
 	fs.StringVar(&opts.CatalogDir, "catalog-dir", "",
 		"dir for the adopted catalog (required); unlike the ingest benchmarks this catalog PERSISTS, "+
 			"so a re-run over the same dataset reuses it")

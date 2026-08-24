@@ -32,7 +32,8 @@ import (
 type coldDataset struct {
 	// Root is the --cold-dir: the tree holding ledgers/, events/, txhash/.
 	Root string
-	// HotRoot is the --hot-dir under Root, populated only by withHotChunk.
+	// HotRoot is the --hot-dir value for this dataset: bench-serve derives
+	// <HotRoot>/hot/{chunk} from it, matching where withHotChunk seeds.
 	HotRoot string
 	// TxHashes maps each seeded transaction hash to its ledger.
 	TxHashes map[xdr.Hash]uint32
@@ -64,7 +65,7 @@ func buildColdDataset(t *testing.T, c chunk.ID, numLedgers uint32) *coldDataset 
 	require.NoError(t, cat.Close())
 	return &coldDataset{
 		Root:        root,
-		HotRoot:     filepath.Join(root, "hot"),
+		HotRoot:     root,
 		TxHashes:    hashes,
 		FirstLedger: c.FirstLedger(),
 		LastLedger:  c.FirstLedger() + numLedgers - 1,
@@ -482,7 +483,7 @@ func TestServeReplayAdvancesServedTip(t *testing.T) {
 	coldTip := ds.LastLedger
 	url := startServe(t, serveOptions{
 		ColdRoot:      ds.Root,
-		HotRoot:       filepath.Join(t.TempDir(), "hot"),
+		HotRoot:       t.TempDir(),
 		StartChunk:    coldChunk,
 		NumChunks:     1,
 		LatestLedger:  coldTip,
@@ -546,7 +547,7 @@ func TestServeReplayRejectsColdOverlap(t *testing.T) {
 	ds := buildColdDataset(t, chunk.ID(1), 2)
 	err := runServe(context.Background(), rpcv2test.SilentLogger(), serveOptions{
 		ColdRoot:          ds.Root,
-		HotRoot:           filepath.Join(t.TempDir(), "hot"),
+		HotRoot:           t.TempDir(),
 		CatalogDir:        filepath.Join(t.TempDir(), "catalog"),
 		StartChunk:        chunk.ID(1),
 		NumChunks:         2,
@@ -598,7 +599,7 @@ func TestServeReplayKeepsServingAfterLegEnds(t *testing.T) {
 
 	url := startServe(t, serveOptions{
 		ColdRoot:      ds.Root,
-		HotRoot:       filepath.Join(t.TempDir(), "hot"),
+		HotRoot:       t.TempDir(),
 		StartChunk:    coldChunk,
 		NumChunks:     1,
 		LatestLedger:  ds.LastLedger,
