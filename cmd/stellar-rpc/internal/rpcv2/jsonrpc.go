@@ -136,12 +136,10 @@ func notImplemented(message string) jrpc2.Handler {
 
 // wrapAdapterRequest is the per-request scope around every handler: it plants
 // the adapters' shared read view (adapters.WithSharedView, released after the
-// handler returns — every store read in one request sees one snapshot) and
-// rewrites the routing/lifecycle failures the shared handlers can only report
-// as generic internal errors. The shared handlers flatten every store error,
-// so the adapters preserve the original through a context mark
-// (adapters.WithErrorMark) and this wrapper classifies it after the handler
-// fails:
+// handler returns) and rewrites the routing/lifecycle failures the shared
+// handlers can only report as generic internal errors. The original error
+// survives the handler through a context mark (see adapters.WithErrorMark);
+// this wrapper classifies it after the handler fails:
 //
 //   - a request that raced a store handoff (query.ErrUnavailable or
 //     stores.ErrStoreClosed) becomes network.ErrTemporarilyUnavailable — both
@@ -149,13 +147,6 @@ func notImplemented(message string) jrpc2.Handler {
 //   - a scan the router rejected as below the servable window
 //     (*query.RangeError) becomes the v1-style invalid-request rejection;
 //   - everything else passes through untouched.
-//
-// A store closed under an in-flight request also counts on the
-// StoreClosedServed metric, but only while the request's context is still
-// live: reaching a client means the request outlived the deletion grace
-// period, which operators must see, whereas a straggler whose context is
-// already dead (teardown, or the duration limiter answered at the deadline)
-// reaches no one and says nothing about the grace.
 func wrapAdapterRequest(h jrpc2.Handler, metrics observability.Metrics) jrpc2.Handler {
 	return func(ctx context.Context, req *jrpc2.Request) (any, error) {
 		ctx, mark := adapters.WithErrorMark(ctx)
@@ -174,10 +165,8 @@ func wrapAdapterRequest(h jrpc2.Handler, metrics observability.Metrics) jrpc2.Ha
 		case errors.As(marked, &rangeErr):
 			return nil, &jrpc2.Error{Code: jrpc2.InvalidRequest, Message: rangeErr.Error()}
 		case errors.Is(marked, stores.ErrStoreClosed):
-			// Count only while the context is live: a dead context means no
-			// client can receive this response — teardown closed the
-			// connection, or the duration limiter already answered at the
-			// deadline — so the grace period is not implicated.
+			// A dead context reaches no client and says nothing about the
+			// grace period (see observability.Metrics.StoreClosedServed).
 			if ctx.Err() == nil {
 				metrics.StoreClosedServed()
 			}
