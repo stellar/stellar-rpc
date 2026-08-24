@@ -58,7 +58,10 @@ type LedgerReaderTx interface {
 	Done() error
 }
 
+// LedgerMetadataChunk is one ledger as getLedgers serves it: the marshaled
+// LedgerCloseMeta plus the marshaled LedgerHeaderHistoryEntry sliced out of
+// it. Both stay raw bytes because the XDR wire format base64s them as-is.
 type LedgerMetadataChunk struct {
-	Header xdr.LedgerHeaderHistoryEntry
-	Lcm    []byte
+	HeaderRaw []byte
+	Lcm       []byte
 }

@@ -263,7 +263,9 @@ func TestTxBatchGetLedgers(t *testing.T) {
 
 	want := append(seqRange(c0.FirstLedger(), c0.FirstLedger()+3), c1.FirstLedger())
 	for i, mc := range got {
-		assert.Equal(t, want[i], uint32(mc.Header.Header.LedgerSeq))
+		var hdr xdr.LedgerHeaderHistoryEntry
+		require.NoError(t, hdr.UnmarshalBinary(mc.HeaderRaw))
+		assert.Equal(t, want[i], uint32(hdr.Header.LedgerSeq))
 		// Entry.Bytes is borrowed from the reader's scratch buffer; if the
 		// adapter forgot to clone, earlier entries would decode to a later
 		// ledger's bytes by the time the loop finishes.
@@ -293,8 +295,10 @@ func TestTxBatchGetLedgers_HeaderMatchesFullDecode(t *testing.T) {
 	for i, raw := range [][]byte{rawV1, rawV2} {
 		var full xdr.LedgerCloseMeta
 		require.NoError(t, full.UnmarshalBinary(raw))
-		assert.Equal(t, full.LedgerHeaderHistoryEntry(), got[i].Header,
-			"the header-only decode must produce what the full decode would")
+		wantHeader, err := full.LedgerHeaderHistoryEntry().MarshalBinary()
+		require.NoError(t, err)
+		assert.Equal(t, wantHeader, got[i].HeaderRaw,
+			"the header slice must equal what the full decode re-marshals")
 		assert.Equal(t, raw, got[i].Lcm)
 	}
 }

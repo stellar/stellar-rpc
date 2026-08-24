@@ -259,10 +259,11 @@ func BenchmarkBatchGetLedgers(b *testing.B) {
 		ledgers, err := readTx.BatchGetLedgers(b.Context(), start, end)
 		require.NoError(b, err)
 
-		hdrFirst := ledgers[0].Header.Header
-		hdrLast := ledgers[batchSize-1].Header.Header
-		assert.EqualValues(b, lcms[0].LedgerSequence(), hdrFirst.LedgerSeq)
-		assert.EqualValues(b, lcms[batchSize-1].LedgerSequence(), hdrLast.LedgerSeq)
+		var hdrFirst, hdrLast xdr.LedgerHeaderHistoryEntry
+		require.NoError(b, hdrFirst.UnmarshalBinary(ledgers[0].HeaderRaw))
+		require.NoError(b, hdrLast.UnmarshalBinary(ledgers[batchSize-1].HeaderRaw))
+		assert.EqualValues(b, lcms[0].LedgerSequence(), hdrFirst.Header.LedgerSeq)
+		assert.EqualValues(b, lcms[batchSize-1].LedgerSequence(), hdrLast.Header.LedgerSeq)
 	}
 }
 

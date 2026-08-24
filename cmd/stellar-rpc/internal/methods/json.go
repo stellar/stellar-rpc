@@ -45,7 +45,7 @@ func ledgerToJSON(chunk *store.LedgerMetadataChunk) ([]byte, []byte, error) {
 		return nil, nil, err
 	}
 
-	headerJSON, err = xdr2json.ConvertInterface(chunk.Header)
+	headerJSON, err = xdr2json.ConvertBytes(xdr.LedgerHeaderHistoryEntry{}, chunk.HeaderRaw)
 	if err != nil {
 		return nil, nil, err
 	}
