@@ -82,8 +82,7 @@ func (l SpecLimits) LongestDuration() time.Duration {
 // Apply pairs each spec with its limits from the table and returns the
 // completed list — the step that makes a method list servable. Run it over a
 // daemon's COMPLETE list (the shared BuildHandlerSpecs result plus any methods
-// that daemon appended). A served method missing from the table, or a table
-// entry no spec claims, panics at startup.
+// that daemon appended).
 func (l SpecLimits) Apply(specs []HandlerSpec) []HandlerSpec {
 	used := make(map[string]bool, len(l))
 	for i := range specs {

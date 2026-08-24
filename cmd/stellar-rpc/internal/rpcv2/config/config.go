@@ -127,8 +127,7 @@ type MethodsConfig struct {
 	GetTransactions PaginatedMethodConfig `toml:"getTransactions"`
 	GetLedgers      PaginatedMethodConfig `toml:"getLedgers"`
 	GetEvents       EventsMethodConfig    `toml:"getEvents"`
-	// GetEventsV2 is the one method v2 serves that v1 does not; it carries
-	// getEvents' knob set and defaults.
+	// GetEventsV2 carries getEvents' knob set and defaults.
 	GetEventsV2 EventsMethodConfig `toml:"getEventsV2"`
 	GetFeeStats MethodConfig       `toml:"getFeeStats"`
 

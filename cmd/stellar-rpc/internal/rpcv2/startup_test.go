@@ -457,9 +457,6 @@ func TestRun_IngestionCleanEndSurfacesErrorNotHang(t *testing.T) {
 	}
 }
 
-// A read server dying AFTER serving started (its accept loop failing, reported
-// on the ServeReads channel) fails the whole attempt: ingestion must not keep
-// running behind an endpoint nothing can reach.
 func TestRun_ReadServerDeathFailsTheAttempt(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
