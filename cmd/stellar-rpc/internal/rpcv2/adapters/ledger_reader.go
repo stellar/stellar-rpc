@@ -145,7 +145,10 @@ func (tx *ledgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.L
 	}
 
 	if tx.next == nil {
-		scan, err := tx.view.ScanLedgers(sequence, min(tx.view.LatestLedger(), sequence+walkSpanCap))
+		// Inclusive end: -1 keeps the span at exactly walkSpanCap ledgers, so a
+		// chunk-aligned start stays inside one chunk (ScanLedgers eagerly opens
+		// a reader per chunk the span touches).
+		scan, err := tx.view.ScanLedgers(sequence, min(tx.view.LatestLedger(), sequence+walkSpanCap-1))
 		if err != nil {
 			return xdr.LedgerCloseMeta{}, false, markErr(ctx, err)
 		}

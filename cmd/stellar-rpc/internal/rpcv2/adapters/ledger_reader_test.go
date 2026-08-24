@@ -378,13 +378,13 @@ func TestTxGetLedger_WalkPastSpanCapIsExhaustedNotNonSequential(t *testing.T) {
 	defer func() { _ = tx.Done() }()
 
 	start := c0.FirstLedger()
-	for seq := start; seq <= start+walkSpanCap; seq++ {
+	for seq := start; seq < start+walkSpanCap; seq++ {
 		_, ok, err := tx.GetLedger(context.Background(), seq)
 		require.NoError(t, err, "ledger %d", seq)
 		require.True(t, ok, "ledger %d", seq)
 	}
 
-	_, _, err = tx.GetLedger(context.Background(), start+walkSpanCap+1)
+	_, _, err = tx.GetLedger(context.Background(), start+walkSpanCap)
 	require.ErrorContains(t, err, "exhausted its primed")
 	assert.NotContains(t, err.Error(), "non-sequential")
 }
