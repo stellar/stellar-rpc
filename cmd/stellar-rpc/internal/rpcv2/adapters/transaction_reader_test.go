@@ -74,8 +74,8 @@ func TestGetTransaction_AboveLatestIsGated(t *testing.T) {
 
 func TestGetTransaction_BelowFloorIsGated(t *testing.T) {
 	cat := openTestCatalog(t)
-	// Retention floor at chunk 6: chunk 5's handle stays published (hot indexes
-	// are deliberately unfiltered) but its ledgers are below the servable window.
+	// Retention floor at chunk 6: chunk 5's handle stays published but its
+	// ledgers are below the servable window, so the view's gate must hide it.
 	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk+1))
 	lcm5, txs5 := lcmWithTxs(t, testChunk.FirstLedger(), txSpec{})
 	lcm6, txs6 := lcmWithTxs(t, (testChunk + 1).FirstLedger(), txSpec{})

@@ -13,6 +13,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
 // TestHotTxHashIndexes pins that every published hot chunk's tx index is returned,
@@ -42,8 +43,32 @@ func TestHotTxHashIndexes(t *testing.T) {
 
 	got := a.HotTxHashIndexes()
 	require.Len(t, got, 3)
-	assert.Equal(t, dbs[7].Txhash(), got[0], "newest chunk first")
-	assert.Equal(t, dbs[5].Txhash(), got[2], "oldest chunk last")
+	inner := func(i int) txhash.HashIndex { return got[i].(*windowGatedIndex).inner }
+	assert.Equal(t, dbs[7].Txhash(), inner(0), "newest chunk first")
+	assert.Equal(t, dbs[5].Txhash(), inner(2), "oldest chunk last")
+}
+
+// stubIndex is a HashIndex whose Get always hits, answering seq.
+type stubIndex struct{ seq uint32 }
+
+func (s stubIndex) Get([32]byte) (uint32, error) { return s.seq, nil }
+
+func TestWindowGatedIndex_OutOfWindowHitIsAMiss(t *testing.T) {
+	view := &ReadView{floor: 5, latest: ledgerStamp{seq: chunk.ID(6).FirstLedger()}}
+	oldest, latest := view.OldestLedger(), view.LatestLedger()
+
+	for _, seq := range []uint32{oldest - 1, latest + 1} {
+		gated := &windowGatedIndex{inner: stubIndex{seq: seq}, view: view}
+		_, err := gated.Get([32]byte{1})
+		assert.ErrorIs(t, err, stores.ErrNotFound, "seq %d is outside [%d, %d]", seq, oldest, latest)
+	}
+
+	for _, seq := range []uint32{oldest, latest} {
+		gated := &windowGatedIndex{inner: stubIndex{seq: seq}, view: view}
+		got, err := gated.Get([32]byte{1})
+		require.NoError(t, err)
+		assert.Equal(t, seq, got)
+	}
 }
 
 // TestTxHashCoverages pins that only frozen window coverages are returned, newest
@@ -103,6 +128,10 @@ func TestColdTxIndexes(t *testing.T) {
 	debris := chunk.ID(3 * geometry.ChunksPerTxhashIndex)
 	_, err := cat.MarkTxHashIndexFreezing(3, debris, debris)
 	require.NoError(t, err)
+
+	// The returned indexes are window-gated; latest must cover the seeded seqs
+	// or every hit reads as a miss.
+	r.SetLatestLedger(seqs[1], 0)
 
 	a, err := r.NewReadView()
 	require.NoError(t, err)
