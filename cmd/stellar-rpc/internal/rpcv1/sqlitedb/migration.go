@@ -92,11 +92,7 @@ func (mm MultiMigration) ApplicableRange() LedgerSeqRange {
 	return result
 }
 
-func (mm MultiMigration) Apply(ctx context.Context, view xdr.LedgerCloseMetaView) error {
-	ledgerSeq, err := view.LedgerSequence()
-	if err != nil {
-		return errors.Join(err, mm.db.Rollback())
-	}
+func (mm MultiMigration) Apply(ctx context.Context, ledgerSeq uint32, view xdr.LedgerCloseMetaView) error {
 	var meta xdr.LedgerCloseMeta
 	decoded := false
 	var applyErr error
