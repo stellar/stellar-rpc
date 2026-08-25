@@ -24,7 +24,6 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
@@ -390,7 +389,7 @@ func (d *DB) IngestLedger(
 	}
 	rep.CloseTime = closedAt
 	// A pre-Soroban ledger yields zero payloads, no error.
-	payloads, err := events.PayloadsFromLedgerEvents(txParts, seq, closedAt)
+	payloads, err := event.PayloadsFromLedgerEvents(txParts, seq, closedAt)
 	if err != nil {
 		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
 		rep.Failed = PhaseExtract

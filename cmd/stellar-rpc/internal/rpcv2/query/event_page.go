@@ -17,7 +17,6 @@ import (
 	"math"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 )
 
@@ -66,7 +65,7 @@ const (
 // is present only while it leads the watermark (assemblePage drops a
 // passed one).
 type EventPage struct {
-	Events []events.Payload
+	Events []event.Payload
 	Next   EventCursor
 	Status ScanStatus
 }
@@ -259,7 +258,7 @@ func resumeBounds(cursor *EventCursor) (uint32, uint32, *EventPosition) {
 // walkResult accumulates the chunks' results; see chunkResult for the
 // stop-fact fields. finished means every part was consumed.
 type walkResult struct {
-	events         []events.Payload
+	events         []event.Payload
 	last           *EventPosition
 	nextUnserved   *uint32
 	coveredThrough *uint32
@@ -320,7 +319,7 @@ func (a *ReadView) walkChunks(
 
 // chunkResult is one chunk's contribution to a page.
 type chunkResult struct {
-	events []events.Payload
+	events []event.Payload
 	last   *EventPosition
 	// nextUnserved is set when the page filled while the stream still
 	// had matches: the ledger of the first match the client has not
@@ -398,7 +397,7 @@ func scanChunk(
 // QueryEvents refuses to serve when a bookmark is above the view's
 // latest, and resumeBounds starts the window at the position's ledger.
 func chunkWindow(
-	ctx context.Context, r event.Reader, ofs *events.LedgerOffsets,
+	ctx context.Context, r event.Reader, ofs *event.LedgerOffsets,
 	pLo, pHi uint32, reenter *EventPosition, desc bool,
 ) (event.IDRange, error) {
 	window, err := event.IDRangeForLedgers(ofs, pLo, pHi)
@@ -427,7 +426,7 @@ func chunkWindow(
 // fixed inclusion rule), so a mismatch is a wrong cursor, not
 // something to recover from.
 func resumeOrdinal(
-	ctx context.Context, r event.Reader, ofs *events.LedgerOffsets, pos *EventPosition,
+	ctx context.Context, r event.Reader, ofs *event.LedgerOffsets, pos *EventPosition,
 ) (uint32, error) {
 	lStart, lEnd, err := ofs.EventIDs(pos.Ledger)
 	if err != nil {

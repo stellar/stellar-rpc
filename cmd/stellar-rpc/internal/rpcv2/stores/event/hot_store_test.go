@@ -19,7 +19,6 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
@@ -87,7 +86,7 @@ func openRawHotChunkForTest(t *testing.T, dir string, chunkID chunk.ID) *rocksdb
 	return raw
 }
 
-func makePayload(symbol string) (events.Payload, []events.TermKey) {
+func makePayload(symbol string) (Payload, []TermKey) {
 	var cid xdr.ContractId
 	cid[0] = 0xab
 	sym := xdr.ScSymbol(symbol)
@@ -106,11 +105,11 @@ func makePayload(symbol string) (events.Payload, []events.TermKey) {
 	if err != nil {
 		panic(err) // hardcoded test fixture; an error here is a test bug
 	}
-	keys, err := events.TermsForBytes(evBytes)
+	keys, err := TermsForBytes(evBytes)
 	if err != nil {
 		panic(err)
 	}
-	p := events.Payload{
+	p := Payload{
 		TxHash:             xdr.Hash{0xde, 0xad},
 		TxIdx:              1,
 		ContractEventBytes: evBytes,
@@ -121,7 +120,7 @@ func makePayload(symbol string) (events.Payload, []events.TermKey) {
 // eventOf decodes a Payload's ContractEventBytes back into the struct for
 // fixtures and assertions. Payloads carry only the raw XDR; a decode
 // failure means a corrupt fixture, so it panics.
-func eventOf(p events.Payload) xdr.ContractEvent {
+func eventOf(p Payload) xdr.ContractEvent {
 	var ev xdr.ContractEvent
 	if err := ev.UnmarshalBinary(p.ContractEventBytes); err != nil {
 		panic(err)
@@ -132,7 +131,7 @@ func eventOf(p events.Payload) xdr.ContractEvent {
 // dataSym returns a Payload's ScVal Data symbol. The event store read path
 // yields Payloads carrying only raw event XDR (ContractEventBytes), so
 // assertions decode it back to a ContractEvent first.
-func dataSym(t *testing.T, p events.Payload) string {
+func dataSym(t *testing.T, p Payload) string {
 	t.Helper()
 	return string(*eventOf(p).Body.V0.Data.Sym)
 }
@@ -151,13 +150,13 @@ func TestHotStore_IngestLedgerWritesAllCFs(t *testing.T) {
 	h := openHotStoreForTest(t, chunkID)
 
 	p, keys := makePayload("transfer")
-	require.NoError(t, ingestLedgerEvents(h.store, 2, []events.Payload{p}))
+	require.NoError(t, ingestLedgerEvents(h.store, 2, []Payload{p}))
 
 	// events_data row exists.
 	got, found, err := h.store.chunkStore.Get(DataCF, encodeDataKey(0))
 	require.NoError(t, err)
 	require.True(t, found)
-	var decoded events.Payload
+	var decoded Payload
 	require.NoError(t, decoded.Unmarshal(got))
 	assert.Equal(t, p.TxHash, decoded.TxHash)
 
@@ -189,10 +188,10 @@ func TestHotStore_EventIDsAreMonotonic(t *testing.T) {
 
 	p1, _ := makePayload("a")
 	p2, _ := makePayload("b")
-	require.NoError(t, ingestLedgerEvents(h.store, first, []events.Payload{p1, p2}))
+	require.NoError(t, ingestLedgerEvents(h.store, first, []Payload{p1, p2}))
 
 	p3, _ := makePayload("c")
-	require.NoError(t, ingestLedgerEvents(h.store, first+1, []events.Payload{p3}))
+	require.NoError(t, ingestLedgerEvents(h.store, first+1, []Payload{p3}))
 
 	for id := range uint32(3) {
 		_, found, err := h.store.chunkStore.Get(DataCF, encodeDataKey(id))
@@ -229,7 +228,7 @@ func TestHotStore_LookupReturnsImmutableSnapshot(t *testing.T) {
 	// Promote to dense mode so we exercise the bm.Load path (sparse
 	// mode allocates a fresh bitmap per Get).
 	for i := range uint32(70) {
-		require.NoError(t, ingestLedgerEvents(h.store, 2+i, []events.Payload{p}))
+		require.NoError(t, ingestLedgerEvents(h.store, 2+i, []Payload{p}))
 	}
 
 	first := lookupOne(t, h.store, keys[0])
@@ -237,7 +236,7 @@ func TestHotStore_LookupReturnsImmutableSnapshot(t *testing.T) {
 
 	// New ingest publishes a new snapshot. The old pointer must
 	// remain unchanged (it's the previous snapshot).
-	require.NoError(t, ingestLedgerEvents(h.store, 72, []events.Payload{p}))
+	require.NoError(t, ingestLedgerEvents(h.store, 72, []Payload{p}))
 
 	assert.Equal(t, cardBefore, first.GetCardinality(),
 		"prior LookupKeys result must be an immutable snapshot — later IngestLedgerEvents must not mutate it")
@@ -253,9 +252,9 @@ func TestHotStore_FetchEventsRoundTrip(t *testing.T) {
 
 	p1, _ := makePayload("a")
 	p2, _ := makePayload("b")
-	require.NoError(t, ingestLedgerEvents(h.store, 2, []events.Payload{p1, p2}))
+	require.NoError(t, ingestLedgerEvents(h.store, 2, []Payload{p1, p2}))
 	p3, _ := makePayload("c")
-	require.NoError(t, ingestLedgerEvents(h.store, 3, []events.Payload{p3}))
+	require.NoError(t, ingestLedgerEvents(h.store, 3, []Payload{p3}))
 
 	fetched, err := h.store.FetchEvents(context.Background(), []uint32{0, 1, 2})
 	require.NoError(t, err)
@@ -269,7 +268,7 @@ func TestHotStore_FetchEventsErrorsOnMissingID(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
 	p, _ := makePayload("only")
-	require.NoError(t, ingestLedgerEvents(h.store, 2, []events.Payload{p}))
+	require.NoError(t, ingestLedgerEvents(h.store, 2, []Payload{p}))
 
 	_, err := h.store.FetchEvents(context.Background(), []uint32{99})
 	assert.Error(t, err)
@@ -285,7 +284,7 @@ func TestHotStore_FetchEventsLargeBatch(t *testing.T) {
 	const n = 256
 	h := openHotStoreForTest(t, chunkID)
 
-	payloads := make([]events.Payload, n)
+	payloads := make([]Payload, n)
 	for i := range n {
 		p, _ := makePayload(fmt.Sprintf("evt-%03d", i))
 		payloads[i] = p
@@ -315,7 +314,7 @@ func TestHotStore_FetchEventsHonorsContext(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
 	p, _ := makePayload("only")
-	require.NoError(t, ingestLedgerEvents(h.store, 2, []events.Payload{p}))
+	require.NoError(t, ingestLedgerEvents(h.store, 2, []Payload{p}))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -338,7 +337,7 @@ func TestHotStore_FetchEventsRejectsUnsortedInput(t *testing.T) {
 	p2.LedgerSequence = 2
 	p3, _ := makePayload("c")
 	p3.LedgerSequence = 2
-	require.NoError(t, ingestLedgerEvents(h.store, 2, []events.Payload{p1, p2, p3}))
+	require.NoError(t, ingestLedgerEvents(h.store, 2, []Payload{p1, p2, p3}))
 
 	_, err := h.store.FetchEvents(context.Background(), []uint32{2, 0})
 	require.ErrorIs(t, err, ErrUnsortedEventIDs, "out-of-order input must error")
@@ -354,10 +353,10 @@ func TestHotStore_AllStreamsInEventIDOrder(t *testing.T) {
 	p1.LedgerSequence = 2
 	p2, _ := makePayload("b")
 	p2.LedgerSequence = 2
-	require.NoError(t, ingestLedgerEvents(h.store, 2, []events.Payload{p1, p2}))
+	require.NoError(t, ingestLedgerEvents(h.store, 2, []Payload{p1, p2}))
 	p3, _ := makePayload("c")
 	p3.LedgerSequence = 3
-	require.NoError(t, ingestLedgerEvents(h.store, 3, []events.Payload{p3}))
+	require.NoError(t, ingestLedgerEvents(h.store, 3, []Payload{p3}))
 
 	got := make([]string, 0, 3)
 	gotLedgers := make([]uint32, 0, 3)
@@ -397,11 +396,11 @@ func TestHotStore_PostCloseReadsError(t *testing.T) {
 	h := openHotStoreForTest(t, chunkID)
 
 	p, keys := makePayload("seed")
-	require.NoError(t, ingestLedgerEvents(h.store, chunkID.FirstLedger(), []events.Payload{p}))
+	require.NoError(t, ingestLedgerEvents(h.store, chunkID.FirstLedger(), []Payload{p}))
 	require.NoError(t, h.raw.Close())
 
 	// LookupKeys must error rather than silently returning cached bitmaps.
-	bms, err := h.store.LookupKeys(context.Background(), []events.TermKey{keys[0]})
+	bms, err := h.store.LookupKeys(context.Background(), []TermKey{keys[0]})
 	assert.Nil(t, bms)
 	require.ErrorIs(t, err, stores.ErrStoreClosed)
 
@@ -434,13 +433,13 @@ func TestHotStore_IngestLedgerEvents_DuplicateLedgerErrors(t *testing.T) {
 	first := chunkID.FirstLedger()
 
 	p1, _ := makePayload("a")
-	require.NoError(t, ingestLedgerEvents(h.store, first, []events.Payload{p1}))
+	require.NoError(t, ingestLedgerEvents(h.store, first, []Payload{p1}))
 
 	countBefore := mustEventCount(t, h.store)
 
 	// Re-ingesting the same ledger errors (expected is now first+1).
 	p2, _ := makePayload("b")
-	err := ingestLedgerEvents(h.store, first, []events.Payload{p2})
+	err := ingestLedgerEvents(h.store, first, []Payload{p2})
 	require.ErrorIs(t, err, ErrLedgerOutOfOrder, "a re-delivered committed ledger must error, not no-op")
 
 	assert.Equal(t, countBefore, mustEventCount(t, h.store), "event count must not advance on the rejected ingest")
@@ -467,13 +466,13 @@ func TestHotStore_IngestLedgerEvents_RejectsLedgerGap(t *testing.T) {
 	first := chunkID.FirstLedger()
 
 	p1, _ := makePayload("a")
-	require.NoError(t, ingestLedgerEvents(h.store, first, []events.Payload{p1}))
+	require.NoError(t, ingestLedgerEvents(h.store, first, []Payload{p1}))
 
 	countBefore := mustEventCount(t, h.store)
 
 	// Skip first+1; jump directly to first+2.
 	p2, _ := makePayload("c")
-	err := ingestLedgerEvents(h.store, first+2, []events.Payload{p2})
+	err := ingestLedgerEvents(h.store, first+2, []Payload{p2})
 	require.ErrorIs(t, err, ErrLedgerOutOfOrder)
 
 	assert.Equal(t, countBefore, mustEventCount(t, h.store))
@@ -488,11 +487,11 @@ func TestHotStore_IngestLedgerEvents_RejectsOutOfRangeLedger(t *testing.T) {
 	p, _ := makePayload("a")
 
 	// Below range (chunk 0's FirstLedger is FirstLedgerSeq == 2).
-	err := ingestLedgerEvents(h.store, 1, []events.Payload{p})
+	err := ingestLedgerEvents(h.store, 1, []Payload{p})
 	require.ErrorIs(t, err, ErrLedgerOutOfRange, "ledger below chunk range")
 
 	// Above range — well past chunk 0's LastLedger.
-	err = ingestLedgerEvents(h.store, chunkID.LastLedger()+1, []events.Payload{p})
+	err = ingestLedgerEvents(h.store, chunkID.LastLedger()+1, []Payload{p})
 	require.ErrorIs(t, err, ErrLedgerOutOfRange, "ledger above chunk range")
 
 	// State must be unchanged after both rejections.
@@ -514,7 +513,7 @@ func TestHotStore_ReopenRecoversState(t *testing.T) {
 
 	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p1, _ := makePayload("before")
-	require.NoError(t, ingestLedgerEvents(hot1, 2, []events.Payload{p1}))
+	require.NoError(t, ingestLedgerEvents(hot1, 2, []Payload{p1}))
 	require.NoError(t, raw1.Close())
 
 	hot2, _ := openHotStoreForTestAt(t, dir, chunkID)
@@ -522,7 +521,7 @@ func TestHotStore_ReopenRecoversState(t *testing.T) {
 	assert.Equal(t, uint32(1), mustEventCount(t, hot2), "warmup recovered offsets")
 
 	p2, _ := makePayload("after")
-	require.NoError(t, ingestLedgerEvents(hot2, 3, []events.Payload{p2}))
+	require.NoError(t, ingestLedgerEvents(hot2, 3, []Payload{p2}))
 	assert.Equal(t, uint32(2), mustEventCount(t, hot2))
 }
 
@@ -550,7 +549,7 @@ func TestHotStore_ConcurrentIngestAndLookup(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := range uint32(N) {
-			if err := ingestLedgerEvents(h.store, 2+i, []events.Payload{p}); err != nil {
+			if err := ingestLedgerEvents(h.store, 2+i, []Payload{p}); err != nil {
 				t.Errorf("ingest %d: %v", i, err)
 				return
 			}
@@ -574,9 +573,9 @@ func TestHotStore_ConcurrentIngestAndLookup(t *testing.T) {
 // fetchRangePayloads fully drains FetchRange into a slice for tests
 // that want to compare against a known sequence. Shared with
 // cold_reader_test.go via the package.
-func fetchRangePayloads(t *testing.T, r Reader, start, count uint32) ([]events.Payload, error) {
+func fetchRangePayloads(t *testing.T, r Reader, start, count uint32) ([]Payload, error) {
 	t.Helper()
-	var out []events.Payload
+	var out []Payload
 	var firstErr error
 	for p, err := range r.FetchRange(context.Background(), start, count) {
 		if err != nil {
@@ -597,7 +596,7 @@ func fetchRangePayloads(t *testing.T, r Reader, start, count uint32) ([]events.P
 // stops" — the iterator returns immediately after the error yield,
 // so the helper doesn't walk a long sequence in practice. Shared
 // with cold_reader_test.go.
-func firstIterError(seq iter.Seq2[events.Payload, error]) error {
+func firstIterError(seq iter.Seq2[Payload, error]) error {
 	for _, err := range seq {
 		if err != nil {
 			return err
@@ -611,9 +610,9 @@ func firstIterError(seq iter.Seq2[events.Payload, error]) error {
 // hot/cold/query tests that assert on one term at a time. It requires
 // LookupKeys to succeed, so closed/corrupt-path tests must call
 // LookupKeys directly and assert on the error.
-func lookupOne(t *testing.T, r Reader, key events.TermKey) *roaring.Bitmap {
+func lookupOne(t *testing.T, r Reader, key TermKey) *roaring.Bitmap {
 	t.Helper()
-	bms, err := r.LookupKeys(context.Background(), []events.TermKey{key})
+	bms, err := r.LookupKeys(context.Background(), []TermKey{key})
 	require.NoError(t, err)
 	require.Len(t, bms, 1)
 	return bms[0]
@@ -624,7 +623,7 @@ func TestHotStore_FetchRangeMidRange(t *testing.T) {
 	h := openHotStoreForTest(t, chunkID)
 	first := chunkID.FirstLedger()
 
-	payloads := make([]events.Payload, 5)
+	payloads := make([]Payload, 5)
 	for i := range payloads {
 		p, _ := makePayload(fmt.Sprintf("evt-%d", i))
 		payloads[i] = p
@@ -651,7 +650,7 @@ func TestHotStore_FetchRangeOutOfBoundsErrors(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
 	p, _ := makePayload("only")
-	require.NoError(t, ingestLedgerEvents(h.store, chunkID.FirstLedger(), []events.Payload{p}))
+	require.NoError(t, ingestLedgerEvents(h.store, chunkID.FirstLedger(), []Payload{p}))
 
 	_, err := fetchRangePayloads(t, h.store, 0, 2) // count > EventCount
 	require.Error(t, err)
@@ -671,7 +670,7 @@ func TestHotStore_AllMatchesFetchRange(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
 	first := chunkID.FirstLedger()
-	payloads := make([]events.Payload, 4)
+	payloads := make([]Payload, 4)
 	for i := range payloads {
 		p, _ := makePayload(fmt.Sprintf("e%d", i))
 		payloads[i] = p
@@ -703,7 +702,7 @@ func mustEventCount(t *testing.T, r Reader) uint32 {
 }
 
 // mustOffsets asserts r.Offsets() succeeds and returns the offsets.
-func mustOffsets(t *testing.T, r Reader) *events.LedgerOffsets {
+func mustOffsets(t *testing.T, r Reader) *LedgerOffsets {
 	t.Helper()
 	o, err := r.Offsets()
 	require.NoError(t, err)
@@ -714,7 +713,7 @@ func mustOffsets(t *testing.T, r Reader) *events.LedgerOffsets {
 // ingestLedgerEvents commits one ledger's events through IngestLedgerToBatch in
 // a test-owned batch and runs the post-commit apply hook — the production
 // write shape, reduced to a test seeding call.
-func ingestLedgerEvents(h *HotStore, ledgerSeq uint32, payloads []events.Payload) error {
+func ingestLedgerEvents(h *HotStore, ledgerSeq uint32, payloads []Payload) error {
 	if h.chunkStore.IsClosed() {
 		return stores.ErrStoreClosed
 	}

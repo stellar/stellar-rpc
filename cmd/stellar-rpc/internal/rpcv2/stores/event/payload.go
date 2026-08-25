@@ -1,4 +1,4 @@
-// Package events defines the canonical binary format for a
+// payload.go defines the canonical binary format for a
 // single event as stored in the full-history pipeline.
 //
 // The same bytes are produced by hot ingest, written into the
@@ -43,7 +43,8 @@
 // records are stored and read back whole, so any slack means the bytes were
 // not written by this layout, and the mismatch fails loudly rather than
 // silently aliasing the wrong event slice.
-package events
+
+package event
 
 import (
 	"encoding/binary"

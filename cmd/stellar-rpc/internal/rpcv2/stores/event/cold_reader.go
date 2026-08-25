@@ -3,7 +3,7 @@ package event
 // cold_reader.go is the read side of a frozen Chunk. It opens the
 // three cold artifacts produced by ColdWriter + WriteColdIndex
 // (events.pack, index.pack, index.hash), decodes the embedded
-// events.LedgerOffsets app-data block, and serves the events.Reader
+// LedgerOffsets app-data block, and serves the Reader
 // interface against them.
 //
 // Lifecycle: each ColdReader owns two packfile.Reader instances
@@ -53,13 +53,12 @@ import (
 	"github.com/RoaringBitmap/roaring/v2"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
 // ColdReader is the read side of a frozen Chunk. Implements
-// events.Reader.
+// Reader.
 //
 // Open shape: OpenColdReader does no synchronous I/O beyond options
 // validation. packfile.Open starts each file's open + trailer read
@@ -102,7 +101,7 @@ type ColdReader struct {
 // the deferred loader cached behind waitMeta.
 type coldMeta struct {
 	count   uint32
-	offsets *events.LedgerOffsets
+	offsets *LedgerOffsets
 }
 
 // Compile-time guard.
@@ -293,7 +292,7 @@ func (c *ColdReader) EventCount() (uint32, error) {
 // Returns (nil, stores.ErrStoreClosed) after Close. Callers must treat the
 // returned value as read-only — mutations would corrupt every
 // other reader holding the same cached snapshot.
-func (c *ColdReader) Offsets() (*events.LedgerOffsets, error) {
+func (c *ColdReader) Offsets() (*LedgerOffsets, error) {
 	if c.closed.Load() {
 		return nil, stores.ErrStoreClosed
 	}
@@ -311,7 +310,7 @@ func (c *ColdReader) Offsets() (*events.LedgerOffsets, error) {
 // not-found. record is valid only inside ReadItem's callback;
 // UnmarshalBinary copies into roaring's internal state so the
 // returned bitmap outlives the callback safely.
-func verifyAndDeserializeBitmap(record []byte, key events.TermKey, slot uint32) (*roaring.Bitmap, error) {
+func verifyAndDeserializeBitmap(record []byte, key TermKey, slot uint32) (*roaring.Bitmap, error) {
 	if len(record) < IndexRecordFingerprintLen {
 		return nil, fmt.Errorf("events: index.pack record at slot %d truncated (%d bytes)", slot, len(record))
 	}
@@ -346,7 +345,7 @@ func verifyAndDeserializeBitmap(record []byte, key events.TermKey, slot uint32) 
 //     match. Misses (fingerprint mismatch) leave result[i] = nil.
 //
 //nolint:cyclop // the four documented steps above, inline; splitting obscures the pass structure
-func (c *ColdReader) LookupKeys(ctx context.Context, keys []events.TermKey) ([]*roaring.Bitmap, error) {
+func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.Bitmap, error) {
 	if c.closed.Load() {
 		return nil, stores.ErrStoreClosed
 	}
@@ -435,7 +434,7 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []events.TermKey) ([]*
 // the worker count set via ColdReaderOptions.Concurrency.
 // result[idx] writes from concurrent workers do not race — each
 // idx is unique.
-func (c *ColdReader) FetchEvents(ctx context.Context, eventIDs []uint32) ([]events.Payload, error) {
+func (c *ColdReader) FetchEvents(ctx context.Context, eventIDs []uint32) ([]Payload, error) {
 	if c.closed.Load() {
 		return nil, stores.ErrStoreClosed
 	}
@@ -457,7 +456,7 @@ func (c *ColdReader) FetchEvents(ctx context.Context, eventIDs []uint32) ([]even
 		}
 		positions[i] = int(id)
 	}
-	results := make([]events.Payload, len(eventIDs))
+	results := make([]Payload, len(eventIDs))
 	if err := c.events.ReadItems(ctx, positions, func(idx int, data []byte) error {
 		// packfile.ReadItems passes a borrowed data slice valid only for
 		// the duration of fn (see Reader.ReadItems docstring). FetchEvents
@@ -488,14 +487,14 @@ func (c *ColdReader) FetchEvents(ctx context.Context, eventIDs []uint32) ([]even
 //
 // Yielded Payloads are borrowed: ContractEventBytes aliases the
 // ReadRange buffer and is valid only until the next step — clone to retain.
-func (c *ColdReader) FetchRange(ctx context.Context, start, count uint32) iter.Seq2[events.Payload, error] {
-	return func(yield func(events.Payload, error) bool) {
+func (c *ColdReader) FetchRange(ctx context.Context, start, count uint32) iter.Seq2[Payload, error] {
+	return func(yield func(Payload, error) bool) {
 		if c.closed.Load() {
-			yield(events.Payload{}, stores.ErrStoreClosed)
+			yield(Payload{}, stores.ErrStoreClosed)
 			return
 		}
 		if err := ctx.Err(); err != nil {
-			yield(events.Payload{}, err)
+			yield(Payload{}, err)
 			return
 		}
 		if count == 0 {
@@ -503,31 +502,31 @@ func (c *ColdReader) FetchRange(ctx context.Context, start, count uint32) iter.S
 		}
 		m, err := c.waitMeta()
 		if err != nil {
-			yield(events.Payload{}, err)
+			yield(Payload{}, err)
 			return
 		}
 		if err := validateFetchRange(start, count, m.count, c.chunkID); err != nil {
-			yield(events.Payload{}, err)
+			yield(Payload{}, err)
 			return
 		}
 		// ReadRange yields raw item bytes in position order; we
 		// decode each on the fly.
 		for raw, err := range c.events.ReadRange(int(start), int(count)) {
 			if err != nil {
-				yield(events.Payload{}, fmt.Errorf("events: scan chunk %s: %w", c.chunkID, err))
+				yield(Payload{}, fmt.Errorf("events: scan chunk %s: %w", c.chunkID, err))
 				return
 			}
 			if err := ctx.Err(); err != nil {
-				yield(events.Payload{}, err)
+				yield(Payload{}, err)
 				return
 			}
-			var p events.Payload
+			var p Payload
 			// raw is valid only until the next ReadRange step (see
 			// Reader.ReadRange); Unmarshal aliases it into
 			// ContractEventBytes, so the yielded Payload is borrowed (see
 			// the FetchRange doc). A retaining consumer clones.
 			if err := p.Unmarshal(raw); err != nil {
-				yield(events.Payload{}, fmt.Errorf("events: decode event from chunk %s: %w", c.chunkID, err))
+				yield(Payload{}, fmt.Errorf("events: decode event from chunk %s: %w", c.chunkID, err))
 				return
 			}
 			if !yield(p, nil) {
@@ -543,15 +542,15 @@ func (c *ColdReader) FetchRange(ctx context.Context, start, count uint32) iter.S
 // check short-circuits to stores.ErrStoreClosed without spinning up the cached
 // waitMeta + descending into FetchRange (which would also detect
 // the closed state, just one indirection later).
-func (c *ColdReader) All(ctx context.Context) iter.Seq2[events.Payload, error] {
-	return func(yield func(events.Payload, error) bool) {
+func (c *ColdReader) All(ctx context.Context) iter.Seq2[Payload, error] {
+	return func(yield func(Payload, error) bool) {
 		if c.closed.Load() {
-			yield(events.Payload{}, stores.ErrStoreClosed)
+			yield(Payload{}, stores.ErrStoreClosed)
 			return
 		}
 		m, err := c.waitMeta()
 		if err != nil {
-			yield(events.Payload{}, err)
+			yield(Payload{}, err)
 			return
 		}
 		for p, err := range c.FetchRange(ctx, 0, m.count) {

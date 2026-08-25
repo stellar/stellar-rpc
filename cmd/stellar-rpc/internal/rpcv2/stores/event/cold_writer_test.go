@@ -13,16 +13,15 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 )
 
-// makeColdPayload builds a deterministic events.Payload carrying a single-
+// makeColdPayload builds a deterministic Payload carrying a single-
 // topic ContractEvent so writer round-trips can be inspected against
 // the original by symbol + ledger sequence.
 //
 //nolint:unparam // txIdx kept as a param so future tests can vary it without resurrecting the signature
-func makeColdPayload(ledgerSeq, txIdx uint32, symbol string) events.Payload {
+func makeColdPayload(ledgerSeq, txIdx uint32, symbol string) Payload {
 	var cid xdr.ContractId
 	cid[0] = 0xc0
 	cid[1] = 0x1d
@@ -42,7 +41,7 @@ func makeColdPayload(ledgerSeq, txIdx uint32, symbol string) events.Payload {
 	if err != nil {
 		panic(err) // hardcoded fixture; marshal can't fail
 	}
-	return events.Payload{
+	return Payload{
 		TxHash:             xdr.Hash{0xab},
 		LedgerSequence:     ledgerSeq,
 		TxIdx:              txIdx,
@@ -61,7 +60,7 @@ func TestWriter_AppendThenFinishProducesReadablePackfile(t *testing.T) {
 
 	// Stream 3 payloads across 2 ledgers. Empty third ledger has no
 	// Append call but appears in the offsets cache.
-	payloads := []events.Payload{
+	payloads := []Payload{
 		makeColdPayload(2, 1, "alpha"),
 		makeColdPayload(2, 1, "beta"),
 		makeColdPayload(3, 1, "gamma"),
@@ -70,7 +69,7 @@ func TestWriter_AppendThenFinishProducesReadablePackfile(t *testing.T) {
 		require.NoError(t, w.Append(p))
 	}
 
-	offsets := events.NewLedgerOffsets(chunkID.FirstLedger())
+	offsets := NewLedgerOffsets(chunkID.FirstLedger())
 	require.NoError(t, offsets.Append(2, 2))
 	require.NoError(t, offsets.Append(3, 1))
 	require.NoError(t, offsets.Append(4, 0)) // empty ledger
@@ -85,10 +84,10 @@ func TestWriter_AppendThenFinishProducesReadablePackfile(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 3, total)
 
-	got := make([]events.Payload, 0, 3)
+	got := make([]Payload, 0, 3)
 	for data, err := range reader.ReadRange(0, total) {
 		require.NoError(t, err)
-		var p events.Payload
+		var p Payload
 		require.NoError(t, p.Unmarshal(data))
 		got = append(got, p)
 	}
@@ -98,7 +97,7 @@ func TestWriter_AppendThenFinishProducesReadablePackfile(t *testing.T) {
 		assert.Equal(t, payloads[i].ContractEventBytes, p.ContractEventBytes, "item %d event bytes", i)
 	}
 
-	// AppData round-trips the events.LedgerOffsets.
+	// AppData round-trips the LedgerOffsets.
 	appData, err := reader.AppData()
 	require.NoError(t, err)
 	decoded, err := DecodeLedgerOffsets(appData)
@@ -123,7 +122,7 @@ func TestWriter_EmptyChunkStillFinalizes(t *testing.T) {
 	w, err := NewColdWriter(chunkID, dir, ColdWriterOptions{})
 	require.NoError(t, err)
 
-	offsets := events.NewLedgerOffsets(chunkID.FirstLedger())
+	offsets := NewLedgerOffsets(chunkID.FirstLedger())
 	require.NoError(t, w.Finish(offsets))
 
 	reader := packfile.Open(
@@ -147,7 +146,7 @@ func TestWriter_AppendAfterFinishErrors(t *testing.T) {
 	w, err := NewColdWriter(chunkID, t.TempDir(), ColdWriterOptions{})
 	require.NoError(t, err)
 
-	offsets := events.NewLedgerOffsets(chunkID.FirstLedger())
+	offsets := NewLedgerOffsets(chunkID.FirstLedger())
 	require.NoError(t, w.Finish(offsets))
 
 	err = w.Append(makeColdPayload(2, 1, "x"))
@@ -213,7 +212,7 @@ func TestWriter_PreservesEventIDOrder(t *testing.T) {
 			fmt.Sprintf("event-%d", i),
 		)))
 	}
-	offsets := events.NewLedgerOffsets(chunkID.FirstLedger())
+	offsets := NewLedgerOffsets(chunkID.FirstLedger())
 	require.NoError(t, offsets.Append(chunkID.FirstLedger(), uint32(n)))
 	require.NoError(t, w.Finish(offsets))
 
@@ -225,7 +224,7 @@ func TestWriter_PreservesEventIDOrder(t *testing.T) {
 
 	var idx int
 	err = reader.ReadItems(context.Background(), rangeIDs(0, n), func(_ int, data []byte) error {
-		var p events.Payload
+		var p Payload
 		if err := p.Unmarshal(data); err != nil {
 			return err
 		}
@@ -263,7 +262,7 @@ func TestEventsPack_TrailerPinsFormatAndRecordSize(t *testing.T) {
 	w, err := NewColdWriter(chunkID, dir, ColdWriterOptions{})
 	require.NoError(t, err)
 	require.NoError(t, w.Append(makeColdPayload(chunkID.FirstLedger(), 1, "x")))
-	offsets := events.NewLedgerOffsets(chunkID.FirstLedger())
+	offsets := NewLedgerOffsets(chunkID.FirstLedger())
 	require.NoError(t, offsets.Append(chunkID.FirstLedger(), 1))
 	require.NoError(t, w.Finish(offsets))
 

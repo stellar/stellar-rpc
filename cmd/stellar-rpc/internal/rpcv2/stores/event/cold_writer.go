@@ -1,12 +1,12 @@
 package event
 
 // cold_writer.go is the events.pack writer half of the cold-Chunk
-// pipeline. ColdWriter streams a Chunk's events.Payload sequence
+// pipeline. ColdWriter streams a Chunk's Payload sequence
 // into events.pack and embeds the ledger offset array as packfile
 // app data.
 //
 // The index.pack + index.hash half lives in cold_index.go. Shared
-// format constants, the events.LedgerOffsets app-data wire format,
+// format constants, the LedgerOffsets app-data wire format,
 // and the MPHF wrapper live in cold_format.go.
 //
 // ColdWriter is intentionally thin: it owns no closed-state of its
@@ -19,21 +19,20 @@ import (
 	"path/filepath"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 )
 
 // ──────────────────────────────────────────────────────────────────
-// ColdWriter — streams a Chunk's events.Payload sequence into events.pack.
+// ColdWriter — streams a Chunk's Payload sequence into events.pack.
 // ──────────────────────────────────────────────────────────────────
 
-// ColdWriter streams a Chunk's events.Payload sequence into events.pack.
-// events.Payload bytes pass through unchanged — the same canonical wire
+// ColdWriter streams a Chunk's Payload sequence into events.pack.
+// Payload bytes pass through unchanged — the same canonical wire
 // format HotStore stores in events_data. The ledger offset array is
 // serialized as packfile app data so the cold reader can resolve
 // ledger→eventID ranges without a second file.
 //
-// ColdWriter.Finish takes the events.LedgerOffsets externally rather than
+// ColdWriter.Finish takes the LedgerOffsets externally rather than
 // inferring boundaries from the payload stream. This honestly
 // represents the contract: the caller knows ledger boundaries
 // (including any empty ledgers that produce no Append calls) and
@@ -41,7 +40,7 @@ import (
 //
 //   - Freeze: hot.Offsets() already has entries for every ledger
 //     in the Chunk, including empty ones. Hand it to Finish.
-//   - Backfill: maintains a *events.LedgerOffsets incrementally as it
+//   - Backfill: maintains a *LedgerOffsets incrementally as it
 //     processes LCMs. Hand it to Finish.
 //
 // ColdWriter doesn't produce the index files (index.pack +
@@ -112,7 +111,7 @@ func NewColdWriter(chunkID chunk.ID, bucketDir string, opts ColdWriterOptions) (
 // the cold reader reads them back the same way.
 //
 // Returns packfile.ErrWriterClosed if called after Finish or Close.
-func (w *ColdWriter) Append(p events.Payload) error {
+func (w *ColdWriter) Append(p Payload) error {
 	// Marshal into a reusable scratch buffer. AppendItem copies the bytes
 	// into the packfile's record buffer synchronously, so the scratch is
 	// free to reuse on the next Append — no per-event allocation.
@@ -130,7 +129,7 @@ func (w *ColdWriter) Append(p events.Payload) error {
 //
 // Finish must not be called more than once. A second call (or a
 // call after Close) returns packfile.ErrWriterClosed.
-func (w *ColdWriter) Finish(offsets *events.LedgerOffsets) error {
+func (w *ColdWriter) Finish(offsets *LedgerOffsets) error {
 	appData, err := encodeLedgerOffsets(offsets)
 	if err != nil {
 		return fmt.Errorf("events: encode offsets: %w", err)

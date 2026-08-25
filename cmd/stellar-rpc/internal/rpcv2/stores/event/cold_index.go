@@ -5,7 +5,7 @@ package event
 // serialized MPHF) inside a Chunk's cold directory.
 //
 // The events.pack writer half lives in cold_writer.go. Shared format
-// constants, the events.LedgerOffsets app-data wire format, and the
+// constants, the LedgerOffsets app-data wire format, and the
 // MPHF wrapper live in cold_format.go.
 
 import (
@@ -21,7 +21,6 @@ import (
 	"github.com/RoaringBitmap/roaring/v2"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 )
 
@@ -51,7 +50,7 @@ import (
 // catastrophically.
 //
 // Both cold backfill and the live-chunk freeze build a Bitmaps single-threaded by
-// re-deriving terms from raw LCMs (per-event events.TermsForBytes + Bitmaps.AddTo) and
+// re-deriving terms from raw LCMs (per-event TermsForBytes + Bitmaps.AddTo) and
 // hand it directly here.
 //
 // index.hash is the MPHF serialized via buildMPHF.
@@ -60,7 +59,7 @@ import (
 // order. Each record is:
 //
 //	offset  size  field
-//	0       4     fingerprint (first 4 bytes of the events.TermKey hash)
+//	0       4     fingerprint (first 4 bytes of the TermKey hash)
 //	4       N     serialized roaring bitmap (Bitmap.MarshalBinary)
 //
 // The cold reader uses mphf.Lookup(term) → slot to find the record
@@ -83,7 +82,7 @@ import (
 // ctx cancels the MPHF build phase (the expensive part for large
 // chunks); the subsequent index.pack write is a tight in-memory
 // loop that doesn't poll ctx.
-func WriteColdIndex(ctx context.Context, chunkID chunk.ID, bitmaps events.Bitmaps, bucketDir string) (err error) {
+func WriteColdIndex(ctx context.Context, chunkID chunk.ID, bitmaps Bitmaps, bucketDir string) (err error) {
 	indexPackPath := filepath.Join(bucketDir, IndexPackName(chunkID))
 	indexHashPath := filepath.Join(bucketDir, IndexHashName(chunkID))
 

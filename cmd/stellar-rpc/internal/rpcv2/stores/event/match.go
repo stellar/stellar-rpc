@@ -1,6 +1,6 @@
 package event
 
-// query.go is the events-side read surface: Matches turns a
+// match.go is the events-side read surface: Matches turns a
 // {filters, window} spec into a stream of verified matches for one
 // Chunk. It is built on the Reader interface, so it works against
 // HotStore and ColdReader without branching. Filter semantics are on
@@ -23,8 +23,6 @@ import (
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
-
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 )
 
 // Filter is one item in the union of an events query. Within a
@@ -33,7 +31,7 @@ import (
 // zero value are wildcards.
 //
 // Topics[i] constrains topic position i. Positions beyond
-// protocol.MaxTopicCount are not indexed (see events.TermsForBytes).
+// protocol.MaxTopicCount are not indexed (see TermsForBytes).
 type Filter struct {
 	ContractID []byte
 	Topics     [protocol.MaxTopicCount][]byte
@@ -75,14 +73,14 @@ func (f TopicCountFilter) matches(n int) bool {
 // count ValidateFilters admits has a bucket of its own, and an "at
 // least" union is closed by the overflow bucket, so the union never
 // holds an event f does not match.
-func (f TopicCountFilter) termKeys() []events.TermKey {
+func (f TopicCountFilter) termKeys() []TermKey {
 	if f.isWildcard() {
 		return nil
 	}
 	if f.Exact {
-		return []events.TermKey{events.TopicCountTermKey(f.Count)}
+		return []TermKey{TopicCountTermKey(f.Count)}
 	}
-	return events.TopicCountTermKeysAtLeast(f.Count)
+	return TopicCountTermKeysAtLeast(f.Count)
 }
 
 // valueTermKeys returns one term per constrained value field
@@ -91,19 +89,19 @@ func (f TopicCountFilter) termKeys() []events.TermKey {
 // over which values a filter names. The topic-count buckets are not
 // value terms; termGroups adds them separately and the budget does
 // not count them.
-func (f *Filter) valueTermKeys() []events.TermKey {
-	var keys []events.TermKey
+func (f *Filter) valueTermKeys() []TermKey {
+	var keys []TermKey
 	if len(f.ContractID) > 0 {
-		keys = append(keys, events.ComputeTermKey(f.ContractID, events.FieldContractID))
+		keys = append(keys, ComputeTermKey(f.ContractID, FieldContractID))
 	}
 	if f.EventType != nil {
-		keys = append(keys, events.EventTypeTermKey(*f.EventType))
+		keys = append(keys, EventTypeTermKey(*f.EventType))
 	}
 	for tIdx, t := range f.Topics {
 		if len(t) == 0 {
 			continue
 		}
-		keys = append(keys, events.ComputeTermKey(t, topicFieldByPosition[tIdx]))
+		keys = append(keys, ComputeTermKey(t, topicField(tIdx)))
 	}
 	return keys
 }
@@ -111,10 +109,10 @@ func (f *Filter) valueTermKeys() []events.TermKey {
 // termGroups returns the indexed terms this filter constrains, grouped
 // by field: the bitmaps within a group are OR-ed and the groups are
 // AND-ed. Only the topic-count group ever holds more than one term.
-func (f *Filter) termGroups() [][]events.TermKey {
-	var groups [][]events.TermKey
+func (f *Filter) termGroups() [][]TermKey {
+	var groups [][]TermKey
 	for _, key := range f.valueTermKeys() {
-		groups = append(groups, []events.TermKey{key})
+		groups = append(groups, []TermKey{key})
 	}
 	// A constrained topic position already implies an "at least" count at
 	// or below it, since a topic term is only indexed for events carrying
@@ -186,7 +184,7 @@ func (r IDRange) check() error {
 // [firstID, lastID) covering those ledgers' events. Both bounds
 // must lie inside ofs's [StartLedger, EndLedger) range; out-of-range
 // bounds surface a wrapped error from LedgerOffsets.EventIDs.
-func IDRangeForLedgers(ofs *events.LedgerOffsets, startLedger, endLedger uint32) (IDRange, error) {
+func IDRangeForLedgers(ofs *LedgerOffsets, startLedger, endLedger uint32) (IDRange, error) {
 	firstID, _, err := ofs.EventIDs(startLedger)
 	if err != nil {
 		return IDRange{}, fmt.Errorf("events: range start ledger %d: %w", startLedger, err)
@@ -211,20 +209,9 @@ var matchBatchSize = 512
 // stopped; it cannot be recovered from the payload, which carries
 // chain data only.
 type Match struct {
-	events.Payload
+	Payload
 
 	Ordinal uint32
-}
-
-// topicFieldByPosition maps topic position 0..MaxTopicCount-1 to its
-// indexed events.Field. Mirror of the unexported events.topicField.
-//
-//nolint:gochecknoglobals // immutable lookup table; can't use const for array
-var topicFieldByPosition = [protocol.MaxTopicCount]events.Field{
-	events.FieldTopic0,
-	events.FieldTopic1,
-	events.FieldTopic2,
-	events.FieldTopic3,
 }
 
 // termPlan is a filter's termGroups resolved to slots in the batched
@@ -349,7 +336,7 @@ func unionForFilters(
 		return nil, true, nil
 	}
 	filterPlans := make([]termPlan, len(filters))
-	var uniqueKeys []events.TermKey
+	var uniqueKeys []TermKey
 
 	for i := range filters {
 		groups := filters[i].termGroups()
@@ -566,7 +553,7 @@ func ValidateFilters(filters []Filter) error {
 // lookups agree on what a value term is: TermKey over the store's
 // canonical bytes.
 func CountDistinctTerms(filters []Filter) int {
-	unique := make(map[events.TermKey]struct{})
+	unique := make(map[TermKey]struct{})
 	for i := range filters {
 		for _, key := range filters[i].valueTermKeys() {
 			unique[key] = struct{}{}
@@ -601,7 +588,7 @@ func unionSlots(bitmaps []*roaring.Bitmap, slots []int) *roaring.Bitmap {
 
 // indexOfOrAddTerm returns the index of key inside *keys, appending
 // it first if absent.
-func indexOfOrAddTerm(keys *[]events.TermKey, key events.TermKey) int {
+func indexOfOrAddTerm(keys *[]TermKey, key TermKey) int {
 	if i := slices.Index(*keys, key); i >= 0 {
 		return i
 	}
@@ -684,7 +671,7 @@ func streamRange(
 // positionally aligned with payloads (both come from the same
 // candidate batch); survivors carry their ordinal out as
 // Match.Ordinal.
-func postFilter(payloads []events.Payload, ids []uint32, filters []Filter) ([]Match, error) {
+func postFilter(payloads []Payload, ids []uint32, filters []Filter) ([]Match, error) {
 	out := make([]Match, 0, len(payloads))
 	plan := planFilters(filters)
 	for i := range payloads {
