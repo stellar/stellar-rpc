@@ -91,7 +91,7 @@ func (cfg Config) WithLifecycleDefaults() Config {
 // errgroup and forcing a whole-daemon restart (which relaunches captive core) for
 // a retryable file operation. It checks ctx between ops (and the backoff aborts on
 // ctx cancellation) so a shutdown mid-scan stops promptly; the ctx error surfaces
-// up through Loop for supervise to classify as clean.
+// up through Loop, and the caller classifies it as clean via ctx.Err().
 //
 // It returns how many ops ran to success (all of them on a nil error) so the caller
 // can meter the work actually done even when a later op fails — the completed ops
@@ -131,8 +131,8 @@ func runOps(ctx context.Context, cfg Config, ops []func() error) (int, error) {
 // stage 1. A canceled ctx still aborts everything, including the grace wait.
 //
 // It returns the joined stage errors WITHOUT classifying them: Loop propagates
-// them to run's errgroup and supervise decides clean-vs-restart (a canceled ctx
-// surfaces as a ctx error supervise treats as a clean shutdown).
+// them to run's errgroup, and the daemon classifies via ctx.Err() (a canceled
+// ctx surfaces as a ctx error, read as a clean shutdown).
 func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChunk chunk.ID) error {
 	metrics := observability.MetricsOrNop(cfg.Metrics)
 	logger := cfg.Logger
@@ -150,7 +150,7 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	// Stage 1 — plan-and-execute (freeze + index rebuild) over [floor, lastChunk], via
 	// the same entry point backfill uses (resolve → executePlan → Freeze metric,
 	// recorded internally). A canceled ctx makes RunBackfill return ctx.Err(), which
-	// propagates up for supervise to treat as a clean shutdown. lastChunk is always
+	// propagates up and classifies as a clean shutdown. lastChunk is always
 	// a completed chunk (boundary fence + post-backfill seed), so the only guard
 	// needed is the empty-range check (floor above lastChunk when retention outran
 	// production). An empty range emits no Freeze sample — the Discard/Prune samples
@@ -271,10 +271,11 @@ func (s *BoundarySignal) Publish() {
 // boundary that woke it, which only pulls the next tick's work forward. It
 // selects on ctx.Done() too, so it never blocks past shutdown.
 //
-// It returns the first tick error to its caller (run() joins it with ingestion in
-// an errgroup, so supervise decides clean-vs-restart). A cancellation observed at
-// the select returns nil; a cancellation mid-tick returns the tick's wrapped ctx
-// error — both are clean, since supervise keys off the daemon ctx, not this return.
+// It returns the first tick error to its caller (run() joins it with ingestion
+// in an errgroup; a failure exits the process and the orchestrator restarts). A
+// cancellation observed at the select returns nil; a cancellation mid-tick
+// returns the tick's wrapped ctx error — both are clean, since the daemon keys
+// off its own ctx, not this return.
 func Loop(ctx context.Context, cfg Config, cat *catalog.Catalog, sig *BoundarySignal) error {
 	for {
 		select {

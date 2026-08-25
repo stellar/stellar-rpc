@@ -3,6 +3,7 @@ package rpcv2
 import (
 	"context"
 	"errors"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -104,7 +105,8 @@ func startTestConfig(
 		Exec:       exec,
 		Retention:  rpcv2test.RetentionFor(t, cat, 0),
 		Core:       core,
-		ServeReads: func(context.Context, *query.Registry) (func(), <-chan error, error) { return func() {}, nil, nil },
+		ServeReads: nopServeReads,
+		Endpoint:   "127.0.0.1:0",
 	}
 	if recordPlan != nil {
 		cfg.runBackfill = func(_ context.Context, _ backfill.ExecConfig, lo, hi chunk.ID) error {
@@ -194,8 +196,8 @@ func TestSampleTip_CtxCancelAbortsWait(t *testing.T) {
 // backfillToTip — backfill loop edge cases.
 // ---------------------------------------------------------------------------
 
-// First start (genesis, no local history) with no usable tip errors out
-// (restartable — no sentinel; the supervisor retries). Sub-genesis reads as a
+// First start (genesis, no local history) with no usable tip errors out (no
+// sentinel; the process exits and the orchestrator retries). Sub-genesis reads as a
 // permanent "not ready", so the sample fails fast instead of burning the
 // production retry backoff backfillToTip now applies.
 func TestBackfill_FirstStartTipAbsentErrors(t *testing.T) {
@@ -344,7 +346,7 @@ func TestBackfill_LongDowntimeRePass(t *testing.T) {
 
 // Restart with no usable tip errors out even when local progress exists: the
 // synthetic tip:=lastCommitted degraded mode is gone. No backfill pass runs; the
-// supervisor restarts and re-samples. Sub-genesis reads as a permanent "not
+// restarted process re-samples. Sub-genesis reads as a permanent "not
 // ready" — one poll, no retry sleeps — and resolves to the same "tip
 // unavailable" outcome as an erroring tip (whose retry exhaustion
 // TestSampleTip_ExhaustedRetriesErrors covers at a fast interval).
@@ -451,56 +453,60 @@ func TestRun_IngestionCleanEndSurfacesErrorNotHang(t *testing.T) {
 	select {
 	case err := <-errCh:
 		require.Error(t, err, "a graceful stream end surfaces as an error, not a nil clean shutdown")
-		require.NotErrorIs(t, err, context.Canceled, "a graceful end is restartable, not a clean shutdown")
+		require.NotErrorIs(t, err, context.Canceled, "a graceful end is a failure, not a clean shutdown")
 	case <-time.After(10 * time.Second):
 		t.Fatal("run did not return on a graceful stream end — g.Wait hung on a silent nil")
 	}
 }
 
-func TestRun_ReadServerDeathFailsTheAttempt(t *testing.T) {
+func TestRun_ReadServerDeathFailsRun(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}} // young ⇒ no backfill
 	cfg := startTestConfig(t, cat, tip, &fakeCore{}, nil)
 
-	died := make(chan error, 1)
-	cfg.ServeReads = func(context.Context, *query.Registry) (func(), <-chan error, error) {
-		return func() {}, died, nil
+	// ServeReads returning before its ctx cancels is the accept loop dying;
+	// run must surface it (crash-only: the process exits, k8s restarts).
+	cfg.ServeReads = func(context.Context, *query.Registry, net.Listener) error {
+		return errors.New("accept loop broke")
 	}
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- run(context.Background(), cfg) }()
-	died <- errors.New("accept loop broke")
 
 	select {
 	case err := <-errCh:
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "read server died")
-		require.NotErrorIs(t, err, context.Canceled, "a dead read server is restartable, not a clean shutdown")
+		require.Contains(t, err.Error(), "accept loop broke")
+		require.NotErrorIs(t, err, context.Canceled, "a dead read server is a failure, not a clean shutdown")
 	case <-time.After(10 * time.Second):
 		t.Fatal("run did not fail after the read server died")
 	}
 }
 
-// A ServeReads error is surfaced wrapped as a restartable failure (NOT clean).
-// run() opens the resume hot DB and starts core BEFORE serving; a serve error
-// after those returns via run()'s defer, which closes the DB (the loop never took
-// ownership), so a restart can reopen it — asserted by the reopen below.
-func TestRun_ServeReadsErrorSurfaces(t *testing.T) {
+// A bind failure (the endpoint already taken) is surfaced wrapped as a run
+// failure (NOT clean). run() opens the resume hot DB and starts core BEFORE
+// binding; the bind error returns via run()'s defer, which closes the DB (the
+// loop never took ownership), so a restart can reopen it — asserted by the
+// reopen below.
+func TestRun_BindFailureSurfaces(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 	core := &fakeCore{stream: &fakeCoreStream{frames: map[uint32][]byte{}, blockOnCtx: true}}
 	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}}
 	cfg := startTestConfig(t, cat, tip, core, nil)
-	cfg.ServeReads = func(context.Context, *query.Registry) (func(), <-chan error, error) {
-		return nil, nil, errors.New("rpc bind failed")
-	}
+	// Occupy a port so run()'s own bind fails with a real address-in-use.
+	var lc net.ListenConfig
+	taken, lerr := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	require.NoError(t, lerr)
+	defer func() { _ = taken.Close() }()
+	cfg.Endpoint = taken.Addr().String()
 
 	err := run(context.Background(), cfg)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "serve reads")
-	require.NotErrorIs(t, err, context.Canceled, "a ServeReads error is restartable, not a clean shutdown")
-	require.Equal(t, int32(1), core.openedCount.Load(), "core was started before serving")
+	require.Contains(t, err.Error(), "read listener")
+	require.NotErrorIs(t, err, context.Canceled, "a bind failure is a failure, not a clean shutdown")
+	require.Equal(t, int32(1), core.openedCount.Load(), "core was started before binding")
 
 	// run() opened the resume hot DB before serving and closed it on the error path
 	// (the loop never took ownership): reopening it succeeds (LOCK released).
@@ -511,9 +517,10 @@ func TestRun_ServeReadsErrorSurfaces(t *testing.T) {
 
 // The resume hot DB and core are opened BEFORE reads are served (the design's
 // fail-fast order): by the time ServeReads runs, the resume chunk's hot key is
-// already "ready" and core has started — so a broken hot tier / core fails startup
-// instead of serving behind a crash-looping loop. Asserted from inside ServeReads,
-// which then errors to avoid entering the blocking loop.
+// already "ready" and core has started — so a broken hot tier / core fails
+// startup instead of serving behind a crash-looping loop. Asserted from inside
+// the serve fake (whose invocation follows run()'s own bind), which then
+// errors to end the run; the blocking stream keeps the observed state stable.
 func TestRun_OpensHotDBAndCoreBeforeServe(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
@@ -524,22 +531,22 @@ func TestRun_OpensHotDBAndCoreBeforeServe(t *testing.T) {
 
 	var stateAtServe geometry.HotState
 	var coreAtServe int32
-	cfg.ServeReads = func(context.Context, *query.Registry) (func(), <-chan error, error) {
+	cfg.ServeReads = func(context.Context, *query.Registry, net.Listener) error {
 		st, herr := cat.HotState(resumeChunk)
 		require.NoError(t, herr)
 		stateAtServe = st
 		coreAtServe = core.openedCount.Load()
-		return nil, nil, errors.New("stop before the blocking loop")
+		return errors.New("stop the run after asserting")
 	}
 
 	err := run(context.Background(), cfg)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "serve reads")
+	require.Contains(t, err.Error(), "stop the run after asserting")
 	assert.Equal(t, geometry.HotReady, stateAtServe, "resume hot DB is open+ready before serve")
 	assert.Equal(t, int32(1), coreAtServe, "core is opened before serve")
 }
 
-// run errors on a first start with an unavailable tip (restartable, no sentinel);
+// run errors on a first start with an unavailable tip (no sentinel);
 // reads are never served and ingestion never starts. Sub-genesis ⇒ one
 // permanent-failure poll, no retry sleeps.
 func TestRun_FirstStartNoTipErrors(t *testing.T) {

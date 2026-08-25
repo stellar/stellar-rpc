@@ -8,7 +8,7 @@ package rpcv2
 //     - runDaemonWith (the true daemon entrypoint): TOML load + form-validate,
 //       root prep, catalog open (its own KV store, holding the single-process
 //       lock), the stateful validateConfig gate (pins the floor), and the
-//       supervised run loop.
+//       daemon body.
 //     - run → backfillToTip → openHotDBForChunk → runIngestionLoop (the real
 //       atomic per-ledger WriteBatch across all CFs of the real per-chunk
 //       hotchunk RocksDB), the real boundary handoff, the real boundary signal.
@@ -220,7 +220,6 @@ func runDaemonInBackground(
 		ServeReads:           countingServeReads(served),
 		Logger:               silentLogger(),
 		Metrics:              metrics,
-		RestartBackoff:       10 * time.Millisecond,
 		chunksPerTxhashIndex: 1,
 		lifecycleGrace:       time.Millisecond, // don't park the run on the 5m default
 	}
@@ -354,7 +353,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 		"first start resumes the ingestion stream at genesis (last committed ledger + 1)")
 
 	// =====================================================================
-	// STEP 2 — clean shutdown. The supervised loop returns nil on ctx cancel.
+	// STEP 2 — clean shutdown. runDaemonWith returns nil on ctx cancel.
 	// =====================================================================
 	waitClean(t, cancel, done)
 

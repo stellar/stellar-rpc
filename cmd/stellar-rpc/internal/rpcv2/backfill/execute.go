@@ -240,8 +240,9 @@ func (cfg ExecConfig) retryBackOff() backoff.BackOff {
 
 // RunBackfill resolves the missing work, then executePlans the diff. No upfront
 // producibility gate: an unproducible chunk surfaces as a backfillSource error when
-// the executor reaches it — retried under withRetries, then failing the pass so
-// supervise restarts (its bounded coverage wait handles a lagging-but-advancing backend).
+// the executor reaches it — retried under withRetries, then failing the pass
+// (the process exits and startup re-derives the remaining work on the next run;
+// the bounded coverage wait handles a lagging-but-advancing backend).
 func RunBackfill(ctx context.Context, cfg ExecConfig, rangeStart, rangeEnd chunk.ID) error {
 	cfg = cfg.WithDefaults()
 	if err := cfg.validate(); err != nil {

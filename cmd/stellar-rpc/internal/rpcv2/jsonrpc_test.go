@@ -8,12 +8,10 @@ import (
 	"time"
 
 	"github.com/creachadair/jrpc2"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
@@ -51,7 +49,6 @@ func testHandlerParams(t *testing.T, r *query.Registry) handlerParams {
 	return handlerParams{
 		daemon:            host.MakeNoOpDaemon(),
 		logger:            silentLogger(),
-		handlerMetrics:    jsonrpc.NewHandlerMetrics("test", prometheus.NewRegistry()),
 		metrics:           observability.NopMetrics{},
 		registry:          r,
 		ledgerReader:      adapters.NewLedgerReader(),

@@ -6,12 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
@@ -27,47 +25,39 @@ func freeEndpoint(t *testing.T) string {
 	return addr
 }
 
-func TestServeReads_ServesAndRebindsAcrossAttempts(t *testing.T) {
+func TestServeReads_ServesAndDrainsOnCancel(t *testing.T) {
 	r := seedServingRegistry(t)
 	cfg := defaultsConfig(t)
 	cfg.Service.Endpoint = freeEndpoint(t)
 
-	serve := newServeReads(readServerDeps{
-		cfg: cfg,
-		params: handlerParams{
-			daemon:            host.MakeNoOpDaemon(),
-			logger:            silentLogger(),
-			handlerMetrics:    jsonrpc.NewHandlerMetrics("test", prometheus.NewRegistry()),
-			metrics:           observability.NopMetrics{},
-			feeWindows:        feewindow.NewFeeWindows(10, 10),
-			networkPassphrase: "test passphrase",
-			retentionWindow:   1,
-		},
+	serve := newServeReads(cfg, handlerParams{
+		daemon:            host.MakeNoOpDaemon(),
+		logger:            silentLogger(),
+		metrics:           observability.NopMetrics{},
+		feeWindows:        feewindow.NewFeeWindows(10, 10),
+		networkPassphrase: "test passphrase",
+		retentionWindow:   1,
 	})
 
-	url := "http://" + cfg.Service.Endpoint
-
-	// First attempt serves; stop releases the port.
-	stop, died, err := serve(context.Background(), r)
+	var lc net.ListenConfig
+	listener, err := lc.Listen(context.Background(), "tcp", cfg.Service.Endpoint)
 	require.NoError(t, err)
+	url := "http://" + listener.Addr().String()
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serve(runCtx, r, listener) }()
+
 	out := rpcv2test.PostRPC(t, url, "getVersionInfo", `{}`)
 	assert.Nil(t, out.Error)
-	stop()
 
-	// A graceful stop must not read as the server dying — a false death here
-	// would make every teardown restart the attempt it is tearing down.
+	// Cancel is a graceful drain: the runner returns its ctx error, never a
+	// death — a false death here would crash a process that is shutting down.
+	cancel()
 	select {
-	case serr := <-died:
-		t.Fatalf("graceful stop reported a server death: %v", serr)
-	case <-time.After(100 * time.Millisecond):
+	case rerr := <-done:
+		require.ErrorIs(t, rerr, context.Canceled, "a graceful shutdown is not a server death")
+	case <-time.After(5 * time.Second):
+		t.Fatal("runner did not return after cancel")
 	}
-
-	// Second attempt on the same port: rebinding must succeed, and rebuilding
-	// the method table over the shared per-process metrics must not panic on a
-	// duplicate collector registration.
-	stop, _, err = serve(context.Background(), r)
-	require.NoError(t, err)
-	defer stop()
-	out = rpcv2test.PostRPC(t, url, "getVersionInfo", `{}`)
-	assert.Nil(t, out.Error)
 }

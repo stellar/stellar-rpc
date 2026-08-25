@@ -31,9 +31,9 @@ import (
 // the durable hot:chunk state:
 //   - "ready": open it must-exist (create-if-missing OFF). A missing or gutted DB
 //     FAILS the open — never auto-heal into a fresh empty DB (which would silently
-//     regress the last-committed ledger). The open failure is an ordinary restartable error:
-//     a transient self-heals on the next attempt, genuine loss becomes a
-//     supervised crash-loop with the wrapped context.
+//     regress the last-committed ledger). The open failure fails the run: a
+//     transient self-heals on the orchestrator's restart, genuine loss becomes
+//     a crash-loop with the wrapped context.
 //   - "transient" or absent: wipe any leftover dir and create fresh
 //     (transient -> fsync dir+parent -> ready), so a crash mid-create can't
 //     fabricate a "ready but DB gone" open failure above.
@@ -148,12 +148,12 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 	// On a normal exit it is the live chunk; completed chunks are the sink's to
 	// close. One exception: when openHotDBForChunk fails at a boundary, hotDB
 	// still points at the just-completed, registry-published chunk, so the
-	// defer closes a handle the registry also holds while reads are still live.
-	// Until the restart's stopReads runs moments later, reads hitting that
-	// chunk fail as store-closed. This is safe — Close blocks, draining any
-	// in-flight freeze read, and is idempotent; the restart rebuilds the
-	// registry — but briefly visible, not a no-op. No writer races the close:
-	// the loop has stopped on every exit path.
+	// defer closes a handle the registry also holds while the read server is
+	// still draining; reads hitting that chunk in the drain window fail as
+	// store-closed. This is safe — Close blocks, draining any in-flight freeze
+	// read, and is idempotent; the process exits right after and the next run
+	// rebuilds the registry — but briefly visible, not a no-op. No writer
+	// races the close: the loop has stopped on every exit path.
 	hotDB := cfg.HotDB
 	defer func() {
 		if hotDB != nil {
@@ -225,8 +225,8 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 	// The unbounded production stream ends only on ctx cancellation or a source
 	// error, both surfaced as the stream's error element above. Falling through here
 	// means the source stopped WITHOUT an error while the daemon ctx is still live —
-	// abnormal; surface a restartable error. (run()'s guard owns the clean-vs-restart
-	// classification.)
+	// abnormal; surface an error and fail the run (runBody owns the
+	// clean-vs-crash classification).
 	return errStreamEnded
 }
 
@@ -257,7 +257,7 @@ type BoundedIngestConfig struct {
 // opens the resume chunk's hot DB through openHotDBForChunk and runs
 // runIngestionLoop until the stream ends. A bounded stream ending is the
 // expected termination (errStreamEnded), so unlike the daemon's unbounded run
-// it is remapped to a nil error rather than surfaced as a restartable failure.
+// it is remapped to a nil error rather than surfaced as a run failure.
 func RunBoundedIngestionLoop(ctx context.Context, cfg BoundedIngestConfig) error {
 	hotDB, err := openHotDBForChunk(cfg.Catalog, chunk.IDFromLedger(cfg.Resume), cfg.Logger)
 	if err != nil {
