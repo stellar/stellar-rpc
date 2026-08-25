@@ -34,13 +34,13 @@ package event
 // identity gates and the composition gate (ingest/freeze_test.go).
 
 import (
-	"slices"
 	"context"
 	"encoding/binary"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"

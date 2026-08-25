@@ -37,7 +37,8 @@ func writeFixtureBin(t *testing.T, dir string, c chunk.ID, n int) {
 		entries[i].Seq = c.FirstLedger() + uint32(state%uint64(chunk.LedgersPerChunk))
 	}
 	slices.SortFunc(entries, func(a, b txhash.ColdEntry) int { return bytes.Compare(a.Key[:], b.Key[:]) })
-	require.NoError(t, txhash.WriteColdBin(filepath.Join(dir, fmt.Sprintf("%08d.bin", uint32(c))), benchTestSecret, entries))
+	require.NoError(t,
+		txhash.WriteColdBin(filepath.Join(dir, fmt.Sprintf("%08d.bin", uint32(c))), benchTestSecret, entries))
 }
 
 // TestRunTxindex: a three-chunk window builds through the production

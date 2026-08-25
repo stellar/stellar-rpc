@@ -28,7 +28,7 @@ import (
 // this package) turns these .bin files into the queryable cold MPHF index.
 type txhashCold struct {
 	binPath string
-	secret [stores.SecretLen]byte
+	secret  [stores.SecretLen]byte
 	entries []txhash.ColdEntry
 	metrics coldMetrics
 }

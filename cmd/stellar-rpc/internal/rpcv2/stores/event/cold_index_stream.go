@@ -30,7 +30,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event/runspill"
 	"hash/crc32"
 	"io"
 	"io/fs"
@@ -42,6 +41,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event/runspill"
 )
 
 // inlineBodyMax is the copy/reference boundary for buffered records: bodies

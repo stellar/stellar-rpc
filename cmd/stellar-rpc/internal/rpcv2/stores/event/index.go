@@ -110,15 +110,6 @@ func TopicCountTermKeysAtLeast(n int) []TermKey {
 	return keys
 }
 
-// maxTermsPerEvent is what TermsForBytes emits for an event carrying
-// the most topics a filter can name: type, topic count, contract ID,
-// and one term per topic position.
-const maxTermsPerEvent = 3 + protocol.MaxTopicCount
-
-// TermsForBytes returns the term keys for a marshaled ContractEvent,
-// navigating the raw XDR via xdr.ContractEventView instead of a full
-// UnmarshalBinary: its type, its topic count, its contract ID when it
-// has one, and its topics 0..MaxTopicCount-1.
 // MaxTermsPerEvent is the most term keys one event can contribute to the
 // index: its type, its topic count, its contract ID, and topics
 // 0..protocol.MaxTopicCount-1 — the protocol bound on queryable topic
@@ -232,9 +223,9 @@ func appendTopicTerms(
 		return nil, fmt.Errorf("events: view Body.V0.Topics raw: %w", err)
 	}
 	if lanes != nil {
-		lanes.topicCount = topicCountLane(int(count))
+		lanes.topicCount = topicCountLane(count)
 	} else {
-		dst = append(dst, TopicCountTermKey(int(count)))
+		dst = append(dst, TopicCountTermKey(count))
 	}
 	off := 4 // the vec's count header; raw is trimmed to the vec's exact extent
 	for i := range min(count, protocol.MaxTopicCount) {
@@ -253,7 +244,7 @@ func appendTopicTerms(
 // XDR via xdr.ContractEventView instead of a full UnmarshalBinary.
 func TermsForBytes(eventBytes []byte) ([]TermKey, error) {
 	ev := xdr.ContractEventView(eventBytes)
-	keys := make([]TermKey, 0, maxTermsPerEvent)
+	keys := make([]TermKey, 0, MaxTermsPerEvent)
 
 	typeView, err := ev.Type()
 	if err != nil {

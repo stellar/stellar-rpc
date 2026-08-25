@@ -27,11 +27,11 @@ package txhash
 
 import (
 	"bytes"
-	"slices"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
