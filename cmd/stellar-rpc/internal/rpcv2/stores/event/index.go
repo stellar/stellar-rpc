@@ -1,4 +1,4 @@
-package events
+package event
 
 import (
 	"encoding/binary"
@@ -56,6 +56,14 @@ func ComputeTermKey(value []byte, field Field) TermKey {
 // EventTypeTermKey returns the term key for eventType. Every event
 // carries one, so a query for a rare type resolves through the index
 // instead of scanning a chunk to find the few events that have it.
+//
+// The name stutters as event.EventTypeTermKey. It stays that way because
+// every TermKey constructor here is named after the Field it hashes
+// (FieldEventType here, FieldTopicCount -> TopicCountTermKey), and
+// trimming to TypeTermKey drops the domain term: the value is an
+// xdr.ContractEventType, called eventType on the wire.
+//
+//nolint:revive // named after FieldEventType; see the note above
 func EventTypeTermKey(eventType xdr.ContractEventType) TermKey {
 	var value [4]byte
 	binary.BigEndian.PutUint32(value[:], uint32(eventType)) //nolint:gosec // enum keeps its own XDR width

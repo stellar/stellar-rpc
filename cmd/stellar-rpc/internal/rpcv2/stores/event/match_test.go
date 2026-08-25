@@ -15,7 +15,6 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 )
 
 // Query and QueryOptions are the engine's historical one-shot surface
@@ -30,8 +29,8 @@ type QueryOptions struct {
 	Range      IDRange
 }
 
-func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) ([]events.Payload, error) {
-	var out []events.Payload
+func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) ([]Payload, error) {
+	var out []Payload
 	for m, err := range Matches(ctx, r, filters, opts.Range, opts.Descending, 0) {
 		if err != nil {
 			return nil, err
@@ -55,7 +54,7 @@ type countingReader struct {
 	totalKeys       int
 }
 
-func (c *countingReader) LookupKeys(ctx context.Context, keys []events.TermKey) ([]*roaring.Bitmap, error) {
+func (c *countingReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.Bitmap, error) {
 	c.lookupKeysCalls++
 	c.totalKeys += len(keys)
 	return c.Reader.LookupKeys(ctx, keys)
@@ -86,7 +85,7 @@ type queryFixture struct {
 // payloadFor builds a Payload carrying the marshaled ContractEvent XDR
 // in ContractEventBytes — the only shape this branch's Payload supports.
 // dataSym labels the event so tests can match against the layout above.
-func payloadFor(t *testing.T, cid xdr.ContractId, dataSym string, topics ...xdr.ScVal) events.Payload {
+func payloadFor(t *testing.T, cid xdr.ContractId, dataSym string, topics ...xdr.ScVal) Payload {
 	t.Helper()
 	return typedPayloadFor(t, cid, xdr.ContractEventTypeContract, dataSym, topics...)
 }
@@ -96,7 +95,7 @@ func payloadFor(t *testing.T, cid xdr.ContractId, dataSym string, topics ...xdr.
 func typedPayloadFor(
 	t *testing.T, cid xdr.ContractId, eventType xdr.ContractEventType,
 	dataSym string, topics ...xdr.ScVal,
-) events.Payload {
+) Payload {
 	t.Helper()
 	sym := xdr.ScSymbol(dataSym)
 	cidCopy := cid
@@ -113,7 +112,7 @@ func typedPayloadFor(
 	}
 	raw, err := ev.MarshalBinary()
 	require.NoError(t, err)
-	return events.Payload{
+	return Payload{
 		TxHash:             xdr.Hash{0xde, 0xad},
 		ContractEventBytes: raw,
 	}
@@ -141,7 +140,7 @@ func newQueryFixture(t *testing.T) *queryFixture {
 	require.NoError(t, err)
 
 	first := chunkID.FirstLedger()
-	require.NoError(t, ingestLedgerEvents(fx.store, first, []events.Payload{
+	require.NoError(t, ingestLedgerEvents(fx.store, first, []Payload{
 		payloadFor(t, fx.contractA, evtAAB, fx.t0a, fx.t0b),
 		payloadFor(t, fx.contractA, "evt-a-ac", fx.t0a, fx.t0c),
 		payloadFor(t, fx.contractB, "evt-b-ab", fx.t0a, fx.t0b),
@@ -153,7 +152,7 @@ func newQueryFixture(t *testing.T) *queryFixture {
 
 // dataSyms extracts each payload's Data symbol as a string so test
 // assertions can match against the fixture's labels above.
-func dataSyms(t *testing.T, payloads []events.Payload) []string {
+func dataSyms(t *testing.T, payloads []Payload) []string {
 	t.Helper()
 	out := make([]string, len(payloads))
 	for i, p := range payloads {
@@ -295,7 +294,7 @@ func TestQuery_DuplicateTermsAcrossFiltersDedupedInLookup(t *testing.T) {
 func TestQuery_DoesNotMutateMirrorBitmaps(t *testing.T) {
 	fx := newQueryFixture(t)
 	// Snapshot the mirror's bitmap for topic0=alpha before any query.
-	key := events.ComputeTermKey(fx.t0aRaw, events.FieldTopic0)
+	key := ComputeTermKey(fx.t0aRaw, FieldTopic0)
 	before := lookupOne(t, fx.store, key)
 	beforeCard := before.GetCardinality()
 
@@ -381,7 +380,7 @@ func TestQuery_ManyFiltersAtCallerCap(t *testing.T) {
 	// 15 unique contracts; one filter per contract.
 	first := chunkID.FirstLedger()
 	const n = 15
-	payloads := make([]events.Payload, n)
+	payloads := make([]Payload, n)
 	contracts := make([]xdr.ContractId, n)
 	for i := range n {
 		contracts[i][0] = byte(i + 1)
@@ -410,7 +409,7 @@ func newMultiLedgerQueryFixture(t *testing.T) *queryFixture {
 	t.Helper()
 	fx := newQueryFixture(t)
 	first := chunk.ID(0).FirstLedger()
-	require.NoError(t, ingestLedgerEvents(fx.store, first+1, []events.Payload{
+	require.NoError(t, ingestLedgerEvents(fx.store, first+1, []Payload{
 		payloadFor(t, fx.contractA, evtExtra0, fx.t0a),
 		payloadFor(t, fx.contractA, "evt-extra-1", fx.t0a),
 	}))
@@ -571,7 +570,7 @@ func TestQuery_MixedSuccessFilterList(t *testing.T) {
 	require.NoError(t, err)
 	// Sanity check: this term really isn't in the index. LookupKeys
 	// (which Query uses) signals the miss with a nil slot.
-	missingKey := events.ComputeTermKey(missingRaw, events.FieldTopic0)
+	missingKey := ComputeTermKey(missingRaw, FieldTopic0)
 	require.Nil(t, lookupOne(t, fx.store, missingKey),
 		"fixture sanity: 'nonexistent' must not be indexed")
 
@@ -694,7 +693,7 @@ func TestQuery_EmptyLeadingLedgerRangeStaysEmpty(t *testing.T) {
 	//   [first]   → [0, 0)   (empty)
 	//   [first+1] → [0, 5)   (5 events)
 	require.NoError(t, ingestLedgerEvents(h.store, first, nil))
-	require.NoError(t, ingestLedgerEvents(h.store, first+1, []events.Payload{
+	require.NoError(t, ingestLedgerEvents(h.store, first+1, []Payload{
 		makeSimplePayload(t, "evt-0"),
 		makeSimplePayload(t, "evt-1"),
 		makeSimplePayload(t, "evt-2"),
@@ -728,10 +727,10 @@ func TestQuery_EmptyLeadingLedgerRangeStaysEmpty(t *testing.T) {
 	require.Len(t, got, 5, "whole-chunk pin must still see the later-ledger events")
 }
 
-// makeSimplePayload builds an events.Payload with a unique Data symbol
+// makeSimplePayload builds an Payload with a unique Data symbol
 // and a single trivial topic. Used by tests that don't care about the
 // indexed-field layout, only event counts and ordering.
-func makeSimplePayload(t *testing.T, dataSymbol string) events.Payload {
+func makeSimplePayload(t *testing.T, dataSymbol string) Payload {
 	t.Helper()
 	var cid xdr.ContractId
 	cid[0] = 0xab
@@ -749,7 +748,7 @@ func makeSimplePayload(t *testing.T, dataSymbol string) events.Payload {
 	}
 	raw, err := ev.MarshalBinary()
 	require.NoError(t, err)
-	return events.Payload{
+	return Payload{
 		TxHash:             xdr.Hash{0xde, 0xad},
 		ContractEventBytes: raw,
 	}
@@ -797,7 +796,7 @@ func newTypeArityFixture(t *testing.T) *typeArityFixture {
 	fx.alphaRaw, err = alpha.MarshalBinary()
 	require.NoError(t, err)
 
-	require.NoError(t, ingestLedgerEvents(fx.store, chunkID.FirstLedger(), []events.Payload{
+	require.NoError(t, ingestLedgerEvents(fx.store, chunkID.FirstLedger(), []Payload{
 		payloadFor(t, fx.contract, "c-1", alpha),
 		typedPayloadFor(t, fx.contract, xdr.ContractEventTypeSystem, labelS1, alpha),
 		payloadFor(t, fx.contract, "c-2", alpha, beta),
@@ -1198,8 +1197,8 @@ func freezeFixtureToColdReader(t *testing.T, hot *HotStore, chunkID chunk.ID) *C
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cw.Close() })
 
-	idx := events.NewBitmaps()
-	coldOffsets := events.NewLedgerOffsets(chunkID.FirstLedger())
+	idx := NewBitmaps()
+	coldOffsets := NewLedgerOffsets(chunkID.FirstLedger())
 
 	// Read the hot store's offsets snapshot so we know exactly how many
 	// events sit in each ledger. Walking per-ledger via FetchRange lets
@@ -1228,7 +1227,7 @@ func freezeFixtureToColdReader(t *testing.T, hot *HotStore, chunkID chunk.ID) *C
 			require.NoError(t, err)
 			p.ContractEventBytes = bytes.Clone(p.ContractEventBytes)
 			require.NoError(t, cw.Append(p))
-			keys, err := events.TermsForBytes(p.ContractEventBytes)
+			keys, err := TermsForBytes(p.ContractEventBytes)
 			require.NoError(t, err)
 			for _, k := range keys {
 				idx.AddTo(k, eventID)
@@ -1507,12 +1506,12 @@ type fetchCountingReader struct {
 	rangeSizes []int // count per FetchRange call
 }
 
-func (c *fetchCountingReader) FetchEvents(ctx context.Context, ids []uint32) ([]events.Payload, error) {
+func (c *fetchCountingReader) FetchEvents(ctx context.Context, ids []uint32) ([]Payload, error) {
 	c.fetchSizes = append(c.fetchSizes, len(ids))
 	return c.Reader.FetchEvents(ctx, ids)
 }
 
-func (c *fetchCountingReader) FetchRange(ctx context.Context, start, count uint32) iter.Seq2[events.Payload, error] {
+func (c *fetchCountingReader) FetchRange(ctx context.Context, start, count uint32) iter.Seq2[Payload, error] {
 	c.rangeSizes = append(c.rangeSizes, int(count))
 	return c.Reader.FetchRange(ctx, start, count)
 }
@@ -1580,7 +1579,7 @@ func TestMatches_DropsAreInvisible(t *testing.T) {
 	// topic1 == gamma legitimately matches id 1 only. Inject ids 2, 3,
 	// and 4 as false positives, so the candidate set is {1, 2, 3, 4}
 	// and every candidate after the true match drops.
-	gammaKey := events.ComputeTermKey(fx.t0cRaw, events.FieldTopic1)
+	gammaKey := ComputeTermKey(fx.t0cRaw, FieldTopic1)
 	for _, fp := range []uint32{2, 3, 4} {
 		fx.store.index().AddTo(gammaKey, fp)
 	}
@@ -1642,7 +1641,7 @@ func TestMatches_EmptyStreams(t *testing.T) {
 // a no-op.
 func TestMatches_WindowANDLeavesBorrowedBitmapUntouched(t *testing.T) {
 	fx := newQueryFixture(t)
-	key := events.ComputeTermKey(fx.contractA[:], events.FieldContractID)
+	key := ComputeTermKey(fx.contractA[:], FieldContractID)
 	// Promote contract A's term (real matches: ids 0, 1, 4) to dense
 	// mode. The injected ids sit above the chunk's EventCount and every
 	// window below, so they are clipped before any fetch.
@@ -1688,7 +1687,7 @@ func TestQuery_PostFilterRejectsTermHashCollision(t *testing.T) {
 	// gamma's term legitimately matches id=1 only (evt-a-ac with
 	// topic1=gamma). Inject id=4 (evt-a-b: topic0=beta only,
 	// no topic1) into the same bitmap to simulate a collision.
-	gammaKey := events.ComputeTermKey(fx.t0cRaw, events.FieldTopic1)
+	gammaKey := ComputeTermKey(fx.t0cRaw, FieldTopic1)
 	before := lookupOne(t, fx.store, gammaKey)
 	require.True(t, before.Contains(1), "fixture sanity: id=1 indexes topic1=gamma")
 	require.False(t, before.Contains(4), "fixture sanity: id=4 not yet in topic1=gamma bitmap")
@@ -1738,7 +1737,7 @@ func TestPostFilter_OrdinalAlignmentWithLeadingDrop(t *testing.T) {
 
 	// Candidate batch [7, 9]: ordinal 7's bytes do not match the filter
 	// (topic0 = beta), ordinal 9's do: a leading drop.
-	payloads := []events.Payload{
+	payloads := []Payload{
 		payloadFor(t, cid, "drop", betaVal),
 		payloadFor(t, cid, "keep", gammaVal),
 	}

@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 )
 
@@ -22,18 +21,18 @@ import (
 // composing per-chunk filenames inside the temp bucket directory.
 const indexTestChunkID = chunk.ID(0)
 
-// indexFixture builds a populated events.Bitmaps containing n distinct
+// indexFixture builds a populated Bitmaps containing n distinct
 // contractID terms; each term is mapped to a roaring bitmap of two
 // event IDs derived from i so callers can verify bitmap round-trip
 // integrity term by term. The returned index is already Close()'d
 // so callers can iterate it via WriteColdIndex (which requires a
 // frozen index).
-func indexFixture(t *testing.T, n int) events.Bitmaps {
+func indexFixture(t *testing.T, n int) Bitmaps {
 	t.Helper()
-	idx := events.NewBitmaps()
+	idx := NewBitmaps()
 	for i := range n {
 		v := fmt.Sprintf("term-%d", i)
-		idx.AddTo(events.ComputeTermKey([]byte(v), events.FieldContractID),
+		idx.AddTo(ComputeTermKey([]byte(v), FieldContractID),
 			uint32(i*10), uint32(i*10+1))
 	}
 	return idx
@@ -114,9 +113,9 @@ func TestWriteIndex_RoundTripsBitmapsPerTerm(t *testing.T) {
 	// fingerprint and verify the deserialized bitmap matches the
 	// original.
 	for i := range n {
-		term := events.ComputeTermKey(
+		term := ComputeTermKey(
 			fmt.Appendf(nil, "term-%d", i),
-			events.FieldContractID,
+			FieldContractID,
 		)
 		slot, err := m.Lookup(term)
 		require.NoError(t, err, "lookup term-%d", i)
@@ -157,9 +156,9 @@ func TestWriteIndex_UnseenTermFingerprintMismatches(t *testing.T) {
 	// fingerprint check screens.
 	var collisions, mismatches int
 	for i := range 100 {
-		unseen := events.ComputeTermKey(
+		unseen := ComputeTermKey(
 			fmt.Appendf(nil, "never-seen-%d", i),
-			events.FieldTopic0,
+			FieldTopic0,
 		)
 		slot, err := m.Lookup(unseen)
 		if errors.Is(err, ErrKeyNotFound) {
@@ -205,7 +204,7 @@ func TestWriteIndex_RespectsContextCancellation(t *testing.T) {
 // the ordinary path.
 func TestWriteIndex_ZeroTerms_WritesEmptyIndex(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, events.NewBitmaps(), dir))
+	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, NewBitmaps(), dir))
 
 	// index.hash exists (a real streamhash index built over zero terms).
 	hashInfo, err := os.Stat(filepath.Join(dir, IndexHashName(indexTestChunkID)))
@@ -223,7 +222,7 @@ func TestWriteIndex_ZeroTerms_WritesEmptyIndex(t *testing.T) {
 	m, err := openMPHF(filepath.Join(dir, IndexHashName(indexTestChunkID)))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = m.Close() })
-	_, lerr := m.Lookup(events.ComputeTermKey([]byte("anything"), events.FieldContractID))
+	_, lerr := m.Lookup(ComputeTermKey([]byte("anything"), FieldContractID))
 	assert.ErrorIs(t, lerr, ErrKeyNotFound)
 }
 
@@ -262,9 +261,9 @@ func TestWriteIndex_SlotsAreDense(t *testing.T) {
 
 			seen := make(map[uint32]struct{}, n)
 			for i := range n {
-				term := events.ComputeTermKey(
+				term := ComputeTermKey(
 					fmt.Appendf(nil, "term-%d", i),
-					events.FieldContractID,
+					FieldContractID,
 				)
 				slot, err := m.Lookup(term)
 				require.NoError(t, err)
@@ -295,9 +294,9 @@ func TestWriteIndex_LargeIndex(t *testing.T) {
 
 	// Spot-check a sample of terms.
 	for _, i := range []int{0, 1, 7, n / 2, n - 1} {
-		term := events.ComputeTermKey(
+		term := ComputeTermKey(
 			fmt.Appendf(nil, "term-%d", i),
-			events.FieldContractID,
+			FieldContractID,
 		)
 		slot, err := m.Lookup(term)
 		require.NoError(t, err)
@@ -312,8 +311,8 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	// Future readers (PR-3a) rely on this layout; if it ever changes
 	// silently, this test fails.
 	dir := t.TempDir()
-	idx := events.NewBitmaps()
-	idx.AddTo(events.ComputeTermKey([]byte("only"), events.FieldContractID), 42)
+	idx := NewBitmaps()
+	idx.AddTo(ComputeTermKey([]byte("only"), FieldContractID), 42)
 
 	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir))
 
@@ -323,7 +322,7 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	record := records[0]
 	require.Greater(t, len(record), IndexRecordFingerprintLen)
 
-	term := events.ComputeTermKey([]byte("only"), events.FieldContractID)
+	term := ComputeTermKey([]byte("only"), FieldContractID)
 	assert.Equal(t, term[:IndexRecordFingerprintLen], record[:IndexRecordFingerprintLen])
 
 	bm := roaring.New()
@@ -332,7 +331,7 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	assert.True(t, bm.Contains(42))
 
 	// Defensive: the fingerprint occupies bytes 0..3 in little-endian
-	// the way events.TermKey itself encodes — read it back via binary helpers
+	// the way TermKey itself encodes — read it back via binary helpers
 	// just to lock the endianness contract.
 	_ = binary.LittleEndian.Uint32(record[:IndexRecordFingerprintLen])
 }

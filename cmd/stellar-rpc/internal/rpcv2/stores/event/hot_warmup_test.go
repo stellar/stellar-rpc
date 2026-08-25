@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 )
 
@@ -24,7 +23,7 @@ func TestWarmup_FreshChunkProducesEmptyMirrorsViaNewWithStore(t *testing.T) {
 
 	// A fresh mirror is empty: probing any term is a clean miss
 	// (nil bitmap, no error).
-	bm, err := h.store.mirror.Get(events.ComputeTermKey([]byte("any"), events.FieldContractID))
+	bm, err := h.store.mirror.Get(ComputeTermKey([]byte("any"), FieldContractID))
 	require.NoError(t, err)
 	assert.Nil(t, bm)
 	assert.Zero(t, h.store.offsets.LedgerCount())
@@ -46,18 +45,18 @@ func TestWarmup_RebuildsMirrorFromIngestedRows(t *testing.T) {
 	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p1, _ := makePayload("alpha")
 	p2, _ := makePayload("beta")
-	require.NoError(t, ingestLedgerEvents(hot1, 2, []events.Payload{p1, p2}))
+	require.NoError(t, ingestLedgerEvents(hot1, 2, []Payload{p1, p2}))
 
 	// Derive the terms each seeded payload contributes (the same
-	// events.TermsForBytes the ingest path indexed by), then snapshot
+	// TermsForBytes the ingest path indexed by), then snapshot
 	// their pre-close cardinalities straight from the live mirror.
-	var seededKeys []events.TermKey
-	for _, p := range []events.Payload{p1, p2} {
-		keys, err := events.TermsForBytes(p.ContractEventBytes)
+	var seededKeys []TermKey
+	for _, p := range []Payload{p1, p2} {
+		keys, err := TermsForBytes(p.ContractEventBytes)
 		require.NoError(t, err)
 		seededKeys = append(seededKeys, keys...)
 	}
-	expected := make(map[events.TermKey]uint64)
+	expected := make(map[TermKey]uint64)
 	for _, k := range seededKeys {
 		bm, err := hot1.mirror.Get(k)
 		require.NoError(t, err)
@@ -69,7 +68,7 @@ func TestWarmup_RebuildsMirrorFromIngestedRows(t *testing.T) {
 	// Reopen — warmup replays events_index into a fresh mirror.
 	hot2, _ := openHotStoreForTestAt(t, dir, chunkID)
 
-	got := make(map[events.TermKey]uint64)
+	got := make(map[TermKey]uint64)
 	for k := range expected {
 		bm, err := hot2.mirror.Get(k)
 		require.NoError(t, err)
@@ -87,12 +86,12 @@ func TestWarmup_RestoresEventIDsForRepeatedTerm(t *testing.T) {
 	p1, _ := makePayload("shared")
 	p2, _ := makePayload("shared")
 	p3, _ := makePayload("shared")
-	require.NoError(t, ingestLedgerEvents(hot1, 2, []events.Payload{p1, p2, p3}))
+	require.NoError(t, ingestLedgerEvents(hot1, 2, []Payload{p1, p2, p3}))
 	require.NoError(t, raw1.Close())
 
 	hot2, _ := openHotStoreForTestAt(t, dir, chunkID)
 
-	contractTermKey := events.ComputeTermKey(eventOf(p1).ContractId[:], events.FieldContractID)
+	contractTermKey := ComputeTermKey(eventOf(p1).ContractId[:], FieldContractID)
 	bm := lookupOne(t, hot2, contractTermKey)
 	require.NotNil(t, bm)
 	assert.Equal(t, uint64(3), bm.GetCardinality())
@@ -108,9 +107,9 @@ func TestWarmup_OffsetsReconstructedAcrossLedgers(t *testing.T) {
 	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p1, _ := makePayload("a")
 	p2, _ := makePayload("b")
-	require.NoError(t, ingestLedgerEvents(hot1, 2, []events.Payload{p1, p2}))
+	require.NoError(t, ingestLedgerEvents(hot1, 2, []Payload{p1, p2}))
 	p3, _ := makePayload("c")
-	require.NoError(t, ingestLedgerEvents(hot1, 3, []events.Payload{p3}))
+	require.NoError(t, ingestLedgerEvents(hot1, 3, []Payload{p3}))
 	require.NoError(t, raw1.Close())
 
 	hot2, _ := openHotStoreForTestAt(t, dir, chunkID)
@@ -148,7 +147,7 @@ func TestWarmup_RejectsDataEventBeyondOffsets(t *testing.T) {
 	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p1, _ := makePayload("a")
 	p2, _ := makePayload("b")
-	require.NoError(t, ingestLedgerEvents(hot1, 2, []events.Payload{p1, p2})) // total = 2
+	require.NoError(t, ingestLedgerEvents(hot1, 2, []Payload{p1, p2})) // total = 2
 	require.NoError(t, raw1.Close())
 
 	// An orphan data row well beyond total (id 7, total = 2): proves the
@@ -170,7 +169,7 @@ func TestWarmup_RejectsOffsetsGap(t *testing.T) {
 	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	for _, seq := range []uint32{2, 3, 4} {
 		p, _ := makePayload("x")
-		require.NoError(t, ingestLedgerEvents(hot1, seq, []events.Payload{p}))
+		require.NoError(t, ingestLedgerEvents(hot1, seq, []Payload{p}))
 	}
 	require.NoError(t, raw1.Close())
 
@@ -192,7 +191,7 @@ func TestWarmup_RejectsOffsetsOverflow(t *testing.T) {
 	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	for _, seq := range []uint32{2, 3} {
 		p, _ := makePayload("x")
-		require.NoError(t, ingestLedgerEvents(hot1, seq, []events.Payload{p}))
+		require.NoError(t, ingestLedgerEvents(hot1, seq, []Payload{p}))
 	}
 	require.NoError(t, raw1.Close())
 
@@ -231,7 +230,7 @@ func TestWarmup_RejectsMissingTailDataEvent(t *testing.T) {
 	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p1, _ := makePayload("a")
 	p2, _ := makePayload("b")
-	require.NoError(t, ingestLedgerEvents(hot1, 2, []events.Payload{p1, p2})) // total = 2
+	require.NoError(t, ingestLedgerEvents(hot1, 2, []Payload{p1, p2})) // total = 2
 	require.NoError(t, raw1.Close())
 
 	// Drop the last data row (event id total-1 == 1) while offsets still
@@ -251,13 +250,13 @@ func TestWarmup_RejectsIndexBeyondCommitted(t *testing.T) {
 	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p1, _ := makePayload("a")
 	p2, _ := makePayload("b")
-	require.NoError(t, ingestLedgerEvents(hot1, 2, []events.Payload{p1, p2})) // total = 2
+	require.NoError(t, ingestLedgerEvents(hot1, 2, []Payload{p1, p2})) // total = 2
 	require.NoError(t, raw1.Close())
 
 	// An index row at exactly total (id 2): the tightest "beyond
 	// committed" case, pinning the > (not >=) bound — valid ids are 0..1.
 	corruptHotChunk(t, dir, chunkID, func(raw *rocksdb.Store) {
-		var term events.TermKey
+		var term TermKey
 		term[0] = 0x99
 		require.NoError(t, raw.Put(IndexCF, encodeIndexKey(term, 2), nil))
 	})
@@ -272,7 +271,7 @@ func TestWarmup_OffsetsHandleEmptyTrailingLedger(t *testing.T) {
 
 	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p, _ := makePayload("only")
-	require.NoError(t, ingestLedgerEvents(hot1, 2, []events.Payload{p}))
+	require.NoError(t, ingestLedgerEvents(hot1, 2, []Payload{p}))
 	require.NoError(t, ingestLedgerEvents(hot1, 3, nil))
 	require.NoError(t, raw1.Close())
 
@@ -297,11 +296,11 @@ func TestWarmup_RejectsIndexRowAtMaxUint32(t *testing.T) {
 
 	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p1, _ := makePayload("a")
-	require.NoError(t, ingestLedgerEvents(hot1, 2, []events.Payload{p1})) // total = 1
+	require.NoError(t, ingestLedgerEvents(hot1, 2, []Payload{p1})) // total = 1
 	require.NoError(t, raw1.Close())
 
 	corruptHotChunk(t, dir, chunkID, func(raw *rocksdb.Store) {
-		var term events.TermKey
+		var term TermKey
 		term[0] = 0x99
 		require.NoError(t, raw.Put(IndexCF, encodeIndexKey(term, math.MaxUint32), nil))
 	})

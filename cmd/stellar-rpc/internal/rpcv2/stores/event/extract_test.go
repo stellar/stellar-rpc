@@ -1,4 +1,4 @@
-package events_test
+package event_test
 
 import (
 	"fmt"
@@ -19,17 +19,17 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 )
 
 const testPassphrase = "Test SDF Network ; September 2015"
 
 // lcmViewToPayloads is the view→payloads convenience the cursor-contract tests
 // need to run from raw LCM bytes: the header reads plus the single
-// ExtractLedgerTxParts walk, fed to PayloadsFromLedgerEvents. Test-only —
+// ExtractLedgerTxParts walk, fed to event.PayloadsFromLedgerEvents. Test-only —
 // production walks once at a higher level (hot HotService.Ingest, cold
-// coldChunk.ingest) and calls PayloadsFromLedgerEvents directly.
-func lcmViewToPayloads(lcmView xdr.LedgerCloseMetaView) ([]events.Payload, error) {
+// coldChunk.ingest) and calls event.PayloadsFromLedgerEvents directly.
+func lcmViewToPayloads(lcmView xdr.LedgerCloseMetaView) ([]event.Payload, error) {
 	seq, err := lcmView.LedgerSequence()
 	if err != nil {
 		return nil, err
@@ -42,7 +42,7 @@ func lcmViewToPayloads(lcmView xdr.LedgerCloseMetaView) ([]events.Payload, error
 	if err != nil {
 		return nil, err
 	}
-	return events.PayloadsFromLedgerEvents(txParts, seq, closedAt)
+	return event.PayloadsFromLedgerEvents(txParts, seq, closedAt)
 }
 
 // buildContractEvent returns a ContractEvent with a contractID and a

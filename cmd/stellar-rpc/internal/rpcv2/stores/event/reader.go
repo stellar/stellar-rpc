@@ -1,7 +1,8 @@
-// Package event is the per-chunk event store (hot RocksDB CFs + cold
-// pack/index artifacts). Named in the singular because the plural —
-// events — belongs to rpcv2/events, the extraction/index machinery
-// this store is built on.
+// Package event is everything the daemon knows about a stored event: the
+// canonical binary payload format, the term-index vocabulary and bitmap
+// containers built from it, the extraction that turns a walked ledger into
+// payloads, and the per-chunk stores that hold them (hot RocksDB CFs and
+// cold pack/index artifacts) with the match engine that reads them.
 package event
 
 import (
@@ -13,7 +14,6 @@ import (
 	"github.com/RoaringBitmap/roaring/v2"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 )
 
 // Closed-store lifecycle: HotStore and ColdReader read methods
@@ -55,14 +55,14 @@ var ErrFetchRangeOutOfBounds = errors.New("events: FetchRange out of bounds")
 // ContractEventBytes are safe to retain. FetchRange and All yield borrowed
 // Payloads — ContractEventBytes aliases the reader's iteration buffer and
 // is valid only until the next step; a consumer that retains one past the
-// step must clone its ContractEventBytes. See events.Payload.Unmarshal for
+// step must clone its ContractEventBytes. See Payload.Unmarshal for
 // the alias contract.
 type Reader interface {
 	// ChunkID identifies which Chunk this Reader serves.
 	ChunkID() chunk.ID
 
 	// EventCount is the total number of events in this Chunk.
-	// Equal to the last events.LedgerOffsets cumulative count.
+	// Equal to the last LedgerOffsets cumulative count.
 	// Returns (0, stores.ErrStoreClosed) after Close. On ColdReader, the value
 	// is read lazily from events.pack's trailer on first call.
 	EventCount() (uint32, error)
@@ -88,7 +88,7 @@ type Reader interface {
 	//     other reader holding the cached pointer (cold).
 	//
 	// Returns (nil, stores.ErrStoreClosed) after Close.
-	Offsets() (*events.LedgerOffsets, error)
+	Offsets() (*LedgerOffsets, error)
 
 	// LookupKeys returns bitmaps for each key, aligned positionally
 	// with the input slice (result[i] corresponds to keys[i]).
@@ -113,7 +113,7 @@ type Reader interface {
 	// ctx cancels in-flight I/O on the cold path (MPHF load,
 	// index.pack ReadAt); hot side checks ctx as a fast guard before
 	// touching the in-memory mirror.
-	LookupKeys(ctx context.Context, keys []events.TermKey) ([]*roaring.Bitmap, error)
+	LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.Bitmap, error)
 
 	// FetchEvents decodes events for the supplied chunk-relative
 	// eventIDs and returns them positionally aligned with the input
@@ -133,7 +133,7 @@ type Reader interface {
 	// resume ordinal is bounds-checked against its ledger's ID range
 	// first), so a miss signals corruption or a writer/reader
 	// mismatch, not a normal not-found case.
-	FetchEvents(ctx context.Context, eventIDs []uint32) ([]events.Payload, error)
+	FetchEvents(ctx context.Context, eventIDs []uint32) ([]Payload, error)
 
 	// FetchRange streams count events starting at chunk-relative
 	// event ID start, in ascending event-ID order. Equivalent to
@@ -148,7 +148,7 @@ type Reader interface {
 	// and may be sparse.
 	//
 	// ctx cancels in-flight I/O on both paths. Yielding
-	// (events.Payload{}, stores.ErrStoreClosed) and stopping is the after-Close
+	// (Payload{}, stores.ErrStoreClosed) and stopping is the after-Close
 	// behavior, mirroring All.
 	//
 	// count == 0 is a no-op regardless of start (both implementations
@@ -156,15 +156,15 @@ type Reader interface {
 	// range escapes [0, EventCount) yields a wrapped
 	// ErrFetchRangeOutOfBounds and stops — callers cap count against
 	// EventCount themselves.
-	FetchRange(ctx context.Context, start, count uint32) iter.Seq2[events.Payload, error]
+	FetchRange(ctx context.Context, start, count uint32) iter.Seq2[Payload, error]
 
 	// All streams every event in this Chunk in chunk-relative
 	// eventID order without intermediate buffering. Equivalent to
 	// FetchRange(ctx, 0, EventCount). (The freeze path does NOT use
 	// this — it re-derives cold artifacts from raw LCMs.)
-	// Each events.Payload carries its LedgerSequence, so consumers can
+	// Each Payload carries its LedgerSequence, so consumers can
 	// track ledger boundaries without separate signaling.
-	All(ctx context.Context) iter.Seq2[events.Payload, error]
+	All(ctx context.Context) iter.Seq2[Payload, error]
 }
 
 // validateSortedEventIDs returns a wrapped ErrUnsortedEventIDs if

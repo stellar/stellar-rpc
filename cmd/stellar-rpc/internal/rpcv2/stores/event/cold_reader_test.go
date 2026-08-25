@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
@@ -20,8 +19,8 @@ import (
 // + index.pack + index.hash) into a fresh directory by:
 //   - writing every payload to events.pack in order,
 //   - feeding the same payload's indexed (contractID + topic0)
-//     fields into a fresh events.Bitmaps (matching what the freezer
-//     would do via events.TermsForBytes + idx.Add),
+//     fields into a fresh Bitmaps (matching what the freezer
+//     would do via TermsForBytes + idx.Add),
 //   - finalizing with WriteColdIndex.
 //
 // Layout:
@@ -38,7 +37,7 @@ import (
 // Returns the directory plus the list of payloads written.
 //
 //nolint:unparam // chunkID kept as a param to mirror production call sites and make per-test override easy
-func buildColdFixture(t *testing.T, chunkID chunk.ID, eventsPerLedger, ledgersPerChunk int) (string, []events.Payload) {
+func buildColdFixture(t *testing.T, chunkID chunk.ID, eventsPerLedger, ledgersPerChunk int) (string, []Payload) {
 	t.Helper()
 	dir := t.TempDir()
 	first := chunkID.FirstLedger()
@@ -47,10 +46,10 @@ func buildColdFixture(t *testing.T, chunkID chunk.ID, eventsPerLedger, ledgersPe
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cw.Close() })
 
-	idx := events.NewBitmaps()
-	offsets := events.NewLedgerOffsets(first)
+	idx := NewBitmaps()
+	offsets := NewLedgerOffsets(first)
 
-	payloads := make([]events.Payload, 0, eventsPerLedger*ledgersPerChunk)
+	payloads := make([]Payload, 0, eventsPerLedger*ledgersPerChunk)
 	eventID := uint32(0)
 	for ledgerOffset := range ledgersPerChunk {
 		ledgerSeq := first + uint32(ledgerOffset)
@@ -64,13 +63,13 @@ func buildColdFixture(t *testing.T, chunkID chunk.ID, eventsPerLedger, ledgersPe
 			require.NoError(t, cw.Append(p))
 
 			// Index the contractID and topic0 fields, matching what
-			// events.TermsForBytes would emit. We keep the (value, field)
-			// pairs in hand so tests can compute the same events.TermKey.
+			// TermsForBytes would emit. We keep the (value, field)
+			// pairs in hand so tests can compute the same TermKey.
 			ev := eventOf(p)
-			idx.AddTo(events.ComputeTermKey(ev.ContractId[:], events.FieldContractID), eventID)
+			idx.AddTo(ComputeTermKey(ev.ContractId[:], FieldContractID), eventID)
 			topicBytes, err := ev.Body.V0.Topics[0].MarshalBinary()
 			require.NoError(t, err)
-			idx.AddTo(events.ComputeTermKey(topicBytes, events.FieldTopic0), eventID)
+			idx.AddTo(ComputeTermKey(topicBytes, FieldTopic0), eventID)
 
 			eventID++
 		}
@@ -82,18 +81,18 @@ func buildColdFixture(t *testing.T, chunkID chunk.ID, eventsPerLedger, ledgersPe
 	return dir, payloads
 }
 
-// contractTermKey computes the events.TermKey ColdReader.LookupKeys expects for
+// contractTermKey computes the TermKey ColdReader.LookupKeys expects for
 // the contractID indexed field of p.
-func contractTermKey(p events.Payload) events.TermKey {
-	return events.ComputeTermKey(eventOf(p).ContractId[:], events.FieldContractID)
+func contractTermKey(p Payload) TermKey {
+	return ComputeTermKey(eventOf(p).ContractId[:], FieldContractID)
 }
 
-// topic0TermKey computes the events.TermKey for topic0 of p.
-func topic0TermKey(t *testing.T, p events.Payload) events.TermKey {
+// topic0TermKey computes the TermKey for topic0 of p.
+func topic0TermKey(t *testing.T, p Payload) TermKey {
 	t.Helper()
 	bytes, err := eventOf(p).Body.V0.Topics[0].MarshalBinary()
 	require.NoError(t, err)
-	return events.ComputeTermKey(bytes, events.FieldTopic0)
+	return ComputeTermKey(bytes, FieldTopic0)
 }
 
 func TestColdReader_OpenRoundTrip(t *testing.T) {
@@ -151,9 +150,9 @@ func TestColdReader_LookupUnseenTermReturnsNil(t *testing.T) {
 	// surface a clean miss: a nil bitmap and no error. We don't care
 	// which path each key takes — only that every outcome is nil.
 	for i := range 100 {
-		key := events.ComputeTermKey(
+		key := ComputeTermKey(
 			fmt.Appendf(nil, "never-added-%d", i),
-			events.FieldTopic1,
+			FieldTopic1,
 		)
 		assert.Nil(t, lookupOne(t, cr, key), "unseen key %d returned a bitmap", i)
 	}
@@ -276,8 +275,8 @@ func TestColdReader_EventlessChunk(t *testing.T) {
 
 	// Term-filtered paths miss cleanly (nil bitmap, no error) instead
 	// of surfacing a filesystem error.
-	someTerm := events.ComputeTermKey([]byte("any"), events.FieldContractID)
-	bms, err := cr.LookupKeys(context.Background(), []events.TermKey{someTerm})
+	someTerm := ComputeTermKey([]byte("any"), FieldContractID)
+	bms, err := cr.LookupKeys(context.Background(), []TermKey{someTerm})
 	require.NoError(t, err)
 	require.Len(t, bms, 1)
 	assert.Nil(t, bms[0])
@@ -316,7 +315,7 @@ func TestColdReader_EmptyIndexOverNonEmptyPackErrors(t *testing.T) {
 	t.Cleanup(func() { _ = cr.Close() })
 
 	// The mismatch must surface as an error, not a clean miss (nil, no error).
-	_, lerr := cr.LookupKeys(context.Background(), []events.TermKey{contractTermKey(payloads[0])})
+	_, lerr := cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
 	require.Error(t, lerr, "a mispaired empty index must error, not miss silently (nil bitmap)")
 	assert.Contains(t, lerr.Error(), "holds zero terms")
 }
@@ -352,7 +351,7 @@ func TestColdReader_OpenMissingIndexHash(t *testing.T) {
 	t.Cleanup(func() { _ = cr.Close() })
 
 	// First LookupKeys awaits the background MPHF load → missing-file error.
-	_, err = cr.LookupKeys(context.Background(), []events.TermKey{{}})
+	_, err = cr.LookupKeys(context.Background(), []TermKey{{}})
 	assert.Error(t, err, "missing index.hash must surface from the first LookupKeys")
 }
 
@@ -372,7 +371,7 @@ func TestColdReader_PostCloseMethodsError(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, cr.Close())
 
-	_, err = cr.LookupKeys(context.Background(), []events.TermKey{contractTermKey(payloads[0])})
+	_, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
 	require.ErrorIs(t, err, stores.ErrStoreClosed)
 
 	_, err = cr.FetchEvents(context.Background(), []uint32{0})
@@ -546,9 +545,9 @@ func TestColdReader_LookupKeys(t *testing.T) {
 
 	contractKey := contractTermKey(payloads[0])
 	topicKey := topic0TermKey(t, payloads[0])
-	missing := events.ComputeTermKey([]byte("never-added"), events.FieldTopic1)
+	missing := ComputeTermKey([]byte("never-added"), FieldTopic1)
 
-	keys := []events.TermKey{contractKey, missing, topicKey, missing}
+	keys := []TermKey{contractKey, missing, topicKey, missing}
 	bms, err := cr.LookupKeys(context.Background(), keys)
 	require.NoError(t, err)
 	require.Len(t, bms, len(keys))
@@ -577,13 +576,13 @@ func TestColdReader_LookupKeysClonesAcrossCalls(t *testing.T) {
 	t.Cleanup(func() { _ = cr.Close() })
 
 	key := contractTermKey(payloads[0])
-	first, err := cr.LookupKeys(context.Background(), []events.TermKey{key})
+	first, err := cr.LookupKeys(context.Background(), []TermKey{key})
 	require.NoError(t, err)
 	require.Len(t, first, 1)
 	require.NotNil(t, first[0])
 	first[0].Add(999_999)
 
-	second, err := cr.LookupKeys(context.Background(), []events.TermKey{key})
+	second, err := cr.LookupKeys(context.Background(), []TermKey{key})
 	require.NoError(t, err)
 	require.Len(t, second, 1)
 	require.NotNil(t, second[0])
@@ -719,7 +718,7 @@ func TestColdReader_RejectsWrongFormatIndexPack(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
-	_, err = cr.LookupKeys(context.Background(), []events.TermKey{contractTermKey(payloads[0])})
+	_, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
 	require.ErrorContains(t, err, "expected format")
 }
 
@@ -740,7 +739,7 @@ func TestColdReader_RejectsMispairedOffsets(t *testing.T) {
 	}
 	// Offsets sum to 2 events; the pack holds 3. ColdWriter.Finish takes
 	// the caller's offsets on trust — the reader-side check is the guard.
-	offsets := events.NewLedgerOffsets(first)
+	offsets := NewLedgerOffsets(first)
 	require.NoError(t, offsets.Append(first, 2))
 	require.NoError(t, cw.Finish(offsets))
 
@@ -767,7 +766,7 @@ func TestColdReader_RejectsMispairedIndexHash(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
-	_, err = cr.LookupKeys(context.Background(), []events.TermKey{contractTermKey(payloadsA[0])})
+	_, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloadsA[0])})
 	require.ErrorContains(t, err, "index pair mismatch")
 }
 
@@ -786,6 +785,6 @@ func TestColdReader_RejectsNonEmptyIndexOnEventlessChunk(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
-	_, err = cr.LookupKeys(context.Background(), []events.TermKey{contractTermKey(payloads[0])})
+	_, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
 	require.ErrorContains(t, err, "eventless")
 }

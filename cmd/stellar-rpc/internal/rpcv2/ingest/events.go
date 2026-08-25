@@ -10,7 +10,6 @@ import (
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 )
 
@@ -18,14 +17,14 @@ import (
 
 // eventsCold models the backfill path: shared-walk output → payloads →
 // term-index accumulate + cold append, then chunk-end Finish + WriteColdIndex.
-// No HotStore is involved — it maintains an in-memory events.Bitmaps mirror via
-// NewBitmaps + per-event TermsForBytes, and an events.LedgerOffsets to assign
+// No HotStore is involved — it maintains an in-memory event.Bitmaps mirror via
+// NewBitmaps + per-event TermsForBytes, and an event.LedgerOffsets to assign
 // chunk-relative event IDs.
 type eventsCold struct {
 	chunkID   chunk.ID
 	writer    *event.ColdWriter
-	mirror    events.Bitmaps
-	offsets   *events.LedgerOffsets
+	mirror    event.Bitmaps
+	offsets   *event.LedgerOffsets
 	bucketDir string
 	metrics   coldMetrics
 	// failed latches any write error. A failed write can leave the mirror
@@ -56,8 +55,8 @@ func newEventsCold(bucketDir string, chunkID chunk.ID, sink MetricSink) (*events
 	return &eventsCold{
 		chunkID:   chunkID,
 		writer:    w,
-		mirror:    events.NewBitmaps(),
-		offsets:   events.NewLedgerOffsets(chunkID.FirstLedger()),
+		mirror:    event.NewBitmaps(),
+		offsets:   event.NewLedgerOffsets(chunkID.FirstLedger()),
 		bucketDir: bucketDir,
 		metrics:   newColdMetrics(sink, dataTypeEvents),
 	}, nil
@@ -121,13 +120,13 @@ func (e *eventsCold) close() error {
 
 // ingestSeq writes one ledger's events and returns the count written. It shapes
 // coldChunk's shared ExtractLedgerTxParts walk output into cursor-ordered payloads
-// via events.PayloadsFromLedgerEvents — the SAME function the hot tier uses, so
+// via event.PayloadsFromLedgerEvents — the SAME function the hot tier uses, so
 // event-ID assignment is byte-identical to the hot path (same shaping). A
 // pre-Soroban (V0) ledger yields zero payloads, recorded like any event-free
 // ledger. Shaping folds into the per-writer ColdIngest total; the extraction
 // itself is metered once, ledger-scoped, as the ColdExtract signal.
 func (e *eventsCold) ingestSeq(seq uint32, closedAt int64, txParts []sdkingest.LedgerTxParts) (int, error) {
-	payloads, err := events.PayloadsFromLedgerEvents(txParts, seq, closedAt)
+	payloads, err := event.PayloadsFromLedgerEvents(txParts, seq, closedAt)
 	if err != nil {
 		return 0, fmt.Errorf("shape events seq %d: %w", seq, err)
 	}
@@ -154,7 +153,7 @@ func (e *eventsCold) ingestSeq(seq uint32, closedAt int64, txParts []sdkingest.L
 	var termDur, writeDur time.Duration
 	for i := range payloads {
 		tstart := time.Now()
-		keys, terr := events.TermsForBytes(payloads[i].ContractEventBytes)
+		keys, terr := event.TermsForBytes(payloads[i].ContractEventBytes)
 		if terr != nil {
 			return 0, fmt.Errorf("TermsForBytes seq %d eventIdx %d: %w", seq, i, terr)
 		}

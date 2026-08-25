@@ -10,7 +10,7 @@ package event
 //   2. events.pack record codec: ItemsPerRecord, the zstd encoder
 //      constructor, and the shared zstd decoder.
 //
-//   3. events.LedgerOffsets app-data encoding (encodeLedgerOffsets /
+//   3. LedgerOffsets app-data encoding (encodeLedgerOffsets /
 //      DecodeLedgerOffsets). The writer embeds the encoded form in
 //      events.pack's app-data slot; the reader decodes it on open.
 //
@@ -33,7 +33,6 @@ import (
 	"github.com/stellar/streamhash"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/zstd"
 )
@@ -121,7 +120,7 @@ func newEventsPackEncoder() packfile.RecordEncoder { return zstd.NewCompressor()
 var eventsPackDecoder = zstd.NewDecompressor()
 
 // ──────────────────────────────────────────────────────────────────
-// events.LedgerOffsets app-data wire format.
+// LedgerOffsets app-data wire format.
 //
 // Embedded in events.pack's app-data slot:
 //
@@ -134,7 +133,7 @@ var eventsPackDecoder = zstd.NewDecompressor()
 //	                    startLedger + i)
 //
 // Cumulative counts (rather than per-ledger counts) match the
-// in-memory representation of events.LedgerOffsets and let the cold reader
+// in-memory representation of LedgerOffsets and let the cold reader
 // resolve ledger range → eventID range in two array lookups.
 //
 // The version byte makes future format additions safe across
@@ -143,23 +142,23 @@ var eventsPackDecoder = zstd.NewDecompressor()
 // ──────────────────────────────────────────────────────────────────
 
 // LedgerOffsetsFormatVersion is the current on-disk version for the
-// events.LedgerOffsets app-data block.
+// LedgerOffsets app-data block.
 const LedgerOffsetsFormatVersion byte = 0x01
 
 const ledgerOffsetsHeaderLen = 1 + 4 + 4
 
 // ErrUnknownLedgerOffsetsVersion is returned when decoding app data
 // whose leading version byte isn't recognized by this binary.
-var ErrUnknownLedgerOffsetsVersion = errors.New("events: unknown events.LedgerOffsets format version")
+var ErrUnknownLedgerOffsetsVersion = errors.New("events: unknown LedgerOffsets format version")
 
 // ErrShortLedgerOffsets is returned when the app data buffer is
 // shorter than the declared header or trailing cumulative array.
-var ErrShortLedgerOffsets = errors.New("events: events.LedgerOffsets app data too short")
+var ErrShortLedgerOffsets = errors.New("events: LedgerOffsets app data too short")
 
 // encodeLedgerOffsets serializes o for packfile app-data embedding.
-func encodeLedgerOffsets(o *events.LedgerOffsets) ([]byte, error) {
+func encodeLedgerOffsets(o *LedgerOffsets) ([]byte, error) {
 	if o == nil {
-		return nil, errors.New("events: nil events.LedgerOffsets")
+		return nil, errors.New("events: nil LedgerOffsets")
 	}
 	cumulative := o.Offsets()
 	n := uint32(len(cumulative)) //nolint:gosec // bounded by chunk's ledger count
@@ -175,9 +174,9 @@ func encodeLedgerOffsets(o *events.LedgerOffsets) ([]byte, error) {
 }
 
 // DecodeLedgerOffsets parses the packfile app-data block written by
-// encodeLedgerOffsets back into a *events.LedgerOffsets. Used by the cold
+// encodeLedgerOffsets back into a *LedgerOffsets. Used by the cold
 // reader (PR-3a).
-func DecodeLedgerOffsets(data []byte) (*events.LedgerOffsets, error) {
+func DecodeLedgerOffsets(data []byte) (*LedgerOffsets, error) {
 	if len(data) < ledgerOffsetsHeaderLen {
 		return nil, ErrShortLedgerOffsets
 	}
@@ -191,7 +190,7 @@ func DecodeLedgerOffsets(data []byte) (*events.LedgerOffsets, error) {
 		return nil, fmt.Errorf("%w: want %d bytes, got %d", ErrShortLedgerOffsets, expected, len(data))
 	}
 
-	offsets := events.NewLedgerOffsets(startLedger)
+	offsets := NewLedgerOffsets(startLedger)
 	var prev uint32
 	for i := range n {
 		cumulative := binary.BigEndian.Uint32(data[ledgerOffsetsHeaderLen+int(i)*4:])
@@ -199,7 +198,7 @@ func DecodeLedgerOffsets(data []byte) (*events.LedgerOffsets, error) {
 			return nil, fmt.Errorf("events: non-monotonic cumulative count at ledger %d", startLedger+i)
 		}
 		if err := offsets.Append(startLedger+i, cumulative-prev); err != nil {
-			return nil, fmt.Errorf("events: decode events.LedgerOffsets: %w", err)
+			return nil, fmt.Errorf("events: decode LedgerOffsets: %w", err)
 		}
 		prev = cumulative
 	}
@@ -209,11 +208,11 @@ func DecodeLedgerOffsets(data []byte) (*events.LedgerOffsets, error) {
 // ──────────────────────────────────────────────────────────────────
 // MPHF wrapper around github.com/stellar/streamhash.
 //
-// The MPHF maps each events.TermKey (16 bytes of xxh3-128 over
+// The MPHF maps each TermKey (16 bytes of xxh3-128 over
 // `field || value`) to a unique slot in [0, N), where N is the
 // number of unique terms in a Chunk. index.pack is laid out as one
 // roaring-bitmap record per slot. The cold reader looks up a
-// events.TermKey via Lookup, reads the bitmap record at that slot, and
+// TermKey via Lookup, reads the bitmap record at that slot, and
 // MUST verify a 4-byte fingerprint stored alongside the bitmap
 // before trusting it: an MPHF returns a slot for every input,
 // including keys never added at build time. False positives are
@@ -223,9 +222,9 @@ func DecodeLedgerOffsets(data []byte) (*events.LedgerOffsets, error) {
 //
 // Hash compatibility: streamhash's AddKey/Query do not re-hash the
 // supplied key — they take the first 16 bytes as the routing
-// identity. events.TermKey is already a uniformly distributed 16-byte
-// xxh3-128 value (produced by events.ComputeTermKey via
-// streamhash.PreHashInPlace), so the wrapper passes events.TermKey[:]
+// identity. TermKey is already a uniformly distributed 16-byte
+// xxh3-128 value (produced by ComputeTermKey via
+// streamhash.PreHashInPlace), so the wrapper passes TermKey[:]
 // through. No double-hashing.
 // ──────────────────────────────────────────────────────────────────
 
@@ -246,7 +245,7 @@ type mphf struct {
 	idx *streamhash.Index
 }
 
-// buildMPHF constructs an MPHF over every events.TermKey in bitmaps,
+// buildMPHF constructs an MPHF over every TermKey in bitmaps,
 // writes the serialized form to outputPath, and returns an opened
 // handle ready for immediate Lookup. The freeze path needs slot
 // assignments before closing so it can populate index.pack at the
@@ -254,7 +253,7 @@ type mphf struct {
 //
 // len(bitmaps) supplies streamhash's required total-keys count;
 // the map is iterated once to feed keys to the builder. The bitmap
-// values are not consumed — only the events.TermKey participates in
+// values are not consumed — only the TermKey participates in
 // MPHF construction.
 //
 // Memory usage is bounded by streamhash's internal partition buffers,
@@ -268,7 +267,7 @@ type mphf struct {
 // inputs.
 //
 //nolint:nonamedreturns // named err carries through to the deferred builder.Close
-func buildMPHF(ctx context.Context, bitmaps events.Bitmaps, outputPath string) (m *mphf, err error) {
+func buildMPHF(ctx context.Context, bitmaps Bitmaps, outputPath string) (m *mphf, err error) {
 	total := len(bitmaps)
 
 	tmpDir, terr := os.MkdirTemp("", "eventstore-unsorted-")
@@ -343,7 +342,7 @@ func openMPHF(path string) (*mphf, error) {
 // 4-byte fingerprint stored alongside the bitmap at that slot in
 // index.pack — an MPHF can map an unseen key to a valid build-set
 // slot, and only the fingerprint catches that residual collision.
-func (m *mphf) Lookup(key events.TermKey) (uint32, error) {
+func (m *mphf) Lookup(key TermKey) (uint32, error) {
 	slot, err := m.idx.QueryRank(key[:])
 	if err != nil {
 		if errors.Is(err, streamhash.ErrNotFound) {

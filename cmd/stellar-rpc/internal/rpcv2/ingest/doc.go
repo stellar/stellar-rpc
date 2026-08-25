@@ -3,7 +3,7 @@
 // and writes the three data types — ledgers, txhashes, contract events —
 // into the full-history stores, one chunk at a time, via the zero-copy
 // view extractors in the go-stellar-sdk ingest package and the RPC-side
-// events.PayloadsFromLedgerEvents emitter.
+// event.PayloadsFromLedgerEvents emitter.
 //
 // Both tiers extract each ledger with a SINGLE ExtractLedgerTxParts walk
 // (the hot DB's IngestLedger, the cold coldChunk.ingest) — txhash reads

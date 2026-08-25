@@ -14,7 +14,6 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
@@ -136,7 +135,7 @@ func fullChunkSeamFixture(t *testing.T) (*Registry, uint32, uint32) {
 	return r, lo, f6
 }
 
-func labels(t *testing.T, payloads []events.Payload) []string {
+func labels(t *testing.T, payloads []event.Payload) []string {
 	t.Helper()
 	out := make([]string, len(payloads))
 	for i := range payloads {
@@ -395,7 +394,7 @@ func TestQueryEvents_UncoveredWindowFailsLoud(t *testing.T) {
 	// Head side: ingest enforces chunk-aligned starts, so this state
 	// cannot be staged through a real store; scanChunk is checked
 	// directly with offsets that begin past the part's From.
-	ofs := events.NewLedgerOffsets(f + 8)
+	ofs := event.NewLedgerOffsets(f + 8)
 	require.NoError(t, ofs.Append(f+8, 1))
 	_, err = scanChunk(context.Background(),
 		eventPart{Chunk: c, Reader: &fakeEventReader{chunkID: c, ofs: ofs}, From: f, To: f + 8},
@@ -920,9 +919,9 @@ func TestQueryEvents_CursorValidation(t *testing.T) {
 // another package's store internals.
 type fakeEventReader struct {
 	chunkID  chunk.ID
-	ofs      *events.LedgerOffsets
-	payloads []events.Payload // indexed by ordinal
-	bitmaps  map[events.TermKey]*roaring.Bitmap
+	ofs      *event.LedgerOffsets
+	payloads []event.Payload // indexed by ordinal
+	bitmaps  map[event.TermKey]*roaring.Bitmap
 }
 
 func (f *fakeEventReader) ChunkID() chunk.ID { return f.chunkID }
@@ -931,9 +930,9 @@ func (f *fakeEventReader) EventCount() (uint32, error) {
 	return uint32(len(f.payloads)), nil
 }
 
-func (f *fakeEventReader) Offsets() (*events.LedgerOffsets, error) { return f.ofs, nil }
+func (f *fakeEventReader) Offsets() (*event.LedgerOffsets, error) { return f.ofs, nil }
 
-func (f *fakeEventReader) LookupKeys(_ context.Context, keys []events.TermKey) ([]*roaring.Bitmap, error) {
+func (f *fakeEventReader) LookupKeys(_ context.Context, keys []event.TermKey) ([]*roaring.Bitmap, error) {
 	out := make([]*roaring.Bitmap, len(keys))
 	for i, k := range keys {
 		out[i] = f.bitmaps[k]
@@ -941,16 +940,16 @@ func (f *fakeEventReader) LookupKeys(_ context.Context, keys []events.TermKey) (
 	return out, nil
 }
 
-func (f *fakeEventReader) FetchEvents(_ context.Context, ids []uint32) ([]events.Payload, error) {
-	out := make([]events.Payload, len(ids))
+func (f *fakeEventReader) FetchEvents(_ context.Context, ids []uint32) ([]event.Payload, error) {
+	out := make([]event.Payload, len(ids))
 	for i, id := range ids {
 		out[i] = f.payloads[id]
 	}
 	return out, nil
 }
 
-func (f *fakeEventReader) FetchRange(_ context.Context, start, count uint32) iter.Seq2[events.Payload, error] {
-	return func(yield func(events.Payload, error) bool) {
+func (f *fakeEventReader) FetchRange(_ context.Context, start, count uint32) iter.Seq2[event.Payload, error] {
+	return func(yield func(event.Payload, error) bool) {
 		for i := start; i < start+count; i++ {
 			if !yield(f.payloads[i], nil) {
 				return
@@ -959,7 +958,7 @@ func (f *fakeEventReader) FetchRange(_ context.Context, start, count uint32) ite
 	}
 }
 
-func (f *fakeEventReader) All(ctx context.Context) iter.Seq2[events.Payload, error] {
+func (f *fakeEventReader) All(ctx context.Context) iter.Seq2[event.Payload, error] {
 	return f.FetchRange(ctx, 0, uint32(len(f.payloads)))
 }
 
@@ -973,11 +972,11 @@ func TestEventScan_DropsDoNotStallTheChunk(t *testing.T) {
 	f := c.FirstLedger()
 	const total = 10
 
-	ofs := events.NewLedgerOffsets(f)
+	ofs := event.NewLedgerOffsets(f)
 	require.NoError(t, ofs.Append(f, total))
 	fake := &fakeEventReader{
 		chunkID: c, ofs: ofs,
-		bitmaps: map[events.TermKey]*roaring.Bitmap{},
+		bitmaps: map[event.TermKey]*roaring.Bitmap{},
 	}
 	for i := range total {
 		label := fmt.Sprintf("noise%d", i)
@@ -988,7 +987,7 @@ func TestEventScan_DropsDoNotStallTheChunk(t *testing.T) {
 		ev := symEvent(cid, label)
 		raw, err := ev.MarshalBinary()
 		require.NoError(t, err)
-		fake.payloads = append(fake.payloads, events.Payload{
+		fake.payloads = append(fake.payloads, event.Payload{
 			LedgerSequence: f, TxIdx: 1, OpIdx: 1, EventIdx: uint32(i),
 			ContractEventBytes: raw,
 		})
@@ -997,7 +996,7 @@ func TestEventScan_DropsDoNotStallTheChunk(t *testing.T) {
 	// are collision-style false positives the post-filter must drop.
 	all := roaring.New()
 	all.AddRange(0, total)
-	fake.bitmaps[events.ComputeTermKey(cidA[:], events.FieldContractID)] = all
+	fake.bitmaps[event.ComputeTermKey(cidA[:], event.FieldContractID)] = all
 
 	got, err := scanChunk(context.Background(),
 		eventPart{Chunk: c, Reader: fake, From: f, To: f},

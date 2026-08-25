@@ -9,16 +9,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 )
 
 // ──────────────────────────────────────────────────────────────────
-// events.LedgerOffsets app-data wire-format tests.
+// LedgerOffsets app-data wire-format tests.
 // ──────────────────────────────────────────────────────────────────
 
 func TestLedgerOffsets_EncodeDecodeRoundTrip(t *testing.T) {
-	o := events.NewLedgerOffsets(50_002)
+	o := NewLedgerOffsets(50_002)
 	require.NoError(t, o.Append(50_002, 3))
 	require.NoError(t, o.Append(50_003, 0)) // empty ledger
 	require.NoError(t, o.Append(50_004, 7))
@@ -46,7 +44,7 @@ func TestLedgerOffsets_EncodeDecodeRoundTrip(t *testing.T) {
 }
 
 func TestLedgerOffsets_EncodeEmpty(t *testing.T) {
-	o := events.NewLedgerOffsets(50_002)
+	o := NewLedgerOffsets(50_002)
 	bytes, err := encodeLedgerOffsets(o)
 	require.NoError(t, err)
 	assert.Len(t, bytes, ledgerOffsetsHeaderLen)
@@ -75,7 +73,7 @@ func TestLedgerOffsets_DecodeRejectsUnknownVersion(t *testing.T) {
 
 func TestLedgerOffsets_DecodeRejectsTruncatedArray(t *testing.T) {
 	// Declare 3 ledgers but only supply 2 entries of payload bytes.
-	o := events.NewLedgerOffsets(50_002)
+	o := NewLedgerOffsets(50_002)
 	require.NoError(t, o.Append(50_002, 1))
 	require.NoError(t, o.Append(50_003, 1))
 	require.NoError(t, o.Append(50_004, 1))
@@ -97,28 +95,28 @@ func TestLedgerOffsets_EncodeNil(t *testing.T) {
 // MPHF wrapper tests.
 // ──────────────────────────────────────────────────────────────────
 
-// keyFor returns the events.TermKey events.ComputeTermKey produces for the i'th
+// keyFor returns the TermKey ComputeTermKey produces for the i'th
 // test value — useful for verifying Lookup against the same value
-// the test loaded into the events.Bitmaps.
-func keyFor(i int) events.TermKey {
-	return events.ComputeTermKey(
+// the test loaded into the Bitmaps.
+func keyFor(i int) TermKey {
+	return ComputeTermKey(
 		fmt.Appendf(nil, "key-%d", i),
-		events.FieldContractID,
+		FieldContractID,
 	)
 }
 
-// buildIndex returns a populated events.Bitmaps of n distinct terms,
+// buildIndex returns a populated Bitmaps of n distinct terms,
 // each with a single event ID. Mirrors how the freeze writer will
 // hand the chunk's term set to buildMPHF at runtime — the writer
-// always has an events.Bitmaps in hand (the chunk's in-memory mirror
+// always has an Bitmaps in hand (the chunk's in-memory mirror
 // or one rebuilt from a RocksDB scan). The returned index is already
 // Close()'d so buildMPHF can iterate via idx.All().
-func buildIndex(t *testing.T, n int) events.Bitmaps {
+func buildIndex(t *testing.T, n int) Bitmaps {
 	t.Helper()
-	idx := events.NewBitmaps()
+	idx := NewBitmaps()
 	for i := range n {
 		idx.AddTo(
-			events.ComputeTermKey(fmt.Appendf(nil, "key-%d", i), events.FieldContractID),
+			ComputeTermKey(fmt.Appendf(nil, "key-%d", i), FieldContractID),
 			uint32(i),
 		)
 	}
@@ -181,9 +179,9 @@ func TestLookup_UnseenKeyBehavior(t *testing.T) {
 		collidedSlot int
 	)
 	for i := range 200 {
-		unseen := events.ComputeTermKey(
+		unseen := ComputeTermKey(
 			fmt.Appendf(nil, "never-added-%d", i),
-			events.FieldTopic0,
+			FieldTopic0,
 		)
 		slot, err := m.Lookup(unseen)
 		switch {
@@ -206,12 +204,12 @@ func TestLookup_UnseenKeyBehavior(t *testing.T) {
 
 func TestBuild_EmptyIndexSucceeds(t *testing.T) {
 	// Zero terms builds a valid empty index rather than erroring.
-	empty := events.NewBitmaps()
+	empty := NewBitmaps()
 	m, err := buildMPHF(context.Background(), empty, filepath.Join(t.TempDir(), "index.hash"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = m.Close() })
 	assert.True(t, m.isEmpty())
-	_, lerr := m.Lookup(events.ComputeTermKey([]byte("anything"), events.FieldContractID))
+	_, lerr := m.Lookup(ComputeTermKey([]byte("anything"), FieldContractID))
 	assert.ErrorIs(t, lerr, ErrKeyNotFound)
 }
 
@@ -225,7 +223,7 @@ func TestOpen_RoundTripsBuiltFile(t *testing.T) {
 	// Record every (key, slot) the Build handle reports, then close
 	// it and reopen via Open. Slots must match — the file is the
 	// authoritative serialization.
-	expected := make(map[events.TermKey]uint32, n)
+	expected := make(map[TermKey]uint32, n)
 	for i := range n {
 		k := keyFor(i)
 		slot, err := built.Lookup(k)
@@ -249,7 +247,7 @@ func TestBuild_AcceptsManyKeys(t *testing.T) {
 	// A more realistic workload — exercise streamhash beyond toy
 	// sizes so basic build-time issues (chunked partition handling,
 	// etc.) surface in unit tests rather than at PR-2c integration
-	// time. Also exercises the streaming path: with an events.Bitmaps
+	// time. Also exercises the streaming path: with an Bitmaps
 	// holding 10K terms, Build never materializes the keys as a
 	// slice.
 	const n = 10_000
