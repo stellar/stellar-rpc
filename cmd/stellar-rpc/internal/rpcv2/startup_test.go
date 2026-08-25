@@ -3,6 +3,7 @@ package rpcv2
 import (
 	"context"
 	"errors"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -105,6 +106,7 @@ func startTestConfig(
 		Retention:  rpcv2test.RetentionFor(t, cat, 0),
 		Core:       core,
 		ServeReads: nopServeReads,
+		Endpoint:   "127.0.0.1:0",
 	}
 	if recordPlan != nil {
 		cfg.runBackfill = func(_ context.Context, _ backfill.ExecConfig, lo, hi chunk.ID) error {
@@ -463,10 +465,10 @@ func TestRun_ReadServerDeathFailsRun(t *testing.T) {
 	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}} // young ⇒ no backfill
 	cfg := startTestConfig(t, cat, tip, &fakeCore{}, nil)
 
-	// The runner returning before its ctx cancels is the accept loop dying;
+	// ServeReads returning before its ctx cancels is the accept loop dying;
 	// run must surface it (crash-only: the process exits, k8s restarts).
-	cfg.ServeReads = func(context.Context, *query.Registry) (readRunner, error) {
-		return func(context.Context) error { return errors.New("accept loop broke") }, nil
+	cfg.ServeReads = func(context.Context, *query.Registry, net.Listener) error {
+		return errors.New("accept loop broke")
 	}
 
 	errCh := make(chan error, 1)
@@ -482,25 +484,29 @@ func TestRun_ReadServerDeathFailsRun(t *testing.T) {
 	}
 }
 
-// A ServeReads error is surfaced wrapped as a run failure (NOT clean).
-// run() opens the resume hot DB and starts core BEFORE serving; a serve error
-// after those returns via run()'s defer, which closes the DB (the loop never took
-// ownership), so a restart can reopen it — asserted by the reopen below.
-func TestRun_ServeReadsErrorSurfaces(t *testing.T) {
+// A bind failure (the endpoint already taken) is surfaced wrapped as a run
+// failure (NOT clean). run() opens the resume hot DB and starts core BEFORE
+// binding; the bind error returns via run()'s defer, which closes the DB (the
+// loop never took ownership), so a restart can reopen it — asserted by the
+// reopen below.
+func TestRun_BindFailureSurfaces(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 	core := &fakeCore{stream: &fakeCoreStream{frames: map[uint32][]byte{}, blockOnCtx: true}}
 	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}}
 	cfg := startTestConfig(t, cat, tip, core, nil)
-	cfg.ServeReads = func(context.Context, *query.Registry) (readRunner, error) {
-		return nil, errors.New("rpc bind failed")
-	}
+	// Occupy a port so run()'s own bind fails with a real address-in-use.
+	var lc net.ListenConfig
+	taken, lerr := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	require.NoError(t, lerr)
+	defer func() { _ = taken.Close() }()
+	cfg.Endpoint = taken.Addr().String()
 
 	err := run(context.Background(), cfg)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "serve reads")
-	require.NotErrorIs(t, err, context.Canceled, "a ServeReads error is a failure, not a clean shutdown")
-	require.Equal(t, int32(1), core.openedCount.Load(), "core was started before serving")
+	require.Contains(t, err.Error(), "read listener")
+	require.NotErrorIs(t, err, context.Canceled, "a bind failure is a failure, not a clean shutdown")
+	require.Equal(t, int32(1), core.openedCount.Load(), "core was started before binding")
 
 	// run() opened the resume hot DB before serving and closed it on the error path
 	// (the loop never took ownership): reopening it succeeds (LOCK released).
@@ -511,9 +517,10 @@ func TestRun_ServeReadsErrorSurfaces(t *testing.T) {
 
 // The resume hot DB and core are opened BEFORE reads are served (the design's
 // fail-fast order): by the time ServeReads runs, the resume chunk's hot key is
-// already "ready" and core has started — so a broken hot tier / core fails startup
-// instead of serving behind a crash-looping loop. Asserted from inside ServeReads,
-// which then errors to avoid entering the blocking loop.
+// already "ready" and core has started — so a broken hot tier / core fails
+// startup instead of serving behind a crash-looping loop. Asserted from inside
+// the serve fake (whose invocation follows run()'s own bind), which then
+// errors to end the run; the blocking stream keeps the observed state stable.
 func TestRun_OpensHotDBAndCoreBeforeServe(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
@@ -524,17 +531,17 @@ func TestRun_OpensHotDBAndCoreBeforeServe(t *testing.T) {
 
 	var stateAtServe geometry.HotState
 	var coreAtServe int32
-	cfg.ServeReads = func(context.Context, *query.Registry) (readRunner, error) {
+	cfg.ServeReads = func(context.Context, *query.Registry, net.Listener) error {
 		st, herr := cat.HotState(resumeChunk)
 		require.NoError(t, herr)
 		stateAtServe = st
 		coreAtServe = core.openedCount.Load()
-		return nil, errors.New("stop before the blocking loop")
+		return errors.New("stop the run after asserting")
 	}
 
 	err := run(context.Background(), cfg)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "serve reads")
+	require.Contains(t, err.Error(), "stop the run after asserting")
 	assert.Equal(t, geometry.HotReady, stateAtServe, "resume hot DB is open+ready before serve")
 	assert.Equal(t, int32(1), coreAtServe, "core is opened before serve")
 }

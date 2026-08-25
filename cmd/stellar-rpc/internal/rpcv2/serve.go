@@ -22,54 +22,45 @@ import (
 // still in flight after it is cut off.
 const readShutdownTimeout = 5 * time.Second
 
-// newServeReads returns the production ServeReads — method table over the
-// registry, bound to [service].endpoint; the contract lives on
+// newServeReads returns the production ServeReads — the method table over the
+// registry, served on run()'s bound listener; the contract lives on
 // StartConfig.ServeReads. params carries the handler inputs; the registry and
 // the two readers are filled here.
-func newServeReads(cfg config.Config, params handlerParams) serveReadsFn {
-	return func(ctx context.Context, reg *query.Registry) (readRunner, error) {
+func newServeReads(
+	cfg config.Config, params handlerParams,
+) func(context.Context, *query.Registry, net.Listener) error {
+	return func(ctx context.Context, reg *query.Registry, listener net.Listener) error {
 		p := params
 		p.registry = reg
 		p.ledgerReader = adapters.NewLedgerReader()
 		p.transactionReader = adapters.NewTransactionReader(p.networkPassphrase, p.metrics)
 		handler := newJSONRPCHandler(cfg, p)
-
-		var lc net.ListenConfig
-		listener, err := lc.Listen(ctx, "tcp", cfg.Service.Endpoint)
-		if err != nil {
-			handler.Close()
-			return nil, fmt.Errorf("read server listen on %q: %w", cfg.Service.Endpoint, err)
-		}
 		server := &http.Server{Handler: handler, ReadTimeout: jsonrpc.DefaultHTTPReadTimeout}
-		params.logger.WithField("endpoint", cfg.Service.Endpoint).Info("read server listening")
 
-		run := func(runCtx context.Context) error {
-			// Both exits close the server: on death this reaps established
-			// keep-alive conns Serve abandoned; after the graceful path's
-			// Shutdown it is a no-op.
-			defer func() { _ = server.Close() }()
-			defer handler.Close()
-			died := make(chan error, 1)
-			go func() { died <- server.Serve(listener) }()
-			select {
-			case serr := <-died:
-				// Before any shutdown, Serve can only exit on a real failure
-				// (nothing else closes the server), so this fails the errgroup
-				// and the process.
-				return fmt.Errorf("read server died: %w", serr)
-			case <-runCtx.Done():
-				// Graceful drain, bounded: runCtx is already canceled, so a
-				// fresh Background timeout bounds the drain.
-				shutdownCtx, cancel := context.WithTimeout(context.Background(), readShutdownTimeout)
-				defer cancel()
-				if serr := server.Shutdown(shutdownCtx); serr != nil { //nolint:contextcheck // ctx is canceled
-					_ = server.Close()
-				}
-				<-died // ErrServerClosed, by construction
-				return runCtx.Err()
+		// Both exits close the server: on death this reaps established
+		// keep-alive conns Serve abandoned; after the graceful path's
+		// Shutdown it is a no-op.
+		defer func() { _ = server.Close() }()
+		defer handler.Close()
+		died := make(chan error, 1)
+		go func() { died <- server.Serve(listener) }()
+		select {
+		case serr := <-died:
+			// Before any shutdown, Serve can only exit on a real failure
+			// (nothing else closes the server), so this fails the errgroup
+			// and the process.
+			return fmt.Errorf("read server died: %w", serr)
+		case <-ctx.Done():
+			// Graceful drain, bounded: ctx is already canceled, so a fresh
+			// Background timeout bounds the drain.
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), readShutdownTimeout)
+			defer cancel()
+			if serr := server.Shutdown(shutdownCtx); serr != nil { //nolint:contextcheck // ctx is canceled
+				_ = server.Close()
 			}
+			<-died // ErrServerClosed, by construction
+			return ctx.Err()
 		}
-		return run, nil
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -164,17 +165,17 @@ func run(ctx context.Context, cfg StartConfig) error {
 		Grace:      cfg.lifecycleGrace,
 	}.WithLifecycleDefaults()
 
-	// Bind the read server (injected) BEFORE launching the loops; the contract
-	// lives on StartConfig.ServeReads. The runner owns the listener and bridge
-	// release, so it must reach the g.Go below — keep this gap free of fallible
-	// steps, or a failure here leaks the bound endpoint for the process's life.
-	serveRun, err := cfg.ServeReads(ctx, registry)
+	// Bind the read endpoint BEFORE launching the loops, so a taken port fails
+	// startup here with nothing else running. The defer covers every exit path
+	// (a failure below, or teardown after ServeReads' own drain already closed
+	// it), so the bound port can never outlive run().
+	var lc net.ListenConfig
+	listener, err := lc.Listen(ctx, "tcp", cfg.Endpoint)
 	if err != nil {
-		return fmt.Errorf("startup serve reads: %w", err)
+		return fmt.Errorf("startup read listener on %q: %w", cfg.Endpoint, err)
 	}
-	if serveRun == nil {
-		return errors.New("startup serve reads: nil runner")
-	}
+	defer func() { _ = listener.Close() }()
+	cfg.Exec.Logger.WithField("endpoint", listener.Addr().String()).Info("read server listening")
 
 	// Ingestion and the lifecycle run as a joined pair under errgroup.WithContext:
 	// gctx cancels as soon as EITHER returns — and WithContext records the returning
@@ -211,13 +212,14 @@ func run(ctx context.Context, cfg StartConfig) error {
 		return lifecycle.Loop(gctx, lifecycleCfg, cat, boundary)
 	})
 	g.Go(func() error {
-		// Serves until gctx cancels or the accept loop dies (contract on
-		// StartConfig.ServeReads). The endpoint therefore drains at the FIRST
-		// sibling failure or SIGTERM; the rest of the unwind (an in-flight
-		// freeze finalize) runs without serving. Accepted under crash-only:
-		// the process is exiting, and serving through a doomed unwind is not
-		// worth the stop-after-Wait machinery it used to require.
-		return serveRun(gctx)
+		// Serves on the bound listener until gctx cancels or the accept loop
+		// dies (contract on StartConfig.ServeReads). The endpoint therefore
+		// drains at the FIRST sibling failure or SIGTERM; the rest of the
+		// unwind (an in-flight freeze finalize) runs without serving. Accepted
+		// under crash-only: the process is exiting, and serving through a
+		// doomed unwind is not worth the stop-after-Wait machinery it used to
+		// require.
+		return cfg.ServeReads(gctx, registry, listener)
 	})
 	return g.Wait()
 }
@@ -374,14 +376,19 @@ type StartConfig struct {
 	// Core starts captive core and yields the ingestion getter. Required.
 	Core CoreOpener
 
-	// ServeReads binds the read server over this run's registry and returns a
-	// runner; the bind must be synchronous (a taken port fails startup) and the
-	// runner must serve until its context cancels — draining before returning,
-	// so no handler outlives the stores — or return the accept loop's death as
-	// its error. run() joins the runner into the errgroup, so a dead accept
-	// loop fails the process (v1 classifies it fatal too). This comment is the
-	// contract's one authoritative statement. Required, non-nil runner.
-	ServeReads serveReadsFn
+	// Endpoint is the read server's listen address. run() carries it because
+	// run() owns the bind (a taken port fails startup before the loops
+	// launch); everything else about serving belongs to the ServeReads
+	// implementation. Required.
+	Endpoint string
+
+	// ServeReads serves the read surface for this run's registry on the bound
+	// listener, blocking until its context cancels — draining before
+	// returning, so no handler outlives the stores — or until the accept loop
+	// dies, returned as its error. run() joins it into the errgroup, so a dead
+	// accept loop fails the process (v1 classifies it fatal too). This comment
+	// is the contract's one authoritative statement. Required.
+	ServeReads func(ctx context.Context, reg *query.Registry, l net.Listener) error
 
 	// runBackfill is a test-only seam for one backfill pass; nil ⇒ backfill.RunBackfill.
 	runBackfill func(ctx context.Context, exec backfill.ExecConfig, lo, hi chunk.ID) error
@@ -397,14 +404,6 @@ type StartConfig struct {
 	// means the loop never computes fees.
 	FeeWindows *feewindow.FeeWindows
 }
-
-// readRunner serves the bound read server until its context cancels; the
-// contract lives on StartConfig.ServeReads.
-type readRunner func(context.Context) error
-
-// serveReadsFn binds the read server over a run's registry and returns its
-// runner; the contract lives on StartConfig.ServeReads.
-type serveReadsFn func(ctx context.Context, reg *query.Registry) (readRunner, error)
 
 // withDefaults fills the embedded Exec defaults (Workers -> GOMAXPROCS). The
 // lifecycle.Config is assembled from Exec + Retention in run(); the tip retry
@@ -431,6 +430,9 @@ func (cfg StartConfig) validate() error {
 	}
 	if cfg.ServeReads == nil {
 		return errors.New("nil StartConfig.ServeReads")
+	}
+	if cfg.Endpoint == "" {
+		return errors.New("empty StartConfig.Endpoint")
 	}
 	return nil
 }

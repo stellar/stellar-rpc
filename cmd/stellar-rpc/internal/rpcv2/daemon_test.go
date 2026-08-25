@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -429,14 +430,14 @@ func TestRunBody_FailureSurfacesOnce(t *testing.T) {
 	var binds atomic.Int32
 	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}}
 	start := startTestConfig(t, cat, tip, &fakeCore{}, nil)
-	start.ServeReads = func(context.Context, *query.Registry) (readRunner, error) {
+	start.ServeReads = func(context.Context, *query.Registry, net.Listener) error {
 		binds.Add(1)
-		return nil, errors.New("bind failure")
+		return errors.New("serve failure")
 	}
 
 	err := runBody(context.Background(), start, silentLogger())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "bind failure")
+	assert.Contains(t, err.Error(), "serve failure")
 	assert.Equal(t, int32(1), binds.Load(), "one attempt, no in-process retry")
 }
 

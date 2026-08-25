@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"iter"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -24,34 +25,30 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 )
 
-// blockingRunner is the no-op read-server runner: it serves nothing and
-// returns when its context cancels, like the production runner's clean path.
-func blockingRunner(rc context.Context) error {
-	<-rc.Done()
-	return rc.Err()
+// nopServeReads is the no-op ServeReads: it serves nothing and returns when
+// its context cancels, like the production serve's clean path.
+func nopServeReads(ctx context.Context, _ *query.Registry, _ net.Listener) error {
+	<-ctx.Done()
+	return ctx.Err()
 }
 
-// nopServeReads is the no-op ServeReads for tests that need serving wired but
-// never exercise it.
-func nopServeReads(context.Context, *query.Registry) (readRunner, error) {
-	return blockingRunner, nil
-}
-
-// countingServeReads is a no-op ServeReads that counts its binds — for tests
-// that only care that serving started.
-func countingServeReads(served *atomic.Int32) serveReadsFn {
-	return func(context.Context, *query.Registry) (readRunner, error) {
+// countingServeReads is a no-op ServeReads that counts its invocations — for
+// tests that only care that serving started.
+func countingServeReads(served *atomic.Int32) func(context.Context, *query.Registry, net.Listener) error {
+	return func(ctx context.Context, _ *query.Registry, _ net.Listener) error {
 		served.Add(1)
-		return blockingRunner, nil
+		<-ctx.Done()
+		return ctx.Err()
 	}
 }
 
 // signalingServeReads is countingServeReads' channel twin, for tests that
 // sequence on the moment serving starts.
-func signalingServeReads(servedCh chan struct{}) serveReadsFn {
-	return func(context.Context, *query.Registry) (readRunner, error) {
+func signalingServeReads(servedCh chan struct{}) func(context.Context, *query.Registry, net.Listener) error {
+	return func(ctx context.Context, _ *query.Registry, _ net.Listener) error {
 		servedCh <- struct{}{}
-		return blockingRunner, nil
+		<-ctx.Done()
+		return ctx.Err()
 	}
 }
 

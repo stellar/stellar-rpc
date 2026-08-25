@@ -39,14 +39,14 @@ func TestServeReads_ServesAndDrainsOnCancel(t *testing.T) {
 		retentionWindow:   1,
 	})
 
-	url := "http://" + cfg.Service.Endpoint
-
-	run, err := serve(context.Background(), r)
+	var lc net.ListenConfig
+	listener, err := lc.Listen(context.Background(), "tcp", cfg.Service.Endpoint)
 	require.NoError(t, err)
+	url := "http://" + listener.Addr().String()
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- run(runCtx) }()
+	go func() { done <- serve(runCtx, r, listener) }()
 
 	out := rpcv2test.PostRPC(t, url, "getVersionInfo", `{}`)
 	assert.Nil(t, out.Error)

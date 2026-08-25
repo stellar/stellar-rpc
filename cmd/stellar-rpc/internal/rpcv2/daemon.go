@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +30,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 )
 
 // RunDaemon is the full-history daemon's process entrypoint: load config, lock
@@ -69,9 +71,9 @@ type daemonOptions struct {
 
 	// ServeReads overrides the read server (contract on StartConfig.ServeReads).
 	// nil ⇒ the production server (newServeReads): the shared method table over
-	// the router-backed adapters, listening on [service].endpoint. Tests inject
-	// recorders.
-	ServeReads serveReadsFn
+	// the router-backed adapters, served on run()'s bound listener. Tests
+	// inject recorders.
+	ServeReads func(ctx context.Context, reg *query.Registry, l net.Listener) error
 
 	// Logger overrides the daemon logger; nil ⇒ built from [logging].level/.format.
 	Logger *supportlog.Entry
@@ -346,7 +348,7 @@ func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry
 func startConfig(
 	cfg config.Config, cat *catalog.Catalog, logger *supportlog.Entry,
 	backend backfill.Backend, core CoreOpener,
-	serveReads serveReadsFn,
+	serveReads func(context.Context, *query.Registry, net.Listener) error,
 	metrics observability.Metrics, sink ingest.MetricSink, retention geometry.Retention,
 ) StartConfig {
 	exec := backfill.ExecConfig{
@@ -365,6 +367,7 @@ func startConfig(
 		Retention:  retention,
 		Core:       core,
 		ServeReads: serveReads,
+		Endpoint:   cfg.Service.Endpoint,
 	}
 }
 
