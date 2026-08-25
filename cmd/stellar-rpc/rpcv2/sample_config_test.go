@@ -49,8 +49,9 @@ func TestSampleConfig_ParsesStrict(t *testing.T) {
 	assert.Equal(t, "http://localhost:11626", cfg.Ingestion.CoreURL,
 		"the sample leaves core_url commented out, so it derives from core_http_port")
 
-	assert.Equal(t, uint32(backfill.DefaultBSBBufferSize), *cfg.Backfill.BSB.BufferSize)
-	assert.Equal(t, uint32(backfill.DefaultBSBNumWorkers), *cfg.Backfill.BSB.NumWorkers)
+	assert.Equal(t, uint32(backfill.DefaultBSBPrefetchObjects), *cfg.Backfill.BSB.BufferSize)
+	assert.Equal(t, uint32(backfill.DefaultBSBDownloads), *cfg.Backfill.BSB.NumWorkers)
+	assert.Equal(t, int64(backfill.DefaultBSBPrefetchBytes), *cfg.Backfill.BSB.BufferBytes)
 	assert.Equal(t, uint32(backfill.DefaultBSBMaxRetries), *cfg.Backfill.BSB.MaxRetries)
 	assert.Equal(t, backfill.DefaultBSBRetryWait, *cfg.Backfill.BSB.RetryWait)
 }

@@ -43,14 +43,17 @@ type sourceConfig struct {
 	// (destination_path). Required when Kind is sourceBSB.
 	BucketPath string
 
-	// BufferSize is the BSB prefetch buffer depth PER WORKER: total prefetch
-	// multiplies by the cold driver's Workers. Zero falls back to the backfill
-	// package's default.
+	// BufferSize overrides one chunk task's prefetch depth, in datastore
+	// objects. Zero takes the default.
 	BufferSize uint32
 
-	// NumWorkers is the BSB download concurrency PER WORKER: total downloads
-	// in flight multiply by the cold driver's Workers. Zero falls back to the
-	// backfill package's default.
+	// BufferBytes is one chunk task's prefetch budget in bytes; zero takes the
+	// default. It is the bound that tracks memory, since object size varies
+	// ~700x across pubnet history while a count does not.
+	BufferBytes int64
+
+	// NumWorkers overrides one chunk task's download concurrency. Zero takes
+	// the default.
 	NumWorkers uint32
 
 	// RetryLimit caps BSB download retries on transient datastore errors,
@@ -83,6 +86,10 @@ func (c sourceConfig) validate() error {
 	case sourceBSB:
 		if c.BucketPath == "" {
 			return errors.New("--bucket-path is required when --source=bsb")
+		}
+		if c.BufferBytes < 0 {
+			return fmt.Errorf("--bsb-buffer-bytes (%d) cannot be negative; "+
+				"drop the flag to use the default", c.BufferBytes)
 		}
 	default:
 		return fmt.Errorf("--source=%s; expected %s|%s", c.Kind, sourcePack, sourceBSB)
@@ -118,12 +125,13 @@ func openSource(ctx context.Context, cfg sourceConfig) (backfill.Backend, func()
 		}
 		backend, release, err := backfill.NewBSBBackendFromConfig(ctx,
 			datastore.DataStoreConfig{Type: cfg.DatastoreType, Params: params},
-			ledgerbackend.BufferedStorageBackendConfig{
-				BufferSize: cfg.BufferSize,
-				NumWorkers: cfg.NumWorkers,
-				RetryLimit: cfg.RetryLimit,
-				RetryWait:  cfg.RetryWait,
-			})
+			backfill.FillBSBDefaults(ledgerbackend.BufferedStorageBackendConfig{
+				BufferSize:  cfg.BufferSize,
+				BufferBytes: cfg.BufferBytes,
+				NumWorkers:  cfg.NumWorkers,
+				RetryLimit:  cfg.RetryLimit,
+				RetryWait:   cfg.RetryWait,
+			}))
 		if err != nil {
 			return nil, noop, fmt.Errorf("open BSB backend: %w", err)
 		}

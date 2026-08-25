@@ -302,11 +302,17 @@ func (d DataStoreConfig) SDKConfig(networkPassphrase string) datastore.DataStore
 // key is named max_retries to match [backfill].max_retries instead of the SDK's
 // retry_limit. SDKConfig converts to the SDK type at the daemon boundary.
 type BSBConfig struct {
-	// BufferSize is how many downloaded ledgers are buffered in memory, keeping
-	// the download ahead of ingest; >= 1. Default backfill.DefaultBSBBufferSize.
+	// BufferSize is the prefetch depth of one chunk task, in datastore OBJECTS
+	// (an object holds ledgersPerFile ledgers). >= 1. It bounds per-object
+	// overhead, not memory.
 	BufferSize *uint32 `toml:"buffer_size"`
-	// NumWorkers is how many object downloads run concurrently; >= 1. Default
-	// backfill.DefaultBSBNumWorkers.
+	// BufferBytes is one chunk task's prefetch budget in bytes — the bound
+	// that tracks memory, since object size varies ~700x across pubnet history
+	// while a count does not. >= 1; unset takes the default.
+	BufferBytes *int64 `toml:"buffer_bytes"`
+
+	// NumWorkers is how many object downloads run concurrently for one chunk
+	// task; >= 1 and <= buffer_size.
 	NumWorkers *uint32 `toml:"num_workers"`
 	// MaxRetries caps how many times ONE object download (a single ledger file
 	// fetched from the datastore) is retried after a transient error, waiting
@@ -325,10 +331,11 @@ type BSBConfig struct {
 // type. Call it only after WithDefaults, when every field is non-nil.
 func (b BSBConfig) SDKConfig() ledgerbackend.BufferedStorageBackendConfig {
 	return ledgerbackend.BufferedStorageBackendConfig{
-		BufferSize: *b.BufferSize,
-		NumWorkers: *b.NumWorkers,
-		RetryLimit: *b.MaxRetries,
-		RetryWait:  *b.RetryWait,
+		BufferSize:  *b.BufferSize,
+		BufferBytes: *b.BufferBytes,
+		NumWorkers:  *b.NumWorkers,
+		RetryLimit:  *b.MaxRetries,
+		RetryWait:   *b.RetryWait,
 	}
 }
 
@@ -556,8 +563,13 @@ func (cfg Config) WithDefaults() Config {
 		v := DefaultMaxRetries
 		cfg.Backfill.MaxRetries = &v
 	}
-	fillUint32(&cfg.Backfill.BSB.BufferSize, backfill.DefaultBSBBufferSize)
-	fillUint32(&cfg.Backfill.BSB.NumWorkers, backfill.DefaultBSBNumWorkers)
+	// Resolve through backfill.FillBSBDefaults so this path and the bench
+	// cannot drift apart.
+	resolved := backfill.FillBSBDefaults(ledgerbackend.BufferedStorageBackendConfig{})
+	fillUint32(&cfg.Backfill.BSB.BufferSize, resolved.BufferSize)
+	fillInt64(&cfg.Backfill.BSB.BufferBytes, backfill.DefaultBSBPrefetchBytes)
+	fillUint32(&cfg.Backfill.BSB.NumWorkers,
+		min(resolved.NumWorkers, *cfg.Backfill.BSB.BufferSize))
 	fillUint32(&cfg.Backfill.BSB.MaxRetries, backfill.DefaultBSBMaxRetries)
 	fillDuration(&cfg.Backfill.BSB.RetryWait, backfill.DefaultBSBRetryWait)
 	if cfg.Retention.RetentionChunks == nil {
@@ -684,6 +696,12 @@ func fillUint(p **uint, v uint) {
 }
 
 func fillBool(p **bool, v bool) {
+	if *p == nil {
+		*p = &v
+	}
+}
+
+func fillInt64(p **int64, v int64) {
 	if *p == nil {
 		*p = &v
 	}

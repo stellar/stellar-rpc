@@ -36,21 +36,48 @@ type Backend interface {
 // Default buffered-storage tuning. Exported because the config package fills
 // them into an unset [backfill.bsb] section and the bench command uses them as
 // its flag defaults — the values are defined once, here.
-//
-// The buffer and worker values are the BACKFILL-workload numbers the rpc-hack
-// bulk-ingest benchmarking converged on: the pubnet lake stores one ledger per
-// object, so download throughput is request-latency-bound and scales with
-// workers, and a deep prefetch buffer keeps the download overlapped with
-// ingest. They apply PER BSB INSTANCE — each backfill chunk task opens its own
-// stream — so aggregate connections and prefetch RAM scale with
-// [backfill].workers. TODO: revisit once the #800 ingestion experiments sweep
-// buffer depth and worker count for real.
 const (
-	DefaultBSBBufferSize = 5000
-	DefaultBSBNumWorkers = 50
+	// Every value below is PER CHUNK TASK, and backfill runs [backfill].workers
+	// tasks at once — totals multiply by the worker count.
+
+	// DefaultBSBPrefetchBytes caps one task's prefetch in bytes — the bound
+	// that tracks memory, since object size varies ~700x across pubnet history
+	// while a count does not. Throughput is flat across an 8x range around it.
+	DefaultBSBPrefetchBytes = 32 << 20
+
+	// DefaultBSBDownloads is one task's concurrent object downloads. 12-50
+	// measure identically, and aggregates to 1600 requests are error-free, so
+	// it is chosen small.
+	DefaultBSBDownloads = 25
+
+	// DefaultBSBPrefetchObjects is one task's prefetch depth in objects. It
+	// bounds per-object overhead; memory is DefaultBSBPrefetchBytes' job.
+	DefaultBSBPrefetchObjects = 5000
+
 	DefaultBSBMaxRetries = 3
 	DefaultBSBRetryWait  = 5 * time.Second
 )
+
+// FillBSBDefaults fills unset (zero) fields; explicitly set fields are
+// honored. There is no way to disable the byte cap: zero means unset, and a
+// caller wanting it effectively unbounded sets a huge value.
+func FillBSBDefaults(
+	bsb ledgerbackend.BufferedStorageBackendConfig,
+) ledgerbackend.BufferedStorageBackendConfig {
+	if bsb.BufferSize == 0 {
+		bsb.BufferSize = DefaultBSBPrefetchObjects
+	}
+	if bsb.BufferBytes == 0 {
+		bsb.BufferBytes = DefaultBSBPrefetchBytes
+	}
+	if bsb.NumWorkers == 0 {
+		bsb.NumWorkers = DefaultBSBDownloads
+	}
+	if bsb.NumWorkers > bsb.BufferSize {
+		bsb.NumWorkers = bsb.BufferSize
+	}
+	return bsb
+}
 
 // bsbSource is the Backend over an SDK datastore (the pubnet lake): a
 // buffered-storage stream for the ledgers, plus a long-lived datastore handle used
@@ -79,17 +106,8 @@ func NewBSBBackend(
 	cfg datastore.DataStoreConfig,
 	bsb ledgerbackend.BufferedStorageBackendConfig,
 ) Backend {
-	if bsb.BufferSize == 0 {
-		bsb.BufferSize = DefaultBSBBufferSize
-	}
-	if bsb.NumWorkers == 0 {
-		bsb.NumWorkers = DefaultBSBNumWorkers
-	}
-	if bsb.NumWorkers > bsb.BufferSize {
-		bsb.NumWorkers = bsb.BufferSize
-	}
 	return &bsbSource{
-		LedgerStream: ledgerbackend.NewBufferedStorageStream(bsb, cfg, nil),
+		LedgerStream: ledgerbackend.NewBufferedStorageStream(FillBSBDefaults(bsb), cfg, nil),
 		ds:           ds,
 	}
 }

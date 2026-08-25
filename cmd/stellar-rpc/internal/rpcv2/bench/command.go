@@ -29,15 +29,16 @@ func NewCommand() *cobra.Command {
 
 // sourceFlags is the ledger-source flag set shared by both subcommands.
 type sourceFlags struct {
-	source        string
-	packDir       string
-	bucketPath    string
-	bsbBufferSize uint32
-	bsbNumWorkers uint32
-	retryLimit    uint32
-	retryWait     time.Duration
-	datastoreType string
-	region        string
+	source         string
+	packDir        string
+	bucketPath     string
+	bsbBufferSize  uint32
+	bsbBufferBytes int64
+	bsbNumWorkers  uint32
+	retryLimit     uint32
+	retryWait      time.Duration
+	datastoreType  string
+	region         string
 }
 
 func (f *sourceFlags) bind(cmd *cobra.Command) {
@@ -48,10 +49,13 @@ func (f *sourceFlags) bind(cmd *cobra.Command) {
 	fs.StringVar(&f.bucketPath, "bucket-path", "sdf-ledger-close-meta/v1/ledgers/pubnet",
 		"datastore destination_bucket_path, or the lake's local directory for "+
 			"--datastore-type=Filesystem (used iff --source=bsb)")
+	fs.Int64Var(&f.bsbBufferBytes, "bsb-buffer-bytes", 0,
+		"prefetch budget in bytes for each chunk task "+
+			"(sizes the download queue, not a hard memory ceiling); 0 = default 32 MiB")
 	fs.Uint32Var(&f.bsbBufferSize, "bsb-buffer-size", 0,
-		"BSB prefetch buffer depth PER worker (0 = backfill default)")
+		"BSB prefetch depth of one stream, in objects (0 = backfill default)")
 	fs.Uint32Var(&f.bsbNumWorkers, "bsb-num-workers", 0,
-		"BSB download workers PER worker (0 = backfill default)")
+		"concurrent object downloads inside each chunk task (0 = default 25)")
 	fs.Uint32Var(&f.retryLimit, "retry-limit", backfill.DefaultBSBMaxRetries,
 		"BSB retry attempts per object download (0 = no retries)")
 	fs.DurationVar(&f.retryWait, "retry-wait", backfill.DefaultBSBRetryWait,
@@ -67,6 +71,7 @@ func (f *sourceFlags) config() sourceConfig {
 		PackDir:       f.packDir,
 		BucketPath:    f.bucketPath,
 		BufferSize:    f.bsbBufferSize,
+		BufferBytes:   f.bsbBufferBytes,
 		NumWorkers:    f.bsbNumWorkers,
 		RetryLimit:    f.retryLimit,
 		RetryWait:     f.retryWait,
