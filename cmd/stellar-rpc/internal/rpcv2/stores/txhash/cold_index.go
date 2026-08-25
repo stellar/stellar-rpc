@@ -12,9 +12,9 @@ package txhash
 // WriteColdBin guarantees).
 
 import (
-	"errors"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"

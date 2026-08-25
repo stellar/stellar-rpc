@@ -14,7 +14,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event/runspill"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
 // ───────────────────────── Cold writer ─────────────────────────
@@ -104,59 +103,6 @@ func eventsScratchDir(eventsDir string, c chunk.ID) string {
 // — keeping steady-state index memory ~64MB + sort scratch regardless of the
 // chunk's unique-term count.
 const indexSpillSlabBytes = 32 << 20
-
-// eventsFreeze is the freeze-by-merge events writer: it takes NO per-ledger
-// feed (openColdChunk leaves coldChunk.events nil, so the walk never shapes
-// events for it) and produces all three cold events artifacts at finalize
-// straight from the complete hot chunk DB's CFs (hotchunk.FreezeEventsCold).
-type eventsFreeze struct {
-	chunkID   chunk.ID
-	db        *hotchunk.DB
-	bucketDir string
-	// secret is the chunk's routing secret (event.ColdIndexSecret) — the
-	// freeze build blinds term keys with it at its run boundary, mirroring
-	// the walk path's blind-before-spill.
-	secret  [stores.SecretLen]byte
-	metrics coldMetrics
-}
-
-func newEventsFreeze(
-	bucketDir string, chunkID chunk.ID, db *hotchunk.DB, sink MetricSink,
-	secret [stores.SecretLen]byte,
-) (*eventsFreeze, error) {
-	if err := os.MkdirAll(bucketDir, 0o755); err != nil {
-		return nil, fmt.Errorf("mkdir %s: %w", bucketDir, err)
-	}
-	return &eventsFreeze{
-		chunkID:   chunkID,
-		db:        db,
-		bucketDir: bucketDir,
-		secret:    secret,
-		metrics:   newColdMetrics(sink, dataTypeEvents),
-	}, nil
-}
-
-// finalize builds events.pack + index.pack + index.hash from the hot DB. One
-// ColdIngest sample covers the whole build (there are no per-ledger writes to
-// observe on this path).
-func (e *eventsFreeze) finalize(ctx context.Context) error {
-	start := time.Now()
-	scratch := filepath.Join(e.bucketDir, ".freeze-scratch-"+e.chunkID.String())
-	err := e.db.FreezeEventsCold(ctx, scratch, e.bucketDir, e.secret, event.ColdWriterOptions{
-		Concurrency:  coldEncoderConcurrency,
-		BytesPerSync: coldBytesPerSync,
-	})
-	if err != nil {
-		err = fmt.Errorf("freeze events from hot DB: %w", err)
-	}
-	e.metrics.emit(time.Since(start), err)
-	return err
-}
-
-// close is a no-op: the freeze writer holds no partial state of its own —
-// artifact overwrite-on-retry and scratch wiping are FreezeColdFromStore's
-// contract, and the hot DB is owned by the caller.
-func (e *eventsFreeze) close() error { return nil }
 
 // write ingests one ledger's events from the shared walk's output. txParts
 // aliases the source stream's borrowed buffer, valid only for this call —

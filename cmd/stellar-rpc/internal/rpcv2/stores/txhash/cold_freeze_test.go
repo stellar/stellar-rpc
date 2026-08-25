@@ -292,7 +292,8 @@ func TestFreezeColdFromStore_RejectsCorruptRunCRC(t *testing.T) {
 	require.NoError(t, os.WriteFile(runPath, raw, 0o644))
 
 	reopened := openBareStore(t, path)
-	_, err = FreezeColdFromStore(context.Background(), chunkID, reopened, filepath.Join(t.TempDir(), "x.bin"), testBinSecret)
+	_, err = FreezeColdFromStore(
+		context.Background(), chunkID, reopened, filepath.Join(t.TempDir(), "x.bin"), testBinSecret)
 	require.ErrorContains(t, err, "crc mismatch")
 }
 
@@ -339,7 +340,8 @@ func TestFreezeAndWarmup_RejectSeqOutsideRunHeaderRange(t *testing.T) {
 	// would let either mechanism satisfy both halves.
 	require.ErrorContains(t, err, "record 0 seq ", "warmup must reject the out-of-header-range seq")
 
-	_, err = FreezeColdFromStore(context.Background(), chunkID, reopened, filepath.Join(t.TempDir(), "x.bin"), testBinSecret)
+	_, err = FreezeColdFromStore(
+		context.Background(), chunkID, reopened, filepath.Join(t.TempDir(), "x.bin"), testBinSecret)
 	require.ErrorContains(t, err, "record 0 seq ", "freeze must reject the out-of-header-range seq")
 }
 

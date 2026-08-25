@@ -442,18 +442,7 @@ func streamUnion(
 			yield(Match{}, err)
 			return
 		}
-		ids = ids[:0]
-		if descending {
-			for pos > 0 && len(ids) < batch {
-				pos--
-				ids = append(ids, all[pos])
-			}
-		} else {
-			for pos < len(all) && len(ids) < batch {
-				ids = append(ids, all[pos])
-				pos++
-			}
-		}
+		ids, pos = collectBatch(ids[:0], all, pos, batch, descending)
 		batch = rest
 		if len(ids) == 0 {
 			return
@@ -481,6 +470,24 @@ func streamUnion(
 			}
 		}
 	}
+}
+
+// collectBatch takes up to batch ids from all starting at pos, walking down
+// when descending (ids come out highest-first) and up otherwise, returning the
+// batch and the new position.
+func collectBatch(ids, all []uint32, pos, batch int, descending bool) ([]uint32, int) {
+	if descending {
+		for pos > 0 && len(ids) < batch {
+			pos--
+			ids = append(ids, all[pos])
+		}
+		return ids, pos
+	}
+	for pos < len(all) && len(ids) < batch {
+		ids = append(ids, all[pos])
+		pos++
+	}
+	return ids, pos
 }
 
 // ValidateFilters rejects filters that would silently never match

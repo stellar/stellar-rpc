@@ -436,6 +436,7 @@ type LedgerReport struct {
 // copies what it retains, so neither need outlive this call. Store.Batch's
 // lifecycle RLock + checkOpen is the authoritative closed-store guard, so there
 // is no separate pre-check here.
+
 // StartCompress forks the ledger-bytes zstd encode. The caller starts it
 // BEFORE its own TxProcessing walk so the encode overlaps that walk — the
 // walk is the largest step the encode can hide behind, and forking inside

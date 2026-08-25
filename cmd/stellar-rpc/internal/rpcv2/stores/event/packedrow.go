@@ -5,8 +5,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event/runspill"
 	"slices"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event/runspill"
 )
 
 // This file is the SHARED packed-row codec: the byte encoding for a
@@ -133,16 +134,6 @@ func PackedRecordLen(b []byte) int {
 	return n
 }
 
-// uvarintLen is the byte width binary.AppendUvarint would use for v.
-func uvarintLen(v uint64) int {
-	n := 1
-	for v >= 0x80 {
-		v >>= 7
-		n++
-	}
-	return n
-}
-
 // The postings codec (AppendTermPostings / TermPostingsLen / DecodeAscendingIDs)
 // lives in runspill, the innermost package that needs it — this package and
 // runspill share one body, imported downward, so the run files and the packed
@@ -165,4 +156,6 @@ func AppendPostings(dst []byte, ids []uint32) []byte { return runspill.AppendPos
 
 // DecodeAscendingIDs decodes count delta-varint ids via next, validating
 // ascending order and uint32 range (postings are untrusted input).
-var DecodeAscendingIDs = runspill.DecodeAscendingIDs
+func DecodeAscendingIDs(next func() (uint64, error), count uint64, ids []uint32) ([]uint32, error) {
+	return runspill.DecodeAscendingIDs(next, count, ids)
+}
