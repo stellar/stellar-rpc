@@ -11,3 +11,15 @@ conversion_result_t* xdr_to_json(
 );
 
 void free_conversion_result(conversion_result_t*);
+
+typedef struct {
+    xdr_t xdr;
+    const char* const error;
+} json_to_xdr_result_t;
+
+json_to_xdr_result_t* json_to_xdr(
+    const char* const typename,
+    xdr_t json
+);
+
+void free_json_to_xdr_result(json_to_xdr_result_t*);
