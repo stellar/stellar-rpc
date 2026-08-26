@@ -288,7 +288,8 @@ func (d *DB) Events() *event.HotStore {
 // canonical marshaled payloads, the offsets CF is the ledger-count sequence,
 // and the term index replays the hot engine's manifest-listed sealed runs
 // plus the un-sealed packed-row tail through the cold run merge — no ledger
-// re-extraction, no whole-chunk index re-derivation, no per-term memory.
+// re-extraction, no whole-chunk index re-derivation; index memory is the
+// freeze's byte-bounded blind/re-spill windows (event.FreezeColdFromStore).
 // Valid on a read-only view; the DB must be complete through the chunk's
 // last ledger (the freeze's source resolution already guarantees it).
 func (d *DB) FreezeEventsCold(
@@ -311,7 +312,8 @@ func (d *DB) FreezeLedgersCold(
 // FreezeTxhashCold builds the chunk's cold txhash .bin at binPath by
 // freeze-by-merge over THIS hot DB's durable txhash state: the
 // manifest-listed sealed runs plus the un-sealed packed-row tail, k-way
-// merged back into the .bin's hash order. Valid on a read-only view (it
+// merged, blinded, and re-sorted into the .bin's blinded-key order. Valid
+// on a read-only view (it
 // never touches the query facade); same completeness contract as the other
 // freezes. Returns the entries written.
 func (d *DB) FreezeTxhashCold(

@@ -14,13 +14,16 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
 // ---------------------------------------------------------------------------
@@ -432,4 +435,117 @@ func writeRealPack(t *testing.T, cat *catalog.Catalog, chunkID chunk.ID) {
 		context.Background(), silentLogger(), chunkID, raw, dirs,
 		ingest.NopSink{}, ingest.Config{Ledgers: true}))
 	require.FileExists(t, cat.Layout().LedgerPackPath(chunkID))
+}
+
+// ---------------------------------------------------------------------------
+// The txhash secret is scoped to the INDEX, not the chunk.
+// ---------------------------------------------------------------------------
+
+// txLCMAt returns a tx-bearing LCM for seq plus the transaction hash it
+// carries. The fixture's source account is random, so the hash is only
+// knowable after the fact — recover it from the marshaled meta rather than
+// re-deriving it.
+func txLCMAt(t *testing.T, seq uint32) ([]byte, [32]byte) {
+	t.Helper()
+	raw := rpcv2test.EventLCMBytes(t, seq)
+	var lcm xdr.LedgerCloseMeta
+	require.NoError(t, lcm.UnmarshalBinary(raw))
+	require.Len(t, lcm.V2.TxProcessing, 1, "fixture must carry exactly one transaction")
+	return raw, lcm.V2.TxProcessing[0].Result.TransactionHash
+}
+
+// TestProcessChunk_TxhashSecretIsPerIndex materializes TWO chunks that share
+// ONE tx-hash index and then builds that index over both .bins. It pins the
+// scope of the ingest-time blinding secret: ingestConfigFor must derive it from
+// TxHashIndexID(chunkID), not from the chunk. Every other test in the tree runs
+// where the two coincide (chunk 0 in index 0), so a per-CHUNK derivation passes
+// the suite while breaking every real deployment — here it makes the two .bins
+// disagree, which BuildColdIndex refuses outright ("keyed under a different
+// index secret"), and even a lenient build could not resolve both hashes
+// through one adopted secret.
+func TestProcessChunk_TxhashSecretIsPerIndex(t *testing.T) {
+	cat, _ := testCatalog(t)
+	txLayout := cat.TxHashIndexLayout()
+	first, second := chunk.ID(0), chunk.ID(1)
+	require.Greater(t, geometry.ChunksPerTxhashIndex, uint32(1),
+		"premise: the default geometry must put several chunks in one index")
+	require.Equal(t, txLayout.TxHashIndexID(first), txLayout.TxHashIndexID(second),
+		"premise: both chunks must live in ONE index for the secrets to have to match")
+
+	// One tx-bearing ledger per chunk; every other ledger is empty.
+	rawFirst, hashFirst := txLCMAt(t, first.FirstLedger())
+	rawSecond, hashSecond := txLCMAt(t, second.FirstLedger())
+	require.NotEqual(t, hashFirst, hashSecond)
+	gen := func(t *testing.T, seq uint32) []byte {
+		switch seq {
+		case first.FirstLedger():
+			return rawFirst
+		case second.FirstLedger():
+			return rawSecond
+		default:
+			return rpcv2test.ZeroTxLCMBytes(t, seq)
+		}
+	}
+
+	cfg := testProcessConfig(t, cat)
+	cfg.Backend = &fakeBackend{t: t, gen: gen, tip: math.MaxUint32}
+	set := catalog.NewArtifactSet(geometry.KindLedgers, geometry.KindTxHash)
+	ctx := context.Background()
+	require.NoError(t, processChunk(ctx, first, set, cfg))
+	require.NoError(t, processChunk(ctx, second, set, cfg))
+
+	layout := cat.Layout()
+	inputs := make([]string, 0, 2)
+	for _, c := range []chunk.ID{first, second} {
+		p := layout.TxHashBinPath(c)
+		require.Len(t, rpcv2test.ReadColdBin(t, p), 1, "chunk %s .bin holds its one transaction", c)
+		inputs = append(inputs, p)
+	}
+
+	// The build adopts ONE secret for the window and refuses inputs that
+	// disagree — a per-chunk derivation dies right here.
+	idxPath := filepath.Join(t.TempDir(), "per-index.idx")
+	require.NoError(t, txhash.BuildColdIndex(ctx, inputs, idxPath,
+		first.FirstLedger(), second.LastLedger()))
+
+	// ...and under that one secret a hash from EACH chunk resolves to its ledger.
+	reader, err := txhash.OpenColdReader(idxPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reader.Close() })
+	for _, want := range []struct {
+		hash [32]byte
+		seq  uint32
+	}{
+		{hashFirst, first.FirstLedger()},
+		{hashSecond, second.FirstLedger()},
+	} {
+		got, gerr := reader.Get(want.hash)
+		require.NoError(t, gerr, "hash %x must resolve through the shared index", want.hash[:4])
+		require.Equal(t, want.seq, got, "hash %x resolves to its ledger", want.hash[:4])
+	}
+}
+
+// TestIngestConfigFor_TxhashSecretIsIndexScoped is the other half of the scope
+// contract, in the cheap direction the e2e above cannot reach without
+// materializing a chunk a whole index away: chunks inside one index share a
+// secret, and the first chunk of the NEXT index gets a different one.
+func TestIngestConfigFor_TxhashSecretIsIndexScoped(t *testing.T) {
+	cat, _ := testCatalog(t)
+	cfg := testProcessConfig(t, cat)
+	set := catalog.NewArtifactSet(geometry.KindTxHash)
+
+	secretFor := func(c chunk.ID) []byte {
+		ic := ingestConfigFor(set, c, cfg)
+		require.True(t, ic.Txhash)
+		require.Len(t, ic.TxhashSecret, stores.SecretLen)
+		return ic.TxhashSecret
+	}
+
+	nextIndex := chunk.ID(geometry.ChunksPerTxhashIndex)
+	txLayout := cat.TxHashIndexLayout()
+	require.NotEqual(t, txLayout.TxHashIndexID(0), txLayout.TxHashIndexID(nextIndex),
+		"premise: chunk %s starts the next index", nextIndex)
+
+	require.Equal(t, secretFor(0), secretFor(1), "chunks in one index share the secret")
+	require.NotEqual(t, secretFor(0), secretFor(nextIndex), "a different index gets a different secret")
 }

@@ -42,3 +42,24 @@ func TestSecret_RejectsCorruptedPersisted(t *testing.T) {
 	require.Error(t, err, "a corrupted persisted secret must fail Open, not remint")
 	require.ErrorContains(t, err, "persisted cold-index secret is 5 bytes")
 }
+
+// TestSecret_RejectsPersistedAllZero pins that an all-zero persisted secret is
+// rejected at Open rather than adopted. It is the right LENGTH, so the
+// corruption check above waves it through, but blinding under it is no
+// blinding at all: every derived per-index secret becomes a constant an
+// attacker can reproduce, so influenced keys can be steered into one block.
+// A zeroed page from a torn write, or a deployment that never minted one, must
+// fail loudly instead of silently serving an unblinded deployment.
+func TestSecret_RejectsPersistedAllZero(t *testing.T) {
+	path := t.TempDir()
+
+	cat, err := openKVAt(t, path)
+	require.NoError(t, err)
+	var zero [32]byte
+	require.NoError(t, cat.put(catalogSecretStoreKey, string(zero[:])))
+	require.NoError(t, cat.Close())
+
+	_, err = openKVAt(t, path)
+	require.Error(t, err, "an all-zero persisted secret must fail Open, not be adopted")
+	require.ErrorContains(t, err, "all zero")
+}

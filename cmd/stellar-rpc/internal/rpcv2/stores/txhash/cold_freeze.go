@@ -6,8 +6,10 @@ package txhash
 // hash order is recovered by a k-way merge over already-sorted sources: the
 // manifest-listed sealed runs (hash-sorted 36-byte records, CRC64-framed)
 // plus each un-sealed tail row (hash-sorted by EncodeRow) fed AS ITS OWN
-// merge source — no tail explode-and-sort, so freeze RAM stays flat even for
-// a crash-inherited tail larger than one seal window. Orphan run files (a
+// merge source — no tail explode-and-sort, whatever the tail's shape (a
+// crash-inherited tail larger than one seal window included). Freeze RAM is
+// bounded by the chunk's ENTRY COUNT: the blinded-sort accumulator in
+// FreezeColdFromStore, not the merge, is this path's working set. Orphan run files (a
 // crash between run write and manifest Put) are ignored by construction:
 // only manifest-named runs feed the merge, and the CF rows past the sealed
 // frontier cover everything an orphan holds — freeze output is identical
@@ -45,12 +47,13 @@ const freezeCtxPollEvery = 4096
 
 // FreezeColdFromStore builds the chunk's cold txhash .bin at binPath from
 // the chunk's hot store (read-only opens included — nothing here needs a
-// warmed facade, and nothing is mutated). Entries stream from the source
-// merge straight to the .bin — no whole-chunk accumulator; the header's
-// leading count is patched in once the merge completes. Serialization is the
-// walk path's own writer (coldBinStream, which WriteColdBin loops a whole
-// slice over), so the byte-parity gate's only remaining subject is the entry
-// ORDER this merge produces. Returns the entries written.
+// warmed facade, and nothing is mutated). The WHOLE CHUNK's entries are
+// accumulated (pre-sized from the sources, ~20 B/record — keyed routing's
+// price on this path: blinding destroys the merge's streamable order) and
+// stable-sorted, then serialized through the walk path's own writer
+// (coldBinStream, which WriteColdBin loops a whole slice over), so the
+// byte-parity gate's only remaining subject is entry ORDER — and stability
+// pins that even for duplicate blinded keys. Returns the entries written.
 // secret is the chunk's per-index routing secret: every stored key is
 // stores.BlindKey(secret, hash[:ColdKeySize]) — the walk writer's rule.
 // Blinding destroys the merge's raw-key order, so the blinded entries are
@@ -168,8 +171,6 @@ func collectTailSources(
 }
 
 // mergeFreezeSources runs the k-way merge, emitting each record as a cold
-// entry: hash truncated to ColdKeySize, seq range-checked against the chunk.
-// mergeFreezeSources runs the k-way merge, emitting each record as a cold
 // entry — hash truncated to ColdKeySize and BLINDED with the index secret —
 // seq range-checked against the chunk. The returned slice is in the merge's
 // raw-key order (global ledger order on ties); the caller owns the
@@ -182,7 +183,11 @@ func mergeFreezeSources(
 	if err != nil {
 		return nil, fmt.Errorf("txhash freeze %s: %w", chunkID, err)
 	}
-	entries := make([]ColdEntry, 0, 1<<16)
+	total := 0
+	for _, s := range sources {
+		total += s.records()
+	}
+	entries := make([]ColdEntry, 0, total)
 	for h.len() > 0 {
 		if cerr := pollCtx(ctx, len(entries)); cerr != nil {
 			return nil, cerr
@@ -228,6 +233,11 @@ type freezeSource interface {
 	// current. (false, nil) is clean end-of-stream — for a run source that
 	// includes the whole-payload CRC64 verification passing.
 	advance() (bool, error)
+	// records returns the source's total record count, known up front from
+	// its header/row — the merge pre-sizes its accumulator with the sum, so
+	// a stress chunk never pays append-doubling's ~2x transient on a GiB
+	// slice.
+	records() int
 	// close releases resources; safe in any state.
 	close()
 }
@@ -249,6 +259,8 @@ type tailRowSource struct {
 }
 
 func (t *tailRowSource) hash() []byte { return t.row[t.off : t.off+rowHashLen] }
+
+func (t *tailRowSource) records() int { return len(t.row) / rowHashLen }
 
 func (t *tailRowSource) seq() uint32 { return t.rowSeq }
 

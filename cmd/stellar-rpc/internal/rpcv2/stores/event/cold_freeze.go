@@ -107,13 +107,15 @@ func copyDataCF(ctx context.Context, store *rocksdb.Store, w *ColdWriter) (uint6
 // freezeIndexWindowBytes caps how many packed-row bytes accumulate in the
 // window map before it flushes as one spill run. The tail is normally under
 // one seal window (≤windowLedgers event-bearing rows → a single small run);
-// the cap matters for a crash-inherited backlog — up to the whole chunk when
+// the cap bounds every freeze's respill and tail windows —
+// largest for a crash-inherited backlog — up to the whole chunk when
 // the manifest is empty — where ~32MB windows keep freeze memory bounded.
 const freezeIndexWindowBytes = 32 << 20
 
 // FreezeColdFromStore builds all three cold events artifacts for chunkID in
 // bucketDir from the chunk's (read-only) hot store. scratchDir hosts the
-// tail spill runs and terms.run; it is wiped on entry and removed on
+// blinded re-spill of the sealed runs, the tail spill runs, and terms.run;
+// it is wiped on entry and removed on
 // success, and must lie OUTSIDE the chunk DB (production: the cold events
 // bucket) — the manifest-listed runs beside the DB's CFs are consumed in
 // place, strictly read-only. opts tunes the events.pack writer exactly as
@@ -174,7 +176,7 @@ func FreezeColdFromStore(
 	}
 
 	// ── index: the engine's durable sealed runs + the un-sealed tail. ──
-	runs, err := freezeIndexInputs(ctx, store, scratchDir, secret)
+	runs, err := freezeIndexInputs(ctx, store, chunkID, scratchDir, secret)
 	if err != nil {
 		return err
 	}
@@ -185,14 +187,16 @@ func FreezeColdFromStore(
 }
 
 // freezeIndexInputs assembles the index merge's run list: the manifest-listed
-// sealed runs (in place under the chunk DB's run dir — read-only inputs,
-// never copied, moved, or deleted) followed by the tail-only scratch runs
-// from freezeIndexRuns. Only manifest-named runs qualify — an orphan a crash
+// sealed runs re-spilled under BLINDED keys into scratch (respillBlinded —
+// the originals under the chunk DB's run dir stay read-only, never moved or
+// deleted, because they serve raw-key hot lookups) followed by the tail
+// scratch runs from freezeIndexRuns. Only manifest-named runs qualify — an orphan a crash
 // left beside them holds nothing the tail past the frontier doesn't
 // re-cover, while a missing or corrupt LISTED run fails the merge loudly
 // rather than silently thinning the index.
 func freezeIndexInputs(
-	ctx context.Context, store *rocksdb.Store, scratchDir string, secret [stores.SecretLen]byte,
+	ctx context.Context, store *rocksdb.Store, chunkID chunk.ID, scratchDir string,
+	secret [stores.SecretLen]byte,
 ) ([]string, error) {
 	names, lastSealed, err := rocksdbManifest{store: store}.GetRuns()
 	if err != nil {
@@ -207,7 +211,7 @@ func freezeIndexInputs(
 	if err != nil {
 		return nil, err
 	}
-	tail, err := freezeIndexRuns(ctx, store, scratchDir, lastSealed, secret)
+	tail, err := freezeIndexRuns(ctx, store, chunkID, scratchDir, lastSealed, secret)
 	if err != nil {
 		return nil, err
 	}
@@ -254,8 +258,16 @@ func respillBlinded(
 			}
 		}
 		emitted++
+		bk := TermKey(stores.BlindKey(secret, term[:]))
+		// MergeRuns emits each term exactly once, so an occupied slot means
+		// two DISTINCT terms blinded to one key (~2^-128). Silently keeping
+		// either posting set would serve wrong results — reject loudly, the
+		// same call the index build makes on a duplicate key.
+		if _, dup := window[bk]; dup {
+			return fmt.Errorf("events: blinded key collision on %x", bk[:])
+		}
 		// MergeRuns reuses the ids buffer across emits — copy before keeping.
-		window[TermKey(stores.BlindKey(secret, term[:]))] = slices.Clone(ids)
+		window[bk] = slices.Clone(ids)
 		windowBytes += len(term) + 4*len(ids)
 		if windowBytes >= freezeIndexWindowBytes {
 			return flush()
@@ -280,7 +292,7 @@ func respillBlinded(
 // the whole chunk is tail and this is the fresh-crash full scan, not a
 // separate path.
 func freezeIndexRuns(
-	ctx context.Context, store *rocksdb.Store, scratchDir string, lastSealed uint32,
+	ctx context.Context, store *rocksdb.Store, chunkID chunk.ID, scratchDir string, lastSealed uint32,
 	secret [stores.SecretLen]byte,
 ) ([]string, error) {
 	var (
@@ -314,14 +326,23 @@ func freezeIndexRuns(
 		if len(entry.Key) != packedIndexKeyLen {
 			return nil, fmt.Errorf("events: freeze %s key length %d (want %d)", IndexCF, len(entry.Key), packedIndexKeyLen)
 		}
+		// Range-check the row's ledger against the chunk, mirroring the txhash
+		// arm: a stray row past the chunk bound would otherwise fold into the
+		// index silently.
+		if seq := binary.BigEndian.Uint32(entry.Key); seq > chunkID.LastLedger() {
+			return nil, fmt.Errorf("events: freeze %s row seq %d outside chunk %s", IndexCF, seq, chunkID)
+		}
 		if derr := DecodePackedRow(entry.Value, func(term TermKey, ids []uint32) {
 			// Blind at the run boundary — the ingest rule (see the freeze doc).
 			bk := TermKey(stores.BlindKey(secret, term[:]))
 			window[bk] = append(window[bk], ids...)
+			// Account the DECODED cost the window actually holds (key + id
+			// slice), not the varint-encoded row length — encoded bytes
+			// undercount RAM several-fold on dense rows.
+			windowBytes += 16 + 4*len(ids)
 		}); derr != nil {
 			return nil, fmt.Errorf("events: freeze ledger %d row: %w", binary.BigEndian.Uint32(entry.Key), derr)
 		}
-		windowBytes += len(entry.Value)
 		if windowBytes >= freezeIndexWindowBytes {
 			if ferr := flush(); ferr != nil {
 				return nil, ferr

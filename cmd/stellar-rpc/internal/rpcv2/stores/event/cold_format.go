@@ -110,9 +110,10 @@ const (
 const deltaPostingMaxCardinality = 1024
 
 // IndexRecordFingerprintLen is the byte width of the leading
-// fingerprint in every index.pack record. The cold reader checks
-// this against the queried term's first four bytes to filter MPHF
-// false positives before deserializing the bitmap.
+// fingerprint in every index.pack record — the ROUTED (blinded)
+// key's first four bytes. The cold reader checks it against the
+// routed query key to filter MPHF false positives before decoding
+// the postings.
 const IndexRecordFingerprintLen = 4
 
 // ──────────────────────────────────────────────────────────────────
@@ -269,8 +270,12 @@ func DecodeLedgerOffsets(data []byte) (*LedgerOffsets, error) {
 // (see stores/blind.go). The wrapper therefore feeds
 // streamhash stores.BlindKey(secret, TermKey) at both build and
 // query, with the deterministic per-chunk secret (ColdIndexSecret)
-// stored in index.hash's user metadata. The 4-byte app fingerprint in index.pack and the
-// downstream post-filter stay on the ORIGINAL TermKey bytes.
+// stored in index.hash's user metadata. The 4-byte app fingerprint
+// in index.pack is the ROUTED (blinded) key's prefix — the one
+// identity the streaming builder's pass B has in hand — and the
+// reader compares it against the routed query key. Only the
+// downstream post-filter still sees original bytes: it verifies raw
+// event FIELDS, never TermKeys.
 // ──────────────────────────────────────────────────────────────────
 
 // index.hash user-metadata wire format (streamhash WithMetadata):

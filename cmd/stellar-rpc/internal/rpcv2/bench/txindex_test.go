@@ -16,10 +16,11 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
-// writeFixtureBin writes chunk c's synthetic sorted .bin with n entries.
 // benchTestSecret keys the bench fixtures — any fixed non-zero value works;
 // BuildColdIndex adopts whatever secret the .bin headers carry.
 var benchTestSecret = [stores.SecretLen]byte{3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3}
+
+// writeFixtureBin writes chunk c's synthetic sorted .bin with n entries.
 
 func writeFixtureBin(t *testing.T, dir string, c chunk.ID, n int) {
 	t.Helper()

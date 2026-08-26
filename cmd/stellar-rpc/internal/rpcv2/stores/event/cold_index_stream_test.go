@@ -366,12 +366,46 @@ func TestWriteColdIndexFromRuns_EmptyChunk(t *testing.T) {
 	}
 }
 
+// writeEventsPackForRuns writes the events.pack half of a cold artifact set:
+// n events on the chunk's first ledger, matching the [0, n) ID space the
+// streaming index is built over. The ColdReader cross-checks index.hash
+// against events.pack before serving a lookup, so the reader-level tests need
+// the real pack, not just the index pair.
+func writeEventsPackForRuns(t *testing.T, chunkID chunk.ID, dir string, n int) {
+	t.Helper()
+	cw, err := NewColdWriter(chunkID, dir, ColdWriterOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cw.Close() })
+
+	first := chunkID.FirstLedger()
+	for i := range n {
+		require.NoError(t, cw.Append(makeColdPayload(first, 1, fmt.Sprintf("e%d", i))))
+	}
+	offsets := NewLedgerOffsets(first)
+	require.NoError(t, offsets.Append(first, uint32(n)))
+	require.NoError(t, cw.Commit(offsets))
+}
+
 // TestWriteColdIndexFromRuns_ReadsBack: the streaming build's artifacts must
 // serve reads through the production ColdReader — every term resolves to its
 // exact ID set, and an absent term misses cleanly.
 func TestWriteColdIndexFromRuns_ReadsBack(t *testing.T) {
-	const chunkID = chunk.ID(5)
-	corpus := synthTerms(500, 9)
+	const (
+		chunkID = chunk.ID(5)
+		events  = 1200
+	)
+	corpus := synthTerms(events, 9)
+
+	// Premise: the corpus must straddle the codec split, so this one read-back
+	// drives BOTH posting codecs through the reader's dispatch — the firehose
+	// term (every ID) is roaring, the singletons delta.
+	fattest, thinnest := 0, int(^uint(0)>>1)
+	for _, ids := range corpus {
+		fattest = max(fattest, len(ids))
+		thinnest = min(thinnest, len(ids))
+	}
+	require.Greater(t, fattest, deltaPostingMaxCardinality, "corpus must include a roaring-coded term")
+	require.LessOrEqual(t, thinnest, deltaPostingMaxCardinality, "corpus must include a delta-coded term")
 
 	dir := t.TempDir()
 	scratch := filepath.Join(t.TempDir(), "s")
@@ -385,15 +419,39 @@ func TestWriteColdIndexFromRuns_ReadsBack(t *testing.T) {
 	runs, err := sp.Finish()
 	require.NoError(t, err)
 	require.NoError(t, WriteColdIndexFromRuns(context.Background(), chunkID, runs, scratch, dir, testIndexSecret))
+	writeEventsPackForRuns(t, chunkID, dir, events)
 
-	m, err := openMPHF(filepath.Join(dir, IndexHashName(chunkID)))
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
 	require.NoError(t, err)
-	defer m.Close()
-	for k, want := range corpus {
-		slot, _, err := m.Lookup(k)
-		require.NoError(t, err)
-		_ = slot
-		_ = want
-		break // slot resolution exercised; full read path is covered by cold_reader tests
+	t.Cleanup(func() { _ = cr.Close() })
+
+	// Every spilled term, resolved in ONE batch through the production reader:
+	// the blinding, the MPHF routing, the fingerprint check and the posting
+	// codecs all have to agree for the exact ID set to come back.
+	keys := make([]TermKey, 0, len(corpus))
+	for k := range corpus {
+		keys = append(keys, k)
 	}
+	got, err := cr.LookupKeys(context.Background(), keys)
+	require.NoError(t, err)
+	require.Len(t, got, len(keys))
+	for i, k := range keys {
+		require.True(t, got[i].Present(), "term %x must resolve", k[:8])
+		assert.Equal(t, corpus[k], got[i].Bitmap().ToArray(), "term %x ID set", k[:8])
+		assert.Equal(t, len(corpus[k]) <= deltaPostingMaxCardinality, got[i].IDs() != nil,
+			"term %x form must follow its codec", k[:8])
+	}
+
+	// A term that was never spilled misses cleanly: absent postings, no error.
+	// (Whichever miss path it takes — streamhash no-match or a residual
+	// collision caught by the fingerprint — the outcome must be the same.)
+	absent := ComputeTermKey([]byte("never-spilled"), FieldTopic1)
+	_, inCorpus := corpus[absent]
+	require.False(t, inCorpus, "premise: the miss key must not be in the corpus")
+	miss, err := cr.LookupKeys(context.Background(), []TermKey{absent})
+	require.NoError(t, err)
+	require.Len(t, miss, 1)
+	assert.False(t, miss[0].Present(), "an absent term must miss")
+	assert.Zero(t, miss[0].Cardinality())
+	assert.Nil(t, lookupOne(t, cr, absent), "the shared single-term path must agree")
 }

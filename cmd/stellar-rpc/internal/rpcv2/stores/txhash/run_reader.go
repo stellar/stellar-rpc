@@ -34,11 +34,13 @@ type runSource struct {
 	br        *bufio.Reader
 	crc       hash.Hash64
 	hdr       runHeader
-	records   int
+	recs      int
 	remaining int
 	rec       [runRecordLen]byte
 	prev      [rowHashLen]byte
 }
+
+func (r *runSource) records() int { return r.recs }
 
 // openRunSource opens and structurally validates a run for sequential
 // draining: header magic/shape (readRunHeader) and count vs file size
@@ -60,7 +62,7 @@ func openRunSource(path string) (*runSource, error) {
 	}
 	return &runSource{
 		path: path, f: f, br: bufio.NewReaderSize(f, 128<<10),
-		crc: crc64.New(crcRunTable), hdr: hdr, records: records, remaining: records,
+		crc: crc64.New(crcRunTable), hdr: hdr, recs: records, remaining: records,
 	}, nil
 }
 
@@ -76,7 +78,7 @@ func (r *runSource) advance() (bool, error) {
 		}
 		return false, nil
 	}
-	idx := r.records - r.remaining
+	idx := r.recs - r.remaining
 	if idx > 0 {
 		copy(r.prev[:], r.rec[:rowHashLen])
 	}

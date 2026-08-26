@@ -391,8 +391,8 @@ func TestWriteIndex_CodecDispatch(t *testing.T) {
 
 	// Both codecs must come back through the reader's dispatch with the right
 	// postings. (The full ColdReader path over a complete artifact set is
-	// covered by TestWriteColdIndexFromRuns_ReadsBack, whose small terms
-	// exercise the delta codec end to end.)
+	// covered by TestWriteColdIndexFromRuns_ReadsBack, whose corpus straddles
+	// this same threshold and reads back through the production ColdReader.)
 	wantCard := []uint64{1, deltaPostingMaxCardinality, deltaPostingMaxCardinality + 1}
 	for i, k := range []TermKey{single, atThreshold, overThreshold} {
 		want := wantCard[i]

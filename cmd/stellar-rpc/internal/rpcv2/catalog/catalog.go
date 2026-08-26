@@ -20,7 +20,8 @@ import (
 // to disk paths and the tx-hash-index arithmetic) it adds the one-write
 // protocol (catalog_protocol.go) and the key-driven sweeps (catalog_sweep.go).
 //
-// Every key names a file/dir state or a config pin; progress is derived, never
+// Every key names a file/dir state, a config pin, or deployment
+// metadata (the cold-index secret); progress is derived, never
 // stored.
 //
 // The read-then-act sequences in the write protocol and the sweeps carry no

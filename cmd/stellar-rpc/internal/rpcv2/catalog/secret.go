@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
 )
 
@@ -30,6 +31,14 @@ func (c *Catalog) ensureSecret() ([32]byte, error) {
 			return s, fmt.Errorf("persisted cold-index secret is %d bytes, want %d", len(v), len(s))
 		}
 		copy(s[:], v)
+		// An all-zero persisted secret is corruption or tampering, never a
+		// mint (crypto/rand). HKDF would launder it into non-zero per-index
+		// secrets that pass every downstream zero-check while making all
+		// blinded routing attacker-predictable — the exact threat the secret
+		// exists to close. Refuse to open.
+		if s == ([32]byte{}) {
+			return s, errors.New("persisted cold-index secret is all zero (corrupt store?)")
+		}
 		return s, nil
 	}
 	if _, err := rand.Read(s[:]); err != nil {

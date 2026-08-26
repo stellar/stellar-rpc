@@ -32,7 +32,8 @@ const (
 //
 // Routed through streamhash.PreHashInPlace so the hash function and
 // byte encoding stay aligned with the MPHF builder downstream
-// (mphf.go). Including the field byte in the hash input ensures the
+// (the mphf wrapper in cold_format.go; streamhash routes on BlindKey
+// output, so this hash is the pre-blind identity). Including the field byte in the hash input ensures the
 // same value in different fields produces different keys.
 func ComputeTermKey(value []byte, field Field) TermKey {
 	// Prepend field byte to value for hashing.

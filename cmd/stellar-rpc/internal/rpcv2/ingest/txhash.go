@@ -90,7 +90,10 @@ func (t *txhashCold) finalize(_ context.Context) error {
 	start := time.Now()
 	// slices.SortFunc over sort.Slice: reflection-free, meaningfully faster
 	// on a ~3M-element sort.
-	slices.SortFunc(t.entries, func(a, b txhash.ColdEntry) int {
+	// STABLE, matching the freeze writer: duplicate blinded keys keep their
+	// arrival (ledger) order, so walk and freeze bytes agree even on inputs
+	// the downstream build would reject.
+	slices.SortStableFunc(t.entries, func(a, b txhash.ColdEntry) int {
 		return bytes.Compare(a.Key[:], b.Key[:])
 	})
 	err := txhash.WriteColdBin(t.binPath, t.secret, t.entries)

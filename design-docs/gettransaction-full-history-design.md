@@ -117,10 +117,11 @@ The `.bin` lives at `txhash/raw/{bucket:05d}/{chunk:08d}.bin`, with catalog key 
 
 ```
 uint64 LE        entry count
+16 bytes         index secret the keys were blinded with
 entry × count    20 bytes each: [key: 16][seq: 4 LE]
 ```
 
-- `key` is the **first 16 bytes of the transaction hash**. The index uses only these 16 bytes to place and find a transaction; what happens when two hashes share a 16-byte prefix is in §8.2.
+- `key` is **`BlindKey(secret, hash[:16])`** — the SipHash-2-4-128 blinding of the hash's first 16 bytes under the index's routing secret (stores/blind.go; the secret derives per index from the catalog secret and rides in the `.bin` header and index metadata). The index uses only this 16-byte blinded key to place and find a transaction; what happens when two hashes share a 16-byte prefix is in §8.2.
 - Entries are sorted ascending by `key`, **bytewise over all 16 bytes** — a total order, so the same entries always produce byte-identical files (rebuilds are deterministic).
 
 The `.bin` is a pre-sorted file, and a lookup never reads it directly. It is sorted because streamhash builds an index **much faster, and with much less memory, when its keys arrive already sorted** — its *sorted-builder mode*.
@@ -206,7 +207,7 @@ The cold tier **probes every in-retention window's `.idx`**. A hash gives no hin
 
 ```
 for each in-retention window (its live index → {lo}-{hi}.idx):
-  → MPHF probe on the hash's 16-byte prefix
+  → MPHF probe on the blinded 16-byte routing key (BlindKey of the hash prefix)
   → fingerprint check (1 byte)                    — miss ⇒ skip this window
   → on a fingerprint hit:
        seq = MinLedger + payload (3 bytes)
