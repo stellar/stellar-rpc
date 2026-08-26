@@ -149,6 +149,36 @@ func TestGetTransactions_CustomLimitAndCursor(t *testing.T) {
 	assert.Equal(t, uint32(3), response.Transactions[2].Ledger)
 }
 
+func TestGetTransactions_CaughtUpCursorIsEchoed(t *testing.T) {
+	cursors := map[string]string{
+		"above the tip":          toid.New(15, 1, 1).String(),
+		"at the consumed tip":    toid.New(10, 2, 1).String(),
+		"past the tip's last tx": toid.New(10, 5, 1).String(),
+	}
+	for name, cursor := range cursors {
+		t.Run(name, func(t *testing.T) {
+			testDB := setupDB(t, 10, 0)
+			handler := transactionsRPCHandler{
+				ledgerReader:      sqlitedb.NewLedgerReader(testDB),
+				maxLimit:          100,
+				defaultLimit:      10,
+				networkPassphrase: NetworkPassphrase,
+			}
+
+			request := protocol.GetTransactionsRequest{
+				Pagination: &protocol.LedgerPaginationOptions{
+					Cursor: cursor,
+				},
+			}
+
+			response, err := handler.getTransactionsByLedgerSequence(context.TODO(), request)
+			require.NoError(t, err)
+			assert.Empty(t, response.Transactions)
+			assert.Equal(t, cursor, response.Cursor)
+		})
+	}
+}
+
 func TestGetTransactions_InvalidStartLedger(t *testing.T) {
 	testDB := setupDB(t, 3, 0)
 	handler := transactionsRPCHandler{

@@ -41,6 +41,18 @@ var deferredCloseOps atomic.Uint64
 // a deferred close. See deferredCloseOps.
 func DeferredCloseOps() uint64 { return deferredCloseOps.Load() }
 
+// openSnapshots counts snapshots not yet released, across all stores — the
+// process-wide sum of every store's snapRefs. The metrics exporter reads it
+// via OpenSnapshots, so a leaked snapshot is visible while the process runs,
+// not only in a store's teardown log.
+//
+//nolint:gochecknoglobals // one tally across all stores; read-only outside this file
+var openSnapshots atomic.Int64
+
+// OpenSnapshots returns the process-wide count of unreleased snapshots. See
+// openSnapshots.
+func OpenSnapshots() int64 { return openSnapshots.Load() }
+
 const (
 	dirPerm       os.FileMode = 0o700
 	defaultCFName             = "default"
@@ -378,6 +390,7 @@ func (s *Store) NewSnapshot() (*Snapshot, error) {
 		return nil, err
 	}
 	s.snapRefs.Add(1)
+	openSnapshots.Add(1)
 	return &Snapshot{snap: s.db.NewSnapshot()}, nil
 }
 
@@ -395,6 +408,7 @@ func (s *Store) ReleaseSnapshot(snap *Snapshot) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	s.snapRefs.Add(-1)
+	openSnapshots.Add(-1)
 	if s.db != nil {
 		s.db.ReleaseSnapshot(snap.snap)
 	}

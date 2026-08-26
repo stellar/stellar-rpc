@@ -110,6 +110,22 @@ func TestSnapshot_ReleaseSemantics(t *testing.T) {
 	s.ReleaseSnapshot(nil)
 }
 
+func TestOpenSnapshots_TracksAcquireAndRelease(t *testing.T) {
+	s := openTestStore(t, nil)
+	base := OpenSnapshots()
+
+	snap, err := s.NewSnapshot()
+	require.NoError(t, err)
+	assert.Equal(t, base+1, OpenSnapshots())
+
+	s.ReleaseSnapshot(snap)
+	assert.Equal(t, base, OpenSnapshots())
+
+	s.ReleaseSnapshot(snap)
+	s.ReleaseSnapshot(nil)
+	assert.Equal(t, base, OpenSnapshots())
+}
+
 // TestSnapshot_NilSnapshotArgs pins the nil-snapshot guards on both read paths.
 func TestSnapshot_NilSnapshotArgs(t *testing.T) {
 	s := openTestStore(t, nil)

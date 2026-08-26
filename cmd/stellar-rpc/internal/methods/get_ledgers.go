@@ -93,6 +93,21 @@ func (h ledgersHandler) getLedgers(
 		}
 	}
 
+	// A caught-up poller's cursor points at or past the tip. Echo it back on
+	// an empty page instead of rejecting the server's own token. An explicit
+	// startLedger above the tip stays an error (Validate above rejects it).
+	if request.Pagination != nil && request.Pagination.Cursor != "" &&
+		start > availableLedgerRange.LastLedger {
+		return protocol.GetLedgersResponse{
+			Ledgers:               []protocol.LedgerInfo{},
+			LatestLedger:          ledgerRange.LastLedger.Sequence,
+			LatestLedgerCloseTime: ledgerRange.LastLedger.CloseTime,
+			OldestLedger:          ledgerRange.FirstLedger.Sequence,
+			OldestLedgerCloseTime: ledgerRange.FirstLedger.CloseTime,
+			Cursor:                request.Pagination.Cursor,
+		}, nil
+	}
+
 	end := start + uint32(limit) - 1 //nolint:gosec
 	ledgers, err := h.fetchLedgers(ctx, start, end, request.Format, readTx, ledgerRange.ToLedgerSeqRange())
 	if err != nil {
@@ -151,13 +166,16 @@ func (h ledgersHandler) parseCursor(cursor string, ledgerRange protocol.LedgerSe
 		return 0, err
 	}
 
+	// Only the lower bound is an error: below the oldest ledger is data the
+	// node no longer has. At or past the tip is a caught-up poller, answered
+	// with an empty page by getLedgers. The +1 wraps a max-uint32 cursor to
+	// start 0, which this check also catches.
 	start := uint32(cursorInt) + 1
-	if !protocol.IsLedgerWithinRange(start, ledgerRange) {
+	if start < ledgerRange.FirstLedger {
 		return 0, fmt.Errorf(
-			"cursor ('%s') must be between the oldest ledger: %d and the latest ledger: %d for this rpc instance",
+			"cursor ('%s') must be at or above the oldest ledger: %d for this rpc instance",
 			cursor,
 			ledgerRange.FirstLedger,
-			ledgerRange.LastLedger,
 		)
 	}
 

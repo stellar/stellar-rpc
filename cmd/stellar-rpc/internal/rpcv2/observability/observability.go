@@ -180,6 +180,11 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 			"cold ledger packs whose file was gone on first read "+
 				"(routing only opens packs the catalog snapshot holds; any count is an alarm)",
 			ledger.MissingPackOpens),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Namespace: namespace, Subsystem: subsystem, Name: "open_snapshots",
+			Help: "RocksDB snapshots currently held, across all stores " +
+				"(request-scoped, so a floor that stops returning to zero is a leaked read view)",
+		}, func() float64 { return float64(rocksdb.OpenSnapshots()) }),
 	)
 	return m
 }
