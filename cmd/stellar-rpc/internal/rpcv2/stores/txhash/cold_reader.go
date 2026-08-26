@@ -59,7 +59,7 @@ func (r *ColdReader) Get(hash [32]byte) (uint32, error) {
 	if r.closed.Load() {
 		return 0, stores.ErrStoreClosed
 	}
-	rk := stores.BlindKey(r.secret, hash[:ColdKeySize])
+	rk := RoutingKey(r.secret, hash[:])
 	_, payload, err := r.idx.QueryPayload(rk[:])
 	if err != nil {
 		if errors.Is(err, streamhash.ErrNotFound) {

@@ -17,10 +17,8 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/durable"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
 // ErrBackendCoverageTimeout is returned when the bulk backend's tip never reaches the chunk in time.
@@ -65,8 +63,12 @@ func (cfg ProcessConfig) validate() error {
 // ingestConfigFor maps an artifact set (plus the walk's format-affecting
 // encode setting) to ingest.Config. It lives here, not on
 // catalog.ArtifactSet, so catalog needn't import ingest (the #824 split invariant).
-// For a txhash or events request it resolves the chunk's per-index secret from the
-// catalog (the same one the index build derives), so ingest keys stay consistent.
+//
+// The chunk's per-index secrets come from hotchunk.SecretsFor — the SAME
+// expression the hot opens use — because the pairing is the point: a chunk's
+// sealed runs and its cold artifacts must be keyed alike or the freeze
+// produces something no query can route. Re-deriving them here independently
+// would make "one derivation" a claim about the hot half only.
 func ingestConfigFor(s catalog.ArtifactSet, chunkID chunk.ID, cfg ProcessConfig) ingest.Config {
 	c := ingest.Config{
 		Ledgers:           s.Has(geometry.KindLedgers),
@@ -75,15 +77,12 @@ func ingestConfigFor(s catalog.ArtifactSet, chunkID chunk.ID, cfg ProcessConfig)
 		ZstdEncodeWorkers: cfg.ZstdEncodeWorkers,
 	}
 	if c.Txhash || c.Events {
-		catalogSecret := cfg.Catalog.Secret()
+		secrets := hotchunk.SecretsFor(cfg.Catalog, chunkID)
 		if c.Txhash {
-			indexID := uint32(cfg.Catalog.TxHashIndexLayout().TxHashIndexID(chunkID))
-			sec := txhash.ColdIndexSecret(catalogSecret[:], indexID)
-			c.TxhashSecret = sec[:]
+			c.TxhashSecret = secrets.Txhash[:]
 		}
 		if c.Events {
-			sec := event.ColdIndexSecret(catalogSecret[:], chunkID)
-			c.EventsSecret = sec[:]
+			c.EventsSecret = secrets.Events[:]
 		}
 	}
 	return c

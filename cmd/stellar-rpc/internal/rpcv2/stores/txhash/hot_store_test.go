@@ -2,6 +2,8 @@ package txhash
 
 import (
 	"bytes"
+	"context"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -46,7 +48,7 @@ func openBareStore(t *testing.T, path string) *rocksdb.Store {
 func openPackedStoreAt(t *testing.T, path string, chunkID chunk.ID, sealEvery int) (*HotStore, *rocksdb.Store) {
 	t.Helper()
 	store := openBareStore(t, path)
-	s, err := NewWithStore(store, chunkID)
+	s, err := NewWithStore(store, chunkID, testBinSecret)
 	require.NoError(t, err)
 	s.hotIdx.sealEvery = sealEvery
 	t.Cleanup(s.Shutdown)
@@ -177,6 +179,75 @@ func TestHotStore_WarmupReplaysTailAndServes(t *testing.T) {
 	}
 }
 
+// TestHotStore_SecretAdoption is this engine's THREADING case for the shared
+// secret protocol: NewWithStore hands the caller's secret to
+// runset.AdoptSecret against the txhash key, so the chunk's own sealed runs
+// stay probeable across a reopen and a foreign secret is a loud open failure.
+// The protocol's own semantics (first-open-persists, zero refused, no durable
+// state on rejection) are the table test beside it, runset/secret_test.go.
+func TestHotStore_SecretAdoption(t *testing.T) {
+	chunkID := chunk.ID(0)
+	first := chunkID.FirstLedger()
+	path := t.TempDir()
+
+	s, store := openPackedStoreAt(t, path, chunkID, 2)
+	hash := randHash(testRNG(0x5EC))
+	ingestLedger(t, s, first, [][32]byte{hash})
+	ingestLedger(t, s, first+1, nil)
+	settle(t, s) // a sealed run now exists, keyed under testBinSecret
+	s.Shutdown()
+	require.NoError(t, store.Close())
+
+	// Same secret: adopted, and the sealed run still answers.
+	s2, store2 := openPackedStoreAt(t, path, chunkID, 2)
+	got, err := s2.Get(hash)
+	require.NoError(t, err)
+	require.Equal(t, first, got)
+	s2.Shutdown()
+	require.NoError(t, store2.Close())
+
+	// Different secret: loud open failure, before any run is touched.
+	other := testBinSecret
+	other[0] ^= 0xFF
+	store3 := openBareStore(t, path)
+	_, err = NewWithStore(store3, chunkID, other)
+	require.ErrorContains(t, err, "keyed under a different routing secret")
+	require.ErrorContains(t, err, "re-ingest the chunk")
+	require.NoError(t, store3.Close())
+
+	// The failed open changed nothing: the original secret still opens.
+	s4, _ := openPackedStoreAt(t, path, chunkID, 2)
+	got, err = s4.Get(hash)
+	require.NoError(t, err)
+	require.Equal(t, first, got)
+}
+
+// TestFreezeColdFromStore_RejectsForeignSecret: the freeze may not key a .bin
+// with a secret the chunk's sealed runs were not blinded under — their
+// records are copied into the file verbatim, so a mismatch would mix two
+// keyspaces into one artifact.
+func TestFreezeColdFromStore_RejectsForeignSecret(t *testing.T) {
+	chunkID := chunk.ID(0)
+	first := chunkID.FirstLedger()
+	path := t.TempDir()
+
+	s, store := openPackedStoreAt(t, path, chunkID, 2)
+	ingestLedger(t, s, first, [][32]byte{randHash(testRNG(0xF00))})
+	ingestLedger(t, s, first+1, nil)
+	settle(t, s)
+
+	other := testBinSecret
+	other[15] ^= 0x01
+	_, err := FreezeColdFromStore(
+		context.Background(), chunkID, store, filepath.Join(t.TempDir(), "x.bin"), other)
+	require.ErrorContains(t, err, "keyed under a different routing secret")
+
+	// The DB's own secret freezes fine.
+	_, err = FreezeColdFromStore(
+		context.Background(), chunkID, store, filepath.Join(t.TempDir(), "ok.bin"), testBinSecret)
+	require.NoError(t, err)
+}
+
 // TestHotStore_ReadOnlyGetPanics pins the read-only contract: no warmup runs
 // on a read-only open, so txhash queries are structurally disabled — loudly,
 // never a silent wrong answer from a cold index.
@@ -201,7 +272,7 @@ func TestHotStore_StaleFormatTripwire(t *testing.T) {
 	stale := randHash(testRNG(3))
 	require.NoError(t, store.Put(txhashCF, stale[:], rocksdb.EncodeUint32(chunkID.FirstLedger())))
 
-	_, err := NewWithStore(store, chunkID)
+	_, err := NewWithStore(store, chunkID, testBinSecret)
 	require.ErrorContains(t, err, "stale pre-release txhash format")
 }
 
@@ -219,7 +290,7 @@ func TestHotStore_WarmupRejectsDenseGap(t *testing.T) {
 		return nil
 	}))
 
-	_, err = NewWithStore(store, chunkID)
+	_, err = NewWithStore(store, chunkID, testBinSecret)
 	require.ErrorContains(t, err, "dense chain")
 }
 

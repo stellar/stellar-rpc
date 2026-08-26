@@ -20,7 +20,11 @@ func (c *Catalog) Secret() [32]byte { return c.secret }
 // fresh random one on first call. Open runs it single-threaded, after the
 // census has already validated any persisted value's width, and caches the
 // result; nothing else should call it (get-or-create is not atomic).
-func (c *Catalog) ensureSecret() ([32]byte, error) {
+//
+// pinned (catalog.WithSecret) replaces the random draw for a catalog that has
+// none yet; a persisted secret always wins over it, because the catalog's
+// keys are already blinded under the persisted one.
+func (c *Catalog) ensureSecret(pinned *[32]byte) ([32]byte, error) {
 	var s [32]byte
 	v, found, err := c.get(catalogSecretStoreKey)
 	if err != nil {
@@ -45,7 +49,12 @@ func (c *Catalog) ensureSecret() ([32]byte, error) {
 		}
 		return s, nil
 	}
-	if _, err := rand.Read(s[:]); err != nil {
+	if pinned != nil {
+		s = *pinned
+		if s == ([32]byte{}) {
+			return s, errors.New("catalog: pinned cold-index secret is all zero")
+		}
+	} else if _, err := rand.Read(s[:]); err != nil {
 		return s, err
 	}
 	if err := c.put(catalogSecretStoreKey, string(s[:])); err != nil {

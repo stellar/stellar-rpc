@@ -1,11 +1,13 @@
 package txhash
 
 import (
+	"bytes"
 	"encoding/binary"
 	"hash/crc64"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"testing"
 
@@ -97,7 +99,11 @@ func (hh *hotIndexHarness) randomLedger(fresh, reuse int) {
 }
 
 // verifyAll checks EVERY reference hash resolves to a containing ledger
-// (exactly, when the hash lives in one), plus absent-hash misses.
+// (exactly, when the hash lives in one), plus absent-hash misses. The
+// reference model IS the verification a run hit gets here: HotStore re-checks
+// a run's candidate against the ledger's raw row (hot_store.go), and these
+// engine-level tests hold no CF to read, so they check the answer against the
+// model that recorded which ledgers really carry the hash.
 func (hh *hotIndexHarness) verifyAll() {
 	hh.t.Helper()
 	for h, seqs := range hh.ref {
@@ -122,7 +128,7 @@ func (hh *hotIndexHarness) settle() {
 }
 
 func testHotIndex(t *testing.T, dir string, m runset.Manifest) *HotIndex {
-	h, err := NewHotIndex(dir, m)
+	h, err := NewHotIndex(dir, m, testBinSecret)
 	require.NoError(t, err)
 	h.sealEvery = 8 // tiny window: many seals
 	h.ArmSealing()  // tests emulate a validated live engine
@@ -167,17 +173,20 @@ func repeatedHash(b byte) [32]byte {
 
 // TestWriteRun_CrossRowDuplicateGoldenBytes pins EVERY byte of a run whose
 // window carries the same full hash in THREE different ledgers alongside a
-// tx-less ledger — the seal merge's duplicate contract, which nothing else
-// gates directly. TestHotIndex_EquivalenceAcrossSeals only asserts a
-// duplicate resolves to SOME containing ledger (require.Contains is
-// order-blind) and the run reader only checks hashes are non-decreasing, so
-// intra-run duplicate ORDER — the (hash, row) tie-break that emits equal
-// hashes oldest-ledger-first — was otherwise protected solely by RNG draws in
-// the freeze fixture, transitively and by accident.
+// tx-less ledger — the seal's duplicate contract, which nothing else gates
+// directly. TestHotIndex_EquivalenceAcrossSeals only asserts a duplicate
+// resolves to SOME containing ledger (require.Contains is order-blind) and
+// the run reader only checks keys are non-decreasing, so intra-run duplicate
+// ORDER — the (key, ledger) tie-break that emits equal keys oldest-ledger-
+// first, the .bin's stored order — was otherwise protected solely by RNG
+// draws in the freeze fixture, transitively and by accident.
 //
-// The expectation is written out by hand as (hash, seq) pairs in emission
-// order, so it pins the order the format PROMISES rather than whatever the
-// merge currently produces.
+// The expectation is built independently of the writer: blind the fixture's
+// (hash, ledger) pairs, then STABLE-sort by key alone over ledger-ordered
+// input — a different construction that must agree with the production
+// comparator's (key, ledger) order. Blinding also means the emission order is
+// no longer eyeball-obvious from the fixture, so the pin is written as that
+// construction rather than as a hand-listed sequence.
 func TestWriteRun_CrossRowDuplicateGoldenBytes(t *testing.T) {
 	encode := func(hashes ...[32]byte) []byte {
 		row, err := EncodeRow(hashes)
@@ -192,41 +201,50 @@ func TestWriteRun_CrossRowDuplicateGoldenBytes(t *testing.T) {
 		{seq: 103, bytes: encode(b, a)},
 	}
 	path := filepath.Join(t.TempDir(), "seal-000000.run")
-	_, err := writeRun(rows, path)
+	_, err := writeRun(rows, path, testBinSecret)
 	require.NoError(t, err)
 	got, err := os.ReadFile(path)
 	require.NoError(t, err)
 
-	// Ascending hash; equal hashes in ASCENDING LEDGER.
-	emitted := []struct {
-		hash [32]byte
-		seq  uint32
-	}{
-		{a, 100},
-		{a, 102},
-		{a, 103},
-		{b, 100},
-		{b, 103},
-		{c, 102},
+	// Ledger order in, blinded, stable-sorted by key: equal keys (the same
+	// hash in three ledgers) must keep ascending ledger.
+	type rec struct {
+		key [ColdKeySize]byte
+		seq uint32
 	}
+	var emitted []rec
+	for _, l := range []struct {
+		seq    uint32
+		hashes [][32]byte
+	}{
+		{100, [][32]byte{a, b}}, {102, [][32]byte{c, a}}, {103, [][32]byte{b, a}},
+	} {
+		for _, h := range l.hashes {
+			emitted = append(emitted, rec{key: stores.BlindKey(testBinSecret, h[:ColdKeySize]), seq: l.seq})
+		}
+	}
+	sort.SliceStable(emitted, func(i, j int) bool {
+		return bytes.Compare(emitted[i].key[:], emitted[j].key[:]) < 0
+	})
 	payload := make([]byte, 0, len(emitted)*runRecordLen)
 	for _, e := range emitted {
-		payload = append(payload, e.hash[:]...)
+		payload = append(payload, e.key[:]...)
 		payload = binary.LittleEndian.AppendUint32(payload, e.seq)
 	}
 	// The 40-byte header is written out with LITERAL magic and offsets, not
 	// the writer's own constants: a version bump or a relayout has to be
 	// re-declared here rather than passing silently on both sides.
 	want := make([]byte, 40, 40+len(payload))
-	copy(want, "TXHRUN01")
+	copy(want, "TXHRUN02")
 	binary.LittleEndian.PutUint64(want[8:], uint64(len(emitted)))
 	binary.LittleEndian.PutUint32(want[16:], 100)
 	binary.LittleEndian.PutUint32(want[20:], 103)
 	binary.LittleEndian.PutUint64(want[24:], crc64.Checksum(payload, crcRunTable))
 	want = append(want, payload...)
 	require.Equal(t, want, got, "run bytes drifted from the pinned seal output")
+	require.Equal(t, 20, runRecordLen, "a record is the cold .bin's entry: 16-byte key + LE seq")
 
-	// The pinned bytes are a VALID run: the drain re-verifies CRC64, hash
+	// The pinned bytes are a VALID run: the drain re-verifies CRC64, key
 	// order, seq containment and the header's promised count.
 	run, err := openSealedRun(path)
 	require.NoError(t, err)
@@ -234,7 +252,7 @@ func TestWriteRun_CrossRowDuplicateGoldenBytes(t *testing.T) {
 	assert.Equal(t, len(emitted), run.records)
 
 	// The magic is a gate nothing else in the package covers. Corrupt the
-	// FIXED prefix, so this case outlives any version bump — the "TXHRUN01"
+	// FIXED prefix, so this case outlives any version bump — the "TXHRUN02"
 	// literal above is the version pin.
 	bad := append([]byte(nil), got...)
 	bad[0] = 'X'
@@ -242,6 +260,48 @@ func TestWriteRun_CrossRowDuplicateGoldenBytes(t *testing.T) {
 	require.NoError(t, os.WriteFile(badPath, bad, 0o644))
 	_, err = openSealedRun(badPath)
 	require.ErrorContains(t, err, "bad magic", "a foreign magic must not be parsed with our offsets")
+}
+
+// TestOpenHotIndex_RejectsPreReleaseRunFormat pins the stale-format tripwire
+// on the path an operator actually meets it: warmup, opening a
+// manifest-named run left by the pre-release build (36-byte records holding
+// raw hashes, magic TXHRUN01). There is no migration and no re-keying — a
+// raw run cannot be probed with a blinded key — so the open must fail by
+// NAME, saying what to do, rather than surfacing as a record-count mismatch.
+func TestOpenHotIndex_RejectsPreReleaseRunFormat(t *testing.T) {
+	dir := t.TempDir()
+	m := &fakeManifest{}
+	h := testHotIndex(t, dir, m)
+	hh := newHarness(t, h, 500)
+	for range 8 {
+		hh.randomLedger(6, 0)
+	}
+	hh.settle()
+	h.Close()
+
+	names, _, err := m.GetRuns()
+	require.NoError(t, err)
+	require.Len(t, names, 1)
+	runPath := filepath.Join(dir, names[0])
+	raw, err := os.ReadFile(runPath)
+	require.NoError(t, err)
+	copy(raw, "TXHRUN01") // the pre-release magic, nothing else touched
+	require.NoError(t, os.WriteFile(runPath, raw, 0o644))
+
+	_, _, err = OpenHotIndex(dir, 500, m, testBinSecret)
+	require.ErrorContains(t, err, "stale pre-release run format")
+	require.ErrorContains(t, err, "re-ingest the chunk")
+
+	// A record width that is neither format's fails too, just less
+	// specifically — the size gate BEHIND the magic. Restoring the current
+	// magic first is what makes the extra byte reach that gate; with
+	// TXHRUN01 still in place the assertion would pass on the stale-format
+	// message above and gate nothing.
+	copy(raw, runMagic)
+	require.NoError(t, os.WriteFile(runPath, append(raw, 0x00), 0o644))
+	_, _, err = OpenHotIndex(dir, 500, m, testBinSecret)
+	require.ErrorContains(t, err, "does not match")
+	require.ErrorContains(t, err, "re-ingest the chunk")
 }
 
 // TestHotIndex_DenseChainViolationRejected pins ApplyRow's write-time
@@ -272,7 +332,7 @@ func TestHotIndex_DenseChainViolationRejected(t *testing.T) {
 func TestHotIndex_SealingDisarmedUntilArmed(t *testing.T) {
 	dir := t.TempDir()
 	m := &fakeManifest{}
-	h, err := NewHotIndex(dir, m)
+	h, err := NewHotIndex(dir, m, testBinSecret)
 	require.NoError(t, err)
 	defer h.Close()
 	h.sealEvery = 8 // NOT armed — the warmup-replay state
@@ -325,7 +385,7 @@ func TestHotIndex_WarmupRebuild(t *testing.T) {
 	tail := append([]windowRow(nil), h.view.Load().rows...)
 	h.Close()
 
-	h2, lastSealed, err := OpenHotIndex(dir, 900, m)
+	h2, lastSealed, err := OpenHotIndex(dir, 900, m, testBinSecret)
 	require.NoError(t, err)
 	defer h2.Close()
 	h2.sealEvery = 8
@@ -359,7 +419,7 @@ func TestHotIndex_WarmupSweepsOrphans(t *testing.T) {
 
 	orphan := filepath.Join(dir, "seal-999999.run")
 	require.NoError(t, os.WriteFile(orphan, []byte("junk"), 0o644))
-	h2, _, err := OpenHotIndex(dir, 60, m)
+	h2, _, err := OpenHotIndex(dir, 60, m, testBinSecret)
 	require.NoError(t, err)
 	h2.Close()
 	_, serr := os.Stat(orphan)
@@ -369,7 +429,7 @@ func TestHotIndex_WarmupSweepsOrphans(t *testing.T) {
 	names, _, _ := m.GetRuns()
 	require.NotEmpty(t, names)
 	require.NoError(t, os.Remove(filepath.Join(dir, names[0])))
-	_, _, err = OpenHotIndex(dir, 60, m)
+	_, _, err = OpenHotIndex(dir, 60, m, testBinSecret)
 	require.Error(t, err, "missing manifest-referenced run must fail open")
 }
 
@@ -397,11 +457,11 @@ func TestHotIndex_WarmupRejectsCorruptRun(t *testing.T) {
 	flipped := append([]byte(nil), raw...)
 	flipped[runHeaderLen+5] ^= 0x01
 	require.NoError(t, os.WriteFile(path, flipped, 0o644))
-	_, _, err = OpenHotIndex(dir, 300, m)
+	_, _, err = OpenHotIndex(dir, 300, m, testBinSecret)
 	require.Error(t, err, "corrupt payload must fail the open loudly")
 
 	require.NoError(t, os.WriteFile(path, raw[:len(raw)-runRecordLen], 0o644))
-	_, _, err = OpenHotIndex(dir, 300, m)
+	_, _, err = OpenHotIndex(dir, 300, m, testBinSecret)
 	require.Error(t, err, "truncated payload must fail the open loudly")
 }
 
@@ -427,15 +487,15 @@ func TestOpenHotIndex_RejectsBrokenRunChain(t *testing.T) {
 	require.Len(t, names, 2)
 
 	require.NoError(t, m.PutRuns([]string{names[1], names[0]}, lastSealed))
-	_, _, err = OpenHotIndex(dir, 100, m)
+	_, _, err = OpenHotIndex(dir, 100, m, testBinSecret)
 	require.Error(t, err, "reordered runs break the dense chain")
 
 	require.NoError(t, m.PutRuns(names, lastSealed+3))
-	_, _, err = OpenHotIndex(dir, 100, m)
+	_, _, err = OpenHotIndex(dir, 100, m, testBinSecret)
 	require.Error(t, err, "frontier disagreeing with the newest run is loud")
 
 	require.NoError(t, m.PutRuns(names, lastSealed))
-	h2, gotLast, err := OpenHotIndex(dir, 100, m)
+	h2, gotLast, err := OpenHotIndex(dir, 100, m, testBinSecret)
 	require.NoError(t, err)
 	assert.Equal(t, lastSealed, gotLast)
 	h2.Close()
@@ -461,7 +521,7 @@ func TestHotIndex_EmptyLedgersSealEmptyRun(t *testing.T) {
 	require.ErrorIs(t, err, stores.ErrNotFound)
 	h.Close()
 
-	h2, lastSealed2, err := OpenHotIndex(dir, 20, m)
+	h2, lastSealed2, err := OpenHotIndex(dir, 20, m, testBinSecret)
 	require.NoError(t, err)
 	defer h2.Close()
 	assert.Equal(t, uint32(23), lastSealed2)
@@ -470,33 +530,45 @@ func TestHotIndex_EmptyLedgersSealEmptyRun(t *testing.T) {
 }
 
 // prefixedHash builds a hash whose first 16 bytes repeat p and whose last 4
-// carry a counter — many DISTINCT hashes sharing one ladder prefix.
+// carry a counter — many DISTINCT hashes that nevertheless share ONE blinded
+// key, since a run's key blinds hash[:ColdKeySize]. That is the only way to
+// craft equal run keys on demand, and it is the shape the ladder's tie
+// geometry exists for (the natural one is a hash committed in several of the
+// window's ledgers).
 func prefixedHash(p byte, n uint32) [32]byte {
 	var h [32]byte
-	for i := range ladderKeyLen {
+	for i := range ColdKeySize {
 		h[i] = p
 	}
 	binary.BigEndian.PutUint32(h[28:], n)
 	return h
 }
 
+// blindPrefix is the run key every prefixedHash(p, _) collapses to.
+func blindPrefix(p byte) [ColdKeySize]byte {
+	h := prefixedHash(p, 0)
+	return stores.BlindKey(testBinSecret, h[:ColdKeySize])
+}
+
 // TestHotIndex_LadderBoundaryTie crafts a run whose page boundary splits a
-// range of records sharing one 16-byte ladder prefix: the probe must read
-// the NEXT page too when the target prefix equals its ladder key, or every
-// record past the boundary would be unfindable.
+// range of records sharing one key: the probe must read the NEXT page too
+// when the target equals its ladder key, or every record past the boundary
+// would be unfindable.
 func TestHotIndex_LadderBoundaryTie(t *testing.T) {
 	m := &fakeManifest{}
 	h := testHotIndex(t, t.TempDir(), m)
 	defer h.Close()
 	h.sealEvery = 1 // the crafted ledger seals into exactly one run
 
-	// 100 hashes with prefix 0x11, then 50 with prefix 0x22: the page
-	// boundary at record pageRecords (113) falls inside the 0x22 range.
-	hashes := make([][32]byte, 0, 150)
-	for i := range uint32(100) {
+	// 150 hashes under key 0x11, 100 under key 0x22: 250 records, so the
+	// page boundary at pageRecords (204) falls strictly inside whichever
+	// group sorts second — blinding decides which, and either way the
+	// boundary splits an equal-key range.
+	hashes := make([][32]byte, 0, 250)
+	for i := range uint32(150) {
 		hashes = append(hashes, prefixedHash(0x11, i))
 	}
-	for i := range uint32(50) {
+	for i := range uint32(100) {
 		hashes = append(hashes, prefixedHash(0x22, i))
 	}
 	row, err := EncodeRow(hashes)
@@ -508,19 +580,29 @@ func TestHotIndex_LadderBoundaryTie(t *testing.T) {
 	require.Empty(t, v.rows, "the crafted row must have sealed")
 	require.Len(t, v.runs, 1)
 	require.Len(t, v.runs[0].ladder, 2, "crafted run must span two pages")
-	var tieKey [ladderKeyLen]byte
-	for i := range tieKey {
-		tieKey[i] = 0x22
+	k11, k22 := blindPrefix(0x11), blindPrefix(0x22)
+	tieKey := k22 // the second group holds record 204 either way
+	if bytes.Compare(k22[:], k11[:]) < 0 {
+		tieKey = k11
 	}
-	require.Equal(t, tieKey, v.runs[0].ladder[1], "page boundary must split the equal-prefix range")
+	require.Equal(t, tieKey, v.runs[0].ladder[1], "page boundary must split the equal-key range")
 
+	require.Empty(t, h.view.Load().rows, "every hit below must come from the run, not the window")
 	for _, hash := range hashes {
 		got, gerr := h.Get(hash)
 		require.NoError(t, gerr, "hash %x", hash)
 		require.Equal(t, uint32(7), got, "hash %x", hash)
 	}
-	_, err = h.Get(prefixedHash(0x22, 200))
+	// A hash whose key is in NEITHER group misses outright; one sharing a
+	// crafted prefix is a genuine key collision, so the run answers a
+	// CANDIDATE ledger — resolved, not verified. The 32-byte check happens
+	// where the ledger is read (read_assembly.go), which is why the engine
+	// returns the candidate rather than a not-found.
+	_, err = h.Get(prefixedHash(0x33, 0))
 	require.ErrorIs(t, err, stores.ErrNotFound)
+	seq, err := h.Get(prefixedHash(0x22, 200))
+	require.NoError(t, err)
+	require.Equal(t, uint32(7), seq, "a key collision resolves to the run's record, unverified")
 }
 
 // TestHotIndex_WritePassRoutingEqualsDrainRebuild pins the one-pass trust
@@ -528,21 +610,22 @@ func TestHotIndex_LadderBoundaryTie(t *testing.T) {
 // — no post-write re-read — deep-equals what the warmup drain
 // (openSealedRun) rebuilds from the verified file: bloom bits, ladder
 // contents, record count, ledger range. The crafted window spans three
-// pages, splits equal-16-byte-prefix ranges across both page boundaries
-// (the ladder's tie geometry), and spreads the hashes over two ledgers so
-// the merge heap — not input order — dictates observation order.
+// pages, splits equal-key ranges across both page boundaries (the ladder's
+// tie geometry), and spreads the hashes over two ledgers so the seal's sort
+// — not input order — dictates observation order.
 func TestHotIndex_WritePassRoutingEqualsDrainRebuild(t *testing.T) {
-	// 120 hashes with prefix 0x11, 120 with 0x22, 60 with 0x33: 300 records
-	// = two full pages + a tail, with the page boundaries (records 113 and
-	// 226) inside the 0x11 and 0x22 ranges respectively.
-	all := make([][32]byte, 0, 300)
-	for i := range uint32(120) {
+	// 200 hashes under key 0x11, 200 under 0x22, 100 under 0x33: 500 records
+	// = two full pages + a tail. Blinding permutes the three groups, but no
+	// permutation puts a group boundary (100/200/300/400) on a page boundary
+	// (204, 408), so both boundaries always split an equal-key range.
+	all := make([][32]byte, 0, 500)
+	for i := range uint32(200) {
 		all = append(all, prefixedHash(0x11, i))
 	}
-	for i := range uint32(120) {
+	for i := range uint32(200) {
 		all = append(all, prefixedHash(0x22, i))
 	}
-	for i := range uint32(60) {
+	for i := range uint32(100) {
 		all = append(all, prefixedHash(0x33, i))
 	}
 	var a, b [][32]byte
@@ -559,7 +642,7 @@ func TestHotIndex_WritePassRoutingEqualsDrainRebuild(t *testing.T) {
 	require.NoError(t, err)
 
 	path := filepath.Join(t.TempDir(), "seal-000000.run")
-	fresh, err := sealWindow([]windowRow{{seq: 9, bytes: rowA}, {seq: 10, bytes: rowB}}, path)
+	fresh, err := sealWindow([]windowRow{{seq: 9, bytes: rowA}, {seq: 10, bytes: rowB}}, path, testBinSecret)
 	require.NoError(t, err)
 	defer fresh.close()
 	require.Len(t, fresh.ladder, 3, "crafted run must span three pages")
@@ -686,10 +769,10 @@ func TestRocksdbManifest_PublishGoldenBytes(t *testing.T) {
 	dir := t.TempDir()
 	row, err := EncodeRow([][32]byte{{1}, {2}})
 	require.NoError(t, err)
-	live, err := sealWindow([]windowRow{{seq: 4, bytes: row}}, filepath.Join(dir, "seal-000000.run"))
+	live, err := sealWindow([]windowRow{{seq: 4, bytes: row}}, filepath.Join(dir, "seal-000000.run"), testBinSecret)
 	require.NoError(t, err)
 	defer live.close()
-	fresh, err := sealWindow([]windowRow{{seq: 5, bytes: row}}, filepath.Join(dir, "seal-000001.run"))
+	fresh, err := sealWindow([]windowRow{{seq: 5, bytes: row}}, filepath.Join(dir, "seal-000001.run"), testBinSecret)
 	require.NoError(t, err)
 	defer fresh.close()
 

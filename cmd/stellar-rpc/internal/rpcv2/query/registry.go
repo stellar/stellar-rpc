@@ -348,6 +348,11 @@ func (r *Registry) NewReadView() (*ReadView, error) {
 // the events facade is warmed (a read-only open is ledgers-only), and the
 // registry closes them at discard. Runs at startup before any read view is
 // acquired.
+//
+// A read-write open adopts the chunk's routing secrets, so each is derived
+// from the catalog exactly as its cold build derives it
+// (hotchunk.SecretsFor) — a chunk resumed here must land on the same keys
+// it sealed under, or the open fails loudly.
 func (r *Registry) publishReadyHandles(
 	liveChunk chunk.ID, logger *supportlog.Entry, tuning hotchunk.Tuning,
 ) error {
@@ -360,7 +365,8 @@ func (r *Registry) publishReadyHandles(
 			continue
 		}
 		db, err := hotchunk.OpenReadyWrite(
-			geometry.HotReady, r.catalog.Layout().HotChunkPath(c), c, logger, tuning)
+			geometry.HotReady, r.catalog.Layout().HotChunkPath(c), c, logger, tuning,
+			hotchunk.SecretsFor(r.catalog, c))
 		if err != nil {
 			return fmt.Errorf("bootstrap: open hot chunk %s: %w", c, err)
 		}

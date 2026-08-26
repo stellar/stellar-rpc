@@ -7,13 +7,23 @@ package txhash
 // in on the writer goroutine (reapSeal).
 //
 // Run file format (<dir>/seal-%06d.run) — one sealed window, every
-// (hash, seq) record of its ledgers sorted by full 32-byte hash:
+// (blinded key, seq) record of its ledgers sorted by blinded key:
 //
-//	header (40B): magic "TXHRUN01" ‖ count u64 LE ‖ firstSeq u32 LE ‖
+//	header (40B): magic "TXHRUN02" ‖ count u64 LE ‖ firstSeq u32 LE ‖
 //	              lastSeq u32 LE ‖ crc64-ECMA(payload) LE, patched at
 //	              finish ‖ 8 reserved zero bytes (ignored on read)
-//	payload:      count × 36B records hash[32] ‖ seq u32 LE (equal hashes:
-//	              ledger order)
+//	payload:      count × 20B records BlindKey(secret, hash[:16])[16] ‖
+//	              seq u32 LE (equal keys: ledger order)
+//
+// BLIND-AT-SEAL. A record is byte-for-byte the cold .bin's entry
+// (cold_bin.go): sealing is where a hash stops being raw and becomes the
+// routing key the cold artifact stores, so the freeze streams every sealed
+// run into the .bin verbatim instead of re-keying and re-sorting the whole
+// chunk. The durable ROWS stay raw — they are the verification source
+// (HotStore.Get re-checks a run hit against the ledger's row) and the tail
+// source. The secret is fixed per chunk DB, persisted beside the manifest
+// and adoption-checked at every open (hot_store.go), so a run's keys can
+// never disagree with the .bin the freeze writes from them.
 //
 // Durability ladder: buffered payload → flush → patch CRC → fsync file
 // (writeRun) → fsync the run DIRECTORY (the h.fsyncDir barrier at the seal
@@ -35,6 +45,7 @@ import (
 	"strings"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/bloom"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/internal/runset"
 )
@@ -43,7 +54,13 @@ import (
 
 const (
 	// runMagic heads every run file; a version bump changes the digits.
-	runMagic = "TXHRUN01"
+	runMagic = "TXHRUN02"
+
+	// runMagicRaw is the pre-release format this one replaced: 36-byte
+	// records holding RAW 32-byte hashes. There is no migration — a chunk
+	// carrying one is a loud open failure (readRunHeader), the same posture
+	// as the hash-keyed CF tripwire (checkRowFormat).
+	runMagicRaw = "TXHRUN01"
 
 	// Header field offsets. The fields end at byte 32; the header is padded
 	// to its fixed 40-byte size (the format's payload offset) with reserved
@@ -54,15 +71,17 @@ const (
 	runCRCOff    = 24
 	runHeaderLen = 40
 
-	// runRecordLen is one payload record: hash[32] ‖ seq u32 LE.
-	runRecordLen = rowHashLen + 4
+	// runRecordLen is one payload record — deliberately the cold .bin's
+	// entry width (blinded key ‖ seq u32 LE), because it holds the same
+	// bytes: the freeze copies a sealed run's records straight into the
+	// .bin.
+	runRecordLen = coldBinEntrySize
 
 	// pageRecords is the ladder's page: the most whole records inside a
-	// 4KiB I/O budget (113 × 36B = 4068B). Pages are record-aligned so the
-	// in-page binary search strides whole records; the first ladderKeyLen
-	// bytes of each page's first record route a probe to ONE page pread.
-	pageRecords  = 4096 / runRecordLen
-	ladderKeyLen = 16
+	// 4KiB I/O budget (204 × 20B = 4080B). Pages are record-aligned so the
+	// in-page binary search strides whole records; each page's first record
+	// key routes a probe to ONE page pread.
+	pageRecords = 4096 / runRecordLen
 )
 
 // crcRunTable is the CRC64-ECMA table framing every run payload.
@@ -82,6 +101,9 @@ type runHeader struct {
 // hand-back — reapSeal's next stop is the manifest write that names it.
 // Writer goroutine only; h.sealInFlight guards the single-job invariant.
 func (h *HotIndex) startSeal(rows []windowRow) {
+	// Read on the writer goroutine: the seal below takes the secret as an
+	// argument rather than reaching into the engine from its goroutine.
+	secret := h.secret
 	// The name follows runset.NextSealSeq's grammar (<prefix>-%06d.run, the
 	// prefix OpenHotIndex resumes from); changing its shape silently breaks
 	// the seal-sequence resume.
@@ -90,7 +112,7 @@ func (h *HotIndex) startSeal(rows []windowRow) {
 	h.sealInFlight = true
 	go func() {
 		res := sealResult{rows: len(rows), lastSeq: rows[len(rows)-1].seq}
-		res.run, res.err = sealWindow(rows, name)
+		res.run, res.err = sealWindow(rows, name, secret)
 		// The ladder's dirent barrier — the manifest may only ever name a
 		// run whose existence survives a crash (see HotIndex.fsyncDir).
 		if res.err == nil {
@@ -154,8 +176,11 @@ func (h *HotIndex) reapSeal(block bool) error {
 // warmup build routing through this one type — ladder cadence and bloom
 // geometry cannot drift between a freshly written run and its reopened form.
 type runRouting struct {
-	bloom  bloom.Filter
-	ladder [][ladderKeyLen]byte
+	bloom bloom.Filter
+	// ladder holds each page's first record key at its FULL ColdKeySize
+	// width — not a prefix of it — so a ladder compare is exact and only
+	// genuinely equal keys tie.
+	ladder [][ColdKeySize]byte
 	n      int // records observed so far
 }
 
@@ -163,18 +188,19 @@ type runRouting struct {
 func newRunRouting(records int) *runRouting {
 	return &runRouting{
 		bloom:  bloom.New(max(records, 1)),
-		ladder: make([][ladderKeyLen]byte, 0, records/pageRecords+1),
+		ladder: make([][ColdKeySize]byte, 0, records/pageRecords+1),
 	}
 }
 
-// observe folds in one payload record (hash[32] ‖ seq u32 LE). Must be
+// observe folds in one payload record (blinded key ‖ seq u32 LE). Must be
 // called once per record, in emission order — the ladder keys page
-// boundaries by observation index.
+// boundaries by observation index. Bloom and ladder are both keyed by the
+// BLINDED key, the only key a run is ever probed with.
 func (rt *runRouting) observe(rec *[runRecordLen]byte) {
 	if rt.n%pageRecords == 0 {
-		rt.ladder = append(rt.ladder, [ladderKeyLen]byte(rec[:ladderKeyLen]))
+		rt.ladder = append(rt.ladder, [ColdKeySize]byte(rec[:ColdKeySize]))
 	}
-	rt.bloom.Add(fp64([rowHashLen]byte(rec[:rowHashLen])))
+	rt.bloom.Add(fp64([ColdKeySize]byte(rec[:ColdKeySize])))
 	rt.n++
 }
 
@@ -195,8 +221,8 @@ func (rt *runRouting) run(path string, first, last uint32) *sealedRun {
 // never names the file, and warmup's orphan sweep owns unlisted files — the
 // same posture writeRun's sync/close failures already take. Runs on the
 // background goroutine over immutable inputs.
-func sealWindow(rows []windowRow, path string) (*sealedRun, error) {
-	rt, err := writeRun(rows, path)
+func sealWindow(rows []windowRow, path string, secret [stores.SecretLen]byte) (*sealedRun, error) {
+	rt, err := writeRun(rows, path, secret)
 	if err != nil {
 		return nil, err
 	}
@@ -219,12 +245,12 @@ func sealWindow(rows []windowRow, path string) (*sealedRun, error) {
 // open; the shared runsettest pin gates the invariant that matters —
 // barrier before PutRuns — in both engines. Returns the routing state the
 // write pass accumulated (writeRunPayload).
-func writeRun(rows []windowRow, path string) (*runRouting, error) {
+func writeRun(rows []windowRow, path string, secret [stores.SecretLen]byte) (*runRouting, error) {
 	f, err := os.Create(path)
 	if err != nil {
 		return nil, fmt.Errorf("txhash: create run %s: %w", path, err)
 	}
-	rt, err := writeRunPayload(f, rows)
+	rt, err := writeRunPayload(f, rows, secret)
 	if err != nil {
 		_ = f.Close()
 		_ = os.Remove(path)
@@ -240,18 +266,23 @@ func writeRun(rows []windowRow, path string) (*runRouting, error) {
 	return rt, nil
 }
 
-// writeRunPayload writes the header and the k-way-merged records (each row
-// is already sorted; ≤window-size cursors), then patches the payload CRC
-// into the header, feeding every record through the run's routing state
-// beside the CRC (runRouting — one-pass construction). No whole-payload
-// buffer: the merge streams straight through a bufio writer.
+// writeRunPayload writes the header and the window's records — every row's
+// hashes BLINDED and re-sorted — then patches the payload CRC into the
+// header, feeding every record through the run's routing state beside the
+// CRC (runRouting — one-pass construction). The records stream out through a
+// bufio writer; only the (key, seq) pairs are buffered.
 //
-// The merge is the package's shared hash heap (merge_heap.go) over the rows'
-// hash cursors: offs[i] is row i's byte offset and the heap caches each live
-// row's CURRENT hash beside its row index. Rows arrive in ledger order, so the
-// (hash, row) tie-break emits equal cross-ledger duplicate hashes in ledger
-// order — the run's byte-level duplicate contract.
-func writeRunPayload(f *os.File, rows []windowRow) (*runRouting, error) {
+// Blinding destroys each row's raw-hash order, so the window cannot be
+// k-way merged: the pairs are collected and sorted instead. That buffer is
+// the seal's whole working set and is bounded by the seal window — 256
+// ledgers of hashes, ~30MB at stress density — not by the chunk.
+//
+// The sort is by (blinded key, ledger), which is exactly the .bin's stored
+// order: rows arrive in ledger order, so equal keys — one hash committed in
+// several of the window's ledgers, the legal cross-ledger shape — emit
+// oldest ledger first, the run's byte-level duplicate contract and the same
+// tie-break the walk writer and the freeze merge produce.
+func writeRunPayload(f *os.File, rows []windowRow, secret [stores.SecretLen]byte) (*runRouting, error) {
 	count := 0
 	for i := range rows {
 		count += len(rows[i].bytes) / rowHashLen
@@ -264,41 +295,29 @@ func writeRunPayload(f *os.File, rows []windowRow) (*runRouting, error) {
 	if _, err := f.Write(hdr); err != nil {
 		return nil, err
 	}
+	recs := make([]ColdEntry, 0, count)
+	for i := range rows {
+		recs = blindRow(recs, rows[i].bytes, rows[i].seq, secret)
+	}
+	SortColdEntries(recs)
+
 	rt := newRunRouting(count)
 	w := bufio.NewWriterSize(f, 128<<10)
 	crc := crc64.New(crcRunTable)
 	var rec [runRecordLen]byte
-	offs := make([]int, len(rows))
-	h := make(hashHeap, 0, len(rows))
-	for i := range rows {
-		if len(rows[i].bytes) > 0 { // a tx-less ledger's row holds no hash
-			h = append(h, hashEntry{hash: rows[i].bytes[:rowHashLen], idx: i})
-		}
-	}
-	h.heapify()
-	for len(h) > 0 {
-		row := h[0].idx
-		// Emit-copy before the advance: the entry's hash is a slice INTO the
-		// row, and the refill below repoints it.
-		copy(rec[:rowHashLen], h[0].hash)
-		binary.LittleEndian.PutUint32(rec[rowHashLen:], rows[row].seq)
+	for i := range recs {
+		copy(rec[:ColdKeySize], recs[i].Key[:])
+		binary.LittleEndian.PutUint32(rec[ColdKeySize:], recs[i].Seq)
 		_, _ = crc.Write(rec[:])
 		rt.observe(&rec)
 		if _, err := w.Write(rec[:]); err != nil {
 			return nil, err
 		}
-		offs[row] += rowHashLen
-		if offs[row] == len(rows[row].bytes) {
-			h = h.dropRoot()
-			continue
-		}
-		h[0].hash = rows[row].bytes[offs[row] : offs[row]+rowHashLen]
-		h.siftDown(0)
 	}
-	// The header promised count records; the merge must have emitted exactly
+	// The header promised count records; the write must have emitted exactly
 	// that (the seal-time cross-check the deleted re-read used to run).
 	if rt.n != count {
-		return nil, fmt.Errorf("merged %d records, header claims %d", rt.n, count)
+		return nil, fmt.Errorf("wrote %d records, header claims %d", rt.n, count)
 	}
 	if err := w.Flush(); err != nil {
 		return nil, err
@@ -319,7 +338,7 @@ func writeRunPayload(f *os.File, rows []windowRow) (*runRouting, error) {
 // never auto-healed. Freshly WRITTEN runs (sealWindow) build routing in the
 // write pass instead (runRouting) and are not re-read.
 //
-// The drain is the one TXHRUN01 streaming reader (runSource, run_reader.go)
+// The drain is the one run streaming reader (runSource, run_reader.go)
 // — the same verify loop the freeze merges through — with every verified
 // record folded through the write pass's runRouting funnel: routing state
 // for runs that crossed a restart is always rebuilt from the verified file
@@ -358,6 +377,11 @@ func readRunHeader(f *os.File, path string) (runHeader, error) {
 		return runHeader{}, fmt.Errorf("txhash: run %s: short header: %w", path, err)
 	}
 	if string(b[:len(runMagic)]) != runMagic {
+		if string(b[:len(runMagicRaw)]) == runMagicRaw {
+			return runHeader{}, fmt.Errorf(
+				"txhash: run %s: stale pre-release run format (raw 36-byte records; no migration; "+
+					"re-ingest the chunk)", path)
+		}
 		return runHeader{}, fmt.Errorf("txhash: run %s: bad magic %q", path, b[:len(runMagic)])
 	}
 	hdr := runHeader{
@@ -382,19 +406,27 @@ func runRecordCount(f *os.File, path string, hdr runHeader) (int, error) {
 	}
 	payload := fi.Size() - runHeaderLen
 	if payload < 0 || payload%runRecordLen != 0 || uint64(payload/runRecordLen) != hdr.count {
-		return 0, fmt.Errorf("txhash: run %s: count %d does not match %d payload bytes", path, hdr.count, payload)
+		return 0, fmt.Errorf(
+			"txhash: run %s: count %d does not match %d payload bytes (torn tail, or a foreign record "+
+				"width — no migration; re-ingest the chunk)", path, hdr.count, payload)
 	}
 	return int(payload / runRecordLen), nil
 }
 
-// lookup probes the run for one hash: bloom reject → ladder route → one
-// record-aligned page pread (two on a boundary tie) → in-buffer stride
-// binary search → full 32-byte verify → LE seq. Concurrent-safe (ReadAt).
-func (r *sealedRun) lookup(hash [32]byte) (uint32, bool, error) {
-	if len(r.ladder) == 0 || !r.bloom.MayContain(fp64(hash)) {
+// lookup probes the run for one BLINDED key: bloom reject → ladder route →
+// one record-aligned page pread (two on a boundary tie) → in-buffer stride
+// binary search → full 16-byte key verify → LE seq. Concurrent-safe
+// (ReadAt).
+//
+// A hit is a CANDIDATE, not an answer: the run holds no raw hash to compare
+// against, and the key blinds only the hash's first 16 bytes. The full-hash
+// check happens where the ledger is read, in the read assembly — see
+// HotStore.Get.
+func (r *sealedRun) lookup(rk [ColdKeySize]byte) (uint32, bool, error) {
+	if len(r.ladder) == 0 || !r.bloom.MayContain(fp64(rk)) {
 		return 0, false, nil
 	}
-	page, pages := r.route(hash)
+	page, pages := r.route(rk)
 	start := page * pageRecords
 	n := min(pages*pageRecords, r.records-start)
 	buf := make([]byte, n*runRecordLen)
@@ -402,31 +434,33 @@ func (r *sealedRun) lookup(hash [32]byte) (uint32, bool, error) {
 		return 0, false, fmt.Errorf("txhash: run pread %s: %w", r.path, err)
 	}
 	i := sort.Search(n, func(k int) bool {
-		return bytes.Compare(buf[k*runRecordLen:k*runRecordLen+rowHashLen], hash[:]) >= 0
+		return bytes.Compare(buf[k*runRecordLen:k*runRecordLen+ColdKeySize], rk[:]) >= 0
 	})
-	if i == n || !bytes.Equal(buf[i*runRecordLen:i*runRecordLen+rowHashLen], hash[:]) {
+	if i == n || !bytes.Equal(buf[i*runRecordLen:i*runRecordLen+ColdKeySize], rk[:]) {
 		return 0, false, nil
 	}
-	return binary.LittleEndian.Uint32(buf[i*runRecordLen+rowHashLen:]), true, nil
+	return binary.LittleEndian.Uint32(buf[i*runRecordLen+ColdKeySize:]), true, nil
 }
 
-// route picks the page(s) a hash can live in: the last page whose ladder key
-// sorts strictly below the hash's 16-byte prefix — the equal-prefix record
-// range begins inside that page, or exactly at the next page boundary, in
-// which case the next page is read too (the boundary tie). Two pages always
-// suffice for equal FULL hashes (any match is a correct answer, and the
-// covered pages contain at least one); only >pageRecords DISTINCT hashes
-// sharing a 16-byte prefix — a 2^-64-per-pair event, crafted inputs only —
-// could defeat the cap.
-func (r *sealedRun) route(hash [32]byte) (int, int) {
+// route picks the page(s) a key can live in: the last page whose ladder key
+// sorts strictly below the probe — the equal-key record range begins inside
+// that page, or exactly at the next page boundary, in which case the next
+// page is read too (the boundary tie). Two pages suffice: equal keys mean
+// the same hash committed in several of the window's ledgers (or, at 2^-64,
+// two hashes sharing a 16-byte prefix), any of whose records is a correct
+// candidate, and the covered pages hold at least one. Only a key repeated
+// past a whole page — one hash in >pageRecords of a window's ledgers, which
+// the window's ledger count bounds — could span further, and even then the
+// covered pages still hold a correct candidate.
+func (r *sealedRun) route(rk [ColdKeySize]byte) (int, int) {
 	page := sort.Search(len(r.ladder), func(k int) bool {
-		return bytes.Compare(r.ladder[k][:], hash[:ladderKeyLen]) >= 0
+		return bytes.Compare(r.ladder[k][:], rk[:]) >= 0
 	})
 	if page > 0 {
 		page--
 	}
 	pages := 1
-	if page+1 < len(r.ladder) && bytes.Equal(r.ladder[page+1][:], hash[:ladderKeyLen]) {
+	if page+1 < len(r.ladder) && bytes.Equal(r.ladder[page+1][:], rk[:]) {
 		pages = 2
 	}
 	return page, pages
@@ -495,13 +529,22 @@ func (m rocksdbManifest) GetRuns() ([]string, uint32, error) {
 // frontier. A violated chain means the manifest and the run files disagree
 // about history — a loud open failure, like every other warmup inconsistency.
 //
+// secret is the chunk DB's adopted routing secret (hot_store.go): every run
+// this engine writes or probes is keyed under it. Warmup itself is
+// content-blind — the drain verifies CRC64 and record shape, never a key —
+// so a wrong secret cannot corrupt the open; it would only make probes miss,
+// which is why the secret is adoption-checked against the DB before the
+// engine is built at all.
+//
 // firstLedger anchors the dense chain for a chunk with nothing sealed yet:
 // expectedNext = max(lastSealed+1, firstLedger), so a fresh/empty-manifest
 // chunk demands exactly the chunk's first ledger as its first row — an
 // unanchored engine would instead let an arbitrary mis-sequenced first row
 // anchor the whole chain.
-func OpenHotIndex(dir string, firstLedger uint32, manifest runset.Manifest) (*HotIndex, uint32, error) {
-	h, err := NewHotIndex(dir, manifest)
+func OpenHotIndex(
+	dir string, firstLedger uint32, manifest runset.Manifest, secret [stores.SecretLen]byte,
+) (*HotIndex, uint32, error) {
+	h, err := NewHotIndex(dir, manifest, secret)
 	if err != nil {
 		return nil, 0, err
 	}

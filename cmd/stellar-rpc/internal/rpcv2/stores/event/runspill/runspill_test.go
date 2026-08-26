@@ -168,13 +168,25 @@ func TestRunReader_DetectsCorruption(t *testing.T) {
 	require.ErrorIs(t, err, ErrCorruptRun, "truncated run must surface an error")
 
 	// The magic is a version gate: the header relayout rode the EVR1→EVR2
-	// bump, so the old tag must be rejected, not parsed with new offsets.
+	// bump and the blind-at-seal flip rode EVR2→EVR3, so an older tag must be
+	// rejected, not parsed as if it were this format.
 	prev := append([]byte(nil), raw...)
 	prev[3] = '1'
 	pPrev := filepath.Join(dir, "evr1.run")
 	require.NoError(t, os.WriteFile(pPrev, prev, 0o644))
 	_, err = OpenRun(pPrev)
 	require.ErrorIs(t, err, ErrCorruptRun, "EVR1 magic must be rejected")
+
+	// EVR2 is byte-compatible framing with RAW-keyed records: nothing but the
+	// magic can tell it apart, so the rejection names it and says what to do.
+	stale := append([]byte(nil), raw...)
+	copy(stale[:4], runMagicPre[:])
+	pStale := filepath.Join(dir, "evr2.run")
+	require.NoError(t, os.WriteFile(pStale, stale, 0o644))
+	_, err = OpenRun(pStale)
+	require.ErrorIs(t, err, ErrCorruptRun, "EVR2 magic must be rejected")
+	require.ErrorContains(t, err, "stale pre-release run format")
+	require.ErrorContains(t, err, "re-ingest the chunk")
 }
 
 func TestSlab_OutputIsTermSorted(t *testing.T) {

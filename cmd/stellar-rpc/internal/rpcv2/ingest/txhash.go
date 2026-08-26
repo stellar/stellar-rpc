@@ -16,7 +16,7 @@ import (
 // ───────────────────────── Cold writer ─────────────────────────
 
 // txhashCold accumulates (routing key, seq) tuples per ledger — each stored
-// key is stores.BlindKey(secret, txhash[:ColdKeySize]), keyed at ingest so
+// key is txhash.RoutingKey(secret, hash), keyed at ingest so
 // the deferred SortedBuilder index build consumes an already-keyed, sorted
 // .bin unchanged. At finalize time it lex-sorts by the (keyed) key and writes
 // a per-chunk sorted .bin file under <out-root>/<bucketID:05d>/<chunkID:08d>.bin
@@ -56,7 +56,7 @@ func newTxhashCold(binPath string, sink MetricSink, secret [stores.SecretLen]byt
 // write accumulates one ledger's tx hashes — one entry per hash, two for a
 // fee-bump (outer + inner). They come from coldChunk's shared
 // ExtractLedgerTxParts walk, in apply order. Each is keyed
-// (BlindKey(secret, hash[:ColdKeySize])) and appended STRAIGHT into the
+// (txhash.RoutingKey — the one blind-and-truncate site) and appended STRAIGHT into the
 // accumulator — no intermediate per-ledger entry slice; over a ~3M-tx chunk
 // that intermediate would be hundreds of MB of transient garbage. The
 // extraction itself is metered once, ledger-scoped, as the ColdExtract signal;
@@ -67,12 +67,12 @@ func (t *txhashCold) write(seq uint32, txParts []sdkingest.LedgerTxParts) error 
 	before := len(t.entries)
 	for i := range txParts {
 		t.entries = append(t.entries, txhash.ColdEntry{
-			Key: stores.BlindKey(t.secret, txParts[i].Hash[:txhash.ColdKeySize]),
+			Key: txhash.RoutingKey(t.secret, txParts[i].Hash[:]),
 			Seq: seq,
 		})
 		if txParts[i].FeeBump {
 			t.entries = append(t.entries, txhash.ColdEntry{
-				Key: stores.BlindKey(t.secret, txParts[i].InnerHash[:txhash.ColdKeySize]),
+				Key: txhash.RoutingKey(t.secret, txParts[i].InnerHash[:]),
 				Seq: seq,
 			})
 		}
@@ -86,12 +86,12 @@ func (t *txhashCold) write(seq uint32, txParts []sdkingest.LedgerTxParts) error 
 // pkg/stores/txhash/cold_bin.go pins the layout).
 func (t *txhashCold) finalize(_ context.Context) error {
 	start := time.Now()
-	// The shared sharded sort (stable shards + lowest-shard-tie merge — see
-	// txhash.WriteColdBinSorted): equal to a whole-slice STABLE sort, so
-	// walk and freeze bytes agree even on duplicate blinded keys, at a
-	// fraction of single-threaded symmerge's cost on multi-million-entry
-	// chunks.
-	err := txhash.WriteColdBinSorted(t.binPath, t.secret, t.entries)
+	// SortColdEntries is the .bin's stored order — the ONE comparator the
+	// hot tier's seal sorts through too, so this path and the freeze (which
+	// streams those sealed records verbatim) agree by construction, down to
+	// the duplicate-key tie-break.
+	txhash.SortColdEntries(t.entries)
+	err := txhash.WriteColdBin(t.binPath, t.secret, t.entries)
 	if err == nil {
 		t.metrics.sink.IngestStage(dataTypeTxhash, stageFinalize, time.Since(start), len(t.entries))
 	}

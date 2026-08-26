@@ -42,6 +42,12 @@ func openHotDBForChunk(
 	cat *catalog.Catalog, chunkID chunk.ID, logger *supportlog.Entry, tun hotchunk.Tuning,
 ) (*hotchunk.DB, error) {
 	dir := cat.Layout().HotChunkPath(chunkID)
+	// The chunk's hot routing secrets, derived exactly as its COLD builds
+	// derive theirs (hotchunk.SecretsFor): both hot engines blind at seal,
+	// so their runs must be keyed with the secret the freeze will declare.
+	// A resumed chunk re-derives the same values and the open adopts them; a
+	// disagreement (a re-minted catalog secret) fails the open loudly.
+	secrets := hotchunk.SecretsFor(cat, chunkID)
 
 	state, err := cat.HotState(chunkID)
 	if err != nil {
@@ -53,7 +59,7 @@ func openHotDBForChunk(
 		// exists: must-exist, never-creating (a gutted DB fails restartably, never
 		// auto-heals into a fresh empty DB). OpenReadyWrite routes through the single
 		// ready-open enforcement site.
-		return hotchunk.OpenReadyWrite(state, dir, chunkID, logger, tun)
+		return hotchunk.OpenReadyWrite(state, dir, chunkID, logger, tun, secrets)
 	}
 
 	// The create bracket: BeginHotCreate wipes + marks transient; FinishHotCreate
@@ -61,7 +67,7 @@ func openHotDBForChunk(
 	if beginErr := cat.BeginHotCreate(chunkID); beginErr != nil {
 		return nil, beginErr
 	}
-	db, openErr := hotchunk.Open(dir, chunkID, logger, tun)
+	db, openErr := hotchunk.Open(dir, chunkID, logger, tun, secrets)
 	if openErr != nil {
 		return nil, fmt.Errorf("create hot DB chunk %s: %w", chunkID, openErr)
 	}

@@ -1,10 +1,12 @@
 package event
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
 // These tests exercise the (unexported) warmup() function indirectly
@@ -127,6 +130,125 @@ func TestWarmup_OffsetsReconstructedAcrossLedgers(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint32(2), start)
 	assert.Equal(t, uint32(3), end)
+}
+
+// postingIDs materializes a Postings' event ids in ascending order, whether
+// it came back as an id list (sparse) or a bitmap (dense overlay).
+func postingIDs(t *testing.T, p Postings) []uint32 {
+	t.Helper()
+	if ids := p.IDs(); ids != nil {
+		return append([]uint32(nil), ids...)
+	}
+	require.NotNil(t, p.Bitmap(), "a present Postings must carry ids or a bitmap")
+	return p.Bitmap().ToArray()
+}
+
+// TestHotStore_LookupKeysSpansBlindedRunsAndRawWindow is the events half of
+// the blind-at-seal read gate: sealed runs store BLINDED term keys while the
+// window rows (and the dense overlay) stay RAW, so one LookupKeys with raw
+// query terms must reassemble a term's postings across both tiers — the
+// blinded probe for the runs, the raw one for the window, derived from the
+// same query key.
+//
+// The fixture deliberately puts each shared term on BOTH sides of the sealed
+// frontier: a term found only through the window (or only through the runs)
+// would still look right if one of the two probes were mis-keyed.
+func TestHotStore_LookupKeysSpansBlindedRunsAndRawWindow(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir := t.TempDir()
+	hot, raw := openHotStoreForTestAt(t, dir, chunkID)
+	hot.hotIdx.sealEvery = 4
+	hot.hotIdx.maxRuns = 2 // a merge fold too: merged runs stay blinded
+
+	first := chunkID.FirstLedger()
+	shared, sharedKeys := makePayload("transfer")
+	term := sharedKeys[0]
+	// 14 event-bearing ledgers at sealEvery=4: three seals (12 rows, one of
+	// them a merge fold) plus a 2-row un-sealed window. The expectation is
+	// derived from the payloads themselves — every event whose own terms
+	// include the queried one, in event-id order.
+	var want []uint32
+	var nextID uint32
+	for i := range uint32(14) {
+		p := shared
+		p.LedgerSequence = first + i
+		solo, _ := makePayload(fmt.Sprintf("solo-%d", i))
+		solo.LedgerSequence = first + i
+		for _, pl := range []Payload{p, solo} {
+			keys, kerr := TermsForBytes(pl.ContractEventBytes)
+			require.NoError(t, kerr)
+			if slices.Contains(keys, term) {
+				want = append(want, nextID)
+			}
+			nextID++
+		}
+		require.NoError(t, ingestLedgerEvents(hot, first+i, []Payload{p, solo}))
+		require.NoError(t, hot.hotIdx.reapSeal(true))
+	}
+	require.NotEmpty(t, want)
+	require.Len(t, hot.hotIdx.view.Load().rows, 2, "the last two ledgers must stay un-sealed")
+	require.NotEmpty(t, hot.hotIdx.view.Load().runs, "the fixture must have sealed runs")
+
+	// The sealed runs really are keyed under the blinded identity: the raw
+	// term must NOT be findable in them, only its blinded form.
+	blinded := TermKey(stores.BlindKey(testIndexSecret, term[:]))
+	for _, r := range hot.hotIdx.view.Load().runs {
+		ids, err := r.lookup(term)
+		require.NoError(t, err)
+		require.Nil(t, ids, "a sealed run must not answer a RAW term")
+		ids, err = r.lookup(blinded)
+		require.NoError(t, err)
+		require.NotEmpty(t, ids, "a sealed run must answer the blinded term")
+	}
+
+	// The facade query is by RAW term and must span both tiers.
+	got, err := hot.LookupKeys(context.Background(), []TermKey{term})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.True(t, got[0].Present())
+	ids := postingIDs(t, got[0])
+	require.Equal(t, want, ids, "postings must cover every ledger, sealed and un-sealed")
+
+	// Same after a restart: warmup adopts the blinded runs as they are and
+	// replays the raw tail.
+	require.NoError(t, raw.Close())
+	hot2, _ := openHotStoreForTestAt(t, dir, chunkID)
+	got, err = hot2.LookupKeys(context.Background(), []TermKey{term})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, ids, postingIDs(t, got[0]), "postings changed across a restart")
+}
+
+// TestWarmup_SecretAdoption is this engine's THREADING case for the shared
+// secret protocol: NewWithStore hands the caller's secret to
+// runset.AdoptSecret against the events key, so a reopen under the same
+// secret still answers and a foreign one is a loud open failure. The
+// protocol's own semantics (first-open-persists, zero refused, no durable
+// state on rejection) are the table test beside it, runset/secret_test.go.
+func TestWarmup_SecretAdoption(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir := t.TempDir()
+
+	hot, raw := openHotStoreForTestAt(t, dir, chunkID)
+	p, keys := makePayload("alpha")
+	require.NoError(t, ingestLedgerEvents(hot, chunkID.FirstLedger(), []Payload{p}))
+	require.NoError(t, raw.Close())
+
+	// Same secret: adopted, postings intact.
+	hot2, raw2 := openHotStoreForTestAt(t, dir, chunkID)
+	got, err := hot2.LookupKeys(context.Background(), []TermKey{keys[0]})
+	require.NoError(t, err)
+	require.True(t, got[0].Present())
+	require.NoError(t, raw2.Close())
+
+	// Foreign secret: loud open failure.
+	other := testIndexSecret
+	other[0] ^= 0xFF
+	raw3 := openRawHotChunkForTest(t, dir, chunkID)
+	_, err = NewWithStore(raw3, chunkID, other)
+	require.ErrorContains(t, err, "keyed under a different routing secret")
+	require.ErrorContains(t, err, "re-ingest the chunk")
+	require.NoError(t, raw3.Close())
 }
 
 // corruptHotChunk reopens chunkID's raw per-chunk DB (bypassing warmup),

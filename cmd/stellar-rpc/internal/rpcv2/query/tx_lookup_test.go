@@ -30,7 +30,8 @@ func TestHotTxHashIndexes(t *testing.T) {
 
 	dbs := map[chunk.ID]*hotchunk.DB{}
 	for _, c := range []chunk.ID{5, 6, 7} {
-		db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger(), hotchunk.DefaultTuning())
+		db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger(), hotchunk.DefaultTuning(),
+			hotchunk.SecretsFor(cat, c))
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = db.Close() })
 		r.PublishHandle(c, db)

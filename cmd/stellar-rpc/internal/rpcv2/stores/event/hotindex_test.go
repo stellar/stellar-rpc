@@ -135,7 +135,7 @@ func (hh *hotIndexHarness) settle() {
 }
 
 func testHotIndex(t *testing.T, dir string, m runset.Manifest) *HotIndex {
-	h, err := NewHotIndex(dir, m)
+	h, err := NewHotIndex(dir, m, testIndexSecret)
 	require.NoError(t, err)
 	h.sealEvery = 8 // tiny window: many seals
 	h.maxRuns = 3   // frequent merges
@@ -201,7 +201,7 @@ func TestHotIndex_WarmupRebuild(t *testing.T) {
 	}
 	h.Close()
 
-	h2, lastSealed, err := OpenHotIndex(dir, m)
+	h2, lastSealed, err := OpenHotIndex(dir, m, testIndexSecret)
 	require.NoError(t, err)
 	defer h2.Close()
 	h2.sealEvery, h2.maxRuns = 8, 3
@@ -221,7 +221,7 @@ func TestHotIndex_WarmupRebuild(t *testing.T) {
 func TestHotIndex_SealingDisarmedUntilArmed(t *testing.T) {
 	dir := t.TempDir()
 	m := &fakeManifest{}
-	h, err := NewHotIndex(dir, m)
+	h, err := NewHotIndex(dir, m, testIndexSecret)
 	require.NoError(t, err)
 	defer h.Close()
 	h.sealEvery, h.maxRuns = 8, 3 // NOT armed — the warmup-replay state
@@ -271,7 +271,7 @@ func TestHotIndex_WarmupSweepsOrphans(t *testing.T) {
 
 	orphan := filepath.Join(dir, "seal-999999.run")
 	require.NoError(t, os.WriteFile(orphan, []byte("junk"), 0o644))
-	h2, _, err := OpenHotIndex(dir, m)
+	h2, _, err := OpenHotIndex(dir, m, testIndexSecret)
 	require.NoError(t, err)
 	h2.Close()
 	_, serr := os.Stat(orphan)
@@ -281,7 +281,7 @@ func TestHotIndex_WarmupSweepsOrphans(t *testing.T) {
 	names, _, _ := m.GetRuns()
 	require.NotEmpty(t, names)
 	require.NoError(t, os.Remove(filepath.Join(dir, names[0])))
-	_, _, err = OpenHotIndex(dir, m)
+	_, _, err = OpenHotIndex(dir, m, testIndexSecret)
 	require.Error(t, err, "missing manifest-referenced run must fail open")
 }
 
