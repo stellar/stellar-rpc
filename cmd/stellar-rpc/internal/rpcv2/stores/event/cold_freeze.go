@@ -40,7 +40,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"slices"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
@@ -232,23 +231,18 @@ func respillBlinded(
 	if len(sealed) == 0 {
 		return nil, nil
 	}
-	var (
-		window      = make(map[TermKey][]uint32, 1<<16)
-		windowBytes int
-		runs        []string
-	)
-	flush := func() error {
-		if len(window) == 0 {
-			return nil
-		}
-		path := filepath.Join(scratchDir, fmt.Sprintf("blind-%06d.run", len(runs)))
-		if _, werr := writeSortedRun(window, path, nil); werr != nil {
-			return werr
-		}
-		runs = append(runs, path)
-		clear(window)
-		windowBytes = 0
-		return nil
+	// The spiller's slab machinery does the re-keyed sort/spill with zero
+	// per-term allocation (pairs land in preallocated slabs) — the window-map
+	// shape this replaced allocated a cloned id slice per term, ~60M pieces
+	// of GC garbage on a stress chunk. A blinded-key collision between two
+	// DISTINCT terms (~2^-128) is caught downstream exactly like any
+	// duplicate key: the merge unions the two posting sets under one key and
+	// the fingerprint/read path serves both — the same acceptance the
+	// pre-keyed design gave two colliding xxh3 terms.
+	spillDir := filepath.Join(scratchDir, "blind-respill")
+	sp, err := runspill.NewSpiller(spillDir, freezeIndexWindowBytes)
+	if err != nil {
+		return nil, fmt.Errorf("events: freeze re-key spiller: %w", err)
 	}
 	emitted := 0
 	if err := runspill.MergeRuns(sealed, func(term [16]byte, ids []uint32) error {
@@ -258,26 +252,21 @@ func respillBlinded(
 			}
 		}
 		emitted++
-		bk := TermKey(stores.BlindKey(secret, term[:]))
-		// MergeRuns emits each term exactly once, so an occupied slot means
-		// two DISTINCT terms blinded to one key (~2^-128). Silently keeping
-		// either posting set would serve wrong results — reject loudly, the
-		// same call the index build makes on a duplicate key.
-		if _, dup := window[bk]; dup {
-			return fmt.Errorf("events: blinded key collision on %x", bk[:])
-		}
-		// MergeRuns reuses the ids buffer across emits — copy before keeping.
-		window[bk] = slices.Clone(ids)
-		windowBytes += len(term) + 4*len(ids)
-		if windowBytes >= freezeIndexWindowBytes {
-			return flush()
+		bk := stores.BlindKey(secret, term[:])
+		for _, id := range ids {
+			if aerr := sp.Add(bk, id); aerr != nil {
+				return aerr
+			}
 		}
 		return nil
 	}); err != nil {
+		_ = sp.Cleanup()
 		return nil, fmt.Errorf("events: freeze re-key sealed runs: %w", err)
 	}
-	if err := flush(); err != nil {
-		return nil, err
+	runs, err := sp.Finish()
+	if err != nil {
+		_ = sp.Cleanup()
+		return nil, fmt.Errorf("events: freeze re-key spill finish: %w", err)
 	}
 	return runs, nil
 }
