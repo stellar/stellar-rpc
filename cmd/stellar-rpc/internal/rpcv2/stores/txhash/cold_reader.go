@@ -22,6 +22,7 @@ import (
 // unmaps.
 type ColdReader struct {
 	idx       *streamhash.PayloadIndex
+	secret    [stores.SecretLen]byte
 	minLedger uint32
 	maxLedger uint32
 	closed    atomic.Bool
@@ -41,23 +42,25 @@ func OpenColdReader(path string) (*ColdReader, error) {
 		_ = idx.Close()
 		return nil, fmt.Errorf("txhash: cold index %s payload size %d, want %d", path, got, ColdPayloadSize)
 	}
-	minLedger, maxLedger, err := ParseLedgerRange(idx.UserMetadata())
+	minLedger, maxLedger, secret, err := ParseColdMetadata(idx.UserMetadata())
 	if err != nil {
 		_ = idx.Close()
 		return nil, fmt.Errorf("txhash: open cold index %s: %w", path, err)
 	}
-	return &ColdReader{idx: idx, minLedger: minLedger, maxLedger: maxLedger}, nil
+	return &ColdReader{idx: idx, secret: secret, minLedger: minLedger, maxLedger: maxLedger}, nil
 }
 
 // Get returns the ledgerSeq the hash was committed in, stores.ErrNotFound
 // if it wasn't in the build set (residual fingerprint false positives are
-// caught downstream), or stores.ErrStoreClosed after Close. streamhash keys on the first
-// 16 bytes, so the full 32-byte hash and hash[:16] are equivalent.
+// caught downstream), or stores.ErrStoreClosed after Close. The index keys on
+// the secret-keyed routing key of hash[:ColdKeySize] (see cold_format.go), so
+// the full 32-byte hash and hash[:16] are equivalent.
 func (r *ColdReader) Get(hash [32]byte) (uint32, error) {
 	if r.closed.Load() {
 		return 0, stores.ErrStoreClosed
 	}
-	_, payload, err := r.idx.QueryPayload(hash[:])
+	rk := stores.BlindKey(r.secret, hash[:ColdKeySize])
+	_, payload, err := r.idx.QueryPayload(rk[:])
 	if err != nil {
 		if errors.Is(err, streamhash.ErrNotFound) {
 			return 0, stores.ErrNotFound

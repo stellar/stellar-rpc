@@ -2,6 +2,7 @@ package txhash
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -13,7 +14,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
+
+// testBinSecret is the index secret the .bin writer tests key their entries
+// with; the header records it and the reader/build validate it.
+var testBinSecret = [stores.SecretLen]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
 
 // readColdBin reads back a cold .bin file, validating its header count against
 // the file size via the shared coldBinCount. It is the test-side mirror of the
@@ -32,7 +38,7 @@ func readColdBin(path string) ([]ColdEntry, error) {
 	if _, err := io.ReadFull(br, header[:]); err != nil {
 		return nil, fmt.Errorf("txhash: read header of %s: %w", path, err)
 	}
-	count := binary.LittleEndian.Uint64(header[:])
+	count := binary.LittleEndian.Uint64(header[:coldBinCountSize])
 
 	info, err := f.Stat()
 	if err != nil {
@@ -64,7 +70,7 @@ func TestColdBin_RoundTrip(t *testing.T) {
 		{Key: [ColdKeySize]byte{0x02}, Seq: 11},
 		{Key: [ColdKeySize]byte{0x02}, Seq: 12}, // duplicate truncated key preserved
 	}
-	require.NoError(t, WriteColdBin(path, entries))
+	require.NoError(t, WriteColdBin(path, testBinSecret, entries))
 
 	got, err := readColdBin(path)
 	require.NoError(t, err)
@@ -80,12 +86,13 @@ func TestColdBin_HeaderAndLayout(t *testing.T) {
 		{Key: [ColdKeySize]byte{0xaa}, Seq: 7},
 		{Key: [ColdKeySize]byte{0xbb}, Seq: 8},
 	}
-	require.NoError(t, WriteColdBin(path, entries))
+	require.NoError(t, WriteColdBin(path, testBinSecret, entries))
 
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.Len(t, data, coldBinHeaderSize+2*coldBinEntrySize)
-	assert.Equal(t, uint64(2), binary.LittleEndian.Uint64(data[:coldBinHeaderSize]))
+	assert.Equal(t, uint64(2), binary.LittleEndian.Uint64(data[:coldBinCountSize]))
+	assert.Equal(t, testBinSecret[:], data[coldBinCountSize:coldBinHeaderSize], "secret recorded after the count")
 	assert.Equal(t, byte(0xaa), data[coldBinHeaderSize])
 	assert.Equal(t, uint32(7),
 		binary.LittleEndian.Uint32(data[coldBinHeaderSize+ColdKeySize:coldBinHeaderSize+coldBinEntrySize]))
@@ -99,7 +106,7 @@ func TestColdBin_CreateFails(t *testing.T) {
 	path := filepath.Join(dir, "out.bin")
 	require.NoError(t, os.Mkdir(path, 0o755)) // create() will hit EISDIR
 
-	err := WriteColdBin(path, []ColdEntry{{Key: [ColdKeySize]byte{0x01}, Seq: 7}})
+	err := WriteColdBin(path, testBinSecret, []ColdEntry{{Key: [ColdKeySize]byte{0x01}, Seq: 7}})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "create")
 
@@ -121,7 +128,7 @@ func TestColdBin_OverwritesPriorAttempt(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, make([]byte, 4096), 0o600))
 
 	entries := []ColdEntry{{Key: [ColdKeySize]byte{0x03}, Seq: 21}}
-	require.NoError(t, WriteColdBin(path, entries))
+	require.NoError(t, WriteColdBin(path, testBinSecret, entries))
 
 	got, err := readColdBin(path)
 	require.NoError(t, err)
@@ -133,7 +140,7 @@ func TestColdBin_OverwritesPriorAttempt(t *testing.T) {
 func TestColdBin_ReadRejectsTruncated(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "out.bin")
-	require.NoError(t, WriteColdBin(path, []ColdEntry{
+	require.NoError(t, WriteColdBin(path, testBinSecret, []ColdEntry{
 		{Key: [ColdKeySize]byte{0x01}, Seq: 1},
 		{Key: [ColdKeySize]byte{0x02}, Seq: 2},
 	}))
@@ -143,4 +150,23 @@ func TestColdBin_ReadRejectsTruncated(t *testing.T) {
 
 	_, err = readColdBin(path)
 	require.Error(t, err)
+}
+
+// TestBuildColdIndex_RejectsMixedSecrets pins the H3 guard: BuildColdIndex
+// adopts the secret from the .bin headers and requires every input in a window
+// to carry the same one. Inputs blinded under different secrets (a catalog
+// remint or geometry drift between ingest passes) must fail the build loudly
+// rather than produce an index no query can hit.
+func TestBuildColdIndex_RejectsMixedSecrets(t *testing.T) {
+	dir := t.TempDir()
+	secretA := [stores.SecretLen]byte{0xa1}
+	secretB := [stores.SecretLen]byte{0xb2}
+	binA := filepath.Join(dir, "a.bin")
+	binB := filepath.Join(dir, "b.bin")
+	require.NoError(t, WriteColdBin(binA, secretA, []ColdEntry{{Key: [ColdKeySize]byte{0x01}, Seq: 1}}))
+	require.NoError(t, WriteColdBin(binB, secretB, []ColdEntry{{Key: [ColdKeySize]byte{0x02}, Seq: 2}}))
+
+	err := BuildColdIndex(context.Background(), []string{binA, binB}, filepath.Join(dir, "out.idx"), 0, 100)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "different index secret")
 }

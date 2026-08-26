@@ -9,17 +9,21 @@ package txhash
 // The merge requires each file's entries pre-sorted ascending by the
 // big-endian uint64 of their first 8 key bytes — the block order streamhash
 // routes on (for the first 8 bytes this is identical to the lex key order
-// WriteColdBin guarantees).
+// WriteColdBin guarantees). The .bin keys are already the keyed routing keys
+// (see cold_format.go), so the build feeds them verbatim — no keying here.
 
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"runtime"
 
 	"github.com/stellar/streamhash"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
 // BuildColdIndex builds one cold txhash index from inputs (the per-chunk
@@ -32,6 +36,12 @@ import (
 // streamhash. By default the block build uses runtime.NumCPU()/2 workers
 // (~2.7x over single-threaded); caller opts override. Removes the partial
 // output on error, and honors ctx cancellation.
+//
+// The index secret written into the metadata is ADOPTED from the .bin headers
+// (the secret the .bin producer keyed the inputs with), not re-derived — so the
+// index can never disagree with its inputs' keying. All inputs must share one
+// secret (scanAndValidate enforces it). That secret is deterministic, so an
+// ErrBlockOverflow here recurs identically on rebuild — non-retryable by design.
 func BuildColdIndex(
 	ctx context.Context,
 	inputs []string,
@@ -47,7 +57,7 @@ func BuildColdIndex(
 			maxLedger-minLedger, ColdPayloadSize)
 	}
 
-	total, err := scanAndValidate(inputs)
+	total, secret, err := scanAndValidate(inputs)
 	if err != nil {
 		return err
 	}
@@ -58,7 +68,7 @@ func BuildColdIndex(
 	buildOpts := make([]streamhash.BuildOption, 0, len(opts)+4)
 	buildOpts = append(buildOpts, streamhash.WithWorkers(defaultBuildWorkers()))
 	buildOpts = append(buildOpts, opts...)
-	buildOpts = append(buildOpts, ColdBuildOptions(minLedger, maxLedger)...)
+	buildOpts = append(buildOpts, ColdBuildOptions(minLedger, maxLedger, secret)...)
 	builder, berr := streamhash.NewSortedBuilder(ctx, outputPath, total, buildOpts...)
 	if berr != nil {
 		return fmt.Errorf("txhash: create cold index builder at %s: %w", outputPath, berr)
@@ -110,38 +120,56 @@ func maxMergeLeaves() int {
 	return max(1, runtime.NumCPU()/2)
 }
 
-// scanAndValidate sums the per-file header counts, cross-checking each
-// against the file length: an understated count would otherwise silently
-// drop a file's trailing entries (the merge reads to EOF).
-func scanAndValidate(inputs []string) (uint64, error) {
+// scanAndValidate sums the per-file header counts, cross-checking each against
+// the file length (an understated count would otherwise silently drop a file's
+// trailing entries — the merge reads to EOF), and returns the index secret the
+// inputs were blinded with. Every input in a window must carry the SAME secret;
+// a mismatch means the .bin files were keyed under different secrets (a catalog
+// remint or geometry drift between ingest passes), so the build stops rather
+// than silently producing an index no query can hit.
+func scanAndValidate(inputs []string) (uint64, [stores.SecretLen]byte, error) {
 	var total uint64
-	for _, path := range inputs {
-		count, err := scanBinHeader(path)
+	var secret [stores.SecretLen]byte
+	if len(inputs) == 0 {
+		return 0, secret, errors.New("txhash: cold index build has no .bin inputs")
+	}
+	for i, path := range inputs {
+		count, s, err := scanBinHeader(path)
 		if err != nil {
-			return 0, err
+			return 0, secret, err
+		}
+		if i == 0 {
+			secret = s
+		} else if s != secret {
+			return 0, secret, fmt.Errorf(
+				"txhash: %s was blinded with a different index secret than %s — inputs must share one secret",
+				path, inputs[0])
 		}
 		total += count
 	}
-	return total, nil
+	return total, secret, nil
 }
 
-// scanBinHeader opens path, reads its declared entry count, and verifies its
-// byte size matches that count via coldBinCount (the shared, overflow-safe
-// header check).
-func scanBinHeader(path string) (uint64, error) {
+// scanBinHeader opens path, reads its declared entry count and index secret,
+// and verifies its byte size matches that count via coldBinCount (the shared,
+// overflow-safe header check).
+func scanBinHeader(path string) (uint64, [stores.SecretLen]byte, error) {
+	var secret [stores.SecretLen]byte
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, fmt.Errorf("txhash: open %s: %w", path, err)
+		return 0, secret, fmt.Errorf("txhash: open %s: %w", path, err)
 	}
 	defer f.Close()
 
 	fi, err := f.Stat()
 	if err != nil {
-		return 0, fmt.Errorf("txhash: stat %s: %w", path, err)
+		return 0, secret, fmt.Errorf("txhash: stat %s: %w", path, err)
 	}
 	var hdr [coldBinHeaderSize]byte
 	if _, err := io.ReadFull(f, hdr[:]); err != nil {
-		return 0, fmt.Errorf("txhash: read header of %s: %w", path, err)
+		return 0, secret, fmt.Errorf("txhash: read header of %s: %w", path, err)
 	}
-	return coldBinCount(path, fi.Size(), binary.LittleEndian.Uint64(hdr[:]))
+	copy(secret[:], hdr[coldBinCountSize:])
+	count, err := coldBinCount(path, fi.Size(), binary.LittleEndian.Uint64(hdr[:coldBinCountSize]))
+	return count, secret, err
 }

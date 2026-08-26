@@ -32,6 +32,7 @@ import (
 	"github.com/stellar/streamhash"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
@@ -80,12 +81,14 @@ func TestStreamingRebuild_ByteIdenticalToColdPath(t *testing.T) {
 	streamingIdx := cat.Layout().TxHashIndexFilePath(frozen)
 
 	// (2) The merged cold path, over the SAME .bin inputs, with the SAME
-	// MinLedger/MaxLedger anchor the streaming path derives (lo.FirstLedger,
-	// hi.LastLedger — build.go step 3).
+	// MinLedger/MaxLedger anchor (lo.FirstLedger, hi.LastLedger, window 0 —
+	// build.go step 3). Both paths adopt the same secret from the .bin
+	// headers, so the bytes must still match.
 	minLedger := chunk.ID(0).FirstLedger()
 	maxLedger := chunk.ID(2).LastLedger()
 	directIdx := filepath.Join(t.TempDir(), "direct.idx")
-	require.NoError(t, txhash.BuildColdIndex(context.Background(), inputs, directIdx, minLedger, maxLedger))
+	require.NoError(t, txhash.BuildColdIndex(
+		context.Background(), inputs, directIdx, minLedger, maxLedger))
 
 	streamingBytes, err := os.ReadFile(streamingIdx)
 	require.NoError(t, err)
@@ -102,9 +105,10 @@ func TestStreamingRebuild_ByteIdenticalToColdPath(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestStreamingBin_MatchesSpecFormat asserts the .bin a frozen chunk leaves on
-// disk matches gettransaction §6.1: a uint64-LE entry-count header followed by
-// 20-byte [16-byte key | 4-byte LE seq] entries. freezeChunkBin uses the real
-// txhash.WriteColdBin, so this is the producer's actual on-disk contract.
+// disk matches gettransaction §6.1: a uint64-LE entry-count header, then the
+// 16-byte index secret the keys were blinded with, then 20-byte [16-byte key |
+// 4-byte LE seq] entries. freezeChunkBin uses the real txhash.WriteColdBin, so
+// this is the producer's actual on-disk contract.
 func TestStreamingBin_MatchesSpecFormat(t *testing.T) {
 	cat, _ := smallTxHashIndexCatalog(t, 4)
 
@@ -115,9 +119,12 @@ func TestStreamingBin_MatchesSpecFormat(t *testing.T) {
 	raw, err := os.ReadFile(cat.Layout().TxHashBinPath(0))
 	require.NoError(t, err)
 
-	// §6.1: 8-byte header + N * 20-byte entries.
+	// §6.1: 24-byte header (8-byte uint64-LE count + 16-byte index secret) +
+	// N * 20-byte entries.
 	const (
-		hdrSize   = 8
+		countW    = 8                // uint64-LE entry count
+		secretW   = stores.SecretLen // index secret the keys were blinded with
+		hdrSize   = countW + secretW
 		keyW      = 16 // streamhash.MinKeySize
 		seqW      = 4
 		entryW    = keyW + seqW // 20 bytes exactly
@@ -127,16 +134,16 @@ func TestStreamingBin_MatchesSpecFormat(t *testing.T) {
 	require.Equal(t, streamhash.MinKeySize, keyW, "16-byte key == streamhash routing-key width")
 	require.Len(t, raw, hdrSize+wantCount*entryW, "header + 20-byte entries")
 
-	count := binary.LittleEndian.Uint64(raw[:hdrSize])
+	count := binary.LittleEndian.Uint64(raw[:countW])
 	require.Equal(t, uint64(wantCount), count, "uint64-LE entry-count header")
 
-	// Each entry: 16-byte truncated key, then a uint32-LE absolute seq. Entries
-	// are written sorted lex by key, so locate each by its known key prefix.
+	// Each entry: the 16-byte secret-keyed routing key (keyed at ingest — never
+	// the raw hash prefix), then a uint32-LE absolute seq. Entries are written
+	// sorted lex by keyed key, so locate each by its expected keyed key.
+	secret := chunkSecret(cat, 0)
 	wantSeqByKey := map[[keyW]byte]uint32{}
 	for _, e := range []txEntry{e0, e1} {
-		var k [keyW]byte
-		copy(k[:], e.hash[:keyW])
-		wantSeqByKey[k] = e.seq
+		wantSeqByKey[stores.BlindKey(secret, e.hash[:keyW])] = e.seq
 	}
 	for i := range wantCount {
 		off := hdrSize + i*entryW
@@ -181,8 +188,10 @@ func TestStreamingIdx_MatchesSpecFormat(t *testing.T) {
 	require.Equal(t, txhash.ColdFingerprintSize, idx.Stats().FingerprintSize, "1-byte fingerprint on disk")
 	require.Equal(t, uint64(2), idx.NumKeys(), "one key per indexed transaction")
 
-	gotMin, gotMax, err := txhash.ParseLedgerRange(idx.UserMetadata())
+	gotMin, gotMax, gotSecret, err := txhash.ParseColdMetadata(idx.UserMetadata())
 	require.NoError(t, err)
+	require.Equal(t, chunkSecret(cat, 0), gotSecret,
+		"metadata carries the derived per-index routing secret")
 	require.Equal(t, chunk.ID(0).FirstLedger(), gotMin, "MinLedger anchor = lo.FirstLedger")
 	require.Equal(t, chunk.ID(1).LastLedger(), gotMax, "MaxLedger = hi.LastLedger")
 

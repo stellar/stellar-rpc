@@ -82,7 +82,8 @@ func (cfg ExecConfig) validate() error {
 	return nil
 }
 
-// processConfig projects the shared Catalog/Logger into the ProcessConfig.
+// processConfig projects the shared Catalog/Logger into the ProcessConfig. The
+// cold-index secret is sourced from the Catalog at point of use.
 func (cfg ExecConfig) processConfig() ProcessConfig {
 	p := cfg.Process
 	p.Catalog = cfg.Catalog

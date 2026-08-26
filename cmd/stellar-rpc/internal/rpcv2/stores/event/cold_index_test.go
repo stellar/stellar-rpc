@@ -67,7 +67,7 @@ func loadIndexPack(t *testing.T, path string) map[int][]byte {
 // slip past every round-trip test.
 func TestIndexPack_TrailerPinsFormatAndRecordSize(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, indexFixture(t, 4), dir))
+	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, indexFixture(t, 4), dir, testIndexSecret))
 
 	r := packfile.Open(filepath.Join(dir, IndexPackName(indexTestChunkID)), packfile.ReaderOptions{})
 	t.Cleanup(func() { _ = r.Close() })
@@ -84,7 +84,7 @@ func TestWriteIndex_ProducesBothFiles(t *testing.T) {
 	dir := t.TempDir()
 	idx := indexFixture(t, 64)
 
-	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir))
+	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
 
 	// index.hash exists and is openable as an MPHF.
 	m, err := openMPHF(filepath.Join(dir, IndexHashName(indexTestChunkID)))
@@ -101,7 +101,7 @@ func TestWriteIndex_RoundTripsBitmapsPerTerm(t *testing.T) {
 	const n = 32
 	idx := indexFixture(t, n)
 
-	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir))
+	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
 
 	m, err := openMPHF(filepath.Join(dir, IndexHashName(indexTestChunkID)))
 	require.NoError(t, err)
@@ -141,7 +141,7 @@ func TestWriteIndex_UnseenTermFingerprintMismatches(t *testing.T) {
 	dir := t.TempDir()
 	idx := indexFixture(t, 32)
 
-	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir))
+	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
 
 	m, err := openMPHF(filepath.Join(dir, IndexHashName(indexTestChunkID)))
 	require.NoError(t, err)
@@ -153,9 +153,10 @@ func TestWriteIndex_UnseenTermFingerprintMismatches(t *testing.T) {
 	// fast-no-matches (ErrKeyNotFound — already covered by mphf_test)
 	// or returns a slot whose fingerprint does NOT match the unseen
 	// term's first four bytes. The latter is the case index.pack's
-	// fingerprint check screens.
+	// fingerprint check screens. 2000 probes keep P(zero collisions)
+	// negligible.
 	var collisions, mismatches int
-	for i := range 100 {
+	for i := range 2000 {
 		unseen := ComputeTermKey(
 			fmt.Appendf(nil, "never-seen-%d", i),
 			FieldTopic0,
@@ -191,7 +192,7 @@ func TestWriteIndex_RespectsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already done before WriteColdIndex sees it
 
-	err := WriteColdIndex(ctx, indexTestChunkID, indexFixture(t, 64), t.TempDir())
+	err := WriteColdIndex(ctx, indexTestChunkID, indexFixture(t, 64), t.TempDir(), testIndexSecret)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled,
 		"WriteColdIndex must surface ctx.Err() when canceled before start")
@@ -204,7 +205,7 @@ func TestWriteIndex_RespectsContextCancellation(t *testing.T) {
 // the ordinary path.
 func TestWriteIndex_ZeroTerms_WritesEmptyIndex(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, NewBitmaps(), dir))
+	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, NewBitmaps(), dir, testIndexSecret))
 
 	// index.hash exists (a real streamhash index built over zero terms).
 	hashInfo, err := os.Stat(filepath.Join(dir, IndexHashName(indexTestChunkID)))
@@ -237,7 +238,7 @@ func TestWriteIndex_FailedWriteCleansUpIndexHash(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(dir, IndexPackName(indexTestChunkID)), 0o755))
 
-	err := WriteColdIndex(context.Background(), indexTestChunkID, indexFixture(t, 4), dir)
+	err := WriteColdIndex(context.Background(), indexTestChunkID, indexFixture(t, 4), dir, testIndexSecret)
 	require.Error(t, err, "WriteColdIndex must fail when index.pack path is a directory")
 
 	_, statErr := os.Stat(filepath.Join(dir, IndexHashName(indexTestChunkID)))
@@ -253,7 +254,7 @@ func TestWriteIndex_SlotsAreDense(t *testing.T) {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
 			dir := t.TempDir()
 			idx := indexFixture(t, n)
-			require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir))
+			require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
 
 			m, err := openMPHF(filepath.Join(dir, IndexHashName(indexTestChunkID)))
 			require.NoError(t, err)
@@ -283,7 +284,7 @@ func TestWriteIndex_LargeIndex(t *testing.T) {
 	const n = 5_000
 	idx := indexFixture(t, n)
 
-	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir))
+	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
 
 	m, err := openMPHF(filepath.Join(dir, IndexHashName(indexTestChunkID)))
 	require.NoError(t, err)
@@ -314,7 +315,7 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	idx := NewBitmaps()
 	idx.AddTo(ComputeTermKey([]byte("only"), FieldContractID), 42)
 
-	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir))
+	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
 
 	records := loadIndexPack(t, filepath.Join(dir, IndexPackName(indexTestChunkID)))
 	require.Len(t, records, 1)

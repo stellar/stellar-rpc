@@ -17,8 +17,10 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/durable"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
 // ErrBackendCoverageTimeout is returned when the bulk backend's tip never reaches the chunk in time.
@@ -56,12 +58,27 @@ func (cfg ProcessConfig) validate() error {
 
 // ingestConfigFor maps an artifact set to ingest.Config. It lives here, not on
 // catalog.ArtifactSet, so catalog needn't import ingest (the #824 split invariant).
-func ingestConfigFor(s catalog.ArtifactSet) ingest.Config {
-	return ingest.Config{
+// For a txhash or events request it resolves the chunk's per-index secret from the
+// catalog (the same one the index build derives), so ingest keys stay consistent.
+func ingestConfigFor(s catalog.ArtifactSet, chunkID chunk.ID, cfg ProcessConfig) ingest.Config {
+	c := ingest.Config{
 		Ledgers: s.Has(geometry.KindLedgers),
 		Txhash:  s.Has(geometry.KindTxHash),
 		Events:  s.Has(geometry.KindEvents),
 	}
+	if c.Txhash || c.Events {
+		catalogSecret := cfg.Catalog.Secret()
+		if c.Txhash {
+			indexID := uint32(cfg.Catalog.TxHashIndexLayout().TxHashIndexID(chunkID))
+			sec := txhash.ColdIndexSecret(catalogSecret[:], indexID)
+			c.TxhashSecret = sec[:]
+		}
+		if c.Events {
+			sec := event.ColdIndexSecret(catalogSecret[:], chunkID)
+			c.EventsSecret = sec[:]
+		}
+	}
+	return c
 }
 
 // processChunk materializes the requested cold artifacts for ONE chunk via the
@@ -115,8 +132,9 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 		EventsDir:  layout.EventsBucketDir(chunkID),
 	}
 	raw := src.RawLedgers(ctx, ledgerbackend.BoundedRange(chunkID.FirstLedger(), chunkID.LastLedger()))
+	ic := ingestConfigFor(artifacts, chunkID, cfg)
 	if rerr := ingest.WriteColdChunk(
-		ctx, cfg.Logger, chunkID, raw, dirs, cfg.Sink, ingestConfigFor(artifacts),
+		ctx, cfg.Logger, chunkID, raw, dirs, cfg.Sink, ic,
 	); rerr != nil {
 		return fmt.Errorf("cold ingest chunk %s %s: %w", chunkID, artifacts, rerr)
 	}

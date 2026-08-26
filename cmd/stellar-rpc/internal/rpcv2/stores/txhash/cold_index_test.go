@@ -25,6 +25,15 @@ import (
 // this package).
 // ──────────────────────────────────────────────────────────────────
 
+// testCatalogSecret/testIndexID are the fixed keying inputs every fixture build
+// and .bin writer share (deterministic, so fixtures are reproducible);
+// testSecret is the derived per-index routing secret.
+var testCatalogSecret = bytes.Repeat([]byte{0xA5}, 32)
+
+const testIndexID uint32 = 7
+
+func testSecret() [stores.SecretLen]byte { return ColdIndexSecret(testCatalogSecret, testIndexID) }
+
 // randHash returns a 32-byte hash drawn from r. Cold tests use true
 // random hashes (matching streamhash's own test patterns): structured
 // hashes can produce correlated 16-byte prefixes that defeat the
@@ -103,24 +112,29 @@ func makeFixtureEntries(n int) []fixtureEntry {
 	return entries
 }
 
-// writeBinFile writes entries to a per-chunk .bin file in the input
-// format BuildColdIndex consumes, sorted ascending by the 16-byte key
-// prefix (the per-file ordering the build's merge requires).
-func writeBinFile(t *testing.T, path string, entries []fixtureEntry) {
+// writeBinFile writes entries to a per-chunk .bin file in the input format
+// BuildColdIndex consumes: each stored key is the secret-keyed routing key of
+// the entry's hash prefix (mirroring ingest-time keying), sorted ascending
+// (the per-file ordering the build's merge requires).
+func writeBinFile(t *testing.T, path string, entries []fixtureEntry, secret [stores.SecretLen]byte) {
 	t.Helper()
-	sorted := append([]fixtureEntry(nil), entries...)
-	sort.Slice(sorted, func(i, j int) bool {
-		return bytes.Compare(sorted[i].hash[:ColdKeySize], sorted[j].hash[:ColdKeySize]) < 0
+	keyed := make([]ColdEntry, len(entries))
+	for i, e := range entries {
+		keyed[i] = ColdEntry{Key: stores.BlindKey(secret, e.hash[:ColdKeySize]), Seq: e.seq}
+	}
+	sort.Slice(keyed, func(i, j int) bool {
+		return bytes.Compare(keyed[i].Key[:], keyed[j].Key[:]) < 0
 	})
 
 	var buf bytes.Buffer
 	var hdr [coldBinHeaderSize]byte
-	binary.LittleEndian.PutUint64(hdr[:], uint64(len(sorted)))
+	binary.LittleEndian.PutUint64(hdr[:coldBinCountSize], uint64(len(keyed)))
+	copy(hdr[coldBinCountSize:], secret[:])
 	buf.Write(hdr[:])
 	var seqBuf [coldBinSeqSize]byte
-	for _, e := range sorted {
-		buf.Write(e.hash[:ColdKeySize])
-		binary.LittleEndian.PutUint32(seqBuf[:], e.seq)
+	for _, e := range keyed {
+		buf.Write(e.Key[:])
+		binary.LittleEndian.PutUint32(seqBuf[:], e.Seq)
 		buf.Write(seqBuf[:])
 	}
 	require.NoError(t, os.WriteFile(path, buf.Bytes(), 0o600))
@@ -132,6 +146,12 @@ func writeBinFile(t *testing.T, path string, entries []fixtureEntry) {
 // mirroring how #765's per-chunk ingester would lay them out.
 func writeFixtureBins(t *testing.T, dir string, entries []fixtureEntry) []string {
 	t.Helper()
+	return writeFixtureBinsKeyed(t, dir, entries, testSecret())
+}
+
+// writeFixtureBinsKeyed is writeFixtureBins under an explicit routing secret.
+func writeFixtureBinsKeyed(t *testing.T, dir string, entries []fixtureEntry, secret [stores.SecretLen]byte) []string {
+	t.Helper()
 	byChunk := make(map[chunk.ID][]fixtureEntry)
 	for _, e := range entries {
 		c := chunk.IDFromLedger(e.seq)
@@ -140,7 +160,7 @@ func writeFixtureBins(t *testing.T, dir string, entries []fixtureEntry) []string
 	inputs := make([]string, 0, len(byChunk))
 	for c, es := range byChunk {
 		p := filepath.Join(dir, c.String()+".bin")
-		writeBinFile(t, p, es)
+		writeBinFile(t, p, es, secret)
 		inputs = append(inputs, p)
 	}
 	return inputs
@@ -158,7 +178,8 @@ func buildColdFixture(t *testing.T, n int) (string, []fixtureEntry) {
 	require.Greater(t, len(inputs), 1, "fixture should span multiple .bin files to exercise the merge")
 
 	idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
-	require.NoError(t, BuildColdIndex(context.Background(), inputs, idxPath, fixtureMinLedger(), fixtureMaxLedger()))
+	require.NoError(t, BuildColdIndex(context.Background(), inputs, idxPath,
+		fixtureMinLedger(), fixtureMaxLedger()))
 	return idxPath, entries
 }
 
@@ -210,7 +231,8 @@ func TestBuildColdIndex_LargeFilesSpanMultipleBuffers(t *testing.T) {
 		"fixture must produce a file larger than the read buffer to exercise refills")
 
 	idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
-	require.NoError(t, BuildColdIndex(context.Background(), inputs, idxPath, fixtureMinLedger(), fixtureMaxLedger()))
+	require.NoError(t, BuildColdIndex(context.Background(), inputs, idxPath,
+		fixtureMinLedger(), fixtureMaxLedger()))
 
 	r, err := OpenColdReader(idxPath)
 	require.NoError(t, err)
@@ -225,25 +247,32 @@ func TestBuildColdIndex_LargeFilesSpanMultipleBuffers(t *testing.T) {
 // assertEmptyColdIndex checks that idxPath is a valid empty cold index: it
 // opens cleanly, carries its coverage's [wantMin, wantMax] metadata, and every
 // lookup misses.
-func assertEmptyColdIndex(t *testing.T, idxPath string, wantMin, wantMax uint32) {
+func assertEmptyColdIndex(t *testing.T, idxPath string, wantMin, wantMax uint32, wantSecret [stores.SecretLen]byte) {
 	t.Helper()
 	assert.FileExists(t, idxPath)
 	r, err := OpenColdReader(idxPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = r.Close() })
-	// The empty index must still carry correct coverage bounds.
+	// The empty index must still carry correct coverage bounds and the adopted
+	// index secret: a query blinds with the metadata secret, so dropping it on
+	// the empty path would break lookups once the range fills.
 	assert.Equal(t, wantMin, r.MinLedger(), "empty index minLedger")
 	assert.Equal(t, wantMax, r.MaxLedger(), "empty index maxLedger")
+	assert.Equal(t, wantSecret, r.secret, "empty index metadata secret")
 	_, err = r.Get(randHash(testRNG(99)))
 	require.ErrorIs(t, err, stores.ErrNotFound)
 }
 
 func TestBuildColdIndex_NoInputs(t *testing.T) {
-	// No .bin files at all: streamhash now builds a valid empty index rather
-	// than refusing.
+	// With adopt-the-secret, the build reads the index secret from the .bin
+	// headers, so it needs at least one input. Zero inputs is refused — it never
+	// happens in production (a window always has its chunks' .bin files, empty or
+	// not; an all-empty window is TestBuildColdIndex_AllEmptyInputs).
 	idxPath := filepath.Join(t.TempDir(), indexFileName(0))
-	require.NoError(t, BuildColdIndex(context.Background(), nil, idxPath, 2, 2))
-	assertEmptyColdIndex(t, idxPath, 2, 2)
+	err := BuildColdIndex(context.Background(), nil, idxPath, 2, 2)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no .bin inputs")
+	assert.NoFileExists(t, idxPath)
 }
 
 func TestBuildColdIndex_MaxBelowMinErrors(t *testing.T) {
@@ -265,12 +294,13 @@ func TestBuildColdIndex_AllEmptyInputs(t *testing.T) {
 	inputs := make([]string, 0, len(chunks))
 	for _, c := range chunks {
 		p := filepath.Join(dir, c.String()+".bin")
-		writeBinFile(t, p, nil)
+		writeBinFile(t, p, nil, testSecret())
 		inputs = append(inputs, p)
 	}
 	idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
-	require.NoError(t, BuildColdIndex(context.Background(), inputs, idxPath, fixtureMinLedger(), fixtureMaxLedger()))
-	assertEmptyColdIndex(t, idxPath, fixtureMinLedger(), fixtureMaxLedger())
+	require.NoError(t, BuildColdIndex(context.Background(), inputs, idxPath,
+		fixtureMinLedger(), fixtureMaxLedger()))
+	assertEmptyColdIndex(t, idxPath, fixtureMinLedger(), fixtureMaxLedger(), testSecret())
 }
 
 func TestBuildColdIndex_MissingInputErrors(t *testing.T) {
@@ -296,9 +326,10 @@ func TestBuildColdIndex_SeqOutsideCoverageErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			p := filepath.Join(dir, "00000004.bin")
-			writeBinFile(t, p, []fixtureEntry{{hash: randHash(testRNG(1)), seq: tc.seq}})
+			writeBinFile(t, p, []fixtureEntry{{hash: randHash(testRNG(1)), seq: tc.seq}}, testSecret())
 			idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
-			err := BuildColdIndex(context.Background(), []string{p}, idxPath, fixtureMinLedger(), fixtureMaxLedger())
+			err := BuildColdIndex(context.Background(), []string{p}, idxPath,
+				fixtureMinLedger(), fixtureMaxLedger())
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "outside index coverage")
 			assert.NoFileExists(t, idxPath)
@@ -314,10 +345,11 @@ func TestBuildColdIndex_CoverageSpanExceedsBudgetErrors(t *testing.T) {
 	overflowSeq := minLedger + uint32(coldPayloadMax) + 1
 	entries := []fixtureEntry{{hash: randHash(testRNG(2)), seq: overflowSeq}}
 	p := filepath.Join(dir, "99999999.bin")
-	writeBinFile(t, p, entries)
+	writeBinFile(t, p, entries, testSecret())
 
 	idxPath := filepath.Join(dir, indexFileName(0))
-	err := BuildColdIndex(context.Background(), []string{p}, idxPath, minLedger, overflowSeq)
+	err := BuildColdIndex(
+		context.Background(), []string{p}, idxPath, minLedger, overflowSeq)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "payload budget")
 	assert.NoFileExists(t, idxPath)
@@ -332,7 +364,8 @@ func TestBuildColdIndex_CallerOptsCannotOverrideFormat(t *testing.T) {
 	inputs := writeFixtureBins(t, dir, entries)
 	idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
 	err := BuildColdIndex(context.Background(), inputs, idxPath,
-		fixtureMinLedger(), fixtureMaxLedger(), streamhash.WithMetadata(EncodeLedgerRange(7, 7)))
+		fixtureMinLedger(), fixtureMaxLedger(),
+		streamhash.WithMetadata(EncodeColdMetadata(7, 7, testSecret())))
 	require.NoError(t, err)
 
 	r, err := OpenColdReader(idxPath)
@@ -363,7 +396,8 @@ func TestBuildColdIndex_TruncatedFileErrors(t *testing.T) {
 	require.NoError(t, os.WriteFile(p, buf.Bytes(), 0o600))
 
 	idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
-	err := BuildColdIndex(context.Background(), []string{p}, idxPath, fixtureMinLedger(), fixtureMaxLedger())
+	err := BuildColdIndex(context.Background(), []string{p}, idxPath,
+		fixtureMinLedger(), fixtureMaxLedger())
 	require.Error(t, err)
 	assert.NoFileExists(t, idxPath)
 }
@@ -382,7 +416,8 @@ func TestBuildColdIndex_HeaderUndercountErrors(t *testing.T) {
 	require.NoError(t, os.WriteFile(p, buf.Bytes(), 0o600))
 
 	idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
-	err := BuildColdIndex(context.Background(), []string{p}, idxPath, fixtureMinLedger(), fixtureMaxLedger())
+	err := BuildColdIndex(context.Background(), []string{p}, idxPath,
+		fixtureMinLedger(), fixtureMaxLedger())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "header claims")
 	assert.NoFileExists(t, idxPath)
@@ -404,7 +439,8 @@ func TestBuildColdIndex_HeaderOverflowRejected(t *testing.T) {
 	require.NoError(t, os.WriteFile(p, buf.Bytes(), 0o600))
 
 	idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
-	err := BuildColdIndex(context.Background(), []string{p}, idxPath, fixtureMinLedger(), fixtureMaxLedger())
+	err := BuildColdIndex(context.Background(), []string{p}, idxPath,
+		fixtureMinLedger(), fixtureMaxLedger())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "header claims")
 	assert.NoFileExists(t, idxPath)
@@ -419,7 +455,8 @@ func TestBuildColdIndex_InputOrderIndependent(t *testing.T) {
 	require.Greater(t, len(inputs), 1)
 
 	forwardPath := filepath.Join(dir, "forward.idx")
-	require.NoError(t, BuildColdIndex(context.Background(), inputs, forwardPath, fixtureMinLedger(), fixtureMaxLedger()))
+	require.NoError(t, BuildColdIndex(context.Background(), inputs, forwardPath,
+		fixtureMinLedger(), fixtureMaxLedger()))
 
 	reversed := append([]string(nil), inputs...)
 	for i, j := 0, len(reversed)-1; i < j; i, j = i+1, j-1 {
@@ -434,4 +471,44 @@ func TestBuildColdIndex_InputOrderIndependent(t *testing.T) {
 	reversedBytes, err := os.ReadFile(reversedPath)
 	require.NoError(t, err)
 	assert.Equal(t, forwardBytes, reversedBytes, "index must not depend on input file order")
+}
+
+// TestBuildColdIndex_CatalogSecretChangesRoutingNotResults: two master keys route
+// the same entries differently (different .idx bytes — the anti-grinding
+// property), while each keyed build→query round trip still resolves every
+// entry and rejects an unseen hash.
+func TestBuildColdIndex_CatalogSecretChangesRoutingNotResults(t *testing.T) {
+	dir := t.TempDir()
+	entries := makeFixtureEntries(200)
+
+	build := func(name string, catalogSecret []byte) string {
+		binDir := filepath.Join(dir, name)
+		require.NoError(t, os.MkdirAll(binDir, 0o755))
+		inputs := writeFixtureBinsKeyed(t, binDir, entries, ColdIndexSecret(catalogSecret, testIndexID))
+		idxPath := filepath.Join(dir, name+".idx")
+		require.NoError(t, BuildColdIndex(context.Background(), inputs, idxPath,
+			fixtureMinLedger(), fixtureMaxLedger()))
+		return idxPath
+	}
+	pathA := build("a", testCatalogSecret)
+	pathB := build("b", bytes.Repeat([]byte{0x5A}, 32))
+
+	bytesA, err := os.ReadFile(pathA)
+	require.NoError(t, err)
+	bytesB, err := os.ReadFile(pathB)
+	require.NoError(t, err)
+	assert.NotEqual(t, bytesA, bytesB, "a different master key must produce different routing")
+
+	for _, idxPath := range []string{pathA, pathB} {
+		r, err := OpenColdReader(idxPath)
+		require.NoError(t, err)
+		for _, e := range entries {
+			got, gerr := r.Get(e.hash)
+			require.NoError(t, gerr)
+			require.Equal(t, e.seq, got)
+		}
+		_, miss := r.Get(randHash(testRNG(0xabad1dea)))
+		require.ErrorIs(t, miss, stores.ErrNotFound)
+		require.NoError(t, r.Close())
+	}
 }
