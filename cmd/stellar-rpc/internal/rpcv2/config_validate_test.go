@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
@@ -222,6 +224,15 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 			"zero getEventsV2 max_items_per_response",
 			func(c *config.Config) { c.Service.Methods.GetEventsV2.MaxItemsPerResponse = uintPtr(0) },
 			"[service.methods.getEventsV2].max_items_per_response",
+		},
+		{
+			// The spec fixes the largest limit a client may ask for, so an
+			// operator can only lower this cap.
+			"getEventsV2 max_items_per_response above the spec's cap",
+			func(c *config.Config) {
+				c.Service.Methods.GetEventsV2.MaxItemsPerResponse = uintPtr(protocol.MaxLimitV2 + 1)
+			},
+			"cannot exceed 1000",
 		},
 		{
 			"zero preflight worker_count",
@@ -598,3 +609,15 @@ func TestValidateConfig_RestartNowIsNoOp(t *testing.T) {
 
 // itoa is the test-local uint32 -> decimal-string helper.
 func itoa(n uint32) string { return strconv.FormatUint(uint64(n), 10) }
+
+// v1 getEvents has no spec-fixed limit, so raising its cap is
+// the operator's business. Only the v2 cap is bounded.
+func TestValidateConfig_AllowsGetEventsV1CapAboveTheV2Ceiling(t *testing.T) {
+	cat, _ := testCatalog(t)
+	cfg := validCfg(4, 3, "genesis")
+	above := uint(protocol.MaxLimitV2 + 1)
+	cfg.Service.Methods.GetEvents.MaxItemsPerResponse = &above
+
+	_, err := callValidate(t, cfg, cat, readyTip(chunk.ID(10).FirstLedger()))
+	require.NoError(t, err)
+}

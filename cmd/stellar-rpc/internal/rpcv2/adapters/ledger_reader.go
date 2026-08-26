@@ -36,7 +36,7 @@ func NewLedgerReader() *LedgerReader {
 }
 
 func (r *LedgerReader) GetLatestLedgerSequence(ctx context.Context) (uint32, error) {
-	view, err := viewFrom(ctx)
+	view, err := ViewFrom(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -47,7 +47,7 @@ func (r *LedgerReader) GetLatestLedgerSequence(ctx context.Context) (uint32, err
 }
 
 func (r *LedgerReader) GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
-	view, err := viewFrom(ctx)
+	view, err := ViewFrom(ctx)
 	if err != nil {
 		return xdr.LedgerCloseMeta{}, false, err
 	}
@@ -56,7 +56,7 @@ func (r *LedgerReader) GetLedger(ctx context.Context, sequence uint32) (xdr.Ledg
 }
 
 func (r *LedgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRange, error) {
-	view, err := viewFrom(ctx)
+	view, err := ViewFrom(ctx)
 	if err != nil {
 		return store.LedgerRange{}, err
 	}
@@ -67,7 +67,7 @@ func (r *LedgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRange, e
 func (r *LedgerReader) StreamLedgerRange(
 	ctx context.Context, startLedger, endLedger uint32, f store.StreamLedgerFn,
 ) error {
-	view, err := viewFrom(ctx)
+	view, err := ViewFrom(ctx)
 	if err != nil {
 		return err
 	}
@@ -95,7 +95,7 @@ func (r *LedgerReader) StreamLedgerRange(
 }
 
 func (r *LedgerReader) NewTx(ctx context.Context) (store.LedgerReaderTx, error) {
-	view, err := viewFrom(ctx)
+	view, err := ViewFrom(ctx)
 	if err != nil {
 		return nil, err
 	}

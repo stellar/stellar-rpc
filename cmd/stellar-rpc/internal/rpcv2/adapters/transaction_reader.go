@@ -31,7 +31,7 @@ func NewTransactionReader(networkPassphrase string, metrics observability.Metric
 }
 
 func (r *TransactionReader) GetTransaction(ctx context.Context, hash xdr.Hash) (store.Transaction, error) {
-	view, err := viewFrom(ctx)
+	view, err := ViewFrom(ctx)
 	if err != nil {
 		return store.Transaction{}, err
 	}

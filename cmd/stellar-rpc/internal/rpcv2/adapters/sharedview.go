@@ -24,8 +24,10 @@ func WithView(ctx context.Context, view *query.ReadView) context.Context {
 	return context.WithValue(ctx, viewKey{}, view)
 }
 
-// viewFrom returns the view WithView installed, or errNoView.
-func viewFrom(ctx context.Context) (*query.ReadView, error) {
+// ViewFrom returns the view WithView installed, or errNoView. It is exported
+// for the getEventsV2 handler. That handler is not an adapter, but it takes
+// its view from the request context the same way.
+func ViewFrom(ctx context.Context) (*query.ReadView, error) {
 	view, ok := ctx.Value(viewKey{}).(*query.ReadView)
 	if !ok {
 		return nil, errNoView
