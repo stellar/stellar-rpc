@@ -22,7 +22,19 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
+
+// coldRoutingDomain is the DeriveIndexSecret domain for events cold indexes
+// (distinct from txhash's "txhash").
+const coldRoutingDomain = "events"
+
+// ColdIndexSecret derives chunkID's routing secret from the build-side master
+// key. The single derivation both ingest and the index build use, so rebuilds
+// stay byte-identical.
+func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]byte {
+	return stores.DeriveIndexSecret(catalogSecret, coldRoutingDomain, uint32(chunkID))
+}
 
 // WriteColdIndex produces index.pack + index.hash for chunkID inside
 // bucketDir. Both files are fsync'd before the function returns.
@@ -82,7 +94,13 @@ import (
 // ctx cancels the MPHF build phase (the expensive part for large
 // chunks); the subsequent index.pack write is a tight in-memory
 // loop that doesn't poll ctx.
-func WriteColdIndex(ctx context.Context, chunkID chunk.ID, bitmaps Bitmaps, bucketDir string) (err error) {
+//
+// secret is the chunk's deterministic routing secret (ColdIndexSecret).
+// A streamhash.ErrBlockOverflow is non-retryable: rebuilding with the
+// same secret routes the same keys to the same blocks.
+func WriteColdIndex(
+	ctx context.Context, chunkID chunk.ID, bitmaps Bitmaps, bucketDir string, secret [stores.SecretLen]byte,
+) (err error) {
 	indexPackPath := filepath.Join(bucketDir, IndexPackName(chunkID))
 	indexHashPath := filepath.Join(bucketDir, IndexHashName(chunkID))
 
@@ -98,7 +116,7 @@ func WriteColdIndex(ctx context.Context, chunkID chunk.ID, bitmaps Bitmaps, buck
 		}
 	}()
 
-	m, err := buildMPHF(ctx, bitmaps, indexHashPath)
+	m, err := buildMPHF(ctx, bitmaps, indexHashPath, secret)
 	if err != nil {
 		return fmt.Errorf("events: build MPHF: %w", err)
 	}
@@ -110,6 +128,7 @@ func WriteColdIndex(ctx context.Context, chunkID chunk.ID, bitmaps Bitmaps, buck
 		if lerr != nil {
 			return fmt.Errorf("events: MPHF lookup during index.pack build: %w", lerr)
 		}
+		// App fingerprint stays on the ORIGINAL term key, not the routed key.
 		var fp [IndexRecordFingerprintLen]byte
 		copy(fp[:], term[:IndexRecordFingerprintLen])
 		// Mutate in place — bitmaps is uniquely owned by the caller, built

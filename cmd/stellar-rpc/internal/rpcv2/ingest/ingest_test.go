@@ -27,6 +27,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
@@ -36,6 +37,23 @@ import (
 // testPassphrase is a network passphrase literal used only by the test fixtures
 // (transaction-hash derivation); the package itself never hardcodes one.
 const testPassphrase = "Public Global Stellar Network ; September 2015"
+
+// testTxhashKey is the fixed routing master key the txhash fixtures use;
+// index 0 matches the tests' fixed chunk 0.
+var testTxhashKey = bytes.Repeat([]byte{0xA7}, 32)
+
+// testTxhashSecret is the routing secret the ingested .bin keys are keyed with.
+func testTxhashSecret() [stores.SecretLen]byte { return txhash.ColdIndexSecret(testTxhashKey, 0) }
+
+// testTxhashSecretBytes is testTxhashSecret as a slice, for ingest.Config.TxhashSecret.
+func testTxhashSecretBytes() []byte { s := testTxhashSecret(); return s[:] }
+
+// testEventsSecret is the routing secret the events cold index builds use;
+// chunk 0 matches the tests' fixed chunk 0.
+func testEventsSecret() [stores.SecretLen]byte { return event.ColdIndexSecret(testTxhashKey, 0) }
+
+// testEventsSecretBytes is testEventsSecret as a slice, for ingest.Config.EventsSecret.
+func testEventsSecretBytes() []byte { s := testEventsSecret(); return s[:] }
 
 // ───────────────────────── test metric sink ─────────────────────────
 
@@ -500,7 +518,7 @@ func TestTxhashColdWriter_Bin(t *testing.T) {
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := newTxhashCold(txhashBinPath(coldDir), chunkID, nil)
+	ing, err := newTxhashCold(txhashBinPath(coldDir), chunkID, nil, testTxhashSecret())
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
@@ -522,7 +540,7 @@ func TestEventsColdWriter_Readback(t *testing.T) {
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := newEventsCold(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil)
+	ing, err := newEventsCold(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil, testEventsSecret())
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
@@ -559,7 +577,7 @@ func TestEventsColdWriter_V0KeepsOffsetsContiguous(t *testing.T) {
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := newEventsCold(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil)
+	ing, err := newEventsCold(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil, testEventsSecret())
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
@@ -620,7 +638,7 @@ func TestWriteColdChunk_EventlessChunk_FullyReadable(t *testing.T) {
 	// Every ledger in the chunk is a V0 (pre-Soroban) ledger → zero events.
 	require.NoError(t, WriteColdChunk(
 		context.Background(), logger, chunkID, rawChunk(fullStream(t, chunkID, marshalV0LCM), chunkID),
-		coldDirsAt(coldDir, chunkID), sink, Config{Events: true},
+		coldDirsAt(coldDir, chunkID), sink, Config{Events: true, EventsSecret: testEventsSecretBytes()},
 	))
 
 	bucketDir := filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID())
@@ -665,7 +683,11 @@ func TestColdChunk_Success(t *testing.T) {
 	sink := &testSink{}
 
 	cc, err := openColdChunk(
-		coldDirsAt(coldDir, chunkID), chunkID, sink, Config{Ledgers: true, Txhash: true, Events: true})
+		coldDirsAt(coldDir, chunkID), chunkID, sink,
+		Config{
+			Ledgers: true, Txhash: true, Events: true,
+			TxhashSecret: testTxhashSecretBytes(), EventsSecret: testEventsSecretBytes(),
+		})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cc.close()) }()
 
@@ -753,7 +775,8 @@ func TestColdChunk_MidChunkFailure_NoArtifact(t *testing.T) {
 	coldDir := t.TempDir()
 	sink := &testSink{}
 
-	cc, err := openColdChunk(coldDirsAt(coldDir, chunkID), chunkID, sink, Config{Ledgers: true, Events: true})
+	cc, err := openColdChunk(coldDirsAt(coldDir, chunkID), chunkID, sink,
+		Config{Ledgers: true, Events: true, EventsSecret: testEventsSecretBytes()})
 	require.NoError(t, err)
 
 	require.NoError(t, cc.ingest(first, viewOf(t, first)))
@@ -933,31 +956,35 @@ func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 	}
 	require.NoError(t, WriteColdChunk(
 		context.Background(), testLogger(), chunkID, rawChunk(fullStream(t, chunkID, gen), chunkID),
-		coldDirsAt(coldDir, chunkID), nil, Config{Ledgers: true, Txhash: true, Events: true},
+		coldDirsAt(coldDir, chunkID), nil,
+		Config{
+			Ledgers: true, Txhash: true, Events: true,
+			TxhashSecret: testTxhashSecretBytes(), EventsSecret: testEventsSecretBytes(),
+		},
 	))
 
-	// Reference #1 — txhash: sorted, truncated entries for every resolvable
+	// Reference #1 — txhash: sorted, keyed entries for every resolvable
 	// hash (outer, plus a fee-bump's inner) over the sentinels.
 	var wantEntries []txhash.ColdEntry
 	for _, seq := range sentinels {
 		txParts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raws[seq]))
 		require.NoError(t, err)
 		for i := range txParts {
-			var ke txhash.ColdEntry
-			copy(ke.Key[:], txParts[i].Hash[:txhash.ColdKeySize])
-			ke.Seq = seq
-			wantEntries = append(wantEntries, ke)
+			wantEntries = append(wantEntries, txhash.ColdEntry{
+				Key: stores.BlindKey(testTxhashSecret(), txParts[i].Hash[:txhash.ColdKeySize]),
+				Seq: seq,
+			})
 			if txParts[i].FeeBump {
-				var ike txhash.ColdEntry
-				copy(ike.Key[:], txParts[i].InnerHash[:txhash.ColdKeySize])
-				ike.Seq = seq
-				wantEntries = append(wantEntries, ike)
+				wantEntries = append(wantEntries, txhash.ColdEntry{
+					Key: stores.BlindKey(testTxhashSecret(), txParts[i].InnerHash[:txhash.ColdKeySize]),
+					Seq: seq,
+				})
 			}
 		}
 	}
 	slices.SortFunc(wantEntries, func(a, b txhash.ColdEntry) int { return bytes.Compare(a.Key[:], b.Key[:]) })
 	gotEntries := rpcv2test.ReadColdBin(t, txhashBinPath(filepath.Join(coldDir, dataTypeTxhash)))
-	require.Equal(t, wantEntries, gotEntries, "cold .bin must hold every resolvable hash, sorted and truncated")
+	require.Equal(t, wantEntries, gotEntries, "cold .bin must hold every resolvable hash, sorted and keyed")
 
 	// Reference #2 — events: PayloadsFromLedgerEvents with chunk-relative IDs
 	// assigned in ingest (ascending-seq) order, mapped to their term keys.
@@ -1044,7 +1071,7 @@ func TestWriteColdChunk_TxhashCold_Bin(t *testing.T) {
 
 	require.NoError(t, WriteColdChunk(
 		context.Background(), logger, chunkID, rawChunk(fullStream(t, chunkID, gen), chunkID),
-		coldDirsAt(coldDir, chunkID), nil, Config{Txhash: true},
+		coldDirsAt(coldDir, chunkID), nil, Config{Txhash: true, TxhashSecret: testTxhashSecretBytes()},
 	))
 
 	entries := rpcv2test.ReadColdBin(t, txhashBinPath(filepath.Join(coldDir, dataTypeTxhash)))
@@ -1072,7 +1099,7 @@ func TestWriteColdChunk_EventsCold_Readback(t *testing.T) {
 
 	require.NoError(t, WriteColdChunk(
 		context.Background(), logger, chunkID, rawChunk(fullStream(t, chunkID, gen), chunkID),
-		coldDirsAt(coldDir, chunkID), nil, Config{Events: true},
+		coldDirsAt(coldDir, chunkID), nil, Config{Events: true, EventsSecret: testEventsSecretBytes()},
 	))
 
 	bucketDir := filepath.Join(coldDir, "events", chunkID.BucketID())
@@ -1337,16 +1364,16 @@ func TestHotService_FailedPhaseCarriesPartialDuration(t *testing.T) {
 
 // TestTxhashColdWriter_BinContent ingests two tx-bearing ledgers, finalizes,
 // then reads the .bin back through the store codec and asserts the contract
-// the deferred streamhash builder relies on: each key == the fixture tx hash
-// truncated to txhash.ColdKeySize (pinned to streamhash.MinKeySize by the
-// codec), each seq == the ledger it was ingested in, and entries are in
-// non-decreasing key order.
+// the deferred streamhash builder relies on: each key == the secret-keyed
+// routing key of the fixture tx hash truncated to txhash.ColdKeySize (keyed
+// at ingest — never the raw hash prefix), each seq == the ledger it was
+// ingested in, and entries are in non-decreasing (keyed) key order.
 func TestTxhashColdWriter_BinContent(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := newTxhashCold(txhashBinPath(coldDir), chunkID, nil)
+	ing, err := newTxhashCold(txhashBinPath(coldDir), chunkID, nil, testTxhashSecret())
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
@@ -1354,9 +1381,7 @@ func TestTxhashColdWriter_BinContent(t *testing.T) {
 	wantSeqByKey := map[[txhash.ColdKeySize]byte]uint32{}
 	for _, seq := range []uint32{first, first + 1} {
 		raw, hash, _ := marshalLCMWithEvent(t, seq)
-		var key [txhash.ColdKeySize]byte
-		copy(key[:], hash[:txhash.ColdKeySize])
-		wantSeqByKey[key] = seq
+		wantSeqByKey[stores.BlindKey(testTxhashSecret(), hash[:txhash.ColdKeySize])] = seq
 		txParts, _ := extractFor(t, raw)
 		require.NoError(t, ing.write(seq, txParts))
 	}
@@ -1368,7 +1393,7 @@ func TestTxhashColdWriter_BinContent(t *testing.T) {
 	var prevKey [txhash.ColdKeySize]byte
 	for i, e := range entries {
 		wantSeq, known := wantSeqByKey[e.Key]
-		require.True(t, known, "entry %d key %x is not one of the ingested fixture hashes", i, e.Key)
+		require.True(t, known, "entry %d key %x is not a keyed fixture hash", i, e.Key)
 		require.Equal(t, wantSeq, e.Seq, "entry %d seq must equal the ledger it was ingested in", i)
 
 		if i > 0 {
@@ -1447,7 +1472,8 @@ func TestOpenColdChunk_RollbackOneBuilt(t *testing.T) {
 	// bucket-dir MkdirAll.
 	require.NoError(t, os.WriteFile(filepath.Join(coldDir, dataTypeTxhash), []byte("not a dir"), 0o644))
 
-	_, err := openColdChunk(coldDirsAt(coldDir, chunkID), chunkID, sink, Config{Ledgers: true, Txhash: true})
+	_, err := openColdChunk(coldDirsAt(coldDir, chunkID), chunkID, sink,
+		Config{Ledgers: true, Txhash: true, TxhashSecret: testTxhashSecretBytes()})
 	require.Error(t, err, "the txhash open must fail on the planted file")
 
 	// The ledger writer was opened then rolled back with no write/finalize, so
@@ -1471,7 +1497,10 @@ func TestOpenColdChunk_RollbackTwoBuilt(t *testing.T) {
 	require.NoError(t, os.MkdirAll(packPath, 0o755))
 
 	_, err := openColdChunk(coldDirsAt(coldDir, chunkID), chunkID, sink,
-		Config{Ledgers: true, Txhash: true, Events: true})
+		Config{
+			Ledgers: true, Txhash: true, Events: true,
+			TxhashSecret: testTxhashSecretBytes(), EventsSecret: testEventsSecretBytes(),
+		})
 	require.Error(t, err, "the events open must fail on the planted directory")
 
 	// Both the ledger and txhash writers were opened then rolled back with no
@@ -1515,7 +1544,7 @@ func TestEventsCold_FinishThenIndexFails_LeavesInertPack(t *testing.T) {
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := newEventsCold(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil)
+	ing, err := newEventsCold(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil, testEventsSecret())
 	require.NoError(t, err)
 
 	// Ingest one event-bearing ledger so the mirror is non-empty, exercising a
@@ -1553,7 +1582,7 @@ func TestEventsCold_FinalizeAfterFailedIngest_Refuses(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldDir := t.TempDir()
 
-	ing, err := newEventsCold(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil)
+	ing, err := newEventsCold(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil, testEventsSecret())
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
@@ -1587,7 +1616,10 @@ func TestColdChunk_Finalize_FirstErrorStopsRemaining(t *testing.T) {
 	sink := &testSink{}
 
 	cc, err := openColdChunk(coldDirsAt(coldDir, chunkID), chunkID, sink,
-		Config{Ledgers: true, Txhash: true, Events: true})
+		Config{
+			Ledgers: true, Txhash: true, Events: true,
+			TxhashSecret: testTxhashSecretBytes(), EventsSecret: testEventsSecretBytes(),
+		})
 	require.NoError(t, err)
 
 	raw, _, _ := marshalLCMWithEvent(t, first)
@@ -1774,7 +1806,7 @@ func TestTxhashColdWriter_FeeBumpBothHashes(t *testing.T) {
 	seq := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := newTxhashCold(txhashBinPath(coldDir), chunkID, nil)
+	ing, err := newTxhashCold(txhashBinPath(coldDir), chunkID, nil, testTxhashSecret())
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
@@ -1792,6 +1824,8 @@ func TestTxhashColdWriter_FeeBumpBothHashes(t *testing.T) {
 		require.Equal(t, seq, entries[i].Seq)
 		keys = append(keys, entries[i].Key[:])
 	}
-	assert.Contains(t, keys, outerHash[:txhash.ColdKeySize])
-	assert.Contains(t, keys, innerHash[:txhash.ColdKeySize])
+	outerKey := stores.BlindKey(testTxhashSecret(), outerHash[:txhash.ColdKeySize])
+	innerKey := stores.BlindKey(testTxhashSecret(), innerHash[:txhash.ColdKeySize])
+	assert.Contains(t, keys, outerKey[:])
+	assert.Contains(t, keys, innerKey[:])
 }

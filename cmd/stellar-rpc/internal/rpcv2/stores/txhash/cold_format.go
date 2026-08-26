@@ -6,6 +6,12 @@ package txhash
 // offset from the group's MinLedger, stored inline in the per-key payload.
 // One MPHF spans many chunks because a hash lookup has no ledger to narrow
 // on. The reader is in cold_reader.go, the build in cold_index.go.
+//
+// Routing is secret-keyed: the .bin producer stores
+// stores.BlindKey(secret, txhash[:ColdKeySize]) as each entry's key, the
+// build feeds those keys verbatim, and the reader keys its queries the same
+// way. secret = ColdIndexSecret(catalogSecret, indexID) — deterministic, and
+// stored in the index metadata so queries never need the master key.
 
 import (
 	"encoding/binary"
@@ -13,6 +19,8 @@ import (
 	"fmt"
 
 	"github.com/stellar/streamhash"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
 // DefaultChunksPerIndex is the default number of chunks per cold txhash index.
@@ -29,42 +37,55 @@ const ColdFingerprintSize = 1
 // coldPayloadMax is the largest offset that fits ColdPayloadSize bytes.
 const coldPayloadMax = uint64(1)<<(ColdPayloadSize*8) - 1
 
-// coldMetadataSize is the metadata blob width: two 4-byte LE values,
-// [MinLedger, MaxLedger].
-const coldMetadataSize = 8
+// coldMetadataSize is the metadata blob width:
+// [MinLedger:4 LE][MaxLedger:4 LE][routing secret:16].
+const coldMetadataSize = 8 + stores.SecretLen
+
+// coldRoutingDomain is the DeriveIndexSecret domain for txhash cold indexes.
+const coldRoutingDomain = "txhash"
 
 // ErrInvalidMetadata is returned when a cold index's metadata is not a valid
-// [MinLedger, MaxLedger] blob.
+// [MinLedger, MaxLedger, secret] blob.
 var ErrInvalidMetadata = errors.New("txhash: cold index user metadata malformed")
 
-// EncodeLedgerRange packs [minLedger, maxLedger] into the metadata blob.
-func EncodeLedgerRange(minLedger, maxLedger uint32) []byte {
+// ColdIndexSecret derives index indexID's routing secret from the
+// build-side master key. The single derivation both the .bin producer and
+// BuildColdIndex use, so ingest-time keys always match the built index.
+func ColdIndexSecret(catalogSecret []byte, indexID uint32) [stores.SecretLen]byte {
+	return stores.DeriveIndexSecret(catalogSecret, coldRoutingDomain, indexID)
+}
+
+// EncodeColdMetadata packs [minLedger, maxLedger, secret] into the metadata blob.
+func EncodeColdMetadata(minLedger, maxLedger uint32, secret [stores.SecretLen]byte) []byte {
 	buf := make([]byte, coldMetadataSize)
 	binary.LittleEndian.PutUint32(buf[:4], minLedger)
-	binary.LittleEndian.PutUint32(buf[4:], maxLedger)
+	binary.LittleEndian.PutUint32(buf[4:8], maxLedger)
+	copy(buf[8:], secret[:])
 	return buf
 }
 
-// ParseLedgerRange recovers [minLedger, maxLedger] from the metadata blob,
-// rejecting a wrong size or maxLedger < minLedger with ErrInvalidMetadata.
-func ParseLedgerRange(metadata []byte) (uint32, uint32, error) {
+// ParseColdMetadata recovers [minLedger, maxLedger, secret] from the metadata
+// blob, rejecting a wrong size or maxLedger < minLedger with ErrInvalidMetadata.
+func ParseColdMetadata(metadata []byte) (uint32, uint32, [stores.SecretLen]byte, error) {
+	var secret [stores.SecretLen]byte
 	if len(metadata) != coldMetadataSize {
-		return 0, 0, fmt.Errorf("%w: got %d bytes, want %d", ErrInvalidMetadata, len(metadata), coldMetadataSize)
+		return 0, 0, secret, fmt.Errorf("%w: got %d bytes, want %d", ErrInvalidMetadata, len(metadata), coldMetadataSize)
 	}
 	minLedger := binary.LittleEndian.Uint32(metadata[:4])
-	maxLedger := binary.LittleEndian.Uint32(metadata[4:])
+	maxLedger := binary.LittleEndian.Uint32(metadata[4:8])
 	if maxLedger < minLedger {
-		return 0, 0, fmt.Errorf("%w: maxLedger %d < minLedger %d", ErrInvalidMetadata, maxLedger, minLedger)
+		return 0, 0, secret, fmt.Errorf("%w: maxLedger %d < minLedger %d", ErrInvalidMetadata, maxLedger, minLedger)
 	}
-	return minLedger, maxLedger, nil
+	copy(secret[:], metadata[8:])
+	return minLedger, maxLedger, secret, nil
 }
 
 // ColdBuildOptions pins a cold index's payload size, fingerprint size, and
-// [minLedger, maxLedger] anchor.
-func ColdBuildOptions(minLedger, maxLedger uint32) []streamhash.BuildOption {
+// [minLedger, maxLedger, secret] metadata.
+func ColdBuildOptions(minLedger, maxLedger uint32, secret [stores.SecretLen]byte) []streamhash.BuildOption {
 	return []streamhash.BuildOption{
 		streamhash.WithPayload(ColdPayloadSize),
 		streamhash.WithFingerprint(ColdFingerprintSize),
-		streamhash.WithMetadata(EncodeLedgerRange(minLedger, maxLedger)),
+		streamhash.WithMetadata(EncodeColdMetadata(minLedger, maxLedger, secret)),
 	}
 }

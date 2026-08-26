@@ -26,6 +26,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
@@ -213,16 +214,18 @@ func WriteColdTxIndexFile(
 	t *testing.T, cat *catalog.Catalog, cov geometry.TxHashIndexCoverage, entries map[xdr.Hash]uint32,
 ) {
 	t.Helper()
+	master := cat.Secret()
+	secret := txhash.ColdIndexSecret(master[:], uint32(cov.Index))
 	cold := make([]txhash.ColdEntry, 0, len(entries))
 	for h, seq := range entries {
 		var e txhash.ColdEntry
-		copy(e.Key[:], h[:txhash.ColdKeySize])
+		e.Key = stores.BlindKey(secret, h[:txhash.ColdKeySize])
 		e.Seq = seq
 		cold = append(cold, e)
 	}
 	slices.SortFunc(cold, func(a, b txhash.ColdEntry) int { return bytes.Compare(a.Key[:], b.Key[:]) })
 	bin := filepath.Join(t.TempDir(), txhash.ColdBinName(cov.Lo))
-	require.NoError(t, txhash.WriteColdBin(bin, cold))
+	require.NoError(t, txhash.WriteColdBin(bin, secret, cold))
 
 	idxPath := cat.Layout().TxHashIndexFilePath(cov)
 	require.NoError(t, os.MkdirAll(filepath.Dir(idxPath), 0o755))
@@ -330,13 +333,13 @@ func ReadColdBin(t *testing.T, path string) []txhash.ColdEntry {
 	require.NoError(t, err)
 	defer f.Close()
 
-	const headerSize = 8
+	const headerSize = 8 + stores.SecretLen // uint64-LE count + index secret
 	entrySize := txhash.ColdKeySize + 4
 
 	var header [headerSize]byte
 	_, err = io.ReadFull(f, header[:])
 	require.NoError(t, err)
-	count := binary.LittleEndian.Uint64(header[:])
+	count := binary.LittleEndian.Uint64(header[:8])
 
 	info, err := f.Stat()
 	require.NoError(t, err)

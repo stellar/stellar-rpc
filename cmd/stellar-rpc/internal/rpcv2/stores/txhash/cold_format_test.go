@@ -13,25 +13,28 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
-func TestEncodeParseLedgerRange_RoundTrip(t *testing.T) {
+func TestEncodeParseColdMetadata_RoundTrip(t *testing.T) {
+	secret := testSecret()
 	cases := [][2]uint32{{0, 0}, {2, 2}, {100, 12345}, {50002, 60001}, {0, 0xFFFFFFFF}}
 	for _, c := range cases {
-		gotMin, gotMax, err := ParseLedgerRange(EncodeLedgerRange(c[0], c[1]))
+		gotMin, gotMax, gotSecret, err := ParseColdMetadata(EncodeColdMetadata(c[0], c[1], secret))
 		require.NoError(t, err)
 		assert.Equal(t, c[0], gotMin)
 		assert.Equal(t, c[1], gotMax)
+		assert.Equal(t, secret, gotSecret)
 	}
 }
 
-func TestParseLedgerRange_WrongSizeErrors(t *testing.T) {
-	for _, sz := range []int{0, 1, 4, 7, 9, 16} {
-		_, _, err := ParseLedgerRange(make([]byte, sz))
+func TestParseColdMetadata_WrongSizeErrors(t *testing.T) {
+	// 8 is the pre-secret layout; 24 is the only valid width.
+	for _, sz := range []int{0, 1, 4, 7, 8, 9, 16, 23, 25} {
+		_, _, _, err := ParseColdMetadata(make([]byte, sz))
 		assert.ErrorIs(t, err, ErrInvalidMetadata, "size %d should error", sz)
 	}
 }
 
-func TestParseLedgerRange_MaxBelowMinErrors(t *testing.T) {
-	_, _, err := ParseLedgerRange(EncodeLedgerRange(100, 99))
+func TestParseColdMetadata_MaxBelowMinErrors(t *testing.T) {
+	_, _, _, err := ParseColdMetadata(EncodeColdMetadata(100, 99, testSecret()))
 	assert.ErrorIs(t, err, ErrInvalidMetadata)
 }
 
@@ -76,7 +79,7 @@ func TestColdReader_UnseenKeyReturnsNotFound(t *testing.T) {
 
 func TestOpenColdReader_BadMetadataErrors(t *testing.T) {
 	// An index built without ColdBuildOptions' metadata must be rejected
-	// at open: ParseLedgerRange requires exactly 8 bytes.
+	// at open: ParseColdMetadata requires exactly coldMetadataSize bytes.
 	path := filepath.Join(t.TempDir(), "no-metadata.idx")
 	sb, err := streamhash.NewSortedBuilder(context.Background(), path, 1,
 		streamhash.WithPayload(ColdPayloadSize),
@@ -100,7 +103,7 @@ func TestOpenColdReader_WrongPayloadSizeErrors(t *testing.T) {
 	sb, err := streamhash.NewSortedBuilder(context.Background(), path, 1,
 		streamhash.WithPayload(ColdPayloadSize+1), // wrong width
 		streamhash.WithFingerprint(ColdFingerprintSize),
-		streamhash.WithMetadata(EncodeLedgerRange(2, 2)),
+		streamhash.WithMetadata(EncodeColdMetadata(2, 2, testSecret())),
 	)
 	require.NoError(t, err)
 	var k [ColdKeySize]byte

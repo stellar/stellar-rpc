@@ -10,6 +10,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
 // coldChunk is one chunk's set of cold writers — one concrete field per data
@@ -59,7 +60,12 @@ func openColdChunk(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Config)
 		if dirs.TxhashBin == "" {
 			return fail(errors.New("ingest: txhash enabled but its ColdDirs path is empty"))
 		}
-		w, err := newTxhashCold(dirs.TxhashBin, chunkID, sink)
+		if len(cfg.TxhashSecret) != stores.SecretLen {
+			return fail(errors.New("ingest: txhash cold writer requires a per-index secret"))
+		}
+		var secret [stores.SecretLen]byte
+		copy(secret[:], cfg.TxhashSecret)
+		w, err := newTxhashCold(dirs.TxhashBin, chunkID, sink, secret)
 		if err != nil {
 			return fail(fmt.Errorf("open txhash cold writer: %w", err))
 		}
@@ -69,7 +75,12 @@ func openColdChunk(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Config)
 		if dirs.EventsDir == "" {
 			return fail(errors.New("ingest: events enabled but its ColdDirs path is empty"))
 		}
-		w, err := newEventsCold(dirs.EventsDir, chunkID, sink)
+		if len(cfg.EventsSecret) != stores.SecretLen {
+			return fail(errors.New("ingest: events cold writer requires a per-index secret"))
+		}
+		var secret [stores.SecretLen]byte
+		copy(secret[:], cfg.EventsSecret)
+		w, err := newEventsCold(dirs.EventsDir, chunkID, sink, secret)
 		if err != nil {
 			return fail(fmt.Errorf("open events cold writer: %w", err))
 		}

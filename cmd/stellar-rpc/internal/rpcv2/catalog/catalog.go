@@ -31,6 +31,7 @@ type Catalog struct {
 	logger      *supportlog.Entry
 	layout      geometry.Layout
 	txhashIndex geometry.TxHashIndexLayout
+	secret      [32]byte // cold-index secret, minted once at Open then read-only
 }
 
 // Open opens the catalog's backing KV store at path (created if absent) and
@@ -44,7 +45,17 @@ func Open(
 	if err != nil {
 		return nil, err
 	}
-	return &Catalog{store: store, logger: logger, layout: layout, txhashIndex: txhashIndex}, nil
+	c := &Catalog{store: store, logger: logger, layout: layout, txhashIndex: txhashIndex}
+	// Mint-or-load the cold-index secret up front (get-or-create is not atomic;
+	// here it runs single-threaded) and cache it, so post-Open Secret() reads are
+	// lock-free and cannot fail.
+	secret, err := c.ensureSecret()
+	if err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("catalog: ensure cold-index secret: %w", err)
+	}
+	c.secret = secret
+	return c, nil
 }
 
 // Close releases the backing store. Idempotent.

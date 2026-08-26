@@ -1,6 +1,6 @@
 package txhash
 
-// cold_bin.go owns the on-disk format of the RAW cold txhash chunk: the
+// cold_bin.go owns the on-disk format of the cold txhash chunk: the
 // sorted per-chunk `<chunkID:08d>.bin` file the cold ingester publishes and
 // the deferred streamhash index builder consumes. Keeping the writer and
 // the filename helper next to the index builder's pre-scan in this package
@@ -10,13 +10,14 @@ package txhash
 //
 // File layout:
 //
-//	header  uint64 LE      entry count
-//	entry   ColdKeySize B  txhash[:ColdKeySize]
-//	        uint32 LE      absolute ledger seq
+//	header  uint64 LE           entry count
+//	        stores.SecretLen B  index secret the keys were blinded with
+//	entry   ColdKeySize B       blinded txhash[:ColdKeySize]
+//	        uint32 LE           absolute ledger seq
 //
-// Entries are lex-sorted by key. Duplicate truncated keys are written
+// Entries are lex-sorted by (blinded) key. Duplicate keys are written
 // verbatim, but the downstream streamhash build fails on them — with
-// 16-byte truncated hashes a collision is astronomically unlikely, and
+// 16-byte blinded keys a collision is astronomically unlikely, and
 // if one ever occurs the index build rejects it loudly rather than
 // serving an ambiguous key.
 
@@ -29,25 +30,31 @@ import (
 	"github.com/stellar/streamhash"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
 const (
-	// ColdKeySize is the truncated tx-hash key width stored in the cold
+	// ColdKeySize is the blinded routing-key width stored in the cold
 	// .bin file. It is pinned to streamhash.MinKeySize: the deferred
 	// streamhash index builder routes/hashes on the first MinKeySize bytes
-	// of each key, so the .bin producer must truncate to exactly that
+	// of each key, so the .bin producer's blinded keys are exactly that
 	// width for the round-trip to hold.
 	ColdKeySize = streamhash.MinKeySize
 	// coldBinSeqSize is the per-entry ledger seq width (uint32 LE).
 	coldBinSeqSize = 4
 	// coldBinEntrySize is the per-entry width in the cold .bin file:
-	// ColdKeySize bytes of truncated hash + the ledger seq.
+	// ColdKeySize bytes of blinded key + the ledger seq.
 	coldBinEntrySize = ColdKeySize + coldBinSeqSize
-	// coldBinHeaderSize is the leading uint64 LE entry count.
-	coldBinHeaderSize = 8
+	// coldBinCountSize is the leading uint64 LE entry count.
+	coldBinCountSize = 8
+	// coldBinHeaderSize is the count followed by the index secret the keys were
+	// blinded with (stores.SecretLen). The build reads the secret back and
+	// adopts it, so an index can never be built under a secret that disagrees
+	// with the one its .bin keys were keyed with (see BuildColdIndex).
+	coldBinHeaderSize = coldBinCountSize + stores.SecretLen
 )
 
-// ColdEntry is one (truncated txhash, ledger seq) tuple in a cold .bin file.
+// ColdEntry is one (blinded key, ledger seq) tuple in a cold .bin file.
 type ColdEntry struct {
 	Key [ColdKeySize]byte
 	Seq uint32
@@ -68,6 +75,10 @@ func ColdBinName(chunkID chunk.ID) string {
 // (and scanBinHeader's header-vs-size check rejects loudly if one is
 // ever opened).
 //
+// secret is the index secret entries' keys were blinded with; it is recorded in
+// the header so the deferred build adopts it instead of re-deriving one that
+// might disagree.
+//
 // entries must already be sorted (lex by Key, non-decreasing); this function
 // writes them verbatim.
 //
@@ -75,7 +86,7 @@ func ColdBinName(chunkID chunk.ID) string {
 // completion record must only be written once the data is durable, and on
 // many filesystems ENOSPC/EIO only surface at fd close — a silently
 // truncated .bin would produce a wrong index without any signal.
-func WriteColdBin(path string, entries []ColdEntry) error {
+func WriteColdBin(path string, secret [stores.SecretLen]byte, entries []ColdEntry) error {
 	f, cerr := os.Create(path)
 	if cerr != nil {
 		return fmt.Errorf("txhash: create %s: %w", path, cerr)
@@ -91,7 +102,8 @@ func WriteColdBin(path string, entries []ColdEntry) error {
 
 	bw := bufio.NewWriterSize(f, 1<<20)
 	var header [coldBinHeaderSize]byte
-	binary.LittleEndian.PutUint64(header[:], uint64(len(entries)))
+	binary.LittleEndian.PutUint64(header[:coldBinCountSize], uint64(len(entries)))
+	copy(header[coldBinCountSize:], secret[:])
 	if _, werr := bw.Write(header[:]); werr != nil {
 		return fmt.Errorf("txhash: write header: %w", werr)
 	}
