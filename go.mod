@@ -29,7 +29,7 @@ require (
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/pflag v1.0.5
 	github.com/stellar/go-stellar-sdk v0.7.4-0.20260825061852-f479ee9335f3
-	github.com/stellar/streamhash v0.0.0-20260713164615-c72a4e6f578d
+	github.com/stellar/streamhash v0.1.1-0.20260826155856-77556799545b
 	github.com/stretchr/testify v1.11.1
 )
 
@@ -151,8 +151,8 @@ require (
 	golang.org/x/mod v0.35.0
 	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/oauth2 v0.32.0 // indirect
-	golang.org/x/sync v0.21.0
-	golang.org/x/sys v0.46.0
+	golang.org/x/sync v0.22.0
+	golang.org/x/sys v0.47.0
 	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	google.golang.org/api v0.254.0 // indirect
