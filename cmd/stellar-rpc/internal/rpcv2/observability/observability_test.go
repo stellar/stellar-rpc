@@ -75,6 +75,9 @@ func TestPrometheusMetrics_RegistersAndRecords(t *testing.T) {
 	assert.InDelta(t, float64(3), values["test_ns_fullhistory_streaming_discarded_hot_chunks_total"], 0)
 	assert.InDelta(t, float64(2), values["test_ns_fullhistory_streaming_pruned_artifacts_total"], 0)
 
+	_, exported := values["test_ns_fullhistory_streaming_open_snapshots"]
+	assert.True(t, exported, "open_snapshots gauge must be registered")
+
 	// Phase-duration histogram saw backfill_pass + freeze + rebuild + discard + prune = 5 observations.
 	assert.Equal(t, uint64(5), counts["test_ns_fullhistory_streaming_phase_duration_seconds"])
 }

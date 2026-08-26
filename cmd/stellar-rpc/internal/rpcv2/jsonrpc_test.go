@@ -142,6 +142,26 @@ func TestJSONRPCHandler_HealthyOverFreshRegistryStamp(t *testing.T) {
 	assert.Equal(t, "healthy", result.Status)
 }
 
+func TestJSONRPCHandler_HealthGatedUntilFirstCommit(t *testing.T) {
+	r := seedServingRegistry(t)
+	r.SeedLatestAtBoot(chunk.FirstLedgerSeq, time.Now().Unix())
+	url := newTestRPCServer(t, r)
+
+	out := rpcv2test.PostRPC(t, url, "getHealth", `{}`)
+	require.NotNil(t, out.Error)
+	assert.EqualValues(t, jrpc2.InternalError, out.Error.Code)
+	assert.Contains(t, out.Error.Message, "since this process started")
+
+	r.SetLatestLedger(chunk.FirstLedgerSeq+1, time.Now().Unix())
+	out = rpcv2test.PostRPC(t, url, "getHealth", `{}`)
+	require.Nil(t, out.Error)
+	var result struct {
+		Status string `json:"status"`
+	}
+	require.NoError(t, json.Unmarshal(out.Result, &result))
+	assert.Equal(t, "healthy", result.Status)
+}
+
 func TestWrapAdapterRequest_PanicReleasesSharedView(t *testing.T) {
 	logger, buf := capturingLogger()
 	cat, _ := rpcv2test.OpenTestCatalogWith(t, testCPI, logger)

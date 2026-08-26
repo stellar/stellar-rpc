@@ -225,7 +225,36 @@ func TestGetLedgers_NoLedgers(t *testing.T) {
 	assert.Contains(t, err.Error(), "[-32603] DB is empty")
 }
 
-func TestGetLedgers_CursorGreaterThanLatestLedger(t *testing.T) {
+func TestGetLedgers_CaughtUpCursorIsEchoed(t *testing.T) {
+	cursors := map[string]string{
+		"at the tip":    "10",
+		"above the tip": "15",
+	}
+	for name, cursor := range cursors {
+		t.Run(name, func(t *testing.T) {
+			testDB := setupTestDB(t, 10)
+			handler := ledgersHandler{
+				ledgerReader: sqlitedb.NewLedgerReader(testDB),
+				maxLimit:     100,
+				defaultLimit: 5,
+			}
+
+			request := protocol.GetLedgersRequest{
+				Pagination: &protocol.LedgerPaginationOptions{
+					Cursor: cursor,
+				},
+			}
+
+			response, err := handler.getLedgers(context.TODO(), request)
+			require.NoError(t, err)
+			assert.Empty(t, response.Ledgers)
+			assert.Equal(t, cursor, response.Cursor)
+			assert.Equal(t, uint32(10), response.LatestLedger)
+		})
+	}
+}
+
+func TestGetLedgers_MaxUint32CursorIsRejected(t *testing.T) {
 	testDB := setupTestDB(t, 10)
 	handler := ledgersHandler{
 		ledgerReader: sqlitedb.NewLedgerReader(testDB),
@@ -235,13 +264,13 @@ func TestGetLedgers_CursorGreaterThanLatestLedger(t *testing.T) {
 
 	request := protocol.GetLedgersRequest{
 		Pagination: &protocol.LedgerPaginationOptions{
-			Cursor: "15",
+			Cursor: "4294967295",
 		},
 	}
 
 	_, err := handler.getLedgers(context.TODO(), request)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cursor ('15') must be between")
+	assert.Contains(t, err.Error(), "must be at or above the oldest ledger")
 }
 
 func BenchmarkGetLedgers(b *testing.B) {
