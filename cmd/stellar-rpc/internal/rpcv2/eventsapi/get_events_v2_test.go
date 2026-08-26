@@ -269,6 +269,20 @@ func TestGetEventsV2_LimitOverTheOperatorCapIsRejected(t *testing.T) {
 		})
 	}
 
+	// Zero is rejected either way, but the message must still name this
+	// node's cap rather than the SDK's ceiling.
+	t.Run("limit 0", func(t *testing.T) {
+		ctx, first := seedView(t)
+		zero := uint(0)
+		_, err := getEventsV2(ctx, limits, &protocol.GetEventsV2Request{
+			MinLedger: first,
+			Limit:     &zero,
+		})
+		require.Error(t, err)
+		requireErrorData(t, err, protocol.ErrorReasonInvalidParams, nil)
+		assert.Contains(t, err.Error(), "between 1 and 2")
+	})
+
 	t.Run("at the cap", func(t *testing.T) {
 		ctx, first := seedView(t)
 		resp, err := getEventsV2(ctx, limits, &protocol.GetEventsV2Request{

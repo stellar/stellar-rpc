@@ -88,7 +88,7 @@ func requestCursor(
 	// the error names.
 	limit := limits.DefaultLimit
 	if req.Limit != nil {
-		if *req.Limit > limits.MaxLimit {
+		if *req.Limit == 0 || *req.Limit > limits.MaxLimit {
 			return query.EventCursor{}, 0, &protocol.InvalidParamsError{
 				Message: fmt.Sprintf("limit must be between 1 and %d", limits.MaxLimit),
 				Data:    protocol.InvalidParamsErrorData{Reason: protocol.ErrorReasonInvalidParams},
