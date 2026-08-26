@@ -35,7 +35,11 @@ func newServeReads(
 		p.ledgerReader = adapters.NewLedgerReader()
 		p.transactionReader = adapters.NewTransactionReader(p.networkPassphrase, p.metrics)
 		handler := newJSONRPCHandler(cfg, p)
-		server := &http.Server{Handler: handler, ReadTimeout: jsonrpc.DefaultHTTPReadTimeout}
+		server := &http.Server{
+			Handler:     handler,
+			ReadTimeout: jsonrpc.DefaultHTTPReadTimeout,
+			IdleTimeout: jsonrpc.DefaultHTTPIdleTimeout,
+		}
 
 		// Both exits close the server: on death this reaps established
 		// keep-alive conns Serve abandoned; after the graceful path's
@@ -79,7 +83,11 @@ func startAdminServer(
 	if err != nil {
 		return nil, fmt.Errorf("admin server listen on %q: %w", endpoint, err)
 	}
-	server := &http.Server{Handler: mux, ReadTimeout: jsonrpc.DefaultHTTPReadTimeout}
+	server := &http.Server{
+		Handler:     mux,
+		ReadTimeout: jsonrpc.DefaultHTTPReadTimeout,
+		IdleTimeout: jsonrpc.DefaultHTTPIdleTimeout,
+	}
 	go func() {
 		// Log-only on purpose, matching v1: a dead admin server (pprof,
 		// /metrics) must not take down a node that is still serving reads.

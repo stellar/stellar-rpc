@@ -218,11 +218,13 @@ func runSuite(ctx context.Context, dir, outFile string, count int, pkgs []string
 	return nil
 }
 
-// benchPackages excludes rpcv2 and packages that need native libraries absent
-// from the benchmark box.
+// benchPackages lists the module's packages minus rpcv2 and anything needing
+// native libraries absent from the benchmark box. A package that fails to load
+// stays in (-e), so go test reports it as a per-package failure the way
+// `go test ./...` did, instead of the listing failing the whole leg.
 func benchPackages(ctx context.Context, dir string) ([]string, error) {
 	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "go", "list", "-test", "-json", "./...")
+	cmd := exec.CommandContext(ctx, "go", "list", "-e", "-test", "-json", "./...")
 	cmd.Dir = dir
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
@@ -232,15 +234,18 @@ func benchPackages(ctx context.Context, dir string) ([]string, error) {
 	all, excluded := map[string]bool{}, map[string]bool{}
 	decoder := json.NewDecoder(&stdout)
 	for {
-		var listed struct {
-			ImportPath string   `json:"importPath"`
-			ForTest    string   `json:"forTest"`
-			Deps       []string `json:"deps"`
-		}
+		var listed goListPackage
 		if err := decoder.Decode(&listed); err == io.EOF {
 			break
 		} else if err != nil {
 			return nil, fmt.Errorf("decoding go list output: %w", err)
+		}
+		if listed.Incomplete {
+			reason := "a dependency failed to load"
+			if listed.Error != nil {
+				reason = listed.Error.Err
+			}
+			logger.Warnf("%s in %s did not load cleanly; go test will report it: %s", listed.ImportPath, dir, reason)
 		}
 
 		pkg := listed.ImportPath
@@ -271,6 +276,24 @@ func benchPackages(ctx context.Context, dir string) ([]string, error) {
 	logger.Infof("bench suite in %s: %d packages, %d excluded (v2 tree or native libs): %s",
 		dir, len(kept), len(skipped), strings.Join(skipped, ", "))
 	return kept, nil
+}
+
+// goListPackage is the subset of `go list -json` output benchPackages reads.
+// The tags spell go list's keys exactly, so decoding never depends on
+// encoding/json's case-insensitive fallback.
+//
+//nolint:tagliatelle // go list emits PascalCase keys
+type goListPackage struct {
+	ImportPath string          `json:"ImportPath"`
+	ForTest    string          `json:"ForTest"`
+	Deps       []string        `json:"Deps"`
+	Incomplete bool            `json:"Incomplete"`
+	Error      *goListPkgError `json:"Error"`
+}
+
+//nolint:tagliatelle // go list emits PascalCase keys
+type goListPkgError struct {
+	Err string `json:"Err"`
 }
 
 func excludeFromBench(pkg string, deps []string) bool {
