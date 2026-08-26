@@ -34,6 +34,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
@@ -80,23 +81,75 @@ func FreezeColdFromStore(
 	if err != nil {
 		return 0, err
 	}
-	slices.SortStableFunc(entries, func(a, b ColdEntry) int {
-		return bytes.Compare(a.Key[:], b.Key[:])
-	})
 	w, err := newColdBinStream(binPath, secret)
 	if err != nil {
 		return 0, err
 	}
 	defer w.close()
-	for i := range entries {
-		if werr := w.append(entries[i]); werr != nil {
-			return 0, werr
-		}
+	if serr := sortBlindedToStream(entries, w); serr != nil {
+		return 0, serr
 	}
 	if ferr := w.commit(); ferr != nil {
 		return 0, ferr
 	}
 	return len(entries), nil
+}
+
+// freezeSortShards is the blinded sort's parallelism: the accumulator splits
+// into contiguous arrival-order shards, each stable-sorted on its own core,
+// then k-way merged into the stream writer. Contiguous shards + lowest-shard
+// tie-break make the output equal to a whole-slice STABLE sort — duplicate
+// blinded keys keep global ledger order, the walk writer's own tie-break —
+// while a 60M-entry stress chunk's sort drops from a ~single-core minute to
+// seconds.
+const freezeSortShards = 16
+
+// sortBlindedToStream stable-sorts entries by blinded key (sharded, in
+// place — the accumulator is the sort space) and streams the merged order
+// into w.
+func sortBlindedToStream(entries []ColdEntry, w *coldBinStream) error {
+	n := len(entries)
+	shards := freezeSortShards
+	if n < shards*1024 {
+		shards = 1
+	}
+	bounds := make([]int, shards+1)
+	for i := 1; i <= shards; i++ {
+		bounds[i] = i * n / shards
+	}
+	var wg sync.WaitGroup
+	for i := range shards {
+		wg.Add(1)
+		go func(lo, hi int) {
+			defer wg.Done()
+			slices.SortStableFunc(entries[lo:hi], func(a, b ColdEntry) int {
+				return bytes.Compare(a.Key[:], b.Key[:])
+			})
+		}(bounds[i], bounds[i+1])
+	}
+	wg.Wait()
+	heads := make([]int, shards)
+	for s := range shards {
+		heads[s] = bounds[s]
+	}
+	for {
+		best := -1
+		for s := range shards {
+			if heads[s] >= bounds[s+1] {
+				continue
+			}
+			if best == -1 || bytes.Compare(entries[heads[s]].Key[:], entries[heads[best]].Key[:]) < 0 {
+				best = s
+			}
+		}
+		if best == -1 {
+			return nil
+		}
+		if err := w.append(entries[heads[best]]); err != nil {
+			return err
+		}
+		heads[best]++
+	}
 }
 
 // openFreezeSources assembles the merge inputs in tie-break order: the

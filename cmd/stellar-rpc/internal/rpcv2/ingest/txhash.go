@@ -1,12 +1,10 @@
 package ingest
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"time"
 
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
@@ -88,15 +86,12 @@ func (t *txhashCold) write(seq uint32, txParts []sdkingest.LedgerTxParts) error 
 // pkg/stores/txhash/cold_bin.go pins the layout).
 func (t *txhashCold) finalize(_ context.Context) error {
 	start := time.Now()
-	// slices.SortFunc over sort.Slice: reflection-free, meaningfully faster
-	// on a ~3M-element sort.
-	// STABLE, matching the freeze writer: duplicate blinded keys keep their
-	// arrival (ledger) order, so walk and freeze bytes agree even on inputs
-	// the downstream build would reject.
-	slices.SortStableFunc(t.entries, func(a, b txhash.ColdEntry) int {
-		return bytes.Compare(a.Key[:], b.Key[:])
-	})
-	err := txhash.WriteColdBin(t.binPath, t.secret, t.entries)
+	// The shared sharded sort (stable shards + lowest-shard-tie merge — see
+	// txhash.WriteColdBinSorted): equal to a whole-slice STABLE sort, so
+	// walk and freeze bytes agree even on duplicate blinded keys, at a
+	// fraction of single-threaded symmerge's cost on multi-million-entry
+	// chunks.
+	err := txhash.WriteColdBinSorted(t.binPath, t.secret, t.entries)
 	if err == nil {
 		t.metrics.sink.IngestStage(dataTypeTxhash, stageFinalize, time.Since(start), len(t.entries))
 	}

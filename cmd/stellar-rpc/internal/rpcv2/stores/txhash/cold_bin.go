@@ -67,14 +67,30 @@ func ColdBinName(chunkID chunk.ID) string {
 	return chunkID.String() + ".bin"
 }
 
+// WriteColdBinSorted sorts entries by blinded key (sharded stable sort —
+// sortBlindedToStream's contract: equal to a whole-slice stable sort) and
+// writes the .bin at path. The entry point for callers holding UNSORTED
+// accumulators (the walk writer's finalize); WriteColdBin keeps the
+// pre-sorted contract for callers that already merged.
+func WriteColdBinSorted(path string, secret [stores.SecretLen]byte, entries []ColdEntry) error {
+	w, err := newColdBinStream(path, secret)
+	if err != nil {
+		return err
+	}
+	defer w.close()
+	if serr := sortBlindedToStream(entries, w); serr != nil {
+		return serr
+	}
+	return w.commit()
+}
+
 // WriteColdBin writes the .bin file at path from entries the caller already
-// holds whole — the walk path's finalize accumulator, which exists for its
-// sort anyway. It is a loop over the same coldBinStream the freeze drives, so
-// walk-path and freeze-path bytes are identical by construction; see that
-// type for the create semantics and commit for the durability ladder.
+// holds whole. It is a loop over the same coldBinStream the freeze drives, so
+// every producer's bytes are identical by construction; see that type for the
+// create semantics and commit for the durability ladder.
 //
-// entries must already be sorted (lex by Key, non-decreasing); this function
-// writes them verbatim.
+// entries must already be sorted (lex by blinded Key, non-decreasing); this
+// function writes them verbatim.
 func WriteColdBin(path string, secret [stores.SecretLen]byte, entries []ColdEntry) error {
 	w, err := newColdBinStream(path, secret)
 	if err != nil {
