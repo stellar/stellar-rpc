@@ -16,6 +16,7 @@ import (
 	"slices"
 	"sort"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/bloom"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event/runspill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/internal/runset"
@@ -29,6 +30,9 @@ import (
 // single-job invariant.
 func (h *HotIndex) startSeal(rows []windowRow) {
 	runsSnapshot := h.view.Load().runs
+	// Read on the writer goroutine, like runsSnapshot: the job below closes
+	// over no mutable HotIndex state but h.fsyncDir (fixed at construction).
+	secret := h.secret
 	sealed := len(rows)
 	// Both run names follow runset.NextSealSeq's grammar (<prefix>-%06d.run,
 	// the prefixes OpenHotIndex resumes from); changing either shape silently
@@ -38,7 +42,7 @@ func (h *HotIndex) startSeal(rows []windowRow) {
 	h.sealInFlight = true
 	go func() {
 		res := sealResult{rows: sealed, lastSeq: rows[sealed-1].seq}
-		res.run, res.err = sealWindow(rows, name, h.fsyncDir)
+		res.run, res.err = sealWindow(rows, name, secret, h.fsyncDir)
 		if res.err == nil && len(runsSnapshot)+1 > h.maxRuns {
 			merged, obsolete, merr := mergeSealedRuns(
 				append(append([]*sealedRun{}, runsSnapshot...), res.run),
@@ -237,16 +241,48 @@ func (fb *fenceBuilder) finish(payloadLen int64) []fence {
 	return append(fb.fences, fence{off: payloadLen})
 }
 
+// foldBlindedRow decodes ONE packed index row and unions its postings into a
+// blinded window map, returning how many DECODED bytes the window grew by
+// (16-byte key + 4 bytes per id — what the map actually holds, which the
+// varint-encoded row length undercounts several-fold on dense rows).
+//
+// This is the blind-at-seal step itself, written once for its two callers:
+// the seal, which folds a whole window of rows and ignores the byte count,
+// and the freeze's tail scan, which folds rows until the count crosses its
+// window cap (cold_freeze.go). The in-place merge those two feed is only
+// correct because the seal's key and the freeze tail's key are the same
+// function of the same term — so they are the same expression.
+func foldBlindedRow(window map[TermKey][]uint32, row []byte, secret [stores.SecretLen]byte) (int, error) {
+	added := 0
+	if err := DecodePackedRow(row, func(term TermKey, ids []uint32) {
+		bk := blindTerm(secret, term)
+		window[bk] = append(window[bk], ids...)
+		added += 16 + 4*len(ids)
+	}); err != nil {
+		return 0, err
+	}
+	return added, nil
+}
+
 // sealWindow folds window rows into one run file, building its in-RAM
 // routing state in the same pass as the write, and hands back through
 // openDurable — so the run's dirent is durable before the caller ever sees
 // it. Runs on the background goroutine over immutable inputs.
-func sealWindow(rows []windowRow, path string, fsyncDir func(string) error) (*sealedRun, error) {
+//
+// The fold is where a term stops being raw and becomes the blinded routing
+// key the cold index is built on (blind at seal): the packed rows keep their
+// raw terms — they are what warmup replays and what the freeze's tail scan
+// reads — while everything downstream of the fold (the run's records, its
+// fences, its bloom, and the cold index the freeze merges them into) is
+// keyed by BlindKey(secret, term). Blinding at the fold, rather than at the
+// write, keeps writeSortedRun key-agnostic: the freeze's tail windows blind
+// at their own insert and stream through the same writer.
+func sealWindow(
+	rows []windowRow, path string, secret [stores.SecretLen]byte, fsyncDir func(string) error,
+) (*sealedRun, error) {
 	window := make(map[TermKey][]uint32, 1<<15)
 	for i := range rows {
-		if err := DecodePackedRow(rows[i].bytes, func(term TermKey, ids []uint32) {
-			window[term] = append(window[term], ids...)
-		}); err != nil {
+		if _, err := foldBlindedRow(window, rows[i].bytes, secret); err != nil {
 			return nil, err
 		}
 	}
@@ -258,12 +294,17 @@ func sealWindow(rows []windowRow, path string, fsyncDir func(string) error) (*se
 	return rt.openDurable(path, payloadLen, fsyncDir)
 }
 
-// writeSortedRun streams a folded (term → ids) window to path as one
-// term-sorted run file — no whole-payload buffer — and returns the payload
-// length. observe, when non-nil, sees each record's term and payload-relative
+// writeSortedRun streams a folded (key → ids) window to path as one
+// key-sorted run file — no whole-payload buffer — and returns the payload
+// length. observe, when non-nil, sees each record's key and payload-relative
 // offset just before it is written (one-pass routing-state construction).
 // Shared by the seal and by the events freeze's window flushes (observe=nil),
 // so the fold-and-stream shape has one implementation.
+//
+// Deliberately key-AGNOSTIC: both callers hand it a window that is already
+// keyed the way the run must store it (blinded — the seal blinds in its
+// fold, the freeze's tail scan at its insert), so record order here is
+// exactly the caller's key order and nothing re-keys behind their back.
 func writeSortedRun(
 	window map[TermKey][]uint32, path string, observe func(term TermKey, off int64),
 ) (int64, error) {
@@ -416,11 +457,16 @@ func (r *sealedRun) CloseRun()       { r.close() }
 // manifest-listed run is re-opened (drain-verified — corruption is a loud
 // failure, never auto-healed), unreferenced files in dir are swept as
 // orphans, and the caller then replays the un-sealed tail of packed rows
-// (ledgers past the sealed frontier) through ApplyLedger. The dense overlay
+// (ledgers past the sealed frontier) through ApplyLedger. Sealed runs are
+// adopted AS THEY ARE — already blinded under the chunk DB's adopted secret
+// (hot_store.go), which is the same secret passed here — while the replayed
+// rows are raw, exactly as they were live. The dense overlay
 // starts empty and self-heals: a firehose term re-promotes on its first
 // ledger, backfilling its history from window+runs.
-func OpenHotIndex(dir string, manifest runset.Manifest) (*HotIndex, uint32, error) {
-	h, err := NewHotIndex(dir, manifest)
+func OpenHotIndex(
+	dir string, manifest runset.Manifest, secret [stores.SecretLen]byte,
+) (*HotIndex, uint32, error) {
+	h, err := NewHotIndex(dir, manifest, secret)
 	if err != nil {
 		return nil, 0, err
 	}

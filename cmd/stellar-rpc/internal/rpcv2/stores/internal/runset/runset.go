@@ -13,6 +13,10 @@
 //     (SweepOrphans), and the run-name sequence resumes past every listed
 //     run (NextSealSeq) so a future seal can never overwrite a live one.
 //
+// It also owns the routing-SECRET protocol both engines run over their chunk
+// DB (secret.go): a cross-engine invariant, not a per-engine format, so it is
+// one rule here instead of two that have to keep agreeing.
+//
 // Deliberately NOT here: everything record-aware or view-aware — run opening
 // and drain-verification, txhash's dense-chain check, view swaps, window
 // trims, retired-handle bookkeeping. Those stay per-engine (the two-engines

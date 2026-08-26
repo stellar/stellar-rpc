@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -169,4 +170,33 @@ func TestBuildColdIndex_RejectsMixedSecrets(t *testing.T) {
 	err := BuildColdIndex(context.Background(), []string{binA, binB}, filepath.Join(dir, "out.idx"), 0, 100)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "different index secret")
+}
+
+// TestSortColdEntries_ParallelMatchesSequential pins the parallel path's
+// whole claim: above sortParallelMin the shard-sort-and-merge ladder produces
+// the SAME slice, entry for entry, as the plain sequential sort. The fixture
+// is deliberately duplicate-heavy — keys drawn from a small space, so equal
+// keys are common and the (Key, Seq) tie-break is exercised across shard
+// boundaries — because duplicates are the only place a merge could reorder
+// anything, and they are exactly what the byte-identity gates ride on.
+func TestSortColdEntries_ParallelMatchesSequential(t *testing.T) {
+	if testing.Short() {
+		t.Skip("allocates ~2 × sortParallelMin entries")
+	}
+	const n = sortParallelMin + 12345 // not a multiple of sortShards
+	rng := testRNG(0x5037)
+	entries := make([]ColdEntry, n)
+	for i := range entries {
+		// A 3-byte key space over n ≫ 2^24/8 entries guarantees many exact
+		// key collisions, and a small seq space guarantees exact (Key, Seq)
+		// duplicates too.
+		binary.LittleEndian.PutUint32(entries[i].Key[:4], uint32(rng.UintN(1<<24)))
+		entries[i].Seq = uint32(rng.UintN(64))
+	}
+	want := append([]ColdEntry(nil), entries...)
+	slices.SortFunc(want, compareColdEntries)
+
+	require.GreaterOrEqual(t, len(entries), sortParallelMin, "fixture must take the parallel path")
+	SortColdEntries(entries)
+	require.Equal(t, want, entries)
 }

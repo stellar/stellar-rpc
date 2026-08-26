@@ -125,11 +125,63 @@ func DefaultTuning() Tuning {
 	return Tuning{ZstdEncodeWorkers: ledger.DefaultZstdEncodeWorkers}
 }
 
+// Secrets carries the two routing secrets a read-WRITE hot chunk needs. Both
+// hot engines blind at seal — a sealed run holds the same keys the chunk's
+// cold artifact will — so each engine's secret must be the one its COLD
+// build uses, and the pairing is per chunk, not per deployment: txhash's is
+// per tx-hash INDEX (a contiguous run of chunks), events' per chunk.
+// DeriveSecrets is the derivation; the values are separate fields, never one
+// shared secret, because the two domains are separately derived
+// (stores.DeriveIndexSecret) and must not become interchangeable by accident.
+//
+// A read-ONLY open takes none: it warms nothing and probes nothing (see
+// OpenReadOnly), and the freezes take their secret as an explicit argument,
+// checked against the one the chunk DB adopted.
+type Secrets struct {
+	Txhash [stores.SecretLen]byte
+	Events [stores.SecretLen]byte
+}
+
+// DeriveSecrets derives a chunk's hot routing secrets from the deployment's
+// catalog secret — the SAME derivations the cold builds use
+// (txhash.ColdIndexSecret over the chunk's tx-hash index id,
+// event.ColdIndexSecret over the chunk id), so a chunk's sealed runs and its
+// frozen artifacts are always keyed alike. This is the ONE derivation; every
+// site that needs a chunk's secrets, hot or cold, reaches it — the hot opens
+// through SecretsFor below, the cold materializer through it too
+// (backfill's ingestConfigFor).
+func DeriveSecrets(catalogSecret []byte, txLayout geometry.TxHashIndexLayout, chunkID chunk.ID) Secrets {
+	return Secrets{
+		Txhash: txhash.ColdIndexSecret(catalogSecret, uint32(txLayout.TxHashIndexID(chunkID))),
+		Events: event.ColdIndexSecret(catalogSecret, chunkID),
+	}
+}
+
+// SecretSource is the half of a catalog the derivation reads: the deployment
+// secret and the tx-hash index layout. Declared as an interface, and here
+// rather than in catalog, so hotchunk needn't import catalog (*catalog.Catalog
+// satisfies it structurally) — the same #824 split invariant backfill keeps.
+type SecretSource interface {
+	Secret() [32]byte
+	TxHashIndexLayout() geometry.TxHashIndexLayout
+}
+
+// SecretsFor derives chunkID's hot routing secrets from a catalog. It exists
+// because Go cannot slice a call's array result: without it every caller
+// spells the same two-line `s := cat.Secret(); DeriveSecrets(s[:], ...)`
+// dance, which is a derivation repeated at every open site rather than one.
+func SecretsFor(src SecretSource, chunkID chunk.ID) Secrets {
+	secret := src.Secret()
+	return DeriveSecrets(secret[:], src.TxHashIndexLayout(), chunkID)
+}
+
 // Open opens (or creates) the chunk's shared multi-CF hot DB read-WRITE
 // (ingestion's handle for a NEW chunk) and composes the three facades over it. On
 // any facade-construction failure the shared store is closed before returning.
-func Open(path string, chunkID chunk.ID, logger *supportlog.Entry, tun Tuning) (*DB, error) {
-	return open(path, chunkID, logger, tun, false, false)
+func Open(
+	path string, chunkID chunk.ID, logger *supportlog.Entry, tun Tuning, secrets Secrets,
+) (*DB, error) {
+	return open(path, chunkID, logger, tun, secrets, false, false)
 }
 
 // OpenExisting opens an EXISTING hot DB read-WRITE with create-if-missing OFF —
@@ -137,8 +189,10 @@ func Open(path string, chunkID chunk.ID, logger *supportlog.Entry, tun Tuning) (
 // A missing or gutted DB fails the open instead of silently fabricating a fresh
 // empty one (the "never auto-heal" rule); the caller treats that failure as an
 // ordinary run-failing error.
-func OpenExisting(path string, chunkID chunk.ID, logger *supportlog.Entry, tun Tuning) (*DB, error) {
-	return open(path, chunkID, logger, tun, false, true)
+func OpenExisting(
+	path string, chunkID chunk.ID, logger *supportlog.Entry, tun Tuning, secrets Secrets,
+) (*DB, error) {
+	return open(path, chunkID, logger, tun, secrets, false, true)
 }
 
 // OpenReadOnly opens an EXISTING hot DB read-only — the freeze source's view AND
@@ -160,25 +214,30 @@ func OpenExisting(path string, chunkID chunk.ID, logger *supportlog.Entry, tun T
 // facade (Events() panics), its txhash facade's Get panics, and IngestLedger
 // errors rather than serving a cold, unwarmed surface.
 func OpenReadOnly(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	// Zero Tuning: a read-only view composes the ledger facade for reads
-	// alone — its encoder is never invoked, so no encode tuning applies.
-	return open(path, chunkID, logger, Tuning{}, true, false)
+	// Zero Tuning and zero Secrets: a read-only view composes the ledger
+	// facade for reads alone — its encoder is never invoked and neither hot
+	// index is warmed, so neither applies.
+	return open(path, chunkID, logger, Tuning{}, Secrets{}, true, false)
 }
 
 // OpenReadyWrite opens a "ready" chunk's hot DB read-WRITE — ingestion's handle
 // for a resumed chunk (OpenExisting underneath). openReady enforces the ready-open
 // rule.
 func OpenReadyWrite(
-	state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry, tun Tuning,
+	state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry,
+	tun Tuning, secrets Secrets,
 ) (*DB, error) {
-	return openReady(state, path, chunkID, logger, tun, false)
+	return openReady(state, path, chunkID, logger,
+		func(p string, c chunk.ID, l *supportlog.Entry) (*DB, error) {
+			return OpenExisting(p, c, l, tun, secrets)
+		})
 }
 
 // OpenReadyView opens a "ready" chunk's hot DB read-only — the freeze source's
 // and the last-committed refiner's view (OpenReadOnly underneath). openReady
 // enforces the ready-open rule.
 func OpenReadyView(state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return openReady(state, path, chunkID, logger, Tuning{}, true)
+	return openReady(state, path, chunkID, logger, OpenReadOnly)
 }
 
 // openReady is the single enforcement site for the "ready key ⇒ must-exist,
@@ -188,16 +247,18 @@ func OpenReadyView(state geometry.HotState, path string, chunkID chunk.ID, logge
 // the catalog considers ready. Either way a missing or gutted "ready" DB fails
 // the open — never auto-healed into a fresh empty one — wrapped in the uniform
 // won't-open error so every ready-open site reports it identically.
+//
+// What it does NOT take is the write open's configuration: openFn is the
+// caller's already-bound opener, so the read-only path carries no zero Tuning
+// or zero Secrets it would never use. The rule enforced here is about the
+// ready KEY; the shape of the open belongs to the two exported wrappers.
 func openReady(
-	state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry, tun Tuning, readOnly bool,
+	state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry,
+	openFn func(string, chunk.ID, *supportlog.Entry) (*DB, error),
 ) (*DB, error) {
 	if state != geometry.HotReady {
 		return nil, fmt.Errorf(
 			"hotchunk: ready-open requires chunk %s key %q, got %q", chunkID, geometry.HotReady, state)
-	}
-	openFn := func(p string, c chunk.ID, l *supportlog.Entry) (*DB, error) { return OpenExisting(p, c, l, tun) }
-	if readOnly {
-		openFn = OpenReadOnly
 	}
 	db, err := openFn(path, chunkID, logger)
 	if err != nil {
@@ -206,7 +267,10 @@ func openReady(
 	return db, nil
 }
 
-func open(path string, chunkID chunk.ID, logger *supportlog.Entry, tun Tuning, readOnly, mustExist bool) (*DB, error) {
+func open(
+	path string, chunkID chunk.ID, logger *supportlog.Entry, tun Tuning, secrets Secrets,
+	readOnly, mustExist bool,
+) (*DB, error) {
 	if path == "" {
 		return nil, stores.ErrInvalidConfig
 	}
@@ -236,13 +300,13 @@ func open(path string, chunkID chunk.ID, logger *supportlog.Entry, tun Tuning, r
 		db.txhash = txhash.NewReadOnlyWithStore(store, chunkID)
 		return db, nil
 	}
-	th, err := txhash.NewWithStore(store, chunkID)
+	th, err := txhash.NewWithStore(store, chunkID, secrets.Txhash)
 	if err != nil {
 		_ = store.Close()
 		return nil, fmt.Errorf("compose txhash facade for chunk %s: %w", chunkID, err)
 	}
 	db.txhash = th
-	es, err := event.NewWithStore(store, chunkID)
+	es, err := event.NewWithStore(store, chunkID, secrets.Events)
 	if err != nil {
 		th.Shutdown()
 		_ = store.Close()
@@ -288,8 +352,9 @@ func (d *DB) Events() *event.HotStore {
 // canonical marshaled payloads, the offsets CF is the ledger-count sequence,
 // and the term index replays the hot engine's manifest-listed sealed runs
 // plus the un-sealed packed-row tail through the cold run merge — no ledger
-// re-extraction, no whole-chunk index re-derivation; index memory is the
-// freeze's byte-bounded blind/re-spill windows (event.FreezeColdFromStore).
+// re-extraction, no whole-chunk index re-derivation, and no re-keying (the
+// runs were blinded at seal); index memory is the freeze's byte-bounded tail
+// windows (event.FreezeColdFromStore).
 // Valid on a read-only view; the DB must be complete through the chunk's
 // last ledger (the freeze's source resolution already guarantees it).
 func (d *DB) FreezeEventsCold(
@@ -311,11 +376,11 @@ func (d *DB) FreezeLedgersCold(
 
 // FreezeTxhashCold builds the chunk's cold txhash .bin at binPath by
 // freeze-by-merge over THIS hot DB's durable txhash state: the
-// manifest-listed sealed runs plus the un-sealed packed-row tail, k-way
-// merged, blinded, and re-sorted into the .bin's blinded-key order. Valid
-// on a read-only view (it
-// never touches the query facade); same completeness contract as the other
-// freezes. Returns the entries written.
+// manifest-listed sealed runs (already blinded and key-sorted at seal, so
+// their records ARE .bin entries) plus the un-sealed packed-row tail, k-way
+// merged straight into the file. Valid on a read-only view (it never touches
+// the query facade); same completeness contract as the other freezes.
+// Returns the entries written.
 func (d *DB) FreezeTxhashCold(
 	ctx context.Context, binPath string, secret [stores.SecretLen]byte,
 ) (int, error) {

@@ -35,6 +35,17 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 	return stores.DeriveIndexSecret(catalogSecret, coldRoutingDomain, uint32(chunkID))
 }
 
+// blindTerm is THE events routing key: the blinded form of a raw term key.
+// Every keyed surface derives it through here — the hot tier's sparse probe,
+// the seal's fold, the freeze tail's fold, the MPHF build and its query — so
+// "one blinded identity" is a property of one function instead of an
+// agreement between five call sites. Terms are already fixed-width
+// (TermKey is 16 bytes), so unlike txhash's RoutingKey there is nothing to
+// truncate: this is purely the naming of the identity.
+func blindTerm(secret [stores.SecretLen]byte, term TermKey) TermKey {
+	return TermKey(stores.BlindKey(secret, term[:]))
+}
+
 // WriteColdIndex produces index.pack + index.hash for chunkID inside
 // bucketDir. Both files are fsync'd before the function returns.
 // bucketDir is the chunk's bucket directory; filenames are composed

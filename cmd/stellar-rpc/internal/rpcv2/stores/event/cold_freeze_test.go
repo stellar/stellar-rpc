@@ -296,6 +296,27 @@ func TestFreezeColdFromStore_IgnoresUnreapedMerge(t *testing.T) {
 	require.NoError(t, reopened.Close())
 }
 
+// TestFreezeColdFromStore_RejectsForeignSecret: the freeze may not build an
+// index under a secret the chunk's sealed runs were not blinded with — they
+// are merged in place, so a mismatch would fold two keyspaces into one index
+// that no query could route.
+func TestFreezeColdFromStore_RejectsForeignSecret(t *testing.T) {
+	chunkID := chunk.ID(0)
+	ledgers := freezeEventsPopulation(chunkID.FirstLedger(), 12)
+	hot, store := openSealingStoreAt(t, t.TempDir(), chunkID, 4, 8)
+	populateDeterministic(t, hot, ledgers)
+
+	other := testIndexSecret
+	other[0] ^= 0xFF
+	err := FreezeColdFromStore(context.Background(), chunkID, store,
+		filepath.Join(t.TempDir(), "scratch"), t.TempDir(), other, ColdWriterOptions{})
+	require.ErrorContains(t, err, "keyed under a different routing secret")
+
+	// The DB's own secret freezes fine.
+	require.NoError(t, FreezeColdFromStore(context.Background(), chunkID, store,
+		filepath.Join(t.TempDir(), "scratch"), t.TempDir(), testIndexSecret, ColdWriterOptions{}))
+}
+
 // TestFreezeColdFromStore_RejectsCorruptRunCRC: a manifest-listed run whose
 // payload CRC does not verify fails the freeze loudly (the merge drains
 // every listed run to its trailer) — and identically on retry, since
@@ -325,6 +346,53 @@ func TestFreezeColdFromStore_RejectsCorruptRunCRC(t *testing.T) {
 		filepath.Join(t.TempDir(), "scratch"), t.TempDir(), testIndexSecret, ColdWriterOptions{})
 	require.ErrorIs(t, err, runspill.ErrCorruptRun)
 	require.ErrorContains(t, err, "crc mismatch")
+}
+
+// TestStaleRunFormatTripwire is the events arm's version tripwire. The
+// blind-at-seal flip changed what a sealed run's records are KEYED by
+// (raw term → BlindKey(secret, term)) without changing a single byte of the
+// container, so no structural check can tell a pre-flip run from this one:
+// the CRC verifies, the fences route, the merge would happily fold its
+// raw-keyed postings in under a blinded tail and produce an index whose
+// queries miss ~the whole chunk. The magic bump (EVR2→EVR3) IS the tripwire,
+// and it has to fire on BOTH doors — the read-write open that would otherwise
+// stamp a secret onto the stale DB and launder it, and the freeze, which
+// production reaches through a read-ONLY open that never warms at all.
+func TestStaleRunFormatTripwire(t *testing.T) {
+	chunkID := chunk.ID(0)
+	dir := t.TempDir()
+	ledgers := freezeEventsPopulation(chunkID.FirstLedger(), 48)
+	hot, store := openSealingStoreAt(t, dir, chunkID, 8, 8)
+	populateDeterministic(t, hot, ledgers)
+	names, _, err := rocksdbManifest{store: store}.GetRuns()
+	require.NoError(t, err)
+	require.NotEmpty(t, names, "fixture must leave a manifest-listed run to stale out")
+	runPath := filepath.Join(store.Path(), hotIndexRunDir, names[0])
+	hot.Shutdown()
+	require.NoError(t, store.Close())
+
+	// Rewrite ONLY the magic: every other byte stays a valid run, so the
+	// rejection is attributable to the version gate alone.
+	raw, err := os.ReadFile(runPath)
+	require.NoError(t, err)
+	copy(raw[:4], "EVR2")
+	require.NoError(t, os.WriteFile(runPath, raw, 0o644))
+
+	// Door 1: the read-write open (warmup reopens every manifest-listed run).
+	_, _, err = tryOpenHotStoreForTest(t, dir, chunkID)
+	require.ErrorIs(t, err, runspill.ErrCorruptRun)
+	require.ErrorContains(t, err, "stale pre-release run format")
+	require.ErrorContains(t, err, "re-ingest the chunk")
+
+	// Door 2: the freeze, which never opens read-write and so never sees a
+	// warmup — this is the door the bench's --reuse-hot path walks through.
+	reopened := openRawHotChunkForTest(t, dir, chunkID)
+	err = FreezeColdFromStore(context.Background(), chunkID, reopened,
+		filepath.Join(t.TempDir(), "scratch"), t.TempDir(), testIndexSecret, ColdWriterOptions{})
+	require.ErrorIs(t, err, runspill.ErrCorruptRun)
+	require.ErrorContains(t, err, "stale pre-release run format")
+	require.ErrorContains(t, err, "re-ingest the chunk")
+	require.NoError(t, reopened.Close())
 }
 
 // TestFreezeColdFromStore_EmptyChunk: a zero-row chunk (no rows, no

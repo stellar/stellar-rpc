@@ -35,13 +35,40 @@ type Catalog struct {
 	secret      [32]byte // cold-index secret, minted once at Open then read-only
 }
 
+// Option customizes Open. Deployments pass none.
+type Option func(*openOptions)
+
+type openOptions struct {
+	secret *[32]byte
+}
+
+// WithSecret pins the cold-index secret a FRESH catalog mints, instead of
+// drawing a random one. A catalog that already has one keeps it — its keys
+// are blinded under it — so this only ever decides the first open.
+//
+// Production never passes it: the mint is the whole point, and a random
+// deployment-wide secret is what makes blinded routing unpredictable. It
+// exists for harnesses whose catalog is scratch while their HOT DBs outlive
+// it. A hot chunk is bound to the secret its runs were sealed under
+// (hotchunk.DeriveSecrets — the engines blind at seal), so a harness that
+// re-mints per run could not freeze, or even reopen, a chunk it populated in
+// a previous run.
+func WithSecret(secret [32]byte) Option {
+	return func(o *openOptions) { o.secret = &secret }
+}
+
 // Open opens the catalog's backing KV store at path (created if absent) and
 // binds the catalog to it, the on-disk layout, and the tx-hash-index
 // arithmetic. path and logger are required (rocksdb.New validates both). The
 // catalog owns the store: Close releases it.
 func Open(
 	path string, layout geometry.Layout, txhashIndex geometry.TxHashIndexLayout, logger *supportlog.Entry,
+	opts ...Option,
 ) (*Catalog, error) {
+	var o openOptions
+	for _, apply := range opts {
+		apply(&o)
+	}
 	store, err := rocksdb.New(rocksdb.Config{Path: path, Logger: logger})
 	if err != nil {
 		return nil, err
@@ -50,7 +77,7 @@ func Open(
 	// Mint-or-load the cold-index secret up front (get-or-create is not atomic;
 	// here it runs single-threaded) and cache it, so post-Open Secret() reads are
 	// lock-free and cannot fail.
-	secret, err := c.ensureSecret()
+	secret, err := c.ensureSecret(o.secret)
 	if err != nil {
 		_ = c.Close()
 		return nil, fmt.Errorf("catalog: ensure cold-index secret: %w", err)

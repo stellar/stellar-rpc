@@ -388,10 +388,10 @@ func applyLedgerFromMap(h *HotIndex, seq uint32, rowBytes []byte, per map[TermKe
 // warmup-replay state) so both windows retain every row deterministically;
 // seal/merge equivalence is hotindex_test.go's job.
 func TestApplyLedger_OverlayEquivalentToMapPath(t *testing.T) {
-	hMap, err := NewHotIndex(t.TempDir(), &fakeManifest{})
+	hMap, err := NewHotIndex(t.TempDir(), &fakeManifest{}, testIndexSecret)
 	require.NoError(t, err)
 	defer hMap.Close()
-	hRuns, err := NewHotIndex(t.TempDir(), &fakeManifest{})
+	hRuns, err := NewHotIndex(t.TempDir(), &fakeManifest{}, testIndexSecret)
 	require.NoError(t, err)
 	defer hRuns.Close()
 

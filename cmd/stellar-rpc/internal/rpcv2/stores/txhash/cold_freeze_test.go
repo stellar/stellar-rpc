@@ -56,13 +56,14 @@ func populationSize(ledgers [][][32]byte) int {
 	return total
 }
 
-// expectedBinBytes is the walk-path expectation: accumulate entries in
-// ledger order, blind (BlindKey over the truncated hash — the ingest rule),
-// sort by blinded key, WriteColdBin. The sort is
-// STABLE so cross-ledger duplicate full hashes keep ledger order — exactly
-// the order the freeze merge's run-then-tail source tie-break produces
-// (ingest's walk writer sorts unstably, which only ever differs on those
-// duplicates, where its order is unspecified rather than conflicting).
+// expectedBinBytes is the walk-path expectation, constructed INDEPENDENTLY of
+// the production comparator: accumulate entries in ledger order, blind
+// (BlindKey over the truncated hash — the ingest rule), then STABLE-sort by
+// blinded key alone. Stability over ledger-ordered input expresses exactly
+// the order SortColdEntries produces (key, then ledger) without calling it —
+// which is the point, since SortColdEntries is what both production paths
+// sort through (ingest/txhash.go's finalize and the seal), so re-running it
+// here would gate nothing.
 func expectedBinBytes(t *testing.T, ledgers [][][32]byte, first uint32) []byte {
 	t.Helper()
 	entries := make([]ColdEntry, 0, populationSize(ledgers))
@@ -179,7 +180,7 @@ func TestFreezeColdFromStore_IdenticalAcrossCrashStates(t *testing.T) {
 	tailRows := append([]windowRow(nil), sC.hotIdx.view.Load().rows...)
 	require.NotEmpty(t, tailRows, "population must leave a tail to orphan")
 	orphan := filepath.Join(storeC.Path(), txhashRunDir, "seal-000099.run")
-	_, err := writeRun(tailRows, orphan)
+	_, err := writeRun(tailRows, orphan, testBinSecret)
 	require.NoError(t, err)
 	sC.Shutdown()
 	require.NoError(t, storeC.Close())
@@ -215,7 +216,7 @@ func TestFreezeColdFromStore_RejectsOutOfRangeSeq(t *testing.T) {
 	require.NoError(t, err)
 	runDir := filepath.Join(store.Path(), txhashRunDir)
 	require.NoError(t, os.MkdirAll(runDir, 0o755))
-	_, err = writeRun([]windowRow{{seq: badSeq, bytes: row}}, filepath.Join(runDir, "seal-000000.run"))
+	_, err = writeRun([]windowRow{{seq: badSeq, bytes: row}}, filepath.Join(runDir, "seal-000000.run"), testBinSecret)
 	require.NoError(t, err)
 	require.NoError(t, rocksdbManifest{store: store}.PutRuns([]string{"seal-000000.run"}, badSeq))
 
@@ -297,6 +298,47 @@ func TestFreezeColdFromStore_RejectsCorruptRunCRC(t *testing.T) {
 	require.ErrorContains(t, err, "crc mismatch")
 }
 
+// TestFreezeColdFromStore_RejectsBrokenManifestChain pins the ordering
+// dependency the freeze merge's tie-break rests on: source index must rise
+// with ledger, which is true only while the manifest lists runs in ascending
+// ledger order ending at the sealed frontier. Warmup enforces that chain
+// (OpenHotIndex), but a production freeze never warms — it opens read-only —
+// so the freeze re-checks it while opening its own sources. Both halves are
+// exercised: a swapped pair, and a frontier that does not match the newest
+// run.
+func TestFreezeColdFromStore_RejectsBrokenManifestChain(t *testing.T) {
+	chunkID := chunk.ID(0)
+	first := chunkID.FirstLedger()
+	path := t.TempDir()
+	ledgers := freezePopulation(16) // seals two full runs, no tail
+	s, store := openPackedStoreAt(t, path, chunkID, 8)
+	populateDeterministic(t, s, first, ledgers)
+	names, lastSealed, err := rocksdbManifest{store: store}.GetRuns()
+	require.NoError(t, err)
+	require.Len(t, names, 2, "fixture must seal two runs to have a chain to break")
+	s.Shutdown()
+	require.NoError(t, store.Close())
+
+	reopened := openBareStore(t, path)
+	m := rocksdbManifest{store: reopened}
+	binPath := filepath.Join(t.TempDir(), "x.bin")
+
+	// In manifest order the runs freeze fine — the baseline the two breaks
+	// are attributable against.
+	_, err = FreezeColdFromStore(context.Background(), chunkID, reopened, binPath, testBinSecret)
+	require.NoError(t, err)
+
+	// Newest-first: every run file is intact, only the LIST is wrong.
+	require.NoError(t, m.PutRuns([]string{names[1], names[0]}, lastSealed))
+	_, err = FreezeColdFromStore(context.Background(), chunkID, reopened, binPath, testBinSecret)
+	require.ErrorContains(t, err, "previous run ends at")
+
+	// Right order, wrong frontier: the tail scan would re-cover sealed rows.
+	require.NoError(t, m.PutRuns(names, lastSealed-1))
+	_, err = FreezeColdFromStore(context.Background(), chunkID, reopened, binPath, testBinSecret)
+	require.ErrorContains(t, err, "sealed frontier is")
+}
+
 // TestFreezeAndWarmup_RejectSeqOutsideRunHeaderRange pins the run reader's
 // per-record seq tripwire on BOTH its drivers: a record whose seq falls
 // outside the run header's [first,last] — but INSIDE the chunk's ledger
@@ -327,14 +369,14 @@ func TestFreezeAndWarmup_RejectSeqOutsideRunHeaderRange(t *testing.T) {
 	require.NoError(t, err)
 	badSeq := binary.LittleEndian.Uint32(raw[runLastOff:]) + 1
 	require.Less(t, badSeq, chunkID.LastLedger(), "bad seq must stay inside the chunk range")
-	binary.LittleEndian.PutUint32(raw[runHeaderLen+rowHashLen:], badSeq)
+	binary.LittleEndian.PutUint32(raw[runHeaderLen+ColdKeySize:], badSeq)
 	crc := crc64.New(crcRunTable)
 	_, _ = crc.Write(raw[runHeaderLen:])
 	binary.LittleEndian.PutUint64(raw[runCRCOff:], crc.Sum64())
 	require.NoError(t, os.WriteFile(runPath, raw, 0o644))
 
 	reopened := openBareStore(t, path)
-	_, _, err = OpenHotIndex(filepath.Join(path, txhashRunDir), first, rocksdbManifest{store: reopened})
+	_, _, err = OpenHotIndex(filepath.Join(path, txhashRunDir), first, rocksdbManifest{store: reopened}, testBinSecret)
 	// "record N seq" is the run reader's own tripwire (run_reader.go); the
 	// merge's chunk-range check says "entry seq", so matching bare "outside"
 	// would let either mechanism satisfy both halves.

@@ -12,18 +12,24 @@ package event
 //     "accel" pair of arrays per row (sorted fp64 + record offset) built by a
 //     single linear scan — rows are term-sorted, so the accel is sorted by
 //     construction.
-//   - RUNS: immutable flat files beside the chunk DB (runspill format: full
-//     16-byte terms, CRC-framed), sealed from the window every windowLedgers
+//   - RUNS: immutable flat files beside the chunk DB (runspill format:
+//     16-byte keys, CRC-framed), sealed from the window every windowLedgers
 //     ledgers on a background goroutine, each with an in-RAM bloom + fence
 //     array (sidecar-derived; rebuildable by draining the run). A single-level
-//     merge caps live runs at maxLiveRuns.
+//     merge caps live runs at maxLiveRuns. Run keys are BLINDED (blind at
+//     seal): the sealed run IS the cold index's input, so the freeze merges
+//     the manifest's runs in place instead of re-spilling the whole chunk
+//     under blinded keys.
 //   - DENSE OVERLAY: terms promoted by a per-ledger admission policy keep
 //     their roaring bitmaps in the existing ConcurrentBitmaps (with
 //     its tail-delta optimization) — popular-term queries stay memory-fast.
 //     Dense postings ALSO flow into rows/runs (set-union dedupes), so the
 //     overlay is rebuildable and runs are self-contained.
 //
-// Reads are exact: fp64 hits verify the full 16-byte term before IDs count.
+// Reads are exact: fp64 hits verify the full 16-byte key before IDs count.
+// Rows and the overlay are keyed RAW (they are what warmup and the freeze
+// replay), runs by the blinded key — so a lookup carries both forms of the
+// queried term, deriving the blinded one once (lookupSparse).
 // Ingest-side work per ledger is O(row bytes) with two pointerless
 // allocations — no per-term map or bitmap mutation for sparse terms.
 //
@@ -45,6 +51,7 @@ import (
 	"github.com/cespare/xxhash/v2"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/durable"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/bloom"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/internal/runset"
 )
@@ -119,6 +126,14 @@ type fence struct {
 // HotIndex is the engine. One per open hot chunk (read-write opens).
 type HotIndex struct {
 	dir string // run-file directory (inside the chunk's DB dir)
+
+	// secret keys every sealed run this engine writes and probes (blind at
+	// seal). Fixed for the life of the chunk DB — persisted there and
+	// adoption-checked before the engine is constructed (hot_store.go) — so
+	// runs written across restarts stay probeable and the freeze can merge
+	// them straight into a cold index declaring the same secret.
+	secret [stores.SecretLen]byte
+
 	// overlay is a PARTIAL view: it holds only promoted (dense) terms, so a
 	// lookup against it alone silently misses every sparse term (those live
 	// in the window rows and sealed runs). Read through Get.
@@ -188,12 +203,13 @@ type sealResult struct {
 // NewHotIndex creates the engine for a fresh chunk. dir is created. The
 // manifest (rocksdbManifest in production, hot_store.go) is the
 // crash-recovery authority on which runs are live — see runset.Manifest.
-func NewHotIndex(dir string, manifest runset.Manifest) (*HotIndex, error) {
+func NewHotIndex(dir string, manifest runset.Manifest, secret [stores.SecretLen]byte) (*HotIndex, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("events: hotindex mkdir %s: %w", dir, err)
 	}
 	h := &HotIndex{
 		dir:         dir,
+		secret:      secret,
 		overlay:     NewConcurrentBitmapsFromBitmaps(Bitmaps{}),
 		pendingSeal: make(chan sealResult, 1),
 		manifest:    manifest,
@@ -345,11 +361,16 @@ func (h *HotIndex) Close() {
 // lookupSparse collects a term's IDs from the view's runs (oldest first)
 // then window rows (oldest first) — ascending ID order overall, since runs
 // hold strictly older ledgers than the window.
+//
+// The term is carried in BOTH forms: runs are keyed by the blinded key
+// (blind at seal), window rows by the raw term they were written with. The
+// blinding happens once per call, outside the run loop.
 func (h *HotIndex) lookupSparse(v *hotIndexView, term TermKey) ([]uint32, error) {
 	var out []uint32
 	fp := fp64(term)
+	rk := blindTerm(h.secret, term)
 	for _, r := range v.runs {
-		ids, err := r.lookup(term)
+		ids, err := r.lookup(rk)
 		if err != nil {
 			return nil, err
 		}

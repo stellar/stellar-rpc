@@ -85,13 +85,19 @@ memtable keys per ledger dominated commit latency):
   sorted (`hot_rows.go`); written in the same atomic batch as the rest of
   the ledger, so a ledger's hashes remain all-or-nothing.
 - **In-memory window**: the last 256 ledgers' rows, merged and sealed into
-  checksummed, hash-sorted run files (`TXHRUN01`) with bloom + page-ladder
-  routing built in the write pass; a manifest names the live runs and
-  warmup drain-verifies them (see `stores/txhash/hotindex_seal.go`).
+  checksummed, blinded-key-sorted run files (`TXHRUN02`) with bloom +
+  page-ladder routing built in the write pass; a manifest names the live runs
+  and warmup drain-verifies them (see `stores/txhash/hotindex_seal.go`).
 
-Full 32-byte hashes are stored throughout, so the hot tier stays **exact**:
-a lookup either finds the hash or it doesn't — bloom routing only prunes
-which run is read, never what a probe verifies against.
+**Rows stay raw; runs blind at seal.** The CF rows hold full 32-byte hashes,
+so a window probe compares all 32 bytes and answers exactly. A sealed run
+holds `BlindKey(secret, hash[:16])` instead — the same keys the chunk's cold
+`.bin` will hold, which is what lets the freeze copy run records verbatim —
+so a run hit names a CANDIDATE ledger. Nothing re-reads the row to confirm
+it: the read assembly already extracts the transaction from that ledger by
+its full hash, and an absence there is `ErrInconsistent`
+(`stores/txhash/read_assembly.go`). The 32-byte check happens once, where the
+ledger is read.
 
 ### 5.2 Write path
 

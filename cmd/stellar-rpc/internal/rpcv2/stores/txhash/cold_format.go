@@ -7,10 +7,9 @@ package txhash
 // One MPHF spans many chunks because a hash lookup has no ledger to narrow
 // on. The reader is in cold_reader.go, the build in cold_index.go.
 //
-// Routing is secret-keyed: the .bin producer stores
-// stores.BlindKey(secret, txhash[:ColdKeySize]) as each entry's key, the
-// build feeds those keys verbatim, and the reader keys its queries the same
-// way. secret = ColdIndexSecret(catalogSecret, indexID) — deterministic, and
+// Routing is secret-keyed: the .bin producer stores RoutingKey(secret, hash)
+// as each entry's key, the build feeds those keys verbatim, and the reader
+// keys its queries through the same function. secret = ColdIndexSecret(catalogSecret, indexID) — deterministic, and
 // stored in the index metadata so queries never need the master key.
 
 import (
@@ -53,6 +52,17 @@ var ErrInvalidMetadata = errors.New("txhash: cold index user metadata malformed"
 // BuildColdIndex use, so ingest-time keys always match the built index.
 func ColdIndexSecret(catalogSecret []byte, indexID uint32) [stores.SecretLen]byte {
 	return stores.DeriveIndexSecret(catalogSecret, coldRoutingDomain, indexID)
+}
+
+// RoutingKey is THE txhash routing key: the blinded first ColdKeySize bytes
+// of a transaction hash. Callers hand it whatever holds the hash — a full
+// 32-byte hash, or a packed row's 32-byte slot — and the TRUNCATION lives
+// here, once, so "the key is blinded and truncated in exactly one place" is a
+// property of this function rather than an agreement between the walk writer,
+// the seal, the freeze's tail sources, and the cold reader. hash must hold at
+// least ColdKeySize bytes.
+func RoutingKey(secret [stores.SecretLen]byte, hash []byte) [ColdKeySize]byte {
+	return stores.BlindKey(secret, hash[:ColdKeySize])
 }
 
 // EncodeColdMetadata packs [minLedger, maxLedger, secret] into the metadata blob.

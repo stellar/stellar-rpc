@@ -26,7 +26,7 @@ rebuild window**, and the settled architecture (below) closes that too:
 fixes):** hot solo p99 65.9 (p50 49.7, max 70.2 — within the ±5% band of the
 63.7 baseline; the SRT reader-race/leak fixes and sort swap cost nothing),
 hot RSS 1.15GB; freeze --reuse-hot wall 7m23, **peak RSS 8.4→6.4GB** (the
-streamed .bin deleted the ~1.2GB whole-chunk accumulator — measured pre-keyed-routing; #932's key blinding reinstated a whole-chunk blinded-sort accumulator in the txhash freeze arm, and the events freeze gained a blinded re-spill pass, so the freeze RSS/wall anchors need re-measurement).
+streamed .bin deleted the ~1.2GB whole-chunk accumulator — measured pre-keyed-routing; #932's key blinding briefly reinstated a whole-chunk blinded-sort accumulator in the txhash freeze arm and a blinded re-spill pass in the events one, but blind-at-seal deleted BOTH: freeze RAM is now the merge's cursors plus one tail row (txhash) and the 32MB tail windows (events). Re-measure — these anchors predate all of it).
 Post-review co-location (single disk, unpaced): freeze-window-conditional
 ingest p99 111.0 / commit p99 82.4 / 1.25% of ledgers >100ms; post-freeze
 p99 65.0 = solo. ~11-23ms better than the pre-review 122-134 basis —
@@ -185,6 +185,19 @@ next pass does not re-derive them.
   WriteColdIndexFromRuns runs on both paths. Never land-then-supersede two
   rungs in one pass.
 
+- **A re-minted catalog secret bricks every existing HOT chunk — accepted
+  posture, not an oversight.** Hot chunks are bound to the catalog secret by
+  design: the first read-write open stamps each engine's derived secret into
+  the chunk DB, and every later open must present the same one, because the
+  chunk's sealed runs are already blinded with it and the freeze copies those
+  bytes into the cold artifact. Cold artifacts, by contrast, self-describe —
+  the `.bin` header and `index.hash`'s user metadata each carry the secret
+  they were keyed with — so they survive a remint and stay queryable. A
+  remint therefore means re-ingesting the hot chunks, and nothing else. There
+  is no re-keying path and no adopt-from-DB fallback: silently accepting the
+  DB's own secret would let a mis-derived caller freeze an artifact under a
+  key its catalog cannot reproduce.
+
 The standing bar is 83a6ae47's:
 elegance is FEWER mental models, not more abstraction — a change that
 relocates a model rather than removing one fails even when it is free.
@@ -200,8 +213,8 @@ relocates a model rather than removing one fails even when it is free.
   and `mergeStream`/`finalMerge` already resist it in-file.
 - **A shared fence/ladder router (events fenceBuilder + txhash page ladder)
   — REJECTED.** The two geometries are earned, not incidental: byte- and
-  record-capped fences for variable-width EVR2 records, fixed-cadence 16B
-  prefixes for TXHRUN01's fixed-width ones.
+  record-capped fences for variable-width EVR3 records, fixed-cadence WHOLE
+  routing keys for TXHRUN02's fixed-width ones.
 - **Rewriting the events seal as a k-way merge (txhash's shape) —
   REJECTED.** The map-fold/sort asymmetry is by design (events aggregate
   per-term across the window; txhash rows arrive pre-sorted), and this is a

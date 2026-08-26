@@ -11,6 +11,8 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/internal/runset"
 )
 
 const (
@@ -56,12 +58,17 @@ type HotStore struct {
 
 // NewWithStore wraps an ALREADY-OPEN rocksdb.Store as a read-WRITE txhash
 // HotStore on the single txhash CF (CFNames()), running the mandatory warmup:
-// reopen the sealed runs from the manifest, replay the un-sealed packed-row
-// tail into the window, and only then arm sealing. A warmup failure returns
-// the error WITHOUT closing the caller-owned store. The store must have
-// CFNames() registered.
-func NewWithStore(store *rocksdb.Store, chunkID chunk.ID) (*HotStore, error) {
-	hotIdx, err := warmupHotIndex(store, chunkID)
+// adopt the routing secret, reopen the sealed runs from the manifest, replay
+// the un-sealed packed-row tail into the window, and only then arm sealing. A
+// warmup failure returns the error WITHOUT closing the caller-owned store.
+// The store must have CFNames() registered.
+//
+// secret is the chunk's per-index routing secret — the SAME value the cold
+// .bin is keyed with (txhash.ColdIndexSecret), because the runs this store
+// seals become that .bin's records verbatim. The first open persists it in
+// the DB; every later open must present the same one (adoptSecret).
+func NewWithStore(store *rocksdb.Store, chunkID chunk.ID, secret [stores.SecretLen]byte) (*HotStore, error) {
+	hotIdx, err := warmupHotIndex(store, chunkID, secret)
 	if err != nil {
 		return nil, fmt.Errorf("txhash: warmup chunk %s: %w", chunkID, err)
 	}
@@ -102,8 +109,27 @@ func (h *HotStore) AddLedgerToBatch(
 
 // Get returns the ledger sequence the hash was committed in, or
 // (0, stores.ErrNotFound) on miss — served entirely from the HotIndex
-// (window rows, then sealed runs; every route ends in a full 32-byte
-// compare). Safe alongside the single writer.
+// (window rows, then sealed runs). Safe alongside the single writer.
+//
+// A window hit is exact (full 32-byte compare against the raw row); a sealed
+// RUN hit is a CANDIDATE, because a run holds blinded keys over the hash's
+// first 16 bytes (blind-at-seal). This facade does NOT re-verify it, and
+// deliberately so: the read assembly already validates every exact-index
+// answer at USE. read_assembly.go's scan(exact=true) fetches the named
+// ledger and runs LedgerTransactionViewByHash over all 32 bytes; an absence
+// there is ErrInconsistent, which is what raises the operator's
+// TxIndexInconsistency metric (adapters/transaction_reader.go). That is the
+// same 32-byte check, on a ledger the caller was going to read anyway.
+//
+// A facade-level re-verify was tried and removed: it cost a point Get of the
+// candidate ledger's WHOLE packed row — on a CF built with no bloom filter
+// precisely because queries never point-probe it (CFOptions) — for ~97% of
+// hot hits (the window covers 256 of a chunk's 10,000 ledgers), squarely on
+// the p99 path; and it DOWNGRADED the failure, turning the assembly's hard
+// ErrInconsistent (and its metric) into a soft per-index skip. It also could
+// not repair the search it guarded: HotIndex.Get returns on the first run
+// hit, so a genuine blinded-key collision would still shadow the older run
+// holding the real hash.
 //
 // Panics on a read-only open: txhash queries are disabled there because no
 // warmup ran — reaching for them is a programming error, never silently
@@ -166,13 +192,23 @@ func CFOptions() map[string]rocksdb.CFOptions {
 }
 
 // warmupHotIndex rebuilds the read-WRITE facade's HotIndex from the chunk's
-// durable state: manifest-listed runs (drain-verified), then the un-sealed
-// packed-row tail, then the stale-format tripwire, and ArmSealing LAST — the
-// replay runs disarmed so a failed open writes nothing durable and every
-// retry faces the same state.
-func warmupHotIndex(store *rocksdb.Store, chunkID chunk.ID) (*HotIndex, error) {
+// durable state: adopt the routing secret FIRST (a mismatch means every
+// sealed run is keyed for someone else — nothing below is worth doing), then
+// manifest-listed runs (drain-verified), the un-sealed packed-row tail, the
+// stale-format tripwire, and ArmSealing LAST — the replay runs disarmed so a
+// failed open writes nothing durable and every retry faces the same state.
+//
+// Adoption is the only durable write a warmup makes, and only on a chunk
+// that has none: it is what makes "first open decides the key" true, so the
+// later opens the mismatch check protects have something to compare against.
+func warmupHotIndex(
+	store *rocksdb.Store, chunkID chunk.ID, secret [stores.SecretLen]byte,
+) (*HotIndex, error) {
+	if err := adoptSecret(store, secret); err != nil {
+		return nil, err
+	}
 	runDir := filepath.Join(store.Path(), txhashRunDir)
-	hotIdx, lastSealed, err := OpenHotIndex(runDir, chunkID.FirstLedger(), rocksdbManifest{store: store})
+	hotIdx, lastSealed, err := OpenHotIndex(runDir, chunkID.FirstLedger(), rocksdbManifest{store: store}, secret)
 	if err != nil {
 		return nil, err
 	}
@@ -233,4 +269,22 @@ func checkRowFormat(store *rocksdb.Store) error {
 			"re-ingest the chunk)", len(last), txhashCF)
 	}
 	return nil
+}
+
+// txhashSecretKey holds the chunk DB's adopted txhash routing secret in the
+// default CF, beside the run manifest (hotindex_seal.go). One key per store:
+// the events engine keeps its own under its own name.
+var txhashSecretKey = []byte("txhash:secret") //nolint:gochecknoglobals // fixed key
+
+// adoptSecret and requireStoreSecret thread this engine's key into the
+// shared secret protocol (stores/internal/runset/secret.go), which carries
+// the rule, the errors, and the reasoning both engines run on. There is no
+// migration and no re-keying: a re-minted catalog secret means the chunk
+// must be re-ingested (pre-release posture, the same as checkRowFormat's).
+func adoptSecret(store *rocksdb.Store, secret [stores.SecretLen]byte) error {
+	return runset.AdoptSecret(store, txhashSecretKey, "txhash", secret[:])
+}
+
+func requireStoreSecret(store *rocksdb.Store, secret [stores.SecretLen]byte) error {
+	return runset.RequireSecret(store, txhashSecretKey, secret[:])
 }

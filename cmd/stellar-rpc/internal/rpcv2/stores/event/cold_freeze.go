@@ -9,14 +9,16 @@ package event
 //     events.pack verbatim, in eventID order (the CF's BE-key order).
 //   - events_offsets IS the per-ledger count sequence → LedgerOffsets.
 //   - the term index IS the hot engine's published run set: the
-//     manifest-listed sealed runs (union-merged, CRC-framed EVR2 files beside
-//     the chunk DB, read in place) plus the un-sealed events_index tail past
-//     the sealed frontier, windowed into tail-only scratch runs. Both feed
-//     WriteColdIndexFromRuns' one MergeRuns — the same trust rule as warmup
-//     (hot_store.go): sealed rows' derived runs are the CRC-verified
-//     authority, packed rows replay from lastSealed+1. This is the txhash
-//     freeze's shape (txhash/cold_freeze.go): merge the engine's durable runs
-//     with its un-sealed tail.
+//     manifest-listed sealed runs (union-merged, CRC-framed EVR3 files beside
+//     the chunk DB, read in place — already keyed by the blinded routing
+//     identity, because the engine blinds at seal) plus the un-sealed
+//     events_index tail past the sealed frontier, windowed into tail-only
+//     scratch runs that blind at insert. Both feed WriteColdIndexFromRuns'
+//     one MergeRuns — the same trust rule as warmup (hot_store.go): sealed
+//     rows' derived runs are the CRC-verified authority, packed rows replay
+//     from lastSealed+1. This is the txhash freeze's shape
+//     (txhash/cold_freeze.go): merge the engine's durable runs with its
+//     un-sealed tail.
 //
 // Byte identity with the walk-derived build is structural, not incidental:
 // per-term event IDs are strictly ascending and globally duplicate-free, so
@@ -44,7 +46,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event/runspill"
 )
 
 // replayOffsets rebuilds the chunk's ledger offsets from OffsetsCF through
@@ -103,27 +104,31 @@ func copyDataCF(ctx context.Context, store *rocksdb.Store, w *ColdWriter) (uint6
 	return copied, nil
 }
 
-// freezeIndexWindowBytes caps how many packed-row bytes accumulate in the
-// window map before it flushes as one spill run. The tail is normally under
+// freezeIndexWindowBytes caps how many DECODED window bytes (key + ids, as
+// foldBlindedRow accounts them) accumulate in the window map before it
+// flushes as one spill run. The tail is normally under
 // one seal window (≤windowLedgers event-bearing rows → a single small run);
-// the cap bounds every freeze's respill and tail windows —
-// largest for a crash-inherited backlog — up to the whole chunk when
-// the manifest is empty — where ~32MB windows keep freeze memory bounded.
+// the cap bounds the tail window — largest for a crash-inherited backlog, up
+// to the whole chunk when the manifest is empty — where ~32MB windows keep
+// freeze memory bounded.
 const freezeIndexWindowBytes = 32 << 20
 
 // FreezeColdFromStore builds all three cold events artifacts for chunkID in
-// bucketDir from the chunk's (read-only) hot store. scratchDir hosts the
-// blinded re-spill of the sealed runs, the tail spill runs, and terms.run;
-// it is wiped on entry and removed on
-// success, and must lie OUTSIDE the chunk DB (production: the cold events
-// bucket) — the manifest-listed runs beside the DB's CFs are consumed in
-// place, strictly read-only. opts tunes the events.pack writer exactly as
-// the walk-driven build does.
+// bucketDir from the chunk's (read-only) hot store. scratchDir hosts the tail
+// spill runs and terms.run; it is wiped on entry and removed on success, and
+// must lie OUTSIDE the chunk DB (production: the cold events bucket) — the
+// manifest-listed runs beside the DB's CFs are consumed in place, strictly
+// read-only. opts tunes the events.pack writer exactly as the walk-driven
+// build does.
+//
 // secret is the chunk's routing secret (ColdIndexSecret): the walk path
-// blinds term keys before its spiller, so this path blinds at ITS run
-// boundaries — the sealed runs are re-spilled under blinded keys (they serve
-// raw-key hot lookups and cannot be blinded in place) and the tail's window
-// map blinds at insert — keeping both builds keyed by one blinded identity.
+// blinds term keys before its spiller, and this path's inputs are blinded by
+// the time they get here — the sealed runs at seal time (blind at seal), the
+// tail's window map at insert — so both builds are keyed by one blinded
+// identity and no run is ever re-keyed. The sealed runs' keys came from the
+// secret the chunk DB adopted at its first read-write open, so a caller's
+// secret that disagrees would merge two keyspaces into one index;
+// requireStoreSecret rejects that before any artifact is written.
 func FreezeColdFromStore(
 	ctx context.Context,
 	chunkID chunk.ID,
@@ -134,6 +139,9 @@ func FreezeColdFromStore(
 ) (err error) {
 	if err := os.MkdirAll(bucketDir, 0o755); err != nil {
 		return fmt.Errorf("events: mkdir freeze bucket %s: %w", bucketDir, err)
+	}
+	if err := requireStoreSecret(store, secret); err != nil {
+		return fmt.Errorf("events: freeze chunk %s: %w", chunkID, err)
 	}
 	if err := os.RemoveAll(scratchDir); err != nil {
 		return fmt.Errorf("events: wipe freeze scratch %s: %w", scratchDir, err)
@@ -185,14 +193,13 @@ func FreezeColdFromStore(
 	return os.RemoveAll(scratchDir)
 }
 
-// freezeIndexInputs assembles the index merge's run list: the manifest-listed
-// sealed runs re-spilled under BLINDED keys into scratch (respillBlinded —
-// the originals under the chunk DB's run dir stay read-only, never moved or
-// deleted, because they serve raw-key hot lookups) followed by the tail
-// scratch runs from freezeIndexRuns. Only manifest-named runs qualify — an orphan a crash
-// left beside them holds nothing the tail past the frontier doesn't
-// re-cover, while a missing or corrupt LISTED run fails the merge loudly
-// rather than silently thinning the index.
+// freezeIndexInputs assembles the index merge's run list: the
+// manifest-listed sealed runs IN PLACE — already blinded, so the merge reads
+// them where they lie, read-only, and never moves, re-keys, or deletes one —
+// followed by the tail scratch runs from freezeIndexRuns. Only manifest-named
+// runs qualify: an orphan a crash left beside them holds nothing the tail
+// past the frontier doesn't re-cover, while a missing or corrupt LISTED run
+// fails the merge loudly rather than silently thinning the index.
 func freezeIndexInputs(
 	ctx context.Context, store *rocksdb.Store, chunkID chunk.ID, scratchDir string,
 	secret [stores.SecretLen]byte,
@@ -202,73 +209,15 @@ func freezeIndexInputs(
 		return nil, fmt.Errorf("events: freeze manifest: %w", err)
 	}
 	runDir := filepath.Join(store.Path(), hotIndexRunDir)
-	sealed := make([]string, 0, len(names))
+	runs := make([]string, 0, len(names))
 	for _, name := range names {
-		sealed = append(sealed, filepath.Join(runDir, name))
-	}
-	runs, err := respillBlinded(ctx, sealed, scratchDir, secret)
-	if err != nil {
-		return nil, err
+		runs = append(runs, filepath.Join(runDir, name))
 	}
 	tail, err := freezeIndexRuns(ctx, store, chunkID, scratchDir, lastSealed, secret)
 	if err != nil {
 		return nil, err
 	}
 	return append(runs, tail...), nil
-}
-
-// respillBlinded merges the manifest-listed sealed runs (raw term keys, read
-// in place) and re-spills them as BLINDED scratch runs — the freeze's half of
-// the ingest rule: cold artifacts are keyed by the blinded routing identity,
-// while the hot tier's sealed runs serve raw-key lookups and cannot be
-// blinded in place. One MergeRuns pass dedups terms across the sealed runs
-// (per-term union, ascending — the merge's own contract), so each blinded
-// term lands in the window map exactly once; the byte-bounded flush mirrors
-// the tail scan's.
-func respillBlinded(
-	ctx context.Context, sealed []string, scratchDir string, secret [stores.SecretLen]byte,
-) ([]string, error) {
-	if len(sealed) == 0 {
-		return nil, nil
-	}
-	// The spiller's slab machinery does the re-keyed sort/spill with zero
-	// per-term allocation (pairs land in preallocated slabs) — the window-map
-	// shape this replaced allocated a cloned id slice per term, ~60M pieces
-	// of GC garbage on a stress chunk. A blinded-key collision between two
-	// DISTINCT terms (~2^-128) is caught downstream exactly like any
-	// duplicate key: the merge unions the two posting sets under one key and
-	// the fingerprint/read path serves both — the same acceptance the
-	// pre-keyed design gave two colliding xxh3 terms.
-	spillDir := filepath.Join(scratchDir, "blind-respill")
-	sp, err := runspill.NewSpiller(spillDir, freezeIndexWindowBytes)
-	if err != nil {
-		return nil, fmt.Errorf("events: freeze re-key spiller: %w", err)
-	}
-	emitted := 0
-	if err := runspill.MergeRuns(sealed, func(term [16]byte, ids []uint32) error {
-		if emitted%256 == 0 {
-			if cerr := ctx.Err(); cerr != nil {
-				return cerr
-			}
-		}
-		emitted++
-		bk := stores.BlindKey(secret, term[:])
-		for _, id := range ids {
-			if aerr := sp.Add(bk, id); aerr != nil {
-				return aerr
-			}
-		}
-		return nil
-	}); err != nil {
-		_ = sp.Cleanup()
-		return nil, fmt.Errorf("events: freeze re-key sealed runs: %w", err)
-	}
-	runs, err := sp.Finish()
-	if err != nil {
-		_ = sp.Cleanup()
-		return nil, fmt.Errorf("events: freeze re-key spill finish: %w", err)
-	}
-	return runs, nil
 }
 
 // freezeIndexRuns scans the UN-SEALED IndexCF tail — per-ledger packed rows
@@ -321,17 +270,14 @@ func freezeIndexRuns(
 		if seq := binary.BigEndian.Uint32(entry.Key); seq > chunkID.LastLedger() {
 			return nil, fmt.Errorf("events: freeze %s row seq %d outside chunk %s", IndexCF, seq, chunkID)
 		}
-		if derr := DecodePackedRow(entry.Value, func(term TermKey, ids []uint32) {
-			// Blind at the run boundary — the ingest rule (see the freeze doc).
-			bk := TermKey(stores.BlindKey(secret, term[:]))
-			window[bk] = append(window[bk], ids...)
-			// Account the DECODED cost the window actually holds (key + id
-			// slice), not the varint-encoded row length — encoded bytes
-			// undercount RAM several-fold on dense rows.
-			windowBytes += 16 + 4*len(ids)
-		}); derr != nil {
+		// Blind at the run boundary through the SEAL's own fold — the
+		// premise of merging these tail runs in place beside the sealed ones
+		// (see the freeze doc).
+		added, derr := foldBlindedRow(window, entry.Value, secret)
+		if derr != nil {
 			return nil, fmt.Errorf("events: freeze ledger %d row: %w", binary.BigEndian.Uint32(entry.Key), derr)
 		}
+		windowBytes += added
 		if windowBytes >= freezeIndexWindowBytes {
 			if ferr := flush(); ferr != nil {
 				return nil, ferr

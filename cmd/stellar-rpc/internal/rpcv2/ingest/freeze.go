@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime/debug"
 	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -106,15 +105,6 @@ func FreezeColdChunk(
 	if cfg.Events {
 		if dirs.EventsDir == "" {
 			return errors.New("ingest: events enabled but its ColdDirs path is empty")
-		}
-		// The txhash arm just released its whole-chunk blinded-sort
-		// accumulator (~1.2 GB at stress density). Go returns freed pages to
-		// the OS lazily, so without this the events arm — the freeze's RSS
-		// peak — builds ON TOP of that retained footprint and the arms'
-		// peaks stack (+~2.4 GB measured). One forced release per chunk
-		// freeze is noise against multi-minute arm walls.
-		if cfg.Txhash {
-			debug.FreeOSMemory()
 		}
 		var secret [stores.SecretLen]byte
 		copy(secret[:], cfg.EventsSecret)

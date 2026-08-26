@@ -15,17 +15,21 @@ package txhash
 //     commit batch already allocates each row; keeping the slice is free).
 //     A row is one ledger's full 32-byte hashes, sorted, concatenated —
 //     directly binary-searchable, no accel arrays.
-//   - RUNS: immutable flat files beside the chunk DB (TXHRUN01 format:
-//     36-byte hash‖seq records, hash-sorted, CRC64-framed), sealed from the
-//     window every sealEvery ledgers on a background goroutine, each with
-//     an in-RAM bloom + page ladder built in the seal's write pass and
-//     rebuilt from the verified file bytes at warmup (one funnel:
+//   - RUNS: immutable flat files beside the chunk DB (TXHRUN02 format:
+//     20-byte BLINDED-key‖seq records, key-sorted, CRC64-framed), sealed
+//     from the window every sealEvery ledgers on a background goroutine,
+//     each with an in-RAM bloom + page ladder built in the seal's write pass
+//     and rebuilt from the verified file bytes at warmup (one funnel:
 //     runRouting, hotindex_seal.go).
 //
-// Reads are exact: every route ends in a full 32-byte hash compare before a
-// sequence is returned. The row chain is DENSE — one row per ledger, empty
-// value for tx-less ledgers — so the CF is self-validating: a gap is
-// corruption, never ambiguity.
+// Rows are RAW, runs are BLINDED (blind-at-seal, hotindex_seal.go): a window
+// probe is a full 32-byte hash compare and answers exactly, while a run
+// probe compares the blinded key and answers a CANDIDATE ledger. The
+// candidate is validated at USE, not here and not in the facade: the read
+// assembly extracts the tx from the named ledger by its full hash and calls
+// an absence ErrInconsistent (read_assembly.go, HotStore.Get's doc). The row
+// chain is DENSE — one row per ledger, empty value for tx-less ledgers — so
+// the CF is self-validating: a gap is corruption, never ambiguity.
 //
 // Concurrency: single-writer (the ingest goroutine calls ApplyRow; seals run
 // on ONE background goroutine owned here); readers Load the view and use
@@ -77,7 +81,7 @@ type windowRow struct {
 type sealedRun struct {
 	path    string
 	bloom   bloom.Filter
-	ladder  [][ladderKeyLen]byte // first 16B of each page's first record
+	ladder  [][ColdKeySize]byte // the blinded key of each page's first record
 	file    *os.File
 	first   uint32
 	last    uint32
@@ -88,6 +92,13 @@ type sealedRun struct {
 type HotIndex struct {
 	dir  string // run-file directory (inside the chunk's DB dir)
 	view atomic.Pointer[hotIndexView]
+
+	// secret keys every sealed run this engine writes and probes (blind at
+	// seal). It is fixed for the life of the chunk DB — persisted there and
+	// adoption-checked before the engine is constructed (hot_store.go) — so
+	// runs written across restarts stay probeable and the freeze can copy
+	// them into a .bin declaring the same secret.
+	secret [stores.SecretLen]byte
 
 	// Writer-owned state (single-writer contract). sealEvery defaults to
 	// windowLedgers; tests shrink it to exercise seals with small inputs. The
@@ -146,12 +157,13 @@ type sealResult struct {
 // NewHotIndex creates the engine for a fresh chunk. dir is created. The
 // manifest (rocksdbManifest in production, hotindex_seal.go) is the
 // crash-recovery authority on which runs are live — see runset.Manifest.
-func NewHotIndex(dir string, manifest runset.Manifest) (*HotIndex, error) {
+func NewHotIndex(dir string, manifest runset.Manifest, secret [stores.SecretLen]byte) (*HotIndex, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("txhash: hotindex mkdir %s: %w", dir, err)
 	}
 	h := &HotIndex{
 		dir:         dir,
+		secret:      secret,
 		pendingSeal: make(chan sealResult, 1),
 		manifest:    manifest,
 		fsyncDir:    durable.FsyncDir,
@@ -201,11 +213,15 @@ func (h *HotIndex) ApplyRow(seq uint32, rowBytes []byte, count int) error {
 }
 
 // Get returns the ledger holding hash, or stores.ErrNotFound. Window rows
-// are probed newest→oldest, then runs newest→oldest — recent transactions
-// are the hot hits. Correctness is order-independent: a hash lives in one
-// ledger, and for the legal cross-ledger duplicate any containing ledger is
-// a correct answer (GetTransaction verifies against the ledger itself).
-// Concurrent-safe.
+// are probed newest→oldest (raw, exact), then runs newest→oldest (by blinded
+// key) — recent transactions are the hot hits. Correctness is
+// order-independent: a hash lives in one ledger, and for the legal
+// cross-ledger duplicate any containing ledger is a correct answer
+// (GetTransaction verifies against the ledger itself). Concurrent-safe.
+//
+// A run answer is a candidate (16-byte blinded-key compare), validated where
+// the ledger is read — see HotStore.Get. The blinding is deferred to the run
+// loop so a window hit and a miss on a run-less chunk pay nothing for it.
 func (h *HotIndex) Get(hash [32]byte) (uint32, error) {
 	v := h.view.Load()
 	for i := len(v.rows) - 1; i >= 0; i-- {
@@ -213,13 +229,16 @@ func (h *HotIndex) Get(hash [32]byte) (uint32, error) {
 			return v.rows[i].seq, nil
 		}
 	}
-	for i := len(v.runs) - 1; i >= 0; i-- {
-		seq, ok, err := v.runs[i].lookup(hash)
-		if err != nil {
-			return 0, err
-		}
-		if ok {
-			return seq, nil
+	if len(v.runs) > 0 {
+		rk := RoutingKey(h.secret, hash[:])
+		for i := len(v.runs) - 1; i >= 0; i-- {
+			seq, ok, err := v.runs[i].lookup(rk)
+			if err != nil {
+				return 0, err
+			}
+			if ok {
+				return seq, nil
+			}
 		}
 	}
 	return 0, stores.ErrNotFound
@@ -242,8 +261,8 @@ func (h *HotIndex) Close() {
 	})
 }
 
-// fp64 is the bloom fingerprint of a hash.
-func fp64(hash [32]byte) uint64 { return xxhash.Sum64(hash[:]) }
+// fp64 is the bloom fingerprint of a run's blinded key.
+func fp64(key [ColdKeySize]byte) uint64 { return xxhash.Sum64(key[:]) }
 
 // rowContains binary-searches one packed row (32-byte stride, strictly
 // ascending) for hash.

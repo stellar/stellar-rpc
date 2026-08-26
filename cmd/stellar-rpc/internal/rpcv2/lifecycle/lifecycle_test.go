@@ -334,7 +334,8 @@ func TestDeferredDeletion_BusyHandleRetriedAcrossRuns(t *testing.T) {
 	const c chunk.ID = 0
 	freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindTxHash)
 	freezeCoverage(t, cat, cat.TxHashIndexLayout().TxHashIndexID(c), c, c)
-	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger(), hotchunk.DefaultTuning())
+	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger(), hotchunk.DefaultTuning(),
+		hotchunk.SecretsFor(cat, c))
 	require.NoError(t, err)
 	rpcv2test.IngestLedger(t, db, c.FirstLedger(), rpcv2test.ZeroTxLCMBytes(t, c.FirstLedger()))
 	require.NoError(t, cat.FlipHotReady(c))

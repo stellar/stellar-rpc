@@ -49,7 +49,7 @@ func TestFreezeColdChunk_ByteIdenticalToWalk(t *testing.T) {
 	// extraction, and CF layout exactly as a live chunk's).
 	ctx := context.Background()
 	dbPath := t.TempDir()
-	db, err := hotchunk.Open(dbPath, chunkID, hotTestLogger(), hotchunk.DefaultTuning())
+	db, err := hotchunk.Open(dbPath, chunkID, hotTestLogger(), hotchunk.DefaultTuning(), testHotSecrets())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	svc := NewHotService(db, nil, nil)

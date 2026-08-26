@@ -65,7 +65,7 @@ func openHotStoreForTestAt(t *testing.T, dir string, chunkID chunk.ID) (*HotStor
 func tryOpenHotStoreForTest(t *testing.T, dir string, chunkID chunk.ID) (*HotStore, *rocksdb.Store, error) {
 	t.Helper()
 	raw := openRawHotChunkForTest(t, dir, chunkID)
-	hot, err := NewWithStore(raw, chunkID)
+	hot, err := NewWithStore(raw, chunkID, testIndexSecret)
 	if err != nil {
 		_ = raw.Close()
 		return nil, nil, err

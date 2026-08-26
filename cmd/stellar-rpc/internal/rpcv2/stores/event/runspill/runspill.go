@@ -29,7 +29,18 @@ import (
 const RecordSize = 16 + 4
 
 // runMagic heads every run file; a version bump changes the letter.
-var runMagic = [4]byte{'E', 'V', 'R', '2'} //nolint:gochecknoglobals // fixed format tag
+var runMagic = [4]byte{'E', 'V', 'R', '3'} //nolint:gochecknoglobals // fixed format tag
+
+// runMagicPre is the pre-release format this one replaced: the SAME framing
+// and record encoding, but records keyed by the RAW term instead of
+// BlindKey(secret, term) — the blind-at-seal flip. Nothing in the container
+// can tell the two apart (a run is just bytes; the reader never interprets a
+// key), so the magic IS the tripwire: without the bump a chunk sealed by the
+// pre-flip build would merge its raw-keyed runs under a blinded tail and
+// produce an index whose queries silently miss ~the whole chunk. There is no
+// migration — a chunk carrying one is a loud open failure (OpenRun), the
+// same posture as txhash's TXHRUN01.
+var runMagicPre = [4]byte{'E', 'V', 'R', '2'} //nolint:gochecknoglobals // fixed format tag
 
 // HeaderLen is the run-file header size: magic (4) ‖ u64 payload length (8) ‖
 // u64 record count (8). Record offsets within the payload are relative to the
@@ -326,6 +337,9 @@ func OpenRun(path string) (*RunReader, error) {
 		return fail("short header")
 	}
 	if !bytes.Equal(hdr[:4], runMagic[:]) {
+		if bytes.Equal(hdr[:4], runMagicPre[:]) {
+			return fail("stale pre-release run format (raw-keyed records; no migration; re-ingest the chunk)")
+		}
 		return fail("bad magic")
 	}
 	payloadLen := binary.BigEndian.Uint64(hdr[4:12])

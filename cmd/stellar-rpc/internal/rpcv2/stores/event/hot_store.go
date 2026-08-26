@@ -15,6 +15,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/internal/runset"
 )
 
 // Column-family names used inside one chunk's hot RocksDB DB. The
@@ -129,8 +130,15 @@ var _ Reader = (*HotStore)(nil)
 // hotchunk.DB composes this facade over the shared per-chunk DB and closes that
 // DB once. The store must have CFNames() registered + CFOptions() applied.
 // A warmup failure returns the error WITHOUT closing the caller-owned store.
-func NewWithStore(store *rocksdb.Store, chunkID chunk.ID) (*HotStore, error) {
-	hotIdx, offsets, err := warmup(store, chunkID)
+//
+// secret is the chunk's routing secret — the SAME value the cold index is
+// keyed with (event.ColdIndexSecret), because the runs this store seals are
+// merged into that index verbatim. The first open persists it in the DB;
+// every later open must present the same one (adoptSecret).
+func NewWithStore(
+	store *rocksdb.Store, chunkID chunk.ID, secret [stores.SecretLen]byte,
+) (*HotStore, error) {
+	hotIdx, offsets, err := warmup(store, chunkID, secret)
 	if err != nil {
 		return nil, fmt.Errorf("events: warmup chunk %s: %w", chunkID, err)
 	}
@@ -524,6 +532,26 @@ func (m rocksdbManifest) GetRuns() ([]string, uint32, error) {
 	return strings.Split(rest, ","), lastSealed, nil
 }
 
+// hotIndexSecretKey holds the chunk DB's adopted events routing secret in the
+// default CF, beside the run manifest. One key per store: the txhash engine
+// keeps its own under its own name.
+var hotIndexSecretKey = []byte("hotindex:secret") //nolint:gochecknoglobals // fixed key
+
+// adoptSecret and requireStoreSecret thread this engine's key into the
+// shared secret protocol (stores/internal/runset/secret.go), which carries
+// the rule, the errors, and the reasoning both engines run on. There is no
+// migration and no re-keying: a re-minted catalog secret means the chunk
+// must be re-ingested (pre-release posture); the EVR3 magic is what makes a
+// pre-blinding chunk's runs a loud failure rather than a silent re-key
+// (runspill.runMagicPre).
+func adoptSecret(store *rocksdb.Store, secret [stores.SecretLen]byte) error {
+	return runset.AdoptSecret(store, hotIndexSecretKey, "events", secret[:])
+}
+
+func requireStoreSecret(store *rocksdb.Store, secret [stores.SecretLen]byte) error {
+	return runset.RequireSecret(store, hotIndexSecretKey, secret[:])
+}
+
 // ManifestRuns reads the chunk store's hot-index run manifest — the run
 // names and sealed frontier, the same read the freeze anchors its index
 // inputs on (freezeIndexInputs) and warmup anchors its replay on. Exported
@@ -606,15 +634,22 @@ func verifyChunkConsistency(chunkStore *rocksdb.Store, total uint32, indexUpperB
 // chunks; on-disk rows carry the full ledger sequence themselves.
 // Both mirrors are empty for fresh chunks.
 func warmup(
-	chunkStore *rocksdb.Store, chunkID chunk.ID,
+	chunkStore *rocksdb.Store, chunkID chunk.ID, secret [stores.SecretLen]byte,
 ) (*HotIndex, *ConcurrentLedgerOffsets, error) {
+	// Adoption first: a mismatch means every sealed run is keyed for someone
+	// else, so nothing below is worth doing. It is also the only durable
+	// write a warmup makes, and only on a chunk that has no secret yet —
+	// what makes "first open decides the key" true.
+	if err := adoptSecret(chunkStore, secret); err != nil {
+		return nil, nil, err
+	}
 	offsets, err := warmupOffsets(chunkStore, chunkID)
 	if err != nil {
 		return nil, nil, err
 	}
 	manifest := rocksdbManifest{store: chunkStore}
 	runDir := filepath.Join(chunkStore.Path(), hotIndexRunDir)
-	hotIdx, lastSealed, err := OpenHotIndex(runDir, manifest)
+	hotIdx, lastSealed, err := OpenHotIndex(runDir, manifest, secret)
 	if err != nil {
 		return nil, nil, err
 	}

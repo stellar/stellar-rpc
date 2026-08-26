@@ -387,7 +387,7 @@ func buildMPHF(
 		if err = ctx.Err(); err != nil {
 			return nil, fmt.Errorf("events: build MPHF canceled after %d keys: %w", i, err)
 		}
-		rk := stores.BlindKey(secret, key[:])
+		rk := blindTerm(secret, key)
 		if err = builder.AddKey(rk[:], 0); err != nil {
 			return nil, fmt.Errorf("events: add key %d: %w", i, err)
 		}
@@ -443,7 +443,7 @@ func openMPHF(path string) (*mphf, error) {
 // index.pack — an MPHF can map an unseen key to a valid build-set
 // slot, and only the fingerprint catches that residual collision.
 func (m *mphf) Lookup(key TermKey) (uint32, TermKey, error) {
-	rk := TermKey(stores.BlindKey(m.secret, key[:]))
+	rk := blindTerm(m.secret, key)
 	slot, err := m.LookupRouted(rk)
 	return slot, rk, err
 }

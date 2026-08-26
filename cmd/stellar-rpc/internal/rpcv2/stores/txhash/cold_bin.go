@@ -15,17 +15,23 @@ package txhash
 //	entry   ColdKeySize B       blinded txhash[:ColdKeySize]
 //	        uint32 LE           absolute ledger seq
 //
-// Entries are lex-sorted by (blinded) key. Duplicate keys are written
-// verbatim, but the downstream streamhash build fails on them — with
-// 16-byte blinded keys a collision is astronomically unlikely, and
-// if one ever occurs the index build rejects it loudly rather than
-// serving an ambiguous key.
+// Entries are lex-sorted by (blinded) key, ties by ascending ledger
+// (SortColdEntries) — the one stored order every producer emits: the walk
+// writer's finalize sort, the seal's run records (which the freeze copies
+// verbatim), and the freeze merge's source order. Duplicate keys are written
+// verbatim; the downstream streamhash build fails on them, so the tie-break
+// exists to keep the producers byte-identical, not to make duplicates
+// servable.
 
 import (
 	"bufio"
+	"bytes"
+	"cmp"
 	"encoding/binary"
 	"fmt"
 	"os"
+	"slices"
+	"sync"
 
 	"github.com/stellar/streamhash"
 
@@ -60,6 +66,24 @@ type ColdEntry struct {
 	Seq uint32
 }
 
+// blindRow appends one packed CF row's hashes to dst as cold entries, all
+// carrying the row's ledger seq: the "blind one raw row into stored records"
+// step, written once for its two callers — the seal, which folds a whole
+// window of rows this way (hotindex_seal.go), and the freeze, which folds one
+// un-sealed tail row per merge source (cold_freeze.go). Both then sort through
+// SortColdEntries, which is what makes the run records the freeze copies
+// verbatim and the tail records it merges beside them literally the same
+// function of the same bytes.
+//
+// A tx-less ledger's row is empty and contributes nothing. Trailing bytes past
+// the last whole hash are ignored here; validateRow rejects them upstream.
+func blindRow(dst []ColdEntry, row []byte, seq uint32, secret [stores.SecretLen]byte) []ColdEntry {
+	for off := 0; off+rowHashLen <= len(row); off += rowHashLen {
+		dst = append(dst, ColdEntry{Key: RoutingKey(secret, row[off:]), Seq: seq})
+	}
+	return dst
+}
+
 // ColdBinName returns the .bin filename for chunkID (`<chunkID:08d>.bin`).
 // Bucket-directory composition ({bucketID:05d}/) is the orchestrator's job,
 // mirroring the event store cold-format split.
@@ -67,21 +91,129 @@ func ColdBinName(chunkID chunk.ID) string {
 	return chunkID.String() + ".bin"
 }
 
-// WriteColdBinSorted sorts entries by blinded key (sharded stable sort —
-// sortBlindedToStream's contract: equal to a whole-slice stable sort) and
-// writes the .bin at path. The entry point for callers holding UNSORTED
-// accumulators (the walk writer's finalize); WriteColdBin keeps the
-// pre-sorted contract for callers that already merged.
-func WriteColdBinSorted(path string, secret [stores.SecretLen]byte, entries []ColdEntry) error {
-	w, err := newColdBinStream(path, secret)
-	if err != nil {
-		return err
+// compareColdEntries is THE comparator: ascending blinded key, equal keys
+// ascending ledger. Nothing in the package orders cold entries any other
+// way — SortColdEntries sorts through it, its parallel merge merges through
+// it, and the freeze's k-way merge reproduces the same order by construction
+// (runs oldest first, keys ascending within each).
+//
+// The ledger tie-break costs nothing (it runs only on equal keys, which are
+// the cross-ledger duplicate shape) and buys determinism: without it
+// duplicate keys land in an unspecified order, which the byte-identity gates
+// would then only pass by accident of the fixture.
+func compareColdEntries(a, b ColdEntry) int {
+	if c := bytes.Compare(a.Key[:], b.Key[:]); c != 0 {
+		return c
 	}
-	defer w.close()
-	if serr := sortBlindedToStream(entries, w); serr != nil {
-		return serr
+	return cmp.Compare(a.Seq, b.Seq)
+}
+
+const (
+	// sortShards is the parallel sort's fan-out: the slice splits into this
+	// many contiguous shards, each sorted on its own goroutine, then merged
+	// back. A power of two so the merge ladder is exactly log2(sortShards)
+	// passes — 4 here, an EVEN number, which is what lets the ping-pong land
+	// its result back in the caller's slice with no final copy.
+	sortShards = 16
+
+	// sortParallelMin is the smallest input worth the fan-out: below it the
+	// scratch allocation and goroutine round-trip cost more than the sort
+	// they save, so the plain single-threaded path runs. Chunk-scale
+	// accumulators (a stress chunk is ~60M entries) are far above it; test
+	// fixtures and ordinary seal windows are far below. A seal window on
+	// genuinely heavy traffic can cross it, which is harmless — the output is
+	// identical either way and the scratch is proportional to the WINDOW, not
+	// the chunk.
+	sortParallelMin = 1 << 20
+)
+
+// SortColdEntries sorts entries in place into the .bin's stored order
+// (compareColdEntries). It is the ONE definition of that order — the walk
+// writer's finalize and the hot tier's seal both sort through it, and the
+// freeze merge's source order reproduces it — so byte parity between the
+// paths is a property of one comparator instead of an agreement between
+// three.
+//
+// Large inputs take a parallel path: sortShards contiguous shards sorted
+// concurrently, then merged back with a bottom-up ladder. The OUTPUT IS
+// IDENTICAL to the sequential sort, not merely equivalent — compareColdEntries
+// is a TOTAL order on distinct records (a ColdEntry is exactly (Key, Seq), so
+// records that compare equal are byte-identical), and a shard-then-merge over
+// a total order produces the same sequence of bytes whatever the tie-break.
+// That is what makes the parallelism free of the byte-identity gates.
+//
+// It costs one scratch slice of len(entries) — ~1.2GB transient on a 60M-entry
+// stress chunk — held only for the merge. That is acceptable where it is paid:
+// the caller that reaches chunk scale is the walk path's finalize
+// (ingest/txhash.go), which is already holding the whole-chunk accumulator
+// being sorted, so the peak grows by one slice rather than by a new order of
+// magnitude. The freeze path allocates none at all — it holds no accumulator,
+// only merge cursors (cold_freeze.go). The motivation is measured: a stress
+// chunk's finalize sort is a single-core MINUTE sequentially and seconds
+// sharded.
+func SortColdEntries(entries []ColdEntry) {
+	if len(entries) < sortParallelMin {
+		slices.SortFunc(entries, compareColdEntries)
+		return
 	}
-	return w.commit()
+
+	// Shard bounds over the arrival-order slice: contiguous, so each shard
+	// sorts in place and the merge below needs no index mapping.
+	bounds := make([]int, sortShards+1)
+	for i := range bounds {
+		bounds[i] = i * len(entries) / sortShards
+	}
+	var wg sync.WaitGroup
+	for i := range sortShards {
+		lo, hi := bounds[i], bounds[i+1]
+		wg.Go(func() { slices.SortFunc(entries[lo:hi], compareColdEntries) })
+	}
+	wg.Wait()
+
+	// Bottom-up merge ladder, ping-ponging between entries and one scratch
+	// slice: each pass halves the run count and merges adjacent pairs
+	// concurrently. sortShards is a power of two, so the pass count is even
+	// and the last pass writes into entries — the caller's slice ends up
+	// sorted with no copy-back.
+	scratch := make([]ColdEntry, len(entries))
+	src, dst := entries, scratch
+	for len(bounds) > 2 {
+		next := make([]int, 0, len(bounds)/2+1)
+		var pass sync.WaitGroup
+		for j := 0; j+2 < len(bounds); j += 2 {
+			lo, mid, hi := bounds[j], bounds[j+1], bounds[j+2]
+			next = append(next, lo)
+			pass.Go(func() { mergeColdEntries(src[lo:mid], src[mid:hi], dst[lo:hi]) })
+		}
+		pass.Wait()
+		next = append(next, bounds[len(bounds)-1])
+		bounds = next
+		src, dst = dst, src
+	}
+}
+
+// mergeColdEntries merges two compareColdEntries-sorted runs into out, which
+// must hold exactly len(a)+len(b) entries and must not alias either input.
+// Ties take from a, which keeps the merge equal to a stable one — though the
+// distinction cannot show in the bytes, since equal entries ARE equal bytes.
+func mergeColdEntries(a, b, out []ColdEntry) {
+	i, j := 0, 0
+	for k := range out {
+		switch {
+		case i == len(a):
+			out[k] = b[j]
+			j++
+		case j == len(b):
+			out[k] = a[i]
+			i++
+		case compareColdEntries(b[j], a[i]) < 0:
+			out[k] = b[j]
+			j++
+		default:
+			out[k] = a[i]
+			i++
+		}
+	}
 }
 
 // WriteColdBin writes the .bin file at path from entries the caller already
@@ -89,7 +221,7 @@ func WriteColdBinSorted(path string, secret [stores.SecretLen]byte, entries []Co
 // every producer's bytes are identical by construction; see that type for the
 // create semantics and commit for the durability ladder.
 //
-// entries must already be sorted (lex by blinded Key, non-decreasing); this
+// entries must already be in the stored order (SortColdEntries); this
 // function writes them verbatim.
 func WriteColdBin(path string, secret [stores.SecretLen]byte, entries []ColdEntry) error {
 	w, err := newColdBinStream(path, secret)
