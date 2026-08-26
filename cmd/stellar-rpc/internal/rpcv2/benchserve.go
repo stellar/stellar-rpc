@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -59,6 +61,14 @@ type BenchServeConfig struct {
 	// RetentionWindow is the window width in ledgers getHealth reports. Zero
 	// (full history) is what a Retention of size 0 yields, matching the daemon.
 	RetentionWindow uint32
+
+	// MaxHealthyLedgerLatency is how far behind the wall clock the served tip's
+	// close time may fall before getHealth reports unhealthy. A served dataset
+	// is frozen by definition, so wall-clock staleness says nothing about its
+	// health: the check is the daemon's liveness signal, not this harness's.
+	// Zero means unbounded, so a caller that leaves the field out gets a
+	// servable run instead of a getHealth that fails on every request.
+	MaxHealthyLedgerLatency time.Duration
 }
 
 func (c BenchServeConfig) validate() error {
@@ -90,6 +100,10 @@ func (c BenchServeConfig) validate() error {
 // is supplied. sendTransaction and simulateTransaction therefore fail per
 // request instead of at startup, which is the honest outcome for a read-only
 // process.
+//
+// The getHealth staleness bound is the one serving limit the bench overrides,
+// and it is written onto the config the handler table reads, so it travels the
+// same deref path the daemon's value does.
 func BenchServeReads(ctx context.Context, cfg BenchServeConfig) error {
 	if err := cfg.validate(); err != nil {
 		return err
@@ -99,6 +113,11 @@ func BenchServeReads(ctx context.Context, cfg BenchServeConfig) error {
 		return fmt.Errorf("resolve serving defaults: %w", err)
 	}
 	base.Service.Endpoint = cfg.Endpoint
+	healthLatency := cfg.MaxHealthyLedgerLatency
+	if healthLatency <= 0 {
+		healthLatency = time.Duration(math.MaxInt64)
+	}
+	base.Service.Methods.GetHealth.MaxHealthyLedgerLatency = &healthLatency
 
 	serve := newServeReads(readServerDeps{
 		cfg: base,

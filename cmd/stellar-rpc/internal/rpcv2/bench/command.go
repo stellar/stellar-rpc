@@ -187,6 +187,14 @@ func NewServeCommand() *cobra.Command {
 	fs.StringVar(&opts.Endpoint, "endpoint", "127.0.0.1:8000", "host:port the read server binds")
 	fs.StringVar(&opts.NetworkPassphrase, "network-passphrase", "",
 		"passphrase transaction hashes are computed against (required; must match the dataset's)")
+	fs.DurationVar(&opts.MaxHealthyLedgerLatency, "max-healthy-ledger-latency", unboundedHealthLatency,
+		"how far behind the wall clock the served tip's close time may fall before getHealth reports "+
+			"unhealthy. Unbounded by default: a served prepared dataset is frozen by definition, so "+
+			"wall-clock staleness says nothing about its health — the check is the daemon's liveness "+
+			"signal, not this harness's. Pass 30s to reproduce daemon behavior")
+	// DefValue is help text only, and the unbounded default would print as
+	// 2562047h47m16.854775807s.
+	fs.Lookup("max-healthy-ledger-latency").DefValue = "unbounded"
 	fs.Int64Var(&replayChunk, "replay-chunk", -1,
 		"chunk to ingest live from --source while serving, measuring reads under ingest load "+
 			"(-1 = static run); its hot DB is created FRESH, wiping any leftover dir. "+

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,6 +115,14 @@ type serveOptions struct {
 	// must match the passphrase the dataset was generated under, or every
 	// getTransaction lookup misses.
 	NetworkPassphrase string
+
+	// MaxHealthyLedgerLatency is how far behind the wall clock the served tip's
+	// close time may fall before getHealth reports unhealthy. A served prepared
+	// dataset is frozen by definition, so wall-clock staleness says nothing
+	// about its health — the check is the daemon's liveness signal, not this
+	// harness's. Zero, the value an operator gets by default, means unbounded;
+	// pass the daemon's 30s to reproduce its behavior.
+	MaxHealthyLedgerLatency time.Duration
 
 	// Source is the ledger source the replay leg reads from. Used only when
 	// ReplayChunk is set.
@@ -311,12 +320,36 @@ func seedCloseTimes(reg *query.Registry) error {
 
 func (o serveOptions) serveConfig(reg *query.Registry, logger *supportlog.Entry) rpcv2.BenchServeConfig {
 	return rpcv2.BenchServeConfig{
-		Endpoint:          o.Endpoint,
-		NetworkPassphrase: o.NetworkPassphrase,
-		Registry:          reg,
-		Logger:            logger,
-		RetentionWindow:   0, // full history: nothing is pruned
+		Endpoint:                o.Endpoint,
+		NetworkPassphrase:       o.NetworkPassphrase,
+		Registry:                reg,
+		Logger:                  logger,
+		RetentionWindow:         0, // full history: nothing is pruned
+		MaxHealthyLedgerLatency: o.healthLatency(),
 	}
+}
+
+// unboundedHealthLatency is a staleness bound no elapsed time can exceed, which
+// turns the getHealth check off.
+const unboundedHealthLatency = time.Duration(math.MaxInt64)
+
+// healthLatency resolves the effective getHealth staleness bound. An unset
+// field means unbounded, so a caller that omits it serves a frozen dataset
+// rather than failing every getHealth.
+func (o serveOptions) healthLatency() time.Duration {
+	if o.MaxHealthyLedgerLatency <= 0 {
+		return unboundedHealthLatency
+	}
+	return o.MaxHealthyLedgerLatency
+}
+
+// healthLatencyLabel renders the effective bound for the startup log, where the
+// unbounded value would otherwise print as 2562047h47m16.854775807s.
+func (o serveOptions) healthLatencyLabel() string {
+	if d := o.healthLatency(); d != unboundedHealthLatency {
+		return d.String()
+	}
+	return "unbounded (frozen dataset)"
 }
 
 // runServeWithReplay serves reads while the daemon's ingestion loop writes the
@@ -487,6 +520,7 @@ func buildServingRegistry(
 	reg.SetLatestLedger(latest, 0)
 	logger.WithField("oldest_ledger", first.FirstLedger()).
 		WithField("latest_ledger", latest).
+		WithField("max_healthy_ledger_latency", opts.healthLatencyLabel()).
 		Info("bench-serve: serving window")
 	return reg, nil
 }

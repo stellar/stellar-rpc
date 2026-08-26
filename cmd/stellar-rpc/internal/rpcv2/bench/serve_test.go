@@ -309,6 +309,57 @@ func TestServeColdOnlyDatasetAnswersReads(t *testing.T) {
 	})
 }
 
+// TestServeHealthOverAFrozenDataset pins the staleness check being off by
+// default. The daemon's 30s bound measures the tip's close time against the
+// wall clock — a liveness signal for a daemon that ingests. A prepared dataset
+// is frozen, so its close times are as old as the capture (the fixture's are
+// 0), and under the daemon's bound every getHealth would fail. The load
+// generator's preflight requires getHealth, so this is the difference between
+// a benchmark that runs and one that cannot start.
+func TestServeHealthOverAFrozenDataset(t *testing.T) {
+	const c = chunk.ID(1)
+	const numLedgers = 8
+	ds := buildColdDataset(t, c, numLedgers)
+
+	url := startServe(t, serveOptions{
+		ColdRoot:     ds.Root,
+		StartChunk:   c,
+		NumChunks:    1,
+		LatestLedger: ds.LastLedger,
+	})
+
+	var got struct {
+		Status       string `json:"status"`
+		LatestLedger uint32 `json:"latestLedger"`
+		OldestLedger uint32 `json:"oldestLedger"`
+	}
+	require.NoError(t, json.Unmarshal(
+		okResult(t, callRPC(t, url, "getHealth", `{}`), "getHealth"), &got))
+	assert.Equal(t, "healthy", got.Status)
+	assert.Equal(t, ds.LastLedger, got.LatestLedger, "getHealth reports the served tip")
+	assert.Equal(t, ds.FirstLedger, got.OldestLedger, "getHealth reports the served floor")
+}
+
+// TestServeHealthHonorsLatencyBound proves the flag reaches the handler: the
+// same frozen dataset under a 1s bound fails getHealth exactly as the daemon's
+// 30s bound did on the box.
+func TestServeHealthHonorsLatencyBound(t *testing.T) {
+	const c = chunk.ID(1)
+	ds := buildColdDataset(t, c, 4)
+
+	url := startServe(t, serveOptions{
+		ColdRoot:                ds.Root,
+		StartChunk:              c,
+		NumChunks:               1,
+		LatestLedger:            ds.LastLedger,
+		MaxHealthyLedgerLatency: time.Second,
+	})
+
+	reply := callRPC(t, url, "getHealth", `{}`)
+	require.NotNil(t, reply.Error, "a frozen tip cannot be within 1s of now")
+	assert.Contains(t, reply.Error.Message, "too high")
+}
+
 // TestServeAdoptsPrebuiltHotChunk is the run-1 shape with both tiers: a sealed
 // cold chunk plus the finished hot DB `bench-ingest hot` leaves. The hot chunk
 // must be adopted read-write WITHOUT the create bracket, which would wipe it —
