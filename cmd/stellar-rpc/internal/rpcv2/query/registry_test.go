@@ -85,6 +85,19 @@ func TestSetLatestLedger(t *testing.T) {
 	assert.Equal(t, uint32(42), r.LatestLedger())
 }
 
+func TestHasCommittedSinceBoot(t *testing.T) {
+	r, _ := newTestRegistry(t, 0, 0)
+	r.SeedLatestAtBoot(42, 0)
+	assert.False(t, r.HasCommittedSinceBoot())
+
+	r.SetLatestLedger(42, 4242)
+	assert.False(t, r.HasCommittedSinceBoot(),
+		"re-stamping the boot ledger's close time is not a commit")
+
+	r.SetLatestLedger(43, 4343)
+	assert.True(t, r.HasCommittedSinceBoot())
+}
+
 func TestReadView_LatestCloseTime(t *testing.T) {
 	r, cat := newTestRegistry(t, 0, 0)
 	require.NoError(t, cat.FlipHotReady(5))

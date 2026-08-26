@@ -80,6 +80,9 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 	specs = limitsByMethod(m).Apply(specs)
 	for i := range specs {
 		specs[i].Handler = wrapAdapterRequest(specs[i].Handler, p.registry)
+		if specs[i].MethodName == protocol.GetHealthMethodName {
+			specs[i].Handler = gateHealthOnFirstCommit(specs[i].Handler, p.registry)
+		}
 	}
 
 	return jsonrpc.NewHandler(jsonrpc.Params{
@@ -152,6 +155,22 @@ func wrapAdapterRequest(h jrpc2.Handler, registry *query.Registry) jrpc2.Handler
 		// serving, so a skipped release would orphan the RocksDB snapshot.
 		defer view.Release()
 		return h(adapters.WithView(ctx, view), req)
+	}
+}
+
+// gateHealthOnFirstCommit fails getHealth until this run commits a ledger.
+// Close times survive restarts in the durable stores, so freshness alone
+// cannot tell a working node from one whose ingestion never started. v1
+// keeps the shared behavior.
+func gateHealthOnFirstCommit(h jrpc2.Handler, registry *query.Registry) jrpc2.Handler {
+	return func(ctx context.Context, req *jrpc2.Request) (any, error) {
+		if !registry.HasCommittedSinceBoot() {
+			return nil, &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: "ingestion has not committed a ledger since this process started",
+			}
+		}
+		return h(ctx, req)
 	}
 }
 

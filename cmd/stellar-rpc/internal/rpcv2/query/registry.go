@@ -42,6 +42,9 @@ type Registry struct {
 	// (ReadView.LatestLedger / LatestCloseTime), never this live value.
 	latest atomic.Pointer[ledgerStamp]
 
+	// bootSeq is the latest ledger found at startup; set once by SeedLatestAtBoot.
+	bootSeq uint32
+
 	// oldest is a read-through cache of the retention floor's first ledger and
 	// its close time. Views populate it after a fallback point read
 	// (ReadView.RecordOldestCloseTime); readers trust it only while its seq
@@ -118,7 +121,7 @@ func OpenRegistry(
 	}
 	r.PublishHandle(live.ChunkID(), live)
 	// The catalog has no close times, so the seed stamp starts at 0 (unknown).
-	r.SetLatestLedger(lastCommitted, 0)
+	r.SeedLatestAtBoot(lastCommitted, 0)
 	return r, nil
 }
 
@@ -143,6 +146,19 @@ func NewRegistry(cat *catalog.Catalog, retention geometry.Retention) *Registry {
 // 0 = unknown, see ledgerStamp); the latest field documents the caller.
 func (r *Registry) SetLatestLedger(seq uint32, closeTimeUnix int64) {
 	r.latest.Store(&ledgerStamp{seq: seq, closeTime: closeTimeUnix})
+}
+
+// SeedLatestAtBoot is SetLatestLedger plus a record of seq as this process's
+// boot value. OpenRegistry calls it once at startup.
+func (r *Registry) SeedLatestAtBoot(seq uint32, closeTimeUnix int64) {
+	r.bootSeq = seq
+	r.SetLatestLedger(seq, closeTimeUnix)
+}
+
+// HasCommittedSinceBoot reports whether ingestion advanced the latest ledger
+// past the boot value.
+func (r *Registry) HasCommittedSinceBoot() bool {
+	return r.latest.Load().seq > r.bootSeq
 }
 
 // LatestLedger returns the live latest ledger. Queries do not call this — they
