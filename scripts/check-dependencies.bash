@@ -53,8 +53,14 @@ do
   if CARGO_OUTPUT=$(cargo tree --depth 0 -p stellar-xdr@$PROTO 2>&1); then
     RS_STELLAR_XDR_REVISION=$(echo -n "$CARGO_OUTPUT" | stellar_xdr_version_from_rust_dep_tree)
     if [ ${#RS_STELLAR_XDR_REVISION} -eq 40 ]; then
-      # revision is a git hash
-      STELLAR_XDR_REVISION_FROM_RUST=$($CURL https://raw.githubusercontent.com/stellar/rs-stellar-xdr/${RS_STELLAR_XDR_REVISION}/xdr/curr-version)
+      # revision is a git hash. rs-stellar-xdr moved the pinned stellar-xdr
+      # commit from xdr/curr-version to the top-level xdr-version file in v27,
+      # so read xdr-version first and fall back to xdr/curr-version for older
+      # layouts. The || sits outside the command substitution so a
+      # --fail-with-body 404 body can't be concatenated into the captured
+      # revision; each assignment captures only its own command's stdout.
+      STELLAR_XDR_REVISION_FROM_RUST=$($CURL "https://raw.githubusercontent.com/stellar/rs-stellar-xdr/${RS_STELLAR_XDR_REVISION}/xdr-version" 2>/dev/null) \
+        || STELLAR_XDR_REVISION_FROM_RUST=$($CURL "https://raw.githubusercontent.com/stellar/rs-stellar-xdr/${RS_STELLAR_XDR_REVISION}/xdr/curr-version" 2>/dev/null)
     else
       # revision is a crate version
       CARGO_SRC_BASE_DIR=$(realpath ${CARGO_HOME:-$HOME/.cargo}/registry/src/index*)

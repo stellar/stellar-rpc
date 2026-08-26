@@ -1,6 +1,7 @@
 package methods
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -52,6 +53,21 @@ func (ledgerReader *ConstantLedgerReader) GetLedger(_ context.Context,
 			expectedLatestLedgerProtocolVersion,
 			expectedLatestLedgerCloseTime),
 		true, nil
+}
+
+func (ledgerReader *ConstantLedgerReader) GetLedgerRaw(
+	_ context.Context,
+	sequence uint32,
+) (db.RawLedger, bool, error) {
+	lcm := createLedger(expectedLatestLedgerHashBytes,
+		sequence,
+		expectedLatestLedgerProtocolVersion,
+		expectedLatestLedgerCloseTime)
+	var buf bytes.Buffer
+	if _, err := xdr.Marshal(&buf, lcm); err != nil {
+		return nil, false, err
+	}
+	return buf.Bytes(), true, nil
 }
 
 func (ledgerReader *ConstantLedgerReader) StreamAllLedgers(_ context.Context, _ db.StreamLedgerFn) error {

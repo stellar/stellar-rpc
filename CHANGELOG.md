@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## [v28.0.0](https://github.com/stellar/stellar-rpc/compare/v27.1.1...v28.0.0)
+
+### Added
+* XDR has been updated to support Protocol 28 (CAP-0083, CAP-0085) ([#913](https://github.com/stellar/stellar-rpc/pull/913)).
+* The preflight hosts have been rotated to soroban-env-host 28.0.1 (27.0.1 for the previous protocol) and integration tests now run against stellar-core 28.0.0 ([#913](https://github.com/stellar/stellar-rpc/pull/913)).
+
+### Fixed
+* Backfill ingestion is significantly faster: the bulk load defers index creation and batches its writes ([#854](https://github.com/stellar/stellar-rpc/pull/854)).
+* Bumped dependencies to latest versions, and the release image no longer installs recommended packages ([#928](https://github.com/stellar/stellar-rpc/pull/928)).
+* Bumped `go-stellar-sdk` to [v0.7.2](https://github.com/stellar/go-stellar-sdk/releases/tag/v0.7.2), so strkeys in requests are validated against their [SEP-23](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0023.md) payload length: an address, contract ID or claimable balance ID whose checksum is valid but whose payload length is wrong is now rejected instead of accepted ([#929](https://github.com/stellar/stellar-rpc/pull/929)).
+
+## [v27.1.1](https://github.com/stellar/stellar-rpc/compare/v27.1.0...v27.1.1)
+
+### Fixed
+* `getEvents` no longer misses events when one filter constrains `contractIds` or `type` and another filter leaves it empty ([#832](https://github.com/stellar/stellar-rpc/pull/832)).
+* Bumped dependencies to latest versions ([#842](https://github.com/stellar/stellar-rpc/pull/842)).
+* Disable built-in `rpc.*` methods ([#828](https://github.com/stellar/stellar-rpc/pull/828)).
 
 ## [v27.1.0](https://github.com/stellar/stellar-rpc/compare/v27.0.0...v27.1.0)
 
@@ -12,7 +29,6 @@
 ### Fixed
 * Query performance improvements via caching ([#801](https://github.com/stellar/stellar-rpc/pull/801)).
 * `simulateTransaction` now returns the ledger's close time rather than the execution timestamp to accurately reflect simulation state ([#742](https://github.com/stellar/stellar-rpc/pull/742)).
-
 
 ## [v27.0.0](https://github.com/stellar/stellar-rpc/compare/v26.0.1...v27.0.0)
 
