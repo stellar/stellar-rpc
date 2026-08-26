@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/creachadair/jrpc2"
@@ -95,6 +96,10 @@ func requestCursor(
 		}
 		limit = *req.Limit
 	}
+	// min makes the conversion provably safe. The suppression stays because
+	// CI's gosec still reports it; nolintlint is suppressed with it, because
+	// the newer gosec does not.
+	pageLimit := int(min(limit, math.MaxInt32)) //nolint:gosec,nolintlint
 	if err := req.Valid(protocol.DefaultMaxFiltersV2); err != nil {
 		return query.EventCursor{}, 0, err
 	}
@@ -103,13 +108,13 @@ func requestCursor(
 		if err != nil {
 			return query.EventCursor{}, 0, err
 		}
-		return *cursor, int(limit), nil
+		return *cursor, pageLimit, nil
 	}
 	scope, err := eventScope(req, latest)
 	if err != nil {
 		return query.EventCursor{}, 0, err
 	}
-	return query.EventCursor{Scope: scope}, int(limit), nil
+	return query.EventCursor{Scope: scope}, pageLimit, nil
 }
 
 // checkTermBudget reports both numbers on rejection. A client needs them
@@ -322,10 +327,16 @@ func eventInfoV2(p *event.Payload, format string) (protocol.EventInfoV2, error) 
 	if err != nil {
 		return protocol.EventInfoV2{}, err
 	}
+	// The response field is int32, so a sequence past its range would go
+	// out negative. v1 rejects the same shape.
+	if p.LedgerSequence > math.MaxInt32 {
+		return protocol.EventInfoV2{}, fmt.Errorf(
+			"rpcv2: ledger sequence %d exceeds supported range", p.LedgerSequence)
+	}
 
 	info := protocol.EventInfoV2{
 		EventType:      eventType,
-		Ledger:         int32(p.LedgerSequence), //nolint:gosec // ledger sequences fit int32 by protocol
+		Ledger:         int32(p.LedgerSequence),
 		LedgerClosedAt: time.Unix(p.LedgerClosedAt, 0).UTC().Format(time.RFC3339),
 		ID: protocol.Cursor{
 			Ledger: p.LedgerSequence, Tx: p.TxIdx, Op: p.OpIdx, Event: p.EventIdx,

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -369,6 +370,20 @@ func TestEventInfoV2Corrupt(t *testing.T) {
 		payload := event.Payload{ContractEventBytes: []byte{0xFF, 0xFF}}
 		_, err := eventInfoV2(&payload, protocol.FormatBase64)
 		require.Error(t, err)
+	})
+
+	// The response field is int32, so the boundary is where a sequence
+	// would go out negative.
+	t.Run("a ledger sequence past the response field", func(t *testing.T) {
+		payload, _, _ := testPayload(t, nil)
+		payload.LedgerSequence = math.MaxInt32 + 1
+		_, err := eventInfoV2(&payload, protocol.FormatBase64)
+		require.ErrorContains(t, err, "exceeds supported range")
+
+		payload.LedgerSequence = math.MaxInt32
+		info, err := eventInfoV2(&payload, protocol.FormatBase64)
+		require.NoError(t, err, "the boundary itself still fits")
+		assert.Equal(t, int32(math.MaxInt32), info.Ledger)
 	})
 
 	t.Run("a type the store never holds", func(t *testing.T) {

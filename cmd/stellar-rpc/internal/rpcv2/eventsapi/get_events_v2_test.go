@@ -76,7 +76,7 @@ func seedView(t *testing.T) (context.Context, uint32) {
 }
 
 // requireErrorData asserts the code and reason, then decodes the data
-// payload into into.
+// payload into the given struct. Pass nil to skip that.
 func requireErrorData(t *testing.T, err error, wantReason string, into any) {
 	t.Helper()
 	var jerr *jrpc2.Error
