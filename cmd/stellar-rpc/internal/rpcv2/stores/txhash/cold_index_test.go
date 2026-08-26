@@ -412,6 +412,60 @@ func TestBuildColdIndex_HeaderOverflowRejected(t *testing.T) {
 	assert.NoFileExists(t, idxPath)
 }
 
+func TestBuildColdIndex_RejectsPreSecretBinLayout(t *testing.T) {
+	// A .bin in the PRE-SECRET layout: an 8-byte LE count followed by whole
+	// 20-byte entries, with neither the magic-and-version prelude nor an
+	// index secret in the header. Such a stale fixture must be rejected, not
+	// adopted: a lenient build would read entry key bytes as "the secret" and
+	// produce an index no query can hit. A non-empty one is refused by the
+	// prelude check, which finds the count's low bytes where the magic
+	// belongs; an empty one is shorter than a header outright. The size check
+	// backs both up — the old body measures 8+20c-32 = 20c-24 bytes, and
+	// 20c-24 mod 20 == 16 for every c >= 1.
+	require.Equal(t, 32, coldBinHeaderSize,
+		"premise: today's header is a prelude, a count, and a 16-byte secret")
+	require.Equal(t, 20, coldBinEntrySize, "premise: today's entry is a 16-byte key plus a uint32 seq")
+
+	for _, tc := range []struct {
+		name    string
+		count   uint64
+		wantErr string
+	}{
+		{
+			name:    "entries present",
+			count:   3,
+			wantErr: "is not a cold txhash .bin (magic",
+		},
+		{
+			// 8 bytes total: the header read itself runs off the end.
+			name:    "empty",
+			count:   0,
+			wantErr: "read header of",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			var buf bytes.Buffer
+			var legacyHdr [coldBinCountSize]byte // count only — the pre-secret header
+			binary.LittleEndian.PutUint64(legacyHdr[:], tc.count)
+			buf.Write(legacyHdr[:])
+			buf.Write(make([]byte, coldBinEntrySize*int(tc.count)))
+			require.Equal(t, coldBinCountSize+coldBinEntrySize*int(tc.count), buf.Len(),
+				"premise: the fixture is the old [count][entries] layout, byte for byte")
+
+			p := filepath.Join(dir, "00000005.bin")
+			require.NoError(t, os.WriteFile(p, buf.Bytes(), 0o600))
+
+			idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
+			err := BuildColdIndex(context.Background(), []string{p}, idxPath,
+				fixtureMinLedger(), fixtureMaxLedger())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+			assert.NoFileExists(t, idxPath)
+		})
+	}
+}
+
 func TestBuildColdIndex_InputOrderIndependent(t *testing.T) {
 	// The merge sorts globally, so feeding the same files in reversed
 	// order must produce a byte-identical index.

@@ -95,11 +95,12 @@ func WriteColdIndexFromRuns(
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if rmErr := os.Remove(termsRunPath); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) && err == nil {
-			err = fmt.Errorf("events: remove %s: %w", termsRunPath, rmErr)
-		}
-	}()
+	// Scratch removal is best-effort and MUST NOT write to err: this defer
+	// runs before the orphan-index.hash guard above (LIFO), so a scratch
+	// unlink failure surfacing as err would delete the finalized index.hash
+	// while index.pack survives — a torn artifact pair on an otherwise
+	// successful build. The caller owns scratchDir and wipes it wholesale.
+	defer func() { _ = os.Remove(termsRunPath) }()
 
 	// Pass A: keys → SortedBuilder → index.hash. The run keys are already
 	// blinded (see the function doc); the secret rides only in the metadata.

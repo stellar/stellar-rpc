@@ -927,7 +927,7 @@ func eventRichLedger(t *testing.T, seq uint32) []byte {
 // several rich sentinel ledgers and compares the artifacts to INDEPENDENT
 // reference computations:
 //
-//   - txhash .bin vs. sorted, truncated entries built from an independent
+//   - txhash .bin vs. sorted, blinded entries built from an independent
 //     ExtractLedgerTxParts run over the same fixtures (`.Hash`/`.InnerHash` per
 //     element) — so an entry-by-entry match proves the ingester's shared walk
 //     dropped or reshaped no hash.

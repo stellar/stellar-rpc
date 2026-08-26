@@ -17,7 +17,7 @@ rebuild window**, and the settled architecture (below) closes that too:
 | regime | ingest p99 | notes |
 |---|---|---|
 | solo steady-state | 63.7-64.1ms | flat per-decile across a full 10k chunk; RSS: steady ~2GB, transient merge-generation peaks ~4.6GB (see RAM anchor below) |
-| during freeze (unpaced, single disk, post-review) | 111.0 | commit p99 82; 1.25% ledgers >100ms; co-located freeze wall ~8min; pre-review basis was ~122-134 — the streamed .bin improved it |
+| during freeze (unpaced, single disk, post-review) | 111.0 | commit p99 82; 1.25% ledgers >100ms; co-located freeze wall ~8min; pre-review basis was ~122-134 — the streamed .bin improved it; superseded by #932 key blinding — re-measure |
 | during freeze (old walk freeze, like-for-like) | 141.9 | for the full 10min cycle — the new freeze is strictly better |
 | during txindex rebuild (single disk) | ~152, p50 +29 | recurs EVERY chunk boundary; see architecture |
 | post-co-runner | instantly solo | every co-runner, every trace |
@@ -26,7 +26,7 @@ rebuild window**, and the settled architecture (below) closes that too:
 fixes):** hot solo p99 65.9 (p50 49.7, max 70.2 — within the ±5% band of the
 63.7 baseline; the SRT reader-race/leak fixes and sort swap cost nothing),
 hot RSS 1.15GB; freeze --reuse-hot wall 7m23, **peak RSS 8.4→6.4GB** (the
-streamed .bin deleted the ~1.2GB whole-chunk accumulator — confirmed).
+streamed .bin deleted the ~1.2GB whole-chunk accumulator — measured pre-keyed-routing; #932's key blinding reinstated a whole-chunk blinded-sort accumulator in the txhash freeze arm, and the events freeze gained a blinded re-spill pass, so the freeze RSS/wall anchors need re-measurement).
 Post-review co-location (single disk, unpaced): freeze-window-conditional
 ingest p99 111.0 / commit p99 82.4 / 1.25% of ledgers >100ms; post-freeze
 p99 65.0 = solo. ~11-23ms better than the pre-review 122-134 basis —

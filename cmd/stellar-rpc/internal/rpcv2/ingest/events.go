@@ -153,13 +153,10 @@ func (e *eventsCold) finalize(ctx context.Context) error {
 		e.metrics.emit(time.Since(start), err)
 		return err
 	}
-	if err := e.spiller.Cleanup(); err != nil {
-		// Scratch removal is best-effort: the artifacts are already durable,
-		// and the next attempt's NewSpiller wipes this dir anyway.
-		err = fmt.Errorf("index spill cleanup: %w", err)
-		e.metrics.emit(time.Since(start), err)
-		return err
-	}
+	// Scratch removal is best-effort: the artifacts are already durable, and
+	// the next attempt's NewSpiller wipes this dir anyway — failing the chunk
+	// here would force a full re-materialization over a cosmetic unlink.
+	_ = e.spiller.Cleanup()
 	e.metrics.sink.IngestStage(dataTypeEvents, stageFinalize, time.Since(start), 0)
 	e.metrics.emit(time.Since(start), nil)
 	return nil

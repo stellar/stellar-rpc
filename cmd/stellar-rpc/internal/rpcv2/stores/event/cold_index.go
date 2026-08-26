@@ -65,13 +65,13 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 // order. Each record is:
 //
 //	offset  size  field
-//	0       4     fingerprint (first 4 bytes of the TermKey hash)
+//	0       4     fingerprint (first 4 bytes of the ROUTED/blinded key)
 //	4       1     codec (itemCodecRoaring | itemCodecDelta)
 //	5       N     postings in that codec
 //
 // The cold reader uses mphf.Lookup(term) → slot to find the record
 // position, packfile.Reader.ReadItem(slot, ...) to read the bytes,
-// verifies the 4-byte fingerprint against term[:4], and then
+// verifies the 4-byte fingerprint against the routed query key's prefix, and then
 // deserializes the bitmap on match. Unseen terms still produce a
 // slot (vanilla MPHF semantics) but their fingerprint mismatches —
 // the cold reader rejects them at that point.

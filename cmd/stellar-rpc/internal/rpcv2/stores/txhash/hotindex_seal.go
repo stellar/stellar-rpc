@@ -334,7 +334,7 @@ func openSealedRun(path string) (*sealedRun, error) {
 	// The validated header count sizes the routing state up front — the same
 	// one-pass runRouting shape the write side uses, here fed from the
 	// verified drain.
-	rt := newRunRouting(rs.records)
+	rt := newRunRouting(rs.recs)
 	for {
 		ok, aerr := rs.advance()
 		if aerr != nil {
