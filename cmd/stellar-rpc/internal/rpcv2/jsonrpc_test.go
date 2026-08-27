@@ -118,6 +118,32 @@ func TestJSONRPCHandler_GetEventsV2ReportsTypedErrorData(t *testing.T) {
 	assert.Equal(t, protocol.ErrorReasonInvalidParams, data.Reason)
 }
 
+// Every field is optional, so a typo would widen the query rather than fail.
+func TestJSONRPCHandler_GetEventsV2RejectsUnknownFields(t *testing.T) {
+	url := newTestRPCServer(t, seedServingRegistry(t))
+
+	for name, params := range map[string]string{
+		"top level":    `{"minLedger":2,"maxLedgor":2}`,
+		"in a filter":  `{"minLedger":2,"filters":[{"topicc1":"AAAA"}]}`,
+		"array params": `[2]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := rpcv2test.PostRPC(t, url, protocol.GetEventsV2MethodName, params)
+			require.NotNil(t, out.Error)
+			assert.EqualValues(t, jrpc2.InvalidParams, out.Error.Code)
+			var data struct {
+				Reason string `json:"reason"`
+			}
+			require.NoError(t, json.Unmarshal(out.Error.Data, &data))
+			assert.Equal(t, protocol.ErrorReasonInvalidParams, data.Reason)
+			assert.NotContains(t, out.Error.Message, "json:",
+				"the decoder's own prefix is not the client's business")
+			assert.NotContains(t, out.Error.Message, "protocol.",
+				"a Go type name is not the client's business")
+		})
+	}
+}
+
 func TestJSONRPCHandler_ServesLatestLedgerFromRegistry(t *testing.T) {
 	url := newTestRPCServer(t, seedServingRegistry(t))
 

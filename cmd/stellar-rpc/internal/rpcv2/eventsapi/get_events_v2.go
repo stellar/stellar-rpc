@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/creachadair/jrpc2"
@@ -17,7 +18,6 @@ import (
 	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
@@ -34,12 +34,42 @@ type Limits struct {
 	DefaultLimit uint
 }
 
-// NewHandler builds the getEventsV2 handler.
+// NewHandler builds the getEventsV2 handler. It decodes the params itself,
+// not through methods.NewHandler, so an unknown field fails.
 func NewHandler(limits Limits) jrpc2.Handler {
-	return methods.NewHandler(
-		func(ctx context.Context, req protocol.GetEventsV2Request) (protocol.GetEventsV2Response, error) {
-			return getEventsV2(ctx, limits, &req)
-		})
+	return func(ctx context.Context, r *jrpc2.Request) (any, error) {
+		var raw json.RawMessage
+		_ = r.UnmarshalParams(&raw)
+		if len(raw) > 0 && raw[0] != '{' {
+			return nil, invalidParams("params must be an object")
+		}
+		var req protocol.GetEventsV2Request
+		if err := r.UnmarshalParams(jrpc2.StrictFields(&req)); err != nil {
+			return nil, decodeError(err)
+		}
+		return getEventsV2(ctx, limits, &req)
+	}
+}
+
+// decodeError re-shapes a params failure to carry a reason. jrpc2 puts the
+// decoder's message in error.data, which leaves no room for one.
+func decodeError(err error) error {
+	message := err.Error()
+	var jerr *jrpc2.Error
+	if errors.As(err, &jerr) {
+		message = jerr.Message
+		var detail string
+		if json.Unmarshal(jerr.Data, &detail) == nil && detail != "" {
+			message = detail
+		}
+	}
+	return invalidParams(strings.TrimPrefix(message, "json: "))
+}
+
+func invalidParams(message string) error {
+	return jrpcError(message, protocol.InvalidParamsErrorData{
+		Reason: protocol.ErrorReasonInvalidParams,
+	})
 }
 
 // getEventsV2 classifies every failure in one place.
