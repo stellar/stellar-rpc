@@ -123,7 +123,7 @@ type runEnv struct {
 // SIGINT-canceled context, Info-level logger, profiling around run, an
 // invocation.json record written to --out after the run — with --out, the
 // profile flags, and each caller-supplied flag group bound. bench-ingest passes
-// its ledger-source group, bench-query its sweep group.
+// its ledger-source group, bench-query its leg group.
 func newBenchCommand(
 	use, short string, prof *profileFlags,
 	run func(ctx context.Context, logger *supportlog.Entry, env runEnv) error,

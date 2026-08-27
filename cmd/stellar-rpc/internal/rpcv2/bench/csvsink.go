@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -141,38 +141,53 @@ var fileSpecs = func() []fileSpec {
 	)
 }()
 
-// querySpecs is the bench-query report schema for one run: one CSV per swept
-// query type, each holding a total_c<W> row per concurrency level, plus
-// driver.csv holding the fixture open, the page-cache evictions, the per-cell
-// wall-clocks (<qtype>_c<W>), and the peak RSS. Unlike fileSpecs it is built per
-// run, since the row set is the --types × --query-concurrency sweep the flags
-// asked for.
+// querySpecs is the bench-query report schema for one run: one CSV per query
+// type, each holding the latency rows of that type's legs, plus driver.csv
+// holding the setup rows and each leg's driver metrics. It is built per run,
+// since the row set is the --types × --target-rps ladder the flags asked for.
 //
 // The labels are the results converter's contract, not a presentation choice:
-// it discovers the query types by globbing the run dir for CSVs other than
-// driver.csv, reads each cell from that type's total_c<W> row and the matching
-// <qtype>_c<W> driver row, and files every driver row WITHOUT a _c<W> suffix
-// (open, evict, peak_rss_bytes) under "setup".
 //
-// txhash carries two more rows per concurrency level, found_c<W> and miss_c<W>,
-// splitting the same samples its total_c<W> row blends. The converter matches
-// total_c<W> alone, so the split is invisible to the site and exists for the CSV
-// and the log summary — see recordCell.
-func querySpecs(types []string, concurrency []int) []fileSpec {
+//   - Every CSV in the run dir other than driver.csv is a query type, named by
+//     its basename.
+//   - In a type's file, total_r<rate> is that leg's headline distribution — the
+//     scheduled latency of every measured request. service_r<rate>,
+//     found_r<rate>, and miss_r<rate> are side rows over the same requests.
+//   - In driver.csv, <qtype>_r<rate> with no further suffix is the leg's
+//     wall-clock. <qtype>_r<rate>_millirps, _lag, and _shed are that leg's
+//     driver metrics: the achieved rate times 1000, the dispatch-lag
+//     distribution, and the shed count.
+//   - A driver row with no _r<rate> segment (open, evict, peak_rss_bytes) is
+//     setup.
+//
+// txhash carries the found_r<rate> and miss_r<rate> rows, splitting the same
+// requests its total_r<rate> row blends. The converter matches total_r<rate>
+// alone, so the split is invisible to the site and exists for the CSV and the
+// log summary — see recordLeg.
+func querySpecs(types []string, rates []float64) []fileSpec {
 	specs := make([]fileSpec, 0, len(types)+1)
-	driverRows := make([]string, 0, len(types)*len(concurrency)+3)
+	legSuffixes := []string{driverLegRPSSuffix, driverLegLagSuffix, driverLegShedSuffix}
+	driverRows := make([]string, 0, len(types)*len(rates)*(len(legSuffixes)+1)+3)
 	driverRows = append(driverRows, driverQueryOpen, driverQueryEvict)
 	for _, qtype := range types {
-		rows := make([]string, 0, len(concurrency))
-		for _, w := range concurrency {
-			rows = append(rows, queryCellRow(w))
-			driverRows = append(driverRows, queryDriverRow(qtype, w))
+		rows := make([]string, 0, len(rates)*2)
+		for _, rps := range rates {
+			rows = append(rows, queryTotalRow(rps))
+		}
+		for _, rps := range rates {
+			rows = append(rows, queryServiceRow(rps))
 		}
 		if qtype == queryTypeTxHash {
 			for _, stage := range []string{txHashStageFound, txHashStageMiss} {
-				for _, w := range concurrency {
-					rows = append(rows, stage+"_c"+strconv.Itoa(w))
+				for _, rps := range rates {
+					rows = append(rows, queryStageRow(stage, rps))
 				}
+			}
+		}
+		for _, rps := range rates {
+			driverRows = append(driverRows, queryDriverRow(qtype, rps))
+			for _, suffix := range legSuffixes {
+				driverRows = append(driverRows, queryDriverLegRow(qtype, rps, suffix))
 			}
 		}
 		specs = append(specs, fileSpec{name: qtype, rowOrder: rows})
@@ -227,7 +242,7 @@ type csvSink struct {
 
 	// specs is the report schema this sink renders through: fileSpecs for an
 	// ingest run, querySpecs(...) for a query run, whose file and row set is the
-	// sweep the flags asked for rather than a fixed vocabulary. Read-only after
+	// ladder the flags asked for rather than a fixed vocabulary. Read-only after
 	// construction.
 	specs []fileSpec
 
@@ -424,9 +439,9 @@ type row struct {
 
 // aggregate reduces a series to a row, filtering out zero-duration samples so
 // work too fast for the timer (an empty ledger's stage) doesn't skew the
-// percentiles. For pace_lag, zeros are always included (they represent
-// on-time ledgers and are part of the lag distribution). ok is false when no
-// sample survives the filter — the row is suppressed.
+// percentiles. Rows whose zeros are real observations pass includeZeros and
+// keep them (see keepsZeroSamples). ok is false when no sample survives the
+// filter — the row is suppressed.
 func aggregate(name string, s *series, includeZeros bool) (row, bool) {
 	durs := make([]time.Duration, 0, len(s.samples))
 	items := 0
@@ -474,6 +489,16 @@ func withUnknown[V any](order []string, m map[string]V) []string {
 	return append(slices.Clone(order), extra...)
 }
 
+// keepsZeroSamples reports whether a row keeps its zero-duration samples. These
+// rows are distributions or counts in which a zero is a real observation — a
+// ledger that committed on time, a request dispatched on time, a leg that shed
+// nothing — rather than a piece of work too fast for the timer to see.
+func keepsZeroSamples(label string) bool {
+	return label == driverPaceLag ||
+		strings.HasSuffix(label, driverLegLagSuffix) ||
+		strings.HasSuffix(label, driverLegShedSuffix)
+}
+
 // file is one aggregated CSV file: its basename (without .csv) and its rows.
 type file struct {
 	name string
@@ -508,8 +533,7 @@ func (s *csvSink) files() []file {
 		var rows []row
 		for _, label := range withUnknown(rowOrders[name], byRow) {
 			if sr := byRow[label]; sr != nil {
-				// pace_lag is for paced runs; include zero-lag samples (on-time ledgers).
-				if r, ok := aggregate(label, sr, label == driverPaceLag); ok {
+				if r, ok := aggregate(label, sr, keepsZeroSamples(label)); ok {
 					rows = append(rows, r)
 				}
 			}

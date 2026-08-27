@@ -21,10 +21,10 @@ import (
 // touches a store reader that ReadView did not hand over, so the p99-campaign
 // refactor of the readers moves these numbers without moving this code.
 
-// Sub-stage labels for the tx-hash distribution. The blended total_c<W> row is
-// what the results converter reads; these two additionally split it, since a
+// Sub-stage labels for the tx-hash distribution. The blended total_r<rate> row
+// is what the results converter reads; these two additionally split it, since a
 // hit and a miss are different amounts of work and a blended p99 hides which
-// one moved (see recordCell).
+// one moved (see recordLeg).
 const (
 	txHashStageFound = "found"
 	txHashStageMiss  = "miss"
@@ -32,7 +32,7 @@ const (
 
 // newQueryRequest builds one query type's measured request, sampling whatever
 // corpus it needs first. The corpus build reads the dataset and is deliberately
-// outside every timer; the returned closure is what the sweep measures.
+// outside every timer; the returned closure is what a leg measures.
 func newQueryRequest(
 	ctx context.Context, logger *supportlog.Entry, f *queryFixture, p queryPlan, qtype string,
 ) (queryRequest, error) {
@@ -64,7 +64,7 @@ func newQueryRequest(
 // ReadView.ScanLedgers.
 //
 // The span is a flag rather than two hard-coded shapes because a point read is
-// simply a span of one: mixing both into a single cell would blend two very
+// simply a span of one: mixing both into a single leg would blend two very
 // different distributions under one percentile. The default is the endpoint's
 // page cap, which is what a client actually asks for.
 func ledgersRequest(f *queryFixture, p queryPlan) queryRequest {
@@ -158,7 +158,7 @@ func txPageRequest(f *queryFixture, p queryPlan) queryRequest {
 // read, and it opens a cold index on that index's first probe, so a hot hit
 // pays no file open.
 //
-// The reader is stateless, so one serves every iteration of the cell.
+// The reader is stateless, so one serves every request of a leg.
 func txHashRequest(ctx context.Context, f *queryFixture, corpus *txHashCorpus) queryRequest {
 	reader := adapters.NewTransactionReader(f.Passphrase, nil)
 	return func(rng *rand.Rand) (cellSample, error) {

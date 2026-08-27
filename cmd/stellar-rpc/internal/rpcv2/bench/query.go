@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"slices"
 	"strconv"
@@ -57,22 +58,46 @@ const (
 //nolint:gochecknoglobals // fixed vocabulary, read-only
 var allQueryTypes = []string{queryTypeLedgers, queryTypeTxPage, queryTypeTxHash, queryTypeEvents}
 
-// Query report row labels. Each per-type CSV carries one total_c<W> row per
-// swept concurrency level — that cell's per-query distribution — and driver.csv
-// carries the matching <qtype>_c<W> cell wall-clock plus the fixture open.
+// Query report row labels. A row belonging to one leg carries an _r<rate>
+// segment holding that leg's target rate as --target-rps spelled it: a per-type
+// CSV names its latency rows total_r<rate> and service_r<rate>, and driver.csv
+// names one leg's rows <qtype>_r<rate> plus the three suffixed variants below.
+// A driver row with no _r<rate> segment belongs to the run's setup.
 const (
-	queryRowTotalPrefix = "total_c"
-	driverQueryOpen     = "open"  // fixture open: catalog, handles, first read view
-	driverQueryEvict    = "evict" // one page-cache eviction pass before a cold cell
+	queryRowTotalPrefix   = "total_r"
+	queryRowServicePrefix = "service_r"
+	driverLegRPSSuffix    = "_millirps"
+	driverLegLagSuffix    = "_lag"
+	driverLegShedSuffix   = "_shed"
+	driverQueryOpen       = "open"  // fixture open: catalog, handles, first read view
+	driverQueryEvict      = "evict" // one page-cache eviction pass before a cold leg
 )
 
-// queryCellRow is a per-type CSV's row label for concurrency level w.
-func queryCellRow(w int) string { return queryRowTotalPrefix + strconv.Itoa(w) }
+// formatRPS renders a target rate as its row label spells it: the shortest
+// decimal that reads back as the same rate, so 0.5 stays "0.5" and 300 stays
+// "300".
+func formatRPS(rps float64) string { return strconv.FormatFloat(rps, 'f', -1, 64) }
 
-// queryDriverRow is driver.csv's cell wall-clock row label for one query type
-// at concurrency level w.
-func queryDriverRow(qtype string, w int) string {
-	return qtype + "_c" + strconv.Itoa(w)
+// queryTotalRow is a per-type CSV's scheduled-latency row label for the leg at
+// rate rps.
+func queryTotalRow(rps float64) string { return queryRowTotalPrefix + formatRPS(rps) }
+
+// queryServiceRow is a per-type CSV's service-time row label for the leg at
+// rate rps.
+func queryServiceRow(rps float64) string { return queryRowServicePrefix + formatRPS(rps) }
+
+// queryStageRow is a per-type CSV's row label for one sub-stage of the leg at
+// rate rps.
+func queryStageRow(stage string, rps float64) string { return stage + "_r" + formatRPS(rps) }
+
+// queryDriverRow is driver.csv's wall-clock row label for one query type's leg
+// at rate rps.
+func queryDriverRow(qtype string, rps float64) string { return qtype + "_r" + formatRPS(rps) }
+
+// queryDriverLegRow is driver.csv's row label for one of a leg's driver
+// metrics: queryDriverRow's label plus the metric's suffix.
+func queryDriverLegRow(qtype string, rps float64, suffix string) string {
+	return queryDriverRow(qtype, rps) + suffix
 }
 
 // Defaults for the read-shape flags. The two span defaults are the v2 page caps
@@ -88,17 +113,26 @@ const (
 	defaultSeed         = 1
 )
 
-// queryFlags is the sweep flag set both bench-query subcommands share, beyond
-// the --out and profiling flags newBenchCommand binds. The spellings and value
-// formats of --types, --query-concurrency, --iters, and --warmup are the
-// campaign runner's argv contract; the read-shape flags after them are
-// bench-side only, so the runner's argv keeps working untouched.
+// Defaults for the two flags that shape a leg. defaultLegDuration is long
+// enough that a slow rate still schedules a useful number of requests and short
+// enough that a four-type ladder finishes in minutes; defaultTargetRPS is a
+// single modest rate, so a bare invocation runs one leg per type.
+const (
+	defaultLegDuration = 60 * time.Second
+	defaultTargetRPS   = "10"
+)
+
+// queryFlags is the flag set both bench-query subcommands share, beyond the
+// --out and profiling flags newBenchCommand binds. The spellings and value
+// formats of --types, --target-rps, --duration, and --warmup are the campaign
+// runner's argv contract; the read-shape flags after them are bench-side only,
+// so the runner's argv keeps working untouched.
 type queryFlags struct {
 	types       string
-	concurrency string
-	iters       int
+	targetRPS   string
+	duration    time.Duration
 	warmup      int
-	warmupBound bool // bind --warmup (hot only; a cold cell evicts instead of warming)
+	warmupBound bool // bind --warmup (hot only; a cold leg evicts instead of warming)
 
 	ledgersSpan  uint32
 	txPageSpan   uint32
@@ -112,13 +146,14 @@ type queryFlags struct {
 func (f *queryFlags) bind(cmd *cobra.Command) {
 	fs := cmd.Flags()
 	fs.StringVar(&f.types, "types", strings.Join(allQueryTypes, ","),
-		"comma-separated query types to sweep: "+strings.Join(allQueryTypes, " | "))
-	fs.StringVar(&f.concurrency, "query-concurrency", "1",
-		"comma-separated reader concurrency levels to sweep, e.g. 1,4,16")
-	fs.IntVar(&f.iters, "iters", f.iters, "measured queries per type per concurrency level")
+		"comma-separated query types to run: "+strings.Join(allQueryTypes, " | "))
+	fs.StringVar(&f.targetRPS, "target-rps", defaultTargetRPS,
+		"comma-separated arrival rates to run, in requests per second, e.g. 0.5,1,2")
+	fs.DurationVar(&f.duration, "duration", defaultLegDuration, "how long each --target-rps leg runs")
 	if f.warmupBound {
 		fs.IntVar(&f.warmup, "warmup", f.warmup,
-			"unmeasured queries per cell before the measured ones, warming the store's caches")
+			"unmeasured queries per leg, dispatched at the leg's rate before measurement starts, "+
+				"warming the store's caches")
 	}
 	fs.Uint32Var(&f.ledgersSpan, "ledgers-span", defaultLedgersSpan,
 		"ledgers one ledgers query scans (1 = a point read)")
@@ -138,13 +173,13 @@ func (f *queryFlags) bind(cmd *cobra.Command) {
 		"seed for the work each query picks, so a re-run reads the same ledgers")
 }
 
-// queryPlan is the validated sweep: which types, at which concurrency levels,
-// how many queries per cell, and the shape of each query.
+// queryPlan is the validated run: which types, at which arrival rates, how long
+// each leg runs, and the shape of each query.
 type queryPlan struct {
-	Types       []string
-	Concurrency []int
-	Iters       int
-	Warmup      int
+	Types     []string
+	TargetRPS []float64
+	Duration  time.Duration
+	Warmup    int
 
 	LedgersSpan  uint32
 	TxPageSpan   uint32
@@ -154,25 +189,25 @@ type queryPlan struct {
 	Passphrase   string
 	Seed         int64
 
-	// Evict drops the cold artifacts from the OS page cache before each cell's
-	// measured pass. Cold only: the hot tier's steady state is a warm cache, so
-	// its cells warm up instead.
+	// Evict drops the cold artifacts from the OS page cache before each leg's
+	// measured requests. Cold only: the hot tier's steady state is a warm cache,
+	// so its legs warm up instead.
 	Evict bool
 }
 
-// plan parses and validates the sweep flags.
+// plan parses and validates the flags.
 func (f *queryFlags) plan() (queryPlan, error) {
 	types, err := parseQueryTypes(f.types)
 	if err != nil {
 		return queryPlan{}, err
 	}
-	concurrency, err := parseConcurrency(f.concurrency)
+	rates, err := parseTargetRPS(f.targetRPS)
 	if err != nil {
 		return queryPlan{}, err
 	}
 	switch {
-	case f.iters < 1:
-		return queryPlan{}, fmt.Errorf("--iters must be >= 1, got %d", f.iters)
+	case f.duration <= 0:
+		return queryPlan{}, fmt.Errorf("--duration must be > 0, got %v", f.duration)
 	case f.warmup < 0:
 		return queryPlan{}, fmt.Errorf("--warmup must be >= 0, got %d", f.warmup)
 	case f.ledgersSpan < 1:
@@ -190,8 +225,8 @@ func (f *queryFlags) plan() (queryPlan, error) {
 	}
 	return queryPlan{
 		Types:        types,
-		Concurrency:  concurrency,
-		Iters:        f.iters,
+		TargetRPS:    rates,
+		Duration:     f.duration,
 		Warmup:       f.warmup,
 		LedgersSpan:  f.ledgersSpan,
 		TxPageSpan:   f.txPageSpan,
@@ -226,25 +261,31 @@ func parseQueryTypes(s string) ([]string, error) {
 	return types, nil
 }
 
-// parseConcurrency splits --query-concurrency into the reader counts to sweep,
-// rejecting an empty list, a non-integer, a level below 1, or a repeat.
-func parseConcurrency(s string) ([]int, error) {
+// parseTargetRPS splits --target-rps into the arrival rates to run, keeping the
+// caller's order and rejecting an empty list, an empty entry, a non-number, a
+// rate that is not positive and finite, or a repeat (a repeated rate would
+// collide on its CSV rows).
+func parseTargetRPS(s string) ([]float64, error) {
 	fields := strings.Split(s, ",")
-	levels := make([]int, 0, len(fields))
+	rates := make([]float64, 0, len(fields))
 	for _, f := range fields {
-		w, err := strconv.Atoi(strings.TrimSpace(f))
+		field := strings.TrimSpace(f)
+		if field == "" {
+			return nil, fmt.Errorf("--target-rps has an empty entry: %q", s)
+		}
+		rps, err := strconv.ParseFloat(field, 64)
 		if err != nil {
-			return nil, fmt.Errorf("--query-concurrency: %q is not a list of integers", s)
+			return nil, fmt.Errorf("--target-rps: %q is not a list of numbers", s)
 		}
-		if w < 1 {
-			return nil, fmt.Errorf("--query-concurrency levels must be >= 1, got %d", w)
+		if rps <= 0 || math.IsNaN(rps) || math.IsInf(rps, 0) {
+			return nil, fmt.Errorf("--target-rps rates must be > 0, got %v", rps)
 		}
-		if slices.Contains(levels, w) {
-			return nil, fmt.Errorf("--query-concurrency repeats %d", w)
+		if slices.Contains(rates, rps) {
+			return nil, fmt.Errorf("--target-rps repeats %v", rps)
 		}
-		levels = append(levels, w)
+		rates = append(rates, rps)
 	}
-	return levels, nil
+	return rates, nil
 }
 
 // queryFixture is the read side of one bench-query run, assembled over a
@@ -273,7 +314,7 @@ type queryFixture struct {
 	// database actually holds, narrowed further by --sample-ledgers.
 	FirstLedger, LastLedger uint32
 
-	// EvictPaths are the on-disk artifacts a cold cell drops from the page cache
+	// EvictPaths are the on-disk artifacts a cold leg drops from the page cache
 	// before it measures. Empty for a hot fixture, whose data lives in RocksDB's
 	// own caches rather than in files the bench can advise on.
 	EvictPaths []string
@@ -287,7 +328,7 @@ func (f *queryFixture) view() (*query.ReadView, error) {
 
 // verifyServes acquires a read view and resolves each benchmarked chunk's
 // ledger store, so a dataset that cannot be served fails at open with the
-// chunk named — not per-query, deep inside the sweep. It runs the real routing
+// chunk named — not per-query, deep inside a leg. It runs the real routing
 // (ReadView.Ledgers → resolveTier), which is also what makes it a check: the
 // fixture publishes state for one tier only.
 func (f *queryFixture) verifyServes() error {
@@ -305,9 +346,8 @@ func (f *queryFixture) verifyServes() error {
 }
 
 // evictColdArtifacts drops the fixture's cold artifacts from the OS page cache
-// and reports how many files it advised. Without it a cold cell after the first
-// reads what the previous cell just paged in, and the sweep would show a warming
-// curve rather than a concurrency curve.
+// and reports how many files it advised. Without it a leg after the first would
+// read what the previous leg paged in; with it every leg's numbers are cold.
 //
 // A file that cannot be opened is skipped rather than failing the run: the
 // artifact set is derived from the layout, so a kind the dataset never produced
@@ -326,13 +366,14 @@ func (f *queryFixture) evictColdArtifacts() (int, error) {
 	return evicted, nil
 }
 
-// runQuerySweep sweeps every requested type at every concurrency level against
-// the fixture, recording each cell's per-query distribution in the sink.
+// runQueryLegs runs every requested type at every requested rate against the
+// fixture, recording each leg's per-request distribution in the sink.
 //
-// A type's corpus is sampled once, before its first cell, and shared by every
-// concurrency level: re-sampling per level would make the levels read different
-// work and turn the concurrency curve into noise.
-func runQuerySweep(
+// A type's corpus is sampled once, before its first leg, and shared by every
+// rate: re-sampling per rate would make the legs read different work, so a
+// difference between two legs would be a difference in the work rather than in
+// the rate.
+func runQueryLegs(
 	ctx context.Context, logger *supportlog.Entry, f *queryFixture, p queryPlan, sink *csvSink,
 ) error {
 	for _, qtype := range p.Types {
@@ -340,9 +381,9 @@ func runQuerySweep(
 		if err != nil {
 			return fmt.Errorf("prepare the %s benchmark: %w", qtype, err)
 		}
-		for _, w := range p.Concurrency {
-			if err := runQueryCell(logger, f, p, sink, qtype, w, req); err != nil {
-				return fmt.Errorf("query %s at concurrency %d: %w", qtype, w, err)
+		for _, rps := range p.TargetRPS {
+			if err := runQueryLeg(ctx, logger, f, p, sink, qtype, rps, req); err != nil {
+				return fmt.Errorf("query %s at %s rps: %w", qtype, formatRPS(rps), err)
 			}
 			if err := ctx.Err(); err != nil {
 				return err
@@ -352,15 +393,15 @@ func runQuerySweep(
 	return nil
 }
 
-// runQueryCell runs one (type, concurrency) cell: page-cache eviction for a
-// cold run, then p.Warmup unmeasured requests and p.Iters measured ones on each
-// of w workers.
+// runQueryLeg runs one (type, rate) leg: page-cache eviction for a cold run,
+// then p.Warmup unmeasured requests and the leg's measured ones, all dispatched
+// at rps requests per second over p.Duration.
 //
-// The cell's seed mixes in the type so two types do not read the same ledgers in
+// The leg's seed mixes in the type so two types do not read the same ledgers in
 // the same order, which would let the second inherit the first's warm cache.
-func runQueryCell(
-	logger *supportlog.Entry, f *queryFixture, p queryPlan, sink *csvSink,
-	qtype string, w int, req queryRequest,
+func runQueryLeg(
+	ctx context.Context, logger *supportlog.Entry, f *queryFixture, p queryPlan, sink *csvSink,
+	qtype string, rps float64, req queryRequest,
 ) error {
 	if p.Evict {
 		start := time.Now()
@@ -370,40 +411,76 @@ func runQueryCell(
 		}
 		sink.observe(fileDriver, driverQueryEvict, time.Since(start), evicted)
 	}
-	logger.Infof("query %s at concurrency %d: %d iters, %d warmup", qtype, w, p.Iters, p.Warmup)
+	logger.Infof("query %s at %s rps for %s: %d measured requests, %d warmup",
+		qtype, formatRPS(rps), p.Duration, measuredRequests(rps, p.Duration), p.Warmup)
 
-	res := runSweep(w, p.Warmup, p.Iters, p.Seed+int64(len(qtype)), req)
-	if res.errs > 0 {
-		return fmt.Errorf("%d of %d requests failed", res.errs, w*p.Iters)
+	res, err := runPacedLeg(ctx, rps, p.Duration, p.Warmup, p.Seed+int64(len(qtype)), req)
+	if err != nil {
+		return err
 	}
-	recordCell(sink, qtype, w, res)
+	if res.errs > 0 {
+		return fmt.Errorf("%d of %d requests failed", res.errs, res.dispatched)
+	}
+	recordLeg(sink, qtype, rps, res)
 	return nil
 }
 
-// recordCell files one cell's samples into the report.
+// recordLeg files one leg's samples into the report.
 //
-// Every sample lands in the type's total_c<W> row — the blended cell the results
-// converter reads — and a sample carrying a sub-stage additionally lands in a
-// <stage>_c<W> row of the same file. The converter ignores those extra rows
-// (it matches total_c<W> alone), so they cost the site nothing and give the CSV
-// and the log summary the split that matters locally: txhash's found and
-// not-found lookups do different amounts of work, and a blended p99 cannot say
-// which of them moved.
-func recordCell(sink *csvSink, qtype string, w int, res sweepResult) {
-	total := queryCellRow(w)
+// In the type's own CSV every request lands in the total_r<rate> row — the
+// scheduled latency the results converter reads — and in the service_r<rate>
+// row, which holds the same requests' service times; a request carrying a
+// sub-stage lands in a <stage>_r<rate> row too. The converter matches
+// total_r<rate> alone, so the side rows cost the site nothing and give the CSV
+// and the log summary the splits that matter locally: what the store spent
+// against what a client waited, and txhash's found lookups against its
+// not-found ones, which do different amounts of work.
+//
+// driver.csv gets the leg's four driver rows. <qtype>_r<rate> is the leg wall.
+// The _millirps row's duration columns carry the achieved rate times 1000 as an
+// integer, the way peak_rss_bytes carries bytes. The _lag row holds one sample
+// per dispatched request, so it is the distribution of how far behind schedule
+// the dispatcher ran. The _shed row is written for every leg, so a leg that
+// shed nothing says so with a zero rather than by leaving the row out.
+func recordLeg(sink *csvSink, qtype string, rps float64, res legResult) {
+	total := queryTotalRow(rps)
+	service := queryServiceRow(rps)
 	for _, s := range res.samples {
-		sink.observe(qtype, total, s.service, s.items)
+		sink.observe(qtype, total, s.scheduled, s.items)
+		sink.observe(qtype, service, s.service, s.items)
 		if s.stage != "" {
-			sink.observe(qtype, s.stage+"_c"+strconv.Itoa(w), s.service, s.items)
+			sink.observe(qtype, queryStageRow(s.stage, rps), s.scheduled, s.items)
 		}
 	}
-	sink.observe(fileDriver, queryDriverRow(qtype, w), res.wall, len(res.samples))
+
+	answered := len(res.samples)
+	sink.observe(fileDriver, queryDriverRow(qtype, rps), res.wall, answered)
+	sink.observe(fileDriver, queryDriverLegRow(qtype, rps, driverLegRPSSuffix),
+		achievedMilliRPS(answered, res.wall), answered)
+	for _, lag := range res.lags {
+		sink.observe(fileDriver, queryDriverLegRow(qtype, rps, driverLegLagSuffix), lag, 1)
+	}
+	sink.observe(fileDriver, queryDriverLegRow(qtype, rps, driverLegShedSuffix), 0, res.shed)
+}
+
+// milliPerUnit is the scale the _millirps row stores an achieved rate at, so a
+// fractional rate survives an integer CSV column.
+const milliPerUnit = 1000
+
+// achievedMilliRPS returns the rate answered requests were served at over wall,
+// scaled by milliPerUnit and carried as a duration so it fits the CSV's
+// duration columns. A leg with no wall to divide by reports zero.
+func achievedMilliRPS(answered int, wall time.Duration) time.Duration {
+	if wall <= 0 {
+		return 0
+	}
+	return time.Duration(math.Round(float64(answered) / wall.Seconds() * milliPerUnit))
 }
 
 // runQueryBench is the body both bench-query subcommands share: prepare --out,
-// open the tier's fixture (timing the open into driver.csv), sweep, and report.
-// A failed sweep still writes the partial report and the peak RSS, so the setup
-// rows and whatever cells completed survive.
+// open the tier's fixture (timing the open into driver.csv), run the legs, and
+// report. A failed run still writes the partial report and the peak RSS, so the
+// setup rows and whatever legs completed survive.
 func runQueryBench(
 	ctx context.Context, logger *supportlog.Entry, p queryPlan, outDir string,
 	open func() (*queryFixture, func(), error),
@@ -412,7 +489,7 @@ func runQueryBench(
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return fmt.Errorf("create --out dir %s: %w", outDir, err)
 	}
-	sink := newSchemaCSVSink(querySpecs(p.Types, p.Concurrency))
+	sink := newSchemaCSVSink(querySpecs(p.Types, p.TargetRPS))
 
 	start := time.Now()
 	f, release, err := open()
@@ -423,7 +500,7 @@ func runQueryBench(
 	sink.observe(fileDriver, driverQueryOpen, time.Since(start), len(f.Chunks))
 	logger.Infof("serving ledgers [%d, %d] over %d chunk(s)", f.FirstLedger, f.LastLedger, len(f.Chunks))
 
-	err = runQuerySweep(ctx, logger, f, p, sink)
+	err = runQueryLegs(ctx, logger, f, p, sink)
 	// VmHWM never decreases, so it can be read before the error check and a
 	// failed run's partial CSV still gets the row.
 	recordPeakRSS(logger, sink, readPeakRSS)

@@ -2,9 +2,9 @@ package bench
 
 import (
 	"context"
+	"math"
 	"math/rand/v2"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 
@@ -58,7 +58,7 @@ func TestQueryCommandAcceptsRunnerArgv(t *testing.T) {
 				"cold",
 				"--cold-dir=/bench/ds", "--start-chunk=7", "--num-chunks=1",
 				"--types=ledgers,txpage,txhash,events",
-				"--query-concurrency=1,4,16", "--iters=100", "--out=/bench/out",
+				"--target-rps=0.5,1,2", "--duration=5s", "--out=/bench/out",
 			},
 		},
 		{
@@ -67,7 +67,7 @@ func TestQueryCommandAcceptsRunnerArgv(t *testing.T) {
 				"hot",
 				"--hot-dir=/bench/hot", "--chunk=7",
 				"--types=ledgers,txpage,txhash,events",
-				"--query-concurrency=1,4,16", "--iters=200", "--warmup=20", "--out=/bench/out",
+				"--target-rps=0.5,1,2", "--duration=5s", "--warmup=20", "--out=/bench/out",
 			},
 		},
 		{
@@ -76,7 +76,7 @@ func TestQueryCommandAcceptsRunnerArgv(t *testing.T) {
 				"hot",
 				"--hot-dir=/bench/hot", "--chunk=7",
 				"--types=ledgers,txpage,txhash,events",
-				"--query-concurrency=1,4,16", "--iters=200", "--warmup=20",
+				"--target-rps=0.5,1,2", "--duration=5s", "--warmup=20",
 				"--sample-ledgers=50000", "--out=/bench/out",
 			},
 		},
@@ -92,11 +92,15 @@ func TestQueryCommandAcceptsRunnerArgv(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, allQueryTypes, parsed, "the runner sweeps every query type")
 
-			concurrency, err := sub.Flags().GetString("query-concurrency")
+			targetRPS, err := sub.Flags().GetString("target-rps")
 			require.NoError(t, err)
-			levels, err := parseConcurrency(concurrency)
+			rates, err := parseTargetRPS(targetRPS)
 			require.NoError(t, err)
-			require.Equal(t, []int{1, 4, 16}, levels)
+			require.Equal(t, []float64{0.5, 1, 2}, rates)
+
+			duration, err := sub.Flags().GetDuration("duration")
+			require.NoError(t, err)
+			require.Equal(t, 5*time.Second, duration)
 		})
 	}
 }
@@ -113,23 +117,34 @@ func TestParseQueryTypes(t *testing.T) {
 	}
 }
 
-// TestParseConcurrency pins the accepted and rejected --query-concurrency values.
-func TestParseConcurrency(t *testing.T) {
-	got, err := parseConcurrency("16,1,4")
+// TestParseTargetRPS pins the accepted and rejected --target-rps values.
+func TestParseTargetRPS(t *testing.T) {
+	got, err := parseTargetRPS("2,0.5,1")
 	require.NoError(t, err)
-	require.Equal(t, []int{16, 1, 4}, got, "the caller's order is kept")
+	require.Equal(t, []float64{2, 0.5, 1}, got, "the caller's order is kept")
 
-	for _, bad := range []string{"", "1,", "0", "-1", "1,1", "four"} {
-		_, err := parseConcurrency(bad)
-		require.Error(t, err, "--query-concurrency=%q must be rejected", bad)
+	for _, bad := range []string{"", "1,", "0", "-1", "1,1", "four", "NaN", "Inf"} {
+		_, err := parseTargetRPS(bad)
+		require.Error(t, err, "--target-rps=%q must be rejected", bad)
 	}
 }
 
+// TestFormatRPS pins how a rate is spelled in a row label: the shortest decimal
+// that reads back as the same rate, whole rates without a trailing ".0".
+func TestFormatRPS(t *testing.T) {
+	for rps, want := range map[float64]string{0.5: "0.5", 1: "1", 1.67: "1.67", 300: "300"} {
+		assert.Equal(t, want, formatRPS(rps))
+	}
+	assert.Equal(t, "total_r0.5", queryTotalRow(0.5))
+	assert.Equal(t, "txhash_r300_lag", queryDriverLegRow(queryTypeTxHash, 300, driverLegLagSuffix))
+}
+
 // TestQuerySpecs pins the report schema the results converter parses: one CSV
-// per swept type carrying total_c<W>, and driver.csv carrying the fixture open,
-// each cell's <qtype>_c<W> wall-clock, and the peak RSS.
+// per query type carrying total_r<rate> and service_r<rate>, and driver.csv
+// carrying the fixture open, each leg's wall-clock and driver metrics, and the
+// peak RSS.
 func TestQuerySpecs(t *testing.T) {
-	specs := querySpecs([]string{queryTypeLedgers, queryTypeEvents}, []int{1, 4})
+	specs := querySpecs([]string{queryTypeLedgers, queryTypeEvents}, []float64{0.5, 2})
 
 	names := make([]string, len(specs))
 	byName := make(map[string][]string, len(specs))
@@ -138,40 +153,54 @@ func TestQuerySpecs(t *testing.T) {
 		byName[s.name] = s.rowOrder
 	}
 	require.Equal(t, []string{"ledgers", "events", "driver"}, names,
-		"the swept types come first, in sweep order, then driver.csv")
-	require.Equal(t, []string{"total_c1", "total_c4"}, byName["ledgers"])
-	require.Equal(t, []string{"total_c1", "total_c4"}, byName["events"])
+		"the query types come first, in --types order, then driver.csv")
+	require.Equal(t, []string{"total_r0.5", "total_r2", "service_r0.5", "service_r2"}, byName["ledgers"])
+	require.Equal(t, []string{"total_r0.5", "total_r2", "service_r0.5", "service_r2"}, byName["events"])
 	require.Equal(t, []string{
 		"open", "evict",
-		"ledgers_c1", "ledgers_c4",
-		"events_c1", "events_c4",
+		"ledgers_r0.5", "ledgers_r0.5_millirps", "ledgers_r0.5_lag", "ledgers_r0.5_shed",
+		"ledgers_r2", "ledgers_r2_millirps", "ledgers_r2_lag", "ledgers_r2_shed",
+		"events_r0.5", "events_r0.5_millirps", "events_r0.5_lag", "events_r0.5_shed",
+		"events_r2", "events_r2_millirps", "events_r2_lag", "events_r2_shed",
 		"peak_rss_bytes",
 	}, byName["driver"])
 }
 
 // TestQuerySpecsTxHashStages pins the found/miss rows the txhash file carries
-// beside the blended cell the converter reads.
+// beside the blended row the converter reads.
 func TestQuerySpecsTxHashStages(t *testing.T) {
-	specs := querySpecs([]string{queryTypeTxHash}, []int{1, 4})
+	specs := querySpecs([]string{queryTypeTxHash}, []float64{0.5, 2})
 	require.Equal(t, queryTypeTxHash, specs[0].name)
 	require.Equal(t, []string{
-		"total_c1", "total_c4",
-		"found_c1", "found_c4",
-		"miss_c1", "miss_c4",
+		"total_r0.5", "total_r2",
+		"service_r0.5", "service_r2",
+		"found_r0.5", "found_r2",
+		"miss_r0.5", "miss_r2",
 	}, specs[0].rowOrder)
 }
 
-// TestQuerySinkWritesContractRows records one cell per type and checks the
-// written CSVs carry the converter's header and row names.
+// TestQuerySinkWritesContractRows records one leg per type per rate and checks
+// the written CSVs carry the converter's row names — including the _lag and
+// _shed rows, whose samples are zero durations the ordinary filter would drop —
+// and that the _millirps row carries the leg's achieved rate times 1000.
 func TestQuerySinkWritesContractRows(t *testing.T) {
+	const legWall = 2 * time.Second
 	types := []string{queryTypeLedgers, queryTypeTxHash}
-	concurrency := []int{1, 4}
-	sink := newSchemaCSVSink(querySpecs(types, concurrency))
+	rates := []float64{1, 4}
+	sink := newSchemaCSVSink(querySpecs(types, rates))
 	sink.observe(fileDriver, driverQueryOpen, time.Millisecond, 1)
+	res := legResult{
+		samples: []cellSample{
+			{service: time.Millisecond, scheduled: 2 * time.Millisecond, items: 3},
+			{service: 2 * time.Millisecond, scheduled: 3 * time.Millisecond, items: 3},
+		},
+		lags:       []time.Duration{0, time.Millisecond},
+		wall:       legWall,
+		dispatched: 2,
+	}
 	for _, qtype := range types {
-		for _, w := range concurrency {
-			sink.observe(qtype, queryCellRow(w), time.Millisecond, 3)
-			sink.observe(fileDriver, queryDriverRow(qtype, w), time.Second, 3)
+		for _, rps := range rates {
+			recordLeg(sink, qtype, rps, res)
 		}
 	}
 
@@ -179,6 +208,29 @@ func TestQuerySinkWritesContractRows(t *testing.T) {
 	written, err := sink.writeCSVs(outDir)
 	require.NoError(t, err)
 	require.Len(t, written, 3)
+
+	driver := readCSV(t, filepath.Join(outDir, "driver.csv"))
+	wantMilliRPS := int64(math.Round(float64(len(res.samples)) / legWall.Seconds() * 1000))
+	for _, qtype := range types {
+		rows := readCSV(t, filepath.Join(outDir, qtype+".csv"))
+		for _, rps := range rates {
+			assert.Contains(t, rows, queryTotalRow(rps))
+			assert.Contains(t, rows, queryServiceRow(rps))
+
+			lag := queryDriverLegRow(qtype, rps, driverLegLagSuffix)
+			require.Contains(t, driver, lag, "a zero dispatch lag is a real observation")
+			assert.EqualValues(t, 2, driver[lag]["n"], "%s keeps its zero-lag sample", lag)
+
+			shed := queryDriverLegRow(qtype, rps, driverLegShedSuffix)
+			require.Contains(t, driver, shed, "a leg that shed nothing still reports a shed row")
+			assert.EqualValues(t, 0, driver[shed]["n_items"])
+
+			millirps := queryDriverLegRow(qtype, rps, driverLegRPSSuffix)
+			require.Contains(t, driver, millirps)
+			assert.Equal(t, wantMilliRPS, driver[millirps]["total_ns"])
+			assert.EqualValues(t, len(res.samples), driver[millirps]["n_items"])
+		}
+	}
 
 	for _, f := range sink.files() {
 		names := make([]string, len(f.rows))
@@ -188,10 +240,15 @@ func TestQuerySinkWritesContractRows(t *testing.T) {
 		switch f.name {
 		case fileDriver:
 			require.Equal(t, []string{
-				"open", "ledgers_c1", "ledgers_c4", "txhash_c1", "txhash_c4",
+				"open",
+				"ledgers_r1", "ledgers_r1_millirps", "ledgers_r1_lag", "ledgers_r1_shed",
+				"ledgers_r4", "ledgers_r4_millirps", "ledgers_r4_lag", "ledgers_r4_shed",
+				"txhash_r1", "txhash_r1_millirps", "txhash_r1_lag", "txhash_r1_shed",
+				"txhash_r4", "txhash_r4_millirps", "txhash_r4_lag", "txhash_r4_shed",
 			}, names)
 		default:
-			require.Equal(t, []string{"total_c1", "total_c4"}, names, "file %s", f.name)
+			require.Equal(t, []string{"total_r1", "total_r4", "service_r1", "service_r4"},
+				names, "file %s", f.name)
 		}
 	}
 }
@@ -265,15 +322,16 @@ func TestOpenColdFixtureServesFrozenChunks(t *testing.T) {
 // directly.
 func testRNG() *rand.Rand { return rand.New(rand.NewPCG(defaultSeed, defaultSeed)) }
 
-// testQueryPlan is the sweep the end-to-end tests run: every type, two
-// concurrency levels, few enough iterations to stay quick. The spans are small
-// because the fixture chunk is synthetic, and the miss fraction is high enough
-// that a short cell reliably produces both a found and a not-found lookup.
-func testQueryPlan(iters int) queryPlan {
+// testQueryPlan is the run the end-to-end tests drive: every type at two rates,
+// over legs short enough to stay quick and fast enough that each still measures
+// tens of requests (10 at 50 rps, 40 at 200 rps). The spans are small because
+// the fixture chunk is synthetic, and the miss fraction is high enough that a
+// short leg reliably produces both a found and a not-found lookup.
+func testQueryPlan() queryPlan {
 	return queryPlan{
 		Types:        allQueryTypes,
-		Concurrency:  []int{1, 2},
-		Iters:        iters,
+		TargetRPS:    []float64{50, 200},
+		Duration:     200 * time.Millisecond,
 		LedgersSpan:  4,
 		TxPageSpan:   2,
 		TxPageLimit:  10,
@@ -284,18 +342,16 @@ func testQueryPlan(iters int) queryPlan {
 	}
 }
 
-// TestRunQueryCold is the cold end-to-end: ingest a chunk, then sweep every
-// query type over its frozen artifacts and check the report the results
-// converter will read — one CSV per type carrying a total_c<W> row per
-// concurrency level, and driver.csv carrying the matching cell walls plus the
-// setup rows.
+// TestRunQueryCold is the cold end-to-end: ingest a chunk, then run every query
+// type over its frozen artifacts and check the report the results converter
+// will read — one CSV per type carrying a total_r<rate> row per leg, and
+// driver.csv carrying the matching leg walls plus the setup rows.
 func TestRunQueryCold(t *testing.T) {
-	const iters = 5
 	chunkID := chunk.ID(0)
 	coldRoot := ingestColdChunk(t, chunkID)
 
 	csvDir := filepath.Join(t.TempDir(), "csv")
-	plan := testQueryPlan(iters)
+	plan := testQueryPlan()
 	plan.Evict = true
 	require.NoError(t, runQueryCold(context.Background(), testLogger(), coldQueryOptions{
 		ColdRoot:   coldRoot,
@@ -305,29 +361,26 @@ func TestRunQueryCold(t *testing.T) {
 		OutDir:     csvDir,
 	}))
 
-	assertQueryReport(t, csvDir, plan, iters)
+	assertQueryReport(t, csvDir, plan)
 
 	driver := readCSV(t, filepath.Join(csvDir, "driver.csv"))
 	require.Contains(t, driver, "open")
 	assert.EqualValues(t, 1, driver["open"]["n_items"], "one chunk opened")
-	// One eviction pass runs per cell, but the sink drops zero-duration samples
+	// One eviction pass runs per leg, but the sink drops zero-duration samples
 	// and off Linux the pass is a no-op that finishes inside a timer tick — so
 	// the row's presence and the artifacts it named are what can be asserted
 	// everywhere, not the sample count.
-	require.Contains(t, driver, "evict", "a cold cell evicts before it measures")
-	assert.LessOrEqual(t, driver["evict"]["n"], int64(len(plan.Types)*len(plan.Concurrency)),
-		"at most one eviction pass per cell")
+	require.Contains(t, driver, "evict", "a cold leg evicts before it measures")
+	assert.LessOrEqual(t, driver["evict"]["n"], int64(len(plan.Types)*len(plan.TargetRPS)),
+		"at most one eviction pass per leg")
 	assert.Positive(t, driver["evict"]["n_items"], "the eviction pass named some artifacts")
 }
 
 // TestRunQueryHot is the hot end-to-end: ingest a chunk into a hot database,
-// then sweep every query type against it. It also covers the warmup pass, which
-// only the hot tier runs.
+// then run every query type against it. It also covers the warmup requests,
+// which only the hot tier dispatches.
 func TestRunQueryHot(t *testing.T) {
-	const (
-		ingested = 400
-		iters    = 5
-	)
+	const ingested = 400
 	chunkID := chunk.ID(0)
 	packDir, _ := writeSourcePack(t, t.TempDir(), chunkID, ingested)
 	hotRoot := t.TempDir()
@@ -341,7 +394,7 @@ func TestRunQueryHot(t *testing.T) {
 	}))
 
 	csvDir := filepath.Join(t.TempDir(), "csv")
-	plan := testQueryPlan(iters)
+	plan := testQueryPlan()
 	plan.Warmup = 2
 	require.NoError(t, runQueryHot(context.Background(), testLogger(), hotQueryOptions{
 		HotRoot: hotRoot,
@@ -350,44 +403,73 @@ func TestRunQueryHot(t *testing.T) {
 		OutDir:  csvDir,
 	}))
 
-	assertQueryReport(t, csvDir, plan, iters)
+	assertQueryReport(t, csvDir, plan)
 
 	driver := readCSV(t, filepath.Join(csvDir, "driver.csv"))
 	assert.NotContains(t, driver, "evict", "a hot run has no page-cache artifacts to evict")
 }
 
 // assertQueryReport checks a finished run's CSVs against the converter's
-// contract: every swept cell present, its sample count exactly what the sweep
-// promised (workers × iters), and every cell wall recorded in driver.csv. It
-// also checks txhash's found/miss rows partition the blended row, which is the
-// property that lets the split be reported without touching the cell the
-// converter reads.
-func assertQueryReport(t *testing.T, csvDir string, plan queryPlan, iters int) {
+// contract: every leg present, its sample count exactly the number of requests
+// the leg scheduled, and every leg's wall and driver metrics recorded in
+// driver.csv. It also checks txhash's found/miss rows partition the blended
+// row, which is the property that lets the split be reported without touching
+// the row the converter reads.
+func assertQueryReport(t *testing.T, csvDir string, plan queryPlan) {
 	t.Helper()
 	driver := readCSV(t, filepath.Join(csvDir, "driver.csv"))
 
 	for _, qtype := range plan.Types {
 		rows := readCSV(t, filepath.Join(csvDir, qtype+".csv"))
-		for _, w := range plan.Concurrency {
-			cell := queryCellRow(w)
-			require.Contains(t, rows, cell, "%s is missing its c%d cell", qtype, w)
-			assert.EqualValues(t, w*iters, rows[cell]["n"],
-				"%s c%d must hold one sample per request", qtype, w)
+		for _, rps := range plan.TargetRPS {
+			measured := int64(measuredRequests(rps, plan.Duration))
+			total := queryTotalRow(rps)
+			require.Contains(t, rows, total, "%s is missing its %s leg", qtype, formatRPS(rps))
+			assert.Equal(t, measured, rows[total]["n"],
+				"%s at %s rps must hold one sample per request", qtype, formatRPS(rps))
 
-			wall := queryDriverRow(qtype, w)
-			require.Contains(t, driver, wall, "driver.csv is missing %s", wall)
-			assert.Positive(t, driver[wall]["total_ns"], "%s took no time", wall)
+			service := queryServiceRow(rps)
+			require.Contains(t, rows, service, "%s is missing %s", qtype, service)
+			assert.Equal(t, measured, rows[service]["n"])
+
+			assertLegDriverRows(t, driver, qtype, rps, measured)
 		}
 		if qtype != queryTypeTxHash {
 			continue
 		}
-		for _, w := range plan.Concurrency {
-			found := rows[txHashStageFound+"_c"+strconv.Itoa(w)]
-			miss := rows[txHashStageMiss+"_c"+strconv.Itoa(w)]
-			assert.Equal(t, rows[queryCellRow(w)]["n"], found["n"]+miss["n"],
-				"txhash c%d: the found and miss rows must partition the blended row", w)
+		for _, rps := range plan.TargetRPS {
+			found := rows[queryStageRow(txHashStageFound, rps)]
+			miss := rows[queryStageRow(txHashStageMiss, rps)]
+			assert.Equal(t, rows[queryTotalRow(rps)]["n"], found["n"]+miss["n"],
+				"txhash at %s rps: the found and miss rows must partition the blended row", formatRPS(rps))
 		}
 	}
+}
+
+// assertLegDriverRows checks the four driver rows one leg writes: its wall, its
+// achieved rate, its dispatch-lag distribution (one sample per dispatched
+// request, zeros kept), and its shed count, which a leg the fixture kept up
+// with reports as zero.
+func assertLegDriverRows(
+	t *testing.T, driver map[string]map[string]int64, qtype string, rps float64, measured int64,
+) {
+	t.Helper()
+	wall := queryDriverRow(qtype, rps)
+	require.Contains(t, driver, wall, "driver.csv is missing %s", wall)
+	assert.Positive(t, driver[wall]["total_ns"], "%s took no time", wall)
+
+	millirps := queryDriverLegRow(qtype, rps, driverLegRPSSuffix)
+	require.Contains(t, driver, millirps, "driver.csv is missing %s", millirps)
+	assert.Positive(t, driver[millirps]["total_ns"], "%s served nothing", millirps)
+	assert.Equal(t, driver[wall]["n_items"], driver[millirps]["n_items"])
+
+	lag := queryDriverLegRow(qtype, rps, driverLegLagSuffix)
+	require.Contains(t, driver, lag, "driver.csv is missing %s", lag)
+	assert.Equal(t, measured, driver[lag]["n"], "%s holds one sample per dispatch", lag)
+
+	shed := queryDriverLegRow(qtype, rps, driverLegShedSuffix)
+	require.Contains(t, driver, shed, "driver.csv is missing %s", shed)
+	assert.EqualValues(t, 0, driver[shed]["n_items"], "%s: the fixture kept up", shed)
 }
 
 // ingestColdChunk runs bench-ingest cold over a synthetic pack and returns the
@@ -415,7 +497,7 @@ func TestQueryRejectsWrongPassphrase(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldRoot := ingestColdChunk(t, chunkID)
 
-	plan := testQueryPlan(2)
+	plan := testQueryPlan()
 	plan.Types = []string{queryTypeTxHash}
 	plan.Passphrase = network.TestNetworkPassphrase
 	err := runQueryCold(context.Background(), testLogger(), coldQueryOptions{

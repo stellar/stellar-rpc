@@ -15,17 +15,14 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
-// Defaults for the hot sweep. Hot queries are the fast tier, so more of them
-// fit in the same leg budget, and each cell warms the store's caches first —
-// the hot tier's steady state is warm.
-const (
-	defaultHotIters  = 200
-	defaultHotWarmup = 20
-)
+// defaultHotWarmup is --warmup's default: the unmeasured requests a hot leg
+// dispatches at its rate before it starts measuring. The hot tier's steady
+// state is a warm cache, so a hot leg warms one first.
+const defaultHotWarmup = 20
 
 func newQueryHotCommand() *cobra.Command {
 	var (
-		qf   = queryFlags{iters: defaultHotIters, warmup: defaultHotWarmup, warmupBound: true}
+		qf   = queryFlags{warmup: defaultHotWarmup, warmupBound: true}
 		prof profileFlags
 
 		chunkID       uint32
@@ -76,7 +73,7 @@ type hotQueryOptions struct {
 	// so the corpora stay inside what was ingested.
 	SampleLedgers uint32
 
-	// Plan is the validated --types × --query-concurrency sweep.
+	// Plan is the validated --types × --target-rps ladder.
 	Plan queryPlan
 
 	// OutDir receives the CSV report.
