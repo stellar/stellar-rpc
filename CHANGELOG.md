@@ -2,7 +2,10 @@
 
 ## Unreleased
 
+## [v28.0.1](https://github.com/stellar/stellar-rpc/compare/v28.0.0...v28.0.1)
+
 ### Fixed
+* Integration tests and docker images now use the stellar-core 28.0.1 stable release (`28.0.1-3508.947aad841`).
 * Bumped dependencies to latest versions, including `grpc`, `go-jose` and `opentelemetry` ([#958](https://github.com/stellar/stellar-rpc/pull/958)).
 
 ## [v28.0.0](https://github.com/stellar/stellar-rpc/compare/v27.1.1...v28.0.0)
