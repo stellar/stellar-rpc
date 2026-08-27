@@ -92,6 +92,14 @@ func (l ledgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.Led
 	return getLedgerFromDB(ctx, l.tx, sequence)
 }
 
+func (l ledgerReaderTx) GetLedgerView(ctx context.Context, sequence uint32) (xdr.LedgerCloseMetaView, bool, error) {
+	meta, found, err := getLedgerRawFromDB(ctx, l.tx, sequence)
+	if err != nil || !found {
+		return nil, found, err
+	}
+	return xdr.LedgerCloseMetaView(meta), true, nil
+}
+
 func (l ledgerReaderTx) Done() error {
 	return l.tx.Rollback()
 }
