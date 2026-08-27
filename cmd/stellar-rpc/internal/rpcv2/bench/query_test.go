@@ -46,7 +46,8 @@ func TestNewQueryCommand(t *testing.T) {
 // verbatim and in its own order, through both subcommands. The runner is the
 // only caller in the campaign, so this argv IS the flag surface's contract: a
 // renamed flag, a dropped one, or a value format the flag cannot parse breaks a
-// campaign leg, not a local invocation.
+// campaign leg, not a local invocation. It also pins which tier binds --warmup,
+// since the runner passes it to the hot subcommand alone.
 func TestQueryCommandAcceptsRunnerArgv(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -90,7 +91,7 @@ func TestQueryCommandAcceptsRunnerArgv(t *testing.T) {
 			require.NoError(t, err)
 			parsed, err := parseQueryTypes(types)
 			require.NoError(t, err)
-			require.Equal(t, allQueryTypes, parsed, "the runner sweeps every query type")
+			require.Equal(t, allQueryTypes, parsed, "the runner runs every query type")
 
 			targetRPS, err := sub.Flags().GetString("target-rps")
 			require.NoError(t, err)
@@ -101,6 +102,13 @@ func TestQueryCommandAcceptsRunnerArgv(t *testing.T) {
 			duration, err := sub.Flags().GetDuration("duration")
 			require.NoError(t, err)
 			require.Equal(t, 5*time.Second, duration)
+
+			warmup := sub.Flags().Lookup("warmup")
+			if tc.argv[0] == "cold" {
+				assert.Nil(t, warmup, "a cold leg evicts before it measures rather than warming")
+			} else {
+				assert.NotNil(t, warmup, "a hot leg warms the store's caches first")
+			}
 		})
 	}
 }
@@ -123,7 +131,7 @@ func TestParseTargetRPS(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []float64{2, 0.5, 1}, got, "the caller's order is kept")
 
-	for _, bad := range []string{"", "1,", "0", "-1", "1,1", "four", "NaN", "Inf"} {
+	for _, bad := range []string{"", "1,", "0", "-1", "1,1", "four", "NaN", "Inf", "1e7"} {
 		_, err := parseTargetRPS(bad)
 		require.Error(t, err, "--target-rps=%q must be rejected", bad)
 	}
@@ -182,9 +190,14 @@ func TestQuerySpecsTxHashStages(t *testing.T) {
 // TestQuerySinkWritesContractRows records one leg per type per rate and checks
 // the written CSVs carry the converter's row names — including the _lag and
 // _shed rows, whose samples are zero durations the ordinary filter would drop —
-// and that the _millirps row carries the leg's achieved rate times 1000.
+// and that the _millirps row carries the leg's achieved rate times 1000, which
+// is the answered requests over the window the leg offered rather than over its
+// drain-inclusive wall.
 func TestQuerySinkWritesContractRows(t *testing.T) {
-	const legWall = 2 * time.Second
+	const (
+		legWall    = 2 * time.Second
+		legOffered = 4 * time.Second
+	)
 	types := []string{queryTypeLedgers, queryTypeTxHash}
 	rates := []float64{1, 4}
 	sink := newSchemaCSVSink(querySpecs(types, rates))
@@ -195,6 +208,7 @@ func TestQuerySinkWritesContractRows(t *testing.T) {
 			{service: 2 * time.Millisecond, scheduled: 3 * time.Millisecond, items: 3},
 		},
 		lags:       []time.Duration{0, time.Millisecond},
+		offered:    legOffered,
 		wall:       legWall,
 		dispatched: 2,
 	}
@@ -210,7 +224,7 @@ func TestQuerySinkWritesContractRows(t *testing.T) {
 	require.Len(t, written, 3)
 
 	driver := readCSV(t, filepath.Join(outDir, "driver.csv"))
-	wantMilliRPS := int64(math.Round(float64(len(res.samples)) / legWall.Seconds() * 1000))
+	wantMilliRPS := int64(math.Round(float64(len(res.samples)) / legOffered.Seconds() * 1000))
 	for _, qtype := range types {
 		rows := readCSV(t, filepath.Join(outDir, qtype+".csv"))
 		for _, rps := range rates {
@@ -251,6 +265,44 @@ func TestQuerySinkWritesContractRows(t *testing.T) {
 				names, "file %s", f.name)
 		}
 	}
+}
+
+// TestRecordLegAllShed pins what a leg that answered nothing reports: its shed
+// count, a zero achieved rate rather than a missing row, and a dispatch lag per
+// measured position. Its own CSV is not written, because a leg with no request
+// to time has no latency distribution.
+func TestRecordLegAllShed(t *testing.T) {
+	const (
+		rps       = 4.0
+		shedLag   = 10 * time.Millisecond
+		shedCount = 5
+	)
+	sink := newSchemaCSVSink(querySpecs([]string{queryTypeLedgers}, []float64{rps}))
+	lags := make([]time.Duration, shedCount)
+	for i := range lags {
+		lags[i] = shedLag
+	}
+	recordLeg(sink, queryTypeLedgers, rps, legResult{lags: lags, shed: shedCount, offered: time.Second})
+
+	outDir := t.TempDir()
+	written, err := sink.writeCSVs(outDir)
+	require.NoError(t, err)
+	require.Len(t, written, 1, "only driver.csv is written")
+
+	driver := readCSV(t, filepath.Join(outDir, "driver.csv"))
+	shed := queryDriverLegRow(queryTypeLedgers, rps, driverLegShedSuffix)
+	require.Contains(t, driver, shed)
+	assert.EqualValues(t, shedCount, driver[shed]["n_items"])
+
+	millirps := queryDriverLegRow(queryTypeLedgers, rps, driverLegRPSSuffix)
+	require.Contains(t, driver, millirps, "a leg that answered nothing still reports its rate")
+	assert.EqualValues(t, 0, driver[millirps]["total_ns"])
+
+	lag := queryDriverLegRow(queryTypeLedgers, rps, driverLegLagSuffix)
+	require.Contains(t, driver, lag)
+	assert.EqualValues(t, shedCount, driver[lag]["n"], "a shed position is charged a lag")
+
+	assert.NoFileExists(t, filepath.Join(outDir, queryTypeLedgers+".csv"))
 }
 
 // TestOpenColdFixtureServesFrozenChunks runs bench-ingest cold to produce a real
@@ -447,9 +499,9 @@ func assertQueryReport(t *testing.T, csvDir string, plan queryPlan) {
 }
 
 // assertLegDriverRows checks the four driver rows one leg writes: its wall, its
-// achieved rate, its dispatch-lag distribution (one sample per dispatched
-// request, zeros kept), and its shed count, which a leg the fixture kept up
-// with reports as zero.
+// achieved rate, its dispatch-lag distribution (one sample per measured
+// position, shed positions included, zeros kept), and its shed count, which a
+// leg the fixture kept up with reports as zero.
 func assertLegDriverRows(
 	t *testing.T, driver map[string]map[string]int64, qtype string, rps float64, measured int64,
 ) {
@@ -465,7 +517,7 @@ func assertLegDriverRows(
 
 	lag := queryDriverLegRow(qtype, rps, driverLegLagSuffix)
 	require.Contains(t, driver, lag, "driver.csv is missing %s", lag)
-	assert.Equal(t, measured, driver[lag]["n"], "%s holds one sample per dispatch", lag)
+	assert.Equal(t, measured, driver[lag]["n"], "%s holds one sample per measured position", lag)
 
 	shed := queryDriverLegRow(qtype, rps, driverLegShedSuffix)
 	require.Contains(t, driver, shed, "driver.csv is missing %s", shed)

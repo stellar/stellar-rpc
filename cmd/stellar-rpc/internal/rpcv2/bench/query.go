@@ -122,6 +122,16 @@ const (
 	defaultTargetRPS   = "10"
 )
 
+// maxTargetRPS is the highest arrival rate --target-rps accepts. Above it a leg
+// schedules more arrivals than one dispatch loop can issue, so the leg would
+// report the loop's own speed rather than the store's.
+const maxTargetRPS = 1_000_000
+
+// minLegSamples is the number of measured requests below which a leg's
+// percentiles are reported with a warning: a p99 over fewer samples than this
+// is one or two requests wide.
+const minLegSamples = 100
+
 // queryFlags is the flag set both bench-query subcommands share, beyond the
 // --out and profiling flags newBenchCommand binds. The spellings and value
 // formats of --types, --target-rps, --duration, and --warmup are the campaign
@@ -263,8 +273,8 @@ func parseQueryTypes(s string) ([]string, error) {
 
 // parseTargetRPS splits --target-rps into the arrival rates to run, keeping the
 // caller's order and rejecting an empty list, an empty entry, a non-number, a
-// rate that is not positive and finite, or a repeat (a repeated rate would
-// collide on its CSV rows).
+// rate that is not positive and finite, a rate above maxTargetRPS, or a repeat
+// (a repeated rate would collide on its CSV rows).
 func parseTargetRPS(s string) ([]float64, error) {
 	fields := strings.Split(s, ",")
 	rates := make([]float64, 0, len(fields))
@@ -279,6 +289,9 @@ func parseTargetRPS(s string) ([]float64, error) {
 		}
 		if rps <= 0 || math.IsNaN(rps) || math.IsInf(rps, 0) {
 			return nil, fmt.Errorf("--target-rps rates must be > 0, got %v", rps)
+		}
+		if rps > maxTargetRPS {
+			return nil, fmt.Errorf("--target-rps rates must be <= %v, got %v", float64(maxTargetRPS), rps)
 		}
 		if slices.Contains(rates, rps) {
 			return nil, fmt.Errorf("--target-rps repeats %v", rps)
@@ -411,8 +424,14 @@ func runQueryLeg(
 		}
 		sink.observe(fileDriver, driverQueryEvict, time.Since(start), evicted)
 	}
+	measured := measuredRequests(rps, p.Duration)
 	logger.Infof("query %s at %s rps for %s: %d measured requests, %d warmup",
-		qtype, formatRPS(rps), p.Duration, measuredRequests(rps, p.Duration), p.Warmup)
+		qtype, formatRPS(rps), p.Duration, measured, p.Warmup)
+	if measured < minLegSamples {
+		logger.Warnf("query %s at %s rps measures %d requests: its percentiles rest on fewer than "+
+			"%d samples, so a longer --duration makes them steadier",
+			qtype, formatRPS(rps), measured, minLegSamples)
+	}
 
 	res, err := runPacedLeg(ctx, rps, p.Duration, p.Warmup, p.Seed+int64(len(qtype)), req)
 	if err != nil {
@@ -436,12 +455,16 @@ func runQueryLeg(
 // against what a client waited, and txhash's found lookups against its
 // not-found ones, which do different amounts of work.
 //
-// driver.csv gets the leg's four driver rows. <qtype>_r<rate> is the leg wall.
-// The _millirps row's duration columns carry the achieved rate times 1000 as an
-// integer, the way peak_rss_bytes carries bytes. The _lag row holds one sample
-// per dispatched request, so it is the distribution of how far behind schedule
-// the dispatcher ran. The _shed row is written for every leg, so a leg that
-// shed nothing says so with a zero rather than by leaving the row out.
+// driver.csv gets the leg's four driver rows. <qtype>_r<rate> is the leg wall,
+// which runs to the last request's completion and so covers the leg's drain
+// tail. The _millirps row's duration columns carry the achieved rate times 1000
+// as an integer, the way peak_rss_bytes carries bytes; it is the answered
+// requests over the window the leg offered, so the drain tail shows in the
+// latency rows and in the wall row rather than in the rate. The _lag row holds
+// one sample per measured position, shed positions included, so it is the
+// distribution of how far behind schedule the dispatcher ran. The _shed row is
+// written for every leg, so a leg that shed nothing says so with a zero rather
+// than by leaving the row out.
 func recordLeg(sink *csvSink, qtype string, rps float64, res legResult) {
 	total := queryTotalRow(rps)
 	service := queryServiceRow(rps)
@@ -456,7 +479,7 @@ func recordLeg(sink *csvSink, qtype string, rps float64, res legResult) {
 	answered := len(res.samples)
 	sink.observe(fileDriver, queryDriverRow(qtype, rps), res.wall, answered)
 	sink.observe(fileDriver, queryDriverLegRow(qtype, rps, driverLegRPSSuffix),
-		achievedMilliRPS(answered, res.wall), answered)
+		achievedMilliRPS(answered, res.offered), answered)
 	for _, lag := range res.lags {
 		sink.observe(fileDriver, queryDriverLegRow(qtype, rps, driverLegLagSuffix), lag, 1)
 	}
@@ -467,14 +490,15 @@ func recordLeg(sink *csvSink, qtype string, rps float64, res legResult) {
 // fractional rate survives an integer CSV column.
 const milliPerUnit = 1000
 
-// achievedMilliRPS returns the rate answered requests were served at over wall,
-// scaled by milliPerUnit and carried as a duration so it fits the CSV's
-// duration columns. A leg with no wall to divide by reports zero.
-func achievedMilliRPS(answered int, wall time.Duration) time.Duration {
-	if wall <= 0 {
+// achievedMilliRPS returns the rate answered requests were served at over the
+// window the leg offered, scaled by milliPerUnit and carried as a duration so
+// it fits the CSV's duration columns. A leg with no offered window to divide by
+// reports zero.
+func achievedMilliRPS(answered int, offered time.Duration) time.Duration {
+	if offered <= 0 {
 		return 0
 	}
-	return time.Duration(math.Round(float64(answered) / wall.Seconds() * milliPerUnit))
+	return time.Duration(math.Round(float64(answered) / offered.Seconds() * milliPerUnit))
 }
 
 // runQueryBench is the body both bench-query subcommands share: prepare --out,

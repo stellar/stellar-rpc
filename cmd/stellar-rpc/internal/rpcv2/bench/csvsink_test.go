@@ -290,8 +290,8 @@ func TestKeepsZeroSamples(t *testing.T) {
 		"pace_lag":            true,
 		"txhash_r300_lag":     true,
 		"events_r0.5_shed":    true,
+		"ledgers_r1_millirps": true,
 		"ledgers_r1":          false,
-		"ledgers_r1_millirps": false,
 		"open":                false,
 	} {
 		assert.Equal(t, want, keepsZeroSamples(label), "keepsZeroSamples(%q)", label)

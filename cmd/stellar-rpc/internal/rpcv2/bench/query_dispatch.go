@@ -10,10 +10,10 @@ import (
 )
 
 // This file is the query bench's dispatcher: it issues a per-request closure at
-// a fixed arrival rate and collects every request's latency. It is deliberately
-// ignorant of what the requests do — the per-type bodies in query_types.go own
-// that — and it does no I/O of its own, so the only thing between the timer and
-// the store is the query itself.
+// a fixed arrival rate and collects what every request observed. It is
+// deliberately ignorant of what the requests do — the per-type bodies in
+// query_types.go own that — and it does no I/O of its own, so the only thing
+// between the timer and the store is the query itself.
 
 // cellSample is one measured request: how long it took, the number of items the
 // response carried, and the sub-stage it belongs to. An empty stage means the
@@ -58,15 +58,21 @@ const (
 
 // legResult is one paced leg's outcome.
 type legResult struct {
-	// samples holds the measured requests that answered, in completion order.
-	// A request that failed contributes no sample: a latency for a request
-	// that did not answer is not a latency.
+	// samples holds the measured requests that answered. A request that
+	// failed contributes no sample: a latency for a request that did not
+	// answer is not a latency.
 	samples []cellSample
-	// lags holds the dispatch lag of every dispatched measured request in
-	// dispatch order. A zero is a real observation — a dispatch that was on
-	// time — so zeros are kept.
+	// lags holds one dispatch lag per measured position, in schedule order,
+	// shed positions included. A zero is a real observation — a dispatch that
+	// was on time — so zeros are kept, and a shed position's lag shows how far
+	// behind schedule the dispatcher ran while it was shedding.
 	lags []time.Duration
-	// wall spans the first measured due time to the last measured completion.
+	// offered is the span of arrivals the leg offered the store: its measured
+	// positions times the arrival interval. It is the denominator of the
+	// leg's achieved rate.
+	offered time.Duration
+	// wall spans the first measured due time to the last measured completion,
+	// so it includes the tail the leg spent draining its last requests.
 	wall time.Duration
 	// dispatched counts the measured requests that got a slot and ran.
 	dispatched int
@@ -88,13 +94,20 @@ type legCollector struct {
 	errs       int
 }
 
-// recordDispatch notes that a measured request got a slot and started, lag
-// behind its due time.
-func (c *legCollector) recordDispatch(lag time.Duration) {
+// recordLag notes how far behind its due time a measured position was reached.
+// Every measured position is charged one lag, whether its request ran or was
+// shed.
+func (c *legCollector) recordLag(lag time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lags = append(c.lags, lag)
+}
+
+// recordDispatch notes that a measured request got a slot and started.
+func (c *legCollector) recordDispatch() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.dispatched++
-	c.lags = append(c.lags, lag)
 }
 
 // recordShed notes that a measured request was dropped because the in-flight
@@ -151,9 +164,11 @@ func (c *legCollector) result(firstDue time.Time) legResult {
 // the leg keeps its rate whatever the store does with it.
 //
 // Positions 0 to warmup-1 run at the leg's rate and record nothing; the
-// round(rps × duration) positions after them are measured, so a leg's schedule
-// spans exactly duration. Each request runs on its own goroutine with its own
-// RNG, and the in-flight count is capped at maxInFlight.
+// round(rps × duration) positions after them are measured. Their due times run
+// from warmup×interval to (warmup+measured-1)×interval, one interval short of
+// duration, and the leg offers the store measured×interval of arrivals. Each
+// request runs on its own goroutine with its own RNG, and the in-flight count
+// is capped at maxInFlight.
 //
 // The returned error is a context error: it means the leg was cut short and its
 // result is not a measurement. A request that fails is counted in errs and does
@@ -169,31 +184,42 @@ func runPacedLeg(
 	}
 	warmup = max(warmup, 0)
 	measured := measuredRequests(rps, duration)
-	schedule := newPaceSchedule(time.Duration(float64(time.Second)/rps), 0)
+	interval := time.Duration(float64(time.Second) / rps)
+	schedule := newPaceSchedule(interval, 0)
 
 	collector := &legCollector{}
 	slots := make(chan struct{}, maxInFlight)
 	var wg sync.WaitGroup
 	for pos := range warmup + measured {
+		if err := ctx.Err(); err != nil {
+			wg.Wait()
+			return legResult{}, err
+		}
 		due := schedule.dueForPos(pos)
-		if err := contextSleep(ctx, time.Until(due)); err != nil {
+		if err := contextSleep(ctx, due.Sub(schedule.clock())); err != nil {
 			wg.Wait()
 			return legResult{}, err
 		}
 		launchPacedRequest(&wg, slots, collector, req, legRNG(seed, pos, rps), due, pos >= warmup)
 	}
 	wg.Wait()
-	return collector.result(schedule.dueForPos(warmup)), nil
+	res := collector.result(schedule.dueForPos(warmup))
+	res.offered = time.Duration(measured) * interval
+	return res, nil
 }
 
 // launchPacedRequest starts one request of a paced leg on its own goroutine,
 // taking a slot from slots first. With no slot free the request is shed: it is
-// counted and nothing else about it is recorded. A warmup request runs in full
-// and records nothing either way.
+// counted and it runs nothing. A measured position is charged its dispatch lag
+// either way, so the lag distribution covers the whole leg. A warmup request
+// runs in full and records nothing.
 func launchPacedRequest(
 	wg *sync.WaitGroup, slots chan struct{}, collector *legCollector,
 	req queryRequest, rng *rand.Rand, due time.Time, measured bool,
 ) {
+	if measured {
+		collector.recordLag(max(time.Since(due), 0))
+	}
 	select {
 	case slots <- struct{}{}:
 	default:
@@ -203,7 +229,7 @@ func launchPacedRequest(
 		return
 	}
 	if measured {
-		collector.recordDispatch(max(time.Since(due), 0))
+		collector.recordDispatch()
 	}
 	wg.Go(func() {
 		defer func() { <-slots }()
