@@ -16,7 +16,6 @@ import (
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
@@ -72,7 +71,7 @@ func seedView(t *testing.T) (context.Context, uint32) {
 	view, err := r.NewReadView()
 	require.NoError(t, err)
 	t.Cleanup(view.Release)
-	return adapters.WithView(context.Background(), view), first
+	return query.WithView(context.Background(), view), first
 }
 
 // requireErrorData asserts the code and reason, then decodes the data

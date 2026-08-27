@@ -18,7 +18,6 @@ import (
 	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
@@ -76,7 +75,7 @@ func invalidParams(message string) error {
 func getEventsV2(
 	ctx context.Context, limits Limits, req *protocol.GetEventsV2Request,
 ) (protocol.GetEventsV2Response, error) {
-	view, err := adapters.ViewFrom(ctx)
+	view, err := query.ViewFrom(ctx)
 	if err != nil {
 		return protocol.GetEventsV2Response{}, responseError(err, 0, 0)
 	}

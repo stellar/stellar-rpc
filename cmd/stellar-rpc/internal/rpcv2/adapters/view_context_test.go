@@ -71,13 +71,13 @@ func TestViewFrom_ContextWithoutViewIsAnError(t *testing.T) {
 	txReader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 
 	_, err := ledgerReader.GetLatestLedgerSequence(context.Background())
-	assert.ErrorIs(t, err, errNoView)
+	assert.ErrorIs(t, err, query.ErrNoView)
 
 	_, err = ledgerReader.NewTx(context.Background())
-	assert.ErrorIs(t, err, errNoView)
+	assert.ErrorIs(t, err, query.ErrNoView)
 
 	_, err = txReader.GetTransaction(context.Background(), xdr.Hash{1})
-	assert.ErrorIs(t, err, errNoView)
+	assert.ErrorIs(t, err, query.ErrNoView)
 }
 
 func TestWithView_TxDoneLeavesTheRequestViewAlive(t *testing.T) {

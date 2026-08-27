@@ -13,7 +13,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/eventsapi"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
@@ -157,7 +156,7 @@ func wrapAdapterRequest(h jrpc2.Handler, registry *query.Registry) jrpc2.Handler
 		// limiter recovers panics above this frame and keeps the process
 		// serving, so a skipped release would orphan the RocksDB snapshot.
 		defer view.Release()
-		return h(adapters.WithView(ctx, view), req)
+		return h(query.WithView(ctx, view), req)
 	}
 }
 
