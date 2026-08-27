@@ -19,6 +19,9 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 )
 
+// testOldest is the retention floor the scope conversions run against.
+const testOldest = uint32(100)
+
 func testContractRaw(b byte) []byte { return bytes.Repeat([]byte{b}, 32) }
 
 func testContractStrkey(t *testing.T, b byte) string {
@@ -97,7 +100,7 @@ func TestEventScopeBounds(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			require.NoError(t, tc.req.Valid(protocol.DefaultMaxFiltersV2))
 
-			got, err := eventScope(&tc.req, latest)
+			got, err := eventScope(&tc.req, testOldest, latest)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
 		})
@@ -106,17 +109,31 @@ func TestEventScopeBounds(t *testing.T) {
 
 // Valid admits a descending minLedger above latest when max is absent. The
 // inverted scope is deliberate: the pager owns that rejection.
+// Defaulting the max would invert the scope here, so the request is out of
+// range instead. It serves once the chain reaches minLedger.
 func TestEventScopeDescendingMinAboveLatest(t *testing.T) {
 	req := protocol.GetEventsV2Request{MinLedger: 5001, Order: protocol.OrderDescending}
 	require.NoError(t, req.Valid(protocol.DefaultMaxFiltersV2))
 
-	scope, err := eventScope(&req, 5000)
+	_, err := eventScope(&req, testOldest, 5000)
+	var outOfRange *query.RangeError
+	require.ErrorAs(t, err, &outOfRange)
+	assert.Equal(t, uint32(5001), outOfRange.Requested)
+	assert.Equal(t, uint32(5000), outOfRange.Latest)
+	assert.Equal(t, testOldest, outOfRange.Oldest)
+}
+
+// An explicit max above the tip is legal: the scan waits for those ledgers.
+func TestEventScopeDescendingExplicitMaxAboveLatest(t *testing.T) {
+	req := protocol.GetEventsV2Request{
+		MinLedger: 5001, MaxLedger: 6000, Order: protocol.OrderDescending,
+	}
+	require.NoError(t, req.Valid(protocol.DefaultMaxFiltersV2))
+
+	scope, err := eventScope(&req, testOldest, 5000)
 	require.NoError(t, err)
 	require.NotNil(t, scope.MaxLedger)
-	assert.Greater(t, scope.MinLedger, *scope.MaxLedger)
-
-	_, err = (&query.ReadView{}).QueryEvents(t.Context(), query.EventCursor{Scope: scope}, 10)
-	assert.ErrorIs(t, err, query.ErrInvertedRange)
+	assert.Equal(t, uint32(6000), *scope.MaxLedger)
 }
 
 func TestEventScopeFilters(t *testing.T) {
@@ -132,7 +149,7 @@ func TestEventScopeFilters(t *testing.T) {
 	}
 	require.NoError(t, req.Valid(protocol.DefaultMaxFiltersV2))
 
-	scope, err := eventScope(&req, 9000)
+	scope, err := eventScope(&req, testOldest, 9000)
 	require.NoError(t, err)
 	require.Len(t, scope.Filters, 2)
 
@@ -160,7 +177,7 @@ func TestEventScopeFilterErrorNamesIndex(t *testing.T) {
 		},
 	}
 
-	_, err := eventScope(&req, 9000)
+	_, err := eventScope(&req, testOldest, 9000)
 	require.ErrorIs(t, err, errJSONInputFormatUnsupported)
 	assert.Contains(t, err.Error(), "filters[1]")
 }

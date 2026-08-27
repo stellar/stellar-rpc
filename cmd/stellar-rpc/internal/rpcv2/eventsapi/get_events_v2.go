@@ -62,7 +62,7 @@ func serve(
 	ctx context.Context, view *query.ReadView, limits Limits,
 	req *protocol.GetEventsV2Request, oldest, latest uint32,
 ) (protocol.GetEventsV2Response, error) {
-	cursor, limit, err := requestCursor(limits, req, latest)
+	cursor, limit, err := requestCursor(limits, req, oldest, latest)
 	if err != nil {
 		return protocol.GetEventsV2Response{}, err
 	}
@@ -81,7 +81,7 @@ func serve(
 // requestCursor turns either request shape into the cursor the pager
 // advances, plus the limit to advance it by.
 func requestCursor(
-	limits Limits, req *protocol.GetEventsV2Request, latest uint32,
+	limits Limits, req *protocol.GetEventsV2Request, oldest, latest uint32,
 ) (query.EventCursor, int, error) {
 	// Check the operator's limit first. req.Valid checks
 	// protocol.MaxLimitV2, and whichever check runs first is the number
@@ -110,7 +110,7 @@ func requestCursor(
 		}
 		return *cursor, pageLimit, nil
 	}
-	scope, err := eventScope(req, latest)
+	scope, err := eventScope(req, oldest, latest)
 	if err != nil {
 		return query.EventCursor{}, 0, err
 	}
@@ -143,7 +143,7 @@ func response(
 	resp := protocol.GetEventsV2Response{
 		Events:        make([]protocol.EventInfoV2, 0, len(page.Events)),
 		ScanStatus:    responseScanStatus(page.Status),
-		ScannedLedger: page.Next.ScannedLedger,
+		ScannedLedger: responseScannedLedger(&page.Next),
 		OldestLedger:  oldest,
 		LatestLedger:  latest,
 	}
@@ -162,6 +162,23 @@ func response(
 		resp.Cursor = token
 	}
 	return resp, nil
+}
+
+// responseScannedLedger translates the cursor's watermark for the wire. A
+// cursor uses 0 to mean "nothing covered yet". On the wire that 0 would
+// claim the whole range, so report the ledger just outside it instead.
+func responseScannedLedger(next *query.EventCursor) uint32 {
+	if next.ScannedLedger != 0 {
+		return next.ScannedLedger
+	}
+	if next.Scope.Dir == query.Descending {
+		// Saturate, so a scope topped at MaxUint32 cannot wrap to 0.
+		if *next.Scope.MaxLedger == math.MaxUint32 {
+			return math.MaxUint32
+		}
+		return *next.Scope.MaxLedger + 1
+	}
+	return next.Scope.MinLedger - 1
 }
 
 // responseError maps the pager's and the SDK's errors onto the three
@@ -223,7 +240,7 @@ var errJSONInputFormatUnsupported = errors.New(
 // An absent ascending maxLedger stays nil, the open bound. A descending one
 // is pinned to latest, so every page of the session shares one top edge.
 func eventScope(
-	req *protocol.GetEventsV2Request, latest uint32,
+	req *protocol.GetEventsV2Request, oldest, latest uint32,
 ) (query.EventScope, error) {
 	// A below-genesis minLedger is raised, not rejected. The floor rules
 	// then decide the outcome: ledger_out_of_range ascending,
@@ -232,6 +249,13 @@ func eventScope(
 	scope := query.EventScope{MinLedger: max(req.MinLedger, chunk.FirstLedgerSeq)}
 	if req.Order == protocol.OrderDescending {
 		scope.Dir = query.Descending
+		// With no max from the client, a minLedger past the tip is out of
+		// range.
+		if req.MaxLedger == 0 && req.MinLedger > latest {
+			return query.EventScope{}, &query.RangeError{
+				Requested: req.MinLedger, Oldest: oldest, Latest: latest,
+			}
+		}
 		maxLedger := req.MaxLedger
 		if maxLedger == 0 {
 			maxLedger = latest

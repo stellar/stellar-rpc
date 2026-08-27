@@ -117,6 +117,36 @@ func TestGetEventsV2_AscendingPagesToComplete(t *testing.T) {
 	assert.NotEmpty(t, page2.Cursor)
 }
 
+// A page that covers no whole ledger reports the ledger just outside the
+// range, not the cursor's 0. Descending, 0 would claim the whole range.
+func TestGetEventsV2_ScannedLedgerOnAPageThatCoveredNothing(t *testing.T) {
+	t.Run("ascending", func(t *testing.T) {
+		ctx, first := seedView(t)
+		one := uint(1)
+		resp, err := getEventsV2(ctx, testLimits(), &protocol.GetEventsV2Request{
+			MinLedger: first,
+			Limit:     &one,
+		})
+		require.NoError(t, err)
+		require.Len(t, resp.Events, 1, "the page fills inside the first ledger")
+		assert.Equal(t, first-1, resp.ScannedLedger)
+	})
+
+	t.Run("descending", func(t *testing.T) {
+		ctx, first := seedView(t)
+		one := uint(1)
+		resp, err := getEventsV2(ctx, testLimits(), &protocol.GetEventsV2Request{
+			MinLedger: first,
+			MaxLedger: first,
+			Order:     protocol.OrderDescending,
+			Limit:     &one,
+		})
+		require.NoError(t, err)
+		require.Len(t, resp.Events, 1, "the page fills inside the top ledger")
+		assert.Equal(t, first+1, resp.ScannedLedger)
+	})
+}
+
 func TestGetEventsV2_ClosedRangeCompletesWithoutCursor(t *testing.T) {
 	ctx, first := seedView(t)
 
@@ -189,7 +219,7 @@ func TestGetEventsV2_TermBudgetRejectsBothRequestShapes(t *testing.T) {
 		scope, err := eventScope(&protocol.GetEventsV2Request{
 			MinLedger: first,
 			Filters:   filters,
-		}, first+2)
+		}, testOldest, first+2)
 		require.NoError(t, err)
 		token, err := (&query.EventCursor{Scope: scope}).Encode()
 		require.NoError(t, err)
