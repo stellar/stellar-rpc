@@ -232,6 +232,17 @@ func TestGetEventsV2_TermBudgetRejectsBothRequestShapes(t *testing.T) {
 	})
 }
 
+// Only a forged cursor can carry an inverted scope. Checked on the mapping,
+// because the codec refuses to encode one.
+func TestResponseErrorInvertedRangeIsCursorMalformed(t *testing.T) {
+	err := responseError(fmt.Errorf("%w: [3, 2]", query.ErrInvertedRange), 2, 9)
+
+	var data protocol.CursorMalformedErrorData
+	requireErrorData(t, err, protocol.ErrorReasonCursorMalformed, &data)
+	assert.Equal(t, uint32(2), data.OldestLedger)
+	assert.Equal(t, uint32(9), data.LatestLedger)
+}
+
 func TestGetEventsV2_MalformedCursorReportsTheServedRange(t *testing.T) {
 	ctx, first := seedView(t)
 

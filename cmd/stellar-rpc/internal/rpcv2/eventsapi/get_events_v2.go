@@ -230,13 +230,13 @@ func responseError(err error, oldest, latest uint32) error {
 	switch {
 	case errors.Is(err, query.ErrCursorMalformed),
 		errors.Is(err, query.ErrCursorUnknownVersion),
-		errors.Is(err, query.ErrPositionMismatch):
+		errors.Is(err, query.ErrPositionMismatch),
+		errors.Is(err, query.ErrInvertedRange):
 		return jrpcError(err.Error(), protocol.CursorMalformedErrorData{
 			OldestLedger: oldest,
 			LatestLedger: latest,
 		})
-	case errors.Is(err, query.ErrInvertedRange),
-		errors.Is(err, query.ErrInvalidLimit),
+	case errors.Is(err, query.ErrInvalidLimit),
 		errors.Is(err, errJSONInputFormatUnsupported):
 		return jrpcError(err.Error(), protocol.InvalidParamsErrorData{
 			Reason: protocol.ErrorReasonInvalidParams,
@@ -272,27 +272,25 @@ var errJSONInputFormatUnsupported = errors.New(
 func eventScope(
 	req *protocol.GetEventsV2Request, oldest, latest uint32,
 ) (query.EventScope, error) {
-	// A below-genesis minLedger is raised, not rejected. The floor rules
-	// then decide the outcome: ledger_out_of_range ascending,
-	// OLDEST_REACHED descending. Only a forged cursor now trips the
-	// pager's own below-genesis check.
+	// Below-genesis bounds are raised, not rejected, and the floor rules
+	// decide the outcome. Raising both keeps min <= max.
 	scope := query.EventScope{MinLedger: max(req.MinLedger, chunk.FirstLedgerSeq)}
 	if req.Order == protocol.OrderDescending {
 		scope.Dir = query.Descending
-		// With no max from the client, a minLedger past the tip is out of
+		// With no max from the client, a low edge past the tip is out of
 		// range.
-		if req.MaxLedger == 0 && req.MinLedger > latest {
+		if req.MaxLedger == 0 && scope.MinLedger > latest {
 			return query.EventScope{}, &query.RangeError{
-				Requested: req.MinLedger, Oldest: oldest, Latest: latest,
+				Requested: scope.MinLedger, Oldest: oldest, Latest: latest,
 			}
 		}
-		maxLedger := req.MaxLedger
-		if maxLedger == 0 {
-			maxLedger = latest
+		maxLedger := latest
+		if req.MaxLedger != 0 {
+			maxLedger = max(req.MaxLedger, chunk.FirstLedgerSeq)
 		}
 		scope.MaxLedger = &maxLedger
 	} else if req.MaxLedger != 0 {
-		maxLedger := req.MaxLedger
+		maxLedger := max(req.MaxLedger, chunk.FirstLedgerSeq)
 		scope.MaxLedger = &maxLedger
 	}
 	if len(req.Filters) > 0 {

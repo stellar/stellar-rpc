@@ -123,6 +123,31 @@ func TestEventScopeDescendingMinAboveLatest(t *testing.T) {
 	assert.Equal(t, testOldest, outOfRange.Oldest)
 }
 
+// Raising only the min would push it past a below-genesis max.
+func TestEventScopeBelowGenesisMax(t *testing.T) {
+	req := protocol.GetEventsV2Request{
+		MinLedger: 1, MaxLedger: 1, Order: protocol.OrderDescending,
+	}
+	require.NoError(t, req.Valid(protocol.DefaultMaxFiltersV2))
+
+	scope, err := eventScope(&req, testOldest, 5000)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(chunk.FirstLedgerSeq), scope.MinLedger)
+	require.NotNil(t, scope.MaxLedger)
+	assert.Equal(t, uint32(chunk.FirstLedgerSeq), *scope.MaxLedger)
+}
+
+// A node whose tip is below genesis can serve nothing yet.
+func TestEventScopeDescendingOnANodeBelowGenesis(t *testing.T) {
+	req := protocol.GetEventsV2Request{Order: protocol.OrderDescending}
+	require.NoError(t, req.Valid(protocol.DefaultMaxFiltersV2))
+
+	_, err := eventScope(&req, testOldest, 1)
+	var outOfRange *query.RangeError
+	require.ErrorAs(t, err, &outOfRange)
+	assert.Equal(t, uint32(chunk.FirstLedgerSeq), outOfRange.Requested)
+}
+
 // An explicit max above the tip is legal: the scan waits for those ledgers.
 func TestEventScopeDescendingExplicitMaxAboveLatest(t *testing.T) {
 	req := protocol.GetEventsV2Request{
