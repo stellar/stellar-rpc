@@ -69,12 +69,22 @@ func (txn *MockTransactionHandler) InsertTransactions(lcm xdr.LedgerCloseMeta) e
 func (txn *MockTransactionHandler) GetTransaction(_ context.Context, hash xdr.Hash) (
 	store.Transaction, error,
 ) {
-	tx, ok := txn.txs[hash.HexString()]
+	lcm, ok := txn.txHashToMeta[hash.HexString()]
 	if !ok {
 		return store.Transaction{}, store.ErrNoTransaction
 	}
-	itx, err := store.ParseTransaction(*txn.txHashToMeta[hash.HexString()], tx)
-	return itx, err
+	raw, err := lcm.MarshalBinary()
+	if err != nil {
+		return store.Transaction{}, err
+	}
+	txView, found, err := ingest.LedgerTransactionViewByHash(xdr.LedgerCloseMetaView(raw), hash, txn.passphrase)
+	if err != nil {
+		return store.Transaction{}, err
+	}
+	if !found {
+		return store.Transaction{}, store.ErrNoTransaction
+	}
+	return store.ParseTransaction(txView), nil
 }
 
 func (txn *MockTransactionHandler) RegisterMetrics(_, _ prometheus.Observer) {}
