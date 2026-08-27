@@ -59,6 +59,11 @@ func getEventsV1(
 	if req.Pagination != nil {
 		if req.Pagination.Cursor != nil {
 			start = *req.Pagination.Cursor
+			// The item right after the cursor, with the shared handler's
+			// exact arithmetic: the increment wraps at MaxUint32, and the
+			// scan start is inclusive, so a wrapped cursor re-serves its
+			// whole (tx, op) group there and must here.
+			start.Event++
 			fromCursor = true
 		}
 		if req.Pagination.Limit > 0 {
@@ -107,6 +112,18 @@ func getEventsV1(
 		// request, cancellation included.
 		return zero, &jrpc2.Error{Code: jrpc2.InvalidRequest, Message: err.Error()}
 	}
+	// A short page must mean the scope is done: v1Response's window-end
+	// cursor claims everything through endLedger-1 was scanned. That holds
+	// because one pager call covers a full v1 window (the pairing test on
+	// LedgerScanLimit); if that coupling ever breaks, fail loud here rather
+	// than mint a cursor that skips the unscanned remainder.
+	if uint(len(page.Events)) < limit &&
+		(page.Status == query.ScanHasMore || page.Status == query.ScanWaitingForLedgers) {
+		return zero, &jrpc2.Error{
+			Code:    jrpc2.InternalError,
+			Message: "getEvents: the scan stopped before the request's window was covered",
+		}
+	}
 	events := make([]protocol.EventInfo, 0, len(page.Events))
 	for i := range page.Events {
 		info, err := eventInfoV1(&page.Events[i], req.Format)
@@ -145,10 +162,11 @@ func v1Response(
 	}
 }
 
-// v1Resume turns a v1 cursor into the pager's resume state. v1 resumes
-// strictly after the cursor tuple. Within a ledger, storage order is id
-// order, so the last stored event at or before the cursor is found by
-// binary search with point fetches, and the pager re-enters after it.
+// v1Resume turns a v1 cursor, already incremented the v1 way, into the
+// pager's resume state: the scan starts at the first stored event at or
+// after c, the inclusive start v1's id >= scan uses. Within a ledger,
+// storage order is id order, so that boundary is found by binary search
+// with point fetches, and the pager re-enters after the event before it.
 func v1Resume(
 	ctx context.Context, view *query.ReadView, c protocol.Cursor,
 	maxLedger uint32, filters []event.Filter,
@@ -166,8 +184,8 @@ func v1Resume(
 	if err != nil {
 		return query.EventCursor{}, err
 	}
-	// Find the first stored ordinal in the cursor's ledger that sorts after
-	// the cursor. prev tracks the payload just below the boundary: lo only
+	// Find the first stored ordinal in the cursor's ledger at or after the
+	// cursor. prev tracks the payload just below the boundary: lo only
 	// moves to mid+1, so the last advancing probe is exactly lo-1.
 	lo, hi := lStart, lEnd
 	var prev *event.Payload
@@ -178,10 +196,10 @@ func v1Resume(
 			return query.EventCursor{}, err
 		}
 		p := got[0]
-		after := protocol.Cursor{
+		atOrAfter := protocol.Cursor{
 			Ledger: c.Ledger, Tx: p.TxIdx, Op: p.OpIdx, Event: p.EventIdx,
-		}.Cmp(c) > 0
-		if after {
+		}.Cmp(c) >= 0
+		if atOrAfter {
 			hi = mid
 		} else {
 			lo = mid + 1
@@ -190,12 +208,14 @@ func v1Resume(
 	}
 	switch lo {
 	case lEnd:
-		// Nothing in the cursor's ledger sorts after it (the window-end
-		// cursor of a short page, or the ledger's last event, or an empty
-		// ledger): the watermark covers the ledger and resume moves past it.
+		// Everything in the cursor's ledger sorts below it (the window-end
+		// cursor of a short page, whose incremented sentinel tuple still
+		// tops every storable event, or the incremented last event, or an
+		// empty ledger): the watermark covers the ledger and resume moves
+		// past it.
 		return query.EventCursor{Scope: scope, ScannedLedger: c.Ledger}, nil
 	case lStart:
-		// Everything in the ledger sorts after the cursor: scan it whole.
+		// The whole ledger sorts at or after the cursor: scan it whole.
 		return query.EventCursor{Scope: scope}, nil
 	default:
 		return query.EventCursor{Scope: scope, Position: &query.EventPosition{
@@ -206,11 +226,11 @@ func v1Resume(
 }
 
 // v1Filters expands a validated v1 filter list into the pager's filters. The
-// OR dimensions within one v1 filter (event types, contract ids, topic
-// filters) multiply out, one store filter per combination: at most
-// 5 filters x 5 contract ids x 5 topics = 125, under the pager's cap. A
-// combination with no constraints matches every event, so the whole query
-// collapses to the pager's match-all (nil).
+// OR dimensions within one v1 filter (contract ids, topic filters) multiply
+// out, one store filter per combination: at most 5 filters x 5 contract ids
+// x 5 topics = 125, under the pager's cap. A combination with no constraints
+// matches every event, so the whole query collapses to the pager's
+// match-all (nil).
 func v1Filters(in []protocol.EventFilter) ([]event.Filter, error) {
 	var out []event.Filter
 	for i := range in {
@@ -228,16 +248,15 @@ func v1Filters(in []protocol.EventFilter) ([]event.Filter, error) {
 
 func expandV1Filter(f *protocol.EventFilter) ([]event.Filter, bool, error) {
 	// A validated type set holds only contract and system: naming both
-	// constrains nothing, naming one is one term.
-	types := []*xdr.ContractEventType{nil}
+	// constrains nothing, naming one is one term. Either way the type never
+	// multiplies the expansion.
+	var eventType *xdr.ContractEventType
 	if len(f.EventType) == 1 {
-		for key := range f.EventType {
-			if key == protocol.EventTypeSystem {
-				types = []*xdr.ContractEventType{new(xdr.ContractEventTypeSystem)}
-			} else {
-				types = []*xdr.ContractEventType{new(xdr.ContractEventTypeContract)}
-			}
+		typ := xdr.ContractEventTypeContract
+		if _, ok := f.EventType[protocol.EventTypeSystem]; ok {
+			typ = xdr.ContractEventTypeSystem
 		}
+		eventType = &typ
 	}
 	contracts := [][]byte{nil}
 	if len(f.ContractIDs) > 0 {
@@ -264,19 +283,17 @@ func expandV1Filter(f *protocol.EventFilter) ([]event.Filter, bool, error) {
 		}
 	}
 
-	out := make([]event.Filter, 0, len(types)*len(contracts)*len(shapes))
-	for _, ty := range types {
-		for _, cid := range contracts {
-			for _, sh := range shapes {
-				flt := event.Filter{
-					ContractID: cid, EventType: ty,
-					Topics: sh.topics, TopicCount: sh.count,
-				}
-				if isMatchAll(&flt) {
-					return nil, true, nil
-				}
-				out = append(out, flt)
+	out := make([]event.Filter, 0, len(contracts)*len(shapes))
+	for _, cid := range contracts {
+		for _, sh := range shapes {
+			flt := event.Filter{
+				ContractID: cid, EventType: eventType,
+				Topics: sh.topics, TopicCount: sh.count,
 			}
+			if isMatchAll(&flt) {
+				return nil, true, nil
+			}
+			out = append(out, flt)
 		}
 	}
 	return out, false, nil

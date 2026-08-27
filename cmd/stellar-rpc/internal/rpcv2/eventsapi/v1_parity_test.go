@@ -10,6 +10,7 @@ package eventsapi
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -21,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -44,27 +46,117 @@ const (
 	parityTermBudget = 200
 )
 
+// parityCloseTime is ledger F+i's close time: distinct and nonzero, so a
+// close-time wiring bug on either side diffs instead of comparing 0 == 0.
+func parityCloseTime(i int) int64 { return 1_700_000_000 + int64(i)*7 }
+
 // parityLCMs is the shared fixture set, ingested identically on both sides:
 //
 //	F+0: contract A "a0" topics(xfer), "a1" topics(xfer, alice)  [one tx, one op]
 //	F+1: contract B "b0" topics(mint)
 //	F+2: no events
 //	F+3: contract A "a2" topics(burn, alice, extra)
+//	F+4: two transactions carrying transaction-level events in all three
+//	     stages — the sentinel-id surface (store.StageSentinels) the other
+//	     ledgers never touch: tx 1 (success) fee, one op event, refund;
+//	     tx 2 (failed) fee, unlock, no operations
 func parityLCMs(t *testing.T) [][]byte {
 	t.Helper()
 	a := xdr.ContractId(testContractRaw(0xAA))
 	b := xdr.ContractId(testContractRaw(0xBB))
 	first := parityChunk.FirstLedger()
 	return [][]byte{
-		rpcv2test.EventsLCMBytes(t, first,
+		rpcv2test.EventsLCMBytesAt(t, first, parityCloseTime(0),
 			rpcv2test.SymbolContractEvent(a, "a0", "xfer"),
 			rpcv2test.SymbolContractEvent(a, "a1", "xfer", "alice")),
-		rpcv2test.EventsLCMBytes(t, first+1,
+		rpcv2test.EventsLCMBytesAt(t, first+1, parityCloseTime(1),
 			rpcv2test.SymbolContractEvent(b, "b0", "mint")),
-		rpcv2test.ZeroTxLCMBytes(t, first+2),
-		rpcv2test.EventsLCMBytes(t, first+3,
+		rpcv2test.ZeroTxLCMBytesAt(t, first+2, parityCloseTime(2)),
+		rpcv2test.EventsLCMBytesAt(t, first+3, parityCloseTime(3),
 			rpcv2test.SymbolContractEvent(a, "a2", "burn", "alice", "extra")),
+		multiTxLCMBytes(t, first+4, parityCloseTime(4), []parityTx{
+			{
+				txEvents: []xdr.TransactionEvent{
+					stageEvent(xdr.TransactionEventStageTransactionEventStageBeforeAllTxs, "fee1"),
+					stageEvent(xdr.TransactionEventStageTransactionEventStageAfterTx, "refund1"),
+				},
+				opEvents: []xdr.ContractEvent{rpcv2test.SymbolContractEvent(a, "c0", "call")},
+			},
+			{
+				failed: true,
+				txEvents: []xdr.TransactionEvent{
+					stageEvent(xdr.TransactionEventStageTransactionEventStageBeforeAllTxs, "fee2"),
+					stageEvent(xdr.TransactionEventStageTransactionEventStageAfterAllTxs, "unlock"),
+				},
+			},
+		}),
 	}
+}
+
+// parityTx is one transaction of the sentinel fixture ledger. A failed
+// transaction carries fee events and no operations, the shape the ledger
+// stream actually produces.
+type parityTx struct {
+	txEvents []xdr.TransactionEvent
+	opEvents []xdr.ContractEvent
+	failed   bool
+}
+
+func stageEvent(stage xdr.TransactionEventStage, label string) xdr.TransactionEvent {
+	return xdr.TransactionEvent{
+		Stage: stage,
+		Event: rpcv2test.SymbolContractEvent(xdr.ContractId(testContractRaw(0xFE)), label, label),
+	}
+}
+
+// multiTxLCMBytes builds one ledger holding txs in apply order, each with
+// top-level transaction events and operation events — the shapes
+// EventsLCMBytesAt cannot express (it hard-codes one successful transaction
+// of op events).
+func multiTxLCMBytes(t *testing.T, seq uint32, closeTime int64, txs []parityTx) []byte {
+	t.Helper()
+	envelopes := make([]xdr.TransactionEnvelope, 0, len(txs))
+	processing := make([]xdr.TransactionResultMetaV1, 0, len(txs))
+	for _, tx := range txs {
+		meta := xdr.TransactionMeta{V: 4, V4: &xdr.TransactionMetaV4{Events: tx.txEvents}}
+		if len(tx.opEvents) > 0 {
+			meta.V4.Operations = []xdr.OperationMetaV2{{Events: tx.opEvents}}
+		}
+		envelope := xdr.TransactionEnvelope{
+			Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+			V1: &xdr.TransactionV1Envelope{
+				Tx: xdr.Transaction{
+					SourceAccount: xdr.MustMuxedAddress(keypair.MustRandom().Address()),
+					Ext: xdr.TransactionExt{
+						V:           1,
+						SorobanData: &xdr.SorobanTransactionData{},
+					},
+				},
+			},
+		}
+		hash, err := network.HashTransactionInEnvelope(envelope, network.PublicNetworkPassphrase)
+		require.NoError(t, err)
+		code := xdr.TransactionResultCodeTxSuccess
+		if tx.failed {
+			code = xdr.TransactionResultCodeTxFailed
+		}
+		opResults := []xdr.OperationResult{}
+		envelopes = append(envelopes, envelope)
+		processing = append(processing, xdr.TransactionResultMetaV1{
+			TxApplyProcessing: meta,
+			Result: xdr.TransactionResultPair{
+				TransactionHash: hash,
+				Result: xdr.TransactionResult{
+					FeeCharged: 100,
+					Result: xdr.TransactionResultResult{
+						Code:    code,
+						Results: &opResults,
+					},
+				},
+			},
+		})
+	}
+	return rpcv2test.V2LCMBytes(t, seq, closeTime, envelopes, processing)
 }
 
 func newLocalClient(t *testing.T, h jrpc2.Handler) *jrpc2.Client {
@@ -111,7 +203,9 @@ func newShimClient(t *testing.T, lcms [][]byte) *jrpc2.Client {
 	r := query.NewRegistry(cat, geometry.NewRetention(0, parityChunk))
 	rpcv2test.SeedHotChunkLCMs(t, cat, parityChunk,
 		func(db *hotchunk.DB) { r.PublishHandle(parityChunk, db) }, lcms...)
-	r.SetLatestLedger(parityChunk.FirstLedger()+uint32(len(lcms))-1, 0)
+	// The tip stamp is what latestLedgerCloseTime serves; it must be the
+	// last fixture's real close time or the parity diff catches it.
+	r.SetLatestLedger(parityChunk.FirstLedger()+uint32(len(lcms))-1, parityCloseTime(len(lcms)-1))
 	view, err := r.NewReadView()
 	require.NoError(t, err)
 	t.Cleanup(view.Release)
@@ -161,6 +255,15 @@ func requireParity(t *testing.T, v1c, shimc *jrpc2.Client, req protocol.GetEvent
 	assert.Equal(t, normalizedResponse(t, r1), normalizedResponse(t, r2))
 }
 
+// The v1 window and the pager's per-page scan window are the same number by
+// construction. v1Response's short-page cursor claims everything through
+// endLedger-1 was scanned, which holds only while one QueryEvents call can
+// cover a full v1 window; getEventsV1's truncation guard turns a violation
+// into a loud error, and this pairing keeps the guard unreachable.
+func TestV1WindowFitsThePagerScanWindow(t *testing.T) {
+	assert.LessOrEqual(t, uint32(methods.LedgerScanLimit), chunk.LedgersPerChunk)
+}
+
 // TestV1ParityHarness_V1SideServes runs today, before the shim exists: it
 // proves the seeding, the in-memory server, and the cursor round-trip work,
 // so a parity failure later indicts the shim and not the harness.
@@ -173,14 +276,16 @@ func TestV1ParityHarness_V1SideServes(t *testing.T) {
 	require.Nil(t, jerr)
 	var resp protocol.GetEventsResponse
 	require.NoError(t, json.Unmarshal(raw, &resp))
-	require.Len(t, resp.Events, 4)
+	require.Len(t, resp.Events, 9, "4 op events + 5 sentinel-ledger events")
 	assert.Equal(t, int32(first), resp.Events[0].Ledger)
 	assert.Equal(t, first, resp.OldestLedger)
-	assert.Equal(t, first+3, resp.LatestLedger)
+	assert.Equal(t, first+4, resp.LatestLedger)
+	assert.Equal(t, parityCloseTime(0), resp.OldestLedgerCloseTime)
+	assert.Equal(t, parityCloseTime(4), resp.LatestLedgerCloseTime)
 
 	// Short page: the cursor is the window's end, MaxCursor at the tip.
 	wantCursor := protocol.MaxCursor
-	wantCursor.Ledger = first + 3
+	wantCursor.Ledger = first + 4
 	assert.Equal(t, wantCursor.String(), resp.Cursor)
 
 	// The window-end cursor round-trips: at the tip it stays put, empty page.
@@ -196,6 +301,7 @@ func TestV1ParityHarness_V1SideServes(t *testing.T) {
 	assert.Equal(t, resp.Cursor, resp2.Cursor)
 }
 
+//nolint:funlen // one table, one case per v1 behavior
 func TestGetEventsV1Parity(t *testing.T) {
 	lcms := parityLCMs(t)
 	v1c := newV1Client(t, lcms)
@@ -273,6 +379,32 @@ func TestGetEventsV1Parity(t *testing.T) {
 		"limit fills the page and mints the last id": {
 			StartLedger: first, Pagination: &protocol.PaginationOptions{Limit: 2},
 		},
+		"limit exactly at the event count still mints the last id": {
+			StartLedger: first, Pagination: &protocol.PaginationOptions{Limit: 9},
+		},
+		"crafted cursor with max event index wraps like v1": {
+			// v1's resume increment wraps MaxUint32 to 0 and rescans the
+			// cursor's whole (tx, op) group; the shim must reproduce it.
+			Pagination: &protocol.PaginationOptions{Cursor: &protocol.Cursor{
+				Ledger: first, Tx: 1, Op: 0, Event: math.MaxUint32,
+			}},
+		},
+		"crafted cursor below the ledger's first event": {
+			Pagination: &protocol.PaginationOptions{Cursor: &protocol.Cursor{Ledger: first}},
+		},
+		"crafted cursor at the first event's exact id": {
+			Pagination: &protocol.PaginationOptions{Cursor: &protocol.Cursor{
+				Ledger: first, Tx: 1, Op: 0, Event: 0,
+			}},
+		},
+		"crafted cursor in the empty ledger": {
+			Pagination: &protocol.PaginationOptions{Cursor: &protocol.Cursor{Ledger: first + 2}},
+		},
+		"crafted cursor inside the sentinel fee group": {
+			Pagination: &protocol.PaginationOptions{Cursor: &protocol.Cursor{
+				Ledger: first + 4, Tx: 0, Op: 0, Event: 0,
+			}},
+		},
 		"start above the tip errors":   {StartLedger: first + 100},
 		"start below the floor errors": {StartLedger: first - 1},
 		"bad contract id is rejected by validation": {
@@ -298,7 +430,7 @@ func TestGetEventsV1Parity_PaginationChain(t *testing.T) {
 		StartLedger: parityChunk.FirstLedger(),
 		Pagination:  &protocol.PaginationOptions{Limit: 1},
 	}
-	const maxPages = 7 // 4 events + the empty window-end page, with margin
+	const maxPages = 13 // 9 events + the empty window-end page, with margin
 	for page := range maxPages {
 		r1, e1 := callGetEvents(t, v1c, req)
 		r2, e2 := callGetEvents(t, shimc, req)
