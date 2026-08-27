@@ -115,11 +115,11 @@ func runQueryHot(ctx context.Context, logger *supportlog.Entry, opts hotQueryOpt
 // bracket (transient then ready) and its database is opened through
 // OpenReadyWrite — the same must-exist, never-creating open ingestion resumes a
 // chunk with, so a missing or gutted database fails here instead of being healed
-// into an empty one. The handle is published, which is what makes routing
-// resolve the chunk hot; nothing is frozen, so the hot tier is the only one that
-// can serve it.
+// into an empty one. query.OpenRegistry then publishes the handle as the live
+// chunk, which is what makes routing resolve it hot; nothing is frozen, so the
+// hot tier is the only one that can serve it.
 //
-// The read view's latest ledger is what the database actually holds
+// The registry's latest ledger is what the database actually holds
 // (MaxCommittedSeq), never the chunk's nominal last: a capped ingest stops
 // mid-chunk, and a view claiming ledgers that were never ingested would turn
 // every query past the cap into a miss. --sample-ledgers narrows the sampled
@@ -146,25 +146,30 @@ func openHotFixture(logger *supportlog.Entry, opts hotQueryOptions) (*queryFixtu
 		return nil, nil, fmt.Errorf("open hot chunk %s at %s: %w", opts.Chunk, path, err)
 	}
 
-	registry := query.NewRegistry(cat, geometry.NewRetention(0, opts.Chunk))
-	registry.PublishHandle(opts.Chunk, db)
+	committed, ok, err := db.MaxCommittedSeq()
+	if err != nil {
+		_ = db.Close()
+		releaseCat()
+		return nil, nil, fmt.Errorf("read hot chunk %s last committed ledger: %w", opts.Chunk, err)
+	}
+	if !ok {
+		_ = db.Close()
+		releaseCat()
+		return nil, nil, fmt.Errorf("hot chunk %s holds no committed ledger: ingest it before querying it", opts.Chunk)
+	}
+
+	registry, err := query.OpenRegistry(cat, geometry.NewRetention(0, opts.Chunk), db, committed)
+	if err != nil {
+		_ = db.Close()
+		releaseCat()
+		return nil, nil, fmt.Errorf("open the read registry over hot chunk %s: %w", opts.Chunk, err)
+	}
 	// Registry.Close closes every published handle, so releasing the registry
 	// releases the database.
 	release := func() {
 		registry.Close()
 		releaseCat()
 	}
-
-	committed, ok, err := db.MaxCommittedSeq()
-	if err != nil {
-		release()
-		return nil, nil, fmt.Errorf("read hot chunk %s last committed ledger: %w", opts.Chunk, err)
-	}
-	if !ok {
-		release()
-		return nil, nil, fmt.Errorf("hot chunk %s holds no committed ledger: ingest it before querying it", opts.Chunk)
-	}
-	registry.SetLatestLedger(committed, 0)
 
 	first := opts.Chunk.FirstLedger()
 	last := committed
