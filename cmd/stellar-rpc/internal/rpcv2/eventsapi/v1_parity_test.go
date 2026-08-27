@@ -3,19 +3,15 @@ package eventsapi
 // The v1-parity harness, the shim's acceptance oracle: the same LCM fixtures
 // are ingested into an rpcv1 sqlite store and into a v2 hot chunk, the shared
 // v1 handler and the shim each serve over an in-memory JSON-RPC pipe, and
-// responses are compared field for field, cursors included. The one
-// deliberate divergence: inSuccessfulContractCall (deprecated, dropped by the
-// shim per getevents-v1-shim-brief.md) is stripped from both sides before the
-// diff. While getEventsV1 is the prep stub, every shim comparison skips
-// itself; TestV1ParityHarness_V1SideServes runs regardless, so the harness
-// itself stays verified.
+// responses are compared field for field, cursors included.
+// TestV1ParityHarness_V1SideServes exercises the v1 side alone, so a parity
+// failure indicts the shim and not the harness.
 
 import (
 	"context"
 	"encoding/json"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -32,7 +28,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
@@ -44,8 +39,8 @@ const (
 	parityChunk        = chunk.ID(5)
 	parityMaxLimit     = 1000
 	parityDefaultLimit = 100
-	// parityTermBudget has headroom over the worst legal v1 expansion; the
-	// production default is the brief's open sizing decision.
+	// parityTermBudget has headroom over the worst legal v1 expansion,
+	// like the production default (config.DefaultGetEventsV1TermBudget).
 	parityTermBudget = 200
 )
 
@@ -126,7 +121,7 @@ func newShimClient(t *testing.T, lcms [][]byte) *jrpc2.Client {
 		DefaultLimit: parityDefaultLimit,
 	})
 	return newLocalClient(t, func(ctx context.Context, req *jrpc2.Request) (any, error) {
-		return base(adapters.WithView(ctx, view), req)
+		return base(query.WithView(ctx, view), req)
 	})
 }
 
@@ -144,35 +139,18 @@ func callGetEvents(
 	return nil, jerr
 }
 
-// normalizedResponse parses a response for comparison, stripping the one
-// field the shim deliberately drops (from both sides, so the diff is blind to
-// which mechanism the drop uses).
+// normalizedResponse parses a response into the comparable form.
 func normalizedResponse(t *testing.T, raw json.RawMessage) map[string]any {
 	t.Helper()
 	var m map[string]any
 	require.NoError(t, json.Unmarshal(raw, &m))
-	if evs, ok := m["events"].([]any); ok {
-		for _, e := range evs {
-			if em, ok := e.(map[string]any); ok {
-				delete(em, "inSuccessfulContractCall")
-			}
-		}
-	}
 	return m
-}
-
-func skipWhileStubbed(t *testing.T, jerr *jrpc2.Error) {
-	t.Helper()
-	if jerr != nil && strings.Contains(jerr.Message, "prep stub") {
-		t.Skip("shim core pending (see the TODO plan in get_events_v1.go)")
-	}
 }
 
 func requireParity(t *testing.T, v1c, shimc *jrpc2.Client, req protocol.GetEventsRequest) {
 	t.Helper()
 	r1, e1 := callGetEvents(t, v1c, req)
 	r2, e2 := callGetEvents(t, shimc, req)
-	skipWhileStubbed(t, e2)
 	if e1 != nil {
 		require.NotNil(t, e2, "v1 errored (%v) but the shim served", e1)
 		assert.Equal(t, e1.Code, e2.Code)
@@ -196,7 +174,7 @@ func TestV1ParityHarness_V1SideServes(t *testing.T) {
 	var resp protocol.GetEventsResponse
 	require.NoError(t, json.Unmarshal(raw, &resp))
 	require.Len(t, resp.Events, 4)
-	assert.Equal(t, int32(first), resp.Events[0].Ledger) //nolint:gosec // fixture ledgers are small
+	assert.Equal(t, int32(first), resp.Events[0].Ledger)
 	assert.Equal(t, first, resp.OldestLedger)
 	assert.Equal(t, first+3, resp.LatestLedger)
 
@@ -218,7 +196,6 @@ func TestV1ParityHarness_V1SideServes(t *testing.T) {
 	assert.Equal(t, resp.Cursor, resp2.Cursor)
 }
 
-//nolint:funlen // one table, one case per v1 behavior
 func TestGetEventsV1Parity(t *testing.T) {
 	lcms := parityLCMs(t)
 	v1c := newV1Client(t, lcms)
@@ -239,44 +216,71 @@ func TestGetEventsV1Parity(t *testing.T) {
 		"no filters, whole window": {StartLedger: first},
 		"endLedger is exclusive":   {StartLedger: first, EndLedger: first + 1},
 		"endLedger at the start ledger is an empty page": {
-			StartLedger: first + 1, EndLedger: first + 1},
+			StartLedger: first + 1, EndLedger: first + 1,
+		},
 		"endLedger below the start ledger is legal and empty": {
-			StartLedger: first + 1, EndLedger: first},
+			StartLedger: first + 1, EndLedger: first,
+		},
 		"contract id": {StartLedger: first, Filters: []protocol.EventFilter{
-			{ContractIDs: []string{contractA}}}},
+			{ContractIDs: []string{contractA}},
+		}},
 		"two contract ids": {StartLedger: first, Filters: []protocol.EventFilter{
-			{ContractIDs: []string{contractA, contractB}}}},
+			{ContractIDs: []string{contractA, contractB}},
+		}},
 		"type contract": {StartLedger: first, Filters: []protocol.EventFilter{
-			{EventType: protocol.EventTypeSet{protocol.EventTypeContract: nil}}}},
+			{EventType: protocol.EventTypeSet{protocol.EventTypeContract: nil}},
+		}},
 		"type set of both stored types": {StartLedger: first, Filters: []protocol.EventFilter{
 			{EventType: protocol.EventTypeSet{
-				protocol.EventTypeContract: nil, protocol.EventTypeSystem: nil}}}},
+				protocol.EventTypeContract: nil, protocol.EventTypeSystem: nil,
+			}},
+		}},
 		"type diagnostic is rejected": {StartLedger: first, Filters: []protocol.EventFilter{
-			{EventType: protocol.EventTypeSet{protocol.EventTypeDiagnostic: nil}}}},
+			{EventType: protocol.EventTypeSet{protocol.EventTypeDiagnostic: nil}},
+		}},
 		"one-segment topic matches only one-topic events": {
 			StartLedger: first, Filters: []protocol.EventFilter{
-				{Topics: []protocol.TopicFilter{{seg("xfer")}}}}},
+				{Topics: []protocol.TopicFilter{{seg("xfer")}}},
+			},
+		},
 		"trailing ** relaxes the arity": {
 			StartLedger: first, Filters: []protocol.EventFilter{
-				{Topics: []protocol.TopicFilter{{seg("xfer"), wild("**")}}}}},
+				{Topics: []protocol.TopicFilter{{seg("xfer"), wild("**")}}},
+			},
+		},
 		"star matches any value at its position": {
 			StartLedger: first, Filters: []protocol.EventFilter{
-				{Topics: []protocol.TopicFilter{{wild("*"), seg("alice")}}}}},
+				{Topics: []protocol.TopicFilter{{wild("*"), seg("alice")}}},
+			},
+		},
 		"star alone matches every one-topic event": {
 			StartLedger: first, Filters: []protocol.EventFilter{
-				{Topics: []protocol.TopicFilter{{wild("*")}}}}},
+				{Topics: []protocol.TopicFilter{{wild("*")}}},
+			},
+		},
 		"filters are OR-ed": {StartLedger: first, Filters: []protocol.EventFilter{
 			{ContractIDs: []string{contractB}},
-			{Topics: []protocol.TopicFilter{{seg("burn"), wild("**")}}}}},
+			{Topics: []protocol.TopicFilter{{seg("burn"), wild("**")}}},
+		}},
 		"fields within a filter are AND-ed": {
 			StartLedger: first, Filters: []protocol.EventFilter{
-				{ContractIDs: []string{contractA},
-					Topics: []protocol.TopicFilter{{seg("xfer"), wild("**")}}}}},
+				{
+					ContractIDs: []string{contractA},
+					Topics:      []protocol.TopicFilter{{seg("xfer"), wild("**")}},
+				},
+			},
+		},
 		"limit fills the page and mints the last id": {
-			StartLedger: first, Pagination: &protocol.PaginationOptions{Limit: 2}},
+			StartLedger: first, Pagination: &protocol.PaginationOptions{Limit: 2},
+		},
 		"start above the tip errors":   {StartLedger: first + 100},
 		"start below the floor errors": {StartLedger: first - 1},
-		"json format":                  {StartLedger: first, Format: protocol.FormatJSON},
+		"bad contract id is rejected by validation": {
+			StartLedger: first, Filters: []protocol.EventFilter{
+				{ContractIDs: []string{"CNOTVALID"}},
+			},
+		},
+		"json format": {StartLedger: first, Format: protocol.FormatJSON},
 	} {
 		t.Run(name, func(t *testing.T) { requireParity(t, v1c, shimc, req) })
 	}
@@ -298,7 +302,6 @@ func TestGetEventsV1Parity_PaginationChain(t *testing.T) {
 	for page := range maxPages {
 		r1, e1 := callGetEvents(t, v1c, req)
 		r2, e2 := callGetEvents(t, shimc, req)
-		skipWhileStubbed(t, e2)
 		require.Nil(t, e1, "page %d", page)
 		require.Nil(t, e2, "page %d", page)
 		n1, n2 := normalizedResponse(t, r1), normalizedResponse(t, r2)

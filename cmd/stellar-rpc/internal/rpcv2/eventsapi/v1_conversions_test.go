@@ -1,10 +1,8 @@
 package eventsapi
 
-// Translation rules for the v1 filter model, encoded as data ahead of the
-// implementation: each case pins one rule from getevents-v1-shim-brief.md
-// against the exact store filters v1Filters must produce. Skipped while
-// getEventsV1 is the prep stub; the parity harness cross-checks the same
-// rules end to end.
+// Translation rules for the v1 filter model: each case pins one rule against
+// the exact store filters v1Filters must produce. The parity harness
+// cross-checks the same rules end to end against the shared v1 handler.
 
 import (
 	"testing"
@@ -19,8 +17,6 @@ import (
 
 //nolint:funlen // one table, one case per translation rule
 func TestV1FiltersTranslation(t *testing.T) {
-	t.Skip("shim core pending: v1Filters is the prep stub (see get_events_v1.go)")
-
 	xferVal, xferRaw := symbolScVal(t, "xfer")
 	mintVal, mintRaw := symbolScVal(t, "mint")
 	aliceVal, aliceRaw := symbolScVal(t, "alice")
@@ -69,7 +65,8 @@ func TestV1FiltersTranslation(t *testing.T) {
 		// arity to at-least-prefix.
 		"trailing double-star is at-least arity": {
 			in: []protocol.EventFilter{{Topics: []protocol.TopicFilter{
-				{seg(xferVal), wild(dstar)}}}},
+				{seg(xferVal), wild(dstar)},
+			}}},
 			want: []event.Filter{{
 				Topics:     [protocol.MaxTopicCount][]byte{xferRaw},
 				TopicCount: event.TopicCountFilter{Count: 1, Exact: false},
@@ -82,7 +79,8 @@ func TestV1FiltersTranslation(t *testing.T) {
 		},
 		"star then value pins position one": {
 			in: []protocol.EventFilter{{Topics: []protocol.TopicFilter{
-				{wild(star), seg(aliceVal)}}}},
+				{wild(star), seg(aliceVal)},
+			}}},
 			want: []event.Filter{{
 				Topics:     [protocol.MaxTopicCount][]byte{nil, aliceRaw},
 				TopicCount: event.TopicCountFilter{Count: 2, Exact: true},
@@ -99,7 +97,8 @@ func TestV1FiltersTranslation(t *testing.T) {
 			in: []protocol.EventFilter{{
 				EventType: contractType,
 				ContractIDs: []string{
-					testContractStrkey(t, 0xAA), testContractStrkey(t, 0xBB)},
+					testContractStrkey(t, 0xAA), testContractStrkey(t, 0xBB),
+				},
 				Topics: []protocol.TopicFilter{{seg(xferVal)}, {seg(mintVal)}},
 			}},
 			want: []event.Filter{

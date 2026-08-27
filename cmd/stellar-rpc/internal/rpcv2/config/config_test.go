@@ -226,7 +226,7 @@ func TestParseConfig_ServiceDefaults(t *testing.T) {
 
 	assert.Equal(t, DefaultGetEventsMaxItemsPerResponse, *m.GetEvents.MaxItemsPerResponse)
 	assert.Equal(t, DefaultGetEventsDefaultItemsPerResponse, *m.GetEvents.DefaultItemsPerResponse)
-	assert.Equal(t, DefaultGetEventsTermBudget, *m.GetEvents.TermBudget)
+	assert.Equal(t, DefaultGetEventsV1TermBudget, *m.GetEvents.TermBudget)
 	assert.Equal(t, DefaultGetTransactionsMaxItemsPerResponse, *m.GetTransactions.MaxItemsPerResponse)
 	assert.Equal(t, DefaultGetLedgersMaxItemsPerResponse, *m.GetLedgers.MaxItemsPerResponse)
 

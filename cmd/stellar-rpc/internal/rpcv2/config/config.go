@@ -464,6 +464,13 @@ const (
 	// (github.com/orgs/stellar/discussions/1872).
 	DefaultGetEventsTermBudget uint = 15
 
+	// DefaultGetEventsV1TermBudget covers the worst legal v1 request (5
+	// filters x (1 type + 5 contract ids + 5 topic filters x 4 values) =
+	// at most 130 distinct terms), so no request the v1 API admits is
+	// rejected. v1 predates the budget; only an operator lowering this can
+	// surface it there.
+	DefaultGetEventsV1TermBudget uint = 130
+
 	DefaultGetTransactionsMaxItemsPerResponse     uint = 200
 	DefaultGetTransactionsDefaultItemsPerResponse uint = 50
 	DefaultGetLedgersMaxItemsPerResponse          uint = 20
@@ -666,7 +673,7 @@ func (cfg Config) WithDefaults() Config {
 	dur(&m.GetEvents.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
 	fillUint(&m.GetEvents.MaxItemsPerResponse, DefaultGetEventsMaxItemsPerResponse)
 	fillUint(&m.GetEvents.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
-	fillUint(&m.GetEvents.TermBudget, DefaultGetEventsTermBudget)
+	fillUint(&m.GetEvents.TermBudget, DefaultGetEventsV1TermBudget)
 
 	queue(&m.GetEventsV2.QueueLimit, DefaultMethodQueueLimit)
 	dur(&m.GetEventsV2.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
