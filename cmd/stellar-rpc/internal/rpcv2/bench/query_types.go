@@ -2,6 +2,7 @@ package bench
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 
@@ -9,10 +10,9 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 // This file holds the four measured request bodies, one per query type. Each
@@ -42,11 +42,11 @@ func newQueryRequest(
 	case queryTypeTxPage:
 		return txPageRequest(f, p), nil
 	case queryTypeTxHash:
-		corpus, err := buildTxHashCorpus(logger, f, p.MissFraction, p.Seed)
+		corpus, err := buildTxHashCorpus(ctx, logger, f, p.MissFraction, p.Seed)
 		if err != nil {
 			return nil, err
 		}
-		return txHashRequest(f, corpus), nil
+		return txHashRequest(ctx, f, corpus), nil
 	case queryTypeEvents:
 		corpus, err := buildEventFilterCorpus(ctx, logger, f)
 		if err != nil {
@@ -146,16 +146,21 @@ func txPageRequest(f *queryFixture, p queryPlan) queryRequest {
 	}
 }
 
-// txHashRequest measures getTransaction's read: the full by-hash lookup —
-// every hot index, then every frozen cold window index, each cold candidate
-// verified by reading its ledger and finding the transaction in it.
+// txHashRequest measures getTransaction's read: the served by-hash path,
+// adapters.TransactionReader. It probes the view's hot tx-hash indexes, then
+// its cold window indexes, verifies each candidate by reading the candidate's
+// ledger, and copies the transaction's bytes out of that ledger buffer the way
+// the endpoint does.
 //
-// It drives txhash.TxReader rather than probing an index directly. That
-// distinction is the whole point: an index probe answers "which ledger", while
-// the endpoint must also read that ledger and prove the transaction is in it,
-// and on the cold tier roughly one in 256 unseen hashes survives the
-// fingerprint and forces exactly that work for nothing.
-func txHashRequest(f *queryFixture, corpus *txHashCorpus) queryRequest {
+// The view owns both index tiers, and the query package tests them. It hands
+// over each index already gated to the servable ledger range, so an index hit
+// below the retention floor reads as not-found instead of as a failed ledger
+// read, and it opens a cold index on that index's first probe, so a hot hit
+// pays no file open.
+//
+// The reader is stateless, so one serves every iteration of the cell.
+func txHashRequest(ctx context.Context, f *queryFixture, corpus *txHashCorpus) queryRequest {
+	reader := adapters.NewTransactionReader(f.Passphrase, nil)
 	return func(rng *rand.Rand) (cellSample, error) {
 		hash, wantFound := corpus.pick(rng)
 		stage := txHashStageFound
@@ -169,11 +174,11 @@ func txHashRequest(f *queryFixture, corpus *txHashCorpus) queryRequest {
 			}
 			defer view.Release()
 
-			probe, err := f.txReader(view)
-			if err != nil {
-				return 0, err
+			_, err = reader.GetTransaction(adapters.WithView(ctx, view), xdr.Hash(hash))
+			found := err == nil
+			if errors.Is(err, store.ErrNoTransaction) {
+				err = nil
 			}
-			_, found, err := probe.GetTransaction(hash)
 			if err != nil {
 				return 0, fmt.Errorf("look up transaction %x: %w", hash, err)
 			}
@@ -234,51 +239,4 @@ func (f *queryFixture) pickStart(rng *rand.Rand, span uint32) uint32 {
 		return f.FirstLedger
 	}
 	return f.FirstLedger + uint32(rng.IntN(int(room-span+1))) //nolint:gosec // room fits a chunk range
-}
-
-// txReader assembles the two-tier by-hash probe for one read view, the way the
-// serving adapter does: the hot indexes of every published chunk, then the
-// frozen cold window indexes on demand, with the candidate ledgers read back
-// through the view.
-//
-// The view owns both tiers. It hands over each index already gated to the
-// servable ledger range, and it opens a cold .idx only on that index's first
-// probe and closes it on Release. Both properties are load-bearing for these
-// numbers, so the bench states what it depends on:
-//
-//   - The gate sits between the index probe and the ledger read. A frozen cold
-//     index covers a thousand chunks, but each chunk's ledger file goes as soon
-//     as that chunk falls below the retention floor, so for most of its life the
-//     index names transactions whose ledgers are gone. Ungated, those reads
-//     fail; gated, they are the not-found they should be.
-//   - Cold indexes open lazily, and the probe asks for them only after every hot
-//     index missed. A hot hit therefore pays no file open — which is the whole
-//     shape of the hot/cold split this benchmark reports.
-func (f *queryFixture) txReader(view *query.ReadView) (*txhash.TxReader, error) {
-	probe, err := txhash.NewTxReader(
-		view.HotTxHashIndexes(), view.ColdTxIndexes,
-		&viewLedgerSource{view: view}, f.Passphrase)
-	if err != nil {
-		return nil, fmt.Errorf("assemble the by-hash probe: %w", err)
-	}
-	return probe, nil
-}
-
-// viewLedgerSource reads a candidate ledger through the read view, so the
-// verification step routes to the same tier a served request would.
-type viewLedgerSource struct {
-	view *query.ReadView
-}
-
-func (s *viewLedgerSource) GetLedgerRaw(seq uint32) ([]byte, error) {
-	// A sub-genesis sequence would panic the chunk arithmetic. An index naming
-	// one is corrupt data, and it must fail the candidate, not the process.
-	if seq < chunk.FirstLedgerSeq {
-		return nil, stores.ErrNotFound
-	}
-	reader, err := s.view.Ledgers(chunk.IDFromLedger(seq))
-	if err != nil {
-		return nil, err
-	}
-	return reader.GetLedgerRaw(seq)
 }
