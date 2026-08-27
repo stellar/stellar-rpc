@@ -13,10 +13,12 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 // This file builds the corpora the per-type bodies draw their work from. Every
@@ -87,7 +89,7 @@ func (c *txHashCorpus) pick(rng *rand.Rand) ([32]byte, bool) {
 // it just produced must resolve — so if it does not, the passphrase is wrong and
 // the run stops here saying so.
 func buildTxHashCorpus(
-	logger *supportlog.Entry, f *queryFixture, missFraction float64, seed int64,
+	ctx context.Context, logger *supportlog.Entry, f *queryFixture, missFraction float64, seed int64,
 ) (*txHashCorpus, error) {
 	view, err := f.view()
 	if err != nil {
@@ -108,7 +110,7 @@ func buildTxHashCorpus(
 		return nil, fmt.Errorf("%w: chunks %v, ledgers [%d, %d]",
 			errNoTransactions, f.Chunks, f.FirstLedger, f.LastLedger)
 	}
-	if err := verifyPassphrase(view, f, hashes[0]); err != nil {
+	if err := verifyPassphrase(ctx, view, f, hashes[0]); err != nil {
 		return nil, err
 	}
 	logger.Infof("txhash corpus: %d hashes sampled, miss fraction %.2f", len(hashes), missFraction)
@@ -160,21 +162,19 @@ func sampleChunkTxHashes(
 }
 
 // verifyPassphrase confirms the configured network passphrase resolves a hash
-// the sampler just read out of a ledger. See buildTxHashCorpus for why a wrong
-// passphrase would otherwise pass silently.
-func verifyPassphrase(view *query.ReadView, f *queryFixture, hash [32]byte) error {
-	probe, err := f.txReader(view)
-	if err != nil {
-		return err
-	}
-	_, found, err := probe.GetTransaction(hash)
-	if err != nil {
-		return fmt.Errorf("verify --network-passphrase: %w", err)
-	}
-	if !found {
+// the sampler just read out of a ledger, through the same served by-hash path
+// the benchmark measures. See buildTxHashCorpus for why a wrong passphrase would
+// otherwise pass silently.
+func verifyPassphrase(ctx context.Context, view *query.ReadView, f *queryFixture, hash [32]byte) error {
+	reader := adapters.NewTransactionReader(f.Passphrase, nil)
+	_, err := reader.GetTransaction(adapters.WithView(ctx, view), xdr.Hash(hash))
+	if errors.Is(err, store.ErrNoTransaction) {
 		return fmt.Errorf(
 			"a transaction hash sampled straight from a ledger does not resolve: "+
 				"--network-passphrase=%q is wrong for this dataset", f.Passphrase)
+	}
+	if err != nil {
+		return fmt.Errorf("verify --network-passphrase: %w", err)
 	}
 	return nil
 }
