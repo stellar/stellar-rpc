@@ -10,8 +10,8 @@
 // interfaces.
 //
 // A query run reads a dataset an ingest run left on disk. It rebuilds the
-// catalog state those artifacts imply, then sweeps the requested query types at
-// each requested reader concurrency through query.ReadView — the daemon's read
+// catalog state those artifacts imply, then issues the requested query types at
+// each requested arrival rate through query.ReadView — the daemon's read
 // facade, so routing resolves each chunk's tier exactly as a served request
 // does — and times each query itself.
 //

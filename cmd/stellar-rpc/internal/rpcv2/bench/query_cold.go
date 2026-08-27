@@ -19,13 +19,9 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 )
 
-// defaultColdIters is --iters' default for a cold cell. Cold queries are the
-// slow tier, so the default is the smaller of the two.
-const defaultColdIters = 100
-
 func newQueryColdCommand() *cobra.Command {
 	var (
-		qf         = queryFlags{iters: defaultColdIters}
+		qf         = queryFlags{}
 		prof       profileFlags
 		startChunk uint32
 		numChunks  int
@@ -56,7 +52,7 @@ func newQueryColdCommand() *cobra.Command {
 	fs.StringVar(&coldDir, "cold-dir", "",
 		"root of the frozen artifact tree to query, as bench-ingest cold's --cold-out-dir laid it out (required)")
 	fs.BoolVar(&evict, "evict-page-cache", true,
-		"drop the cold artifacts from the OS page cache before each cell, so a cold read is really cold "+
+		"drop the cold artifacts from the OS page cache before each leg, so a cold read is really cold "+
 			"(Linux only; elsewhere the run records that it did not happen)")
 	markRequired(cmd, "start-chunk", "cold-dir")
 	return cmd
@@ -91,7 +87,7 @@ type coldQueryOptions struct {
 	StartChunk chunk.ID
 	NumChunks  int
 
-	// Plan is the validated --types × --query-concurrency sweep.
+	// Plan is the validated --types × --target-rps ladder.
 	Plan queryPlan
 
 	// OutDir receives the CSV report.
@@ -195,7 +191,7 @@ func openColdFixture(logger *supportlog.Entry, opts coldQueryOptions) (*queryFix
 }
 
 // coldArtifactPaths lists every file the benchmarked chunks are served from —
-// each chunk's artifacts plus the frozen tx-hash window indexes — so a cold cell
+// each chunk's artifacts plus the frozen tx-hash window indexes — so a cold leg
 // can drop them from the page cache. It reads the catalog rather than the disk,
 // so it names exactly what routing will open.
 func coldArtifactPaths(cat *catalog.Catalog, layout geometry.Layout, chunks []chunk.ID) []string {
@@ -279,7 +275,7 @@ func kindList(kinds []geometry.Kind) string {
 // supersedes.
 //
 // An absent index is not an error — a shallow dataset whose backfill built no
-// index is a real state, and the txhash cell reports the empty probe set rather
+// index is a real state, and the txhash leg reports the empty probe set rather
 // than the open failing for the three types that do not need it.
 func commitDiskTxHashIndex(
 	logger *supportlog.Entry, cat *catalog.Catalog, layout geometry.Layout, lo, hi chunk.ID,

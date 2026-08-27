@@ -26,7 +26,7 @@ import (
 // benchmark that sampled inside the measured pass would report its own setup.
 
 // The tx-hash sampler's stopping rule. It aims for a pool large enough that a
-// cell's iterations do not keep asking for the same few hashes, and it counts
+// leg's requests do not keep asking for the same few hashes, and it counts
 // hashes rather than ledgers because how many transactions a ledger carries is
 // a property of the dataset: a loaded one fills the pool in a handful of reads,
 // while a sparse one would otherwise stop with an unusably small pool. The read
