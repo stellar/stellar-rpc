@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+* Bumped dependencies to latest versions, including `grpc`, `go-jose` and `opentelemetry` ([#958](https://github.com/stellar/stellar-rpc/pull/958)).
+
 ## [v28.0.0](https://github.com/stellar/stellar-rpc/compare/v27.1.1...v28.0.0)
 
 ### Added
