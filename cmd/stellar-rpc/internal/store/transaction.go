@@ -31,9 +31,8 @@ type TransactionReader interface {
 	GetTransaction(ctx context.Context, hash xdr.Hash) (Transaction, error)
 }
 
-// ParseTransaction reshapes the SDK's raw-bytes transaction view into the
-// serving contract's Transaction. The byte fields alias the view's ledger
-// buffer rather than being copied.
+// ParseTransaction reshapes an SDK transaction view into a Transaction; the
+// byte fields alias the view's buffer.
 func ParseTransaction(txView ingest.LedgerTransactionView) Transaction {
 	return Transaction{
 		TransactionHash:  hex.EncodeToString(txView.Hash[:]),

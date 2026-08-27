@@ -52,10 +52,9 @@ type WithLedgerRawFn func(raw []byte) error
 //
 // GetLedger and GetLedgerView are one walk, not free-form point reads. Call
 // them with ascending, contiguous sequences, starting from the first call's
-// sequence. Read at most methods.LedgerScanLimit ledgers per Tx. This is
-// getTransactions' access pattern. The v1 (SQL) backend accepts any pattern;
-// the v2 backend serves the walk from a forward iterator primed on the first
-// call and fails loudly on anything else.
+// sequence. Read at most methods.LedgerScanLimit ledgers per Tx. The v1 (SQL)
+// backend accepts any pattern, while the v2 backend only walks from a forward
+// iterator primed on the first call.
 type LedgerReaderTx interface {
 	GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error)
 	GetLedgerView(ctx context.Context, sequence uint32) (xdr.LedgerCloseMetaView, bool, error)

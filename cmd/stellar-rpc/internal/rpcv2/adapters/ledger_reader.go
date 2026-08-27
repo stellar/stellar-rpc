@@ -150,11 +150,9 @@ func (tx *ledgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.L
 	return lcm, true, nil
 }
 
-// GetLedgerView is GetLedger without the decode; it advances the same walk.
-// The walk's Entry.Bytes alias the scan's scratch buffer, overwritten on the
-// next step, while the caller keeps slices of the view across steps
-// (getTransactions accumulates a page of transactions whose bytes alias their
-// ledgers) — so the bytes are copied out.
+// GetLedgerView is GetLedger without the decode and advances the same walk.
+// Entry.Bytes is overwritten on the next step and callers keep slices of the
+// view across steps, so clone.
 func (tx *ledgerReaderTx) GetLedgerView(ctx context.Context, sequence uint32) (xdr.LedgerCloseMetaView, bool, error) {
 	entry, found, err := tx.walk(ctx, sequence)
 	if err != nil || !found {
@@ -214,10 +212,8 @@ func (tx *ledgerReaderTx) Done() error {
 	return nil
 }
 
-// walk serves the ascending, contiguous per-ledger walk described on
-// store.LedgerReaderTx from a single ScanLedgers iterator primed on the first
-// call. The returned Entry's Bytes alias the reader's scratch buffer and are
-// only valid until the next call.
+// walk is the store.LedgerReaderTx walk: one ScanLedgers iterator primed on
+// the first call. The returned Entry.Bytes are valid only until the next call.
 func (tx *ledgerReaderTx) walk(ctx context.Context, sequence uint32) (ledger.Entry, bool, error) {
 	// The request duration limiter answers the client at the deadline but only
 	// abandons the handler goroutine — it cannot stop it. Without this check
