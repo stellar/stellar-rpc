@@ -202,6 +202,20 @@ The standing bar is 83a6ae47's:
 elegance is FEWER mental models, not more abstraction — a change that
 relocates a model rather than removing one fails even when it is free.
 
+- **Cold-routing trust model (ruling, 2026-08-27):** indexes are routing
+  hints; ledger data is the truth. Every candidate from any tier is verified
+  at use by locating the tx in the fetched ledger by its FULL hash. Cold
+  indexes false-positive routinely (MPHF answers for absent keys; 1-byte
+  fingerprint) and scan as soft candidates. Hot sealed runs store real
+  16-byte blinded keys, so a probe matches only on same-hash or a ~2^-128
+  keyed collision — a failed hot verification is treated as corruption (hard
+  ErrInconsistent + operator metric, no fallthrough). A TRUE collision is
+  moot at read time regardless: the same duplicate blinded key
+  deterministically fails the chunk's cold index build (streamhash rejects
+  duplicates loudly), so the read path cannot save a colliding chunk — only
+  report it sooner. Verified-candidate fallthrough and per-hit row
+  verification were both considered and rejected (the latter measured: a
+  point-read on ~97% of hot hits).
 - **A shared `Cursor[K]` interface over the merge cursors — REJECTED.** The
   four cursors carry four different end/error/cancel models: txhash cold's
   `streamReader.advance` returns a bare bool and the caller re-reads
