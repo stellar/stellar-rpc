@@ -27,7 +27,8 @@ func evictFile(path string) error {
 		return fmt.Errorf("open %s: %w", path, err)
 	}
 	defer func() { _ = f.Close() }()
-	if err := unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_DONTNEED); err != nil {
+	fd := int(f.Fd()) //nolint:gosec // an open descriptor is a small non-negative number and fits an int
+	if err := unix.Fadvise(fd, 0, 0, unix.FADV_DONTNEED); err != nil {
 		return fmt.Errorf("fadvise dontneed %s: %w", path, err)
 	}
 	return nil
