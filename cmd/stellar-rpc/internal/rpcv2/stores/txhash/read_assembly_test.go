@@ -1,15 +1,20 @@
 package txhash
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -22,23 +27,26 @@ var (
 	_ HashIndex    = (*HotStore)(nil)
 	_ HashIndex    = (*ColdReader)(nil)
 	_ LedgerSource = mapLedgerSource(nil)
+	_ LedgerSource = (*poisoningLedgerSource)(nil)
 )
 
-// mapLedgerSource is an in-memory LedgerSource; an unheld seq returns ErrOutOfRange.
+// mapLedgerSource is an in-memory LedgerSource shaped like the cold tier: it
+// lends storage it already holds, so the release is a no-op. An unheld seq
+// returns ErrOutOfRange.
 type mapLedgerSource map[uint32][]byte
 
-func (m mapLedgerSource) GetLedgerRaw(seq uint32) ([]byte, error) {
+func (m mapLedgerSource) WithLedger(seq uint32, fn func(raw []byte) error) error {
 	raw, ok := m[seq]
 	if !ok {
-		return nil, stores.ErrOutOfRange
+		return stores.ErrOutOfRange
 	}
-	return raw, nil
+	return fn(raw[:len(raw):len(raw)])
 }
 
-// errLedgerSource always fails GetLedgerRaw with a fixed error.
+// errLedgerSource always fails the borrow with a fixed error.
 type errLedgerSource struct{ err error }
 
-func (e errLedgerSource) GetLedgerRaw(uint32) ([]byte, error) { return nil, e.err }
+func (e errLedgerSource) WithLedger(uint32, func([]byte) error) error { return e.err }
 
 // fakeIndex is a scripted HashIndex for driving the assembly without a real index.
 type fakeIndex struct {
@@ -433,4 +441,291 @@ func TestTxReader_FanOutAcrossColdIndexes(t *testing.T) {
 		require.True(t, found)
 		assert.Equal(t, seq, txv.LedgerSequence)
 	}
+}
+
+// poisoningLedgerSource mirrors the hot store's shape — a pool of decode
+// buffers, lent and returned — and scribbles over every buffer before filling
+// it. A view that outlived its borrow, or two lookups sharing one buffer, then
+// shows up as corrupt bytes rather than as bytes that happen to still be right.
+// It also lends deliberately fat buffers, so anything reading past the ledger's
+// length reads poison.
+type poisoningLedgerSource struct {
+	src   mapLedgerSource
+	pool  sync.Pool
+	loans atomic.Int64
+}
+
+func newPoisoningSource(src mapLedgerSource) *poisoningLedgerSource {
+	p := &poisoningLedgerSource{src: src}
+	p.pool.New = func() any { return new([]byte) }
+	return p
+}
+
+func (p *poisoningLedgerSource) WithLedger(seq uint32, fn func(raw []byte) error) error {
+	raw, ok := p.src[seq]
+	if !ok {
+		return stores.ErrOutOfRange
+	}
+	p.loans.Add(1)
+	buf, _ := p.pool.Get().(*[]byte)
+	defer p.pool.Put(buf)
+	// Scribble over the whole buffer, including the slack a previous, longer
+	// ledger left behind, then refill only the ledger's own length.
+	full := (*buf)[:cap(*buf)]
+	for i := range full {
+		full[i] = 0xEE
+	}
+	*buf = append((*buf)[:0], raw...)
+	lent := *buf
+	return fn(lent[:len(lent):len(lent)])
+}
+
+// directView is the pre-fix extraction: the SDK reading the whole ledger.
+func directView(t *testing.T, fl fixtureLedgers, hash [32]byte) ingest.LedgerTransactionView {
+	t.Helper()
+	seq, ok := fl.byHash[hash]
+	require.True(t, ok)
+	v, found, err := ingest.LedgerTransactionViewByHash(
+		xdr.LedgerCloseMetaView(fl.src[seq]), hash, network.TestNetworkPassphrase)
+	require.NoError(t, err)
+	require.True(t, found)
+	return v
+}
+
+// mergeLedgers folds several fixtures into one probe-able set, so a test can
+// mix ledgers of very different sizes.
+func mergeLedgers(fls ...fixtureLedgers) fixtureLedgers {
+	out := fixtureLedgers{src: mapLedgerSource{}, byHash: map[[32]byte]uint32{}}
+	for _, fl := range fls {
+		maps.Copy(out.src, fl.src)
+		maps.Copy(out.byHash, fl.byHash)
+		out.entries = append(out.entries, fl.entries...)
+	}
+	return out
+}
+
+// TestTxReader_LookupsMatchDirectExtraction is the differential guard on the
+// whole read: whatever the ledger source does with its buffers, the transaction
+// a lookup returns must be byte-for-byte what the SDK extracts straight from the
+// ledger. The cases differ only in the source's buffer behavior and in what
+// each additionally proves, so they run as one table over the same corpus.
+func TestTxReader_LookupsMatchDirectExtraction(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// fixture builds the ledgers; lopsided ones exercise a buffer grown by
+		// a big ledger and then handed to a small one.
+		fixture func(t *testing.T) fixtureLedgers
+		// source is the probe's ledger source over that fixture.
+		source func(fl fixtureLedgers) LedgerSource
+		// before runs lookups whose results are discarded, to leave the source
+		// in the state the case is really about.
+		before func(t *testing.T, r *TxReader, fl fixtureLedgers)
+		// after asserts whatever the case adds beyond byte-equality.
+		after func(t *testing.T, fl fixtureLedgers, src LedgerSource)
+	}{
+		{
+			name:    "source lends its own storage",
+			fixture: func(t *testing.T) fixtureLedgers { return buildLedgers(t, []uint32{100, 200}, 3) },
+			source:  func(fl fixtureLedgers) LedgerSource { return fl.src },
+		},
+		{
+			name:    "source recycles a poisoned buffer",
+			fixture: func(t *testing.T) fixtureLedgers { return buildLedgers(t, []uint32{100, 200}, 3) },
+			source:  func(fl fixtureLedgers) LedgerSource { return newPoisoningSource(fl.src) },
+			// Churn the pool first: every buffer a lookup returns is poisoned
+			// and refilled several times over, so a result that still aliased
+			// one comes back corrupt rather than coincidentally intact.
+			before: func(t *testing.T, r *TxReader, fl fixtureLedgers) {
+				t.Helper()
+				for range 4 {
+					for hash := range fl.byHash {
+						_, _, err := r.GetTransaction(hash)
+						require.NoError(t, err)
+					}
+				}
+			},
+			after: func(t *testing.T, _ fixtureLedgers, src LedgerSource) {
+				t.Helper()
+				p, ok := src.(*poisoningLedgerSource)
+				require.True(t, ok)
+				assert.Positive(t, p.loans.Load(), "the probe must have borrowed")
+			},
+		},
+		{
+			name: "small ledger read through a buffer a big one grew",
+			fixture: func(t *testing.T) fixtureLedgers {
+				t.Helper()
+				fl := mergeLedgers(buildLedgers(t, []uint32{100}, 40), buildLedgers(t, []uint32{200}, 1))
+				require.Greater(t, len(fl.src[100]), 4*len(fl.src[200]),
+					"the fixture must actually be lopsided")
+				return fl
+			},
+			source: func(fl fixtureLedgers) LedgerSource { return newPoisoningSource(fl.src) },
+			// Read the big ledger first so the pooled buffer is grown, and its
+			// slack still holds the big ledger's bytes.
+			before: func(t *testing.T, r *TxReader, fl fixtureLedgers) {
+				t.Helper()
+				for hash, seq := range fl.byHash {
+					if seq == 100 {
+						_, found, err := r.GetTransaction(hash)
+						require.NoError(t, err)
+						require.True(t, found)
+					}
+				}
+			},
+		},
+		{
+			name: "lopsided ledgers from a source that lends its own storage",
+			fixture: func(t *testing.T) fixtureLedgers {
+				t.Helper()
+				return mergeLedgers(buildLedgers(t, []uint32{100}, 40), buildLedgers(t, []uint32{200}, 1))
+			},
+			source: func(fl fixtureLedgers) LedgerSource { return fl.src },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fl := tc.fixture(t)
+			source := tc.source(fl)
+			reader, err := NewTxReader(
+				[]HashIndex{fakeIndex{out: fl.byHash}}, nil, source, network.TestNetworkPassphrase)
+			require.NoError(t, err)
+
+			want := map[[32]byte]ingest.LedgerTransactionView{}
+			for hash := range fl.byHash {
+				want[hash] = directView(t, fl, hash)
+			}
+			// Nothing may write back into the fixture: a source that lends its
+			// own storage must get it back untouched, and one that lends a copy
+			// must never reach past it.
+			untouched := map[uint32][]byte{}
+			for seq, raw := range fl.src {
+				untouched[seq] = bytes.Clone(raw)
+			}
+			if tc.before != nil {
+				tc.before(t, reader, fl)
+			}
+			for hash := range fl.byHash {
+				got, found, err := reader.GetTransaction(hash)
+				require.NoError(t, err)
+				require.Truef(t, found, "hash %x should resolve", hash)
+				assert.Equalf(t, want[hash], got, "lookup differs for hash %x", hash)
+			}
+			for seq, raw := range fl.src {
+				assert.Equalf(t, untouched[seq], raw, "ledger %d was written through", seq)
+			}
+			if tc.after != nil {
+				tc.after(t, fl, source)
+			}
+		})
+	}
+}
+
+// TestCompactView_CopiesOutOfTheLedgerBuffer pins the copy-out contract
+// directly: after it, no field points into the buffer the view was read from,
+// the bytes are unchanged, an absent field stays absent, and no slice can be
+// appended into its neighbor.
+func TestCompactView_CopiesOutOfTheLedgerBuffer(t *testing.T) {
+	buf := []byte("ENVELOPERESULTMETADIAG1DIAG2TXEVOPAOPB")
+	at := func(s string) []byte {
+		i := bytes.Index(buf, []byte(s))
+		require.GreaterOrEqual(t, i, 0)
+		return buf[i : i+len(s)]
+	}
+	in := ingest.LedgerTransactionView{
+		Hash:              [32]byte{1, 2, 3},
+		ApplicationOrder:  7,
+		FeeBump:           true,
+		Successful:        true,
+		Envelope:          at("ENVELOPE"),
+		Result:            at("RESULT"),
+		Meta:              at("META"),
+		DiagnosticEvents:  [][]byte{at("DIAG1"), at("DIAG2")},
+		TransactionEvents: [][]byte{at("TXEV")},
+		ContractEvents:    [][][]byte{{at("OPA")}, nil, {at("OPB"), buf[:0]}},
+		LedgerSequence:    99,
+		LedgerCloseTime:   1234,
+	}
+	want := ingest.LedgerTransactionView{
+		Hash:              in.Hash,
+		ApplicationOrder:  in.ApplicationOrder,
+		FeeBump:           in.FeeBump,
+		Successful:        in.Successful,
+		Envelope:          []byte("ENVELOPE"),
+		Result:            []byte("RESULT"),
+		Meta:              []byte("META"),
+		DiagnosticEvents:  [][]byte{[]byte("DIAG1"), []byte("DIAG2")},
+		TransactionEvents: [][]byte{[]byte("TXEV")},
+		ContractEvents:    [][][]byte{{[]byte("OPA")}, nil, {[]byte("OPB"), {}}},
+		LedgerSequence:    in.LedgerSequence,
+		LedgerCloseTime:   in.LedgerCloseTime,
+	}
+
+	out := compactView(in)
+	// Destroy the source; anything the view still aliased goes with it.
+	for i := range buf {
+		buf[i] = 0xFF
+	}
+	assert.Equal(t, want, out)
+
+	// Every slice is capped to its own length, so appending to one cannot reach
+	// the next field in the shared backing array.
+	for name, b := range map[string][]byte{
+		"envelope": out.Envelope, "result": out.Result, "meta": out.Meta,
+		"diag0": out.DiagnosticEvents[0], "txev0": out.TransactionEvents[0],
+		"op0": out.ContractEvents[0][0],
+	} {
+		assert.Equalf(t, len(b), cap(b), "%s must not be appendable into its neighbor", name)
+	}
+
+	// A view with nothing to copy stays a view with nothing to copy.
+	assert.Equal(t, ingest.LedgerTransactionView{}, compactView(ingest.LedgerTransactionView{}))
+}
+
+// TestTxReader_ConcurrentBorrowsAreIsolated runs many lookups at once
+// through the pool. Each borrows a buffer the previous borrower poisoned, so a
+// view that outlived its borrow — or two lookups sharing one buffer — comes back
+// as bytes that do not match the ledger. Run under -race this also covers the
+// pool handoff itself.
+func TestTxReader_ConcurrentBorrowsAreIsolated(t *testing.T) {
+	fl := buildLedgers(t, []uint32{100, 200, 300}, 4)
+	poisoning := newPoisoningSource(fl.src)
+	reader, err := NewTxReader(
+		[]HashIndex{fakeIndex{out: fl.byHash}}, nil, poisoning, network.TestNetworkPassphrase)
+	require.NoError(t, err)
+
+	hashes := make([][32]byte, 0, len(fl.byHash))
+	want := make(map[[32]byte]ingest.LedgerTransactionView, len(fl.byHash))
+	for hash := range fl.byHash {
+		hashes = append(hashes, hash)
+		want[hash] = directView(t, fl, hash)
+	}
+
+	const goroutines, rounds = 8, 30
+	failures := make(chan error, goroutines)
+	var wg sync.WaitGroup
+	for g := range goroutines {
+		wg.Go(func() {
+			for i := range rounds {
+				hash := hashes[(g+i)%len(hashes)]
+				got, found, err := reader.GetTransaction(hash)
+				switch {
+				case err != nil:
+					failures <- fmt.Errorf("hash %x: %w", hash, err)
+				case !found:
+					failures <- fmt.Errorf("hash %x: not found", hash)
+				case !assert.ObjectsAreEqual(want[hash], got):
+					failures <- fmt.Errorf("hash %x: view differs under concurrency", hash)
+				default:
+					continue
+				}
+				return
+			}
+		})
+	}
+	wg.Wait()
+	close(failures)
+	for err := range failures {
+		require.NoError(t, err)
+	}
+	assert.EqualValues(t, goroutines*rounds, poisoning.loans.Load())
 }

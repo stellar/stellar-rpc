@@ -2,6 +2,7 @@ package adapters
 
 import (
 	"context"
+	"runtime"
 	"sync/atomic"
 	"testing"
 
@@ -262,4 +263,55 @@ func TestGetTransaction_HotIndexInconsistencyIsCounted(t *testing.T) {
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, store.ErrNoTransaction)
 	assert.Equal(t, int32(1), metrics.n.Load())
+}
+
+// TestGetTransaction_AllocatesPerTransactionNotPerLedger is the standing guard
+// on the fix: a found lookup must cost transaction-sized garbage, not
+// ledger-sized. Measured in BYTES rather than allocation count, because the
+// regression this protects against is one object of the wrong size.
+func TestGetTransaction_AllocatesPerTransactionNotPerLedger(t *testing.T) {
+	cat := openTestCatalog(t)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
+	// A ledger many times larger than any one of its transactions, so the two
+	// scales are far enough apart for the assertion to mean something.
+	specs := make([]txSpec, 64)
+	lcm, txs := lcmWithTxs(t, testChunk.FirstLedger(), specs...)
+	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
+	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
+	ctx := viewCtx(t, r)
+	hash := txs[len(txs)/2].hash
+
+	got, err := reader.GetTransaction(ctx, hash)
+	require.NoError(t, err)
+	require.Equal(t, hash.HexString(), got.TransactionHash)
+
+	perCall := allocBytesPerRun(t, 40, func() {
+		if _, err := reader.GetTransaction(ctx, hash); err != nil {
+			t.Error(err)
+		}
+	})
+	// Generous: the point is the ORDER, not a tight budget. Without the pooled
+	// buffer this is at least one whole ledger per call.
+	assert.Less(t, perCall, uint64(len(lcm)),
+		"a found lookup allocated a ledger's worth (%d bytes) per call; ledger is %d bytes",
+		perCall, len(lcm))
+}
+
+// allocBytesPerRun reports the average bytes fn allocates per call, after a
+// warm-up pass so one-time costs (caches, the buffer pool filling) are not
+// charged to the measurement.
+func allocBytesPerRun(t *testing.T, runs int, fn func()) uint64 {
+	t.Helper()
+	for range runs {
+		fn()
+	}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	for range runs {
+		fn()
+	}
+	runtime.ReadMemStats(&after)
+	return (after.TotalAlloc - before.TotalAlloc) / uint64(runs)
 }
