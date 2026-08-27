@@ -50,8 +50,6 @@ func latestLedgerResponse(view xdr.LedgerCloseMetaView, sequence uint32,
 	if err != nil {
 		return protocol.GetLatestLedgerResponse{}, err
 	}
-	// Must* accessors panic with *ViewError on malformed fields and Try
-	// recovers it, so the extraction needs a single error check.
 	return xdr.Try(func() protocol.GetLatestLedgerResponse {
 		header := headerEntry.MustHeader()
 		return protocol.GetLatestLedgerResponse{

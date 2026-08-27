@@ -108,8 +108,7 @@ func (r *LedgerReader) StreamLedgerRange(
 			return ctx.Err()
 		}
 		// Entry.Bytes aliases the reader's scratch buffer and is overwritten
-		// on the next iteration step — exactly the StreamLedgerViewFn
-		// contract (the view is valid for the duration of the call only).
+		// on the next iteration, so the view is invalid after the call.
 		if err := f(xdr.LedgerCloseMetaView(entry.Bytes)); err != nil {
 			return err
 		}

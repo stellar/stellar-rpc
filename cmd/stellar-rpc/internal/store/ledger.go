@@ -12,8 +12,7 @@ import (
 var ErrEmptyDB = errors.New("DB is empty")
 
 // StreamLedgerViewFn receives each streamed ledger as a view over its raw
-// bytes. The view is only valid for the duration of the call: a backend may
-// hand out a buffer it reuses for the next ledger, so callers that need the
+// bytes. The view is only valid for the duration of the call, so callers that
 // bytes afterwards must copy them.
 type StreamLedgerViewFn func(xdr.LedgerCloseMetaView) error
 
