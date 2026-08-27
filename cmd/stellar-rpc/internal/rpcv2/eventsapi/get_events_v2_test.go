@@ -6,6 +6,7 @@ package eventsapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -240,6 +241,18 @@ func TestResponseErrorInvertedRangeIsCursorMalformed(t *testing.T) {
 	requireErrorData(t, err, protocol.ErrorReasonCursorMalformed, &data)
 	assert.Equal(t, uint32(2), data.OldestLedger)
 	assert.Equal(t, uint32(9), data.LatestLedger)
+}
+
+// Internal errors carry a package prefix. A client has no use for it.
+func TestClientMessageDropsLayerPrefixes(t *testing.T) {
+	for in, want := range map[string]string{
+		"query: malformed cursor: base64: bad input":          "malformed cursor: base64: bad input",
+		"rpcv2: xdrInputFormat \"json\" is not supported yet": "xdrInputFormat \"json\" is not supported yet",
+		"json: unknown field \"maxLedgor\"":                   "unknown field \"maxLedgor\"",
+		"no prefix at all":                                    "no prefix at all",
+	} {
+		assert.Equal(t, want, clientMessage(errors.New(in)))
+	}
 }
 
 func TestGetEventsV2_MalformedCursorReportsTheServedRange(t *testing.T) {

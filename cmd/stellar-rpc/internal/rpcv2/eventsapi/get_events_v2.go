@@ -62,7 +62,17 @@ func decodeError(err error) error {
 			message = detail
 		}
 	}
-	return invalidParams(strings.TrimPrefix(message, "json: "))
+	return invalidParams(clientMessage(errors.New(message)))
+}
+
+// clientMessage drops the package prefixes internal errors carry. They say
+// which layer produced the error, which a client has no use for.
+func clientMessage(err error) string {
+	message := err.Error()
+	for _, prefix := range []string{"json: ", "query: ", "rpcv2: "} {
+		message = strings.TrimPrefix(message, prefix)
+	}
+	return message
 }
 
 func invalidParams(message string) error {
@@ -220,7 +230,7 @@ func responseError(err error, oldest, latest uint32) error {
 	}
 	var outOfRange *query.RangeError
 	if errors.As(err, &outOfRange) {
-		return jrpcError(err.Error(), protocol.LedgerOutOfRangeErrorData{
+		return jrpcError(clientMessage(err), protocol.LedgerOutOfRangeErrorData{
 			MissingLedger: outOfRange.Requested,
 			OldestLedger:  outOfRange.Oldest,
 			LatestLedger:  outOfRange.Latest,
@@ -231,15 +241,13 @@ func responseError(err error, oldest, latest uint32) error {
 		errors.Is(err, query.ErrCursorUnknownVersion),
 		errors.Is(err, query.ErrPositionMismatch),
 		errors.Is(err, query.ErrInvertedRange):
-		return jrpcError(err.Error(), protocol.CursorMalformedErrorData{
+		return jrpcError(clientMessage(err), protocol.CursorMalformedErrorData{
 			OldestLedger: oldest,
 			LatestLedger: latest,
 		})
 	case errors.Is(err, query.ErrInvalidLimit),
 		errors.Is(err, errJSONInputFormatUnsupported):
-		return jrpcError(err.Error(), protocol.InvalidParamsErrorData{
-			Reason: protocol.ErrorReasonInvalidParams,
-		})
+		return invalidParams(clientMessage(err))
 	}
 	// Cancellation and the deadline pass through. jrpc2 codes them
 	// itself, and those codes say more than an internal error.
@@ -263,7 +271,7 @@ func jrpcError(message string, data any) error {
 // converter, because the term index matches on a topic's canonical bytes.
 // Deferred to #940.
 var errJSONInputFormatUnsupported = errors.New(
-	"rpcv2: xdrInputFormat \"json\" is not supported yet")
+	"xdrInputFormat \"json\" is not supported yet")
 
 // eventScope converts a validated range-form request into the pager's scope.
 // An absent ascending maxLedger stays nil, the open bound. A descending one
