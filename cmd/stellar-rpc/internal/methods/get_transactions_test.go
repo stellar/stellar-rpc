@@ -32,7 +32,7 @@ var expectedTransactionInfo = protocol.TransactionInfo{
 		FeeBump:             false,
 		Ledger:              1,
 		EnvelopeXDR:         "AAAAAgAAAQCAAAAAAAAAAD8MNL+TrQ2ZcdBMzJD3BVEcg4qtlzSkovsNegP8f+iaAAAAAQAAAAD///+dAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==", //nolint:lll
-		ResultMetaXDR:       "AAAAAwAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		ResultMetaXDR:       "AAAAAwAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAABAAAAAA==",
 		ResultXDR:           "AAAAAAAAAGQAAAAAAAAAAAAAAAA=",
 		DiagnosticEventsXDR: []string{},
 		Events: protocol.Events{
@@ -323,7 +323,11 @@ func createTestLedger(sequence uint32) xdr.LedgerCloseMeta {
 		TxApplyProcessing: xdr.TransactionMeta{
 			V:          3,
 			Operations: &[]xdr.OperationMeta{},
-			V3:         &xdr.TransactionMetaV3{},
+			// The envelope is soroban (Ext V1), so its V3 meta must carry
+			// SorobanMeta, as on the real network.
+			V3: &xdr.TransactionMetaV3{SorobanMeta: &xdr.SorobanTransactionMeta{
+				ReturnValue: xdr.ScVal{Type: xdr.ScValTypeScvVoid},
+			}},
 		},
 		Result: xdr.TransactionResultPair{
 			TransactionHash: txHash(sequence),
