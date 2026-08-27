@@ -136,6 +136,7 @@ func TestValidateConfig_RejectsMalformed(t *testing.T) {
 	}
 }
 
+//nolint:funlen // one table, one rejection per row — splitting the table hides the coverage, not the length
 func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 	uintPtr := func(v uint) *uint { return &v }
 	uint32Ptr := func(v uint32) *uint32 { return &v }
