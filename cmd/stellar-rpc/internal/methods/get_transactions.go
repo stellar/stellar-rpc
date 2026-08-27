@@ -3,9 +3,7 @@ package methods
 import (
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
-	"io"
 	"strconv"
 
 	"github.com/creachadair/jrpc2"
@@ -74,31 +72,29 @@ func (h transactionsRPCHandler) initializePagination(
 	return *start, requestCursor, limit, nil
 }
 
-// fetchLedgerData calls the meta table to fetch the corresponding ledger data.
-func (h transactionsRPCHandler) fetchLedgerData(ctx context.Context, ledgerSeq uint32,
+// fetchLedgerViewData calls the meta table to fetch the corresponding ledger data.
+func (h transactionsRPCHandler) fetchLedgerViewData(ctx context.Context, ledgerSeq uint32,
 	readTx store.LedgerReaderTx,
-) (xdr.LedgerCloseMeta, error) {
-	ledger, found, err := readTx.GetLedger(ctx, ledgerSeq)
+) (xdr.LedgerCloseMetaView, error) {
+	ledgerView, found, err := readTx.GetLedgerView(ctx, ledgerSeq)
 	if err != nil {
-		return ledger, &jrpc2.Error{
+		return ledgerView, &jrpc2.Error{
 			Code:    jrpc2.InternalError,
 			Message: err.Error(),
 		}
 	} else if !found {
-		return ledger, &jrpc2.Error{
+		return ledgerView, &jrpc2.Error{
 			Code:    jrpc2.InvalidParams,
 			Message: fmt.Sprintf("database does not contain metadata for ledger: %d", ledgerSeq),
 		}
 	}
-	return ledger, nil
+	return ledgerView, nil
 }
 
-// processTransactionsInLedger cycles through all the transactions in a ledger, extracts the transaction info
+// processTransactionsInLedgerView cycles through all the transactions in a ledger, extracts the transaction info
 // and builds the list of transactions.
-//
-//nolint:cyclop,funlen // one linear pagination pass; splitting would scatter the cursor math
-func (h transactionsRPCHandler) processTransactionsInLedger(
-	ledger xdr.LedgerCloseMeta, start toid.ID,
+func (h transactionsRPCHandler) processTransactionsInLedgerView(
+	ledger xdr.LedgerCloseMetaView, start toid.ID,
 	txns *[]protocol.TransactionInfo, limit uint,
 	format string,
 ) (*toid.ID, bool, error) {
@@ -106,55 +102,26 @@ func (h transactionsRPCHandler) processTransactionsInLedger(
 	if err != nil {
 		return nil, false, &jrpc2.Error{Code: jrpc2.InvalidParams, Message: err.Error()}
 	}
-
-	reader, err := ingest.NewLedgerTransactionReaderFromLedgerCloseMeta(h.networkPassphrase, ledger)
-	if err != nil {
-		return nil, false, &jrpc2.Error{
-			Code:    jrpc2.InternalError,
-			Message: err.Error(),
-		}
-	}
-
-	startTxIdx := 1
-	ledgerSeq := ledger.LedgerSequence()
-	ledgerSeqInt32, err := uint32ToInt32(ledgerSeq, "ledger sequence")
+	ledgerSeq, err := ledger.LedgerSequence()
 	if err != nil {
 		return nil, false, &jrpc2.Error{Code: jrpc2.InternalError, Message: err.Error()}
 	}
+	ledgerSeqInt32 := int32(ledgerSeq) //nolint:gosec // safe until ledger seq exceeds 2147483647
+
+	// The cursor's tx-order offset only applies within the cursor's own ledger.
+	startTxIdx := 1
 	if ledgerSeqInt32 == start.LedgerSequence {
 		startTxIdx = int(start.TransactionOrder)
-		if ierr := reader.Seek(startTxIdx - 1); ierr != nil && !errors.Is(ierr, io.EOF) {
-			return nil, false, &jrpc2.Error{
-				Code:    jrpc2.InternalError,
-				Message: ierr.Error(),
-			}
-		}
 	}
-
-	txCount := ledger.CountTransactions()
+	remaining := limitInt - len(*txns)
+	views, err := ingest.LedgerTransactionViewRange(ledger, startTxIdx-1, remaining, h.networkPassphrase)
+	if err != nil {
+		return nil, false, &jrpc2.Error{Code: jrpc2.InternalError, Message: err.Error()}
+	}
 	cursor := toid.New(ledgerSeqInt32, 0, 1)
-	for i := startTxIdx; i <= txCount; i++ {
-		cursor.TransactionOrder = int32(i)
-
-		ingestTx, err := reader.Read()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return nil, false, &jrpc2.Error{
-				Code:    jrpc2.InvalidParams,
-				Message: err.Error(),
-			}
-		}
-
-		tx, err := store.ParseTransaction(ledger, ingestTx)
-		if err != nil {
-			return nil, false, &jrpc2.Error{
-				Code:    jrpc2.InternalError,
-				Message: err.Error(),
-			}
-		}
-
+	for _, v := range views {
+		tx := store.ParseTransaction(v)
+		cursor.TransactionOrder = tx.ApplicationOrder
 		txInfo := protocol.TransactionInfo{
 			TransactionDetails: protocol.TransactionDetails{
 				TransactionHash:  tx.TransactionHash,
@@ -272,12 +239,12 @@ func (h transactionsRPCHandler) getTransactionsByLedgerSequence(ctx context.Cont
 				Message: "cursor ledger sequence cannot be negative",
 			}
 		}
-		ledger, err := h.fetchLedgerData(ctx, uint32(ledgerSeq), readTx)
+		ledgerView, err := h.fetchLedgerViewData(ctx, uint32(ledgerSeq), readTx)
 		if err != nil {
 			return protocol.GetTransactionsResponse{}, err
 		}
 
-		cursor, done, err = h.processTransactionsInLedger(ledger, start, &txns, limit, request.Format)
+		cursor, done, err = h.processTransactionsInLedgerView(ledgerView, start, &txns, limit, request.Format)
 		if err != nil {
 			return protocol.GetTransactionsResponse{}, err
 		}
