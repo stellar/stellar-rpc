@@ -10,6 +10,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
@@ -116,9 +117,10 @@ func TestLedgerReader_Hot(t *testing.T) {
 
 	lr, err := a.Ledgers(c)
 	require.NoError(t, err)
-	raw, err := lr.GetLedgerRaw(c.FirstLedger())
-	require.NoError(t, err)
-	assert.NotEmpty(t, raw, "the hot facade returns the committed ledger")
+	require.NoError(t, lr.WithLedger(c.FirstLedger(), func(raw []byte) error {
+		assert.NotEmpty(t, raw, "the hot facade returns the committed ledger")
+		return nil
+	}))
 }
 
 // TestEventReader_Hot resolves the same ready hot chunk as the common
@@ -163,7 +165,7 @@ func TestLedgerReader_ColdRoutesToColdOpen(t *testing.T) {
 	// fails at the chunk's pack path — proving the cold branch (not hot /
 	// unavailable) and the right target. Read-back over a real pack is covered by
 	// the ledger store tests and the daemon e2e.
-	_, err = lr.GetLedgerRaw(c.FirstLedger())
+	err = lr.WithLedger(c.FirstLedger(), func([]byte) error { return nil })
 	require.Error(t, err)
 	require.ErrorContains(t, err, cat.Layout().LedgerPackPath(c), "cold reads target the chunk's pack path")
 }
@@ -246,4 +248,27 @@ func TestUnavailableResolves_CountsNoServingStore(t *testing.T) {
 	_, err = a.Events(0)
 	require.ErrorIs(t, err, ErrUnavailable)
 	assert.Equal(t, before+2, UnavailableResolves())
+}
+
+// TestReadViewWithLedger_SubGenesisIsNotFound pins the guard that keeps corrupt
+// input from crashing the process: chunk.IDFromLedger panics below the genesis
+// ledger, so a sequence naming one must be rejected before routing sees it, with
+// fn never invoked.
+func TestReadViewWithLedger_SubGenesisIsNotFound(t *testing.T) {
+	const c chunk.ID = 5
+	a, _ := viewFor(t, func(cat *catalog.Catalog, r *Registry) {
+		db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+		require.NoError(t, cat.FlipHotReady(c))
+		r.PublishHandle(c, db)
+	})
+	defer a.Release()
+
+	for _, seq := range []uint32{0, chunk.FirstLedgerSeq - 1} {
+		called := false
+		err := a.WithLedger(seq, func([]byte) error { called = true; return nil })
+		assert.ErrorIsf(t, err, stores.ErrNotFound, "seq %d", seq)
+		assert.Falsef(t, called, "seq %d must not reach the ledger read", seq)
+	}
 }

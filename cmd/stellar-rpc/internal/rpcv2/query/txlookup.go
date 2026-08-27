@@ -15,10 +15,12 @@ import (
 // so routing cannot resolve it directly; instead the getTransaction path probes
 // the hot transaction indexes (a match is definitive) and then the frozen window
 // indexes (a match is a candidate, verified against the full hash). These two
-// methods supply what that path needs from the read view — the hot indexes and
-// the (lazily opened) cold window indexes, each wrapped in the servable-window
-// gate (see windowGatedIndex) — leaving the probe order and candidate
-// verification to the lookup itself.
+// methods supply what that path needs from the read view — the hot indexes, the
+// (lazily opened) cold window indexes, each wrapped in the servable-window gate
+// (see windowGatedIndex) — leaving the probe order and candidate verification
+// to the lookup itself. With the routed ledger read the view already offers
+// (WithLedger, in resolve.go), that makes the read view the probe's whole
+// ledger-side dependency, so nothing has to wrap it to hand it over.
 
 // HotTxHashIndexes returns the transaction hash index of every published hot chunk,
 // newest chunk first. A hot match is exact and definitive, so the newest indexes
