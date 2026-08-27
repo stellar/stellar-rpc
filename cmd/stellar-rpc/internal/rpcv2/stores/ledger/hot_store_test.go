@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"bytes"
+	"errors"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -51,20 +52,20 @@ func TestHotStore_AddGetRoundTripVerbatim(t *testing.T) {
 	h := openTestHotStore(t)
 
 	// Miss.
-	_, err := h.GetLedgerRaw(42)
+	_, err := readLedgerRaw(h, 42)
 	require.ErrorIs(t, err, stores.ErrNotFound)
 
 	// Single-entry write.
 	payload := []byte("arbitrary opaque bytes the store has no opinion about")
 	require.NoError(t, addLedgers(h, Entry{Seq: 42, Bytes: payload}))
-	got, err := h.GetLedgerRaw(42)
+	got, err := readLedgerRaw(h, 42)
 	require.NoError(t, err)
 	assert.Equal(t, payload, got)
 
 	// Overwrite.
 	updated := []byte("different bytes")
 	require.NoError(t, addLedgers(h, Entry{Seq: 42, Bytes: updated}))
-	got, err = h.GetLedgerRaw(42)
+	got, err = readLedgerRaw(h, 42)
 	require.NoError(t, err)
 	assert.Equal(t, updated, got)
 
@@ -85,7 +86,7 @@ func TestHotStore_AddLedgersIdempotentRetry(t *testing.T) {
 	require.NoError(t, addLedgers(h, Entry{Seq: 7, Bytes: payload}))
 	require.NoError(t, addLedgers(h, Entry{Seq: 7, Bytes: payload})) // retry
 
-	got, err := h.GetLedgerRaw(7)
+	got, err := readLedgerRaw(h, 7)
 	require.NoError(t, err)
 	assert.Equal(t, payload, got)
 
@@ -126,7 +127,7 @@ func TestHotStore_AddLedgersMultipleEntries(t *testing.T) {
 	}
 	require.NoError(t, addLedgers(h, entries...))
 	for _, e := range entries {
-		got, err := h.GetLedgerRaw(e.Seq)
+		got, err := readLedgerRaw(h, e.Seq)
 		require.NoError(t, err)
 		assert.Equal(t, e.Bytes, got)
 	}
@@ -197,6 +198,80 @@ func TestHotStore_IterateLedgersVisibleGap(t *testing.T) {
 	assert.Equal(t, []uint32{10, 20, 40, 50}, seen)
 }
 
+func TestHotStore_WithLedgerReusesAndGrows(t *testing.T) {
+	h := openTestHotStore(t)
+
+	// A miss reports ErrNotFound and never calls fn.
+	called := false
+	err := h.WithLedger(42, func([]byte) error { called = true; return nil })
+	require.ErrorIs(t, err, stores.ErrNotFound)
+	assert.False(t, called)
+
+	small := bytes.Repeat([]byte("a"), 32)
+	require.NoError(t, addLedgers(h, Entry{Seq: 42, Bytes: small}))
+	require.NoError(t, h.WithLedger(42, func(raw []byte) error {
+		assert.Equal(t, small, raw)
+		assert.Equal(t, len(raw), cap(raw), "the store caps the loan to the ledger")
+		return nil
+	}))
+
+	// A ledger too big for the pooled buffer must grow it and decode correctly,
+	// and a small one read afterwards must still come back exact and clipped.
+	// Whether the grown buffer is the one the pool hands back is not asserted:
+	// sync.Pool may discard at any GC, so identity is not a contract.
+	big := bytes.Repeat([]byte("b"), 8192)
+	require.NoError(t, addLedgers(h, Entry{Seq: 43, Bytes: big}))
+	require.NoError(t, h.WithLedger(43, func(raw []byte) error {
+		assert.Equal(t, big, raw)
+		assert.Equal(t, len(raw), cap(raw))
+		return nil
+	}))
+	require.NoError(t, h.WithLedger(42, func(raw []byte) error {
+		assert.Equal(t, small, raw)
+		assert.Equal(t, len(raw), cap(raw))
+		return nil
+	}))
+}
+
+func TestHotStore_WithLedgerReturnsWhatWasStored(t *testing.T) {
+	h := openTestHotStore(t)
+	// A realistic ledger, so the two paths are compared on something with
+	// structure rather than a handful of repeated bytes.
+	lcm, _ := makeRandomLedgerCloseMeta(7, 4)
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+	require.NoError(t, addLedgers(h, Entry{Seq: 7, Bytes: raw}))
+
+	fresh, err := readLedgerRaw(h, 7)
+	require.NoError(t, err)
+	require.NoError(t, h.WithLedger(7, func(lent []byte) error {
+		assert.Equal(t, raw, fresh)
+		assert.Equal(t, fresh, lent)
+		return nil
+	}))
+}
+
+// TestHotStore_WithLedgerPropagatesCallbackError pins that a caller's failure
+// surfaces unchanged, and that the buffer still goes back.
+func TestHotStore_WithLedgerPropagatesCallbackError(t *testing.T) {
+	h := openTestHotStore(t)
+	require.NoError(t, addLedgers(h, Entry{Seq: 9, Bytes: []byte("payload")}))
+	sentinel := errors.New("caller said no")
+	require.ErrorIs(t, h.WithLedger(9, func([]byte) error { return sentinel }), sentinel)
+	require.NoError(t, h.WithLedger(9, func(raw []byte) error {
+		assert.Equal(t, []byte("payload"), raw)
+		return nil
+	}))
+}
+
+// TestPoolable pins the pool ceiling: capacity only ratchets up, so a buffer
+// grown past the cap must not be kept for the life of the store.
+func TestPoolable(t *testing.T) {
+	assert.True(t, poolable(nil))
+	assert.True(t, poolable(make([]byte, 0, maxPooledLedgerBytes)))
+	assert.False(t, poolable(make([]byte, 0, maxPooledLedgerBytes+1)))
+}
+
 func TestHotStore_GracefulCloseAndReopen(t *testing.T) {
 	path := t.TempDir()
 
@@ -213,7 +288,7 @@ func TestHotStore_GracefulCloseAndReopen(t *testing.T) {
 	second, _ := openTestHotStoreAt(t, path)
 
 	for _, want := range seeded {
-		got, err := second.GetLedgerRaw(want.Seq)
+		got, err := readLedgerRaw(second, want.Seq)
 		require.NoError(t, err)
 		assert.Equal(t, want.Bytes, got)
 	}
@@ -224,7 +299,7 @@ func TestHotStore_PostCloseOps(t *testing.T) {
 	require.NoError(t, store.Close())
 
 	require.ErrorIs(t, addLedgers(h, Entry{Seq: 1, Bytes: []byte("v")}), stores.ErrStoreClosed)
-	_, err := h.GetLedgerRaw(1)
+	_, err := readLedgerRaw(h, 1)
 	require.ErrorIs(t, err, stores.ErrStoreClosed)
 	var iterErr error
 	for _, e := range h.IterateLedgers(0, 100) {
@@ -260,7 +335,7 @@ func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 		})
 		wg.Go(func() {
 			for i := uint32(0); !stop.Load(); i++ {
-				_, _ = h.GetLedgerRaw(i % 50)
+				_, _ = readLedgerRaw(h, i%50)
 			}
 		})
 		wg.Go(func() {
@@ -288,13 +363,13 @@ func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 func TestHotStore_AddLedgersEmptyBytes(t *testing.T) {
 	h := openTestHotStore(t)
 	require.NoError(t, addLedgers(h, Entry{Seq: 1, Bytes: nil}))
-	got, err := h.GetLedgerRaw(1)
+	got, err := readLedgerRaw(h, 1)
 	require.NoError(t, err)
 	assert.Empty(t, got)
 }
 
 // TestHotToColdMigration exercises the symmetric byte-convention:
-// hot.GetLedgerRaw returns uncompressed bytes; cold.AppendLedger
+// the hot store lends uncompressed bytes; cold.AppendLedger
 // takes uncompressed bytes; the round-trip is byte-equal end to
 // end. Regression guard for the double-compress hazard we fixed in
 // the convention unification.
@@ -319,7 +394,7 @@ func TestHotToColdMigration(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = w.Close() })
 	for i := range n {
-		fromHot, err := hot.GetLedgerRaw(firstSeq + uint32(i))
+		fromHot, err := readLedgerRaw(hot, firstSeq+uint32(i))
 		require.NoError(t, err)
 		require.NoError(t, w.AppendLedger(firstSeq+uint32(i), fromHot))
 	}
@@ -330,7 +405,7 @@ func TestHotToColdMigration(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 	for i := range n {
-		got, err := c.GetLedgerRaw(firstSeq + uint32(i))
+		got, err := readLedgerRaw(c, firstSeq+uint32(i))
 		require.NoError(t, err)
 		assert.Equal(t, raws[i], got, "ledger %d byte-equality", firstSeq+uint32(i))
 	}
@@ -347,7 +422,7 @@ func TestHotStore_XDRRoundTrip(t *testing.T) {
 	h := openTestHotStore(t)
 	require.NoError(t, addLedgers(h, Entry{Seq: ledgerSeq, Bytes: raw}))
 
-	gotRaw, err := h.GetLedgerRaw(ledgerSeq)
+	gotRaw, err := readLedgerRaw(h, ledgerSeq)
 	require.NoError(t, err)
 	assert.Equal(t, raw, gotRaw, "stored bytes must come back verbatim")
 
@@ -453,4 +528,19 @@ func addLedgers(h *HotStore, entries ...Entry) error {
 		}
 		return nil
 	}))
+}
+
+// readLedgerRaw is the owning read the stores no longer expose: WithLedger plus
+// the copy. Nothing served keeps a whole ledger, so the copy belongs to the
+// tests that assert on one rather than to an API sitting next to the pooled read.
+func readLedgerRaw(r interface {
+	WithLedger(seq uint32, fn func(raw []byte) error) error
+}, seq uint32,
+) ([]byte, error) {
+	var out []byte
+	err := r.WithLedger(seq, func(raw []byte) error {
+		out = bytes.Clone(raw)
+		return nil
+	})
+	return out, err
 }

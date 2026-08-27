@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -45,7 +46,7 @@ func TestColdReader_RoundTripVariousSizes(t *testing.T) {
 
 			for i := range n {
 				seq := firstSeq + uint32(i)
-				got, err := c.GetLedgerRaw(seq)
+				got, err := readLedgerRaw(c, seq)
 				require.NoError(t, err)
 				assert.Equal(t, raws[i], got, "ledger %d byte-equality", seq)
 
@@ -66,17 +67,17 @@ func TestColdReader_RoundTripVariousSizes(t *testing.T) {
 	}
 }
 
-func TestColdReader_GetLedgerRawOutOfRangeErrors(t *testing.T) {
+func TestColdReader_WithLedgerOutOfRangeErrors(t *testing.T) {
 	const firstSeq uint32 = 1_000
 	path, _ := writeFixturePack(t, firstSeq, 10)
 	c := newTestColdReader(t, path)
 
-	_, err := c.GetLedgerRaw(firstSeq - 1)
+	_, err := readLedgerRaw(c, firstSeq-1)
 	require.ErrorIs(t, err, stores.ErrOutOfRange)
 
 	last, err := c.LastSeq()
 	require.NoError(t, err)
-	_, err = c.GetLedgerRaw(last + 1)
+	_, err = readLedgerRaw(c, last+1)
 	assert.ErrorIs(t, err, stores.ErrOutOfRange)
 }
 
@@ -258,7 +259,7 @@ func TestColdReader_ConcurrentReadsRaceFree(t *testing.T) {
 	for range workers {
 		wg.Go(func() {
 			for i := uint32(0); !stop.Load(); i++ {
-				_, _ = c.GetLedgerRaw(i % n)
+				_, _ = readLedgerRaw(c, i%n)
 			}
 		})
 		wg.Go(func() {
@@ -294,17 +295,17 @@ func TestColdReader_SharedDecompressorAcrossPacks(t *testing.T) {
 	t.Cleanup(func() { _ = cB.Close() })
 
 	for i := range 5 {
-		gotA, err := cA.GetLedgerRaw(1_000 + uint32(i))
+		gotA, err := readLedgerRaw(cA, 1_000+uint32(i))
 		require.NoError(t, err)
 		assert.Equal(t, rawA[i], gotA)
 
-		gotB, err := cB.GetLedgerRaw(9_000 + uint32(i))
+		gotB, err := readLedgerRaw(cB, 9_000+uint32(i))
 		require.NoError(t, err)
 		assert.Equal(t, rawB[i], gotB)
 	}
 
 	require.NoError(t, cA.Close())
-	got, err := cB.GetLedgerRaw(9_002)
+	got, err := readLedgerRaw(cB, 9_002)
 	require.NoError(t, err)
 	assert.Equal(t, rawB[2], got)
 }
@@ -321,7 +322,28 @@ func TestMissingPackOpens_CountsAbsentFile(t *testing.T) {
 		"routing only opens packs the snapshot holds, so a missing file must count")
 
 	// The header load is cached; a second read must not double-count.
-	_, err = c.GetLedgerRaw(2)
+	_, err = readLedgerRaw(c, 2)
 	require.Error(t, err)
 	assert.Equal(t, before+1, MissingPackOpens())
+}
+
+// TestColdReader_WithLedgerPassesCallbackErrorThrough pins the fnErr-capture
+// discipline: a caller's error must come back exactly as given, not routed
+// through translateReaderErr, which only ever classifies the packfile's own
+// failures.
+func TestColdReader_WithLedgerPassesCallbackErrorThrough(t *testing.T) {
+	const firstSeq uint32 = 1_000
+	path, _ := writeFixturePack(t, firstSeq, 4)
+	c := newTestColdReader(t, path)
+
+	sentinel := errors.New("caller said no")
+	calls := 0
+	err := c.WithLedger(firstSeq+1, func(raw []byte) error {
+		calls++
+		assert.NotEmpty(t, raw, "the read itself succeeded")
+		return sentinel
+	})
+	require.ErrorIs(t, err, sentinel)
+	assert.Equal(t, sentinel, err, "the callback's error is not translated")
+	assert.Equal(t, 1, calls)
 }
