@@ -392,9 +392,9 @@ func runQueryCell(
 func recordCell(sink *csvSink, qtype string, w int, res sweepResult) {
 	total := queryCellRow(w)
 	for _, s := range res.samples {
-		sink.observe(qtype, total, s.d, s.items)
+		sink.observe(qtype, total, s.service, s.items)
 		if s.stage != "" {
-			sink.observe(qtype, s.stage+"_c"+strconv.Itoa(w), s.d, s.items)
+			sink.observe(qtype, s.stage+"_c"+strconv.Itoa(w), s.service, s.items)
 		}
 	}
 	sink.observe(fileDriver, queryDriverRow(qtype, w), res.wall, len(res.samples))
