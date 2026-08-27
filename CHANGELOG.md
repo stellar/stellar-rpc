@@ -2,8 +2,6 @@
 
 ## Unreleased
 
-### Added
-* The full-history service serves `getEventsV2`, the cursor-paged events method ([#774](https://github.com/stellar/stellar-rpc/issues/774)).
 ### Fixed
 * **`getLedgers` no longer rejects its own cursor at the tip.** This changes wire behavior for BOTH rpcv1 and rpcv2 — the handler is shared. Resending the cursor of the last page used to fail with `-32602` ("cursor must be between the oldest ledger ... and the latest ledger ...") until the next ledger closed — the same code a malformed cursor gets, so a poller could not tell "wait and retry" from "bad cursor". A cursor at or past the tip now returns an empty page with the cursor echoed back. A cursor below the oldest ledger still errors (that data is gone), and an explicit `startLedger` above the tip still errors (only the server-issued token gets the echo).
 * **`getTransactions` cursor no longer breaks a caught-up poller.** This changes wire behavior for BOTH rpcv1 and rpcv2 — the handler is shared. Two long-standing bugs, one fix: the returned `cursor` is now never below the request's cursor; at the tip, the request's cursor is echoed back. Before this fix: (1) a cursor at or above the node's latest ledger returned the literal cursor `"0"`, and resending it failed every poll with `-32602` — the client was stuck until it discarded its cursor (reported in [#745](https://github.com/stellar/stellar-rpc/issues/745)); (2) a cursor at a fully-consumed ledger returned a cursor pointing back at that ledger's start, and the next poll re-delivered all of its transactions as duplicates. Clients need no changes: the returned cursor now always does what the docs promise — fetch what comes next.

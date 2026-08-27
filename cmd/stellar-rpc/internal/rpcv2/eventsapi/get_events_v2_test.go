@@ -92,7 +92,7 @@ func requireErrorData(t *testing.T, err error, wantReason string, into any) {
 	}
 }
 
-func TestGetEventsV2_AscendingPagesToComplete(t *testing.T) {
+func TestGetEventsV2_AscendingPagesToTheTip(t *testing.T) {
 	ctx, first := seedView(t)
 
 	page1, err := getEventsV2(ctx, testLimits(), &protocol.GetEventsV2Request{
