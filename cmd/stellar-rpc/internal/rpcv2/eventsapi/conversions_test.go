@@ -123,8 +123,9 @@ func TestEventScopeDescendingMinAboveLatest(t *testing.T) {
 	assert.Equal(t, testOldest, outOfRange.Oldest)
 }
 
-// Raising only the min would push it past a below-genesis max.
-func TestEventScopeBelowGenesisMax(t *testing.T) {
+// The max is never raised: that would add genesis to a range that excluded
+// it. The inverted scope is handled by serve as an exhausted range.
+func TestEventScopeBelowGenesisMaxIsNotRaised(t *testing.T) {
 	req := protocol.GetEventsV2Request{
 		MinLedger: 1, MaxLedger: 1, Order: protocol.OrderDescending,
 	}
@@ -134,7 +135,7 @@ func TestEventScopeBelowGenesisMax(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint32(chunk.FirstLedgerSeq), scope.MinLedger)
 	require.NotNil(t, scope.MaxLedger)
-	assert.Equal(t, uint32(chunk.FirstLedgerSeq), *scope.MaxLedger)
+	assert.Equal(t, uint32(1), *scope.MaxLedger)
 }
 
 // A node whose tip is below genesis can serve nothing yet.

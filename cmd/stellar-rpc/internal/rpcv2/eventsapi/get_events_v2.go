@@ -105,6 +105,9 @@ func serve(
 	if err != nil {
 		return protocol.GetEventsV2Response{}, err
 	}
+	if req.Cursor == "" && exhausted(req) {
+		return exhaustedResponse(&cursor.Scope, oldest, latest), nil
+	}
 	// Checked on the cursor path too: a cursor carries the filters and is
 	// not signed, so a hand-built one could ask for any number of lookups.
 	if err := checkTermBudget(cursor.Scope.Filters, limits.TermBudget); err != nil {
@@ -203,6 +206,24 @@ func response(
 	return resp, nil
 }
 
+// exhausted reports a range whose every ledger is below genesis: an
+// explicit max that the raised min has passed. Valid already requires
+// min <= max, so this is the only way a range request can end up empty.
+func exhausted(req *protocol.GetEventsV2Request) bool {
+	return req.MaxLedger != 0 && req.MaxLedger < chunk.FirstLedgerSeq
+}
+
+// exhaustedResponse is the finished page for a range with nothing in it.
+func exhaustedResponse(scope *query.EventScope, oldest, latest uint32) protocol.GetEventsV2Response {
+	return protocol.GetEventsV2Response{
+		Events:        []protocol.EventInfoV2{},
+		ScanStatus:    protocol.ScanStatusComplete,
+		ScannedLedger: responseScannedLedger(&query.EventCursor{Scope: *scope}),
+		OldestLedger:  oldest,
+		LatestLedger:  latest,
+	}
+}
+
 // responseScannedLedger translates the cursor's watermark for the wire. A
 // cursor uses 0 to mean "nothing covered yet". On the wire that 0 would
 // claim the whole range, so report the ledger just outside it instead.
@@ -279,8 +300,10 @@ var errJSONInputFormatUnsupported = errors.New(
 func eventScope(
 	req *protocol.GetEventsV2Request, oldest, latest uint32,
 ) (query.EventScope, error) {
-	// Below-genesis bounds are raised, not rejected, and the floor rules
-	// decide the outcome. Raising both keeps min <= max.
+	// A below-genesis minLedger is raised, not rejected: no ledger exists
+	// below genesis, so the range keeps the same ledgers. The max is never
+	// raised, because that would add genesis to a range that excluded it;
+	// serve handles that shape as an exhausted range.
 	scope := query.EventScope{MinLedger: max(req.MinLedger, chunk.FirstLedgerSeq)}
 	if req.Order == protocol.OrderDescending {
 		scope.Dir = query.Descending
@@ -291,13 +314,13 @@ func eventScope(
 				Requested: scope.MinLedger, Oldest: oldest, Latest: latest,
 			}
 		}
-		maxLedger := latest
-		if req.MaxLedger != 0 {
-			maxLedger = max(req.MaxLedger, chunk.FirstLedgerSeq)
+		maxLedger := req.MaxLedger
+		if maxLedger == 0 {
+			maxLedger = latest
 		}
 		scope.MaxLedger = &maxLedger
 	} else if req.MaxLedger != 0 {
-		maxLedger := max(req.MaxLedger, chunk.FirstLedgerSeq)
+		maxLedger := req.MaxLedger
 		scope.MaxLedger = &maxLedger
 	}
 	if len(req.Filters) > 0 {

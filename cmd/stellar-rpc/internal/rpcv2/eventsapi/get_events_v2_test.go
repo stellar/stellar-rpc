@@ -147,6 +147,25 @@ func TestGetEventsV2_ScannedLedgerOnAPageThatCoveredNothing(t *testing.T) {
 	})
 }
 
+// A range wholly below genesis holds no ledger. It is an exhausted range,
+// not an error, and it must not serve genesis, which the request excluded.
+func TestGetEventsV2_RangeBelowGenesisIsAnEmptyCompletePage(t *testing.T) {
+	for name, req := range map[string]protocol.GetEventsV2Request{
+		"ascending":  {MinLedger: 1, MaxLedger: 1},
+		"descending": {MaxLedger: 1, Order: protocol.OrderDescending},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, _ := seedView(t)
+			resp, err := getEventsV2(ctx, testLimits(), &req)
+			require.NoError(t, err)
+			assert.Empty(t, resp.Events)
+			assert.Equal(t, protocol.ScanStatusComplete, resp.ScanStatus)
+			assert.Empty(t, resp.Cursor)
+			assert.NotZero(t, resp.OldestLedger)
+		})
+	}
+}
+
 func TestGetEventsV2_ClosedRangeCompletesWithoutCursor(t *testing.T) {
 	ctx, first := seedView(t)
 
