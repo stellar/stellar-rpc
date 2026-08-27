@@ -329,9 +329,8 @@ func TestMissingPackOpens_CountsAbsentFile(t *testing.T) {
 }
 
 // TestColdReader_WithLedgerPassesCallbackErrorThrough pins the fnErr-capture
-// discipline: a caller's error must come back exactly as given, not routed
-// through translateReaderErr, which only ever classifies the packfile's own
-// failures.
+// discipline: a caller's error must come back exactly as given, not
+// reclassified as a store failure by the pack handle's translation.
 func TestColdReader_WithLedgerPassesCallbackErrorThrough(t *testing.T) {
 	const firstSeq uint32 = 1_000
 	path, _ := writeFixturePack(t, firstSeq, 4)

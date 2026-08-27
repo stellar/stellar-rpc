@@ -46,7 +46,7 @@ const appDataSize = 4
 var coldPackDecoder = zstd.NewDecompressor()
 
 // ColdReader is lazy: OpenColdReader does no synchronous I/O and
-// returns no error. packfile.Open begins the open in a background
+// returns no error. OpenPack begins the open in a background
 // goroutine immediately; the trailer + AppData are read and validated
 // on the first method call, via a sync.OnceValues-cached loadHeader,
 // where a failed open also surfaces. Read methods (LastSeq,
@@ -68,7 +68,7 @@ type coldHeader struct {
 
 // OpenColdReader returns a lazy reader for the cold pack at path.
 // It does no synchronous I/O and returns no error for a valid path;
-// packfile.Open starts the open in the background immediately, and
+// OpenPack starts the open in the background immediately, and
 // trailer + AppData read/validation (plus any open failure) surface
 // on the first method call. Uses the package-level coldPackDecoder,
 // shared across all readers in the process.
@@ -132,8 +132,9 @@ func (c *ColdReader) WithLedger(seq uint32, fn func(raw []byte) error) error {
 		return fmt.Errorf("%w: seq %d outside store coverage [%d, %d]",
 			stores.ErrOutOfRange, seq, h.firstSeq, h.lastSeq)
 	}
-	// Carried out rather than returned through the reader, so
-	// translateReaderErr only ever sees the packfile's own failures.
+	// Carried out rather than returned through the reader: the handle
+	// translates every error ReadItem returns, so a caller's error routed
+	// that way would be reclassified as a store failure.
 	var fnErr error
 	rerr := c.r.ReadItem(int(seq-h.firstSeq), func(b []byte) error {
 		fnErr = fn(b)

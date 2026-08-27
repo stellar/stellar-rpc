@@ -3,7 +3,9 @@ package event
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"testing"
@@ -899,4 +901,44 @@ func TestColdReader_CloseOnlySurfacesCorrupt(t *testing.T) {
 	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
 	require.NoError(t, err)
 	require.ErrorIs(t, cr.Close(), stores.ErrCorrupt)
+}
+
+// clearRecordChecksumFlag rewrites path's trailer so its record-checksum flag
+// is absent and the trailer CRC32C still agrees, which is what a pack built
+// before the checksum existed looks like to the reader.
+func clearRecordChecksumFlag(t *testing.T, path string) {
+	t.Helper()
+	const (
+		trailerSize = 76
+		offFlags    = 5
+		offCRC      = 72
+		flagRecord  = 1 << 1
+	)
+	b, err := os.ReadFile(path)
+	require.NoError(t, err)
+	tr := b[len(b)-trailerSize:]
+	require.NotZero(t, tr[offFlags]&flagRecord, "fixture should have been written WITH the flag")
+	tr[offFlags] &^= flagRecord
+	binary.LittleEndian.PutUint32(tr[offCRC:], crc32.Checksum(tr[:offCRC], crc32.MakeTable(crc32.Castagnoli)))
+	require.NoError(t, os.WriteFile(path, b, 0o600))
+}
+
+// TestColdReader_UncheckedIndexPackIsCorrupt pins the stale-build rejection.
+// The pack is structurally valid and its trailer CRC agrees — only the record
+// checksum is absent, which is precisely the artifact that could answer queries
+// from unverified bitmaps.
+func TestColdReader_UncheckedIndexPackIsCorrupt(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
+	clearRecordChecksumFlag(t, filepath.Join(dir, IndexPackName(chunkID)))
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	_, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
+	require.ErrorIs(t, err, stores.ErrCorrupt)
+	// Pin the guard itself: reading a widened record as a narrow one also fails,
+	// so a bare ErrCorrupt assertion would survive the guard's removal.
+	require.Contains(t, err.Error(), "built without a record checksum")
 }

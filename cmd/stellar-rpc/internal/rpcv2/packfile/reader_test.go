@@ -1194,3 +1194,46 @@ func TestReadLoansAreClipped(t *testing.T) {
 		}
 	}
 }
+
+// TestOpenRejectsItemsWithoutItemsPerRecord pins the guard against a trailer
+// that claims items but no itemsPerRecord. Before the guard, such a file passed
+// Open and the first read indexed past the offsets slice and panicked, so this
+// asserts the failure is an ordinary ErrCorrupt and that nothing panics on the
+// way there. recordCount is zero, so a guard gated on it alone would not fire.
+func TestOpenRejectsItemsWithoutItemsPerRecord(t *testing.T) {
+	path := writeTestPackfile(t, nil, WriterOptions{ItemsPerRecord: 4})
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := b[len(b)-trailerSize:]
+	binary.LittleEndian.PutUint32(tr[tOffTotalItems:], 8)
+	binary.LittleEndian.PutUint32(tr[tOffItemsPerRecord:], 0)
+	// Re-seal so the trailer's own CRC agrees and the guard, not the checksum,
+	// is what rejects the file.
+	binary.LittleEndian.PutUint32(tr[tOffCRC:], crc32c(tr[:trailerCRCEnd]))
+	if werr := os.WriteFile(path, b, 0o600); werr != nil {
+		t.Fatal(werr)
+	}
+
+	r := Open(path, ReaderOptions{})
+	defer r.Close()
+
+	// Must not panic: a crafted trailer is corrupt input, not a bug.
+	_, err = r.TotalItems()
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("TotalItems on a trailer claiming items with itemsPerRecord=0: got %v, want ErrCorrupt", err)
+	}
+	// Pin the guard itself: several later checks also reject this file, so a
+	// bare ErrCorrupt assertion would survive the guard's removal.
+	if !strings.Contains(err.Error(), "invalid itemsPerRecord") {
+		t.Fatalf("got %v, want the itemsPerRecord guard to be what rejects it", err)
+	}
+	for _, rerr := range r.ReadRange(0, 8) {
+		if !errors.Is(rerr, ErrCorrupt) {
+			t.Fatalf("ReadRange: got %v, want ErrCorrupt", rerr)
+		}
+		break
+	}
+}
