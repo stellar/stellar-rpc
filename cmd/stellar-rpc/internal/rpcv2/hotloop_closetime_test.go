@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 )
 
@@ -20,9 +21,10 @@ type stampRecordingSink struct {
 	closeTimes []int64
 }
 
-func (s *stampRecordingSink) SetLatestLedger(seq uint32, closeTimeUnix int64) {
+func (s *stampRecordingSink) SetLatestLedger(seq uint32, closeTime query.CloseTime) {
 	s.seqs = append(s.seqs, seq)
-	s.closeTimes = append(s.closeTimes, closeTimeUnix)
+	unix, _ := closeTime.Unix()
+	s.closeTimes = append(s.closeTimes, unix)
 }
 
 func TestRunIngestionLoop_StampsCloseTimeOnCommit(t *testing.T) {

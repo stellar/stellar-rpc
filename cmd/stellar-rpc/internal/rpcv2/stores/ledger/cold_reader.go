@@ -1,7 +1,6 @@
 package ledger
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -123,21 +122,6 @@ func (c *ColdReader) loadHeader() (coldHeader, error) {
 }
 
 func (c *ColdReader) LastSeq() (uint32, error) { h, err := c.init(); return h.lastSeq, err }
-
-// GetLedgerRaw reads the raw LedgerCloseMeta bytes for seq into a fresh,
-// caller-owned buffer. It is WithLedger plus the copy that makes the bytes the
-// caller's; a caller that consumes them in scope should prefer WithLedger, and a
-// sequential bulk reader IterateLedgers.
-func (c *ColdReader) GetLedgerRaw(seq uint32) ([]byte, error) {
-	var out []byte
-	if err := c.WithLedger(seq, func(raw []byte) error {
-		out = bytes.Clone(raw)
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
 
 // WithLedger calls fn with seq's bytes; see query.LedgerReader for the loan
 // rule. The bytes are the packfile reader's own record buffer, passed through.

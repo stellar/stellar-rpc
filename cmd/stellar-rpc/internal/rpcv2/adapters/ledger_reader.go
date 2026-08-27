@@ -232,27 +232,25 @@ func inWindow(view *query.ReadView, seq uint32) bool {
 	return seq >= view.OldestLedger() && seq <= view.LatestLedger()
 }
 
-// getLedger is the one-shot point read: window-gated, then a single
-// GetLedgerRaw against the sequence's chunk. A hot-store miss inside the window
-// maps to (false, nil), matching v1's absent-ledger shape.
+// getLedger is the one-shot point read: window-gated, then one ledger read. A
+// hot-store miss inside the window maps to (false, nil), matching v1's
+// absent-ledger shape.
 func getLedger(view *query.ReadView, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
 	if !inWindow(view, sequence) {
 		return xdr.LedgerCloseMeta{}, false, nil
 	}
-	reader, err := view.Ledgers(chunk.IDFromLedger(sequence))
-	if err != nil {
-		return xdr.LedgerCloseMeta{}, false, err
-	}
-	raw, err := reader.GetLedgerRaw(sequence)
+	var lcm xdr.LedgerCloseMeta
+	err := view.WithLedger(sequence, func(raw []byte) error {
+		if uerr := lcm.UnmarshalBinary(raw); uerr != nil {
+			return fmt.Errorf("adapters: unmarshal ledger %d: %w", sequence, uerr)
+		}
+		return nil
+	})
 	if errors.Is(err, stores.ErrNotFound) {
 		return xdr.LedgerCloseMeta{}, false, nil
 	}
 	if err != nil {
 		return xdr.LedgerCloseMeta{}, false, err
-	}
-	var lcm xdr.LedgerCloseMeta
-	if err := lcm.UnmarshalBinary(raw); err != nil {
-		return xdr.LedgerCloseMeta{}, false, fmt.Errorf("adapters: unmarshal ledger %d: %w", sequence, err)
 	}
 	return lcm, true, nil
 }
@@ -292,24 +290,27 @@ func getLedgerRange(view *query.ReadView) (store.LedgerRange, error) {
 	}, nil
 }
 
-// readCloseTime point-reads one ledger and decodes only its close time off the
-// raw bytes — no full LedgerCloseMeta unmarshal. which names the window edge
-// ("oldest"/"latest") in the missing-ledger error.
+// readCloseTime is the fallback, not the normal path: reaching a close time
+// costs decompressing its ledger, and the registry's stamps answer both window
+// edges for every served request. This runs in the boot window before seeding,
+// or on the read after the retention floor moves.
+//
+// which names the window edge ("oldest"/"latest") in the missing-ledger error.
 func readCloseTime(view *query.ReadView, seq uint32, which string) (int64, error) {
-	reader, err := view.Ledgers(chunk.IDFromLedger(seq))
-	if err != nil {
-		return 0, err
-	}
-	raw, err := reader.GetLedgerRaw(seq)
+	var closeTime int64
+	err := view.WithLedger(seq, func(raw []byte) error {
+		ct, cerr := xdr.LedgerCloseMetaView(raw).LedgerCloseTime()
+		if cerr != nil {
+			return fmt.Errorf("adapters: decode close time of ledger %d: %w", seq, cerr)
+		}
+		closeTime = ct
+		return nil
+	})
 	if errors.Is(err, stores.ErrNotFound) {
 		return 0, fmt.Errorf("adapters: %s ledger %d missing from its store", which, seq)
 	}
 	if err != nil {
 		return 0, err
-	}
-	closeTime, err := xdr.LedgerCloseMetaView(raw).LedgerCloseTime()
-	if err != nil {
-		return 0, fmt.Errorf("adapters: decode close time of ledger %d: %w", seq, err)
 	}
 	return closeTime, nil
 }

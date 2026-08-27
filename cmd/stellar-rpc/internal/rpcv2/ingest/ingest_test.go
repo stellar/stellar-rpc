@@ -499,7 +499,7 @@ func TestLedgerColdWriter_Readback(t *testing.T) {
 	cr, err := ledger.OpenColdReader(packPath(coldDir, chunkID))
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cr.Close()) }()
-	got, err := cr.GetLedgerRaw(seq)
+	got, err := readLedgerRaw(cr, seq)
 	require.NoError(t, err)
 	require.Equal(t, raw, got)
 }
@@ -705,7 +705,7 @@ func TestColdChunk_Success(t *testing.T) {
 	lcr, err := ledger.OpenColdReader(packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID))
 	require.NoError(t, err)
 	defer func() { require.NoError(t, lcr.Close()) }()
-	gotFirst, err := lcr.GetLedgerRaw(first)
+	gotFirst, err := readLedgerRaw(lcr, first)
 	require.NoError(t, err)
 	var decoded xdr.LedgerCloseMeta
 	require.NoError(t, decoded.UnmarshalBinary(gotFirst))
@@ -886,10 +886,10 @@ func TestWriteColdChunk_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cr.Close()) }()
 
-	rawFirst, err := cr.GetLedgerRaw(first)
+	rawFirst, err := readLedgerRaw(cr, first)
 	require.NoError(t, err)
 	require.Equal(t, marshalLCM(t, first), rawFirst)
-	rawLast, err := cr.GetLedgerRaw(last)
+	rawLast, err := readLedgerRaw(cr, last)
 	require.NoError(t, err)
 	require.Equal(t, marshalLCM(t, last), rawLast)
 
@@ -1828,4 +1828,19 @@ func TestTxhashColdWriter_FeeBumpBothHashes(t *testing.T) {
 	innerKey := stores.BlindKey(testTxhashSecret(), innerHash[:txhash.ColdKeySize])
 	assert.Contains(t, keys, outerKey[:])
 	assert.Contains(t, keys, innerKey[:])
+}
+
+// readLedgerRaw is the owning read the stores no longer expose: WithLedger plus
+// the copy. Nothing served keeps a whole ledger, so the copy belongs to the
+// tests that assert on one rather than to an API sitting next to the pooled read.
+func readLedgerRaw(r interface {
+	WithLedger(seq uint32, fn func(raw []byte) error) error
+}, seq uint32,
+) ([]byte, error) {
+	var out []byte
+	err := r.WithLedger(seq, func(raw []byte) error {
+		out = bytes.Clone(raw)
+		return nil
+	})
+	return out, err
 }

@@ -1,6 +1,7 @@
 package hotchunk
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
@@ -146,7 +147,7 @@ func TestIngestLedger_AllCFsAdvanceTogether(t *testing.T) {
 	assertWriteItems(t, repB, 1)
 
 	// ledgers CF.
-	gotA, err := db.Ledgers().GetLedgerRaw(first)
+	gotA, err := readLedgerRaw(db.Ledgers(), first)
 	require.NoError(t, err)
 	assert.Equal(t, rawA, gotA)
 	// txhash CFs.
@@ -191,7 +192,7 @@ func TestIngestLedger_RejectedLedgerPersistsNothingAcrossAnyCF(t *testing.T) {
 
 	// NOTHING persisted, across every CF:
 	// ledgers CF — no row at badSeq.
-	_, gerr := db.Ledgers().GetLedgerRaw(badSeq)
+	_, gerr := readLedgerRaw(db.Ledgers(), badSeq)
 	require.ErrorIs(t, gerr, stores.ErrNotFound)
 	// txhash CFs — the hash is absent.
 	_, gerr = db.Txhash().Get(hash)
@@ -262,12 +263,12 @@ func TestIngestLedger_MidBatchCommitFailurePersistsNothing(t *testing.T) {
 
 	// The good ledger's data is intact; the failed ledger's is wholly absent
 	// across the ledgers and txhash CFs.
-	_, gerr := db3.Ledgers().GetLedgerRaw(first + 1)
+	_, gerr := readLedgerRaw(db3.Ledgers(), first+1)
 	require.ErrorIs(t, gerr, stores.ErrNotFound)
 	_, gerr = db3.Txhash().Get(hashNext)
 	require.ErrorIs(t, gerr, stores.ErrNotFound)
 
-	gotGood, err := db3.Ledgers().GetLedgerRaw(first)
+	gotGood, err := readLedgerRaw(db3.Ledgers(), first)
 	require.NoError(t, err)
 	assert.Equal(t, rawGood, gotGood)
 	_, err = db3.Txhash().Get(hashGood)
@@ -295,7 +296,7 @@ func TestSharedBatch_DirectRocksAbortAcrossCFs(t *testing.T) {
 	require.ErrorIs(t, err, sentinelErr)
 
 	// None of the three CFs received the aborted writes.
-	_, gerr := db.Ledgers().GetLedgerRaw(2)
+	_, gerr := readLedgerRaw(db.Ledgers(), 2)
 	require.ErrorIs(t, gerr, stores.ErrNotFound)
 	_, gerr = db.Txhash().Get(hash)
 	require.ErrorIs(t, gerr, stores.ErrNotFound)
@@ -370,7 +371,7 @@ func TestIngestLedger_WritesEveryHotType(t *testing.T) {
 	require.NoError(t, err)
 	assertWriteItems(t, rep, 1)
 
-	got, err := db.Ledgers().GetLedgerRaw(first)
+	got, err := readLedgerRaw(db.Ledgers(), first)
 	require.NoError(t, err)
 	assert.Equal(t, raw, got)
 
@@ -684,4 +685,19 @@ func eventCount(t *testing.T, r interface{ EventCount() (uint32, error) }) uint3
 	n, err := r.EventCount()
 	require.NoError(t, err)
 	return n
+}
+
+// readLedgerRaw is the owning read the stores no longer expose: WithLedger plus
+// the copy. Nothing served keeps a whole ledger, so the copy belongs to the
+// tests that assert on one rather than to an API sitting next to the pooled read.
+func readLedgerRaw(r interface {
+	WithLedger(seq uint32, fn func(raw []byte) error) error
+}, seq uint32,
+) ([]byte, error) {
+	var out []byte
+	err := r.WithLedger(seq, func(raw []byte) error {
+		out = bytes.Clone(raw)
+		return nil
+	})
+	return out, err
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
@@ -104,7 +105,7 @@ type ingestionLoopConfig struct {
 // bounded bench loop passes a closingSink.
 type handleSink interface {
 	PublishHandle(c chunk.ID, db *hotchunk.DB)
-	SetLatestLedger(seq uint32, closeTimeUnix int64)
+	SetLatestLedger(seq uint32, closeTime query.CloseTime)
 }
 
 // closingSink is the bounded bench loop's handleSink: each completed chunk's DB
@@ -120,7 +121,7 @@ func (s *closingSink) PublishHandle(_ chunk.ID, db *hotchunk.DB) {
 	s.prev = db
 }
 
-func (s *closingSink) SetLatestLedger(uint32, int64) {}
+func (s *closingSink) SetLatestLedger(uint32, query.CloseTime) {}
 
 // runIngestionLoop is the hot tier's writer: the single goroutine that opens,
 // writes, and hands off the per-chunk hot DBs. It consumes ONE continuous
@@ -196,7 +197,7 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		// returning, so a read view acquired after this can serve seq from
 		// every hot store. This one write carries the sequence and its close
 		// time, so getLedgerRange never point-reads the tip.
-		cfg.Registry.SetLatestLedger(seq, closeUnix)
+		cfg.Registry.SetLatestLedger(seq, query.CloseTimeAt(closeUnix))
 
 		// Chunk boundary: this seq is the chunk's last ledger.
 		if closed := chunk.IDFromLedger(seq); seq == closed.LastLedger() {

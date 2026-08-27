@@ -1,6 +1,7 @@
 package rpcv2
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"iter"
@@ -270,7 +271,7 @@ func TestRunIngestionLoop_LedgerLandsAcrossAllCFs(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, first+2, maxSeq, "the single committed frontier is the last committed seq")
 
-	raw, err := reopened.Ledgers().GetLedgerRaw(first + 2)
+	raw, err := readLedgerRaw(reopened.Ledgers(), first+2)
 	require.NoError(t, err)
 	assert.NotEmpty(t, raw)
 	assert.Equal(t, uint32(0), eventCount(t, reopened.Events()), "zero-tx ledgers carry no events")
@@ -677,5 +678,20 @@ func TestClosingSink(t *testing.T) {
 	_, _, err = b.MaxCommittedSeq()
 	require.NoError(t, err, "the newest handle stays open for the loop's deferred close")
 
-	s.SetLatestLedger(42, 0) // discarded; must not panic
+	s.SetLatestLedger(42, query.CloseTimeAt(0)) // discarded; must not panic
+}
+
+// readLedgerRaw is the owning read the stores no longer expose: WithLedger plus
+// the copy. Nothing served keeps a whole ledger, so the copy belongs to the
+// tests that assert on one rather than to an API sitting next to the pooled read.
+func readLedgerRaw(r interface {
+	WithLedger(seq uint32, fn func(raw []byte) error) error
+}, seq uint32,
+) ([]byte, error) {
+	var out []byte
+	err := r.WithLedger(seq, func(raw []byte) error {
+		out = bytes.Clone(raw)
+		return nil
+	})
+	return out, err
 }

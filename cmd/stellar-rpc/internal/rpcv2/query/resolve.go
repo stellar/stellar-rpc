@@ -50,7 +50,6 @@ func (a *ReadView) unavailable(c chunk.ID, k geometry.Kind) error {
 // LastSeq (the two tiers' signatures differ) since routing reads within an
 // already-known chunk range.
 type LedgerReader interface {
-	GetLedgerRaw(seq uint32) ([]byte, error)
 	// WithLedger calls fn with one ledger's bytes. THE LOAN RULE, for every
 	// tier: the bytes are the store's and are valid inside fn only — it reuses
 	// them for the next ledger — so anything kept must be copied out there.

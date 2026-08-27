@@ -68,7 +68,7 @@ func seedEventChunks(
 		r.PublishHandle(s.c, db)
 		dbs[s.c] = db
 	}
-	r.SetLatestLedger(latest, 0)
+	r.SetLatestLedger(latest, CloseTimeAt(0))
 	return r, dbs
 }
 
@@ -416,7 +416,7 @@ func TestQueryEvents_FollowsTheTip(t *testing.T) {
 	assert.Equal(t, f+3, page.Next.ScannedLedger)
 
 	ingestEvents(t, db, f+4, []xdr.ContractEvent{symEvent(cidA, "a4"), symEvent(cidB, "b2")})
-	r.SetLatestLedger(f+4, 0)
+	r.SetLatestLedger(f+4, CloseTimeAt(0))
 
 	page = d.next()
 	assert.Equal(t, []string{"a4", "b2"}, labels(t, page.Events), "only the new ledger's events")
@@ -445,7 +445,7 @@ func TestQueryEvents_WatermarkOnlyResume(t *testing.T) {
 	assert.Equal(t, ScanWaitingForLedgers, page.Status)
 
 	ingestEvents(t, db, f+4, []xdr.ContractEvent{symEvent(cidC, "c0")})
-	r.SetLatestLedger(f+4, 0)
+	r.SetLatestLedger(f+4, CloseTimeAt(0))
 
 	page = d.next()
 	assert.Equal(t, []string{"c0"}, labels(t, page.Events))
@@ -571,7 +571,7 @@ func TestQueryEvents_EndStabilityAcrossIngest(t *testing.T) {
 
 	// Ingest between pages; the next page continues mid-ledger F.
 	ingestEvents(t, db, f+4, []xdr.ContractEvent{symEvent(cidA, "a4")})
-	r.SetLatestLedger(f+4, 0)
+	r.SetLatestLedger(f+4, CloseTimeAt(0))
 
 	var all []string
 	all = append(all, labels(t, page.Events)...)
@@ -600,7 +600,7 @@ func TestQueryEvents_DescendingResumeAboveLatestWaits(t *testing.T) {
 	ingestEvents(t, db, f+5, []xdr.ContractEvent{symEvent(cidB, "b2"), symEvent(cidA, "a4")})
 
 	// Page 1 on the ahead node: latest = f+5, stop mid-ledger f+5.
-	r.SetLatestLedger(f+5, 0)
+	r.SetLatestLedger(f+5, CloseTimeAt(0))
 	maxL := f + 5
 	d := &pageDriver{
 		t: t, r: r, limit: 1,
@@ -611,7 +611,7 @@ func TestQueryEvents_DescendingResumeAboveLatestWaits(t *testing.T) {
 	require.Equal(t, f+5, page.Next.Position.Ledger)
 
 	// Page 2 on a node that is behind: wait, don't skip past b2 and c0.
-	r.SetLatestLedger(f+3, 0)
+	r.SetLatestLedger(f+3, CloseTimeAt(0))
 	before := d.cursor
 	page = d.next()
 	assert.Empty(t, page.Events)
@@ -619,7 +619,7 @@ func TestQueryEvents_DescendingResumeAboveLatestWaits(t *testing.T) {
 	assert.Equal(t, before, d.cursor, "waiting must not move the bookmarks")
 
 	// Caught up: the walk continues at b2 with no gap and no duplicates.
-	r.SetLatestLedger(f+5, 0)
+	r.SetLatestLedger(f+5, CloseTimeAt(0))
 	all, status := d.drain()
 	assert.Equal(t, []string{"b2", "c0", "a3", "b1", "a2", "b0", "a1", "a0"}, all)
 	assert.Equal(t, ScanComplete, status)
@@ -724,7 +724,7 @@ func TestQueryEvents_DescendingFreshScopeAboveLatestWaits(t *testing.T) {
 	// The chain reaches MaxLedger: the whole scope serves, top first.
 	ingestEvents(t, db, f+4, nil)
 	ingestEvents(t, db, f+5, []xdr.ContractEvent{symEvent(cidA, "a4")})
-	r.SetLatestLedger(f+5, 0)
+	r.SetLatestLedger(f+5, CloseTimeAt(0))
 	all, status := d.drain()
 	assert.Equal(t, []string{"a4", "a3", "b1", "a2", "b0", "a1", "a0"}, all)
 	assert.Equal(t, ScanComplete, status)

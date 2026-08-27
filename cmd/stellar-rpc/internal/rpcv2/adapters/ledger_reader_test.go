@@ -29,7 +29,7 @@ func sparseFixture(t *testing.T) (context.Context, *LedgerReader, chunk.ID, chun
 	c0, c1 := testChunk, testChunk+1
 	seedHotLedgers(t, cat, r, c0, seqRange(c0.FirstLedger(), c0.FirstLedger()+3)...)
 	seedHotLedgers(t, cat, r, c1, c1.FirstLedger(), c1.FirstLedger()+1)
-	r.SetLatestLedger(c1.FirstLedger(), closeTimeFor(c1.FirstLedger()))
+	r.SetLatestLedger(c1.FirstLedger(), query.CloseTimeAt(closeTimeFor(c1.FirstLedger())))
 	return viewCtx(t, r), NewLedgerReader(), c0, c1
 }
 
@@ -42,7 +42,7 @@ func emptyFixture(t *testing.T) (context.Context, *LedgerReader) {
 	cat := openTestCatalog(t)
 	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
 	seedHotLedgers(t, cat, r, testChunk)
-	r.SetLatestLedger(testChunk.FirstLedger()-1, 0)
+	r.SetLatestLedger(testChunk.FirstLedger()-1, query.UnknownCloseTime())
 	return viewCtx(t, r), NewLedgerReader()
 }
 
@@ -79,9 +79,9 @@ func TestGetLedgerRange_BootStampFallsBackThenCaches(t *testing.T) {
 	cat := openTestCatalog(t)
 	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
 	seedHotLedgers(t, cat, r, testChunk, testChunk.FirstLedger(), testChunk.FirstLedger()+1)
-	// The boot seeding: OpenRegistry stamps the latest seq with close time 0
-	// because the catalog knows no close times.
-	r.SetLatestLedger(testChunk.FirstLedger()+1, 0)
+	// The boot seeding: OpenRegistry publishes the latest seq with no close
+	// time, because the catalog records sequences and not timestamps.
+	r.SetLatestLedger(testChunk.FirstLedger()+1, query.UnknownCloseTime())
 	reader := NewLedgerReader()
 
 	got, err := reader.GetLedgerRange(viewCtx(t, r))
@@ -134,7 +134,7 @@ func TestGetLedger_V1LedgerCloseMeta(t *testing.T) {
 	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
 	raw, _ := lcmV1WithClassicTx(t, testChunk.FirstLedger())
 	seedHotChunkLCMs(t, cat, r, testChunk, raw)
-	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
+	r.SetLatestLedger(testChunk.FirstLedger(), query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger())))
 	reader := NewLedgerReader()
 
 	lcm, ok, err := reader.GetLedger(viewCtx(t, r), testChunk.FirstLedger())
@@ -282,7 +282,7 @@ func TestTxBatchGetLedgers_HeaderMatchesFullDecode(t *testing.T) {
 	rawV1, _ := lcmV1WithClassicTx(t, testChunk.FirstLedger())
 	rawV2, _ := lcmWithTxs(t, testChunk.FirstLedger()+1, txSpec{})
 	seedHotChunkLCMs(t, cat, r, testChunk, rawV1, rawV2)
-	r.SetLatestLedger(testChunk.FirstLedger()+1, closeTimeFor(testChunk.FirstLedger()+1))
+	r.SetLatestLedger(testChunk.FirstLedger()+1, query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger()+1)))
 	reader := NewLedgerReader()
 
 	tx, err := reader.NewTx(viewCtx(t, r))
@@ -350,7 +350,7 @@ func TestTxGetLedger_WalkCrossesChunkBorder(t *testing.T) {
 	c0, c1 := testChunk, testChunk+1
 	seedHotLedgers(t, cat, r, c0, seqRange(c0.FirstLedger(), c0.LastLedger())...)
 	seedHotLedgers(t, cat, r, c1, c1.FirstLedger(), c1.FirstLedger()+1)
-	r.SetLatestLedger(c1.FirstLedger()+1, closeTimeFor(c1.FirstLedger()+1))
+	r.SetLatestLedger(c1.FirstLedger()+1, query.CloseTimeAt(closeTimeFor(c1.FirstLedger()+1)))
 	reader := NewLedgerReader()
 
 	tx, err := reader.NewTx(viewCtx(t, r))
@@ -374,7 +374,7 @@ func TestTxGetLedger_WalkPastSpanCapIsExhaustedNotNonSequential(t *testing.T) {
 	c0, c1 := testChunk, testChunk+1
 	seedHotLedgers(t, cat, r, c0, seqRange(c0.FirstLedger(), c0.LastLedger())...)
 	seedHotLedgers(t, cat, r, c1, c1.FirstLedger(), c1.FirstLedger()+1, c1.FirstLedger()+2)
-	r.SetLatestLedger(c1.FirstLedger()+2, closeTimeFor(c1.FirstLedger()+2))
+	r.SetLatestLedger(c1.FirstLedger()+2, query.CloseTimeAt(closeTimeFor(c1.FirstLedger()+2)))
 	reader := NewLedgerReader()
 
 	tx, err := reader.NewTx(viewCtx(t, r))
@@ -440,4 +440,48 @@ func TestLedgerReaderTx_BatchGetLedgersStopsOnCanceledContext(t *testing.T) {
 
 	_, err = tx.BatchGetLedgers(ctx, first, first+2)
 	assert.ErrorIs(t, err, context.Canceled)
+}
+
+// TestGetLedgerRange_SeededWindowReadsNoLedgers is the standing guard on the
+// close-time path: once both edges are stamped, a served daemon that is not
+// ingesting must answer getLedgerRange without touching a ledger at all. Each
+// read it does take costs a whole decompressed ledger to recover eight bytes,
+// so a regression here is not a small one.
+//
+// Proved by the allocation budget rather than by breaking the store: a point
+// read decompresses a whole ledger, so a served range that stays under a couple
+// of kilobytes per call did not take one. The numbers are asserted too, which is
+// what rules out answering cheaply by answering wrongly.
+func TestGetLedgerRange_SeededWindowReadsNoLedgers(t *testing.T) {
+	cat := openTestCatalog(t)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
+	seedHotLedgers(t, cat, r, testChunk, testChunk.FirstLedger(), testChunk.FirstLedger()+1)
+	r.SetLatestLedger(testChunk.FirstLedger()+1, query.UnknownCloseTime())
+	reader := NewLedgerReader()
+
+	// Seeding is the one read per edge the daemon pays before serving.
+	require.NoError(t, SeedCloseTimes(r))
+
+	want := store.LedgerRange{
+		FirstLedger: store.LedgerInfo{
+			Sequence: testChunk.FirstLedger(), CloseTime: closeTimeFor(testChunk.FirstLedger()),
+		},
+		LastLedger: store.LedgerInfo{
+			Sequence: testChunk.FirstLedger() + 1, CloseTime: closeTimeFor(testChunk.FirstLedger() + 1),
+		},
+	}
+	ctx := viewCtx(t, r)
+	got, err := reader.GetLedgerRange(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, want, got, "seeded stamps must answer with the real close times")
+
+	// Both edges come from stamps, so nothing is read: a served range costs
+	// about nothing per call.
+	perCall := allocBytesPerRun(t, 200, func() {
+		if _, err := reader.GetLedgerRange(ctx); err != nil {
+			t.Error(err)
+		}
+	})
+	assert.Less(t, perCall, uint64(2048),
+		"a seeded GetLedgerRange allocated %d bytes per call; it should not be reading ledgers", perCall)
 }

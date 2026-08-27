@@ -92,16 +92,6 @@ func (h *HotStore) AddLedgerToBatch(b *rocksdb.BatchWriter, e Entry) error {
 	return nil
 }
 
-// GetLedgerRaw decodes the ledger stored under seq into a fresh,
-// caller-owned buffer, or returns stores.ErrNotFound on miss. A zstd
-// decode failure surfaces as stores.ErrCorrupt. Sequential bulk readers
-// should prefer IterateLedgers, which yields borrows without the
-// per-ledger decode allocation; a caller that reads one ledger and drops
-// it should prefer WithLedger.
-func (h *HotStore) GetLedgerRaw(seq uint32) ([]byte, error) {
-	return h.getLedgerInto(nil, seq)
-}
-
 // WithLedger calls fn with seq's decoded bytes; see query.LedgerReader for the
 // loan rule. The buffer returns to the store's pool as fn returns.
 func (h *HotStore) WithLedger(seq uint32, fn func(raw []byte) error) error {

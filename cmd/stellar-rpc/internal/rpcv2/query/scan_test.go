@@ -38,7 +38,7 @@ func borderFixture(t *testing.T) (*Registry, chunk.ID, chunk.ID) {
 	const c0, c1 = chunk.ID(5), chunk.ID(6)
 	seedHotLedgers(t, cat, r, c0, c0.FirstLedger(), c0.FirstLedger()+1)
 	seedHotLedgers(t, cat, r, c1, c1.FirstLedger(), c1.FirstLedger()+1)
-	r.SetLatestLedger(c1.FirstLedger(), 0)
+	r.SetLatestLedger(c1.FirstLedger(), CloseTimeAt(0))
 	return r, c0, c1
 }
 
@@ -93,7 +93,7 @@ func TestScanLedgers_UnroutableChunkFailsUpFront(t *testing.T) {
 	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 	const c1 = chunk.ID(6)
 	seedHotLedgers(t, cat, r, c1, c1.FirstLedger())
-	r.SetLatestLedger(c1.FirstLedger(), 0)
+	r.SetLatestLedger(c1.FirstLedger(), CloseTimeAt(0))
 
 	a, err := r.NewReadView()
 	require.NoError(t, err)
@@ -146,7 +146,7 @@ func TestScanLedgers_ColdHotBorder(t *testing.T) {
 
 	// c1 is hot with real committed ledgers.
 	seedHotLedgers(t, cat, r, c1, c1.FirstLedger(), c1.FirstLedger()+1)
-	r.SetLatestLedger(c1.FirstLedger()+1, 0)
+	r.SetLatestLedger(c1.FirstLedger()+1, CloseTimeAt(0))
 
 	a, err := r.NewReadView()
 	require.NoError(t, err)
@@ -190,7 +190,7 @@ func TestScanLedgers_LateChunkFailureSurfacesAtPosition(t *testing.T) {
 	seedHotLedgers(t, cat, r, c0, c0.FirstLedger(), c0.FirstLedger()+1)
 	seedHotLedgers(t, cat, r, c1, c1.FirstLedger(), c1.FirstLedger()+1)
 	// c2: nothing at all — unroutable, but only discovered mid-stream.
-	r.SetLatestLedger(c2.FirstLedger(), 0)
+	r.SetLatestLedger(c2.FirstLedger(), CloseTimeAt(0))
 
 	a, err := r.NewReadView()
 	require.NoError(t, err)
@@ -256,7 +256,7 @@ func TestScanLedgers_EarlyBreakThenRelease(t *testing.T) {
 	for _, c := range []chunk.ID{5, 6} {
 		coldMarkerPack(t, cat, c)
 	}
-	r.SetLatestLedger(chunk.ID(6).LastLedger(), 0)
+	r.SetLatestLedger(chunk.ID(6).LastLedger(), CloseTimeAt(0))
 
 	a, err := r.NewReadView()
 	require.NoError(t, err)
