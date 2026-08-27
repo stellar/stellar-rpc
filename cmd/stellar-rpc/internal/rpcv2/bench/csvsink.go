@@ -152,7 +152,10 @@ var fileSpecs = func() []fileSpec {
 //     its basename.
 //   - In a type's file, total_r<rate> is that leg's headline distribution — the
 //     scheduled latency of every measured request. service_r<rate>,
-//     found_r<rate>, and miss_r<rate> are side rows over the same requests.
+//     found_r<rate>, and miss_r<rate> are side rows over the same requests. A
+//     consumer must read <qtype>_r<rate>_shed alongside total_r<rate>, because
+//     once a leg sheds, total_r<rate> covers only the requests the dispatcher
+//     was able to offer.
 //   - In driver.csv, <qtype>_r<rate> with no further suffix is the leg's
 //     wall-clock. <qtype>_r<rate>_millirps, _lag, and _shed are that leg's
 //     driver metrics: the achieved rate times 1000, the dispatch-lag
@@ -490,13 +493,17 @@ func withUnknown[V any](order []string, m map[string]V) []string {
 }
 
 // keepsZeroSamples reports whether a row keeps its zero-duration samples. These
-// rows are distributions or counts in which a zero is a real observation — a
-// ledger that committed on time, a request dispatched on time, a leg that shed
-// nothing — rather than a piece of work too fast for the timer to see.
+// rows are distributions, counts, or rates in which a zero is a real
+// observation — a ledger that committed on time, a request dispatched on time,
+// a leg that shed nothing, a leg that answered nothing — rather than a piece of
+// work too fast for the timer to see.
+//
+// The rule is a whole-label suffix rule shared by the ingest and query schemas,
+// so the ingest report's pace_lag is covered by the _lag suffix.
 func keepsZeroSamples(label string) bool {
-	return label == driverPaceLag ||
-		strings.HasSuffix(label, driverLegLagSuffix) ||
-		strings.HasSuffix(label, driverLegShedSuffix)
+	return strings.HasSuffix(label, driverLegLagSuffix) ||
+		strings.HasSuffix(label, driverLegShedSuffix) ||
+		strings.HasSuffix(label, driverLegRPSSuffix)
 }
 
 // file is one aggregated CSV file: its basename (without .csv) and its rows.
@@ -591,19 +598,34 @@ func writeCSV(path string, rows []row) error {
 func (s *csvSink) logSummary(logger *supportlog.Entry) {
 	for _, f := range s.files() {
 		for _, r := range f.rows {
-			// peak_rss_bytes carries bytes in its duration fields; render it
-			// as a byte count, not a garbled duration.
-			if f.name == fileDriver && r.name == driverPeakRSS {
-				logger.Infof("%-10s %-12s n=%-7d bytes=%d", f.name, r.name, r.n, r.total.Nanoseconds())
-				continue
-			}
-			logger.Infof("%-10s %-12s n=%-7d items=%-9d total=%-12s p50=%-10s p90=%-10s p99=%-10s max=%s",
-				f.name, r.name, r.n, r.items,
-				r.total.Round(time.Microsecond),
-				r.p50.Round(time.Microsecond),
-				r.p90.Round(time.Microsecond),
-				r.p99.Round(time.Microsecond),
-				r.maxv.Round(time.Microsecond))
+			logRow(logger, f.name, r)
 		}
 	}
+}
+
+// logRow logs one aggregated row. Three driver rows hold a plain number in
+// their duration columns rather than a time — the run's peak RSS in bytes, a
+// leg's achieved rate in thousandths of a request per second, and a leg's shed
+// count — so each is rendered as the number it holds.
+func logRow(logger *supportlog.Entry, fileName string, r row) {
+	switch {
+	case fileName != fileDriver:
+	case r.name == driverPeakRSS:
+		logger.Infof("%-10s %-12s n=%-7d bytes=%d", fileName, r.name, r.n, r.total.Nanoseconds())
+		return
+	case strings.HasSuffix(r.name, driverLegRPSSuffix):
+		logger.Infof("%-10s %-12s n=%-7d rps=%.3f", fileName, r.name, r.n,
+			float64(r.total.Nanoseconds())/milliPerUnit)
+		return
+	case strings.HasSuffix(r.name, driverLegShedSuffix):
+		logger.Infof("%-10s %-12s n=%-7d shed=%d", fileName, r.name, r.n, r.items)
+		return
+	}
+	logger.Infof("%-10s %-12s n=%-7d items=%-9d total=%-12s p50=%-10s p90=%-10s p99=%-10s max=%s",
+		fileName, r.name, r.n, r.items,
+		r.total.Round(time.Microsecond),
+		r.p50.Round(time.Microsecond),
+		r.p90.Round(time.Microsecond),
+		r.p99.Round(time.Microsecond),
+		r.maxv.Round(time.Microsecond))
 }
