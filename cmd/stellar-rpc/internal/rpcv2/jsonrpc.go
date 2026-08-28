@@ -2,6 +2,7 @@ package rpcv2
 
 import (
 	"context"
+	"math"
 	"time"
 
 	"github.com/creachadair/jrpc2"
@@ -12,8 +13,8 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/eventsapi"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
@@ -36,16 +37,13 @@ type handlerParams struct {
 	retentionWindow   uint32
 }
 
-// getEventsV2MethodName is the one method v2 serves that v1 does not, so no
-// shared protocol constant exists for it yet.
-const getEventsV2MethodName = "getEventsV2"
-
 // newJSONRPCHandler maps the v2 config onto the shared method-spec builder —
 // the v2 counterpart of rpcv1.NewJSONRPCHandler. The handlers are the shared
 // internal/methods constructors, unmodified; only their inputs are v2's (the
 // router-backed adapters, the daemon-owned fee windows, captive-core state).
-// getEvents is the one exception: a stub that reports not-implemented until
-// #774 ships it.
+// getEventsV2 is the exception. v1 has no such method, so eventsapi
+// implements it natively. v1 getEvents stays a not-implemented stub until the
+// v1 shim lands.
 func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 	m := cfg.Service.Methods
 	specs := jsonrpc.BuildHandlerSpecs(
@@ -74,8 +72,12 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 			DefaultTransactionsLimit: deref(m.GetTransactions.DefaultItemsPerResponse),
 		})
 	specs = append(specs, jsonrpc.HandlerSpec{
-		MethodName: getEventsV2MethodName,
-		Handler:    notImplemented(getEventsV2MethodName),
+		MethodName: protocol.GetEventsV2MethodName,
+		Handler: eventsapi.NewHandler(eventsapi.Limits{
+			TermBudget:   uint32(min(deref(m.GetEventsV2.TermBudget), math.MaxUint32)), //nolint:gosec // min clamps it
+			MaxLimit:     deref(m.GetEventsV2.MaxItemsPerResponse),
+			DefaultLimit: deref(m.GetEventsV2.DefaultItemsPerResponse),
+		}),
 	})
 	specs = limitsByMethod(m).Apply(specs)
 	for i := range specs {
@@ -105,7 +107,7 @@ func limitsByMethod(m config.MethodsConfig) jsonrpc.LimitsByMethod {
 	return jsonrpc.LimitsByMethod{
 		protocol.GetHealthMethodName:        lim(m.GetHealth.QueueLimit, m.GetHealth.MaxExecutionDuration),
 		protocol.GetEventsMethodName:        lim(m.GetEvents.QueueLimit, m.GetEvents.MaxExecutionDuration),
-		getEventsV2MethodName:               lim(m.GetEventsV2.QueueLimit, m.GetEventsV2.MaxExecutionDuration),
+		protocol.GetEventsV2MethodName:      lim(m.GetEventsV2.QueueLimit, m.GetEventsV2.MaxExecutionDuration),
 		protocol.GetNetworkMethodName:       lim(m.GetNetwork.QueueLimit, m.GetNetwork.MaxExecutionDuration),
 		protocol.GetVersionInfoMethodName:   lim(m.GetVersionInfo.QueueLimit, m.GetVersionInfo.MaxExecutionDuration),
 		protocol.GetLatestLedgerMethodName:  lim(m.GetLatestLedger.QueueLimit, m.GetLatestLedger.MaxExecutionDuration),
@@ -120,11 +122,11 @@ func limitsByMethod(m config.MethodsConfig) jsonrpc.LimitsByMethod {
 	}
 }
 
-// notImplemented is the stub for a method in the table but not built yet
-// (both current uses die when #774 ships the events handlers). An explicit
-// error, never an empty success: an empty page would tell a paging client
-// "nothing exists", which is a lie. jrpc2.MethodNotFound (-32601) is the
-// spec's "method does not exist / is not available".
+// notImplemented is the stub for a method in the table but not built yet; its
+// one use dies when the v1 events shim lands. An explicit error, never an
+// empty success: an empty page would tell a paging client "nothing exists",
+// which is a lie. jrpc2.MethodNotFound (-32601) is the spec's "method does
+// not exist / is not available".
 func notImplemented(method string) jrpc2.Handler {
 	message := method + " is not implemented by this service yet (issue #774 adds it);" +
 		" use the existing RPC service for events meanwhile"
@@ -154,7 +156,7 @@ func wrapAdapterRequest(h jrpc2.Handler, registry *query.Registry) jrpc2.Handler
 		// limiter recovers panics above this frame and keeps the process
 		// serving, so a skipped release would orphan the RocksDB snapshot.
 		defer view.Release()
-		return h(adapters.WithView(ctx, view), req)
+		return h(query.WithView(ctx, view), req)
 	}
 }
 

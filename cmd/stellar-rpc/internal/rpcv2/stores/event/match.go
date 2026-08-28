@@ -525,6 +525,20 @@ func ValidateFilters(filters []Filter) error {
 			return fmt.Errorf(
 				"events: filter[%d].EventType %d is not a known event type", fi, *f.EventType)
 		}
+		for pos, topic := range f.Topics {
+			if len(topic) == 0 {
+				continue
+			}
+			// The topic bytes are what ComputeTermKey hashes, so a filter
+			// naming anything but one whole ScVal was never minted here.
+			// The length comparison rejects trailing bytes.
+			view := xdr.ScValView(topic)
+			raw, err := view.Raw()
+			if err != nil || len(raw) != len(topic) {
+				return fmt.Errorf(
+					"events: filter[%d].Topics[%d] is not one ScVal", fi, pos)
+			}
+		}
 		if f.TopicCount.Count < 0 {
 			return fmt.Errorf(
 				"events: filter[%d].TopicCount.Count must be non-negative, got %d",

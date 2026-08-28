@@ -12,8 +12,9 @@ import (
 
 // RPCError is the error object of a JSON-RPC 2.0 response.
 type RPCError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    json.RawMessage `json:"data"`
 }
 
 // RPCResponse is a JSON-RPC 2.0 response with the result left raw, so a test

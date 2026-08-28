@@ -43,7 +43,7 @@ func viewCtx(t *testing.T, r *query.Registry) context.Context {
 	view, err := r.NewReadView()
 	require.NoError(t, err)
 	t.Cleanup(view.Release)
-	return WithView(context.Background(), view)
+	return query.WithView(context.Background(), view)
 }
 
 func seqRange(lo, hi uint32) []uint32 {
