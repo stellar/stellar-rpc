@@ -386,6 +386,7 @@ func BenchmarkOldestLedgerRangeLookup(b *testing.B) {
 		latest := lcms[len(lcms)-1]
 		require.NoError(b, write.Commit(latest, nil))
 
+		// Verify that both the prefix and full-blob lookups return the same ledger range.
 		ctx := b.Context()
 		latestSeq, latestTime := latest.LedgerSequence(), latest.LedgerCloseTime()
 		want, err := getLedgerRangeWithCache(ctx, testDB, latestSeq, latestTime)
