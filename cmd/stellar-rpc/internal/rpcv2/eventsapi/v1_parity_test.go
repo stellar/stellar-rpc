@@ -255,13 +255,14 @@ func requireParity(t *testing.T, v1c, shimc *jrpc2.Client, req protocol.GetEvent
 	assert.Equal(t, normalizedResponse(t, r1), normalizedResponse(t, r2))
 }
 
-// The v1 window and the pager's per-page scan window are the same number by
-// construction. v1Response's short-page cursor claims everything through
-// endLedger-1 was scanned, which holds only while one QueryEvents call can
-// cover a full v1 window; getEventsV1's truncation guard turns a violation
-// into a loud error, and this pairing keeps the guard unreachable.
+// v1Response's short-page cursor claims everything through endLedger-1 was
+// scanned, which holds only while one pager call can cover a whole v1
+// window. getEventsV1's truncation guard turns a violation into a loud
+// error; this pairing keeps the guard unreachable. It pins against the
+// window the pager actually applies, not against the constant that window
+// happens to derive from, so narrowing one without the other fails here.
 func TestV1WindowFitsThePagerScanWindow(t *testing.T) {
-	assert.LessOrEqual(t, uint32(methods.LedgerScanLimit), chunk.LedgersPerChunk)
+	assert.LessOrEqual(t, uint32(methods.LedgerScanLimit), query.MaxScanLedgers)
 }
 
 // TestV1ParityHarness_V1SideServes exercises the v1 side alone: it

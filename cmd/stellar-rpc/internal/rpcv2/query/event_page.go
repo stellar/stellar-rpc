@@ -29,13 +29,17 @@ var ErrPositionMismatch = errors.New("query: cursor position does not match stor
 // part of the cursor, and the handler maps the two differently.
 var ErrInvalidLimit = errors.New("query: page limit must be positive")
 
-// defaultMaxScanLedgers bounds the ledgers one page may scan, so a
-// filter that matches nothing cannot walk the node's whole retention
-// in one call: the page stops at the window's edge and returns
-// ScanHasMore with the watermark advanced through it. The value is the
-// per-request scan bound (see chunk.LedgersPerChunk): a page touches
-// at most two chunks. Registry.maxScanLedgers shrinks it in tests.
-const defaultMaxScanLedgers = chunk.LedgersPerChunk
+// MaxScanLedgers bounds the ledgers one page may scan, so a filter that
+// matches nothing cannot walk the node's whole retention in one call:
+// the page stops at the window's edge and returns ScanHasMore with the
+// watermark advanced through it. The value is the per-request scan bound
+// (see chunk.LedgersPerChunk): a page touches at most two chunks.
+// Registry.maxScanLedgers shrinks it in tests.
+//
+// Exported because a handler whose own window must fit inside one page
+// has to pin itself against this number, not against the constant it
+// happens to derive from.
+const MaxScanLedgers = chunk.LedgersPerChunk
 
 // ScanStatus is where a page's walk stopped; the handler maps it to
 // the wire scanStatus.
@@ -169,7 +173,7 @@ func (a *ReadView) queryEvents(
 	// never terminal, so the next page continues.
 	window := a.maxScanLedgers
 	if window == 0 {
-		window = defaultMaxScanLedgers
+		window = MaxScanLedgers
 	}
 	truncated := hi-lo+1 > window
 	if truncated {
