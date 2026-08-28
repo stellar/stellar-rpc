@@ -74,13 +74,57 @@ const (
 	// records. The Format value identifies the on-disk codec; readers
 	// dispatch on it to select a matching RecordDecoder.
 	eventsPackFormat packfile.Format = 0xFE1E000C // "Fellow Events 0xC" (zstd)
-	indexPackFormat  packfile.Format = 0xFE1E000B // "Fellow Events 0xB"
+	// Bumped from 0xFE1E000B when an index.pack item body gained its
+	// leading codec byte. 0xFE1E000C was already taken by eventsPackFormat,
+	// so the index side skips to 0xD. An older reader pointed at a new
+	// artifact (or the reverse) fails at open rather than decoding a roaring
+	// header out of a delta body.
+	indexPackFormat packfile.Format = 0xFE1E000D // "Fellow Events 0xD" (codec byte)
 )
+
+// index.pack item codecs — the codec byte in the layout cold_index.go
+// documents.
+//
+// The byte is what makes a future codec additive: a new one takes the next
+// value, the reader learns to decode it, and artifacts written by either
+// writer stay readable. Only a change to what the EXISTING values mean would
+// need another indexPackFormat bump.
+const (
+	// itemCodecRoaring bodies are a serialized roaring bitmap, RunOptimize'd
+	// before Bitmap.WriteTo.
+	itemCodecRoaring byte = 0x00
+	// itemCodecDelta bodies are events.AppendPostings output: a uvarint count
+	// then the event IDs, first absolute and the rest strictly-positive
+	// deltas.
+	itemCodecDelta byte = 0x01
+)
+
+// deltaPostingMaxCardinality is the term cardinality at or below which
+// postings are stored as a delta-varint list instead of a roaring bitmap.
+//
+// Measured on a real pubnet chunk (10,000 ledgers, 8.65M events, 204,752
+// terms): below ~1024 postings roaring costs 1.7x to 3.8x a delta list, and
+// above it roaring's run and bitmap containers pull ahead, reaching 12.5x on
+// the nine terms holding more than a million postings. 99.2% of terms fall
+// below the threshold and hold 71% of the byte saving.
+//
+// Cardinality is a proxy for whichever encoding is actually smaller, not a
+// derivation of it: a contiguous 1024-posting term is far smaller as a run
+// container than as deltas, and a scattered 262K-posting term is smaller as
+// deltas than as roaring. The proxy holds on pubnet event postings because
+// cardinality correlates with run structure there, fat terms being the
+// clustered ones. That is a property of the data, so re-measure before
+// retuning.
+//
+// This is WRITER POLICY, not format: the codec byte says what a record
+// holds, so moving the threshold changes only what future artifacts choose
+// and needs no re-backfill of the ones already written.
+const deltaPostingMaxCardinality = 1024
 
 // IndexRecordFingerprintLen is the byte width of the leading
 // fingerprint in every index.pack record. The cold reader checks
 // this against the queried term's first four bytes to filter MPHF
-// false positives before deserializing the bitmap.
+// false positives before decoding the postings.
 const IndexRecordFingerprintLen = 4
 
 // ──────────────────────────────────────────────────────────────────

@@ -14,6 +14,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
@@ -932,10 +933,12 @@ func (f *fakeEventReader) EventCount() (uint32, error) {
 
 func (f *fakeEventReader) Offsets() (*event.LedgerOffsets, error) { return f.ofs, nil }
 
-func (f *fakeEventReader) LookupKeys(_ context.Context, keys []event.TermKey) ([]*roaring.Bitmap, error) {
-	out := make([]*roaring.Bitmap, len(keys))
+func (f *fakeEventReader) LookupKeys(_ context.Context, keys []event.TermKey) ([]events.Postings, error) {
+	out := make([]events.Postings, len(keys))
 	for i, k := range keys {
-		out[i] = f.bitmaps[k]
+		// An absent key maps to a nil bitmap, which BitmapPostings reports
+		// as absent — the same clean miss a real store returns.
+		out[i] = events.BitmapPostings(f.bitmaps[k])
 	}
 	return out, nil
 }

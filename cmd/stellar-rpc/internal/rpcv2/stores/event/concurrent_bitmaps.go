@@ -5,6 +5,8 @@ import (
 	"sync/atomic"
 
 	"github.com/RoaringBitmap/roaring/v2"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 )
 
 // promotionThreshold is the number of event IDs stored in a list
@@ -81,11 +83,16 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 	return cb
 }
 
-// Get returns the bitmap for the given term key, or (nil, nil) when
-// the key is not indexed. The returned bitmap is an immutable
-// snapshot: writers publish new termStates via atomic.Store, so the
-// pointer this method returns will never be mutated by anyone — but
-// only if callers respect the "read-only" half of the contract.
+// Get returns the postings for the given term key, or the zero Postings when
+// the key is not indexed. What comes back is an immutable snapshot: writers
+// publish new termStates via atomic.Store, and neither a published bitmap nor
+// a published id slice is ever written afterwards — but only if callers
+// respect the "read-only" half of the contract.
+//
+// A sparse entry is returned as its id slice, un-materialized, since that is
+// the form it is stored in and the form events.Intersect can drive from.
+// Building a bitmap for it here was pure loss: the state already held an id
+// list, and every Get paid for a copy the planner then took apart again.
 //
 // Forbidden caller-side methods on the returned bitmap (these have
 // side effects on the bitmap's internal needCopyOnWrite[] array,
@@ -98,6 +105,8 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 //   - SetCopyOnWrite
 //   - Any *Writable* accessor on the underlying roaringArray
 //
+// The same rule applies to a returned id slice: read it, never write to it.
+//
 // Safe caller-side methods (used by event.Matches today): any
 // non-mutating read — Contains, GetCardinality, Iterator,
 // ToArray, IsEmpty, Minimum, Maximum — plus the non-mutating
@@ -107,8 +116,8 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 // ≥2-input qualifier on FastAnd/FastOr: with a single input the
 // roaring library has historically taken a Clone-the-input
 // shortcut, so callers MUST avoid passing a singleton slice to
-// those aggregators (the event store's Matches guards its single-input
-// cases before calling FastAnd/FastOr).
+// those aggregators (events.Intersect and events.Union guard their
+// single-input cases before calling FastAnd/FastOr).
 //
 // Callers may hold the pointer arbitrarily long. A subsequent Get
 // on the same key may return either this same pointer (no AddTo
@@ -118,22 +127,23 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 // Concurrency: the RLock is held only for the map lookup. Once the
 // per-entry pointer is captured, the lock is released; the atomic
 // load on the entry happens lock-free.
-func (s *ConcurrentBitmaps) Get(key TermKey) (*roaring.Bitmap, error) {
+func (s *ConcurrentBitmaps) Get(key TermKey) (events.Postings, error) {
 	s.rwmu.RLock()
 	p := s.terms[key]
 	s.rwmu.RUnlock()
 	if p == nil {
-		return nil, nil //nolint:nilnil // not-found is signaled by nil bitmap, no error
+		return events.Postings{}, nil
 	}
 	// The pointer is always Stored with a non-nil termState holding a
 	// non-nil bm or non-empty ids before it is published to the map.
 	st := p.Load()
 	if st.bm != nil {
-		return st.bm, nil
+		return events.BitmapPostings(st.bm), nil
 	}
-	bm := roaring.New()
-	bm.AddMany(st.ids)
-	return bm, nil
+	// Sparse: hand out the published id list. AddTo builds a fresh slice per
+	// publish and never appends into one already published, so holding it is
+	// safe for as long as the caller likes.
+	return events.IDPostings(st.ids), nil
 }
 
 // AddTo records each eventID under key. Idempotent: callers

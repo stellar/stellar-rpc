@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -158,30 +159,6 @@ func TestColdReader_LookupUnseenTermReturnsNil(t *testing.T) {
 	}
 }
 
-func TestColdReader_LookupKeysReturnsFreshBitmaps(t *testing.T) {
-	// Two LookupKeys calls for the same term return independent
-	// bitmaps — mutating one must not affect the other. The interface
-	// contract says cold-side results are freshly unmarshaled and
-	// logically owned by the caller; this pins that a mutation cannot
-	// bleed into a later lookup.
-	const chunkID = chunk.ID(0)
-	dir, payloads := buildColdFixture(t, chunkID, 8, 1)
-
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = cr.Close() })
-
-	key := contractTermKey(payloads[0])
-	first := lookupOne(t, cr, key)
-	require.NotNil(t, first)
-	first.Add(999_999)
-
-	second := lookupOne(t, cr, key)
-	require.NotNil(t, second)
-	assert.False(t, second.Contains(999_999),
-		"a LookupKeys result mutation must not bleed into the next lookup")
-}
-
 func TestColdReader_FetchEventsRoundTrip(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 5, 1)
@@ -273,13 +250,13 @@ func TestColdReader_EventlessChunk(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, cnt)
 
-	// Term-filtered paths miss cleanly (nil bitmap, no error) instead
-	// of surfacing a filesystem error.
+	// Term-filtered paths miss cleanly (absent postings, no error)
+	// instead of surfacing a filesystem error.
 	someTerm := ComputeTermKey([]byte("any"), FieldContractID)
-	bms, err := cr.LookupKeys(context.Background(), []TermKey{someTerm})
+	got, err := cr.LookupKeys(context.Background(), []TermKey{someTerm})
 	require.NoError(t, err)
-	require.Len(t, bms, 1)
-	assert.Nil(t, bms[0])
+	require.Len(t, got, 1)
+	assert.False(t, got[0].Present())
 
 	// Full-scan path yields nothing.
 	for _, err := range cr.All(context.Background()) {
@@ -548,26 +525,28 @@ func TestColdReader_LookupKeys(t *testing.T) {
 	missing := ComputeTermKey([]byte("never-added"), FieldTopic1)
 
 	keys := []TermKey{contractKey, missing, topicKey, missing}
-	bms, err := cr.LookupKeys(context.Background(), keys)
+	got, err := cr.LookupKeys(context.Background(), keys)
 	require.NoError(t, err)
-	require.Len(t, bms, len(keys))
+	require.Len(t, got, len(keys))
 
-	require.NotNil(t, bms[0], "contract key should hit")
-	assert.Equal(t, uint64(len(payloads)), bms[0].GetCardinality())
+	require.True(t, got[0].Present(), "contract key should hit")
+	assert.Equal(t, uint64(len(payloads)), got[0].Cardinality())
 
-	assert.Nil(t, bms[1], "missing key should be nil")
+	assert.False(t, got[1].Present(), "missing key should be absent")
 
-	require.NotNil(t, bms[2], "topic key should hit")
-	assert.Equal(t, uint64(1), bms[2].GetCardinality())
-	assert.True(t, bms[2].Contains(0))
+	require.True(t, got[2].Present(), "topic key should hit")
+	assert.Equal(t, uint64(1), got[2].Cardinality())
+	assert.True(t, got[2].Contains(0))
 
-	assert.Nil(t, bms[3], "second missing must also be nil")
+	assert.False(t, got[3].Present(), "second missing must also be absent")
 }
 
-// TestColdReader_LookupKeysClonesAcrossCalls pins that two
-// LookupKeys batches for the same key return independent bitmaps —
-// mutating one must not bleed into the next.
-func TestColdReader_LookupKeysClonesAcrossCalls(t *testing.T) {
+// TestColdReader_LookupKeysIsolatesCalls pins that two LookupKeys batches for
+// the same key return independent postings, so scribbling on one cannot bleed
+// into the next. The fixture's term is small, so it comes back as an ID slice;
+// mutating the slice is the mutation that could actually reach a shared
+// buffer, whereas Bitmap() on an ID-backed term hands back a throwaway.
+func TestColdReader_LookupKeysIsolatesCalls(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 8, 1)
 
@@ -579,14 +558,15 @@ func TestColdReader_LookupKeysClonesAcrossCalls(t *testing.T) {
 	first, err := cr.LookupKeys(context.Background(), []TermKey{key})
 	require.NoError(t, err)
 	require.Len(t, first, 1)
-	require.NotNil(t, first[0])
-	first[0].Add(999_999)
+	require.NotNil(t, first[0].IDs(), "a small term must come back as an ID slice")
+
+	want := slices.Clone(first[0].IDs())
+	first[0].IDs()[0] = 999_999
 
 	second, err := cr.LookupKeys(context.Background(), []TermKey{key})
 	require.NoError(t, err)
 	require.Len(t, second, 1)
-	require.NotNil(t, second[0])
-	assert.False(t, second[0].Contains(999_999),
+	assert.Equal(t, want, second[0].IDs(),
 		"a LookupKeys result mutation must not bleed into the next LookupKeys")
 }
 

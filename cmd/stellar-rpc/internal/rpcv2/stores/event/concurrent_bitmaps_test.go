@@ -23,21 +23,21 @@ func TestConcurrentBitmaps_AddToAndGet(t *testing.T) {
 	s.AddTo(key, 1)
 	s.AddTo(key, 2)
 
-	bm, err := s.Get(key)
+	post, err := s.Get(key)
 	require.NoError(t, err)
-	require.NotNil(t, bm)
-	assert.Equal(t, uint64(3), bm.GetCardinality())
-	assert.True(t, bm.Contains(0))
-	assert.True(t, bm.Contains(1))
-	assert.True(t, bm.Contains(2))
+	require.True(t, post.Present())
+	assert.Equal(t, uint64(3), post.Cardinality())
+	assert.True(t, post.Contains(0))
+	assert.True(t, post.Contains(1))
+	assert.True(t, post.Contains(2))
 }
 
 func TestConcurrentBitmaps_GetMissing(t *testing.T) {
 	s := newTestConcurrentBitmaps()
 	key := ComputeTermKey([]byte("missing"), FieldTopic0)
-	bm, err := s.Get(key)
+	post, err := s.Get(key)
 	require.NoError(t, err)
-	assert.Nil(t, bm)
+	assert.False(t, post.Present())
 }
 
 func TestConcurrentBitmaps_ListMode(t *testing.T) {
@@ -55,10 +55,15 @@ func TestConcurrentBitmaps_ListMode(t *testing.T) {
 	assert.Nil(t, st.bm, "must still be in list mode")
 	assert.Len(t, st.ids, promotionThreshold-1)
 
-	bm, err := s.Get(key)
+	post, err := s.Get(key)
 	require.NoError(t, err)
-	require.NotNil(t, bm)
-	assert.Equal(t, uint64(promotionThreshold-1), bm.GetCardinality())
+	require.True(t, post.Present())
+	assert.Equal(t, uint64(promotionThreshold-1), post.Cardinality())
+
+	// The form follows storage: a sparse term is never materialized, and what
+	// comes back is the store's own slice rather than a copy.
+	require.NotNil(t, post.IDs(), "a sparse term must not be materialized")
+	assert.Same(t, &st.ids[0], &post.IDs()[0])
 
 	// Get must not have promoted.
 	assert.Nil(t, p.Load().bm)
@@ -78,6 +83,11 @@ func TestConcurrentBitmaps_Promotion(t *testing.T) {
 	require.NotNil(t, st.bm)
 	assert.Empty(t, st.ids, "sparse ids cleared after promotion")
 	assert.Equal(t, uint64(promotionThreshold), st.bm.GetCardinality())
+
+	post, err := s.Get(key)
+	require.NoError(t, err)
+	require.True(t, post.Present())
+	assert.Nil(t, post.IDs(), "a promoted term comes back as a bitmap")
 }
 
 func TestConcurrentBitmaps_AddAfterPromotion(t *testing.T) {
@@ -90,11 +100,11 @@ func TestConcurrentBitmaps_AddAfterPromotion(t *testing.T) {
 	s.AddTo(key, 1000)
 	s.AddTo(key, 2000)
 
-	bm, err := s.Get(key)
+	post, err := s.Get(key)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(promotionThreshold+2), bm.GetCardinality())
-	assert.True(t, bm.Contains(1000))
-	assert.True(t, bm.Contains(2000))
+	assert.Equal(t, uint64(promotionThreshold+2), post.Cardinality())
+	assert.True(t, post.Contains(1000))
+	assert.True(t, post.Contains(2000))
 }
 
 func TestConcurrentBitmaps_BatchAddTo(t *testing.T) {
@@ -103,12 +113,12 @@ func TestConcurrentBitmaps_BatchAddTo(t *testing.T) {
 
 	s.AddTo(key, 0, 1, 2, 3, 4)
 
-	bm, err := s.Get(key)
+	post, err := s.Get(key)
 	require.NoError(t, err)
-	require.NotNil(t, bm)
-	assert.Equal(t, uint64(5), bm.GetCardinality())
-	assert.True(t, bm.Contains(0))
-	assert.True(t, bm.Contains(4))
+	require.True(t, post.Present())
+	assert.Equal(t, uint64(5), post.Cardinality())
+	assert.True(t, post.Contains(0))
+	assert.True(t, post.Contains(4))
 }
 
 func TestConcurrentBitmaps_BatchAddToPromotion(t *testing.T) {
@@ -146,13 +156,13 @@ func TestConcurrentBitmaps_GetReturnsImmutableSnapshot(t *testing.T) {
 
 	before, err := s.Get(key)
 	require.NoError(t, err)
-	beforeCard := before.GetCardinality()
+	beforeCard := before.Cardinality()
 
 	// New AddTo publishes a new snapshot via atomic.Store.
 	s.AddTo(key, 9_999_999)
 
 	// before still observes the pre-AddTo cardinality.
-	assert.Equal(t, beforeCard, before.GetCardinality(),
+	assert.Equal(t, beforeCard, before.Cardinality(),
 		"AddTo published a new snapshot; the borrowed pointer must remain unchanged")
 
 	after, err := s.Get(key)
@@ -189,10 +199,10 @@ func TestConcurrentBitmaps_ConcurrentGetIsSafe(t *testing.T) {
 		wg.Go(func() {
 			for range 50 {
 				for _, k := range keys {
-					bm, err := s.Get(k)
+					post, err := s.Get(k)
 					require.NoError(t, err)
-					require.NotNil(t, bm)
-					_ = bm.Contains(0)
+					require.True(t, post.Present())
+					_ = post.Contains(0)
 				}
 			}
 		})
@@ -201,9 +211,9 @@ func TestConcurrentBitmaps_ConcurrentGetIsSafe(t *testing.T) {
 
 	// Sanity check: the store is untouched by all that reading.
 	for _, k := range keys {
-		bm, err := s.Get(k)
+		post, err := s.Get(k)
 		require.NoError(t, err)
-		require.NotNil(t, bm)
+		require.True(t, post.Present())
 	}
 }
 
@@ -243,14 +253,14 @@ func TestConcurrentBitmaps_ConcurrentReadWrite(t *testing.T) {
 	wg.Wait()
 
 	for _, key := range keys {
-		bm, err := s.Get(key)
+		post, err := s.Get(key)
 		require.NoError(t, err)
-		require.NotNil(t, bm)
-		assert.Equal(t, uint64(numEvents/numTerms), bm.GetCardinality())
+		require.True(t, post.Present())
+		assert.Equal(t, uint64(numEvents/numTerms), post.Cardinality())
 	}
 }
 
-// TestConcurrentBitmaps_GetDuringPromotionNeverReturnsNil pins
+// TestConcurrentBitmaps_GetDuringPromotionNeverReturnsAbsent pins
 // concurrent-reader safety across the sparse→dense promotion
 // transition. The current termState design publishes the whole
 // (ids, bm) pair via a single atomic.Store, so the
@@ -259,9 +269,9 @@ func TestConcurrentBitmaps_ConcurrentReadWrite(t *testing.T) {
 // separate Stores and seeing (bm=nil, ids=empty)) is structurally
 // impossible. The test still has value as a -race probe: many
 // readers calling Get while a writer drives terms across the
-// promotion boundary should never produce a nil bitmap and
+// promotion boundary should never produce an absent result and
 // should never trip the race detector.
-func TestConcurrentBitmaps_GetDuringPromotionNeverReturnsNil(t *testing.T) {
+func TestConcurrentBitmaps_GetDuringPromotionNeverReturnsAbsent(t *testing.T) {
 	s := newTestConcurrentBitmaps()
 	const numKeys = 200
 
@@ -303,12 +313,12 @@ func TestConcurrentBitmaps_GetDuringPromotionNeverReturnsNil(t *testing.T) {
 				default:
 				}
 				for _, k := range keys {
-					bm, err := s.Get(k)
+					post, err := s.Get(k)
 					require.NoError(t, err)
 					// The term was seeded with promotionThreshold-1
 					// ids and the writer only appends — Get must
-					// always observe a non-nil bitmap.
-					require.NotNil(t, bm, "Get returned nil during promotion window")
+					// always observe a present term.
+					require.True(t, post.Present(), "Get returned absent during promotion window")
 				}
 			}
 		})
@@ -340,12 +350,12 @@ func TestConcurrentBitmaps_AddToIsIdempotent(t *testing.T) {
 		// And add a new one — must still go through.
 		s.AddTo(key, 3)
 
-		bm, err := s.Get(key)
+		post, err := s.Get(key)
 		require.NoError(t, err)
-		require.NotNil(t, bm)
-		assert.Equal(t, uint64(4), bm.GetCardinality())
+		require.True(t, post.Present())
+		assert.Equal(t, uint64(4), post.Cardinality())
 		for _, id := range []uint32{0, 1, 2, 3} {
-			assert.True(t, bm.Contains(id))
+			assert.True(t, post.Contains(id))
 		}
 	})
 
@@ -365,9 +375,9 @@ func TestConcurrentBitmaps_AddToIsIdempotent(t *testing.T) {
 			s.AddTo(key, i)
 		}
 
-		bm, err := s.Get(key)
+		post, err := s.Get(key)
 		require.NoError(t, err)
-		assert.Equal(t, uint64(promotionThreshold), bm.GetCardinality())
+		assert.Equal(t, uint64(promotionThreshold), post.Cardinality())
 	})
 }
 
@@ -439,22 +449,22 @@ func TestNewConcurrentBitmapsFromBitmaps_DirectlyPinsContract(t *testing.T) {
 
 	cb := NewConcurrentBitmapsFromBitmaps(src)
 
-	bmA, err := cb.Get(keyA)
+	postA, err := cb.Get(keyA)
 	require.NoError(t, err)
-	require.NotNil(t, bmA)
-	assert.Equal(t, uint64(5), bmA.GetCardinality())
-	assert.True(t, bmA.GetCopyOnWrite(),
+	require.True(t, postA.Present())
+	assert.Equal(t, uint64(5), postA.Cardinality())
+	assert.True(t, postA.Bitmap().GetCopyOnWrite(),
 		"FromBitmaps must enable CopyOnWrite so the live-ingest AddTo path Clones via the fast shallow path")
 
-	bmB, err := cb.Get(keyB)
+	postB, err := cb.Get(keyB)
 	require.NoError(t, err)
-	require.NotNil(t, bmB)
-	assert.Equal(t, uint64(2), bmB.GetCardinality())
-	assert.True(t, bmB.GetCopyOnWrite())
+	require.True(t, postB.Present())
+	assert.Equal(t, uint64(2), postB.Cardinality())
+	assert.True(t, postB.Bitmap().GetCopyOnWrite())
 
-	bmNil, err := cb.Get(keyNil)
+	postNil, err := cb.Get(keyNil)
 	require.NoError(t, err)
-	assert.Nil(t, bmNil, "nil source entries must be skipped, not panicked")
+	assert.False(t, postNil.Present(), "nil source entries must be skipped, not panicked")
 
 	// Subsequent AddTo on the converted index produces a new
 	// termState whose bitmap still has CopyOnWrite (inherited via

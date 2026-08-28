@@ -157,10 +157,10 @@ func TestIngestLedger_AllCFsAdvanceTogether(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, first+1, seqB)
 	// events CFs.
-	bms, err := db.Events().LookupKeys(context.Background(), []event.TermKey{termA})
+	post, err := db.Events().LookupKeys(context.Background(), []event.TermKey{termA})
 	require.NoError(t, err)
-	require.NotNil(t, bms[0])
-	assert.Equal(t, uint64(2), bms[0].GetCardinality(), "both ledgers share the event term")
+	require.True(t, post[0].Present())
+	assert.Equal(t, uint64(2), post[0].Cardinality(), "both ledgers share the event term")
 	assert.Equal(t, uint32(2), eventCount(t, db.Events()))
 
 	// The single authoritative committed frontier equals the last committed seq.
@@ -196,10 +196,10 @@ func TestIngestLedger_RejectedLedgerPersistsNothingAcrossAnyCF(t *testing.T) {
 	// txhash CFs — the hash is absent.
 	_, gerr = db.Txhash().Get(hash)
 	require.ErrorIs(t, gerr, stores.ErrNotFound)
-	// events CFs — no term indexed, no event committed (clean miss = nil bitmap).
+	// events CFs — no term indexed, no event committed (clean miss = absent).
 	bms, lerr := db.Events().LookupKeys(context.Background(), []event.TermKey{term})
 	require.NoError(t, lerr)
-	require.Nil(t, bms[0])
+	require.False(t, bms[0].Present())
 	assert.Equal(t, uint32(0), eventCount(t, db.Events()))
 
 	// The single committed frontier is still empty — nothing committed.
@@ -379,8 +379,8 @@ func TestIngestLedger_WritesEveryHotType(t *testing.T) {
 	assert.Equal(t, first, seq)
 	bms, err := db.Events().LookupKeys(context.Background(), []event.TermKey{term})
 	require.NoError(t, err)
-	require.NotNil(t, bms[0])
-	assert.Equal(t, uint64(1), bms[0].GetCardinality())
+	require.True(t, bms[0].Present())
+	assert.Equal(t, uint64(1), bms[0].Cardinality())
 }
 
 // TestIngestLedger_EventlessTxStillIndexesHash pins the post-merge txhash

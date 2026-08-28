@@ -15,6 +15,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 )
 
 // Query and QueryOptions are the engine's historical one-shot surface
@@ -54,7 +55,7 @@ type countingReader struct {
 	totalKeys       int
 }
 
-func (c *countingReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.Bitmap, error) {
+func (c *countingReader) LookupKeys(ctx context.Context, keys []TermKey) ([]events.Postings, error) {
 	c.lookupKeysCalls++
 	c.totalKeys += len(keys)
 	return c.Reader.LookupKeys(ctx, keys)
@@ -1131,19 +1132,22 @@ func TestQuery_InvalidFilterRejected(t *testing.T) {
 // multi-term group, and the overflow bucket is populated in any chunk holding
 // an event with topics.
 func TestUnionSlots(t *testing.T) {
-	first := roaring.BitmapOf(1, 2)
-	second := roaring.BitmapOf(3)
-	bitmaps := []*roaring.Bitmap{first, nil, second, nil}
+	firstIDs := []uint32{1, 2}
+	first := events.IDPostings(firstIDs)
+	second := events.BitmapPostings(roaring.BitmapOf(3))
+	postings := []events.Postings{first, {}, second, {}}
 
-	assert.Same(t, first, unionSlots(bitmaps, []int{0}),
-		"a lone bitmap is borrowed, not cloned")
-	assert.Nil(t, unionSlots(bitmaps, []int{1}))
-	assert.Nil(t, unionSlots(bitmaps, []int{1, 3}),
+	assert.Equal(t, firstIDs, unionSlots(postings, []int{0}).IDs(),
+		"a lone entry is borrowed, not copied")
+	assert.False(t, unionSlots(postings, []int{1}).Present())
+	assert.False(t, unionSlots(postings, []int{1, 3}).Present(),
 		"a group absent from the index empties the filter")
-	assert.Same(t, second, unionSlots(bitmaps, []int{1, 2}),
-		"the one present bitmap in a group is borrowed too")
-	assert.Equal(t, []uint32{1, 2, 3}, unionSlots(bitmaps, []int{0, 2}).ToArray())
-	assert.Equal(t, []uint32{1, 2}, first.ToArray(), "inputs must not be mutated")
+	assert.Same(t, second.Bitmap(), unionSlots(postings, []int{1, 2}).Bitmap(),
+		"the one present entry in a group is borrowed too")
+	assert.Equal(t, []uint32{1, 2, 3}, unionSlots(postings, []int{0, 2}).Bitmap().ToArray())
+	assert.Equal(t, []uint32{1, 2}, firstIDs, "inputs must not be mutated")
+	assert.Equal(t, []uint32{1, 2}, postings[0].IDs(),
+		"Union must not compact the caller's slot-indexed results")
 }
 
 // ─── Cold-reader parity coverage ────────────────────────────────────────

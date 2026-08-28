@@ -13,16 +13,15 @@ package event
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"fmt"
 	"iter"
 	"slices"
 
-	"github.com/RoaringBitmap/roaring/v2"
-
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 )
 
 // Filter is one item in the union of an events query. Within a
@@ -107,7 +106,7 @@ func (f *Filter) valueTermKeys() []TermKey {
 }
 
 // termGroups returns the indexed terms this filter constrains, grouped
-// by field: the bitmaps within a group are OR-ed and the groups are
+// by field: the postings within a group are OR-ed and the groups are
 // AND-ed. Only the topic-count group ever holds more than one term.
 func (f *Filter) termGroups() [][]TermKey {
 	var groups [][]TermKey
@@ -280,7 +279,7 @@ func Matches(
 			streamRange(ctx, r, window, descending, firstBatch, yield)
 			return
 		}
-		if union.IsEmpty() {
+		if !union.Present() {
 			return
 		}
 		streamUnion(ctx, r, filters, union, descending, firstBatch, yield)
@@ -316,16 +315,19 @@ func validateMatchCall(ctx context.Context, r Reader, filters []Filter, window I
 // numbered steps below). matchAll reports that some filter (or the
 // empty slice) constrains nothing, detected before any index I/O; the
 // caller then streams the window directly. Otherwise the result is
-// empty when no candidate falls in the window, and is never a
-// borrowed mirror snapshot (the window AND allocates on the borrowing
-// path), so downstream iteration is safe.
+// absent when no candidate falls in the window.
+//
+// The result may be BORROWED store state: Intersect and Union both pass a
+// lone input through, and ClipRange can return its receiver. That is safe
+// because nothing downstream writes to it (see events.Postings), and
+// FetchEvents takes the ids read-only.
 func unionForFilters(
 	ctx context.Context, r Reader, filters []Filter, window IDRange,
-) (*roaring.Bitmap, bool, error) {
+) (events.Postings, bool, error) {
 	// ───── 1. Dedupe terms across filters ─────
 	//
 	// filterPlans[i] holds the slots filter i needs out of the batched
-	// lookup: the bitmaps within a group are OR-ed, the groups AND-ed.
+	// lookup: the postings within a group are OR-ed, the groups AND-ed.
 	//
 	// A filter that asks the index for no terms constrains nothing, and
 	// so does an empty filter slice: both take the match-all path.
@@ -333,7 +335,7 @@ func unionForFilters(
 	// an unconstrained filter from intersecting nothing and coming back
 	// empty instead.
 	if len(filters) == 0 {
-		return nil, true, nil
+		return events.Postings{}, true, nil
 	}
 	filterPlans := make([]termPlan, len(filters))
 	var uniqueKeys []TermKey
@@ -341,7 +343,7 @@ func unionForFilters(
 	for i := range filters {
 		groups := filters[i].termGroups()
 		if len(groups) == 0 {
-			return nil, true, nil
+			return events.Postings{}, true, nil
 		}
 		plan := make(termPlan, len(groups))
 		for g, keys := range groups {
@@ -355,33 +357,28 @@ func unionForFilters(
 	}
 
 	// ───── 2. Single batched lookup for all unique terms ─────
-	bitmaps, err := r.LookupKeys(ctx, uniqueKeys)
+	postings, err := r.LookupKeys(ctx, uniqueKeys)
 	if err != nil {
-		return nil, false, fmt.Errorf("events: query lookup: %w", err)
+		return events.Postings{}, false, fmt.Errorf("events: query lookup: %w", err)
 	}
 
 	// ───── 3. Per-filter intersect ─────
 	//
-	// If a whole group is absent from the index (every bitmap in it is
-	// nil), that filter's intersection is empty — skip it without
-	// contributing to the union.
+	// If a whole group is absent from the index, that filter's
+	// intersection is empty — skip it without contributing to the union,
+	// and without unioning the groups after it.
 	//
-	// Bitmap ownership in perFilter is mixed:
-	//   - Single-constraint filter: we borrow bitmaps[s] directly (a
-	//     mirror snapshot from LookupKeys), skipping FastAnd's Clone.
-	//   - Multi-constraint filter: FastAnd allocates a fresh result.
-	// Either way the downstream union (FastOr) and the window AND never
-	// mutate their inputs, so a borrowed entry stays valid through
-	// the rest of the function. FastAnd never mutates its inputs
-	// either, so the same bitmap may appear across multiple filters
-	// safely.
-	perFilter := make([]*roaring.Bitmap, 0, len(filterPlans))
+	// Intersect drives from the smallest side whatever form it is in and
+	// probes the rest, rather than materializing every side into a bitmap
+	// first. Entries here may be borrowed store state and stay borrowed to
+	// the end; see unionForFilters' contract.
+	perFilter := make([]events.Postings, 0, len(filterPlans))
 	for _, plan := range filterPlans {
-		inputs := make([]*roaring.Bitmap, 0, len(plan))
+		inputs := make([]events.Postings, 0, len(plan))
 		missed := false
 		for _, slots := range plan {
-			group := unionSlots(bitmaps, slots)
-			if group == nil {
+			group := unionSlots(postings, slots)
+			if !group.Present() {
 				missed = true
 				break
 			}
@@ -390,59 +387,39 @@ func unionForFilters(
 		if missed {
 			continue
 		}
-		if len(inputs) == 1 {
-			perFilter = append(perFilter, inputs[0])
-			continue
+		// Intersect sorts what it is given, so inputs must be this
+		// filter's own slice — postings itself is indexed by slot and
+		// shared across filters.
+		if hits := events.Intersect(inputs); hits.Present() {
+			perFilter = append(perFilter, hits)
 		}
-		// FastAnd intersects left-to-right — putting the smallest
-		// bitmap first shrinks the accumulator fastest. roaring's own
-		// docs call this out as the recommended caller-side prep.
-		slices.SortFunc(inputs, func(a, b *roaring.Bitmap) int {
-			return cmp.Compare(a.GetCardinality(), b.GetCardinality())
-		})
-		perFilter = append(perFilter, roaring.FastAnd(inputs...))
 	}
 
 	if len(perFilter) == 0 {
-		return roaring.New(), false, nil
+		return events.Postings{}, false, nil
 	}
 
 	// ───── 4. Union across filters ─────
-	// Single-filter case: FastOr would Clone — skip it and use the
-	// already-computed bitmap directly. That bitmap may be borrowed
-	// (from LookupKeys), so step 5's window And uses the fresh-result
-	// variant on that path to avoid mutating shared state.
-	var union *roaring.Bitmap
-	singleFilter := len(perFilter) == 1
-	if singleFilter {
-		union = perFilter[0]
-	} else {
-		union = roaring.FastOr(perFilter...)
-	}
+	// Union merges ascending lists rather than building a bitmap per
+	// input, and passes a lone input through untouched.
+	union := events.Union(perFilter)
 
 	// ───── 5. Apply the event-ID window ─────
 	//
-	// The window AND enforces the caller's pinned range. It also clips
+	// The clip enforces the caller's pinned range. It also drops
 	// phantom IDs from a concurrent hot-store ingest: the mirror
 	// publishes entries before offsets, so LookupKeys can briefly
-	// surface IDs past EventCount. The AND keeps the stream strictly
+	// surface IDs past EventCount. It keeps the stream strictly
 	// within the snapshot the caller pinned at request entry.
 	//
-	// This covers the multi-term group too. Its bitmaps are separate
+	// This covers the multi-term group too. Its postings are separate
 	// mirror snapshots taken at different instants, but an event never
 	// moves between the terms of one group once ingested, so a torn read
 	// across them can only surface IDs past the pinned End.
-	rangeBM := roaring.New()
-	rangeBM.AddRange(uint64(window.Start), uint64(window.End))
-	if singleFilter {
-		union = roaring.And(union, rangeBM) // fresh result; union may be borrowed
-	} else {
-		union.And(rangeBM) // FastOr output is owned; in-place is fine
-	}
-	return union, false, nil
+	return union.ClipRange(window.Start, window.End), false, nil
 }
 
-// streamUnion walks the union bitmap in internal batches: collect
+// streamUnion walks the union in internal batches: collect
 // candidate ordinals up to the batch size, fetch, post-filter, yield
 // the survivors. Drops advance the walk with no yield. The first
 // batch is sized to firstBatch (see Matches); later batches use the
@@ -453,17 +430,23 @@ func unionForFilters(
 // fetched matches are flipped back. Stepping one id at a time is fine
 // here: the fetch I/O dominates a 512-step loop.
 func streamUnion(
-	ctx context.Context, r Reader, filters []Filter, union *roaring.Bitmap,
+	ctx context.Context, r Reader, filters []Filter, union events.Postings,
 	descending bool, firstBatch int, yield func(Match, error) bool,
 ) {
 	var it interface {
 		HasNext() bool
 		Next() uint32
 	}
-	if descending {
-		it = union.ReverseIterator()
-	} else {
-		it = union.Iterator()
+	switch ids := union.IDs(); {
+	case ids != nil:
+		// An ID-backed union — every term the cold index stored below its
+		// delta threshold, and every sparse hot term — is walked over its
+		// own slice, so the stream never materializes a bitmap for it.
+		it = newIDCursor(ids, descending)
+	case descending:
+		it = union.Bitmap().ReverseIterator()
+	default:
+		it = union.Bitmap().Iterator()
 	}
 	batch, rest := batchSizes(firstBatch)
 	ids := make([]uint32, 0, batch)
@@ -562,28 +545,44 @@ func CountDistinctTerms(filters []Filter) int {
 	return len(unique)
 }
 
-// unionSlots ORs the bitmaps at slots, and returns nil when every one
-// of them is absent from the index. A lone present bitmap is borrowed
-// rather than cloned, like the single-constraint path in
-// unionForFilters.
-func unionSlots(bitmaps []*roaring.Bitmap, slots []int) *roaring.Bitmap {
+// unionSlots ORs the postings at slots, and returns the zero Postings
+// when every one of them is absent from the index. A lone present entry
+// is borrowed rather than copied — Union passes a single input through.
+func unionSlots(postings []events.Postings, slots []int) events.Postings {
 	if len(slots) == 1 {
-		return bitmaps[slots[0]]
+		return postings[slots[0]]
 	}
-	present := make([]*roaring.Bitmap, 0, len(slots))
+	// Union compacts the slice it is given in place, so this must be a
+	// fresh one rather than a view of the slot-indexed result.
+	group := make([]events.Postings, 0, len(slots))
 	for _, s := range slots {
-		if bitmaps[s] != nil {
-			present = append(present, bitmaps[s])
-		}
+		group = append(group, postings[s])
 	}
-	switch len(present) {
-	case 0:
-		return nil
-	case 1:
-		return present[0]
-	default:
-		return roaring.FastOr(present...)
+	return events.Union(group)
+}
+
+// idCursor walks an ascending id slice in stream order, matching the
+// HasNext/Next shape of roaring's iterators so streamUnion does not have to
+// branch per id.
+type idCursor struct {
+	ids  []uint32
+	next int
+	step int
+}
+
+func newIDCursor(ids []uint32, descending bool) *idCursor {
+	if descending {
+		return &idCursor{ids: ids, next: len(ids) - 1, step: -1}
 	}
+	return &idCursor{ids: ids, step: 1}
+}
+
+func (c *idCursor) HasNext() bool { return c.next >= 0 && c.next < len(c.ids) }
+
+func (c *idCursor) Next() uint32 {
+	id := c.ids[c.next]
+	c.next += c.step
+	return id
 }
 
 // indexOfOrAddTerm returns the index of key inside *keys, appending
