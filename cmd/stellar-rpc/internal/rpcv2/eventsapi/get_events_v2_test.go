@@ -278,6 +278,32 @@ func TestResponseErrorInvertedRangeIsCursorMalformed(t *testing.T) {
 	assert.Equal(t, uint32(9), data.LatestLedger)
 }
 
+// Every decode failure names the field in the client's terms. The limit row
+// reuses the range wording, so a negative limit reads like an over-cap one.
+func TestDecodeRequestMessages(t *testing.T) {
+	for params, want := range map[string]string{
+		`{"limit":-1}`:                   "limit must be between 1 and 50",
+		`{"limit":"ten"}`:                "limit must be between 1 and 50",
+		`{"minLedger":"abc"}`:            "minLedger must be a number",
+		`{"order":7}`:                    "order must be a string",
+		`{"filters":"x"}`:                "filters must be an array",
+		`{"filters":[7]}`:                "each filter must be an object",
+		`{"filters":[{"contractId":7}]}`: "filters.contractId must be a string",
+		`{"maxLedgor":2}`:                `unknown field "maxLedgor"`,
+		`[2]`:                            "params must be an object",
+		`{"minLedger":2} 7`:              "params must be a single object",
+	} {
+		_, err := decodeRequest(params, 50)
+		require.Error(t, err, params)
+		requireErrorData(t, err, protocol.ErrorReasonInvalidParams, nil)
+		assert.Contains(t, err.Error(), want, params)
+	}
+	for _, params := range []string{``, `null`, `{"minLedger":2}`} {
+		_, err := decodeRequest(params, 50)
+		require.NoError(t, err, params)
+	}
+}
+
 // Internal errors carry a package prefix. A client has no use for it.
 func TestClientMessageDropsLayerPrefixes(t *testing.T) {
 	for in, want := range map[string]string{

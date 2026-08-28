@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"reflect"
 	"strings"
 	"time"
 
@@ -37,32 +39,66 @@ type Limits struct {
 // not through methods.NewHandler, so an unknown field fails.
 func NewHandler(limits Limits) jrpc2.Handler {
 	return func(ctx context.Context, r *jrpc2.Request) (any, error) {
-		var raw json.RawMessage
-		_ = r.UnmarshalParams(&raw)
-		if len(raw) > 0 && raw[0] != '{' {
-			return nil, invalidParams("params must be an object")
+		req, err := decodeRequest(r.ParamString(), limits.MaxLimit)
+		if err != nil {
+			return nil, err
 		}
-		var req protocol.GetEventsV2Request
-		if err := r.UnmarshalParams(jrpc2.StrictFields(&req)); err != nil {
-			return nil, decodeError(err)
-		}
-		return getEventsV2(ctx, limits, &req)
+		return getEventsV2(ctx, limits, req)
 	}
 }
 
-// decodeError re-shapes a params failure to carry a reason. jrpc2 puts the
-// decoder's message in error.data, which leaves no room for one.
-func decodeError(err error) error {
-	message := err.Error()
-	var jerr *jrpc2.Error
-	if errors.As(err, &jerr) {
-		message = jerr.Message
-		var detail string
-		if json.Unmarshal(jerr.Data, &detail) == nil && detail != "" {
-			message = detail
-		}
+// decodeRequest decodes the params, rejecting unknown fields. A failure is
+// reported by field name, in the client's terms, never as the decoder's
+// message: that names Go types the client has no use for.
+func decodeRequest(params string, maxLimit uint) (*protocol.GetEventsV2Request, error) {
+	var req protocol.GetEventsV2Request
+	if params == "" {
+		return &req, nil
 	}
-	return invalidParams(clientMessage(errors.New(message)))
+	dec := json.NewDecoder(strings.NewReader(params))
+	dec.DisallowUnknownFields()
+	err := dec.Decode(&req)
+	if err == nil {
+		if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+			return nil, invalidParams("params must be a single object")
+		}
+		return &req, nil
+	}
+	var typeErr *json.UnmarshalTypeError
+	switch {
+	case errors.As(err, &typeErr) && typeErr.Field == "":
+		return nil, invalidParams("params must be an object")
+	case errors.As(err, &typeErr) && typeErr.Field == "limit":
+		return nil, invalidParams(fmt.Sprintf("limit must be between 1 and %d", maxLimit))
+	case errors.As(err, &typeErr):
+		return nil, invalidParams(fmt.Sprintf("%s must be %s", fieldName(typeErr), wantedKind(typeErr)))
+	}
+	// Unknown field, or malformed JSON. The decoder's text is the client's
+	// own input reflected back, minus the package prefix.
+	return nil, invalidParams(clientMessage(err))
+}
+
+// fieldName is the failing field's path. encoding/json reports an array
+// element under the array's own name, so the element is spelled out.
+func fieldName(e *json.UnmarshalTypeError) string {
+	if e.Field == "filters" && e.Type.Kind() == reflect.Struct {
+		return "each filter"
+	}
+	return e.Field
+}
+
+// wantedKind names the JSON kind a field takes, for a type error's message.
+func wantedKind(e *json.UnmarshalTypeError) string {
+	switch e.Type.Kind() {
+	case reflect.String:
+		return "a string"
+	case reflect.Slice:
+		return "an array"
+	case reflect.Struct:
+		return "an object"
+	default:
+		return "a number"
+	}
 }
 
 // clientMessage drops the package prefixes internal errors carry. They say

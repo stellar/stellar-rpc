@@ -123,9 +123,12 @@ func TestJSONRPCHandler_GetEventsV2RejectsUnknownFields(t *testing.T) {
 	url := newTestRPCServer(t, seedServingRegistry(t))
 
 	for name, params := range map[string]string{
-		"top level":    `{"minLedger":2,"maxLedgor":2}`,
-		"in a filter":  `{"minLedger":2,"filters":[{"topicc1":"AAAA"}]}`,
-		"array params": `[2]`,
+		"top level":      `{"minLedger":2,"maxLedgor":2}`,
+		"in a filter":    `{"minLedger":2,"filters":[{"topicc1":"AAAA"}]}`,
+		"array params":   `[2]`,
+		"negative limit": `{"minLedger":2,"limit":-1}`,
+		"wrong type":     `{"minLedger":"abc"}`,
+		"filter not obj": `{"minLedger":2,"filters":[7]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			out := rpcv2test.PostRPC(t, url, protocol.GetEventsV2MethodName, params)
@@ -140,6 +143,8 @@ func TestJSONRPCHandler_GetEventsV2RejectsUnknownFields(t *testing.T) {
 				"the decoder's own prefix is not the client's business")
 			assert.NotContains(t, out.Error.Message, "protocol.",
 				"a Go type name is not the client's business")
+			assert.NotContains(t, out.Error.Message, "Go struct",
+				"the decoder's phrasing is not the client's business")
 		})
 	}
 }
