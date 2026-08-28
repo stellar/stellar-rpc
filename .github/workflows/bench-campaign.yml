@@ -207,6 +207,8 @@ jobs:
         # that run on the box match the bytes in git. Order is:
         #   preamble exports -> bootstrap-common.sh -> run-campaign.sh.
         # BENCH_TOML_B64 is one base64 line, so it survives quoting as-is.
+        # The whole script is gzipped for launch: cloud-init gunzips user-data
+        # transparently, and the raw script outgrew EC2's 16 KB user-data cap.
         run: |
           {
             echo '#!/usr/bin/env bash'
@@ -218,10 +220,12 @@ jobs:
             cat "$PERF_EVAL_DIR/bootstrap-common.sh"
             cat "$PERF_EVAL_DIR/bench-campaign/run-campaign.sh"
           } > /tmp/user-data.sh
+          gzip -9 -c /tmp/user-data.sh > /tmp/user-data.sh.gz
           # EC2 refuses user-data above 16 KB; fail here rather than on launch.
-          SIZE=$(wc -c < /tmp/user-data.sh)
-          echo "user-data is $SIZE bytes"
-          [ "$SIZE" -le 16384 ] || { echo "::error::user-data is $SIZE bytes, over the 16384-byte EC2 limit"; exit 1; }
+          RAW=$(wc -c < /tmp/user-data.sh)
+          SIZE=$(wc -c < /tmp/user-data.sh.gz)
+          echo "user-data is $RAW bytes raw, $SIZE bytes gzipped"
+          [ "$SIZE" -le 16384 ] || { echo "::error::gzipped user-data is $SIZE bytes, over the 16384-byte EC2 limit"; exit 1; }
 
       - name: Launch EC2 instance
         id: launch
@@ -249,7 +253,7 @@ jobs:
             --image-id ami-052355af2a014bd2c \
             --instance-type "$INSTANCE_TYPE" \
             --iam-instance-profile Name=stellar-rpc-ci-load-test \
-            --user-data file:///tmp/user-data.sh \
+            --user-data fileb:///tmp/user-data.sh.gz \
             --instance-initiated-shutdown-behavior terminate \
             --block-device-mappings '[{
               "DeviceName":"/dev/sda1",
