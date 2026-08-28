@@ -1152,3 +1152,55 @@ func TestReadItemsConcurrencyMatchesBatchCount(t *testing.T) {
 		}
 	}
 }
+
+// TestReadLoansAreClipped pins the loan contract at the lender. Several items
+// share one record here, which is the case that matters.
+func TestReadLoansAreClipped(t *testing.T) {
+	const items = 8
+	want := make([][]byte, items)
+	for i := range want {
+		want[i] = bytes.Repeat([]byte{byte('a' + i)}, 32+i)
+	}
+	path := writeTestPackfile(t, want, WriterOptions{ItemsPerRecord: 4})
+
+	r := Open(path, ReaderOptions{})
+	defer r.Close()
+
+	if err := r.ReadItem(0, func(b []byte) error {
+		if len(b) != cap(b) {
+			t.Errorf("ReadItem loan not clipped: len %d cap %d", len(b), cap(b))
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ReadItems(context.Background(), []int{1, 2}, func(_ int, b []byte) error {
+		if len(b) != cap(b) {
+			t.Errorf("ReadItems loan not clipped: len %d cap %d", len(b), cap(b))
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for b, err := range r.ReadRange(0, items) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(b) != cap(b) {
+			t.Errorf("ReadRange loan not clipped: len %d cap %d", len(b), cap(b))
+		}
+	}
+
+	// Appending to one loan must not reach the next.
+	if err := r.ReadItem(0, func(b []byte) error {
+		_ = append(b, bytes.Repeat([]byte{0xFF}, 4096)...)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := range items {
+		if got := readItemCopy(t, r, i); !bytes.Equal(want[i], got) {
+			t.Errorf("item %d corrupted by a neighbor's append", i)
+		}
+	}
+}

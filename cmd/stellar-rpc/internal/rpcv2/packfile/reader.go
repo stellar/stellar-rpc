@@ -393,6 +393,11 @@ func (r *Reader) ContentHash() ([32]byte, bool, error) {
 // The []byte passed to fn is borrowed and must not be retained after fn
 // returns — copy if needed. Returns ErrPositionOutOfRange if position is
 // out of [0, TotalItems).
+//
+// Loans are capacity-clipped, so a borrower may read and append freely; it may
+// not retain. Lifetimes differ: ReadItem's until fn returns, ReadItems' until
+// that item's callback returns (records are reused between callbacks), and
+// ReadRange's until the loop body ends, break included.
 func (r *Reader) ReadItem(position int, fn func([]byte) error) error {
 	if err := r.waitOpen(); err != nil {
 		return err
@@ -427,7 +432,7 @@ func (r *Reader) ReadItem(position int, fn func([]byte) error) error {
 // ReadRange returns an iterator over count contiguous items starting at start.
 // Consecutive records are coalesced into single ReadAt calls using a pooled
 // 1MB buffer, minimizing I/O syscalls for large ranges.
-// Each yielded []byte is valid only until the next iteration — copy if you
+// Each yielded []byte is valid only until the loop body ends, break included — copy if you
 // need to retain it. Safe to break early.
 //
 // Concurrent ReadRange calls on the same Reader are safe; the returned

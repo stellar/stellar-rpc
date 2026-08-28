@@ -8,7 +8,6 @@ import (
 	"iter"
 	"math"
 	"os"
-	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -138,9 +137,7 @@ func (c *ColdReader) WithLedger(seq uint32, fn func(raw []byte) error) error {
 	// translateReaderErr only ever sees the packfile's own failures.
 	var fnErr error
 	rerr := c.r.ReadItem(int(seq-h.firstSeq), func(b []byte) error {
-		// Capped to the ledger, as the hot side caps its loan: the record
-		// buffer behind b is longer and belongs to the packfile reader.
-		fnErr = fn(slices.Clip(b))
+		fnErr = fn(b)
 		return nil
 	})
 	switch {
@@ -186,9 +183,8 @@ func (c *ColdReader) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 				return
 			}
 			// Entry.Bytes is the packfile's: valid only until the loop body
-			// ends, break included. Copy it to retain it. Clipped because a
-			// record slice's capacity runs into the ledgers packed after it.
-			if !yield(Entry{Seq: seq, Bytes: slices.Clip(item)}, nil) {
+			// ends, break included. Copy it to retain it.
+			if !yield(Entry{Seq: seq, Bytes: item}, nil) {
 				return
 			}
 			seq++
