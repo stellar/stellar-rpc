@@ -111,16 +111,16 @@ func runQueryHot(ctx context.Context, logger *supportlog.Entry, opts hotQueryOpt
 // rebuilds the catalog state they imply: the chunk's hot key runs the ready
 // bracket (transient then ready) and its database is opened through
 // OpenReadyWrite — the same must-exist, never-creating open ingestion resumes a
-// chunk with, so a missing or gutted database fails here instead of being healed
-// into an empty one. query.OpenRegistry then publishes the handle as the live
-// chunk, which is what makes routing resolve it hot; nothing is frozen, so the
-// hot tier is the only one that can serve it.
+// chunk with, so a missing or gutted database fails the open here.
+// query.OpenRegistry then publishes the handle as the live chunk, which is what
+// makes routing resolve it hot; nothing is frozen, so the hot tier is the only
+// one that can serve it.
 //
 // The registry's latest ledger is what the database actually holds
 // (MaxCommittedSeq), never the chunk's nominal last: a capped ingest stops
-// mid-chunk, and a view claiming ledgers that were never ingested would turn
-// every query past the cap into a miss. --sample-ledgers narrows the sampled
-// range further, and a cap past what was ingested is clamped, not trusted.
+// mid-chunk, so the view claims only the ledgers that were ingested and no
+// query lands past the cap. --sample-ledgers narrows the sampled range further,
+// and a cap past what was ingested is clamped.
 func openHotFixture(logger *supportlog.Entry, opts hotQueryOptions) (*queryFixture, func(), error) {
 	layout := geometry.NewLayout(opts.HotRoot)
 	cat, releaseCat, err := openScratchCatalog(opts.HotRoot, scratchPrefixQuery, layout, logger)

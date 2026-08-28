@@ -63,10 +63,10 @@ func newQueryRequest(
 // ledgers from a random point in the fixture's range, through
 // ReadView.ScanLedgers.
 //
-// The span is a flag rather than two hard-coded shapes because a point read is
-// simply a span of one: mixing both into a single leg would blend two very
-// different distributions under one percentile. The default is the endpoint's
-// page cap, which is what a client actually asks for.
+// The span is a flag because a point read is simply a span of one, and a leg
+// measures one shape at a time, so its percentiles describe a single
+// distribution. The default is the endpoint's page cap, which is what a client
+// actually asks for.
 func ledgersRequest(f *queryFixture, p queryPlan) queryRequest {
 	return func(rng *rand.Rand) (cellSample, error) {
 		lo := f.pickStart(rng, p.LedgersSpan)
@@ -103,13 +103,11 @@ func ledgersRequest(f *queryFixture, p queryPlan) queryRequest {
 // materialize each one's transactions in apply order, stopping at
 // --txpage-limit transactions the way a page does.
 //
-// It materializes full transaction views rather than the cheaper hash-and-result
-// walk, because that is what the endpoint serves — envelopes included, which
-// costs a TxSet re-hash per transaction. Each ledger's transactions are counted
-// inside the loop body: ScanLedgers lends its ledger bytes only until the
-// iterator steps, and every byte field of a transaction view aliases them, so
-// carrying views out of the loop would need a copy the endpoint does not pay
-// here.
+// It materializes the full transaction views the endpoint serves, envelopes
+// included, which costs a TxSet re-hash per transaction. Each ledger's
+// transactions are counted inside the loop body, because ScanLedgers lends its
+// ledger bytes only until the iterator steps and every byte field of a
+// transaction view aliases them.
 func txPageRequest(f *queryFixture, p queryPlan) queryRequest {
 	return func(rng *rand.Rand) (cellSample, error) {
 		lo := f.pickStart(rng, p.TxPageSpan)

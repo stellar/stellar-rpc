@@ -192,8 +192,8 @@ func openColdFixture(logger *supportlog.Entry, opts coldQueryOptions) (*queryFix
 
 // coldArtifactPaths lists every file the benchmarked chunks are served from —
 // each chunk's artifacts plus the frozen tx-hash window indexes — so a cold leg
-// can drop them from the page cache. It reads the catalog rather than the disk,
-// so it names exactly what routing will open.
+// can drop them from the page cache. The list comes from the catalog, so it
+// names exactly what routing will open.
 func coldArtifactPaths(cat *catalog.Catalog, layout geometry.Layout, chunks []chunk.ID) []string {
 	var paths []string
 	for _, c := range chunks {
@@ -274,9 +274,9 @@ func kindList(kinds []geometry.Kind) string {
 // production order does: a terminal coverage demotes the per-chunk .bin keys it
 // supersedes.
 //
-// An absent index is not an error — a shallow dataset whose backfill built no
-// index is a real state, and the txhash leg reports the empty probe set rather
-// than the open failing for the three types that do not need it.
+// An absent index is a real state — a shallow dataset's backfill builds none —
+// so the open succeeds, the txhash leg reports an empty probe set, and the
+// three types that do not need the index run as usual.
 func commitDiskTxHashIndex(
 	logger *supportlog.Entry, cat *catalog.Catalog, layout geometry.Layout, lo, hi chunk.ID,
 ) error {

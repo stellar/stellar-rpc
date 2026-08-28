@@ -22,15 +22,15 @@ import (
 )
 
 // This file builds the corpora the per-type bodies draw their work from. Every
-// read here happens once, before any measurement, and is never timed: a
-// benchmark that sampled inside the measured pass would report its own setup.
+// read here happens once, before any measurement, and is never timed, so the
+// measured pass reports the query and not the corpus build.
 
 // The tx-hash sampler's stopping rule. It aims for a pool large enough that a
-// leg's requests do not keep asking for the same few hashes, and it counts
-// hashes rather than ledgers because how many transactions a ledger carries is
-// a property of the dataset: a loaded one fills the pool in a handful of reads,
-// while a sparse one would otherwise stop with an unusably small pool. The read
-// cap ends the sample on a dataset too sparse to reach the target at all.
+// leg's requests draw from many hashes, and it counts hashes because how many
+// transactions a ledger carries is a property of the dataset: a loaded one
+// fills the pool in a handful of reads, and a sparse one keeps reading until
+// the pool is big enough. The read cap ends the sample on a dataset too sparse
+// to reach the target at all.
 const (
 	corpusTargetHashes   = 512
 	corpusMaxLedgerReads = 512
