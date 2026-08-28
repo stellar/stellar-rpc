@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"iter"
 	"math"
+	"strconv"
 	"testing"
 
 	"github.com/RoaringBitmap/roaring/v2"
@@ -1097,4 +1098,79 @@ func TestQueryEventsFrom_RejectsDescending(t *testing.T) {
 		EventScope{MinLedger: f, MaxLedger: &maxL, Dir: Descending},
 		&EventID{Ledger: f}, 10)
 	require.ErrorContains(t, err, "ascending")
+}
+
+// countingReader counts what a walk pulls from storage.
+type countingReader struct {
+	*fakeEventReader
+
+	payloadsRead int
+}
+
+func (c *countingReader) FetchEvents(ctx context.Context, ids []uint32) ([]event.Payload, error) {
+	c.payloadsRead += len(ids)
+	return c.fakeEventReader.FetchEvents(ctx, ids)
+}
+
+func (c *countingReader) FetchRange(ctx context.Context, start, count uint32) iter.Seq2[event.Payload, error] {
+	return func(yield func(event.Payload, error) bool) {
+		for p, err := range c.fakeEventReader.FetchRange(ctx, start, count) {
+			c.payloadsRead++
+			if !yield(p, err) {
+				return
+			}
+		}
+	}
+}
+
+// oneBigLedgerReader holds a single ledger of n events, all under tx 1 op 0,
+// with event indexes 0..n-1.
+func oneBigLedgerReader(t *testing.T, c chunk.ID, n int) (*countingReader, uint32) {
+	t.Helper()
+	f := c.FirstLedger()
+	ofs := event.NewLedgerOffsets(f)
+	require.NoError(t, ofs.Append(f, uint32(n)))
+	payloads := make([]event.Payload, n)
+	for i := range payloads {
+		sym := xdr.ScSymbol(strconv.Itoa(i))
+		raw, err := xdr.ContractEvent{
+			Type: xdr.ContractEventTypeContract,
+			Body: xdr.ContractEventBody{V: 0, V0: &xdr.ContractEventV0{
+				Data: xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym},
+			}},
+		}.MarshalBinary()
+		require.NoError(t, err)
+		payloads[i] = event.Payload{
+			LedgerSequence: f, TxIdx: 1, OpIdx: 0, EventIdx: uint32(i),
+			ContractEventBytes: raw,
+		}
+	}
+	return &countingReader{fakeEventReader: &fakeEventReader{
+		chunkID: c, ofs: ofs, payloads: payloads,
+	}}, f
+}
+
+// An id resume must cost the same wherever the id sits in its ledger. The
+// window is clipped by seeking the id, so a page reads its own events plus
+// the seek's probes; dropping matches after the fact instead would read the
+// whole prefix, which is the full ledger at the deep end.
+func TestQueryEventsFrom_CostDoesNotGrowWithDepth(t *testing.T) {
+	const (
+		events = 3000
+		room   = 100
+		c      = chunk.ID(5)
+	)
+	for _, depth := range []uint32{0, 100, 1000, 2900} {
+		t.Run(strconv.Itoa(int(depth)), func(t *testing.T) {
+			r, f := oneBigLedgerReader(t, c, events)
+			res, err := scanChunk(context.Background(),
+				eventPart{Chunk: c, Reader: r, From: f, To: f},
+				nil, resumeAt{from: &EventID{Ledger: f, Tx: 1, Event: depth}}, false, room)
+			require.NoError(t, err)
+			assert.Len(t, res.events, room)
+			assert.Less(t, r.payloadsRead, room*2,
+				"reads should track the page, not the depth: a prefix scan would read %d here",
+				int(depth)+room+1)
+		})
+	}
 }
