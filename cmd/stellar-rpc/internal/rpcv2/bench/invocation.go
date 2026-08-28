@@ -23,7 +23,9 @@ type invocationRecord struct {
 	Binary        binaryInfo        `json:"binary"`
 	Hostname      string            `json:"hostname"`
 	StartedAt     string            `json:"startedAt"`
-	FinishedAt    string            `json:"finishedAt"`
+	// FinishedAt is absent in the record written when the run starts, and
+	// carries the end time in the record written when it stops.
+	FinishedAt string `json:"finishedAt,omitempty"`
 	// Extra carries facts the run resolved for itself rather than read off a
 	// flag — whether page-cache eviction actually ran, for instance, which
 	// depends on the platform as well as the flag. Absent when the run recorded
@@ -41,10 +43,22 @@ type binaryInfo struct {
 	Branch         string `json:"branch"`
 }
 
-// writeInvocationJSON writes an invocation record as JSON to outDir/invocation.json.
-// startedAt and finishedAt should be UTC times. runErr is the run's outcome: nil
-// for a successful run, otherwise its message lands in the record's error field.
-// The JSON is formatted with indentation and a trailing newline.
+// writeStartInvocationJSON writes the record of a run that has just started:
+// the command, its flags, and the start time, with no finishedAt and no error.
+// A process killed outright still leaves in --out what it was asked to do. The
+// write at the end of the run overwrites the same file.
+func writeStartInvocationJSON(
+	outDir string, cmd *cobra.Command, flags, extra map[string]string, startedAt time.Time,
+) error {
+	return writeInvocationJSON(outDir, cmd, flags, extra, startedAt, time.Time{}, nil)
+}
+
+// writeInvocationJSON writes an invocation record as JSON to outDir/invocation.json,
+// replacing the file if it is already there. startedAt and finishedAt should be UTC
+// times; a zero finishedAt leaves the field out, which is how a run in progress
+// records itself. runErr is the run's outcome: nil for a successful run, otherwise
+// its message lands in the record's error field. The JSON is formatted with
+// indentation and a trailing newline.
 func writeInvocationJSON(
 	outDir string,
 	cmd *cobra.Command,
@@ -59,6 +73,11 @@ func writeInvocationJSON(
 		errMsg = runErr.Error()
 	}
 
+	var finished string
+	if !finishedAt.IsZero() {
+		finished = finishedAt.UTC().Format(time.RFC3339)
+	}
+
 	record := invocationRecord{
 		SchemaVersion: 1,
 		Command:       cmd.CommandPath(),
@@ -71,7 +90,7 @@ func writeInvocationJSON(
 		},
 		Hostname:   hostname,
 		StartedAt:  startedAt.UTC().Format(time.RFC3339),
-		FinishedAt: finishedAt.UTC().Format(time.RFC3339),
+		FinishedAt: finished,
 		Error:      errMsg,
 	}
 	if len(extra) > 0 {
