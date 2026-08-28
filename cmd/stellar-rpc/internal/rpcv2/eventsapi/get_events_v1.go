@@ -20,7 +20,6 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
@@ -98,14 +97,16 @@ func getEventsV1(
 	}
 	maxLedger := endLedger - 1
 	scope := query.EventScope{MinLedger: start.Ledger, MaxLedger: &maxLedger, Filters: filters}
-	cursor := query.EventCursor{Scope: scope}
+	var from *query.EventID
 	if fromCursor {
-		if cursor, err = v1Resume(ctx, view, start, scope); err != nil {
-			return zero, &jrpc2.Error{Code: jrpc2.InvalidRequest, Message: err.Error()}
+		// start already carries v1's increment, and the pager serves from
+		// the id inclusive, so this is v1's own "id >= cursor" scan.
+		from = &query.EventID{
+			Ledger: start.Ledger, Tx: start.Tx, Op: start.Op, Event: start.Event,
 		}
 	}
 	pageLimit := int(min(limit, math.MaxInt32)) //nolint:gosec // min clamps it
-	page, err := view.QueryEvents(ctx, cursor, pageLimit)
+	page, err := view.QueryEventsFrom(ctx, scope, from, pageLimit)
 	if err != nil {
 		// The v1 handler codes every failure past validation as an invalid
 		// request, cancellation included.
@@ -158,74 +159,6 @@ func v1Response(
 		OldestLedger:          lr.FirstLedger.Sequence,
 		LatestLedgerCloseTime: lr.LastLedger.CloseTime,
 		OldestLedgerCloseTime: lr.FirstLedger.CloseTime,
-	}
-}
-
-// v1Resume turns a v1 cursor, already incremented the v1 way, into the
-// pager's resume state: the scan starts at the first stored event at or
-// after c, the inclusive start v1's id >= scan uses. Within a ledger,
-// storage order is id order, so that boundary is found by binary search
-// with point fetches, and the pager re-enters after the event before it.
-func v1Resume(
-	ctx context.Context, view *query.ReadView, c protocol.Cursor, scope query.EventScope,
-) (query.EventCursor, error) {
-	// A short page hands back MaxCursor at the window's end, whose tx and
-	// op sentinels top every storable event, so the search below would
-	// always walk to the ledger's end. Answer it without reading anything:
-	// this is the cursor a caught-up poller sends every time.
-	if c.Tx == protocol.MaxCursor.Tx && c.Op == protocol.MaxCursor.Op {
-		return query.EventCursor{Scope: scope, ScannedLedger: c.Ledger}, nil
-	}
-	r, err := view.Events(chunk.IDFromLedger(c.Ledger))
-	if err != nil {
-		return query.EventCursor{}, err
-	}
-	ofs, err := r.Offsets()
-	if err != nil {
-		return query.EventCursor{}, err
-	}
-	lStart, lEnd, err := ofs.EventIDs(c.Ledger)
-	if err != nil {
-		return query.EventCursor{}, err
-	}
-	// Find the first stored ordinal in the cursor's ledger at or after the
-	// cursor. prev tracks the payload just below the boundary: lo only
-	// moves to mid+1, so the last advancing probe is exactly lo-1.
-	lo, hi := lStart, lEnd
-	var prev *event.Payload
-	for lo < hi {
-		mid := lo + (hi-lo)/2
-		got, err := r.FetchEvents(ctx, []uint32{mid})
-		if err != nil {
-			return query.EventCursor{}, err
-		}
-		p := got[0]
-		atOrAfter := protocol.Cursor{
-			Ledger: c.Ledger, Tx: p.TxIdx, Op: p.OpIdx, Event: p.EventIdx,
-		}.Cmp(c) >= 0
-		if atOrAfter {
-			hi = mid
-		} else {
-			lo = mid + 1
-			prev = &p
-		}
-	}
-	switch lo {
-	case lEnd:
-		// Everything in the cursor's ledger sorts below it (the window-end
-		// cursor of a short page, whose incremented sentinel tuple still
-		// tops every storable event, or the incremented last event, or an
-		// empty ledger): the watermark covers the ledger and resume moves
-		// past it.
-		return query.EventCursor{Scope: scope, ScannedLedger: c.Ledger}, nil
-	case lStart:
-		// The whole ledger sorts at or after the cursor: scan it whole.
-		return query.EventCursor{Scope: scope}, nil
-	default:
-		return query.EventCursor{Scope: scope, Position: &query.EventPosition{
-			Ledger: prev.LedgerSequence, Tx: prev.TxIdx, Op: prev.OpIdx, Event: prev.EventIdx,
-			LedgerOrdinal: lo - 1 - lStart,
-		}}, nil
 	}
 }
 

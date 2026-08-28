@@ -78,12 +78,65 @@ type EventPage struct {
 // ErrPositionMismatch for a Position no stored event matches.
 // Anything else is a store failure.
 func (a *ReadView) QueryEvents(ctx context.Context, cursor EventCursor, limit int) (*EventPage, error) {
+	return a.queryEvents(ctx, cursor, nil, limit)
+}
+
+// EventID names an event by identity alone, without the stored ordinal an
+// EventPosition carries: the four fields a getEvents v1 cursor spells out.
+type EventID struct{ Ledger, Tx, Op, Event uint32 }
+
+// atOrAfter reports whether (tx, op, ev) sorts at or after e's own triple,
+// in the lexicographic order the event ids themselves sort by.
+func (e *EventID) atOrAfter(tx, op, ev uint32) bool {
+	if tx != e.Tx {
+		return tx > e.Tx
+	}
+	if op != e.Op {
+		return op > e.Op
+	}
+	return ev >= e.Event
+}
+
+// resumeAt is the walk's re-entry point in its first chunk: either a
+// position carrying the stored ordinal, which a v2 cursor round-trips, or a
+// bare event id, which is all a v1 cursor names. At most one is set.
+type resumeAt struct {
+	pos  *EventPosition
+	from *EventID
+}
+
+// QueryEventsFrom serves one page of scope starting at the event id from,
+// inclusive; a nil from starts at the scope's low edge. It serves an API
+// whose cursor names an event by identity rather than by stored position:
+// nothing looks the id up, the walk drops the ids below it as it streams,
+// which is both cheaper than a lookup and exactly the "id >= cursor" scan
+// v1 promises. Ascending only, the one direction v1 has.
+func (a *ReadView) QueryEventsFrom(
+	ctx context.Context, scope EventScope, from *EventID, limit int,
+) (*EventPage, error) {
+	if from != nil && scope.Dir != Ascending {
+		return nil, errors.New("query: resuming from an event id needs an ascending scope")
+	}
+	return a.queryEvents(ctx, EventCursor{Scope: scope}, from, limit)
+}
+
+func (a *ReadView) queryEvents(
+	ctx context.Context, cursor EventCursor, from *EventID, limit int,
+) (*EventPage, error) {
 	if err := validateCursor(&cursor, limit); err != nil {
 		return nil, err
 	}
 	desc := cursor.Scope.Dir == Descending
 
 	lo, hi, reenter := resumeBounds(&cursor)
+	if from != nil {
+		if from.Ledger < cursor.Scope.MinLedger ||
+			(cursor.Scope.MaxLedger != nil && from.Ledger > *cursor.Scope.MaxLedger) {
+			return nil, fmt.Errorf("%w: resume id ledger %d outside scope bounds",
+				ErrCursorMalformed, from.Ledger)
+		}
+		lo = max(lo, from.Ledger)
+	}
 	if lo > hi {
 		// Resume moved past the scope's far bound: nothing is left to serve.
 		return &EventPage{Next: cursor, Status: ScanComplete}, nil
@@ -119,7 +172,8 @@ func (a *ReadView) QueryEvents(ctx context.Context, cursor EventCursor, limit in
 	}
 
 	chunks := chunksBetween(chunk.IDFromLedger(lo), chunk.IDFromLedger(hi), cursor.Scope.Dir)
-	walk, err := a.walkChunks(ctx, chunks, lo, hi, cursor.Scope.Filters, reenter, desc, limit)
+	resume := resumeAt{pos: reenter, from: from}
+	walk, err := a.walkChunks(ctx, chunks, lo, hi, cursor.Scope.Filters, resume, desc, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -279,12 +333,12 @@ type eventPart struct {
 // most two chunks) the second often goes unopened.
 func (a *ReadView) walkChunks(
 	ctx context.Context, chunks []chunk.ID, lo, hi uint32, filters []event.Filter,
-	reenter *EventPosition, desc bool, limit int,
+	resume resumeAt, desc bool, limit int,
 ) (walkResult, error) {
 	var walk walkResult
 	for i, c := range chunks {
 		if i > 0 {
-			reenter = nil // the resume point is always in the first chunk
+			resume = resumeAt{} // the resume point is always in the first chunk
 		}
 		r, err := a.Events(c)
 		if err != nil {
@@ -294,7 +348,7 @@ func (a *ReadView) walkChunks(
 			Chunk: c, Reader: r,
 			From: max(lo, c.FirstLedger()), To: min(hi, c.LastLedger()),
 		}
-		res, err := scanChunk(ctx, part, filters, reenter, desc, limit-len(walk.events))
+		res, err := scanChunk(ctx, part, filters, resume, desc, limit-len(walk.events))
 		if err != nil {
 			return walkResult{}, err
 		}
@@ -334,7 +388,7 @@ type chunkResult struct {
 
 func scanChunk(
 	ctx context.Context, part eventPart, filters []event.Filter,
-	reenter *EventPosition, desc bool, room int,
+	resume resumeAt, desc bool, room int,
 ) (chunkResult, error) {
 	ofs, err := part.Reader.Offsets()
 	if err != nil {
@@ -351,17 +405,26 @@ func scanChunk(
 			"query: chunk %s offsets cover [%d, %d] but the walk needs [%d, %d]",
 			part.Chunk, ofs.StartLedger(), end-1, part.From, part.To)
 	}
-	window, err := chunkWindow(ctx, part.Reader, ofs, part.From, part.To, reenter, desc)
+	window, err := chunkWindow(ctx, part.Reader, ofs, part.From, part.To, resume.pos, desc)
 	if err != nil {
 		return chunkResult{}, err
 	}
 
 	var out chunkResult
 	// room+1: the walk reads one match past the room to learn
-	// nextUnserved, so a page that fills is one right-sized fetch.
+	// nextUnserved, so a page that fills is one right-sized fetch. An id
+	// resume drops matches instead of clipping the window, so it can need
+	// one batch more than the hint.
 	for m, merr := range event.Matches(ctx, part.Reader, filters, window, desc, room+1) {
 		if merr != nil {
 			return chunkResult{}, merr
+		}
+		// The window still starts at the resume id's ledger, so drop that
+		// ledger's matches below the id. Ordering inside a ledger is the
+		// id order, so this delivers each event exactly once.
+		if from := resume.from; from != nil && m.LedgerSequence == from.Ledger &&
+			!from.atOrAfter(m.TxIdx, m.OpIdx, m.EventIdx) {
+			continue
 		}
 		if len(out.events) >= room {
 			// The page is full and the next match is known: every
