@@ -319,8 +319,11 @@ func topicShapeOf(tf protocol.TopicFilter) (topicShape, error) {
 		}
 	}
 	for i, s := range segs {
-		if s.Wildcard != nil {
-			continue // "*": any value; the position exists via the count
+		// "*" is any value, and the position still exists via the count.
+		// A segment with neither value nor wildcard is skipped the way the
+		// shared handler skips it, rather than dereferenced.
+		if s.Wildcard != nil || s.ScVal == nil {
+			continue
 		}
 		raw, err := s.ScVal.MarshalBinary()
 		if err != nil {

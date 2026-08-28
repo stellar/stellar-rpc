@@ -431,6 +431,7 @@ func TestGetEventsV1Parity_PaginationChain(t *testing.T) {
 		Pagination:  &protocol.PaginationOptions{Limit: 1},
 	}
 	const maxPages = 13 // 9 events + the empty window-end page, with margin
+	drained := 0
 	for page := range maxPages {
 		r1, e1 := callGetEvents(t, v1c, req)
 		r2, e2 := callGetEvents(t, shimc, req)
@@ -443,8 +444,13 @@ func TestGetEventsV1Parity_PaginationChain(t *testing.T) {
 		cursorStr, _ := n1["cursor"].(string)
 		require.NotEmpty(t, cursorStr, "page %d", page)
 		if len(events) == 0 {
-			return // both sides drained the window in lockstep
+			// Both sides drained the window in lockstep. Assert what was
+			// drained: an empty first page would otherwise pass without
+			// ever exercising a resume.
+			assert.Equal(t, 9, drained, "the chain must deliver every fixture event")
+			return
 		}
+		drained += len(events)
 		var cur protocol.Cursor
 		require.NoError(t, json.Unmarshal([]byte(strconv.Quote(cursorStr)), &cur))
 		req = protocol.GetEventsRequest{

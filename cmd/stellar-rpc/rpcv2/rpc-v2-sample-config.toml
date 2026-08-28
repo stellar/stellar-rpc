@@ -165,15 +165,15 @@ default_items_per_response = 5
 [service.methods.getEvents]
 queue_limit = 1000
 max_execution_duration = "10s"
-# The getEvents v2 API caps pages at 1,000 (spec constant), unlike v1's 10000.
-max_items_per_response = 1000
+max_items_per_response = 10000
 default_items_per_response = 100
-# Cap on distinct index terms one request may look up. Over budget fails
-# with invalid_params; the client splits the query and merges results.
-term_budget = 15
+# Cap on distinct index terms one request may look up. Sized so no request
+# this API admits is rejected; lowering it rejects queries v1 has always
+# served.
+term_budget = 130
 
-# The one method this daemon serves that v1 does not; same knobs and defaults
-# as getEvents.
+# The one method this daemon serves that v1 does not. The spec fixes the page
+# cap at 1,000 and the term budget at 15, where v1 above carries its own.
 [service.methods.getEventsV2]
 queue_limit = 1000
 max_execution_duration = "10s"

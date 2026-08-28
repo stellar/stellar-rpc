@@ -471,6 +471,11 @@ const (
 	// surface it there.
 	DefaultGetEventsV1TermBudget uint = 130
 
+	// DefaultGetEventsV1MaxItemsPerResponse is v1's own page cap, matching
+	// the existing service's max-events-limit. The 1,000 above is the v2
+	// spec's constant; applying it to v1 would reject pages v1 serves.
+	DefaultGetEventsV1MaxItemsPerResponse uint = 10_000
+
 	DefaultGetTransactionsMaxItemsPerResponse     uint = 200
 	DefaultGetTransactionsDefaultItemsPerResponse uint = 50
 	DefaultGetLedgersMaxItemsPerResponse          uint = 20
@@ -671,7 +676,7 @@ func (cfg Config) WithDefaults() Config {
 
 	queue(&m.GetEvents.QueueLimit, DefaultMethodQueueLimit)
 	dur(&m.GetEvents.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
-	fillUint(&m.GetEvents.MaxItemsPerResponse, DefaultGetEventsMaxItemsPerResponse)
+	fillUint(&m.GetEvents.MaxItemsPerResponse, DefaultGetEventsV1MaxItemsPerResponse)
 	fillUint(&m.GetEvents.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
 	fillUint(&m.GetEvents.TermBudget, DefaultGetEventsV1TermBudget)
 
