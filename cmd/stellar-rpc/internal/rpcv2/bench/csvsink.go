@@ -146,7 +146,7 @@ var fileSpecs = func() []fileSpec {
 // holding the setup rows and each leg's driver metrics. It is built per run,
 // since the row set is the --types × --target-rps ladder the flags asked for.
 //
-// The labels are the results converter's contract, not a presentation choice:
+// The labels are the results converter's contract:
 //
 //   - Every CSV in the run dir other than driver.csv is a query type, named by
 //     its basename.
@@ -245,7 +245,7 @@ type csvSink struct {
 
 	// specs is the report schema this sink renders through: fileSpecs for an
 	// ingest run, querySpecs(...) for a query run, whose file and row set is the
-	// ladder the flags asked for rather than a fixed vocabulary. Read-only after
+	// --types × --target-rps ladder the flags asked for. Read-only after
 	// construction.
 	specs []fileSpec
 
@@ -494,12 +494,12 @@ func withUnknown[V any](order []string, m map[string]V) []string {
 
 // keepsZeroSamples reports whether a row keeps its zero-duration samples. These
 // rows are distributions, counts, or rates in which a zero is a real
-// observation — a ledger that committed on time, a request dispatched on time,
-// a leg that shed nothing, a leg that answered nothing — rather than a piece of
-// work too fast for the timer to see.
+// observation: a ledger that committed on time, a request dispatched on time, a
+// leg that shed nothing, a leg that answered nothing. Everywhere else a zero
+// means work too fast for the timer to see, which aggregate drops.
 //
-// The rule is a whole-label suffix rule shared by the ingest and query schemas,
-// so the ingest report's pace_lag is covered by the _lag suffix.
+// The rule matches whole label suffixes and is shared by the ingest and query
+// schemas: the ingest report's pace_lag is covered by the _lag suffix.
 func keepsZeroSamples(label string) bool {
 	return strings.HasSuffix(label, driverLegLagSuffix) ||
 		strings.HasSuffix(label, driverLegShedSuffix) ||
@@ -603,10 +603,10 @@ func (s *csvSink) logSummary(logger *supportlog.Entry) {
 	}
 }
 
-// logRow logs one aggregated row. Three driver rows hold a plain number in
-// their duration columns rather than a time — the run's peak RSS in bytes, a
+// logRow logs one aggregated row as a percentile line. Three driver rows carry
+// a plain number in their duration columns — the run's peak RSS in bytes, a
 // leg's achieved rate in thousandths of a request per second, and a leg's shed
-// count — so each is rendered as the number it holds.
+// count — so each of those is rendered as the number it holds.
 func logRow(logger *supportlog.Entry, fileName string, r row) {
 	switch {
 	case fileName != fileDriver:

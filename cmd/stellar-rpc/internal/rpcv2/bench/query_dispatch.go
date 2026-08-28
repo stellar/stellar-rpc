@@ -10,15 +10,13 @@ import (
 )
 
 // This file is the query bench's dispatcher: it issues a per-request closure at
-// a fixed arrival rate and collects what every request observed. It is
-// deliberately ignorant of what the requests do — the per-type bodies in
-// query_types.go own that — and it does no I/O of its own, so the only thing
+// a fixed arrival rate and collects what every request observed. What a request
+// does is the business of the per-type bodies in query_types.go; the dispatcher
+// only paces, times and counts, and it does no I/O of its own, so the only thing
 // between the timer and the store is the query itself.
 
-// cellSample is one measured request: how long it took, the number of items the
-// response carried, and the sub-stage it belongs to. An empty stage means the
-// sample belongs only to the type's blended row; txhash sets it so found and
-// not-found lookups are also reported apart (see recordLeg).
+// cellSample is one measured request: what it cost, what its response carried,
+// and which sub-stage of its query type it belongs to.
 type cellSample struct {
 	// service is how long the request body itself ran, measured by timed.
 	service time.Duration
@@ -27,8 +25,13 @@ type cellSample struct {
 	// schedule on top of the service time, so it is the latency a client
 	// sending at the target rate observes.
 	scheduled time.Duration
-	items     int
-	stage     string
+	// items counts what the response carried: ledgers, transactions or
+	// events, depending on the query type.
+	items int
+	// stage names a sub-stage of the query type, so these samples are also
+	// reported apart from the type's blended row. Only txhash sets it,
+	// splitting found lookups from not-found ones (see recordLeg).
+	stage string
 }
 
 // queryRequest issues one request against the fixture and reports what the
@@ -37,15 +40,13 @@ type cellSample struct {
 // not share mutable state between concurrent requests.
 //
 // The whole request is inside the caller's timer, read-view acquisition
-// included: a served request pays for its own view, and leaving that out would
-// flatter every number.
+// included, because a served request pays for its own view.
 type queryRequest func(rng *rand.Rand) (cellSample, error)
 
 // maxInFlight is the number of requests a paced leg may have outstanding at
 // once. A request that arrives while the cap is full is shed and counted, so a
-// target rate the store cannot keep up with shows as a shed count rather than
-// as an unbounded pile of goroutines that would measure the machine's scheduler
-// instead of the store.
+// target rate the store cannot keep up with shows up as a shed count and the
+// leg's goroutine count stays bounded — what it measures stays the store.
 const maxInFlight = 512
 
 // Mixing constants for the per-request seeds. They are odd and mutually prime
@@ -59,8 +60,7 @@ const (
 // legResult is one paced leg's outcome.
 type legResult struct {
 	// samples holds the measured requests that answered. A request that
-	// failed contributes no sample: a latency for a request that did not
-	// answer is not a latency.
+	// failed contributes no sample, since it has no latency to report.
 	samples []cellSample
 	// lags holds one dispatch lag per measured position, in schedule order,
 	// shed positions included. A zero is a real observation — a dispatch that
@@ -118,7 +118,8 @@ func (c *legCollector) recordShed() {
 	c.shed++
 }
 
-// recordSample stores a measured request's sample and its completion time.
+// recordSample stores a measured request's sample and keeps the leg's latest
+// completion time, which is where its wall ends.
 func (c *legCollector) recordSample(s cellSample, done time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -129,7 +130,8 @@ func (c *legCollector) recordSample(s cellSample, done time.Time) {
 }
 
 // recordError notes that a measured request failed at the given time. A failed
-// request still occupied the leg, so its completion counts toward the wall.
+// request occupied the leg like any other, so its completion counts toward the
+// wall.
 func (c *legCollector) recordError(done time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -170,9 +172,9 @@ func (c *legCollector) result(firstDue time.Time) legResult {
 // request runs on its own goroutine with its own RNG, and the in-flight count
 // is capped at maxInFlight.
 //
-// The returned error is a context error: it means the leg was cut short and its
-// result is not a measurement. A request that fails is counted in errs and does
-// not end the leg.
+// The returned error is a context error: it means the leg was cut short, so
+// discard its result. A request that fails is counted in errs and does not end
+// the leg.
 func runPacedLeg(
 	ctx context.Context, rps float64, duration time.Duration, warmup int, seed int64, req queryRequest,
 ) (legResult, error) {

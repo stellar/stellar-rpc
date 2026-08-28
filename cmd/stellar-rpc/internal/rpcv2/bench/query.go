@@ -122,9 +122,9 @@ const (
 	defaultTargetRPS   = "10"
 )
 
-// maxTargetRPS is the highest arrival rate --target-rps accepts. Above it a leg
-// schedules more arrivals than one dispatch loop can issue, so the leg would
-// report the loop's own speed rather than the store's.
+// maxTargetRPS is the highest arrival rate --target-rps accepts: the ceiling at
+// which the single dispatch loop that issues a leg's arrivals can still keep to
+// its schedule. A leg above it measures the loop's own speed.
 const maxTargetRPS = 1_000_000
 
 // minLegSamples is the number of measured requests below which a leg's
@@ -135,14 +135,14 @@ const minLegSamples = 100
 // queryFlags is the flag set both bench-query subcommands share, beyond the
 // --out and profiling flags newBenchCommand binds. The spellings and value
 // formats of --types, --target-rps, --duration, and --warmup are the campaign
-// runner's argv contract; the read-shape flags after them are bench-side only,
-// so the runner's argv keeps working untouched.
+// runner's argv contract; the read-shape flags after them are bench-side only
+// and outside that contract.
 type queryFlags struct {
 	types       string
 	targetRPS   string
 	duration    time.Duration
 	warmup      int
-	warmupBound bool // bind --warmup (hot only; a cold leg evicts instead of warming)
+	warmupBound bool // bind --warmup (hot only; a cold leg evicts its page cache)
 
 	ledgersSpan  uint32
 	txPageSpan   uint32
@@ -201,7 +201,7 @@ type queryPlan struct {
 
 	// Evict drops the cold artifacts from the OS page cache before each leg's
 	// measured requests. Cold only: the hot tier's steady state is a warm cache,
-	// so its legs warm up instead.
+	// so its legs warm one up first.
 	Evict bool
 }
 
@@ -249,8 +249,8 @@ func (f *queryFlags) plan() (queryPlan, error) {
 }
 
 // parseQueryTypes splits --types, keeping the caller's order and rejecting an
-// empty list, an unknown type, or a repeat (a repeated type would collide on
-// its CSV rows).
+// empty list, an unknown type, or a repeat (a type names its own CSV file, so
+// it may appear once).
 func parseQueryTypes(s string) ([]string, error) {
 	fields := strings.Split(s, ",")
 	types := make([]string, 0, len(fields))
@@ -273,8 +273,8 @@ func parseQueryTypes(s string) ([]string, error) {
 
 // parseTargetRPS splits --target-rps into the arrival rates to run, keeping the
 // caller's order and rejecting an empty list, an empty entry, a non-number, a
-// rate that is not positive and finite, a rate above maxTargetRPS, or a repeat
-// (a repeated rate would collide on its CSV rows).
+// rate that is zero, negative, NaN or infinite, a rate above maxTargetRPS, or a
+// repeat (a rate names its leg's CSV rows, so it may appear once).
 func parseTargetRPS(s string) ([]float64, error) {
 	fields := strings.Split(s, ",")
 	rates := make([]float64, 0, len(fields))
@@ -329,7 +329,7 @@ type queryFixture struct {
 
 	// EvictPaths are the on-disk artifacts a cold leg drops from the page cache
 	// before it measures. Empty for a hot fixture, whose data lives in RocksDB's
-	// own caches rather than in files the bench can advise on.
+	// own caches, which the bench cannot advise the kernel about.
 	EvictPaths []string
 }
 
@@ -340,10 +340,9 @@ func (f *queryFixture) view() (*query.ReadView, error) {
 }
 
 // verifyServes acquires a read view and resolves each benchmarked chunk's
-// ledger store, so a dataset that cannot be served fails at open with the
-// chunk named — not per-query, deep inside a leg. It runs the real routing
-// (ReadView.Ledgers → resolveTier), which is also what makes it a check: the
-// fixture publishes state for one tier only.
+// ledger store, so a dataset that cannot be served fails at open, with the
+// chunk named. It runs the real routing (ReadView.Ledgers → resolveTier), which
+// is also what makes it a check: the fixture publishes state for one tier only.
 func (f *queryFixture) verifyServes() error {
 	view, err := f.view()
 	if err != nil {
@@ -359,12 +358,12 @@ func (f *queryFixture) verifyServes() error {
 }
 
 // evictColdArtifacts drops the fixture's cold artifacts from the OS page cache
-// and reports how many files it advised. Without it a leg after the first would
-// read what the previous leg paged in; with it every leg's numbers are cold.
+// and reports how many files it advised. It runs before every leg, so each leg
+// reads from disk and its numbers are cold.
 //
-// A file that cannot be opened is skipped rather than failing the run: the
-// artifact set is derived from the layout, so a kind the dataset never produced
-// is a legitimate absence.
+// A file that cannot be opened is skipped and the run continues: the artifact
+// set is derived from the layout, so a kind the dataset never produced is a
+// legitimate absence.
 func (f *queryFixture) evictColdArtifacts() (int, error) {
 	evicted := 0
 	for _, path := range f.EvictPaths {
@@ -383,9 +382,8 @@ func (f *queryFixture) evictColdArtifacts() (int, error) {
 // fixture, recording each leg's per-request distribution in the sink.
 //
 // A type's corpus is sampled once, before its first leg, and shared by every
-// rate: re-sampling per rate would make the legs read different work, so a
-// difference between two legs would be a difference in the work rather than in
-// the rate.
+// rate, so the legs of one type all read the same work and what separates two
+// of them is the rate.
 func runQueryLegs(
 	ctx context.Context, logger *supportlog.Entry, f *queryFixture, p queryPlan, sink *csvSink,
 ) error {
@@ -410,8 +408,8 @@ func runQueryLegs(
 // then p.Warmup unmeasured requests and the leg's measured ones, all dispatched
 // at rps requests per second over p.Duration.
 //
-// The leg's seed mixes in the type so two types do not read the same ledgers in
-// the same order, which would let the second inherit the first's warm cache.
+// The leg's seed mixes in the type, so two types read different ledgers in
+// different orders and neither inherits the other's warm cache.
 func runQueryLeg(
 	ctx context.Context, logger *supportlog.Entry, f *queryFixture, p queryPlan, sink *csvSink,
 	qtype string, rps float64, req queryRequest,
@@ -459,12 +457,11 @@ func runQueryLeg(
 // which runs to the last request's completion and so covers the leg's drain
 // tail. The _millirps row's duration columns carry the achieved rate times 1000
 // as an integer, the way peak_rss_bytes carries bytes; it is the answered
-// requests over the window the leg offered, so the drain tail shows in the
-// latency rows and in the wall row rather than in the rate. The _lag row holds
-// one sample per measured position, shed positions included, so it is the
-// distribution of how far behind schedule the dispatcher ran. The _shed row is
-// written for every leg, so a leg that shed nothing says so with a zero rather
-// than by leaving the row out.
+// requests over the window the leg offered, and the wall row carries the drain
+// tail. The _lag row holds one sample per measured position, shed positions
+// included, so it is the distribution of how far behind schedule the dispatcher
+// ran. The _shed row is written for every leg, so a leg that shed nothing
+// reports a zero.
 func recordLeg(sink *csvSink, qtype string, rps float64, res legResult) {
 	total := queryTotalRow(rps)
 	service := queryServiceRow(rps)
