@@ -331,23 +331,17 @@ func verifyAndDecodePostings(record []byte, key TermKey, slot uint32) (Postings,
 		if err := bm.UnmarshalBinary(body[1:]); err != nil {
 			return Postings{}, fmt.Errorf("events: unmarshal bitmap at slot %d: %w", slot, err)
 		}
-		// No writer produces a zero-posting term (encodeIndexBody rejects
-		// them, exactly as the delta codec rejects a zero count), so zero
-		// decoded postings is corruption, not a miss — and it is the shape
-		// UnmarshalBinary accepts without error: a genuinely empty body, or
-		// a run container holding no intervals, which IsEmpty misses because
-		// the container exists. GetCardinality sums the actual run lengths,
-		// so one linear pass over the containers catches both.
-		//
-		// Deliberately NOT bm.Validate(): its run-container disjointness
-		// proof is super-linear on run-dense bitmaps and would run on every
-		// fat term of every query — measured 15ms → 230ms p99 on cold pubnet
-		// events queries. Cardinality-positive structural lies stay trusted,
-		// as they always were on this path.
-		if bm.GetCardinality() == 0 {
-			return Postings{}, fmt.Errorf(
-				"events: empty bitmap at slot %d (no writer produces a zero-posting term)", slot)
-		}
+		// Byte integrity is the packfile layer's job (#910 checksums
+		// index.pack record payloads), so the decode trusts what it is
+		// handed: no structural validation here. bm.Validate() in
+		// particular is banned from this path — its run-disjointness proof
+		// is super-linear on run-dense bitmaps and measured 15ms → 230ms
+		// p99 on cold pubnet events queries. A parseable-but-hollow body
+		// decodes to zero postings: a genuinely empty one normalizes to a
+		// clean miss in BitmapPostings, and a zero-interval run container
+		// (whose container survives IsEmpty) reads as a present term whose
+		// intersections and unions are simply empty — the trust level the
+		// base read path always had.
 		return BitmapPostings(bm), nil
 	case itemCodecDelta:
 		ids, err := DecodePostings(body[1:])
