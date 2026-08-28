@@ -361,8 +361,9 @@ func TestOpenColdFixtureServesFrozenChunks(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, idxs, 1)
 
-	hashes, err := sampleChunkTxHashes(view, chunkID, f.FirstLedger, f.LastLedger, testRNG())
-	require.NoError(t, err)
+	s := newTxHashSampler(testRNG())
+	require.NoError(t, s.sampleChunk(view, chunkID, f.FirstLedger, f.LastLedger))
+	hashes := s.hashes
 	require.NotEmpty(t, hashes, "the synthetic chunk holds transactions to probe")
 	seq, err := idxs[0].Get(hashes[0])
 	require.NoError(t, err)
