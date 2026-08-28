@@ -333,13 +333,13 @@ func padLedger(lcm xdr.LedgerCloseMeta, size int) xdr.LedgerCloseMeta {
 
 // BenchmarkOldestLedgerRangeLookup pits the 1KiB prefix fetch in
 // getLedgerRangeWithCache against the full-blob query it replaced. The tx read
-// path (getLedgers/getTransactions) runs this lookup once per request; sizes
-// are the min/avg/max meta blobs observed on a pubnet 7-day node.
+// path (getLedgers/getTransactions) runs this lookup once per request
 func BenchmarkOldestLedgerRangeLookup(b *testing.B) {
 	for _, tc := range []struct {
 		name string
 		size int
 	}{
+		// min/avg/max meta blob sizes observed on a pubnet 7-day node
 		{"512KiB", 512 << 10},
 		{"2MiB", 2 << 20},
 		{"4MiB", 4 << 20},
