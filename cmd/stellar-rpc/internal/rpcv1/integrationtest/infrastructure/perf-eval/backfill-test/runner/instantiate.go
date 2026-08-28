@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -112,7 +114,7 @@ func instantiate(ctx context.Context) error {
 
 	if daemon != nil {
 		// hand the serving box off to the chained blaster leg
-		servePhase(ctx, daemon)
+		servePhase(ctx, daemon, cfg.Bucket, cfg.ResultKey)
 	}
 	return nil
 }
@@ -181,12 +183,15 @@ func renderConfig(repoRoot, workDir, coreCfg, retention, endpoint string) (strin
 
 // daemonHandle controls a daemon left running past its backfill phase.
 type daemonHandle struct {
-	cancel context.CancelFunc
-	done   chan struct{} // closed once the daemon is reaped
+	cancel   context.CancelFunc
+	done     chan struct{} // closed once the daemon is reaped
+	err      error         // cmd.Wait's result; valid once done is closed
+	stopping atomic.Bool   // set by Stop, so the reaper can tell a requested kill from a crash
 }
 
 // Stop kills the daemon and waits (bounded) for it to be reaped.
 func (d *daemonHandle) Stop() {
+	d.stopping.Store(true)
 	d.cancel()
 	select {
 	case <-d.done:
@@ -249,23 +254,35 @@ func runBackfill(
 		return 0, 0, 0, nil, fmt.Errorf("daemon exited or hit the %s deadline before backfill completed", deadline)
 	}
 
-	// keep draining the pipe (the daemon blocks on it once full) and teeing
-	// its catchup/ingestion output to the box log until it dies
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for scanner.Scan() {
-			fmt.Fprintln(os.Stderr, scanner.Text())
-		}
-		pr.Close()
-		_ = cmd.Wait() // reap; a kill from cancel surfaces here and is expected
-	}()
-	daemon := &daemonHandle{cancel: cancel, done: done}
+	daemon := &daemonHandle{cancel: cancel, done: make(chan struct{})}
+	go daemon.reap(scanner, pr, cmd)
 	if !keepAlive {
 		daemon.Stop() // stop the daemon before it starts live ingestion
 		return elapsed, lo, hi, nil, nil
 	}
 	return elapsed, lo, hi, daemon, nil
+}
+
+// reap keeps draining the pipe (the daemon blocks on it once full), teeing its
+// catchup/ingestion output to the box log until it dies, then records how.
+func (d *daemonHandle) reap(scanner *bufio.Scanner, pr *os.File, cmd *exec.Cmd) {
+	defer close(d.done)
+	for scanner.Scan() {
+		fmt.Fprintln(os.Stderr, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		// a line over the scanner's cap must not stop the drain: closing the
+		// read end would SIGPIPE-kill a healthy daemon on its next write
+		logger.Warnf("reading daemon output: %v; draining the rest unbuffered", err)
+		_, _ = io.Copy(os.Stderr, pr)
+	}
+	pr.Close()
+	d.err = cmd.Wait()
+	if d.stopping.Load() {
+		logger.Infof("daemon stopped on request: %v", d.err)
+	} else {
+		logger.Warnf("daemon exited on its own: %v", d.err)
+	}
 }
 
 func renderMarkdown(sha, retention string, lo, hi, ingested int, elapsed time.Duration) string {

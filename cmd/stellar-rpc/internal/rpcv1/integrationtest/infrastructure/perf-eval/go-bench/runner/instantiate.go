@@ -11,7 +11,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -28,6 +28,16 @@ const legTitle = "Go endpoint benchmarks"
 var benchDenylist = []string{
 	"BenchmarkGetLedgerEntries", // is an integration test
 	"BenchmarkTransactionFetch", // is broken in current baseline release
+}
+
+var nativeLibRoots = []string{
+	"github.com/linxGnu/grocksdb",
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/zstd",
+}
+
+var v2Prefixes = []string{
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2",
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/rpcv2",
 }
 
 // instantiate is the instance half after the bootstrap, which runs the benches
@@ -74,17 +84,15 @@ func instantiate(ctx context.Context) error {
 		return bail("checking out baseline %s: %v", baselineRef, err)
 	}
 
-	for _, dir := range []string{baselineDir, repoRoot} {
-		logger.Infof("building rpc libs in %s", dir)
-		if err := harness.RunStreaming(ctx, dir, nil, 40, "make", "build-libs"); err != nil {
-			return bail("make build-libs failed in %s: %v", dir, err)
-		}
+	baselinePkgs, candidatePkgs, err := prepareSuites(ctx, baselineDir, repoRoot)
+	if err != nil {
+		return bail("%v", err)
 	}
 
 	logger.Infof("running audited benchmarks (count=%d) on baseline %s", count, baselineRef)
-	baselineFails := runSuite(ctx, baselineDir, baselineOut, count)
+	baselineFails := runSuite(ctx, baselineDir, baselineOut, count, baselinePkgs)
 	logger.Infof("running audited benchmarks (count=%d) on candidate %s", count, env["TARGET_SHA"])
-	candidateFails := runSuite(ctx, repoRoot, candidateOut, count)
+	candidateFails := runSuite(ctx, repoRoot, candidateOut, count, candidatePkgs)
 
 	logger.Infof("comparing with benchstat")
 	if err := runBenchstat(ctx, baselineOut, candidateOut, benchstatOut); err != nil {
@@ -128,6 +136,21 @@ func instantiate(ctx context.Context) error {
 	return nil
 }
 
+func prepareSuites(ctx context.Context, baselineDir, candidateDir string) ([]string, []string, error) {
+	pkgs := make([][]string, 2)
+	for i, dir := range []string{baselineDir, candidateDir} {
+		logger.Infof("building rpc libs in %s", dir)
+		if err := harness.RunStreaming(ctx, dir, nil, 40, "make", "build-libs"); err != nil {
+			return nil, nil, fmt.Errorf("make build-libs failed in %s: %w", dir, err)
+		}
+		var err error
+		if pkgs[i], err = benchPackages(ctx, dir); err != nil {
+			return nil, nil, err
+		}
+	}
+	return pkgs[0], pkgs[1], nil
+}
+
 // publishOK writes the bench metadata and publishes the ok result object.
 func publishOK(
 	ctx context.Context, client *s3.Client, r benchReport, env map[string]string, benchResults string,
@@ -166,20 +189,22 @@ func checkoutBaseline(ctx context.Context, dir, repo, ref string) (string, error
 	return strings.TrimSpace(string(out)), nil
 }
 
-// runSuite runs every benchmark in the module in dir except benchDenylist.
+// runSuite runs every benchmark of pkgs in dir except benchDenylist.
 // Only stderr (tool/compile errors, low-volume) streams to the log.
 // Returns the packages go test reported as failed (empty on success).
-func runSuite(ctx context.Context, dir, outFile string, count int) []string {
+func runSuite(ctx context.Context, dir, outFile string, count int, pkgs []string) []string {
 	f, err := os.OpenFile(outFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		logger.Warnf("opening %s: %v", outFile, err)
 		return []string{"<suite>"}
 	}
 	defer f.Close()
-	cmd := exec.CommandContext(ctx, "go", "test", "-run", "^$", "-bench", ".",
-		"-skip", "^("+strings.Join(benchDenylist, "|")+")$",
+	args := append([]string{
+		"test", "-run", "^$", "-bench", ".",
+		"-skip", "^(" + strings.Join(benchDenylist, "|") + ")$",
 		"-benchmem", "-count", strconv.Itoa(count), "-timeout", "30m",
-		"./...")
+	}, pkgs...)
+	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Dir = dir
 	cmd.Stdout, cmd.Stderr = f, os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -191,6 +216,98 @@ func runSuite(ctx context.Context, dir, outFile string, count int) []string {
 		return failed
 	}
 	return nil
+}
+
+// benchPackages lists the module's packages minus rpcv2 and anything needing
+// native libraries absent from the benchmark box. A package that fails to load
+// stays in (-e), so go test reports it as a per-package failure the way
+// `go test ./...` did, instead of the listing failing the whole leg.
+func benchPackages(ctx context.Context, dir string) ([]string, error) {
+	var stdout, stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, "go", "list", "-e", "-test", "-json", "./...")
+	cmd.Dir = dir
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("go list -test in %s: %w (%s)", dir, err, strings.TrimSpace(stderr.String()))
+	}
+
+	all, excluded := map[string]bool{}, map[string]bool{}
+	decoder := json.NewDecoder(&stdout)
+	for {
+		var listed goListPackage
+		if err := decoder.Decode(&listed); err == io.EOF {
+			break
+		} else if err != nil {
+			return nil, fmt.Errorf("decoding go list output: %w", err)
+		}
+		if listed.Incomplete {
+			reason := "a dependency failed to load"
+			if listed.Error != nil {
+				reason = listed.Error.Err
+			}
+			logger.Warnf("%s in %s did not load cleanly; go test will report it: %s", listed.ImportPath, dir, reason)
+		}
+
+		pkg := listed.ImportPath
+		testPkg, isTestBinary := strings.CutSuffix(pkg, ".test")
+		switch {
+		case listed.ForTest != "":
+			pkg = listed.ForTest
+		case isTestBinary:
+			pkg = testPkg
+		default:
+			all[pkg] = true
+		}
+		if excludeFromBench(pkg, listed.Deps) {
+			excluded[pkg] = true
+		}
+	}
+
+	var kept, skipped []string
+	for pkg := range all {
+		if excluded[pkg] {
+			skipped = append(skipped, pkg)
+		} else {
+			kept = append(kept, pkg)
+		}
+	}
+	slices.Sort(kept)
+	slices.Sort(skipped)
+	logger.Infof("bench suite in %s: %d packages, %d excluded (v2 tree or native libs): %s",
+		dir, len(kept), len(skipped), strings.Join(skipped, ", "))
+	return kept, nil
+}
+
+// goListPackage is the subset of `go list -json` output benchPackages reads.
+// The tags spell go list's keys exactly, so decoding never depends on
+// encoding/json's case-insensitive fallback.
+//
+//nolint:tagliatelle // go list emits PascalCase keys
+type goListPackage struct {
+	ImportPath string          `json:"ImportPath"`
+	ForTest    string          `json:"ForTest"`
+	Deps       []string        `json:"Deps"`
+	Incomplete bool            `json:"Incomplete"`
+	Error      *goListPkgError `json:"Error"`
+}
+
+//nolint:tagliatelle // go list emits PascalCase keys
+type goListPkgError struct {
+	Err string `json:"Err"`
+}
+
+func excludeFromBench(pkg string, deps []string) bool {
+	for _, prefix := range v2Prefixes {
+		if pkg == prefix || strings.HasPrefix(pkg, prefix+"/") {
+			return true
+		}
+	}
+	for _, root := range nativeLibRoots {
+		if pkg == root || slices.Contains(deps, root) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseFailedPkgs scans a bench output file for go test's FAIL lines.
@@ -256,7 +373,7 @@ func uploadRawLogs(
 		}
 		uploaded = append(uploaded, name)
 	}
-	sort.Strings(uploaded)
+	slices.Sort(uploaded)
 	return uploaded
 }
 
@@ -278,7 +395,7 @@ type benchReport struct {
 func renderMarkdown(r benchReport) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "**Baseline** `%s` (`%s`) vs **candidate** `%s` — `-benchmem -count=%d`, "+
-		"both refs sequentially on one box.\n",
+		"both refs sequentially on one box; rpcv2 excluded.\n",
 		r.BaselineRef, r.BaselineSHA[:min(12, len(r.BaselineSHA))], r.TargetSHA[:min(12, len(r.TargetSHA))], r.Count)
 	for _, pkg := range r.CandidateFails {
 		fmt.Fprintf(&b, "\n❌ Candidate bench run failed in `%s`; see the box log.\n", pkg)
