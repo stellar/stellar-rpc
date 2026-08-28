@@ -25,15 +25,21 @@ import (
 // read here happens once, before any measurement, and is never timed, so the
 // measured pass reports the query and not the corpus build.
 
-// The tx-hash sampler's stopping rule. It aims for a pool large enough that a
-// leg's requests draw from many hashes, and it counts hashes because how many
-// transactions a ledger carries is a property of the dataset: a loaded one
-// fills the pool in a handful of reads, and a sparse one keeps reading until
-// the pool is big enough. The read cap ends the sample on a dataset too sparse
-// to reach the target at all.
+// The tx-hash sampler's rule: read randomly chosen ledgers, take at most
+// corpusMaxHashesPerLedger hashes from each, and stop once the pool holds
+// corpusTargetHashes of them or the read cap runs out.
+//
+// The per-ledger cap is what spreads the pool over ledgers. Looking a hash up
+// reads the ledger it landed in, so a pool drawn from one ledger measures the
+// same decompressed blob over and over, which is not what a served by-hash mix
+// does. With these values a dataset dense enough to fill the pool covers
+// corpusTargetHashes/corpusMaxHashesPerLedger ledgers; a sparser one never
+// reaches the cap and contributes each ledger's whole transaction set. The read
+// cap ends the sample on a dataset too sparse to reach the target at all.
 const (
-	corpusTargetHashes   = 512
-	corpusMaxLedgerReads = 512
+	corpusTargetHashes       = 512
+	corpusMaxLedgerReads     = 512
+	corpusMaxHashesPerLedger = 16
 )
 
 // eventScanCap bounds how many stored events the filter builder reads while
@@ -98,67 +104,120 @@ func buildTxHashCorpus(
 	defer view.Release()
 
 	rng := rand.New(rand.NewPCG(uint64(seed), uint64(seed*31+7))) //nolint:gosec // seed mixing
-	var hashes [][32]byte
+	s := newTxHashSampler(rng)
 	for _, c := range f.Chunks {
-		got, err := sampleChunkTxHashes(view, c, f.FirstLedger, f.LastLedger, rng)
-		if err != nil {
+		if err := s.sampleChunk(view, c, f.FirstLedger, f.LastLedger); err != nil {
 			return nil, err
 		}
-		hashes = append(hashes, got...)
 	}
-	if len(hashes) == 0 {
+	if len(s.hashes) == 0 {
 		return nil, fmt.Errorf("%w: chunks %v, ledgers [%d, %d]",
 			errNoTransactions, f.Chunks, f.FirstLedger, f.LastLedger)
 	}
-	if err := verifyPassphrase(ctx, view, f, hashes[0]); err != nil {
+	if err := verifyPassphrase(ctx, view, f, s.hashes[0]); err != nil {
 		return nil, err
 	}
-	logger.Infof("txhash corpus: %d hashes sampled, miss fraction %.2f", len(hashes), missFraction)
-	return &txHashCorpus{hashes: hashes, missFraction: missFraction}, nil
+	s.logCoverage(logger, missFraction)
+	return &txHashCorpus{hashes: s.hashes, missFraction: missFraction}, nil
 }
 
-// sampleChunkTxHashes reads randomly chosen ledgers of chunk c — within the
-// fixture's servable range — and returns every transaction hash it finds,
-// stopping once the pool reaches corpusTargetHashes or the read cap runs out.
+// txHashSampler draws transaction hashes from a fixture's ledgers and records
+// which ledgers they came from, so the corpus can report how many it covers.
+//
+// It reads each sequence at most once. A ledger therefore contributes at most
+// corpusMaxHashesPerLedger hashes to the pool, and the ledgers list holds
+// exactly the ledgers whose hashes are in the pool.
+type txHashSampler struct {
+	rng *rand.Rand
+
+	// hashes is the pool.
+	hashes [][32]byte
+
+	// ledgers lists every ledger that contributed a hash, in sample order, and
+	// read holds every sequence the sampler has already drawn — including the
+	// ones that held no stored ledger, which are not worth drawing twice.
+	ledgers []uint32
+	read    map[uint32]struct{}
+}
+
+func newTxHashSampler(rng *rand.Rand) *txHashSampler {
+	return &txHashSampler{rng: rng, read: map[uint32]struct{}{}}
+}
+
+// sampleChunk reads randomly chosen ledgers of chunk c — within the fixture's
+// servable range — and adds a random subset of each one's transaction hashes to
+// the pool, stopping once the pool reaches corpusTargetHashes or the read cap
+// runs out.
 //
 // A sequence with no stored ledger is skipped rather than failing the sample: a
 // capped hot ingest leaves the chunk's tail empty, which is a known state, not
 // an error. The hashes come from ExtractLedgerTxParts, which derives them from
 // each transaction's own result and meta and needs no passphrase — so they are
 // authoritative, which is what makes them usable to check the passphrase.
-func sampleChunkTxHashes(
-	view *query.ReadView, c chunk.ID, first, last uint32, rng *rand.Rand,
-) ([][32]byte, error) {
+func (s *txHashSampler) sampleChunk(view *query.ReadView, c chunk.ID, first, last uint32) error {
 	lo := max(c.FirstLedger(), first)
 	hi := min(c.LastLedger(), last)
 	if lo > hi {
-		return nil, nil
+		return nil
 	}
 	reader, err := view.Ledgers(c)
 	if err != nil {
-		return nil, fmt.Errorf("resolve ledgers of chunk %s: %w", c, err)
+		return fmt.Errorf("resolve ledgers of chunk %s: %w", c, err)
 	}
 
 	span := int(hi - lo + 1)
-	var hashes [][32]byte
-	for reads := 0; reads < corpusMaxLedgerReads && len(hashes) < corpusTargetHashes; reads++ {
-		seq := lo + uint32(rng.IntN(span)) //nolint:gosec // span <= LedgersPerChunk
+	for reads := 0; reads < corpusMaxLedgerReads && len(s.hashes) < corpusTargetHashes; reads++ {
+		seq := lo + uint32(s.rng.IntN(span)) //nolint:gosec // span <= LedgersPerChunk
+		if _, drawn := s.read[seq]; drawn {
+			continue
+		}
+		s.read[seq] = struct{}{}
 		raw, err := reader.GetLedgerRaw(seq)
 		if errors.Is(err, stores.ErrNotFound) {
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("read ledger %d: %w", seq, err)
+			return fmt.Errorf("read ledger %d: %w", seq, err)
 		}
 		parts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
 		if err != nil {
-			return nil, fmt.Errorf("extract tx parts of ledger %d: %w", seq, err)
+			return fmt.Errorf("extract tx parts of ledger %d: %w", seq, err)
 		}
-		for _, p := range parts {
-			hashes = append(hashes, p.Hash)
+		picked := sampleHashesFromLedger(s.rng, parts)
+		if len(picked) == 0 {
+			continue
 		}
+		s.hashes = append(s.hashes, picked...)
+		s.ledgers = append(s.ledgers, seq)
 	}
-	return hashes, nil
+	return nil
+}
+
+// logCoverage reports what the pool covers: how many hashes it holds, how many
+// ledgers they came from, and the range those ledgers span. A pool drawn from
+// one ledger is legitimate on a dataset that holds one, and still worth a
+// warning, because every found lookup in the run then reads that one ledger.
+func (s *txHashSampler) logCoverage(logger *supportlog.Entry, missFraction float64) {
+	logger.Infof("txhash corpus: %d hashes over %d ledgers spanning %d..%d, miss fraction %.2f",
+		len(s.hashes), len(s.ledgers), slices.Min(s.ledgers), slices.Max(s.ledgers), missFraction)
+	if len(s.ledgers) == 1 {
+		logger.Warnf("txhash corpus came from ledger %d alone: every found lookup reads that "+
+			"one ledger, so this run's found rows measure a warm read", s.ledgers[0])
+	}
+}
+
+// sampleHashesFromLedger returns at most corpusMaxHashesPerLedger of the
+// transactions' hashes, drawn uniformly without replacement. The draw is random
+// rather than the ledger's first transactions because apply order is a property
+// of the ordering rule, not of the ledger's traffic, so the opening
+// transactions do not stand in for the rest.
+func sampleHashesFromLedger(rng *rand.Rand, parts []sdkingest.LedgerTxParts) [][32]byte {
+	take := min(len(parts), corpusMaxHashesPerLedger)
+	out := make([][32]byte, 0, take)
+	for _, i := range rng.Perm(len(parts))[:take] {
+		out = append(out, parts[i].Hash)
+	}
+	return out
 }
 
 // verifyPassphrase confirms the configured network passphrase resolves a hash
