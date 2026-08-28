@@ -2,15 +2,11 @@ package sqlitedb
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"path"
-	"runtime"
 	"slices"
-	"strings"
 	"testing"
 
-	sq "github.com/Masterminds/squirrel"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -292,37 +288,6 @@ func BenchmarkBatchGetLedgers(b *testing.B) {
 	}
 }
 
-// fullBlobLedgerRange reproduces the pre-optimization oldest-ledger lookup
-// (SELECT meta, i.e. the entire blob) as the benchmark baseline.
-func fullBlobLedgerRange(ctx context.Context, db readDB,
-	latestSeq uint32, latestTime int64,
-) (store.LedgerRange, error) {
-	query := sq.Select("meta").
-		From(ledgerCloseMetaTableName).
-		Where(
-			fmt.Sprintf("sequence = (SELECT MIN(sequence) FROM %s)", ledgerCloseMetaTableName),
-		)
-	var lcmRaw []xdr.LedgerCloseMetaView
-	if err := db.Select(ctx, &lcmRaw, query); err != nil {
-		return store.LedgerRange{}, err
-	}
-	if len(lcmRaw) == 0 {
-		return store.LedgerRange{}, store.ErrEmptyDB
-	}
-	firstSeq, err := lcmRaw[0].LedgerSequence()
-	if err != nil {
-		return store.LedgerRange{}, err
-	}
-	firstCloseTime, err := lcmRaw[0].LedgerCloseTime()
-	if err != nil {
-		return store.LedgerRange{}, err
-	}
-	return store.LedgerRange{
-		FirstLedger: store.LedgerInfo{Sequence: firstSeq, CloseTime: firstCloseTime},
-		LastLedger:  store.LedgerInfo{Sequence: latestSeq, CloseTime: latestTime},
-	}, nil
-}
-
 // padLedger grows a txMeta ledger's meta to roughly size bytes via its soroban return value.
 func padLedger(lcm xdr.LedgerCloseMeta, size int) xdr.LedgerCloseMeta {
 	payload := xdr.ScBytes(make([]byte, size))
@@ -333,33 +298,10 @@ func padLedger(lcm xdr.LedgerCloseMeta, size int) xdr.LedgerCloseMeta {
 	return lcm
 }
 
-// benchLookup times fn as a sub-benchmark and returns its result so the parent
-// can summarize ratios across variants.
-func benchLookup(b *testing.B, name string, fn func() error) testing.BenchmarkResult {
-	var res testing.BenchmarkResult
-	b.Run(name, func(b *testing.B) {
-		b.ReportAllocs()
-		var before, after runtime.MemStats
-		runtime.ReadMemStats(&before)
-		for b.Loop() {
-			require.NoError(b, fn())
-		}
-		runtime.ReadMemStats(&after)
-		res = testing.BenchmarkResult{
-			N:         b.N,
-			T:         b.Elapsed(),
-			MemAllocs: after.Mallocs - before.Mallocs,
-			MemBytes:  after.TotalAlloc - before.TotalAlloc,
-		}
-	})
-	return res
-}
-
-// BenchmarkOldestLedgerRangeLookup pits the 1KiB prefix fetch in
-// getLedgerRangeWithCache against the full-blob query it replaced. The tx read
-// path (getLedgers/getTransactions) runs this lookup once per request
+// BenchmarkOldestLedgerRangeLookup measures the 1KiB prefix fetch in
+// getLedgerRangeWithCache. The tx read path (getLedgers/getTransactions) runs
+// this lookup once per request.
 func BenchmarkOldestLedgerRangeLookup(b *testing.B) {
-	var summary strings.Builder
 	for _, tc := range []struct {
 		name string
 		size int
@@ -369,9 +311,10 @@ func BenchmarkOldestLedgerRangeLookup(b *testing.B) {
 		{"2MiB", 2 << 20},
 		{"4MiB", 4 << 20},
 	} {
+		ctx := b.Context()
 		testDB := NewTestDB(b)
 		writer := NewReadWriter(logger, testDB, host.MakeNoOpDaemon(), 1_000_000, passphrase)
-		write, err := writer.NewTx(b.Context())
+		write, err := writer.NewTx(ctx)
 		require.NoError(b, err)
 
 		lcms := []xdr.LedgerCloseMeta{
@@ -385,31 +328,20 @@ func BenchmarkOldestLedgerRangeLookup(b *testing.B) {
 		}
 		latest := lcms[len(lcms)-1]
 		require.NoError(b, write.Commit(latest, nil))
-
-		// Verify that both the prefix and full-blob lookups return the same ledger range.
-		ctx := b.Context()
 		latestSeq, latestTime := latest.LedgerSequence(), latest.LedgerCloseTime()
-		want, err := getLedgerRangeWithCache(ctx, testDB, latestSeq, latestTime)
+
+		got, err := getLedgerRangeWithCache(ctx, testDB, latestSeq, latestTime)
 		require.NoError(b, err)
-		got, err := fullBlobLedgerRange(ctx, testDB, latestSeq, latestTime)
-		require.NoError(b, err)
-		require.Equal(b, want, got)
 		require.Equal(b, lcms[0].LedgerSequence(), got.FirstLedger.Sequence)
 
-		prefix := benchLookup(b, tc.name+"/prefix", func() error {
-			_, err := getLedgerRangeWithCache(ctx, testDB, latestSeq, latestTime)
-			return err
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				_, err := getLedgerRangeWithCache(ctx, testDB, latestSeq, latestTime)
+				require.NoError(b, err)
+			}
 		})
-		full := benchLookup(b, tc.name+"/fullBlob", func() error {
-			_, err := fullBlobLedgerRange(ctx, testDB, latestSeq, latestTime)
-			return err
-		})
-		summary.WriteString(fmt.Sprintf("\n  %-8s %.2fx ns/op | %.3fx B/op | %.2fx allocs/op", tc.name+":",
-			float64(prefix.NsPerOp())/float64(full.NsPerOp()),
-			float64(prefix.AllocedBytesPerOp())/float64(full.AllocedBytesPerOp()),
-			float64(prefix.AllocsPerOp())/float64(full.AllocsPerOp())))
 	}
-	fmt.Println("\nprefix / fullBlob:" + summary.String()) //nolint:forbidigo // b.Log would only show under -v
 }
 
 func NewTestDB(tb testing.TB) *DB {
