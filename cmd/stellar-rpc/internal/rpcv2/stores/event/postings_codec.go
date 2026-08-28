@@ -1,12 +1,4 @@
-// Package events holds the postings vocabulary the event stores share: the
-// delta-varint codec one term's ascending event IDs are stored in, the
-// Postings value that carries a term in whichever form the store already had
-// it, and the set operations that work on either form.
-//
-// It sits below stores/event so the cold index writer, the cold reader and
-// the hot in-RAM index can all speak about a term's postings without any of
-// them depending on the others.
-package events
+package event
 
 import (
 	"encoding/binary"

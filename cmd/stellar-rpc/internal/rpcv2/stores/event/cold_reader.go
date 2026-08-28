@@ -53,7 +53,6 @@ import (
 	"github.com/RoaringBitmap/roaring/v2"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
@@ -314,23 +313,23 @@ func (c *ColdReader) Offsets() (*LedgerOffsets, error) {
 // mismatch (residual MPHF collision on an unseen key) it returns the zero
 // Postings, which the caller treats as not-found.
 //
-// A delta term is returned un-materialized (see events.Intersect). record is
+// A delta term is returned un-materialized (see Intersect). record is
 // valid only inside ReadItems' callback, and neither codec aliases it, so the
 // result outlives the callback safely.
-func verifyAndDecodePostings(record []byte, key TermKey, slot uint32) (events.Postings, error) {
+func verifyAndDecodePostings(record []byte, key TermKey, slot uint32) (Postings, error) {
 	if len(record) <= IndexRecordFingerprintLen {
-		return events.Postings{}, fmt.Errorf(
+		return Postings{}, fmt.Errorf(
 			"events: index.pack record at slot %d truncated (%d bytes)", slot, len(record))
 	}
 	if !bytes.Equal(record[:IndexRecordFingerprintLen], key[:IndexRecordFingerprintLen]) {
-		return events.Postings{}, nil
+		return Postings{}, nil
 	}
 	body := record[IndexRecordFingerprintLen:]
 	switch body[0] {
 	case itemCodecRoaring:
 		bm := roaring.New()
 		if err := bm.UnmarshalBinary(body[1:]); err != nil {
-			return events.Postings{}, fmt.Errorf("events: unmarshal bitmap at slot %d: %w", slot, err)
+			return Postings{}, fmt.Errorf("events: unmarshal bitmap at slot %d: %w", slot, err)
 		}
 		// UnmarshalBinary accepts shapes that are structurally invalid rather
 		// than merely unexpected, such as a run container holding no
@@ -339,7 +338,7 @@ func verifyAndDecodePostings(record []byte, key TermKey, slot uint32) (events.Po
 		// slot is known, rather than downstream where a caller assuming a
 		// present term holds at least one posting would fault.
 		if err := bm.Validate(); err != nil {
-			return events.Postings{}, fmt.Errorf("events: invalid bitmap at slot %d: %w", slot, err)
+			return Postings{}, fmt.Errorf("events: invalid bitmap at slot %d: %w", slot, err)
 		}
 		// A structurally valid but empty bitmap is equally impossible from
 		// the writer — encodeIndexBody rejects zero-posting terms, exactly
@@ -347,18 +346,18 @@ func verifyAndDecodePostings(record []byte, key TermKey, slot uint32) (events.Po
 		// normalize it to absent, silently deleting an indexed term.
 		// Corruption, not a miss.
 		if bm.IsEmpty() {
-			return events.Postings{}, fmt.Errorf(
+			return Postings{}, fmt.Errorf(
 				"events: empty bitmap at slot %d (no writer produces a zero-posting term)", slot)
 		}
-		return events.BitmapPostings(bm), nil
+		return BitmapPostings(bm), nil
 	case itemCodecDelta:
-		ids, err := events.DecodePostings(body[1:])
+		ids, err := DecodePostings(body[1:])
 		if err != nil {
-			return events.Postings{}, fmt.Errorf("events: decode postings at slot %d: %w", slot, err)
+			return Postings{}, fmt.Errorf("events: decode postings at slot %d: %w", slot, err)
 		}
-		return events.IDPostings(ids), nil
+		return IDPostings(ids), nil
 	default:
-		return events.Postings{}, fmt.Errorf(
+		return Postings{}, fmt.Errorf(
 			"events: index.pack record at slot %d has unknown codec 0x%02x", slot, body[0])
 	}
 }
@@ -384,7 +383,7 @@ func verifyAndDecodePostings(record []byte, key TermKey, slot uint32) (events.Po
 //     Misses (fingerprint mismatch) leave result[i] absent.
 //
 //nolint:cyclop // the four documented steps above, inline; splitting obscures the pass structure
-func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]events.Postings, error) {
+func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]Postings, error) {
 	if c.closed.Load() {
 		return nil, stores.ErrStoreClosed
 	}
@@ -403,7 +402,7 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]events.P
 		return nil, err
 	}
 
-	results := make([]events.Postings, len(keys))
+	results := make([]Postings, len(keys))
 
 	type pendingKey struct {
 		outIdx int

@@ -12,7 +12,6 @@ import (
 	"iter"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 )
 
 // Closed-store lifecycle: HotStore and ColdReader read methods
@@ -91,12 +90,12 @@ type Reader interface {
 
 	// LookupKeys returns each key's postings, aligned positionally
 	// with the input slice (result[i] corresponds to keys[i]).
-	// result[i] is the zero events.Postings if keys[i] has no
+	// result[i] is the zero Postings if keys[i] has no
 	// matching events in this chunk — a per-key miss is not an error.
 	//
 	// A term the cold index stored below its delta threshold comes
-	// back as an ascending id slice, not a bitmap; see events.Postings
-	// and events.Intersect for why the planner keeps it that way.
+	// back as an ascending id slice, not a bitmap; see Postings
+	// and Intersect for why the planner keeps it that way.
 	//
 	// Ownership: callers MUST treat the result as read-only. Some of
 	// what comes back is the hot store's live state, either a bitmap
@@ -112,7 +111,7 @@ type Reader interface {
 	// ctx cancels in-flight I/O on the cold path (MPHF load,
 	// index.pack ReadAt); hot side checks ctx as a fast guard before
 	// touching the in-memory mirror.
-	LookupKeys(ctx context.Context, keys []TermKey) ([]events.Postings, error)
+	LookupKeys(ctx context.Context, keys []TermKey) ([]Postings, error)
 
 	// FetchEvents decodes events for the supplied chunk-relative
 	// eventIDs and returns them positionally aligned with the input

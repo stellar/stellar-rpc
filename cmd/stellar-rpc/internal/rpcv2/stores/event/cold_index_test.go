@@ -15,7 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 )
 
@@ -326,7 +325,7 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	assert.Equal(t, term[:IndexRecordFingerprintLen], record[:IndexRecordFingerprintLen])
 
 	// A single-posting term takes the delta codec, and its body is the codec
-	// byte plus events.AppendPostings output — no roaring container framing.
+	// byte plus AppendPostings output — no roaring container framing.
 	assert.Equal(t, itemCodecDelta, record[IndexRecordFingerprintLen],
 		"a 1-posting term must use the delta codec")
 	post, derr := verifyAndDecodePostings(record, term, 0)
@@ -421,7 +420,7 @@ func TestEncodeIndexBodyRejectsEmpty(t *testing.T) {
 
 	body, err := encodeIndexBody(nil, []uint32{7})
 	require.NoError(t, err)
-	ids, err := events.DecodePostings(body[1:])
+	ids, err := DecodePostings(body[1:])
 	require.NoError(t, err, "one posting must round-trip")
 	require.Equal(t, []uint32{7}, ids)
 }

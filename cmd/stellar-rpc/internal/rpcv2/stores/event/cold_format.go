@@ -93,7 +93,7 @@ const (
 	// itemCodecRoaring bodies are a serialized roaring bitmap, RunOptimize'd
 	// before Bitmap.WriteTo.
 	itemCodecRoaring byte = 0x00
-	// itemCodecDelta bodies are events.AppendPostings output: a uvarint count
+	// itemCodecDelta bodies are AppendPostings output: a uvarint count
 	// then the event IDs, first absolute and the rest strictly-positive
 	// deltas.
 	itemCodecDelta byte = 0x01

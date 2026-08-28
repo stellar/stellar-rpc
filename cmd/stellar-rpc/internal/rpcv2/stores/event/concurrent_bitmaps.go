@@ -5,8 +5,6 @@ import (
 	"sync/atomic"
 
 	"github.com/RoaringBitmap/roaring/v2"
-
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 )
 
 // promotionThreshold is the number of event IDs stored in a list
@@ -90,7 +88,7 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 // respect the "read-only" half of the contract.
 //
 // A sparse entry is returned as its id slice, un-materialized, since that is
-// the form it is stored in and the form events.Intersect can drive from.
+// the form it is stored in and the form Intersect can drive from.
 // Building a bitmap for it here was pure loss: the state already held an id
 // list, and every Get paid for a copy the planner then took apart again.
 //
@@ -116,7 +114,7 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 // ≥2-input qualifier on FastAnd/FastOr: with a single input the
 // roaring library has historically taken a Clone-the-input
 // shortcut, so callers MUST avoid passing a singleton slice to
-// those aggregators (events.Intersect and events.Union guard their
+// those aggregators (Intersect and Union guard their
 // single-input cases before calling FastAnd/FastOr).
 //
 // Callers may hold the pointer arbitrarily long. A subsequent Get
@@ -127,23 +125,23 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 // Concurrency: the RLock is held only for the map lookup. Once the
 // per-entry pointer is captured, the lock is released; the atomic
 // load on the entry happens lock-free.
-func (s *ConcurrentBitmaps) Get(key TermKey) (events.Postings, error) {
+func (s *ConcurrentBitmaps) Get(key TermKey) (Postings, error) {
 	s.rwmu.RLock()
 	p := s.terms[key]
 	s.rwmu.RUnlock()
 	if p == nil {
-		return events.Postings{}, nil
+		return Postings{}, nil
 	}
 	// The pointer is always Stored with a non-nil termState holding a
 	// non-nil bm or non-empty ids before it is published to the map.
 	st := p.Load()
 	if st.bm != nil {
-		return events.BitmapPostings(st.bm), nil
+		return BitmapPostings(st.bm), nil
 	}
 	// Sparse: hand out the published id list. AddTo builds a fresh slice per
 	// publish and never appends into one already published, so holding it is
 	// safe for as long as the caller likes.
-	return events.IDPostings(st.ids), nil
+	return IDPostings(st.ids), nil
 }
 
 // AddTo records each eventID under key. Idempotent: callers

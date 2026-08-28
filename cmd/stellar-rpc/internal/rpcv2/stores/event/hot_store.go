@@ -11,7 +11,6 @@ import (
 	"github.com/linxGnu/grocksdb"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
@@ -169,7 +168,7 @@ func (h *HotStore) Offsets() (*LedgerOffsets, error) {
 }
 
 // LookupKeys returns each key's postings, aligned positionally with
-// the input slice. result[i] is the zero events.Postings if keys[i]
+// the input slice. result[i] is the zero Postings if keys[i]
 // has no matching events. See Reader.LookupKeys for the semantics —
 // in particular the borrowed-result contract (callers must not
 // mutate).
@@ -178,7 +177,7 @@ func (h *HotStore) Offsets() (*LedgerOffsets, error) {
 // to batch — but exposing this method satisfies the Reader
 // interface so callers can program against batched lookups
 // uniformly.
-func (h *HotStore) LookupKeys(ctx context.Context, keys []TermKey) ([]events.Postings, error) {
+func (h *HotStore) LookupKeys(ctx context.Context, keys []TermKey) ([]Postings, error) {
 	if h.chunkStore.IsClosed() {
 		return nil, stores.ErrStoreClosed
 	}
@@ -188,7 +187,7 @@ func (h *HotStore) LookupKeys(ctx context.Context, keys []TermKey) ([]events.Pos
 	if len(keys) == 0 {
 		return nil, nil
 	}
-	results := make([]events.Postings, len(keys))
+	results := make([]Postings, len(keys))
 	for i, key := range keys {
 		p, err := h.mirror.Get(key)
 		if err != nil {

@@ -15,7 +15,6 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 )
 
 // Query and QueryOptions are the engine's historical one-shot surface
@@ -55,7 +54,7 @@ type countingReader struct {
 	totalKeys       int
 }
 
-func (c *countingReader) LookupKeys(ctx context.Context, keys []TermKey) ([]events.Postings, error) {
+func (c *countingReader) LookupKeys(ctx context.Context, keys []TermKey) ([]Postings, error) {
 	c.lookupKeysCalls++
 	c.totalKeys += len(keys)
 	return c.Reader.LookupKeys(ctx, keys)
@@ -1133,9 +1132,9 @@ func TestQuery_InvalidFilterRejected(t *testing.T) {
 // an event with topics.
 func TestUnionSlots(t *testing.T) {
 	firstIDs := []uint32{1, 2}
-	first := events.IDPostings(firstIDs)
-	second := events.BitmapPostings(roaring.BitmapOf(3))
-	postings := []events.Postings{first, {}, second, {}}
+	first := IDPostings(firstIDs)
+	second := BitmapPostings(roaring.BitmapOf(3))
+	postings := []Postings{first, {}, second, {}}
 
 	assert.Equal(t, firstIDs, unionSlots(postings, []int{0}).IDs(),
 		"a lone entry is borrowed, not copied")

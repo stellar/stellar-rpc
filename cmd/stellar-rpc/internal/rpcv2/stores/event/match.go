@@ -20,8 +20,6 @@ import (
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
-
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 )
 
 // Filter is one item in the union of an events query. Within a
@@ -319,11 +317,11 @@ func validateMatchCall(ctx context.Context, r Reader, filters []Filter, window I
 //
 // The result may be BORROWED store state: Intersect and Union both pass a
 // lone input through, and ClipRange can return its receiver. That is safe
-// because nothing downstream writes to it (see events.Postings), and
+// because nothing downstream writes to it (see Postings), and
 // FetchEvents takes the ids read-only.
 func unionForFilters(
 	ctx context.Context, r Reader, filters []Filter, window IDRange,
-) (events.Postings, bool, error) {
+) (Postings, bool, error) {
 	// ───── 1. Dedupe terms across filters ─────
 	//
 	// filterPlans[i] holds the slots filter i needs out of the batched
@@ -335,7 +333,7 @@ func unionForFilters(
 	// an unconstrained filter from intersecting nothing and coming back
 	// empty instead.
 	if len(filters) == 0 {
-		return events.Postings{}, true, nil
+		return Postings{}, true, nil
 	}
 	filterPlans := make([]termPlan, len(filters))
 	var uniqueKeys []TermKey
@@ -343,7 +341,7 @@ func unionForFilters(
 	for i := range filters {
 		groups := filters[i].termGroups()
 		if len(groups) == 0 {
-			return events.Postings{}, true, nil
+			return Postings{}, true, nil
 		}
 		plan := make(termPlan, len(groups))
 		for g, keys := range groups {
@@ -359,7 +357,7 @@ func unionForFilters(
 	// ───── 2. Single batched lookup for all unique terms ─────
 	postings, err := r.LookupKeys(ctx, uniqueKeys)
 	if err != nil {
-		return events.Postings{}, false, fmt.Errorf("events: query lookup: %w", err)
+		return Postings{}, false, fmt.Errorf("events: query lookup: %w", err)
 	}
 
 	// ───── 3. Per-filter intersect ─────
@@ -372,9 +370,9 @@ func unionForFilters(
 	// probes the rest, rather than materializing every side into a bitmap
 	// first. Entries here may be borrowed store state and stay borrowed to
 	// the end; see unionForFilters' contract.
-	perFilter := make([]events.Postings, 0, len(filterPlans))
+	perFilter := make([]Postings, 0, len(filterPlans))
 	for _, plan := range filterPlans {
-		inputs := make([]events.Postings, 0, len(plan))
+		inputs := make([]Postings, 0, len(plan))
 		missed := false
 		for _, slots := range plan {
 			group := unionSlots(postings, slots)
@@ -390,19 +388,19 @@ func unionForFilters(
 		// Intersect sorts what it is given, so inputs must be this
 		// filter's own slice — postings itself is indexed by slot and
 		// shared across filters.
-		if hits := events.Intersect(inputs); hits.Present() {
+		if hits := Intersect(inputs); hits.Present() {
 			perFilter = append(perFilter, hits)
 		}
 	}
 
 	if len(perFilter) == 0 {
-		return events.Postings{}, false, nil
+		return Postings{}, false, nil
 	}
 
 	// ───── 4. Union across filters ─────
 	// Union merges ascending lists rather than building a bitmap per
 	// input, and passes a lone input through untouched.
-	union := events.Union(perFilter)
+	union := Union(perFilter)
 
 	// ───── 5. Apply the event-ID window ─────
 	//
@@ -430,7 +428,7 @@ func unionForFilters(
 // fetched matches are flipped back. Stepping one id at a time is fine
 // here: the fetch I/O dominates a 512-step loop.
 func streamUnion(
-	ctx context.Context, r Reader, filters []Filter, union events.Postings,
+	ctx context.Context, r Reader, filters []Filter, union Postings,
 	descending bool, firstBatch int, yield func(Match, error) bool,
 ) {
 	var it interface {
@@ -548,17 +546,17 @@ func CountDistinctTerms(filters []Filter) int {
 // unionSlots ORs the postings at slots, and returns the zero Postings
 // when every one of them is absent from the index. A lone present entry
 // is borrowed rather than copied — Union passes a single input through.
-func unionSlots(postings []events.Postings, slots []int) events.Postings {
+func unionSlots(postings []Postings, slots []int) Postings {
 	if len(slots) == 1 {
 		return postings[slots[0]]
 	}
 	// Union compacts the slice it is given in place, so this must be a
 	// fresh one rather than a view of the slot-indexed result.
-	group := make([]events.Postings, 0, len(slots))
+	group := make([]Postings, 0, len(slots))
 	for _, s := range slots {
 		group = append(group, postings[s])
 	}
-	return events.Union(group)
+	return Union(group)
 }
 
 // idCursor walks an ascending id slice in stream order, matching the

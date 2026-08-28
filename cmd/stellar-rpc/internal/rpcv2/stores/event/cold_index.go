@@ -20,7 +20,6 @@ import (
 	"github.com/RoaringBitmap/roaring/v2"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
@@ -200,7 +199,7 @@ func encodeIndexBody(dst []byte, ids []uint32) ([]byte, error) {
 		return nil, errors.New("events: index body for a term with no postings")
 	}
 	if len(ids) <= deltaPostingMaxCardinality {
-		return events.AppendPostings(append(dst, itemCodecDelta), ids), nil
+		return AppendPostings(append(dst, itemCodecDelta), ids), nil
 	}
 	// RunOptimize re-encodes long runs of set bits as RUN containers, which
 	// the serialization then writes more compactly: ~14% on chunk 5999,
