@@ -20,6 +20,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
@@ -264,6 +265,36 @@ func TestGetEventsV2_TermBudgetRejectsBothRequestShapes(t *testing.T) {
 		requireErrorData(t, err, protocol.ErrorReasonInvalidParams, &data)
 		assert.Equal(t, uint32(3), data.TermsUsed)
 	})
+}
+
+// A hand-built cursor can carry filter shapes no v2 request can. Each is
+// cursor_malformed. The first one matters most: an unconstrained clause is
+// a full scan the term budget counts as zero.
+func TestGetEventsV2_CursorWithV2ForbiddenFilterIsMalformed(t *testing.T) {
+	ctx, first := seedView(t)
+	top := first + 2
+	diag := xdr.ContractEventTypeDiagnostic
+	_, a0 := symbolScVal(t, "a0")
+	withTopic := event.Filter{TopicCount: event.TopicCountFilter{Count: 2, Exact: true}}
+	withTopic.Topics[0] = a0
+	for name, filter := range map[string]event.Filter{
+		"no constraint":   {},
+		"diagnostic type": {EventType: &diag},
+		// The count rides alongside a topic, as v1 mints it. Alone it would
+		// fail the no-constraint arm instead and never reach its own.
+		"topic count": withTopic,
+	} {
+		t.Run(name, func(t *testing.T) {
+			token, err := (&query.EventCursor{Scope: query.EventScope{
+				MinLedger: first, MaxLedger: &top, Filters: []event.Filter{filter},
+			}}).Encode()
+			require.NoError(t, err, "the codec mints these for the v1 adapter")
+
+			_, err = getEventsV2(ctx, testLimits(), &protocol.GetEventsV2Request{Cursor: token})
+			require.Error(t, err)
+			requireErrorData(t, err, protocol.ErrorReasonCursorMalformed, nil)
+		})
+	}
 }
 
 func TestGetEventsV2_MalformedCursorReportsTheServedRange(t *testing.T) {

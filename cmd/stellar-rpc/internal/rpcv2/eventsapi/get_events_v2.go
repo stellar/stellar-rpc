@@ -11,6 +11,7 @@ import (
 	"io"
 	"math"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -188,6 +189,9 @@ func requestCursor(
 		if err != nil {
 			return query.EventCursor{}, 0, err
 		}
+		if err := validateCursorFilters(cursor.Scope.Filters); err != nil {
+			return query.EventCursor{}, 0, err
+		}
 		return *cursor, pageLimit, nil
 	}
 	scope, err := eventScope(req, oldest, latest)
@@ -195,6 +199,29 @@ func requestCursor(
 		return query.EventCursor{}, 0, err
 	}
 	return query.EventCursor{Scope: scope}, pageLimit, nil
+}
+
+// validateCursorFilters rejects filter shapes a v2 request cannot build,
+// which only a hand-built cursor carries. The codec and the pager accept
+// them because the v1 adapter will mint them. Two matter here: a clause
+// with no constraint is a full scan that the term budget counts as zero,
+// and a diagnostic type or a topic-count clause names events v2 never
+// serves.
+func validateCursorFilters(filters []event.Filter) error {
+	for i := range filters {
+		f := &filters[i]
+		hasTopic := slices.ContainsFunc(f.Topics[:], func(t []byte) bool { return len(t) > 0 })
+		switch {
+		case len(f.ContractID) == 0 && f.EventType == nil && !hasTopic:
+			return fmt.Errorf("%w: filter %d has no constraint", query.ErrCursorMalformed, i)
+		case f.EventType != nil && *f.EventType != xdr.ContractEventTypeContract &&
+			*f.EventType != xdr.ContractEventTypeSystem:
+			return fmt.Errorf("%w: filter %d names event type %d", query.ErrCursorMalformed, i, *f.EventType)
+		case f.TopicCount != (event.TopicCountFilter{}):
+			return fmt.Errorf("%w: filter %d carries a topic count", query.ErrCursorMalformed, i)
+		}
+	}
+	return nil
 }
 
 // checkTermBudget reports both numbers on rejection. A client needs them
