@@ -113,9 +113,11 @@ func (p *prober) contains(id uint32) bool {
 }
 
 // Union returns the union of ps, or the zero Postings when none are present.
-// It compacts ps in place, dropping absent entries and zeroing the tail, so a
-// caller that reads ps afterwards sees neither its original order nor its
-// original length.
+// It mutates ps's backing array: present entries compact to the front keeping
+// their relative order, and the tail up to the caller's original length is
+// zeroed. The caller's own slice header keeps its length — reading ps
+// afterwards yields the compacted entries followed by zero-value Postings —
+// so treat ps as consumed.
 //
 // All-list inputs are merged rather than materialized. Building a bitmap from a
 // scattered id list costs an allocation per container it touches, which is what
