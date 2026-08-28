@@ -233,6 +233,21 @@ func TestGetEventsV2_TermBudgetRejectsBothRequestShapes(t *testing.T) {
 		assert.Equal(t, uint32(2), data.TermBudget)
 	})
 
+	// Validation runs before the range is looked at, so an empty range does
+	// not skip it.
+	t.Run("range below genesis", func(t *testing.T) {
+		ctx, _ := seedView(t)
+		_, err := getEventsV2(ctx, limits, &protocol.GetEventsV2Request{
+			MaxLedger: 1,
+			Order:     protocol.OrderDescending,
+			Filters:   filters,
+		})
+		require.Error(t, err)
+		var data protocol.InvalidParamsErrorData
+		requireErrorData(t, err, protocol.ErrorReasonInvalidParams, &data)
+		assert.Equal(t, uint32(3), data.TermsUsed)
+	})
+
 	t.Run("cursor request", func(t *testing.T) {
 		ctx, first := seedView(t)
 		scope, err := eventScope(&protocol.GetEventsV2Request{

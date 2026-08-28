@@ -105,13 +105,15 @@ func serve(
 	if err != nil {
 		return protocol.GetEventsV2Response{}, err
 	}
-	if req.Cursor == "" && exhausted(req) {
-		return exhaustedResponse(&cursor.Scope, oldest, latest), nil
-	}
 	// Checked on the cursor path too: a cursor carries the filters and is
 	// not signed, so a hand-built one could ask for any number of lookups.
 	if err := checkTermBudget(cursor.Scope.Filters, limits.TermBudget); err != nil {
 		return protocol.GetEventsV2Response{}, err
+	}
+	// A range with no ledgers in it is finished before it starts. Only a
+	// below-genesis max produces one; the pager would call it inverted.
+	if s := &cursor.Scope; s.MaxLedger != nil && s.MinLedger > *s.MaxLedger {
+		return response(&query.EventPage{Next: cursor, Status: query.ScanComplete}, req.Format, oldest, latest)
 	}
 	page, err := view.QueryEvents(ctx, cursor, limit)
 	if err != nil {
@@ -206,24 +208,6 @@ func response(
 	return resp, nil
 }
 
-// exhausted reports a range whose every ledger is below genesis: an
-// explicit max that the raised min has passed. Valid already requires
-// min <= max, so this is the only way a range request can end up empty.
-func exhausted(req *protocol.GetEventsV2Request) bool {
-	return req.MaxLedger != 0 && req.MaxLedger < chunk.FirstLedgerSeq
-}
-
-// exhaustedResponse is the finished page for a range with nothing in it.
-func exhaustedResponse(scope *query.EventScope, oldest, latest uint32) protocol.GetEventsV2Response {
-	return protocol.GetEventsV2Response{
-		Events:        []protocol.EventInfoV2{},
-		ScanStatus:    protocol.ScanStatusComplete,
-		ScannedLedger: responseScannedLedger(&query.EventCursor{Scope: *scope}),
-		OldestLedger:  oldest,
-		LatestLedger:  latest,
-	}
-}
-
 // responseScannedLedger translates the cursor's watermark for the wire. A
 // cursor uses 0 to mean "nothing covered yet". On the wire that 0 would
 // claim the whole range, so report the ledger just outside it instead.
@@ -302,8 +286,7 @@ func eventScope(
 ) (query.EventScope, error) {
 	// A below-genesis minLedger is raised, not rejected: no ledger exists
 	// below genesis, so the range keeps the same ledgers. The max is never
-	// raised, because that would add genesis to a range that excluded it;
-	// serve handles that shape as an exhausted range.
+	// raised, because that would add genesis to a range that excluded it.
 	scope := query.EventScope{MinLedger: max(req.MinLedger, chunk.FirstLedgerSeq)}
 	if req.Order == protocol.OrderDescending {
 		scope.Dir = query.Descending
