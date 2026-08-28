@@ -107,17 +107,26 @@ type resumeAt struct {
 
 // QueryEventsFrom serves one page of scope starting at the event id from,
 // inclusive; a nil from starts at the scope's low edge. It serves an API
-// whose cursor names an event by identity rather than by stored position:
-// nothing looks the id up, the walk drops the ids below it as it streams,
-// which is both cheaper than a lookup and exactly the "id >= cursor" scan
-// v1 promises. Ascending only, the one direction v1 has.
+// whose cursor names an event by identity rather than by stored position,
+// so the walk seeks the id's own ledger for the matching boundary instead
+// of being handed an ordinal. Inclusive is what v1's "id >= cursor" scan
+// promises. Ascending only, the one direction v1 has.
+//
+// The returned page carries no Next cursor: a caller that names events by
+// id mints its own, and the bookmarks this walk advances are not a cursor
+// the pager would take back.
 func (a *ReadView) QueryEventsFrom(
 	ctx context.Context, scope EventScope, from *EventID, limit int,
 ) (*EventPage, error) {
 	if from != nil && scope.Dir != Ascending {
 		return nil, errors.New("query: resuming from an event id needs an ascending scope")
 	}
-	return a.queryEvents(ctx, EventCursor{Scope: scope}, from, limit)
+	page, err := a.queryEvents(ctx, EventCursor{Scope: scope}, from, limit)
+	if err != nil {
+		return nil, err
+	}
+	page.Next = EventCursor{}
+	return page, nil
 }
 
 func (a *ReadView) queryEvents(
@@ -405,26 +414,17 @@ func scanChunk(
 			"query: chunk %s offsets cover [%d, %d] but the walk needs [%d, %d]",
 			part.Chunk, ofs.StartLedger(), end-1, part.From, part.To)
 	}
-	window, err := chunkWindow(ctx, part.Reader, ofs, part.From, part.To, resume.pos, desc)
+	window, err := chunkWindow(ctx, part.Reader, ofs, part.From, part.To, resume, desc)
 	if err != nil {
 		return chunkResult{}, err
 	}
 
 	var out chunkResult
 	// room+1: the walk reads one match past the room to learn
-	// nextUnserved, so a page that fills is one right-sized fetch. An id
-	// resume drops matches instead of clipping the window, so it can need
-	// one batch more than the hint.
+	// nextUnserved, so a page that fills is one right-sized fetch.
 	for m, merr := range event.Matches(ctx, part.Reader, filters, window, desc, room+1) {
 		if merr != nil {
 			return chunkResult{}, merr
-		}
-		// The window still starts at the resume id's ledger, so drop that
-		// ledger's matches below the id. Ordering inside a ledger is the
-		// id order, so this delivers each event exactly once.
-		if from := resume.from; from != nil && m.LedgerSequence == from.Ledger &&
-			!from.atOrAfter(m.TxIdx, m.OpIdx, m.EventIdx) {
-			continue
 		}
 		if len(out.events) >= room {
 			// The page is full and the next match is known: every
@@ -456,21 +456,32 @@ func scanChunk(
 }
 
 // chunkWindow translates [pLo, pHi] to ordinals and clips past the
-// re-entry position. The position is always inside [pLo, pHi]:
+// re-entry point. Either form of re-entry is inside [pLo, pHi]:
 // QueryEvents refuses to serve when a bookmark is above the view's
-// latest, and resumeBounds starts the window at the position's ledger.
+// latest, and resumeBounds starts the window at its ledger.
 func chunkWindow(
 	ctx context.Context, r event.Reader, ofs *event.LedgerOffsets,
-	pLo, pHi uint32, reenter *EventPosition, desc bool,
+	pLo, pHi uint32, resume resumeAt, desc bool,
 ) (event.IDRange, error) {
 	window, err := event.IDRangeForLedgers(ofs, pLo, pHi)
 	if err != nil {
 		return event.IDRange{}, err
 	}
-	if reenter == nil {
+	if from := resume.from; from != nil {
+		// An id names no ordinal, so seek its ledger for the first one at
+		// or after it. Clipping here rather than dropping matches later
+		// keeps the page's cost independent of how deep the id sits.
+		ord, err := seekOrdinal(ctx, r, ofs, from)
+		if err != nil {
+			return event.IDRange{}, err
+		}
+		window.Start = max(window.Start, ord)
 		return window, nil
 	}
-	ord, err := resumeOrdinal(ctx, r, ofs, reenter)
+	if resume.pos == nil {
+		return window, nil
+	}
+	ord, err := resumeOrdinal(ctx, r, ofs, resume.pos)
 	if err != nil {
 		return event.IDRange{}, err
 	}
@@ -480,6 +491,36 @@ func chunkWindow(
 		window.Start = max(window.Start, ord+1)
 	}
 	return window, nil
+}
+
+// seekOrdinal returns the first ordinal in from's ledger whose id is at or
+// after from, and the ledger's end when none is, which empties that
+// ledger's share of the window. Order inside a ledger is id order, so this
+// is a binary search: each probe reads one event, and unlike a resume from
+// a position there is nothing to verify afterwards, since an id is a
+// boundary the client asked for rather than a slot it claims exists.
+func seekOrdinal(
+	ctx context.Context, r event.Reader, ofs *event.LedgerOffsets, from *EventID,
+) (uint32, error) {
+	lStart, lEnd, err := ofs.EventIDs(from.Ledger)
+	if err != nil {
+		return 0, fmt.Errorf("query: resume ledger %d: %w", from.Ledger, err)
+	}
+	lo, hi := lStart, lEnd
+	for lo < hi {
+		mid := lo + (hi-lo)/2
+		got, err := r.FetchEvents(ctx, []uint32{mid})
+		if err != nil {
+			return 0, fmt.Errorf("query: resume seek: %w", err)
+		}
+		p := &got[0]
+		if from.atOrAfter(p.TxIdx, p.OpIdx, p.EventIdx) {
+			hi = mid
+		} else {
+			lo = mid + 1
+		}
+	}
+	return lo, nil
 }
 
 // resumeOrdinal returns the re-entry position's chunk-relative

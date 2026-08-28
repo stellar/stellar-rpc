@@ -317,6 +317,14 @@ func TestGetEventsV1Parity(t *testing.T) {
 	wild := func(w string) protocol.SegmentFilter {
 		return protocol.SegmentFilter{Wildcard: &w}
 	}
+	// windowEnd is the cursor a short page hands back: MaxCursor's tx and
+	// op sentinels over one ledger. Sending it back is what a caught-up
+	// poller does on every request.
+	windowEnd := func(l uint32) *protocol.Cursor {
+		c := protocol.MaxCursor
+		c.Ledger = l
+		return &c
+	}
 
 	for name, req := range map[string]protocol.GetEventsRequest{
 		"no filters, whole window": {StartLedger: first},
@@ -399,6 +407,18 @@ func TestGetEventsV1Parity(t *testing.T) {
 		},
 		"crafted cursor in the empty ledger": {
 			Pagination: &protocol.PaginationOptions{Cursor: &protocol.Cursor{Ledger: first + 2}},
+		},
+		"window-end cursor mid-range resumes past its ledger": {
+			Pagination: &protocol.PaginationOptions{Cursor: windowEnd(first)},
+		},
+		"window-end cursor at the tip stays put": {
+			Pagination: &protocol.PaginationOptions{Cursor: windowEnd(first + 4)},
+		},
+		"window-end cursor keeps its filter": {
+			Pagination: &protocol.PaginationOptions{Cursor: windowEnd(first)},
+			Filters: []protocol.EventFilter{
+				{Topics: []protocol.TopicFilter{{seg("burn"), wild("**")}}},
+			},
 		},
 		"crafted cursor inside the sentinel fee group": {
 			Pagination: &protocol.PaginationOptions{Cursor: &protocol.Cursor{

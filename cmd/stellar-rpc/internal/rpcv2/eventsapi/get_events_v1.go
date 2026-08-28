@@ -90,21 +90,14 @@ func getEventsV1(
 		return zero, responseError(err, lr.FirstLedger.Sequence, lr.LastLedger.Sequence)
 	}
 
+	minLedger, from := v1ResumePoint(start, fromCursor)
 	// An end at or below the start is legal v1 input and an empty window.
 	// Served here: the pager's scopes are inclusive and never inverted.
-	if endLedger <= start.Ledger {
+	if endLedger <= minLedger {
 		return v1Response(nil, endLedger, limit, lr), nil
 	}
 	maxLedger := endLedger - 1
-	scope := query.EventScope{MinLedger: start.Ledger, MaxLedger: &maxLedger, Filters: filters}
-	var from *query.EventID
-	if fromCursor {
-		// start already carries v1's increment, and the pager serves from
-		// the id inclusive, so this is v1's own "id >= cursor" scan.
-		from = &query.EventID{
-			Ledger: start.Ledger, Tx: start.Tx, Op: start.Op, Event: start.Event,
-		}
-	}
+	scope := query.EventScope{MinLedger: minLedger, MaxLedger: &maxLedger, Filters: filters}
 	pageLimit := int(min(limit, math.MaxInt32)) //nolint:gosec // min clamps it
 	page, err := view.QueryEventsFrom(ctx, scope, from, pageLimit)
 	if err != nil {
@@ -133,6 +126,28 @@ func getEventsV1(
 		events = append(events, info)
 	}
 	return v1Response(events, endLedger, limit, lr), nil
+}
+
+// v1ResumePoint maps the request's resolved start onto where the walk
+// begins: the scope's low ledger, and the id to serve from within it.
+//
+// A window-end cursor gets neither. It carries MaxCursor's tx and op
+// sentinels, which top every storable id, so its ledger is finished by
+// definition and the scope starts past it; seeking that ledger would read
+// all of it to reach the same answer, and this is the cursor a caught-up
+// poller sends on every request. Any other cursor is an inclusive id,
+// already carrying v1's increment, which is v1's own "id >= cursor" scan.
+func v1ResumePoint(start protocol.Cursor, fromCursor bool) (uint32, *query.EventID) {
+	switch {
+	case !fromCursor:
+		return start.Ledger, nil
+	case start.Tx == protocol.MaxCursor.Tx && start.Op == protocol.MaxCursor.Op:
+		return start.Ledger + 1, nil
+	default:
+		return start.Ledger, &query.EventID{
+			Ledger: start.Ledger, Tx: start.Tx, Op: start.Op, Event: start.Event,
+		}
+	}
 }
 
 // v1Response mints the cursor the v1 way: a page that fills its limit hands
