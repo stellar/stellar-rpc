@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Removed
-* **`getEvents` responses no longer carry `inSuccessfulContractCall`.** The field has been deprecated ("remove in v24") since protocol 23, and it is deleted from the shared wire type, so it leaves this service's responses as well. Events from failed transactions are fee events only, so the field's value was derivable: `true` for every operation event, `false` only on fee/refund events of failed transactions.
+* **`getEvents` responses no longer carry `inSuccessfulContractCall`.** The field has been deprecated ("remove in v24") since protocol 23 and is now deleted from the shared response type, so it is gone from every `getEvents` response. Its value was derivable anyway: `true` for every operation event, and `false` only on the fee and refund events of failed transactions.
 
 ### Fixed
 * **`getLedgers` no longer rejects its own cursor at the tip.** This changes wire behavior for BOTH rpcv1 and rpcv2 — the handler is shared. Resending the cursor of the last page used to fail with `-32602` ("cursor must be between the oldest ledger ... and the latest ledger ...") until the next ledger closed — the same code a malformed cursor gets, so a poller could not tell "wait and retry" from "bad cursor". A cursor at or past the tip now returns an empty page with the cursor echoed back. A cursor below the oldest ledger still errors (that data is gone), and an explicit `startLedger` above the tip still errors (only the server-issued token gets the echo).

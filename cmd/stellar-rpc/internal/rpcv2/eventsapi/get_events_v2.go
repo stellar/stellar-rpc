@@ -201,12 +201,12 @@ func requestCursor(
 	return query.EventCursor{Scope: scope}, pageLimit, nil
 }
 
-// validateCursorFilters rejects filter shapes a v2 request cannot build,
-// which only a hand-built cursor carries. The codec and the pager accept
-// them because the v1 adapter will mint them. Two matter here: a clause
-// with no constraint is a full scan that the term budget counts as zero,
-// and a diagnostic type or a topic-count clause names events v2 never
-// serves.
+// validateCursorFilters rejects filter shapes no v2 request can build, so
+// only a hand-built cursor carries them: a clause with no constraint (a
+// match-all the term budget counts as zero), a type outside contract and
+// system, and a topic-count clause. The pager accepts all three because
+// the v1 handler builds them directly, as values rather than tokens; this
+// handler is the codec's only encoder.
 func validateCursorFilters(filters []event.Filter) error {
 	for i := range filters {
 		f := &filters[i]
