@@ -828,3 +828,31 @@ func TestColdReader_EventlessChunkStillChecksIndexFormat(t *testing.T) {
 	_, lerr := cr.LookupKeys(context.Background(), []TermKey{someTerm})
 	require.ErrorContains(t, lerr, "expected format")
 }
+
+// TestColdReader_RejectsZeroIntervalRunContainer pins the cardinality guard
+// against the shape roaring's UnmarshalBinary accepts silently: a run
+// container holding zero intervals, which IsEmpty misses (the container
+// exists) while the bitmap holds no postings. Bytes handcrafted per the
+// roaring run-container serialization: SERIAL_COOKIE, one container flagged
+// as runs, zero runs inside.
+func TestColdReader_RejectsZeroIntervalRunContainer(t *testing.T) {
+	body := []byte{
+		0x3B, 0x30, // SERIAL_COOKIE (12347) — run-container format
+		0x00, 0x00, // size-1 = 0 → one container
+		0x01,       // run-flag bitset: container 0 is a run container
+		0x00, 0x00, // key 0
+		0x00, 0x00, // cardinality-1 (header claim; GetCardinality ignores it)
+		0x00, 0x00, // numRuns = 0 — the defect
+	}
+	var bm roaring.Bitmap
+	require.NoError(t, bm.UnmarshalBinary(body), "the library accepts this shape — that is the point")
+	require.False(t, bm.IsEmpty(), "IsEmpty misses it: the container exists")
+	require.Zero(t, bm.GetCardinality())
+
+	key := ComputeTermKey([]byte("void-runs"), FieldContractID)
+	rec := append([]byte(nil), key[:IndexRecordFingerprintLen]...)
+	rec = append(rec, itemCodecRoaring)
+	rec = append(rec, body...)
+	_, derr := verifyAndDecodePostings(rec, key, 3)
+	require.ErrorContains(t, derr, "empty bitmap")
+}

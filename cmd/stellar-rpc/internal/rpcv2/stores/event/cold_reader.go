@@ -331,21 +331,20 @@ func verifyAndDecodePostings(record []byte, key TermKey, slot uint32) (Postings,
 		if err := bm.UnmarshalBinary(body[1:]); err != nil {
 			return Postings{}, fmt.Errorf("events: unmarshal bitmap at slot %d: %w", slot, err)
 		}
-		// UnmarshalBinary accepts shapes that are structurally invalid rather
-		// than merely unexpected, such as a run container holding no
-		// intervals, which reads back as a bitmap with containers but no
-		// postings. Reject them here, where the bytes are untrusted and the
-		// slot is known, rather than downstream where a caller assuming a
-		// present term holds at least one posting would fault.
-		if err := bm.Validate(); err != nil {
-			return Postings{}, fmt.Errorf("events: invalid bitmap at slot %d: %w", slot, err)
-		}
-		// A structurally valid but empty bitmap is equally impossible from
-		// the writer — encodeIndexBody rejects zero-posting terms, exactly
-		// as the delta codec rejects a zero count — and BitmapPostings would
-		// normalize it to absent, silently deleting an indexed term.
-		// Corruption, not a miss.
-		if bm.IsEmpty() {
+		// No writer produces a zero-posting term (encodeIndexBody rejects
+		// them, exactly as the delta codec rejects a zero count), so zero
+		// decoded postings is corruption, not a miss — and it is the shape
+		// UnmarshalBinary accepts without error: a genuinely empty body, or
+		// a run container holding no intervals, which IsEmpty misses because
+		// the container exists. GetCardinality sums the actual run lengths,
+		// so one linear pass over the containers catches both.
+		//
+		// Deliberately NOT bm.Validate(): its run-container disjointness
+		// proof is super-linear on run-dense bitmaps and would run on every
+		// fat term of every query — measured 15ms → 230ms p99 on cold pubnet
+		// events queries. Cardinality-positive structural lies stay trusted,
+		// as they always were on this path.
+		if bm.GetCardinality() == 0 {
 			return Postings{}, fmt.Errorf(
 				"events: empty bitmap at slot %d (no writer produces a zero-posting term)", slot)
 		}

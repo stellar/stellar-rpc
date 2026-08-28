@@ -428,9 +428,11 @@ func TestEncodeIndexBodyRejectsEmpty(t *testing.T) {
 // TestVerifyAndDecodePostings_RejectsInvalidBitmap pins the trust boundary.
 // roaring's UnmarshalBinary accepts a run container holding no intervals, which
 // reads back as a bitmap with containers but no postings — a shape no producer
-// makes, so it means the record is corrupt. It must be rejected here, naming
-// the slot, rather than reaching a caller that assumes a present term holds at
-// least one posting.
+// makes, so it means the record is corrupt. The zero-cardinality guard (one
+// linear pass; deliberately not bm.Validate, whose run-disjointness proof is
+// super-linear on run-dense fat terms and measured 15ms → 230ms p99 on cold
+// pubnet queries) must reject it here, naming the slot, rather than reaching
+// a caller that assumes a present term holds at least one posting.
 func TestVerifyAndDecodePostings_RejectsInvalidBitmap(t *testing.T) {
 	body, err := hex.DecodeString("3b3000000100008713000000008713")
 	require.NoError(t, err)
@@ -442,7 +444,7 @@ func TestVerifyAndDecodePostings_RejectsInvalidBitmap(t *testing.T) {
 	record = append(record, body...)
 
 	_, derr := verifyAndDecodePostings(record, key, 7)
-	require.ErrorContains(t, derr, "invalid bitmap at slot 7")
+	require.ErrorContains(t, derr, "empty bitmap at slot 7")
 }
 
 // TestColdIndex_BothCodecsOnDiskRoundTrip is the format's own evidence. It
