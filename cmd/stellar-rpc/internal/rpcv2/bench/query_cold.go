@@ -162,7 +162,8 @@ func openColdFixture(logger *supportlog.Entry, opts coldQueryOptions) (*queryFix
 		release()
 		return nil, nil, err
 	}
-	if err := commitDiskTxHashIndex(logger, cat, layout, opts.StartChunk, end); err != nil {
+	txHashRequested := slices.Contains(opts.Plan.Types, queryTypeTxHash)
+	if err := commitDiskTxHashIndex(logger, cat, layout, opts.StartChunk, end, txHashRequested); err != nil {
 		release()
 		return nil, nil, err
 	}
@@ -274,11 +275,15 @@ func kindList(kinds []geometry.Kind) string {
 // production order does: a terminal coverage demotes the per-chunk .bin keys it
 // supersedes.
 //
-// An absent index is a real state — a shallow dataset's backfill builds none —
-// so the open succeeds, the txhash leg reports an empty probe set, and the
-// three types that do not need the index run as usual.
+// An absent index is a real state — a shallow dataset's backfill builds none.
+// txHashRequested says whether this run needs one: with the txhash type in
+// --types every by-hash lookup would fail once the legs started, so the open
+// fails here instead, naming the range and the directory the index is expected
+// in. Without it the open succeeds with a warning, and the three types that do
+// not read the index run as usual.
 func commitDiskTxHashIndex(
 	logger *supportlog.Entry, cat *catalog.Catalog, layout geometry.Layout, lo, hi chunk.ID,
+	txHashRequested bool,
 ) error {
 	txLayout := cat.TxHashIndexLayout()
 	cov, ok, err := diskTxHashCoverage(layout, txLayout, lo, hi)
@@ -286,6 +291,13 @@ func commitDiskTxHashIndex(
 		return err
 	}
 	if !ok {
+		if txHashRequested {
+			return fmt.Errorf(
+				"no tx-hash window index on disk covers chunks [%s, %s], and --types includes %s: "+
+					"expected an .idx file spanning that range in %s; ingest the range with a cold run that "+
+					"builds the index, or drop %s from --types",
+				lo, hi, queryTypeTxHash, layout.TxHashIndexDir(txLayout.TxHashIndexID(lo)), queryTypeTxHash)
+		}
 		logger.Warnf("no tx-hash window index on disk covers chunks [%s, %s]: cold by-hash lookups have nothing to probe",
 			lo, hi)
 		return nil

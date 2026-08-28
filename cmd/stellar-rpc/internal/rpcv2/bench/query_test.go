@@ -4,10 +4,13 @@ import (
 	"context"
 	"math"
 	"math/rand/v2"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,6 +18,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/network"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 )
 
 // TestNewQueryCommand builds the full command tree — executing every
@@ -561,6 +565,57 @@ func TestQueryRejectsWrongPassphrase(t *testing.T) {
 		OutDir:     filepath.Join(t.TempDir(), "csv"),
 	})
 	require.ErrorContains(t, err, "--network-passphrase")
+}
+
+// TestOpenColdFixtureWithoutTxHashIndex pins what a cold tree carrying no
+// tx-hash window index does to the open, which depends on what the run asked
+// for. With txhash among the types every by-hash lookup would fail once the legs
+// started, so the open fails first and names the directory the index belongs in.
+// Without txhash the open succeeds and warns: the other three types never read
+// the index.
+func TestOpenColdFixtureWithoutTxHashIndex(t *testing.T) {
+	chunkID := chunk.ID(0)
+	coldRoot := ingestColdChunk(t, chunkID)
+	indexRoot := geometry.NewLayout(coldRoot).TxHashIndexRoot()
+	require.DirExists(t, indexRoot, "the cold ingest built an index to remove")
+	require.NoError(t, os.RemoveAll(indexRoot))
+
+	t.Run("txhash requested", func(t *testing.T) {
+		_, _, err := openColdFixture(testLogger(), coldQueryOptions{
+			ColdRoot:   coldRoot,
+			StartChunk: chunkID,
+			NumChunks:  1,
+			Plan:       queryPlan{Types: []string{queryTypeLedgers, queryTypeTxHash}},
+		})
+		require.ErrorContains(t, err, indexRoot, "the error names where the index is expected")
+		assert.ErrorContains(t, err, queryTypeTxHash)
+	})
+
+	t.Run("txhash not requested", func(t *testing.T) {
+		logger := testLogger()
+		done := logger.StartTest(logrus.WarnLevel)
+		f, release, err := openColdFixture(logger, coldQueryOptions{
+			ColdRoot:   coldRoot,
+			StartChunk: chunkID,
+			NumChunks:  1,
+			Plan:       queryPlan{Types: []string{queryTypeLedgers}},
+		})
+		warnings := done()
+		require.NoError(t, err)
+		defer release()
+		assert.Equal(t, []chunk.ID{chunkID}, f.Chunks)
+		assert.Contains(t, warningMessages(warnings), "no tx-hash window index on disk")
+	})
+}
+
+// warningMessages joins a captured log's messages so a test can assert one of
+// them carries a phrase.
+func warningMessages(entries []logrus.Entry) string {
+	messages := make([]string, 0, len(entries))
+	for _, e := range entries {
+		messages = append(messages, e.Message)
+	}
+	return strings.Join(messages, "\n")
 }
 
 // TestEvictionStateRecordsPlatform pins what invocation.json says about
