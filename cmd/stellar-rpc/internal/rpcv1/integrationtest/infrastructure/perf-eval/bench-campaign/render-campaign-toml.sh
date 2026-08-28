@@ -9,7 +9,8 @@
 #
 # Env in: PHASE INGEST QUERY RUNS WORKERS MACHINE TARGET_REF HOT_NUM_LEDGERS
 # RUN_NAME BENCHMARKS_REF, with PUBLISH_URI / INPUTS_PREFIX / CAPACITY_MINUTES /
-# SETUP_MARGIN_MINUTES / NOW_EPOCH available as overrides for tests.
+# SETUP_MARGIN_MINUTES / QUERY_LEG_DURATION_SECONDS / NOW_EPOCH available as
+# overrides for tests.
 # BENCHMARKS_REF produces no output key: it is validated here and consumed by the
 # workflow's launch job straight from the dispatch input.
 # Out: key=value lines appended to $GITHUB_OUTPUT (stdout when unset); the
@@ -60,9 +61,29 @@ PUBLISH_URI="${PUBLISH_URI:-s3://stellar-rpc-bench/results}"
 INPUTS_PREFIX="${INPUTS_PREFIX:-s3://stellar-rpc-bench/inputs/synthetic-ledgers/2026-07-18-apply-load-20k}"
 # 21 h: four 5.3 h poller windows, the most the relay chain can cover.
 CAPACITY_MINUTES="${CAPACITY_MINUTES:-1260}"
-# Toolchain install, build, dataset sync, cold legs, query legs, bundle upload.
+# Toolchain install, build, dataset sync, cold ingest legs, bundle upload.
 SETUP_MARGIN_MINUTES="${SETUP_MARGIN_MINUTES:-120}"
 NOW_EPOCH="${NOW_EPOCH:-$(date +%s)}"
+
+# How long one bench-query leg holds each rate of its ladder. The runner's
+# default is 60s (DefaultQueryDuration in runner/internal/config/config.go) and
+# the rendered TOML cannot set query_duration, because the runner rejects TOML
+# keys it does not know. The override exists so the estimate can follow the
+# runner's default if that default moves.
+QUERY_LEG_DURATION_SECONDS="${QUERY_LEG_DURATION_SECONDS:-60}"
+# The query grid the runner builds (runner/internal/plan/plan.go): one leg per
+# dataset, per run, per tier (cold and hot), per query type, and the four types
+# are ledgers, txpage, txhash and events.
+query_tiers=2
+query_type_count=4
+# Every leg sweeps the ladder in the benchmarks repo's docs/targets.json, which
+# holds three multipliers (0.5x, 1x, 2x of the phase floor), and it holds each
+# one for QUERY_LEG_DURATION_SECONDS.
+query_rate_steps=3
+# Time a leg spends outside its paced windows: building the query corpus,
+# dropping the page cache for a cold leg, and the warmup. A minute per leg
+# covers that on both box sizes.
+query_leg_overhead_secs=60
 
 case "$INGEST" in
   both | cold | hot | none) ;;
@@ -88,6 +109,7 @@ case "$PHASE" in
 esac
 
 require_uint runs "$RUNS" 1 20
+require_uint query_leg_duration_seconds "$QUERY_LEG_DURATION_SECONDS" 1 3600
 # A campaign runs chunk 1 only, so a cap above the 10,000-ledger chunk is a typo.
 require_uint hot_num_ledgers "$HOT_NUM_LEDGERS" 0 10000
 if [ -n "$WORKERS" ]; then
@@ -132,28 +154,43 @@ case "$BENCHMARKS_REF" in
   *[!A-Za-z0-9._/-]*) die "benchmarks_ref must match [A-Za-z0-9._/-]+, got '$BENCHMARKS_REF'" ;;
 esac
 
-# Wall clock is dominated by the paced hot legs: one per dataset per run, each
-# replaying `ledgers` ledgers at the phase close interval. Cold and query legs
-# are unpaced and fall inside the setup margin.
+# Two parts of the campaign run at a rate the campaign chooses, so their wall
+# clock is known here. The hot ingest legs replay `ledgers` ledgers at the phase
+# close interval, one leg per dataset per run. The query legs each hold a fixed
+# arrival rate for a fixed duration, once per rate on the ladder. The cold
+# ingest legs run as fast as the box allows, so they stay in the setup margin
+# together with the toolchain install, the build and the dataset sync.
+dataset_count=0
+for _p in $profiles; do
+  dataset_count=$((dataset_count + 1))
+done
+
 if [ "$INGEST" = hot ] || [ "$INGEST" = both ]; then
   if [ "$HOT_NUM_LEDGERS" -gt 0 ]; then
     ledgers="$HOT_NUM_LEDGERS"
   else
     ledgers=10000
   fi
-  dataset_count=0
-  for _p in $profiles; do
-    dataset_count=$((dataset_count + 1))
-  done
   hot_secs=$(((dataset_count * RUNS * ledgers * interval_ms + 999) / 1000))
 else
   hot_secs=0
 fi
-budget_minutes=$(((hot_secs + 59) / 60 + SETUP_MARGIN_MINUTES))
+
+if [ "$QUERY" = yes ]; then
+  query_legs=$((dataset_count * RUNS * query_tiers * query_type_count))
+  query_secs=$((query_legs * (query_rate_steps * QUERY_LEG_DURATION_SECONDS + query_leg_overhead_secs)))
+else
+  query_legs=0
+  query_secs=0
+fi
+budget_minutes=$(((hot_secs + query_secs + 59) / 60 + SETUP_MARGIN_MINUTES))
 
 if [ "$budget_minutes" -gt "$CAPACITY_MINUTES" ]; then
-  die "estimated budget ${budget_minutes}m exceeds the ${CAPACITY_MINUTES}m relay-chain ceiling;" \
-    "shrink runs (${RUNS}), cap hot_num_ledgers (${HOT_NUM_LEDGERS}), or split the phase into separate dispatches"
+  hint="shrink runs (${RUNS}), cap hot_num_ledgers (${HOT_NUM_LEDGERS}), or split the phase into separate dispatches"
+  if [ "$QUERY" = yes ]; then
+    hint="$hint; the ${query_legs} query legs (${query_rate_steps} rates of ${QUERY_LEG_DURATION_SECONDS}s each) cost ~$((query_secs / 60))m of it, so query=no is the other lever"
+  fi
+  die "estimated budget ${budget_minutes}m exceeds the ${CAPACITY_MINUTES}m relay-chain ceiling;" "$hint"
 fi
 
 deadline_epoch=$((NOW_EPOCH + budget_minutes * 60))
@@ -197,7 +234,7 @@ toml_file="$(mktemp "${TMPDIR:-/tmp}/campaign-XXXXXX")"
   echo "campaign $campaign_name: phase $PHASE (close_interval $close_interval), ingest=$INGEST query=$QUERY"
   echo "datasets: $profiles"
   echo "machine $MACHINE = $instance_type, workers $workers, runs $RUNS, hot_num_ledgers $HOT_NUM_LEDGERS"
-  echo "paced hot legs ~$((hot_secs / 60))m; budget ${budget_minutes}m of ${CAPACITY_MINUTES}m capacity"
+  echo "paced hot legs ~$((hot_secs / 60))m; ${query_legs} query legs ~$((query_secs / 60))m; budget ${budget_minutes}m of ${CAPACITY_MINUTES}m capacity"
   echo "deadline $(fmt_epoch "$deadline_epoch"); box self-terminates after ${self_terminate_minutes}m"
   echo "rendered config: $toml_file"
 } >&2
