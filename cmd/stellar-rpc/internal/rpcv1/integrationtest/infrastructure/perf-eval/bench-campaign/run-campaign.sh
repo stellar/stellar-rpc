@@ -59,6 +59,62 @@ export CGO_CFLAGS="-I$HOME/.zstd/include -I$HOME/.rocksdb/include"
 export CGO_LDFLAGS="-L$HOME/.zstd/lib -L$HOME/.rocksdb/lib"
 export LD_LIBRARY_PATH="$HOME/.zstd/lib:$HOME/.rocksdb/lib"
 
+# upload_bundle copies a results tarball and a run-info.json sidecar to the run's
+# own prefix in S3, next to the result object. The verdict object carries only
+# markdown, so the notify job reads the sidecar for the bundle's run id and
+# destination as data, and it ingests the tarball into the results site from this
+# bucket because its role can read this bucket but not the results bucket.
+#
+# Every step is best-effort: a failed upload must not change the campaign's
+# verdict, so each command is either an `if` condition or is followed by `|| log`
+# and so cannot reach the ERR trap. The notify job falls back to the result key
+# when the sidecar is missing, and skips the site ingest when tarballKey is empty.
+#
+# It sets TARBALL_KEY to the key it wrote, or to an empty string when no tarball
+# reached S3, for the caller's verdict markdown.
+#
+# usage: upload_bundle <tarball> <bench_run_id> <results_uri>
+upload_bundle() {
+  local tarball="$1" bench_run_id="$2" results_uri="$3"
+  TARBALL_KEY=""
+  if [ -z "$BUCKET" ] || [ -z "$RESULT_KEY" ]; then
+    log "WARN: BUCKET/RESULT_KEY unset; skipping the tarball and run-info.json"
+    return 0
+  fi
+  local prefix="${RESULT_KEY%/*}"
+  TARBALL_KEY="$prefix/$(basename "$tarball")"
+  if ! aws s3api put-object --bucket "$BUCKET" --key "$TARBALL_KEY" \
+         --content-type application/gzip --body "$tarball" >/dev/null; then
+    log "WARN: tarball upload failed; notify skips the results-site ingest"
+    TARBALL_KEY=""
+  fi
+  if ! jq -n --arg run "$RUN_ID" --arg bench "$bench_run_id" \
+        --arg uri "$results_uri" --arg tar "$tarball" --arg tarkey "$TARBALL_KEY" \
+        '{schemaVersion: 1, runId: $run, benchRunId: $bench, resultsUri: $uri, tarball: $tar, tarballKey: $tarkey}' \
+        > /tmp/run-info.json; then
+    log "WARN: could not write run-info.json; notify falls back to the result key"
+    return 0
+  fi
+  aws s3api put-object --bucket "$BUCKET" --key "$prefix/run-info.json" \
+        --content-type application/json --body /tmp/run-info.json >/dev/null \
+    || log "WARN: run-info.json upload failed; notify falls back to the result key"
+}
+
+# newest_bundle_tarball prints the path of the most recently modified
+# /tmp/bench-results-*.tgz, or nothing when the runner produced none. The runner
+# names one tarball per campaign run id, and a resumed or retried campaign on the
+# same box can leave more than one behind.
+newest_bundle_tarball() {
+  local newest="" candidate
+  for candidate in /tmp/bench-results-*.tgz; do
+    [ -f "$candidate" ] || continue
+    if [ -z "$newest" ] || [ "$candidate" -nt "$newest" ]; then
+      newest="$candidate"
+    fi
+  done
+  printf '%s' "$newest"
+}
+
 # The runner keeps its own campaign.log inside the bundle; this tee is for the
 # lines this fragment parses (`published:`) and the tail it puts in a failure
 # comment. pipefail is active so the `if` sees the runner's exit code, and the
@@ -79,30 +135,9 @@ if (cd /root/stellar-rpc-benchmarks/runner \
   TARBALL="/tmp/bench-results-${BENCH_RUN_ID}.tgz"
   log "published bundle $BENCH_RUN_ID to $RESULTS_URI"
 
-  # Sidecar for the notify job: the verdict object carries only markdown, and the
-  # workflow needs the run id and destination as data. The tarball rides along to
-  # the run's own prefix because the notify job's role can read this bucket but
-  # not the results bucket — it is what the job ingests into the results site.
-  # All best-effort: the notify job already falls back to the result key, so a
-  # failed upload must not turn a passed campaign into a fail verdict via the
-  # ERR trap; a missing tarballKey just skips the site ingest.
-  if [ -n "$BUCKET" ] && [ -n "$RESULT_KEY" ]; then
-    TARBALL_KEY="${RESULT_KEY%/*}/$(basename "$TARBALL")"
-    if ! aws s3api put-object --bucket "$BUCKET" --key "$TARBALL_KEY" \
-           --content-type application/gzip --body "$TARBALL" >/dev/null; then
-      log "WARN: tarball upload failed; notify skips the results-site ingest"
-      TARBALL_KEY=""
-    fi
-    jq -n --arg run "$RUN_ID" --arg bench "$BENCH_RUN_ID" \
-          --arg uri "$RESULTS_URI" --arg tar "$TARBALL" --arg tarkey "$TARBALL_KEY" \
-          '{schemaVersion: 1, runId: $run, benchRunId: $bench, resultsUri: $uri, tarball: $tar, tarballKey: $tarkey}' \
-          > /tmp/run-info.json
-    aws s3api put-object --bucket "$BUCKET" --key "${RESULT_KEY%/*}/run-info.json" \
-          --content-type application/json --body /tmp/run-info.json >/dev/null \
-      || log "WARN: run-info.json upload failed; notify falls back to the result key"
-  else
-    log "WARN: BUCKET/RESULT_KEY unset; skipping run-info.json"
-  fi
+  # The complete bundle and its sidecar, for the notify job to ingest into the
+  # results site.
+  upload_bundle "$TARBALL" "$BENCH_RUN_ID" "$RESULTS_URI"
 
   # shellcheck disable=SC2016  # the backticks below are markdown code spans, not shell expansion
   {
@@ -124,15 +159,42 @@ if (cd /root/stellar-rpc-benchmarks/runner \
   poweroff
 
 else
-  # Non-zero: a leg failed, the tarball failed, or the publish failed. The bundle
-  # itself is still complete (the runner's epilogue always runs), so name where it
-  # is rather than only that it broke.
+  # Non-zero: a leg failed, the tarball failed, or the publish failed. The
+  # runner's epilogue runs after a failed leg — it writes the bundle's metadata,
+  # tars /mnt/nvme/bench/results/<run id> into /tmp/bench-results-<run id>.tgz,
+  # and publishes it when the campaign config names a publish URI — so a bundle
+  # holding every leg that did finish usually exists here.
+  #
+  # Upload it before the verdict: the box self-terminates at its ceiling, and
+  # without this the good legs die with it and only an SSM rescue can recover
+  # them. A campaign that failed before the tarball step leaves no tarball, and
+  # a campaign whose publish step failed leaves no `published:` line, so both
+  # are treated as missing rather than as errors.
+  TARBALL=$(newest_bundle_tarball)
+  TARBALL_KEY=""
+  if [ -n "$TARBALL" ]; then
+    BENCH_RUN_ID=$(basename "$TARBALL" .tgz)
+    BENCH_RUN_ID="${BENCH_RUN_ID#bench-results-}"
+    PUBLISHED_LINE=$(grep '^published: ' /tmp/campaign-console.log | tail -1 || true)
+    RESULTS_URI="${PUBLISHED_LINE#published: }"
+    RESULTS_URI="${RESULTS_URI%/}"
+    log "uploading the bundle a failed campaign left behind: $BENCH_RUN_ID"
+    upload_bundle "$TARBALL" "$BENCH_RUN_ID" "$RESULTS_URI"
+  else
+    log "WARN: no /tmp/bench-results-*.tgz on the box; there is no bundle to upload"
+  fi
+
   # shellcheck disable=SC2016  # the backticks below are markdown code spans, not shell expansion
   {
     printf '❌ **%s failed** (run `%s`)\n\n' "$LEG_TITLE" "$RUN_ID"
     printf 'Last 60 lines of the campaign console:\n\n```\n'
     tail -n 60 /tmp/campaign-console.log
     printf '```\n\n'
+    if [ -n "$TARBALL_KEY" ]; then
+      printf 'Uploaded bundle: `s3://%s/%s`, holding the legs that finished before the failure.\n' "$BUCKET" "$TARBALL_KEY"
+    else
+      printf 'No bundle uploaded: an SSM rescue is the only way to reach the results.\n'
+    fi
     printf 'Rescue: the bundle is under `/mnt/nvme/bench/results/`, the tarball at `/tmp/bench-results-*.tgz`.\n'
     printf 'The box is left running until its self-terminate ceiling (%s minutes after boot), so an operator can SSM in.\n' "$SELF_TERMINATE_MINUTES"
   } > "$RESULTS_FILE"
