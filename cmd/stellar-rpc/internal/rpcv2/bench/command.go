@@ -2,6 +2,8 @@ package bench
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -121,9 +123,10 @@ type runEnv struct {
 
 // newBenchCommand builds one bench subcommand skeleton — no positional args,
 // SIGINT-canceled context, Info-level logger, profiling around run, an
-// invocation.json record written to --out after the run — with --out, the
-// profile flags, and each caller-supplied flag group bound. bench-ingest passes
-// its ledger-source group, bench-query its query group.
+// invocation.json record written to --out when the run starts and again when it
+// stops — with --out, the profile flags, and each caller-supplied flag group
+// bound. bench-ingest passes its ledger-source group, bench-query its query
+// group.
 func newBenchCommand(
 	use, short string, prof *profileFlags,
 	run func(ctx context.Context, logger *supportlog.Entry, env runEnv) error,
@@ -140,11 +143,20 @@ func newBenchCommand(
 			defer stop()
 			startedAt := time.Now().UTC()
 			env := runEnv{OutDir: outDir, Extra: map[string]string{}}
+			// The record is written twice: once now, so a run killed
+			// outright still leaves its argv and start time in --out, and
+			// once when the run stops, with the end time and the outcome.
+			// Creating --out here is also the earliest point an unwritable
+			// one can be reported.
+			if err := os.MkdirAll(outDir, 0o755); err != nil {
+				return fmt.Errorf("create --out dir %s: %w", outDir, err)
+			}
+			if err := writeStartInvocationJSON(outDir, cmd, captureFlags(cmd), env.Extra, startedAt); err != nil {
+				return err
+			}
 			runErr := prof.around(logger, func() error { return run(ctx, logger, env) })
-			// The --out dir is created by the run itself, so a run that
-			// failed early (e.g. in validation) leaves nowhere to write the
-			// record and this write fails too. In that case only warn about
-			// the write: the error the user needs to see is the run's own.
+			// A failing final write only warns: the error the user needs to
+			// see is the run's own, and the start record is already on disk.
 			if err := writeInvocationJSON(
 				outDir, cmd, captureFlags(cmd), env.Extra, startedAt, time.Now().UTC(), runErr,
 			); err != nil {
