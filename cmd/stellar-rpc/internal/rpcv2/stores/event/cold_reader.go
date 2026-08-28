@@ -176,6 +176,30 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		if err != nil {
 			return err
 		}
+		// Bind the index pair to this chunk before serving from it —
+		// index.pack/index.hash carry no chunk ID of their own, so a
+		// mispaired index would silently return an incomplete subset of
+		// matches. Three cheap checks: index.pack's trailer Format,
+		// index.hash keys == index.pack records (halves of one build), and
+		// the empty/non-empty cross-checks against events.pack below. The
+		// trailer checks run for the eventless case too: a zero-term chunk
+		// still writes a real (zero-record) index.pack, so a stale-format
+		// or foreign pack fails here instead of hiding behind the
+		// empty-index early return.
+		tr, terr := c.index.Trailer()
+		if terr != nil {
+			return fmt.Errorf("events: open %s: %w", indexPackPath, terr)
+		}
+		if tr.Format != indexPackFormat {
+			return fmt.Errorf("events: %s: expected format %#x, got %#x (mis-pointed or foreign pack)",
+				indexPackPath, indexPackFormat, tr.Format)
+		}
+		if uint64(tr.TotalItems) != idx.numKeys() {
+			return fmt.Errorf(
+				"events: index pair mismatch for chunk %s: index.hash holds %d keys "+
+					"but index.pack holds %d records (mispaired artifacts)",
+				c.chunkID, idx.numKeys(), tr.TotalItems)
+		}
 		if idx.isEmpty() {
 			// A zero-term index is only valid for an eventless chunk: cross-check
 			// events.pack's count so a mispaired empty index fails loudly instead
@@ -191,27 +215,8 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 			}
 			return nil
 		}
-		// Non-empty index: bind the pair to this chunk before serving from
-		// it — index.pack/index.hash carry no chunk ID of their own, so a
-		// mispaired index would silently return an incomplete subset of
-		// matches. Three cheap checks: index.pack's trailer Format,
-		// index.hash keys == index.pack records (halves of one build), and
-		// non-empty index ⇒ non-empty events.pack (converse of the
+		// Non-empty index ⇒ non-empty events.pack (converse of the
 		// empty-index check above).
-		tr, terr := c.index.Trailer()
-		if terr != nil {
-			return fmt.Errorf("events: open %s: %w", indexPackPath, terr)
-		}
-		if tr.Format != indexPackFormat {
-			return fmt.Errorf("events: %s: expected format %#x, got %#x (mis-pointed or foreign pack)",
-				indexPackPath, indexPackFormat, tr.Format)
-		}
-		if uint64(tr.TotalItems) != idx.numKeys() {
-			return fmt.Errorf(
-				"events: index pair mismatch for chunk %s: index.hash holds %d keys "+
-					"but index.pack holds %d records (mispaired artifacts)",
-				c.chunkID, idx.numKeys(), tr.TotalItems)
-		}
 		m, merr := c.waitMeta()
 		if merr != nil {
 			return fmt.Errorf("events: validate index for chunk %s: %w", c.chunkID, merr)
@@ -335,6 +340,15 @@ func verifyAndDecodePostings(record []byte, key TermKey, slot uint32) (events.Po
 		// present term holds at least one posting would fault.
 		if err := bm.Validate(); err != nil {
 			return events.Postings{}, fmt.Errorf("events: invalid bitmap at slot %d: %w", slot, err)
+		}
+		// A structurally valid but empty bitmap is equally impossible from
+		// the writer — encodeIndexBody rejects zero-posting terms, exactly
+		// as the delta codec rejects a zero count — and BitmapPostings would
+		// normalize it to absent, silently deleting an indexed term.
+		// Corruption, not a miss.
+		if bm.IsEmpty() {
+			return events.Postings{}, fmt.Errorf(
+				"events: empty bitmap at slot %d (no writer produces a zero-posting term)", slot)
 		}
 		return events.BitmapPostings(bm), nil
 	case itemCodecDelta:

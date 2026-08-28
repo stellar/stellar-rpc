@@ -8,6 +8,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -274,7 +275,9 @@ func TestColdReader_EventlessChunk(t *testing.T) {
 // guarding a zero-term index: it is only valid when events.pack is also
 // empty. A real empty index.hash mispaired onto a chunk whose events.pack
 // holds events must fail loudly at the first lookup, not silently match
-// nothing.
+// nothing. An empty index.hash over the chunk's populated index.pack trips
+// the pairing check; mispairing BOTH empty halves agrees with pairing and
+// format, so the events.pack cross-check is the layer that catches it.
 func TestColdReader_EmptyIndexOverNonEmptyPackErrors(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 2, 1)
@@ -294,6 +297,20 @@ func TestColdReader_EmptyIndexOverNonEmptyPackErrors(t *testing.T) {
 	// The mismatch must surface as an error, not a clean miss (nil, no error).
 	_, lerr := cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
 	require.Error(t, lerr, "a mispaired empty index must error, not miss silently (nil bitmap)")
+	assert.Contains(t, lerr.Error(), "index pair mismatch",
+		"empty index.hash over the populated index.pack is the pairing check's catch")
+
+	// Mispair BOTH empty halves onto the non-empty chunk: pairing (0 == 0)
+	// and format agree, so the events.pack cross-check must catch it.
+	emptyPack, err := os.ReadFile(filepath.Join(emptyDir, IndexPackName(chunkID)))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, IndexPackName(chunkID)), emptyPack, 0o644))
+
+	cr2, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr2.Close() })
+	_, lerr = cr2.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
+	require.Error(t, lerr, "both-empty halves over a non-empty chunk must still error")
 	assert.Contains(t, lerr.Error(), "holds zero terms")
 }
 
@@ -767,4 +784,47 @@ func TestColdReader_RejectsNonEmptyIndexOnEventlessChunk(t *testing.T) {
 
 	_, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
 	require.ErrorContains(t, err, "eventless")
+}
+
+// TestColdReader_RejectsEmptyRoaringBody pins that a structurally valid but
+// EMPTY roaring body is corruption, not a miss: the writer rejects
+// zero-posting terms and the delta codec rejects a zero count, so the
+// roaring codec must not be the one path that silently reads an indexed
+// term as absent.
+func TestColdReader_RejectsEmptyRoaringBody(t *testing.T) {
+	key := ComputeTermKey([]byte("hollow"), FieldContractID)
+	body, err := roaring.New().ToBytes()
+	require.NoError(t, err)
+	rec := append([]byte(nil), key[:IndexRecordFingerprintLen]...)
+	rec = append(rec, itemCodecRoaring)
+	rec = append(rec, body...)
+	_, derr := verifyAndDecodePostings(rec, key, 7)
+	require.ErrorContains(t, derr, "empty bitmap")
+}
+
+// TestColdReader_EventlessChunkStillChecksIndexFormat pins that the format
+// gate covers the eventless case: a zero-term chunk writes a real
+// (zero-record) index.pack, so a stale-format pack — 0xFE1E000B is the
+// pre-codec-byte layout's constant — fails at first use instead of hiding
+// behind the empty-index early return.
+func TestColdReader_EventlessChunkStillChecksIndexFormat(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, payloads := buildColdFixture(t, chunkID, 0, 2)
+	require.Empty(t, payloads)
+
+	pw, err := packfile.Create(filepath.Join(dir, IndexPackName(chunkID)), packfile.WriterOptions{
+		Format:         0xFE1E000B,
+		ItemsPerRecord: indexPackItemsPerRecord,
+		Overwrite:      true,
+	})
+	require.NoError(t, err)
+	require.NoError(t, pw.Finish(nil))
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	someTerm := ComputeTermKey([]byte("any"), FieldContractID)
+	_, lerr := cr.LookupKeys(context.Background(), []TermKey{someTerm})
+	require.ErrorContains(t, lerr, "expected format")
 }
