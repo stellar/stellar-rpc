@@ -22,20 +22,24 @@ const (
 	Descending                  // results begin at the high edge and fall
 )
 
-// RangeError reports a request whose leading edge falls below the view's
-// retention floor. It carries the available range so the handler can report it,
-// matching v1's out-of-range behavior. Silently clamping is wrong here: it would
-// drop the first results the caller asked for.
+// RangeError reports a request whose leading edge falls outside the view's
+// range [Oldest, Latest]. Clamping instead would drop the first results the
+// caller asked for.
 type RangeError struct {
-	Requested uint32 // the leading-edge ledger that fell below the floor
+	Requested uint32 // the leading-edge ledger that fell outside the range
 	Oldest    uint32 // oldest servable ledger in the view's range
 	Latest    uint32 // newest servable ledger in the view's range
 }
 
+// Error names the side the ledger fell on. The two sides call for opposite
+// client actions: pruned history is gone, a future ledger arrives with time.
 func (e *RangeError) Error() string {
-	return fmt.Sprintf(
-		"query: ledger %d is below the retention floor; available range is [%d, %d]",
-		e.Requested, e.Oldest, e.Latest)
+	side := "below the retention floor"
+	if e.Requested > e.Latest {
+		side = "above the latest ledger"
+	}
+	return fmt.Sprintf("query: ledger %d is %s; available range is [%d, %d]",
+		e.Requested, side, e.Oldest, e.Latest)
 }
 
 // OldestLedger is the oldest ledger this request may serve: the first ledger of

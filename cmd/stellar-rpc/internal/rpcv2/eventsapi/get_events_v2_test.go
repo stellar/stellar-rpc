@@ -195,6 +195,7 @@ func TestGetEventsV2_MinLedgerBelowGenesisFollowsTheFloorRules(t *testing.T) {
 		requireErrorData(t, err, protocol.ErrorReasonLedgerOutOfRange, &data)
 		assert.Equal(t, uint32(chunk.FirstLedgerSeq), data.MissingLedger)
 		assert.Equal(t, first, data.OldestLedger)
+		assert.Contains(t, err.Error(), "below the retention floor")
 	})
 
 	t.Run("descending reaches the oldest served ledger", func(t *testing.T) {

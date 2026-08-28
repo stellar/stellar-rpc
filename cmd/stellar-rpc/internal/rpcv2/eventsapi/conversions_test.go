@@ -121,6 +121,9 @@ func TestEventScopeDescendingMinAboveLatest(t *testing.T) {
 	assert.Equal(t, uint32(5001), outOfRange.Requested)
 	assert.Equal(t, uint32(5000), outOfRange.Latest)
 	assert.Equal(t, testOldest, outOfRange.Oldest)
+	// The message must name the side. A future ledger is not pruned history.
+	assert.Contains(t, err.Error(), "above the latest ledger")
+	assert.NotContains(t, err.Error(), "retention floor")
 }
 
 // The max is never raised: that would add genesis to a range that excluded
