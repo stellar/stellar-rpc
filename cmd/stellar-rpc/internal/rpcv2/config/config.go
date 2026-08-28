@@ -448,21 +448,22 @@ const (
 
 	DefaultMaxHealthyLedgerLatency time.Duration = 30 * time.Second
 
-	// DefaultGetEventsMaxItemsPerResponse and the getLedgers pair below are the
-	// two deliberate breaks from v1's page sizes (TODO: revisit both under the
-	// v2 benchmarking epic):
-	//   - getEvents max is 1000, not v1's 10000 — the finalized getEvents v2
-	//     API fixes the page cap at 1,000 as a spec constant
-	//     (github.com/orgs/stellar/discussions/1872).
-	//   - getLedgers is 20/5, not v1's 200/50 — the item here is a full
-	//     LedgerCloseMeta (megabytes each on a busy pubnet ledger), so v1's
-	//     200-item page could exceed a hundred MB of XDR in one response.
-	DefaultGetEventsMaxItemsPerResponse     uint = 1000
+	// DefaultGetEventsV2MaxItemsPerResponse is the page cap the finalized
+	// getEvents v2 API fixes as a spec constant
+	// (github.com/orgs/stellar/discussions/1872). The v1 method keeps v1's
+	// own cap; see DefaultGetEventsV1MaxItemsPerResponse.
+	//
+	// The getLedgers pair below is the one deliberate break from v1's page
+	// sizes (TODO: revisit under the v2 benchmarking epic): 20/5, not v1's
+	// 200/50, because the item there is a full LedgerCloseMeta (megabytes
+	// each on a busy pubnet ledger), so v1's 200-item page could exceed a
+	// hundred MB of XDR in one response.
+	DefaultGetEventsV2MaxItemsPerResponse   uint = 1000
 	DefaultGetEventsDefaultItemsPerResponse uint = 100
 
-	// DefaultGetEventsTermBudget is the getEvents v2 proposal's default
+	// DefaultGetEventsV2TermBudget is the getEvents v2 proposal's default
 	// (github.com/orgs/stellar/discussions/1872).
-	DefaultGetEventsTermBudget uint = 15
+	DefaultGetEventsV2TermBudget uint = 15
 
 	// DefaultGetEventsV1TermBudget covers the worst legal v1 request (5
 	// filters x (1 type + 5 contract ids + 5 topic filters x 4 values) =
@@ -682,9 +683,9 @@ func (cfg Config) WithDefaults() Config {
 
 	queue(&m.GetEventsV2.QueueLimit, DefaultMethodQueueLimit)
 	dur(&m.GetEventsV2.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
-	fillUint(&m.GetEventsV2.MaxItemsPerResponse, DefaultGetEventsMaxItemsPerResponse)
+	fillUint(&m.GetEventsV2.MaxItemsPerResponse, DefaultGetEventsV2MaxItemsPerResponse)
 	fillUint(&m.GetEventsV2.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
-	fillUint(&m.GetEventsV2.TermBudget, DefaultGetEventsTermBudget)
+	fillUint(&m.GetEventsV2.TermBudget, DefaultGetEventsV2TermBudget)
 
 	queue(&m.GetFeeStats.QueueLimit, DefaultGetFeeStatsQueueLimit)
 	dur(&m.GetFeeStats.MaxExecutionDuration, DefaultMethodMaxExecutionDuration)

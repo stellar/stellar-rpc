@@ -264,7 +264,7 @@ func TestV1WindowFitsThePagerScanWindow(t *testing.T) {
 	assert.LessOrEqual(t, uint32(methods.LedgerScanLimit), chunk.LedgersPerChunk)
 }
 
-// TestV1ParityHarness_V1SideServes runs today, before the shim exists: it
+// TestV1ParityHarness_V1SideServes exercises the v1 side alone: it
 // proves the seeding, the in-memory server, and the cursor round-trip work,
 // so a parity failure later indicts the shim and not the harness.
 func TestV1ParityHarness_V1SideServes(t *testing.T) {

@@ -97,11 +97,10 @@ func getEventsV1(
 		return v1Response(nil, endLedger, limit, lr), nil
 	}
 	maxLedger := endLedger - 1
-	cursor := query.EventCursor{Scope: query.EventScope{
-		MinLedger: start.Ledger, MaxLedger: &maxLedger, Filters: filters,
-	}}
+	scope := query.EventScope{MinLedger: start.Ledger, MaxLedger: &maxLedger, Filters: filters}
+	cursor := query.EventCursor{Scope: scope}
 	if fromCursor {
-		if cursor, err = v1Resume(ctx, view, start, maxLedger, filters); err != nil {
+		if cursor, err = v1Resume(ctx, view, start, scope); err != nil {
 			return zero, &jrpc2.Error{Code: jrpc2.InvalidRequest, Message: err.Error()}
 		}
 	}
@@ -168,10 +167,15 @@ func v1Response(
 // storage order is id order, so that boundary is found by binary search
 // with point fetches, and the pager re-enters after the event before it.
 func v1Resume(
-	ctx context.Context, view *query.ReadView, c protocol.Cursor,
-	maxLedger uint32, filters []event.Filter,
+	ctx context.Context, view *query.ReadView, c protocol.Cursor, scope query.EventScope,
 ) (query.EventCursor, error) {
-	scope := query.EventScope{MinLedger: c.Ledger, MaxLedger: &maxLedger, Filters: filters}
+	// A short page hands back MaxCursor at the window's end, whose tx and
+	// op sentinels top every storable event, so the search below would
+	// always walk to the ledger's end. Answer it without reading anything:
+	// this is the cursor a caught-up poller sends every time.
+	if c.Tx == protocol.MaxCursor.Tx && c.Op == protocol.MaxCursor.Op {
+		return query.EventCursor{Scope: scope, ScannedLedger: c.Ledger}, nil
+	}
 	r, err := view.Events(chunk.IDFromLedger(c.Ledger))
 	if err != nil {
 		return query.EventCursor{}, err
@@ -252,9 +256,12 @@ func expandV1Filter(f *protocol.EventFilter) ([]event.Filter, bool, error) {
 	// multiplies the expansion.
 	var eventType *xdr.ContractEventType
 	if len(f.EventType) == 1 {
-		typ := xdr.ContractEventTypeContract
-		if _, ok := f.EventType[protocol.EventTypeSystem]; ok {
-			typ = xdr.ContractEventTypeSystem
+		name := f.EventType.Keys()[0]
+		typ, ok := protocol.GetEventTypeXDRFromEventType()[name]
+		if !ok {
+			// Valid admits only contract and system, so a name that is
+			// neither is a handler bug, not client input.
+			return nil, false, fmt.Errorf("unsupported event type %q", name)
 		}
 		eventType = &typ
 	}
@@ -312,11 +319,9 @@ func topicShapeOf(tf protocol.TopicFilter) (topicShape, error) {
 	segs := tf
 	shape := topicShape{count: event.TopicCountFilter{Count: len(tf), Exact: true}}
 	if n := len(tf); n > 0 && tf[n-1].Wildcard != nil && *tf[n-1].Wildcard == protocol.WildCardZeroOrMore {
+		// "At least zero" is the wildcard, which is the zero value.
 		segs = tf[:n-1]
-		shape.count = event.TopicCountFilter{Count: len(segs), Exact: false}
-		if len(segs) == 0 {
-			shape.count = event.TopicCountFilter{}
-		}
+		shape.count = event.TopicCountFilter{Count: len(segs)}
 	}
 	for i, s := range segs {
 		// "*" is any value, and the position still exists via the count.

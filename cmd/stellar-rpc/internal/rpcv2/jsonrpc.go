@@ -56,11 +56,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 			TransactionReader: p.transactionReader,
 			FeeStats:          p.feeWindows,
 
-			GetEventsHandler: eventsapi.NewV1Handler(eventsapi.Limits{
-				TermBudget:   uint32(min(deref(m.GetEvents.TermBudget), math.MaxUint32)), //nolint:gosec // min clamps it
-				MaxLimit:     deref(m.GetEvents.MaxItemsPerResponse),
-				DefaultLimit: deref(m.GetEvents.DefaultItemsPerResponse),
-			}),
+			GetEventsHandler: eventsapi.NewV1Handler(eventLimits(m.GetEvents)),
 
 			// No DataStoreLedgerReader: getLedgers can fall back to a bulk
 			// datastore for ledgers below local retention, but the full-history
@@ -78,11 +74,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 		})
 	specs = append(specs, jsonrpc.HandlerSpec{
 		MethodName: protocol.GetEventsV2MethodName,
-		Handler: eventsapi.NewHandler(eventsapi.Limits{
-			TermBudget:   uint32(min(deref(m.GetEventsV2.TermBudget), math.MaxUint32)), //nolint:gosec // min clamps it
-			MaxLimit:     deref(m.GetEventsV2.MaxItemsPerResponse),
-			DefaultLimit: deref(m.GetEventsV2.DefaultItemsPerResponse),
-		}),
+		Handler:    eventsapi.NewHandler(eventLimits(m.GetEventsV2)),
 	})
 	specs = limitsByMethod(m).Apply(specs)
 	for i := range specs {
@@ -100,6 +92,16 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 		GlobalDurationWarning: deref(cfg.Service.RequestExecutionWarningThreshold),
 		GlobalDurationLimit:   deref(cfg.Service.MaxRequestExecutionDuration),
 	})
+}
+
+// eventLimits reads one events method's knobs into the handler's form. Both
+// events methods take the same shape; only their defaults differ.
+func eventLimits(c config.EventsMethodConfig) eventsapi.Limits {
+	return eventsapi.Limits{
+		TermBudget:   uint32(min(deref(c.TermBudget), math.MaxUint32)), //nolint:gosec // min clamps it
+		MaxLimit:     deref(c.MaxItemsPerResponse),
+		DefaultLimit: deref(c.DefaultItemsPerResponse),
+	}
 }
 
 // limitsByMethod maps [service.methods] onto the shared limits table. Both the
