@@ -2,11 +2,13 @@ package sqlitedb
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"path"
 	"slices"
 	"testing"
 
+	sq "github.com/Masterminds/squirrel"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -285,6 +287,103 @@ func BenchmarkBatchGetLedgers(b *testing.B) {
 		require.NoError(b, hdrLast.UnmarshalBinary(ledgers[batchSize-1].HeaderRaw))
 		assert.EqualValues(b, lcms[0].LedgerSequence(), hdrFirst.Header.LedgerSeq)
 		assert.EqualValues(b, lcms[batchSize-1].LedgerSequence(), hdrLast.Header.LedgerSeq)
+	}
+}
+
+// fullBlobLedgerRange reproduces the pre-optimization oldest-ledger lookup
+// (SELECT meta, i.e. the entire blob) as the benchmark baseline.
+func fullBlobLedgerRange(ctx context.Context, db readDB,
+	latestSeq uint32, latestTime int64,
+) (store.LedgerRange, error) {
+	query := sq.Select("meta").
+		From(ledgerCloseMetaTableName).
+		Where(
+			fmt.Sprintf("sequence = (SELECT MIN(sequence) FROM %s)", ledgerCloseMetaTableName),
+		)
+	var lcmRaw []xdr.LedgerCloseMetaView
+	if err := db.Select(ctx, &lcmRaw, query); err != nil {
+		return store.LedgerRange{}, err
+	}
+	if len(lcmRaw) == 0 {
+		return store.LedgerRange{}, store.ErrEmptyDB
+	}
+	firstSeq, err := lcmRaw[0].LedgerSequence()
+	if err != nil {
+		return store.LedgerRange{}, err
+	}
+	firstCloseTime, err := lcmRaw[0].LedgerCloseTime()
+	if err != nil {
+		return store.LedgerRange{}, err
+	}
+	return store.LedgerRange{
+		FirstLedger: store.LedgerInfo{Sequence: firstSeq, CloseTime: firstCloseTime},
+		LastLedger:  store.LedgerInfo{Sequence: latestSeq, CloseTime: latestTime},
+	}, nil
+}
+
+// padLedger grows a txMeta ledger's meta to roughly size bytes via its soroban return value.
+func padLedger(lcm xdr.LedgerCloseMeta, size int) xdr.LedgerCloseMeta {
+	payload := xdr.ScBytes(make([]byte, size))
+	lcm.V2.TxProcessing[0].TxApplyProcessing.V3.SorobanMeta.ReturnValue = xdr.ScVal{
+		Type:  xdr.ScValTypeScvBytes,
+		Bytes: &payload,
+	}
+	return lcm
+}
+
+// BenchmarkOldestLedgerRangeLookup pits the 1KiB prefix fetch in
+// getLedgerRangeWithCache against the full-blob query it replaced. The tx read
+// path (getLedgers/getTransactions) runs this lookup once per request; sizes
+// are the min/avg/max meta blobs observed on a pubnet 7-day node.
+func BenchmarkOldestLedgerRangeLookup(b *testing.B) {
+	for _, tc := range []struct {
+		name string
+		size int
+	}{
+		{"512KiB", 512 << 10},
+		{"2MiB", 2 << 20},
+		{"4MiB", 4 << 20},
+	} {
+		testDB := NewTestDB(b)
+		writer := NewReadWriter(logger, testDB, host.MakeNoOpDaemon(), 1_000_000, passphrase)
+		write, err := writer.NewTx(b.Context())
+		require.NoError(b, err)
+
+		lcms := []xdr.LedgerCloseMeta{
+			padLedger(txMeta(1000, true), tc.size),
+			padLedger(txMeta(1001, true), tc.size),
+		}
+		ledgerW, txW := write.LedgerWriter(), write.TransactionWriter()
+		for _, lcm := range lcms {
+			require.NoError(b, ledgerW.InsertLedger(lcm))
+			require.NoError(b, txW.InsertTransactions(lcm))
+		}
+		latest := lcms[len(lcms)-1]
+		require.NoError(b, write.Commit(latest, nil))
+
+		ctx := b.Context()
+		latestSeq, latestTime := latest.LedgerSequence(), latest.LedgerCloseTime()
+		want, err := getLedgerRangeWithCache(ctx, testDB, latestSeq, latestTime)
+		require.NoError(b, err)
+		got, err := fullBlobLedgerRange(ctx, testDB, latestSeq, latestTime)
+		require.NoError(b, err)
+		require.Equal(b, want, got)
+		require.Equal(b, lcms[0].LedgerSequence(), got.FirstLedger.Sequence)
+
+		b.Run(tc.name+"/prefix", func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				_, err := getLedgerRangeWithCache(ctx, testDB, latestSeq, latestTime)
+				require.NoError(b, err)
+			}
+		})
+		b.Run(tc.name+"/fullBlob", func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				_, err := fullBlobLedgerRange(ctx, testDB, latestSeq, latestTime)
+				require.NoError(b, err)
+			}
+		})
 	}
 }
 
