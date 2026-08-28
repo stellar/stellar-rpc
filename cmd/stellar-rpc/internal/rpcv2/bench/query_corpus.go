@@ -18,7 +18,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 // This file builds the corpora the per-type bodies draw their work from. Every
@@ -85,15 +84,14 @@ func (c *txHashCorpus) pick(rng *rand.Rand) ([32]byte, bool) {
 }
 
 // buildTxHashCorpus samples transaction hashes from the fixture's ledger range
-// and verifies the network passphrase against them.
+// and checks that one of them resolves before any leg runs.
 //
-// The passphrase check is not ceremony. Resolving a hash to a transaction pairs
-// each TxSet envelope to its result by hashing the envelope, which needs the
-// passphrase; with the wrong one nothing pairs, every lookup reports not-found,
-// and the benchmark would publish the miss path's latency under the hit path's
-// name. Since ExtractLedgerTxParts derives hashes without a passphrase, a hash
-// it just produced must resolve — so if it does not, the passphrase is wrong and
-// the run stops here saying so.
+// The check is not ceremony. Resolving a hash to a transaction pairs each TxSet
+// envelope to its result by hashing the envelope, which needs the passphrase;
+// with the wrong one nothing pairs and the benchmark would publish the failed
+// path's latency under the hit path's name. Since ExtractLedgerTxParts derives
+// hashes without a passphrase, a hash it just produced must resolve — so if it
+// does not, the run stops here.
 func buildTxHashCorpus(
 	ctx context.Context, logger *supportlog.Entry, f *queryFixture, missFraction float64, seed int64,
 ) (*txHashCorpus, error) {
@@ -114,7 +112,8 @@ func buildTxHashCorpus(
 		return nil, fmt.Errorf("%w: chunks %v, ledgers [%d, %d]",
 			errNoTransactions, f.Chunks, f.FirstLedger, f.LastLedger)
 	}
-	if err := verifyPassphrase(ctx, view, f, s.hashes[0]); err != nil {
+	hash, seq := s.first()
+	if err := verifySampledHashResolves(ctx, view, f, hash, seq); err != nil {
 		return nil, err
 	}
 	s.logCoverage(logger, missFraction)
@@ -142,6 +141,14 @@ type txHashSampler struct {
 
 func newTxHashSampler(rng *rand.Rand) *txHashSampler {
 	return &txHashSampler{rng: rng, read: map[uint32]struct{}{}}
+}
+
+// first returns the pool's first hash and the ledger it came from. sampleChunk
+// appends to hashes and to ledgers in the same step, so the first ledger it
+// recorded is the one the first hashes were drawn from. The caller must have
+// checked the pool is not empty.
+func (s *txHashSampler) first() ([32]byte, uint32) {
+	return s.hashes[0], s.ledgers[0]
 }
 
 // sampleChunk reads randomly chosen ledgers of chunk c — within the fixture's
@@ -220,20 +227,57 @@ func sampleHashesFromLedger(rng *rand.Rand, parts []sdkingest.LedgerTxParts) [][
 	return out
 }
 
-// verifyPassphrase confirms the configured network passphrase resolves a hash
-// the sampler just read out of a ledger, through the same served by-hash path
-// the benchmark measures. See buildTxHashCorpus for why a wrong passphrase would
-// otherwise pass silently.
-func verifyPassphrase(ctx context.Context, view *query.ReadView, f *queryFixture, hash [32]byte) error {
-	reader := adapters.NewTransactionReader(f.Passphrase, nil)
-	_, err := reader.GetTransaction(adapters.WithView(ctx, view), xdr.Hash(hash))
-	if errors.Is(err, store.ErrNoTransaction) {
-		return fmt.Errorf(
-			"a transaction hash sampled straight from a ledger does not resolve: "+
-				"--network-passphrase=%q is wrong for this dataset", f.Passphrase)
+// verifySampledHashResolves checks a hash the sampler read out of ledger seq
+// two ways, in the order that tells the operator what to fix.
+//
+// The passphrase comes first, checked against that one ledger. Pairing the
+// transaction's envelope to its result there is the only step the passphrase
+// feeds, so a failure names --network-passphrase and nothing else.
+//
+// The served by-hash path comes second: the same hash has to resolve through
+// the tx-hash indexes and the routing the benchmark measures. That path can
+// fail for reasons the passphrase has no part in — an index the fixture never
+// committed, an .idx that will not open, a ledger read that fails — so its
+// error is reported as the probe failure it is.
+func verifySampledHashResolves(
+	ctx context.Context, view *query.ReadView, f *queryFixture, hash [32]byte, seq uint32,
+) error {
+	if err := verifyEnvelopePairing(view, f.Passphrase, hash, seq); err != nil {
+		return err
 	}
+	reader := adapters.NewTransactionReader(f.Passphrase, nil)
+	if _, err := reader.GetTransaction(adapters.WithView(ctx, view), xdr.Hash(hash)); err != nil {
+		return fmt.Errorf("probe of a known transaction hash failed: %w "+
+			"(the fixture's tx-hash index may be missing or unreadable)", err)
+	}
+	return nil
+}
+
+// verifyEnvelopePairing re-reads ledger seq and materializes hash out of it with
+// the configured passphrase, which is what pairs each TxSet envelope to its
+// TxProcessing entry. The hash came from that ledger's own results and meta, so
+// the transaction is there and the pairing is the only thing that can go wrong;
+// a failure therefore reports the passphrase, carrying the underlying error for
+// the rarer case of a ledger that really is malformed.
+func verifyEnvelopePairing(view *query.ReadView, passphrase string, hash [32]byte, seq uint32) error {
+	reader, err := view.Ledgers(chunk.IDFromLedger(seq))
 	if err != nil {
-		return fmt.Errorf("verify --network-passphrase: %w", err)
+		return fmt.Errorf("resolve ledgers of the sampled ledger %d: %w", seq, err)
+	}
+	raw, err := reader.GetLedgerRaw(seq)
+	if err != nil {
+		return fmt.Errorf("re-read the sampled ledger %d: %w", seq, err)
+	}
+	_, found, err := sdkingest.LedgerTransactionViewByHash(xdr.LedgerCloseMetaView(raw), hash, passphrase)
+	if err != nil {
+		return fmt.Errorf(
+			"transaction %x does not pair with an envelope in ledger %d, the ledger it was sampled from: "+
+				"--network-passphrase=%q is wrong for this dataset (%w)", hash, seq, passphrase, err)
+	}
+	if !found {
+		return fmt.Errorf(
+			"transaction %x is not in ledger %d, the ledger it was sampled from: "+
+				"--network-passphrase=%q is wrong for this dataset", hash, seq, passphrase)
 	}
 	return nil
 }

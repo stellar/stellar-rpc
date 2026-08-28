@@ -3,6 +3,7 @@ package bench
 import (
 	"context"
 	"math/rand/v2"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 )
 
@@ -194,6 +196,74 @@ func buildCorpusCapturingLogs(t *testing.T, f *queryFixture) (string, []string) 
 	}
 	require.NotEmpty(t, coverage, "the corpus build logs its coverage")
 	return coverage, warnings
+}
+
+// TestVerifySampledHashReportsThePassphrase pins which of the two checks reports a
+// failure, since they send the operator to different places. A passphrase the
+// dataset was not signed under fails the envelope pairing, inside the very
+// ledger the hash was sampled from, and names --network-passphrase. A fixture
+// whose tx-hash index cannot resolve the hash pairs fine and fails the served
+// probe, which must not name the passphrase.
+func TestVerifySampledHashReportsThePassphrase(t *testing.T) {
+	f, release := openDenseHotFixture(t, 4, 4)
+	defer release()
+
+	view, err := f.view()
+	require.NoError(t, err)
+	defer view.Release()
+
+	s := newTxHashSampler(testRNG())
+	require.NoError(t, s.sampleChunk(view, f.Chunks[0], f.FirstLedger, f.LastLedger))
+	require.NotEmpty(t, s.hashes)
+	hash, seq := s.first()
+
+	t.Run("the configured passphrase resolves it", func(t *testing.T) {
+		require.NoError(t, verifySampledHashResolves(context.Background(), view, f, hash, seq))
+	})
+
+	t.Run("wrong passphrase", func(t *testing.T) {
+		wrong := *f
+		wrong.Passphrase = network.TestNetworkPassphrase
+		err := verifySampledHashResolves(context.Background(), view, &wrong, hash, seq)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--network-passphrase")
+		assert.NotContains(t, err.Error(), "probe of a known transaction hash failed")
+	})
+}
+
+// TestVerifySampledHashReportsAProbeFailure covers the other side of the split:
+// a cold fixture whose tx-hash window index is gone still pairs the envelope,
+// because the passphrase is right, and fails on the served lookup. The report
+// must name the probe and leave the passphrase out of it.
+func TestVerifySampledHashReportsAProbeFailure(t *testing.T) {
+	chunkID := chunk.ID(0)
+	coldRoot := ingestColdChunk(t, chunkID)
+	require.NoError(t, os.RemoveAll(geometry.NewLayout(coldRoot).TxHashIndexRoot()))
+
+	// The types exclude txhash, so the open only warns about the absent index
+	// and leaves the fixture to be probed here.
+	f, release, err := openColdFixture(testLogger(), coldQueryOptions{
+		ColdRoot:   coldRoot,
+		StartChunk: chunkID,
+		NumChunks:  1,
+		Plan:       queryPlan{Types: []string{queryTypeLedgers}, Passphrase: network.PublicNetworkPassphrase},
+	})
+	require.NoError(t, err)
+	defer release()
+
+	view, err := f.view()
+	require.NoError(t, err)
+	defer view.Release()
+
+	s := newTxHashSampler(testRNG())
+	require.NoError(t, s.sampleChunk(view, chunkID, f.FirstLedger, f.LastLedger))
+	require.NotEmpty(t, s.hashes)
+	hash, seq := s.first()
+
+	err = verifySampledHashResolves(context.Background(), view, f, hash, seq)
+	require.ErrorContains(t, err, "probe of a known transaction hash failed")
+	assert.Contains(t, err.Error(), "tx-hash index may be missing")
+	assert.NotContains(t, err.Error(), "--network-passphrase")
 }
 
 // hashesPerLedger resolves every hash through the served by-hash path and
