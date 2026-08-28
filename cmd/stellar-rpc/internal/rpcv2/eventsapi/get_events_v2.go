@@ -280,8 +280,7 @@ func responseError(err error, oldest, latest uint32) error {
 	switch {
 	case errors.Is(err, query.ErrCursorMalformed),
 		errors.Is(err, query.ErrCursorUnknownVersion),
-		errors.Is(err, query.ErrPositionMismatch),
-		errors.Is(err, query.ErrInvertedRange):
+		errors.Is(err, query.ErrPositionMismatch):
 		return jrpcError(clientMessage(err), protocol.CursorMalformedErrorData{
 			OldestLedger: oldest,
 			LatestLedger: latest,

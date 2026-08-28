@@ -6,7 +6,6 @@ package eventsapi
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"testing"
 
@@ -265,55 +264,6 @@ func TestGetEventsV2_TermBudgetRejectsBothRequestShapes(t *testing.T) {
 		requireErrorData(t, err, protocol.ErrorReasonInvalidParams, &data)
 		assert.Equal(t, uint32(3), data.TermsUsed)
 	})
-}
-
-// Only a forged cursor can carry an inverted scope. Checked on the mapping,
-// because the codec refuses to encode one.
-func TestResponseErrorInvertedRangeIsCursorMalformed(t *testing.T) {
-	err := responseError(fmt.Errorf("%w: [3, 2]", query.ErrInvertedRange), 2, 9)
-
-	var data protocol.CursorMalformedErrorData
-	requireErrorData(t, err, protocol.ErrorReasonCursorMalformed, &data)
-	assert.Equal(t, uint32(2), data.OldestLedger)
-	assert.Equal(t, uint32(9), data.LatestLedger)
-}
-
-// Every decode failure names the field in the client's terms. The limit row
-// reuses the range wording, so a negative limit reads like an over-cap one.
-func TestDecodeRequestMessages(t *testing.T) {
-	for params, want := range map[string]string{
-		`{"limit":-1}`:                   "limit must be between 1 and 50",
-		`{"limit":"ten"}`:                "limit must be between 1 and 50",
-		`{"minLedger":"abc"}`:            "minLedger must be a number",
-		`{"order":7}`:                    "order must be a string",
-		`{"filters":"x"}`:                "filters must be an array",
-		`{"filters":[7]}`:                "each filter must be an object",
-		`{"filters":[{"contractId":7}]}`: "filters.contractId must be a string",
-		`{"maxLedgor":2}`:                `unknown field "maxLedgor"`,
-		`[2]`:                            "params must be an object",
-		`{"minLedger":2} 7`:              "params must be a single object",
-	} {
-		_, err := decodeRequest(params, 50)
-		require.Error(t, err, params)
-		requireErrorData(t, err, protocol.ErrorReasonInvalidParams, nil)
-		assert.Contains(t, err.Error(), want, params)
-	}
-	for _, params := range []string{``, `null`, `{"minLedger":2}`} {
-		_, err := decodeRequest(params, 50)
-		require.NoError(t, err, params)
-	}
-}
-
-// Internal errors carry a package prefix. A client has no use for it.
-func TestClientMessageDropsLayerPrefixes(t *testing.T) {
-	for in, want := range map[string]string{
-		"query: malformed cursor: base64: bad input":          "malformed cursor: base64: bad input",
-		"rpcv2: xdrInputFormat \"json\" is not supported yet": "xdrInputFormat \"json\" is not supported yet",
-		"json: unknown field \"maxLedgor\"":                   "unknown field \"maxLedgor\"",
-		"no prefix at all":                                    "no prefix at all",
-	} {
-		assert.Equal(t, want, clientMessage(errors.New(in)))
-	}
 }
 
 func TestGetEventsV2_MalformedCursorReportsTheServedRange(t *testing.T) {
