@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"path"
-	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -43,10 +42,9 @@ func createLedger(ledgerSequence uint32) xdr.LedgerCloseMeta {
 
 func assertLedgerRange(t *testing.T, reader LedgerReader, start, end uint32) {
 	ctx := t.Context()
-	var allLedgers []xdr.LedgerCloseMetaView
-	err := reader.StreamLedgerRange(ctx, start-1, end+1, func(txmeta xdr.LedgerCloseMetaView) error {
-		// the view is only valid for the duration of the callback
-		allLedgers = append(allLedgers, slices.Clone(txmeta))
+	var allLedgers []xdr.LedgerCloseMeta
+	err := reader.StreamLedgerRange(ctx, start-1, end+1, func(txmeta xdr.LedgerCloseMeta) error {
+		allLedgers = append(allLedgers, txmeta)
 		return nil
 	})
 	require.NoError(t, err)
@@ -65,7 +63,7 @@ func assertLedgerRange(t *testing.T, reader LedgerReader, start, end uint32) {
 		require.NoError(t, err)
 		assert.Equal(t, expectedBinary, ledgerBinary)
 
-		ledgerBinary, err = allLedgers[0].Raw()
+		ledgerBinary, err = allLedgers[0].MarshalBinary()
 		require.NoError(t, err)
 		assert.Equal(t, expectedBinary, ledgerBinary)
 		allLedgers = allLedgers[1:]

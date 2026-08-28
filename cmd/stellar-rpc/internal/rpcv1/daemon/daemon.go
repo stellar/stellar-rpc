@@ -472,12 +472,8 @@ func (d *Daemon) mustInitializeStorage(cfg *config.Config) *feewindow.FeeWindows
 		readTxMetaCtx,
 		ledgerSeqRange.First,
 		ledgerSeqRange.Last,
-		func(txMeta xdr.LedgerCloseMetaView) error {
-			seq, err := txMeta.LedgerSequence()
-			if err != nil {
-				return err
-			}
-			currentSeq = seq
+		func(txMeta xdr.LedgerCloseMeta) error {
+			currentSeq = txMeta.LedgerSequence()
 			if initialSeq == 0 {
 				initialSeq = currentSeq
 				d.logger.
@@ -491,7 +487,7 @@ func (d *Daemon) mustInitializeStorage(cfg *config.Config) *feewindow.FeeWindows
 					Debug("Still initializing in-memory store")
 			}
 
-			if err := dataMigrations.Apply(readTxMetaCtx, currentSeq, txMeta); err != nil {
+			if err := dataMigrations.Apply(readTxMetaCtx, txMeta); err != nil {
 				d.logger.WithError(err).Fatal("could not apply migration for ledger ", currentSeq)
 			}
 

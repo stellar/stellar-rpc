@@ -92,26 +92,19 @@ func (mm MultiMigration) ApplicableRange() LedgerSeqRange {
 	return result
 }
 
-func (mm MultiMigration) Apply(ctx context.Context, ledgerSeq uint32, view xdr.LedgerCloseMetaView) error {
-	var meta xdr.LedgerCloseMeta
-	decoded := false
-	var applyErr error
+func (mm MultiMigration) Apply(ctx context.Context, meta xdr.LedgerCloseMeta) error {
+	var err error
 	for _, m := range mm.migrations {
+		ledgerSeq := meta.LedgerSequence()
 		if !m.ApplicableRange().IsLedgerIncluded(ledgerSeq) {
 			// The range of a sub-migration can be smaller than the global range.
 			continue
 		}
-		if !decoded {
-			if err := meta.UnmarshalBinary(view); err != nil {
-				return errors.Join(err, mm.db.Rollback())
-			}
-			decoded = true
-		}
 		if localErr := m.Apply(ctx, meta); localErr != nil {
-			applyErr = errors.Join(applyErr, localErr, mm.db.Rollback())
+			err = errors.Join(err, localErr, mm.db.Rollback())
 		}
 	}
-	return applyErr
+	return err
 }
 
 func (mm MultiMigration) Commit(ctx context.Context) error {

@@ -63,7 +63,7 @@ func (ledgerReader *ConstantLedgerReader) StreamLedgerRange(
 	_ context.Context,
 	_ uint32,
 	_ uint32,
-	_ store.StreamLedgerViewFn,
+	_ store.StreamLedgerFn,
 ) error {
 	return nil
 }

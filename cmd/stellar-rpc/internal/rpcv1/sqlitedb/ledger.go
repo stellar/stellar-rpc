@@ -2,7 +2,6 @@
 package sqlitedb
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -121,7 +120,7 @@ func (r ledgerReader) StreamLedgerRange(
 	ctx context.Context,
 	startLedger uint32,
 	endLedger uint32,
-	f store.StreamLedgerViewFn,
+	f store.StreamLedgerFn,
 ) error {
 	sql := sq.Select("meta").From(ledgerCloseMetaTableName).
 		Where(sq.GtOrEq{"sequence": startLedger}).
@@ -134,7 +133,7 @@ func (r ledgerReader) StreamLedgerRange(
 	}
 	defer q.Close()
 	for q.Next() {
-		var closeMeta xdr.LedgerCloseMetaView
+		var closeMeta xdr.LedgerCloseMeta
 		if err = q.Scan(&closeMeta); err != nil {
 			return err
 		}
@@ -358,12 +357,12 @@ func (l ledgerWriter) trimLedgers(latestLedgerSeq uint32, retentionWindow uint32
 
 // getLedgerFromDB fetches a single ledger from the database.
 func getLedgerFromDB(ctx context.Context, db readDB, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
-	raw, found, err := getLedgerRawFromDB(ctx, db, sequence)
+	meta, found, err := getLedgerRawFromDB(ctx, db, sequence)
 	if err != nil || !found {
 		return xdr.LedgerCloseMeta{}, false, err
 	}
 	var lcm xdr.LedgerCloseMeta
-	if _, err := xdr.Unmarshal(bytes.NewReader(raw), &lcm); err != nil {
+	if err := lcm.UnmarshalBinary(meta); err != nil {
 		return xdr.LedgerCloseMeta{}, false, err
 	}
 	return lcm, true, nil
