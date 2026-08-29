@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -543,9 +542,9 @@ func TestColdReader_LookupKeys(t *testing.T) {
 
 // TestColdReader_LookupKeysIsolatesCalls pins that two LookupKeys batches for
 // the same key return independent postings, so scribbling on one cannot bleed
-// into the next. The fixture's term is small, so it comes back as an ID slice;
-// mutating the slice is the mutation that could actually reach a shared buffer,
-// whereas Bitmap() on an ID-backed term hands back a throwaway.
+// into the next. Cold postings are bitmap-backed, and Bitmap() hands back the
+// store's own bitmap rather than a copy, so writing through it is the mutation
+// that could actually reach a shared buffer.
 func TestColdReader_LookupKeysIsolatesCalls(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 8, 1)
@@ -558,15 +557,17 @@ func TestColdReader_LookupKeysIsolatesCalls(t *testing.T) {
 	first, err := cr.LookupKeys(context.Background(), []TermKey{key})
 	require.NoError(t, err)
 	require.Len(t, first, 1)
-	require.NotNil(t, first[0].IDs(), "a small term must come back as an ID slice")
+	require.True(t, first[0].Present(), "the fixture's contract term must hit")
 
-	want := slices.Clone(first[0].IDs())
-	first[0].IDs()[0] = 999_999
+	want := first[0].Bitmap().ToArray()
+	first[0].Bitmap().Add(999_999)
+	require.True(t, first[0].Contains(999_999),
+		"premise: the scribble must land on the returned postings")
 
 	second, err := cr.LookupKeys(context.Background(), []TermKey{key})
 	require.NoError(t, err)
 	require.Len(t, second, 1)
-	assert.Equal(t, want, second[0].IDs(),
+	assert.Equal(t, want, second[0].Bitmap().ToArray(),
 		"a LookupKeys result mutation must not bleed into the next LookupKeys")
 }
 

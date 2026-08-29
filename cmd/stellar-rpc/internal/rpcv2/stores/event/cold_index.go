@@ -60,8 +60,7 @@ func blindTerm(secret [stores.SecretLen]byte, term TermKey) TermKey {
 // pack-without-index special case.
 //
 // bitmaps is the complete term index for the Chunk. It is read, not
-// modified: encodeIndexBody builds its own bitmap for the terms that
-// need one.
+// modified: encodeIndexBody serializes through a bitmap of its own.
 //
 // PRODUCTION-DEAD, KEPT AS THE ORACLE: no shipping path calls this anymore —
 // both cold backfill and the live-chunk freeze stream from spill runs via
@@ -77,8 +76,7 @@ func blindTerm(secret [stores.SecretLen]byte, term TermKey) TermKey {
 //
 //	offset  size  field
 //	0       4     fingerprint (first 4 bytes of the ROUTED/blinded key)
-//	4       1     codec (itemCodecRoaring | itemCodecDelta)
-//	5       N     postings in that codec
+//	4       N     RunOptimize'd roaring bitmap (Bitmap.WriteTo bytes)
 //
 // The cold reader uses mphf.Lookup(term) → slot to find the record
 // position, packfile.Reader.ReadItem(slot, ...) to read the bytes,
@@ -140,7 +138,7 @@ func WriteColdIndex(
 		// the reader compares against the routed query key).
 		var fp [IndexRecordFingerprintLen]byte
 		copy(fp[:], rk[:IndexRecordFingerprintLen])
-		body, berr := encodeIndexBody(nil, bitmap.ToArray())
+		body, berr := encodeIndexBody(nil, bitmap.ToArray(), nil)
 		if berr != nil {
 			return berr
 		}
@@ -200,42 +198,52 @@ func WriteColdIndex(
 }
 
 // indexEntry is one assembled index.pack record: the slot it lands at,
-// the 4-byte fingerprint, and the encoded item body (codec ‖ postings).
+// the 4-byte fingerprint, and the encoded item body (the serialized
+// bitmap).
 type indexEntry struct {
 	slot uint32
 	fp   [IndexRecordFingerprintLen]byte
 	body []byte
 }
 
-// encodeIndexBody appends the index.pack item body for ids — the codec byte,
-// then the postings in that codec — to dst. ids must be ascending and deduped.
+// encodeIndexBody appends the index.pack item body for ids — the
+// RunOptimize'd roaring serialization — to dst. ids must be ascending and
+// deduped.
 //
 // Both builders call this, which is what keeps the byte-identity gate
 // meaningful: they cannot disagree about a term's encoding because there is
-// only one. It takes ids rather than a bitmap because the delta codec needs a
-// sorted slice and the streaming builder has one, while a bitmap is cheap to
-// build from ids for the terms that need one.
-func encodeIndexBody(dst []byte, ids []uint32) ([]byte, error) {
+// only one. It takes ids rather than a bitmap because the streaming builder
+// has a sorted slice and never materializes one, while a bitmap is cheap to
+// build from ids.
+//
+// scratch, when non-nil, is the bitmap the ids are loaded into: the streaming
+// builder hands the same one back for every term so a multi-million-term
+// build does not allocate a bitmap per term. It is cleared first, so the
+// caller need not, and its contents are meaningless afterwards. nil allocates
+// one per call — for tests and the in-memory oracle, where per-term
+// allocation does not matter.
+func encodeIndexBody(dst []byte, ids []uint32, scratch *roaring.Bitmap) ([]byte, error) {
 	if len(ids) == 0 {
-		// A zero-posting term has no reason to exist, and the delta codec
-		// cannot represent one: DecodePostings rejects a zero count, so
-		// writing it would produce a record no reader can decode.
+		// A zero-posting term has no reason to exist: every term reaches the
+		// index because some event carried it.
 		return nil, errors.New("events: index body for a term with no postings")
 	}
-	if len(ids) <= deltaPostingMaxCardinality {
-		return AppendPostings(append(dst, itemCodecDelta), ids), nil
+	if scratch == nil {
+		scratch = roaring.New()
+	} else {
+		scratch.Clear()
 	}
+	scratch.AddMany(ids)
 	// RunOptimize re-encodes long runs of set bits as RUN containers, which
-	// MarshalBinary then serializes more compactly: ~14% on chunk 5999,
+	// the serialization then stores more compactly: ~14% on chunk 5999,
 	// concentrated in dense clustered terms. It is also what makes the
 	// serialization canonical.
-	bm := roaring.BitmapOf(ids...)
-	bm.RunOptimize()
-	b, err := bm.ToBytes()
+	scratch.RunOptimize()
+	b, err := scratch.ToBytes()
 	if err != nil {
 		return nil, fmt.Errorf("events: serialize bitmap: %w", err)
 	}
-	return append(append(dst, itemCodecRoaring), b...), nil
+	return append(dst, b...), nil
 }
 
 // writeIndexPackEntries appends every assembled record to the index.pack

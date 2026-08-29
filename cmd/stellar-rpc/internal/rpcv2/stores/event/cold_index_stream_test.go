@@ -210,7 +210,7 @@ func TestStreamTermsRun_Offsets(t *testing.T) {
 		fatIDs[j] = uint32(j * 7)
 	}
 	corpus[fat] = fatIDs
-	fatBody, err := encodeIndexBody(nil, fatIDs)
+	fatBody, err := encodeIndexBody(nil, fatIDs, nil)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(fatBody), 128, "corpus must include a two-byte length varint")
 
@@ -253,43 +253,32 @@ func TestWriteColdIndexFromRuns_ByteIdentical(t *testing.T) {
 	const chunkID = chunk.ID(3)
 	corpus := synthTerms(2000, 42)
 
-	// Add terms sitting either side of deltaPostingMaxCardinality. The two
-	// builders pick a codec from cardinality independently — one from
-	// len(ids), one from a bitmap built out of the same ids — so the threshold
-	// is where they could disagree, and synthTerms alone never lands near it.
-	for i, card := range []int{
-		deltaPostingMaxCardinality - 1,
-		deltaPostingMaxCardinality,
-		deltaPostingMaxCardinality + 1,
-		deltaPostingMaxCardinality + 2,
-	} {
-		k := ComputeTermKey(fmt.Appendf(nil, "straddle-%d", i), FieldTopic1)
-		ids := make([]uint32, card)
-		for j := range ids {
-			ids[j] = uint32(j * 3)
-		}
-		corpus[k] = ids
-	}
-
-	// Add roaring-coded terms sitting either side of inlineBodyMax, so this
-	// one build drains a heap holding BOTH inline and reference records —
-	// pinning the discriminator and readBuf reuse across mixed pops. The
-	// straddle is premise-checked below, not assumed.
+	// Add terms sitting either side of inlineBodyMax, so this one build
+	// drains a heap holding BOTH inline and reference records — pinning the
+	// discriminator and readBuf reuse across mixed pops. Body size follows
+	// roaring's container layout rather than cardinality alone (a term whose
+	// ids fit one container caps out at a bitmap container's 8 KiB however
+	// many it holds), so the wide-stride terms below spread across several
+	// containers to clear the boundary. The straddle is premise-checked
+	// afterwards, not assumed.
 	minBody, maxBody := int(^uint(0)>>1), 0
-	for i, card := range []int{2400, 2500, 2600, 2700} {
+	for i, spec := range []struct{ card, stride int }{
+		{2400, 3}, {2700, 3}, // one container each — inline path
+		{6000, 29}, {7000, 29}, // several containers each — reference path
+	} {
 		k := ComputeTermKey(fmt.Appendf(nil, "inline-straddle-%d", i), FieldTopic1)
-		ids := make([]uint32, card)
+		ids := make([]uint32, spec.card)
 		for j := range ids {
-			ids[j] = uint32(j*3 + 1)
+			ids[j] = uint32(j*spec.stride + 1)
 		}
 		corpus[k] = ids
-		body, berr := encodeIndexBody(nil, ids)
+		body, berr := encodeIndexBody(nil, ids, nil)
 		require.NoError(t, berr)
 		minBody = min(minBody, len(body))
 		maxBody = max(maxBody, len(body))
 	}
-	require.LessOrEqual(t, minBody, inlineBodyMax, "corpus must include an inline-path roaring body")
-	require.Greater(t, maxBody, inlineBodyMax, "corpus must include a reference-path roaring body")
+	require.LessOrEqual(t, minBody, inlineBodyMax, "corpus must include an inline-path body")
+	require.Greater(t, maxBody, inlineBodyMax, "corpus must include a reference-path body")
 
 	// Reference: today's in-memory mirror path.
 	refDir := t.TempDir()
@@ -396,16 +385,18 @@ func TestWriteColdIndexFromRuns_ReadsBack(t *testing.T) {
 	)
 	corpus := synthTerms(events, 9)
 
-	// Premise: the corpus must straddle the codec split, so this one read-back
-	// drives BOTH posting codecs through the reader's dispatch — the firehose
-	// term (every ID) is roaring, the singletons delta.
+	// Premise: the corpus must span the container shapes roaring switches
+	// between, so this one read-back drives run/bitmap and array containers
+	// alike through the reader — the firehose term holds every ID, the tail
+	// is singletons.
 	fattest, thinnest := 0, int(^uint(0)>>1)
 	for _, ids := range corpus {
 		fattest = max(fattest, len(ids))
 		thinnest = min(thinnest, len(ids))
 	}
-	require.Greater(t, fattest, deltaPostingMaxCardinality, "corpus must include a roaring-coded term")
-	require.LessOrEqual(t, thinnest, deltaPostingMaxCardinality, "corpus must include a delta-coded term")
+	require.Equal(t, events, fattest,
+		"corpus must include the firehose term — every ID, one run container after RunOptimize")
+	require.Equal(t, 1, thinnest, "corpus must include a one-posting term — a lone array container")
 
 	dir := t.TempDir()
 	scratch := filepath.Join(t.TempDir(), "s")
@@ -426,8 +417,8 @@ func TestWriteColdIndexFromRuns_ReadsBack(t *testing.T) {
 	t.Cleanup(func() { _ = cr.Close() })
 
 	// Every spilled term, resolved in ONE batch through the production reader:
-	// the blinding, the MPHF routing, the fingerprint check and the posting
-	// codecs all have to agree for the exact ID set to come back.
+	// the blinding, the MPHF routing, the fingerprint check and the bitmap
+	// decode all have to agree for the exact ID set to come back.
 	keys := make([]TermKey, 0, len(corpus))
 	for k := range corpus {
 		keys = append(keys, k)
@@ -438,8 +429,7 @@ func TestWriteColdIndexFromRuns_ReadsBack(t *testing.T) {
 	for i, k := range keys {
 		require.True(t, got[i].Present(), "term %x must resolve", k[:8])
 		assert.Equal(t, corpus[k], got[i].Bitmap().ToArray(), "term %x ID set", k[:8])
-		assert.Equal(t, len(corpus[k]) <= deltaPostingMaxCardinality, got[i].IDs() != nil,
-			"term %x form must follow its codec", k[:8])
+		assert.Nil(t, got[i].IDs(), "cold postings are bitmap-backed at every cardinality")
 	}
 
 	// A term that was never spilled misses cleanly: absent postings, no error.

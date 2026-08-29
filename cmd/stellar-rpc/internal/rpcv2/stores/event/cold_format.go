@@ -77,38 +77,6 @@ const (
 	indexPackFormat  packfile.Format = 0xFE1E000B // "Fellow Events 0xB"
 )
 
-// index.pack item codecs — the codec byte in the layout cold_index.go
-// documents.
-const (
-	// itemCodecRoaring bodies are a serialized roaring bitmap, RunOptimize'd
-	// before Bitmap.WriteTo.
-	itemCodecRoaring byte = 0x00
-	// itemCodecDelta bodies are AppendPostings output: a uvarint count
-	// then the event IDs, first absolute and the rest strictly-positive
-	// deltas.
-	itemCodecDelta byte = 0x01
-)
-
-// deltaPostingMaxCardinality is the term cardinality at or below which
-// postings are stored as a delta-varint list instead of a roaring bitmap.
-//
-// Measured on a real pubnet chunk (10,000 ledgers, 8.65M events, 204,752
-// terms): below ~1024 postings roaring costs 1.7x to 3.8x a delta list, and
-// above it roaring's run and bitmap containers pull ahead, reaching 12.5x on
-// the nine terms holding more than a million postings. 99.2% of terms fall
-// below the threshold and hold 71% of the byte saving.
-//
-// Cardinality is a proxy for whichever encoding is actually smaller, not a
-// derivation of it: a contiguous 1024-posting term is far smaller as a run
-// container than as deltas, and a scattered 262K-posting term is smaller as
-// deltas than as roaring. The proxy holds on pubnet event postings because
-// cardinality correlates with run structure there, fat terms being the
-// clustered ones. That is a property of the data, so re-measure before
-// retuning — and retuning also moves inlineBodyMax (cold_index_stream.go),
-// which scales the reorder heap's corrupt-index inline ceiling
-// (backstop × inlineBodyMax): redo that RAM math in the same change.
-const deltaPostingMaxCardinality = 1024
-
 // IndexRecordFingerprintLen is the byte width of the leading
 // fingerprint in every index.pack record — the ROUTED (blinded)
 // key's first four bytes. The cold reader checks it against the

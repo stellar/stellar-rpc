@@ -309,9 +309,9 @@ func (c *ColdReader) Offsets() (*LedgerOffsets, error) {
 // mismatch (residual MPHF collision on an unseen key) it returns the zero
 // Postings, which the caller treats as not-found.
 //
-// A delta term is returned un-materialized (see Intersect). record is
-// valid only inside ReadItems' callback, and neither codec aliases it, so the
-// result outlives the callback safely.
+// record is valid only inside ReadItems' callback; UnmarshalBinary copies the
+// bytes into roaring's own state rather than aliasing them, so the decoded
+// postings outlive the callback safely.
 func verifyAndDecodePostings(record []byte, key TermKey, slot uint32) (Postings, error) {
 	if len(record) <= IndexRecordFingerprintLen {
 		return Postings{}, fmt.Errorf(
@@ -321,32 +321,17 @@ func verifyAndDecodePostings(record []byte, key TermKey, slot uint32) (Postings,
 		return Postings{}, nil
 	}
 	body := record[IndexRecordFingerprintLen:]
-	switch body[0] {
-	case itemCodecRoaring:
-		bm := roaring.New()
-		if err := bm.UnmarshalBinary(body[1:]); err != nil {
-			return Postings{}, fmt.Errorf("events: unmarshal bitmap at slot %d: %w", slot, err)
-		}
-		// UnmarshalBinary accepts shapes that are structurally invalid rather
-		// than merely unexpected, such as a run container holding no
-		// intervals, which reads back as a bitmap with containers but no
-		// postings. Reject them here, where the bytes are untrusted and the
-		// slot is known, rather than downstream where a caller assuming a
-		// present term holds at least one posting would fault.
-		if err := bm.Validate(); err != nil {
-			return Postings{}, fmt.Errorf("events: invalid bitmap at slot %d: %w", slot, err)
-		}
-		return BitmapPostings(bm), nil
-	case itemCodecDelta:
-		ids, err := DecodePostings(body[1:])
-		if err != nil {
-			return Postings{}, fmt.Errorf("events: decode postings at slot %d: %w", slot, err)
-		}
-		return IDPostings(ids), nil
-	default:
-		return Postings{}, fmt.Errorf(
-			"events: index.pack record at slot %d has unknown codec 0x%02x", slot, body[0])
+	bm := roaring.New()
+	if err := bm.UnmarshalBinary(body); err != nil {
+		return Postings{}, fmt.Errorf("events: unmarshal bitmap at slot %d: %w", slot, err)
 	}
+	// No Bitmap.Validate here: byte integrity is the packfile checksum layer's
+	// job, and per-decode validation is super-linear on run-dense terms — the
+	// exact terms the query hot path reads most. A structurally hollow bitmap
+	// that UnmarshalBinary accepts (a run container holding no intervals, say)
+	// resolves as a present term matching nothing, which every caller already
+	// handles.
+	return BitmapPostings(bm), nil
 }
 
 // LookupKeys returns each key's postings, aligned positionally with the input

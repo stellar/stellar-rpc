@@ -16,12 +16,11 @@ package event
 //     builder's (pinned by streamhash's own lifecycle tests).
 //  3. Pass B: re-stream terms.run → mphf.Lookup per term → index.pack in
 //     dense slot order via a bounded reorder heap: bodies at or under
-//     inlineBodyMax ride the heap inline (every delta-coded body does, by
-//     construction), larger ones are buffered as references and re-read
-//     from terms.run at emit. Slots deviate from key order only within one
-//     MPHF block; an entry-count backstop bounds the heap's RAM when slot
-//     assignment is corrupt, and a stranded-records check catches
-//     non-dense output.
+//     inlineBodyMax ride the heap inline, larger ones are buffered as
+//     references and re-read from terms.run at emit. Slots deviate from
+//     key order only within one MPHF block; an entry-count backstop bounds
+//     the heap's RAM when slot assignment is corrupt, and a
+//     stranded-records check catches non-dense output.
 
 import (
 	"bufio"
@@ -36,6 +35,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/RoaringBitmap/roaring/v2"
+
 	"github.com/stellar/streamhash"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
@@ -46,21 +47,25 @@ import (
 
 // inlineBodyMax is the copy/reference boundary for buffered records: bodies
 // at or under it are copied into the heap entry at push time, larger ones
-// are re-read from terms.run at emit. It is derived so that EVERY
-// delta-coded body inlines by construction — 1 codec byte, a count varint,
-// and up to deltaPostingMaxCardinality posting varints — and moves with
-// that constant if the codec split is ever retuned; only roaring bodies
-// — multi-MiB at the extreme, and unbounded in aggregate per block —
+// are re-read from terms.run at emit. 10 KiB approximates roaring's worst
+// case for a ~1,024-posting term spread across maximal containers — one
+// posting per container: ~16B of header, ~8B of bookkeeping per container,
+// and 2B per posting ≈ 10 KiB — so the small-term population that always
+// inlined under the old cardinality-derived bound still inlines; only fat
+// terms — multi-MiB at the extreme, and unbounded in aggregate per block —
 // take the reference path. Straying into the heap is the norm, not the
 // exception (~99.7% of records: within-block slot order is effectively
 // random), so without the inline copy every record pays an emit-time pread
 // — measured on sac-6000 (c6id.8xlarge NVMe, page-cache-hot) at ~1.4µs
-// each = +29% on the freeze's events arm. Re-measure before retuning.
+// each, the all-reference extreme costing +29% on the freeze's events arm.
+// That ±% was measured against the previous, smaller body sizes, so
+// re-measure before retuning.
 // RAM: the heap provably drains at every block boundary, so occupancy is
-// one MPHF block (≲3.5K entries ≈ 17MB inline); the enforced ceiling —
-// the derived backstop × inlineBodyMax ≈ 320MiB — is reachable only with
-// a corrupt index.hash, which the backstop then turns into a loud abort.
-const inlineBodyMax = 1 + binary.MaxVarintLen32 + deltaPostingMaxCardinality*binary.MaxVarintLen32
+// one MPHF block (≲3.5K entries ≈ 35MB with every body at the ceiling);
+// the enforced ceiling — the derived backstop × inlineBodyMax ≈ 640MiB —
+// is reachable only with a corrupt index.hash, which the backstop then
+// turns into a loud abort.
+const inlineBodyMax = 10 * 1024
 
 var errCorruptTermsRun = errors.New("events: corrupt terms.run scratch")
 
@@ -216,10 +221,13 @@ func writeTermsRun(path string, runPaths []string) (uint64, error) {
 		crc     uint32
 		bodyBuf []byte
 		recBuf  []byte
+		// One bitmap for the whole merge: encodeIndexBody clears and refills
+		// it per term, so a multi-million-term chunk allocates none.
+		scratch = roaring.New()
 		mergeED = func(rawTerm [16]byte, ids []uint32) error {
 			term := TermKey(rawTerm)
 			var berr error
-			if bodyBuf, berr = encodeIndexBody(bodyBuf[:0], ids); berr != nil {
+			if bodyBuf, berr = encodeIndexBody(bodyBuf[:0], ids, scratch); berr != nil {
 				return berr
 			}
 			recBuf = recBuf[:0]

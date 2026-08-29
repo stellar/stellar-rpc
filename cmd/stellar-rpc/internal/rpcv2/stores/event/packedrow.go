@@ -150,8 +150,8 @@ func AppendTermPostings(dst []byte, term TermKey, ids []uint32) []byte {
 func TermPostingsLen(ids []uint32) int { return runspill.TermPostingsLen(ids) }
 
 // AppendPostings appends one posting list (uvarint count, then delta-varint
-// ascending ids) to dst — the term-less half of AppendTermPostings, shared
-// with the cold index's delta-codec records.
+// ascending ids) to dst — the term-less half of AppendTermPostings, for
+// consumers that already know which term they are reading.
 func AppendPostings(dst []byte, ids []uint32) []byte { return runspill.AppendPostings(dst, ids) }
 
 // DecodeAscendingIDs decodes count delta-varint ids via next, validating
