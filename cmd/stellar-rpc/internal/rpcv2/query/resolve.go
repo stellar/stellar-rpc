@@ -144,6 +144,27 @@ func (a *ReadView) resolveLedgers(c chunk.ID) (LedgerReader, func() error, error
 	}
 }
 
+// coldEventReadConcurrency is the worker fan-out one cold events read gets over
+// its packfiles (ColdReaderOptions.Concurrency → packfile ReadItems). A page's
+// payload fetch is hundreds of scattered records, each its own ~90 µs NVMe pread
+// after coalescing; the reads have no ordering between them, so serializing them
+// only added their latencies together. A constant, not configuration: it is a
+// property of the storage the daemon reads through, not of the query the client
+// asked for, and the package spells that kind of bound as a constant already
+// (defaultMaxScanLedgers).
+//
+// Why 8: swept 1/4/8/16/32 on a full cold chunk, p99 falls 106 → 32 → 21.6 →
+// 16.6 → 14.1 ms — every doubling still helps, by about half as much as the one
+// before. The cost side has no such curve: the fan-out is per request, so the
+// worker count multiplies both goroutines and packfile's 1 MiB coalesced-read
+// buffers by the number of cold pages in flight, and a 50 rps bench with a
+// fraction of a request in flight cannot see that. Eight removes 79% of the
+// baseline p99 and captures 92% of what 32 achieves, at a quarter of its
+// per-request footprint. A
+// deployment with headroom to spend can raise it; the seam is a Registry field,
+// the way maxScanLedgers is one.
+const coldEventReadConcurrency = 8
+
 // Events resolves chunk c's event store as the common event.Reader the
 // query engine consumes, uniform across tiers. A cold reader is view-owned —
 // Release closes it; the hot facade is registry-owned. Returns ErrUnavailable
@@ -157,10 +178,8 @@ func (a *ReadView) Events(c chunk.ID) (event.Reader, error) {
 	}
 	switch t {
 	case tierCold:
-		// TODO(events adapter / #772): thread read concurrency
-		// (ColdReaderOptions.Concurrency → the packfile ReadItems concurrency) here;
-		// decide whether it is config-driven or caller-supplied. Default for now.
-		cr, err := event.OpenColdReader(c, a.catalog.Layout().EventsBucketDir(c), event.ColdReaderOptions{})
+		cr, err := event.OpenColdReader(c, a.catalog.Layout().EventsBucketDir(c),
+			event.ColdReaderOptions{Concurrency: coldEventReadConcurrency})
 		if err != nil {
 			return nil, err
 		}
