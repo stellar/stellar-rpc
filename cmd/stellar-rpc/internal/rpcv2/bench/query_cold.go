@@ -13,6 +13,7 @@ import (
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
@@ -175,7 +176,13 @@ func openColdFixture(logger *supportlog.Entry, opts coldQueryOptions) (*queryFix
 	}
 
 	registry := query.NewRegistry(cat, geometry.NewRetention(0, opts.StartChunk))
-	registry.SetLatestLedger(end.LastLedger(), 0)
+	registry.SetLatestLedger(end.LastLedger(), query.UnknownCloseTime())
+	// Stamp the window edges' close times the way startup.go does, so served
+	// requests do not pay a ledger decode to learn the latest close time.
+	if err := adapters.SeedCloseTimes(registry); err != nil {
+		release()
+		return nil, nil, fmt.Errorf("seed close times: %w", err)
+	}
 	f := &queryFixture{
 		registry:    registry,
 		Passphrase:  opts.Plan.Passphrase,
