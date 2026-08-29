@@ -27,11 +27,16 @@ func TestEncodeParseColdMetadata_RoundTrip(t *testing.T) {
 
 func TestParseColdMetadata_WrongSizeErrors(t *testing.T) {
 	// 8 is the pre-secret layout, 24 the pre-version one; 25 is the only
-	// valid width.
-	for _, sz := range []int{0, 1, 4, 7, 8, 9, 16, 24, 26} {
-		_, _, _, err := ParseColdMetadata(make([]byte, sz))
+	// valid width. Blobs carry a valid version byte so the size check is what
+	// fires (the version check runs first by design).
+	for _, sz := range []int{1, 4, 7, 8, 9, 16, 24, 26} {
+		blob := make([]byte, sz)
+		blob[0] = coldMetadataVersion
+		_, _, _, err := ParseColdMetadata(blob)
 		assert.ErrorIs(t, err, ErrInvalidMetadata, "size %d should error", sz)
 	}
+	_, _, _, err := ParseColdMetadata(nil)
+	assert.ErrorIs(t, err, ErrInvalidMetadata, "empty blob should error")
 }
 
 func TestParseColdMetadata_UnknownVersionErrors(t *testing.T) {

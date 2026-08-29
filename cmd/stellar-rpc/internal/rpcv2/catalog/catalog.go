@@ -43,7 +43,7 @@ func Open(
 ) (*Catalog, error) {
 	store, err := rocksdb.New(rocksdb.Config{Path: path, Logger: logger})
 	if err != nil {
-		return nil, rocksdb.WrapIfEngineTooNew(err)
+		return nil, err
 	}
 	c := &Catalog{store: store, logger: logger, layout: layout, txhashIndex: txhashIndex}
 	// Census before anything writes: a catalog holding entries outside this

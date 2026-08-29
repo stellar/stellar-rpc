@@ -28,9 +28,12 @@ const (
 
 // TermSchemaVersion names the term-derivation scheme: the hash function and
 // byte encoding behind ComputeTermKey plus each field's value encoding. Bump
-// it whenever any of those change; adding a whole field instead sets a new
-// bit in IndexedFieldMask. Both are recorded in every index.pack's build
-// stamp so an index answers only for the scheme it was built under.
+// it whenever any of those change. Adding a whole field sets a new bit in
+// IndexedFieldMask instead, and is a storage-format change in its own right:
+// per the design doc's versioning section it ships as a new events format id
+// with a hot format bump. Both values are recorded in every index.pack's
+// build stamp, and the release-1 reader accepts exactly its own pair (fails
+// closed; per-id read sets arrive with the format-id grammar).
 const TermSchemaVersion uint16 = 1
 
 // IndexedFieldMask is the set of indexed fields as a bitmask (bit i set means

@@ -77,37 +77,29 @@ func censusArtifactEntry(key, value string) (string, bool) {
 		if _, ok := geometry.ParseHotChunkKey(key); !ok {
 			return "malformed hot-chunk key", false
 		}
-		if !isKnownHotState(value) {
+		if !geometry.IsKnownHotState(geometry.HotState(value)) {
 			return fmt.Sprintf("unknown hot state %q", value), false
 		}
 	case strings.HasPrefix(key, geometry.ChunkPrefix):
 		if _, _, ok := geometry.ParseChunkKey(key); !ok {
 			return "malformed per-chunk artifact key", false
 		}
-		if !isKnownState(value) {
+		if !geometry.IsKnownState(geometry.State(value)) {
 			return fmt.Sprintf("unknown artifact state %q", value), false
 		}
 	case strings.HasPrefix(key, geometry.TxHashIndexPrefix):
 		if _, ok := geometry.ParseTxHashIndexKey(key); !ok {
 			return "malformed index coverage key", false
 		}
-		if !isKnownState(value) {
+		if !geometry.IsKnownState(geometry.State(value)) {
 			return fmt.Sprintf("unknown artifact state %q", value), false
 		}
 	default:
-		return fmt.Sprintf("unknown key (value %q)", value), false
+		// Never print an unknown key's value: a newer binary may store key
+		// material under a name this binary does not recognize.
+		return fmt.Sprintf("unknown key (value redacted, %d bytes)", len(value)), false
 	}
 	return "", true
-}
-
-func isKnownState(v string) bool {
-	s := geometry.State(v)
-	return s == geometry.StateFreezing || s == geometry.StateFrozen || s == geometry.StatePruning
-}
-
-func isKnownHotState(v string) bool {
-	s := geometry.HotState(v)
-	return s == geometry.HotTransient || s == geometry.HotReady
 }
 
 // isCanonicalUint32 reports whether v round-trips through ParseUint and

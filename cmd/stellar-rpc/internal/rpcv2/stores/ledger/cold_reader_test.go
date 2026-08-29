@@ -182,8 +182,9 @@ func TestColdReader_RejectsWrongAppDataSize(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, pw.AppendItem([]byte("v")))
-	// 7-byte payload — appDataSize is 4.
-	require.NoError(t, pw.Finish([]byte("seven-b")))
+	// Valid version byte, 7-byte payload; appDataSize is 5, so the size
+	// check (which runs after the version check) is what fires.
+	require.NoError(t, pw.Finish([]byte{coldAppDataVersion, 's', 'e', 'v', 'e', 'n', 'b'}))
 
 	c, err := OpenColdReader(path)
 	require.NoError(t, err)
@@ -191,6 +192,26 @@ func TestColdReader_RejectsWrongAppDataSize(t *testing.T) {
 	_, err = c.LastSeq()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "AppData")
+}
+
+func TestColdReader_RejectsNewerAppDataVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "newer-appdata.pack")
+	pw, err := packfile.Create(path, packfile.WriterOptions{
+		ItemsPerRecord: 1,
+		Format:         formatLedgerCold,
+	})
+	require.NoError(t, err)
+	require.NoError(t, pw.AppendItem([]byte("v")))
+	// A longer blob under an unknown version byte must report as a version
+	// problem, not a size mismatch.
+	require.NoError(t, pw.Finish([]byte{coldAppDataVersion + 1, 0, 0, 0, 2, 9}))
+
+	c, err := OpenColdReader(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	_, err = c.LastSeq()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "written by a newer stellar-rpc")
 }
 
 func TestColdReader_RejectsWrongFormat(t *testing.T) {

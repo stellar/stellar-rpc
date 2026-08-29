@@ -111,12 +111,17 @@ func (c *ColdReader) loadHeader() (coldHeader, error) {
 	if err != nil {
 		return coldHeader{}, fmt.Errorf("cold: read AppData %q: %w", c.path, err)
 	}
-	if len(ad) != appDataSize {
-		return coldHeader{}, fmt.Errorf("cold %q: expected %d-byte AppData, got %d", c.path, appDataSize, len(ad))
+	// Version before length, so a longer newer-format blob reports as a
+	// version problem rather than corruption-shaped size mismatch.
+	if len(ad) == 0 {
+		return coldHeader{}, fmt.Errorf("cold %q: empty AppData", c.path)
 	}
 	if ad[0] != coldAppDataVersion {
 		return coldHeader{}, fmt.Errorf(
 			"cold %q: unsupported AppData version 0x%02x (written by a newer stellar-rpc?)", c.path, ad[0])
+	}
+	if len(ad) != appDataSize {
+		return coldHeader{}, fmt.Errorf("cold %q: expected %d-byte AppData, got %d", c.path, appDataSize, len(ad))
 	}
 	first := binary.BigEndian.Uint32(ad[1:])
 	if uint64(first)+uint64(tr.TotalItems)-1 > math.MaxUint32 {

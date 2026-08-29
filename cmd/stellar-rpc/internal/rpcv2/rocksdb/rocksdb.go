@@ -89,8 +89,9 @@ func WrapIfEngineTooNew(err error) error {
 	msg := err.Error()
 	for _, sig := range engineTooNewSignatures {
 		if strings.Contains(msg, sig) {
-			return fmt.Errorf("%w (this database was likely written by a newer stellar-rpc "+
-				"using a newer RocksDB format; deploy that version or newer)", err)
+			return fmt.Errorf("%w (likely written by a newer stellar-rpc using a newer "+
+				"RocksDB format, so deploy that version or newer; or the path points at "+
+				"a different kind of database)", err)
 		}
 	}
 	return err
@@ -203,7 +204,9 @@ func New(cfg Config) (*Store, error) {
 	}
 	s := &Store{cfg: cfg}
 	if err := s.constructAndOpen(); err != nil {
-		return nil, err
+		// Wrapped here so every store (catalog and hot chunks alike) reports a
+		// newer-engine database as an upgrade problem, not corruption.
+		return nil, WrapIfEngineTooNew(err)
 	}
 	return s, nil
 }
@@ -877,10 +880,10 @@ func applyDBTuning(opts *grocksdb.Options, t Tuning) {
 // override (when set). The Store retains every BBTO and the cache;
 // Close destroys them after opts/cfOpts.
 //
-// A BBTO is installed on a CF iff the shared cache, that CF's bloom
-// filter, or that CF's BlockSize override is configured — preserving
-// the previous behavior of leaving RocksDB's default BBTO untouched
-// when no table-level knob is set.
+// Every CF gets an explicit BBTO, tuned or not, so the on-disk table
+// format stays pinned (pinnedTableFormatVersion) instead of riding
+// grocksdb's default; restoring a skip-when-untuned path would
+// silently unpin it.
 //
 // The bloom filter is built per CF because SetFilterPolicy MOVES the
 // policy into the BBTO (it nils the source pointer), so a single

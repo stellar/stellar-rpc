@@ -76,12 +76,17 @@ func EncodeColdMetadata(minLedger, maxLedger uint32, secret [stores.SecretLen]by
 // ErrInvalidMetadata and an unknown version byte with its own message.
 func ParseColdMetadata(metadata []byte) (uint32, uint32, [stores.SecretLen]byte, error) {
 	var secret [stores.SecretLen]byte
-	if len(metadata) != coldMetadataSize {
-		return 0, 0, secret, fmt.Errorf("%w: got %d bytes, want %d", ErrInvalidMetadata, len(metadata), coldMetadataSize)
+	// Version before length, so a longer newer-format blob reports as a
+	// version problem rather than corruption-shaped size mismatch.
+	if len(metadata) == 0 {
+		return 0, 0, secret, fmt.Errorf("%w: empty", ErrInvalidMetadata)
 	}
 	if metadata[0] != coldMetadataVersion {
 		return 0, 0, secret, fmt.Errorf(
 			"txhash: cold index metadata version 0x%02x unsupported (written by a newer stellar-rpc?)", metadata[0])
+	}
+	if len(metadata) != coldMetadataSize {
+		return 0, 0, secret, fmt.Errorf("%w: got %d bytes, want %d", ErrInvalidMetadata, len(metadata), coldMetadataSize)
 	}
 	minLedger := binary.LittleEndian.Uint32(metadata[1:5])
 	maxLedger := binary.LittleEndian.Uint32(metadata[5:9])

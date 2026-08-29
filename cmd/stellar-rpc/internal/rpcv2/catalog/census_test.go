@@ -32,8 +32,7 @@ func reopenAfter(t *testing.T, mutate func(c *Catalog)) error {
 // secret — reopens cleanly. This is the whole release-1 write surface.
 func TestCensus_AcceptsOwnVocabulary(t *testing.T) {
 	err := reopenAfter(t, func(c *Catalog) {
-		states := []geometry.State{geometry.StateFreezing, geometry.StateFrozen, geometry.StatePruning}
-		for i, s := range states {
+		for i, s := range geometry.AllStates() {
 			id := chunk.ID(i)
 			for _, kind := range geometry.AllKinds() {
 				require.NoError(t, c.put(geometry.ChunkKey(id, kind), string(s)))
@@ -41,8 +40,9 @@ func TestCensus_AcceptsOwnVocabulary(t *testing.T) {
 			idxKey := geometry.TxHashIndexKey(geometry.TxHashIndexID(i), id, id+5)
 			require.NoError(t, c.put(idxKey, string(s)))
 		}
-		require.NoError(t, c.put(geometry.HotChunkKey(7), string(geometry.HotTransient)))
-		require.NoError(t, c.put(geometry.HotChunkKey(8), string(geometry.HotReady)))
+		for i, s := range geometry.AllHotStates() {
+			require.NoError(t, c.put(geometry.HotChunkKey(chunk.ID(7+i)), string(s)))
+		}
 		require.NoError(t, c.PinEarliestLedger(2))
 	})
 	require.NoError(t, err)
@@ -65,7 +65,7 @@ func TestCensus_RefusesForeignEntries(t *testing.T) {
 		name, key, value string
 	}{
 		{"novel prefix", "format:events", "2"},
-		{"novel meta key", "meta/other", "x"},
+		{"novel meta key", "meta/other", "WOULD-BE-SECRET-BYTES"},
 		{"unknown kind under chunk prefix", "chunk:00000001:bogus", "frozen"},
 		{"version suffix on chunk state", geometry.ChunkKey(1, geometry.KindEvents), "frozen@2"},
 		{"version suffix on hot state", geometry.HotChunkKey(3), "ready@2"},
@@ -83,6 +83,8 @@ func TestCensus_RefusesForeignEntries(t *testing.T) {
 			require.ErrorIs(t, err, ErrForeignCatalog)
 			require.ErrorContains(t, err, "deploy that version or newer")
 			require.ErrorContains(t, err, tc.key)
+			require.NotContains(t, err.Error(), "WOULD-BE-SECRET-BYTES",
+				"an unknown key's value must never be printed; it may be a newer binary's key material")
 		})
 	}
 }

@@ -175,9 +175,11 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		if err != nil {
 			return err
 		}
-		// index.pack's own integrity is checked for every chunk, eventless or
-		// not: a foreign or unchecked pack is not servable whatever its term
-		// count, and the open is already in flight either way.
+		// index.pack's format, record checksum, and build stamp are checked for
+		// every chunk, eventless or not: an empty index answers every query
+		// correctly regardless, but a foreign, unchecked, or mis-schemed pack
+		// must refuse deterministically, not only once a chunk with events
+		// happens to be opened. The open is already in flight either way.
 		tr, terr := c.index.Trailer()
 		if terr != nil {
 			return fmt.Errorf("events: open %s: %w", indexPackPath, terr)
@@ -193,6 +195,20 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		if !tr.HasRecordChecksum {
 			return fmt.Errorf("%w: %s: built without a record checksum (stale build)",
 				stores.ErrCorrupt, indexPackPath)
+		}
+		ad, aerr := c.index.AppData()
+		if aerr != nil {
+			return fmt.Errorf("events: read build stamp of %s: %w", indexPackPath, aerr)
+		}
+		schema, mask, serr := decodeIndexBuildStamp(ad)
+		if serr != nil {
+			return fmt.Errorf("events: %s: %w", indexPackPath, serr)
+		}
+		if schema != TermSchemaVersion || mask != IndexedFieldMask {
+			return fmt.Errorf(
+				"events: %s was built under term schema %d with field mask %#x; this binary expects "+
+					"schema %d with mask %#x (rebuilt index required, or a binary matching the artifact)",
+				indexPackPath, schema, mask, TermSchemaVersion, IndexedFieldMask)
 		}
 		if idx.isEmpty() {
 			// A zero-term index is only valid for an eventless chunk: cross-check
@@ -212,24 +228,11 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		// Non-empty index: bind the pair to this chunk before serving from
 		// it — index.pack/index.hash carry no chunk ID of their own, so a
 		// mispaired index would silently return an incomplete subset of
-		// matches. Two cheap checks on top of the pack's own validation
-		// above: index.hash keys == index.pack records (halves of one
-		// build), and non-empty index ⇒ non-empty events.pack (converse of
-		// the empty-index check below).
-		ad, aerr := c.index.AppData()
-		if aerr != nil {
-			return fmt.Errorf("events: read build stamp of %s: %w", indexPackPath, aerr)
-		}
-		schema, mask, serr := decodeIndexBuildStamp(ad)
-		if serr != nil {
-			return fmt.Errorf("events: %s: %w", indexPackPath, serr)
-		}
-		if schema != TermSchemaVersion || mask != IndexedFieldMask {
-			return fmt.Errorf(
-				"events: %s was built under term schema %d with field mask %#x; this binary expects "+
-					"schema %d with mask %#x (rebuilt index required, or a binary matching the artifact)",
-				indexPackPath, schema, mask, TermSchemaVersion, IndexedFieldMask)
-		}
+		// matches. Two cheap checks beyond the shared format, checksum, and
+		// stamp gates above:
+		// index.hash keys == index.pack records (halves of one build), and
+		// non-empty index ⇒ non-empty events.pack (converse of the
+		// empty-index check above).
 		if uint64(tr.TotalItems) != idx.numKeys() {
 			return fmt.Errorf(
 				"events: index pair mismatch for chunk %s: index.hash holds %d keys "+
