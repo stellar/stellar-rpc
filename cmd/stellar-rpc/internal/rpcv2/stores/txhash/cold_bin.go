@@ -48,9 +48,9 @@ const (
 	// coldBinEntrySize is the per-entry width in the cold .bin file:
 	// ColdKeySize bytes of blinded key + the ledger seq.
 	coldBinEntrySize = ColdKeySize + coldBinSeqSize
-	// coldBinMagic identifies a cold txhash .bin; the bytes on disk read
-	// "SBIN". A mis-pointed or foreign file fails the header scan on it.
-	coldBinMagic uint32 = 0x4E494253
+	// coldBinMagic identifies a cold txhash .bin; a mis-pointed or foreign
+	// file fails the header scan on it.
+	coldBinMagic = "SBIN"
 	// coldBinVersion is the .bin format version; the header scan rejects
 	// files written by a newer binary rather than misreading them.
 	coldBinVersion byte = 1
@@ -113,7 +113,7 @@ func WriteColdBin(path string, secret [stores.SecretLen]byte, entries []ColdEntr
 
 	bw := bufio.NewWriterSize(f, 1<<20)
 	var header [coldBinHeaderSize]byte
-	binary.LittleEndian.PutUint32(header[:4], coldBinMagic)
+	copy(header[:4], coldBinMagic)
 	header[4] = coldBinVersion
 	binary.LittleEndian.PutUint64(header[coldBinPreludeSize:], uint64(len(entries)))
 	copy(header[coldBinPreludeSize+coldBinCountSize:], secret[:])

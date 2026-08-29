@@ -1057,6 +1057,10 @@ Every durable byte the daemon writes belongs to a storage format, and the policy
 
 **Upgrades, per tier.** Cold artifacts are write-new, read-old: a newer binary reads every id in its read set forever, writes only its current id, and mixed-id trees are permanent and normal. Cold ids are never demoted automatically in either direction, and mass rebuilds are never an upgrade path. The hot tier is the one automatic reaction: a newer binary that finds hot state at a known old hot id discards it (demote to transient, wipe, recreate) and re-ingests at most one chunk from the cold boundary, minutes of work. A capability the artifacts of an old id cannot answer (a term family they never indexed) is a loud, actionable error naming the range and the remedy, never a silent empty result; an optional background reindex can converge old chunks when wanted.
 
+---
+
+## Related documents
+
 
 - The transactions design ([gettransaction-full-history-design.md](./gettransaction-full-history-design.md)) — the tx-by-hash subsystem end to end: the hot `txhash` CF, the `.bin`/`.idx` formats, the rolling window index rebuild — its streamhash merge internals and safety argument — the `getTransaction` read path, and the capacity numbers. Canonical for the streamhash `.bin`/`.idx` formats, the index merge internals, and the index-key coverage semantics this doc summarizes.
 - The events design ([getevents-full-history-design.md](./getevents-full-history-design.md), PR #635) — the cold-segment file formats and the hot events CF schema referenced by the data model.

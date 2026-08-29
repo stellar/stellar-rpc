@@ -65,7 +65,9 @@ func TestLedgerOffsets_DecodeRejectsShortBuffer(t *testing.T) {
 	_, err := DecodeLedgerOffsets(nil)
 	require.ErrorIs(t, err, ErrShortLedgerOffsets)
 
-	_, err = DecodeLedgerOffsets(make([]byte, ledgerOffsetsHeaderLen-1))
+	short := make([]byte, ledgerOffsetsHeaderLen-1)
+	short[0] = LedgerOffsetsFormatVersion // valid version, so the length check fires
+	_, err = DecodeLedgerOffsets(short)
 	assert.ErrorIs(t, err, ErrShortLedgerOffsets)
 }
 

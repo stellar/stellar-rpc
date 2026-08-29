@@ -132,7 +132,7 @@ func writeBinFile(t *testing.T, path string, entries []fixtureEntry, secret [sto
 // zero secret) claiming count entries, for corrupt-file fixtures.
 func rawBinHeader(count uint64) [coldBinHeaderSize]byte {
 	var hdr [coldBinHeaderSize]byte
-	binary.LittleEndian.PutUint32(hdr[:4], coldBinMagic)
+	copy(hdr[:4], coldBinMagic)
 	hdr[4] = coldBinVersion
 	binary.LittleEndian.PutUint64(hdr[coldBinPreludeSize:], count)
 	return hdr

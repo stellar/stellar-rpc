@@ -131,12 +131,11 @@ func encodeIndexBuildStamp() []byte {
 // app-data blob, rejecting a short blob or an unknown stamp version. Bytes
 // past the stamp are ignored (future extension room).
 func decodeIndexBuildStamp(data []byte) (uint16, uint64, error) {
+	if err := stores.CheckBlobVersion(data, indexStampVersion); err != nil {
+		return 0, 0, fmt.Errorf("events: index.pack build stamp: %w", err)
+	}
 	if len(data) < indexStampLen {
 		return 0, 0, fmt.Errorf("events: index.pack build stamp is %d bytes, want at least %d", len(data), indexStampLen)
-	}
-	if data[0] != indexStampVersion {
-		return 0, 0, fmt.Errorf(
-			"events: index.pack build stamp version 0x%02x unsupported (written by a newer stellar-rpc?)", data[0])
 	}
 	return binary.BigEndian.Uint16(data[1:3]), binary.BigEndian.Uint64(data[3:11]), nil
 }
@@ -236,11 +235,16 @@ func encodeLedgerOffsets(o *LedgerOffsets) ([]byte, error) {
 // encodeLedgerOffsets back into a *LedgerOffsets. Used by the cold
 // reader (PR-3a).
 func DecodeLedgerOffsets(data []byte) (*LedgerOffsets, error) {
-	if len(data) < ledgerOffsetsHeaderLen {
+	// Version before length (the CheckBlobVersion order), so a differently
+	// sized newer blob reports as a version problem.
+	if len(data) == 0 {
 		return nil, ErrShortLedgerOffsets
 	}
 	if data[0] != LedgerOffsetsFormatVersion {
 		return nil, fmt.Errorf("%w: 0x%02x", ErrUnknownLedgerOffsetsVersion, data[0])
+	}
+	if len(data) < ledgerOffsetsHeaderLen {
+		return nil, ErrShortLedgerOffsets
 	}
 	startLedger := binary.BigEndian.Uint32(data[1:5])
 	n := binary.BigEndian.Uint32(data[5:9])
@@ -315,11 +319,16 @@ func encodeEventsMeta(secret [stores.SecretLen]byte) []byte {
 
 func decodeEventsMeta(data []byte) ([stores.SecretLen]byte, error) {
 	var secret [stores.SecretLen]byte
-	if len(data) != eventsMetaLen {
-		return secret, fmt.Errorf("%w: %d bytes, want %d", errBadIndexMetadata, len(data), eventsMetaLen)
+	// Version before length (the CheckBlobVersion order), so a differently
+	// sized newer blob reports as a version problem.
+	if len(data) == 0 {
+		return secret, fmt.Errorf("%w: empty", errBadIndexMetadata)
 	}
 	if data[0] != eventsMetaVersion {
 		return secret, fmt.Errorf("%w: unknown version 0x%02x", errBadIndexMetadata, data[0])
+	}
+	if len(data) != eventsMetaLen {
+		return secret, fmt.Errorf("%w: %d bytes, want %d", errBadIndexMetadata, len(data), eventsMetaLen)
 	}
 	copy(secret[:], data[1:])
 	return secret, nil

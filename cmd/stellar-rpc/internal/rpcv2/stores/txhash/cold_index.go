@@ -169,8 +169,8 @@ func scanBinHeader(path string) (uint64, [stores.SecretLen]byte, error) {
 	if _, err := io.ReadFull(f, hdr[:]); err != nil {
 		return 0, secret, fmt.Errorf("txhash: read header of %s: %w", path, err)
 	}
-	if magic := binary.LittleEndian.Uint32(hdr[:4]); magic != coldBinMagic {
-		return 0, secret, fmt.Errorf("txhash: %s is not a cold txhash .bin (magic %#08x, want %#08x)",
+	if magic := string(hdr[:4]); magic != coldBinMagic {
+		return 0, secret, fmt.Errorf("txhash: %s is not a cold txhash .bin (magic %q, want %q)",
 			path, magic, coldBinMagic)
 	}
 	if hdr[4] != coldBinVersion {

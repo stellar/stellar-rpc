@@ -68,7 +68,7 @@ const (
 
 // engineTooNewSignatures are the RocksDB open-failure strings produced when a
 // database was written by a newer RocksDB than the linked one. They arrive
-// corruption-classed from the engine, so WrapIfEngineTooNew re-labels them.
+// corruption-classed from the engine, so wrapIfEngineTooNew re-labels them.
 //
 //nolint:gochecknoglobals // immutable signature list
 var engineTooNewSignatures = []string{
@@ -78,11 +78,11 @@ var engineTooNewSignatures = []string{
 	"future feature not supported",
 }
 
-// WrapIfEngineTooNew re-labels an open failure whose error text matches a
+// wrapIfEngineTooNew re-labels an open failure whose error text matches a
 // known newer-RocksDB signature, so a rollback across a RocksDB upgrade reads
 // as "deploy the newer binary" instead of corruption. Any other error (nil
 // included) passes through unchanged.
-func WrapIfEngineTooNew(err error) error {
+func wrapIfEngineTooNew(err error) error {
 	if err == nil {
 		return nil
 	}
@@ -160,10 +160,10 @@ type Store struct {
 
 	// cache is the block cache shared across every CF in this store,
 	// created in applyTuning when BlockCacheMB is set. bbtos are the
-	// per-CF block-based-table options (one per CF that has a cache,
-	// bloom filter, or block-size override); each may own a moved-in
-	// bloom filter. Both are destroyed in Close after opts/cfOpts,
-	// which hold C-side refs we must drop first.
+	// per-CF block-based-table options (one per CF, carrying the pinned
+	// table format version); each may own a moved-in bloom filter. Both
+	// are destroyed in Close after opts/cfOpts, which hold C-side refs
+	// we must drop first.
 	cache *grocksdb.Cache
 	bbtos []*grocksdb.BlockBasedTableOptions
 
@@ -206,7 +206,7 @@ func New(cfg Config) (*Store, error) {
 	if err := s.constructAndOpen(); err != nil {
 		// Wrapped here so every store (catalog and hot chunks alike) reports a
 		// newer-engine database as an upgrade problem, not corruption.
-		return nil, WrapIfEngineTooNew(err)
+		return nil, wrapIfEngineTooNew(err)
 	}
 	return s, nil
 }

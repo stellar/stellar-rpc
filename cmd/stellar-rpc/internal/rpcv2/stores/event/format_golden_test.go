@@ -2,11 +2,12 @@ package event
 
 // Byte-level goldens for the term-key derivation. The term keys are on-disk
 // format: they are the identities every frozen index.pack/index.hash is built
-// over, so any change to the hash function, the field-byte prefix, a field's
-// value encoding, or the blinding derivation silently invalidates every
-// existing index. These fixtures make such a change fail CI with "bytes
-// changed: bump TermSchemaVersion (and the artifact format) or revert" instead
-// of relying on review to notice.
+// over, so any change to the hash function, the field-byte prefix, or a
+// field's value encoding silently invalidates every existing index. These
+// fixtures make such a change fail CI with "bytes changed: bump
+// TermSchemaVersion (and the artifact format) or revert" instead of relying
+// on review to notice. (The shared blinding primitives are pinned at their
+// own level, in stores/blind_test.go.)
 
 import (
 	"encoding/hex"
@@ -16,8 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
-
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
 func hexKey(t *testing.T, k TermKey) string {
@@ -59,21 +58,4 @@ func TestFieldTermKeys_Golden(t *testing.T) {
 	}
 	assert.Equal(t, TopicCountTermKey(topicCountOverflowBucket), TopicCountTermKey(99),
 		"counts past the overflow bucket clamp into it")
-}
-
-// TestBlinding_Golden pins the routing-key derivation the cold artifacts store
-// (.bin keys, index.hash routing): the per-index secret derivation and the
-// SipHash blinding, under a fixed master secret.
-func TestBlinding_Golden(t *testing.T) {
-	var master [32]byte
-	for i := range master {
-		master[i] = byte(i)
-	}
-	events42 := stores.DeriveIndexSecret(master[:], "events", 42)
-	assert.Equal(t, "499f6daedb5e4a2e9306870f4d20ea07", hex.EncodeToString(events42[:]))
-	txhash7 := stores.DeriveIndexSecret(master[:], "txhash", 7)
-	assert.Equal(t, "185e905743a3dc8c298d5dfc22e9a1ba", hex.EncodeToString(txhash7[:]))
-
-	blinded := stores.BlindKey(events42, []byte("stellar-rpc-term")[:stores.SecretLen])
-	assert.Equal(t, "74a4a95714d6020334182f1d83ac44a5", hex.EncodeToString(blinded[:]))
 }
