@@ -301,7 +301,7 @@ func (s *Store) BatchMultiGet(cf string, keys [][]byte) ([][]byte, error) {
 
 	pinned, err := s.db.BatchedMultiGetCF(ro, cfh, true /* sortedInput */, keys...)
 	if err != nil {
-		return nil, fmt.Errorf("rocksdb: batched multi get on %q: %w", cf, err)
+		return nil, fmt.Errorf("rocksdb: batched multi get on %q: %w", cf, wrapIfEngineTooNew(err))
 	}
 	defer pinned.Destroy()
 
@@ -369,10 +369,10 @@ func (s *Store) LastKey(cf string) ([]byte, bool, error) {
 	it.SeekToLast()
 	if !it.Valid() {
 		// Empty CF (it.Err() is nil) or a mid-seek RocksDB error.
-		return nil, false, it.Err()
+		return nil, false, wrapIfEngineTooNew(it.Err())
 	}
 	// Copy: the KeySlice is freed when the iterator closes.
-	return bytes.Clone(it.KeySlice().Data()), true, it.Err()
+	return bytes.Clone(it.KeySlice().Data()), true, wrapIfEngineTooNew(it.Err())
 }
 
 // IterateRange yields (key, value) for keys in [start, end] byte-lex

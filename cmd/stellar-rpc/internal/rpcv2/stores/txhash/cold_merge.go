@@ -266,6 +266,11 @@ func newFileReader(path string, bufBytes int) (*fileReader, error) {
 		return nil, fmt.Errorf("txhash: %s has .bin version %d unsupported by this binary "+
 			"(written by a newer stellar-rpc?)", path, buf[4])
 	}
+	if buf[5]|buf[6]|buf[7] != 0 {
+		_ = f.Close()
+		return nil, fmt.Errorf("txhash: %s has reserved header bytes set "+
+			"(written by a newer stellar-rpc, or corrupted)", path)
+	}
 	return &fileReader{
 		path:    path,
 		f:       f,
