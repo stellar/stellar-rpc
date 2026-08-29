@@ -43,9 +43,17 @@ func Open(
 ) (*Catalog, error) {
 	store, err := rocksdb.New(rocksdb.Config{Path: path, Logger: logger})
 	if err != nil {
-		return nil, err
+		return nil, rocksdb.WrapIfEngineTooNew(err)
 	}
 	c := &Catalog{store: store, logger: logger, layout: layout, txhashIndex: txhashIndex}
+	// Census before anything writes: a catalog holding entries outside this
+	// binary's vocabulary (a newer binary's formats, or corruption) is refused
+	// here, ahead of the secret mint below — Open must never write into a
+	// catalog it is about to refuse.
+	if err := c.census(); err != nil {
+		_ = c.Close()
+		return nil, err
+	}
 	// Mint-or-load the cold-index secret up front (get-or-create is not atomic;
 	// here it runs single-threaded) and cache it, so post-Open Secret() reads are
 	// lock-free and cannot fail.

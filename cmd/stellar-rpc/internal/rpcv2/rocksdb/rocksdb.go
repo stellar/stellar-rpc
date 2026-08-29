@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -56,7 +57,44 @@ func OpenSnapshots() int64 { return openSnapshots.Load() }
 const (
 	dirPerm       os.FileMode = 0o700
 	defaultCFName             = "default"
+
+	// pinnedTableFormatVersion pins the block-based table format written to
+	// disk, so a grocksdb/librocksdb upgrade cannot silently change the on-disk
+	// format. Raising it is a format-touching change: an older binary cannot
+	// open the newer tables, so it must ship as a declared storage-format bump,
+	// never as a side effect of a dependency bump.
+	pinnedTableFormatVersion = 6
 )
+
+// engineTooNewSignatures are the RocksDB open-failure strings produced when a
+// database was written by a newer RocksDB than the linked one. They arrive
+// corruption-classed from the engine, so WrapIfEngineTooNew re-labels them.
+//
+//nolint:gochecknoglobals // immutable signature list
+var engineTooNewSignatures = []string{
+	"unsupported format_version",
+	"Column families not opened",
+	"Unknown Footer version",
+	"future feature not supported",
+}
+
+// WrapIfEngineTooNew re-labels an open failure whose error text matches a
+// known newer-RocksDB signature, so a rollback across a RocksDB upgrade reads
+// as "deploy the newer binary" instead of corruption. Any other error (nil
+// included) passes through unchanged.
+func WrapIfEngineTooNew(err error) error {
+	if err == nil {
+		return err
+	}
+	msg := err.Error()
+	for _, sig := range engineTooNewSignatures {
+		if strings.Contains(msg, sig) {
+			return fmt.Errorf("%w (this database was likely written by a newer stellar-rpc "+
+				"using a newer RocksDB format; deploy that version or newer)", err)
+		}
+	}
+	return err
+}
 
 // Config — per-store knobs. Each Layer-2 facade owns one, built in
 // code (never from operator TOML).
@@ -854,10 +892,10 @@ func (s *Store) applySharedTableOptions(cfNames []string, cfOpts []*grocksdb.Opt
 	}
 	for i, o := range cfOpts {
 		override := s.cfg.PerCFOptions[cfNames[i]]
-		if s.cache == nil && override.BloomFilterBitsPerKey == 0 && override.BlockSize == 0 {
-			continue
-		}
+		// Every CF gets an explicit BBTO so the on-disk table format is pinned
+		// (see pinnedTableFormatVersion) instead of riding grocksdb's default.
 		bbto := grocksdb.NewDefaultBlockBasedTableOptions()
+		bbto.SetFormatVersion(pinnedTableFormatVersion)
 		if s.cache != nil {
 			bbto.SetBlockCache(s.cache)
 		}

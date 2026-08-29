@@ -8,6 +8,9 @@ import (
 // catalogSecretStoreKey holds the deployment's cold-index secret.
 const catalogSecretStoreKey = "meta/catalog-secret"
 
+// catalogSecretLen is the secret's exact byte width; the census checks it.
+const catalogSecretLen = 32
+
 // Secret returns a copy of the deployment's cold-index secret, minted once at
 // Open and cached. Per-index secrets are derived from it, so an attacker who
 // influences indexed keys cannot predict which block a key lands in. Returning

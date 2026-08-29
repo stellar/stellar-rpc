@@ -762,7 +762,9 @@ func TestStore_TuningZeroValue(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 
 	assert.Nil(t, s.cache)
-	assert.Nil(t, s.bbtos)
+	// Even with zero tuning, every CF carries an explicit BBTO so the on-disk
+	// table format stays pinned (pinnedTableFormatVersion).
+	assert.Len(t, s.bbtos, 1)
 
 	require.NoError(t, s.Put(defaultCFName, []byte("k"), []byte("v")))
 	v, found, err := s.Get(defaultCFName, []byte("k"))
