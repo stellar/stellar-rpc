@@ -112,8 +112,12 @@ type HotStore struct {
 	offsets    *ConcurrentLedgerOffsets
 }
 
-// Compile-time guard: *HotStore satisfies Reader.
-var _ Reader = (*HotStore)(nil)
+// Compile-time guards: *HotStore satisfies Reader, and the optional
+// postingReader seam match.go's ascending path probes for.
+var (
+	_ Reader        = (*HotStore)(nil)
+	_ postingReader = (*HotStore)(nil)
+)
 
 // NewWithStore wraps an ALREADY-OPEN rocksdb.Store as an events HotStore on the
 // three events CFs (CFNames()), running the mandatory warmup to rebuild the
@@ -449,6 +453,40 @@ func (h *HotStore) IngestLedgerToBatch(
 	b.Put(OffsetsCF, encodeOffsetKey(ledgerSeq), encodeLedgerEventCount(uint32(len(payloads))))
 
 	return func() { h.applyLedger(startID, termKeys) }, nil
+}
+
+// lookupPostings is the no-materialize half of LookupKeys, and the
+// hot store's implementation of the optional postingReader seam the
+// ascending match path probes for (see match.go). It returns each
+// term's live mirror representation — sorted ids for a sparse term,
+// the roaring bitmap for a dense one — so a query that only walks ids
+// in ascending order never pays Get's roaring.New + AddMany per
+// sparse term.
+//
+// Results are positionally aligned with keys; a miss is the zero
+// postings, which postings.present() reports as absent. Same
+// borrowed-snapshot contract as LookupKeys: read-only, valid
+// indefinitely.
+//
+// The cold reader deliberately does NOT implement this. Its postings
+// arrive as freshly-unmarshaled bitmaps out of index.pack, so there
+// is no un-materialized representation to expose; match.go's fallback
+// wraps its LookupKeys bitmaps in the same cursor type.
+func (h *HotStore) lookupPostings(ctx context.Context, keys []TermKey) ([]postings, error) {
+	if h.chunkStore.IsClosed() {
+		return nil, stores.ErrStoreClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	results := make([]postings, len(keys))
+	for i, key := range keys {
+		results[i] = h.mirror.lookupPostings(key)
+	}
+	return results, nil
 }
 
 // index returns the in-memory term mirror. Test-only write hook: no production
