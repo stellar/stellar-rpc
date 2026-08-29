@@ -433,7 +433,8 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring
 // records into single ReadAt calls and optionally fans out across
 // the worker count set via ColdReaderOptions.Concurrency.
 // result[idx] writes from concurrent workers do not race — each
-// idx is unique.
+// idx is unique — and the payload arena they share is locked (see
+// the callback).
 func (c *ColdReader) FetchEvents(ctx context.Context, eventIDs []uint32) ([]Payload, error) {
 	if c.closed.Load() {
 		return nil, stores.ErrStoreClosed
@@ -457,15 +458,26 @@ func (c *ColdReader) FetchEvents(ctx context.Context, eventIDs []uint32) ([]Payl
 		positions[i] = int(id)
 	}
 	results := make([]Payload, len(eventIDs))
-	var arena byteArena
+	// One arena per call, shared by every worker: a call's payloads live and
+	// die together, so per-payload clones would only add GC work. The arena
+	// is one appended buffer and is single-threaded by construction, while
+	// ReadItems calls the callback from up to Concurrency goroutines — hence
+	// the lock. It covers the copy alone; the read, the record decode and the
+	// Unmarshal all stay outside it, so a fan-out still overlaps everything
+	// that costs.
+	var (
+		arenaMu sync.Mutex
+		arena   byteArena
+	)
 	if err := c.events.ReadItems(ctx, positions, func(idx int, data []byte) error {
 		// packfile.ReadItems passes a borrowed data slice valid only for
 		// the duration of fn (see Reader.ReadItems docstring). FetchEvents
 		// returns the Payloads in a slice that outlives fn, so copy before
-		// Unmarshal aliases the bytes into ContractEventBytes — through an
-		// arena, since a batch's payloads live and die together and
-		// per-payload clones only add GC work.
-		return results[idx].Unmarshal(arena.copy(data))
+		// Unmarshal aliases the bytes into ContractEventBytes.
+		arenaMu.Lock()
+		owned := arena.copy(data)
+		arenaMu.Unlock()
+		return results[idx].Unmarshal(owned)
 	}); err != nil {
 		// packfile.ReadItems also validates sorted positions as defense in
 		// depth; translate its sentinel to ours so callers can errors.Is
