@@ -11,7 +11,9 @@
 #   INSTANCE_TYPE, HOT_NUM_LEDGERS, BUDGET_MINUTES, ELAPSED_MINUTES,
 #   DEADLINE_EPOCH, TARGET_REF, TARGET_SHA, BENCH_RUN_ID, VIEWER_URL,
 #   RESULTS_URI, RUN_URL, RUN_JSON (path to the converted results-site run JSON,
-#   for the ingestion-vs-target recap), EXCERPT (verdict-markdown lines, fail),
+#   for the ingestion-vs-target recap), INGEST_STATE (ingested|skipped|failed,
+#   empty when the ingest was never attempted) and INGEST_REASON (one line, why
+#   the run is not on the site), EXCERPT (verdict-markdown lines, fail),
 #   BOX_ID, BOX_RESCUED (true when the box is left up), RUN_ID_TAG, BUCKET,
 #   RESULT_KEY, AWS_REGION, HARNESS_SHA, REPO_URL.
 # Env in, MODE=reaper:
@@ -126,6 +128,8 @@ VIEWER_URL="${VIEWER_URL:-}"
 RESULTS_URI="${RESULTS_URI:-}"
 RUN_URL="${RUN_URL:-}"
 RUN_JSON="${RUN_JSON:-}"
+INGEST_STATE="${INGEST_STATE:-}"
+INGEST_REASON="${INGEST_REASON:-}"
 EXCERPT="${EXCERPT:-}"
 BOX_ID="${BOX_ID:-}"
 BOX_RESCUED="${BOX_RESCUED:-false}"
@@ -151,8 +155,8 @@ BUNDLE_URL=$(s3_prefix_url "$RESULTS_URI")
 SUMMARY_URL=""
 if [ -n "$VIEWER_URL" ]; then
   BASE="${VIEWER_URL%%\?*}"
-  QUERY="${VIEWER_URL#"$BASE"}"
-  SUMMARY_URL="${BASE%/}/summary.html${QUERY}"
+  URL_QUERY="${VIEWER_URL#"$BASE"}"
+  SUMMARY_URL="${BASE%/}/summary.html${URL_QUERY}"
 fi
 
 # The ingestion-p99-vs-target recap, from the converted run JSON the ingest step
@@ -240,6 +244,8 @@ jq -n \
   --arg runidtag "$RUN_ID_TAG" \
   --arg repo "$REPO_URL" \
   --arg harness "$HARNESS_SHA" \
+  --arg ingest_state "$INGEST_STATE" \
+  --arg ingest_reason "$INGEST_REASON" \
   --argjson results "$RESULTS_BLOCK" \
   '
   def button($t; $u): {type: "button", text: {type: "plain_text", text: $t, emoji: true}, url: $u};
@@ -250,11 +256,21 @@ jq -n \
   | (if $elapsed != "" and $budget != "" then " in *\($elapsed)* of a \($budget) budget"
      elif $elapsed != "" then " in *\($elapsed)*" else "" end) as $took
 
+  # The campaign passing and the run reaching the results site are two
+  # outcomes; a green campaign whose ingest broke still says so, in the lead
+  # (which never folds) as well as the footer. A viewer URL in hand means the
+  # ingest published, whatever the state says. Slack caps a section at 3000
+  # chars and a context element at 2000, hence the trimmed reason.
+  | ($ingest_reason | .[0:300]) as $ireason
+  | (if $summary != "" or $ingest_state == "" or $ingest_state == "ingested" then ""
+     elif $ingest_state == "failed" then " ⚠️ *Results-site ingest failed:* \($ireason)."
+     else " ℹ️ *Not ingested:* \($ireason)." end) as $ingest_note
+
   | (if $state == "ok" then
       {
         color: "#2eb67d",
         header: "✅ Bench campaign passed — \($name | .[0:100])",
-        lead: "\(if $runs == "1" then "The run finished green" else "All *\($runs) runs* green" end)\($took).",
+        lead: "\(if $runs == "1" then "The run finished green" else "All *\($runs) runs* green" end)\($took).\($ingest_note)",
         fields: ([
           ["Phase", $phase],
           ["Machine", ($machine + (if $workers != "" then " · \($workers) workers" else "" end))],
@@ -272,7 +288,10 @@ jq -n \
           (if $bundle_url != "" then button("Bundle on S3"; $bundle_url) else empty end)
         ]),
         context: ([
-          (if $summary != "" then "Ingested into the results site" else "Not on the results site — the ingest did not complete" end),
+          (if $summary != "" or $ingest_state == "ingested" then "Ingested into the results site"
+           elif $ingest_state == "failed" then "Not on the results site — ingest failed: \($ireason)"
+           elif $ingest_state == "skipped" then "Not on the results site — \($ireason)"
+           else "Not on the results site — the ingest did not complete" end),
           (if $harness != "" then "harness \($harness | .[0:8])" else empty end)
         ] | join(" · "))
       }
