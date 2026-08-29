@@ -135,6 +135,20 @@ func (d *denseState) snapshot() *roaring.Bitmap {
 	return bm
 }
 
+// cardinality is the term's id count without materializing a
+// snapshot for it. A live pub already is the term, exactly, so it
+// answers lock-free; otherwise the count comes off wbm under mu,
+// which costs a walk of the writer's containers rather than a clone
+// of them.
+func (d *denseState) cardinality() uint64 {
+	if bm := d.pub.Load(); bm != nil {
+		return bm.GetCardinality()
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.wbm.GetCardinality()
+}
+
 // postings is an iterable view of ONE term's event IDs, in whichever
 // representation the index already holds: the sparse mode's sorted
 // []uint32, a dense term's live denseState, or a bitmap that came
@@ -186,6 +200,25 @@ func (p postings) bitmap() *roaring.Bitmap {
 		return p.dense.snapshot()
 	}
 	return p.bm
+}
+
+// estimate is the term's cardinality over the whole chunk, the weight
+// the ascending path's query plan orders an intersection by. It
+// ignores the caller's window, so it ranks terms rather than counting
+// a query's candidates. The zero postings weighs 0.
+//
+// A dense term is counted off the writer's own bitmap
+// (denseState.cardinality), not off a snapshot: planning wants a
+// number, and snapshot would clone a term written since its last read
+// to hand back a bitmap the plan may never walk.
+func (p postings) estimate() uint64 {
+	if p.dense != nil {
+		return p.dense.cardinality()
+	}
+	if p.bm != nil {
+		return p.bm.GetCardinality()
+	}
+	return uint64(len(p.ids))
 }
 
 // AddTo records each eventID under key. Callers feed events in
