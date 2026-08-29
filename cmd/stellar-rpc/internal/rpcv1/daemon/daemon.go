@@ -402,6 +402,7 @@ func (d *Daemon) setupHTTPServers(cfg *config.Config) {
 	d.server = &http.Server{
 		Handler:     createHTTPHandler(d.logger, d.jsonRPCHandler),
 		ReadTimeout: jsonrpc.DefaultHTTPReadTimeout,
+		IdleTimeout: jsonrpc.DefaultHTTPIdleTimeout,
 	}
 
 	if cfg.AdminEndpoint != "" {
@@ -423,7 +424,11 @@ func (d *Daemon) setupAdminServer(cfg *config.Config) {
 	if err != nil {
 		d.logger.WithError(err).WithField("endpoint", cfg.AdminEndpoint).Fatal("cannot listen on admin endpoint")
 	}
-	d.adminServer = &http.Server{Handler: adminMux} //nolint:gosec
+	d.adminServer = &http.Server{
+		Handler:     adminMux,
+		ReadTimeout: jsonrpc.DefaultHTTPReadTimeout,
+		IdleTimeout: jsonrpc.DefaultHTTPIdleTimeout,
+	}
 }
 
 // mustInitializeStorage initializes the storage using what was on the DB

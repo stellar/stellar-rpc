@@ -202,6 +202,21 @@ func (d *pageDriver) drain() ([]string, ScanStatus) {
 	return nil, 0
 }
 
+// topicFilter is a filter naming raw as its topic0 value.
+func topicFilter(raw []byte) event.Filter {
+	var f event.Filter
+	f.Topics[0] = raw
+	return f
+}
+
+// voidScValBytes is the shortest well-formed ScVal encoding.
+func voidScValBytes(t *testing.T) []byte {
+	t.Helper()
+	raw, err := xdr.ScVal{Type: xdr.ScValTypeScvVoid}.MarshalBinary()
+	require.NoError(t, err)
+	return raw
+}
+
 func TestQueryEvents_SinglePageComplete(t *testing.T) {
 	r, _, f := singleChunkFixture(t)
 	maxL := f + 3
@@ -894,6 +909,22 @@ func TestQueryEvents_CursorValidation(t *testing.T) {
 			Scope: EventScope{
 				MinLedger: f + 100,
 				Filters:   []event.Filter{{ContractID: []byte{0x0a, 0x0b}}},
+			},
+		}, 1, ErrCursorMalformed},
+		// Topic bytes reach the term hash unparsed, so a cursor naming
+		// anything but one whole ScVal was forged, never minted.
+		"filter topic that is not one ScVal": {EventCursor{
+			Scope: EventScope{
+				MinLedger: f,
+				Filters:   []event.Filter{topicFilter([]byte{0xff})},
+			},
+		}, 1, ErrCursorMalformed},
+		// A whole ScVal with one byte after it: the value parses, so only
+		// the length comparison catches the extra byte.
+		"filter topic with trailing bytes": {EventCursor{
+			Scope: EventScope{
+				MinLedger: f,
+				Filters:   []event.Filter{topicFilter(append(voidScValBytes(t), 0x00))},
 			},
 		}, 1, ErrCursorMalformed},
 		"watermark overflow sentinel": {EventCursor{

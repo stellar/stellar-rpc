@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
@@ -79,13 +81,72 @@ func TestJSONRPCHandler_GetEventsIsExplicitlyNotImplemented(t *testing.T) {
 	assert.Contains(t, out.Error.Message, "#774")
 }
 
-func TestJSONRPCHandler_GetEventsV2IsExplicitlyNotImplemented(t *testing.T) {
+// The registered handler answers over the real server, so this covers
+// the wiring the eventsapi tests cannot: the method name in the table,
+// and the wrapper's read view reaching a handler that is not an adapter.
+func TestJSONRPCHandler_ServesGetEventsV2(t *testing.T) {
 	url := newTestRPCServer(t, seedServingRegistry(t))
 
-	out := rpcv2test.PostRPC(t, url, "getEventsV2", `{"startLedger":2}`)
+	out := rpcv2test.PostRPC(t, url, "getEventsV2",
+		`{"minLedger":2,"maxLedger":2}`)
+	require.Nil(t, out.Error)
+	var result struct {
+		Events       []json.RawMessage `json:"events"`
+		Cursor       string            `json:"cursor"`
+		ScanStatus   string            `json:"scanStatus"`
+		LatestLedger uint32            `json:"latestLedger"`
+	}
+	require.NoError(t, json.Unmarshal(out.Result, &result))
+	assert.Empty(t, result.Events, "the fixture ledger carries no events")
+	assert.Equal(t, protocol.ScanStatusComplete, result.ScanStatus)
+	assert.Empty(t, result.Cursor)
+	assert.Equal(t, uint32(chunk.FirstLedgerSeq), result.LatestLedger)
+}
+
+// An invalid request must reach the client as typed error data, not as a
+// bare message.
+func TestJSONRPCHandler_GetEventsV2ReportsTypedErrorData(t *testing.T) {
+	url := newTestRPCServer(t, seedServingRegistry(t))
+
+	out := rpcv2test.PostRPC(t, url, "getEventsV2", `{"minLedger":2,"limit":9999}`)
 	require.NotNil(t, out.Error)
-	assert.EqualValues(t, jrpc2.MethodNotFound, out.Error.Code)
-	assert.Contains(t, out.Error.Message, "#774")
+	assert.EqualValues(t, jrpc2.InvalidParams, out.Error.Code)
+	var data struct {
+		Reason string `json:"reason"`
+	}
+	require.NoError(t, json.Unmarshal(out.Error.Data, &data))
+	assert.Equal(t, protocol.ErrorReasonInvalidParams, data.Reason)
+}
+
+// Every field is optional, so a typo would widen the query rather than fail.
+func TestJSONRPCHandler_GetEventsV2RejectsUnknownFields(t *testing.T) {
+	url := newTestRPCServer(t, seedServingRegistry(t))
+
+	for name, params := range map[string]string{
+		"top level":      `{"minLedger":2,"maxLedgor":2}`,
+		"in a filter":    `{"minLedger":2,"filters":[{"topicc1":"AAAA"}]}`,
+		"array params":   `[2]`,
+		"negative limit": `{"minLedger":2,"limit":-1}`,
+		"wrong type":     `{"minLedger":"abc"}`,
+		"filter not obj": `{"minLedger":2,"filters":[7]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := rpcv2test.PostRPC(t, url, protocol.GetEventsV2MethodName, params)
+			require.NotNil(t, out.Error)
+			assert.EqualValues(t, jrpc2.InvalidParams, out.Error.Code)
+			var data struct {
+				Reason string `json:"reason"`
+			}
+			require.NoError(t, json.Unmarshal(out.Error.Data, &data))
+			assert.Equal(t, protocol.ErrorReasonInvalidParams, data.Reason)
+			assert.NotContains(t, out.Error.Message, "json:",
+				"the decoder's own prefix is not the client's business")
+			assert.NotContains(t, out.Error.Message, "protocol.",
+				"a Go type name is not the client's business")
+			assert.NotContains(t, out.Error.Message, "Go struct",
+				"the decoder's phrasing is not the client's business")
+		})
+	}
 }
 
 func TestJSONRPCHandler_ServesLatestLedgerFromRegistry(t *testing.T) {

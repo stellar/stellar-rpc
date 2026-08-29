@@ -8,6 +8,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
@@ -27,7 +28,7 @@ func NewTransactionReader(networkPassphrase string, metrics observability.Metric
 }
 
 func (r *TransactionReader) GetTransaction(ctx context.Context, hash xdr.Hash) (store.Transaction, error) {
-	view, err := viewFrom(ctx)
+	view, err := query.ViewFrom(ctx)
 	if err != nil {
 		return store.Transaction{}, err
 	}
