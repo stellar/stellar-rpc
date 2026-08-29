@@ -172,7 +172,7 @@ func txHashRequest(ctx context.Context, f *queryFixture, corpus *txHashCorpus) q
 			}
 			defer view.Release()
 
-			_, err = reader.GetTransaction(adapters.WithView(ctx, view), xdr.Hash(hash))
+			_, err = reader.GetTransaction(query.WithView(ctx, view), xdr.Hash(hash))
 			found := err == nil
 			if errors.Is(err, store.ErrNoTransaction) {
 				err = nil

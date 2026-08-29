@@ -273,7 +273,7 @@ func hashesPerLedger(
 ) map[uint32]int {
 	t.Helper()
 	reader := adapters.NewTransactionReader(f.Passphrase, nil)
-	ctx := adapters.WithView(context.Background(), view)
+	ctx := query.WithView(context.Background(), view)
 	counts := map[uint32]int{}
 	for _, h := range hashes {
 		tx, err := reader.GetTransaction(ctx, xdr.Hash(h))

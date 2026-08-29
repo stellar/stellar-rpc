@@ -179,18 +179,23 @@ func (s *txHashSampler) sampleChunk(view *query.ReadView, c chunk.ID, first, las
 			continue
 		}
 		s.read[seq] = struct{}{}
-		raw, err := reader.GetLedgerRaw(seq)
+		// The ledger bytes are on loan inside the callback, so the hashes are
+		// picked there; they are value arrays and outlive the loan.
+		var picked [][32]byte
+		err := reader.WithLedger(seq, func(raw []byte) error {
+			parts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
+			if err != nil {
+				return fmt.Errorf("extract tx parts of ledger %d: %w", seq, err)
+			}
+			picked = sampleHashesFromLedger(s.rng, parts)
+			return nil
+		})
 		if errors.Is(err, stores.ErrNotFound) {
 			continue
 		}
 		if err != nil {
 			return fmt.Errorf("read ledger %d: %w", seq, err)
 		}
-		parts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
-		if err != nil {
-			return fmt.Errorf("extract tx parts of ledger %d: %w", seq, err)
-		}
-		picked := sampleHashesFromLedger(s.rng, parts)
 		if len(picked) == 0 {
 			continue
 		}
@@ -246,7 +251,7 @@ func verifySampledHashResolves(
 		return err
 	}
 	reader := adapters.NewTransactionReader(f.Passphrase, nil)
-	if _, err := reader.GetTransaction(adapters.WithView(ctx, view), xdr.Hash(hash)); err != nil {
+	if _, err := reader.GetTransaction(query.WithView(ctx, view), xdr.Hash(hash)); err != nil {
 		return fmt.Errorf("probe of a known transaction hash failed: %w "+
 			"(the fixture's tx-hash index may be missing or unreadable)", err)
 	}
@@ -264,12 +269,16 @@ func verifyEnvelopePairing(view *query.ReadView, passphrase string, hash [32]byt
 	if err != nil {
 		return fmt.Errorf("resolve ledgers of the sampled ledger %d: %w", seq, err)
 	}
-	raw, err := reader.GetLedgerRaw(seq)
+	var found bool
+	var pairErr error
+	err = reader.WithLedger(seq, func(raw []byte) error {
+		_, found, pairErr = sdkingest.LedgerTransactionViewByHash(xdr.LedgerCloseMetaView(raw), hash, passphrase)
+		return nil
+	})
 	if err != nil {
 		return fmt.Errorf("re-read the sampled ledger %d: %w", seq, err)
 	}
-	_, found, err := sdkingest.LedgerTransactionViewByHash(xdr.LedgerCloseMetaView(raw), hash, passphrase)
-	if err != nil {
+	if err := pairErr; err != nil {
 		return fmt.Errorf(
 			"transaction %x does not pair with an envelope in ledger %d, the ledger it was sampled from: "+
 				"--network-passphrase=%q is wrong for this dataset (%w)", hash, seq, passphrase, err)
