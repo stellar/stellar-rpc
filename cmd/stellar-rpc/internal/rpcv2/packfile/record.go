@@ -1,6 +1,9 @@
 package packfile
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // record is the per-call processing workspace pulled from
 // recordWorkspacePool. It carries scratch buffers and the decoded item-size
@@ -155,9 +158,13 @@ func (r *record) decode(data []byte, recordIdx int) error {
 // item returns the item at index i within the decoded record.
 // The returned slice is valid only until the next decode call.
 // Panics if i is out of [0, n) where n is the number of items.
+//
+// Clipped: an item's capacity otherwise runs to the end of the shared record
+// buffer, so a borrower appending to its loan would overwrite the items packed
+// after it. Every loan the reader hands out passes through here.
 func (r *record) item(i int) []byte {
 	if i < 0 || i >= len(r.sizes) {
 		panic(fmt.Sprintf("packfile: item(%d) out of range [0, %d)", i, len(r.sizes)))
 	}
-	return r.current[r.offsets[i]:r.offsets[i+1]]
+	return slices.Clip(r.current[r.offsets[i]:r.offsets[i+1]])
 }

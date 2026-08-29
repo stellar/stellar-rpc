@@ -7,11 +7,12 @@ import (
 )
 
 // SeedCloseTimes stamps the close times of both servable-window edges on the
-// registry before serving begins — OpenRegistry seeds the latest ledger with
-// close time 0 (the catalog has no close times), and the oldest cache starts
-// empty. One point read per edge here spares the first requests those reads;
-// the fallbacks in getLedgerRange stay as backstops. No-op on an empty
-// catalog (nothing committed yet).
+// registry before serving begins — OpenRegistry publishes the latest ledger with
+// no close time (the catalog records sequences, not timestamps) and the oldest
+// stamp starts empty. One point read per edge here, once, is what keeps every
+// served request off that read: the fallbacks in getLedgerRange stay only as
+// backstops for the boot window and for the read after the retention floor
+// moves. No-op on an empty catalog (nothing committed yet).
 func SeedCloseTimes(registry *query.Registry) error {
 	view, err := registry.NewReadView()
 	if err != nil {
@@ -34,7 +35,7 @@ func SeedCloseTimes(registry *query.Registry) error {
 	if lastCT, err := readCloseTime(view, latest, "latest"); err != nil {
 		errs = append(errs, err)
 	} else {
-		registry.SetLatestLedger(latest, lastCT)
+		registry.SetLatestLedger(latest, query.CloseTimeAt(lastCT))
 	}
 	return errors.Join(errs...)
 }

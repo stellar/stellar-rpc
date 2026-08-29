@@ -2,6 +2,7 @@ package adapters
 
 import (
 	"context"
+	"runtime"
 	"sync/atomic"
 	"testing"
 
@@ -24,7 +25,7 @@ func TestGetTransaction_HotHit(t *testing.T) {
 	lcm, txs := lcmWithTxs(t, testChunk.FirstLedger(),
 		txSpec{events: []xdr.ContractEvent{rpcv2test.SymbolContractEvent(xdr.ContractId{0xab}, "transfer", "transfer")}})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
-	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
+	r.SetLatestLedger(testChunk.FirstLedger(), query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger())))
 	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 
 	got, err := reader.GetTransaction(viewCtx(t, r), txs[0].hash)
@@ -52,7 +53,7 @@ func TestGetTransaction_MissIsErrNoTransaction(t *testing.T) {
 	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
 	lcm, _ := lcmWithTxs(t, testChunk.FirstLedger(), txSpec{})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
-	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
+	r.SetLatestLedger(testChunk.FirstLedger(), query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger())))
 	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 
 	_, err := reader.GetTransaction(viewCtx(t, r), xdr.Hash{0xde, 0xad})
@@ -67,7 +68,7 @@ func TestGetTransaction_AboveLatestIsGated(t *testing.T) {
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm1, lcm2)
 	// The second ledger is committed but above the view's frozen latest; only
 	// the adapter's gate, not the store, can produce the miss.
-	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
+	r.SetLatestLedger(testChunk.FirstLedger(), query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger())))
 	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 
 	_, err := reader.GetTransaction(viewCtx(t, r), txs2[0].hash)
@@ -83,7 +84,7 @@ func TestGetTransaction_BelowFloorIsGated(t *testing.T) {
 	lcm6, txs6 := lcmWithTxs(t, (testChunk + 1).FirstLedger(), txSpec{})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm5)
 	seedHotChunkLCMs(t, cat, r, testChunk+1, lcm6)
-	r.SetLatestLedger((testChunk + 1).FirstLedger(), closeTimeFor((testChunk + 1).FirstLedger()))
+	r.SetLatestLedger((testChunk + 1).FirstLedger(), query.CloseTimeAt(closeTimeFor((testChunk + 1).FirstLedger())))
 	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 	ctx := viewCtx(t, r)
 
@@ -102,7 +103,7 @@ func TestGetTransaction_PrunedDuringAcquisitionIsCleanMiss(t *testing.T) {
 	lcm6, _ := lcmWithTxs(t, (testChunk + 1).FirstLedger(), txSpec{})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm5)
 	seedHotChunkLCMs(t, cat, r, testChunk+1, lcm6)
-	r.SetLatestLedger((testChunk + 1).FirstLedger(), closeTimeFor((testChunk + 1).FirstLedger()))
+	r.SetLatestLedger((testChunk + 1).FirstLedger(), query.CloseTimeAt(closeTimeFor((testChunk + 1).FirstLedger())))
 
 	// The mid-prune race a view can observe: testChunk's handle is still
 	// published (loaded before the prune) while the catalog snapshot already
@@ -137,7 +138,7 @@ func coldFixture(t *testing.T) (context.Context, *TransactionReader, []fixtureTx
 	})
 	// Latest sits in testChunk+2 so the orphan candidate is in-window; a
 	// candidate outside the window would be gated to a clean miss instead.
-	r.SetLatestLedger((testChunk + 2).FirstLedger(), closeTimeFor((testChunk + 2).FirstLedger()))
+	r.SetLatestLedger((testChunk + 2).FirstLedger(), query.CloseTimeAt(closeTimeFor((testChunk + 2).FirstLedger())))
 	return viewCtx(t, r), NewTransactionReader(network.PublicNetworkPassphrase, nil), txs, orphanHash
 }
 
@@ -180,7 +181,7 @@ func TestGetTransaction_V1LedgerCloseMeta(t *testing.T) {
 	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
 	raw, hash := lcmV1WithClassicTx(t, testChunk.FirstLedger())
 	seedHotChunkLCMs(t, cat, r, testChunk, raw)
-	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
+	r.SetLatestLedger(testChunk.FirstLedger(), query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger())))
 	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 
 	got, err := reader.GetTransaction(viewCtx(t, r), hash)
@@ -209,7 +210,7 @@ func TestGetTransaction_AgedOutColdCandidateIsCleanMiss(t *testing.T) {
 	})
 	lcm, _ := lcmWithTxs(t, (testChunk + 1).FirstLedger(), txSpec{})
 	rpcv2test.WriteFrozenLedgerPack(t, cat, testChunk+1, lcm)
-	r.SetLatestLedger((testChunk + 1).FirstLedger(), closeTimeFor((testChunk + 1).FirstLedger()))
+	r.SetLatestLedger((testChunk + 1).FirstLedger(), query.CloseTimeAt(closeTimeFor((testChunk + 1).FirstLedger())))
 
 	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 	_, err := reader.GetTransaction(viewCtx(t, r), agedHash)
@@ -222,7 +223,7 @@ func TestGetTransaction_FeeBumpByEitherHash(t *testing.T) {
 	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
 	lcm, outerHash, innerHash := feeBumpLCM(t, testChunk.FirstLedger())
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
-	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
+	r.SetLatestLedger(testChunk.FirstLedger(), query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger())))
 	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 	ctx := viewCtx(t, r)
 
@@ -248,7 +249,7 @@ func TestGetTransaction_HotIndexInconsistencyIsCounted(t *testing.T) {
 	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
 	lcm, txs := lcmWithTxs(t, testChunk.FirstLedger(), txSpec{})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
-	r.SetLatestLedger(testChunk.FirstLedger(), closeTimeFor(testChunk.FirstLedger()))
+	r.SetLatestLedger(testChunk.FirstLedger(), query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger())))
 
 	// A frozen ledger pack for the same chunk WITHOUT the transaction: routing
 	// serves cold (cold-wins), the exact hot index still hits, and the fetched
@@ -262,4 +263,55 @@ func TestGetTransaction_HotIndexInconsistencyIsCounted(t *testing.T) {
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, store.ErrNoTransaction)
 	assert.Equal(t, int32(1), metrics.n.Load())
+}
+
+// TestGetTransaction_AllocatesPerTransactionNotPerLedger is the standing guard
+// on the fix: a found lookup must cost transaction-sized garbage, not
+// ledger-sized. Measured in BYTES rather than allocation count, because the
+// regression this protects against is one object of the wrong size.
+func TestGetTransaction_AllocatesPerTransactionNotPerLedger(t *testing.T) {
+	cat := openTestCatalog(t)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
+	// A ledger many times larger than any one of its transactions, so the two
+	// scales are far enough apart for the assertion to mean something.
+	specs := make([]txSpec, 64)
+	lcm, txs := lcmWithTxs(t, testChunk.FirstLedger(), specs...)
+	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
+	r.SetLatestLedger(testChunk.FirstLedger(), query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger())))
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
+	ctx := viewCtx(t, r)
+	hash := txs[len(txs)/2].hash
+
+	got, err := reader.GetTransaction(ctx, hash)
+	require.NoError(t, err)
+	require.Equal(t, hash.HexString(), got.TransactionHash)
+
+	perCall := allocBytesPerRun(t, 40, func() {
+		if _, err := reader.GetTransaction(ctx, hash); err != nil {
+			t.Error(err)
+		}
+	})
+	// Generous: the point is the ORDER, not a tight budget. Without the pooled
+	// buffer this is at least one whole ledger per call.
+	assert.Less(t, perCall, uint64(len(lcm)),
+		"a found lookup allocated a ledger's worth (%d bytes) per call; ledger is %d bytes",
+		perCall, len(lcm))
+}
+
+// allocBytesPerRun reports the average bytes fn allocates per call, after a
+// warm-up pass so one-time costs (caches, the buffer pool filling) are not
+// charged to the measurement.
+func allocBytesPerRun(t *testing.T, runs int, fn func()) uint64 {
+	t.Helper()
+	for range runs {
+		fn()
+	}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	for range runs {
+		fn()
+	}
+	runtime.ReadMemStats(&after)
+	return (after.TotalAlloc - before.TotalAlloc) / uint64(runs)
 }

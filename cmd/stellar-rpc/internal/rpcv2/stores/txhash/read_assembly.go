@@ -3,6 +3,7 @@ package txhash
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -21,10 +22,10 @@ type HashIndex interface {
 	Get(hash [32]byte) (uint32, error)
 }
 
-// LedgerSource fetches a ledger's raw LedgerCloseMeta by seq; the bytes must
-// outlive the call since the returned view aliases them.
+// LedgerSource lends a candidate ledger's raw LedgerCloseMeta; see
+// query.LedgerReader for the loan rule. *query.ReadView is the served one.
 type LedgerSource interface {
-	GetLedgerRaw(seq uint32) ([]byte, error)
+	WithLedger(seq uint32, fn func(raw []byte) error) error
 }
 
 type TxReader struct {
@@ -54,6 +55,9 @@ func NewTxReader(
 // GetTransaction resolves hash, scanning the exact hot tier first and touching
 // the cold tier only on a hot miss. found is false on a miss; an exact index
 // naming a ledger without the tx yields ErrInconsistent.
+//
+// The returned view owns its bytes (see compactView), so holding it pins
+// nothing.
 func (r *TxReader) GetTransaction(hash [32]byte) (ingest.LedgerTransactionView, bool, error) {
 	var softErr error
 	if txv, found, err := r.scan(hash, r.hot, true, &softErr); found || err != nil {
@@ -99,26 +103,13 @@ func (r *TxReader) scan(
 			continue
 		}
 
-		raw, err := r.ledgers.GetLedgerRaw(seq)
+		txv, found, err := r.verify(seq, hash, exact)
 		if err != nil {
 			if exact {
-				if errors.Is(err, stores.ErrNotFound) || errors.Is(err, stores.ErrOutOfRange) {
-					return ingest.LedgerTransactionView{}, false,
-						fmt.Errorf("txhash: exact index mapped tx to unavailable ledger %d: %w", seq, ErrInconsistent)
-				}
-				return ingest.LedgerTransactionView{}, false, fmt.Errorf("txhash: read ledger %d: %w", seq, err)
+				return ingest.LedgerTransactionView{}, false, err
 			}
-			// Unverified candidate; any ledger failure is soft — record and keep scanning.
-			*softErr = errors.Join(*softErr, fmt.Errorf("txhash: candidate ledger %d: %w", seq, err))
-			continue
-		}
-
-		txv, found, err := ingest.LedgerTransactionViewByHash(xdr.LedgerCloseMetaView(raw), hash, r.passphrase)
-		if err != nil {
-			if exact {
-				return ingest.LedgerTransactionView{}, false, fmt.Errorf("txhash: extract tx from ledger %d: %w", seq, err)
-			}
-			*softErr = errors.Join(*softErr, fmt.Errorf("txhash: extract tx from ledger %d: %w", seq, err))
+			// Unverified candidate; any failure is soft — record and keep scanning.
+			*softErr = errors.Join(*softErr, err)
 			continue
 		}
 		if found {
@@ -130,4 +121,101 @@ func (r *TxReader) scan(
 		}
 	}
 	return ingest.LedgerTransactionView{}, false, nil
+}
+
+// verify reads candidate ledger seq and looks for hash in it. Its error is
+// already worded for the failure and the tier, so scan only decides how hard it
+// is: an unreadable ledger may simply be gone, which for an exact index is an
+// inconsistency, while an unparsable one never is. The parse error is captured
+// rather than returned so readErr means exactly "the read failed".
+func (r *TxReader) verify(
+	seq uint32, hash [32]byte, exact bool,
+) (ingest.LedgerTransactionView, bool, error) {
+	var txv ingest.LedgerTransactionView
+	var found bool
+	var extractErr error
+	readErr := r.ledgers.WithLedger(seq, func(raw []byte) error {
+		var v ingest.LedgerTransactionView
+		v, found, extractErr = ingest.LedgerTransactionViewByHash(
+			xdr.LedgerCloseMetaView(raw), hash, r.passphrase)
+		if extractErr == nil && found {
+			// v's byte fields still point into the lent bytes.
+			txv = compactView(v)
+		}
+		return nil
+	})
+	switch {
+	case extractErr != nil:
+		return failed(fmt.Errorf("txhash: extract tx from ledger %d: %w", seq, extractErr))
+	case readErr == nil:
+		return txv, found, nil
+	case !exact:
+		return failed(fmt.Errorf("txhash: candidate ledger %d: %w", seq, readErr))
+	case errors.Is(readErr, stores.ErrNotFound) || errors.Is(readErr, stores.ErrOutOfRange):
+		return failed(fmt.Errorf("txhash: exact index mapped tx to unavailable ledger %d: %w", seq, ErrInconsistent))
+	default:
+		return failed(fmt.Errorf("txhash: read ledger %d: %w", seq, readErr))
+	}
+}
+
+// failed is the not-found-with-a-reason return.
+func failed(err error) (ingest.LedgerTransactionView, bool, error) {
+	return ingest.LedgerTransactionView{}, false, err
+}
+
+// compactView copies a view's byte fields out of the ledger buffer they alias
+// and into one freshly allocated backing array sized to the transaction. The
+// returned view is byte-for-byte the one passed in; only the storage changes.
+//
+// One array, so each returned slice is capped to its own length and a caller
+// appending to one cannot reach its neighbor. nil fields stay nil: the serving
+// contract distinguishes an absent event list from an empty one.
+func compactView(v ingest.LedgerTransactionView) ingest.LedgerTransactionView {
+	total := len(v.Envelope) + len(v.Result) + len(v.Meta)
+	for _, b := range v.DiagnosticEvents {
+		total += len(b)
+	}
+	for _, b := range v.TransactionEvents {
+		total += len(b)
+	}
+	for _, op := range v.ContractEvents {
+		for _, b := range op {
+			total += len(b)
+		}
+	}
+
+	// Exactly sized, so append never reallocates under a slice already handed out.
+	backing := make([]byte, 0, total)
+	take := func(b []byte) []byte {
+		if b == nil {
+			return nil
+		}
+		start := len(backing)
+		backing = append(backing, b...)
+		return slices.Clip(backing[start:])
+	}
+	takeAll := func(in [][]byte) [][]byte {
+		if in == nil {
+			return nil
+		}
+		out := make([][]byte, len(in))
+		for i, b := range in {
+			out[i] = take(b)
+		}
+		return out
+	}
+
+	v.Envelope = take(v.Envelope)
+	v.Result = take(v.Result)
+	v.Meta = take(v.Meta)
+	v.DiagnosticEvents = takeAll(v.DiagnosticEvents)
+	v.TransactionEvents = takeAll(v.TransactionEvents)
+	if v.ContractEvents != nil {
+		ops := make([][][]byte, len(v.ContractEvents))
+		for i, op := range v.ContractEvents {
+			ops[i] = takeAll(op)
+		}
+		v.ContractEvents = ops
+	}
+	return v
 }

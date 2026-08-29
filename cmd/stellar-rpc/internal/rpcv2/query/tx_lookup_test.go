@@ -135,7 +135,7 @@ func TestColdTxIndexes(t *testing.T) {
 
 	// The returned indexes are window-gated; latest must cover the seeded seqs
 	// or every hit reads as a miss.
-	r.SetLatestLedger(seqs[1], 0)
+	r.SetLatestLedger(seqs[1], CloseTimeAt(0))
 
 	a, err := r.NewReadView()
 	require.NoError(t, err)

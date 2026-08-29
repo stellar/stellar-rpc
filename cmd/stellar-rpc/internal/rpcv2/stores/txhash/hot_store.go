@@ -98,12 +98,18 @@ func (h *HotStore) AddEntriesToBatch(b *rocksdb.BatchWriter, entries []Entry) {
 // Get returns the ledger sequence the hash was committed in, or
 // (0, stores.ErrNotFound) on miss.
 func (h *HotStore) Get(hash [32]byte) (uint32, error) {
-	v, found, err := h.store.Get(txhashCF, hash[:])
+	// The value is four bytes and is decoded before the pinned block is
+	// released, so this probe — one per hot chunk per lookup — copies nothing.
+	var seq uint32
+	found, err := h.store.GetPinned(txhashCF, hash[:], func(v []byte) error {
+		seq = rocksdb.DecodeUint32(v)
+		return nil
+	})
 	if err != nil {
 		return 0, err
 	}
 	if !found {
 		return 0, stores.ErrNotFound
 	}
-	return rocksdb.DecodeUint32(v), nil
+	return seq, nil
 }

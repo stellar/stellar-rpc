@@ -81,20 +81,20 @@ func TestOpenRegistry(t *testing.T) {
 func TestSetLatestLedger(t *testing.T) {
 	r, _ := newTestRegistry(t, 0, 0)
 	assert.Equal(t, uint32(0), r.LatestLedger())
-	r.SetLatestLedger(42, 4242)
+	r.SetLatestLedger(42, CloseTimeAt(4242))
 	assert.Equal(t, uint32(42), r.LatestLedger())
 }
 
 func TestHasCommittedSinceBoot(t *testing.T) {
 	r, _ := newTestRegistry(t, 0, 0)
-	r.SeedLatestAtBoot(42, 0)
+	r.SeedLatestAtBoot(42)
 	assert.False(t, r.HasCommittedSinceBoot())
 
-	r.SetLatestLedger(42, 4242)
+	r.SetLatestLedger(42, CloseTimeAt(4242))
 	assert.False(t, r.HasCommittedSinceBoot(),
 		"re-stamping the boot ledger's close time is not a commit")
 
-	r.SetLatestLedger(43, 4343)
+	r.SetLatestLedger(43, CloseTimeAt(4343))
 	assert.True(t, r.HasCommittedSinceBoot())
 }
 
@@ -102,14 +102,24 @@ func TestReadView_LatestCloseTime(t *testing.T) {
 	r, cat := newTestRegistry(t, 0, 0)
 	require.NoError(t, cat.FlipHotReady(5))
 
-	r.SetLatestLedger(42, 0) // the boot seeding: close time unknown
+	r.SetLatestLedger(42, UnknownCloseTime()) // the boot seeding: no close time yet
 	a, err := r.NewReadView()
 	require.NoError(t, err)
 	_, ok := a.LatestCloseTime()
-	assert.False(t, ok, "a zero close time means unknown, not midnight 1970")
+	assert.False(t, ok, "no close time stamped yet")
 	a.Release()
 
-	r.SetLatestLedger(43, 4343)
+	// A ledger closed at the epoch is a timestamp, not an absence: unknown is
+	// carried by the stamp itself, so zero survives the round trip as known.
+	r.SetLatestLedger(42, CloseTimeAt(0))
+	a, err = r.NewReadView()
+	require.NoError(t, err)
+	epoch, ok := a.LatestCloseTime()
+	assert.True(t, ok, "midnight 1970 is a close time")
+	assert.Equal(t, int64(0), epoch)
+	a.Release()
+
+	r.SetLatestLedger(43, CloseTimeAt(4343))
 	a, err = r.NewReadView()
 	require.NoError(t, err)
 	defer a.Release()
@@ -141,7 +151,7 @@ func TestReadView_OldestCloseTime(t *testing.T) {
 	// from before the floor moved) must read as a miss, never as the wrong
 	// ledger's close time. The view API cannot write a stale seq (it stamps its
 	// own floor), so simulate the moved floor by writing the cache directly.
-	r.oldest.Store(&ledgerStamp{seq: chunk.ID(2).FirstLedger(), closeTime: 222})
+	r.oldest.Store(&ledgerStamp{seq: chunk.ID(2).FirstLedger(), closeTime: CloseTimeAt(222)})
 	a, err = r.NewReadView()
 	require.NoError(t, err)
 	defer a.Release()
@@ -217,7 +227,7 @@ func TestNewReadView_CapturesStateAtAcquisitionInstant(t *testing.T) {
 	r, cat := newTestRegistry(t, 0, 0)
 	require.NoError(t, cat.FlipHotReady(5))
 	require.NoError(t, cat.FlipHotReady(6))
-	r.SetLatestLedger(65_000, 650)
+	r.SetLatestLedger(65_000, CloseTimeAt(650))
 	r.PublishHandle(5, &hotchunk.DB{})
 
 	a, err := r.NewReadView()
@@ -225,7 +235,7 @@ func TestNewReadView_CapturesStateAtAcquisitionInstant(t *testing.T) {
 	defer a.Release()
 
 	// Mutate every piece of serving state after acquisition.
-	r.SetLatestLedger(70_000, 700)
+	r.SetLatestLedger(70_000, CloseTimeAt(700))
 	require.NoError(t, cat.FlipHotReady(7))
 	r.PublishHandle(7, &hotchunk.DB{})
 	r.DiscardHandle(5)
@@ -413,12 +423,12 @@ func TestNewReadView_NoReadyChunkErrors(t *testing.T) {
 func TestNewReadView_LoadOrderPinned(t *testing.T) {
 	r, cat := newTestRegistry(t, 0, 0)
 	require.NoError(t, cat.FlipHotReady(5))
-	r.SetLatestLedger(100, 0)
+	r.SetLatestLedger(100, CloseTimeAt(0))
 
 	inner := r.newSnapshot
 	r.newSnapshot = func() (*catalog.Snapshot, error) {
-		r.SetLatestLedger(200, 0)          // lands after the latest-ledger load
-		r.PublishHandle(6, &hotchunk.DB{}) // lands after the handle-set load
+		r.SetLatestLedger(200, CloseTimeAt(0)) // lands after the latest-ledger load
+		r.PublishHandle(6, &hotchunk.DB{})     // lands after the handle-set load
 		return inner()
 	}
 
@@ -440,11 +450,11 @@ func TestNewReadView_LoadOrderPinned(t *testing.T) {
 func TestNewReadView_LatestBeforeHandles(t *testing.T) {
 	r, cat := newTestRegistry(t, 0, 0)
 	require.NoError(t, cat.FlipHotReady(5))
-	r.SetLatestLedger(100, 0)
+	r.SetLatestLedger(100, CloseTimeAt(0))
 
 	inner := r.loadHandles
 	r.loadHandles = func() *handleSet {
-		r.SetLatestLedger(200, 0) // lands after the latest-ledger load
+		r.SetLatestLedger(200, CloseTimeAt(0)) // lands after the latest-ledger load
 		return inner()
 	}
 

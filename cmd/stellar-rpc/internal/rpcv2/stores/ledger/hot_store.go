@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"slices"
 	"sync"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
@@ -46,7 +47,16 @@ type HotStore struct {
 	// compPool — per-store pool of zstd.Compressors; each concurrent
 	// AddLedgerToBatch borrows one for its Encode call.
 	compPool sync.Pool
+	// scratch — decode buffers WithLedger lends. Pooled as *[]byte so a buffer
+	// the decode had to grow goes back in place of the one that was lent.
+	scratch sync.Pool
 }
+
+// maxPooledLedgerBytes is the largest decode buffer this store keeps. Capacity
+// only ratchets upward and sync.Pool accepts whatever it is given, so without a
+// ceiling N concurrent borrows can park N outsized buffers for the store's life.
+// 64MiB is several times the largest raw ledgers on the heaviest profile.
+const maxPooledLedgerBytes = 64 << 20
 
 // NewWithStore wraps an ALREADY-OPEN rocksdb.Store as a ledger HotStore on
 // LedgersCF. The store is owned by the caller — in production, hotchunk.DB
@@ -58,6 +68,9 @@ func NewWithStore(store *rocksdb.Store) *HotStore {
 		dec:   zstd.NewDecompressor(),
 		compPool: sync.Pool{
 			New: func() any { return zstd.NewCompressor() },
+		},
+		scratch: sync.Pool{
+			New: func() any { return new([]byte) },
 		},
 	}
 }
@@ -79,24 +92,18 @@ func (h *HotStore) AddLedgerToBatch(b *rocksdb.BatchWriter, e Entry) error {
 	return nil
 }
 
-// GetLedgerRaw decodes the ledger stored under seq into a fresh,
-// caller-owned buffer, or returns stores.ErrNotFound on miss. A zstd
-// decode failure surfaces as stores.ErrCorrupt. Sequential bulk readers
-// should prefer IterateLedgers, which yields borrows without the
-// per-ledger decode allocation.
-func (h *HotStore) GetLedgerRaw(seq uint32) ([]byte, error) {
-	v, found, err := h.store.Get(LedgersCF, rocksdb.EncodeUint32(seq))
+// WithLedger calls fn with seq's decoded bytes; see query.LedgerReader for the
+// loan rule. The buffer returns to the store's pool as fn returns.
+func (h *HotStore) WithLedger(seq uint32, fn func(raw []byte) error) error {
+	buf, _ := h.scratch.Get().(*[]byte)
+	defer h.recycle(buf)
+	raw, err := h.getLedgerInto((*buf)[:0], seq)
 	if err != nil {
-		return nil, translateRocksErr(err)
+		return err
 	}
-	if !found {
-		return nil, stores.ErrNotFound
-	}
-	out, derr := h.dec.Decode(nil, v)
-	if derr != nil {
-		return nil, fmt.Errorf("%w: hot decode seq %d: %w", stores.ErrCorrupt, seq, derr)
-	}
-	return out, nil
+	// A ledger too big for the pooled capacity got a fresh, larger array; keep it.
+	*buf = raw
+	return fn(slices.Clip(raw))
 }
 
 // LastSeq returns the highest ledger sequence in the store, or ok=false
@@ -123,12 +130,10 @@ func (h *HotStore) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 		if start > end {
 			return
 		}
-		// scratch is the reused decompression buffer; Entry.Bytes aliases it
-		// and is therefore BORROWED — valid only until the next iteration step
-		// decodes the following ledger into it. Copy it if you need to retain
-		// it past the loop body. The read benches consume each ledger in-scope,
-		// so this avoids a per-ledger decode allocation.
-		var scratch []byte
+		// Entry.Bytes aliases the pooled buffer: valid only until the loop body
+		// ends, break included. Copy it to retain it.
+		buf, _ := h.scratch.Get().(*[]byte)
+		defer h.recycle(buf)
 		for e, err := range h.store.IterateRange(LedgersCF, rocksdb.EncodeUint32(start), rocksdb.EncodeUint32(end)) {
 			if err != nil {
 				yield(Entry{}, translateRocksErr(err))
@@ -137,17 +142,58 @@ func (h *HotStore) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 			// e.Value is itself a zero-copy ref into the iterator's internal
 			// buffer; decompress it into the reused scratch buffer.
 			seq := rocksdb.DecodeUint32(e.Key)
-			decoded, derr := h.dec.Decode(scratch[:0], e.Value)
+			decoded, derr := h.dec.Decode((*buf)[:0], e.Value)
 			if derr != nil {
-				yield(Entry{}, fmt.Errorf("%w: hot decode seq %d: %w", stores.ErrCorrupt, seq, derr))
+				yield(Entry{}, decodeErr(seq, derr))
 				return
 			}
-			scratch = decoded
-			if !yield(Entry{Seq: seq, Bytes: decoded}, nil) {
+			*buf = decoded
+			if !yield(Entry{Seq: seq, Bytes: slices.Clip(decoded)}, nil) {
 				return
 			}
 		}
 	}
+}
+
+// recycle pools a decode buffer the store still wants back.
+func (h *HotStore) recycle(buf *[]byte) {
+	if !poolable(*buf) {
+		return
+	}
+	h.scratch.Put(buf)
+}
+
+// poolable reports whether a decode buffer is worth keeping. See
+// maxPooledLedgerBytes.
+func poolable(buf []byte) bool { return cap(buf) <= maxPooledLedgerBytes }
+
+// getLedgerInto decodes seq into dst, nil for a fresh allocation. The decode
+// runs inside GetPinned's callback, so the compressed value is never copied.
+func (h *HotStore) getLedgerInto(dst []byte, seq uint32) ([]byte, error) {
+	var out []byte
+	found, err := h.store.GetPinned(LedgersCF, rocksdb.EncodeUint32(seq), func(v []byte) error {
+		decoded, derr := h.dec.Decode(dst, v)
+		if derr != nil {
+			return decodeErr(seq, derr)
+		}
+		out = decoded
+		return nil
+	})
+	switch {
+	case errors.Is(err, stores.ErrCorrupt):
+		return nil, err
+	case err != nil:
+		return nil, translateRocksErr(err)
+	case !found:
+		return nil, stores.ErrNotFound
+	}
+	return out, nil
+}
+
+// decodeErr reports a stored frame that would not decompress: the store wrote
+// it, so this is corruption.
+func decodeErr(seq uint32, err error) error {
+	return fmt.Errorf("%w: hot decode seq %d: %w", stores.ErrCorrupt, seq, err)
 }
 
 // translateRocksErr maps rocksdb-level lifecycle errors to the

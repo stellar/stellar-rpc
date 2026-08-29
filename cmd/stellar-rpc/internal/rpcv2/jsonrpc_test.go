@@ -42,7 +42,7 @@ func seedServingRegistry(t *testing.T) *query.Registry {
 	rpcv2test.SeedHotChunkLCMs(t, cat, c, func(d *hotchunk.DB) {
 		r.PublishHandle(c, d)
 	}, rpcv2test.ZeroTxLCMBytes(t, chunk.FirstLedgerSeq))
-	r.SetLatestLedger(chunk.FirstLedgerSeq, time.Now().Unix())
+	r.SetLatestLedger(chunk.FirstLedgerSeq, query.CloseTimeAt(time.Now().Unix()))
 	return r
 }
 
@@ -175,7 +175,7 @@ func TestJSONRPCHandler_HealthyOverFreshRegistryStamp(t *testing.T) {
 
 func TestJSONRPCHandler_HealthGatedUntilFirstCommit(t *testing.T) {
 	r := seedServingRegistry(t)
-	r.SeedLatestAtBoot(chunk.FirstLedgerSeq, time.Now().Unix())
+	r.SeedLatestAtBoot(chunk.FirstLedgerSeq)
 	url := newTestRPCServer(t, r)
 
 	out := rpcv2test.PostRPC(t, url, "getHealth", `{}`)
@@ -183,7 +183,7 @@ func TestJSONRPCHandler_HealthGatedUntilFirstCommit(t *testing.T) {
 	assert.EqualValues(t, jrpc2.InternalError, out.Error.Code)
 	assert.Contains(t, out.Error.Message, "since this process started")
 
-	r.SetLatestLedger(chunk.FirstLedgerSeq+1, time.Now().Unix())
+	r.SetLatestLedger(chunk.FirstLedgerSeq+1, query.CloseTimeAt(time.Now().Unix()))
 	out = rpcv2test.PostRPC(t, url, "getHealth", `{}`)
 	require.Nil(t, out.Error)
 	var result struct {
@@ -200,7 +200,7 @@ func TestWrapAdapterRequest_PanicReleasesSharedView(t *testing.T) {
 	rpcv2test.SeedHotChunkLCMs(t, cat, chunk.ID(0),
 		func(d *hotchunk.DB) { r.PublishHandle(chunk.ID(0), d) },
 		rpcv2test.ZeroTxLCMBytes(t, chunk.FirstLedgerSeq))
-	r.SetLatestLedger(chunk.FirstLedgerSeq, time.Now().Unix())
+	r.SetLatestLedger(chunk.FirstLedgerSeq, query.CloseTimeAt(time.Now().Unix()))
 	reader := adapters.NewLedgerReader()
 
 	wrapped := wrapAdapterRequest(func(ctx context.Context, _ *jrpc2.Request) (any, error) {

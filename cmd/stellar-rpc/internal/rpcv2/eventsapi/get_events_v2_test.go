@@ -67,7 +67,7 @@ func seedView(t *testing.T) (context.Context, uint32) {
 	}
 	rpcv2test.SeedHotChunkLCMs(t, cat, testChunk,
 		func(db *hotchunk.DB) { r.PublishHandle(testChunk, db) }, lcms...)
-	r.SetLatestLedger(first+2, 0)
+	r.SetLatestLedger(first+2, query.UnknownCloseTime())
 
 	view, err := r.NewReadView()
 	require.NoError(t, err)

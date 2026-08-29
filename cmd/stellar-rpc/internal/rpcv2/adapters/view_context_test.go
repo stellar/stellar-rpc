@@ -23,7 +23,7 @@ func sharedViewFixture(t *testing.T) (*query.Registry, uint32) {
 	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
 	first := testChunk.FirstLedger()
 	seedHotLedgers(t, cat, r, testChunk, seqRange(first, first+3)...)
-	r.SetLatestLedger(first+2, closeTimeFor(first+2))
+	r.SetLatestLedger(first+2, query.CloseTimeAt(closeTimeFor(first+2)))
 	return r, first
 }
 
@@ -36,7 +36,7 @@ func TestWithView_OneSnapshotPerRequest(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, first+2, got)
 
-	r.SetLatestLedger(first+3, closeTimeFor(first+3))
+	r.SetLatestLedger(first+3, query.CloseTimeAt(closeTimeFor(first+3)))
 
 	got, err = reader.GetLatestLedgerSequence(ctx)
 	require.NoError(t, err)
@@ -58,7 +58,7 @@ func TestWithView_SharedAcrossAdapters(t *testing.T) {
 	_, err := txReader.GetTransaction(ctx, xdr.Hash{1})
 	assert.ErrorIs(t, err, store.ErrNoTransaction)
 
-	r.SetLatestLedger(first+3, closeTimeFor(first+3))
+	r.SetLatestLedger(first+3, query.CloseTimeAt(closeTimeFor(first+3)))
 
 	got, err := ledgerReader.GetLatestLedgerSequence(ctx)
 	require.NoError(t, err)

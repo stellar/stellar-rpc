@@ -18,8 +18,9 @@ import (
 // [lo, hi] clamped to the view's range. The per-chunk intersect lives here, so
 // a caller cannot read past the view's latestLedger or below its floor; the
 // intersect also satisfies the cold reader's coverage requirement, since a
-// frozen pack covers its whole chunk. Entry.Bytes follows the hot store's
-// borrow contract: valid only until the next iteration step.
+// frozen pack covers its whole chunk. Entry.Bytes follows the stores' borrow
+// contract: valid only until the loop body ends, whether that is the next
+// iteration step or a break — copy it to retain it.
 //
 // The walk holds at most TWO readers open regardless of range: chunk i's reader
 // plus a one-ahead open of chunk i+1 (so the border chunk's open overlaps the

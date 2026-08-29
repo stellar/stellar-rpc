@@ -51,7 +51,7 @@ var coldPackDecoder = zstd.NewDecompressor()
 // goroutine immediately; the trailer + AppData are read and validated
 // on the first method call, via a sync.OnceValues-cached loadHeader,
 // where a failed open also surfaces. Read methods (LastSeq,
-// GetLedgerRaw, IterateLedgers) are safe for concurrent use; Close
+// WithLedger, IterateLedgers) are safe for concurrent use; Close
 // is NOT — callers must ensure all in-flight reads have returned
 // before invoking it, matching the underlying packfile.Reader.Close
 // contract.
@@ -122,30 +122,31 @@ func (c *ColdReader) loadHeader() (coldHeader, error) {
 
 func (c *ColdReader) LastSeq() (uint32, error) { h, err := c.init(); return h.lastSeq, err }
 
-// GetLedgerRaw reads the raw LedgerCloseMeta bytes for seq into a fresh,
-// caller-owned buffer. Sequential bulk readers should prefer IterateLedgers,
-// which yields borrows without the per-ledger copy.
-func (c *ColdReader) GetLedgerRaw(seq uint32) ([]byte, error) {
+// WithLedger calls fn with seq's bytes; see query.LedgerReader for the loan
+// rule. The bytes are the packfile reader's own record buffer, passed through.
+func (c *ColdReader) WithLedger(seq uint32, fn func(raw []byte) error) error {
 	h, err := c.init()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if seq < h.firstSeq || seq > h.lastSeq {
-		return nil, fmt.Errorf("%w: seq %d outside store coverage [%d, %d]",
+		return fmt.Errorf("%w: seq %d outside store coverage [%d, %d]",
 			stores.ErrOutOfRange, seq, h.firstSeq, h.lastSeq)
 	}
-	pos := int(seq - h.firstSeq)
-	var out []byte
-	rerr := c.r.ReadItem(pos, func(b []byte) error {
-		// b is borrowed from packfile (valid only inside this callback);
-		// copy so the returned bytes are owned by the caller.
-		out = append(out, b...)
+	// Carried out rather than returned through the reader, so
+	// translateReaderErr only ever sees the packfile's own failures.
+	var fnErr error
+	rerr := c.r.ReadItem(int(seq-h.firstSeq), func(b []byte) error {
+		fnErr = fn(b)
 		return nil
 	})
-	if rerr != nil {
-		return nil, translateReaderErr(rerr)
+	switch {
+	case fnErr != nil:
+		return fnErr
+	case rerr != nil:
+		return translateReaderErr(rerr)
 	}
-	return out, nil
+	return nil
 }
 
 // IterateLedgers walks (seq, raw bytes) pairs in [start, end] inclusive,
@@ -181,10 +182,8 @@ func (c *ColdReader) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 				yield(Entry{}, translateReaderErr(err))
 				return
 			}
-			// Entry.Bytes is BORROWED from packfile and valid only until the
-			// next iteration step — copy it if you need to retain it past the
-			// loop body. Callers that consume each ledger in-scope (the ingest
-			// and read benches) avoid a per-ledger clone this way.
+			// Entry.Bytes is the packfile's: valid only until the loop body
+			// ends, break included. Copy it to retain it.
 			if !yield(Entry{Seq: seq, Bytes: item}, nil) {
 				return
 			}

@@ -76,13 +76,30 @@ type Registry struct {
 	loadHandles func() *handleSet
 }
 
-// ledgerStamp pairs a ledger sequence with its close time (unix seconds).
-// closeTime 0 means "not known yet": OpenRegistry seeds the latest stamp from
-// the catalog (which has no close times), and the oldest cache starts empty.
-// Consumers fall back to a point read when the close time is 0.
+// CloseTime is a ledger's close time, or the absence of one. Absence is real —
+// the catalog records sequences but not timestamps, so between boot and seeding
+// the latest ledger has none — and zero cannot stand in for it, because a ledger
+// closed at the epoch is a legal timestamp. Reading one as absent costs a whole
+// ledger decode per request, which synthetic corpora hit routinely.
+type CloseTime struct {
+	unix  int64
+	known bool
+}
+
+// CloseTimeAt is the close time of a ledger closed at unix seconds.
+func CloseTimeAt(unix int64) CloseTime { return CloseTime{unix: unix, known: true} }
+
+// UnknownCloseTime is the close time of a ledger whose timestamp nothing has
+// read yet; readers point-read instead.
+func UnknownCloseTime() CloseTime { return CloseTime{} }
+
+// Unix reports the close time and whether there is one to report.
+func (c CloseTime) Unix() (int64, bool) { return c.unix, c.known }
+
+// ledgerStamp pairs a ledger sequence with its close time, known or not.
 type ledgerStamp struct {
 	seq       uint32
-	closeTime int64
+	closeTime CloseTime
 }
 
 // handleSet is an immutable map of open hot-database handles keyed by chunk,
@@ -120,8 +137,7 @@ func OpenRegistry(
 		return nil, err
 	}
 	r.PublishHandle(live.ChunkID(), live)
-	// The catalog has no close times, so the seed stamp starts at 0 (unknown).
-	r.SeedLatestAtBoot(lastCommitted, 0)
+	r.SeedLatestAtBoot(lastCommitted)
 	return r, nil
 }
 
@@ -138,21 +154,22 @@ func NewRegistry(cat *catalog.Catalog, retention geometry.Retention) *Registry {
 	}
 	r.loadHandles = r.handles.Load
 	r.handles.Store(&handleSet{byChunk: map[chunk.ID]*hotchunk.DB{}})
-	r.latest.Store(&ledgerStamp{})
+	r.SetLatestLedger(0, UnknownCloseTime())
 	return r
 }
 
-// SetLatestLedger publishes seq together with its close time (unix seconds;
-// 0 = unknown, see ledgerStamp); the latest field documents the caller.
-func (r *Registry) SetLatestLedger(seq uint32, closeTimeUnix int64) {
-	r.latest.Store(&ledgerStamp{seq: seq, closeTime: closeTimeUnix})
+// SetLatestLedger publishes seq together with its close time, which callers
+// without one spell UnknownCloseTime().
+func (r *Registry) SetLatestLedger(seq uint32, closeTime CloseTime) {
+	r.latest.Store(&ledgerStamp{seq: seq, closeTime: closeTime})
 }
 
-// SeedLatestAtBoot is SetLatestLedger plus a record of seq as this process's
-// boot value. OpenRegistry calls it once at startup.
-func (r *Registry) SeedLatestAtBoot(seq uint32, closeTimeUnix int64) {
+// SeedLatestAtBoot records seq as this process's boot value and publishes it
+// with no close time — the catalog has none. Startup then reads the real ones
+// before serving (adapters.SeedCloseTimes).
+func (r *Registry) SeedLatestAtBoot(seq uint32) {
 	r.bootSeq = seq
-	r.SetLatestLedger(seq, closeTimeUnix)
+	r.SetLatestLedger(seq, UnknownCloseTime())
 }
 
 // HasCommittedSinceBoot reports whether ingestion advanced the latest ledger
@@ -351,10 +368,10 @@ func (r *Registry) publishReadyHandles(liveChunk chunk.ID, logger *supportlog.En
 func (a *ReadView) LatestLedger() uint32 { return a.latest.seq }
 
 // LatestCloseTime returns the latest ledger's close time captured at
-// acquisition. ok is false when the stamp predates any real commit (OpenRegistry
-// seeds close time 0 from the catalog) — the caller point-reads instead.
+// acquisition. ok is false only while no close time has been stamped yet — the
+// boot window before seeding — and the caller point-reads instead.
 func (a *ReadView) LatestCloseTime() (int64, bool) {
-	return a.latest.closeTime, a.latest.closeTime != 0
+	return a.latest.closeTime.Unix()
 }
 
 // OldestCloseTime returns the cached close time of the view's oldest servable
@@ -362,10 +379,10 @@ func (a *ReadView) LatestCloseTime() (int64, bool) {
 // longer equals the view's OldestLedger (the retention floor moved since the
 // cache was written) — the caller point-reads and re-records.
 func (a *ReadView) OldestCloseTime() (int64, bool) {
-	if a.oldestStamp.closeTime == 0 || a.oldestStamp.seq != a.OldestLedger() {
+	if a.oldestStamp.seq != a.OldestLedger() {
 		return 0, false
 	}
-	return a.oldestStamp.closeTime, true
+	return a.oldestStamp.closeTime.Unix()
 }
 
 // RecordOldestCloseTime caches the close time of the view's oldest servable
@@ -376,7 +393,7 @@ func (a *ReadView) OldestCloseTime() (int64, bool) {
 // floor's, which the seq check in OldestCloseTime handles), so
 // last-write-wins is always correct.
 func (a *ReadView) RecordOldestCloseTime(closeTimeUnix int64) {
-	a.oldest.Store(&ledgerStamp{seq: a.OldestLedger(), closeTime: closeTimeUnix})
+	a.oldest.Store(&ledgerStamp{seq: a.OldestLedger(), closeTime: CloseTimeAt(closeTimeUnix)})
 }
 
 func (a *ReadView) FloorChunk() chunk.ID { return a.floor }

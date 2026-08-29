@@ -2,6 +2,7 @@ package rocksdb
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -181,6 +182,67 @@ func TestStore_PutGet_DefaultCF(t *testing.T) {
 	_, found3, err := s.Get(defaultCFName, []byte("never-written"))
 	require.NoError(t, err)
 	assert.False(t, found3)
+}
+
+func TestStore_GetPinned(t *testing.T) {
+	s := openTestStore(t, nil)
+	require.NoError(t, s.Put("", []byte("k1"), []byte("v1")))
+
+	// A hit hands the value to the callback and reports it.
+	var seen []byte
+	found, err := s.GetPinned("", []byte("k1"), func(v []byte) error {
+		// Copy: the bytes are RocksDB's and die with the callback.
+		seen = bytes.Clone(v)
+		return nil
+	})
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, []byte("v1"), seen)
+
+	// Miss: the callback never runs, and absence is not an error.
+	called := false
+	found, err = s.GetPinned("", []byte("never-written"), func([]byte) error {
+		called = true
+		return nil
+	})
+	require.NoError(t, err)
+	assert.False(t, found)
+	assert.False(t, called)
+
+	// The callback's error is the caller's error, with the hit still reported.
+	sentinel := errors.New("callback said no")
+	found, err = s.GetPinned("", []byte("k1"), func([]byte) error { return sentinel })
+	require.ErrorIs(t, err, sentinel)
+	assert.True(t, found)
+
+	// Lifecycle guards match Get's.
+	_, err = s.GetPinned("no-such-cf", []byte("k1"), func([]byte) error { return nil })
+	require.Error(t, err)
+	require.NoError(t, s.Close())
+	_, err = s.GetPinned("", []byte("k1"), func([]byte) error { return nil })
+	require.ErrorIs(t, err, ErrStoreClosed)
+}
+
+// TestStore_GetPinnedReleasesOnPanic pins the unwinding path: GetPinned holds
+// the lifecycle read lock and an open pinned handle across the callback, and a
+// callback that panics must still give both back. A leaked read lock would not
+// fail a read — it would hang the next Close, which is a far worse failure than
+// the panic that caused it.
+func TestStore_GetPinnedReleasesOnPanic(t *testing.T) {
+	s := openTestStore(t, nil)
+	require.NoError(t, s.Put("", []byte("k1"), []byte("v1")))
+
+	require.Panics(t, func() {
+		_, _ = s.GetPinned("", []byte("k1"), func([]byte) error { panic("callback exploded") })
+	})
+
+	// The store still reads...
+	val, found, err := s.Get("", []byte("k1"))
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, []byte("v1"), val)
+	// ...and still closes, which needs the write lock the panicking call held.
+	require.NoError(t, s.Close())
 }
 
 func TestStore_LastKey(t *testing.T) {

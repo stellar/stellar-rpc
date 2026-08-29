@@ -136,6 +136,9 @@ type Store struct {
 	// freeing the C++ DB. Without this, a Put already past checkOpen
 	// would segfault against a torn-down DB.
 	mu sync.RWMutex
+	// GetPinned runs its callback under the read side, so a reader can hold it
+	// for milliseconds. Close waits that out; CloseIfIdle does not, taking the
+	// write side with TryLock so a slow read costs it a sweep, not the loop.
 
 	closed atomic.Bool
 	// deferredClose remembers that CloseIfIdle (deferred deletion) set the
@@ -206,6 +209,18 @@ func (s *Store) Put(cf string, key, value []byte) error {
 // Returned value is a fresh copy the caller owns.
 func (s *Store) Get(cf string, key []byte) ([]byte, bool, error) {
 	return s.getWith(s.ro, cf, key)
+}
+
+// GetPinned hands fn RocksDB's own pinned block, uncopied. Returns (false, nil)
+// — fn uncalled — on a miss.
+//
+// fn must not retain, append to, or mutate the slice: it is RocksDB-owned memory
+// that Destroy invalidates as fn returns. The store's lifecycle read lock is
+// held across fn, so fn must not block on anything that could close the store,
+// nor call back into a Store method that takes the lock — a nested RLock behind
+// a waiting Close writer deadlocks both and the read with them.
+func (s *Store) GetPinned(cf string, key []byte, fn func(value []byte) error) (bool, error) {
+	return s.getPinnedWith(s.ro, cf, key, fn)
 }
 
 // BatchMultiGet reads many keys from cf in a single batched call.
@@ -540,27 +555,40 @@ func (s *Store) teardownLocked() {
 // getWith is the shared body for Get and GetAsOf; ro selects the read view
 // (s.ro for a live read, a snapshot-pinned ReadOptions for GetAsOf).
 func (s *Store) getWith(ro *grocksdb.ReadOptions, cf string, key []byte) ([]byte, bool, error) {
+	var out []byte
+	found, err := s.getPinnedWith(ro, cf, key, func(value []byte) error {
+		out = bytes.Clone(value)
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return out, found, nil
+}
+
+// getPinnedWith is the shared body for GetPinned and getWith; ro selects the
+// read view.
+func (s *Store) getPinnedWith(
+	ro *grocksdb.ReadOptions, cf string, key []byte, fn func(value []byte) error,
+) (bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if err := s.checkOpen(); err != nil {
-		return nil, false, err
+		return false, err
 	}
 	cfh, err := s.resolveCF(cf)
 	if err != nil {
-		return nil, false, err
+		return false, err
 	}
 	handle, err := s.db.GetPinnedCFV2(ro, cfh, key)
 	if err != nil {
-		return nil, false, err
+		return false, err
 	}
 	defer handle.Destroy()
 	if !handle.Exists() {
-		return nil, false, nil
+		return false, nil
 	}
-	// handle.Data() points into the pinned cache page; copy before
-	// Destroy invalidates it.
-	out := bytes.Clone(handle.Data())
-	return out, true, nil
+	return true, fn(handle.Data())
 }
 
 // iterateWith is the shared body for Iterate and IterateAsOf; ro selects the read

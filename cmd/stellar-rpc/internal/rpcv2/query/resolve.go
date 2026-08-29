@@ -7,6 +7,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
@@ -49,7 +50,10 @@ func (a *ReadView) unavailable(c chunk.ID, k geometry.Kind) error {
 // LastSeq (the two tiers' signatures differ) since routing reads within an
 // already-known chunk range.
 type LedgerReader interface {
-	GetLedgerRaw(seq uint32) ([]byte, error)
+	// WithLedger calls fn with one ledger's bytes. THE LOAN RULE, for every
+	// tier: the bytes are the store's and are valid inside fn only — it reuses
+	// them for the next ledger — so anything kept must be copied out there.
+	WithLedger(seq uint32, fn func(raw []byte) error) error
 	IterateLedgers(start, end uint32) iter.Seq2[ledger.Entry, error]
 }
 
@@ -101,6 +105,20 @@ func (a *ReadView) Ledgers(c chunk.ID) (LedgerReader, error) {
 		a.closers = append(a.closers, closeFn)
 	}
 	return r, nil
+}
+
+// WithLedger is the routed point read: it resolves the chunk serving seq and
+// lends that tier's bytes, so callers holding only a sequence need not resolve.
+func (a *ReadView) WithLedger(seq uint32, fn func(raw []byte) error) error {
+	// chunk.IDFromLedger panics below ledger 2; corrupt data must fail, not crash.
+	if seq < chunk.FirstLedgerSeq {
+		return stores.ErrNotFound
+	}
+	reader, err := a.Ledgers(chunk.IDFromLedger(seq))
+	if err != nil {
+		return err
+	}
+	return reader.WithLedger(seq, fn)
 }
 
 // resolveLedgers is Ledgers without the view registration: the returned close is
