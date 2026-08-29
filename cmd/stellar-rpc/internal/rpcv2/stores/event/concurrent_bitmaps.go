@@ -135,6 +135,59 @@ func (d *denseState) snapshot() *roaring.Bitmap {
 	return bm
 }
 
+// postings is an iterable view of ONE term's event IDs, in whichever
+// representation the index already holds: the sparse mode's sorted
+// []uint32, a dense term's live denseState, or a bitmap that came
+// from outside the mirror (the cold tier's, and the ascending path's
+// own bulk answers). Exactly one of the three is set; the zero value
+// means the term is absent.
+//
+// It exists so the ascending match path can iterate a sparse term in
+// place. Get has to promise a *roaring.Bitmap, so it pays a
+// roaring.New + AddMany over the id list on every sparse lookup —
+// measurably the bulk of the hot read path's container churn, and
+// pure waste when the consumer only walks the ids in order.
+//
+// Ownership: ids borrows the atomically published termState's slice,
+// which no writer ever mutates (a sparse AddTo publishes a NEW
+// termState), so it may be held indefinitely; it must be read, never
+// written or appended to. dense is the live term, and every bitmap it
+// yields comes from denseState.snapshot — the writer's own wbm and
+// the raw pub pointer are never handed out — so what bitmap()
+// returns obeys Get's read-only contract verbatim, forbidden and safe
+// method lists included.
+//
+// A postings over a dense term is a view, not a frozen copy: two
+// materializations of it can straddle an ingest and the later one
+// hold more ids. Callers pin a window before the lookup and clip
+// every cursor to it at the leaf (see bitmapIter.end), so ids a write
+// added after the pin sit above the window and are never yielded.
+type postings struct {
+	ids   []uint32
+	bm    *roaring.Bitmap
+	dense *denseState
+}
+
+// present reports whether the term is in the index at all. A term
+// that is present but holds no ids (possible only for an empty bitmap
+// handed to NewConcurrentBitmapsFromBitmaps) is present: it yields an
+// exhausted cursor, which intersects and unions to the same result an
+// absent term's caller-side skip would produce.
+func (p postings) present() bool { return p.bm != nil || p.ids != nil || p.dense != nil }
+
+// bitmap is the term's ids as a roaring bitmap, or nil when the term
+// is sparse or absent — sparse callers walk ids instead. A dense term
+// is snapshotted here, the only place outside Get that materializes
+// one, which is what keeps the writer's wbm off every read path.
+// Repeat calls cost nothing while no write lands: denseState caches
+// the snapshot it published.
+func (p postings) bitmap() *roaring.Bitmap {
+	if p.dense != nil {
+		return p.dense.snapshot()
+	}
+	return p.bm
+}
+
 // AddTo records each eventID under key. Callers feed events in
 // event-ID order relative to the chunk, so a duplicate is a retry of an
 // already-added prefix and is skipped.
@@ -170,6 +223,27 @@ func (s *ConcurrentBitmaps) AddTo(key TermKey, eventIDs ...uint32) {
 	ids := make([]uint32, 0, len(old.ids)+len(eventIDs))
 	ids = append(ids, old.ids...)
 	p.Store(termStateFromIDs(appendSorted(ids, eventIDs)))
+}
+
+// lookupPostings is Get without the sparse-mode materialization: it
+// hands back the term's live representation rather than converting it
+// to a bitmap. Same concurrency story as Get — the RLock covers the
+// map lookup only, and the entry load is lock-free. A dense term is
+// handed back as its denseState, so the bitmap a caller eventually
+// reads is denseState.snapshot's, immutable and current as of the
+// call that asks for it. A miss returns the zero postings.
+func (s *ConcurrentBitmaps) lookupPostings(key TermKey) postings {
+	s.rwmu.RLock()
+	p := s.terms[key]
+	s.rwmu.RUnlock()
+	if p == nil {
+		return postings{}
+	}
+	st := p.Load()
+	if st.dense != nil {
+		return postings{dense: st.dense}
+	}
+	return postings{ids: st.ids}
 }
 
 // appendSorted appends the ids in src that are greater than dst's
