@@ -4,7 +4,11 @@ package event
 // chunked allocations, so a fetch that copies hundreds of small payloads
 // costs a handful of allocations instead of one per payload. Chunks are
 // only ever appended within capacity, so previously returned copies never
-// move. Zero value is ready; not safe for concurrent use.
+// move. Zero value is ready.
+//
+// NOT safe for concurrent use: copy appends to one buffer. A caller whose
+// copies come from several goroutines — ColdReader.FetchEvents, once its
+// packfile reads fan out — must serialize them.
 type byteArena struct {
 	buf []byte
 }
