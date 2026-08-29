@@ -21,6 +21,7 @@ package event
 // unchanged.
 
 import (
+	"cmp"
 	"slices"
 
 	"github.com/RoaringBitmap/roaring/v2"
@@ -213,28 +214,63 @@ func (u *unionIter) advance(floor uint32) {
 // every child is advanced to the running maximum of the peeks until
 // they all agree on one id. A child that exhausts ends the
 // intersection — permanently, since cursors only move forward.
+//
+// Alignment is bounded when bulk is set. Every round that does not
+// settle the AND ends with the leading child stepped past one of its
+// ids, so a walk costs up to one round per id of that child — and
+// with chunk-sized groups on both sides of a thin overlap, the walk
+// spends all of them on a window the consumer's page never reaches.
+// Once the budget is gone the AND hands the rest of its window to
+// bulk, whose cost is bounded by the containers the terms span rather
+// than by the ids inside them. A nil bulk leaves the alignment
+// unbounded, which is what an AND with no bulk twin gets.
 type intersectIter struct {
 	children []idIter
 	cur      uint32
 	ok       bool
 	primed   bool
+
+	bulk    *bulkAnd
+	budget  uint64
+	rounds  uint64
+	spilled idIter
 }
 
 func (n *intersectIter) peek() (uint32, bool) {
+	if n.spilled != nil {
+		return n.spilled.peek()
+	}
 	if !n.primed {
 		n.cur, n.ok = n.align()
+		if n.spilled != nil {
+			return n.spilled.peek()
+		}
 		n.primed = true
 	}
 	return n.cur, n.ok
 }
 
-// align raises every child to the smallest id all of them hold.
+// align raises every child to the smallest id all of them hold, or
+// spills to the bulk answer when it runs out of rounds first.
 func (n *intersectIter) align() (uint32, bool) {
 	cand, ok := n.children[0].peek()
 	if !ok {
 		return 0, false
 	}
 	for {
+		if n.bulk != nil {
+			n.rounds++
+			if n.rounds > n.budget {
+				// A child raises the floor only past ids it does not
+				// hold, and cand only rises, so no id of the
+				// intersection was skipped between the last one
+				// yielded and cand: the bulk answer from cand up is
+				// exactly the rest of this AND.
+				n.spilled = n.bulk.iter(cand)
+				n.bulk = nil
+				return 0, false
+			}
+		}
 		raised := false
 		for _, c := range n.children {
 			c.advance(cand)
@@ -261,6 +297,10 @@ func (n *intersectIter) next() {
 	if !ok {
 		return
 	}
+	if n.spilled != nil {
+		n.spilled.next()
+		return
+	}
 	// Post-align every child sits on v; step them all past it.
 	for _, c := range n.children {
 		if cv, cok := c.peek(); cok && cv == v {
@@ -272,6 +312,10 @@ func (n *intersectIter) next() {
 
 func (n *intersectIter) advance(floor uint32) {
 	if v, ok := n.peek(); !ok || v >= floor {
+		return
+	}
+	if n.spilled != nil {
+		n.spilled.advance(floor)
 		return
 	}
 	for _, c := range n.children {
@@ -323,11 +367,11 @@ func intersectOf(children []idIter) idIter {
 func candidateIter(plans []termPlan, sources []postings, window IDRange) idIter {
 	perFilter := make([]idIter, 0, len(plans))
 	for _, plan := range plans {
-		groups := make([]idIter, 0, len(plan))
+		groups := make([]candidateGroup, 0, len(plan))
 		missed := false
 		for _, slots := range plan {
-			g := groupIter(sources, slots, window)
-			if g == nil {
+			g, ok := resolveGroup(sources, slots)
+			if !ok {
 				missed = true
 				break
 			}
@@ -336,9 +380,153 @@ func candidateIter(plans []termPlan, sources []postings, window IDRange) idIter 
 		if missed {
 			continue
 		}
-		perFilter = append(perFilter, intersectOf(groups))
+		perFilter = append(perFilter, filterIter(sources, groups, window))
 	}
 	return unionOf(perFilter)
+}
+
+// candidateGroup is one of a filter's resolved groups: where its terms
+// live in the batched lookup, and the weight that orders the filter's
+// AND.
+type candidateGroup struct {
+	slots []int
+	est   uint64
+}
+
+// resolveGroup weighs the postings at slots, reporting false when
+// every one of them is absent from the index — the mirror of
+// unionSlots' nil return, and the signal that the owning filter can
+// match nothing.
+//
+// The weight sums the present terms' cardinalities, an upper bound the
+// OR's dedup can only lower. It orders an intersection; nothing reads
+// it as a count.
+func resolveGroup(sources []postings, slots []int) (candidateGroup, bool) {
+	g := candidateGroup{slots: slots}
+	present := false
+	for _, slot := range slots {
+		p := sources[slot]
+		if !p.present() {
+			continue
+		}
+		present = true
+		g.est += p.estimate()
+	}
+	return g, present
+}
+
+// alignBudget is how many alignment rounds one filter's AND may spend
+// before it spills to the bulk answer.
+//
+// A round is a handful of galloping advances — tens of nanoseconds
+// over chunk-spanning terms — so the budget buys a few hundred
+// microseconds of walking, about what the bulk answer costs for a
+// filter whose terms span a whole chunk. That is the shape of the
+// trade at every value: a spill pays for the walk it abandoned on top
+// of the bulk answer, so it costs about twice the bulk on a filter it
+// fires on wrongly, and saves the difference between the bulk and an
+// unbounded walk on one it fires on rightly.
+//
+// A filter selective enough to fill a page out of the window's first
+// fraction settles in a round or two per id it yields and never comes
+// near the budget, whatever it is set to. What the value decides is
+// the boundary between filters that yield steadily but slowly — a few
+// dozen rounds per id, where the walk still finishes — and the ones
+// whose alignment crosses a chunk to find a handful of matches.
+//
+// A var, not a const, so in-package tests can shrink it to force the
+// spill; it never changes what a stream yields.
+//
+//nolint:gochecknoglobals // test seam; production never writes it
+var alignBudget uint64 = 8192
+
+// filterIter builds one filter's candidate cursor: the AND of its
+// groups, rarest first, bounded by alignBudget.
+//
+// Rarest first because intersectIter's alignment seeds its floor from
+// the leading child and raises the others to it in order, so the
+// leading cursor is the one every barren round steps forward, and the
+// trailing ones are the ones spared a wasted advance. Intersection is
+// commutative, so the order changes only how fast the gallop
+// converges — and it is what makes the budget's bound the rarest
+// group's cardinality rather than the fattest's.
+func filterIter(sources []postings, groups []candidateGroup, window IDRange) idIter {
+	slices.SortStableFunc(groups, func(a, b candidateGroup) int {
+		return cmp.Compare(a.est, b.est)
+	})
+	children := make([]idIter, len(groups))
+	for i := range groups {
+		children[i] = groupIter(sources, groups[i].slots, window)
+	}
+	if len(children) < 2 {
+		return intersectOf(children)
+	}
+	return &intersectIter{
+		children: children,
+		bulk:     &bulkAnd{sources: sources, groups: groups, end: window.End},
+		budget:   alignBudget,
+	}
+}
+
+// bulkAnd is a filter's AND as roaring's aggregation would answer it,
+// held unevaluated beside the walk that normally answers it instead.
+// It is the walk's bound: the cost of the aggregation is set by the
+// containers the terms span, so it does not grow with a window the
+// walk would have to cross id by id.
+type bulkAnd struct {
+	sources []postings
+	groups  []candidateGroup
+	end     uint32
+}
+
+// iter computes the filter's candidate set — OR each group, AND the
+// groups smallest first — and returns a cursor over the part of it at
+// or above floor.
+//
+// The inputs may be borrowed mirror snapshots: FastAnd and FastOr read
+// them without writing through, and never see the single-element slice
+// that would make them Clone, so what comes back is this call's own
+// bitmap, and only the intersection large. The window lands at the
+// leaf, exactly as it does on a borrowed term.
+func (b *bulkAnd) iter(floor uint32) idIter {
+	inputs := make([]*roaring.Bitmap, len(b.groups))
+	for i := range b.groups {
+		inputs[i] = orGroup(b.sources, b.groups[i].slots)
+	}
+	// FastAnd intersects left to right, so the smallest input first
+	// shrinks the accumulator fastest — the caller-side prep roaring's
+	// own docs call for, and the one unionForFilters does. A group's
+	// weight only bounds its OR, so the inputs are ranked again once
+	// they exist.
+	slices.SortFunc(inputs, func(x, y *roaring.Bitmap) int {
+		return cmp.Compare(x.GetCardinality(), y.GetCardinality())
+	})
+	return postings{bm: roaring.FastAnd(inputs...)}.iter(
+		IDRange{Start: floor, End: b.end})
+}
+
+// orGroup ORs a group's present terms into one bulkAnd input. A group
+// holding one of them is that term's bitmap: FastOr has historically
+// Cloned a single-element slice. A sparse term is inflated here, the
+// one place the ascending path does what Get does — it costs the ids
+// it holds, and only a filter whose walk already overran its budget
+// ever pays it.
+func orGroup(sources []postings, slots []int) *roaring.Bitmap {
+	present := make([]*roaring.Bitmap, 0, len(slots))
+	for _, slot := range slots {
+		switch p := sources[slot]; {
+		case p.bm != nil:
+			present = append(present, p.bm)
+		case p.ids != nil:
+			bm := roaring.New()
+			bm.AddMany(p.ids)
+			present = append(present, bm)
+		}
+	}
+	if len(present) == 1 {
+		return present[0]
+	}
+	return roaring.FastOr(present...)
 }
 
 // groupIter ORs the postings at slots into one cursor, returning nil

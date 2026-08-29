@@ -166,6 +166,19 @@ type postings struct {
 // absent term's caller-side skip would produce.
 func (p postings) present() bool { return p.bm != nil || p.ids != nil }
 
+// estimate is the term's cardinality over the whole chunk, the weight
+// the ascending path's query plan orders an intersection by. It reads
+// the count off whichever representation the term holds — one
+// GetCardinality, on Get's safe list, or one len — and ignores the
+// caller's window, so it ranks terms rather than counting a query's
+// candidates. The zero postings weighs 0.
+func (p postings) estimate() uint64 {
+	if p.bm != nil {
+		return p.bm.GetCardinality()
+	}
+	return uint64(len(p.ids))
+}
+
 // AddTo records each eventID under key. Idempotent: callers
 // (HotStore.applyLedger via the post-commit hook, warmup) feed
 // events in chunk-relative event-ID order, so any duplicate is a

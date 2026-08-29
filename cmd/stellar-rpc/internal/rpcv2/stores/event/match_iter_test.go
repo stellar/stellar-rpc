@@ -299,6 +299,229 @@ func TestGroupIterAbsentGroup(t *testing.T) {
 	assert.Equal(t, []uint32{1, 2, 3}, drain(groupIter(sources, []int{0, 3}, wholeWindow)))
 }
 
+// TestPostingsEstimate pins the ordering weight on both
+// representations: the term's whole-chunk cardinality, window and all.
+func TestPostingsEstimate(t *testing.T) {
+	assert.Equal(t, uint64(0), postings{}.estimate(), "the absent term weighs nothing")
+	assert.Equal(t, uint64(0), postings{bm: roaring.New()}.estimate())
+	assert.Equal(t, uint64(3), sparseSource(1, 2, 3).estimate())
+	assert.Equal(t, uint64(3), denseSource(1, 2, 3).estimate())
+	assert.Equal(t, uint64(4), denseSource(1, 2, 3, 1<<20).estimate(),
+		"cardinality spans containers")
+}
+
+// TestResolveGroup pins what a group reports about itself: presence,
+// and the summed weight that orders its filter's AND.
+func TestResolveGroup(t *testing.T) {
+	sources := []postings{
+		sparseSource(1, 2),
+		{}, // absent
+		denseSource(2, 3, 4),
+	}
+
+	g, ok := resolveGroup(sources, []int{0})
+	require.True(t, ok)
+	assert.Equal(t, uint64(2), g.est)
+	assert.Equal(t, []int{0}, g.slots)
+
+	g, ok = resolveGroup(sources, []int{0, 2})
+	require.True(t, ok)
+	assert.Equal(t, uint64(5), g.est, "a group's terms sum, overlaps double-counted")
+
+	g, ok = resolveGroup(sources, []int{1, 2})
+	require.True(t, ok)
+	assert.Equal(t, uint64(3), g.est, "an absent term adds nothing")
+
+	g, ok = resolveGroup(sources, []int{1})
+	assert.False(t, ok, "a group of absent terms drops its filter")
+	assert.Equal(t, uint64(0), g.est)
+}
+
+// TestFilterIterOrdersRarestFirst pins the driver choice: the rarest
+// group leads the AND however the plan named its groups, which is what
+// bounds the walk at one round per id of that group.
+func TestFilterIterOrdersRarestFirst(t *testing.T) {
+	sources := []postings{
+		denseSource(1, 2, 3, 4, 5, 6, 7, 8), // 0: the fat group
+		denseSource(2, 4, 6, 8),             // 1
+		denseSource(4, 8),                   // 2: the rare group
+	}
+	slotSets := [][]int{{0}, {2}, {1}}
+	groups := make([]candidateGroup, 0, len(slotSets))
+	for _, slots := range slotSets {
+		g, ok := resolveGroup(sources, slots)
+		require.True(t, ok)
+		groups = append(groups, g)
+	}
+	it := filterIter(sources, groups, wholeWindow)
+	n, isIntersect := it.(*intersectIter)
+	require.True(t, isIntersect)
+	assert.Equal(t, [][]int{{2}, {1}, {0}},
+		[][]int{groups[0].slots, groups[1].slots, groups[2].slots},
+		"the groups are reordered rarest first")
+	assert.Equal(t, alignBudget, n.budget)
+	assert.Equal(t, []uint32{4, 8}, drain(it))
+
+	// A one-group filter is the group itself: no AND, so no budget.
+	one, ok := resolveGroup(sources, []int{2})
+	require.True(t, ok)
+	assert.Equal(t, []uint32{4, 8},
+		drain(filterIter(sources, []candidateGroup{one}, wholeWindow)))
+}
+
+// planGroups resolves a whole filter, for the tests that drive
+// filterIter directly.
+func planGroups(t *testing.T, sources []postings, plan termPlan) []candidateGroup {
+	t.Helper()
+	groups := make([]candidateGroup, 0, len(plan))
+	for _, slots := range plan {
+		g, ok := resolveGroup(sources, slots)
+		require.True(t, ok)
+		groups = append(groups, g)
+	}
+	return groups
+}
+
+// TestIntersectIterSpills pins the fallback: an AND that overruns its
+// budget answers the rest of its window out of the bulk bitmap,
+// yielding exactly what the walk would have — no id repeated across
+// the seam, none dropped at it — at every budget the seam can fall on.
+func TestIntersectIterSpills(t *testing.T) {
+	sources := []postings{
+		denseSource(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+		denseSource(2, 4, 6, 8, 10, 12),
+		sparseSource(3, 4, 8, 12, 20),
+	}
+	plan := termPlan{{0}, {1}, {2}}
+
+	for _, budget := range []uint64{0, 1, 2, 3, 5, 100} {
+		it, ok := filterIter(sources, planGroups(t, sources, plan), wholeWindow).(*intersectIter)
+		require.True(t, ok)
+		it.budget = budget
+		assert.Equal(t, []uint32{4, 8, 12}, drain(it), "budget %d", budget)
+	}
+
+	// A budget of zero spills on the first round, so the whole answer
+	// comes from the bulk bitmap — sparse group and all, which the
+	// aggregation inflates rather than walks — and the window still
+	// lands at the leaf.
+	it, ok := filterIter(sources, planGroups(t, sources, plan),
+		IDRange{Start: 0, End: 12}).(*intersectIter)
+	require.True(t, ok)
+	it.budget = 0
+	assert.Equal(t, []uint32{4, 8}, drain(it))
+	assert.NotNil(t, it.spilled)
+}
+
+// TestIntersectIterSpillAdvance pins the seam under advance: a gallop
+// that crosses the spill lands where the walk would have.
+func TestIntersectIterSpillAdvance(t *testing.T) {
+	sources := []postings{
+		denseSource(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+		denseSource(2, 4, 6, 8, 10, 12),
+	}
+	plan := termPlan{{0}, {1}}
+	for _, budget := range []uint64{0, 1, 2, 100} {
+		it, ok := filterIter(sources, planGroups(t, sources, plan), wholeWindow).(*intersectIter)
+		require.True(t, ok)
+		it.budget = budget
+		it.advance(7)
+		v, vok := it.peek()
+		require.True(t, vok, "budget %d", budget)
+		assert.Equal(t, uint32(8), v, "budget %d", budget)
+		it.advance(3)
+		v, _ = it.peek()
+		assert.Equal(t, uint32(8), v, "advance backwards is a no-op, budget %d", budget)
+		assert.Equal(t, []uint32{8, 10, 12}, drain(it), "budget %d", budget)
+	}
+}
+
+// randomBulkPlan draws a corpus of overlapping terms in both
+// representations and one filter's plan over it, the shape family the
+// spill has to answer identically to the walk.
+func randomBulkPlan(rng *rand.Rand, idSpace int) ([]postings, termPlan) {
+	sources := make([]postings, 1+rng.Intn(5))
+	for i := range sources {
+		n := rng.Intn(idSpace / 2)
+		seen := make(map[uint32]struct{}, n)
+		for range n {
+			seen[uint32(rng.Intn(idSpace))] = struct{}{}
+		}
+		ids := make([]uint32, 0, len(seen))
+		for id := range seen {
+			ids = append(ids, id)
+		}
+		slices.Sort(ids)
+		if rng.Intn(4) == 0 {
+			sources[i] = postings{ids: ids}
+		} else {
+			sources[i] = denseSource(ids...)
+		}
+	}
+	plan := make(termPlan, 1+rng.Intn(4))
+	for g := range plan {
+		slots := make([]int, 1+rng.Intn(2))
+		for s := range slots {
+			slots[s] = rng.Intn(len(sources))
+		}
+		plan[g] = slots
+	}
+	return sources, plan
+}
+
+// TestFilterIterBulkMatchesWalk is the spill's equivalence gate: over
+// randomized plans, source shapes and windows, an AND that spills must
+// yield exactly what the unbounded walk yields, and both must equal the
+// materialized algebra. The budget is moved rather than the corpus, so
+// the same filter is answered every way.
+func TestFilterIterBulkMatchesWalk(t *testing.T) {
+	rng := rand.New(rand.NewSource(20260901))
+	const idSpace = 4000
+	spills := 0
+	for trial := range 300 {
+		sources, plan := randomBulkPlan(rng, idSpace)
+		start := uint32(rng.Intn(idSpace))
+		end := start + uint32(rng.Intn(idSpace))
+		window := IDRange{Start: start, End: end}
+
+		build := func(budget uint64) (idIter, *intersectIter) {
+			groups := make([]candidateGroup, 0, len(plan))
+			for _, slots := range plan {
+				g, ok := resolveGroup(sources, slots)
+				if !ok {
+					return nil, nil
+				}
+				groups = append(groups, g)
+			}
+			it := filterIter(sources, groups, window)
+			n, _ := it.(*intersectIter)
+			if n != nil {
+				n.budget = budget
+			}
+			return it, n
+		}
+		walk, _ := build(^uint64(0))
+		if walk == nil {
+			continue
+		}
+		want := referenceCandidates([]termPlan{plan}, sources, window)
+		require.Equal(t, want, drain(walk),
+			"trial %d: window %v plan %v", trial, window, plan)
+		// Budgets in the low single digits put the seam at the start of
+		// a plan's answer and partway into it, so the join is under test
+		// and not just its ends.
+		for _, budget := range []uint64{0, 1, 3} {
+			it, n := build(budget)
+			require.Equal(t, want, drain(it),
+				"trial %d budget %d: window %v plan %v", trial, budget, window, plan)
+			if n != nil && n.spilled != nil {
+				spills++
+			}
+		}
+	}
+	require.Greater(t, spills, 100, "fixture sanity: the spill must actually fire")
+}
+
 func TestCandidateIterDropsFilterWithAbsentGroup(t *testing.T) {
 	sources := []postings{
 		sparseSource(1, 2, 3),
@@ -363,6 +586,43 @@ func referenceCandidates(plans []termPlan, sources []postings, window IDRange) [
 	windowBM.AddRange(uint64(window.Start), uint64(window.End))
 	union.And(windowBM)
 	return union.ToArray()
+}
+
+// TestMatchesSpillYieldsSameStream drives whole Matches calls with the
+// alignment budget shrunk, so every filter's AND spills on its first
+// rounds, and requires the stream to be the one the unbounded walk
+// yields. It puts the seam where it actually sits: under term
+// planning, the window cap, the batch loop and the post-filter.
+func TestMatchesSpillYieldsSameStream(t *testing.T) {
+	rng := rand.New(rand.NewSource(20260902))
+	v := newDiffVocab(t)
+	const corpusSize = 300
+	corpus := newDiffCorpus(t, rng, v, corpusSize)
+
+	// Shrink the batch too, so a spill can land mid-page.
+	defer func(n int) { matchBatchSize = n }(matchBatchSize)
+	matchBatchSize = 7
+	defer func(n uint64) { alignBudget = n }(alignBudget)
+
+	r := diffPostingsReader{diffReader{corpus}}
+	matched := 0
+	for trial := range 200 {
+		filters := randomFilters(rng, v)
+		start := uint32(rng.Intn(corpusSize + 1))
+		end := start + uint32(rng.Intn(corpusSize+1-int(start)))
+		w := IDRange{Start: start, End: end}
+
+		alignBudget = ^uint64(0)
+		want := collectOrdinals(t, r, filters, w, false)
+		matched += len(want)
+		for _, budget := range []uint64{0, 1, 4} {
+			alignBudget = budget
+			require.Equal(t, want, collectOrdinals(t, r, filters, w, false),
+				"trial %d budget %d: window %v filters %+v", trial, budget, w, filters)
+		}
+	}
+	require.Greater(t, matched, 2000,
+		"fixture sanity: randomized queries selected too little")
 }
 
 // TestCandidateIterMatchesMaterializedAlgebra is the differential
@@ -626,3 +886,344 @@ func benchMatches(b *testing.B, descending bool) {
 // keeps the bitmap algebra.
 func BenchmarkMatchesAscending(b *testing.B)  { benchMatches(b, false) }
 func BenchmarkMatchesDescending(b *testing.B) { benchMatches(b, true) }
+
+// ─── the candidate-shape microbench ─────────────────────────────────
+//
+// The A/B above drives one production query end to end; the matrix
+// below isolates the candidate set itself. Both paths answer the same
+// synthetic plan over the same mirror — candidateIter's cursor tree
+// against unionForFilters' bitmap algebra — with fetch and
+// post-filter out of frame, so a shape's number is candidate work
+// alone. The shapes are the term geometries the two are expected to
+// disagree on: fat partially-overlapping ANDs, a skewed AND, a deep
+// AND, and a wide OR.
+
+// benchFat is one fat term's cardinality against benchEvents: ~7% of
+// the domain, the density at which roaring holds a term as bitmap
+// containers — the representation FastAnd intersects a word at a
+// time and the cursor tree walks a bit at a time.
+const benchFat = 300_000
+
+// benchRand is a deterministic xorshift. The shapes must be identical
+// from run to run, and a fixed stride would hand the gallop a
+// regularity real postings do not have.
+type benchRand uint64
+
+func (r *benchRand) next() uint64 {
+	x := uint64(*r)
+	x ^= x << 13
+	x ^= x >> 7
+	x ^= x << 17
+	*r = benchRand(x)
+	return x
+}
+
+// scatter draws exactly k ascending ids from the residue class
+// {i : i ≡ res (mod m), i < domain}, one per fixed stride at a
+// jittered offset inside it. Terms built on disjoint residue classes
+// interleave at single-id granularity while sharing nothing, so a
+// shape's overlap is exactly the class its terms are built to share.
+func scatter(rng *benchRand, domain, m, res uint32, k int) []uint32 {
+	if k == 0 {
+		return nil
+	}
+	class := (domain - res + m - 1) / m
+	stride := class / uint32(k)
+	if stride == 0 {
+		panic("scatter: residue class too small for k")
+	}
+	ids := make([]uint32, k)
+	for t := range k {
+		ids[t] = (uint32(t)*stride+uint32(rng.next()%uint64(stride)))*m + res
+	}
+	return ids
+}
+
+// fatGroup builds n terms of card ids each: term i draws its private
+// ids from residue class base+i, and every term also holds the class
+// base+n, so the group's joint intersection is exactly that shared
+// class and every pairwise overlap is the same set. mod is the total
+// number of classes in play, so several groups can be laid over one
+// domain without colliding.
+func fatGroup(rng *benchRand, domain, mod, base uint32, n, card, shared int) [][]uint32 {
+	common := scatter(rng, domain, mod, base+uint32(n), shared)
+	out := make([][]uint32, n)
+	for i := range out {
+		ids := scatter(rng, domain, mod, base+uint32(i), card-shared)
+		ids = append(ids, common...)
+		slices.Sort(ids)
+		out[i] = ids
+	}
+	return out
+}
+
+// benchShape is one synthetic candidate-set problem: a term corpus in
+// the mirror, the plan resolved over it, and the page both paths must
+// produce from it.
+type benchShape struct {
+	name   string
+	reader *hotLikeIndex
+	plans  []termPlan
+	keys   []TermKey
+	window IDRange
+	// wantCount and wantSum fingerprint the first page. Both paths
+	// check them every iteration, so a harness that stopped answering
+	// the query cannot post a fast number.
+	wantCount int
+	wantSum   uint64
+}
+
+// newBenchShape indexes terms as one term each, resolves the window to
+// most of the domain with both edges live, and fingerprints the first
+// page off the materialized algebra — the reference the cursor tree
+// must reproduce id for id.
+func newBenchShape(name string, domain uint32, terms [][]uint32, plans []termPlan) *benchShape {
+	bms := NewBitmaps()
+	keys := make([]TermKey, len(terms))
+	for i, ids := range terms {
+		keys[i] = TermKey{0: byte(i + 1)}
+		bms.AddTo(keys[i], ids...)
+	}
+	s := &benchShape{
+		name: name,
+		reader: &hotLikeIndex{&stubIndex{
+			mirror: NewConcurrentBitmapsFromBitmaps(bms), count: domain,
+		}},
+		plans:  plans,
+		keys:   keys,
+		window: IDRange{Start: domain / 32, End: domain - domain/32},
+	}
+	union, err := unionForFilters(
+		context.Background(), s.reader, s.plans, s.keys, s.window)
+	if err != nil {
+		panic(err)
+	}
+	it := union.Iterator()
+	for s.wantCount < benchPage && it.HasNext() {
+		s.wantCount++
+		s.wantSum += uint64(it.Next())
+	}
+	return s
+}
+
+// singleFilterPlan is one filter AND-ing n one-term groups: the
+// intersect shapes' plan.
+func singleFilterPlan(n int) []termPlan {
+	plan := make(termPlan, n)
+	for i := range plan {
+		plan[i] = []int{i}
+	}
+	return []termPlan{plan}
+}
+
+// benchShapes is the shape matrix, each entry built on first use so a
+// -bench selecting one shape pays for one shape. domain is a
+// parameter so the correctness twin of the matrix can run the same
+// geometries small.
+func benchShapes(domain uint32) []struct {
+	name  string
+	build func() *benchShape
+} {
+	scale := func(n int) int { return max(1, n*int(domain)/benchEvents) }
+	fat := scale(benchFat)
+	// ~3% of a fat term: the partial overlap that makes an aligning
+	// AND converge slowly without making it empty.
+	partial := fat * 3 / 100
+	// Just over one page once the window clips it: the intersection
+	// too small to fill a page early, so the walk spans the window.
+	tiny := scale(1200)
+
+	shapes := []struct {
+		name  string
+		build func() *benchShape
+	}{
+		{"a_and2_fat_3pct", func() *benchShape {
+			rng := benchRand(1)
+			return newBenchShape("a", domain,
+				fatGroup(&rng, domain, 3, 0, 2, fat, partial), singleFilterPlan(2))
+		}},
+		{"b_and3_fat_3pct", func() *benchShape {
+			rng := benchRand(2)
+			return newBenchShape("b", domain,
+				fatGroup(&rng, domain, 4, 0, 3, fat, partial), singleFilterPlan(3))
+		}},
+		{"c_and2_skew", func() *benchShape {
+			rng := benchRand(3)
+			// The small term is a subset of the fat one, spread over
+			// it, so the AND is entirely decided by the rare side —
+			// the gallop-friendly control.
+			big := scatter(&rng, domain, 1, 0, fat)
+			small := make([]uint32, 0, scale(2000))
+			step := len(big) / cap(small)
+			for i := range cap(small) {
+				small = append(small, big[i*step])
+			}
+			return newBenchShape("c", domain,
+				[][]uint32{big, small}, singleFilterPlan(2))
+		}},
+		{"d_and6_fat_tiny", func() *benchShape {
+			rng := benchRand(4)
+			return newBenchShape("d", domain,
+				fatGroup(&rng, domain, 7, 0, 6, fat, tiny), singleFilterPlan(6))
+		}},
+		{"e_or10_single_term", func() *benchShape {
+			rng := benchRand(5)
+			terms := fatGroup(&rng, domain, 11, 0, 10, scale(30_000), 0)
+			plans := make([]termPlan, len(terms))
+			for i := range plans {
+				plans[i] = termPlan{{i}}
+			}
+			return newBenchShape("e", domain, terms, plans)
+		}},
+		{"f_and2_fat_tiny", func() *benchShape {
+			rng := benchRand(6)
+			return newBenchShape("f", domain,
+				fatGroup(&rng, domain, 3, 0, 2, fat, tiny), singleFilterPlan(2))
+		}},
+		{"h_and2_fat_overlapping", func() *benchShape {
+			rng := benchRand(8)
+			// The serving default: one selective term AND-ed with a
+			// near-total one (an event type constrains almost
+			// nothing). The intersection is nearly the selective term
+			// itself, so a page comes out of the window's first
+			// fraction — the shape the cursor tree exists to serve,
+			// and the one any eager rule must leave alone.
+			selective := scatter(&rng, domain, 3, 0, fat)
+			nearAll := make([]uint32, 0, domain)
+			for id := range domain {
+				if id%50 != 7 {
+					nearAll = append(nearAll, id)
+				}
+			}
+			return newBenchShape("h", domain,
+				[][]uint32{selective, nearAll}, singleFilterPlan(2))
+		}},
+		{"g_and3_x4_filters", func() *benchShape {
+			rng := benchRand(7)
+			// The serving shape the tail regression was measured on:
+			// several filters, each AND-ing a few fat terms. Each
+			// filter owns four residue classes, so the filters overlap
+			// only where the union has to dedup them.
+			terms := make([][]uint32, 0, 12)
+			plans := make([]termPlan, 0, 4)
+			for f := range uint32(4) {
+				group := fatGroup(&rng, domain, 16, f*4, 3, scale(75_000), scale(2250))
+				plan := make(termPlan, len(group))
+				for i := range group {
+					plan[i] = []int{len(terms) + i}
+				}
+				terms = append(terms, group...)
+				plans = append(plans, plan)
+			}
+			return newBenchShape("g", domain, terms, plans)
+		}},
+	}
+	return shapes
+}
+
+// benchShapeCache keeps one built corpus per shape name, so the tree
+// and materialized runs of a shape share it. Benchmarks run one at a
+// time, so a plain map suffices.
+var benchShapeCache = map[string]*benchShape{}
+
+func shapeFor(name string, build func() *benchShape) *benchShape {
+	s, ok := benchShapeCache[name]
+	if !ok {
+		s = build()
+		benchShapeCache[name] = s
+	}
+	return s
+}
+
+// benchCandidatePage pulls one page of candidates through the cursor
+// tree — the ascending path's candidate work, with nothing else in
+// frame.
+func benchCandidatePage(b *testing.B, s *benchShape) {
+	b.Helper()
+	ctx := context.Background()
+	b.ReportAllocs()
+	for b.Loop() {
+		sources, err := lookupPostings(ctx, s.reader, s.keys)
+		if err != nil {
+			b.Fatal(err)
+		}
+		it := candidateIter(s.plans, sources, s.window)
+		n, sum := 0, uint64(0)
+		for n < benchPage {
+			v, ok := it.peek()
+			if !ok {
+				break
+			}
+			n, sum = n+1, sum+uint64(v)
+			it.next()
+		}
+		if n != s.wantCount || sum != s.wantSum {
+			b.Fatalf("page mismatch: got (%d, %d), want (%d, %d)",
+				n, sum, s.wantCount, s.wantSum)
+		}
+	}
+}
+
+// benchMaterializedPage is benchCandidatePage's twin over the bitmap
+// algebra: build the whole candidate set, then read one page off it.
+// The direction of that read is immaterial — the materialization
+// dominates and the page is 1000 steps either way — so it reads
+// ascending, which makes the two harnesses answer bit for bit.
+func benchMaterializedPage(b *testing.B, s *benchShape) {
+	b.Helper()
+	ctx := context.Background()
+	b.ReportAllocs()
+	for b.Loop() {
+		union, err := unionForFilters(ctx, s.reader, s.plans, s.keys, s.window)
+		if err != nil {
+			b.Fatal(err)
+		}
+		it := union.Iterator()
+		n, sum := 0, uint64(0)
+		for n < benchPage && it.HasNext() {
+			n, sum = n+1, sum+uint64(it.Next())
+		}
+		if n != s.wantCount || sum != s.wantSum {
+			b.Fatalf("page mismatch: got (%d, %d), want (%d, %d)",
+				n, sum, s.wantCount, s.wantSum)
+		}
+	}
+}
+
+// BenchmarkCandidateTree and BenchmarkCandidateMaterialized are the
+// per-shape A/B for the candidate set: the same plan, the same
+// postings, the same page, differing only in whether the ids are
+// pulled through the cursor tree or read off a materialized bitmap.
+func BenchmarkCandidateTree(b *testing.B) {
+	for _, sh := range benchShapes(benchEvents) {
+		b.Run(sh.name, func(b *testing.B) {
+			benchCandidatePage(b, shapeFor(sh.name, sh.build))
+		})
+	}
+}
+
+func BenchmarkCandidateMaterialized(b *testing.B) {
+	for _, sh := range benchShapes(benchEvents) {
+		b.Run(sh.name, func(b *testing.B) {
+			benchMaterializedPage(b, shapeFor(sh.name, sh.build))
+		})
+	}
+}
+
+// TestBenchShapesAgree runs the whole shape matrix small: every
+// geometry the microbench measures must be one both candidate paths
+// answer identically, so a shape can never post a number for a query
+// the tree gets wrong.
+func TestBenchShapesAgree(t *testing.T) {
+	const domain = 1 << 16
+	for _, sh := range benchShapes(domain) {
+		t.Run(sh.name, func(t *testing.T) {
+			s := sh.build()
+			sources, err := lookupPostings(context.Background(), s.reader, s.keys)
+			require.NoError(t, err)
+			got := drain(candidateIter(s.plans, sources, s.window))
+			require.Equal(t, referenceCandidates(s.plans, sources, s.window), got)
+			require.NotEmpty(t, got, "shape sanity: the plan must select something")
+		})
+	}
+}
