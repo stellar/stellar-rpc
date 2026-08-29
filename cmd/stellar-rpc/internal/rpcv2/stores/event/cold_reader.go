@@ -457,12 +457,15 @@ func (c *ColdReader) FetchEvents(ctx context.Context, eventIDs []uint32) ([]Payl
 		positions[i] = int(id)
 	}
 	results := make([]Payload, len(eventIDs))
+	var arena byteArena
 	if err := c.events.ReadItems(ctx, positions, func(idx int, data []byte) error {
 		// packfile.ReadItems passes a borrowed data slice valid only for
 		// the duration of fn (see Reader.ReadItems docstring). FetchEvents
-		// returns the Payloads in a slice that outlives fn, so clone before
-		// Unmarshal aliases the bytes into ContractEventBytes.
-		return results[idx].Unmarshal(bytes.Clone(data))
+		// returns the Payloads in a slice that outlives fn, so copy before
+		// Unmarshal aliases the bytes into ContractEventBytes — through an
+		// arena, since a batch's payloads live and die together and
+		// per-payload clones only add GC work.
+		return results[idx].Unmarshal(arena.copy(data))
 	}); err != nil {
 		// packfile.ReadItems also validates sorted positions as defense in
 		// depth; translate its sentinel to ours so callers can errors.Is

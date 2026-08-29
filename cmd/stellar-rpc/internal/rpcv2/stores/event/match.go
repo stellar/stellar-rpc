@@ -219,14 +219,17 @@ type Match struct {
 type termPlan [][]int
 
 // batchSizes resolves the first and following internal batch sizes
-// from the caller's hint. The hint applies only when it is positive
-// and below the default. Both results are clamped positive, so a zero
-// test seam cannot stall a stream (a zero step never advances).
+// from the caller's hint. A positive hint sizes the first batch in both
+// directions — smaller for a small page, larger so a page-sized request
+// is one storage round trip instead of several — capped at eight default
+// batches so a wild hint cannot demand an unbounded fetch. Both results
+// are clamped positive, so a zero test seam cannot stall a stream (a
+// zero step never advances).
 func batchSizes(hint int) (int, int) {
 	rest := max(1, matchBatchSize)
 	first := rest
-	if hint > 0 && hint < rest {
-		first = hint
+	if hint > 0 {
+		first = min(hint, 8*rest)
 	}
 	return first, rest
 }
