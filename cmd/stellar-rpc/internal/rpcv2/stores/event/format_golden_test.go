@@ -35,8 +35,10 @@ func TestComputeTermKey_Golden(t *testing.T) {
 		FieldEventType:  "b8cba0b1d3c82ec9ba18a11d780d0d23",
 		FieldTopicCount: "8188dbfd6145c54e6cb442dc02b3c324",
 	}
-	require.Len(t, want, int(FieldTopicCount)+1, "extend the golden map when adding a Field")
-	for f, w := range want {
+	require.Len(t, want, len(allFields), "extend the golden map when adding a Field")
+	for _, f := range allFields {
+		w, pinned := want[f]
+		require.True(t, pinned, "field %d has no golden pin; add one when adding a Field", f)
 		assert.Equal(t, w, hexKey(t, ComputeTermKey(val, f)), "field %d", f)
 	}
 }

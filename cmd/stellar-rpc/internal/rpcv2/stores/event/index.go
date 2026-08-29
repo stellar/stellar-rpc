@@ -36,12 +36,28 @@ const (
 // closed; per-id read sets arrive with the format-id grammar).
 const TermSchemaVersion uint16 = 1
 
+// allFields is the field registry, the single source of truth the mask and
+// the golden tests derive from. Extend it in the same change that adds a
+// Field constant.
+//
+//nolint:gochecknoglobals // immutable field registry, single source of truth
+var allFields = []Field{
+	FieldContractID, FieldTopic0, FieldTopic1, FieldTopic2, FieldTopic3,
+	FieldEventType, FieldTopicCount,
+}
+
 // IndexedFieldMask is the set of indexed fields as a bitmask (bit i set means
-// Field i is indexed). Extend it in the same change that adds a Field; the
-// term-key golden tests pin the derivation, and the build stamp records this
-// mask per artifact.
-const IndexedFieldMask uint64 = 1<<FieldContractID | 1<<FieldTopic0 | 1<<FieldTopic1 |
-	1<<FieldTopic2 | 1<<FieldTopic3 | 1<<FieldEventType | 1<<FieldTopicCount
+// Field i is indexed), derived from allFields; the build stamp records it per
+// artifact and the term-key golden tests iterate the same registry.
+//
+//nolint:gochecknoglobals // derived from the immutable field registry
+var IndexedFieldMask = func() uint64 {
+	var m uint64
+	for _, f := range allFields {
+		m |= 1 << f
+	}
+	return m
+}()
 
 // ComputeTermKey computes a 16-byte term key by hashing the field byte
 // followed by the value bytes: xxh3_128(field || value), encoded as

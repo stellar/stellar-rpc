@@ -205,10 +205,6 @@ const LedgerOffsetsFormatVersion byte = 0x01
 
 const ledgerOffsetsHeaderLen = 1 + 4 + 4
 
-// ErrUnknownLedgerOffsetsVersion is returned when decoding app data
-// whose leading version byte isn't recognized by this binary.
-var ErrUnknownLedgerOffsetsVersion = errors.New("events: unknown LedgerOffsets format version")
-
 // ErrShortLedgerOffsets is returned when the app data buffer is
 // shorter than the declared header or trailing cumulative array.
 var ErrShortLedgerOffsets = errors.New("events: LedgerOffsets app data too short")
@@ -235,13 +231,8 @@ func encodeLedgerOffsets(o *LedgerOffsets) ([]byte, error) {
 // encodeLedgerOffsets back into a *LedgerOffsets. Used by the cold
 // reader (PR-3a).
 func DecodeLedgerOffsets(data []byte) (*LedgerOffsets, error) {
-	// Version before length (the CheckBlobVersion order), so a differently
-	// sized newer blob reports as a version problem.
-	if len(data) == 0 {
-		return nil, ErrShortLedgerOffsets
-	}
-	if data[0] != LedgerOffsetsFormatVersion {
-		return nil, fmt.Errorf("%w: 0x%02x", ErrUnknownLedgerOffsetsVersion, data[0])
+	if err := stores.CheckBlobVersion(data, LedgerOffsetsFormatVersion); err != nil {
+		return nil, fmt.Errorf("events: LedgerOffsets app data: %w", err)
 	}
 	if len(data) < ledgerOffsetsHeaderLen {
 		return nil, ErrShortLedgerOffsets
@@ -319,13 +310,8 @@ func encodeEventsMeta(secret [stores.SecretLen]byte) []byte {
 
 func decodeEventsMeta(data []byte) ([stores.SecretLen]byte, error) {
 	var secret [stores.SecretLen]byte
-	// Version before length (the CheckBlobVersion order), so a differently
-	// sized newer blob reports as a version problem.
-	if len(data) == 0 {
-		return secret, fmt.Errorf("%w: empty", errBadIndexMetadata)
-	}
-	if data[0] != eventsMetaVersion {
-		return secret, fmt.Errorf("%w: unknown version 0x%02x", errBadIndexMetadata, data[0])
+	if err := stores.CheckBlobVersion(data, eventsMetaVersion); err != nil {
+		return secret, fmt.Errorf("%w: %w", errBadIndexMetadata, err)
 	}
 	if len(data) != eventsMetaLen {
 		return secret, fmt.Errorf("%w: %d bytes, want %d", errBadIndexMetadata, len(data), eventsMetaLen)

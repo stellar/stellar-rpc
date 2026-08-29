@@ -255,6 +255,17 @@ func newFileReader(path string, bufBytes int) (*fileReader, error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("txhash: %s too short for header (%d bytes)", path, n)
 	}
+	// Self-defending: the merge consumes raw entry bytes, so it verifies the
+	// prelude itself rather than trusting that scanAndValidate ran upstream.
+	if magic := string(buf[:4]); magic != coldBinMagic {
+		_ = f.Close()
+		return nil, fmt.Errorf("txhash: %s is not a cold txhash .bin (magic %q, want %q)", path, magic, coldBinMagic)
+	}
+	if buf[4] != coldBinVersion {
+		_ = f.Close()
+		return nil, fmt.Errorf("txhash: %s has .bin version %d unsupported by this binary "+
+			"(written by a newer stellar-rpc?)", path, buf[4])
+	}
 	return &fileReader{
 		path:    path,
 		f:       f,

@@ -175,11 +175,11 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		if err != nil {
 			return err
 		}
-		// index.pack's format, record checksum, and build stamp are checked for
-		// every chunk, eventless or not: an empty index answers every query
-		// correctly regardless, but a foreign, unchecked, or mis-schemed pack
-		// must refuse deterministically, not only once a chunk with events
-		// happens to be opened. The open is already in flight either way.
+		// Format, record-checksum, and build-stamp checks run for eventless
+		// chunks too, so a foreign, unchecked, or mis-schemed pack refuses on the
+		// first indexed lookup regardless of chunk content. The guarantee is
+		// lookup-path-only by design: payload reads (FetchEvents, All) never
+		// consult the index pair and stay valid against events.pack's own checks.
 		tr, terr := c.index.Trailer()
 		if terr != nil {
 			return fmt.Errorf("events: open %s: %w", indexPackPath, terr)

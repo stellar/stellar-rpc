@@ -78,10 +78,10 @@ var engineTooNewSignatures = []string{
 	"future feature not supported",
 }
 
-// wrapIfEngineTooNew re-labels an open failure whose error text matches a
-// known newer-RocksDB signature, so a rollback across a RocksDB upgrade reads
-// as "deploy the newer binary" instead of corruption. Any other error (nil
-// included) passes through unchanged.
+// wrapIfEngineTooNew re-labels an open or read failure whose error text
+// matches a known newer-RocksDB signature, so a rollback across a RocksDB
+// upgrade reads as "deploy the newer binary" instead of corruption. Any other
+// error (nil included) passes through unchanged.
 func wrapIfEngineTooNew(err error) error {
 	if err == nil {
 		return nil
@@ -424,7 +424,7 @@ func (s *Store) IterateRange(cf string, start, end []byte) iter.Seq2[Entry, erro
 			}
 		}
 		if err := it.Err(); err != nil {
-			yield(Entry{}, err)
+			yield(Entry{}, wrapIfEngineTooNew(err))
 		}
 	}
 }
@@ -623,7 +623,9 @@ func (s *Store) getPinnedWith(
 	}
 	handle, err := s.db.GetPinnedCFV2(ro, cfh, key)
 	if err != nil {
-		return false, err
+		// Newer-format SSTs can surface lazily here rather than at open when
+		// max_open_files is finite (no table-reader preload).
+		return false, wrapIfEngineTooNew(err)
 	}
 	defer handle.Destroy()
 	if !handle.Exists() {
@@ -667,7 +669,7 @@ func (s *Store) iterateWith(ro *grocksdb.ReadOptions, cf string, prefix []byte) 
 			}
 		}
 		if err := it.Err(); err != nil {
-			yield(Entry{}, err)
+			yield(Entry{}, wrapIfEngineTooNew(err))
 		}
 	}
 }

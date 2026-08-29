@@ -177,6 +177,10 @@ func scanBinHeader(path string) (uint64, [stores.SecretLen]byte, error) {
 		return 0, secret, fmt.Errorf("txhash: %s has .bin version %d unsupported by this binary "+
 			"(written by a newer stellar-rpc?)", path, hdr[4])
 	}
+	if hdr[5]|hdr[6]|hdr[7] != 0 {
+		return 0, secret, fmt.Errorf("txhash: %s has reserved header bytes set "+
+			"(written by a newer stellar-rpc, or corrupted)", path)
+	}
 	copy(secret[:], hdr[coldBinPreludeSize+coldBinCountSize:])
 	count, err := coldBinCount(path, fi.Size(),
 		binary.LittleEndian.Uint64(hdr[coldBinPreludeSize:coldBinPreludeSize+coldBinCountSize]))
