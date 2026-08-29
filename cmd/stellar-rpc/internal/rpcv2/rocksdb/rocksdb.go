@@ -84,7 +84,7 @@ var engineTooNewSignatures = []string{
 // included) passes through unchanged.
 func WrapIfEngineTooNew(err error) error {
 	if err == nil {
-		return err
+		return nil
 	}
 	msg := err.Error()
 	for _, sig := range engineTooNewSignatures {

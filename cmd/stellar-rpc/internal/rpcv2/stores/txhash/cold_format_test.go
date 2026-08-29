@@ -26,11 +26,19 @@ func TestEncodeParseColdMetadata_RoundTrip(t *testing.T) {
 }
 
 func TestParseColdMetadata_WrongSizeErrors(t *testing.T) {
-	// 8 is the pre-secret layout; 24 is the only valid width.
-	for _, sz := range []int{0, 1, 4, 7, 8, 9, 16, 23, 25} {
+	// 8 is the pre-secret layout, 24 the pre-version one; 25 is the only
+	// valid width.
+	for _, sz := range []int{0, 1, 4, 7, 8, 9, 16, 24, 26} {
 		_, _, _, err := ParseColdMetadata(make([]byte, sz))
 		assert.ErrorIs(t, err, ErrInvalidMetadata, "size %d should error", sz)
 	}
+}
+
+func TestParseColdMetadata_UnknownVersionErrors(t *testing.T) {
+	blob := EncodeColdMetadata(5, 9, testSecret())
+	blob[0] = coldMetadataVersion + 1
+	_, _, _, err := ParseColdMetadata(blob)
+	require.ErrorContains(t, err, "written by a newer stellar-rpc")
 }
 
 func TestParseColdMetadata_MaxBelowMinErrors(t *testing.T) {

@@ -34,11 +34,12 @@ func TestCensus_AcceptsOwnVocabulary(t *testing.T) {
 	err := reopenAfter(t, func(c *Catalog) {
 		states := []geometry.State{geometry.StateFreezing, geometry.StateFrozen, geometry.StatePruning}
 		for i, s := range states {
-			id := chunk.ID(i) //nolint:gosec // tiny test range
+			id := chunk.ID(i)
 			for _, kind := range geometry.AllKinds() {
 				require.NoError(t, c.put(geometry.ChunkKey(id, kind), string(s)))
 			}
-			require.NoError(t, c.put(geometry.TxHashIndexKey(geometry.TxHashIndexID(i), id, id+5), string(s))) //nolint:gosec // tiny test range
+			idxKey := geometry.TxHashIndexKey(geometry.TxHashIndexID(i), id, id+5)
+			require.NoError(t, c.put(idxKey, string(s)))
 		}
 		require.NoError(t, c.put(geometry.HotChunkKey(7), string(geometry.HotTransient)))
 		require.NoError(t, c.put(geometry.HotChunkKey(8), string(geometry.HotReady)))

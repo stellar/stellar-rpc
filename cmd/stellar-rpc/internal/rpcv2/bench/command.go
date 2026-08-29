@@ -22,6 +22,10 @@ func NewCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bench-ingest",
 		Short: "Benchmark full-history ingestion",
+		Long: "Benchmark full-history ingestion.\n\n" +
+			"WARNING: pointed at a live deployment's storage roots, the benchmark " +
+			"overwrites cold artifact files in place with no catalog trace. Only " +
+			"run it against scratch directories.",
 	}
 	cmd.AddCommand(newColdCommand(), newHotCommand())
 	return cmd

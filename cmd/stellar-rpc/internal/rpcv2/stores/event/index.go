@@ -26,6 +26,20 @@ const (
 	FieldTopicCount Field = 6
 )
 
+// TermSchemaVersion names the term-derivation scheme: the hash function and
+// byte encoding behind ComputeTermKey plus each field's value encoding. Bump
+// it whenever any of those change; adding a whole field instead sets a new
+// bit in IndexedFieldMask. Both are recorded in every index.pack's build
+// stamp so an index answers only for the scheme it was built under.
+const TermSchemaVersion uint16 = 1
+
+// IndexedFieldMask is the set of indexed fields as a bitmask (bit i set means
+// Field i is indexed). Extend it in the same change that adds a Field; the
+// term-key golden tests pin the derivation, and the build stamp records this
+// mask per artifact.
+const IndexedFieldMask uint64 = 1<<FieldContractID | 1<<FieldTopic0 | 1<<FieldTopic1 |
+	1<<FieldTopic2 | 1<<FieldTopic3 | 1<<FieldEventType | 1<<FieldTopicCount
+
 // ComputeTermKey computes a 16-byte term key by hashing the field byte
 // followed by the value bytes: xxh3_128(field || value), encoded as
 // two little-endian uint64s.

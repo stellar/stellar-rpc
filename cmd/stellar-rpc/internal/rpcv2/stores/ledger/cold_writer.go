@@ -69,8 +69,11 @@ func NewColdWriter(path string, firstSeq uint32, opts ColdWriterOptions) (*ColdW
 		Format:           formatLedgerCold,
 		Overwrite:        true,
 		NewRecordEncoder: newColdPackEncoder,
-		Concurrency:      opts.Concurrency,
-		BytesPerSync:     opts.BytesPerSync,
+		// Items reach AppendItem as raw LCM bytes, so the content hash is
+		// independent of the zstd encoder version.
+		ContentHash:  true,
+		Concurrency:  opts.Concurrency,
+		BytesPerSync: opts.BytesPerSync,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("cold: create packfile %q: %w", path, err)
@@ -105,7 +108,8 @@ func (w *ColdWriter) Commit() error {
 		return fmt.Errorf("cold %q: commit with no appends", w.path)
 	}
 	var ad [appDataSize]byte
-	binary.BigEndian.PutUint32(ad[:], w.firstSeq)
+	ad[0] = coldAppDataVersion
+	binary.BigEndian.PutUint32(ad[1:], w.firstSeq)
 	if err := w.pw.Finish(ad[:]); err != nil {
 		return translateWriterErr(err)
 	}

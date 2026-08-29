@@ -38,7 +38,7 @@ func readColdBin(path string) ([]ColdEntry, error) {
 	if _, err := io.ReadFull(br, header[:]); err != nil {
 		return nil, fmt.Errorf("txhash: read header of %s: %w", path, err)
 	}
-	count := binary.LittleEndian.Uint64(header[:coldBinCountSize])
+	count := binary.LittleEndian.Uint64(header[coldBinPreludeSize : coldBinPreludeSize+coldBinCountSize])
 
 	info, err := f.Stat()
 	if err != nil {
@@ -77,8 +77,9 @@ func TestColdBin_RoundTrip(t *testing.T) {
 	assert.Equal(t, entries, got)
 }
 
-// TestColdBin_HeaderAndLayout pins the raw on-disk layout: uint64 LE count
-// header followed by fixed-width (key, uint32 LE seq) entries.
+// TestColdBin_HeaderAndLayout pins the raw on-disk layout: the "SBIN" magic,
+// the version byte, three reserved zero bytes, the uint64 LE count, the
+// secret, then fixed-width (key, uint32 LE seq) entries.
 func TestColdBin_HeaderAndLayout(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "out.bin")
@@ -91,11 +92,41 @@ func TestColdBin_HeaderAndLayout(t *testing.T) {
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.Len(t, data, coldBinHeaderSize+2*coldBinEntrySize)
-	assert.Equal(t, uint64(2), binary.LittleEndian.Uint64(data[:coldBinCountSize]))
-	assert.Equal(t, testBinSecret[:], data[coldBinCountSize:coldBinHeaderSize], "secret recorded after the count")
+	assert.Equal(t, []byte("SBIN"), data[:4], "magic in on-disk byte order")
+	assert.Equal(t, coldBinVersion, data[4])
+	assert.Equal(t, []byte{0, 0, 0}, data[5:coldBinPreludeSize], "reserved bytes zero")
+	assert.Equal(t, uint64(2),
+		binary.LittleEndian.Uint64(data[coldBinPreludeSize:coldBinPreludeSize+coldBinCountSize]))
+	assert.Equal(t, testBinSecret[:], data[coldBinPreludeSize+coldBinCountSize:coldBinHeaderSize],
+		"secret recorded after the count")
 	assert.Equal(t, byte(0xaa), data[coldBinHeaderSize])
 	assert.Equal(t, uint32(7),
 		binary.LittleEndian.Uint32(data[coldBinHeaderSize+ColdKeySize:coldBinHeaderSize+coldBinEntrySize]))
+}
+
+// TestColdBin_ScanRejectsForeignHeader pins the header scan's refusals: a
+// foreign magic and a newer version byte each fail loudly instead of being
+// misread as entry data.
+func TestColdBin_ScanRejectsForeignHeader(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.bin")
+	require.NoError(t, WriteColdBin(path, testBinSecret, []ColdEntry{{Key: [ColdKeySize]byte{1}, Seq: 2}}))
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	bad := append([]byte(nil), data...)
+	copy(bad, "JUNK")
+	badPath := filepath.Join(dir, "bad-magic.bin")
+	require.NoError(t, os.WriteFile(badPath, bad, 0o600))
+	_, _, err = scanBinHeader(badPath)
+	require.ErrorContains(t, err, "not a cold txhash .bin")
+
+	newer := append([]byte(nil), data...)
+	newer[4] = coldBinVersion + 1
+	newerPath := filepath.Join(dir, "newer.bin")
+	require.NoError(t, os.WriteFile(newerPath, newer, 0o600))
+	_, _, err = scanBinHeader(newerPath)
+	require.ErrorContains(t, err, "written by a newer stellar-rpc")
 }
 
 // TestColdBin_CreateFails forces os.Create on the destination to fail by

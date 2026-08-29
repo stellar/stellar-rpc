@@ -96,6 +96,52 @@ const indexPackChecksum = packfile.ChecksumCRC32C
 const IndexRecordFingerprintLen = 4
 
 // ──────────────────────────────────────────────────────────────────
+// index.pack build stamp.
+//
+// Embedded in index.pack's app-data slot:
+//
+//	offset  size  field
+//	0       1     version (0x01)
+//	1       2     term schema version (uint16 BE)
+//	3       8     indexed-field bitmask (uint64 BE)
+//
+// The stamp records which term-derivation scheme and field set the
+// index was built under, making the artifact self-describing: an
+// index missing a term family becomes distinguishable from one that
+// simply matched nothing. Freeze and walk write identical stamps
+// (all three values are compile-time constants), so freeze-vs-walk
+// byte identity is unaffected. Decoding ignores trailing bytes so a
+// future version can extend the blob without moving these fields.
+// ──────────────────────────────────────────────────────────────────
+
+const (
+	indexStampVersion byte = 0x01
+	indexStampLen          = 1 + 2 + 8
+)
+
+func encodeIndexBuildStamp() []byte {
+	buf := make([]byte, indexStampLen)
+	buf[0] = indexStampVersion
+	binary.BigEndian.PutUint16(buf[1:3], TermSchemaVersion)
+	binary.BigEndian.PutUint64(buf[3:11], IndexedFieldMask)
+	return buf
+}
+
+// decodeIndexBuildStamp recovers (termSchema, fieldMask) from an index.pack
+// app-data blob, rejecting a short blob or an unknown stamp version. Bytes
+// past the stamp are ignored (future extension room).
+func decodeIndexBuildStamp(data []byte) (uint16, uint64, error) {
+	if len(data) < indexStampLen {
+		return 0, 0, fmt.Errorf("events: index.pack build stamp is %d bytes, want at least %d", len(data), indexStampLen)
+	}
+	if data[0] != indexStampVersion {
+		return 0, 0, fmt.Errorf(
+			"events: index.pack build stamp version 0x%02x unsupported (written by a newer stellar-rpc?)", data[0])
+	}
+	return binary.BigEndian.Uint16(data[1:3]), binary.BigEndian.Uint64(data[3:11]), nil
+}
+
+// ──────────────────────────────────────────────────────────────────
 // events.pack record codec.
 // ──────────────────────────────────────────────────────────────────
 

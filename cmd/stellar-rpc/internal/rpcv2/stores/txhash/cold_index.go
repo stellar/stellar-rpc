@@ -169,7 +169,16 @@ func scanBinHeader(path string) (uint64, [stores.SecretLen]byte, error) {
 	if _, err := io.ReadFull(f, hdr[:]); err != nil {
 		return 0, secret, fmt.Errorf("txhash: read header of %s: %w", path, err)
 	}
-	copy(secret[:], hdr[coldBinCountSize:])
-	count, err := coldBinCount(path, fi.Size(), binary.LittleEndian.Uint64(hdr[:coldBinCountSize]))
+	if magic := binary.LittleEndian.Uint32(hdr[:4]); magic != coldBinMagic {
+		return 0, secret, fmt.Errorf("txhash: %s is not a cold txhash .bin (magic %#08x, want %#08x)",
+			path, magic, coldBinMagic)
+	}
+	if hdr[4] != coldBinVersion {
+		return 0, secret, fmt.Errorf("txhash: %s has .bin version %d unsupported by this binary "+
+			"(written by a newer stellar-rpc?)", path, hdr[4])
+	}
+	copy(secret[:], hdr[coldBinPreludeSize+coldBinCountSize:])
+	count, err := coldBinCount(path, fi.Size(),
+		binary.LittleEndian.Uint64(hdr[coldBinPreludeSize:coldBinPreludeSize+coldBinCountSize]))
 	return count, secret, err
 }

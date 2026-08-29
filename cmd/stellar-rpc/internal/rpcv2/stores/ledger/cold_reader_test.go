@@ -235,7 +235,8 @@ func TestColdReader_LastSeqOverflowRejected(t *testing.T) {
 		require.NoError(t, pw.AppendItem([]byte{byte(i)}))
 	}
 	var ad [appDataSize]byte
-	binary.BigEndian.PutUint32(ad[:], math.MaxUint32-1) // firstSeq = MaxUint32-1, items=3 → overflow
+	ad[0] = coldAppDataVersion
+	binary.BigEndian.PutUint32(ad[1:], math.MaxUint32-1) // firstSeq = MaxUint32-1, items=3 → overflow
 	require.NoError(t, pw.Finish(ad[:]))
 
 	c, err := OpenColdReader(path)

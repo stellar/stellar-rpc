@@ -216,6 +216,20 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		// above: index.hash keys == index.pack records (halves of one
 		// build), and non-empty index ⇒ non-empty events.pack (converse of
 		// the empty-index check below).
+		ad, aerr := c.index.AppData()
+		if aerr != nil {
+			return fmt.Errorf("events: read build stamp of %s: %w", indexPackPath, aerr)
+		}
+		schema, mask, serr := decodeIndexBuildStamp(ad)
+		if serr != nil {
+			return fmt.Errorf("events: %s: %w", indexPackPath, serr)
+		}
+		if schema != TermSchemaVersion || mask != IndexedFieldMask {
+			return fmt.Errorf(
+				"events: %s was built under term schema %d with field mask %#x; this binary expects "+
+					"schema %d with mask %#x (rebuilt index required, or a binary matching the artifact)",
+				indexPackPath, schema, mask, TermSchemaVersion, IndexedFieldMask)
+		}
 		if uint64(tr.TotalItems) != idx.numKeys() {
 			return fmt.Errorf(
 				"events: index pair mismatch for chunk %s: index.hash holds %d keys "+

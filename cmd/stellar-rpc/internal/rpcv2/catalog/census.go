@@ -44,12 +44,12 @@ func (c *Catalog) census() error {
 		if err != nil {
 			return fmt.Errorf("catalog: census scan: %w", err)
 		}
-		switch {
-		case e.Key == geometry.ConfigEarliestLedger:
+		switch e.Key {
+		case geometry.ConfigEarliestLedger:
 			if !isCanonicalUint32(e.Value) {
 				flag(e.Key, fmt.Sprintf("value %q is not a canonical decimal uint32", e.Value))
 			}
-		case e.Key == catalogSecretStoreKey:
+		case catalogSecretStoreKey:
 			// Never print the secret: it is the live index-blinding key.
 			if len(e.Value) != catalogSecretLen {
 				flag(e.Key, fmt.Sprintf("value is %d bytes, want %d (value redacted)", len(e.Value), catalogSecretLen))

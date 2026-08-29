@@ -163,6 +163,7 @@ func WriteColdIndex(
 	pw, err := packfile.Create(indexPackPath, packfile.WriterOptions{
 		Format:         indexPackFormat,
 		ItemsPerRecord: indexPackItemsPerRecord,
+		ContentHash:    true,
 		Overwrite:      true,
 		RecordChecksum: indexPackChecksum,
 	})
@@ -208,5 +209,5 @@ func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
 			return fmt.Errorf("events: write slot %d to index.pack: %w", e.slot, err)
 		}
 	}
-	return pw.Finish(nil)
+	return pw.Finish(encodeIndexBuildStamp())
 }
