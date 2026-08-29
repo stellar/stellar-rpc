@@ -637,15 +637,25 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       # Fold the run into the results site: fetch the tarball the box uploaded,
-      # clone stellar-rpc-benchmarks, and run its own ingest script, which
-      # converts the bundle, gates on the repo's tests, and pushes
-      # docs/runs/<id>.json to main — that push IS the site deploy. The push
-      # authenticates with BENCHMARKS_PUSH_TOKEN, a token with write access to
-      # that one repo; until the secret holds a working token this degrades to
-      # a warning. Best-effort throughout: an ingest failure must never turn a
-      # passing campaign red — the notification just falls back to the raw
-      # results URI, and the run can be ingested later from a laptop with the
-      # same script.
+      # clone stellar-rpc-benchmarks at the same ref the box ran the campaign
+      # from, and run its own ingest script, which converts the bundle, gates on
+      # the repo's tests, and pushes docs/runs/<id>.json to main — that push IS
+      # the site deploy. Producer and consumer must run the same benchmarks
+      # code: a bundle produced by a feature ref and converted by main's older
+      # converter loses whatever sections that ref added, silently.
+      #
+      # The site publishes from main only (ingest.sh --push-main refuses a HEAD
+      # that is not origin/main, because it pushes HEAD:main), so a campaign run
+      # from a feature ref converts with --local instead — committed on a local
+      # run/<id> branch, nothing pushed — which still leaves the run JSON for
+      # the notification's recap. Re-ingest by hand once the ref merges.
+      #
+      # The push authenticates with BENCHMARKS_PUSH_TOKEN, a token with write
+      # access to that one repo; until the secret holds a working token this
+      # degrades to a warning. Best-effort throughout: an ingest failure must
+      # never turn a passing campaign red — the step exits 0 on every path and
+      # reports what happened through ingest_state / ingest_reason, which the
+      # notification puts on the card.
       - name: Ingest the run into the results site
         id: ingest
         if: steps.verdict.outputs.state == 'ok' && steps.runinfo.outputs.tarball_key != ''
@@ -653,13 +663,46 @@ jobs:
           TARBALL_KEY: ${{ steps.runinfo.outputs.tarball_key }}
           RESULTS_URI: ${{ steps.runinfo.outputs.results_uri }}
           PUSH_TOKEN: ${{ secrets.BENCHMARKS_PUSH_TOKEN }}
+          BENCH_REPO_REF: ${{ inputs.benchmarks_ref }}
         run: |
+          BENCH_REPO_REF="${BENCH_REPO_REF:-main}"
+          # ingested | skipped | failed, plus a one-line human reason for the
+          # Slack card. Written on every path, always before the exit.
+          emit() {
+            {
+              echo "ingest_state=$1"
+              echo "ingest_reason=$(printf '%s' "${2:-}" | tr -d '\r\n')"
+            } >> "$GITHUB_OUTPUT"
+          }
+          # Name the gate that rejected the run, from the ingest log, so the
+          # card says what broke instead of "see the run".
+          classify_failure() {
+            FAIL_LINE=""
+            if grep -q 'SMOKE SUMMARY' /tmp/ingest.log 2>/dev/null \
+               && ! grep -q 'SMOKE SUMMARY: [0-9]* passed, 0 failed' /tmp/ingest.log 2>/dev/null; then
+              FAIL_LINE=$( (grep -m1 'FAIL \[' /tmp/ingest.log | sed 's/^[[:space:]]*//') || true )
+              [ -n "$FAIL_LINE" ] || FAIL_LINE="no FAIL line in the log"
+              # Bash substring, not cut -c: GNU cut counts bytes and would
+              # split the em dash the smoke test prints.
+              echo "viewer smoke gate failed (${FAIL_LINE:0:120})"
+            elif grep -q 'make: \*\*\* \[Makefile:.*test\]' /tmp/ingest.log 2>/dev/null; then
+              echo "converter tests failed"
+            elif grep -q 'converter failed' /tmp/ingest.log 2>/dev/null; then
+              echo "converter failed"
+            elif grep -q 'already exists (run already ingested)' /tmp/ingest.log 2>/dev/null; then
+              echo "run already ingested"
+            else
+              echo "ingest.sh exited non-zero (see step log)"
+            fi
+          }
           if [ -z "$PUSH_TOKEN" ]; then
             echo "::warning::BENCHMARKS_PUSH_TOKEN is unset; run not ingested into the results site"
+            emit skipped "BENCHMARKS_PUSH_TOKEN unset"
             exit 0
           fi
           if ! aws s3 cp "s3://$BUCKET/$TARBALL_KEY" /tmp/bench-bundle.tgz; then
             echo "::warning::tarball download failed; run not ingested into the results site"
+            emit failed "tarball download failed"
             exit 0
           fi
           # Full clone: the ingest script pushes HEAD:main, which a shallow
@@ -667,27 +710,58 @@ jobs:
           # URL; the runner is ephemeral and Actions masks the secret in logs.
           if ! git clone "https://x-access-token:${PUSH_TOKEN}@github.com/stellar-experimental/stellar-rpc-benchmarks.git" /tmp/benchmarks; then
             echo "::warning::benchmarks repo clone failed; run not ingested into the results site"
+            emit failed "benchmarks clone failed (ref $BENCH_REPO_REF)"
+            exit 0
+          fi
+          # Checkout, not clone --branch: benchmarks_ref takes any ref the box
+          # takes, and --branch rejects a commit SHA. From a fresh clone
+          # `checkout main` still leaves HEAD at origin/main for --push-main,
+          # and --local branches off a detached HEAD fine.
+          if ! git -C /tmp/benchmarks checkout --quiet "$BENCH_REPO_REF"; then
+            echo "::warning::benchmarks ref $BENCH_REPO_REF not found; run not ingested into the results site"
+            emit failed "benchmarks ref $BENCH_REPO_REF not found"
             exit 0
           fi
           git -C /tmp/benchmarks config user.name "github-actions[bot]"
           git -C /tmp/benchmarks config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          MODE_FLAG=--push-main
+          if [ "$BENCH_REPO_REF" != "main" ]; then
+            MODE_FLAG=--local
+          fi
           # Campaign datasets are the synthetic apply-load packs, hence the
           # hard-coded kind — revisit if a pubnet campaign ever runs through
           # this workflow.
           if (cd /tmp/benchmarks && scripts/ingest.sh /tmp/bench-bundle.tgz \
-                --dataset-kind synthetic --push-main \
+                --dataset-kind synthetic "$MODE_FLAG" \
                 -- --source-uri "$RESULTS_URI") 2>&1 | tee /tmp/ingest.log; then
-            VIEWER=$(grep '^viewer: ' /tmp/ingest.log | tail -1 | cut -d' ' -f2)
-            echo "viewer_url=$VIEWER" >> "$GITHUB_OUTPUT"
             # The converted run JSON the ingest just committed; the notification
             # reads the per-profile ingestion p99s and the build commit from it.
-            SITE_RUN_ID="${VIEWER##*run=}"
+            # --push-main names the live run in a `viewer:` line; --local
+            # publishes nothing and prints none, so read the id off the commit
+            # subject (`runs: add <id>`) instead.
+            VIEWER=""
+            SITE_RUN_ID=""
+            if [ "$MODE_FLAG" = "--push-main" ]; then
+              VIEWER=$( (grep '^viewer: ' /tmp/ingest.log | tail -1 | cut -d' ' -f2) || true )
+              echo "viewer_url=$VIEWER" >> "$GITHUB_OUTPUT"
+              SITE_RUN_ID="${VIEWER##*run=}"
+            else
+              SITE_RUN_ID=$( (sed -n 's/^.*runs: add \(.*\)$/\1/p' /tmp/ingest.log | tail -1) || true )
+            fi
             if [ -n "$SITE_RUN_ID" ] && [ -f "/tmp/benchmarks/docs/runs/$SITE_RUN_ID.json" ]; then
               echo "run_json=/tmp/benchmarks/docs/runs/$SITE_RUN_ID.json" >> "$GITHUB_OUTPUT"
             fi
-            echo "ingested; viewer: $VIEWER"
+            if [ "$MODE_FLAG" = "--push-main" ]; then
+              emit ingested "published to the results site"
+              echo "ingested; viewer: $VIEWER"
+            else
+              echo "::warning::benchmarks_ref $BENCH_REPO_REF is not main; the run was converted on a local run/ branch but not published to the results site"
+              emit skipped "benchmarks_ref $BENCH_REPO_REF is not main — site publishes from main only; merge it, then re-ingest by hand"
+            fi
           else
-            echo "::warning::results-site ingest failed; the notification falls back to the raw results URI"
+            INGEST_REASON=$(classify_failure)
+            echo "::warning::results-site ingest failed: $INGEST_REASON; the notification falls back to the raw results URI"
+            emit failed "$INGEST_REASON"
           fi
 
       # The Block Kit payload comes from slack-payload.sh so its layout is
@@ -716,6 +790,10 @@ jobs:
           RESULTS_URI: ${{ steps.runinfo.outputs.results_uri }}
           VIEWER_URL: ${{ steps.ingest.outputs.viewer_url }}
           RUN_JSON: ${{ steps.ingest.outputs.run_json }}
+          # Empty when the ingest step was skipped by its `if:` — a failed
+          # campaign, or no tarball — i.e. the ingest was never attempted.
+          INGEST_STATE: ${{ steps.ingest.outputs.ingest_state }}
+          INGEST_REASON: ${{ steps.ingest.outputs.ingest_reason }}
           EXCERPT: ${{ steps.result.outputs.excerpt }}
           HARNESS_SHA: ${{ github.sha }}
           WEBHOOK: ${{ secrets.SLACK_BENCH_WEBHOOK_URL }}
