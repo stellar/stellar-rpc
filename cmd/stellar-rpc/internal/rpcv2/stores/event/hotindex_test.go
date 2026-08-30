@@ -455,11 +455,12 @@ func TestRunFences_ByteCapAndIsolation(t *testing.T) {
 		mkTerm(0x10, 149), mkTerm(0x20, 50), mkTerm(0x90, 0),
 	}
 	for _, k := range probes {
-		ids, lerr := written.lookup(k)
+		ids, lerr := written.lookup(nil, k, fp64(k))
 		require.NoError(t, lerr)
 		require.Equal(t, window[k], ids, "term %x", k)
 	}
-	miss, err := written.lookup(mkTerm(0x70, 7))
+	absent := mkTerm(0x70, 7)
+	miss, err := written.lookup(nil, absent, fp64(absent))
 	require.NoError(t, err)
 	require.Nil(t, miss)
 }
@@ -729,4 +730,215 @@ func TestHotIndex_ManifestFailureLeavesObsoleteRuns(t *testing.T) {
 	_, serr := os.Stat(obsolete.path)
 	require.NoError(t, serr, "obsolete inputs' files must remain")
 	require.Empty(t, h.retired, "nothing retires until the merged run is durably named")
+}
+
+// probeTerm builds a TermKey from its two leading bytes — run records sort
+// by the key's bytes, so the prefix alone fixes the order.
+func probeTerm(hi, lo byte) TermKey {
+	var k TermKey
+	k[0], k[1] = hi, lo
+	return k
+}
+
+// runForProbe writes a one-off sealed run over window. bloomFP seeds extra
+// fingerprints into the run's bloom so an ABSENT term still reaches the
+// fence walk — the bloom's false-positive path, which otherwise cannot be
+// reached on purpose.
+func runForProbe(t *testing.T, path string, window map[TermKey][]uint32, bloomFP ...TermKey) *sealedRun {
+	t.Helper()
+	rt := newRunRouting(len(window))
+	payloadLen, err := writeSortedRun(window, path, rt.observe)
+	require.NoError(t, err)
+	for _, k := range bloomFP {
+		rt.bloom.Add(fp64(k))
+	}
+	run, err := rt.open(path, payloadLen)
+	require.NoError(t, err)
+	t.Cleanup(run.close)
+	return run
+}
+
+// TestSealedRunLookup_AbsentRunsKeepTheAccumulator pins lookup's accumulator
+// contract: EVERY absent path hands dst back, never nil. lookupSparse
+// threads ONE accumulator through the view's runs oldest-first, so a nil
+// return from a newer run silently drops what older runs already
+// contributed — wrong answers, no error, no metric. All three absent exits
+// are covered: the bloom reject, the sorted-past-the-slot exit inside the
+// window walk, and window exhaustion.
+func TestSealedRunLookup_AbsentRunsKeepTheAccumulator(t *testing.T) {
+	dir := t.TempDir()
+	term := probeTerm(0x50, 0)
+	want := []uint32{3, 7, 9}
+
+	// The term's own run: found between two neighbors.
+	found := runForProbe(t, filepath.Join(dir, "found.run"), map[TermKey][]uint32{
+		probeTerm(0x40, 0): {1, 2},
+		term:               want,
+		probeTerm(0x60, 0): {4},
+	})
+	// Absent, walk runs off the end of the window (every record sorts BEFORE
+	// the term).
+	exhausted := runForProbe(t, filepath.Join(dir, "exhausted.run"), map[TermKey][]uint32{
+		probeTerm(0x10, 0): {11},
+		probeTerm(0x20, 0): {12},
+	}, term)
+	// Absent, walk passes the slot: one record before the term (so the fence
+	// search does not exit early) and one after it.
+	passed := runForProbe(t, filepath.Join(dir, "passed.run"), map[TermKey][]uint32{
+		probeTerm(0x40, 0): {13},
+		probeTerm(0x60, 0): {14},
+	}, term)
+	// Absent, and the bloom already says so (no seeded fingerprint).
+	rejected := runForProbe(t, filepath.Join(dir, "rejected.run"), map[TermKey][]uint32{
+		probeTerm(0x40, 0): {15},
+	})
+
+	// The exits really are the ones this test claims to cover.
+	require.True(t, exhausted.bloom.MayContain(fp64(term)), "fixture: bloom must pass")
+	require.True(t, passed.bloom.MayContain(fp64(term)), "fixture: bloom must pass")
+	require.False(t, rejected.bloom.MayContain(fp64(term)), "fixture: bloom must reject")
+
+	out, err := found.lookup(nil, term, fp64(term))
+	require.NoError(t, err)
+	require.Equal(t, want, out)
+	for i, r := range []*sealedRun{exhausted, passed, rejected} {
+		out, err = r.lookup(out, term, fp64(term))
+		require.NoError(t, err)
+		require.Equal(t, want, out, "absent run %d truncated the accumulator", i)
+	}
+}
+
+// TestSealedRunLookup_TruncatedWindowNeverPanics: a fence window that does
+// not end on a record boundary — which a well-formed run cannot produce, and
+// which nothing in the probe path validates — must come back absent or as an
+// error, never as an out-of-range panic: the len(b) >= 16 bound is what
+// stands between a cut-short window and an over-read, both in the key
+// compare and in the length walk that reads its count from b[16:].
+func TestSealedRunLookup_TruncatedWindowNeverPanics(t *testing.T) {
+	term := probeTerm(0x50, 0)
+	want := []uint32{4, 5, 6}
+	run := runForProbe(t, filepath.Join(t.TempDir(), "trunc.run"), map[TermKey][]uint32{
+		probeTerm(0x40, 0): {1, 2, 3},
+		term:               want,
+	}, term)
+	payloadLen := run.fences[len(run.fences)-1].off
+	require.Equal(t, int64(40), payloadLen, "fixture: two records of 16+1+3 bytes")
+
+	for _, end := range []int64{1, 8, 15, 16, 17, 20, payloadLen - 2, payloadLen - 1} {
+		// One window, [0, end): a first fence sorting before the term so the
+		// fence search enters the walk, and a sentinel that cuts mid-record.
+		run.fences = []fence{{term: probeTerm(0x00, 0), off: 0}, {off: end}}
+		var (
+			out []uint32
+			err error
+		)
+		require.NotPanics(t, func() { out, err = run.lookup(nil, term, fp64(term)) }, "end=%d", end)
+		if err != nil {
+			require.Nil(t, out, "end=%d: an errored probe returns no ids", end)
+			continue
+		}
+		require.True(t, out == nil || slices.Equal(out, want),
+			"end=%d: a truncated window must answer absent or exactly, got %v", end, out)
+	}
+}
+
+// TestProbeBufPool_DropsOversizedWindows pins the pool's size cap.
+// fenceBuilder.isolatePrev gives a record of fenceSpanBytes or more a window
+// of its OWN, of arbitrary size (dense terms' records in merged runs reach
+// megabytes), and sync.Pool has no size classes — so one such probe would
+// otherwise ratchet a multi-MB buffer into every P's private slot. Ordinary
+// windows, bounded by maxProbeBufBytes, stay pooled.
+func TestProbeBufPool_DropsOversizedWindows(t *testing.T) {
+	// Nothing else probes a run here, so the buffers can be inspected after
+	// they go back.
+	big := getProbeBuf(maxProbeBufBytes + 1)
+	require.Len(t, big.b, maxProbeBufBytes+1)
+	putProbeBuf(big)
+	require.Nil(t, big.b, "an isolated oversized window must not be retained")
+
+	ordinary := getProbeBuf(maxProbeBufBytes)
+	require.Len(t, ordinary.b, maxProbeBufBytes)
+	putProbeBuf(ordinary)
+	require.NotNil(t, ordinary.b, "a window at the cap must stay pooled")
+	require.Equal(t, maxProbeBufBytes, cap(ordinary.b))
+}
+
+// TestHotIndex_MultiRunAccumulation drives the accumulator through
+// lookupSparse itself: two sealed runs plus a live window, one term in ALL
+// three tiers and one term the newest run does not hold at all. Every other
+// lookup test in this package probes a single run and is blind to a newer
+// run clobbering an older one's postings.
+func TestHotIndex_MultiRunAccumulation(t *testing.T) {
+	h := testHotIndex(t, t.TempDir(), &fakeManifest{}) // sealEvery=8, maxRuns=3
+	defer h.Close()
+
+	spread := probeTerm(0xA0, 0)  // every ledger: both runs and the window
+	oldOnly := probeTerm(0xB0, 0) // the first run and the window only
+	var nextID uint32
+	var wantSpread, wantOldOnly []uint32
+	apply := func(seq uint32, terms ...TermKey) {
+		per := map[TermKey][]uint32{}
+		for _, k := range terms {
+			per[k] = []uint32{nextID}
+			switch k {
+			case spread:
+				wantSpread = append(wantSpread, nextID)
+			case oldOnly:
+				wantOldOnly = append(wantOldOnly, nextID)
+			}
+			nextID++
+		}
+		require.NoError(t, h.ApplyLedger(seq, AppendPackedRow(nil, per), runsFromMap(per)))
+	}
+
+	// Fresh singleton terms give each run records on both sides of the two
+	// probed ones, so neither probe is answered by a one-record run.
+	rng := rand.New(rand.NewSource(11))
+	var seq uint32
+	for range 8 { // seal #1: both terms
+		apply(seq, spread, oldOnly, hiKey(rng), hiKey(rng))
+		seq++
+	}
+	require.NoError(t, h.reapSeal(true))
+	for range 8 { // seal #2: the newest run never sees oldOnly
+		apply(seq, spread, hiKey(rng), hiKey(rng))
+		seq++
+	}
+	require.NoError(t, h.reapSeal(true))
+	for range 3 { // un-sealed window rows on top
+		apply(seq, spread, oldOnly)
+		seq++
+	}
+
+	v := h.view.Load()
+	require.Len(t, v.runs, 2, "fixture: two live runs, no merge")
+	require.Len(t, v.rows, 3, "fixture: an un-sealed window")
+	// The fixture's premise: the NEWEST run really is absent for oldOnly,
+	// and really does hold spread.
+	rk := blindTerm(h.secret, oldOnly)
+	missing, err := v.runs[1].lookup(nil, rk, fp64(rk))
+	require.NoError(t, err)
+	require.Nil(t, missing, "fixture: the newest run must not hold the term")
+	sk := blindTerm(h.secret, spread)
+	for i := range v.runs {
+		ids, lerr := v.runs[i].lookup(nil, sk, fp64(sk))
+		require.NoError(t, lerr)
+		require.NotEmpty(t, ids, "fixture: run %d must hold the spread term", i)
+	}
+
+	for _, tc := range []struct {
+		name string
+		term TermKey
+		want []uint32
+	}{
+		{"across both runs and the window", spread, wantSpread},
+		{"present only in the older run and the window", oldOnly, wantOldOnly},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			post, err := h.Get(tc.term)
+			require.NoError(t, err)
+			require.True(t, post.Present())
+			require.Equal(t, tc.want, post.IDs(), "postings were truncated")
+		})
+	}
 }

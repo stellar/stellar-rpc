@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event/runspill"
@@ -99,6 +100,80 @@ func decodePostings(b []byte, ids []uint32) ([]uint32, []byte, error) {
 		return nil, nil, err
 	}
 	return out, b, nil
+}
+
+// appendRecordIDs decodes ONE packed record (16-byte term ‖ uvarint count
+// ‖ delta uvarints) at the head of rec, appending its ids to dst, and
+// returns the record's byte length. It is decodePostings' loop with the
+// closure fused away: the byte cursor is a local index rather than a
+// captured slice header (the closure's escaped one costs a funcval call and
+// a heap slice-header write per id), and the ids land in the caller's
+// accumulator rather than in a per-record buffer that is then copied out.
+// One walk, one write — the sealed-run probe (sealedRun.lookup) neither
+// pre-sizes the record with PackedRecordLen nor re-copies its ids.
+//
+// The validation is character-for-character DecodeAscendingIDs': raw-varint
+// reject BEFORE accumulation, zero delta, uint32 overflow, plus the
+// pre-allocation guard on count (a THIRD copy of that guard, beside
+// decodePostings above and runspill's RunReader). A second decoder beside
+// the shared codec is exactly what codec.go's one-definition-site rule warns
+// about — the near-2^64 wrap fix once had to be applied twice — so
+// FuzzAppendRecordIDs pins the two against each other over arbitrary bytes:
+// identical ids on accept, identical accept/reject classification. That is
+// the pin; keep it green rather than letting the two drift.
+//
+// Errors are unwrapped (callers add their own context) and leave dst holding
+// whatever the partial record contributed — the caller discards the
+// accumulator with the error.
+func appendRecordIDs(dst []uint32, rec []byte) ([]uint32, int, error) {
+	// A run's fences land on record boundaries, so a well-formed window
+	// cannot end mid-key; the guard keeps a truncated one an error instead
+	// of an out-of-range panic in the 16-byte key slice below.
+	if len(rec) < 16 {
+		return dst, 0, fmt.Errorf("%d bytes, want 16-byte term", len(rec))
+	}
+	count, m := binary.Uvarint(rec[16:])
+	if m <= 0 {
+		return dst, 0, errors.New("bad id-count uvarint")
+	}
+	i := 16 + m
+	// Each ID takes ≥1 byte, so a count beyond the remaining bytes is
+	// structurally impossible — reject before growing for it.
+	//nolint:gosec // i ≤ len(rec): binary.Uvarint never reports more bytes than it was given
+	if count == 0 || count > uint64(len(rec)-i) {
+		return dst, 0, fmt.Errorf("id count %d exceeds %d remaining bytes", count, len(rec)-i)
+	}
+	// Grow once, off the exact decoded count, so the shared accumulator does
+	// not re-grow per record. count is bounded by the remaining bytes above,
+	// so it cannot force a large allocation from a small record.
+	dst = slices.Grow(dst, int(count)) //nolint:gosec // count ≤ len(rec)-i, an int
+	var prev uint64
+	for j := range count {
+		v, k := binary.Uvarint(rec[i:])
+		if k <= 0 {
+			return dst, 0, errors.New("bad event-id uvarint")
+		}
+		i += k
+		// Reject the raw varint before accumulating: a crafted delta near
+		// 2^64 would wrap prev+v back under MaxUint32 and smuggle a
+		// non-ascending ID past the overflow check (postings are untrusted).
+		if v > math.MaxUint32 {
+			return dst, 0, fmt.Errorf("delta %d overflows uint32", v)
+		}
+		abs := v
+		if j > 0 {
+			if v == 0 {
+				return dst, 0, errors.New("zero delta")
+			}
+			abs = prev + v
+		}
+		if abs > math.MaxUint32 {
+			return dst, 0, fmt.Errorf("event id %d overflows uint32", abs)
+		}
+		dst = append(dst, uint32(abs))
+		prev = abs
+	}
+	return dst, i, nil
 }
 
 // DecodePostings decodes one term's ID list as written by AppendPostings. b

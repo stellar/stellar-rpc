@@ -326,15 +326,6 @@ func (h *HotIndex) Get(term TermKey) (Postings, error) {
 	return IDPostings(ids), nil
 }
 
-// decodeRecordIDs decodes ONE packed record's ID list.
-func decodeRecordIDs(rec []byte) ([]uint32, error) {
-	var out []uint32
-	err := DecodePackedRow(rec[:PackedRecordLen(rec)], func(_ TermKey, ids []uint32) {
-		out = append(out, ids...)
-	})
-	return out, err
-}
-
 // Close drains any in-flight seal (discarding its result — warmup rebuilds
 // deterministically) and releases every run handle this index still owns:
 // the live view's runs, the handles retired by merge folds (kept open for
@@ -364,17 +355,24 @@ func (h *HotIndex) Close() {
 //
 // The term is carried in BOTH forms: runs are keyed by the blinded key
 // (blind at seal), window rows by the raw term they were written with. The
-// blinding happens once per call, outside the run loop.
+// blinding happens once per call, outside the run loop, and so does the
+// blinded key's fingerprint — every run's bloom probes the same one.
+//
+// out is ONE accumulator threaded through every source: each decode appends
+// straight into it, so a term's ids are written once, never per-record and
+// copied. A source that lacks the term must hand the accumulator back
+// untouched (see sealedRun.lookup); on error the partial accumulator dies
+// with the error return.
 func (h *HotIndex) lookupSparse(v *hotIndexView, term TermKey) ([]uint32, error) {
 	var out []uint32
+	var err error
 	fp := fp64(term)
 	rk := blindTerm(h.secret, term)
+	rkfp := fp64(rk)
 	for _, r := range v.runs {
-		ids, err := r.lookup(rk)
-		if err != nil {
+		if out, err = r.lookup(out, rk, rkfp); err != nil {
 			return nil, err
 		}
-		out = append(out, ids...)
 	}
 	for i := range v.rows {
 		row := &v.rows[i]
@@ -386,11 +384,9 @@ func (h *HotIndex) lookupSparse(v *hotIndexView, term TermKey) ([]uint32, error)
 			if !bytes.Equal(rec[:16], term[:]) {
 				continue
 			}
-			ids, err := decodeRecordIDs(rec)
-			if err != nil {
-				return nil, err
+			if out, _, err = appendRecordIDs(out, rec); err != nil {
+				return nil, fmt.Errorf("events: hotindex window row: %w", err)
 			}
-			out = append(out, ids...)
 		}
 	}
 	// Compact is the whole dedup: out is ascending, and the only possible
