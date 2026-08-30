@@ -81,13 +81,11 @@ func TestReaderCloseDuringReadDoesNotRecycle(t *testing.T) {
 	unpark := make(chan struct{})
 	var closeErr error
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		<-parked
 		closeErr = r.Close()
 		close(unpark)
-	}()
+	})
 
 	first := true
 	got := make([]byte, 0, len(items[0]))

@@ -2,7 +2,6 @@ package event
 
 import (
 	"bytes"
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -16,7 +15,7 @@ func TestByteArenaCopiesAreStable(t *testing.T) {
 	src := make([]byte, 300)
 	var got [][]byte
 	var want [][]byte
-	for i := 0; i < 3000; i++ { // ~900KB total: crosses many 64KB chunks
+	for i := range 3000 { // ~900KB total: crosses many 64KB chunks
 		for j := range src {
 			src[j] = byte(i + j)
 		}
@@ -30,12 +29,12 @@ func TestByteArenaCopiesAreStable(t *testing.T) {
 	require.Equal(t, byte(0xAB), hugeCopy[0])
 	require.Len(t, hugeCopy, 3*arenaChunkSize)
 	for i := range got {
-		require.True(t, bytes.Equal(got[i], want[i]), fmt.Sprintf("copy %d changed", i))
+		require.True(t, bytes.Equal(got[i], want[i]), "copy %d changed", i)
 	}
 	// Appending to a returned copy must not scribble into the arena: the
 	// three-index slice pins capacity to length.
 	c := a.copy([]byte{1, 2, 3})
 	next := a.copy([]byte{9, 9, 9})
-	_ = append(c, 7) //nolint:staticcheck // the append must copy, not extend in place
+	_ = append(c, 7) // the append must copy, not extend in place
 	require.Equal(t, []byte{9, 9, 9}, next)
 }
