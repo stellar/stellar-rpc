@@ -3,7 +3,6 @@ package packfile
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -110,6 +109,6 @@ func TestReaderCloseDuringReadDoesNotRecycle(t *testing.T) {
 	if err == nil {
 		require.True(t, bytes.Equal(got, items[0]), "payload corrupted by Close during read")
 	} else {
-		require.True(t, errors.Is(err, os.ErrClosed) || err != nil)
+		require.ErrorIs(t, err, os.ErrClosed)
 	}
 }
