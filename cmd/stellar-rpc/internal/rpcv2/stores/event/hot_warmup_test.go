@@ -193,10 +193,10 @@ func TestHotStore_LookupKeysSpansBlindedRunsAndRawWindow(t *testing.T) {
 	// term must NOT be findable in them, only its blinded form.
 	blinded := TermKey(stores.BlindKey(testIndexSecret, term[:]))
 	for _, r := range hot.hotIdx.view.Load().runs {
-		ids, err := r.lookup(term)
+		ids, err := r.lookup(nil, term, fp64(term))
 		require.NoError(t, err)
 		require.Nil(t, ids, "a sealed run must not answer a RAW term")
-		ids, err = r.lookup(blinded)
+		ids, err = r.lookup(nil, blinded, fp64(blinded))
 		require.NoError(t, err)
 		require.NotEmpty(t, ids, "a sealed run must answer the blinded term")
 	}

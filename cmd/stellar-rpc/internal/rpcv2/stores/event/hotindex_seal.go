@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"sync"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/bloom"
@@ -406,38 +407,107 @@ func openSealedRun(path string) (*sealedRun, error) {
 	return rt.open(path, end) // end = payload length
 }
 
-// lookup probes the run for one term: bloom reject → fence window → pread →
-// linear decode with full-term verification. Concurrent-safe (ReadAt).
-func (r *sealedRun) lookup(term TermKey) ([]uint32, error) {
-	if !r.bloom.MayContain(fp64(term)) {
-		return nil, nil
+// maxProbeBufBytes caps what the probe-buffer pool retains. A fence window
+// holding more than one record spans strictly less than 2*fenceSpanBytes:
+// its last record starts less than fenceSpanBytes past the opening fence (or
+// the byte cap would already have closed the window there) and is itself
+// smaller than fenceSpanBytes (or isolatePrev would have fenced it into a
+// window of its own). Anything bigger IS such an isolated record, whose size
+// is unbounded — dense terms' records in merged runs reach megabytes.
+const maxProbeBufBytes = 2 * fenceSpanBytes
+
+// probeBuf is one pooled fence-window scratch buffer, boxed so returning it
+// costs no interface allocation.
+type probeBuf struct{ b []byte }
+
+// probeBufPool recycles the fence-window scratch a run probe preads into:
+// one buffer per in-flight lookup, released before the probe returns. It
+// deletes a large (≥32 KiB ⇒ mheap allocation plus a full memclr) make per
+// probe from the query path.
+//
+// SIZE CAP: putProbeBuf drops any buffer over maxProbeBufBytes instead of
+// retaining it. sync.Pool has no size classes, so one probe of an
+// isolatePrev window would otherwise ratchet a multi-MB buffer into every
+// P's private slot — a resident floor of hundreds of MB on a 32-P box,
+// against a design whose whole point was killing an O(unique sparse terms)
+// footprint.
+//
+// This is byte scratch on a bounded size class, released before return and
+// never aliased by the decoded uint32s. That is what separates it from the
+// two in-tree rejections of sync.Pool (zstd.go, ledger/hot_store.go): those
+// held expensive STATEFUL objects that had to survive across ledger
+// boundaries, and lost them to sync.Pool's GC-emptied semantics. Losing a
+// scratch buffer here costs one make.
+//
+//nolint:gochecknoglobals // process-wide scratch pool, no state
+var probeBufPool = sync.Pool{New: func() any { return new(probeBuf) }}
+
+func getProbeBuf(n int) *probeBuf {
+	p, _ := probeBufPool.Get().(*probeBuf)
+	if cap(p.b) < n {
+		p.b = make([]byte, n)
+	}
+	p.b = p.b[:n]
+	return p
+}
+
+func putProbeBuf(p *probeBuf) {
+	if cap(p.b) > maxProbeBufBytes {
+		p.b = nil // oversized window: keep the box, drop the bytes
+	}
+	probeBufPool.Put(p)
+}
+
+// lookup probes the run for one term, APPENDING its ids to dst: bloom reject
+// → fence window → pread → one linear walk with full-term verification.
+// fp is the caller's fp64(term) — lookupSparse already holds it, and it is
+// the same value for every run in the view. Concurrent-safe (ReadAt).
+//
+// Every absent path returns dst, never nil: dst is the caller's accumulator
+// across ALL live runs, so a nil return would silently drop the postings
+// older runs already contributed — wrong answers, no error, no metric. On a
+// decode error dst may hold a partial record's ids; lookupSparse discards
+// the accumulator along with the error.
+func (r *sealedRun) lookup(dst []uint32, term TermKey, fp uint64) ([]uint32, error) {
+	if !r.bloom.MayContain(fp) {
+		return dst, nil
 	}
 	// Last fence with fence.term <= term (fences[0].off == 0 always).
 	i := sort.Search(len(r.fences)-1, func(k int) bool {
 		return bytes.Compare(r.fences[k].term[:], term[:]) > 0
 	})
 	if i == 0 {
-		return nil, nil // term sorts before the first record
+		return dst, nil // term sorts before the first record
 	}
 	start, end := r.fences[i-1].off, r.fences[i].off
-	buf := make([]byte, end-start)
+	p := getProbeBuf(int(end - start))
+	defer putProbeBuf(p)
 	// Fence offsets are payload-relative; the payload begins after the run
 	// header (runspill.HeaderLen keeps this pread aligned with the framing).
-	if _, err := r.file.ReadAt(buf, runspill.HeaderLen+start); err != nil {
+	if _, err := r.file.ReadAt(p.b, runspill.HeaderLen+start); err != nil {
 		return nil, fmt.Errorf("events: hotindex run pread %s: %w", r.path, err)
 	}
-	for len(buf) > 0 {
-		c := bytes.Compare(buf[:16], term[:])
-		recLen := PackedRecordLen(buf)
+	// Fences land on record boundaries, so a well-formed window never ends
+	// mid-record; the ≥16 bound turns a truncated tail into an absent probe
+	// instead of an over-read — of the key compare just below, and of the
+	// length walk, which reads its count from b[16:].
+	for b := p.b; len(b) >= 16; {
+		c := bytes.Compare(b[:16], term[:])
 		if c == 0 {
-			return decodeRecordIDs(buf[:recLen])
+			out, _, err := appendRecordIDs(dst, b)
+			if err != nil {
+				return nil, fmt.Errorf("events: hotindex run %s: %w", r.path, err)
+			}
+			return out, nil
 		}
 		if c > 0 {
-			return nil, nil // sorted: passed the slot, absent
+			return dst, nil // sorted: passed the slot, absent
 		}
-		buf = buf[recLen:]
+		// Only the skip branch pays a length walk: the found record's length
+		// falls out of its decode, and the absent exit above never needs one.
+		b = b[PackedRecordLen(b):]
 	}
-	return nil, nil
+	return dst, nil
 }
 
 func (r *sealedRun) close() {
