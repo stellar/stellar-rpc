@@ -13,8 +13,8 @@ import (
 func TestByteArenaCopiesAreStable(t *testing.T) {
 	var a byteArena
 	src := make([]byte, 300)
-	var got [][]byte
-	var want [][]byte
+	got := make([][]byte, 0, 3000)
+	want := make([][]byte, 0, 3000)
 	for i := range 3000 { // ~900KB total: crosses many 64KB chunks
 		for j := range src {
 			src[j] = byte(i + j)
