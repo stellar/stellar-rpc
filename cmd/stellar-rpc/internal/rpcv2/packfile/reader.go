@@ -172,24 +172,6 @@ type Reader struct {
 	closeErr  error
 }
 
-// errReaderClosed is returned by reads that begin after Close. It wraps
-// os.ErrClosed so callers matching the pre-existing closed-file error
-// shape keep matching.
-var errReaderClosed = fmt.Errorf("packfile: read after Close: %w", os.ErrClosed)
-
-// beginRead registers a read with the Close handshake; endRead must run
-// when the read finishes. See the closed/inflight field comment.
-func (r *Reader) beginRead() error {
-	r.inflight.Add(1)
-	if r.closed.Load() {
-		r.inflight.Add(-1)
-		return errReaderClosed
-	}
-	return nil
-}
-
-func (r *Reader) endRead() { r.inflight.Add(-1) }
-
 // Open returns a Reader immediately. File I/O runs in a background goroutine;
 // the first read call blocks until the file is ready. Open itself does not
 // return an error — option-validation and I/O failures are deferred to the
@@ -817,3 +799,21 @@ func (r *Reader) Close() error {
 	})
 	return r.closeErr
 }
+
+// errReaderClosed is returned by reads that begin after Close. It wraps
+// os.ErrClosed so callers matching the pre-existing closed-file error
+// shape keep matching.
+var errReaderClosed = fmt.Errorf("packfile: read after Close: %w", os.ErrClosed)
+
+// beginRead registers a read with the Close handshake; endRead must run
+// when the read finishes. See the closed/inflight field comment.
+func (r *Reader) beginRead() error {
+	r.inflight.Add(1)
+	if r.closed.Load() {
+		r.inflight.Add(-1)
+		return errReaderClosed
+	}
+	return nil
+}
+
+func (r *Reader) endRead() { r.inflight.Add(-1) }
