@@ -13,14 +13,23 @@ type byteArena struct {
 	buf []byte
 }
 
-// arenaChunkSize is the arena's allocation unit. Big enough that a
-// 512-candidate fetch of ~250B payloads fits in one or two chunks, small
-// enough that a mostly-idle arena wastes little.
-const arenaChunkSize = 64 << 10
+// The arena's allocation unit ramps: the first chunk is small so a
+// limit=1 page fetching a few hundred bytes does not pay 64 KiB for
+// them, and each subsequent chunk doubles up to arenaChunkSize so a
+// 512-candidate fetch of ~250B payloads still lands in a handful of
+// allocations.
+const (
+	arenaFirstChunkSize = 4 << 10
+	arenaChunkSize      = 64 << 10
+)
 
 func (a *byteArena) copy(b []byte) []byte {
 	if len(b) > cap(a.buf)-len(a.buf) {
-		a.buf = make([]byte, 0, max(arenaChunkSize, len(b)))
+		next := arenaFirstChunkSize
+		if c := 2 * cap(a.buf); c > next {
+			next = min(c, arenaChunkSize)
+		}
+		a.buf = make([]byte, 0, max(next, len(b)))
 	}
 	n := len(a.buf)
 	a.buf = append(a.buf, b...)

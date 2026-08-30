@@ -38,10 +38,9 @@ type Registry struct {
 
 	// coldEventReadConcurrency overrides the packfile read fan-out one cold
 	// events read gets. Zero means defaultColdEventReadConcurrency, resolved
-	// where the reader is opened (ReadView.Events). Held here, like
-	// maxScanLedgers, so a deployment with I/O headroom to spend — or a test
-	// pinning the serialized path — sets it on its Registry rather than
-	// rebuilding.
+	// where the reader is opened (ReadView.Events). Set through
+	// SetColdEventReadConcurrency — the deployment-reachable knob the fan-out
+	// constant's doc points at — or left zero for the swept default.
 	coldEventReadConcurrency int
 
 	// latest is the newest fully ingested ledger visible to queries, paired with
@@ -164,6 +163,14 @@ func NewRegistry(cat *catalog.Catalog, retention geometry.Retention) *Registry {
 	r.handles.Store(&handleSet{byChunk: map[chunk.ID]*hotchunk.DB{}})
 	r.SetLatestLedger(0, UnknownCloseTime())
 	return r
+}
+
+// SetColdEventReadConcurrency overrides the packfile read fan-out cold
+// events reads get; zero restores defaultColdEventReadConcurrency. Call it
+// at wiring time, before views are handed out: views copy the value at
+// acquisition, so a change never shifts an in-flight request's fan-out.
+func (r *Registry) SetColdEventReadConcurrency(n int) {
+	r.coldEventReadConcurrency = n
 }
 
 // SetLatestLedger publishes seq together with its close time, which callers
