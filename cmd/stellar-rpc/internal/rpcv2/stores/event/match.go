@@ -263,8 +263,10 @@ func batchSizes(hint int) (int, int) {
 //
 // firstBatch sizes the first internal fetch batch. A consumer that
 // will stop after N matches passes N, so the first round trip fetches
-// no more than it needs; 0 or any out-of-range value uses the
-// default. Later batches use the default size. The hint changes I/O
+// no more than it needs; zero and negative hints use the default, and
+// a positive hint is honored up to eight default batches (a page-sized
+// request is one round trip; a wild hint cannot demand an unbounded
+// fetch). Later batches use the default size. The hint changes I/O
 // counts only, never what the stream yields.
 func Matches(
 	ctx context.Context, r Reader, filters []Filter, window IDRange,
