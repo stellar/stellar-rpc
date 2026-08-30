@@ -152,10 +152,11 @@ func countPayloads(txEvents []ingest.TxEvents) int {
 // each emitted (matching-stage) payload and then incremented, so it tracks the
 // event's position within its cursor group.
 func appendStageEventPayloads(
-	dst []Payload, txEvents []xdr.TransactionEventView, wantStage xdr.TransactionEventStage,
+	dst []Payload, txEvents [][]byte, wantStage xdr.TransactionEventStage,
 	txHash xdr.Hash, applyIdx, ledgerSeq uint32, ledgerClosedAt int64, eventIdx *uint32,
 ) ([]Payload, error) {
-	for _, tev := range txEvents {
+	for _, raw := range txEvents {
+		tev := xdr.TransactionEventView(raw)
 		stageView, err := tev.Stage()
 		if err != nil {
 			return nil, fmt.Errorf("events: tx event Stage: %w", err)
