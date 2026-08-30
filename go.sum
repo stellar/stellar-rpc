@@ -447,6 +447,8 @@ github.com/spiffe/go-spiffe/v2 v2.6.0 h1:l+DolpxNWYgruGQVV0xsfeya3CsC7m8iBzDnMps
 github.com/spiffe/go-spiffe/v2 v2.6.0/go.mod h1:gm2SeUoMZEtpnzPNs2Csc0D/gX33k1xIx7lEzqblHEs=
 github.com/stellar/go-stellar-sdk v0.7.4-0.20260826171458-81dd8f0aec3f h1:gSKOcF072hVQkHnu1va3iWB2hOPcbqcI8kwI3TxF6D0=
 github.com/stellar/go-stellar-sdk v0.7.4-0.20260826171458-81dd8f0aec3f/go.mod h1:YTYl7/zFt7oIX5Y4WRgL+3d2upWQDLywlHunZ4fOxvc=
+github.com/stellar/go-stellar-sdk v0.7.4-0.20260830044937-6e76d632122c h1:aZIhEtP1QKuINC3pJgyO9/AdGKU5hpSLJdR86vX++Xw=
+github.com/stellar/go-stellar-sdk v0.7.4-0.20260830044937-6e76d632122c/go.mod h1:YTYl7/zFt7oIX5Y4WRgL+3d2upWQDLywlHunZ4fOxvc=
 github.com/stellar/go-xdr v0.0.0-20260806060815-dc590f17552a h1:40YIhQusSioBKDW5Tr+YdjoXphcVeu7eXUS2ibMQBTs=
 github.com/stellar/go-xdr v0.0.0-20260806060815-dc590f17552a/go.mod h1:If+U9Z1W5xU97VrOgJandQT+2dN7/iOpkCrxBJEyF80=
 github.com/stellar/streamhash v0.1.1-0.20260826155856-77556799545b h1:+qwFEBRESdIqVbLLMUtKf6RTnh7MDbNbyoP6T2WPfJc=
