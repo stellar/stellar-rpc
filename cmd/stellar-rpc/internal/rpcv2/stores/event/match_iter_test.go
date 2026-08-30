@@ -1227,3 +1227,37 @@ func TestBenchShapesAgree(t *testing.T) {
 		})
 	}
 }
+
+// TestBatchSizes pins the first-batch hint contract: a positive hint
+// sizes the first fetch (a page-sized request is one round trip), a
+// wild hint is capped at eight default batches, and later batches
+// always use the default. The seam interplay matters: the cap scales
+// with matchBatchSize so a test-shrunk batch size cannot be blown past
+// by a hint.
+func TestBatchSizes(t *testing.T) {
+	first, rest := batchSizes(0)
+	require.Equal(t, matchBatchSize, first)
+	require.Equal(t, matchBatchSize, rest)
+
+	first, rest = batchSizes(-3)
+	require.Equal(t, matchBatchSize, first)
+	require.Equal(t, matchBatchSize, rest)
+
+	first, rest = batchSizes(7)
+	require.Equal(t, 7, first)
+	require.Equal(t, matchBatchSize, rest)
+
+	first, rest = batchSizes(1000)
+	require.Equal(t, 1000, first, "a page-sized hint is the first fetch size")
+	require.Equal(t, matchBatchSize, rest)
+
+	first, rest = batchSizes(1 << 20)
+	require.Equal(t, 8*matchBatchSize, first, "oversized hints are capped")
+	require.Equal(t, matchBatchSize, rest)
+
+	defer func(n int) { matchBatchSize = n }(matchBatchSize)
+	matchBatchSize = 7
+	first, rest = batchSizes(1000)
+	require.Equal(t, 56, first, "the cap follows the seam")
+	require.Equal(t, 7, rest)
+}
