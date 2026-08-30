@@ -259,7 +259,8 @@ func TestUnavailableResolves_CountsNoServingStore(t *testing.T) {
 func TestReadViewWithLedger_SubGenesisIsNotFound(t *testing.T) {
 	const c chunk.ID = 5
 	a, _ := viewFor(t, func(cat *catalog.Catalog, r *Registry) {
-		db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
+		db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger(), hotchunk.DefaultTuning(),
+			hotchunk.SecretsFor(cat, c))
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = db.Close() })
 		require.NoError(t, cat.FlipHotReady(c))

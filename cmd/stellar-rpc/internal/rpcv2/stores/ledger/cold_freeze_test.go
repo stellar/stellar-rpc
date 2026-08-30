@@ -88,7 +88,7 @@ func TestFreezeColdFromStore_ByteIdenticalToWalk(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = cr.Close() }()
 	for _, seq := range []uint32{first, first + 4999, last} {
-		got, gerr := cr.GetLedgerRaw(seq)
+		got, gerr := readLedgerRaw(cr, seq)
 		require.NoError(t, gerr)
 		require.Equal(t, freezePayload(seq), got, "seq %d", seq)
 	}
