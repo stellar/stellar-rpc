@@ -1156,3 +1156,85 @@ func TestWire_ParamsReachTheHandlerVerbatim(t *testing.T) {
 		})
 	}
 }
+
+// DELTA (g), the half that stops: once the request is dead — the duration
+// limiter has written its 504, or the client is gone — the serving goroutine
+// stops feeding the bound. Before this it kept taking permits and starting
+// elements for ceil(elements/weight) x the per-element time AFTER the answer
+// had gone out, with the global backlog slot held inside that abandoned
+// goroutine; a 3,200-element batch measured 4.73s of it past a 300ms deadline.
+//
+// The half that does NOT stop — an element already inside its handler runs to
+// completion — is asserted here on the elements that held permits, and at the
+// mount in TestMount_AStartedElementSurvivesTheDeadline.
+//
+//nolint:unparam // the handler literal must match the fixed jrpc2.Handler signature
+func TestWire_ADeadRequestStopsStartingElements(t *testing.T) {
+	weight := runtime.GOMAXPROCS(0)
+	elements := max(512, 4*weight)
+
+	entered := make(chan struct{}, elements)
+	release := make(chan struct{})
+	var started, completed atomic.Int64
+
+	h := NewHandler(map[string]jrpc2.Handler{
+		"hold": func(context.Context, *jrpc2.Request) (any, error) {
+			started.Add(1)
+			entered <- struct{}{}
+			<-release
+			completed.Add(1)
+			return held, nil
+		},
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/", strings.NewReader(batchOf(elements, "hold")))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.ServeHTTP(rec, req)
+	}()
+
+	// Saturate the bound. Every permit is now held, so the dispatch loop is
+	// parked in Acquire with the great majority of the batch still to go.
+	for k := range weight {
+		select {
+		case <-entered:
+		case <-time.After(10 * time.Second):
+			cancel()
+			close(release)
+			<-done
+			t.Fatalf("only %d of %d permits were taken", k, weight)
+		}
+	}
+
+	// Kill the request, exactly as the limiter's 504 branch does.
+	cancel()
+	time.Sleep(250 * time.Millisecond) // ample room for the loop to notice
+	atCancel := started.Load()
+
+	// Release the in-flight elements and time the unwind from there: the
+	// serving goroutine joins the work it started, so it cannot return before
+	// that work does. What it must NOT do is start any more.
+	close(release)
+	unwindStart := time.Now()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the serving goroutine never unwound: the dispatch loop is not watching the request")
+	}
+	unwind := time.Since(unwindStart)
+	t.Logf("started %d of %d elements at a bound of %d; unwound %v after the last one returned",
+		started.Load(), elements, weight, unwind)
+
+	assert.Equal(t, atCancel, started.Load(), "elements started after the request was already dead")
+	assert.LessOrEqual(t, atCancel, int64(weight+1),
+		"a dead request started more than the elements already holding permits (+1 for the Acquire race)")
+	assert.Equal(t, atCancel, completed.Load(), "an element that had started did not run to completion")
+	assert.Less(t, unwind, 5*time.Second, "the unwind waited on more than the work it had started")
+	assert.Empty(t, rec.Body.String(),
+		"a dead request is answered by the layer that killed it; the framing writes nothing")
+}

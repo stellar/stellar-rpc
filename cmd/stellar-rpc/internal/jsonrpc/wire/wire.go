@@ -36,7 +36,7 @@
 //	(d) an empty-method notification is answered rather than 204'd
 //	(e) batch frames come back in input order
 //	(f) params reach handlers verbatim rather than re-marshaled
-//	(g) OPEN: the serving goroutine does not unwind at the HTTP deadline
+//	(g) dispatch stops at the HTTP deadline; started elements still finish
 //
 // # What the jrpc2.Server took with it
 //
@@ -206,15 +206,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// The handler context is deliberately NOT derived from req: invoke
-	// builds context.Background(), reproducing jrpc2's NewContext default so
-	// that a client hangup does not cancel work in flight. See invoke, and the
-	// package doc for the two jrpc2 server values that context no longer has.
-	h.serve(w, body) //nolint:contextcheck // deliberate; see invoke
+	// req.Context() governs the DISPATCH — whether another element is allowed
+	// to start (DELTA (g)) — and nothing else. The HANDLER context is still
+	// context.Background, so a client hangup does not cancel work in flight;
+	// see invoke, and the package doc for the two jrpc2 server values that
+	// context no longer has.
+	h.serve(req.Context(), w, body)
 }
 
-// serve parses body, dispatches it, and writes the response.
-func (h *Handler) serve(w http.ResponseWriter, body []byte) {
+// serve parses body, dispatches it, and writes the response. ctx is the HTTP
+// request's, used only to decide whether to keep dispatching.
+func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, body []byte) {
 	reqs, err := jrpc2.ParseRequests(body)
 	if err != nil {
 		// DELTA (a): the bridge answers a malformed body with HTTP 500 and the
@@ -235,7 +237,17 @@ func (h *Handler) serve(w http.ResponseWriter, body []byte) {
 	// Batch-ness is a property of the body, carried on every element.
 	isBatch := reqs[0].Batch
 
-	frames := h.dispatchAll(reqs)
+	frames := h.dispatchAll(ctx, reqs)
+	if ctx.Err() != nil {
+		// DELTA (g): the request died while we were dispatching, so there is
+		// nobody to answer — httpRequestDurationLimiter has already written
+		// its 504 and returned, or the client is gone and its buffered body
+		// would be discarded. Writing anything here would have to choose
+		// between a partial batch array and mistaking an abandoned batch for
+		// an all-notification one and 204ing it. Neither is a response; this
+		// is not one either, and it is the honest one.
+		return
+	}
 	if len(frames) == 0 {
 		// Every element was a notification. DELTA (c): they have all run to
 		// completion by the time this 204 is written, because dispatchAll
@@ -279,28 +291,33 @@ func (h *Handler) serve(w http.ResponseWriter, body []byte) {
 // length; the batch's length still bounds the frames, which is where the
 // (pre-existing, bridge-identical) response amplification lives.
 //
-// DELTA (g), and the open one: this loop does not unwind when the HTTP
-// request's context ends. The permit is taken with context.Background, so
-// after httpRequestDurationLimiter answers 504 and returns, the serving
-// goroutine keeps taking permits and starting elements — for as long as
-// ceil(elements/weight) x the per-method duration limit — and the global
-// backlog slot BacklogHTTPQLimiter holds is inside that abandoned goroutine.
-// A single request has the same shape bounded at one per-method limit, since
-// RPCRequestDurationLimiter returns at its threshold whatever the context
-// does; a batch is that hole times its element count, not a new one.
-// The bridge unwound here: jhttp passed req.Context() to Client.Batch, whose
-// waitComplete failed each pending response when the context ended, so the
-// framing layer returned at the deadline while the handlers ran on.
+// DELTA (g): the permit is acquired against the HTTP REQUEST's context, so
+// this loop stops feeding the bound the moment the request is dead — when
+// httpRequestDurationLimiter has answered 504, or the client has hung up.
+// Without that it kept starting elements for ceil(elements/weight) x the
+// per-method duration limit AFTER the 504, with the global backlog slot
+// BacklogHTTPQLimiter holds sitting inside an abandoned goroutine. The bridge
+// did unwind here (jhttp passed req.Context() to Client.Batch, whose
+// waitComplete failed every pending response when the context ended), so this
+// is parity restored, not a new behavior.
 //
-// It is not fixed here because the fix is a choice, not a repair. Passing the
-// request context to Acquire would stop the loop at the deadline, at the cost
-// of the guarantee that every element of an accepted batch runs — which the
-// bridge did keep (it handed the whole batch to its server before waiting on
-// anything), and which is the guarantee sendTransaction cares about. Serial
-// dispatch had the same shape and a factor of `weight` more of it, so this is
-// strictly better than the commit before it and strictly worse than the
-// bridge, in different units.
-func (h *Handler) dispatchAll(reqs []*jrpc2.ParsedRequest) [][]byte {
+// The line it draws is between STARTED and QUEUED, and only queued work is
+// canceled:
+//
+//   - An element already inside its handler runs to completion. Its context is
+//     context.Background and nothing cancels it — that is the guarantee
+//     sendTransaction depends on, and it is untouched. wg.Wait still joins
+//     every worker that started, so the unwind costs at most one element's
+//     duration, which is exactly what a single request has always cost.
+//   - An element that never got a permit never runs, and produces no frame.
+//     There is no answer to give it and nobody to give one to: the 504 is
+//     already on the wire. serve writes nothing at all rather than assembling
+//     a response out of the survivors.
+//
+// So a canceled CALL element yields no frame, not an error frame. Building
+// one would allocate up to 22MB of answers for a batch whose reader is gone,
+// which is the work this delta exists to stop.
+func (h *Handler) dispatchAll(ctx context.Context, reqs []*jrpc2.ParsedRequest) [][]byte {
 	// One slot per element, filled by index, so the response order is the
 	// request order and does not depend on completion order. A nil slot is an
 	// element that gets no response.
@@ -314,17 +331,18 @@ func (h *Handler) dispatchAll(reqs []*jrpc2.ParsedRequest) [][]byte {
 		// panic reaches the limiter's recover with its OWN stack rather than
 		// wrapped in a relayedPanic. Deleting it as premature optimization
 		// would quietly change that.
-		frames[0] = h.dispatchOne(reqs[0])
+		frames[0] = h.dispatchOne(ctx, reqs[0])
 	} else {
-		h.dispatchBatch(reqs, frames)
+		h.dispatchBatch(ctx, reqs, frames)
 	}
 	return slices.DeleteFunc(frames, func(f []byte) bool { return f == nil })
 }
 
 // dispatchBatch runs the elements of a multi-element body, writing each one's
 // frame into its own slot of frames. See dispatchAll for why the permit is
-// taken on this goroutine rather than in the worker.
-func (h *Handler) dispatchBatch(reqs []*jrpc2.ParsedRequest, frames [][]byte) {
+// taken on this goroutine rather than in the worker, and for what a dead
+// request leaves behind.
+func (h *Handler) dispatchBatch(ctx context.Context, reqs []*jrpc2.ParsedRequest, frames [][]byte) {
 	var wg sync.WaitGroup
 	var raised atomic.Pointer[relayedPanic]
 
@@ -337,10 +355,14 @@ func (h *Handler) dispatchBatch(reqs []*jrpc2.ParsedRequest, frames [][]byte) {
 			frames[i] = frame
 			continue
 		}
-		if ok, denied := h.acquirePermit(pr); !ok {
-			frames[i] = denied
-			continue
+		if !h.acquirePermit(ctx) {
+			// DELTA (g): the request is dead, so this element and every one
+			// after it stays unstarted and unanswered. Breaking rather than
+			// continuing is the point — routing the rest would build frames
+			// for a reader that is already gone.
+			break
 		}
+		//nolint:contextcheck // invoke's context is Background by design; see invoke
 		wg.Go(func() {
 			// Released once the frame is built and strictly before the caller
 			// writes a byte, exactly as dispatchOne releases it — and released
@@ -375,36 +397,30 @@ func (h *Handler) dispatchBatch(reqs []*jrpc2.ParsedRequest, frames [][]byte) {
 // across the handler and the marshal and releasing it before it returns the
 // finished frame — so the caller writes with no permit held, and a panicking
 // handler still releases on the way out.
-func (h *Handler) dispatchOne(pr *jrpc2.ParsedRequest) []byte {
+func (h *Handler) dispatchOne(ctx context.Context, pr *jrpc2.ParsedRequest) []byte {
 	method, frame := h.route(pr)
 	if method == nil {
 		return frame
 	}
-	if ok, denied := h.acquirePermit(pr); !ok {
-		return denied
+	if !h.acquirePermit(ctx) {
+		return nil // DELTA (g): never started, so there is nothing to answer.
 	}
 	defer h.sem.Release(1)
+	//nolint:contextcheck // invoke's context is Background by design; see invoke
 	return h.invoke(pr, method)
 }
 
-// acquirePermit takes one permit from the shared bound and reports whether it
-// got one. When it did not, the second result is what goes in the element's
-// slot: the error frame for a call, and nothing at all for a notification,
-// which must never be answered whatever went wrong.
+// acquirePermit takes one permit from the shared bound, blocking until either
+// it gets one or ctx ends, and reports which happened.
 //
-// The failure is unreachable today, because Background is never canceled and
-// Acquire only fails on a canceled context. It is answered rather than dropped
-// so that a future change of context cannot turn this into a silent 200 with
-// no body — and for the same reason it has to get the notification case right
-// now, while nothing exercises it.
-func (h *Handler) acquirePermit(pr *jrpc2.ParsedRequest) (bool, []byte) {
-	if err := h.sem.Acquire(context.Background(), 1); err != nil {
-		if pr.ID == "" {
-			return false, nil
-		}
-		return false, errorFrame(pr.ID, &jrpc2.Error{Code: jrpc2.InternalError, Message: err.Error()})
-	}
-	return true, nil
+// ctx is the HTTP request's, never the handler's: this is the one place the
+// request's lifetime reaches into dispatch (DELTA (g)). Acquire fails only on
+// a canceled context and never keeps a permit it won in the race — x/sync
+// checks Done before, after, and while waiting, releasing the tokens if it has
+// to — so false here always means "this element did not run, and the request
+// it belongs to is over".
+func (h *Handler) acquirePermit(ctx context.Context) bool {
+	return h.sem.Acquire(ctx, 1) == nil
 }
 
 // route decides how one parsed request is answered, WITHOUT running anything:

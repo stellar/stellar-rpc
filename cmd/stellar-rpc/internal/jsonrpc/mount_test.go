@@ -333,3 +333,39 @@ func TestMount_HandlerPanics(t *testing.T) {
 		stillServing(t, "7")
 	})
 }
+
+// DELTA (g), the half that does not stop: the deadline ends the DISPATCH, not
+// the work. A handler that had already started keeps running on its
+// context.Background-derived context, with no deadline of the HTTP request's —
+// the guarantee sendTransaction depends on. The half that does stop is
+// TestWire_ADeadRequestStopsStartingElements.
+func TestMount_AStartedElementSurvivesTheDeadline(t *testing.T) {
+	const limit = 300 * time.Millisecond
+	finished := make(chan error, 1)
+
+	url := newMountedHandler(t, limit, []HandlerSpec{{
+		MethodName: "slow",
+		Handler: func(ctx context.Context, _ *jrpc2.Request) (any, error) {
+			time.Sleep(3 * limit) // well past the HTTP deadline
+			finished <- ctx.Err()
+			return "eventually", nil
+		},
+		QueueLimit:           10,
+		RequestDurationLimit: time.Minute,
+	}})
+
+	start := time.Now()
+	status, body := postMounted(t, url, `{"jsonrpc":"2.0","id":1,"method":"slow"}`)
+	answered := time.Since(start)
+
+	require.Equal(t, http.StatusGatewayTimeout, status)
+	assert.Empty(t, body)
+	assert.Less(t, answered, 3*limit, "the 504 waited for the handler instead of abandoning it")
+
+	select {
+	case err := <-finished:
+		assert.NoError(t, err, "the HTTP deadline reached a handler that had already started")
+	case <-time.After(10 * time.Second):
+		t.Fatal("a started handler never finished: the run-to-completion guarantee is gone")
+	}
+}
