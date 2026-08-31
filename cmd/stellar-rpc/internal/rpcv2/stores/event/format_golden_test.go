@@ -61,3 +61,59 @@ func TestFieldTermKeys_Golden(t *testing.T) {
 	assert.Equal(t, TopicCountTermKey(topicCountOverflowBucket), TopicCountTermKey(99),
 		"counts past the overflow bucket clamp into it")
 }
+
+// goldenContractEventBytes builds the fixed marshaled ContractEvent the
+// TermsForBytes golden runs over: a contract ID of bytes 0..31 and four
+// topics exercising every indexed topic position.
+func goldenContractEventBytes(t *testing.T) []byte {
+	t.Helper()
+	var cid xdr.ContractId
+	for i := range cid {
+		cid[i] = byte(i)
+	}
+	sym0, sym2 := xdr.ScSymbol("transfer"), xdr.ScSymbol("to")
+	u1, u3 := xdr.Uint32(7), xdr.Uint32(9)
+	ev := xdr.ContractEvent{
+		ContractId: &cid,
+		Type:       xdr.ContractEventTypeContract,
+		Body: xdr.ContractEventBody{
+			V: 0,
+			V0: &xdr.ContractEventV0{
+				Topics: []xdr.ScVal{
+					{Type: xdr.ScValTypeScvSymbol, Sym: &sym0},
+					{Type: xdr.ScValTypeScvU32, U32: &u1},
+					{Type: xdr.ScValTypeScvSymbol, Sym: &sym2},
+					{Type: xdr.ScValTypeScvU32, U32: &u3},
+				},
+				Data: xdr.ScVal{Type: xdr.ScValTypeScvU32, U32: &u1},
+			},
+		},
+	}
+	b, err := ev.MarshalBinary()
+	require.NoError(t, err)
+	return b
+}
+
+// TestTermsForBytes_Golden pins the full derivation from a marshaled event:
+// not just the hash and field prefix (TestComputeTermKey_Golden's job) but
+// the value encoding of every field TermsForBytes extracts, so a change to
+// how a contract ID or topic becomes hash input cannot pass unnoticed.
+// Cross-anchors: key 0 equals the eventType(contract) golden and key 2 the
+// topicCount(4) golden above.
+func TestTermsForBytes_Golden(t *testing.T) {
+	keys, err := TermsForBytes(goldenContractEventBytes(t))
+	require.NoError(t, err)
+	want := []string{
+		"092967d65ec25b057c6a54e627dec4e6", // event type (contract)
+		"f96521b095e9249b0af1546bfbd9a80f", // contract ID 0..31
+		"db3d5df76fa2f6cd611dde2b96f16401", // topic count 4
+		"8b9390866f0062b43022a0896fe6b606", // topic 0: symbol "transfer"
+		"de4348720f97c94df5621c5cc5304a3d", // topic 1: u32 7
+		"9ea0933498a23b8f6c3d867631e945c8", // topic 2: symbol "to"
+		"dacc6ffd833f6932052ef2cd55f75844", // topic 3: u32 9
+	}
+	require.Len(t, keys, len(want))
+	for i, k := range keys {
+		assert.Equal(t, want[i], hex.EncodeToString(k[:]), "key %d", i)
+	}
+}

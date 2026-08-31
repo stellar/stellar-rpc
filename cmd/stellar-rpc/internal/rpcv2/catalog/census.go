@@ -56,7 +56,7 @@ func (c *Catalog) census() error {
 				flag(e.Key, fmt.Sprintf("value is %d bytes, want %d (value redacted)", len(e.Value), len(c.secret)))
 			}
 		default:
-			if detail, ok := censusArtifactEntry(e.Key, e.Value); !ok {
+			if detail, ok := c.censusArtifactEntry(e.Key, e.Value); !ok {
 				flag(e.Key, detail)
 			}
 		}
@@ -72,7 +72,7 @@ func (c *Catalog) census() error {
 
 // censusArtifactEntry validates one non-config entry against the three state
 // key families. ok=false returns the reason.
-func censusArtifactEntry(key, value string) (string, bool) {
+func (c *Catalog) censusArtifactEntry(key, value string) (string, bool) {
 	switch {
 	case strings.HasPrefix(key, geometry.HotChunkPrefix):
 		if _, ok := geometry.ParseHotChunkKey(key); !ok {
@@ -89,8 +89,16 @@ func censusArtifactEntry(key, value string) (string, bool) {
 			return fmt.Sprintf("unknown artifact state %q", value), false
 		}
 	case strings.HasPrefix(key, geometry.TxHashIndexPrefix):
-		if _, ok := geometry.ParseTxHashIndexKey(key); !ok {
+		cov, ok := geometry.ParseTxHashIndexKey(key)
+		if !ok {
 			return "malformed index coverage key", false
+		}
+		// The builder only ever covers chunks of the key's own index, so a
+		// cross-window coverage is something no binary wrote. Left accepted,
+		// a corrupt frozen one would suppress legitimate index rebuilds.
+		if c.txhashIndex.TxHashIndexID(cov.Lo) != cov.Index ||
+			c.txhashIndex.TxHashIndexID(cov.Hi) != cov.Index {
+			return "index coverage endpoints outside the key's own index", false
 		}
 		if !geometry.IsKnownState(geometry.State(value)) {
 			return fmt.Sprintf("unknown artifact state %q", value), false

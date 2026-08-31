@@ -37,7 +37,9 @@ func TestCensus_AcceptsOwnVocabulary(t *testing.T) {
 			for _, kind := range geometry.AllKinds() {
 				require.NoError(t, c.put(geometry.ChunkKey(id, kind), string(s)))
 			}
-			idxKey := geometry.TxHashIndexKey(geometry.TxHashIndexID(i), id, id+5)
+			// Coverage endpoints must lie in the key's own index window.
+			first := chunk.ID(i) * chunk.ID(geometry.ChunksPerTxhashIndex)
+			idxKey := geometry.TxHashIndexKey(geometry.TxHashIndexID(i), first, first+5)
 			require.NoError(t, c.put(idxKey, string(s)))
 		}
 		for i, s := range geometry.AllHotStates() {
@@ -73,6 +75,7 @@ func TestCensus_RefusesForeignEntries(t *testing.T) {
 		{"unknown hot state", geometry.HotChunkKey(4), "warm"},
 		{"unpadded chunk id", "chunk:123:ledgers", "frozen"},
 		{"index lo above hi", "index:00000000:00000005:00000002", "frozen"},
+		{"cross-window index coverage", "index:00000001:00000000:00003000", "frozen"},
 		{"non-canonical pin", geometry.ConfigEarliestLedger, "007"},
 	}
 	for _, tc := range cases {
