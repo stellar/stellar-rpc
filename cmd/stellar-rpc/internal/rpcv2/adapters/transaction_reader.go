@@ -53,5 +53,5 @@ func (r *TransactionReader) GetTransaction(ctx context.Context, hash xdr.Hash) (
 	// Only a compactView-produced view may be reshaped here: the type does not
 	// carry that, and a view straight off the SDK still aliases the ledger it
 	// was read from — probe.GetTransaction guarantees it (see compactView).
-	return store.ParseTransaction(txv), nil
+	return store.ParseTransaction(txv)
 }
