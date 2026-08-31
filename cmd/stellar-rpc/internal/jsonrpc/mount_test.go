@@ -25,8 +25,8 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
 )
 
-// The framing is only correct WHERE IT IS MOUNTED: inside the shared chain.
-// NewHandler builds one, so these cover both daemons.
+// The framing is only correct mounted inside the shared chain; NewHandler
+// builds one, so these cover both daemons.
 
 func mountLogger() *log.Entry {
 	l := log.New()
@@ -122,8 +122,8 @@ func TestMount_ServesThroughTheRealMiddlewareChain(t *testing.T) {
 	})
 }
 
-// A client's disconnect does not cancel a handler; the method budget does.
-// This mount gives the method no budget, so nothing cancels it at all.
+// A client's disconnect does not cancel a handler; this mount gives the method
+// no budget, so nothing cancels it at all.
 func TestMount_HandlerContextIsNotTheRequestContext(t *testing.T) {
 	type outcome struct {
 		deadline bool
@@ -139,8 +139,7 @@ func TestMount_HandlerContextIsNotTheRequestContext(t *testing.T) {
 			return "ok", nil
 		},
 		QueueLimit: 10,
-		// No per-method budget, so nothing between Background and the handler
-		// adds a deadline of its own.
+		// No per-method budget, so nothing adds a deadline.
 		RequestDurationLimit: network.RequestDurationLimiterNoLimit,
 	}})
 
@@ -342,8 +341,7 @@ func TestMount_AStartedElementSurvivesTheDeadline(t *testing.T) {
 	}
 }
 
-// The deadline answers the client and leaves the handler running; only
-// Shutdown ends it.
+// The deadline leaves the handler running; only Shutdown ends it.
 func TestMount_ShutdownEndsWhatTheDeadlineDidNot(t *testing.T) {
 	const limit = 300 * time.Millisecond
 	entered := make(chan struct{}, 1)
@@ -383,10 +381,8 @@ func TestMount_ShutdownEndsWhatTheDeadlineDidNot(t *testing.T) {
 	}
 }
 
-// A handler that ignores cancellation and outruns its per-method budget is
-// answered -32001 and ABANDONED: the duration limiter returns without joining
-// it, so its wire permit is back long before Shutdown starts. Draining the
-// bound alone would prove nothing about it.
+// An over-budget handler that ignores cancellation is abandoned with its
+// permit returned, so draining the bound alone proves nothing about it.
 func TestMount_ShutdownJoinsATimedOutHandler(t *testing.T) {
 	const budget = 200 * time.Millisecond
 
@@ -438,10 +434,8 @@ func TestMount_ShutdownJoinsATimedOutHandler(t *testing.T) {
 	})
 }
 
-// The wiring invariant both daemons now hold: connections dead BEFORE the
-// drain. DELTA (g) gates an element's start on the request's context, so a
-// live connection mid-batch keeps authorizing starts and the drain chases a
-// moving target. Closing the connections kills those contexts first.
+// Connections dead before the drain: a live one keeps authorizing element
+// starts, so the drain chases a moving target.
 func TestMount_ClosedConnectionsStopTheDispatchBeforeTheDrain(t *testing.T) {
 	weight := runtime.GOMAXPROCS(0)
 	elements := 4 * weight
@@ -484,8 +478,7 @@ func TestMount_ClosedConnectionsStopTheDispatchBeforeTheDrain(t *testing.T) {
 		}
 	}()
 
-	// Bound saturated: the dispatch loop is parked in Acquire with most of the
-	// batch still queued behind it.
+	// Bound saturated: the loop is parked in Acquire, most of the batch to go.
 	for range weight {
 		select {
 		case <-entered:
@@ -510,9 +503,8 @@ func TestMount_ClosedConnectionsStopTheDispatchBeforeTheDrain(t *testing.T) {
 		"the dispatch kept going past the bound while its connection was dead")
 }
 
-// stableRegistryDaemon is MakeNoOpDaemon with a registry that does not change
-// between calls. NoOpDaemon hands out a fresh one per call so tests can
-// register repeatedly, which also makes registration unobservable.
+// stableRegistryDaemon is MakeNoOpDaemon with a registry that survives between
+// calls; NoOpDaemon hands out a fresh one, which hides registration.
 type stableRegistryDaemon struct {
 	*host.NoOpDaemon
 
@@ -521,11 +513,8 @@ type stableRegistryDaemon struct {
 
 func (d stableRegistryDaemon) MetricsRegistry() *prometheus.Registry { return d.registry }
 
-// Six metric families were built and never registered between #804 (2023) and
-// the commit that added this test, so the per-method and global limiter
-// signals did not exist on /metrics at all — including
-// <method>_inflight_requests, which is the count of live handler bodies and
-// the operator's only view of the population the drain waits for.
+// Six limiter metric families were built and never registered, so they were
+// incremented on every request and never reached /metrics.
 func TestMount_LimiterMetricsAreRegistered(t *testing.T) {
 	daemon := stableRegistryDaemon{host.MakeNoOpDaemon(), prometheus.NewRegistry()}
 	NewHandler(Params{
@@ -573,10 +562,8 @@ func TestMount_LimiterMetricsAreRegistered(t *testing.T) {
 	})
 }
 
-// DELTA (c), scoped. A notification's work has finished when its 204 lands —
-// unless its method budget expired first, in which case the limiter answered
-// and walked away, and the 204 precedes the side effects. Not joined here on
-// purpose: see invoke. The child stays tracked, so Shutdown still covers it.
+// Delta (c) scoped: an over-budget notification's 204 precedes its side
+// effects, and the abandoned child stays tracked for Shutdown.
 func TestMount_ANotificationOverItsBudgetIsAnsweredAtBudget(t *testing.T) {
 	const budget = 200 * time.Millisecond
 	release := make(chan struct{})

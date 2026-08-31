@@ -28,9 +28,8 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
 )
 
-// Every `want` is a byte string captured from jrpc2 v1.3.3's jhttp.Bridge,
-// except where annotated with a delta. Only an exact-byte pin notices a bump
-// moving one of wire.go's transcribed error strings.
+// Every `want` is a byte string captured from jhttp.Bridge, except where
+// annotated with a delta; only an exact-byte pin notices a library bump.
 
 // held is what the parked handlers return once released.
 const held = "done"
@@ -161,8 +160,8 @@ func TestWire_SingleRequests(t *testing.T) {
 	}
 }
 
-// If this fails because appendID was "simplified" to a plain append, the mount
-// is reflecting arbitrary client bytes into a response with no nosniff header.
+// If this fails, appendID was "simplified" and the mount now reflects client
+// bytes into a response with no nosniff header.
 func TestWire_IDIsHTMLEscapedExactlyAsTheBridgeEscapedIt(t *testing.T) {
 	h, _ := newTestHandler(t)
 
@@ -179,8 +178,7 @@ func TestWire_IDIsHTMLEscapedExactlyAsTheBridgeEscapedIt(t *testing.T) {
 		body: "{\"jsonrpc\":\"2.0\",\"id\":\"a\u2029b\",\"method\":\"echo\"}",
 		want: `{"jsonrpc":"2.0","id":"a\u2029b","result":{"method":"echo"}}`,
 	}, {
-		// Every byte but the five is spliced raw, invalid UTF-8 included:
-		// the boundary of the guarantee, not an oversight in it.
+		// Every byte but the five is spliced raw, invalid UTF-8 included.
 		name: "bytes that are not valid UTF-8 are spliced raw, as the bridge spliced them",
 		body: "{\"jsonrpc\":\"2.0\",\"id\":\"a\xffb\",\"method\":\"echo\"}",
 		want: "{\"jsonrpc\":\"2.0\",\"id\":\"a\xffb\",\"result\":{\"method\":\"echo\"}}",
@@ -199,8 +197,7 @@ func TestWire_IDIsHTMLEscapedExactlyAsTheBridgeEscapedIt(t *testing.T) {
 	}
 }
 
-// The frame's capacity must be its EXACT length: no assertion on the response
-// can see that, but cap > len means the payload was re-copied.
+// The capacity must be exact; cap > len means the payload was re-copied.
 func TestFrameIsExactlyOneAllocation(t *testing.T) {
 	payload := []byte(`{"a":[1,2,3]}`)
 	for _, id := range []string{
@@ -684,8 +681,8 @@ func TestWire_SemaphoreIsReleasedBeforeTheWrite(t *testing.T) {
 	wg.Wait()
 }
 
-// blockingWriter stands in for a client that stopped reading. Header must keep
-// the map it hands out, or the writer swallows every header set on it.
+// blockingWriter stands in for a client that stopped reading; Header must keep
+// the map it hands out or every header set on it is swallowed.
 type blockingWriter struct {
 	blocked chan struct{}
 	header  http.Header
@@ -790,9 +787,8 @@ func TestWire_BatchElementsRunConcurrently(t *testing.T) {
 	assert.Equal(t, strconv.Itoa(len(want)), rec.Header().Get("Content-Length"))
 }
 
-// A batch borrows from the process-wide bound. The weight must bound concurrent
-// HANDLERS and GOROUTINES both — the latter only because the permit is taken
-// before the worker starts.
+// The weight must bound concurrent handlers and goroutines both; the latter
+// only because the permit is taken before the worker starts.
 //
 //nolint:unparam // the handler literal must match the fixed jrpc2.Handler signature
 func TestWire_ABatchDoesNotMultiplyTheConcurrencyBound(t *testing.T) {
@@ -846,8 +842,7 @@ func TestWire_ABatchDoesNotMultiplyTheConcurrencyBound(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
-// DELTA (e) and compaction hold however the batch completes; this one
-// finishes back to front.
+// Delta (e) and compaction hold however the batch completes.
 //
 //nolint:unparam // the handler literals must match the fixed jrpc2.Handler signature
 func TestWire_BatchOrderAndCompactionSurviveOutOfOrderCompletion(t *testing.T) {
@@ -956,8 +951,7 @@ func TestWire_ValidJSONThatIsNotARequest(t *testing.T) {
 		body: `true`,
 		want: `{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"request is not a JSON object"}}`,
 	}, {
-		// null decodes into a nil map, so it reaches the version check: the
-		// one scalar that does not answer -32700.
+		// null decodes to a nil map, so it reaches the version check.
 		name: "a bare null",
 		body: `null`,
 		want: `{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"invalid version marker"}}`,
@@ -1136,8 +1130,7 @@ func TestWire_ADeadRequestStopsStartingElements(t *testing.T) {
 		"a dead request is answered by the layer that killed it; the framing writes nothing")
 }
 
-// adversarialBatch fills the body cap with the cheapest element that still
-// demands an answer.
+// adversarialBatch fills the body cap with the cheapest answerable element.
 func adversarialBatch(t *testing.T) (string, int) {
 	t.Helper()
 	const bodyCap = 512 * 1024
@@ -1151,9 +1144,8 @@ func adversarialBatch(t *testing.T) (string, int) {
 	return body, n
 }
 
-// DELTA (g) for the elements that never reach acquirePermit. Measured ABOVE
-// the parse: the frames are discarded either way, so all that changes is
-// whether they were built.
+// Delta (g) for elements that never reach acquirePermit, measured above the
+// parse: the frames are discarded either way, so only the building changes.
 func TestWire_ADeadRequestStopsBuildingStaticErrorFrames(t *testing.T) {
 	h, _ := newTestHandler(t)
 	body, elements := adversarialBatch(t)
@@ -1271,8 +1263,7 @@ func TestWire_Shutdown(t *testing.T) {
 		<-done
 	})
 
-	// Shutdown holds the bound, so a later request unwinds at its own
-	// deadline (DELTA (g)) rather than hanging.
+	// Shutdown holds the bound, so a later request unwinds at its own deadline.
 	t.Run("nothing new starts after a completed drain", func(t *testing.T) {
 		var ran atomic.Int64
 		h := NewHandler(map[string]jrpc2.Handler{
@@ -1296,11 +1287,8 @@ func TestWire_Shutdown(t *testing.T) {
 	})
 }
 
-// Static-error frames are the one answer that needs no handler, and a hostile
-// body carries ~260,000 of them at ~23MB. Building them outside the bound let
-// concurrent hostile bodies materialize that much each, so the deferred build
-// takes a permit — proved here by holding every permit and showing a
-// static-only batch cannot finish until one comes back.
+// Static-error frames need no handler, so the deferred build takes a permit;
+// held here to show a static-only batch cannot finish without one.
 //
 //nolint:unparam // the handler literal must match the fixed jrpc2.Handler signature
 func TestWire_StaticErrorFramesAreBuiltInsideTheBound(t *testing.T) {
@@ -1329,8 +1317,7 @@ func TestWire_StaticErrorFramesAreBuiltInsideTheBound(t *testing.T) {
 		<-entered
 	}
 
-	// Every permit is held. This batch runs no handler at all, so before the
-	// deferred build it answered immediately.
+	// Every permit held; this batch runs no handler at all.
 	rec, done := serveAsync(t, h, `[5,5,5]`)
 	select {
 	case <-done:
@@ -1353,10 +1340,8 @@ func TestWire_StaticErrorFramesAreBuiltInsideTheBound(t *testing.T) {
 	assert.Equal(t, "["+one+","+one+","+one+"]", rec.Body.String())
 }
 
-// Both ends of the drain must be wired to the SAME group. A nil one used to
-// default silently to a private group, producing a Shutdown that reports
-// success while abandoned handlers run into a closing store — no error, no log
-// line, nothing observable until a shutdown races a teardown in production.
+// Both ends of the drain must be the same group; a nil one silently defaulted
+// and produced a Shutdown that reported success with handlers still running.
 func TestWire_NewHandlerRefusesAMissingLiveHandlersGroup(t *testing.T) {
 	assert.PanicsWithValue(t,
 		"wire: NewHandler needs the mount's LiveHandlers; jsonrpc.NewHandler is the one place that builds it",

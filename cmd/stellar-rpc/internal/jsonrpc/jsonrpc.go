@@ -37,7 +37,7 @@ const (
 	LedgerKeyDecodeMaxMemory   = 16 * 1024   // 16 KB
 	TransactionDecodeMaxMemory = 1024 * 1024 // 1 MB
 
-	// metric label/subsystem names shared across the assembly below
+	// Metric label and subsystem names, shared across the assembly below.
 	subsystemNetwork = "network"
 	labelStatus      = "status"
 
@@ -55,10 +55,11 @@ type Handler struct {
 	framing *wire.Handler
 }
 
-// Shutdown cancels the context every method handler runs on and waits for the
-// ones still running, or for ctx to end. Handler contexts are server-scoped,
-// so nothing else ends a request that outlived the HTTP deadline: call this
-// after the server stops accepting and BEFORE closing the stores it reads.
+// Shutdown cancels the context every method handler runs on, then waits for
+// the ones still running or for ctx to end. Handler contexts are
+// server-scoped, so nothing else ends a handler that outlived its HTTP
+// deadline. Call it after the server stops accepting and before closing the
+// stores it reads.
 func (h Handler) Shutdown(ctx context.Context) error { return h.framing.Shutdown(ctx) }
 
 // HandlerSpec describes one JSON-RPC method: its handler plus the per-method
@@ -82,17 +83,10 @@ type Params struct {
 	GlobalDurationLimit   time.Duration
 }
 
-// decorateHandlers wraps every method with request logging and the duration
-// summary. Each daemon builds its handler once, so creating and registering
-// the collector here happens once per registry.
-// registerOrReuse registers c and returns it, or returns the collector already
-// registered under the same name. Each daemon builds its handler once today,
-// but a second build on the same registry (a reload, a re-bind) must keep
-// counting on the existing series rather than panic on a duplicate.
-//
-// EVERY collector this package builds must go through here. Six families were
-// constructed and never registered between #804 and this commit, so the
-// per-method and global limiter signals did not exist on /metrics at all.
+// registerOrReuse registers c, or returns the collector already registered
+// under the same name so a rebuild keeps counting on the existing series.
+// Every collector this package builds goes through here; one that does not is
+// incremented on every request and never appears on /metrics.
 func registerOrReuse[T prometheus.Collector](registry *prometheus.Registry, c T) T {
 	rerr := registry.Register(c)
 	if rerr == nil {
@@ -109,6 +103,9 @@ func registerOrReuse[T prometheus.Collector](registry *prometheus.Registry, c T)
 	return existing
 }
 
+// decorateHandlers wraps every method with request logging and the duration
+// summary. Each daemon builds its handler once, so the collector is created
+// and registered once per registry.
 func decorateHandlers(daemon host.Daemon, logger *log.Entry, m handler.Map) handler.Map {
 	requestMetric := prometheus.NewSummaryVec(prometheus.SummaryOpts{
 		Namespace:  daemon.MetricsNamespace(),
@@ -146,11 +143,10 @@ func decorateHandlers(daemon host.Daemon, logger *log.Entry, m handler.Map) hand
 	return decorated
 }
 
-// maxLoggedRequestID bounds the client-controlled text that reaches the log:
-// jrpc2.Request.ID() is the raw id token the client sent, so this field is
-// anything up to the 512KB body cap, once per request at INFO. A quoted UUID
-// is 38 bytes. It bounds what is WRITTEN, not what is copied — ID() has
-// already copied the token, and jrpc2 exposes no length accessor.
+// maxLoggedRequestID caps the client-controlled text reaching the log.
+// jrpc2.Request.ID() is the raw id token, up to the body cap, written once per
+// request at INFO; a quoted UUID is 38 bytes. It caps what is written, not
+// what is copied: ID() has already copied the token and exposes no length.
 const maxLoggedRequestID = 64
 
 func loggedRequestID(req *jrpc2.Request) string {
@@ -199,15 +195,11 @@ func toSnakeCase(s string) string {
 }
 
 // wrapWithLimiters applies the per-method backlog-queue and request-duration
-// limiters (and their metrics) around a single method handler.
-//
-// LOAD-BEARING nesting: the backlog limiter wraps spec.Handler and the
-// duration limiter wraps queueLimiter.Handle, so the backlog slot is held
-// ACROSS the real call — including after the duration limiter has answered its
-// timeout and walked away from it. That is the only thing bounding live
-// handler bodies (QueueLimit per method); the wire semaphore counts
-// dispatches and cannot see them. Swap the two and the slot is released when
-// the wrapper returns, bounding nothing.
+// limiters, and their metrics, around one method handler. The nesting order is
+// load-bearing: the backlog limiter wraps the handler and the duration limiter
+// wraps that, so the backlog slot is held across the real call and bounds live
+// handler bodies at QueueLimit. Swapped, it releases on return and bounds
+// nothing.
 func wrapWithLimiters(
 	spec HandlerSpec, daemon host.Daemon, logger *log.Entry, liveHandlers *network.LiveHandlers,
 ) jrpc2.Handler {
@@ -243,7 +235,7 @@ func wrapWithLimiters(
 		Name: durationLimitCounterName,
 		Help: durationLimitCounterHelp,
 	})
-	// set the warning threshold to be one third of the limit.
+	// The warning threshold is one third of the limit.
 	requestDurationWarn := spec.RequestDurationLimit / warningThresholdDenominator
 	durationLimiter := network.MakeJrpcRequestDurationLimiter(
 		queueLimiter.Handle,
@@ -256,23 +248,20 @@ func wrapWithLimiters(
 	return durationLimiter.Handle
 }
 
-// NewHandler constructs a Handler instance from the given method specs
+// NewHandler constructs a Handler from the given method specs.
 func NewHandler(params Params) Handler {
-	// The duration limiter answers at its timeout and leaves its handler
-	// running, so the framing's bound loses sight of it. Both ends of that
-	// share this group: the limiters count into it, Handler.Shutdown joins it.
+	// A duration limiter answering at its timeout leaves its handler running,
+	// out of the framing's sight. The limiters count into this group and
+	// Handler.Shutdown waits on it.
 	liveHandlers := new(network.LiveHandlers)
 	handlersMap := handler.Map{}
 	for _, spec := range params.Specs {
 		handlersMap[spec.MethodName] = wrapWithLimiters(spec, params.Daemon, params.Logger, liveHandlers)
 	}
-	// The framing at the bottom of the chain. Both mounts use the same one:
-	// internal/jsonrpc/wire, which parses with jrpc2.ParseRequests and then
-	// writes its own envelope. Everything assembled around it below — cors, the
-	// 512KB body cap, the request-duration limiter and its buffered response
-	// writer, the global backlog limiter — is unchanged and stays in this
-	// order. The duration limiter is the slow-client decoupler and must remain
-	// OUTSIDE the framing, never beside or under it.
+	// The framing at the bottom of the chain, shared by both mounts. What is
+	// assembled around it below stays in this order: cors, the body cap, the
+	// request-duration limiter with its buffered writer, the global backlog
+	// limiter. The duration limiter must stay outside the framing.
 	framing := wire.NewHandler(decorateHandlers(
 		params.Daemon,
 		params.Logger,
