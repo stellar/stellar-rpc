@@ -56,10 +56,9 @@ type Handler struct {
 }
 
 // Shutdown cancels the context every method handler runs on and waits for the
-// ones still running, or for ctx to end. Call it after the HTTP server has
-// stopped accepting and BEFORE closing the stores the handlers read: handler
-// contexts are server-scoped, so nothing else ends a request that outlived the
-// HTTP deadline. Idempotent.
+// ones still running, or for ctx to end. Handler contexts are server-scoped,
+// so nothing else ends a request that outlived the HTTP deadline: call this
+// after the server stops accepting and BEFORE closing the stores it reads.
 func (h Handler) Shutdown(ctx context.Context) error { return h.framing.Shutdown(ctx) }
 
 // HandlerSpec describes one JSON-RPC method: its handler plus the per-method
@@ -136,16 +135,11 @@ func decorateHandlers(daemon host.Daemon, logger *log.Entry, m handler.Map) hand
 	return decorated
 }
 
-// maxLoggedRequestID bounds the client-controlled text that reaches the log.
-// jrpc2.Request.ID() is the raw JSON id token the client sent; under the jhttp
-// bridge it was the bridge's own virtualized counter instead, so this field
-// used to be a couple of bytes and is now anything up to the 512KB body cap,
-// once per request at INFO. Every sane id fits (a quoted UUID is 38 bytes).
-//
-// This bounds what is WRITTEN, not what is copied: jrpc2.Request.ID() is
-// string(r.id) and has already copied the whole token by the time it returns.
-// jrpc2 exposes no length or zero-copy accessor, so the copy stays; the log
-// volume, which is the part that reaches a disk, does not.
+// maxLoggedRequestID bounds the client-controlled text that reaches the log:
+// jrpc2.Request.ID() is the raw id token the client sent, so this field is
+// anything up to the 512KB body cap, once per request at INFO. A quoted UUID
+// is 38 bytes. It bounds what is WRITTEN, not what is copied — ID() has
+// already copied the token, and jrpc2 exposes no length accessor.
 const maxLoggedRequestID = 64
 
 func loggedRequestID(req *jrpc2.Request) string {
