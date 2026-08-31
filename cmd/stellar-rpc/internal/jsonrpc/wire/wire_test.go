@@ -30,6 +30,10 @@ import (
 // fields in request", ...) is unexported in jrpc2 and transcribed here: only an
 // exact-byte pin will notice if a library bump or a refactor moves one.
 
+// held is what the handlers that park under the concurrency bound return once
+// they are released.
+const held = "done"
+
 // testMethods is the table under test. notified counts calls to "note" so a
 // notification's completion is observable.
 //
@@ -563,7 +567,7 @@ func TestWire_SemaphoreBoundsConcurrentDispatch(t *testing.T) {
 			entered <- struct{}{}
 			<-release
 			inflight.Add(-1)
-			return "done", nil
+			return held, nil
 		},
 	})
 	srv := httptest.NewServer(h)
@@ -701,4 +705,321 @@ func TestAppendHTMLEscaped(t *testing.T) {
 		assert.Equal(t, len(tc.want), idLen(tc.in), "idLen must predict the escaped length of %q", tc.in)
 	}
 	assert.Equal(t, len("null"), idLen(""))
+}
+
+// batchOf builds a batch body of n calls to method, with ids 1..n.
+func batchOf(n int, method string) string {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := 1; i <= n; i++ {
+		if i > 1 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"jsonrpc":"2.0","id":%d,"method":%q}`, i, method)
+	}
+	b.WriteByte(']')
+	return b.String()
+}
+
+// serveAsync runs one body through h on its own goroutine and returns the
+// recorder plus a channel closed when ServeHTTP has returned. It exists so a
+// test can look at a batch while it is still in flight; post() cannot, and its
+// require calls would be on the wrong goroutine anyway.
+func serveAsync(t *testing.T, h http.Handler, body string) (*httptest.ResponseRecorder, <-chan struct{}) {
+	t.Helper()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.ServeHTTP(rec, req)
+	}()
+	return rec, done
+}
+
+// Batch elements run concurrently, as jrpc2's dispatchLocked ran them. Serial
+// dispatch sums a batch's latencies under the one HTTP deadline the mount
+// enforces, so a batch of individually-fine calls 504s where each of them alone
+// succeeds — the regression this test exists to catch.
+//
+// The proof is a barrier, not a stopwatch: every element must be inside its
+// handler before any of them is allowed to return. Serial dispatch delivers
+// exactly one.
+//
+//nolint:unparam // the handler literal must match the fixed jrpc2.Handler signature
+func TestWire_BatchElementsRunConcurrently(t *testing.T) {
+	n := min(runtime.NumCPU(), 8)
+	if n < 2 {
+		t.Skip("a one-permit bound cannot show concurrency")
+	}
+	entered := make(chan struct{}, n)
+	release := make(chan struct{})
+
+	h := NewHandler(map[string]jrpc2.Handler{
+		"hold": func(context.Context, *jrpc2.Request) (any, error) {
+			entered <- struct{}{}
+			<-release
+			return held, nil
+		},
+	})
+	rec, done := serveAsync(t, h, batchOf(n, "hold"))
+
+	for k := range n {
+		select {
+		case <-entered:
+		case <-time.After(10 * time.Second):
+			close(release)
+			<-done
+			t.Fatalf("only %d of %d batch elements were in flight at once: batch dispatch is serial", k, n)
+		}
+	}
+	close(release)
+	<-done
+
+	var want strings.Builder
+	want.WriteByte('[')
+	for i := 1; i <= n; i++ {
+		if i > 1 {
+			want.WriteByte(',')
+		}
+		fmt.Fprintf(&want, `{"jsonrpc":"2.0","id":%d,"result":%q}`, i, held)
+	}
+	want.WriteByte(']')
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, want.String(), rec.Body.String())
+	assert.Equal(t, strconv.Itoa(want.Len()), rec.Header().Get("Content-Length"))
+}
+
+// The stopwatch form of the test above, because "the batch took N times one
+// call" is the user-visible symptom and is worth asserting in its own units.
+//
+//nolint:unparam // the handler literal must match the fixed jrpc2.Handler signature
+func TestWire_ABatchOfSlowCallsTakesAboutOneCallsTime(t *testing.T) {
+	n := min(runtime.NumCPU(), 4)
+	if n < 4 {
+		t.Skip("needs at least 4 permits for the serial and concurrent times to separate")
+	}
+	const delay = 200 * time.Millisecond
+
+	h := NewHandler(map[string]jrpc2.Handler{
+		"slow": func(context.Context, *jrpc2.Request) (any, error) {
+			time.Sleep(delay)
+			return held, nil
+		},
+	})
+
+	start := time.Now()
+	status, _, _ := post(t, h, batchOf(n, "slow"))
+	elapsed := time.Since(start)
+
+	assert.Equal(t, http.StatusOK, status)
+	assert.Less(t, elapsed, time.Duration(n)*delay/2,
+		"a batch of %d %v calls took %v; serial dispatch would need %v", n, delay, elapsed, time.Duration(n)*delay)
+}
+
+// A batch borrows from the process-wide bound; it does not multiply it. Two
+// separate things are pinned, because they fail separately:
+//
+//  1. no more than runtime.NumCPU() of a batch's handlers run at once, and
+//  2. no more than that many GOROUTINES exist for them, which is only true
+//     because the permit is taken on the serving goroutine BEFORE the worker
+//     is started. Acquire inside the worker instead and this batch parks one
+//     goroutine per element — which the 512KB body cap bounds at ~260,000.
+//
+//nolint:unparam // the handler literal must match the fixed jrpc2.Handler signature
+func TestWire_ABatchDoesNotMultiplyTheConcurrencyBound(t *testing.T) {
+	limit := runtime.NumCPU()
+	if limit < 2 {
+		t.Skip("a one-permit bound cannot separate the two failure modes")
+	}
+	const oversubscribe = 16
+	elements := oversubscribe * limit
+
+	entered := make(chan struct{}, elements)
+	release := make(chan struct{})
+	var inflight, peak atomic.Int64
+
+	h := NewHandler(map[string]jrpc2.Handler{
+		"hold": func(context.Context, *jrpc2.Request) (any, error) {
+			now := inflight.Add(1)
+			for {
+				old := peak.Load()
+				if now <= old || peak.CompareAndSwap(old, now) {
+					break
+				}
+			}
+			entered <- struct{}{}
+			<-release
+			inflight.Add(-1)
+			return held, nil
+		},
+	})
+
+	runtime.GC() // settle the goroutine count before sampling it
+	before := runtime.NumGoroutine()
+	rec, done := serveAsync(t, h, batchOf(elements, "hold"))
+
+	for k := range limit {
+		select {
+		case <-entered:
+		case <-time.After(10 * time.Second):
+			close(release)
+			<-done
+			t.Fatalf("only %d of %d permits were taken", k, limit)
+		}
+	}
+	// Saturated: give an unbounded implementation ample room to overshoot.
+	time.Sleep(250 * time.Millisecond)
+	observedPeak := peak.Load()
+	observedGoroutines := runtime.NumGoroutine()
+	close(release)
+	<-done
+
+	assert.Equal(t, int64(limit), observedPeak,
+		"a batch of %d elements ran %d handlers at once against a bound of %d", elements, observedPeak, limit)
+	// The serving goroutine, this test's goroutine and the runtime's own make
+	// up the slack; what must not appear is one goroutine per element.
+	assert.Less(t, observedGoroutines, before+limit+16,
+		"a batch of %d elements parked %d goroutines: the permit is being acquired inside the worker",
+		elements, observedGoroutines-before)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// Input order (DELTA (f)) and notification compaction are properties of the
+// response, not of the completion order. This batch finishes back to front.
+//
+//nolint:unparam // the handler literals must match the fixed jrpc2.Handler signature
+func TestWire_BatchOrderAndCompactionSurviveOutOfOrderCompletion(t *testing.T) {
+	var notified atomic.Int64
+	h := NewHandler(map[string]jrpc2.Handler{
+		"slowest": func(context.Context, *jrpc2.Request) (any, error) {
+			time.Sleep(120 * time.Millisecond)
+			return "slowest", nil
+		},
+		"slower": func(context.Context, *jrpc2.Request) (any, error) {
+			time.Sleep(60 * time.Millisecond)
+			return "slower", nil
+		},
+		"note": func(context.Context, *jrpc2.Request) (any, error) {
+			time.Sleep(30 * time.Millisecond)
+			notified.Add(1)
+			return "noted", nil
+		},
+		"fast": func(context.Context, *jrpc2.Request) (any, error) { return "fast", nil },
+	})
+
+	status, header, got := post(t, h, `[{"jsonrpc":"2.0","id":1,"method":"slowest"},`+
+		`{"jsonrpc":"2.0","method":"note"},`+
+		`{"jsonrpc":"2.0","id":2,"method":"slower"},`+
+		`{"jsonrpc":"1.0","id":3,"method":"fast"},`+
+		`{"jsonrpc":"2.0","id":4,"method":"fast"},`+
+		`{"jsonrpc":"2.0","id":4,"method":"nope"}]`)
+
+	want := `[{"jsonrpc":"2.0","id":1,"result":"slowest"},` +
+		`{"jsonrpc":"2.0","id":2,"result":"slower"},` +
+		`{"jsonrpc":"2.0","id":3,"error":{"code":-32600,"message":"invalid version marker"}},` +
+		`{"jsonrpc":"2.0","id":4,"result":"fast"},` +
+		`{"jsonrpc":"2.0","id":4,"error":{"code":-32601,"message":"method not found","data":"nope"}}]`
+
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, want, got)
+	assert.Equal(t, strconv.Itoa(len(want)), header.Get("Content-Length"))
+	assert.Equal(t, int64(1), notified.Load(), "the notification must have run before the response was written")
+}
+
+// jrpc2 never recovered a handler panic: under the bridge it unwound on a
+// goroutine the server owned, and took the process with it. Here a panic
+// unwinds out of ServeHTTP into httpRequestDurationLimiter's recover, which
+// answers 500 — so a batch worker's panic must be RE-RAISED on the serving
+// goroutine rather than escaping its own, and the permit it held must be gone
+// either way.
+//
+//nolint:unparam // the handler literals must match the fixed jrpc2.Handler signature
+func TestWire_APanicInABatchElementFailsTheRequestAndReleasesItsPermit(t *testing.T) {
+	h := NewHandler(map[string]jrpc2.Handler{
+		"boom": func(context.Context, *jrpc2.Request) (any, error) { panic("handler exploded") },
+		"echo": func(_ context.Context, r *jrpc2.Request) (any, error) {
+			return map[string]any{"method": r.Method()}, nil
+		},
+	})
+
+	serve := func(body string) any {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			h.ServeHTTP(httptest.NewRecorder(), req)
+		}()
+		return recovered
+	}
+
+	t.Run("a single request's panic propagates unchanged", func(t *testing.T) {
+		assert.Equal(t, "handler exploded", serve(`{"jsonrpc":"2.0","id":1,"method":"boom"}`))
+	})
+
+	t.Run("a batch element's panic is re-raised with its own stack", func(t *testing.T) {
+		got := serve(`[{"jsonrpc":"2.0","id":1,"method":"echo"},{"jsonrpc":"2.0","id":2,"method":"boom"}]`)
+		require.NotNil(t, got, "the batch must fail the request, not swallow the panic")
+		rendered := fmt.Sprintf("%v", got)
+		assert.Contains(t, rendered, "handler exploded")
+		assert.Contains(t, rendered, "panicked on a batch worker goroutine")
+		assert.Contains(t, rendered, "wire.TestWire_APanicInABatchElementFailsTheRequestAndReleasesItsPermit",
+			"the relayed value must carry the stack the handler panicked on, not the relay's")
+	})
+
+	// Enough panics to exhaust the bound if any of them leaked its permit.
+	for range runtime.NumCPU() + 1 {
+		serve(`[{"jsonrpc":"2.0","id":1,"method":"boom"},{"jsonrpc":"2.0","id":2,"method":"boom"}]`)
+	}
+
+	served := make(chan string, 1)
+	go func() {
+		_, _, body := post(t, h, `{"jsonrpc":"2.0","id":9,"method":"echo"}`)
+		served <- body
+	}()
+	select {
+	case body := <-served:
+		//nolint:testifylint // byte-exact wire pin; JSONEq would ignore key order and escaping
+		assert.Equal(t, `{"jsonrpc":"2.0","id":9,"result":{"method":"echo"}}`, body)
+	case <-time.After(10 * time.Second):
+		t.Error("the handler stopped serving after panicking batches: every panic leaked its permit")
+	}
+}
+
+// A body that is valid JSON but is not a request object or an array of them.
+// jrpc2 parses it as a single element whose validation failed, so it answers
+// with one bare frame — never an array — which is what the bridge did too.
+func TestWire_ValidJSONThatIsNotARequest(t *testing.T) {
+	h, _ := newTestHandler(t)
+
+	for _, tc := range []struct{ name, body, want string }{{
+		name: "a bare number",
+		body: `5`,
+		want: `{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"request is not a JSON object"}}`,
+	}, {
+		name: "a bare string",
+		body: `"hello"`,
+		want: `{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"request is not a JSON object"}}`,
+	}, {
+		name: "a bare boolean",
+		body: `true`,
+		want: `{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"request is not a JSON object"}}`,
+	}, {
+		// null decodes into a nil map rather than failing, so it gets as far as
+		// the version check. Pinned because it is the one scalar that does not
+		// answer -32700.
+		name: "a bare null",
+		body: `null`,
+		want: `{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"invalid version marker"}}`,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, header, got := post(t, h, tc.body)
+			assert.Equal(t, http.StatusOK, status)
+			assert.Equal(t, tc.want, got)
+			assert.Equal(t, strconv.Itoa(len(tc.want)), header.Get("Content-Length"))
+		})
+	}
 }

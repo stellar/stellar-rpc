@@ -16,10 +16,12 @@
 // envelope: one json.Marshal of the handler's result, one hand-appended
 // envelope around it, one Write.
 //
-// Two rules in here are load-bearing and are commented at their site, because
-// each has a plausible-looking "improvement" that silently reverses this
-// package's reason to exist: json.Marshal + Write (never json.NewEncoder), and
-// hand-appended batch frames (never json.Marshal of a []json.RawMessage).
+// Three rules in here are load-bearing and are commented at their site,
+// because each has a plausible-looking "improvement" that silently reverses
+// this package's reason to exist: json.Marshal + Write (never
+// json.NewEncoder), hand-appended batch frames (never json.Marshal of a
+// []json.RawMessage), and a batch worker's permit taken before its goroutine
+// is started (never inside it).
 package wire
 
 import (
@@ -30,7 +32,11 @@ import (
 	"mime"
 	"net/http"
 	"runtime"
+	"runtime/debug"
+	"slices"
 	"strconv"
+	"sync"
+	"sync/atomic"
 
 	"github.com/creachadair/jrpc2"
 	"golang.org/x/sync/semaphore"
@@ -91,6 +97,11 @@ type Handler struct {
 	// socket write stays outside the bound and a slow reader cannot hold a
 	// permit. jrpc2 defaults ServerOptions.Concurrency to runtime.NumCPU();
 	// this reproduces that number rather than inventing one.
+	//
+	// It is ONE semaphore for the whole handler, and a batch's elements take
+	// their permits from it individually, just as jrpc2's Server.invoke did.
+	// A batch therefore borrows from the process-wide budget instead of
+	// multiplying it — see dispatchAll.
 	sem *semaphore.Weighted
 }
 
@@ -165,38 +176,146 @@ func (h *Handler) serve(w http.ResponseWriter, body []byte) {
 	// Batch-ness is a property of the body, carried on every element.
 	isBatch := reqs[0].Batch
 
-	// DELTA (f): frames come back in input order. The bridge emits every
-	// statically-invalid element first and the valid ones after, so any mixed
-	// batch is reordered against the request. Spec-legal, but client-visible
-	// and needless.
-	frames := make([][]byte, 0, len(reqs))
-	for _, pr := range reqs {
-		if frame := h.dispatch(pr); frame != nil {
-			frames = append(frames, frame)
-		}
-	}
-
+	frames := h.dispatchAll(reqs)
 	if len(frames) == 0 {
 		// Every element was a notification. DELTA (c): they have all run to
-		// completion by the time this 204 is written, because dispatch is
-		// synchronous. The bridge fires notifications at its in-process client
-		// and 204s immediately, so today a notification is free to the caller
-		// and its work races the response.
+		// completion by the time this 204 is written, because dispatchAll
+		// returns only after every handler it started has returned. The bridge
+		// fires notifications at its in-process client and 204s immediately,
+		// so today a notification is free to the caller and its work races the
+		// response.
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	writeFrames(w, isBatch, frames)
 }
 
-// dispatch answers one parsed request, returning its response frame or nil if
-// the request gets no response.
+// dispatchAll answers every element of one parsed body and returns the frames
+// in INPUT order (DELTA (f)), with the elements that get no response — the
+// notifications — compacted out. It returns only once every handler it started
+// has returned, which is what lets serve's 204 mean "the notifications have
+// run" rather than "the notifications have been queued".
+//
+// A batch's elements run CONCURRENTLY, as jrpc2's dispatchLocked ran them.
+// Dispatching them serially would sum their latencies under the ONE HTTP
+// deadline the mount enforces (httpRequestDurationLimiter, 25s by default), so
+// a batch of individually-fine calls would 504 where each call on its own
+// succeeds, and would hold its global backlog slot for the sum rather than the
+// max.
+//
+// The concurrency is the process-wide semaphore's, not a second budget: a batch
+// borrows permits from the same bound a single request takes one from, so N
+// elements cannot buy N times the handler parallelism. It also cannot buy N
+// goroutines. The permit is acquired HERE, on the serving goroutine, and
+// released by the worker; that ordering is the third load-bearing rule in this
+// file. Acquire inside the worker instead and every element gets a goroutine
+// parked on Acquire — and the body cap bounds elements only by their minimum
+// size, so a 512KB body of `[5,5,5,...]` is ~260,000 of them. Acquiring first
+// makes the in-flight worker count runtime.NumCPU(), whatever the batch's
+// length; the batch's length still bounds the frames, which is where the
+// (pre-existing, bridge-identical) response amplification lives.
+func (h *Handler) dispatchAll(reqs []*jrpc2.ParsedRequest) [][]byte {
+	// One slot per element, filled by index, so the response order is the
+	// request order and does not depend on completion order. A nil slot is an
+	// element that gets no response.
+	frames := make([][]byte, len(reqs))
+
+	if len(reqs) == 1 {
+		// A single-element body — every non-batch request, including the fat
+		// ones this package exists for — never leaves this goroutine.
+		frames[0] = h.dispatchOne(reqs[0])
+	} else {
+		h.dispatchBatch(reqs, frames)
+	}
+	return slices.DeleteFunc(frames, func(f []byte) bool { return f == nil })
+}
+
+// dispatchBatch runs the elements of a multi-element body, writing each one's
+// frame into its own slot of frames. See dispatchAll for why the permit is
+// taken on this goroutine rather than in the worker.
+func (h *Handler) dispatchBatch(reqs []*jrpc2.ParsedRequest, frames [][]byte) {
+	var wg sync.WaitGroup
+	var raised atomic.Pointer[relayedPanic]
+
+	for i, pr := range reqs {
+		method, frame := h.route(pr)
+		if method == nil {
+			// Answered without running anything: a parse or shape error, an
+			// empty method, an unknown method, or a silent notification. No
+			// permit and no goroutine are spent on it.
+			frames[i] = frame
+			continue
+		}
+		if denied := h.acquirePermit(pr); denied != nil {
+			frames[i] = denied
+			continue
+		}
+		wg.Go(func() {
+			// Released once the frame is built and strictly before the caller
+			// writes a byte, exactly as dispatchOne releases it — and released
+			// on a panicking handler too, because it is deferred.
+			defer h.sem.Release(1)
+			defer catchPanic(&raised)
+			frames[i] = h.invoke(pr, method)
+		})
+	}
+	wg.Wait()
+
+	if p := raised.Load(); p != nil {
+		// A panic on a worker goroutine has nothing above it to recover, so it
+		// would take the whole process down; the same handler bug on a single
+		// request unwinds into httpRequestDurationLimiter's recover, which
+		// answers 500 and logs the stack. Re-raising it here, after every
+		// sibling has finished, keeps a batch element's panic failing exactly
+		// the request it already failed and nothing else. (No parity is lost:
+		// jrpc2 ran batch elements on goroutines it did not recover either, so
+		// under the bridge this bug class was a crash.)
+		panic(p)
+	}
+}
+
+// dispatchOne answers one request on the calling goroutine, holding a permit
+// across the handler and the marshal and releasing it before it returns the
+// finished frame — so the caller writes with no permit held, and a panicking
+// handler still releases on the way out.
+func (h *Handler) dispatchOne(pr *jrpc2.ParsedRequest) []byte {
+	method, frame := h.route(pr)
+	if method == nil {
+		return frame
+	}
+	if denied := h.acquirePermit(pr); denied != nil {
+		return denied
+	}
+	defer h.sem.Release(1)
+	return h.invoke(pr, method)
+}
+
+// acquirePermit takes one permit from the shared bound, returning nil. It
+// returns the frame that answers pr instead if the permit cannot be taken,
+// which is unreachable today: Background is never canceled and Acquire only
+// fails on a canceled context. Answered rather than dropped so that a future
+// change of context cannot turn this into a silent 200 with no body.
+func (h *Handler) acquirePermit(pr *jrpc2.ParsedRequest) []byte {
+	if err := h.sem.Acquire(context.Background(), 1); err != nil {
+		return errorFrame(pr.ID, &jrpc2.Error{Code: jrpc2.InternalError, Message: err.Error()})
+	}
+	return nil
+}
+
+// route decides how one parsed request is answered, WITHOUT running anything:
+// it returns the handler to invoke, or a nil handler and the finished frame —
+// which is itself nil for a request that gets no response at all.
 //
 // Order is load-bearing and is not jrpc2's stated order, because jrpc2's
 // composite behavior is not its stated order either:
 //
 //  1. Parse and shape errors answer with a frame even for a notification —
 //     that is what the bridge does today (it filters invalid elements before
-//     it ever looks at notification-ness) and what the spec requires.
+//     it ever looks at notification-ness) and what the spec requires. jrpc2's
+//     own responses() reports a notification's error only when its code is
+//     ParseError or InvalidRequest; every error ParseRequests can attach to an
+//     element carries one of those two codes, so reporting them all is the
+//     same set, not a wider one.
 //  2. An empty method name is the same class of request-level protocol error,
 //     so it answers with a frame too. DELTA (e): today an empty-method
 //     NOTIFICATION returns 204, and only by accident — jrpc2's server does
@@ -210,39 +329,34 @@ func (h *Handler) serve(w http.ResponseWriter, body []byte) {
 // ToRequest builds the id with fixID(json.RawMessage(p.ID)) from a string, so
 // for an absent id it yields an empty-but-non-nil RawMessage and
 // IsNotification (which tests id == nil) cannot be trusted.
-func (h *Handler) dispatch(pr *jrpc2.ParsedRequest) []byte {
+func (h *Handler) route(pr *jrpc2.ParsedRequest) (jrpc2.Handler, []byte) {
 	if pr.Error != nil {
-		return errorFrame(pr.ID, pr.Error)
+		return nil, errorFrame(pr.ID, pr.Error)
 	}
 	if pr.Method == "" {
-		return errorFrame(pr.ID, errEmptyMethod)
+		return nil, errorFrame(pr.ID, errEmptyMethod)
 	}
-
-	notification := pr.ID == ""
-
-	method, ok := h.methods[pr.Method]
-	if !ok {
-		if notification {
-			return nil
-		}
-		// jrpc2's own errNoSuchMethod frame, byte for byte: code -32601,
-		// message "method not found", data the method name. Resolving it here
-		// means no jrpc2.Server ever sees the request, which is also why the
-		// library's unknown-method in-flight-map leak is unreachable from this
-		// serving path. No handler is invoked and no metric is labeled, so an
-		// attacker-chosen method name cannot grow the per-method summary's
-		// cardinality either.
-		return errorFrame(pr.ID, (&jrpc2.Error{
-			Code:    jrpc2.MethodNotFound,
-			Message: jrpc2.MethodNotFound.String(),
-		}).WithData(pr.Method))
+	if method, ok := h.methods[pr.Method]; ok {
+		return method, nil
 	}
-
-	return h.invoke(pr, method, notification)
+	if pr.ID == "" {
+		return nil, nil // an unknown method on a notification is silent
+	}
+	// jrpc2's own errNoSuchMethod frame, byte for byte: code -32601, message
+	// "method not found", data the method name. Resolving it here means no
+	// jrpc2.Server ever sees the request, which is also why the library's
+	// unknown-method in-flight-map leak is unreachable from this serving path.
+	// No handler is invoked and no metric is labeled, so an attacker-chosen
+	// method name cannot grow the per-method summary's cardinality either.
+	return nil, errorFrame(pr.ID, (&jrpc2.Error{
+		Code:    jrpc2.MethodNotFound,
+		Message: jrpc2.MethodNotFound.String(),
+	}).WithData(pr.Method))
 }
 
-// invoke runs one handler and builds its frame under the concurrency bound.
-func (h *Handler) invoke(pr *jrpc2.ParsedRequest, method jrpc2.Handler, notification bool) []byte {
+// invoke runs one handler and builds its frame. The caller holds the permit
+// for the whole call and releases it before any byte is written.
+func (h *Handler) invoke(pr *jrpc2.ParsedRequest, method jrpc2.Handler) []byte {
 	// context.Background, never the http.Request's context, and never a
 	// timeout of our own: this reproduces jrpc2's ServerOptions.NewContext
 	// default byte for byte. Handlers keep today's hangup semantics (a client
@@ -252,18 +366,8 @@ func (h *Handler) invoke(pr *jrpc2.ParsedRequest, method jrpc2.Handler, notifica
 	// is a separate, deliberate decision that has not been taken.
 	ctx := context.Background()
 
-	if err := h.sem.Acquire(ctx, 1); err != nil {
-		// Unreachable: Background is never canceled and Acquire only fails on
-		// a canceled context. Answered rather than dropped so a future ctx
-		// change cannot turn this into a silent 200 with no body.
-		return errorFrame(pr.ID, &jrpc2.Error{Code: jrpc2.InternalError, Message: err.Error()})
-	}
-	// Deferred, so the permit is released when this function returns the
-	// finished frame — i.e. strictly before the caller writes any byte.
-	defer h.sem.Release(1)
-
 	result, err := method(ctx, pr.ToRequest())
-	if notification {
+	if pr.ID == "" {
 		// "The Server MUST NOT reply to a Notification, including those that
 		// are within a batch request." The work is done; the answer is not
 		// sent. Errors are dropped exactly as jrpc2's invoke drops them.
@@ -288,6 +392,30 @@ func (h *Handler) invoke(pr *jrpc2.ParsedRequest, method jrpc2.Handler, notifica
 		return errorFrame(pr.ID, &jrpc2.Error{Code: jrpc2.InternalError, Message: err.Error()})
 	}
 	return resultFrame(pr.ID, bits)
+}
+
+// relayedPanic is a handler panic caught on a batch worker so the serving
+// goroutine can re-raise it. It carries the stack the handler actually
+// panicked on, because the recover that ends up logging it runs on a different
+// goroutine and debug.Stack() there would show only the relay.
+type relayedPanic struct {
+	value any
+	stack []byte
+}
+
+// String is what httpRequestDurationLimiter's "%v" of the recovered value
+// prints, so the original panic and its stack land in the log.
+func (p *relayedPanic) String() string {
+	return fmt.Sprintf("%v (panicked on a batch worker goroutine)\n%s", p.value, p.stack)
+}
+
+// catchPanic must be deferred directly, so that its recover is the worker's.
+// The first panic wins; later ones are dropped, exactly as only one panic can
+// be re-raised.
+func catchPanic(raised *atomic.Pointer[relayedPanic]) {
+	if v := recover(); v != nil {
+		raised.CompareAndSwap(nil, &relayedPanic{value: v, stack: debug.Stack()})
+	}
 }
 
 // handlerError maps a handler's error onto the wire error object, reproducing
