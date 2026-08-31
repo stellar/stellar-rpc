@@ -24,6 +24,8 @@ import (
 	"github.com/creachadair/jrpc2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
 )
 
 // Every `want` is a byte string captured from jrpc2 v1.3.3's jhttp.Bridge,
@@ -95,7 +97,7 @@ func post(t *testing.T, h http.Handler, body string) (int, http.Header, string) 
 func newTestHandler(t *testing.T) (*Handler, *atomic.Int64) {
 	t.Helper()
 	var notified atomic.Int64
-	return NewHandler(testMethods(&notified), nil), &notified
+	return NewHandler(testMethods(&notified), new(network.LiveHandlers)), &notified
 }
 
 func TestWire_SingleRequests(t *testing.T) {
@@ -546,7 +548,7 @@ func TestWire_BigResponseIntegrity(t *testing.T) {
 
 	h := NewHandler(map[string]jrpc2.Handler{
 		"fat": func(context.Context, *jrpc2.Request) (any, error) { return value, nil },
-	}, nil)
+	}, new(network.LiveHandlers))
 
 	status, header, got := post(t, h, `{"jsonrpc":"2.0","id":"big","method":"fat"}`)
 	require.Equal(t, http.StatusOK, status)
@@ -588,7 +590,7 @@ func TestWire_SemaphoreBoundsConcurrentDispatch(t *testing.T) {
 			inflight.Add(-1)
 			return held, nil
 		},
-	}, nil)
+	}, new(network.LiveHandlers))
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -644,7 +646,7 @@ func TestWire_SemaphoreIsReleasedBeforeTheWrite(t *testing.T) {
 			started <- struct{}{}
 			return "ok", nil
 		},
-	}, nil)
+	}, new(network.LiveHandlers))
 
 	// Saturate with writers that never drain, then serve a fresh request.
 	blocked := make(chan struct{})
@@ -764,7 +766,7 @@ func TestWire_BatchElementsRunConcurrently(t *testing.T) {
 			<-release
 			return held, nil
 		},
-	}, nil)
+	}, new(network.LiveHandlers))
 	rec, done := serveAsync(t, h, batchOf(n, "hold"))
 
 	for k := range n {
@@ -813,7 +815,7 @@ func TestWire_ABatchDoesNotMultiplyTheConcurrencyBound(t *testing.T) {
 			inflight.Add(-1)
 			return held, nil
 		},
-	}, nil)
+	}, new(network.LiveHandlers))
 
 	runtime.GC() // settle the goroutine count before sampling it
 	before := runtime.NumGoroutine()
@@ -865,7 +867,7 @@ func TestWire_BatchOrderAndCompactionSurviveOutOfOrderCompletion(t *testing.T) {
 			return "noted", nil
 		},
 		"fast": func(context.Context, *jrpc2.Request) (any, error) { return "fast", nil },
-	}, nil)
+	}, new(network.LiveHandlers))
 
 	status, header, got := post(t, h, `[{"jsonrpc":"2.0","id":1,"method":"slowest"},`+
 		`{"jsonrpc":"2.0","method":"note"},`+
@@ -895,7 +897,7 @@ func TestWire_APanicInABatchElementFailsTheRequestAndReleasesItsPermit(t *testin
 		"echo": func(_ context.Context, r *jrpc2.Request) (any, error) {
 			return map[string]any{"method": r.Method()}, nil
 		},
-	}, nil)
+	}, new(network.LiveHandlers))
 
 	serve := func(body string) any {
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(body))
@@ -1031,7 +1033,7 @@ func TestWire_ParamsReachTheHandlerVerbatim(t *testing.T) {
 			seen = r.ParamString()
 			return nil, nil
 		},
-	}, nil)
+	}, new(network.LiveHandlers))
 
 	for _, tc := range []struct{ name, body, want string }{{
 		name: "by position",
@@ -1083,7 +1085,7 @@ func TestWire_ADeadRequestStopsStartingElements(t *testing.T) {
 			completed.Add(1)
 			return held, nil
 		},
-	}, nil)
+	}, new(network.LiveHandlers))
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -1221,7 +1223,7 @@ func TestWire_Shutdown(t *testing.T) {
 				observed <- ctx.Err()
 				return held, nil
 			},
-		}, nil)
+		}, new(network.LiveHandlers))
 		rec, done := serveAsync(t, h, `{"jsonrpc":"2.0","id":1,"method":"watch"}`)
 		<-entered
 
@@ -1253,7 +1255,7 @@ func TestWire_Shutdown(t *testing.T) {
 				<-release // ignores cancellation, as a scan loop between checks does
 				return held, nil
 			},
-		}, nil)
+		}, new(network.LiveHandlers))
 		_, done := serveAsync(t, h, `{"jsonrpc":"2.0","id":1,"method":"stuck"}`)
 		<-entered
 
@@ -1278,7 +1280,7 @@ func TestWire_Shutdown(t *testing.T) {
 				ran.Add(1)
 				return held, nil
 			},
-		}, nil)
+		}, new(network.LiveHandlers))
 		require.NoError(t, h.Shutdown(t.Context()))
 
 		ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
@@ -1312,7 +1314,7 @@ func TestWire_StaticErrorFramesAreBuiltInsideTheBound(t *testing.T) {
 			<-release
 			return held, nil
 		},
-	}, nil)
+	}, new(network.LiveHandlers))
 
 	var wg sync.WaitGroup
 	for range weight {
@@ -1349,4 +1351,14 @@ func TestWire_StaticErrorFramesAreBuiltInsideTheBound(t *testing.T) {
 	one := `{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"request is not a JSON object"}}`
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "["+one+","+one+","+one+"]", rec.Body.String())
+}
+
+// Both ends of the drain must be wired to the SAME group. A nil one used to
+// default silently to a private group, producing a Shutdown that reports
+// success while abandoned handlers run into a closing store — no error, no log
+// line, nothing observable until a shutdown races a teardown in production.
+func TestWire_NewHandlerRefusesAMissingLiveHandlersGroup(t *testing.T) {
+	assert.PanicsWithValue(t,
+		"wire: NewHandler needs the mount's LiveHandlers; jsonrpc.NewHandler is the one place that builds it",
+		func() { NewHandler(map[string]jrpc2.Handler{}, nil) })
 }

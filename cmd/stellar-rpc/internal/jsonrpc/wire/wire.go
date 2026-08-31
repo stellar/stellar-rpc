@@ -38,6 +38,8 @@ import (
 
 	"github.com/creachadair/jrpc2"
 	"golang.org/x/sync/semaphore"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
 )
 
 const (
@@ -100,21 +102,22 @@ type Handler struct {
 	// just the abandoned ones (see network.RPCRequestDurationLimiter). An
 	// abandoned one has given its permit back, so the bound cannot see it and
 	// Shutdown joins the group separately.
-	liveHandlers *sync.WaitGroup
+	liveHandlers *network.LiveHandlers
 
 	drainOnce sync.Once
 	drainErr  error
 }
 
 // NewHandler returns the handler over methods, read-only from here on.
-// liveHandlers is the group the method table's duration limiters count their
-// abandoned handler goroutines into; nil means nothing registers any.
-func NewHandler(methods map[string]jrpc2.Handler, liveHandlers *sync.WaitGroup) *Handler {
+// liveHandlers must be the SAME group the method table's duration limiters
+// count into — jsonrpc.NewHandler is the one place that has both.
+func NewHandler(methods map[string]jrpc2.Handler, liveHandlers *network.LiveHandlers) *Handler {
 	weight := int64(runtime.GOMAXPROCS(0))
 	//nolint:gosec // G118: stopRoot is the handler's, called by Shutdown
 	root, stopRoot := context.WithCancel(context.Background())
 	if liveHandlers == nil {
-		liveHandlers = new(sync.WaitGroup)
+		panic("wire: NewHandler needs the mount's LiveHandlers; " +
+			"jsonrpc.NewHandler is the one place that builds it")
 	}
 	return &Handler{
 		methods:      methods,
@@ -161,7 +164,7 @@ func (h *Handler) Shutdown(ctx context.Context) error {
 
 // joinLiveHandlers waits for wg, or for ctx to end. The waiter outlives this call
 // when ctx wins; it ends when the stragglers do.
-func joinLiveHandlers(ctx context.Context, wg *sync.WaitGroup) error {
+func joinLiveHandlers(ctx context.Context, wg *network.LiveHandlers) error {
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
 	select {

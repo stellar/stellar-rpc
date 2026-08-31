@@ -198,6 +198,18 @@ func (q *httpRequestDurationLimiter) ServeHTTP(res http.ResponseWriter, req *htt
 	}
 }
 
+// LiveHandlers counts the handler executions one mount has in flight. It lives
+// here because both ends of the drain need it and neither imports the other:
+// the duration limiters count into it, and wire.Handler.Shutdown joins it.
+//
+// It is a named type so the two ends cannot be wired to different groups by
+// accident. There is exactly ONE legal producer, jsonrpc.NewHandler; anything
+// else building a mount gets a Shutdown that reports success while abandoned
+// handlers run into a closing store.
+type LiveHandlers struct {
+	sync.WaitGroup
+}
+
 type RPCRequestDurationLimiter struct {
 	requestDurationLimiter
 
@@ -214,7 +226,7 @@ type RPCRequestDurationLimiter struct {
 	// wire permit, so a drain that has taken every permit cannot race an Add.
 	// "Making the name true" by adding only on the timeout path is
 	// unimplementable: by then the parent has already abandoned the child.
-	liveHandlers *sync.WaitGroup
+	liveHandlers *LiveHandlers
 }
 
 func MakeJrpcRequestDurationLimiter(
@@ -224,14 +236,15 @@ func MakeJrpcRequestDurationLimiter(
 	warningCounter increasingCounter,
 	limitCounter increasingCounter,
 	logger *log.Entry,
-	liveHandlers *sync.WaitGroup,
+	liveHandlers *LiveHandlers,
 ) *RPCRequestDurationLimiter {
 	// make sure the warning threshold is less then the limit threshold; otherwise, just set it to the limit threshold.
 	if warningThreshold > limitThreshold {
 		warningThreshold = limitThreshold
 	}
 	if liveHandlers == nil {
-		liveHandlers = new(sync.WaitGroup)
+		panic("network: MakeJrpcRequestDurationLimiter needs the mount's LiveHandlers; " +
+			"jsonrpc.NewHandler is the one place that builds it")
 	}
 
 	return &RPCRequestDurationLimiter{

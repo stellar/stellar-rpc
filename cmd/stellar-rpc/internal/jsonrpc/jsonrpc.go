@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 
@@ -210,7 +209,7 @@ func toSnakeCase(s string) string {
 // dispatches and cannot see them. Swap the two and the slot is released when
 // the wrapper returns, bounding nothing.
 func wrapWithLimiters(
-	spec HandlerSpec, daemon host.Daemon, logger *log.Entry, liveHandlers *sync.WaitGroup,
+	spec HandlerSpec, daemon host.Daemon, logger *log.Entry, liveHandlers *network.LiveHandlers,
 ) jrpc2.Handler {
 	longName := toSnakeCase(spec.MethodName)
 	queueLimiterGaugeName := longName + "_inflight_requests"
@@ -262,7 +261,7 @@ func NewHandler(params Params) Handler {
 	// The duration limiter answers at its timeout and leaves its handler
 	// running, so the framing's bound loses sight of it. Both ends of that
 	// share this group: the limiters count into it, Handler.Shutdown joins it.
-	liveHandlers := new(sync.WaitGroup)
+	liveHandlers := new(network.LiveHandlers)
 	handlersMap := handler.Map{}
 	for _, spec := range params.Specs {
 		handlersMap[spec.MethodName] = wrapWithLimiters(spec, params.Daemon, params.Logger, liveHandlers)

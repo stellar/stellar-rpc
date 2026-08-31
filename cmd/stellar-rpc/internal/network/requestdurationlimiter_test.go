@@ -11,6 +11,7 @@ import (
 	"github.com/creachadair/jrpc2"
 	"github.com/creachadair/jrpc2/handler"
 	"github.com/creachadair/jrpc2/jhttp"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -207,7 +208,7 @@ func TestJRPCRequestDurationLimiter_Limiting(t *testing.T) {
 		&warningCounter,
 		&limitCounter,
 		logCounter.Entry(),
-		nil,
+		new(LiveHandlers),
 	).Handle
 
 	ch := jhttp.NewChannel("http://"+addr+"/", nil)
@@ -255,7 +256,7 @@ func TestJRPCRequestDurationLimiter_NoLimiting(t *testing.T) {
 		&warningCounter,
 		&limitCounter,
 		logCounter.Entry(),
-		nil,
+		new(LiveHandlers),
 	).Handle
 
 	ch := jhttp.NewChannel("http://"+addr+"/", nil)
@@ -300,7 +301,7 @@ func TestJRPCRequestDurationLimiter_NoLimiting_Warn(t *testing.T) {
 		&warningCounter,
 		&limitCounter,
 		logCounter.Entry(),
-		nil,
+		new(LiveHandlers),
 	).Handle
 
 	ch := jhttp.NewChannel("http://"+addr+"/", nil)
@@ -350,4 +351,18 @@ func TestHTTPRequestDurationLimiter_Panicing(t *testing.T) {
 	require.Equal(t, []byte{}, bytes)
 	require.Equal(t, [7]int{0, 0, 0, 7, 0, 0, 0}, logCounter.writtenLogEntries)
 	shutdown()
+}
+
+// The limiter counts its children into the mount's group; without one, a
+// Shutdown that joins that group proves nothing about them.
+func TestMakeJrpcRequestDurationLimiterRefusesAMissingGroup(t *testing.T) {
+	assert.PanicsWithValue(t,
+		"network: MakeJrpcRequestDurationLimiter needs the mount's LiveHandlers; "+
+			"jsonrpc.NewHandler is the one place that builds it",
+		func() {
+			MakeJrpcRequestDurationLimiter(
+				//nolint:nilnil // the handler is never called; only the constructor is under test
+				func(context.Context, *jrpc2.Request) (any, error) { return nil, nil },
+				time.Second, time.Second, nil, nil, nil, nil)
+		})
 }
