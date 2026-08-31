@@ -3,9 +3,11 @@ package jsonrpc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -201,4 +203,52 @@ func TestMount_FramesParseAsJSONRPC(t *testing.T) {
 	assert.JSONEq(t, `"x"`, string(frame.ID))
 	assert.Equal(t, []int{1, 2, 3}, frame.Result)
 	assert.Nil(t, frame.Error)
+}
+
+// The regression that made batch dispatch concurrent, at the altitude where it
+// bites: the mount enforces ONE deadline for the whole HTTP request, so a
+// serial batch sums its elements' latencies against it. Four calls that each
+// fit comfortably inside the budget must still fit inside it together.
+func TestMount_ABatchOfSlowCallsFitsTheOneHTTPDeadline(t *testing.T) {
+	const (
+		globalLimit = time.Second
+		perCall     = 400 * time.Millisecond
+		elements    = 4
+	)
+	if runtime.NumCPU() < elements {
+		t.Skip("needs at least one permit per batch element")
+	}
+
+	url := newMountedHandler(t, globalLimit, []HandlerSpec{{
+		MethodName: "slow",
+		Handler: func(context.Context, *jrpc2.Request) (any, error) {
+			time.Sleep(perCall)
+			return "done", nil
+		},
+		QueueLimit:           10,
+		RequestDurationLimit: time.Minute,
+	}})
+
+	var body strings.Builder
+	var want strings.Builder
+	body.WriteByte('[')
+	want.WriteByte('[')
+	for i := 1; i <= elements; i++ {
+		if i > 1 {
+			body.WriteByte(',')
+			want.WriteByte(',')
+		}
+		fmt.Fprintf(&body, `{"jsonrpc":"2.0","id":%d,"method":"slow"}`, i)
+		fmt.Fprintf(&want, `{"jsonrpc":"2.0","id":%d,"result":"done"}`, i)
+	}
+	body.WriteByte(']')
+	want.WriteByte(']')
+
+	status, got := postMounted(t, url, body.String())
+
+	// Serial dispatch needs elements*perCall, which is past globalLimit, and
+	// the duration limiter answers 504 with an empty body.
+	require.Equal(t, http.StatusOK, status,
+		"a batch of %d %v calls did not fit a %v budget: the elements ran serially", elements, perCall, globalLimit)
+	assert.Equal(t, want.String(), got)
 }

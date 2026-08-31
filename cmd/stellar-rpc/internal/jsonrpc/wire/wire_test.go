@@ -134,6 +134,12 @@ func TestWire_SingleRequests(t *testing.T) {
 		body: `{"jsonrpc":"2.0","id"  :  7  ,"method":"echo"}`,
 		want: `{"jsonrpc":"2.0","id":7,"result":{"method":"echo"}}`,
 	}, {
+		// Both the bridge and this package take the id from encoding/json's
+		// object decode, where a repeated key keeps the last value.
+		name: "a repeated id key echoes the last one",
+		body: `{"jsonrpc":"2.0","id":1,"id":2,"method":"echo"}`,
+		want: `{"jsonrpc":"2.0","id":2,"result":{"method":"echo"}}`,
+	}, {
 		name: "a nil result is null, not omitted",
 		body: `{"jsonrpc":"2.0","id":1,"method":"nilResult"}`,
 		want: `{"jsonrpc":"2.0","id":1,"result":null}`,
@@ -168,6 +174,17 @@ func TestWire_IDIsHTMLEscapedExactlyAsTheBridgeEscapedIt(t *testing.T) {
 		name: "U+2029 paragraph separator",
 		body: "{\"jsonrpc\":\"2.0\",\"id\":\"a\u2029b\",\"method\":\"echo\"}",
 		want: `{"jsonrpc":"2.0","id":"a\u2029b","result":{"method":"echo"}}`,
+	}, {
+		// The escape covers exactly five characters; every other byte of the
+		// id is spliced raw. That includes bytes that are not valid UTF-8:
+		// the bridge's compaction pass let them through too, because
+		// encoding/json's scanner checks JSON syntax and not encoding. A
+		// non-UTF-8 id therefore produces a non-UTF-8 response body, here and
+		// before. This is the boundary of the escaping guarantee, not an
+		// oversight in it.
+		name: "bytes that are not valid UTF-8 are spliced raw, as the bridge spliced them",
+		body: "{\"jsonrpc\":\"2.0\",\"id\":\"a\xffb\",\"method\":\"echo\"}",
+		want: "{\"jsonrpc\":\"2.0\",\"id\":\"a\xffb\",\"result\":{\"method\":\"echo\"}}",
 	}, {
 		name: "a script tag cannot escape the id",
 		body: `{"jsonrpc":"2.0","id":"</script><script>alert(1)</script>","method":"echo"}`,
@@ -270,6 +287,11 @@ func TestWire_RequestLevelProtocolErrors(t *testing.T) {
 	}, {
 		name:   "an empty body is the same -32700 frame",
 		body:   `   `,
+		status: http.StatusOK,
+		want:   `{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"invalid request value"}}`,
+	}, {
+		name:   "trailing bytes after a complete request are a parse error",
+		body:   `{"jsonrpc":"2.0","id":1,"method":"echo"} trailing`,
 		status: http.StatusOK,
 		want:   `{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"invalid request value"}}`,
 	}, {
@@ -1070,4 +1092,54 @@ func TestNoJRPC2ContextValueCallersInProductionCode(t *testing.T) {
 	assert.Empty(t, callers, "wire runs handlers on a context with none of jrpc2's server values: "+
 		"InboundRequest returns nil and ServerFromContext panics. Take the request from the handler's "+
 		"second argument instead")
+}
+
+// Params reach the handler as the exact bytes the body carried, by position or
+// by name. DELTA (g): the bridge re-marshaled every params value through
+// json.Marshal of a json.RawMessage, which compacted it and HTML-escaped it.
+// Both forms decode to the same value and every handler here decodes, so the
+// delta is invisible in behavior — but rpcv2's getEventsV2 reads
+// r.ParamString() rather than UnmarshalParams, so the raw bytes are part of
+// the handler contract and are pinned rather than left to chance.
+//
+//nolint:nilnil,unparam // the handler literal must match the fixed jrpc2.Handler signature
+func TestWire_ParamsReachTheHandlerVerbatim(t *testing.T) {
+	var seen string
+	h := NewHandler(map[string]jrpc2.Handler{
+		"params": func(_ context.Context, r *jrpc2.Request) (any, error) {
+			seen = r.ParamString()
+			return nil, nil
+		},
+	})
+
+	for _, tc := range []struct{ name, body, want string }{{
+		name: "by position",
+		body: `{"jsonrpc":"2.0","id":1,"method":"params","params":[1,"two",null]}`,
+		want: `[1,"two",null]`,
+	}, {
+		name: "by name, in the client's key order and with the client's whitespace",
+		body: `{"jsonrpc":"2.0","id":1,"method":"params","params":{"b": 2,  "a":1}}`,
+		want: `{"b": 2,  "a":1}`,
+	}, {
+		name: "characters the bridge's re-marshal would have escaped are not escaped",
+		body: `{"jsonrpc":"2.0","id":1,"method":"params","params":{"a":"x<y&z"}}`,
+		want: `{"a":"x<y&z"}`,
+	}, {
+		name: "absent params are the empty string",
+		body: `{"jsonrpc":"2.0","id":1,"method":"params"}`,
+		want: ``,
+	}, {
+		// jrpc2's parser reduces "null" params to nil, so a handler cannot
+		// tell an explicit null from an absent params.
+		name: "an explicit null is reduced to absent",
+		body: `{"jsonrpc":"2.0","id":1,"method":"params","params":null}`,
+		want: ``,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			seen = "<unset>"
+			status, _, _ := post(t, h, tc.body)
+			require.Equal(t, http.StatusOK, status)
+			assert.Equal(t, tc.want, seen)
+		})
+	}
 }

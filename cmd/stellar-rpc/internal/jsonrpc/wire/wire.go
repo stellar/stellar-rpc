@@ -356,7 +356,11 @@ func (h *Handler) route(pr *jrpc2.ParsedRequest) (jrpc2.Handler, []byte) {
 	if pr.Method == "" {
 		return nil, errorFrame(pr.ID, errEmptyMethod)
 	}
-	if method, ok := h.methods[pr.Method]; ok {
+	// `ok && method != nil`: route says "run this" by returning a non-nil
+	// handler, so a nil entry in the table must not be able to say it. The
+	// mount cannot register one (handler.New never returns nil), and answering
+	// -32601 for one is a better failure than dropping the element silently.
+	if method, ok := h.methods[pr.Method]; ok && method != nil {
 		return method, nil
 	}
 	if pr.ID == "" {
@@ -388,6 +392,15 @@ func (h *Handler) invoke(pr *jrpc2.ParsedRequest, method jrpc2.Handler) []byte {
 	// see the package doc.
 	ctx := context.Background()
 
+	// ToRequest hands the handler the params bytes the body carried, in the
+	// client's key order and whitespace and with the client's own escapes.
+	// DELTA (g): the bridge re-marshaled them on the way in — Client.req ->
+	// marshalParams -> json.Marshal of a json.RawMessage, which compacts and
+	// HTML-escapes — so a handler used to see `{"a":"x\u003cy"}` where it now
+	// sees `{"a": "x<y"}`. Both decode to the same value, and every handler
+	// here decodes (including getEventsV2, the one that reads ParamString
+	// rather than UnmarshalParams), so the only visible difference is that the
+	// debug log's "params" field now shows what the client actually sent.
 	result, err := method(ctx, pr.ToRequest())
 	if pr.ID == "" {
 		// "The Server MUST NOT reply to a Notification, including those that
