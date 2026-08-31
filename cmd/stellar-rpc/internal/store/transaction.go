@@ -88,6 +88,31 @@ func ParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTransaction
 	return tx, err
 }
 
+// TransactionFromView reshapes the SDK's zero-copy LedgerTransactionView into
+// the serving contract, ALIASING its byte fields — it is ParseTransaction's
+// view-path parallel, for readers that walk raw ledger bytes instead of a
+// decoded xdr.LedgerCloseMeta.
+//
+// The result is only as durable as the view: a view straight off the SDK still
+// points into the ledger buffer it was read from, so either pass a view whose
+// bytes were already copied out, or consume the returned Transaction before
+// that buffer is reused.
+func TransactionFromView(txv ingest.LedgerTransactionView) Transaction {
+	return Transaction{
+		TransactionHash:   xdr.Hash(txv.Hash).HexString(),
+		Result:            txv.Result,
+		Meta:              txv.Meta,
+		Envelope:          txv.Envelope,
+		Events:            txv.DiagnosticEvents,
+		FeeBump:           txv.FeeBump,
+		ApplicationOrder:  txv.ApplicationOrder,
+		Successful:        txv.Successful,
+		Ledger:            LedgerInfo{Sequence: txv.LedgerSequence, CloseTime: txv.LedgerCloseTime},
+		TransactionEvents: txv.TransactionEvents,
+		ContractEvents:    txv.ContractEvents,
+	}
+}
+
 // parseEvents parses diagnostic, transaction and contract events
 func parseEvents(allEvents ingest.TransactionEvents, tx *Transaction) error {
 	// encode TransactionEvents

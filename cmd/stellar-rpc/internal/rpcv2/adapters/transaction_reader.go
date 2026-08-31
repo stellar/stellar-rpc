@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 
-	"github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
@@ -51,26 +50,8 @@ func (r *TransactionReader) GetTransaction(ctx context.Context, hash xdr.Hash) (
 	if !found {
 		return store.Transaction{}, store.ErrNoTransaction
 	}
-	return transactionFromView(txv), nil
-}
-
-// transactionFromView reshapes the SDK's view into the serving contract,
-// aliasing its byte fields.
-//
-// Only a compactView-produced view may be passed: the type does not carry that,
-// and a view straight off the SDK still aliases the ledger it was read from.
-func transactionFromView(txv ingest.LedgerTransactionView) store.Transaction {
-	return store.Transaction{
-		TransactionHash:   xdr.Hash(txv.Hash).HexString(),
-		Result:            txv.Result,
-		Meta:              txv.Meta,
-		Envelope:          txv.Envelope,
-		Events:            txv.DiagnosticEvents,
-		FeeBump:           txv.FeeBump,
-		ApplicationOrder:  txv.ApplicationOrder,
-		Successful:        txv.Successful,
-		Ledger:            store.LedgerInfo{Sequence: txv.LedgerSequence, CloseTime: txv.LedgerCloseTime},
-		TransactionEvents: txv.TransactionEvents,
-		ContractEvents:    txv.ContractEvents,
-	}
+	// Only a compactView-produced view may be reshaped here: the type does not
+	// carry that, and a view straight off the SDK still aliases the ledger it
+	// was read from — probe.GetTransaction guarantees it (see compactView).
+	return store.TransactionFromView(txv), nil
 }
