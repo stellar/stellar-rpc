@@ -31,7 +31,7 @@ type Catalog struct {
 	logger      *supportlog.Entry
 	layout      geometry.Layout
 	txhashIndex geometry.TxHashIndexLayout
-	secret      [catalogSecretLen]byte // cold-index secret, minted once at Open then read-only
+	secret      [32]byte // cold-index secret, minted once at Open then read-only
 }
 
 // Open opens the catalog's backing KV store at path (created if absent) and

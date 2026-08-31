@@ -50,9 +50,10 @@ func (c *Catalog) census() error {
 				flag(e.Key, fmt.Sprintf("value %q is not a canonical decimal uint32", e.Value))
 			}
 		case catalogSecretStoreKey:
-			// Never print the secret: it is the live index-blinding key.
-			if len(e.Value) != catalogSecretLen {
-				flag(e.Key, fmt.Sprintf("value is %d bytes, want %d (value redacted)", len(e.Value), catalogSecretLen))
+			// Never print the secret: it is the live index-blinding key. The
+			// width comes from the field's type, valid before the mint.
+			if len(e.Value) != len(c.secret) {
+				flag(e.Key, fmt.Sprintf("value is %d bytes, want %d (value redacted)", len(e.Value), len(c.secret)))
 			}
 		default:
 			if detail, ok := censusArtifactEntry(e.Key, e.Value); !ok {
