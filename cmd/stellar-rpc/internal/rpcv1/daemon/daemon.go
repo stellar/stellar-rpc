@@ -107,7 +107,6 @@ func (d *Daemon) close() {
 		d.logger.WithError(err).Error("error closing captive core")
 		closeErrors = append(closeErrors, err)
 	}
-	d.jsonRPCHandler.Close()
 	if err := d.db.Close(); err != nil {
 		d.logger.WithError(err).Error("Error closing db")
 		closeErrors = append(closeErrors, err)

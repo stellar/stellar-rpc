@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/creachadair/jrpc2"
+	"github.com/creachadair/jrpc2/channel"
+	"github.com/creachadair/jrpc2/handler"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -65,10 +68,8 @@ func newTestRPCServer(t *testing.T, r *query.Registry) string {
 	t.Helper()
 	handler := newJSONRPCHandler(defaultsConfig(t), testHandlerParams(t, r))
 	srv := httptest.NewServer(handler)
-	t.Cleanup(func() {
-		srv.Close()
-		handler.Close()
-	})
+	// No handler teardown: the mount owns no goroutine and no connection.
+	t.Cleanup(srv.Close)
 	return srv.URL
 }
 
@@ -227,4 +228,85 @@ func TestDeriveLifecycleGrace_TracksARaisedMethodBudget(t *testing.T) {
 	long := 2 * time.Minute
 	cfg.Service.Methods.SimulateTransaction.MaxExecutionDuration = &long
 	assert.Equal(t, long+graceMargin, deriveLifecycleGrace(cfg.Service))
+}
+
+// The mount answers an unknown method with jrpc2's own method-not-found frame:
+// code, message and data are exactly what a client saw when jrpc2's server
+// resolved the method, so replacing that server changed no byte here.
+//
+// It also drives the trigger of the library leak documented below many times
+// over. Under the wire framing an unknown method never reaches a jrpc2.Server —
+// it never reaches a handler at all — so no in-flight entry can be stranded and
+// no attacker-chosen method name can reach the per-method metric labels.
+func TestJSONRPCHandler_UnknownMethodWireShapeUnchanged(t *testing.T) {
+	url := newTestRPCServer(t, seedServingRegistry(t))
+	before := runtime.NumGoroutine()
+
+	const unknownCalls = 500
+	for range unknownCalls {
+		out := rpcv2test.PostRPC(t, url, "noSuchMethod", `{"padding":"xxxxxxxxxxxxxxxx"}`)
+		require.NotNil(t, out.Error)
+		require.Nil(t, out.Result)
+		require.EqualValues(t, jrpc2.MethodNotFound, out.Error.Code)
+		require.Equal(t, "method not found", out.Error.Message)
+		require.JSONEq(t, `"noSuchMethod"`, string(out.Error.Data))
+	}
+
+	// Generous: the HTTP server's own per-connection goroutines come and go.
+	// A per-call goroutine leak over 500 calls would blow past this.
+	assert.Less(t, runtime.NumGoroutine(), before+50,
+		"unknown-method calls must not accumulate goroutines")
+}
+
+// The upstream jrpc2 defect, kept as a self-contained reproduction for the
+// planned filing against creachadair/jrpc2 v1.3.3.
+//
+// Server.checkAndAssignLocked calls setContext (server.go:365-375) BEFORE it
+// resolves a handler (348-351), so by the time Assign returns nil the server
+// has already recorded the request's CancelFunc in Server.used. Release happens
+// only in deliver() (295-299), and only for a response with no rsp.err — which
+// responses() sets precisely when the task was never assigned a handler
+// (800-802). So every unknown-method CALL carrying an id strands its map entry,
+// its CancelFunc, and through that context the *Request and its params, for the
+// life of the process. Remotely triggerable from garbage method names, and
+// unbounded.
+//
+// Server.used is unexported, but it has one exported consequence: a second
+// request reusing a still-registered id is rejected as a duplicate. That makes
+// id reuse a direct, deterministic probe — no reflection, no fork.
+//
+// Nothing in this repo's serving path constructs a jrpc2.Server any more, so
+// this is no longer a mitigation we carry; it is evidence. If this test ever
+// stops failing in the way it asserts, the library has fixed the leak and both
+// this test and the upstream ticket can go.
+func TestJRPC2ServerStrandsUnknownMethodInFlightEntries(t *testing.T) {
+	// Two calls, same id, unknown method: the second is refused as a duplicate
+	// id because the first one's entry was never released.
+	cli, srv := channel.Direct()
+	table := handler.Map{
+		"getHealth": func(context.Context, *jrpc2.Request) (any, error) { return "ok", nil },
+	}
+	server := jrpc2.NewServer(table, &jrpc2.ServerOptions{DisableBuiltin: true}).Start(srv)
+	t.Cleanup(func() {
+		require.NoError(t, cli.Close())
+		require.NoError(t, server.Wait())
+	})
+
+	errs := make([]*jrpc2.Error, 0, 2)
+	for range 2 {
+		require.NoError(t, cli.Send([]byte(`{"jsonrpc":"2.0","id":1,"method":"noSuchMethod"}`)))
+		raw, err := cli.Recv()
+		require.NoError(t, err)
+		var rsp struct {
+			Error *jrpc2.Error `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &rsp))
+		require.NotNil(t, rsp.Error, "an unknown method must answer an error")
+		errs = append(errs, rsp.Error)
+	}
+
+	assert.Equal(t, jrpc2.MethodNotFound, errs[0].Code)
+	assert.Equal(t, jrpc2.InvalidRequest, errs[1].Code,
+		"if this passes as MethodNotFound, jrpc2 fixed the leak: retire the upstream ticket")
+	assert.Equal(t, "duplicate request ID", errs[1].Message)
 }

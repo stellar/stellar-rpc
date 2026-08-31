@@ -43,9 +43,8 @@ func newServeReads(
 
 		// Both exits close the server: on death this reaps established
 		// keep-alive conns Serve abandoned; after the graceful path's
-		// Shutdown it is a no-op.
+		// Shutdown it is a no-op. The handler itself owns nothing to close.
 		defer func() { _ = server.Close() }()
-		defer handler.Close()
 		died := make(chan error, 1)
 		go func() { died <- server.Serve(listener) }()
 		select {

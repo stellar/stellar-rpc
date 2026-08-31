@@ -17,7 +17,6 @@ import (
 
 	"github.com/creachadair/jrpc2"
 	"github.com/creachadair/jrpc2/handler"
-	"github.com/creachadair/jrpc2/jhttp"
 	"github.com/go-chi/chi/middleware"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/cors"
@@ -26,6 +25,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc/wire"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
 )
 
@@ -48,20 +48,15 @@ const (
 	warningThresholdDenominator = 3
 )
 
-// Handler is the HTTP handler which serves the Soroban JSON RPC responses
+// Handler is the HTTP handler which serves the Soroban JSON RPC responses.
+//
+// It owns no background goroutine and no connection, so there is nothing to
+// close: the framing under it (internal/jsonrpc/wire) runs entirely on the
+// calling request's goroutine. The jhttp bridge that used to sit there did own
+// a jrpc2 server goroutine and an in-process client, which is why this type
+// once had a Close method.
 type Handler struct {
 	http.Handler
-
-	bridge jhttp.Bridge
-	logger *log.Entry
-}
-
-// Close closes all the resources held by the Handler instances.
-// After Close is called the Handler instance will stop accepting JSON RPC requests.
-func (h Handler) Close() {
-	if err := h.bridge.Close(); err != nil {
-		h.logger.WithError(err).Warn("could not close bridge")
-	}
 }
 
 // HandlerSpec describes one JSON-RPC method: its handler plus the per-method
@@ -224,24 +219,21 @@ func wrapWithLimiters(spec HandlerSpec, daemon host.Daemon, logger *log.Entry) j
 
 // NewHandler constructs a Handler instance from the given method specs
 func NewHandler(params Params) Handler {
-	bridgeOptions := jhttp.BridgeOptions{
-		Server: &jrpc2.ServerOptions{
-			Logger: func(text string) { params.Logger.Debug(text) },
-			// Disable built-in rpc.* methods (e.g. rpc.serverInfo) that
-			// bypass the handler allowlist and request limiters.
-			DisableBuiltin: true,
-		},
-	}
-
 	handlersMap := handler.Map{}
 	for _, spec := range params.Specs {
 		handlersMap[spec.MethodName] = wrapWithLimiters(spec, params.Daemon, params.Logger)
 	}
-	bridge := jhttp.NewBridge(decorateHandlers(
+	// The framing at the bottom of the chain. Both mounts use the same one:
+	// internal/jsonrpc/wire, which parses with jrpc2.ParseRequests and then
+	// writes its own envelope. Everything assembled around it below — cors, the
+	// 512KB body cap, the request-duration limiter and its buffered response
+	// writer, the global backlog limiter — is unchanged and stays in this
+	// order. The duration limiter is the slow-client decoupler and must remain
+	// OUTSIDE the framing, never beside or under it.
+	framing := wire.NewHandler(decorateHandlers(
 		params.Daemon,
 		params.Logger,
-		handlersMap),
-		&bridgeOptions)
+		handlersMap))
 
 	// globalQueueRequestBacklogLimiter is a metric for measuring the total concurrent inflight requests
 	globalQueueRequestBacklogLimiter := prometheus.NewGauge(prometheus.GaugeOpts{
@@ -249,8 +241,8 @@ func NewHandler(params Params) Handler {
 		Help: "Number of concurrenty in-flight http requests",
 	})
 
-	queueLimitedBridge := network.MakeHTTPBacklogQueueLimiter(
-		bridge,
+	queueLimitedFraming := network.MakeHTTPBacklogQueueLimiter(
+		framing,
 		globalQueueRequestBacklogLimiter,
 		uint64(params.GlobalQueueLimit),
 		params.Logger)
@@ -268,7 +260,7 @@ func NewHandler(params Params) Handler {
 		Help:      "The metric measures the count of requests that surpassed the limit threshold for execution time",
 	})
 	handler := network.MakeHTTPRequestDurationLimiter(
-		queueLimitedBridge,
+		queueLimitedFraming,
 		params.GlobalDurationWarning,
 		params.GlobalDurationLimit,
 		globalQueueRequestExecutionDurationWarningCounter,
@@ -284,9 +276,5 @@ func NewHandler(params Params) Handler {
 		AllowedMethods:         []string{"GET", "PUT", "POST", "PATCH", "DELETE", "HEAD", "OPTIONS"},
 	})
 
-	return Handler{
-		bridge:  bridge,
-		logger:  params.Logger,
-		Handler: corsMiddleware.Handler(handler),
-	}
+	return Handler{Handler: corsMiddleware.Handler(handler)}
 }
