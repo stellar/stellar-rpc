@@ -230,8 +230,8 @@ func TestMount_ABatchOfSlowCallsFitsTheOneHTTPDeadline(t *testing.T) {
 		perCall     = 400 * time.Millisecond
 		elements    = 4
 	)
-	if runtime.NumCPU() < elements {
-		t.Skip("needs at least one permit per batch element")
+	if runtime.GOMAXPROCS(0) < elements {
+		t.Skip("needs at least one permit per batch element; the wire bound is GOMAXPROCS")
 	}
 
 	url := newMountedHandler(t, globalLimit, []HandlerSpec{{
@@ -266,4 +266,66 @@ func TestMount_ABatchOfSlowCallsFitsTheOneHTTPDeadline(t *testing.T) {
 	require.Equal(t, http.StatusOK, status,
 		"a batch of %d %v calls did not fit a %v budget: the elements ran serially", elements, perCall, globalLimit)
 	assert.Equal(t, want.String(), got)
+}
+
+// The panic path, pinned at the mount, because which layer catches a handler
+// panic decides what the client sees and there are two candidate layers in the
+// chain.
+//
+// jrpc2 recovered nothing: under the bridge a panic from a method with no
+// duration budget unwound on a goroutine the jrpc2.Server owned and took the
+// PROCESS with it. Here the chain's own recover answers 500 and the mount
+// keeps serving — and a batch element's panic has to be relayed to the serving
+// goroutine to get that, since nothing above a worker recovers.
+func TestMount_HandlerPanics(t *testing.T) {
+	boom := func(context.Context, *jrpc2.Request) (any, error) { panic("handler exploded") }
+	url := newMountedHandler(t, time.Minute, []HandlerSpec{{
+		MethodName:           "boomBudgeted",
+		Handler:              boom,
+		QueueLimit:           10,
+		RequestDurationLimit: time.Minute,
+	}, {
+		MethodName: "boomUnbudgeted",
+		Handler:    boom,
+		QueueLimit: 10,
+		// The only configuration in which a panic reaches the framing at all.
+		// No method either daemon registers is built this way.
+		RequestDurationLimit: network.RequestDurationLimiterNoLimit,
+	}, {
+		MethodName:           "fast",
+		Handler:              func(context.Context, *jrpc2.Request) (any, error) { return map[string]int{"n": 7}, nil },
+		QueueLimit:           10,
+		RequestDurationLimit: time.Minute,
+	}})
+
+	stillServing := func(t *testing.T, id string) {
+		t.Helper()
+		status, body := postMounted(t, url, `{"jsonrpc":"2.0","id":`+id+`,"method":"fast"}`)
+		assert.Equal(t, http.StatusOK, status)
+		assert.Equal(t, `{"jsonrpc":"2.0","id":`+id+`,"result":{"n":7}}`, body)
+	}
+
+	t.Run("a method with a duration budget answers -32003; the panic never reaches the framing", func(t *testing.T) {
+		status, body := postMounted(t, url, `{"jsonrpc":"2.0","id":1,"method":"boomBudgeted"}`)
+		assert.Equal(t, http.StatusOK, status)
+		//nolint:testifylint // byte-exact wire pin; JSONEq would ignore key order and escaping
+		assert.Equal(t, `{"jsonrpc":"2.0","id":1,"error":{"code":-32003,`+
+			`"message":"[-32003] request failed to process due to internal issue"}}`, body)
+		stillServing(t, "2")
+	})
+
+	t.Run("a method with no budget fails the request with 500 and no body", func(t *testing.T) {
+		status, body := postMounted(t, url, `{"jsonrpc":"2.0","id":3,"method":"boomUnbudgeted"}`)
+		assert.Equal(t, http.StatusInternalServerError, status)
+		assert.Empty(t, body, "the limiter's 500 discards the response buffer rather than writing a partial one")
+		stillServing(t, "4")
+	})
+
+	t.Run("a panicking batch element fails its batch, not the process", func(t *testing.T) {
+		status, body := postMounted(t, url,
+			`[{"jsonrpc":"2.0","id":5,"method":"fast"},{"jsonrpc":"2.0","id":6,"method":"boomUnbudgeted"}]`)
+		assert.Equal(t, http.StatusInternalServerError, status)
+		assert.Empty(t, body)
+		stillServing(t, "7")
+	})
 }

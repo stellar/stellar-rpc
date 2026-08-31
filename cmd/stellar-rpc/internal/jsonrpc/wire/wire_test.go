@@ -1098,7 +1098,7 @@ func TestNoJRPC2ContextValueCallersInProductionCode(t *testing.T) {
 	// The accessor name, and the receiver that makes a hit a real call: the
 	// two context accessors are package functions of jrpc2, and
 	// IsNotification is a method on a *jrpc2.Request under any name.
-	banned := map[string]string{
+	receiverOf := map[string]string{
 		"InboundRequest":    "jrpc2",
 		"ServerFromContext": "jrpc2",
 		"IsNotification":    "",
@@ -1121,7 +1121,7 @@ func TestNoJRPC2ContextValueCallersInProductionCode(t *testing.T) {
 			if !ok {
 				return true
 			}
-			recv, banned := banned[sel.Sel.Name]
+			recv, banned := receiverOf[sel.Sel.Name]
 			if !banned {
 				return true
 			}

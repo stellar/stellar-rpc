@@ -141,10 +141,11 @@ func decorateHandlers(daemon host.Daemon, logger *log.Entry, m handler.Map) hand
 const maxLoggedRequestID = 64
 
 func loggedRequestID(req *jrpc2.Request) string {
-	if id := req.ID(); len(id) <= maxLoggedRequestID {
+	id := req.ID()
+	if len(id) <= maxLoggedRequestID {
 		return id
 	}
-	return req.ID()[:maxLoggedRequestID] + "…(truncated)"
+	return id[:maxLoggedRequestID] + "…(truncated)"
 }
 
 func logRequest(logger *log.Entry, reqID string, req *jrpc2.Request) {

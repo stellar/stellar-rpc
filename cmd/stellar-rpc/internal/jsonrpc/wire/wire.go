@@ -2,10 +2,10 @@
 // only framing this repo serves.
 //
 // It replaced jrpc2's jhttp.Bridge, which is no longer built here. The bridge
-// was a
-// loopback, not a framing layer: jhttp.NewBridge builds a jrpc2.Server and a
-// jrpc2.Client joined by an in-memory pipe, so every response was marshaled by
-// the server, re-parsed by the client, and marshaled twice more by the bridge.
+// was a loopback, not a framing layer: jhttp.NewBridge builds a jrpc2.Server
+// and a jrpc2.Client joined by an in-memory pipe, so every response was
+// marshaled by the server, re-parsed by the client, and marshaled twice more
+// by the bridge.
 // In the 2026-08-30 fat-response profile that cost 10.34s of 18.10s of daemon
 // CPU (57.1%) and 3.29GB of 9.36GB allocated (35%), for zero semantic work.
 //
@@ -23,14 +23,14 @@
 // []json.RawMessage), and a batch worker's permit taken before its goroutine
 // is started (never inside it).
 //
-// # The handler context, and the one thing it no longer carries
+// # What the jrpc2.Server took with it
 //
 // Handlers run on a context derived from context.Background, which is what
 // jrpc2's ServerOptions.NewContext default gave them, so a client hangup still
 // does not cancel work in flight. What it does NOT carry is the pair of values
 // jrpc2's Server.invoke attached to every handler context: the inbound
 // *jrpc2.Request (inboundRequestKey) and the *jrpc2.Server itself (serverKey).
-// The observable delta is exactly two accessors:
+// The delta those two values leave is exactly two accessors:
 // jrpc2.InboundRequest(ctx) returns nil where it used to return the request,
 // and jrpc2.ServerFromContext(ctx) panics where it used to return the server —
 // it is documented to panic on a non-handler context, and this is one.
@@ -39,7 +39,8 @@
 // would be a worse answer than a loud one, and a handler that wants its request
 // already has it as its second argument.
 //
-// A third accessor is worse than either, because it fails QUIETLY:
+// A third accessor is not about the context at all, and is worse than either,
+// because it fails QUIETLY:
 // (*jrpc2.Request).IsNotification() is now false for every request, including
 // notifications. It tests id == nil, and ParsedRequest.ToRequest builds the id
 // as fixID(json.RawMessage(p.ID)) from a string — for an absent id that is an
@@ -263,6 +264,9 @@ func (h *Handler) serve(w http.ResponseWriter, body []byte) {
 // goroutine keeps taking permits and starting elements — for as long as
 // ceil(elements/weight) x the per-method duration limit — and the global
 // backlog slot BacklogHTTPQLimiter holds is inside that abandoned goroutine.
+// A single request has the same shape bounded at one per-method limit, since
+// RPCRequestDurationLimiter returns at its threshold whatever the context
+// does; a batch is that hole times its element count, not a new one.
 // The bridge unwound here: jhttp passed req.Context() to Client.Batch, whose
 // waitComplete failed each pending response when the context ended, so the
 // framing layer returned at the deadline while the handlers ran on.
