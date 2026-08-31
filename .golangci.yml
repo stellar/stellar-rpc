@@ -57,6 +57,25 @@ linters:
           deny:
             - pkg: github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1
               desc: the rpcv2 tree and the v2 binary must not import the rpcv1 tree
+        # internal/jsonrpc is the ONLY assembler of the serving stack. It owns the
+        # sync.WaitGroup that wire.Handler.Shutdown joins and that the method
+        # table's duration limiters count into; a second assembler that passes
+        # a different group, or nil, compiles and serves correctly and produces
+        # a Shutdown that reports success while handlers run into a closing
+        # store. Blind spot, stated rather than sold past: this cannot see a
+        # second assembler INSIDE package jsonrpc, where admin.go already lives.
+        jsonrpc-assembly:
+          files:
+            - "**/cmd/stellar-rpc/internal/**"
+            - "**/cmd/stellar-rpc/rpcv1/**"
+            - "**/cmd/stellar-rpc/rpcv2/**"
+            - "!**/cmd/stellar-rpc/internal/jsonrpc/**"
+            - "!$test"
+          deny:
+            - pkg: github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc/wire
+              desc: only internal/jsonrpc may build the framing; it owns the liveHandlers group Shutdown joins
+            - pkg: github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network
+              desc: only internal/jsonrpc may wrap handlers in the limiters; they must count into that same group
     cyclop:
       max-complexity: 15
     dogsled:
