@@ -147,9 +147,10 @@ func (a *ReadView) resolveLedgers(c chunk.ID) (LedgerReader, func() error, error
 // defaultColdEventReadConcurrency is the worker fan-out one cold events read
 // gets over its packfiles. A page's payload fetch is hundreds of scattered
 // records with no ordering between them, so serializing them only added their
-// latencies together. A constant rather than configuration: it is a property
-// of the storage the daemon reads through, not of the query the client asked
-// for, which is how the package already spells defaultMaxScanLedgers.
+// latencies together. The right value is a property of the storage the daemon
+// reads through, never of the query the client asked for: this default is the
+// NVMe-measured choice, and a deployment on different storage overrides it at
+// wiring time via Registry.SetColdEventReadConcurrency.
 //
 // The fan-out is per request, so the worker count multiplies both goroutines
 // and packfile's coalesced-read buffers by the number of cold pages in flight.
