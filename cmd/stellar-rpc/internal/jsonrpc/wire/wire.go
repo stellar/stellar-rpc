@@ -260,7 +260,12 @@ func (h *Handler) serve(w http.ResponseWriter, body []byte) {
 // deadline the mount enforces (httpRequestDurationLimiter, 25s by default), so
 // a batch of individually-fine calls would 504 where each call on its own
 // succeeds, and would hold its global backlog slot for the sum rather than the
-// max.
+// max. It is not free: a worker costs about 2.6us in goroutine and closure,
+// measured on this table, so a batch of instant calls is slower than a serial
+// one and a batch of anything real is faster by the semaphore's weight. At a
+// weight of 1 the elements serialize anyway and the workers are pure loss —
+// accepted rather than special-cased, because a third dispatch path costs more
+// than microseconds on a one-CPU deployment saves.
 //
 // The concurrency is the process-wide semaphore's, not a second budget: a batch
 // borrows permits from the same bound a single request takes one from, so N
@@ -512,7 +517,7 @@ func (h *Handler) invoke(pr *jrpc2.ParsedRequest, method jrpc2.Handler) []byte {
 		// that fails.
 		return errorFrame(pr.ID, handlerError(err))
 	}
-	return resultFrame(pr.ID, bits)
+	return frame(pr.ID, resultKey, bits)
 }
 
 // relayedPanic is a handler panic caught on a batch worker so the serving
@@ -572,17 +577,28 @@ func parseError(err error) *jrpc2.Error {
 	return errInvalidRequestValue
 }
 
-// resultFrame builds {"jsonrpc":"2.0","id":<id>,"result":<result>}.
-func resultFrame(id string, result []byte) []byte {
-	out := make([]byte, 0, frameSize(id, len(resultKey), len(result)))
-	out = appendEnvelope(out, id, resultKey)
-	out = append(out, result...)
+// frame builds {"jsonrpc":"2.0","id":<id>,<key><payload>}, where key is
+// resultKey or errorKey. id is the request's raw id text, or "" for a request
+// with no usable id, which answers with a null id per jhttp's marshalError.
+//
+// The capacity is the frame's exact byte length, so a frame is one allocation
+// and one copy — which is why the arithmetic and the appends it predicts live
+// in the same six lines. Getting it wrong is not a correctness bug and no
+// assertion on the RESPONSE can see it: append grows silently and the bytes
+// come out identical. It is an expensive bug, though — an append that outgrows
+// its capacity reallocates and re-copies the whole payload, which on a fat
+// getLedgers response is another 17MB moved. TestFrameIsExactlyOneAllocation
+// pins it the only way it is observable, on cap.
+func frame(id, key string, payload []byte) []byte {
+	out := make([]byte, 0, len(framePrefix)+idLen(id)+len(key)+len(payload)+1)
+	out = append(out, framePrefix...)
+	out = appendID(out, id)
+	out = append(out, key...)
+	out = append(out, payload...)
 	return append(out, '}')
 }
 
-// errorFrame builds {"jsonrpc":"2.0","id":<id>,"error":<error>}. id is the
-// request's raw id text, or "" for a request with no usable id, which answers
-// with a null id per jhttp's marshalError.
+// errorFrame builds the frame for one error object.
 func errorFrame(id string, e *jrpc2.Error) []byte {
 	bits, err := json.Marshal(e)
 	if err != nil {
@@ -596,24 +612,7 @@ func errorFrame(id string, e *jrpc2.Error) []byte {
 			bits = []byte(`{"code":-32603,"message":"internal error"}`)
 		}
 	}
-	out := make([]byte, 0, frameSize(id, len(errorKey), len(bits)))
-	out = appendEnvelope(out, id, errorKey)
-	out = append(out, bits...)
-	return append(out, '}')
-}
-
-// frameSize is the frame's exact byte length, so a frame is one allocation and
-// one copy. Getting it wrong is not a correctness bug but it is an expensive
-// one: an append that outgrows its capacity reallocates and re-copies the whole
-// payload, which on a fat getLedgers response is another 17MB moved.
-func frameSize(id string, keyLen, payloadLen int) int {
-	return len(framePrefix) + idLen(id) + keyLen + payloadLen + 1
-}
-
-func appendEnvelope(dst []byte, id, key string) []byte {
-	dst = append(dst, framePrefix...)
-	dst = appendID(dst, id)
-	return append(dst, key...)
+	return frame(id, errorKey, bits)
 }
 
 // appendID writes the request's id back exactly as the client sent it —

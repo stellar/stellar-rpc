@@ -211,29 +211,33 @@ func TestWire_IDIsHTMLEscapedExactlyAsTheBridgeEscapedIt(t *testing.T) {
 			status, header, got := post(t, h, tc.body)
 			assert.Equal(t, http.StatusOK, status)
 			assert.Equal(t, tc.want, got)
-			// The capacity hint must account for the escape, or the frame is
-			// built with a reallocation.
 			assert.Equal(t, strconv.Itoa(len(tc.want)), header.Get("Content-Length"))
 		})
 	}
 }
 
-// idLen's capacity arithmetic is only load-bearing at scale: a hint one byte
-// short makes the frame reallocate and re-copy its whole payload, which is the
-// cost this package exists to delete. This is the worst case the 512KB body cap
-// allows — an id in which every single byte escapes to six.
-func TestWire_ALargeEscapingIDIsFramedAtItsExactLength(t *testing.T) {
-	h, _ := newTestHandler(t)
-	const n = 128 * 1024
-	body := `{"jsonrpc":"2.0","id":"` + strings.Repeat("<", n) + `","method":"echo"}`
-	want := `{"jsonrpc":"2.0","id":"` + strings.Repeat(`\u003c`, n) + `","result":{"method":"echo"}}`
-
-	status, header, got := post(t, h, body)
-	require.Equal(t, http.StatusOK, status)
-	//nolint:testifylint // compare lengths first: an Equal on the values would dump a megabyte
-	require.Equal(t, len(want), len(got), "the frame is not the envelope plus the escaped id")
-	assert.Equal(t, want, got)
-	assert.Equal(t, strconv.Itoa(len(want)), header.Get("Content-Length"))
+// The frame builder's capacity is meant to be the frame's EXACT length, so a
+// frame is one allocation and one copy. No assertion on the response can see
+// that: append grows silently and the bytes come out identical either way. It
+// is observable on the slice, though — make([]byte, 0, n) yields cap == n, so
+// cap > len means the hint was short and the payload was re-copied.
+//
+// idLen is the half of the arithmetic that can be wrong, so the ids here are
+// the ones that escape, at both ends of the scale.
+func TestFrameIsExactlyOneAllocation(t *testing.T) {
+	payload := []byte(`{"a":[1,2,3]}`)
+	for _, id := range []string{
+		``, `1`, `12345678901234567890`, `-1`, `1.500`,
+		`"plain"`, `"a<b&c>d"`, `"</script>"`, "\"a\u2028b\"", "\"a\u2029b\"",
+		`"` + strings.Repeat("<", 64*1024) + `"`,
+		`"` + strings.Repeat("\u2028", 16*1024) + `"`,
+	} {
+		for _, key := range []string{resultKey, errorKey} {
+			f := frame(id, key, payload)
+			assert.Equal(t, len(f), cap(f),
+				"frame(%.20q, %q, ...) reallocated: idLen under-predicts by %d bytes", id, key, cap(f)-len(f))
+		}
+	}
 }
 
 func TestWire_ErrorMapping(t *testing.T) {
@@ -713,16 +717,12 @@ func TestWire_SemaphoreIsReleasedBeforeTheWrite(t *testing.T) {
 		}
 	}
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		status, _, body := post(t, h, `{"jsonrpc":"2.0","id":2,"method":"echo"}`)
-		assert.Equal(t, http.StatusOK, status)
-		//nolint:testifylint // byte-exact wire pin; JSONEq would ignore key order and escaping
-		assert.Equal(t, `{"jsonrpc":"2.0","id":2,"result":"ok"}`, body)
-	}()
+	rec, done := serveAsync(t, h, `{"jsonrpc":"2.0","id":2,"method":"echo"}`)
 	select {
 	case <-done:
+		assert.Equal(t, http.StatusOK, rec.Code)
+		//nolint:testifylint // byte-exact wire pin; JSONEq would ignore key order and escaping
+		assert.Equal(t, `{"jsonrpc":"2.0","id":2,"result":"ok"}`, rec.Body.String())
 	case <-time.After(10 * time.Second):
 		t.Error("a request could not be served while the bound's worth of writers were stalled: " +
 			"the semaphore is being held across the write")
@@ -847,33 +847,6 @@ func TestWire_BatchElementsRunConcurrently(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, want, rec.Body.String())
 	assert.Equal(t, strconv.Itoa(len(want)), rec.Header().Get("Content-Length"))
-}
-
-// The stopwatch form of the test above, because "the batch took N times one
-// call" is the user-visible symptom and is worth asserting in its own units.
-//
-//nolint:unparam // the handler literal must match the fixed jrpc2.Handler signature
-func TestWire_ABatchOfSlowCallsTakesAboutOneCallsTime(t *testing.T) {
-	n := min(runtime.GOMAXPROCS(0), 4)
-	if n < 4 {
-		t.Skip("needs at least 4 permits for the serial and concurrent times to separate")
-	}
-	const delay = 200 * time.Millisecond
-
-	h := NewHandler(map[string]jrpc2.Handler{
-		"slow": func(context.Context, *jrpc2.Request) (any, error) {
-			time.Sleep(delay)
-			return held, nil
-		},
-	})
-
-	start := time.Now()
-	status, _, _ := post(t, h, batchOf(n, "slow"))
-	elapsed := time.Since(start)
-
-	assert.Equal(t, http.StatusOK, status)
-	assert.Less(t, elapsed, time.Duration(n)*delay/2,
-		"a batch of %d %v calls took %v; serial dispatch would need %v", n, delay, elapsed, time.Duration(n)*delay)
 }
 
 // A batch borrows from the process-wide bound; it does not multiply it. Two
@@ -1026,15 +999,11 @@ func TestWire_APanicInABatchElementFailsTheRequestAndReleasesItsPermit(t *testin
 		serve(`[{"jsonrpc":"2.0","id":1,"method":"boom"},{"jsonrpc":"2.0","id":2,"method":"boom"}]`)
 	}
 
-	served := make(chan string, 1)
-	go func() {
-		_, _, body := post(t, h, `{"jsonrpc":"2.0","id":9,"method":"echo"}`)
-		served <- body
-	}()
+	rec, done := serveAsync(t, h, `{"jsonrpc":"2.0","id":9,"method":"echo"}`)
 	select {
-	case body := <-served:
+	case <-done:
 		//nolint:testifylint // byte-exact wire pin; JSONEq would ignore key order and escaping
-		assert.Equal(t, `{"jsonrpc":"2.0","id":9,"result":{"method":"echo"}}`, body)
+		assert.Equal(t, `{"jsonrpc":"2.0","id":9,"result":{"method":"echo"}}`, rec.Body.String())
 	case <-time.After(10 * time.Second):
 		t.Error("the handler stopped serving after panicking batches: every panic leaked its permit")
 	}

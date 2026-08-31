@@ -138,6 +138,11 @@ func decorateHandlers(daemon host.Daemon, logger *log.Entry, m handler.Map) hand
 // bridge it was the bridge's own virtualized counter instead, so this field
 // used to be a couple of bytes and is now anything up to the 512KB body cap,
 // once per request at INFO. Every sane id fits (a quoted UUID is 38 bytes).
+//
+// This bounds what is WRITTEN, not what is copied: jrpc2.Request.ID() is
+// string(r.id) and has already copied the whole token by the time it returns.
+// jrpc2 exposes no length or zero-copy accessor, so the copy stays; the log
+// volume, which is the part that reaches a disk, does not.
 const maxLoggedRequestID = 64
 
 func loggedRequestID(req *jrpc2.Request) string {

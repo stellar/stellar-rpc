@@ -72,67 +72,29 @@ func postMounted(t *testing.T, url, body string) (int, string) {
 	return res.StatusCode, string(raw)
 }
 
-//nolint:testifylint // byte-exact wire pins; JSONEq would ignore key order and escaping
-func TestMount_ServesThroughTheRealMiddlewareChain(t *testing.T) {
-	const limit = 500 * time.Millisecond
-	// The slow handler holds a wire permit for as long as it runs, and the
-	// bound is GOMAXPROCS — one, on a single-CPU runner. So it is released and
-	// joined at the end of its own subtest rather than at cleanup; leaving it
-	// parked would 504 every subtest after it.
-	blocked := make(chan struct{})
-	slowReturned := make(chan struct{}, 1)
-
-	url := newMountedHandler(t, limit, []HandlerSpec{{
+// fastSpec answers immediately, and is every mount below's ordinary method.
+func fastSpec() HandlerSpec {
+	return HandlerSpec{
 		MethodName: "fast",
 		Handler: func(context.Context, *jrpc2.Request) (any, error) {
 			return map[string]int{"n": 7}, nil
 		},
 		QueueLimit:           10,
 		RequestDurationLimit: time.Minute,
-	}, {
-		MethodName: "slow",
-		Handler: func(ctx context.Context, _ *jrpc2.Request) (any, error) {
-			defer func() { slowReturned <- struct{}{} }()
-			select {
-			case <-blocked:
-			case <-ctx.Done():
-			}
-			return "eventually", nil
-		},
-		QueueLimit: 10,
-		// Longer than the global limit, so the HTTP-level limiter is the one
-		// that answers and the 504 path is the one under test.
-		RequestDurationLimit: time.Minute,
-	}})
+	}
+}
+
+//nolint:testifylint // byte-exact wire pins; JSONEq would ignore key order and escaping
+func TestMount_ServesThroughTheRealMiddlewareChain(t *testing.T) {
+	// No parking handler here: one would hold a wire permit for as long as it
+	// parks, and the bound is GOMAXPROCS — one, on a single-CPU runner — so
+	// every subtest after it would 504. The 504 path has its own mount below.
+	url := newMountedHandler(t, time.Minute, []HandlerSpec{fastSpec()})
 
 	t.Run("a normal call gets its framed body, id escaped as the bridge escaped it", func(t *testing.T) {
 		status, body := postMounted(t, url, `{"jsonrpc":"2.0","id":"a<b","method":"fast"}`)
 		assert.Equal(t, http.StatusOK, status)
 		assert.Equal(t, `{"jsonrpc":"2.0","id":"a\u003cb","result":{"n":7}}`, body)
-	})
-
-	t.Run("a slow call still gets the 504 path with no body", func(t *testing.T) {
-		start := time.Now()
-		status, body := postMounted(t, url, `{"jsonrpc":"2.0","id":1,"method":"slow"}`)
-		assert.Equal(t, http.StatusGatewayTimeout, status)
-		assert.Empty(t, body, "the duration limiter answers before the framing writes anything")
-		assert.Less(t, time.Since(start), 30*time.Second)
-
-		// The 504 answered the client; the handler goroutine is still live and
-		// still holds its permit. Release it and wait, so the bound is whole
-		// again for the subtests below.
-		close(blocked)
-		select {
-		case <-slowReturned:
-		case <-time.After(10 * time.Second):
-			t.Fatal("the slow handler never returned after its channel was closed")
-		}
-	})
-
-	t.Run("the mount keeps serving after a timed-out request", func(t *testing.T) {
-		status, body := postMounted(t, url, `{"jsonrpc":"2.0","id":2,"method":"fast"}`)
-		assert.Equal(t, http.StatusOK, status)
-		assert.Equal(t, `{"jsonrpc":"2.0","id":2,"result":{"n":7}}`, body)
 	})
 
 	t.Run("an unknown method is method-not-found, not a 500", func(t *testing.T) {
@@ -218,6 +180,56 @@ func TestMount_FramesParseAsJSONRPC(t *testing.T) {
 	assert.JSONEq(t, `"x"`, string(frame.ID))
 	assert.Equal(t, []int{1, 2, 3}, frame.Result)
 	assert.Nil(t, frame.Error)
+}
+
+// The slow-client decoupler, on a mount of its own. A parked handler holds its
+// wire permit until it returns, and that bound is GOMAXPROCS — one on a
+// single-CPU runner — so this cannot share a mount with tests that need a
+// permit of their own. Releasing and joining the handler is the second half of
+// the test, not bookkeeping: "the mount survives a 504" is only meaningful once
+// the abandoned handler has finished.
+//
+//nolint:testifylint // byte-exact wire pins; JSONEq would ignore key order and escaping
+func TestMount_ASlowCallGets504AndTheMountRecovers(t *testing.T) {
+	const limit = 500 * time.Millisecond
+	blocked := make(chan struct{})
+	returned := make(chan struct{}, 1)
+
+	url := newMountedHandler(t, limit, []HandlerSpec{fastSpec(), {
+		MethodName: "slow",
+		Handler: func(ctx context.Context, _ *jrpc2.Request) (any, error) {
+			defer func() { returned <- struct{}{} }()
+			select {
+			case <-blocked:
+			case <-ctx.Done():
+			}
+			return "eventually", nil
+		},
+		QueueLimit: 10,
+		// Longer than the global limit, so the HTTP-level limiter is the one
+		// that answers and the 504 path is the one under test.
+		RequestDurationLimit: time.Minute,
+	}})
+
+	start := time.Now()
+	status, body := postMounted(t, url, `{"jsonrpc":"2.0","id":1,"method":"slow"}`)
+	assert.Equal(t, http.StatusGatewayTimeout, status)
+	assert.Empty(t, body, "the duration limiter answers before the framing writes anything")
+	assert.Less(t, time.Since(start), 30*time.Second)
+
+	// The client has its 504; the handler goroutine is still live and still
+	// holds its permit. That is the documented shape (DELTA (g)), so the mount
+	// is only expected to serve again once it has actually finished.
+	close(blocked)
+	select {
+	case <-returned:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the slow handler never returned after its channel was closed")
+	}
+
+	status, body = postMounted(t, url, `{"jsonrpc":"2.0","id":2,"method":"fast"}`)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, `{"jsonrpc":"2.0","id":2,"result":{"n":7}}`, body)
 }
 
 // The regression that made batch dispatch concurrent, at the altitude where it
