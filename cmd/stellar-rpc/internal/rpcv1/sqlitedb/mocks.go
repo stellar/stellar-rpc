@@ -84,7 +84,7 @@ func (txn *MockTransactionHandler) GetTransaction(_ context.Context, hash xdr.Ha
 	if !found {
 		return store.Transaction{}, store.ErrNoTransaction
 	}
-	return store.ParseTransaction(txView), nil
+	return store.ParseTransaction(txView)
 }
 
 func (txn *MockTransactionHandler) RegisterMetrics(_, _ prometheus.Observer) {}
