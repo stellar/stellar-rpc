@@ -435,3 +435,75 @@ func TestMount_ShutdownJoinsATimedOutHandler(t *testing.T) {
 		assert.True(t, done.Load(), "Shutdown returned before the abandoned handler finished")
 	})
 }
+
+// The wiring invariant both daemons now hold: connections dead BEFORE the
+// drain. DELTA (g) gates an element's start on the request's context, so a
+// live connection mid-batch keeps authorizing starts and the drain chases a
+// moving target. Closing the connections kills those contexts first.
+func TestMount_ClosedConnectionsStopTheDispatchBeforeTheDrain(t *testing.T) {
+	weight := runtime.GOMAXPROCS(0)
+	elements := 4 * weight
+	entered := make(chan struct{}, elements)
+	release := make(chan struct{})
+	var started atomic.Int64
+
+	handler := NewHandler(Params{
+		Daemon: host.MakeNoOpDaemon(), Logger: mountLogger(), GlobalQueueLimit: 100,
+		GlobalDurationWarning: time.Minute, GlobalDurationLimit: time.Minute,
+		Specs: []HandlerSpec{{
+			MethodName: "hold",
+			Handler: func(context.Context, *jrpc2.Request) (any, error) {
+				started.Add(1)
+				entered <- struct{}{}
+				<-release
+				return "done", nil
+			},
+			QueueLimit:           1000,
+			RequestDurationLimit: time.Minute,
+		}},
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	body := make([]string, elements)
+	for i := range body {
+		body[i] = fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"hold"}`, i+1)
+	}
+	go func() {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL,
+			strings.NewReader("["+strings.Join(body, ",")+"]"))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if res, derr := http.DefaultClient.Do(req); derr == nil {
+			_, _ = io.Copy(io.Discard, res.Body)
+			res.Body.Close()
+		}
+	}()
+
+	// Bound saturated: the dispatch loop is parked in Acquire with most of the
+	// batch still queued behind it.
+	for range weight {
+		select {
+		case <-entered:
+		case <-time.After(10 * time.Second):
+			close(release)
+			t.Fatal("the batch never saturated the bound")
+		}
+	}
+
+	srv.CloseClientConnections() // the request contexts die with them
+	time.Sleep(250 * time.Millisecond)
+	atClose := started.Load()
+	close(release)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, handler.Shutdown(ctx), "the drain did not converge after the connections closed")
+
+	t.Logf("started %d of %d elements at a bound of %d", started.Load(), elements, weight)
+	assert.Equal(t, atClose, started.Load(), "elements started after the connections were closed")
+	assert.LessOrEqual(t, atClose, int64(weight+1),
+		"the dispatch kept going past the bound while its connection was dead")
+}

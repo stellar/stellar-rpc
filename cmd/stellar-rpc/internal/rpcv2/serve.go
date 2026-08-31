@@ -43,16 +43,15 @@ func newServeReads(
 			IdleTimeout: jsonrpc.DefaultHTTPIdleTimeout,
 		}
 
-		// Both exits close the server: on death this reaps established
-		// keep-alive conns Serve abandoned; after the graceful path's
-		// Shutdown it is a no-op.
-		defer func() { _ = server.Close() }()
-		// Runs first, defers being LIFO: handler contexts are server-scoped,
-		// so this is the only thing that ends a request still reading the
-		// registry. It must finish before startup.go's `defer registry.Close()`,
-		// which runs after g.Wait joins this goroutine.
+		// Both steps on every exit, in ONE defer so the order is written down
+		// rather than inferred from LIFO. Connections dead before the drain,
+		// or live requests keep starting elements. Close reaps the keep-alives
+		// Serve abandoned on death and is a no-op after a graceful Shutdown;
+		// the drain must then finish before startup.go's `defer
+		// registry.Close()`, which runs once g.Wait joins this goroutine.
 		//nolint:contextcheck // a fresh budget: ctx is already canceled
 		defer func() {
+			_ = server.Close()
 			drainCtx, cancel := context.WithTimeout(context.Background(), readShutdownTimeout)
 			defer cancel()
 			if derr := handler.Shutdown(drainCtx); derr != nil {
