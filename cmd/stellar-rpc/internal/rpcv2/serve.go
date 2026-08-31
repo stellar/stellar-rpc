@@ -18,8 +18,10 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 )
 
-// readShutdownTimeout bounds the graceful drain at shutdown; whatever is
-// still in flight after it is cut off.
+// readShutdownTimeout bounds EACH phase of the read server's teardown: first
+// http.Server.Shutdown waiting for in-flight requests, then the handler drain
+// canceling and waiting for the handlers those requests left behind. The two
+// are sequential, so the endpoint's teardown is bounded by twice this.
 const readShutdownTimeout = 5 * time.Second
 
 // newServeReads returns the production ServeReads — the method table over the
@@ -43,8 +45,20 @@ func newServeReads(
 
 		// Both exits close the server: on death this reaps established
 		// keep-alive conns Serve abandoned; after the graceful path's
-		// Shutdown it is a no-op. The handler itself owns nothing to close.
+		// Shutdown it is a no-op.
 		defer func() { _ = server.Close() }()
+		// Runs first, defers being LIFO: handler contexts are server-scoped,
+		// so this is the only thing that ends a request still reading the
+		// registry. It must finish before startup.go's `defer registry.Close()`,
+		// which runs after g.Wait joins this goroutine.
+		//nolint:contextcheck // a fresh budget: ctx is already canceled
+		defer func() {
+			drainCtx, cancel := context.WithTimeout(context.Background(), readShutdownTimeout)
+			defer cancel()
+			if derr := handler.Shutdown(drainCtx); derr != nil {
+				p.logger.WithError(derr).Warn("read handlers did not drain before teardown")
+			}
+		}()
 		died := make(chan error, 1)
 		go func() { died <- server.Serve(listener) }()
 		select {

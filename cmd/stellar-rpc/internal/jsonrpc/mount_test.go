@@ -45,6 +45,16 @@ func mountLogger() *log.Entry {
 // over real HTTP.
 func newMountedHandler(t *testing.T, globalLimit time.Duration, specs []HandlerSpec) string {
 	t.Helper()
+	url, _ := newMountedHandlerAndHandle(t, globalLimit, specs)
+	return url
+}
+
+// newMountedHandlerAndHandle also returns the mount, for the tests that drive
+// its lifetime rather than its requests.
+func newMountedHandlerAndHandle(
+	t *testing.T, globalLimit time.Duration, specs []HandlerSpec,
+) (string, Handler) {
+	t.Helper()
 	handler := NewHandler(Params{
 		Daemon:                host.MakeNoOpDaemon(),
 		Logger:                mountLogger(),
@@ -54,9 +64,8 @@ func newMountedHandler(t *testing.T, globalLimit time.Duration, specs []HandlerS
 		GlobalDurationLimit:   globalLimit,
 	})
 	srv := httptest.NewServer(handler)
-	// No handler teardown: the mount owns no goroutine and no connection.
 	t.Cleanup(srv.Close)
-	return srv.URL
+	return srv.URL, handler
 }
 
 func postMounted(t *testing.T, url, body string) (int, string) {
@@ -71,6 +80,9 @@ func postMounted(t *testing.T, url, body string) (int, string) {
 	require.NoError(t, err)
 	return res.StatusCode, string(raw)
 }
+
+// eventually is what the parking handlers below return once released.
+const eventually = "eventually"
 
 // fastSpec answers immediately, and is every mount below's ordinary method.
 func fastSpec() HandlerSpec {
@@ -203,7 +215,7 @@ func TestMount_ASlowCallGets504AndTheMountRecovers(t *testing.T) {
 			case <-blocked:
 			case <-ctx.Done():
 			}
-			return "eventually", nil
+			return eventually, nil
 		},
 		QueueLimit: 10,
 		// Longer than the global limit, so the HTTP-level limiter is the one
@@ -348,7 +360,7 @@ func TestMount_AStartedElementSurvivesTheDeadline(t *testing.T) {
 		Handler: func(ctx context.Context, _ *jrpc2.Request) (any, error) {
 			time.Sleep(3 * limit) // well past the HTTP deadline
 			finished <- ctx.Err()
-			return "eventually", nil
+			return eventually, nil
 		},
 		QueueLimit:           10,
 		RequestDurationLimit: time.Minute,
@@ -367,5 +379,48 @@ func TestMount_AStartedElementSurvivesTheDeadline(t *testing.T) {
 		assert.NoError(t, err, "the HTTP deadline reached a handler that had already started")
 	case <-time.After(10 * time.Second):
 		t.Fatal("a started handler never finished: the run-to-completion guarantee is gone")
+	}
+}
+
+// The two halves of the handler lifetime, at the mount. The HTTP deadline
+// answers the client and leaves the handler running (that is DELTA (g), and
+// what sendTransaction depends on); only Shutdown ends it. Between the two,
+// nothing did — which is what let a straggler outlive the stores it reads.
+func TestMount_ShutdownEndsWhatTheDeadlineDidNot(t *testing.T) {
+	const limit = 300 * time.Millisecond
+	entered := make(chan struct{}, 1)
+	observed := make(chan error, 1)
+
+	url, handler := newMountedHandlerAndHandle(t, limit, []HandlerSpec{{
+		MethodName: "watch",
+		Handler: func(ctx context.Context, _ *jrpc2.Request) (any, error) {
+			entered <- struct{}{}
+			<-ctx.Done()
+			observed <- ctx.Err()
+			return eventually, nil
+		},
+		QueueLimit:           10,
+		RequestDurationLimit: time.Minute,
+	}})
+
+	status, _ := postMounted(t, url, `{"jsonrpc":"2.0","id":1,"method":"watch"}`)
+	require.Equal(t, http.StatusGatewayTimeout, status)
+	<-entered
+
+	select {
+	case err := <-observed:
+		t.Fatalf("the HTTP deadline canceled the handler context (%v); it must outlive its request", err)
+	case <-time.After(2 * limit):
+	}
+
+	// Bounded, so a regression fails here instead of hanging the package.
+	drainCtx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, handler.Shutdown(drainCtx))
+	select {
+	case err := <-observed:
+		assert.ErrorIs(t, err, context.Canceled)
+	case <-time.After(10 * time.Second):
+		t.Fatal("Shutdown did not end a handler the deadline had abandoned")
 	}
 }

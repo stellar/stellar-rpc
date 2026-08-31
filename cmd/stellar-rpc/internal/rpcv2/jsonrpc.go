@@ -181,6 +181,9 @@ func gateHealthOnFirstCommit(h jrpc2.Handler, registry *query.Registry) jrpc2.Ha
 // its handler goroutine actually stopping: the duration limiter answers the
 // client at the deadline but the handler keeps running until it observes its
 // canceled context, which scan loops only check between iterations.
+//
+// jsonrpc.Handler.Shutdown cancels handler contexts too, at teardown. That can
+// only shorten a handler's life, so this stays an upper bound.
 const graceMargin = 30 * time.Second
 
 // deriveLifecycleGrace computes the deferred-deletion grace period from the

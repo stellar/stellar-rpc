@@ -40,9 +40,13 @@
 //
 // # What the jrpc2.Server took with it
 //
-// Handlers run on a context derived from context.Background, which is what
-// jrpc2's ServerOptions.NewContext default gave them, so a client hangup still
-// does not cancel work in flight. What it does NOT carry is the pair of values
+// Handlers run on a SERVER-scoped context: derived from context.Background,
+// as jrpc2's ServerOptions.NewContext default was, so no request cancels it
+// and a client hangup still does not cancel work in flight — and canceled by
+// Handler.Shutdown, as jrpc2's Server.stopLocked canceled every in-flight
+// request's context at stop (server.go, `for id, cancel := range s.used`).
+// Per-request semantics are unchanged; the server's own lifetime is back.
+// What it does NOT carry is the pair of values
 // jrpc2's Server.invoke attached to every handler context: the inbound
 // *jrpc2.Request (inboundRequestKey) and the *jrpc2.Server itself (serverKey).
 // The delta those two values leave is exactly two accessors:
@@ -161,16 +165,67 @@ type Handler struct {
 	// A batch therefore borrows from the process-wide budget instead of
 	// multiplying it — see dispatchAll.
 	sem *semaphore.Weighted
+
+	// weight is sem's size, kept because semaphore.Weighted does not expose
+	// it and Shutdown drains by acquiring all of it.
+	weight int64
+
+	// root is the SERVER-scoped lifetime every handler runs on. No request
+	// touches it; only Shutdown cancels it. jrpc2's Server owned this and
+	// canceled it at stop (server.go stopLocked, `for id, cancel := range
+	// s.used`), which is what kept a straggler from reading a store its
+	// daemon had already closed.
+	//
+	//nolint:containedctx // a server's own lifetime, as http.Server holds one
+	root     context.Context
+	stopRoot context.CancelFunc
+
+	drainOnce sync.Once
+	drainErr  error
 }
 
 // NewHandler returns the JSON-RPC handler over methods. The map is the
 // decorated, limiter-wrapped table the bridge would otherwise have been given;
 // it is read-only from here on.
 func NewHandler(methods map[string]jrpc2.Handler) *Handler {
+	weight := int64(runtime.GOMAXPROCS(0))
+	//nolint:gosec // G118: stopRoot is the handler's, called by Shutdown
+	root, stopRoot := context.WithCancel(context.Background())
 	return &Handler{
-		methods: methods,
-		sem:     semaphore.NewWeighted(int64(runtime.GOMAXPROCS(0))),
+		methods:  methods,
+		sem:      semaphore.NewWeighted(weight),
+		weight:   weight,
+		root:     root,
+		stopRoot: stopRoot,
 	}
+}
+
+// Shutdown cancels the context every handler runs on and waits for the
+// handlers still running to return, or for ctx to end, whichever comes first.
+// It reports the drain's failure to finish in time; a caller that gets one has
+// a straggler still touching whatever it is about to close.
+//
+// The wait is an acquire of the whole bound. Every handler invocation happens
+// between an acquirePermit and its Release, so holding every permit is exactly
+// "no handler is running" — no second counter to keep in step with the first.
+// The permits are not released afterwards: a drained handler stays drained, so
+// nothing can start against resources being torn down. A request that arrives
+// anyway blocks in acquirePermit and unwinds at its own deadline (DELTA (g));
+// the two cancellation sources compose that way, the request's context
+// governing whether an element may START and this one whether a running
+// handler may CONTINUE.
+//
+// Idempotent — the first call's result answers every later one. Call it after
+// the HTTP server has stopped accepting, and before the resources the handlers
+// read are closed.
+func (h *Handler) Shutdown(ctx context.Context) error {
+	h.stopRoot()
+	h.drainOnce.Do(func() {
+		if err := h.sem.Acquire(ctx, h.weight); err != nil {
+			h.drainErr = fmt.Errorf("wire: draining handlers: %w", err)
+		}
+	})
+	return h.drainErr
 }
 
 // ServeHTTP implements http.Handler.
@@ -313,6 +368,12 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, body []byte)
 //     There is no answer to give it and nobody to give one to: the 504 is
 //     already on the wire. serve writes nothing at all rather than assembling
 //     a response out of the survivors.
+//
+// Two contexts govern a dispatch and they do not overlap: the request's
+// decides whether an element may START (here), and the handler's — the
+// server-scoped root, canceled only by Shutdown — whether a running handler
+// may CONTINUE.
+//
 //   - An element that needs no handler at all — a parse or shape error, an
 //     empty method, an unknown method — never reaches the permit, so the loop
 //     probes the request's Done channel per element as well. Without that,
@@ -380,7 +441,6 @@ func (h *Handler) dispatchBatch(ctx context.Context, reqs []*jrpc2.ParsedRequest
 			// answer as above: stop, and leave the rest unstarted.
 			break
 		}
-		//nolint:contextcheck // invoke's context is Background by design; see invoke
 		wg.Go(func() {
 			// Released once the frame is built and strictly before the caller
 			// writes a byte, exactly as dispatchOne releases it — and released
@@ -424,7 +484,6 @@ func (h *Handler) dispatchOne(ctx context.Context, pr *jrpc2.ParsedRequest) []by
 		return nil // DELTA (g): never started, so there is nothing to answer.
 	}
 	defer h.sem.Release(1)
-	//nolint:contextcheck // invoke's context is Background by design; see invoke
 	return h.invoke(pr, method)
 }
 
@@ -510,16 +569,11 @@ func (h *Handler) route(pr *jrpc2.ParsedRequest) (jrpc2.Handler, []byte) {
 // invoke runs one handler and builds its frame. The caller holds the permit
 // for the whole call and releases it before any byte is written.
 func (h *Handler) invoke(pr *jrpc2.ParsedRequest, method jrpc2.Handler) []byte {
-	// context.Background, never the http.Request's context, and never a
-	// timeout of our own: this reproduces jrpc2's ServerOptions.NewContext
-	// default byte for byte. Handlers keep today's hangup semantics (a client
-	// that disconnects mid-call still completes it, which matters for
-	// sendTransaction) and today's deadline shape (the per-method duration
-	// limiter derives its own timeout from this). Deriving from r.Context()
-	// is a separate, deliberate decision that has not been taken. The two
-	// values jrpc2's server used to attach to this context are gone with it;
-	// see the package doc.
-	ctx := context.Background()
+	// The SERVER's lifetime, never the http.Request's: a client that
+	// disconnects mid-call still completes it, which matters for
+	// sendTransaction, and the per-method duration limiter derives its own
+	// timeout from this. Only Shutdown cancels it.
+	ctx := h.root
 
 	// ToRequest hands the handler the params bytes the body carried, in the
 	// client's key order and whitespace and with the client's own escapes.

@@ -1322,3 +1322,94 @@ func TestWire_ADeadRequestStopsBuildingStaticErrorFrames(t *testing.T) {
 		"a dead request spent %.1fMB framing against a %.1fMB control: it is still answering its elements",
 		mb(deadFraming), mb(liveFraming))
 }
+
+// Shutdown is the server-scoped lifetime jrpc2's Server used to own: its
+// stopLocked canceled every in-flight request's context at stop. Nothing
+// replaced that when the bridge retired, so a straggler could keep reading a
+// store its daemon had already closed.
+//
+//nolint:unparam // the handler literals must match the fixed jrpc2.Handler signature
+func TestWire_Shutdown(t *testing.T) {
+	t.Run("cancels a running handler and returns once it is gone", func(t *testing.T) {
+		entered := make(chan struct{}, 1)
+		observed := make(chan error, 1)
+		h := NewHandler(map[string]jrpc2.Handler{
+			"watch": func(ctx context.Context, _ *jrpc2.Request) (any, error) {
+				entered <- struct{}{}
+				<-ctx.Done() // no request deadline reaches here; only Shutdown
+				observed <- ctx.Err()
+				return held, nil
+			},
+		})
+		rec, done := serveAsync(t, h, `{"jsonrpc":"2.0","id":1,"method":"watch"}`)
+		<-entered
+
+		drained := make(chan error, 1)
+		go func() { drained <- h.Shutdown(context.Background()) }()
+
+		select {
+		case err := <-observed:
+			assert.ErrorIs(t, err, context.Canceled)
+		case <-time.After(10 * time.Second):
+			t.Fatal("Shutdown did not cancel the running handler's context")
+		}
+		select {
+		case err := <-drained:
+			assert.NoError(t, err, "the drain must report success once its handlers are gone")
+		case <-time.After(10 * time.Second):
+			t.Fatal("Shutdown returned before, or never after, its handlers finished")
+		}
+		<-done
+		assert.Equal(t, http.StatusOK, rec.Code, "the request in flight still gets its answer")
+	})
+
+	t.Run("reports a drain that runs out of time, and stays idempotent", func(t *testing.T) {
+		entered := make(chan struct{}, 1)
+		release := make(chan struct{})
+		h := NewHandler(map[string]jrpc2.Handler{
+			"stuck": func(context.Context, *jrpc2.Request) (any, error) {
+				entered <- struct{}{}
+				<-release // ignores cancellation, as a scan loop between checks does
+				return held, nil
+			},
+		})
+		_, done := serveAsync(t, h, `{"jsonrpc":"2.0","id":1,"method":"stuck"}`)
+		<-entered
+
+		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+		defer cancel()
+		err := h.Shutdown(ctx)
+		require.Error(t, err, "a straggler that outlasts the budget must be reported")
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.Equal(t, err, h.Shutdown(t.Context()),
+			"the first result must answer every later call, without re-taking a bound it cannot have")
+
+		close(release)
+		<-done
+	})
+
+	// The two cancellation sources compose: Shutdown holds the bound, so a
+	// later request cannot start a handler, and unwinds at its own deadline
+	// instead of hanging (DELTA (g)).
+	t.Run("nothing new starts after a completed drain", func(t *testing.T) {
+		var ran atomic.Int64
+		h := NewHandler(map[string]jrpc2.Handler{
+			"count": func(context.Context, *jrpc2.Request) (any, error) {
+				ran.Add(1)
+				return held, nil
+			},
+		})
+		require.NoError(t, h.Shutdown(t.Context()))
+
+		ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+		defer cancel()
+		req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/",
+			strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"count"}`))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		assert.Zero(t, ran.Load(), "a handler ran against resources that are being torn down")
+		assert.Empty(t, rec.Body.String())
+	})
+}

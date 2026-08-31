@@ -49,15 +49,18 @@ const (
 )
 
 // Handler is the HTTP handler which serves the Soroban JSON RPC responses.
-//
-// It owns no background goroutine and no connection, so there is nothing to
-// close: the framing under it (internal/jsonrpc/wire) runs entirely on the
-// calling request's goroutine. The jhttp bridge that used to sit there did own
-// a jrpc2 server goroutine and an in-process client, which is why this type
-// once had a Close method.
 type Handler struct {
 	http.Handler
+
+	framing *wire.Handler
 }
+
+// Shutdown cancels the context every method handler runs on and waits for the
+// ones still running, or for ctx to end. Call it after the HTTP server has
+// stopped accepting and BEFORE closing the stores the handlers read: handler
+// contexts are server-scoped, so nothing else ends a request that outlived the
+// HTTP deadline. Idempotent.
+func (h Handler) Shutdown(ctx context.Context) error { return h.framing.Shutdown(ctx) }
 
 // HandlerSpec describes one JSON-RPC method: its handler plus the per-method
 // request limits applied around it.
@@ -296,5 +299,5 @@ func NewHandler(params Params) Handler {
 		AllowedMethods:         []string{"GET", "PUT", "POST", "PATCH", "DELETE", "HEAD", "OPTIONS"},
 	})
 
-	return Handler{Handler: corsMiddleware.Handler(handler)}
+	return Handler{Handler: corsMiddleware.Handler(handler), framing: framing}
 }
