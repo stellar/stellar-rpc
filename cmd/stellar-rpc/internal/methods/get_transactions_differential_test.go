@@ -183,7 +183,7 @@ func legacyParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTrans
 	var err error
 
 	tx.FeeBump = ingestTx.Envelope.IsFeeBump()
-	tx.ApplicationOrder = int32(ingestTx.Index) //nolint:gosec // corpus indices are tiny
+	tx.ApplicationOrder = int32(ingestTx.Index)
 	tx.Successful = ingestTx.Result.Successful()
 	tx.Ledger = store.LedgerInfo{Sequence: lcm.LedgerSequence(), CloseTime: lcm.LedgerCloseTime()}
 	tx.TransactionHash = ingestTx.Result.TransactionHash.HexString()
@@ -825,6 +825,8 @@ func TestRepairV3OperationArity(t *testing.T) {
 // identically on both sides — so the renderer's field-by-field wiring is
 // pinned here instead, with every byte source distinct so that crossing any
 // two of them fails.
+//
+//nolint:funlen // one field-by-field pin; splitting it would scatter the wiring
 func TestTransactionInfo_FieldMapping(t *testing.T) {
 	marshal := func(v interface{ MarshalBinary() ([]byte, error) }) []byte {
 		raw, err := v.MarshalBinary()

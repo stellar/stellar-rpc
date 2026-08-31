@@ -151,17 +151,6 @@ func (tx *ledgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.L
 	return lcm, true, nil
 }
 
-// GetLedgerView is GetLedger without the decode and advances the same walk.
-// Entry.Bytes is overwritten on the next step and callers keep slices of the
-// view across steps, so clone.
-func (tx *ledgerReaderTx) GetLedgerView(ctx context.Context, sequence uint32) (xdr.LedgerCloseMetaView, bool, error) {
-	entry, found, err := tx.walk(ctx, sequence)
-	if err != nil || !found {
-		return nil, false, err
-	}
-	return xdr.LedgerCloseMetaView(bytes.Clone(entry.Bytes)), true, nil
-}
-
 // WithLedgerRaw is GetLedger without the decode or the clone: it lends the
 // step's bytes straight from the chunk reader's scratch buffer, which the
 // next step overwrites — fn must not retain them.
