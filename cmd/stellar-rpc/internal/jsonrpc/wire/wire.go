@@ -310,9 +310,9 @@ func (h *Handler) dispatchOne(pr *jrpc2.ParsedRequest) []byte {
 	return h.invoke(pr, method)
 }
 
-// acquirePermit takes one permit from the shared bound, returning nil. It
-// returns the frame that answers pr instead if the permit cannot be taken,
-// which is unreachable today: Background is never canceled and Acquire only
+// acquirePermit takes one permit from the shared bound and returns nil. If the
+// permit cannot be taken it returns the error frame that answers pr instead —
+// unreachable today, because Background is never canceled and Acquire only
 // fails on a canceled context. Answered rather than dropped so that a future
 // change of context cannot turn this into a silent 200 with no body.
 func (h *Handler) acquirePermit(pr *jrpc2.ParsedRequest) []byte {
@@ -613,7 +613,8 @@ func writeFrames(w http.ResponseWriter, isBatch bool, frames [][]byte) {
 		// dispatcher already built: no second copy of a 17MB body.
 		body = frames[0]
 	} else {
-		size := 2
+		// '[' + ']' is 2, and n frames carry n-1 commas: 1 + sum(len+1).
+		size := 1
 		for _, f := range frames {
 			size += len(f) + 1
 		}

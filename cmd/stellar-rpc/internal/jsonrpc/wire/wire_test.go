@@ -39,6 +39,17 @@ import (
 // they are released.
 const held = "done"
 
+// recordPeak raises peak to now, for handlers counting how many of them ran at
+// the same time.
+func recordPeak(peak *atomic.Int64, now int64) {
+	for {
+		old := peak.Load()
+		if now <= old || peak.CompareAndSwap(old, now) {
+			return
+		}
+	}
+}
+
 // testMethods is the table under test. notified counts calls to "note" so a
 // notification's completion is observable.
 //
@@ -584,13 +595,7 @@ func TestWire_SemaphoreBoundsConcurrentDispatch(t *testing.T) {
 	var inflight, peak atomic.Int64
 	h := NewHandler(map[string]jrpc2.Handler{
 		"hold": func(context.Context, *jrpc2.Request) (any, error) {
-			now := inflight.Add(1)
-			for {
-				old := peak.Load()
-				if now <= old || peak.CompareAndSwap(old, now) {
-					break
-				}
-			}
+			recordPeak(&peak, inflight.Add(1))
 			entered <- struct{}{}
 			<-release
 			inflight.Add(-1)
@@ -870,13 +875,7 @@ func TestWire_ABatchDoesNotMultiplyTheConcurrencyBound(t *testing.T) {
 
 	h := NewHandler(map[string]jrpc2.Handler{
 		"hold": func(context.Context, *jrpc2.Request) (any, error) {
-			now := inflight.Add(1)
-			for {
-				old := peak.Load()
-				if now <= old || peak.CompareAndSwap(old, now) {
-					break
-				}
-			}
+			recordPeak(&peak, inflight.Add(1))
 			entered <- struct{}{}
 			<-release
 			inflight.Add(-1)
