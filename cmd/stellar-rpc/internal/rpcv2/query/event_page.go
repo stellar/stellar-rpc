@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
@@ -510,21 +511,27 @@ func seekOrdinal(
 	if err != nil {
 		return 0, fmt.Errorf("query: resume ledger %d: %w", from.Ledger, err)
 	}
-	lo, hi := lStart, lEnd
-	for lo < hi {
-		mid := lo + (hi-lo)/2
-		got, err := r.FetchEvents(ctx, []uint32{mid})
+	// sort.Search wants a predicate that is false then true across the
+	// range, which "at or after from" is. Its probe cannot report an error,
+	// so a failed read is kept aside and answered true to end the search;
+	// the index it returns is discarded on that path.
+	var ferr error
+	i := sort.Search(int(lEnd-lStart), func(i int) bool {
+		if ferr != nil {
+			return true
+		}
+		got, err := r.FetchEvents(ctx, []uint32{lStart + uint32(i)}) //nolint:gosec // i is within the ledger
 		if err != nil {
-			return 0, fmt.Errorf("query: resume seek: %w", err)
+			ferr = err
+			return true
 		}
 		p := &got[0]
-		if from.atOrAfter(p.TxIdx, p.OpIdx, p.EventIdx) {
-			hi = mid
-		} else {
-			lo = mid + 1
-		}
+		return from.atOrAfter(p.TxIdx, p.OpIdx, p.EventIdx)
+	})
+	if ferr != nil {
+		return 0, fmt.Errorf("query: resume seek: %w", ferr)
 	}
-	return lo, nil
+	return lStart + uint32(i), nil //nolint:gosec // i is within the ledger
 }
 
 // resumeOrdinal returns the re-entry position's chunk-relative

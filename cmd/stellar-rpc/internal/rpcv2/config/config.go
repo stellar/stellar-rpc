@@ -474,11 +474,11 @@ const (
 	DefaultGetTransactionsMaxItemsPerResponse     uint = 200
 	DefaultGetTransactionsDefaultItemsPerResponse uint = 50
 
-	// The getLedgers sizes are 20/5 where v1 serves 200/50 (TODO: revisit
-	// under the v2 benchmarking epic). A getLedgers item is a whole
-	// LedgerCloseMeta, megabytes each on a busy pubnet ledger, so a
-	// 200-item page could exceed a hundred megabytes of XDR in one
-	// response.
+	// DefaultGetLedgersMaxItemsPerResponse and the default below it are 20
+	// and 5, where v1 serves 200 and 50 (TODO: revisit under the v2
+	// benchmarking epic). A getLedgers item is a whole LedgerCloseMeta,
+	// megabytes each on a busy pubnet ledger, so a 200-item page could
+	// exceed a hundred megabytes of XDR in one response.
 	DefaultGetLedgersMaxItemsPerResponse     uint = 20
 	DefaultGetLedgersDefaultItemsPerResponse uint = 5
 
