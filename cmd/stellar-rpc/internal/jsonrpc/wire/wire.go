@@ -200,13 +200,13 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, body []byte)
 	reqs, err := jrpc2.ParseRequests(body)
 	if err != nil {
 		// Delta (a).
-		writeFrames(w, false, [][]byte{errorFrame("", parseError(err))})
+		h.writeFrames(ctx, w, false, [][]byte{errorFrame("", parseError(err))})
 		return
 	}
 	if len(reqs) == 0 {
 		// Delta (b). A non-batch body parses to exactly one element, so an
 		// empty result means the body was `[]`.
-		writeFrames(w, false, [][]byte{errorFrame("", errEmptyBatch)})
+		h.writeFrames(ctx, w, false, [][]byte{errorFrame("", errEmptyBatch)})
 		return
 	}
 
@@ -225,7 +225,7 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, body []byte)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	writeFrames(w, isBatch, frames)
+	h.writeFrames(ctx, w, isBatch, frames)
 }
 
 // dispatchAll answers every element in input order (delta (e)) and returns
@@ -525,26 +525,21 @@ func appendHTMLEscaped(dst []byte, src string) []byte {
 // JSON array for a batch, a one-element batch included. The array is
 // hand-appended; json.Marshal of a []json.RawMessage re-validates and re-copies
 // every frame.
-func writeFrames(w http.ResponseWriter, isBatch bool, frames [][]byte) {
+//
+// The array copy is as large as the whole response, so it is built under a
+// permit like the frames it joins, and released before the write. The bare
+// case takes no permit: it writes the frame the dispatcher already built.
+func (h *Handler) writeFrames(ctx context.Context, w http.ResponseWriter, isBatch bool, frames [][]byte) {
 	var body []byte
 	if !isBatch && len(frames) == 1 {
 		// The fat case: the frame the dispatcher already built, uncopied.
 		body = frames[0]
 	} else {
-		// Brackets are 2 and n frames carry n-1 commas: 1 + sum(len+1).
-		size := 1
-		for _, f := range frames {
-			size += len(f) + 1
+		if !h.acquirePermit(ctx) {
+			return // delta (g): nobody left to answer
 		}
-		body = make([]byte, 0, size)
-		body = append(body, '[')
-		for i, f := range frames {
-			if i > 0 {
-				body = append(body, ',')
-			}
-			body = append(body, f...)
-		}
-		body = append(body, ']')
+		body = joinFrames(frames)
+		h.sem.Release(1)
 	}
 
 	// One Write; the body is materialized, so Content-Length is set.
@@ -552,4 +547,22 @@ func writeFrames(w http.ResponseWriter, isBatch bool, frames [][]byte) {
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(http.StatusOK)
 	w.Write(body) //nolint:errcheck // nothing actionable remains once the body is committed
+}
+
+// joinFrames concatenates frames inside a JSON array in one allocation.
+func joinFrames(frames [][]byte) []byte {
+	// Brackets are 2 and n frames carry n-1 commas: 1 + sum(len+1).
+	size := 1
+	for _, f := range frames {
+		size += len(f) + 1
+	}
+	body := make([]byte, 0, size)
+	body = append(body, '[')
+	for i, f := range frames {
+		if i > 0 {
+			body = append(body, ',')
+		}
+		body = append(body, f...)
+	}
+	return append(body, ']')
 }

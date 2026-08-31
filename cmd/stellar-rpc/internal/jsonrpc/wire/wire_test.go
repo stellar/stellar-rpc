@@ -1436,3 +1436,38 @@ func TestWire_ADeadSingleRequestBuildsNoStaticFrame(t *testing.T) {
 		"a dead request allocated %.1fMB against a %.1fMB control: it is still framing",
 		float64(deadAlloc)/(1<<20), float64(liveAlloc)/(1<<20))
 }
+
+// The batch body is a copy as large as the whole response, so it is assembled
+// under a permit; the bare single-frame path must stay permit-free, since it
+// only writes the frame the dispatcher already built.
+func TestWire_BatchAssemblyIsBuiltInsideTheBound(t *testing.T) {
+	h := NewHandler(map[string]jrpc2.Handler{}, new(network.LiveHandlers))
+	weight := int64(runtime.GOMAXPROCS(0))
+	require.NoError(t, h.sem.Acquire(context.Background(), weight))
+
+	// The bare path does not assemble anything, so it must not block.
+	bare := httptest.NewRecorder()
+	h.writeFrames(context.Background(), bare, false, [][]byte{[]byte(`{"a":1}`)})
+	assert.Equal(t, `{"a":1}`, bare.Body.String())
+
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.writeFrames(context.Background(), rec, true, [][]byte{[]byte(`{"a":1}`), []byte(`{"b":2}`)})
+	}()
+	select {
+	case <-done:
+		h.sem.Release(weight)
+		t.Fatal("a batch body was assembled while every permit was held")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	h.sem.Release(weight)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the batch body was never assembled after a permit came back")
+	}
+	assert.Equal(t, `[{"a":1},{"b":2}]`, rec.Body.String())
+}
