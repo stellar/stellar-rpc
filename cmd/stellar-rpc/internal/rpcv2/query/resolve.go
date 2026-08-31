@@ -144,25 +144,17 @@ func (a *ReadView) resolveLedgers(c chunk.ID) (LedgerReader, func() error, error
 	}
 }
 
-// defaultColdEventReadConcurrency is the worker fan-out one cold events read gets over
-// its packfiles (ColdReaderOptions.Concurrency → packfile ReadItems). A page's
-// payload fetch is hundreds of scattered records, each its own ~90 µs NVMe pread
-// after coalescing; the reads have no ordering between them, so serializing them
-// only added their latencies together. A constant, not configuration: it is a
-// property of the storage the daemon reads through, not of the query the client
-// asked for, and the package spells that kind of bound as a constant already
-// (defaultMaxScanLedgers).
+// defaultColdEventReadConcurrency is the worker fan-out one cold events read
+// gets over its packfiles. A page's payload fetch is hundreds of scattered
+// records with no ordering between them, so serializing them only added their
+// latencies together. A constant rather than configuration: it is a property
+// of the storage the daemon reads through, not of the query the client asked
+// for, which is how the package already spells defaultMaxScanLedgers.
 //
-// Why 8: swept 1/4/8/16/32 on a full cold chunk, p99 falls 106 → 32 → 21.6 →
-// 16.6 → 14.1 ms — every doubling still helps, by about half as much as the one
-// before. The cost side has no such curve: the fan-out is per request, so the
-// worker count multiplies both goroutines and packfile's 1 MiB coalesced-read
-// buffers by the number of cold pages in flight, and a 50 rps bench with a
-// fraction of a request in flight cannot see that. Eight removes 79% of the
-// baseline p99 and captures 92% of what 32 achieves, at a quarter of its
-// per-request footprint. A deployment with headroom to spend raises it via
-// the Registry's coldEventReadConcurrency, the way maxScanLedgers is set;
-// zero means this default.
+// The fan-out is per request, so the worker count multiplies both goroutines
+// and packfile's coalesced-read buffers by the number of cold pages in flight.
+// A deployment with headroom raises it through the Registry's
+// coldEventReadConcurrency; zero means this default.
 const defaultColdEventReadConcurrency = 8
 
 // Events resolves chunk c's event store as the common event.Reader the

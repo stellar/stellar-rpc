@@ -9,14 +9,11 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
 
-// TestColdReader_FetchEventsFansOutSafely pins the payload arena against the
-// reader's own fan-out. With Concurrency > 1 packfile.ReadItems splits the
-// positions into batches and calls the callback from one goroutine per batch,
-// so the arena every callback copies through is shared across goroutines — an
-// unsynchronized append there corrupts payloads at best and segfaults at worst.
-// The fixture is wide enough (many records, one position each) to force several
-// batches, and every payload is checked, so a torn copy fails the assertion even
-// on a run where -race happens not to schedule the overlap.
+// Pins the payload arena against the reader's own fan-out: with Concurrency
+// above one, ReadItems calls the callback from one goroutine per batch, so an
+// unsynchronized append into the shared arena corrupts payloads or segfaults.
+// Every payload is checked, so a torn copy fails even when -race does not
+// schedule the overlap.
 func TestColdReader_FetchEventsFansOutSafely(t *testing.T) {
 	const (
 		chunkID = chunk.ID(0)

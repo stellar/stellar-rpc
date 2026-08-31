@@ -1,12 +1,8 @@
 package event
 
-// Full-Matches differential: the ascending iterator tree and the
-// descending materialized union must select the same events, in
-// mirrored order, over randomized corpora, filters and windows. The
-// iterator-level differential in match_iter_test.go stops at
-// candidateIter; this one drives the whole call, so it also covers
-// term planning, the postings-vs-LookupKeys seam, the window cap and
-// the batch loop.
+// Full-Matches differential: the ascending iterator tree and the descending
+// materialized union must select the same events, in mirrored order, over
+// randomized corpora, filters and windows.
 
 import (
 	"context"
@@ -25,19 +21,16 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
 
-// diffCorpus is an in-memory chunk carrying one distinct marshaled
-// event per id, so the post-filter has real bytes to verify against.
+// diffCorpus is an in-memory chunk with one distinct event per id.
 type diffCorpus struct {
 	raw    [][]byte
 	mirror *ConcurrentBitmaps
 }
 
-// diffReader serves the corpus through LookupKeys only — the
-// materializing seam ColdReader and every out-of-package Reader use.
+// diffReader serves the corpus through LookupKeys only, the materializing seam.
 type diffReader struct{ c *diffCorpus }
 
-// diffPostingsReader adds the no-materialize seam HotStore carries, so
-// the same query also runs over sparse ids read in place.
+// diffPostingsReader adds the no-materialize seam HotStore carries.
 type diffPostingsReader struct{ diffReader }
 
 func (r diffReader) ChunkID() chunk.ID           { return chunk.ID(0) }
@@ -68,8 +61,7 @@ func (r diffPostingsReader) lookupPostings(_ context.Context, keys []TermKey) ([
 }
 
 func (r diffReader) FetchEvents(_ context.Context, ids []uint32) ([]Payload, error) {
-	// The precondition is the point: a dedup bug in the union would
-	// surface here rather than as a silently doubled result.
+	// A dedup bug in the union surfaces here, not as a doubled result.
 	if err := validateSortedEventIDs(ids); err != nil {
 		return nil, err
 	}
@@ -106,8 +98,7 @@ var (
 	_ postingReader = diffPostingsReader{}
 )
 
-// diffVocab is the small closed vocabulary the corpus and the random
-// filters share, so a generated filter has a real chance of matching.
+// diffVocab is the closed vocabulary the corpus and the random filters share.
 type diffVocab struct {
 	contracts [][]byte
 	topics    []xdr.ScVal
@@ -173,8 +164,8 @@ func newDiffCorpus(t *testing.T, rng *rand.Rand, v *diffVocab, n int) *diffCorpu
 	return c
 }
 
-// randomFilters builds a filter list over the shared vocabulary,
-// including the unconstrained shape that routes to the match-all path.
+// randomFilters builds a filter list over the shared vocabulary, including the
+// unconstrained shape that routes to the match-all path.
 func randomFilters(rng *rand.Rand, v *diffVocab) []Filter {
 	filters := make([]Filter, 0, 3)
 	for range 1 + rng.Intn(3) {
@@ -218,17 +209,15 @@ func collectOrdinals(t *testing.T, r Reader, filters []Filter, w IDRange, desc b
 	return out
 }
 
-// TestMatches_AscendingDescendingDifferential drives 400 randomized
-// queries through both candidate paths and both index seams. The
-// ascending stream reversed must equal the descending stream exactly.
+// Drives randomized queries through both candidate paths and both index seams;
+// the ascending stream reversed must equal the descending stream.
 func TestMatches_AscendingDescendingDifferential(t *testing.T) {
 	rng := rand.New(rand.NewSource(20260829))
 	v := newDiffVocab(t)
 	const corpusSize = 300
 	corpus := newDiffCorpus(t, rng, v, corpusSize)
 
-	// Shrink the batch so multi-batch seams are exercised on a small
-	// corpus; the stream's contents must not depend on it.
+	// Shrink the batch so multi-batch seams are exercised on a small corpus.
 	defer func(n int) { matchBatchSize = n }(matchBatchSize)
 	matchBatchSize = 7
 
@@ -266,23 +255,18 @@ func TestMatches_AscendingDescendingDifferential(t *testing.T) {
 				require.Equal(t, asc, desc,
 					"trial %d: window %v filters %+v", trial, w, filters)
 			}
-			// Guard against a vacuous pass: the generated queries must
-			// actually select events, not agree on emptiness.
+			// Guard against a vacuous pass: the queries must select events.
 			require.Greater(t, matched, 5000,
 				"fixture sanity: randomized queries selected too little")
 		})
 	}
 }
 
-// TestMatches_ConcurrentIngestBorrowSafety turns the borrow contract
-// into a race-detector gate. The ascending tree's cursors read mirror
-// snapshots in place — no clone anywhere — while AddTo publishes new
-// termStates on the same keys, including the sparse→dense promotion
-// that swaps a term's whole representation. Under -race, any write
-// that reached a borrowed snapshot (a COW slip in roaring, a shared
-// container mutation) fails the run; without -race the identity check
-// still pins that a pinned window's results are immune to concurrent
-// ingest past its End.
+// Turns the borrow contract into a race-detector gate: the ascending cursors
+// read mirror snapshots in place while AddTo publishes new termStates on the
+// same keys, including the sparse-to-dense promotion. Under -race any write
+// reaching a borrowed snapshot fails the run; without it, the identity check
+// still pins that a pinned window is immune to ingest past its End.
 func TestMatches_ConcurrentIngestBorrowSafety(t *testing.T) {
 	rng := rand.New(rand.NewSource(20260830))
 	v := newDiffVocab(t)
@@ -317,9 +301,8 @@ func TestMatches_ConcurrentIngestBorrowSafety(t *testing.T) {
 		require.NoError(t, err)
 		keysByID[id] = keys
 	}
-	// Only the pinned window is indexed up front; the writer feeds the
-	// rest live. The shared vocabulary is small, so most keys cross the
-	// sparse→dense promotion threshold mid-run.
+	// Only the pinned window is indexed up front; the writer feeds the rest
+	// live, and most keys cross the promotion threshold mid-run.
 	for id := range pinned {
 		for _, k := range keysByID[id] {
 			corpus.mirror.AddTo(k, uint32(id))
