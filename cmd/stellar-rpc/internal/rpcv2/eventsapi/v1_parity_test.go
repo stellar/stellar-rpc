@@ -205,7 +205,8 @@ func newShimClient(t *testing.T, lcms [][]byte) *jrpc2.Client {
 		func(db *hotchunk.DB) { r.PublishHandle(parityChunk, db) }, lcms...)
 	// The tip stamp is what latestLedgerCloseTime serves; it must be the
 	// last fixture's real close time or the parity diff catches it.
-	r.SetLatestLedger(parityChunk.FirstLedger()+uint32(len(lcms))-1, parityCloseTime(len(lcms)-1))
+	r.SetLatestLedger(parityChunk.FirstLedger()+uint32(len(lcms))-1,
+		query.CloseTimeAt(parityCloseTime(len(lcms)-1)))
 	view, err := r.NewReadView()
 	require.NoError(t, err)
 	t.Cleanup(view.Release)
