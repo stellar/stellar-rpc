@@ -274,11 +274,10 @@ func txMeta(acctSeq uint32, successful bool) xdr.LedgerCloseMeta {
 			TxApplyProcessing: xdr.TransactionMeta{
 				V:          3,
 				Operations: &[]xdr.OperationMeta{},
-				// The envelope is soroban (Ext V1), so its V3 meta must carry
-				// SorobanMeta, as on the real network.
-				V3: &xdr.TransactionMetaV3{SorobanMeta: &xdr.SorobanTransactionMeta{
-					ReturnValue: xdr.ScVal{Type: xdr.ScValTypeScvVoid},
-				}},
+				// Soroban envelope with NO SorobanMeta: a Soroban tx charged
+				// but never executed (real on protocol 20-22 history). Pins
+				// the [[]] contractEventsXdr arity the view path must serve.
+				V3: &xdr.TransactionMetaV3{},
 			},
 			Result: xdr.TransactionResultPair{
 				TransactionHash: txHash(acctSeq),

@@ -50,20 +50,19 @@ type WithLedgerRawFn func(raw []byte) error
 // LedgerReaderTx is a read-only snapshot of the ledger store. Call Done to
 // release it.
 //
-// GetLedger, GetLedgerView, and WithLedgerRaw are one walk, not free-form
-// point reads. Call them with ascending, contiguous sequences, starting from
-// the first call's sequence, and use only one of them per Tx: they share a
-// single cursor, so interleaving them consumes positions from each other.
-// Read at most methods.LedgerScanLimit ledgers per Tx. The v1 (SQL) backend
-// accepts any pattern, while the v2 backend only walks from a forward
-// iterator primed on the first call.
+// GetLedger and WithLedgerRaw are one walk, not free-form point reads. Call
+// them with ascending, contiguous sequences, starting from the first call's
+// sequence, and use only one of the two per Tx: they share a single cursor,
+// so interleaving them consumes positions from each other. Read at most
+// methods.LedgerScanLimit ledgers per Tx. The v1 (SQL) backend accepts any
+// pattern, while the v2 backend only walks from a forward iterator primed on
+// the first call.
 //
 // WithLedgerRaw is GetLedger without the decode: fn borrows the marshaled
 // LCM under WithLedgerRawFn's loan terms. found=false means fn never ran;
 // fn's own error comes back verbatim with found=true.
 type LedgerReaderTx interface {
 	GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error)
-	GetLedgerView(ctx context.Context, sequence uint32) (xdr.LedgerCloseMetaView, bool, error)
 	WithLedgerRaw(ctx context.Context, sequence uint32, fn WithLedgerRawFn) (bool, error)
 	GetLedgerRange(ctx context.Context) (LedgerRange, error)
 	BatchGetLedgers(ctx context.Context, start uint32, end uint32) ([]LedgerMetadataChunk, error)

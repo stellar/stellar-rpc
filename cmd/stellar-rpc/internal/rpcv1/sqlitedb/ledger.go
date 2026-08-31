@@ -92,14 +92,6 @@ func (l ledgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.Led
 	return getLedgerFromDB(ctx, l.tx, sequence)
 }
 
-func (l ledgerReaderTx) GetLedgerView(ctx context.Context, sequence uint32) (xdr.LedgerCloseMetaView, bool, error) {
-	meta, found, err := getLedgerRawFromDB(ctx, l.tx, sequence)
-	if err != nil || !found {
-		return nil, found, err
-	}
-	return xdr.LedgerCloseMetaView(meta), true, nil
-}
-
 // WithLedgerRaw lends the ledger's stored meta blob without decoding it. The
 // blob is ours to lend: database/sql clones each BLOB scanned into a *[]byte.
 func (l ledgerReaderTx) WithLedgerRaw(

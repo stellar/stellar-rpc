@@ -76,13 +76,6 @@ func (m *MockLedgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xd
 	return args.Get(0).(xdr.LedgerCloseMeta), args.Bool(1), args.Error(2) //nolint:forcetypeassert
 }
 
-func (m *MockLedgerReaderTx) GetLedgerView(ctx context.Context, sequence uint32) (
-	xdr.LedgerCloseMetaView, bool, error,
-) {
-	args := m.Called(ctx, sequence)
-	return args.Get(0).(xdr.LedgerCloseMetaView), args.Bool(1), args.Error(2) //nolint:forcetypeassert
-}
-
 func (m *MockLedgerReaderTx) WithLedgerRaw(
 	ctx context.Context, sequence uint32, fn store.WithLedgerRawFn,
 ) (bool, error) {
