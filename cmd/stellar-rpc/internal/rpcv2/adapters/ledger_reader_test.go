@@ -519,6 +519,53 @@ func TestWithLedgerRaw_MissDoesNotRunFn(t *testing.T) {
 	}
 }
 
+func TestTxWithLedgerRaw_LendsTheSameBytesGetLedgerDecodes(t *testing.T) {
+	ctx, reader, c0, _ := sparseFixture(t)
+
+	decodeTx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = decodeTx.Done() }()
+	rawTx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = rawTx.Done() }()
+
+	for seq := c0.FirstLedger(); seq <= c0.FirstLedger()+3; seq++ {
+		lcm, ok, err := decodeTx.GetLedger(context.Background(), seq)
+		require.NoError(t, err)
+		require.True(t, ok, "ledger %d", seq)
+		want, err := lcm.MarshalBinary()
+		require.NoError(t, err)
+
+		var got []byte
+		found, err := rawTx.WithLedgerRaw(context.Background(), seq, func(raw []byte) error {
+			// The loan forbids retaining raw, so clone inside fn.
+			got = bytes.Clone(raw)
+			return nil
+		})
+		require.NoError(t, err)
+		require.True(t, found, "ledger %d", seq)
+		assert.Equal(t, want, got, "ledger %d", seq)
+	}
+}
+
+func TestTxWithLedgerRaw_MissDoesNotRunFn(t *testing.T) {
+	ctx, reader, c0, c1 := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	for _, seq := range []uint32{0, 1, c0.FirstLedger() - 1, c1.FirstLedger() + 1} {
+		ran := false
+		found, err := tx.WithLedgerRaw(context.Background(), seq, func([]byte) error {
+			ran = true
+			return nil
+		})
+		assert.NoError(t, err)
+		assert.False(t, found, "ledger %d", seq)
+		assert.False(t, ran, "fn must not run for an absent ledger %d", seq)
+	}
+}
+
 func TestWithLedgerRaw_CallbackErrorSurfacesAsFound(t *testing.T) {
 	ctx, reader, c0, _ := sparseFixture(t)
 	boom := errors.New("boom")
@@ -526,4 +573,60 @@ func TestWithLedgerRaw_CallbackErrorSurfacesAsFound(t *testing.T) {
 	found, err := reader.WithLedgerRaw(ctx, c0.FirstLedger(), func([]byte) error { return boom })
 	assert.ErrorIs(t, err, boom)
 	assert.True(t, found)
+}
+
+func TestTxWithLedgerRaw_CallbackErrorSurfacesAsFound(t *testing.T) {
+	ctx, reader, c0, _ := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	boom := errors.New("boom")
+	// found stays true: the ledger WAS there, the caller's own callback failed.
+	found, err := tx.WithLedgerRaw(context.Background(), c0.FirstLedger(),
+		func([]byte) error { return boom })
+	assert.ErrorIs(t, err, boom)
+	assert.True(t, found)
+}
+
+func TestTxWithLedgerRaw_SharesTheWalkWithGetLedger(t *testing.T) {
+	ctx, reader, c0, _ := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	_, ok, err := tx.GetLedger(context.Background(), c0.FirstLedger())
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// One cursor: the raw accessor picks up where GetLedger left off, and
+	// skipping ahead breaks the same contract just as loudly.
+	found, err := tx.WithLedgerRaw(context.Background(), c0.FirstLedger()+1,
+		func([]byte) error { return nil })
+	require.NoError(t, err)
+	require.True(t, found)
+
+	_, err = tx.WithLedgerRaw(context.Background(), c0.FirstLedger()+3,
+		func([]byte) error { return nil })
+	assert.ErrorContains(t, err, "non-sequential")
+}
+
+func TestTxWithLedgerRaw_StopsOnCanceledContext(t *testing.T) {
+	baseCtx, reader, c0, _ := sparseFixture(t)
+	tx, err := reader.NewTx(baseCtx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	ctx, cancel := context.WithCancel(baseCtx)
+	_, err = tx.WithLedgerRaw(ctx, c0.FirstLedger(), func([]byte) error { return nil })
+	require.NoError(t, err)
+
+	cancel()
+	ran := false
+	_, err = tx.WithLedgerRaw(ctx, c0.FirstLedger()+1, func([]byte) error {
+		ran = true
+		return nil
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, ran)
 }
