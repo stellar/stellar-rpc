@@ -360,20 +360,12 @@ func buildMPHF(
 // <chunkDir>/index.hash produced by an earlier buildMPHF) for
 // query-time lookups.
 //
-// The file is mmapped (streamhash.Open), never read whole: pages
-// fault in on first touch from the kernel page cache, which is
-// keyed by the file rather than the mapping, so every reader of the
-// same chunk shares the resident pages no matter how short its own
-// lifetime. A per-request open therefore costs a map/unmap pair and
-// the few pages its lookups touch — not a read and heap copy of the
-// whole file, whose size has no design bound: it scales with the
-// chunk's distinct term count, and terms are caller-controlled
-// on-chain data (a 60M-term chunk makes this file 18.5 MB, and a
-// whole-file read per request out of that is the cardinality cliff
-// this used to be). A deployment on storage where cold faults are
-// expensive AND the page cache cannot hold a serving chunk's index
-// resident would want a prefault (madvise WILLNEED) on open, not a
-// heap copy.
+// The file is mmapped, never read whole. Pages fault in from the kernel page
+// cache, which is keyed by the file rather than the mapping, so every reader
+// of the same chunk shares them however short its own lifetime. A per-request
+// open therefore costs a map/unmap pair and the pages its lookups touch, not a
+// heap copy of a file whose size has no design bound: it scales with the
+// chunk's distinct term count, which is caller-controlled on-chain data.
 //
 // Close unmaps; callers must call it.
 func openMPHF(path string) (*mphf, error) {

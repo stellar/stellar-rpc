@@ -264,11 +264,9 @@ func (s *Store) BatchMultiGet(cf string, keys [][]byte) ([][]byte, error) {
 	}
 	defer pinned.Destroy()
 
-	// Copy out of the pinned cache pages (Destroy invalidates them) —
-	// through one arena, not a clone per value: a batch is fetched,
-	// decoded, and dropped as a unit, so per-value allocations only add
-	// GC work. The returned slices therefore share one backing array:
-	// they are read-only, and retaining any of them retains the batch.
+	// Copy out of the pinned cache pages, which Destroy invalidates, through
+	// one arena rather than a clone per value. The returned slices share one
+	// backing array: they are read-only, and retaining one retains the batch.
 	total := 0
 	for _, p := range pinned {
 		total += len(p.Data())

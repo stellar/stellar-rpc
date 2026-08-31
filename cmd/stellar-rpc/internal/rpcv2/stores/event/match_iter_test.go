@@ -1,12 +1,8 @@
 package event
 
-// match_iter_test.go covers the ascending path's un-materialized
-// query plan: the cursor sources, the union/intersect combinators,
-// and the tree candidateIter assembles from them. The end-to-end
-// semantics stay pinned black-box by match_test.go; what is pinned
-// here is the machinery underneath it, plus a randomized differential
-// check that the tree and the descending path's materialized
-// bitmap algebra answer identically.
+// match_iter_test.go covers the ascending path's un-materialized query plan:
+// the cursor sources, the combinators, and the tree candidateIter assembles,
+// plus a randomized differential against the materialized bitmap algebra.
 
 import (
 	"context"
@@ -27,12 +23,11 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
 
-// wholeWindow is the no-op window: every cursor test that is not about
-// clamping uses it.
+// wholeWindow is the no-op window, for every test not about clamping.
 var wholeWindow = IDRange{Start: 0, End: ^uint32(0)}
 
-// drain pulls a cursor dry. Always returns a non-nil slice so an empty
-// result compares equal to a materialized bitmap's ToArray().
+// drain pulls a cursor dry, never returning nil so an empty result compares
+// equal to a materialized bitmap's ToArray().
 func drain(it idIter) []uint32 {
 	out := []uint32{}
 	for {
@@ -45,9 +40,7 @@ func drain(it idIter) []uint32 {
 	}
 }
 
-// sparseSource / denseSource build the two representations the index
-// actually holds, so a test can pin that both cursor sources behave
-// identically.
+// sparseSource and denseSource build the two representations the index holds.
 func sparseSource(ids ...uint32) postings { return postings{ids: ids} }
 
 func denseSource(ids ...uint32) postings {
@@ -56,8 +49,7 @@ func denseSource(ids ...uint32) postings {
 	return postings{bm: bm}
 }
 
-// sourceKinds runs fn against both representations of the same id set,
-// so every cursor-level assertion is made twice.
+// sourceKinds runs fn against both representations of the same id set.
 func sourceKinds(ids ...uint32) map[string]func() postings {
 	return map[string]func() postings{
 		"sparse": func() postings { return sparseSource(ids...) },
@@ -74,10 +66,8 @@ func TestPostingsPresent(t *testing.T) {
 	assert.Empty(t, drain(postings{bm: roaring.New()}.iter(wholeWindow)))
 }
 
-// TestIDIterSources pins peek/next/advance on both leaf sources: peek
-// does not consume, advance lands on the first id at or above min,
-// advance never moves backwards, and both are idempotent at
-// exhaustion.
+// peek does not consume, advance lands on the first id at or above the floor
+// and never moves backwards, and both are idempotent at exhaustion.
 func TestIDIterSources(t *testing.T) {
 	for name, mk := range sourceKinds(3, 7, 8, 20, 100) {
 		t.Run(name, func(t *testing.T) {
@@ -115,9 +105,8 @@ func TestIDIterSources(t *testing.T) {
 	}
 }
 
-// TestIDIterSourcesWindowClampsBothEnds pins the window applied at the
-// leaf: ids below Start are skipped at construction and ids at or
-// above the exclusive End exhaust the cursor.
+// The window applied at the leaf: ids below Start are skipped at construction
+// and ids at or above the exclusive End exhaust the cursor.
 func TestIDIterSourcesWindowClampsBothEnds(t *testing.T) {
 	for name, mk := range sourceKinds(1, 4, 5, 6, 9, 10, 11) {
 		t.Run(name, func(t *testing.T) {
@@ -154,9 +143,8 @@ func TestEmptyIter(t *testing.T) {
 	assert.Empty(t, drain(it))
 }
 
-// TestUnionIterDedups is the combinator's load-bearing property: an id
-// several children hold is yielded once. Emitting it per child would
-// hand FetchEvents a duplicate, which it rejects outright.
+// An id several children hold is yielded once; emitting it per child would
+// hand FetchEvents a duplicate, which it rejects.
 func TestUnionIterDedups(t *testing.T) {
 	u := &unionIter{children: []idIter{
 		sparseSource(1, 3, 5, 7).iter(wholeWindow),
@@ -196,9 +184,8 @@ func TestUnionIterAdvanceAndEdges(t *testing.T) {
 	assert.Empty(t, drain(allEmpty))
 }
 
-// TestIntersectIterGallops covers the AND: a plain overlap, a
-// three-way overlap that forces several alignment passes, disjoint
-// children, and an empty child short-circuiting the whole thing.
+// The AND: a plain overlap, a three-way overlap forcing several alignment
+// passes, disjoint children, and an empty child short-circuiting.
 func TestIntersectIterGallops(t *testing.T) {
 	t.Run("overlap", func(t *testing.T) {
 		n := &intersectIter{children: []idIter{
@@ -209,8 +196,8 @@ func TestIntersectIterGallops(t *testing.T) {
 	})
 
 	t.Run("three way with long gallops", func(t *testing.T) {
-		// Each child holds a long run the others skip, so alignment
-		// has to gallop repeatedly and in both orders.
+		// Each child holds a long run the others skip, so alignment gallops
+		// repeatedly and in both orders.
 		a := make([]uint32, 0, 400)
 		b := make([]uint32, 0, 400)
 		c := make([]uint32, 0, 400)
@@ -266,11 +253,8 @@ func TestIntersectIterAdvance(t *testing.T) {
 	assert.Equal(t, []uint32{6, 8}, drain(n))
 }
 
-// TestSingleChildCollapse pins that a one-input union or intersect is
-// the input itself, not a wrapper. The materialized path needs the
-// same guard for a harder reason (roaring's FastAnd/FastOr Clone a
-// singleton input); here it just keeps a one-constraint filter from
-// re-scanning a one-element slice per step.
+// A one-input union or intersect is the input itself, not a wrapper, which
+// keeps a one-constraint filter from re-scanning a one-element slice per step.
 func TestSingleChildCollapse(t *testing.T) {
 	leaf := sparseSource(1, 2).iter(wholeWindow)
 	assert.Same(t, leaf, unionOf([]idIter{leaf}))
@@ -281,9 +265,7 @@ func TestSingleChildCollapse(t *testing.T) {
 	assert.IsType(t, &intersectIter{}, intersectOf([]idIter{leaf, leaf}))
 }
 
-// TestGroupIterAbsentGroup pins the absent-group signal: a group whose
-// every term is missing from the index returns nil, which drops the
-// owning filter from the union entirely.
+// A group whose every term is missing returns nil, dropping the owning filter.
 func TestGroupIterAbsentGroup(t *testing.T) {
 	sources := []postings{
 		sparseSource(1, 2),
@@ -299,8 +281,7 @@ func TestGroupIterAbsentGroup(t *testing.T) {
 	assert.Equal(t, []uint32{1, 2, 3}, drain(groupIter(sources, []int{0, 3}, wholeWindow)))
 }
 
-// TestPostingsEstimate pins the ordering weight on both
-// representations: the term's whole-chunk cardinality, window and all.
+// The ordering weight is the term's whole-chunk cardinality, window and all.
 func TestPostingsEstimate(t *testing.T) {
 	assert.Equal(t, uint64(0), postings{}.estimate(), "the absent term weighs nothing")
 	assert.Equal(t, uint64(0), postings{bm: roaring.New()}.estimate())
@@ -310,8 +291,7 @@ func TestPostingsEstimate(t *testing.T) {
 		"cardinality spans containers")
 }
 
-// TestResolveGroup pins what a group reports about itself: presence,
-// and the summed weight that orders its filter's AND.
+// What a group reports about itself: presence, and its summed weight.
 func TestResolveGroup(t *testing.T) {
 	sources := []postings{
 		sparseSource(1, 2),
@@ -337,9 +317,8 @@ func TestResolveGroup(t *testing.T) {
 	assert.Equal(t, uint64(0), g.est)
 }
 
-// TestFilterIterOrdersRarestFirst pins the driver choice: the rarest
-// group leads the AND however the plan named its groups, which is what
-// bounds the walk at one round per id of that group.
+// The rarest group leads the AND however the plan named its groups, which is
+// what bounds the walk at one round per id of that group.
 func TestFilterIterOrdersRarestFirst(t *testing.T) {
 	sources := []postings{
 		denseSource(1, 2, 3, 4, 5, 6, 7, 8), // 0: the fat group
@@ -369,8 +348,7 @@ func TestFilterIterOrdersRarestFirst(t *testing.T) {
 		drain(filterIter(sources, []candidateGroup{one}, wholeWindow)))
 }
 
-// planGroups resolves a whole filter, for the tests that drive
-// filterIter directly.
+// planGroups resolves a whole filter, for tests driving filterIter directly.
 func planGroups(t *testing.T, sources []postings, plan termPlan) []candidateGroup {
 	t.Helper()
 	groups := make([]candidateGroup, 0, len(plan))
@@ -382,10 +360,8 @@ func planGroups(t *testing.T, sources []postings, plan termPlan) []candidateGrou
 	return groups
 }
 
-// TestIntersectIterSpills pins the fallback: an AND that overruns its
-// budget answers the rest of its window out of the bulk bitmap,
-// yielding exactly what the walk would have — no id repeated across
-// the seam, none dropped at it — at every budget the seam can fall on.
+// An AND that overruns its budget answers the rest of its window from the bulk
+// bitmap, yielding exactly what the walk would have at every seam position.
 func TestIntersectIterSpills(t *testing.T) {
 	sources := []postings{
 		denseSource(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
@@ -401,10 +377,8 @@ func TestIntersectIterSpills(t *testing.T) {
 		assert.Equal(t, []uint32{4, 8, 12}, drain(it), "budget %d", budget)
 	}
 
-	// A budget of zero spills on the first round, so the whole answer
-	// comes from the bulk bitmap — sparse group and all, which the
-	// aggregation inflates rather than walks — and the window still
-	// lands at the leaf.
+	// A budget of zero spills on the first round, so the whole answer comes
+	// from the bulk bitmap and the window still lands at the leaf.
 	it, ok := filterIter(sources, planGroups(t, sources, plan),
 		IDRange{Start: 0, End: 12}).(*intersectIter)
 	require.True(t, ok)
@@ -413,8 +387,7 @@ func TestIntersectIterSpills(t *testing.T) {
 	assert.NotNil(t, it.spilled)
 }
 
-// TestIntersectIterSpillAdvance pins the seam under advance: a gallop
-// that crosses the spill lands where the walk would have.
+// A gallop that crosses the spill lands where the walk would have.
 func TestIntersectIterSpillAdvance(t *testing.T) {
 	sources := []postings{
 		denseSource(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
@@ -436,9 +409,8 @@ func TestIntersectIterSpillAdvance(t *testing.T) {
 	}
 }
 
-// randomBulkPlan draws a corpus of overlapping terms in both
-// representations and one filter's plan over it, the shape family the
-// spill has to answer identically to the walk.
+// randomBulkPlan draws overlapping terms in both representations and one
+// filter's plan over them.
 func randomBulkPlan(rng *rand.Rand, idSpace int) ([]postings, termPlan) {
 	sources := make([]postings, 1+rng.Intn(5))
 	for i := range sources {
@@ -469,11 +441,10 @@ func randomBulkPlan(rng *rand.Rand, idSpace int) ([]postings, termPlan) {
 	return sources, plan
 }
 
-// TestFilterIterBulkMatchesWalk is the spill's equivalence gate: over
-// randomized plans, source shapes and windows, an AND that spills must
-// yield exactly what the unbounded walk yields, and both must equal the
-// materialized algebra. The budget is moved rather than the corpus, so
-// the same filter is answered every way.
+// Over randomized plans, shapes and windows, an AND that spills must yield
+// what the unbounded walk yields, and both must equal the materialized
+// algebra. The budget moves rather than the corpus, so one filter is answered
+// every way.
 func TestFilterIterBulkMatchesWalk(t *testing.T) {
 	rng := rand.New(rand.NewSource(20260901))
 	const idSpace = 4000
@@ -507,9 +478,8 @@ func TestFilterIterBulkMatchesWalk(t *testing.T) {
 		want := referenceCandidates([]termPlan{plan}, sources, window)
 		require.Equal(t, want, drain(walk),
 			"trial %d: window %v plan %v", trial, window, plan)
-		// Budgets in the low single digits put the seam at the start of
-		// a plan's answer and partway into it, so the join is under test
-		// and not just its ends.
+		// Low budgets put the seam at the start of a plan's answer and
+		// partway into it, so the join is under test and not just its ends.
 		for _, budget := range []uint64{0, 1, 3} {
 			it, n := build(budget)
 			require.Equal(t, want, drain(it),
@@ -533,18 +503,15 @@ func TestCandidateIterDropsFilterWithAbsentGroup(t *testing.T) {
 	plans := []termPlan{{{0}, {1}}, {{2}}}
 	assert.Equal(t, []uint32{9}, drain(candidateIter(plans, sources, wholeWindow)))
 
-	// Every filter dropped → the exhausted cursor, the
-	// un-materialized form of union.IsEmpty().
+	// Every filter dropped, so the cursor is exhausted.
 	allMissed := []termPlan{{{0}, {1}}}
 	it := candidateIter(allMissed, sources, wholeWindow)
 	_, ok := it.peek()
 	assert.False(t, ok)
 }
 
-// referenceCandidates is an independent, deliberately naive
-// materialized implementation of the same query algebra
-// candidateIter answers: OR within a group, AND across a filter's
-// groups, OR across filters, AND the window.
+// referenceCandidates is an independent, naive materialized implementation of
+// the algebra candidateIter answers.
 func referenceCandidates(plans []termPlan, sources []postings, window IDRange) []uint32 {
 	materialize := func(p postings) *roaring.Bitmap {
 		if p.bm != nil {
@@ -588,10 +555,8 @@ func referenceCandidates(plans []termPlan, sources []postings, window IDRange) [
 	return union.ToArray()
 }
 
-// TestMatchesSpillYieldsSameStream drives whole Matches calls with the
-// alignment budget shrunk, so every filter's AND spills on its first
-// rounds, and requires the stream to be the one the unbounded walk
-// yields. It puts the seam where it actually sits: under term
+// Drives whole Matches calls with the budget shrunk so every AND spills, and
+// requires the stream the unbounded walk yields — with the seam under term
 // planning, the window cap, the batch loop and the post-filter.
 func TestMatchesSpillYieldsSameStream(t *testing.T) {
 	rng := rand.New(rand.NewSource(20260902))
@@ -625,10 +590,8 @@ func TestMatchesSpillYieldsSameStream(t *testing.T) {
 		"fixture sanity: randomized queries selected too little")
 }
 
-// TestCandidateIterMatchesMaterializedAlgebra is the differential
-// gate: over randomized plans, source shapes (absent / sparse / dense
-// / present-but-empty) and windows, the un-materialized tree must
-// yield exactly what the bitmap algebra does.
+// Over randomized plans, source shapes and windows, the un-materialized tree
+// must yield exactly what the bitmap algebra does.
 func TestCandidateIterMatchesMaterializedAlgebra(t *testing.T) {
 	rng := rand.New(rand.NewSource(20260829))
 	const idSpace = 400
@@ -684,11 +647,9 @@ func TestCandidateIterMatchesMaterializedAlgebra(t *testing.T) {
 
 // ─── the A/B benchmark ──────────────────────────────────────────────
 
-// stubIndex is a Reader over an in-memory mirror and one shared event
-// payload: enough for Matches to run end to end without RocksDB, so a
-// benchmark measures the match layer rather than the storage tier.
-// FetchEvents reuses its result buffer, keeping the per-batch fetch
-// cost identical in both directions.
+// stubIndex is a Reader over an in-memory mirror and one shared payload, so a
+// benchmark measures the match layer rather than the storage tier. FetchEvents
+// reuses its buffer, keeping the per-batch fetch cost equal in both directions.
 type stubIndex struct {
 	mirror *ConcurrentBitmaps
 	count  uint32
@@ -878,25 +839,15 @@ func benchMatches(b *testing.B, descending bool) {
 	}
 }
 
-// BenchmarkMatchesAscending measures the un-materialized iterator tree
-// and BenchmarkMatchesDescending its materialized twin — the same
-// query, the same page size, the same fetch work, differing only in
-// which candidate path Matches takes. The pair is the in-tree A/B for
-// the un-materialized path; it stays honest as long as descending
-// keeps the bitmap algebra.
+// The in-tree A/B for the un-materialized path: the same query, page size and
+// fetch work, differing only in which candidate path Matches takes.
 func BenchmarkMatchesAscending(b *testing.B)  { benchMatches(b, false) }
 func BenchmarkMatchesDescending(b *testing.B) { benchMatches(b, true) }
 
-// ─── the candidate-shape microbench ─────────────────────────────────
-//
-// The A/B above drives one production query end to end; the matrix
-// below isolates the candidate set itself. Both paths answer the same
-// synthetic plan over the same mirror — candidateIter's cursor tree
-// against unionForFilters' bitmap algebra — with fetch and
-// post-filter out of frame, so a shape's number is candidate work
-// alone. The shapes are the term geometries the two are expected to
-// disagree on: fat partially-overlapping ANDs, a skewed AND, a deep
-// AND, and a wide OR.
+// The candidate-shape microbench isolates the candidate set itself: both paths
+// answer the same synthetic plan over the same mirror, with fetch and
+// post-filter out of frame. The shapes are the term geometries the two are
+// expected to disagree on.
 
 // benchFat is one fat term's cardinality against benchEvents: ~7% of
 // the domain, the density at which roaring holds a term as bitmap
@@ -918,11 +869,10 @@ func (r *benchRand) next() uint64 {
 	return x
 }
 
-// scatter draws exactly k ascending ids from the residue class
-// {i : i ≡ res (mod m), i < domain}, one per fixed stride at a
-// jittered offset inside it. Terms built on disjoint residue classes
-// interleave at single-id granularity while sharing nothing, so a
-// shape's overlap is exactly the class its terms are built to share.
+// scatter draws k ascending ids from one residue class, one per stride at a
+// jittered offset. Terms on disjoint classes interleave at single-id
+// granularity while sharing nothing, so a shape's overlap is exactly the class
+// its terms share.
 func scatter(rng *benchRand, domain, m, res uint32, k int) []uint32 {
 	if k == 0 {
 		return nil
@@ -939,12 +889,9 @@ func scatter(rng *benchRand, domain, m, res uint32, k int) []uint32 {
 	return ids
 }
 
-// fatGroup builds n terms of card ids each: term i draws its private
-// ids from residue class base+i, and every term also holds the class
-// base+n, so the group's joint intersection is exactly that shared
-// class and every pairwise overlap is the same set. mod is the total
-// number of classes in play, so several groups can be laid over one
-// domain without colliding.
+// fatGroup builds n terms of card ids each, drawing private ids from one
+// residue class per term plus one class every term holds, so the joint
+// intersection is exactly that shared class.
 func fatGroup(rng *benchRand, domain, mod, base uint32, n, card, shared int) [][]uint32 {
 	common := scatter(rng, domain, mod, base+uint32(n), shared)
 	out := make([][]uint32, n)
@@ -1082,12 +1029,9 @@ func benchShapes(domain uint32) []struct {
 		}},
 		{"h_and2_fat_overlapping", func() *benchShape {
 			rng := benchRand(8)
-			// The serving default: one selective term AND-ed with a
-			// near-total one (an event type constrains almost
-			// nothing). The intersection is nearly the selective term
-			// itself, so a page comes out of the window's first
-			// fraction — the shape the cursor tree exists to serve,
-			// and the one any eager rule must leave alone.
+			// The serving default: one selective term AND-ed with a near-total
+			// one, so a page comes out of the window's first fraction. This
+			// is the shape any eager rule must leave alone.
 			selective := scatter(&rng, domain, 3, 0, fat)
 			nearAll := make([]uint32, 0, domain)
 			for id := range domain {
@@ -1164,11 +1108,9 @@ func benchCandidatePage(b *testing.B, s *benchShape) {
 	}
 }
 
-// benchMaterializedPage is benchCandidatePage's twin over the bitmap
-// algebra: build the whole candidate set, then read one page off it.
-// The direction of that read is immaterial — the materialization
-// dominates and the page is 1000 steps either way — so it reads
-// ascending, which makes the two harnesses answer bit for bit.
+// benchMaterializedPage is benchCandidatePage's twin over the bitmap algebra:
+// build the whole candidate set, then read one page off it. It reads ascending
+// so the two harnesses answer bit for bit.
 func benchMaterializedPage(b *testing.B, s *benchShape) {
 	b.Helper()
 	ctx := context.Background()
@@ -1228,12 +1170,10 @@ func TestBenchShapesAgree(t *testing.T) {
 	}
 }
 
-// TestBatchSizes pins the first-batch hint contract: a positive hint
-// sizes the first fetch (a page-sized request is one round trip), a
-// wild hint is capped at eight default batches, and later batches
-// always use the default. The seam interplay matters: the cap scales
-// with matchBatchSize so a test-shrunk batch size cannot be blown past
-// by a hint.
+// The first-batch hint contract: a positive hint sizes the first fetch, a wild
+// one is capped at eight default batches, and later batches use the default.
+// The cap scales with matchBatchSize, so a test-shrunk batch cannot be blown
+// past by a hint.
 func TestBatchSizes(t *testing.T) {
 	first, rest := batchSizes(0)
 	require.Equal(t, matchBatchSize, first)

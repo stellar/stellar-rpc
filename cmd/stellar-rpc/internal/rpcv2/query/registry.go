@@ -38,9 +38,7 @@ type Registry struct {
 
 	// coldEventReadConcurrency overrides the packfile read fan-out one cold
 	// events read gets. Zero means defaultColdEventReadConcurrency, resolved
-	// where the reader is opened (ReadView.Events). Set through
-	// SetColdEventReadConcurrency — the deployment-reachable knob the fan-out
-	// constant's doc points at — or left zero for the swept default.
+	// where the reader is opened. Set through SetColdEventReadConcurrency.
 	coldEventReadConcurrency int
 
 	// latest is the newest fully ingested ledger visible to queries, paired with
@@ -165,10 +163,10 @@ func NewRegistry(cat *catalog.Catalog, retention geometry.Retention) *Registry {
 	return r
 }
 
-// SetColdEventReadConcurrency overrides the packfile read fan-out cold
-// events reads get; zero restores defaultColdEventReadConcurrency. Call it
-// at wiring time, before views are handed out: views copy the value at
-// acquisition, so a change never shifts an in-flight request's fan-out.
+// SetColdEventReadConcurrency overrides the packfile read fan-out cold events
+// reads get; zero restores the default. Call it at wiring time, before views
+// are handed out: a view copies the value at acquisition, so a change never
+// shifts an in-flight request's fan-out.
 func (r *Registry) SetColdEventReadConcurrency(n int) {
 	r.coldEventReadConcurrency = n
 }
@@ -303,9 +301,8 @@ type ReadView struct {
 	// so a view built without it still bounds its pages.
 	maxScanLedgers uint32
 
-	// coldEventReadConcurrency is the registry's cold events fan-out, copied
-	// at acquisition like maxScanLedgers. Zero means
-	// defaultColdEventReadConcurrency.
+	// coldEventReadConcurrency is the registry's cold events fan-out, copied at
+	// acquisition like maxScanLedgers. Zero means the default.
 	coldEventReadConcurrency int
 
 	// closers releases every cold reader this view opened (hot facades are

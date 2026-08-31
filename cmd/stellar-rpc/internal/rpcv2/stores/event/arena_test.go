@@ -7,9 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestByteArenaCopiesAreStable pins the arena's one load-bearing property:
-// a returned copy never moves or changes, however much is copied after it —
-// including copies that force new chunks and copies larger than a chunk.
+// A returned copy never moves or changes, however much is copied after it.
 func TestByteArenaCopiesAreStable(t *testing.T) {
 	var a byteArena
 	src := make([]byte, 300)
@@ -31,8 +29,7 @@ func TestByteArenaCopiesAreStable(t *testing.T) {
 	for i := range got {
 		require.True(t, bytes.Equal(got[i], want[i]), "copy %d changed", i)
 	}
-	// Appending to a returned copy must not scribble into the arena: the
-	// three-index slice pins capacity to length.
+	// Appending to a returned copy must not scribble into the arena.
 	c := a.copy([]byte{1, 2, 3})
 	next := a.copy([]byte{9, 9, 9})
 	_ = append(c, 7) // the append must copy, not extend in place

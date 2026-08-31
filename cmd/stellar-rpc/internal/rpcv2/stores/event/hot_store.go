@@ -29,15 +29,10 @@ const (
 //
 //   - DataCF holds XDR-encoded event payloads: compressible (zstd
 //     typically 2-3× on XDR) and read in batches via
-//     BatchedMultiGetCF. The block is the decompression unit of a
-//     point read, so its size trades compression context against
-//     per-miss work: getEvents fetches scattered ~250B events, and a
-//     32 KiB block made every cache miss decompress ~128 events to
-//     serve one. Measured under the K-stratified events corpus at
-//     limit=1000, 8 KiB vs 32 KiB: service p50 −53% / p99 −59% and
-//     −41% peak RSS at stress density (sac-6000), neutral on pubnet;
-//     +0.8% on disk; ingest wall unchanged; 4 KiB adds nothing more
-//     (the curve is flat below 8 KiB).
+//     BatchedMultiGetCF. The block is the decompression unit of a point
+//     read, so its size trades compression context against per-miss work:
+//     getEvents fetches scattered ~250B events, and a 32 KiB block made
+//     every cache miss decompress ~128 of them to serve one.
 //   - IndexCF stores 20-byte (term_hash || event_id) keys with
 //     empty values — nothing in the values to compress, and small
 //     blocks reduce wasted I/O per random Lookup miss (each Lookup
@@ -112,8 +107,8 @@ type HotStore struct {
 	offsets    *ConcurrentLedgerOffsets
 }
 
-// Compile-time guards: *HotStore satisfies Reader, and the optional
-// postingReader seam match.go's ascending path probes for.
+// Compile-time guards: *HotStore satisfies Reader and the optional
+// postingReader seam.
 var (
 	_ Reader        = (*HotStore)(nil)
 	_ postingReader = (*HotStore)(nil)
@@ -455,23 +450,14 @@ func (h *HotStore) IngestLedgerToBatch(
 	return func() { h.applyLedger(startID, termKeys) }, nil
 }
 
-// lookupPostings is the no-materialize half of LookupKeys, and the
-// hot store's implementation of the optional postingReader seam the
-// ascending match path probes for (see match.go). It returns each
-// term's live mirror representation — sorted ids for a sparse term,
-// the roaring bitmap for a dense one — so a query that only walks ids
-// in ascending order never pays Get's roaring.New + AddMany per
-// sparse term.
+// lookupPostings is the no-materialize half of LookupKeys, and the hot store's
+// implementation of the optional postingReader seam. It returns each term's
+// live mirror representation, so a query that only walks ids in ascending
+// order never pays Get's roaring.New plus AddMany per sparse term.
 //
-// Results are positionally aligned with keys; a miss is the zero
-// postings, which postings.present() reports as absent. Same
-// borrowed-snapshot contract as LookupKeys: read-only, valid
+// Results are positionally aligned with keys; a miss is the zero postings.
+// Same borrowed-snapshot contract as LookupKeys: read-only, valid
 // indefinitely.
-//
-// The cold reader deliberately does NOT implement this. Its postings
-// arrive as freshly-unmarshaled bitmaps out of index.pack, so there
-// is no un-materialized representation to expose; match.go's fallback
-// wraps its LookupKeys bitmaps in the same cursor type.
 func (h *HotStore) lookupPostings(ctx context.Context, keys []TermKey) ([]postings, error) {
 	if h.chunkStore.IsClosed() {
 		return nil, stores.ErrStoreClosed

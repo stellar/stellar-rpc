@@ -158,13 +158,13 @@ type Reader struct {
 
 	waitOpen func() error // blocks until background open completes
 
-	// closed/inflight are the Close-vs-read handshake that lets Close
-	// recycle the pooled offsets. Reads increment inflight before
-	// checking closed; Close sets closed before reading inflight — so
-	// either the read sees closed and backs out, or Close sees the
-	// reader and leaves the offsets to the garbage collector. A read
-	// racing Close is a caller contract violation either way; the
-	// handshake turns its worst case from memory reuse into a leak.
+	// closed and inflight are the Close-vs-read handshake that lets Close
+	// recycle the pooled offsets. Reads increment inflight before checking
+	// closed; Close sets closed before reading inflight. Either the read
+	// sees closed and backs out, or Close sees the reader and leaves the
+	// offsets to the garbage collector. A read racing Close is a caller
+	// contract violation either way; this turns its worst case from memory
+	// reuse into a leak.
 	closed   atomic.Bool
 	inflight atomic.Int64
 
@@ -269,9 +269,9 @@ func doOpen(path string) openResult {
 	var indexBuf []byte
 	var appData []byte
 
-	// Both arms hand decodeIndex a view into a pooled buffer: the index
-	// bytes are dead once the offsets are built (decodeIndex retains
-	// nothing), so only appData — which the Reader keeps — is copied out.
+	// Both arms hand decodeIndex a view into a pooled buffer. The index bytes
+	// are dead once the offsets are built, so only appData, which the Reader
+	// keeps, is copied out.
 	if tailSize <= speculativeSize {
 		// Index + appData are already inside the speculative read.
 		tailStart := len(speculativeBuf) - int(tailSize)
@@ -786,11 +786,10 @@ func (r *Reader) Close() error {
 		if r.file != nil {
 			closeErr = r.file.Close()
 		}
-		// Recycle the decoded offsets only when no read is in flight:
-		// closed is already set, so no new read can begin, and a zero
-		// inflight count proves no existing one holds the array. A read
-		// still in flight here is a contract violation; leaving the
-		// array to the garbage collector keeps it merely a leak.
+		// Recycle only when no read is in flight: closed is already set, so
+		// no new read can begin, and a zero count proves no existing one
+		// holds the array. A read still in flight is a contract violation;
+		// leaving the array to the collector keeps it merely a leak.
 		if r.inflight.Load() == 0 && r.offsets != nil {
 			putOffsets(r.offsets)
 			r.offsets = nil
@@ -801,12 +800,11 @@ func (r *Reader) Close() error {
 }
 
 // errReaderClosed is returned by reads that begin after Close. It wraps
-// os.ErrClosed so callers matching the pre-existing closed-file error
-// shape keep matching.
+// os.ErrClosed so callers matching the closed-file error shape keep matching.
 var errReaderClosed = fmt.Errorf("packfile: read after Close: %w", os.ErrClosed)
 
-// beginRead registers a read with the Close handshake; endRead must run
-// when the read finishes. See the closed/inflight field comment.
+// beginRead registers a read with the Close handshake; endRead must run when
+// the read finishes. See the closed and inflight field comment.
 func (r *Reader) beginRead() error {
 	r.inflight.Add(1)
 	if r.closed.Load() {

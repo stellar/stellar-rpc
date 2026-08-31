@@ -103,9 +103,9 @@ func decodeIndex(buf []byte, recordCount int, indexSize int, indexBase int64) ([
 		return nil, fmt.Errorf("%w: index has %d unconsumed bytes after decoding all groups", ErrCorrupt, pos)
 	}
 
-	// Forward prefix-sum to build absolute offsets from deltas. The
-	// pooled array is fully overwritten: every entry below recordCount by
-	// the loop, the sentinel by the assignment after it.
+	// Forward prefix-sum to build absolute offsets from deltas. The pooled
+	// array is fully overwritten: the entries by the loop, the sentinel by
+	// the assignment after it.
 	offsets := getOffsets(recordCount + 1)
 
 	offset := int64(0)

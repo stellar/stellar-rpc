@@ -458,13 +458,11 @@ func (c *ColdReader) FetchEvents(ctx context.Context, eventIDs []uint32) ([]Payl
 		positions[i] = int(id)
 	}
 	results := make([]Payload, len(eventIDs))
-	// One arena per call, shared by every worker: a call's payloads live and
-	// die together, so per-payload clones would only add GC work. The arena
-	// is one appended buffer and is single-threaded by construction, while
-	// ReadItems calls the callback from up to Concurrency goroutines — hence
-	// the lock. It covers the copy alone; the read, the record decode and the
-	// Unmarshal all stay outside it, so a fan-out still overlaps everything
-	// that costs.
+	// One arena per call, shared by every worker, because a call's payloads
+	// live and die together. The arena is a single appended buffer while
+	// ReadItems calls back from up to Concurrency goroutines, hence the lock.
+	// It covers the copy alone, so a fan-out still overlaps the read, the
+	// record decode and the Unmarshal.
 	var (
 		arenaMu sync.Mutex
 		arena   byteArena

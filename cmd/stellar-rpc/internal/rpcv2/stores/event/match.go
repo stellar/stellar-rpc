@@ -11,12 +11,10 @@ package event
 // then stream in internal batches. On the cold path this is one
 // MPHF+index.pack round trip per Matches call, not per batch.
 //
-// The candidate set is then built one of two ways. ASCENDING pulls
-// ids through the un-materialized iterator tree in match_iter.go: no
-// intermediate bitmap, and no index work past what the consumer
-// pulls. DESCENDING materializes a union bitmap through roaring's
-// aggregation, because roaring's reverse iterator offers no gallop to
-// build ascending-style combinators on.
+// The candidate set is built one of two ways. Ascending pulls ids through the
+// un-materialized iterator tree in match_iter.go. Descending materializes a
+// union bitmap, because roaring's reverse iterator offers no gallop to build
+// ascending-style combinators on.
 
 import (
 	"bytes"
@@ -225,13 +223,10 @@ type Match struct {
 // LookupKeys result.
 type termPlan [][]int
 
-// batchSizes resolves the first and following internal batch sizes
-// from the caller's hint. A positive hint sizes the first batch in both
-// directions — smaller for a small page, larger so a page-sized request
-// is one storage round trip instead of several — capped at eight default
-// batches so a wild hint cannot demand an unbounded fetch. Both results
-// are clamped positive, so a zero test seam cannot stall a stream (a
-// zero step never advances).
+// batchSizes resolves the first and following internal batch sizes from the
+// caller's hint, capped at eight default batches so a wild hint cannot demand
+// an unbounded fetch. Both are clamped positive: a zero step never advances,
+// so a zero test seam would stall the stream.
 func batchSizes(hint int) (int, int) {
 	rest := max(1, matchBatchSize)
 	first := rest
@@ -261,12 +256,9 @@ func batchSizes(hint int) (int, int) {
 // drops are invisible: the iterator advances past them internally, so
 // consumers never see or reason about resume state.
 //
-// firstBatch sizes the first internal fetch batch. A consumer that
-// will stop after N matches passes N, so the first round trip fetches
-// no more than it needs; zero and negative hints use the default, and
-// a positive hint is honored up to eight default batches (a page-sized
-// request is one round trip; a wild hint cannot demand an unbounded
-// fetch). Later batches use the default size. The hint changes I/O
+// firstBatch sizes the first internal fetch batch: a consumer that will stop
+// after N matches passes N. Zero and negative hints use the default, and a
+// positive one is honored up to eight default batches. The hint changes I/O
 // counts only, never what the stream yields.
 func Matches(
 	ctx context.Context, r Reader, filters []Filter, window IDRange,
@@ -288,13 +280,7 @@ func Matches(
 			streamRange(ctx, r, window, descending, firstBatch, yield)
 			return
 		}
-		// Direction splits the plan from here. Ascending pulls
-		// candidates through the un-materialized iterator tree
-		// (match_iter.go): no intermediate bitmap, and the walk stops
-		// the moment the consumer does. Descending materializes the
-		// union the old way — roaring's reverse iterator has no
-		// AdvanceIfNeeded, so there is no reverse gallop to build the
-		// combinators on.
+		// Direction splits the plan from here; see the file header.
 		if descending {
 			union, err := unionForFilters(ctx, r, plans, uniqueKeys, window)
 			if err != nil {
@@ -313,9 +299,8 @@ func Matches(
 			return
 		}
 		candidates := candidateIter(plans, sources, window)
-		// The structural twin of the descending path's
-		// union.IsEmpty(): one peek settles whether anything matches,
-		// without reading a single id further than that.
+		// The twin of the descending path's union.IsEmpty(): one peek
+		// settles whether anything matches, reading no further.
 		if _, ok := candidates.peek(); !ok {
 			return
 		}
@@ -355,11 +340,10 @@ func validateMatchCall(ctx context.Context, r Reader, filters []Filter, window I
 // holds the slots filter i needs; the terms within a group are OR-ed
 // and the groups AND-ed.
 //
-// matchAll reports that some filter (or the empty slice) constrains
-// nothing, so the caller streams the window directly. Reading that
-// condition off the term groups themselves is what keeps an
-// unconstrained filter from intersecting nothing and coming back
-// empty instead.
+// matchAll reports that some filter, or the empty slice, constrains nothing,
+// so the caller streams the window directly. Reading that off the term groups
+// is what keeps an unconstrained filter from intersecting nothing and coming
+// back empty.
 func planIndexTerms(filters []Filter) ([]termPlan, []TermKey, bool) {
 	if len(filters) == 0 {
 		return nil, nil, true
@@ -384,26 +368,20 @@ func planIndexTerms(filters []Filter) ([]termPlan, []TermKey, bool) {
 	return plans, uniqueKeys, false
 }
 
-// postingReader is the optional, hot-tier half of the index read
-// surface: a Reader that can expose a term's postings WITHOUT
-// materializing a bitmap for it.
+// postingReader is the optional, hot-tier half of the index read surface: a
+// Reader that can expose a term's postings without materializing a bitmap.
 //
-// Deliberately not folded into Reader. Cold postings genuinely are
-// bitmaps — ColdReader unmarshals a fresh one per term out of
-// index.pack — so it has nothing un-materialized to hand back and
-// could only implement the method by re-wrapping what LookupKeys
-// already returns. Hoisting it into Reader would also impose it on
-// every out-of-package implementation (the query package's test
-// fakes) for no gain. The assertion in lookupPostings picks the fast
-// path where it exists and wraps bitmaps everywhere else.
+// Deliberately not folded into Reader. Cold postings genuinely are bitmaps,
+// unmarshaled per term out of index.pack, so ColdReader has nothing
+// un-materialized to hand back, and hoisting the method would impose it on
+// every out-of-package implementation for no gain.
 type postingReader interface {
 	lookupPostings(ctx context.Context, keys []TermKey) ([]postings, error)
 }
 
-// lookupPostings resolves keys to per-term postings, positionally
-// aligned with keys, in one batched call. It takes the
-// no-materialize path when r offers one and otherwise falls back to
-// LookupKeys; a nil bitmap stays the zero postings, i.e. absent.
+// lookupPostings resolves keys to per-term postings, positionally aligned with
+// keys, in one batched call. It takes the no-materialize path when r offers
+// one; a nil bitmap stays the zero postings, meaning absent.
 func lookupPostings(ctx context.Context, r Reader, keys []TermKey) ([]postings, error) {
 	if pr, ok := r.(postingReader); ok {
 		sources, err := pr.lookupPostings(ctx, keys)
@@ -425,16 +403,10 @@ func lookupPostings(ctx context.Context, r Reader, keys []TermKey) ([]postings, 
 	return sources, nil
 }
 
-// unionForFilters materializes the DESCENDING path's candidate set:
-// steps 2-5 below, over the plan planIndexTerms already resolved. The
-// result is empty when no candidate falls in the window, and is never
-// a borrowed mirror snapshot (the window AND allocates on the
-// borrowing path), so downstream iteration is safe.
-//
-// The ascending path does not come through here at all — see
-// candidateIter, which answers the same question with no intermediate
-// bitmap. This shape survives because roaring offers no reverse
-// gallop to build ascending-style combinators on.
+// unionForFilters materializes the descending path's candidate set over the
+// plan planIndexTerms resolved. The result is never a borrowed mirror
+// snapshot, because the window AND allocates on the borrowing path, so
+// downstream iteration is safe. The ascending path uses candidateIter instead.
 func unionForFilters(
 	ctx context.Context, r Reader, filterPlans []termPlan, uniqueKeys []TermKey,
 	window IDRange,
@@ -527,12 +499,10 @@ func unionForFilters(
 	return union, nil
 }
 
-// streamUnion walks the DESCENDING path's materialized union bitmap
-// in internal batches: collect candidate ordinals up to the batch
-// size, fetch, post-filter, yield the survivors. Drops advance the
-// walk with no yield. The first batch is sized to firstBatch (see
-// Matches); later batches use the default. Stepping one id at a time
-// is fine here: the fetch I/O dominates a 512-step loop.
+// streamUnion walks the descending path's materialized union bitmap in
+// internal batches: collect candidate ordinals up to the batch size, fetch,
+// post-filter, yield the survivors. Stepping one id at a time is fine here,
+// because the fetch I/O dominates the loop.
 func streamUnion(
 	ctx context.Context, r Reader, filters []Filter, union *roaring.Bitmap,
 	firstBatch int, yield func(Match, error) bool,
@@ -559,11 +529,9 @@ func streamUnion(
 	}
 }
 
-// streamCandidates is streamUnion's ASCENDING twin over the
-// un-materialized iterator tree. Same batch loop, same post-filter,
-// same yields; the difference is that candidates are pulled out of
-// the tree one at a time as the batch fills, so a consumer that stops
-// after one page never touched the postings past it.
+// streamCandidates is streamUnion's ascending twin over the un-materialized
+// iterator tree. Candidates are pulled from the tree as the batch fills, so a
+// consumer that stops after one page never touched the postings past it.
 func streamCandidates(
 	ctx context.Context, r Reader, filters []Filter, candidates idIter,
 	firstBatch int, yield func(Match, error) bool,
@@ -594,13 +562,10 @@ func streamCandidates(
 	}
 }
 
-// emitBatch fetches one batch of candidate ordinals, drops the
-// bitmap-side false positives and yields the survivors, reporting
-// whether the stream should continue.
-//
-// FetchEvents requires ascending ids, so a descending batch — which
-// arrives highest-first — is flipped in place before the fetch and
-// the surviving matches are flipped back before they are yielded.
+// emitBatch fetches one batch of candidate ordinals, drops the bitmap-side
+// false positives and yields the survivors, reporting whether the stream
+// should continue. FetchEvents requires ascending ids, so a descending batch
+// is flipped in place before the fetch and flipped back before yielding.
 func emitBatch(
 	ctx context.Context, r Reader, filters []Filter, ids []uint32,
 	descending bool, yield func(Match, error) bool,
