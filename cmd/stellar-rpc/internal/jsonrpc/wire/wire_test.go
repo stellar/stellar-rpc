@@ -26,15 +26,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Every `want` here is a byte string captured from jrpc2 v1.3.3's jhttp.Bridge
-// except where annotated with a delta. The error vocabulary is unexported and
-// transcribed into wire.go: only an exact-byte pin notices a bump moving one.
+// Every `want` is a byte string captured from jrpc2 v1.3.3's jhttp.Bridge,
+// except where annotated with a delta. Only an exact-byte pin notices a bump
+// moving one of wire.go's transcribed error strings.
 
 // held is what the parked handlers return once released.
 const held = "done"
 
-// recordPeak raises peak to now, for handlers counting how many of them ran at
-// the same time.
+// recordPeak raises peak to now.
 func recordPeak(peak *atomic.Int64, now int64) {
 	for {
 		old := peak.Load()
@@ -44,8 +43,7 @@ func recordPeak(peak *atomic.Int64, now int64) {
 	}
 }
 
-// testMethods is the table under test; notified makes a notification's
-// completion observable.
+// testMethods is the table under test; notified observes a notification.
 //
 //nolint:unparam // every literal here must match the fixed jrpc2.Handler signature
 func testMethods(notified *atomic.Int64) map[string]jrpc2.Handler {
@@ -68,8 +66,7 @@ func testMethods(notified *atomic.Int64) map[string]jrpc2.Handler {
 			return nil, fmt.Errorf("while doing the thing: %w", &jrpc2.Error{Code: -32123, Message: "custom failure"})
 		},
 		"valueJRPCError": func(context.Context, *jrpc2.Request) (any, error) {
-			// The repo's limiter sentinels are jrpc2.Error VALUES; see
-			// handlerError.
+			// The limiter sentinels are jrpc2.Error VALUES; see handlerError.
 			return nil, jrpc2.Error{Code: -32001, Message: "request exceeded processing limit threshold"}
 		},
 		"contextCanceled": func(context.Context, *jrpc2.Request) (any, error) {
@@ -232,8 +229,7 @@ func TestWire_ErrorMapping(t *testing.T) {
 		want: `{"jsonrpc":"2.0","id":1,"error":{"code":-32123,` +
 			`"message":"while doing the thing: [-32123] custom failure"}}`,
 	}, {
-		// The repo's limiter sentinels take this path; the doubled
-		// "[-32001] " is reproduced, not fixed.
+		// The doubled "[-32001] " is reproduced, not fixed.
 		name: "a jrpc2.Error VALUE keeps its code and doubles its code into the message",
 		body: `{"jsonrpc":"2.0","id":1,"method":"valueJRPCError"}`,
 		want: `{"jsonrpc":"2.0","id":1,"error":{"code":-32001,` +
@@ -247,8 +243,7 @@ func TestWire_ErrorMapping(t *testing.T) {
 		body: `{"jsonrpc":"2.0","id":1,"method":"contextCanceled"}`,
 		want: `{"jsonrpc":"2.0","id":1,"error":{"code":-32097,"message":"gave up: context canceled"}}`,
 	}, {
-		// -32098, not -32603: jrpc2 maps a marshal failure down the same
-		// ladder a handler error takes. Captured from the live bridge.
+		// -32098, not -32603: a marshal failure takes the handler ladder.
 		name: "a result that cannot be marshaled is a system error, not a truncated body",
 		body: `{"jsonrpc":"2.0","id":1,"method":"unmarshalable"}`,
 		want: `{"jsonrpc":"2.0","id":1,"error":{"code":-32098,` +
@@ -322,15 +317,13 @@ func TestWire_RequestLevelProtocolErrors(t *testing.T) {
 		status: http.StatusOK,
 		want:   `{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"empty method name"}}`,
 	}, {
-		// DELTA (d). An empty method name is a request-level error and is
-		// reportable even for a notification.
+		// DELTA (d). Reportable even for a notification.
 		name:   "an empty method name on a NOTIFICATION is a -32600 frame with a null id",
 		body:   `{"jsonrpc":"2.0","method":""}`,
 		status: http.StatusOK,
 		want:   `{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"empty method name"}}`,
 	}, {
-		// A response-shaped message has no method, so it degrades to the
-		// empty-method error rather than being "understood".
+		// No method, so it degrades rather than being "understood".
 		name:   "a response-shaped message with a version marker degrades to empty method",
 		body:   `{"jsonrpc":"2.0","id":1,"result":5}`,
 		status: http.StatusOK,
@@ -445,8 +438,7 @@ func TestWire_Batches(t *testing.T) {
 		want: `[{"jsonrpc":"2.0","id":1,"result":{"method":"echo"}},` +
 			`{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"request is not a JSON object"}}]`,
 	}, {
-		// jrpc2's duplicate-id check was unreachable under the bridge, and
-		// owning the framing must not make it reachable.
+		// Owning the framing must not make jrpc2's duplicate-id check reachable.
 		name: "duplicate ids inside one batch are allowed",
 		body: `[{"jsonrpc":"2.0","id":1,"method":"echo"},{"jsonrpc":"2.0","id":1,"method":"nilResult"}]`,
 		want: `[{"jsonrpc":"2.0","id":1,"result":{"method":"echo"}},` +
@@ -579,8 +571,7 @@ func TestWire_BigResponseIntegrity(t *testing.T) {
 	assert.Equal(t, oracle, []byte(envelope.Result))
 }
 
-// Without the bound, the fat marshals in flight are the HTTP backlog limit
-// (5000), not the core count.
+// Without the bound, fat marshals in flight are the backlog limit, not cores.
 //
 //nolint:unparam // the handler literal must match the fixed jrpc2.Handler signature
 func TestWire_SemaphoreBoundsConcurrentDispatch(t *testing.T) {
@@ -643,8 +634,7 @@ func TestWire_SemaphoreBoundsConcurrentDispatch(t *testing.T) {
 		"the bound was never reached, so this test would not notice its removal")
 }
 
-// The permit must be gone before any byte reaches the ResponseWriter, or a
-// slow reader holds a slot in a bound sized for CPUs.
+// The permit must be gone before any byte reaches the ResponseWriter.
 //
 //nolint:unparam // the handler literal must match the fixed jrpc2.Handler signature
 func TestWire_SemaphoreIsReleasedBeforeTheWrite(t *testing.T) {
@@ -656,8 +646,7 @@ func TestWire_SemaphoreIsReleasedBeforeTheWrite(t *testing.T) {
 		},
 	})
 
-	// Saturate with writers that never drain, then prove a fresh request
-	// reaches its handler.
+	// Saturate with writers that never drain, then serve a fresh request.
 	blocked := make(chan struct{})
 	var wg sync.WaitGroup
 	for range runtime.GOMAXPROCS(0) {
@@ -744,8 +733,7 @@ func jsonArray(n int, element func(id int) string) string {
 	return "[" + strings.Join(elems, ",") + "]"
 }
 
-// serveAsync runs one body on its own goroutine, so a test can look at a batch
-// in flight; post()'s require calls would be on the wrong one.
+// serveAsync runs one body on its own goroutine, to watch a batch in flight.
 func serveAsync(t *testing.T, h http.Handler, body string) (*httptest.ResponseRecorder, <-chan struct{}) {
 	t.Helper()
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(body))
@@ -759,8 +747,7 @@ func serveAsync(t *testing.T, h http.Handler, body string) (*httptest.ResponseRe
 	return rec, done
 }
 
-// The proof is a barrier: every element must be inside its handler before any
-// of them returns. Serial dispatch delivers one.
+// A barrier, not a stopwatch: serial dispatch gets one element in flight.
 //
 //nolint:unparam // the handler literal must match the fixed jrpc2.Handler signature
 func TestWire_BatchElementsRunConcurrently(t *testing.T) {
@@ -857,8 +844,8 @@ func TestWire_ABatchDoesNotMultiplyTheConcurrencyBound(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
-// Input order (DELTA (e)) and compaction are properties of the response, not
-// the completion order. This batch finishes back to front.
+// DELTA (e) and compaction hold however the batch completes; this one
+// finishes back to front.
 //
 //nolint:unparam // the handler literals must match the fixed jrpc2.Handler signature
 func TestWire_BatchOrderAndCompactionSurviveOutOfOrderCompletion(t *testing.T) {
@@ -899,8 +886,7 @@ func TestWire_BatchOrderAndCompactionSurviveOutOfOrderCompletion(t *testing.T) {
 	assert.Equal(t, int64(1), notified.Load(), "the notification must have run before the response was written")
 }
 
-// A batch worker's panic must be RE-RAISED on the serving goroutine rather
-// than escaping its own, and its permit must be gone either way.
+// A worker's panic must be RE-RAISED, not escape, and free its permit.
 //
 //nolint:unparam // the handler literals must match the fixed jrpc2.Handler signature
 func TestWire_APanicInABatchElementFailsTheRequestAndReleasesItsPermit(t *testing.T) {
@@ -951,8 +937,7 @@ func TestWire_APanicInABatchElementFailsTheRequestAndReleasesItsPermit(t *testin
 	}
 }
 
-// Valid JSON that is not a request object answers one bare frame, never an
-// array.
+// Valid JSON that is not a request object answers one bare frame.
 func TestWire_ValidJSONThatIsNotARequest(t *testing.T) {
 	h, _ := newTestHandler(t)
 
@@ -984,8 +969,7 @@ func TestWire_ValidJSONThatIsNotARequest(t *testing.T) {
 	}
 }
 
-// Three jrpc2 accessors stopped working with the jrpc2.Server (see the package
-// doc), which is only safe while nothing calls them.
+// Three jrpc2 accessors stopped working with the jrpc2.Server; see the doc.
 func TestNoJRPC2ContextValueCallersInProductionCode(t *testing.T) {
 	// Anchored on this file's compiled-in path, not the working directory.
 	_, thisFile, _, ok := runtime.Caller(0)
@@ -1037,8 +1021,7 @@ func TestNoJRPC2ContextValueCallersInProductionCode(t *testing.T) {
 		"Take the request from the handler's second argument, and its notification-ness from an empty ID()")
 }
 
-// DELTA (f): params reach the handler as the exact bytes the body carried.
-// rpcv2's getEventsV2 reads ParamString, so those bytes are contract.
+// DELTA (f). rpcv2's getEventsV2 reads ParamString, so the bytes are contract.
 //
 //nolint:nilnil,unparam // the handler literal must match the fixed jrpc2.Handler signature
 func TestWire_ParamsReachTheHandlerVerbatim(t *testing.T) {
@@ -1067,8 +1050,7 @@ func TestWire_ParamsReachTheHandlerVerbatim(t *testing.T) {
 		body: `{"jsonrpc":"2.0","id":1,"method":"params"}`,
 		want: ``,
 	}, {
-		// jrpc2 reduces "null" params to nil, so a handler cannot tell an
-		// explicit null from an absent one.
+		// jrpc2 reduces "null" params to nil, indistinguishable from absent.
 		name: "an explicit null is reduced to absent",
 		body: `{"jsonrpc":"2.0","id":1,"method":"params","params":null}`,
 		want: ``,
@@ -1082,8 +1064,7 @@ func TestWire_ParamsReachTheHandlerVerbatim(t *testing.T) {
 	}
 }
 
-// DELTA (g): once the request is dead the serving goroutine stops feeding the
-// bound. What HAD started still finishes.
+// DELTA (g): a dead request stops feeding the bound; what started finishes.
 //
 //nolint:unparam // the handler literal must match the fixed jrpc2.Handler signature
 func TestWire_ADeadRequestStopsStartingElements(t *testing.T) {
@@ -1154,7 +1135,7 @@ func TestWire_ADeadRequestStopsStartingElements(t *testing.T) {
 }
 
 // adversarialBatch fills the body cap with the cheapest element that still
-// demands an answer: the worst response amplification the cap allows.
+// demands an answer.
 func adversarialBatch(t *testing.T) (string, int) {
 	t.Helper()
 	const bodyCap = 512 * 1024
@@ -1168,9 +1149,9 @@ func adversarialBatch(t *testing.T) (string, int) {
 	return body, n
 }
 
-// DELTA (g) for the elements that never reach acquirePermit. The signal is
-// allocation ABOVE the parse — the frames are discarded either way, so all
-// that changes is whether they were built.
+// DELTA (g) for the elements that never reach acquirePermit. Measured ABOVE
+// the parse: the frames are discarded either way, so all that changes is
+// whether they were built.
 func TestWire_ADeadRequestStopsBuildingStaticErrorFrames(t *testing.T) {
 	h, _ := newTestHandler(t)
 	body, elements := adversarialBatch(t)
@@ -1288,8 +1269,8 @@ func TestWire_Shutdown(t *testing.T) {
 		<-done
 	})
 
-	// The two sources compose: Shutdown holds the bound, so a later request
-	// unwinds at its own deadline instead (DELTA (g)).
+	// Shutdown holds the bound, so a later request unwinds at its own
+	// deadline (DELTA (g)) rather than hanging.
 	t.Run("nothing new starts after a completed drain", func(t *testing.T) {
 		var ran atomic.Int64
 		h := NewHandler(map[string]jrpc2.Handler{

@@ -1,19 +1,10 @@
-// Package wire frames JSON-RPC 2.0 over HTTP. Both mounts use it; it is the
-// only framing this repo serves.
+// Package wire frames JSON-RPC 2.0 over HTTP; both mounts use it.
 //
-// It replaced jrpc2's jhttp.Bridge, a loopback that marshaled every response
-// four times over. jrpc2 remains the parser and the vocabulary; this package
-// owns the envelope: one json.Marshal, one hand-appended envelope, one Write.
-//
-// Three rules here are LOAD-BEARING, each with a plausible-looking
-// "improvement" that silently reverses this package's reason to exist:
-// json.Marshal + Write (never json.NewEncoder), hand-appended batch frames
-// (never json.Marshal of a []json.RawMessage), and a batch worker's permit
-// taken before its goroutine is started (never inside it).
+// Three rules are LOAD-BEARING: json.Marshal + Write (never json.NewEncoder),
+// hand-appended batch frames (never json.Marshal of a []json.RawMessage), and
+// a batch worker's permit taken before its goroutine starts (never inside it).
 //
 // # The deltas
-//
-// Seven places answer differently from the bridge, argued at their sites:
 //
 //	(a) a malformed body is a -32700 frame over 200, not 500 + plaintext
 //	(b) an empty batch `[]` is a -32600 frame, not a 204
@@ -23,17 +14,11 @@
 //	(f) params reach handlers verbatim rather than re-marshaled
 //	(g) dispatch stops at the HTTP deadline; started elements still finish
 //
-// # Three jrpc2 accessors a handler must not use
-//
-// Handlers run on a SERVER-scoped context: derived from context.Background, so
-// no request cancels it, and canceled by Handler.Shutdown. It carries none of
-// the values jrpc2's Server.invoke attached, and none is fabricated back —
-// jrpc2.InboundRequest(ctx) returns nil, jrpc2.ServerFromContext(ctx) panics,
-// and (*jrpc2.Request).IsNotification() is false for EVERY request. The last
-// is the dangerous one because it fails quietly: it tests id == nil, and
-// ToRequest builds an empty-but-non-nil id for an absent one. Notification-ness
-// is ParsedRequest.ID == "". Take the request from the handler's second
-// argument. TestNoJRPC2ContextValueCallersInProductionCode fails on a caller.
+// Handlers run on a SERVER-scoped context, Background-derived and canceled only
+// by Handler.Shutdown. Three jrpc2 accessors are therefore unusable, and a
+// guard test pins that: InboundRequest returns nil, ServerFromContext panics,
+// and IsNotification is false for EVERY request — that one QUIETLY, so
+// notification-ness is ParsedRequest.ID == "".
 package wire
 
 import (
@@ -67,46 +52,34 @@ const (
 	nullID = "null"
 )
 
-// Transcriptions of jrpc2's unexported error vocabulary (jrpc2/error.go). The
-// cost is permanent: a `go get -u` moves the library's strings and leaves
-// these frozen. The byte-exact tests are what notice.
+// Transcribed from jrpc2's unexported vocabulary; byte-exact tests notice drift.
 var (
 	errEmptyMethod         = &jrpc2.Error{Code: jrpc2.InvalidRequest, Message: "empty method name"}
 	errEmptyBatch          = &jrpc2.Error{Code: jrpc2.InvalidRequest, Message: "empty request batch"}
 	errInvalidRequestValue = &jrpc2.Error{Code: jrpc2.ParseError, Message: "invalid request value"}
 )
 
-// Handler serves JSON-RPC 2.0 over HTTP for one method table.
-//
-// Mounted INSIDE the shared middleware chain jsonrpc.NewHandler builds:
-// cors -> MaxBytesHandler -> httpRequestDurationLimiter -> BacklogHTTPQLimiter
-// -> Handler. The duration limiter is the slow-client decoupler — it answers a
-// timed-out client with 504 while the handler is still live, safe only because
-// nothing has reached the socket, and flushes after the per-method limiters
-// and the view release, so a stalled client holds one flat []byte and nothing
-// else. rpcv2's deriveLifecycleGrace relies on that deadline. Do not bypass or
-// wrap it: bufferedResponseWriter has no Unwrap, Flusher or SetWriteDeadline.
+// Handler serves JSON-RPC 2.0 for one method table, mounted INSIDE the chain
+// jsonrpc.NewHandler builds: cors -> MaxBytesHandler ->
+// httpRequestDurationLimiter -> BacklogHTTPQLimiter -> Handler. Do not
+// bypass or wrap the duration limiter: it is the slow-client decoupler, has no
+// Unwrap/Flusher/SetWriteDeadline, and deriveLifecycleGrace needs its deadline.
 type Handler struct {
 	methods map[string]jrpc2.Handler
 
-	// sem bounds concurrent handler+marshal work: acquired before dispatch,
-	// released BEFORE the bytes reach the (buffered) ResponseWriter, so a slow
-	// reader cannot hold a permit. ONE semaphore for the whole handler, so a
-	// batch borrows from the process-wide budget instead of multiplying it.
-	//
-	// The weight is GOMAXPROCS, not jrpc2's NumCPU: since Go 1.25 GOMAXPROCS
-	// follows the cgroup CPU quota and NumCPU does not, and this is what caps
-	// the number of fat results marshaled at once. Matches the repo's
-	// convention (rpcv2/backfill.DefaultWorkers).
+	// sem bounds handler+marshal work, released BEFORE the bytes reach the
+	// (buffered) ResponseWriter so a slow reader cannot hold a permit. ONE for
+	// the whole handler, so a batch borrows from the budget rather than
+	// multiplying it. Weight is GOMAXPROCS (cgroup-aware), not NumCPU; it caps
+	// concurrent fat marshals; see backfill.DefaultWorkers.
 	sem *semaphore.Weighted
 
-	// weight is sem's size, kept because semaphore.Weighted does not expose
-	// it and Shutdown drains by acquiring all of it.
+	// weight is sem's size; Weighted does not expose it and Shutdown drains by
+	// acquiring all of it.
 	weight int64
 
-	// root is the SERVER-scoped lifetime every handler runs on. No request
-	// touches it; only Shutdown cancels it, which is what keeps a straggler
-	// from reading a store its daemon has already closed.
+	// root is the SERVER-scoped lifetime handlers run on. Only Shutdown cancels
+	// it, which is what stops a straggler reading an already-closed store.
 	//
 	//nolint:containedctx // a server's own lifetime, as http.Server holds one
 	root     context.Context
@@ -116,8 +89,7 @@ type Handler struct {
 	drainErr  error
 }
 
-// NewHandler returns the JSON-RPC handler over methods, which is the
-// decorated, limiter-wrapped table and is read-only from here on.
+// NewHandler returns the handler over methods, read-only from here on.
 func NewHandler(methods map[string]jrpc2.Handler) *Handler {
 	weight := int64(runtime.GOMAXPROCS(0))
 	//nolint:gosec // G118: stopRoot is the handler's, called by Shutdown
@@ -131,18 +103,11 @@ func NewHandler(methods map[string]jrpc2.Handler) *Handler {
 	}
 }
 
-// Shutdown cancels the context every handler runs on and waits for the running
-// handlers, or for ctx to end. An error means a straggler is still touching
-// whatever the caller is about to close.
-//
-// The wait is an acquire of the whole bound: every invocation happens between
-// an acquirePermit and its Release, so holding every permit IS "no handler is
-// running", with no second counter to keep in step. The permits are never
-// given back — a drained handler stays drained, and a request that arrives
-// anyway unwinds at its own deadline (DELTA (g)).
-//
-// Idempotent. Call it after the HTTP server has stopped accepting and before
-// the resources the handlers read are closed.
+// Shutdown cancels the root and waits by acquiring the whole bound — every
+// invocation holds a permit, so that IS "no handler is running". The permits
+// are never returned, and an error means a straggler is still touching what
+// the caller is about to close. Idempotent; call it after the HTTP server
+// stops accepting and before the handlers' resources are closed.
 func (h *Handler) Shutdown(ctx context.Context) error {
 	h.stopRoot()
 	h.drainOnce.Do(func() {
@@ -153,9 +118,8 @@ func (h *Handler) Shutdown(ctx context.Context) error {
 	return h.drainErr
 }
 
-// ServeHTTP implements http.Handler. The HTTP shell is byte-identical to
-// jhttp.Bridge.ServeHTTP: Accept-Post advertised unconditionally, non-POST 405
-// with no body, wrong media type or charset 415 with jhttp's exact plaintext.
+// ServeHTTP implements http.Handler. The shell is byte-identical to
+// jhttp.Bridge's: Accept-Post always, non-POST 405, bad media type 415.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Accept-Post", contentTypeJSON)
 
@@ -174,20 +138,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
-		// A transport event, not a JSON-RPC one: no request to answer and no
-		// id to echo. MaxBytesHandler takes this path for an oversized body.
+		// A transport event: no request to answer and no id to echo.
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintln(w, err.Error())
 		return
 	}
 
-	// req.Context() governs the DISPATCH — whether another element may start
-	// (DELTA (g)) — and nothing else. Handlers run on h.root; see invoke.
+	// req.Context() governs the DISPATCH only (DELTA (g)); handlers run on
+	// h.root.
 	h.serve(req.Context(), w, body)
 }
 
-// serve parses body, dispatches it, and writes the response. ctx is the HTTP
-// request's, used only to decide whether to keep dispatching.
+// serve parses, dispatches and writes. ctx is the HTTP request's, used only
+// to decide whether to keep dispatching.
 func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, body []byte) {
 	reqs, err := jrpc2.ParseRequests(body)
 	if err != nil {
@@ -196,66 +159,43 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, body []byte)
 		return
 	}
 	if len(reqs) == 0 {
-		// DELTA (b). A non-batch body always parses to exactly one element,
-		// so an empty slice means the body was `[]`.
+		// DELTA (b). A non-batch body parses to exactly one element.
 		writeFrames(w, false, [][]byte{errorFrame("", errEmptyBatch)})
 		return
 	}
 
-	isBatch := reqs[0].Batch // a property of the body, carried on every element
+	isBatch := reqs[0].Batch // a property of the body, on every element
 
 	frames := h.dispatchAll(ctx, reqs)
 	if ctx.Err() != nil {
-		// DELTA (g): the request died mid-dispatch, so there is nobody to
-		// answer. Falling through would have to choose between a partial
-		// batch array and 204ing an abandoned batch as all-notification.
+		// DELTA (g). Nobody to answer, and no honest answer to give.
 		return
 	}
 	if len(frames) == 0 {
-		// Every element was a notification, and DELTA (c) — all of them have
-		// finished, because dispatchAll joins every handler it started.
+		// All notifications, and DELTA (c) — all of them have finished.
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	writeFrames(w, isBatch, frames)
 }
 
-// dispatchAll answers every element of one parsed body and returns the frames
-// in INPUT order (DELTA (e)), the elements that get no response compacted out.
-// It returns only once every handler it started has, which is what lets
-// serve's 204 mean "the notifications have run".
+// dispatchAll answers every element in INPUT order (DELTA (e)), joining every
+// handler it started.
 //
-// A batch's elements run CONCURRENTLY: dispatched serially they sum their
-// latencies under the ONE HTTP deadline the mount enforces, so a batch of
-// individually-fine calls 504s where each call alone succeeds.
+// LOAD-BEARING: the permit is acquired HERE and released by the worker.
+// Acquire inside the worker and every element parks a goroutine on Acquire —
+// one body fits ~260,000 elements under the cap.
 //
-// LOAD-BEARING: the permit is acquired HERE, on the serving goroutine, and
-// released by the worker. Acquire inside the worker instead and every element
-// gets a goroutine parked on Acquire — and one body fits ~260,000 elements
-// under the cap. Acquiring first makes the in-flight worker count the
-// semaphore's weight, whatever the batch's length.
-//
-// Two contexts govern a dispatch and do not overlap: the REQUEST's decides
-// whether an element may START, the server-scoped root whether a running
-// handler may CONTINUE. DELTA (g) is the first of those:
-//
-//   - An element already inside its handler runs to completion; only Shutdown
-//     cancels it. wg.Wait joins every worker that started, so the unwind costs
-//     at most one element's duration.
-//   - An element that never got a permit yields NO FRAME, not an error frame:
-//     there is nobody to answer, and building answers for a departed reader is
-//     the work this stops.
-//   - An element that needs no handler never reaches the permit, so the loop
-//     probes the request's Done channel per element too.
+// Two contexts govern a dispatch: the REQUEST's decides whether an element may
+// START (DELTA (g)), the root whether a running handler may CONTINUE. An
+// element that never started yields NO FRAME, not an error one.
 func (h *Handler) dispatchAll(ctx context.Context, reqs []*jrpc2.ParsedRequest) [][]byte {
-	// One slot per element, by index, so response order is request order
-	// whatever the completion order. A nil slot gets no answer.
+	// By index, so response order is request order. A nil slot gets no answer.
 	frames := make([][]byte, len(reqs))
 
 	if len(reqs) == 1 {
-		// A single-element body never leaves this goroutine. Not an
-		// optimization: it is what lets its panic reach the limiter's recover
-		// with its OWN stack, unwrapped by relayedPanic.
+		// Not an optimization: staying here lets a panic reach the limiter's
+		// recover with its OWN stack.
 		frames[0] = h.dispatchOne(ctx, reqs[0])
 	} else {
 		h.dispatchBatch(ctx, reqs, frames)
@@ -263,8 +203,7 @@ func (h *Handler) dispatchAll(ctx context.Context, reqs []*jrpc2.ParsedRequest) 
 	return slices.DeleteFunc(frames, func(f []byte) bool { return f == nil })
 }
 
-// dispatchBatch runs the elements of a multi-element body into their own slots
-// of frames. See dispatchAll for the permit ordering and the dead-request rule.
+// dispatchBatch runs a multi-element body; see dispatchAll for the rules.
 func (h *Handler) dispatchBatch(ctx context.Context, reqs []*jrpc2.ParsedRequest, frames [][]byte) {
 	var wg sync.WaitGroup
 	var raised atomic.Pointer[relayedPanic]
@@ -295,17 +234,14 @@ func (h *Handler) dispatchBatch(ctx context.Context, reqs []*jrpc2.ParsedRequest
 	wg.Wait()
 
 	if p := raised.Load(); p != nil {
-		// A panic on a worker has nothing above it to recover and would take
-		// the process down. Re-raised here, once every sibling has finished,
-		// it fails only this HTTP request. A safety net, not a live path:
-		// every registered method carries a RequestDurationLimit, whose
-		// limiter recovers a handler panic into -32003 first.
+		// Nothing above a worker recovers, so an escaping panic would take the
+		// process down; re-raised here it fails only this request.
 		panic(p)
 	}
 }
 
-// dispatchOne answers one request on the calling goroutine, releasing its
-// permit before returning so the caller writes without one, panics included.
+// dispatchOne answers one request here, releasing its permit before returning
+// so the caller writes without one, panics included.
 func (h *Handler) dispatchOne(ctx context.Context, pr *jrpc2.ParsedRequest) []byte {
 	method, frame := h.route(pr)
 	if method == nil {
@@ -318,15 +254,12 @@ func (h *Handler) dispatchOne(ctx context.Context, pr *jrpc2.ParsedRequest) []by
 	return h.invoke(pr, method)
 }
 
-// acquirePermit takes one permit from the shared bound, blocking until it gets
-// one or ctx ends, and reports which happened. ctx is the HTTP request's — the
-// one place a request's lifetime reaches into dispatch (DELTA (g)). x/sync
-// gives back a permit won in the race, so false always means "did not run".
+// acquirePermit takes one permit, blocking until it gets one or ctx ends.
+// x/sync gives back a permit won in the race, so false means "did not run".
 func (h *Handler) acquirePermit(ctx context.Context) bool {
 	return h.sem.Acquire(ctx, 1) == nil
 }
 
-// isClosed reports whether c is closed, without blocking.
 func isClosed(c <-chan struct{}) bool {
 	select {
 	case <-c:
@@ -336,17 +269,11 @@ func isClosed(c <-chan struct{}) bool {
 	}
 }
 
-// route decides how one parsed request is answered WITHOUT running anything:
-// it returns the handler to invoke, or a nil handler and the finished frame,
-// which is itself nil for a request that gets no response at all.
-//
-// The order is load-bearing. Parse and shape errors answer with a frame even
-// for a notification, as the spec requires; an empty method name is the same
-// class and answers too (DELTA (d)); only then does notification-ness apply,
-// and only to DISPATCH results, so an unknown method or a handler error on a
-// notification is silent.
-//
-// Notification-ness is ParsedRequest.ID == ""; see the package doc.
+// route decides how one request is answered WITHOUT running anything: the
+// handler, or a nil handler and the frame (itself nil for no response). The
+// ORDER is load-bearing — parse and shape errors answer even for a
+// notification, then an empty method (DELTA (d)), and only then does
+// notification-ness apply, to DISPATCH results only.
 func (h *Handler) route(pr *jrpc2.ParsedRequest) (jrpc2.Handler, []byte) {
 	if pr.Error != nil {
 		return nil, errorFrame(pr.ID, pr.Error)
@@ -354,63 +281,52 @@ func (h *Handler) route(pr *jrpc2.ParsedRequest) (jrpc2.Handler, []byte) {
 	if pr.Method == "" {
 		return nil, errorFrame(pr.ID, errEmptyMethod)
 	}
-	// `method != nil` as well as ok: route says "run this" by returning a
-	// non-nil handler, so a nil table entry must not be able to say it.
+	// `method != nil` too: a nil table entry must not read as "run this".
 	if method, ok := h.methods[pr.Method]; ok && method != nil {
 		return method, nil
 	}
 	if pr.ID == "" {
 		return nil, nil // an unknown method on a notification is silent
 	}
-	// jrpc2's errNoSuchMethod frame, byte for byte. Resolved here, so no
-	// handler runs and no metric is labeled: an attacker-chosen method name
-	// cannot grow the per-method summary's cardinality.
+	// Resolved here, so no metric is labeled: an attacker-chosen method name
+	// cannot grow the summary's cardinality.
 	return nil, errorFrame(pr.ID, (&jrpc2.Error{
 		Code:    jrpc2.MethodNotFound,
 		Message: jrpc2.MethodNotFound.String(),
 	}).WithData(pr.Method))
 }
 
-// invoke runs one handler and builds its frame. The caller holds the permit
-// for the whole call and releases it before any byte is written.
+// invoke runs one handler and frames it; the caller holds the permit.
 func (h *Handler) invoke(pr *jrpc2.ParsedRequest, method jrpc2.Handler) []byte {
-	// The SERVER's lifetime, never the http.Request's: a client that hangs up
-	// mid-call still completes it, which sendTransaction depends on.
+	// The SERVER's lifetime: a client that hangs up mid-call still completes
+	// it, which sendTransaction depends on.
 	ctx := h.root
 
-	// DELTA (f): ToRequest hands over the params bytes the body carried, in
-	// the client's key order and whitespace and with its own escapes. rpcv2's
-	// getEventsV2 reads ParamString, so those raw bytes are contract.
+	// DELTA (f): the params bytes go over verbatim, and rpcv2's getEventsV2
+	// reads ParamString, so those raw bytes are contract.
 	result, err := method(ctx, pr.ToRequest())
 	if pr.ID == "" {
 		// "The Server MUST NOT reply to a Notification, including those that
-		// are within a batch request." The work is done, the answer is not
-		// sent, and an error is dropped as jrpc2's invoke drops it.
+		// are within a batch request."
 		return nil
 	}
 	if err != nil {
 		return errorFrame(pr.ID, handlerError(err))
 	}
 
-	// THE one marshal. LOAD-BEARING: json.Marshal, never
-	// json.NewEncoder(w).Encode — Encode's deferred encodeStatePool.Put fires
-	// after enc.w.Write, so N stalled clients pin N full-size pooled buffers,
-	// and under GOEXPERIMENT=jsonv2 it copies through its own buffer,
-	// reintroducing exactly the copy this package deletes. Marshal also lets
-	// Content-Length be set.
+	// THE one marshal. LOAD-BEARING: never json.NewEncoder(w).Encode — its
+	// pool Put fires after the Write, so N stalled clients pin N pooled
+	// buffers, and under jsonv2 it copies through its own buffer.
 	bits, err := json.Marshal(result)
 	if err != nil {
-		// Through handlerError, not a hand-built InternalError: jrpc2 runs a
-		// marshal failure down the same ladder a handler error takes, which
-		// answers -32098, never -32603.
+		// Through handlerError: a marshal failure is -32098, never -32603.
 		return errorFrame(pr.ID, handlerError(err))
 	}
 	return frame(pr.ID, resultKey, bits)
 }
 
-// relayedPanic is a handler panic caught on a batch worker so the serving
-// goroutine can re-raise it, carrying the stack the handler panicked on —
-// the recover that logs it runs elsewhere, where debug.Stack() shows the relay.
+// relayedPanic carries a worker's panic and the stack it panicked on, not the
+// relay's, to the serving goroutine.
 type relayedPanic struct {
 	value any
 	stack []byte
@@ -421,21 +337,17 @@ func (p *relayedPanic) String() string {
 	return fmt.Sprintf("%v (panicked on a batch worker goroutine)\n%s", p.value, p.stack)
 }
 
-// catchPanic must be deferred directly, so its recover is the worker's. The
-// first panic wins; only one can be re-raised.
+// catchPanic must be deferred directly, so its recover is the worker's.
 func catchPanic(raised *atomic.Pointer[relayedPanic]) {
 	if v := recover(); v != nil {
 		raised.CompareAndSwap(nil, &relayedPanic{value: v, stack: debug.Stack()})
 	}
 }
 
-// handlerError maps a handler's error onto the wire error object, reproducing
-// jrpc2's tasks.responses exactly, bare type assertion included: a WRAPPED
-// *jrpc2.Error falls to the ErrorCode branch, keeping the code and taking the
-// wrapper's message. Looks like a bug and is pinned as behavior: network's
-// limiter sentinels are jrpc2.Error VALUES, so the assertion misses them and
-// err.Error() — "[%d] %s" — supplies the message, giving those wire messages a
-// redundant "[-32001] " prefix. They always have.
+// handlerError reproduces jrpc2's tasks.responses exactly, bare type assertion
+// included. Pinned, not a bug: network's limiter sentinels are jrpc2.Error
+// VALUES, so the assertion misses them and their message keeps its own
+// "[-32001] " prefix.
 func handlerError(err error) *jrpc2.Error {
 	if e, ok := err.(*jrpc2.Error); ok { //nolint:errorlint // jrpc2 asserts, it does not unwrap
 		return e
@@ -446,9 +358,7 @@ func handlerError(err error) *jrpc2.Error {
 	return &jrpc2.Error{Code: jrpc2.InternalError, Message: err.Error()}
 }
 
-// parseError recovers the *jrpc2.Error ParseRequests reports for a body that
-// is not valid JSON. The fallback only guards a future library that returns
-// something other than its errInvalidRequest.
+// parseError recovers the *jrpc2.Error ParseRequests reports for bad JSON.
 func parseError(err error) *jrpc2.Error {
 	if e, ok := err.(*jrpc2.Error); ok { //nolint:errorlint // matching jrpc2's own assertion style
 		return e
@@ -456,14 +366,10 @@ func parseError(err error) *jrpc2.Error {
 	return errInvalidRequestValue
 }
 
-// frame builds {"jsonrpc":"2.0","id":<id>,<key><payload>}. id is the request's
-// raw id text, or "" for one with no usable id, which answers a null id.
-//
-// The capacity is the frame's exact byte length, so a frame is one allocation
-// and one copy — which is why the arithmetic and the appends it predicts sit
-// in the same six lines. No assertion on the RESPONSE can catch it being
-// wrong: append grows silently and the bytes come out identical while the
-// payload is re-copied. TestFrameIsExactlyOneAllocation pins it on cap.
+// frame builds {"jsonrpc":"2.0","id":<id>,<key><payload>}; id is the raw id
+// text, or "" for one with no usable id, which answers a null id. The capacity
+// must be the frame's EXACT length — nothing about the response can catch it
+// being wrong, so TestFrameIsExactlyOneAllocation pins it on cap.
 func frame(id, key string, payload []byte) []byte {
 	out := make([]byte, 0, len(framePrefix)+idLen(id)+len(key)+len(payload)+1)
 	out = append(out, framePrefix...)
@@ -473,13 +379,10 @@ func frame(id, key string, payload []byte) []byte {
 	return append(out, '}')
 }
 
-// errorFrame builds the frame for one error object.
 func errorFrame(id string, e *jrpc2.Error) []byte {
 	bits, err := json.Marshal(e)
 	if err != nil {
-		// Only reachable if a handler hand-built an Error whose Data is not
-		// valid JSON. Answer something well-formed rather than nothing; the
-		// bridge hung the request until its deadline here.
+		// Only reachable for an Error whose Data is not valid JSON.
 		bits, err = json.Marshal(&jrpc2.Error{Code: jrpc2.InternalError, Message: err.Error()})
 		if err != nil {
 			bits = []byte(`{"code":-32603,"message":"internal error"}`)
@@ -488,17 +391,11 @@ func errorFrame(id string, e *jrpc2.Error) []byte {
 	return frame(id, errorKey, bits)
 }
 
-// appendID writes the request's id back exactly as the client sent it —
-// string, number or null — with one transformation that is NOT optional. The
-// id is raw client bytes, escaped today only as a side effect of the
-// compaction passes this package deletes, so splicing it plain would reflect
+// appendID writes the id back exactly as the client sent it, LOAD-BEARINGLY
+// applying stdlib appendCompact(escape=true)'s escaping — <, >, & and
+// U+2028/U+2029 — at the splice. "Simplifying" this to a plain append reflects
 // up to 512KB of client-controlled bytes into a response with no nosniff
-// header from a mount with fully open CORS.
-//
-// LOAD-BEARING: the escaping stdlib's appendCompact(escape=true) applies —
-// <, >, & and U+2028/U+2029 — is applied here at the splice. "Simplifying"
-// this to a plain append is a security regression, not a saving. Numbers pass
-// through untouched, so no id loses a digit and no float round-trip happens.
+// header from a mount with open CORS. Numbers pass through untouched.
 func appendID(dst []byte, id string) []byte {
 	if id == "" {
 		return append(dst, nullID...)
@@ -525,8 +422,7 @@ func idLen(id string) int {
 
 const hexDigits = "0123456789abcdef"
 
-// appendHTMLEscaped is encoding/json's appendHTMLEscape, over a string, for the
-// one field this package writes without routing through the encoder.
+// appendHTMLEscaped is encoding/json's appendHTMLEscape, over a string.
 func appendHTMLEscaped(dst []byte, src string) []byte {
 	start := 0
 	for i := range len(src) {
@@ -547,14 +443,10 @@ func appendHTMLEscaped(dst []byte, src string) []byte {
 	return append(dst, src[start:]...)
 }
 
-// writeFrames writes the response body: one frame bare, or the frames joined
-// inside a JSON array when the request was a batch, a one-element batch
-// included.
-//
-// LOAD-BEARING: the array is hand-appended. json.Marshal of a
-// []json.RawMessage sends every frame through marshalerEncoder, whose
-// unconditional appendCompact re-validates and re-copies the whole payload —
-// the largest thing this package exists to delete, and an invisible mistake.
+// writeFrames writes the body: one frame bare, or the frames joined inside a
+// JSON array for a batch, a one-element batch included. LOAD-BEARING: the
+// array is hand-appended — json.Marshal of a []json.RawMessage sends every
+// frame through marshalerEncoder, which re-copies the whole payload.
 func writeFrames(w http.ResponseWriter, isBatch bool, frames [][]byte) {
 	var body []byte
 	if !isBatch && len(frames) == 1 {
@@ -577,9 +469,7 @@ func writeFrames(w http.ResponseWriter, isBatch bool, frames [][]byte) {
 		body = append(body, ']')
 	}
 
-	// One Write of the finished body, into the duration limiter's buffered
-	// writer. The body is fully materialized, so Content-Length is set rather
-	// than leaving the client to discover it from a chunked stream.
+	// One Write; the body is materialized, so Content-Length is set.
 	w.Header().Set("Content-Type", contentTypeJSON)
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(http.StatusOK)

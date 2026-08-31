@@ -23,9 +23,8 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
 )
 
-// The framing is only correct WHERE IT IS MOUNTED: inside the shared chain
-// (cors -> 512KB cap -> duration limiter and its buffered writer -> backlog
-// limiter -> framing). NewHandler builds one, so these cover both daemons.
+// The framing is only correct WHERE IT IS MOUNTED: inside the shared chain.
+// NewHandler builds one, so these cover both daemons.
 
 func mountLogger() *log.Entry {
 	l := log.New()
@@ -88,8 +87,7 @@ func fastSpec() HandlerSpec {
 
 //nolint:testifylint // byte-exact wire pins; JSONEq would ignore key order and escaping
 func TestMount_ServesThroughTheRealMiddlewareChain(t *testing.T) {
-	// No parking handler: it would hold the only permit on a single-CPU
-	// runner. The 504 path has its own mount below.
+	// No parking handler: it would hold the only permit on one CPU.
 	url := newMountedHandler(t, time.Minute, []HandlerSpec{fastSpec()})
 
 	t.Run("a normal call gets its framed body, id escaped as the bridge escaped it", func(t *testing.T) {
@@ -122,8 +120,7 @@ func TestMount_ServesThroughTheRealMiddlewareChain(t *testing.T) {
 	})
 }
 
-// Handlers see a server-scoped context, so a client that hangs up mid-call
-// does not cancel the work — sendTransaction included.
+// A client that hangs up mid-call does not cancel the work.
 func TestMount_HandlerContextIsNotTheRequestContext(t *testing.T) {
 	type outcome struct {
 		deadline bool
@@ -154,8 +151,7 @@ func TestMount_HandlerContextIsNotTheRequestContext(t *testing.T) {
 	assert.NoError(t, got.err)
 }
 
-// A frame the mount produces must be what a JSON-RPC client parses: the belt
-// to the byte-pins' braces.
+// A frame the mount produces must be what a JSON-RPC client parses.
 func TestMount_FramesParseAsJSONRPC(t *testing.T) {
 	url := newMountedHandler(t, time.Minute, []HandlerSpec{{
 		MethodName:           "fast",
@@ -180,8 +176,7 @@ func TestMount_FramesParseAsJSONRPC(t *testing.T) {
 	assert.Nil(t, frame.Error)
 }
 
-// The slow-client decoupler, on a mount of its own: a parked handler holds its
-// permit, and that bound is one on a single-CPU runner.
+// The slow-client decoupler, on its own mount: a parked handler holds a permit.
 //
 //nolint:testifylint // byte-exact wire pins; JSONEq would ignore key order and escaping
 func TestMount_ASlowCallGets504AndTheMountRecovers(t *testing.T) {
@@ -200,8 +195,7 @@ func TestMount_ASlowCallGets504AndTheMountRecovers(t *testing.T) {
 			return eventually, nil
 		},
 		QueueLimit: 10,
-		// Longer than the global limit, so the HTTP-level limiter is the one
-		// that answers and the 504 path is the one under test.
+		// Longer than the global limit, so the HTTP limiter answers.
 		RequestDurationLimit: time.Minute,
 	}})
 
@@ -211,8 +205,7 @@ func TestMount_ASlowCallGets504AndTheMountRecovers(t *testing.T) {
 	assert.Empty(t, body, "the duration limiter answers before the framing writes anything")
 	assert.Less(t, time.Since(start), 30*time.Second)
 
-	// The client has its 504 and the handler still holds its permit — the
-	// documented shape (DELTA (g)) — so serving resumes once it finishes.
+	// The handler still holds its permit (DELTA (g)), so join it first.
 	close(blocked)
 	select {
 	case <-returned:
@@ -225,8 +218,7 @@ func TestMount_ASlowCallGets504AndTheMountRecovers(t *testing.T) {
 	assert.Equal(t, `{"jsonrpc":"2.0","id":2,"result":{"n":7}}`, body)
 }
 
-// The mount enforces ONE deadline for the whole request, so a serial batch
-// sums its elements against it. Calls that each fit must fit together.
+// ONE deadline for the whole request: calls that each fit must fit together.
 func TestMount_ABatchOfSlowCallsFitsTheOneHTTPDeadline(t *testing.T) {
 	const (
 		globalLimit = time.Second
@@ -262,8 +254,7 @@ func TestMount_ABatchOfSlowCallsFitsTheOneHTTPDeadline(t *testing.T) {
 	assert.Equal(t, "["+strings.Join(want, ",")+"]", got)
 }
 
-// Which layer catches a handler panic decides what the client sees. A batch
-// element's panic must be relayed to the serving goroutine to reach either.
+// Which layer catches a handler panic decides what the client sees.
 func TestMount_HandlerPanics(t *testing.T) {
 	boom := func(context.Context, *jrpc2.Request) (any, error) { panic("handler exploded") }
 	url := newMountedHandler(t, time.Minute, []HandlerSpec{{
@@ -275,8 +266,7 @@ func TestMount_HandlerPanics(t *testing.T) {
 		MethodName: "boomUnbudgeted",
 		Handler:    boom,
 		QueueLimit: 10,
-		// The only configuration in which a panic reaches the framing. No
-		// method either daemon registers is built this way.
+		// The only configuration in which a panic reaches the framing.
 		RequestDurationLimit: network.RequestDurationLimiterNoLimit,
 	}, {
 		MethodName:           "fast",
@@ -317,8 +307,7 @@ func TestMount_HandlerPanics(t *testing.T) {
 	})
 }
 
-// DELTA (g), the half that does not stop: the deadline ends the DISPATCH, not
-// the work, which is what sendTransaction depends on.
+// DELTA (g): the deadline ends the DISPATCH, not the work.
 func TestMount_AStartedElementSurvivesTheDeadline(t *testing.T) {
 	const limit = 300 * time.Millisecond
 	finished := make(chan error, 1)
@@ -350,8 +339,8 @@ func TestMount_AStartedElementSurvivesTheDeadline(t *testing.T) {
 	}
 }
 
-// The two halves of the handler lifetime: the HTTP deadline answers the client
-// and leaves the handler running, and only Shutdown ends it.
+// The deadline answers the client and leaves the handler running; only
+// Shutdown ends it.
 func TestMount_ShutdownEndsWhatTheDeadlineDidNot(t *testing.T) {
 	const limit = 300 * time.Millisecond
 	entered := make(chan struct{}, 1)
