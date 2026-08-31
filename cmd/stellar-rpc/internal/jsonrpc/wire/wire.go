@@ -1,8 +1,19 @@
 // Package wire frames JSON-RPC 2.0 over HTTP; both mounts use it.
 //
-// Three rules are LOAD-BEARING: json.Marshal + Write (never json.NewEncoder),
-// hand-appended batch frames (never json.Marshal of a []json.RawMessage), and
-// a batch worker's permit taken before its goroutine starts (never inside it).
+// Three things here look like they could be written more idiomatically, and
+// must not be:
+//
+//   - Results are marshaled with json.Marshal and written with one Write.
+//     Switching to json.NewEncoder(w).Encode re-adds a full copy of every
+//     large response under GOEXPERIMENT=jsonv2, silently.
+//   - Batch responses are assembled by appending frames between brackets.
+//     json.Marshal of a []json.RawMessage makes the stdlib re-validate and
+//     re-copy every frame — the multi-pass waste this package exists to
+//     remove.
+//   - A batch worker's semaphore permit is acquired before its goroutine is
+//     started. Acquired inside the goroutine, every element parks a
+//     goroutine on the semaphore, and one request body fits ~260,000
+//     elements.
 //
 // # The deltas
 //
