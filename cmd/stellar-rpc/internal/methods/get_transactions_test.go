@@ -385,6 +385,15 @@ func (r *sparseLedgerReader) GetLedger(_ context.Context, seq uint32) (xdr.Ledge
 	return createEmptyTestLedger(seq), true, nil
 }
 
+func (r *sparseLedgerReader) GetLedgerView(_ context.Context, seq uint32) (xdr.LedgerCloseMetaView, bool, error) {
+	r.gets++
+	raw, err := createEmptyTestLedger(seq).MarshalBinary()
+	if err != nil {
+		return nil, false, err
+	}
+	return xdr.LedgerCloseMetaView(raw), true, nil
+}
+
 func (r *sparseLedgerReader) WithLedgerRaw(
 	_ context.Context, seq uint32, fn store.WithLedgerRawFn,
 ) (bool, error) {
