@@ -14,8 +14,9 @@
 //	(f) params reach handlers verbatim rather than re-marshaled
 //	(g) dispatch stops at the HTTP deadline; started elements still finish
 //
-// Handlers run on a SERVER-scoped context, Background-derived and canceled only
-// by Handler.Shutdown. Three jrpc2 accessors are therefore unusable, and a
+// Handlers run on a SERVER-scoped context, Background-derived, so a client's
+// disconnect does not cancel a handler; the method budget does, and at
+// teardown Handler.Shutdown does. Three jrpc2 accessors are unusable, and a
 // guard test pins that: InboundRequest returns nil, ServerFromContext panics,
 // and IsNotification is false for EVERY request — that one QUIETLY, so
 // notification-ness is ParsedRequest.ID == "".
@@ -383,8 +384,11 @@ func (h *Handler) route(pr *jrpc2.ParsedRequest) (jrpc2.Handler, *jrpc2.Error) {
 
 // invoke runs one handler and frames it; the caller holds the permit.
 func (h *Handler) invoke(pr *jrpc2.ParsedRequest, method jrpc2.Handler) []byte {
-	// The SERVER's lifetime: a client that hangs up mid-call still completes
-	// it, which sendTransaction depends on.
+	// The SERVER's lifetime, so a client's disconnect does not cancel a
+	// handler — the METHOD BUDGET does, via the WithTimeout the per-method
+	// duration limiter derives from this. That is the property
+	// sendTransaction depends on: nothing the caller does mid-call decides
+	// whether the submission happens.
 	ctx := h.root
 
 	// DELTA (f): the params bytes go over verbatim, and rpcv2's getEventsV2

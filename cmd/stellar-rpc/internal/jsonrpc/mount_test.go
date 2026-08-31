@@ -122,7 +122,8 @@ func TestMount_ServesThroughTheRealMiddlewareChain(t *testing.T) {
 	})
 }
 
-// A client that hangs up mid-call does not cancel the work.
+// A client's disconnect does not cancel a handler; the method budget does.
+// This mount gives the method no budget, so nothing cancels it at all.
 func TestMount_HandlerContextIsNotTheRequestContext(t *testing.T) {
 	type outcome struct {
 		deadline bool
