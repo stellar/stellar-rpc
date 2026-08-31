@@ -106,6 +106,14 @@ func (l ledgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.Led
 	return getLedgerFromDB(ctx, l.tx, sequence)
 }
 
+// WithLedgerRaw lends the ledger's stored meta blob without decoding it; see
+// store.LedgerReaderTx for the loan's terms.
+func (l ledgerReaderTx) WithLedgerRaw(
+	ctx context.Context, sequence uint32, fn store.WithLedgerRawFn,
+) (bool, error) {
+	return withLedgerRawFromDB(ctx, l.tx, sequence, fn)
+}
+
 func (l ledgerReaderTx) Done() error {
 	return l.tx.Rollback()
 }
@@ -341,6 +349,34 @@ func getLedgerFromDB(ctx context.Context, db readDB, sequence uint32) (xdr.Ledge
 		return results[0], true, nil
 	default:
 		return xdr.LedgerCloseMeta{}, false, fmt.Errorf("multiple lcm entries (%d) for sequence %d in table %q",
+			len(results), sequence, ledgerCloseMetaTableName)
+	}
+}
+
+// withLedgerRawFromDB is getLedgerFromDB without the decode: it selects the
+// same `meta` column into a []byte instead of an xdr.LedgerCloseMeta, so the
+// row scan never runs LedgerCloseMeta.UnmarshalBinary, and lends the blob.
+//
+// The lent bytes are ours to lend: scanning a BLOB into a *[]byte goes through
+// database/sql's convertAssign, which clones the driver's row buffer (only
+// sql.RawBytes opts out of that clone), so each result is a freshly allocated
+// slice no later statement can reuse. BatchGetLedgers above already depends on
+// exactly this — it retains the slices it selects the same way.
+func withLedgerRawFromDB(
+	ctx context.Context, db readDB, sequence uint32, fn store.WithLedgerRawFn,
+) (bool, error) {
+	sql := sq.Select("meta").From(ledgerCloseMetaTableName).Where(sq.Eq{"sequence": sequence})
+	var results [][]byte
+	if err := db.Select(ctx, &results, sql); err != nil {
+		return false, err
+	}
+	switch len(results) {
+	case 0:
+		return false, nil
+	case 1:
+		return true, fn(results[0])
+	default:
+		return false, fmt.Errorf("multiple lcm entries (%d) for sequence %d in table %q",
 			len(results), sequence, ledgerCloseMetaTableName)
 	}
 }

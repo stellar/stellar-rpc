@@ -103,74 +103,45 @@ func (r *LedgerReader) NewTx(ctx context.Context) (store.LedgerReaderTx, error) 
 }
 
 // ledgerReaderTx satisfies store.LedgerReaderTx over the request's read view
-// (the serving wrapper owns and releases it — Done does not). GetLedger serves
-// getTransactions' ascending, contiguous per-ledger walk by pulling from a
-// single ScanLedgers iterator primed on the first call; GetLedgerRange and
-// BatchGetLedgers read through the same view but never touch that iterator.
+// (the serving wrapper owns and releases it — Done does not). GetLedger and
+// WithLedgerRaw serve getTransactions' ascending, contiguous per-ledger walk
+// by pulling from a single ScanLedgers iterator primed on the first call —
+// one iterator between them, see walkTo; GetLedgerRange and BatchGetLedgers
+// read through the same view but never touch that iterator.
 type ledgerReaderTx struct {
 	view *query.ReadView
 
 	// next/stop are the pull ends of the walk iterator; nil until the first
-	// GetLedger primes them.
+	// walk step primes them.
 	next func() (ledger.Entry, error, bool)
 	stop func()
 }
 
 func (tx *ledgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
-	// The request duration limiter answers the client at the deadline but only
-	// abandons the handler goroutine — it cannot stop it. Without this check
-	// the abandoned getTransactions walk would keep decoding the rest of its
-	// primed span (up to a whole chunk) while holding its read view, and the
-	// deletion grace margin is sized assuming walks stop within one iteration
-	// of their deadline.
-	if err := ctx.Err(); err != nil {
-		return xdr.LedgerCloseMeta{}, false, err
-	}
-	// ClampRange is the only place the servable window is enforced and no
-	// point-read path calls it, so gate here: without this a view acquired
-	// between ingestion's commit and its SetLatestLedger could return a ledger
-	// above the view's frozen latest.
-	if !inWindow(tx.view, sequence) {
-		return xdr.LedgerCloseMeta{}, false, nil
-	}
-
-	if tx.next == nil {
-		// ScanLedgers' end is inclusive; the -1 keeps the span at exactly
-		// walkSpanCap ledgers, so a chunk-aligned start opens one chunk
-		// reader, not two.
-		scan, err := tx.view.ScanLedgers(sequence, min(tx.view.LatestLedger(), sequence+walkSpanCap-1))
-		if err != nil {
-			return xdr.LedgerCloseMeta{}, false, err
-		}
-		tx.next, tx.stop = iter.Pull2(scan)
-	}
-
-	entry, err, ok := tx.next()
-	if err != nil {
-		return xdr.LedgerCloseMeta{}, false, err
-	}
-	if !ok {
-		// The iterator ran dry: the caller walked sequentially but past the span
-		// primed above. getTransactions' span cap (methods.LedgerScanLimit) keeps
-		// its walks inside the span, so reaching this means a new caller without
-		// that cap. Fail loudly rather than serve a wrong-position read.
-		return xdr.LedgerCloseMeta{}, false, fmt.Errorf(
-			"adapters: ledger walk exhausted its primed %d-ledger span at ledger %d"+
-				" — the calling handler must cap the request's ledger range",
-			walkSpanCap, sequence)
-	}
-	if entry.Seq != sequence {
-		// The walk contract (ascending, contiguous from the priming sequence)
-		// was broken. Fail loudly rather than serve the wrong ledger's data.
-		return xdr.LedgerCloseMeta{}, false, fmt.Errorf(
-			"adapters: non-sequential GetLedger: asked for ledger %d, the walk is at ledger %d",
-			sequence, entry.Seq)
+	raw, found, err := tx.walkTo(ctx, sequence)
+	if err != nil || !found {
+		return xdr.LedgerCloseMeta{}, found, err
 	}
 	var lcm xdr.LedgerCloseMeta
-	if err := lcm.UnmarshalBinary(entry.Bytes); err != nil {
+	if err := lcm.UnmarshalBinary(raw); err != nil {
 		return xdr.LedgerCloseMeta{}, false, fmt.Errorf("adapters: unmarshal ledger %d: %w", sequence, err)
 	}
 	return lcm, true, nil
+}
+
+// WithLedgerRaw is GetLedger's walk without its decode: it lends the step's
+// bytes straight through from the chunk reader. Same cursor as GetLedger (see
+// store.LedgerReaderTx), and the same loan rule the query views already use —
+// entry.Bytes aliases the reader's scratch buffer and the next step overwrites
+// it, so fn must not retain what it is handed.
+func (tx *ledgerReaderTx) WithLedgerRaw(
+	ctx context.Context, sequence uint32, fn store.WithLedgerRawFn,
+) (bool, error) {
+	raw, found, err := tx.walkTo(ctx, sequence)
+	if err != nil || !found {
+		return found, err
+	}
+	return true, fn(raw)
 }
 
 func (tx *ledgerReaderTx) GetLedgerRange(_ context.Context) (store.LedgerRange, error) {
@@ -222,6 +193,64 @@ func (tx *ledgerReaderTx) Done() error {
 		tx.stop()
 	}
 	return nil
+}
+
+// walkTo advances the Tx's single forward iterator to sequence and returns
+// that ledger's raw bytes, still aliasing the chunk reader's buffer. It is the
+// whole of the walk contract — deadline check, window gate, priming, and the
+// two loud failures — shared by GetLedger and WithLedgerRaw so the two cannot
+// drift into different notions of where the walk is.
+func (tx *ledgerReaderTx) walkTo(ctx context.Context, sequence uint32) ([]byte, bool, error) {
+	// The request duration limiter answers the client at the deadline but only
+	// abandons the handler goroutine — it cannot stop it. Without this check
+	// the abandoned getTransactions walk would keep reading the rest of its
+	// primed span (up to a whole chunk) while holding its read view, and the
+	// deletion grace margin is sized assuming walks stop within one iteration
+	// of their deadline.
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	// ClampRange is the only place the servable window is enforced and no
+	// point-read path calls it, so gate here: without this a view acquired
+	// between ingestion's commit and its SetLatestLedger could return a ledger
+	// above the view's frozen latest.
+	if !inWindow(tx.view, sequence) {
+		return nil, false, nil
+	}
+
+	if tx.next == nil {
+		// ScanLedgers' end is inclusive; the -1 keeps the span at exactly
+		// walkSpanCap ledgers, so a chunk-aligned start opens one chunk
+		// reader, not two.
+		scan, err := tx.view.ScanLedgers(sequence, min(tx.view.LatestLedger(), sequence+walkSpanCap-1))
+		if err != nil {
+			return nil, false, err
+		}
+		tx.next, tx.stop = iter.Pull2(scan)
+	}
+
+	entry, err, ok := tx.next()
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		// The iterator ran dry: the caller walked sequentially but past the span
+		// primed above. getTransactions' span cap (methods.LedgerScanLimit) keeps
+		// its walks inside the span, so reaching this means a new caller without
+		// that cap. Fail loudly rather than serve a wrong-position read.
+		return nil, false, fmt.Errorf(
+			"adapters: ledger walk exhausted its primed %d-ledger span at ledger %d"+
+				" — the calling handler must cap the request's ledger range",
+			walkSpanCap, sequence)
+	}
+	if entry.Seq != sequence {
+		// The walk contract (ascending, contiguous from the priming sequence)
+		// was broken. Fail loudly rather than serve the wrong ledger's data.
+		return nil, false, fmt.Errorf(
+			"adapters: non-sequential ledger walk: asked for ledger %d, the walk is at ledger %d",
+			sequence, entry.Seq)
+	}
+	return entry.Bytes, true, nil
 }
 
 // inWindow reports whether seq falls inside the view's servable window

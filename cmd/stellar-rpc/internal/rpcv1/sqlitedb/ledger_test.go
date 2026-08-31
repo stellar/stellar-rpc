@@ -2,6 +2,7 @@ package sqlitedb
 
 import (
 	"context"
+	"errors"
 	"io"
 	"path"
 	"testing"
@@ -300,4 +301,57 @@ func setupBenchmarkingDB(b *testing.B) (*DB, []xdr.LedgerCloseMeta) {
 	}
 	require.NoError(b, write.Commit(lcms[len(lcms)-1], nil))
 	return testDB, lcms
+}
+
+// TestWithLedgerRaw pins the raw accessor against the decoding one: the blob it
+// lends must re-marshal to exactly what GetLedger decodes, an absent ledger
+// must report found=false without running fn, and a callback error must come
+// back verbatim with found=true.
+func TestWithLedgerRaw(t *testing.T) {
+	db := NewTestDB(t)
+	daemon := host.MakeNoOpDaemon()
+	write := NewReadWriter(logger, db, daemon, 10, passphrase)
+	for seq := uint32(1); seq <= 3; seq++ {
+		tx, err := write.NewTx(t.Context())
+		require.NoError(t, err)
+		lcm := createLedger(seq)
+		require.NoError(t, tx.LedgerWriter().InsertLedger(lcm))
+		require.NoError(t, tx.Commit(lcm, nil))
+	}
+
+	reader := NewLedgerReader(db)
+	readTx, err := reader.NewTx(t.Context())
+	require.NoError(t, err)
+	defer func() { _ = readTx.Done() }()
+
+	for seq := uint32(1); seq <= 3; seq++ {
+		lcm, ok, err := readTx.GetLedger(t.Context(), seq)
+		require.NoError(t, err)
+		require.True(t, ok)
+		want, err := lcm.MarshalBinary()
+		require.NoError(t, err)
+
+		var got []byte
+		found, err := readTx.WithLedgerRaw(t.Context(), seq, func(raw []byte) error {
+			got = append([]byte(nil), raw...) // the loan forbids retaining raw
+			return nil
+		})
+		require.NoError(t, err)
+		require.True(t, found)
+		assert.Equal(t, want, got, "ledger %d", seq)
+	}
+
+	ran := false
+	found, err := readTx.WithLedgerRaw(t.Context(), 99, func([]byte) error {
+		ran = true
+		return nil
+	})
+	require.NoError(t, err)
+	assert.False(t, found)
+	assert.False(t, ran, "fn must not run for an absent ledger")
+
+	boom := errors.New("boom")
+	found, err = readTx.WithLedgerRaw(t.Context(), 1, func([]byte) error { return boom })
+	assert.ErrorIs(t, err, boom)
+	assert.True(t, found, "the ledger was there; only the callback failed")
 }
