@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -15,9 +16,6 @@ import (
 
 // blasterCfg is the realistic traffic-profile config, shipped with the blaster checkout.
 const blasterCfg = "cmd/stellar-rpc-blaster/internal/config/config.profile.toml"
-
-// blasterPin is the pinned stellar-rpc-blaster commit (realistic-traffic-profile).
-const blasterPin = "dd8f7c36c0f5e40aff78c4d52ebab2f0dc49c8b5"
 
 // blasterEnv is the leg's env-derived config.
 type blasterEnv struct {
@@ -123,25 +121,25 @@ func instantiate(ctx context.Context) error {
 
 // fetchBlaster clones and builds stellar-rpc-blaster at the pinned commit.
 func fetchBlaster(ctx context.Context, dir, repo string) (string, string, error) {
-	logger.Infof("fetching stellar-rpc-blaster (%s@%s)", repo, blasterPin)
+	logger.Infof("fetching stellar-rpc-blaster (%s@dev)", repo)
 	if err := os.RemoveAll(dir); err != nil {
 		return "", "", err
 	}
-	for _, args := range [][]string{
-		{"init", "-q", dir},
-		{"-C", dir, "fetch", "-q", "--depth", "1", "https://github.com/" + repo + ".git", blasterPin},
-		{"-C", dir, "checkout", "-q", "--detach", "FETCH_HEAD"},
-	} {
-		if err := harness.RunStreaming(ctx, "", nil, 20, "git", args...); err != nil {
-			return "", "", fmt.Errorf("git %s failed: %w", strings.Join(args, " "), err)
-		}
+	if err := harness.RunStreaming(ctx, "", nil, 20, "git", "clone", "-q", "--depth", "1",
+		"--branch", "dev", "https://github.com/"+repo+".git", dir); err != nil {
+		return "", "", fmt.Errorf("git clone failed: %w", err)
 	}
+	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return "", "", fmt.Errorf("resolving blaster commit: %w", err)
+	}
+	sha := strings.TrimSpace(string(out))
 
-	logger.Infof("building stellar-rpc-blaster at %s", blasterPin)
+	logger.Infof("building stellar-rpc-blaster at %s", sha)
 	if err := harness.RunStreaming(ctx, dir, nil, 40, "make", "build"); err != nil {
 		return "", "", fmt.Errorf("blaster build failed: %w", err)
 	}
-	return filepath.Join(dir, "stellar-rpc-blaster"), blasterPin, nil
+	return filepath.Join(dir, "stellar-rpc-blaster"), sha, nil
 }
 
 // blastCall parameterizes one serial blaster sweep.
