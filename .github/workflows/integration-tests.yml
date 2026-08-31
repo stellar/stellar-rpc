@@ -96,14 +96,14 @@ jobs:
 
       # --- Use pre-built debian package when core_git_ref is NOT provided ---
       - name: Pull and set Stellar Core image
-        if: env.CORE_GIT_REF == ''
+        if: env.CORE_GIT_REF == '' && env.CORE_DOCKER_IMG != ''
         shell: bash
         run: |
           docker pull "$CORE_DOCKER_IMG"
           echo STELLAR_RPC_INTEGRATION_TESTS_DOCKER_IMG="$CORE_DOCKER_IMG" >> $GITHUB_ENV
 
       - name: Install Captive Core from debian package
-        if: env.CORE_GIT_REF == ''
+        if: env.CORE_GIT_REF == '' && env.CORE_DEBIAN_PKG_VERSION != ''
         shell: bash
         run: |
           # Workaround for https://github.com/actions/virtual-environments/issues/5245,
