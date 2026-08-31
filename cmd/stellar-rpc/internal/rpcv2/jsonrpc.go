@@ -214,5 +214,13 @@ func deriveLifecycleGrace(svc config.ServiceConfig) time.Duration {
 	// method only it covers, so it participates in the max alongside the
 	// per-method budgets.
 	longest := max(deref(svc.MaxRequestExecutionDuration), limitsByMethod(svc.Methods).LongestDuration())
+	if longest > math.MaxInt64-graceMargin {
+		// Adding the margin would wrap to a NEGATIVE duration, which
+		// lifecycle.WithLifecycleDefaults reads as unset and silently replaces
+		// with its 5-minute default — the narrowest grace in the codebase,
+		// under the widest budget an operator can configure. Config validates
+		// only a minimum. Saturate instead.
+		return math.MaxInt64
+	}
 	return longest + graceMargin
 }

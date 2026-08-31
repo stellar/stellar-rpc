@@ -4,9 +4,11 @@ import (
 	"reflect"
 	"regexp"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAllConfigKeysMustBePointers(t *testing.T) {
@@ -106,4 +108,28 @@ func TestAllOptionsMustHaveAUniqueValidTomlKey(t *testing.T) {
 		// Ensure the keys are simple valid toml keys
 		assert.True(t, keyRegex.MatchString(key), "Invalid toml key for Option %s: %s", option.Name, key)
 	}
+}
+
+// A zero execution budget is a footgun the limiter cannot report: it arms no
+// limit timer, hands the handler an already-expired context, and then waits on
+// the handler with no deadline at all. v2 rejects it; v1 accepted it until
+// these options gained a validator.
+func TestExecutionDurationOptionsRejectZero(t *testing.T) {
+	cfg := Config{}
+	var checked int
+	for _, option := range cfg.options() {
+		if option.Validate == nil {
+			continue
+		}
+		target, ok := option.ConfigKey.(*time.Duration)
+		if !ok {
+			continue
+		}
+		checked++
+		*target = 0
+		require.Error(t, option.Validate(option), "%s accepted a zero duration", option.Name)
+		*target = time.Second
+		require.NoError(t, option.Validate(option), "%s rejected a positive duration", option.Name)
+	}
+	assert.Equal(t, 13, checked, "the execution-duration options lost their validator")
 }

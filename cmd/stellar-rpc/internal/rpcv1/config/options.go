@@ -521,78 +521,91 @@ func (cfg *Config) options() Options {
 			Usage:        "The max request execution duration is the predefined maximum duration of time allowed for processing a request. When that time elapses, the server would return 504 and abort the request's execution",
 			ConfigKey:    &cfg.MaxRequestExecutionDuration,
 			DefaultValue: 25 * time.Second,
+			Validate:     positive,
 		},
 		{
 			TomlKey:      strutils.KebabToConstantCase("max-get-health-execution-duration"),
 			Usage:        "The maximum duration of time allowed for processing a getHealth request. When that time elapses, the rpc server would return -32001 and abort the request's execution",
 			ConfigKey:    &cfg.MaxGetHealthExecutionDuration,
 			DefaultValue: 5 * time.Second,
+			Validate:     positive,
 		},
 		{
 			TomlKey:      strutils.KebabToConstantCase("max-get_events-execution-duration"),
 			Usage:        "The maximum duration of time allowed for processing a getEvents request. When that time elapses, the rpc server would return -32001 and abort the request's execution",
 			ConfigKey:    &cfg.MaxGetEventsExecutionDuration,
 			DefaultValue: 10 * time.Second,
+			Validate:     positive,
 		},
 		{
 			TomlKey:      strutils.KebabToConstantCase("max-get-network-execution-duration"),
 			Usage:        "The maximum duration of time allowed for processing a getNetwork request. When that time elapses, the rpc server would return -32001 and abort the request's execution",
 			ConfigKey:    &cfg.MaxGetNetworkExecutionDuration,
 			DefaultValue: 5 * time.Second,
+			Validate:     positive,
 		},
 		{
 			TomlKey:      strutils.KebabToConstantCase("max-get-version-info-execution-duration"),
 			Usage:        "The maximum duration of time allowed for processing a getVersionInfo request. When that time elapses, the rpc server would return -32001 and abort the request's execution",
 			ConfigKey:    &cfg.MaxGetVersionInfoExecutionDuration,
 			DefaultValue: 5 * time.Second,
+			Validate:     positive,
 		},
 		{
 			TomlKey:      strutils.KebabToConstantCase("max-get-latest-ledger-execution-duration"),
 			Usage:        "The maximum duration of time allowed for processing a getLatestLedger request. When that time elapses, the rpc server would return -32001 and abort the request's execution",
 			ConfigKey:    &cfg.MaxGetLatestLedgerExecutionDuration,
 			DefaultValue: 5 * time.Second,
+			Validate:     positive,
 		},
 		{
 			TomlKey:      strutils.KebabToConstantCase("max-get_ledger-entries-execution-duration"),
 			Usage:        "The maximum duration of time allowed for processing a getLedgerEntries request. When that time elapses, the rpc server would return -32001 and abort the request's execution",
 			ConfigKey:    &cfg.MaxGetLedgerEntriesExecutionDuration,
 			DefaultValue: 5 * time.Second,
+			Validate:     positive,
 		},
 		{
 			TomlKey:      strutils.KebabToConstantCase("max-get-transaction-execution-duration"),
 			Usage:        "The maximum duration of time allowed for processing a getTransaction request. When that time elapses, the rpc server would return -32001 and abort the request's execution",
 			ConfigKey:    &cfg.MaxGetTransactionExecutionDuration,
 			DefaultValue: 5 * time.Second,
+			Validate:     positive,
 		},
 		{
 			TomlKey:      strutils.KebabToConstantCase("max-get-transactions-execution-duration"),
 			Usage:        "The maximum duration of time allowed for processing a getTransactions request. When that time elapses, the rpc server would return -32001 and abort the request's execution",
 			ConfigKey:    &cfg.MaxGetTransactionsExecutionDuration,
 			DefaultValue: 5 * time.Second,
+			Validate:     positive,
 		},
 		{
 			TomlKey:      strutils.KebabToConstantCase("max-get-ledgers-execution-duration"),
 			Usage:        "The maximum duration of time allowed for processing a getLedgers request. When that time elapses, the rpc server would return -32001 and abort the request's execution",
 			ConfigKey:    &cfg.MaxGetLedgersExecutionDuration,
 			DefaultValue: 10 * time.Second,
+			Validate:     positive,
 		},
 		{
 			TomlKey:      strutils.KebabToConstantCase("max-send-transaction-execution-duration"),
 			Usage:        "The maximum duration of time allowed for processing a sendTransaction request. When that time elapses, the rpc server would return -32001 and abort the request's execution",
 			ConfigKey:    &cfg.MaxSendTransactionExecutionDuration,
 			DefaultValue: 15 * time.Second,
+			Validate:     positive,
 		},
 		{
 			TomlKey:      strutils.KebabToConstantCase("max-simulate-transaction-execution-duration"),
 			Usage:        "The maximum duration of time allowed for processing a simulateTransaction request. When that time elapses, the rpc server would return -32001 and abort the request's execution",
 			ConfigKey:    &cfg.MaxSimulateTransactionExecutionDuration,
 			DefaultValue: 15 * time.Second,
+			Validate:     positive,
 		},
 		{
 			TomlKey:      strutils.KebabToConstantCase("max-get-fee-stats-execution-duration"),
 			Usage:        "The maximum duration of time allowed for processing a getFeeStats request. When that time elapses, the rpc server would return -32001 and abort the request's execution",
 			ConfigKey:    &cfg.MaxGetFeeStatsExecutionDuration,
 			DefaultValue: 5 * time.Second,
+			Validate:     positive,
 		},
 		{
 			Name:         "serve-ledgers-from-datastore",
@@ -753,6 +766,13 @@ func positive(option *Option) error {
 		}
 	case *uint, *uint8, *uint16, *uint32, *uint64:
 		if reflect.ValueOf(v).Elem().Uint() <= 0 {
+			return fmt.Errorf("%s must be positive", option.Name)
+		}
+	case *time.Duration:
+		// A named int64: the *int64 case above does NOT match it, so without
+		// this every duration option that asks for validation would be
+		// rejected as "not a positive integer".
+		if *v <= 0 {
 			return fmt.Errorf("%s must be positive", option.Name)
 		}
 	default:

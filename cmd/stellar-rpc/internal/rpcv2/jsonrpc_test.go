@@ -3,6 +3,7 @@ package rpcv2
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http/httptest"
 	"runtime"
 	"testing"
@@ -309,4 +310,18 @@ func TestJRPC2ServerStrandsUnknownMethodInFlightEntries(t *testing.T) {
 	assert.Equal(t, jrpc2.InvalidRequest, errs[1].Code,
 		"if this passes as MethodNotFound, jrpc2 fixed the leak: retire the upstream ticket")
 	assert.Equal(t, "duplicate request ID", errs[1].Message)
+}
+
+// A budget near the top of the range must not wrap the grace negative:
+// lifecycle.WithLifecycleDefaults reads a non-positive Grace as unset and
+// substitutes 5 minutes, which would pair the narrowest grace with the widest
+// budget. Config validates only a minimum, so nothing upstream stops this.
+func TestDeriveLifecycleGrace_SaturatesInsteadOfWrapping(t *testing.T) {
+	cfg := defaultsConfig(t)
+	huge := time.Duration(math.MaxInt64)
+	cfg.Service.MaxRequestExecutionDuration = &huge
+
+	grace := deriveLifecycleGrace(cfg.Service)
+	assert.Positive(t, grace, "the derived grace wrapped negative")
+	assert.Equal(t, time.Duration(math.MaxInt64), grace)
 }
