@@ -17,6 +17,8 @@ import (
 	"math"
 	"sort"
 
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 )
@@ -362,7 +364,7 @@ func (a *ReadView) walkChunks(
 			Chunk: c, Reader: r,
 			From: max(lo, c.FirstLedger()), To: min(hi, c.LastLedger()),
 		}
-		res, err := scanChunk(ctx, part, filters, resume, desc, limit-len(walk.events))
+		res, err := scanChunk(ctx, part, filters, resume, desc, limit-len(walk.events), a.catalog.Logger())
 		if err != nil {
 			return walkResult{}, err
 		}
@@ -402,7 +404,7 @@ type chunkResult struct {
 
 func scanChunk(
 	ctx context.Context, part eventPart, filters []event.Filter,
-	resume resumeAt, desc bool, room int,
+	resume resumeAt, desc bool, room int, logger *supportlog.Entry,
 ) (chunkResult, error) {
 	ofs, err := part.Reader.Offsets()
 	if err != nil {
@@ -415,9 +417,13 @@ func scanChunk(
 	// and claim them covered.
 	end := ofs.EndLedger()
 	if end == ofs.StartLedger() || part.From < ofs.StartLedger() || part.To > end-1 {
-		return chunkResult{}, fmt.Errorf(
+		err := fmt.Errorf(
 			"query: chunk %s offsets cover [%d, %d] but the walk needs [%d, %d]",
 			part.Chunk, ofs.StartLedger(), end-1, part.From, part.To)
+		// The request fails with this, but the request is gone once it is
+		// answered and the condition means the store disagrees with itself.
+		logger.WithError(err).Error("query: chunk offsets do not cover the walk")
+		return chunkResult{}, err
 	}
 	window, err := chunkWindow(ctx, part.Reader, ofs, part.From, part.To, resume, desc)
 	if err != nil {

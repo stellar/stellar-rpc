@@ -213,7 +213,7 @@ func newShimClient(t *testing.T, lcms [][]byte) *jrpc2.Client {
 		TermBudget:   parityTermBudget,
 		MaxLimit:     parityMaxLimit,
 		DefaultLimit: parityDefaultLimit,
-	}, logger, nil)
+	}, logger)
 	return newLocalClient(t, func(ctx context.Context, req *jrpc2.Request) (any, error) {
 		return base(query.WithView(ctx, view), req)
 	})

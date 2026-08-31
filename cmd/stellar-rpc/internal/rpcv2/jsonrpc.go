@@ -56,7 +56,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 			TransactionReader: p.transactionReader,
 			FeeStats:          p.feeWindows,
 
-			GetEventsHandler: eventsapi.NewV1Handler(eventLimits(m.GetEvents), p.logger, p.metrics),
+			GetEventsHandler: eventsapi.NewV1Handler(eventLimits(m.GetEvents), p.logger),
 
 			// No DataStoreLedgerReader: getLedgers can fall back to a bulk
 			// datastore for ledgers below local retention, but the full-history
@@ -74,7 +74,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 		})
 	specs = append(specs, jsonrpc.HandlerSpec{
 		MethodName: protocol.GetEventsV2MethodName,
-		Handler:    eventsapi.NewHandler(eventLimits(m.GetEventsV2)),
+		Handler:    eventsapi.NewHandler(eventLimits(m.GetEventsV2), p.logger),
 	})
 	specs = limitsByMethod(m).Apply(specs)
 	for i := range specs {

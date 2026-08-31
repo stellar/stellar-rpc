@@ -21,7 +21,6 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
@@ -30,18 +29,16 @@ import (
 // NewV1Handler builds the v1 getEvents handler. Limits are the getEvents
 // method's own knobs, not getEventsV2's: the term budget defaults high
 // enough that no legal v1 request is rejected (config.DefaultGetEventsV1TermBudget).
-func NewV1Handler(limits Limits, logger *supportlog.Entry, metrics observability.Metrics) jrpc2.Handler {
-	metrics = observability.MetricsOrNop(metrics)
+func NewV1Handler(limits Limits, logger *supportlog.Entry) jrpc2.Handler {
 	return methods.NewHandler(
 		func(ctx context.Context, req protocol.GetEventsRequest) (protocol.GetEventsResponse, error) {
-			return getEventsV1(ctx, limits, logger, metrics, &req)
+			return getEventsV1(ctx, limits, logger, &req)
 		})
 }
 
 //nolint:cyclop // the v1 handler's validation order, kept in one place like the original
 func getEventsV1(
-	ctx context.Context, limits Limits, logger *supportlog.Entry,
-	metrics observability.Metrics, req *protocol.GetEventsRequest,
+	ctx context.Context, limits Limits, logger *supportlog.Entry, req *protocol.GetEventsRequest,
 ) (protocol.GetEventsResponse, error) {
 	zero := protocol.GetEventsResponse{}
 	if err := req.Valid(limits.MaxLimit); err != nil {
@@ -91,7 +88,7 @@ func getEventsV1(
 		return zero, &jrpc2.Error{Code: jrpc2.InvalidParams, Message: err.Error()}
 	}
 	if err := checkTermBudget(filters, limits.TermBudget); err != nil {
-		return zero, responseError(err, lr.FirstLedger.Sequence, lr.LastLedger.Sequence)
+		return zero, responseError(err, lr.FirstLedger.Sequence, lr.LastLedger.Sequence, logger)
 	}
 
 	minLedger, from := v1ResumePoint(start, fromCursor)
@@ -116,7 +113,6 @@ func getEventsV1(
 	// than mint a cursor that skips the unscanned remainder.
 	if uint(len(page.Events)) < limit &&
 		(page.Status == query.ScanHasMore || page.Status == query.ScanWaitingForLedgers) {
-		metrics.TruncatedEventWindow()
 		logger.WithField("startLedger", minLedger).WithField("endLedger", endLedger).
 			WithField("served", len(page.Events)).WithField("limit", limit).
 			WithField("scanStatus", page.Status).

@@ -414,7 +414,7 @@ func TestQueryEvents_UncoveredWindowFailsLoud(t *testing.T) {
 	require.NoError(t, ofs.Append(f+8, 1))
 	_, err = scanChunk(context.Background(),
 		eventPart{Chunk: c, Reader: &fakeEventReader{chunkID: c, ofs: ofs}, From: f, To: f + 8},
-		nil, resumeAt{}, false, 10)
+		nil, resumeAt{}, false, 10, rpcv2test.SilentLogger())
 	require.ErrorContains(t, err, "offsets cover")
 }
 
@@ -1032,7 +1032,7 @@ func TestEventScan_DropsDoNotStallTheChunk(t *testing.T) {
 
 	got, err := scanChunk(context.Background(),
 		eventPart{Chunk: c, Reader: fake, From: f, To: f},
-		[]event.Filter{{ContractID: cidA[:]}}, resumeAt{}, false, 5)
+		[]event.Filter{{ContractID: cidA[:]}}, resumeAt{}, false, 5, rpcv2test.SilentLogger())
 	require.NoError(t, err)
 	assert.Nil(t, got.nextUnserved, "the stream ended; the page did not fill")
 	assert.Equal(t, []string{"hit"}, labels(t, got.events),
@@ -1165,7 +1165,7 @@ func TestQueryEventsFrom_CostDoesNotGrowWithDepth(t *testing.T) {
 			r, f := oneBigLedgerReader(t, c, events)
 			res, err := scanChunk(context.Background(),
 				eventPart{Chunk: c, Reader: r, From: f, To: f},
-				nil, resumeAt{from: &EventID{Ledger: f, Tx: 1, Event: depth}}, false, room)
+				nil, resumeAt{from: &EventID{Ledger: f, Tx: 1, Event: depth}}, false, room, rpcv2test.SilentLogger())
 			require.NoError(t, err)
 			assert.Len(t, res.events, room)
 			assert.Less(t, r.payloadsRead, room*2,
