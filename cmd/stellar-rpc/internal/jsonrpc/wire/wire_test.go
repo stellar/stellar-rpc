@@ -770,16 +770,18 @@ func TestAppendHTMLEscaped(t *testing.T) {
 
 // batchOf builds a batch body of n calls to method, with ids 1..n.
 func batchOf(n int, method string) string {
-	var b strings.Builder
-	b.WriteByte('[')
-	for i := 1; i <= n; i++ {
-		if i > 1 {
-			b.WriteByte(',')
-		}
-		fmt.Fprintf(&b, `{"jsonrpc":"2.0","id":%d,"method":%q}`, i, method)
+	return jsonArray(n, func(id int) string {
+		return fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":%q}`, id, method)
+	})
+}
+
+// jsonArray joins n elements, built from ids 1..n, into a JSON array.
+func jsonArray(n int, element func(id int) string) string {
+	elems := make([]string, n)
+	for i := range elems {
+		elems[i] = element(i + 1)
 	}
-	b.WriteByte(']')
-	return b.String()
+	return "[" + strings.Join(elems, ",") + "]"
 }
 
 // serveAsync runs one body through h on its own goroutine and returns the
@@ -838,19 +840,13 @@ func TestWire_BatchElementsRunConcurrently(t *testing.T) {
 	close(release)
 	<-done
 
-	var want strings.Builder
-	want.WriteByte('[')
-	for i := 1; i <= n; i++ {
-		if i > 1 {
-			want.WriteByte(',')
-		}
-		fmt.Fprintf(&want, `{"jsonrpc":"2.0","id":%d,"result":%q}`, i, held)
-	}
-	want.WriteByte(']')
+	want := jsonArray(n, func(id int) string {
+		return fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":%q}`, id, held)
+	})
 
 	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, want.String(), rec.Body.String())
-	assert.Equal(t, strconv.Itoa(want.Len()), rec.Header().Get("Content-Length"))
+	assert.Equal(t, want, rec.Body.String())
+	assert.Equal(t, strconv.Itoa(len(want)), rec.Header().Get("Content-Length"))
 }
 
 // The stopwatch form of the test above, because "the batch took N times one

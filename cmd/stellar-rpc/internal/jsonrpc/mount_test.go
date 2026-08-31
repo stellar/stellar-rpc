@@ -244,28 +244,20 @@ func TestMount_ABatchOfSlowCallsFitsTheOneHTTPDeadline(t *testing.T) {
 		RequestDurationLimit: time.Minute,
 	}})
 
-	var body strings.Builder
-	var want strings.Builder
-	body.WriteByte('[')
-	want.WriteByte('[')
-	for i := 1; i <= elements; i++ {
-		if i > 1 {
-			body.WriteByte(',')
-			want.WriteByte(',')
-		}
-		fmt.Fprintf(&body, `{"jsonrpc":"2.0","id":%d,"method":"slow"}`, i)
-		fmt.Fprintf(&want, `{"jsonrpc":"2.0","id":%d,"result":"done"}`, i)
+	body := make([]string, elements)
+	want := make([]string, elements)
+	for i := range elements {
+		body[i] = fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"slow"}`, i+1)
+		want[i] = fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":"done"}`, i+1)
 	}
-	body.WriteByte(']')
-	want.WriteByte(']')
 
-	status, got := postMounted(t, url, body.String())
+	status, got := postMounted(t, url, "["+strings.Join(body, ",")+"]")
 
 	// Serial dispatch needs elements*perCall, which is past globalLimit, and
 	// the duration limiter answers 504 with an empty body.
 	require.Equal(t, http.StatusOK, status,
 		"a batch of %d %v calls did not fit a %v budget: the elements ran serially", elements, perCall, globalLimit)
-	assert.Equal(t, want.String(), got)
+	assert.Equal(t, "["+strings.Join(want, ",")+"]", got)
 }
 
 // The panic path, pinned at the mount, because which layer catches a handler

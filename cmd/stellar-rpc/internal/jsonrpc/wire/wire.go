@@ -23,6 +23,21 @@
 // []json.RawMessage), and a batch worker's permit taken before its goroutine
 // is started (never inside it).
 //
+// # The deltas
+//
+// Seven places answer differently from the bridge. Each is argued where it is
+// implemented; they are indexed here so the set is countable, because a
+// lettered list whose letters are scattered is exactly the kind of thing that
+// silently loses one.
+//
+//	(a) a malformed body is a -32700 frame over 200, not 500 + plaintext
+//	(b) an empty batch `[]` is a -32600 frame, not a 204
+//	(c) notifications have finished when their 204 is written
+//	(d) an empty-method notification is answered rather than 204'd
+//	(e) batch frames come back in input order
+//	(f) params reach handlers verbatim rather than re-marshaled
+//	(g) OPEN: the serving goroutine does not unwind at the HTTP deadline
+//
 // # What the jrpc2.Server took with it
 //
 // Handlers run on a context derived from context.Background, which is what
@@ -138,7 +153,8 @@ type Handler struct {
 	// number of fat results being marshaled at once: 64 x 17MB rather than
 	// 2 x 17MB is the difference between a bound and a decoration. The repo
 	// already takes GOMAXPROCS as its parallelism convention — see
-	// rpcv2/backfill.DefaultWorkers.
+	// rpcv2/backfill.DefaultWorkers. It is read once, here, which is enough:
+	// the quota that matters is in effect before the daemon binds a port.
 	//
 	// It is ONE semaphore for the whole handler, and a batch's elements take
 	// their permits from it individually, just as jrpc2's Server.invoke did.
@@ -287,7 +303,12 @@ func (h *Handler) dispatchAll(reqs []*jrpc2.ParsedRequest) [][]byte {
 
 	if len(reqs) == 1 {
 		// A single-element body — every non-batch request, including the fat
-		// ones this package exists for — never leaves this goroutine.
+		// ones this package exists for — never leaves this goroutine. The
+		// saving is a goroutine and a WaitGroup, which is noise beside a 17MB
+		// marshal; what this branch really buys is that a single request's
+		// panic reaches the limiter's recover with its OWN stack rather than
+		// wrapped in a relayedPanic. Deleting it as premature optimization
+		// would quietly change that.
 		frames[0] = h.dispatchOne(reqs[0])
 	} else {
 		h.dispatchBatch(reqs, frames)
@@ -331,8 +352,10 @@ func (h *Handler) dispatchBatch(reqs []*jrpc2.ParsedRequest, frames [][]byte) {
 		// would take the whole process down; the same handler bug on a single
 		// request unwinds into httpRequestDurationLimiter's recover, which
 		// answers 500 and logs the stack. Re-raising it here, after every
-		// sibling has finished, keeps a batch element's panic failing exactly
-		// the request it already failed and nothing else. (No parity is lost:
+		// sibling has finished, keeps a batch element's panic inside the HTTP
+		// request it belongs to instead of the process — the batch's other
+		// frames go down with it, which is what the serial dispatch this
+		// replaced did too. (No parity is lost:
 		// jrpc2 ran batch elements on goroutines it did not recover either, so
 		// under the bridge this bug class was a crash.) In this mount it is a
 		// safety net and not a live path: every method both daemons register
