@@ -164,6 +164,19 @@ func (tx *ledgerReaderTx) WithLedgerRaw(
 	return true, fn(entry.Bytes)
 }
 
+// WithLedgerRaw is GetLedger without the decode or the clone: it lends the
+// step's bytes straight from the chunk reader's scratch buffer, which the
+// next step overwrites — fn must not retain them.
+func (tx *ledgerReaderTx) WithLedgerRaw(
+	ctx context.Context, sequence uint32, fn store.WithLedgerRawFn,
+) (bool, error) {
+	entry, found, err := tx.walk(ctx, sequence)
+	if err != nil || !found {
+		return found, err
+	}
+	return true, fn(entry.Bytes)
+}
+
 func (tx *ledgerReaderTx) GetLedgerRange(_ context.Context) (store.LedgerRange, error) {
 	return getLedgerRange(tx.view)
 }
