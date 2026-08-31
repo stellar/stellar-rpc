@@ -86,6 +86,30 @@ type Params struct {
 // decorateHandlers wraps every method with request logging and the duration
 // summary. Each daemon builds its handler once, so creating and registering
 // the collector here happens once per registry.
+// registerOrReuse registers c and returns it, or returns the collector already
+// registered under the same name. Each daemon builds its handler once today,
+// but a second build on the same registry (a reload, a re-bind) must keep
+// counting on the existing series rather than panic on a duplicate.
+//
+// EVERY collector this package builds must go through here. Six families were
+// constructed and never registered between #804 and this commit, so the
+// per-method and global limiter signals did not exist on /metrics at all.
+func registerOrReuse[T prometheus.Collector](registry *prometheus.Registry, c T) T {
+	rerr := registry.Register(c)
+	if rerr == nil {
+		return c
+	}
+	are := prometheus.AlreadyRegisteredError{}
+	if !errors.As(rerr, &are) {
+		panic(rerr)
+	}
+	existing, ok := are.ExistingCollector.(T)
+	if !ok {
+		panic(rerr)
+	}
+	return existing
+}
+
 func decorateHandlers(daemon host.Daemon, logger *log.Entry, m handler.Map) handler.Map {
 	requestMetric := prometheus.NewSummaryVec(prometheus.SummaryOpts{
 		Namespace:  daemon.MetricsNamespace(),
@@ -94,20 +118,7 @@ func decorateHandlers(daemon host.Daemon, logger *log.Entry, m handler.Map) hand
 		Help:       "JSON RPC request duration",
 		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
 	}, []string{"endpoint", labelStatus})
-	// Register-or-reuse: each daemon builds its handler once today, but a
-	// second build on the same registry (a future reload or re-bind) must keep
-	// counting on the existing series, not panic on duplicate registration.
-	if rerr := daemon.MetricsRegistry().Register(requestMetric); rerr != nil {
-		are := prometheus.AlreadyRegisteredError{}
-		if !errors.As(rerr, &are) {
-			panic(rerr)
-		}
-		existing, ok := are.ExistingCollector.(*prometheus.SummaryVec)
-		if !ok {
-			panic(rerr)
-		}
-		requestMetric = existing
-	}
+	requestMetric = registerOrReuse(daemon.MetricsRegistry(), requestMetric)
 	decorated := handler.Map{}
 	for endpoint, h := range m {
 		decorated[endpoint] = handler.New(func(ctx context.Context, r *jrpc2.Request) (any, error) {
@@ -204,7 +215,7 @@ func wrapWithLimiters(
 	})
 	queueLimiter := network.MakeJrpcBacklogQueueLimiter(
 		spec.Handler,
-		queueLimiterGauge,
+		registerOrReuse(daemon.MetricsRegistry(), queueLimiterGauge),
 		uint64(spec.QueueLimit),
 		logger)
 
@@ -231,8 +242,8 @@ func wrapWithLimiters(
 		queueLimiter.Handle,
 		requestDurationWarn,
 		spec.RequestDurationLimit,
-		requestDurationWarnCounter,
-		requestDurationLimitCounter,
+		registerOrReuse(daemon.MetricsRegistry(), requestDurationWarnCounter),
+		registerOrReuse(daemon.MetricsRegistry(), requestDurationLimitCounter),
 		logger,
 		detached)
 	return durationLimiter.Handle
@@ -268,7 +279,7 @@ func NewHandler(params Params) Handler {
 
 	queueLimitedFraming := network.MakeHTTPBacklogQueueLimiter(
 		framing,
-		globalQueueRequestBacklogLimiter,
+		registerOrReuse(params.Daemon.MetricsRegistry(), globalQueueRequestBacklogLimiter),
 		uint64(params.GlobalQueueLimit),
 		params.Logger)
 
@@ -288,8 +299,8 @@ func NewHandler(params Params) Handler {
 		queueLimitedFraming,
 		params.GlobalDurationWarning,
 		params.GlobalDurationLimit,
-		globalQueueRequestExecutionDurationWarningCounter,
-		globalQueueRequestExecutionDurationLimitCounter,
+		registerOrReuse(params.Daemon.MetricsRegistry(), globalQueueRequestExecutionDurationWarningCounter),
+		registerOrReuse(params.Daemon.MetricsRegistry(), globalQueueRequestExecutionDurationLimitCounter),
 		params.Logger)
 
 	handler = http.MaxBytesHandler(handler, maxHTTPRequestSize)

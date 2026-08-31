@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/creachadair/jrpc2"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -506,4 +507,67 @@ func TestMount_ClosedConnectionsStopTheDispatchBeforeTheDrain(t *testing.T) {
 	assert.Equal(t, atClose, started.Load(), "elements started after the connections were closed")
 	assert.LessOrEqual(t, atClose, int64(weight+1),
 		"the dispatch kept going past the bound while its connection was dead")
+}
+
+// stableRegistryDaemon is MakeNoOpDaemon with a registry that does not change
+// between calls. NoOpDaemon hands out a fresh one per call so tests can
+// register repeatedly, which also makes registration unobservable.
+type stableRegistryDaemon struct {
+	*host.NoOpDaemon
+
+	registry *prometheus.Registry
+}
+
+func (d stableRegistryDaemon) MetricsRegistry() *prometheus.Registry { return d.registry }
+
+// Six metric families were built and never registered between #804 (2023) and
+// the commit that added this test, so the per-method and global limiter
+// signals did not exist on /metrics at all — including
+// <method>_inflight_requests, which is the count of live handler bodies and
+// the operator's only view of the population the drain waits for.
+func TestMount_LimiterMetricsAreRegistered(t *testing.T) {
+	daemon := stableRegistryDaemon{host.MakeNoOpDaemon(), prometheus.NewRegistry()}
+	NewHandler(Params{
+		Daemon: daemon, Logger: mountLogger(), GlobalQueueLimit: 100,
+		GlobalDurationWarning: time.Second, GlobalDurationLimit: time.Minute,
+		Specs: []HandlerSpec{{
+			MethodName:           "getHealth",
+			Handler:              func(context.Context, *jrpc2.Request) (any, error) { return "ok", nil },
+			QueueLimit:           10,
+			RequestDurationLimit: time.Minute,
+		}},
+	})
+
+	families, err := daemon.registry.Gather()
+	require.NoError(t, err)
+	got := make(map[string]bool, len(families))
+	for _, f := range families {
+		got[f.GetName()] = true
+	}
+
+	ns := host.PrometheusNamespace + "_" + subsystemNetwork + "_"
+	for _, name := range []string{
+		ns + "get_health_inflight_requests",
+		ns + "get_health_execution_threshold_warning",
+		ns + "get_health_execution_threshold_limit",
+		ns + "global_inflight_requests",
+		ns + "global_request_execution_duration_threshold_warning",
+		ns + "global_request_execution_duration_threshold_limit",
+	} {
+		assert.True(t, got[name], "%s was built but never registered", name)
+	}
+
+	// Registering twice must reuse rather than panic: the mount is rebuildable.
+	assert.NotPanics(t, func() {
+		NewHandler(Params{
+			Daemon: daemon, Logger: mountLogger(), GlobalQueueLimit: 100,
+			GlobalDurationWarning: time.Second, GlobalDurationLimit: time.Minute,
+			Specs: []HandlerSpec{{
+				MethodName:           "getHealth",
+				Handler:              func(context.Context, *jrpc2.Request) (any, error) { return "ok", nil },
+				QueueLimit:           10,
+				RequestDurationLimit: time.Minute,
+			}},
+		})
+	})
 }
