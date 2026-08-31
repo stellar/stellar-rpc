@@ -9,8 +9,8 @@ import (
 )
 
 // expectedTrafficProfile is the traffic-model version blaster stamps on modeled
-// endpoints at the pinned commit; a mismatch breaks cross-run comparability.
-const expectedTrafficProfile = 2
+// endpoints at dev HEAD; a mismatch breaks cross-run comparability.
+const expectedTrafficProfile = 3
 
 // endpointStats is one endpoint's row of the report, distilled from blaster's
 // results JSON (percentile keys there are "p50.0", "p95.0", "p99.0", "p99.9").

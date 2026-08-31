@@ -20,7 +20,7 @@ const fixture = `{
       "errors": 9,
       "target_rps": 20,
       "limit": 1,
-      "traffic_profile": 2,
+      "traffic_profile": 3,
       "percentiles_ms": {"p50.0": 3.2, "p95.0": 9.8, "p99.0": 21.5, "p99.9": 60.1},
       "error_types": {"rpc_error": {"error_msg": "boom", "error_code": -32600, "count": 9}},
       "timeline": [
@@ -40,7 +40,7 @@ const fixture = `{
       "success": 333,
       "errors": 2,
       "target_rps": 15,
-      "traffic_profile": 2,
+      "traffic_profile": 3,
       "percentiles_ms": {"p50.0": 0.8, "p95.0": 2.1, "p99.0": 5.0, "p99.9": 30.2},
       "timeline": [
         {"target_rps": 15, "success": 74, "errors": 0, "error_rate_pct": 0,
@@ -52,7 +52,7 @@ const fixture = `{
           "success": 225,
           "errors": 0,
           "target_rps": 7.2,
-          "traffic_profile": 2,
+          "traffic_profile": 3,
           "percentiles_ms": {"p50.0": 0.637, "p95.0": 1.287, "p99.0": 1.703, "p99.9": 2.815},
           "timeline": [
             {"target_rps": 7.2, "success": 36, "errors": 0, "error_rate_pct": 0,
@@ -64,7 +64,7 @@ const fixture = `{
           "success": 108,
           "errors": 2,
           "target_rps": 3.45,
-          "traffic_profile": 2,
+          "traffic_profile": 3,
           "percentiles_ms": {"p50.0": 5.1, "p95.0": 14.2, "p99.0": 30.4, "p99.9": 81.7}
         }
       }
@@ -113,19 +113,19 @@ func TestSummarize(t *testing.T) {
 func TestSummarizeTrafficProfile(t *testing.T) {
 	// mismatched profile version fails
 	_, _, err := summarize([]byte(`{"endpoints": {"getLedgers": {
-		"total_requests": 1, "target_rps": 1, "traffic_profile": 3, "percentiles_ms": {}}}}`))
-	require.ErrorContains(t, err, "traffic profile 3, want 2")
+		"total_requests": 1, "target_rps": 1, "traffic_profile": 2, "percentiles_ms": {}}}}`))
+	require.ErrorContains(t, err, "traffic profile 2, want 3")
 
 	// mismatch inside an archetype sub-stream fails too
 	_, _, err = summarize([]byte(`{"endpoints": {"getEvents": {
-		"total_requests": 1, "target_rps": 1, "traffic_profile": 2, "percentiles_ms": {},
-		"archetypes": {"head-poll": {"total_requests": 1, "target_rps": 1, "traffic_profile": 3, "percentiles_ms": {}}}}}}`))
-	require.ErrorContains(t, err, "getEvents/head-poll reports traffic profile 3, want 2")
+		"total_requests": 1, "target_rps": 1, "traffic_profile": 3, "percentiles_ms": {},
+		"archetypes": {"head-poll": {"total_requests": 1, "target_rps": 1, "traffic_profile": 2, "percentiles_ms": {}}}}}}`))
+	require.ErrorContains(t, err, "getEvents/head-poll reports traffic profile 2, want 3")
 
 	// no profile stamped anywhere fails
 	_, _, err = summarize([]byte(`{"endpoints": {"getHealth": {
 		"total_requests": 1, "target_rps": 1, "percentiles_ms": {}}}}`))
-	require.ErrorContains(t, err, "no endpoint reports traffic profile 2")
+	require.ErrorContains(t, err, "no endpoint reports traffic profile 3")
 }
 
 func TestRenderMarkdown(t *testing.T) {
