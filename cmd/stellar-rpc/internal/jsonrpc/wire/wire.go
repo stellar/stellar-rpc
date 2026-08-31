@@ -252,15 +252,24 @@ func (h *Handler) dispatchBatch(ctx context.Context, reqs []*jrpc2.ParsedRequest
 	// Read once: ctx.Err() takes a lock per call, a channel probe does not.
 	dead := ctx.Done()
 
+	// Errors answerable without a handler, by index, built below rather than
+	// here: one body can carry ~260,000 of them and ~23MB of frames.
+	var static []*jrpc2.Error
+
 	for i, pr := range reqs {
 		if isClosed(dead) {
 			// DELTA (g) for the elements that never reach acquirePermit.
 			break
 		}
-		method, frame := h.route(pr)
+		method, rerr := h.route(pr)
 		if method == nil {
-			frames[i] = frame // answered without a permit or a goroutine
-			continue
+			if rerr != nil {
+				if static == nil {
+					static = make([]*jrpc2.Error, len(reqs))
+				}
+				static[i] = rerr
+			}
+			continue // no permit and no goroutine spent on it
 		}
 		if !h.acquirePermit(ctx) {
 			break // the request died waiting for the bound
@@ -271,6 +280,22 @@ func (h *Handler) dispatchBatch(ctx context.Context, reqs []*jrpc2.ParsedRequest
 			defer catchPanic(&raised)
 			frames[i] = h.invoke(pr, method)
 		})
+	}
+
+	// ONE permit for every static frame, not one per element: a hostile body
+	// would otherwise put ~260,000 acquire/release cycles through a semaphore
+	// every legitimate request shares. Safe to take here — this goroutine
+	// holds nothing, so it cannot deadlock against the workers above. The
+	// parse that precedes it is ~7x larger for the same body and is bounded by
+	// the backlog limit times the body cap, not by this; that is pre-existing
+	// and true of the bridge too.
+	if static != nil && !isClosed(dead) && h.acquirePermit(ctx) {
+		for i, rerr := range static {
+			if rerr != nil {
+				frames[i] = errorFrame(reqs[i].ID, rerr)
+			}
+		}
+		h.sem.Release(1)
 	}
 	wg.Wait()
 
@@ -284,9 +309,13 @@ func (h *Handler) dispatchBatch(ctx context.Context, reqs []*jrpc2.ParsedRequest
 // dispatchOne answers one request here, releasing its permit before returning
 // so the caller writes without one, panics included.
 func (h *Handler) dispatchOne(ctx context.Context, pr *jrpc2.ParsedRequest) []byte {
-	method, frame := h.route(pr)
+	method, rerr := h.route(pr)
 	if method == nil {
-		return frame
+		if rerr == nil {
+			return nil
+		}
+		// One frame, so it is built here rather than deferred as a batch's are.
+		return errorFrame(pr.ID, rerr)
 	}
 	if !h.acquirePermit(ctx) {
 		return nil // DELTA (g): never started, so there is nothing to answer.
@@ -311,16 +340,19 @@ func isClosed(c <-chan struct{}) bool {
 }
 
 // route decides how one request is answered WITHOUT running anything: the
-// handler, or a nil handler and the frame (itself nil for no response). The
-// ORDER is load-bearing — parse and shape errors answer even for a
+// handler, or a nil handler and the error to answer with (itself nil when the
+// request gets no response). It returns the error rather than the frame so the
+// caller can choose when to pay for the bytes — see dispatchBatch.
+//
+// The ORDER is load-bearing — parse and shape errors answer even for a
 // notification, then an empty method (DELTA (d)), and only then does
 // notification-ness apply, to DISPATCH results only.
-func (h *Handler) route(pr *jrpc2.ParsedRequest) (jrpc2.Handler, []byte) {
+func (h *Handler) route(pr *jrpc2.ParsedRequest) (jrpc2.Handler, *jrpc2.Error) {
 	if pr.Error != nil {
-		return nil, errorFrame(pr.ID, pr.Error)
+		return nil, pr.Error
 	}
 	if pr.Method == "" {
-		return nil, errorFrame(pr.ID, errEmptyMethod)
+		return nil, errEmptyMethod
 	}
 	// `method != nil` too: a nil table entry must not read as "run this".
 	if method, ok := h.methods[pr.Method]; ok && method != nil {
@@ -331,10 +363,10 @@ func (h *Handler) route(pr *jrpc2.ParsedRequest) (jrpc2.Handler, []byte) {
 	}
 	// Resolved here, so no metric is labeled: an attacker-chosen method name
 	// cannot grow the summary's cardinality.
-	return nil, errorFrame(pr.ID, (&jrpc2.Error{
+	return nil, (&jrpc2.Error{
 		Code:    jrpc2.MethodNotFound,
 		Message: jrpc2.MethodNotFound.String(),
-	}).WithData(pr.Method))
+	}).WithData(pr.Method)
 }
 
 // invoke runs one handler and frames it; the caller holds the permit.

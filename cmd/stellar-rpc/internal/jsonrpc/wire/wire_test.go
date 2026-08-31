@@ -1293,3 +1293,60 @@ func TestWire_Shutdown(t *testing.T) {
 		assert.Empty(t, rec.Body.String())
 	})
 }
+
+// Static-error frames are the one answer that needs no handler, and a hostile
+// body carries ~260,000 of them at ~23MB. Building them outside the bound let
+// concurrent hostile bodies materialize that much each, so the deferred build
+// takes a permit — proved here by holding every permit and showing a
+// static-only batch cannot finish until one comes back.
+//
+//nolint:unparam // the handler literal must match the fixed jrpc2.Handler signature
+func TestWire_StaticErrorFramesAreBuiltInsideTheBound(t *testing.T) {
+	weight := runtime.GOMAXPROCS(0)
+	entered := make(chan struct{}, weight)
+	release := make(chan struct{})
+
+	h := NewHandler(map[string]jrpc2.Handler{
+		"hold": func(context.Context, *jrpc2.Request) (any, error) {
+			entered <- struct{}{}
+			<-release
+			return held, nil
+		},
+	}, nil)
+
+	var wg sync.WaitGroup
+	for range weight {
+		wg.Go(func() {
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/",
+				strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"hold"}`))
+			req.Header.Set("Content-Type", "application/json")
+			h.ServeHTTP(httptest.NewRecorder(), req)
+		})
+	}
+	for range weight {
+		<-entered
+	}
+
+	// Every permit is held. This batch runs no handler at all, so before the
+	// deferred build it answered immediately.
+	rec, done := serveAsync(t, h, `[5,5,5]`)
+	select {
+	case <-done:
+		close(release)
+		wg.Wait()
+		t.Fatal("a static-error batch was framed while every permit was held")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the static-error batch never completed after a permit came back")
+	}
+	wg.Wait()
+
+	one := `{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"request is not a JSON object"}}`
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "["+one+","+one+","+one+"]", rec.Body.String())
+}
