@@ -8,7 +8,8 @@
 //
 //	(a) a malformed body is a -32700 frame over 200, not 500 + plaintext
 //	(b) an empty batch `[]` is a -32600 frame, not a 204
-//	(c) notifications have finished when their 204 is written
+//	(c) notifications have finished, or been answered-at-budget and abandoned
+//	    per the limiter's contract, before the 204
 //	(d) an empty-method notification is answered rather than 204'd
 //	(e) batch frames come back in input order
 //	(f) params reach handlers verbatim rather than re-marshaled
@@ -229,7 +230,9 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, body []byte)
 		return
 	}
 	if len(frames) == 0 {
-		// All notifications, and DELTA (c) — all of them have finished.
+		// All notifications, and DELTA (c) — each has finished, or its
+		// method budget expired and the limiter abandoned it. dispatchAll
+		// joins the dispatches, not the limiter's children.
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -399,7 +402,10 @@ func (h *Handler) invoke(pr *jrpc2.ParsedRequest, method jrpc2.Handler) []byte {
 	result, err := method(ctx, pr.ToRequest())
 	if pr.ID == "" {
 		// "The Server MUST NOT reply to a Notification, including those that
-		// are within a batch request."
+		// are within a batch request." Deliberately NOT joined here: waiting
+		// for an over-budget notification would tie the 204 and its backlog
+		// slot to straggler duration — the coupling the duration limiter
+		// exists to break — for a difference no notification client can see.
 		return nil
 	}
 	if err != nil {

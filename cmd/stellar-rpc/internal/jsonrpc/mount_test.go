@@ -572,3 +572,56 @@ func TestMount_LimiterMetricsAreRegistered(t *testing.T) {
 		})
 	})
 }
+
+// DELTA (c), scoped. A notification's work has finished when its 204 lands —
+// unless its method budget expired first, in which case the limiter answered
+// and walked away, and the 204 precedes the side effects. Not joined here on
+// purpose: see invoke. The child stays tracked, so Shutdown still covers it.
+func TestMount_ANotificationOverItsBudgetIsAnsweredAtBudget(t *testing.T) {
+	const budget = 200 * time.Millisecond
+	release := make(chan struct{})
+	defer close(release)
+	var slowFinished, quickFinished atomic.Bool
+
+	url, handler := newMountedHandlerAndHandle(t, time.Minute, []HandlerSpec{{
+		MethodName: "slowNote",
+		Handler: func(context.Context, *jrpc2.Request) (any, error) {
+			<-release
+			slowFinished.Store(true)
+			return "late", nil
+		},
+		QueueLimit:           10,
+		RequestDurationLimit: budget,
+	}, {
+		MethodName: "quickNote",
+		Handler: func(context.Context, *jrpc2.Request) (any, error) {
+			quickFinished.Store(true)
+			return "ok", nil
+		},
+		QueueLimit:           10,
+		RequestDurationLimit: time.Minute,
+	}})
+
+	// The original property, still true within budget.
+	status, _ := postMounted(t, url, `{"jsonrpc":"2.0","method":"quickNote"}`)
+	require.Equal(t, http.StatusNoContent, status)
+	assert.True(t, quickFinished.Load(), "a within-budget notification must run before its 204")
+
+	// Over budget: answered at the budget, not at completion.
+	start := time.Now()
+	status, body := postMounted(t, url, `[{"jsonrpc":"2.0","method":"slowNote"}]`)
+	answered := time.Since(start)
+
+	require.Equal(t, http.StatusNoContent, status)
+	assert.Empty(t, body)
+	t.Logf("204 after %v against a %v budget", answered, budget)
+	assert.GreaterOrEqual(t, answered, budget, "the 204 did not wait for the budget: the handler never ran")
+	assert.Less(t, answered, 4*budget, "the 204 waited for the handler instead of the budget")
+	assert.False(t, slowFinished.Load(), "the handler finished on its own; this pins nothing")
+
+	// Abandoned, but still counted: the drain sees it even though the 204 did not.
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	assert.Error(t, handler.Shutdown(ctx),
+		"an abandoned notification is not tracked by liveHandlers")
+}
