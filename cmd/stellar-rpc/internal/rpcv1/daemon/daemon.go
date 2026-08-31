@@ -99,6 +99,18 @@ func (d *Daemon) close() {
 		}
 	}
 
+	// FIRST teardown step: handler contexts are server-scoped, so this is the
+	// only thing that ends a request still reading core, db or the datastore
+	// below. Its own budget, not shutdownCtx's remainder, because the drain
+	// matters most when the Shutdown above already spent that on the very
+	// stragglers this cancels. Logged, not collected: a drain that ran out of
+	// time is a degraded shutdown, not a failed one.
+	drainCtx, drainRelease := context.WithTimeout(context.Background(), defaultShutdownGracePeriod)
+	defer drainRelease()
+	if err := d.jsonRPCHandler.Shutdown(drainCtx); err != nil {
+		d.logger.WithError(err).Warn("JSON-RPC handlers did not drain before teardown")
+	}
+
 	if err := d.ingestService.Close(); err != nil {
 		d.logger.WithError(err).Error("error closing ingestion service")
 		closeErrors = append(closeErrors, err)
@@ -106,17 +118,6 @@ func (d *Daemon) close() {
 	if err := d.core.Close(); err != nil {
 		d.logger.WithError(err).Error("error closing captive core")
 		closeErrors = append(closeErrors, err)
-	}
-	// Handler contexts are server-scoped, so this is the only thing that ends
-	// a request still reading d.db below. Its own budget rather than
-	// shutdownCtx's remainder: the drain matters most when the Shutdown above
-	// has already spent that on the very stragglers this cancels. Logged, not
-	// collected — a drain that ran out of time is a degraded shutdown, not a
-	// failed one.
-	drainCtx, drainRelease := context.WithTimeout(context.Background(), defaultShutdownGracePeriod)
-	defer drainRelease()
-	if err := d.jsonRPCHandler.Shutdown(drainCtx); err != nil {
-		d.logger.WithError(err).Warn("JSON-RPC handlers did not drain before teardown")
 	}
 	if err := d.db.Close(); err != nil {
 		d.logger.WithError(err).Error("Error closing db")
