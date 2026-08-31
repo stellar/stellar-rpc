@@ -32,7 +32,7 @@ var expectedTransactionInfo = protocol.TransactionInfo{
 		FeeBump:             false,
 		Ledger:              1,
 		EnvelopeXDR:         "AAAAAgAAAQCAAAAAAAAAAD8MNL+TrQ2ZcdBMzJD3BVEcg4qtlzSkovsNegP8f+iaAAAAAQAAAAD///+dAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==", //nolint:lll
-		ResultMetaXDR:       "AAAAAwAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAABAAAAAA==",
+		ResultMetaXDR:       "AAAAAwAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		ResultXDR:           "AAAAAAAAAGQAAAAAAAAAAAAAAAA=",
 		DiagnosticEventsXDR: []string{},
 		Events: protocol.Events{
@@ -323,11 +323,10 @@ func createTestLedger(sequence uint32) xdr.LedgerCloseMeta {
 		TxApplyProcessing: xdr.TransactionMeta{
 			V:          3,
 			Operations: &[]xdr.OperationMeta{},
-			// The envelope is soroban (Ext V1), so its V3 meta must carry
-			// SorobanMeta, as on the real network.
-			V3: &xdr.TransactionMetaV3{SorobanMeta: &xdr.SorobanTransactionMeta{
-				ReturnValue: xdr.ScVal{Type: xdr.ScValTypeScvVoid},
-			}},
+			// Soroban envelope with NO SorobanMeta: a Soroban tx charged but
+			// never executed (real on protocol 20-22 history). This pins the
+			// [[]] contractEventsXdr arity the view path must preserve.
+			V3: &xdr.TransactionMetaV3{},
 		},
 		Result: xdr.TransactionResultPair{
 			TransactionHash: txHash(sequence),
@@ -383,15 +382,6 @@ type sparseLedgerReader struct {
 func (r *sparseLedgerReader) GetLedger(_ context.Context, seq uint32) (xdr.LedgerCloseMeta, bool, error) {
 	r.gets++
 	return createEmptyTestLedger(seq), true, nil
-}
-
-func (r *sparseLedgerReader) GetLedgerView(_ context.Context, seq uint32) (xdr.LedgerCloseMetaView, bool, error) {
-	r.gets++
-	raw, err := createEmptyTestLedger(seq).MarshalBinary()
-	if err != nil {
-		return nil, false, err
-	}
-	return xdr.LedgerCloseMetaView(raw), true, nil
 }
 
 func (r *sparseLedgerReader) WithLedgerRaw(
