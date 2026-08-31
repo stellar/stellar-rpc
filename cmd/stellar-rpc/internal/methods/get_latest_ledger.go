@@ -24,18 +24,22 @@ func NewGetLatestLedgerHandler(ledgerReader store.LedgerReader) jrpc2.Handler {
 				Message: "could not get latest ledger sequence",
 			}
 		}
-		latestLedgerView, found, err := ledgerReader.GetLedgerView(ctx, latestSequence)
-		if (err != nil) || (!found) {
-			return protocol.GetLatestLedgerResponse{}, &jrpc2.Error{
-				Code:    jrpc2.InternalError,
-				Message: "could not get latest ledger",
-			}
-		}
-		response, err := latestLedgerResponse(latestLedgerView, latestSequence)
-		if err != nil {
+		var response protocol.GetLatestLedgerResponse
+		found, err := ledgerReader.WithLedgerRaw(ctx, latestSequence, func(raw []byte) error {
+			var lerr error
+			response, lerr = latestLedgerResponse(xdr.LedgerCloseMetaView(raw), latestSequence)
+			return lerr
+		})
+		if err != nil && found {
 			return protocol.GetLatestLedgerResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
 				Message: "could not parse latest ledger header",
+			}
+		}
+		if err != nil || !found {
+			return protocol.GetLatestLedgerResponse{}, &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: "could not get latest ledger",
 			}
 		}
 		return response, nil

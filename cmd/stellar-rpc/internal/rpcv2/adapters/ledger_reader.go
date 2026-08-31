@@ -55,28 +55,26 @@ func (r *LedgerReader) GetLedger(ctx context.Context, sequence uint32) (xdr.Ledg
 	return lcm, found, err
 }
 
-// GetLedgerView is GetLedger without the decode: the raw bytes are copied
-// out of the read's loan, so the view may outlive the call.
-func (r *LedgerReader) GetLedgerView(ctx context.Context, sequence uint32) (xdr.LedgerCloseMetaView, bool, error) {
+// WithLedgerRaw lends the ledger's raw bytes with no copy: the routed point
+// read lends the tier's buffer, whose validity ends with fn — exactly the
+// loan's terms.
+func (r *LedgerReader) WithLedgerRaw(ctx context.Context, sequence uint32, fn store.WithLedgerRawFn) (bool, error) {
 	view, err := query.ViewFrom(ctx)
 	if err != nil {
-		return nil, false, err
+		return false, err
 	}
 	if !inWindow(view, sequence) {
-		return nil, false, nil
+		return false, nil
 	}
-	var raw []byte
-	err = view.WithLedger(sequence, func(b []byte) error {
-		raw = bytes.Clone(b)
-		return nil
+	found := false
+	err = view.WithLedger(sequence, func(raw []byte) error {
+		found = true
+		return fn(raw)
 	})
-	if errors.Is(err, stores.ErrNotFound) {
-		return nil, false, nil
+	if !found && errors.Is(err, stores.ErrNotFound) {
+		return false, nil
 	}
-	if err != nil {
-		return nil, false, err
-	}
-	return xdr.LedgerCloseMetaView(raw), true, nil
+	return found, err
 }
 
 func (r *LedgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRange, error) {

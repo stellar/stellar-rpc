@@ -36,12 +36,16 @@ func (lr LedgerRange) ToLedgerSeqRange() protocol.LedgerSeqRange {
 // implements. Handlers depend on this interface, never on a concrete backend.
 type LedgerReader interface {
 	GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error)
-	GetLedgerView(ctx context.Context, sequence uint32) (xdr.LedgerCloseMetaView, bool, error)
+	WithLedgerRaw(ctx context.Context, sequence uint32, fn WithLedgerRawFn) (found bool, err error)
 	GetLedgerRange(ctx context.Context) (LedgerRange, error)
 	StreamLedgerRange(ctx context.Context, startLedger uint32, endLedger uint32, f StreamLedgerFn) error
 	NewTx(ctx context.Context) (LedgerReaderTx, error)
 	GetLatestLedgerSequence(ctx context.Context) (uint32, error)
 }
+
+// WithLedgerRawFn receives one ledger's marshaled LCM on loan and the bytes
+// are valid only inside the call, read-only. Copy whatever outlives fn.
+type WithLedgerRawFn func(raw []byte) error
 
 // LedgerReaderTx is a read-only snapshot of the ledger store. Call Done to
 // release it.

@@ -149,13 +149,13 @@ func (r ledgerReader) GetLedger(ctx context.Context, sequence uint32) (xdr.Ledge
 	return getLedgerFromDB(ctx, r.db, sequence)
 }
 
-// GetLedgerView fetches a single ledger from the db and returns its view and whether it was found.
-func (r ledgerReader) GetLedgerView(ctx context.Context, sequence uint32) (xdr.LedgerCloseMetaView, bool, error) {
+// WithLedgerRaw lends the ledger's stored meta blob without decoding it.
+func (r ledgerReader) WithLedgerRaw(ctx context.Context, sequence uint32, fn store.WithLedgerRawFn) (bool, error) {
 	meta, found, err := getLedgerRawFromDB(ctx, r.db, sequence)
 	if err != nil || !found {
-		return nil, found, err
+		return found, err
 	}
-	return xdr.LedgerCloseMetaView(meta), true, nil
+	return true, fn(meta)
 }
 
 // GetLedgerRange pulls the min/max ledger sequence numbers from the meta table.

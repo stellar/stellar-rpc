@@ -97,16 +97,16 @@ func (m *MockLedgerReader) GetLedger(_ context.Context, sequence uint32) (xdr.Le
 	return *lcm, true, nil
 }
 
-func (m *MockLedgerReader) GetLedgerView(_ context.Context, sequence uint32) (xdr.LedgerCloseMetaView, bool, error) {
+func (m *MockLedgerReader) WithLedgerRaw(_ context.Context, sequence uint32, fn store.WithLedgerRawFn) (bool, error) {
 	lcm, ok := m.txn.ledgerSeqToMeta[sequence]
 	if !ok {
-		return nil, false, nil
+		return false, nil
 	}
 	rawMeta, err := lcm.MarshalBinary()
 	if err != nil {
-		return nil, false, err
+		return false, err
 	}
-	return xdr.LedgerCloseMetaView(rawMeta), true, nil
+	return true, fn(rawMeta)
 }
 
 func (m *MockLedgerReader) StreamLedgerRange(_ context.Context, _ uint32, _ uint32, _ store.StreamLedgerFn) error {
