@@ -127,6 +127,17 @@ func TestColdBin_ScanRejectsForeignHeader(t *testing.T) {
 	require.NoError(t, os.WriteFile(newerPath, newer, 0o600))
 	_, _, err = scanBinHeader(newerPath)
 	require.ErrorContains(t, err, "written by a newer stellar-rpc")
+
+	// A set reserved byte refuses in BOTH .bin consumers: the pre-scan and
+	// the self-defending merge reader.
+	reserved := append([]byte(nil), data...)
+	reserved[6] = 0x01
+	reservedPath := filepath.Join(dir, "reserved.bin")
+	require.NoError(t, os.WriteFile(reservedPath, reserved, 0o600))
+	_, _, err = scanBinHeader(reservedPath)
+	require.ErrorContains(t, err, "reserved header bytes set")
+	_, err = newFileReader(reservedPath, 0)
+	require.ErrorContains(t, err, "reserved header bytes set")
 }
 
 // TestColdBin_CreateFails forces os.Create on the destination to fail by
