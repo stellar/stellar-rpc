@@ -84,14 +84,6 @@ jobs:
           CGO_ENABLED: 1
           GOARCH: ${{ matrix.go_arch }}
 
-  integration-p27-pkg:
-    name: Integration tests (P27)
-    uses: ./.github/workflows/integration-tests.yml
-    with:
-      protocol_version: '27'
-      core_deb_version: '28.0.0-3494.a9b861321.jammy'
-      core_docker_img: 'stellar/stellar-core:28.0.0-3494.a9b861321.jammy'
-
   integration-p28-pkg:
     name: Integration tests (P28)
     uses: ./.github/workflows/integration-tests.yml
@@ -103,6 +95,18 @@ jobs:
       # apply-time metering.
       core_deb_version: '28.0.0-3494.a9b861321.jammy'
       core_docker_img: 'stellar/stellar-core:28.0.0-3494.a9b861321.jammy'
+
+  integration-p30-pkg:
+    name: Integration tests (P30)
+    uses: ./.github/workflows/integration-tests.yml
+    with:
+      protocol_version: '30'
+      # No -vnext core image exists yet for CAP-0088 (stellar-core#5423,
+      # SirTyson:ms-close-time @ 9ef9b5cd, unmerged). Blocked on a Jenkins
+      # -vnext build after that PR merges; core_deb_version/core_docker_img
+      # are intentionally left empty until then.
+      core_deb_version: ''
+      core_docker_img: ''
 
   # integration-p25-src:
   #   name: Integration tests (p25, core from source)
