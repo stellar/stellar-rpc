@@ -180,7 +180,10 @@ func gateHealthOnFirstCommit(h jrpc2.Handler, registry *query.Registry) jrpc2.Ha
 // request timeout. It covers the gap between a request's deadline firing and
 // its handler goroutine actually stopping: the duration limiter answers the
 // client at the deadline but the handler keeps running until it observes its
-// canceled context, which scan loops only check between iterations.
+// canceled context, which scan loops only check between iterations. (Verified:
+// the loops in stores/event, stores/txhash, packfile and adapters do check
+// per iteration. The orchestration layers above them do not, which is why the
+// margin is 30s and not zero.)
 //
 // jsonrpc.Handler.Shutdown cancels handler contexts too, at teardown. That can
 // only shorten a handler's life, so this stays an upper bound.
@@ -189,12 +192,23 @@ const graceMargin = 30 * time.Second
 // deriveLifecycleGrace computes the deferred-deletion grace period from the
 // serving timeouts: the longest time any request can run, plus graceMargin.
 //
-// INVARIANT: the request timeouts and the grace period move together. There is
-// no reader refcount — after a lifecycle run demotes a resource, this grace is
-// the ONLY thing separating an in-flight request from os.Remove. Deriving it
-// here (instead of a constant) means an operator raising a method's
-// max_execution_duration automatically widens the grace; a constant would let
-// the two drift until a slow request reads deleted files.
+// INVARIANT: the request timeouts and the grace period move together.
+// Deriving it here (instead of a constant) means an operator raising a
+// method's max_execution_duration automatically widens the grace; a constant
+// would let the two drift until a slow request reads deleted files.
+//
+// What the grace buys is AVAILABILITY, not memory safety: it covers a view
+// that predates a demotion opening a cold artifact for the FIRST time
+// afterwards (query-routing-design.md, "Filesystem unlink semantics alone").
+// Memory safety comes from ownership and drain barriers — rocksdb's per-op
+// read lock, CloseIfIdle declining under an in-flight op — because the
+// deadline bounds the response, not the handler goroutine.
+//
+// The handler drain is best-effort (readShutdownTimeout here, rpcv1's
+// defaultShutdownGracePeriod there) and the daemon closes its stores when it
+// expires, so store ownership is the backstop and not this. Relaxing the
+// per-op read lock as an optimization would silently turn a drain timeout into
+// a use-after-free, and nothing in the lifecycle code would show why.
 func deriveLifecycleGrace(svc config.ServiceConfig) time.Duration {
 	// The global HTTP-layer limit bounds every request, including any future
 	// method only it covers, so it participates in the max alongside the

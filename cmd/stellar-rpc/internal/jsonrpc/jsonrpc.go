@@ -201,8 +201,16 @@ func toSnakeCase(s string) string {
 
 // wrapWithLimiters applies the per-method backlog-queue and request-duration
 // limiters (and their metrics) around a single method handler.
+//
+// LOAD-BEARING nesting: the backlog limiter wraps spec.Handler and the
+// duration limiter wraps queueLimiter.Handle, so the backlog slot is held
+// ACROSS the real call — including after the duration limiter has answered its
+// timeout and walked away from it. That is the only thing bounding live
+// handler bodies (QueueLimit per method); the wire semaphore counts
+// dispatches and cannot see them. Swap the two and the slot is released when
+// the wrapper returns, bounding nothing.
 func wrapWithLimiters(
-	spec HandlerSpec, daemon host.Daemon, logger *log.Entry, detached *sync.WaitGroup,
+	spec HandlerSpec, daemon host.Daemon, logger *log.Entry, liveHandlers *sync.WaitGroup,
 ) jrpc2.Handler {
 	longName := toSnakeCase(spec.MethodName)
 	queueLimiterGaugeName := longName + "_inflight_requests"
@@ -245,7 +253,7 @@ func wrapWithLimiters(
 		registerOrReuse(daemon.MetricsRegistry(), requestDurationWarnCounter),
 		registerOrReuse(daemon.MetricsRegistry(), requestDurationLimitCounter),
 		logger,
-		detached)
+		liveHandlers)
 	return durationLimiter.Handle
 }
 
@@ -254,10 +262,10 @@ func NewHandler(params Params) Handler {
 	// The duration limiter answers at its timeout and leaves its handler
 	// running, so the framing's bound loses sight of it. Both ends of that
 	// share this group: the limiters count into it, Handler.Shutdown joins it.
-	detached := new(sync.WaitGroup)
+	liveHandlers := new(sync.WaitGroup)
 	handlersMap := handler.Map{}
 	for _, spec := range params.Specs {
-		handlersMap[spec.MethodName] = wrapWithLimiters(spec, params.Daemon, params.Logger, detached)
+		handlersMap[spec.MethodName] = wrapWithLimiters(spec, params.Daemon, params.Logger, liveHandlers)
 	}
 	// The framing at the bottom of the chain. Both mounts use the same one:
 	// internal/jsonrpc/wire, which parses with jrpc2.ParseRequests and then
@@ -269,7 +277,7 @@ func NewHandler(params Params) Handler {
 	framing := wire.NewHandler(decorateHandlers(
 		params.Daemon,
 		params.Logger,
-		handlersMap), detached)
+		handlersMap), liveHandlers)
 
 	// globalQueueRequestBacklogLimiter is a metric for measuring the total concurrent inflight requests
 	globalQueueRequestBacklogLimiter := prometheus.NewGauge(prometheus.GaugeOpts{

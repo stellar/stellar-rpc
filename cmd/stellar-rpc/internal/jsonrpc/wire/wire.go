@@ -77,8 +77,11 @@ type Handler struct {
 	// per-method budget gets its permit back while its handler runs on, by
 	// design (network.RPCRequestDurationLimiter, and the graceMargin that
 	// exists for that gap), so goroutines executing handler code can exceed
-	// this by the number of timed-out requests. Shutdown joins them; nothing
-	// bounds them.
+	// this by the number of timed-out requests. Shutdown joins them, and what
+	// BOUNDS them is the per-method backlog limiter nested inside the duration
+	// limiter (jsonrpc.wrapWithLimiters), whose slot is held across the real
+	// call: QueueLimit per method, ~10,700 aggregate at v2 defaults. Far too
+	// loose to be an operative memory bound, and invisible from here.
 	sem *semaphore.Weighted
 
 	// weight is sem's size; Weighted does not expose it and Shutdown drains by
@@ -92,32 +95,33 @@ type Handler struct {
 	root     context.Context
 	stopRoot context.CancelFunc
 
-	// detached is the handler goroutines the per-method duration limiter
-	// abandoned at its own timeout. They have already given their permits
-	// back, so the bound cannot see them and Shutdown joins them separately.
-	detached *sync.WaitGroup
+	// liveHandlers is every handler execution under a budgeted method, not
+	// just the abandoned ones (see network.RPCRequestDurationLimiter). An
+	// abandoned one has given its permit back, so the bound cannot see it and
+	// Shutdown joins the group separately.
+	liveHandlers *sync.WaitGroup
 
 	drainOnce sync.Once
 	drainErr  error
 }
 
 // NewHandler returns the handler over methods, read-only from here on.
-// detached is the group the method table's duration limiters count their
+// liveHandlers is the group the method table's duration limiters count their
 // abandoned handler goroutines into; nil means nothing registers any.
-func NewHandler(methods map[string]jrpc2.Handler, detached *sync.WaitGroup) *Handler {
+func NewHandler(methods map[string]jrpc2.Handler, liveHandlers *sync.WaitGroup) *Handler {
 	weight := int64(runtime.GOMAXPROCS(0))
 	//nolint:gosec // G118: stopRoot is the handler's, called by Shutdown
 	root, stopRoot := context.WithCancel(context.Background())
-	if detached == nil {
-		detached = new(sync.WaitGroup)
+	if liveHandlers == nil {
+		liveHandlers = new(sync.WaitGroup)
 	}
 	return &Handler{
-		methods:  methods,
-		sem:      semaphore.NewWeighted(weight),
-		weight:   weight,
-		root:     root,
-		stopRoot: stopRoot,
-		detached: detached,
+		methods:      methods,
+		sem:          semaphore.NewWeighted(weight),
+		weight:       weight,
+		root:         root,
+		stopRoot:     stopRoot,
+		liveHandlers: liveHandlers,
 	}
 }
 
@@ -126,6 +130,14 @@ func NewHandler(methods map[string]jrpc2.Handler, detached *sync.WaitGroup) *Han
 // the whole bound, which IS "no dispatch is in flight" since every invocation
 // holds a permit, and then joins the handlers a per-method duration limiter
 // abandoned at its timeout, which gave their permits back long ago.
+//
+// THREE premises, none of them local. The caller closes its connections FIRST
+// — DELTA (g) gates an element's start on the REQUEST's context, so a live
+// connection keeps authorizing starts and the drain chases a moving target.
+// The method table's limiters count into the same group this handler was
+// built with. And the full-weight Acquire converges against an in-flight batch
+// only because x/sync queues a full-weight waiter ahead of the Acquire(1)s
+// behind it.
 //
 // The permits are never returned. An error means a straggler is still touching
 // what the caller is about to close. Idempotent; call it after the HTTP server
@@ -138,17 +150,17 @@ func (h *Handler) Shutdown(ctx context.Context) error {
 			return
 		}
 		// Only now: every permit is held, so no wrapper is running and none
-		// can start another detached handler behind the Wait.
-		if err := joinDetached(ctx, h.detached); err != nil {
+		// can launch another child behind the Wait.
+		if err := joinLiveHandlers(ctx, h.liveHandlers); err != nil {
 			h.drainErr = fmt.Errorf("wire: joining timed-out handlers: %w", err)
 		}
 	})
 	return h.drainErr
 }
 
-// joinDetached waits for wg, or for ctx to end. The waiter outlives this call
+// joinLiveHandlers waits for wg, or for ctx to end. The waiter outlives this call
 // when ctx wins; it ends when the stragglers do.
-func joinDetached(ctx context.Context, wg *sync.WaitGroup) error {
+func joinLiveHandlers(ctx context.Context, wg *sync.WaitGroup) error {
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
 	select {

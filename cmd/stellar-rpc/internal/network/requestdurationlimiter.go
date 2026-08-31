@@ -203,12 +203,18 @@ type RPCRequestDurationLimiter struct {
 
 	jrpcDownstreamHandler jrpc2.Handler
 
-	// detached tracks the handler goroutines Handle abandons when its timer
-	// fires: it returns the timeout error to its caller and does NOT join
-	// them, which is the whole point of the decoupling and the reason
-	// rpcv2's graceMargin exists. Whoever owns the lifecycle needs them
-	// joinable at shutdown, so they are counted here.
-	detached *sync.WaitGroup
+	// liveHandlers counts EVERY live child of a budgeted method, not only the
+	// abandoned ones — the Add below is unconditional and pre-launch. They
+	// need to be joinable at shutdown because Handle returns on its timer
+	// without waiting for them, which is the whole point of the decoupling
+	// and the reason rpcv2 carries a graceMargin.
+	//
+	// LOAD-BEARING: the Add happens on the WRAPPER goroutine, synchronously,
+	// before the launch — never inside the child. The wrapper always holds a
+	// wire permit, so a drain that has taken every permit cannot race an Add.
+	// "Making the name true" by adding only on the timeout path is
+	// unimplementable: by then the parent has already abandoned the child.
+	liveHandlers *sync.WaitGroup
 }
 
 func MakeJrpcRequestDurationLimiter(
@@ -218,19 +224,19 @@ func MakeJrpcRequestDurationLimiter(
 	warningCounter increasingCounter,
 	limitCounter increasingCounter,
 	logger *log.Entry,
-	detached *sync.WaitGroup,
+	liveHandlers *sync.WaitGroup,
 ) *RPCRequestDurationLimiter {
 	// make sure the warning threshold is less then the limit threshold; otherwise, just set it to the limit threshold.
 	if warningThreshold > limitThreshold {
 		warningThreshold = limitThreshold
 	}
-	if detached == nil {
-		detached = new(sync.WaitGroup)
+	if liveHandlers == nil {
+		liveHandlers = new(sync.WaitGroup)
 	}
 
 	return &RPCRequestDurationLimiter{
 		jrpcDownstreamHandler: downstream,
-		detached:              detached,
+		liveHandlers:          liveHandlers,
 		requestDurationLimiter: requestDurationLimiter{
 			warningThreshold: warningThreshold,
 			limitThreshold:   limitThreshold,
@@ -266,11 +272,10 @@ func (q *RPCRequestDurationLimiter) Handle(ctx context.Context, req *jrpc2.Reque
 	requestCtx, requestCtxCancel := context.WithTimeout(ctx, q.limitThreshold)
 	defer requestCtxCancel()
 
-	// Counted before the launch and released after the handler returns, so a
-	// request abandoned below stays visible to whoever joins the group.
-	q.detached.Add(1)
+	// Before the launch, on this goroutine, under this wrapper's wire permit.
+	q.liveHandlers.Add(1)
 	go func() {
-		defer q.detached.Done()
+		defer q.liveHandlers.Done()
 		defer func() {
 			if err := recover(); err != nil {
 				q.logger.Errorf("Request for method %s resulted in an error : %v", req.Method(), err)
