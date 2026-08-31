@@ -1347,3 +1347,92 @@ func TestWire_NewHandlerRefusesAMissingLiveHandlersGroup(t *testing.T) {
 		"wire: NewHandler needs the mount's LiveHandlers; jsonrpc.NewHandler is the one place that builds it",
 		func() { NewHandler(map[string]jrpc2.Handler{}, nil) })
 }
+
+// The single-request path frames static errors under the bound too: an
+// unknown-method flood carries client-controlled ids that escape to megabytes.
+//
+//nolint:unparam // the handler literal must match the fixed jrpc2.Handler signature
+func TestWire_ASingleStaticErrorFrameIsBuiltInsideTheBound(t *testing.T) {
+	weight := runtime.GOMAXPROCS(0)
+	entered := make(chan struct{}, weight)
+	release := make(chan struct{})
+
+	h := NewHandler(map[string]jrpc2.Handler{
+		"hold": func(context.Context, *jrpc2.Request) (any, error) {
+			entered <- struct{}{}
+			<-release
+			return held, nil
+		},
+	}, new(network.LiveHandlers))
+
+	var wg sync.WaitGroup
+	for range weight {
+		wg.Go(func() {
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/",
+				strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"hold"}`))
+			req.Header.Set("Content-Type", "application/json")
+			h.ServeHTTP(httptest.NewRecorder(), req)
+		})
+	}
+	for range weight {
+		<-entered
+	}
+
+	// Every permit held; this call runs no handler at all.
+	rec, done := serveAsync(t, h, `{"jsonrpc":"2.0","id":1,"method":"nope"}`)
+	select {
+	case <-done:
+		close(release)
+		wg.Wait()
+		t.Fatal("a static-error frame was built while every permit was held")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the static-error frame never completed after a permit came back")
+	}
+	wg.Wait()
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	//nolint:testifylint // byte-exact wire pin; JSONEq would ignore key order and escaping
+	assert.Equal(t,
+		`{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found","data":"nope"}}`,
+		rec.Body.String())
+}
+
+// A dead single request builds no frame at all. The id here escapes six to one,
+// so the frame it would have built is megabytes.
+func TestWire_ADeadSingleRequestBuildsNoStaticFrame(t *testing.T) {
+	h, _ := newTestHandler(t)
+	body := `{"jsonrpc":"2.0","id":"` + strings.Repeat("<", 256*1024) + `","method":"nope"}`
+
+	serve := func(ctx context.Context) (uint64, int) {
+		req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		h.ServeHTTP(rec, req)
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc, rec.Body.Len()
+	}
+
+	liveAlloc, liveLen := serve(t.Context())
+	dead, cancel := context.WithCancel(t.Context())
+	cancel()
+	deadAlloc, deadLen := serve(dead)
+
+	t.Logf("live %.1fMB -> %d body bytes; dead %.1fMB -> %d body bytes",
+		float64(liveAlloc)/(1<<20), liveLen, float64(deadAlloc)/(1<<20), deadLen)
+
+	require.Positive(t, liveLen, "the control run must answer, or this proves nothing")
+	assert.Zero(t, deadLen)
+	assert.Less(t, deadAlloc, liveAlloc/2,
+		"a dead request allocated %.1fMB against a %.1fMB control: it is still framing",
+		float64(deadAlloc)/(1<<20), float64(liveAlloc)/(1<<20))
+}

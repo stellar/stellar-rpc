@@ -313,17 +313,19 @@ func (h *Handler) dispatchBatch(ctx context.Context, reqs []*jrpc2.ParsedRequest
 // permit before returning so the caller writes without one, panics included.
 func (h *Handler) dispatchOne(ctx context.Context, pr *jrpc2.ParsedRequest) []byte {
 	method, rerr := h.route(pr)
-	if method == nil {
-		if rerr == nil {
-			return nil
-		}
-		// One frame, so it is not worth deferring as a batch's are.
-		return errorFrame(pr.ID, rerr)
+	if method == nil && rerr == nil {
+		return nil
 	}
 	if !h.acquirePermit(ctx) {
 		return nil // delta (g): never started, so nothing to answer
 	}
 	defer h.sem.Release(1)
+	if method == nil {
+		// Framed under the same bound as every other frame construction: an
+		// id near the body cap escapes to megabytes. A dead request builds
+		// nothing.
+		return errorFrame(pr.ID, rerr)
+	}
 	return h.invoke(pr, method)
 }
 
