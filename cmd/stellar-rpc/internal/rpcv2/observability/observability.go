@@ -53,6 +53,13 @@ type Metrics interface {
 	// climbing counter is the stuck-handle alarm the logs alone cannot raise.
 	FailedDestroy()
 
+	// TruncatedEventWindow counts one v1 getEvents page that stopped before
+	// covering its window. The v1 scan window is sized to fit inside one
+	// pager page, so the handler refuses such a page rather than mint a
+	// cursor that skips the unscanned remainder. Any count means that
+	// sizing no longer holds and the endpoint is failing requests.
+	TruncatedEventWindow()
+
 	// TxIndexInconsistency counts one lookup where an exact (hot) transaction
 	// index disagreed with the ledger store — the index named a ledger that
 	// lacks the transaction or cannot be served. Any count means corruption
@@ -74,6 +81,7 @@ func (NopMetrics) Discard(int, time.Duration) {}
 func (NopMetrics) Prune(int, time.Duration)   {}
 func (NopMetrics) FailedDestroy()             {}
 func (NopMetrics) TxIndexInconsistency()      {}
+func (NopMetrics) TruncatedEventWindow()      {}
 
 // MetricsOrNop returns m, or NopMetrics{} when nil, so call sites never nil-check.
 func MetricsOrNop(m Metrics) Metrics {
@@ -106,6 +114,7 @@ type PrometheusMetrics struct {
 	pruned                 prometheus.Counter
 	failedDestroys         prometheus.Counter
 	txIndexInconsistencies prometheus.Counter
+	truncatedEventWindows  prometheus.Counter
 
 	// Durations — per-phase wall-clock histogram, keyed by phase label.
 	phaseDuration *prometheus.HistogramVec
@@ -146,6 +155,9 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 			"next lifecycle run (a stuck hot handle recounts every run)"),
 		txIndexInconsistencies: counter("tx_index_inconsistencies_total", "lookups where an exact hot tx index "+
 			"disagreed with the ledger store (any count means corruption)"),
+		truncatedEventWindows: counter("truncated_event_windows_total",
+			"v1 getEvents pages that stopped before covering their window "+
+				"(the window is sized to fit one pager page, so any count is an alarm)"),
 		phaseDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace, Subsystem: subsystem,
 			Name: "phase_duration_seconds", Help: "wall-clock of a daemon phase action",
@@ -166,7 +178,7 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 	registry.MustRegister(
 		m.lastCommitted, m.retentionFloor, m.liveHotChunks,
 		m.chunkBoundaries, m.discarded, m.pruned,
-		m.failedDestroys, m.txIndexInconsistencies,
+		m.failedDestroys, m.txIndexInconsistencies, m.truncatedEventWindows,
 		m.phaseDuration,
 		counterFunc("store_ops_after_deferred_close_total",
 			"operations refused because deferred deletion had closed the store "+
@@ -223,6 +235,8 @@ func (m *PrometheusMetrics) Discard(count int, d time.Duration) {
 func (m *PrometheusMetrics) FailedDestroy() { m.failedDestroys.Inc() }
 
 func (m *PrometheusMetrics) TxIndexInconsistency() { m.txIndexInconsistencies.Inc() }
+
+func (m *PrometheusMetrics) TruncatedEventWindow() { m.truncatedEventWindows.Inc() }
 
 func (m *PrometheusMetrics) Prune(count int, d time.Duration) {
 	if count > 0 {
