@@ -119,7 +119,7 @@ func instantiate(ctx context.Context) error {
 	return nil
 }
 
-// fetchBlaster clones and builds stellar-rpc-blaster at the pinned commit.
+// fetchBlaster clones and builds stellar-rpc-blaster at dev HEAD.
 func fetchBlaster(ctx context.Context, dir, repo string) (string, string, error) {
 	logger.Infof("fetching stellar-rpc-blaster (%s@dev)", repo)
 	if err := os.RemoveAll(dir); err != nil {
