@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -65,37 +64,6 @@ const (
 	// never as a side effect of a dependency bump.
 	pinnedTableFormatVersion = 6
 )
-
-// engineTooNewSignatures are the RocksDB open-failure strings produced when a
-// database was written by a newer RocksDB than the linked one. They arrive
-// corruption-classed from the engine, so wrapIfEngineTooNew re-labels them.
-//
-//nolint:gochecknoglobals // immutable signature list
-var engineTooNewSignatures = []string{
-	"unsupported format_version",
-	"Column families not opened",
-	"Unknown Footer version",
-	"future feature not supported",
-}
-
-// wrapIfEngineTooNew re-labels an open or read failure whose error text
-// matches a known newer-RocksDB signature, so a rollback across a RocksDB
-// upgrade reads as "deploy the newer binary" instead of corruption. Any other
-// error (nil included) passes through unchanged.
-func wrapIfEngineTooNew(err error) error {
-	if err == nil {
-		return nil
-	}
-	msg := err.Error()
-	for _, sig := range engineTooNewSignatures {
-		if strings.Contains(msg, sig) {
-			return fmt.Errorf("%w (likely written by a newer stellar-rpc using a newer "+
-				"RocksDB format, so deploy that version or newer; or the path points at "+
-				"a different kind of database)", err)
-		}
-	}
-	return err
-}
 
 // Config — per-store knobs. Each Layer-2 facade owns one, built in
 // code (never from operator TOML).
@@ -204,9 +172,7 @@ func New(cfg Config) (*Store, error) {
 	}
 	s := &Store{cfg: cfg}
 	if err := s.constructAndOpen(); err != nil {
-		// Wrapped here so every store (catalog and hot chunks alike) reports a
-		// newer-engine database as an upgrade problem, not corruption.
-		return nil, wrapIfEngineTooNew(err)
+		return nil, err
 	}
 	return s, nil
 }
@@ -301,7 +267,7 @@ func (s *Store) BatchMultiGet(cf string, keys [][]byte) ([][]byte, error) {
 
 	pinned, err := s.db.BatchedMultiGetCF(ro, cfh, true /* sortedInput */, keys...)
 	if err != nil {
-		return nil, fmt.Errorf("rocksdb: batched multi get on %q: %w", cf, wrapIfEngineTooNew(err))
+		return nil, fmt.Errorf("rocksdb: batched multi get on %q: %w", cf, err)
 	}
 	defer pinned.Destroy()
 
@@ -369,10 +335,10 @@ func (s *Store) LastKey(cf string) ([]byte, bool, error) {
 	it.SeekToLast()
 	if !it.Valid() {
 		// Empty CF (it.Err() is nil) or a mid-seek RocksDB error.
-		return nil, false, wrapIfEngineTooNew(it.Err())
+		return nil, false, it.Err()
 	}
 	// Copy: the KeySlice is freed when the iterator closes.
-	return bytes.Clone(it.KeySlice().Data()), true, wrapIfEngineTooNew(it.Err())
+	return bytes.Clone(it.KeySlice().Data()), true, it.Err()
 }
 
 // IterateRange yields (key, value) for keys in [start, end] byte-lex
@@ -424,7 +390,7 @@ func (s *Store) IterateRange(cf string, start, end []byte) iter.Seq2[Entry, erro
 			}
 		}
 		if err := it.Err(); err != nil {
-			yield(Entry{}, wrapIfEngineTooNew(err))
+			yield(Entry{}, err)
 		}
 	}
 }
@@ -623,9 +589,7 @@ func (s *Store) getPinnedWith(
 	}
 	handle, err := s.db.GetPinnedCFV2(ro, cfh, key)
 	if err != nil {
-		// Newer-format SSTs can surface lazily here rather than at open when
-		// max_open_files is finite (no table-reader preload).
-		return false, wrapIfEngineTooNew(err)
+		return false, err
 	}
 	defer handle.Destroy()
 	if !handle.Exists() {
@@ -669,7 +633,7 @@ func (s *Store) iterateWith(ro *grocksdb.ReadOptions, cf string, prefix []byte) 
 			}
 		}
 		if err := it.Err(); err != nil {
-			yield(Entry{}, wrapIfEngineTooNew(err))
+			yield(Entry{}, err)
 		}
 	}
 }
