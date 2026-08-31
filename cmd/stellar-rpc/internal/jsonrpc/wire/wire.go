@@ -22,6 +22,25 @@
 // json.NewEncoder), hand-appended batch frames (never json.Marshal of a
 // []json.RawMessage), and a batch worker's permit taken before its goroutine
 // is started (never inside it).
+//
+// # The handler context, and the one thing it no longer carries
+//
+// Handlers run on a context derived from context.Background, which is what
+// jrpc2's ServerOptions.NewContext default gave them, so a client hangup still
+// does not cancel work in flight. What it does NOT carry is the pair of values
+// jrpc2's Server.invoke attached to every handler context: the inbound
+// *jrpc2.Request (inboundRequestKey) and the *jrpc2.Server itself (serverKey).
+// The observable delta is exactly two accessors:
+// jrpc2.InboundRequest(ctx) returns nil where it used to return the request,
+// and jrpc2.ServerFromContext(ctx) panics where it used to return the server —
+// it is documented to panic on a non-handler context, and this is one.
+//
+// Neither is fabricated here. There is no jrpc2.Server to hand back, a fake one
+// would be a worse answer than a loud one, and a handler that wants its request
+// already has it as its second argument. Nothing in this tree calls either
+// accessor — `grep -rn 'InboundRequest\|ServerFromContext' --include='*.go' .`
+// reports nothing — and TestNoJRPC2ContextValueCallersInProductionCode fails if
+// that stops being true.
 package wire
 
 import (
@@ -150,7 +169,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	// The handler context is deliberately NOT derived from req: invoke
 	// builds context.Background(), reproducing jrpc2's NewContext default so
-	// that a client hangup does not cancel work in flight. See invoke.
+	// that a client hangup does not cancel work in flight. See invoke, and the
+	// package doc for the two jrpc2 server values that context no longer has.
 	h.serve(w, body) //nolint:contextcheck // deliberate; see invoke
 }
 
@@ -363,7 +383,9 @@ func (h *Handler) invoke(pr *jrpc2.ParsedRequest, method jrpc2.Handler) []byte {
 	// that disconnects mid-call still completes it, which matters for
 	// sendTransaction) and today's deadline shape (the per-method duration
 	// limiter derives its own timeout from this). Deriving from r.Context()
-	// is a separate, deliberate decision that has not been taken.
+	// is a separate, deliberate decision that has not been taken. The two
+	// values jrpc2's server used to attach to this context are gone with it;
+	// see the package doc.
 	ctx := context.Background()
 
 	result, err := method(ctx, pr.ToRequest())

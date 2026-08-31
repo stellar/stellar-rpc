@@ -5,9 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -1022,4 +1027,47 @@ func TestWire_ValidJSONThatIsNotARequest(t *testing.T) {
 			assert.Equal(t, strconv.Itoa(len(tc.want)), header.Get("Content-Length"))
 		})
 	}
+}
+
+// Handlers used to run on a context jrpc2's Server built, carrying the inbound
+// request and the server itself. They now run on a context.Background-derived
+// one carrying neither, so jrpc2.InboundRequest returns nil and
+// jrpc2.ServerFromContext PANICS. Neither value is fabricated here (see the
+// package doc), which is only safe while nothing calls them — so this test
+// fails the moment production code does.
+func TestNoJRPC2ContextValueCallersInProductionCode(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", "..", "..", ".."))
+	require.NoError(t, err)
+	require.Equal(t, "cmd", filepath.Base(root), "this test walks cmd/; the package moved")
+
+	banned := map[string]bool{"InboundRequest": true, "ServerFromContext": true}
+	fset := token.NewFileSet()
+	var callers []string
+
+	require.NoError(t, filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return err
+		}
+		file, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if perr != nil {
+			return perr
+		}
+		// Selector expressions only: the package doc names both accessors, and
+		// a comment is not a caller.
+		ast.Inspect(file, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok || !banned[sel.Sel.Name] {
+				return true
+			}
+			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "jrpc2" {
+				callers = append(callers, fmt.Sprintf("%s: jrpc2.%s", fset.Position(sel.Pos()), sel.Sel.Name))
+			}
+			return true
+		})
+		return nil
+	}))
+
+	assert.Empty(t, callers, "wire runs handlers on a context with none of jrpc2's server values: "+
+		"InboundRequest returns nil and ServerFromContext panics. Take the request from the handler's "+
+		"second argument instead")
 }
