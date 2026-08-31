@@ -95,7 +95,7 @@ func post(t *testing.T, h http.Handler, body string) (int, http.Header, string) 
 func newTestHandler(t *testing.T) (*Handler, *atomic.Int64) {
 	t.Helper()
 	var notified atomic.Int64
-	return NewHandler(testMethods(&notified)), &notified
+	return NewHandler(testMethods(&notified), nil), &notified
 }
 
 func TestWire_SingleRequests(t *testing.T) {
@@ -546,7 +546,7 @@ func TestWire_BigResponseIntegrity(t *testing.T) {
 
 	h := NewHandler(map[string]jrpc2.Handler{
 		"fat": func(context.Context, *jrpc2.Request) (any, error) { return value, nil },
-	})
+	}, nil)
 
 	status, header, got := post(t, h, `{"jsonrpc":"2.0","id":"big","method":"fat"}`)
 	require.Equal(t, http.StatusOK, status)
@@ -588,7 +588,7 @@ func TestWire_SemaphoreBoundsConcurrentDispatch(t *testing.T) {
 			inflight.Add(-1)
 			return held, nil
 		},
-	})
+	}, nil)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -644,7 +644,7 @@ func TestWire_SemaphoreIsReleasedBeforeTheWrite(t *testing.T) {
 			started <- struct{}{}
 			return "ok", nil
 		},
-	})
+	}, nil)
 
 	// Saturate with writers that never drain, then serve a fresh request.
 	blocked := make(chan struct{})
@@ -764,7 +764,7 @@ func TestWire_BatchElementsRunConcurrently(t *testing.T) {
 			<-release
 			return held, nil
 		},
-	})
+	}, nil)
 	rec, done := serveAsync(t, h, batchOf(n, "hold"))
 
 	for k := range n {
@@ -813,7 +813,7 @@ func TestWire_ABatchDoesNotMultiplyTheConcurrencyBound(t *testing.T) {
 			inflight.Add(-1)
 			return held, nil
 		},
-	})
+	}, nil)
 
 	runtime.GC() // settle the goroutine count before sampling it
 	before := runtime.NumGoroutine()
@@ -865,7 +865,7 @@ func TestWire_BatchOrderAndCompactionSurviveOutOfOrderCompletion(t *testing.T) {
 			return "noted", nil
 		},
 		"fast": func(context.Context, *jrpc2.Request) (any, error) { return "fast", nil },
-	})
+	}, nil)
 
 	status, header, got := post(t, h, `[{"jsonrpc":"2.0","id":1,"method":"slowest"},`+
 		`{"jsonrpc":"2.0","method":"note"},`+
@@ -895,7 +895,7 @@ func TestWire_APanicInABatchElementFailsTheRequestAndReleasesItsPermit(t *testin
 		"echo": func(_ context.Context, r *jrpc2.Request) (any, error) {
 			return map[string]any{"method": r.Method()}, nil
 		},
-	})
+	}, nil)
 
 	serve := func(body string) any {
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(body))
@@ -1031,7 +1031,7 @@ func TestWire_ParamsReachTheHandlerVerbatim(t *testing.T) {
 			seen = r.ParamString()
 			return nil, nil
 		},
-	})
+	}, nil)
 
 	for _, tc := range []struct{ name, body, want string }{{
 		name: "by position",
@@ -1083,7 +1083,7 @@ func TestWire_ADeadRequestStopsStartingElements(t *testing.T) {
 			completed.Add(1)
 			return held, nil
 		},
-	})
+	}, nil)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -1221,7 +1221,7 @@ func TestWire_Shutdown(t *testing.T) {
 				observed <- ctx.Err()
 				return held, nil
 			},
-		})
+		}, nil)
 		rec, done := serveAsync(t, h, `{"jsonrpc":"2.0","id":1,"method":"watch"}`)
 		<-entered
 
@@ -1253,7 +1253,7 @@ func TestWire_Shutdown(t *testing.T) {
 				<-release // ignores cancellation, as a scan loop between checks does
 				return held, nil
 			},
-		})
+		}, nil)
 		_, done := serveAsync(t, h, `{"jsonrpc":"2.0","id":1,"method":"stuck"}`)
 		<-entered
 
@@ -1278,7 +1278,7 @@ func TestWire_Shutdown(t *testing.T) {
 				ran.Add(1)
 				return held, nil
 			},
-		})
+		}, nil)
 		require.NoError(t, h.Shutdown(t.Context()))
 
 		ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)

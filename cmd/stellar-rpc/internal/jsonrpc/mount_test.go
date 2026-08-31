@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -378,4 +379,59 @@ func TestMount_ShutdownEndsWhatTheDeadlineDidNot(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("Shutdown did not end a handler the deadline had abandoned")
 	}
+}
+
+// A handler that ignores cancellation and outruns its per-method budget is
+// answered -32001 and ABANDONED: the duration limiter returns without joining
+// it, so its wire permit is back long before Shutdown starts. Draining the
+// bound alone would prove nothing about it.
+func TestMount_ShutdownJoinsATimedOutHandler(t *testing.T) {
+	const budget = 200 * time.Millisecond
+
+	// stuckMount answers one request, whose handler then parks on release.
+	stuckMount := func(t *testing.T, release <-chan struct{}, done *atomic.Bool) Handler {
+		t.Helper()
+		url, handler := newMountedHandlerAndHandle(t, time.Minute, []HandlerSpec{{
+			MethodName: "stuck",
+			Handler: func(context.Context, *jrpc2.Request) (any, error) {
+				<-release
+				done.Store(true)
+				return "late", nil
+			},
+			QueueLimit:           10,
+			RequestDurationLimit: budget,
+		}})
+		status, body := postMounted(t, url, `{"jsonrpc":"2.0","id":1,"method":"stuck"}`)
+		require.Equal(t, http.StatusOK, status)
+		require.Contains(t, body, "-32001", "the method budget did not fire")
+		return handler
+	}
+
+	t.Run("reports the straggler when the drain budget runs out", func(t *testing.T) {
+		release := make(chan struct{})
+		defer close(release)
+		var done atomic.Bool
+		handler := stuckMount(t, release, &done)
+
+		ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+		defer cancel()
+		err := handler.Shutdown(ctx)
+
+		require.Error(t, err, "the drain claimed success while an abandoned handler was still running")
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.False(t, done.Load())
+	})
+
+	t.Run("returns only once the straggler has finished", func(t *testing.T) {
+		release := make(chan struct{})
+		var done atomic.Bool
+		handler := stuckMount(t, release, &done)
+
+		time.AfterFunc(2*budget, func() { close(release) })
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+
+		require.NoError(t, handler.Shutdown(ctx))
+		assert.True(t, done.Load(), "Shutdown returned before the abandoned handler finished")
+	})
 }

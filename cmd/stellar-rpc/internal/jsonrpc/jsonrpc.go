@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -189,7 +190,9 @@ func toSnakeCase(s string) string {
 
 // wrapWithLimiters applies the per-method backlog-queue and request-duration
 // limiters (and their metrics) around a single method handler.
-func wrapWithLimiters(spec HandlerSpec, daemon host.Daemon, logger *log.Entry) jrpc2.Handler {
+func wrapWithLimiters(
+	spec HandlerSpec, daemon host.Daemon, logger *log.Entry, detached *sync.WaitGroup,
+) jrpc2.Handler {
 	longName := toSnakeCase(spec.MethodName)
 	queueLimiterGaugeName := longName + "_inflight_requests"
 	queueLimiterGaugeHelp := "Number of concurrenty in-flight " + spec.MethodName + " requests"
@@ -230,15 +233,20 @@ func wrapWithLimiters(spec HandlerSpec, daemon host.Daemon, logger *log.Entry) j
 		spec.RequestDurationLimit,
 		requestDurationWarnCounter,
 		requestDurationLimitCounter,
-		logger)
+		logger,
+		detached)
 	return durationLimiter.Handle
 }
 
 // NewHandler constructs a Handler instance from the given method specs
 func NewHandler(params Params) Handler {
+	// The duration limiter answers at its timeout and leaves its handler
+	// running, so the framing's bound loses sight of it. Both ends of that
+	// share this group: the limiters count into it, Handler.Shutdown joins it.
+	detached := new(sync.WaitGroup)
 	handlersMap := handler.Map{}
 	for _, spec := range params.Specs {
-		handlersMap[spec.MethodName] = wrapWithLimiters(spec, params.Daemon, params.Logger)
+		handlersMap[spec.MethodName] = wrapWithLimiters(spec, params.Daemon, params.Logger, detached)
 	}
 	// The framing at the bottom of the chain. Both mounts use the same one:
 	// internal/jsonrpc/wire, which parses with jrpc2.ParseRequests and then
@@ -250,7 +258,7 @@ func NewHandler(params Params) Handler {
 	framing := wire.NewHandler(decorateHandlers(
 		params.Daemon,
 		params.Logger,
-		handlersMap))
+		handlersMap), detached)
 
 	// globalQueueRequestBacklogLimiter is a metric for measuring the total concurrent inflight requests
 	globalQueueRequestBacklogLimiter := prometheus.NewGauge(prometheus.GaugeOpts{

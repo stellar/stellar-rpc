@@ -206,7 +206,9 @@ func TestJRPCRequestDurationLimiter_Limiting(t *testing.T) {
 		time.Second/10,
 		&warningCounter,
 		&limitCounter,
-		logCounter.Entry()).Handle
+		logCounter.Entry(),
+		nil,
+	).Handle
 
 	ch := jhttp.NewChannel("http://"+addr+"/", nil)
 	client := jrpc2.NewClient(ch, nil)
@@ -252,7 +254,9 @@ func TestJRPCRequestDurationLimiter_NoLimiting(t *testing.T) {
 		time.Second*10,
 		&warningCounter,
 		&limitCounter,
-		logCounter.Entry()).Handle
+		logCounter.Entry(),
+		nil,
+	).Handle
 
 	ch := jhttp.NewChannel("http://"+addr+"/", nil)
 	client := jrpc2.NewClient(ch, nil)
@@ -295,7 +299,9 @@ func TestJRPCRequestDurationLimiter_NoLimiting_Warn(t *testing.T) {
 		time.Second*10,
 		&warningCounter,
 		&limitCounter,
-		logCounter.Entry()).Handle
+		logCounter.Entry(),
+		nil,
+	).Handle
 
 	ch := jhttp.NewChannel("http://"+addr+"/", nil)
 	client := jrpc2.NewClient(ch, nil)
