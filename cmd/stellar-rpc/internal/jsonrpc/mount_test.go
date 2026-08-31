@@ -75,8 +75,12 @@ func postMounted(t *testing.T, url, body string) (int, string) {
 //nolint:testifylint // byte-exact wire pins; JSONEq would ignore key order and escaping
 func TestMount_ServesThroughTheRealMiddlewareChain(t *testing.T) {
 	const limit = 500 * time.Millisecond
+	// The slow handler holds a wire permit for as long as it runs, and the
+	// bound is GOMAXPROCS — one, on a single-CPU runner. So it is released and
+	// joined at the end of its own subtest rather than at cleanup; leaving it
+	// parked would 504 every subtest after it.
 	blocked := make(chan struct{})
-	t.Cleanup(func() { close(blocked) })
+	slowReturned := make(chan struct{}, 1)
 
 	url := newMountedHandler(t, limit, []HandlerSpec{{
 		MethodName: "fast",
@@ -88,6 +92,7 @@ func TestMount_ServesThroughTheRealMiddlewareChain(t *testing.T) {
 	}, {
 		MethodName: "slow",
 		Handler: func(ctx context.Context, _ *jrpc2.Request) (any, error) {
+			defer func() { slowReturned <- struct{}{} }()
 			select {
 			case <-blocked:
 			case <-ctx.Done():
@@ -112,6 +117,16 @@ func TestMount_ServesThroughTheRealMiddlewareChain(t *testing.T) {
 		assert.Equal(t, http.StatusGatewayTimeout, status)
 		assert.Empty(t, body, "the duration limiter answers before the framing writes anything")
 		assert.Less(t, time.Since(start), 30*time.Second)
+
+		// The 504 answered the client; the handler goroutine is still live and
+		// still holds its permit. Release it and wait, so the bound is whole
+		// again for the subtests below.
+		close(blocked)
+		select {
+		case <-slowReturned:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the slow handler never returned after its channel was closed")
+		}
 	})
 
 	t.Run("the mount keeps serving after a timed-out request", func(t *testing.T) {

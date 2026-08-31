@@ -37,10 +37,21 @@
 //
 // Neither is fabricated here. There is no jrpc2.Server to hand back, a fake one
 // would be a worse answer than a loud one, and a handler that wants its request
-// already has it as its second argument. Nothing in this tree calls either
-// accessor — `grep -rn 'InboundRequest\|ServerFromContext' --include='*.go' .`
-// reports nothing — and TestNoJRPC2ContextValueCallersInProductionCode fails if
-// that stops being true.
+// already has it as its second argument.
+//
+// A third accessor is worse than either, because it fails QUIETLY:
+// (*jrpc2.Request).IsNotification() is now false for every request, including
+// notifications. It tests id == nil, and ParsedRequest.ToRequest builds the id
+// as fixID(json.RawMessage(p.ID)) from a string — for an absent id that is an
+// empty-but-non-nil RawMessage, which fixID passes through because its isNull
+// only matches the four bytes "null". Under the bridge the handler was reached
+// through jrpc2's own server, which had the real nil. Notification-ness is
+// ParsedRequest.ID == "" here, and route says so at its site.
+//
+// Nothing in this tree calls any of the three: grepping the names across cmd/
+// finds only this paragraph and the test that enforces it, and
+// TestNoJRPC2ContextValueCallersInProductionCode fails if that stops being
+// true.
 package wire
 
 import (
@@ -114,8 +125,19 @@ type Handler struct {
 	// did: acquired before dispatch, released after the envelope is built and
 	// BEFORE the bytes are handed to the (buffered) ResponseWriter, so the
 	// socket write stays outside the bound and a slow reader cannot hold a
-	// permit. jrpc2 defaults ServerOptions.Concurrency to runtime.NumCPU();
-	// this reproduces that number rather than inventing one.
+	// permit.
+	//
+	// The weight is runtime.GOMAXPROCS(0), which is the one number in here
+	// that deliberately does NOT reproduce jrpc2's — its ServerOptions
+	// defaults Concurrency to runtime.NumCPU(). Since Go 1.25, and this module
+	// is `go 1.26`, the default GOMAXPROCS is derived from the cgroup CPU
+	// quota as well as from the machine, while NumCPU still reports the node's
+	// CPUs and its affinity mask only. In a container limited to 2 CPUs on a
+	// 64-core node the two differ by 32x, and this bound is what caps the
+	// number of fat results being marshaled at once: 64 x 17MB rather than
+	// 2 x 17MB is the difference between a bound and a decoration. The repo
+	// already takes GOMAXPROCS as its parallelism convention — see
+	// rpcv2/backfill.DefaultWorkers.
 	//
 	// It is ONE semaphore for the whole handler, and a batch's elements take
 	// their permits from it individually, just as jrpc2's Server.invoke did.
@@ -130,7 +152,7 @@ type Handler struct {
 func NewHandler(methods map[string]jrpc2.Handler) *Handler {
 	return &Handler{
 		methods: methods,
-		sem:     semaphore.NewWeighted(int64(runtime.NumCPU())),
+		sem:     semaphore.NewWeighted(int64(runtime.GOMAXPROCS(0))),
 	}
 }
 
@@ -211,7 +233,7 @@ func (h *Handler) serve(w http.ResponseWriter, body []byte) {
 }
 
 // dispatchAll answers every element of one parsed body and returns the frames
-// in INPUT order (DELTA (f)), with the elements that get no response — the
+// in INPUT order (DELTA (e)), with the elements that get no response — the
 // notifications — compacted out. It returns only once every handler it started
 // has returned, which is what lets serve's 204 mean "the notifications have
 // run" rather than "the notifications have been queued".
@@ -231,9 +253,28 @@ func (h *Handler) serve(w http.ResponseWriter, body []byte) {
 // file. Acquire inside the worker instead and every element gets a goroutine
 // parked on Acquire — and the body cap bounds elements only by their minimum
 // size, so a 512KB body of `[5,5,5,...]` is ~260,000 of them. Acquiring first
-// makes the in-flight worker count runtime.NumCPU(), whatever the batch's
+// makes the in-flight worker count the semaphore's weight, whatever the batch's
 // length; the batch's length still bounds the frames, which is where the
 // (pre-existing, bridge-identical) response amplification lives.
+//
+// DELTA (g), and the open one: this loop does not unwind when the HTTP
+// request's context ends. The permit is taken with context.Background, so
+// after httpRequestDurationLimiter answers 504 and returns, the serving
+// goroutine keeps taking permits and starting elements — for as long as
+// ceil(elements/weight) x the per-method duration limit — and the global
+// backlog slot BacklogHTTPQLimiter holds is inside that abandoned goroutine.
+// The bridge unwound here: jhttp passed req.Context() to Client.Batch, whose
+// waitComplete failed each pending response when the context ended, so the
+// framing layer returned at the deadline while the handlers ran on.
+//
+// It is not fixed here because the fix is a choice, not a repair. Passing the
+// request context to Acquire would stop the loop at the deadline, at the cost
+// of the guarantee that every element of an accepted batch runs — which the
+// bridge did keep (it handed the whole batch to its server before waiting on
+// anything), and which is the guarantee sendTransaction cares about. Serial
+// dispatch had the same shape and a factor of `weight` more of it, so this is
+// strictly better than the commit before it and strictly worse than the
+// bridge, in different units.
 func (h *Handler) dispatchAll(reqs []*jrpc2.ParsedRequest) [][]byte {
 	// One slot per element, filled by index, so the response order is the
 	// request order and does not depend on completion order. A nil slot is an
@@ -266,7 +307,7 @@ func (h *Handler) dispatchBatch(reqs []*jrpc2.ParsedRequest, frames [][]byte) {
 			frames[i] = frame
 			continue
 		}
-		if denied := h.acquirePermit(pr); denied != nil {
+		if ok, denied := h.acquirePermit(pr); !ok {
 			frames[i] = denied
 			continue
 		}
@@ -289,7 +330,11 @@ func (h *Handler) dispatchBatch(reqs []*jrpc2.ParsedRequest, frames [][]byte) {
 		// sibling has finished, keeps a batch element's panic failing exactly
 		// the request it already failed and nothing else. (No parity is lost:
 		// jrpc2 ran batch elements on goroutines it did not recover either, so
-		// under the bridge this bug class was a crash.)
+		// under the bridge this bug class was a crash.) In this mount it is a
+		// safety net and not a live path: every method both daemons register
+		// carries a RequestDurationLimit, and network's RPCRequestDurationLimiter
+		// recovers a handler panic into its own -32003 error before wire can
+		// see it.
 		panic(p)
 	}
 }
@@ -303,23 +348,31 @@ func (h *Handler) dispatchOne(pr *jrpc2.ParsedRequest) []byte {
 	if method == nil {
 		return frame
 	}
-	if denied := h.acquirePermit(pr); denied != nil {
+	if ok, denied := h.acquirePermit(pr); !ok {
 		return denied
 	}
 	defer h.sem.Release(1)
 	return h.invoke(pr, method)
 }
 
-// acquirePermit takes one permit from the shared bound and returns nil. If the
-// permit cannot be taken it returns the error frame that answers pr instead —
-// unreachable today, because Background is never canceled and Acquire only
-// fails on a canceled context. Answered rather than dropped so that a future
-// change of context cannot turn this into a silent 200 with no body.
-func (h *Handler) acquirePermit(pr *jrpc2.ParsedRequest) []byte {
+// acquirePermit takes one permit from the shared bound and reports whether it
+// got one. When it did not, the second result is what goes in the element's
+// slot: the error frame for a call, and nothing at all for a notification,
+// which must never be answered whatever went wrong.
+//
+// The failure is unreachable today, because Background is never canceled and
+// Acquire only fails on a canceled context. It is answered rather than dropped
+// so that a future change of context cannot turn this into a silent 200 with
+// no body — and for the same reason it has to get the notification case right
+// now, while nothing exercises it.
+func (h *Handler) acquirePermit(pr *jrpc2.ParsedRequest) (bool, []byte) {
 	if err := h.sem.Acquire(context.Background(), 1); err != nil {
-		return errorFrame(pr.ID, &jrpc2.Error{Code: jrpc2.InternalError, Message: err.Error()})
+		if pr.ID == "" {
+			return false, nil
+		}
+		return false, errorFrame(pr.ID, &jrpc2.Error{Code: jrpc2.InternalError, Message: err.Error()})
 	}
-	return nil
+	return true, nil
 }
 
 // route decides how one parsed request is answered, WITHOUT running anything:
@@ -337,7 +390,7 @@ func (h *Handler) acquirePermit(pr *jrpc2.ParsedRequest) []byte {
 //     element carries one of those two codes, so reporting them all is the
 //     same set, not a wider one.
 //  2. An empty method name is the same class of request-level protocol error,
-//     so it answers with a frame too. DELTA (e): today an empty-method
+//     so it answers with a frame too. DELTA (d): today an empty-method
 //     NOTIFICATION returns 204, and only by accident — jrpc2's server does
 //     emit the InvalidRequest frame, but with an empty id, so the bridge's
 //     in-process client discards it as a response to an unknown id and the
@@ -394,7 +447,7 @@ func (h *Handler) invoke(pr *jrpc2.ParsedRequest, method jrpc2.Handler) []byte {
 
 	// ToRequest hands the handler the params bytes the body carried, in the
 	// client's key order and whitespace and with the client's own escapes.
-	// DELTA (g): the bridge re-marshaled them on the way in — Client.req ->
+	// DELTA (f): the bridge re-marshaled them on the way in — Client.req ->
 	// marshalParams -> json.Marshal of a json.RawMessage, which compacts and
 	// HTML-escapes — so a handler used to see `{"a":"x\u003cy"}` where it now
 	// sees `{"a": "x<y"}`. Both decode to the same value, and every handler
@@ -424,7 +477,13 @@ func (h *Handler) invoke(pr *jrpc2.ParsedRequest, method jrpc2.Handler) []byte {
 	// Content-Length be set.
 	bits, err := json.Marshal(result)
 	if err != nil {
-		return errorFrame(pr.ID, &jrpc2.Error{Code: jrpc2.InternalError, Message: err.Error()})
+		// Through handlerError, not a hand-built InternalError: jrpc2's own
+		// invoke returns the marshal failure as the task's error, so
+		// tasks.responses runs it down the SAME ladder a handler error takes
+		// and answers -32098 (SystemError), never -32603. Measured against the
+		// live bridge, both for an unmarshalable value and for a MarshalJSON
+		// that fails.
+		return errorFrame(pr.ID, handlerError(err))
 	}
 	return resultFrame(pr.ID, bits)
 }
@@ -501,7 +560,10 @@ func errorFrame(id string, e *jrpc2.Error) []byte {
 	bits, err := json.Marshal(e)
 	if err != nil {
 		// Only reachable if a handler hand-built an Error whose Data is not
-		// valid JSON. Answer something well-formed rather than nothing.
+		// valid JSON. Answer something well-formed rather than nothing — an
+		// improvement, not parity: the bridge's server-side encode failed on
+		// the same input, which killed its channel, so ServeHTTP never
+		// returned and the request hung until the deadline.
 		bits, err = json.Marshal(&jrpc2.Error{Code: jrpc2.InternalError, Message: err.Error()})
 		if err != nil {
 			bits = []byte(`{"code":-32603,"message":"internal error"}`)

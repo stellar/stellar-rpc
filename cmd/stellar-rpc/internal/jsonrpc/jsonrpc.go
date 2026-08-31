@@ -133,11 +133,25 @@ func decorateHandlers(daemon host.Daemon, logger *log.Entry, m handler.Map) hand
 	return decorated
 }
 
+// maxLoggedRequestID bounds the client-controlled text that reaches the log.
+// jrpc2.Request.ID() is the raw JSON id token the client sent; under the jhttp
+// bridge it was the bridge's own virtualized counter instead, so this field
+// used to be a couple of bytes and is now anything up to the 512KB body cap,
+// once per request at INFO. Every sane id fits (a quoted UUID is 38 bytes).
+const maxLoggedRequestID = 64
+
+func loggedRequestID(req *jrpc2.Request) string {
+	if id := req.ID(); len(id) <= maxLoggedRequestID {
+		return id
+	}
+	return req.ID()[:maxLoggedRequestID] + "…(truncated)"
+}
+
 func logRequest(logger *log.Entry, reqID string, req *jrpc2.Request) {
 	logger = logger.WithFields(log.F{
 		"subsys":   "jsonrpc",
 		"req":      reqID,
-		"json_req": req.ID(),
+		"json_req": loggedRequestID(req),
 		"method":   req.Method(),
 	})
 	logger.Info("starting JSONRPC request")

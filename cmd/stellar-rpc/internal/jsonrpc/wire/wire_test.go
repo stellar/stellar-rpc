@@ -137,6 +137,11 @@ func TestWire_SingleRequests(t *testing.T) {
 		body: `{"jsonrpc":"2.0","id":1e2,"method":"echo"}`,
 		want: `{"jsonrpc":"2.0","id":1e2,"result":{"method":"echo"}}`,
 	}, {
+		// The only branch of jrpc2's isValidID that no other case reaches.
+		name: "a negative id keeps its sign",
+		body: `{"jsonrpc":"2.0","id":-1,"method":"echo"}`,
+		want: `{"jsonrpc":"2.0","id":-1,"result":{"method":"echo"}}`,
+	}, {
 		name: "escapes inside a string id are passed through untouched",
 		body: `{"jsonrpc":"2.0","id":"a\"b\nc\u00e9","method":"echo"}`,
 		want: `{"jsonrpc":"2.0","id":"a\"b\nc\u00e9","result":{"method":"echo"}}`,
@@ -213,6 +218,24 @@ func TestWire_IDIsHTMLEscapedExactlyAsTheBridgeEscapedIt(t *testing.T) {
 	}
 }
 
+// idLen's capacity arithmetic is only load-bearing at scale: a hint one byte
+// short makes the frame reallocate and re-copy its whole payload, which is the
+// cost this package exists to delete. This is the worst case the 512KB body cap
+// allows — an id in which every single byte escapes to six.
+func TestWire_ALargeEscapingIDIsFramedAtItsExactLength(t *testing.T) {
+	h, _ := newTestHandler(t)
+	const n = 128 * 1024
+	body := `{"jsonrpc":"2.0","id":"` + strings.Repeat("<", n) + `","method":"echo"}`
+	want := `{"jsonrpc":"2.0","id":"` + strings.Repeat(`\u003c`, n) + `","result":{"method":"echo"}}`
+
+	status, header, got := post(t, h, body)
+	require.Equal(t, http.StatusOK, status)
+	//nolint:testifylint // compare lengths first: an Equal on the values would dump a megabyte
+	require.Equal(t, len(want), len(got), "the frame is not the envelope plus the escaped id")
+	assert.Equal(t, want, got)
+	assert.Equal(t, strconv.Itoa(len(want)), header.Get("Content-Length"))
+}
+
 func TestWire_ErrorMapping(t *testing.T) {
 	h, _ := newTestHandler(t)
 
@@ -243,9 +266,12 @@ func TestWire_ErrorMapping(t *testing.T) {
 		body: `{"jsonrpc":"2.0","id":1,"method":"contextCanceled"}`,
 		want: `{"jsonrpc":"2.0","id":1,"error":{"code":-32097,"message":"gave up: context canceled"}}`,
 	}, {
-		name: "an unmarshalable result becomes an internal error, not a truncated body",
+		// -32098, not -32603: jrpc2's invoke returns the marshal failure as
+		// the task's error, so responses() maps it down the same ladder a
+		// handler error takes. Captured from the live bridge.
+		name: "a result that cannot be marshaled is a system error, not a truncated body",
 		body: `{"jsonrpc":"2.0","id":1,"method":"unmarshalable"}`,
-		want: `{"jsonrpc":"2.0","id":1,"error":{"code":-32603,` +
+		want: `{"jsonrpc":"2.0","id":1,"error":{"code":-32098,` +
 			`"message":"json: unsupported type: chan int"}}`,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -317,7 +343,7 @@ func TestWire_RequestLevelProtocolErrors(t *testing.T) {
 		status: http.StatusOK,
 		want:   `{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"empty method name"}}`,
 	}, {
-		// DELTA (e): the bridge answers 204 here, and only by accident — its
+		// DELTA (d): the bridge answers 204 here, and only by accident — its
 		// in-process client discards the server's frame because the id is
 		// empty. An empty method name is a request-level error and is
 		// reportable even for a notification.
@@ -428,7 +454,7 @@ func TestWire_Batches(t *testing.T) {
 		body: `[{"jsonrpc":"2.0","id":1,"method":"echo"}]`,
 		want: `[{"jsonrpc":"2.0","id":1,"result":{"method":"echo"}}]`,
 	}, {
-		// DELTA (f): the bridge answers this
+		// DELTA (e): the bridge answers this
 		// [invalid(id 2), valid(id 1), valid(id 3)].
 		name: "invalid elements answer in place, not first",
 		body: `[{"jsonrpc":"2.0","id":1,"method":"echo"},` +
@@ -438,6 +464,7 @@ func TestWire_Batches(t *testing.T) {
 			`{"jsonrpc":"2.0","id":2,"error":{"code":-32600,"message":"invalid version marker"}},` +
 			`{"jsonrpc":"2.0","id":3,"result":{"method":"echo"}}]`,
 	}, {
+		// DELTA (e) again: the bridge answers [invalid(null id), valid(id 1)].
 		name: "a non-object element answers in place with a null id",
 		body: `[{"jsonrpc":"2.0","id":1,"method":"echo"},5]`,
 		want: `[{"jsonrpc":"2.0","id":1,"result":{"method":"echo"}},` +
@@ -583,12 +610,13 @@ func TestWire_BigResponseIntegrity(t *testing.T) {
 
 // The concurrency bound is the design's own #1 hazard: without it, the number
 // of fat marshals in flight is the HTTP backlog limit (5000), not the core
-// count. jrpc2's Server held a semaphore of runtime.NumCPU() across handler and
-// result marshal; this reproduces it, and this test fails if it is removed.
+// count. jrpc2's Server held a semaphore across handler and result marshal;
+// this reproduces it (at GOMAXPROCS rather than NumCPU — see the sem field's
+// comment), and this test fails if it is removed.
 //
 //nolint:unparam // the handler literal must match the fixed jrpc2.Handler signature
 func TestWire_SemaphoreBoundsConcurrentDispatch(t *testing.T) {
-	limit := runtime.NumCPU()
+	limit := runtime.GOMAXPROCS(0)
 	entered := make(chan struct{}, 4*limit)
 	release := make(chan struct{})
 
@@ -643,7 +671,7 @@ func TestWire_SemaphoreBoundsConcurrentDispatch(t *testing.T) {
 	wg.Wait()
 
 	assert.LessOrEqual(t, observed, int64(limit),
-		"more than runtime.NumCPU() handlers ran at once: the semaphore is gone or its weight is wrong")
+		"more handlers ran at once than the bound allows: the semaphore is gone or its weight is wrong")
 	assert.Equal(t, int64(limit), observed,
 		"the bound was never reached, so this test would not notice its removal")
 }
@@ -655,7 +683,7 @@ func TestWire_SemaphoreBoundsConcurrentDispatch(t *testing.T) {
 //
 //nolint:unparam // the handler literal must match the fixed jrpc2.Handler signature
 func TestWire_SemaphoreIsReleasedBeforeTheWrite(t *testing.T) {
-	started := make(chan struct{}, 1)
+	started := make(chan struct{}, runtime.GOMAXPROCS(0)+1)
 	h := NewHandler(map[string]jrpc2.Handler{
 		"echo": func(context.Context, *jrpc2.Request) (any, error) {
 			started <- struct{}{}
@@ -667,15 +695,15 @@ func TestWire_SemaphoreIsReleasedBeforeTheWrite(t *testing.T) {
 	// request still reaches its handler.
 	blocked := make(chan struct{})
 	var wg sync.WaitGroup
-	for range runtime.NumCPU() {
+	for range runtime.GOMAXPROCS(0) {
 		wg.Go(func() {
 			req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/",
 				strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"echo"}`))
 			req.Header.Set("Content-Type", "application/json")
-			h.ServeHTTP(blockingWriter{blocked: blocked}, req)
+			h.ServeHTTP(&blockingWriter{blocked: blocked}, req)
 		})
 	}
-	for range runtime.NumCPU() {
+	for range runtime.GOMAXPROCS(0) {
 		select {
 		case <-started:
 		case <-time.After(10 * time.Second):
@@ -696,7 +724,7 @@ func TestWire_SemaphoreIsReleasedBeforeTheWrite(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
-		t.Error("a request could not be served while NumCPU writers were stalled: " +
+		t.Error("a request could not be served while the bound's worth of writers were stalled: " +
 			"the semaphore is being held across the write")
 	}
 	<-started
@@ -705,20 +733,21 @@ func TestWire_SemaphoreIsReleasedBeforeTheWrite(t *testing.T) {
 }
 
 // blockingWriter is a ResponseWriter whose Write never returns until blocked is
-// closed, standing in for a client that stopped reading.
+// closed, standing in for a client that stopped reading. Header must keep the
+// map it hands out, or the writer silently swallows every header set on it.
 type blockingWriter struct {
 	blocked chan struct{}
 	header  http.Header
 }
 
-func (b blockingWriter) Header() http.Header {
+func (b *blockingWriter) Header() http.Header {
 	if b.header == nil {
-		return http.Header{}
+		b.header = http.Header{}
 	}
 	return b.header
 }
-func (b blockingWriter) Write(p []byte) (int, error) { <-b.blocked; return len(p), nil }
-func (blockingWriter) WriteHeader(int)               {}
+func (b *blockingWriter) Write(p []byte) (int, error) { <-b.blocked; return len(p), nil }
+func (*blockingWriter) WriteHeader(int)               {}
 
 func TestAppendHTMLEscaped(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
@@ -781,7 +810,7 @@ func serveAsync(t *testing.T, h http.Handler, body string) (*httptest.ResponseRe
 //
 //nolint:unparam // the handler literal must match the fixed jrpc2.Handler signature
 func TestWire_BatchElementsRunConcurrently(t *testing.T) {
-	n := min(runtime.NumCPU(), 8)
+	n := min(runtime.GOMAXPROCS(0), 8)
 	if n < 2 {
 		t.Skip("a one-permit bound cannot show concurrency")
 	}
@@ -829,7 +858,7 @@ func TestWire_BatchElementsRunConcurrently(t *testing.T) {
 //
 //nolint:unparam // the handler literal must match the fixed jrpc2.Handler signature
 func TestWire_ABatchOfSlowCallsTakesAboutOneCallsTime(t *testing.T) {
-	n := min(runtime.NumCPU(), 4)
+	n := min(runtime.GOMAXPROCS(0), 4)
 	if n < 4 {
 		t.Skip("needs at least 4 permits for the serial and concurrent times to separate")
 	}
@@ -854,7 +883,7 @@ func TestWire_ABatchOfSlowCallsTakesAboutOneCallsTime(t *testing.T) {
 // A batch borrows from the process-wide bound; it does not multiply it. Two
 // separate things are pinned, because they fail separately:
 //
-//  1. no more than runtime.NumCPU() of a batch's handlers run at once, and
+//  1. no more than the semaphore's weight of a batch's handlers run at once, and
 //  2. no more than that many GOROUTINES exist for them, which is only true
 //     because the permit is taken on the serving goroutine BEFORE the worker
 //     is started. Acquire inside the worker instead and this batch parks one
@@ -862,7 +891,7 @@ func TestWire_ABatchOfSlowCallsTakesAboutOneCallsTime(t *testing.T) {
 //
 //nolint:unparam // the handler literal must match the fixed jrpc2.Handler signature
 func TestWire_ABatchDoesNotMultiplyTheConcurrencyBound(t *testing.T) {
-	limit := runtime.NumCPU()
+	limit := runtime.GOMAXPROCS(0)
 	if limit < 2 {
 		t.Skip("a one-permit bound cannot separate the two failure modes")
 	}
@@ -913,7 +942,7 @@ func TestWire_ABatchDoesNotMultiplyTheConcurrencyBound(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
-// Input order (DELTA (f)) and notification compaction are properties of the
+// Input order (DELTA (e)) and notification compaction are properties of the
 // response, not of the completion order. This batch finishes back to front.
 //
 //nolint:unparam // the handler literals must match the fixed jrpc2.Handler signature
@@ -997,7 +1026,7 @@ func TestWire_APanicInABatchElementFailsTheRequestAndReleasesItsPermit(t *testin
 	})
 
 	// Enough panics to exhaust the bound if any of them leaked its permit.
-	for range runtime.NumCPU() + 1 {
+	for range runtime.GOMAXPROCS(0) + 1 {
 		serve(`[{"jsonrpc":"2.0","id":1,"method":"boom"},{"jsonrpc":"2.0","id":2,"method":"boom"}]`)
 	}
 
@@ -1050,18 +1079,30 @@ func TestWire_ValidJSONThatIsNotARequest(t *testing.T) {
 	}
 }
 
-// Handlers used to run on a context jrpc2's Server built, carrying the inbound
-// request and the server itself. They now run on a context.Background-derived
-// one carrying neither, so jrpc2.InboundRequest returns nil and
-// jrpc2.ServerFromContext PANICS. Neither value is fabricated here (see the
-// package doc), which is only safe while nothing calls them — so this test
-// fails the moment production code does.
+// Three jrpc2 accessors stopped working when the jrpc2.Server left the serving
+// path, and none of them is fabricated back (see the package doc):
+// jrpc2.InboundRequest returns nil, jrpc2.ServerFromContext PANICS, and
+// (*jrpc2.Request).IsNotification reports false for every request — the last
+// one silently, which is why it is banned here alongside the other two. That is
+// only safe while nothing calls them, so this test fails the moment production
+// code does.
 func TestNoJRPC2ContextValueCallersInProductionCode(t *testing.T) {
-	root, err := filepath.Abs(filepath.Join("..", "..", "..", ".."))
-	require.NoError(t, err)
+	// Anchored on this file's own compiled-in path, not the working directory,
+	// so the walk is the same whether `go test` runs it from the package dir
+	// or something runs the built binary from elsewhere.
+	_, thisFile, _, ok := runtime.Caller(0)
+	require.True(t, ok, "cannot locate this test's own source file")
+	root := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", "..", "..", ".."))
 	require.Equal(t, "cmd", filepath.Base(root), "this test walks cmd/; the package moved")
 
-	banned := map[string]bool{"InboundRequest": true, "ServerFromContext": true}
+	// The accessor name, and the receiver that makes a hit a real call: the
+	// two context accessors are package functions of jrpc2, and
+	// IsNotification is a method on a *jrpc2.Request under any name.
+	banned := map[string]string{
+		"InboundRequest":    "jrpc2",
+		"ServerFromContext": "jrpc2",
+		"IsNotification":    "",
+	}
 	fset := token.NewFileSet()
 	var callers []string
 
@@ -1077,24 +1118,32 @@ func TestNoJRPC2ContextValueCallersInProductionCode(t *testing.T) {
 		// a comment is not a caller.
 		ast.Inspect(file, func(n ast.Node) bool {
 			sel, ok := n.(*ast.SelectorExpr)
-			if !ok || !banned[sel.Sel.Name] {
+			if !ok {
 				return true
 			}
-			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "jrpc2" {
-				callers = append(callers, fmt.Sprintf("%s: jrpc2.%s", fset.Position(sel.Pos()), sel.Sel.Name))
+			recv, banned := banned[sel.Sel.Name]
+			if !banned {
+				return true
 			}
+			if recv != "" {
+				pkg, isIdent := sel.X.(*ast.Ident)
+				if !isIdent || pkg.Name != recv {
+					return true
+				}
+			}
+			callers = append(callers, fmt.Sprintf("%s: %s", fset.Position(sel.Pos()), sel.Sel.Name))
 			return true
 		})
 		return nil
 	}))
 
-	assert.Empty(t, callers, "wire runs handlers on a context with none of jrpc2's server values: "+
-		"InboundRequest returns nil and ServerFromContext panics. Take the request from the handler's "+
-		"second argument instead")
+	assert.Empty(t, callers, "no jrpc2.Server sits under these handlers any more, so InboundRequest "+
+		"returns nil, ServerFromContext panics, and IsNotification is false even for a notification. "+
+		"Take the request from the handler's second argument, and its notification-ness from an empty ID()")
 }
 
 // Params reach the handler as the exact bytes the body carried, by position or
-// by name. DELTA (g): the bridge re-marshaled every params value through
+// by name. DELTA (f): the bridge re-marshaled every params value through
 // json.Marshal of a json.RawMessage, which compacted it and HTML-escaped it.
 // Both forms decode to the same value and every handler here decodes, so the
 // delta is invisible in behavior — but rpcv2's getEventsV2 reads
