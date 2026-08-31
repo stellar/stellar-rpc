@@ -1238,3 +1238,87 @@ func TestWire_ADeadRequestStopsStartingElements(t *testing.T) {
 	assert.Empty(t, rec.Body.String(),
 		"a dead request is answered by the layer that killed it; the framing writes nothing")
 }
+
+// adversarialBatch fills the 512KB body cap with the cheapest element that
+// still demands an answer: a bare scalar, which is a -32700 "request is not a
+// JSON object" frame. It is the worst response amplification the cap allows —
+// ~260,000 elements in, ~22MB of frames out.
+func adversarialBatch(t *testing.T) (string, int) {
+	t.Helper()
+	const bodyCap = 512 * 1024
+	n := (bodyCap - 2) / 2 // "5," per element, inside the brackets
+	elems := make([]string, n)
+	for i := range elems {
+		elems[i] = "5"
+	}
+	body := "[" + strings.Join(elems, ",") + "]"
+	require.LessOrEqual(t, len(body), bodyCap)
+	return body, n
+}
+
+// DELTA (g), the half the permit does not cover. Elements that answer without
+// a handler never reach acquirePermit, so a batch of nothing BUT those — the
+// adversarial `[5,5,5,...]` — used to keep building frames after the request
+// was already dead, 22MB of them for a reader that had gone.
+//
+// The signal is allocation, and specifically allocation ABOVE the parse: the
+// frames are discarded either way, so the only thing that changes is whether
+// they were built at all, and ParseRequests' own ~175MB for a quarter-million
+// elements would otherwise drown that out. Measuring the parse separately
+// leaves the framing cost by subtraction, and calibrates to the machine.
+func TestWire_ADeadRequestStopsBuildingStaticErrorFrames(t *testing.T) {
+	h, _ := newTestHandler(t)
+	body, elements := adversarialBatch(t)
+
+	measure := func(f func()) uint64 {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		f()
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc
+	}
+	serve := func(ctx context.Context) (uint64, time.Duration, int) {
+		req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		var elapsed time.Duration
+		alloc := measure(func() {
+			start := time.Now()
+			h.ServeHTTP(rec, req)
+			elapsed = time.Since(start)
+		})
+		return alloc, elapsed, rec.Body.Len()
+	}
+
+	// The floor both runs pay whatever happens.
+	parseAlloc := measure(func() {
+		parsed, err := jrpc2.ParseRequests([]byte(body))
+		require.NoError(t, err)
+		require.Len(t, parsed, elements)
+	})
+
+	liveAlloc, liveTime, liveLen := serve(t.Context())
+	dead, cancel := context.WithCancel(t.Context())
+	cancel()
+	deadAlloc, deadTime, deadLen := serve(dead)
+
+	mb := func(n float64) float64 { return n / (1 << 20) }
+	liveFraming := float64(liveAlloc) - float64(parseAlloc)
+	deadFraming := float64(deadAlloc) - float64(parseAlloc)
+	t.Logf("%d elements, parse floor %.1fMB: live %.1fMB (%.1fMB framing) in %v -> %d body bytes; "+
+		"dead %.1fMB (%.1fMB framing) in %v -> %d body bytes",
+		elements, mb(float64(parseAlloc)),
+		mb(float64(liveAlloc)), mb(liveFraming), liveTime, liveLen,
+		mb(float64(deadAlloc)), mb(deadFraming), deadTime, deadLen)
+
+	require.Positive(t, liveLen, "the control run must actually answer, or this proves nothing")
+	require.Positive(t, liveFraming, "the control run framed nothing; the measurement is broken")
+	assert.Zero(t, deadLen, "a dead request must not be answered by the framing")
+	// The dead run's residual is the one allocation it makes before it can
+	// know: dispatchAll's slot slice, 24 bytes x the element count. The bound
+	// sits well above that and well below a run that framed anything.
+	assert.Less(t, deadFraming, liveFraming/5,
+		"a dead request spent %.1fMB framing against a %.1fMB control: it is still answering its elements",
+		mb(deadFraming), mb(liveFraming))
+}

@@ -313,6 +313,13 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, body []byte)
 //     There is no answer to give it and nobody to give one to: the 504 is
 //     already on the wire. serve writes nothing at all rather than assembling
 //     a response out of the survivors.
+//   - An element that needs no handler at all — a parse or shape error, an
+//     empty method, an unknown method — never reaches the permit, so the loop
+//     probes the request's Done channel per element as well. Without that,
+//     the one body that is ALL such elements (`[5,5,5,...]`, ~260,000 of them
+//     inside the 512KB cap) would keep building its 22MB of answers after the
+//     deadline. The permit covers the slow batches; this covers the cheap
+//     enormous one.
 //
 // So a canceled CALL element yields no frame, not an error frame. Building
 // one would allocate up to 22MB of answers for a batch whose reader is gone,
@@ -346,20 +353,31 @@ func (h *Handler) dispatchBatch(ctx context.Context, reqs []*jrpc2.ParsedRequest
 	var wg sync.WaitGroup
 	var raised atomic.Pointer[relayedPanic]
 
+	// Read once: this loop asks per element, and ctx.Err() takes a lock every
+	// time where a closed-channel probe takes none.
+	dead := ctx.Done()
+
 	for i, pr := range reqs {
+		if isClosed(dead) {
+			// DELTA (g), the half the permit does not cover: an element that
+			// answers without a handler — a parse or shape error, an empty
+			// method, an unknown method — never reaches acquirePermit, so
+			// without this check a batch of nothing but those would keep
+			// building frames after the request was dead. That is the
+			// adversarial shape: `[5,5,5,...]` fits ~260,000 elements into the
+			// 512KB cap and 22MB of answers into a response nobody will read.
+			break
+		}
 		method, frame := h.route(pr)
 		if method == nil {
-			// Answered without running anything: a parse or shape error, an
-			// empty method, an unknown method, or a silent notification. No
-			// permit and no goroutine are spent on it.
+			// Answered without running anything. No permit and no goroutine
+			// are spent on it.
 			frames[i] = frame
 			continue
 		}
 		if !h.acquirePermit(ctx) {
-			// DELTA (g): the request is dead, so this element and every one
-			// after it stays unstarted and unanswered. Breaking rather than
-			// continuing is the point — routing the rest would build frames
-			// for a reader that is already gone.
+			// The request died while this element waited for the bound. Same
+			// answer as above: stop, and leave the rest unstarted.
 			break
 		}
 		//nolint:contextcheck // invoke's context is Background by design; see invoke
@@ -421,6 +439,16 @@ func (h *Handler) dispatchOne(ctx context.Context, pr *jrpc2.ParsedRequest) []by
 // it belongs to is over".
 func (h *Handler) acquirePermit(ctx context.Context) bool {
 	return h.sem.Acquire(ctx, 1) == nil
+}
+
+// isClosed reports whether c is closed, without blocking.
+func isClosed(c <-chan struct{}) bool {
+	select {
+	case <-c:
+		return true
+	default:
+		return false
+	}
 }
 
 // route decides how one parsed request is answered, WITHOUT running anything:
