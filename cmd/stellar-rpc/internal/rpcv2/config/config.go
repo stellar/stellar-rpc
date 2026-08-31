@@ -452,12 +452,6 @@ const (
 	// getEvents v2 API fixes as a spec constant
 	// (github.com/orgs/stellar/discussions/1872). The v1 method keeps v1's
 	// own cap; see DefaultGetEventsV1MaxItemsPerResponse.
-	//
-	// The getLedgers pair below is the one deliberate break from v1's page
-	// sizes (TODO: revisit under the v2 benchmarking epic): 20/5, not v1's
-	// 200/50, because the item there is a full LedgerCloseMeta (megabytes
-	// each on a busy pubnet ledger), so v1's 200-item page could exceed a
-	// hundred MB of XDR in one response.
 	DefaultGetEventsV2MaxItemsPerResponse   uint = 1000
 	DefaultGetEventsDefaultItemsPerResponse uint = 100
 
@@ -479,8 +473,14 @@ const (
 
 	DefaultGetTransactionsMaxItemsPerResponse     uint = 200
 	DefaultGetTransactionsDefaultItemsPerResponse uint = 50
-	DefaultGetLedgersMaxItemsPerResponse          uint = 20
-	DefaultGetLedgersDefaultItemsPerResponse      uint = 5
+
+	// The getLedgers sizes are 20/5 where v1 serves 200/50 (TODO: revisit
+	// under the v2 benchmarking epic). A getLedgers item is a whole
+	// LedgerCloseMeta, megabytes each on a busy pubnet ledger, so a
+	// 200-item page could exceed a hundred megabytes of XDR in one
+	// response.
+	DefaultGetLedgersMaxItemsPerResponse     uint = 20
+	DefaultGetLedgersDefaultItemsPerResponse uint = 5
 
 	DefaultClassicFeeWindowLedgers          uint32 = 10
 	DefaultSorobanInclusionFeeWindowLedgers uint32 = 50
