@@ -1,6 +1,7 @@
 package sqlitedb
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"path"
@@ -250,6 +251,38 @@ func TestGetLedgerRange_EmptyDB(t *testing.T) {
 	assert.Equal(t, int64(0), ledgerRange.FirstLedger.CloseTime)
 	assert.Equal(t, uint32(0), ledgerRange.LastLedger.Sequence)
 	assert.Equal(t, int64(0), ledgerRange.LastLedger.CloseTime)
+}
+
+// TestWithLedgerRaw covers both lend outcomes: a hit lends the stored meta
+// blob verbatim, and a miss reports found=false without running fn.
+func TestWithLedgerRaw(t *testing.T) {
+	db := NewTestDB(t)
+	tx, err := NewReadWriter(logger, db, host.MakeNoOpDaemon(), 15, passphrase).NewTx(t.Context())
+	require.NoError(t, err)
+	lcm := createLedger(42)
+	require.NoError(t, tx.LedgerWriter().InsertLedger(lcm))
+	require.NoError(t, tx.Commit(lcm, nil))
+	want, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+
+	reader := NewLedgerReader(db)
+	var got []byte
+	found, err := reader.WithLedgerRaw(t.Context(), 42, func(raw []byte) error {
+		got = bytes.Clone(raw)
+		return nil
+	})
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, want, got)
+
+	ran := false
+	found, err = reader.WithLedgerRaw(t.Context(), 43, func([]byte) error {
+		ran = true
+		return nil
+	})
+	require.NoError(t, err)
+	assert.False(t, found)
+	assert.False(t, ran)
 }
 
 func BenchmarkGetLedgerRange(b *testing.B) {
