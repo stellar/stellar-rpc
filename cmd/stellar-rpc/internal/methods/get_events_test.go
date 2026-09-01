@@ -146,17 +146,16 @@ func TestGetEvents(t *testing.T) {
 			})
 			require.NoError(t, err)
 			expected = append(expected, protocol.EventInfo{
-				EventType:                protocol.EventTypeContract,
-				Ledger:                   1,
-				LedgerClosedAt:           now.Format(time.RFC3339),
-				ContractID:               "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
-				ID:                       id,
-				TopicXDR:                 []string{value},
-				ValueXDR:                 value,
-				InSuccessfulContractCall: true,
-				TransactionHash:          ledgerCloseMeta.TransactionHash(i).HexString(),
-				OpIndex:                  0,
-				TxIndex:                  uint32(i + 1),
+				EventType:       protocol.EventTypeContract,
+				Ledger:          1,
+				LedgerClosedAt:  now.Format(time.RFC3339),
+				ContractID:      "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+				ID:              id,
+				TopicXDR:        []string{value},
+				ValueXDR:        value,
+				TransactionHash: ledgerCloseMeta.TransactionHash(i).HexString(),
+				OpIndex:         0,
+				TxIndex:         uint32(i + 1),
 			})
 		}
 		cursor := protocol.MaxCursor
@@ -306,17 +305,16 @@ func TestGetEvents(t *testing.T) {
 		require.NoError(t, err)
 		expected := []protocol.EventInfo{
 			{
-				EventType:                protocol.EventTypeContract,
-				Ledger:                   1,
-				LedgerClosedAt:           now.Format(time.RFC3339),
-				ContractID:               "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
-				ID:                       id,
-				TopicXDR:                 []string{counterXdr, value},
-				ValueXDR:                 value,
-				InSuccessfulContractCall: true,
-				TransactionHash:          ledgerCloseMeta.TransactionHash(4).HexString(),
-				TxIndex:                  5,
-				OpIndex:                  0,
+				EventType:       protocol.EventTypeContract,
+				Ledger:          1,
+				LedgerClosedAt:  now.Format(time.RFC3339),
+				ContractID:      "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+				ID:              id,
+				TopicXDR:        []string{counterXdr, value},
+				ValueXDR:        value,
+				TransactionHash: ledgerCloseMeta.TransactionHash(4).HexString(),
+				TxIndex:         5,
+				OpIndex:         0,
 			},
 		}
 
@@ -498,17 +496,16 @@ func TestGetEvents(t *testing.T) {
 		// flexible topic length matching
 		expected := []protocol.EventInfo{
 			{
-				EventType:                protocol.EventTypeContract,
-				Ledger:                   1,
-				LedgerClosedAt:           now.Format(time.RFC3339),
-				ContractID:               "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
-				ID:                       id,
-				TopicXDR:                 []string{counterXdr, value, value, counterXdr},
-				ValueXDR:                 value,
-				InSuccessfulContractCall: true,
-				TransactionHash:          ledgerCloseMeta.TransactionHash(4).HexString(),
-				TxIndex:                  5,
-				OpIndex:                  0,
+				EventType:       protocol.EventTypeContract,
+				Ledger:          1,
+				LedgerClosedAt:  now.Format(time.RFC3339),
+				ContractID:      "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+				ID:              id,
+				TopicXDR:        []string{counterXdr, value, value, counterXdr},
+				ValueXDR:        value,
+				TransactionHash: ledgerCloseMeta.TransactionHash(4).HexString(),
+				TxIndex:         5,
+				OpIndex:         0,
 			},
 		}
 		require.NoError(t, err)
@@ -673,17 +670,16 @@ func TestGetEvents(t *testing.T) {
 		require.NoError(t, err)
 		expected := []protocol.EventInfo{
 			{
-				EventType:                protocol.EventTypeContract,
-				Ledger:                   1,
-				LedgerClosedAt:           now.Format(time.RFC3339),
-				ContractID:               strkey.MustEncode(strkey.VersionByteContract, contractID[:]),
-				ID:                       id,
-				TopicXDR:                 []string{counterXdr, value},
-				ValueXDR:                 value,
-				InSuccessfulContractCall: true,
-				TransactionHash:          ledgerCloseMeta.TransactionHash(3).HexString(),
-				TxIndex:                  4,
-				OpIndex:                  0,
+				EventType:       protocol.EventTypeContract,
+				Ledger:          1,
+				LedgerClosedAt:  now.Format(time.RFC3339),
+				ContractID:      strkey.MustEncode(strkey.VersionByteContract, contractID[:]),
+				ID:              id,
+				TopicXDR:        []string{counterXdr, value},
+				ValueXDR:        value,
+				TransactionHash: ledgerCloseMeta.TransactionHash(3).HexString(),
+				TxIndex:         4,
+				OpIndex:         0,
 			},
 		}
 		cursor := protocol.MaxCursor
@@ -762,17 +758,16 @@ func TestGetEvents(t *testing.T) {
 		id := protocol.Cursor{Ledger: 1, Tx: 1, Op: 0, Event: 1}.String()
 		expected := []protocol.EventInfo{
 			{
-				EventType:                protocol.EventTypeSystem,
-				Ledger:                   1,
-				LedgerClosedAt:           now.Format(time.RFC3339),
-				ContractID:               strkey.MustEncode(strkey.VersionByteContract, contractID[:]),
-				ID:                       id,
-				TopicXDR:                 []string{counterXdr},
-				ValueXDR:                 counterXdr,
-				InSuccessfulContractCall: true,
-				TransactionHash:          ledgerCloseMeta.TransactionHash(0).HexString(),
-				TxIndex:                  1,
-				OpIndex:                  0,
+				EventType:       protocol.EventTypeSystem,
+				Ledger:          1,
+				LedgerClosedAt:  now.Format(time.RFC3339),
+				ContractID:      strkey.MustEncode(strkey.VersionByteContract, contractID[:]),
+				ID:              id,
+				TopicXDR:        []string{counterXdr},
+				ValueXDR:        counterXdr,
+				TransactionHash: ledgerCloseMeta.TransactionHash(0).HexString(),
+				TxIndex:         1,
+				OpIndex:         0,
 			},
 		}
 		cursor := protocol.MaxCursor
@@ -847,17 +842,16 @@ func TestGetEvents(t *testing.T) {
 			value, err := xdr.MarshalBase64(txMeta[i].MustV3().SorobanMeta.Events[0].Body.MustV0().Data)
 			require.NoError(t, err)
 			expected = append(expected, protocol.EventInfo{
-				EventType:                protocol.EventTypeContract,
-				Ledger:                   1,
-				LedgerClosedAt:           now.Format(time.RFC3339),
-				ContractID:               "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
-				ID:                       id,
-				TopicXDR:                 []string{value},
-				ValueXDR:                 value,
-				InSuccessfulContractCall: true,
-				TransactionHash:          ledgerCloseMeta.TransactionHash(i).HexString(),
-				TxIndex:                  uint32(i + 1),
-				OpIndex:                  0,
+				EventType:       protocol.EventTypeContract,
+				Ledger:          1,
+				LedgerClosedAt:  now.Format(time.RFC3339),
+				ContractID:      "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+				ID:              id,
+				TopicXDR:        []string{value},
+				ValueXDR:        value,
+				TransactionHash: ledgerCloseMeta.TransactionHash(i).HexString(),
+				TxIndex:         uint32(i + 1),
+				OpIndex:         0,
 			})
 		}
 		cursor := expected[len(expected)-1].ID
@@ -960,17 +954,16 @@ func TestGetEvents(t *testing.T) {
 			expectedXdr, err := xdr.MarshalBase64(xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &symbols[i]})
 			require.NoError(t, err)
 			expected = append(expected, protocol.EventInfo{
-				EventType:                protocol.EventTypeContract,
-				Ledger:                   5,
-				LedgerClosedAt:           now.Format(time.RFC3339),
-				ContractID:               strkey.MustEncode(strkey.VersionByteContract, contractID[:]),
-				ID:                       id,
-				TopicXDR:                 []string{counterXdr},
-				ValueXDR:                 expectedXdr,
-				InSuccessfulContractCall: true,
-				TransactionHash:          ledgerCloseMeta.TransactionHash(i).HexString(),
-				TxIndex:                  uint32(i + 1),
-				OpIndex:                  0,
+				EventType:       protocol.EventTypeContract,
+				Ledger:          5,
+				LedgerClosedAt:  now.Format(time.RFC3339),
+				ContractID:      strkey.MustEncode(strkey.VersionByteContract, contractID[:]),
+				ID:              id,
+				TopicXDR:        []string{counterXdr},
+				ValueXDR:        expectedXdr,
+				TransactionHash: ledgerCloseMeta.TransactionHash(i).HexString(),
+				TxIndex:         uint32(i + 1),
+				OpIndex:         0,
 			})
 		}
 		cursor := expected[len(expected)-1].ID
