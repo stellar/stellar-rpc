@@ -197,7 +197,7 @@ func (txn *transactionHandler) getTransactionByHash(ctx context.Context, hash xd
 		return store.Transaction{}, store.ErrNoTransaction
 	}
 	txView := txnViewRange[0]
-	return store.ParseTransaction(txView)
+	return store.ParseTransaction(txView), nil
 }
 
 type transactionTableMigration struct {

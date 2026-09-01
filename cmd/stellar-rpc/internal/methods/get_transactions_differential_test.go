@@ -306,8 +306,9 @@ func diffMetaV1() xdr.TransactionMeta {
 
 // diffMetaV3NoSoroban is the straggler corner: a V3 meta with no SorobanMeta
 // at all. Paired with a Soroban envelope it is the one shape where the SDK's
-// view extractor and the parsed reader disagree on operation-slice arity, so
-// the corpus pins it deliberately (see repairV3OperationArity).
+// view extractor historically disagreed with the parsed reader on
+// operation-slice arity (fixed upstream in go-stellar-sdk#5997), so the
+// corpus pins it deliberately.
 func diffMetaV3NoSoroban() xdr.TransactionMeta {
 	return xdr.TransactionMeta{V: 3, Operations: &[]xdr.OperationMeta{}, V3: &xdr.TransactionMetaV3{}}
 }
@@ -750,74 +751,6 @@ func TestGetTransactions_ViewWalkCorpusIsNotVacuous(t *testing.T) {
 	require.Positive(t, withContractEvents, "transactions with contract events")
 	require.Positive(t, withTxEvents, "transactions with transaction events")
 	require.Positive(t, withDiagnostics, "transactions with diagnostic events")
-}
-
-// TestRepairV3OperationArity pins the straggler repair (inside
-// store.ParseTransaction) directly: it fires only for a V3 meta on a Soroban
-// envelope that came back with no operations, and leaves every other shape
-// exactly as the view extractor produced it.
-func TestRepairV3OperationArity(t *testing.T) {
-	marshal := func(v interface{ MarshalBinary() ([]byte, error) }) []byte {
-		raw, err := v.MarshalBinary()
-		require.NoError(t, err)
-		return raw
-	}
-
-	sorobanEnv := marshal(txEnvelope(300))
-	classicEnv := marshal(diffClassicEnvelope(301))
-	feeBumpSorobanEnv := marshal(diffFeeBumpEnvelope(txEnvelope(302)))
-	metaV3 := diffMetaV3NoSoroban()
-	metaV4 := diffMetaV4(nil, nil, nil)
-	metaV1 := diffMetaV1()
-
-	tests := []struct {
-		name     string
-		txView   ingest.LedgerTransactionView
-		expected [][][]byte
-	}{
-		{
-			"v3 soroban envelope, no operations: one empty operation slice",
-			ingest.LedgerTransactionView{Envelope: sorobanEnv, Meta: marshal(&metaV3), ContractEvents: [][][]byte{}},
-			[][][]byte{{}},
-		},
-		{
-			"v3 fee bump over a soroban inner: also repaired",
-			ingest.LedgerTransactionView{Envelope: feeBumpSorobanEnv, Meta: marshal(&metaV3), ContractEvents: [][][]byte{}},
-			[][][]byte{{}},
-		},
-		{
-			"v3 classic envelope: left empty",
-			ingest.LedgerTransactionView{Envelope: classicEnv, Meta: marshal(&metaV3), ContractEvents: [][][]byte{}},
-			[][][]byte{},
-		},
-		{
-			"v4 meta: left empty whatever the envelope",
-			ingest.LedgerTransactionView{Envelope: sorobanEnv, Meta: marshal(&metaV4), ContractEvents: [][][]byte{}},
-			[][][]byte{},
-		},
-		{
-			"v1 meta: left empty",
-			ingest.LedgerTransactionView{Envelope: sorobanEnv, Meta: marshal(&metaV1), ContractEvents: [][][]byte{}},
-			[][][]byte{},
-		},
-		{
-			"already has operations: untouched",
-			ingest.LedgerTransactionView{
-				Envelope:       sorobanEnv,
-				Meta:           marshal(&metaV3),
-				ContractEvents: [][][]byte{{[]byte("x")}},
-			},
-			[][][]byte{{[]byte("x")}},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tx, err := store.ParseTransaction(tt.txView)
-			require.NoError(t, err)
-			require.Equal(t, tt.expected, tx.ContractEvents)
-		})
-	}
 }
 
 // TestTransactionInfo_FieldMapping pins the renderer both extractions share.
