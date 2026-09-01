@@ -152,7 +152,7 @@ func (h transactionsRPCHandler) processTransactionsInLedger(
 	for i, txView := range txViews {
 		cursor.TransactionOrder = int32(startTxIdx + i)
 
-		tx := store.ParseTransaction(txView)
+		tx := store.ParseTransactionView(txView)
 		txInfo, ferr := transactionInfo(tx, format)
 		if ferr != nil {
 			return nil, false, &jrpc2.Error{

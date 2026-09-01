@@ -307,8 +307,7 @@ func diffMetaV1() xdr.TransactionMeta {
 // diffMetaV3NoSoroban is the straggler corner: a V3 meta with no SorobanMeta
 // at all. Paired with a Soroban envelope it is the one shape where the SDK's
 // view extractor historically disagreed with the parsed reader on
-// operation-slice arity (fixed upstream in go-stellar-sdk#5997), so the
-// corpus pins it deliberately.
+// operation-slice arity, so the corpus pins it deliberately.
 func diffMetaV3NoSoroban() xdr.TransactionMeta {
 	return xdr.TransactionMeta{V: 3, Operations: &[]xdr.OperationMeta{}, V3: &xdr.TransactionMetaV3{}}
 }
