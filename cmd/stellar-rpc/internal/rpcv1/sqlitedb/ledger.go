@@ -237,10 +237,9 @@ func ledgerInfoFromRow(ctx context.Context, db readDB, row ledgerRangeRow) (stor
 		if dbErr != nil {
 			return store.LedgerInfo{}, dbErr
 		}
-		if !found {
-			return store.LedgerInfo{}, fmt.Errorf("couldn't get ledger %d close time: %w", row.Sequence, err)
+		if found {
+			closeTime, err = xdr.LedgerCloseMetaView(meta).LedgerCloseTime()
 		}
-		closeTime, err = xdr.LedgerCloseMetaView(meta).LedgerCloseTime()
 		if err != nil {
 			return store.LedgerInfo{}, fmt.Errorf("couldn't get ledger %d close time: %w", row.Sequence, err)
 		}
