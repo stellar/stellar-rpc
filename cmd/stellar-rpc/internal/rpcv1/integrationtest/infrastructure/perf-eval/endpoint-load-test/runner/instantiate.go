@@ -14,8 +14,8 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/harness"
 )
 
-// blasterCfg is the realistic traffic-profile config, shipped with the blaster checkout.
-const blasterCfg = "cmd/stellar-rpc-blaster/internal/config/config.profile.toml"
+// legDir holds the leg's traffic-profile config; runners start w/ cwd = repo root.
+const legDir = "cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/endpoint-load-test"
 
 // blasterEnv is the leg's env-derived config.
 type blasterEnv struct {
@@ -88,12 +88,13 @@ func instantiate(ctx context.Context) error {
 	// launch blast
 	call := blastCall{
 		bin: blasterBin, url: cfg.TargetRPC,
-		configPath: filepath.Join(blasterDir, blasterCfg),
+		configPath: filepath.Join(leg.RepoRoot, legDir, "testdata", "blaster-test-profile.toml"),
 		// the profile config pins input_data_path to ./output/seed.json, resolved
 		// against the blaster cwd; passing it on the CLI too is a config error
 		seedPath:    filepath.Join(blasterDir, "output", "seed.json"),
 		resultsPath: filepath.Join(leg.WorkDir, "blaster-results.json"),
 		rampUp:      cfg.RampUp, duration: cfg.Duration, cooloff: cfg.Cooloff,
+		errorThreshold: cfg.ErrorThreshold,
 	}
 	if err := generateSeed(ctx, call, lo, hi, cfg.SeedCount); err != nil {
 		return leg.Bail("%v", err)
@@ -105,13 +106,16 @@ func instantiate(ctx context.Context) error {
 	if err != nil {
 		return leg.Bail("reading blaster results: %v", err)
 	}
-	rows, archRows, err := summarize(data)
+	rows, archRows, aborted, err := summarize(data)
 	if err != nil {
 		return leg.Bail("summarizing blaster results: %v", err)
 	}
+	if aborted {
+		logger.Warnf("blaster aborted the run: an endpoint crossed the %s%% error kill switch", cfg.ErrorThreshold)
+	}
 
-	md := renderMarkdown(leg.TargetSHA, blasterSHA, cfg.RampUp, cfg.Duration,
-		health.OldestLedger, health.LatestLedger, handoffSecs, rows, archRows)
+	md := renderMarkdown(leg.TargetSHA, blasterSHA, cfg.RampUp, cfg.Duration, cfg.ErrorThreshold,
+		health.OldestLedger, health.LatestLedger, handoffSecs, aborted, rows, archRows)
 	if err := os.WriteFile(leg.ResultsFile, []byte(md), 0o644); err != nil {
 		return leg.Bail("writing results: %v", err)
 	}
@@ -172,8 +176,9 @@ func generateSeed(ctx context.Context, c blastCall, lo, hi int64, count string) 
 
 // blast runs the serial endpoint sweep, writing results to c.resultsPath.
 func blast(ctx context.Context, c blastCall) error {
-	logger.Infof("blasting endpoints in serial (ramp-up %s, duration %s, cooloff %s per endpoint)",
-		c.rampUp, c.duration, c.cooloff)
+	logger.Infof("running blaster " +
+		fmt.Sprintf("(--serial enabled, ramp-up %s, duration %s, cooloff %s per endpoint, error killswitch %s%%)",
+			c.rampUp, c.duration, c.cooloff, c.errorThreshold))
 	if err := harness.RunStreaming(ctx, filepath.Dir(c.bin), nil, 80, c.bin, "run",
 		"--rpc-url", c.url,
 		"--config-path", c.configPath,
