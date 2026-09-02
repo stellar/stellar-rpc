@@ -176,9 +176,8 @@ func generateSeed(ctx context.Context, c blastCall, lo, hi int64, count string) 
 
 // blast runs the serial endpoint sweep, writing results to c.resultsPath.
 func blast(ctx context.Context, c blastCall) error {
-	logger.Infof("running blaster " +
-		fmt.Sprintf("(--serial enabled, ramp-up %s, duration %s, cooloff %s per endpoint, error killswitch %s%%)",
-			c.rampUp, c.duration, c.cooloff, c.errorThreshold))
+	logger.Infof("running blaster (--serial enabled, ramp-up %s, duration %s, cooloff %s per endpoint, "+
+		"error killswitch %s%%)", c.rampUp, c.duration, c.cooloff, c.errorThreshold)
 	if err := harness.RunStreaming(ctx, filepath.Dir(c.bin), nil, 80, c.bin, "run",
 		"--rpc-url", c.url,
 		"--config-path", c.configPath,
