@@ -482,7 +482,7 @@ Single-item record layout (ItemsPerRecord=1):
 
 **Which artifacts need `RecordChecksum`.** The question is whether the bytes that land on disk are already self-validating, which is a property of the byte stream rather than of whether a codec is present:
 
-- `*zstd.Compressor` — zstd frames carry a built-in xxHash64 checksum, verified during decompression. No record checksum needed.
+- `*zstd.Compressor` with its default options — zstd frames carry a built-in xxHash64 checksum, verified during decompression. No record checksum needed. A compressor built with `zstd.WithoutChecksum()` emits frames without it and needs `ChecksumCRC32C` like passthrough does.
 - Passthrough over items that are themselves checksummed (e.g. pre-compressed zstd frames copied verbatim) — likewise none.
 - Passthrough over raw bytes — nothing else covers the payload, so set `ChecksumCRC32C`. A flipped bit otherwise reaches the caller as different data rather than an error.
 

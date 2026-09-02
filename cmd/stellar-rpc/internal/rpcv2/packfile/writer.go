@@ -29,10 +29,13 @@ const recordCRCLen = 4
 var ErrWriterClosed = errors.New("packfile: writer is closed")
 
 // RecordChecksum selects the integrity check a record carries. It is an axis
-// of its own rather than a codec: a compressing codec supplies its own
-// checksum (a zstd frame carries a content checksum libzstd validates on
-// decode), while a passthrough artifact has nothing protecting its payload
-// bytes, and neither fact is expressed by the Format the codec is chosen by.
+// of its own rather than a codec: whether the bytes on disk are already
+// self-checking is a property of the encoded bytes, not of the Format the
+// codec is chosen by. The default zstd compressor emits frames with a content
+// checksum that libzstd validates on decode, so those records need nothing
+// more. A passthrough artifact, or one written with
+// zstd.NewCompressor(zstd.WithoutChecksum()), has nothing protecting its
+// payload bytes and needs ChecksumCRC32C.
 type RecordChecksum uint8
 
 const (
