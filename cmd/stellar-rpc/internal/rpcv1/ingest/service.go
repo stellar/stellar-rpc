@@ -152,9 +152,32 @@ type Service struct {
 	onLedgerIngested  func(seq uint32, d time.Duration)
 }
 
-func (s *Service) Close() error {
+// Stop cancels ingestion but does not wait for the worker goroutine to exit.
+//
+// Shutdown has to be split in two because of how captive core starts up. While
+// the daemon is still catching up, the ingestion worker sits inside a blocking
+// "stellar-core catchup" command. That command watches the ledger backend's
+// context, not the one cancelled here, so nothing this function does can
+// interrupt it -- only closing the backend can. The correct shutdown order is
+// therefore Stop, then close the ledger backend, then Wait. Cancelling first
+// matters: it makes the retry loop treat the errors that the backend shutdown
+// produces as a clean cancellation instead of a fatal ingestion failure.
+func (s *Service) Stop() {
 	s.done()
+}
+
+// Wait blocks until the ingestion worker goroutine has exited. Call it only
+// after the ledger backend is closed, or it can block for as long as captive
+// core takes to exit on its own.
+func (s *Service) Wait() {
 	s.wg.Wait()
+}
+
+// Close stops ingestion and waits for the worker to exit. Callers that also own
+// the ledger backend should use Stop and Wait around closing it instead.
+func (s *Service) Close() error {
+	s.Stop()
+	s.Wait()
 	return nil
 }
 

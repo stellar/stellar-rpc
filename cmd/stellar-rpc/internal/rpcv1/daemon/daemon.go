@@ -99,14 +99,18 @@ func (d *Daemon) close() {
 		}
 	}
 
-	if err := d.ingestService.Close(); err != nil {
-		d.logger.WithError(err).Error("error closing ingestion service")
-		closeErrors = append(closeErrors, err)
-	}
+	// Order matters. The ingestion worker can be parked inside a blocking
+	// captive-core startup command that only closing the backend interrupts, so
+	// cancel ingestion first, then close captive core, and only then wait for
+	// the worker. Waiting before closing captive core stalls shutdown for as
+	// long as stellar-core takes to exit by itself, which with an unreachable
+	// history archive is minutes.
+	d.ingestService.Stop()
 	if err := d.core.Close(); err != nil {
 		d.logger.WithError(err).Error("error closing captive core")
 		closeErrors = append(closeErrors, err)
 	}
+	d.ingestService.Wait()
 	d.jsonRPCHandler.Close()
 	if err := d.db.Close(); err != nil {
 		d.logger.WithError(err).Error("Error closing db")
