@@ -23,7 +23,7 @@ type blasterEnv struct {
 	Duration string `env:"BLASTER_DURATION" envDefault:"3m"`
 	// recovery gap between serial endpoints, so one endpoint's failures
 	// don't cascade into the next
-	Cooloff   string `env:"BLASTER_COOLOFF" envDefault:"15s"`
+	Cooloff   string `env:"BLASTER_COOLOFF" envDefault:"30s"`
 	SeedCount string `env:"SEED_COUNT"      envDefault:"1000"`
 	// left buffer outruns retention trimming during the blast; right buffer
 	// keeps clear of the (still advancing) tip
