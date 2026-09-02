@@ -42,15 +42,17 @@ type streamResult struct {
 
 // summarize turns blaster's results JSON into report rows: the per-endpoint
 // table, plus per-archetype rows for endpoints that break their traffic down.
-func summarize(data []byte) ([]endpointStats, []endpointStats, error) {
+// The bool reports whether the error-percent kill switch cut the run short.
+func summarize(data []byte) ([]endpointStats, []endpointStats, bool, error) {
 	var res struct {
+		Aborted   bool                    `json:"aborted"`
 		Endpoints map[string]streamResult `json:"endpoints"`
 	}
 	if err := json.Unmarshal(data, &res); err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	if len(res.Endpoints) == 0 {
-		return nil, nil, errors.New("blaster results hold no endpoints")
+		return nil, nil, false, errors.New("blaster results hold no endpoints")
 	}
 
 	profiled := false
@@ -78,35 +80,39 @@ func summarize(data []byte) ([]endpointStats, []endpointStats, error) {
 	for name, ep := range res.Endpoints {
 		r, err := row(name, ep)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 		rows = append(rows, r)
 		for arch, sub := range ep.Archetypes {
 			r, err := row(name+"/"+arch, sub)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, false, err
 			}
 			archRows = append(archRows, r)
 		}
 	}
 	if !profiled {
-		return nil, nil, fmt.Errorf("no endpoint reports traffic profile %d", expectedTrafficProfile)
+		return nil, nil, false, fmt.Errorf("no endpoint reports traffic profile %d", expectedTrafficProfile)
 	}
 	for _, rs := range [][]endpointStats{rows, archRows} {
 		sort.Slice(rs, func(i, j int) bool { return rs[i].Name < rs[j].Name })
 	}
-	return rows, archRows, nil
+	return rows, archRows, res.Aborted, nil
 }
 
 func renderMarkdown(
-	sha, blasterSHA, rampUp, duration string, oldest, latest uint32, handoffSecs int,
-	rows, archRows []endpointStats,
+	sha, blasterSHA, rampUp, duration, errorThreshold string, oldest, latest uint32, handoffSecs int,
+	aborted bool, rows, archRows []endpointStats,
 ) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "### 🎯 Endpoint load test — `%s`\n\n", sha[:min(12, len(sha))])
-	fmt.Fprintf(&b, "Serial blast per endpoint (ramp-up %s, duration %s, blaster `%s`) against the backfilled RPC "+
-		"(ledgers `[%d, %d]`, handoff wait %ds).\n\n",
-		rampUp, duration, blasterSHA[:min(12, len(blasterSHA))], oldest, latest, handoffSecs)
+	fmt.Fprintf(&b, "Serial blast per endpoint (ramp-up %s, duration %s, error kill switch %s%%, blaster `%s`) "+
+		"against the backfilled RPC (ledgers `[%d, %d]`, handoff wait %ds).\n\n",
+		rampUp, duration, errorThreshold, blasterSHA[:min(12, len(blasterSHA))], oldest, latest, handoffSecs)
+	if aborted {
+		b.WriteString("> ⚠️ **Aborted early:** an endpoint's error rate crossed the kill switch, so blaster ended " +
+			"the run; the rows below cover only the traffic served before the cutoff.\n\n")
+	}
 	writeTable(&b, rows)
 	if len(archRows) > 0 {
 		b.WriteString("\n<details>\n<summary>getEvents results extended</summary>\n\n")

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -13,6 +14,7 @@ const fixture = `{
   "start": "2026-07-10T00:00:00Z",
   "end": "2026-07-10T00:06:10Z",
   "duration_seconds": 370,
+  "aborted": false,
   "endpoints": {
     "getLedgers": {
       "total_requests": 3600,
@@ -73,8 +75,9 @@ const fixture = `{
 }`
 
 func TestSummarize(t *testing.T) {
-	rows, archRows, err := summarize([]byte(fixture))
+	rows, archRows, aborted, err := summarize([]byte(fixture))
 	require.NoError(t, err)
+	require.False(t, aborted)
 	require.Len(t, rows, 3)
 	require.Len(t, archRows, 2)
 
@@ -112,35 +115,37 @@ func TestSummarize(t *testing.T) {
 
 func TestSummarizeTrafficProfile(t *testing.T) {
 	// mismatched profile version fails
-	_, _, err := summarize([]byte(`{"endpoints": {"getLedgers": {
+	_, _, _, err := summarize([]byte(`{"endpoints": {"getLedgers": {
 		"total_requests": 1, "target_rps": 1, "traffic_profile": 2, "percentiles_ms": {}}}}`))
 	require.ErrorContains(t, err, "traffic profile 2, want 3")
 
 	// mismatch inside an archetype sub-stream fails too
-	_, _, err = summarize([]byte(`{"endpoints": {"getEvents": {
+	_, _, _, err = summarize([]byte(`{"endpoints": {"getEvents": {
 		"total_requests": 1, "target_rps": 1, "traffic_profile": 3, "percentiles_ms": {},
 		"archetypes": {"head-poll": {"total_requests": 1, "target_rps": 1, "traffic_profile": 2, "percentiles_ms": {}}}}}}`))
 	require.ErrorContains(t, err, "getEvents/head-poll reports traffic profile 2, want 3")
 
 	// no profile stamped anywhere fails
-	_, _, err = summarize([]byte(`{"endpoints": {"getHealth": {
+	_, _, _, err = summarize([]byte(`{"endpoints": {"getHealth": {
 		"total_requests": 1, "target_rps": 1, "percentiles_ms": {}}}}`))
 	require.ErrorContains(t, err, "no endpoint reports traffic profile 3")
 }
 
 func TestRenderMarkdown(t *testing.T) {
 	// fails on empty
-	_, _, err := summarize([]byte(`{"endpoints": {}}`))
+	_, _, _, err := summarize([]byte(`{"endpoints": {}}`))
 	require.Error(t, err)
 
-	rows, archRows, err := summarize([]byte(fixture))
+	rows, archRows, _, err := summarize([]byte(fixture))
 	require.NoError(t, err)
-	md := renderMarkdown("0123456789abcdef", "fedcba9876543210", "2m", "3m", 60_000_000, 60_017_280, 1800, rows, archRows)
+	md := renderMarkdown("0123456789abcdef", "fedcba9876543210", "2m", "3m", "75",
+		60_000_000, 60_017_280, 1800, false, rows, archRows)
 
 	require.Contains(t, md, "`0123456789ab`")
-	require.Contains(t, md, "ramp-up 2m, duration 3m, blaster `fedcba987654`")
+	require.Contains(t, md, "ramp-up 2m, duration 3m, error kill switch 75%, blaster `fedcba987654`")
 	require.Contains(t, md, "`[60000000, 60017280]`")
 	require.Contains(t, md, "handoff wait 1800s")
+	require.NotContains(t, md, "Aborted early")
 	require.Contains(t, md, "| p50 (ms) | p95 (ms) | p99 (ms) | p99.9 (ms) |")
 	require.Contains(t, md, "| getLedgers (limit=1) | 20 | 3600 | 9 (0.2%) | 3.2 | 9.8 | 21.5 | 60.1 |")
 	require.Contains(t, md, "| getHealth | 100 | 18000 | 0 (0.0%) | 0.4 | 0.9 | 1.5 | 4.2 |")
@@ -152,6 +157,16 @@ func TestRenderMarkdown(t *testing.T) {
 	require.Contains(t, md, "| getEvents/deep-pager | 3.45 | 110 | 2 (1.8%) | 5.1 | 14.2 | 30.4 | 81.7 |")
 
 	// no dropdown when there are no archetype rows
-	md = renderMarkdown("0123456789abcdef", "fedcba9876543210", "2m", "3m", 60_000_000, 60_017_280, 1800, rows, nil)
+	md = renderMarkdown("0123456789abcdef", "fedcba9876543210", "2m", "3m", "75",
+		60_000_000, 60_017_280, 1800, false, rows, nil)
 	require.NotContains(t, md, "<details>")
+
+	// a kill-switch abort is flagged above the table
+	_, _, aborted, err := summarize([]byte(strings.Replace(fixture, `"aborted": false`, `"aborted": true`, 1)))
+	require.NoError(t, err)
+	require.True(t, aborted)
+	md = renderMarkdown("0123456789abcdef", "fedcba9876543210", "2m", "3m", "75",
+		60_000_000, 60_017_280, 1800, aborted, rows, nil)
+	require.Contains(t, md, "> ⚠️ **Aborted early:**")
+	require.Less(t, strings.Index(md, "Aborted early"), strings.Index(md, "| Endpoint |"))
 }
