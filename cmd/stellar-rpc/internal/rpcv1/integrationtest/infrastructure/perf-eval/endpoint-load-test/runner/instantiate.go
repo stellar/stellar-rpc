@@ -21,6 +21,8 @@ const blasterCfg = "cmd/stellar-rpc-blaster/internal/config/config.profile.toml"
 type blasterEnv struct {
 	RampUp   string `env:"BLASTER_RAMP_UP"  envDefault:"2m"`
 	Duration string `env:"BLASTER_DURATION" envDefault:"3m"`
+	// max % of acceptable response failure rate before terminating the blast
+	ErrorThreshold string `env:"BLASTER_ERROR_THRESHOLD" envDefault:"75"`
 	// recovery gap between serial endpoints, so one endpoint's failures
 	// don't cascade into the next
 	Cooloff   string `env:"BLASTER_COOLOFF" envDefault:"30s"`
@@ -121,12 +123,13 @@ func instantiate(ctx context.Context) error {
 
 // fetchBlaster clones and builds stellar-rpc-blaster at dev HEAD.
 func fetchBlaster(ctx context.Context, dir, repo string) (string, string, error) {
-	logger.Infof("fetching stellar-rpc-blaster (%s@dev)", repo)
+	// TEMP: restore to @dev before merge
+	logger.Infof("fetching stellar-rpc-blaster (%s@expose-getEvents-archetypes)", repo)
 	if err := os.RemoveAll(dir); err != nil {
 		return "", "", err
 	}
 	if err := harness.RunStreaming(ctx, "", nil, 20, "git", "clone", "-q", "--depth", "1",
-		"--branch", "dev", "https://github.com/"+repo+".git", dir); err != nil {
+		"--branch", "expose-getEvents-archetypes", "https://github.com/"+repo+".git", dir); err != nil {
 		return "", "", fmt.Errorf("git clone failed: %w", err)
 	}
 	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "HEAD").Output()
@@ -144,10 +147,11 @@ func fetchBlaster(ctx context.Context, dir, repo string) (string, string, error)
 
 // blastCall parameterizes one serial blaster sweep.
 type blastCall struct {
-	bin, url                  string
-	configPath                string
-	seedPath, resultsPath     string
-	rampUp, duration, cooloff string
+	bin, url                string
+	configPath              string
+	seedPath, resultsPath   string
+	rampUp, duration        string
+	errorThreshold, cooloff string
 }
 
 // generateSeed samples the request corpus from the target RPC's ledger window.
@@ -174,8 +178,8 @@ func blast(ctx context.Context, c blastCall) error {
 		"--rpc-url", c.url,
 		"--config-path", c.configPath,
 		"--serial",
-		"--ramp-up", c.rampUp,
-		"--duration", c.duration,
+		"--ramp-up", c.rampUp, "--duration", c.duration,
+		"--error-percent", c.errorThreshold,
 		"--cooloff", c.cooloff,
 		"--test-output-path", c.resultsPath); err != nil {
 		return fmt.Errorf("blaster run failed: %w", err)
