@@ -277,3 +277,62 @@ func TestRecordChecksumWithAppDataAndGrowingCodec(t *testing.T) {
 		t.Fatalf("read %d items, want %d", i, len(items))
 	}
 }
+
+// readBackMatches reads every item in the file at path. It returns an error
+// if any read fails, and false if every read succeeds but some item differs
+// from want, which is the silent-wrong-answer case the record checksum exists
+// to prevent.
+func readBackMatches(t *testing.T, path string, want [][]byte) (bool, error) {
+	t.Helper()
+	r := Open(path, ReaderOptions{})
+	defer r.Close()
+	i := 0
+	for item, err := range r.ReadRange(0, len(want)) {
+		if err != nil {
+			return false, err
+		}
+		if !bytes.Equal(item, want[i]) {
+			return false, nil
+		}
+		i++
+	}
+	return true, nil
+}
+
+func TestRecordChecksumCorruptionSweep(t *testing.T) {
+	masks := []byte{0x01, 0xFF, 0x80}
+	for _, perRecord := range []int{1, 4} {
+		for _, sum := range []RecordChecksum{ChecksumNone, ChecksumCRC32C} {
+			t.Run(fmt.Sprintf("%ditems/checksum%d", perRecord, sum), func(t *testing.T) {
+				items := makeItems(6, 20)
+				path := writePackfile(t, WriterOptions{ItemsPerRecord: perRecord, RecordChecksum: sum}, items)
+				orig, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				var detected, silentlyWrong int
+				for off := range orig {
+					for _, mask := range masks {
+						corrupt := corruptAt(t, path, false, func(data []byte) { data[off] ^= mask })
+						ok, rerr := readBackMatches(t, corrupt, items)
+						switch {
+						case rerr != nil:
+							detected++
+						case !ok:
+							silentlyWrong++
+						}
+					}
+				}
+
+				// The ChecksumNone rows are informational: they show the gap
+				// being closed, which is what makes the checked rows meaningful.
+				t.Logf("%d flips over %d bytes: %d detected, %d silently wrong",
+					len(orig)*len(masks), len(orig), detected, silentlyWrong)
+				if sum == ChecksumCRC32C && silentlyWrong > 0 {
+					t.Errorf("%d flips read back as different bytes with no error", silentlyWrong)
+				}
+			})
+		}
+	}
+}
