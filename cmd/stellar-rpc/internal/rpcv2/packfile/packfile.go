@@ -7,8 +7,11 @@ import (
 )
 
 const (
-	magic       = 0x48434C53 // "SLCH" in the on-disk (little-endian) byte order
-	version     = 1          // on-disk format version; bump on any breaking trailer/index change
+	magic = 0x48434C53 // "SLCH" in the on-disk (little-endian) byte order
+	// version is the on-disk format version. Until RPC v2 ships, the layout
+	// may change in place and artifacts are rebuilt; bump on any breaking
+	// trailer/index change after that.
+	version     = 1
 	trailerSize = 76
 )
 
