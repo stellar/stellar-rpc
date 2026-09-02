@@ -1,0 +1,30 @@
+# Realistic traffic mix, measured over one week of production traffic on a public
+# mainnet 7-day RPC service (~38M requests, Aug 2026 ledgers 63,680,746-63,788,137, 5.62s avg close).
+# Excludes send/simulateTransaction + getLedgerEntries and is renormalized to 100 RPS aggregate.
+# rps values below are the observed per-method shares scaled to ~100 RPS aggregate.
+
+input_data_path = "./output/seed.json"
+
+[endpoints.getLedgerEntries]
+rps = 0 # excluded from this suite; it sustains >1500 RPS alone and never binds first
+
+[endpoints.getEvents]
+rps = 25
+
+[endpoints.getHealth]
+rps = 24
+
+[endpoints.getTransaction]
+rps = 24
+
+[endpoints.getLatestLedger]
+rps = 19
+
+[endpoints.getTransactions]
+rps = 4
+
+[endpoints.getLedgers]
+rps = 2
+
+[endpoints.getNetwork]
+rps = 2
