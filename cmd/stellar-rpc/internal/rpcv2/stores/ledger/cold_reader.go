@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"iter"
 	"math"
-	"os"
 	"sync"
 	"sync/atomic"
 
@@ -47,7 +46,7 @@ const appDataSize = 4
 var coldPackDecoder = zstd.NewDecompressor()
 
 // ColdReader is lazy: OpenColdReader does no synchronous I/O and
-// returns no error. packfile.Open begins the open in a background
+// returns no error. OpenPack begins the open in a background
 // goroutine immediately; the trailer + AppData are read and validated
 // on the first method call, via a sync.OnceValues-cached loadHeader,
 // where a failed open also surfaces. Read methods (LastSeq,
@@ -56,7 +55,7 @@ var coldPackDecoder = zstd.NewDecompressor()
 // before invoking it, matching the underlying packfile.Reader.Close
 // contract.
 type ColdReader struct {
-	r    *packfile.Reader
+	r    *stores.PackReader
 	path string
 	init func() (coldHeader, error)
 }
@@ -69,7 +68,7 @@ type coldHeader struct {
 
 // OpenColdReader returns a lazy reader for the cold pack at path.
 // It does no synchronous I/O and returns no error for a valid path;
-// packfile.Open starts the open in the background immediately, and
+// OpenPack starts the open in the background immediately, and
 // trailer + AppData read/validation (plus any open failure) surface
 // on the first method call. Uses the package-level coldPackDecoder,
 // shared across all readers in the process.
@@ -78,7 +77,7 @@ func OpenColdReader(path string) (*ColdReader, error) {
 		return nil, stores.ErrInvalidConfig
 	}
 	c := &ColdReader{
-		r:    packfile.Open(path, packfile.ReaderOptions{RecordDecoder: coldPackDecoder}),
+		r:    stores.OpenPack(path, packfile.ReaderOptions{RecordDecoder: coldPackDecoder}),
 		path: path,
 	}
 	c.init = sync.OnceValues(c.loadHeader)
@@ -133,8 +132,9 @@ func (c *ColdReader) WithLedger(seq uint32, fn func(raw []byte) error) error {
 		return fmt.Errorf("%w: seq %d outside store coverage [%d, %d]",
 			stores.ErrOutOfRange, seq, h.firstSeq, h.lastSeq)
 	}
-	// Carried out rather than returned through the reader, so
-	// translateReaderErr only ever sees the packfile's own failures.
+	// Carried out rather than returned through the reader: the handle
+	// translates every error ReadItem returns, so a caller's error routed
+	// that way would be reclassified as a store failure.
 	var fnErr error
 	rerr := c.r.ReadItem(int(seq-h.firstSeq), func(b []byte) error {
 		fnErr = fn(b)
@@ -144,7 +144,7 @@ func (c *ColdReader) WithLedger(seq uint32, fn func(raw []byte) error) error {
 	case fnErr != nil:
 		return fnErr
 	case rerr != nil:
-		return translateReaderErr(rerr)
+		return rerr
 	}
 	return nil
 }
@@ -179,7 +179,7 @@ func (c *ColdReader) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 		seq := start
 		for item, err := range c.r.ReadRange(startPos, count) {
 			if err != nil {
-				yield(Entry{}, translateReaderErr(err))
+				yield(Entry{}, err)
 				return
 			}
 			// Entry.Bytes is the packfile's: valid only until the loop body
@@ -193,15 +193,3 @@ func (c *ColdReader) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 }
 
 func (c *ColdReader) Close() error { return c.r.Close() }
-
-// translateReaderErr maps packfile- and os-level errors to the
-// stores sentinels.
-func translateReaderErr(err error) error {
-	if errors.Is(err, os.ErrClosed) {
-		return stores.ErrStoreClosed
-	}
-	if errors.Is(err, packfile.ErrCorrupt) {
-		return fmt.Errorf("%w: %w", stores.ErrCorrupt, err)
-	}
-	return err
-}

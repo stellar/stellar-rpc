@@ -159,10 +159,12 @@ func WriteColdIndex(
 	// measurably (~3.6× lookup latency in measurement) for marginal
 	// byte savings. Contrast events.pack, where XDR payloads grouped
 	// at 128/record offer plenty of compression headroom.
+	// Skipping compression is also why indexPackChecksum exists.
 	pw, err := packfile.Create(indexPackPath, packfile.WriterOptions{
 		Format:         indexPackFormat,
 		ItemsPerRecord: indexPackItemsPerRecord,
 		Overwrite:      true,
+		RecordChecksum: indexPackChecksum,
 	})
 	if err != nil {
 		return fmt.Errorf("events: create index.pack at %s: %w", indexPackPath, err)

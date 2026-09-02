@@ -1,8 +1,11 @@
 package event
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"testing"
@@ -691,6 +694,66 @@ func copyFile(t *testing.T, src, dst string) {
 	require.NoError(t, os.WriteFile(dst, b, 0o644))
 }
 
+// flipByteAt xors the byte at off in the file at path.
+func flipByteAt(t *testing.T, path string, off int) {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Greater(t, len(b), off)
+	b[off] ^= 0x01
+	require.NoError(t, os.WriteFile(path, b, 0o644))
+}
+
+// TestColdReader_CorruptIndexPackIsCorrupt is the reason index.pack carries a
+// record checksum. roaring's UnmarshalBinary accepts a flipped container bit
+// and hands back a DIFFERENT posting set, so without the checksum this lookup
+// would return a wrong answer with no error. The first record starts at file
+// offset 0, and its first bytes are a term fingerprint followed by that term's
+// serialized bitmap.
+func TestColdReader_CorruptIndexPackIsCorrupt(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
+	flipByteAt(t, filepath.Join(dir, IndexPackName(chunkID)), 0)
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	_, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
+	require.ErrorIs(t, err, stores.ErrCorrupt)
+	require.ErrorIs(t, err, packfile.ErrChecksum, "the underlying signal stays in the chain")
+}
+
+// TestColdReader_CorruptOffsetsBlobIsCorrupt covers the app-data section, whose
+// decoded contents map ledgers to event-ID ranges. A flipped byte there can
+// leave the blob structurally valid and silently shift those ranges.
+func TestColdReader_CorruptOffsetsBlobIsCorrupt(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, _ := buildColdFixture(t, chunkID, 4, 3)
+
+	eventsPath := filepath.Join(dir, EventsPackName(chunkID))
+	b, err := os.ReadFile(eventsPath)
+	require.NoError(t, err)
+
+	// Locate the section by its bytes rather than by trailer arithmetic. It
+	// sits just before the trailer, so search from the end.
+	r := packfile.Open(eventsPath, packfile.ReaderOptions{})
+	appData, err := r.AppData()
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+	require.NotEmpty(t, appData, "fixture should carry an offsets blob")
+	off := bytes.LastIndex(b, appData)
+	require.GreaterOrEqual(t, off, 0)
+	flipByteAt(t, eventsPath, off)
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	_, err = cr.EventCount()
+	require.ErrorIs(t, err, stores.ErrCorrupt)
+}
+
 // TestColdReader_RejectsWrongFormatEventsPack pins the open-time Format
 // dispatch: a mis-pointed events.pack fails loudly at first metadata
 // access instead of mid-query with an opaque decode error.
@@ -787,4 +850,95 @@ func TestColdReader_RejectsNonEmptyIndexOnEventlessChunk(t *testing.T) {
 
 	_, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
 	require.ErrorContains(t, err, "eventless")
+}
+
+// TestColdReader_CorruptIndexOffsetsIsCorrupt covers the other half of
+// index.pack. A record-level flip surfaces through LookupKeys' read; a flip in
+// the offsets index or the trailer surfaces at open, through validateMPHF,
+// which is a different path and has to reach the same sentinel.
+func TestColdReader_CorruptIndexOffsetsIsCorrupt(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
+
+	// The offsets index sits between the last record and the trailer; app data
+	// is empty for index.pack, so it ends 76 bytes before EOF.
+	indexPath := filepath.Join(dir, IndexPackName(chunkID))
+	b, err := os.ReadFile(indexPath)
+	require.NoError(t, err)
+	pr := packfile.Open(indexPath, packfile.ReaderOptions{})
+	t.Cleanup(func() { _ = pr.Close() })
+	tr, err := pr.Trailer()
+	require.NoError(t, err)
+	require.Positive(t, tr.IndexSize)
+	flipByteAt(t, indexPath, len(b)-76-int(tr.IndexSize))
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	_, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
+	require.ErrorIs(t, err, stores.ErrCorrupt)
+}
+
+// TestColdReader_CloseOnlySurfacesCorrupt covers the reader that is opened and
+// closed without a read. Close waits for the background open, so it is the
+// first and only place the corruption can surface, and it owes callers the
+// same sentinel every other method gives them.
+func TestColdReader_CloseOnlySurfacesCorrupt(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, _ := buildColdFixture(t, chunkID, 4, 1)
+
+	indexPath := filepath.Join(dir, IndexPackName(chunkID))
+	b, err := os.ReadFile(indexPath)
+	require.NoError(t, err)
+	pr := packfile.Open(indexPath, packfile.ReaderOptions{})
+	t.Cleanup(func() { _ = pr.Close() })
+	tr, err := pr.Trailer()
+	require.NoError(t, err)
+	require.Positive(t, tr.IndexSize)
+	flipByteAt(t, indexPath, len(b)-76-int(tr.IndexSize))
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	require.ErrorIs(t, cr.Close(), stores.ErrCorrupt)
+}
+
+// clearRecordChecksumFlag rewrites path's trailer so its record-checksum flag
+// is absent and the trailer CRC32C still agrees, which is what a pack built
+// before the checksum existed looks like to the reader.
+func clearRecordChecksumFlag(t *testing.T, path string) {
+	t.Helper()
+	const (
+		trailerSize = 76
+		offFlags    = 5
+		offCRC      = 72
+		flagRecord  = 1 << 1
+	)
+	b, err := os.ReadFile(path)
+	require.NoError(t, err)
+	tr := b[len(b)-trailerSize:]
+	require.NotZero(t, tr[offFlags]&flagRecord, "fixture should have been written WITH the flag")
+	tr[offFlags] &^= flagRecord
+	binary.LittleEndian.PutUint32(tr[offCRC:], crc32.Checksum(tr[:offCRC], crc32.MakeTable(crc32.Castagnoli)))
+	require.NoError(t, os.WriteFile(path, b, 0o600))
+}
+
+// TestColdReader_UncheckedIndexPackIsCorrupt pins the stale-build rejection.
+// The pack is structurally valid and its trailer CRC agrees — only the record
+// checksum is absent, which is precisely the artifact that could answer queries
+// from unverified bitmaps.
+func TestColdReader_UncheckedIndexPackIsCorrupt(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
+	clearRecordChecksumFlag(t, filepath.Join(dir, IndexPackName(chunkID)))
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	_, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
+	require.ErrorIs(t, err, stores.ErrCorrupt)
+	// Pin the guard itself: reading a widened record as a narrow one also fails,
+	// so a bare ErrCorrupt assertion would survive the guard's removal.
+	require.Contains(t, err.Error(), "built without a record checksum")
 }
