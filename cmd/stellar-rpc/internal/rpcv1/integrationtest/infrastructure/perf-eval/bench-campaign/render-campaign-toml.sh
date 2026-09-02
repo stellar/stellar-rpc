@@ -215,7 +215,7 @@ toml_file="$(mktemp "${TMPDIR:-/tmp}/campaign-XXXXXX")"
     printf '\n[[dataset]]\n'
     printf 'name = "%s"\n' "$profile"
     printf 'kind = "packs-s3"\n'
-    printf 'location = "%s/%s/packs/cold"\n' "$INPUTS_PREFIX" "$profile"
+    printf 'location = "%s/%s/packs-v2/cold"\n' "$INPUTS_PREFIX" "$profile"
     printf 'chunks = [1]\n'
   done
 } > "$toml_file"
