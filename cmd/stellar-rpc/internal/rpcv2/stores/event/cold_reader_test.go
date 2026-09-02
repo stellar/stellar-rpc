@@ -956,6 +956,7 @@ func rewriteIndexPackStamp(t *testing.T, dir string, chunkID chunk.ID, schema ui
 	pw, err := packfile.Create(filepath.Join(dir, IndexPackName(chunkID)), packfile.WriterOptions{
 		Format:         indexPackFormat,
 		ItemsPerRecord: indexPackItemsPerRecord,
+		RecordChecksum: indexPackChecksum,
 		Overwrite:      true,
 	})
 	require.NoError(t, err)
