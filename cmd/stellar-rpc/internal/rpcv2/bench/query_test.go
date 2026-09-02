@@ -117,6 +117,27 @@ func TestQueryCommandAcceptsRunnerArgv(t *testing.T) {
 	}
 }
 
+// TestQueryDefaultShapesMatchSLA pins the two read shapes the team SLA fixes:
+// getLedgers reads 10 ledgers per call and getEvents reads a small page of 10
+// matches. The campaign runner passes neither flag, so the defaults are the
+// shapes the SLA rows are measured at.
+func TestQueryDefaultShapesMatchSLA(t *testing.T) {
+	for _, name := range []string{"cold", "hot"} {
+		t.Run(name, func(t *testing.T) {
+			sub := querySubcommands(t, NewQueryCommand())[name]
+			require.NotNil(t, sub)
+
+			ledgersSpan, err := sub.Flags().GetUint32("ledgers-span")
+			require.NoError(t, err)
+			require.Equal(t, uint32(10), ledgersSpan, "SLA: getLedgers max=10")
+
+			eventsLimit, err := sub.Flags().GetInt("events-limit")
+			require.NoError(t, err)
+			require.Equal(t, 10, eventsLimit, "SLA: getEvents small page, 10 matches")
+		})
+	}
+}
+
 // TestParseQueryTypes pins the accepted and rejected --types values.
 func TestParseQueryTypes(t *testing.T) {
 	got, err := parseQueryTypes("events,ledgers")
