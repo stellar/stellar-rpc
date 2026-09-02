@@ -10,8 +10,7 @@ name: Bench campaign (EC2)
 
 on:
   # Dispatch only. No cron in v1: a campaign occupies one box for most of a day
-  # and nothing here decides which phase is worth running unattended. The
-  # rpc-bench concurrency group is the lane the whole campaign chain runs in.
+  # and nothing here decides which phase is worth running unattended.
   workflow_dispatch:
     # Ten inputs is the workflow_dispatch ceiling, so this list is full: further
     # knobs have to become overrides inside render-campaign-toml.sh.
@@ -70,11 +69,16 @@ on:
         type: string
         default: main
 
-# One campaign at a time across the whole repo: a campaign owns a box for hours
-# and two of them would only measure each other. Queue, never cancel — a
-# cancelled chain leaves the box to its self-terminate ceiling.
+# Campaigns run in parallel: every run launches its own box, writes under its
+# own runs/<run_id>/ S3 prefix, and the relay ignores other runs' result
+# objects, so two campaigns never measure each other. The one shared resource,
+# the results-site push in notify, is race-safe on its own (ingest.sh
+# --push-main rebuilds and retries when main moves). The group is therefore
+# per run: it exists only so a re-run of the same run_id queues behind the
+# original rather than racing it. Never cancel — a cancelled chain leaves the
+# box to its self-terminate ceiling.
 concurrency:
-  group: rpc-bench
+  group: rpc-bench-${{ github.run_id }}
   cancel-in-progress: false
 
 permissions:
