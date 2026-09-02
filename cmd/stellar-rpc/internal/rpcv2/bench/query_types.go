@@ -65,8 +65,8 @@ func newQueryRequest(
 //
 // The span is a flag because a point read is simply a span of one, and a leg
 // measures one shape at a time, so its percentiles describe a single
-// distribution. The default is the endpoint's page cap, which is what a client
-// actually asks for.
+// distribution. The default is the request shape fixed by the team SLA
+// (getLedgers max=10).
 func ledgersRequest(f *queryFixture, p queryPlan) queryRequest {
 	return func(rng *rand.Rand) (cellSample, error) {
 		lo := f.pickStart(rng, p.LedgersSpan)

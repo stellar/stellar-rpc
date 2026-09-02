@@ -100,15 +100,17 @@ func queryDriverLegRow(qtype string, rps float64, suffix string) string {
 	return queryDriverRow(qtype, rps) + suffix
 }
 
-// Defaults for the read-shape flags. The two span defaults are the v2 page caps
-// for their endpoints, so a default run reads what a client asks for; the miss
+// Defaults for the read-shape flags. The ledgers span and the events limit are
+// the request shapes fixed by the team SLA (getLedgers max=10; getEvents small
+// page, 10 matches), so a default run measures the shapes the SLA rows quote;
+// the txpage span and limit are the v2 page caps for that endpoint; the miss
 // fraction matches the share of by-hash lookups a production node sees asking
 // for a hash that never landed.
 const (
-	defaultLedgersSpan  = 20
+	defaultLedgersSpan  = 10
 	defaultTxPageSpan   = 5
 	defaultTxPageLimit  = 200
-	defaultEventsLimit  = 100
+	defaultEventsLimit  = 10
 	defaultMissFraction = 0.12
 	defaultSeed         = 1
 )
