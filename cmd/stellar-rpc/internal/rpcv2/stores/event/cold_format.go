@@ -78,9 +78,10 @@ const (
 )
 
 // IndexRecordFingerprintLen is the byte width of the leading
-// fingerprint in every index.pack record. The cold reader checks
-// this against the queried term's first four bytes to filter MPHF
-// false positives before deserializing the bitmap.
+// fingerprint in every index.pack record — the ROUTED (blinded)
+// key's first four bytes. The cold reader checks it against the
+// routed query key to filter MPHF false positives before decoding
+// the postings.
 const IndexRecordFingerprintLen = 4
 
 // ──────────────────────────────────────────────────────────────────
@@ -106,6 +107,13 @@ const eventsPackItemsPerRecord = 128
 // read is dominated by the bitmap deserialization the caller does
 // anyway.
 const indexPackItemsPerRecord = 128
+
+// indexPackBytesPerSync smooths the index.pack build's dirty pages into
+// 1MiB background-writeback initiations, matching the events.pack build's
+// coldBytesPerSync and the packfile writer docs' rationale: spreading
+// writeback keeps the final Finish fsync from flushing a multi-GB burst,
+// a large win on networked/slow cold storage.
+const indexPackBytesPerSync = packfile.DefaultBytesPerSync
 
 // newEventsPackEncoder constructs a fresh zstd encoder for one
 // packfile writer goroutine. RecordEncoder is not safe for concurrent
@@ -230,8 +238,12 @@ func DecodeLedgerOffsets(data []byte) (*LedgerOffsets, error) {
 // (see stores/blind.go). The wrapper therefore feeds
 // streamhash stores.BlindKey(secret, TermKey) at both build and
 // query, with the deterministic per-chunk secret (ColdIndexSecret)
-// stored in index.hash's user metadata. The 4-byte app fingerprint in index.pack and the
-// downstream post-filter stay on the ORIGINAL TermKey bytes.
+// stored in index.hash's user metadata. The 4-byte app fingerprint
+// in index.pack is the ROUTED (blinded) key's prefix — the one
+// identity the streaming builder's pass B has in hand — and the
+// reader compares it against the routed query key. Only the
+// downstream post-filter still sees original bytes: it verifies raw
+// event FIELDS, never TermKeys.
 // ──────────────────────────────────────────────────────────────────
 
 // index.hash user-metadata wire format (streamhash WithMetadata):
@@ -343,7 +355,7 @@ func buildMPHF(
 		if err = ctx.Err(); err != nil {
 			return nil, fmt.Errorf("events: build MPHF canceled after %d keys: %w", i, err)
 		}
-		rk := stores.BlindKey(secret, key[:])
+		rk := blindTerm(secret, key)
 		if err = builder.AddKey(rk[:], 0); err != nil {
 			return nil, fmt.Errorf("events: add key %d: %w", i, err)
 		}
@@ -387,7 +399,9 @@ func openMPHF(path string) (*mphf, error) {
 	return &mphf{idx: idx, secret: secret}, nil
 }
 
-// Lookup returns the dense slot in [0, N) that key maps to.
+// Lookup blinds key with the index's routing secret and returns its
+// dense slot in [0, N) plus the routed key — the identity every
+// record and fingerprint downstream is keyed by.
 //
 // streamhash returns ErrKeyNotFound for keys its routing-stage check
 // can prove were never in the build set; callers should treat this
@@ -396,8 +410,16 @@ func openMPHF(path string) (*mphf, error) {
 // 4-byte fingerprint stored alongside the bitmap at that slot in
 // index.pack — an MPHF can map an unseen key to a valid build-set
 // slot, and only the fingerprint catches that residual collision.
-func (m *mphf) Lookup(key TermKey) (uint32, error) {
-	rk := stores.BlindKey(m.secret, key[:])
+func (m *mphf) Lookup(key TermKey) (uint32, TermKey, error) {
+	rk := blindTerm(m.secret, key)
+	slot, err := m.LookupRouted(rk)
+	return slot, rk, err
+}
+
+// LookupRouted returns the dense slot for an ALREADY-ROUTED key. The
+// streaming build's pass B feeds run keys that were blinded when they
+// entered the spill (ingest keys the runs), so it must not blind again.
+func (m *mphf) LookupRouted(rk TermKey) (uint32, error) {
 	slot, err := m.idx.QueryRank(rk[:])
 	if err != nil {
 		if errors.Is(err, streamhash.ErrNotFound) {
@@ -418,6 +440,12 @@ func (m *mphf) Lookup(key TermKey) (uint32, error) {
 func (m *mphf) Close() error {
 	return m.idx.Close()
 }
+
+// MaxBlockKeys reports the opened index's format-level per-block key
+// ceiling (streamhash.Index.MaxBlockKeys). The streaming builder's pass B
+// derives its reorder backstop from it, so the bound tracks the artifact's
+// format instead of transcribing a streamhash internal here.
+func (m *mphf) MaxBlockKeys() uint32 { return m.idx.MaxBlockKeys() }
 
 // isEmpty reports whether the index holds zero terms (an eventless chunk).
 func (m *mphf) isEmpty() bool { return m.numKeys() == 0 }

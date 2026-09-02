@@ -76,16 +76,36 @@ Window 0 spans ledgers 2–10,000,001 (chunks 0–999), window N spans N×10M+2 
 
 ### 5.1 Storage
 
-The hot tier is a plain key-value table, one per chunk, stored as a `txhash` column family in that chunk's RocksDB:
+The hot tier is a packed-row engine, one per chunk, layered over a `txhash`
+column family in that chunk's RocksDB (the hot-latency campaign's wave 2
+replaced the original one-key-per-hash table, whose ~6,000 random 32-byte
+memtable keys per ledger dominated commit latency):
 
-- **Key**: the full 32-byte transaction hash.
-- **Value**: the 4-byte ledger sequence.
+- **CF row**: one seq-keyed row per ledger holding that ledger's hashes,
+  sorted (`hot_rows.go`); written in the same atomic batch as the rest of
+  the ledger, so a ledger's hashes remain all-or-nothing.
+- **In-memory window**: the last 256 ledgers' rows, merged and sealed into
+  checksummed, blinded-key-sorted run files (`TXHRUN02`) with bloom +
+  page-ladder routing built in the write pass; a manifest names the live runs
+  and warmup drain-verifies them (see `stores/txhash/hotindex_seal.go`).
 
-Storing the full hash makes the hot tier **exact**: a lookup either finds the hash or it doesn't. There are no false positives to screen out and nothing to verify. The table is tuned for point lookups.
+**Rows stay raw; runs blind at seal.** The CF rows hold full 32-byte hashes,
+so a window probe compares all 32 bytes and answers exactly. A sealed run
+holds `BlindKey(secret, hash[:16])` instead — the same keys the chunk's cold
+`.bin` will hold, which is what lets the freeze copy run records verbatim —
+so a run hit names a CANDIDATE ledger. Nothing re-reads the row to confirm
+it: the read assembly already extracts the transaction from that ledger by
+its full hash, and an absence there is `ErrInconsistent`
+(`stores/txhash/read_assembly.go`). The 32-byte check happens once, where the
+ledger is read.
 
 ### 5.2 Write path
 
-Writing is straightforward. As each ledger is ingested, one `(hash, seq)` entry is added for every transaction hash in it — two entries for a fee-bump (outer and inner) — in the same atomic write that stores the rest of the ledger. So a ledger's hashes are written all-or-nothing, together with the rest of the ledger.
+As each ledger is ingested, its transaction hashes — two for a fee-bump
+(outer and inner) — are encoded into that ledger's packed row in the same
+atomic write that stores the rest of the ledger. Every 256 ledgers the
+window seals into a run file off the ingest goroutine; the freeze later
+merges the manifest-listed runs with the un-sealed tail rows verbatim.
 
 ### 5.3 Lifetime
 
@@ -103,10 +123,11 @@ The `.bin` lives at `txhash/raw/{bucket:05d}/{chunk:08d}.bin`, with catalog key 
 
 ```
 uint64 LE        entry count
+16 bytes         index secret the keys were blinded with
 entry × count    20 bytes each: [key: 16][seq: 4 LE]
 ```
 
-- `key` is the **first 16 bytes of the transaction hash**. The index uses only these 16 bytes to place and find a transaction; what happens when two hashes share a 16-byte prefix is in §8.2.
+- `key` is **`BlindKey(secret, hash[:16])`** — the SipHash-2-4-128 blinding of the hash's first 16 bytes under the index's routing secret (stores/blind.go; the secret derives per index from the catalog secret and rides in the `.bin` header and index metadata). The index uses only this 16-byte blinded key to place and find a transaction; what happens when two hashes share a 16-byte prefix is in §8.2.
 - Entries are sorted ascending by `key`, **bytewise over all 16 bytes** — a total order, so the same entries always produce byte-identical files (rebuilds are deterministic).
 
 The `.bin` is a pre-sorted file, and a lookup never reads it directly. It is sorted because streamhash builds an index **much faster, and with much less memory, when its keys arrive already sorted** — its *sorted-builder mode*.
@@ -192,7 +213,7 @@ The cold tier **probes every in-retention window's `.idx`**. A hash gives no hin
 
 ```
 for each in-retention window (its live index → {lo}-{hi}.idx):
-  → MPHF probe on the hash's 16-byte prefix
+  → MPHF probe on the blinded 16-byte routing key (BlindKey of the hash prefix)
   → fingerprint check (1 byte)                    — miss ⇒ skip this window
   → on a fingerprint hit:
        seq = MinLedger + payload (3 bytes)

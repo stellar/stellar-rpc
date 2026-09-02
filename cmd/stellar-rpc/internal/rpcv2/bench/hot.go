@@ -15,6 +15,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
 // hotOptions configures one hot-ingest benchmark run.
@@ -56,6 +57,18 @@ type hotOptions struct {
 
 	// OutDir receives the CSV report.
 	OutDir string
+
+	// TraceFile, when non-empty, streams a per-ledger trace CSV to this path:
+	// one wall-clock-stamped row per ingested ledger with every phase duration,
+	// for correlating individual slow ledgers against external timelines
+	// (RocksDB LOG flush events, iostat). Empty = no trace.
+	TraceFile string
+
+	// ZstdWorkers is the hot tier's ledger-frame encode parallelism
+	// (--zstd-workers; 0 = single-threaded). FORMAT-AFFECTING in production
+	// (see hotchunk.Tuning); for a hot bench it selects which production
+	// shape the run measures — default ledger.DefaultZstdEncodeWorkers.
+	ZstdWorkers int
 }
 
 // validate checks the flags and chunk range before runHot touches the
@@ -77,7 +90,27 @@ func (o hotOptions) validate() error {
 	if o.CloseInterval < 0 {
 		return fmt.Errorf("--close-interval must be >= 0, got %s", o.CloseInterval)
 	}
+	if o.ZstdWorkers < 0 {
+		return fmt.Errorf("--zstd-workers must be >= 0 (0 = single-threaded), got %d", o.ZstdWorkers)
+	}
 	return nil
+}
+
+// prepareHotRun validates opts and readies the out dir and hot root, so an
+// unwritable path surfaces before the expensive run, not after it.
+func prepareHotRun(opts hotOptions) (geometry.Layout, error) {
+	if err := opts.validate(); err != nil {
+		return geometry.Layout{}, err
+	}
+	if err := os.MkdirAll(opts.OutDir, 0o755); err != nil {
+		return geometry.Layout{}, fmt.Errorf("create --out dir %s: %w", opts.OutDir, err)
+	}
+	layout := geometry.NewLayout(opts.HotRoot)
+	// Create + fsync the hot root up front — the daemon's own root prep.
+	if err := config.PrepareRoots(layout.HotRoot()); err != nil {
+		return geometry.Layout{}, fmt.Errorf("prepare --hot-dir hot root: %w", err)
+	}
+	return layout, nil
 }
 
 // runHot benchmarks the hot path: the daemon's ingestion loop (via
@@ -91,17 +124,9 @@ func (o hotOptions) validate() error {
 // close cadence: the run measures steady-state keep-up rather than catch-up
 // throughput, recording per-ledger pace_lag.
 func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) error {
-	if err := opts.validate(); err != nil {
+	layout, err := prepareHotRun(opts)
+	if err != nil {
 		return err
-	}
-	// Surface an unwritable --out before the expensive run, not after it.
-	if err := os.MkdirAll(opts.OutDir, 0o755); err != nil {
-		return fmt.Errorf("create --out dir %s: %w", opts.OutDir, err)
-	}
-	layout := geometry.NewLayout(opts.HotRoot)
-	// Create + fsync the hot root up front — the daemon's own root prep.
-	if err := config.PrepareRoots(layout.HotRoot()); err != nil {
-		return fmt.Errorf("prepare --hot-dir hot root: %w", err)
 	}
 	catalogBase := opts.CatalogDir
 	if catalogBase == "" {
@@ -131,6 +156,20 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 	sink := newCSVSink()
 	stream, schedule := buildHotStream(backend, first, last, opts.CloseInterval)
 	sink.schedule = schedule
+	if opts.TraceFile != "" {
+		trace, terr := newHotTrace(opts.TraceFile)
+		if terr != nil {
+			return terr
+		}
+		// Close on every exit so a failed run keeps its partial trace; a trace
+		// write error is logged, never a run failure (the trace is diagnostics).
+		defer func() {
+			if cerr := trace.close(); cerr != nil {
+				logger.Warnf("per-ledger trace: %v", cerr)
+			}
+		}()
+		sink.trace = trace
+	}
 
 	start := time.Now()
 	err = rpcv2.RunBoundedIngestionLoop(ctx, rpcv2.BoundedIngestConfig{
@@ -141,6 +180,7 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 		Logger:   logger,
 		Metrics:  sink,
 		Sink:     sink,
+		Tuning:   hotchunk.Tuning{ZstdEncodeWorkers: opts.ZstdWorkers},
 	})
 	// VmHWM never decreases, so it can be read right here — before the
 	// completion check — and a failed run's partial CSV still gets the row.

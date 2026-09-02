@@ -82,7 +82,8 @@ func openHotDBForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlo
 	if err := cat.PutHotTransient(chunkID); err != nil {
 		return nil, fmt.Errorf("mark hot transient chunk %s: %w", chunkID, err)
 	}
-	db, err := hotchunk.Open(dir, chunkID, logger)
+	db, err := hotchunk.Open(dir, chunkID, logger, hotchunk.DefaultTuning(),
+		hotchunk.SecretsFor(cat, chunkID))
 	if err != nil {
 		return nil, fmt.Errorf("create hot DB chunk %s: %w", chunkID, err)
 	}

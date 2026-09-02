@@ -55,6 +55,14 @@ func testEventsSecret() [stores.SecretLen]byte { return event.ColdIndexSecret(te
 // testEventsSecretBytes is testEventsSecret as a slice, for ingest.Config.EventsSecret.
 func testEventsSecretBytes() []byte { s := testEventsSecret(); return s[:] }
 
+// testHotSecrets is the hot-DB half of the same pair: a chunk's sealed runs
+// are keyed with these, and the freeze copies those runs into artifacts
+// declaring Config's secrets — so the two MUST be the same values, which is
+// what makes the freeze-vs-walk identity gate meaningful.
+func testHotSecrets() hotchunk.Secrets {
+	return hotchunk.Secrets{Txhash: testTxhashSecret(), Events: testEventsSecret()}
+}
+
 // ───────────────────────── test metric sink ─────────────────────────
 
 type hotPhaseCall struct {
@@ -489,7 +497,7 @@ func TestLedgerColdWriter_Readback(t *testing.T) {
 	raw := marshalLCM(t, seq)
 	coldDir := t.TempDir()
 
-	ing, err := newLedgerCold(packPath(coldDir, chunkID), chunkID, nil)
+	ing, err := newLedgerCold(packPath(coldDir, chunkID), chunkID, nil, ledger.DefaultZstdEncodeWorkers)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
@@ -518,7 +526,7 @@ func TestTxhashColdWriter_Bin(t *testing.T) {
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := newTxhashCold(txhashBinPath(coldDir), chunkID, nil, testTxhashSecret())
+	ing, err := newTxhashCold(txhashBinPath(coldDir), nil, testTxhashSecret())
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
@@ -560,10 +568,10 @@ func TestEventsColdWriter_Readback(t *testing.T) {
 	cnt, err := cr.EventCount()
 	require.NoError(t, err)
 	require.Equal(t, uint32(2), cnt)
-	bms, err := cr.LookupKeys(context.Background(), []event.TermKey{term})
+	post, err := cr.LookupKeys(context.Background(), []event.TermKey{term})
 	require.NoError(t, err)
-	require.NotNil(t, bms[0])
-	require.Equal(t, uint64(2), bms[0].GetCardinality())
+	require.True(t, post[0].Present())
+	require.Equal(t, uint64(2), post[0].Cardinality())
 }
 
 // ───────────────────────── V0 (pre-Soroban) events handling ─────────────────────────
@@ -618,8 +626,8 @@ func TestEventsColdWriter_V0KeepsOffsetsContiguous(t *testing.T) {
 	// And the event is queryable by its term.
 	bms, err := cr.LookupKeys(context.Background(), []event.TermKey{term})
 	require.NoError(t, err)
-	require.NotNil(t, bms[0])
-	require.Equal(t, uint64(1), bms[0].GetCardinality())
+	require.True(t, bms[0].Present())
+	require.Equal(t, uint64(1), bms[0].Cardinality())
 }
 
 // TestWriteColdChunk_EventlessChunk_FullyReadable drives a full cold chunk of V0
@@ -664,7 +672,7 @@ func TestWriteColdChunk_EventlessChunk_FullyReadable(t *testing.T) {
 	anyKey := event.ComputeTermKey([]byte("any"), event.FieldContractID)
 	bms, lerr := cr.LookupKeys(context.Background(), []event.TermKey{anyKey})
 	require.NoError(t, lerr)
-	require.Nil(t, bms[0], "a term with no matching events misses cleanly (nil bitmap)")
+	require.False(t, bms[0].Present(), "a term with no matching events misses cleanly")
 
 	// Metrics still fired: one aggregate per-chunk, one (clean) per-ingester.
 	require.Equal(t, 1, sink.coldChunkTotals, "ColdChunkTotal must fire for an eventless chunk")
@@ -718,7 +726,7 @@ func TestColdChunk_Success(t *testing.T) {
 	defer func() { require.NoError(t, ecr.Close()) }()
 	bms, err := ecr.LookupKeys(context.Background(), []event.TermKey{term})
 	require.NoError(t, err)
-	require.Equal(t, uint64(2), bms[0].GetCardinality())
+	require.Equal(t, uint64(2), bms[0].Cardinality())
 
 	// Txhash .bin count.
 	binEntries := rpcv2test.ReadColdBin(t, txhashBinPath(filepath.Join(coldDir, dataTypeTxhash)))
@@ -927,7 +935,7 @@ func eventRichLedger(t *testing.T, seq uint32) []byte {
 // several rich sentinel ledgers and compares the artifacts to INDEPENDENT
 // reference computations:
 //
-//   - txhash .bin vs. sorted, truncated entries built from an independent
+//   - txhash .bin vs. sorted, blinded entries built from an independent
 //     ExtractLedgerTxParts run over the same fixtures (`.Hash`/`.InnerHash` per
 //     element) — so an entry-by-entry match proves the ingester's shared walk
 //     dropped or reshaped no hash.
@@ -1025,8 +1033,8 @@ func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 	bms, err := ecr.LookupKeys(context.Background(), terms)
 	require.NoError(t, err)
 	for i, k := range terms {
-		require.NotNil(t, bms[i], "term %d present in reference must resolve", i)
-		require.Equal(t, wantTermIDs[k], bms[i].ToArray(),
+		require.True(t, bms[i].Present(), "term %d present in reference must resolve", i)
+		require.Equal(t, wantTermIDs[k], bms[i].Bitmap().ToArray(),
 			"cold term bitmap must carry the same event IDs as the shaping reference")
 	}
 }
@@ -1112,16 +1120,17 @@ func TestWriteColdChunk_EventsCold_Readback(t *testing.T) {
 	require.Equal(t, uint32(len(evSeqs)), cnt)
 	bms, err := cr.LookupKeys(context.Background(), []event.TermKey{term})
 	require.NoError(t, err)
-	require.NotNil(t, bms[0])
-	require.Equal(t, uint64(len(evSeqs)), bms[0].GetCardinality())
+	require.True(t, bms[0].Present())
+	require.Equal(t, uint64(len(evSeqs)), bms[0].Cardinality())
 }
 
 // ───────────────────────── drain stream errors ─────────────────────────
 //
 // The per-seq order guard the shared cursor used to run in drain moved to the
-// SOURCE (packStream reads positionally; hotLedgerStream key-checks its keyspace,
-// see TestSource_RejectsGap; the SDK backends validate their own output), so drain
-// keeps only its overrun + completeness checks on a local counter. The tests that
+// SOURCE (packStream reads positionally; the SDK backends validate their own
+// output; the hot-DB freeze path takes no stream at all — FreezeColdChunk
+// scans CFs with its own key-derived checks), so drain keeps only its overrun
+// + completeness checks on a local counter. The tests that
 // fed an artificially mis-ordered stream to drain were deleted with the cursor.
 
 // TestWriteColdChunk_DrainStreamError_NoArtifact exercises the drain mid-stream error
@@ -1169,7 +1178,7 @@ func hotTestLogger() *supportlog.Entry {
 // TestHotService_FeedsFeeWindowsAfterCommit: a successfully committed ledger's
 // fee observations land in the injected windows.
 func TestHotService_FeedsFeeWindowsAfterCommit(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger(), hotchunk.Tuning{}, testHotSecrets())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1191,7 +1200,7 @@ func TestHotService_FeedsFeeWindowsAfterCommit(t *testing.T) {
 // next-expected seq) contributes nothing to the windows, so its retry cannot
 // double-count.
 func TestHotService_RejectedLedgerFeedsNoFees(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger(), hotchunk.Tuning{}, testHotSecrets())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1218,7 +1227,7 @@ func TestHotService_RejectedLedgerFeedsNoFees(t *testing.T) {
 // the ledger is durably committed, the windows stay unfed, and the loop's
 // caller sees the error (tip-only trusted input, mirroring extract failures).
 func TestHotService_FeeClassificationErrorFailsCommittedLedger(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger(), hotchunk.Tuning{}, testHotSecrets())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1242,7 +1251,7 @@ func TestHotService_FeeClassificationErrorFailsCommittedLedger(t *testing.T) {
 // once, the write phases carry per-type volume (extract/commit/apply carry none),
 // and no phase carries an error.
 func TestHotService_EmitsEveryPhaseOnSuccess(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger(), hotchunk.DefaultTuning(), testHotSecrets())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1269,7 +1278,7 @@ func TestHotService_EmitsEveryPhaseOnSuccess(t *testing.T) {
 // DB) surfaces the error on the commit phase — by construction, not by a
 // separately-maintained label — and emits no items on the failure path.
 func TestHotService_CommitErrorLandsOnCommitPhase(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger(), hotchunk.DefaultTuning(), testHotSecrets())
 	require.NoError(t, err)
 	require.NoError(t, db.Close()) // closed => the batch commit fails
 
@@ -1293,7 +1302,7 @@ func TestHotService_CommitErrorLandsOnCommitPhase(t *testing.T) {
 // failure lands by construction — and emits ONLY that phase (no batch was opened, so
 // no later phase ran).
 func TestHotService_ExtractFailureLandsOnExtractPhase(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger(), hotchunk.DefaultTuning(), testHotSecrets())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1317,7 +1326,7 @@ func TestHotService_ExtractFailureLandsOnExtractPhase(t *testing.T) {
 // Failed's zero value, a NON-zero Failed is the discriminator that proves the phase was
 // actually assigned rather than defaulted.
 func TestHotService_EventsQueueFailureLandsOnEventsPhase(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger(), hotchunk.DefaultTuning(), testHotSecrets())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1344,7 +1353,7 @@ func TestHotService_EventsQueueFailureLandsOnEventsPhase(t *testing.T) {
 // that completed earlier phases carry theirs too. Uses the same out-of-order failure as
 // above, whose failed phase is the events queue.
 func TestHotService_FailedPhaseCarriesPartialDuration(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger(), hotchunk.DefaultTuning(), testHotSecrets())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1373,7 +1382,7 @@ func TestTxhashColdWriter_BinContent(t *testing.T) {
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := newTxhashCold(txhashBinPath(coldDir), chunkID, nil, testTxhashSecret())
+	ing, err := newTxhashCold(txhashBinPath(coldDir), nil, testTxhashSecret())
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
@@ -1531,15 +1540,15 @@ func TestWriteColdChunk_ConstructorFailure_EmitsAggregate(t *testing.T) {
 	require.Zero(t, countCleanColdIngests(sink), "no clean ColdIngest on the rollback path")
 }
 
-// ───────────────────────── events Finish-then-WriteColdIndex failure ─────────────────────────
+// ───────────────────────── events Commit-then-WriteColdIndex failure ─────────────────────────
 
-// TestEventsCold_FinishThenIndexFails_LeavesInertPack forces WriteColdIndex to
-// fail AFTER writer.Finish has committed events.pack, by planting a directory
+// TestEventsCold_CommitThenIndexFails_LeavesInertPack forces WriteColdIndex to
+// fail AFTER writer.Commit has published events.pack, by planting a directory
 // where the index.hash file must be written (buildMPHF then hits EISDIR).
 // Finalize must surface the error; the index-less events.pack stays on disk —
 // without the orchestrator's completion record it is inert scratch (see the
 // package doc's artifact model), and a retry's overwrite is the cleanup.
-func TestEventsCold_FinishThenIndexFails_LeavesInertPack(t *testing.T) {
+func TestEventsCold_CommitThenIndexFails_LeavesInertPack(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
@@ -1562,7 +1571,7 @@ func TestEventsCold_FinishThenIndexFails_LeavesInertPack(t *testing.T) {
 	require.Error(t, ferr, "Finalize must fail when WriteColdIndex fails")
 	require.Contains(t, ferr.Error(), "WriteColdIndex")
 
-	// The committed events.pack stays in place as inert scratch (Finish ran,
+	// The committed events.pack stays in place as inert scratch (Commit ran,
 	// so the later Close does not drop it either).
 	packPath := filepath.Join(bucketDir, event.EventsPackName(chunkID))
 	_, statErr := os.Stat(packPath)
@@ -1571,7 +1580,7 @@ func TestEventsCold_FinishThenIndexFails_LeavesInertPack(t *testing.T) {
 	// Close is still safe/idempotent afterwards and does not remove the pack.
 	require.NoError(t, ing.close())
 	_, statErr = os.Stat(packPath)
-	require.NoError(t, statErr, "close after a committed Finish must not drop the pack")
+	require.NoError(t, statErr, "close after a successful Commit must not drop the pack")
 }
 
 // TestEventsCold_FinalizeAfterFailedIngest_Refuses asserts the failed-write
@@ -1806,7 +1815,7 @@ func TestTxhashColdWriter_FeeBumpBothHashes(t *testing.T) {
 	seq := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := newTxhashCold(txhashBinPath(coldDir), chunkID, nil, testTxhashSecret())
+	ing, err := newTxhashCold(txhashBinPath(coldDir), nil, testTxhashSecret())
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 

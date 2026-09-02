@@ -13,6 +13,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
 // TestFeeWindowReplay_SpansChunkBoundary is issue #888's core case: a restart
@@ -52,7 +53,7 @@ func TestFeeWindowReplay_SpansChunkBoundary(t *testing.T) {
 		rpcv2test.IngestLedger(t, db1, seq, lcmFor(seq))
 	}
 
-	registry, err := query.OpenRegistry(cat, geometry.NewRetention(0, 0), db1, lastCommitted)
+	registry, err := query.OpenRegistry(cat, geometry.NewRetention(0, 0), db1, lastCommitted, hotchunk.Tuning{})
 	require.NoError(t, err)
 	defer registry.Close()
 
@@ -90,7 +91,7 @@ func TestFeeWindowReplay_FreshStartIsNoOp(t *testing.T) {
 	db0 := openLiveHotDB(t, cat, c0) // empty live chunk
 	lastCommitted := c0.FirstLedger() - 1
 
-	registry, err := query.OpenRegistry(cat, geometry.NewRetention(0, 0), db0, lastCommitted)
+	registry, err := query.OpenRegistry(cat, geometry.NewRetention(0, 0), db0, lastCommitted, hotchunk.Tuning{})
 	require.NoError(t, err)
 	defer registry.Close()
 
@@ -113,7 +114,7 @@ func TestFeeWindowReplay_ShortHistoryClampsToOldest(t *testing.T) {
 		rpcv2test.IngestLedger(t, db0, seq, rpcv2test.FeeTxLCMBytes(t, seq, int64(seq)))
 	}
 
-	registry, err := query.OpenRegistry(cat, geometry.NewRetention(0, 0), db0, lastCommitted)
+	registry, err := query.OpenRegistry(cat, geometry.NewRetention(0, 0), db0, lastCommitted, hotchunk.Tuning{})
 	require.NoError(t, err)
 	defer registry.Close()
 

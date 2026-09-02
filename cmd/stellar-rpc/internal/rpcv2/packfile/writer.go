@@ -25,6 +25,14 @@ const defaultItemsPerRecord = 128
 // been closed (successfully finalized or aborted).
 var ErrWriterClosed = errors.New("packfile: writer is closed")
 
+// DefaultBytesPerSync is the writeback cadence every production cold-artifact
+// writer uses (1 MiB): frequent enough that Finish's fsync never flushes a
+// multi-GB accumulation in one burst — the packfile writer docs' networked/
+// slow-storage rationale — and coarse enough to stay off the write hot path.
+// It lives here so the per-package constants that opt in cannot silently
+// diverge.
+const DefaultBytesPerSync = 1 << 20
+
 // WriterOptions configures how the packfile is written.
 type WriterOptions struct {
 	// ItemsPerRecord is the number of items per record. 0 defaults to 128.

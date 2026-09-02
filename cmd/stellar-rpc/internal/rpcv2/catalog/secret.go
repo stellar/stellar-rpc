@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
 )
 
@@ -17,9 +18,13 @@ const catalogSecretStoreKey = "meta/catalog-secret"
 func (c *Catalog) Secret() [32]byte { return c.secret }
 
 // ensureSecret loads the persisted cold-index secret, minting and persisting a
-// fresh random one on first call. Open runs it single-threaded and caches the
+// fresh one on first call. Open runs it single-threaded and caches the
 // result; nothing else should call it (get-or-create is not atomic).
-func (c *Catalog) ensureSecret() ([32]byte, error) {
+//
+// pinned (catalog.WithSecret) replaces the random draw for a catalog that has
+// none yet; a persisted secret always wins over it, because the catalog's
+// keys are already blinded under the persisted one.
+func (c *Catalog) ensureSecret(pinned *[32]byte) ([32]byte, error) {
 	var s [32]byte
 	v, found, err := c.get(catalogSecretStoreKey)
 	if err != nil {
@@ -30,9 +35,22 @@ func (c *Catalog) ensureSecret() ([32]byte, error) {
 			return s, fmt.Errorf("persisted cold-index secret is %d bytes, want %d", len(v), len(s))
 		}
 		copy(s[:], v)
+		// An all-zero persisted secret is corruption or tampering, never a
+		// mint (crypto/rand). HKDF would launder it into non-zero per-index
+		// secrets that pass every downstream zero-check while making all
+		// blinded routing attacker-predictable — the exact threat the secret
+		// exists to close. Refuse to open.
+		if s == ([32]byte{}) {
+			return s, errors.New("persisted cold-index secret is all zero (corrupt store?)")
+		}
 		return s, nil
 	}
-	if _, err := rand.Read(s[:]); err != nil {
+	if pinned != nil {
+		s = *pinned
+		if s == ([32]byte{}) {
+			return s, errors.New("catalog: pinned cold-index secret is all zero")
+		}
+	} else if _, err := rand.Read(s[:]); err != nil {
 		return s, err
 	}
 	if err := c.put(catalogSecretStoreKey, string(s[:])); err != nil {

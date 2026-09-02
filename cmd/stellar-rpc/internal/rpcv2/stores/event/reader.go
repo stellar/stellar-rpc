@@ -11,8 +11,6 @@ import (
 	"fmt"
 	"iter"
 
-	"github.com/RoaringBitmap/roaring/v2"
-
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
 
@@ -90,40 +88,37 @@ type Reader interface {
 	// Returns (nil, stores.ErrStoreClosed) after Close.
 	Offsets() (*LedgerOffsets, error)
 
-	// LookupKeys returns bitmaps for each key, aligned positionally
+	// LookupKeys returns each key's postings, aligned positionally
 	// with the input slice (result[i] corresponds to keys[i]).
-	// result[i] is nil if keys[i] has no matching events in this
-	// chunk — a per-key miss is not an error.
+	// result[i] is the zero Postings if keys[i] has no
+	// matching events in this chunk — a per-key miss is not an error.
+	//
+	// Ownership: callers MUST treat the result as read-only. Some of
+	// what comes back is the hot store's live state, either a bitmap or
+	// the store's own id slice, so writing to it corrupts the store for
+	// every other reader.
 	//
 	// ColdReader coalesces the underlying packfile reads into a
 	// single ReadItems pass, fanning out across the worker count
-	// configured via ColdReaderOptions.Concurrency. HotStore returns
-	// borrowed mirror references with no per-key Clone.
-	//
-	// Bitmap ownership: callers MUST treat returned bitmaps as
-	// read-only. The hot path returns immutable snapshots of the
-	// live mirror — ConcurrentBitmaps stores bitmap pointers via
-	// atomic.Pointer COW, so a returned pointer will never be
-	// mutated by anyone. The cold path returns freshly-unmarshaled
-	// bitmaps logically owned by the caller. Either way callers
-	// must not mutate; event.Matches is the only consumer today
-	// and never mutates, and downstream roaring.FastAnd/FastOr never
-	// mutate inputs.
+	// configured via ColdReaderOptions.Concurrency.
 	//
 	// ctx cancels in-flight I/O on the cold path (MPHF load,
 	// index.pack ReadAt); hot side checks ctx as a fast guard before
 	// touching the in-memory mirror.
-	LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.Bitmap, error)
+	LookupKeys(ctx context.Context, keys []TermKey) ([]Postings, error)
 
 	// FetchEvents decodes events for the supplied chunk-relative
 	// eventIDs and returns them positionally aligned with the input
 	// slice (result[i] corresponds to eventIDs[i]).
 	//
-	// eventIDs MUST be sorted ascending with no duplicates. Matches
-	// iterating a bitmap intersection (roaring.Bitmap.Iterator yields
-	// ascending) satisfies this for free. Both implementations
-	// validate the precondition up front and return a wrapped
-	// ErrUnsortedEventIDs on violation.
+	// eventIDs is READ-ONLY: it may be a window onto the hot store's
+	// published postings, so sorting or appending in place corrupts
+	// live store state, not just this call.
+	//
+	// eventIDs MUST be sorted ascending with no duplicates.
+	// Postings.SelectIDs yields ascending, so the coordinator satisfies
+	// this for free. Both implementations validate the precondition up
+	// front and return a wrapped ErrUnsortedEventIDs on violation.
 	//
 	// ctx cancels in-flight I/O; the cold path checks ctx between
 	// scattered-read batches, the hot path checks between Gets.

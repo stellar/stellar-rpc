@@ -14,8 +14,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/streamhash"
-
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
@@ -355,33 +353,6 @@ func TestBuildColdIndex_CoverageSpanExceedsBudgetErrors(t *testing.T) {
 	assert.NoFileExists(t, idxPath)
 }
 
-func TestBuildColdIndex_CallerOptsCannotOverrideFormat(t *testing.T) {
-	// A caller opt that tries to repoint the cold format (here, bogus
-	// metadata) must not win — ColdBuildOptions is pinned last, so the
-	// reader still recovers the real coverage and resolves seqs correctly.
-	dir := t.TempDir()
-	entries := makeFixtureEntries(64)
-	inputs := writeFixtureBins(t, dir, entries)
-	idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
-	err := BuildColdIndex(context.Background(), inputs, idxPath,
-		fixtureMinLedger(), fixtureMaxLedger(),
-		streamhash.WithMetadata(EncodeColdMetadata(7, 7, testSecret())))
-	require.NoError(t, err)
-
-	r, err := OpenColdReader(idxPath)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = r.Close() })
-
-	gotMin, gotMax := r.MinLedger(), r.MaxLedger()
-	assert.Equal(t, fixtureMinLedger(), gotMin, "pinned metadata must win over a caller's WithMetadata")
-	assert.Equal(t, fixtureMaxLedger(), gotMax)
-	for _, e := range entries {
-		got, err := r.Get(e.hash)
-		require.NoError(t, err)
-		assert.Equal(t, e.seq, got)
-	}
-}
-
 func TestBuildColdIndex_TruncatedFileErrors(t *testing.T) {
 	// Header OVERSTATES the count (claims more entries than the body
 	// holds): the open-time size cross-check rejects it; no index.
@@ -444,6 +415,57 @@ func TestBuildColdIndex_HeaderOverflowRejected(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "header claims")
 	assert.NoFileExists(t, idxPath)
+}
+
+func TestBuildColdIndex_RejectsPreSecretBinLayout(t *testing.T) {
+	// A .bin in the PRE-SECRET layout: an 8-byte LE count followed by whole
+	// 20-byte entries, with no index secret in the header. Such a stale
+	// fixture must be rejected, not adopted: a lenient build would read the
+	// first entry's key bytes as "the secret" and produce an index no query
+	// can hit. A non-empty one trips the size check for every count — the old
+	// body measures 8+20c-24 = 20c-16 bytes, and 20c-16 mod 20 == 4 for every
+	// c >= 1 — while an empty one is shorter than a header outright.
+	require.Equal(t, 24, coldBinHeaderSize, "premise: today's header is a count plus a 16-byte secret")
+	require.Equal(t, 20, coldBinEntrySize, "premise: today's entry is a 16-byte key plus a uint32 seq")
+
+	for _, tc := range []struct {
+		name    string
+		count   uint64
+		wantErr string
+	}{
+		{
+			name:    "entries present",
+			count:   3,
+			wantErr: "not a 24-byte header plus whole 20-byte entries",
+		},
+		{
+			// 8 bytes total: the header read itself runs off the end.
+			name:    "empty",
+			count:   0,
+			wantErr: "read header of",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			var buf bytes.Buffer
+			var legacyHdr [coldBinCountSize]byte // count only — the pre-secret header
+			binary.LittleEndian.PutUint64(legacyHdr[:], tc.count)
+			buf.Write(legacyHdr[:])
+			buf.Write(make([]byte, coldBinEntrySize*int(tc.count)))
+			require.Equal(t, coldBinCountSize+coldBinEntrySize*int(tc.count), buf.Len(),
+				"premise: the fixture is the old [count][entries] layout, byte for byte")
+
+			p := filepath.Join(dir, "00000005.bin")
+			require.NoError(t, os.WriteFile(p, buf.Bytes(), 0o600))
+
+			idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
+			err := BuildColdIndex(context.Background(), []string{p}, idxPath,
+				fixtureMinLedger(), fixtureMaxLedger())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+			assert.NoFileExists(t, idxPath)
+		})
+	}
 }
 
 func TestBuildColdIndex_InputOrderIndependent(t *testing.T) {

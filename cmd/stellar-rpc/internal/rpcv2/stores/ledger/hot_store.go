@@ -9,6 +9,7 @@ import (
 	"iter"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
@@ -36,17 +37,28 @@ type Entry struct {
 // before freezing; it does not itself range-check writes (the driver's drain loop
 // already validates every sequence against the chunk).
 //
-// Concurrency: all methods are safe for concurrent use, including use alongside
-// the caller-owned rocksdb.Store.Close. A read/write racing Close either completes
-// first or observes the closed store and returns stores.ErrStoreClosed. HotStore
-// adds no unguarded state of its own — the compressor pool and decompressor are
-// both concurrent-safe.
+// Concurrency: all READ methods are safe for concurrent use — with each
+// other, with the write side, and alongside the caller-owned
+// rocksdb.Store.Close (a read racing Close either completes first or
+// observes the closed store and returns stores.ErrStoreClosed). The WRITE
+// side (StartCompress / AddPendingToBatch / AddLedgerToBatch / Discard) is
+// SINGLE-FLIGHT per store: at most one compression may be in flight at a
+// time — hotchunk's single-writer ingest loop is the sole production
+// caller. The store owns one reusable encode state under that contract;
+// violations panic loudly (see encBusy) rather than racing silently.
 type HotStore struct {
 	store *rocksdb.Store
 	dec   *zstd.Decompressor
-	// compPool — per-store pool of zstd.Compressors; each concurrent
-	// AddLedgerToBatch borrows one for its Encode call.
-	compPool sync.Pool
+	// enc — the store's single OWNED zstd encode state (context + retained
+	// dst buffer). The write side is single-flight (see the concurrency
+	// contract above), so one state suffices and can never be dropped —
+	// its sync.Pool predecessor was measured losing the state ~1-in-5
+	// ledgers to GC pool-emptying, re-allocating a worst-case dst each
+	// time. encBusy makes a contract violation loud instead of a silent
+	// data race. BatchWriter.Put copies synchronously, so the buffer is
+	// safe to reuse on the next ledger.
+	enc     *zstd.EncoderState
+	encBusy atomic.Bool
 	// scratch — decode buffers WithLedger lends. Pooled as *[]byte so a buffer
 	// the decode had to grow goes back in place of the one that was lent.
 	scratch sync.Pool
@@ -58,38 +70,124 @@ type HotStore struct {
 // 64MiB is several times the largest raw ledgers on the heaviest profile.
 const maxPooledLedgerBytes = 64 << 20
 
+// DefaultZstdEncodeWorkers is the settled ledger-frame encode parallelism
+// (zstd.WithWorkers): 2 measured equal to 3 within noise on the hot-ingest
+// cell (total p50 33.4 -> 29.2ms, join 7.35 -> 1.9ms vs single-threaded)
+// while claiming one fewer core. It is the default every configuration
+// surface resolves to (daemon TOML, bench --zstd-workers, hotchunk
+// DefaultTuning).
+const DefaultZstdEncodeWorkers = 2
+
 // NewWithStore wraps an ALREADY-OPEN rocksdb.Store as a ledger HotStore on
 // LedgersCF. The store is owned by the caller — in production, hotchunk.DB
 // composes this facade over the shared multi-CF DB and closes that DB once. The
 // store must have LedgersCF registered.
-func NewWithStore(store *rocksdb.Store) *HotStore {
+//
+// zstdEncodeWorkers is FORMAT-AFFECTING (see hotchunk.Tuning's field doc):
+// it selects the stored ledger frames' encode mode (0 = single-threaded,
+// >=1 = libzstd multithreaded — a different frame byte stream), and the
+// walk/backfill cold writer must encode with the SAME value because the
+// freeze copies these frames into the cold pack verbatim.
+func NewWithStore(store *rocksdb.Store, zstdEncodeWorkers int) *HotStore {
 	return &HotStore{
 		store: store,
 		dec:   zstd.NewDecompressor(),
-		compPool: sync.Pool{
-			New: func() any { return zstd.NewCompressor() },
-		},
+		enc:   zstd.NewEncoderState(encoderOptions(zstdEncodeWorkers)...),
 		scratch: sync.Pool{
 			New: func() any { return new([]byte) },
 		},
 	}
 }
 
-// AddLedgerToBatch compresses one ledger and queues its Put into b on LedgersCF
-// — the building block hotchunk uses to fold the ledger write into the one
-// shared per-ledger WriteBatch (decision (a)). Does not commit (caller owns the
-// batch). Compresses into a fresh buffer BatchWriter.Put copies, so e.Bytes need
-// not outlive this call. The caller runs inside Store.Batch, whose lifecycle
-// RLock + checkOpen is the authoritative closed-store guard, so this adds none.
-func (h *HotStore) AddLedgerToBatch(b *rocksdb.BatchWriter, e Entry) error {
-	c, _ := h.compPool.Get().(*zstd.Compressor)
-	defer h.compPool.Put(c)
-	compressed, err := c.Encode(nil, e.Bytes)
-	if err != nil {
-		return err
+// encoderOptions maps the resolved workers count to the encoder's option set:
+// <=0 = single-threaded encode, >=1 = libzstd's internal multithreading
+// (zstd.WithWorkers). Validation (>=0) lives at the configuration
+// boundaries; here any non-positive value is simply single-threaded.
+func encoderOptions(workers int) []zstd.CompressorOption {
+	if workers > 0 {
+		return []zstd.CompressorOption{zstd.WithWorkers(workers)}
 	}
-	b.Put(LedgersCF, rocksdb.EncodeUint32(e.Seq), compressed)
 	return nil
+}
+
+// PendingCompression is an in-flight background compression started by
+// StartCompress: the fork half of the fork/join that takes the ~20ms zstd
+// encode off the hot loop's critical path (it runs concurrent with extract
+// and the other queue steps, all read-only on the ledger bytes).
+//
+// Exactly one of AddPendingToBatch (the join) or Discard must be called, on
+// the same goroutine that started it; both block until the encode goroutine
+// has finished with the input bytes, so the caller's borrowed ledger view
+// never outlives its call even on error paths.
+type PendingCompression struct {
+	seq  uint32
+	h    *HotStore
+	done chan struct{}
+
+	compressed []byte
+	err        error
+	consumed   bool
+}
+
+// StartCompress begins compressing e.Bytes into a pooled buffer on its own
+// goroutine. e.Bytes is read until the returned pending resolves — join or
+// Discard before invalidating it.
+func (h *HotStore) StartCompress(e Entry) *PendingCompression {
+	if !h.encBusy.CompareAndSwap(false, true) {
+		panic("ledger: concurrent StartCompress violates the single-flight write contract")
+	}
+	p := &PendingCompression{seq: e.Seq, h: h, done: make(chan struct{})}
+	go func() {
+		defer close(p.done)
+		p.compressed, p.err = h.enc.Encode(e.Bytes)
+	}()
+	return p
+}
+
+// AddPendingToBatch joins p and queues its compressed ledger into b on
+// LedgersCF — the deferred-join twin of AddLedgerToBatch. Put copies
+// synchronously, so the pooled buffer is released for reuse before returning.
+func (h *HotStore) AddPendingToBatch(b *rocksdb.BatchWriter, p *PendingCompression) error {
+	<-p.done
+	p.consumed = true
+	defer p.release()
+	if p.err != nil {
+		return p.err
+	}
+	b.Put(LedgersCF, rocksdb.EncodeUint32(p.seq), p.compressed)
+	return nil
+}
+
+// Discard joins p and drops its result, returning the pooled state. No-op if
+// the pending was already consumed — safe to defer unconditionally alongside
+// a conditional AddPendingToBatch.
+func (p *PendingCompression) Discard() {
+	if p.consumed {
+		return
+	}
+	<-p.done
+	p.consumed = true
+	p.release()
+}
+
+// release clears the single-flight latch. Callers reach here only after
+// joining p.done, so the encode goroutine is finished with the owned state.
+func (p *PendingCompression) release() {
+	p.h.encBusy.Store(false)
+	p.compressed = nil
+}
+
+// AddLedgerToBatch compresses one ledger and queues its Put into b on
+// LedgersCF — the synchronous convenience over the StartCompress /
+// AddPendingToBatch fork-join pair (production ingest uses the pair
+// directly to overlap compression with the other batch arms; this
+// composition keeps ONE write path for the ledger row). Does not commit
+// (caller owns the batch). Neither e.Bytes nor the pooled buffer need
+// outlive this call. The caller runs inside Store.Batch, whose lifecycle
+// RLock + checkOpen is the authoritative closed-store guard, so this adds
+// none.
+func (h *HotStore) AddLedgerToBatch(b *rocksdb.BatchWriter, e Entry) error {
+	return h.AddPendingToBatch(b, h.StartCompress(e))
 }
 
 // WithLedger calls fn with seq's decoded bytes; see query.LedgerReader for the

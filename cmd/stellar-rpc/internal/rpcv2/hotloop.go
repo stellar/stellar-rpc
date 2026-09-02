@@ -38,8 +38,16 @@ import (
 //   - "transient" or absent: wipe any leftover dir and create fresh
 //     (transient -> fsync dir+parent -> ready), so a crash mid-create can't
 //     fabricate a "ready but DB gone" open failure above.
-func openHotDBForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlog.Entry) (*hotchunk.DB, error) {
+func openHotDBForChunk(
+	cat *catalog.Catalog, chunkID chunk.ID, logger *supportlog.Entry, tun hotchunk.Tuning,
+) (*hotchunk.DB, error) {
 	dir := cat.Layout().HotChunkPath(chunkID)
+	// The chunk's hot routing secrets, derived exactly as its COLD builds
+	// derive theirs (hotchunk.SecretsFor): both hot engines blind at seal,
+	// so their runs must be keyed with the secret the freeze will declare.
+	// A resumed chunk re-derives the same values and the open adopts them; a
+	// disagreement (a re-minted catalog secret) fails the open loudly.
+	secrets := hotchunk.SecretsFor(cat, chunkID)
 
 	state, err := cat.HotState(chunkID)
 	if err != nil {
@@ -47,8 +55,11 @@ func openHotDBForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlo
 	}
 
 	if state == geometry.HotReady {
-		// OpenReadyWrite is the single ready-open enforcement site.
-		return hotchunk.OpenReadyWrite(state, dir, chunkID, logger)
+		// Resume/boundary write handle for a chunk whose "ready" key promises the DB
+		// exists: must-exist, never-creating (a gutted DB fails restartably, never
+		// auto-heals into a fresh empty DB). OpenReadyWrite routes through the single
+		// ready-open enforcement site.
+		return hotchunk.OpenReadyWrite(state, dir, chunkID, logger, tun, secrets)
 	}
 
 	// The create bracket: BeginHotCreate wipes + marks transient; FinishHotCreate
@@ -56,7 +67,7 @@ func openHotDBForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlo
 	if beginErr := cat.BeginHotCreate(chunkID); beginErr != nil {
 		return nil, beginErr
 	}
-	db, openErr := hotchunk.Open(dir, chunkID, logger)
+	db, openErr := hotchunk.Open(dir, chunkID, logger, tun, secrets)
 	if openErr != nil {
 		return nil, fmt.Errorf("create hot DB chunk %s: %w", chunkID, openErr)
 	}
@@ -98,6 +109,11 @@ type ingestionLoopConfig struct {
 	// boundary rebuilds must not wipe fee history — and never resets it. nil
 	// (the bounded bench loop) means fees are never computed.
 	FeeWindows *feewindow.FeeWindows
+
+	// Tuning is the write-open tuning for every hot DB the loop (re)opens at
+	// chunk boundaries; run() opens the initial HotDB with the same value.
+	// Its ZstdEncodeWorkers field is FORMAT-AFFECTING (see hotchunk.Tuning).
+	Tuning hotchunk.Tuning
 }
 
 // handleSink is the slice of the registry the loop publishes into. The daemon's
@@ -202,7 +218,7 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		// Chunk boundary: this seq is the chunk's last ledger.
 		if closed := chunk.IDFromLedger(seq); seq == closed.LastLedger() {
 			next := closed + 1
-			nextDB, oerr := openHotDBForChunk(cfg.Catalog, next, cfg.Logger)
+			nextDB, oerr := openHotDBForChunk(cfg.Catalog, next, cfg.Logger, cfg.Tuning)
 			if oerr != nil {
 				return fmt.Errorf("open hot DB for chunk %s at boundary: %w", next, oerr)
 			}
@@ -252,6 +268,11 @@ type BoundedIngestConfig struct {
 	Logger   *supportlog.Entry
 	Metrics  observability.Metrics
 	Sink     ingest.MetricSink
+	// Tuning is the write-open tuning for every hot DB the run touches. Its
+	// ZstdEncodeWorkers field is FORMAT-AFFECTING (see hotchunk.Tuning);
+	// bench cells resolve it from --zstd-workers (default
+	// ledger.DefaultZstdEncodeWorkers).
+	Tuning hotchunk.Tuning
 }
 
 // RunBoundedIngestionLoop runs the ingestion loop over a bounded stream: it
@@ -260,7 +281,7 @@ type BoundedIngestConfig struct {
 // expected termination (errStreamEnded), so unlike the daemon's unbounded run
 // it is remapped to a nil error rather than surfaced as a run failure.
 func RunBoundedIngestionLoop(ctx context.Context, cfg BoundedIngestConfig) error {
-	hotDB, err := openHotDBForChunk(cfg.Catalog, chunk.IDFromLedger(cfg.Resume), cfg.Logger)
+	hotDB, err := openHotDBForChunk(cfg.Catalog, chunk.IDFromLedger(cfg.Resume), cfg.Logger, cfg.Tuning)
 	if err != nil {
 		return fmt.Errorf("open hot DB for resume ledger %d: %w", cfg.Resume, err)
 	}
@@ -274,6 +295,7 @@ func RunBoundedIngestionLoop(ctx context.Context, cfg BoundedIngestConfig) error
 		Metrics:  cfg.Metrics,
 		Sink:     cfg.Sink,
 		Registry: &closingSink{},
+		Tuning:   cfg.Tuning,
 	})
 	if errors.Is(err, errStreamEnded) {
 		return nil

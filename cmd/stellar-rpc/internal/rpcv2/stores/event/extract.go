@@ -83,7 +83,7 @@ func PayloadsFromLedgerEvents(
 		applyIdx, txHash := at(i)
 		for opIdx, opEvents := range txEvents[i].OperationEvents {
 			// eventIdx is the event's position within its operation.
-			for evIdx, evRaw := range opEvents {
+			for evIdx, evView := range opEvents {
 				payloads = append(payloads, Payload{
 					TxHash:             txHash,
 					LedgerSequence:     ledgerSeq,
@@ -91,7 +91,7 @@ func PayloadsFromLedgerEvents(
 					OpIdx:              uint32(opIdx),
 					LedgerClosedAt:     ledgerClosedAt,
 					EventIdx:           uint32(evIdx),
-					ContractEventBytes: evRaw,
+					ContractEventBytes: []byte(evView),
 				})
 			}
 		}
@@ -152,11 +152,10 @@ func countPayloads(txEvents []ingest.TxEvents) int {
 // each emitted (matching-stage) payload and then incremented, so it tracks the
 // event's position within its cursor group.
 func appendStageEventPayloads(
-	dst []Payload, txEventRaws [][]byte, wantStage xdr.TransactionEventStage,
+	dst []Payload, txEvents []xdr.TransactionEventView, wantStage xdr.TransactionEventStage,
 	txHash xdr.Hash, applyIdx, ledgerSeq uint32, ledgerClosedAt int64, eventIdx *uint32,
 ) ([]Payload, error) {
-	for _, raw := range txEventRaws {
-		tev := xdr.TransactionEventView(raw)
+	for _, tev := range txEvents {
 		stageView, err := tev.Stage()
 		if err != nil {
 			return nil, fmt.Errorf("events: tx event Stage: %w", err)

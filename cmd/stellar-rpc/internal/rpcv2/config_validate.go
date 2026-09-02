@@ -73,6 +73,10 @@ func validateForm(cfg config.Config) error {
 	if maxRetries := deref(cfg.Backfill.MaxRetries); maxRetries < 0 {
 		return fmt.Errorf("max_retries must be >= 0 (got %d) — 0 means run once, no retry", maxRetries)
 	}
+	if w := deref(cfg.Storage.ZstdEncodeWorkers); w < 0 {
+		return fmt.Errorf(
+			"storage.zstd_encode_workers must be >= 0 (got %d) — 0 means single-threaded ledger-frame encode", w)
+	}
 	if err := validateBSB(cfg.Backfill.BSB); err != nil {
 		return err
 	}

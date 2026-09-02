@@ -65,12 +65,37 @@ func transactionFromView(txv ingest.LedgerTransactionView) store.Transaction {
 		Result:            txv.Result,
 		Meta:              txv.Meta,
 		Envelope:          txv.Envelope,
-		Events:            txv.DiagnosticEvents,
+		Events:            viewsAsBytes(txv.DiagnosticEvents),
 		FeeBump:           txv.FeeBump,
 		ApplicationOrder:  txv.ApplicationOrder,
 		Successful:        txv.Successful,
 		Ledger:            store.LedgerInfo{Sequence: txv.LedgerSequence, CloseTime: txv.LedgerCloseTime},
-		TransactionEvents: txv.TransactionEvents,
-		ContractEvents:    txv.ContractEvents,
+		TransactionEvents: viewsAsBytes(txv.TransactionEvents),
+		ContractEvents:    nestedViewsAsBytes(txv.ContractEvents),
 	}
+}
+
+// viewsAsBytes and nestedViewsAsBytes reshape the SDK's ~[]byte view slices
+// into the serving contract's [][]byte without copying any bytes — the views
+// already own their backing (compactView), only the slice headers convert.
+func viewsAsBytes[T ~[]byte](in []T) [][]byte {
+	if in == nil {
+		return nil
+	}
+	out := make([][]byte, len(in))
+	for i, v := range in {
+		out[i] = []byte(v)
+	}
+	return out
+}
+
+func nestedViewsAsBytes[T ~[]byte](in [][]T) [][][]byte {
+	if in == nil {
+		return nil
+	}
+	out := make([][][]byte, len(in))
+	for i, s := range in {
+		out[i] = viewsAsBytes(s)
+	}
+	return out
 }

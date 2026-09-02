@@ -117,7 +117,9 @@ func (r *TxReader) scan(
 		}
 		if exact {
 			return ingest.LedgerTransactionView{}, false,
-				fmt.Errorf("txhash: exact index mapped tx to ledger %d that does not contain it: %w", seq, ErrInconsistent)
+				fmt.Errorf("txhash: exact index mapped tx to ledger %d that does not contain it "+
+					"(corrupt index or store; a 16-byte blinded-key collision is the ~2^-128 alternative "+
+					"and reproduces deterministically on retry): %w", seq, ErrInconsistent)
 		}
 	}
 	return ingest.LedgerTransactionView{}, false, nil
@@ -194,28 +196,30 @@ func compactView(v ingest.LedgerTransactionView) ingest.LedgerTransactionView {
 		backing = append(backing, b...)
 		return slices.Clip(backing[start:])
 	}
-	takeAll := func(in [][]byte) [][]byte {
-		if in == nil {
-			return nil
-		}
-		out := make([][]byte, len(in))
-		for i, b := range in {
-			out[i] = take(b)
-		}
-		return out
-	}
-
 	v.Envelope = take(v.Envelope)
 	v.Result = take(v.Result)
 	v.Meta = take(v.Meta)
-	v.DiagnosticEvents = takeAll(v.DiagnosticEvents)
-	v.TransactionEvents = takeAll(v.TransactionEvents)
+	v.DiagnosticEvents = takeAll(take, v.DiagnosticEvents)
+	v.TransactionEvents = takeAll(take, v.TransactionEvents)
 	if v.ContractEvents != nil {
-		ops := make([][][]byte, len(v.ContractEvents))
+		ops := make([][]xdr.ContractEventView, len(v.ContractEvents))
 		for i, op := range v.ContractEvents {
-			ops[i] = takeAll(op)
+			ops[i] = takeAll(take, op)
 		}
 		v.ContractEvents = ops
 	}
 	return v
+}
+
+// takeAll copies each element into the compact backing via take, preserving
+// the element's view type — the SDK's events products are ~[]byte views.
+func takeAll[T ~[]byte](take func([]byte) []byte, in []T) []T {
+	if in == nil {
+		return nil
+	}
+	out := make([]T, len(in))
+	for i, b := range in {
+		out[i] = T(take(b))
+	}
+	return out
 }

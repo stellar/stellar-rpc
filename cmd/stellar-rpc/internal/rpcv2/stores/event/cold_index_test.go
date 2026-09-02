@@ -3,6 +3,7 @@ package event
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
 // indexTestChunkID is the chunk ID every WriteColdIndex test uses for
@@ -117,21 +119,20 @@ func TestWriteIndex_RoundTripsBitmapsPerTerm(t *testing.T) {
 			fmt.Appendf(nil, "term-%d", i),
 			FieldContractID,
 		)
-		slot, err := m.Lookup(term)
+		slot, rk, err := m.Lookup(term)
 		require.NoError(t, err, "lookup term-%d", i)
 
 		record, ok := records[int(slot)]
 		require.True(t, ok, "record missing at slot %d (term-%d)", slot, i)
-		require.GreaterOrEqual(t, len(record), IndexRecordFingerprintLen, "record at slot %d too short", slot)
 
-		// Fingerprint must match term[:4].
-		assert.Equal(t, term[:IndexRecordFingerprintLen], record[:IndexRecordFingerprintLen],
-			"fingerprint mismatch at slot %d", slot)
-
-		// Deserialize bitmap.
-		bm := roaring.New()
-		require.NoError(t, bm.UnmarshalBinary(record[IndexRecordFingerprintLen:]))
-		assert.Equal(t, uint64(2), bm.GetCardinality(), "term-%d bitmap card", i)
+		// Read it back the way the cold reader does, which also checks the
+		// fingerprint against the ROUTED key's prefix before unmarshalling
+		// the bitmap.
+		post, derr := verifyAndDecodePostings(record, rk, slot)
+		require.NoError(t, derr, "term-%d", i)
+		require.True(t, post.Present(), "term-%d must resolve, not read as a fingerprint miss", i)
+		bm := post.Bitmap()
+		assert.Equal(t, uint64(2), post.Cardinality(), "term-%d posting count", i)
 		assert.True(t, bm.Contains(uint32(i*10)), "term-%d missing event id %d", i, i*10)
 		assert.True(t, bm.Contains(uint32(i*10+1)), "term-%d missing event id %d", i, i*10+1)
 	}
@@ -161,7 +162,7 @@ func TestWriteIndex_UnseenTermFingerprintMismatches(t *testing.T) {
 			fmt.Appendf(nil, "never-seen-%d", i),
 			FieldTopic0,
 		)
-		slot, err := m.Lookup(unseen)
+		slot, unseenRK, err := m.Lookup(unseen)
 		if errors.Is(err, ErrKeyNotFound) {
 			continue
 		}
@@ -171,7 +172,7 @@ func TestWriteIndex_UnseenTermFingerprintMismatches(t *testing.T) {
 		record, ok := records[int(slot)]
 		require.True(t, ok)
 		recordFP := record[:IndexRecordFingerprintLen]
-		if string(recordFP) != string(unseen[:IndexRecordFingerprintLen]) {
+		if string(recordFP) != string(unseenRK[:IndexRecordFingerprintLen]) {
 			mismatches++
 		}
 	}
@@ -223,7 +224,7 @@ func TestWriteIndex_ZeroTerms_WritesEmptyIndex(t *testing.T) {
 	m, err := openMPHF(filepath.Join(dir, IndexHashName(indexTestChunkID)))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = m.Close() })
-	_, lerr := m.Lookup(ComputeTermKey([]byte("anything"), FieldContractID))
+	_, _, lerr := m.Lookup(ComputeTermKey([]byte("anything"), FieldContractID))
 	assert.ErrorIs(t, lerr, ErrKeyNotFound)
 }
 
@@ -266,7 +267,7 @@ func TestWriteIndex_SlotsAreDense(t *testing.T) {
 					fmt.Appendf(nil, "term-%d", i),
 					FieldContractID,
 				)
-				slot, err := m.Lookup(term)
+				slot, _, err := m.Lookup(term)
 				require.NoError(t, err)
 				assert.Less(t, slot, uint32(n))
 				seen[slot] = struct{}{}
@@ -299,18 +300,18 @@ func TestWriteIndex_LargeIndex(t *testing.T) {
 			fmt.Appendf(nil, "term-%d", i),
 			FieldContractID,
 		)
-		slot, err := m.Lookup(term)
+		slot, rk, err := m.Lookup(term)
 		require.NoError(t, err)
 		record, ok := records[int(slot)]
 		require.True(t, ok)
-		assert.Equal(t, term[:IndexRecordFingerprintLen], record[:IndexRecordFingerprintLen])
+		assert.Equal(t, rk[:IndexRecordFingerprintLen], record[:IndexRecordFingerprintLen])
 	}
 }
 
 func TestWriteIndex_RecordEncoding(t *testing.T) {
-	// Lock the on-disk record format: fingerprint || roaring bitmap.
-	// Future readers (PR-3a) rely on this layout; if it ever changes
-	// silently, this test fails.
+	// Lock the on-disk record format: routed-key fingerprint || roaring
+	// bitmap, with nothing between them. The cold reader relies on this
+	// layout; if it ever changes silently, this test fails.
 	dir := t.TempDir()
 	idx := NewBitmaps()
 	idx.AddTo(ComputeTermKey([]byte("only"), FieldContractID), 42)
@@ -324,15 +325,133 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	require.Greater(t, len(record), IndexRecordFingerprintLen)
 
 	term := ComputeTermKey([]byte("only"), FieldContractID)
-	assert.Equal(t, term[:IndexRecordFingerprintLen], record[:IndexRecordFingerprintLen])
+	rk := TermKey(stores.BlindKey(testIndexSecret, term[:]))
+	assert.Equal(t, rk[:IndexRecordFingerprintLen], record[:IndexRecordFingerprintLen])
 
+	// The body is a bare roaring serialization starting at offset 4 — no
+	// codec byte, no framing of our own.
 	bm := roaring.New()
-	require.NoError(t, bm.UnmarshalBinary(record[IndexRecordFingerprintLen:]))
-	assert.Equal(t, uint64(1), bm.GetCardinality())
-	assert.True(t, bm.Contains(42))
+	require.NoError(t, bm.UnmarshalBinary(record[IndexRecordFingerprintLen:]),
+		"the body must parse as roaring with no header of ours in front of it")
+	assert.Equal(t, []uint32{42}, bm.ToArray())
+
+	post, derr := verifyAndDecodePostings(record, rk, 0)
+	require.NoError(t, derr)
+	require.True(t, post.Present())
+	assert.Equal(t, uint64(1), post.Cardinality())
+	assert.True(t, post.Contains(42))
 
 	// Defensive: the fingerprint occupies bytes 0..3 in little-endian
 	// the way TermKey itself encodes — read it back via binary helpers
 	// just to lock the endianness contract.
 	_ = binary.LittleEndian.Uint32(record[:IndexRecordFingerprintLen])
+}
+
+// TestWriteIndex_BodiesAreRoaringAtEveryCardinality pins that the record body
+// is a roaring bitmap whatever the term's cardinality — the format carries no
+// per-term encoding choice, so a one-posting term and a fat one are read back
+// by the same two lines. The cardinalities either side of 1024 are corpus,
+// not a boundary: nothing dispatches on them.
+func TestWriteIndex_BodiesAreRoaringAtEveryCardinality(t *testing.T) {
+	dir := t.TempDir()
+	idx := NewBitmaps()
+
+	term := func(name string, card int) TermKey {
+		k := ComputeTermKey([]byte(name), FieldContractID)
+		ids := make([]uint32, card)
+		for i := range ids {
+			ids[i] = uint32(i * 7)
+		}
+		idx.AddTo(k, ids...)
+		return k
+	}
+	single := term("single", 1)
+	small := term("small", 1024)
+	fat := term("fat", 1025)
+
+	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
+
+	m, err := openMPHF(filepath.Join(dir, IndexHashName(indexTestChunkID)))
+	require.NoError(t, err)
+	defer m.Close()
+	records := loadIndexPack(t, filepath.Join(dir, IndexPackName(indexTestChunkID)))
+
+	wantCard := []uint64{1, 1024, 1025}
+	for i, k := range []TermKey{single, small, fat} {
+		want := wantCard[i]
+		slot, rk, lerr := m.Lookup(k)
+		require.NoError(t, lerr)
+		record := records[int(slot)]
+
+		// Straight off the disk bytes: body at offset 4 is roaring, always.
+		bm := roaring.New()
+		require.NoError(t, bm.UnmarshalBinary(record[IndexRecordFingerprintLen:]),
+			"term %d body must parse as roaring", i)
+		assert.Equal(t, want, bm.GetCardinality(), "term %d on-disk cardinality", i)
+
+		// And through the reader's decode, which must agree.
+		post, derr := verifyAndDecodePostings(record, rk, slot)
+		require.NoError(t, derr, "term %d", i)
+		require.True(t, post.Present(), "term %d must resolve", i)
+		assert.Equal(t, want, post.Cardinality(), "term %d cardinality", i)
+		assert.True(t, post.Contains(0), "term %d must hold its first posting", i)
+	}
+}
+
+// TestEncodeIndexBodyRejectsEmpty pins that the encoder refuses a term with no
+// postings rather than writing a record for a term that cannot exist.
+func TestEncodeIndexBodyRejectsEmpty(t *testing.T) {
+	_, err := encodeIndexBody(nil, nil, nil)
+	require.Error(t, err)
+
+	body, err := encodeIndexBody(nil, []uint32{7}, nil)
+	require.NoError(t, err)
+	bm := roaring.New()
+	require.NoError(t, bm.UnmarshalBinary(body), "one posting must round-trip")
+	require.Equal(t, []uint32{7}, bm.ToArray())
+}
+
+// TestEncodeIndexBodyScratchReuse pins the streaming builder's optimization
+// against the byte-identity gate's requirement: a scratch bitmap carried
+// across terms must encode exactly what a fresh one does, including after a
+// fatter term has grown its containers.
+func TestEncodeIndexBodyScratchReuse(t *testing.T) {
+	corpus := [][]uint32{{7}, {1, 2, 3, 4, 5}, nil, {9, 400000}}
+	corpus[2] = make([]uint32, 5000) // dense, container-growing
+	for i := range corpus[2] {
+		corpus[2][i] = uint32(i * 3)
+	}
+
+	scratch := roaring.New()
+	for i, ids := range corpus {
+		want, err := encodeIndexBody(nil, ids, nil)
+		require.NoError(t, err)
+		got, err := encodeIndexBody(nil, ids, scratch)
+		require.NoError(t, err)
+		require.Equal(t, want, got, "corpus %d must encode identically with a reused scratch", i)
+	}
+}
+
+// TestVerifyAndDecodePostings_TrustsBytes pins the trust model: the decode
+// path does not validate bitmap structure. roaring's UnmarshalBinary accepts a
+// run container holding no intervals, which reads back as a bitmap with
+// containers but no postings. Byte integrity belongs to the packfile checksum
+// layer, and per-decode validation is super-linear on run-dense terms, so such
+// a record decodes cleanly and simply resolves as a present term matching
+// nothing.
+func TestVerifyAndDecodePostings_TrustsBytes(t *testing.T) {
+	body, err := hex.DecodeString("3b3000000100008713000000008713")
+	require.NoError(t, err)
+	require.NoError(t, roaring.New().UnmarshalBinary(body),
+		"roaring must accept these bytes, else this test proves nothing")
+
+	key := ComputeTermKey([]byte("corrupt"), FieldContractID)
+	record := append(append([]byte{}, key[:IndexRecordFingerprintLen]...), body...)
+
+	post, derr := verifyAndDecodePostings(record, key, 7)
+	require.NoError(t, derr, "a structurally hollow bitmap must not fail the decode")
+	assert.True(t, post.Present(), "the term is present — it just matches nothing")
+	assert.Equal(t, uint64(0), post.Cardinality())
+	assert.False(t, post.Contains(0))
+	assert.Empty(t, post.SelectIDs(0, false), "a hollow bitmap must iterate no postings")
 }

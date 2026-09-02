@@ -4,12 +4,11 @@ package event
 // produces index.pack (per-slot bitmap records) + index.hash (the
 // serialized MPHF) inside a Chunk's cold directory.
 //
-// The events.pack writer half lives in cold_writer.go. Shared format
+// The pack writer half lives in cold_writer.go. Shared format
 // constants, the LedgerOffsets app-data wire format, and the
 // MPHF wrapper live in cold_format.go.
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -36,6 +35,17 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 	return stores.DeriveIndexSecret(catalogSecret, coldRoutingDomain, uint32(chunkID))
 }
 
+// blindTerm is THE events routing key: the blinded form of a raw term key.
+// Every keyed surface derives it through here — the hot tier's sparse probe,
+// the seal's fold, the freeze tail's fold, the MPHF build and its query — so
+// "one blinded identity" is a property of one function instead of an
+// agreement between five call sites. Terms are already fixed-width
+// (TermKey is 16 bytes), so unlike txhash's RoutingKey there is nothing to
+// truncate: this is purely the naming of the identity.
+func blindTerm(secret [stores.SecretLen]byte, term TermKey) TermKey {
+	return TermKey(stores.BlindKey(secret, term[:]))
+}
+
 // WriteColdIndex produces index.pack + index.hash for chunkID inside
 // bucketDir. Both files are fsync'd before the function returns.
 // bucketDir is the chunk's bucket directory; filenames are composed
@@ -45,25 +55,19 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 // A zero-term bitmaps (an eventless chunk, e.g. a pre-Soroban
 // backfill range) produces a real (empty) index.hash over zero terms
 // plus a zero-record index.pack. The cold reader resolves every
-// LookupKeys entry against it to a nil-bitmap miss through the
-// ordinary path, so neither readers nor orchestrators need a
+// LookupKeys entry against it to a clean miss through the ordinary
+// path, so neither readers nor orchestrators need a
 // pack-without-index special case.
 //
-// bitmaps is the complete term index for the Chunk, uniquely owned by
-// the caller (no concurrent reader holds a pointer to any of its
-// bitmaps). WriteColdIndex mutates each bitmap in place via
-// RunOptimize before MarshalBinary — RunOptimize re-encodes long runs
-// of set bits as RUN containers, which MarshalBinary then serializes
-// more compactly. For chunk 5999 the on-disk shrink is ~14% (108MB →
-// 93MB), concentrated in dense, clustered terms (popular contracts,
-// common topic[0] verbs). This pairs with the fastaggregation.go fix
-// in RoaringBitmap/roaring#81 — without that fix, the RUN containers
-// hit a slow (*Bitmap).lazyOR path at query time and K≥12 regresses
-// catastrophically.
+// bitmaps is the complete term index for the Chunk. It is read, not
+// modified: encodeIndexBody serializes through a bitmap of its own.
 //
-// Both cold backfill and the live-chunk freeze build a Bitmaps single-threaded by
-// re-deriving terms from raw LCMs (per-event TermsForBytes + Bitmaps.AddTo) and
-// hand it directly here.
+// PRODUCTION-DEAD, KEPT AS THE ORACLE: no shipping path calls this anymore —
+// both cold backfill and the live-chunk freeze stream from spill runs via
+// WriteColdIndexFromRuns. This in-memory builder is retained because the
+// byte-identity gate (cold_index_stream_test.go) pins the streaming build's
+// output against it; a format change must be mirrored here or the gate stops
+// meaning anything.
 //
 // index.hash is the MPHF serialized via buildMPHF.
 //
@@ -71,12 +75,12 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 // order. Each record is:
 //
 //	offset  size  field
-//	0       4     fingerprint (first 4 bytes of the TermKey hash)
-//	4       N     serialized roaring bitmap (Bitmap.MarshalBinary)
+//	0       4     fingerprint (first 4 bytes of the ROUTED/blinded key)
+//	4       N     RunOptimize'd roaring bitmap (Bitmap.WriteTo bytes)
 //
 // The cold reader uses mphf.Lookup(term) → slot to find the record
 // position, packfile.Reader.ReadItem(slot, ...) to read the bytes,
-// verifies the 4-byte fingerprint against term[:4], and then
+// verifies the 4-byte fingerprint against the routed query key's prefix, and then
 // deserializes the bitmap on match. Unseen terms still produce a
 // slot (vanilla MPHF semantics) but their fingerprint mismatches —
 // the cold reader rejects them at that point.
@@ -124,18 +128,21 @@ func WriteColdIndex(
 
 	entries := make([]indexEntry, 0, len(bitmaps))
 	for term, bitmap := range bitmaps {
-		slot, lerr := m.Lookup(term)
+		slot, rk, lerr := m.Lookup(term)
 		if lerr != nil {
 			return fmt.Errorf("events: MPHF lookup during index.pack build: %w", lerr)
 		}
-		// App fingerprint stays on the ORIGINAL term key, not the routed key.
+		// App fingerprint comes from the ROUTED (blinded) key: the streaming
+		// twin's pass B only ever holds run keys, which are blinded at ingest,
+		// so the blinded bytes are the one identity both builders share (and
+		// the reader compares against the routed query key).
 		var fp [IndexRecordFingerprintLen]byte
-		copy(fp[:], term[:IndexRecordFingerprintLen])
-		// Mutate in place — bitmaps is uniquely owned by the caller, built
-		// single-threaded either way: cold backfill from the .pack, or the freeze
-		// from the read-only hot DB.
-		bitmap.RunOptimize()
-		entries = append(entries, indexEntry{slot: slot, fp: fp, bitmap: bitmap})
+		copy(fp[:], rk[:IndexRecordFingerprintLen])
+		body, berr := encodeIndexBody(nil, bitmap.ToArray(), nil)
+		if berr != nil {
+			return berr
+		}
+		entries = append(entries, indexEntry{slot: slot, fp: fp, body: body})
 	}
 
 	sort.Slice(entries, func(i, j int) bool { return entries[i].slot < entries[j].slot })
@@ -157,18 +164,27 @@ func WriteColdIndex(
 	// container-encodes (array / bitmap / RLE) the underlying data,
 	// and a second compression pass slows the query hot path
 	// measurably (~3.6× lookup latency in measurement) for marginal
-	// byte savings. Contrast events.pack, where XDR payloads grouped
+	// byte savings. Contrast pack, where XDR payloads grouped
 	// at 128/record offer plenty of compression headroom.
 	pw, err := packfile.Create(indexPackPath, packfile.WriterOptions{
 		Format:         indexPackFormat,
 		ItemsPerRecord: indexPackItemsPerRecord,
 		Overwrite:      true,
+		// Smooth the multi-GB build's dirty pages into background writeback
+		// instead of one Finish-time flush burst (the burst stalls a
+		// co-located hot tier's WAL fdatasync — 2026-07-24 freeze traces).
+		BytesPerSync: indexPackBytesPerSync,
 	})
 	if err != nil {
 		return fmt.Errorf("events: create index.pack at %s: %w", indexPackPath, err)
 	}
 
 	writerErr := writeIndexPackEntries(pw, entries)
+	if writerErr == nil {
+		if finishErr := pw.Finish(nil); finishErr != nil {
+			writerErr = fmt.Errorf("events: finish index.pack: %w", finishErr)
+		}
+	}
 	if writerErr != nil {
 		// pw.Close removes the partial index.pack. Join its error so a
 		// cleanup failure surfaces alongside the original write error,
@@ -182,29 +198,63 @@ func WriteColdIndex(
 }
 
 // indexEntry is one assembled index.pack record: the slot it lands at,
-// the 4-byte fingerprint, and the bitmap to serialize.
+// the 4-byte fingerprint, and the encoded item body (the serialized
+// bitmap).
 type indexEntry struct {
-	slot   uint32
-	fp     [IndexRecordFingerprintLen]byte
-	bitmap *roaring.Bitmap
+	slot uint32
+	fp   [IndexRecordFingerprintLen]byte
+	body []byte
+}
+
+// encodeIndexBody appends the index.pack item body for ids — the
+// RunOptimize'd roaring serialization — to dst. ids must be ascending and
+// deduped.
+//
+// Both builders call this, which is what keeps the byte-identity gate
+// meaningful: they cannot disagree about a term's encoding because there is
+// only one. It takes ids rather than a bitmap because the streaming builder
+// has a sorted slice and never materializes one, while a bitmap is cheap to
+// build from ids.
+//
+// scratch, when non-nil, is the bitmap the ids are loaded into: the streaming
+// builder hands the same one back for every term so a multi-million-term
+// build does not allocate a bitmap per term. It is cleared first, so the
+// caller need not, and its contents are meaningless afterwards. nil allocates
+// one per call — for tests and the in-memory oracle, where per-term
+// allocation does not matter.
+func encodeIndexBody(dst []byte, ids []uint32, scratch *roaring.Bitmap) ([]byte, error) {
+	if len(ids) == 0 {
+		// A zero-posting term has no reason to exist: every term reaches the
+		// index because some event carried it.
+		return nil, errors.New("events: index body for a term with no postings")
+	}
+	if scratch == nil {
+		scratch = roaring.New()
+	} else {
+		scratch.Clear()
+	}
+	scratch.AddMany(ids)
+	// RunOptimize re-encodes long runs of set bits as RUN containers, which
+	// the serialization then stores more compactly: ~14% on chunk 5999,
+	// concentrated in dense clustered terms. It is also what makes the
+	// serialization canonical.
+	scratch.RunOptimize()
+	b, err := scratch.ToBytes()
+	if err != nil {
+		return nil, fmt.Errorf("events: serialize bitmap: %w", err)
+	}
+	return append(dst, b...), nil
 }
 
 // writeIndexPackEntries appends every assembled record to the index.pack
-// writer in slot order and finishes the pack.
+// writer in slot order. The caller owns the writer's lifecycle (Finish
+// beside Create) — the same convention as the streaming twin's
+// writeSlotOrdered, so neither emitter can ship an unfinalized pack.
 func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
-	// Serialize each bitmap into one reused buffer rather than a fresh
-	// MarshalBinary slice per record. AppendItem copies its input, so the
-	// buffer is safe to reuse across iterations; roaring's WriteTo emits
-	// the same bytes MarshalBinary would, so the pack is byte-identical.
-	var buf bytes.Buffer
 	for _, e := range entries {
-		buf.Reset()
-		if _, werr := e.bitmap.WriteTo(&buf); werr != nil {
-			return fmt.Errorf("events: serialize bitmap at slot %d: %w", e.slot, werr)
-		}
-		if err := pw.AppendItem(e.fp[:], buf.Bytes()); err != nil {
+		if err := pw.AppendItem(e.fp[:], e.body); err != nil {
 			return fmt.Errorf("events: write slot %d to index.pack: %w", e.slot, err)
 		}
 	}
-	return pw.Finish(nil)
+	return nil
 }

@@ -58,7 +58,8 @@ func seedEventChunks(
 	r := NewRegistry(cat, geometry.NewRetention(0, earliest))
 	dbs := make(map[chunk.ID]*hotchunk.DB, len(specs))
 	for _, s := range specs {
-		db, err := hotchunk.Open(cat.Layout().HotChunkPath(s.c), s.c, silentLogger())
+		db, err := hotchunk.Open(cat.Layout().HotChunkPath(s.c), s.c, silentLogger(), hotchunk.DefaultTuning(),
+			hotchunk.SecretsFor(cat, s.c))
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = db.Close() })
 		for i, evs := range s.ledgers {
@@ -952,7 +953,7 @@ type fakeEventReader struct {
 	chunkID  chunk.ID
 	ofs      *event.LedgerOffsets
 	payloads []event.Payload // indexed by ordinal
-	bitmaps  map[event.TermKey]*roaring.Bitmap
+	postings map[event.TermKey]event.Postings
 }
 
 func (f *fakeEventReader) ChunkID() chunk.ID { return f.chunkID }
@@ -963,10 +964,10 @@ func (f *fakeEventReader) EventCount() (uint32, error) {
 
 func (f *fakeEventReader) Offsets() (*event.LedgerOffsets, error) { return f.ofs, nil }
 
-func (f *fakeEventReader) LookupKeys(_ context.Context, keys []event.TermKey) ([]*roaring.Bitmap, error) {
-	out := make([]*roaring.Bitmap, len(keys))
+func (f *fakeEventReader) LookupKeys(_ context.Context, keys []event.TermKey) ([]event.Postings, error) {
+	out := make([]event.Postings, len(keys))
 	for i, k := range keys {
-		out[i] = f.bitmaps[k]
+		out[i] = f.postings[k]
 	}
 	return out, nil
 }
@@ -1007,7 +1008,7 @@ func TestEventScan_DropsDoNotStallTheChunk(t *testing.T) {
 	require.NoError(t, ofs.Append(f, total))
 	fake := &fakeEventReader{
 		chunkID: c, ofs: ofs,
-		bitmaps: map[event.TermKey]*roaring.Bitmap{},
+		postings: map[event.TermKey]event.Postings{},
 	}
 	for i := range total {
 		label := fmt.Sprintf("noise%d", i)
@@ -1027,7 +1028,7 @@ func TestEventScan_DropsDoNotStallTheChunk(t *testing.T) {
 	// are collision-style false positives the post-filter must drop.
 	all := roaring.New()
 	all.AddRange(0, total)
-	fake.bitmaps[event.ComputeTermKey(cidA[:], event.FieldContractID)] = all
+	fake.postings[event.ComputeTermKey(cidA[:], event.FieldContractID)] = event.BitmapPostings(all)
 
 	got, err := scanChunk(context.Background(),
 		eventPart{Chunk: c, Reader: fake, From: f, To: f},

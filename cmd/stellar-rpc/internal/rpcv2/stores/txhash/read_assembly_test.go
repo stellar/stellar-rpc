@@ -389,10 +389,12 @@ func TestTxReader_ExactSourceUnavailableLedgerErrors(t *testing.T) {
 func TestTxReader_HotAndColdFederation(t *testing.T) {
 	hotSeq := chunk.ID(10).FirstLedger()
 	flHot := buildLedgers(t, []uint32{hotSeq}, 1)
-	hotStore := openTestHotStore(t)
-	for h, seq := range flHot.byHash {
-		require.NoError(t, addEntries(hotStore, []Entry{{Hash: h, LedgerSeq: seq}}))
+	hotStore, _ := openPackedStoreAt(t, t.TempDir(), chunk.ID(10), windowLedgers)
+	hotHashes := make([][32]byte, 0, len(flHot.byHash))
+	for h := range flHot.byHash {
+		hotHashes = append(hotHashes, h)
 	}
+	ingestLedger(t, hotStore, hotSeq, hotHashes)
 
 	coldSeq := chunk.ID(5).FirstLedger()
 	flCold := buildLedgers(t, []uint32{coldSeq}, 1)
@@ -639,9 +641,9 @@ func TestCompactView_CopiesOutOfTheLedgerBuffer(t *testing.T) {
 		Envelope:          at("ENVELOPE"),
 		Result:            at("RESULT"),
 		Meta:              at("META"),
-		DiagnosticEvents:  [][]byte{at("DIAG1"), at("DIAG2")},
-		TransactionEvents: [][]byte{at("TXEV")},
-		ContractEvents:    [][][]byte{{at("OPA")}, nil, {at("OPB"), buf[:0]}},
+		DiagnosticEvents:  []xdr.DiagnosticEventView{at("DIAG1"), at("DIAG2")},
+		TransactionEvents: []xdr.TransactionEventView{at("TXEV")},
+		ContractEvents:    [][]xdr.ContractEventView{{at("OPA")}, nil, {at("OPB"), buf[:0]}},
 		LedgerSequence:    99,
 		LedgerCloseTime:   1234,
 	}
@@ -653,9 +655,9 @@ func TestCompactView_CopiesOutOfTheLedgerBuffer(t *testing.T) {
 		Envelope:          []byte("ENVELOPE"),
 		Result:            []byte("RESULT"),
 		Meta:              []byte("META"),
-		DiagnosticEvents:  [][]byte{[]byte("DIAG1"), []byte("DIAG2")},
-		TransactionEvents: [][]byte{[]byte("TXEV")},
-		ContractEvents:    [][][]byte{{[]byte("OPA")}, nil, {[]byte("OPB"), {}}},
+		DiagnosticEvents:  []xdr.DiagnosticEventView{[]byte("DIAG1"), []byte("DIAG2")},
+		TransactionEvents: []xdr.TransactionEventView{[]byte("TXEV")},
+		ContractEvents:    [][]xdr.ContractEventView{{[]byte("OPA")}, nil, {[]byte("OPB"), {}}},
 		LedgerSequence:    in.LedgerSequence,
 		LedgerCloseTime:   in.LedgerCloseTime,
 	}
