@@ -1,6 +1,7 @@
 package sqlitedb
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"path"
@@ -111,6 +112,25 @@ func TestLedgers(t *testing.T) {
 	require.NoError(t, tx.Commit(ledgerCloseMeta, nil))
 
 	assertLedgerRange(t, reader, 8, 12)
+}
+
+// TestLedgerInfoFromRow_PrefixFallback covers a meta prefix too short to reach
+// the close time, which must fall back to reading the full blob.
+func TestLedgerInfoFromRow_PrefixFallback(t *testing.T) {
+	db := NewTestDB(t)
+	tx, err := NewReadWriter(logger, db, host.MakeNoOpDaemon(), 15, passphrase).NewTx(t.Context())
+	require.NoError(t, err)
+	lcm := createLedger(42)
+	require.NoError(t, tx.LedgerWriter().InsertLedger(lcm))
+	require.NoError(t, tx.Commit(lcm, nil))
+
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+
+	info, err := ledgerInfoFromRow(t.Context(), db, ledgerRangeRow{Sequence: 42, MetaPrefix: raw[:8]})
+	require.NoError(t, err)
+	assert.Equal(t, uint32(42), info.Sequence)
+	assert.Equal(t, lcm.LedgerCloseTime(), info.CloseTime)
 }
 
 func TestGetLedgerRange_NonEmptyDB(t *testing.T) {
@@ -233,6 +253,38 @@ func TestGetLedgerRange_EmptyDB(t *testing.T) {
 	assert.Equal(t, int64(0), ledgerRange.LastLedger.CloseTime)
 }
 
+// TestWithLedgerRaw covers both lend outcomes: a hit lends the stored meta
+// blob verbatim, and a miss reports found=false without running fn.
+func TestWithLedgerRaw(t *testing.T) {
+	db := NewTestDB(t)
+	tx, err := NewReadWriter(logger, db, host.MakeNoOpDaemon(), 15, passphrase).NewTx(t.Context())
+	require.NoError(t, err)
+	lcm := createLedger(42)
+	require.NoError(t, tx.LedgerWriter().InsertLedger(lcm))
+	require.NoError(t, tx.Commit(lcm, nil))
+	want, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+
+	reader := NewLedgerReader(db)
+	var got []byte
+	found, err := reader.WithLedgerRaw(t.Context(), 42, func(raw []byte) error {
+		got = bytes.Clone(raw)
+		return nil
+	})
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, want, got)
+
+	ran := false
+	found, err = reader.WithLedgerRaw(t.Context(), 43, func([]byte) error {
+		ran = true
+		return nil
+	})
+	require.NoError(t, err)
+	assert.False(t, found)
+	assert.False(t, ran)
+}
+
 func BenchmarkGetLedgerRange(b *testing.B) {
 	testDB, lcms := setupBenchmarkingDB(b)
 	reader := NewLedgerReader(testDB)
@@ -264,6 +316,62 @@ func BenchmarkBatchGetLedgers(b *testing.B) {
 		require.NoError(b, hdrLast.UnmarshalBinary(ledgers[batchSize-1].HeaderRaw))
 		assert.EqualValues(b, lcms[0].LedgerSequence(), hdrFirst.Header.LedgerSeq)
 		assert.EqualValues(b, lcms[batchSize-1].LedgerSequence(), hdrLast.Header.LedgerSeq)
+	}
+}
+
+// padLedger grows a txMeta ledger's meta to roughly size bytes via its soroban return value.
+func padLedger(lcm xdr.LedgerCloseMeta, size int) xdr.LedgerCloseMeta {
+	payload := xdr.ScBytes(make([]byte, size))
+	lcm.V2.TxProcessing[0].TxApplyProcessing.V3.SorobanMeta.ReturnValue = xdr.ScVal{
+		Type:  xdr.ScValTypeScvBytes,
+		Bytes: &payload,
+	}
+	return lcm
+}
+
+// BenchmarkOldestLedgerRangeLookup measures the 1KiB prefix fetch in
+// getLedgerRangeWithCache. The tx read path (getLedgers/getTransactions) runs
+// this lookup once per request.
+func BenchmarkOldestLedgerRangeLookup(b *testing.B) {
+	for _, tc := range []struct {
+		name string
+		size int
+	}{
+		// min/avg/max meta blob sizes observed on a pubnet 7-day node
+		{"512KiB", 512 << 10},
+		{"2MiB", 2 << 20},
+		{"4MiB", 4 << 20},
+	} {
+		ctx := b.Context()
+		testDB := NewTestDB(b)
+		writer := NewReadWriter(logger, testDB, host.MakeNoOpDaemon(), 1_000_000, passphrase)
+		write, err := writer.NewTx(ctx)
+		require.NoError(b, err)
+
+		lcms := []xdr.LedgerCloseMeta{
+			padLedger(txMeta(1000, true), tc.size),
+			padLedger(txMeta(1001, true), tc.size),
+		}
+		ledgerW, txW := write.LedgerWriter(), write.TransactionWriter()
+		for _, lcm := range lcms {
+			require.NoError(b, ledgerW.InsertLedger(lcm))
+			require.NoError(b, txW.InsertTransactions(lcm))
+		}
+		latest := lcms[len(lcms)-1]
+		require.NoError(b, write.Commit(latest, nil))
+		latestSeq, latestTime := latest.LedgerSequence(), latest.LedgerCloseTime()
+
+		got, err := getLedgerRangeWithCache(ctx, testDB, latestSeq, latestTime)
+		require.NoError(b, err)
+		require.Equal(b, lcms[0].LedgerSequence(), got.FirstLedger.Sequence)
+
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				_, err := getLedgerRangeWithCache(ctx, testDB, latestSeq, latestTime)
+				require.NoError(b, err)
+			}
+		})
 	}
 }
 

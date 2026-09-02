@@ -3,11 +3,13 @@ package methods
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 
 	"github.com/creachadair/jrpc2"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
@@ -23,39 +25,48 @@ func NewGetLatestLedgerHandler(ledgerReader store.LedgerReader) jrpc2.Handler {
 				Message: "could not get latest ledger sequence",
 			}
 		}
-		latestLedger, found, err := ledgerReader.GetLedger(ctx, latestSequence)
-		if (err != nil) || (!found) {
+		var response protocol.GetLatestLedgerResponse
+		var parseErr error
+		found, err := ledgerReader.WithLedgerRaw(ctx, latestSequence, func(raw []byte) error {
+			response, parseErr = latestLedgerResponse(xdr.LedgerCloseMetaView(raw), latestSequence)
+			return parseErr
+		})
+		if err != nil || !found {
+			var msg string
+			switch {
+			case parseErr != nil:
+				msg = fmt.Sprintf("could not parse latest ledger header: %v", parseErr)
+			case err != nil:
+				msg = fmt.Sprintf("could not get latest ledger: %v", err)
+			default: // clean miss: no underlying error to report
+				msg = "could not get latest ledger"
+			}
 			return protocol.GetLatestLedgerResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
-				Message: "could not get latest ledger",
+				Message: msg,
 			}
 		}
-		header := latestLedger.LedgerHeaderHistoryEntry().Header
-		headerBytes, err := header.MarshalBinary()
-		if err != nil {
-			return protocol.GetLatestLedgerResponse{}, &jrpc2.Error{
-				Code:    jrpc2.InternalError,
-				Message: fmt.Sprintf("could not marshal latest ledger header: %v", err),
-			}
-		}
-		response := protocol.GetLatestLedgerResponse{
-			Hash:            latestLedger.LedgerHash().HexString(),
-			ProtocolVersion: latestLedger.ProtocolVersion(),
-			Sequence:        latestSequence,
-			LedgerCloseTime: latestLedger.LedgerCloseTime(),
-			LedgerHeader:    base64.StdEncoding.EncodeToString(headerBytes),
-		}
-
-		raw, err := latestLedger.MarshalBinary()
-		if err != nil {
-			return protocol.GetLatestLedgerResponse{}, &jrpc2.Error{
-				Code:    jrpc2.InternalError,
-				Message: fmt.Sprintf("could not marshal latest ledger metadata: %v", err),
-			}
-		}
-		response.LedgerMetadata = base64.StdEncoding.EncodeToString(raw)
-
 		return response, nil
 	}
 	return NewHandler(coreHandler)
+}
+
+// latestLedgerResponse extracts the response fields from a ledger close meta view.
+func latestLedgerResponse(view xdr.LedgerCloseMetaView, sequence uint32,
+) (protocol.GetLatestLedgerResponse, error) {
+	headerEntry, err := view.LedgerHeader()
+	if err != nil {
+		return protocol.GetLatestLedgerResponse{}, err
+	}
+	return xdr.Try(func() protocol.GetLatestLedgerResponse {
+		header := headerEntry.MustHeader()
+		return protocol.GetLatestLedgerResponse{
+			Hash:            hex.EncodeToString(headerEntry.MustHash().MustRaw()),
+			ProtocolVersion: header.MustLedgerVersion().MustValue(),
+			Sequence:        sequence,
+			LedgerCloseTime: int64(header.MustScpValue().MustCloseTime().MustValue()), //nolint:gosec // safe for ~292B years
+			LedgerHeader:    base64.StdEncoding.EncodeToString(header.MustRaw()),
+			LedgerMetadata:  base64.StdEncoding.EncodeToString(view),
+		}
+	})
 }
