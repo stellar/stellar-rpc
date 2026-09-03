@@ -127,6 +127,26 @@ func encodeIndexBuildStamp() []byte {
 	return buf
 }
 
+// checkIndexBuildStamp refuses an index.pack whose build stamp names a term
+// schema or field set other than this binary's own.
+func checkIndexBuildStamp(indexPackPath string, r *stores.PackReader) error {
+	ad, err := r.AppData()
+	if err != nil {
+		return fmt.Errorf("events: read build stamp of %s: %w", indexPackPath, err)
+	}
+	schema, mask, err := decodeIndexBuildStamp(ad)
+	if err != nil {
+		return fmt.Errorf("events: %s: %w", indexPackPath, err)
+	}
+	if schema != TermSchemaVersion || mask != IndexedFieldMask() {
+		return fmt.Errorf(
+			"events: %s was built under term schema %d with field mask %#x; this binary expects "+
+				"schema %d with mask %#x (rebuilt index required, or a binary matching the artifact)",
+			indexPackPath, schema, mask, TermSchemaVersion, IndexedFieldMask())
+	}
+	return nil
+}
+
 // decodeIndexBuildStamp recovers (termSchema, fieldMask) from an index.pack
 // app-data blob, rejecting a short blob or an unknown stamp version. Bytes
 // past the stamp are ignored (future extension room).

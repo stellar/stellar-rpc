@@ -196,19 +196,8 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 			return fmt.Errorf("%w: %s: built without a record checksum (stale build)",
 				stores.ErrCorrupt, indexPackPath)
 		}
-		ad, aerr := c.index.AppData()
-		if aerr != nil {
-			return fmt.Errorf("events: read build stamp of %s: %w", indexPackPath, aerr)
-		}
-		schema, mask, serr := decodeIndexBuildStamp(ad)
-		if serr != nil {
-			return fmt.Errorf("events: %s: %w", indexPackPath, serr)
-		}
-		if schema != TermSchemaVersion || mask != IndexedFieldMask() {
-			return fmt.Errorf(
-				"events: %s was built under term schema %d with field mask %#x; this binary expects "+
-					"schema %d with mask %#x (rebuilt index required, or a binary matching the artifact)",
-				indexPackPath, schema, mask, TermSchemaVersion, IndexedFieldMask())
+		if err := checkIndexBuildStamp(indexPackPath, c.index); err != nil {
+			return err
 		}
 		if idx.isEmpty() {
 			// A zero-term index is only valid for an eventless chunk: cross-check

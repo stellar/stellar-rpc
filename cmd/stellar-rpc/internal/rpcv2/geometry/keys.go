@@ -79,10 +79,25 @@ func AllStates() []State { return append([]State(nil), allStates...) }
 func AllHotStates() []HotState { return append([]HotState(nil), allHotStates...) }
 
 // IsKnownState reports whether s is a registered artifact lifecycle state.
-func IsKnownState(s State) bool { return slices.Contains(allStates, s) }
+// The switch names every constant so a state added to the const block but not
+// here is caught by the exhaustive linter, not by the census refusing the
+// daemon's own catalog on the next restart.
+func IsKnownState(s State) bool {
+	switch s {
+	case StateFreezing, StateFrozen, StatePruning:
+		return true
+	}
+	return false
+}
 
 // IsKnownHotState reports whether s is a registered hot-DB lifecycle state.
-func IsKnownHotState(s HotState) bool { return slices.Contains(allHotStates, s) }
+func IsKnownHotState(s HotState) bool {
+	switch s {
+	case HotTransient, HotReady:
+		return true
+	}
+	return false
+}
 
 // TxHashIndexID identifies a tx-hash index: a contiguous run of
 // chunks_per_txhash_index chunks. Distinct type from chunk.ID (both uint32) so

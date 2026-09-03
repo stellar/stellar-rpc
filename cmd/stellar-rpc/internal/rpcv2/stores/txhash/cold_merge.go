@@ -257,19 +257,9 @@ func newFileReader(path string, bufBytes int) (*fileReader, error) {
 	}
 	// Self-defending: the merge consumes raw entry bytes, so it verifies the
 	// prelude itself rather than trusting that scanAndValidate ran upstream.
-	if magic := string(buf[:4]); magic != coldBinMagic {
+	if err := checkBinPrelude(path, buf); err != nil {
 		_ = f.Close()
-		return nil, fmt.Errorf("txhash: %s is not a cold txhash .bin (magic %q, want %q)", path, magic, coldBinMagic)
-	}
-	if buf[4] != coldBinVersion {
-		_ = f.Close()
-		return nil, fmt.Errorf("txhash: %s has .bin version %d unsupported by this binary "+
-			"(written by a newer stellar-rpc?)", path, buf[4])
-	}
-	if buf[5]|buf[6]|buf[7] != 0 {
-		_ = f.Close()
-		return nil, fmt.Errorf("txhash: %s has reserved header bytes set "+
-			"(written by a newer stellar-rpc, or corrupted)", path)
+		return nil, err
 	}
 	return &fileReader{
 		path:    path,

@@ -104,9 +104,10 @@ func TestColdBin_HeaderAndLayout(t *testing.T) {
 		binary.LittleEndian.Uint32(data[coldBinHeaderSize+ColdKeySize:coldBinHeaderSize+coldBinEntrySize]))
 }
 
-// TestColdBin_ScanRejectsForeignHeader pins the header scan's refusals: a
-// foreign magic and a newer version byte each fail loudly instead of being
-// misread as entry data.
+// TestColdBin_ScanRejectsForeignHeader pins the prelude refusals in BOTH .bin
+// consumers, the pre-scan and the self-defending merge reader: a foreign magic,
+// a newer version byte, and a set reserved byte each fail loudly instead of
+// being misread as entry data.
 func TestColdBin_ScanRejectsForeignHeader(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "out.bin")
@@ -114,30 +115,27 @@ func TestColdBin_ScanRejectsForeignHeader(t *testing.T) {
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 
-	bad := append([]byte(nil), data...)
-	copy(bad, "JUNK")
-	badPath := filepath.Join(dir, "bad-magic.bin")
-	require.NoError(t, os.WriteFile(badPath, bad, 0o600))
-	_, _, err = scanBinHeader(badPath)
-	require.ErrorContains(t, err, "not a cold txhash .bin")
-
-	newer := append([]byte(nil), data...)
-	newer[4] = coldBinVersion + 1
-	newerPath := filepath.Join(dir, "newer.bin")
-	require.NoError(t, os.WriteFile(newerPath, newer, 0o600))
-	_, _, err = scanBinHeader(newerPath)
-	require.ErrorContains(t, err, "written by a newer stellar-rpc")
-
-	// A set reserved byte refuses in BOTH .bin consumers: the pre-scan and
-	// the self-defending merge reader.
-	reserved := append([]byte(nil), data...)
-	reserved[6] = 0x01
-	reservedPath := filepath.Join(dir, "reserved.bin")
-	require.NoError(t, os.WriteFile(reservedPath, reserved, 0o600))
-	_, _, err = scanBinHeader(reservedPath)
-	require.ErrorContains(t, err, "reserved header bytes set")
-	_, err = newFileReader(reservedPath, 0)
-	require.ErrorContains(t, err, "reserved header bytes set")
+	cases := []struct {
+		name   string
+		mutate func([]byte)
+		want   string
+	}{
+		{"bad magic", func(b []byte) { copy(b, "JUNK") }, "not a cold txhash .bin"},
+		{"newer version", func(b []byte) { b[4] = coldBinVersion + 1 }, "written by a newer stellar-rpc"},
+		{"reserved byte set", func(b []byte) { b[6] = 0x01 }, "reserved header bytes set"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bad := append([]byte(nil), data...)
+			tc.mutate(bad)
+			badPath := filepath.Join(dir, tc.name+".bin")
+			require.NoError(t, os.WriteFile(badPath, bad, 0o600))
+			_, _, err := scanBinHeader(badPath)
+			require.ErrorContains(t, err, tc.want)
+			_, err = newFileReader(badPath, 0)
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
 }
 
 // TestColdBin_CreateFails forces os.Create on the destination to fail by

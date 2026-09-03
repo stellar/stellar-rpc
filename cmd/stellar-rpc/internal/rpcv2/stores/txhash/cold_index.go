@@ -169,17 +169,8 @@ func scanBinHeader(path string) (uint64, [stores.SecretLen]byte, error) {
 	if _, err := io.ReadFull(f, hdr[:]); err != nil {
 		return 0, secret, fmt.Errorf("txhash: read header of %s: %w", path, err)
 	}
-	if magic := string(hdr[:4]); magic != coldBinMagic {
-		return 0, secret, fmt.Errorf("txhash: %s is not a cold txhash .bin (magic %q, want %q)",
-			path, magic, coldBinMagic)
-	}
-	if hdr[4] != coldBinVersion {
-		return 0, secret, fmt.Errorf("txhash: %s has .bin version %d unsupported by this binary "+
-			"(written by a newer stellar-rpc?)", path, hdr[4])
-	}
-	if hdr[5]|hdr[6]|hdr[7] != 0 {
-		return 0, secret, fmt.Errorf("txhash: %s has reserved header bytes set "+
-			"(written by a newer stellar-rpc, or corrupted)", path)
+	if err := checkBinPrelude(path, hdr[:]); err != nil {
+		return 0, secret, err
 	}
 	copy(secret[:], hdr[coldBinPreludeSize+coldBinCountSize:])
 	count, err := coldBinCount(path, fi.Size(),

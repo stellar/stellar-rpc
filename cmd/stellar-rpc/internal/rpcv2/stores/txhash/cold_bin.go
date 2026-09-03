@@ -65,6 +65,24 @@ const (
 	coldBinHeaderSize = coldBinPreludeSize + coldBinCountSize + stores.SecretLen
 )
 
+// checkBinPrelude validates the magic, version, and reserved bytes at the
+// start of a .bin header. Both readers call it, so a format bump cannot leave
+// one of them reading a newer header as entry bytes.
+func checkBinPrelude(path string, hdr []byte) error {
+	if magic := string(hdr[:4]); magic != coldBinMagic {
+		return fmt.Errorf("txhash: %s is not a cold txhash .bin (magic %q, want %q)", path, magic, coldBinMagic)
+	}
+	if hdr[4] != coldBinVersion {
+		return fmt.Errorf("txhash: %s has .bin version %d unsupported by this binary "+
+			"(written by a newer stellar-rpc?)", path, hdr[4])
+	}
+	if hdr[5]|hdr[6]|hdr[7] != 0 {
+		return fmt.Errorf("txhash: %s has reserved header bytes set "+
+			"(written by a newer stellar-rpc, or corrupted)", path)
+	}
+	return nil
+}
+
 // ColdEntry is one (blinded key, ledger seq) tuple in a cold .bin file.
 type ColdEntry struct {
 	Key [ColdKeySize]byte

@@ -68,14 +68,14 @@ func TestCensus_RefusesForeignEntries(t *testing.T) {
 	}{
 		{"novel prefix", "format:events", "2"},
 		{"novel meta key", "meta/other", "WOULD-BE-SECRET-BYTES"},
-		{"unknown kind under chunk prefix", "chunk:00000001:bogus", "frozen"},
+		{"unknown kind under chunk prefix", "chunk:00000001:bogus", string(geometry.StateFrozen)},
 		{"version suffix on chunk state", geometry.ChunkKey(1, geometry.KindEvents), "frozen@2"},
 		{"version suffix on hot state", geometry.HotChunkKey(3), "ready@2"},
 		{"version suffix on index state", geometry.TxHashIndexKey(0, 0, 9), "frozen@2"},
 		{"unknown hot state", geometry.HotChunkKey(4), "warm"},
-		{"unpadded chunk id", "chunk:123:ledgers", "frozen"},
-		{"index lo above hi", "index:00000000:00000005:00000002", "frozen"},
-		{"cross-window index coverage", "index:00000001:00000000:00003000", "frozen"},
+		{"unpadded chunk id", "chunk:123:ledgers", string(geometry.StateFrozen)},
+		{"index lo above hi", "index:00000000:00000005:00000002", string(geometry.StateFrozen)},
+		{"cross-window index coverage", "index:00000001:00000000:00003000", string(geometry.StateFrozen)},
 		{"non-canonical pin", geometry.ConfigEarliestLedger, "007"},
 	}
 	for _, tc := range cases {
