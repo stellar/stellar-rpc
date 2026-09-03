@@ -46,18 +46,22 @@ var allFields = []Field{
 	FieldEventType, FieldTopicCount,
 }
 
-// IndexedFieldMask is the set of indexed fields as a bitmask (bit i set means
-// Field i is indexed), derived from allFields; the build stamp records it per
-// artifact and the term-key golden tests iterate the same registry.
+// indexedFieldMask is derived from allFields once at init. It is unexported so
+// no importer can reassign the value every index.pack build stamp records.
 //
 //nolint:gochecknoglobals // derived from the immutable field registry
-var IndexedFieldMask = func() uint64 {
+var indexedFieldMask = func() uint64 {
 	var m uint64
 	for _, f := range allFields {
 		m |= 1 << f
 	}
 	return m
 }()
+
+// IndexedFieldMask is the set of indexed fields as a bitmask (bit i set means
+// Field i is indexed). The build stamp records it per artifact and the
+// term-key golden tests iterate the same registry.
+func IndexedFieldMask() uint64 { return indexedFieldMask }
 
 // ComputeTermKey computes a 16-byte term key by hashing the field byte
 // followed by the value bytes: xxh3_128(field || value), encoded as

@@ -973,8 +973,8 @@ func TestColdReader_RejectsMismatchedBuildStamp(t *testing.T) {
 		schema uint16
 		mask   uint64
 	}{
-		{"schema", TermSchemaVersion + 1, IndexedFieldMask},
-		{"mask", TermSchemaVersion, IndexedFieldMask | 1<<63},
+		{"schema", TermSchemaVersion + 1, IndexedFieldMask()},
+		{"mask", TermSchemaVersion, IndexedFieldMask() | 1<<63},
 	}
 	for _, eventsPerLedger := range []int{2, 0} {
 		for _, tc := range cases {

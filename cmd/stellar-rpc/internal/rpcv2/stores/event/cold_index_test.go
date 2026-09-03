@@ -351,7 +351,7 @@ func TestWriteColdIndex_StampAndContentHash(t *testing.T) {
 	schema, mask, err := decodeIndexBuildStamp(ad)
 	require.NoError(t, err)
 	assert.Equal(t, TermSchemaVersion, schema)
-	assert.Equal(t, IndexedFieldMask, mask)
+	assert.Equal(t, IndexedFieldMask(), mask)
 
 	// Bytes past the stamp are extension room: the decoder ignores them.
 	_, _, err = decodeIndexBuildStamp(append(append([]byte(nil), ad...), 0xAB, 0xCD))

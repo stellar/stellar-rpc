@@ -123,7 +123,7 @@ func encodeIndexBuildStamp() []byte {
 	buf := make([]byte, indexStampLen)
 	buf[0] = indexStampVersion
 	binary.BigEndian.PutUint16(buf[1:3], TermSchemaVersion)
-	binary.BigEndian.PutUint64(buf[3:11], IndexedFieldMask)
+	binary.BigEndian.PutUint64(buf[3:11], IndexedFieldMask())
 	return buf
 }
 

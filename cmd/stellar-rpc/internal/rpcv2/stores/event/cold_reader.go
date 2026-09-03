@@ -204,11 +204,11 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		if serr != nil {
 			return fmt.Errorf("events: %s: %w", indexPackPath, serr)
 		}
-		if schema != TermSchemaVersion || mask != IndexedFieldMask {
+		if schema != TermSchemaVersion || mask != IndexedFieldMask() {
 			return fmt.Errorf(
 				"events: %s was built under term schema %d with field mask %#x; this binary expects "+
 					"schema %d with mask %#x (rebuilt index required, or a binary matching the artifact)",
-				indexPackPath, schema, mask, TermSchemaVersion, IndexedFieldMask)
+				indexPackPath, schema, mask, TermSchemaVersion, IndexedFieldMask())
 		}
 		if idx.isEmpty() {
 			// A zero-term index is only valid for an eventless chunk: cross-check
