@@ -102,9 +102,11 @@ type Reader interface {
 	//
 	// Bitmap ownership: callers MUST treat returned bitmaps as
 	// read-only. The hot path returns immutable snapshots of the
-	// live mirror — ConcurrentBitmaps stores bitmap pointers via
-	// atomic.Pointer COW, so a returned pointer will never be
-	// mutated by anyone. The cold path returns freshly-unmarshaled
+	// live mirror — ConcurrentBitmaps mutates a writer-owned bitmap
+	// under a per-term mutex and publishes snapshots lazily, so a
+	// returned pointer will never be mutated by anyone; see
+	// ConcurrentBitmaps.Get for the full contract. The cold path
+	// returns freshly-unmarshaled
 	// bitmaps logically owned by the caller. Either way callers
 	// must not mutate; event.Matches is the only consumer today
 	// and never mutates, and downstream roaring.FastAnd/FastOr never
