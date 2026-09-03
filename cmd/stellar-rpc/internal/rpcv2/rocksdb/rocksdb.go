@@ -59,7 +59,8 @@ const (
 
 	// pinnedTableFormatVersion pins the block-based table format written to
 	// disk, so a grocksdb/librocksdb upgrade cannot silently change the on-disk
-	// format. 6 is librocksdb 10.10.1's default, so the pin changes no byte
+	// format. 6 is the default in librocksdb 10.9.1 (the version
+	// scripts/install-rocksdb.sh builds), so the pin changes no byte
 	// today. RocksDB's own header advises leaving format_version at the
 	// default so improvements arrive automatically; we choose the opposite on
 	// purpose. Raising it is a format-touching change: an older binary cannot
