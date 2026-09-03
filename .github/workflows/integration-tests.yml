@@ -153,5 +153,29 @@ jobs:
       - uses: stellar/actions/rust-cache@main
       - run: make build-libs
 
+      # -v so each test reports its own duration. Without it the log carries a
+      # single package total, which is not enough to tell a slow suite from one
+      # slow test.
       - name: Run Stellar RPC Integration Tests
-        run: go test -race -timeout 30m ./cmd/stellar-rpc/internal/rpcv1/integrationtest/...
+        run: |
+          set -o pipefail
+          go test -race -v -timeout 30m ./cmd/stellar-rpc/internal/rpcv1/integrationtest/... 2>&1 \
+            | tee "${RUNNER_TEMP}/integration-tests.log"
+
+      - name: Report the slowest tests
+        if: always()
+        run: |
+          log="${RUNNER_TEMP}/integration-tests.log"
+          [ -f "$log" ] || exit 0
+          {
+            echo "### Slowest integration tests (P${{ inputs.protocol_version }})"
+            echo
+            grep -E '^[[:space:]]*--- (PASS|FAIL):' "$log" \
+              | sed -E 's/^[[:space:]]*--- (PASS|FAIL): (.+) \(([0-9.]+)s\)$/\3 \2 \1/' \
+              | sort -rn | head -20 \
+              | awk 'BEGIN { print "| test | seconds | result |"; print "|---|---:|---|" }
+                     { printf "| `%s` | %s | %s |\n", $2, $1, $3 }'
+            echo
+            grep -E '^(ok|FAIL)[[:space:]]+github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/integrationtest[[:space:]]' "$log" \
+              | awk '{ printf "\nPackage total: **%s**\n", $NF }'
+          } >> "$GITHUB_STEP_SUMMARY"

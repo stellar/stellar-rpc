@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/fsouza/fake-gcs-server/fakestorage"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	client "github.com/stellar/go-stellar-sdk/clients/rpcclient"
@@ -115,7 +116,7 @@ func waitUntilLedgerIngested(t *testing.T, test *infrastructure.Test, rpcClient 
 	cancelIngest bool,
 ) protocol.GetLatestLedgerResponse {
 	var last protocol.GetLatestLedgerResponse
-	require.Eventually(t, func() bool {
+	if !assert.Eventually(t, func() bool {
 		resp, err := rpcClient.GetLatestLedger(t.Context())
 		require.NoError(t, err)
 		last = resp
@@ -124,7 +125,9 @@ func waitUntilLedgerIngested(t *testing.T, test *infrastructure.Test, rpcClient 
 			test.StopCore()
 		}
 		return cond(resp)
-	}, timeout, time.Second, "last ledger backfilled: %+v", last.Sequence)
+	}, timeout, time.Second) {
+		t.Fatalf("last ledger seen: %d", last.Sequence)
+	}
 	return last
 }
 
