@@ -18,43 +18,75 @@ import (
 // (≈256 B per slice); only long-tail dense terms promote to roaring.
 const promotionThreshold = 64
 
-// termState is an immutable snapshot of a single term's event IDs.
-// At most one of ids / bm is non-nil at any moment:
-//   - Sparse mode: ids holds the sorted []uint32 of event IDs.
-//   - Dense mode: bm holds the roaring.Bitmap (with COW enabled so
-//     subsequent Clones in AddTo are O(1) shallow copies).
+// denseState is the whole state of one dense term. Exactly one is
+// allocated per promoted term and it lives for the term's lifetime,
+// so a dense term allocates nothing per AddTo and nothing per
+// published snapshot beyond the snapshot itself.
 //
-// A new termState is allocated and atomically published on every
-// AddTo. Readers atomic.Load the pointer and operate on the
-// resulting struct — by construction the (ids, bm) pair is always
-// observed consistently, so the previous (bm.Load, ids.Load) split
-// and its promotion-window re-Load workaround are gone.
+//   - wbm is the writer's private bitmap. AddTo mutates it in place;
+//     it is NEVER handed to a reader.
+//   - pub is the last immutable snapshot published to readers. nil
+//     until the first read after promotion or warmup.
+//   - dirty says wbm holds writes that pub does not. Set by AddTo,
+//     cleared by the reader that republishes.
+//   - mu serializes the writer's in-place AddMany against a reader's
+//     wbm.Clone(). Both mutate wbm's needCopyOnWrite slice
+//     (roaringarray.go:258-288 markAllAsNeedingCopyOnWrite on the
+//     clone source; roaringarray.go:348-353
+//     getWritableContainerAtIndex on the AddMany path), so they must
+//     not overlap.
+//
+// Invariant: pub == nil implies dirty is true. Every constructor of a
+// denseState sets dirty before the entry becomes reachable, and the
+// only code that clears dirty stores a non-nil pub first.
+type denseState struct {
+	mu    sync.Mutex
+	wbm   *roaring.Bitmap
+	pub   atomic.Pointer[roaring.Bitmap]
+	dirty atomic.Bool
+}
+
+// termState is the immutable per-term entry value. Exactly one of
+// ids / dense is set:
+//   - Sparse mode: ids holds the sorted []uint32 of event IDs. A new
+//     termState is published on every AddTo.
+//   - Dense mode: dense points at the term's denseState. This
+//     termState is published once, at promotion, and is never
+//     replaced for the rest of the term's life — fresher snapshots
+//     are published inside denseState.pub instead.
+//
+// Readers atomic.Load the pointer and operate on the resulting
+// struct, so the (ids, dense) pair is always observed consistently.
 type termState struct {
-	ids []uint32
-	bm  *roaring.Bitmap
+	ids   []uint32
+	dense *denseState
 }
 
 // ConcurrentBitmaps is the in-memory event index for live ingest:
 // one writer, many concurrent readers. Each per-term entry is a
-// single atomic.Pointer[termState]. AddTo publishes a new
-// termState via a single atomic.Store, so readers atomic.Load and
-// operate on an immutable snapshot for as long as they hold the
-// pointer. No lock is required across the borrowed pointer's
-// lifetime.
+// single atomic.Pointer[termState].
 //
 // The struct-level RWMutex protects only the map's structure (the
 // terms map insert when a new key arrives). Once an entry exists,
 // all subsequent AddTo and Get operations bypass the lock entirely.
 //
+// Dense terms are writer-owned: AddTo mutates a private bitmap in
+// place and only flags the term dirty, and the next reader clones
+// that bitmap once to publish a fresh immutable snapshot. This keeps
+// AddTo's cost proportional to the IDs it adds instead of to the
+// term's container count, which is what made apply latency grow as a
+// chunk filled.
+//
 // Concurrency contracts:
 //
 //   - AddTo: single-writer. The orchestrator drives ingest from one
-//     goroutine per chunk. The COW Clone inside AddTo (on the dense
-//     path) mutates the source bitmap's needCopyOnWrite slice as a
-//     side effect of roaring's clone implementation; two concurrent
-//     AddTo calls on the same key would race on that.
+//     goroutine per chunk. Two concurrent AddTo calls on the same
+//     key would race on the sparse-mode read-modify-write and on
+//     the dense bitmap's container array.
 //
-//   - Get / LookupKeys: many-reader. No Clone, just atomic.Load.
+//   - Get / LookupKeys: many-reader. Lock-free unless the term is
+//     dense and a write landed since the last snapshot, in which
+//     case exactly one reader pays a Clone under the per-term mutex.
 //     Safe to call concurrently with AddTo.
 type ConcurrentBitmaps struct {
 	rwmu  sync.RWMutex
@@ -63,8 +95,13 @@ type ConcurrentBitmaps struct {
 
 // NewConcurrentBitmapsFromBitmaps takes ownership of a single-threaded
 // Bitmaps (typically built via warmup or backfill) and wraps it as a
-// ConcurrentBitmaps. Each per-term bitmap is marked CopyOnWrite so
-// subsequent AddTo calls share containers via lazy COW.
+// ConcurrentBitmaps. Each per-term bitmap becomes that term's
+// writer-private bitmap, marked CopyOnWrite so the first reader
+// snapshot is a shallow clone.
+//
+// No snapshot is published here: entries start dirty and the first
+// Get materializes them. Warmup builds millions of terms and most are
+// never read, so cloning every one up front would be pure waste.
 //
 // The input Bitmaps must not be used after this call returns.
 func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
@@ -73,9 +110,8 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 		if bm == nil {
 			continue
 		}
-		bm.SetCopyOnWrite(true)
 		p := &atomic.Pointer[termState]{}
-		p.Store(&termState{bm: bm})
+		p.Store(&termState{dense: newDenseState(bm)})
 		cb.terms[k] = p
 	}
 	return cb
@@ -83,14 +119,15 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 
 // Get returns the bitmap for the given term key, or (nil, nil) when
 // the key is not indexed. The returned bitmap is an immutable
-// snapshot: writers publish new termStates via atomic.Store, so the
-// pointer this method returns will never be mutated by anyone — but
+// snapshot: the writer never mutates a published snapshot, and a
+// fresher one is published by replacing the pointer — so the
+// pointer this method returns will never be mutated by anyone, but
 // only if callers respect the "read-only" half of the contract.
 //
 // Forbidden caller-side methods on the returned bitmap (these have
 // side effects on the bitmap's internal needCopyOnWrite[] array,
-// which the writer's COW Clone also writes to; concurrent calls
-// from two goroutines would race):
+// which a concurrent reader taking a fresh snapshot may also write
+// to; concurrent calls from two goroutines would race):
 //
 //   - Clone, CloneCopyOnWriteContainers
 //   - RunOptimize, AddRange, RemoveRange, FlipInt
@@ -116,8 +153,7 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 // older pointer remains usable until the caller drops it.
 //
 // Concurrency: the RLock is held only for the map lookup. Once the
-// per-entry pointer is captured, the lock is released; the atomic
-// load on the entry happens lock-free.
+// per-entry pointer is captured, the lock is released.
 func (s *ConcurrentBitmaps) Get(key TermKey) (*roaring.Bitmap, error) {
 	s.rwmu.RLock()
 	p := s.terms[key]
@@ -125,15 +161,62 @@ func (s *ConcurrentBitmaps) Get(key TermKey) (*roaring.Bitmap, error) {
 	if p == nil {
 		return nil, nil //nolint:nilnil // not-found is signaled by nil bitmap, no error
 	}
-	// The pointer is always Stored with a non-nil termState holding a
-	// non-nil bm or non-empty ids before it is published to the map.
+	// The pointer is always Stored with a non-nil termState before it
+	// is published to the map.
 	st := p.Load()
-	if st.bm != nil {
-		return st.bm, nil
+	if st.dense != nil {
+		return st.dense.snapshot(), nil
 	}
 	bm := roaring.New()
 	bm.AddMany(st.ids)
 	return bm, nil
+}
+
+// snapshot returns the term's current immutable bitmap, republishing
+// it from the writer's private bitmap first if a write landed since
+// the last snapshot.
+//
+// Freshness argument — a Get that starts after an AddTo returns must
+// observe that AddTo's IDs. The flag is read BEFORE the pointer, and
+// the publisher stores the pointer BEFORE clearing the flag:
+//
+//   - AddTo completes its AddMany and sets dirty=true, both under mu,
+//     before returning. So a Get that starts afterwards loads dirty
+//     no earlier than that store.
+//   - If it loads dirty==true it takes the slow path and either
+//     clones wbm itself or finds a snapshot another reader published
+//     under mu after the write. Either way the result includes the
+//     write.
+//   - If it loads dirty==false, some publisher had already cleared
+//     the flag, and that publisher stored pub before clearing. The
+//     pub load that follows therefore returns that snapshot or a
+//     later one — never an older one.
+//
+// Reading the pointer first would break this: a reader could load a
+// stale pub, then have a concurrent publisher store a fresh pub and
+// clear dirty, then load dirty==false and return the stale snapshot.
+func (d *denseState) snapshot() *roaring.Bitmap {
+	if !d.dirty.Load() {
+		if bm := d.pub.Load(); bm != nil {
+			return bm
+		}
+	}
+	// Republish: clone the writer's bitmap once. With CopyOnWrite
+	// enabled on wbm the clone is shallow (it shares containers and
+	// marks both sides as needing COW — roaringarray.go:258-288), and
+	// the writer's next AddMany deep-copies only the containers it
+	// touches (roaringarray.go:348-353, reached from Bitmap.addwithptr
+	// at roaring.go:1177). The snapshot itself is never mutated
+	// afterwards by anyone.
+	d.mu.Lock()
+	bm := d.pub.Load()
+	if d.dirty.Load() || bm == nil {
+		bm = d.wbm.Clone()
+		d.pub.Store(bm)
+		d.dirty.Store(false)
+	}
+	d.mu.Unlock()
+	return bm
 }
 
 // AddTo records each eventID under key. Idempotent: callers
@@ -146,13 +229,12 @@ func (s *ConcurrentBitmaps) Get(key TermKey) (*roaring.Bitmap, error) {
 // itself. The orchestrator drives ingest from one goroutine per
 // chunk.
 //
-// COW behavior: for an existing dense term, AddTo Clones the
-// current bitmap (O(1) shallow copy because the source has
-// CopyOnWrite enabled), AddManys the new IDs (which COW-clones only
-// the touched containers), then atomic.Stores a new termState
-// pointing at the resulting bitmap. The old termState's bitmap is
-// untouched — concurrent readers holding it see the previous
-// snapshot.
+// Dense-mode behavior: AddMany mutates the term's writer-private
+// bitmap in place under the per-term mutex, then flags it dirty.
+// Nothing is allocated or published, so the call costs
+// O(len(eventIDs)) rather than O(containers) — the term whose growth
+// with chunk fill dominated the apply phase. Readers holding an
+// earlier snapshot are unaffected; the next Get republishes.
 func (s *ConcurrentBitmaps) AddTo(key TermKey, eventIDs ...uint32) {
 	if len(eventIDs) == 0 {
 		return
@@ -173,11 +255,14 @@ func (s *ConcurrentBitmaps) AddTo(key TermKey, eventIDs ...uint32) {
 	}
 
 	old := p.Load()
-	if old.bm != nil {
-		// Dense mode: COW Clone + AddMany + atomic publish.
-		next := old.bm.Clone()
-		next.AddMany(eventIDs)
-		p.Store(&termState{bm: next})
+	if d := old.dense; d != nil {
+		// Dense mode: in-place add, no clone, no publish. dirty is set
+		// before the unlock so a Get starting after this call returns
+		// cannot miss these IDs (see denseState.snapshot).
+		d.mu.Lock()
+		d.wbm.AddMany(eventIDs)
+		d.dirty.Store(true)
+		d.mu.Unlock()
 		return
 	}
 
@@ -192,21 +277,35 @@ func (s *ConcurrentBitmaps) AddTo(key TermKey, eventIDs ...uint32) {
 		ids = append(ids, id)
 	}
 	if len(ids) >= promotionThreshold {
-		bm := roaring.New()
-		bm.AddMany(ids)
-		// Enable lazy container-level copy-on-write. Subsequent
-		// AddTo calls clone bm via roaring.Clone (O(1) shallow:
-		// shares container pointers and marks both bitmaps as
-		// needing COW), then AddMany routes through
-		// getWritableContainerAtIndex which deep-copies only the
-		// touched containers. This turns each ingest call's
-		// Clone+AddMany into per-touched-container work instead of
-		// per-bitmap work — ~40× speedup for popular dense terms.
-		bm.SetCopyOnWrite(true)
-		p.Store(&termState{bm: bm})
+		p.Store(promote(ids))
 		return
 	}
 	p.Store(&termState{ids: ids})
+}
+
+// newDenseState wraps a writer-owned bitmap as a dense term. The
+// bitmap is marked CopyOnWrite so the reader-side Clone in snapshot
+// is O(containers) of slice copy rather than a deep copy of every
+// container, and so the writer's following AddMany deep-copies only
+// the containers it touches.
+//
+// No snapshot is published: dirty starts true, which the pub == nil
+// invariant requires, and the first reader materializes one. A dense
+// term that is written but never read therefore never clones.
+func newDenseState(bm *roaring.Bitmap) *denseState {
+	bm.SetCopyOnWrite(true)
+	d := &denseState{wbm: bm}
+	d.dirty.Store(true)
+	return d
+}
+
+// promote builds the dense representation of a term from its sorted
+// ids. The returned termState is the last one this term ever
+// publishes; later snapshots go into denseState.pub.
+func promote(ids []uint32) *termState {
+	bm := roaring.New()
+	bm.AddMany(ids)
+	return &termState{dense: newDenseState(bm)}
 }
 
 // newTermState builds a fresh termState seeded with the given
@@ -215,10 +314,7 @@ func (s *ConcurrentBitmaps) AddTo(key TermKey, eventIDs ...uint32) {
 // threshold.
 func newTermState(eventIDs []uint32) *termState {
 	if len(eventIDs) >= promotionThreshold {
-		bm := roaring.New()
-		bm.AddMany(eventIDs)
-		bm.SetCopyOnWrite(true) // see AddTo for rationale
-		return &termState{bm: bm}
+		return promote(eventIDs)
 	}
 	ids := make([]uint32, 0, len(eventIDs))
 	for _, id := range eventIDs {
