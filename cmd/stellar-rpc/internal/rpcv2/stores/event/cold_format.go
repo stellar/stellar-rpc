@@ -96,6 +96,71 @@ const indexPackChecksum = packfile.ChecksumCRC32C
 const IndexRecordFingerprintLen = 4
 
 // ──────────────────────────────────────────────────────────────────
+// index.pack build stamp.
+//
+// Embedded in index.pack's app-data slot:
+//
+//	offset  size  field
+//	0       1     version (0x01)
+//	1       2     term schema version (uint16 BE)
+//	3       8     indexed-field bitmask (uint64 BE)
+//
+// The stamp records which term-derivation scheme and field set the
+// index was built under, making the artifact self-describing: an
+// index missing a term family becomes distinguishable from one that
+// simply matched nothing. Freeze and walk write identical stamps
+// (all three values are compile-time constants), so freeze-vs-walk
+// byte identity is unaffected. Decoding ignores trailing bytes so a
+// future version can extend the blob without moving these fields.
+// ──────────────────────────────────────────────────────────────────
+
+const (
+	indexStampVersion byte = 0x01
+	indexStampLen          = 1 + 2 + 8
+)
+
+func encodeIndexBuildStamp() []byte {
+	buf := make([]byte, indexStampLen)
+	buf[0] = indexStampVersion
+	binary.BigEndian.PutUint16(buf[1:3], TermSchemaVersion)
+	binary.BigEndian.PutUint64(buf[3:11], IndexedFieldMask())
+	return buf
+}
+
+// checkIndexBuildStamp refuses an index.pack whose build stamp names a term
+// schema or field set other than this binary's own.
+func checkIndexBuildStamp(indexPackPath string, r *stores.PackReader) error {
+	ad, err := r.AppData()
+	if err != nil {
+		return fmt.Errorf("events: read build stamp of %s: %w", indexPackPath, err)
+	}
+	schema, mask, err := decodeIndexBuildStamp(ad)
+	if err != nil {
+		return fmt.Errorf("events: %s: %w", indexPackPath, err)
+	}
+	if schema != TermSchemaVersion || mask != IndexedFieldMask() {
+		return fmt.Errorf(
+			"events: %s was built under term schema %d with field mask %#x; this binary expects "+
+				"schema %d with mask %#x (rebuilt index required, or a binary matching the artifact)",
+			indexPackPath, schema, mask, TermSchemaVersion, IndexedFieldMask())
+	}
+	return nil
+}
+
+// decodeIndexBuildStamp recovers (termSchema, fieldMask) from an index.pack
+// app-data blob, rejecting a short blob or an unknown stamp version. Bytes
+// past the stamp are ignored (future extension room).
+func decodeIndexBuildStamp(data []byte) (uint16, uint64, error) {
+	if err := stores.CheckBlobVersion(data, indexStampVersion); err != nil {
+		return 0, 0, fmt.Errorf("events: index.pack build stamp: %w", err)
+	}
+	if len(data) < indexStampLen {
+		return 0, 0, fmt.Errorf("events: index.pack build stamp is %d bytes, want at least %d", len(data), indexStampLen)
+	}
+	return binary.BigEndian.Uint16(data[1:3]), binary.BigEndian.Uint64(data[3:11]), nil
+}
+
+// ──────────────────────────────────────────────────────────────────
 // events.pack record codec.
 // ──────────────────────────────────────────────────────────────────
 
@@ -160,12 +225,9 @@ const LedgerOffsetsFormatVersion byte = 0x01
 
 const ledgerOffsetsHeaderLen = 1 + 4 + 4
 
-// ErrUnknownLedgerOffsetsVersion is returned when decoding app data
-// whose leading version byte isn't recognized by this binary.
-var ErrUnknownLedgerOffsetsVersion = errors.New("events: unknown LedgerOffsets format version")
-
-// ErrShortLedgerOffsets is returned when the app data buffer is
-// shorter than the declared header or trailing cumulative array.
+// ErrShortLedgerOffsets is returned when the app data buffer is empty,
+// carries an unknown version byte, or is shorter than the declared header
+// or trailing cumulative array.
 var ErrShortLedgerOffsets = errors.New("events: LedgerOffsets app data too short")
 
 // encodeLedgerOffsets serializes o for packfile app-data embedding.
@@ -190,11 +252,11 @@ func encodeLedgerOffsets(o *LedgerOffsets) ([]byte, error) {
 // encodeLedgerOffsets back into a *LedgerOffsets. Used by the cold
 // reader (PR-3a).
 func DecodeLedgerOffsets(data []byte) (*LedgerOffsets, error) {
+	if err := stores.CheckBlobVersion(data, LedgerOffsetsFormatVersion); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrShortLedgerOffsets, err)
+	}
 	if len(data) < ledgerOffsetsHeaderLen {
 		return nil, ErrShortLedgerOffsets
-	}
-	if data[0] != LedgerOffsetsFormatVersion {
-		return nil, fmt.Errorf("%w: 0x%02x", ErrUnknownLedgerOffsetsVersion, data[0])
 	}
 	startLedger := binary.BigEndian.Uint32(data[1:5])
 	n := binary.BigEndian.Uint32(data[5:9])
@@ -269,11 +331,11 @@ func encodeEventsMeta(secret [stores.SecretLen]byte) []byte {
 
 func decodeEventsMeta(data []byte) ([stores.SecretLen]byte, error) {
 	var secret [stores.SecretLen]byte
+	if err := stores.CheckBlobVersion(data, eventsMetaVersion); err != nil {
+		return secret, fmt.Errorf("%w: %w", errBadIndexMetadata, err)
+	}
 	if len(data) != eventsMetaLen {
 		return secret, fmt.Errorf("%w: %d bytes, want %d", errBadIndexMetadata, len(data), eventsMetaLen)
-	}
-	if data[0] != eventsMetaVersion {
-		return secret, fmt.Errorf("%w: unknown version 0x%02x", errBadIndexMetadata, data[0])
 	}
 	copy(secret[:], data[1:])
 	return secret, nil

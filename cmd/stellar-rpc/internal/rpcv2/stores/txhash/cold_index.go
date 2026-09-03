@@ -169,7 +169,11 @@ func scanBinHeader(path string) (uint64, [stores.SecretLen]byte, error) {
 	if _, err := io.ReadFull(f, hdr[:]); err != nil {
 		return 0, secret, fmt.Errorf("txhash: read header of %s: %w", path, err)
 	}
-	copy(secret[:], hdr[coldBinCountSize:])
-	count, err := coldBinCount(path, fi.Size(), binary.LittleEndian.Uint64(hdr[:coldBinCountSize]))
+	if err := checkBinPrelude(path, hdr[:]); err != nil {
+		return 0, secret, err
+	}
+	copy(secret[:], hdr[coldBinPreludeSize+coldBinCountSize:])
+	count, err := coldBinCount(path, fi.Size(),
+		binary.LittleEndian.Uint64(hdr[coldBinPreludeSize:coldBinPreludeSize+coldBinCountSize]))
 	return count, secret, err
 }

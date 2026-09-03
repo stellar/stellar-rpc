@@ -942,3 +942,53 @@ func TestColdReader_UncheckedIndexPackIsCorrupt(t *testing.T) {
 	// so a bare ErrCorrupt assertion would survive the guard's removal.
 	require.Contains(t, err.Error(), "built without a record checksum")
 }
+
+// rewriteIndexPackStamp replaces the chunk's index.pack with a zero-record
+// pack carrying the given build stamp. The stamp gate runs before every
+// count cross-check, so this exercises the schema/mask refusal on both
+// eventful and eventless chunks.
+func rewriteIndexPackStamp(t *testing.T, dir string, chunkID chunk.ID, schema uint16, mask uint64) {
+	t.Helper()
+	stamp := make([]byte, indexStampLen)
+	stamp[0] = indexStampVersion
+	binary.BigEndian.PutUint16(stamp[1:3], schema)
+	binary.BigEndian.PutUint64(stamp[3:11], mask)
+	pw, err := packfile.Create(filepath.Join(dir, IndexPackName(chunkID)), packfile.WriterOptions{
+		Format:         indexPackFormat,
+		ItemsPerRecord: indexPackItemsPerRecord,
+		RecordChecksum: indexPackChecksum,
+		Overwrite:      true,
+	})
+	require.NoError(t, err)
+	require.NoError(t, pw.Finish(stamp))
+}
+
+// TestColdReader_RejectsMismatchedBuildStamp pins the capability gate: an
+// index built under a different term schema or field set must refuse at the
+// lookup path, on eventful and eventless chunks alike, rather than serve
+// as if it could answer this binary's filters.
+func TestColdReader_RejectsMismatchedBuildStamp(t *testing.T) {
+	cases := []struct {
+		name   string
+		schema uint16
+		mask   uint64
+	}{
+		{"schema", TermSchemaVersion + 1, IndexedFieldMask()},
+		{"mask", TermSchemaVersion, IndexedFieldMask() | 1<<63},
+	}
+	for _, eventsPerLedger := range []int{2, 0} {
+		for _, tc := range cases {
+			t.Run(fmt.Sprintf("eventsPerLedger=%d/%s", eventsPerLedger, tc.name), func(t *testing.T) {
+				const chunkID = chunk.ID(0)
+				dir, _ := buildColdFixture(t, chunkID, eventsPerLedger, 2)
+				rewriteIndexPackStamp(t, dir, chunkID, tc.schema, tc.mask)
+
+				cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = cr.Close() })
+				_, err = cr.LookupKeys(context.Background(), []TermKey{{1}})
+				require.ErrorContains(t, err, "was built under term schema")
+			})
+		}
+	}
+}

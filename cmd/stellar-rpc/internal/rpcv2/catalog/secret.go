@@ -2,7 +2,6 @@ package catalog
 
 import (
 	"crypto/rand"
-	"fmt"
 )
 
 // catalogSecretStoreKey holds the deployment's cold-index secret.
@@ -17,7 +16,8 @@ const catalogSecretStoreKey = "meta/catalog-secret"
 func (c *Catalog) Secret() [32]byte { return c.secret }
 
 // ensureSecret loads the persisted cold-index secret, minting and persisting a
-// fresh random one on first call. Open runs it single-threaded and caches the
+// fresh random one on first call. Open runs it single-threaded, after the
+// census has already validated any persisted value's width, and caches the
 // result; nothing else should call it (get-or-create is not atomic).
 func (c *Catalog) ensureSecret() ([32]byte, error) {
 	var s [32]byte
@@ -26,9 +26,6 @@ func (c *Catalog) ensureSecret() ([32]byte, error) {
 		return s, err
 	}
 	if found {
-		if len(v) != len(s) {
-			return s, fmt.Errorf("persisted cold-index secret is %d bytes, want %d", len(v), len(s))
-		}
 		copy(s[:], v)
 		return s, nil
 	}

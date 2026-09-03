@@ -62,6 +62,43 @@ var allKinds = []Kind{KindLedgers, KindEvents, KindTxHash}
 // AllKinds returns the per-chunk artifact kinds in canonical order.
 func AllKinds() []Kind { return append([]Kind(nil), allKinds...) }
 
+// allStates / allHotStates are the state-token registries, the single source
+// of truth the census derives its vocabulary from — a token added here is
+// automatically accepted, so the daemon can never refuse its own writes.
+//
+//nolint:gochecknoglobals // immutable state registries, single source of truth
+var (
+	allStates    = []State{StateFreezing, StateFrozen, StatePruning}
+	allHotStates = []HotState{HotTransient, HotReady}
+)
+
+// AllStates returns the artifact lifecycle states.
+func AllStates() []State { return append([]State(nil), allStates...) }
+
+// AllHotStates returns the hot-DB lifecycle states.
+func AllHotStates() []HotState { return append([]HotState(nil), allHotStates...) }
+
+// IsKnownState reports whether s is a registered artifact lifecycle state.
+// The switch names every constant so a state added to the const block but not
+// here is caught by the exhaustive linter, not by the census refusing the
+// daemon's own catalog on the next restart.
+func IsKnownState(s State) bool {
+	switch s {
+	case StateFreezing, StateFrozen, StatePruning:
+		return true
+	}
+	return false
+}
+
+// IsKnownHotState reports whether s is a registered hot-DB lifecycle state.
+func IsKnownHotState(s HotState) bool {
+	switch s {
+	case HotTransient, HotReady:
+		return true
+	}
+	return false
+}
+
 // TxHashIndexID identifies a tx-hash index: a contiguous run of
 // chunks_per_txhash_index chunks. Distinct type from chunk.ID (both uint32) so
 // index ids and chunk ids never silently interchange.
