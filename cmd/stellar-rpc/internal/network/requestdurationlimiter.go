@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"reflect"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/creachadair/jrpc2"
@@ -197,10 +198,35 @@ func (q *httpRequestDurationLimiter) ServeHTTP(res http.ResponseWriter, req *htt
 	}
 }
 
+// LiveHandlers counts the handler executions one mount has in flight. It lives
+// here because both ends of the drain need it and neither imports the other:
+// the duration limiters count into it, and wire.Handler.Shutdown joins it.
+//
+// It is a named type so the two ends cannot be wired to different groups by
+// accident. There is exactly ONE legal producer, jsonrpc.NewHandler; anything
+// else building a mount gets a Shutdown that reports success while abandoned
+// handlers run into a closing store.
+type LiveHandlers struct {
+	sync.WaitGroup
+}
+
 type RPCRequestDurationLimiter struct {
 	requestDurationLimiter
 
 	jrpcDownstreamHandler jrpc2.Handler
+
+	// liveHandlers counts EVERY live child of a budgeted method, not only the
+	// abandoned ones — the Add below is unconditional and pre-launch. They
+	// need to be joinable at shutdown because Handle returns on its timer
+	// without waiting for them, which is the whole point of the decoupling
+	// and the reason rpcv2 carries a graceMargin.
+	//
+	// LOAD-BEARING: the Add happens on the WRAPPER goroutine, synchronously,
+	// before the launch — never inside the child. The wrapper always holds a
+	// wire permit, so a drain that has taken every permit cannot race an Add.
+	// "Making the name true" by adding only on the timeout path is
+	// unimplementable: by then the parent has already abandoned the child.
+	liveHandlers *LiveHandlers
 }
 
 func MakeJrpcRequestDurationLimiter(
@@ -210,14 +236,20 @@ func MakeJrpcRequestDurationLimiter(
 	warningCounter increasingCounter,
 	limitCounter increasingCounter,
 	logger *log.Entry,
+	liveHandlers *LiveHandlers,
 ) *RPCRequestDurationLimiter {
 	// make sure the warning threshold is less then the limit threshold; otherwise, just set it to the limit threshold.
 	if warningThreshold > limitThreshold {
 		warningThreshold = limitThreshold
 	}
+	if liveHandlers == nil {
+		panic("network: MakeJrpcRequestDurationLimiter needs the mount's LiveHandlers; " +
+			"jsonrpc.NewHandler is the one place that builds it")
+	}
 
 	return &RPCRequestDurationLimiter{
 		jrpcDownstreamHandler: downstream,
+		liveHandlers:          liveHandlers,
 		requestDurationLimiter: requestDurationLimiter{
 			warningThreshold: warningThreshold,
 			limitThreshold:   limitThreshold,
@@ -253,7 +285,10 @@ func (q *RPCRequestDurationLimiter) Handle(ctx context.Context, req *jrpc2.Reque
 	requestCtx, requestCtxCancel := context.WithTimeout(ctx, q.limitThreshold)
 	defer requestCtxCancel()
 
+	// Before the launch, on this goroutine, under this wrapper's wire permit.
+	q.liveHandlers.Add(1)
 	go func() {
+		defer q.liveHandlers.Done()
 		defer func() {
 			if err := recover(); err != nil {
 				q.logger.Errorf("Request for method %s resulted in an error : %v", req.Method(), err)

@@ -99,6 +99,26 @@ func (d *Daemon) close() {
 		}
 	}
 
+	// Connections dead before the drain, or live requests keep starting
+	// elements. A no-op after a graceful Shutdown; when that exhausted its
+	// deadline this force-closes the survivors, killing their request
+	// contexts. Ignored like rpcv2's: re-closing listeners Shutdown already
+	// closed reports so, and there is nothing to do about it here. The admin
+	// server serves NewAdminMux, not this handler, so it is not in the path.
+	_ = d.server.Close()
+
+	// FIRST resource-teardown step: handler contexts are server-scoped, so
+	// this is the only thing that ends a request still reading core, db or the
+	// datastore below. Its own budget, not shutdownCtx's remainder, because
+	// the drain matters most when the Shutdown above already spent that on the
+	// very stragglers this cancels. Logged, not collected: a drain that ran out of
+	// time is a degraded shutdown, not a failed one.
+	drainCtx, drainRelease := context.WithTimeout(context.Background(), defaultShutdownGracePeriod)
+	defer drainRelease()
+	if err := d.jsonRPCHandler.Shutdown(drainCtx); err != nil {
+		d.logger.WithError(err).Warn("JSON-RPC handlers did not drain before teardown")
+	}
+
 	if err := d.ingestService.Close(); err != nil {
 		d.logger.WithError(err).Error("error closing ingestion service")
 		closeErrors = append(closeErrors, err)
@@ -107,7 +127,6 @@ func (d *Daemon) close() {
 		d.logger.WithError(err).Error("error closing captive core")
 		closeErrors = append(closeErrors, err)
 	}
-	d.jsonRPCHandler.Close()
 	if err := d.db.Close(); err != nil {
 		d.logger.WithError(err).Error("Error closing db")
 		closeErrors = append(closeErrors, err)

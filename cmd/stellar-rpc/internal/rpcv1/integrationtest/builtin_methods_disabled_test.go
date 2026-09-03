@@ -14,7 +14,12 @@ import (
 
 // TestBuiltinRPCMethodsDisabled verifies that the jrpc2 library's built-in
 // rpc.* methods (e.g. rpc.serverInfo, which leaks node lifetime metrics and
-// process start time) are not reachable via the HTTP bridge.
+// process start time) are not reachable on the JSON-RPC mount.
+//
+// This used to depend on the bridge's DisableBuiltin server option. The mount
+// no longer runs a jrpc2.Server at all: internal/jsonrpc/wire dispatches from
+// the method table alone, so a reserved name is an ordinary unknown method and
+// the -32601 shape below is unchanged.
 func TestBuiltinRPCMethodsDisabled(t *testing.T) {
 	test := infrastructure.NewTest(t, nil)
 

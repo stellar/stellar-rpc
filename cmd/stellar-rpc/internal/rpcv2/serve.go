@@ -18,8 +18,10 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 )
 
-// readShutdownTimeout bounds the graceful drain at shutdown; whatever is
-// still in flight after it is cut off.
+// readShutdownTimeout bounds EACH phase of the read server's teardown: first
+// http.Server.Shutdown waiting for in-flight requests, then the handler drain
+// canceling and waiting for the handlers those requests left behind. The two
+// are sequential, so the endpoint's teardown is bounded by twice this.
 const readShutdownTimeout = 5 * time.Second
 
 // newServeReads returns the production ServeReads — the method table over the
@@ -41,11 +43,21 @@ func newServeReads(
 			IdleTimeout: jsonrpc.DefaultHTTPIdleTimeout,
 		}
 
-		// Both exits close the server: on death this reaps established
-		// keep-alive conns Serve abandoned; after the graceful path's
-		// Shutdown it is a no-op.
-		defer func() { _ = server.Close() }()
-		defer handler.Close()
+		// Both steps on every exit, in ONE defer so the order is written down
+		// rather than inferred from LIFO. Connections dead before the drain,
+		// or live requests keep starting elements. Close reaps the keep-alives
+		// Serve abandoned on death and is a no-op after a graceful Shutdown;
+		// the drain must then finish before startup.go's `defer
+		// registry.Close()`, which runs once g.Wait joins this goroutine.
+		//nolint:contextcheck // a fresh budget: ctx is already canceled
+		defer func() {
+			_ = server.Close()
+			drainCtx, cancel := context.WithTimeout(context.Background(), readShutdownTimeout)
+			defer cancel()
+			if derr := handler.Shutdown(drainCtx); derr != nil {
+				p.logger.WithError(derr).Warn("read handlers did not drain before teardown")
+			}
+		}()
 		died := make(chan error, 1)
 		go func() { died <- server.Serve(listener) }()
 		select {
