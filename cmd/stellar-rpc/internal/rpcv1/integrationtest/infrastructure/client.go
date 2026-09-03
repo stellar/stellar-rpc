@@ -53,6 +53,29 @@ func logTransactionResult(t testing.TB, response protocol.GetTransactionResponse
 	}
 }
 
+// SendTransaction submits an encoded transaction and returns Core's answer.
+//
+// Core answers TRY_AGAIN_LATER when the source account's previous transaction
+// is still in its queue. RPC reports that previous transaction as applied as
+// soon as captive core has applied it, which on a loaded CI runner can be a few
+// hundred milliseconds before the validator has. Nothing was queued, so the
+// same transaction is submitted again after a short wait.
+func SendTransaction(t testing.TB, client *client.Client, b64 string) protocol.SendTransactionResponse {
+	const maxAttempts = 60
+	request := protocol.SendTransactionRequest{Transaction: b64}
+	var result protocol.SendTransactionResponse
+	for attempt := 1; ; attempt++ {
+		var err error
+		result, err = client.SendTransaction(context.Background(), request)
+		require.NoError(t, err)
+		if result.Status != stellarcore.TXStatusTryAgainLater || attempt == maxAttempts {
+			return result
+		}
+		t.Logf("sendTransaction returned TRY_AGAIN_LATER (attempt %d), retrying", attempt)
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
 func SendSuccessfulTransaction(t testing.TB, client *client.Client, kp *keypair.Full,
 	tx *txnbuild.Transaction,
 ) protocol.GetTransactionResponse {
@@ -64,9 +87,7 @@ func SendSuccessfulTransaction(t testing.TB, client *client.Client, kp *keypair.
 	b64, err := tx.Base64()
 	require.NoError(t, err)
 
-	request := protocol.SendTransactionRequest{Transaction: b64}
-	result, err := client.SendTransaction(context.Background(), request)
-	require.NoError(t, err)
+	result := SendTransaction(t, client, b64)
 
 	expectedHashHex, err := tx.HashHex(StandaloneNetworkPassphrase)
 	require.NoError(t, err)
