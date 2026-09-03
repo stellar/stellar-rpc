@@ -128,12 +128,12 @@ func instantiate(ctx context.Context) error {
 // fetchBlaster clones and builds stellar-rpc-blaster at dev HEAD.
 func fetchBlaster(ctx context.Context, dir, repo string) (string, string, error) {
 	// TEMP: restore to @dev before merge
-	logger.Infof("fetching stellar-rpc-blaster (%s@expose-getEvents-archetypes)", repo)
+	logger.Infof("fetching stellar-rpc-blaster (%s@dev)", repo)
 	if err := os.RemoveAll(dir); err != nil {
 		return "", "", err
 	}
 	if err := harness.RunStreaming(ctx, "", nil, 20, "git", "clone", "-q", "--depth", "1",
-		"--branch", "expose-getEvents-archetypes", "https://github.com/"+repo+".git", dir); err != nil {
+		"--branch", "dev", "https://github.com/"+repo+".git", dir); err != nil {
 		return "", "", fmt.Errorf("git clone failed: %w", err)
 	}
 	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "HEAD").Output()
