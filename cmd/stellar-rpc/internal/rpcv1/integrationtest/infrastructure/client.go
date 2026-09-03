@@ -64,16 +64,17 @@ func SendTransaction(t testing.TB, client *client.Client, b64 string) protocol.S
 	const maxAttempts = 60
 	request := protocol.SendTransactionRequest{Transaction: b64}
 	var result protocol.SendTransactionResponse
-	for attempt := 1; ; attempt++ {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		var err error
-		result, err = client.SendTransaction(context.Background(), request)
+		result, err = client.SendTransaction(t.Context(), request)
 		require.NoError(t, err)
-		if result.Status != stellarcore.TXStatusTryAgainLater || attempt == maxAttempts {
-			return result
+		if result.Status != stellarcore.TXStatusTryAgainLater {
+			break
 		}
-		t.Logf("sendTransaction returned TRY_AGAIN_LATER (attempt %d), retrying", attempt)
+		t.Logf("sendTransaction returned TRY_AGAIN_LATER (attempt %d of %d)", attempt, maxAttempts)
 		time.Sleep(500 * time.Millisecond)
 	}
+	return result
 }
 
 func SendSuccessfulTransaction(t testing.TB, client *client.Client, kp *keypair.Full,
