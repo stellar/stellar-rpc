@@ -5,9 +5,6 @@
 
 input_data_path = "./output/seed.json"
 
-[endpoints.getLedgerEntries]
-rps = 0 # excluded from this suite; it sustains >1500 RPS alone and never binds first
-
 [endpoints.getEvents]
 rps = 25
 
@@ -24,7 +21,7 @@ rps = 19
 rps = 4
 
 [endpoints.getLedgers]
-rps = 2
+rps = 1
 
 [endpoints.getNetwork]
-rps = 2
+rps = 3
