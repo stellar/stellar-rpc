@@ -157,9 +157,9 @@ type Service struct {
 // Shutdown has to be split in two because of how captive core starts up. While
 // the daemon is still catching up, the ingestion worker sits inside a blocking
 // "stellar-core catchup" command. That command watches the ledger backend's
-// context, not the one cancelled here, so nothing this function does can
+// context, not the one canceled here, so nothing this function does can
 // interrupt it -- only closing the backend can. The correct shutdown order is
-// therefore Stop, then close the ledger backend, then Wait. Cancelling first
+// therefore Stop, then close the ledger backend, then Wait. Canceling first
 // matters: it makes the retry loop treat the errors that the backend shutdown
 // produces as a clean cancellation instead of a fatal ingestion failure.
 func (s *Service) Stop() {
