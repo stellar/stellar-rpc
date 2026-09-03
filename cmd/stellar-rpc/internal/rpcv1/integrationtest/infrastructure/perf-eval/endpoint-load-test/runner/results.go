@@ -111,7 +111,7 @@ func renderMarkdown(
 		rampUp, duration, errorThreshold, blasterSHA[:min(12, len(blasterSHA))], oldest, latest, handoffSecs)
 	if aborted {
 		b.WriteString("> ⚠️ **Aborted early:** an endpoint's error rate crossed the kill switch, so blaster ended " +
-			"the run; the rows below cover only the traffic served before the cutoff.\n\n")
+			"the run early.\n\n")
 	}
 	writeTable(&b, rows)
 	if len(archRows) > 0 {
