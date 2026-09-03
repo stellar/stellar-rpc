@@ -39,7 +39,7 @@ const formatLedgerCold packfile.Format = 1
 // independent of the trailer Format that names the whole encoding.
 const coldAppDataVersion byte = 0x01
 
-const appDataSize = 5
+const appDataSize = 1 + 4 // version byte + firstSeq (uint32 BE)
 
 // coldPackDecoder is the process-wide zstd decoder for cold ledger
 // pack records. packfile.RecordDecoder must be concurrent-safe and

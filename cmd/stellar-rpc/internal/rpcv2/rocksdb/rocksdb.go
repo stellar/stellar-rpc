@@ -59,7 +59,10 @@ const (
 
 	// pinnedTableFormatVersion pins the block-based table format written to
 	// disk, so a grocksdb/librocksdb upgrade cannot silently change the on-disk
-	// format. Raising it is a format-touching change: an older binary cannot
+	// format. 6 is librocksdb 10.10.1's default, so the pin changes no byte
+	// today. RocksDB's own header advises leaving format_version at the
+	// default so improvements arrive automatically; we choose the opposite on
+	// purpose. Raising it is a format-touching change: an older binary cannot
 	// open the newer tables, so it must ship as a declared storage-format bump,
 	// never as a side effect of a dependency bump.
 	pinnedTableFormatVersion = 6
@@ -861,8 +864,6 @@ func (s *Store) applySharedTableOptions(cfNames []string, cfOpts []*grocksdb.Opt
 	}
 	for i, o := range cfOpts {
 		override := s.cfg.PerCFOptions[cfNames[i]]
-		// Every CF gets an explicit BBTO so the on-disk table format is pinned
-		// (see pinnedTableFormatVersion) instead of riding grocksdb's default.
 		bbto := grocksdb.NewDefaultBlockBasedTableOptions()
 		bbto.SetFormatVersion(pinnedTableFormatVersion)
 		if s.cache != nil {

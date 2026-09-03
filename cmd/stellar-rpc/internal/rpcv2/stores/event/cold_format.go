@@ -225,8 +225,9 @@ const LedgerOffsetsFormatVersion byte = 0x01
 
 const ledgerOffsetsHeaderLen = 1 + 4 + 4
 
-// ErrShortLedgerOffsets is returned when the app data buffer is
-// shorter than the declared header or trailing cumulative array.
+// ErrShortLedgerOffsets is returned when the app data buffer is empty,
+// carries an unknown version byte, or is shorter than the declared header
+// or trailing cumulative array.
 var ErrShortLedgerOffsets = errors.New("events: LedgerOffsets app data too short")
 
 // encodeLedgerOffsets serializes o for packfile app-data embedding.
@@ -252,7 +253,7 @@ func encodeLedgerOffsets(o *LedgerOffsets) ([]byte, error) {
 // reader (PR-3a).
 func DecodeLedgerOffsets(data []byte) (*LedgerOffsets, error) {
 	if err := stores.CheckBlobVersion(data, LedgerOffsetsFormatVersion); err != nil {
-		return nil, fmt.Errorf("events: LedgerOffsets app data: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrShortLedgerOffsets, err)
 	}
 	if len(data) < ledgerOffsetsHeaderLen {
 		return nil, ErrShortLedgerOffsets

@@ -72,12 +72,12 @@ func EncodeColdMetadata(minLedger, maxLedger uint32, secret [stores.SecretLen]by
 }
 
 // ParseColdMetadata recovers [minLedger, maxLedger, secret] from the metadata
-// blob, rejecting a wrong size or maxLedger < minLedger with
-// ErrInvalidMetadata and an unknown version byte with its own message.
+// blob. Every refusal (empty, unknown version, wrong size, maxLedger <
+// minLedger) wraps ErrInvalidMetadata.
 func ParseColdMetadata(metadata []byte) (uint32, uint32, [stores.SecretLen]byte, error) {
 	var secret [stores.SecretLen]byte
 	if err := stores.CheckBlobVersion(metadata, coldMetadataVersion); err != nil {
-		return 0, 0, secret, fmt.Errorf("txhash: cold index metadata: %w", err)
+		return 0, 0, secret, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 	if len(metadata) != coldMetadataSize {
 		return 0, 0, secret, fmt.Errorf("%w: got %d bytes, want %d", ErrInvalidMetadata, len(metadata), coldMetadataSize)

@@ -36,7 +36,8 @@ func TestParseColdMetadata_WrongSizeErrors(t *testing.T) {
 		assert.ErrorIs(t, err, ErrInvalidMetadata, "size %d should error", sz)
 	}
 	_, _, _, err := ParseColdMetadata(nil)
-	require.ErrorContains(t, err, "empty", "empty blob should error")
+	require.ErrorIs(t, err, ErrInvalidMetadata, "empty blob should error")
+	require.ErrorContains(t, err, "empty")
 }
 
 func TestParseColdMetadata_UnknownVersionErrors(t *testing.T) {
@@ -106,7 +107,8 @@ func TestOpenColdReader_BadMetadataErrors(t *testing.T) {
 	require.NoError(t, sb.Close())
 
 	_, err = OpenColdReader(path)
-	require.ErrorContains(t, err, "metadata: empty", "a metadata-less index must fail open")
+	require.ErrorIs(t, err, ErrInvalidMetadata, "a metadata-less index must fail open")
+	require.ErrorContains(t, err, "empty")
 }
 
 func TestOpenColdReader_WrongPayloadSizeErrors(t *testing.T) {
