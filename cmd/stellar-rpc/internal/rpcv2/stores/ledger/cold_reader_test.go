@@ -175,22 +175,55 @@ func TestColdReader_LazyOpen(t *testing.T) {
 }
 
 func TestColdReader_RejectsWrongAppDataSize(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "bad-appdata.pack")
+	// Every blob carries a valid version byte, so the size check (which runs
+	// after the version check) is what fires. appDataSize is 5: too long and
+	// too short both refuse, and the 1-byte case pins that the firstSeq read
+	// never runs on a blob that only holds the version byte.
+	for _, tc := range []struct {
+		name string
+		ad   []byte
+	}{
+		{"too long", []byte{coldAppDataVersion, 's', 'e', 'v', 'e', 'n', 'b'}},
+		{"version byte only", []byte{coldAppDataVersion}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "bad-appdata.pack")
+			pw, err := packfile.Create(path, packfile.WriterOptions{
+				ItemsPerRecord: 1,
+				Format:         formatLedgerCold,
+			})
+			require.NoError(t, err)
+			require.NoError(t, pw.AppendItem([]byte("v")))
+			require.NoError(t, pw.Finish(tc.ad))
+
+			c, err := OpenColdReader(path)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = c.Close() })
+			_, err = c.LastSeq()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "AppData")
+		})
+	}
+}
+
+func TestColdReader_RejectsNewerAppDataVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "newer-appdata.pack")
 	pw, err := packfile.Create(path, packfile.WriterOptions{
 		ItemsPerRecord: 1,
 		Format:         formatLedgerCold,
 	})
 	require.NoError(t, err)
 	require.NoError(t, pw.AppendItem([]byte("v")))
-	// 7-byte payload — appDataSize is 4.
-	require.NoError(t, pw.Finish([]byte("seven-b")))
+	// A longer blob under an unknown version byte must report as a version
+	// problem, not a size mismatch.
+	require.NoError(t, pw.Finish([]byte{coldAppDataVersion + 1, 0, 0, 0, 2, 9}))
 
 	c, err := OpenColdReader(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 	_, err = c.LastSeq()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "AppData")
+	assert.Contains(t, err.Error(), "written by a newer stellar-rpc")
 }
 
 func TestColdReader_RejectsWrongFormat(t *testing.T) {
@@ -235,7 +268,8 @@ func TestColdReader_LastSeqOverflowRejected(t *testing.T) {
 		require.NoError(t, pw.AppendItem([]byte{byte(i)}))
 	}
 	var ad [appDataSize]byte
-	binary.BigEndian.PutUint32(ad[:], math.MaxUint32-1) // firstSeq = MaxUint32-1, items=3 → overflow
+	ad[0] = coldAppDataVersion
+	binary.BigEndian.PutUint32(ad[1:], math.MaxUint32-1) // firstSeq = MaxUint32-1, items=3 → overflow
 	require.NoError(t, pw.Finish(ad[:]))
 
 	c, err := OpenColdReader(path)

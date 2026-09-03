@@ -293,18 +293,19 @@ func TestKV_GracefulCloseAndReopen(t *testing.T) {
 
 	first, err := openKVAt(t, path)
 	require.NoError(t, err)
-	require.NoError(t, first.put("streaming:last_committed_ledger", "999"))
-	require.NoError(t, first.put("config:ledgers_per_tx_index", "100000"))
-	require.NoError(t, first.put("chunk:00000001:lfs", "1"))
+	// Keys must stay inside the census vocabulary — reopen refuses anything else.
+	require.NoError(t, first.put(geometry.ConfigEarliestLedger, "999"))
+	require.NoError(t, first.put(geometry.HotChunkKey(3), string(geometry.HotReady)))
+	require.NoError(t, first.put(geometry.ChunkKey(1, geometry.KindLedgers), string(geometry.StateFrozen)))
 	require.NoError(t, first.Close())
 
 	second, err := openKVAt(t, path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = second.Close() })
 
-	assert.Equal(t, "999", kvGetHit(t, second, "streaming:last_committed_ledger"))
-	assert.Equal(t, "100000", kvGetHit(t, second, "config:ledgers_per_tx_index"))
-	assert.Equal(t, "1", kvGetHit(t, second, "chunk:00000001:lfs"))
+	assert.Equal(t, "999", kvGetHit(t, second, geometry.ConfigEarliestLedger))
+	assert.Equal(t, string(geometry.HotReady), kvGetHit(t, second, geometry.HotChunkKey(3)))
+	assert.Equal(t, string(geometry.StateFrozen), kvGetHit(t, second, geometry.ChunkKey(1, geometry.KindLedgers)))
 }
 
 func TestKV_ConcurrentOpsAndCloseRaceFree(t *testing.T) {

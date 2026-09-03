@@ -255,6 +255,12 @@ func newFileReader(path string, bufBytes int) (*fileReader, error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("txhash: %s too short for header (%d bytes)", path, n)
 	}
+	// Self-defending: the merge consumes raw entry bytes, so it verifies the
+	// prelude itself rather than trusting that scanAndValidate ran upstream.
+	if err := checkBinPrelude(path, buf); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
 	return &fileReader{
 		path:    path,
 		f:       f,

@@ -32,10 +32,14 @@ func MissingPackOpens() uint64 { return missingPackOpens.Load() }
 // store. Shared by the reader and the writer (same package).
 const formatLedgerCold packfile.Format = 1
 
-// appDataSize — firstSeq (4 BE). lastSeq is derived from
-// trailer.TotalItems at open. Shared by the reader and the writer
-// (same package).
-const appDataSize = 4
+// AppData layout: a leading version byte, then firstSeq (4 BE).
+// lastSeq is derived from trailer.TotalItems at open. Shared by the
+// reader and the writer (same package). Every app-data blob leads
+// with its own version byte so it is self-describing on its own,
+// independent of the trailer Format that names the whole encoding.
+const coldAppDataVersion byte = 0x01
+
+const appDataSize = 1 + 4 // version byte + firstSeq (uint32 BE)
 
 // coldPackDecoder is the process-wide zstd decoder for cold ledger
 // pack records. packfile.RecordDecoder must be concurrent-safe and
@@ -107,10 +111,13 @@ func (c *ColdReader) loadHeader() (coldHeader, error) {
 	if err != nil {
 		return coldHeader{}, fmt.Errorf("cold: read AppData %q: %w", c.path, err)
 	}
+	if err := stores.CheckBlobVersion(ad, coldAppDataVersion); err != nil {
+		return coldHeader{}, fmt.Errorf("cold %q: AppData: %w", c.path, err)
+	}
 	if len(ad) != appDataSize {
 		return coldHeader{}, fmt.Errorf("cold %q: expected %d-byte AppData, got %d", c.path, appDataSize, len(ad))
 	}
-	first := binary.BigEndian.Uint32(ad)
+	first := binary.BigEndian.Uint32(ad[1:])
 	if uint64(first)+uint64(tr.TotalItems)-1 > math.MaxUint32 {
 		return coldHeader{}, fmt.Errorf(
 			"cold %q: lastSeq overflows uint32 (firstSeq=%d, items=%d)",

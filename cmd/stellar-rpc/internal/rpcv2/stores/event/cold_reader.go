@@ -175,9 +175,11 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		if err != nil {
 			return err
 		}
-		// index.pack's own integrity is checked for every chunk, eventless or
-		// not: a foreign or unchecked pack is not servable whatever its term
-		// count, and the open is already in flight either way.
+		// Format, record-checksum, and build-stamp checks run for eventless
+		// chunks too, so a foreign, unchecked, or mis-schemed pack refuses on the
+		// first indexed lookup regardless of chunk content. The guarantee is
+		// lookup-path-only by design: payload reads (FetchEvents, All) never
+		// consult the index pair and stay valid against events.pack's own checks.
 		tr, terr := c.index.Trailer()
 		if terr != nil {
 			return fmt.Errorf("events: open %s: %w", indexPackPath, terr)
@@ -193,6 +195,9 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		if !tr.HasRecordChecksum {
 			return fmt.Errorf("%w: %s: built without a record checksum (stale build)",
 				stores.ErrCorrupt, indexPackPath)
+		}
+		if err := checkIndexBuildStamp(indexPackPath, c.index); err != nil {
+			return err
 		}
 		if idx.isEmpty() {
 			// A zero-term index is only valid for an eventless chunk: cross-check
@@ -212,10 +217,11 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		// Non-empty index: bind the pair to this chunk before serving from
 		// it — index.pack/index.hash carry no chunk ID of their own, so a
 		// mispaired index would silently return an incomplete subset of
-		// matches. Two cheap checks on top of the pack's own validation
-		// above: index.hash keys == index.pack records (halves of one
-		// build), and non-empty index ⇒ non-empty events.pack (converse of
-		// the empty-index check below).
+		// matches. Two cheap checks beyond the shared format, checksum, and
+		// stamp gates above:
+		// index.hash keys == index.pack records (halves of one build), and
+		// non-empty index ⇒ non-empty events.pack (converse of the
+		// empty-index check above).
 		if uint64(tr.TotalItems) != idx.numKeys() {
 			return fmt.Errorf(
 				"events: index pair mismatch for chunk %s: index.hash holds %d keys "+

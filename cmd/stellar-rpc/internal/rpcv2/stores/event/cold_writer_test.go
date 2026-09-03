@@ -279,3 +279,19 @@ func TestEventsPack_TrailerPinsFormatAndRecordSize(t *testing.T) {
 	assert.Equal(t, uint32(eventsPackItemsPerRecord), tr.ItemsPerRecord,
 		"events.pack ItemsPerRecord must match eventsPackItemsPerRecord constant")
 }
+
+// TestColdWriter_EventsPackContentHash pins that events.pack carries a
+// content hash over the canonical payload bytes and that it verifies through
+// the production decoder, matching the ledger and index.pack assertions.
+func TestColdWriter_EventsPackContentHash(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, _ := buildColdFixture(t, chunkID, 3, 1)
+
+	r := packfile.Open(filepath.Join(dir, EventsPackName(chunkID)),
+		packfile.ReaderOptions{RecordDecoder: eventsPackDecoder})
+	t.Cleanup(func() { _ = r.Close() })
+	_, hashed, err := r.ContentHash()
+	require.NoError(t, err)
+	require.True(t, hashed, "events.pack carries a content hash")
+	require.NoError(t, r.Verify(context.Background()))
+}

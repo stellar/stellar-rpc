@@ -333,13 +333,17 @@ func ReadColdBin(t *testing.T, path string) []txhash.ColdEntry {
 	require.NoError(t, err)
 	defer f.Close()
 
-	const headerSize = 8 + stores.SecretLen // uint64-LE count + index secret
+	// Prelude (magic "SBIN", version, 3 reserved) + uint64-LE count + secret.
+	const preludeSize = 8
+	const headerSize = preludeSize + 8 + stores.SecretLen
 	entrySize := txhash.ColdKeySize + 4
 
 	var header [headerSize]byte
 	_, err = io.ReadFull(f, header[:])
 	require.NoError(t, err)
-	count := binary.LittleEndian.Uint64(header[:8])
+	require.Equal(t, []byte("SBIN"), header[:4], "cold .bin magic")
+	require.Equal(t, byte(1), header[4], "cold .bin version")
+	count := binary.LittleEndian.Uint64(header[preludeSize : preludeSize+8])
 
 	info, err := f.Stat()
 	require.NoError(t, err)
