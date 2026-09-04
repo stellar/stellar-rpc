@@ -195,14 +195,32 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 
 	eventTypes := combineEventTypes(request.Filters)
 
+	filters, err := store.CompileV1EventFilters(request.Filters) // nil matches every event
+	if err != nil {
+		return protocol.GetEventsResponse{}, &jrpc2.Error{
+			Code: jrpc2.InvalidParams, Message: err.Error(),
+		}
+	}
+	plan := store.PlanFilters(filters)
+
 	// Scan function to apply filters
 	var eventViewScanFunction store.ViewScanFunction = func(
 		eventView xdr.DiagnosticEventView, cursor protocol.Cursor, ledgerCloseTimestamp int64, txHash *xdr.Hash,
-	) bool {
-		if request.Matches(eventView) {
+	) (bool, error) {
+		matched := filters == nil
+		if !matched {
+			event, err := eventView.Event()
+			if err != nil {
+				return false, err
+			}
+			if matched, err = store.MatchesAnyFilterView(event, filters, &plan); err != nil {
+				return false, err
+			}
+		}
+		if matched {
 			found = append(found, entry{cursor, ledgerCloseTimestamp, eventView, txHash})
 		}
-		return uint(len(found)) < limit
+		return uint(len(found)) < limit, nil
 	}
 
 	err = h.dbReader.GetEvents(ctx, cursorRange, contractIDs, topics, eventTypes, eventViewScanFunction)

@@ -284,7 +284,7 @@ func (eventHandler *eventHandler) trimEvents(latestLedgerSeq uint32, retentionWi
 // ascending Cursor order.
 //
 // If f returns false, the scan terminates early (f will not be applied on
-// remaining events in the range).
+// remaining events in the range). If f returns an error, the scan aborts with it.
 //
 //nolint:funlen,cyclop
 func (eventHandler *eventHandler) GetEvents(
@@ -394,7 +394,11 @@ func (eventHandler *eventHandler) GetEvents(
 		eventView := xdr.DiagnosticEventView(row.eventData)
 
 		txHash := xdr.Hash(transactionHash)
-		if !scanner(eventView, cur, ledgerCloseTime, &txHash) {
+		keepGoing, err := scanner(eventView, cur, ledgerCloseTime, &txHash)
+		if err != nil {
+			return errors.Join(err, errors.New("failed to scan event"))
+		}
+		if !keepGoing {
 			return nil
 		}
 	}
