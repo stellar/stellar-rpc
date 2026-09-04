@@ -7,7 +7,10 @@ defaults:
 on:
   pull_request:
   push:
-    branches: [ main, release/** ]
+    # A pull request can restore caches saved on its base branch. Running on
+    # push to feature/full-history is what saves librocksdb, libzstd and the Go
+    # module cache there, so PRs against it do not rebuild them on every run.
+    branches: [ main, release/**, feature/full-history ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_protected == 'true' && github.sha || github.ref }}
@@ -86,20 +89,21 @@ jobs:
     uses: ./.github/workflows/integration-tests.yml
     with:
       protocol_version: '27'
-      core_deb_version: '28.0.0-3486.2332980a1.jammy'
-      core_docker_img: 'stellar/unsafe-stellar-core:28.0.0-3486.2332980a1.jammy'
+      core_deb_version: '28.0.0-3494.a9b861321.noble'
+      core_docker_img: 'stellar/unsafe-stellar-core:28.0.0-3494.a9b861321.jammy'
 
   integration-p28-pkg:
     name: Integration tests (P28)
     uses: ./.github/workflows/integration-tests.yml
     with:
       protocol_version: '28'
-      # Protocol 28 GA core release. Its src/rust/soroban/p28 submodule is
+      # Protocol 28 GA core release, the build published to the noble apt repo.
+      # Its src/rust/soroban/p28 submodule is
       # rs-soroban-env v28.0.0 (ba37ea5f) — the same release soroban-env-host-curr
       # pins from crates.io, keeping simulation cost models identical to
       # apply-time metering.
-      core_deb_version: '28.0.0-3486.2332980a1.jammy'
-      core_docker_img: 'stellar/unsafe-stellar-core:28.0.0-3486.2332980a1.jammy'
+      core_deb_version: '28.0.0-3494.a9b861321.noble'
+      core_docker_img: 'stellar/unsafe-stellar-core:28.0.0-3494.a9b861321.jammy'
 
   # integration-p25-src:
   #   name: Integration tests (p25, core from source)

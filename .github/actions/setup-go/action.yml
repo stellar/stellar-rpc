@@ -139,12 +139,16 @@ runs:
         echo SUDO='sudo' >> $GITHUB_OUTPUT
       id: variables
 
-    # Cache the Go Modules downloaded during the job.
+    # Cache the Go modules downloaded during the job. The module cache holds
+    # the same files for every workflow, job and matrix leg, so it is keyed by
+    # OS and go.sum only. Keying it by KEY_PREFIX stored one 560MB copy per
+    # leg and crowded the small, slow-to-rebuild native libraries out of the
+    # repository's 10GB cache budget.
     - uses: actions/cache@v4
       with:
         path: ${{ steps.variables.outputs.GOMODCACHE }}
-        key: ${{ steps.variables.outputs.KEY_PREFIX }}-go-mod-${{ hashFiles('**/go.sum') }}
-        restore-keys: ${{ steps.variables.outputs.KEY_PREFIX  }}-go-mod-
+        key: go-mod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+        restore-keys: go-mod-${{ runner.os }}-
 
     # Cache any build and test artifacts during the job, which will speed up
     # rebuilds and cause test runs to skip tests that have no reason to rerun.
