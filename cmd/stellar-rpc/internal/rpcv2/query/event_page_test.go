@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"iter"
 	"math"
+	"strconv"
 	"testing"
 
 	"github.com/RoaringBitmap/roaring/v2"
@@ -413,7 +414,7 @@ func TestQueryEvents_UncoveredWindowFailsLoud(t *testing.T) {
 	require.NoError(t, ofs.Append(f+8, 1))
 	_, err = scanChunk(context.Background(),
 		eventPart{Chunk: c, Reader: &fakeEventReader{chunkID: c, ofs: ofs}, From: f, To: f + 8},
-		nil, nil, false, 10)
+		nil, resumeAt{}, false, 10, rpcv2test.SilentLogger())
 	require.ErrorContains(t, err, "offsets cover")
 }
 
@@ -1031,7 +1032,7 @@ func TestEventScan_DropsDoNotStallTheChunk(t *testing.T) {
 
 	got, err := scanChunk(context.Background(),
 		eventPart{Chunk: c, Reader: fake, From: f, To: f},
-		[]event.Filter{{ContractID: cidA[:]}}, nil, false, 5)
+		[]event.Filter{{ContractID: cidA[:]}}, resumeAt{}, false, 5, rpcv2test.SilentLogger())
 	require.NoError(t, err)
 	assert.Nil(t, got.nextUnserved, "the stream ended; the page did not fill")
 	assert.Equal(t, []string{"hit"}, labels(t, got.events),
@@ -1040,4 +1041,136 @@ func TestEventScan_DropsDoNotStallTheChunk(t *testing.T) {
 	assert.Equal(t, uint32(total-1), got.last.LedgerOrdinal)
 	require.NotNil(t, got.coveredThrough)
 	assert.Equal(t, f, *got.coveredThrough, "the finished chunk's ledger is fully covered")
+}
+
+// TestQueryEventsFrom_ServesFromTheIDInclusive pins the id-resume boundary.
+// The walk starts at the id's ledger and drops that ledger's events below
+// the id, so nothing looks the id up; an id above everything in its ledger
+// simply drops the whole ledger and the walk moves on.
+func TestQueryEventsFrom_ServesFromTheIDInclusive(t *testing.T) {
+	r, _, f := singleChunkFixture(t)
+	maxL := f + 3
+	scope := EventScope{MinLedger: f, MaxLedger: &maxL}
+	view, err := r.NewReadView()
+	require.NoError(t, err)
+	t.Cleanup(view.Release)
+
+	all, err := view.QueryEventsFrom(t.Context(), scope, nil, 10)
+	require.NoError(t, err)
+	require.Equal(t, []string{"a0", "a1", "b0", "a2", "b1", "a3"}, labels(t, all.Events),
+		"a nil id serves the whole scope")
+
+	idOf := func(i int) *EventID {
+		p := all.Events[i]
+		return &EventID{Ledger: p.LedgerSequence, Tx: p.TxIdx, Op: p.OpIdx, Event: p.EventIdx}
+	}
+
+	for name, tc := range map[string]struct {
+		from *EventID
+		want []string
+	}{
+		"the first id serves everything":   {idOf(0), []string{"a0", "a1", "b0", "a2", "b1", "a3"}},
+		"a mid-ledger id drops the prefix": {idOf(1), []string{"a1", "b0", "a2", "b1", "a3"}},
+		"its ledger's last id":             {idOf(2), []string{"b0", "a2", "b1", "a3"}},
+		"an id in a later ledger":          {idOf(4), []string{"b1", "a3"}},
+		"an id above its ledger's events drops that ledger": {
+			&EventID{Ledger: f, Tx: math.MaxUint32}, []string{"a2", "b1", "a3"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			page, err := view.QueryEventsFrom(t.Context(), scope, tc.from, 10)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, labels(t, page.Events))
+			assert.Equal(t, ScanComplete, page.Status)
+		})
+	}
+}
+
+// A descending scope has no id-resume form: only the v1 shim needs one.
+func TestQueryEventsFrom_RejectsDescending(t *testing.T) {
+	r, _, f := singleChunkFixture(t)
+	maxL := f + 3
+	view, err := r.NewReadView()
+	require.NoError(t, err)
+	t.Cleanup(view.Release)
+
+	_, err = view.QueryEventsFrom(t.Context(),
+		EventScope{MinLedger: f, MaxLedger: &maxL, Dir: Descending},
+		&EventID{Ledger: f}, 10)
+	require.ErrorContains(t, err, "ascending")
+}
+
+// countingReader counts what a walk pulls from storage.
+type countingReader struct {
+	*fakeEventReader
+
+	payloadsRead int
+}
+
+func (c *countingReader) FetchEvents(ctx context.Context, ids []uint32) ([]event.Payload, error) {
+	c.payloadsRead += len(ids)
+	return c.fakeEventReader.FetchEvents(ctx, ids)
+}
+
+func (c *countingReader) FetchRange(ctx context.Context, start, count uint32) iter.Seq2[event.Payload, error] {
+	return func(yield func(event.Payload, error) bool) {
+		for p, err := range c.fakeEventReader.FetchRange(ctx, start, count) {
+			c.payloadsRead++
+			if !yield(p, err) {
+				return
+			}
+		}
+	}
+}
+
+// oneBigLedgerReader holds a single ledger of n events, all under tx 1 op 0,
+// with event indexes 0..n-1.
+func oneBigLedgerReader(t *testing.T, c chunk.ID, n int) (*countingReader, uint32) {
+	t.Helper()
+	f := c.FirstLedger()
+	ofs := event.NewLedgerOffsets(f)
+	require.NoError(t, ofs.Append(f, uint32(n)))
+	payloads := make([]event.Payload, n)
+	for i := range payloads {
+		sym := xdr.ScSymbol(strconv.Itoa(i))
+		raw, err := xdr.ContractEvent{
+			Type: xdr.ContractEventTypeContract,
+			Body: xdr.ContractEventBody{V: 0, V0: &xdr.ContractEventV0{
+				Data: xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym},
+			}},
+		}.MarshalBinary()
+		require.NoError(t, err)
+		payloads[i] = event.Payload{
+			LedgerSequence: f, TxIdx: 1, OpIdx: 0, EventIdx: uint32(i),
+			ContractEventBytes: raw,
+		}
+	}
+	return &countingReader{fakeEventReader: &fakeEventReader{
+		chunkID: c, ofs: ofs, payloads: payloads,
+	}}, f
+}
+
+// An id resume must cost the same wherever the id sits in its ledger. The
+// window is clipped by seeking the id, so a page reads its own events plus
+// the seek's probes; dropping matches after the fact instead would read the
+// whole prefix, which is the full ledger at the deep end.
+func TestQueryEventsFrom_CostDoesNotGrowWithDepth(t *testing.T) {
+	const (
+		events = 3000
+		room   = 100
+		c      = chunk.ID(5)
+	)
+	for _, depth := range []uint32{0, 100, 1000, 2900} {
+		t.Run(strconv.Itoa(int(depth)), func(t *testing.T) {
+			r, f := oneBigLedgerReader(t, c, events)
+			res, err := scanChunk(context.Background(),
+				eventPart{Chunk: c, Reader: r, From: f, To: f},
+				nil, resumeAt{from: &EventID{Ledger: f, Tx: 1, Event: depth}}, false, room, rpcv2test.SilentLogger())
+			require.NoError(t, err)
+			assert.Len(t, res.events, room)
+			assert.Less(t, r.payloadsRead, room*2,
+				"reads should track the page, not the depth: a prefix scan would read %d here",
+				int(depth)+room+1)
+		})
+	}
 }

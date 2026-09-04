@@ -72,13 +72,27 @@ func newTestRPCServer(t *testing.T, r *query.Registry) string {
 	return srv.URL
 }
 
-func TestJSONRPCHandler_GetEventsIsExplicitlyNotImplemented(t *testing.T) {
+// The v1 shim answers over the real server: the method name in the table,
+// the wrapper's read view, and the v1 short-page cursor (the end of the
+// scanned window, not an event id).
+func TestJSONRPCHandler_ServesGetEventsV1(t *testing.T) {
 	url := newTestRPCServer(t, seedServingRegistry(t))
 
 	out := rpcv2test.PostRPC(t, url, "getEvents", `{"startLedger":2}`)
-	require.NotNil(t, out.Error)
-	assert.EqualValues(t, jrpc2.MethodNotFound, out.Error.Code)
-	assert.Contains(t, out.Error.Message, "#774")
+	require.Nil(t, out.Error)
+	var result struct {
+		Events       []json.RawMessage `json:"events"`
+		Cursor       string            `json:"cursor"`
+		LatestLedger uint32            `json:"latestLedger"`
+		OldestLedger uint32            `json:"oldestLedger"`
+	}
+	require.NoError(t, json.Unmarshal(out.Result, &result))
+	assert.Empty(t, result.Events, "the fixture ledger carries no events")
+	windowEnd := protocol.MaxCursor
+	windowEnd.Ledger = chunk.FirstLedgerSeq
+	assert.Equal(t, windowEnd.String(), result.Cursor)
+	assert.Equal(t, uint32(chunk.FirstLedgerSeq), result.LatestLedger)
+	assert.Equal(t, uint32(chunk.FirstLedgerSeq), result.OldestLedger)
 }
 
 // The registered handler answers over the real server, so this covers

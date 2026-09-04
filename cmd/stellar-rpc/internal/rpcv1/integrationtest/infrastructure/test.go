@@ -820,16 +820,26 @@ func (i *Test) waitForCore() {
 
 // UpgradeProtocol arms Core with upgrade and blocks until protocol is upgraded.
 func (i *Test) UpgradeProtocol(version int32) {
-	ctx, cancel := context.WithTimeout(i.t.Context(), time.Second)
-	err := i.coreClient.UpgradeProtocol(ctx, int(version), time.Unix(int64(0), 0))
-	cancel()
-	require.NoError(i.t, err)
+	arm := func() error {
+		ctx, cancel := context.WithTimeout(i.t.Context(), time.Second)
+		defer cancel()
+		return i.coreClient.UpgradeProtocol(ctx, int(version), time.Unix(int64(0), 0))
+	}
+	require.NoError(i.t, arm())
 
 	require.Eventually(i.t,
 		func() bool {
 			info, err := i.getCoreInfo()
 			i.t.Logf("Upgrading protocol, /info: %+v (err=%v)", info, err)
-			return err == nil && info.Info.Ledger.Version == int(version)
+			if err == nil && info.Info.Ledger.Version == int(version) {
+				return true
+			}
+			// Core answers /info before it has finished booting. An upgrade
+			// armed at that point (ledger 1, nothing closed yet) is silently
+			// dropped and Core keeps running protocol 0. Arming again with the
+			// same parameters is idempotent, so repeat it on every poll.
+			_ = arm()
+			return false
 		},
 		30*time.Second,
 		time.Second,

@@ -245,11 +245,17 @@ func EventLCMBytes(t *testing.T, seq uint32) []byte {
 	return EventsLCMBytes(t, seq, SymbolContractEvent(contractID, "fhtest", "fhtest"))
 }
 
-// EventsLCMBytes returns the marshaled bytes of a single-transaction
-// LedgerCloseMeta (V2) for ledger seq whose transaction carries evs as
-// the events of one operation. The random source account gives each
-// call a distinct, valid pubnet transaction hash.
+// EventsLCMBytes is EventsLCMBytesAt at close time zero.
 func EventsLCMBytes(t *testing.T, seq uint32, evs ...xdr.ContractEvent) []byte {
+	t.Helper()
+	return EventsLCMBytesAt(t, seq, 0, evs...)
+}
+
+// EventsLCMBytesAt returns the marshaled bytes of a single-transaction
+// LedgerCloseMeta (V2) for ledger seq, closed at closeTimeUnix, whose
+// transaction carries evs as the events of one operation. The random source
+// account gives each call a distinct, valid pubnet transaction hash.
+func EventsLCMBytesAt(t *testing.T, seq uint32, closeTimeUnix int64, evs ...xdr.ContractEvent) []byte {
 	t.Helper()
 	meta := xdr.TransactionMeta{
 		V:  4,
@@ -285,7 +291,7 @@ func EventsLCMBytes(t *testing.T, seq uint32, evs ...xdr.ContractEvent) []byte {
 			},
 		},
 	}}
-	return V2LCMBytes(t, seq, 0, []xdr.TransactionEnvelope{envelope}, processing)
+	return V2LCMBytes(t, seq, closeTimeUnix, []xdr.TransactionEnvelope{envelope}, processing)
 }
 
 // FeeTxLCMBytes returns the marshaled bytes of a single-transaction
@@ -333,13 +339,17 @@ func ReadColdBin(t *testing.T, path string) []txhash.ColdEntry {
 	require.NoError(t, err)
 	defer f.Close()
 
-	const headerSize = 8 + stores.SecretLen // uint64-LE count + index secret
+	// Prelude (magic "SBIN", version, 3 reserved) + uint64-LE count + secret.
+	const preludeSize = 8
+	const headerSize = preludeSize + 8 + stores.SecretLen
 	entrySize := txhash.ColdKeySize + 4
 
 	var header [headerSize]byte
 	_, err = io.ReadFull(f, header[:])
 	require.NoError(t, err)
-	count := binary.LittleEndian.Uint64(header[:8])
+	require.Equal(t, []byte("SBIN"), header[:4], "cold .bin magic")
+	require.Equal(t, byte(1), header[4], "cold .bin version")
+	count := binary.LittleEndian.Uint64(header[preludeSize : preludeSize+8])
 
 	info, err := f.Stat()
 	require.NoError(t, err)

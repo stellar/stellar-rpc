@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -174,22 +175,55 @@ func TestColdReader_LazyOpen(t *testing.T) {
 }
 
 func TestColdReader_RejectsWrongAppDataSize(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "bad-appdata.pack")
+	// Every blob carries a valid version byte, so the size check (which runs
+	// after the version check) is what fires. appDataSize is 5: too long and
+	// too short both refuse, and the 1-byte case pins that the firstSeq read
+	// never runs on a blob that only holds the version byte.
+	for _, tc := range []struct {
+		name string
+		ad   []byte
+	}{
+		{"too long", []byte{coldAppDataVersion, 's', 'e', 'v', 'e', 'n', 'b'}},
+		{"version byte only", []byte{coldAppDataVersion}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "bad-appdata.pack")
+			pw, err := packfile.Create(path, packfile.WriterOptions{
+				ItemsPerRecord: 1,
+				Format:         formatLedgerCold,
+			})
+			require.NoError(t, err)
+			require.NoError(t, pw.AppendItem([]byte("v")))
+			require.NoError(t, pw.Finish(tc.ad))
+
+			c, err := OpenColdReader(path)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = c.Close() })
+			_, err = c.LastSeq()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "AppData")
+		})
+	}
+}
+
+func TestColdReader_RejectsNewerAppDataVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "newer-appdata.pack")
 	pw, err := packfile.Create(path, packfile.WriterOptions{
 		ItemsPerRecord: 1,
 		Format:         formatLedgerCold,
 	})
 	require.NoError(t, err)
 	require.NoError(t, pw.AppendItem([]byte("v")))
-	// 7-byte payload — appDataSize is 4.
-	require.NoError(t, pw.Finish([]byte("seven-b")))
+	// A longer blob under an unknown version byte must report as a version
+	// problem, not a size mismatch.
+	require.NoError(t, pw.Finish([]byte{coldAppDataVersion + 1, 0, 0, 0, 2, 9}))
 
 	c, err := OpenColdReader(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 	_, err = c.LastSeq()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "AppData")
+	assert.Contains(t, err.Error(), "written by a newer stellar-rpc")
 }
 
 func TestColdReader_RejectsWrongFormat(t *testing.T) {
@@ -234,7 +268,8 @@ func TestColdReader_LastSeqOverflowRejected(t *testing.T) {
 		require.NoError(t, pw.AppendItem([]byte{byte(i)}))
 	}
 	var ad [appDataSize]byte
-	binary.BigEndian.PutUint32(ad[:], math.MaxUint32-1) // firstSeq = MaxUint32-1, items=3 → overflow
+	ad[0] = coldAppDataVersion
+	binary.BigEndian.PutUint32(ad[1:], math.MaxUint32-1) // firstSeq = MaxUint32-1, items=3 → overflow
 	require.NoError(t, pw.Finish(ad[:]))
 
 	c, err := OpenColdReader(path)
@@ -328,9 +363,8 @@ func TestMissingPackOpens_CountsAbsentFile(t *testing.T) {
 }
 
 // TestColdReader_WithLedgerPassesCallbackErrorThrough pins the fnErr-capture
-// discipline: a caller's error must come back exactly as given, not routed
-// through translateReaderErr, which only ever classifies the packfile's own
-// failures.
+// discipline: a caller's error must come back exactly as given, not
+// reclassified as a store failure by the pack handle's translation.
 func TestColdReader_WithLedgerPassesCallbackErrorThrough(t *testing.T) {
 	const firstSeq uint32 = 1_000
 	path, _ := writeFixturePack(t, firstSeq, 4)
@@ -346,4 +380,48 @@ func TestColdReader_WithLedgerPassesCallbackErrorThrough(t *testing.T) {
 	require.ErrorIs(t, err, sentinel)
 	assert.Equal(t, sentinel, err, "the callback's error is not translated")
 	assert.Equal(t, 1, calls)
+}
+
+// TestColdReader_CorruptAppDataIsCorrupt covers the metadata-open path, which
+// reaches the packfile through Trailer/AppData rather than a record read. Its
+// errors have to carry the same sentinel: a caller distinguishing corruption
+// from a missing file cannot be asked to know which of a reader's internals
+// happened to fail.
+func TestColdReader_CorruptAppDataIsCorrupt(t *testing.T) {
+	path, _ := writeFixturePack(t, 100, 8)
+
+	// App data sits immediately before the 76-byte trailer; the reader now
+	// covers it with a CRC32C, so one flipped bit must fail the open.
+	b, err := os.ReadFile(path)
+	require.NoError(t, err)
+	const trailerSize = 76
+	b[len(b)-trailerSize-1] ^= 0x01
+	require.NoError(t, os.WriteFile(path, b, 0o600))
+
+	for _, tc := range []struct {
+		name string
+		call func(c *ColdReader) error
+	}{
+		{"LastSeq", func(c *ColdReader) error { _, err := c.LastSeq(); return err }},
+		{"WithLedger", func(c *ColdReader) error {
+			return c.WithLedger(100, func([]byte) error { return nil })
+		}},
+		// Close waits for the background open, so on a reader that is
+		// closed without being read it is the FIRST place corruption
+		// surfaces — and the only one, since nothing else ran.
+		{"Close", func(c *ColdReader) error { return c.Close() }},
+		{"IterateLedgers", func(c *ColdReader) error {
+			for _, err := range c.IterateLedgers(100, 101) {
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestColdReader(t, path)
+			require.ErrorIs(t, tc.call(c), stores.ErrCorrupt)
+		})
+	}
 }

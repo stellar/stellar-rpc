@@ -336,3 +336,35 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	// just to lock the endianness contract.
 	_ = binary.LittleEndian.Uint32(record[:IndexRecordFingerprintLen])
 }
+
+// TestWriteColdIndex_StampAndContentHash pins index.pack's app-data build
+// stamp (schema, field mask, trailing-bytes-ignored, newer-version refusal)
+// and its content hash.
+func TestWriteColdIndex_StampAndContentHash(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, indexFixture(t, 4), dir, testIndexSecret))
+	r := packfile.Open(filepath.Join(dir, IndexPackName(indexTestChunkID)), packfile.ReaderOptions{})
+	t.Cleanup(func() { _ = r.Close() })
+
+	ad, err := r.AppData()
+	require.NoError(t, err)
+	schema, mask, err := decodeIndexBuildStamp(ad)
+	require.NoError(t, err)
+	assert.Equal(t, TermSchemaVersion, schema)
+	assert.Equal(t, IndexedFieldMask(), mask)
+
+	// Bytes past the stamp are extension room: the decoder ignores them.
+	_, _, err = decodeIndexBuildStamp(append(append([]byte(nil), ad...), 0xAB, 0xCD))
+	require.NoError(t, err)
+
+	// An unknown stamp version refuses with the newer-binary hint.
+	newer := append([]byte(nil), ad...)
+	newer[0] = indexStampVersion + 1
+	_, _, err = decodeIndexBuildStamp(newer)
+	require.ErrorContains(t, err, "written by a newer stellar-rpc")
+
+	_, hashed, err := r.ContentHash()
+	require.NoError(t, err)
+	assert.True(t, hashed, "index.pack carries a content hash")
+	require.NoError(t, r.Verify(context.Background()))
+}

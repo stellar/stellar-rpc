@@ -56,6 +56,17 @@ func OpenSnapshots() int64 { return openSnapshots.Load() }
 const (
 	dirPerm       os.FileMode = 0o700
 	defaultCFName             = "default"
+
+	// pinnedTableFormatVersion pins the block-based table format written to
+	// disk, so a grocksdb/librocksdb upgrade cannot silently change the on-disk
+	// format. 6 is the default in librocksdb 10.9.1 (the version
+	// scripts/install-rocksdb.sh builds), so the pin changes no byte
+	// today. RocksDB's own header advises leaving format_version at the
+	// default so improvements arrive automatically; we choose the opposite on
+	// purpose. Raising it is a format-touching change: an older binary cannot
+	// open the newer tables, so it must ship as a declared storage-format bump,
+	// never as a side effect of a dependency bump.
+	pinnedTableFormatVersion = 6
 )
 
 // Config — per-store knobs. Each Layer-2 facade owns one, built in
@@ -121,10 +132,10 @@ type Store struct {
 
 	// cache is the block cache shared across every CF in this store,
 	// created in applyTuning when BlockCacheMB is set. bbtos are the
-	// per-CF block-based-table options (one per CF that has a cache,
-	// bloom filter, or block-size override); each may own a moved-in
-	// bloom filter. Both are destroyed in Close after opts/cfOpts,
-	// which hold C-side refs we must drop first.
+	// per-CF block-based-table options (one per CF, carrying the pinned
+	// table format version); each may own a moved-in bloom filter. Both
+	// are destroyed in Close after opts/cfOpts, which hold C-side refs
+	// we must drop first.
 	cache *grocksdb.Cache
 	bbtos []*grocksdb.BlockBasedTableOptions
 
@@ -839,10 +850,10 @@ func applyDBTuning(opts *grocksdb.Options, t Tuning) {
 // override (when set). The Store retains every BBTO and the cache;
 // Close destroys them after opts/cfOpts.
 //
-// A BBTO is installed on a CF iff the shared cache, that CF's bloom
-// filter, or that CF's BlockSize override is configured — preserving
-// the previous behavior of leaving RocksDB's default BBTO untouched
-// when no table-level knob is set.
+// Every CF gets an explicit BBTO, tuned or not, so the on-disk table
+// format stays pinned (pinnedTableFormatVersion) instead of riding
+// grocksdb's default; restoring a skip-when-untuned path would
+// silently unpin it.
 //
 // The bloom filter is built per CF because SetFilterPolicy MOVES the
 // policy into the BBTO (it nils the source pointer), so a single
@@ -854,10 +865,8 @@ func (s *Store) applySharedTableOptions(cfNames []string, cfOpts []*grocksdb.Opt
 	}
 	for i, o := range cfOpts {
 		override := s.cfg.PerCFOptions[cfNames[i]]
-		if s.cache == nil && override.BloomFilterBitsPerKey == 0 && override.BlockSize == 0 {
-			continue
-		}
 		bbto := grocksdb.NewDefaultBlockBasedTableOptions()
+		bbto.SetFormatVersion(pinnedTableFormatVersion)
 		if s.cache != nil {
 			bbto.SetBlockCache(s.cache)
 		}

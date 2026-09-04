@@ -41,9 +41,10 @@ type handlerParams struct {
 // the v2 counterpart of rpcv1.NewJSONRPCHandler. The handlers are the shared
 // internal/methods constructors, unmodified; only their inputs are v2's (the
 // router-backed adapters, the daemon-owned fee windows, captive-core state).
-// getEventsV2 is the exception. v1 has no such method, so eventsapi
-// implements it natively. v1 getEvents stays a not-implemented stub until the
-// v1 shim lands.
+// The two events methods are the exception: eventsapi implements both
+// natively on the v2 pager — getEventsV2 because v1 has no such method, and
+// v1 getEvents as the compatibility surface, byte-parity with the shared
+// handler held by its parity suite.
 func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 	m := cfg.Service.Methods
 	specs := jsonrpc.BuildHandlerSpecs(
@@ -55,7 +56,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 			TransactionReader: p.transactionReader,
 			FeeStats:          p.feeWindows,
 
-			GetEventsHandler: notImplemented(protocol.GetEventsMethodName),
+			GetEventsHandler: eventsapi.NewV1Handler(eventLimits(m.GetEvents), p.logger),
 
 			// No DataStoreLedgerReader: getLedgers can fall back to a bulk
 			// datastore for ledgers below local retention, but the full-history
@@ -73,11 +74,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 		})
 	specs = append(specs, jsonrpc.HandlerSpec{
 		MethodName: protocol.GetEventsV2MethodName,
-		Handler: eventsapi.NewHandler(eventsapi.Limits{
-			TermBudget:   uint32(min(deref(m.GetEventsV2.TermBudget), math.MaxUint32)), //nolint:gosec // min clamps it
-			MaxLimit:     deref(m.GetEventsV2.MaxItemsPerResponse),
-			DefaultLimit: deref(m.GetEventsV2.DefaultItemsPerResponse),
-		}),
+		Handler:    eventsapi.NewHandler(eventLimits(m.GetEventsV2), p.logger),
 	})
 	specs = limitsByMethod(m).Apply(specs)
 	for i := range specs {
@@ -95,6 +92,16 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 		GlobalDurationWarning: deref(cfg.Service.RequestExecutionWarningThreshold),
 		GlobalDurationLimit:   deref(cfg.Service.MaxRequestExecutionDuration),
 	})
+}
+
+// eventLimits reads one events method's knobs into the handler's form. Both
+// events methods take the same shape; only their defaults differ.
+func eventLimits(c config.EventsMethodConfig) eventsapi.Limits {
+	return eventsapi.Limits{
+		TermBudget:   uint32(min(deref(c.TermBudget), math.MaxUint32)), //nolint:gosec // min clamps it
+		MaxLimit:     deref(c.MaxItemsPerResponse),
+		DefaultLimit: deref(c.DefaultItemsPerResponse),
+	}
 }
 
 // limitsByMethod maps [service.methods] onto the shared limits table. Both the
@@ -119,19 +126,6 @@ func limitsByMethod(m config.MethodsConfig) jsonrpc.LimitsByMethod {
 		protocol.SimulateTransactionMethodName: lim(
 			m.SimulateTransaction.QueueLimit, m.SimulateTransaction.MaxExecutionDuration),
 		protocol.GetFeeStatsMethodName: lim(m.GetFeeStats.QueueLimit, m.GetFeeStats.MaxExecutionDuration),
-	}
-}
-
-// notImplemented is the stub for a method in the table but not built yet; its
-// one use dies when the v1 events shim lands. An explicit error, never an
-// empty success: an empty page would tell a paging client "nothing exists",
-// which is a lie. jrpc2.MethodNotFound (-32601) is the spec's "method does
-// not exist / is not available".
-func notImplemented(method string) jrpc2.Handler {
-	message := method + " is not implemented by this service yet (issue #774 adds it);" +
-		" use the existing RPC service for events meanwhile"
-	return func(context.Context, *jrpc2.Request) (any, error) {
-		return nil, &jrpc2.Error{Code: jrpc2.MethodNotFound, Message: message}
 	}
 }
 

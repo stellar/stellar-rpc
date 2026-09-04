@@ -21,7 +21,7 @@ Non-goals:
 
 On disk, items are grouped into **records**. `ItemsPerRecord` controls how many items go into each record.
 
-Record bytes are transformed on the way to and from disk by a **caller-supplied codec** — a pair of `RecordEncoder` / `RecordDecoder` implementations the caller plugs into `WriterOptions` and `ReaderOptions`. With a nil codec, records are passthrough (written and read verbatim). The package ships no built-in codec; the `zstd` subpackage provides `*zstd.Compressor` and `*zstd.Decompressor` that satisfy the interfaces directly, and callers are free to provide their own (e.g. raw bytes with a trailing CRC32C).
+Record bytes are transformed on the way to and from disk by a **caller-supplied codec** — a pair of `RecordEncoder` / `RecordDecoder` implementations the caller plugs into `WriterOptions` and `ReaderOptions`. With a nil codec, records are passthrough (written and read verbatim). The package ships no built-in codec; the `zstd` subpackage provides `*zstd.Compressor` and `*zstd.Decompressor` that satisfy the interfaces directly, and callers are free to provide their own. Integrity is not a codec: a record's checksum is selected by `WriterOptions.RecordChecksum` and recorded in the trailer, so the library applies and verifies it itself.
 
 The trailer carries a caller-assigned `Format uint32` field. Readers dispatch on `Format` to pick the matching decoder (and any other decode-side choice such as the content-hash extract — see [Codec Contract](#codec-contract)). The library does not interpret `Format` values.
 
@@ -194,6 +194,13 @@ type WriterOptions struct {
     // record before write and Close on shutdown. Pass nil for passthrough
     // records (no encoding).
     NewRecordEncoder func() RecordEncoder
+
+    // RecordChecksum selects the per-record integrity check
+    // (ChecksumNone | ChecksumCRC32C). Defaults to ChecksumNone. Set it for
+    // artifacts written in passthrough mode whose items are not
+    // self-checksummed. The reader learns the layout from a trailer flag, so
+    // there is no matching reader-side option.
+    RecordChecksum RecordChecksum
 
     // ContentHash enables SHA-256 content hashing over the logical item
     // stream. The digest is stored in the trailer.
@@ -449,32 +456,37 @@ The FOR group size for the offset index is 128 — a library constant, independe
 
 Each record contains up to `ItemsPerRecord` items.
 
-**Multi-item records** (`ItemsPerRecord > 1`): Items are concatenated into a payload. The payload is passed through the caller's `RecordEncoder` (or written verbatim in passthrough mode), then an **item size index** is appended — a single FOR group encoding each item's byte length followed by a CRC32C of the FOR data. The item size index is library-managed and always written verbatim regardless of the encoder; the reader strips and CRC-verifies it before invoking the decoder.
+**Multi-item records** (`ItemsPerRecord > 1`): Items are concatenated into a payload. The payload is passed through the caller's `RecordEncoder` (or written verbatim in passthrough mode), then an **item size index** is appended — a single FOR group encoding each item's byte length — followed by a CRC32C. Both are library-managed and written verbatim regardless of the encoder.
 
 ```
 Multi-item record on-disk layout:
 
-  [encoder.Encode(payload) | payload if passthrough][item_sizes]
-
-  item_sizes = [FOR-encoded item lengths][4B CRC32C]
+  [encoder.Encode(payload) | payload if passthrough][FOR-encoded item lengths][4B CRC32C]
 ```
 
-Stripping the size index before decoding enables early corruption detection — a CRC failure on the size index surfaces before the (potentially expensive) decoder is invoked.
+What that CRC32C covers is what `RecordChecksum` selects, and the trailer's `flagRecordChecksum` tells the reader which of the two it is looking at:
 
-**Single-item records** (`ItemsPerRecord=1`): The item size index is omitted entirely — the item is the entire payload.
+| RecordChecksum | covered range | verified |
+|---|---|---|
+| `ChecksumNone` | the FOR group alone | after `DecodeGroup` reports the group's length |
+| `ChecksumCRC32C` | every preceding byte, payload included | before the FOR group is parsed |
+
+Widening costs a multi-item record nothing on disk, because the four bytes are already there. It also strengthens the ordering: the widened range follows from the record bounds in the offsets index, which `Open` has already verified, so nothing the record claims about itself selects the bytes being checked. The narrow form cannot be hoisted that way, since the FOR group's extent is only known after parsing it.
+
+**Single-item records** (`ItemsPerRecord=1`): The item size index is omitted entirely — the item is the entire payload. These records carry no CRC32C unless `RecordChecksum` is set, in which case four bytes are appended.
 
 ```
 Single-item record layout (ItemsPerRecord=1):
-  [encoder.Encode(item) | item if passthrough]
+  [encoder.Encode(item) | item if passthrough][4B CRC32C if RecordChecksum set]
 ```
 
-**Encoder responsibility for payload integrity.** The library does not wrap encoded payloads with a CRC. Per-record payload integrity is whatever the encoder provides:
+**Which artifacts need `RecordChecksum`.** The question is whether the bytes that land on disk are already self-validating, which is a property of the byte stream rather than of whether a codec is present:
 
-- `*zstd.Compressor` — zstd frames carry a built-in xxHash64 checksum, verified during decompression.
-- Passthrough (nil encoder) — no per-record integrity. Use only when items are already checksummed by the caller or the trailer-level content hash is sufficient.
-- Custom encoder — caller's choice (e.g. raw bytes with a trailing CRC32C).
+- `*zstd.Compressor` with its default options — zstd frames carry a built-in xxHash64 checksum, verified during decompression. No record checksum needed. A compressor built with `zstd.WithoutChecksum()` emits frames without it and needs `ChecksumCRC32C` like passthrough does.
+- Passthrough over items that are themselves checksummed (e.g. pre-compressed zstd frames copied verbatim) — likewise none.
+- Passthrough over raw bytes — nothing else covers the payload, so set `ChecksumCRC32C`. A flipped bit otherwise reaches the caller as different data rather than an error.
 
-The library-managed item-size-index CRC is independent of the payload codec.
+The library cannot observe that property, which is why the caller declares it.
 
 ### Worked Example
 
@@ -584,12 +596,13 @@ Offset  Size  Type      Field
 28      4     uint32    indexSize (offset index bytes + 4-byte CRC32C)
 32      4     uint32    appDataSize (0 if none)
 36      32    [32]byte  contentHash (zeroed if flagContentHash not set)
-68      4     —         reserved
+68      4     uint32    appDataCRC (CRC32C of the app data section)
 72      4     uint32    CRC32C of trailer[0:72]
 ```
 
 Flags (uint8):
 - Bit 0 (`flagContentHash`): trailer contains a 32-byte SHA-256 content hash
+- Bit 1 (`flagRecordChecksum`): each record's trailing CRC32C covers the whole record, not just its item size index
 
 All other bits are reserved. The reader validates flags against `knownFlags` and rejects files with unknown flag bits.
 
@@ -599,13 +612,13 @@ The `Checksum` at offset 72 covers `trailer[0:72]`.
 
 **Index checksum:** CRC32C of the raw offset index bytes. Verified on open before decoding. After decoding, the reader also asserts that the running offset sum equals `indexBase` — an independent structural invariant that catches encode/decode logic bugs.
 
-**Trailer checksum:** CRC32C of `trailer[0:72]` protects all structural fields. App data has no packfile-level integrity check — callers are responsible for their own app data integrity.
+**Trailer checksum:** CRC32C of `trailer[0:72]` protects all structural fields, including `appDataCRC`.
+
+**App data checksum:** CRC32C of the app-data section, stored in the trailer and verified on open, unconditionally. The section is opaque to the library, so nothing here can check it structurally, and a consumer's own decoder cannot tell plausible corruption from real data. An artifact built before this fails to open and gets rebuilt.
 
 **Trailer validation:** On open: flags against `knownFlags`, `itemsPerRecord > 0`, `ceil(totalItems / itemsPerRecord) == recordCount`.
 
-**Item-size-index checksum:** Each multi-item record carries a CRC32C over its FOR-encoded item-size index, verified before the record's encoded payload is passed to the decoder. The CRC is library-managed and independent of the encoder.
-
-**Per-record payload integrity:** Caller-supplied — see [Records](#records). The library does not wrap encoded payloads with a CRC.
+**Record checksum:** Each multi-item record carries a CRC32C in its last four bytes, verified on every record read, before the payload is passed to the decoder. `Verify` checks record CRCs only as a side effect of streaming the items for the content hash, and returns immediately when a file has no content hash; record CRCs are enforced on the read path, not by `Verify`. `WriterOptions.RecordChecksum` selects whether it covers the item size index alone or the whole record including the payload; the trailer records which. See [Records](#records).
 
 **Content hash verification:** `Verify(ctx)` recomputes the chunked SHA-256 by streaming all items (applying `ReaderOptions.ContentHashExtract` if set) and compares to the stored hash. Mismatched extract on read produces `ErrContentHashMismatch`.
 
@@ -636,7 +649,7 @@ The `Checksum` at offset 72 covers `trailer[0:72]`.
 1. Record number = `42 / 128 = 0`, local position = `42 % 128 = 42`
 2. Look up record 0's byte offset from the in-memory offset table (array access)
 3. One `pread` fetches the entire record from disk
-4. Decode: for multi-item records, strip and CRC-verify the item size index; then run the caller's `RecordDecoder` on the payload (or alias verbatim in passthrough mode). Single-item records skip the size-index step.
+4. Decode: verify the record CRC32C, strip the item size index (multi-item records only), then run the caller's `RecordDecoder` on the payload (or alias verbatim in passthrough mode). With `flagRecordChecksum` set the CRC is checked first, over a range the offsets index already fixed; otherwise it is checked against the FOR group after that group is parsed.
 5. Extract item 42 from the decoded payload, pass to `fn`
 
 All of steps 2-5 are a single I/O operation. A `*record` workspace is borrowed from a package-level pool and returned after the callback.
