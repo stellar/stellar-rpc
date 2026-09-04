@@ -89,21 +89,21 @@ jobs:
     uses: ./.github/workflows/integration-tests.yml
     with:
       protocol_version: '27'
-      core_deb_version: '28.0.0-3494.a9b861321.noble'
-      core_docker_img: 'stellar/unsafe-stellar-core:28.0.0-3494.a9b861321.jammy'
+      core_deb_version: '28.0.1-3508.947aad841.noble'
+      core_docker_img: 'stellar/stellar-core:28.0.1-3508.947aad841.noble'
 
   integration-p28-pkg:
     name: Integration tests (P28)
     uses: ./.github/workflows/integration-tests.yml
     with:
       protocol_version: '28'
-      # Protocol 28 GA core release, the build published to the noble apt repo.
-      # Its src/rust/soroban/p28 submodule is
-      # rs-soroban-env v28.0.0 (ba37ea5f) — the same release soroban-env-host-curr
-      # pins from crates.io, keeping simulation cost models identical to
-      # apply-time metering.
-      core_deb_version: '28.0.0-3494.a9b861321.noble'
-      core_docker_img: 'stellar/unsafe-stellar-core:28.0.0-3494.a9b861321.jammy'
+      # Protocol 28 stable core release (28.0.1), the same pin as main. Its
+      # src/rust/soroban/p28 submodule is unchanged from 28.0.0: rs-soroban-env
+      # v28.0.0 (ba37ea5f) — the same release soroban-env-host-curr pins from
+      # crates.io, keeping simulation cost models identical to apply-time
+      # metering.
+      core_deb_version: '28.0.1-3508.947aad841.noble'
+      core_docker_img: 'stellar/stellar-core:28.0.1-3508.947aad841.noble'
 
   # integration-p25-src:
   #   name: Integration tests (p25, core from source)
