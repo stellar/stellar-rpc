@@ -1,0 +1,887 @@
+name: Bench campaign (EC2)
+# Runs one stellar-rpc-benchmarks campaign on one ephemeral EC2 box: renders the
+# campaign TOML from the dispatch inputs, launches the box with that config in
+# its user-data, then relays the wait across four poll jobs until the box
+# publishes a verdict object to S3.
+# Box bootstrap: perf-eval/bootstrap-common.sh + perf-eval/bench-campaign/run-campaign.sh;
+# runner-side waiting: perf-eval/relay.
+# The campaign itself lives in stellar-experimental/stellar-rpc-benchmarks; this
+# workflow only drives it and reports the verdict.
+
+on:
+  # Dispatch only. No cron in v1: a campaign occupies one box for most of a day
+  # and nothing here decides which phase is worth running unattended.
+  workflow_dispatch:
+    # Ten inputs is the workflow_dispatch ceiling, so this list is full: further
+    # knobs have to become overrides inside render-campaign-toml.sh.
+    inputs:
+      phase:
+        description: 'Pacing phase (selects close_interval + the dataset profiles)'
+        required: true
+        type: choice
+        options: ['1', '2', '3']
+      ingest:
+        description: 'Which ingest benchmarks to run'
+        required: false
+        type: choice
+        default: both
+        options: [both, cold, hot, none]
+      query:
+        description: 'Run the query suites after ingest'
+        required: false
+        type: choice
+        default: 'no'
+        options: ['no', 'yes']
+      runs:
+        description: 'Repetitions per (dataset, chunk) cell'
+        required: false
+        type: string
+        default: '1'
+      workers:
+        description: 'bench-ingest cold --workers (empty = the per-machine default)'
+        required: false
+        type: string
+        default: ''
+      machine:
+        description: 'Box size: 2x = m6id.2xlarge, 8x = c6id.8xlarge'
+        required: false
+        type: choice
+        default: 2x
+        options: [2x, 8x]
+      ref:
+        description: 'stellar-rpc ref to benchmark (resolved on the box, not here)'
+        required: false
+        type: string
+        default: feature/full-history
+      hot_num_ledgers:
+        description: 'Cap the hot ingest at N ledgers (0 = the whole chunk); shortens a smoke run'
+        required: false
+        type: string
+        default: '0'
+      run_name:
+        description: 'Campaign name (empty = phase<N>-<machine>)'
+        required: false
+        type: string
+        default: ''
+      benchmarks_ref:
+        description: 'stellar-rpc-benchmarks ref the box runs the campaign from'
+        required: false
+        type: string
+        default: main
+
+# Campaigns run in parallel: every run launches its own box, writes under its
+# own runs/<run_id>/ S3 prefix, and the relay ignores other runs' result
+# objects, so two campaigns never measure each other. The one shared resource,
+# the results-site push in notify, is race-safe on its own (ingest.sh
+# --push-main rebuilds and retries when main moves). The group is therefore
+# per run: it exists only so a re-run of the same run_id queues behind the
+# original rather than racing it. Never cancel — a cancelled chain leaves the
+# box to its self-terminate ceiling.
+concurrency:
+  group: rpc-bench-${{ github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write   # OIDC AssumeRole into the GHA role
+  contents: read    # checkout
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  AWS_REGION: us-east-1
+  BUCKET: stellar-rpc-ci-load-test
+  PERF_EVAL_DIR: cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval
+  RESULT_KEY: runs/${{ github.run_id }}/campaign/result.json # deterministic per run
+
+jobs:
+  validate:
+    name: Validate inputs + render campaign config
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      toml_b64: ${{ steps.render.outputs.toml_b64 }}
+      budget_minutes: ${{ steps.render.outputs.budget_minutes }}
+      deadline_epoch: ${{ steps.render.outputs.deadline_epoch }}
+      instance_type: ${{ steps.render.outputs.instance_type }}
+      workers: ${{ steps.render.outputs.workers }}
+      self_terminate_minutes: ${{ steps.render.outputs.self_terminate_minutes }}
+      campaign_name: ${{ steps.render.outputs.campaign_name }}
+    steps:
+      # Default checkout (github.sha): the harness — this workflow, the render
+      # script, the leg script, the relay — always runs at the version it was
+      # dispatched from. The benchmarked ref travels in the TOML and is resolved
+      # on the box. This deliberately differs from ec2-leg.yml, which checks out
+      # its target_ref and so also runs that ref's harness.
+      - uses: actions/checkout@v4
+
+      # Every input check and the wall-clock estimate live in the script so they
+      # can be exercised off GHA; a rejection here costs no EC2 time.
+      - name: Render campaign config
+        id: render
+        env:
+          PHASE: ${{ inputs.phase }}
+          INGEST: ${{ inputs.ingest }}
+          QUERY: ${{ inputs.query }}
+          RUNS: ${{ inputs.runs }}
+          WORKERS: ${{ inputs.workers }}
+          MACHINE: ${{ inputs.machine }}
+          TARGET_REF: ${{ inputs.ref }}
+          HOT_NUM_LEDGERS: ${{ inputs.hot_num_ledgers }}
+          RUN_NAME: ${{ inputs.run_name }}
+          # Gated here even though it never enters the TOML: the launch job
+          # interpolates it into the box user-data, which runs as root.
+          BENCHMARKS_REF: ${{ inputs.benchmarks_ref }}
+        run: ./"$PERF_EVAL_DIR"/bench-campaign/render-campaign-toml.sh
+
+      - name: Summarize the plan
+        env:
+          CAMPAIGN_NAME: ${{ steps.render.outputs.campaign_name }}
+          BUDGET_MINUTES: ${{ steps.render.outputs.budget_minutes }}
+          DEADLINE_EPOCH: ${{ steps.render.outputs.deadline_epoch }}
+          INSTANCE_TYPE: ${{ steps.render.outputs.instance_type }}
+          RESOLVED_WORKERS: ${{ steps.render.outputs.workers }}
+          PHASE: ${{ inputs.phase }}
+          INGEST: ${{ inputs.ingest }}
+          QUERY: ${{ inputs.query }}
+          RUNS: ${{ inputs.runs }}
+          TARGET_REF: ${{ inputs.ref }}
+          HOT_NUM_LEDGERS: ${{ inputs.hot_num_ledgers }}
+          BENCHMARKS_REF: ${{ inputs.benchmarks_ref }}
+        run: |
+          # shellcheck disable=SC2016 # the backticks below are markdown, not command substitution
+          {
+            printf '### Bench campaign `%s`\n\n' "$CAMPAIGN_NAME"
+            printf '| field | value |\n|---|---|\n'
+            printf '| phase | %s |\n' "$PHASE"
+            printf '| ingest / query | %s / %s |\n' "$INGEST" "$QUERY"
+            printf '| runs / workers / hot_num_ledgers | %s / %s / %s |\n' \
+              "$RUNS" "$RESOLVED_WORKERS" "$HOT_NUM_LEDGERS"
+            printf '| stellar-rpc ref | `%s` |\n' "$TARGET_REF"
+            printf '| benchmarks ref | `%s` |\n' "$BENCHMARKS_REF"
+            printf '| instance type | %s |\n' "$INSTANCE_TYPE"
+            printf '| estimated budget | %dh%02dm |\n' \
+              "$((BUDGET_MINUTES / 60))" "$((BUDGET_MINUTES % 60))"
+            printf '| deadline (UTC) | %s |\n' "$(date -u -d "@$DEADLINE_EPOCH" +%FT%TZ)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  launch:
+    name: Launch campaign box
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      instance_id: ${{ steps.launch.outputs.instance_id }}
+    env:
+      INSTANCE_TYPE: ${{ needs.validate.outputs.instance_type }}
+      SELF_TERMINATE_MINUTES: ${{ needs.validate.outputs.self_terminate_minutes }}
+      BUDGET_MINUTES: ${{ needs.validate.outputs.budget_minutes }}
+      CAMPAIGN_NAME: ${{ needs.validate.outputs.campaign_name }}
+      BENCH_TOML_B64: ${{ needs.validate.outputs.toml_b64 }}
+      BENCH_REPO_REF: ${{ inputs.benchmarks_ref }}
+      SSM_REGISTRATION_TIMEOUT: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 1800
+
+      # Seed RESULT_KEY with a pending marker so the key exists from launch
+      # onward: the relay reads "pending" as still-running and can treat fetch
+      # errors as genuine faults (an absent key surfaces as 403, not 404,
+      # because the role has no s3:ListBucket on this bucket). A re-run attempt
+      # also overwrites the previous attempt's leftover verdict here.
+      - name: Seed the pending result marker
+        env:
+          RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          jq -n --arg run "$RUN_ID" \
+                '{schemaVersion: 1, verdict: "pending", markdown: "", runId: $run}' > /tmp/pending.json
+          aws s3api put-object --bucket "$BUCKET" --key "$RESULT_KEY" \
+                --content-type application/json --body /tmp/pending.json >/dev/null
+          echo "seeded pending marker at s3://$BUCKET/$RESULT_KEY"
+
+      - name: Render user-data
+        # The scripts ship verbatim; parameters travel in a preamble so the bytes
+        # that run on the box match the bytes in git. Order is:
+        #   preamble exports -> bootstrap-common.sh -> run-campaign.sh.
+        # BENCH_TOML_B64 is one base64 line, so it survives quoting as-is.
+        # The whole script is gzipped for launch: cloud-init gunzips user-data
+        # transparently, and the raw script outgrew EC2's 16 KB user-data cap.
+        run: |
+          {
+            echo '#!/usr/bin/env bash'
+            echo "export RUN_ID=${{ github.run_id }}-${{ github.run_attempt }}"
+            echo "export BUCKET=$BUCKET RESULT_KEY=$RESULT_KEY"
+            echo "export SELF_TERMINATE_MINUTES=$SELF_TERMINATE_MINUTES BUDGET_MINUTES=$BUDGET_MINUTES"
+            echo "export BENCH_TOML_B64=\"$BENCH_TOML_B64\""
+            echo "export BENCH_REPO_REF=\"$BENCH_REPO_REF\""
+            cat "$PERF_EVAL_DIR/bootstrap-common.sh"
+            cat "$PERF_EVAL_DIR/bench-campaign/run-campaign.sh"
+          } > /tmp/user-data.sh
+          gzip -9 -c /tmp/user-data.sh > /tmp/user-data.sh.gz
+          # EC2 refuses user-data above 16 KB; fail here rather than on launch.
+          RAW=$(wc -c < /tmp/user-data.sh)
+          SIZE=$(wc -c < /tmp/user-data.sh.gz)
+          echo "user-data is $RAW bytes raw, $SIZE bytes gzipped"
+          [ "$SIZE" -le 16384 ] || { echo "::error::gzipped user-data is $SIZE bytes, over the 16384-byte EC2 limit"; exit 1; }
+
+      - name: Launch EC2 instance
+        id: launch
+        run: |
+          # rpc-bench + deadline are what bench-reaper.yml sweeps on; the test tag
+          # is what the GHA role's terminate permission is conditioned on. The
+          # deadline tag is the reaper's backstop, not the campaign budget: it is
+          # set past the box's self-terminate ceiling so a failed campaign keeps
+          # its rescue window instead of being reaped out from under an operator.
+          # It is computed here rather than at render time so runner queue delay
+          # cannot shrink it; the 30-minute margin covers launch-to-boot lag,
+          # because the box's shutdown clock only starts at boot.
+          REAPER_DEADLINE_EPOCH=$(( $(date +%s) + (SELF_TERMINATE_MINUTES + 30) * 60 ))
+          COMMON_TAGS="{Key=test,Value=stellar-rpc-ci-load-test},
+            {Key=rpc-bench,Value=true},
+            {Key=run-id,Value=${{ github.run_id }}},
+            {Key=deadline,Value=$REAPER_DEADLINE_EPOCH}"
+          # AMI: Canonical Ubuntu 24.04 LTS (Noble) amd64, us-east-1, gp3, serial
+          # 20260714. The benchmarks runner's bootstrap.sh requires 24.04, so
+          # ec2-leg.yml's 22.04 AMI is deliberately not reused here.
+          # Root gp3 stays small (toolchain + build clone only) because the
+          # datasets, RocksDB and packfiles all live on the NVMe instance store
+          # both machine types carry.
+          RUN_INSTANCES_JSON=$(aws ec2 run-instances \
+            --image-id ami-052355af2a014bd2c \
+            --instance-type "$INSTANCE_TYPE" \
+            --iam-instance-profile Name=stellar-rpc-ci-load-test \
+            --user-data fileb:///tmp/user-data.sh.gz \
+            --instance-initiated-shutdown-behavior terminate \
+            --block-device-mappings '[{
+              "DeviceName":"/dev/sda1",
+              "Ebs":{"VolumeSize":50,"VolumeType":"gp3","Iops":3000,"Throughput":125,"DeleteOnTermination":true}
+            }]' \
+            --tag-specifications \
+              "ResourceType=instance,Tags=[
+                {Key=Name,Value=bench-campaign-$CAMPAIGN_NAME},
+                $COMMON_TAGS
+              ]" \
+              "ResourceType=volume,Tags=[
+                {Key=Name,Value=bench-campaign-$CAMPAIGN_NAME-root},
+                $COMMON_TAGS
+              ]" \
+            --count 1 \
+            --output json)
+
+          INSTANCE_ID=$(printf '%s' "$RUN_INSTANCES_JSON" | jq -r '.Instances[0].InstanceId')
+          echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+          echo "launched $INSTANCE_ID ($INSTANCE_TYPE) for campaign $CAMPAIGN_NAME"
+
+      # The relay's periodic debug tail reads the box log over SSM, so a box that
+      # never registers is a blind run: fail fast instead.
+      - name: Wait for SSM agent to register
+        env:
+          INSTANCE_ID: ${{ steps.launch.outputs.instance_id }}
+        run: |
+          DEADLINE=$(( $(date +%s) + SSM_REGISTRATION_TIMEOUT ))
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            PING=$(aws ssm describe-instance-information \
+                     --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+                     --query 'InstanceInformationList[0].PingStatus' \
+                     --output text 2>/dev/null || echo "")
+            echo "[$(date -u +%FT%TZ)] ssm ping=$PING"
+            if [ "$PING" = "Online" ]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::SSM agent never registered for $INSTANCE_ID — verify AmazonSSMManagedInstanceCore is attached to the stellar-rpc-ci-load-test role"
+          exit 1
+
+  # A campaign outlives any single GHA job (6 h hard ceiling), and Actions has no
+  # way to loop a job, so the wait is relayed across four copied jobs. Each one
+  # polls its ~5.3 h window and reports state=ok|fail|running; `running` hands
+  # off to the next. 4 x 19200 s covers the 21 h capacity ceiling the render
+  # script enforces.
+  poll1:
+    name: Await campaign (window 1/4)
+    needs: [validate, launch]
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    outputs:
+      state: ${{ steps.relay.outputs.state }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-go
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 21600
+      # RUN_ID must match the box preamble's: the relay ignores result objects
+      # from other attempts, which share RESULT_KEY with this one.
+      - name: Relay
+        id: relay
+        env:
+          INSTANCE_ID: ${{ needs.launch.outputs.instance_id }}
+          DEADLINE_EPOCH: ${{ needs.validate.outputs.deadline_epoch }}
+          RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          WINDOW_SECONDS: 19200
+          POLL_INTERVAL: 30
+          DEBUG_LOG_LINES: 40
+          DEBUG_LOG_EVERY_POLLS: 10
+        run: go run "./$PERF_EVAL_DIR/relay"
+      - name: Write relay summary
+        if: always()
+        run: |
+          if [ -f /tmp/results.md ]; then
+            cat /tmp/results.md >> "$GITHUB_STEP_SUMMARY"
+          elif [ -f /tmp/timeout-comment.md ]; then
+            cat /tmp/timeout-comment.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      # The relay exits 0 for every state; the job verdict is decided here.
+      - name: Gate on relay state
+        env:
+          STATE: ${{ steps.relay.outputs.state }}
+        run: |
+          case "$STATE" in
+            ok) echo "campaign passed inside this window" ;;
+            running) echo "window closed with the campaign still running; handing off to window 2/4" ;;
+            fail)
+              cat /tmp/results.md /tmp/timeout-comment.md 2>/dev/null || true
+              echo "::error::campaign failed"
+              exit 1
+              ;;
+            *)
+              echo "::error::relay reported no state"
+              exit 1
+              ;;
+          esac
+
+  poll2:
+    name: Await campaign (window 2/4)
+    needs: [validate, launch, poll1]
+    if: needs.poll1.outputs.state == 'running'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    outputs:
+      state: ${{ steps.relay.outputs.state }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-go
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 21600
+      - name: Relay
+        id: relay
+        env:
+          INSTANCE_ID: ${{ needs.launch.outputs.instance_id }}
+          DEADLINE_EPOCH: ${{ needs.validate.outputs.deadline_epoch }}
+          RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          WINDOW_SECONDS: 19200
+          POLL_INTERVAL: 30
+          DEBUG_LOG_LINES: 40
+          DEBUG_LOG_EVERY_POLLS: 10
+        run: go run "./$PERF_EVAL_DIR/relay"
+      - name: Write relay summary
+        if: always()
+        run: |
+          if [ -f /tmp/results.md ]; then
+            cat /tmp/results.md >> "$GITHUB_STEP_SUMMARY"
+          elif [ -f /tmp/timeout-comment.md ]; then
+            cat /tmp/timeout-comment.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Gate on relay state
+        env:
+          STATE: ${{ steps.relay.outputs.state }}
+        run: |
+          case "$STATE" in
+            ok) echo "campaign passed inside this window" ;;
+            running) echo "window closed with the campaign still running; handing off to window 3/4" ;;
+            fail)
+              cat /tmp/results.md /tmp/timeout-comment.md 2>/dev/null || true
+              echo "::error::campaign failed"
+              exit 1
+              ;;
+            *)
+              echo "::error::relay reported no state"
+              exit 1
+              ;;
+          esac
+
+  poll3:
+    name: Await campaign (window 3/4)
+    needs: [validate, launch, poll2]
+    if: needs.poll2.outputs.state == 'running'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    outputs:
+      state: ${{ steps.relay.outputs.state }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-go
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 21600
+      - name: Relay
+        id: relay
+        env:
+          INSTANCE_ID: ${{ needs.launch.outputs.instance_id }}
+          DEADLINE_EPOCH: ${{ needs.validate.outputs.deadline_epoch }}
+          RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          WINDOW_SECONDS: 19200
+          POLL_INTERVAL: 30
+          DEBUG_LOG_LINES: 40
+          DEBUG_LOG_EVERY_POLLS: 10
+        run: go run "./$PERF_EVAL_DIR/relay"
+      - name: Write relay summary
+        if: always()
+        run: |
+          if [ -f /tmp/results.md ]; then
+            cat /tmp/results.md >> "$GITHUB_STEP_SUMMARY"
+          elif [ -f /tmp/timeout-comment.md ]; then
+            cat /tmp/timeout-comment.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Gate on relay state
+        env:
+          STATE: ${{ steps.relay.outputs.state }}
+        run: |
+          case "$STATE" in
+            ok) echo "campaign passed inside this window" ;;
+            running) echo "window closed with the campaign still running; handing off to window 4/4" ;;
+            fail)
+              cat /tmp/results.md /tmp/timeout-comment.md 2>/dev/null || true
+              echo "::error::campaign failed"
+              exit 1
+              ;;
+            *)
+              echo "::error::relay reported no state"
+              exit 1
+              ;;
+          esac
+
+  poll4:
+    name: Await campaign (window 4/4)
+    needs: [validate, launch, poll3]
+    if: needs.poll3.outputs.state == 'running'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    outputs:
+      state: ${{ steps.relay.outputs.state }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-go
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 21600
+      - name: Relay
+        id: relay
+        env:
+          INSTANCE_ID: ${{ needs.launch.outputs.instance_id }}
+          DEADLINE_EPOCH: ${{ needs.validate.outputs.deadline_epoch }}
+          RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          WINDOW_SECONDS: 19200
+          POLL_INTERVAL: 30
+          DEBUG_LOG_LINES: 40
+          DEBUG_LOG_EVERY_POLLS: 10
+        run: go run "./$PERF_EVAL_DIR/relay"
+      - name: Write relay summary
+        if: always()
+        run: |
+          if [ -f /tmp/results.md ]; then
+            cat /tmp/results.md >> "$GITHUB_STEP_SUMMARY"
+          elif [ -f /tmp/timeout-comment.md ]; then
+            cat /tmp/timeout-comment.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      # The last window: `running` here means the chain ran out before the
+      # campaign deadline. The box's own ceiling and the reaper still kill it.
+      - name: Gate on relay state
+        env:
+          STATE: ${{ steps.relay.outputs.state }}
+        run: |
+          case "$STATE" in
+            ok) echo "campaign passed inside this window" ;;
+            running) echo "::warning::relay chain exhausted; the campaign is still running on the box" ;;
+            fail)
+              cat /tmp/results.md /tmp/timeout-comment.md 2>/dev/null || true
+              echo "::error::campaign failed"
+              exit 1
+              ;;
+            *)
+              echo "::error::relay reported no state"
+              exit 1
+              ;;
+          esac
+
+  notify:
+    name: Notify
+    needs: [validate, launch, poll1, poll2, poll3, poll4]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    # The results-site ingest (bundle download, converter, viewer smoke test,
+    # push) dominates this budget; the notification itself takes seconds.
+    timeout-minutes: 20
+    steps:
+      # For scripts/bench-campaign's slack-payload.sh; same harness-version rule
+      # as validate (github.sha, not the benchmarked ref).
+      - uses: actions/checkout@v4
+
+      # The chain's shape carries the verdict: exactly one poll job sees the
+      # result object, the rest are skipped (empty state) or handed off.
+      # `rescued` mirrors the cleanup job's box-left-up condition (a poll saw
+      # a fail verdict) so the notification only claims a rescuable box when
+      # cleanup actually left one running.
+      - name: Decide the campaign verdict
+        id: verdict
+        env:
+          S1: ${{ needs.poll1.outputs.state }}
+          S2: ${{ needs.poll2.outputs.state }}
+          S3: ${{ needs.poll3.outputs.state }}
+          S4: ${{ needs.poll4.outputs.state }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          LAUNCH_RESULT: ${{ needs.launch.result }}
+        run: |
+          STATE=fail
+          REASON=""
+          RESCUED=false
+          for S in "$S1" "$S2" "$S3" "$S4"; do
+            if [ "$S" = "ok" ]; then STATE=ok; fi
+          done
+          if [ "$STATE" != "ok" ]; then
+            if [ "$VALIDATE_RESULT" != "success" ]; then
+              REASON="input validation failed"
+            elif [ "$LAUNCH_RESULT" != "success" ]; then
+              REASON="box launch failed"
+            elif [ "$S1" = "fail" ] || [ "$S2" = "fail" ] || [ "$S3" = "fail" ] || [ "$S4" = "fail" ]; then
+              REASON="the campaign reported a failing verdict"
+              RESCUED=true
+            else
+              REASON="the relay chain was exhausted without a verdict"
+            fi
+          fi
+          {
+            echo "state=$STATE"
+            echo "reason=$REASON"
+            echo "rescued=$RESCUED"
+          } >> "$GITHUB_OUTPUT"
+          echo "verdict: $STATE ${REASON:+($REASON)}"
+
+      # Unconditional: the ok path reads the sidecar and ingests, the fail path
+      # reads the result object for the notification's verdict excerpt.
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 1800
+
+      # The box writes this sidecar next to the result object so the bundle's run
+      # id, published location, and uploaded tarball can be named without parsing
+      # the markdown. Its runId must match this attempt's, the way the relay
+      # checks the result object: attempts of the same run share this key, so a
+      # re-run whose own sidecar upload failed would otherwise report the
+      # previous attempt's bundle.
+      - name: Read the run-info sidecar
+        id: runinfo
+        if: steps.verdict.outputs.state == 'ok'
+        env:
+          RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          if aws s3 cp "s3://$BUCKET/${RESULT_KEY%/*}/run-info.json" /tmp/run-info.json >/dev/null 2>&1; then
+            SIDECAR_RUN_ID=$(jq -r '.runId // ""' /tmp/run-info.json)
+            if [ "$SIDECAR_RUN_ID" = "$RUN_ID" ]; then
+              {
+                echo "bench_run_id=$(jq -r '.benchRunId // ""' /tmp/run-info.json)"
+                echo "results_uri=$(jq -r '.resultsUri // ""' /tmp/run-info.json)"
+                echo "tarball_key=$(jq -r '.tarballKey // ""' /tmp/run-info.json)"
+              } >> "$GITHUB_OUTPUT"
+            else
+              echo "::warning::run-info.json is from run ${SIDECAR_RUN_ID:-<none>}, not $RUN_ID; the notification falls back to the result key"
+            fi
+          else
+            echo "::warning::no run-info.json sidecar; the notification falls back to the result key"
+          fi
+
+      # On failure the result object's markdown is the closest thing to a cause
+      # (the box wrote the last campaign-console lines into it), so pull a short
+      # excerpt for the notification: the first grep-worthy lines, else the last
+      # three. Guarded by the same runId check as the sidecar; the seeded
+      # pending marker (relay exhausted, launch failed) has no markdown and
+      # yields nothing. Best-effort throughout.
+      - name: Read the failure excerpt from the result object
+        id: result
+        if: steps.verdict.outputs.state == 'fail'
+        env:
+          RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          aws s3 cp "s3://$BUCKET/$RESULT_KEY" /tmp/result.json >/dev/null 2>&1 || exit 0
+          [ "$(jq -r '.runId // ""' /tmp/result.json)" = "$RUN_ID" ] || exit 0
+          [ "$(jq -r '.verdict // ""' /tmp/result.json)" = "fail" ] || exit 0
+          # Drop the fences, blank lines, and the ✅/❌ headline (the Slack
+          # header already carries the verdict).
+          jq -r '.markdown // ""' /tmp/result.json | grep -v '^```' | grep -v '^\s*$' | grep -v '^[✅❌]' > /tmp/verdict-lines.txt || true
+          EXCERPT=$(grep -m3 -iE 'fail|error|regression|gate|exceed|panic' /tmp/verdict-lines.txt || tail -n 3 /tmp/verdict-lines.txt)
+          [ -n "$EXCERPT" ] || exit 0
+          {
+            echo "excerpt<<VERDICT_EXCERPT_EOF"
+            echo "$EXCERPT"
+            echo "VERDICT_EXCERPT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # Fold the run into the results site: fetch the tarball the box uploaded,
+      # clone stellar-rpc-benchmarks at the same ref the box ran the campaign
+      # from, and run its own ingest script, which converts the bundle, gates on
+      # the repo's tests, and pushes docs/runs/<id>.json to main — that push IS
+      # the site deploy. Producer and consumer must run the same benchmarks
+      # code: a bundle produced by a feature ref and converted by main's older
+      # converter loses whatever sections that ref added, silently.
+      #
+      # The site publishes from main only (ingest.sh --push-main refuses a HEAD
+      # that is not origin/main, because it pushes HEAD:main), so a campaign run
+      # from a feature ref converts with --local instead — committed on a local
+      # run/<id> branch, nothing pushed — which still leaves the run JSON for
+      # the notification's recap. Re-ingest by hand once the ref merges.
+      #
+      # The push authenticates with BENCHMARKS_PUSH_TOKEN, a token with write
+      # access to that one repo; until the secret holds a working token this
+      # degrades to a warning. Best-effort throughout: an ingest failure must
+      # never turn a passing campaign red — the step exits 0 on every path and
+      # reports what happened through ingest_state / ingest_reason, which the
+      # notification puts on the card.
+      - name: Ingest the run into the results site
+        id: ingest
+        if: steps.verdict.outputs.state == 'ok' && steps.runinfo.outputs.tarball_key != ''
+        env:
+          TARBALL_KEY: ${{ steps.runinfo.outputs.tarball_key }}
+          RESULTS_URI: ${{ steps.runinfo.outputs.results_uri }}
+          PUSH_TOKEN: ${{ secrets.BENCHMARKS_PUSH_TOKEN }}
+          BENCH_REPO_REF: ${{ inputs.benchmarks_ref }}
+        run: |
+          BENCH_REPO_REF="${BENCH_REPO_REF:-main}"
+          # ingested | skipped | failed, plus a one-line human reason for the
+          # Slack card. Written on every path, always before the exit.
+          emit() {
+            {
+              echo "ingest_state=$1"
+              echo "ingest_reason=$(printf '%s' "${2:-}" | tr -d '\r\n')"
+            } >> "$GITHUB_OUTPUT"
+          }
+          # Name the gate that rejected the run, from the ingest log, so the
+          # card says what broke instead of "see the run".
+          classify_failure() {
+            FAIL_LINE=""
+            if grep -q 'SMOKE SUMMARY' /tmp/ingest.log 2>/dev/null \
+               && ! grep -q 'SMOKE SUMMARY: [0-9]* passed, 0 failed' /tmp/ingest.log 2>/dev/null; then
+              FAIL_LINE=$( (grep -m1 'FAIL \[' /tmp/ingest.log | sed 's/^[[:space:]]*//') || true )
+              [ -n "$FAIL_LINE" ] || FAIL_LINE="no FAIL line in the log"
+              # Bash substring, not cut -c: GNU cut counts bytes and would
+              # split the em dash the smoke test prints.
+              echo "viewer smoke gate failed (${FAIL_LINE:0:120})"
+            elif grep -q 'make: \*\*\* \[Makefile:.*test\]' /tmp/ingest.log 2>/dev/null; then
+              echo "converter tests failed"
+            elif grep -q 'converter failed' /tmp/ingest.log 2>/dev/null; then
+              echo "converter failed"
+            elif grep -q 'already exists (run already ingested)' /tmp/ingest.log 2>/dev/null; then
+              echo "run already ingested"
+            else
+              echo "ingest.sh exited non-zero (see step log)"
+            fi
+          }
+          if [ -z "$PUSH_TOKEN" ]; then
+            echo "::warning::BENCHMARKS_PUSH_TOKEN is unset; run not ingested into the results site"
+            emit skipped "BENCHMARKS_PUSH_TOKEN unset"
+            exit 0
+          fi
+          if ! aws s3 cp "s3://$BUCKET/$TARBALL_KEY" /tmp/bench-bundle.tgz; then
+            echo "::warning::tarball download failed; run not ingested into the results site"
+            emit failed "tarball download failed"
+            exit 0
+          fi
+          # Full clone: the ingest script pushes HEAD:main, which a shallow
+          # clone's server-side check can reject. The token rides in the remote
+          # URL; the runner is ephemeral and Actions masks the secret in logs.
+          if ! git clone "https://x-access-token:${PUSH_TOKEN}@github.com/stellar-experimental/stellar-rpc-benchmarks.git" /tmp/benchmarks; then
+            echo "::warning::benchmarks repo clone failed; run not ingested into the results site"
+            emit failed "benchmarks clone failed (ref $BENCH_REPO_REF)"
+            exit 0
+          fi
+          # Checkout, not clone --branch: benchmarks_ref takes any ref the box
+          # takes, and --branch rejects a commit SHA. From a fresh clone
+          # `checkout main` still leaves HEAD at origin/main for --push-main,
+          # and --local branches off a detached HEAD fine.
+          if ! git -C /tmp/benchmarks checkout --quiet "$BENCH_REPO_REF"; then
+            echo "::warning::benchmarks ref $BENCH_REPO_REF not found; run not ingested into the results site"
+            emit failed "benchmarks ref $BENCH_REPO_REF not found"
+            exit 0
+          fi
+          git -C /tmp/benchmarks config user.name "github-actions[bot]"
+          git -C /tmp/benchmarks config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          MODE_FLAG=--push-main
+          if [ "$BENCH_REPO_REF" != "main" ]; then
+            MODE_FLAG=--local
+          fi
+          # Campaign datasets are the synthetic apply-load packs, hence the
+          # hard-coded kind — revisit if a pubnet campaign ever runs through
+          # this workflow.
+          if (cd /tmp/benchmarks && scripts/ingest.sh /tmp/bench-bundle.tgz \
+                --dataset-kind synthetic "$MODE_FLAG" \
+                -- --source-uri "$RESULTS_URI") 2>&1 | tee /tmp/ingest.log; then
+            # The converted run JSON the ingest just committed; the notification
+            # reads the per-profile ingestion p99s and the build commit from it.
+            # --push-main names the live run in a `viewer:` line; --local
+            # publishes nothing and prints none, so read the id off the commit
+            # subject (`runs: add <id>`) instead.
+            VIEWER=""
+            SITE_RUN_ID=""
+            if [ "$MODE_FLAG" = "--push-main" ]; then
+              VIEWER=$( (grep '^viewer: ' /tmp/ingest.log | tail -1 | cut -d' ' -f2) || true )
+              echo "viewer_url=$VIEWER" >> "$GITHUB_OUTPUT"
+              SITE_RUN_ID="${VIEWER##*run=}"
+            else
+              SITE_RUN_ID=$( (sed -n 's/^.*runs: add \(.*\)$/\1/p' /tmp/ingest.log | tail -1) || true )
+            fi
+            if [ -n "$SITE_RUN_ID" ] && [ -f "/tmp/benchmarks/docs/runs/$SITE_RUN_ID.json" ]; then
+              echo "run_json=/tmp/benchmarks/docs/runs/$SITE_RUN_ID.json" >> "$GITHUB_OUTPUT"
+            fi
+            if [ "$MODE_FLAG" = "--push-main" ]; then
+              emit ingested "published to the results site"
+              echo "ingested; viewer: $VIEWER"
+            else
+              echo "::warning::benchmarks_ref $BENCH_REPO_REF is not main; the run was converted on a local run/ branch but not published to the results site"
+              emit skipped "benchmarks_ref $BENCH_REPO_REF is not main — site publishes from main only; merge it, then re-ingest by hand"
+            fi
+          else
+            INGEST_REASON=$(classify_failure)
+            echo "::warning::results-site ingest failed: $INGEST_REASON; the notification falls back to the raw results URI"
+            emit failed "$INGEST_REASON"
+          fi
+
+      # The Block Kit payload comes from slack-payload.sh so its layout is
+      # testable off GHA. A missing or broken webhook must never turn a passing
+      # campaign red: it degrades to a warning plus the message in the log.
+      - name: Post the campaign notification
+        env:
+          MODE: campaign
+          STATE: ${{ steps.verdict.outputs.state }}
+          REASON: ${{ steps.verdict.outputs.reason }}
+          BOX_RESCUED: ${{ steps.verdict.outputs.rescued }}
+          CAMPAIGN_NAME: ${{ needs.validate.outputs.campaign_name }}
+          PHASE: ${{ inputs.phase }}
+          INGEST: ${{ inputs.ingest }}
+          QUERY: ${{ inputs.query }}
+          RUNS: ${{ inputs.runs }}
+          HOT_NUM_LEDGERS: ${{ inputs.hot_num_ledgers }}
+          TARGET_REF: ${{ inputs.ref }}
+          WORKERS: ${{ needs.validate.outputs.workers }}
+          INSTANCE_TYPE: ${{ needs.validate.outputs.instance_type }}
+          BUDGET_MINUTES: ${{ needs.validate.outputs.budget_minutes }}
+          DEADLINE_EPOCH: ${{ needs.validate.outputs.deadline_epoch }}
+          BOX_ID: ${{ needs.launch.outputs.instance_id }}
+          RUN_ID_TAG: ${{ github.run_id }}
+          BENCH_RUN_ID: ${{ steps.runinfo.outputs.bench_run_id }}
+          RESULTS_URI: ${{ steps.runinfo.outputs.results_uri }}
+          VIEWER_URL: ${{ steps.ingest.outputs.viewer_url }}
+          RUN_JSON: ${{ steps.ingest.outputs.run_json }}
+          # Empty when the ingest step was skipped by its `if:` — a failed
+          # campaign, or no tarball — i.e. the ingest was never attempted.
+          INGEST_STATE: ${{ steps.ingest.outputs.ingest_state }}
+          INGEST_REASON: ${{ steps.ingest.outputs.ingest_reason }}
+          EXCERPT: ${{ steps.result.outputs.excerpt }}
+          HARNESS_SHA: ${{ github.sha }}
+          WEBHOOK: ${{ secrets.SLACK_BENCH_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          # Elapsed since the config was rendered: the render script pins
+          # deadline_epoch = render time + budget.
+          ELAPSED_MINUTES=""
+          if [ -n "$DEADLINE_EPOCH" ] && [ -n "$BUDGET_MINUTES" ]; then
+            case "$DEADLINE_EPOCH$BUDGET_MINUTES" in
+              *[!0-9]*) : ;;
+              *)
+                E=$(( ($(date +%s) - (DEADLINE_EPOCH - BUDGET_MINUTES * 60)) / 60 ))
+                if [ "$E" -ge 0 ]; then ELAPSED_MINUTES=$E; fi
+                ;;
+            esac
+          fi
+          # The benchmarked commit, for the ref link: the converted run JSON
+          # records what the box actually built (campaign boxes leave the
+          # result object's targetSha empty).
+          TARGET_SHA=""
+          if [ -n "$RUN_JSON" ] && [ -r "$RUN_JSON" ]; then
+            TARGET_SHA=$(jq -r '.build.commit // ""' "$RUN_JSON" 2>/dev/null || true)
+          fi
+          export ELAPSED_MINUTES TARGET_SHA
+          # Degrade, never fail: a payload bug must not turn a campaign verdict
+          # red at the last step.
+          if ! ./"$PERF_EVAL_DIR"/bench-campaign/slack-payload.sh > /tmp/slack.json; then
+            echo "::warning::slack-payload.sh failed; notification not delivered"
+            exit 0
+          fi
+          TEXT=$(jq -r '.attachments[0].fallback' /tmp/slack.json)
+          echo "$TEXT"
+          echo "$TEXT" >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "$WEBHOOK" ]; then
+            echo "::warning::SLACK_BENCH_WEBHOOK_URL is unset; notification not delivered"
+            exit 0
+          fi
+          if curl -fsS -X POST -H 'Content-Type: application/json' \
+               --data @/tmp/slack.json "$WEBHOOK" >/dev/null; then
+            echo "slack notified"
+          else
+            echo "::warning::slack notification failed"
+          fi
+
+  cleanup:
+    name: Terminate campaign box
+    needs: [launch, poll1, poll2, poll3, poll4]
+    if: always() && needs.launch.outputs.instance_id != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 900
+
+      # A failing campaign is the one worth rescuing: its bundle tarball is still
+      # on the box under /tmp, so the box is left up to its self-terminate
+      # ceiling for an operator to SSM in and pull it. The deadline tag plus
+      # bench-reaper.yml guarantee it dies regardless.
+      - name: Terminate unless the campaign failed
+        env:
+          INSTANCE_ID: ${{ needs.launch.outputs.instance_id }}
+          S1: ${{ needs.poll1.outputs.state }}
+          S2: ${{ needs.poll2.outputs.state }}
+          S3: ${{ needs.poll3.outputs.state }}
+          S4: ${{ needs.poll4.outputs.state }}
+        run: |
+          FAILED=false
+          for S in "$S1" "$S2" "$S3" "$S4"; do
+            if [ "$S" = "fail" ]; then FAILED=true; fi
+          done
+          if [ "$FAILED" = "true" ]; then
+            echo "::warning::campaign failed — leaving $INSTANCE_ID up to its self-terminate ceiling so /tmp/bench-results-*.tgz can be rescued over SSM"
+            exit 0
+          fi
+          # Tolerates an already-terminated box (terminate is idempotent, and a
+          # passing campaign powers itself off) but surfaces real failures —
+          # a bare `|| true` here masked a missing ec2:TerminateInstances
+          # permission for weeks.
+          if ! OUT=$(aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" 2>&1); then
+            echo "::warning::terminate-instances failed; the box falls to its self-terminate ceiling / the reaper: $OUT"
+          fi

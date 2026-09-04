@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -84,7 +85,7 @@ type fileSpec struct {
 	rowOrder []string
 }
 
-// fileSpecs is the whole report schema, in file emission order:
+// fileSpecs is the bench-ingest report schema, in file emission order:
 //
 //   - one CSV per cold data type the ingest engine reports (ledgers.csv,
 //     txhash.csv, events.csv), one row per cold pipeline stage (term_index →
@@ -140,6 +141,64 @@ var fileSpecs = func() []fileSpec {
 	)
 }()
 
+// querySpecs is the bench-query report schema for one run: one CSV per query
+// type, each holding the latency rows of that type's legs, plus driver.csv
+// holding the setup rows and each leg's driver metrics. It is built per run,
+// since the row set is the --types × --target-rps ladder the flags asked for.
+//
+// The labels are the results converter's contract:
+//
+//   - Every CSV in the run dir other than driver.csv is a query type, named by
+//     its basename.
+//   - In a type's file, total_r<rate> is that leg's headline distribution — the
+//     scheduled latency of every measured request. service_r<rate>,
+//     found_r<rate>, and miss_r<rate> are side rows over the same requests. A
+//     consumer must read <qtype>_r<rate>_shed alongside total_r<rate>, because
+//     once a leg sheds, total_r<rate> covers only the requests the dispatcher
+//     was able to offer.
+//   - In driver.csv, <qtype>_r<rate> with no further suffix is the leg's
+//     wall-clock. <qtype>_r<rate>_millirps, _lag, and _shed are that leg's
+//     driver metrics: the achieved rate times 1000, the dispatch-lag
+//     distribution, and the shed count.
+//   - A driver row with no _r<rate> segment (open, evict, peak_rss_bytes) is
+//     setup.
+//
+// txhash carries the found_r<rate> and miss_r<rate> rows, splitting the same
+// requests its total_r<rate> row blends. The converter matches total_r<rate>
+// alone, so the split is invisible to the site and exists for the CSV and the
+// log summary — see recordLeg.
+func querySpecs(types []string, rates []float64) []fileSpec {
+	specs := make([]fileSpec, 0, len(types)+1)
+	legSuffixes := []string{driverLegRPSSuffix, driverLegLagSuffix, driverLegShedSuffix}
+	driverRows := make([]string, 0, len(types)*len(rates)*(len(legSuffixes)+1)+3)
+	driverRows = append(driverRows, driverQueryOpen, driverQueryEvict)
+	for _, qtype := range types {
+		rows := make([]string, 0, len(rates)*2)
+		for _, rps := range rates {
+			rows = append(rows, queryTotalRow(rps))
+		}
+		for _, rps := range rates {
+			rows = append(rows, queryServiceRow(rps))
+		}
+		if qtype == queryTypeTxHash {
+			for _, stage := range []string{txHashStageFound, txHashStageMiss} {
+				for _, rps := range rates {
+					rows = append(rows, queryStageRow(stage, rps))
+				}
+			}
+		}
+		for _, rps := range rates {
+			driverRows = append(driverRows, queryDriverRow(qtype, rps))
+			for _, suffix := range legSuffixes {
+				driverRows = append(driverRows, queryDriverLegRow(qtype, rps, suffix))
+			}
+		}
+		specs = append(specs, fileSpec{name: qtype, rowOrder: rows})
+	}
+	driverRows = append(driverRows, driverPeakRSS)
+	return append(specs, fileSpec{name: fileDriver, rowOrder: driverRows})
+}
+
 // sample is one observed (duration, item-count) pair.
 type sample struct {
 	d     time.Duration
@@ -184,6 +243,12 @@ type csvSink struct {
 	mu   sync.Mutex
 	rows map[rowKey]*series // every signal is one sample on a (file, row) key
 
+	// specs is the report schema this sink renders through: fileSpecs for an
+	// ingest run, querySpecs(...) for a query run, whose file and row set is the
+	// --types × --target-rps ladder the flags asked for. Read-only after
+	// construction.
+	specs []fileSpec
+
 	// hotBurst accumulates the current hot ledger's HotPhase durations so
 	// HotPhase can reconstruct the per-ledger end-to-end ingest_total (the
 	// phases partition the per-ledger total). Guarded by mu.
@@ -205,9 +270,15 @@ var (
 	_ observability.Metrics = (*csvSink)(nil)
 )
 
-// newCSVSink returns an empty recorder.
+// newCSVSink returns an empty recorder rendering through the bench-ingest
+// schema.
 func newCSVSink() *csvSink {
-	return &csvSink{rows: make(map[rowKey]*series)}
+	return newSchemaCSVSink(fileSpecs)
+}
+
+// newSchemaCSVSink returns an empty recorder rendering through specs.
+func newSchemaCSVSink(specs []fileSpec) *csvSink {
+	return &csvSink{rows: make(map[rowKey]*series), specs: specs}
 }
 
 // HotPhase records one phase of one hot ledger ingest into hot.csv, and
@@ -371,9 +442,9 @@ type row struct {
 
 // aggregate reduces a series to a row, filtering out zero-duration samples so
 // work too fast for the timer (an empty ledger's stage) doesn't skew the
-// percentiles. For pace_lag, zeros are always included (they represent
-// on-time ledgers and are part of the lag distribution). ok is false when no
-// sample survives the filter — the row is suppressed.
+// percentiles. Rows whose zeros are real observations pass includeZeros and
+// keep them (see keepsZeroSamples). ok is false when no sample survives the
+// filter — the row is suppressed.
 func aggregate(name string, s *series, includeZeros bool) (row, bool) {
 	durs := make([]time.Duration, 0, len(s.samples))
 	items := 0
@@ -421,14 +492,28 @@ func withUnknown[V any](order []string, m map[string]V) []string {
 	return append(slices.Clone(order), extra...)
 }
 
+// keepsZeroSamples reports whether a row keeps its zero-duration samples. These
+// rows are distributions, counts, or rates in which a zero is a real
+// observation: a ledger that committed on time, a request dispatched on time, a
+// leg that shed nothing, a leg that answered nothing. Everywhere else a zero
+// means work too fast for the timer to see, which aggregate drops.
+//
+// The rule matches whole label suffixes and is shared by the ingest and query
+// schemas: the ingest report's pace_lag is covered by the _lag suffix.
+func keepsZeroSamples(label string) bool {
+	return strings.HasSuffix(label, driverLegLagSuffix) ||
+		strings.HasSuffix(label, driverLegShedSuffix) ||
+		strings.HasSuffix(label, driverLegRPSSuffix)
+}
+
 // file is one aggregated CSV file: its basename (without .csv) and its rows.
 type file struct {
 	name string
 	rows []row
 }
 
-// files aggregates every recorded series into the report's CSV files, in
-// fileSpecs order (a file outside the schema is appended after, sorted, its
+// files aggregates every recorded series into the report's CSV files, in the
+// sink's schema order (a file outside the schema is appended after, sorted, its
 // rows ordered by sorted label).
 func (s *csvSink) files() []file {
 	s.mu.Lock()
@@ -442,9 +527,9 @@ func (s *csvSink) files() []file {
 		byFile[k.file][k.row] = sr
 	}
 
-	names := make([]string, len(fileSpecs))
-	rowOrders := make(map[string][]string, len(fileSpecs))
-	for i, spec := range fileSpecs {
+	names := make([]string, len(s.specs))
+	rowOrders := make(map[string][]string, len(s.specs))
+	for i, spec := range s.specs {
 		names[i] = spec.name
 		rowOrders[spec.name] = spec.rowOrder
 	}
@@ -455,8 +540,7 @@ func (s *csvSink) files() []file {
 		var rows []row
 		for _, label := range withUnknown(rowOrders[name], byRow) {
 			if sr := byRow[label]; sr != nil {
-				// pace_lag is for paced runs; include zero-lag samples (on-time ledgers).
-				if r, ok := aggregate(label, sr, label == driverPaceLag); ok {
+				if r, ok := aggregate(label, sr, keepsZeroSamples(label)); ok {
 					rows = append(rows, r)
 				}
 			}
@@ -514,19 +598,34 @@ func writeCSV(path string, rows []row) error {
 func (s *csvSink) logSummary(logger *supportlog.Entry) {
 	for _, f := range s.files() {
 		for _, r := range f.rows {
-			// peak_rss_bytes carries bytes in its duration fields; render it
-			// as a byte count, not a garbled duration.
-			if f.name == fileDriver && r.name == driverPeakRSS {
-				logger.Infof("%-10s %-12s n=%-7d bytes=%d", f.name, r.name, r.n, r.total.Nanoseconds())
-				continue
-			}
-			logger.Infof("%-10s %-12s n=%-7d items=%-9d total=%-12s p50=%-10s p90=%-10s p99=%-10s max=%s",
-				f.name, r.name, r.n, r.items,
-				r.total.Round(time.Microsecond),
-				r.p50.Round(time.Microsecond),
-				r.p90.Round(time.Microsecond),
-				r.p99.Round(time.Microsecond),
-				r.maxv.Round(time.Microsecond))
+			logRow(logger, f.name, r)
 		}
 	}
+}
+
+// logRow logs one aggregated row as a percentile line. Three driver rows carry
+// a plain number in their duration columns — the run's peak RSS in bytes, a
+// leg's achieved rate in thousandths of a request per second, and a leg's shed
+// count — so each of those is rendered as the number it holds.
+func logRow(logger *supportlog.Entry, fileName string, r row) {
+	switch {
+	case fileName != fileDriver:
+	case r.name == driverPeakRSS:
+		logger.Infof("%-10s %-12s n=%-7d bytes=%d", fileName, r.name, r.n, r.total.Nanoseconds())
+		return
+	case strings.HasSuffix(r.name, driverLegRPSSuffix):
+		logger.Infof("%-10s %-12s n=%-7d rps=%.3f", fileName, r.name, r.n,
+			float64(r.total.Nanoseconds())/milliPerUnit)
+		return
+	case strings.HasSuffix(r.name, driverLegShedSuffix):
+		logger.Infof("%-10s %-12s n=%-7d shed=%d", fileName, r.name, r.n, r.items)
+		return
+	}
+	logger.Infof("%-10s %-12s n=%-7d items=%-9d total=%-12s p50=%-10s p90=%-10s p99=%-10s max=%s",
+		fileName, r.name, r.n, r.items,
+		r.total.Round(time.Microsecond),
+		r.p50.Round(time.Microsecond),
+		r.p90.Round(time.Microsecond),
+		r.p99.Round(time.Microsecond),
+		r.maxv.Round(time.Microsecond))
 }

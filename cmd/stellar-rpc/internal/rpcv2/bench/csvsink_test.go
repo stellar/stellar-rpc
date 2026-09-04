@@ -260,6 +260,44 @@ func TestCSVSinkPaceLagBelowFirstSeq(t *testing.T) {
 	assert.Empty(t, paceLagSamples(sink))
 }
 
+// TestCSVSinkKeepsZeroLagAndShedSamples pins the query bench's zero-keeping
+// rows against the ordinary filter: a leg's _lag and _shed rows survive with
+// nothing but zero durations, while a latency row whose only sample is zero is
+// still dropped as work too fast for the timer.
+func TestCSVSinkKeepsZeroLagAndShedSamples(t *testing.T) {
+	sink := newSchemaCSVSink(querySpecs([]string{queryTypeLedgers}, []float64{1}))
+	sink.observe(fileDriver, "ledgers_r1_lag", 0, 1)
+	sink.observe(fileDriver, "ledgers_r1_lag", 0, 1)
+	sink.observe(fileDriver, "ledgers_r1_shed", 0, 0)
+	sink.observe(queryTypeLedgers, "total_r1", 0, 1)
+
+	outDir := t.TempDir()
+	written, err := sink.writeCSVs(outDir)
+	require.NoError(t, err)
+	require.Len(t, written, 1)
+
+	driver := readCSV(t, filepath.Join(outDir, "driver.csv"))
+	require.Contains(t, driver, "ledgers_r1_lag")
+	assert.EqualValues(t, 2, driver["ledgers_r1_lag"]["n"])
+	require.Contains(t, driver, "ledgers_r1_shed")
+	assert.EqualValues(t, 1, driver["ledgers_r1_shed"]["n"])
+	assert.NoFileExists(t, filepath.Join(outDir, "ledgers.csv"))
+}
+
+// TestKeepsZeroSamples pins which rows keep their zero-duration samples.
+func TestKeepsZeroSamples(t *testing.T) {
+	for label, want := range map[string]bool{
+		"pace_lag":            true,
+		"txhash_r300_lag":     true,
+		"events_r0.5_shed":    true,
+		"ledgers_r1_millirps": true,
+		"ledgers_r1":          false,
+		"open":                false,
+	} {
+		assert.Equal(t, want, keepsZeroSamples(label), "keepsZeroSamples(%q)", label)
+	}
+}
+
 // mustWriteCSVs writes the sink's report to a temp dir and returns it.
 func mustWriteCSVs(t *testing.T, sink *csvSink) string {
 	t.Helper()
