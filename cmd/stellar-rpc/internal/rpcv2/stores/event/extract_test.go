@@ -598,16 +598,18 @@ func sqliteEventRows(t *testing.T, lcm xdr.LedgerCloseMeta) []sqliteEventRow {
 	var rows []sqliteEventRow
 	reader := sqlitedb.NewEventReader(logger, testDB, testPassphrase)
 	err = reader.GetEvents(ctx, cursorRange, nil, nil, nil,
-		func(event xdr.DiagnosticEvent, cur protocol.Cursor, closeTime int64, txHash *xdr.Hash) bool {
-			evBytes, merr := event.Event.MarshalBinary()
-			require.NoError(t, merr)
+		func(eventView xdr.DiagnosticEventView, cur protocol.Cursor, closeTime int64, txHash *xdr.Hash) (bool, error) {
+			ev, verr := eventView.Event()
+			require.NoError(t, verr)
+			evBytes, rerr := ev.Raw()
+			require.NoError(t, rerr)
 			rows = append(rows, sqliteEventRow{
 				cursor:             cur,
 				txHash:             *txHash,
 				ledgerCloseTime:    closeTime,
 				contractEventBytes: evBytes,
 			})
-			return true
+			return true, nil
 		})
 	require.NoError(t, err, "SQLite GetEvents")
 	return rows
