@@ -92,6 +92,18 @@ func (l ledgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.Led
 	return getLedgerFromDB(ctx, l.tx, sequence)
 }
 
+// WithLedgerRaw lends the ledger's stored meta blob without decoding it. The
+// blob is ours to lend: database/sql clones each BLOB scanned into a *[]byte.
+func (l ledgerReaderTx) WithLedgerRaw(
+	ctx context.Context, sequence uint32, fn store.WithLedgerRawFn,
+) (bool, error) {
+	meta, found, err := withLedgerRawFromDB(ctx, l.tx, sequence)
+	if err != nil || !found {
+		return found, err
+	}
+	return true, fn(meta)
+}
+
 func (l ledgerReaderTx) Done() error {
 	return l.tx.Rollback()
 }
@@ -151,7 +163,7 @@ func (r ledgerReader) GetLedger(ctx context.Context, sequence uint32) (xdr.Ledge
 
 // WithLedgerRaw lends the ledger's stored meta blob without decoding it.
 func (r ledgerReader) WithLedgerRaw(ctx context.Context, sequence uint32, fn store.WithLedgerRawFn) (bool, error) {
-	meta, found, err := getLedgerRawFromDB(ctx, r.db, sequence)
+	meta, found, err := withLedgerRawFromDB(ctx, r.db, sequence)
 	if err != nil || !found {
 		return found, err
 	}
@@ -233,7 +245,7 @@ type ledgerRangeRow struct {
 func ledgerInfoFromRow(ctx context.Context, db readDB, row ledgerRangeRow) (store.LedgerInfo, error) {
 	closeTime, err := xdr.LedgerCloseMetaView(row.MetaPrefix).LedgerCloseTime()
 	if err != nil {
-		meta, found, dbErr := getLedgerRawFromDB(ctx, db, row.Sequence)
+		meta, found, dbErr := withLedgerRawFromDB(ctx, db, row.Sequence)
 		if dbErr != nil {
 			return store.LedgerInfo{}, dbErr
 		}
@@ -356,7 +368,7 @@ func (l ledgerWriter) trimLedgers(latestLedgerSeq uint32, retentionWindow uint32
 
 // getLedgerFromDB fetches a single ledger from the database.
 func getLedgerFromDB(ctx context.Context, db readDB, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
-	meta, found, err := getLedgerRawFromDB(ctx, db, sequence)
+	meta, found, err := withLedgerRawFromDB(ctx, db, sequence)
 	if err != nil || !found {
 		return xdr.LedgerCloseMeta{}, false, err
 	}
@@ -367,9 +379,10 @@ func getLedgerFromDB(ctx context.Context, db readDB, sequence uint32) (xdr.Ledge
 	return lcm, true, nil
 }
 
-// getLedgerRawFromDB is a helper function that encapsulates the common logic
-// for fetching a single ledger's bytes from the database.
-func getLedgerRawFromDB(ctx context.Context, db readDB, sequence uint32) ([]byte, bool, error) {
+// withLedgerRawFromDB is a helper function that encapsulates the common logic
+// for fetching a single ledger's bytes from the database. The bytes returned
+// are lent and shouldn't be reused by a later statement.
+func withLedgerRawFromDB(ctx context.Context, db readDB, sequence uint32) ([]byte, bool, error) {
 	sql := sq.Select("meta").From(ledgerCloseMetaTableName).Where(sq.Eq{"sequence": sequence})
 	var results [][]byte
 	if err := db.Select(ctx, &results, sql); err != nil {
