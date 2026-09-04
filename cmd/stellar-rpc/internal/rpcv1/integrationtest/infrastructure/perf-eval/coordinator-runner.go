@@ -99,6 +99,12 @@ func run(ctx context.Context) error {
 			logger.Warnf("no result at s3://%s/%s: %v", l.Bucket, l.Key, err)
 			continue
 		}
+		// A campaign that never overwrote its seed marker has no outcome to
+		// report; it renders through the no-result fallback below.
+		if res.Verdict == harness.VerdictPending {
+			logger.Warnf("result at s3://%s/%s is still pending", l.Bucket, l.Key)
+			continue
+		}
 		results[i].Verdict, results[i].Markdown = res.Verdict, res.Markdown
 	}
 
@@ -161,7 +167,7 @@ func renderRun(r runRecord) string {
 // or a fallback when no result object was published.
 func renderLeg(l legResult) string {
 	emoji := "❌"
-	if l.Verdict == "ok" {
+	if l.Verdict == harness.VerdictOK {
 		emoji = "✅"
 	}
 	var b strings.Builder
