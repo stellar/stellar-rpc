@@ -19,6 +19,7 @@ import (
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/strkey"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
@@ -38,13 +39,13 @@ type Limits struct {
 
 // NewHandler builds the getEventsV2 handler. It decodes the params itself,
 // not through methods.NewHandler, so an unknown field fails.
-func NewHandler(limits Limits) jrpc2.Handler {
+func NewHandler(limits Limits, logger *supportlog.Entry) jrpc2.Handler {
 	return func(ctx context.Context, r *jrpc2.Request) (any, error) {
 		req, err := decodeRequest(r.ParamString(), limits.MaxLimit)
 		if err != nil {
 			return nil, err
 		}
-		return getEventsV2(ctx, limits, req)
+		return getEventsV2(ctx, limits, logger, req)
 	}
 }
 
@@ -120,16 +121,17 @@ func invalidParams(message string) error {
 
 // getEventsV2 classifies every failure in one place.
 func getEventsV2(
-	ctx context.Context, limits Limits, req *protocol.GetEventsV2Request,
+	ctx context.Context, limits Limits, logger *supportlog.Entry,
+	req *protocol.GetEventsV2Request,
 ) (protocol.GetEventsV2Response, error) {
 	view, err := query.ViewFrom(ctx)
 	if err != nil {
-		return protocol.GetEventsV2Response{}, responseError(err, 0, 0)
+		return protocol.GetEventsV2Response{}, responseError(err, 0, 0, logger)
 	}
 	oldest, latest := view.OldestLedger(), view.LatestLedger()
 	resp, err := serve(ctx, view, limits, req, oldest, latest)
 	if err != nil {
-		return protocol.GetEventsV2Response{}, responseError(err, oldest, latest)
+		return protocol.GetEventsV2Response{}, responseError(err, oldest, latest, logger)
 	}
 	return resp, nil
 }
@@ -201,12 +203,12 @@ func requestCursor(
 	return query.EventCursor{Scope: scope}, pageLimit, nil
 }
 
-// validateCursorFilters rejects filter shapes a v2 request cannot build,
-// which only a hand-built cursor carries. The codec and the pager accept
-// them because the v1 adapter will mint them. Two matter here: a clause
-// with no constraint is a full scan that the term budget counts as zero,
-// and a diagnostic type or a topic-count clause names events v2 never
-// serves.
+// validateCursorFilters rejects filter shapes no v2 request can build, so
+// only a hand-built cursor carries them: a clause with no constraint (a
+// match-all the term budget counts as zero), a type outside contract and
+// system, and a topic-count clause. The pager accepts all three because
+// the v1 handler builds them directly, as values rather than tokens; this
+// handler is the codec's only encoder.
 func validateCursorFilters(filters []event.Filter) error {
 	for i := range filters {
 		f := &filters[i]
@@ -291,7 +293,7 @@ func responseScannedLedger(next *query.EventCursor) uint32 {
 // responseError maps the pager's and the SDK's errors onto the three
 // machine-readable reasons. Anything else becomes an internal error; jrpc2
 // would otherwise code a plain error as SystemError.
-func responseError(err error, oldest, latest uint32) error {
+func responseError(err error, oldest, latest uint32, logger *supportlog.Entry) error {
 	var invalid *protocol.InvalidParamsError
 	if errors.As(err, &invalid) {
 		return jrpcError(invalid.Message, invalid.Data)
@@ -321,6 +323,12 @@ func responseError(err error, oldest, latest uint32) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
+	// Nothing above claimed it, so this is the server's fault, not the
+	// request's: a stored event the reader could not make sense of, a
+	// cursor this server minted and cannot re-encode, or a store failure.
+	// The client gets the message; an operator needs it in the log too,
+	// since the response is gone the moment it is sent.
+	logger.WithError(err).Error("getEvents: unclassified failure, serving an internal error")
 	return &jrpc2.Error{Code: jrpc2.InternalError, Message: err.Error()}
 }
 
