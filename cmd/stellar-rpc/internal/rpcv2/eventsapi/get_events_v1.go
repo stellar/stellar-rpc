@@ -15,9 +15,7 @@ import (
 	"github.com/creachadair/jrpc2"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
-	"github.com/stellar/go-stellar-sdk/strkey"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
-	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
@@ -183,126 +181,10 @@ func v1Response(
 	}
 }
 
-// v1Filters expands a validated v1 filter list into the pager's filters. The
-// OR dimensions within one v1 filter (contract ids, topic filters) multiply
-// out, one store filter per combination: at most 5 filters x 5 contract ids
-// x 5 topics = 125, under the pager's cap. A combination with no constraints
-// matches every event, so the whole query collapses to the pager's
-// match-all (nil).
+// v1Filters compiles a validated v1 filter list into the pager's filters;
+// nil matches every event.
 func v1Filters(in []protocol.EventFilter) ([]event.Filter, error) {
-	var out []event.Filter
-	for i := range in {
-		expanded, matchAll, err := expandV1Filter(&in[i])
-		if err != nil {
-			return nil, err
-		}
-		if matchAll {
-			return nil, nil
-		}
-		out = append(out, expanded...)
-	}
-	return out, nil
-}
-
-func expandV1Filter(f *protocol.EventFilter) ([]event.Filter, bool, error) {
-	// A validated type set holds only contract and system: naming both
-	// constrains nothing, naming one is one term. Either way the type never
-	// multiplies the expansion.
-	var eventType *xdr.ContractEventType
-	if len(f.EventType) == 1 {
-		name := f.EventType.Keys()[0]
-		typ, ok := protocol.GetEventTypeXDRFromEventType()[name]
-		if !ok {
-			// Valid admits only contract and system, so a name that is
-			// neither is a handler bug, not client input.
-			return nil, false, fmt.Errorf("unsupported event type %q", name)
-		}
-		eventType = &typ
-	}
-	contracts := [][]byte{nil}
-	if len(f.ContractIDs) > 0 {
-		contracts = make([][]byte, 0, len(f.ContractIDs))
-		for _, id := range f.ContractIDs {
-			raw, err := strkey.Decode(strkey.VersionByteContract, id)
-			if err != nil {
-				// Unreachable: req.Valid decoded it already. The message is
-				// the v1 handler's backstop wording.
-				return nil, false, fmt.Errorf("invalid contract ID: %v", id)
-			}
-			contracts = append(contracts, raw)
-		}
-	}
-	shapes := []topicShape{{}}
-	if len(f.Topics) > 0 {
-		shapes = make([]topicShape, 0, len(f.Topics))
-		for _, tf := range f.Topics {
-			shape, err := topicShapeOf(tf)
-			if err != nil {
-				return nil, false, err
-			}
-			shapes = append(shapes, shape)
-		}
-	}
-
-	out := make([]event.Filter, 0, len(contracts)*len(shapes))
-	for _, cid := range contracts {
-		for _, sh := range shapes {
-			flt := event.Filter{
-				ContractID: cid, EventType: eventType,
-				Topics: sh.topics, TopicCount: sh.count,
-			}
-			if isMatchAll(&flt) {
-				return nil, true, nil
-			}
-			out = append(out, flt)
-		}
-	}
-	return out, false, nil
-}
-
-// topicShape is one v1 TopicFilter in the store's terms: the pinned
-// positional values plus the arity constraint. N segments match exactly N
-// topics; a trailing "**" relaxes that to at least the prefix, and "at least
-// zero" is the zero value, no constraint.
-type topicShape struct {
-	topics [protocol.MaxTopicCount][]byte
-	count  event.TopicCountFilter
-}
-
-func topicShapeOf(tf protocol.TopicFilter) (topicShape, error) {
-	segs := tf
-	shape := topicShape{count: event.TopicCountFilter{Count: len(tf), Exact: true}}
-	if n := len(tf); n > 0 && tf[n-1].Wildcard != nil && *tf[n-1].Wildcard == protocol.WildCardZeroOrMore {
-		// "At least zero" is the wildcard, which is the zero value.
-		segs = tf[:n-1]
-		shape.count = event.TopicCountFilter{Count: len(segs)}
-	}
-	for i, s := range segs {
-		// "*" is any value, and the position still exists via the count.
-		// A segment with neither value nor wildcard is skipped the way the
-		// shared handler skips it, rather than dereferenced.
-		if s.Wildcard != nil || s.ScVal == nil {
-			continue
-		}
-		raw, err := s.ScVal.MarshalBinary()
-		if err != nil {
-			return topicShape{}, fmt.Errorf("failed to marshal segment: %w", err)
-		}
-		shape.topics[i] = raw
-	}
-	return shape, nil
-}
-
-func isMatchAll(f *event.Filter) bool {
-	if f.EventType != nil || len(f.ContractID) > 0 || f.TopicCount != (event.TopicCountFilter{}) {
-		return false
-	}
-	for i := range f.Topics {
-		if len(f.Topics[i]) > 0 {
-			return false
-		}
-	}
-	return true
+	return store.CompileV1EventFilters(in)
 }
 
 // eventInfoV1 mints the v1 response event: the same stored-payload decode as
