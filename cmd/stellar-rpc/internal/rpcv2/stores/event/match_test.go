@@ -15,6 +15,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 // Query and QueryOptions are the engine's historical one-shot surface
@@ -1078,8 +1079,8 @@ func TestMatchesAnyFilterView_TypeAndCount(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			filters := []Filter{tc.filter}
-			plan := planFilters(filters)
-			got, err := matchesAnyFilterView(tc.raw, filters, &plan)
+			plan := store.PlanFilters(filters)
+			got, err := store.MatchesAnyFilterView(xdr.ContractEventView(tc.raw), filters, &plan)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
 		})
