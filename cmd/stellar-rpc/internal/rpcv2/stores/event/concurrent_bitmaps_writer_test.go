@@ -67,8 +67,8 @@ func TestConcurrentBitmaps_SnapshotSurvivesMultiContainerWrites(t *testing.T) {
 
 // TestConcurrentBitmaps_GetAfterAddToIsFresh pins the freshness
 // contract call by call: every single AddTo must be visible to the
-// very next Get. This is what the dirty flag buys — the published
-// snapshot is allowed to lag, but only until someone reads.
+// very next Get. The published snapshot is allowed to lag, but only
+// until someone reads.
 func TestConcurrentBitmaps_GetAfterAddToIsFresh(t *testing.T) {
 	s := newTestConcurrentBitmaps()
 	key := ComputeTermKey([]byte("freshness"), FieldTopic0)
@@ -89,7 +89,10 @@ func TestConcurrentBitmaps_GetAfterAddToIsFresh(t *testing.T) {
 // (Contains / GetCardinality / Iterator). Under -race this pins that
 // the writer's in-place AddMany and the readers' Clone never overlap
 // on the writer-private bitmap, and that nothing mutates a snapshot
-// while another goroutine reads it.
+// while another goroutine reads it. The writer starts only once every
+// reader is in its loop, and each reader keeps going for minReads
+// iterations past the writer's end, so the test cannot pass without
+// reader work overlapping writes.
 func TestConcurrentBitmaps_WriterReaderRace(t *testing.T) {
 	s := newTestConcurrentBitmaps()
 
@@ -97,6 +100,7 @@ func TestConcurrentBitmaps_WriterReaderRace(t *testing.T) {
 	const numLedgers = 400
 	const perLedger = 8
 	const numReaders = 8
+	const minReads = 64
 
 	keys := make([]TermKey, numTerms)
 	for i := range keys {
@@ -104,10 +108,13 @@ func TestConcurrentBitmaps_WriterReaderRace(t *testing.T) {
 	}
 
 	var done atomic.Bool
-	var wg sync.WaitGroup
+	var reads atomic.Uint64
+	var ready, wg sync.WaitGroup
+	ready.Add(numReaders)
 
 	wg.Go(func() {
 		defer done.Store(true)
+		ready.Wait()
 		var next uint32
 		for range numLedgers {
 			for _, key := range keys {
@@ -123,12 +130,15 @@ func TestConcurrentBitmaps_WriterReaderRace(t *testing.T) {
 
 	for r := range numReaders {
 		wg.Go(func() {
-			for i := 0; !done.Load(); i++ {
+			ready.Done()
+			for i, n := 0, 0; !done.Load() || n < minReads; i++ {
 				key := keys[(i+r)%numTerms]
 				bm, err := s.Get(key)
 				if err != nil || bm == nil {
 					continue
 				}
+				n++
+				reads.Add(1)
 				_ = bm.GetCardinality()
 				_ = bm.Contains(uint32(i))
 				it := bm.Iterator()
@@ -140,6 +150,8 @@ func TestConcurrentBitmaps_WriterReaderRace(t *testing.T) {
 	}
 
 	wg.Wait()
+	assert.GreaterOrEqual(t, reads.Load(), uint64(numReaders*minReads),
+		"every reader must have done real reads")
 
 	want := uint64(numLedgers * perLedger)
 	for _, key := range keys {
@@ -161,13 +173,17 @@ func TestConcurrentBitmaps_PromotionMidStreamUnderReaders(t *testing.T) {
 
 	const total = promotionThreshold * 8
 	const numReaders = 4
+	const minReads = 64
 
 	var writes atomic.Uint32
 	var done atomic.Bool
-	var wg sync.WaitGroup
+	var reads atomic.Uint64
+	var ready, wg sync.WaitGroup
+	ready.Add(numReaders)
 
 	wg.Go(func() {
 		defer done.Store(true)
+		ready.Wait()
 		for i := range uint32(total) {
 			s.AddTo(key, i)
 			writes.Store(i + 1)
@@ -176,12 +192,15 @@ func TestConcurrentBitmaps_PromotionMidStreamUnderReaders(t *testing.T) {
 
 	for range numReaders {
 		wg.Go(func() {
+			ready.Done()
 			var last uint64
-			for !done.Load() {
+			for n := 0; !done.Load() || n < minReads; {
 				bm, err := s.Get(key)
 				if err != nil || bm == nil {
 					continue
 				}
+				n++
+				reads.Add(1)
 				card := bm.GetCardinality()
 				assert.GreaterOrEqual(t, card, last,
 					"a term's observed cardinality must never go backwards")
@@ -193,6 +212,8 @@ func TestConcurrentBitmaps_PromotionMidStreamUnderReaders(t *testing.T) {
 	}
 
 	wg.Wait()
+	assert.GreaterOrEqual(t, reads.Load(), uint64(numReaders*minReads),
+		"every reader must have done real reads")
 
 	bm, err := s.Get(key)
 	require.NoError(t, err)
@@ -287,9 +308,9 @@ func TestConcurrentBitmaps_UnreadTermNeverClones(t *testing.T) {
 }
 
 // TestConcurrentBitmaps_DenseStateAfterAddToAndGet checks the state
-// of a dense term at each step: dirty with no snapshot after
-// promotion and after a write, clean with the returned snapshot in
-// pub after a read. Earlier snapshots stay frozen.
+// of a dense term at each step: no snapshot after promotion and after
+// a write, the returned snapshot in pub after a read. Earlier
+// snapshots stay frozen.
 func TestConcurrentBitmaps_DenseStateAfterAddToAndGet(t *testing.T) {
 	s := newTestConcurrentBitmaps()
 	key := ComputeTermKey([]byte("publish-order"), FieldTopic0)
@@ -302,26 +323,68 @@ func TestConcurrentBitmaps_DenseStateAfterAddToAndGet(t *testing.T) {
 
 	d := s.terms[key].Load().dense
 	require.NotNil(t, d)
-	assert.True(t, d.dirty.Load(), "a freshly promoted term is dirty until first read")
-	assert.Nil(t, d.pub.Load(), "pub == nil requires dirty == true")
+	assert.Nil(t, d.pub.Load(), "a freshly promoted term has no snapshot until first read")
 
 	first, err := s.Get(key)
 	require.NoError(t, err)
-	assert.False(t, d.dirty.Load(), "the republishing reader clears dirty")
 	assert.Same(t, first, d.pub.Load(),
-		"dirty may only be cleared once pub holds the snapshot being returned")
+		"the publishing reader stores the snapshot it returns")
 
 	s.AddTo(key, 12_345)
-	assert.True(t, d.dirty.Load(), "AddTo sets dirty before returning")
-	assert.Nil(t, d.pub.Load(), "AddTo clears the stale snapshot")
+	assert.Nil(t, d.pub.Load(), "AddTo clears the stale snapshot before returning")
 	assert.False(t, first.Contains(12_345), "an earlier snapshot stays frozen")
 
 	second, err := s.Get(key)
 	require.NoError(t, err)
 	assert.True(t, second.Contains(12_345), "the next Get observes the write")
-	assert.False(t, d.dirty.Load())
 	assert.Same(t, second, d.pub.Load())
 	assert.False(t, first.Contains(12_345), "the earlier snapshot is still frozen")
+}
+
+// freshnessWriterCounters is the shared state between the freshness
+// stress writer and its readers.
+type freshnessWriterCounters struct {
+	committed *atomic.Uint32 // highest ID whose AddTo has returned
+	observed  *atomic.Uint32 // highest committed ID a reader has seen in a snapshot
+	batches   *atomic.Uint32 // batches the writer has finished
+}
+
+// freshnessWriter adds numBatches three-ID batches under key, handing
+// off to the readers after each one: it does not start the next batch
+// until some reader has returned a snapshot holding this batch's last
+// ID. That snapshot must be a clone made after the AddTo, so every
+// batch forces at least one republish, and the readers race each
+// other to make it. Returns early once the test has failed so a
+// reader that gave up cannot hang the writer.
+func freshnessWriter(
+	t *testing.T, s *ConcurrentBitmaps, key TermKey, c freshnessWriterCounters,
+	numBatches, firstID, idStride uint32,
+) {
+	next := firstID
+	for i := range numBatches {
+		batch := []uint32{next, next + 977, next + 65_536}
+		s.AddTo(key, batch...)
+		last := batch[len(batch)-1]
+		c.committed.Store(last)
+		c.batches.Store(i + 1)
+		next += idStride
+		for c.observed.Load() < last {
+			if t.Failed() {
+				return
+			}
+			runtime.Gosched()
+		}
+	}
+}
+
+// storeMax raises v to want unless v is already at least want.
+func storeMax(v *atomic.Uint32, want uint32) {
+	for {
+		seen := v.Load()
+		if seen >= want || v.CompareAndSwap(seen, want) {
+			return
+		}
+	}
 }
 
 // TestConcurrentBitmaps_FreshnessUnderConcurrentPublishers: the
@@ -346,27 +409,21 @@ func TestConcurrentBitmaps_FreshnessUnderConcurrentPublishers(t *testing.T) {
 	numReaders := max(16, 2*runtime.GOMAXPROCS(0))
 	// firstID + numBatches*idStride + 65_536 stays below MaxUint32.
 	const (
-		numBatches = 10_000
+		numBatches = 1_000
 		firstID    = uint32(20_000_000)
 		idStride   = uint32(131_072)
 	)
 
-	var committed atomic.Uint32 // highest ID whose AddTo has returned
-	var batches atomic.Uint32   // batches the writer has finished
+	var committed, observed, batches atomic.Uint32
 	var done atomic.Bool
 	var reads, republishes atomic.Uint64
 	var wg sync.WaitGroup
 
 	wg.Go(func() {
 		defer done.Store(true)
-		next := firstID
-		for i := range uint32(numBatches) {
-			batch := []uint32{next, next + 977, next + 65_536}
-			s.AddTo(key, batch...)
-			committed.Store(batch[len(batch)-1])
-			batches.Store(i + 1)
-			next += idStride
-		}
+		freshnessWriter(t, s, key, freshnessWriterCounters{
+			committed: &committed, observed: &observed, batches: &batches,
+		}, numBatches, firstID, idStride)
 	})
 
 	for range numReaders {
@@ -398,6 +455,7 @@ func TestConcurrentBitmaps_FreshnessUnderConcurrentPublishers(t *testing.T) {
 						want, bm.GetCardinality())
 					return
 				}
+				storeMax(&observed, want)
 			}
 		})
 	}
@@ -407,8 +465,10 @@ func TestConcurrentBitmaps_FreshnessUnderConcurrentPublishers(t *testing.T) {
 		reads.Load(), republishes.Load(), batches.Load())
 	assert.Equal(t, uint32(numBatches), batches.Load(), "the writer must finish every batch")
 	require.Positive(t, reads.Load(), "the stress loop must have done real reads")
-	require.GreaterOrEqual(t, republishes.Load(), uint64(numBatches/10),
-		"readers must observe snapshots being republished, not one frozen bitmap")
+	// Each batch's handoff needs a snapshot cloned after that batch's
+	// AddTo, which is a pointer no reader has counted before.
+	require.GreaterOrEqual(t, republishes.Load(), uint64(numBatches),
+		"every batch must force at least one republish")
 }
 
 // TestConcurrentBitmaps_WarmupSubThresholdTermStaysSparse pins the
