@@ -151,14 +151,6 @@ runs:
         key: go-mod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
         restore-keys: go-mod-${{ runner.os }}-
 
-    # The first job to finish saves the shared entry. Fill the module cache
-    # here so that job saves a complete one, even if it is a job that never
-    # builds Go code. Without this the dependency checker saved an empty
-    # folder and every other job found the key taken.
-    - if: steps.go-mod-cache.outputs.cache-hit != 'true'
-      shell: bash
-      run: go mod download
-
     # Cache any build and test artifacts during the job, which will speed up
     # rebuilds and cause test runs to skip tests that have no reason to rerun.
     - uses: actions/cache@v4
@@ -174,3 +166,12 @@ runs:
     - if: github.ref_protected
       shell: bash
       run: ${{ steps.variables.outputs.SUDO }} rm -rf ${{ steps.variables.outputs.GOMODCACHE }} ${{ steps.variables.outputs.GOCACHE  }}
+
+    # The first job to finish saves the shared module cache. Fill it here, after
+    # the protected-branch reset above, so that job saves a complete one even
+    # when it never builds Go code. `go mod download` fetches every module in
+    # go.mod, test-only ones included. Without this the dependency checker
+    # saved an empty folder and every other job found the key taken.
+    - if: steps.go-mod-cache.outputs.cache-hit != 'true' || github.ref_protected
+      shell: bash
+      run: go mod download
