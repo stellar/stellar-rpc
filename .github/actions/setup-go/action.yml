@@ -139,12 +139,17 @@ runs:
         echo SUDO='sudo' >> $GITHUB_OUTPUT
       id: variables
 
-    # Cache the Go Modules downloaded during the job.
+    # Cache the Go modules downloaded during the job. The module cache holds
+    # the same files for every workflow, job and matrix leg, so it is keyed by
+    # OS and go.sum only. Keying it by KEY_PREFIX stored one 560MB copy per
+    # leg and crowded the small, slow-to-rebuild native libraries out of the
+    # repository's 10GB cache budget.
     - uses: actions/cache@v4
+      id: go-mod-cache
       with:
         path: ${{ steps.variables.outputs.GOMODCACHE }}
-        key: ${{ steps.variables.outputs.KEY_PREFIX }}-go-mod-${{ hashFiles('**/go.sum') }}
-        restore-keys: ${{ steps.variables.outputs.KEY_PREFIX  }}-go-mod-
+        key: go-mod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+        restore-keys: go-mod-${{ runner.os }}-
 
     # Cache any build and test artifacts during the job, which will speed up
     # rebuilds and cause test runs to skip tests that have no reason to rerun.
@@ -161,3 +166,12 @@ runs:
     - if: github.ref_protected
       shell: bash
       run: ${{ steps.variables.outputs.SUDO }} rm -rf ${{ steps.variables.outputs.GOMODCACHE }} ${{ steps.variables.outputs.GOCACHE  }}
+
+    # The first job to finish saves the shared module cache. Fill it here, after
+    # the protected-branch reset above, so that job saves a complete one even
+    # when it never builds Go code. `go mod download` fetches every module in
+    # go.mod, test-only ones included. Without this the dependency checker
+    # saved an empty folder and every other job found the key taken.
+    - if: steps.go-mod-cache.outputs.cache-hit != 'true' || github.ref_protected
+      shell: bash
+      run: go mod download
