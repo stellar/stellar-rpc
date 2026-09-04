@@ -125,7 +125,7 @@ type resumeAt struct {
 func (a *ReadView) QueryEventsFrom(
 	ctx context.Context, scope EventScope, from *EventID, limit int,
 ) (*EventPage, error) {
-	if from != nil && scope.Dir != Ascending {
+	if scope.Dir != Ascending {
 		return nil, errors.New("query: resuming from an event id needs an ascending scope")
 	}
 	page, err := a.queryEvents(ctx, EventCursor{Scope: scope}, from, limit)
