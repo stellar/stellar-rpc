@@ -24,8 +24,8 @@ type TopicFilter []TopicCondition
 // matches a row, the DB event is considered a candidate for further filtering.
 type TopicFilters []TopicFilter
 
-type ScanFunction func(
-	event xdr.DiagnosticEvent,
+type ViewScanFunction func(
+	eventView xdr.DiagnosticEventView,
 	cursor protocol.Cursor,
 	ledgerCloseTimestamp int64,
 	txHash *xdr.Hash,
@@ -39,7 +39,7 @@ type EventReader interface {
 		contractIDs [][]byte,
 		topics TopicFilters,
 		eventTypes []int,
-		f ScanFunction,
+		f ViewScanFunction,
 	) error
 }
 

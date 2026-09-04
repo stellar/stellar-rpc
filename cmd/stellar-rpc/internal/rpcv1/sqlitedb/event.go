@@ -293,7 +293,7 @@ func (eventHandler *eventHandler) GetEvents(
 	contractIDs [][]byte,
 	topics store.TopicFilters,
 	eventTypes []int,
-	scanner store.ScanFunction,
+	scanner store.ViewScanFunction,
 ) error {
 	start := time.Now()
 
@@ -391,13 +391,10 @@ func (eventHandler *eventHandler) GetEvents(
 			return errors.Join(err, errors.New("failed to parse cursor"))
 		}
 
-		var event xdr.DiagnosticEvent
-		if err := event.UnmarshalBinary(row.eventData); err != nil {
-			return errors.Join(err, errors.New("failed to decode event"))
-		}
+		eventView := xdr.DiagnosticEventView(row.eventData)
 
 		txHash := xdr.Hash(transactionHash)
-		if !scanner(event, cur, ledgerCloseTime, &txHash) {
+		if !scanner(eventView, cur, ledgerCloseTime, &txHash) {
 			return nil
 		}
 	}
