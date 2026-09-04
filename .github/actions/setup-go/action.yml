@@ -145,10 +145,19 @@ runs:
     # leg and crowded the small, slow-to-rebuild native libraries out of the
     # repository's 10GB cache budget.
     - uses: actions/cache@v4
+      id: go-mod-cache
       with:
         path: ${{ steps.variables.outputs.GOMODCACHE }}
         key: go-mod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
         restore-keys: go-mod-${{ runner.os }}-
+
+    # The first job to finish saves the shared entry. Fill the module cache
+    # here so that job saves a complete one, even if it is a job that never
+    # builds Go code. Without this the dependency checker saved an empty
+    # folder and every other job found the key taken.
+    - if: steps.go-mod-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: go mod download
 
     # Cache any build and test artifacts during the job, which will speed up
     # rebuilds and cause test runs to skip tests that have no reason to rerun.
