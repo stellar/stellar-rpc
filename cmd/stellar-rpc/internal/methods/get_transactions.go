@@ -171,7 +171,7 @@ func (h transactionsRPCHandler) processTransactionsInLedger(
 }
 
 // transactionInfo renders one extracted transaction as a page entry. Pure
-// formatting — the differential test drives both extractions through it.
+// formatting.
 func transactionInfo(tx store.Transaction, format string) (protocol.TransactionInfo, error) {
 	txInfo := protocol.TransactionInfo{
 		TransactionDetails: protocol.TransactionDetails{
