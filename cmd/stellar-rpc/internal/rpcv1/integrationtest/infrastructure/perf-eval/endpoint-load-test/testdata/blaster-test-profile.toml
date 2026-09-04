@@ -1,0 +1,41 @@
+# stellar-rpc endpoint load test profile for performance evaluation
+# Excludes send/simulateTransaction + getLedgerEntries.
+# "Class" refers to how much load the endpoint can handle.
+
+input_data_path = "./output/seed.json"
+
+# Class 1: very lightweight endpoints
+[endpoints.getFeeStats]
+rps = 250
+
+[endpoints.getHealth]
+rps = 250
+
+# Class 2: lightweight endpoints
+[endpoints.getNetwork]
+rps = 100
+
+[endpoints.getVersionInfo]
+rps = 100
+
+# Class 3: moderate endpoints
+[endpoints.getTransaction]
+rps = 75
+
+[endpoints.getEvents]
+rps = 75
+
+# Class 4: heavy endpoints
+[endpoints.getLatestLedger]
+rps = 15
+
+[endpoints.getTransactions]
+rps = 10
+
+# Class 5: very heavy endpoints
+
+# getLedgers struggles with production-style traffic (e.g. requests with
+# limit >= 20). `limit = 5` forces each request to only fetch 5 ledgers.
+[endpoints.getLedgers]
+rps = 3
+limit = 5 

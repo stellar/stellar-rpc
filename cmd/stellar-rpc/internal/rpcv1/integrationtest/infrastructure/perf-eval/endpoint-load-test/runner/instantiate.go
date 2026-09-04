@@ -14,16 +14,18 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/harness"
 )
 
-// blasterCfg is the endpoint roster, shipped with the blaster checkout.
-const blasterCfg = "cmd/stellar-rpc-blaster/internal/config/config.example.toml"
+// legDir holds the leg's traffic-profile config; runners start w/ cwd = repo root.
+const legDir = "cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/endpoint-load-test"
 
 // blasterEnv is the leg's env-derived config.
 type blasterEnv struct {
 	RampUp   string `env:"BLASTER_RAMP_UP"  envDefault:"2m"`
 	Duration string `env:"BLASTER_DURATION" envDefault:"3m"`
+	// max % of acceptable response failure rate before terminating the blast
+	ErrorThreshold string `env:"BLASTER_ERROR_THRESHOLD" envDefault:"75"`
 	// recovery gap between serial endpoints, so one endpoint's failures
 	// don't cascade into the next
-	Cooloff   string `env:"BLASTER_COOLOFF" envDefault:"15s"`
+	Cooloff   string `env:"BLASTER_COOLOFF" envDefault:"30s"`
 	SeedCount string `env:"SEED_COUNT"      envDefault:"1000"`
 	// left buffer outruns retention trimming during the blast; right buffer
 	// keeps clear of the (still advancing) tip
@@ -86,10 +88,13 @@ func instantiate(ctx context.Context) error {
 	// launch blast
 	call := blastCall{
 		bin: blasterBin, url: cfg.TargetRPC,
-		configPath:  filepath.Join(blasterDir, blasterCfg),
-		seedPath:    filepath.Join(leg.WorkDir, "blaster-seed.json"),
+		configPath: filepath.Join(leg.RepoRoot, legDir, "testdata", "blaster-test-profile.toml"),
+		// the profile config pins input_data_path to ./output/seed.json, resolved
+		// against the blaster cwd; passing it on the CLI too is a config error
+		seedPath:    filepath.Join(blasterDir, "output", "seed.json"),
 		resultsPath: filepath.Join(leg.WorkDir, "blaster-results.json"),
 		rampUp:      cfg.RampUp, duration: cfg.Duration, cooloff: cfg.Cooloff,
+		errorThreshold: cfg.ErrorThreshold,
 	}
 	if err := generateSeed(ctx, call, lo, hi, cfg.SeedCount); err != nil {
 		return leg.Bail("%v", err)
@@ -101,13 +106,16 @@ func instantiate(ctx context.Context) error {
 	if err != nil {
 		return leg.Bail("reading blaster results: %v", err)
 	}
-	rows, err := summarize(data)
+	rows, archRows, aborted, err := summarize(data)
 	if err != nil {
 		return leg.Bail("summarizing blaster results: %v", err)
 	}
+	if aborted {
+		logger.Warnf("blaster aborted the run: an endpoint crossed the %s%% error kill switch", cfg.ErrorThreshold)
+	}
 
-	md := renderMarkdown(leg.TargetSHA, blasterSHA, cfg.RampUp, cfg.Duration,
-		health.OldestLedger, health.LatestLedger, handoffSecs, rows)
+	md := renderMarkdown(leg.TargetSHA, blasterSHA, cfg.RampUp, cfg.Duration, cfg.ErrorThreshold,
+		health.OldestLedger, health.LatestLedger, handoffSecs, aborted, rows, archRows)
 	if err := os.WriteFile(leg.ResultsFile, []byte(md), 0o644); err != nil {
 		return leg.Bail("writing results: %v", err)
 	}
@@ -117,8 +125,9 @@ func instantiate(ctx context.Context) error {
 	return nil
 }
 
-// fetchBlaster clones and builds stellar-rpc-blaster at dev HEAD
+// fetchBlaster clones and builds stellar-rpc-blaster at dev HEAD.
 func fetchBlaster(ctx context.Context, dir, repo string) (string, string, error) {
+	// TEMP: restore to @dev before merge
 	logger.Infof("fetching stellar-rpc-blaster (%s@dev)", repo)
 	if err := os.RemoveAll(dir); err != nil {
 		return "", "", err
@@ -142,15 +151,19 @@ func fetchBlaster(ctx context.Context, dir, repo string) (string, string, error)
 
 // blastCall parameterizes one serial blaster sweep.
 type blastCall struct {
-	bin, url                  string
-	configPath                string
-	seedPath, resultsPath     string
-	rampUp, duration, cooloff string
+	bin, url                string
+	configPath              string
+	seedPath, resultsPath   string
+	rampUp, duration        string
+	errorThreshold, cooloff string
 }
 
 // generateSeed samples the request corpus from the target RPC's ledger window.
 func generateSeed(ctx context.Context, c blastCall, lo, hi int64, count string) error {
 	logger.Infof("generating seed data: %s ledgers sampled from [%d, %d]", count, lo, hi)
+	if err := os.MkdirAll(filepath.Dir(c.seedPath), 0o755); err != nil {
+		return err
+	}
 	if err := harness.RunStreaming(ctx, filepath.Dir(c.bin), nil, 40, c.bin, "generate",
 		"--rpc-url", c.url,
 		"--output", c.seedPath,
@@ -163,15 +176,14 @@ func generateSeed(ctx context.Context, c blastCall, lo, hi int64, count string) 
 
 // blast runs the serial endpoint sweep, writing results to c.resultsPath.
 func blast(ctx context.Context, c blastCall) error {
-	logger.Infof("blasting endpoints in serial (ramp-up %s, duration %s, cooloff %s per endpoint)",
-		c.rampUp, c.duration, c.cooloff)
+	logger.Infof("running blaster (--serial enabled, ramp-up %s, duration %s, cooloff %s per endpoint, "+
+		"error killswitch %s%%)", c.rampUp, c.duration, c.cooloff, c.errorThreshold)
 	if err := harness.RunStreaming(ctx, filepath.Dir(c.bin), nil, 80, c.bin, "run",
 		"--rpc-url", c.url,
 		"--config-path", c.configPath,
-		"--input-data-path", c.seedPath,
 		"--serial",
-		"--ramp-up", c.rampUp,
-		"--duration", c.duration,
+		"--ramp-up", c.rampUp, "--duration", c.duration,
+		"--error-percent", c.errorThreshold,
 		"--cooloff", c.cooloff,
 		"--test-output-path", c.resultsPath); err != nil {
 		return fmt.Errorf("blaster run failed: %w", err)

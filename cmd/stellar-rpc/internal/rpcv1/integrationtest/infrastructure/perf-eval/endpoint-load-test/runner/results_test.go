@@ -1,17 +1,20 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
 // fixture mirrors blaster's results JSON shape, including the fields the
-// summary drops (timeline, error_types, top-level timings).
+// summary drops (timeline, error_types, top-level timings). getEvents nests
+// per-archetype sub-streams under "archetypes", alongside its overall stats.
 const fixture = `{
   "start": "2026-07-10T00:00:00Z",
   "end": "2026-07-10T00:06:10Z",
   "duration_seconds": 370,
+  "aborted": false,
   "endpoints": {
     "getLedgers": {
       "total_requests": 3600,
@@ -19,6 +22,7 @@ const fixture = `{
       "errors": 9,
       "target_rps": 20,
       "limit": 1,
+      "traffic_profile": 3,
       "percentiles_ms": {"p50.0": 3.2, "p95.0": 9.8, "p99.0": 21.5, "p99.9": 60.1},
       "error_types": {"rpc_error": {"error_msg": "boom", "error_code": -32600, "count": 9}},
       "timeline": [
@@ -32,45 +36,137 @@ const fixture = `{
       "errors": 0,
       "target_rps": 100,
       "percentiles_ms": {"p50.0": 0.4, "p95.0": 0.9, "p99.0": 1.5, "p99.9": 4.2}
+    },
+    "getEvents": {
+      "total_requests": 335,
+      "success": 333,
+      "errors": 2,
+      "target_rps": 15,
+      "traffic_profile": 3,
+      "percentiles_ms": {"p50.0": 0.8, "p95.0": 2.1, "p99.0": 5.0, "p99.9": 30.2},
+      "timeline": [
+        {"target_rps": 15, "success": 74, "errors": 0, "error_rate_pct": 0,
+         "p50_ms": 0.659, "p95_ms": 1.2, "p99_ms": 1.7, "p99.9_ms": 2.8}
+      ],
+      "archetypes": {
+        "head-poll": {
+          "total_requests": 225,
+          "success": 225,
+          "errors": 0,
+          "target_rps": 7.2,
+          "traffic_profile": 3,
+          "percentiles_ms": {"p50.0": 0.637, "p95.0": 1.287, "p99.0": 1.703, "p99.9": 2.815},
+          "timeline": [
+            {"target_rps": 7.2, "success": 36, "errors": 0, "error_rate_pct": 0,
+             "p50_ms": 0.659, "p95_ms": 1.2, "p99_ms": 1.7, "p99.9_ms": 2.8}
+          ]
+        },
+        "deep-pager": {
+          "total_requests": 110,
+          "success": 108,
+          "errors": 2,
+          "target_rps": 3.45,
+          "traffic_profile": 3,
+          "percentiles_ms": {"p50.0": 5.1, "p95.0": 14.2, "p99.0": 30.4, "p99.9": 81.7}
+        }
+      }
     }
   }
 }`
 
 func TestSummarize(t *testing.T) {
-	rows, err := summarize([]byte(fixture))
+	rows, archRows, aborted, err := summarize([]byte(fixture))
 	require.NoError(t, err)
-	require.Len(t, rows, 2)
+	require.False(t, aborted)
+	require.Len(t, rows, 3)
+	require.Len(t, archRows, 2)
 
-	// sorted by endpoint name
-	require.Equal(t, "getHealth", rows[0].Name)
-	require.Equal(t, "getLedgers", rows[1].Name)
+	// sorted by name; archetypes live in their own row set
+	require.Equal(t, "getEvents", rows[0].Name)
+	require.Equal(t, "getHealth", rows[1].Name)
+	require.Equal(t, "getLedgers", rows[2].Name)
+	require.Equal(t, "getEvents/deep-pager", archRows[0].Name)
+	require.Equal(t, "getEvents/head-poll", archRows[1].Name)
 
-	gl := rows[1]
+	gl := rows[2]
 	require.Equal(t, uint64(3600), gl.Requests)
 	require.Equal(t, uint64(9), gl.Errors)
 	require.Equal(t, uint64(1), gl.Limit)
-	require.Zero(t, rows[0].Limit) // getHealth doesn't paginate
+	require.Zero(t, rows[1].Limit) // getHealth doesn't paginate
 	require.InDelta(t, 20.0, gl.TargetRPS, 0.001)
 	require.InDelta(t, 3.2, gl.P50, 0.001)
 	require.InDelta(t, 9.8, gl.P95, 0.001)
 	require.InDelta(t, 21.5, gl.P99, 0.001)
 	require.InDelta(t, 60.1, gl.P999, 0.001)
+
+	// getEvents overall row carries the endpoint-level stats
+	ge := rows[0]
+	require.Equal(t, uint64(335), ge.Requests)
+	require.Equal(t, uint64(2), ge.Errors)
+	require.InDelta(t, 15.0, ge.TargetRPS, 0.001)
+	require.InDelta(t, 0.8, ge.P50, 0.001)
+
+	// archetype rows carry their share of the endpoint's RPS
+	hp := archRows[1]
+	require.Equal(t, uint64(225), hp.Requests)
+	require.InDelta(t, 7.2, hp.TargetRPS, 0.001)
+	require.InDelta(t, 0.637, hp.P50, 0.001)
+}
+
+func TestSummarizeTrafficProfile(t *testing.T) {
+	// mismatched profile version fails
+	_, _, _, err := summarize([]byte(`{"endpoints": {"getLedgers": {
+		"total_requests": 1, "target_rps": 1, "traffic_profile": 2, "percentiles_ms": {}}}}`))
+	require.ErrorContains(t, err, "traffic profile 2, want 3")
+
+	// mismatch inside an archetype sub-stream fails too
+	_, _, _, err = summarize([]byte(`{"endpoints": {"getEvents": {
+		"total_requests": 1, "target_rps": 1, "traffic_profile": 3, "percentiles_ms": {},
+		"archetypes": {"head-poll": {"total_requests": 1, "target_rps": 1, "traffic_profile": 2, "percentiles_ms": {}}}}}}`))
+	require.ErrorContains(t, err, "getEvents/head-poll reports traffic profile 2, want 3")
+
+	// no profile stamped anywhere fails
+	_, _, _, err = summarize([]byte(`{"endpoints": {"getHealth": {
+		"total_requests": 1, "target_rps": 1, "percentiles_ms": {}}}}`))
+	require.ErrorContains(t, err, "no endpoint reports traffic profile 3")
 }
 
 func TestRenderMarkdown(t *testing.T) {
 	// fails on empty
-	_, err := summarize([]byte(`{"endpoints": {}}`))
+	_, _, _, err := summarize([]byte(`{"endpoints": {}}`))
 	require.Error(t, err)
 
-	rows, err := summarize([]byte(fixture))
+	rows, archRows, _, err := summarize([]byte(fixture))
 	require.NoError(t, err)
-	md := renderMarkdown("0123456789abcdef", "fedcba9876543210", "2m", "3m", 60_000_000, 60_017_280, 1800, rows)
+	md := renderMarkdown("0123456789abcdef", "fedcba9876543210", "2m", "3m", "75",
+		60_000_000, 60_017_280, 1800, false, rows, archRows)
 
 	require.Contains(t, md, "`0123456789ab`")
-	require.Contains(t, md, "ramp-up 2m, duration 3m, blaster `fedcba987654`")
+	require.Contains(t, md, "ramp-up 2m, duration 3m, error kill switch 75%, blaster `fedcba987654`")
 	require.Contains(t, md, "`[60000000, 60017280]`")
 	require.Contains(t, md, "handoff wait 1800s")
+	require.NotContains(t, md, "Aborted early")
 	require.Contains(t, md, "| p50 (ms) | p95 (ms) | p99 (ms) | p99.9 (ms) |")
 	require.Contains(t, md, "| getLedgers (limit=1) | 20 | 3600 | 9 (0.2%) | 3.2 | 9.8 | 21.5 | 60.1 |")
 	require.Contains(t, md, "| getHealth | 100 | 18000 | 0 (0.0%) | 0.4 | 0.9 | 1.5 | 4.2 |")
+	require.Contains(t, md, "| getEvents | 15 | 335 | 2 (0.6%) | 0.8 | 2.1 | 5.0 | 30.2 |")
+
+	// archetype rows live in the dropdown, not the main table
+	require.Contains(t, md, "<summary>getEvents results extended</summary>")
+	require.Contains(t, md, "| getEvents/head-poll | 7.2 | 225 | 0 (0.0%) | 0.6 | 1.3 | 1.7 | 2.8 |")
+	require.Contains(t, md, "| getEvents/deep-pager | 3.45 | 110 | 2 (1.8%) | 5.1 | 14.2 | 30.4 | 81.7 |")
+
+	// no dropdown when there are no archetype rows
+	md = renderMarkdown("0123456789abcdef", "fedcba9876543210", "2m", "3m", "75",
+		60_000_000, 60_017_280, 1800, false, rows, nil)
+	require.NotContains(t, md, "<details>")
+
+	// a kill-switch abort is flagged above the table
+	_, _, aborted, err := summarize([]byte(strings.Replace(fixture, `"aborted": false`, `"aborted": true`, 1)))
+	require.NoError(t, err)
+	require.True(t, aborted)
+	md = renderMarkdown("0123456789abcdef", "fedcba9876543210", "2m", "3m", "75",
+		60_000_000, 60_017_280, 1800, aborted, rows, nil)
+	require.Contains(t, md, "> ⚠️ **Aborted early:**")
+	require.Less(t, strings.Index(md, "Aborted early"), strings.Index(md, "| Endpoint |"))
 }
