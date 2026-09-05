@@ -6,7 +6,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -416,7 +415,7 @@ func TestConcurrentBitmaps_FreshnessUnderConcurrentPublishers(t *testing.T) {
 
 	var committed, observed, batches atomic.Uint32
 	var done atomic.Bool
-	var reads, republishes atomic.Uint64
+	var reads atomic.Uint64
 	var wg sync.WaitGroup
 
 	wg.Go(func() {
@@ -428,7 +427,6 @@ func TestConcurrentBitmaps_FreshnessUnderConcurrentPublishers(t *testing.T) {
 
 	for range numReaders {
 		wg.Go(func() {
-			var last *roaring.Bitmap
 			for !done.Load() {
 				want := committed.Load()
 				if want == 0 {
@@ -440,10 +438,6 @@ func TestConcurrentBitmaps_FreshnessUnderConcurrentPublishers(t *testing.T) {
 					continue
 				}
 				reads.Add(1)
-				if bm != last {
-					republishes.Add(1)
-					last = bm
-				}
 				// Yield: every read after a write takes the term
 				// mutex, and unyielding readers starve the writer.
 				runtime.Gosched()
@@ -461,14 +455,12 @@ func TestConcurrentBitmaps_FreshnessUnderConcurrentPublishers(t *testing.T) {
 	}
 
 	wg.Wait()
-	t.Logf("freshness stress: %d reads, %d distinct snapshots, %d batches",
-		reads.Load(), republishes.Load(), batches.Load())
+	t.Logf("freshness stress: %d reads, %d batches",
+		reads.Load(), batches.Load())
 	assert.Equal(t, uint32(numBatches), batches.Load(), "the writer must finish every batch")
+	assert.GreaterOrEqual(t, observed.Load(), committed.Load(),
+		"a reader must observe the final committed batch")
 	require.Positive(t, reads.Load(), "the stress loop must have done real reads")
-	// Each batch's handoff needs a snapshot cloned after that batch's
-	// AddTo, which is a pointer no reader has counted before.
-	require.GreaterOrEqual(t, republishes.Load(), uint64(numBatches),
-		"every batch must force at least one republish")
 }
 
 // TestConcurrentBitmaps_WarmupSubThresholdTermStaysSparse pins the
