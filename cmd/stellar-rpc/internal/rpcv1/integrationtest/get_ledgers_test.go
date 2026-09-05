@@ -105,18 +105,7 @@ func TestGetLedgers(t *testing.T) {
 
 //nolint:funlen
 func TestGetLedgersFromDatastore(t *testing.T) {
-	// setup fake GCS server
-	opts := fakestorage.Options{
-		Scheme:     "http",
-		PublicHost: "127.0.0.1",
-	}
-	gcsServer, err := fakestorage.NewServerWithOptions(opts)
-	require.NoError(t, err)
-	defer gcsServer.Stop()
-
-	t.Setenv("STORAGE_EMULATOR_HOST", gcsServer.URL())
-	bucketName := "test-bucket"
-	gcsServer.CreateBucketWithOpts(fakestorage.CreateBucketOpts{Name: bucketName})
+	bucketName := newGCSBucket(t)
 
 	// datastore configuration function
 	schema := datastore.DataStoreSchema{
@@ -142,7 +131,7 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 
 	// add files to GCS
 	for seq := uint32(35); seq <= 40; seq++ {
-		gcsServer.CreateObject(fakestorage.Object{
+		sharedGCSServer.CreateObject(fakestorage.Object{
 			ObjectAttrs: fakestorage.ObjectAttrs{
 				BucketName: bucketName,
 				Name:       schema.GetObjectKeyFromSequenceNumber(seq),
@@ -153,7 +142,6 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 
 	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
 		DatastoreConfigFunc: setDatastoreConfig,
-		NoParallel:          true, // can't use parallel due to env vars
 	})
 	client := test.GetRPCLient() // at this point we're at like ledger 30
 
