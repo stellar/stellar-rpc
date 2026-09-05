@@ -434,24 +434,18 @@ func buildMPHF(
 // <chunkDir>/index.hash produced by an earlier buildMPHF) for
 // query-time lookups.
 //
-// The file is read into memory up-front via os.ReadFile +
-// streamhash.OpenBytes rather than mmapped. Rationale: a typical
-// MPHF for a single Chunk is small (~hundreds of KB at production
-// term counts), and on storage with expensive random IOPS (e.g.
-// EBS, ~1 ms each) mmap page-faults on cold Lookups cost more than
-// a single sequential read amortized across the index's lifetime.
+// The file is mmapped, never read whole. Pages fault in from the kernel page
+// cache, which is keyed by the file rather than the mapping, so every reader
+// of the same chunk shares them however short its own lifetime. A per-request
+// open therefore costs a map/unmap pair and the pages its lookups touch, not a
+// heap copy of a file whose size has no design bound: it scales with the
+// chunk's distinct term count, which is caller-controlled on-chain data.
 //
-// Close on the returned handle is a no-op for the OpenBytes path
-// (streamhash holds no fd / mmap), but callers should still call it
-// for symmetry with other open variants.
+// Close unmaps; callers must call it.
 func openMPHF(path string) (*mphf, error) {
-	data, err := os.ReadFile(path)
+	idx, err := streamhash.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("events: read %s: %w", path, err)
-	}
-	idx, err := streamhash.OpenBytes(data)
-	if err != nil {
-		return nil, fmt.Errorf("events: parse %s: %w", path, err)
+		return nil, fmt.Errorf("events: open %s: %w", path, err)
 	}
 	secret, merr := decodeEventsMeta(idx.UserMetadata())
 	if merr != nil {

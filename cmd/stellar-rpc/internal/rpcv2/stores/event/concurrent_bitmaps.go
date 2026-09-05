@@ -136,6 +136,37 @@ func (s *ConcurrentBitmaps) Get(key TermKey) (*roaring.Bitmap, error) {
 	return bm, nil
 }
 
+// postings is an immutable, iterable view of one term's event IDs in whichever
+// representation the index holds: the sparse mode's sorted []uint32 or the
+// dense mode's roaring bitmap. Exactly one is set; the zero value means the
+// term is absent. It exists so the ascending match path can iterate a sparse
+// term in place, where Get has to promise a bitmap and so pays a roaring.New
+// plus AddMany on every sparse lookup.
+//
+// Ownership matches Get's: both fields borrow the atomically published
+// termState, which no writer ever mutates, so a caller may hold a postings
+// value indefinitely. Get's read-only contract applies verbatim to the bitmap,
+// and the id slice must likewise be read, never written or appended to.
+type postings struct {
+	ids []uint32
+	bm  *roaring.Bitmap
+}
+
+// present reports whether the term is in the index at all. A term present but
+// holding no ids still counts as present: it yields an exhausted cursor, which
+// intersects and unions to what an absent term's caller-side skip produces.
+func (p postings) present() bool { return p.bm != nil || p.ids != nil }
+
+// estimate is the term's cardinality over the whole chunk, the weight the
+// ascending path orders an intersection by. It ignores the caller's window, so
+// it ranks terms rather than counting a query's candidates.
+func (p postings) estimate() uint64 {
+	if p.bm != nil {
+		return p.bm.GetCardinality()
+	}
+	return uint64(len(p.ids))
+}
+
 // AddTo records each eventID under key. Idempotent: callers
 // (HotStore.applyLedger via the post-commit hook, warmup) feed
 // events in chunk-relative event-ID order, so any duplicate is a
@@ -207,6 +238,20 @@ func (s *ConcurrentBitmaps) AddTo(key TermKey, eventIDs ...uint32) {
 		return
 	}
 	p.Store(&termState{ids: ids})
+}
+
+// lookupPostings is Get without the sparse-mode materialization: it hands back
+// the term's live representation rather than converting it to a bitmap. Same
+// concurrency story as Get, and a miss returns the zero postings.
+func (s *ConcurrentBitmaps) lookupPostings(key TermKey) postings {
+	s.rwmu.RLock()
+	p := s.terms[key]
+	s.rwmu.RUnlock()
+	if p == nil {
+		return postings{}
+	}
+	st := p.Load()
+	return postings{ids: st.ids, bm: st.bm}
 }
 
 // newTermState builds a fresh termState seeded with the given

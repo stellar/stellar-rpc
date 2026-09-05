@@ -7,9 +7,14 @@ package event
 // Matches.
 //
 // Optimization shape: terms are deduped across filters and issued as
-// a single Reader.LookupKeys call at iteration start; payload fetches
+// a single batched index lookup at iteration start; payload fetches
 // then stream in internal batches. On the cold path this is one
 // MPHF+index.pack round trip per Matches call, not per batch.
+//
+// The candidate set is built one of two ways. Ascending pulls ids through the
+// un-materialized iterator tree in match_iter.go. Descending materializes a
+// union bitmap, because roaring's reverse iterator offers no gallop to build
+// ascending-style combinators on.
 
 import (
 	"bytes"
@@ -218,15 +223,15 @@ type Match struct {
 // LookupKeys result.
 type termPlan [][]int
 
-// batchSizes resolves the first and following internal batch sizes
-// from the caller's hint. The hint applies only when it is positive
-// and below the default. Both results are clamped positive, so a zero
-// test seam cannot stall a stream (a zero step never advances).
+// batchSizes resolves the first and following internal batch sizes from the
+// caller's hint, capped at eight default batches so a wild hint cannot demand
+// an unbounded fetch. Both are clamped positive: a zero step never advances,
+// so a zero test seam would stall the stream.
 func batchSizes(hint int) (int, int) {
 	rest := max(1, matchBatchSize)
 	first := rest
-	if hint > 0 && hint < rest {
-		first = hint
+	if hint > 0 {
+		first = min(hint, 8*rest)
 	}
 	return first, rest
 }
@@ -251,10 +256,9 @@ func batchSizes(hint int) (int, int) {
 // drops are invisible: the iterator advances past them internally, so
 // consumers never see or reason about resume state.
 //
-// firstBatch sizes the first internal fetch batch. A consumer that
-// will stop after N matches passes N, so the first round trip fetches
-// no more than it needs; 0 or any out-of-range value uses the
-// default. Later batches use the default size. The hint changes I/O
+// firstBatch sizes the first internal fetch batch: a consumer that will stop
+// after N matches passes N. Zero and negative hints use the default, and a
+// positive one is honored up to eight default batches. The hint changes I/O
 // counts only, never what the stream yields.
 func Matches(
 	ctx context.Context, r Reader, filters []Filter, window IDRange,
@@ -268,11 +272,7 @@ func Matches(
 		if window.isEmpty() {
 			return
 		}
-		union, matchAll, err := unionForFilters(ctx, r, filters, window)
-		if err != nil {
-			yield(Match{}, err)
-			return
-		}
+		plans, uniqueKeys, matchAll := planIndexTerms(filters)
 		// Match-all path: empty filter slice or any filter that asks the
 		// index for no terms. Serves without touching the index: the
 		// window is dense, so it streams Reader.FetchRange directly.
@@ -280,10 +280,31 @@ func Matches(
 			streamRange(ctx, r, window, descending, firstBatch, yield)
 			return
 		}
-		if union.IsEmpty() {
+		// Direction splits the plan from here; see the file header.
+		if descending {
+			union, err := unionForFilters(ctx, r, plans, uniqueKeys, window)
+			if err != nil {
+				yield(Match{}, err)
+				return
+			}
+			if union.IsEmpty() {
+				return
+			}
+			streamUnion(ctx, r, filters, union, firstBatch, yield)
 			return
 		}
-		streamUnion(ctx, r, filters, union, descending, firstBatch, yield)
+		sources, err := lookupPostings(ctx, r, uniqueKeys)
+		if err != nil {
+			yield(Match{}, err)
+			return
+		}
+		candidates := candidateIter(plans, sources, window)
+		// The twin of the descending path's union.IsEmpty(): one peek
+		// settles whether anything matches, reading no further.
+		if _, ok := candidates.peek(); !ok {
+			return
+		}
+		streamCandidates(ctx, r, filters, candidates, firstBatch, yield)
 	}
 }
 
@@ -312,36 +333,27 @@ func validateMatchCall(ctx context.Context, r Reader, filters []Filter, window I
 	return nil
 }
 
-// unionForFilters runs the index side once per Matches call (the
-// numbered steps below). matchAll reports that some filter (or the
-// empty slice) constrains nothing, detected before any index I/O; the
-// caller then streams the window directly. Otherwise the result is
-// empty when no candidate falls in the window, and is never a
-// borrowed mirror snapshot (the window AND allocates on the borrowing
-// path), so downstream iteration is safe.
-func unionForFilters(
-	ctx context.Context, r Reader, filters []Filter, window IDRange,
-) (*roaring.Bitmap, bool, error) {
-	// ───── 1. Dedupe terms across filters ─────
-	//
-	// filterPlans[i] holds the slots filter i needs out of the batched
-	// lookup: the bitmaps within a group are OR-ed, the groups AND-ed.
-	//
-	// A filter that asks the index for no terms constrains nothing, and
-	// so does an empty filter slice: both take the match-all path.
-	// Reading the condition off the term groups themselves is what keeps
-	// an unconstrained filter from intersecting nothing and coming back
-	// empty instead.
+// planIndexTerms is step 1 of the index side, shared by both
+// directions and run before any index I/O: dedupe the terms the
+// filters name across the whole query, and resolve each filter's
+// groups to slots in the single batched lookup that follows. plans[i]
+// holds the slots filter i needs; the terms within a group are OR-ed
+// and the groups AND-ed.
+//
+// matchAll reports that some filter, or the empty slice, constrains nothing,
+// so the caller streams the window directly. Reading that off the term groups
+// is what keeps an unconstrained filter from intersecting nothing and coming
+// back empty.
+func planIndexTerms(filters []Filter) ([]termPlan, []TermKey, bool) {
 	if len(filters) == 0 {
-		return nil, true, nil
+		return nil, nil, true
 	}
-	filterPlans := make([]termPlan, len(filters))
 	var uniqueKeys []TermKey
-
+	plans := make([]termPlan, len(filters))
 	for i := range filters {
 		groups := filters[i].termGroups()
 		if len(groups) == 0 {
-			return nil, true, nil
+			return nil, nil, true
 		}
 		plan := make(termPlan, len(groups))
 		for g, keys := range groups {
@@ -351,13 +363,58 @@ func unionForFilters(
 			}
 			plan[g] = slots
 		}
-		filterPlans[i] = plan
+		plans[i] = plan
 	}
+	return plans, uniqueKeys, false
+}
 
+// postingReader is the optional, hot-tier half of the index read surface: a
+// Reader that can expose a term's postings without materializing a bitmap.
+//
+// Deliberately not folded into Reader. Cold postings genuinely are bitmaps,
+// unmarshaled per term out of index.pack, so ColdReader has nothing
+// un-materialized to hand back, and hoisting the method would impose it on
+// every out-of-package implementation for no gain.
+type postingReader interface {
+	lookupPostings(ctx context.Context, keys []TermKey) ([]postings, error)
+}
+
+// lookupPostings resolves keys to per-term postings, positionally aligned with
+// keys, in one batched call. It takes the no-materialize path when r offers
+// one; a nil bitmap stays the zero postings, meaning absent.
+func lookupPostings(ctx context.Context, r Reader, keys []TermKey) ([]postings, error) {
+	if pr, ok := r.(postingReader); ok {
+		sources, err := pr.lookupPostings(ctx, keys)
+		if err != nil {
+			return nil, fmt.Errorf("events: query lookup: %w", err)
+		}
+		return sources, nil
+	}
+	bitmaps, err := r.LookupKeys(ctx, keys)
+	if err != nil {
+		return nil, fmt.Errorf("events: query lookup: %w", err)
+	}
+	sources := make([]postings, len(bitmaps))
+	for i, bm := range bitmaps {
+		if bm != nil {
+			sources[i] = postings{bm: bm}
+		}
+	}
+	return sources, nil
+}
+
+// unionForFilters materializes the descending path's candidate set over the
+// plan planIndexTerms resolved. The result is never a borrowed mirror
+// snapshot, because the window AND allocates on the borrowing path, so
+// downstream iteration is safe. The ascending path uses candidateIter instead.
+func unionForFilters(
+	ctx context.Context, r Reader, filterPlans []termPlan, uniqueKeys []TermKey,
+	window IDRange,
+) (*roaring.Bitmap, error) {
 	// ───── 2. Single batched lookup for all unique terms ─────
 	bitmaps, err := r.LookupKeys(ctx, uniqueKeys)
 	if err != nil {
-		return nil, false, fmt.Errorf("events: query lookup: %w", err)
+		return nil, fmt.Errorf("events: query lookup: %w", err)
 	}
 
 	// ───── 3. Per-filter intersect ─────
@@ -404,7 +461,7 @@ func unionForFilters(
 	}
 
 	if len(perFilter) == 0 {
-		return roaring.New(), false, nil
+		return roaring.New(), nil
 	}
 
 	// ───── 4. Union across filters ─────
@@ -439,32 +496,18 @@ func unionForFilters(
 	} else {
 		union.And(rangeBM) // FastOr output is owned; in-place is fine
 	}
-	return union, false, nil
+	return union, nil
 }
 
-// streamUnion walks the union bitmap in internal batches: collect
-// candidate ordinals up to the batch size, fetch, post-filter, yield
-// the survivors. Drops advance the walk with no yield. The first
-// batch is sized to firstBatch (see Matches); later batches use the
-// default.
-//
-// FetchEvents requires ascending ids, so a descending batch is
-// collected highest-first and flipped before the fetch, then the
-// fetched matches are flipped back. Stepping one id at a time is fine
-// here: the fetch I/O dominates a 512-step loop.
+// streamUnion walks the descending path's materialized union bitmap in
+// internal batches: collect candidate ordinals up to the batch size, fetch,
+// post-filter, yield the survivors. Stepping one id at a time is fine here,
+// because the fetch I/O dominates the loop.
 func streamUnion(
 	ctx context.Context, r Reader, filters []Filter, union *roaring.Bitmap,
-	descending bool, firstBatch int, yield func(Match, error) bool,
+	firstBatch int, yield func(Match, error) bool,
 ) {
-	var it interface {
-		HasNext() bool
-		Next() uint32
-	}
-	if descending {
-		it = union.ReverseIterator()
-	} else {
-		it = union.Iterator()
-	}
+	it := union.ReverseIterator()
 	batch, rest := batchSizes(firstBatch)
 	ids := make([]uint32, 0, batch)
 	for {
@@ -480,29 +523,76 @@ func streamUnion(
 		if len(ids) == 0 {
 			return
 		}
-		if descending {
-			slices.Reverse(ids)
-		}
-		payloads, err := r.FetchEvents(ctx, ids)
-		if err != nil {
-			yield(Match{}, err)
+		if !emitBatch(ctx, r, filters, ids, true, yield) {
 			return
-		}
-		// Drop bitmap-side false positives (see postFilter for the rationale).
-		matched, err := postFilter(payloads, ids, filters)
-		if err != nil {
-			yield(Match{}, err)
-			return
-		}
-		if descending {
-			slices.Reverse(matched)
-		}
-		for i := range matched {
-			if !yield(matched[i], nil) {
-				return
-			}
 		}
 	}
+}
+
+// streamCandidates is streamUnion's ascending twin over the un-materialized
+// iterator tree. Candidates are pulled from the tree as the batch fills, so a
+// consumer that stops after one page never touched the postings past it.
+func streamCandidates(
+	ctx context.Context, r Reader, filters []Filter, candidates idIter,
+	firstBatch int, yield func(Match, error) bool,
+) {
+	batch, rest := batchSizes(firstBatch)
+	ids := make([]uint32, 0, batch)
+	for {
+		if err := ctx.Err(); err != nil {
+			yield(Match{}, err)
+			return
+		}
+		ids = ids[:0]
+		for len(ids) < batch {
+			id, ok := candidates.peek()
+			if !ok {
+				break
+			}
+			ids = append(ids, id)
+			candidates.next()
+		}
+		batch = rest
+		if len(ids) == 0 {
+			return
+		}
+		if !emitBatch(ctx, r, filters, ids, false, yield) {
+			return
+		}
+	}
+}
+
+// emitBatch fetches one batch of candidate ordinals, drops the bitmap-side
+// false positives and yields the survivors, reporting whether the stream
+// should continue. FetchEvents requires ascending ids, so a descending batch
+// is flipped in place before the fetch and flipped back before yielding.
+func emitBatch(
+	ctx context.Context, r Reader, filters []Filter, ids []uint32,
+	descending bool, yield func(Match, error) bool,
+) bool {
+	if descending {
+		slices.Reverse(ids)
+	}
+	payloads, err := r.FetchEvents(ctx, ids)
+	if err != nil {
+		yield(Match{}, err)
+		return false
+	}
+	// Drop bitmap-side false positives (see postFilter for the rationale).
+	matched, err := postFilter(payloads, ids, filters)
+	if err != nil {
+		yield(Match{}, err)
+		return false
+	}
+	if descending {
+		slices.Reverse(matched)
+	}
+	for i := range matched {
+		if !yield(matched[i], nil) {
+			return false
+		}
+	}
+	return true
 }
 
 // ValidateFilters rejects filters that would silently never match

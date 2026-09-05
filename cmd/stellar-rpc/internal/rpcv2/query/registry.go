@@ -36,6 +36,11 @@ type Registry struct {
 	// cannot leak into another test's pages.
 	maxScanLedgers uint32
 
+	// coldEventReadConcurrency overrides the packfile read fan-out one cold
+	// events read gets. Zero means defaultColdEventReadConcurrency, resolved
+	// where the reader is opened. Set through SetColdEventReadConcurrency.
+	coldEventReadConcurrency int
+
 	// latest is the newest fully ingested ledger visible to queries, paired with
 	// its close time so both publish atomically. The ingest loop advances it as
 	// the final step of each per-ledger cycle. Queries read a frozen copy
@@ -156,6 +161,14 @@ func NewRegistry(cat *catalog.Catalog, retention geometry.Retention) *Registry {
 	r.handles.Store(&handleSet{byChunk: map[chunk.ID]*hotchunk.DB{}})
 	r.SetLatestLedger(0, UnknownCloseTime())
 	return r
+}
+
+// SetColdEventReadConcurrency overrides the packfile read fan-out cold events
+// reads get; zero restores the default. Call it at wiring time, before views
+// are handed out: a view copies the value at acquisition, so a change never
+// shifts an in-flight request's fan-out.
+func (r *Registry) SetColdEventReadConcurrency(n int) {
+	r.coldEventReadConcurrency = n
 }
 
 // SetLatestLedger publishes seq together with its close time, which callers
@@ -288,6 +301,10 @@ type ReadView struct {
 	// so a view built without it still bounds its pages.
 	maxScanLedgers uint32
 
+	// coldEventReadConcurrency is the registry's cold events fan-out, copied at
+	// acquisition like maxScanLedgers. Zero means the default.
+	coldEventReadConcurrency int
+
 	// closers releases every cold reader this view opened (hot facades are
 	// registry-owned and never appear here). Appended by the resolve methods and
 	// by ScanLedgers' walk backstop, drained by Release — a view's resources live
@@ -323,13 +340,14 @@ func (r *Registry) NewReadView() (*ReadView, error) {
 		return nil, err
 	}
 	view := &ReadView{
-		latest:         *latest,
-		maxScanLedgers: r.maxScanLedgers,
-		floor:          r.retention.FloorAt(lastComplete),
-		handles:        handles,
-		snap:           snap,
-		catalog:        r.catalog,
-		oldest:         &r.oldest,
+		latest:                   *latest,
+		maxScanLedgers:           r.maxScanLedgers,
+		coldEventReadConcurrency: r.coldEventReadConcurrency,
+		floor:                    r.retention.FloorAt(lastComplete),
+		handles:                  handles,
+		snap:                     snap,
+		catalog:                  r.catalog,
+		oldest:                   &r.oldest,
 	}
 	// The oldest-close-time cache rides along outside the three-load order: it
 	// is a pure optimization whose staleness the seq check in OldestCloseTime

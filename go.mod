@@ -4,9 +4,12 @@ go 1.26
 
 require (
 	github.com/Masterminds/squirrel v1.5.4
-	// Minimum v2.18.2: first upstream release with the FastOr/runContainer16
-	// fix (RoaringBitmap/roaring#527) that the fork previously carried.
-	github.com/RoaringBitmap/roaring/v2 v2.18.2
+	// Minimum v2.18.2 (the FastOr/runContainer16 fix, #527, the fork
+	// previously carried); v2.26.0 for the no-clone lazy union (#542)
+	// and fused cardinality-slice aggregation (#559) the descending
+	// events path leans on. SIMD paths are x/sys/cpu-gated and honor
+	// GODEBUG=cpu.avx512vpopcntdq=off.
+	github.com/RoaringBitmap/roaring/v2 v2.26.0
 	github.com/aws/aws-sdk-go-v2 v1.42.0
 	github.com/aws/aws-sdk-go-v2/config v1.31.16
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.89.1
@@ -61,7 +64,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.30.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.35.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.39.0 // indirect
-	github.com/bits-and-blooms/bitset v1.24.2 // indirect
+	github.com/bits-and-blooms/bitset v1.24.4 // indirect
 	github.com/cncf/xds/go v0.0.0-20251031190108-5cf4b1949528 // indirect
 	github.com/edsrzf/mmap-go v1.2.0 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.35.0 // indirect

@@ -450,7 +450,8 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring
 // records into single ReadAt calls and optionally fans out across
 // the worker count set via ColdReaderOptions.Concurrency.
 // result[idx] writes from concurrent workers do not race — each
-// idx is unique.
+// idx is unique — and the payload arena they share is locked (see
+// the callback).
 func (c *ColdReader) FetchEvents(ctx context.Context, eventIDs []uint32) ([]Payload, error) {
 	if c.closed.Load() {
 		return nil, stores.ErrStoreClosed
@@ -474,12 +475,24 @@ func (c *ColdReader) FetchEvents(ctx context.Context, eventIDs []uint32) ([]Payl
 		positions[i] = int(id)
 	}
 	results := make([]Payload, len(eventIDs))
+	// One arena per call, shared by every worker, because a call's payloads
+	// live and die together. The arena is a single appended buffer while
+	// ReadItems calls back from up to Concurrency goroutines, hence the lock.
+	// It covers the copy alone, so a fan-out still overlaps the read, the
+	// record decode and the Unmarshal.
+	var (
+		arenaMu sync.Mutex
+		arena   byteArena
+	)
 	if err := c.events.ReadItems(ctx, positions, func(idx int, data []byte) error {
 		// packfile.ReadItems passes a borrowed data slice valid only for
 		// the duration of fn (see Reader.ReadItems docstring). FetchEvents
-		// returns the Payloads in a slice that outlives fn, so clone before
+		// returns the Payloads in a slice that outlives fn, so copy before
 		// Unmarshal aliases the bytes into ContractEventBytes.
-		return results[idx].Unmarshal(bytes.Clone(data))
+		arenaMu.Lock()
+		owned := arena.copy(data)
+		arenaMu.Unlock()
+		return results[idx].Unmarshal(owned)
 	}); err != nil {
 		// packfile.ReadItems also validates sorted positions as defense in
 		// depth; translate its sentinel to ours so callers can errors.Is

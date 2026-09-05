@@ -29,8 +29,10 @@ const (
 //
 //   - DataCF holds XDR-encoded event payloads: compressible (zstd
 //     typically 2-3× on XDR) and read in batches via
-//     BatchedMultiGetCF. Larger blocks give zstd more context per
-//     compression unit and align with batch-fetch shapes.
+//     BatchedMultiGetCF. The block is the decompression unit of a point
+//     read, so its size trades compression context against per-miss work:
+//     getEvents fetches scattered ~250B events, and a 32 KiB block made
+//     every cache miss decompress ~128 of them to serve one.
 //   - IndexCF stores 20-byte (term_hash || event_id) keys with
 //     empty values — nothing in the values to compress, and small
 //     blocks reduce wasted I/O per random Lookup miss (each Lookup
@@ -38,7 +40,7 @@ const (
 //   - OffsetsCF stores 8-byte (ledger_seq -> event_count) rows in
 //     the tens-of-thousands per chunk — same shape as IndexCF.
 const (
-	dataCFBlockSize    = 32 * 1024
+	dataCFBlockSize    = 8 * 1024
 	indexCFBlockSize   = 4 * 1024
 	offsetsCFBlockSize = 4 * 1024
 )
@@ -105,8 +107,12 @@ type HotStore struct {
 	offsets    *ConcurrentLedgerOffsets
 }
 
-// Compile-time guard: *HotStore satisfies Reader.
-var _ Reader = (*HotStore)(nil)
+// Compile-time guards: *HotStore satisfies Reader and the optional
+// postingReader seam.
+var (
+	_ Reader        = (*HotStore)(nil)
+	_ postingReader = (*HotStore)(nil)
+)
 
 // NewWithStore wraps an ALREADY-OPEN rocksdb.Store as an events HotStore on the
 // three events CFs (CFNames()), running the mandatory warmup to rebuild the
@@ -442,6 +448,31 @@ func (h *HotStore) IngestLedgerToBatch(
 	b.Put(OffsetsCF, encodeOffsetKey(ledgerSeq), encodeLedgerEventCount(uint32(len(payloads))))
 
 	return func() { h.applyLedger(startID, termKeys) }, nil
+}
+
+// lookupPostings is the no-materialize half of LookupKeys, and the hot store's
+// implementation of the optional postingReader seam. It returns each term's
+// live mirror representation, so a query that only walks ids in ascending
+// order never pays Get's roaring.New plus AddMany per sparse term.
+//
+// Results are positionally aligned with keys; a miss is the zero postings.
+// Same borrowed-snapshot contract as LookupKeys: read-only, valid
+// indefinitely.
+func (h *HotStore) lookupPostings(ctx context.Context, keys []TermKey) ([]postings, error) {
+	if h.chunkStore.IsClosed() {
+		return nil, stores.ErrStoreClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	results := make([]postings, len(keys))
+	for i, key := range keys {
+		results[i] = h.mirror.lookupPostings(key)
+	}
+	return results, nil
 }
 
 // index returns the in-memory term mirror. Test-only write hook: no production

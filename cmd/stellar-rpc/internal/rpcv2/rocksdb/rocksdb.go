@@ -275,14 +275,22 @@ func (s *Store) BatchMultiGet(cf string, keys [][]byte) ([][]byte, error) {
 	}
 	defer pinned.Destroy()
 
+	// Copy out of the pinned cache pages, which Destroy invalidates, through
+	// one arena rather than a clone per value. The returned slices share one
+	// backing array: they are read-only, and retaining one retains the batch.
+	total := 0
+	for _, p := range pinned {
+		total += len(p.Data())
+	}
+	arena := make([]byte, 0, total)
 	results := make([][]byte, len(keys))
 	for i, p := range pinned {
 		if !p.Exists() {
 			continue
 		}
-		// p.Data() points into the pinned cache page; copy before
-		// Destroy invalidates it.
-		results[i] = bytes.Clone(p.Data())
+		n := len(arena)
+		arena = append(arena, p.Data()...)
+		results[i] = arena[n:len(arena):len(arena)]
 	}
 	return results, nil
 }
