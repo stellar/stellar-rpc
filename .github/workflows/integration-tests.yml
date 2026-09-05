@@ -16,11 +16,11 @@ on:
         required: true
         type: string
       core_deb_version:
-        description: 'Stellar Core debian package version (e.g. 25.2.0-3045.rc2.bb195c49d.jammy). Mutually exclusive with core_git_ref.'
+        description: 'Stellar Core debian package version from the noble repo (e.g. 28.0.1-3508.947aad841.noble). Mutually exclusive with core_git_ref.'
         required: false
         type: string
       core_docker_img:
-        description: 'Full docker image reference for Stellar Core (e.g. stellar/unsafe-stellar-core:25.2.0-3045.rc2.bb195c49d.jammy). Mutually exclusive with core_git_ref.'
+        description: 'Full docker image reference for Stellar Core (e.g. stellar/stellar-core:28.0.1-3508.947aad841.noble). Mutually exclusive with core_git_ref.'
         required: false
         type: string
       core_git_ref:
@@ -32,7 +32,7 @@ jobs:
   integration:
     name: Integration tests
     continue-on-error: true
-    runs-on: ${{ inputs.core_git_ref && 'ubuntu-24.04' || 'ubuntu-22.04' }}
+    runs-on: ubuntu-24.04
     env:
       STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
       STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL: ${{ inputs.protocol_version }}
@@ -106,17 +106,12 @@ jobs:
         if: env.CORE_GIT_REF == ''
         shell: bash
         run: |
-          # Workaround for https://github.com/actions/virtual-environments/issues/5245,
-          # libc++1-8 won't be installed if another version is installed (but apt won't give you a helpful
-          # message about why the installation fails)
-          sudo apt-get remove -y libc++1-10 libc++abi1-10 || true
-
           sudo wget -qO - https://apt.stellar.org/SDF.asc | APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=true sudo apt-key add -
-          sudo bash -c 'echo "deb https://apt.stellar.org jammy unstable" > /etc/apt/sources.list.d/SDF-unstable.list'
+          sudo bash -c 'echo "deb https://apt.stellar.org noble stable" > /etc/apt/sources.list.d/SDF.list'
 
+          # The noble package links libc++ 20, which comes from apt.llvm.org.
           sudo wget -O /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key
-          sudo bash -c 'echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main" > /etc/apt/sources.list.d/llvm.list'
-          sudo bash -c 'echo "deb-src http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main" >> /etc/apt/sources.list.d/llvm.list'
+          sudo bash -c 'echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main" > /etc/apt/sources.list.d/llvm.list'
 
           sudo apt-get update && sudo apt-get install -y stellar-core="$CORE_DEBIAN_PKG_VERSION"
           echo "Using stellar core version $(stellar-core version)"
