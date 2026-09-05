@@ -1,0 +1,73 @@
+name: Bench campaign (EC2)
+# Registration stub. GitHub only lists a workflow_dispatch workflow once a file
+# exists at this path on the default branch; the real bench-campaign workflow
+# lives on feature/full-history until that branch merges.
+# The inputs mirror the real workflow's so the dispatch form renders the same
+# fields either way.
+
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: 'Pacing phase (selects close_interval + the dataset profiles)'
+        required: true
+        type: choice
+        options: ['1', '2', '3']
+      ingest:
+        description: 'Which ingest benchmarks to run'
+        required: false
+        type: choice
+        default: both
+        options: [both, cold, hot, none]
+      query:
+        description: 'Run the query suites after ingest'
+        required: false
+        type: choice
+        default: 'no'
+        options: ['no', 'yes']
+      runs:
+        description: 'Repetitions per (dataset, chunk) cell'
+        required: false
+        type: string
+        default: '1'
+      workers:
+        description: 'bench-ingest cold --workers (empty = the per-machine default)'
+        required: false
+        type: string
+        default: ''
+      machine:
+        description: 'Box size: 2x = m6id.2xlarge, 8x = c6id.8xlarge'
+        required: false
+        type: choice
+        default: 2x
+        options: [2x, 8x]
+      ref:
+        description: 'stellar-rpc ref to benchmark (resolved on the box, not here)'
+        required: false
+        type: string
+        default: feature/full-history
+      hot_num_ledgers:
+        description: 'Cap the hot ingest at N ledgers (0 = the whole chunk); shortens a smoke run'
+        required: false
+        type: string
+        default: '0'
+      run_name:
+        description: 'Campaign name (empty = phase<N>-<machine>)'
+        required: false
+        type: string
+        default: ''
+      benchmarks_ref:
+        description: 'stellar-rpc-benchmarks ref the box runs the campaign from'
+        required: false
+        type: string
+        default: main
+
+jobs:
+  stub:
+    name: Registration stub
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: |
+          echo "::error::this ref carries only the registration stub — re-run the dispatch with a branch that has the real bench-campaign workflow (feature/full-history)"
+          exit 1

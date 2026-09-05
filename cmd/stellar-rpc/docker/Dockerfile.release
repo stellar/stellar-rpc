@@ -20,7 +20,7 @@ RUN echo 'deb http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main' > /etc/ap
 RUN echo 'deb-src http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main' >> /etc/apt/sources.list.d/llvm.list
 
 RUN apt update && \
-    apt install -y stellar-core=${STELLAR_CORE_VERSION} stellar-rpc=${STELLAR_RPC_VERSION} && \
+    apt install -y --no-install-recommends stellar-core=${STELLAR_CORE_VERSION} stellar-rpc=${STELLAR_RPC_VERSION} && \
     apt clean
 
 ENTRYPOINT ["/usr/bin/stellar-rpc"]

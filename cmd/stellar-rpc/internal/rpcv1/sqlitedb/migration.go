@@ -114,6 +114,9 @@ func (mm MultiMigration) Commit(ctx context.Context) error {
 			err = errors.Join(err, localErr, mm.db.Rollback())
 		}
 	}
+	if err != nil {
+		return err
+	}
 	return mm.db.Commit()
 }
 
@@ -178,6 +181,12 @@ func (g *guardedMigration) ApplicableRange() LedgerSeqRange {
 func (g *guardedMigration) Commit(ctx context.Context) error {
 	if g.alreadyMigrated {
 		return nil
+	}
+	// flush rows still buffered by a batching writer before setting the guard
+	if flusher, ok := g.migration.(interface{ flushPending() error }); ok {
+		if err := flusher.flushPending(); err != nil {
+			return err
+		}
 	}
 	return setMetaBool(ctx, g.db, g.guardMetaKey, true)
 }
