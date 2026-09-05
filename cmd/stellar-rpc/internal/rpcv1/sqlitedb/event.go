@@ -35,12 +35,17 @@ type eventHandler struct {
 	db         db.SessionInterface
 	stmtCache  *sq.StmtCache
 	passphrase string
+	pending    []dbEvent
 }
 type dbEvent struct {
-	TxHash xdr.Hash
-	Event  xdr.DiagnosticEvent
-	Cursor string
+	TxHash    xdr.Hash
+	Event     xdr.DiagnosticEvent
+	Cursor    string
+	CloseTime int64
 }
+
+// 10 bind variables/event * 3,000 events stays under SQLite's 32,766 limit
+const maxEventsPerBatch = 3000
 
 func NewEventReader(log *log.Entry, db db.SessionInterface, passphrase string) store.EventReader {
 	return &eventHandler{log: log, db: db, passphrase: passphrase}
@@ -48,8 +53,6 @@ func NewEventReader(log *log.Entry, db db.SessionInterface, passphrase string) s
 
 // Named error return: the deferred txReader.Close errors.Join below
 // must reach the caller (an unnamed return made it a dead local).
-//
-//nolint:gocognit,cyclop,funlen // pre-existing complexity; only the signature changed
 func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) (err error) {
 	txCount := lcm.CountTransactions()
 
@@ -95,18 +98,9 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) (err err
 	//  - Post-application events have a TOID with { ledger seq, -1, 0 }
 	// where -1 is actually the largest possible uint32.
 	//
-	var beforeIndex, afterIndex uint32
-
-	for {
-		var tx ingest.LedgerTransaction
-		tx, err = txReader.Read()
-		if errors.Is(err, io.EOF) {
-			err = nil
-			break
-		} else if err != nil {
-			return err
-		}
-
+	var indices txEventIndices
+	var tx ingest.LedgerTransaction
+	for tx, err = txReader.Read(); err == nil; tx, err = txReader.Read() {
 		// Note that we do not skip failed transactions because they still
 		// contain events (e.g., fees are paid regardless of success).
 		var allEvents ingest.TransactionEvents
@@ -117,58 +111,31 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) (err err
 
 		opEvents := allEvents.OperationEvents
 		txEvents := allEvents.TransactionEvents
-		insertableEvents := make([]dbEvent, 0, len(txEvents)+len(opEvents))
 
-		var afterTxIndex uint32
+		indices.afterTx = 0 // post-tx events number from 0 within each tx
 
 		// First, gather the transaction-level application events, tracking
 		// indices individually for each category.
 		for _, event := range txEvents {
-			insertedEvent := dbEvent{
+			cursor, cursorErr := indices.cursor(event.Stage, lcm.LedgerSequence(), tx.Index)
+			if cursorErr != nil {
+				return cursorErr
+			}
+			eventHandler.pending = append(eventHandler.pending, dbEvent{
 				TxHash: tx.Hash,
 				Event: xdr.DiagnosticEvent{
 					InSuccessfulContractCall: tx.Successful(),
 					Event:                    event.Event,
 				}, // fake diagnostic event since that's what the DB expects
-			}
-
-			// The Stage→(Tx, Op) cursor sentinels come from
-			// store.StageSentinels — the single definition shared with the
-			// full-history view path — so the two backends cannot drift.
-			// Only the per-stage event counters are selected here (the
-			// full-history path stores EventIdx explicitly too, per the
-			// byte-stable-ID decision).
-			var txIdx, opIdx uint32
-			txIdx, opIdx, err = store.StageSentinels(event.Stage, tx.Index)
-			if err != nil {
-				return err
-			}
-			var eventIdx uint32
-			switch event.Stage {
-			case xdr.TransactionEventStageTransactionEventStageBeforeAllTxs:
-				eventIdx = beforeIndex
-				beforeIndex++
-			case xdr.TransactionEventStageTransactionEventStageAfterAllTxs:
-				eventIdx = afterIndex
-				afterIndex++
-			default: // AfterTx — StageSentinels already rejected unknown stages
-				eventIdx = afterTxIndex
-				afterTxIndex++
-			}
-			insertedEvent.Cursor = protocol.Cursor{
-				Ledger: lcm.LedgerSequence(),
-				Tx:     txIdx,
-				Op:     opIdx,
-				Event:  eventIdx,
-			}.String()
-
-			insertableEvents = append(insertableEvents, insertedEvent)
+				Cursor:    cursor.String(),
+				CloseTime: lcm.LedgerCloseTime(),
+			})
 		}
 
 		// Then, gather all of the operation events.
 		for opIndex, innerOpEvents := range opEvents {
 			for eventIndex, event := range innerOpEvents {
-				insertableEvents = append(insertableEvents, dbEvent{
+				eventHandler.pending = append(eventHandler.pending, dbEvent{
 					TxHash: tx.Hash,
 					Event: xdr.DiagnosticEvent{
 						InSuccessfulContractCall: tx.Successful(),
@@ -180,50 +147,90 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) (err err
 						Op:     uint32(opIndex),
 						Event:  uint32(eventIndex),
 					}.String(),
+					CloseTime: lcm.LedgerCloseTime(),
 				})
 			}
 		}
 
-		// Batch inserts to avoid exceeding SQLite's SQLITE_MAX_VARIABLE_NUMBER
-		// limit (32,767 by default). With 10 bind variables per event, we cap
-		// each INSERT at 1000 events (10,000 bind variables) to stay well
-		// within the limit.
-		const maxEventsPerBatch = 1000
-
-		for batchStart := 0; batchStart < len(insertableEvents); batchStart += maxEventsPerBatch {
-			batchEnd := min(batchStart+maxEventsPerBatch, len(insertableEvents))
-
-			query := sq.Insert(eventTableName).
-				Columns(
-					"id",
-					"contract_id",
-					"event_type",
-					"event_data",
-					"ledger_close_time",
-					"transaction_hash",
-					"topic1", "topic2", "topic3", "topic4",
-				)
-
-			for _, event := range insertableEvents[batchStart:batchEnd] {
-				query, err = insertEvents(query, lcm, event)
-				if err != nil {
-					return err
-				}
-			}
-
-			_, err = query.RunWith(eventHandler.stmtCache).Exec()
-			if err != nil {
+		// Full fixed-size batches keep the SQL text constant so the statement
+		// cache reuses one prepare; the remainder is flushed at Commit.
+		for len(eventHandler.pending) >= maxEventsPerBatch {
+			if err = eventHandler.flush(maxEventsPerBatch); err != nil {
 				return err
 			}
 		}
 	}
-
+	if !errors.Is(err, io.EOF) {
+		return err
+	}
 	return nil
+}
+
+// txEventIndices tracks per-stage counters for a ledger's transaction-level
+// events.
+type txEventIndices struct{ beforeAll, afterAll, afterTx uint32 }
+
+// cursor returns the cursor for a transaction-level event, advancing its
+// stage's counter.
+//
+// The Stage→(Tx, Op) cursor sentinels come from store.StageSentinels, the
+// single definition shared with the full-history view path, so the two
+// backends cannot drift. Only the per-stage event counters live here.
+func (indices *txEventIndices) cursor(
+	stage xdr.TransactionEventStage, ledgerSeq, txIndex uint32,
+) (protocol.Cursor, error) {
+	txIdx, opIdx, err := store.StageSentinels(stage, txIndex)
+	if err != nil {
+		return protocol.Cursor{}, err
+	}
+	var eventIdx uint32
+	switch stage {
+	case xdr.TransactionEventStageTransactionEventStageBeforeAllTxs:
+		eventIdx = indices.beforeAll
+		indices.beforeAll++
+	case xdr.TransactionEventStageTransactionEventStageAfterAllTxs:
+		eventIdx = indices.afterAll
+		indices.afterAll++
+	default: // AfterTx — StageSentinels already rejected unknown stages
+		eventIdx = indices.afterTx
+		indices.afterTx++
+	}
+	return protocol.Cursor{Ledger: ledgerSeq, Tx: txIdx, Op: opIdx, Event: eventIdx}, nil
+}
+
+func (eventHandler *eventHandler) flush(n int) error {
+	query := sq.Insert(eventTableName).
+		Columns(
+			"id",
+			"contract_id",
+			"event_type",
+			"event_data",
+			"ledger_close_time",
+			"transaction_hash",
+			"topic1", "topic2", "topic3", "topic4",
+		)
+	var err error
+	for _, event := range eventHandler.pending[:n] {
+		if query, err = insertEvents(query, event); err != nil {
+			return err
+		}
+	}
+	if _, err = query.RunWith(eventHandler.stmtCache).Exec(); err != nil {
+		return err
+	}
+	eventHandler.pending = eventHandler.pending[:copy(eventHandler.pending, eventHandler.pending[n:])]
+	return nil
+}
+
+func (eventHandler *eventHandler) flushPending() error {
+	if len(eventHandler.pending) == 0 {
+		return nil
+	}
+	return eventHandler.flush(len(eventHandler.pending))
 }
 
 func insertEvents(
 	query sq.InsertBuilder,
-	lcm xdr.LedgerCloseMeta,
 	event dbEvent,
 ) (sq.InsertBuilder, error) {
 	var contractID []byte
@@ -257,7 +264,7 @@ func insertEvents(
 		contractID,
 		int(event.Event.Event.Type),
 		eventBlob,
-		lcm.LedgerCloseTime(),
+		event.CloseTime,
 		event.TxHash[:],
 		topicList[0], topicList[1], topicList[2], topicList[3],
 	), nil
@@ -417,7 +424,7 @@ func (eventHandler *eventHandler) GetEvents(
 type eventTableMigration struct {
 	firstLedger uint32
 	lastLedger  uint32
-	writer      EventWriter
+	writer      *eventHandler
 }
 
 func (e *eventTableMigration) ApplicableRange() LedgerSeqRange {
@@ -429,6 +436,10 @@ func (e *eventTableMigration) ApplicableRange() LedgerSeqRange {
 
 func (e *eventTableMigration) Apply(_ context.Context, meta xdr.LedgerCloseMeta) error {
 	return e.writer.InsertEvents(meta)
+}
+
+func (e *eventTableMigration) flushPending() error {
+	return e.writer.flushPending()
 }
 
 func newEventTableMigration(

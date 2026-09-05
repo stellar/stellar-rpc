@@ -96,6 +96,7 @@ jobs:
   load-test:
     name: ${{ matrix.leg.label }}
     needs: plan
+    if: ${{ needs.plan.outputs.matrix_legs != '[]' }}
     strategy:
       fail-fast: false # stops one leg's failure from cancelling other legs
       matrix:
@@ -184,7 +185,8 @@ jobs:
           CID=""; PREV=""
           if [ -n "$PR" ]; then
             CID=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-              --jq "map(select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\")))) | .[0].id // empty" || true)
+              --jq "map(select(.user.login == \"github-actions[bot]\" and
+                              (.body | startswith(\"$MARKER\")))) | .[0].id // empty" || true)
             [ -n "$CID" ] && PREV=$(gh api "repos/$REPO/issues/comments/$CID" --jq '.body' || true)
           fi
 
@@ -221,7 +223,8 @@ jobs:
         env:
           NEEDS: ${{ toJSON(needs) }}
         run: |
-          FAILED=$(jq -r '[to_entries[] | select(.value.result != "success") | .key] | join(", ")' <<<"$NEEDS")
+          FAILED=$(jq -r '[to_entries[] | select(.value.result == "failure" or .value.result == "cancelled")
+            | .key] | join(", ")' <<<"$NEEDS")
           if [ -n "$FAILED" ]; then
             echo "::error::jobs did not pass: $FAILED"
             exit 1
