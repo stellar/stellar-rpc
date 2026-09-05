@@ -65,6 +65,10 @@ const (
 
 	inContainerRPCPort      = 8000
 	inContainerRPCAdminPort = 8080
+
+	// How long a core container may take to answer its HTTP port and reach
+	// sync. Generous on purpose: up to four tests boot a container at once.
+	coreStartupTimeout = 2 * time.Minute
 )
 
 //go:embed docker/upgrades/*.xdr
@@ -530,7 +534,11 @@ func (i *Test) waitForRPC() {
 			i.t.Logf("getHealth: %+v; err: %v", result, err)
 			return err == nil && result.Status == "healthy"
 		},
-		60*time.Second,
+		// The daemon reports "DB is empty" until its captive core has replayed
+		// every ledger the network already closed. That replay competes for CPU
+		// with the other tests running at the same time, so it needs a window
+		// well above the time a replay takes on an idle machine.
+		180*time.Second,
 		time.Second,
 		"RPC never got healthy: %+v",
 		err,
@@ -797,12 +805,14 @@ func (i *Test) Shutdown() {
 // Wait for core to be up and manually close the first ledger
 func (i *Test) waitForCore() {
 	i.t.Log("Waiting for core to be up...")
+	// Several tests boot their own core container at the same time, so a
+	// container needs much longer to answer than it does on an idle machine.
 	require.Eventually(i.t,
 		func() bool {
 			_, err := i.getCoreInfo()
 			return err == nil
 		},
-		30*time.Second,
+		coreStartupTimeout,
 		time.Second,
 	)
 
@@ -813,7 +823,7 @@ func (i *Test) waitForCore() {
 			info, err := i.getCoreInfo()
 			return err == nil && info.IsSynced()
 		},
-		30*time.Second,
+		coreStartupTimeout,
 		time.Second,
 	)
 }
@@ -1060,8 +1070,9 @@ func (i *Test) upgradeLimitsWithFile(limitFile string) string {
 func (i *Test) fillContainerPorts() {
 	getPublicPort := func(service string, privatePort int) uint16 {
 		var port uint16
-		// We need to try several times because we detached from `docker-compose up`
-		// and the container may not be ready
+		// We detached from `docker compose up`, so the container may not have
+		// published its ports yet. The wait is generous because several tests
+		// run at once and the Docker daemon answers slowly under that load.
 		require.Eventually(i.t,
 			func() bool {
 				out, err := i.runComposeCommand("port", service, strconv.Itoa(privatePort))
@@ -1075,7 +1086,7 @@ func (i *Test) fillContainerPorts() {
 				port = uint16(intPort)
 				return true
 			},
-			2*time.Second,
+			30*time.Second,
 			100*time.Millisecond,
 		)
 		return port

@@ -57,8 +57,7 @@ func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint
 		stopLedger                          = 66    // minimum ledger to reach before stopping core
 	)
 
-	gcsServer, makeDatastoreConfig := makeNewFakeGCSServer(t, datastoreStart, datastoreEnd, retentionWindow, objPrefix)
-	defer gcsServer.Stop()
+	makeDatastoreConfig := seedFakeGCSBucket(t, datastoreStart, datastoreEnd, retentionWindow, objPrefix)
 
 	// Create temporary SQLite DB populated with dummy ledgers
 	dbPath := createDbWithLedgers(t, localDbStart, localDbEnd, retentionWindow)
@@ -67,7 +66,6 @@ func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint
 	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
 		SQLitePath:             dbPath,
 		DatastoreConfigFunc:    makeDatastoreConfig,
-		NoParallel:             true,              // can't use parallel due to env vars
 		DelayDaemonForLedgerN:  int(datastoreEnd), // don't start daemon until core has at least the datastore ledgers
 		IgnoreLedgerCloseTimes: true,              // fake/seeded ledgers don't need correct close times relative to core's
 		ApplyLimits:            &limitFile,
@@ -131,22 +129,13 @@ func waitUntilLedgerIngested(t *testing.T, test *infrastructure.Test, rpcClient 
 	return last
 }
 
-func makeNewFakeGCSServer(t *testing.T,
+func seedFakeGCSBucket(t *testing.T,
 	datastoreStart,
 	datastoreEnd,
 	retentionWindow uint32,
 	objPrefix string,
-) (*fakestorage.Server, func(*config.Config)) {
-	opts := fakestorage.Options{
-		Scheme:     "http",
-		PublicHost: "127.0.0.1",
-	}
-	gcsServer, err := fakestorage.NewServerWithOptions(opts)
-	require.NoError(t, err, "failed to start fake GCS server")
-	bucketName := "test-bucket"
-	t.Setenv("STORAGE_EMULATOR_HOST", gcsServer.URL())
-
-	gcsServer.CreateBucketWithOpts(fakestorage.CreateBucketOpts{Name: bucketName})
+) func(*config.Config) {
+	bucketName := newGCSBucket(t)
 	bucketPath := path.Join(bucketName, objPrefix)
 
 	// datastore config
@@ -173,7 +162,7 @@ func makeNewFakeGCSServer(t *testing.T,
 	}
 	// Add ledger files to datastore
 	for seq := datastoreStart; seq <= datastoreEnd; seq++ {
-		gcsServer.CreateObject(fakestorage.Object{
+		sharedGCSServer.CreateObject(fakestorage.Object{
 			ObjectAttrs: fakestorage.ObjectAttrs{
 				BucketName: bucketName,
 				Name:       path.Join(objPrefix, schema.GetObjectKeyFromSequenceNumber(seq)),
@@ -182,7 +171,7 @@ func makeNewFakeGCSServer(t *testing.T,
 		})
 	}
 
-	return gcsServer, makeDatastoreConfig
+	return makeDatastoreConfig
 }
 
 func createDbWithLedgers(t *testing.T, start, end, retentionWindow uint32) string {
