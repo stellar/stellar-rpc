@@ -45,7 +45,7 @@ type backfillEnv struct {
 	TargetSHA   string `env:"TARGET_SHA"`
 	RunID       string `env:"RUN_ID"       envDefault:"manual"`
 	// ~1 day by default for cheap test runs; the full week is 120960.
-	Retention int           `env:"HISTORY_RETENTION_WINDOW" envDefault:"17280"`
+	Retention int           `env:"HISTORY_RETENTION_WINDOW" envDefault:"120960"`
 	Deadline  time.Duration `env:"BACKFILL_DEADLINE"        envDefault:"4h"`
 	// serve on a non-loopback bind after the backfill completes
 	ServeAfter bool `env:"SERVE_AFTER_BACKFILL"`
