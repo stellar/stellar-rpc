@@ -83,17 +83,20 @@ func dumpDmesgTail(ctx context.Context) {
 	logger.Warnf("dmesg tail:\n%s", strings.Join(lines, "\n"))
 }
 
-// snapshotBoxLog copies the box log so far next to the result object.
+// snapshotBoxLog copies the box log and the daemon log so far next to the result object.
 func snapshotBoxLog(ctx context.Context, bucket, key string) {
 	if bucket == "" || key == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
 	defer cancel()
-	dst := fmt.Sprintf("s3://%s/%s/user-data-serving.log", bucket, path.Dir(key))
-	cmd := exec.CommandContext(ctx, "aws", "s3", "cp", "/var/log/user-data.log", dst)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		logger.Warnf("snapshotting box log to %s: %v (%s)", dst, err, out)
+	logs := [][2]string{{"/var/log/user-data.log", "user-data-serving.log"}, {daemonLogPath, "stellar-rpc-serving.log"}}
+	for _, f := range logs {
+		dst := fmt.Sprintf("s3://%s/%s/%s", bucket, path.Dir(key), f[1])
+		cmd := exec.CommandContext(ctx, "aws", "s3", "cp", f[0], dst)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			logger.Warnf("snapshotting %s to %s: %v (%s)", f[0], dst, err, out)
+		}
 	}
 }
 

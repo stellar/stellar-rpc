@@ -26,6 +26,8 @@ const (
 	// runner runs w/ cwd = repo root, so paths are relative to there
 	legDir   = "cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/backfill-test"
 	corePath = "/usr/local/bin/stellar-core" // fetched from S3
+	// daemon output; the box log's console/syslog tee drains at ~45 KB/s, which throttled request logging
+	daemonLogPath = "/var/log/stellar-rpc.log"
 )
 
 const ledgerThreshold = 384 // mirrors ingest.ledgerThreshold in backfill.go
@@ -212,6 +214,11 @@ func runBackfill(
 	cmd := exec.CommandContext(runCtx, binary, "--config-path", cfgPath)
 	// hide this box's IMDS creds as the public datalake 403s signed requests
 	cmd.Env = append(os.Environ(), "AWS_EC2_METADATA_DISABLED=true")
+	logFile, err := os.Create(daemonLogPath)
+	if err != nil {
+		cancel()
+		return 0, 0, 0, nil, err
+	}
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		cancel()
@@ -234,7 +241,8 @@ func runBackfill(
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
-		fmt.Fprintln(os.Stderr, line) // tee to the box user-data log (SSM debug tail)
+		fmt.Fprintln(logFile, line)
+		fmt.Fprintln(os.Stderr, line) // tee only the backfill phase to the box log (SSM debug tail)
 		if m := backfillDoneRe.FindStringSubmatch(line); m != nil {
 			elapsed = time.Since(start)
 			lo, _ = strconv.Atoi(m[1])
@@ -247,6 +255,7 @@ func runBackfill(
 	if elapsed == 0 { // daemon died, read failure, or the watchdog killed it
 		cancel()
 		pr.Close()
+		logFile.Close()
 		_ = cmd.Wait()
 		if scanErr := scanner.Err(); scanErr != nil {
 			return 0, 0, 0, nil, fmt.Errorf("reading daemon output: %w", scanErr)
@@ -255,7 +264,7 @@ func runBackfill(
 	}
 
 	daemon := &daemonHandle{cancel: cancel, done: make(chan struct{})}
-	go daemon.reap(scanner, pr, cmd)
+	go daemon.reap(scanner, pr, logFile, cmd)
 	if !keepAlive {
 		daemon.Stop() // stop the daemon before it starts live ingestion
 		return elapsed, lo, hi, nil, nil
@@ -263,18 +272,19 @@ func runBackfill(
 	return elapsed, lo, hi, daemon, nil
 }
 
-// reap keeps draining the pipe (the daemon blocks on it once full), teeing its
-// catchup/ingestion output to the box log until it dies, then records how.
-func (d *daemonHandle) reap(scanner *bufio.Scanner, pr *os.File, cmd *exec.Cmd) {
+// reap keeps draining the pipe (the daemon blocks on it once full) into the
+// daemon log file until it dies, then records how.
+func (d *daemonHandle) reap(scanner *bufio.Scanner, pr, logFile *os.File, cmd *exec.Cmd) {
 	defer close(d.done)
+	defer logFile.Close()
 	for scanner.Scan() {
-		fmt.Fprintln(os.Stderr, scanner.Text())
+		fmt.Fprintln(logFile, scanner.Text())
 	}
 	if err := scanner.Err(); err != nil {
 		// a line over the scanner's cap must not stop the drain: closing the
 		// read end would SIGPIPE-kill a healthy daemon on its next write
 		logger.Warnf("reading daemon output: %v; draining the rest unbuffered", err)
-		_, _ = io.Copy(os.Stderr, pr)
+		_, _ = io.Copy(logFile, pr)
 	}
 	pr.Close()
 	d.err = cmd.Wait()
