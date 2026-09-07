@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/fsouza/fake-gcs-server/fakestorage"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	client "github.com/stellar/go-stellar-sdk/clients/rpcclient"
@@ -145,14 +146,18 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 	})
 	client := test.GetRPCLient() // at this point we're at like ledger 30
 
-	waitUntil := func(cond func(h protocol.GetHealthResponse) bool, timeout time.Duration) protocol.GetHealthResponse {
+	waitUntil := func(what string, cond func(h protocol.GetHealthResponse) bool,
+		timeout time.Duration,
+	) protocol.GetHealthResponse {
 		var last protocol.GetHealthResponse
-		require.Eventually(t, func() bool {
+		if !assert.Eventually(t, func() bool {
 			resp, err := client.GetHealth(t.Context())
 			require.NoError(t, err)
 			last = resp
 			return cond(resp)
-		}, timeout, 100*time.Millisecond, "last health: %+v", last)
+		}, timeout, 100*time.Millisecond) {
+			t.Fatalf("timed out waiting for %s; last health: %+v", what, last)
+		}
 		return last
 	}
 
@@ -175,10 +180,13 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 		return client.GetLedgers(t.Context(), req)
 	}
 
-	// ensure oldest > 40 so datastore set ([35..40]) is below local window
-	health := waitUntil(func(h protocol.GetHealthResponse) bool {
-		return uint(h.OldestLedger) > 40
-	}, 30*time.Second)
+	// Ensure oldest > 40 so the datastore set ([35..40]) sits below the local
+	// window. The retention window is 15 ledgers and the network closes about
+	// one ledger per second, so this waits for roughly ledger 56 to close.
+	health := waitUntil("the local retention window to move past ledger 40",
+		func(h protocol.GetHealthResponse) bool {
+			return uint(h.OldestLedger) > 40
+		}, 90*time.Second)
 
 	oldest := health.OldestLedger
 	latest := health.LatestLedger
