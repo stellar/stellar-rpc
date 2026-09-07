@@ -34,6 +34,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/util"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version"
 )
@@ -207,22 +208,32 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 	var ingestCfg ingest.Config
 	daemon.ingestService, ingestCfg = createIngestService(cfg, logger, daemon, feewindows, historyArchive, rw)
 	if cfg.Backfill {
-		backfillMeta, err := ingest.NewBackfillMeta(
-			logger,
-			daemon.ingestService,
-			sqlitedb.NewLedgerReader(daemon.db),
-			daemon.dataStore,
-			daemon.dataStoreSchema,
-		)
-		if err != nil {
-			logger.WithError(err).Fatal("failed to create backfill metadata")
+		// On a fresh DB, reshape the schema for the bulk-load; FinalizeBulkLoad
+		// restores it below
+		_, err := sqlitedb.NewLedgerReader(daemon.db).GetLedgerRange(context.Background())
+		if errors.Is(err, store.ErrEmptyDB) {
+			if err := sqlitedb.PrepareBulkLoad(context.Background(), daemon.db, logger); err != nil {
+				logger.WithError(err).Fatal("failed to prepare database for backfill bulk-load")
+			}
+		} else if err != nil {
+			logger.WithError(err).Fatal("failed to check database emptiness for backfill")
 		}
-		if err := backfillMeta.RunBackfill(cfg); err != nil {
-			logger.WithError(err).Fatal("failed to backfill ledgers")
-		}
-		// Clear the DB cache and fee windows so they re-populate from the database
-		daemon.db.ResetCache()
-		feewindows.Reset()
+
+		daemon.mustBackfill(cfg, feewindows)
+	}
+
+	// Restore the canonical schema after a bulk-load, including one interrupted
+	// by a crash. Must finish before ingestService.Start to avoid starving it.
+	finalizeStart := time.Now()
+	if err := sqlitedb.FinalizeBulkLoad(context.Background(), daemon.db, cfg.SQLiteDBPath, logger); err != nil {
+		logger.WithError(err).Fatal("failed to finalize backfill bulk-load")
+	}
+	// The backfill perf-eval runner keys off this line; keep it stable
+	logger.WithField("duration", time.Since(finalizeStart).String()).Info("Bulk-load finalize complete")
+
+	if cfg.Backfill {
+		// Top-up frontfill after finalize so captive core starts nearer the live tip
+		daemon.mustBackfill(cfg, feewindows)
 	}
 	// Start ingestion service only after backfill is complete
 	daemon.ingestService.Start(ingestCfg)
@@ -513,6 +524,26 @@ func (d *Daemon) mustInitializeStorage(cfg *config.Config) *feewindow.FeeWindows
 	}
 
 	return feeWindows
+}
+
+func (d *Daemon) mustBackfill(cfg *config.Config, feeWindows *feewindow.FeeWindows) {
+	backfillMeta, err := ingest.NewBackfillMeta(
+		d.logger,
+		d.ingestService,
+		sqlitedb.NewLedgerReader(d.db),
+		d.dataStore,
+		d.dataStoreSchema,
+	)
+	if err != nil {
+		d.logger.WithError(err).Fatal("failed to create backfill metadata")
+	}
+	if err := backfillMeta.RunBackfill(cfg); err != nil {
+		d.logger.WithError(err).Fatal("failed to backfill ledgers")
+	}
+
+	// Clear the DB cache and fee windows so they re-populate from the database
+	d.db.ResetCache()
+	feeWindows.Reset()
 }
 
 func (d *Daemon) buildMigrations(ctx context.Context, cfg *config.Config, retentionRange sqlitedb.LedgerSeqRange,
