@@ -18,7 +18,7 @@ import (
 )
 
 func TestMetrics(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: skipLimitsUpgrade()})
 	metricsURL, err := url.JoinPath(test.GetAdminURL(), "/metrics")
 	require.NoError(t, err)
 	metrics := getMetrics(t, metricsURL)

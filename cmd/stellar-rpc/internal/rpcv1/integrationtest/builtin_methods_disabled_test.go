@@ -16,7 +16,7 @@ import (
 // rpc.* methods (e.g. rpc.serverInfo, which leaks node lifetime metrics and
 // process start time) are not reachable via the HTTP bridge.
 func TestBuiltinRPCMethodsDisabled(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: skipLimitsUpgrade()})
 
 	body := `{"jsonrpc": "2.0", "id": 1, "method": "rpc.serverInfo"}`
 	request, err := http.NewRequestWithContext(

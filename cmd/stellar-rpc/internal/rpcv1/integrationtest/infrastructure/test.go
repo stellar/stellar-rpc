@@ -958,25 +958,22 @@ func (i *Test) upgradeLimits() {
 	if limitFile == "" { // skip upgrade
 		return
 	}
-	output := i.upgradeLimitsWithFile("enable.xdr") // first enable settings upgrades in general
-	require.Contains(i.t, output, "3500000")
+	// First enable settings upgrades in general.
+	i.upgradeLimitsWithFile("enable.xdr", "3500000")
 
-	limitFile = fmt.Sprintf("%s.p%d.xdr", limitFile, i.protocolVersion)
-	output = i.upgradeLimitsWithFile(limitFile) // then run out upgrade
-
-	// A coupla oddly-specific values from the .json file to validate against:
-	switch limitFile {
-	case "testnet":
-		require.Contains(i.t, output, "65536")
-	//
-	// Add others here if you want
-	//
-	default: // unlimited
-		require.Contains(i.t, output, "4294967295")
+	// An oddly-specific value from the .json file, to prove the upgrade landed.
+	// Add another case here if you add another upgrade file.
+	expected := "4294967295" // unlimited
+	if limitFile == "testnet" {
+		expected = "65536"
 	}
+	i.upgradeLimitsWithFile(fmt.Sprintf("%s.p%d.xdr", limitFile, i.protocolVersion), expected)
 }
 
-func (i *Test) upgradeLimitsWithFile(limitFile string) string {
+// upgradeLimitsWithFile applies one Core settings upgrade and waits for Core to
+// report it. expectInSorobanInfo is a value the upgrade must put into Core's
+// /sorobaninfo response, which is how we know the upgrade has been applied.
+func (i *Test) upgradeLimitsWithFile(limitFile, expectInSorobanInfo string) {
 	newLimits, err := upgradeFiles.ReadFile(
 		filepath.Join("docker", "upgrades", limitFile))
 	require.NoError(i.t, err)
@@ -1052,19 +1049,18 @@ func (i *Test) upgradeLimitsWithFile(limitFile string) string {
 		require.NoError(i.t, err)
 	}
 
-	// Wait for a ledger then ensure that the upgrade got applied:
-	time.Sleep(5 * time.Second)
-	upgradeCmd = i.getComposeCommand(
-		"exec", "-T", "core",
-		"curl", "-sG",
-		"http://localhost:11626/sorobaninfo",
-	)
-	upgradeCmd.Stdout = stdout
-	stdout.Reset()
-
-	require.NoError(i.t, upgradeCmd.Start())
-	require.NoError(i.t, upgradeCmd.Wait())
-	return stdout.String()
+	// The upgrade lands on the next ledger close, which takes about a second
+	// with accelerated time. Poll for it. A fixed sleep here used to cost every
+	// environment 10 seconds, because this function runs twice per environment.
+	require.Eventually(i.t, func() bool {
+		out, err := i.runComposeCommand(
+			"exec", "-T", "core",
+			"curl", "-sG",
+			"http://localhost:11626/sorobaninfo",
+		)
+		return err == nil && strings.Contains(string(out), expectInSorobanInfo)
+	}, 30*time.Second, 500*time.Millisecond,
+		"the %s upgrade never put %s into Core's /sorobaninfo", limitFile, expectInSorobanInfo)
 }
 
 func (i *Test) fillContainerPorts() {

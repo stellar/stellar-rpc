@@ -10,7 +10,7 @@ import (
 )
 
 func TestGetNetworkSucceeds(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: skipLimitsUpgrade()})
 
 	client := test.GetRPCLient()
 

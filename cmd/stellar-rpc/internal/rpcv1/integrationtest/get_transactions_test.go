@@ -57,7 +57,7 @@ func sendTransactions(t *testing.T, client *client.Client) []uint32 {
 
 func TestGetTransactions(t *testing.T) {
 	ctx := t.Context()
-	test := infrastructure.NewTest(t, nil)
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: skipLimitsUpgrade()})
 	client := test.GetRPCLient()
 
 	ledgers := sendTransactions(t, client)

@@ -98,7 +98,7 @@ func testGetLedgers(t *testing.T, client *client.Client) {
 }
 
 func TestGetLedgers(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: skipLimitsUpgrade()})
 	client := test.GetRPCLient()
 	testGetLedgers(t, client)
 }

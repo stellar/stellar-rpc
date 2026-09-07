@@ -62,13 +62,12 @@ func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint
 	// Create temporary SQLite DB populated with dummy ledgers
 	dbPath := createDbWithLedgers(t, localDbStart, localDbEnd, retentionWindow)
 
-	limitFile := ""
 	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
 		SQLitePath:             dbPath,
 		DatastoreConfigFunc:    makeDatastoreConfig,
 		DelayDaemonForLedgerN:  int(datastoreEnd), // don't start daemon until core has at least the datastore ledgers
 		IgnoreLedgerCloseTimes: true,              // fake/seeded ledgers don't need correct close times relative to core's
-		ApplyLimits:            &limitFile,
+		ApplyLimits:            skipLimitsUpgrade(),
 	})
 
 	testDb := test.GetDaemon().GetDB()
