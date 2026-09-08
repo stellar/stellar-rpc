@@ -31,6 +31,7 @@ rps = 15
 
 [endpoints.getTransactions]
 rps = 10
+limit = 200 # blaster sends this by default, but setting here makes it show in results
 
 # Class 5: very heavy endpoints
 
