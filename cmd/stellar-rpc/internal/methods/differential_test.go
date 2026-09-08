@@ -140,6 +140,45 @@ func diffSym(name string) xdr.ScVal {
 	return xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym}
 }
 
+func diffStr(s string) xdr.ScVal {
+	str := xdr.ScString(s)
+	return xdr.ScVal{Type: xdr.ScValTypeScvString, Str: &str}
+}
+
+func diffU32(n uint32) xdr.ScVal {
+	u := xdr.Uint32(n)
+	return xdr.ScVal{Type: xdr.ScValTypeScvU32, U32: &u}
+}
+
+func diffI128(hi int64, lo uint64) xdr.ScVal {
+	return xdr.ScVal{Type: xdr.ScValTypeScvI128, I128: &xdr.Int128Parts{Hi: xdr.Int64(hi), Lo: xdr.Uint64(lo)}}
+}
+
+func diffBytes(b ...byte) xdr.ScVal {
+	bytes := xdr.ScBytes(b)
+	return xdr.ScVal{Type: xdr.ScValTypeScvBytes, Bytes: &bytes}
+}
+
+func diffBool(b bool) xdr.ScVal {
+	return xdr.ScVal{Type: xdr.ScValTypeScvBool, B: &b}
+}
+
+func diffVoid() xdr.ScVal {
+	return xdr.ScVal{Type: xdr.ScValTypeScvVoid}
+}
+
+func diffVec(vals ...xdr.ScVal) xdr.ScVal {
+	vec := xdr.ScVec(vals)
+	vecPtr := &vec
+	return xdr.ScVal{Type: xdr.ScValTypeScvVec, Vec: &vecPtr}
+}
+
+func diffAddress(id xdr.ContractId) xdr.ScVal {
+	return xdr.ScVal{Type: xdr.ScValTypeScvAddress, Address: &xdr.ScAddress{
+		Type: xdr.ScAddressTypeScAddressTypeContract, ContractId: &id,
+	}}
+}
+
 // diffEvent builds a V0-bodied event. A nil id is an event with no contract.
 func diffEvent(
 	typ xdr.ContractEventType, id *xdr.ContractId, data xdr.ScVal, topics ...xdr.ScVal,
