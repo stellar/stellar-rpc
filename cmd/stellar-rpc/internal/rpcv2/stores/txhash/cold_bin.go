@@ -10,7 +10,10 @@ package txhash
 //
 // File layout:
 //
-//	header  uint64 LE           entry count
+//	header  uint32 LE           magic ("SBIN" in on-disk byte order)
+//	        uint8               version (1)
+//	        3 B                 reserved (zero)
+//	        uint64 LE           entry count
 //	        stores.SecretLen B  index secret the keys were blinded with
 //	entry   ColdKeySize B       blinded txhash[:ColdKeySize]
 //	        uint32 LE           absolute ledger seq
@@ -45,14 +48,40 @@ const (
 	// coldBinEntrySize is the per-entry width in the cold .bin file:
 	// ColdKeySize bytes of blinded key + the ledger seq.
 	coldBinEntrySize = ColdKeySize + coldBinSeqSize
-	// coldBinCountSize is the leading uint64 LE entry count.
+	// coldBinMagic identifies a cold txhash .bin; a mis-pointed or foreign
+	// file fails the header scan on it.
+	coldBinMagic = "SBIN"
+	// coldBinVersion is the .bin format version; the header scan rejects
+	// files written by a newer binary rather than misreading them.
+	coldBinVersion byte = 1
+	// coldBinPreludeSize is the magic + version + 3 reserved zero bytes.
+	coldBinPreludeSize = 8
+	// coldBinCountSize is the uint64 LE entry count after the prelude.
 	coldBinCountSize = 8
-	// coldBinHeaderSize is the count followed by the index secret the keys were
-	// blinded with (stores.SecretLen). The build reads the secret back and
-	// adopts it, so an index can never be built under a secret that disagrees
-	// with the one its .bin keys were keyed with (see BuildColdIndex).
-	coldBinHeaderSize = coldBinCountSize + stores.SecretLen
+	// coldBinHeaderSize is the prelude, the count, and the index secret the
+	// keys were blinded with (stores.SecretLen). The build reads the secret
+	// back and adopts it, so an index can never be built under a secret that
+	// disagrees with the one its .bin keys were keyed with (see BuildColdIndex).
+	coldBinHeaderSize = coldBinPreludeSize + coldBinCountSize + stores.SecretLen
 )
+
+// checkBinPrelude validates the magic, version, and reserved bytes at the
+// start of a .bin header. Both readers call it, so a format bump cannot leave
+// one of them reading a newer header as entry bytes.
+func checkBinPrelude(path string, hdr []byte) error {
+	if magic := string(hdr[:4]); magic != coldBinMagic {
+		return fmt.Errorf("txhash: %s is not a cold txhash .bin (magic %q, want %q)", path, magic, coldBinMagic)
+	}
+	if hdr[4] != coldBinVersion {
+		return fmt.Errorf("txhash: %s has .bin version %d unsupported by this binary "+
+			"(written by a newer stellar-rpc?)", path, hdr[4])
+	}
+	if hdr[5]|hdr[6]|hdr[7] != 0 {
+		return fmt.Errorf("txhash: %s has reserved header bytes set "+
+			"(written by a newer stellar-rpc, or corrupted)", path)
+	}
+	return nil
+}
 
 // ColdEntry is one (blinded key, ledger seq) tuple in a cold .bin file.
 type ColdEntry struct {
@@ -102,8 +131,10 @@ func WriteColdBin(path string, secret [stores.SecretLen]byte, entries []ColdEntr
 
 	bw := bufio.NewWriterSize(f, 1<<20)
 	var header [coldBinHeaderSize]byte
-	binary.LittleEndian.PutUint64(header[:coldBinCountSize], uint64(len(entries)))
-	copy(header[coldBinCountSize:], secret[:])
+	copy(header[:4], coldBinMagic)
+	header[4] = coldBinVersion
+	binary.LittleEndian.PutUint64(header[coldBinPreludeSize:], uint64(len(entries)))
+	copy(header[coldBinPreludeSize+coldBinCountSize:], secret[:])
 	if _, werr := bw.Write(header[:]); werr != nil {
 		return fmt.Errorf("txhash: write header: %w", werr)
 	}

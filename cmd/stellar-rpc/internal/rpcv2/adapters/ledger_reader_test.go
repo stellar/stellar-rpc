@@ -485,3 +485,45 @@ func TestGetLedgerRange_SeededWindowReadsNoLedgers(t *testing.T) {
 	assert.Less(t, perCall, uint64(2048),
 		"a seeded GetLedgerRange allocated %d bytes per call; it should not be reading ledgers", perCall)
 }
+
+func TestWithLedgerRaw_LendsTheSameBytesGetLedgerDecodes(t *testing.T) {
+	ctx, reader, c0, _ := sparseFixture(t)
+	lcm, ok, err := reader.GetLedger(ctx, c0.FirstLedger())
+	require.NoError(t, err)
+	require.True(t, ok)
+	want, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+
+	var got []byte
+	found, err := reader.WithLedgerRaw(ctx, c0.FirstLedger(), func(raw []byte) error {
+		got = bytes.Clone(raw) // the loan forbids retaining raw
+		return nil
+	})
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, want, got)
+}
+
+func TestWithLedgerRaw_MissDoesNotRunFn(t *testing.T) {
+	ctx, reader, c0, c1 := sparseFixture(t)
+	// below the floor, in an in-window gap, and above latest
+	for _, seq := range []uint32{c0.FirstLedger() - 1, c0.FirstLedger() + 10, c1.FirstLedger() + 1} {
+		ran := false
+		found, err := reader.WithLedgerRaw(ctx, seq, func([]byte) error {
+			ran = true
+			return nil
+		})
+		assert.NoError(t, err, "ledger %d", seq)
+		assert.False(t, found, "ledger %d", seq)
+		assert.False(t, ran, "fn must not run for an absent ledger %d", seq)
+	}
+}
+
+func TestWithLedgerRaw_CallbackErrorSurfacesAsFound(t *testing.T) {
+	ctx, reader, c0, _ := sparseFixture(t)
+	boom := errors.New("boom")
+	// found stays true: the ledger WAS there, the caller's own callback failed.
+	found, err := reader.WithLedgerRaw(ctx, c0.FirstLedger(), func([]byte) error { return boom })
+	assert.ErrorIs(t, err, boom)
+	assert.True(t, found)
+}

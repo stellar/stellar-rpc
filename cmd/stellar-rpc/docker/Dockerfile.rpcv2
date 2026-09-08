@@ -1,8 +1,8 @@
 # All stages use ubuntu:24.04 so shared libs built in one stage work in any
 # other (same glibc). zstd and RocksDB are built from source to pin versions;
 # Go and Rust come from upstream tarballs (there's no golang:1.26-noble image).
-# Note: v1 (Dockerfile) ships on ubuntu:22.04, its long-standing production base —
-# the 22.04/24.04 divergence between the two images is deliberate.
+# Both images (this one and v1's Dockerfile) ship on ubuntu:24.04 with noble
+# stellar-core packages.
 
 # --- Stage 1: zstd ---
 FROM ubuntu:24.04 AS zstd-build
@@ -72,7 +72,7 @@ RUN apt update && apt install -y --no-install-recommends \
 RUN curl -sSL https://apt.stellar.org/SDF.asc | gpg --dearmor >/etc/apt/trusted.gpg.d/SDF.gpg
 RUN echo "deb https://apt.stellar.org noble stable" >/etc/apt/sources.list.d/SDF.list
 RUN echo "deb https://apt.stellar.org noble unstable" >/etc/apt/sources.list.d/SDF-unstable.list
-RUN apt update && apt install -y stellar-core=${STELLAR_CORE_VERSION}
+RUN apt update && apt install -y --no-install-recommends stellar-core=${STELLAR_CORE_VERSION}
 RUN apt clean
 
 COPY --from=zstd-build /usr/local/lib/libzstd.so* /usr/local/lib/

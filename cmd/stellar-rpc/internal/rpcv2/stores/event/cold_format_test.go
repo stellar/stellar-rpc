@@ -65,7 +65,9 @@ func TestLedgerOffsets_DecodeRejectsShortBuffer(t *testing.T) {
 	_, err := DecodeLedgerOffsets(nil)
 	require.ErrorIs(t, err, ErrShortLedgerOffsets)
 
-	_, err = DecodeLedgerOffsets(make([]byte, ledgerOffsetsHeaderLen-1))
+	short := make([]byte, ledgerOffsetsHeaderLen-1)
+	short[0] = LedgerOffsetsFormatVersion // valid version, so the length check fires
+	_, err = DecodeLedgerOffsets(short)
 	assert.ErrorIs(t, err, ErrShortLedgerOffsets)
 }
 
@@ -73,7 +75,7 @@ func TestLedgerOffsets_DecodeRejectsUnknownVersion(t *testing.T) {
 	buf := make([]byte, ledgerOffsetsHeaderLen)
 	buf[0] = 0xff // not LedgerOffsetsFormatVersion
 	_, err := DecodeLedgerOffsets(buf)
-	assert.ErrorIs(t, err, ErrUnknownLedgerOffsetsVersion)
+	assert.ErrorContains(t, err, "written by a newer stellar-rpc")
 }
 
 func TestLedgerOffsets_DecodeRejectsTruncatedArray(t *testing.T) {

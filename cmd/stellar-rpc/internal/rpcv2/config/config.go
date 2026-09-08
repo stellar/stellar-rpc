@@ -448,26 +448,39 @@ const (
 
 	DefaultMaxHealthyLedgerLatency time.Duration = 30 * time.Second
 
-	// DefaultGetEventsMaxItemsPerResponse and the getLedgers pair below are the
-	// two deliberate breaks from v1's page sizes (TODO: revisit both under the
-	// v2 benchmarking epic):
-	//   - getEvents max is 1000, not v1's 10000 — the finalized getEvents v2
-	//     API fixes the page cap at 1,000 as a spec constant
-	//     (github.com/orgs/stellar/discussions/1872).
-	//   - getLedgers is 20/5, not v1's 200/50 — the item here is a full
-	//     LedgerCloseMeta (megabytes each on a busy pubnet ledger), so v1's
-	//     200-item page could exceed a hundred MB of XDR in one response.
-	DefaultGetEventsMaxItemsPerResponse     uint = 1000
+	// DefaultGetEventsV2MaxItemsPerResponse is the page cap the finalized
+	// getEvents v2 API fixes as a spec constant
+	// (github.com/orgs/stellar/discussions/1872). The v1 method keeps v1's
+	// own cap; see DefaultGetEventsV1MaxItemsPerResponse.
+	DefaultGetEventsV2MaxItemsPerResponse   uint = 1000
 	DefaultGetEventsDefaultItemsPerResponse uint = 100
 
-	// DefaultGetEventsTermBudget is the getEvents v2 proposal's default
+	// DefaultGetEventsV2TermBudget is the getEvents v2 proposal's default
 	// (github.com/orgs/stellar/discussions/1872).
-	DefaultGetEventsTermBudget uint = 15
+	DefaultGetEventsV2TermBudget uint = 15
+
+	// DefaultGetEventsV1TermBudget covers the worst legal v1 request (5
+	// filters x (1 type + 5 contract ids + 5 topic filters x 4 values) =
+	// at most 130 distinct terms), so no request the v1 API admits is
+	// rejected. v1 predates the budget; only an operator lowering this can
+	// surface it there.
+	DefaultGetEventsV1TermBudget uint = 130
+
+	// DefaultGetEventsV1MaxItemsPerResponse is v1's own page cap, matching
+	// the existing service's max-events-limit. The 1,000 above is the v2
+	// spec's constant; applying it to v1 would reject pages v1 serves.
+	DefaultGetEventsV1MaxItemsPerResponse uint = 10_000
 
 	DefaultGetTransactionsMaxItemsPerResponse     uint = 200
 	DefaultGetTransactionsDefaultItemsPerResponse uint = 50
-	DefaultGetLedgersMaxItemsPerResponse          uint = 20
-	DefaultGetLedgersDefaultItemsPerResponse      uint = 5
+
+	// DefaultGetLedgersMaxItemsPerResponse and the default below it are 20
+	// and 5, where v1 serves 200 and 50 (TODO: revisit under the v2
+	// benchmarking epic). A getLedgers item is a whole LedgerCloseMeta,
+	// megabytes each on a busy pubnet ledger, so a 200-item page could
+	// exceed a hundred megabytes of XDR in one response.
+	DefaultGetLedgersMaxItemsPerResponse     uint = 20
+	DefaultGetLedgersDefaultItemsPerResponse uint = 5
 
 	DefaultClassicFeeWindowLedgers          uint32 = 10
 	DefaultSorobanInclusionFeeWindowLedgers uint32 = 50
@@ -664,15 +677,15 @@ func (cfg Config) WithDefaults() Config {
 
 	queue(&m.GetEvents.QueueLimit, DefaultMethodQueueLimit)
 	dur(&m.GetEvents.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
-	fillUint(&m.GetEvents.MaxItemsPerResponse, DefaultGetEventsMaxItemsPerResponse)
+	fillUint(&m.GetEvents.MaxItemsPerResponse, DefaultGetEventsV1MaxItemsPerResponse)
 	fillUint(&m.GetEvents.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
-	fillUint(&m.GetEvents.TermBudget, DefaultGetEventsTermBudget)
+	fillUint(&m.GetEvents.TermBudget, DefaultGetEventsV1TermBudget)
 
 	queue(&m.GetEventsV2.QueueLimit, DefaultMethodQueueLimit)
 	dur(&m.GetEventsV2.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
-	fillUint(&m.GetEventsV2.MaxItemsPerResponse, DefaultGetEventsMaxItemsPerResponse)
+	fillUint(&m.GetEventsV2.MaxItemsPerResponse, DefaultGetEventsV2MaxItemsPerResponse)
 	fillUint(&m.GetEventsV2.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
-	fillUint(&m.GetEventsV2.TermBudget, DefaultGetEventsTermBudget)
+	fillUint(&m.GetEventsV2.TermBudget, DefaultGetEventsV2TermBudget)
 
 	queue(&m.GetFeeStats.QueueLimit, DefaultGetFeeStatsQueueLimit)
 	dur(&m.GetFeeStats.MaxExecutionDuration, DefaultMethodMaxExecutionDuration)

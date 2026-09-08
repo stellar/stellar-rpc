@@ -46,6 +46,15 @@ func Open(
 		return nil, err
 	}
 	c := &Catalog{store: store, logger: logger, layout: layout, txhashIndex: txhashIndex}
+	// Census before the secret mint below: a catalog holding entries outside
+	// this binary's vocabulary (a newer binary's formats, or corruption) is
+	// refused here, so Open writes no catalog entry of its own into a tree it
+	// refuses. RocksDB itself may still create housekeeping files and flush a
+	// previous binary's recovered WAL on Close.
+	if err := c.census(); err != nil {
+		_ = c.Close()
+		return nil, err
+	}
 	// Mint-or-load the cold-index secret up front (get-or-create is not atomic;
 	// here it runs single-threaded) and cache it, so post-Open Secret() reads are
 	// lock-free and cannot fail.

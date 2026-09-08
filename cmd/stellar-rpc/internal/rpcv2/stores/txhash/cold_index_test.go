@@ -125,19 +125,17 @@ func writeBinFile(t *testing.T, path string, entries []fixtureEntry, secret [sto
 	sort.Slice(keyed, func(i, j int) bool {
 		return bytes.Compare(keyed[i].Key[:], keyed[j].Key[:]) < 0
 	})
+	require.NoError(t, WriteColdBin(path, secret, keyed))
+}
 
-	var buf bytes.Buffer
+// rawBinHeader hand-builds a syntactically valid .bin header (magic, version,
+// zero secret) claiming count entries, for corrupt-file fixtures.
+func rawBinHeader(count uint64) [coldBinHeaderSize]byte {
 	var hdr [coldBinHeaderSize]byte
-	binary.LittleEndian.PutUint64(hdr[:coldBinCountSize], uint64(len(keyed)))
-	copy(hdr[coldBinCountSize:], secret[:])
-	buf.Write(hdr[:])
-	var seqBuf [coldBinSeqSize]byte
-	for _, e := range keyed {
-		buf.Write(e.Key[:])
-		binary.LittleEndian.PutUint32(seqBuf[:], e.Seq)
-		buf.Write(seqBuf[:])
-	}
-	require.NoError(t, os.WriteFile(path, buf.Bytes(), 0o600))
+	copy(hdr[:4], coldBinMagic)
+	hdr[4] = coldBinVersion
+	binary.LittleEndian.PutUint64(hdr[coldBinPreludeSize:], count)
+	return hdr
 }
 
 // writeFixtureBins partitions entries into per-chunk .bin files under
@@ -387,8 +385,7 @@ func TestBuildColdIndex_TruncatedFileErrors(t *testing.T) {
 	// holds): the open-time size cross-check rejects it; no index.
 	dir := t.TempDir()
 	var buf bytes.Buffer
-	var hdr [coldBinHeaderSize]byte
-	binary.LittleEndian.PutUint64(hdr[:], 5) // claim 5
+	hdr := rawBinHeader(5) // claim 5
 	buf.Write(hdr[:])
 	// ...but write only one entry.
 	buf.Write(make([]byte, coldBinEntrySize))
@@ -408,8 +405,7 @@ func TestBuildColdIndex_HeaderUndercountErrors(t *testing.T) {
 	// silently drop the trailing entries; it must error instead.
 	dir := t.TempDir()
 	var buf bytes.Buffer
-	var hdr [coldBinHeaderSize]byte
-	binary.LittleEndian.PutUint64(hdr[:], 1) // declare 1...
+	hdr := rawBinHeader(1) // declare 1...
 	buf.Write(hdr[:])
 	buf.Write(make([]byte, coldBinEntrySize*3)) // ...but write 3 entries
 	p := filepath.Join(dir, "00000005.bin")
@@ -431,8 +427,7 @@ func TestBuildColdIndex_HeaderOverflowRejected(t *testing.T) {
 	// reject this cleanly (no allocation, no panic).
 	dir := t.TempDir()
 	var buf bytes.Buffer
-	var hdr [coldBinHeaderSize]byte
-	binary.LittleEndian.PutUint64(hdr[:], math.MaxUint64) // wildly overstated count
+	hdr := rawBinHeader(math.MaxUint64) // wildly overstated count
 	buf.Write(hdr[:])
 	buf.Write(make([]byte, coldBinEntrySize)) // one real entry
 	p := filepath.Join(dir, "00000005.bin")

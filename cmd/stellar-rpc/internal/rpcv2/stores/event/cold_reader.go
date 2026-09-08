@@ -6,15 +6,15 @@ package event
 // LedgerOffsets app-data block, and serves the Reader
 // interface against them.
 //
-// Lifecycle: each ColdReader owns two packfile.Reader instances
+// Lifecycle: each ColdReader owns two stores.PackReader instances
 // plus an in-memory parsed MPHF index. Open returns immediately,
 // but all three I/O units start right away in background
-// goroutines: packfile.Open opens each file (holding its fd) and
+// goroutines: OpenPack opens each file (holding its fd) and
 // reads its trailer in the background, and the MPHF read kicks off
 // alongside them. Decoded metadata is awaited on the first call
 // that needs it. Close drains the MPHF goroutine and releases the
 // packfile handles. Multiple ColdReaders can be open against the
-// same chunk directory concurrently — packfile.Reader is safe for
+// same chunk directory concurrently — the pack handle is safe for
 // concurrent reads and the MPHF is read-only after load.
 //
 // Concurrency contract: read methods (LookupKeys,
@@ -61,7 +61,7 @@ import (
 // Reader.
 //
 // Open shape: OpenColdReader does no synchronous I/O beyond options
-// validation. packfile.Open starts each file's open + trailer read
+// validation. OpenPack starts each file's open + trailer read
 // in a background goroutine immediately; events.pack metadata
 // (TotalItems + AppData + offsets decode + chunkID cross-check) is
 // decoded on first metadata access via a sync.OnceValues-cached
@@ -73,8 +73,8 @@ import (
 type ColdReader struct {
 	chunkID chunk.ID
 
-	events *packfile.Reader // opened in the background by packfile.Open; reads await it
-	index  *packfile.Reader // opened in the background by packfile.Open; reads await it
+	events *stores.PackReader // opened in the background by OpenPack; reads await it
+	index  *stores.PackReader // opened in the background by OpenPack; reads await it
 
 	// waitMeta returns the events.pack metadata (count + offsets),
 	// decoded on first call from the events.pack trailer + AppData.
@@ -119,7 +119,7 @@ type ColdReaderOptions struct {
 }
 
 // OpenColdReader prepares a ColdReader for chunkID inside bucketDir.
-// It does no synchronous I/O — packfile.Open starts each file's open
+// It does no synchronous I/O — OpenPack starts each file's open
 // in a background goroutine (holding its fd once open), the
 // events.pack metadata decode is sync.OnceValues-deferred, and the
 // MPHF loader runs in a background goroutine awaited via
@@ -143,11 +143,11 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 
 	c := &ColdReader{
 		chunkID: chunkID,
-		events: packfile.Open(eventsPath, packfile.ReaderOptions{
+		events: stores.OpenPack(eventsPath, packfile.ReaderOptions{
 			RecordDecoder: eventsPackDecoder,
 			Concurrency:   opts.Concurrency,
 		}),
-		index: packfile.Open(indexPackPath, packfile.ReaderOptions{
+		index: stores.OpenPack(indexPackPath, packfile.ReaderOptions{
 			Concurrency: opts.Concurrency,
 		}),
 	}
@@ -175,6 +175,30 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		if err != nil {
 			return err
 		}
+		// Format, record-checksum, and build-stamp checks run for eventless
+		// chunks too, so a foreign, unchecked, or mis-schemed pack refuses on the
+		// first indexed lookup regardless of chunk content. The guarantee is
+		// lookup-path-only by design: payload reads (FetchEvents, All) never
+		// consult the index pair and stay valid against events.pack's own checks.
+		tr, terr := c.index.Trailer()
+		if terr != nil {
+			return fmt.Errorf("events: open %s: %w", indexPackPath, terr)
+		}
+		if tr.Format != indexPackFormat {
+			return fmt.Errorf("events: %s: expected format %#x, got %#x (mis-pointed or foreign pack)",
+				indexPackPath, indexPackFormat, tr.Format)
+		}
+		// Serving an index whose bitmaps are unchecked is the silent-wrong-answer
+		// case indexPackChecksum exists to prevent, and the reader can tell. It is
+		// stores.ErrCorrupt for the same reason a failed checksum is: the artifact
+		// cannot answer queries and has to be rebuilt.
+		if !tr.HasRecordChecksum {
+			return fmt.Errorf("%w: %s: built without a record checksum (stale build)",
+				stores.ErrCorrupt, indexPackPath)
+		}
+		if err := checkIndexBuildStamp(indexPackPath, c.index); err != nil {
+			return err
+		}
 		if idx.isEmpty() {
 			// A zero-term index is only valid for an eventless chunk: cross-check
 			// events.pack's count so a mispaired empty index fails loudly instead
@@ -193,18 +217,11 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		// Non-empty index: bind the pair to this chunk before serving from
 		// it — index.pack/index.hash carry no chunk ID of their own, so a
 		// mispaired index would silently return an incomplete subset of
-		// matches. Three cheap checks: index.pack's trailer Format,
+		// matches. Two cheap checks beyond the shared format, checksum, and
+		// stamp gates above:
 		// index.hash keys == index.pack records (halves of one build), and
 		// non-empty index ⇒ non-empty events.pack (converse of the
 		// empty-index check above).
-		tr, terr := c.index.Trailer()
-		if terr != nil {
-			return fmt.Errorf("events: open %s: %w", indexPackPath, terr)
-		}
-		if tr.Format != indexPackFormat {
-			return fmt.Errorf("events: %s: expected format %#x, got %#x (mis-pointed or foreign pack)",
-				indexPackPath, indexPackFormat, tr.Format)
-		}
 		if uint64(tr.TotalItems) != idx.numKeys() {
 			return fmt.Errorf(
 				"events: index pair mismatch for chunk %s: index.hash holds %d keys "+

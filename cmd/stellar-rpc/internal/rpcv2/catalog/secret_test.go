@@ -29,7 +29,8 @@ func TestSecret_MintedOnceAndStable(t *testing.T) {
 // TestSecret_RejectsCorruptedPersisted pins that a wrong-length persisted
 // secret fails Open loudly instead of silently reminting: a truncated write or
 // downgraded encoding must not swap in a fresh secret, which would orphan every
-// txhash .bin already keyed under the old one.
+// txhash .bin already keyed under the old one. The census catches it (before
+// the mint), and its message must not print the secret's value.
 func TestSecret_RejectsCorruptedPersisted(t *testing.T) {
 	path := t.TempDir()
 
@@ -40,5 +41,7 @@ func TestSecret_RejectsCorruptedPersisted(t *testing.T) {
 
 	_, err = openKVAt(t, path)
 	require.Error(t, err, "a corrupted persisted secret must fail Open, not remint")
-	require.ErrorContains(t, err, "persisted cold-index secret is 5 bytes")
+	require.ErrorIs(t, err, ErrForeignCatalog)
+	require.ErrorContains(t, err, "value is 5 bytes, want 32")
+	require.NotContains(t, err.Error(), "short", "the secret's value must never appear in the error")
 }

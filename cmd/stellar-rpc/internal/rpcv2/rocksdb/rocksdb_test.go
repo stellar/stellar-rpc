@@ -762,7 +762,7 @@ func TestStore_TuningZeroValue(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 
 	assert.Nil(t, s.cache)
-	assert.Nil(t, s.bbtos)
+	assert.Len(t, s.bbtos, 1, "every CF carries a BBTO even with zero tuning")
 
 	require.NoError(t, s.Put(defaultCFName, []byte("k"), []byte("v")))
 	v, found, err := s.Get(defaultCFName, []byte("k"))

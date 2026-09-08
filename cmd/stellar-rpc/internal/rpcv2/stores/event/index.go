@@ -26,6 +26,42 @@ const (
 	FieldTopicCount Field = 6
 )
 
+// TermSchemaVersion names the term-derivation scheme: the hash function and
+// byte encoding behind ComputeTermKey plus each field's value encoding. Bump
+// it whenever any of those change. Adding a whole field sets a new bit in
+// IndexedFieldMask instead and is a storage-format change in its own right;
+// see the design doc's "Format versioning and upgrades" section. Both values
+// are recorded in every index.pack's build stamp, and the reader accepts
+// exactly its own pair.
+const TermSchemaVersion uint16 = 1
+
+// allFields is the field registry, the single source of truth the mask and
+// the golden tests derive from. Extend it in the same change that adds a
+// Field constant.
+//
+//nolint:gochecknoglobals // immutable field registry, single source of truth
+var allFields = []Field{
+	FieldContractID, FieldTopic0, FieldTopic1, FieldTopic2, FieldTopic3,
+	FieldEventType, FieldTopicCount,
+}
+
+// indexedFieldMask is derived from allFields once at init. It is unexported so
+// no importer can reassign the value every index.pack build stamp records.
+//
+//nolint:gochecknoglobals // derived from the immutable field registry
+var indexedFieldMask = func() uint64 {
+	var m uint64
+	for _, f := range allFields {
+		m |= 1 << f
+	}
+	return m
+}()
+
+// IndexedFieldMask is the set of indexed fields as a bitmask (bit i set means
+// Field i is indexed). The build stamp records it per artifact and the
+// term-key golden tests iterate the same registry.
+func IndexedFieldMask() uint64 { return indexedFieldMask }
+
 // ComputeTermKey computes a 16-byte term key by hashing the field byte
 // followed by the value bytes: xxh3_128(field || value), encoded as
 // two little-endian uint64s.

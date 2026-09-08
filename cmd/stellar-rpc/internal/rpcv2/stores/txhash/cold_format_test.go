@@ -26,11 +26,25 @@ func TestEncodeParseColdMetadata_RoundTrip(t *testing.T) {
 }
 
 func TestParseColdMetadata_WrongSizeErrors(t *testing.T) {
-	// 8 is the pre-secret layout; 24 is the only valid width.
-	for _, sz := range []int{0, 1, 4, 7, 8, 9, 16, 23, 25} {
-		_, _, _, err := ParseColdMetadata(make([]byte, sz))
+	// 8 is the pre-secret layout, 24 the pre-version one; 25 is the only
+	// valid width. Blobs carry a valid version byte so the size check is what
+	// fires (the version check runs first by design).
+	for _, sz := range []int{1, 4, 7, 8, 9, 16, 24, 26} {
+		blob := make([]byte, sz)
+		blob[0] = coldMetadataVersion
+		_, _, _, err := ParseColdMetadata(blob)
 		assert.ErrorIs(t, err, ErrInvalidMetadata, "size %d should error", sz)
 	}
+	_, _, _, err := ParseColdMetadata(nil)
+	require.ErrorIs(t, err, ErrInvalidMetadata, "empty blob should error")
+	require.ErrorContains(t, err, "empty")
+}
+
+func TestParseColdMetadata_UnknownVersionErrors(t *testing.T) {
+	blob := EncodeColdMetadata(5, 9, testSecret())
+	blob[0] = coldMetadataVersion + 1
+	_, _, _, err := ParseColdMetadata(blob)
+	require.ErrorContains(t, err, "written by a newer stellar-rpc")
 }
 
 func TestParseColdMetadata_MaxBelowMinErrors(t *testing.T) {
@@ -93,7 +107,8 @@ func TestOpenColdReader_BadMetadataErrors(t *testing.T) {
 	require.NoError(t, sb.Close())
 
 	_, err = OpenColdReader(path)
-	assert.ErrorIs(t, err, ErrInvalidMetadata)
+	require.ErrorIs(t, err, ErrInvalidMetadata, "a metadata-less index must fail open")
+	require.ErrorContains(t, err, "empty")
 }
 
 func TestOpenColdReader_WrongPayloadSizeErrors(t *testing.T) {

@@ -1,6 +1,7 @@
 package packfile
 
 import (
+	"errors"
 	"slices"
 	"testing"
 )
@@ -35,6 +36,14 @@ func newTestRecord(n int, dec RecordDecoder) *record {
 	}
 }
 
+// buildRecordBytes assembles one record's on-disk bytes the way the writer
+// does: payload, the FOR index over sizes, then the trailing CRC32C. wide
+// selects the widened checksum, matching a Reader with recordChecksum set.
+func buildRecordBytes(payload []byte, sizes []uint32, wide bool) []byte {
+	// Clone so sealRecord's append cannot reach the caller's payload.
+	return sealRecord(slices.Clone(payload), encodeForIndex(sizes), wide)
+}
+
 func TestRecordWithDecoder(t *testing.T) {
 	entries := [][]byte{
 		[]byte("hello"),
@@ -42,12 +51,11 @@ func TestRecordWithDecoder(t *testing.T) {
 		[]byte("!"),
 	}
 	payload, sizes := buildPayload(entries)
-	forIndex := encodeForIndex(sizes)
 	encoded, err := xorCompress(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := slices.Concat(encoded, forIndex)
+	data := buildRecordBytes(encoded, sizes, false)
 
 	rec := newTestRecord(len(entries), newXorDecoder())
 
@@ -66,8 +74,7 @@ func TestRecordPassthrough(t *testing.T) {
 	// items concatenated verbatim.
 	entries := [][]byte{[]byte("raw"), []byte("data")}
 	payload, sizes := buildPayload(entries)
-	forIndex := encodeForIndex(sizes)
-	data := slices.Concat(payload, forIndex)
+	data := buildRecordBytes(payload, sizes, false)
 
 	rec := newTestRecord(len(entries), nil)
 
@@ -78,6 +85,31 @@ func TestRecordPassthrough(t *testing.T) {
 		if got := string(rec.item(i)); got != string(want) {
 			t.Errorf("Item(%d) = %q, want %q", i, got, want)
 		}
+	}
+}
+
+// TestRecordWidenedChecksum covers decode's read side of flagRecordChecksum
+// directly: the same four trailing bytes, verified over the whole record.
+func TestRecordWidenedChecksum(t *testing.T) {
+	entries := [][]byte{[]byte("hello"), []byte("world"), []byte("!")}
+	payload, sizes := buildPayload(entries)
+	data := buildRecordBytes(payload, sizes, true)
+
+	rec := newTestRecord(len(entries), nil)
+	rec.reader.recordChecksum = true
+
+	if err := rec.decode(data, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(rec.item(0)); got != string(entries[0]) {
+		t.Errorf("Item(0) = %q, want %q", got, entries[0])
+	}
+
+	// The payload is inside the covered range now, so a flipped bit there is
+	// an error rather than a different item.
+	data[0] ^= 0x01
+	if err := rec.decode(data, 0); !errors.Is(err, ErrChecksum) {
+		t.Errorf("decode of corrupted payload = %v, want ErrChecksum", err)
 	}
 }
 
@@ -102,8 +134,7 @@ func TestRecordNoForIndex(t *testing.T) {
 func TestItemBoundsCheck(t *testing.T) {
 	entries := [][]byte{[]byte("a"), []byte("b"), []byte("c")}
 	payload, sizes := buildPayload(entries)
-	forIndex := encodeForIndex(sizes)
-	data := slices.Concat(payload, forIndex)
+	data := buildRecordBytes(payload, sizes, false)
 
 	rec := newTestRecord(3, nil)
 	if err := rec.decode(data, 0); err != nil {
@@ -161,12 +192,11 @@ func TestRecordReuse(t *testing.T) {
 	// sizes/offsets slices) doesn't leak into the second.
 	entries1 := [][]byte{[]byte("a"), []byte("bb"), []byte("ccc"), []byte("dd"), []byte("e")}
 	payload1, sizes1 := buildPayload(entries1)
-	forIndex1 := encodeForIndex(sizes1)
 	enc1, err := xorCompress(payload1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	data1 := slices.Concat(enc1, forIndex1)
+	data1 := buildRecordBytes(enc1, sizes1, false)
 
 	rec := newTestRecord(5, newXorDecoder())
 
@@ -182,12 +212,11 @@ func TestRecordReuse(t *testing.T) {
 	// Second decode: fewer items.
 	entries2 := [][]byte{[]byte("xx"), []byte("yy")}
 	payload2, sizes2 := buildPayload(entries2)
-	forIndex2 := encodeForIndex(sizes2)
 	enc2, err := xorCompress(payload2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	data2 := slices.Concat(enc2, forIndex2)
+	data2 := buildRecordBytes(enc2, sizes2, false)
 
 	rec.reader.totalItems = 2
 	rec.reader.itemsPerRecord = 2
@@ -230,8 +259,7 @@ func TestPassthroughDecodePreservesPayload(t *testing.T) {
 
 	entries := [][]byte{[]byte("hello"), []byte("world"), []byte("!")}
 	payload, sizes := buildPayload(entries)
-	forIndex := encodeForIndex(sizes)
-	data := slices.Concat(payload, forIndex)
+	data := buildRecordBytes(payload, sizes, false)
 
 	if err := rec.decode(data, 0); err != nil {
 		t.Fatal(err)

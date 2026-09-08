@@ -29,7 +29,7 @@ type Registry struct {
 	retention geometry.Retention
 
 	// maxScanLedgers caps the ledgers one event page may scan. Zero means
-	// defaultMaxScanLedgers, resolved by QueryEvents. A test-only shrink:
+	// MaxScanLedgers, resolved by QueryEvents. A test-only shrink:
 	// production always runs the per-request scan bound (see
 	// chunk.LedgersPerChunk) — the bound is an invariant, not configuration.
 	// Held here rather than in a package var so a test shrinking the window
@@ -284,7 +284,7 @@ type ReadView struct {
 	oldest *atomic.Pointer[ledgerStamp]
 
 	// maxScanLedgers is the registry's window, copied at acquisition so one
-	// page's bound cannot change mid-request. Zero means defaultMaxScanLedgers,
+	// page's bound cannot change mid-request. Zero means MaxScanLedgers,
 	// so a view built without it still bounds its pages.
 	maxScanLedgers uint32
 

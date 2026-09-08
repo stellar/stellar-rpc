@@ -105,10 +105,10 @@ func TestStreamingRebuild_ByteIdenticalToColdPath(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestStreamingBin_MatchesSpecFormat asserts the .bin a frozen chunk leaves on
-// disk matches gettransaction §6.1: a uint64-LE entry-count header, then the
-// 16-byte index secret the keys were blinded with, then 20-byte [16-byte key |
-// 4-byte LE seq] entries. freezeChunkBin uses the real txhash.WriteColdBin, so
-// this is the producer's actual on-disk contract.
+// disk matches gettransaction §6.1: the "SBIN" magic-and-version prelude, a
+// uint64-LE entry-count, the 16-byte index secret the keys were blinded with,
+// then 20-byte [16-byte key | 4-byte LE seq] entries. freezeChunkBin uses the
+// real txhash.WriteColdBin, so this is the producer's actual on-disk contract.
 func TestStreamingBin_MatchesSpecFormat(t *testing.T) {
 	cat, _ := smallTxHashIndexCatalog(t, 4)
 
@@ -119,12 +119,13 @@ func TestStreamingBin_MatchesSpecFormat(t *testing.T) {
 	raw, err := os.ReadFile(cat.Layout().TxHashBinPath(0))
 	require.NoError(t, err)
 
-	// §6.1: 24-byte header (8-byte uint64-LE count + 16-byte index secret) +
-	// N * 20-byte entries.
+	// §6.1: 32-byte header (8-byte magic/version prelude + 8-byte uint64-LE
+	// count + 16-byte index secret) + N * 20-byte entries.
 	const (
+		preludeW  = 8                // magic "SBIN" + version + reserved
 		countW    = 8                // uint64-LE entry count
 		secretW   = stores.SecretLen // index secret the keys were blinded with
-		hdrSize   = countW + secretW
+		hdrSize   = preludeW + countW + secretW
 		keyW      = 16 // streamhash.MinKeySize
 		seqW      = 4
 		entryW    = keyW + seqW // 20 bytes exactly
@@ -134,7 +135,9 @@ func TestStreamingBin_MatchesSpecFormat(t *testing.T) {
 	require.Equal(t, streamhash.MinKeySize, keyW, "16-byte key == streamhash routing-key width")
 	require.Len(t, raw, hdrSize+wantCount*entryW, "header + 20-byte entries")
 
-	count := binary.LittleEndian.Uint64(raw[:countW])
+	require.Equal(t, []byte("SBIN"), raw[:4], "magic in on-disk byte order")
+	require.Equal(t, byte(1), raw[4], ".bin format version")
+	count := binary.LittleEndian.Uint64(raw[preludeW : preludeW+countW])
 	require.Equal(t, uint64(wantCount), count, "uint64-LE entry-count header")
 
 	// Each entry: the 16-byte secret-keyed routing key (keyed at ingest — never

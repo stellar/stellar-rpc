@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Removed
+* **`getEvents` responses no longer carry `inSuccessfulContractCall`.** This changes wire behavior for BOTH rpcv1 and rpcv2 — the response type is shared. The field has been deprecated ("remove in v24") since protocol 23, and its value was derivable anyway: `true` for every operation event, and `false` only on the fee and refund events of failed transactions.
+
 ### Fixed
 * **`getLedgers` no longer rejects its own cursor at the tip.** This changes wire behavior for BOTH rpcv1 and rpcv2 — the handler is shared. Resending the cursor of the last page used to fail with `-32602` ("cursor must be between the oldest ledger ... and the latest ledger ...") until the next ledger closed — the same code a malformed cursor gets, so a poller could not tell "wait and retry" from "bad cursor". A cursor at or past the tip now returns an empty page with the cursor echoed back. A cursor below the oldest ledger still errors (that data is gone), and an explicit `startLedger` above the tip still errors (only the server-issued token gets the echo).
 * **`getTransactions` cursor no longer breaks a caught-up poller.** This changes wire behavior for BOTH rpcv1 and rpcv2 — the handler is shared. Two long-standing bugs, one fix: the returned `cursor` is now never below the request's cursor; at the tip, the request's cursor is echoed back. Before this fix: (1) a cursor at or above the node's latest ledger returned the literal cursor `"0"`, and resending it failed every poll with `-32602` — the client was stuck until it discarded its cursor (reported in [#745](https://github.com/stellar/stellar-rpc/issues/745)); (2) a cursor at a fully-consumed ledger returned a cursor pointing back at that ledger's start, and the next poll re-delivered all of its transactions as duplicates. Clients need no changes: the returned cursor now always does what the docs promise — fetch what comes next.
@@ -10,11 +13,22 @@
 * `getTransactions` now scans at most 10,000 ledgers per request. On a sparse range a page can come back short — or even empty — while still carrying a `cursor`, so a response shorter than `limit` no longer implies end-of-data. Every response carries a `cursor`; to tell a sparse scan window from the tip, compare the cursor's ledger part against `latestLedger` and keep paging while it is below ([#908](https://github.com/stellar/stellar-rpc/pull/908)).
 * `getEvents` now rejects malformed contract IDs in filters with `-32602`: a `C…` string with a valid checksum but wrong-length payload used to decode and silently match nothing, and now errors under the SDK's stricter SEP-23 strkey parsing ([#908](https://github.com/stellar/stellar-rpc/pull/908)).
 
+## [v28.0.1](https://github.com/stellar/stellar-rpc/compare/v28.0.0...v28.0.1)
+
+### Fixed
+* Integration tests and docker images now use the stellar-core 28.0.1 stable release (`28.0.1-3508.947aad841`).
+* Bumped dependencies to latest versions, including `grpc`, `go-jose` and `opentelemetry` ([#958](https://github.com/stellar/stellar-rpc/pull/958)).
+
 ## [v28.0.0](https://github.com/stellar/stellar-rpc/compare/v27.1.1...v28.0.0)
 
 ### Added
 * XDR has been updated to support Protocol 28 (CAP-0083, CAP-0085) ([#913](https://github.com/stellar/stellar-rpc/pull/913)).
 * The preflight hosts have been rotated to soroban-env-host 28.0.1 (27.0.1 for the previous protocol) and integration tests now run against stellar-core 28.0.0 ([#913](https://github.com/stellar/stellar-rpc/pull/913)).
+
+### Fixed
+* Backfill ingestion is significantly faster: the bulk load defers index creation and batches its writes ([#854](https://github.com/stellar/stellar-rpc/pull/854)).
+* Bumped dependencies to latest versions, and the release image no longer installs recommended packages ([#928](https://github.com/stellar/stellar-rpc/pull/928)).
+* Bumped `go-stellar-sdk` to [v0.7.2](https://github.com/stellar/go-stellar-sdk/releases/tag/v0.7.2), so strkeys in requests are validated against their [SEP-23](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0023.md) payload length: an address, contract ID or claimable balance ID whose checksum is valid but whose payload length is wrong is now rejected instead of accepted ([#929](https://github.com/stellar/stellar-rpc/pull/929)).
 
 ## [v27.1.1](https://github.com/stellar/stellar-rpc/compare/v27.1.0...v27.1.1)
 

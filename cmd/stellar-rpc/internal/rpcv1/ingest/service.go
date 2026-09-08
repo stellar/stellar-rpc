@@ -152,9 +152,32 @@ type Service struct {
 	onLedgerIngested  func(seq uint32, d time.Duration)
 }
 
-func (s *Service) Close() error {
+// Stop cancels ingestion but does not wait for the worker goroutine to exit.
+//
+// Shutdown has to be split in two because of how captive core starts up. While
+// the daemon is still catching up, the ingestion worker sits inside a blocking
+// "stellar-core catchup" command. That command watches the ledger backend's
+// context, not the one canceled here, so nothing this function does can
+// interrupt it -- only closing the backend can. The correct shutdown order is
+// therefore Stop, then close the ledger backend, then Wait. Canceling first
+// matters: it makes the retry loop treat the errors that the backend shutdown
+// produces as a clean cancellation instead of a fatal ingestion failure.
+func (s *Service) Stop() {
 	s.done()
+}
+
+// Wait blocks until the ingestion worker goroutine has exited. Call it only
+// after the ledger backend is closed, or it can block for as long as captive
+// core takes to exit on its own.
+func (s *Service) Wait() {
 	s.wg.Wait()
+}
+
+// Close stops ingestion and waits for the worker to exit. Callers that also own
+// the ledger backend should use Stop and Wait around closing it instead.
+func (s *Service) Close() error {
+	s.Stop()
+	s.Wait()
 	return nil
 }
 
@@ -274,12 +297,35 @@ func (s *Service) ingestRange(ctx context.Context, backend backends.LedgerBacken
 		}
 	}()
 
-	var ledgerCloseMeta xdr.LedgerCloseMeta
-	for seq := seqRange.From(); seq <= seqRange.To(); seq++ {
-		ledgerCloseMeta, err = backend.GetLedger(ctx, seq)
-		if err != nil {
-			return err
+	// Fetch (and decode) ledgers ahead of the DB writes
+	type fetched struct {
+		lcm xdr.LedgerCloseMeta
+		err error
+	}
+	fetchCtx, cancelFetch := context.WithCancel(ctx)
+	defer cancelFetch()
+	fetches := make(chan fetched, 8) //nolint:mnd
+	go func() {
+		defer close(fetches)
+		for seq := seqRange.From(); seq <= seqRange.To(); seq++ {
+			lcm, err := backend.GetLedger(fetchCtx, seq)
+			select {
+			case fetches <- fetched{lcm, err}:
+			case <-fetchCtx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
 		}
+	}()
+
+	var ledgerCloseMeta xdr.LedgerCloseMeta
+	for f := range fetches {
+		if f.err != nil {
+			return f.err
+		}
+		ledgerCloseMeta = f.lcm
 		if err := s.ingestLedgerCloseMeta(tx, ledgerCloseMeta); err != nil {
 			return err
 		}

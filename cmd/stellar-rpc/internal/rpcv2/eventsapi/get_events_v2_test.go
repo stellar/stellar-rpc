@@ -95,7 +95,7 @@ func requireErrorData(t *testing.T, err error, wantReason string, into any) {
 func TestGetEventsV2_AscendingPagesToTheTip(t *testing.T) {
 	ctx, first := seedView(t)
 
-	page1, err := getEventsV2(ctx, testLimits(), &protocol.GetEventsV2Request{
+	page1, err := getEventsV2(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.GetEventsV2Request{
 		MinLedger: first,
 		Limit:     new(uint(2)),
 	})
@@ -106,7 +106,7 @@ func TestGetEventsV2_AscendingPagesToTheTip(t *testing.T) {
 	assert.Equal(t, first, uint32(page1.Events[0].Ledger))
 	assert.Equal(t, first, uint32(page1.Events[1].Ledger))
 
-	page2, err := getEventsV2(ctx, testLimits(), &protocol.GetEventsV2Request{
+	page2, err := getEventsV2(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.GetEventsV2Request{
 		Cursor: page1.Cursor,
 	})
 	require.NoError(t, err)
@@ -123,7 +123,7 @@ func TestGetEventsV2_ScannedLedgerOnAPageThatCoveredNothing(t *testing.T) {
 	t.Run("ascending", func(t *testing.T) {
 		ctx, first := seedView(t)
 		one := uint(1)
-		resp, err := getEventsV2(ctx, testLimits(), &protocol.GetEventsV2Request{
+		resp, err := getEventsV2(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.GetEventsV2Request{
 			MinLedger: first,
 			Limit:     &one,
 		})
@@ -135,7 +135,7 @@ func TestGetEventsV2_ScannedLedgerOnAPageThatCoveredNothing(t *testing.T) {
 	t.Run("descending", func(t *testing.T) {
 		ctx, first := seedView(t)
 		one := uint(1)
-		resp, err := getEventsV2(ctx, testLimits(), &protocol.GetEventsV2Request{
+		resp, err := getEventsV2(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.GetEventsV2Request{
 			MinLedger: first,
 			MaxLedger: first,
 			Order:     protocol.OrderDescending,
@@ -156,7 +156,7 @@ func TestGetEventsV2_RangeBelowGenesisIsAnEmptyCompletePage(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			ctx, _ := seedView(t)
-			resp, err := getEventsV2(ctx, testLimits(), &req)
+			resp, err := getEventsV2(ctx, testLimits(), rpcv2test.SilentLogger(), &req)
 			require.NoError(t, err)
 			assert.Empty(t, resp.Events)
 			assert.Equal(t, protocol.ScanStatusComplete, resp.ScanStatus)
@@ -169,7 +169,7 @@ func TestGetEventsV2_RangeBelowGenesisIsAnEmptyCompletePage(t *testing.T) {
 func TestGetEventsV2_ClosedRangeCompletesWithoutCursor(t *testing.T) {
 	ctx, first := seedView(t)
 
-	resp, err := getEventsV2(ctx, testLimits(), &protocol.GetEventsV2Request{
+	resp, err := getEventsV2(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.GetEventsV2Request{
 		MinLedger: first,
 		MaxLedger: first + 2,
 	})
@@ -186,7 +186,7 @@ func TestGetEventsV2_ClosedRangeCompletesWithoutCursor(t *testing.T) {
 func TestGetEventsV2_MinLedgerBelowGenesisFollowsTheFloorRules(t *testing.T) {
 	t.Run("ascending is out of range", func(t *testing.T) {
 		ctx, first := seedView(t)
-		_, err := getEventsV2(ctx, testLimits(), &protocol.GetEventsV2Request{
+		_, err := getEventsV2(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.GetEventsV2Request{
 			MinLedger: 1,
 			MaxLedger: first + 2,
 		})
@@ -200,7 +200,7 @@ func TestGetEventsV2_MinLedgerBelowGenesisFollowsTheFloorRules(t *testing.T) {
 
 	t.Run("descending reaches the oldest served ledger", func(t *testing.T) {
 		ctx, first := seedView(t)
-		resp, err := getEventsV2(ctx, testLimits(), &protocol.GetEventsV2Request{
+		resp, err := getEventsV2(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.GetEventsV2Request{
 			MinLedger: 1,
 			MaxLedger: first + 2,
 			Order:     protocol.OrderDescending,
@@ -223,7 +223,7 @@ func TestGetEventsV2_TermBudgetRejectsBothRequestShapes(t *testing.T) {
 
 	t.Run("range request", func(t *testing.T) {
 		ctx, first := seedView(t)
-		_, err := getEventsV2(ctx, limits, &protocol.GetEventsV2Request{
+		_, err := getEventsV2(ctx, limits, rpcv2test.SilentLogger(), &protocol.GetEventsV2Request{
 			MinLedger: first,
 			Filters:   filters,
 		})
@@ -238,7 +238,7 @@ func TestGetEventsV2_TermBudgetRejectsBothRequestShapes(t *testing.T) {
 	// not skip it.
 	t.Run("range below genesis", func(t *testing.T) {
 		ctx, _ := seedView(t)
-		_, err := getEventsV2(ctx, limits, &protocol.GetEventsV2Request{
+		_, err := getEventsV2(ctx, limits, rpcv2test.SilentLogger(), &protocol.GetEventsV2Request{
 			MaxLedger: 1,
 			Order:     protocol.OrderDescending,
 			Filters:   filters,
@@ -259,7 +259,7 @@ func TestGetEventsV2_TermBudgetRejectsBothRequestShapes(t *testing.T) {
 		token, err := (&query.EventCursor{Scope: scope}).Encode()
 		require.NoError(t, err)
 
-		_, err = getEventsV2(ctx, limits, &protocol.GetEventsV2Request{Cursor: token})
+		_, err = getEventsV2(ctx, limits, rpcv2test.SilentLogger(), &protocol.GetEventsV2Request{Cursor: token})
 		require.Error(t, err)
 		var data protocol.InvalidParamsErrorData
 		requireErrorData(t, err, protocol.ErrorReasonInvalidParams, &data)
@@ -290,7 +290,7 @@ func TestGetEventsV2_CursorWithV2ForbiddenFilterIsMalformed(t *testing.T) {
 			}}).Encode()
 			require.NoError(t, err, "the codec mints these for the v1 adapter")
 
-			_, err = getEventsV2(ctx, testLimits(), &protocol.GetEventsV2Request{Cursor: token})
+			_, err = getEventsV2(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.GetEventsV2Request{Cursor: token})
 			require.Error(t, err)
 			requireErrorData(t, err, protocol.ErrorReasonCursorMalformed, nil)
 		})
@@ -300,7 +300,7 @@ func TestGetEventsV2_CursorWithV2ForbiddenFilterIsMalformed(t *testing.T) {
 func TestGetEventsV2_MalformedCursorReportsTheServedRange(t *testing.T) {
 	ctx, first := seedView(t)
 
-	_, err := getEventsV2(ctx, testLimits(), &protocol.GetEventsV2Request{
+	_, err := getEventsV2(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.GetEventsV2Request{
 		Cursor: "gec1_not-a-real-token",
 	})
 	require.Error(t, err)
@@ -314,7 +314,7 @@ func TestGetEventsV2_JSONInputFormatIsRejected(t *testing.T) {
 	ctx, first := seedView(t)
 	_, raw := symbolScVal(t, "a0")
 
-	_, err := getEventsV2(ctx, testLimits(), &protocol.GetEventsV2Request{
+	_, err := getEventsV2(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.GetEventsV2Request{
 		MinLedger:      first,
 		XDRInputFormat: protocol.FormatJSON,
 		Filters:        []protocol.EventFilterV2{{Topic0: requestTopic(t, raw)}},
@@ -326,7 +326,7 @@ func TestGetEventsV2_JSONInputFormatIsRejected(t *testing.T) {
 func TestGetEventsV2_InvalidRequestIsRejectedBeforeAnyRead(t *testing.T) {
 	ctx, first := seedView(t)
 
-	_, err := getEventsV2(ctx, testLimits(), &protocol.GetEventsV2Request{
+	_, err := getEventsV2(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.GetEventsV2Request{
 		MinLedger: first,
 		Format:    "protobuf",
 	})
@@ -335,7 +335,7 @@ func TestGetEventsV2_InvalidRequestIsRejectedBeforeAnyRead(t *testing.T) {
 }
 
 func TestGetEventsV2_WithoutAViewIsAnError(t *testing.T) {
-	_, err := getEventsV2(context.Background(), testLimits(), &protocol.GetEventsV2Request{
+	_, err := getEventsV2(context.Background(), testLimits(), rpcv2test.SilentLogger(), &protocol.GetEventsV2Request{
 		MinLedger: chunk.FirstLedgerSeq,
 	})
 	require.Error(t, err)
@@ -354,7 +354,7 @@ func TestGetEventsV2_LimitOverTheOperatorCapIsRejected(t *testing.T) {
 	for _, over := range []uint{3, protocol.MaxLimitV2 + 1} {
 		t.Run(fmt.Sprintf("limit %d over the cap", over), func(t *testing.T) {
 			ctx, first := seedView(t)
-			_, err := getEventsV2(ctx, limits, &protocol.GetEventsV2Request{
+			_, err := getEventsV2(ctx, limits, rpcv2test.SilentLogger(), &protocol.GetEventsV2Request{
 				MinLedger: first,
 				Limit:     &over,
 			})
@@ -369,7 +369,7 @@ func TestGetEventsV2_LimitOverTheOperatorCapIsRejected(t *testing.T) {
 	t.Run("limit 0", func(t *testing.T) {
 		ctx, first := seedView(t)
 		zero := uint(0)
-		_, err := getEventsV2(ctx, limits, &protocol.GetEventsV2Request{
+		_, err := getEventsV2(ctx, limits, rpcv2test.SilentLogger(), &protocol.GetEventsV2Request{
 			MinLedger: first,
 			Limit:     &zero,
 		})
@@ -380,7 +380,7 @@ func TestGetEventsV2_LimitOverTheOperatorCapIsRejected(t *testing.T) {
 
 	t.Run("at the cap", func(t *testing.T) {
 		ctx, first := seedView(t)
-		resp, err := getEventsV2(ctx, limits, &protocol.GetEventsV2Request{
+		resp, err := getEventsV2(ctx, limits, rpcv2test.SilentLogger(), &protocol.GetEventsV2Request{
 			MinLedger: first,
 			Limit:     new(uint(2)),
 		})

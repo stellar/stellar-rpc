@@ -224,9 +224,9 @@ func TestParseConfig_ServiceDefaults(t *testing.T) {
 	assert.Equal(t, DefaultScanMethodMaxExecutionDuration, *m.GetEvents.MaxExecutionDuration)
 	assert.Equal(t, DefaultMethodMaxExecutionDuration, *m.GetTransactions.MaxExecutionDuration)
 
-	assert.Equal(t, DefaultGetEventsMaxItemsPerResponse, *m.GetEvents.MaxItemsPerResponse)
+	assert.Equal(t, DefaultGetEventsV1MaxItemsPerResponse, *m.GetEvents.MaxItemsPerResponse)
 	assert.Equal(t, DefaultGetEventsDefaultItemsPerResponse, *m.GetEvents.DefaultItemsPerResponse)
-	assert.Equal(t, DefaultGetEventsTermBudget, *m.GetEvents.TermBudget)
+	assert.Equal(t, DefaultGetEventsV1TermBudget, *m.GetEvents.TermBudget)
 	assert.Equal(t, DefaultGetTransactionsMaxItemsPerResponse, *m.GetTransactions.MaxItemsPerResponse)
 	assert.Equal(t, DefaultGetLedgersMaxItemsPerResponse, *m.GetLedgers.MaxItemsPerResponse)
 
@@ -338,7 +338,7 @@ func TestParseConfig_MethodsCascade(t *testing.T) {
 		// (10000/100), untouched by getLedgers' 400/40 or any wide value.
 		assert.Equal(t, uint(400), *m.GetLedgers.MaxItemsPerResponse)
 		assert.Equal(t, uint(40), *m.GetLedgers.DefaultItemsPerResponse)
-		assert.Equal(t, DefaultGetEventsMaxItemsPerResponse, *m.GetEvents.MaxItemsPerResponse)
+		assert.Equal(t, DefaultGetEventsV1MaxItemsPerResponse, *m.GetEvents.MaxItemsPerResponse)
 		assert.Equal(t, DefaultGetEventsDefaultItemsPerResponse, *m.GetEvents.DefaultItemsPerResponse)
 	})
 }
