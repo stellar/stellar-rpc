@@ -52,7 +52,7 @@ func summarize(data []byte) ([]endpointStats, []endpointStats, bool, error) {
 		return nil, nil, false, err
 	}
 	if len(res.Endpoints) == 0 {
-		return nil, nil, false, errors.New("blaster results hold no endpoints")
+		return nil, nil, res.Aborted, errors.New("blaster results hold no endpoints")
 	}
 
 	profiled := false
@@ -80,19 +80,19 @@ func summarize(data []byte) ([]endpointStats, []endpointStats, bool, error) {
 	for name, ep := range res.Endpoints {
 		r, err := row(name, ep)
 		if err != nil {
-			return nil, nil, false, err
+			return nil, nil, res.Aborted, err
 		}
 		rows = append(rows, r)
 		for arch, sub := range ep.Archetypes {
 			r, err := row(name+"/"+arch, sub)
 			if err != nil {
-				return nil, nil, false, err
+				return nil, nil, res.Aborted, err
 			}
 			archRows = append(archRows, r)
 		}
 	}
 	if !profiled {
-		return nil, nil, false, fmt.Errorf("no endpoint reports traffic profile %d", expectedTrafficProfile)
+		return nil, nil, res.Aborted, fmt.Errorf("no endpoint reports traffic profile %d", expectedTrafficProfile)
 	}
 	for _, rs := range [][]endpointStats{rows, archRows} {
 		sort.Slice(rs, func(i, j int) bool { return rs[i].Name < rs[j].Name })
