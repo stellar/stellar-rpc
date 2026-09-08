@@ -22,7 +22,7 @@ var blasterProfile []byte
 
 // blasterEnv is the leg's env-derived config.
 type blasterEnv struct {
-	RampUp   string `env:"BLASTER_RAMP_UP"  envDefault:"2m"`
+	RampUp   string `env:"BLASTER_RAMP_UP"  envDefault:"1m"`
 	Duration string `env:"BLASTER_DURATION" envDefault:"3m"`
 	// max % of acceptable response failure rate before terminating the blast
 	ErrorThreshold string `env:"BLASTER_ERROR_THRESHOLD" envDefault:"75"`
