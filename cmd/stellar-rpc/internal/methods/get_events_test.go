@@ -4,7 +4,6 @@ package methods
 import (
 	"context"
 	"encoding/json"
-	"path"
 	"strconv"
 	"testing"
 	"time"
@@ -37,7 +36,7 @@ func TestGetEvents(t *testing.T) {
 
 	t.Run("startLedger validation", func(t *testing.T) {
 		contractID := xdr.ContractId([32]byte{})
-		dbx := newTestDB(t)
+		dbx := NewTestDB(t)
 		ctx := context.TODO()
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
@@ -86,7 +85,7 @@ func TestGetEvents(t *testing.T) {
 	})
 
 	t.Run("no filtering returns all", func(t *testing.T) {
-		dbx := newTestDB(t)
+		dbx := NewTestDB(t)
 		ctx := context.TODO()
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
@@ -175,7 +174,7 @@ func TestGetEvents(t *testing.T) {
 	})
 
 	t.Run("filtering by contract id", func(t *testing.T) {
-		dbx := newTestDB(t)
+		dbx := NewTestDB(t)
 		ctx := context.TODO()
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
@@ -241,7 +240,7 @@ func TestGetEvents(t *testing.T) {
 	})
 
 	t.Run("filtering by topic", func(t *testing.T) {
-		dbx := newTestDB(t)
+		dbx := NewTestDB(t)
 		ctx := context.TODO()
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
@@ -380,7 +379,7 @@ func TestGetEvents(t *testing.T) {
 
 	t.Run("filtering by topic, flexible length matching", func(t *testing.T) {
 		wildCardZeroOrMore := protocol.WildCardZeroOrMore
-		dbx := newTestDB(t)
+		dbx := NewTestDB(t)
 		ctx := t.Context()
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
@@ -575,7 +574,7 @@ func TestGetEvents(t *testing.T) {
 	})
 
 	t.Run("filtering by both contract id and topic", func(t *testing.T) {
-		dbx := newTestDB(t)
+		dbx := NewTestDB(t)
 		ctx := context.TODO()
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
@@ -699,7 +698,7 @@ func TestGetEvents(t *testing.T) {
 	})
 
 	t.Run("filtering by event type", func(t *testing.T) {
-		dbx := newTestDB(t)
+		dbx := NewTestDB(t)
 		ctx := context.TODO()
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
@@ -787,7 +786,7 @@ func TestGetEvents(t *testing.T) {
 	})
 
 	t.Run("with limit", func(t *testing.T) {
-		dbx := newTestDB(t)
+		dbx := NewTestDB(t)
 		ctx := context.TODO()
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
@@ -870,7 +869,7 @@ func TestGetEvents(t *testing.T) {
 	})
 
 	t.Run("with cursor", func(t *testing.T) {
-		dbx := newTestDB(t)
+		dbx := NewTestDB(t)
 		ctx := context.TODO()
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
@@ -1014,7 +1013,7 @@ func BenchmarkGetEventsTopicFilters(b *testing.B) {
 	log := log.DefaultLogger
 	log.SetLevel(logrus.ErrorLevel)
 
-	dbx := newTestDB(b)
+	dbx := NewTestDB(b)
 	writer := sqlitedb.NewReadWriter(log, dbx, host.MakeNoOpDaemon(), 10, passphrase)
 	write, err := writer.NewTx(ctx)
 	require.NoError(b, err)
@@ -1105,7 +1104,7 @@ func BenchmarkGetEvents(b *testing.B) {
 	}
 	// counter := xdr.ScSymbol("COUNTER")
 	// requestedCounter := xdr.ScSymbol("REQUESTED")
-	dbx := newTestDB(b)
+	dbx := NewTestDB(b)
 	ctx := context.TODO()
 	log := log.DefaultLogger
 	log.SetLevel(logrus.TraceLevel)
@@ -1239,7 +1238,7 @@ func setupTwoContractEventsHandler(t *testing.T) (eventsRPCHandler, xdr.Contract
 	contractA := xdr.ContractId([32]byte{1})
 	contractB := xdr.ContractId([32]byte{2})
 
-	dbx := newTestDB(t)
+	dbx := NewTestDB(t)
 	ctx := context.TODO()
 	logger := log.DefaultLogger
 
@@ -1482,15 +1481,4 @@ func diagnosticEvent(contractID xdr.ContractId, topic []xdr.ScVal, body xdr.ScVa
 			},
 		},
 	}
-}
-
-func newTestDB(tb testing.TB) *sqlitedb.DB {
-	tmp := tb.TempDir()
-	dbPath := path.Join(tmp, "dbx.sqlite")
-	db, err := sqlitedb.OpenSQLiteDB(dbPath)
-	require.NoError(tb, err)
-	tb.Cleanup(func() {
-		require.NoError(tb, db.Close())
-	})
-	return db
 }
