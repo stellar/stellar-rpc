@@ -50,10 +50,10 @@ type WithLedgerRawFn func(raw []byte) error
 // LedgerReaderTx is a read-only snapshot of the ledger store. Call Done to
 // release it.
 //
-// GetLedger and WithLedgerRaw are one walk, not free-form point reads. Call
-// them with ascending, contiguous sequences, starting from the first call's
-// sequence, and use only one of the two per Tx: they share a single cursor,
-// so interleaving them consumes positions from each other. Read at most
+// GetLedger and WithLedgerRaw share one walk, not free-form point reads. Calls
+// may use either accessor, but their combined sequence must be ascending and
+// contiguous, starting from the first call's sequence, because both consume
+// positions from the same cursor. Read at most
 // methods.LedgerScanLimit ledgers per Tx. The v1 (SQL) backend accepts any
 // pattern, while the v2 backend only walks from a forward iterator primed on
 // the first call.
