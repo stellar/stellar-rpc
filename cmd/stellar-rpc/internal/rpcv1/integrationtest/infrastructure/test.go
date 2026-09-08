@@ -392,7 +392,7 @@ func (i *Test) waitForCheckpoint() {
 			info, err := i.getCoreInfo()
 			return err == nil && info.Info.Ledger.Num > checkpointFrequency
 		},
-		30*time.Second,
+		coreStartupTimeout,
 		time.Second,
 	)
 }
@@ -404,7 +404,9 @@ func (i *Test) waitForCoreAtLedger(ledger int) {
 			info, err := i.getCoreInfo()
 			return err == nil && info.Info.Ledger.Num >= ledger
 		},
-		time.Duration(ledger+5)*ledgerCloseTime,
+		// The ledgers have to close before this can pass, so the budget is the
+		// time they take on an idle machine plus room for a busy one.
+		time.Duration(ledger)*ledgerCloseTime+coreStartupTimeout,
 		time.Second,
 	)
 }
@@ -961,18 +963,23 @@ func (i *Test) upgradeLimits() {
 	// First enable settings upgrades in general.
 	i.upgradeLimitsWithFile("enable.xdr", "3500000")
 
-	// An oddly-specific value from the .json file, to prove the upgrade landed.
+	// The value below has to be one the second upgrade file sets and enable.xdr
+	// does not, or the wait returns on its first look and proves nothing. Both
+	// of these are contract_max_size_bytes. 65536 would not do: enable.xdr
+	// already sets contract_data_entry_size_bytes to it.
 	// Add another case here if you add another upgrade file.
 	expected := "4294967295" // unlimited
 	if limitFile == "testnet" {
-		expected = "65536"
+		expected = "131072"
 	}
 	i.upgradeLimitsWithFile(fmt.Sprintf("%s.p%d.xdr", limitFile, i.protocolVersion), expected)
 }
 
 // upgradeLimitsWithFile applies one Core settings upgrade and waits for Core to
-// report it. expectInSorobanInfo is a value the upgrade must put into Core's
-// /sorobaninfo response, which is how we know the upgrade has been applied.
+// report it. expectInSorobanInfo is a number the upgrade file sets; seeing it in
+// Core's /sorobaninfo response is how we know the upgrade has been applied.
+// Pick a number no earlier upgrade already set, or the wait returns on its
+// first look and proves nothing.
 func (i *Test) upgradeLimitsWithFile(limitFile, expectInSorobanInfo string) {
 	newLimits, err := upgradeFiles.ReadFile(
 		filepath.Join("docker", "upgrades", limitFile))
@@ -1052,15 +1059,21 @@ func (i *Test) upgradeLimitsWithFile(limitFile, expectInSorobanInfo string) {
 	// The upgrade lands on the next ledger close, which takes about a second
 	// with accelerated time. Poll for it. A fixed sleep here used to cost every
 	// environment 10 seconds, because this function runs twice per environment.
+	//
+	// The number has to stand on its own, so 3500000 does not match a reported
+	// 35000000.
+	applied := regexp.MustCompile(
+		`(?:^|[^0-9])` + regexp.QuoteMeta(expectInSorobanInfo) + `(?:[^0-9]|$)`)
 	require.Eventually(i.t, func() bool {
 		out, err := i.runComposeCommand(
 			"exec", "-T", "core",
 			"curl", "-sG",
 			"http://localhost:11626/sorobaninfo",
 		)
-		return err == nil && strings.Contains(string(out), expectInSorobanInfo)
+		return err == nil && applied.Match(out)
 	}, 30*time.Second, 500*time.Millisecond,
-		"the %s upgrade never put %s into Core's /sorobaninfo", limitFile, expectInSorobanInfo)
+		"the %s upgrade never put %s into Core's /sorobaninfo",
+		limitFile, expectInSorobanInfo)
 }
 
 func (i *Test) fillContainerPorts() {

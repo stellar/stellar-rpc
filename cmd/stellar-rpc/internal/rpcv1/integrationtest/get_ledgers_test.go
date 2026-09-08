@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/fsouza/fake-gcs-server/fakestorage"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	client "github.com/stellar/go-stellar-sdk/clients/rpcclient"
@@ -21,11 +20,13 @@ import (
 )
 
 func testGetLedgers(t *testing.T, client *client.Client) {
-	// Wait until there's at least 10 ledgers
+	// The test reads five ledgers, then pages past them with a cursor, so the
+	// network must be far enough ahead that the second page has something in
+	// it. Five ledgers is exactly the first page and leaves nothing over.
 	var ledgerCount uint
 	var oldestLedger uint32
 
-	for ledgerCount < 5 {
+	for ledgerCount < 15 {
 		health, err := client.GetHealth(t.Context())
 		require.NoError(t, err)
 
@@ -146,18 +147,22 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 	})
 	client := test.GetRPCLient() // at this point we're at like ledger 30
 
+	// The condition runs in a goroutine that testify does not wait for once the
+	// budget expires, so nothing outside it may read what it writes, and it must
+	// not call t.Log or t.Fatal itself. require.Eventually ends the test on
+	// timeout, which keeps the read of last on the success path only.
 	waitUntil := func(what string, cond func(h protocol.GetHealthResponse) bool,
 		timeout time.Duration,
 	) protocol.GetHealthResponse {
 		var last protocol.GetHealthResponse
-		if !assert.Eventually(t, func() bool {
+		require.Eventually(t, func() bool {
 			resp, err := client.GetHealth(t.Context())
-			require.NoError(t, err)
+			if err != nil {
+				return false
+			}
 			last = resp
 			return cond(resp)
-		}, timeout, 100*time.Millisecond) {
-			t.Fatalf("timed out waiting for %s; last health: %+v", what, last)
-		}
+		}, timeout, 100*time.Millisecond, "timed out waiting for %s", what)
 		return last
 	}
 

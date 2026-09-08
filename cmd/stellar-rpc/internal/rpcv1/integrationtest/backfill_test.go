@@ -73,16 +73,19 @@ func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint
 	testDb := test.GetDaemon().GetDB()
 	client := test.GetRPCLient()
 
+	// These budgets have to hold on a busy machine: three backfill environments
+	// and a datastore one now run at the same time, so ledgers close slower
+	// than the one per second that accelerated time gives an idle machine.
 	backfillComplete := waitUntilLedgerIngested(t, test, client,
 		func(l protocol.GetLatestLedgerResponse) bool {
 			return l.Sequence >= datastoreEnd
-		}, 60*time.Second, false)
+		}, 3*time.Minute, false)
 	t.Logf("Successfully backfilled to ledger %d, ledger %d in DB", datastoreEnd, backfillComplete.Sequence)
 
 	coreIngestionComplete := waitUntilLedgerIngested(t, test, client,
 		func(l protocol.GetLatestLedgerResponse) bool {
 			return l.Sequence >= uint32(stopLedger)
-		}, time.Duration(stopLedger)*time.Second, true) // stop core ingestion once we reach the target
+		}, time.Duration(stopLedger)*time.Second+2*time.Minute, true) // stop core ingestion once we reach the target
 	t.Logf("Core ingestion complete, ledger %d fetched from captive core", coreIngestionComplete.Sequence)
 	time.Sleep(100 * time.Millisecond) // let final ledger writes commit to DB before reading
 

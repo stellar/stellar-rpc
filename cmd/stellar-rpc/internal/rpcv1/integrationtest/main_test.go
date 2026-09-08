@@ -17,20 +17,28 @@ import (
 var sharedGCSServer *fakestorage.Server
 
 func TestMain(m *testing.M) {
-	server, err := fakestorage.NewServerWithOptions(fakestorage.Options{
-		Scheme:     "http",
-		PublicHost: "127.0.0.1",
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to start fake GCS server: %v\n", err)
-		os.Exit(1)
+	// Every test in this package skips when STELLAR_RPC_INTEGRATION_TESTS_ENABLED
+	// is unset, so there is nothing to serve. Binding a listener anyway would
+	// fail the whole package in an environment that cannot open a loopback
+	// socket, instead of skipping as it should.
+	if os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_ENABLED") != "" {
+		server, err := fakestorage.NewServerWithOptions(fakestorage.Options{
+			Scheme:     "http",
+			PublicHost: "127.0.0.1",
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to start fake GCS server: %v\n", err)
+			os.Exit(1)
+		}
+		sharedGCSServer = server
+		os.Setenv("STORAGE_EMULATOR_HOST", server.URL())
 	}
-	sharedGCSServer = server
-	os.Setenv("STORAGE_EMULATOR_HOST", server.URL())
 
 	code := m.Run()
 
-	server.Stop()
+	if sharedGCSServer != nil {
+		sharedGCSServer.Stop()
+	}
 	os.Exit(code)
 }
 
@@ -38,6 +46,11 @@ func TestMain(m *testing.M) {
 // server. Two tests never get the same name, so objects written by one test are
 // invisible to the others.
 func newGCSBucket(t *testing.T) string {
+	// Callers reach this before infrastructure.NewTest, which is what normally
+	// skips a disabled integration test, so the skip has to happen here too.
+	if sharedGCSServer == nil {
+		t.Skip("skipping integration test: STELLAR_RPC_INTEGRATION_TESTS_ENABLED not set")
+	}
 	name := strings.ToLower(strings.NewReplacer("/", "-", "_", "-").Replace(t.Name()))
 	sharedGCSServer.CreateBucketWithOpts(fakestorage.CreateBucketOpts{Name: name})
 	return name
