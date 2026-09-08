@@ -17,7 +17,6 @@ type MockTransactionHandler struct {
 	passphrase string
 
 	ledgerRange     store.LedgerRange
-	txs             map[string]ingest.LedgerTransaction
 	txHashToMeta    map[string]*xdr.LedgerCloseMeta
 	ledgerSeqToMeta map[uint32]*xdr.LedgerCloseMeta
 }
@@ -25,7 +24,6 @@ type MockTransactionHandler struct {
 func NewMockTransactionStore(passphrase string) *MockTransactionHandler {
 	return &MockTransactionHandler{
 		passphrase:      passphrase,
-		txs:             make(map[string]ingest.LedgerTransaction),
 		txHashToMeta:    make(map[string]*xdr.LedgerCloseMeta),
 		ledgerSeqToMeta: make(map[uint32]*xdr.LedgerCloseMeta),
 	}
@@ -47,9 +45,7 @@ func (txn *MockTransactionHandler) InsertTransactions(lcm xdr.LedgerCloseMeta) e
 			return err
 		}
 
-		h := tx.Result.TransactionHash.HexString()
-		txn.txs[h] = tx
-		txn.txHashToMeta[h] = &lcm
+		txn.txHashToMeta[tx.Result.TransactionHash.HexString()] = &lcm
 	}
 
 	if lcmSeq := lcm.LedgerSequence(); lcmSeq < txn.ledgerRange.FirstLedger.Sequence ||
