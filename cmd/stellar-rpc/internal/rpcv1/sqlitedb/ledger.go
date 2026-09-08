@@ -104,18 +104,6 @@ func (l ledgerReaderTx) WithLedgerRaw(
 	return true, fn(meta)
 }
 
-// WithLedgerRaw lends the ledger's stored meta blob without decoding it. The
-// blob is ours to lend: database/sql clones each BLOB scanned into a *[]byte.
-func (l ledgerReaderTx) WithLedgerRaw(
-	ctx context.Context, sequence uint32, fn store.WithLedgerRawFn,
-) (bool, error) {
-	meta, found, err := getLedgerRawFromDB(ctx, l.tx, sequence)
-	if err != nil || !found {
-		return found, err
-	}
-	return true, fn(meta)
-}
-
 func (l ledgerReaderTx) Done() error {
 	return l.tx.Rollback()
 }

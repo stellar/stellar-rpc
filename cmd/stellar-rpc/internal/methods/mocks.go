@@ -83,13 +83,6 @@ func (m *MockLedgerReaderTx) WithLedgerRaw(
 	return args.Bool(0), args.Error(1)
 }
 
-func (m *MockLedgerReaderTx) WithLedgerRaw(
-	ctx context.Context, sequence uint32, fn store.WithLedgerRawFn,
-) (bool, error) {
-	args := m.Called(ctx, sequence, fn)
-	return args.Bool(0), args.Error(1)
-}
-
 func (m *MockLedgerReaderTx) Done() error {
 	args := m.Called()
 	return args.Error(0)
