@@ -3,7 +3,6 @@ package methods
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,13 +13,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/ingest"
-	"github.com/stellar/go-stellar-sdk/network"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
-	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/toid"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
@@ -37,6 +33,7 @@ import (
 // two paths' protocol.GetTransactionsResponse values serialize to byte-
 // identical JSON over a corpus that sweeps meta versions, envelope shapes,
 // event shapes, page boundaries, empty ledgers and cursor round-trips.
+// Shared machinery lives in differential_test.go.
 
 // legacyGetTransactionsByLedgerSequence is the pre-view-walk pagination loop:
 // same handler, same cursor math, but reading each ledger through
@@ -241,203 +238,18 @@ func legacyParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTrans
 // ---- the corpus ----
 //
 
-// diffTxSpec is one transaction in a corpus ledger: an envelope shape paired
-// with an apply-processing meta.
-type diffTxSpec struct {
-	envelope xdr.TransactionEnvelope
-	meta     xdr.TransactionMeta
-	succeeds bool
-}
-
-func diffSymbolVal() xdr.ScVal {
-	sym := xdr.ScSymbol("COUNTER")
-	return xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym}
-}
-
-func diffContractEvent() xdr.ContractEvent {
-	val := diffSymbolVal()
-	id := xdr.ContractId{7}
-	return xdr.ContractEvent{
-		ContractId: &id,
-		Type:       xdr.ContractEventTypeContract,
-		Body: xdr.ContractEventBody{
-			V:  0,
-			V0: &xdr.ContractEventV0{Topics: []xdr.ScVal{val}, Data: val},
-		},
-	}
-}
-
-// diffClassicEnvelope is a plain (non-Soroban) v1 envelope: Tx.Ext stays at
-// discriminant 0, which is what makes it classic.
-func diffClassicEnvelope(acctSeq uint32) xdr.TransactionEnvelope {
-	env, err := xdr.NewTransactionEnvelope(xdr.EnvelopeTypeEnvelopeTypeTx, xdr.TransactionV1Envelope{
-		Tx: xdr.Transaction{
-			Fee:           1,
-			SeqNum:        xdr.SequenceNumber(acctSeq),
-			SourceAccount: xdr.MustMuxedAddress("MA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVAAAAAAAAAAAAAJLK"),
-		},
-	})
-	if err != nil {
-		panic(err)
-	}
-	return env
-}
-
-// diffFeeBumpEnvelope wraps inner in a fee bump.
-func diffFeeBumpEnvelope(inner xdr.TransactionEnvelope) xdr.TransactionEnvelope {
-	return xdr.TransactionEnvelope{
-		Type: xdr.EnvelopeTypeEnvelopeTypeTxFeeBump,
-		FeeBump: &xdr.FeeBumpTransactionEnvelope{
-			Tx: xdr.FeeBumpTransaction{
-				FeeSource: xdr.MustMuxedAddress("MA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVAAAAAAAAAAAAAJLK"),
-				Fee:       200,
-				InnerTx: xdr.FeeBumpTransactionInnerTx{
-					Type: xdr.EnvelopeTypeEnvelopeTypeTx,
-					V1:   inner.V1,
-				},
-			},
-		},
-	}
-}
-
-func diffMetaV1() xdr.TransactionMeta {
-	return xdr.TransactionMeta{V: 1, V1: &xdr.TransactionMetaV1{Operations: []xdr.OperationMeta{}}}
-}
-
-// diffMetaV3NoSoroban is the straggler corner: a V3 meta with no SorobanMeta
-// at all. Paired with a Soroban envelope it is the one shape where the SDK's
-// view extractor historically disagreed with the parsed reader on
-// operation-slice arity, so the corpus pins it deliberately.
-func diffMetaV3NoSoroban() xdr.TransactionMeta {
-	return xdr.TransactionMeta{V: 3, Operations: &[]xdr.OperationMeta{}, V3: &xdr.TransactionMetaV3{}}
-}
-
-func diffMetaV3WithEvents(events []xdr.ContractEvent, diags []xdr.DiagnosticEvent) xdr.TransactionMeta {
-	return xdr.TransactionMeta{
-		V:          3,
-		Operations: &[]xdr.OperationMeta{},
-		V3: &xdr.TransactionMetaV3{SorobanMeta: &xdr.SorobanTransactionMeta{
-			Events:           events,
-			DiagnosticEvents: diags,
-			ReturnValue:      diffSymbolVal(),
-		}},
-	}
-}
-
-func diffMetaV4(ops []xdr.OperationMetaV2, txEvents []xdr.TransactionEvent,
-	diags []xdr.DiagnosticEvent,
-) xdr.TransactionMeta {
-	return xdr.TransactionMeta{V: 4, V4: &xdr.TransactionMetaV4{
-		Operations:       ops,
-		Events:           txEvents,
-		DiagnosticEvents: diags,
-	}}
-}
-
-// diffResultFor builds the TransactionResultPair for spec: a fee bump carries
-// an inner result pair, a plain transaction does not.
-func diffResultFor(t *testing.T, spec diffTxSpec) xdr.TransactionResultPair {
-	t.Helper()
-	hash, err := network.HashTransactionInEnvelope(spec.envelope, NetworkPassphrase)
-	require.NoError(t, err)
-
-	code := xdr.TransactionResultCodeTxSuccess
-	if !spec.succeeds {
-		code = xdr.TransactionResultCodeTxBadSeq
-	}
-	opResults := []xdr.OperationResult{}
-	res := xdr.TransactionResultResult{Code: code, Results: &opResults}
-
-	if spec.envelope.Type == xdr.EnvelopeTypeEnvelopeTypeTxFeeBump {
-		innerHash, ierr := network.HashTransactionInEnvelope(xdr.TransactionEnvelope{
-			Type: xdr.EnvelopeTypeEnvelopeTypeTx, V1: spec.envelope.FeeBump.Tx.InnerTx.V1,
-		}, NetworkPassphrase)
-		require.NoError(t, ierr)
-		outer := xdr.TransactionResultCodeTxFeeBumpInnerSuccess
-		if !spec.succeeds {
-			outer = xdr.TransactionResultCodeTxFeeBumpInnerFailed
-		}
-		res = xdr.TransactionResultResult{
-			Code: outer,
-			InnerResultPair: &xdr.InnerTransactionResultPair{
-				TransactionHash: innerHash,
-				Result: xdr.InnerTransactionResult{
-					FeeCharged: 100,
-					Result:     xdr.InnerTransactionResultResult{Code: code, Results: &opResults},
-				},
-			},
-		}
-	}
-
-	return xdr.TransactionResultPair{
-		TransactionHash: hash,
-		Result:          xdr.TransactionResult{FeeCharged: 100, Result: res},
-	}
-}
-
-// diffLCM assembles a LedgerCloseMeta of the given wire version (1 or 2) at
-// sequence seq holding specs. Both versions matter: their TxProcessing arrays
-// are different element types, which the view dispatcher walks with different
-// code.
-func diffLCM(t *testing.T, version int32, seq uint32, specs ...diffTxSpec) xdr.LedgerCloseMeta {
-	t.Helper()
-	envs := make([]xdr.TransactionEnvelope, 0, len(specs))
-	for _, spec := range specs {
-		envs = append(envs, spec.envelope)
-	}
-	components := []xdr.TxSetComponent{{
-		Type:                  xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
-		TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{Txs: envs},
-	}}
-	header := xdr.LedgerHeaderHistoryEntry{Header: xdr.LedgerHeader{
-		ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(ledgerCloseTime(seq))},
-		LedgerSeq: xdr.Uint32(seq),
-	}}
-	txSet := xdr.GeneralizedTransactionSet{V: 1, V1TxSet: &xdr.TransactionSetV1{
-		PreviousLedgerHash: xdr.Hash{1},
-		Phases:             []xdr.TransactionPhase{{V: 0, V0Components: &components}},
-	}}
-
-	if version == 1 {
-		proc := make([]xdr.TransactionResultMeta, 0, len(specs))
-		for _, spec := range specs {
-			proc = append(proc, xdr.TransactionResultMeta{
-				Result:            diffResultFor(t, spec),
-				TxApplyProcessing: spec.meta,
-			})
-		}
-		return xdr.LedgerCloseMeta{V: 1, V1: &xdr.LedgerCloseMetaV1{
-			LedgerHeader: header, TxSet: txSet, TxProcessing: proc,
-		}}
-	}
-
-	proc := make([]xdr.TransactionResultMetaV1, 0, len(specs))
-	for _, spec := range specs {
-		proc = append(proc, xdr.TransactionResultMetaV1{
-			Result:            diffResultFor(t, spec),
-			TxApplyProcessing: spec.meta,
-		})
-	}
-	return xdr.LedgerCloseMeta{V: 2, V2: &xdr.LedgerCloseMetaV2{
-		LedgerHeader: header, TxSet: txSet, TxProcessing: proc,
-	}}
-}
-
-// differentialCorpus is the contiguous ledger run [corpusFirstLedger,
-// corpusLastLedger] the differential sweeps over.
+// transactionsCorpus is the contiguous ledger run [transactionsCorpusFirst,
+// transactionsCorpusLast] the differential sweeps over.
 // Every ledger is a deliberate shape; the comment on each says which axis it
 // covers. Account sequence numbers are unique across the corpus so no two
 // transactions share an envelope hash (the TxSet is paired to TxProcessing by
 // hash, so a collision would hide a mispairing).
-func differentialCorpus(t *testing.T) []xdr.LedgerCloseMeta {
+func transactionsCorpus(t *testing.T) []xdr.LedgerCloseMeta {
 	t.Helper()
 	ev := diffContractEvent()
 	diag := xdr.DiagnosticEvent{InSuccessfulContractCall: true, Event: ev}
 	failedDiag := xdr.DiagnosticEvent{InSuccessfulContractCall: false, Event: ev}
-	txEvent := xdr.TransactionEvent{
-		Stage: xdr.TransactionEventStageTransactionEventStageAfterAllTxs,
-		Event: ev,
-	}
+	txEvent := diffTxEvent(xdr.TransactionEventStageTransactionEventStageAfterAllTxs, ev)
 
 	return []xdr.LedgerCloseMeta{
 		// 1: the shape the pre-existing tests use — one TxSet envelope, two
@@ -509,66 +321,38 @@ func differentialCorpus(t *testing.T) []xdr.LedgerCloseMeta {
 	}
 }
 
-// corpusFirstLedger / corpusLastLedger bracket differentialCorpus. The run
-// starts at 101 because the shared fixture helpers (createTestLedger,
+// transactionsCorpusFirst / transactionsCorpusLast bracket transactionsCorpus.
+// The run starts at 101 because the shared fixture helpers (createTestLedger,
 // createEmptyTestLedger) offset their sequences by 100.
 const (
-	corpusFirstLedger = 101
-	corpusLastLedger  = 110
+	transactionsCorpusFirst = 101
+	transactionsCorpusLast  = 110
 )
 
-// setupDifferentialDB writes differentialCorpus into a fresh sqlite store.
-func setupDifferentialDB(t *testing.T) *sqlitedb.DB {
-	t.Helper()
-	corpus := differentialCorpus(t)
-	require.Len(t, corpus, corpusLastLedger-corpusFirstLedger+1)
-	testDB := NewTestDB(t)
-	daemon := host.MakeNoOpDaemon()
-	for i, lcm := range corpus {
-		require.Equal(t, uint32(corpusFirstLedger+i), lcm.LedgerSequence(),
-			"the corpus must be one contiguous run")
-		tx, err := sqlitedb.NewReadWriter(log.DefaultLogger, testDB, daemon, 100, passphrase).NewTx(t.Context())
-		require.NoError(t, err)
-		require.NoError(t, tx.LedgerWriter().InsertLedger(lcm))
-		require.NoError(t, tx.Commit(lcm, nil))
-	}
-	return testDB
-}
+type transactionsDifferential = differential[protocol.GetTransactionsRequest, protocol.GetTransactionsResponse]
 
-func differentialHandler(testDB *sqlitedb.DB) transactionsRPCHandler {
-	return transactionsRPCHandler{
+// newTransactionsDifferential pairs the frozen reference with the production
+// handler, both reading testDB.
+func newTransactionsDifferential(testDB *sqlitedb.DB) transactionsDifferential {
+	h := transactionsRPCHandler{
 		ledgerReader:      sqlitedb.NewLedgerReader(testDB),
 		maxLimit:          100,
 		defaultLimit:      10,
 		networkPassphrase: NetworkPassphrase,
 	}
+	return transactionsDifferential{
+		want: func(ctx context.Context, req protocol.GetTransactionsRequest) (protocol.GetTransactionsResponse, error) {
+			return legacyGetTransactionsByLedgerSequence(ctx, h, req)
+		},
+		got: h.getTransactionsByLedgerSequence,
+	}
 }
 
-// assertSameResponse runs both extractions over the same request and asserts
-// their responses serialize identically, byte for byte.
-func assertSameResponse(
-	t *testing.T, h transactionsRPCHandler, request protocol.GetTransactionsRequest,
-) protocol.GetTransactionsResponse {
+func seededTransactionsDifferential(t *testing.T) transactionsDifferential {
 	t.Helper()
-	wantResp, wantErr := legacyGetTransactionsByLedgerSequence(context.TODO(), h, request)
-	gotResp, gotErr := h.getTransactionsByLedgerSequence(context.TODO(), request)
-
-	if wantErr != nil {
-		require.Error(t, gotErr)
-		require.Equal(t, wantErr.Error(), gotErr.Error())
-		return gotResp
-	}
-	require.NoError(t, gotErr)
-
-	wantJSON, err := json.Marshal(wantResp)
-	require.NoError(t, err)
-	gotJSON, err := json.Marshal(gotResp)
-	require.NoError(t, err)
-	// Byte equality, deliberately, not require.JSONEq's semantic equality: the
-	// point of the differential is that the wire bytes are unchanged, and
-	// JSONEq would forgive a field that appeared, vanished, or reordered.
-	require.Equal(t, string(wantJSON), string(gotJSON)) //nolint:testifylint // see above
-	return gotResp
+	corpus := transactionsCorpus(t)
+	require.Len(t, corpus, transactionsCorpusLast-transactionsCorpusFirst+1)
+	return newTransactionsDifferential(seedDifferentialDB(t, corpus))
 }
 
 // TestGetTransactions_ViewWalkMatchesParsedPath sweeps start ledgers, page
@@ -576,18 +360,15 @@ func assertSameResponse(
 // responses. The limits are chosen so pages end inside a ledger as well as on
 // its boundary.
 func TestGetTransactions_ViewWalkMatchesParsedPath(t *testing.T) {
-	testDB := setupDifferentialDB(t)
-	h := differentialHandler(testDB)
-
-	formats := []string{"", protocol.FormatJSON}
+	diff := seededTransactionsDifferential(t)
 	limits := []uint{1, 2, 3, 4, 5, 7, 11, 100}
 
-	for _, format := range formats {
-		for startLedger := corpusFirstLedger; startLedger <= corpusLastLedger; startLedger++ {
+	for _, format := range diffFormats {
+		for startLedger := transactionsCorpusFirst; startLedger <= transactionsCorpusLast; startLedger++ {
 			for _, limit := range limits {
 				name := fmt.Sprintf("format=%q/start=%d/limit=%d", format, startLedger, limit)
 				t.Run(name, func(t *testing.T) {
-					assertSameResponse(t, h, protocol.GetTransactionsRequest{
+					diff.assertSame(t, protocol.GetTransactionsRequest{
 						Format:      format,
 						StartLedger: uint32(startLedger),
 						Pagination:  &protocol.LedgerPaginationOptions{Limit: limit},
@@ -602,13 +383,12 @@ func TestGetTransactions_ViewWalkMatchesParsedPath(t *testing.T) {
 // requests that carry no pagination block at all, so the handler's default
 // limit applies.
 func TestGetTransactions_ViewWalkMatchesParsedPath_DefaultPagination(t *testing.T) {
-	testDB := setupDifferentialDB(t)
-	h := differentialHandler(testDB)
+	diff := seededTransactionsDifferential(t)
 
-	for _, format := range []string{"", protocol.FormatJSON} {
-		for startLedger := corpusFirstLedger; startLedger <= corpusLastLedger; startLedger++ {
+	for _, format := range diffFormats {
+		for startLedger := transactionsCorpusFirst; startLedger <= transactionsCorpusLast; startLedger++ {
 			t.Run(fmt.Sprintf("format=%q/start=%d", format, startLedger), func(t *testing.T) {
-				assertSameResponse(t, h, protocol.GetTransactionsRequest{
+				diff.assertSame(t, protocol.GetTransactionsRequest{
 					Format:      format,
 					StartLedger: uint32(startLedger),
 				})
@@ -618,51 +398,27 @@ func TestGetTransactions_ViewWalkMatchesParsedPath_DefaultPagination(t *testing.
 }
 
 // TestGetTransactions_ViewWalkCursorRoundTrip pages through the whole corpus
-// with each extraction driving its OWN cursor chain, so a cursor that differed
-// by one would send the two paths down diverging pages. Every page must match
-// byte for byte, and both must terminate on the same page count.
+// with each extraction driving its own cursor chain. An empty page ends the
+// chain, and the corpus must take more than one page to get there.
 func TestGetTransactions_ViewWalkCursorRoundTrip(t *testing.T) {
-	testDB := setupDifferentialDB(t)
-	h := differentialHandler(testDB)
+	diff := seededTransactionsDifferential(t)
 
 	for _, limit := range []uint{1, 2, 3, 5} {
 		t.Run(fmt.Sprintf("limit=%d", limit), func(t *testing.T) {
-			request := protocol.GetTransactionsRequest{
-				StartLedger: corpusFirstLedger,
+			first := protocol.GetTransactionsRequest{
+				StartLedger: transactionsCorpusFirst,
 				Pagination:  &protocol.LedgerPaginationOptions{Limit: limit},
 			}
-			legacyReq, viewReq := request, request
-
-			var legacyPages, viewPages int
-			for {
-				want, err := legacyGetTransactionsByLedgerSequence(context.TODO(), h, legacyReq)
-				require.NoError(t, err)
-				got, err := h.getTransactionsByLedgerSequence(context.TODO(), viewReq)
-				require.NoError(t, err)
-
-				wantJSON, err := json.Marshal(want)
-				require.NoError(t, err)
-				gotJSON, err := json.Marshal(got)
-				require.NoError(t, err)
-				//nolint:testifylint // byte equality, not JSONEq's semantic equality
-				require.Equal(t, string(wantJSON), string(gotJSON), "page %d", legacyPages)
-
-				legacyPages++
-				viewPages++
-				if len(want.Transactions) == 0 {
-					break
+			next := func(page protocol.GetTransactionsResponse) (protocol.GetTransactionsRequest, bool) {
+				if len(page.Transactions) == 0 {
+					return protocol.GetTransactionsRequest{}, false
 				}
-				require.Less(t, legacyPages, 200, "paging did not terminate")
-
-				legacyReq = protocol.GetTransactionsRequest{
-					Pagination: &protocol.LedgerPaginationOptions{Cursor: want.Cursor, Limit: limit},
-				}
-				viewReq = protocol.GetTransactionsRequest{
-					Pagination: &protocol.LedgerPaginationOptions{Cursor: got.Cursor, Limit: limit},
-				}
+				return protocol.GetTransactionsRequest{
+					Pagination: &protocol.LedgerPaginationOptions{Cursor: page.Cursor, Limit: limit},
+				}, true
 			}
-			require.Equal(t, legacyPages, viewPages)
-			require.Greater(t, legacyPages, 1, "the corpus must take more than one page")
+			pages := diff.assertSameChain(t, first, next)
+			require.Greater(t, pages, 1, "the corpus must take more than one page")
 		})
 	}
 }
@@ -672,16 +428,15 @@ func TestGetTransactions_ViewWalkCursorRoundTrip(t *testing.T) {
 // ledger's last transaction, past a ledger's last transaction, and past the
 // tip (where the request's own cursor has to be echoed back).
 func TestGetTransactions_ViewWalkMatchesParsedPath_Cursors(t *testing.T) {
-	testDB := setupDifferentialDB(t)
-	h := differentialHandler(testDB)
+	diff := seededTransactionsDifferential(t)
 
-	for ledger := corpusFirstLedger; ledger <= corpusLastLedger; ledger++ {
+	for ledger := transactionsCorpusFirst; ledger <= transactionsCorpusLast; ledger++ {
 		for txOrder := range 7 {
 			for _, limit := range []uint{1, 3, 10} {
 				cursor := toid.New(int32(ledger), int32(txOrder), 1).String()
 				name := fmt.Sprintf("cursor=%d.%d/limit=%d", ledger, txOrder, limit)
 				t.Run(name, func(t *testing.T) {
-					assertSameResponse(t, h, protocol.GetTransactionsRequest{
+					diff.assertSame(t, protocol.GetTransactionsRequest{
 						Pagination: &protocol.LedgerPaginationOptions{Cursor: cursor, Limit: limit},
 					})
 				})
@@ -695,13 +450,12 @@ func TestGetTransactions_ViewWalkMatchesParsedPath_Cursors(t *testing.T) {
 // driven entirely by the cursor math, which the view walk must not have
 // shifted.
 func TestGetTransactions_ViewWalkMatchesParsedPath_EmptyLedgersOnly(t *testing.T) {
-	testDB := setupDBNoTxs(t, 5)
-	h := differentialHandler(testDB)
+	diff := newTransactionsDifferential(setupDBNoTxs(t, 5))
 
 	for start := 1; start <= 5; start++ {
 		for _, limit := range []uint{1, 10} {
 			t.Run(fmt.Sprintf("start=%d/limit=%d", start, limit), func(t *testing.T) {
-				assertSameResponse(t, h, protocol.GetTransactionsRequest{
+				diff.assertSame(t, protocol.GetTransactionsRequest{
 					StartLedger: uint32(start),
 					Pagination:  &protocol.LedgerPaginationOptions{Limit: limit},
 				})
@@ -714,11 +468,10 @@ func TestGetTransactions_ViewWalkMatchesParsedPath_EmptyLedgersOnly(t *testing.T
 // itself: a corpus that silently produced no transactions, or only one shape
 // of them, would make every comparison above pass for the wrong reason.
 func TestGetTransactions_ViewWalkCorpusIsNotVacuous(t *testing.T) {
-	testDB := setupDifferentialDB(t)
-	h := differentialHandler(testDB)
+	diff := seededTransactionsDifferential(t)
 
-	resp, err := h.getTransactionsByLedgerSequence(context.TODO(), protocol.GetTransactionsRequest{
-		StartLedger: corpusFirstLedger,
+	resp, err := diff.got(context.TODO(), protocol.GetTransactionsRequest{
+		StartLedger: transactionsCorpusFirst,
 		Pagination:  &protocol.LedgerPaginationOptions{Limit: 100},
 	})
 	require.NoError(t, err)
@@ -766,14 +519,8 @@ func TestTransactionInfo_FieldMapping(t *testing.T) {
 		return raw
 	}
 	symEvent := func(name string) xdr.ContractEvent {
-		sym := xdr.ScSymbol(name)
-		val := xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym}
 		id := xdr.ContractId{9}
-		return xdr.ContractEvent{
-			ContractId: &id,
-			Type:       xdr.ContractEventTypeContract,
-			Body:       xdr.ContractEventBody{V: 0, V0: &xdr.ContractEventV0{Topics: []xdr.ScVal{val}, Data: val}},
-		}
+		return diffEvent(xdr.ContractEventTypeContract, &id, diffSym(name), diffSym(name))
 	}
 
 	result := xdr.TransactionResult{
@@ -786,10 +533,7 @@ func TestTransactionInfo_FieldMapping(t *testing.T) {
 	meta := diffMetaV4(nil, nil, nil)
 	envelope := diffClassicEnvelope(999)
 	diagnostic := xdr.DiagnosticEvent{InSuccessfulContractCall: true, Event: symEvent("DIAGNOSTIC")}
-	txEvent := xdr.TransactionEvent{
-		Stage: xdr.TransactionEventStageTransactionEventStageAfterAllTxs,
-		Event: symEvent("TRANSACTION"),
-	}
+	txEvent := diffTxEvent(xdr.TransactionEventStageTransactionEventStageAfterAllTxs, symEvent("TRANSACTION"))
 	opEventA, opEventB := symEvent("OPERATION_A"), symEvent("OPERATION_B")
 
 	tx := store.Transaction{
