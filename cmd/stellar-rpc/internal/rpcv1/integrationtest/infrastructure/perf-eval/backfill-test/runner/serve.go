@@ -15,9 +15,9 @@ import (
 const (
 	rpcPort               = "8000"
 	serveSnapshotInterval = 2 * time.Minute
-	// snapshotTimeout bounds one box-log upload. Under the tick, so uploads
-	// never overlap and a stalled S3 path cannot keep the serve loop from
-	// noticing a daemon exit or the ceiling.
+	// snapshotTimeout bounds each of the two log uploads; together they fit the
+	// tick, so uploads never overlap and a stalled S3 path cannot keep the serve
+	// loop from noticing a daemon exit or the ceiling for long.
 	snapshotTimeout = time.Minute
 	// ceilingBackstopSlackMinutes keeps the OS poweroff behind the in-process
 	// ceiling, so the teardown defers (the final snapshot included) run first.
@@ -83,17 +83,20 @@ func dumpDmesgTail(ctx context.Context) {
 	logger.Warnf("dmesg tail:\n%s", strings.Join(lines, "\n"))
 }
 
-// snapshotBoxLog copies the box log so far next to the result object.
+// snapshotBoxLog copies the box log and the daemon log so far next to the result object.
 func snapshotBoxLog(ctx context.Context, bucket, key string) {
 	if bucket == "" || key == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
-	defer cancel()
-	dst := fmt.Sprintf("s3://%s/%s/user-data-serving.log", bucket, path.Dir(key))
-	cmd := exec.CommandContext(ctx, "aws", "s3", "cp", "/var/log/user-data.log", dst)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		logger.Warnf("snapshotting box log to %s: %v (%s)", dst, err, out)
+	logs := [][2]string{{"/var/log/user-data.log", "user-data-serving.log"}, {daemonLogPath, "stellar-rpc-serving.log"}}
+	for _, f := range logs {
+		dst := fmt.Sprintf("s3://%s/%s/%s", bucket, path.Dir(key), f[1])
+		uploadCtx, cancel := context.WithTimeout(ctx, snapshotTimeout)
+		out, err := exec.CommandContext(uploadCtx, "aws", "s3", "cp", f[0], dst).CombinedOutput()
+		cancel()
+		if err != nil {
+			logger.Warnf("snapshotting %s to %s: %v (%s)", f[0], dst, err, out)
+		}
 	}
 }
 
