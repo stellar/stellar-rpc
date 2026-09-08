@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,8 +15,10 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/harness"
 )
 
-// legDir holds the leg's traffic-profile config; runners start w/ cwd = repo root.
-const legDir = "cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/endpoint-load-test"
+// blasterProfile is the leg's traffic profile. blast() writes it out for --config-path
+//
+//go:embed blaster-test-profile.toml
+var blasterProfile []byte
 
 // blasterEnv is the leg's env-derived config.
 type blasterEnv struct {
@@ -88,7 +91,7 @@ func instantiate(ctx context.Context) error {
 	// launch blast
 	call := blastCall{
 		bin: blasterBin, url: cfg.TargetRPC,
-		configPath: filepath.Join(leg.RepoRoot, legDir, "testdata", "blaster-test-profile.toml"),
+		configPath: filepath.Join(leg.WorkDir, "blaster-test-profile.toml"),
 		// the profile config pins input_data_path to ./output/seed.json, resolved
 		// against the blaster cwd; passing it on the CLI too is a config error
 		seedPath:    filepath.Join(blasterDir, "output", "seed.json"),
@@ -174,8 +177,12 @@ func generateSeed(ctx context.Context, c blastCall, lo, hi int64, count string) 
 	return nil
 }
 
-// blast runs the serial endpoint sweep, writing results to c.resultsPath.
+// blast writes the embedded profile to c.configPath, then runs the serial
+// endpoint sweep, writing results to c.resultsPath.
 func blast(ctx context.Context, c blastCall) error {
+	if err := os.WriteFile(c.configPath, blasterProfile, 0o644); err != nil {
+		return fmt.Errorf("writing blaster profile: %w", err)
+	}
 	logger.Infof("running blaster (--serial enabled, ramp-up %s, duration %s, cooloff %s per endpoint, "+
 		"error killswitch %s%%)", c.rampUp, c.duration, c.cooloff, c.errorThreshold)
 	if err := harness.RunStreaming(ctx, filepath.Dir(c.bin), nil, 80, c.bin, "run",
