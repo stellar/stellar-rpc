@@ -10,6 +10,7 @@ import (
 
 // expectedTrafficProfile is the traffic-model version blaster stamps on modeled
 // endpoints at dev HEAD; a mismatch breaks cross-run comparability.
+// see cmd/stellar-rpc-blaster/internal/run/parameters/endpoints.go
 const expectedTrafficProfile = 3
 
 // endpointStats is one endpoint's row of the report, distilled from blaster's
