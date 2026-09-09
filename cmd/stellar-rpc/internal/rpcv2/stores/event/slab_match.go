@@ -4,23 +4,13 @@ package event
 // one roaring slab at a time — 65536 ids, the span of exactly one container —
 // and answers the whole filter algebra inside that slab.
 //
-// Clip-early slab evaluation, per slab, per filter:
-//
-//	acc := roaring.New()          // ours, shared with nobody
-//	acc.AddRange(slabLo, slabHi)  // the caller's window, clipped to this slab
-//	acc.AndAny(group0Terms...)    // acc ∩ (t1 ∪ t2 ∪ …), in place on acc
-//	acc.AndAny(group1Terms...)    // …AND the next group, still in place
-//
 // The window is applied first rather than last, so no id outside it is ever
-// read. The successive in-place AndAny is the AND across a filter's groups,
-// and roaring.FastOr unions the surviving filters' per-slab results. Every
-// input to a slab's evaluation is a single container and every intermediate
-// the engine allocates holds at most one.
+// read. Every input to a slab's evaluation is a single container and every
+// intermediate the engine allocates holds at most one.
 //
 // Direction is the slab walk order and nothing else: ascending walks slabs low
 // to high and reads each result forward, descending walks them high to low and
-// reads each result backward. One code path serves both, with no gallop, no
-// alignment budget, no spill and no separate descending machinery.
+// reads each result backward. One code path serves both.
 //
 // Laziness is per slab, not per id. A consumer that stops after one page has
 // evaluated only the slabs that page spans, and the cost inside a slab is
@@ -57,9 +47,8 @@ import (
 	"github.com/RoaringBitmap/roaring/v2"
 )
 
-// slabShift sets the slab width as a power of two: 1<<16 is one roaring
-// container, so a slab's evaluation touches exactly one container per input
-// and every result the engine builds is single-container.
+// slabShift sets the slab width as a power of two: 1<<16 is exactly one
+// roaring container.
 //
 // A var rather than a const so in-package tests can shrink it and drive slab
 // seams over a small corpus. It never changes what a stream yields.
@@ -115,10 +104,10 @@ func resolveSlabTerms(sources []postings, slots []int) (slabTerms, bool) {
 	return g, present
 }
 
-// resolveSlabFilters is the whole planning step: resolve every filter's
-// groups, drop the filters that named an entirely absent group, and order each
-// survivor's groups rarest first so the accumulator shrinks fastest and a
-// group that empties it ends the slab before the fat groups are read.
+// resolveSlabFilters is the planning step: resolve every filter's groups, drop
+// the filters that named an entirely absent group, and order each survivor's
+// groups rarest first so the accumulator shrinks fastest and a group that
+// empties it ends the slab before the fat groups are read.
 func resolveSlabFilters(plans []termPlan, sources []postings) []slabFilter {
 	out := make([]slabFilter, 0, len(plans))
 	for _, plan := range plans {
@@ -194,10 +183,8 @@ func (sc *slabScratch) inputs(g *slabTerms, lo, hi uint32) []*roaring.Bitmap {
 // caller owns, or nil when f matches nothing there.
 //
 // The accumulator starts as the slab window itself and is narrowed group by
-// group in place. AndAny is x.And(FastOr(args)) without the intermediate
-// union, so one call is a whole group; a single-group filter is therefore one
-// AddRange plus one AndAny, with no FastAnd and no clone-the-input shortcut to
-// guard against.
+// group in place: AndAny is x.And(FastOr(args)) without the intermediate
+// union, so one call is a whole group.
 func (f *slabFilter) eval(lo, hi uint32, sc *slabScratch) *roaring.Bitmap {
 	var acc *roaring.Bitmap
 	for i := range f.groups {
@@ -259,7 +246,7 @@ func newSlabStepper(
 
 // nextBounds returns the next slab's [lo, hi) clipped to the window, walking
 // away from the cursor in the query's direction. The first slab is clipped at
-// the cursor by these bounds alone — there is no seek.
+// the cursor by these bounds alone.
 func (s *slabStepper) nextBounds() (uint32, uint32, bool) {
 	if s.done {
 		return 0, 0, false
@@ -291,8 +278,8 @@ func (s *slabStepper) nextBounds() (uint32, uint32, bool) {
 }
 
 // evalSlab is the union across filters of their per-slab results, or nil when
-// the slab holds nothing. Every input is this call's own bitmap, so FastOr's
-// single-input clone shortcut is unreachable and would be harmless anyway.
+// the slab holds nothing. Every input is a bitmap this call owns, so the
+// caller owns the union whichever path FastOr takes.
 func (s *slabStepper) evalSlab(lo, hi uint32) *roaring.Bitmap {
 	s.perFilter = s.perFilter[:0]
 	for i := range s.filters {
@@ -353,9 +340,8 @@ func (s *slabStepper) appendUpTo(dst []uint32, n int) []uint32 {
 			}
 			continue
 		}
-		// NextMany fills the tail directly, so an ascending page is copied out
-		// of the slab's containers in bulk rather than id by id. It returns
-		// short only at the end of the bitmap.
+		// NextMany fills the tail in bulk and returns short only at the end
+		// of the bitmap, so a short fill is this slab's last id.
 		want := n - len(dst)
 		base := len(dst)
 		dst = slices.Grow(dst, want)[:base+want]
@@ -368,10 +354,9 @@ func (s *slabStepper) appendUpTo(dst []uint32, n int) []uint32 {
 	return dst
 }
 
-// streamSlabs is the streaming loop, shared by both directions: fill one
-// internal batch of candidate ordinals out of the stepper, fetch, post-filter,
-// yield the survivors. One loop serves both because the stepper already hides
-// the direction.
+// streamSlabs is the streaming loop, shared by both directions because the
+// stepper already hides direction: fill one internal batch of candidate
+// ordinals out of the stepper, fetch, post-filter, yield the survivors.
 func streamSlabs(
 	ctx context.Context, r Reader, filters []Filter, st *slabStepper,
 	descending bool, firstBatch int, yield func(Match, error) bool,

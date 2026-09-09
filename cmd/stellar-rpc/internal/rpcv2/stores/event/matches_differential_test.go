@@ -1,17 +1,18 @@
 package event
 
-// Full-Matches differential across the index's two read seams: LookupKeys,
+// The in-memory chunk the match-path tests run against, and the borrow-safety
+// gate over it.
+//
+// The corpus is served through both of the index's read seams: LookupKeys,
 // which materializes every term as a bitmap, and lookupPostings, which hands
-// sparse terms back as borrowed id lists. Both must select the same events
-// over randomized corpora, filters and windows, and the ascending stream
-// reversed must equal the descending one.
+// sparse terms back as borrowed id lists. slab_match_test.go drives both
+// against an answer computed without the index.
 
 import (
 	"context"
 	"errors"
 	"iter"
 	"math/rand"
-	"slices"
 	"testing"
 
 	"github.com/RoaringBitmap/roaring/v2"
@@ -108,25 +109,23 @@ type diffVocab struct {
 	types     []xdr.ContractEventType
 }
 
-func newDiffVocab(t *testing.T) *diffVocab {
-	t.Helper()
+func newDiffVocab(tb testing.TB) *diffVocab {
+	tb.Helper()
 	v := &diffVocab{types: []xdr.ContractEventType{
 		xdr.ContractEventTypeSystem,
 		xdr.ContractEventTypeContract,
 		xdr.ContractEventTypeDiagnostic,
 	}}
 	for i := range 4 {
-		var cid xdr.ContractId
-		cid[0] = byte(0xC0 + i)
+		cid := xdr.ContractId{0: byte(0xC0 + i)}
 		v.contracts = append(v.contracts, cid[:])
 	}
 	for _, name := range []string{"alpha", "beta", "gamma", "delta", "epsilon"} {
 		sym := xdr.ScSymbol(name)
 		val := xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym}
 		raw, err := val.MarshalBinary()
-		require.NoError(t, err)
-		v.topics = append(v.topics, val)
-		v.topicRaw = append(v.topicRaw, raw)
+		require.NoError(tb, err)
+		v.topics, v.topicRaw = append(v.topics, val), append(v.topicRaw, raw)
 	}
 	return v
 }
@@ -209,59 +208,6 @@ func collectOrdinals(t *testing.T, r Reader, filters []Filter, w IDRange, desc b
 		out = append(out, m.Ordinal)
 	}
 	return out
-}
-
-// Drives randomized queries through both index seams in both directions; the
-// ascending stream reversed must equal the descending stream.
-func TestMatches_AscendingDescendingDifferential(t *testing.T) {
-	rng := rand.New(rand.NewSource(20260829))
-	v := newDiffVocab(t)
-	const corpusSize = 300
-	corpus := newDiffCorpus(t, rng, v, corpusSize)
-
-	// Shrink the batch so multi-batch seams are exercised on a small corpus.
-	defer func(n int) { matchBatchSize = n }(matchBatchSize)
-	matchBatchSize = 7
-
-	readers := []struct {
-		name string
-		r    Reader
-	}{
-		{"lookupKeys", diffReader{corpus}},
-		{"postings", diffPostingsReader{diffReader{corpus}}},
-	}
-	for _, seam := range readers {
-		name, r := seam.name, seam.r
-		t.Run(name, func(t *testing.T) {
-			matched := 0
-			for trial := range 400 {
-				filters := randomFilters(rng, v)
-				start := uint32(rng.Intn(corpusSize + 1))
-				end := start + uint32(rng.Intn(corpusSize+1-int(start)))
-				w := IDRange{Start: start, End: end}
-
-				asc := collectOrdinals(t, r, filters, w, false)
-				desc := collectOrdinals(t, r, filters, w, true)
-
-				for i := 1; i < len(asc); i++ {
-					require.Less(t, asc[i-1], asc[i],
-						"trial %d: ascending ordinals must be strictly increasing "+
-							"(an equal pair is a union dedup bug)", trial)
-				}
-				matched += len(asc)
-				for _, id := range asc {
-					require.GreaterOrEqual(t, id, w.Start, "trial %d: below window", trial)
-					require.Less(t, id, w.End, "trial %d: End must be exclusive", trial)
-				}
-				slices.Reverse(desc)
-				require.Equal(t, asc, desc,
-					"trial %d: window %v filters %+v", trial, w, filters)
-			}
-			// Guard against a vacuous pass: the queries must select events.
-			require.Greater(t, matched, 5000,
-				"fixture sanity: randomized queries selected too little")
-		})
-	}
 }
 
 // Turns the borrow contract into a race-detector gate: the match path reads

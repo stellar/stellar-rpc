@@ -2,8 +2,8 @@ package event
 
 // slab_match_test.go covers the slab engine over a corpus built to hold each
 // named query shape by construction: dense-only, sparse-only, mixed, absent,
-// match-all, and the fat/fat thin-overlap shape whose two chunk-sized terms
-// meet on a handful of ids.
+// match-all, the fat/fat thin-overlap shape whose two chunk-sized terms meet
+// on a handful of ids, and the high-arity AND and union.
 //
 // The answer every case is checked against is computed without the index —
 // postFilter run over every ordinal in the corpus, then clipped to the window,
@@ -17,7 +17,6 @@ import (
 	"iter"
 	"math/rand"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -130,7 +129,6 @@ type slabShape struct {
 type shapedFixture struct {
 	corpus *diffCorpus
 	vocab  *diffVocab
-	n      uint32
 	// thin holds the ids where the two fat terms of the overlap shape meet.
 	thin []uint32
 	// rareContract and rareTopic hold the ids carrying the sparse terms.
@@ -173,12 +171,16 @@ func (f *shapedFixture) shapeFor(id uint32) slabShape {
 	return sh
 }
 
-// newShapedFixture builds the shaped corpus over n ids. n is chosen by the
-// caller to cross at least one 65536-id slab boundary.
-func newShapedFixture(tb testing.TB, n uint32) *shapedFixture {
+// shapedCorpusSize spans slab 0 whole and part of slab 1, so every window
+// bound below is a real slab-relative position rather than a synthetic one.
+const shapedCorpusSize uint32 = 70_000
+
+// newShapedFixture builds the shaped corpus.
+func newShapedFixture(tb testing.TB) *shapedFixture {
 	tb.Helper()
-	v := newDiffVocabTB(tb)
-	f := &shapedFixture{vocab: v, n: n}
+	const n = shapedCorpusSize
+	v := newDiffVocab(tb)
+	f := &shapedFixture{vocab: v}
 	// Thin-overlap ids: even, spread across the window, and deliberately
 	// sitting on both sides of a slab boundary.
 	for _, id := range []uint32{4, 30_000, 65_534, 65_536, 65_538, n - 2} {
@@ -249,29 +251,6 @@ func (f *shapedFixture) marshalShape(tb testing.TB, sh slabShape) []byte {
 	raw, err := ev.MarshalBinary()
 	require.NoError(tb, err)
 	return raw
-}
-
-// newDiffVocabTB is newDiffVocab widened to testing.TB so benchmarks can build
-// the same vocabulary.
-func newDiffVocabTB(tb testing.TB) *diffVocab {
-	tb.Helper()
-	v := &diffVocab{types: []xdr.ContractEventType{
-		xdr.ContractEventTypeSystem,
-		xdr.ContractEventTypeContract,
-		xdr.ContractEventTypeDiagnostic,
-	}}
-	for i := range 4 {
-		cid := xdr.ContractId{0: byte(0xC0 + i)}
-		v.contracts = append(v.contracts, cid[:])
-	}
-	for name := range strings.FieldsSeq("alpha beta gamma delta epsilon") {
-		sym := xdr.ScSymbol(name)
-		val := xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym}
-		raw, err := val.MarshalBinary()
-		require.NoError(tb, err)
-		v.topics, v.topicRaw = append(v.topics, val), append(v.topicRaw, raw)
-	}
-	return v
 }
 
 // named query shapes over the shaped corpus.
@@ -360,9 +339,43 @@ func (f *shapedFixture) filterUnion() []Filter {
 	}
 }
 
-// shapedCorpusSize spans slab 0 whole and part of slab 1, so every window
-// bound below is a real slab-relative position rather than a synthetic one.
-const shapedCorpusSize = 70_000
+// filterDeepAND names every constrainable field at once, so the AND runs five
+// groups deep: a near-total event-type term, two chunk-sized terms and two
+// sparse ones, meeting on the handful of ids carrying a second topic. Exact
+// keeps the count group in the plan, which an "at least" bound the constrained
+// positions already imply would not.
+func (f *shapedFixture) filterDeepAND() []Filter {
+	evType := xdr.ContractEventTypeContract
+	return []Filter{{
+		ContractID: f.vocab.contracts[0],
+		EventType:  &evType,
+		Topics: [protocol.MaxTopicCount][]byte{
+			0: f.vocab.topicRaw[0],
+			1: f.vocab.topicRaw[2],
+		},
+		TopicCount: TopicCountFilter{Count: 2, Exact: true},
+	}}
+}
+
+// filterWideUnion drives eight filters into one FastOr, the widest of the
+// named shapes, mixing dense, sparse, absent and multi-group filters so the
+// union also has to drop a filter and dedup ids several of them select.
+func (f *shapedFixture) filterWideUnion() []Filter {
+	sysType := xdr.ContractEventTypeSystem
+	return []Filter{
+		{
+			ContractID: f.vocab.contracts[0],
+			Topics:     [protocol.MaxTopicCount][]byte{0: f.vocab.topicRaw[1]},
+		},
+		{ContractID: f.vocab.contracts[1]},
+		{ContractID: f.vocab.contracts[2]},
+		{ContractID: f.vocab.contracts[3]},
+		{EventType: &sysType},
+		{Topics: [protocol.MaxTopicCount][]byte{0: f.vocab.topicRaw[0]}},
+		{Topics: [protocol.MaxTopicCount][]byte{1: f.vocab.topicRaw[2]}},
+		{TopicCount: TopicCountFilter{Count: 2, Exact: true}},
+	}
+}
 
 // namedShape is one query shape with the name its failures report under.
 type namedShape struct {
@@ -385,6 +398,8 @@ func (f *shapedFixture) namedShapes() []namedShape {
 		{"partly absent group", f.filterPartlyAbsentGroup()},
 		{"wholly absent group", f.filterWhollyAbsentGroup()},
 		{"union of filters", f.filterUnion()},
+		{"deep and", f.filterDeepAND()},
+		{"wide union", f.filterWideUnion()},
 		{"match all empty slice", nil},
 		{"match all wildcard filter", []Filter{{}}},
 		{"match all beside constrained", []Filter{{EventType: &sysType}, {}}},
@@ -395,7 +410,7 @@ func (f *shapedFixture) namedShapes() []namedShape {
 // ───────────────────────── the shaped matrix ─────────────────────────
 
 func TestMatches_ShapedMatrix(t *testing.T) {
-	f := newShapedFixture(t, shapedCorpusSize)
+	f := newShapedFixture(t)
 	readers := []struct {
 		name string
 		r    Reader
@@ -457,7 +472,7 @@ func TestMatches_ShapedMatrix(t *testing.T) {
 // different thing — the corpus end, a slab boundary, and a window living
 // entirely inside the second slab.
 func TestMatches_WholeStreams(t *testing.T) {
-	f := newShapedFixture(t, shapedCorpusSize)
+	f := newShapedFixture(t)
 	r := diffPostingsReader{diffReader{f.corpus}}
 	const slab = 1 << 16
 
@@ -482,7 +497,7 @@ func TestMatches_WholeStreams(t *testing.T) {
 // overlap. Drift in the corpus rules would otherwise turn the matrix above
 // into a weaker test without failing it.
 func TestMatches_ShapedFixtureIsWhatItClaims(t *testing.T) {
-	f := newShapedFixture(t, shapedCorpusSize)
+	f := newShapedFixture(t)
 	r := diffPostingsReader{diffReader{f.corpus}}
 	ctx := context.Background()
 	window := IDRange{0, shapedCorpusSize}
@@ -513,6 +528,14 @@ func TestMatches_ShapedFixtureIsWhatItClaims(t *testing.T) {
 	require.Len(t, drainMatches(t,
 		Matches(ctx, r, f.filterPartlyAbsentGroup(), window, false, 0), 0), len(f.rareTopic),
 		"the partly-absent group must select exactly its one present bucket")
+
+	// The high-arity shapes must reach the corpus. A five-group AND that
+	// intersected to nothing, or a union that selected a corner of it, would
+	// pass the matrix vacuously.
+	require.Greater(t, card(f.filterDeepAND()), 10,
+		"the five-group AND must still select something")
+	require.Greater(t, card(f.filterWideUnion()), 30_000,
+		"the wide union must span the corpus")
 
 	// The overlap shape is only the overlap shape if both sides are
 	// chunk-sized and their meeting point is rare.
@@ -550,9 +573,11 @@ func TestMatches_RandomizedAgainstPostFilter(t *testing.T) {
 		{"lookupKeys", diffReader{corpus}},
 		{"postings", diffPostingsReader{diffReader{corpus}}},
 	}
-	// slabShift 2 and 4 put 75 and 19 slab seams inside the corpus; 16 is the
-	// production width, where the whole corpus is one slab.
-	for _, shift := range []uint{2, 4, 16} {
+	// The slab width is a seam, not a behavior: every width must reproduce the
+	// same stream. 1, 2 and 4 put 150, 75 and 19 slab seams inside the corpus,
+	// 8 leaves a single seam, and 16 is the production width, where the whole
+	// corpus is one slab.
+	for _, shift := range []uint{1, 2, 4, 8, 16} {
 		slabShift = shift
 		for _, seam := range readers {
 			r := seam.r
@@ -612,43 +637,6 @@ func requireStrictOrder(t *testing.T, got []Match, desc bool, trial int) {
 	}
 }
 
-// The slabShift seam must be invisible in the output: every width reproduces
-// the production width's stream exactly.
-func TestMatches_SlabWidthIsInvisible(t *testing.T) {
-	f := newShapedFixture(t, shapedCorpusSize)
-	r := diffPostingsReader{diffReader{f.corpus}}
-	ctx := context.Background()
-
-	defer func(s uint) { slabShift = s }(slabShift)
-	cases := [][]Filter{
-		f.filterDenseOnly(),
-		f.filterSparseOnly(),
-		f.filterMixedOrGroup(),
-		f.filterThinOverlap(),
-		f.filterUnion(),
-	}
-	windows := []IDRange{
-		{0, shapedCorpusSize},
-		{65_000, 67_000},
-		{65_536, shapedCorpusSize},
-	}
-	for ci, filters := range cases {
-		for _, w := range windows {
-			for _, desc := range []bool{false, true} {
-				slabShift = 16
-				want := drainMatches(t, Matches(ctx, r, filters, w, desc, 0), 250)
-				for _, shift := range []uint{3, 8, 13, 17, 20, 31} {
-					slabShift = shift
-					got := drainMatches(t, Matches(ctx, r, filters, w, desc, 0), 250)
-					require.Equal(t, want, got,
-						"case %d window %v desc=%v: slabShift %d changed the stream",
-						ci, w, desc, shift)
-				}
-			}
-		}
-	}
-}
-
 // ───────────────────────── the candidate-set pin ─────────────────────────
 
 // fetchTracer records the ordinals of every FetchEvents call, one entry per
@@ -683,7 +671,7 @@ var (
 // The match-all shapes are excluded because they never reach the index: they
 // stream FetchRange instead.
 func TestMatches_FetchesOnlyTrueCandidates(t *testing.T) {
-	f := newShapedFixture(t, shapedCorpusSize)
+	f := newShapedFixture(t)
 
 	const slab = 1 << 16
 	shapes := [][]Filter{
