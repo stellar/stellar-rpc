@@ -456,8 +456,9 @@ func (h *HotStore) IngestLedgerToBatch(
 // order never pays Get's roaring.New plus AddMany per sparse term.
 //
 // Results are positionally aligned with keys; a miss is the zero postings.
-// Same borrowed-snapshot contract as LookupKeys: read-only, valid
-// indefinitely.
+// Same read-only contract as LookupKeys: a sparse term borrows the mirror's
+// published id slice, and a dense one materializes through
+// denseState.snapshot, the shared immutable bitmap LookupKeys hands out.
 func (h *HotStore) lookupPostings(ctx context.Context, keys []TermKey) ([]postings, error) {
 	if h.chunkStore.IsClosed() {
 		return nil, stores.ErrStoreClosed
