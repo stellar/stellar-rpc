@@ -5,10 +5,11 @@ go 1.26
 require (
 	github.com/Masterminds/squirrel v1.5.4
 	// Minimum v2.18.2 (the FastOr/runContainer16 fix, #527, the fork
-	// previously carried); v2.26.0 for the no-clone lazy union (#542)
-	// and fused cardinality-slice aggregation (#559) the descending
-	// events path leans on. SIMD paths are x/sys/cpu-gated and honor
-	// GODEBUG=cpu.avx512vpopcntdq=off.
+	// previously carried). v2.26.0 ships vectorized container kernels,
+	// hand-written assembly included, gated by x/sys/cpu and GODEBUG
+	// (cpu.avx512vpopcntdq=off and friends); the aggregation layer this
+	// package's contracts rest on — fastaggregation.go, parallel.go — is
+	// byte-identical to v2.18.
 	github.com/RoaringBitmap/roaring/v2 v2.26.0
 	github.com/aws/aws-sdk-go-v2 v1.45.1
 	github.com/aws/aws-sdk-go-v2/config v1.31.16

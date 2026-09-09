@@ -482,7 +482,7 @@ func (m *mphf) Lookup(key TermKey) (uint32, error) {
 	return uint32(slot), nil
 }
 
-// Close releases the index; a no-op for the in-memory OpenBytes path.
+// Close unmaps the index file; callers must call it (see openMPHF).
 func (m *mphf) Close() error {
 	return m.idx.Close()
 }

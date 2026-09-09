@@ -168,9 +168,11 @@ func (p *Payload) MarshalInto(dst []byte) ([]byte, error) {
 // the event store read paths apply this two ways:
 //
 //   - FetchEvents passes data that outlives the returned slice — hot from
-//     rocksdb.BatchMultiGet (freshly allocated, caller-owned), cold by
-//     cloning the borrowed packfile.ReadItems buffer — so its Payloads are
-//     safe to retain.
+//     rocksdb.BatchMultiGet, cold by cloning the borrowed
+//     packfile.ReadItems buffer — so its Payloads are safe to retain. The
+//     hot bytes are batch-shared, not per-payload: BatchMultiGet copies one
+//     batch into one backing array, so retaining a single Payload pins every
+//     payload fetched with it.
 //   - FetchRange / All pass the iterator's borrowed buffer directly
 //     (rocksdb.IterateRange / packfile.ReadRange, valid only for the
 //     current step), so each yielded Payload is borrowed; a consumer that

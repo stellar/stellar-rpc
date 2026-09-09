@@ -39,6 +39,11 @@ const (
 //     reads one block to find one key).
 //   - OffsetsCF stores 8-byte (ledger_seq -> event_count) rows in
 //     the tens-of-thousands per chunk — same shape as IndexCF.
+//
+// A block size takes effect as SSTs are written, so chunks already on disk
+// keep whatever size they were built with: changing one of these constants
+// reaches a running deployment only as natural compaction or chunk rotation
+// rewrites those SSTs, never at restart.
 const (
 	dataCFBlockSize    = 8 * 1024
 	indexCFBlockSize   = 4 * 1024
