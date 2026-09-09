@@ -200,12 +200,7 @@ func TestRoaringContract_ConcurrentReaders(t *testing.T) {
 	seq := freshRange(0, 4<<16)
 	seq.AndAny(shared...)
 	wantAndAny := bitmapBytes(t, seq)
-	var wantSearch []int64
-	for _, bm := range shared {
-		for _, target := range targets {
-			wantSearch = append(wantSearch, bm.NextValue(target), bm.PreviousValue(target))
-		}
-	}
+	wantSearch := valueSearches(shared, targets)
 
 	gotAndAny := make([][]byte, goroutines)
 	gotSearch := make([][]int64, goroutines)
@@ -222,13 +217,7 @@ func TestRoaringContract_ConcurrentReaders(t *testing.T) {
 					panic(err)
 				}
 				gotAndAny[g] = b
-				var search []int64
-				for _, bm := range shared {
-					for _, target := range targets {
-						search = append(search, bm.NextValue(target), bm.PreviousValue(target))
-					}
-				}
-				gotSearch[g] = search
+				gotSearch[g] = valueSearches(shared, targets)
 			}
 		})
 	}
@@ -240,6 +229,18 @@ func TestRoaringContract_ConcurrentReaders(t *testing.T) {
 		require.Equal(t, wantAndAny, gotAndAny[g], "goroutine %d disagreed on AndAny", g)
 		require.Equal(t, wantSearch, gotSearch[g], "goroutine %d disagreed on the value searches", g)
 	}
+}
+
+// valueSearches runs NextValue and PreviousValue for every target on every
+// bitmap.
+func valueSearches(bms []*roaring.Bitmap, targets []uint32) []int64 {
+	out := make([]int64, 0, 2*len(bms)*len(targets))
+	for _, bm := range bms {
+		for _, target := range targets {
+			out = append(out, bm.NextValue(target), bm.PreviousValue(target))
+		}
+	}
+	return out
 }
 
 // TestRoaringContract_ValueSearchIsInclusiveAndReadOnly pins NextValue and
