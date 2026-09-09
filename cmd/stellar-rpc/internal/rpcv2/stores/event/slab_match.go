@@ -1,10 +1,8 @@
 package event
 
-// slab_match.go is a second evaluation engine for the query Matches serves:
-// slabMatches. It steps the window one roaring slab at a time — 65536 ids, the
-// span of exactly one container — and answers the whole filter algebra inside
-// that slab, where match_iter.go pulls candidates through a lazy cursor tree
-// (ascending) and match.go materializes a whole-window union (descending).
+// slab_match.go is the candidate machinery behind Matches. It steps the window
+// one roaring slab at a time — 65536 ids, the span of exactly one container —
+// and answers the whole filter algebra inside that slab.
 //
 // Clip-early slab evaluation, per slab, per filter:
 //
@@ -24,24 +22,23 @@ package event
 // reads each result backward. One code path serves both, with no gallop, no
 // alignment budget, no spill and no separate descending machinery.
 //
-// Laziness is per slab rather than per id. A consumer that stops after one
-// page has evaluated only the slabs that page spans, and the cost inside a
-// slab is bounded by the containers its inputs hold there rather than by the
-// width of the window. The granularity is coarser than the cursor tree's — a
-// page ending mid-slab has paid for the whole slab — and bounded above by one
-// container's worth of work per input per filter.
+// Laziness is per slab, not per id. A consumer that stops after one page has
+// evaluated only the slabs that page spans, and the cost inside a slab is
+// bounded by the containers its inputs hold there rather than by the width of
+// the window. The unit is the slab, so a page ending mid-slab has paid for
+// that whole slab: one container's worth of work per input per filter.
 //
-// The trade is descending over a whole window: the materialized path ANDs the
-// chunk-sized terms once with roaring's bulk aggregation, while this one
-// re-enters the algebra per slab. On the benchmarks in
-// slab_match_bench_test.go, over a 300k-event corpus, that is +8µs on a
-// descending page of the two-fat-term AND (9.9µs → 18.1µs) and +170µs on a
-// descending full scan of one chunk-sized term measured on candidates alone
-// (1.20ms → 1.37ms), which the fetch swallows end to end (10.88ms → 10.93ms).
-// Descending pages that stop early are faster (148µs → 128µs), because the
-// materialized path pays for the whole chunk before yielding anything.
-// Seeding the walk at the slab holding the window's high bound, rather than
-// re-clipping the accumulator there, would recover part of the scan cost.
+// The trade is descending over a whole window. The whole-chunk union this
+// replaced ANDed the chunk-sized terms once with roaring's bulk aggregation,
+// where the walk re-enters the algebra per slab. Measured over a 300k-event
+// corpus, that cost +8µs on a descending page of a two-fat-term AND (9.9µs →
+// 18.1µs) and +170µs on a descending full scan of one chunk-sized term timed
+// on candidates alone (1.20ms → 1.37ms), which the fetch swallows end to end
+// (10.88ms → 10.93ms). Descending pages that stop early got faster (148µs →
+// 128µs), because the union paid for the whole chunk before yielding
+// anything. Seeding the walk at the slab holding the window's high bound,
+// rather than re-clipping the accumulator there, would recover part of the
+// scan cost.
 //
 // Ownership. acc is built by this call and is the only bitmap ever mutated.
 // The term bitmaps handed to AndAny may be shared, copy-on-write-marked mirror
@@ -55,7 +52,6 @@ package event
 import (
 	"cmp"
 	"context"
-	"iter"
 	"slices"
 
 	"github.com/RoaringBitmap/roaring/v2"
@@ -71,53 +67,14 @@ import (
 //nolint:gochecknoglobals // test seam; production never writes it
 var slabShift uint = 16
 
-// slabMatches is Matches over the slab-stepped engine: same arguments, same
-// validation, same yields, same order, same match-all and absent-term
-// handling. It is a drop-in alternative to Matches on the index-served paths,
-// and the match-all path is shared verbatim.
-func slabMatches(
-	ctx context.Context, r Reader, filters []Filter, window IDRange,
-	descending bool, firstBatch int,
-) iter.Seq2[Match, error] {
-	return func(yield func(Match, error) bool) {
-		if err := validateMatchCall(ctx, r, filters, window); err != nil {
-			yield(Match{}, err)
-			return
-		}
-		if window.isEmpty() {
-			return
-		}
-		plans, uniqueKeys, matchAll := planIndexTerms(filters)
-		// Match-all path: identical to Matches'. The window is dense, so it
-		// streams Reader.FetchRange without touching the index.
-		if matchAll {
-			streamRange(ctx, r, window, descending, firstBatch, yield)
-			return
-		}
-		sources, err := lookupPostings(ctx, r, uniqueKeys)
-		if err != nil {
-			yield(Match{}, err)
-			return
-		}
-		st := newSlabStepper(plans, sources, window, descending)
-		// The twin of Matches' peek/IsEmpty early out: no filter survived
-		// group resolution, so nothing can match and no slab is worth
-		// evaluating.
-		if len(st.filters) == 0 {
-			return
-		}
-		streamSlabs(ctx, r, filters, st, descending, firstBatch, yield)
-	}
-}
-
 // slabTerms is one of a filter's term groups resolved out of the batched
 // lookup and held in whichever representation the index gave it: bitmaps for
 // dense (and cold) terms, borrowed id lists for sparse ones. The group's value
 // is the union of the two halves.
 //
-// est is the summed cardinality of the present terms over the whole chunk —
-// the same weight match_iter.go's resolveGroup computes, used the same way, to
-// order a filter's AND.
+// est is the summed cardinality of the present terms over the whole chunk. It
+// ignores the window, so it ranks a filter's groups rather than counting a
+// query's candidates, and it is what orders the AND.
 type slabTerms struct {
 	bitmaps []*roaring.Bitmap
 	lists   [][]uint32
@@ -131,7 +88,7 @@ type slabFilter struct {
 
 // resolveSlabTerms collects the postings at slots, reporting false when every
 // one of them is absent from the index — the signal that the owning filter can
-// match nothing, exactly as in resolveGroup.
+// match nothing.
 //
 // A present term holding no ids contributes nothing to the union but still
 // keeps the group alive, which an absent term's caller-side skip would not do.
@@ -258,8 +215,8 @@ func (f *slabFilter) eval(lo, hi uint32, sc *slabScratch) *roaring.Bitmap {
 		}
 	}
 	// acc is nil only for a filter that named no group at all, which takes the
-	// match-all path upstream and never reaches here. Matching intersectOf,
-	// the unreachable case is the empty candidate set.
+	// match-all path upstream and never reaches here; the nil is read as the
+	// empty candidate set either way.
 	return acc
 }
 
@@ -411,10 +368,10 @@ func (s *slabStepper) appendUpTo(dst []uint32, n int) []uint32 {
 	return dst
 }
 
-// streamSlabs is the single streaming loop, shared by both directions: fill
-// one internal batch of candidate ordinals out of the stepper, fetch,
-// post-filter, yield the survivors. It is streamUnion and streamCandidates
-// collapsed into one, because the stepper already hides the direction.
+// streamSlabs is the streaming loop, shared by both directions: fill one
+// internal batch of candidate ordinals out of the stepper, fetch, post-filter,
+// yield the survivors. One loop serves both because the stepper already hides
+// the direction.
 func streamSlabs(
 	ctx context.Context, r Reader, filters []Filter, st *slabStepper,
 	descending bool, firstBatch int, yield func(Match, error) bool,

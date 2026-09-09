@@ -1,8 +1,10 @@
 package event
 
-// Full-Matches differential: the ascending iterator tree and the descending
-// materialized union must select the same events, in mirrored order, over
-// randomized corpora, filters and windows.
+// Full-Matches differential across the index's two read seams: LookupKeys,
+// which materializes every term as a bitmap, and lookupPostings, which hands
+// sparse terms back as borrowed id lists. Both must select the same events
+// over randomized corpora, filters and windows, and the ascending stream
+// reversed must equal the descending one.
 
 import (
 	"context"
@@ -209,8 +211,8 @@ func collectOrdinals(t *testing.T, r Reader, filters []Filter, w IDRange, desc b
 	return out
 }
 
-// Drives randomized queries through both candidate paths and both index seams;
-// the ascending stream reversed must equal the descending stream.
+// Drives randomized queries through both index seams in both directions; the
+// ascending stream reversed must equal the descending stream.
 func TestMatches_AscendingDescendingDifferential(t *testing.T) {
 	rng := rand.New(rand.NewSource(20260829))
 	v := newDiffVocab(t)
@@ -262,9 +264,9 @@ func TestMatches_AscendingDescendingDifferential(t *testing.T) {
 	}
 }
 
-// Turns the borrow contract into a race-detector gate: the ascending cursors
-// read mirror snapshots in place while AddTo publishes new termStates on the
-// same keys, including the sparse-to-dense promotion. Under -race any write
+// Turns the borrow contract into a race-detector gate: the match path reads
+// mirror snapshots in place while AddTo publishes new termStates on the same
+// keys, including the sparse-to-dense promotion. Under -race any write
 // reaching a borrowed snapshot fails the run; without it, the identity check
 // still pins that a pinned window is immune to ingest past its End.
 func TestMatches_ConcurrentIngestBorrowSafety(t *testing.T) {

@@ -4,9 +4,52 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// sparseSource and denseSource build the two representations the index holds
+// for a term, for tests that need postings without a store behind them.
+func sparseSource(ids ...uint32) postings { return postings{ids: ids} }
+
+func denseSource(ids ...uint32) postings {
+	bm := roaring.New()
+	bm.AddMany(ids)
+	return postings{bm: bm}
+}
+
+// postingIDs reads a term's ids out of whichever representation it holds,
+// through the accessor the match path uses. It never returns nil, so an empty
+// term compares equal to a materialized bitmap's ToArray().
+func postingIDs(p postings) []uint32 {
+	if bm := p.bitmap(); bm != nil {
+		return bm.ToArray()
+	}
+	return append([]uint32{}, p.ids...)
+}
+
+// A term present but holding no ids is still present: it contributes nothing
+// to a union and does not drop its group, which is what distinguishes it from
+// a term absent from the index.
+func TestPostingsPresent(t *testing.T) {
+	assert.False(t, postings{}.present(), "the zero postings is the absent term")
+	assert.True(t, sparseSource(1).present())
+	assert.True(t, denseSource(1).present())
+	assert.True(t, postings{bm: roaring.New()}.present(),
+		"a present-but-empty bitmap is present; it just holds nothing")
+	assert.Empty(t, postingIDs(postings{bm: roaring.New()}))
+}
+
+// The ordering weight is the term's whole-chunk cardinality, window and all.
+func TestPostingsEstimate(t *testing.T) {
+	assert.Equal(t, uint64(0), postings{}.estimate(), "the absent term weighs nothing")
+	assert.Equal(t, uint64(0), postings{bm: roaring.New()}.estimate())
+	assert.Equal(t, uint64(3), sparseSource(1, 2, 3).estimate())
+	assert.Equal(t, uint64(3), denseSource(1, 2, 3).estimate())
+	assert.Equal(t, uint64(4), denseSource(1, 2, 3, 1<<20).estimate(),
+		"cardinality spans containers")
+}
 
 // newTestConcurrentBitmaps builds an empty ConcurrentBitmaps via the
 // only remaining constructor (production always converts from a

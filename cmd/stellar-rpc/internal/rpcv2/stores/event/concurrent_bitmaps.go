@@ -162,8 +162,8 @@ func (d *denseState) cardinality() uint64 {
 // read-only contract applies verbatim, and the id slice must likewise be read,
 // never written or appended to. A dense postings is a view, not a frozen copy:
 // a later materialization can hold ids a write added since. Callers pin a window
-// before the lookup and clip every cursor to it at the leaf (bitmapIter.end), so
-// those ids sit above the window and are never yielded.
+// before the lookup and intersect every read with it (the slab accumulator's
+// range), so those ids sit above the window and are never yielded.
 type postings struct {
 	ids   []uint32
 	bm    *roaring.Bitmap

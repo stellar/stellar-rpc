@@ -620,9 +620,9 @@ func TestQuery_ChunkWithLedgersButZeroEvents(t *testing.T) {
 
 // TestQuery_DescendingWithRangeAndMaxEvents covers the
 // three-way combination — order × range × cap — that no other test
-// hits together. Forces the descending branch of streamUnion
-// (ReverseIterator with a per-batch flip) over a range-narrowed
-// union, then the shim's MaxEvents truncation.
+// hits together. Forces the descending slab walk (each slab's result
+// read backwards, with a per-batch flip for the fetch) over a
+// range-narrowed window, then the shim's MaxEvents truncation.
 func TestQuery_DescendingWithRangeAndMaxEvents(t *testing.T) {
 	fx := newMultiLedgerQueryFixture(t)
 	first := chunk.ID(0).FirstLedger()
@@ -1126,26 +1126,6 @@ func TestQuery_InvalidFilterRejected(t *testing.T) {
 	}
 }
 
-// TestUnionSlots covers the OR-within-a-group step directly, including the
-// all-absent case a fixture cannot reach: the topic-count buckets are the only
-// multi-term group, and the overflow bucket is populated in any chunk holding
-// an event with topics.
-func TestUnionSlots(t *testing.T) {
-	first := roaring.BitmapOf(1, 2)
-	second := roaring.BitmapOf(3)
-	bitmaps := []*roaring.Bitmap{first, nil, second, nil}
-
-	assert.Same(t, first, unionSlots(bitmaps, []int{0}),
-		"a lone bitmap is borrowed, not cloned")
-	assert.Nil(t, unionSlots(bitmaps, []int{1}))
-	assert.Nil(t, unionSlots(bitmaps, []int{1, 3}),
-		"a group absent from the index empties the filter")
-	assert.Same(t, second, unionSlots(bitmaps, []int{1, 2}),
-		"the one present bitmap in a group is borrowed too")
-	assert.Equal(t, []uint32{1, 2, 3}, unionSlots(bitmaps, []int{0, 2}).ToArray())
-	assert.Equal(t, []uint32{1, 2}, first.ToArray(), "inputs must not be mutated")
-}
-
 // ─── Cold-reader parity coverage ────────────────────────────────────────
 //
 // The hot tests above prove Query works against *HotStore. The whole
@@ -1162,12 +1142,14 @@ func TestUnionSlots(t *testing.T) {
 //
 //   - match-all asc                  → streamRange + cold FetchRange
 //   - match-all desc + cap           → streamRange top-down, slices.Backward
-//   - single-filter (contractID)     → LookupKeys + streamUnion asc
-//   - multi-term filter (AND)        → FastAnd over multiple cold bitmaps
+//   - single-filter (contractID)     → lookupPostings, which a ColdReader
+//                                      serves off LookupKeys, then the
+//                                      ascending slab walk
+//   - multi-term filter (AND)        → AndAny per group over cold bitmaps
 //   - cross-filter (OR)              → FastOr across filters
-//   - ledger range + filter          → roaring.And with the range bitmap
-//   - descending + range + cap       → ReverseIterator on cold-derived
-//                                      union, single-filter And path
+//   - ledger range + filter          → the window clipped into each slab's
+//                                      accumulator
+//   - descending + range + cap       → the slab walk run high to low
 //
 // What we don't replay against cold:
 //   - The mirror-poisoning collision test (mutating an mmap'd cold
@@ -1778,4 +1760,36 @@ func TestCountDistinctTerms(t *testing.T) {
 	assert.Equal(t, 1, CountDistinctTerms([]Filter{
 		{ContractID: cid, TopicCount: TopicCountFilter{Count: 1}},
 	}), "topic-count buckets are not value terms and are not counted")
+}
+
+// The first-batch hint contract: a positive hint sizes the first fetch, a wild
+// one is capped at eight default batches, and later batches use the default.
+// The cap scales with matchBatchSize, so a test-shrunk batch cannot be blown
+// past by a hint.
+func TestBatchSizes(t *testing.T) {
+	first, rest := batchSizes(0)
+	require.Equal(t, matchBatchSize, first)
+	require.Equal(t, matchBatchSize, rest)
+
+	first, rest = batchSizes(-3)
+	require.Equal(t, matchBatchSize, first)
+	require.Equal(t, matchBatchSize, rest)
+
+	first, rest = batchSizes(7)
+	require.Equal(t, 7, first)
+	require.Equal(t, matchBatchSize, rest)
+
+	first, rest = batchSizes(1000)
+	require.Equal(t, 1000, first, "a page-sized hint is the first fetch size")
+	require.Equal(t, matchBatchSize, rest)
+
+	first, rest = batchSizes(1 << 20)
+	require.Equal(t, 8*matchBatchSize, first, "oversized hints are capped")
+	require.Equal(t, matchBatchSize, rest)
+
+	defer func(n int) { matchBatchSize = n }(matchBatchSize)
+	matchBatchSize = 7
+	first, rest = batchSizes(1000)
+	require.Equal(t, 56, first, "the cap follows the seam")
+	require.Equal(t, 7, rest)
 }

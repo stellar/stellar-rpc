@@ -16,13 +16,12 @@ import (
 // (lookupPostings, postings.bitmap, postings.estimate): a read that
 // starts after an AddTo returns observes that AddTo's ids.
 //
-// It needs its own tests because the differentials cannot see the bug
-// it guards. matches_differential_test.go and match_iter_test.go build
-// their sources up front and then only read, so a postings accessor
-// that returned a stale dense snapshot — the raw pub pointer, nil-or-
-// behind after every write — would agree with the materialized twin on
-// every one of them. Only write-then-read-through-the-accessor
-// separates the two.
+// It needs its own tests because the match-path tests cannot see the
+// bug it guards. They build their sources up front and then only read,
+// so a postings accessor that returned a stale dense snapshot — the raw
+// pub pointer, nil-or-behind after every write — would agree with them
+// on every case. Only write-then-read-through-the-accessor separates
+// the two.
 
 // postingsIDs drains a term's postings through the accessor the query
 // engine uses, so a test asserting on it exercises the same path a
@@ -31,7 +30,7 @@ func postingsIDs(t *testing.T, s *ConcurrentBitmaps, key TermKey) []uint32 {
 	t.Helper()
 	p := s.lookupPostings(key)
 	require.True(t, p.present(), "the term must be present in the index")
-	return drain(p.iter(wholeWindow))
+	return postingIDs(p)
 }
 
 // denseOf returns the term's denseState, failing the test when the
@@ -70,7 +69,7 @@ func TestPostings_SparseLookupSeesTheWriteJustMade(t *testing.T) {
 		p := s.lookupPostings(key)
 		require.True(t, p.present(), "a term written to is present")
 		require.Nil(t, p.bitmap(), "a sub-threshold term stays sparse")
-		assert.Equal(t, want, drain(p.iter(wholeWindow)),
+		assert.Equal(t, want, postingIDs(p),
 			"the cursor must yield every id added so far, the last one included")
 		assert.Equal(t, uint64(len(want)), p.estimate(),
 			"estimate must count the write that just returned")
@@ -105,7 +104,7 @@ func TestPostings_PromotionIsVisibleThroughLookupPostings(t *testing.T) {
 	require.NotNil(t, p.bitmap(), "crossing the threshold promotes to a bitmap")
 	assert.True(t, p.bitmap().Contains(promoting),
 		"the promoting id must be in the bitmap the promotion built")
-	assert.Equal(t, want, drain(p.iter(wholeWindow)),
+	assert.Equal(t, want, postingIDs(p),
 		"a lookup straight after promotion yields every id the term holds")
 	assert.Equal(t, uint64(len(want)), p.estimate(),
 		"estimate must count the promoting write")
@@ -157,7 +156,7 @@ func TestPostings_DenseLookupSeesWritesSinceLastSnapshot(t *testing.T) {
 	assert.Equal(t, heldCard+uint64(len(fresh)), bm.GetCardinality())
 	assert.Equal(t, heldCard+uint64(len(fresh)), p.estimate(),
 		"estimate must count the writes made since the last snapshot")
-	assert.Subset(t, drain(p.iter(wholeWindow)), fresh,
+	assert.Subset(t, postingIDs(p), fresh,
 		"the cursor the query engine walks must yield the fresh ids too")
 }
 
@@ -320,7 +319,7 @@ func TestHotStore_LookupPostingsSeesTheWriteJustMade(t *testing.T) {
 	got, err := h.lookupPostings(t.Context(), []TermKey{sparseKey, denseKey})
 	require.NoError(t, err)
 	require.Len(t, got, 2)
-	assert.Equal(t, []uint32{1, 2, 3, 4}, drain(got[0].iter(wholeWindow)),
+	assert.Equal(t, []uint32{1, 2, 3, 4}, postingIDs(got[0]),
 		"the sparse term must carry the id added since the last lookup")
 	assert.Equal(t, uint64(4), got[0].estimate())
 	assert.True(t, got[1].bitmap().Contains(uint32(3_000_000)),
