@@ -43,8 +43,9 @@ package event
 // contract forbids mutating or Cloning. AndAny reads them through roaring's
 // read-only container accessors and writes only through the receiver, so
 // passing them is safe, and roaring_contract_test.go pins that property
-// against the pinned roaring version. acc is built by this call and is the
-// only bitmap ever mutated.
+// against the pinned roaring version. The only bitmaps this file mutates are
+// the per-filter accumulators it built itself, which is also why the union
+// across filters can run in place into the first of them.
 //
 // Freshness follows from holding them. The bitmaps are a point-in-time image
 // of the index taken at query start — a sparse hot term is copied out of the
@@ -263,8 +264,6 @@ type slabStepper struct {
 	cursor uint32
 	done   bool
 
-	perFilter []*roaring.Bitmap
-
 	// cur is the current slab's result, held only for its iterator.
 	cur *roaring.Bitmap
 	asc roaring.ManyIntIterable
@@ -378,23 +377,24 @@ func (s *slabStepper) nextBounds() (uint32, uint32, bool) {
 }
 
 // evalSlab is the union across filters of their per-slab results, or nil when
-// the slab holds nothing. Every input is a bitmap this call owns, so the
-// caller owns the union whichever path FastOr takes.
+// the slab holds nothing.
+//
+// Every per-filter result is a bitmap eval built for this call and nobody else
+// holds, so the union runs in place into the first of them rather than
+// allocating a separate answer to copy them all into.
 func (s *slabStepper) evalSlab(lo, hi uint32) *roaring.Bitmap {
-	s.perFilter = s.perFilter[:0]
+	var acc *roaring.Bitmap
 	for i := range s.filters {
-		if bm := s.filters[i].eval(lo, hi); bm != nil {
-			s.perFilter = append(s.perFilter, bm)
+		bm := s.filters[i].eval(lo, hi)
+		switch {
+		case bm == nil:
+		case acc == nil:
+			acc = bm
+		default:
+			acc.Or(bm)
 		}
 	}
-	switch len(s.perFilter) {
-	case 0:
-		return nil
-	case 1:
-		return s.perFilter[0]
-	default:
-		return roaring.FastOr(s.perFilter...)
-	}
+	return acc
 }
 
 // ensureSlab advances to the next slab that holds a match, reporting false
