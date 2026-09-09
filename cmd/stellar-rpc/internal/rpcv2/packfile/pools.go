@@ -9,11 +9,32 @@ package packfile
 //
 // Puts are capacity-capped so one pathological file cannot pin an arbitrarily
 // large array in a pool slot; larger buffers fall to the garbage collector.
+// Every cap must therefore sit above what a legitimate packfile needs, because
+// crossing one is silent: the Put is skipped, the pool drains, and every open
+// allocates afresh — still correct, but without the allocation win these pools
+// exist for.
 
 import "sync"
 
+// maxPooledOffsets caps the decoded offset table (recordCount+1 int64s, so an
+// 8 MiB array at the cap) a Put may retain. What it has to exceed is fixed by
+// chunk geometry, which this package cannot reach — packfile is a container
+// format with no domain dependencies — so the bound is a constant carrying
+// headroom rather than a derived one:
+//
+//   - the ledger cold pack stores one ledger per record, so its table is
+//     chunk.LedgersPerChunk+1 entries: 10,001;
+//   - events.pack and index.pack store 128 items per record, so 1<<20 entries
+//     covers ~134M events, or ~134M distinct index terms, within a single
+//     chunk — against the ~600K terms a production chunk carries today.
+//
+// Raise it if chunk geometry grows past that; see the file comment for what
+// happens silently if it isn't raised.
+const maxPooledOffsets = 1 << 20 // entries (8 MiB backing array)
+
 const (
-	maxPooledOffsets = 1 << 20 // entries (8 MiB backing array)
+	// maxPooledScratch tracks maxPooledOffsets: the FOR-decode scratch is
+	// recordCount uint32s to the offset table's recordCount+1 int64s.
 	maxPooledScratch = 1 << 20 // entries (4 MiB backing array)
 	maxPooledOpenBuf = 4 << 20 // bytes
 )
@@ -25,9 +46,16 @@ var (
 	openBufPool sync.Pool // *[]byte
 )
 
+// A size miss hands the pooled buffer back before allocating: Get has already
+// removed it from the pool, so returning it is the only thing that keeps a run
+// of growing opens from draining the pool one buffer per open.
+
 func getOffsets(n int) []int64 {
-	if p, _ := offsetsPool.Get().(*[]int64); p != nil && cap(*p) >= n {
-		return (*p)[:n]
+	if p, _ := offsetsPool.Get().(*[]int64); p != nil {
+		if cap(*p) >= n {
+			return (*p)[:n]
+		}
+		putOffsets(*p)
 	}
 	return make([]int64, n)
 }
@@ -43,8 +71,11 @@ func putOffsets(s []int64) {
 }
 
 func getScratch(n int) []uint32 {
-	if p, _ := scratchPool.Get().(*[]uint32); p != nil && cap(*p) >= n {
-		return (*p)[:n]
+	if p, _ := scratchPool.Get().(*[]uint32); p != nil {
+		if cap(*p) >= n {
+			return (*p)[:n]
+		}
+		putScratch(*p)
 	}
 	return make([]uint32, n)
 }
@@ -58,8 +89,11 @@ func putScratch(s []uint32) {
 }
 
 func getOpenBuf(n int) []byte {
-	if p, _ := openBufPool.Get().(*[]byte); p != nil && cap(*p) >= n {
-		return (*p)[:n]
+	if p, _ := openBufPool.Get().(*[]byte); p != nil {
+		if cap(*p) >= n {
+			return (*p)[:n]
+		}
+		putOpenBuf(*p)
 	}
 	return make([]byte, n)
 }
