@@ -1,18 +1,17 @@
 package event
 
-// byteArena hands out stable copies of transient byte slices from large
-// chunked allocations, so a fetch copying hundreds of small payloads costs a
-// handful of allocations rather than one each. Chunks are only appended within
-// capacity, so previously returned copies never move. Zero value is ready.
+// byteArena hands out stable copies of transient byte slices, carved from
+// larger chunks so a fetch copying hundreds of payloads costs a few
+// allocations rather than one each. A chunk is only appended within its
+// capacity, so returned copies never move. The zero value is ready.
 //
-// NOT safe for concurrent use: copy appends to one buffer, so a caller whose
-// copies come from several goroutines must serialize them.
+// Not safe for concurrent use.
 type byteArena struct {
 	buf []byte
 }
 
-// The allocation unit ramps: the first chunk is small so a one-event page does
-// not pay 64 KiB, and each subsequent chunk doubles up to arenaChunkSize.
+// The first chunk is small so a one-event page does not pay 64 KiB; each
+// later chunk doubles up to arenaChunkSize.
 const (
 	arenaFirstChunkSize = 4 << 10
 	arenaChunkSize      = 64 << 10

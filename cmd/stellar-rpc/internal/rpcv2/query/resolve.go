@@ -144,19 +144,14 @@ func (a *ReadView) resolveLedgers(c chunk.ID) (LedgerReader, func() error, error
 	}
 }
 
-// defaultColdEventReadConcurrency is the worker fan-out one cold events read
-// gets over its packfiles. A page's payload fetch is hundreds of scattered
-// records with no ordering between them, so serializing them only added their
-// latencies together. The right value is a property of the storage the daemon
-// reads through, never of the query the client asked for; this is the
-// NVMe-measured choice.
-//
-// The fan-out is per request, so the worker count multiplies both goroutines
-// and packfile's coalesced-read buffers by the number of cold pages in flight
-// — the footprint is workers × in-flight cold pages, not workers alone.
-//
-// The value is a compiled-in constant: changing it is a code change, and a
-// config knob gets added when a deployment on different storage needs one.
+// defaultColdEventReadConcurrency is the worker fan-out for one cold events
+// read over its packfiles. A page's payload fetch is hundreds of scattered
+// records with no ordering between them, and serial reads add their latencies
+// together. The value depends on the storage the daemon reads through, not on
+// the query, and was measured on NVMe. Its footprint is workers times
+// in-flight cold pages, in goroutines and in packfile's coalesced-read
+// buffers. It is compiled in; a config knob can follow if a deployment needs
+// a different value.
 const defaultColdEventReadConcurrency = 8
 
 // Events resolves chunk c's event store as the common event.Reader the

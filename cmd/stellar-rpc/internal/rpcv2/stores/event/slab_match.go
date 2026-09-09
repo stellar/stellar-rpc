@@ -1,59 +1,25 @@
 package event
 
-// slab_match.go is the candidate machinery behind Matches. It steps the window
-// one roaring slab at a time — 65536 ids, the span of exactly one container —
-// and answers the whole filter algebra inside that slab.
+// slab_match.go produces the candidate ids behind Matches. The window is
+// walked one slab at a time, 65536 ids, the span of one roaring container,
+// and the whole filter algebra is evaluated inside each slab. Direction is
+// only the walk order: ascending walks slabs low to high and reads each
+// result forward, descending walks high to low and reads backward.
 //
-// The window is applied first rather than last, so no id outside it is ever
-// read. Every input to a slab's evaluation is a single container and every
-// intermediate the engine allocates holds at most one.
+// Work is lazy per slab. A consumer that stops after one page has paid for
+// the slabs that page spans, one container per input per filter each. Slabs
+// that can hold no candidate are skipped: before evaluating a slab the walk
+// asks the term bitmaps where the next candidate can be and jumps there (see
+// the bound helpers below).
 //
-// Direction is the slab walk order and nothing else: ascending walks slabs low
-// to high and reads each result forward, descending walks them high to low and
-// reads each result backward. One code path serves both.
-//
-// Laziness is per slab, not per id. A consumer that stops after one page has
-// evaluated only the slabs that page spans, and the cost inside a slab is
-// bounded by the containers its inputs hold there rather than by the width of
-// the window. The unit is the slab, so a page ending mid-slab has paid for
-// that whole slab: one container's worth of work per input per filter.
-//
-// Slabs that can hold no candidate are not paid for at all. Before evaluating
-// one the walk asks the held term bitmaps where the next candidate could be
-// and jumps there when the answer is past this slab, so a rare term spread
-// over a wide window costs its own slabs and no others. See "the skip" below
-// for the bound and why it is sound.
-//
-// The trade is descending over a whole window. The whole-chunk union this
-// replaced ANDed the chunk-sized terms once with roaring's bulk aggregation,
-// where the walk re-enters the algebra per slab. Measured over a 300k-event
-// corpus, that cost +8µs on a descending page of a two-fat-term AND (9.9µs →
-// 18.1µs) and +170µs on a descending full scan of one chunk-sized term timed
-// on candidates alone (1.20ms → 1.37ms), which the fetch swallows end to end
-// (10.88ms → 10.93ms). Descending pages that stop early got faster (148µs →
-// 128µs), because the union paid for the whole chunk before yielding
-// anything. The skip closes the rest of that gap where the terms are sparse
-// enough to prove a jump, and seeds the first descending slab at the highest
-// candidate rather than at the window's high bound.
-//
-// Ownership. Every term the query names is materialized once, by the single
-// batched Reader.LookupKeys call in Matches, and the resulting bitmaps are
-// held for the whole walk. They are read-only: a hot dense term's bitmap is
-// the denseState.snapshot every concurrent reader shares, which the index's
-// contract forbids mutating or Cloning. AndAny reads them through roaring's
-// read-only container accessors and writes only through the receiver, so
-// passing them is safe, and roaring_contract_test.go pins that property
-// against the pinned roaring version. The only bitmaps this file mutates are
-// the per-filter accumulators it built itself, which is also why the union
-// across filters can run in place into the first of them.
-//
-// Freshness follows from holding them. The bitmaps are a point-in-time image
-// of the index taken at query start — a sparse hot term is copied out of the
-// atomically published id list, a dense one is denseState's published
-// snapshot — so an id ingested while the walk runs is invisible to it, in
-// either direction and at every slab. That is what the pinned window already
-// promises: see IDRange's snapshot-isolation contract, under which no event
-// past the pinned End is visible to the request anyway.
+// The term bitmaps come from the single Reader.LookupKeys call at query start
+// and are held for the whole walk. They are read-only and may be snapshots
+// shared with other readers. AndAny reads its arguments and writes only its
+// receiver, which roaring_contract_test.go pins against the pinned roaring
+// version; the only bitmaps this file mutates are the per-filter accumulators
+// it builds. Because the lookup is a point-in-time image, ids ingested during
+// the walk are invisible to it, as IDRange's snapshot-isolation contract
+// already requires.
 
 import (
 	"cmp"
@@ -63,22 +29,17 @@ import (
 	"github.com/RoaringBitmap/roaring/v2"
 )
 
-// slabShift sets the slab width as a power of two: 1<<16 is exactly one
-// roaring container.
-//
-// A var rather than a const so in-package tests can shrink it and drive slab
-// seams over a small corpus. It never changes what a stream yields.
+// slabShift is the slab width as a power of two; 1<<16 is one roaring
+// container. A var so tests can shrink it. It never changes what a stream
+// yields.
 //
 //nolint:gochecknoglobals // test seam; production never writes it
 var slabShift uint = 16
 
-// slabTerms is one of a filter's term groups resolved out of the batched
-// lookup: the bitmaps the index returned for the group's present terms, held
-// for the whole query. The group's value is their union.
-//
-// est is the summed cardinality of those bitmaps. It ignores the window, so it
-// ranks a filter's groups rather than counting a query's candidates, and it is
-// what orders the AND.
+// slabTerms is one term group of a filter: the bitmaps the index returned for
+// its present terms, held for the whole query. The group's value is their
+// union. est is their summed cardinality over the whole chunk and orders a
+// filter's groups, rarest first.
 type slabTerms struct {
 	bitmaps []*roaring.Bitmap
 	est     uint64
@@ -89,13 +50,9 @@ type slabFilter struct {
 	groups []slabTerms
 }
 
-// resolveSlabTerms collects the bitmaps at slots, reporting false when every
-// one of them is absent from the index — the signal that the owning filter can
-// match nothing.
-//
-// A present term is a non-nil bitmap, empty or not: an empty one contributes
-// nothing to the union but still keeps the group alive, which an absent term's
-// caller-side skip would not do.
+// resolveSlabTerms collects the bitmaps at slots. ok is false when every one
+// is absent from the index, in which case the owning filter can match nothing.
+// A present but empty bitmap keeps the group alive.
 func resolveSlabTerms(sources []*roaring.Bitmap, slots []int) (slabTerms, bool) {
 	var g slabTerms
 	for _, slot := range slots {
@@ -109,10 +66,9 @@ func resolveSlabTerms(sources []*roaring.Bitmap, slots []int) (slabTerms, bool) 
 	return g, len(g.bitmaps) > 0
 }
 
-// resolveSlabFilters is the planning step: resolve every filter's groups, drop
-// the filters that named an entirely absent group, and order each survivor's
-// groups rarest first so the accumulator shrinks fastest and a group that
-// empties it ends the slab before the fat groups are read.
+// resolveSlabFilters resolves every filter's groups, drops the filters that
+// named an entirely absent group, and orders each survivor's groups rarest
+// first so the accumulator shrinks fastest.
 func resolveSlabFilters(plans []termPlan, sources []*roaring.Bitmap) []slabFilter {
 	out := make([]slabFilter, 0, len(plans))
 	for _, plan := range plans {
@@ -137,15 +93,11 @@ func resolveSlabFilters(plans []termPlan, sources []*roaring.Bitmap) []slabFilte
 	return out
 }
 
-// eval returns f's matches inside [lo, hi) as a freshly built bitmap the
-// caller owns, or nil when f matches nothing there.
-//
-// The accumulator starts as the slab window itself and is narrowed group by
-// group in place: AndAny is x.And(FastOr(args)) without the intermediate
-// union, so one call is a whole group.
-//
-// A filter reaching here always names at least one group: one that names none
-// matches everything and takes the match-all path upstream.
+// eval returns f's matches inside [lo, hi) as a fresh bitmap the caller owns,
+// or nil when there are none. The accumulator starts as the slab range and is
+// narrowed in place by one AndAny per group, which is x.And(FastOr(args))
+// without the intermediate union. A filter always names at least one group;
+// one that names none takes the match-all path upstream.
 func (f *slabFilter) eval(lo, hi uint32) *roaring.Bitmap {
 	acc := roaring.New()
 	acc.AddRange(uint64(lo), uint64(hi))
@@ -158,49 +110,33 @@ func (f *slabFilter) eval(lo, hi uint32) *roaring.Bitmap {
 	return acc
 }
 
-// ──────────────────────── the skip ────────────────────────────
+// Bounds. A slab is skipped only on a bound proved from the term bitmaps
+// themselves. Ascending, at position pos:
 //
-// The walk skips a slab only on a bound it has proved, from the same bitmaps
-// it would have evaluated the slab with. Ascending, at position pos:
+//   - a group's bound is the smallest NextValue(pos) over its terms, since a
+//     candidate lies in at least one of them; no term holding one proves the
+//     group, and so its filter, matches nothing from pos on;
+//   - a filter's bound is the largest of its groups' bounds, since a
+//     candidate satisfies every group;
+//   - the query's bound is the smallest of the live filters' bounds.
 //
-//   - a candidate lies in at least one of a group's terms, so it is at or
-//     above the smallest id at or above pos that any of them holds — the
-//     minimum of their NextValue(pos). No term holding one proves the owning
-//     filter matches nothing from pos on;
-//   - a candidate satisfies every group of its filter, so the filter's bound
-//     is the largest of its groups' bounds;
-//   - a candidate belongs to some filter, so the query's bound is the
-//     smallest of the surviving filters' bounds, and all filters exhausted
-//     means the walk is over.
-//
-// Descending is the mirror: PreviousValue, maximum within a group, minimum
-// across a filter's groups, maximum across filters. The post-filter only ever
-// drops candidates, so a bound proved on the index bounds the stream.
-//
-// roaring's NextValue and PreviousValue answer inclusive of the target and
-// -1 for none, and read the bitmap without writing it — they are called on
-// snapshots shared with every other reader. roaring_contract_test.go pins
-// both properties against the pinned version.
-//
-// A bound the walk has proved is held rather than proved again at every slab,
-// and it decides which filters a slab is evaluated for: see slabStepper.bounds.
+// Descending mirrors this with PreviousValue and the min and max swapped.
+// The post-filter only drops candidates, so a bound proved on the index
+// bounds the stream. NextValue and PreviousValue are inclusive of the target,
+// return -1 for none, and do not write the bitmap they search;
+// roaring_contract_test.go pins all three properties.
 
-// boundRetired marks a filter that has proved it can match nothing more in the
-// window: its terms ran out ahead of the cursor, which only ever moves further
-// from them, so the walk drops it for good rather than asking again at every
-// remaining slab. Below every id, so the test for a bound outside the current
-// slab covers it too.
+// boundRetired marks a filter whose terms ran out ahead of the cursor. The
+// cursor never comes back, so the filter is dropped for the rest of the walk.
+// It sorts below every id, so the "outside this slab" test covers it.
 const boundRetired = int64(-1)
 
 // nextBound is the group's bound: the smallest id at or above pos that any of
-// its terms holds. ok is false when none does, which proves the group, and so
-// the filter owning it, matches nothing from pos on.
+// its terms holds. ok is false when none does.
 func (g *slabTerms) nextBound(pos uint32) (uint32, bool) {
 	if len(g.bitmaps) == 0 {
-		// A group naming no term constrains nothing and proves no bound.
-		// resolveSlabTerms never builds one and a filter that would take
-		// the match-all path never reaches the stepper, but the answer that
-		// skips nothing is the safe one to give.
+		// Unreachable, since resolveSlabTerms never builds an empty group;
+		// an empty group constrains nothing and so proves no bound.
 		return pos, true
 	}
 	best := int64(-1)
@@ -234,9 +170,8 @@ func (g *slabTerms) prevBound(pos uint32) (uint32, bool) {
 	return uint32(best), true
 }
 
-// nextBound is the filter's bound: a candidate satisfies every group, so the
-// strongest of the groups' bounds holds. ok is false as soon as one group
-// proves the filter is done.
+// nextBound is the filter's bound: the largest of its groups' bounds. ok is
+// false as soon as one group proves the filter is done.
 func (f *slabFilter) nextBound(pos uint32) (uint32, bool) {
 	bound := pos
 	for i := range f.groups {
@@ -269,23 +204,14 @@ type slabStepper struct {
 	window  IDRange
 	desc    bool
 
-	// bounds holds what the walk has proved about each filter, parallel to
-	// filters: the id it proved its next candidate lies at or past — at or
-	// before, descending — or boundRetired once it proved it has none left.
-	//
-	// The invariant that makes holding one sound: a filter's bound is monotone
-	// in the walk direction, so one proved at a cursor position still proves
-	// the same emptiness at every position the cursor reaches up to it. A held
-	// bound can be weaker than one proved afresh, because a filter's groups
-	// can pull apart as the cursor advances; weaker costs a slab the walk
-	// could have skipped and never a match.
-	//
-	// So a bound is proved again only once the cursor has reached it, and a
-	// bound past the current slab excuses its filter from being evaluated
-	// there at all — the work a slab costs is the filters live in it rather
-	// than every filter the query named. Seeding each bound at the cursor's
-	// own start, where it proves nothing, is what makes the first step prove
-	// them all.
+	// bounds holds, per filter, the id its next candidate is proved to lie at
+	// or past (at or before, descending), or boundRetired once it has none
+	// left. A bound is monotone in the walk direction, so one proved earlier
+	// still holds at every position up to it: it is re-proved only once the
+	// cursor reaches it, and a filter whose bound lies past the current slab
+	// is not evaluated there. A held bound can be weaker than a fresh one,
+	// which costs an evaluated slab, never a match. Bounds start at the
+	// cursor so the first step proves them all.
 	bounds []int64
 
 	// cursor is the next unevaluated boundary: the inclusive low bound
@@ -319,14 +245,10 @@ func newSlabStepper(
 	return s
 }
 
-// seekAsc is the lowest position at or above pos that any filter can still
-// match at, and false when none can inside the window: a candidate belongs to
-// some filter, so the smallest of their bounds holds for the union. Filters that
-// are done are retired rather than ending the walk, since a live one may still
-// match.
-//
-// Only a filter whose stored bound pos has reached is asked again; the rest
-// answer from the bound they proved earlier, which pos has not yet passed.
+// seekAsc returns the lowest position at or above pos where some filter can
+// still match, or false when none can inside the window. A filter is asked
+// again only once pos has reached its held bound; a filter with no bound
+// left is retired rather than ending the walk.
 func (s *slabStepper) seekAsc(pos uint32) (uint32, bool) {
 	var best int64
 	found := false
@@ -380,22 +302,18 @@ func (s *slabStepper) seekDesc(hi uint32) (uint32, bool) {
 	return uint32(best) + 1, true
 }
 
-// nextBounds returns the next slab's [lo, hi) clipped to the window, walking
-// away from the cursor in the query's direction.
-//
-// The cursor moves to the proved bound first, so the slab returned is the one
-// holding the next possible candidate rather than the one adjacent to the
-// last: every slab between is candidate-free for every filter. The bound also
-// clips the accumulator inside its own slab, so a slab entered part-way is
-// entered at the candidate and not at its base.
+// nextBounds returns the next slab's [lo, hi), clipped to the window, in the
+// walk's direction. The cursor first moves to the proved bound, so the slab
+// returned holds the next possible candidate and is entered at that candidate
+// rather than at its base.
 func (s *slabStepper) nextBounds() (uint32, uint32, bool) {
 	if s.done {
 		return 0, 0, false
 	}
 	if s.desc {
-		// hi-1 is read inside seekDesc. hi > window.Start >= 0 here, because
-		// an empty window never reaches the stepper and the walk stops at
-		// window.Start.
+		// hi > window.Start here, because an empty window never reaches the
+		// stepper and the walk stops at window.Start, so seekDesc's hi-1
+		// cannot underflow.
 		hi, ok := s.seekDesc(s.cursor)
 		if !ok {
 			s.done = true
@@ -427,17 +345,11 @@ func (s *slabStepper) nextBounds() (uint32, uint32, bool) {
 	return lo, hi, true
 }
 
-// evalSlab is the union across filters of their per-slab results, or nil when
-// the slab holds nothing.
-//
-// Only the filters this slab is about are evaluated. The bound the seek just
-// proved for each one says where its next candidate can be, and one lying
-// outside [lo, hi) — a retired filter's included — already proves the filter
-// matches nothing here, which eval would spend a bitmap to rediscover.
-//
-// Every per-filter result is a bitmap eval built for this call and nobody else
-// holds, so the union runs in place into the first of them rather than
-// allocating a separate answer to copy them all into.
+// evalSlab unions the per-filter results for [lo, hi), or returns nil when
+// the slab holds nothing. A filter whose bound lies outside the slab is
+// skipped, since the bound already proves it matches nothing here. The
+// results are this call's own bitmaps, so the union runs in place into the
+// first of them.
 func (s *slabStepper) evalSlab(lo, hi uint32) *roaring.Bitmap {
 	var acc *roaring.Bitmap
 	for i := range s.filters {
@@ -513,9 +425,8 @@ func (s *slabStepper) appendUpTo(dst []uint32, n int) []uint32 {
 	return dst
 }
 
-// streamSlabs is the streaming loop, shared by both directions because the
-// stepper already hides direction: fill one internal batch of candidate
-// ordinals out of the stepper, fetch, post-filter, yield the survivors.
+// streamSlabs is the streaming loop for both directions: fill one batch of
+// candidate ordinals from the stepper, fetch, post-filter, yield.
 func streamSlabs(
 	ctx context.Context, r Reader, filters []Filter, st *slabStepper,
 	descending bool, firstBatch int, yield func(Match, error) bool,

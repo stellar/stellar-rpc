@@ -161,13 +161,11 @@ type Reader struct {
 
 	waitOpen func() error // blocks until background open completes
 
-	// closed and inflight are the Close-vs-read handshake that lets Close
-	// recycle the pooled offsets. Reads increment inflight before checking
-	// closed; Close sets closed before reading inflight. Either the read
-	// sees closed and backs out, or Close sees the reader and leaves the
-	// offsets to the garbage collector. A read racing Close is a caller
-	// contract violation either way; this turns its worst case from memory
-	// reuse into a leak.
+	// closed and inflight let Close recycle the pooled offsets safely. A read
+	// increments inflight before checking closed; Close sets closed before
+	// reading inflight. So either the read backs out, or Close sees it and
+	// leaves the offsets to the garbage collector. A read racing Close is a
+	// caller bug either way; this makes its worst case a leak, not reuse.
 	closed   atomic.Bool
 	inflight atomic.Int64
 
@@ -273,9 +271,8 @@ func doOpen(path string) openResult {
 	var indexBuf []byte
 	var appData []byte
 
-	// Both arms hand decodeIndex a view into a pooled buffer. The index bytes
-	// are dead once the offsets are built, so only appData, which the Reader
-	// keeps, is copied out.
+	// Both arms hand decodeIndex a view into a pooled buffer; only appData,
+	// which the Reader keeps, is copied out.
 	if tailSize <= speculativeSize {
 		// Index + appData are already inside the speculative read.
 		tailStart := len(speculativeBuf) - int(tailSize)
@@ -331,8 +328,8 @@ func doOpen(path string) openResult {
 		}
 	}
 
-	// Last, so that no error path below holds a pooled offsets table: on
-	// success the Reader owns it until Close recycles it.
+	// Decoded last: the table is pooled, and every check that could still
+	// fail has run, so on success the Reader owns it until Close.
 	offsets, err := decodeIndex(indexBuf, recordCount, indexSize, indexBase)
 	if err != nil {
 		return openResult{err: err}
@@ -803,10 +800,9 @@ func (r *Reader) Close() error {
 		if r.file != nil {
 			closeErr = r.file.Close()
 		}
-		// Recycle only when no read is in flight: closed is already set, so
-		// no new read can begin, and a zero count proves no existing one
-		// holds the array. A read still in flight is a contract violation;
-		// leaving the array to the collector keeps it merely a leak.
+		// Recycle only when no read is in flight. closed is already set, so
+		// no new read can begin; a read still in flight is a caller bug, and
+		// leaving the array to the collector keeps that a leak.
 		if r.inflight.Load() == 0 && r.offsets != nil {
 			putOffsets(r.offsets)
 			r.offsets = nil

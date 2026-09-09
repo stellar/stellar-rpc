@@ -434,12 +434,11 @@ func buildMPHF(
 // <chunkDir>/index.hash produced by an earlier buildMPHF) for
 // query-time lookups.
 //
-// The file is mmapped, never read whole. Pages fault in from the kernel page
-// cache, which is keyed by the file rather than the mapping, so every reader
-// of the same chunk shares them however short its own lifetime. A per-request
-// open therefore costs a map/unmap pair and the pages its lookups touch, not a
-// heap copy of a file whose size has no design bound: it scales with the
-// chunk's distinct term count, which is caller-controlled on-chain data.
+// The file is mmapped rather than read whole. Pages fault in from the kernel
+// page cache, which every reader of the same chunk shares regardless of its
+// own lifetime, so a per-request open costs a map and unmap plus the pages
+// its lookups touch, not a copy of a file whose size scales with the chunk's
+// term count.
 //
 // Close unmaps; callers must call it.
 func openMPHF(path string) (*mphf, error) {

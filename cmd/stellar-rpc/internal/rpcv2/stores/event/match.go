@@ -8,12 +8,11 @@ package event
 //
 // Optimization shape: terms are deduped across filters and issued as
 // a single batched Reader.LookupKeys at iteration start, whose bitmaps
-// the walk then holds for the whole query; payload fetches stream in
+// the walk holds for the whole query; payload fetches stream in
 // internal batches. On the cold path the lookup is one MPHF+index.pack
-// round trip per Matches call, not per batch.
-//
-// The candidate set comes from the slab-stepped engine in slab_match.go, which
-// answers both directions from one walk over the window.
+// round trip per Matches call. The candidate set comes from the slab
+// engine in slab_match.go, which serves both directions from one walk
+// over the window.
 
 import (
 	"bytes"
@@ -220,10 +219,9 @@ type Match struct {
 type termPlan [][]int
 
 // batchSizes resolves the first and following internal batch sizes from the
-// caller's hint. The hint is a validated page size — every handler clamps it
-// to its protocol limit before it reaches Matches — so it is honored in full
-// and a page arrives in one fetch. Both sizes are clamped positive: a zero
-// step never advances, so a zero test seam would stall the stream.
+// caller's hint. The hint is a page size the handler has already validated,
+// so it is honored in full and a page arrives in one fetch. Both sizes are
+// clamped positive: a zero step would stall the stream.
 func batchSizes(hint int) (int, int) {
 	rest := max(1, matchBatchSize)
 	first := rest
@@ -253,9 +251,8 @@ func batchSizes(hint int) (int, int) {
 // drops are invisible: the iterator advances past them internally, so
 // consumers never see or reason about resume state.
 //
-// firstBatch sizes the first internal fetch batch: a consumer that will stop
-// after N matches passes N. Zero and negative hints use the default; a
-// positive one is a validated page size and is honored in full. The hint
+// firstBatch sizes the first internal fetch: a consumer that will stop after
+// N matches passes N. Zero and negative hints use the default. The hint
 // changes I/O counts only, never what the stream yields.
 func Matches(
 	ctx context.Context, r Reader, filters []Filter, window IDRange,
@@ -317,17 +314,14 @@ func validateMatchCall(ctx context.Context, r Reader, filters []Filter, window I
 	return nil
 }
 
-// planIndexTerms is step 1 of the index side, shared by both
-// directions and run before any index I/O: dedupe the terms the
-// filters name across the whole query, and resolve each filter's
-// groups to slots in the single batched lookup that follows. plans[i]
-// holds the slots filter i needs; the terms within a group are OR-ed
-// and the groups AND-ed.
+// planIndexTerms dedupes the terms the filters name and resolves each
+// filter's groups to slots in the single batched lookup that follows;
+// it runs before any index I/O. plans[i] holds the slots filter i
+// needs: terms within a group are OR-ed and groups are AND-ed.
 //
-// matchAll reports that some filter, or the empty slice, constrains nothing,
-// so the caller streams the window directly. Reading that off the term groups
-// is what keeps an unconstrained filter from intersecting nothing and coming
-// back empty.
+// matchAll reports that some filter, or the empty slice, constrains
+// nothing, so the caller streams the window directly rather than
+// intersecting nothing and returning empty.
 func planIndexTerms(filters []Filter) ([]termPlan, []TermKey, bool) {
 	if len(filters) == 0 {
 		return nil, nil, true

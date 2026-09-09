@@ -29,10 +29,9 @@ const (
 //
 //   - DataCF holds XDR-encoded event payloads: compressible (zstd
 //     typically 2-3× on XDR) and read in batches via
-//     BatchedMultiGetCF. The block is the decompression unit of a point
-//     read, so its size trades compression context against per-miss work:
-//     getEvents fetches scattered ~250B events, and a 32 KiB block made
-//     every cache miss decompress ~128 of them to serve one.
+//     BatchedMultiGetCF. A point read decompresses one block to serve
+//     one ~250B event, so a 32 KiB block paid for ~128 events per cache
+//     miss.
 //   - IndexCF stores 20-byte (term_hash || event_id) keys with
 //     empty values — nothing in the values to compress, and small
 //     blocks reduce wasted I/O per random Lookup miss (each Lookup
@@ -40,10 +39,9 @@ const (
 //   - OffsetsCF stores 8-byte (ledger_seq -> event_count) rows in
 //     the tens-of-thousands per chunk — same shape as IndexCF.
 //
-// A block size takes effect as SSTs are written, so chunks already on disk
-// keep whatever size they were built with: changing one of these constants
-// reaches a running deployment only as natural compaction or chunk rotation
-// rewrites those SSTs, never at restart.
+// A block size applies to SSTs as they are written. Chunks already on disk
+// keep theirs until compaction or rotation rewrites them; a restart changes
+// nothing.
 const (
 	dataCFBlockSize    = 8 * 1024
 	indexCFBlockSize   = 4 * 1024
@@ -185,12 +183,11 @@ func (h *HotStore) Offsets() (*LedgerOffsets, error) {
 // interface so callers can program against batched lookups
 // uniformly.
 //
-// Freshness, which the match path holds these bitmaps across a whole
-// query on: each is a point-in-time image of its term. A sparse term
-// is copied out of the mirror's atomically published id list; a dense
-// one is denseState.snapshot, the immutable clone shared with every
-// other reader of that term. Neither grows under its holder as ingest
-// continues, so a walk started now never sees an id written later.
+// Each bitmap is a point-in-time image of its term: a sparse term is
+// copied out of the mirror's published id list, a dense one is
+// denseState.snapshot, the immutable clone shared with every other
+// reader. Neither grows under its holder, so a walk never sees an id
+// written after its lookup.
 func (h *HotStore) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.Bitmap, error) {
 	if h.chunkStore.IsClosed() {
 		return nil, stores.ErrStoreClosed
@@ -686,19 +683,14 @@ func encodeDataKey(eventID uint32) []byte {
 	return key[:]
 }
 
-// encodeDataKeys encodes every id into ONE backing buffer and returns
+// encodeDataKeys encodes every id into one backing buffer and returns
 // per-id sub-slices of it, in input order: two allocations for the
-// whole batch (the buffer plus the slice headers) instead of one per
-// id. encodeDataKey cannot serve this loop — its array escapes through
-// the returned slice, so each 4-byte key is heap-allocated
-// ("moved to heap: key" under -gcflags=-m), and a limit=1000 page pays
-// 1000 of them just to name its rows.
+// batch rather than one per id, which is what encodeDataKey costs
+// because its array escapes through the returned slice.
 //
-// The returned slices alias one array and are read-only. A consumer
-// must not retain them past the call it passes them to.
-// rocksdb.Store.BatchMultiGet qualifies: grocksdb copies every key into
-// C memory and frees that copy before the batched get returns, so
-// nothing outlives the call.
+// The slices alias one array and must not be retained past the call
+// they are passed to. BatchMultiGet qualifies: grocksdb copies each key
+// into C memory and frees the copy before returning.
 func encodeDataKeys(eventIDs []uint32) [][]byte {
 	buf := make([]byte, dataKeyLen*len(eventIDs))
 	keys := make([][]byte, len(eventIDs))

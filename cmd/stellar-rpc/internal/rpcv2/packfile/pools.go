@@ -1,39 +1,27 @@
 package packfile
 
-// Open-path allocation pools. The v2 read path opens cold packfiles per
-// request, and every open allocates the decoded offset index, its FOR-decode
-// scratch and the open-time read buffers. These pools recycle the backing
-// memory only: contents are always fully rewritten before use, and every
-// pooled buffer is either dead before its function returns or reader-private
-// until Close hands it back.
+// Pools for the open path. Cold packfiles are opened per request, and every
+// open decodes an offset table, with FOR-decode scratch, out of read buffers;
+// these pools recycle that memory. Contents are fully rewritten before use,
+// and a pooled buffer is either dead before its function returns or
+// reader-private until Close returns it.
 //
-// Puts are capacity-capped so one pathological file cannot pin an arbitrarily
-// large array in a pool slot; larger buffers fall to the garbage collector.
-// Every cap must therefore sit above what a legitimate packfile needs, because
-// crossing one is otherwise silent: the Put is skipped, the pool drains, and
-// every open allocates afresh — still correct, but without the allocation win
-// these pools exist for. capSkips counts those skipped Puts so the drain is
-// visible from outside the process instead.
+// Puts are capped so one pathological file cannot pin a huge array. A cap
+// must sit above what a legitimate packfile needs: crossing it skips the Put,
+// the pool drains, and every open allocates afresh. capSkips counts those
+// skips so the drain is visible.
 
 import (
 	"sync"
 	"sync/atomic"
 )
 
-// maxPooledOffsets caps the decoded offset table (recordCount+1 int64s, so an
-// 8 MiB array at the cap) a Put may retain. What it has to exceed is fixed by
-// chunk geometry, which this package cannot reach — packfile is a container
-// format with no domain dependencies — so the bound is a constant carrying
-// headroom rather than a derived one:
-//
-//   - the ledger cold pack stores one ledger per record, so its table is
-//     chunk.LedgersPerChunk+1 entries: 10,001;
-//   - events.pack and index.pack store 128 items per record, so 1<<20 entries
-//     covers ~134M events, or ~134M distinct index terms, within a single
-//     chunk — against the ~600K terms a production chunk carries today.
-//
-// Raise it if chunk geometry grows past that; see the file comment for what
-// happens silently if it isn't raised.
+// maxPooledOffsets caps the decoded offset table (recordCount+1 int64s) a Put
+// may retain. Chunk geometry, which this package cannot import, sets what it
+// must exceed: the ledger pack holds one ledger per record, 10,001 entries;
+// events.pack and index.pack hold 128 items per record, so 1<<20 entries
+// covers about 134M events or index terms per chunk, against roughly 600K
+// terms in a production chunk today. Raise it if the geometry grows.
 const maxPooledOffsets = 1 << 20 // entries (8 MiB backing array)
 
 const (
@@ -50,28 +38,22 @@ var (
 	openBufPool sync.Pool // *[]byte
 )
 
-// capSkips counts the Puts dropped for exceeding their pool's cap, across all
-// three pools. Each one is a buffer the pool did not get back, so a count that
-// climbs with the open rate is the file comment's silent drain in progress.
-// Process-wide by design — the metrics exporter reads it via PoolCapSkips.
+// capSkips counts Puts dropped for exceeding a cap, across all three pools.
+// A count that climbs with the open rate means the pools have stopped
+// recycling. Exported through PoolCapSkips.
 //
 //nolint:gochecknoglobals // one tally across process-wide pools; read-only outside this file
 var capSkips atomic.Uint64
 
 // PoolCapSkips returns the process-wide count of pooled buffers dropped for
-// exceeding a capacity cap.
-//
-// Zero is the state the caps are chosen for, and the only healthy one: any
-// count means some packfile crossed a cap, and a climbing count means the
-// pools have stopped recycling. Raise the cap the file comment sizes against
-// the geometry that grew. See capSkips.
+// exceeding a capacity cap. Zero is the only healthy value; a climbing count
+// means a cap wants raising.
 func PoolCapSkips() uint64 { return capSkips.Load() }
 
-// A size miss hands the pooled buffer back before allocating: Get has already
-// removed it from the pool, so returning it is the only thing that keeps a run
-// of growing opens from draining the pool one buffer per open. That buffer is
-// under its cap by construction — the pool held it — so it never counts as a
-// cap skip.
+// On a size miss the pooled buffer is returned before a larger one is
+// allocated: Get already removed it, and returning it is what keeps a run of
+// growing opens from draining the pool. It is under its cap, so it never
+// counts as a skip.
 
 func getOffsets(n int) []int64 {
 	if p, _ := offsetsPool.Get().(*[]int64); p != nil {

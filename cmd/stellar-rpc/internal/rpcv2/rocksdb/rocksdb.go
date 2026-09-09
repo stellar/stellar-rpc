@@ -130,12 +130,10 @@ type Store struct {
 	ro        *grocksdb.ReadOptions
 	wo        *grocksdb.WriteOptions
 
-	// roAsync is ro plus async IO, for BatchMultiGet. A second options
-	// object rather than a flag on ro: async IO belongs to the batched
-	// read alone, and setting it on the shared ro would hand it to every
-	// concurrent Get, GetPinned and iterator on this Store. Built once at
-	// open and never mutated after, so a batched read crosses into C for
-	// the read itself and not to configure it.
+	// roAsync is ro plus async IO, used by BatchMultiGet. A separate object
+	// keeps the shared ro, and every Get and iterator on it, synchronous.
+	// Built at open and never mutated, so it is safe to share across
+	// concurrent batched reads.
 	roAsync *grocksdb.ReadOptions
 
 	// cache is the block cache shared across every CF in this store,
@@ -253,16 +251,13 @@ func (s *Store) GetPinned(cf string, key []byte, fn func(value []byte) error) (b
 // unsorted input is undefined per RocksDB semantics.
 //
 // keys are not retained past the call: grocksdb copies each into C
-// memory and frees that copy before the batched get returns. A caller
-// may therefore carve the whole list out of one buffer rather than
-// allocating a key at a time (see event.encodeDataKeys).
+// memory and frees the copy before returning, so a caller may carve
+// the whole list out of one buffer (see event.encodeDataKeys).
 //
-// Reads through the store's async_io read options (roAsync, built at
-// open) so the kernel can issue overlapping I/Os under the hood
-// (notable on EBS / high random-latency storage). The batched call is
-// a single CGO crossing; callers needing cancellation between
-// individual key reads should not use this API — split into multiple
-// calls or use Get in a loop.
+// Reads use roAsync, the store's async_io read options, so the kernel
+// can overlap the I/Os. The batched call is a single CGO crossing;
+// callers needing cancellation between individual keys should split
+// into multiple calls or use Get in a loop.
 func (s *Store) BatchMultiGet(cf string, keys [][]byte) ([][]byte, error) {
 	if len(keys) == 0 {
 		return nil, nil
@@ -284,11 +279,10 @@ func (s *Store) BatchMultiGet(cf string, keys [][]byte) ([][]byte, error) {
 	defer pinned.Destroy()
 
 	// Copy out of the pinned cache pages, which Destroy invalidates, through
-	// one arena rather than a clone per value. Each pinned value is read ONCE:
-	// Data heap-allocates a cgo out-param per call, so the sizing pass keeps
-	// the C-backed slice (valid until pinned.Destroy) and the copy pass reads
-	// from it. The returned slices share one backing array: they are
-	// read-only, and retaining one retains the batch.
+	// one arena rather than a clone per value. Each pinned value is read once,
+	// since Data heap-allocates an out-param per call: the sizing pass keeps
+	// the C-backed slice, valid until Destroy, and the copy pass reads it. The
+	// returned slices share one backing array; retaining one retains the batch.
 	results := make([][]byte, len(keys))
 	total := 0
 	for i, p := range pinned {
@@ -784,7 +778,7 @@ func (s *Store) constructAndOpen() error {
 	s.roAsync = grocksdb.NewDefaultReadOptions()
 	s.wo = grocksdb.NewDefaultWriteOptions()
 
-	// The one setting that separates roAsync from ro. See the field.
+	// Async IO is the only difference from ro; see the field.
 	s.roAsync.SetAsyncIO(true)
 
 	// WAL on + per-write Sync on — non-negotiable across every
