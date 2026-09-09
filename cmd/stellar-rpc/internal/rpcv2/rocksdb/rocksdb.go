@@ -298,12 +298,12 @@ func (s *Store) BatchMultiGet(cf string, keys [][]byte) ([][]byte, error) {
 		}
 	}
 	arena := make([]byte, 0, total)
-	for i, v := range results {
-		if v == nil {
+	for i := range results {
+		if !pinned[i].Exists() {
 			continue
 		}
 		n := len(arena)
-		arena = append(arena, v...)
+		arena = append(arena, results[i]...)
 		results[i] = arena[n:len(arena):len(arena)]
 	}
 	return results, nil

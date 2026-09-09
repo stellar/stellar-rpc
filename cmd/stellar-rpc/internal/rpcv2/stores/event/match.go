@@ -220,14 +220,15 @@ type Match struct {
 type termPlan [][]int
 
 // batchSizes resolves the first and following internal batch sizes from the
-// caller's hint, capped at eight default batches so a wild hint cannot demand
-// an unbounded fetch. Both are clamped positive: a zero step never advances,
-// so a zero test seam would stall the stream.
+// caller's hint. The hint is a validated page size — every handler clamps it
+// to its protocol limit before it reaches Matches — so it is honored in full
+// and a page arrives in one fetch. Both sizes are clamped positive: a zero
+// step never advances, so a zero test seam would stall the stream.
 func batchSizes(hint int) (int, int) {
 	rest := max(1, matchBatchSize)
 	first := rest
 	if hint > 0 {
-		first = min(hint, 8*rest)
+		first = hint
 	}
 	return first, rest
 }
@@ -253,9 +254,9 @@ func batchSizes(hint int) (int, int) {
 // consumers never see or reason about resume state.
 //
 // firstBatch sizes the first internal fetch batch: a consumer that will stop
-// after N matches passes N. Zero and negative hints use the default, and a
-// positive one is honored up to eight default batches. The hint changes I/O
-// counts only, never what the stream yields.
+// after N matches passes N. Zero and negative hints use the default; a
+// positive one is a validated page size and is honored in full. The hint
+// changes I/O counts only, never what the stream yields.
 func Matches(
 	ctx context.Context, r Reader, filters []Filter, window IDRange,
 	descending bool, firstBatch int,

@@ -1782,13 +1782,7 @@ func TestBatchSizes(t *testing.T) {
 	require.Equal(t, 1000, first, "a page-sized hint is the first fetch size")
 	require.Equal(t, matchBatchSize, rest)
 
-	first, rest = batchSizes(1 << 20)
-	require.Equal(t, 8*matchBatchSize, first, "oversized hints are capped")
+	first, rest = batchSizes(10_000)
+	require.Equal(t, 10_000, first, "a v1 page-sized hint is honored in full")
 	require.Equal(t, matchBatchSize, rest)
-
-	defer func(n int) { matchBatchSize = n }(matchBatchSize)
-	matchBatchSize = 7
-	first, rest = batchSizes(1000)
-	require.Equal(t, 56, first, "the cap follows the seam")
-	require.Equal(t, 7, rest)
 }
