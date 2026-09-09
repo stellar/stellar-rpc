@@ -102,9 +102,10 @@ type Reader interface {
 	// a dense term written since its last lookup is cloned once, by
 	// the first reader to look it up, and that clone is then shared.
 	//
-	// Callers MUST treat returned bitmaps as read-only. Hot-path
-	// bitmaps are shared with other readers; cold-path bitmaps are
-	// freshly unmarshaled and owned by the caller. See
+	// Callers MUST treat returned bitmaps as read-only. Dense hot
+	// snapshots are shared with other readers; sparse hot terms
+	// return a fresh caller-owned bitmap per lookup; cold-path
+	// bitmaps are freshly unmarshaled and owned by the caller. See
 	// ConcurrentBitmaps.Get.
 	//
 	// ctx cancels in-flight I/O on the cold path (MPHF load,
