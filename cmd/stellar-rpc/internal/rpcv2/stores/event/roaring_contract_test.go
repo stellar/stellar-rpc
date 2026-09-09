@@ -1,8 +1,10 @@
 package event
 
-// roaring_contract_test.go pins the library-level property the event index is
+// roaring_contract_test.go pins the library-level properties the event index is
 // built on: the aggregation entry points this package calls with shared
-// bitmaps must treat those bitmaps as read-only.
+// bitmaps must treat those bitmaps as read-only, and the value searches the
+// slab walk proves its skips with must answer inclusively, read-only, and -1
+// for none.
 //
 // ConcurrentBitmaps.Get and denseState.snapshot publish one bitmap to every
 // concurrent reader at once and never mutate it afterwards. Readers therefore
@@ -21,6 +23,7 @@ package event
 
 import (
 	"math/rand"
+	"slices"
 	"sync"
 	"testing"
 
@@ -276,5 +279,123 @@ func TestRoaringContract_ConcurrentReadersShareArguments(t *testing.T) {
 		require.Equal(t, wantAndAny, results[g][0], "goroutine %d disagreed on AndAny", g)
 		require.Equal(t, wantFastAnd, results[g][1], "goroutine %d disagreed on FastAnd", g)
 		require.Equal(t, wantFastOr, results[g][2], "goroutine %d disagreed on FastOr", g)
+	}
+}
+
+// TestRoaringContract_ValueSearchIsInclusiveAndReadOnly pins NextValue and
+// PreviousValue, the searches the slab walk proves a skip with. The walk skips
+// every slab between the cursor and the answer, so an answer that overshot the
+// target in the walk's direction — or a search that reported -1 with ids still
+// to come — would silently drop matches.
+//
+// The definition is checked against the bitmap's own ids rather than against
+// hand-written expectations, over targets that land on an id, between two, on
+// and beside a container boundary, and past the last id.
+func TestRoaringContract_ValueSearchIsInclusiveAndReadOnly(t *testing.T) {
+	t.Parallel()
+
+	for i, shared := range sharedBitmaps(t) {
+		ids := shared.ToArray()
+		require.NotEmpty(t, ids, "fixture: bitmap %d holds nothing", i)
+		before := bitmapBytes(t, shared)
+
+		for _, target := range searchTargets(ids) {
+			// The definition, read off the ids: the first id at or after the
+			// target, and the last id at or before it.
+			at, _ := slices.BinarySearch(ids, target)
+			wantNext, wantPrev := int64(-1), int64(-1)
+			if at < len(ids) {
+				wantNext = int64(ids[at])
+			}
+			if at < len(ids) && ids[at] == target {
+				wantPrev = int64(target)
+			} else if at > 0 {
+				wantPrev = int64(ids[at-1])
+			}
+
+			require.Equal(t, wantNext, shared.NextValue(target),
+				"bitmap %d: NextValue(%d) must be the first id at or above the target",
+				i, target)
+			require.Equal(t, wantPrev, shared.PreviousValue(target),
+				"bitmap %d: PreviousValue(%d) must be the last id at or below the target",
+				i, target)
+		}
+
+		require.Equal(t, before, bitmapBytes(t, shared),
+			"bitmap %d: a value search mutated the bitmap it searched: the slab "+
+				"walk cannot run them on denseState.snapshot bitmaps at this version", i)
+	}
+
+	empty := roaring.New()
+	require.Equal(t, int64(-1), empty.NextValue(0),
+		"an empty bitmap must report no next value")
+	require.Equal(t, int64(-1), empty.PreviousValue(1<<20),
+		"an empty bitmap must report no previous value")
+}
+
+// searchTargets returns the positions worth asking about for a bitmap holding
+// ids: each id, its neighbors, every container boundary the ids span, and the
+// ends of the uint32 range.
+func searchTargets(ids []uint32) []uint32 {
+	out := []uint32{0, 1<<32 - 1}
+	for _, id := range ids {
+		out = append(out, id)
+		if id > 0 {
+			out = append(out, id-1)
+		}
+		if id < 1<<32-1 {
+			out = append(out, id+1)
+		}
+	}
+	for key := range uint32(6) {
+		out = append(out, key<<16)
+		if key > 0 {
+			out = append(out, key<<16-1)
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// TestRoaringContract_ConcurrentValueSearch is the race-detector gate for the
+// searches: the slab walk runs them on the same denseState snapshot from every
+// in-flight query at once, so they must not lazily materialize anything inside
+// the bitmap they read.
+func TestRoaringContract_ConcurrentValueSearch(t *testing.T) {
+	t.Parallel()
+
+	const goroutines = 8
+	shared := sharedBitmaps(t)
+	before := bitmapImages(t, shared)
+
+	targets := []uint32{0, 1, 1 << 15, 1 << 16, 1<<16 + 1, 3 << 16, 1<<20 - 1}
+	want := make([][]int64, len(shared))
+	for i, bm := range shared {
+		for _, target := range targets {
+			want[i] = append(want[i], bm.NextValue(target), bm.PreviousValue(target))
+		}
+	}
+
+	got := make([][][]int64, goroutines)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for g := range goroutines {
+		wg.Go(func() {
+			<-start
+			out := make([][]int64, len(shared))
+			for i, bm := range shared {
+				for _, target := range targets {
+					out[i] = append(out[i], bm.NextValue(target), bm.PreviousValue(target))
+				}
+			}
+			got[g] = out
+		})
+	}
+	close(start)
+	wg.Wait()
+
+	requireUnchanged(t, shared, before, "concurrent value search")
+	for g := range goroutines {
+		require.Equal(t, want, got[g], "goroutine %d disagreed on the value searches", g)
 	}
 }

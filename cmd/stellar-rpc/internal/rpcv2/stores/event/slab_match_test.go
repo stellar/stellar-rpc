@@ -5,6 +5,10 @@ package event
 // match-all, the fat/fat thin-overlap shape whose two chunk-sized terms meet
 // on a handful of ids, and the high-arity AND and union.
 //
+// The walk skips slabs it can prove hold no candidate, so those same shapes
+// run again at slab widths narrow enough to put dozens of empty slabs between
+// consecutive ids, where a bound that over-skipped would drop matches.
+//
 // The answer every case is checked against is computed without the index —
 // postFilter run over every ordinal in the corpus, then clipped to the window,
 // the direction and the page. It shares no code with the term planning, the
@@ -799,4 +803,134 @@ func TestResolveSlabFiltersOrdersRarestFirst(t *testing.T) {
 		"a filter naming a wholly absent group is dropped")
 	assert.Len(t, resolveSlabFilters([]termPlan{{{0}, {3}}, {{1}}}, sources), 1,
 		"the drop takes only its own filter")
+}
+
+// ───────────────────────── the skip ─────────────────────────
+
+// The skip is invisible in a stream: a walk that evaluated every slab in the
+// window yields exactly the same ids. Driving nextBounds directly reports the
+// slabs the walk actually opens, which is the claim — and, in the fat case,
+// the claim that a provable bound never skips a slab that holds something.
+func TestSlabStepperSkipsCandidateFreeSlabs(t *testing.T) {
+	defer func(s uint) { slabShift = s }(slabShift)
+	slabShift = 16
+	const slab = 1 << 16
+	const slabs = 10
+	window := IDRange{0, slabs * slab}
+
+	// A rare term whose three ids sit in slabs 0, 3 and 9; a second rare term
+	// in slabs 1 and 6; a chunk-sized term holding every id in the window; and
+	// a term present but empty.
+	fat := roaring.New()
+	fat.AddRange(uint64(window.Start), uint64(window.End))
+	sources := []*roaring.Bitmap{
+		termBitmap(5, 3*slab+7, 9*slab+1),
+		termBitmap(slab+1, 6*slab+3),
+		fat,
+		termBitmap(),
+	}
+
+	walk := func(plans []termPlan, desc bool) [][2]uint32 {
+		st := newSlabStepper(plans, sources, window, desc)
+		out := [][2]uint32{}
+		for {
+			lo, hi, ok := st.nextBounds()
+			if !ok {
+				return out
+			}
+			out = append(out, [2]uint32{lo, hi})
+		}
+	}
+
+	// The rare term alone opens its own three slabs and no others, in either
+	// direction, and each one is entered at the candidate rather than at the
+	// slab's base.
+	rareAsc := [][2]uint32{{5, slab}, {3*slab + 7, 4 * slab}, {9*slab + 1, 10 * slab}}
+	rareDesc := [][2]uint32{
+		{9 * slab, 9*slab + 2}, {3 * slab, 3*slab + 8}, {0, 6},
+	}
+	assert.Equal(t, rareAsc, walk([]termPlan{{{0}}}, false))
+	assert.Equal(t, rareDesc, walk([]termPlan{{{0}}}, true))
+
+	// ANDing it with a chunk-sized term changes nothing: the AND's bound is
+	// the strongest of its groups', and the fat group proves none.
+	assert.Equal(t, rareAsc, walk([]termPlan{{{0}, {2}}}, false),
+		"a chunk-sized group must not weaken the rare group's bound")
+	assert.Equal(t, rareDesc, walk([]termPlan{{{0}, {2}}}, true))
+
+	// The chunk-sized term alone opens every slab: a bound is a bound, and
+	// this one proves nothing to skip.
+	full := make([][2]uint32, 0, slabs)
+	for i := range uint32(slabs) {
+		full = append(full, [2]uint32{i * slab, (i + 1) * slab})
+	}
+	assert.Len(t, full, slabs)
+	assert.Equal(t, full, walk([]termPlan{{{2}}}, false),
+		"a term holding every id must not skip a slab")
+
+	// Across OR-ed filters the union of their slabs is opened, and nothing
+	// else: slabs 0, 1, 3, 6, 9.
+	assert.Equal(t, [][2]uint32{
+		{5, slab},
+		{slab + 1, 2 * slab},
+		{3*slab + 7, 4 * slab},
+		{6*slab + 3, 7 * slab},
+		{9*slab + 1, 10 * slab},
+	}, walk([]termPlan{{{0}}, {{1}}}, false))
+
+	// A filter whose only term is present but empty ends the walk before the
+	// first slab, rather than reading all ten.
+	assert.Empty(t, walk([]termPlan{{{3}}}, false))
+	assert.Empty(t, walk([]termPlan{{{3}}}, true))
+}
+
+// TestMatches_RareTermsSpanSlabs is the oracle gate on the skip. The shapes a
+// rare term dominates — five ids spread over the whole corpus, alone and ANDed
+// with a chunk-sized term — run at slab widths that put hundreds of
+// candidate-free slabs between consecutive ids, where the walk skips almost
+// everything and a bound that over-skipped would silently lose matches.
+//
+// The windows start and end between rare ids, so the first and last slab the
+// walk seeks to are clipped by the window rather than by a candidate.
+func TestMatches_RareTermsSpanSlabs(t *testing.T) {
+	f := newShapedFixture(t)
+	r := diffReader{f.corpus}
+	defer func(s uint) { slabShift = s }(slabShift)
+
+	require.LessOrEqual(t, len(f.rareContract), 5,
+		"fixture: the rare term must stay rare for the skip to matter")
+
+	shapes := []namedShape{
+		{"rare alone", f.filterSparseOnly()},
+		{"rare and chunk-sized", f.filterMixedGroups()},
+		{"rare or chunk-sized", f.filterUnion()},
+	}
+	windows := []IDRange{
+		{0, shapedCorpusSize},
+		{20_000, shapedCorpusSize},
+		{0, 60_000},
+		{20_000, 60_000},
+	}
+
+	for _, sh := range shapes {
+		all := matchingEvents(t, f.corpus, sh.filters)
+		// 64-, 1024- and 8192-wide slabs put 1093, 68 and 8 seams inside the
+		// corpus against the 5 ids the rare term holds.
+		for _, shift := range []uint{6, 10, 13} {
+			slabShift = shift
+			for _, w := range windows {
+				for _, desc := range []bool{false, true} {
+					for _, limit := range []int{0, 1, 3} {
+						requireStream(t, r, all, queryCase{
+							name:    sh.name,
+							filters: sh.filters,
+							window:  w,
+							desc:    desc,
+							limit:   limit,
+						})
+					}
+				}
+			}
+		}
+	}
 }
