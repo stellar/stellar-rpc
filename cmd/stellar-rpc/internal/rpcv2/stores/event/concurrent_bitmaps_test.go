@@ -52,7 +52,7 @@ func TestConcurrentBitmaps_ListMode(t *testing.T) {
 	require.NotNil(t, p)
 	st := p.Load()
 	require.NotNil(t, st)
-	assert.Nil(t, st.bm, "must still be in list mode")
+	assert.Nil(t, st.dense, "must still be in list mode")
 	assert.Len(t, st.ids, promotionThreshold-1)
 
 	bm, err := s.Get(key)
@@ -61,7 +61,7 @@ func TestConcurrentBitmaps_ListMode(t *testing.T) {
 	assert.Equal(t, uint64(promotionThreshold-1), bm.GetCardinality())
 
 	// Get must not have promoted.
-	assert.Nil(t, p.Load().bm)
+	assert.Nil(t, p.Load().dense)
 }
 
 func TestConcurrentBitmaps_Promotion(t *testing.T) {
@@ -75,9 +75,11 @@ func TestConcurrentBitmaps_Promotion(t *testing.T) {
 	p := s.terms[key]
 	require.NotNil(t, p)
 	st := p.Load()
-	require.NotNil(t, st.bm)
+	require.NotNil(t, st.dense)
 	assert.Empty(t, st.ids, "sparse ids cleared after promotion")
-	assert.Equal(t, uint64(promotionThreshold), st.bm.GetCardinality())
+	bm, err := s.Get(key)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(promotionThreshold), bm.GetCardinality())
 }
 
 func TestConcurrentBitmaps_AddAfterPromotion(t *testing.T) {
@@ -125,8 +127,10 @@ func TestConcurrentBitmaps_BatchAddToPromotion(t *testing.T) {
 	p := s.terms[key]
 	require.NotNil(t, p)
 	st := p.Load()
-	require.NotNil(t, st.bm, "single-batch over threshold must promote immediately")
-	assert.Equal(t, uint64(promotionThreshold+10), st.bm.GetCardinality())
+	require.NotNil(t, st.dense, "single-batch over threshold must promote immediately")
+	bm, err := s.Get(key)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(promotionThreshold+10), bm.GetCardinality())
 }
 
 // TestConcurrentBitmaps_GetReturnsImmutableSnapshot pins the
@@ -358,7 +362,7 @@ func TestConcurrentBitmaps_AddToIsIdempotent(t *testing.T) {
 			s.AddTo(key, i)
 		}
 		p := s.terms[key]
-		require.NotNil(t, p.Load().bm, "must have promoted to bitmap mode")
+		require.NotNil(t, p.Load().dense, "must have promoted to bitmap mode")
 
 		// Replay — bitmap.AddMany is set-semantic, so no cardinality change.
 		for i := range uint32(promotionThreshold) {
@@ -371,12 +375,29 @@ func TestConcurrentBitmaps_AddToIsIdempotent(t *testing.T) {
 	})
 }
 
+// assertDenseCOW checks that a term is dense and that CopyOnWrite is
+// enabled on both halves of its state: the writer-private bitmap
+// (where it makes the reader-side Clone shallow) and the snapshot
+// handed to readers (which inherits the flag through that Clone).
+func assertDenseCOW(t *testing.T, s *ConcurrentBitmaps, key TermKey, msg string) {
+	t.Helper()
+	p := s.terms[key]
+	require.NotNil(t, p)
+	d := p.Load().dense
+	require.NotNil(t, d, "term must be dense")
+	assert.True(t, d.wbm.GetCopyOnWrite(), msg+" (writer bitmap)")
+	bm, err := s.Get(key)
+	require.NoError(t, err)
+	require.NotNil(t, bm)
+	assert.True(t, bm.GetCopyOnWrite(), msg+" (published snapshot)")
+}
+
 // TestConcurrentBitmaps_DenseAddToSetsCopyOnWrite pins that the
 // dense path on AddTo (both the promotion transition in AddTo
 // itself and newTermState's over-threshold initial batch) sets
-// CopyOnWrite on the published bitmap. The perf design relies on
-// this: a regression that drops SetCopyOnWrite would silently make
-// every subsequent AddTo's Clone deep-copy the whole bitmap
+// CopyOnWrite. The perf design relies on this: a regression that
+// drops SetCopyOnWrite would silently make every reader-side Clone
+// deep-copy the whole bitmap
 // (+40% hot-ingest wall, observed empirically).
 func TestConcurrentBitmaps_DenseAddToSetsCopyOnWrite(t *testing.T) {
 	t.Run("via promotion in AddTo", func(t *testing.T) {
@@ -385,9 +406,7 @@ func TestConcurrentBitmaps_DenseAddToSetsCopyOnWrite(t *testing.T) {
 		for i := range uint32(promotionThreshold) {
 			s.AddTo(key, i)
 		}
-		bm := s.terms[key].Load().bm
-		require.NotNil(t, bm)
-		assert.True(t, bm.GetCopyOnWrite(),
+		assertDenseCOW(t, s, key,
 			"dense bitmap after promotion must have CopyOnWrite enabled")
 	})
 
@@ -399,9 +418,7 @@ func TestConcurrentBitmaps_DenseAddToSetsCopyOnWrite(t *testing.T) {
 			ids[i] = uint32(i)
 		}
 		s.AddTo(key, ids...)
-		bm := s.terms[key].Load().bm
-		require.NotNil(t, bm)
-		assert.True(t, bm.GetCopyOnWrite(),
+		assertDenseCOW(t, s, key,
 			"dense bitmap from over-threshold initial AddTo must have CopyOnWrite enabled")
 	})
 
@@ -412,9 +429,7 @@ func TestConcurrentBitmaps_DenseAddToSetsCopyOnWrite(t *testing.T) {
 			s.AddTo(key, i)
 		}
 		s.AddTo(key, 10_000, 10_001, 10_002)
-		bm := s.terms[key].Load().bm
-		require.NotNil(t, bm)
-		assert.True(t, bm.GetCopyOnWrite(),
+		assertDenseCOW(t, s, key,
 			"dense bitmap after additional AddTos must keep CopyOnWrite (inherited via Clone)")
 	})
 }
@@ -423,46 +438,49 @@ func TestConcurrentBitmaps_DenseAddToSetsCopyOnWrite(t *testing.T) {
 // the warmup-side conversion constructor:
 //   - input bitmaps survive in the result with their cardinality
 //     intact;
-//   - each non-nil bitmap has CopyOnWrite enabled after conversion;
-//   - nil bitmaps in the input map are skipped (not panicked);
-//   - subsequent AddTo on the result Clones via the COW fast path
-//     (no full deep copy on the popular-term ingest path).
+//   - terms below promotionThreshold become sparse lists, terms at or
+//     above it become dense and keep CopyOnWrite;
+//   - nil bitmaps in the input map are skipped;
+//   - a subsequent AddTo on a converted dense term is visible to the
+//     next Get.
 func TestNewConcurrentBitmapsFromBitmaps_DirectlyPinsContract(t *testing.T) {
 	src := NewBitmaps()
-	keyA := ComputeTermKey([]byte("a"), FieldTopic0)
-	keyB := ComputeTermKey([]byte("b"), FieldTopic1)
+	keySparse := ComputeTermKey([]byte("a"), FieldTopic0)
+	keyDense := ComputeTermKey([]byte("b"), FieldTopic1)
 	keyNil := ComputeTermKey([]byte("nil"), FieldTopic2)
 
-	src.AddTo(keyA, 0, 1, 2, 3, 4)
-	src.AddTo(keyB, 100, 101)
-	src[keyNil] = nil // simulate a nil entry that the constructor must skip
+	src.AddTo(keySparse, 0, 1, 2, 3, 4)
+	dense := make([]uint32, promotionThreshold)
+	for i := range dense {
+		dense[i] = uint32(i) * 1_000
+	}
+	src.AddTo(keyDense, dense...)
+	src[keyNil] = nil
 
 	cb := NewConcurrentBitmapsFromBitmaps(src)
 
-	bmA, err := cb.Get(keyA)
+	bmSparse, err := cb.Get(keySparse)
 	require.NoError(t, err)
-	require.NotNil(t, bmA)
-	assert.Equal(t, uint64(5), bmA.GetCardinality())
-	assert.True(t, bmA.GetCopyOnWrite(),
-		"FromBitmaps must enable CopyOnWrite so the live-ingest AddTo path Clones via the fast shallow path")
+	require.NotNil(t, bmSparse)
+	assert.Equal(t, uint64(5), bmSparse.GetCardinality())
+	assert.Nil(t, cb.terms[keySparse].Load().dense, "a sub-threshold warmup term must be sparse")
 
-	bmB, err := cb.Get(keyB)
+	bmDense, err := cb.Get(keyDense)
 	require.NoError(t, err)
-	require.NotNil(t, bmB)
-	assert.Equal(t, uint64(2), bmB.GetCardinality())
-	assert.True(t, bmB.GetCopyOnWrite())
+	require.NotNil(t, bmDense)
+	assert.Equal(t, uint64(len(dense)), bmDense.GetCardinality())
+	assert.True(t, bmDense.GetCopyOnWrite())
+	assert.NotNil(t, cb.terms[keyDense].Load().dense, "a warmup term at the threshold must be dense")
 
 	bmNil, err := cb.Get(keyNil)
 	require.NoError(t, err)
 	assert.Nil(t, bmNil, "nil source entries must be skipped, not panicked")
 
-	// Subsequent AddTo on the converted index produces a new
-	// termState whose bitmap still has CopyOnWrite (inherited via
-	// Clone). This pins that the AddTo dense path doesn't lose the
-	// COW flag.
-	cb.AddTo(keyA, 5)
-	post := cb.terms[keyA].Load().bm
+	cb.AddTo(keyDense, 999_999)
+	post, err := cb.Get(keyDense)
+	require.NoError(t, err)
 	require.NotNil(t, post)
 	assert.True(t, post.GetCopyOnWrite())
-	assert.Equal(t, uint64(6), post.GetCardinality())
+	assert.Equal(t, uint64(len(dense)+1), post.GetCardinality())
+	assert.Equal(t, uint64(len(dense)), bmDense.GetCardinality(), "earlier snapshot stays immutable")
 }

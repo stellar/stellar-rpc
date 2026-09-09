@@ -459,9 +459,9 @@ func (h *HotStore) index() *ConcurrentBitmaps { return h.mirror }
 // later one. Reversing it would let a reader see an offsets count including IDs
 // the mirror hasn't published — FetchEvents would then miss them, silently.
 func (h *HotStore) applyLedger(startID uint32, termKeys [][]TermKey) {
-	// Batch by key so each AddTo clones at most once per (key, ledger), not per
-	// (key, event) — turns N COW clones into 1 for popular terms. Cap 64 ≈ a few
-	// × unique-terms per ledger; the map grows past that.
+	// Batch by key so each key takes one AddTo per ledger instead of one per
+	// event, saving per-term lock round-trips. Cap 64 ≈ a few × unique-terms
+	// per ledger; the map grows past that.
 	perKeyIDs := make(map[TermKey][]uint32, 64)
 	for i, keys := range termKeys {
 		eventID := startID + uint32(i)
@@ -567,10 +567,9 @@ func verifyChunkConsistency(chunkStore *rocksdb.Store, total uint32, indexUpperB
 // per-term batching (rocksdb's byte-sorted iteration delivers all
 // rows for term K consecutively, so a small buffer flushes when the
 // term changes), then convert to ConcurrentBitmaps at the end. This
-// avoids paying the per-row Clone cost the concurrent ConcurrentBitmaps.AddTo
-// would do for popular terms — without batching, warmup of a
-// 10M-event chunk does ~50M Clones (one per index row) and saturates
-// GC for many minutes.
+// keeps warmup off the concurrent index's per-term locking and
+// promotion path — one AddTo per term instead of one per index row,
+// ~50M for a 10M-event chunk.
 //
 // Also returns the exclusive upper bound of indexed event IDs (max + 1,
 // or 0 if the index is empty; uint64 so max+1 can't wrap — see
