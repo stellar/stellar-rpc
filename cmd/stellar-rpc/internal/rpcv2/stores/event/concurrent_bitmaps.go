@@ -85,10 +85,23 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 // Get returns the bitmap for key, or (nil, nil) when key is not
 // indexed. The result is read-only: dense terms share one bitmap
 // across all concurrent readers, and the index never mutates it.
-// Read-only includes Clone: with copy-on-write on, roaring's Clone
-// writes flags on its source, so two readers cloning one snapshot
-// race. A Get that starts after an AddTo returns sees that AddTo's
-// IDs, and the pointer stays valid for as long as the caller holds it.
+//
+// Forbidden on the returned bitmap — these mutate internal state a
+// concurrent reader or the writer may also be touching:
+//   - Clone, CloneCopyOnWriteContainers (COW is on: Clone writes its
+//     source's copy-on-write flags, so two readers cloning race)
+//   - RunOptimize, AddRange, RemoveRange, FlipInt
+//   - Add, AddMany, Remove, CheckedAdd, CheckedRemove, AddInt
+//   - SetCopyOnWrite
+//   - single-input roaring.FastAnd / roaring.FastOr (roaring takes a
+//     Clone-the-input shortcut when there is only one input)
+//
+// Safe: any non-mutating read (Contains, GetCardinality, Iterator,
+// ToArray, IsEmpty, Minimum, Maximum) plus roaring.And / FastAnd /
+// FastOr with 2+ inputs.
+//
+// A Get that starts after an AddTo returns sees that AddTo's IDs, and
+// the pointer stays valid for as long as the caller holds it.
 func (s *ConcurrentBitmaps) Get(key TermKey) (*roaring.Bitmap, error) {
 	s.rwmu.RLock()
 	p := s.terms[key]
