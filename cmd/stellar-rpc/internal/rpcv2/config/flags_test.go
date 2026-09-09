@@ -282,12 +282,12 @@ captive_core_config = "/cc"
 		cfg := load(t, `
 [storage]
 default_data_dir = "/d"
-[service.methods.getEvents]
+[service.methods.getEventsV2]
 term_budget = 20
 [ingestion]
 captive_core_config = "/cc"
-`, "--service.methods.getEvents.term_budget=30")
-		assert.Equal(t, uint(30), *cfg.Service.Methods.GetEvents.TermBudget, "CLI beats file")
+`, "--service.methods.getEventsV2.term_budget=30")
+		assert.Equal(t, uint(30), *cfg.Service.Methods.GetEventsV2.TermBudget, "CLI beats file")
 	})
 
 	t.Run("example D: durations cascade the same way", func(t *testing.T) {

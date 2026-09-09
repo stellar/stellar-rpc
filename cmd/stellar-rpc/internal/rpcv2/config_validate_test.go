@@ -187,8 +187,8 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 		},
 		{
 			"zero term_budget",
-			func(c *config.Config) { c.Service.Methods.GetEvents.TermBudget = uintPtr(0) },
-			"[service.methods.getEvents].term_budget",
+			func(c *config.Config) { c.Service.Methods.GetEventsV2.TermBudget = uintPtr(0) },
+			"[service.methods.getEventsV2].term_budget",
 		},
 		{
 			"fee window above the cap",

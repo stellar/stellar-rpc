@@ -126,7 +126,7 @@ type MethodsConfig struct {
 	GetTransaction  MethodConfig          `toml:"getTransaction"`
 	GetTransactions PaginatedMethodConfig `toml:"getTransactions"`
 	GetLedgers      PaginatedMethodConfig `toml:"getLedgers"`
-	GetEvents       EventsMethodConfig    `toml:"getEvents"`
+	GetEvents       PaginatedMethodConfig `toml:"getEvents"`
 	// GetEventsV2 carries getEvents' knob set and defaults.
 	GetEventsV2 EventsMethodConfig `toml:"getEventsV2"`
 	GetFeeStats MethodConfig       `toml:"getFeeStats"`
@@ -459,13 +459,6 @@ const (
 	// (github.com/orgs/stellar/discussions/1872).
 	DefaultGetEventsV2TermBudget uint = 15
 
-	// DefaultGetEventsV1TermBudget covers the worst legal v1 request (5
-	// filters x (1 type + 5 contract ids + 5 topic filters x 4 values) =
-	// at most 130 distinct terms), so no request the v1 API admits is
-	// rejected. v1 predates the budget; only an operator lowering this can
-	// surface it there.
-	DefaultGetEventsV1TermBudget uint = 130
-
 	// DefaultGetEventsV1MaxItemsPerResponse is v1's own page cap, matching
 	// the existing service's max-events-limit. The 1,000 above is the v2
 	// spec's constant; applying it to v1 would reject pages v1 serves.
@@ -679,7 +672,6 @@ func (cfg Config) WithDefaults() Config {
 	dur(&m.GetEvents.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
 	fillUint(&m.GetEvents.MaxItemsPerResponse, DefaultGetEventsV1MaxItemsPerResponse)
 	fillUint(&m.GetEvents.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
-	fillUint(&m.GetEvents.TermBudget, DefaultGetEventsV1TermBudget)
 
 	queue(&m.GetEventsV2.QueueLimit, DefaultMethodQueueLimit)
 	dur(&m.GetEventsV2.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)

@@ -87,10 +87,6 @@ func getEventsV1(
 	if err != nil {
 		return zero, &jrpc2.Error{Code: jrpc2.InvalidParams, Message: err.Error()}
 	}
-	if err := checkTermBudget(filters, limits.TermBudget); err != nil {
-		return zero, responseError(err, lr.FirstLedger.Sequence, lr.LastLedger.Sequence, logger)
-	}
-
 	minLedger, from := v1ResumePoint(start, fromCursor)
 	// An end at or below the start is legal v1 input and an empty window.
 	// Served here: the pager's scopes are inclusive and never inverted.
@@ -103,7 +99,10 @@ func getEventsV1(
 	page, err := view.QueryEventsFrom(ctx, scope, from, pageLimit)
 	if err != nil {
 		// The v1 handler codes every failure past validation as an invalid
-		// request, cancellation included.
+		// request, cancellation included. The client's copy of the message
+		// is the only one unless this logs, and a store fault is the
+		// server's to explain.
+		logger.WithError(err).Error("getEvents: serving the request failed")
 		return zero, &jrpc2.Error{Code: jrpc2.InvalidRequest, Message: err.Error()}
 	}
 	// A short page must mean the scope is done: v1Response's window-end
