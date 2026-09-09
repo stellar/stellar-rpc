@@ -311,11 +311,6 @@ func doOpen(path string) openResult {
 			ErrChecksum, trailer.AppDataCRC, computed)}
 	}
 
-	offsets, err := decodeIndex(indexBuf, recordCount, indexSize, indexBase)
-	if err != nil {
-		return openResult{err: err}
-	}
-
 	// Not gated on recordCount: a trailer claiming items but no itemsPerRecord
 	// would otherwise pass Open and index past the offsets slice on first read.
 	if itemsPerRecord <= 0 && (recordCount > 0 || totalItems > 0) {
@@ -334,6 +329,13 @@ func doOpen(path string) openResult {
 				"%w: trailer says %d items / %d itemsPerRecord = %d records, but packfile has %d records",
 				ErrCorrupt, totalItems, itemsPerRecord, expectedRecords, recordCount)}
 		}
+	}
+
+	// Last, so that no error path below holds a pooled offsets table: on
+	// success the Reader owns it until Close recycles it.
+	offsets, err := decodeIndex(indexBuf, recordCount, indexSize, indexBase)
+	if err != nil {
+		return openResult{err: err}
 	}
 
 	// Empty packfiles may legitimately have itemsPerRecord==0 on disk;

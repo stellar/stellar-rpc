@@ -116,6 +116,7 @@ func decodeIndex(buf []byte, recordCount int, indexSize int, indexBase int64) ([
 
 	// Structural sanity check: running sum must arrive at indexBase.
 	if offset != indexBase {
+		putOffsets(offsets)
 		return nil, fmt.Errorf("%w: final offset %d != indexBase %d", ErrCorrupt, offset, indexBase)
 	}
 
