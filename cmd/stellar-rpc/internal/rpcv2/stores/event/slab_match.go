@@ -181,6 +181,16 @@ func (f *slabFilter) eval(lo, hi uint32) *roaring.Bitmap {
 // -1 for none, and read the bitmap without writing it — they are called on
 // snapshots shared with every other reader. roaring_contract_test.go pins
 // both properties against the pinned version.
+//
+// A bound the walk has proved is held rather than proved again at every slab,
+// and it decides which filters a slab is evaluated for: see slabStepper.bounds.
+
+// boundRetired marks a filter that has proved it can match nothing more in the
+// window: its terms ran out ahead of the cursor, which only ever moves further
+// from them, so the walk drops it for good rather than asking again at every
+// remaining slab. Below every id, so the test for a bound outside the current
+// slab covers it too.
+const boundRetired = int64(-1)
 
 // nextBound is the group's bound: the smallest id at or above pos that any of
 // its terms holds. ok is false when none does, which proves the group, and so
@@ -259,6 +269,25 @@ type slabStepper struct {
 	window  IDRange
 	desc    bool
 
+	// bounds holds what the walk has proved about each filter, parallel to
+	// filters: the id it proved its next candidate lies at or past — at or
+	// before, descending — or boundRetired once it proved it has none left.
+	//
+	// The invariant that makes holding one sound: a filter's bound is monotone
+	// in the walk direction, so one proved at a cursor position still proves
+	// the same emptiness at every position the cursor reaches up to it. A held
+	// bound can be weaker than one proved afresh, because a filter's groups
+	// can pull apart as the cursor advances; weaker costs a slab the walk
+	// could have skipped and never a match.
+	//
+	// So a bound is proved again only once the cursor has reached it, and a
+	// bound past the current slab excuses its filter from being evaluated
+	// there at all — the work a slab costs is the filters live in it rather
+	// than every filter the query named. Seeding each bound at the cursor's
+	// own start, where it proves nothing, is what makes the first step prove
+	// them all.
+	bounds []int64
+
 	// cursor is the next unevaluated boundary: the inclusive low bound
 	// ascending, the exclusive high bound descending.
 	cursor uint32
@@ -283,50 +312,72 @@ func newSlabStepper(
 	} else {
 		s.cursor = window.Start
 	}
+	s.bounds = make([]int64, len(s.filters))
+	for i := range s.bounds {
+		s.bounds[i] = int64(s.cursor)
+	}
 	return s
 }
 
 // seekAsc is the lowest position at or above pos that any filter can still
 // match at, and false when none can inside the window: a candidate belongs to
 // some filter, so the smallest of their bounds holds for the union. Filters that
-// are done are dropped from the minimum rather than ending the walk, since a
-// live one may still match.
+// are done are retired rather than ending the walk, since a live one may still
+// match.
+//
+// Only a filter whose stored bound pos has reached is asked again; the rest
+// answer from the bound they proved earlier, which pos has not yet passed.
 func (s *slabStepper) seekAsc(pos uint32) (uint32, bool) {
-	var best uint32
+	var best int64
 	found := false
 	for i := range s.filters {
-		b, ok := s.filters[i].nextBound(pos)
-		if !ok {
+		if s.bounds[i] == boundRetired {
 			continue
 		}
-		if !found || b < best {
-			best, found = b, true
+		if s.bounds[i] <= int64(pos) {
+			b, ok := s.filters[i].nextBound(pos)
+			if !ok {
+				s.bounds[i] = boundRetired
+				continue
+			}
+			s.bounds[i] = int64(b)
+		}
+		if !found || s.bounds[i] < best {
+			best, found = s.bounds[i], true
 		}
 	}
-	if !found || best >= s.window.End {
+	if !found || best >= int64(s.window.End) {
 		return 0, false
 	}
-	return best, true
+	return uint32(best), true
 }
 
 // seekDesc is seekAsc mirrored: the largest of the filters' bounds at or below
 // hi-1, returned as the exclusive high bound the walk resumes at.
 func (s *slabStepper) seekDesc(hi uint32) (uint32, bool) {
-	var best uint32
+	pos := hi - 1
+	var best int64
 	found := false
 	for i := range s.filters {
-		b, ok := s.filters[i].prevBound(hi - 1)
-		if !ok {
+		if s.bounds[i] == boundRetired {
 			continue
 		}
-		if !found || b > best {
-			best, found = b, true
+		if s.bounds[i] >= int64(pos) {
+			b, ok := s.filters[i].prevBound(pos)
+			if !ok {
+				s.bounds[i] = boundRetired
+				continue
+			}
+			s.bounds[i] = int64(b)
+		}
+		if !found || s.bounds[i] > best {
+			best, found = s.bounds[i], true
 		}
 	}
-	if !found || best < s.window.Start {
+	if !found || best < int64(s.window.Start) {
 		return 0, false
 	}
-	return best + 1, true
+	return uint32(best) + 1, true
 }
 
 // nextBounds returns the next slab's [lo, hi) clipped to the window, walking
@@ -379,12 +430,20 @@ func (s *slabStepper) nextBounds() (uint32, uint32, bool) {
 // evalSlab is the union across filters of their per-slab results, or nil when
 // the slab holds nothing.
 //
+// Only the filters this slab is about are evaluated. The bound the seek just
+// proved for each one says where its next candidate can be, and one lying
+// outside [lo, hi) — a retired filter's included — already proves the filter
+// matches nothing here, which eval would spend a bitmap to rediscover.
+//
 // Every per-filter result is a bitmap eval built for this call and nobody else
 // holds, so the union runs in place into the first of them rather than
 // allocating a separate answer to copy them all into.
 func (s *slabStepper) evalSlab(lo, hi uint32) *roaring.Bitmap {
 	var acc *roaring.Bitmap
 	for i := range s.filters {
+		if b := s.bounds[i]; b < int64(lo) || b >= int64(hi) {
+			continue
+		}
 		bm := s.filters[i].eval(lo, hi)
 		switch {
 		case bm == nil:
