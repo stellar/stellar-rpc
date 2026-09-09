@@ -20,11 +20,13 @@ import (
 )
 
 func testGetLedgers(t *testing.T, client *client.Client) {
-	// Wait until there's at least 10 ledgers
+	// The test reads five ledgers, then pages past them with a cursor, so the
+	// network must be far enough ahead that the second page has something in
+	// it. Five ledgers is exactly the first page and leaves nothing over.
 	var ledgerCount uint
 	var oldestLedger uint32
 
-	for ledgerCount < 5 {
+	for ledgerCount < 15 {
 		health, err := client.GetHealth(t.Context())
 		require.NoError(t, err)
 
@@ -98,25 +100,14 @@ func testGetLedgers(t *testing.T, client *client.Client) {
 }
 
 func TestGetLedgers(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: skipLimitsUpgrade()})
 	client := test.GetRPCLient()
 	testGetLedgers(t, client)
 }
 
 //nolint:funlen
 func TestGetLedgersFromDatastore(t *testing.T) {
-	// setup fake GCS server
-	opts := fakestorage.Options{
-		Scheme:     "http",
-		PublicHost: "127.0.0.1",
-	}
-	gcsServer, err := fakestorage.NewServerWithOptions(opts)
-	require.NoError(t, err)
-	defer gcsServer.Stop()
-
-	t.Setenv("STORAGE_EMULATOR_HOST", gcsServer.URL())
-	bucketName := "test-bucket"
-	gcsServer.CreateBucketWithOpts(fakestorage.CreateBucketOpts{Name: bucketName})
+	bucketName := newGCSBucket(t)
 
 	// datastore configuration function
 	schema := datastore.DataStoreSchema{
@@ -142,7 +133,7 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 
 	// add files to GCS
 	for seq := uint32(35); seq <= 40; seq++ {
-		gcsServer.CreateObject(fakestorage.Object{
+		sharedGCSServer.CreateObject(fakestorage.Object{
 			ObjectAttrs: fakestorage.ObjectAttrs{
 				BucketName: bucketName,
 				Name:       schema.GetObjectKeyFromSequenceNumber(seq),
@@ -153,18 +144,25 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 
 	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
 		DatastoreConfigFunc: setDatastoreConfig,
-		NoParallel:          true, // can't use parallel due to env vars
 	})
 	client := test.GetRPCLient() // at this point we're at like ledger 30
 
-	waitUntil := func(cond func(h protocol.GetHealthResponse) bool, timeout time.Duration) protocol.GetHealthResponse {
+	// The condition runs in a goroutine that testify does not wait for once the
+	// budget expires, so nothing outside it may read what it writes, and it must
+	// not call t.Log or t.Fatal itself. require.Eventually ends the test on
+	// timeout, which keeps the read of last on the success path only.
+	waitUntil := func(what string, cond func(h protocol.GetHealthResponse) bool,
+		timeout time.Duration,
+	) protocol.GetHealthResponse {
 		var last protocol.GetHealthResponse
 		require.Eventually(t, func() bool {
 			resp, err := client.GetHealth(t.Context())
-			require.NoError(t, err)
+			if err != nil {
+				return false
+			}
 			last = resp
 			return cond(resp)
-		}, timeout, 100*time.Millisecond, "last health: %+v", last)
+		}, timeout, 100*time.Millisecond, "timed out waiting for %s", what)
 		return last
 	}
 
@@ -187,10 +185,13 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 		return client.GetLedgers(t.Context(), req)
 	}
 
-	// ensure oldest > 40 so datastore set ([35..40]) is below local window
-	health := waitUntil(func(h protocol.GetHealthResponse) bool {
-		return uint(h.OldestLedger) > 40
-	}, 30*time.Second)
+	// Ensure oldest > 40 so the datastore set ([35..40]) sits below the local
+	// window. The retention window is 15 ledgers and the network closes about
+	// one ledger per second, so this waits for roughly ledger 56 to close.
+	health := waitUntil("the local retention window to move past ledger 40",
+		func(h protocol.GetHealthResponse) bool {
+			return uint(h.OldestLedger) > 40
+		}, 90*time.Second)
 
 	oldest := health.OldestLedger
 	latest := health.LatestLedger

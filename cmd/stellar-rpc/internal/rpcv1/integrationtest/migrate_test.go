@@ -20,6 +20,11 @@ import (
 //
 // TODO: find a way to test migrations between protocols
 func TestMigrate(t *testing.T) {
+	// Without this the whole parallel batch waits: Go runs a non-parallel
+	// top-level test on its own, and TestMigrate does not finish until every
+	// one of its own parallel subtests has finished.
+	t.Parallel()
+
 	if infrastructure.GetCoreMaxSupportedProtocol() != infrastructure.MaxSupportedProtocolVersion {
 		t.Skip("Only test this for the latest protocol: ",
 			infrastructure.MaxSupportedProtocolVersion)
@@ -30,6 +35,7 @@ func TestMigrate(t *testing.T) {
 			continue
 		}
 		t.Run(originVersion, func(t *testing.T) {
+			t.Parallel()
 			testMigrateFromVersion(t, originVersion)
 		})
 	}
@@ -41,6 +47,8 @@ func testMigrateFromVersion(t *testing.T, version string) {
 	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
 		UseReleasedRPCVersion: version,
 		SQLitePath:            sqliteFile,
+		// The subtest already called t.Parallel(); a second call panics.
+		NoParallel: true,
 	})
 
 	// Submit an event-logging transaction in the version to migrate from
@@ -59,7 +67,6 @@ func testMigrateFromVersion(t *testing.T, version string) {
 			DontWait:  false,
 		},
 		SQLitePath: sqliteFile,
-		// We don't want to mark the test as parallel twice since it causes a panic
 		NoParallel: true,
 	})
 

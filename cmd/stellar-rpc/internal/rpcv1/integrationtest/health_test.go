@@ -11,7 +11,7 @@ import (
 )
 
 func TestHealth(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: skipLimitsUpgrade()})
 	result, err := test.GetRPCLient().GetHealth(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, "healthy", result.Status)

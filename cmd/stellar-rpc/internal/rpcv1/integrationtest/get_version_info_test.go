@@ -16,7 +16,7 @@ func setVersionInfoForTests() {
 
 func TestGetVersionInfoSucceeds(t *testing.T) {
 	setVersionInfoForTests()
-	test := infrastructure.NewTest(t, nil)
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: skipLimitsUpgrade()})
 
 	result, err := test.GetRPCLient().GetVersionInfo(t.Context())
 	assert.NoError(t, err)

@@ -65,6 +65,10 @@ const (
 
 	inContainerRPCPort      = 8000
 	inContainerRPCAdminPort = 8080
+
+	// How long a core container may take to answer its HTTP port and reach
+	// sync. Generous on purpose: up to four tests boot a container at once.
+	coreStartupTimeout = 2 * time.Minute
 )
 
 //go:embed docker/upgrades/*.xdr
@@ -388,7 +392,7 @@ func (i *Test) waitForCheckpoint() {
 			info, err := i.getCoreInfo()
 			return err == nil && info.Info.Ledger.Num > checkpointFrequency
 		},
-		30*time.Second,
+		coreStartupTimeout,
 		time.Second,
 	)
 }
@@ -400,7 +404,9 @@ func (i *Test) waitForCoreAtLedger(ledger int) {
 			info, err := i.getCoreInfo()
 			return err == nil && info.Info.Ledger.Num >= ledger
 		},
-		time.Duration(ledger+5)*ledgerCloseTime,
+		// The ledgers have to close before this can pass, so the budget is the
+		// time they take on an idle machine plus room for a busy one.
+		time.Duration(ledger)*ledgerCloseTime+coreStartupTimeout,
 		time.Second,
 	)
 }
@@ -530,7 +536,11 @@ func (i *Test) waitForRPC() {
 			i.t.Logf("getHealth: %+v; err: %v", result, err)
 			return err == nil && result.Status == "healthy"
 		},
-		60*time.Second,
+		// The daemon reports "DB is empty" until its captive core has replayed
+		// every ledger the network already closed. That replay competes for CPU
+		// with the other tests running at the same time, so it needs a window
+		// well above the time a replay takes on an idle machine.
+		180*time.Second,
 		time.Second,
 		"RPC never got healthy: %+v",
 		err,
@@ -797,12 +807,14 @@ func (i *Test) Shutdown() {
 // Wait for core to be up and manually close the first ledger
 func (i *Test) waitForCore() {
 	i.t.Log("Waiting for core to be up...")
+	// Several tests boot their own core container at the same time, so a
+	// container needs much longer to answer than it does on an idle machine.
 	require.Eventually(i.t,
 		func() bool {
 			_, err := i.getCoreInfo()
 			return err == nil
 		},
-		30*time.Second,
+		coreStartupTimeout,
 		time.Second,
 	)
 
@@ -813,7 +825,7 @@ func (i *Test) waitForCore() {
 			info, err := i.getCoreInfo()
 			return err == nil && info.IsSynced()
 		},
-		30*time.Second,
+		coreStartupTimeout,
 		time.Second,
 	)
 }
@@ -948,25 +960,27 @@ func (i *Test) upgradeLimits() {
 	if limitFile == "" { // skip upgrade
 		return
 	}
-	output := i.upgradeLimitsWithFile("enable.xdr") // first enable settings upgrades in general
-	require.Contains(i.t, output, "3500000")
+	// First enable settings upgrades in general.
+	i.upgradeLimitsWithFile("enable.xdr", "3500000")
 
-	limitFile = fmt.Sprintf("%s.p%d.xdr", limitFile, i.protocolVersion)
-	output = i.upgradeLimitsWithFile(limitFile) // then run out upgrade
-
-	// A coupla oddly-specific values from the .json file to validate against:
-	switch limitFile {
-	case "testnet":
-		require.Contains(i.t, output, "65536")
-	//
-	// Add others here if you want
-	//
-	default: // unlimited
-		require.Contains(i.t, output, "4294967295")
+	// The value below has to be one the second upgrade file sets and enable.xdr
+	// does not, or the wait returns on its first look and proves nothing. Both
+	// of these are contract_max_size_bytes. 65536 would not do: enable.xdr
+	// already sets contract_data_entry_size_bytes to it.
+	// Add another case here if you add another upgrade file.
+	expected := "4294967295" // unlimited
+	if limitFile == "testnet" {
+		expected = "131072"
 	}
+	i.upgradeLimitsWithFile(fmt.Sprintf("%s.p%d.xdr", limitFile, i.protocolVersion), expected)
 }
 
-func (i *Test) upgradeLimitsWithFile(limitFile string) string {
+// upgradeLimitsWithFile applies one Core settings upgrade and waits for Core to
+// report it. expectInSorobanInfo is a number the upgrade file sets; seeing it in
+// Core's /sorobaninfo response is how we know the upgrade has been applied.
+// Pick a number no earlier upgrade already set, or the wait returns on its
+// first look and proves nothing.
+func (i *Test) upgradeLimitsWithFile(limitFile, expectInSorobanInfo string) {
 	newLimits, err := upgradeFiles.ReadFile(
 		filepath.Join("docker", "upgrades", limitFile))
 	require.NoError(i.t, err)
@@ -1042,26 +1056,32 @@ func (i *Test) upgradeLimitsWithFile(limitFile string) string {
 		require.NoError(i.t, err)
 	}
 
-	// Wait for a ledger then ensure that the upgrade got applied:
-	time.Sleep(5 * time.Second)
-	upgradeCmd = i.getComposeCommand(
-		"exec", "-T", "core",
-		"curl", "-sG",
-		"http://localhost:11626/sorobaninfo",
-	)
-	upgradeCmd.Stdout = stdout
-	stdout.Reset()
-
-	require.NoError(i.t, upgradeCmd.Start())
-	require.NoError(i.t, upgradeCmd.Wait())
-	return stdout.String()
+	// The upgrade lands on the next ledger close, which takes about a second
+	// with accelerated time. Poll for it. A fixed sleep here used to cost every
+	// environment 10 seconds, because this function runs twice per environment.
+	//
+	// The number has to stand on its own, so 3500000 does not match a reported
+	// 35000000.
+	applied := regexp.MustCompile(
+		`(?:^|[^0-9])` + regexp.QuoteMeta(expectInSorobanInfo) + `(?:[^0-9]|$)`)
+	require.Eventually(i.t, func() bool {
+		out, err := i.runComposeCommand(
+			"exec", "-T", "core",
+			"curl", "-sG",
+			"http://localhost:11626/sorobaninfo",
+		)
+		return err == nil && applied.Match(out)
+	}, 30*time.Second, 500*time.Millisecond,
+		"the %s upgrade never put %s into Core's /sorobaninfo",
+		limitFile, expectInSorobanInfo)
 }
 
 func (i *Test) fillContainerPorts() {
 	getPublicPort := func(service string, privatePort int) uint16 {
 		var port uint16
-		// We need to try several times because we detached from `docker-compose up`
-		// and the container may not be ready
+		// We detached from `docker compose up`, so the container may not have
+		// published its ports yet. The wait is generous because several tests
+		// run at once and the Docker daemon answers slowly under that load.
 		require.Eventually(i.t,
 			func() bool {
 				out, err := i.runComposeCommand("port", service, strconv.Itoa(privatePort))
@@ -1075,7 +1095,7 @@ func (i *Test) fillContainerPorts() {
 				port = uint16(intPort)
 				return true
 			},
-			2*time.Second,
+			30*time.Second,
 			100*time.Millisecond,
 		)
 		return port
