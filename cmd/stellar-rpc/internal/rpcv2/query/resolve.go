@@ -148,14 +148,15 @@ func (a *ReadView) resolveLedgers(c chunk.ID) (LedgerReader, func() error, error
 // gets over its packfiles. A page's payload fetch is hundreds of scattered
 // records with no ordering between them, so serializing them only added their
 // latencies together. The right value is a property of the storage the daemon
-// reads through, never of the query the client asked for: this default is the
-// NVMe-measured choice, and a deployment on different storage overrides it at
-// wiring time via Registry.SetColdEventReadConcurrency.
+// reads through, never of the query the client asked for; this is the
+// NVMe-measured choice.
 //
 // The fan-out is per request, so the worker count multiplies both goroutines
-// and packfile's coalesced-read buffers by the number of cold pages in flight.
-// A deployment with headroom raises it through the Registry's
-// coldEventReadConcurrency; zero means this default.
+// and packfile's coalesced-read buffers by the number of cold pages in flight
+// — the footprint is workers × in-flight cold pages, not workers alone.
+//
+// The value is a compiled-in constant: changing it is a code change, and a
+// config knob gets added when a deployment on different storage needs one.
 const defaultColdEventReadConcurrency = 8
 
 // Events resolves chunk c's event store as the common event.Reader the
@@ -171,12 +172,8 @@ func (a *ReadView) Events(c chunk.ID) (event.Reader, error) {
 	}
 	switch t {
 	case tierCold:
-		conc := a.coldEventReadConcurrency
-		if conc == 0 {
-			conc = defaultColdEventReadConcurrency
-		}
 		cr, err := event.OpenColdReader(c, a.catalog.Layout().EventsBucketDir(c),
-			event.ColdReaderOptions{Concurrency: conc})
+			event.ColdReaderOptions{Concurrency: defaultColdEventReadConcurrency})
 		if err != nil {
 			return nil, err
 		}
