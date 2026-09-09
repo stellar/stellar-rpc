@@ -41,9 +41,6 @@ const (
 	parityChunk        = chunk.ID(5)
 	parityMaxLimit     = 1000
 	parityDefaultLimit = 100
-	// parityTermBudget has headroom over the worst legal v1 expansion,
-	// like the production default (config.DefaultGetEventsV1TermBudget).
-	parityTermBudget = 200
 )
 
 // parityCloseTime is ledger F+i's close time: distinct and nonzero, so a
@@ -211,7 +208,6 @@ func newShimClient(t *testing.T, lcms [][]byte) *jrpc2.Client {
 	require.NoError(t, err)
 	t.Cleanup(view.Release)
 	base := NewV1Handler(Limits{
-		TermBudget:   parityTermBudget,
 		MaxLimit:     parityMaxLimit,
 		DefaultLimit: parityDefaultLimit,
 	}, logger)

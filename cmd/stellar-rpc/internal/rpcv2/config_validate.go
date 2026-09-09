@@ -293,9 +293,6 @@ func validateService(svc config.ServiceConfig) error {
 	if err := validatePaginatedMethods(m); err != nil {
 		return err
 	}
-	if err := validateEventsMethod("getEvents", m.GetEvents); err != nil {
-		return err
-	}
 	if err := validateEventsMethod("getEventsV2", m.GetEventsV2); err != nil {
 		return err
 	}
@@ -328,7 +325,7 @@ func validatePaginatedMethods(m config.MethodsConfig) error {
 	}{
 		{"getTransactions", m.GetTransactions},
 		{"getLedgers", m.GetLedgers},
-		{"getEvents", m.GetEvents.PaginatedMethodConfig},
+		{"getEvents", m.GetEvents},
 		{"getEventsV2", m.GetEventsV2.PaginatedMethodConfig},
 	}
 	for _, pp := range paginated {

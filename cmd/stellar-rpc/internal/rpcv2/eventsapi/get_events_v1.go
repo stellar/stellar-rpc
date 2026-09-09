@@ -9,6 +9,7 @@ package eventsapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 
@@ -27,8 +28,7 @@ import (
 )
 
 // NewV1Handler builds the v1 getEvents handler. Limits are the getEvents
-// method's own knobs, not getEventsV2's: the term budget defaults high
-// enough that no legal v1 request is rejected (config.DefaultGetEventsV1TermBudget).
+// method's own page caps, which are v1's rather than the v2 spec's.
 func NewV1Handler(limits Limits, logger *supportlog.Entry) jrpc2.Handler {
 	return methods.NewHandler(
 		func(ctx context.Context, req protocol.GetEventsRequest) (protocol.GetEventsResponse, error) {
@@ -87,10 +87,6 @@ func getEventsV1(
 	if err != nil {
 		return zero, &jrpc2.Error{Code: jrpc2.InvalidParams, Message: err.Error()}
 	}
-	if err := checkTermBudget(filters, limits.TermBudget); err != nil {
-		return zero, responseError(err, lr.FirstLedger.Sequence, lr.LastLedger.Sequence, logger)
-	}
-
 	minLedger, from := v1ResumePoint(start, fromCursor)
 	// An end at or below the start is legal v1 input and an empty window.
 	// Served here: the pager's scopes are inclusive and never inverted.
@@ -103,7 +99,13 @@ func getEventsV1(
 	page, err := view.QueryEventsFrom(ctx, scope, from, pageLimit)
 	if err != nil {
 		// The v1 handler codes every failure past validation as an invalid
-		// request, cancellation included.
+		// request, cancellation included. Only a server fault is logged:
+		// the client's copy of the message is the only one unless this
+		// does, but a caller hanging up or running out its deadline is
+		// routine and would drown the real faults.
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			logger.WithError(err).Error("getEvents: serving the request failed")
+		}
 		return zero, &jrpc2.Error{Code: jrpc2.InvalidRequest, Message: err.Error()}
 	}
 	// A short page must mean the scope is done: v1Response's window-end

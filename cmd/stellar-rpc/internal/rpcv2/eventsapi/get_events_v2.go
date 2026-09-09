@@ -28,18 +28,27 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 )
 
-// Limits are the caps an operator configures.
+// Limits are the page caps an operator configures, which both events
+// methods have.
 type Limits struct {
-	TermBudget uint32
 	// MaxLimit is protocol.MaxLimitV2 unless an operator lowers it.
 	MaxLimit uint
 	// DefaultLimit applies when the request sets no limit.
 	DefaultLimit uint
 }
 
+// V2Limits adds the term budget. Only getEventsV2 has one: v1's own caps
+// bound a request's terms already, so a budget there could only reject
+// requests v1 accepts.
+type V2Limits struct {
+	Limits
+
+	TermBudget uint32
+}
+
 // NewHandler builds the getEventsV2 handler. It decodes the params itself,
 // not through methods.NewHandler, so an unknown field fails.
-func NewHandler(limits Limits, logger *supportlog.Entry) jrpc2.Handler {
+func NewHandler(limits V2Limits, logger *supportlog.Entry) jrpc2.Handler {
 	return func(ctx context.Context, r *jrpc2.Request) (any, error) {
 		req, err := decodeRequest(r.ParamString(), limits.MaxLimit)
 		if err != nil {
@@ -121,7 +130,7 @@ func invalidParams(message string) error {
 
 // getEventsV2 classifies every failure in one place.
 func getEventsV2(
-	ctx context.Context, limits Limits, logger *supportlog.Entry,
+	ctx context.Context, limits V2Limits, logger *supportlog.Entry,
 	req *protocol.GetEventsV2Request,
 ) (protocol.GetEventsV2Response, error) {
 	view, err := query.ViewFrom(ctx)
@@ -137,7 +146,7 @@ func getEventsV2(
 }
 
 func serve(
-	ctx context.Context, view *query.ReadView, limits Limits,
+	ctx context.Context, view *query.ReadView, limits V2Limits,
 	req *protocol.GetEventsV2Request, oldest, latest uint32,
 ) (protocol.GetEventsV2Response, error) {
 	cursor, limit, err := requestCursor(limits, req, oldest, latest)
@@ -164,7 +173,7 @@ func serve(
 // requestCursor turns either request shape into the cursor the pager
 // advances, plus the limit to advance it by.
 func requestCursor(
-	limits Limits, req *protocol.GetEventsV2Request, oldest, latest uint32,
+	limits V2Limits, req *protocol.GetEventsV2Request, oldest, latest uint32,
 ) (query.EventCursor, int, error) {
 	// Check the operator's limit first. req.Valid checks
 	// protocol.MaxLimitV2, and whichever check runs first is the number
