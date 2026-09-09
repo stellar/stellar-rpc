@@ -246,10 +246,7 @@ func (h *HotStore) FetchEvents(ctx context.Context, eventIDs []uint32) ([]Payloa
 		return nil, err
 	}
 
-	keys := make([][]byte, len(eventIDs))
-	for i, id := range eventIDs {
-		keys[i] = encodeDataKey(id)
-	}
+	keys := encodeDataKeys(eventIDs)
 	values, err := h.chunkStore.BatchMultiGet(DataCF, keys)
 	if err != nil {
 		return nil, fmt.Errorf("events: batch fetch from chunk %s: %w", h.chunkID, err)
@@ -687,6 +684,32 @@ func encodeDataKey(eventID uint32) []byte {
 	var key [dataKeyLen]byte
 	binary.BigEndian.PutUint32(key[:], eventID)
 	return key[:]
+}
+
+// encodeDataKeys encodes every id into ONE backing buffer and returns
+// per-id sub-slices of it, in input order: two allocations for the
+// whole batch (the buffer plus the slice headers) instead of one per
+// id. encodeDataKey cannot serve this loop — its array escapes through
+// the returned slice, so each 4-byte key is heap-allocated
+// ("moved to heap: key" under -gcflags=-m), and a limit=1000 page pays
+// 1000 of them just to name its rows.
+//
+// The returned slices alias one array and are read-only. A consumer
+// must not retain them past the call it passes them to.
+// rocksdb.Store.BatchMultiGet qualifies: grocksdb copies every key into
+// C memory and frees that copy before the batched get returns, so
+// nothing outlives the call.
+func encodeDataKeys(eventIDs []uint32) [][]byte {
+	buf := make([]byte, dataKeyLen*len(eventIDs))
+	keys := make([][]byte, len(eventIDs))
+	for i, id := range eventIDs {
+		lo := i * dataKeyLen
+		hi := lo + dataKeyLen
+		key := buf[lo:hi:hi]
+		binary.BigEndian.PutUint32(key, id)
+		keys[i] = key
+	}
+	return keys
 }
 
 func encodeIndexKey(term TermKey, eventID uint32) []byte {

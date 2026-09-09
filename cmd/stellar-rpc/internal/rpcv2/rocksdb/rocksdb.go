@@ -244,6 +244,11 @@ func (s *Store) GetPinned(cf string, key []byte, fn func(value []byte) error) (b
 // merge adjacent SST seeks across the input set. Behavior on
 // unsorted input is undefined per RocksDB semantics.
 //
+// keys are not retained past the call: grocksdb copies each into C
+// memory and frees that copy before the batched get returns. A caller
+// may therefore carve the whole list out of one buffer rather than
+// allocating a key at a time (see event.encodeDataKeys).
+//
 // Uses async_io read options so the kernel can issue overlapping
 // I/Os under the hood (notable on EBS / high random-latency
 // storage). The batched call is a single CGO crossing; callers
