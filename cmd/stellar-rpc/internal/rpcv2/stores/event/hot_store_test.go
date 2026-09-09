@@ -347,17 +347,18 @@ func TestHotStore_FetchEventsRejectsUnsortedInput(t *testing.T) {
 }
 
 // fetchEventsPerIDAllocBudget is the number of heap allocations
-// FetchEvents may spend per event ID. All three are grocksdb's, spent
-// inside the batched multi-get: one *PinnableSlice per key, plus the
-// two size out-params PinnableSlice.Data escapes to the heap (BatchMultiGet
-// calls Data twice per key, once to size the arena and once to fill it).
-// Our own per-batch work — the key list, the value arena, the Payload
-// slice — is a fixed handful of allocations regardless of batch size.
+// FetchEvents may spend per event ID. Both are grocksdb's, spent inside
+// the batched multi-get: one *PinnableSlice per key, plus the size
+// out-param the single PinnableSlice.Data call per key escapes to the
+// heap (BatchMultiGet reads each pinned value once and copies from the
+// kept C-backed slice). Our own per-batch work — the key list, the
+// value arena, the Payload slice — is a fixed handful of allocations
+// regardless of batch size.
 //
 // If a grocksdb bump moves this number, raise it deliberately after
 // checking where the new allocation comes from; do not widen it to
 // absorb a regression on our side of the boundary.
-const fetchEventsPerIDAllocBudget = 3
+const fetchEventsPerIDAllocBudget = 2
 
 // TestHotStore_FetchEventsAllocationBudget pins that FetchEvents spends
 // no per-ID allocation of its own. The regression it catches is building
