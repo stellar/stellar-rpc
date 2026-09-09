@@ -252,10 +252,13 @@ func transactionsCorpus(t *testing.T) []xdr.LedgerCloseMeta {
 	txEvent := diffTxEvent(xdr.TransactionEventStageTransactionEventStageAfterAllTxs, ev)
 
 	return []xdr.LedgerCloseMeta{
-		// 1: the shape the pre-existing tests use — one TxSet envelope, two
-		// TxProcessing entries sharing its hash, V3 meta with no SorobanMeta
-		// on a Soroban envelope (the straggler corner).
-		createTestLedger(101),
+		// 1: V3 meta with NO SorobanMeta on a Soroban envelope (the straggler
+		// corner) plus a second, distinct tx. Unique hashes so the pre-existing
+		// duplicate-hash fixture shape stays pinned by the handler tests.
+		diffLCM(t, 2, 101,
+			diffTxSpec{txEnvelope(198), diffMetaV3NoSoroban(), true},
+			diffTxSpec{diffClassicEnvelope(199), diffMetaV1(), false},
+		),
 		// 2: LCM V1, classic envelopes, V1 meta — no events anywhere.
 		diffLCM(t, 1, 102,
 			diffTxSpec{diffClassicEnvelope(200), diffMetaV1(), true},
