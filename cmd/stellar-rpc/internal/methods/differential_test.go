@@ -37,25 +37,34 @@ type differential[Req, Resp any] struct {
 }
 
 // assertSame runs both sides over req and asserts their responses serialize
-// identically, or that they fail with the same error.
+// identically. Both sides must succeed: a reference error means a broken
+// corpus cell, or a case that belongs in assertSameError.
 func (d differential[Req, Resp]) assertSame(t *testing.T, req Req) Resp {
 	t.Helper()
 	wantResp, wantErr := d.want(context.TODO(), req)
+	require.NoError(t, wantErr, "reference path errored: broken corpus cell, or a case for assertSameError")
 	gotResp, gotErr := d.got(context.TODO(), req)
-
-	if wantErr != nil {
-		require.Error(t, gotErr)
-		require.Equal(t, wantErr.Error(), gotErr.Error())
-		var wantRPC, gotRPC *jrpc2.Error
-		if errors.As(wantErr, &wantRPC) {
-			require.ErrorAs(t, gotErr, &gotRPC)
-			require.Equal(t, wantRPC.Code, gotRPC.Code)
-		}
-		return gotResp
-	}
 	require.NoError(t, gotErr)
 	requireSameJSON(t, wantResp, gotResp)
 	return gotResp
+}
+
+// assertSameError runs both sides over a request both are expected to reject
+// and asserts they fail identically: same message and, for a *jrpc2.Error,
+// the same code. Error behavior is wire-visible, so it is a differential
+// axis of its own.
+func (d differential[Req, Resp]) assertSameError(t *testing.T, req Req) {
+	t.Helper()
+	_, wantErr := d.want(context.TODO(), req)
+	require.Error(t, wantErr, "the reference path accepted a request assertSameError expects it to reject")
+	_, gotErr := d.got(context.TODO(), req)
+	require.Error(t, gotErr)
+	require.Equal(t, wantErr.Error(), gotErr.Error())
+	var wantRPC, gotRPC *jrpc2.Error
+	if errors.As(wantErr, &wantRPC) {
+		require.ErrorAs(t, gotErr, &gotRPC)
+		require.Equal(t, wantRPC.Code, gotRPC.Code)
+	}
 }
 
 // assertSameChain pages both sides from first, each following its OWN cursors

@@ -358,6 +358,20 @@ func seededTransactionsDifferential(t *testing.T) transactionsDifferential {
 	return newTransactionsDifferential(seedDifferentialDB(t, corpus))
 }
 
+// TestGetTransactions_ViewWalkErrorParity pins that both paths reject an
+// invalid request identically: same message, same jrpc2 code.
+func TestGetTransactions_ViewWalkErrorParity(t *testing.T) {
+	diff := seededTransactionsDifferential(t)
+	for name, start := range map[string]uint32{
+		"below oldest": transactionsCorpusFirst - 1,
+		"above latest": transactionsCorpusLast + 1,
+	} {
+		t.Run(name, func(t *testing.T) {
+			diff.assertSameError(t, protocol.GetTransactionsRequest{StartLedger: start})
+		})
+	}
+}
+
 // TestGetTransactions_ViewWalkMatchesParsedPath sweeps start ledgers, page
 // limits and both response formats over the corpus, asserting byte-identical
 // responses. The limits are chosen so pages end inside a ledger as well as on
