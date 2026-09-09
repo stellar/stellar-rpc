@@ -10,11 +10,15 @@ package packfile
 // Puts are capacity-capped so one pathological file cannot pin an arbitrarily
 // large array in a pool slot; larger buffers fall to the garbage collector.
 // Every cap must therefore sit above what a legitimate packfile needs, because
-// crossing one is silent: the Put is skipped, the pool drains, and every open
-// allocates afresh — still correct, but without the allocation win these pools
-// exist for.
+// crossing one is otherwise silent: the Put is skipped, the pool drains, and
+// every open allocates afresh — still correct, but without the allocation win
+// these pools exist for. capSkips counts those skipped Puts so the drain is
+// visible from outside the process instead.
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // maxPooledOffsets caps the decoded offset table (recordCount+1 int64s, so an
 // 8 MiB array at the cap) a Put may retain. What it has to exceed is fixed by
@@ -46,9 +50,28 @@ var (
 	openBufPool sync.Pool // *[]byte
 )
 
+// capSkips counts the Puts dropped for exceeding their pool's cap, across all
+// three pools. Each one is a buffer the pool did not get back, so a count that
+// climbs with the open rate is the file comment's silent drain in progress.
+// Process-wide by design — the metrics exporter reads it via PoolCapSkips.
+//
+//nolint:gochecknoglobals // one tally across process-wide pools; read-only outside this file
+var capSkips atomic.Uint64
+
+// PoolCapSkips returns the process-wide count of pooled buffers dropped for
+// exceeding a capacity cap.
+//
+// Zero is the state the caps are chosen for, and the only healthy one: any
+// count means some packfile crossed a cap, and a climbing count means the
+// pools have stopped recycling. Raise the cap the file comment sizes against
+// the geometry that grew. See capSkips.
+func PoolCapSkips() uint64 { return capSkips.Load() }
+
 // A size miss hands the pooled buffer back before allocating: Get has already
 // removed it from the pool, so returning it is the only thing that keeps a run
-// of growing opens from draining the pool one buffer per open.
+// of growing opens from draining the pool one buffer per open. That buffer is
+// under its cap by construction — the pool held it — so it never counts as a
+// cap skip.
 
 func getOffsets(n int) []int64 {
 	if p, _ := offsetsPool.Get().(*[]int64); p != nil {
@@ -63,7 +86,11 @@ func getOffsets(n int) []int64 {
 // putOffsets recycles a decoded offset table. The caller must guarantee no
 // live reference remains; see Reader.Close for the in-flight handshake.
 func putOffsets(s []int64) {
-	if cap(s) == 0 || cap(s) > maxPooledOffsets {
+	if cap(s) == 0 {
+		return
+	}
+	if cap(s) > maxPooledOffsets {
+		capSkips.Add(1)
 		return
 	}
 	s = s[:0]
@@ -81,7 +108,11 @@ func getScratch(n int) []uint32 {
 }
 
 func putScratch(s []uint32) {
-	if cap(s) == 0 || cap(s) > maxPooledScratch {
+	if cap(s) == 0 {
+		return
+	}
+	if cap(s) > maxPooledScratch {
+		capSkips.Add(1)
 		return
 	}
 	s = s[:0]
@@ -99,7 +130,11 @@ func getOpenBuf(n int) []byte {
 }
 
 func putOpenBuf(s []byte) {
-	if cap(s) == 0 || cap(s) > maxPooledOpenBuf {
+	if cap(s) == 0 {
+		return
+	}
+	if cap(s) > maxPooledOpenBuf {
+		capSkips.Add(1)
 		return
 	}
 	s = s[:0]

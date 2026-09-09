@@ -101,3 +101,27 @@ func TestReaderCloseDuringReadDoesNotRecycle(t *testing.T) {
 		require.ErrorIs(t, err, os.ErrClosed)
 	}
 }
+
+// The counter is the only signal the caps have been crossed, so it must count
+// exactly the Puts a cap dropped: an over-cap buffer on every pool, and
+// nothing for the buffers a Put keeps or for the empty slices it ignores.
+//
+// The count is process-wide, so the assertions are on the delta.
+func TestPoolCapSkipsCountsDroppedPuts(t *testing.T) {
+	before := PoolCapSkips()
+
+	putOffsets(make([]int64, 0, maxPooledOffsets))
+	putScratch(make([]uint32, 0, maxPooledScratch))
+	putOpenBuf(make([]byte, 0, maxPooledOpenBuf))
+	putOffsets(nil)
+	putScratch(nil)
+	putOpenBuf(nil)
+	require.Equal(t, before, PoolCapSkips(),
+		"a Put at the cap is pooled and an empty one is ignored; neither is a cap skip")
+
+	putOffsets(make([]int64, 0, maxPooledOffsets+1))
+	putScratch(make([]uint32, 0, maxPooledScratch+1))
+	putOpenBuf(make([]byte, 0, maxPooledOpenBuf+1))
+	require.Equal(t, before+3, PoolCapSkips(),
+		"each pool must count the Put its cap dropped")
+}
