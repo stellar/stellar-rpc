@@ -12,8 +12,8 @@ import (
 // Pins the payload arena against the reader's own fan-out: with Concurrency
 // above one, ReadItems calls the callback from one goroutine per batch, so an
 // unsynchronized append into the shared arena corrupts payloads or segfaults.
-// Every payload is checked, so a torn copy fails even when -race does not
-// schedule the overlap.
+// Every payload is compared whole, so a torn copy fails even when -race does
+// not schedule the overlap.
 func TestColdReader_FetchEventsFansOutSafely(t *testing.T) {
 	const (
 		chunkID = chunk.ID(0)
@@ -33,6 +33,6 @@ func TestColdReader_FetchEventsFansOutSafely(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, len(ids))
 	for i := range ids {
-		require.Equal(t, dataSym(t, payloads[i]), dataSym(t, got[i]), "payload %d", i)
+		require.Equal(t, payloads[i], got[i], "payload %d", i)
 	}
 }

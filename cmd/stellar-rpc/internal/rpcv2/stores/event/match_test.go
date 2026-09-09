@@ -1761,10 +1761,9 @@ func TestCountDistinctTerms(t *testing.T) {
 	}), "topic-count buckets are not value terms and are not counted")
 }
 
-// The first-batch hint contract: a positive hint sizes the first fetch, a wild
-// one is capped at eight default batches, and later batches use the default.
-// The cap scales with matchBatchSize, so a test-shrunk batch cannot be blown
-// past by a hint.
+// The first-batch hint contract: a positive hint sizes the first fetch in
+// full, since every caller passes a validated page size, and later batches
+// use the default.
 func TestBatchSizes(t *testing.T) {
 	first, rest := batchSizes(0)
 	require.Equal(t, matchBatchSize, first)

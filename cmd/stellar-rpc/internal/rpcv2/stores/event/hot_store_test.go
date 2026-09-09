@@ -362,12 +362,9 @@ const fetchEventsPerIDAllocBudget = 2
 
 // TestHotStore_FetchEventsAllocationBudget pins that FetchEvents spends
 // no per-ID allocation of its own. The regression it catches is building
-// the RocksDB key list with encodeDataKey per ID: that helper returns a
-// slice of a stack array, so every key escapes to the heap
-// ("moved to heap: key" under -gcflags=-m) and a limit=1000 page pays
-// 1000 extra allocations just to name its rows. encodeDataKeys carves
-// them all out of one buffer instead, which drops the measured cost from
-// 4 allocations per ID to the 3 grocksdb charges.
+// the RocksDB key list one heap-allocated key at a time, which cost a
+// limit=1000 page a thousand extra allocations; encodeDataKeys carves
+// them out of one buffer instead, leaving only grocksdb's two per ID.
 func TestHotStore_FetchEventsAllocationBudget(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	const n = 512
