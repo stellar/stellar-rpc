@@ -30,14 +30,23 @@ package event
 // rather than re-clipping the accumulator there, would recover part of the
 // scan cost.
 //
-// Ownership. acc is built by this call and is the only bitmap ever mutated.
-// The term bitmaps handed to AndAny may be shared, copy-on-write-marked mirror
-// snapshots (denseState.snapshot), which the index's contract forbids mutating
-// or Cloning: AndAny reads them through roaring's read-only container
-// accessors and writes only through the receiver, so passing them is safe, and
-// roaring_contract_test.go pins that property against the pinned roaring
-// version. Sparse terms never become bitmaps beyond the ids that land inside
-// the slab under evaluation.
+// Ownership. Every term the query names is materialized once, by the single
+// batched Reader.LookupKeys call in Matches, and the resulting bitmaps are
+// held for the whole walk. They are read-only: a hot dense term's bitmap is
+// the denseState.snapshot every concurrent reader shares, which the index's
+// contract forbids mutating or Cloning. AndAny reads them through roaring's
+// read-only container accessors and writes only through the receiver, so
+// passing them is safe, and roaring_contract_test.go pins that property
+// against the pinned roaring version. acc is built by this call and is the
+// only bitmap ever mutated.
+//
+// Freshness follows from holding them. The bitmaps are a point-in-time image
+// of the index taken at query start — a sparse hot term is copied out of the
+// atomically published id list, a dense one is denseState's published
+// snapshot — so an id ingested while the walk runs is invisible to it, in
+// either direction and at every slab. That is what the pinned window already
+// promises: see IDRange's snapshot-isolation contract, under which no event
+// past the pinned End is visible to the request anyway.
 
 import (
 	"cmp"
@@ -57,16 +66,14 @@ import (
 var slabShift uint = 16
 
 // slabTerms is one of a filter's term groups resolved out of the batched
-// lookup and held in whichever representation the index gave it: bitmaps for
-// dense (and cold) terms, borrowed id lists for sparse ones. The group's value
-// is the union of the two halves.
+// lookup: the bitmaps the index returned for the group's present terms, held
+// for the whole query. The group's value is their union.
 //
-// est is the summed cardinality of the present terms over the whole chunk. It
-// ignores the window, so it ranks a filter's groups rather than counting a
-// query's candidates, and it is what orders the AND.
+// est is the summed cardinality of those bitmaps. It ignores the window, so it
+// ranks a filter's groups rather than counting a query's candidates, and it is
+// what orders the AND.
 type slabTerms struct {
 	bitmaps []*roaring.Bitmap
-	lists   [][]uint32
 	est     uint64
 }
 
@@ -75,40 +82,31 @@ type slabFilter struct {
 	groups []slabTerms
 }
 
-// resolveSlabTerms collects the postings at slots, reporting false when every
+// resolveSlabTerms collects the bitmaps at slots, reporting false when every
 // one of them is absent from the index — the signal that the owning filter can
 // match nothing.
 //
-// A present term holding no ids contributes nothing to the union but still
-// keeps the group alive, which an absent term's caller-side skip would not do.
-func resolveSlabTerms(sources []postings, slots []int) (slabTerms, bool) {
+// A present term is a non-nil bitmap, empty or not: an empty one contributes
+// nothing to the union but still keeps the group alive, which an absent term's
+// caller-side skip would not do.
+func resolveSlabTerms(sources []*roaring.Bitmap, slots []int) (slabTerms, bool) {
 	var g slabTerms
-	present := false
 	for _, slot := range slots {
-		p := sources[slot]
-		if !p.present() {
+		bm := sources[slot]
+		if bm == nil {
 			continue
 		}
-		present = true
-		g.est += p.estimate()
-		// A dense term is snapshotted once here, for the whole query, so every
-		// slab reads the same immutable bitmap.
-		if bm := p.bitmap(); bm != nil {
-			g.bitmaps = append(g.bitmaps, bm)
-			continue
-		}
-		if len(p.ids) > 0 {
-			g.lists = append(g.lists, p.ids)
-		}
+		g.bitmaps = append(g.bitmaps, bm)
+		g.est += bm.GetCardinality()
 	}
-	return g, present
+	return g, len(g.bitmaps) > 0
 }
 
 // resolveSlabFilters is the planning step: resolve every filter's groups, drop
 // the filters that named an entirely absent group, and order each survivor's
 // groups rarest first so the accumulator shrinks fastest and a group that
 // empties it ends the slab before the fat groups are read.
-func resolveSlabFilters(plans []termPlan, sources []postings) []slabFilter {
+func resolveSlabFilters(plans []termPlan, sources []*roaring.Bitmap) []slabFilter {
 	out := make([]slabFilter, 0, len(plans))
 	for _, plan := range plans {
 		groups := make([]slabTerms, 0, len(plan))
@@ -132,78 +130,24 @@ func resolveSlabFilters(plans []termPlan, sources []postings) []slabFilter {
 	return out
 }
 
-// slabScratch is the per-query reusable working set of the slab loop: the
-// AndAny argument slice, and one bitmap holding whichever sparse ids land in
-// the slab under evaluation.
-//
-// Reusing sparse across groups is safe because AndAny is done with its
-// arguments when it returns — it copies out of them and never retains a
-// container — which roaring_contract_test.go pins alongside the read-only
-// property.
-type slabScratch struct {
-	args   []*roaring.Bitmap
-	sparse *roaring.Bitmap
-}
-
-// inputs returns the AndAny arguments for g over [lo, hi): the group's term
-// bitmaps, plus a scratch bitmap for the sparse ids inside the slab when the
-// group has any. An empty result means the group holds nothing in this slab,
-// so the owning filter matches nothing here.
-//
-// A group with no sparse terms hands back its own slice with no copy.
-func (sc *slabScratch) inputs(g *slabTerms, lo, hi uint32) []*roaring.Bitmap {
-	if len(g.lists) == 0 {
-		return g.bitmaps
-	}
-	if sc.sparse == nil {
-		sc.sparse = roaring.New()
-	} else {
-		sc.sparse.Clear()
-	}
-	hit := false
-	for _, ids := range g.lists {
-		// Both bounds are found by binary search, so the borrowed list is
-		// never copied and never scanned outside the slab.
-		lower, _ := slices.BinarySearch(ids, lo)
-		tail := ids[lower:]
-		upper, _ := slices.BinarySearch(tail, hi)
-		if sub := tail[:upper]; len(sub) > 0 {
-			sc.sparse.AddMany(sub)
-			hit = true
-		}
-	}
-	sc.args = append(sc.args[:0], g.bitmaps...)
-	if hit {
-		sc.args = append(sc.args, sc.sparse)
-	}
-	return sc.args
-}
-
 // eval returns f's matches inside [lo, hi) as a freshly built bitmap the
 // caller owns, or nil when f matches nothing there.
 //
 // The accumulator starts as the slab window itself and is narrowed group by
 // group in place: AndAny is x.And(FastOr(args)) without the intermediate
 // union, so one call is a whole group.
-func (f *slabFilter) eval(lo, hi uint32, sc *slabScratch) *roaring.Bitmap {
-	var acc *roaring.Bitmap
+//
+// A filter reaching here always names at least one group: one that names none
+// matches everything and takes the match-all path upstream.
+func (f *slabFilter) eval(lo, hi uint32) *roaring.Bitmap {
+	acc := roaring.New()
+	acc.AddRange(uint64(lo), uint64(hi))
 	for i := range f.groups {
-		inputs := sc.inputs(&f.groups[i], lo, hi)
-		if len(inputs) == 0 {
-			return nil
-		}
-		if acc == nil {
-			acc = roaring.New()
-			acc.AddRange(uint64(lo), uint64(hi))
-		}
-		acc.AndAny(inputs...)
+		acc.AndAny(f.groups[i].bitmaps...)
 		if acc.IsEmpty() {
 			return nil
 		}
 	}
-	// acc is nil only for a filter that named no group at all, which takes the
-	// match-all path upstream and never reaches here; the nil is read as the
-	// empty candidate set either way.
 	return acc
 }
 
@@ -219,7 +163,6 @@ type slabStepper struct {
 	cursor uint32
 	done   bool
 
-	scratch   slabScratch
 	perFilter []*roaring.Bitmap
 
 	// cur is the current slab's result, held only for its iterator.
@@ -229,7 +172,7 @@ type slabStepper struct {
 }
 
 func newSlabStepper(
-	plans []termPlan, sources []postings, window IDRange, descending bool,
+	plans []termPlan, sources []*roaring.Bitmap, window IDRange, descending bool,
 ) *slabStepper {
 	s := &slabStepper{
 		filters: resolveSlabFilters(plans, sources),
@@ -283,7 +226,7 @@ func (s *slabStepper) nextBounds() (uint32, uint32, bool) {
 func (s *slabStepper) evalSlab(lo, hi uint32) *roaring.Bitmap {
 	s.perFilter = s.perFilter[:0]
 	for i := range s.filters {
-		if bm := s.filters[i].eval(lo, hi, &s.scratch); bm != nil {
+		if bm := s.filters[i].eval(lo, hi); bm != nil {
 			s.perFilter = append(s.perFilter, bm)
 		}
 	}

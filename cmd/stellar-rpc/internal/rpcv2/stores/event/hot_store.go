@@ -112,12 +112,8 @@ type HotStore struct {
 	offsets    *ConcurrentLedgerOffsets
 }
 
-// Compile-time guards: *HotStore satisfies Reader and the optional
-// postingReader seam.
-var (
-	_ Reader        = (*HotStore)(nil)
-	_ postingReader = (*HotStore)(nil)
-)
+// Compile-time guard: *HotStore satisfies Reader.
+var _ Reader = (*HotStore)(nil)
 
 // NewWithStore wraps an ALREADY-OPEN rocksdb.Store as an events HotStore on the
 // three events CFs (CFNames()), running the mandatory warmup to rebuild the
@@ -188,6 +184,13 @@ func (h *HotStore) Offsets() (*LedgerOffsets, error) {
 // to batch — but exposing this method satisfies the Reader
 // interface so callers can program against batched lookups
 // uniformly.
+//
+// Freshness, which the match path holds these bitmaps across a whole
+// query on: each is a point-in-time image of its term. A sparse term
+// is copied out of the mirror's atomically published id list; a dense
+// one is denseState.snapshot, the immutable clone shared with every
+// other reader of that term. Neither grows under its holder as ingest
+// continues, so a walk started now never sees an id written later.
 func (h *HotStore) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.Bitmap, error) {
 	if h.chunkStore.IsClosed() {
 		return nil, stores.ErrStoreClosed
@@ -453,32 +456,6 @@ func (h *HotStore) IngestLedgerToBatch(
 	b.Put(OffsetsCF, encodeOffsetKey(ledgerSeq), encodeLedgerEventCount(uint32(len(payloads))))
 
 	return func() { h.applyLedger(startID, termKeys) }, nil
-}
-
-// lookupPostings is the no-materialize half of LookupKeys, and the hot store's
-// implementation of the optional postingReader seam. It returns each term's
-// live mirror representation, so a query that only walks ids in ascending
-// order never pays Get's roaring.New plus AddMany per sparse term.
-//
-// Results are positionally aligned with keys; a miss is the zero postings.
-// Same read-only contract as LookupKeys: a sparse term borrows the mirror's
-// published id slice, and a dense one materializes through
-// denseState.snapshot, the shared immutable bitmap LookupKeys hands out.
-func (h *HotStore) lookupPostings(ctx context.Context, keys []TermKey) ([]postings, error) {
-	if h.chunkStore.IsClosed() {
-		return nil, stores.ErrStoreClosed
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if len(keys) == 0 {
-		return nil, nil
-	}
-	results := make([]postings, len(keys))
-	for i, key := range keys {
-		results[i] = h.mirror.lookupPostings(key)
-	}
-	return results, nil
 }
 
 // index returns the in-memory term mirror. Test-only write hook: no production

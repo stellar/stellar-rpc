@@ -7,9 +7,10 @@ package event
 // Matches.
 //
 // Optimization shape: terms are deduped across filters and issued as
-// a single batched index lookup at iteration start; payload fetches
-// then stream in internal batches. On the cold path this is one
-// MPHF+index.pack round trip per Matches call, not per batch.
+// a single batched Reader.LookupKeys at iteration start, whose bitmaps
+// the walk then holds for the whole query; payload fetches stream in
+// internal batches. On the cold path the lookup is one MPHF+index.pack
+// round trip per Matches call, not per batch.
 //
 // The candidate set comes from the slab-stepped engine in slab_match.go, which
 // answers both directions from one walk over the window.
@@ -275,9 +276,9 @@ func Matches(
 			streamRange(ctx, r, window, descending, firstBatch, yield)
 			return
 		}
-		sources, err := lookupPostings(ctx, r, uniqueKeys)
+		sources, err := r.LookupKeys(ctx, uniqueKeys)
 		if err != nil {
-			yield(Match{}, err)
+			yield(Match{}, fmt.Errorf("events: query lookup: %w", err))
 			return
 		}
 		st := newSlabStepper(plans, sources, window, descending)
@@ -348,41 +349,6 @@ func planIndexTerms(filters []Filter) ([]termPlan, []TermKey, bool) {
 		plans[i] = plan
 	}
 	return plans, uniqueKeys, false
-}
-
-// postingReader is the optional, hot-tier half of the index read surface: a
-// Reader that can expose a term's postings without materializing a bitmap.
-//
-// Deliberately not folded into Reader. Cold postings genuinely are bitmaps,
-// unmarshaled per term out of index.pack, so ColdReader has nothing
-// un-materialized to hand back, and hoisting the method would impose it on
-// every out-of-package implementation for no gain.
-type postingReader interface {
-	lookupPostings(ctx context.Context, keys []TermKey) ([]postings, error)
-}
-
-// lookupPostings resolves keys to per-term postings, positionally aligned with
-// keys, in one batched call. It takes the no-materialize path when r offers
-// one; a nil bitmap stays the zero postings, meaning absent.
-func lookupPostings(ctx context.Context, r Reader, keys []TermKey) ([]postings, error) {
-	if pr, ok := r.(postingReader); ok {
-		sources, err := pr.lookupPostings(ctx, keys)
-		if err != nil {
-			return nil, fmt.Errorf("events: query lookup: %w", err)
-		}
-		return sources, nil
-	}
-	bitmaps, err := r.LookupKeys(ctx, keys)
-	if err != nil {
-		return nil, fmt.Errorf("events: query lookup: %w", err)
-	}
-	sources := make([]postings, len(bitmaps))
-	for i, bm := range bitmaps {
-		if bm != nil {
-			sources[i] = postings{bm: bm}
-		}
-	}
-	return sources, nil
 }
 
 // emitBatch fetches one batch of candidate ordinals, drops the bitmap-side

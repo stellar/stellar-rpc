@@ -19,6 +19,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -411,13 +412,7 @@ func (f *shapedFixture) namedShapes() []namedShape {
 
 func TestMatches_ShapedMatrix(t *testing.T) {
 	f := newShapedFixture(t)
-	readers := []struct {
-		name string
-		r    Reader
-	}{
-		{"lookupKeys", diffReader{f.corpus}},
-		{"postings", diffPostingsReader{diffReader{f.corpus}}},
-	}
+	r := diffReader{f.corpus}
 
 	const slab = 1 << 16
 	windows := []struct {
@@ -449,18 +444,16 @@ func TestMatches_ShapedMatrix(t *testing.T) {
 
 	for _, sh := range f.namedShapes() {
 		all := matchingEvents(t, f.corpus, sh.filters)
-		for _, seam := range readers {
-			for _, w := range windows {
-				for _, desc := range []bool{false, true} {
-					for _, limit := range limits {
-						requireStream(t, seam.r, all, queryCase{
-							name:    sh.name + "/" + seam.name + "/" + w.name,
-							filters: sh.filters,
-							window:  w.w,
-							desc:    desc,
-							limit:   limit,
-						})
-					}
+		for _, w := range windows {
+			for _, desc := range []bool{false, true} {
+				for _, limit := range limits {
+					requireStream(t, r, all, queryCase{
+						name:    sh.name + "/" + w.name,
+						filters: sh.filters,
+						window:  w.w,
+						desc:    desc,
+						limit:   limit,
+					})
 				}
 			}
 		}
@@ -473,7 +466,7 @@ func TestMatches_ShapedMatrix(t *testing.T) {
 // entirely inside the second slab.
 func TestMatches_WholeStreams(t *testing.T) {
 	f := newShapedFixture(t)
-	r := diffPostingsReader{diffReader{f.corpus}}
+	r := diffReader{f.corpus}
 	const slab = 1 << 16
 
 	for _, sh := range f.namedShapes() {
@@ -498,7 +491,7 @@ func TestMatches_WholeStreams(t *testing.T) {
 // into a weaker test without failing it.
 func TestMatches_ShapedFixtureIsWhatItClaims(t *testing.T) {
 	f := newShapedFixture(t)
-	r := diffPostingsReader{diffReader{f.corpus}}
+	r := diffReader{f.corpus}
 	ctx := context.Background()
 	window := IDRange{0, shapedCorpusSize}
 
@@ -539,13 +532,14 @@ func TestMatches_ShapedFixtureIsWhatItClaims(t *testing.T) {
 
 	// The overlap shape is only the overlap shape if both sides are
 	// chunk-sized and their meeting point is rare.
-	fat, err := r.lookupPostings(ctx, []TermKey{
+	fat, err := r.LookupKeys(ctx, []TermKey{
 		ComputeTermKey(f.vocab.contracts[0], FieldContractID),
 		ComputeTermKey(f.vocab.topicRaw[1], topicField(0)),
 	})
 	require.NoError(t, err)
-	for i, p := range fat {
-		require.Greater(t, p.estimate(), uint64(shapedCorpusSize/3),
+	for i, bm := range fat {
+		require.NotNil(t, bm, "thin-overlap term %d must be indexed", i)
+		require.Greater(t, bm.GetCardinality(), uint64(shapedCorpusSize/3),
 			"thin-overlap term %d must be chunk-sized", i)
 	}
 }
@@ -566,31 +560,20 @@ func TestMatches_RandomizedAgainstPostFilter(t *testing.T) {
 	matchBatchSize = 7
 	defer func(s uint) { slabShift = s }(slabShift)
 
-	readers := []struct {
-		name string
-		r    Reader
-	}{
-		{"lookupKeys", diffReader{corpus}},
-		{"postings", diffPostingsReader{diffReader{corpus}}},
-	}
+	r := diffReader{corpus}
 	// The slab width is a seam, not a behavior: every width must reproduce the
 	// same stream. 1, 2 and 4 put 150, 75 and 19 slab seams inside the corpus,
 	// 8 leaves a single seam, and 16 is the production width, where the whole
 	// corpus is one slab.
 	for _, shift := range []uint{1, 2, 4, 8, 16} {
 		slabShift = shift
-		for _, seam := range readers {
-			r := seam.r
-			t.Run(seam.name, func(t *testing.T) {
-				rng := rand.New(rand.NewSource(int64(20260909 + shift)))
-				matched := 0
-				for trial := range 400 {
-					matched += randomizedTrial(t, r, corpus, v, rng, corpusSize, trial)
-				}
-				require.Greater(t, matched, 2000,
-					"fixture sanity: randomized queries selected too little")
-			})
+		rng := rand.New(rand.NewSource(int64(20260909 + shift)))
+		matched := 0
+		for trial := range 400 {
+			matched += randomizedTrial(t, r, corpus, v, rng, corpusSize, trial)
 		}
+		require.Greater(t, matched, 2000,
+			"fixture sanity: randomized queries selected too little")
 	}
 }
 
@@ -648,20 +631,17 @@ func requireStrictOrder(t *testing.T, got []Match, desc bool, trial int) {
 // more I/O. Recording the fetches turns "the right answer" into "the right
 // work".
 type fetchTracer struct {
-	diffPostingsReader
+	diffReader
 
 	batches *[][]uint32
 }
 
 func (r fetchTracer) FetchEvents(ctx context.Context, ids []uint32) ([]Payload, error) {
 	*r.batches = append(*r.batches, slices.Clone(ids))
-	return r.diffPostingsReader.FetchEvents(ctx, ids)
+	return r.diffReader.FetchEvents(ctx, ids)
 }
 
-var (
-	_ Reader        = fetchTracer{}
-	_ postingReader = fetchTracer{}
-)
+var _ Reader = fetchTracer{}
 
 // TestMatches_FetchesOnlyTrueCandidates pins the candidate set itself: the
 // ordinals the engine fetches are the query's true matches, in emission order,
@@ -730,7 +710,7 @@ func traceFetches(
 ) []uint32 {
 	t.Helper()
 	batches := [][]uint32{}
-	r := fetchTracer{diffPostingsReader{diffReader{f.corpus}}, &batches}
+	r := fetchTracer{diffReader{f.corpus}, &batches}
 	drainMatches(t, Matches(context.Background(), r, filters, w, desc, limit), limit)
 
 	out := []uint32{}
@@ -754,29 +734,42 @@ func pageFloor(limit, answer int) int {
 
 // ───────────────────────── the planning step ─────────────────────────
 
+// termBitmap is the shape LookupKeys hands the planner: one materialized
+// bitmap per present term, nil for an absent one.
+func termBitmap(ids ...uint32) *roaring.Bitmap {
+	bm := roaring.New()
+	bm.AddMany(ids)
+	return bm
+}
+
 // What a group reports about itself: presence, and its summed weight.
 func TestResolveSlabTerms(t *testing.T) {
-	sources := []postings{
-		sparseSource(1, 2),
-		{}, // absent
-		denseSource(2, 3, 4),
+	sources := []*roaring.Bitmap{
+		termBitmap(1, 2),
+		nil, // absent
+		termBitmap(2, 3, 4),
+		termBitmap(), // present, holding nothing
 	}
 
 	g, ok := resolveSlabTerms(sources, []int{0})
 	require.True(t, ok)
 	assert.Equal(t, uint64(2), g.est)
-	assert.Equal(t, [][]uint32{{1, 2}}, g.lists)
-	assert.Empty(t, g.bitmaps, "a sparse term stays an id list")
+	assert.Len(t, g.bitmaps, 1, "the group holds the term's bitmap itself")
+	assert.Same(t, sources[0], g.bitmaps[0], "the lookup's bitmap is held, not copied")
 
 	g, ok = resolveSlabTerms(sources, []int{0, 2})
 	require.True(t, ok)
 	assert.Equal(t, uint64(5), g.est, "a group's terms sum, overlaps double-counted")
-	assert.Len(t, g.bitmaps, 1)
-	assert.Len(t, g.lists, 1, "a mixed group keeps both representations")
+	assert.Len(t, g.bitmaps, 2)
 
 	g, ok = resolveSlabTerms(sources, []int{1, 2})
 	require.True(t, ok)
 	assert.Equal(t, uint64(3), g.est, "an absent term adds nothing")
+	assert.Len(t, g.bitmaps, 1, "an absent term is not held")
+
+	g, ok = resolveSlabTerms(sources, []int{3})
+	require.True(t, ok, "a present-but-empty term keeps its group alive")
+	assert.Equal(t, uint64(0), g.est)
 
 	g, ok = resolveSlabTerms(sources, []int{1})
 	assert.False(t, ok, "a group of absent terms drops its filter")
@@ -787,11 +780,11 @@ func TestResolveSlabTerms(t *testing.T) {
 // accumulator shrinks fastest and a group that empties it ends the slab before
 // the fat groups are read.
 func TestResolveSlabFiltersOrdersRarestFirst(t *testing.T) {
-	sources := []postings{
-		denseSource(1, 2, 3, 4, 5, 6, 7, 8), // 0: the fat group
-		denseSource(2, 4, 6, 8),             // 1
-		denseSource(4, 8),                   // 2: the rare group
-		{},                                  // 3: absent
+	sources := []*roaring.Bitmap{
+		termBitmap(1, 2, 3, 4, 5, 6, 7, 8), // 0: the fat group
+		termBitmap(2, 4, 6, 8),             // 1
+		termBitmap(4, 8),                   // 2: the rare group
+		nil,                                // 3: absent
 	}
 
 	got := resolveSlabFilters([]termPlan{{{0}, {2}, {1}}}, sources)

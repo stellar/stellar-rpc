@@ -1142,8 +1142,7 @@ func TestQuery_InvalidFilterRejected(t *testing.T) {
 //
 //   - match-all asc                  → streamRange + cold FetchRange
 //   - match-all desc + cap           → streamRange top-down, slices.Backward
-//   - single-filter (contractID)     → lookupPostings, which a ColdReader
-//                                      serves off LookupKeys, then the
+//   - single-filter (contractID)     → one LookupKeys term, then the
 //                                      ascending slab walk
 //   - multi-term filter (AND)        → AndAny per group over cold bitmaps
 //   - cross-filter (OR)              → FastOr across filters

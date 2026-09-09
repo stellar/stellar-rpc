@@ -3,10 +3,9 @@ package event
 // The in-memory chunk the match-path tests run against, and the borrow-safety
 // gate over it.
 //
-// The corpus is served through both of the index's read seams: LookupKeys,
-// which materializes every term as a bitmap, and lookupPostings, which hands
-// sparse terms back as borrowed id lists. slab_match_test.go drives both
-// against an answer computed without the index.
+// The corpus is served through the index's one read seam, LookupKeys, which
+// materializes every term as a bitmap. slab_match_test.go drives it against an
+// answer computed without the index.
 
 import (
 	"context"
@@ -30,11 +29,9 @@ type diffCorpus struct {
 	mirror *ConcurrentBitmaps
 }
 
-// diffReader serves the corpus through LookupKeys only, the materializing seam.
+// diffReader serves the corpus through LookupKeys, the seam Matches reads the
+// index by.
 type diffReader struct{ c *diffCorpus }
-
-// diffPostingsReader adds the no-materialize seam HotStore carries.
-type diffPostingsReader struct{ diffReader }
 
 func (r diffReader) ChunkID() chunk.ID           { return chunk.ID(0) }
 func (r diffReader) EventCount() (uint32, error) { return uint32(len(r.c.raw)), nil }
@@ -51,14 +48,6 @@ func (r diffReader) LookupKeys(_ context.Context, keys []TermKey) ([]*roaring.Bi
 			return nil, err
 		}
 		out[i] = bm
-	}
-	return out, nil
-}
-
-func (r diffPostingsReader) lookupPostings(_ context.Context, keys []TermKey) ([]postings, error) {
-	out := make([]postings, len(keys))
-	for i, k := range keys {
-		out[i] = r.c.mirror.lookupPostings(k)
 	}
 	return out, nil
 }
@@ -95,11 +84,7 @@ func (r diffReader) All(ctx context.Context) iter.Seq2[Payload, error] {
 	return r.FetchRange(ctx, 0, total)
 }
 
-var (
-	_ Reader        = diffReader{}
-	_ Reader        = diffPostingsReader{}
-	_ postingReader = diffPostingsReader{}
-)
+var _ Reader = diffReader{}
 
 // diffVocab is the closed vocabulary the corpus and the random filters share.
 type diffVocab struct {
@@ -210,10 +195,10 @@ func collectOrdinals(t *testing.T, r Reader, filters []Filter, w IDRange, desc b
 	return out
 }
 
-// Turns the borrow contract into a race-detector gate: the match path reads
-// mirror snapshots in place while AddTo publishes new termStates on the same
-// keys, including the sparse-to-dense promotion. Under -race any write
-// reaching a borrowed snapshot fails the run; without it, the identity check
+// Turns the borrow contract into a race-detector gate: the match path holds
+// mirror snapshots across a whole walk while AddTo publishes new termStates on
+// the same keys, including the sparse-to-dense promotion. Under -race any
+// write reaching a held snapshot fails the run; without it, the identity check
 // still pins that a pinned window is immune to ingest past its End.
 func TestMatches_ConcurrentIngestBorrowSafety(t *testing.T) {
 	rng := rand.New(rand.NewSource(20260830))
@@ -257,7 +242,7 @@ func TestMatches_ConcurrentIngestBorrowSafety(t *testing.T) {
 		}
 	}
 
-	r := diffPostingsReader{diffReader{corpus}}
+	r := diffReader{corpus}
 	et := xdr.ContractEventTypeContract
 	filters := []Filter{
 		{ContractID: v.contracts[0]},

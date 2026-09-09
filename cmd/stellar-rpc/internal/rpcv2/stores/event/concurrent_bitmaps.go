@@ -102,6 +102,12 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 //
 // A Get that starts after an AddTo returns sees that AddTo's IDs, and
 // the pointer stays valid for as long as the caller holds it.
+//
+// The result is a point-in-time image either way, which is what lets a
+// query hold it for a whole walk: a sparse term is copied out of the
+// atomically published id list, and a dense term's snapshot is never
+// mutated once published. Neither grows under a holder as ingest
+// continues.
 func (s *ConcurrentBitmaps) Get(key TermKey) (*roaring.Bitmap, error) {
 	s.rwmu.RLock()
 	p := s.terms[key]
@@ -133,73 +139,6 @@ func (d *denseState) snapshot() *roaring.Bitmap {
 		d.pub.Store(bm)
 	}
 	return bm
-}
-
-// cardinality is the term's id count without materializing a
-// snapshot for it. A live pub is the term exactly, so it answers
-// lock-free; otherwise the count comes off wbm under mu, a walk of
-// the writer's containers rather than a clone of them.
-func (d *denseState) cardinality() uint64 {
-	if bm := d.pub.Load(); bm != nil {
-		return bm.GetCardinality()
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.wbm.GetCardinality()
-}
-
-// postings is an iterable view of one term's event IDs in whichever
-// representation the index holds: the sparse mode's sorted []uint32, a dense
-// term's live denseState, or a bitmap from outside the mirror (the cold tier's,
-// and the ascending path's own bulk answers). Exactly one is set; the zero value
-// means the term is absent. It exists so the ascending match path can iterate a
-// sparse term in place, where Get has to promise a bitmap and so pays a
-// roaring.New plus AddMany on every sparse lookup.
-//
-// Ownership matches Get's: ids borrows the atomically published termState, which
-// no writer ever mutates, and every bitmap a dense term yields comes from
-// denseState.snapshot — never wbm, never the raw pub pointer — so Get's
-// read-only contract applies verbatim, and the id slice must likewise be read,
-// never written or appended to. A dense postings is a view, not a frozen copy:
-// a later materialization can hold ids a write added since. Callers pin a window
-// before the lookup and intersect every read with it (the slab accumulator's
-// range), so those ids sit above the window and are never yielded.
-type postings struct {
-	ids   []uint32
-	bm    *roaring.Bitmap
-	dense *denseState
-}
-
-// present reports whether the term is in the index at all. A term present but
-// holding no ids still counts as present: it yields an exhausted cursor, which
-// intersects and unions to what an absent term's caller-side skip produces.
-func (p postings) present() bool { return p.bm != nil || p.ids != nil || p.dense != nil }
-
-// bitmap is the term's ids as a roaring bitmap, or nil when the term is sparse
-// or absent — sparse callers walk ids instead. A dense term is snapshotted here,
-// the only place outside Get that materializes one, and repeat calls cost
-// nothing while no write lands: denseState caches the snapshot it published.
-func (p postings) bitmap() *roaring.Bitmap {
-	if p.dense != nil {
-		return p.dense.snapshot()
-	}
-	return p.bm
-}
-
-// estimate is the term's cardinality over the whole chunk, the weight the
-// ascending path orders an intersection by. It ignores the caller's window, so
-// it ranks terms rather than counting a query's candidates. A dense term is
-// counted off denseState.cardinality, not a snapshot: planning wants a number,
-// and snapshot would clone a term written since its last read for a bitmap the
-// plan may never walk.
-func (p postings) estimate() uint64 {
-	if p.dense != nil {
-		return p.dense.cardinality()
-	}
-	if p.bm != nil {
-		return p.bm.GetCardinality()
-	}
-	return uint64(len(p.ids))
 }
 
 // AddTo records each eventID under key. Callers feed events in
@@ -237,24 +176,6 @@ func (s *ConcurrentBitmaps) AddTo(key TermKey, eventIDs ...uint32) {
 	ids := make([]uint32, 0, len(old.ids)+len(eventIDs))
 	ids = append(ids, old.ids...)
 	p.Store(termStateFromIDs(appendSorted(ids, eventIDs)))
-}
-
-// lookupPostings is Get without the sparse-mode materialization: it hands back
-// the term's live representation rather than converting it to a bitmap. Same
-// concurrency story as Get; a dense term comes back as its denseState, so the
-// bitmap a caller reads is snapshot's. A miss returns the zero postings.
-func (s *ConcurrentBitmaps) lookupPostings(key TermKey) postings {
-	s.rwmu.RLock()
-	p := s.terms[key]
-	s.rwmu.RUnlock()
-	if p == nil {
-		return postings{}
-	}
-	st := p.Load()
-	if st.dense != nil {
-		return postings{dense: st.dense}
-	}
-	return postings{ids: st.ids}
 }
 
 // appendSorted appends the ids in src that are greater than dst's
