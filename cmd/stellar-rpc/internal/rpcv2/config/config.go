@@ -171,10 +171,10 @@ type NetworkMethodConfig struct {
 	FriendbotURL string `toml:"friendbot_url"`
 }
 
-// EventsMethodConfig adds the events methods' own knobs such as
-// term_budget, which no other method has. Both getEvents and
-// getEventsV2 carry it. The decoder flattens the embedded fields,
-// keeping the method's TOML table flat.
+// EventsMethodConfig adds term_budget, which only getEventsV2 has: v1's
+// own filter caps bound a request's terms already, so a budget there could
+// only reject requests v1 accepts. The decoder flattens the embedded
+// fields, keeping the method's TOML table flat.
 //
 // Known trade-off of embedding: the decoder also accepts the shared
 // keys through a table named after the embedded type, in any casing,
