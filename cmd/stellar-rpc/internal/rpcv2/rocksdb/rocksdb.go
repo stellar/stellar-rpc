@@ -130,6 +130,14 @@ type Store struct {
 	ro        *grocksdb.ReadOptions
 	wo        *grocksdb.WriteOptions
 
+	// roAsync is ro plus async IO, for BatchMultiGet. A second options
+	// object rather than a flag on ro: async IO belongs to the batched
+	// read alone, and setting it on the shared ro would hand it to every
+	// concurrent Get, GetPinned and iterator on this Store. Built once at
+	// open and never mutated after, so a batched read crosses into C for
+	// the read itself and not to configure it.
+	roAsync *grocksdb.ReadOptions
+
 	// cache is the block cache shared across every CF in this store,
 	// created in applyTuning when BlockCacheMB is set. bbtos are the
 	// per-CF block-based-table options (one per CF, carrying the pinned
@@ -249,11 +257,12 @@ func (s *Store) GetPinned(cf string, key []byte, fn func(value []byte) error) (b
 // may therefore carve the whole list out of one buffer rather than
 // allocating a key at a time (see event.encodeDataKeys).
 //
-// Uses async_io read options so the kernel can issue overlapping
-// I/Os under the hood (notable on EBS / high random-latency
-// storage). The batched call is a single CGO crossing; callers
-// needing cancellation between individual key reads should not use
-// this API — split into multiple calls or use Get in a loop.
+// Reads through the store's async_io read options (roAsync, built at
+// open) so the kernel can issue overlapping I/Os under the hood
+// (notable on EBS / high random-latency storage). The batched call is
+// a single CGO crossing; callers needing cancellation between
+// individual key reads should not use this API — split into multiple
+// calls or use Get in a loop.
 func (s *Store) BatchMultiGet(cf string, keys [][]byte) ([][]byte, error) {
 	if len(keys) == 0 {
 		return nil, nil
@@ -268,13 +277,7 @@ func (s *Store) BatchMultiGet(cf string, keys [][]byte) ([][]byte, error) {
 		return nil, err
 	}
 
-	// Fresh ReadOptions: mutating s.ro would surface async_io to
-	// every concurrent reader on this Store.
-	ro := grocksdb.NewDefaultReadOptions()
-	ro.SetAsyncIO(true)
-	defer ro.Destroy()
-
-	pinned, err := s.db.BatchedMultiGetCF(ro, cfh, true /* sortedInput */, keys...)
+	pinned, err := s.db.BatchedMultiGetCF(s.roAsync, cfh, true /* sortedInput */, keys...)
 	if err != nil {
 		return nil, fmt.Errorf("rocksdb: batched multi get on %q: %w", cf, err)
 	}
@@ -555,6 +558,7 @@ func (s *Store) teardownLocked() {
 		cfh.Destroy()
 	}
 	s.ro.Destroy()
+	s.roAsync.Destroy()
 	s.wo.Destroy()
 	s.db.Close()
 	s.opts.Destroy()
@@ -771,7 +775,11 @@ func (s *Store) constructAndOpen() error {
 	s.cfOpts = cfOpts
 	s.cfHandles = cfMap
 	s.ro = grocksdb.NewDefaultReadOptions()
+	s.roAsync = grocksdb.NewDefaultReadOptions()
 	s.wo = grocksdb.NewDefaultWriteOptions()
+
+	// The one setting that separates roAsync from ro. See the field.
+	s.roAsync.SetAsyncIO(true)
 
 	// WAL on + per-write Sync on — non-negotiable across every
 	// rpcv2 store, so pinned here on the shared wo rather
