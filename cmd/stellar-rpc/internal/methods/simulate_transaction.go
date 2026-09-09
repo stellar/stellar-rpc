@@ -227,6 +227,15 @@ func formatResponse(preflight preflight.Preflight,
 		StateChanges:    stateChanges,
 	}
 
+	var totalEventsSize uint64
+	for _, eventBytes := range preflight.Events {
+		totalEventsSize += uint64(len(eventBytes))
+	}
+	const defaultMaxContractEventsSizeBytes uint64 = 16384
+	if simResp.Error == "" && totalEventsSize > defaultMaxContractEventsSizeBytes {
+		simResp.Error = fmt.Sprintf("total contract events size (%d bytes) exceeds maximum limit (%d bytes)", totalEventsSize, defaultMaxContractEventsSizeBytes)
+	}
+
 	switch format {
 	case protocol.FormatJSON:
 		simResp.TransactionDataJSON, err = xdr2json.ConvertBytes(

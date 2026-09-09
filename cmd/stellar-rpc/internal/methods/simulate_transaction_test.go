@@ -678,3 +678,17 @@ func TestSimulateTransactionThreadsUseUpgradedAuth(t *testing.T) {
 		})
 	}
 }
+
+func TestSimulateTransaction_ContractEventsSizeLimit(t *testing.T) {
+	pf := preflight.Preflight{
+		Events: [][]byte{
+			make([]byte, 10000),
+			make([]byte, 7000),
+		},
+	}
+	resp, err := formatResponse(pf, protocol.FormatXDR, 100)
+	require.NoError(t, err)
+	require.Contains(t, resp.Error, "total contract events size")
+	require.Contains(t, resp.Error, "exceeds maximum limit")
+}
+
