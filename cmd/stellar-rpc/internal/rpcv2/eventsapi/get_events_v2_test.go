@@ -26,11 +26,13 @@ import (
 
 const testChunk = chunk.ID(5)
 
-func testLimits() Limits {
-	return Limits{
-		TermBudget:   protocol.DefaultTermBudgetV2,
-		MaxLimit:     protocol.MaxLimitV2,
-		DefaultLimit: 100,
+func testLimits() V2Limits {
+	return V2Limits{
+		Limits: Limits{
+			MaxLimit:     protocol.MaxLimitV2,
+			DefaultLimit: 100,
+		},
+		TermBudget: protocol.DefaultTermBudgetV2,
 	}
 }
 
