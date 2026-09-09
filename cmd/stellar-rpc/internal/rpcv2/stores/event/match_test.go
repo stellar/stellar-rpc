@@ -1145,7 +1145,7 @@ func TestQuery_InvalidFilterRejected(t *testing.T) {
 //   - single-filter (contractID)     → one LookupKeys term, then the
 //                                      ascending slab walk
 //   - multi-term filter (AND)        → AndAny per group over cold bitmaps
-//   - cross-filter (OR)              → FastOr across filters
+//   - cross-filter (OR)              → the in-place Or across filters
 //   - ledger range + filter          → the window clipped into each slab's
 //                                      accumulator
 //   - descending + range + cap       → the slab walk run high to low
@@ -1606,21 +1606,11 @@ func TestMatches_EmptyStreams(t *testing.T) {
 		wholeChunk(t, fx.store), false))
 }
 
-// TestMatches_WindowANDLeavesBorrowedBitmapUntouched pins the
-// singleFilter branch of the window AND: a single-constraint filter
-// borrows the hot mirror's bitmap directly from LookupKeys, and the
-// narrowing AND must allocate a fresh result rather than shrink the
-// mirror's live state in place.
-//
-// The borrow only exists for DENSE terms (the mirror's sparse mode
-// materializes a fresh bitmap per Get, which no mutation can corrupt),
-// so the term is first promoted past the mirror's promotion threshold
-// with injected ids outside the query window (never fetched).
-// TestQuery_DoesNotMutateMirrorBitmaps cannot catch the mutation:
-// its filters carry two constraints (FastAnd-owned inputs) and it
-// compares only cardinality over whole-chunk ranges, where the AND is
-// a no-op.
-func TestMatches_WindowANDLeavesBorrowedBitmapUntouched(t *testing.T) {
+// TestMatches_LeavesSharedSnapshotUntouched pins that a narrowing window over
+// a single-term filter leaves the hot mirror's shared bitmap as it was. Only
+// dense terms are shared, so the term is first promoted with injected ids
+// above the query window.
+func TestMatches_LeavesSharedSnapshotUntouched(t *testing.T) {
 	fx := newQueryFixture(t)
 	key := ComputeTermKey(fx.contractA[:], FieldContractID)
 	// Promote contract A's term (real matches: ids 0, 1, 4) to dense
@@ -1634,18 +1624,16 @@ func TestMatches_WindowANDLeavesBorrowedBitmapUntouched(t *testing.T) {
 		"fixture sanity: the term must be dense so LookupKeys borrows")
 	snapshot := before.Clone()
 
-	// Single filter, single constraint, narrowing range: the borrowed
-	// path with an AND that actually removes ids.
+	// A narrowing window over a single-term filter.
 	got := collectMatches(t, fx.store, []Filter{{ContractID: fx.contractA[:]}},
 		IDRange{Start: 0, End: 2}, false)
 	assert.Equal(t, []uint32{0, 1}, matchOrdinals(got))
 
 	after := lookupOne(t, fx.store, key)
 	assert.True(t, snapshot.Equals(after),
-		"the window AND must not mutate the mirror's term bitmap in place")
+		"Matches must not mutate the mirror's shared term bitmap")
 
-	// End to end: the same filter over the whole chunk still sees the
-	// ids an in-place AND would have destroyed.
+	// The same filter over the whole chunk still sees every id.
 	full := collectMatches(t, fx.store, []Filter{{ContractID: fx.contractA[:]}},
 		wholeChunk(t, fx.store), false)
 	assert.Equal(t, []uint32{0, 1, 4}, matchOrdinals(full))

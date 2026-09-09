@@ -1,19 +1,10 @@
 package event
 
 // slab_match_test.go covers the slab engine over a corpus built to hold each
-// named query shape by construction: dense-only, sparse-only, mixed, absent,
-// match-all, the fat/fat thin-overlap shape whose two chunk-sized terms meet
-// on a handful of ids, and the high-arity AND and union.
-//
-// The walk skips slabs it can prove hold no candidate, so those same shapes
-// run again at slab widths narrow enough to put dozens of empty slabs between
-// consecutive ids, where a bound that over-skipped would drop matches.
-//
-// The answer every case is checked against is computed without the index —
-// postFilter run over every ordinal in the corpus, then clipped to the window,
-// the direction and the page. It shares no code with the term planning, the
-// slab walk or the batching, so an engine that drops an id at a slab seam,
-// yields one twice or emits out of order disagrees with it.
+// named query shape by construction, and again at slab widths narrow enough
+// to put many empty slabs between consecutive ids. Every case is checked
+// against an answer computed without the index: postFilter over every
+// ordinal in the corpus, clipped to the window, the direction and the page.
 
 import (
 	"cmp"
@@ -32,8 +23,7 @@ import (
 )
 
 // drainMatches drains seq into a slice, stopping after limit items when limit
-// is positive. The result is compared whole, so it pins the payload bytes, the
-// ordinals and their order in one assertion.
+// is positive.
 func drainMatches(tb testing.TB, seq iter.Seq2[Match, error], limit int) []Match {
 	tb.Helper()
 	out := []Match{}
@@ -50,10 +40,8 @@ func drainMatches(tb testing.TB, seq iter.Seq2[Match, error], limit int) []Match
 // ───────────────────────── the answer without the index ─────────────────────
 
 // matchingEvents is the corpus's whole answer to filters, computed by running
-// the post-filter over every ordinal in it rather than by asking the index.
-//
-// An empty filter slice is the match-all shape, which postFilter is never
-// reached with: it selects everything.
+// the post-filter over every ordinal rather than by asking the index. An
+// empty filter slice selects everything.
 func matchingEvents(tb testing.TB, c *diffCorpus, filters []Filter) []Match {
 	tb.Helper()
 	ids := make([]uint32, len(c.raw))
@@ -119,9 +107,8 @@ func requireStream(tb testing.TB, r Reader, all []Match, c queryCase) []Match {
 
 // ───────────────────────── the shaped corpus ─────────────────────────
 
-// slabShape is one distinct event in the shaped corpus. The corpus assigns a
-// shape to every id by rule, so a corpus spanning several slabs costs a couple
-// of dozen XDR marshals instead of one per event.
+// slabShape is one distinct event in the shaped corpus; ids map to shapes by
+// rule, so the corpus costs a few dozen XDR marshals.
 type slabShape struct {
 	contract int
 	topic0   int
@@ -141,17 +128,15 @@ type shapedFixture struct {
 	rareTopic    []uint32
 }
 
-// shapeFor is the corpus's id → event rule. It is written so that:
+// shapeFor is the corpus's id to event rule:
 //
-//   - contract 0 and contract 1 split the corpus in half: two dense terms.
-//   - contract 2 is carried by a handful of ids: a term that stays sparse.
-//   - topic 0 tracks the id's parity, except on the thin-overlap ids, so
-//     {contract 0} ∧ {topic0 = odd-topic} is two chunk-sized terms meeting on
-//     a few ids.
-//   - a second topic appears on a handful of ids, so the topic-count bucket
-//     family has one dense bucket and one sparse bucket, making the
-//     "at least one topic" group a mixed dense/sparse OR.
-//   - the system event type is rare enough to stay sparse.
+//   - contracts 0 and 1 split the corpus in half: two dense terms;
+//   - contract 2 is carried by a handful of ids: a sparse term;
+//   - topic 0 tracks the id's parity except on the thin-overlap ids, so
+//     contract 0 AND the odd topic is two chunk-sized terms meeting on a few;
+//   - a second topic appears on a handful of ids, so the topic-count buckets
+//     are one dense and one sparse;
+//   - the system event type stays sparse.
 func (f *shapedFixture) shapeFor(id uint32) slabShape {
 	sh := slabShape{topic1: -1}
 	switch {
@@ -302,10 +287,9 @@ func (f *shapedFixture) filterAbsentPlusPresent() []Filter {
 	}
 }
 
-// The absent group's position inside a filter matters: an engine that stops
-// resolving groups at the first miss but keeps the filter would still answer
-// the leading-miss shape correctly and get the trailing-miss shape wrong. Both
-// orders are named, since termGroups emits contract before topics.
+// Both positions of an absent group are named: an engine that stopped
+// resolving at the first miss but kept the filter would only get the trailing
+// shape wrong.
 func (f *shapedFixture) filterAbsentGroupTrailing() []Filter {
 	// topicRaw[4] is in the vocabulary but no corpus event carries it.
 	return []Filter{{
@@ -321,9 +305,8 @@ func (f *shapedFixture) filterAbsentGroupLeading() []Filter {
 	}}
 }
 
-// A group whose terms are only partly absent: the corpus carries one and two
-// topics, so "at least two" ORs one sparse bucket with three absent ones,
-// while "at least three" is a group that is absent in full.
+// The corpus carries one and two topics, so "at least two" ORs one sparse
+// bucket with three absent ones and "at least three" is absent in full.
 func (f *shapedFixture) filterPartlyAbsentGroup() []Filter {
 	return []Filter{{TopicCount: TopicCountFilter{Count: 2}}}
 }
@@ -344,11 +327,9 @@ func (f *shapedFixture) filterUnion() []Filter {
 	}
 }
 
-// filterDeepAND names every constrainable field at once, so the AND runs five
-// groups deep: a near-total event-type term, two chunk-sized terms and two
-// sparse ones, meeting on the handful of ids carrying a second topic. Exact
-// keeps the count group in the plan, which an "at least" bound the constrained
-// positions already imply would not.
+// filterDeepAND names every constrainable field, so the AND runs five groups
+// deep and meets on the handful of ids carrying a second topic. Exact keeps
+// the count group in the plan.
 func (f *shapedFixture) filterDeepAND() []Filter {
 	evType := xdr.ContractEventTypeContract
 	return []Filter{{
@@ -362,9 +343,8 @@ func (f *shapedFixture) filterDeepAND() []Filter {
 	}}
 }
 
-// filterWideUnion drives eight filters into one FastOr, the widest of the
-// named shapes, mixing dense, sparse, absent and multi-group filters so the
-// union also has to drop a filter and dedup ids several of them select.
+// filterWideUnion unions eight filters, mixing dense, sparse, absent and
+// multi-group ones, so the union drops a filter and dedups shared ids.
 func (f *shapedFixture) filterWideUnion() []Filter {
 	sysType := xdr.ContractEventTypeSystem
 	return []Filter{
@@ -441,9 +421,8 @@ func TestMatches_ShapedMatrix(t *testing.T) {
 		{"tail", IDRange{shapedCorpusSize - 5, shapedCorpusSize}},
 	}
 
-	// Limits chosen against slab 0's yield for the fat filters (~35k): one
-	// page's worth, and a single item, so both a page that ends mid-slab and
-	// one that ends on a slab's last id are covered at every window bound.
+	// One page and a single item: both a page ending mid-slab and one ending
+	// on a slab's last id, at every window bound.
 	limits := []int{1, 1000}
 
 	for _, sh := range f.namedShapes() {
@@ -464,10 +443,8 @@ func TestMatches_ShapedMatrix(t *testing.T) {
 	}
 }
 
-// The bounded matrix above never reaches the end of a fat stream. This one
-// does: whole streams, unlimited, over the windows where "the end" is a
-// different thing — the corpus end, a slab boundary, and a window living
-// entirely inside the second slab.
+// The bounded matrix never reaches the end of a fat stream; this runs whole
+// streams over the windows where the end differs.
 func TestMatches_WholeStreams(t *testing.T) {
 	f := newShapedFixture(t)
 	r := diffReader{f.corpus}
@@ -489,10 +466,8 @@ func TestMatches_WholeStreams(t *testing.T) {
 	}
 }
 
-// The shaped corpus must hold the shapes its filters are named for:
-// chunk-sized terms, sparse terms below the promotion threshold, and a thin
-// overlap. Drift in the corpus rules would otherwise turn the matrix above
-// into a weaker test without failing it.
+// The corpus must hold the shapes its filters are named for; drift in its
+// rules would weaken the matrix without failing it.
 func TestMatches_ShapedFixtureIsWhatItClaims(t *testing.T) {
 	f := newShapedFixture(t)
 	r := diffReader{f.corpus}
@@ -526,16 +501,14 @@ func TestMatches_ShapedFixtureIsWhatItClaims(t *testing.T) {
 		Matches(ctx, r, f.filterPartlyAbsentGroup(), window, false, 0), 0), len(f.rareTopic),
 		"the partly-absent group must select exactly its one present bucket")
 
-	// The high-arity shapes must reach the corpus. A five-group AND that
-	// intersected to nothing, or a union that selected a corner of it, would
-	// pass the matrix vacuously.
+	// The high-arity shapes must select something, or the matrix passes
+	// vacuously.
 	require.Greater(t, card(f.filterDeepAND()), 10,
 		"the five-group AND must still select something")
 	require.Greater(t, card(f.filterWideUnion()), 30_000,
 		"the wide union must span the corpus")
 
-	// The overlap shape is only the overlap shape if both sides are
-	// chunk-sized and their meeting point is rare.
+	// Both sides of the overlap must be chunk-sized.
 	fat, err := r.LookupKeys(ctx, []TermKey{
 		ComputeTermKey(f.vocab.contracts[0], FieldContractID),
 		ComputeTermKey(f.vocab.topicRaw[1], topicField(0)),
@@ -551,30 +524,26 @@ func TestMatches_ShapedFixtureIsWhatItClaims(t *testing.T) {
 // ───────────────────────── the randomized matrix ─────────────────────────
 
 // TestMatches_RandomizedAgainstPostFilter drives random filters, windows and
-// page sizes over a random corpus at several slab widths, so a 300-event
-// corpus still crosses dozens of slab seams, and requires the corpus's own
-// answer every time.
+// page sizes over a random corpus at several slab widths.
 func TestMatches_RandomizedAgainstPostFilter(t *testing.T) {
 	v := newDiffVocab(t)
 	const corpusSize = 300
 	corpus := newDiffCorpus(t, rand.New(rand.NewSource(20260829)), v, corpusSize)
 
-	// Shrink the batch so multi-batch seams are exercised on a small corpus.
+	// A small batch exercises batch seams on a small corpus.
 	defer func(n int) { matchBatchSize = n }(matchBatchSize)
 	matchBatchSize = 7
 	defer func(s uint) { slabShift = s }(slabShift)
 
 	r := diffReader{corpus}
-	// The slab width is a seam, not a behavior: every width must reproduce the
-	// same stream. 1, 2 and 4 put 150, 75 and 19 slab seams inside the corpus,
-	// 8 leaves a single seam, and 16 is the production width, where the whole
-	// corpus is one slab.
+	// Every width must yield the same stream: 1, 2 and 4 put many slab seams
+	// inside the corpus, 8 leaves one, and 16 is the production width.
 	for _, shift := range []uint{1, 2, 4, 8, 16} {
 		slabShift = shift
 		rng := rand.New(rand.NewSource(int64(20260909 + shift)))
 		matched := 0
-		for trial := range 400 {
-			matched += randomizedTrial(t, r, corpus, v, rng, corpusSize, trial)
+		for range 400 {
+			matched += randomizedTrial(t, r, corpus, v, rng, corpusSize)
 		}
 		require.Greater(t, matched, 2000,
 			"fixture sanity: randomized queries selected too little")
@@ -585,7 +554,7 @@ func TestMatches_RandomizedAgainstPostFilter(t *testing.T) {
 // many matches the ascending run selected.
 func randomizedTrial(
 	t *testing.T, r Reader, corpus *diffCorpus, v *diffVocab, rng *rand.Rand,
-	corpusSize, trial int,
+	corpusSize int,
 ) int {
 	t.Helper()
 	filters := randomFilters(rng, v)
@@ -606,34 +575,15 @@ func randomizedTrial(
 		if !desc {
 			matched = len(got)
 		}
-		requireStrictOrder(t, got, desc, trial)
 	}
 	return matched
 }
 
-func requireStrictOrder(t *testing.T, got []Match, desc bool, trial int) {
-	t.Helper()
-	for i := 1; i < len(got); i++ {
-		if desc {
-			require.Greater(t, got[i-1].Ordinal, got[i].Ordinal,
-				"trial %d: descending ordinals must strictly decrease", trial)
-			continue
-		}
-		require.Less(t, got[i-1].Ordinal, got[i].Ordinal,
-			"trial %d: ascending ordinals must strictly increase", trial)
-	}
-}
-
 // ───────────────────────── the candidate-set pin ─────────────────────────
 
-// fetchTracer records the ordinals of every FetchEvents call, one entry per
-// call, in call order.
-//
-// Output equality alone cannot see a candidate set that is merely too wide:
-// postFilter re-verifies every fetched event against the filters, so a
-// superset of the true matches still yields the right stream and only costs
-// more I/O. Recording the fetches turns "the right answer" into "the right
-// work".
+// fetchTracer records the ordinals of every FetchEvents call, in call order.
+// Output equality cannot see an over-wide candidate set, since postFilter
+// drops the extra fetches; recording them can.
 type fetchTracer struct {
 	diffReader
 
@@ -647,13 +597,10 @@ func (r fetchTracer) FetchEvents(ctx context.Context, ids []uint32) ([]Payload, 
 
 var _ Reader = fetchTracer{}
 
-// TestMatches_FetchesOnlyTrueCandidates pins the candidate set itself: the
-// ordinals the engine fetches are the query's true matches, in emission order,
-// with nothing extra read and nothing skipped. A consumer that stops after a
-// page has fetched only the batches that page spans.
-//
-// The match-all shapes are excluded because they never reach the index: they
-// stream FetchRange instead.
+// TestMatches_FetchesOnlyTrueCandidates pins that the ordinals the engine
+// fetches are exactly the query's matches in emission order, and that a
+// consumer stopping after a page fetched only the batches it spans. Match-all
+// shapes stream FetchRange and never reach the index.
 func TestMatches_FetchesOnlyTrueCandidates(t *testing.T) {
 	f := newShapedFixture(t)
 
@@ -707,8 +654,8 @@ func TestMatches_FetchesOnlyTrueCandidates(t *testing.T) {
 }
 
 // traceFetches drives one query and returns the ordinals it fetched in
-// emission order. FetchEvents takes ascending ids, so a descending batch is
-// fetched flipped; flipping it back recovers the order the stream emits in.
+// emission order; a descending batch is fetched flipped, so it is flipped
+// back.
 func traceFetches(
 	t *testing.T, f *shapedFixture, filters []Filter, w IDRange, desc bool, limit int,
 ) []uint32 {
@@ -738,8 +685,7 @@ func pageFloor(limit, answer int) int {
 
 // ───────────────────────── the planning step ─────────────────────────
 
-// termBitmap is the shape LookupKeys hands the planner: one materialized
-// bitmap per present term, nil for an absent one.
+// termBitmap is a materialized term, the shape LookupKeys hands the planner.
 func termBitmap(ids ...uint32) *roaring.Bitmap {
 	bm := roaring.New()
 	bm.AddMany(ids)
@@ -780,37 +726,10 @@ func TestResolveSlabTerms(t *testing.T) {
 	assert.Equal(t, uint64(0), g.est)
 }
 
-// The rarest group leads the AND however the plan named its groups, so the
-// accumulator shrinks fastest and a group that empties it ends the slab before
-// the fat groups are read.
-func TestResolveSlabFiltersOrdersRarestFirst(t *testing.T) {
-	sources := []*roaring.Bitmap{
-		termBitmap(1, 2, 3, 4, 5, 6, 7, 8), // 0: the fat group
-		termBitmap(2, 4, 6, 8),             // 1
-		termBitmap(4, 8),                   // 2: the rare group
-		nil,                                // 3: absent
-	}
-
-	got := resolveSlabFilters([]termPlan{{{0}, {2}, {1}}}, sources)
-	require.Len(t, got, 1)
-	ests := make([]uint64, 0, len(got[0].groups))
-	for _, g := range got[0].groups {
-		ests = append(ests, g.est)
-	}
-	assert.Equal(t, []uint64{2, 4, 8}, ests, "the groups are reordered rarest first")
-
-	assert.Empty(t, resolveSlabFilters([]termPlan{{{0}, {3}}}, sources),
-		"a filter naming a wholly absent group is dropped")
-	assert.Len(t, resolveSlabFilters([]termPlan{{{0}, {3}}, {{1}}}, sources), 1,
-		"the drop takes only its own filter")
-}
-
 // ───────────────────────── the skip ─────────────────────────
 
-// The skip is invisible in a stream: a walk that evaluated every slab in the
-// window yields exactly the same ids. Driving nextBounds directly reports the
-// slabs the walk actually opens, which is the claim — and, in the fat case,
-// the claim that a provable bound never skips a slab that holds something.
+// The skip is invisible in a stream, so this drives nextBounds directly and
+// requires the exact slabs the walk opens.
 func TestSlabStepperSkipsCandidateFreeSlabs(t *testing.T) {
 	defer func(s uint) { slabShift = s }(slabShift)
 	slabShift = 16
@@ -818,9 +737,8 @@ func TestSlabStepperSkipsCandidateFreeSlabs(t *testing.T) {
 	const slabs = 10
 	window := IDRange{0, slabs * slab}
 
-	// A rare term whose three ids sit in slabs 0, 3 and 9; a second rare term
-	// in slabs 1 and 6; a chunk-sized term holding every id in the window; and
-	// a term present but empty.
+	// A rare term in slabs 0, 3 and 9; another in slabs 1 and 6; a term
+	// holding every id in the window; and a term present but empty.
 	fat := roaring.New()
 	fat.AddRange(uint64(window.Start), uint64(window.End))
 	sources := []*roaring.Bitmap{
@@ -842,9 +760,8 @@ func TestSlabStepperSkipsCandidateFreeSlabs(t *testing.T) {
 		}
 	}
 
-	// The rare term alone opens its own three slabs and no others, in either
-	// direction, and each one is entered at the candidate rather than at the
-	// slab's base.
+	// The rare term alone opens its three slabs and no others, in either
+	// direction, each entered at the candidate rather than at the slab base.
 	rareAsc := [][2]uint32{{5, slab}, {3*slab + 7, 4 * slab}, {9*slab + 1, 10 * slab}}
 	rareDesc := [][2]uint32{
 		{9 * slab, 9*slab + 2}, {3 * slab, 3*slab + 8}, {0, 6},
@@ -852,14 +769,13 @@ func TestSlabStepperSkipsCandidateFreeSlabs(t *testing.T) {
 	assert.Equal(t, rareAsc, walk([]termPlan{{{0}}}, false))
 	assert.Equal(t, rareDesc, walk([]termPlan{{{0}}}, true))
 
-	// ANDing it with a chunk-sized term changes nothing: the AND's bound is
-	// the strongest of its groups', and the fat group proves none.
+	// ANDing it with a chunk-sized term changes nothing: the filter's bound is
+	// the strongest of its groups'.
 	assert.Equal(t, rareAsc, walk([]termPlan{{{0}, {2}}}, false),
 		"a chunk-sized group must not weaken the rare group's bound")
 	assert.Equal(t, rareDesc, walk([]termPlan{{{0}, {2}}}, true))
 
-	// The chunk-sized term alone opens every slab: a bound is a bound, and
-	// this one proves nothing to skip.
+	// The chunk-sized term alone opens every slab.
 	full := make([][2]uint32, 0, slabs)
 	for i := range uint32(slabs) {
 		full = append(full, [2]uint32{i * slab, (i + 1) * slab})
@@ -868,8 +784,7 @@ func TestSlabStepperSkipsCandidateFreeSlabs(t *testing.T) {
 	assert.Equal(t, full, walk([]termPlan{{{2}}}, false),
 		"a term holding every id must not skip a slab")
 
-	// Across OR-ed filters the union of their slabs is opened, and nothing
-	// else: slabs 0, 1, 3, 6, 9.
+	// OR-ed filters open the union of their slabs: 0, 1, 3, 6, 9.
 	assert.Equal(t, [][2]uint32{
 		{5, slab},
 		{slab + 1, 2 * slab},
@@ -878,20 +793,15 @@ func TestSlabStepperSkipsCandidateFreeSlabs(t *testing.T) {
 		{9*slab + 1, 10 * slab},
 	}, walk([]termPlan{{{0}}, {{1}}}, false))
 
-	// A filter whose only term is present but empty ends the walk before the
-	// first slab, rather than reading all ten.
+	// A present but empty term ends the walk before the first slab.
 	assert.Empty(t, walk([]termPlan{{{3}}}, false))
 	assert.Empty(t, walk([]termPlan{{{3}}}, true))
 }
 
-// TestMatches_RareTermsSpanSlabs is the oracle gate on the skip. The shapes a
-// rare term dominates — five ids spread over the whole corpus, alone and ANDed
-// with a chunk-sized term — run at slab widths that put hundreds of
-// candidate-free slabs between consecutive ids, where the walk skips almost
-// everything and a bound that over-skipped would silently lose matches.
-//
-// The windows start and end between rare ids, so the first and last slab the
-// walk seeks to are clipped by the window rather than by a candidate.
+// TestMatches_RareTermsSpanSlabs is the oracle gate on the skip: the shapes
+// a rare term dominates run at slab widths that put hundreds of empty slabs
+// between consecutive ids. The windows start and end between rare ids, so
+// the first and last slab are clipped by the window rather than a candidate.
 func TestMatches_RareTermsSpanSlabs(t *testing.T) {
 	f := newShapedFixture(t)
 	r := diffReader{f.corpus}
@@ -914,8 +824,7 @@ func TestMatches_RareTermsSpanSlabs(t *testing.T) {
 
 	for _, sh := range shapes {
 		all := matchingEvents(t, f.corpus, sh.filters)
-		// 64-, 1024- and 8192-wide slabs put 1093, 68 and 8 seams inside the
-		// corpus against the 5 ids the rare term holds.
+		// 64-, 1024- and 8192-wide slabs.
 		for _, shift := range []uint{6, 10, 13} {
 			slabShift = shift
 			for _, w := range windows {

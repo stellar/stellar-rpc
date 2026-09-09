@@ -1,11 +1,7 @@
 package event
 
-// The in-memory chunk the match-path tests run against, and the borrow-safety
-// gate over it.
-//
-// The corpus is served through the index's one read seam, LookupKeys, which
-// materializes every term as a bitmap. slab_match_test.go drives it against an
-// answer computed without the index.
+// The in-memory chunk the match-path tests run against, served through
+// LookupKeys, and the borrow-safety gate over it.
 
 import (
 	"context"
@@ -195,11 +191,10 @@ func collectOrdinals(t *testing.T, r Reader, filters []Filter, w IDRange, desc b
 	return out
 }
 
-// Turns the borrow contract into a race-detector gate: the match path holds
-// mirror snapshots across a whole walk while AddTo publishes new termStates on
-// the same keys, including the sparse-to-dense promotion. Under -race any
-// write reaching a held snapshot fails the run; without it, the identity check
-// still pins that a pinned window is immune to ingest past its End.
+// The match path holds mirror snapshots across a whole walk while AddTo
+// publishes new termStates on the same keys, sparse-to-dense promotion
+// included. Under -race any write reaching a held snapshot fails the run;
+// without it, the identity check pins that a pinned window ignores later ingest.
 func TestMatches_ConcurrentIngestBorrowSafety(t *testing.T) {
 	rng := rand.New(rand.NewSource(20260830))
 	v := newDiffVocab(t)

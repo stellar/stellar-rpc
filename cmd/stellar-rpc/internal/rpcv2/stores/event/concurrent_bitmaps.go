@@ -93,13 +93,12 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 //   - RunOptimize, AddRange, RemoveRange, FlipInt
 //   - Add, AddMany, Remove, CheckedAdd, CheckedRemove, AddInt
 //   - SetCopyOnWrite
-//   - single-input roaring.FastAnd / roaring.FastOr (roaring takes a
-//     Clone-the-input shortcut when there is only one input)
+//   - roaring.FastAnd / roaring.FastOr with a single input, which Clone it
 //
 // Safe: any non-mutating read (Contains, GetCardinality, Iterator,
-// NextValue, PreviousValue, ToArray, IsEmpty, Minimum, Maximum),
-// passing it as an argument to AndAny, and roaring.And / FastAnd /
-// FastOr with 2+ inputs.
+// NextValue, PreviousValue, ToArray, IsEmpty, Minimum, Maximum) and
+// passing it as an argument to AndAny or And; roaring_contract_test.go
+// pins these against the pinned roaring version.
 //
 // A Get that starts after an AddTo returns sees that AddTo's IDs, and
 // the pointer stays valid for as long as the caller holds it. The

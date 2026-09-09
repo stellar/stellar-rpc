@@ -346,25 +346,17 @@ func TestHotStore_FetchEventsRejectsUnsortedInput(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnsortedEventIDs, "duplicate input must error")
 }
 
-// fetchEventsPerIDAllocBudget is the number of heap allocations
-// FetchEvents may spend per event ID. Both are grocksdb's, spent inside
-// the batched multi-get: one *PinnableSlice per key, plus the size
-// out-param the single PinnableSlice.Data call per key escapes to the
-// heap (BatchMultiGet reads each pinned value once and copies from the
-// kept C-backed slice). Our own per-batch work — the key list, the
-// value arena, the Payload slice — is a fixed handful of allocations
-// regardless of batch size.
-//
-// If a grocksdb bump moves this number, raise it deliberately after
-// checking where the new allocation comes from; do not widen it to
-// absorb a regression on our side of the boundary.
+// fetchEventsPerIDAllocBudget is the number of heap allocations FetchEvents
+// may spend per event ID. Both are grocksdb's: one *PinnableSlice per key
+// and the size out-param of the one PinnableSlice.Data call per key. Our
+// own work per batch is a fixed handful. If a grocksdb bump moves this
+// number, raise it after checking where the new allocation comes from; do
+// not widen it to absorb a regression on our side.
 const fetchEventsPerIDAllocBudget = 2
 
-// TestHotStore_FetchEventsAllocationBudget pins that FetchEvents spends
-// no per-ID allocation of its own. The regression it catches is building
-// the RocksDB key list one heap-allocated key at a time, which cost a
-// limit=1000 page a thousand extra allocations; encodeDataKeys carves
-// them out of one buffer instead, leaving only grocksdb's two per ID.
+// TestHotStore_FetchEventsAllocationBudget pins that FetchEvents spends no
+// per-ID allocation of its own; the regression it catches is a
+// heap-allocated key per ID.
 func TestHotStore_FetchEventsAllocationBudget(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	const n = 512
@@ -401,10 +393,8 @@ func TestHotStore_FetchEventsAllocationBudget(t *testing.T) {
 			"allocation crept back into the fetch path", n, allocs, budget)
 }
 
-// TestEncodeDataKeys pins encodeDataKeys itself: the keys are
-// byte-identical to encodeDataKey's, they are distinct windows onto one
-// buffer, and the allocation count does not grow with the batch — the
-// property the FetchEvents budget above rests on.
+// TestEncodeDataKeys pins that the keys equal encodeDataKey's, are distinct
+// windows onto one buffer, and cost a fixed number of allocations.
 func TestEncodeDataKeys(t *testing.T) {
 	ids := []uint32{0, 1, 7, 1 << 20, ^uint32(0)}
 	keys := encodeDataKeys(ids)

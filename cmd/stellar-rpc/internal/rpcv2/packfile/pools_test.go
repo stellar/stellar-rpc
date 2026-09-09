@@ -20,13 +20,11 @@ func poolItems(n int) [][]byte {
 	return items
 }
 
-// Drives several open-read-close cycles over distinct files through the
-// process-wide pools; byte-exact reads prove a recycled buffer never leaks one
-// file's decode into another's.
+// Several open-read-close cycles over distinct files, so a recycled buffer
+// that leaked one file's decode into another's would fail the byte checks.
 func TestReaderPoolReuseKeepsReadsCorrect(t *testing.T) {
 	for cycle := range 4 {
-		// Vary the item count so recycled arrays are reused at different
-		// lengths, covering the reslice paths.
+		// Different item counts reuse recycled arrays at different lengths.
 		items := poolItems(300 + 40*cycle)
 		path := writeTestPackfile(t, items, WriterOptions{ItemsPerRecord: 16})
 		r := Open(path, ReaderOptions{})
@@ -42,8 +40,8 @@ func TestReaderPoolReuseKeepsReadsCorrect(t *testing.T) {
 	}
 }
 
-// The handshake's fast path: a read beginning after Close reports a closed
-// reader, matching os.ErrClosed, instead of touching recycled memory.
+// A read beginning after Close reports os.ErrClosed rather than touching
+// recycled memory.
 func TestReaderReadAfterCloseFails(t *testing.T) {
 	items := poolItems(64)
 	path := writeTestPackfile(t, items, WriterOptions{ItemsPerRecord: 16})
@@ -60,10 +58,8 @@ func TestReaderReadAfterCloseFails(t *testing.T) {
 	}
 }
 
-// The handshake's slow path: Close racing an in-flight read, which is a caller
-// contract violation, must leave the offsets to the garbage collector rather
-// than recycle them under the reader. Under -race this also proves the
-// ordering.
+// Close racing an in-flight read, a caller contract violation, must leave the
+// offsets to the garbage collector rather than recycle them under the reader.
 func TestReaderCloseDuringReadDoesNotRecycle(t *testing.T) {
 	items := poolItems(256)
 	path := writeTestPackfile(t, items, WriterOptions{ItemsPerRecord: 16})
@@ -92,9 +88,8 @@ func TestReaderCloseDuringReadDoesNotRecycle(t *testing.T) {
 	})
 	wg.Wait()
 	require.NoError(t, closeErr)
-	// Either outcome is documented for this contract violation. What the
-	// handshake forbids is recycled-memory corruption, which the byte
-	// check would catch.
+	// Either outcome is allowed; what the handshake forbids is recycled-memory
+	// corruption, which the byte check would catch.
 	if err == nil {
 		require.True(t, bytes.Equal(got, items[0]), "payload corrupted by Close during read")
 	} else {
@@ -102,11 +97,9 @@ func TestReaderCloseDuringReadDoesNotRecycle(t *testing.T) {
 	}
 }
 
-// The counter is the only signal the caps have been crossed, so it must count
-// exactly the Puts a cap dropped: an over-cap buffer on every pool, and
-// nothing for the buffers a Put keeps or for the empty slices it ignores.
-//
-// The count is process-wide, so the assertions are on the delta.
+// The counter must count exactly the Puts a cap dropped, on every pool, and
+// nothing for kept buffers or ignored empty slices. It is process-wide, so
+// the assertions are on the delta.
 func TestPoolCapSkipsCountsDroppedPuts(t *testing.T) {
 	before := PoolCapSkips()
 
