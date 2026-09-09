@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/creachadair/jrpc2"
@@ -271,7 +272,9 @@ func diffResultFor(t *testing.T, spec diffTxSpec) xdr.TransactionResultPair {
 func diffLCM(t *testing.T, version int32, seq uint32, specs ...diffTxSpec) xdr.LedgerCloseMeta {
 	t.Helper()
 	envs := make([]xdr.TransactionEnvelope, 0, len(specs))
-	for _, spec := range specs {
+	// TxSet is agreed-set order, which real ledgers do not keep in apply order,
+	// reverse order here so a positional/zip pairing regression fails corpus-wide.
+	for _, spec := range slices.Backward(specs) {
 		envs = append(envs, spec.envelope)
 	}
 	components := []xdr.TxSetComponent{{
