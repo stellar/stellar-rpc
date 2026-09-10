@@ -151,6 +151,8 @@ type Test struct {
 
 	limitFile *string
 
+	delayDaemonForLedgerN int
+
 	rpcContainerVersion        string
 	rpcContainerSQLiteMountDir string
 	rpcContainerLogsCommand    *exec.Cmd
@@ -197,6 +199,7 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.ignoreLedgerCloseTimes = cfg.IgnoreLedgerCloseTimes
 		i.ingestLoadTest = cfg.IngestLoadTest
 		i.historyRetentionWindow = cfg.HistoryRetentionWindow
+		i.delayDaemonForLedgerN = cfg.DelayDaemonForLedgerN
 		if i.ingestLoadTest.Enabled() {
 			// apply-load ledgers have close time of 1970-01-01
 			i.ignoreLedgerCloseTimes = true
@@ -264,9 +267,9 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.waitForCheckpoint()
 	}
 	if !i.runRPCInContainer() {
-		if cfg != nil && cfg.DelayDaemonForLedgerN != 0 {
-			i.t.Logf("Delaying daemon start until core reaches ledger %d", cfg.DelayDaemonForLedgerN)
-			i.waitForCoreAtLedger(cfg.DelayDaemonForLedgerN)
+		if i.delayDaemonForLedgerN != 0 {
+			i.t.Logf("Delaying daemon start until core reaches ledger %d", i.delayDaemonForLedgerN)
+			i.waitForCoreAtLedger(i.delayDaemonForLedgerN)
 		}
 		i.spawnRPCDaemon()
 	}
@@ -586,7 +589,9 @@ func (i *Test) waitForRPC() {
 // healthy-latency window. A test that then submits a transaction hands it to a
 // captive core that is still catching up.
 func (i *Test) caughtUpWithCore(rpcLatest uint32) bool {
-	if i.coreClient == nil {
+	// A test that delays the daemon on purpose expects it to be behind Core and
+	// waits for the catch-up itself.
+	if i.coreClient == nil || i.delayDaemonForLedgerN != 0 {
 		return true
 	}
 	info, err := i.getCoreInfo()
