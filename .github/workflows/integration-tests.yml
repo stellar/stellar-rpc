@@ -16,11 +16,11 @@ on:
         required: true
         type: string
       core_deb_version:
-        description: 'Stellar Core debian package version from the noble repo (e.g. 28.0.0-3494.a9b861321.noble). Mutually exclusive with core_git_ref.'
+        description: 'Stellar Core debian package version from the noble repo (e.g. 28.0.1-3508.947aad841.noble). Mutually exclusive with core_git_ref.'
         required: false
         type: string
       core_docker_img:
-        description: 'Full docker image reference for Stellar Core (e.g. stellar/unsafe-stellar-core:25.2.0-3045.rc2.bb195c49d.jammy). Mutually exclusive with core_git_ref.'
+        description: 'Full docker image reference for Stellar Core (e.g. stellar/stellar-core:28.0.1-3508.947aad841.noble). Mutually exclusive with core_git_ref.'
         required: false
         type: string
       core_git_ref:
