@@ -115,6 +115,19 @@ func requirePositive(ints map[string]int, keys ...string) error {
 	return nil
 }
 
+// requireSeconds checks that positive seconds fit in a time.Duration.
+func requireSeconds(ints map[string]int, keys ...string) error {
+	if err := requirePositive(ints, keys...); err != nil {
+		return err
+	}
+	for _, k := range keys {
+		if int64(ints[k]) > int64((1<<63-1)/time.Second) {
+			return fmt.Errorf("%s exceeds the maximum duration in seconds", k)
+		}
+	}
+	return nil
+}
+
 // BootDeadline returns the instant a box-side runner should bail by: budget
 // minutes after box boot, minus margin. ok is false when the budget is unset.
 func BootDeadline(budgetMinutes int, margin time.Duration) (time.Time, bool) {

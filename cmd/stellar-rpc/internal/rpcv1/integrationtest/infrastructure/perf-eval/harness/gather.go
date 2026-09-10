@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -31,7 +32,10 @@ func Gather(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := requirePositive(ints, "POLL_INTERVAL", "DEBUG_LOG_EVERY_POLLS", "RESULTS_TIMEOUT"); err != nil {
+	if err := requirePositive(ints, "DEBUG_LOG_LINES", "DEBUG_LOG_EVERY_POLLS"); err != nil {
+		return err
+	}
+	if err := requireSeconds(ints, "POLL_INTERVAL", "RESULTS_TIMEOUT"); err != nil {
 		return err
 	}
 	debugLogLines := ints["DEBUG_LOG_LINES"]
@@ -50,9 +54,19 @@ func Gather(ctx context.Context) error {
 		debugLogLines: debugLogLines, debugEveryPolls: ints["DEBUG_LOG_EVERY_POLLS"],
 	}
 	res, err := poller.poll(ctx, time.Now().Add(resultsTimeout))
+	return reportGather(ctx, runner, instanceID, githubOutput, resultsTimeout, debugLogLines, res, err)
+}
+
+func reportGather(
+	ctx context.Context, runner *ssmRunner, instanceID, githubOutput string,
+	resultsTimeout time.Duration, debugLogLines int, res *Result, pollErr error,
+) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if res != nil {
 		logger.Infof("result published by instance (verdict: %s)", res.Verdict)
-		if werr := os.WriteFile(defaultResultsFile, []byte(res.Markdown), 0o644); werr != nil {
+		if werr := os.WriteFile(Env("RESULTS_FILE", defaultResultsFile), []byte(res.Markdown), 0o644); werr != nil {
 			return werr
 		}
 		return appendOutputs(githubOutput,
@@ -61,11 +75,14 @@ func Gather(ctx context.Context) error {
 	}
 
 	headline := fmt.Sprintf("❌ Load test did not produce results within %.0fs.", resultsTimeout.Seconds())
-	if err != nil {
-		headline = err.Error()
+	if pollErr != nil {
+		headline = pollErr.Error()
 	}
 	if werr := writeNoVerdictComment(ctx, runner, instanceID, headline, debugLogLines); werr != nil {
 		return werr
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 	return appendOutputs(githubOutput, "found=false")
 }
@@ -78,6 +95,8 @@ type ssmRunner struct {
 
 // capture dispatches command, waits for it, and returns its stdout.
 func (r *ssmRunner) capture(ctx context.Context, command string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, commandWaitTimeout)
+	defer cancel()
 	var id string
 	var sendErr error
 	for attempt := 1; attempt <= 3; attempt++ {
@@ -92,7 +111,9 @@ func (r *ssmRunner) capture(ctx context.Context, command string) (string, error)
 		}
 		sendErr = err
 		logger.Warnf("ssm send-command attempt %d failed", attempt)
-		time.Sleep(5 * time.Second)
+		if err := sleepContext(ctx, 5*time.Second); err != nil {
+			return "", err
+		}
 	}
 	if id == "" {
 		return "", fmt.Errorf("ssm send-command failed: %w", sendErr)
@@ -103,7 +124,7 @@ func (r *ssmRunner) capture(ctx context.Context, command string) (string, error)
 	inv, err := r.client.GetCommandInvocation(ctx, in)
 	if err != nil {
 		// Unreadable result is "not ready", not a dispatch failure.
-		return "", nil //nolint:nilerr
+		return "", nil
 	}
 	return aws.ToString(inv.StandardOutputContent), nil
 }
@@ -137,5 +158,6 @@ func writeNoVerdictComment(
 	if tail := runner.debugTail(ctx, debugLogLines); tail != "" {
 		fmt.Fprintf(&b, "\nLast %d lines of /var/log/user-data.log:\n\n```\n%s\n```\n", debugLogLines, tail)
 	}
-	return os.WriteFile("/tmp/timeout-comment.md", []byte(b.String()), 0o644)
+	commentPath := filepath.Join(filepath.Dir(Env("RESULTS_FILE", defaultResultsFile)), "timeout-comment.md")
+	return os.WriteFile(commentPath, []byte(b.String()), 0o644)
 }
