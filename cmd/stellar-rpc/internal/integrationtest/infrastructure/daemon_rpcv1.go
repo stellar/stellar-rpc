@@ -2,6 +2,7 @@ package infrastructure
 
 import (
 	"fmt"
+	"runtime"
 
 	"github.com/stretchr/testify/require"
 
@@ -61,9 +62,11 @@ func (d *rpcv1Daemon) create(c rpcConfig) *daemon.Daemon {
 
 	d.log = supportlog.New()
 	d.log.SetOutput(newTestLogWriter(i.t, `rpc="daemon" `))
-	// The daemon calls this from one of its own goroutines, where FailNow is
-	// not allowed. Error marks the test failed from any goroutine, and the
-	// channel lets waitForRPC stop at once instead of polling out its deadline.
+	// The daemon's Fatal calls land here, from the test goroutine during
+	// MustNew or from a daemon goroutine later. Error marks the test failed
+	// from any goroutine, the channel lets waitForRPC stop at once, and Goexit
+	// ends the calling goroutine the way Fatal would, so MustNew cannot carry
+	// on with half-built state. On the test goroutine that equals FailNow.
 	d.done = make(chan error, 1)
 	d.log.SetExitFunc(func(code int) {
 		err := fmt.Errorf("rpcv1 daemon exited with code %d", code)
@@ -72,6 +75,7 @@ func (d *rpcv1Daemon) create(c rpcConfig) *daemon.Daemon {
 		case d.done <- err:
 		default:
 		}
+		runtime.Goexit()
 	})
 	return daemon.MustNew(&cfg, d.log)
 }
