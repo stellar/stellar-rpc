@@ -47,9 +47,6 @@ type dbEvent struct {
 // 10 bind variables/event * 3,000 events stays under SQLite's 32,766 limit
 const maxEventsPerBatch = 3000
 
-// Rows per GetEvents statement; a full batch resumes just past its last row.
-const eventScanBatch = 200
-
 func NewEventReader(log *log.Entry, db db.SessionInterface, passphrase string) store.EventReader {
 	return &eventHandler{log: log, db: db, passphrase: passphrase}
 }
@@ -312,8 +309,7 @@ func (eventHandler *eventHandler) GetEvents(
 		From(eventTableName).
 		Where(sq.GtOrEq{"id": cursorRange.Start.String()}).
 		Where(sq.Lt{"id": cursorRange.End.String()}).
-		OrderBy("id ASC").
-		Limit(eventScanBatch) // lets SQLite end a multi-range ORDER BY merge early
+		OrderBy("id ASC")
 
 	if len(contractIDs) > 0 {
 		rowQ = rowQ.Where(sq.Eq{"contract_id": contractIDs})
@@ -411,12 +407,6 @@ func (eventHandler *eventHandler) GetEvents(
 		}
 		if !keepGoing {
 			return nil
-		}
-		if foundRows == eventScanBatch { // full batch: there may be more behind it
-			rows.Close()
-			cur.Event++
-			cursorRange.Start = cur
-			return eventHandler.GetEvents(ctx, cursorRange, contractIDs, topics, eventTypes, scanner)
 		}
 	}
 
