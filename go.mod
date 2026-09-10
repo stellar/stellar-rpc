@@ -33,7 +33,7 @@ require (
 
 require (
 	github.com/dchest/siphash v1.2.3
-	github.com/mattn/go-sqlite3 v1.14.17
+	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/rubenv/sql-migrate v1.5.2
 	go.uber.org/goleak v1.3.0
 )
