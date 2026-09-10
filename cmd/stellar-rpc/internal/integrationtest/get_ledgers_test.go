@@ -72,7 +72,9 @@ func testGetLedgers(t *testing.T, client *client.Client) {
 	// Test invalid requests
 	invalidRequests := []protocol.GetLedgersRequest{
 		{StartLedger: result.OldestLedger - 4}, // -3 to exceed data store
-		{StartLedger: result.LatestLedger + 1},
+		// Far beyond the latest ledger: a ledger closes every second on this
+		// network, so latest+1 can exist by the time the request arrives.
+		{StartLedger: result.LatestLedger + 1000},
 		{
 			Pagination: &protocol.LedgerPaginationOptions{
 				Cursor: "invalid",
