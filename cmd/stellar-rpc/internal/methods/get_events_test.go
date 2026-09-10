@@ -1329,6 +1329,81 @@ func TestGetEventsEventTypeFilterDoesNotStarveOtherFilters(t *testing.T) {
 	assert.Equal(t, protocol.EventTypeContract, results.Events[0].EventType)
 }
 
+// SQL pre-filters with the union of every filter's contract IDs and topics,
+// so rows can pass SQL yet fail the per-filter match. Whole statement batches
+// made only of such rows must not end the page early.
+func TestGetEventsContinuesPastBatchesTheFilterRejects(t *testing.T) {
+	counter, transfer := xdr.ScSymbol("COUNTER"), xdr.ScSymbol("TRANSFER")
+	sym := func(s *xdr.ScSymbol) xdr.ScVal { return xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: s} }
+	contractA, contractB := xdr.ContractId([32]byte{1}), xdr.ContractId([32]byte{2})
+	ev := func(c xdr.ContractId, s *xdr.ScSymbol) xdr.TransactionMeta {
+		return transactionMetaWithEvents(contractEvent(c, xdr.ScVec{sym(s)}, sym(s)))
+	}
+	// The filters want A/COUNTER and B/TRANSFER; the crossed pairs pass SQL only.
+	const rejects = 500 // more than one statement batch
+	var txMeta []xdr.TransactionMeta
+	for range rejects {
+		txMeta = append(txMeta, ev(contractA, &transfer), ev(contractB, &counter))
+	}
+	txMeta = append(txMeta, ev(contractA, &counter), ev(contractB, &transfer))
+	for range rejects {
+		txMeta = append(txMeta, ev(contractA, &transfer))
+	}
+	txMeta = append(txMeta, ev(contractA, &counter))
+
+	dbx := newTestDB(t)
+	ctx := context.TODO()
+	logger := log.DefaultLogger
+	writer := sqlitedb.NewReadWriter(logger, dbx, host.MakeNoOpDaemon(), 10, passphrase)
+	write, err := writer.NewTx(ctx)
+	require.NoError(t, err)
+	lcm := ledgerCloseMetaWithEvents(2, time.Now().UTC().Unix(), txMeta...)
+	require.NoError(t, write.LedgerWriter().InsertLedger(lcm))
+	require.NoError(t, write.EventWriter().InsertEvents(lcm))
+	require.NoError(t, write.Commit(lcm, nil))
+	handler := eventsRPCHandler{
+		dbReader:     sqlitedb.NewEventReader(logger, dbx, passphrase),
+		maxLimit:     10000,
+		defaultLimit: 100,
+		ledgerReader: sqlitedb.NewLedgerReader(dbx),
+	}
+
+	idA := strkey.MustEncode(strkey.VersionByteContract, contractA[:])
+	idB := strkey.MustEncode(strkey.VersionByteContract, contractB[:])
+	counterVal, transferVal := sym(&counter), sym(&transfer)
+	request := func(limit uint) protocol.GetEventsRequest {
+		return protocol.GetEventsRequest{
+			StartLedger: 2,
+			Filters: []protocol.EventFilter{
+				{ContractIDs: []string{idA}, Topics: []protocol.TopicFilter{{{ScVal: &counterVal}}}},
+				{ContractIDs: []string{idB}, Topics: []protocol.TopicFilter{{{ScVal: &transferVal}}}},
+			},
+			Pagination: &protocol.PaginationOptions{Limit: limit},
+		}
+	}
+	contracts := func(events []protocol.EventInfo) []string {
+		out := make([]string, 0, len(events))
+		for _, e := range events {
+			out = append(out, e.ContractID)
+		}
+		return out
+	}
+
+	results, err := handler.getEvents(ctx, request(2)) // the first batches are all rejects
+	require.NoError(t, err)
+	assert.Equal(t, []string{idA, idB}, contracts(results.Events))
+	assert.Equal(t, results.Events[1].ID, results.Cursor)
+
+	results, err = handler.getEvents(ctx, request(3)) // the third match sits batches later
+	require.NoError(t, err)
+	assert.Equal(t, []string{idA, idB, idA}, contracts(results.Events))
+
+	results, err = handler.getEvents(ctx, request(10)) // page not filled: window-end cursor
+	require.NoError(t, err)
+	assert.Equal(t, []string{idA, idB, idA}, contracts(results.Events))
+	assert.NotEqual(t, results.Events[2].ID, results.Cursor)
+}
+
 func getTxMetaWithContractEvents(contractID xdr.ContractId) []xdr.TransactionMeta {
 	var counters [1000]xdr.ScSymbol
 	for j := range counters {
