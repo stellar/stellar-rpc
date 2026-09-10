@@ -8,15 +8,18 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/pelletier/go-toml"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/sirupsen/logrus"
 
 	"github.com/stellar/go-stellar-sdk/historyarchive"
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/support/logmetrics"
 	"github.com/stellar/go-stellar-sdk/support/storage"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
@@ -31,6 +34,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version"
 )
 
 // RunDaemon is the full-history daemon's process entrypoint: load config, lock
@@ -39,11 +43,30 @@ import (
 // config.BindFlags (nil = none); each set flag overlays its TOML key before
 // defaults resolve.
 func RunDaemon(ctx context.Context, configPath string, flags config.FlagOverrides) error {
+	return RunDaemonWithOptions(ctx, configPath, Options{Flags: flags})
+}
+
+// Options is the part of the daemon's wiring a caller outside this package may
+// set. The integration-test harness uses it to route the daemon's log lines
+// into the test log and to pass per-test settings without writing a TOML file
+// per test.
+type Options struct {
+	// Logger replaces the logger the daemon would build from [logging]. nil
+	// keeps the built one.
+	Logger *supportlog.Entry
+
+	// Flags carries overrides registered by config.BindFlags; nil = none.
+	Flags config.FlagOverrides
+}
+
+// RunDaemonWithOptions is RunDaemon with a caller-supplied logger. It blocks
+// until ctx is canceled or the daemon fails.
+func RunDaemonWithOptions(ctx context.Context, configPath string, opts Options) error {
 	// The whole daemon — including the pre-run startup phase (archive dial, tip
 	// sampling, core wiring) — runs on the signal-derived ctx, so a drain that
 	// lands mid-startup unwinds with ctx-shaped errors. Classify those as the
 	// clean shutdown they are; a nonzero exit must keep meaning failure.
-	err := runDaemonWith(ctx, configPath, daemonOptions{Flags: flags})
+	err := runDaemonWith(ctx, configPath, daemonOptions{Logger: opts.Logger, Flags: opts.Flags})
 	if ctx.Err() == nil {
 		return err
 	}
@@ -211,6 +234,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// ONE registry, built after the validateConfig gate (it registers Prometheus
 	// collectors). The admin server's /metrics serves it.
 	registry := prometheus.NewRegistry()
+	registerProcessMetrics(registry, logger)
 	metrics, sink := buildSinks(opts, registry)
 
 	// --- Captive-core state access for the three endpoints that need it, plus
@@ -386,6 +410,33 @@ func newPreflightPool(
 		NetworkPassphrase: networkPassphrase,
 		Logger:            logger,
 	})
+}
+
+// registerProcessMetrics registers the process-level families rpcv1 exposes on
+// /metrics, so one dashboard reads both daemons: per-level log-line counters,
+// the build-info gauge, and the Go runtime and process collectors.
+func registerProcessMetrics(registry *prometheus.Registry, logger *supportlog.Entry) {
+	logCounters := logmetrics.New(host.PrometheusNamespace)
+	logger.AddHook(logCounters)
+	for _, counter := range logCounters {
+		registry.MustRegister(counter)
+	}
+
+	buildInfo := prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Namespace: host.PrometheusNamespace, Subsystem: "build", Name: "info"},
+		[]string{"version", "goversion", "commit", "branch", "build_timestamp"},
+	)
+	buildInfo.With(prometheus.Labels{
+		"version":         version.Version,
+		"commit":          version.CommitHash,
+		"branch":          version.Branch,
+		"build_timestamp": version.BuildTimestamp,
+		"goversion":       runtime.Version(),
+	}).Inc()
+	registry.MustRegister(buildInfo)
+
+	registry.MustRegister(collectors.NewGoCollector())
+	registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 }
 
 // buildSinks resolves the control-plane Metrics + per-type ingest sink, defaulting

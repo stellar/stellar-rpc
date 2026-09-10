@@ -35,6 +35,9 @@ linters:
             - "**/cmd/stellar-rpc/internal/**"
             - "!**/cmd/stellar-rpc/internal/rpcv1/**"
             - "!**/cmd/stellar-rpc/internal/rpcv2/**"
+            # The integration-test harness boots either daemon, so it is the one
+            # shared package allowed to import both trees.
+            - "!**/cmd/stellar-rpc/internal/integrationtest/**"
             - "!$test"
           deny:
             - pkg: github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1
@@ -117,7 +120,7 @@ linters:
           - gosec
           - mnd
           - nosprintfhostport
-        path: ^(.*_test\.go|cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/.*)$
+        path: ^(.*_test\.go|cmd/stellar-rpc/internal/(rpcv1/)?integrationtest/infrastructure/.*)$
       # The named returns live in cgo-generated //export wrapper shims, which the
       # linter maps back to source lines here; there is nothing in the source to fix.
       - linters:

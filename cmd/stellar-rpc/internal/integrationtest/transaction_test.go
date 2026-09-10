@@ -17,11 +17,11 @@ import (
 	"github.com/stellar/go-stellar-sdk/txnbuild"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 )
 
 func TestSendTransactionSucceedsWithoutResults(t *testing.T) {
-	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: skipLimitsUpgrade()})
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: infrastructure.SkipLimitsUpgrade()})
 	test.SendMasterOperation(
 		&txnbuild.SetOptions{HomeDomain: new("soroban.com")},
 	)
@@ -79,7 +79,7 @@ func TestSendTransactionSucceedsWithResults(t *testing.T) {
 }
 
 func TestSendTransactionBadSequence(t *testing.T) {
-	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: skipLimitsUpgrade()})
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: infrastructure.SkipLimitsUpgrade()})
 
 	params := infrastructure.CreateTransactionParams(
 		test.MasterAccount(),
@@ -147,7 +147,7 @@ func TestSendTransactionFailedInsufficientResourceFee(t *testing.T) {
 }
 
 func TestSendTransactionFailedInLedger(t *testing.T) {
-	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: skipLimitsUpgrade()})
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: infrastructure.SkipLimitsUpgrade()})
 
 	client := test.GetRPCLient()
 
@@ -197,7 +197,7 @@ func TestSendTransactionFailedInLedger(t *testing.T) {
 }
 
 func TestSendTransactionFailedInvalidXDR(t *testing.T) {
-	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: skipLimitsUpgrade()})
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: infrastructure.SkipLimitsUpgrade()})
 
 	client := test.GetRPCLient()
 

@@ -9,14 +9,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 )
 
 // TestBuiltinRPCMethodsDisabled verifies that the jrpc2 library's built-in
 // rpc.* methods (e.g. rpc.serverInfo, which leaks node lifetime metrics and
 // process start time) are not reachable via the HTTP bridge.
 func TestBuiltinRPCMethodsDisabled(t *testing.T) {
-	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: skipLimitsUpgrade()})
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: infrastructure.SkipLimitsUpgrade()})
 
 	body := `{"jsonrpc": "2.0", "id": 1, "method": "rpc.serverInfo"}`
 	request, err := http.NewRequestWithContext(

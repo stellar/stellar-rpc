@@ -36,13 +36,11 @@ import (
 	"github.com/stellar/go-stellar-sdk/keypair"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	proto "github.com/stellar/go-stellar-sdk/protocols/stellarcore"
-	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/txnbuild"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/limits"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/config"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/daemon"
 )
 
 const (
@@ -69,6 +67,11 @@ const (
 	// How long a core container may take to answer its HTTP port and reach
 	// sync. Generous on purpose: up to four tests boot a container at once.
 	coreStartupTimeout = 2 * time.Minute
+	rpcHealthyTimeout  = 180 * time.Second
+
+	// Bind collisions are rare, so one retry is usually enough; three
+	// attempts leave room for two unlucky picks in a row.
+	maxDaemonStartAttempts = 3
 )
 
 //go:embed docker/upgrades/*.xdr
@@ -155,7 +158,7 @@ type Test struct {
 	rpcClient  *client.Client
 	coreClient *stellarcore.Client
 
-	daemon *daemon.Daemon
+	daemon rpcDaemon
 
 	masterAccount          txnbuild.Account
 	shutdownOnce           sync.Once
@@ -221,6 +224,8 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		}
 	}
 
+	i.rejectRPCv1OnlySettings()
+
 	if i.sqlitePath == "" {
 		i.sqlitePath = path.Join(i.t.TempDir(), "stellar_rpc.sqlite")
 	}
@@ -275,6 +280,18 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.upgradeLimits() // upgrades need preflight so need RPC up
 	}
 	return i
+}
+
+// rejectRPCv1OnlySettings fails a test that asks for a setting only the rpcv1
+// daemon has while another daemon is selected.
+func (i *Test) rejectRPCv1OnlySettings() {
+	if selectedDaemon(i.t) == daemonRPCv1 {
+		return
+	}
+	if i.datastoreConfigFunc != nil || i.ingestLoadTest.Enabled() || i.historyRetentionWindow != 0 {
+		i.t.Fatalf("DatastoreConfigFunc, IngestLoadTest and HistoryRetentionWindow are rpcv1 settings; "+
+			"this test cannot run with %s=%s", daemonEnvVar, selectedDaemon(i.t))
+	}
 }
 
 // startFakeHistoryArchive serves a minimal .well-known/stellar-history.json.
@@ -371,12 +388,17 @@ func (i *Test) MasterAccount() txnbuild.Account {
 	return i.masterAccount
 }
 
+// GetStellarRPCURL names the daemon by 127.0.0.1, never "localhost", like every
+// other address the harness dials. Go dials the IPv6 side of "localhost" first,
+// and on Docker Desktop for macOS a port forwarder can hold the IPv6 side of a
+// port whose IPv4 side the daemon or a container bound; the client then
+// connects to the forwarder and is reset.
 func (i *Test) GetStellarRPCURL() string {
-	return fmt.Sprintf("http://localhost:%d", i.testPorts.RPCPort)
+	return fmt.Sprintf("http://127.0.0.1:%d", i.testPorts.RPCPort)
 }
 
 func (i *Test) GetAdminURL() string {
-	return fmt.Sprintf("http://localhost:%d", i.testPorts.RPCAdminPort)
+	return fmt.Sprintf("http://127.0.0.1:%d", i.testPorts.RPCAdminPort)
 }
 
 func (i *Test) getCoreInfo() (*proto.InfoResponse, error) {
@@ -528,23 +550,55 @@ func (vars rpcConfig) toMap() map[string]string {
 
 func (i *Test) waitForRPC() {
 	i.t.Log("Waiting for RPC to be healthy...")
-	var err error
-	require.Eventually(i.t,
-		func() bool {
-			var result protocol.GetHealthResponse
-			result, err = i.GetRPCLient().GetHealth(i.t.Context())
-			i.t.Logf("getHealth: %+v; err: %v", result, err)
-			return err == nil && result.Status == "healthy"
-		},
-		// The daemon reports "DB is empty" until its captive core has replayed
-		// every ledger the network already closed. That replay competes for CPU
-		// with the other tests running at the same time, so it needs a window
-		// well above the time a replay takes on an idle machine.
-		180*time.Second,
-		time.Second,
-		"RPC never got healthy: %+v",
-		err,
-	)
+	// The daemon reports "DB is empty" until its captive core has replayed
+	// every ledger the network already closed. That replay competes for CPU
+	// with the other tests running at the same time, so it needs a window
+	// well above the time a replay takes on an idle machine.
+	deadline := time.Now().Add(rpcHealthyTimeout)
+	attempts := 1
+	for {
+		select {
+		case err := <-i.daemon.exited():
+			if isBindError(err) && attempts < maxDaemonStartAttempts {
+				attempts++
+				i.t.Logf("daemon lost a port race (%v); starting again with new ports, attempt %d", err, attempts)
+				i.daemon.start()
+				i.rpcClient = client.NewClient(i.GetStellarRPCURL(), nil)
+				continue
+			}
+			i.t.Fatalf("RPC daemon exited before it was healthy: %v", err)
+		default:
+		}
+		result, err := i.GetRPCLient().GetHealth(i.t.Context())
+		i.t.Logf("getHealth: %+v; err: %v", result, err)
+		if err == nil && result.Status == "healthy" && i.caughtUpWithCore(result.LatestLedger) {
+			return
+		}
+		require.False(i.t, time.Now().After(deadline), "RPC never got healthy: %+v", err)
+		time.Sleep(time.Second)
+	}
+}
+
+// caughtUpWithCore reports whether the daemon has ingested up to the ledger the
+// Core container is at. "healthy" alone is not enough here: a daemon that
+// starts at genesis reports healthy as soon as its first ledger commits, because
+// with accelerated time every ledger it still has to replay closed within the
+// healthy-latency window. A test that then submits a transaction hands it to a
+// captive core that is still catching up.
+func (i *Test) caughtUpWithCore(rpcLatest uint32) bool {
+	if i.coreClient == nil {
+		return true
+	}
+	info, err := i.getCoreInfo()
+	if err != nil {
+		return false
+	}
+	coreLatest := uint32(info.Info.Ledger.Num)
+	if rpcLatest < coreLatest {
+		i.t.Logf("RPC is at ledger %d, Core at %d; waiting for RPC to catch up", rpcLatest, coreLatest)
+		return false
+	}
+	return true
 }
 
 const versionAfterStellarRPCRename = "22.1.1"
@@ -563,8 +617,8 @@ func (i *Test) generateCaptiveCoreCfgForContainer() {
 			filename)
 		cmd := exec.CommandContext(i.t.Context(), "git", "show", arg)
 		// The pathspec above starts "./stellar-rpc/..." (old tags predate the
-		// rpcv1 reorg), so run git from the repo's cmd/ directory: five levels up.
-		cmd.Dir = GetCurrentDirectory() + "/../../../../../"
+		// rpcv1 reorg), so run git from the repo's cmd/ directory: four levels up.
+		cmd.Dir = GetCurrentDirectory() + "/../../../../"
 		return cmd.CombinedOutput()
 	}
 
@@ -647,53 +701,9 @@ func (tw *testLogWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (i *Test) createRPCDaemon(c rpcConfig) *daemon.Daemon {
-	var cfg config.Config
-	m := c.toMap()
-	lookup := func(s string) (string, bool) {
-		ret, ok := m[s]
-		return ret, ok
-	}
-	require.NoError(i.t, cfg.SetValues(lookup))
-	require.NoError(i.t, cfg.Validate())
-
-	if i.datastoreConfigFunc != nil {
-		i.datastoreConfigFunc(&cfg)
-	}
-
-	if i.ingestLoadTest.Enabled() {
-		cfg.IngestLoadTest = i.ingestLoadTest
-	}
-
-	logger := supportlog.New()
-	logger.SetOutput(newTestLogWriter(i.t, `rpc="daemon" `))
-	logger.SetExitFunc(func(code int) {
-		i.t.Fatalf("Exited with code %d", code)
-	})
-	return daemon.MustNew(&cfg, logger)
-}
-
-func (i *Test) fillRPCDaemonPorts() {
-	endpointAddr, adminEndpointAddr := i.daemon.GetEndpointAddrs()
-	i.testPorts.RPCPort = uint16(endpointAddr.Port)
-	if adminEndpointAddr != nil {
-		i.testPorts.RPCAdminPort = uint16(adminEndpointAddr.Port)
-	}
-}
-
 func (i *Test) spawnRPCDaemon() {
-	// We need to dynamically allocate port numbers since tests run in parallel.
-	// Unfortunately this isn't completely clash-free, but there is no way to
-	// tell core to allocate the port dynamically.
-	// Allocate both ports together so the OS doesn't hand out the same port twice.
-	ports := getFreeTCPPorts(i.t, 2)
-	i.testPorts.captiveCorePeerPort = ports[0]
-	i.testPorts.captiveCoreHTTPQueryPort = ports[1]
-	i.generateCaptiveCoreCfgForDaemon()
-	rpcCfg := i.getRPConfigForDaemon()
-	i.daemon = i.createRPCDaemon(rpcCfg)
-	i.fillRPCDaemonPorts()
-	go i.daemon.Run()
+	i.daemon = i.newRPCDaemon()
+	i.daemon.start()
 }
 
 var nonAlphanumericRegex = regexp.MustCompile("[^a-zA-Z0-9]+")
@@ -764,7 +774,7 @@ func (i *Test) prepareShutdownHandlers() {
 	i.shutdown = func() {
 		close(done)
 		if i.daemon != nil {
-			i.daemon.Close()
+			i.daemon.close()
 			i.daemon = nil
 		}
 		if i.rpcClient != nil {
@@ -860,7 +870,7 @@ func (i *Test) UpgradeProtocol(version int32) {
 
 func (i *Test) StopRPC() {
 	if i.daemon != nil {
-		i.daemon.Close()
+		i.daemon.close()
 		i.daemon = nil
 	}
 	if i.runRPCInContainer() {
@@ -870,10 +880,6 @@ func (i *Test) StopRPC() {
 
 func (i *Test) GetProtocolVersion() int32 {
 	return i.protocolVersion
-}
-
-func (i *Test) GetDaemon() *daemon.Daemon {
-	return i.daemon
 }
 
 func (i *Test) SendMasterOperation(op txnbuild.Operation) protocol.GetTransactionResponse {
@@ -1100,9 +1106,9 @@ func (i *Test) fillContainerPorts() {
 		)
 		return port
 	}
-	i.testPorts.CoreHostPort = fmt.Sprintf("localhost:%d", getPublicPort("core", inContainerCorePort))
-	i.testPorts.CoreHTTPHostPort = fmt.Sprintf("localhost:%d", getPublicPort("core", inContainerCoreHTTPPort))
-	i.testPorts.CoreArchiveHostPort = fmt.Sprintf("localhost:%d", getPublicPort("core", inContainerCoreArchivePort))
+	i.testPorts.CoreHostPort = fmt.Sprintf("127.0.0.1:%d", getPublicPort("core", inContainerCorePort))
+	i.testPorts.CoreHTTPHostPort = fmt.Sprintf("127.0.0.1:%d", getPublicPort("core", inContainerCoreHTTPPort))
+	i.testPorts.CoreArchiveHostPort = fmt.Sprintf("127.0.0.1:%d", getPublicPort("core", inContainerCoreArchivePort))
 	if i.runRPCInContainer() {
 		i.testPorts.RPCPort = getPublicPort("rpc", inContainerRPCPort)
 		i.testPorts.RPCAdminPort = getPublicPort("rpc", inContainerRPCAdminPort)

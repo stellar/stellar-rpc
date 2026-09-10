@@ -8,14 +8,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 )
 
 // TestCORS ensures that we receive the correct CORS headers as a response to an HTTP request.
 // Specifically, when we include an Origin header in the request, a stellar-rpc should response
 // with a corresponding Access-Control-Allow-Origin.
 func TestCORS(t *testing.T) {
-	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: skipLimitsUpgrade()})
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: infrastructure.SkipLimitsUpgrade()})
 
 	body := `{"jsonrpc": "2.0", "id": 1, "method": "getHealth"}`
 	request, err := http.NewRequestWithContext(
