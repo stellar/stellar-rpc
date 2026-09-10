@@ -31,6 +31,31 @@ func TestResultRoundTrip(t *testing.T) {
 	require.Equal(t, in, out)
 }
 
+func TestResultValidate(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		result  Result
+		wantErr string
+	}{
+		{"ok", Result{SchemaVersion: 1, RunID: "123-1", Verdict: VerdictOK}, ""},
+		{"fail", Result{SchemaVersion: 1, RunID: "123-1", Verdict: VerdictFail}, ""},
+		{"pending", Result{SchemaVersion: 1, RunID: "123-1", Verdict: VerdictPending}, ""},
+		{"zero value", Result{}, "unsupported schemaVersion 0"},
+		{"unknown schema", Result{SchemaVersion: 2, RunID: "123-1", Verdict: VerdictOK}, "unsupported schemaVersion 2"},
+		{"missing run", Result{SchemaVersion: 1, Verdict: VerdictOK}, "runId is required"},
+		{"unknown verdict", Result{SchemaVersion: 1, RunID: "123-1", Verdict: "success"}, `unknown verdict "success"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.result.Validate()
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.EqualError(t, err, tc.wantErr)
+		})
+	}
+}
+
 // TestRequireEnvInts covers the two ways a mis-plumbed workflow reaches the
 // int keys: unset and unparseable.
 func TestRequireEnvInts(t *testing.T) {

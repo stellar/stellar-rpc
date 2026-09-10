@@ -15,26 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestRelayState pins the handoff rule: only an exhausted budget turns a
-// verdict-less window into a failure.
-func TestRelayState(t *testing.T) {
-	deadline := time.Unix(1_700_000_000, 0)
-	for _, tc := range []struct {
-		name string
-		now  time.Time
-		want string
-	}{
-		{"budget left", deadline.Add(-time.Hour), relayStateRunning},
-		{"one second left", deadline.Add(-time.Second), relayStateRunning},
-		{"deadline reached", deadline, relayStateFail},
-		{"deadline passed", deadline.Add(time.Hour), relayStateFail},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, relayState(tc.now, deadline))
-		})
-	}
-}
-
 // relayEnv is the poller env contract, valid values throughout. Tests blank or
 // corrupt one slot at a time from it.
 var relayEnv = map[string]string{
@@ -98,23 +78,48 @@ func TestRelayEnvValidation(t *testing.T) {
 	}
 }
 
-func TestRelayWindowHandoff(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		output := filepath.Join(t.TempDir(), "outputs")
-		calls := 0
-		p := testPoller(func(*http.Request) (*http.Response, error) {
-			calls++
-			return resultResponse(200, resultJSON("1-2", "pending"))
+func TestRelayWindowDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		deadline time.Duration
+		state    string
+		calls    int
+	}{
+		{"budget left", time.Hour, "running", 2},
+		{"one second left", time.Minute + time.Second, "running", 2},
+		{"deadline reached", time.Minute, "fail", 3},
+		{"deadline passed", -time.Hour, "fail", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				dir := t.TempDir()
+				t.Setenv("RESULTS_FILE", filepath.Join(dir, "results.md"))
+				output := filepath.Join(dir, "outputs")
+				calls := 0
+				p := testPoller(func(*http.Request) (*http.Response, error) {
+					calls++
+					return resultResponse(200, resultJSON("1-2", "pending"))
+				})
+				p.runner = testDebugRunner()
+				start := time.Now()
+				cfg := &relayConfig{githubOutput: output, window: time.Minute, deadline: start.Add(tc.deadline)}
+				r := &relay{cfg: cfg, poller: p}
+				require.NoError(t, r.poll(t.Context()))
+				data, err := os.ReadFile(output)
+				require.NoError(t, err)
+				require.Equal(t, "state="+tc.state+"\n", string(data))
+				require.Equal(t, tc.calls, calls)
+				if tc.state == "running" {
+					require.Equal(t, time.Minute, time.Since(start))
+					require.NoFileExists(t, filepath.Join(dir, "timeout-comment.md"))
+				} else {
+					data, err = os.ReadFile(filepath.Join(dir, "timeout-comment.md"))
+					require.NoError(t, err)
+					require.Contains(t, string(data), "budget deadline passed with no verdict")
+				}
+			})
 		})
-		start := time.Now()
-		cfg := &relayConfig{githubOutput: output, window: time.Minute, deadline: start.Add(time.Hour)}
-		require.NoError(t, cfg.poll(t.Context(), p))
-		data, err := os.ReadFile(output)
-		require.NoError(t, err)
-		require.Equal(t, "state=running\n", string(data))
-		require.Equal(t, 2, calls)
-		require.Equal(t, time.Minute, time.Since(start))
-	})
+	}
 }
 
 func TestGatherEnvValidation(t *testing.T) {
@@ -155,7 +160,8 @@ func TestRelayFinalFetch(t *testing.T) {
 					return resultResponse(200, resultJSON("1-2", verdict))
 				})
 				cfg := &relayConfig{githubOutput: output, window: time.Hour, deadline: deadline}
-				require.NoError(t, cfg.poll(t.Context(), p))
+				r := &relay{cfg: cfg, poller: p}
+				require.NoError(t, r.poll(t.Context()))
 				data, err := os.ReadFile(output)
 				require.NoError(t, err)
 				require.Equal(t, "state=ok\n", string(data))
@@ -228,7 +234,8 @@ func TestRelayNoVerdict(t *testing.T) {
 				p.runner = testDebugRunner()
 				start := time.Now()
 				cfg := &relayConfig{githubOutput: output, window: time.Hour, deadline: start, debugLogLines: 40}
-				require.NoError(t, cfg.poll(t.Context(), p))
+				r := &relay{cfg: cfg, poller: p}
+				require.NoError(t, r.poll(t.Context()))
 				require.Equal(t, 1, calls)
 				data, err := os.ReadFile(output)
 				require.NoError(t, err)
@@ -262,6 +269,42 @@ func TestGatherNoVerdictOutputs(t *testing.T) {
 		require.Contains(t, string(data), "polling failed")
 		require.NoFileExists(t, filepath.Join(dir, "results.md"))
 	})
+}
+
+func TestReportCancellationDuringDiagnostics(t *testing.T) {
+	for _, caller := range []string{"gather", "relay"} {
+		t.Run(caller, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				dir := t.TempDir()
+				t.Setenv("RESULTS_FILE", filepath.Join(dir, "results.md"))
+				output := filepath.Join(dir, "outputs")
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				runner := &ssmRunner{instanceID: "i-test", client: ssm.New(ssm.Options{
+					Region: "us-east-1", Credentials: aws.AnonymousCredentials{}, RetryMaxAttempts: 1,
+					HTTPClient: &http.Client{Transport: resultTransport(func(r *http.Request) (*http.Response, error) {
+						time.AfterFunc(time.Second, cancel)
+						<-r.Context().Done()
+						return nil, r.Context().Err()
+					})},
+				})}
+				start := time.Now()
+				var err error
+				if caller == "gather" {
+					err = reportGather(ctx, runner, "i-test", output, time.Minute, 40, nil, nil)
+				} else {
+					cfg := &relayConfig{instanceID: "i-test", githubOutput: output, debugLogLines: 40}
+					r := &relay{cfg: cfg, poller: &resultPoller{runner: runner}}
+					err = r.reportFault(ctx, "polling failed")
+				}
+				require.ErrorIs(t, err, context.Canceled)
+				require.Equal(t, time.Second, time.Since(start))
+				require.NoFileExists(t, output)
+				require.NoFileExists(t, filepath.Join(dir, "results.md"))
+				require.NoFileExists(t, filepath.Join(dir, "timeout-comment.md"))
+			})
+		})
+	}
 }
 
 func TestSSMDiagnosticBound(t *testing.T) {
@@ -298,7 +341,8 @@ func TestRelayCancellation(t *testing.T) {
 			}
 			output := filepath.Join(dir, "outputs")
 			cfg := &relayConfig{githubOutput: output, window: time.Minute, deadline: deadline}
-			require.ErrorIs(t, cfg.poll(ctx, p), context.Canceled)
+			r := &relay{cfg: cfg, poller: p}
+			require.ErrorIs(t, r.poll(ctx), context.Canceled)
 			require.NoFileExists(t, output)
 			require.NoFileExists(t, filepath.Join(dir, "results.md"))
 			require.NoFileExists(t, filepath.Join(dir, "timeout-comment.md"))

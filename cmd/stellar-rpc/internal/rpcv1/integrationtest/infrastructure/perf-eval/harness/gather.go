@@ -81,9 +81,6 @@ func reportGather(
 	if werr := writeNoVerdictComment(ctx, runner, instanceID, headline, debugLogLines); werr != nil {
 		return werr
 	}
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
 	return appendOutputs(githubOutput, "found=false")
 }
 
@@ -156,6 +153,9 @@ func writeNoVerdictComment(
 	}
 	if tail := runner.debugTail(ctx, debugLogLines); tail != "" {
 		fmt.Fprintf(&b, "\nLast %d lines of /var/log/user-data.log:\n\n```\n%s\n```\n", debugLogLines, tail)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	commentPath := filepath.Join(filepath.Dir(Env("RESULTS_FILE", defaultResultsFile)), "timeout-comment.md")
 	return os.WriteFile(commentPath, []byte(b.String()), 0o644)

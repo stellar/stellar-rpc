@@ -2,9 +2,6 @@
 
 ## Unreleased
 
-### Added
-* Add bounded Relay polling windows for long perf-eval campaigns. Gather shares result validation, pending-marker handling, and polling error limits ([#936](https://github.com/stellar/stellar-rpc/pull/936)).
-
 ### Removed
 * **`getEvents` responses no longer carry `inSuccessfulContractCall`.** This changes wire behavior for BOTH rpcv1 and rpcv2 — the response type is shared. The field has been deprecated ("remove in v24") since protocol 23, and its value was derivable anyway: `true` for every operation event, and `false` only on the fee and refund events of failed transactions.
 
