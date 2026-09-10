@@ -121,7 +121,7 @@ func combineTopics(filters []protocol.EventFilter) (store.TopicFilters, error) {
 type entry struct {
 	cursor               protocol.Cursor
 	ledgerCloseTimestamp int64
-	eventView            xdr.DiagnosticEventView
+	event                xdr.ContractEventView
 	txHash               *xdr.Hash
 }
 
@@ -207,18 +207,18 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 	var eventViewScanFunction store.ViewScanFunction = func(
 		eventView xdr.DiagnosticEventView, cursor protocol.Cursor, ledgerCloseTimestamp int64, txHash *xdr.Hash,
 	) (bool, error) {
+		event, err := eventView.Event()
+		if err != nil {
+			return false, err
+		}
 		matched := filters == nil
 		if !matched {
-			event, err := eventView.Event()
-			if err != nil {
-				return false, err
-			}
 			if matched, err = store.MatchesAnyFilterView(event, filters, &plan); err != nil {
 				return false, err
 			}
 		}
 		if matched {
-			found = append(found, entry{cursor, ledgerCloseTimestamp, eventView, txHash})
+			found = append(found, entry{cursor, ledgerCloseTimestamp, event, txHash})
 		}
 		return uint(len(found)) < limit, nil
 	}
@@ -232,8 +232,8 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 
 	results := make([]protocol.EventInfo, 0, len(found))
 	for _, entry := range found {
-		info, err := eventInfoForEvent(
-			entry.eventView,
+		info, err := EventInfoFromView(
+			entry.event,
 			entry.cursor,
 			time.Unix(entry.ledgerCloseTimestamp, 0).UTC().Format(time.RFC3339),
 			entry.txHash.HexString(),
@@ -269,8 +269,9 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 	}, nil
 }
 
-func eventInfoForEvent(
-	eventView xdr.DiagnosticEventView,
+// EventInfoFromView renders one stored ContractEvent into the v1 wire type; rpcv2's eventsapi wraps it.
+func EventInfoFromView(
+	ev xdr.ContractEventView,
 	cursor protocol.Cursor,
 	ledgerClosedAt, txHash, format string,
 ) (protocol.EventInfo, error) {
@@ -281,7 +282,6 @@ func eventInfoForEvent(
 		cidRaw  []byte
 	)
 	err := xdr.TryVoid(func() {
-		ev := eventView.MustEvent()
 		xdrType = ev.MustType().MustValue()
 		v0 := ev.MustBody().MustV0() // panics on a non-V0 body, replacing "unknown event version"
 		for t := range v0.MustTopics().MustIter() {

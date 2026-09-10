@@ -189,25 +189,11 @@ func v1Filters(in []protocol.EventFilter) ([]event.Filter, error) {
 	return store.CompileV1EventFilters(in)
 }
 
-// eventInfoV1 mints the v1 response event: the same stored-payload decode as
-// eventInfoV2, reshaped into the v1 wire type.
+// eventInfoV1 mints the v1 response event: eventInfoV2's output in the v1 wire type.
 func eventInfoV1(p *event.Payload, format string) (protocol.EventInfo, error) {
 	v2, err := eventInfoV2(p, format)
 	if err != nil {
 		return protocol.EventInfo{}, fmt.Errorf("could not parse event: %w", err)
 	}
-	return protocol.EventInfo{
-		EventType:       v2.EventType,
-		Ledger:          v2.Ledger,
-		LedgerClosedAt:  v2.LedgerClosedAt,
-		ContractID:      v2.ContractID,
-		ID:              v2.ID,
-		OpIndex:         v2.OpIndex,
-		TxIndex:         v2.TxIndex,
-		TransactionHash: v2.TransactionHash,
-		TopicXDR:        v2.TopicXDR,
-		TopicJSON:       v2.TopicJSON,
-		ValueXDR:        v2.ValueXDR,
-		ValueJSON:       v2.ValueJSON,
-	}, nil
+	return protocol.EventInfo(v2), nil
 }
