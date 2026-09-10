@@ -14,7 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 )
 
-// commandWaitTimeout backstops a stuck SSM command (the debug-tail reads).
+// commandWaitTimeout bounds a diagnostic, including dispatch, retries, and reads.
 const commandWaitTimeout = 60 * time.Second
 
 // Gather is the GHA-runner half: it polls S3 until the box reports a verdict
@@ -140,8 +140,7 @@ func (r *ssmRunner) debugTail(ctx context.Context, n int) string {
 	return out
 }
 
-// writeNoVerdictComment is the no-verdict path: it writes the caller's
-// headline plus the box context to /tmp/timeout-comment.md.
+// writeNoVerdictComment writes diagnostics to timeout-comment.md beside RESULTS_FILE.
 func writeNoVerdictComment(
 	ctx context.Context,
 	runner *ssmRunner,

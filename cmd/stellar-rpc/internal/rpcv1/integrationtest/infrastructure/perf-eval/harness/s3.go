@@ -18,9 +18,8 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// Result is the structured run outcome the box publishes to S3 as an atomic
-// object, overwriting the pending marker its workflow seeded. Pollers always
-// read a complete object.
+// Result is the run outcome published as one atomic S3 object.
+// A pending marker reserves the key while the producer runs.
 type Result struct {
 	SchemaVersion int             `json:"schemaVersion"`
 	Verdict       string          `json:"verdict"` // "ok" or "fail"; the workflows also seed a "pending" marker
@@ -30,10 +29,8 @@ type Result struct {
 	TargetSHA     string          `json:"targetSha"`
 }
 
-// Verdict values a box publishes. The workflows (each leg job and the
-// campaign launch) seed VerdictPending first, so the result object exists for
-// the whole run: pending reads as still-running, and persistent fetch errors
-// are a real fault, not a not-yet-published object.
+// VerdictOK is a successful final result. VerdictPending is the workflow's
+// initial marker, which the producer overwrites with an ok or fail result.
 const (
 	VerdictOK      = "ok"
 	VerdictPending = "pending"
@@ -84,7 +81,7 @@ func PublishResult(
 	return nil
 }
 
-// ErrResultNotReady means the result object hasn't been published yet.
+// ErrResultNotReady means S3 reported that the result key is absent.
 var ErrResultNotReady = errors.New("result not published yet")
 
 // ErrInvalidResult means an object cannot satisfy the result protocol.

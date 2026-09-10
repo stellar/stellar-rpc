@@ -103,9 +103,7 @@ func RequireEnvInts(keys ...string) (map[string]int, error) {
 	return ints, nil
 }
 
-// requirePositive errors when any of keys maps to a value below 1. The poll
-// loops divide and sleep by these, so zero or negative is a mis-plumbed
-// workflow, not a slow one.
+// requirePositive rejects missing keys and values below one.
 func requirePositive(ints map[string]int, keys ...string) error {
 	for _, k := range keys {
 		if ints[k] < 1 {

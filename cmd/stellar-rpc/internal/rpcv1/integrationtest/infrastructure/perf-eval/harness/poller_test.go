@@ -162,6 +162,47 @@ func TestPollWindowAndHandoff(t *testing.T) {
 	})
 }
 
+func TestPollErrorsResetBetweenWindows(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		calls := 0
+		p := testPoller(func(*http.Request) (*http.Response, error) {
+			calls++
+			if calls == 12 {
+				return resultResponse(200, resultJSON("1-2", "ok"))
+			}
+			return nil, errors.New("temporary transport failure")
+		})
+		res, err := p.poll(t.Context(), time.Now().Add(60*time.Second))
+		require.NoError(t, err)
+		require.Nil(t, res)
+		require.Equal(t, 2, calls)
+		res, err = p.poll(t.Context(), time.Now().Add(time.Hour))
+		require.NoError(t, err)
+		require.Equal(t, "ok", res.Verdict)
+		require.Equal(t, 12, calls)
+	})
+}
+
+func TestPollTransientBodyError(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		calls := 0
+		p := testPoller(func(*http.Request) (*http.Response, error) {
+			calls++
+			if calls == 1 {
+				return &http.Response{
+					StatusCode: http.StatusOK, Header: http.Header{},
+					Body: blockedBody{func() error { return io.ErrUnexpectedEOF }},
+				}, nil
+			}
+			return resultResponse(200, resultJSON("1-2", "ok"))
+		})
+		res, err := p.poll(t.Context(), time.Now().Add(time.Minute))
+		require.NoError(t, err)
+		require.Equal(t, "ok", res.Verdict)
+		require.Equal(t, 2, calls)
+	})
+}
+
 type blockedBody struct{ read func() error }
 
 func (b blockedBody) Read([]byte) (int, error) { return 0, b.read() }

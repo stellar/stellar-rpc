@@ -14,7 +14,7 @@ import (
 // The workflow reads exactly one of these states per poll window.
 const (
 	relayStateOK      = "ok"      // verdict seen, verdict == "ok"
-	relayStateFail    = "fail"    // verdict seen and not "ok", or the budget deadline passed with none
+	relayStateFail    = "fail"    // failed verdict, polling fault, or deadline without a verdict
 	relayStateRunning = "running" // window closed with budget left: the next poll job takes over
 )
 
