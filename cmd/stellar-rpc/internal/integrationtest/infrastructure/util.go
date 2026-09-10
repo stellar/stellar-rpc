@@ -27,9 +27,17 @@ func GetCurrentDirectory() string {
 // handed out ports from that range, and a client socket sometimes took the
 // port back before core bound it: core then died with "bind: Address already
 // in use" and the test failed. The range is offset by process id so two test
-// binaries on one machine do not walk the same ports.
+// binaries on one machine do not walk the same ports; a CI leg runs two (the
+// shared package and the daemon's own), so 25 ranges of 500 ports keep the
+// odds of a shared range low, and the daemon restarts on fresh ports when it
+// happens anyway.
+const (
+	testPortRangeCount = 25
+	testPortRangeSize  = 500
+)
+
 var (
-	testPortBase = uint32(20000 + (os.Getpid()%10)*1000)
+	testPortBase = uint32(20000 + (os.Getpid()%testPortRangeCount)*testPortRangeSize)
 	testPortNext atomic.Uint32
 )
 
@@ -39,7 +47,7 @@ func getFreeTCPPorts(t require.TestingT, n int) []uint16 {
 	ports := make([]uint16, 0, n)
 	for len(ports) < n {
 		port := testPortBase + testPortNext.Add(1) - 1
-		require.Less(t, port, testPortBase+1000, "ran out of test ports")
+		require.Less(t, port, testPortBase+testPortRangeSize, "ran out of test ports")
 		l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if err != nil {
 			continue // something else already listens here, skip it

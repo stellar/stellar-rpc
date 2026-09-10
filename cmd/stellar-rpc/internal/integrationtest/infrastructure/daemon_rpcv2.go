@@ -148,7 +148,15 @@ func (d *rpcv2Daemon) logger() *supportlog.Entry {
 
 // isBindError reports whether a daemon exit was a port collision. Ports are
 // chosen before the daemon binds them, so another process on the host can
-// take one in between; the harness then restarts with fresh ports.
+// take one in between; the harness then restarts with fresh ports. The
+// daemon's own listeners say so in the error. Captive core says it only in
+// its log ("bind: Address already in use") and the daemon reports just that
+// core exited, so a core exit while the daemon is starting counts too.
 func isBindError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "address already in use")
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "address already in use") ||
+		strings.Contains(msg, "stellar core exited unexpectedly")
 }
