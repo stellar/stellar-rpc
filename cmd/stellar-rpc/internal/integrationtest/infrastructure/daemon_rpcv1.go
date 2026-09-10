@@ -15,6 +15,7 @@ type rpcv1Daemon struct {
 	test   *Test
 	daemon *daemon.Daemon
 	log    *supportlog.Entry
+	done   chan error
 }
 
 func (d *rpcv1Daemon) start() {
@@ -60,8 +61,17 @@ func (d *rpcv1Daemon) create(c rpcConfig) *daemon.Daemon {
 
 	d.log = supportlog.New()
 	d.log.SetOutput(newTestLogWriter(i.t, `rpc="daemon" `))
+	// The daemon calls this from one of its own goroutines, where FailNow is
+	// not allowed. Error marks the test failed from any goroutine, and the
+	// channel lets waitForRPC stop at once instead of polling out its deadline.
+	d.done = make(chan error, 1)
 	d.log.SetExitFunc(func(code int) {
-		i.t.Fatalf("Exited with code %d", code)
+		err := fmt.Errorf("rpcv1 daemon exited with code %d", code)
+		i.t.Error(err)
+		select {
+		case d.done <- err:
+		default:
+		}
 	})
 	return daemon.MustNew(&cfg, d.log)
 }
@@ -81,10 +91,8 @@ func (d *rpcv1Daemon) close() {
 	}
 }
 
-// The rpcv1 daemon reports a fatal exit through the logger's exit hook, which
-// fails the test directly, so there is nothing to read here.
 func (d *rpcv1Daemon) exited() <-chan error {
-	return nil
+	return d.done
 }
 
 func (d *rpcv1Daemon) logger() *supportlog.Entry {

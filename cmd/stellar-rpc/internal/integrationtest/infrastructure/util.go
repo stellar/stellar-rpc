@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"sync/atomic"
+	"syscall"
 
 	"github.com/stretchr/testify/require"
 
@@ -26,24 +28,50 @@ func GetCurrentDirectory() string {
 // (32768-60999 on Linux, 49152-65535 on macOS). Asking the kernel for port 0
 // handed out ports from that range, and a client socket sometimes took the
 // port back before core bound it: core then died with "bind: Address already
-// in use" and the test failed. The range is offset by process id so two test
-// binaries on one machine do not walk the same ports; a CI leg runs two (the
-// shared package and the daemon's own), so 25 ranges of 500 ports keep the
-// odds of a shared range low, and the daemon restarts on fresh ports when it
-// happens anyway.
+// in use" and the test failed.
+//
+// A CI leg runs two test binaries at once (the shared package and the
+// daemon's own), and two processes walking the same range collide. Each
+// process therefore claims one of 25 ranges of 500 ports by holding an
+// exclusive flock on a lock file in the temp dir for its whole lifetime. The
+// kernel drops the lock when the process ends, so a crashed run leaves no
+// stale claim.
 const (
 	testPortRangeCount = 25
 	testPortRangeSize  = 500
 )
 
 var (
-	testPortBase = uint32(20000 + (os.Getpid()%testPortRangeCount)*testPortRangeSize)
-	testPortNext atomic.Uint32
+	testPortBase     uint32
+	testPortBaseOnce sync.Once
+	testPortNext     atomic.Uint32
+	// Only ever written: the open file is what keeps the flock alive for the
+	// life of the process.
+	testPortLock *os.File //nolint:unused // see above
 )
+
+func claimTestPortRange(t require.TestingT) {
+	for n := range testPortRangeCount {
+		name := filepath.Join(os.TempDir(), fmt.Sprintf("stellar-rpc-itest-ports-%d.lock", n))
+		f, err := os.OpenFile(name, os.O_CREATE|os.O_RDWR, 0o666)
+		if err != nil {
+			continue
+		}
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			_ = f.Close()
+			continue
+		}
+		testPortLock = f
+		testPortBase = uint32(20000 + n*testPortRangeSize)
+		return
+	}
+	require.Fail(t, "no free test port range: every lock file in the temp dir is held")
+}
 
 // getFreeTCPPorts hands out n distinct ports that nothing on this host is
 // listening on.
 func getFreeTCPPorts(t require.TestingT, n int) []uint16 {
+	testPortBaseOnce.Do(func() { claimTestPortRange(t) })
 	ports := make([]uint16, 0, n)
 	for len(ports) < n {
 		port := testPortBase + testPortNext.Add(1) - 1
