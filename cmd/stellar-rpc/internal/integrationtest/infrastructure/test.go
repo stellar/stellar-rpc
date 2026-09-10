@@ -559,13 +559,20 @@ func (i *Test) waitForRPC() {
 	// well above the time a replay takes on an idle machine.
 	deadline := time.Now().Add(rpcHealthyTimeout)
 	attempts := 1
+	// A nil channel never fires, which covers the released-RPC-container path
+	// (TestMigrate): there is no in-process daemon to watch.
+	var exited <-chan error
+	if i.daemon != nil {
+		exited = i.daemon.exited()
+	}
 	for {
 		select {
-		case err := <-i.daemon.exited():
+		case err := <-exited:
 			if isBindError(err) && attempts < maxDaemonStartAttempts {
 				attempts++
 				i.t.Logf("daemon lost a port race (%v); starting again with new ports, attempt %d", err, attempts)
 				i.daemon.start()
+				exited = i.daemon.exited()
 				i.rpcClient = client.NewClient(i.GetStellarRPCURL(), nil)
 				continue
 			}

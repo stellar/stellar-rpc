@@ -66,13 +66,19 @@ func (d *rpcv2Daemon) start() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	d.cancel = cancel
-	d.done = make(chan error, 1)
-	d.stopped = make(chan struct{})
+	// The goroutine gets its own copies of the channels: a restart after a
+	// port collision replaces the fields while the old daemon may still be
+	// finishing, and the old goroutine must report on the channels it was
+	// started with.
+	done := make(chan error, 1)
+	stopped := make(chan struct{})
+	d.done, d.stopped = done, stopped
 	configPath := filepath.Join(GetCurrentDirectory(), "docker", rpcv2ConfigFilename)
 	flags := d.flags()
+	log := d.log
 	go func() {
-		d.done <- rpcv2.RunDaemonWithOptions(ctx, configPath, rpcv2.Options{Logger: d.log, Flags: flags})
-		close(d.stopped)
+		done <- rpcv2.RunDaemonWithOptions(ctx, configPath, rpcv2.Options{Logger: log, Flags: flags})
+		close(stopped)
 	}()
 }
 
