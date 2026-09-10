@@ -99,13 +99,7 @@ func run(ctx context.Context) error {
 			logger.Warnf("no result at s3://%s/%s: %v", l.Bucket, l.Key, err)
 			continue
 		}
-		// A campaign that never overwrote its seed marker has no outcome to
-		// report; it renders through the no-result fallback below.
-		if res.Verdict == harness.VerdictPending {
-			logger.Warnf("result at s3://%s/%s is still pending", l.Bucket, l.Key)
-			continue
-		}
-		results[i].Verdict, results[i].Markdown = res.Verdict, res.Markdown
+		results[i] = reportableLeg(l.Label, res, os.Getenv("GITHUB_RUN_ID"), os.Getenv("TARGET_SHA"))
 	}
 
 	body := renderComment(runRecord{
@@ -116,6 +110,22 @@ func run(ctx context.Context) error {
 	}, string(prev))
 	_, err = io.WriteString(os.Stdout, body)
 	return err
+}
+
+// reportableLeg allows earlier attempts of this run for failed-jobs-only reruns.
+// Active Gather and Relay jobs require an exact run-attempt match instead.
+func reportableLeg(label string, res *harness.Result, runID, targetSHA string) legResult {
+	result := legResult{Label: label}
+	if res.Verdict == harness.VerdictPending {
+		logger.Warnf("%s has no final result", label)
+		return result
+	}
+	if !strings.HasPrefix(res.RunID, runID+"-") || res.TargetSHA != targetSHA {
+		logger.Warnf("%s result belongs to another run or target", label)
+		return result
+	}
+	result.Verdict, result.Markdown = res.Verdict, res.Markdown
+	return result
 }
 
 // renderComment numbers cur, prepends it to the prior comment's history, and

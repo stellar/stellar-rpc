@@ -155,11 +155,11 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-duration-seconds: ${{ steps.deadlines.outputs.role_seconds }}
 
-      # Seed the pending marker: an absent key reads as 403, not 404,
-      # and a re-run must overwrite the previous attempt's verdict.
-      # With the key always present, persistent fetch
-      # errors are a real fault the poller can fail fast on.
+      # Only the shared poller understands pending. Older target refs use their
+      # original Gather and must wait on an unseeded key. The role has no
+      # ListBucket permission, so a missing key can return 403 rather than 404.
       - name: Seed the pending result marker
+        if: ${{ hashFiles('cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/harness/poller.go') != '' }}
         env:
           RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
@@ -279,7 +279,7 @@ jobs:
         if: always()
         run: |
           if [ "${{ steps.results.outputs.found }}" != "true" ]; then
-            echo "Leg timed out before producing instance results"
+            echo "Leg produced no final result; see the polling diagnostics"
             exit 1
           fi
 
