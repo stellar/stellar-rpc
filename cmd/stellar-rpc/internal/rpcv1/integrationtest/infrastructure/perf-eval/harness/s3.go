@@ -87,6 +87,9 @@ func PublishResult(
 // ErrResultNotReady means the result object hasn't been published yet.
 var ErrResultNotReady = errors.New("result not published yet")
 
+// ErrInvalidResult means an object cannot satisfy the result protocol.
+var ErrInvalidResult = errors.New("invalid result object")
+
 // FetchResult gets and decodes the result object, returning ErrResultNotReady
 // when it is absent.
 func FetchResult(ctx context.Context, client *s3.Client, bucket, key string) (*Result, error) {
@@ -105,7 +108,11 @@ func FetchResult(ctx context.Context, client *s3.Client, bucket, key string) (*R
 	}
 	var res Result
 	if err := json.Unmarshal(data, &res); err != nil {
-		return nil, fmt.Errorf("decoding result object: %w", err)
+		return nil, fmt.Errorf("%w: decoding JSON: %w", ErrInvalidResult, err)
+	}
+	if res.SchemaVersion != 1 || res.RunID == "" ||
+		(res.Verdict != VerdictOK && res.Verdict != "fail" && res.Verdict != VerdictPending) {
+		return nil, fmt.Errorf("%w: expected schemaVersion 1, runId, and ok/fail/pending verdict", ErrInvalidResult)
 	}
 	return &res, nil
 }
