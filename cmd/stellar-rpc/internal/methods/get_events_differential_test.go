@@ -748,10 +748,15 @@ func TestGetEvents_ViewMatchesDecodedPath_Cursors(t *testing.T) {
 							cursor := protocol.Cursor{Ledger: ledger, Tx: tx, Op: op, Event: event}
 							name := fmt.Sprintf("%s/cursor=%s/limit=%d", fc.name, cursor.String(), limit)
 							t.Run(name, func(t *testing.T) {
-								diff.assertSame(t, protocol.GetEventsRequest{
+								req := protocol.GetEventsRequest{
 									Filters:    fc.filters,
 									Pagination: &protocol.PaginationOptions{Cursor: &cursor, Limit: limit},
-								})
+								}
+								if cursor.Ledger > eventsCorpusLast { // past the tip: both sides reject the start ledger
+									diff.assertSameError(t, req)
+									return
+								}
+								diff.assertSame(t, req)
 							})
 						}
 					}
