@@ -43,7 +43,7 @@ func TestRenderComment_FirstRun(t *testing.T) {
 func TestRenderLeg_FallbackWhenNoResult(t *testing.T) {
 	out := renderLeg(legResult{Label: "X"})
 	require.Contains(t, out, "### ❌ X — verdict: none")
-	require.Contains(t, out, "No result object published")
+	require.Contains(t, out, "No final result was published")
 }
 
 // Four runs in sequence: each run's output is the next run's "prior comment".

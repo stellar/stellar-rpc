@@ -164,7 +164,7 @@ func renderRun(r runRecord) string {
 }
 
 // renderLeg renders one leg's section: a verdict heading plus its result markdown,
-// or a fallback when no result object was published.
+// or a fallback when no final result was published.
 func renderLeg(l legResult) string {
 	emoji := "❌"
 	if l.Verdict == harness.VerdictOK {
@@ -176,7 +176,7 @@ func renderLeg(l legResult) string {
 		b.WriteString(strings.TrimRight(l.Markdown, "\n"))
 		b.WriteByte('\n')
 	} else {
-		b.WriteString("_No result object published (leg timed out or failed before publishing). See the run logs._\n")
+		b.WriteString("_No final result was published (leg timed out or failed before publishing). See the run logs._\n")
 	}
 	return b.String()
 }
