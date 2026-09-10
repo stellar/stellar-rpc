@@ -110,6 +110,7 @@ func (d *rpcv2Daemon) flags() *pflag.FlagSet {
 		"ingestion.stellar_core_binary_path":       findCoreBinary(i.t),
 		"ingestion.captive_core_storage_path":      i.captiveCoreStoragePath,
 		"ingestion.core_http_port":                 strconv.Itoa(int(d.captiveCoreHTTPPort)),
+		"ingestion.core_url":                       fmt.Sprintf("http://127.0.0.1:%d", d.captiveCoreHTTPPort),
 		"ingestion.core_http_query_port":           strconv.Itoa(int(i.testPorts.captiveCoreHTTPQueryPort)),
 	}
 	for name, value := range values {

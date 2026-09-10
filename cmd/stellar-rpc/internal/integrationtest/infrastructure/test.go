@@ -265,6 +265,7 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.coreClient = &stellarcore.Client{URL: "http://" + i.testPorts.CoreHTTPHostPort}
 		i.waitForCore()
 		i.waitForCheckpoint()
+		i.waitForArchive()
 	}
 	if !i.runRPCInContainer() {
 		if i.delayDaemonForLedgerN != 0 {
@@ -416,6 +417,36 @@ func (i *Test) waitForCheckpoint() {
 		func() bool {
 			info, err := i.getCoreInfo()
 			return err == nil && info.Info.Ledger.Num > checkpointFrequency
+		},
+		coreStartupTimeout,
+		time.Second,
+	)
+}
+
+// waitForArchive waits until the Core container has published its first
+// checkpoint to the history archive. Core's /info passes the checkpoint ledger
+// a few seconds before the publish lands, and until then the archive's root
+// state still says ledger 0, which rpcv2 treats as a permanent startup failure.
+func (i *Test) waitForArchive() {
+	i.t.Log("Waiting for the first checkpoint in the history archive...")
+	url := "http://" + i.testPorts.CoreArchiveHostPort + "/.well-known/stellar-history.json"
+	require.Eventually(i.t,
+		func() bool {
+			ctx, cancel := context.WithTimeout(i.t.Context(), time.Second)
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+			if err != nil {
+				return false
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return false
+			}
+			defer resp.Body.Close()
+			var has historyarchive.HistoryArchiveState
+			return resp.StatusCode == http.StatusOK &&
+				json.NewDecoder(resp.Body).Decode(&has) == nil &&
+				has.CurrentLedger >= checkpointFrequency-1
 		},
 		coreStartupTimeout,
 		time.Second,
