@@ -22,18 +22,36 @@ import (
 // A pending marker reserves the key while the producer runs.
 type Result struct {
 	SchemaVersion int             `json:"schemaVersion"`
-	Verdict       string          `json:"verdict"` // "ok" or "fail"; the workflows also seed a "pending" marker
+	Verdict       string          `json:"verdict"` // "ok", "fail" or "pending"
 	Markdown      string          `json:"markdown"`
 	Bench         json.RawMessage `json:"bench,omitempty"`
 	RunID         string          `json:"runId"`
 	TargetSHA     string          `json:"targetSha"`
 }
 
+// Validate checks the result schema, required run identity, and verdict.
+func (r Result) Validate() error {
+	if r.SchemaVersion != 1 {
+		return fmt.Errorf("unsupported schemaVersion %d", r.SchemaVersion)
+	}
+	if r.RunID == "" {
+		return errors.New("runId is required")
+	}
+	switch r.Verdict {
+	case VerdictOK, VerdictFail, VerdictPending:
+		return nil
+	default:
+		return fmt.Errorf("unknown verdict %q", r.Verdict)
+	}
+}
+
 // VerdictOK is a successful final result. VerdictPending is the workflow's
 // initial marker, which the producer overwrites with an ok or fail result.
+// VerdictFail is a failed final result.
 const (
 	VerdictOK      = "ok"
 	VerdictPending = "pending"
+	VerdictFail    = "fail"
 )
 
 // PublishResult uploads the run result to s3://bucket/key as one atomic object
@@ -107,9 +125,8 @@ func FetchResult(ctx context.Context, client *s3.Client, bucket, key string) (*R
 	if err := json.Unmarshal(data, &res); err != nil {
 		return nil, fmt.Errorf("%w: decoding JSON: %w", ErrInvalidResult, err)
 	}
-	if res.SchemaVersion != 1 || res.RunID == "" ||
-		(res.Verdict != VerdictOK && res.Verdict != "fail" && res.Verdict != VerdictPending) {
-		return nil, fmt.Errorf("%w: expected schemaVersion 1, runId, and ok/fail/pending verdict", ErrInvalidResult)
+	if err := res.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidResult, err)
 	}
 	return &res, nil
 }

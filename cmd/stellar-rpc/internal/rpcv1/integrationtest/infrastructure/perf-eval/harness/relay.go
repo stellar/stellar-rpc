@@ -11,17 +11,17 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 )
 
-// The workflow reads exactly one of these states per poll window.
+// Relay's state output describes the campaign outcome at the end of a window.
 const (
-	relayStateOK      = "ok"      // verdict seen, verdict == "ok"
+	relayStateOK      = "ok"      // successful final result
 	relayStateFail    = "fail"    // failed verdict, polling fault, or deadline without a verdict
 	relayStateRunning = "running" // window closed with budget left: the next poll job takes over
 )
 
-// Relay is the poll half of a campaign that outlives one GHA job: it polls one
-// bounded window and reports ok, fail, or running, where running hands off to
-// the next poll job. All three states exit 0; the workflow gates on the state
-// output.
+// Relay lets long campaigns span multiple workflow jobs by reporting one
+// polling window's outcome through the state output: ok, fail, or running.
+// The caller uses that output to fail the job or schedule another window.
+// Configuration, cancellation, and local output failures return an error.
 func Relay(ctx context.Context) error {
 	cfg, err := loadRelayConfig()
 	if err != nil {
@@ -40,75 +40,79 @@ func Relay(ctx context.Context) error {
 		interval:      cfg.pollInterval,
 		debugLogLines: cfg.debugLogLines, debugEveryPolls: cfg.debugEveryPolls,
 	}
-	return cfg.poll(ctx, poller)
+	r := &relay{cfg: cfg, poller: poller}
+	return r.poll(ctx)
 }
 
-func (cfg *relayConfig) poll(ctx context.Context, poller *resultPoller) error {
+type relay struct {
+	cfg    *relayConfig
+	poller *resultPoller
+}
+
+func (r *relay) poll(ctx context.Context) error {
 	start := time.Now()
-	// Clamp the poll window to the campaign deadline.
-	windowEnd := start.Add(cfg.window)
-	if cfg.deadline.Before(windowEnd) {
-		windowEnd = cfg.deadline
+	windowEnd := start.Add(r.cfg.window)
+	if r.cfg.deadline.Before(windowEnd) {
+		windowEnd = r.cfg.deadline
 	}
 	logger.Infof("polling s3://%s/%s until %s (deadline %s)",
-		cfg.bucket, cfg.resultKey, windowEnd.UTC().Format(time.RFC3339), cfg.deadline.UTC().Format(time.RFC3339))
+		r.cfg.bucket, r.cfg.resultKey, windowEnd.UTC().Format(time.RFC3339), r.cfg.deadline.UTC().Format(time.RFC3339))
 
-	res, err := poller.poll(ctx, windowEnd)
+	res, err := r.poller.poll(ctx, windowEnd)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	switch {
-	case err != nil:
-		return cfg.reportFault(ctx, poller.runner, err.Error())
-	case res != nil:
-		return cfg.reportVerdict(res)
+	if err != nil {
+		return r.reportFault(ctx, err.Error())
+	}
+	if res != nil {
+		return r.reportVerdict(res)
 	}
 
-	if relayState(time.Now(), cfg.deadline) == relayStateRunning {
+	if time.Now().Before(r.cfg.deadline) {
 		logger.Infof("window closed with %s of budget left; handing off to the next poll job",
-			time.Until(cfg.deadline).Round(time.Second))
-		return appendOutputs(cfg.githubOutput, "state="+relayStateRunning)
+			time.Until(r.cfg.deadline).Round(time.Second))
+		return appendOutputs(r.cfg.githubOutput, "state="+relayStateRunning)
 	}
 
-	// Budget exhausted: a failure, not a handoff. One last fetch first, because
-	// the window can close before the loop's first poll (a job that starts past
-	// the deadline) or during its final sleep.
-	last, lerr := poller.checkOnce(ctx)
+	// Check for a final result even if this job started after the deadline
+	// or the producer published during the last polling sleep.
+	last, lerr := r.poller.checkOnce(ctx)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 	if lerr != nil {
-		return cfg.reportFault(ctx, poller.runner,
+		return r.reportFault(ctx,
 			fmt.Sprintf("Campaign deadline passed; final result fetch failed: %v", lerr))
 	}
 	if last != nil {
-		logger.Infof("verdict published after the last poll; reporting it instead of a timeout")
-		return cfg.reportVerdict(last)
+		return r.reportVerdict(last)
 	}
-	// The duration is this window's wait only; no single job sees the whole chain.
-	logger.Warnf("budget deadline passed with no verdict after %s", time.Since(start).Round(time.Second))
-	return cfg.reportFault(ctx, poller.runner, fmt.Sprintf(
+	return r.reportFault(ctx, fmt.Sprintf(
 		"❌ Campaign budget deadline passed with no verdict (this window waited %s).",
 		time.Since(start).Round(time.Second)))
 }
 
 // reportFault writes context for the workflow summary and relays a fail state.
-func (cfg *relayConfig) reportFault(ctx context.Context, runner *ssmRunner, headline string) error {
+func (r *relay) reportFault(ctx context.Context, headline string) error {
 	logger.Warnf("%s", headline)
-	if err := writeNoVerdictComment(ctx, runner, cfg.instanceID, headline, cfg.debugLogLines); err != nil {
+	if err := writeNoVerdictComment(ctx, r.poller.runner, r.cfg.instanceID, headline, r.cfg.debugLogLines); err != nil {
 		return err
 	}
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	return appendOutputs(cfg.githubOutput, "state="+relayStateFail)
+	return appendOutputs(r.cfg.githubOutput, "state="+relayStateFail)
 }
 
-func relayState(now, deadline time.Time) string {
-	if now.Before(deadline) {
-		return relayStateRunning
+// reportVerdict writes the report before exposing its state to the workflow.
+func (r *relay) reportVerdict(res *Result) error {
+	logger.Infof("result published by instance (verdict: %s)", res.Verdict)
+	if err := os.WriteFile(Env("RESULTS_FILE", defaultResultsFile), []byte(res.Markdown), 0o644); err != nil {
+		return err
 	}
-	return relayStateFail
+	state := relayStateFail
+	if res.Verdict == VerdictOK {
+		state = relayStateOK
+	}
+	return appendOutputs(r.cfg.githubOutput, "state="+state)
 }
 
 type relayConfig struct {
@@ -125,10 +129,6 @@ type relayConfig struct {
 	deadline        time.Time
 }
 
-var relayIntKeys = []string{
-	"POLL_INTERVAL", "DEBUG_LOG_LINES", "DEBUG_LOG_EVERY_POLLS", "WINDOW_SECONDS", "DEADLINE_EPOCH",
-}
-
 func loadRelayConfig() (*relayConfig, error) {
 	strs, err := RequireEnv(
 		"INSTANCE_ID", "AWS_REGION", "GITHUB_OUTPUT", "BUCKET", "RESULT_KEY", "RUN_ID",
@@ -136,7 +136,9 @@ func loadRelayConfig() (*relayConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	ints, err := RequireEnvInts(relayIntKeys...)
+	ints, err := RequireEnvInts(
+		"POLL_INTERVAL", "DEBUG_LOG_LINES", "DEBUG_LOG_EVERY_POLLS", "WINDOW_SECONDS", "DEADLINE_EPOCH",
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -159,18 +161,4 @@ func loadRelayConfig() (*relayConfig, error) {
 		window:          time.Duration(ints["WINDOW_SECONDS"]) * time.Second,
 		deadline:        time.Unix(int64(ints["DEADLINE_EPOCH"]), 0),
 	}, nil
-}
-
-// reportVerdict writes the box's markdown to the results file, where the
-// workflow's summary step reads it, and relays the verdict as the state.
-func (cfg *relayConfig) reportVerdict(res *Result) error {
-	logger.Infof("result published by instance (verdict: %s)", res.Verdict)
-	if err := os.WriteFile(Env("RESULTS_FILE", defaultResultsFile), []byte(res.Markdown), 0o644); err != nil {
-		return err
-	}
-	state := relayStateFail
-	if res.Verdict == VerdictOK {
-		state = relayStateOK
-	}
-	return appendOutputs(cfg.githubOutput, "state="+state)
 }

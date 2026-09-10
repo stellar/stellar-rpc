@@ -112,8 +112,9 @@ func run(ctx context.Context) error {
 	return err
 }
 
-// reportableLeg allows earlier attempts of this run for failed-jobs-only reruns.
-// Active Gather and Relay jobs require an exact run-attempt match instead.
+// reportableLeg includes final results from the same workflow run and target
+// commit. Results from previous attempts remain usable when only failed jobs
+// are rerun. Pending or mismatched results produce a label-only entry.
 func reportableLeg(label string, res *harness.Result, runID, targetSHA string) legResult {
 	result := legResult{Label: label}
 	if res.Verdict == harness.VerdictPending {

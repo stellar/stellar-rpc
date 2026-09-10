@@ -156,8 +156,7 @@ jobs:
           role-duration-seconds: ${{ steps.deadlines.outputs.role_seconds }}
 
       # Only the shared poller understands pending. Older target refs use their
-      # original Gather and must wait on an unseeded key. The role has no
-      # ListBucket permission, so a missing key can return 403 rather than 404.
+      # original Gather and must wait on an unseeded key.
       - name: Seed the pending result marker
         if: ${{ hashFiles('cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/harness/poller.go') != '' }}
         env:

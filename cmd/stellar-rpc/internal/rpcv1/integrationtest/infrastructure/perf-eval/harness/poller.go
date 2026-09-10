@@ -26,10 +26,9 @@ type resultPoller struct {
 	debugEveryPolls int
 }
 
-// poll polls until `until`. It returns (res, nil) when a final verdict for
-// this run appears, (nil, nil) when the window closes without one, and an
-// error on cancellation, invalid data, or ten consecutive failed polls.
-// Each window starts a new error count; a current pending marker resets it.
+// poll keeps result waiting within one job's time budget. Window expiry returns
+// (nil, nil) so Gather can report a timeout and Relay can hand off to another job
+// if campaign time remains.
 func (p *resultPoller) poll(ctx context.Context, until time.Time) (*Result, error) {
 	windowCtx, cancel := context.WithDeadline(ctx, until)
 	defer cancel()
