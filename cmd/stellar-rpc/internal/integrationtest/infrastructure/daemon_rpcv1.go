@@ -1,6 +1,8 @@
 package infrastructure
 
 import (
+	"fmt"
+
 	"github.com/stretchr/testify/require"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -21,11 +23,18 @@ func (d *rpcv1Daemon) start() {
 	// Unfortunately this isn't completely clash-free, but there is no way to
 	// tell core to allocate the port dynamically.
 	// Allocate both ports together so the OS doesn't hand out the same port twice.
-	ports := getFreeTCPPorts(i.t, 2)
+	ports := getFreeTCPPorts(i.t, 3)
 	i.testPorts.captiveCorePeerPort = ports[0]
 	i.testPorts.captiveCoreHTTPQueryPort = ports[1]
 	i.generateCaptiveCoreCfgForDaemon()
-	d.daemon = d.create(i.getRPConfigForDaemon())
+	cfg := i.getRPConfigForDaemon()
+	if !i.ingestLoadTest.Enabled() {
+		// Submit through the daemon's own captive core, as rpcv1 does by
+		// default in production and as rpcv2 always does.
+		cfg.captiveCoreHTTPPort = ports[2]
+		cfg.stellarCoreURL = fmt.Sprintf("http://127.0.0.1:%d", ports[2])
+	}
+	d.daemon = d.create(cfg)
 	d.fillPorts()
 	go d.daemon.Run()
 }
