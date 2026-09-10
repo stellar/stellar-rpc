@@ -279,3 +279,29 @@ func TestSSMDiagnosticBound(t *testing.T) {
 		require.Equal(t, commandWaitTimeout, time.Since(start))
 	})
 }
+
+func TestRelayCancellation(t *testing.T) {
+	for _, expired := range []bool{false, true} {
+		synctest.Test(t, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("RESULTS_FILE", filepath.Join(dir, "results.md"))
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			p := testPoller(func(r *http.Request) (*http.Response, error) {
+				time.AfterFunc(time.Second, cancel)
+				<-r.Context().Done()
+				return nil, r.Context().Err()
+			})
+			deadline := time.Now().Add(time.Hour)
+			if expired {
+				deadline = time.Now()
+			}
+			output := filepath.Join(dir, "outputs")
+			cfg := &relayConfig{githubOutput: output, window: time.Minute, deadline: deadline}
+			require.ErrorIs(t, cfg.poll(ctx, p), context.Canceled)
+			require.NoFileExists(t, output)
+			require.NoFileExists(t, filepath.Join(dir, "results.md"))
+			require.NoFileExists(t, filepath.Join(dir, "timeout-comment.md"))
+		})
+	}
+}

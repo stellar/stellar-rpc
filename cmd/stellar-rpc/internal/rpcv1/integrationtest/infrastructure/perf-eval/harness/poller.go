@@ -9,15 +9,13 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
-// Ten failed polls in a row, about 5 min at the 30 s interval. Persistent
-// errors are a permissions or config fault, not a slow campaign.
+// Ten failed polls in a row, about 5 min at the 30 s interval.
 const maxConsecutiveFetchErrors = 10
 
 const resultFetchTimeout = 30 * time.Second
 
-// resultPoller polls one S3 result key until a final verdict for its run
-// appears or the window closes. Gather and Relay share it; they differ only in
-// the window they poll and in what they report afterwards.
+// resultPoller waits for a final result with an exact run-attempt match.
+// Its workflow must seed the result key before launching the producer.
 type resultPoller struct {
 	s3Client        *s3.Client
 	runner          *ssmRunner
@@ -30,7 +28,8 @@ type resultPoller struct {
 
 // poll polls until `until`. It returns (res, nil) when a final verdict for
 // this run appears, (nil, nil) when the window closes without one, and an
-// error after maxConsecutiveFetchErrors consecutive failed fetches.
+// error on cancellation, invalid data, or ten consecutive failed polls.
+// Each window starts a new error count; a current pending marker resets it.
 func (p *resultPoller) poll(ctx context.Context, until time.Time) (*Result, error) {
 	windowCtx, cancel := context.WithDeadline(ctx, until)
 	defer cancel()
@@ -92,7 +91,7 @@ func (p *resultPoller) checkOnce(ctx context.Context) (*Result, error) {
 		return nil, fmt.Errorf("stale result from run %q (want %q)", res.RunID, p.runID)
 	case res.Verdict == VerdictPending:
 		logger.Infof("campaign still running (pending marker at s3://%s/%s)", p.bucket, p.key)
-		return nil, nil //nolint:nilnil // same: keep polling
+		return nil, nil //nolint:nilnil // pending is a healthy wait
 	default:
 		return res, nil
 	}
