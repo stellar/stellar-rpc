@@ -1092,6 +1092,15 @@ func (i *Test) upgradeLimitsWithFile(limitFile, expectInSorobanInfo string) {
 	}, 30*time.Second, 500*time.Millisecond,
 		"the %s upgrade never put %s into Core's /sorobaninfo",
 		limitFile, expectInSorobanInfo)
+
+	// /sorobaninfo answers for the Core container. Preflight reads ledger state
+	// from the daemon's captive core, which closes the same ledger a moment
+	// later, so a simulateTransaction sent now can still see the old limits.
+	require.Eventually(i.t, func() bool {
+		health, err := i.GetRPCLient().GetHealth(i.t.Context())
+		return err == nil && i.caughtUpWithCore(health.LatestLedger)
+	}, 30*time.Second, 500*time.Millisecond,
+		"the daemon never ingested the ledger that applied the %s upgrade", limitFile)
 }
 
 func (i *Test) fillContainerPorts() {
