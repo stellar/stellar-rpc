@@ -36,8 +36,8 @@ import (
 // Shared machinery lives in differential_test.go.
 
 // legacyGetTransactionsByLedgerSequence is the pre-view-walk pagination loop:
-// same handler, same cursor math, but reading each ledger through
-// LedgerReaderTx.GetLedger's decoded xdr.LedgerCloseMeta.
+// same handler, same cursor math, but reading each ledger's bytes through
+// LedgerReaderTx.WithLedgerRaw and decoding them into an xdr.LedgerCloseMeta.
 func legacyGetTransactionsByLedgerSequence(
 	ctx context.Context, h transactionsRPCHandler, request protocol.GetTransactionsRequest,
 ) (protocol.GetTransactionsResponse, error) {
@@ -72,7 +72,8 @@ func legacyGetTransactionsByLedgerSequence(
 				Message: "cursor ledger sequence cannot be negative",
 			}
 		}
-		ledger, found, gerr := readTx.GetLedger(ctx, uint32(ledgerSeq))
+		var ledger xdr.LedgerCloseMeta
+		found, gerr := readTx.WithLedgerRaw(ctx, uint32(ledgerSeq), ledger.UnmarshalBinary)
 		if gerr != nil {
 			return protocol.GetTransactionsResponse{}, &jrpc2.Error{Code: jrpc2.InternalError, Message: gerr.Error()}
 		} else if !found {
