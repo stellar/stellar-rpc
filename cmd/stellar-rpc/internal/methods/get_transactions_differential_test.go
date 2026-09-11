@@ -417,17 +417,37 @@ func seededTransactionsDifferential(t *testing.T) transactionsDifferential {
 }
 
 // TestGetTransactions_ViewWalkErrorParity pins that both paths reject an
-// invalid request identically: same message, same jrpc2 code.
+// invalid request identically: same message, same jrpc2 code. Only the cursor
+// below the oldest ledger reaches the walk: ValidatePagination does not
+// range-check cursors, so a poller resuming after retention moved past it gets
+// the walk's own miss on both sides.
 func TestGetTransactions_ViewWalkErrorParity(t *testing.T) {
 	diff := seededTransactionsDifferential(t)
-	for name, start := range map[string]uint32{
-		"below oldest": transactionsCorpusFirst - 1,
-		"above latest": transactionsCorpusLast + 1,
+	page := func(cursor string, limit uint) *protocol.LedgerPaginationOptions {
+		return &protocol.LedgerPaginationOptions{Cursor: cursor, Limit: limit}
+	}
+	belowOldest := toid.New(transactionsCorpusFirst-1, 0, 1).String()
+
+	for name, req := range map[string]protocol.GetTransactionsRequest{
+		"start below oldest":  {StartLedger: transactionsCorpusFirst - 1},
+		"start above latest":  {StartLedger: transactionsCorpusLast + 1},
+		"cursor below oldest": {Pagination: page(belowOldest, 10)},
+		"malformed cursor":    {Pagination: page("abc", 10)},
+		"limit above max":     {StartLedger: transactionsCorpusFirst, Pagination: page("", 101)},
+		"invalid format":      {StartLedger: transactionsCorpusFirst, Format: "yaml"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			diff.assertSameError(t, protocol.GetTransactionsRequest{StartLedger: start})
+			diff.assertSameError(t, req)
 		})
 	}
+
+	// The exact answer a retention follow-up must keep: the walk's miss, not a range error.
+	_, err := diff.got(t.Context(), protocol.GetTransactionsRequest{Pagination: page(belowOldest, 10)})
+	var rpcErr *jrpc2.Error
+	require.ErrorAs(t, err, &rpcErr)
+	require.Equal(t, jrpc2.InvalidParams, rpcErr.Code)
+	require.Equal(t,
+		fmt.Sprintf("database does not contain metadata for ledger: %d", transactionsCorpusFirst-1), rpcErr.Message)
 }
 
 // TestGetTransactions_ViewWalkMatchesParsedPath sweeps start ledgers, page
