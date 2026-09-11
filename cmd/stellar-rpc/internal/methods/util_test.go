@@ -10,21 +10,21 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
 )
 
 func BenchmarkGetProtocolVersion(b *testing.B) {
 	dbx := NewTestDB(b)
-	daemon := interfaces.MakeNoOpDeamon()
+	daemon := host.MakeNoOpDaemon()
 
-	ledgerReader := db.NewLedgerReader(dbx)
+	ledgerReader := sqlitedb.NewLedgerReader(dbx)
 	_, exists, err := ledgerReader.GetLedger(b.Context(), 1)
 	require.NoError(b, err)
 	assert.False(b, exists)
 
 	ledgerSequence := uint32(1)
-	tx, err := db.NewReadWriter(log.DefaultLogger, dbx, daemon, 15, "passphrase").NewTx(b.Context())
+	tx, err := sqlitedb.NewReadWriter(log.DefaultLogger, dbx, daemon, 15, "passphrase").NewTx(b.Context())
 	require.NoError(b, err)
 	ledgerCloseMeta := createMockLedgerCloseMeta(ledgerSequence)
 	require.NoError(b, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
@@ -40,15 +40,15 @@ func BenchmarkGetProtocolVersion(b *testing.B) {
 
 func TestGetProtocolVersion(t *testing.T) {
 	dbx := NewTestDB(t)
-	daemon := interfaces.MakeNoOpDeamon()
+	daemon := host.MakeNoOpDaemon()
 
-	ledgerReader := db.NewLedgerReader(dbx)
+	ledgerReader := sqlitedb.NewLedgerReader(dbx)
 	_, exists, err := ledgerReader.GetLedger(t.Context(), 1)
 	require.NoError(t, err)
 	assert.False(t, exists)
 
 	ledgerSequence := uint32(1)
-	tx, err := db.NewReadWriter(log.DefaultLogger, dbx, daemon, 15, "passphrase").NewTx(t.Context())
+	tx, err := sqlitedb.NewReadWriter(log.DefaultLogger, dbx, daemon, 15, "passphrase").NewTx(t.Context())
 	require.NoError(t, err)
 	ledgerCloseMeta := createMockLedgerCloseMeta(ledgerSequence)
 	require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
@@ -78,10 +78,10 @@ func createMockLedgerCloseMeta(ledgerSequence uint32) xdr.LedgerCloseMeta {
 	}
 }
 
-func NewTestDB(tb testing.TB) *db.DB {
+func NewTestDB(tb testing.TB) *sqlitedb.DB {
 	tmp := tb.TempDir()
-	dbPath := path.Join(tmp, "db.sqlite")
-	dbConn, err := db.OpenSQLiteDB(dbPath)
+	dbPath := path.Join(tmp, "sqlitedb.sqlite")
+	dbConn, err := sqlitedb.OpenSQLiteDB(dbPath)
 	require.NoError(tb, err)
 	tb.Cleanup(func() {
 		require.NoError(tb, dbConn.Close())

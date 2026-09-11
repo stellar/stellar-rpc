@@ -1,4 +1,4 @@
-FROM golang:1.25-bookworm AS build
+FROM golang:1.26-bookworm AS build
 ARG RUST_TOOLCHAIN_VERSION=stable
 ARG REPOSITORY_VERSION
 
@@ -18,7 +18,7 @@ RUN apt clean
 
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain $RUST_TOOLCHAIN_VERSION
 
-RUN make REPOSITORY_VERSION=${REPOSITORY_VERSION} build-stellar-rpc
+RUN make REPOSITORY_VERSION=${REPOSITORY_VERSION} build-rpc-v1
 
 # Move the binary to a common location
 RUN mv stellar-rpc /bin/stellar-rpc

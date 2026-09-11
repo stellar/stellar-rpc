@@ -1,0 +1,726 @@
+package rpcv2
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"time"
+
+	"github.com/pelletier/go-toml"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/sirupsen/logrus"
+
+	"github.com/stellar/go-stellar-sdk/historyarchive"
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/support/storage"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/corestate"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
+)
+
+// RunDaemon is the full-history daemon's process entrypoint: load config, lock
+// storage roots, open the catalog, validateConfig, build boundaries, then run
+// the daemon body. flags carries the CLI overrides main registered via
+// config.BindFlags (nil = none); each set flag overlays its TOML key before
+// defaults resolve.
+func RunDaemon(ctx context.Context, configPath string, flags config.FlagOverrides) error {
+	// The whole daemon — including the pre-run startup phase (archive dial, tip
+	// sampling, core wiring) — runs on the signal-derived ctx, so a drain that
+	// lands mid-startup unwinds with ctx-shaped errors. Classify those as the
+	// clean shutdown they are; a nonzero exit must keep meaning failure.
+	err := runDaemonWith(ctx, configPath, daemonOptions{Flags: flags})
+	if ctx.Err() == nil {
+		return err
+	}
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		// A real startup failure raced the shutdown request: exit 0 is still
+		// right (the shutdown was asked for), but the failure must not vanish.
+		// stderr, not the structured logger — the earliest failures precede it.
+		fmt.Fprintln(os.Stderr, "shutdown requested while startup was failing:", err)
+	}
+	return nil
+}
+
+// daemonOptions carries the daemon's injectable seams; production leaves every field zero.
+type daemonOptions struct {
+	// Backend is the bulk ledger source backfill freezes from and samples the tip from.
+	// nil ⇒ runDaemonWith builds it: the bulk lake from [backfill.datastore], else —
+	// with history archives configured — captive core replaying from the archives
+	// (#833). Tests inject a fakeBackend.
+	Backend backfill.Backend
+
+	// Core starts captive core at the resume ledger and yields the live getter the
+	// ingestion loop polls. nil ⇒ runDaemonWith builds a captiveCoreOpener from
+	// [ingestion] (a complete production opener). Tests inject a fake getter.
+	Core CoreOpener
+
+	// ServeReads overrides the read server (contract on StartConfig.ServeReads).
+	// nil ⇒ the production server (newServeReads): the shared method table over
+	// the router-backed adapters, served on run()'s bound listener. Tests
+	// inject recorders.
+	ServeReads func(ctx context.Context, reg *query.Registry, l net.Listener) error
+
+	// Logger overrides the daemon logger; nil ⇒ built from [logging].level/.format.
+	Logger *supportlog.Entry
+
+	// Metrics is the control-plane sink; nil ⇒ a *PrometheusMetrics on the daemon's registry.
+	Metrics observability.Metrics
+
+	// IngestSink is the per-type cold-path ingest sink; nil ⇒ a *ingest.PrometheusSink.
+	IngestSink ingest.MetricSink
+
+	// Flags carries the CLI overrides registered by config.BindFlags; nil = none.
+	Flags config.FlagOverrides
+
+	// chunksPerTxhashIndex overrides the tx-hash index width (test-only). 0 ⇒ the
+	// fixed geometry.ChunksPerTxhashIndex. Tests set it to 1 so a single chunk's
+	// freeze is a terminal index (exercising the index rebuild + prune path cheaply).
+	chunksPerTxhashIndex uint32
+
+	// lifecycleGrace overrides the deferred-deletion wait (test-only). 0 ⇒
+	// derived from the serving timeouts (deriveLifecycleGrace). Tests that drive
+	// discard/prune set it small so the end-of-run destroy does not park.
+	lifecycleGrace time.Duration
+}
+
+// runDaemonWith is RunDaemon with explicit options — the seam tests drive.
+//
+//nolint:cyclop,funlen // linear startup sequence; each branch is one wiring step
+func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) error {
+	// --- Load + form-validate the config. ---
+	cfg, err := config.LoadConfigWithFlags(configPath, opts.Flags)
+	if err != nil {
+		return err
+	}
+	if cfg.Storage.DefaultDataDir == "" {
+		return errors.New("[storage].default_data_dir is required")
+	}
+	// Reject a malformed config before anything is opened (catalog, core,
+	// datastore). validateConfig re-runs these pure checks as part of its gate.
+	if err := validateForm(cfg); err != nil {
+		return err
+	}
+
+	logger := opts.Logger
+	if logger == nil {
+		logger, err = newLogger(cfg.Logging)
+		if err != nil {
+			return err
+		}
+	}
+
+	paths := cfg.ResolvePaths()
+
+	// --- Reject shared roots, then create + fsync any missing ones. Single-
+	// process enforcement is the catalog's own RocksDB LOCK, taken next. ---
+	if err := paths.ValidateRoots(); err != nil {
+		return err
+	}
+	if err := config.PrepareRoots(paths.Roots()...); err != nil {
+		return err
+	}
+
+	// --- Open the catalog (it owns its backing KV store; Close releases it). ---
+	cat, err := openCatalog(paths, opts, logger)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = cat.Close() }()
+
+	// --- Resolve the captive-core opener up front: every daemon runs the live
+	// ingestion loop, and the no-lake backfill source is built from its stream. A
+	// bad [ingestion] config therefore surfaces before validateConfig's errors —
+	// cosmetic, both are fatal startup errors. ---
+	core, err := resolveCore(opts, cfg, logger)
+	if err != nil {
+		return err
+	}
+
+	// --- The history-archive pool: the no-lake backfill source's frontier. nil
+	// when a bulk lake is configured (unused there) or no URLs are set. ---
+	var pool rootHASGetter
+	if cfg.Backfill.DataStore.Type == "" && len(cfg.Ingestion.HistoryArchiveURLs) > 0 {
+		pool, err = newArchivePool(ctx, cfg.Ingestion.HistoryArchiveURLs, logger)
+		if err != nil {
+			return err
+		}
+	}
+
+	// --- Resolve the backfill backend: injected (tests), the bulk lake
+	// ([backfill.datastore]), or captive core replaying from the archives when no
+	// lake is configured (#833). Its Tip is THE network frontier — every backfill
+	// pass samples it and the freeze's coverage wait polls it — so validateConfig
+	// (which needs the tip) runs after this. ---
+	backend := opts.Backend
+	if backend == nil {
+		built, cleanup, berr := buildBackfillBackend(
+			ctx, cfg, core.backfill, pool, core.networkPassphrase, logger)
+		if berr != nil {
+			return fmt.Errorf("build backfill backend: %w", berr)
+		}
+		if cleanup != nil {
+			defer cleanup()
+		}
+		backend = built
+	}
+	if backend == nil {
+		// In production newCaptiveCoreOpeners already rejects missing archive URLs;
+		// this config-shaped message covers an injected Core bypassing that gate.
+		return errors.New("no bulk ledger source configured: set [backfill.datastore] " +
+			"or [ingestion].history_archive_urls")
+	}
+
+	// --- validateConfig: pin/confirm the layout, resolve the earliest floor. ---
+	earliest, err := validateConfig(ctx, cfg, cat, backend.Tip)
+	if err != nil {
+		return err
+	}
+
+	// Bind the retention policy once, on the far side of validation: earliest is
+	// validateConfig's return — pinned and chunk-aligned.
+	retention := geometry.NewRetention(deref(cfg.Retention.RetentionChunks), chunk.IDFromLedger(earliest))
+
+	// The getFeeStats windows, sized by [service.fee_stats] (validated 1..1000
+	// by validateConfig just above). Owned here at daemon level: live ingestion
+	// feeds them per committed ledger, the startup replay (#888) refills them
+	// from committed history, and the hot loop's per-boundary HotService
+	// rebuilds only borrow them. Owned here because one instance is wired into
+	// both the serve deps and the ingestion loop below.
+	// The method table serves them as the store.FeeStats behind getFeeStats.
+	feeWindows := feewindow.NewFeeWindows(
+		deref(cfg.Service.FeeStats.ClassicFeeWindowLedgers),
+		deref(cfg.Service.FeeStats.SorobanInclusionFeeWindowLedgers),
+	)
+
+	// Control-plane Metrics, the ingest sink, and the serving collectors share
+	// ONE registry, built after the validateConfig gate (it registers Prometheus
+	// collectors). The admin server's /metrics serves it.
+	registry := prometheus.NewRegistry()
+	metrics, sink := buildSinks(opts, registry)
+
+	// --- Captive-core state access for the three endpoints that need it, plus
+	// simulateTransaction's preflight pool. Built once, before the daemon body:
+	// the pool registers collectors on the registry above, and registering
+	// the same collector twice panics. The method table consumes both. ---
+	coreDaemon, err := corestate.New(ctx, corestate.Config{
+		CoreURL:               cfg.Ingestion.CoreURL,
+		QueryPort:             deref(cfg.Ingestion.CoreHTTPQueryPort),
+		RequestTimeout:        deref(cfg.Ingestion.CoreRequestTimeout),
+		StellarCoreBinaryPath: core.binaryPath,
+		Registry:              registry,
+		Namespace:             host.PrometheusNamespace,
+		Logger:                logger,
+	})
+	if err != nil {
+		return err
+	}
+	preflightPool := newPreflightPool(cfg, coreDaemon, core.networkPassphrase, logger)
+	defer preflightPool.Close()
+	logger.WithFields(supportlog.F{
+		"core_url":             cfg.Ingestion.CoreURL,
+		keyCoreHTTPQueryPort:   deref(cfg.Ingestion.CoreHTTPQueryPort),
+		"preflight_workers":    deref(cfg.Service.Preflight.WorkerCount),
+		"stellar_core_version": coreDaemon.CoreVersion(),
+	}).Info("wired the captive-core-backed endpoints")
+
+	// --- The two HTTP servers. The admin server (pprof, /metrics) is
+	// process-wide; the JSON-RPC server is per run(): its handlers hold run()'s
+	// query registry, so ServeReads builds it there. ---
+	if cfg.Service.AdminEndpoint != "" {
+		stopAdmin, aerr := startAdminServer(ctx, cfg.Service.AdminEndpoint, logger, registry)
+		if aerr != nil {
+			return aerr
+		}
+		defer stopAdmin()
+	}
+	serveReads := opts.ServeReads
+	if serveReads == nil {
+		serveReads = newServeReads(cfg, handlerParams{
+			daemon:            coreDaemon,
+			logger:            logger,
+			metrics:           metrics,
+			preflightGetter:   preflightPool,
+			feeWindows:        feeWindows,
+			networkPassphrase: core.networkPassphrase,
+			retentionWindow:   retention.RetentionWindow(),
+		})
+	}
+
+	// --- Assemble the StartConfig and run the daemon body once. ---
+	start := startConfig(
+		cfg, cat, logger, backend, core.live, serveReads, metrics, sink, retention)
+	start.lifecycleGrace = opts.lifecycleGrace
+	if start.lifecycleGrace <= 0 {
+		start.lifecycleGrace = deriveLifecycleGrace(cfg.Service)
+	}
+	start.FeeWindows = feeWindows
+
+	return runBody(ctx, start, logger)
+}
+
+// runBody executes the daemon body once, mapping a canceled ctx to nil so
+// main exits 0 on SIGTERM; any other error surfaces and crashes the process
+// (the crash-only rationale lives on run). The exit path is the failure
+// contract now, so the crash reason is logged structurally here — stderr in
+// main is not a structured sink — and a real failure that raced a shutdown
+// request is logged too instead of being discarded by the clean-exit mapping.
+func runBody(ctx context.Context, start StartConfig, logger *supportlog.Entry) error {
+	err := run(ctx, start)
+	if ctx.Err() == nil {
+		if err != nil {
+			logger.WithError(err).Error("daemon run failed; exiting for the orchestrator to restart")
+		}
+		return err
+	}
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		logger.WithError(err).Warn("shutdown requested while a run failure was in flight")
+	}
+	return nil
+}
+
+// openCatalog resolves the tx-hash index width (test override, else the fixed
+// constant) and opens the catalog over it. The caller owns Close.
+func openCatalog(paths config.Paths, opts daemonOptions, logger *supportlog.Entry) (*catalog.Catalog, error) {
+	cpi := geometry.ChunksPerTxhashIndex
+	if opts.chunksPerTxhashIndex != 0 {
+		cpi = opts.chunksPerTxhashIndex
+	}
+	txLayout, err := geometry.NewTxHashIndexLayout(cpi)
+	if err != nil {
+		return nil, err
+	}
+	cat, err := catalog.Open(paths.Catalog, config.NewLayoutFromPaths(paths), txLayout, logger)
+	if err != nil {
+		return nil, fmt.Errorf("open catalog %q: %w", paths.Catalog, err)
+	}
+	return cat, nil
+}
+
+// resolvedCore is the result of resolving captive core: two openers, plus the
+// network and binary path read off the resolution.
+type resolvedCore struct {
+	// live opens the stream the ingestion loop follows. Its toml enables core's
+	// two HTTP servers, because the serving endpoints query them.
+	live CoreOpener
+
+	// backfill opens the bounded per-chunk replays of a no-lake deployment. Its
+	// toml has no ports: those replays run one core per chunk in parallel, so a
+	// fixed port would have them all fight over binding it. Nothing queries a
+	// backfill core.
+	backfill CoreOpener
+
+	// networkPassphrase comes from the captive-core file. Empty means unknown (an
+	// injected opener) and skips the datastore's wrong-network check.
+	networkPassphrase string
+
+	// binaryPath is the resolved stellar-core binary. Empty for an injected
+	// opener, which makes corestate report no core version.
+	binaryPath string
+}
+
+// resolveCore returns the injected opener (tests use it for both roles) or the
+// production pair built from [ingestion].
+func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry) (resolvedCore, error) {
+	if opts.Core != nil {
+		return resolvedCore{live: opts.Core, backfill: opts.Core}, nil
+	}
+	return newCaptiveCoreOpeners(cfg.Ingestion, cfg.Storage.DefaultDataDir, logger)
+}
+
+// startConfig assembles the StartConfig run consumes. run() builds the
+// lifecycle.Config from Exec + Retention, so backfill and the lifecycle
+// goroutine share ONE catalog, worker pool, and retention floor by construction.
+func startConfig(
+	cfg config.Config, cat *catalog.Catalog, logger *supportlog.Entry,
+	backend backfill.Backend, core CoreOpener,
+	serveReads func(context.Context, *query.Registry, net.Listener) error,
+	metrics observability.Metrics, sink ingest.MetricSink, retention geometry.Retention,
+) StartConfig {
+	exec := backfill.ExecConfig{
+		Catalog:    cat,
+		Logger:     logger,
+		Metrics:    observability.MetricsOrNop(metrics),
+		Workers:    deref(cfg.Backfill.Workers),
+		MaxRetries: deref(cfg.Backfill.MaxRetries),
+		Process: backfill.ProcessConfig{
+			Backend: backend,
+			Sink:    sink,
+		},
+	}
+	return StartConfig{
+		Exec:       exec,
+		Retention:  retention,
+		Core:       core,
+		ServeReads: serveReads,
+		Endpoint:   cfg.Service.Endpoint,
+	}
+}
+
+// newPreflightPool starts simulateTransaction's worker pool, sized by
+// [service.preflight]. The caller owns Close. networkPassphrase is empty only
+// for an injected (test) opener, where nothing reaches the pool anyway.
+func newPreflightPool(
+	cfg config.Config, coreDaemon *corestate.Daemon, networkPassphrase string, logger *supportlog.Entry,
+) *preflight.WorkerPool {
+	p := cfg.Service.Preflight
+	return preflight.NewPreflightWorkerPool(preflight.WorkerPoolConfig{
+		Daemon:            coreDaemon,
+		WorkerCount:       deref(p.WorkerCount),
+		JobQueueCapacity:  deref(p.WorkerQueueSize),
+		EnableDebug:       deref(p.EnableDebug),
+		NetworkPassphrase: networkPassphrase,
+		Logger:            logger,
+	})
+}
+
+// buildSinks resolves the control-plane Metrics + per-type ingest sink, defaulting
+// each to a Prometheus implementation on the shared registry when unset.
+func buildSinks(opts daemonOptions, registry *prometheus.Registry) (observability.Metrics, ingest.MetricSink) {
+	metrics := opts.Metrics
+	if metrics == nil {
+		metrics = observability.NewPrometheusMetrics(registry, host.PrometheusNamespace)
+	}
+	sink := opts.IngestSink
+	if sink == nil {
+		sink = ingest.NewPrometheusSink(registry, host.PrometheusNamespace)
+	}
+	return metrics, sink
+}
+
+// ---------------------------------------------------------------------------
+// Production backfill backend construction.
+// ---------------------------------------------------------------------------
+
+// buildBackfillBackend opens the bulk ledger source backfill freezes from. With a
+// [backfill.datastore] it is the SDK datastore (GCS/S3/Filesystem/...) wrapped as a
+// backfill.Backend, plus a cleanup that releases the datastore handle at shutdown.
+// With no datastore but history archives configured it is captive core instead
+// (captiveSource): core replays each chunk's bounded range and the archives' root
+// HAS is the frontier — so a below-now earliest_ledger floor is fillable, not just
+// pinnable (#833). With neither it returns (nil, nil, nil) and runDaemonWith fails
+// startup with the config-shaped message. core must be non-nil (runDaemonWith
+// resolves the opener first).
+//
+// networkPassphrase is the one read back from the captive-core file; it is
+// copied into the SDK datastore config so a lake whose manifest names a
+// DIFFERENT network is rejected at startup (NewBSBBackendFromConfig's manifest
+// check). Empty means unknown and skips the check.
+func buildBackfillBackend(
+	ctx context.Context, cfg config.Config, core CoreOpener, pool rootHASGetter,
+	networkPassphrase string, logger *supportlog.Entry,
+) (backfill.Backend, func(), error) {
+	if cfg.Backfill.DataStore.Type != "" {
+		dsCfg := cfg.Backfill.DataStore.SDKConfig(networkPassphrase)
+		backend, cleanup, err := backfill.NewBSBBackendFromConfig(ctx, dsCfg, cfg.Backfill.BSB.SDKConfig())
+		if err != nil {
+			return nil, nil, err
+		}
+		logger.WithField("datastore_type", cfg.Backfill.DataStore.Type).Info("wired BSB backfill backend")
+		return backend, cleanup, nil
+	}
+	if pool == nil {
+		return nil, nil, nil // no bulk source at all; runDaemonWith fails fast on this
+	}
+	stream, err := core.OpenCore(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open captive-core backfill stream: %w", err)
+	}
+	logger.Info("wired captive-core backfill backend (no bulk lake configured)")
+	return &captiveSource{LedgerStream: stream, archives: pool}, nil, nil
+}
+
+// captiveSource is the backfill.Backend for a no-lake deployment: captive core
+// replays each chunk's bounded range, and the history archives' root HAS — the
+// same archives core itself reads — is the frontier Tip. The SDK's captive stream
+// builds a FRESH core per RawLedgers call (each in its own ephemeral working
+// dir), so executePlan's parallel per-chunk pulls run independent cores rather
+// than contending on one cursor.
+//
+// Each bounded replay catches its core up to the range start, so the cost is one
+// catch-up per chunk: fine for a small retention window, infeasible for deep
+// history — a deep-history deployment configures the bulk lake instead.
+type captiveSource struct {
+	ledgerbackend.LedgerStream // the captive-core stream (CoreOpener.OpenCore)
+
+	archives rootHASGetter
+}
+
+var _ backfill.Backend = (*captiveSource)(nil)
+
+// rootHASGetter is the slice of historyarchive.ArchiveInterface Tip needs: the
+// network frontier is the CurrentLedger the root HAS publishes.
+type rootHASGetter interface {
+	GetRootHAS() (historyarchive.HistoryArchiveState, error)
+}
+
+// Tip reports the archives' current frontier — the root HAS CurrentLedger. The
+// archives lag the network by up to one checkpoint (64 ledgers); backfill's
+// max(tip, lastCommitted) target and the signed withinOneChunkOfTip already
+// absorb that, so no lag adjustment here.
+func (s *captiveSource) Tip(context.Context) (uint32, error) {
+	has, err := s.archives.GetRootHAS()
+	if err != nil {
+		return 0, fmt.Errorf("history archive root HAS: %w", err)
+	}
+	return has.CurrentLedger, nil
+}
+
+// ---------------------------------------------------------------------------
+// Production captive-core opener (the live ingestion source).
+// ---------------------------------------------------------------------------
+
+// captiveCoreOpener is the production CoreOpener. It holds a resolved
+// CaptiveCoreConfig and hands back a captive-core LedgerStream that builds a FRESH
+// core per run (each process restart reopens core anew) — the stream owns the
+// process lifecycle, so there is no eager prepare or explicit closer here.
+// Construction mirrors the RPC daemon's newCaptiveCore so the full-history daemon
+// runs captive core and the ledgerbackend the same way (#772 can unify them at
+// the cutover).
+type captiveCoreOpener struct {
+	config ledgerbackend.CaptiveCoreConfig
+}
+
+// newCaptiveCoreOpeners resolves the captive-core config. The
+// captive_core_config file is the source of truth for core-side settings:
+// NETWORK_PASSPHRASE is read back from it, and the binary defaults to the one on
+// PATH. Only the history-archive URLs come from [ingestion], since the file's
+// [HISTORY.*] entries are shell commands, not URLs. The toml params mirror the
+// v1 daemon (strict, unified events, soroban diagnostic/meta enforcement) so the
+// ingested meta suits the events + txhash stores. Core's four HTTP-server
+// settings are the exception: [ingestion] owns those, see applyHTTPServers.
+//
+// It returns two openers over one read of the file, differing only in whether
+// core's HTTP servers are enabled — see resolvedCore.
+func newCaptiveCoreOpeners(
+	ing config.IngestionConfig, dataDir string, logger *supportlog.Entry,
+) (resolvedCore, error) {
+	if ing.CaptiveCoreConfig == "" {
+		return resolvedCore{}, errors.New("[ingestion].captive_core_config is required for live ingestion")
+	}
+	if len(ing.HistoryArchiveURLs) == 0 {
+		return resolvedCore{}, errors.New("[ingestion].history_archive_urls is required for live ingestion")
+	}
+
+	// Read the file ONCE: both openers are built from these bytes, so they cannot
+	// describe two different networks if the file changes underneath us.
+	data, err := os.ReadFile(ing.CaptiveCoreConfig)
+	if err != nil {
+		return resolvedCore{}, fmt.Errorf("read captive_core_config %q: %w", ing.CaptiveCoreConfig, err)
+	}
+	var peek coreFilePeek
+	if perr := toml.Unmarshal(data, &peek); perr != nil {
+		return resolvedCore{}, fmt.Errorf("parse captive_core_config %q: %w", ing.CaptiveCoreConfig, perr)
+	}
+	if peek.NetworkPassphrase == "" {
+		return resolvedCore{}, fmt.Errorf("captive_core_config %q must define NETWORK_PASSPHRASE", ing.CaptiveCoreConfig)
+	}
+	peek.warnHTTPSettingsOverridden(ing, logger)
+
+	// stellar-core binary: explicit path, else the one on PATH (RPC daemon default).
+	binaryPath := ing.StellarCoreBinaryPath
+	if binaryPath == "" {
+		found, lerr := exec.LookPath("stellar-core")
+		if lerr != nil {
+			return resolvedCore{}, fmt.Errorf(
+				"[ingestion].stellar_core_binary_path unset and stellar-core not found on PATH: %w", lerr)
+		}
+		binaryPath = found
+	}
+
+	storagePath := ing.CaptiveCoreStoragePath
+	if storagePath == "" {
+		storagePath = filepath.Join(dataDir, "captive-core")
+	}
+
+	// One set of params for both openers; the HTTP settings are applied per toml
+	// below, not passed here.
+	params := ledgerbackend.CaptiveCoreTomlParams{
+		HistoryArchiveURLs:                 ing.HistoryArchiveURLs,
+		NetworkPassphrase:                  peek.NetworkPassphrase,
+		Strict:                             true,
+		EnforceSorobanDiagnosticEvents:     true,
+		EnforceSorobanTransactionMetaExtV1: true,
+		EmitUnifiedEvents:                  true,
+		CoreBinaryPath:                     binaryPath,
+	}
+
+	backfillOpener, err := newCaptiveCoreOpener(
+		ing, data, params, binaryPath, storagePath, peek.NetworkPassphrase, logger)
+	if err != nil {
+		return resolvedCore{}, err
+	}
+	disableHTTPServers(backfillOpener.config.Toml)
+
+	liveOpener, err := newCaptiveCoreOpener(
+		ing, data, params, binaryPath, storagePath, peek.NetworkPassphrase, logger)
+	if err != nil {
+		return resolvedCore{}, err
+	}
+	applyHTTPServers(liveOpener.config.Toml, ing)
+
+	return resolvedCore{
+		live:              liveOpener,
+		backfill:          backfillOpener,
+		networkPassphrase: peek.NetworkPassphrase,
+		binaryPath:        binaryPath,
+	}, nil
+}
+
+// disableHTTPServers strips core's two HTTP servers from a toml, so a core run
+// with it binds no ports — what makes parallel backfill replays safe.
+//
+// Not asking for the servers is not enough: when the operator's captive-core
+// file declares HTTP_QUERY_PORT itself, the SDK keeps that value (it overwrites
+// the query keys only when given query-server params), and the bounded-replay
+// config it generates clears HTTP_PORT but never the query port. Clearing the
+// fields is how the SDK disables ports itself (CaptiveCoreToml.CatchupToml).
+func disableHTTPServers(coreToml *ledgerbackend.CaptiveCoreToml) {
+	coreToml.HTTPPort = 0 // no admin server, the value CatchupToml writes
+	coreToml.HTTPQueryPort = nil
+	coreToml.QueryThreadPoolSize = nil
+	coreToml.QuerySnapshotLedgers = nil
+}
+
+// coreFilePeek is the captive-core file keys the daemon reads itself before
+// handing the file to the SDK: the network, and the four HTTP-server settings
+// [ingestion] overrides. go-toml ignores every other key.
+type coreFilePeek struct {
+	NetworkPassphrase    string `toml:"NETWORK_PASSPHRASE"`
+	HTTPPort             *uint  `toml:"HTTP_PORT"`
+	HTTPQueryPort        *uint  `toml:"HTTP_QUERY_PORT"`
+	QueryThreadPoolSize  *uint  `toml:"QUERY_THREAD_POOL_SIZE"`
+	QuerySnapshotLedgers *uint  `toml:"QUERY_SNAPSHOT_LEDGERS"`
+}
+
+// warnHTTPSettingsOverridden logs each of core's four HTTP keys the captive-core
+// file sets to something other than what core will run with. Overriding silently
+// would be the trap: an operator carrying a v1 file with HTTP_PORT = 11625 may
+// have firewall rules or a monitoring scrape pointed at 11625.
+func (p coreFilePeek) warnHTTPSettingsOverridden(ing config.IngestionConfig, logger *supportlog.Entry) {
+	settings := []struct {
+		fileKey   string
+		configKey string
+		inFile    *uint
+		used      uint
+	}{
+		{"HTTP_PORT", keyCoreHTTPPort, p.HTTPPort, *ing.CoreHTTPPort},
+		{"HTTP_QUERY_PORT", keyCoreHTTPQueryPort, p.HTTPQueryPort, *ing.CoreHTTPQueryPort},
+		{
+			"QUERY_THREAD_POOL_SIZE", keyCoreQueryThreadPoolSize,
+			p.QueryThreadPoolSize, *ing.CoreHTTPQueryThreadPoolSize,
+		},
+		{
+			"QUERY_SNAPSHOT_LEDGERS", keyCoreQuerySnapshotLedgers,
+			p.QuerySnapshotLedgers, *ing.CoreHTTPQuerySnapshotLedgers,
+		},
+	}
+	for _, s := range settings {
+		if s.inFile == nil || *s.inFile == s.used {
+			continue
+		}
+		logger.Warnf("captive_core_config sets %s = %d, but [ingestion].%s owns core's HTTP "+
+			"settings — running core with %d. Remove %s from the captive-core file to silence this.",
+			s.fileKey, *s.inFile, s.configKey, s.used, s.fileKey)
+	}
+}
+
+// applyHTTPServers points the live core's two HTTP servers at the [ingestion]
+// settings, overriding whatever the captive-core file said.
+//
+// The values are written onto the generated toml instead of passed in
+// CaptiveCoreTomlParams because the SDK treats params as a cross-check, not an
+// override: it rejects a file that disagrees rather than preferring the params,
+// and its three query-server mismatch branches format that error with
+// params.PeerPort, which this daemon never sets, so they panic on a nil pointer.
+// Passing no HTTP params leaves those branches unreachable.
+func applyHTTPServers(coreToml *ledgerbackend.CaptiveCoreToml, ing config.IngestionConfig) {
+	queryPort := *ing.CoreHTTPQueryPort
+	threadPoolSize := *ing.CoreHTTPQueryThreadPoolSize
+	snapshotLedgers := *ing.CoreHTTPQuerySnapshotLedgers
+
+	coreToml.HTTPPort = *ing.CoreHTTPPort
+	coreToml.HTTPQueryPort = &queryPort
+	coreToml.QueryThreadPoolSize = &threadPoolSize
+	coreToml.QuerySnapshotLedgers = &snapshotLedgers
+}
+
+// newCaptiveCoreOpener builds one opener from the captive-core file's bytes.
+// params decides whether core's HTTP servers are enabled.
+//
+// It builds from the bytes, not the path: NewCaptiveCoreTomlFromFile would read
+// the file again and could see a different NETWORK_PASSPHRASE than the caller
+// peeked, surfacing as the SDK's confusing mismatch error.
+func newCaptiveCoreOpener(
+	ing config.IngestionConfig, data []byte, params ledgerbackend.CaptiveCoreTomlParams,
+	binaryPath, storagePath, networkPassphrase string, logger *supportlog.Entry,
+) (*captiveCoreOpener, error) {
+	coreToml, err := ledgerbackend.NewCaptiveCoreTomlFromData(data, params)
+	if err != nil {
+		return nil, fmt.Errorf("invalid captive-core toml %q: %w", ing.CaptiveCoreConfig, err)
+	}
+	return &captiveCoreOpener{
+		config: ledgerbackend.CaptiveCoreConfig{
+			BinaryPath:         binaryPath,
+			StoragePath:        storagePath,
+			NetworkPassphrase:  networkPassphrase,
+			HistoryArchiveURLs: ing.HistoryArchiveURLs,
+			Log:                logger.WithField("subservice", "stellar-core"),
+			Toml:               coreToml,
+			UserAgent:          "stellar-rpc-fullhistory",
+		},
+	}, nil
+}
+
+// OpenCore returns the live ingestion stream backed by captive stellar-core. A
+// fresh core per run keeps process restarts clean.
+func (c *captiveCoreOpener) OpenCore(ctx context.Context) (ledgerbackend.LedgerStream, error) {
+	cfg := c.config
+	cfg.Context = ctx
+	return ledgerbackend.NewCaptiveCoreStream(cfg, c.config.Log), nil
+}
+
+// newArchivePool connects [ingestion].history_archive_urls — the same archives
+// captive core reads; no new config. urls must be non-empty (the caller skips the
+// pool entirely when none are configured).
+func newArchivePool(ctx context.Context, urls []string, logger *supportlog.Entry) (rootHASGetter, error) {
+	pool, err := historyarchive.NewArchivePool(urls, historyarchive.ArchiveOptions{
+		ConnectOptions: storage.ConnectOptions{Context: ctx},
+		Logger:         logger.WithField("subservice", "history-archive"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("connect history archives: %w", err)
+	}
+	return pool, nil
+}
+
+// newLogger builds a daemon logger from the [logging] config.
+func newLogger(cfg config.LoggingConfig) (*supportlog.Entry, error) {
+	level, err := logrus.ParseLevel(cfg.Level)
+	if err != nil {
+		return nil, fmt.Errorf("invalid logging.level %q: %w", cfg.Level, err)
+	}
+	logger := supportlog.New()
+	logger.SetLevel(level)
+	if cfg.Format == config.LogFormatJSON {
+		logger.UseJSONFormatter()
+	}
+	return logger, nil
+}
+
+// compile-time interface checks.
+var _ CoreOpener = (*captiveCoreOpener)(nil)

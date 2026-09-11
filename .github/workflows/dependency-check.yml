@@ -15,7 +15,8 @@ defaults:
 
 jobs:
   dependency-sanity-checker:
-    runs-on: ubuntu-latest
+    # Pinned to the Build matrix image so the cgo libs build the same and share its cache.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - run: rustup update
