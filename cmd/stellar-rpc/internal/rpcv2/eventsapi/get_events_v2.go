@@ -22,10 +22,10 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 )
 
 // Limits are the page caps an operator configures, which both events
@@ -453,77 +453,23 @@ func responseScanStatus(s query.ScanStatus) string {
 	}
 }
 
-// eventInfoV2 builds one response event from a stored payload. The ID is
-// the same TOID-and-index form v1 mints, and topics and value follow the
-// request's xdrFormat.
+// eventInfoV2 builds one response event from a stored event payload.
 func eventInfoV2(p *event.Payload, format string) (protocol.EventInfoV2, error) {
-	var ev xdr.ContractEvent
-	if err := ev.UnmarshalBinary(p.ContractEventBytes); err != nil {
+	ev := xdr.ContractEventView(p.ContractEventBytes)
+	xdrType, err := xdr.Try(func() xdr.ContractEventType { return ev.MustType().MustValue() })
+	if err != nil {
 		return protocol.EventInfoV2{}, fmt.Errorf("rpcv2: stored event bytes: %w", err)
 	}
-	if ev.Body.V != 0 || ev.Body.V0 == nil {
-		// Unreachable: UnmarshalBinary above rejects any other discriminant.
-		// Kept as a guard on the V0 dereferences that follow.
-		return protocol.EventInfoV2{}, fmt.Errorf("rpcv2: stored event has body version %d", ev.Body.V)
-	}
-
-	eventType, err := responseEventType(ev.Type)
-	if err != nil {
+	if _, err := responseEventType(xdrType); err != nil { // stricter than v1, which also renders diagnostic events
 		return protocol.EventInfoV2{}, err
 	}
-	// The response field is int32, so a sequence past its range would go
-	// out negative. v1 rejects the same shape.
-	if p.LedgerSequence > math.MaxInt32 {
-		return protocol.EventInfoV2{}, fmt.Errorf(
-			"rpcv2: ledger sequence %d exceeds supported range", p.LedgerSequence)
-	}
-
-	info := protocol.EventInfoV2{
-		EventType:      eventType,
-		Ledger:         int32(p.LedgerSequence),
-		LedgerClosedAt: time.Unix(p.LedgerClosedAt, 0).UTC().Format(time.RFC3339),
-		ID: protocol.Cursor{
-			Ledger: p.LedgerSequence, Tx: p.TxIdx, Op: p.OpIdx, Event: p.EventIdx,
-		}.String(),
-		OpIndex:         p.OpIdx,
-		TxIndex:         p.TxIdx,
-		TransactionHash: p.TxHash.HexString(),
-	}
-	if ev.ContractId != nil {
-		info.ContractID = strkey.MustEncode(strkey.VersionByteContract, ev.ContractId[:])
-	}
-
-	if format == protocol.FormatJSON {
-		info.TopicJSON = make([]json.RawMessage, 0, len(ev.Body.V0.Topics))
-		for i := range ev.Body.V0.Topics {
-			converted, err := xdr2json.ConvertInterface(ev.Body.V0.Topics[i])
-			if err != nil {
-				return protocol.EventInfoV2{}, fmt.Errorf("rpcv2: topic %d to json: %w", i, err)
-			}
-			info.TopicJSON = append(info.TopicJSON, converted)
-		}
-		valueJSON, err := xdr2json.ConvertInterface(ev.Body.V0.Data)
-		if err != nil {
-			return protocol.EventInfoV2{}, fmt.Errorf("rpcv2: value to json: %w", err)
-		}
-		info.ValueJSON = valueJSON
-		return info, nil
-	}
-
-	info.TopicXDR = make([]string, 0, len(ev.Body.V0.Topics))
-	for i := range ev.Body.V0.Topics {
-		encoded, err := xdr.MarshalBase64(ev.Body.V0.Topics[i])
-		if err != nil {
-			return protocol.EventInfoV2{}, fmt.Errorf("rpcv2: topic %d to xdr: %w", i, err)
-		}
-		info.TopicXDR = append(info.TopicXDR, encoded)
-	}
-	valueXDR, err := xdr.MarshalBase64(ev.Body.V0.Data)
+	cursor := protocol.Cursor{Ledger: p.LedgerSequence, Tx: p.TxIdx, Op: p.OpIdx, Event: p.EventIdx}
+	info, err := methods.EventInfoFromView(ev, cursor,
+		time.Unix(p.LedgerClosedAt, 0).UTC().Format(time.RFC3339), p.TxHash.HexString(), format)
 	if err != nil {
-		return protocol.EventInfoV2{}, fmt.Errorf("rpcv2: value to xdr: %w", err)
+		return protocol.EventInfoV2{}, fmt.Errorf("rpcv2: %w", err)
 	}
-	info.ValueXDR = valueXDR
-	return info, nil
+	return protocol.EventInfoV2(info), nil
 }
 
 // responseEventType: ingest stores contract and system events only.
