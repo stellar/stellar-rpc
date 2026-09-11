@@ -208,7 +208,9 @@ func (txn *transactionHandler) getTransactionByHash(ctx context.Context, hash xd
 			txIndex, ledgerSeq, hex.EncodeToString(hash[:]), err)
 	}
 	if len(txnViewRange) == 0 {
-		return store.Transaction{}, store.ErrNoTransaction
+		return store.Transaction{}, fmt.Errorf(
+			"application_order %d does not resolve to a transaction in ledger %d (txhash=%s): index/meta mismatch",
+			txIndex, ledgerSeq, hex.EncodeToString(hash[:]))
 	}
 	txView := txnViewRange[0]
 	return store.ParseTransactionView(txView), nil
