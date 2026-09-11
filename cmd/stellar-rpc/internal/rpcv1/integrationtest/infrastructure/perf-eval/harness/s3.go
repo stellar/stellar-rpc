@@ -18,11 +18,11 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// Result is the run outcome published as one atomic S3 object.
-// A pending marker reserves the key while the producer runs.
+// Result is the run outcome the box publishes to S3 as one atomic object.
+// The pollers read either a complete object or a 404.
 type Result struct {
 	SchemaVersion int             `json:"schemaVersion"`
-	Verdict       string          `json:"verdict"` // "ok", "fail" or "pending"
+	Verdict       string          `json:"verdict"` // "ok" or "fail"
 	Markdown      string          `json:"markdown"`
 	Bench         json.RawMessage `json:"bench,omitempty"`
 	RunID         string          `json:"runId"`
@@ -38,20 +38,17 @@ func (r Result) Validate() error {
 		return errors.New("runId is required")
 	}
 	switch r.Verdict {
-	case VerdictOK, VerdictFail, VerdictPending:
+	case VerdictOK, VerdictFail:
 		return nil
 	default:
 		return fmt.Errorf("unknown verdict %q", r.Verdict)
 	}
 }
 
-// VerdictOK is a successful final result. VerdictPending is the workflow's
-// initial marker, which the producer overwrites with an ok or fail result.
-// VerdictFail is a failed final result.
+// VerdictOK and VerdictFail are the two outcomes a box can publish.
 const (
-	VerdictOK      = "ok"
-	VerdictPending = "pending"
-	VerdictFail    = "fail"
+	VerdictOK   = "ok"
+	VerdictFail = "fail"
 )
 
 // PublishResult uploads the run result to s3://bucket/key as one atomic object
@@ -106,7 +103,7 @@ var ErrResultNotReady = errors.New("result not published yet")
 var ErrInvalidResult = errors.New("invalid result object")
 
 // FetchResult gets and decodes the result object, returning ErrResultNotReady
-// when it is absent.
+// when it is absent. S3 reports a missing key as 404 (absent) rather than 403 (a permissions fault).
 func FetchResult(ctx context.Context, client *s3.Client, bucket, key string) (*Result, error) {
 	out, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: &bucket, Key: &key})
 	if err != nil {

@@ -76,7 +76,7 @@ func reportGather(
 
 	headline := fmt.Sprintf("❌ Load test did not produce results within %.0fs.", resultsTimeout.Seconds())
 	if pollErr != nil {
-		headline = pollErr.Error()
+		headline = fmt.Sprintf("❌ Result polling failed: %v", pollErr)
 	}
 	if werr := writeNoVerdictComment(ctx, runner, instanceID, headline, debugLogLines); werr != nil {
 		return werr

@@ -22,7 +22,6 @@ func TestReportableLeg(t *testing.T) {
 		{"current result", "123-2", "abc", "ok", true},
 		{"earlier successful attempt", "123-1", "abc", "ok", true},
 		{"failure", "123-2", "abc", "fail", true},
-		{"pending", "123-2", "", "pending", false},
 		{"other run", "1234-1", "abc", "ok", false},
 		{"other target", "123-1", "def", "ok", false},
 	} {

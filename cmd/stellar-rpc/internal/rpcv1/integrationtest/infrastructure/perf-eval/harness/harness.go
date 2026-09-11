@@ -4,15 +4,20 @@
 //
 // This package owns the parts that are identical across legs:
 //
-//	Gather         GHA-side: polls S3 for the result object the box publishes
-//	               and relays the verdict + results as step outputs.
+//	Gather         GHA-side: waits for the result object within one job's
+//	               budget and relays found/passed as step outputs.
+//	Relay          GHA-side: waits for the result object within one polling
+//	               window of a longer campaign and relays ok/fail/running,
+//	               so successive jobs can wait for the same box.
+//	resultPoller   GHA-side: the polling loop, result validation, and
+//	               diagnostics shared by Gather and Relay.
 //	S3Fetcher      on-box: streams (and sha-verifies) corpus objects from S3.
-//	PublishResult  on-box: writes the ok/fail result object the gatherer reads.
+//	PublishResult  on-box: writes the ok/fail result object the pollers read.
 //	RunStreaming   on-box: runs a child, streaming output with a bounded tail.
 //
 // Leg-specific work (which corpus to fetch, which task to run) lives in each
-// leg's own on-box runner command; Gather is its own command (perf-eval/gather)
-// shared by all legs.
+// leg's own on-box runner command; Gather (perf-eval/gather) and Relay
+// (perf-eval/relay) are their own commands shared by all legs.
 package harness
 
 import (

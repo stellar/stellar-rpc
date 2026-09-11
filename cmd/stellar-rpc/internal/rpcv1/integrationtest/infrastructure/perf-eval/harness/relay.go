@@ -63,7 +63,7 @@ func (r *relay) poll(ctx context.Context) error {
 		return ctx.Err()
 	}
 	if err != nil {
-		return r.reportFault(ctx, err.Error())
+		return r.reportFault(ctx, fmt.Sprintf("❌ Result polling failed: %v", err))
 	}
 	if res != nil {
 		return r.reportVerdict(res)
@@ -83,7 +83,7 @@ func (r *relay) poll(ctx context.Context) error {
 	}
 	if lerr != nil {
 		return r.reportFault(ctx,
-			fmt.Sprintf("Campaign deadline passed; final result fetch failed: %v", lerr))
+			fmt.Sprintf("❌ Campaign deadline passed; final result fetch failed: %v", lerr))
 	}
 	if last != nil {
 		return r.reportVerdict(last)

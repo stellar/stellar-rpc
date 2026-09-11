@@ -98,7 +98,7 @@ func TestRelayWindowDeadline(t *testing.T) {
 				calls := 0
 				p := testPoller(func(*http.Request) (*http.Response, error) {
 					calls++
-					return resultResponse(200, resultJSON("1-2", "pending"))
+					return noSuchKey()
 				})
 				p.runner = testDebugRunner()
 				start := time.Now()
@@ -153,11 +153,10 @@ func TestRelayFinalFetch(t *testing.T) {
 				calls := 0
 				p := testPoller(func(*http.Request) (*http.Response, error) {
 					calls++
-					verdict := "pending"
-					if !time.Now().Before(deadline) {
-						verdict = "ok"
+					if time.Now().Before(deadline) {
+						return noSuchKey()
 					}
-					return resultResponse(200, resultJSON("1-2", verdict))
+					return resultResponse(200, resultJSON("1-2", "ok"))
 				})
 				cfg := &relayConfig{githubOutput: output, window: time.Hour, deadline: deadline}
 				r := &relay{cfg: cfg, poller: p}
@@ -210,7 +209,7 @@ func testDebugRunner() *ssmRunner {
 }
 
 func TestRelayNoVerdict(t *testing.T) {
-	for _, kind := range []string{"pending", "missing", "stale", "blocked final fetch"} {
+	for _, kind := range []string{"missing", "stale", "denied", "blocked final fetch"} {
 		t.Run(kind, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				dir := t.TempDir()
@@ -220,15 +219,15 @@ func TestRelayNoVerdict(t *testing.T) {
 				p := testPoller(func(r *http.Request) (*http.Response, error) {
 					calls++
 					switch kind {
-					case "missing":
-						return resultResponse(404, `<Error><Code>NoSuchKey</Code></Error>`)
 					case "stale":
 						return resultResponse(200, resultJSON("1-1", "ok"))
+					case "denied":
+						return accessDenied()
 					case "blocked final fetch":
 						<-r.Context().Done()
 						return nil, r.Context().Err()
 					default:
-						return resultResponse(200, resultJSON("1-2", "pending"))
+						return noSuchKey()
 					}
 				})
 				p.runner = testDebugRunner()
@@ -242,7 +241,7 @@ func TestRelayNoVerdict(t *testing.T) {
 				require.Equal(t, "state=fail\n", string(data))
 				data, err = os.ReadFile(filepath.Join(dir, "timeout-comment.md"))
 				require.NoError(t, err)
-				if kind == "pending" {
+				if kind == "missing" || kind == "stale" {
 					require.Contains(t, string(data), "budget deadline passed with no verdict")
 				} else {
 					require.Contains(t, string(data), "final result fetch failed")
