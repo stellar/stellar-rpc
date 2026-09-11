@@ -182,6 +182,21 @@ func diffClassicEnvelope(acctSeq uint32) xdr.TransactionEnvelope {
 	return env
 }
 
+// diffV0Envelope is a pre-protocol-13 TX_V0 envelope: an ed25519 source, no Ext.
+func diffV0Envelope(acctSeq uint32) xdr.TransactionEnvelope {
+	env, err := xdr.NewTransactionEnvelope(xdr.EnvelopeTypeEnvelopeTypeTxV0, xdr.TransactionV0Envelope{
+		Tx: xdr.TransactionV0{
+			SourceAccountEd25519: xdr.Uint256{1},
+			Fee:                  1,
+			SeqNum:               xdr.SequenceNumber(acctSeq),
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return env
+}
+
 // diffFeeBumpEnvelope wraps inner in a fee bump.
 func diffFeeBumpEnvelope(inner xdr.TransactionEnvelope) xdr.TransactionEnvelope {
 	return xdr.TransactionEnvelope{
@@ -199,8 +214,18 @@ func diffFeeBumpEnvelope(inner xdr.TransactionEnvelope) xdr.TransactionEnvelope 
 	}
 }
 
+// diffMetaV0 is the early-pubnet meta the legacy reader rejects and the view serves.
+func diffMetaV0() xdr.TransactionMeta {
+	return xdr.TransactionMeta{V: 0, Operations: &[]xdr.OperationMeta{}}
+}
+
 func diffMetaV1() xdr.TransactionMeta {
 	return xdr.TransactionMeta{V: 1, V1: &xdr.TransactionMetaV1{Operations: []xdr.OperationMeta{}}}
+}
+
+// diffMetaV2 is the protocol 13 to 19 meta: no events anywhere.
+func diffMetaV2() xdr.TransactionMeta {
+	return xdr.TransactionMeta{V: 2, V2: &xdr.TransactionMetaV2{Operations: []xdr.OperationMeta{}}}
 }
 
 // diffMetaV3NoSoroban is the straggler corner: a V3 meta with no SorobanMeta
@@ -274,52 +299,64 @@ func diffResultFor(t *testing.T, spec diffTxSpec) xdr.TransactionResultPair {
 	}
 }
 
-// diffLCM assembles a LedgerCloseMeta of the given wire version (1 or 2) at
-// sequence seq holding specs; no specs is an empty ledger. Both versions
-// matter: their TxProcessing arrays are different element types, which the
-// view dispatcher walks with different code.
+// diffLCM assembles a LedgerCloseMeta of wire version 0, 1 or 2 at sequence
+// seq holding specs in apply order; no specs is an empty ledger. Every version
+// matters: V0 carries a plain TransactionSet, and V1 and V2 differ in their
+// TxProcessing element type, so the view dispatcher walks each with different code.
 func diffLCM(t *testing.T, version int32, seq uint32, specs ...diffTxSpec) xdr.LedgerCloseMeta {
 	t.Helper()
-	envs := make([]xdr.TransactionEnvelope, 0, len(specs))
-	// TxSet is agreed-set order, which real ledgers do not keep in apply order,
-	// reverse order here so a positional/zip pairing regression fails corpus-wide.
-	for _, spec := range slices.Backward(specs) {
-		envs = append(envs, spec.envelope)
-	}
-	components := []xdr.TxSetComponent{{
-		Type:                  xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
-		TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{Txs: envs},
-	}}
+	envs := diffTxSetEnvelopes(specs)
 	header := xdr.LedgerHeaderHistoryEntry{Header: xdr.LedgerHeader{
 		ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(ledgerCloseTime(seq))},
 		LedgerSeq: xdr.Uint32(seq),
 	}}
 	txSet := xdr.GeneralizedTransactionSet{V: 1, V1TxSet: &xdr.TransactionSetV1{
 		PreviousLedgerHash: xdr.Hash{1},
-		Phases:             []xdr.TransactionPhase{{V: 0, V0Components: &components}},
+		Phases:             []xdr.TransactionPhase{diffClassicPhase(envs)},
 	}}
 
-	if version == 1 {
-		proc := make([]xdr.TransactionResultMeta, 0, len(specs))
+	if version == 2 {
+		proc := make([]xdr.TransactionResultMetaV1, 0, len(specs))
 		for _, spec := range specs {
-			proc = append(proc, xdr.TransactionResultMeta{
-				Result:            diffResultFor(t, spec),
-				TxApplyProcessing: spec.meta,
-			})
+			proc = append(proc, xdr.TransactionResultMetaV1{Result: diffResultFor(t, spec), TxApplyProcessing: spec.meta})
 		}
-		return xdr.LedgerCloseMeta{V: 1, V1: &xdr.LedgerCloseMetaV1{
+		return xdr.LedgerCloseMeta{V: 2, V2: &xdr.LedgerCloseMetaV2{
 			LedgerHeader: header, TxSet: txSet, TxProcessing: proc,
 		}}
 	}
-
-	proc := make([]xdr.TransactionResultMetaV1, 0, len(specs))
+	// V0 and V1 share the TxProcessing element type.
+	proc := make([]xdr.TransactionResultMeta, 0, len(specs))
 	for _, spec := range specs {
-		proc = append(proc, xdr.TransactionResultMetaV1{
-			Result:            diffResultFor(t, spec),
-			TxApplyProcessing: spec.meta,
-		})
+		proc = append(proc, xdr.TransactionResultMeta{Result: diffResultFor(t, spec), TxApplyProcessing: spec.meta})
 	}
-	return xdr.LedgerCloseMeta{V: 2, V2: &xdr.LedgerCloseMetaV2{
+	if version == 0 {
+		return xdr.LedgerCloseMeta{V: 0, V0: &xdr.LedgerCloseMetaV0{
+			LedgerHeader: header,
+			TxSet:        xdr.TransactionSet{PreviousLedgerHash: xdr.Hash{1}, Txs: envs},
+			TxProcessing: proc,
+		}}
+	}
+	return xdr.LedgerCloseMeta{V: 1, V1: &xdr.LedgerCloseMetaV1{
 		LedgerHeader: header, TxSet: txSet, TxProcessing: proc,
 	}}
+}
+
+// diffTxSetEnvelopes is specs' envelopes in TxSet order: reversed, since real
+// ledgers do not keep apply order there, so a positional/zip pairing
+// regression fails on every multi-transaction ledger.
+func diffTxSetEnvelopes(specs []diffTxSpec) []xdr.TransactionEnvelope {
+	envs := make([]xdr.TransactionEnvelope, 0, len(specs))
+	for _, spec := range slices.Backward(specs) {
+		envs = append(envs, spec.envelope)
+	}
+	return envs
+}
+
+// diffClassicPhase is a V0 phase of one fee group holding envs.
+func diffClassicPhase(envs []xdr.TransactionEnvelope) xdr.TransactionPhase {
+	components := []xdr.TxSetComponent{{
+		Type:                  xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
+		TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{Txs: envs},
+	}}
+	return xdr.TransactionPhase{V: 0, V0Components: &components}
 }
