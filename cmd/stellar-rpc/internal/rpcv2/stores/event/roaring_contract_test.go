@@ -2,10 +2,10 @@ package event
 
 // roaring_contract_test.go pins the roaring properties the event index rests
 // on. ConcurrentBitmaps.Get publishes one bitmap to every concurrent reader
-// and never mutates it, and the match path hands those bitmaps to AndAny,
+// and never mutates it, and the match path hands those bitmaps to FastAnd,
 // NextValue and PreviousValue from many goroutines at once. That is sound
-// only while AndAny writes nothing but its receiver and shares no storage
-// with its arguments, and while the searches are read-only, inclusive of the
+// only while FastAnd reads its arguments and returns containers that share
+// no storage with them, and the searches are read-only, inclusive of the
 // target, and return -1 for none. The tests are written against roaring
 // alone, so they are the first thing to run on a version bump.
 //
@@ -91,101 +91,131 @@ func requireUnchanged(t *testing.T, bms []*roaring.Bitmap, before [][]byte, op s
 	}
 }
 
-// freshRange is the receiver shape the match path hands to AndAny: a bitmap
-// this call allocated, holding one contiguous id range, shared with nobody.
+// freshRange is the slab window the match path hands to FastAnd: one
+// contiguous id range, in a bitmap the test may write.
 func freshRange(lo, hi uint64) *roaring.Bitmap {
-	acc := roaring.New()
-	acc.AddRange(lo, hi)
-	return acc
+	bm := roaring.New()
+	bm.AddRange(lo, hi)
+	return bm
 }
 
-// TestRoaringContract_AggregationDoesNotMutateInputs pins that AndAny, and
-// And, which AndAny delegates a single argument to, leave shared arguments
-// byte-identical.
+// scratchBitmap is a bitmap the test owns outright and may write: one array
+// container of scattered ids.
+func scratchBitmap() *roaring.Bitmap {
+	scratch := roaring.New()
+	for i := range uint32(3000) {
+		scratch.Add(i * 3)
+	}
+	return scratch
+}
+
+// windowRanges are slab windows that take different paths inside roaring: a
+// whole high key, a partial one, one across a key boundary, a span over
+// several keys, one the inputs do not reach, and the four-id span that is the
+// smallest range roaring keeps as a run.
+var windowRanges = []struct {
+	name   string
+	lo, hi uint64
+}{
+	{"whole key", 0, 1 << 16},
+	{"partial key", 1000, 40_000},
+	{"key boundary", 65_000, 66_000},
+	{"several keys", 0, 4 << 16},
+	{"disjoint key", 40 << 16, 41 << 16},
+	{"four ids", 8000, 8004},
+}
+
+// TestRoaringContract_AggregationDoesNotMutateInputs pins that FastAnd
+// leaves shared arguments byte-identical and equals the pairwise And chain,
+// for every non-empty subset of the shared bitmaps beside the window: each
+// container kind meets the window alone, in pairs and all together, which
+// is every kernel a plan of one to seven terms can reach.
 func TestRoaringContract_AggregationDoesNotMutateInputs(t *testing.T) {
 	t.Parallel()
 
-	// Ranges that take different paths inside roaring: a whole high key, a
-	// partial one, one the inputs do not reach, and a span across several.
-	ranges := []struct {
-		name   string
-		lo, hi uint64
-	}{
-		{"whole key", 0, 1 << 16},
-		{"partial key", 1000, 40_000},
-		{"key boundary", 65_000, 66_000},
-		{"several keys", 0, 4 << 16},
-		{"disjoint key", 40 << 16, 41 << 16},
-	}
-
-	for _, w := range ranges {
-		t.Run("AndAny/"+w.name, func(t *testing.T) {
+	for _, w := range windowRanges {
+		t.Run(w.name, func(t *testing.T) {
 			t.Parallel()
-			for n := 1; n <= 4; n++ {
-				shared := sharedBitmaps(t)[:n]
-				before := bitmapImages(t, shared)
-				acc := freshRange(w.lo, w.hi)
-				acc.AndAny(shared...)
-				requireUnchanged(t, shared, before, "AndAny")
+			shared := sharedBitmaps(t)
+			for pick := 1; pick < 1<<len(shared); pick++ {
+				ops := []*roaring.Bitmap{freshRange(w.lo, w.hi)}
+				for i, bm := range shared {
+					if pick&(1<<i) != 0 {
+						ops = append(ops, bm)
+					}
+				}
+				before := bitmapImages(t, ops)
+				res := roaring.FastAnd(ops...)
+				requireUnchanged(t, ops, before, "FastAnd")
 
-				// The accumulator must equal the definition AndAny documents,
-				// so a silently wrong answer cannot pass as an unmutated one.
-				// The leading empty bitmap keeps FastOr off its single-input
-				// Clone shortcut, whose result would share containers with a
-				// copy-on-write argument.
-				want := roaring.FastOr(append([]*roaring.Bitmap{roaring.New()}, shared...)...)
-				want.And(freshRange(w.lo, w.hi))
-				require.Equal(t, bitmapBytes(t, want), bitmapBytes(t, acc),
-					"AndAny must equal x.And(FastOr(args)) for %d args", n)
+				want := freshRange(w.lo, w.hi)
+				for _, s := range ops[1:] {
+					want.And(s)
+				}
+				require.Equal(t, bitmapBytes(t, want), bitmapBytes(t, res),
+					"FastAnd must equal the pairwise And chain for %d args", len(ops))
 			}
 		})
 	}
-
-	t.Run("And", func(t *testing.T) {
-		t.Parallel()
-		for _, shared := range sharedBitmaps(t) {
-			before := bitmapBytes(t, shared)
-			acc := freshRange(0, 1<<16)
-			acc.And(shared)
-			require.Equal(t, before, bitmapBytes(t, shared),
-				"Bitmap.And mutated its argument")
-		}
-	})
 }
 
-// TestRoaringContract_AndAnyDoesNotRetainArguments pins that AndAny copies
-// out of its arguments rather than aliasing their storage into the receiver:
-// the slab walk goes on to write the receiver, with further AndAny groups and
-// the in-place union across filters.
-func TestRoaringContract_AndAnyDoesNotRetainArguments(t *testing.T) {
+// TestRoaringContract_FastAndReturnsFreshContainers pins that a FastAnd
+// result shares no storage with its inputs, on the two-input path and the
+// wider one, over a whole key and a partial one: the slab walk unions
+// results in place across plans. The probes remove one id, a write every
+// container kind applies in place; the snapshot is copy-on-write, so only
+// the private inputs are written back.
+func TestRoaringContract_FastAndReturnsFreshContainers(t *testing.T) {
 	t.Parallel()
 
-	for _, shared := range sharedBitmaps(t) {
-		for _, nArgs := range []int{1, 2} {
-			scratch := roaring.New()
-			for i := range uint32(3000) {
-				scratch.Add(i * 3)
-			}
-			acc := freshRange(0, 1<<16)
-			if nArgs == 1 {
-				acc.AndAny(scratch)
-			} else {
-				acc.AndAny(shared, scratch)
-			}
-			answer := bitmapBytes(t, acc)
+	for _, w := range windowRanges[:2] {
+		shared := sharedBitmaps(t)
+		for i, one := range shared {
+			other := shared[(i+1)%len(shared)]
+			for _, tail := range [][]*roaring.Bitmap{{}, {scratchBitmap()}, {other}} {
+				window := freshRange(w.lo, w.hi)
+				ops := append([]*roaring.Bitmap{window, one}, tail...)
+				before := bitmapImages(t, ops)
+				res := roaring.FastAnd(ops...)
+				require.False(t, res.IsEmpty(),
+					"fixture: FastAnd over %d inputs selects nothing in %q", len(ops), w.name)
+				res.Remove(res.Minimum())
+				requireUnchanged(t, ops, before, "writing a FastAnd result")
 
-			scratch.Clear()
-			require.Equal(t, answer, bitmapBytes(t, acc),
-				"AndAny with %d args aliased an argument's storage into the receiver", nArgs)
+				res = roaring.FastAnd(ops...)
+				answer := bitmapBytes(t, res)
+				window.Remove(window.Minimum())
+				for _, bm := range tail {
+					if !bm.GetCopyOnWrite() {
+						bm.Remove(bm.Minimum())
+					}
+				}
+				require.Equal(t, answer, bitmapBytes(t, res),
+					"FastAnd over %d inputs aliased an input's storage into its result", len(ops))
+			}
 		}
+	}
+}
+
+// TestRoaringContract_RangeIsRunContainer pins that a slab window built with
+// AddRange is stored as run containers, the shape whose intersections a
+// count-first FastAnd sizes before allocating; the pinned FastAnd intersects
+// pairwise, so that allocation pin waits for the roaring bump.
+func TestRoaringContract_RangeIsRunContainer(t *testing.T) {
+	t.Parallel()
+
+	for _, w := range windowRanges {
+		st := freshRange(w.lo, w.hi).Stats()
+		require.Equal(t, st.Containers, st.RunContainers,
+			"range %q is not stored as run containers", w.name)
 	}
 }
 
 // TestRoaringContract_ConcurrentReaders is the race-detector gate: eight
-// goroutines run AndAny, NextValue and PreviousValue over the same shared
+// goroutines run FastAnd, NextValue and PreviousValue over the same shared
 // copy-on-write snapshots at once, as concurrent queries do. Under -race any
-// write to a shared bitmap fails the run; without it, the byte-identity check
-// and the agreement between goroutines still catch one.
+// write to a shared bitmap fails the run; without it, the byte-identity
+// check and the agreement between goroutines still catch one.
 func TestRoaringContract_ConcurrentReaders(t *testing.T) {
 	t.Parallel()
 
@@ -197,12 +227,11 @@ func TestRoaringContract_ConcurrentReaders(t *testing.T) {
 	before := bitmapImages(t, shared)
 
 	// The single-threaded answers every goroutine must reproduce.
-	seq := freshRange(0, 4<<16)
-	seq.AndAny(shared...)
-	wantAndAny := bitmapBytes(t, seq)
+	wantFastAnd := bitmapBytes(t,
+		roaring.FastAnd(append([]*roaring.Bitmap{freshRange(0, 4<<16)}, shared...)...))
 	wantSearch := valueSearches(shared, targets)
 
-	gotAndAny := make([][]byte, goroutines)
+	gotFastAnd := make([][]byte, goroutines)
 	gotSearch := make([][]int64, goroutines)
 	var wg sync.WaitGroup
 	start := make(chan struct{})
@@ -210,13 +239,12 @@ func TestRoaringContract_ConcurrentReaders(t *testing.T) {
 		wg.Go(func() {
 			<-start
 			for range rounds {
-				acc := freshRange(0, 4<<16)
-				acc.AndAny(shared...)
-				b, err := acc.ToBytes()
+				fb, err := roaring.FastAnd(
+					append([]*roaring.Bitmap{freshRange(0, 4<<16)}, shared...)...).ToBytes()
 				if err != nil {
 					panic(err)
 				}
-				gotAndAny[g] = b
+				gotFastAnd[g] = fb
 				gotSearch[g] = valueSearches(shared, targets)
 			}
 		})
@@ -226,7 +254,7 @@ func TestRoaringContract_ConcurrentReaders(t *testing.T) {
 
 	requireUnchanged(t, shared, before, "concurrent reads")
 	for g := range goroutines {
-		require.Equal(t, wantAndAny, gotAndAny[g], "goroutine %d disagreed on AndAny", g)
+		require.Equal(t, wantFastAnd, gotFastAnd[g], "goroutine %d disagreed on FastAnd", g)
 		require.Equal(t, wantSearch, gotSearch[g], "goroutine %d disagreed on the value searches", g)
 	}
 }

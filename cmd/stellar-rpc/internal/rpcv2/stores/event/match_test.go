@@ -1144,10 +1144,10 @@ func TestQuery_InvalidFilterRejected(t *testing.T) {
 //   - match-all desc + cap           → streamRange top-down, slices.Backward
 //   - single-filter (contractID)     → one LookupKeys term, then the
 //                                      ascending slab walk
-//   - multi-term filter (AND)        → AndAny per group over cold bitmaps
-//   - cross-filter (OR)              → the in-place Or across filters
-//   - ledger range + filter          → the window clipped into each slab's
-//                                      accumulator
+//   - multi-term filter (AND)        → one FastAnd per plan over cold bitmaps
+//   - cross-filter (OR)              → the in-place Or across plans
+//   - ledger range + filter          → the window clipped to each slab's
+//                                      id range
 //   - descending + range + cap       → the slab walk run high to low
 //
 // What we don't replay against cold:

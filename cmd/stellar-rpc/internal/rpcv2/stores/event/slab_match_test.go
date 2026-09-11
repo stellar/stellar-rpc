@@ -389,6 +389,7 @@ func (f *shapedFixture) namedShapes() []namedShape {
 		{"match all wildcard filter", []Filter{{}}},
 		{"match all beside constrained", []Filter{{EventType: &sysType}, {}}},
 		{"exact topic count", []Filter{{TopicCount: TopicCountFilter{Count: 2, Exact: true}}}},
+		{"term and count range", []Filter{{ContractID: f.vocab.contracts[0], TopicCount: TopicCountFilter{Count: 1}}}},
 	}
 }
 
@@ -692,38 +693,42 @@ func termBitmap(ids ...uint32) *roaring.Bitmap {
 	return bm
 }
 
-// What a group reports about itself: presence, and its summed weight.
-func TestResolveSlabTerms(t *testing.T) {
+// resolveSlabPlans keeps the plans whose every term is present, orders each
+// one's terms rarest first, and holds the lookup's bitmaps rather than
+// copying them.
+func TestResolveSlabPlans(t *testing.T) {
 	sources := []*roaring.Bitmap{
 		termBitmap(1, 2),
 		nil, // absent
 		termBitmap(2, 3, 4),
 		termBitmap(), // present, holding nothing
 	}
+	got := resolveSlabPlans([]termPlan{{0}, {2, 0}, {1, 2}, {3}, {1}}, sources)
+	require.Len(t, got, 3, "a plan naming an absent term matches nothing and is dropped")
+	require.Len(t, got[0], 1)
+	assert.Same(t, sources[0], got[0][0], "the lookup's bitmap is held, not copied")
+	require.Len(t, got[1], 2)
+	assert.Same(t, sources[0], got[1][0], "terms are ordered rarest first")
+	assert.Same(t, sources[2], got[1][1])
+	require.Len(t, got[2], 1)
+	assert.Same(t, sources[3], got[2][0], "a present but empty term keeps its plan")
+}
 
-	g, ok := resolveSlabTerms(sources, []int{0})
-	require.True(t, ok)
-	assert.Equal(t, uint64(2), g.est)
-	assert.Len(t, g.bitmaps, 1, "the group holds the term's bitmap itself")
-	assert.Same(t, sources[0], g.bitmaps[0], "the lookup's bitmap is held, not copied")
-
-	g, ok = resolveSlabTerms(sources, []int{0, 2})
-	require.True(t, ok)
-	assert.Equal(t, uint64(5), g.est, "a group's terms sum, overlaps double-counted")
-	assert.Len(t, g.bitmaps, 2)
-
-	g, ok = resolveSlabTerms(sources, []int{1, 2})
-	require.True(t, ok)
-	assert.Equal(t, uint64(3), g.est, "an absent term adds nothing")
-	assert.Len(t, g.bitmaps, 1, "an absent term is not held")
-
-	g, ok = resolveSlabTerms(sources, []int{3})
-	require.True(t, ok, "a present-but-empty term keeps its group alive")
-	assert.Equal(t, uint64(0), g.est)
-
-	g, ok = resolveSlabTerms(sources, []int{1})
-	assert.False(t, ok, "a group of absent terms drops its filter")
-	assert.Equal(t, uint64(0), g.est)
+// A topic-count range fans out to one plan per bucket, and a repeated filter
+// adds no plan.
+func TestPlanIndexTermsSplitsRanges(t *testing.T) {
+	cid := []byte{0xAB}
+	ranged := Filter{ContractID: cid, TopicCount: TopicCountFilter{Count: 2}}
+	plans, keys, matchAll := planIndexTerms([]Filter{ranged, ranged, {ContractID: cid}})
+	require.False(t, matchAll)
+	buckets := len(TopicCountTermKeysAtLeast(2))
+	require.Len(t, plans, buckets+1)
+	assert.Len(t, keys, buckets+1)
+	for _, p := range plans[:buckets] {
+		assert.Equal(t, 0, p[0], "the contract slot leads every plan of the range")
+		assert.Len(t, p, 2)
+	}
+	assert.Equal(t, termPlan{0}, plans[buckets])
 }
 
 // ───────────────────────── the skip ─────────────────────────
@@ -766,14 +771,14 @@ func TestSlabStepperSkipsCandidateFreeSlabs(t *testing.T) {
 	rareDesc := [][2]uint32{
 		{9 * slab, 9*slab + 2}, {3 * slab, 3*slab + 8}, {0, 6},
 	}
-	assert.Equal(t, rareAsc, walk([]termPlan{{{0}}}, false))
-	assert.Equal(t, rareDesc, walk([]termPlan{{{0}}}, true))
+	assert.Equal(t, rareAsc, walk([]termPlan{{0}}, false))
+	assert.Equal(t, rareDesc, walk([]termPlan{{0}}, true))
 
-	// ANDing it with a chunk-sized term changes nothing: the filter's bound is
-	// the strongest of its groups'.
-	assert.Equal(t, rareAsc, walk([]termPlan{{{0}, {2}}}, false),
-		"a chunk-sized group must not weaken the rare group's bound")
-	assert.Equal(t, rareDesc, walk([]termPlan{{{0}, {2}}}, true))
+	// ANDing it with a chunk-sized term changes nothing: the plan's bound is
+	// the strongest of its terms'.
+	assert.Equal(t, rareAsc, walk([]termPlan{{0, 2}}, false),
+		"a chunk-sized term must not weaken the rare term's bound")
+	assert.Equal(t, rareDesc, walk([]termPlan{{0, 2}}, true))
 
 	// The chunk-sized term alone opens every slab.
 	full := make([][2]uint32, 0, slabs)
@@ -781,21 +786,21 @@ func TestSlabStepperSkipsCandidateFreeSlabs(t *testing.T) {
 		full = append(full, [2]uint32{i * slab, (i + 1) * slab})
 	}
 	assert.Len(t, full, slabs)
-	assert.Equal(t, full, walk([]termPlan{{{2}}}, false),
+	assert.Equal(t, full, walk([]termPlan{{2}}, false),
 		"a term holding every id must not skip a slab")
 
-	// OR-ed filters open the union of their slabs: 0, 1, 3, 6, 9.
+	// OR-ed plans open the union of their slabs: 0, 1, 3, 6, 9.
 	assert.Equal(t, [][2]uint32{
 		{5, slab},
 		{slab + 1, 2 * slab},
 		{3*slab + 7, 4 * slab},
 		{6*slab + 3, 7 * slab},
 		{9*slab + 1, 10 * slab},
-	}, walk([]termPlan{{{0}}, {{1}}}, false))
+	}, walk([]termPlan{{0}, {1}}, false))
 
 	// A present but empty term ends the walk before the first slab.
-	assert.Empty(t, walk([]termPlan{{{3}}}, false))
-	assert.Empty(t, walk([]termPlan{{{3}}}, true))
+	assert.Empty(t, walk([]termPlan{{3}}, false))
+	assert.Empty(t, walk([]termPlan{{3}}, true))
 }
 
 // TestMatches_RareTermsSpanSlabs is the oracle gate on the skip: the shapes

@@ -97,8 +97,8 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 //
 // Safe: any non-mutating read (Contains, GetCardinality, Iterator,
 // NextValue, PreviousValue, ToArray, IsEmpty, Minimum, Maximum) and
-// passing it as an argument to AndAny or And; roaring_contract_test.go
-// pins these against the pinned roaring version.
+// passing it to FastAnd beside at least one other input;
+// roaring_contract_test.go pins these against the pinned roaring version.
 //
 // A Get that starts after an AddTo returns sees that AddTo's IDs, and
 // the pointer stays valid for as long as the caller holds it. The

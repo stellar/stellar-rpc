@@ -85,9 +85,9 @@ func (f TopicCountFilter) termKeys() []TermKey {
 
 // valueTermKeys returns one term per constrained value field
 // (contract ID, event type, topics): the single enumeration
-// termGroups and CountDistinctTerms share, so the two cannot drift
+// termPlans and CountDistinctTerms share, so the two cannot drift
 // over which values a filter names. The topic-count buckets are not
-// value terms; termGroups adds them separately and the budget does
+// value terms; termPlans adds them separately and the budget does
 // not count them.
 func (f *Filter) valueTermKeys() []TermKey {
 	var keys []TermKey
@@ -106,25 +106,30 @@ func (f *Filter) valueTermKeys() []TermKey {
 	return keys
 }
 
-// termGroups returns the indexed terms this filter constrains, grouped
-// by field: the bitmaps within a group are OR-ed and the groups are
-// AND-ed. Only the topic-count group ever holds more than one term.
-func (f *Filter) termGroups() [][]TermKey {
-	var groups [][]TermKey
-	for _, key := range f.valueTermKeys() {
-		groups = append(groups, []TermKey{key})
-	}
-	// A constrained topic position already implies an "at least" count at
-	// or below it, since a topic term is only indexed for events carrying
-	// that position. Skipping the group there keeps the common
-	// ["a", "**"] shape from OR-ing chunk-sized bucket bitmaps; the
-	// post-filter enforces the count either way.
+// termPlans returns the index terms a candidate must carry, one
+// conjunction per plan. A filter yields one plan, its value terms, unless
+// it constrains the topic count, when it yields one plan per bucket, a
+// single one for an exact count: A and (b or c) is (A and b) or (A and
+// c), and the union across plans keeps the or. A constrained topic
+// position already implies an "at least" count at or below it, since a
+// topic term is only indexed for events carrying that position. Skipping
+// the buckets there keeps the common ["a", "**"] shape from fanning out
+// over chunk-sized bucket bitmaps; the post-filter enforces the count
+// either way.
+func (f *Filter) termPlans() [][]TermKey {
+	values := f.valueTermKeys()
+	var buckets []TermKey
 	if !f.impliesTopicCount() {
-		if keys := f.TopicCount.termKeys(); len(keys) > 0 {
-			groups = append(groups, keys)
-		}
+		buckets = f.TopicCount.termKeys()
 	}
-	return groups
+	if len(buckets) == 0 {
+		return [][]TermKey{values}
+	}
+	plans := make([][]TermKey, 0, len(buckets))
+	for _, bucket := range buckets {
+		plans = append(plans, append(slices.Clone(values), bucket))
+	}
+	return plans
 }
 
 // impliesTopicCount reports whether f's constrained topic positions
@@ -214,9 +219,9 @@ type Match struct {
 	Ordinal uint32
 }
 
-// termPlan is a filter's termGroups resolved to slots in the batched
-// term lookup's result.
-type termPlan [][]int
+// termPlan is one of a filter's termPlans, as slots in the batched term
+// lookup's result.
+type termPlan []int
 
 // batchSizes resolves the first and following internal batch sizes from the
 // caller's hint. The hint is a page size the handler has already validated,
@@ -280,9 +285,9 @@ func Matches(
 			return
 		}
 		st := newSlabStepper(plans, sources, window, descending)
-		// No filter survived group resolution, so nothing can match and no
-		// slab is worth evaluating.
-		if len(st.filters) == 0 {
+		// No plan survived term resolution, so nothing can match and no slab
+		// is worth evaluating.
+		if len(st.plans) == 0 {
 			return
 		}
 		streamSlabs(ctx, r, filters, st, descending, firstBatch, yield)
@@ -314,10 +319,10 @@ func validateMatchCall(ctx context.Context, r Reader, filters []Filter, window I
 	return nil
 }
 
-// planIndexTerms dedupes the terms the filters name and resolves each
-// filter's groups to slots in the single batched lookup that follows;
-// it runs before any index I/O. plans[i] holds the slots filter i
-// needs: terms within a group are OR-ed and groups are AND-ed.
+// planIndexTerms maps every filter's plans to slots in the single batched
+// lookup that follows; it runs before any index I/O. A plan that repeats
+// an earlier one is dropped: plans only pick candidates, and the
+// post-filter still runs every filter.
 //
 // matchAll reports that some filter, or the empty slice, constrains
 // nothing, so the caller streams the window directly rather than
@@ -327,21 +332,25 @@ func planIndexTerms(filters []Filter) ([]termPlan, []TermKey, bool) {
 		return nil, nil, true
 	}
 	var uniqueKeys []TermKey
-	plans := make([]termPlan, len(filters))
+	plans := make([]termPlan, 0, len(filters))
 	for i := range filters {
-		groups := filters[i].termGroups()
-		if len(groups) == 0 {
-			return nil, nil, true
-		}
-		plan := make(termPlan, len(groups))
-		for g, keys := range groups {
-			slots := make([]int, len(keys))
-			for j, key := range keys {
-				slots[j] = indexOfOrAddTerm(&uniqueKeys, key)
+		for _, keys := range filters[i].termPlans() {
+			if len(keys) == 0 {
+				return nil, nil, true
 			}
-			plan[g] = slots
+			plan := make(termPlan, len(keys))
+			for j, key := range keys {
+				plan[j] = indexOfOrAddTerm(&uniqueKeys, key)
+			}
+			// Slots follow field order, so equal plans are equal slices.
+			dup := slices.ContainsFunc(plans, func(p termPlan) bool {
+				return slices.Equal(p, plan)
+			})
+			if dup {
+				continue
+			}
+			plans = append(plans, plan)
 		}
-		plans[i] = plan
 	}
 	return plans, uniqueKeys, false
 }
@@ -435,9 +444,9 @@ func ValidateFilters(filters []Filter) error {
 // filters name, deduped by field and value together: one contract ID
 // in five filters counts once, the same bytes in two topic positions
 // count twice. Topic-count buckets are excluded: they are an
-// implementation detail of the engine's grouping, not a value the
+// implementation detail of the engine's plans, not a value the
 // client named. Exported for the v2 handler's term-budget check. It
-// lives here, beside termGroups, so the budget and the engine's
+// lives here, beside termPlans, so the budget and the engine's
 // lookups agree on what a value term is: TermKey over the store's
 // canonical bytes.
 func CountDistinctTerms(filters []Filter) int {
