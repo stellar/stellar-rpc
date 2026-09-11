@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -14,9 +15,11 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/ingest"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/toid"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
@@ -33,8 +36,9 @@ import (
 // reconstructed here rather than left behind in the production file: they
 // exist only as the differential's reference, and the tests assert that the
 // two paths' protocol.GetTransactionsResponse values serialize to byte-
-// identical JSON over a corpus that sweeps meta versions, envelope shapes,
-// event shapes, page boundaries, empty ledgers and cursor round-trips.
+// identical JSON over a corpus that sweeps ledger and meta versions, tx-set
+// phases, envelope shapes, event shapes, page boundaries, empty ledgers and
+// cursor round-trips.
 // Shared machinery lives in differential_test.go.
 
 // legacyGetTransactionsByLedgerSequence is the pre-view-walk pagination loop:
@@ -250,6 +254,8 @@ func legacyParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTrans
 func transactionsCorpus(t *testing.T) []xdr.LedgerCloseMeta {
 	t.Helper()
 	ev := diffContractEvent()
+	// A second, distinct payload: a reversed event order inside one list must show.
+	ev2 := diffEvent(xdr.ContractEventTypeContract, ev.ContractId, diffSym("SECOND"), diffSym("SECOND"))
 	diag := xdr.DiagnosticEvent{InSuccessfulContractCall: true, Event: ev}
 	failedDiag := xdr.DiagnosticEvent{InSuccessfulContractCall: false, Event: ev}
 	txEvent := diffTxEvent(xdr.TransactionEventStageTransactionEventStageAfterAllTxs, ev)
@@ -273,7 +279,7 @@ func transactionsCorpus(t *testing.T) []xdr.LedgerCloseMeta {
 		// events and diagnostic events both present.
 		diffLCM(t, 2, 104,
 			diffTxSpec{txEnvelope(202), diffMetaV3WithEvents(
-				[]xdr.ContractEvent{ev, ev}, []xdr.DiagnosticEvent{diag, failedDiag}), true},
+				[]xdr.ContractEvent{ev, ev2}, []xdr.DiagnosticEvent{diag, failedDiag}), true},
 		),
 		// 5: V3 SorobanMeta present but with no events at all — the "with
 		// SorobanMeta, empty lists" case, distinct from the absent one.
@@ -310,7 +316,7 @@ func transactionsCorpus(t *testing.T) []xdr.LedgerCloseMeta {
 			diffTxSpec{txEnvelope(210), diffMetaV3NoSoroban(), false},
 			diffTxSpec{txEnvelope(211), diffMetaV3WithEvents([]xdr.ContractEvent{ev}, nil), true},
 			diffTxSpec{diffClassicEnvelope(212), diffMetaV4(
-				[]xdr.OperationMetaV2{{Events: []xdr.ContractEvent{ev, ev}}}, nil,
+				[]xdr.OperationMetaV2{{Events: []xdr.ContractEvent{ev, ev2}}}, nil,
 				[]xdr.DiagnosticEvent{diag}), true},
 			diffTxSpec{diffFeeBumpEnvelope(diffClassicEnvelope(213)), diffMetaV1(), false},
 		),
@@ -321,9 +327,38 @@ func transactionsCorpus(t *testing.T) []xdr.LedgerCloseMeta {
 				[]xdr.ContractEvent{ev}, []xdr.DiagnosticEvent{diag}), true},
 			diffTxSpec{diffClassicEnvelope(215), diffMetaV3NoSoroban(), true},
 		),
-		// 10: another empty ledger, this time at the tip, so a walk that runs
+		// 10: LCM V0 with a plain TransactionSet and TX_V0 envelopes on V1 meta:
+		// the pre-protocol-13 shape, which the view walks through v0TxSetEnvelopes.
+		diffLCM(t, 0, 110,
+			diffTxSpec{diffV0Envelope(216), diffMetaV1(), true},
+			diffTxSpec{diffV0Envelope(217), diffMetaV1(), false},
+		),
+		// 11: LCM V0 still, with V2 meta over v1, fee-bump and V0 envelopes:
+		// the protocol 13 to 19 shape.
+		diffLCM(t, 0, 111,
+			diffTxSpec{diffClassicEnvelope(218), diffMetaV2(), true},
+			diffTxSpec{diffFeeBumpEnvelope(diffClassicEnvelope(219)), diffMetaV2(), false},
+			diffTxSpec{diffV0Envelope(220), diffMetaV2(), true},
+		),
+		// 12: LCM V2 whose set carries both phase kinds: classic in the V0
+		// phase, Soroban in the protocol-23 parallel phase.
+		parallelPhaseLedger(t, 112,
+			[]diffTxSpec{
+				{diffClassicEnvelope(221), diffMetaV4(nil, nil, nil), true},
+				{diffClassicEnvelope(222), diffMetaV4([]xdr.OperationMetaV2{{Events: []xdr.ContractEvent{ev}}}, nil, nil), false},
+			},
+			diffTxSpec{txEnvelope(223), diffMetaV4(
+				[]xdr.OperationMetaV2{{Events: []xdr.ContractEvent{ev2, ev}}},
+				[]xdr.TransactionEvent{txEvent},
+				[]xdr.DiagnosticEvent{diag},
+			), true},
+			diffTxSpec{txEnvelope(224), diffMetaV4(nil, nil, []xdr.DiagnosticEvent{failedDiag}), false},
+			diffTxSpec{txEnvelope(225), diffMetaV4([]xdr.OperationMetaV2{{Events: []xdr.ContractEvent{ev2}}}, nil, nil), true},
+			diffTxSpec{diffFeeBumpEnvelope(txEnvelope(226)), diffMetaV4(nil, nil, []xdr.DiagnosticEvent{diag}), true},
+		),
+		// 13: another empty ledger, this time at the tip, so a walk that runs
 		// off the end of the corpus ends on one.
-		createEmptyTestLedger(110),
+		createEmptyTestLedger(113),
 	}
 }
 
@@ -332,8 +367,28 @@ func transactionsCorpus(t *testing.T) []xdr.LedgerCloseMeta {
 // createEmptyTestLedger) offset their sequences by 100.
 const (
 	transactionsCorpusFirst = 101
-	transactionsCorpusLast  = 110
+	transactionsCorpusLast  = 113
 )
+
+// parallelPhaseLedger is the protocol-23 shape at seq: classic stays in the V0
+// phase while Soroban transactions a to d run in a parallel phase of two
+// stages, the second holding two clusters, with c and d dependent.
+func parallelPhaseLedger(
+	t *testing.T, seq uint32, classic []diffTxSpec, a, b, c, d diffTxSpec,
+) xdr.LedgerCloseMeta {
+	t.Helper()
+	lcm := diffLCM(t, 2, seq, append(slices.Clone(classic), a, b, c, d)...)
+	lcm.V2.TxSet.V1TxSet.Phases = []xdr.TransactionPhase{
+		diffClassicPhase(diffTxSetEnvelopes(classic)),
+		{V: 1, ParallelTxsComponent: &xdr.ParallelTxsComponent{
+			ExecutionStages: []xdr.ParallelTxExecutionStage{
+				{xdr.DependentTxCluster{a.envelope}},
+				{xdr.DependentTxCluster{b.envelope}, xdr.DependentTxCluster{c.envelope, d.envelope}},
+			},
+		}},
+	}
+	return lcm
+}
 
 type transactionsDifferential = differential[protocol.GetTransactionsRequest, protocol.GetTransactionsResponse]
 
@@ -484,6 +539,55 @@ func TestGetTransactions_ViewWalkMatchesParsedPath_EmptyLedgersOnly(t *testing.T
 	}
 }
 
+// TestGetTransactions_ViewWalkLegacyV0MetaDivergence pins this migration's one
+// intentional divergence: a TransactionMeta V0 transaction (early pubnet
+// history) failed the reference's whole page, and the view walk serves it
+// event-free beside its ledger-mates. Seeded by hand: seedDifferentialDB's event
+// writer decodes through the reference's reader and rejects V0 the same way.
+func TestGetTransactions_ViewWalkLegacyV0MetaDivergence(t *testing.T) {
+	lcm := diffLCM(t, 0, 101,
+		diffTxSpec{diffV0Envelope(301), diffMetaV0(), true},
+		diffTxSpec{diffV0Envelope(302), diffMetaV1(), false},
+	)
+	testDB := NewTestDB(t)
+	rw := sqlitedb.NewReadWriter(log.DefaultLogger, testDB, host.MakeNoOpDaemon(), 100, passphrase)
+	write, err := rw.NewTx(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, write.LedgerWriter().InsertLedger(lcm))
+	require.NoError(t, write.Commit(lcm, nil))
+	diff := newTransactionsDifferential(testDB)
+
+	for _, format := range diffFormats {
+		t.Run(fmt.Sprintf("format=%q", format), func(t *testing.T) {
+			req := protocol.GetTransactionsRequest{Format: format, StartLedger: 101}
+			_, wantErr := diff.want(t.Context(), req)
+			got, err := diff.got(t.Context(), req)
+			require.NoError(t, err)
+			var rpcErr *jrpc2.Error
+			require.ErrorAs(t, wantErr, &rpcErr)
+			require.Equal(t, jrpc2.InternalError, rpcErr.Code)
+			require.Contains(t, rpcErr.Message, "unsupported TransactionMeta version: 0")
+
+			require.Len(t, got.Transactions, 2, "the V0 transaction must not sink its ledger-mates")
+			v0 := got.Transactions[0]
+			require.Equal(t, int32(1), v0.ApplicationOrder)
+			require.Equal(t, protocol.TransactionStatusSuccess, v0.Status)
+			require.Empty(t, v0.DiagnosticEventsXDR)
+			require.Empty(t, v0.DiagnosticEventsJSON)
+			require.Empty(t, v0.Events.ContractEventsXDR)
+			require.Empty(t, v0.Events.ContractEventsJSON)
+			require.Empty(t, v0.Events.TransactionEventsXDR)
+			require.Empty(t, v0.Events.TransactionEventsJSON)
+		})
+	}
+
+	// Paging in past the V0 transaction, the two sides agree again: the
+	// divergence is that one transaction, not the ledger.
+	diff.assertSame(t, protocol.GetTransactionsRequest{
+		Pagination: &protocol.LedgerPaginationOptions{Cursor: toid.New(101, 1, 1).String()},
+	})
+}
+
 // TestGetTransactions_ViewWalkCorpusIsNotVacuous guards the differential
 // itself: a corpus that silently produced no transactions, or only one shape
 // of them, would make every comparison above pass for the wrong reason.
@@ -495,10 +599,20 @@ func TestGetTransactions_ViewWalkCorpusIsNotVacuous(t *testing.T) {
 		Pagination:  &protocol.LedgerPaginationOptions{Limit: 100},
 	})
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(resp.Transactions), 15, "the corpus must carry real transactions")
+	require.GreaterOrEqual(t, len(resp.Transactions), 25, "the corpus must carry real transactions")
 
-	var feeBumps, failed, withContractEvents, withTxEvents, withDiagnostics int
+	var feeBumps, failed, withContractEvents, withTxEvents, withDiagnostics, v0Envelopes, v2Metas int
 	for _, tx := range resp.Transactions {
+		var env xdr.TransactionEnvelope
+		require.NoError(t, xdr.SafeUnmarshalBase64(tx.EnvelopeXDR, &env))
+		if env.Type == xdr.EnvelopeTypeEnvelopeTypeTxV0 {
+			v0Envelopes++
+		}
+		var meta xdr.TransactionMeta
+		require.NoError(t, xdr.SafeUnmarshalBase64(tx.ResultMetaXDR, &meta))
+		if meta.V == 2 {
+			v2Metas++
+		}
 		if tx.FeeBump {
 			feeBumps++
 		}
@@ -523,6 +637,8 @@ func TestGetTransactions_ViewWalkCorpusIsNotVacuous(t *testing.T) {
 	require.Positive(t, withContractEvents, "transactions with contract events")
 	require.Positive(t, withTxEvents, "transactions with transaction events")
 	require.Positive(t, withDiagnostics, "transactions with diagnostic events")
+	require.Positive(t, v0Envelopes, "TX_V0 envelopes")
+	require.Positive(t, v2Metas, "V2 metas")
 }
 
 // TestTransactionInfo_FieldMapping pins the renderer both extractions share.
