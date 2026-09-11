@@ -222,7 +222,7 @@ func TestSimulateTransactionPassesLedgerTimeFromLatestLedgerMetaToPreflight(t *t
 		Once()
 	ledgerReader.
 		On("GetLedger", mock.Anything, uint32(77)).
-		Return(createLedger(expectedLatestLedgerHashBytes, 77, 20, xdr.TimePoint(1_700_000_123)), true, nil).
+		Return(createLedger(expectedLatestLedgerHashBytes, 77, xdr.TimePoint(1_700_000_123)), true, nil).
 		Once()
 
 	txEnvelope := invokeHostFunctionEnvelope(t)
@@ -488,7 +488,7 @@ func TestSimulateTransactionCloseTimeIsAnchoredToLatestLedgerSequence(t *testing
 	// The handler must load metadata for the exact sequence it selected above.
 	ledgerReader.
 		On("GetLedger", mock.Anything, seqBeforeIngest).
-		Return(createLedger(0, seqBeforeIngest, 20, closeTimeForSeq77), true, nil).
+		Return(createLedger(0, seqBeforeIngest, closeTimeForSeq77), true, nil).
 		Once()
 
 	txEnvelope := invokeHostFunctionEnvelope(t)

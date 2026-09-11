@@ -13,12 +13,12 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 type ledgersHandler struct {
-	ledgerReader          db.LedgerReader
+	ledgerReader          store.LedgerReader
 	maxLimit              uint
 	defaultLimit          uint
 	datastoreLedgerReader rpcdatastore.LedgerReader
@@ -26,7 +26,7 @@ type ledgersHandler struct {
 }
 
 // NewGetLedgersHandler returns a jrpc2.Handler for the getLedgers method.
-func NewGetLedgersHandler(ledgerReader db.LedgerReader, maxLimit, defaultLimit uint,
+func NewGetLedgersHandler(ledgerReader store.LedgerReader, maxLimit, defaultLimit uint,
 	datastoreLedgerReader rpcdatastore.LedgerReader, logger *log.Entry,
 ) jrpc2.Handler {
 	return NewHandler((&ledgersHandler{
@@ -56,7 +56,7 @@ func (h ledgersHandler) getLedgers(
 
 	ledgerRange, err := readTx.GetLedgerRange(ctx)
 	switch {
-	case errors.Is(err, db.ErrEmptyDB):
+	case errors.Is(err, store.ErrEmptyDB):
 		// TODO: Support datastore-only mode (no local DB).
 		fallthrough
 	case err != nil:
@@ -91,6 +91,21 @@ func (h ledgersHandler) getLedgers(
 			Code:    jrpc2.InvalidParams,
 			Message: err.Error(),
 		}
+	}
+
+	// A caught-up poller's cursor points at or past the tip. Echo it back on
+	// an empty page instead of rejecting the server's own token. An explicit
+	// startLedger above the tip stays an error (Validate above rejects it).
+	if request.Pagination != nil && request.Pagination.Cursor != "" &&
+		start > availableLedgerRange.LastLedger {
+		return protocol.GetLedgersResponse{
+			Ledgers:               []protocol.LedgerInfo{},
+			LatestLedger:          ledgerRange.LastLedger.Sequence,
+			LatestLedgerCloseTime: ledgerRange.LastLedger.CloseTime,
+			OldestLedger:          ledgerRange.FirstLedger.Sequence,
+			OldestLedgerCloseTime: ledgerRange.FirstLedger.CloseTime,
+			Cursor:                request.Pagination.Cursor,
+		}, nil
 	}
 
 	end := start + uint32(limit) - 1 //nolint:gosec
@@ -151,13 +166,16 @@ func (h ledgersHandler) parseCursor(cursor string, ledgerRange protocol.LedgerSe
 		return 0, err
 	}
 
+	// Only the lower bound is an error: below the oldest ledger is data the
+	// node no longer has. At or past the tip is a caught-up poller, answered
+	// with an empty page by getLedgers. The +1 wraps a max-uint32 cursor to
+	// start 0, which this check also catches.
 	start := uint32(cursorInt) + 1
-	if !protocol.IsLedgerWithinRange(start, ledgerRange) {
+	if start < ledgerRange.FirstLedger {
 		return 0, fmt.Errorf(
-			"cursor ('%s') must be between the oldest ledger: %d and the latest ledger: %d for this rpc instance",
+			"cursor ('%s') must be at or above the oldest ledger: %d for this rpc instance",
 			cursor,
 			ledgerRange.FirstLedger,
-			ledgerRange.LastLedger,
 		)
 	}
 
@@ -175,13 +193,13 @@ func (h ledgersHandler) parseCursor(cursor string, ledgerRange protocol.LedgerSe
 func (h ledgersHandler) fetchLedgers(
 	ctx context.Context,
 	start, end uint32, format string,
-	readTx db.LedgerReaderTx,
+	readTx store.LedgerReaderTx,
 	localLedgerRange protocol.LedgerSeqRange,
 ) ([]protocol.LedgerInfo, error) {
 	limit := end - start + 1
 	result := make([]protocol.LedgerInfo, 0, limit)
 
-	addToResult := func(ledgers []db.LedgerMetadataChunk) error {
+	addToResult := func(ledgers []store.LedgerMetadataChunk) error {
 		// Transform them all into JSON responses.
 		for _, chunk := range ledgers {
 			if len(result) >= int(limit) {
@@ -190,10 +208,10 @@ func (h ledgersHandler) fetchLedgers(
 
 			info, err := parseLedgerInfo(chunk, format)
 			if err != nil {
+				seq, _ := xdr.LedgerCloseMetaView(chunk.Lcm).LedgerSequence()
 				return &jrpc2.Error{
-					Code: jrpc2.InternalError,
-					Message: fmt.Sprintf("error processing ledger %d: %v",
-						chunk.Header.Header.LedgerSeq, err),
+					Code:    jrpc2.InternalError,
+					Message: fmt.Sprintf("error processing ledger %d: %v", seq, err),
 				}
 			}
 			result = append(result, info)
@@ -262,12 +280,26 @@ func (h ledgersHandler) fetchLedgers(
 
 // parseLedgerInfo extracts and formats the ledger metadata and header
 // information. In the error case, it returns a jrcp2.Error.
-func parseLedgerInfo(ledger db.LedgerMetadataChunk, format string) (protocol.LedgerInfo, error) {
-	header := ledger.Header
+func parseLedgerInfo(ledger store.LedgerMetadataChunk, format string) (protocol.LedgerInfo, error) {
+	view := xdr.LedgerCloseMetaView(ledger.Lcm)
+	sequence, err := view.LedgerSequence()
+	if err != nil {
+		return protocol.LedgerInfo{}, err
+	}
+	closeTime, err := view.LedgerCloseTime()
+	if err != nil {
+		return protocol.LedgerInfo{}, err
+	}
+	hash, err := view.LedgerHash()
+	if err != nil {
+		return protocol.LedgerInfo{}, err
+	}
+	var hashXdr xdr.Hash
+	copy(hashXdr[:], hash)
 	ledgerInfo := protocol.LedgerInfo{
-		Hash:            header.Hash.HexString(),
-		Sequence:        uint32(header.Header.LedgerSeq),
-		LedgerCloseTime: int64(header.Header.ScpValue.CloseTime), //nolint:gosec // safe for ~292B years
+		Hash:            hashXdr.HexString(),
+		Sequence:        sequence,
+		LedgerCloseTime: closeTime,
 	}
 
 	// Format the data according to the requested format (JSON or XDR)
@@ -280,28 +312,28 @@ func parseLedgerInfo(ledger db.LedgerMetadataChunk, format string) (protocol.Led
 		}
 
 	default:
-		headerB, err := header.MarshalBinary()
-		if err != nil {
-			return ledgerInfo, fmt.Errorf("error marshaling ledger header: %w", err)
-		}
-
 		ledgerInfo.LedgerMetadata = base64.StdEncoding.EncodeToString(ledger.Lcm)
-		ledgerInfo.LedgerHeader = base64.StdEncoding.EncodeToString(headerB)
+		ledgerInfo.LedgerHeader = base64.StdEncoding.EncodeToString(ledger.HeaderRaw)
 	}
 	return ledgerInfo, nil
 }
 
-func metaToChunk(meta []xdr.LedgerCloseMeta) ([]db.LedgerMetadataChunk, error) {
-	result := make([]db.LedgerMetadataChunk, 0, len(meta))
+func metaToChunk(meta []xdr.LedgerCloseMeta) ([]store.LedgerMetadataChunk, error) {
+	result := make([]store.LedgerMetadataChunk, 0, len(meta))
 	for _, lcm := range meta {
 		raw, err := lcm.MarshalBinary()
 		if err != nil {
 			return nil, err
 		}
 
-		result = append(result, db.LedgerMetadataChunk{
-			Lcm:    raw,
-			Header: lcm.LedgerHeaderHistoryEntry(),
+		headerRaw, err := lcm.LedgerHeaderHistoryEntry().MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+
+		result = append(result, store.LedgerMetadataChunk{
+			Lcm:       raw,
+			HeaderRaw: headerRaw,
 		})
 	}
 
