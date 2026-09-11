@@ -11,7 +11,7 @@ defaults:
 
 on:
   push:
-    branches: [release/**, optimize-getEvents-scratchpad]
+    branches: [release/**]
   workflow_dispatch:
     inputs:
       target_ref:
