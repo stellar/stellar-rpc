@@ -155,19 +155,6 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-duration-seconds: ${{ steps.deadlines.outputs.role_seconds }}
 
-      # Only the shared poller understands pending. Older target refs use their
-      # original Gather and must wait on an unseeded key.
-      - name: Seed the pending result marker
-        if: ${{ hashFiles('cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/harness/poller.go') != '' }}
-        env:
-          RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          jq -n --arg run "$RUN_ID" \
-                '{schemaVersion: 1, verdict: "pending", markdown: "", runId: $run}' > /tmp/pending.json
-          aws s3api put-object --bucket "$BUCKET" --key "$RESULT_KEY" \
-                --content-type application/json --body /tmp/pending.json >/dev/null
-          echo "seeded pending marker at s3://$BUCKET/$RESULT_KEY"
-
       - name: Render user-data
         # The scripts ship verbatim; parameters travel in a preamble so the bytes
         # that run on the box match the bytes in git. Order is:

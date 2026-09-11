@@ -112,15 +112,11 @@ func run(ctx context.Context) error {
 	return err
 }
 
-// reportableLeg includes final results from the same workflow run and target
+// reportableLeg includes results from the same workflow run and target
 // commit. Results from previous attempts remain usable when only failed jobs
-// are rerun. Pending or mismatched results produce a label-only entry.
+// are rerun. A mismatched result produces a label-only entry.
 func reportableLeg(label string, res *harness.Result, runID, targetSHA string) legResult {
 	result := legResult{Label: label}
-	if res.Verdict == harness.VerdictPending {
-		logger.Warnf("%s has no final result", label)
-		return result
-	}
 	if !strings.HasPrefix(res.RunID, runID+"-") || res.TargetSHA != targetSHA {
 		logger.Warnf("%s result belongs to another run or target", label)
 		return result

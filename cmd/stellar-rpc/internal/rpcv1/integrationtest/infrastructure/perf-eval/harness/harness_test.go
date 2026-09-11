@@ -39,7 +39,7 @@ func TestResultValidate(t *testing.T) {
 	}{
 		{"ok", Result{SchemaVersion: 1, RunID: "123-1", Verdict: VerdictOK}, ""},
 		{"fail", Result{SchemaVersion: 1, RunID: "123-1", Verdict: VerdictFail}, ""},
-		{"pending", Result{SchemaVersion: 1, RunID: "123-1", Verdict: VerdictPending}, ""},
+		{"pending", Result{SchemaVersion: 1, RunID: "123-1", Verdict: "pending"}, `unknown verdict "pending"`},
 		{"zero value", Result{}, "unsupported schemaVersion 0"},
 		{"unknown schema", Result{SchemaVersion: 2, RunID: "123-1", Verdict: VerdictOK}, "unsupported schemaVersion 2"},
 		{"missing run", Result{SchemaVersion: 1, Verdict: VerdictOK}, "runId is required"},

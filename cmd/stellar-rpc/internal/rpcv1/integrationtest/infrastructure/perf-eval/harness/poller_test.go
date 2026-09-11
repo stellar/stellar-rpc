@@ -41,6 +41,16 @@ func resultJSON(run, verdict string) string {
 	return fmt.Sprintf(`{"schemaVersion":1,"runId":%q,"verdict":%q,"markdown":"report"}`, run, verdict)
 }
 
+// S3 error bodies as the CI role sees them: a missing key is a 404 because the
+// role holds s3:ListBucket on the result prefix.
+func noSuchKey() (*http.Response, error) {
+	return resultResponse(404, `<Error><Code>NoSuchKey</Code></Error>`)
+}
+
+func accessDenied() (*http.Response, error) {
+	return resultResponse(403, `<Error><Code>AccessDenied</Code></Error>`)
+}
+
 func TestCheckOnce(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, verdict string
@@ -49,14 +59,15 @@ func TestCheckOnce(t *testing.T) {
 	}{
 		{name: "ok", body: resultJSON("1-2", "ok"), verdict: "ok", status: 200},
 		{name: "fail", body: resultJSON("1-2", "fail"), verdict: "fail", status: 200},
-		{name: "pending", body: resultJSON("1-2", "pending"), status: 200},
-		{name: "prior attempt", body: resultJSON("1-1", "ok"), status: 200, wantErr: "stale result"},
-		{name: "other run", body: resultJSON("2-2", "fail"), status: 200, wantErr: "stale result"},
-		{name: "missing", body: `<Error><Code>NoSuchKey</Code></Error>`, status: 404, wantErr: "not published"},
+		{name: "missing", body: `<Error><Code>NoSuchKey</Code></Error>`, status: 404},
+		{name: "prior attempt", body: resultJSON("1-1", "ok"), status: 200},
+		{name: "other run", body: resultJSON("2-2", "fail"), status: 200},
 		{name: "inaccessible", body: `<Error><Code>AccessDenied</Code></Error>`, status: 403, wantErr: "AccessDenied"},
+		{name: "no bucket", body: `<Error><Code>NoSuchBucket</Code></Error>`, status: 404, wantErr: "NoSuchBucket"},
 		{name: "malformed", body: `{`, status: 200, wantErr: "invalid result"},
 		{name: "null", body: `null`, status: 200, wantErr: "invalid result"},
 		{name: "unknown verdict", body: resultJSON("1-2", "success"), status: 200, wantErr: "invalid result"},
+		{name: "pending", body: resultJSON("1-2", "pending"), status: 200, wantErr: "invalid result"},
 		{name: "no identity", body: resultJSON("", "ok"), status: 200, wantErr: "invalid result"},
 		{
 			name: "unknown schema", body: `{"schemaVersion":2,"runId":"1-2","verdict":"ok"}`,
@@ -82,52 +93,89 @@ func TestCheckOnce(t *testing.T) {
 	}
 }
 
-func TestPollErrorThreshold(t *testing.T) {
-	for _, kind := range []string{"missing", "denied", "stale", "transport", "malformed"} {
-		t.Run(kind, func(t *testing.T) {
+// TestPollFaultClassification pins which failures end a window early. A fault
+// the caller must fix returns on the first poll; everything else waits out the
+// budget so a healthy box is never terminated over a transient blip.
+func TestPollFaultClassification(t *testing.T) {
+	const window = 5 * time.Minute
+	for _, tc := range []struct {
+		kind      string
+		respond   func() (*http.Response, error)
+		wantErr   string
+		permanent bool
+	}{
+		{kind: "denied", respond: accessDenied, wantErr: "AccessDenied", permanent: true},
+		{
+			kind:      "no bucket",
+			respond:   func() (*http.Response, error) { return resultResponse(404, `<Error><Code>NoSuchBucket</Code></Error>`) },
+			wantErr:   "NoSuchBucket",
+			permanent: true,
+		},
+		{
+			kind:      "expired session",
+			respond:   func() (*http.Response, error) { return resultResponse(400, `<Error><Code>ExpiredToken</Code></Error>`) },
+			wantErr:   "ExpiredToken",
+			permanent: true,
+		},
+		{
+			kind:      "malformed",
+			respond:   func() (*http.Response, error) { return resultResponse(200, `{`) },
+			wantErr:   ErrInvalidResult.Error(),
+			permanent: true,
+		},
+		{kind: "missing", respond: noSuchKey},
+		{kind: "stale", respond: func() (*http.Response, error) { return resultResponse(200, resultJSON("1-1", "ok")) }},
+		{
+			kind:    "transport",
+			respond: func() (*http.Response, error) { return nil, errors.New("temporary transport failure") },
+		},
+		{
+			kind:    "server error",
+			respond: func() (*http.Response, error) { return resultResponse(503, `<Error><Code>SlowDown</Code></Error>`) },
+		},
+		{
+			kind: "request timeout",
+			respond: func() (*http.Response, error) {
+				return resultResponse(400, `<Error><Code>RequestTimeout</Code></Error>`)
+			},
+		},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				calls := 0
 				p := testPoller(func(*http.Request) (*http.Response, error) {
 					calls++
-					switch kind {
-					case "missing":
-						return resultResponse(404, `<Error><Code>NoSuchKey</Code></Error>`)
-					case "denied":
-						return resultResponse(403, `<Error><Code>AccessDenied</Code></Error>`)
-					case "stale":
-						return resultResponse(200, resultJSON("1-1", "ok"))
-					case "malformed":
-						return resultResponse(200, `{`)
-					default:
-						return nil, errors.New("temporary transport failure")
-					}
+					return tc.respond()
 				})
 				start := time.Now()
-				res, err := p.poll(t.Context(), start.Add(time.Hour))
-				require.Error(t, err)
+				res, err := p.poll(t.Context(), start.Add(window))
 				require.Nil(t, res)
-				if kind == "malformed" {
-					require.ErrorIs(t, err, ErrInvalidResult)
+				if tc.permanent {
+					require.ErrorContains(t, err, tc.wantErr)
 					require.Equal(t, 1, calls)
-				} else {
-					require.Equal(t, maxConsecutiveFetchErrors, calls)
-					require.Equal(t, 9*p.interval, time.Since(start))
+					require.Equal(t, time.Duration(0), time.Since(start))
+					return
 				}
+				require.NoError(t, err)
+				require.Equal(t, int(window/p.interval), calls)
+				require.Equal(t, window, time.Since(start))
 			})
 		})
 	}
 }
 
-func TestPollPendingResetsErrors(t *testing.T) {
+// TestPollTransientRecovery shows there is no give-up count for transient
+// failures: a result published after many failed polls is still picked up.
+func TestPollTransientRecovery(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		calls := 0
 		p := testPoller(func(*http.Request) (*http.Response, error) {
 			calls++
-			switch calls {
-			case 10:
-				return resultResponse(200, resultJSON("1-2", "pending"))
-			case 20:
+			switch {
+			case calls == 40:
 				return resultResponse(200, resultJSON("1-2", "ok"))
+			case calls%2 == 0:
+				return resultResponse(503, `<Error><Code>SlowDown</Code></Error>`)
 			default:
 				return nil, errors.New("temporary transport failure")
 			}
@@ -135,7 +183,7 @@ func TestPollPendingResetsErrors(t *testing.T) {
 		res, err := p.poll(t.Context(), time.Now().Add(time.Hour))
 		require.NoError(t, err)
 		require.Equal(t, "ok", res.Verdict)
-		require.Equal(t, 20, calls)
+		require.Equal(t, 40, calls)
 	})
 }
 
@@ -147,7 +195,7 @@ func TestPollWindowAndHandoff(t *testing.T) {
 			if calls == 4 {
 				return resultResponse(200, resultJSON("1-2", "fail"))
 			}
-			return resultResponse(200, resultJSON("1-2", "pending"))
+			return noSuchKey()
 		})
 		start := time.Now()
 		res, err := p.poll(t.Context(), start.Add(65*time.Second))
@@ -159,27 +207,6 @@ func TestPollWindowAndHandoff(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "fail", res.Verdict)
 		require.Equal(t, 4, calls)
-	})
-}
-
-func TestPollErrorsResetBetweenWindows(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		calls := 0
-		p := testPoller(func(*http.Request) (*http.Response, error) {
-			calls++
-			if calls == 12 {
-				return resultResponse(200, resultJSON("1-2", "ok"))
-			}
-			return nil, errors.New("temporary transport failure")
-		})
-		res, err := p.poll(t.Context(), time.Now().Add(60*time.Second))
-		require.NoError(t, err)
-		require.Nil(t, res)
-		require.Equal(t, 2, calls)
-		res, err = p.poll(t.Context(), time.Now().Add(time.Hour))
-		require.NoError(t, err)
-		require.Equal(t, "ok", res.Verdict)
-		require.Equal(t, 12, calls)
 	})
 }
 
@@ -229,7 +256,7 @@ func TestPollCancellationAndBounds(t *testing.T) {
 						body := blockedBody{func() error { <-r.Context().Done(); return r.Context().Err() }}
 						return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: body}, nil
 					}
-					return resultResponse(200, resultJSON("1-2", "pending"))
+					return noSuchKey()
 				})
 				start := time.Now()
 				if phase == "before poll" {
