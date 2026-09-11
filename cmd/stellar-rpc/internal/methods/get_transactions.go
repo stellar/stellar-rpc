@@ -131,7 +131,7 @@ func (h transactionsRPCHandler) processTransactionsInLedger(
 	if ledgerSeqInt32 == start.LedgerSequence {
 		startTxIdx = int(start.TransactionOrder)
 	}
-	cursor := toid.New(ledgerSeqInt32, 0, 1)
+	cursor := toid.New(ledgerSeqInt32, int32(startTxIdx-1), 1)
 	remaining := limitInt - len(*txns)
 	if remaining <= 0 {
 		return cursor, true, nil
