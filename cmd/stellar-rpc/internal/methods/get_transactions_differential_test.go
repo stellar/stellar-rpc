@@ -24,7 +24,9 @@ import (
 
 // This file is the correctness harness for the getTransactions page loop's
 // move from "unmarshal the whole LedgerCloseMeta, then range over it" to "walk
-// the raw bytes through the SDK's zero-copy views".
+// the raw bytes through the SDK's zero-copy views." Both sides read sqlite, so
+// the suite pins the shared handler's extraction, not the v2 adapter's walk.
+// The latter is pinned in rpcv2/adapters with its own tests.
 //
 // legacyGetTransactionsByLedgerSequence and legacyProcessTransactionsInLedger
 // below are the decode-based extraction as it stood before that change,
