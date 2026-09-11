@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -16,15 +17,14 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
-// renderedLatestLedger is one ledger's rendered getLatestLedger response.
+// renderedLatestLedger is one ledger's fully rendered getLatestLedger result.
 type renderedLatestLedger struct {
-	seq      uint32
-	response protocol.GetLatestLedgerResponse
+	seq  uint32
+	body json.RawMessage
 }
 
-// latestLedgerCache memoizes the rendered response keyed by ledger sequence: a
-// ledger's bytes never change, and a newly closed ledger invalidates the memo
-// by moving the key.
+// latestLedgerCache memoizes the rendered, final JSON response keyed by ledger
+// sequence. A newly closed ledger invalidates the memo by moving the key.
 type latestLedgerCache struct {
 	ledgerReader store.LedgerReader
 
@@ -33,43 +33,41 @@ type latestLedgerCache struct {
 }
 
 // NewGetLatestLedgerHandler returns a JSON RPC handler to retrieve the latest ledger entry from Stellar core.
-// Requests landing on the same latest ledger share one rendering of it.
+// Requests landing on the same latest ledger are served the same pre-rendered bytes.
 func NewGetLatestLedgerHandler(ledgerReader store.LedgerReader) jrpc2.Handler {
 	c := &latestLedgerCache{ledgerReader: ledgerReader}
 	return NewHandler(c.handle)
 }
 
-func (c *latestLedgerCache) handle(ctx context.Context, _ protocol.GetLatestLedgerRequest,
-) (protocol.GetLatestLedgerResponse, error) {
+func (c *latestLedgerCache) handle(ctx context.Context, _ protocol.GetLatestLedgerRequest) (json.RawMessage, error) {
 	latestSequence, err := c.ledgerReader.GetLatestLedgerSequence(ctx)
 	if err != nil {
-		return protocol.GetLatestLedgerResponse{}, &jrpc2.Error{
+		return nil, &jrpc2.Error{
 			Code:    jrpc2.InternalError,
 			Message: "could not get latest ledger sequence",
 		}
 	}
 	if r := c.rendered.Load(); r != nil && r.seq == latestSequence {
-		return r.response, nil
+		return r.body, nil
 	}
 
 	c.renderMu.Lock()
 	defer c.renderMu.Unlock()
 	if r := c.rendered.Load(); r != nil && r.seq == latestSequence { // rendered while waiting for the lock
-		return r.response, nil
+		return r.body, nil
 	}
-	response, err := c.render(ctx, latestSequence)
+	body, err := c.render(ctx, latestSequence)
 	if err != nil {
-		return protocol.GetLatestLedgerResponse{}, err
+		return nil, err
 	}
 	// A request on an older read view must not evict a newer ledger's render.
 	if r := c.rendered.Load(); r == nil || latestSequence >= r.seq {
-		c.rendered.Store(&renderedLatestLedger{seq: latestSequence, response: response})
+		c.rendered.Store(&renderedLatestLedger{seq: latestSequence, body: body})
 	}
-	return response, nil
+	return body, nil
 }
 
-func (c *latestLedgerCache) render(ctx context.Context, latestSequence uint32,
-) (protocol.GetLatestLedgerResponse, error) {
+func (c *latestLedgerCache) render(ctx context.Context, latestSequence uint32) (json.RawMessage, error) {
 	var response protocol.GetLatestLedgerResponse
 	var parseErr error
 	found, err := c.ledgerReader.WithLedgerRaw(ctx, latestSequence, func(raw []byte) error {
@@ -86,12 +84,19 @@ func (c *latestLedgerCache) render(ctx context.Context, latestSequence uint32,
 		default: // clean miss: no underlying error to report
 			msg = "could not get latest ledger"
 		}
-		return protocol.GetLatestLedgerResponse{}, &jrpc2.Error{
+		return nil, &jrpc2.Error{
 			Code:    jrpc2.InternalError,
 			Message: msg,
 		}
 	}
-	return response, nil
+	body, err := json.Marshal(response)
+	if err != nil {
+		return nil, &jrpc2.Error{
+			Code:    jrpc2.InternalError,
+			Message: fmt.Sprintf("could not encode latest ledger: %v", err),
+		}
+	}
+	return body, nil
 }
 
 // latestLedgerResponse extracts the response fields from a ledger close meta view.
