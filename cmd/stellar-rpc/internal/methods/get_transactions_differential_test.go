@@ -501,20 +501,24 @@ func TestGetTransactions_ViewWalkCursorRoundTrip(t *testing.T) {
 // TestGetTransactions_ViewWalkMatchesParsedPath_Cursors starts each request
 // from an explicit cursor, including cursors that land mid-ledger, on a
 // ledger's last transaction, past a ledger's last transaction, and past the
-// tip (where the request's own cursor has to be echoed back).
+// tip (where the request's own cursor has to be echoed back). The server issues
+// operation order 1; 0 and 2 are client-built, and the echo must return their
+// exact bytes, so all three are swept.
 func TestGetTransactions_ViewWalkMatchesParsedPath_Cursors(t *testing.T) {
 	diff := seededTransactionsDifferential(t)
 
 	for ledger := transactionsCorpusFirst; ledger <= transactionsCorpusLast; ledger++ {
 		for txOrder := range 7 {
-			for _, limit := range []uint{1, 3, 10} {
-				cursor := toid.New(int32(ledger), int32(txOrder), 1).String()
-				name := fmt.Sprintf("cursor=%d.%d/limit=%d", ledger, txOrder, limit)
-				t.Run(name, func(t *testing.T) {
-					diff.assertSame(t, protocol.GetTransactionsRequest{
-						Pagination: &protocol.LedgerPaginationOptions{Cursor: cursor, Limit: limit},
+			for opOrder := range int32(3) {
+				for _, limit := range []uint{1, 3, 10} {
+					cursor := toid.New(int32(ledger), int32(txOrder), opOrder).String()
+					name := fmt.Sprintf("cursor=%d.%d.%d/limit=%d", ledger, txOrder, opOrder, limit)
+					t.Run(name, func(t *testing.T) {
+						diff.assertSame(t, protocol.GetTransactionsRequest{
+							Pagination: &protocol.LedgerPaginationOptions{Cursor: cursor, Limit: limit},
+						})
 					})
-				})
+				}
 			}
 		}
 	}
