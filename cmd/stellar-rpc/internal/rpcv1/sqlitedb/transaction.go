@@ -154,7 +154,8 @@ func (txn *transactionHandler) trimTransactions(latestLedgerSeq uint32, retentio
 // directly against the RPC handler.
 //
 // Errors occur if there are issues with the DB connection or the XDR is
-// corrupted somehow. If the transaction is not found, io.EOF is returned.
+// corrupted somehow. If the transaction is not found, store.ErrNoTransaction
+// is returned.
 func (txn *transactionHandler) GetTransaction(ctx context.Context, hash xdr.Hash) (store.Transaction, error) {
 	start := time.Now()
 
