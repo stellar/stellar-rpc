@@ -125,6 +125,7 @@ var deferredIndexes = []deferredIndex{
 	{Name: "idx_transactions_hash", DDL: "CREATE UNIQUE INDEX idx_transactions_hash ON transactions(hash)"},
 	{Name: "idx_id_contract_id", DDL: "CREATE INDEX idx_id_contract_id ON events (contract_id, id)"},
 	{Name: "idx_id_topic1", DDL: "CREATE INDEX idx_id_topic1 ON events (topic1, id)"},
+	{Name: "idx_id_contract_id_topic1", DDL: "CREATE INDEX idx_id_contract_id_topic1 ON events (contract_id, topic1, id)"},
 }
 
 // PrepareBulkLoad idempotently reshapes an empty DB for a backfill by deferring
@@ -210,6 +211,11 @@ func FinalizeBulkLoad(ctx context.Context, d *DB, dbFilePath string, logger *log
 		logger.WithField("duration", time.Since(startTime).String()).
 			Infof("Built index %s", idx.Name)
 	}
+	startTime := time.Now() // the planner needs stats to pick idx_id_contract_id_topic1
+	if _, err := session.ExecRaw(ctx, "ANALYZE events"); err != nil {
+		return fmt.Errorf("could not analyze events: %w", err)
+	}
+	logger.WithField("duration", time.Since(startTime).String()).Info("Analyzed events")
 	if _, err := session.ExecRaw(ctx,
 		"DELETE FROM "+metaTableName+" WHERE key = ?", pendingIndexesMetaKey); err != nil {
 		return fmt.Errorf("could not clear deferred index record: %w", err)
