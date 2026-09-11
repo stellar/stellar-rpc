@@ -87,11 +87,6 @@ func (l ledgerReaderTx) BatchGetLedgers(
 	return batch, nil
 }
 
-// GetLedger fetches a single ledger from the db using a transaction.
-func (l ledgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
-	return getLedgerFromDB(ctx, l.tx, sequence)
-}
-
 // WithLedgerRaw lends the ledger's stored meta blob without decoding it. The
 // blob is ours to lend: database/sql clones each BLOB scanned into a *[]byte.
 func (l ledgerReaderTx) WithLedgerRaw(

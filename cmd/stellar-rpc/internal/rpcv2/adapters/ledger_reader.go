@@ -19,11 +19,11 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
-// walkSpanCap bounds the ledger span ledgerReaderTx.GetLedger primes its walk
-// iterator with: one chunk's worth of ledgers, touching at most two chunks
-// when the span straddles a boundary, so view.ScanLedgers can resolve every
-// reader up front. Handler scan limits (methods.LedgerScanLimit) must stay
-// ≤ this cap; the pairing test enforces it.
+// walkSpanCap bounds the ledger span ledgerReaderTx.WithLedgerRaw primes its
+// walk iterator with: one chunk's worth of ledgers, touching at most two
+// chunks when the span straddles a boundary, so view.ScanLedgers can resolve
+// every reader up front. Handler scan limits (methods.LedgerScanLimit) must
+// stay ≤ this cap; the pairing test enforces it.
 const walkSpanCap = chunk.LedgersPerChunk
 
 // LedgerReader satisfies store.LedgerReader over the query router. Every
@@ -125,11 +125,11 @@ func (r *LedgerReader) NewTx(ctx context.Context) (store.LedgerReaderTx, error) 
 }
 
 // ledgerReaderTx satisfies store.LedgerReaderTx over the request's read view
-// (the serving wrapper owns and releases it — Done does not). GetLedger and
-// WithLedgerRaw serve getTransactions' ascending, contiguous per-ledger walk
-// by pulling from a single ScanLedgers iterator primed on the first call —
-// one iterator between them, see walk; GetLedgerRange and BatchGetLedgers
-// read through the same view but never touch that iterator.
+// (the serving wrapper owns and releases it — Done does not). WithLedgerRaw
+// serves getTransactions' ascending, contiguous per-ledger walk by pulling
+// from a ScanLedgers iterator primed on the first call, see walk;
+// GetLedgerRange and BatchGetLedgers read through the same view but never
+// touch that iterator.
 type ledgerReaderTx struct {
 	view *query.ReadView
 
@@ -139,21 +139,8 @@ type ledgerReaderTx struct {
 	stop func()
 }
 
-func (tx *ledgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
-	entry, found, err := tx.walk(ctx, sequence)
-	if err != nil || !found {
-		return xdr.LedgerCloseMeta{}, false, err
-	}
-	var lcm xdr.LedgerCloseMeta
-	if err := lcm.UnmarshalBinary(entry.Bytes); err != nil {
-		return xdr.LedgerCloseMeta{}, false, fmt.Errorf("adapters: unmarshal ledger %d: %w", sequence, err)
-	}
-	return lcm, true, nil
-}
-
-// WithLedgerRaw is GetLedger without the decode or the clone: it lends the
-// step's bytes straight from the chunk reader's scratch buffer, which the
-// next step overwrites — fn must not retain them.
+// WithLedgerRaw lends the step's bytes straight from the chunk reader's
+// scratch buffer, which the next step overwrites — fn must not retain them.
 func (tx *ledgerReaderTx) WithLedgerRaw(
 	ctx context.Context, sequence uint32, fn store.WithLedgerRawFn,
 ) (bool, error) {
