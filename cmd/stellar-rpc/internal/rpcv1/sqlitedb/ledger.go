@@ -87,9 +87,16 @@ func (l ledgerReaderTx) BatchGetLedgers(
 	return batch, nil
 }
 
-// GetLedger fetches a single ledger from the db using a transaction.
-func (l ledgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
-	return getLedgerFromDB(ctx, l.tx, sequence)
+// WithLedgerRaw lends the ledger's stored meta blob without decoding it. The
+// blob is ours to lend: database/sql clones each BLOB scanned into a *[]byte.
+func (l ledgerReaderTx) WithLedgerRaw(
+	ctx context.Context, sequence uint32, fn store.WithLedgerRawFn,
+) (bool, error) {
+	meta, found, err := getLedgerRawFromDB(ctx, l.tx, sequence)
+	if err != nil || !found {
+		return found, err
+	}
+	return true, fn(meta)
 }
 
 func (l ledgerReaderTx) Done() error {
@@ -367,8 +374,8 @@ func getLedgerFromDB(ctx context.Context, db readDB, sequence uint32) (xdr.Ledge
 	return lcm, true, nil
 }
 
-// getLedgerRawFromDB is a helper function that encapsulates the common logic
-// for fetching a single ledger's bytes from the database.
+// getLedgerRawFromDB fetches a single ledger's meta blob. The bytes are owned:
+// the driver and database/sql each copy the BLOB out of SQLite's memory.
 func getLedgerRawFromDB(ctx context.Context, db readDB, sequence uint32) ([]byte, bool, error) {
 	sql := sq.Select("meta").From(ledgerCloseMetaTableName).Where(sq.Eq{"sequence": sequence})
 	var results [][]byte

@@ -2,9 +2,8 @@ package store
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
-	"fmt"
-	"strconv"
 
 	"github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -32,87 +31,23 @@ type TransactionReader interface {
 	GetTransaction(ctx context.Context, hash xdr.Hash) (Transaction, error)
 }
 
-func ParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTransaction) (Transaction, error) {
-	var tx Transaction
-	var err error
-
-	//
-	// On-the-fly ingestion: extract all of the fields, return best effort.
-	//
-	tx.FeeBump = ingestTx.Envelope.IsFeeBump()
-	applicationOrder, convErr := strconv.ParseInt(strconv.FormatUint(uint64(ingestTx.Index), 10), 10, 32)
-	if convErr != nil {
-		return tx, fmt.Errorf("transaction index %d exceeds supported range", ingestTx.Index)
+// ParseTransactionView reshapes an SDK transaction view into a Transaction; the
+// byte fields alias the view's buffer.
+func ParseTransactionView(txView ingest.LedgerTransactionView) Transaction {
+	return Transaction{
+		TransactionHash:  hex.EncodeToString(txView.Hash[:]),
+		Result:           txView.Result,
+		Meta:             txView.Meta,
+		Envelope:         txView.Envelope,
+		Events:           txView.DiagnosticEvents,
+		FeeBump:          txView.FeeBump,
+		ApplicationOrder: txView.ApplicationOrder,
+		Successful:       txView.Successful,
+		Ledger: LedgerInfo{
+			Sequence:  txView.LedgerSequence,
+			CloseTime: txView.LedgerCloseTime,
+		},
+		TransactionEvents: txView.TransactionEvents,
+		ContractEvents:    txView.ContractEvents,
 	}
-	tx.ApplicationOrder = int32(applicationOrder)
-	tx.Successful = ingestTx.Result.Successful()
-	tx.Ledger = LedgerInfo{
-		Sequence:  lcm.LedgerSequence(),
-		CloseTime: lcm.LedgerCloseTime(),
-	}
-	tx.TransactionHash = ingestTx.Result.TransactionHash.HexString()
-
-	if tx.Result, err = ingestTx.Result.Result.MarshalBinary(); err != nil {
-		return tx, fmt.Errorf("couldn't encode transaction Result: %w", err)
-	}
-	if tx.Meta, err = ingestTx.UnsafeMeta.MarshalBinary(); err != nil {
-		return tx, fmt.Errorf("couldn't encode transaction UnsafeMeta: %w", err)
-	}
-	if tx.Envelope, err = ingestTx.Envelope.MarshalBinary(); err != nil {
-		return tx, fmt.Errorf("couldn't encode transaction Envelope: %w", err)
-	}
-
-	allEvents, err := ingestTx.GetTransactionEvents()
-	if err != nil {
-		return tx, fmt.Errorf("couldn't encode transaction Events: %w", err)
-	}
-
-	diagEvents, err := ingestTx.GetDiagnosticEvents()
-	if err != nil {
-		return tx, errors.Join(errors.New("couldn't encode diagnostic events"), err)
-	}
-
-	tx.Events = make([][]byte, 0, len(diagEvents))
-	for i, event := range diagEvents {
-		bytes, ierr := event.MarshalBinary()
-		if ierr != nil {
-			return tx, fmt.Errorf("couldn't encode transaction DiagnosticEvent %d: %w", i, ierr)
-		}
-		tx.Events = append(tx.Events, bytes)
-	}
-
-	if err = parseEvents(allEvents, &tx); err != nil {
-		return tx, err
-	}
-
-	return tx, err
-}
-
-// parseEvents parses diagnostic, transaction and contract events
-func parseEvents(allEvents ingest.TransactionEvents, tx *Transaction) error {
-	// encode TransactionEvents
-	tx.TransactionEvents = make([][]byte, 0, len(allEvents.TransactionEvents))
-	for i, event := range allEvents.TransactionEvents {
-		bytes, ierr := event.MarshalBinary()
-		if ierr != nil {
-			return fmt.Errorf("couldn't encode TransactionEvent %d: %w", i, ierr)
-		}
-		tx.TransactionEvents = append(tx.TransactionEvents, bytes)
-	}
-
-	// encode ContractEvents (slice of slices)
-	tx.ContractEvents = make([][][]byte, 0, len(allEvents.OperationEvents))
-	for opIndex, opEvents := range allEvents.OperationEvents {
-		events := make([][]byte, 0, len(opEvents))
-		for i, event := range opEvents {
-			bytes, ierr := event.MarshalBinary()
-			if ierr != nil {
-				return fmt.Errorf("couldn't encode ContractEvent %d for operation %d: %w", i, opIndex, ierr)
-			}
-			events = append(events, bytes)
-		}
-
-		tx.ContractEvents = append(tx.ContractEvents, events)
-	}
-	return nil
 }

@@ -181,14 +181,21 @@ func TestStreamLedgerRange_BelowFloorIsRangeError(t *testing.T) {
 	assert.Equal(t, c0.FirstLedger(), rangeErr.Oldest)
 }
 
-func TestTxGetLedger_WalksContiguously(t *testing.T) {
+// txGetLedger is the Tx's retired GetLedger: one WithLedgerRaw step, decoded inside the loan.
+func txGetLedger(ctx context.Context, tx store.LedgerReaderTx, seq uint32) (xdr.LedgerCloseMeta, bool, error) {
+	var lcm xdr.LedgerCloseMeta
+	found, err := tx.WithLedgerRaw(ctx, seq, lcm.UnmarshalBinary)
+	return lcm, found, err
+}
+
+func TestTxWalk_Contiguous(t *testing.T) {
 	ctx, reader, c0, _ := sparseFixture(t)
 	tx, err := reader.NewTx(ctx)
 	require.NoError(t, err)
 	defer func() { _ = tx.Done() }()
 
 	for seq := c0.FirstLedger(); seq <= c0.FirstLedger()+3; seq++ {
-		lcm, ok, err := tx.GetLedger(context.Background(), seq)
+		lcm, ok, err := txGetLedger(context.Background(), tx, seq)
 		require.NoError(t, err)
 		require.True(t, ok, "ledger %d", seq)
 		assert.Equal(t, seq, lcm.LedgerSequence())
@@ -196,23 +203,23 @@ func TestTxGetLedger_WalksContiguously(t *testing.T) {
 	}
 }
 
-func TestTxGetLedger_NonSequentialFailsLoudly(t *testing.T) {
+func TestTxWalk_NonSequentialFailsLoudly(t *testing.T) {
 	ctx, reader, c0, _ := sparseFixture(t)
 	tx, err := reader.NewTx(ctx)
 	require.NoError(t, err)
 	defer func() { _ = tx.Done() }()
 
-	_, ok, err := tx.GetLedger(context.Background(), c0.FirstLedger())
+	_, ok, err := txGetLedger(context.Background(), tx, c0.FirstLedger())
 	require.NoError(t, err)
 	require.True(t, ok)
 
 	// Skipping ahead breaks the walk contract; serving the wrong ledger's
 	// data would be worse than an error.
-	_, _, err = tx.GetLedger(context.Background(), c0.FirstLedger()+2)
+	_, _, err = txGetLedger(context.Background(), tx, c0.FirstLedger()+2)
 	assert.ErrorContains(t, err, "non-sequential")
 }
 
-func TestTxGetLedger_GuardsBeforePriming(t *testing.T) {
+func TestTxWalk_GuardsBeforePriming(t *testing.T) {
 	ctx, reader, c0, c1 := sparseFixture(t)
 	tx, err := reader.NewTx(ctx)
 	require.NoError(t, err)
@@ -221,12 +228,12 @@ func TestTxGetLedger_GuardsBeforePriming(t *testing.T) {
 	// Sub-genesis and out-of-window sequences return clean misses without
 	// consuming the walk iterator...
 	for _, seq := range []uint32{0, 1, c0.FirstLedger() - 1, c1.FirstLedger() + 1} {
-		_, ok, err := tx.GetLedger(context.Background(), seq)
+		_, ok, err := txGetLedger(context.Background(), tx, seq)
 		assert.NoError(t, err)
 		assert.False(t, ok)
 	}
 	// ...so a walk primed afterwards still starts at its own sequence.
-	lcm, ok, err := tx.GetLedger(context.Background(), c0.FirstLedger())
+	lcm, ok, err := txGetLedger(context.Background(), tx, c0.FirstLedger())
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, c0.FirstLedger(), lcm.LedgerSequence())
@@ -245,7 +252,7 @@ func TestTxGetLedgerRange_DoesNotDisturbTheWalk(t *testing.T) {
 	assert.Equal(t, c0.FirstLedger(), lr.FirstLedger.Sequence)
 	assert.Equal(t, c1.FirstLedger(), lr.LastLedger.Sequence)
 
-	lcm, ok, err := tx.GetLedger(context.Background(), c0.FirstLedger()+1)
+	lcm, ok, err := txGetLedger(context.Background(), tx, c0.FirstLedger()+1)
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, c0.FirstLedger()+1, lcm.LedgerSequence())
@@ -335,13 +342,13 @@ func TestTxDone_WithAndWithoutPriming(t *testing.T) {
 
 	tx, err = reader.NewTx(ctx)
 	require.NoError(t, err)
-	_, _, err = tx.GetLedger(context.Background(), c0.FirstLedger())
+	_, _, err = txGetLedger(context.Background(), tx, c0.FirstLedger())
 	require.NoError(t, err)
 	assert.NoError(t, tx.Done())
 	assert.NoError(t, tx.Done(), "a second Done must be a no-op, not a double release")
 }
 
-func TestTxGetLedger_WalkCrossesChunkBorder(t *testing.T) {
+func TestTxWalk_CrossesChunkBorder(t *testing.T) {
 	if testing.Short() {
 		t.Skip("seeds a full 10k-ledger chunk")
 	}
@@ -358,14 +365,14 @@ func TestTxGetLedger_WalkCrossesChunkBorder(t *testing.T) {
 	defer func() { _ = tx.Done() }()
 
 	for seq := c0.LastLedger() - 1; seq <= c1.FirstLedger()+1; seq++ {
-		lcm, ok, err := tx.GetLedger(context.Background(), seq)
+		lcm, ok, err := txGetLedger(context.Background(), tx, seq)
 		require.NoError(t, err, "ledger %d", seq)
 		require.True(t, ok, "ledger %d", seq)
 		assert.Equal(t, seq, lcm.LedgerSequence())
 	}
 }
 
-func TestTxGetLedger_WalkPastSpanCapIsExhaustedNotNonSequential(t *testing.T) {
+func TestTxWalk_PastSpanCapIsExhaustedNotNonSequential(t *testing.T) {
 	if testing.Short() {
 		t.Skip("seeds a full 10k-ledger chunk")
 	}
@@ -383,12 +390,12 @@ func TestTxGetLedger_WalkPastSpanCapIsExhaustedNotNonSequential(t *testing.T) {
 
 	start := c0.FirstLedger()
 	for seq := start; seq < start+walkSpanCap; seq++ {
-		_, ok, err := tx.GetLedger(context.Background(), seq)
+		_, ok, err := txGetLedger(context.Background(), tx, seq)
 		require.NoError(t, err, "ledger %d", seq)
 		require.True(t, ok, "ledger %d", seq)
 	}
 
-	_, _, err = tx.GetLedger(context.Background(), start+walkSpanCap)
+	_, _, err = txGetLedger(context.Background(), tx, start+walkSpanCap)
 	require.ErrorContains(t, err, "exhausted its primed")
 	assert.NotContains(t, err.Error(), "non-sequential")
 }
@@ -410,22 +417,6 @@ func TestWalkSpanCapCoversTheHandlerScanLimit(t *testing.T) {
 	assert.Equal(t, methods.LedgerScanLimit, int(walkSpanCap),
 		"the per-request scan bound has one value (chunk.LedgersPerChunk); "+
 			"methods.LedgerScanLimit cannot derive from it (shared v1 code), so it is pinned here")
-}
-
-func TestLedgerReaderTx_GetLedgerStopsOnCanceledContext(t *testing.T) {
-	baseCtx, reader, c0, _ := sparseFixture(t)
-	tx, err := reader.NewTx(baseCtx)
-	require.NoError(t, err)
-	defer func() { _ = tx.Done() }()
-
-	ctx, cancel := context.WithCancel(baseCtx)
-	_, found, err := tx.GetLedger(ctx, c0.FirstLedger())
-	require.NoError(t, err)
-	require.True(t, found)
-
-	cancel()
-	_, _, err = tx.GetLedger(ctx, c0.FirstLedger()+1)
-	require.ErrorIs(t, err, context.Canceled)
 }
 
 func TestLedgerReaderTx_BatchGetLedgersStopsOnCanceledContext(t *testing.T) {
@@ -519,6 +510,49 @@ func TestWithLedgerRaw_MissDoesNotRunFn(t *testing.T) {
 	}
 }
 
+func TestTxWithLedgerRaw_LendsTheSameBytesGetLedgerDecodes(t *testing.T) {
+	ctx, reader, c0, _ := sparseFixture(t)
+	rawTx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = rawTx.Done() }()
+
+	for seq := c0.FirstLedger(); seq <= c0.FirstLedger()+3; seq++ {
+		lcm, ok, err := reader.GetLedger(ctx, seq)
+		require.NoError(t, err)
+		require.True(t, ok, "ledger %d", seq)
+		want, err := lcm.MarshalBinary()
+		require.NoError(t, err)
+
+		var got []byte
+		found, err := rawTx.WithLedgerRaw(context.Background(), seq, func(raw []byte) error {
+			// The loan forbids retaining raw, so clone inside fn.
+			got = bytes.Clone(raw)
+			return nil
+		})
+		require.NoError(t, err)
+		require.True(t, found, "ledger %d", seq)
+		assert.Equal(t, want, got, "ledger %d", seq)
+	}
+}
+
+func TestTxWithLedgerRaw_MissDoesNotRunFn(t *testing.T) {
+	ctx, reader, c0, c1 := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	for _, seq := range []uint32{0, 1, c0.FirstLedger() - 1, c1.FirstLedger() + 1} {
+		ran := false
+		found, err := tx.WithLedgerRaw(context.Background(), seq, func([]byte) error {
+			ran = true
+			return nil
+		})
+		assert.NoError(t, err)
+		assert.False(t, found, "ledger %d", seq)
+		assert.False(t, ran, "fn must not run for an absent ledger %d", seq)
+	}
+}
+
 func TestWithLedgerRaw_CallbackErrorSurfacesAsFound(t *testing.T) {
 	ctx, reader, c0, _ := sparseFixture(t)
 	boom := errors.New("boom")
@@ -526,4 +560,38 @@ func TestWithLedgerRaw_CallbackErrorSurfacesAsFound(t *testing.T) {
 	found, err := reader.WithLedgerRaw(ctx, c0.FirstLedger(), func([]byte) error { return boom })
 	assert.ErrorIs(t, err, boom)
 	assert.True(t, found)
+}
+
+func TestTxWithLedgerRaw_CallbackErrorSurfacesAsFound(t *testing.T) {
+	ctx, reader, c0, _ := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	boom := errors.New("boom")
+	// found stays true: the ledger WAS there, the caller's own callback failed.
+	found, err := tx.WithLedgerRaw(context.Background(), c0.FirstLedger(),
+		func([]byte) error { return boom })
+	assert.ErrorIs(t, err, boom)
+	assert.True(t, found)
+}
+
+func TestTxWithLedgerRaw_StopsOnCanceledContext(t *testing.T) {
+	baseCtx, reader, c0, _ := sparseFixture(t)
+	tx, err := reader.NewTx(baseCtx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	ctx, cancel := context.WithCancel(baseCtx)
+	_, err = tx.WithLedgerRaw(ctx, c0.FirstLedger(), func([]byte) error { return nil })
+	require.NoError(t, err)
+
+	cancel()
+	ran := false
+	_, err = tx.WithLedgerRaw(ctx, c0.FirstLedger()+1, func([]byte) error {
+		ran = true
+		return nil
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, ran)
 }

@@ -2,7 +2,6 @@ package methods
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -16,7 +15,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
-//nolint:funlen
 func GetTransaction(
 	ctx context.Context,
 	log *log.Entry,
@@ -63,15 +61,12 @@ func GetTransaction(
 		LatestLedgerCloseTime: storeRange.LastLedger.CloseTime,
 		OldestLedger:          storeRange.FirstLedger.Sequence,
 		OldestLedgerCloseTime: storeRange.FirstLedger.CloseTime,
-		TransactionDetails: protocol.TransactionDetails{
-			TransactionHash: request.Hash,
-		},
 	}
 
-	if errors.Is(getTxErr, store.ErrNoTransaction) {
+	switch {
+	case errors.Is(getTxErr, store.ErrNoTransaction):
 		response.Status = protocol.TransactionStatusNotFound
-		return response, nil
-	} else if getTxErr != nil {
+	case getTxErr != nil:
 		log.WithError(getTxErr).
 			WithField("hash", txHash).
 			Errorf("failed to fetch transaction")
@@ -79,54 +74,18 @@ func GetTransaction(
 			Code:    jrpc2.InternalError,
 			Message: getTxErr.Error(),
 		}
-	}
-
-	response.ApplicationOrder = tx.ApplicationOrder
-	response.FeeBump = tx.FeeBump
-	response.Ledger = tx.Ledger.Sequence
-	response.LedgerCloseTime = tx.Ledger.CloseTime
-
-	switch request.Format {
-	case protocol.FormatJSON:
-		result, envelope, meta, convErr := transactionToJSON(tx)
-		if convErr != nil {
-			return response, &jrpc2.Error{
-				Code:    jrpc2.InternalError,
-				Message: convErr.Error(),
-			}
-		}
-		diagEvents, convErr := jsonifySlice(xdr.DiagnosticEvent{}, tx.Events)
-		if convErr != nil {
-			return response, &jrpc2.Error{
-				Code:    jrpc2.InternalError,
-				Message: convErr.Error(),
-			}
-		}
-
-		response.ResultJSON = result
-		response.EnvelopeJSON = envelope
-		response.ResultMetaJSON = meta
-		response.DiagnosticEventsJSON = diagEvents
-
-		response.Events, convErr = BuildEventsJSONFromTransaction(tx)
-		if convErr != nil {
-			return response, &jrpc2.Error{
-				Code:    jrpc2.InternalError,
-				Message: convErr.Error(),
-			}
-		}
 	default:
-		response.ResultXDR = base64.StdEncoding.EncodeToString(tx.Result)
-		response.EnvelopeXDR = base64.StdEncoding.EncodeToString(tx.Envelope)
-		response.ResultMetaXDR = base64.StdEncoding.EncodeToString(tx.Meta)
-		response.DiagnosticEventsXDR = base64EncodeSlice(tx.Events)
-		response.Events = BuildEventsXDRFromTransaction(tx)
+		txInfo, ferr := transactionInfo(tx, request.Format)
+		if ferr != nil {
+			return response, &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: ferr.Error(),
+			}
+		}
+		response.TransactionDetails = txInfo.TransactionDetails
+		response.LedgerCloseTime = txInfo.LedgerCloseTime
 	}
-
-	response.Status = protocol.TransactionStatusFailed
-	if tx.Successful {
-		response.Status = protocol.TransactionStatusSuccess
-	}
+	response.TransactionHash = request.Hash
 	return response, nil
 }
 
