@@ -11,7 +11,7 @@ defaults:
 
 on:
   push:
-    branches: [release/**, cache-getLatestLedger]
+    branches: [release/**]
   workflow_dispatch:
     inputs:
       target_ref:
