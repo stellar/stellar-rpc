@@ -225,7 +225,7 @@ var matchBatchSize = 512
 // reach a measurement.
 //
 //nolint:gochecknoglobals // -ldflags -X seam; parsed at init, never written
-var stage1Slabs = "8"
+var stage1Slabs = "4"
 
 // defaultStage1Slabs is stage1Slabs parsed: the stage-1 width this binary was
 // built with.
@@ -281,52 +281,71 @@ func batchSizes(hint int) (int, int) {
 	return first, rest
 }
 
-// windowStages yields the at most two pieces of window a query materializes,
-// in walk order. Stage 1 is the leading matchStage1Slabs slabs from the edge
-// the walk starts at — the trailing ones when descending — and stage 2 is
-// whatever is left of the window. matchOneStage yields the window itself.
+// stage1Request is the piece of remaining a query's first lookup asks for:
+// the leading matchStage1Slabs slabs from the edge the walk starts at — the
+// trailing ones when descending. matchOneStage asks for the whole of it.
 //
-// Stage 2 is a lookup of its own, so a query that fills its page inside stage
-// 1 never asks the index about it: the consumer stops pulling and the loop in
-// Matches ends before the second yield. That is the whole point of the split
-// — the common page is served from the window's leading edge, so it asks the
-// index for a page's worth of window rather than for a chunk's — and it is
-// why there is no third stage: past the leading edge a query is reading the
-// window, and reading it in pieces would only cost round trips.
+// Every stage after the first asks for the whole remainder, so there are at
+// most two lookups. Stage 2 is a lookup of its own, so a query that fills its
+// page inside stage 1 never asks the index about it: the consumer stops
+// pulling and the loop in Matches ends before the second request. That is the
+// whole point of the split — the common page is served from the window's
+// leading edge, so it asks the index for a page's worth of window rather than
+// for a chunk's — and it is why there is no third stage: past the leading
+// edge a query is reading the window, and reading it in pieces would only
+// cost round trips.
 //
-// The seam falls on a slab boundary, so no slab is ever split across the two
+// The request falls on a slab boundary, so no slab is ever split across two
 // stages: the slabs the walk opens, and so the candidates it evaluates, are
 // the same whether there are one or two. The leading stage is entered at the
 // window's own bound, which may sit mid-slab.
-func windowStages(window IDRange, descending bool) iter.Seq[IDRange] {
-	return func(yield func(IDRange) bool) {
-		// A width past maxStageSlabs already covers any window, so it is
-		// clamped there rather than overflowing the slab shift.
-		slabs := min(uint64(max(0, matchStage1Slabs)), maxStageSlabs)
-		if slabs == 0 {
-			yield(window)
-			return
-		}
-		if descending {
-			lo := window.Start
-			if base := stageFloor(window.End, slabs); base > uint64(lo) {
-				lo = uint32(base) //nolint:gosec // base < window.End <= MaxUint32
-			}
-			if !yield(IDRange{Start: lo, End: window.End}) || lo == window.Start {
-				return
-			}
-			yield(IDRange{Start: window.Start, End: lo})
-			return
-		}
-		hi := window.End
-		if top := stageCeil(window.Start, slabs); top < uint64(hi) {
-			hi = uint32(top) //nolint:gosec // top < window.End <= MaxUint32
-		}
-		if !yield(IDRange{Start: window.Start, End: hi}) || hi == window.End {
-			return
-		}
-		yield(IDRange{Start: hi, End: window.End})
+func stage1Request(remaining IDRange, descending bool) IDRange {
+	// A width past maxStageSlabs already covers any window, so it is
+	// clamped there rather than overflowing the slab shift.
+	slabs := min(uint64(max(0, matchStage1Slabs)), maxStageSlabs)
+	if slabs == 0 {
+		return remaining
 	}
+	if descending {
+		lo := remaining.Start
+		if base := stageFloor(remaining.End, slabs); base > uint64(lo) {
+			lo = uint32(base) //nolint:gosec // base < remaining.End <= MaxUint32
+		}
+		return IDRange{Start: lo, End: remaining.End}
+	}
+	hi := remaining.End
+	if top := stageCeil(remaining.Start, slabs); top < uint64(hi) {
+		hi = uint32(top) //nolint:gosec // top < remaining.End <= MaxUint32
+	}
+	return IDRange{Start: remaining.Start, End: hi}
+}
+
+// stageWalk is how far a stage's bitmaps can be walked: what the lookup says
+// it covered, cut back to what is left of the window. A reader that reads in
+// units wider than the request — the cold index reads whole parts — answers
+// for the whole unit, and walking it saves the next stage a lookup of ids
+// already in memory. covered always contains the request, so this is never
+// narrower than the stage asked for and the walk always advances.
+func stageWalk(remaining, covered IDRange, descending bool) IDRange {
+	walk := remaining
+	if descending {
+		if covered.Start > remaining.Start {
+			walk.Start = covered.Start
+		}
+		return walk
+	}
+	if covered.End < remaining.End {
+		walk.End = covered.End
+	}
+	return walk
+}
+
+// stageRemainder is what is left of remaining once walked has been walked.
+func stageRemainder(remaining, walked IDRange, descending bool) IDRange {
+	if descending {
+		return IDRange{Start: remaining.Start, End: walked.Start}
+	}
+	return IDRange{Start: walked.End, End: remaining.End}
 }
 
 // maxStageSlabs is the widest stage 1 can be: one slab per id covers any
@@ -370,15 +389,18 @@ func stageFloor(hi uint32, slabs uint64) uint64 {
 // drops are invisible: the iterator advances past them internally, so
 // consumers never see or reason about resume state.
 //
-// The window is materialized in at most two stages (see windowStages): the
+// The window is materialized in at most two stages (see stage1Request): the
 // leading slabs in the walk's direction, then the remainder, and the second
 // only if the consumer is still pulling when the first runs out. So a query
 // performs one Reader.LookupKeys per stage rather than one per call, and on
 // the hot tier it sees one image of the index per stage rather than one for
-// the whole walk. The stream is still the pinned window's: the caller pins
-// window.End below the ingest frontier (see IDRange) and a committed
-// ledger's events never change, so every stage's image answers for the
-// window identically, whenever it is taken.
+// the whole walk. A stage is walked as far as its lookup says it covered,
+// which on the cold tier is the request grown out to the index parts it had
+// to read whole anyway — so the seam moves to where the reading stopped and
+// no part is ever read twice. The stream is still the pinned window's: the
+// caller pins window.End below the ingest frontier (see IDRange) and a
+// committed ledger's events never change, so every stage's image answers for
+// the window identically, whenever it is taken.
 //
 // firstBatch sizes the first internal fetch: a consumer that will stop after
 // N matches passes N. Zero and negative hints use the default. A page that
@@ -405,26 +427,33 @@ func Matches(
 			return
 		}
 		emitted := 0
-		// One query, one memory of the parts it has been handed: the part on
-		// the stage seam belongs to both stages, and this is what keeps it
-		// from being read twice. It dies with the iterator.
-		held := NewLookupParts()
-		for stage := range windowStages(window, descending) {
-			sources, err := r.LookupKeys(ctx, uniqueKeys, stage, held)
+		// remaining is the part of the window no stage has walked yet. The
+		// first stage asks for its leading slabs and every stage after it for
+		// all of what is left, so the loop runs at most twice; a stage always
+		// walks at least what it asked for, so remaining always shrinks.
+		remaining := window
+		for first := true; !remaining.isEmpty(); first = false {
+			stage := remaining
+			if first {
+				stage = stage1Request(remaining, descending)
+			}
+			sources, covered, err := r.LookupKeys(ctx, uniqueKeys, stage)
 			if err != nil {
 				yield(Match{}, fmt.Errorf("events: query lookup: %w", err))
 				return
 			}
-			// The stepper walks this stage and no further: bitmaps say
-			// nothing about the ids outside the stage they were looked up
-			// for, so the bounds it proves are the stage's and are dropped
-			// with it.
-			st := newSlabStepper(plans, sources, stage, descending)
+			// The stepper walks what the lookup covered and no further:
+			// bitmaps say nothing about the ids outside the range they were
+			// looked up for, so the bounds it proves are that range's and are
+			// dropped with it.
+			walked := stageWalk(remaining, covered, descending)
+			st := newSlabStepper(plans, sources, walked, descending)
 			// No plan survived term resolution here, so nothing in this
 			// stage can match and no slab in it is worth evaluating. The
 			// next stage is a lookup of its own, so the walk moves on
 			// rather than ending.
 			if len(st.plans) == 0 {
+				remaining = stageRemainder(remaining, walked, descending)
 				continue
 			}
 			// firstBatch is the whole query's hint, so what stage 1 already
@@ -437,6 +466,7 @@ func Matches(
 			if !ok {
 				return
 			}
+			remaining = stageRemainder(remaining, walked, descending)
 		}
 	}
 }

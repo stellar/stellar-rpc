@@ -517,10 +517,10 @@ func TestMatches_ShapedFixtureIsWhatItClaims(t *testing.T) {
 		"the wide union must span the corpus")
 
 	// Both sides of the overlap must be chunk-sized.
-	fat, err := r.LookupKeys(ctx, []TermKey{
+	fat, _, err := r.LookupKeys(ctx, []TermKey{
 		ComputeTermKey(f.vocab.contracts[0], FieldContractID),
 		ComputeTermKey(f.vocab.topicRaw[1], topicField(0)),
-	}, everyID, nil)
+	}, everyID)
 	require.NoError(t, err)
 	for i, bm := range fat {
 		require.NotNil(t, bm, "thin-overlap term %d must be indexed", i)
@@ -895,14 +895,17 @@ func (m lookupFuzzMode) String() string {
 	return "outside"
 }
 
-// windowFuzzReader is the caller's half of Reader.LookupKeys' window: a
-// result answers for the ids in the window it was asked for and for no
-// others. Wrapping any Reader with it — the hot store and this package's test
-// doubles alike — must not move a single match, which is what makes
-// "unspecified outside" a contract rather than an accident of what today's
-// readers happen to return. The bitmaps the wrapped reader hands back may be
-// shared with other readers (hot dense snapshots are), so each is cloned
-// before it is rewritten.
+// windowFuzzReader is the caller's half of Reader.LookupKeys' contract: a
+// result answers for the ids in the range the lookup reported it covered —
+// which contains the window it was asked for — and for no others. Wrapping
+// any Reader with it — the hot store and this package's test doubles alike —
+// must not move a single match, which is what makes "unspecified outside" a
+// contract rather than an accident of what today's readers happen to return.
+// The rewriting follows the covered range rather than the window, since that
+// is what the walk is entitled to read; a reader that covers more than it was
+// asked (the cold index, which reads whole parts) keeps its extra ids. The
+// bitmaps the wrapped reader hands back may be shared with other readers (hot
+// dense snapshots are), so each is cloned before it is rewritten.
 type windowFuzzReader struct {
 	Reader
 
@@ -913,11 +916,11 @@ type windowFuzzReader struct {
 }
 
 func (r windowFuzzReader) LookupKeys(
-	ctx context.Context, keys []TermKey, window IDRange, held *LookupParts,
-) ([]*roaring.Bitmap, error) {
-	bms, err := r.Reader.LookupKeys(ctx, keys, window, held)
+	ctx context.Context, keys []TermKey, window IDRange,
+) ([]*roaring.Bitmap, IDRange, error) {
+	bms, covered, err := r.Reader.LookupKeys(ctx, keys, window)
 	if err != nil {
-		return nil, err
+		return nil, IDRange{}, err
 	}
 	for i, bm := range bms {
 		if bm == nil {
@@ -925,20 +928,21 @@ func (r windowFuzzReader) LookupKeys(
 		}
 		out := bm.Clone()
 		if r.mode == fuzzClip {
-			out.RemoveRange(0, uint64(window.Start))
-			out.RemoveRange(uint64(window.End), uint64(math.MaxUint32)+1)
+			out.RemoveRange(0, uint64(covered.Start))
+			out.RemoveRange(uint64(covered.End), uint64(math.MaxUint32)+1)
 		} else {
-			r.perturb(out, window)
+			r.perturb(out, covered)
 		}
 		bms[i] = out
 	}
-	return bms, nil
+	return bms, covered, nil
 }
 
 // perturb runs the fuzzOutside mode: it adds ids to bm and drops ids from
-// it, always outside window. The window's own edges are where a wrong answer
-// bites: an id just past the window is what a NextValue asked at the last id
-// returns, and a walk that read it as the next candidate would fetch it.
+// it, always outside the covered range. That range's own edges are where a
+// wrong answer bites: an id just past it is what a NextValue asked at the
+// last id returns, and a walk that read it as the next candidate would fetch
+// it.
 func (r windowFuzzReader) perturb(bm *roaring.Bitmap, window IDRange) {
 	outside := func(id uint64) bool {
 		return id <= uint64(r.span) &&
@@ -1226,10 +1230,18 @@ func TestSlabStagesOpenTheSameSlabs(t *testing.T) {
 	const slab = 1 << 16
 	whole, sources := candidateFreeSlabFixture()
 
+	// The stage schedule Matches runs, with a reader that covers exactly what
+	// it is asked: stage 1 is the leading slabs, every stage after it the
+	// whole remainder.
 	walk := func(window IDRange, plans []termPlan, desc bool, slabs int) [][2]uint32 {
 		matchStage1Slabs = slabs
 		out := [][2]uint32{}
-		for stage := range windowStages(window, desc) {
+		remaining := window
+		for first := true; !remaining.isEmpty(); first = false {
+			stage := remaining
+			if first {
+				stage = stage1Request(remaining, desc)
+			}
 			st := newSlabStepper(plans, sources, stage, desc)
 			for {
 				lo, hi, ok := st.nextBounds()
@@ -1238,6 +1250,7 @@ func TestSlabStagesOpenTheSameSlabs(t *testing.T) {
 				}
 				out = append(out, [2]uint32{lo, hi})
 			}
+			remaining = stageRemainder(remaining, stage, desc)
 		}
 		return out
 	}

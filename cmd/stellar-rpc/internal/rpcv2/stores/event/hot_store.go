@@ -189,31 +189,36 @@ func (h *HotStore) Offsets() (*LedgerOffsets, error) {
 // reader. Neither grows under its holder, so a walk never sees an id
 // written after its lookup.
 //
-// The window and the held parts are ignored: these images are
-// whole-chunk and already in memory, so clipping one would only copy
-// it and there is nothing to re-read. A whole term agrees with the
-// index inside any window, which is all the contract asks.
+// The window is ignored: these images are whole-chunk and already in
+// memory, so clipping one would only copy it. A whole term agrees
+// with the index inside any window, which is all the contract asks.
+//
+// The covered range reported back is the window itself, not the whole
+// chunk. A whole term would justify the wider claim, but a hot lookup
+// is in-memory and re-reading costs nothing, so there is no I/O to
+// save by having the caller's walk run past what it asked for — and
+// the narrow answer keeps the walk's staging identical on both tiers.
 func (h *HotStore) LookupKeys(
-	ctx context.Context, keys []TermKey, _ IDRange, _ *LookupParts,
-) ([]*roaring.Bitmap, error) {
+	ctx context.Context, keys []TermKey, window IDRange,
+) ([]*roaring.Bitmap, IDRange, error) {
 	if h.chunkStore.IsClosed() {
-		return nil, stores.ErrStoreClosed
+		return nil, IDRange{}, stores.ErrStoreClosed
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, IDRange{}, err
 	}
 	if len(keys) == 0 {
-		return nil, nil
+		return nil, window, nil
 	}
 	results := make([]*roaring.Bitmap, len(keys))
 	for i, key := range keys {
 		bm, err := h.mirror.Get(key)
 		if err != nil {
-			return nil, fmt.Errorf("events: LookupKeys for chunk %s: %w", h.chunkID, err)
+			return nil, IDRange{}, fmt.Errorf("events: LookupKeys for chunk %s: %w", h.chunkID, err)
 		}
 		results[i] = bm // nil for misses — Get already returns nil bitmap for not-found
 	}
-	return results, nil
+	return results, window, nil
 }
 
 // FetchEvents decodes the events_data row for each provided eventID

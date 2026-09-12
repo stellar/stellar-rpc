@@ -95,23 +95,27 @@ type Reader interface {
 	// result[i] is nil if keys[i] has no matching events in this
 	// chunk — a per-key miss is not an error.
 	//
-	// window is the id range the caller will read the result over.
-	// Each returned bitmap agrees with the index on every id in
-	// [window.Start, window.End); ids outside the window may be
-	// present or absent, and callers MUST NOT depend on them — not
-	// as matches, and not as the answer to a NextValue or
-	// PreviousValue that leaves the window. The window exists so an
+	// window is the id range the caller asks to be answered for.
+	// The second result is the range the answer actually covers: it
+	// always contains window, and every returned bitmap agrees with
+	// the index on every id in it. Ids outside the covered range may
+	// be present or absent, and callers MUST NOT depend on them —
+	// not as matches, and not as the answer to a NextValue or
+	// PreviousValue that leaves it. The window exists so an
 	// implementation can read only the part of a term it is asked
-	// for; one that returns whole terms satisfies the contract for
-	// free, since a whole term agrees with the index everywhere.
+	// for; the covered range exists so it can report the whole of
+	// what it happened to read, since an implementation that reads
+	// in units wider than the window has already paid for the
+	// remainder. One that returns whole terms satisfies the contract
+	// for free, since a whole term agrees with the index everywhere.
 	//
 	// ColdReader coalesces the underlying packfile reads into a
 	// single ReadItems pass, fanning out across the worker count
 	// configured via ColdReaderOptions.Concurrency, and reads only the
-	// parts of a demoted term that the window reaches — so the ids it
-	// returns outside the window are whatever the boundary parts
-	// happened to hold, and a term small enough to have stayed whole
-	// comes back whole. HotStore returns
+	// parts of a demoted term that the window reaches — whole parts,
+	// so its covered range is the window grown out to the part
+	// boundaries every queried term was read to, and a term small
+	// enough to have stayed whole comes back whole. HotStore returns
 	// snapshots of the live mirror shared by all readers of a term;
 	// a dense term written since its last lookup is cloned once, by
 	// the first reader to look it up, and that clone is then shared.
@@ -124,20 +128,12 @@ type Reader interface {
 	// bitmaps are freshly unmarshaled and owned by the caller. See
 	// ConcurrentBitmaps.Get.
 	//
-	// held, when non-nil, is one query's memory of the index parts a
-	// Reader has already handed it, so a second lookup over a
-	// neighbouring window does not read the same bytes twice (see
-	// LookupParts). It belongs to the caller, not to the Reader: a
-	// Reader is shared by every concurrent query, and this is not.
-	// An implementation that reads whole terms holds nothing and
-	// ignores it; nil is always valid and means "hold nothing".
-	//
 	// ctx cancels in-flight I/O on the cold path (MPHF load,
 	// index.pack ReadAt); hot side checks ctx as a fast guard before
 	// touching the in-memory mirror.
 	LookupKeys(
-		ctx context.Context, keys []TermKey, window IDRange, held *LookupParts,
-	) ([]*roaring.Bitmap, error)
+		ctx context.Context, keys []TermKey, window IDRange,
+	) ([]*roaring.Bitmap, IDRange, error)
 
 	// FetchEvents decodes events for the supplied chunk-relative
 	// eventIDs and returns them positionally aligned with the input
@@ -216,56 +212,4 @@ func validateFetchRange(start, count, total uint32, chunkID chunk.ID) error {
 			start, uint64(start)+uint64(count), total)
 	}
 	return nil
-}
-
-// LookupParts is one query's memory of the index parts a Reader has already
-// handed it. A cold index cuts a dense term into parts spanning fixed ranges
-// of the id space, and a query that reads the window in stages asks for
-// neighbouring ranges in turn; the part on the seam belongs to both. Passing
-// the same LookupParts to each of a query's lookups means that part is read
-// once.
-//
-// It is deliberately the caller's, not the reader's. A ColdReader is shared
-// by every query against its chunk and lives as long as they do, so a cache
-// on it would be a cache with no owner and no bound; a LookupParts lives
-// exactly as long as the query that made it. It is not safe for concurrent
-// use, which costs nothing: a query's lookups are sequential by construction
-// (one per stage, and the next stage starts when the last one's walk ends).
-//
-// The zero value is not usable; NewLookupParts makes one. A nil
-// *LookupParts is valid everywhere and holds nothing, which is what every
-// caller outside Matches passes.
-type LookupParts struct {
-	parts map[partRef]*roaring.Bitmap
-}
-
-// partRef names one part of one term: the term's key and the part's index
-// within it. A reader that does not cut terms into parts never writes one.
-type partRef struct {
-	key TermKey
-	idx uint32
-}
-
-// NewLookupParts returns an empty LookupParts for one query.
-func NewLookupParts() *LookupParts {
-	return &LookupParts{parts: map[partRef]*roaring.Bitmap{}}
-}
-
-// get returns a part this query has already been handed.
-func (l *LookupParts) get(key TermKey, idx uint32) (*roaring.Bitmap, bool) {
-	if l == nil {
-		return nil, false
-	}
-	bm, ok := l.parts[partRef{key: key, idx: idx}]
-	return bm, ok
-}
-
-// put remembers a part. The bitmap is shared with the result it was decoded
-// for, so neither side may mutate it — the same read-only contract
-// LookupKeys' results already carry.
-func (l *LookupParts) put(key TermKey, idx uint32, bm *roaring.Bitmap) {
-	if l == nil {
-		return
-	}
-	l.parts[partRef{key: key, idx: idx}] = bm
 }

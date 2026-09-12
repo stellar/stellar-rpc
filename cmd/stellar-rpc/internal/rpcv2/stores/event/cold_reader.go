@@ -45,6 +45,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"math"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -393,18 +394,34 @@ type keyPlan struct {
 	parts []*roaring.Bitmap // one slot per part in [first, first+len), span order
 }
 
-// assemble unions a term's parts back together. The parts tile disjoint,
-// ascending spans of the id space, so this is an append in disguise: each Or
-// adds containers past everything the accumulator already holds, never
-// merging into one. It unions into a fresh bitmap rather than into the first
-// part because a part may be one the caller already held from an earlier
-// window, shared with that window's result and with the query's cache.
+// assemble unions a term's parts back together without copying a container.
+// A window that reaches one part returns that part itself. Past that, the
+// parts tile disjoint, ascending spans of the id space, so every Or is an
+// append in disguise: roaring runs off the end of the accumulator's own keys
+// and finishes in appendCopyMany, which hands over the source's containers
+// instead of cloning them when both bitmaps carry the copy-on-write mark —
+// the clone is the else branch of roaring v2's
+// `(ra.copyOnWrite && sa.copyOnWrite) || sa.needsCopyOnWrite(i)`. The mark is
+// safe to leave on the result: these parts were decoded by UnmarshalBinary,
+// which owns what it keeps (the caveat in roaring's docs is about FromBuffer,
+// which aliases the caller's bytes), and nothing downstream writes to a term
+// bitmap — the walk reads them and builds its own.
 func (p keyPlan) assemble() *roaring.Bitmap {
-	acc := roaring.New()
+	var acc *roaring.Bitmap
 	for _, part := range p.parts {
-		if part != nil {
-			acc.Or(part)
+		if part == nil {
+			continue
 		}
+		if acc == nil {
+			acc = part
+			continue
+		}
+		acc.SetCopyOnWrite(true)
+		part.SetCopyOnWrite(true)
+		acc.Or(part)
+	}
+	if acc == nil {
+		return roaring.New()
 	}
 	return acc
 }
@@ -417,15 +434,82 @@ type partRead struct {
 	part int32
 }
 
-// LookupKeys returns bitmaps for each key, aligned positionally with
-// the input slice (result[i] corresponds to keys[i]). See
-// Reader.LookupKeys for the semantics.
+// lookupCoverage accumulates the range a lookup's answer covers. It starts at
+// the whole id space and is cut back by each demoted term to the span of the
+// parts that term was actually read to; a key answered out of a whole bucket
+// item, or missing from the index altogether, answers everywhere and never
+// cuts it. With no demoted key in the batch there is nothing to report beyond
+// the window, and the window is what comes back.
+type lookupCoverage struct {
+	window IDRange
+	lo, hi uint64
+	dense  bool
+}
+
+func newLookupCoverage(window IDRange) lookupCoverage {
+	return lookupCoverage{window: window, lo: 0, hi: math.MaxUint32}
+}
+
+// parts records a demoted term read over parts [first, last]. Its answer is
+// the index's own across the whole span those parts tile — and above it too
+// when they run to the term's last part, since the parts tile the chunk and
+// the term holds nothing past them.
+func (c *lookupCoverage) parts(e partEntry, first, last uint32) {
+	c.dense = true
+	shift := uint(e.k) + indexSlabShift
+	c.lo = max(c.lo, uint64(first)<<shift)
+	if uint64(last)+1 < uint64(e.partCount) {
+		c.hi = min(c.hi, (uint64(last)+1)<<shift)
+	}
+}
+
+// emptyAbove records a demoted term the window missed entirely: the window
+// starts past the term's last part, so the empty answer is the index's own
+// from the end of those parts up.
+func (c *lookupCoverage) emptyAbove(e partEntry) {
+	c.dense = true
+	c.lo = max(c.lo, uint64(e.partCount)<<(uint(e.k)+indexSlabShift))
+}
+
+// result is the covered range, which always contains the window: every bound
+// it carries came off a part boundary that already bounded the window. The
+// containment is re-checked rather than assumed — a covered range that did
+// not contain the window would have the walk trust ids nobody looked up — and
+// a batch that fails it falls back to the window, which every answer covers.
+func (c lookupCoverage) result() IDRange {
+	if !c.dense || c.window.isEmpty() {
+		return c.window
+	}
+	hi := min(c.hi, math.MaxUint32)
+	if c.lo > uint64(c.window.Start) || hi < uint64(c.window.End) {
+		return c.window
+	}
+	return IDRange{Start: uint32(c.lo), End: uint32(hi)}
+}
+
+// decodeIndexItem decodes one index.pack item under the key that named it: a
+// bucket item through the fingerprint gate that turns a residual MPHF
+// collision into a miss, a part through the stricter one that calls a
+// fingerprint mismatch corruption.
+func decodeIndexItem(item []byte, key TermKey, r partRead) (*roaring.Bitmap, error) {
+	if r.part < 0 {
+		return verifyAndDeserializeBitmap(item, key, uint32(r.pos)) //nolint:gosec // a slot
+	}
+	return deserializePart(item, key, uint32(r.part)) //nolint:gosec // non-negative here
+}
+
+// LookupKeys returns bitmaps for each key, aligned positionally with the
+// input slice (result[i] corresponds to keys[i]), and the id range those
+// bitmaps answer for. See Reader.LookupKeys for the semantics.
 //
 // Cold-side implementation:
 //
 //  1. Resolve every key against the directory. A demoted (dense) term names
 //     the part records covering window; an empty window, or a window past
 //     the term's last part, is a non-nil empty result and no I/O at all.
+//     Parts are read whole, so the same pass collects the covered range: the
+//     window grown out to the part boundaries every demoted term in the
+//     batch was read to.
 //  2. Every other key goes through the MPHF. Keys rejected at the routing
 //     stage (streamhash ErrKeyNotFound) get result[i] = nil and never touch
 //     index.pack; the rest name their bucket item by slot.
@@ -433,133 +517,132 @@ type partRead struct {
 //     two keys can share a bucket item (a residual MPHF collision), but
 //     never a part. The packfile reader coalesces adjacent positions into
 //     single ReadAt calls and fans out across the worker count configured
-//     via ColdReaderOptions.Concurrency. The callbacks only copy bytes:
-//     every decode happens afterwards, on this goroutine.
-//  4. Verify and decode. A bucket item is this term's whole posting set, or
-//     a fingerprint miss; a term's parts are unioned back together in span
-//     order.
-//
-// held, when non-nil, is the calling query's memory of the parts it has
-// already been handed (see LookupParts): a part already in it is not read
-// again, and every part this call decodes is added to it. It is state of the
-// query, not of the reader — two queries against the same chunk share
-// nothing.
+//     via ColdReaderOptions.Concurrency. Each item is decoded in the
+//     callback, straight off the lent bytes: roaring's UnmarshalBinary owns
+//     what it keeps, so nothing has to be copied to outlive fn, and the
+//     decode rides the read's own fan-out. Every read owns its own slot of
+//     decoded, so concurrent callbacks never write the same one.
+//  4. Merge, serially: a bucket item is this term's whole posting set or a
+//     fingerprint miss, and a term's parts go back together in span order
+//     through keyPlan.assemble.
 //
 //nolint:cyclop,gocognit // the four documented passes above, inline; splitting obscures the structure
 func (c *ColdReader) LookupKeys(
-	ctx context.Context, keys []TermKey, window IDRange, held *LookupParts,
-) ([]*roaring.Bitmap, error) {
+	ctx context.Context, keys []TermKey, window IDRange,
+) ([]*roaring.Bitmap, IDRange, error) {
 	if c.closed.Load() {
-		return nil, stores.ErrStoreClosed
+		return nil, IDRange{}, stores.ErrStoreClosed
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, IDRange{}, err
 	}
 	if len(keys) == 0 {
-		return nil, nil
+		return nil, window, nil
 	}
 	if err := c.validateMPHF(); err != nil {
-		return nil, err
+		return nil, IDRange{}, err
 	}
 	mphf, err := c.waitMPHF()
 	if err != nil {
-		return nil, err
+		return nil, IDRange{}, err
 	}
 	dir, err := c.waitDir()
 	if err != nil {
-		return nil, err
+		return nil, IDRange{}, err
 	}
 
 	results := make([]*roaring.Bitmap, len(keys))
 	plans := make([]keyPlan, len(keys))
 	reads := make([]partRead, 0, len(keys))
+	cov := newLookupCoverage(window)
 
 	for i, key := range keys {
-		if entry, ok := dir.lookup(key); ok {
-			plans[i].dense = true
-			first, last, any := entry.window(window)
-			if !any {
-				// Present in the chunk, nothing of it in the window.
-				results[i] = roaring.New()
-				continue
-			}
-			plans[i].first = first
-			plans[i].parts = make([]*roaring.Bitmap, last-first+1)
-			for part := first; part <= last; part++ {
-				if bm, ok := held.get(key, part); ok {
-					plans[i].parts[part-first] = bm
-					continue
+		entry, demoted := dir.lookup(key)
+		if !demoted {
+			slot, lerr := mphf.Lookup(key)
+			if lerr != nil {
+				if errors.Is(lerr, ErrKeyNotFound) {
+					continue // result[i] stays nil
 				}
-				reads = append(reads, partRead{
-					pos:  int(entry.firstRecord+part) * indexPackItemsPerRecord,
-					out:  i,
-					part: int32(part), //nolint:gosec // bounded by partCount (uint16)
-				})
+				return nil, IDRange{}, fmt.Errorf(
+					"events: LookupKeys MPHF for chunk %s: %w", c.chunkID, lerr)
 			}
+			reads = append(reads, partRead{pos: int(slot), out: i, part: -1})
 			continue
 		}
-		slot, lerr := mphf.Lookup(key)
-		if lerr != nil {
-			if errors.Is(lerr, ErrKeyNotFound) {
-				continue // result[i] stays nil
-			}
-			return nil, fmt.Errorf("events: LookupKeys MPHF for chunk %s: %w", c.chunkID, lerr)
+		plans[i].dense = true
+		first, last, any := entry.window(window)
+		if !any {
+			// Present in the chunk, nothing of it in the window.
+			results[i] = roaring.New()
+			cov.emptyAbove(entry)
+			continue
 		}
-		reads = append(reads, partRead{pos: int(slot), out: i, part: -1})
+		cov.parts(entry, first, last)
+		plans[i].first = first
+		plans[i].parts = make([]*roaring.Bitmap, last-first+1)
+		for part := first; part <= last; part++ {
+			reads = append(reads, partRead{
+				pos:  int(entry.firstRecord+part) * indexPackItemsPerRecord,
+				out:  i,
+				part: int32(part), //nolint:gosec // bounded by partCount (uint16)
+			})
+		}
 	}
+	covered := cov.result()
 	if len(reads) == 0 {
-		return results, nil
+		return results, covered, nil
 	}
 
 	sort.Slice(reads, func(i, j int) bool { return reads[i].pos < reads[j].pos })
 
-	// One position per distinct item. Two reads share a position only when
-	// two keys residually collide into the same MPHF rank.
+	// One position per distinct item, and runStart[p] .. runStart[p+1] are
+	// the reads that name position p. The run is one read except when two
+	// keys residually collide into the same MPHF rank, and then each of them
+	// decodes the item under its own fingerprint.
 	positions := make([]int, 0, len(reads))
-	readIdx := make([]int, len(reads))
+	runStart := make([]int, 0, len(reads)+1)
 	for i, r := range reads {
 		if i > 0 && reads[i-1].pos == r.pos {
-			readIdx[i] = len(positions) - 1
 			continue
 		}
 		positions = append(positions, r.pos)
-		readIdx[i] = len(positions) - 1
+		runStart = append(runStart, i)
 	}
+	runStart = append(runStart, len(reads))
 
-	items := make([][]byte, len(positions))
+	decoded := make([]*roaring.Bitmap, len(reads))
 	if err := c.index.ReadItems(ctx, positions, func(idx int, data []byte) error {
-		// ReadItems lends data only for the callback, and may call back from
-		// several goroutines. Copy, decode later, serially.
-		items[idx] = bytes.Clone(data)
+		// ReadItems lends data for the callback only, and may call back from
+		// several goroutines. Decode here rather than copying the bytes out
+		// to decode later: roaring's UnmarshalBinary keeps its own copy of
+		// what it reads, so the bitmap outlives fn on its own, and the reads
+		// below write disjoint slots.
+		for j := runStart[idx]; j < runStart[idx+1]; j++ {
+			bm, derr := decodeIndexItem(data, keys[reads[j].out], reads[j])
+			if derr != nil {
+				return derr
+			}
+			decoded[j] = bm
+		}
 		return nil
 	}); err != nil {
-		return nil, fmt.Errorf("events: LookupKeys read for chunk %s: %w", c.chunkID, err)
+		return nil, IDRange{}, fmt.Errorf("events: LookupKeys read for chunk %s: %w", c.chunkID, err)
 	}
 
-	for i, r := range reads {
-		item := items[readIdx[i]]
+	for j, r := range reads {
 		if r.part < 0 {
-			bm, derr := verifyAndDeserializeBitmap(item, keys[r.out], uint32(r.pos)) //nolint:gosec // a slot
-			if derr != nil {
-				return nil, derr
-			}
-			results[r.out] = bm
+			results[r.out] = decoded[j]
 			continue
 		}
-		part := uint32(r.part) //nolint:gosec // non-negative here
-		bm, derr := deserializePart(item, keys[r.out], part)
-		if derr != nil {
-			return nil, derr
-		}
-		plans[r.out].parts[part-plans[r.out].first] = bm
-		held.put(keys[r.out], part, bm)
+		plans[r.out].parts[uint32(r.part)-plans[r.out].first] = decoded[j] //nolint:gosec // non-negative here
 	}
 	for i := range plans {
 		if plans[i].dense && plans[i].parts != nil {
 			results[i] = plans[i].assemble()
 		}
 	}
-	return results, nil
+	return results, covered, nil
 }
 
 // FetchEvents decodes events_data records for the supplied

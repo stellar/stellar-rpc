@@ -37,19 +37,21 @@ func (r diffReader) Offsets() (*LedgerOffsets, error) {
 }
 
 // The window is ignored: the corpus is in memory whole, so a term's whole
-// postings agree with the index inside any window the walk asks for.
+// postings agree with the index inside any window the walk asks for. The
+// covered range reported back is the window itself, so the walk stages here
+// exactly as it does over a reader that answers only what it was asked.
 func (r diffReader) LookupKeys(
-	_ context.Context, keys []TermKey, _ IDRange, _ *LookupParts,
-) ([]*roaring.Bitmap, error) {
+	_ context.Context, keys []TermKey, window IDRange,
+) ([]*roaring.Bitmap, IDRange, error) {
 	out := make([]*roaring.Bitmap, len(keys))
 	for i, k := range keys {
 		bm, err := r.c.mirror.Get(k)
 		if err != nil {
-			return nil, err
+			return nil, IDRange{}, err
 		}
 		out[i] = bm
 	}
-	return out, nil
+	return out, window, nil
 }
 
 func (r diffReader) FetchEvents(_ context.Context, ids []uint32) ([]Payload, error) {

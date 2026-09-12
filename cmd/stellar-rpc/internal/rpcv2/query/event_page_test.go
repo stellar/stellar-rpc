@@ -965,15 +965,17 @@ func (f *fakeEventReader) EventCount() (uint32, error) {
 func (f *fakeEventReader) Offsets() (*event.LedgerOffsets, error) { return f.ofs, nil }
 
 // The window is ignored: the fake's bitmaps are canned whole, and a whole
-// term agrees with the index inside any window.
+// term agrees with the index inside any window. It reports the window back as
+// the covered range, so the walk stages exactly as it would over a reader
+// that answers only what it was asked.
 func (f *fakeEventReader) LookupKeys(
-	_ context.Context, keys []event.TermKey, _ event.IDRange, _ *event.LookupParts,
-) ([]*roaring.Bitmap, error) {
+	_ context.Context, keys []event.TermKey, window event.IDRange,
+) ([]*roaring.Bitmap, event.IDRange, error) {
 	out := make([]*roaring.Bitmap, len(keys))
 	for i, k := range keys {
 		out[i] = f.bitmaps[k]
 	}
-	return out, nil
+	return out, window, nil
 }
 
 func (f *fakeEventReader) FetchEvents(_ context.Context, ids []uint32) ([]event.Payload, error) {

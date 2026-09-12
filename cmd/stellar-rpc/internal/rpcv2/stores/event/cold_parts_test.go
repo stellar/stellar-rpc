@@ -123,11 +123,13 @@ func buildPartsFixture(t *testing.T, chunkID chunk.ID, bitmaps Bitmaps) string {
 
 // TestColdReader_WindowedLookupsMatchTheirTerms is the oracle gate. Every
 // term of the fixture, over a spread of windows, must agree with the
-// postings that went in on every id inside the window — which is the whole
-// of Reader.LookupKeys' contract, since ids outside it are unspecified. It
-// runs each window twice through one LookupParts, so the second pass reads
-// the parts it already holds out of the query's memory rather than off disk
-// and has to answer identically.
+// postings that went in on every id inside the range the lookup says it
+// covered — which is the whole of Reader.LookupKeys' contract, since ids
+// outside it are unspecified. The covered range has to contain the window,
+// and it is what the oracle is checked over rather than the window itself:
+// the reader reads whole parts and claims the whole of what it read, so a
+// coverage claim wider than the parts behind it fails here. Each window runs
+// twice, since two lookups over one window must answer identically.
 func TestColdReader_WindowedLookupsMatchTheirTerms(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	f := densePartsFixture()
@@ -169,14 +171,17 @@ func TestColdReader_WindowedLookupsMatchTheirTerms(t *testing.T) {
 		{Start: 0, End: 3_500_001},         // the whole chunk
 	} {
 		t.Run(fmt.Sprintf("[%d,%d)", window.Start, window.End), func(t *testing.T) {
-			held := NewLookupParts()
 			for pass := range 2 {
-				got, lerr := cr.LookupKeys(context.Background(), keys, window, held)
+				got, covered, lerr := cr.LookupKeys(context.Background(), keys, window)
 				require.NoError(t, lerr)
 				require.Len(t, got, len(keys))
+				require.LessOrEqual(t, covered.Start, window.Start,
+					"the covered range must contain the window (pass %d)", pass)
+				require.GreaterOrEqual(t, covered.End, window.End,
+					"the covered range must contain the window (pass %d)", pass)
 
 				clip := roaring.New()
-				clip.AddRange(uint64(window.Start), uint64(window.End))
+				clip.AddRange(uint64(covered.Start), uint64(covered.End))
 				for i, name := range names {
 					if name == "never-added" {
 						assert.Nil(t, got[i], "a term the index never saw is a miss (pass %d)", pass)
@@ -186,8 +191,9 @@ func TestColdReader_WindowedLookupsMatchTheirTerms(t *testing.T) {
 					want := roaring.And(f.oracle[name], clip)
 					inWindow := roaring.And(got[i], clip)
 					assert.True(t, want.Equals(inWindow),
-						"%s in [%d, %d) pass %d: want %d postings, got %d",
-						name, window.Start, window.End, pass, want.GetCardinality(), inWindow.GetCardinality())
+						"%s in covered [%d, %d) of window [%d, %d) pass %d: want %d postings, got %d",
+						name, covered.Start, covered.End, window.Start, window.End,
+						pass, want.GetCardinality(), inWindow.GetCardinality())
 				}
 			}
 		})
