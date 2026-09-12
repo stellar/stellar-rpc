@@ -997,3 +997,222 @@ func TestColdReader_RejectsMismatchedBuildStamp(t *testing.T) {
 		}
 	}
 }
+
+// slotOf is the bucket item position the MPHF puts key at.
+func slotOf(t *testing.T, dir string, key TermKey) int {
+	t.Helper()
+	m, err := openMPHF(filepath.Join(dir, IndexHashName(partsChunkID)))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = m.Close() })
+	slot, err := m.Lookup(key)
+	require.NoError(t, err)
+	return int(slot)
+}
+
+// dirRowAt is where key's directory row starts inside the app data.
+func dirRowAt(t *testing.T, appData []byte, key TermKey) int {
+	t.Helper()
+	for off := indexStampLen + indexDirHeaderLen; off+indexDirEntryLen <= len(appData); off += indexDirEntryLen {
+		if bytes.Equal(appData[off:off+len(key)], key[:]) {
+			return off
+		}
+	}
+	require.FailNow(t, "the term has no directory row")
+	return 0
+}
+
+// firstDemoted is the fixture term whose parts were written first — the one
+// whose row can be made to address one part too many without running off the
+// end of the pack.
+func firstDemoted(t *testing.T, f *partsFixture, d indexDirectory) (string, partEntry) {
+	t.Helper()
+	var (
+		name  string
+		entry partEntry
+	)
+	for candidate := range f.oracle {
+		e, demoted := d.lookup(f.key(candidate))
+		if !demoted || (name != "" && e.firstRecord >= entry.firstRecord) {
+			continue
+		}
+		name, entry = candidate, e
+	}
+	require.NotEmpty(t, name)
+	return name, entry
+}
+
+// partsCorruption is one row of the matrix below: what to do to a freshly
+// built fixture, which term to look up afterwards, and what the reader owes.
+type partsCorruption struct {
+	name     string
+	corrupt  func(t *testing.T, dir string, f *partsFixture, d indexDirectory) string
+	want     string // the error's substring; empty when the answer is a miss
+	sentinel bool   // ... and the error is stores.ErrCorrupt
+}
+
+// partsItemCorruptions mutate the items: a bucket slot, or one term's part.
+func partsItemCorruptions() []partsCorruption {
+	return []partsCorruption{
+		{
+			name: "bucket item fingerprint",
+			corrupt: func(t *testing.T, dir string, f *partsFixture, _ indexDirectory) string {
+				rewriteIndexPack(t, dir, func(a *indexArtifact) {
+					a.items[slotOf(t, dir, f.key(singleTerm))][0] ^= 1
+				})
+				return singleTerm
+			},
+		},
+		{
+			name: "a demoted slot reached directly",
+			corrupt: func(t *testing.T, dir string, f *partsFixture, _ indexDirectory) string {
+				rewriteIndexPack(t, dir, func(a *indexArtifact) {
+					// Without its row the term resolves through the MPHF to the
+					// bucket slot demotion emptied, whose body roaring cannot read.
+					off := dirRowAt(t, a.appData, f.key(denseTerm))
+					a.appData = append(a.appData[:off], a.appData[off+indexDirEntryLen:]...)
+					binary.BigEndian.PutUint32(a.appData[indexStampLen+16:],
+						binary.BigEndian.Uint32(a.appData[indexStampLen+16:])-1)
+				})
+				return denseTerm
+			},
+			want: "unmarshal index.pack item", sentinel: true,
+		},
+		{
+			name: "part item fingerprint",
+			corrupt: func(t *testing.T, dir string, f *partsFixture, d indexDirectory) string {
+				name, e := firstDemoted(t, f, d)
+				rewriteIndexPack(t, dir, func(a *indexArtifact) {
+					a.items[int(e.firstRecord)*indexPackItemsPerRecord][0] ^= 1
+				})
+				return name
+			},
+			want: "does not carry its term's fingerprint", sentinel: true,
+		},
+		{
+			name: "a part item body one byte short",
+			corrupt: func(t *testing.T, dir string, f *partsFixture, d indexDirectory) string {
+				name, e := firstDemoted(t, f, d)
+				rewriteIndexPack(t, dir, func(a *indexArtifact) {
+					pos := int(e.firstRecord) * indexPackItemsPerRecord
+					a.items[pos] = a.items[pos][:len(a.items[pos])-1]
+				})
+				return name
+			},
+			// Roaring's own reader is the only thing that reads a part body,
+			// and a body that ends early is where it stops.
+			want: "unmarshal index.pack item", sentinel: true,
+		},
+	}
+}
+
+// partsDirectoryCorruptions mutate what names the parts: the directory rows,
+// the stamp in front of them, and the format id on the pack.
+func partsDirectoryCorruptions() []partsCorruption {
+	return []partsCorruption{
+		{
+			name: "directory partCount too large",
+			corrupt: func(t *testing.T, dir string, f *partsFixture, d indexDirectory) string {
+				name, e := firstDemoted(t, f, d)
+				rewriteIndexPack(t, dir, func(a *indexArtifact) {
+					row := dirRowAt(t, a.appData, f.key(name))
+					binary.BigEndian.PutUint16(a.appData[row+20:], e.partCount+1)
+				})
+				return name
+			},
+			// One part past its own is the next term's, which carries the
+			// next term's fingerprint.
+			want: "does not carry its term's fingerprint", sentinel: true,
+		},
+		{
+			name: "directory firstRecord out of range",
+			corrupt: func(t *testing.T, dir string, f *partsFixture, d indexDirectory) string {
+				name, _ := firstDemoted(t, f, d)
+				rewriteIndexPack(t, dir, func(a *indexArtifact) {
+					binary.BigEndian.PutUint32(a.appData[dirRowAt(t, a.appData, f.key(name))+16:], 1<<20)
+				})
+				return name
+			},
+			// The pack's own bounds check. The counts pair record for record
+			// at open, so a row this far out means the app data was rewritten
+			// whole, which its CRC is what catches.
+			want: "out of [0,",
+		},
+		{
+			name: "directory k",
+			corrupt: func(t *testing.T, dir string, f *partsFixture, d indexDirectory) string {
+				name, _ := firstDemoted(t, f, d)
+				path := filepath.Join(dir, IndexPackName(partsChunkID))
+				b, err := os.ReadFile(path)
+				require.NoError(t, err)
+				r := packfile.Open(path, packfile.ReaderOptions{})
+				ad, err := r.AppData()
+				require.NoError(t, err)
+				require.NoError(t, r.Close())
+				// The k byte of the term's row, where the app data sits in the file.
+				flipByteAt(t, path, bytes.LastIndex(b, ad)+dirRowAt(t, ad, f.key(name))+22)
+				return name
+			},
+			want: "checksum mismatch", sentinel: true,
+		},
+		{
+			name: "stamp version",
+			corrupt: func(t *testing.T, dir string, _ *partsFixture, _ indexDirectory) string {
+				rewriteIndexPack(t, dir, func(a *indexArtifact) { a.appData[0] = indexStampVersion - 1 })
+				return denseTerm
+			},
+			want: "unsupported version",
+		},
+		{
+			name: "the format id before parts",
+			corrupt: func(t *testing.T, dir string, _ *partsFixture, _ indexDirectory) string {
+				rewriteIndexPack(t, dir, func(a *indexArtifact) { a.format = 0xFE1E000B })
+				return denseTerm
+			},
+			want: "expected format",
+		},
+	}
+}
+
+// TestColdReader_CorruptPartsIndexIsCorrupt is the corruption matrix over the
+// dense-term parts layout: every way the index can disagree with itself, and
+// what the reader owes for each. Nothing here may answer out of the wrong
+// bytes, and nothing may panic.
+//
+// A flipped byte on disk is caught before any of this, by the record checksum
+// over the items (TestColdReader_CorruptIndexPackIsCorrupt) or the app-data
+// checksum over the directory — which is what stands between a query and a
+// different posting set, since roaring decodes a mangled bitmap into a valid
+// one. The rest reseal what they mutate: that is how the reader's own checks
+// are reached, and it is the shape a writer bug takes, since a writer seals
+// what it writes.
+//
+// Two mutations are deliberately not errors. A bucket item whose fingerprint
+// disagrees is the MPHF's residual false positive — the reader cannot tell
+// one from a flip and calls both a miss, which is what the fingerprint is
+// for. And a resealed k answers a subset in silence: nothing else on disk
+// records a term's span, which is exactly why the directory rides inside the
+// app-data CRC rather than beside it.
+func TestColdReader_CorruptPartsIndexIsCorrupt(t *testing.T) {
+	for _, tc := range append(partsItemCorruptions(), partsDirectoryCorruptions()...) {
+		t.Run(tc.name, func(t *testing.T) {
+			f := densePartsFixture()
+			dir := buildPartsFixture(t, f.bitmaps)
+			d := openDirectory(t, dir)
+			term := tc.corrupt(t, dir, f, d)
+
+			cr, err := OpenColdReader(partsChunkID, dir, ColdReaderOptions{})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = cr.Close() })
+			got, _, err := cr.LookupKeys(context.Background(), []TermKey{f.key(term)}, everyID)
+			if tc.want == "" {
+				require.NoError(t, err)
+				require.Nil(t, got[0], "an item that does not carry the term's fingerprint is a miss")
+				return
+			}
+			require.ErrorContains(t, err, tc.want)
+			if tc.sentinel {
+				require.ErrorIs(t, err, stores.ErrCorrupt)
+			}
+		})
+	}
+}

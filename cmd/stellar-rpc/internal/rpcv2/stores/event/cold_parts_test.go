@@ -69,7 +69,7 @@ func densePartsFixture() *partsFixture {
 	for i := range uint32(500_000) {
 		dense = append(dense, i*7)
 	}
-	f.add("dense", dense...)
+	f.add(denseTerm, dense...)
 
 	runs := make([]uint32, 0, 54*1000*20)
 	for c := range uint32(54) {
@@ -108,8 +108,13 @@ func densePartsFixture() *partsFixture {
 	return f
 }
 
-// partsChunkID is the chunk every fixture here is built for.
-const partsChunkID = chunk.ID(0)
+// partsChunkID is the chunk every fixture here is built for, and denseTerm
+// and singleTerm the two fixture terms other files name.
+const (
+	partsChunkID = chunk.ID(0)
+	denseTerm    = "dense"
+	singleTerm   = "single-3"
+)
 
 // buildPartsFixture writes a cold artifact set whose index is exactly
 // bitmaps, beside the smallest events.pack the reader's pairing check
@@ -151,7 +156,7 @@ func TestColdReader_WindowedLookupsMatchTheirTerms(t *testing.T) {
 	// The fixture is only a test of parts if terms were actually demoted.
 	dir2, err := cr.waitDir()
 	require.NoError(t, err)
-	for _, name := range []string{"dense", "run-heavy", "small-extent"} {
+	for _, name := range []string{denseTerm, "run-heavy", "small-extent"} {
 		entry, ok := dir2.lookup(f.key(name))
 		require.True(t, ok, "%s must have been demoted, or this test proves nothing", name)
 		require.Positive(t, entry.partCount)
@@ -290,7 +295,7 @@ func TestColdParts_TileTheirTermDisjointAndAscending(t *testing.T) {
 func TestColdParts_AssembleToTheTermOverRandomWindows(t *testing.T) {
 	f, _, cr, _ := openPartsFixture(t)
 
-	names := []string{"dense", "run-heavy", "small-extent", "edge", "empty-term", "filler-3"}
+	names := []string{denseTerm, "run-heavy", "small-extent", "edge", "empty-term", "filler-3"}
 	keys := make([]TermKey, len(names))
 	for i, name := range names {
 		keys[i] = f.key(name)
@@ -331,7 +336,7 @@ func TestColdParts_SpanFollowsTheSlabExtent(t *testing.T) {
 		partCount uint16
 		occupied  int
 	}{
-		{name: "dense", partCount: 13, occupied: 7},       // ids over 54 of the chunk's 102 slabs
+		{name: denseTerm, partCount: 13, occupied: 7},     // ids over 54 of the chunk's 102 slabs
 		{name: "run-heavy", partCount: 7, occupied: 4},    // the same extent, a quarter of the bytes
 		{name: "small-extent", partCount: 2, occupied: 1}, // 6 slabs of ids, 49 KiB of them
 	} {
@@ -474,7 +479,7 @@ func TestColdReader_RejectsMispairedDirectoryCounts(t *testing.T) {
 			cr, err := OpenColdReader(partsChunkID, dir, ColdReaderOptions{})
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = cr.Close() })
-			_, _, err = cr.LookupKeys(context.Background(), []TermKey{f.key("dense")}, everyID)
+			_, _, err = cr.LookupKeys(context.Background(), []TermKey{f.key(denseTerm)}, everyID)
 			require.ErrorIs(t, err, stores.ErrCorrupt)
 			require.ErrorContains(t, err, tc.want)
 		})
