@@ -24,7 +24,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -73,62 +72,6 @@ func Env(key, def string) string {
 		return v
 	}
 	return def
-}
-
-// RequireEnv returns the values of keys in order, erroring with every unset one.
-func RequireEnv(keys ...string) ([]string, error) {
-	vals := make([]string, len(keys))
-	var missing []string
-	for i, k := range keys {
-		if vals[i] = os.Getenv(k); vals[i] == "" {
-			missing = append(missing, k)
-		}
-	}
-	if len(missing) > 0 {
-		return nil, fmt.Errorf("missing required env: %s", strings.Join(missing, ", "))
-	}
-	return vals, nil
-}
-
-// RequireEnvInts returns the integer values of keys, requiring each to be set
-// and parseable.
-func RequireEnvInts(keys ...string) (map[string]int, error) {
-	vals, err := RequireEnv(keys...)
-	if err != nil {
-		return nil, err
-	}
-	ints := make(map[string]int, len(keys))
-	for i, k := range keys {
-		n, cerr := strconv.Atoi(vals[i])
-		if cerr != nil {
-			return nil, fmt.Errorf("%s: %w", k, cerr)
-		}
-		ints[k] = n
-	}
-	return ints, nil
-}
-
-// requirePositive rejects missing keys and values below one.
-func requirePositive(ints map[string]int, keys ...string) error {
-	for _, k := range keys {
-		if ints[k] < 1 {
-			return fmt.Errorf("%s must be positive, got %d", k, ints[k])
-		}
-	}
-	return nil
-}
-
-// requireSeconds checks that positive seconds fit in a time.Duration.
-func requireSeconds(ints map[string]int, keys ...string) error {
-	if err := requirePositive(ints, keys...); err != nil {
-		return err
-	}
-	for _, k := range keys {
-		if int64(ints[k]) > int64((1<<63-1)/time.Second) {
-			return fmt.Errorf("%s exceeds the maximum duration in seconds", k)
-		}
-	}
-	return nil
 }
 
 // BootDeadline returns the instant a box-side runner should bail by: budget
