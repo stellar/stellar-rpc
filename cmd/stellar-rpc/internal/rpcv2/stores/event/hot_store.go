@@ -189,15 +189,10 @@ func (h *HotStore) Offsets() (*LedgerOffsets, error) {
 // reader. Neither grows under its holder, so a walk never sees an id
 // written after its lookup.
 //
-// The window is ignored: these images are whole-chunk and already in
-// memory, so clipping one would only copy it. A whole term agrees
-// with the index inside any window, which is all the contract asks.
-//
-// The covered range reported back is the window itself, not the whole
-// chunk. A whole term would justify the wider claim, but a hot lookup
-// is in-memory and re-reading costs nothing, so there is no I/O to
-// save by having the caller's walk run past what it asked for — and
-// the narrow answer keeps the walk's staging identical on both tiers.
+// The window is ignored — these images are whole-chunk and already in
+// memory, and a whole term agrees with the index inside any window — and
+// the covered range comes back as the window itself, there being no I/O
+// to save by letting the walk run past what it asked for.
 func (h *HotStore) LookupKeys(
 	ctx context.Context, keys []TermKey, window IDRange,
 ) ([]*roaring.Bitmap, IDRange, error) {

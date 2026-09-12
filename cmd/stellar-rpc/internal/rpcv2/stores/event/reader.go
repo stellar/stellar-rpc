@@ -111,16 +111,13 @@ type Reader interface {
 	//
 	// ColdReader coalesces the underlying packfile reads into a
 	// single ReadItems pass, fanning out across the worker count
-	// configured via ColdReaderOptions.Concurrency, and reads only the
-	// parts of a demoted term that the window reaches — whole parts,
-	// so its covered range is the window grown out to the part
-	// boundaries every queried term was read to, and a term small
-	// enough to have stayed whole comes back whole. HotStore returns
+	// configured via ColdReaderOptions.Concurrency, and reads only
+	// the parts of a demoted term the window reaches — whole parts,
+	// which is what its covered range reports. HotStore returns
 	// snapshots of the live mirror shared by all readers of a term;
 	// a dense term written since its last lookup is cloned once, by
-	// the first reader to look it up, and that clone is then shared.
-	// It ignores the window — its snapshots are whole-chunk and
-	// already in memory, so clipping one would only copy it.
+	// the first reader to look it up, and that clone is then shared,
+	// window or no window.
 	//
 	// Callers MUST treat returned bitmaps as read-only. Dense hot
 	// snapshots are shared with other readers; sparse hot terms
@@ -131,9 +128,7 @@ type Reader interface {
 	// ctx cancels in-flight I/O on the cold path (MPHF load,
 	// index.pack ReadAt); hot side checks ctx as a fast guard before
 	// touching the in-memory mirror.
-	LookupKeys(
-		ctx context.Context, keys []TermKey, window IDRange,
-	) ([]*roaring.Bitmap, IDRange, error)
+	LookupKeys(ctx context.Context, keys []TermKey, window IDRange) ([]*roaring.Bitmap, IDRange, error)
 
 	// FetchEvents decodes events for the supplied chunk-relative
 	// eventIDs and returns them positionally aligned with the input

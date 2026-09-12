@@ -76,11 +76,9 @@ const (
 	// records. The Format value identifies the on-disk codec; readers
 	// dispatch on it to select a matching RecordDecoder.
 	eventsPackFormat packfile.Format = 0xFE1E000C // "Fellow Events 0xC" (zstd)
-	// Bumped from 0xFE1E000B when index.pack grew dense-term parts: a bucket
-	// record no longer means "one term per item" and the app data no longer
-	// means "just a build stamp", so an older binary must refuse the artifact
-	// rather than read a part record as 128 terms. 0xC..0xF are spent on
-	// unreleased experiments, so the next free id is 0x10.
+	// Bumped from 0xFE1E000B when index.pack grew dense-term parts: an older
+	// binary must refuse the artifact rather than read a part record as 128
+	// terms. 0xC..0xF are spent on unreleased experiments.
 	indexPackFormat packfile.Format = 0xFE1E0010 // "Fellow Events 0x10" (dense-term parts)
 )
 
@@ -106,23 +104,20 @@ const IndexRecordFingerprintLen = 4
 // index.pack layout and app data.
 //
 // index.pack is a packfile of 128-item records (indexPackItemsPerRecord)
-// with a CRC32C per record. There are two kinds of record.
+// with a CRC32C per record, in two kinds.
 //
-// Bucket records come first, one per 128 MPHF slots, and hold the terms
-// the chunk indexed in slot order: bucket record r holds slots 128r ..
-// 128r+127, item = fp[4] ‖ roaring portable bitmap of the term's ids. The
-// last bucket record is padded out to 128 items with empty ones, so the
-// part records that follow start on a record boundary and their addresses
-// are arithmetic.
+// Bucket records come first, one per 128 MPHF slots in slot order: record r
+// holds slots 128r .. 128r+127, item = fp[4] ‖ roaring portable bitmap of the
+// term's ids. The last one is padded out to 128 items, so the part records
+// after it start on a record boundary.
 //
-// A term whose bitmap would make its bucket too big to read in one I/O
-// unit is demoted (see cold_index.go): its slot item keeps the
-// fingerprint and drops the bitmap, and the term is written again as part
-// records. A part record covers 2^k slabs of 65,536 ids — item 0 =
-// fp[4] ‖ roaring bitmap of that span's ids, items 1..127 empty — and a
-// term's parts are contiguous, in span order, after every bucket record.
-// Every span in [0, partCount) gets a record, empty ones included, so
-// part p of a term is item 128·(firstRecord+p) and no search is needed.
+// A term whose bitmap would make its bucket too big to read in one I/O unit
+// is demoted (see cold_index.go): its slot item keeps the fingerprint and
+// drops the bitmap, and the term is written again as part records. A part
+// record covers 2^k slabs of 65,536 ids — item 0 = fp[4] ‖ roaring bitmap of
+// that span's ids, items 1..127 empty — and a term's parts are contiguous, in
+// span order, after every bucket record, one per span in [0, partCount) and
+// empty ones included. So part p is item 128·(firstRecord+p), no search.
 //
 // The directory that names the demoted terms rides in index.pack's
 // app-data slot, behind the build stamp:
@@ -141,10 +136,8 @@ const IndexRecordFingerprintLen = 4
 // The stamp records which term-derivation scheme and field set the index
 // was built under, making the artifact self-describing: an index missing a
 // term family becomes distinguishable from one that simply matched
-// nothing. The four header counts are what the reader pairs index.hash and
-// index.pack on. The entries stay bytes on the reader and are binary-searched
-// in place — never parsed into a map, since the whole point is that a
-// chunk has a few hundred of them and a query touches a handful.
+// nothing. The four counts are what the reader pairs index.hash and
+// index.pack on, and the entries stay bytes there, binary-searched in place.
 //
 // Freeze and walk write identical app data (the schema and mask are
 // compile-time constants and demotion is deterministic), so freeze-vs-walk
@@ -161,10 +154,10 @@ const (
 	indexDirEntryLen = 16 + 4 + 2 + 1
 )
 
-// indexSlabShift is the slab width the part layout is cut on, as a power of
-// two: one roaring container, 65,536 ids. It is the format's own constant,
-// not the engine's slabShift (a test seam) — the bytes on disk cannot move
-// because a test shrank a walk.
+// indexSlabShift is the slab width the part layout is cut on: one roaring
+// container, 65,536 ids. It is the format's own constant, not the engine's
+// slabShift (a test seam) — the bytes on disk cannot move because a test
+// shrank a walk.
 const indexSlabShift = 16
 
 // partEntry is one directory row: where a demoted term's parts start, how
@@ -175,11 +168,10 @@ type partEntry struct {
 	k           uint8
 }
 
-// window is the range of part indices that can hold an id in w. Parts tile
-// the chunk on spans of 2^k slabs, so this is a shift, not a search. It
-// reports false when the window is empty or starts past the term's last
-// part — both mean "this term has nothing here", which is a non-nil empty
-// result and no read at all.
+// window is the range of part indices that can hold an id in w: parts tile
+// the chunk on spans of 2^k slabs, so this is a shift, not a search. False
+// means the term has nothing in w — an empty window, or one starting past
+// its last part.
 func (e partEntry) window(w IDRange) (uint32, uint32, bool) {
 	if w.isEmpty() || e.partCount == 0 {
 		return 0, 0, false
@@ -197,7 +189,7 @@ func (e partEntry) window(w IDRange) (uint32, uint32, bool) {
 	return uint32(first), uint32(last), true //nolint:gosec // both <= partCount-1 (uint16)
 }
 
-// indexDirectory is index.pack's app data as the reader keeps it: the four
+// indexDirectory is index.pack's app data as the reader keeps it: the
 // pairing counts, plus the entry table left as bytes for binary search.
 type indexDirectory struct {
 	numKeys     uint64
@@ -210,8 +202,7 @@ type indexDirectory struct {
 func (d indexDirectory) entryCount() int { return len(d.entries) / indexDirEntryLen }
 
 // lookup finds key's parts, reporting false for a term that was not demoted
-// (which is almost every term). Binary search over the fixed stride; the
-// table is sorted by TermKey, the same bytes the caller holds.
+// (which is almost every term). Binary search over the fixed stride.
 func (d indexDirectory) lookup(key TermKey) (partEntry, bool) {
 	n := d.entryCount()
 	i := sort.Search(n, func(i int) bool {

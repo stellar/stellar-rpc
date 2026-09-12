@@ -979,7 +979,7 @@ func (r windowFuzzReader) perturb(bm *roaring.Bitmap, window IDRange) {
 var fuzzWindowSchedules = []struct {
 	shift uint
 	slabs int
-}{{10, defaultStage1Slabs}, {16, 1}}
+}{{10, firstStageSlabs}, {16, 1}}
 
 // TestMatches_IgnoresIDsOutsideTheLookupWindow is the oracle gate on
 // Reader.LookupKeys' window contract. Every shaped shape runs again with each
@@ -1037,7 +1037,7 @@ func TestMatches_IgnoresIDsOutsideTheLookupWindow_WholeStreams(t *testing.T) {
 	f := newShapedFixture(t)
 	defer func(s uint) { slabShift = s }(slabShift)
 	defer func(n int) { matchStage1Slabs = n }(matchStage1Slabs)
-	slabShift, matchStage1Slabs = 10, defaultStage1Slabs
+	slabShift, matchStage1Slabs = 10, firstStageSlabs
 
 	const slab = 1 << 16
 	for _, sh := range f.namedShapes() {

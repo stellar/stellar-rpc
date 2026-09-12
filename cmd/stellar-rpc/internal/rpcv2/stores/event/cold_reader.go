@@ -89,9 +89,8 @@ type ColdReader struct {
 	waitMPHF func() (*mphf, error)
 
 	// waitDir returns index.pack's app data — the build stamp and the
-	// dense-term directory behind it — decoded on first call. Cached via
-	// sync.OnceValues; the entry table stays the app-data bytes, which the
-	// packfile reader already holds, so nothing is copied per lookup.
+	// dense-term directory behind it — decoded on first call. The entry table
+	// stays the app-data bytes the packfile reader already holds.
 	waitDir func() (indexDirectory, error)
 
 	// validateMPHF is the error-only gate over waitMPHF: the
@@ -207,12 +206,11 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		if derr != nil {
 			return derr
 		}
-		// The exact pairing. index.pack and index.hash carry no chunk ID of
-		// their own, so a mispaired index would silently return an incomplete
-		// subset of matches; and the part addressing is arithmetic off
-		// bucketCount, so a pack whose record count does not decompose into
-		// exactly the buckets and parts the directory claims cannot be read
-		// at all. Three counts, all cheap, all at open.
+		// The exact pairing, three cheap counts at open. index.pack and
+		// index.hash carry no chunk ID of their own, so a mispaired index would
+		// silently answer with a subset; and part addressing is arithmetic off
+		// bucketCount, so a record count that does not decompose into the
+		// buckets and parts the directory claims cannot be read at all.
 		if dir.numKeys != idx.numKeys() {
 			return fmt.Errorf(
 				"events: index pair mismatch for chunk %s: index.hash holds %d keys "+
@@ -345,157 +343,53 @@ func (c *ColdReader) Offsets() (*LedgerOffsets, error) {
 	return m.offsets, nil
 }
 
-// verifyAndDeserializeBitmap checks a bucket item's leading fingerprint
-// against key's prefix and, on match, unmarshals a fresh bitmap. On
-// fingerprint mismatch (residual MPHF collision on an unseen key) it returns
-// (nil, nil) — the caller treats nil as not-found. A matching fingerprint
-// over a body roaring cannot decode is corruption, which is also how a
-// demoted slot surfaces: its body is deliberately zero-length, so a reader
-// that lands on one (the directory and the buckets disagreeing) reports it
-// rather than answering with an empty term. record is valid only inside the
-// read callback; UnmarshalBinary copies into roaring's internal state so the
-// returned bitmap outlives it safely.
-func verifyAndDeserializeBitmap(record []byte, key TermKey, slot uint32) (*roaring.Bitmap, error) {
-	if len(record) < IndexRecordFingerprintLen {
-		return nil, fmt.Errorf("%w: events: index.pack item at slot %d truncated (%d bytes)",
-			stores.ErrCorrupt, slot, len(record))
-	}
-	if !bytes.Equal(record[:IndexRecordFingerprintLen], key[:IndexRecordFingerprintLen]) {
-		return nil, nil //nolint:nilnil // not-found signaled by nil bitmap, no error
-	}
-	bm := roaring.New()
-	if err := bm.UnmarshalBinary(record[IndexRecordFingerprintLen:]); err != nil {
-		return nil, fmt.Errorf("%w: events: unmarshal bitmap at slot %d: %w", stores.ErrCorrupt, slot, err)
-	}
-	return bm, nil
-}
-
-// deserializePart decodes one part item. Unlike a bucket item, a fingerprint
-// mismatch here is not a miss: the reader reached this record through the
-// directory, which named this key, so a fingerprint that disagrees means the
-// pack and its directory are not halves of one build.
-func deserializePart(item []byte, key TermKey, part uint32) (*roaring.Bitmap, error) {
-	if len(item) < IndexRecordFingerprintLen ||
-		!bytes.Equal(item[:IndexRecordFingerprintLen], key[:IndexRecordFingerprintLen]) {
-		return nil, fmt.Errorf("%w: events: part %d does not carry its term's fingerprint", stores.ErrCorrupt, part)
-	}
-	bm := roaring.New()
-	if err := bm.UnmarshalBinary(item[IndexRecordFingerprintLen:]); err != nil {
-		return nil, fmt.Errorf("%w: events: unmarshal part %d: %w", stores.ErrCorrupt, part, err)
-	}
-	return bm, nil
-}
-
-// keyPlan is one queried key resolved against the directory: whether it is a
-// demoted term, and if so the parts the window reaches, in span order.
-type keyPlan struct {
-	dense bool
-	first uint32            // the first part index the window reaches
-	parts []*roaring.Bitmap // one slot per part in [first, first+len), span order
-}
-
-// assemble unions a term's parts back together without copying a container.
-// A window that reaches one part returns that part itself. Past that, the
-// parts tile disjoint, ascending spans of the id space, so every Or is an
-// append in disguise: roaring runs off the end of the accumulator's own keys
-// and finishes in appendCopyMany, which hands over the source's containers
-// instead of cloning them when both bitmaps carry the copy-on-write mark —
-// the clone is the else branch of roaring v2's
-// `(ra.copyOnWrite && sa.copyOnWrite) || sa.needsCopyOnWrite(i)`. The mark is
-// safe to leave on the result: these parts were decoded by UnmarshalBinary,
-// which owns what it keeps (the caveat in roaring's docs is about FromBuffer,
-// which aliases the caller's bytes), and nothing downstream writes to a term
-// bitmap — the walk reads them and builds its own.
-func (p keyPlan) assemble() *roaring.Bitmap {
-	var acc *roaring.Bitmap
-	for _, part := range p.parts {
-		if part == nil {
-			continue
-		}
-		if acc == nil {
-			acc = part
-			continue
-		}
-		acc.SetCopyOnWrite(true)
-		part.SetCopyOnWrite(true)
-		acc.Or(part)
-	}
-	if acc == nil {
-		return roaring.New()
-	}
-	return acc
-}
-
 // partRead is one item this lookup has to read: where it is, which result it
-// feeds, and which part of that term it is (-1 for a bucket item).
+// feeds, and which of that result's parts it fills (-1 for a bucket item).
 type partRead struct {
 	pos  int
 	out  int
 	part int32
 }
 
-// lookupCoverage accumulates the range a lookup's answer covers. It starts at
-// the whole id space and is cut back by each demoted term to the span of the
-// parts that term was actually read to; a key answered out of a whole bucket
-// item, or missing from the index altogether, answers everywhere and never
-// cuts it. With no demoted key in the batch there is nothing to report beyond
-// the window, and the window is what comes back.
-type lookupCoverage struct {
-	window IDRange
-	lo, hi uint64
-	dense  bool
-}
-
-func newLookupCoverage(window IDRange) lookupCoverage {
-	return lookupCoverage{window: window, lo: 0, hi: math.MaxUint32}
-}
-
-// parts records a demoted term read over parts [first, last]. Its answer is
-// the index's own across the whole span those parts tile — and above it too
-// when they run to the term's last part, since the parts tile the chunk and
-// the term holds nothing past them.
-func (c *lookupCoverage) parts(e partEntry, first, last uint32) {
-	c.dense = true
-	shift := uint(e.k) + indexSlabShift
-	c.lo = max(c.lo, uint64(first)<<shift)
-	if uint64(last)+1 < uint64(e.partCount) {
-		c.hi = min(c.hi, (uint64(last)+1)<<shift)
-	}
-}
-
-// emptyAbove records a demoted term the window missed entirely: the window
-// starts past the term's last part, so the empty answer is the index's own
-// from the end of those parts up.
-func (c *lookupCoverage) emptyAbove(e partEntry) {
-	c.dense = true
-	c.lo = max(c.lo, uint64(e.partCount)<<(uint(e.k)+indexSlabShift))
-}
-
-// result is the covered range, which always contains the window: every bound
-// it carries came off a part boundary that already bounded the window. The
-// containment is re-checked rather than assumed — a covered range that did
-// not contain the window would have the walk trust ids nobody looked up — and
-// a batch that fails it falls back to the window, which every answer covers.
-func (c lookupCoverage) result() IDRange {
-	if !c.dense || c.window.isEmpty() {
-		return c.window
-	}
-	hi := min(c.hi, math.MaxUint32)
-	if c.lo > uint64(c.window.Start) || hi < uint64(c.window.End) {
-		return c.window
-	}
-	return IDRange{Start: uint32(c.lo), End: uint32(hi)}
-}
-
-// decodeIndexItem decodes one index.pack item under the key that named it: a
-// bucket item through the fingerprint gate that turns a residual MPHF
-// collision into a miss, a part through the stricter one that calls a
-// fingerprint mismatch corruption.
+// decodeIndexItem checks the item's leading fingerprint against key's prefix
+// and, on match, unmarshals a fresh bitmap. A bucket item that disagrees is a
+// residual MPHF collision on an unseen key — (nil, nil), the caller's
+// not-found — but a part that disagrees is corruption, since the directory
+// named this key; so is a matching fingerprint over a body roaring cannot
+// decode, which is how a demoted slot's deliberately empty one surfaces.
 func decodeIndexItem(item []byte, key TermKey, r partRead) (*roaring.Bitmap, error) {
-	if r.part < 0 {
-		return verifyAndDeserializeBitmap(item, key, uint32(r.pos)) //nolint:gosec // a slot
+	if len(item) < IndexRecordFingerprintLen ||
+		!bytes.Equal(item[:IndexRecordFingerprintLen], key[:IndexRecordFingerprintLen]) {
+		if r.part < 0 && len(item) >= IndexRecordFingerprintLen {
+			return nil, nil //nolint:nilnil // not-found signaled by nil bitmap, no error
+		}
+		return nil, fmt.Errorf("%w: events: index.pack item %d does not carry its term's fingerprint",
+			stores.ErrCorrupt, r.pos)
 	}
-	return deserializePart(item, key, uint32(r.part)) //nolint:gosec // non-negative here
+	bm := roaring.New()
+	if err := bm.UnmarshalBinary(item[IndexRecordFingerprintLen:]); err != nil {
+		return nil, fmt.Errorf("%w: events: unmarshal index.pack item %d: %w", stores.ErrCorrupt, r.pos, err)
+	}
+	return bm, nil
+}
+
+// keyPlan is one demoted term's parts, in span order, as the reads fill them.
+type keyPlan []*roaring.Bitmap
+
+// assemble unions a term's parts back together without copying a container:
+// they tile disjoint, ascending spans, so every Or runs off the end of the
+// accumulator's keys into roaring's appendCopyMany, which hands over the
+// source's containers while both bitmaps carry the copy-on-write mark.
+// Leaving the mark on is safe — UnmarshalBinary owns what it keeps, and
+// nothing downstream writes to a term bitmap.
+func (p keyPlan) assemble() *roaring.Bitmap {
+	acc := p[0]
+	acc.SetCopyOnWrite(true)
+	for _, part := range p[1:] {
+		part.SetCopyOnWrite(true)
+		acc.Or(part)
+	}
+	return acc
 }
 
 // LookupKeys returns bitmaps for each key, aligned positionally with the
@@ -504,27 +398,17 @@ func decodeIndexItem(item []byte, key TermKey, r partRead) (*roaring.Bitmap, err
 //
 // Cold-side implementation:
 //
-//  1. Resolve every key against the directory. A demoted (dense) term names
-//     the part records covering window; an empty window, or a window past
-//     the term's last part, is a non-nil empty result and no I/O at all.
-//     Parts are read whole, so the same pass collects the covered range: the
-//     window grown out to the part boundaries every demoted term in the
-//     batch was read to.
+//  1. Resolve every key against the directory. A demoted term names the part
+//     records covering window; an empty window, or one past the term's last
+//     part, is a non-nil empty result and no I/O at all. Parts are read
+//     whole, so the same pass collects the covered range.
 //  2. Every other key goes through the MPHF. Keys rejected at the routing
 //     stage (streamhash ErrKeyNotFound) get result[i] = nil and never touch
 //     index.pack; the rest name their bucket item by slot.
-//  3. One c.index.ReadItems pass over every position, sorted and deduped —
-//     two keys can share a bucket item (a residual MPHF collision), but
-//     never a part. The packfile reader coalesces adjacent positions into
-//     single ReadAt calls and fans out across the worker count configured
-//     via ColdReaderOptions.Concurrency. Each item is decoded in the
-//     callback, straight off the lent bytes: roaring's UnmarshalBinary owns
-//     what it keeps, so nothing has to be copied to outlive fn, and the
-//     decode rides the read's own fan-out. Every read owns its own slot of
-//     decoded, so concurrent callbacks never write the same one.
-//  4. Merge, serially: a bucket item is this term's whole posting set or a
-//     fingerprint miss, and a term's parts go back together in span order
-//     through keyPlan.assemble.
+//  3. One c.index.ReadItems pass over every position, sorted and deduped,
+//     coalescing adjacent ones into single ReadAt calls and fanning out
+//     across ColdReaderOptions.Concurrency.
+//  4. A demoted term's parts go back together in span order (keyPlan.assemble).
 //
 //nolint:cyclop,gocognit // the four documented passes above, inline; splitting obscures the structure
 func (c *ColdReader) LookupKeys(
@@ -554,7 +438,11 @@ func (c *ColdReader) LookupKeys(
 	results := make([]*roaring.Bitmap, len(keys))
 	plans := make([]keyPlan, len(keys))
 	reads := make([]partRead, 0, len(keys))
-	cov := newLookupCoverage(window)
+	// The covered range starts at everything and is cut back by each demoted
+	// term to the span of the parts it was read to; a term answered out of a
+	// whole bucket item, or missing from the index, answers everywhere and
+	// never cuts it.
+	covLo, covHi, dense := uint64(0), uint64(math.MaxUint32), false
 
 	for i, key := range keys {
 		entry, demoted := dir.lookup(key)
@@ -570,75 +458,82 @@ func (c *ColdReader) LookupKeys(
 			reads = append(reads, partRead{pos: int(slot), out: i, part: -1})
 			continue
 		}
-		plans[i].dense = true
+		dense = true
+		shift := uint(entry.k) + indexSlabShift
 		first, last, any := entry.window(window)
 		if !any {
-			// Present in the chunk, nothing of it in the window.
+			// Present in the chunk, nothing of it in the window: the empty
+			// answer is the index's own from the term's last part up.
 			results[i] = roaring.New()
-			cov.emptyAbove(entry)
+			covLo = max(covLo, uint64(entry.partCount)<<shift)
 			continue
 		}
-		cov.parts(entry, first, last)
-		plans[i].first = first
-		plans[i].parts = make([]*roaring.Bitmap, last-first+1)
+		// Read whole, the parts answer across the span they tile — and above
+		// it too when they run to the term's last part.
+		covLo = max(covLo, uint64(first)<<shift)
+		if uint64(last)+1 < uint64(entry.partCount) {
+			covHi = min(covHi, (uint64(last)+1)<<shift)
+		}
+		plans[i] = make(keyPlan, last-first+1)
 		for part := first; part <= last; part++ {
 			reads = append(reads, partRead{
 				pos:  int(entry.firstRecord+part) * indexPackItemsPerRecord,
 				out:  i,
-				part: int32(part), //nolint:gosec // bounded by partCount (uint16)
+				part: int32(part - first), //nolint:gosec // bounded by partCount (uint16)
 			})
 		}
 	}
-	covered := cov.result()
+	// Every bound came off a part boundary that already bounded the window, so
+	// the covered range contains it. Re-checked rather than assumed: one that
+	// did not would have the walk trust ids nobody looked up.
+	covered := window
+	if dense && !window.isEmpty() &&
+		covLo <= uint64(window.Start) && covHi >= uint64(window.End) {
+		covered = IDRange{Start: uint32(covLo), End: uint32(covHi)}
+	}
 	if len(reads) == 0 {
 		return results, covered, nil
 	}
 
 	sort.Slice(reads, func(i, j int) bool { return reads[i].pos < reads[j].pos })
 
-	// One position per distinct item, and runStart[p] .. runStart[p+1] are
-	// the reads that name position p. The run is one read except when two
-	// keys residually collide into the same MPHF rank, and then each of them
-	// decodes the item under its own fingerprint.
+	// One entry per distinct item, runs[p] naming where position p's reads
+	// start. A position carries more than one read only when two keys
+	// residually collide into the same MPHF rank, and then each decodes the
+	// item under its own fingerprint.
 	positions := make([]int, 0, len(reads))
-	runStart := make([]int, 0, len(reads)+1)
-	for i, r := range reads {
-		if i > 0 && reads[i-1].pos == r.pos {
+	runs := make([]int, 0, len(reads))
+	for i, rd := range reads {
+		if i > 0 && reads[i-1].pos == rd.pos {
 			continue
 		}
-		positions = append(positions, r.pos)
-		runStart = append(runStart, i)
+		positions = append(positions, rd.pos)
+		runs = append(runs, i)
 	}
-	runStart = append(runStart, len(reads))
 
-	decoded := make([]*roaring.Bitmap, len(reads))
 	if err := c.index.ReadItems(ctx, positions, func(idx int, data []byte) error {
-		// ReadItems lends data for the callback only, and may call back from
-		// several goroutines. Decode here rather than copying the bytes out
-		// to decode later: roaring's UnmarshalBinary keeps its own copy of
-		// what it reads, so the bitmap outlives fn on its own, and the reads
-		// below write disjoint slots.
-		for j := runStart[idx]; j < runStart[idx+1]; j++ {
+		// ReadItems lends data for the callback only and may call back from
+		// several goroutines: decode here, where roaring's UnmarshalBinary
+		// keeps its own copy, and write it straight to this read's own
+		// destination, which no other read shares.
+		for j := runs[idx]; j < len(reads) && reads[j].pos == positions[idx]; j++ {
 			bm, derr := decodeIndexItem(data, keys[reads[j].out], reads[j])
 			if derr != nil {
 				return derr
 			}
-			decoded[j] = bm
+			if reads[j].part < 0 {
+				results[reads[j].out] = bm
+				continue
+			}
+			plans[reads[j].out][reads[j].part] = bm
 		}
 		return nil
 	}); err != nil {
 		return nil, IDRange{}, fmt.Errorf("events: LookupKeys read for chunk %s: %w", c.chunkID, err)
 	}
 
-	for j, r := range reads {
-		if r.part < 0 {
-			results[r.out] = decoded[j]
-			continue
-		}
-		plans[r.out].parts[uint32(r.part)-plans[r.out].first] = decoded[j] //nolint:gosec // non-negative here
-	}
 	for i := range plans {
-		if plans[i].dense && plans[i].parts != nil {
+		if plans[i] != nil {
 			results[i] = plans[i].assemble()
 		}
 	}

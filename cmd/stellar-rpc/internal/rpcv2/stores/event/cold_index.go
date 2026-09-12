@@ -196,30 +196,21 @@ type indexEntry struct {
 	bitmap *roaring.Bitmap
 }
 
-// Budgets that decide which terms become parts, and how big a part is.
-//
-// indexBucketBudget is the read unit the bucket layout is sized for: a read
-// of 256 KiB or less costs one I/O unit on the storage this serves, so a
-// bucket that fits it is one unit however many of its terms a query wants.
-//
-// indexDemoteFloor is the per-term floor: a term smaller than this is not
-// worth a directory entry and a record of its own, and demoting it would
-// trade a bucket read for a part read of the same size. A bucket made only
-// of sub-floor terms is left whole — its size is bounded by 128 × the floor.
-//
-// indexPartTarget is what one part is meant to weigh. It sets how many parts
-// a demoted term is cut into, before the slab extent rounds that to a power
-// of two (see partLayout).
+// The budgets that decide which terms become parts, and how big a part is.
+// indexBucketBudget is the read a bucket is sized to fit, one I/O unit on the
+// storage this serves. indexDemoteFloor is the per-term floor: demoting a
+// smaller term would trade a bucket read for a part read of the same size, so
+// a bucket of nothing but sub-floor terms is left whole. indexPartTarget is
+// what one part should weigh (see partLayout).
 const (
 	indexBucketBudget = 256 << 10
 	indexDemoteFloor  = 16 << 10
 	indexPartTarget   = 64 << 10
 )
 
-// chunkSlabCount is how many slabs of 65,536 ids the chunk spans, derived
-// from the largest id any term holds. It is the extent the part layout cuts:
-// a term's parts tile [0, chunkSlabCount) whatever the term's own extent, so
-// part addressing is arithmetic and the reader needs no per-term extent.
+// chunkSlabCount is how many slabs of 65,536 ids the chunk spans. Every
+// demoted term's parts tile it, whatever the term's own extent, so part
+// addressing is arithmetic and the reader needs no per-term extent.
 func chunkSlabCount(entries []indexEntry) uint64 {
 	var maxID uint64
 	var any bool
@@ -227,9 +218,8 @@ func chunkSlabCount(entries []indexEntry) uint64 {
 		if entries[i].bitmap.IsEmpty() {
 			continue
 		}
-		if m := uint64(entries[i].bitmap.Maximum()); !any || m > maxID {
-			maxID, any = m, true
-		}
+		any = true
+		maxID = max(maxID, uint64(entries[i].bitmap.Maximum()))
 	}
 	if !any {
 		return 0
@@ -237,13 +227,11 @@ func chunkSlabCount(entries []indexEntry) uint64 {
 	return maxID>>indexSlabShift + 1
 }
 
-// partLayout resolves a demoted term's part geometry from its serialized
-// size and the chunk's slab count: partCount = ceil(S / indexPartTarget)
-// target parts, cut on spans of 2^k slabs with k = floor(log2(C / target))
-// clamped at zero. Parts come out at or under the target size in
-// expectation, and never bigger than the whole term. The span follows the
-// chunk's slab extent, not the term's byte size, so a term whose ids sit in
-// a corner of the chunk still answers a window there in one part.
+// partLayout resolves a demoted term's part geometry from its serialized size
+// and the chunk's slab count: ceil(size / indexPartTarget) target parts, cut
+// on spans of 2^k slabs with k = floor(log2(chunkSlabs / target)) clamped at
+// zero. Spans follow the chunk's extent, not the term's, so a term whose ids
+// sit in a corner of the chunk still answers a window there in one part.
 func partLayout(size, chunkSlabs uint64) (k uint8, records uint32, err error) {
 	if chunkSlabs == 0 {
 		return 0, 0, errors.New("events: a demoted term in a chunk with no ids")
@@ -264,12 +252,12 @@ func partLayout(size, chunkSlabs uint64) (k uint8, records uint32, err error) {
 	return shift, uint32(n), nil //nolint:gosec // bounded by MaxUint16 just above
 }
 
-// demoteBucket picks the terms in one bucket that become parts: while the
-// bucket's serialized size is over the budget and it still holds a term at
-// or above the floor, the largest such term is demoted. Ties go to the lower
-// slot, so freeze and walk demote identically. Returns the demoted positions
-// within bucket, ascending.
-func demoteBucket(bucket []indexEntry, sizes []uint64, demoted []bool, out []int) []int {
+// demoteBucket marks the terms in one bucket that become parts: while the
+// bucket's serialized size is over the budget and it still holds a term at or
+// above the floor, the largest such term is demoted. Ties go to the lower
+// slot, so freeze and walk demote identically. sizes and demoted are scratch,
+// one slot per term.
+func demoteBucket(bucket []indexEntry, sizes []uint64, demoted []bool) {
 	total := 0
 	for i := range bucket {
 		sizes[i] = bucket[i].bitmap.GetSerializedSizeInBytes()
@@ -294,23 +282,13 @@ func demoteBucket(bucket []indexEntry, sizes []uint64, demoted []bool, out []int
 		demoted[best] = true
 		total -= int(sizes[best]) //nolint:gosec // chunk-bounded
 	}
-	for i := range bucket {
-		if demoted[i] {
-			out = append(out, i)
-		}
-	}
-	return out
 }
 
 // writeIndexPackEntries writes index.pack: every term's bucket item in slot
 // order, the last bucket padded to a full record, then the demoted terms'
 // part records, and finally the app data carrying the directory that names
-// them.
-//
-// One reused buffer serializes every bitmap rather than a fresh
-// MarshalBinary slice per item. AppendItem copies its input, so the buffer
-// is safe to reuse across iterations; roaring's WriteTo emits the same bytes
-// MarshalBinary would, so the pack is byte-identical.
+// them. One reused buffer serializes every bitmap; AppendItem copies its
+// input, and WriteTo emits the bytes MarshalBinary would.
 func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
 	chunkSlabs := chunkSlabCount(entries)
 	var (
@@ -318,23 +296,20 @@ func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
 		sizes   [indexPackItemsPerRecord]uint64
 		flags   [indexPackItemsPerRecord]bool
 		demoted []indexEntry
-		picks   []int
 	)
+	// Items actually appended, counted rather than derived: it is what the
+	// directory's part addressing is checked against below.
 	items := 0
 	for lo := 0; lo < len(entries); lo += indexPackItemsPerRecord {
 		bucket := entries[lo:min(lo+indexPackItemsPerRecord, len(entries))]
-		picks = demoteBucket(bucket, sizes[:len(bucket)], flags[:len(bucket)], picks[:0])
-		next := 0
+		demoteBucket(bucket, sizes[:len(bucket)], flags[:len(bucket)])
 		for i := range bucket {
 			e := &bucket[i]
-			if next < len(picks) && picks[next] == i {
-				next++
+			if flags[i] {
 				demoted = append(demoted, *e)
-				// A demoted slot keeps only its fingerprint. Its body is
-				// zero-length, which roaring cannot decode — a reader that
-				// ever lands here reports corruption rather than a miss,
-				// which is right: reaching it means the directory and the
-				// buckets disagree.
+				// A demoted slot keeps only its fingerprint: a body roaring
+				// cannot decode, so a reader landing here (the directory and
+				// the buckets disagreeing) reports corruption, not a miss.
 				if err := pw.AppendItem(e.fp[:]); err != nil {
 					return fmt.Errorf("events: write demoted slot %d to index.pack: %w", e.slot, err)
 				}
@@ -352,8 +327,7 @@ func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
 		}
 	}
 	// Pad the last bucket record out so the part records start on a record
-	// boundary and part p of a term is item 128·(firstRecord+p). A bare
-	// AppendItem() is a no-op, so the empty item has to be spelled out.
+	// boundary. A bare AppendItem() is a no-op, so the empty item is spelled out.
 	bucketCount := (len(entries) + indexPackItemsPerRecord - 1) / indexPackItemsPerRecord
 	for i := len(entries); i < bucketCount*indexPackItemsPerRecord; i++ {
 		if err := pw.AppendItem([]byte{}); err != nil {
@@ -374,11 +348,10 @@ func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
 		if err != nil {
 			return fmt.Errorf("events: part layout for slot %d: %w", e.slot, err)
 		}
-		written, err := writeTermParts(pw, e, k, records, record, items)
-		if err != nil {
+		if err := writeTermParts(pw, e, k, records, record, items); err != nil {
 			return err
 		}
-		items += written
+		items += int(records) * indexPackItemsPerRecord
 		dir.entries = appendDirEntry(dir.entries, e.key, record, records, k)
 		record += records
 		dir.totalParts += records
@@ -391,44 +364,41 @@ func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
 
 // writeTermParts writes one demoted term's part records: every span in
 // [0, records) gets a record whose item 0 is fp[4] ‖ the span's bitmap and
-// whose other 127 items are empty, empty spans included. firstRecord is
-// where the term's parts are supposed to land, which the item count is
-// checked against — the whole addressing scheme is that arithmetic.
+// whose other 127 items are empty, empty spans included, so part p of the
+// term is item 128·(firstRecord+p). items is where the pack stands, which
+// firstRecord is checked against — the whole addressing scheme is that
+// arithmetic.
 func writeTermParts(
 	pw *packfile.Writer, e *indexEntry, k uint8, records, firstRecord uint32, items int,
-) (int, error) {
+) error {
+	if items != int(firstRecord)*indexPackItemsPerRecord {
+		return fmt.Errorf(
+			"events: parts of slot %d land at item %d, not %d (parts must be contiguous after the buckets)",
+			e.slot, items, uint64(firstRecord)*indexPackItemsPerRecord)
+	}
 	var buf bytes.Buffer
 	width := uint64(1) << (uint64(k) + indexSlabShift)
-	written := 0
 	for p := range uint64(records) {
-		if got := (items + written) / indexPackItemsPerRecord; got != int(firstRecord)+int(p) {
-			return written, fmt.Errorf(
-				"events: part %d of slot %d lands at record %d, not %d (parts must be contiguous after the buckets)",
-				p, e.slot, got, uint64(firstRecord)+p)
-		}
 		span := roaring.New()
 		span.AddRange(p*width, min((p+1)*width, uint64(math.MaxUint32)+1))
 		part := roaring.And(e.bitmap, span)
-		// The same form policy whole terms get: runs pay for themselves on
-		// the query side, and the reader decodes parts through roaring's own
-		// reader either way.
+		// The form policy whole terms get: runs pay for themselves on the
+		// query side.
 		part.RunOptimize()
 		buf.Reset()
 		if _, err := part.WriteTo(&buf); err != nil {
-			return written, fmt.Errorf("events: serialize part %d of slot %d: %w", p, e.slot, err)
+			return fmt.Errorf("events: serialize part %d of slot %d: %w", p, e.slot, err)
 		}
 		if err := pw.AppendItem(e.fp[:], buf.Bytes()); err != nil {
-			return written, fmt.Errorf("events: write part %d of slot %d: %w", p, e.slot, err)
+			return fmt.Errorf("events: write part %d of slot %d: %w", p, e.slot, err)
 		}
-		written++
 		for range indexPackItemsPerRecord - 1 {
 			if err := pw.AppendItem([]byte{}); err != nil {
-				return written, fmt.Errorf("events: pad part %d of slot %d: %w", p, e.slot, err)
+				return fmt.Errorf("events: pad part %d of slot %d: %w", p, e.slot, err)
 			}
-			written++
 		}
 	}
-	return written, nil
+	return nil
 }
 
 // appendDirEntry appends one fixed-stride directory row.
@@ -441,22 +411,20 @@ func appendDirEntry(dst []byte, key TermKey, firstRecord uint32, partCount uint3
 	return append(dst, row[:]...)
 }
 
-// sortDirEntries sorts the fixed-stride rows by key in place. Rows are built
-// in slot order, because that is the order the parts are written in, and the
-// reader binary-searches them by key.
+// sortDirEntries sorts the fixed-stride rows by key in place: they are built
+// in slot order, the order the parts are written in, and the reader
+// binary-searches them by key. Keys are unique, so the row compares as its
+// leading key does.
 func sortDirEntries(rows []byte) {
-	n := len(rows) / indexDirEntryLen
 	row := func(i int) []byte { return rows[i*indexDirEntryLen : (i+1)*indexDirEntryLen] }
-	order := make([]int, n)
+	order := make([]int, len(rows)/indexDirEntryLen)
 	for i := range order {
 		order[i] = i
 	}
-	sort.Slice(order, func(a, b int) bool {
-		return bytes.Compare(row(order[a])[:16], row(order[b])[:16]) < 0
-	})
-	sorted := make([]byte, len(rows))
-	for i, j := range order {
-		copy(sorted[i*indexDirEntryLen:], row(j))
+	sort.Slice(order, func(a, b int) bool { return bytes.Compare(row(order[a]), row(order[b])) < 0 })
+	sorted := make([]byte, 0, len(rows))
+	for _, i := range order {
+		sorted = append(sorted, row(i)...)
 	}
 	copy(rows, sorted)
 }
