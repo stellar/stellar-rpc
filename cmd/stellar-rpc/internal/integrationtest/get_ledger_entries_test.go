@@ -14,7 +14,7 @@ import (
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 )
 
 func TestGetLedgerEntriesNotFound(t *testing.T) {
@@ -52,7 +52,7 @@ func TestGetLedgerEntriesNotFound(t *testing.T) {
 }
 
 func TestGetLedgerEntriesInvalidParams(t *testing.T) {
-	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: skipLimitsUpgrade()})
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: infrastructure.SkipLimitsUpgrade()})
 
 	client := test.GetRPCLient()
 

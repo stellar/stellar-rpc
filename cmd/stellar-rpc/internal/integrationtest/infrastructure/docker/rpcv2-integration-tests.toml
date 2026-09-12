@@ -1,0 +1,125 @@
+# Integration-test copy of cmd/stellar-rpc/rpcv2/rpc-v2-sample-config.toml with
+# the comments stripped. Values differ from the sample in three places: no
+# [backfill.datastore*] tables, enable_debug = true, level = "debug". Per-test
+# values (ports, paths, archive URL) arrive as flag overrides from
+# infrastructure/daemon_rpcv2.go.
+
+[storage]
+
+default_data_dir = "/var/stellar/rpc-v2"
+
+[retention]
+
+earliest_ledger = "genesis"
+
+retention_chunks = 0
+
+[service]
+
+endpoint = "localhost:8000"
+
+admin_endpoint = ""
+
+max_concurrent_requests = 5000
+max_request_execution_duration = "25s"
+request_execution_warning_threshold = "5s"
+
+[service.fee_stats]
+classic_fee_window_ledgers = 10
+soroban_inclusion_fee_window_ledgers = 50
+
+[service.methods]
+
+[service.methods.getHealth]
+queue_limit = 1000
+max_execution_duration = "5s"
+max_healthy_ledger_latency = "30s"
+
+[service.methods.getNetwork]
+queue_limit = 1000
+max_execution_duration = "5s"
+
+[service.methods.getVersionInfo]
+queue_limit = 1000
+max_execution_duration = "5s"
+
+[service.methods.getLatestLedger]
+queue_limit = 1000
+max_execution_duration = "5s"
+
+[service.methods.getTransaction]
+queue_limit = 1000
+max_execution_duration = "5s"
+
+[service.methods.getTransactions]
+queue_limit = 1000
+max_execution_duration = "5s"
+max_items_per_response = 200
+default_items_per_response = 50
+
+[service.methods.getLedgers]
+queue_limit = 1000
+max_execution_duration = "10s"
+max_items_per_response = 20
+default_items_per_response = 5
+
+[service.methods.getEvents]
+queue_limit = 1000
+max_execution_duration = "10s"
+max_items_per_response = 10000
+default_items_per_response = 100
+
+[service.methods.getEventsV2]
+queue_limit = 1000
+max_execution_duration = "10s"
+max_items_per_response = 1000
+default_items_per_response = 100
+term_budget = 15
+
+[service.methods.getFeeStats]
+queue_limit = 100
+max_execution_duration = "5s"
+
+[service.methods.sendTransaction]
+queue_limit = 500
+max_execution_duration = "15s"
+
+[service.methods.simulateTransaction]
+queue_limit = 100
+max_execution_duration = "15s"
+
+[service.methods.getLedgerEntries]
+queue_limit = 1000
+max_execution_duration = "5s"
+
+[service.preflight]
+
+enable_debug = true
+
+[backfill]
+
+max_retries = 3
+
+[backfill.bsb]
+
+max_retries = 3
+retry_wait = "5s"
+
+[ingestion]
+
+captive_core_config = "/etc/stellar/captive-core.toml"
+
+history_archive_urls = ["https://history.stellar.org/prd/core-live/core_live_001"]
+
+core_http_port = 11626
+core_http_query_port = 11628
+
+core_request_timeout = "2s"
+
+core_http_query_snapshot_ledgers = 4
+
+[logging]
+
+level = "debug"
+
+format = "text"

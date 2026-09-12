@@ -16,8 +16,8 @@ import (
 var testSalt = sha256.Sum256([]byte("a1"))
 
 func getTestContract(name string) []byte {
-	// six levels up from cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure = repo root
-	contractFile := path.Join(GetCurrentDirectory(), "../../../../../../wasms/test_"+name+".wasm")
+	// five levels up from cmd/stellar-rpc/internal/integrationtest/infrastructure = repo root
+	contractFile := path.Join(GetCurrentDirectory(), "../../../../../wasms/test_"+name+".wasm")
 	ret, err := os.ReadFile(contractFile)
 	if err != nil {
 		str := fmt.Sprintf(

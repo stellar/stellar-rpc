@@ -22,8 +22,8 @@ import (
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/config"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
