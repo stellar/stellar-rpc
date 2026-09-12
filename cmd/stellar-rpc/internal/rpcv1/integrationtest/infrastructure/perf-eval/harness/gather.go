@@ -9,57 +9,39 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 )
 
 // commandWaitTimeout bounds a diagnostic, including dispatch, retries, and reads.
 const commandWaitTimeout = 60 * time.Second
 
+// gatherConfig is the environment Gather reads.
+type gatherConfig struct {
+	PollerConfig
+
+	ResultsTimeout seconds `env:"RESULTS_TIMEOUT,required,notEmpty"`
+}
+
 // Gather is the GHA-runner half: it polls S3 until the box reports a verdict
 // and relays the result as step outputs. On timeout it writes a debug comment
 // instead. Used by every leg's runner.
 func Gather(ctx context.Context) error {
-	strs, err := RequireEnv("INSTANCE_ID", "AWS_REGION", "GITHUB_OUTPUT", "BUCKET", "RESULT_KEY", "RUN_ID")
+	var cfg gatherConfig
+	if err := loadEnv(&cfg); err != nil {
+		return err
+	}
+	poller, err := newResultPoller(ctx, cfg.PollerConfig)
 	if err != nil {
 		return err
 	}
-	instanceID, region, githubOutput := strs[0], strs[1], strs[2]
-	bucket, resultKey, runID := strs[3], strs[4], strs[5]
-
-	ints, err := RequireEnvInts("RESULTS_TIMEOUT", "POLL_INTERVAL", "DEBUG_LOG_LINES", "DEBUG_LOG_EVERY_POLLS")
-	if err != nil {
-		return err
-	}
-	if err := requirePositive(ints, "DEBUG_LOG_LINES", "DEBUG_LOG_EVERY_POLLS"); err != nil {
-		return err
-	}
-	if err := requireSeconds(ints, "POLL_INTERVAL", "RESULTS_TIMEOUT"); err != nil {
-		return err
-	}
-	debugLogLines := ints["DEBUG_LOG_LINES"]
-	resultsTimeout := time.Duration(ints["RESULTS_TIMEOUT"]) * time.Second
-
-	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
-	if err != nil {
-		return err
-	}
-	s3Client := s3.NewFromConfig(awsCfg)
-	runner := &ssmRunner{client: ssm.NewFromConfig(awsCfg), instanceID: instanceID}
-	poller := &resultPoller{
-		s3Client: s3Client, runner: runner,
-		bucket: bucket, key: resultKey, runID: runID,
-		interval:      time.Duration(ints["POLL_INTERVAL"]) * time.Second,
-		debugLogLines: debugLogLines, debugEveryPolls: ints["DEBUG_LOG_EVERY_POLLS"],
-	}
-	res, err := poller.poll(ctx, time.Now().Add(resultsTimeout))
-	return reportGather(ctx, runner, instanceID, githubOutput, resultsTimeout, debugLogLines, res, err)
+	timeout := cfg.ResultsTimeout.duration()
+	res, err := poller.poll(ctx, time.Now().Add(timeout))
+	return reportGather(ctx, poller, cfg.GitHubOutput, timeout, res, err)
 }
 
 func reportGather(
-	ctx context.Context, runner *ssmRunner, instanceID, githubOutput string,
-	resultsTimeout time.Duration, debugLogLines int, res *Result, pollErr error,
+	ctx context.Context, p *resultPoller, githubOutput string,
+	resultsTimeout time.Duration, res *Result, pollErr error,
 ) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -78,7 +60,7 @@ func reportGather(
 	if pollErr != nil {
 		headline = fmt.Sprintf("❌ Result polling failed: %v", pollErr)
 	}
-	if werr := writeNoVerdictComment(ctx, runner, instanceID, headline, debugLogLines); werr != nil {
+	if werr := p.writeNoVerdictComment(ctx, headline); werr != nil {
 		return werr
 	}
 	return appendOutputs(githubOutput, "found=false")
@@ -137,22 +119,19 @@ func (r *ssmRunner) debugTail(ctx context.Context, n int) string {
 	return out
 }
 
-// writeNoVerdictComment writes diagnostics to timeout-comment.md beside RESULTS_FILE.
-func writeNoVerdictComment(
-	ctx context.Context,
-	runner *ssmRunner,
-	instanceID, headline string,
-	debugLogLines int,
-) error {
+// writeNoVerdictComment writes diagnostics to timeout-comment.md beside
+// RESULTS_FILE. The callers reach it only when polling ended without a
+// verdict, where the poller has a runner.
+func (p *resultPoller) writeNoVerdictComment(ctx context.Context, headline string) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n\n", headline)
-	fmt.Fprintf(&b, "Instance: `%s`\n", instanceID)
+	fmt.Fprintf(&b, "Instance: `%s`\n", p.runner.instanceID)
 	srv, repo, run := os.Getenv("GITHUB_SERVER_URL"), os.Getenv("GITHUB_REPOSITORY"), os.Getenv("GITHUB_RUN_ID")
 	if srv != "" && repo != "" && run != "" {
 		fmt.Fprintf(&b, "Workflow run: %s/%s/actions/runs/%s\n", srv, repo, run)
 	}
-	if tail := runner.debugTail(ctx, debugLogLines); tail != "" {
-		fmt.Fprintf(&b, "\nLast %d lines of /var/log/user-data.log:\n\n```\n%s\n```\n", debugLogLines, tail)
+	if tail := p.runner.debugTail(ctx, p.debugLogLines); tail != "" {
+		fmt.Fprintf(&b, "\nLast %d lines of /var/log/user-data.log:\n\n```\n%s\n```\n", p.debugLogLines, tail)
 	}
 	if err := ctx.Err(); err != nil {
 		return err

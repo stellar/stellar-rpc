@@ -24,6 +24,11 @@ type resultPoller struct {
 	debugEveryPolls int
 }
 
+// location is the S3 object the poller waits for, for log lines.
+func (p *resultPoller) location() string {
+	return "s3://" + p.bucket + "/" + p.key
+}
+
 // poll waits for a result within one job's time budget. Window expiry returns
 // (nil, nil) so Gather can report a timeout and Relay can hand off to another
 // job if campaign time remains.
