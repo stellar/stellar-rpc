@@ -6,10 +6,36 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/harness"
 )
 
 func okLeg(md string) []legResult {
 	return []legResult{{Label: "Apply-load ingestion", Verdict: "ok", Markdown: md}}
+}
+
+func TestReportableLeg(t *testing.T) {
+	for _, tc := range []struct {
+		name, run, sha, verdict string
+		accepted                bool
+	}{
+		{"current result", "123-2", "abc", "ok", true},
+		{"earlier successful attempt", "123-1", "abc", "ok", true},
+		{"failure", "123-2", "abc", "fail", true},
+		{"other run", "1234-1", "abc", "ok", false},
+		{"other target", "123-1", "def", "ok", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := &harness.Result{RunID: tc.run, TargetSHA: tc.sha, Verdict: tc.verdict, Markdown: "report"}
+			got := reportableLeg("X", res, "123", "abc")
+			if tc.accepted {
+				require.Equal(t, legResult{Label: "X", Verdict: tc.verdict, Markdown: "report"}, got)
+			} else {
+				require.Equal(t, legResult{Label: "X"}, got)
+				require.Contains(t, renderLeg(got), "No final result was published")
+			}
+		})
+	}
 }
 
 func renderN(n int, legs []legResult) string {
@@ -43,7 +69,7 @@ func TestRenderComment_FirstRun(t *testing.T) {
 func TestRenderLeg_FallbackWhenNoResult(t *testing.T) {
 	out := renderLeg(legResult{Label: "X"})
 	require.Contains(t, out, "### ❌ X — verdict: none")
-	require.Contains(t, out, "No result object published")
+	require.Contains(t, out, "No final result was published")
 }
 
 // Four runs in sequence: each run's output is the next run's "prior comment".

@@ -31,6 +31,58 @@ func TestResultRoundTrip(t *testing.T) {
 	require.Equal(t, in, out)
 }
 
+func TestResultValidate(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		result  Result
+		wantErr string
+	}{
+		{"ok", Result{SchemaVersion: 1, RunID: "123-1", Verdict: VerdictOK}, ""},
+		{"fail", Result{SchemaVersion: 1, RunID: "123-1", Verdict: VerdictFail}, ""},
+		{"pending", Result{SchemaVersion: 1, RunID: "123-1", Verdict: "pending"}, `unknown verdict "pending"`},
+		{"zero value", Result{}, "unsupported schemaVersion 0"},
+		{"unknown schema", Result{SchemaVersion: 2, RunID: "123-1", Verdict: VerdictOK}, "unsupported schemaVersion 2"},
+		{"missing run", Result{SchemaVersion: 1, Verdict: VerdictOK}, "runId is required"},
+		{"unknown verdict", Result{SchemaVersion: 1, RunID: "123-1", Verdict: "success"}, `unknown verdict "success"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.result.Validate()
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.EqualError(t, err, tc.wantErr)
+		})
+	}
+}
+
+// TestRequireEnvInts covers the two ways a mis-plumbed workflow reaches the
+// int keys: unset and unparseable.
+func TestRequireEnvInts(t *testing.T) {
+	t.Setenv("POLL_INTERVAL", "30")
+	t.Setenv("DEBUG_LOG_EVERY_POLLS", "10")
+
+	ints, err := RequireEnvInts("POLL_INTERVAL", "DEBUG_LOG_EVERY_POLLS")
+	require.NoError(t, err)
+	require.Equal(t, map[string]int{"POLL_INTERVAL": 30, "DEBUG_LOG_EVERY_POLLS": 10}, ints)
+
+	_, err = RequireEnvInts("POLL_INTERVAL", "NOT_SET_AT_ALL")
+	require.ErrorContains(t, err, "missing required env: NOT_SET_AT_ALL")
+
+	t.Setenv("POLL_INTERVAL", "half a minute")
+	_, err = RequireEnvInts("POLL_INTERVAL")
+	require.ErrorContains(t, err, "POLL_INTERVAL")
+}
+
+func TestRequirePositive(t *testing.T) {
+	ints := map[string]int{"A": 1, "ZERO": 0, "NEG": -1}
+	require.NoError(t, requirePositive(ints, "A"))
+	require.ErrorContains(t, requirePositive(ints, "A", "ZERO"), "ZERO must be positive, got 0")
+	require.ErrorContains(t, requirePositive(ints, "NEG"), "NEG must be positive, got -1")
+	// An absent key reads as zero, which is what the callers want flagged.
+	require.ErrorContains(t, requirePositive(ints, "ABSENT"), "ABSENT must be positive, got 0")
+}
+
 func TestTailWriter(t *testing.T) {
 	w := &tailWriter{max: 5}
 	for range 1000 {
