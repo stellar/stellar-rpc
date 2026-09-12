@@ -7,19 +7,19 @@ package event
 // Matches.
 //
 // Optimization shape: terms are deduped across filters and issued as
-// a single Reader.LookupKeys call at iteration start; payload fetches
-// then stream in internal batches. On the cold path this is one
-// MPHF+index.pack round trip per Matches call, not per batch.
+// a single batched Reader.LookupKeys at iteration start, whose bitmaps
+// the walk holds for the whole query; payload fetches stream in
+// internal batches. On the cold path the lookup is one MPHF+index.pack
+// round trip per Matches call. The candidate set comes from the slab
+// engine in slab_match.go, which serves both directions from one walk
+// over the window.
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"fmt"
 	"iter"
 	"slices"
-
-	"github.com/RoaringBitmap/roaring/v2"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -85,9 +85,9 @@ func (f TopicCountFilter) termKeys() []TermKey {
 
 // valueTermKeys returns one term per constrained value field
 // (contract ID, event type, topics): the single enumeration
-// termGroups and CountDistinctTerms share, so the two cannot drift
+// termPlans and CountDistinctTerms share, so the two cannot drift
 // over which values a filter names. The topic-count buckets are not
-// value terms; termGroups adds them separately and the budget does
+// value terms; termPlans adds them separately and the budget does
 // not count them.
 func (f *Filter) valueTermKeys() []TermKey {
 	var keys []TermKey
@@ -106,25 +106,30 @@ func (f *Filter) valueTermKeys() []TermKey {
 	return keys
 }
 
-// termGroups returns the indexed terms this filter constrains, grouped
-// by field: the bitmaps within a group are OR-ed and the groups are
-// AND-ed. Only the topic-count group ever holds more than one term.
-func (f *Filter) termGroups() [][]TermKey {
-	var groups [][]TermKey
-	for _, key := range f.valueTermKeys() {
-		groups = append(groups, []TermKey{key})
-	}
-	// A constrained topic position already implies an "at least" count at
-	// or below it, since a topic term is only indexed for events carrying
-	// that position. Skipping the group there keeps the common
-	// ["a", "**"] shape from OR-ing chunk-sized bucket bitmaps; the
-	// post-filter enforces the count either way.
+// termPlans returns the index terms a candidate must carry, one
+// conjunction per plan. A filter yields one plan, its value terms, unless
+// it constrains the topic count, when it yields one plan per bucket, a
+// single one for an exact count: A and (b or c) is (A and b) or (A and
+// c), and the union across plans keeps the or. A constrained topic
+// position already implies an "at least" count at or below it, since a
+// topic term is only indexed for events carrying that position. Skipping
+// the buckets there keeps the common ["a", "**"] shape from fanning out
+// over chunk-sized bucket bitmaps; the post-filter enforces the count
+// either way.
+func (f *Filter) termPlans() [][]TermKey {
+	values := f.valueTermKeys()
+	var buckets []TermKey
 	if !f.impliesTopicCount() {
-		if keys := f.TopicCount.termKeys(); len(keys) > 0 {
-			groups = append(groups, keys)
-		}
+		buckets = f.TopicCount.termKeys()
 	}
-	return groups
+	if len(buckets) == 0 {
+		return [][]TermKey{values}
+	}
+	plans := make([][]TermKey, 0, len(buckets))
+	for _, bucket := range buckets {
+		plans = append(plans, append(slices.Clone(values), bucket))
+	}
+	return plans
 }
 
 // impliesTopicCount reports whether f's constrained topic positions
@@ -214,18 +219,18 @@ type Match struct {
 	Ordinal uint32
 }
 
-// termPlan is a filter's termGroups resolved to slots in the batched
-// LookupKeys result.
-type termPlan [][]int
+// termPlan is one of a filter's termPlans, as slots in the batched term
+// lookup's result.
+type termPlan []int
 
-// batchSizes resolves the first and following internal batch sizes
-// from the caller's hint. The hint applies only when it is positive
-// and below the default. Both results are clamped positive, so a zero
-// test seam cannot stall a stream (a zero step never advances).
+// batchSizes resolves the first and following internal batch sizes from the
+// caller's hint. The hint is a page size the handler has already validated,
+// so it is honored in full and a page arrives in one fetch. Both sizes are
+// clamped positive: a zero step would stall the stream.
 func batchSizes(hint int) (int, int) {
 	rest := max(1, matchBatchSize)
 	first := rest
-	if hint > 0 && hint < rest {
+	if hint > 0 {
 		first = hint
 	}
 	return first, rest
@@ -251,11 +256,9 @@ func batchSizes(hint int) (int, int) {
 // drops are invisible: the iterator advances past them internally, so
 // consumers never see or reason about resume state.
 //
-// firstBatch sizes the first internal fetch batch. A consumer that
-// will stop after N matches passes N, so the first round trip fetches
-// no more than it needs; 0 or any out-of-range value uses the
-// default. Later batches use the default size. The hint changes I/O
-// counts only, never what the stream yields.
+// firstBatch sizes the first internal fetch: a consumer that will stop after
+// N matches passes N. Zero and negative hints use the default. The hint
+// changes I/O counts only, never what the stream yields.
 func Matches(
 	ctx context.Context, r Reader, filters []Filter, window IDRange,
 	descending bool, firstBatch int,
@@ -268,11 +271,7 @@ func Matches(
 		if window.isEmpty() {
 			return
 		}
-		union, matchAll, err := unionForFilters(ctx, r, filters, window)
-		if err != nil {
-			yield(Match{}, err)
-			return
-		}
+		plans, uniqueKeys, matchAll := planIndexTerms(filters)
 		// Match-all path: empty filter slice or any filter that asks the
 		// index for no terms. Serves without touching the index: the
 		// window is dense, so it streams Reader.FetchRange directly.
@@ -280,10 +279,18 @@ func Matches(
 			streamRange(ctx, r, window, descending, firstBatch, yield)
 			return
 		}
-		if union.IsEmpty() {
+		sources, err := r.LookupKeys(ctx, uniqueKeys)
+		if err != nil {
+			yield(Match{}, fmt.Errorf("events: query lookup: %w", err))
 			return
 		}
-		streamUnion(ctx, r, filters, union, descending, firstBatch, yield)
+		st := newSlabStepper(plans, sources, window, descending)
+		// No plan survived term resolution, so nothing can match and no slab
+		// is worth evaluating.
+		if len(st.plans) == 0 {
+			return
+		}
+		streamSlabs(ctx, r, filters, st, descending, firstBatch, yield)
 	}
 }
 
@@ -312,197 +319,73 @@ func validateMatchCall(ctx context.Context, r Reader, filters []Filter, window I
 	return nil
 }
 
-// unionForFilters runs the index side once per Matches call (the
-// numbered steps below). matchAll reports that some filter (or the
-// empty slice) constrains nothing, detected before any index I/O; the
-// caller then streams the window directly. Otherwise the result is
-// empty when no candidate falls in the window, and is never a
-// borrowed mirror snapshot (the window AND allocates on the borrowing
-// path), so downstream iteration is safe.
-func unionForFilters(
-	ctx context.Context, r Reader, filters []Filter, window IDRange,
-) (*roaring.Bitmap, bool, error) {
-	// ───── 1. Dedupe terms across filters ─────
-	//
-	// filterPlans[i] holds the slots filter i needs out of the batched
-	// lookup: the bitmaps within a group are OR-ed, the groups AND-ed.
-	//
-	// A filter that asks the index for no terms constrains nothing, and
-	// so does an empty filter slice: both take the match-all path.
-	// Reading the condition off the term groups themselves is what keeps
-	// an unconstrained filter from intersecting nothing and coming back
-	// empty instead.
+// planIndexTerms maps every filter's plans to slots in the single batched
+// lookup that follows; it runs before any index I/O. A plan that repeats
+// an earlier one is dropped: plans only pick candidates, and the
+// post-filter still runs every filter.
+//
+// matchAll reports that some filter, or the empty slice, constrains
+// nothing, so the caller streams the window directly rather than
+// intersecting nothing and returning empty.
+func planIndexTerms(filters []Filter) ([]termPlan, []TermKey, bool) {
 	if len(filters) == 0 {
-		return nil, true, nil
+		return nil, nil, true
 	}
-	filterPlans := make([]termPlan, len(filters))
 	var uniqueKeys []TermKey
-
+	plans := make([]termPlan, 0, len(filters))
 	for i := range filters {
-		groups := filters[i].termGroups()
-		if len(groups) == 0 {
-			return nil, true, nil
-		}
-		plan := make(termPlan, len(groups))
-		for g, keys := range groups {
-			slots := make([]int, len(keys))
+		for _, keys := range filters[i].termPlans() {
+			if len(keys) == 0 {
+				return nil, nil, true
+			}
+			plan := make(termPlan, len(keys))
 			for j, key := range keys {
-				slots[j] = indexOfOrAddTerm(&uniqueKeys, key)
+				plan[j] = indexOfOrAddTerm(&uniqueKeys, key)
 			}
-			plan[g] = slots
-		}
-		filterPlans[i] = plan
-	}
-
-	// ───── 2. Single batched lookup for all unique terms ─────
-	bitmaps, err := r.LookupKeys(ctx, uniqueKeys)
-	if err != nil {
-		return nil, false, fmt.Errorf("events: query lookup: %w", err)
-	}
-
-	// ───── 3. Per-filter intersect ─────
-	//
-	// If a whole group is absent from the index (every bitmap in it is
-	// nil), that filter's intersection is empty — skip it without
-	// contributing to the union.
-	//
-	// Bitmap ownership in perFilter is mixed:
-	//   - Single-constraint filter: we borrow bitmaps[s] directly (a
-	//     mirror snapshot from LookupKeys), skipping FastAnd's Clone.
-	//   - Multi-constraint filter: FastAnd allocates a fresh result.
-	// Either way the downstream union (FastOr) and the window AND never
-	// mutate their inputs, so a borrowed entry stays valid through
-	// the rest of the function. FastAnd never mutates its inputs
-	// either, so the same bitmap may appear across multiple filters
-	// safely.
-	perFilter := make([]*roaring.Bitmap, 0, len(filterPlans))
-	for _, plan := range filterPlans {
-		inputs := make([]*roaring.Bitmap, 0, len(plan))
-		missed := false
-		for _, slots := range plan {
-			group := unionSlots(bitmaps, slots)
-			if group == nil {
-				missed = true
-				break
+			// Slots follow field order, so equal plans are equal slices.
+			dup := slices.ContainsFunc(plans, func(p termPlan) bool {
+				return slices.Equal(p, plan)
+			})
+			if dup {
+				continue
 			}
-			inputs = append(inputs, group)
+			plans = append(plans, plan)
 		}
-		if missed {
-			continue
-		}
-		if len(inputs) == 1 {
-			perFilter = append(perFilter, inputs[0])
-			continue
-		}
-		// FastAnd intersects left-to-right — putting the smallest
-		// bitmap first shrinks the accumulator fastest. roaring's own
-		// docs call this out as the recommended caller-side prep.
-		slices.SortFunc(inputs, func(a, b *roaring.Bitmap) int {
-			return cmp.Compare(a.GetCardinality(), b.GetCardinality())
-		})
-		perFilter = append(perFilter, roaring.FastAnd(inputs...))
 	}
-
-	if len(perFilter) == 0 {
-		return roaring.New(), false, nil
-	}
-
-	// ───── 4. Union across filters ─────
-	// Single-filter case: FastOr would Clone — skip it and use the
-	// already-computed bitmap directly. That bitmap may be borrowed
-	// (from LookupKeys), so step 5's window And uses the fresh-result
-	// variant on that path to avoid mutating shared state.
-	var union *roaring.Bitmap
-	singleFilter := len(perFilter) == 1
-	if singleFilter {
-		union = perFilter[0]
-	} else {
-		union = roaring.FastOr(perFilter...)
-	}
-
-	// ───── 5. Apply the event-ID window ─────
-	//
-	// The window AND enforces the caller's pinned range. It also clips
-	// phantom IDs from a concurrent hot-store ingest: the mirror
-	// publishes entries before offsets, so LookupKeys can briefly
-	// surface IDs past EventCount. The AND keeps the stream strictly
-	// within the snapshot the caller pinned at request entry.
-	//
-	// This covers the multi-term group too. Its bitmaps are separate
-	// mirror snapshots taken at different instants, but an event never
-	// moves between the terms of one group once ingested, so a torn read
-	// across them can only surface IDs past the pinned End.
-	rangeBM := roaring.New()
-	rangeBM.AddRange(uint64(window.Start), uint64(window.End))
-	if singleFilter {
-		union = roaring.And(union, rangeBM) // fresh result; union may be borrowed
-	} else {
-		union.And(rangeBM) // FastOr output is owned; in-place is fine
-	}
-	return union, false, nil
+	return plans, uniqueKeys, false
 }
 
-// streamUnion walks the union bitmap in internal batches: collect
-// candidate ordinals up to the batch size, fetch, post-filter, yield
-// the survivors. Drops advance the walk with no yield. The first
-// batch is sized to firstBatch (see Matches); later batches use the
-// default.
-//
-// FetchEvents requires ascending ids, so a descending batch is
-// collected highest-first and flipped before the fetch, then the
-// fetched matches are flipped back. Stepping one id at a time is fine
-// here: the fetch I/O dominates a 512-step loop.
-func streamUnion(
-	ctx context.Context, r Reader, filters []Filter, union *roaring.Bitmap,
-	descending bool, firstBatch int, yield func(Match, error) bool,
-) {
-	var it interface {
-		HasNext() bool
-		Next() uint32
+// emitBatch fetches one batch of candidate ordinals, drops the bitmap-side
+// false positives and yields the survivors, reporting whether the stream
+// should continue. FetchEvents requires ascending ids, so a descending batch
+// is flipped in place before the fetch and flipped back before yielding.
+func emitBatch(
+	ctx context.Context, r Reader, filters []Filter, ids []uint32,
+	descending bool, yield func(Match, error) bool,
+) bool {
+	if descending {
+		slices.Reverse(ids)
+	}
+	payloads, err := r.FetchEvents(ctx, ids)
+	if err != nil {
+		yield(Match{}, err)
+		return false
+	}
+	// Drop bitmap-side false positives (see postFilter for the rationale).
+	matched, err := postFilter(payloads, ids, filters)
+	if err != nil {
+		yield(Match{}, err)
+		return false
 	}
 	if descending {
-		it = union.ReverseIterator()
-	} else {
-		it = union.Iterator()
+		slices.Reverse(matched)
 	}
-	batch, rest := batchSizes(firstBatch)
-	ids := make([]uint32, 0, batch)
-	for {
-		if err := ctx.Err(); err != nil {
-			yield(Match{}, err)
-			return
-		}
-		ids = ids[:0]
-		for it.HasNext() && len(ids) < batch {
-			ids = append(ids, it.Next())
-		}
-		batch = rest
-		if len(ids) == 0 {
-			return
-		}
-		if descending {
-			slices.Reverse(ids)
-		}
-		payloads, err := r.FetchEvents(ctx, ids)
-		if err != nil {
-			yield(Match{}, err)
-			return
-		}
-		// Drop bitmap-side false positives (see postFilter for the rationale).
-		matched, err := postFilter(payloads, ids, filters)
-		if err != nil {
-			yield(Match{}, err)
-			return
-		}
-		if descending {
-			slices.Reverse(matched)
-		}
-		for i := range matched {
-			if !yield(matched[i], nil) {
-				return
-			}
+	for i := range matched {
+		if !yield(matched[i], nil) {
+			return false
 		}
 	}
+	return true
 }
 
 // ValidateFilters rejects filters that would silently never match
@@ -561,9 +444,9 @@ func ValidateFilters(filters []Filter) error {
 // filters name, deduped by field and value together: one contract ID
 // in five filters counts once, the same bytes in two topic positions
 // count twice. Topic-count buckets are excluded: they are an
-// implementation detail of the engine's grouping, not a value the
+// implementation detail of the engine's plans, not a value the
 // client named. Exported for the v2 handler's term-budget check. It
-// lives here, beside termGroups, so the budget and the engine's
+// lives here, beside termPlans, so the budget and the engine's
 // lookups agree on what a value term is: TermKey over the store's
 // canonical bytes.
 func CountDistinctTerms(filters []Filter) int {
@@ -574,30 +457,6 @@ func CountDistinctTerms(filters []Filter) int {
 		}
 	}
 	return len(unique)
-}
-
-// unionSlots ORs the bitmaps at slots, and returns nil when every one
-// of them is absent from the index. A lone present bitmap is borrowed
-// rather than cloned, like the single-constraint path in
-// unionForFilters.
-func unionSlots(bitmaps []*roaring.Bitmap, slots []int) *roaring.Bitmap {
-	if len(slots) == 1 {
-		return bitmaps[slots[0]]
-	}
-	present := make([]*roaring.Bitmap, 0, len(slots))
-	for _, s := range slots {
-		if bitmaps[s] != nil {
-			present = append(present, bitmaps[s])
-		}
-	}
-	switch len(present) {
-	case 0:
-		return nil
-	case 1:
-		return present[0]
-	default:
-		return roaring.FastOr(present...)
-	}
 }
 
 // indexOfOrAddTerm returns the index of key inside *keys, appending

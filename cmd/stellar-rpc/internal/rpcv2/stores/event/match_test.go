@@ -620,9 +620,9 @@ func TestQuery_ChunkWithLedgersButZeroEvents(t *testing.T) {
 
 // TestQuery_DescendingWithRangeAndMaxEvents covers the
 // three-way combination — order × range × cap — that no other test
-// hits together. Forces the descending branch of streamUnion
-// (ReverseIterator with a per-batch flip) over a range-narrowed
-// union, then the shim's MaxEvents truncation.
+// hits together. Forces the descending slab walk (each slab's result
+// read backwards, with a per-batch flip for the fetch) over a
+// range-narrowed window, then the shim's MaxEvents truncation.
 func TestQuery_DescendingWithRangeAndMaxEvents(t *testing.T) {
 	fx := newMultiLedgerQueryFixture(t)
 	first := chunk.ID(0).FirstLedger()
@@ -1126,26 +1126,6 @@ func TestQuery_InvalidFilterRejected(t *testing.T) {
 	}
 }
 
-// TestUnionSlots covers the OR-within-a-group step directly, including the
-// all-absent case a fixture cannot reach: the topic-count buckets are the only
-// multi-term group, and the overflow bucket is populated in any chunk holding
-// an event with topics.
-func TestUnionSlots(t *testing.T) {
-	first := roaring.BitmapOf(1, 2)
-	second := roaring.BitmapOf(3)
-	bitmaps := []*roaring.Bitmap{first, nil, second, nil}
-
-	assert.Same(t, first, unionSlots(bitmaps, []int{0}),
-		"a lone bitmap is borrowed, not cloned")
-	assert.Nil(t, unionSlots(bitmaps, []int{1}))
-	assert.Nil(t, unionSlots(bitmaps, []int{1, 3}),
-		"a group absent from the index empties the filter")
-	assert.Same(t, second, unionSlots(bitmaps, []int{1, 2}),
-		"the one present bitmap in a group is borrowed too")
-	assert.Equal(t, []uint32{1, 2, 3}, unionSlots(bitmaps, []int{0, 2}).ToArray())
-	assert.Equal(t, []uint32{1, 2}, first.ToArray(), "inputs must not be mutated")
-}
-
 // ─── Cold-reader parity coverage ────────────────────────────────────────
 //
 // The hot tests above prove Query works against *HotStore. The whole
@@ -1162,12 +1142,13 @@ func TestUnionSlots(t *testing.T) {
 //
 //   - match-all asc                  → streamRange + cold FetchRange
 //   - match-all desc + cap           → streamRange top-down, slices.Backward
-//   - single-filter (contractID)     → LookupKeys + streamUnion asc
-//   - multi-term filter (AND)        → FastAnd over multiple cold bitmaps
-//   - cross-filter (OR)              → FastOr across filters
-//   - ledger range + filter          → roaring.And with the range bitmap
-//   - descending + range + cap       → ReverseIterator on cold-derived
-//                                      union, single-filter And path
+//   - single-filter (contractID)     → one LookupKeys term, then the
+//                                      ascending slab walk
+//   - multi-term filter (AND)        → one FastAnd per plan over cold bitmaps
+//   - cross-filter (OR)              → the in-place Or across plans
+//   - ledger range + filter          → the window clipped to each slab's
+//                                      id range
+//   - descending + range + cap       → the slab walk run high to low
 //
 // What we don't replay against cold:
 //   - The mirror-poisoning collision test (mutating an mmap'd cold
@@ -1625,21 +1606,11 @@ func TestMatches_EmptyStreams(t *testing.T) {
 		wholeChunk(t, fx.store), false))
 }
 
-// TestMatches_WindowANDLeavesBorrowedBitmapUntouched pins the
-// singleFilter branch of the window AND: a single-constraint filter
-// borrows the hot mirror's bitmap directly from LookupKeys, and the
-// narrowing AND must allocate a fresh result rather than shrink the
-// mirror's live state in place.
-//
-// The borrow only exists for DENSE terms (the mirror's sparse mode
-// materializes a fresh bitmap per Get, which no mutation can corrupt),
-// so the term is first promoted past the mirror's promotion threshold
-// with injected ids outside the query window (never fetched).
-// TestQuery_DoesNotMutateMirrorBitmaps cannot catch the mutation:
-// its filters carry two constraints (FastAnd-owned inputs) and it
-// compares only cardinality over whole-chunk ranges, where the AND is
-// a no-op.
-func TestMatches_WindowANDLeavesBorrowedBitmapUntouched(t *testing.T) {
+// TestMatches_LeavesSharedSnapshotUntouched pins that a narrowing window over
+// a single-term filter leaves the hot mirror's shared bitmap as it was. Only
+// dense terms are shared, so the term is first promoted with injected ids
+// above the query window.
+func TestMatches_LeavesSharedSnapshotUntouched(t *testing.T) {
 	fx := newQueryFixture(t)
 	key := ComputeTermKey(fx.contractA[:], FieldContractID)
 	// Promote contract A's term (real matches: ids 0, 1, 4) to dense
@@ -1653,18 +1624,16 @@ func TestMatches_WindowANDLeavesBorrowedBitmapUntouched(t *testing.T) {
 		"fixture sanity: the term must be dense so LookupKeys borrows")
 	snapshot := before.Clone()
 
-	// Single filter, single constraint, narrowing range: the borrowed
-	// path with an AND that actually removes ids.
+	// A narrowing window over a single-term filter.
 	got := collectMatches(t, fx.store, []Filter{{ContractID: fx.contractA[:]}},
 		IDRange{Start: 0, End: 2}, false)
 	assert.Equal(t, []uint32{0, 1}, matchOrdinals(got))
 
 	after := lookupOne(t, fx.store, key)
 	assert.True(t, snapshot.Equals(after),
-		"the window AND must not mutate the mirror's term bitmap in place")
+		"Matches must not mutate the mirror's shared term bitmap")
 
-	// End to end: the same filter over the whole chunk still sees the
-	// ids an in-place AND would have destroyed.
+	// The same filter over the whole chunk still sees every id.
 	full := collectMatches(t, fx.store, []Filter{{ContractID: fx.contractA[:]}},
 		wholeChunk(t, fx.store), false)
 	assert.Equal(t, []uint32{0, 1, 4}, matchOrdinals(full))
@@ -1778,4 +1747,29 @@ func TestCountDistinctTerms(t *testing.T) {
 	assert.Equal(t, 1, CountDistinctTerms([]Filter{
 		{ContractID: cid, TopicCount: TopicCountFilter{Count: 1}},
 	}), "topic-count buckets are not value terms and are not counted")
+}
+
+// The first-batch hint contract: a positive hint sizes the first fetch in
+// full, since every caller passes a validated page size, and later batches
+// use the default.
+func TestBatchSizes(t *testing.T) {
+	first, rest := batchSizes(0)
+	require.Equal(t, matchBatchSize, first)
+	require.Equal(t, matchBatchSize, rest)
+
+	first, rest = batchSizes(-3)
+	require.Equal(t, matchBatchSize, first)
+	require.Equal(t, matchBatchSize, rest)
+
+	first, rest = batchSizes(7)
+	require.Equal(t, 7, first)
+	require.Equal(t, matchBatchSize, rest)
+
+	first, rest = batchSizes(1000)
+	require.Equal(t, 1000, first, "a page-sized hint is the first fetch size")
+	require.Equal(t, matchBatchSize, rest)
+
+	first, rest = batchSizes(10_000)
+	require.Equal(t, 10_000, first, "a v1 page-sized hint is honored in full")
+	require.Equal(t, matchBatchSize, rest)
 }

@@ -79,7 +79,8 @@ func decodeIndex(buf []byte, recordCount int, indexSize int, indexBase int64) ([
 	// (width, min) is at its tail, so intpack.DecodeGroup naturally reads from the end of
 	// its window. Iterating backward lets us shrink the window after each group.
 	groupCount := (recordCount + groupSize - 1) / groupSize
-	deltas := make([]uint32, recordCount)
+	deltas := getScratch(recordCount)
+	defer putScratch(deltas)
 	pos := payloadLen
 
 	for g := groupCount - 1; g >= 0; g-- {
@@ -102,8 +103,9 @@ func decodeIndex(buf []byte, recordCount int, indexSize int, indexBase int64) ([
 		return nil, fmt.Errorf("%w: index has %d unconsumed bytes after decoding all groups", ErrCorrupt, pos)
 	}
 
-	// Forward prefix-sum to build absolute offsets from deltas.
-	offsets := make([]int64, recordCount+1)
+	// Forward prefix-sum from deltas to absolute offsets. Every entry of the
+	// pooled table is overwritten below, the sentinel included.
+	offsets := getOffsets(recordCount + 1)
 
 	offset := int64(0)
 	for i, d := range deltas {
@@ -113,6 +115,7 @@ func decodeIndex(buf []byte, recordCount int, indexSize int, indexBase int64) ([
 
 	// Structural sanity check: running sum must arrive at indexBase.
 	if offset != indexBase {
+		putOffsets(offsets)
 		return nil, fmt.Errorf("%w: final offset %d != indexBase %d", ErrCorrupt, offset, indexBase)
 	}
 

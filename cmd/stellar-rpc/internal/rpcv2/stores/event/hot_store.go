@@ -29,16 +29,21 @@ const (
 //
 //   - DataCF holds XDR-encoded event payloads: compressible (zstd
 //     typically 2-3× on XDR) and read in batches via
-//     BatchedMultiGetCF. Larger blocks give zstd more context per
-//     compression unit and align with batch-fetch shapes.
+//     BatchedMultiGetCF. A point read decompresses one block to serve
+//     one ~250B event, so a 32 KiB block paid for ~128 events per cache
+//     miss.
 //   - IndexCF stores 20-byte (term_hash || event_id) keys with
 //     empty values — nothing in the values to compress, and small
 //     blocks reduce wasted I/O per random Lookup miss (each Lookup
 //     reads one block to find one key).
 //   - OffsetsCF stores 8-byte (ledger_seq -> event_count) rows in
 //     the tens-of-thousands per chunk — same shape as IndexCF.
+//
+// A block size applies to SSTs as they are written. Chunks already on disk
+// keep theirs until compaction or rotation rewrites them; a restart changes
+// nothing.
 const (
-	dataCFBlockSize    = 32 * 1024
+	dataCFBlockSize    = 8 * 1024
 	indexCFBlockSize   = 4 * 1024
 	offsetsCFBlockSize = 4 * 1024
 )
@@ -177,6 +182,12 @@ func (h *HotStore) Offsets() (*LedgerOffsets, error) {
 // to batch — but exposing this method satisfies the Reader
 // interface so callers can program against batched lookups
 // uniformly.
+//
+// Each bitmap is a point-in-time image of its term: a sparse term is
+// copied out of the mirror's published id list, a dense one is
+// denseState.snapshot, the immutable clone shared with every other
+// reader. Neither grows under its holder, so a walk never sees an id
+// written after its lookup.
 func (h *HotStore) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.Bitmap, error) {
 	if h.chunkStore.IsClosed() {
 		return nil, stores.ErrStoreClosed
@@ -232,10 +243,7 @@ func (h *HotStore) FetchEvents(ctx context.Context, eventIDs []uint32) ([]Payloa
 		return nil, err
 	}
 
-	keys := make([][]byte, len(eventIDs))
-	for i, id := range eventIDs {
-		keys[i] = encodeDataKey(id)
-	}
+	keys := encodeDataKeys(eventIDs)
 	values, err := h.chunkStore.BatchMultiGet(DataCF, keys)
 	if err != nil {
 		return nil, fmt.Errorf("events: batch fetch from chunk %s: %w", h.chunkID, err)
@@ -673,6 +681,27 @@ func encodeDataKey(eventID uint32) []byte {
 	var key [dataKeyLen]byte
 	binary.BigEndian.PutUint32(key[:], eventID)
 	return key[:]
+}
+
+// encodeDataKeys encodes every id into one backing buffer and returns
+// per-id sub-slices of it, in input order: two allocations for the
+// batch rather than one per id, which is what encodeDataKey costs
+// because its array escapes through the returned slice.
+//
+// The slices alias one array and must not be retained past the call
+// they are passed to. BatchMultiGet qualifies: grocksdb copies each key
+// into C memory and frees the copy before returning.
+func encodeDataKeys(eventIDs []uint32) [][]byte {
+	buf := make([]byte, dataKeyLen*len(eventIDs))
+	keys := make([][]byte, len(eventIDs))
+	for i, id := range eventIDs {
+		lo := i * dataKeyLen
+		hi := lo + dataKeyLen
+		key := buf[lo:hi:hi]
+		binary.BigEndian.PutUint32(key, id)
+		keys[i] = key
+	}
+	return keys
 }
 
 func encodeIndexKey(term TermKey, eventID uint32) []byte {

@@ -346,6 +346,77 @@ func TestHotStore_FetchEventsRejectsUnsortedInput(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnsortedEventIDs, "duplicate input must error")
 }
 
+// fetchEventsPerIDAllocBudget is the number of heap allocations FetchEvents
+// may spend per event ID. Both are grocksdb's: one *PinnableSlice per key
+// and the size out-param of the one PinnableSlice.Data call per key. Our
+// own work per batch is a fixed handful. If a grocksdb bump moves this
+// number, raise it after checking where the new allocation comes from; do
+// not widen it to absorb a regression on our side.
+const fetchEventsPerIDAllocBudget = 2
+
+// TestHotStore_FetchEventsAllocationBudget pins that FetchEvents spends no
+// per-ID allocation of its own; the regression it catches is a
+// heap-allocated key per ID.
+func TestHotStore_FetchEventsAllocationBudget(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	const n = 512
+	h := openHotStoreForTest(t, chunkID)
+
+	payloads := make([]Payload, n)
+	for i := range n {
+		p, _ := makePayload(fmt.Sprintf("evt-%03d", i))
+		payloads[i] = p
+	}
+	require.NoError(t, ingestLedgerEvents(h.store, 2, payloads))
+
+	ids := make([]uint32, n)
+	for i := range n {
+		ids[i] = uint32(i)
+	}
+	ctx := context.Background()
+	// Warm the block cache first: a cold read allocates in RocksDB's own
+	// Go-side plumbing on the way to the SSTs and would skew run one.
+	_, err := h.store.FetchEvents(ctx, ids)
+	require.NoError(t, err)
+
+	allocs := testing.AllocsPerRun(20, func() {
+		if _, err := h.store.FetchEvents(ctx, ids); err != nil {
+			t.Error(err)
+		}
+	})
+
+	// Per-ID budget plus generous room for the fixed per-batch handful.
+	const fixedAllocSlack = 64
+	budget := float64(n*fetchEventsPerIDAllocBudget + fixedAllocSlack)
+	assert.LessOrEqual(t, allocs, budget,
+		"FetchEvents of %d IDs allocated %.0f times (budget %.0f): a per-ID "+
+			"allocation crept back into the fetch path", n, allocs, budget)
+}
+
+// TestEncodeDataKeys pins that the keys equal encodeDataKey's, are distinct
+// windows onto one buffer, and cost a fixed number of allocations.
+func TestEncodeDataKeys(t *testing.T) {
+	ids := []uint32{0, 1, 7, 1 << 20, ^uint32(0)}
+	keys := encodeDataKeys(ids)
+	require.Len(t, keys, len(ids))
+	for i, id := range ids {
+		assert.Equal(t, encodeDataKey(id), keys[i], "key %d", i)
+		assert.Len(t, keys[i], dataKeyLen, "key %d", i)
+		// Full slice expression: appending to one key must not scribble
+		// over the next one.
+		assert.Equal(t, dataKeyLen, cap(keys[i]), "key %d capacity", i)
+	}
+
+	// Same allocation count two orders of magnitude apart.
+	small := testing.AllocsPerRun(100, func() { _ = encodeDataKeys(make([]uint32, 8)) })
+	large := testing.AllocsPerRun(100, func() { _ = encodeDataKeys(make([]uint32, 4096)) })
+	// One for the key buffer, one for the slice headers, one for the
+	// make([]uint32) the closure itself does.
+	const encodeDataKeysAllocs = 3
+	assert.LessOrEqual(t, small, float64(encodeDataKeysAllocs), "8 IDs")
+	assert.LessOrEqual(t, large, float64(encodeDataKeysAllocs), "4096 IDs")
+}
+
 func TestHotStore_AllStreamsInEventIDOrder(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)

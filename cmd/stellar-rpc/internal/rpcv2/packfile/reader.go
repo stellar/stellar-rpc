@@ -161,6 +161,14 @@ type Reader struct {
 
 	waitOpen func() error // blocks until background open completes
 
+	// closed and inflight let Close recycle the pooled offsets safely. A read
+	// increments inflight before checking closed; Close sets closed before
+	// reading inflight. So either the read backs out, or Close sees it and
+	// leaves the offsets to the garbage collector. A read racing Close is a
+	// caller bug either way; this makes its worst case a leak, not reuse.
+	closed   atomic.Bool
+	inflight atomic.Int64
+
 	closeOnce sync.Once
 	closeErr  error
 }
@@ -235,7 +243,8 @@ func doOpen(path string) openResult {
 	// Speculative read: last min(speculativeReadSize, fileSize) bytes.
 	speculativeSize := min(int64(speculativeReadSize), fileSize)
 	speculativeOff := fileSize - speculativeSize
-	speculativeBuf := make([]byte, speculativeSize)
+	speculativeBuf := getOpenBuf(int(speculativeSize))
+	defer putOpenBuf(speculativeBuf)
 	if _, err := f.ReadAt(speculativeBuf, speculativeOff); err != nil {
 		return openResult{err: fmt.Errorf("packfile: read trailer region: %w", err)}
 	}
@@ -262,11 +271,12 @@ func doOpen(path string) openResult {
 	var indexBuf []byte
 	var appData []byte
 
+	// Both arms hand decodeIndex a view into a pooled buffer; only appData,
+	// which the Reader keeps, is copied out.
 	if tailSize <= speculativeSize {
 		// Index + appData are already inside the speculative read.
 		tailStart := len(speculativeBuf) - int(tailSize)
-		indexBuf = make([]byte, indexSize)
-		copy(indexBuf, speculativeBuf[tailStart:tailStart+indexSize])
+		indexBuf = speculativeBuf[tailStart : tailStart+indexSize]
 		if appDataSize > 0 {
 			appData = make([]byte, appDataSize)
 			adStart := tailStart + indexSize
@@ -275,7 +285,8 @@ func doOpen(path string) openResult {
 	} else {
 		// Single fallback read for index + appData.
 		readSize := indexSize + appDataSize
-		buf := make([]byte, readSize)
+		buf := getOpenBuf(readSize)
+		defer putOpenBuf(buf)
 		if readSize > 0 {
 			if _, err := f.ReadAt(buf, indexBase); err != nil {
 				return openResult{err: fmt.Errorf("packfile: read index region: %w", err)}
@@ -297,11 +308,6 @@ func doOpen(path string) openResult {
 			ErrChecksum, trailer.AppDataCRC, computed)}
 	}
 
-	offsets, err := decodeIndex(indexBuf, recordCount, indexSize, indexBase)
-	if err != nil {
-		return openResult{err: err}
-	}
-
 	// Not gated on recordCount: a trailer claiming items but no itemsPerRecord
 	// would otherwise pass Open and index past the offsets slice on first read.
 	if itemsPerRecord <= 0 && (recordCount > 0 || totalItems > 0) {
@@ -320,6 +326,13 @@ func doOpen(path string) openResult {
 				"%w: trailer says %d items / %d itemsPerRecord = %d records, but packfile has %d records",
 				ErrCorrupt, totalItems, itemsPerRecord, expectedRecords, recordCount)}
 		}
+	}
+
+	// Decoded last: the table is pooled, and every check that could still
+	// fail has run, so on success the Reader owns it until Close.
+	offsets, err := decodeIndex(indexBuf, recordCount, indexSize, indexBase)
+	if err != nil {
+		return openResult{err: err}
 	}
 
 	// Empty packfiles may legitimately have itemsPerRecord==0 on disk;
@@ -417,6 +430,10 @@ func (r *Reader) ReadItem(position int, fn func([]byte) error) error {
 	if err := r.waitOpen(); err != nil {
 		return err
 	}
+	if err := r.beginRead(); err != nil {
+		return err
+	}
+	defer r.endRead()
 	if position < 0 || position >= r.totalItems {
 		return ErrPositionOutOfRange
 	}
@@ -469,6 +486,11 @@ func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 			yield(nil, err)
 			return
 		}
+		if err := r.beginRead(); err != nil {
+			yield(nil, err)
+			return
+		}
+		defer r.endRead()
 		if start < 0 || count < 0 || start > r.totalItems || count > r.totalItems-start {
 			yield(nil, fmt.Errorf("%w: ReadRange(%d, %d) out of [0, %d)",
 				ErrPositionOutOfRange, start, count, r.totalItems))
@@ -577,6 +599,10 @@ func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int
 	if err := r.waitOpen(); err != nil {
 		return err
 	}
+	if err := r.beginRead(); err != nil {
+		return err
+	}
+	defer r.endRead()
 
 	for i, pos := range positions {
 		if pos < 0 || pos >= r.totalItems {
@@ -768,12 +794,37 @@ func (r *Reader) Verify(ctx context.Context) error {
 // Readers); its lifecycle is the caller's responsibility.
 func (r *Reader) Close() error {
 	r.closeOnce.Do(func() {
+		r.closed.Store(true)
 		openErr := r.waitOpen()
 		var closeErr error
 		if r.file != nil {
 			closeErr = r.file.Close()
 		}
+		// Recycle only when no read is in flight. closed is already set, so
+		// no new read can begin; a read still in flight is a caller bug, and
+		// leaving the array to the collector keeps that a leak.
+		if r.inflight.Load() == 0 && r.offsets != nil {
+			putOffsets(r.offsets)
+			r.offsets = nil
+		}
 		r.closeErr = errors.Join(openErr, closeErr)
 	})
 	return r.closeErr
 }
+
+// errReaderClosed is returned by reads that begin after Close. It wraps
+// os.ErrClosed so callers matching the closed-file error shape keep matching.
+var errReaderClosed = fmt.Errorf("packfile: read after Close: %w", os.ErrClosed)
+
+// beginRead registers a read with the Close handshake; endRead must run when
+// the read finishes. See the closed and inflight field comment.
+func (r *Reader) beginRead() error {
+	r.inflight.Add(1)
+	if r.closed.Load() {
+		r.inflight.Add(-1)
+		return errReaderClosed
+	}
+	return nil
+}
+
+func (r *Reader) endRead() { r.inflight.Add(-1) }
