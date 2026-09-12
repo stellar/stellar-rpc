@@ -1278,3 +1278,54 @@ func TestSlabStagesOpenTheSameSlabs(t *testing.T) {
 		}
 	}
 }
+
+// TestStage1Request_TakesTheLeadingSlabs pins which end of the window the
+// first stage comes off — the low slabs ascending, the trailing ones
+// descending — and that it is cut on whole slabs, so no slab is split across
+// the two stages and the candidates are the same however the window is
+// staged. The window's own bound stands where it sits mid-slab: a stage is
+// entered at the edge the walk starts from, not at a slab boundary.
+func TestStage1Request_TakesTheLeadingSlabs(t *testing.T) {
+	defer func(s uint) { slabShift = s }(slabShift)
+	defer func(n int) { matchStage1Slabs = n }(matchStage1Slabs)
+	slabShift = 4
+	const slab = 1 << 4
+
+	for _, tc := range []struct {
+		name      string
+		slabs     int
+		window    IDRange
+		asc, desc IDRange
+	}{
+		{"from the edge", 2, IDRange{0, 10 * slab}, IDRange{0, 2 * slab}, IDRange{8 * slab, 10 * slab}},
+		{
+			"entered mid-slab", 2,
+			IDRange{slab + 5, 10*slab - 3},
+			IDRange{slab + 5, 3 * slab},
+			IDRange{8 * slab, 10*slab - 3},
+		},
+		{
+			"wider than the window", 99,
+			IDRange{2 * slab, 3 * slab},
+			IDRange{2 * slab, 3 * slab},
+			IDRange{2 * slab, 3 * slab},
+		},
+		{
+			"one stage", matchOneStage,
+			IDRange{slab, 9 * slab},
+			IDRange{slab, 9 * slab},
+			IDRange{slab, 9 * slab},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			matchStage1Slabs = tc.slabs
+			assert.Equal(t, tc.asc, stage1Request(tc.window, false))
+			assert.Equal(t, tc.desc, stage1Request(tc.window, true))
+			// What is left is the rest of the window, on the other side.
+			assert.Equal(t, IDRange{tc.asc.End, tc.window.End},
+				stageRemainder(tc.window, tc.asc, false))
+			assert.Equal(t, IDRange{tc.window.Start, tc.desc.Start},
+				stageRemainder(tc.window, tc.desc, true))
+		})
+	}
+}

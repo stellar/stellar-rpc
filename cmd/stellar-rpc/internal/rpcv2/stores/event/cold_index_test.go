@@ -373,3 +373,107 @@ func TestWriteColdIndex_StampAndContentHash(t *testing.T) {
 	assert.True(t, hashed, "index.pack carries a content hash")
 	require.NoError(t, r.Verify(context.Background()))
 }
+
+// TestPartLayout_CutsSpansFromTheChunkExtent pins the part geometry: ceil(S /
+// 64 KiB) target parts, spans of 2^k slabs with k the largest shift that
+// keeps that many spans inside the chunk, and one record per span of the
+// chunk — so the span a part covers is the chunk's to give and a term's ids
+// name their part by arithmetic. A chunk too small to cut yields one record.
+func TestPartLayout_CutsSpansFromTheChunkExtent(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		size       uint64
+		chunkSlabs uint64
+		k          uint8
+		records    uint32
+	}{
+		{"a one-slab chunk cannot be cut", 1 << 10, 1, 0, 1},
+		{"a term under the part target spans the chunk", 32 << 10, 54, 5, 2},
+		{"a wide term gets its S/64KiB parts", 432 << 10, 54, 2, 14},
+		{"records never fall below the target", 1 << 20, 64, 2, 16},
+		{"a big term in a tiny chunk is one part", 1 << 20, 1, 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k, records, err := partLayout(tc.size, tc.chunkSlabs)
+			require.NoError(t, err)
+			assert.Equal(t, tc.k, k)
+			assert.Equal(t, tc.records, records)
+		})
+	}
+	_, _, err := partLayout(1<<20, 0)
+	require.Error(t, err, "a demoted term in a chunk with no ids is a writer bug")
+}
+
+// spreadTerm adds one term holding every other id of slabs [0, slabs), the
+// shape roaring keeps as one bitmap container per slab — 8 KiB apiece,
+// RunOptimize or not — so the term's serialized size is 8 KiB × slabs.
+func spreadTerm(t *testing.T, bitmaps Bitmaps, name string, slabs int) {
+	t.Helper()
+	ids := make([]uint32, 0, slabs<<15)
+	for i := range uint32(slabs << 15) {
+		ids = append(ids, i*2)
+	}
+	bitmaps.AddTo(ComputeTermKey([]byte(name), FieldContractID), ids...)
+}
+
+// openDirectory decodes the fixture's index.pack app data — the directory the
+// writer left behind, read without a ColdReader's validation in the way.
+func openDirectory(t *testing.T, dir string) indexDirectory {
+	t.Helper()
+	r := packfile.Open(filepath.Join(dir, IndexPackName(partsChunkID)), packfile.ReaderOptions{})
+	t.Cleanup(func() { _ = r.Close() })
+	ad, err := r.AppData()
+	require.NoError(t, err)
+	_, _, d, err := decodeIndexAppData(ad)
+	require.NoError(t, err)
+	return d
+}
+
+// bucketBytes is what the bucket records weigh after demotion: the items a
+// reader gets back from them, which is what the writer budgets on.
+func bucketBytes(t *testing.T, dir string, d indexDirectory) int {
+	t.Helper()
+	items := loadIndexPack(t, filepath.Join(dir, IndexPackName(partsChunkID)))
+	total := 0
+	for i := range int(d.bucketCount) * indexPackItemsPerRecord {
+		total += len(items[i])
+	}
+	return total
+}
+
+// TestWriteColdIndex_DemotesUntilTheBucketFits pins the loop: demoting the
+// largest term once is not enough when two of them are over the budget, so
+// the writer demotes again until what is left fits in one I/O unit.
+func TestWriteColdIndex_DemotesUntilTheBucketFits(t *testing.T) {
+	bitmaps := NewBitmaps()
+	// 320 KiB each: either one alone puts the bucket over the budget.
+	spreadTerm(t, bitmaps, "big-a", 40)
+	spreadTerm(t, bitmaps, "big-b", 40)
+	dir := buildPartsFixture(t, bitmaps)
+
+	d := openDirectory(t, dir)
+	require.Equal(t, 2, d.entryCount(), "both terms over the budget must be demoted")
+	require.LessOrEqual(t, bucketBytes(t, dir, d), indexBucketBudget)
+}
+
+// TestWriteColdIndex_SubFloorBucketStaysWhole is the other end of the loop.
+// Demoting a term below the floor would trade a bucket read for a part read
+// of the same bytes, so a bucket of nothing but small terms is left whole
+// however far over the budget it is — bounded, at worst, by 128 × the floor.
+func TestWriteColdIndex_SubFloorBucketStaysWhole(t *testing.T) {
+	bitmaps := NewBitmaps()
+	ids := make([]uint32, 0, 8000)
+	for i := range uint32(8000) {
+		ids = append(ids, i*8) // one bitmap container, ~8 KiB: half the floor
+	}
+	for i := range indexPackItemsPerRecord {
+		bitmaps.AddTo(ComputeTermKey(fmt.Appendf(nil, "small-%d", i), FieldContractID), ids...)
+	}
+	dir := buildPartsFixture(t, bitmaps)
+
+	d := openDirectory(t, dir)
+	assert.Zero(t, d.entryCount(), "no term is worth demoting")
+	assert.Zero(t, d.totalParts)
+	assert.Greater(t, bucketBytes(t, dir, d), indexBucketBudget,
+		"the fixture must leave the bucket over the budget, or it pins nothing")
+}
