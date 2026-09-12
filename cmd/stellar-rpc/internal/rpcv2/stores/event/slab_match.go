@@ -1,7 +1,7 @@
 package event
 
 // slab_match.go produces the candidate ids behind Matches. One stepper walks
-// one batch of the window (see windowBatches) one slab at a time, 65536 ids,
+// one stage of the window (see windowStages) one slab at a time, 65536 ids,
 // the span of one roaring container, and the whole filter algebra is
 // evaluated inside each slab. Direction is only the walk order: ascending
 // walks slabs low to high and reads each result forward, descending walks
@@ -13,12 +13,12 @@ package event
 // asks the term bitmaps where the next candidate can be and jumps there (see
 // the bound helpers below).
 //
-// The term bitmaps come from the Reader.LookupKeys call this batch was looked
-// up by, and are held for its walk. They answer for the batch's ids and no
-// others, which is why the stepper's window is the batch: a NextValue or
-// PreviousValue landing outside it says only that this batch holds nothing
+// The term bitmaps come from the Reader.LookupKeys call this stage was looked
+// up by, and are held for its walk. They answer for the stage's ids and no
+// others, which is why the stepper's window is the stage: a NextValue or
+// PreviousValue landing outside it says only that this stage holds nothing
 // more, never anything about the rest of the query's window, and the bounds
-// proved from them die with the batch. They are read-only and may be
+// proved from them die with the stage. They are read-only and may be
 // snapshots shared with other readers. FastAnd reads its arguments and
 // returns fresh containers, which roaring_contract_test.go pins against the
 // pinned roaring version; the only bitmaps this file mutates are the ones it
@@ -41,7 +41,7 @@ import (
 //nolint:gochecknoglobals // test seam; production never writes it
 var slabShift uint = 16
 
-// slabPlan is one plan's term bitmaps, held for the whole batch and ordered
+// slabPlan is one plan's term bitmaps, held for the whole stage and ordered
 // rarest first.
 type slabPlan []*roaring.Bitmap
 
@@ -50,13 +50,19 @@ type slabPlan []*roaring.Bitmap
 // and orders each survivor's terms rarest first, the order the pinned
 // roaring's FastAnd intersects them in. A present but empty term keeps its
 // plan.
-func resolveSlabPlans(plans []termPlan, sources []*roaring.Bitmap) []slabPlan {
-	// A term's cardinality is counted once, however many plans name it: on
-	// run containers it walks every run.
+//
+// Rare is rare inside window: a term the walk will never leave one slab of
+// is not the rarest one just because it is small elsewhere, and a lookup is
+// free to return ids outside the window anyway. CardinalityInRange counts
+// only the containers the window spans, so the ordering costs O(containers
+// in the window) rather than a walk of every run of every term, and it does
+// not underflow at Start == 0 the way a Rank difference would.
+func resolveSlabPlans(plans []termPlan, sources []*roaring.Bitmap, window IDRange) []slabPlan {
+	// A term's cardinality is counted once, however many plans name it.
 	cards := make([]uint64, len(sources))
 	for i, bm := range sources {
 		if bm != nil {
-			cards[i] = bm.GetCardinality()
+			cards[i] = bm.CardinalityInRange(uint64(window.Start), uint64(window.End))
 		}
 	}
 	absent := func(slot int) bool { return sources[slot] == nil }
@@ -106,15 +112,15 @@ func (p slabPlan) eval(slab *roaring.Bitmap) *roaring.Bitmap {
 //
 // Descending mirrors this with PreviousValue and the min and max swapped.
 // The post-filter only drops candidates, so a bound proved on the index
-// bounds the stream. A bound is proved from this batch's bitmaps, so it
-// bounds this batch only; the next batch proves its own from scratch.
+// bounds the stream. A bound is proved from this stage's bitmaps, so it
+// bounds this stage only; the next stage proves its own from scratch.
 // NextValue and PreviousValue are inclusive of the target, return -1 for
 // none, and do not write the bitmap they search; roaring_contract_test.go
 // pins all three properties.
 
 // boundRetired is the bound of a plan whose terms ran out ahead of the
-// cursor inside this batch: the cursor never comes back, so the plan is
-// dropped for the rest of the batch's walk. It is roaring's own "none" and
+// cursor inside this stage: the cursor never comes back, so the plan is
+// dropped for the rest of the stage's walk. It is roaring's own "none" and
 // sorts below every id, so the "outside this slab" test covers it.
 const boundRetired = int64(-1)
 
@@ -147,9 +153,9 @@ func (p slabPlan) prevBound(pos uint32) int64 {
 	return bound
 }
 
-// slabStepper walks one batch's slabs in emission order, evaluating a slab
+// slabStepper walks one stage's slabs in emission order, evaluating a slab
 // only when the consumer has drained the previous one. Its window is the
-// batch, not the query's: the bitmaps it holds answer for no other ids.
+// stage, not the query's: the bitmaps it holds answer for no other ids.
 type slabStepper struct {
 	plans  []slabPlan
 	window IDRange
@@ -180,7 +186,7 @@ func newSlabStepper(
 	plans []termPlan, sources []*roaring.Bitmap, window IDRange, descending bool,
 ) *slabStepper {
 	s := &slabStepper{
-		plans:  resolveSlabPlans(plans, sources),
+		plans:  resolveSlabPlans(plans, sources, window),
 		window: window,
 		desc:   descending,
 	}
@@ -197,7 +203,7 @@ func newSlabStepper(
 }
 
 // seekAsc returns the lowest position at or above pos where some plan can
-// still match, or false when none can inside the batch. A plan is asked
+// still match, or false when none can inside the stage. A plan is asked
 // again only once pos has reached its held bound; a plan with no bound left
 // is retired rather than ending the walk.
 func (s *slabStepper) seekAsc(pos uint32) (uint32, bool) {
@@ -375,10 +381,10 @@ func (s *slabStepper) appendUpTo(dst []uint32, n int) []uint32 {
 }
 
 // streamSlabs is the streaming loop for both directions over one window
-// batch: fill one fetch of candidate ordinals from the stepper, fetch,
+// stage: fill one fetch of candidate ordinals from the stepper, fetch,
 // post-filter, yield. It returns how many matches it yielded and whether the
-// stream should continue into the next batch — a consumer that stopped, or
-// an error, ends the whole query, an exhausted stepper only this batch.
+// stream should continue into the next stage — a consumer that stopped, or
+// an error, ends the whole query, an exhausted stepper only this stage.
 func streamSlabs(
 	ctx context.Context, r Reader, filters []Filter, st *slabStepper,
 	descending bool, firstBatch int, yield func(Match, error) bool,

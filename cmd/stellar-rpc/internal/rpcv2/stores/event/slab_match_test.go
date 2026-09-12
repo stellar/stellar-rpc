@@ -710,7 +710,7 @@ func TestResolveSlabPlans(t *testing.T) {
 		termBitmap(2, 3, 4),
 		termBitmap(), // present, holding nothing
 	}
-	got := resolveSlabPlans([]termPlan{{0}, {2, 0}, {1, 2}, {3}, {1}}, sources)
+	got := resolveSlabPlans([]termPlan{{0}, {2, 0}, {1, 2}, {3}, {1}}, sources, everyID)
 	require.Len(t, got, 3, "a plan naming an absent term matches nothing and is dropped")
 	require.Len(t, got[0], 1)
 	assert.Same(t, sources[0], got[0][0], "the lookup's bitmap is held, not copied")
@@ -719,6 +719,14 @@ func TestResolveSlabPlans(t *testing.T) {
 	assert.Same(t, sources[2], got[1][1])
 	require.Len(t, got[2], 1)
 	assert.Same(t, sources[3], got[2][0], "a present but empty term keeps its plan")
+
+	// Rare is rare inside the window: over [1, 3) the two-id term holds both
+	// of its ids and the three-id term one of its three, so the order flips.
+	inWindow := resolveSlabPlans([]termPlan{{2, 0}}, sources, IDRange{Start: 1, End: 3})
+	require.Len(t, inWindow, 1)
+	require.Len(t, inWindow[0], 2)
+	assert.Same(t, sources[0], inWindow[0][1])
+	assert.Same(t, sources[2], inWindow[0][0], "ordered by what the window holds")
 }
 
 // A topic-count range fans out to one plan per bucket, and a repeated filter
@@ -958,16 +966,16 @@ func (r windowFuzzReader) perturb(bm *roaring.Bitmap, window IDRange) {
 	}
 }
 
-// fuzzWindowSchedules are the (slab width, first batch) pairs the window pin
+// fuzzWindowSchedules are the (slab width, stage-1 width) pairs the window pin
 // runs under: 1024-wide slabs put ~69 of them in the shaped corpus, so the
-// doubling schedule spends six batches on the whole window, and the
-// production width with a one-slab first batch splits it on the boundary the
-// shaped fixture is built around. Both make the rewritten region land inside
-// the window the consumer asked for, not only outside it.
+// build's own stage 1 covers a fraction of the window and stage 2 the rest,
+// and the production width with a one-slab stage 1 splits the window on the
+// boundary the shaped fixture is built around. Both make the rewritten region
+// land inside the window the consumer asked for, not only outside it.
 var fuzzWindowSchedules = []struct {
 	shift uint
 	slabs int
-}{{10, firstBatchSlabs}, {16, 1}}
+}{{10, defaultStage1Slabs}, {16, 1}}
 
 // TestMatches_IgnoresIDsOutsideTheLookupWindow is the oracle gate on
 // Reader.LookupKeys' window contract. Every shaped shape runs again with each
@@ -977,7 +985,7 @@ var fuzzWindowSchedules = []struct {
 func TestMatches_IgnoresIDsOutsideTheLookupWindow(t *testing.T) {
 	f := newShapedFixture(t)
 	defer func(s uint) { slabShift = s }(slabShift)
-	defer func(n int) { matchFirstBatchSlabs = n }(matchFirstBatchSlabs)
+	defer func(n int) { matchStage1Slabs = n }(matchStage1Slabs)
 
 	const slab = 1 << 16
 	windows := []IDRange{
@@ -989,7 +997,7 @@ func TestMatches_IgnoresIDsOutsideTheLookupWindow(t *testing.T) {
 	for _, sh := range f.namedShapes() {
 		all := matchingEvents(t, f.corpus, sh.filters)
 		for _, sc := range fuzzWindowSchedules {
-			slabShift, matchFirstBatchSlabs = sc.shift, sc.slabs
+			slabShift, matchStage1Slabs = sc.shift, sc.slabs
 			for _, mode := range []lookupFuzzMode{fuzzOutside, fuzzClip} {
 				for _, seed := range []int64{1, 2} {
 					r := windowFuzzReader{
@@ -1024,8 +1032,8 @@ func TestMatches_IgnoresIDsOutsideTheLookupWindow(t *testing.T) {
 func TestMatches_IgnoresIDsOutsideTheLookupWindow_WholeStreams(t *testing.T) {
 	f := newShapedFixture(t)
 	defer func(s uint) { slabShift = s }(slabShift)
-	defer func(n int) { matchFirstBatchSlabs = n }(matchFirstBatchSlabs)
-	slabShift, matchFirstBatchSlabs = 10, firstBatchSlabs
+	defer func(n int) { matchStage1Slabs = n }(matchStage1Slabs)
+	slabShift, matchStage1Slabs = 10, defaultStage1Slabs
 
 	const slab = 1 << 16
 	for _, sh := range f.namedShapes() {
@@ -1088,8 +1096,8 @@ func TestMatches_IgnoresIDsOutsideTheLookupWindow_Randomized(t *testing.T) {
 func TestMatches_IgnoresIDsOutsideTheLookupWindow_HotStore(t *testing.T) {
 	fx := newQueryFixture(t)
 	defer func(s uint) { slabShift = s }(slabShift)
-	defer func(n int) { matchFirstBatchSlabs = n }(matchFirstBatchSlabs)
-	slabShift, matchFirstBatchSlabs = 1, 1
+	defer func(n int) { matchStage1Slabs = n }(matchStage1Slabs)
+	slabShift, matchStage1Slabs = 1, 1
 
 	filters := []Filter{{ContractID: fx.contractA[:]}} // ids 0, 1, 4
 	for _, mode := range []lookupFuzzMode{fuzzOutside, fuzzClip} {
@@ -1113,17 +1121,17 @@ func TestMatches_IgnoresIDsOutsideTheLookupWindow_HotStore(t *testing.T) {
 
 // ───────────────────────── the batch schedule ─────────────────────────
 
-// TestMatches_BatchScheduleIsInvisible pins that how much of the window a
-// query materializes at once never changes what it yields: every first batch
-// size, the whole window included, runs the shaped matrix and must agree with
-// the corpus.
-func TestMatches_BatchScheduleIsInvisible(t *testing.T) {
+// TestMatches_StageScheduleIsInvisible pins that how much of the window a
+// query materializes at once never changes what it yields: every stage-1
+// width the sweep builds, and the one-stage walk, run the shaped matrix and
+// must agree with the corpus.
+func TestMatches_StageScheduleIsInvisible(t *testing.T) {
 	f := newShapedFixture(t)
 	r := diffReader{f.corpus}
 	defer func(s uint) { slabShift = s }(slabShift)
-	defer func(n int) { matchFirstBatchSlabs = n }(matchFirstBatchSlabs)
-	// 1024-wide slabs, so the corpus is ~69 of them and every bounded
-	// schedule below spends several batches on the whole window.
+	defer func(n int) { matchStage1Slabs = n }(matchStage1Slabs)
+	// 1024-wide slabs, so the corpus is ~69 of them and every stage-1
+	// width below leaves a stage 2 to walk.
 	slabShift = 10
 
 	const slab = 1 << 16
@@ -1135,13 +1143,13 @@ func TestMatches_BatchScheduleIsInvisible(t *testing.T) {
 	}
 	for _, sh := range f.namedShapes() {
 		all := matchingEvents(t, f.corpus, sh.filters)
-		for _, slabs := range []int{1, 2, 4, 8, matchWholeWindow} {
-			matchFirstBatchSlabs = slabs
+		for _, slabs := range []int{4, 8, 16, matchOneStage} {
+			matchStage1Slabs = slabs
 			for _, w := range windows {
 				for _, desc := range []bool{false, true} {
 					for _, limit := range []int{1, 1000} {
 						requireStream(t, r, all, queryCase{
-							name:    fmt.Sprintf("%s/first batch %d slabs", sh.name, slabs),
+							name:    fmt.Sprintf("%s/stage 1 = %d slabs", sh.name, slabs),
 							filters: sh.filters,
 							window:  w,
 							desc:    desc,
@@ -1154,24 +1162,24 @@ func TestMatches_BatchScheduleIsInvisible(t *testing.T) {
 	}
 }
 
-// Whole streams under the schedules that split them, where the last batch is
-// the one the window clips.
-func TestMatches_BatchScheduleIsInvisible_WholeStreams(t *testing.T) {
+// Whole streams under the widths that split them, where stage 2 is the one
+// the window clips.
+func TestMatches_StageScheduleIsInvisible_WholeStreams(t *testing.T) {
 	f := newShapedFixture(t)
 	r := diffReader{f.corpus}
 	defer func(s uint) { slabShift = s }(slabShift)
-	defer func(n int) { matchFirstBatchSlabs = n }(matchFirstBatchSlabs)
+	defer func(n int) { matchStage1Slabs = n }(matchStage1Slabs)
 	slabShift = 10
 
 	const slab = 1 << 16
 	for _, sh := range f.namedShapes() {
 		all := matchingEvents(t, f.corpus, sh.filters)
-		for _, slabs := range []int{1, matchWholeWindow} {
-			matchFirstBatchSlabs = slabs
+		for _, slabs := range []int{4, matchOneStage} {
+			matchStage1Slabs = slabs
 			for _, w := range []IDRange{{0, shapedCorpusSize}, {slab - 3, slab + 3}} {
 				for _, desc := range []bool{false, true} {
 					requireStream(t, r, all, queryCase{
-						name:    fmt.Sprintf("%s/first batch %d slabs", sh.name, slabs),
+						name:    fmt.Sprintf("%s/stage 1 = %d slabs", sh.name, slabs),
 						filters: sh.filters,
 						window:  w,
 						desc:    desc,
@@ -1182,19 +1190,19 @@ func TestMatches_BatchScheduleIsInvisible_WholeStreams(t *testing.T) {
 	}
 }
 
-// The randomized matrix under every schedule.
-func TestMatches_BatchScheduleIsInvisible_Randomized(t *testing.T) {
+// The randomized matrix under every stage-1 width.
+func TestMatches_StageScheduleIsInvisible_Randomized(t *testing.T) {
 	v := newDiffVocab(t)
 	const corpusSize = 300
 	corpus := newDiffCorpus(t, rand.New(rand.NewSource(20260829)), v, corpusSize)
 	r := diffReader{corpus}
 	defer func(s uint) { slabShift = s }(slabShift)
-	defer func(n int) { matchFirstBatchSlabs = n }(matchFirstBatchSlabs)
+	defer func(n int) { matchStage1Slabs = n }(matchStage1Slabs)
 	defer func(n int) { matchBatchSize = n }(matchBatchSize)
 	slabShift, matchBatchSize = 2, 7
 
-	for _, slabs := range []int{1, 2, 4, 8, matchWholeWindow} {
-		matchFirstBatchSlabs = slabs
+	for _, slabs := range []int{4, 8, 16, matchOneStage} {
+		matchStage1Slabs = slabs
 		rng := rand.New(rand.NewSource(20260912))
 		matched := 0
 		for range 150 {
@@ -1205,24 +1213,24 @@ func TestMatches_BatchScheduleIsInvisible_Randomized(t *testing.T) {
 	}
 }
 
-// TestSlabBatchesOpenTheSameSlabs is the other half of the schedule pin: the
-// shapes TestSlabStepperSkipsCandidateFreeSlabs walks, walked again batch by
-// batch, open exactly the slabs the one-batch walk opens. Batch seams fall on
-// slab boundaries, and a batch proves its bounds from its own bitmaps at the
-// position the unbatched walk's cursor would hold, so the schedule cannot
-// cost a slab or save one.
-func TestSlabBatchesOpenTheSameSlabs(t *testing.T) {
+// TestSlabStagesOpenTheSameSlabs is the other half of the stage pin: the
+// shapes TestSlabStepperSkipsCandidateFreeSlabs walks, walked again in two
+// stages, open exactly the slabs the one-stage walk opens. The stage seam
+// falls on a slab boundary, and stage 2 proves its bounds from its own
+// bitmaps at the position the one-stage walk's cursor would hold, so the
+// split cannot cost a slab or save one.
+func TestSlabStagesOpenTheSameSlabs(t *testing.T) {
 	defer func(s uint) { slabShift = s }(slabShift)
-	defer func(n int) { matchFirstBatchSlabs = n }(matchFirstBatchSlabs)
+	defer func(n int) { matchStage1Slabs = n }(matchStage1Slabs)
 	slabShift = 16
 	const slab = 1 << 16
 	whole, sources := candidateFreeSlabFixture()
 
 	walk := func(window IDRange, plans []termPlan, desc bool, slabs int) [][2]uint32 {
-		matchFirstBatchSlabs = slabs
+		matchStage1Slabs = slabs
 		out := [][2]uint32{}
-		for batch := range windowBatches(window, desc) {
-			st := newSlabStepper(plans, sources, batch, desc)
+		for stage := range windowStages(window, desc) {
+			st := newSlabStepper(plans, sources, stage, desc)
 			for {
 				lo, hi, ok := st.nextBounds()
 				if !ok {
@@ -1245,12 +1253,12 @@ func TestSlabBatchesOpenTheSameSlabs(t *testing.T) {
 	for _, plans := range [][]termPlan{{{0}}, {{0, 2}}, {{2}}, {{0}, {1}}, {{3}}} {
 		for _, w := range windows {
 			for _, desc := range []bool{false, true} {
-				// One batch is the whole window, the walk the pinned lists
+				// One stage is the whole window, the walk the pinned lists
 				// are written against.
-				want := walk(w, plans, desc, matchWholeWindow)
-				for _, slabs := range []int{1, 2, 4, 8, 16, 64} {
+				want := walk(w, plans, desc, matchOneStage)
+				for _, slabs := range []int{4, 8, 16} {
 					assert.Equal(t, want, walk(w, plans, desc, slabs),
-						"plans %v window %v desc=%v first batch %d slabs",
+						"plans %v window %v desc=%v stage 1 = %d slabs",
 						plans, w, desc, slabs)
 				}
 			}

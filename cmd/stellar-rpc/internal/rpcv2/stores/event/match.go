@@ -7,13 +7,14 @@ package event
 // Matches.
 //
 // Optimization shape: terms are deduped across filters and issued as
-// one batched Reader.LookupKeys per window batch, whose bitmaps the walk
-// holds for that batch; payload fetches stream in internal batches. The
-// window is materialized from its leading edge in doubling batches, so a
-// query that stops after a page has asked the index about the slabs that
-// page spans rather than about the whole window. The candidate set comes
-// from the slab engine in slab_match.go, which serves both directions
-// from one walk over each batch.
+// one batched Reader.LookupKeys per window stage, whose bitmaps the walk
+// holds for that stage; payload fetches stream in internal batches. The
+// window is materialized in two stages — the leading slabs in the walk's
+// direction, then the remainder, and the second only if the page did not
+// fill — so a query that stops after a page has asked the index about the
+// slabs that page spans rather than about the whole window. The candidate
+// set comes from the slab engine in slab_match.go, which serves both
+// directions from one walk over each stage.
 
 import (
 	"bytes"
@@ -22,6 +23,7 @@ import (
 	"iter"
 	"math"
 	"slices"
+	"strconv"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -211,23 +213,46 @@ func IDRangeForLedgers(ofs *LedgerOffsets, startLedger, endLedger uint32) (IDRan
 //nolint:gochecknoglobals // test seam; production never writes it
 var matchBatchSize = 512
 
-// firstBatchSlabs is how many slabs a query materializes in its first
-// window batch, each following batch doubling on it. Two slabs is the
-// smallest batch that spans a slab boundary, so the common case — a page
-// served from the window's leading edge — asks the index for a page's
-// worth of window rather than for a chunk's.
-const firstBatchSlabs = 2
+// stage1Slabs is how many slabs a query's first stage covers, as a decimal
+// string so a build can pick it without a code change:
+//
+//	go build -ldflags "-X <this package>.stage1Slabs=4"
+//
+// It is a build-time knob for the width sweep, not a runtime setting: it is
+// parsed once at package init and never written again. A width that does not
+// parse, or is not positive, panics at init rather than silently serving the
+// default — a mistyped -X is a build mistake, and a build mistake should not
+// reach a measurement.
+//
+//nolint:gochecknoglobals // -ldflags -X seam; parsed at init, never written
+var stage1Slabs = "8"
 
-// matchWholeWindow, as matchFirstBatchSlabs, materializes the window in a
-// single batch — the shape every batched walk must agree with.
-const matchWholeWindow = 0
+// defaultStage1Slabs is stage1Slabs parsed: the stage-1 width this binary was
+// built with.
+//
+//nolint:gochecknoglobals // derived from the -X seam above at init
+var defaultStage1Slabs = mustStage1Slabs(stage1Slabs)
 
-// matchFirstBatchSlabs is firstBatchSlabs as a test seam: in-package tests
-// set it to force batch seams, matchWholeWindow included. It changes I/O
-// counts only, never what a stream yields.
+// matchOneStage, as matchStage1Slabs, materializes the window in a single
+// stage — the shape the two-stage walk must agree with.
+const matchOneStage = 0
+
+// matchStage1Slabs is defaultStage1Slabs as a test seam: in-package tests set
+// it to force a stage seam, matchOneStage included. It changes I/O counts
+// only, never what a stream yields.
 //
 //nolint:gochecknoglobals // test seam; production never writes it
-var matchFirstBatchSlabs = firstBatchSlabs
+var matchStage1Slabs = defaultStage1Slabs
+
+// mustStage1Slabs parses the build-time stage-1 width. See stage1Slabs for
+// why a bad value panics.
+func mustStage1Slabs(s string) int {
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		panic(fmt.Sprintf("events: stage1Slabs must be a positive integer, got %q", s))
+	}
+	return n
+}
 
 // Match is a payload plus Ordinal, its chunk-relative event ID. A
 // consumer that stops mid-stream needs the ordinal to know where it
@@ -256,67 +281,70 @@ func batchSizes(hint int) (int, int) {
 	return first, rest
 }
 
-// windowBatches yields the pieces of window a query materializes, in walk
-// order: the first covers matchFirstBatchSlabs slabs from the edge the walk
-// starts at, each following batch twice the last, every one clipped to the
-// window. matchWholeWindow yields the window itself.
+// windowStages yields the at most two pieces of window a query materializes,
+// in walk order. Stage 1 is the leading matchStage1Slabs slabs from the edge
+// the walk starts at — the trailing ones when descending — and stage 2 is
+// whatever is left of the window. matchOneStage yields the window itself.
 //
-// Seams fall on slab boundaries, so no slab is ever split across two
-// batches: the slabs the walk opens, and so the candidates it evaluates,
-// are the same whatever the schedule is. The leading batch is entered at
-// the window's own bound, which may sit mid-slab.
-func windowBatches(window IDRange, descending bool) iter.Seq[IDRange] {
+// Stage 2 is a lookup of its own, so a query that fills its page inside stage
+// 1 never asks the index about it: the consumer stops pulling and the loop in
+// Matches ends before the second yield. That is the whole point of the split
+// — the common page is served from the window's leading edge, so it asks the
+// index for a page's worth of window rather than for a chunk's — and it is
+// why there is no third stage: past the leading edge a query is reading the
+// window, and reading it in pieces would only cost round trips.
+//
+// The seam falls on a slab boundary, so no slab is ever split across the two
+// stages: the slabs the walk opens, and so the candidates it evaluates, are
+// the same whether there are one or two. The leading stage is entered at the
+// window's own bound, which may sit mid-slab.
+func windowStages(window IDRange, descending bool) iter.Seq[IDRange] {
 	return func(yield func(IDRange) bool) {
-		// A count past maxBatchSlabs already covers any window, so the
-		// doubling stops there rather than overflowing the slab shift.
-		slabs := min(uint64(max(0, matchFirstBatchSlabs)), maxBatchSlabs)
-		if descending {
-			for hi := window.End; hi > window.Start; {
-				lo := window.Start
-				if base := batchFloor(hi, slabs); base > uint64(lo) {
-					lo = uint32(base) //nolint:gosec // base < hi <= MaxUint32
-				}
-				if !yield(IDRange{Start: lo, End: hi}) {
-					return
-				}
-				hi, slabs = lo, min(2*slabs, maxBatchSlabs)
-			}
+		// A width past maxStageSlabs already covers any window, so it is
+		// clamped there rather than overflowing the slab shift.
+		slabs := min(uint64(max(0, matchStage1Slabs)), maxStageSlabs)
+		if slabs == 0 {
+			yield(window)
 			return
 		}
-		for lo := window.Start; lo < window.End; {
-			hi := window.End
-			if top := batchCeil(lo, slabs); top < uint64(hi) {
-				hi = uint32(top) //nolint:gosec // top < hi <= MaxUint32
+		if descending {
+			lo := window.Start
+			if base := stageFloor(window.End, slabs); base > uint64(lo) {
+				lo = uint32(base) //nolint:gosec // base < window.End <= MaxUint32
 			}
-			if !yield(IDRange{Start: lo, End: hi}) {
+			if !yield(IDRange{Start: lo, End: window.End}) || lo == window.Start {
 				return
 			}
-			lo, slabs = hi, min(2*slabs, maxBatchSlabs)
+			yield(IDRange{Start: window.Start, End: lo})
+			return
 		}
+		hi := window.End
+		if top := stageCeil(window.Start, slabs); top < uint64(hi) {
+			hi = uint32(top) //nolint:gosec // top < window.End <= MaxUint32
+		}
+		if !yield(IDRange{Start: window.Start, End: hi}) || hi == window.End {
+			return
+		}
+		yield(IDRange{Start: hi, End: window.End})
 	}
 }
 
-// maxBatchSlabs is the largest batch the schedule grows to: one slab per id
-// covers any window, whatever the slab width.
-const maxBatchSlabs = uint64(math.MaxUint32)
+// maxStageSlabs is the widest stage 1 can be: one slab per id covers any
+// window, whatever the slab width.
+const maxStageSlabs = uint64(math.MaxUint32)
 
-// batchCeil is where an ascending batch entered at lo ends: the top of the
-// slabs-th slab at or above lo's own. A zero count, the unbounded schedule,
-// is every id above lo.
-func batchCeil(lo uint32, slabs uint64) uint64 {
-	if slabs == 0 {
-		return uint64(math.MaxUint32) + 1
-	}
+// stageCeil is where an ascending stage 1 entered at lo ends: the top of the
+// slabs-th slab at or above lo's own. slabs is positive here.
+func stageCeil(lo uint32, slabs uint64) uint64 {
 	return ((uint64(lo) >> slabShift) + slabs) << slabShift
 }
 
-// batchFloor is where a descending batch entered at hi starts: the base of
-// the slabs-th slab at or below the one holding hi-1. A zero count, and one
-// that reaches past id zero, are id zero. hi is never zero — an empty window
-// never reaches a batch.
-func batchFloor(hi uint32, slabs uint64) uint64 {
+// stageFloor is where a descending stage 1 entered at hi starts: the base of
+// the slabs-th slab at or below the one holding hi-1, and id zero when it
+// reaches past it. hi is never zero — an empty window never reaches a stage.
+func stageFloor(hi uint32, slabs uint64) uint64 {
 	top := (uint64(hi) - 1) >> slabShift
-	if slabs == 0 || top+1 <= slabs {
+	if top+1 <= slabs {
 		return 0
 	}
 	return (top + 1 - slabs) << slabShift
@@ -342,18 +370,20 @@ func batchFloor(hi uint32, slabs uint64) uint64 {
 // drops are invisible: the iterator advances past them internally, so
 // consumers never see or reason about resume state.
 //
-// The window is materialized in batches (see windowBatches), so a query
-// performs one Reader.LookupKeys per batch rather than one per call, and on
-// the hot tier it sees one image of the index per batch rather than one for
+// The window is materialized in at most two stages (see windowStages): the
+// leading slabs in the walk's direction, then the remainder, and the second
+// only if the consumer is still pulling when the first runs out. So a query
+// performs one Reader.LookupKeys per stage rather than one per call, and on
+// the hot tier it sees one image of the index per stage rather than one for
 // the whole walk. The stream is still the pinned window's: the caller pins
 // window.End below the ingest frontier (see IDRange) and a committed
-// ledger's events never change, so every batch's image answers for the
+// ledger's events never change, so every stage's image answers for the
 // window identically, whenever it is taken.
 //
 // firstBatch sizes the first internal fetch: a consumer that will stop after
 // N matches passes N. Zero and negative hints use the default. A page that
-// spans a window batch carries the rest of its hint into the next one. The
-// hint changes I/O counts only, never what the stream yields.
+// spans the stage seam carries the rest of its hint into the second stage.
+// The hint changes I/O counts only, never what the stream yields.
 func Matches(
 	ctx context.Context, r Reader, filters []Filter, window IDRange,
 	descending bool, firstBatch int,
@@ -375,28 +405,28 @@ func Matches(
 			return
 		}
 		emitted := 0
-		for batch := range windowBatches(window, descending) {
-			sources, err := r.LookupKeys(ctx, uniqueKeys, batch)
+		for stage := range windowStages(window, descending) {
+			sources, err := r.LookupKeys(ctx, uniqueKeys, stage)
 			if err != nil {
 				yield(Match{}, fmt.Errorf("events: query lookup: %w", err))
 				return
 			}
-			// The stepper walks this batch and no further: bitmaps say
-			// nothing about the ids outside the batch they were looked up
-			// for, so the bounds it proves are the batch's and are dropped
+			// The stepper walks this stage and no further: bitmaps say
+			// nothing about the ids outside the stage they were looked up
+			// for, so the bounds it proves are the stage's and are dropped
 			// with it.
-			st := newSlabStepper(plans, sources, batch, descending)
+			st := newSlabStepper(plans, sources, stage, descending)
 			// No plan survived term resolution here, so nothing in this
-			// batch can match and no slab in it is worth evaluating. The
-			// next batch is a lookup of its own, so the walk moves on
+			// stage can match and no slab in it is worth evaluating. The
+			// next stage is a lookup of its own, so the walk moves on
 			// rather than ending.
 			if len(st.plans) == 0 {
 				continue
 			}
-			// firstBatch is the whole query's hint, so what earlier batches
-			// already yielded comes off it: a page that spans a seam still
-			// arrives in one fetch per batch. A spent hint goes non-positive
-			// and batchSizes falls back to the default.
+			// firstBatch is the whole query's hint, so what stage 1 already
+			// yielded comes off it: a page that spans the seam still arrives
+			// in one fetch per stage. A spent hint goes non-positive and
+			// batchSizes falls back to the default.
 			n, ok := streamSlabs(
 				ctx, r, filters, st, descending, firstBatch-emitted, yield)
 			emitted += n
