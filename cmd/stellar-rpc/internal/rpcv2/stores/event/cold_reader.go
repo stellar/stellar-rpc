@@ -345,6 +345,11 @@ func verifyAndDeserializeBitmap(record []byte, key TermKey, slot uint32) (*roari
 // the input slice (result[i] corresponds to keys[i]). See
 // Reader.LookupKeys for the semantics.
 //
+// The window is ignored: an index.pack record holds one whole term,
+// so a lookup reads and returns the whole of it, and a whole term
+// agrees with the index inside any window — which is all the contract
+// asks. It is honoured once the format can answer for part of a term.
+//
 // Cold-side implementation:
 //
 //  1. MPHF-resolve every key. Keys rejected at the routing stage
@@ -362,7 +367,7 @@ func verifyAndDeserializeBitmap(record []byte, key TermKey, slot uint32) (*roari
 //     match. Misses (fingerprint mismatch) leave result[i] = nil.
 //
 //nolint:cyclop // the four documented steps above, inline; splitting obscures the pass structure
-func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.Bitmap, error) {
+func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey, _ IDRange) ([]*roaring.Bitmap, error) {
 	if c.closed.Load() {
 		return nil, stores.ErrStoreClosed
 	}

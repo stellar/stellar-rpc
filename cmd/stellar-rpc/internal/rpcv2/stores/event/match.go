@@ -7,18 +7,20 @@ package event
 // Matches.
 //
 // Optimization shape: terms are deduped across filters and issued as
-// a single batched Reader.LookupKeys at iteration start, whose bitmaps
-// the walk holds for the whole query; payload fetches stream in
-// internal batches. On the cold path the lookup is one MPHF+index.pack
-// round trip per Matches call. The candidate set comes from the slab
-// engine in slab_match.go, which serves both directions from one walk
-// over the window.
+// one batched Reader.LookupKeys per window batch, whose bitmaps the walk
+// holds for that batch; payload fetches stream in internal batches. The
+// window is materialized from its leading edge in doubling batches, so a
+// query that stops after a page has asked the index about the slabs that
+// page spans rather than about the whole window. The candidate set comes
+// from the slab engine in slab_match.go, which serves both directions
+// from one walk over each batch.
 
 import (
 	"bytes"
 	"context"
 	"fmt"
 	"iter"
+	"math"
 	"slices"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
@@ -209,6 +211,24 @@ func IDRangeForLedgers(ofs *LedgerOffsets, startLedger, endLedger uint32) (IDRan
 //nolint:gochecknoglobals // test seam; production never writes it
 var matchBatchSize = 512
 
+// firstBatchSlabs is how many slabs a query materializes in its first
+// window batch, each following batch doubling on it. Two slabs is the
+// smallest batch that spans a slab boundary, so the common case — a page
+// served from the window's leading edge — asks the index for a page's
+// worth of window rather than for a chunk's.
+const firstBatchSlabs = 2
+
+// matchWholeWindow, as matchFirstBatchSlabs, materializes the window in a
+// single batch — the shape every batched walk must agree with.
+const matchWholeWindow = 0
+
+// matchFirstBatchSlabs is firstBatchSlabs as a test seam: in-package tests
+// set it to force batch seams, matchWholeWindow included. It changes I/O
+// counts only, never what a stream yields.
+//
+//nolint:gochecknoglobals // test seam; production never writes it
+var matchFirstBatchSlabs = firstBatchSlabs
+
 // Match is a payload plus Ordinal, its chunk-relative event ID. A
 // consumer that stops mid-stream needs the ordinal to know where it
 // stopped; it cannot be recovered from the payload, which carries
@@ -236,6 +256,72 @@ func batchSizes(hint int) (int, int) {
 	return first, rest
 }
 
+// windowBatches yields the pieces of window a query materializes, in walk
+// order: the first covers matchFirstBatchSlabs slabs from the edge the walk
+// starts at, each following batch twice the last, every one clipped to the
+// window. matchWholeWindow yields the window itself.
+//
+// Seams fall on slab boundaries, so no slab is ever split across two
+// batches: the slabs the walk opens, and so the candidates it evaluates,
+// are the same whatever the schedule is. The leading batch is entered at
+// the window's own bound, which may sit mid-slab.
+func windowBatches(window IDRange, descending bool) iter.Seq[IDRange] {
+	return func(yield func(IDRange) bool) {
+		// A count past maxBatchSlabs already covers any window, so the
+		// doubling stops there rather than overflowing the slab shift.
+		slabs := min(uint64(max(0, matchFirstBatchSlabs)), maxBatchSlabs)
+		if descending {
+			for hi := window.End; hi > window.Start; {
+				lo := window.Start
+				if base := batchFloor(hi, slabs); base > uint64(lo) {
+					lo = uint32(base) //nolint:gosec // base < hi <= MaxUint32
+				}
+				if !yield(IDRange{Start: lo, End: hi}) {
+					return
+				}
+				hi, slabs = lo, min(2*slabs, maxBatchSlabs)
+			}
+			return
+		}
+		for lo := window.Start; lo < window.End; {
+			hi := window.End
+			if top := batchCeil(lo, slabs); top < uint64(hi) {
+				hi = uint32(top) //nolint:gosec // top < hi <= MaxUint32
+			}
+			if !yield(IDRange{Start: lo, End: hi}) {
+				return
+			}
+			lo, slabs = hi, min(2*slabs, maxBatchSlabs)
+		}
+	}
+}
+
+// maxBatchSlabs is the largest batch the schedule grows to: one slab per id
+// covers any window, whatever the slab width.
+const maxBatchSlabs = uint64(math.MaxUint32)
+
+// batchCeil is where an ascending batch entered at lo ends: the top of the
+// slabs-th slab at or above lo's own. A zero count, the unbounded schedule,
+// is every id above lo.
+func batchCeil(lo uint32, slabs uint64) uint64 {
+	if slabs == 0 {
+		return uint64(math.MaxUint32) + 1
+	}
+	return ((uint64(lo) >> slabShift) + slabs) << slabShift
+}
+
+// batchFloor is where a descending batch entered at hi starts: the base of
+// the slabs-th slab at or below the one holding hi-1. A zero count, and one
+// that reaches past id zero, are id zero. hi is never zero — an empty window
+// never reaches a batch.
+func batchFloor(hi uint32, slabs uint64) uint64 {
+	top := (uint64(hi) - 1) >> slabShift
+	if slabs == 0 || top+1 <= slabs {
+		return 0
+	}
+	return (top + 1 - slabs) << slabShift
+}
+
 // Matches yields the events in window matching filters, in
 // chunk-relative ordinal order (reversed when descending), each
 // verified by the post-filter. Yielded payloads are owned by the
@@ -256,9 +342,18 @@ func batchSizes(hint int) (int, int) {
 // drops are invisible: the iterator advances past them internally, so
 // consumers never see or reason about resume state.
 //
+// The window is materialized in batches (see windowBatches), so a query
+// performs one Reader.LookupKeys per batch rather than one per call, and on
+// the hot tier it sees one image of the index per batch rather than one for
+// the whole walk. The stream is still the pinned window's: the caller pins
+// window.End below the ingest frontier (see IDRange) and a committed
+// ledger's events never change, so every batch's image answers for the
+// window identically, whenever it is taken.
+//
 // firstBatch sizes the first internal fetch: a consumer that will stop after
-// N matches passes N. Zero and negative hints use the default. The hint
-// changes I/O counts only, never what the stream yields.
+// N matches passes N. Zero and negative hints use the default. A page that
+// spans a window batch carries the rest of its hint into the next one. The
+// hint changes I/O counts only, never what the stream yields.
 func Matches(
 	ctx context.Context, r Reader, filters []Filter, window IDRange,
 	descending bool, firstBatch int,
@@ -279,18 +374,36 @@ func Matches(
 			streamRange(ctx, r, window, descending, firstBatch, yield)
 			return
 		}
-		sources, err := r.LookupKeys(ctx, uniqueKeys)
-		if err != nil {
-			yield(Match{}, fmt.Errorf("events: query lookup: %w", err))
-			return
+		emitted := 0
+		for batch := range windowBatches(window, descending) {
+			sources, err := r.LookupKeys(ctx, uniqueKeys, batch)
+			if err != nil {
+				yield(Match{}, fmt.Errorf("events: query lookup: %w", err))
+				return
+			}
+			// The stepper walks this batch and no further: bitmaps say
+			// nothing about the ids outside the batch they were looked up
+			// for, so the bounds it proves are the batch's and are dropped
+			// with it.
+			st := newSlabStepper(plans, sources, batch, descending)
+			// No plan survived term resolution here, so nothing in this
+			// batch can match and no slab in it is worth evaluating. The
+			// next batch is a lookup of its own, so the walk moves on
+			// rather than ending.
+			if len(st.plans) == 0 {
+				continue
+			}
+			// firstBatch is the whole query's hint, so what earlier batches
+			// already yielded comes off it: a page that spans a seam still
+			// arrives in one fetch per batch. A spent hint goes non-positive
+			// and batchSizes falls back to the default.
+			n, ok := streamSlabs(
+				ctx, r, filters, st, descending, firstBatch-emitted, yield)
+			emitted += n
+			if !ok {
+				return
+			}
 		}
-		st := newSlabStepper(plans, sources, window, descending)
-		// No plan survived term resolution, so nothing can match and no slab
-		// is worth evaluating.
-		if len(st.plans) == 0 {
-			return
-		}
-		streamSlabs(ctx, r, filters, st, descending, firstBatch, yield)
 	}
 }
 
@@ -356,36 +469,37 @@ func planIndexTerms(filters []Filter) ([]termPlan, []TermKey, bool) {
 }
 
 // emitBatch fetches one batch of candidate ordinals, drops the bitmap-side
-// false positives and yields the survivors, reporting whether the stream
-// should continue. FetchEvents requires ascending ids, so a descending batch
-// is flipped in place before the fetch and flipped back before yielding.
+// false positives and yields the survivors, reporting how many it yielded
+// and whether the stream should continue. FetchEvents requires ascending
+// ids, so a descending batch is flipped in place before the fetch and
+// flipped back before yielding.
 func emitBatch(
 	ctx context.Context, r Reader, filters []Filter, ids []uint32,
 	descending bool, yield func(Match, error) bool,
-) bool {
+) (int, bool) {
 	if descending {
 		slices.Reverse(ids)
 	}
 	payloads, err := r.FetchEvents(ctx, ids)
 	if err != nil {
 		yield(Match{}, err)
-		return false
+		return 0, false
 	}
 	// Drop bitmap-side false positives (see postFilter for the rationale).
 	matched, err := postFilter(payloads, ids, filters)
 	if err != nil {
 		yield(Match{}, err)
-		return false
+		return 0, false
 	}
 	if descending {
 		slices.Reverse(matched)
 	}
 	for i := range matched {
 		if !yield(matched[i], nil) {
-			return false
+			return i, false
 		}
 	}
-	return true
+	return len(matched), true
 }
 
 // ValidateFilters rejects filters that would silently never match

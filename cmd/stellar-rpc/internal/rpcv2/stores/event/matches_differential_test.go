@@ -36,7 +36,11 @@ func (r diffReader) Offsets() (*LedgerOffsets, error) {
 	return nil, errors.New("diffReader: Offsets is not part of the match path")
 }
 
-func (r diffReader) LookupKeys(_ context.Context, keys []TermKey) ([]*roaring.Bitmap, error) {
+// The window is ignored: the corpus is in memory whole, so a term's whole
+// postings agree with the index inside any window the walk asks for.
+func (r diffReader) LookupKeys(
+	_ context.Context, keys []TermKey, _ IDRange,
+) ([]*roaring.Bitmap, error) {
 	out := make([]*roaring.Bitmap, len(keys))
 	for i, k := range keys {
 		bm, err := r.c.mirror.Get(k)

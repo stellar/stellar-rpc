@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"iter"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -33,6 +34,11 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
+
+// termWindow is the lookup window these tests hand event.Reader.LookupKeys:
+// it answers only for the ids inside the window it is given, and every
+// assertion below is on a term's whole postings.
+var termWindow = event.IDRange{End: math.MaxUint32}
 
 // testPassphrase is a network passphrase literal used only by the test fixtures
 // (transaction-hash derivation); the package itself never hardcodes one.
@@ -560,7 +566,7 @@ func TestEventsColdWriter_Readback(t *testing.T) {
 	cnt, err := cr.EventCount()
 	require.NoError(t, err)
 	require.Equal(t, uint32(2), cnt)
-	bms, err := cr.LookupKeys(context.Background(), []event.TermKey{term})
+	bms, err := cr.LookupKeys(context.Background(), []event.TermKey{term}, termWindow)
 	require.NoError(t, err)
 	require.NotNil(t, bms[0])
 	require.Equal(t, uint64(2), bms[0].GetCardinality())
@@ -616,7 +622,7 @@ func TestEventsColdWriter_V0KeepsOffsetsContiguous(t *testing.T) {
 	require.Equal(t, uint32(1), evEnd)
 
 	// And the event is queryable by its term.
-	bms, err := cr.LookupKeys(context.Background(), []event.TermKey{term})
+	bms, err := cr.LookupKeys(context.Background(), []event.TermKey{term}, termWindow)
 	require.NoError(t, err)
 	require.NotNil(t, bms[0])
 	require.Equal(t, uint64(1), bms[0].GetCardinality())
@@ -662,7 +668,7 @@ func TestWriteColdChunk_EventlessChunk_FullyReadable(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, cnt)
 	anyKey := event.ComputeTermKey([]byte("any"), event.FieldContractID)
-	bms, lerr := cr.LookupKeys(context.Background(), []event.TermKey{anyKey})
+	bms, lerr := cr.LookupKeys(context.Background(), []event.TermKey{anyKey}, termWindow)
 	require.NoError(t, lerr)
 	require.Nil(t, bms[0], "a term with no matching events misses cleanly (nil bitmap)")
 
@@ -716,7 +722,7 @@ func TestColdChunk_Success(t *testing.T) {
 		chunkID, filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID()), event.ColdReaderOptions{})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ecr.Close()) }()
-	bms, err := ecr.LookupKeys(context.Background(), []event.TermKey{term})
+	bms, err := ecr.LookupKeys(context.Background(), []event.TermKey{term}, termWindow)
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), bms[0].GetCardinality())
 
@@ -1022,7 +1028,7 @@ func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 	for k := range wantTermIDs {
 		terms = append(terms, k)
 	}
-	bms, err := ecr.LookupKeys(context.Background(), terms)
+	bms, err := ecr.LookupKeys(context.Background(), terms, termWindow)
 	require.NoError(t, err)
 	for i, k := range terms {
 		require.NotNil(t, bms[i], "term %d present in reference must resolve", i)
@@ -1110,7 +1116,7 @@ func TestWriteColdChunk_EventsCold_Readback(t *testing.T) {
 	cnt, err := cr.EventCount()
 	require.NoError(t, err)
 	require.Equal(t, uint32(len(evSeqs)), cnt)
-	bms, err := cr.LookupKeys(context.Background(), []event.TermKey{term})
+	bms, err := cr.LookupKeys(context.Background(), []event.TermKey{term}, termWindow)
 	require.NoError(t, err)
 	require.NotNil(t, bms[0])
 	require.Equal(t, uint64(len(evSeqs)), bms[0].GetCardinality())

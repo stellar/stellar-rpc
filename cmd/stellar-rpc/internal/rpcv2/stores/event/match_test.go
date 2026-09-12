@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"math"
 	"testing"
 
 	"github.com/RoaringBitmap/roaring/v2"
@@ -54,10 +55,12 @@ type countingReader struct {
 	totalKeys       int
 }
 
-func (c *countingReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.Bitmap, error) {
+func (c *countingReader) LookupKeys(
+	ctx context.Context, keys []TermKey, window IDRange,
+) ([]*roaring.Bitmap, error) {
 	c.lookupKeysCalls++
 	c.totalKeys += len(keys)
-	return c.Reader.LookupKeys(ctx, keys)
+	return c.Reader.LookupKeys(ctx, keys, window)
 }
 
 // queryFixture seeds a hot chunk with a small, hand-crafted event set
@@ -181,6 +184,12 @@ func eventIDRangeFor(t *testing.T, fx *queryFixture, startLedger, endLedger uint
 // Each test that wants "scan the whole chunk" pins its OWN snapshot
 // via this helper rather than relying on a hidden engine default,
 // keeping the snapshot-isolation contract visible at every call site.
+// everyID is the lookup window a test hands Reader.LookupKeys when it wants
+// a term's whole postings: the contract promises only the ids inside the
+// window it is given, so a test asserting on a whole bitmap must ask for
+// every id there could be.
+var everyID = IDRange{End: math.MaxUint32}
+
 func wholeChunk(t *testing.T, r Reader) IDRange {
 	t.Helper()
 	ec, err := r.EventCount()
@@ -1547,6 +1556,28 @@ func TestMatches_FirstBatchHintSizesIO(t *testing.T) {
 	}
 	assert.Equal(t, []uint32{4, 3}, matchOrdinals(got))
 	assert.Equal(t, []int{2}, cr.rangeSizes)
+}
+
+// TestMatches_FirstBatchHintCarriesAcrossWindowBatches pins the hint's carry
+// over a window batch seam: the hint is the whole query's, so when the
+// leading batch yields fewer matches than it asks for, what is left of it
+// sizes the next batch's first fetch rather than the whole hint starting
+// over.
+func TestMatches_FirstBatchHintCarriesAcrossWindowBatches(t *testing.T) {
+	f := newShapedFixture(t)
+	defer func(s uint) { slabShift = s }(slabShift)
+	defer func(n int) { matchFirstBatchSlabs = n }(matchFirstBatchSlabs)
+	// 16384-wide slabs and a one-slab first batch split the sparse term's
+	// five ids across the schedule: two in the first batch, three in the
+	// third.
+	slabShift, matchFirstBatchSlabs = 14, 1
+
+	cr := &fetchCountingReader{Reader: diffReader{f.corpus}}
+	got := drainMatches(t, Matches(context.Background(), cr, f.filterSparseOnly(),
+		IDRange{0, shapedCorpusSize}, false, 4), 0)
+	assert.Equal(t, f.rareContract, matchOrdinals(got))
+	assert.Equal(t, []int{2, 2, 1}, cr.fetchSizes,
+		"a batch's first fetch is what is left of the hint, not the whole hint")
 }
 
 // TestMatches_DropsAreInvisible is the successor of the batch API's

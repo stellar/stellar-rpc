@@ -188,7 +188,11 @@ func (h *HotStore) Offsets() (*LedgerOffsets, error) {
 // denseState.snapshot, the immutable clone shared with every other
 // reader. Neither grows under its holder, so a walk never sees an id
 // written after its lookup.
-func (h *HotStore) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.Bitmap, error) {
+//
+// The window is ignored: these images are whole-chunk and already in
+// memory, so clipping one would only copy it. A whole term agrees
+// with the index inside any window, which is all the contract asks.
+func (h *HotStore) LookupKeys(ctx context.Context, keys []TermKey, _ IDRange) ([]*roaring.Bitmap, error) {
 	if h.chunkStore.IsClosed() {
 		return nil, stores.ErrStoreClosed
 	}

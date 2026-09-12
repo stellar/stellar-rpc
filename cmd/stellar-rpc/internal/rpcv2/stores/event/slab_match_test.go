@@ -5,11 +5,18 @@ package event
 // to put many empty slabs between consecutive ids. Every case is checked
 // against an answer computed without the index: postFilter over every
 // ordinal in the corpus, clipped to the window, the direction and the page.
+//
+// The same matrices carry the two pins the batched window rests on: that a
+// lookup's bitmaps are read only inside the window they were asked for, and
+// that the batch schedule is invisible in both the stream and the slabs the
+// walk opens.
 
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"iter"
+	"math"
 	"math/rand"
 	"slices"
 	"testing"
@@ -513,7 +520,7 @@ func TestMatches_ShapedFixtureIsWhatItClaims(t *testing.T) {
 	fat, err := r.LookupKeys(ctx, []TermKey{
 		ComputeTermKey(f.vocab.contracts[0], FieldContractID),
 		ComputeTermKey(f.vocab.topicRaw[1], topicField(0)),
-	})
+	}, everyID)
 	require.NoError(t, err)
 	for i, bm := range fat {
 		require.NotNil(t, bm, "thin-overlap term %d must be indexed", i)
@@ -733,25 +740,34 @@ func TestPlanIndexTermsSplitsRanges(t *testing.T) {
 
 // ───────────────────────── the skip ─────────────────────────
 
+// candidateFreeSlabCount is how many production-width slabs the fixture below
+// spans.
+const candidateFreeSlabCount = 10
+
+// candidateFreeSlabFixture is the window both slab-list pins walk: a rare
+// term in slabs 0, 3 and 9, another in slabs 1 and 6, a term holding every id
+// in the window, and a term present but empty.
+func candidateFreeSlabFixture() (IDRange, []*roaring.Bitmap) {
+	const slab = 1 << 16
+	window := IDRange{0, candidateFreeSlabCount * slab}
+	fat := roaring.New()
+	fat.AddRange(uint64(window.Start), uint64(window.End))
+	return window, []*roaring.Bitmap{
+		termBitmap(5, 3*slab+7, 9*slab+1),
+		termBitmap(slab+1, 6*slab+3),
+		fat,
+		termBitmap(),
+	}
+}
+
 // The skip is invisible in a stream, so this drives nextBounds directly and
 // requires the exact slabs the walk opens.
 func TestSlabStepperSkipsCandidateFreeSlabs(t *testing.T) {
 	defer func(s uint) { slabShift = s }(slabShift)
 	slabShift = 16
 	const slab = 1 << 16
-	const slabs = 10
-	window := IDRange{0, slabs * slab}
-
-	// A rare term in slabs 0, 3 and 9; another in slabs 1 and 6; a term
-	// holding every id in the window; and a term present but empty.
-	fat := roaring.New()
-	fat.AddRange(uint64(window.Start), uint64(window.End))
-	sources := []*roaring.Bitmap{
-		termBitmap(5, 3*slab+7, 9*slab+1),
-		termBitmap(slab+1, 6*slab+3),
-		fat,
-		termBitmap(),
-	}
+	const slabs = candidateFreeSlabCount
+	window, sources := candidateFreeSlabFixture()
 
 	walk := func(plans []termPlan, desc bool) [][2]uint32 {
 		st := newSlabStepper(plans, sources, window, desc)
@@ -843,6 +859,399 @@ func TestMatches_RareTermsSpanSlabs(t *testing.T) {
 							limit:   limit,
 						})
 					}
+				}
+			}
+		}
+	}
+}
+
+// ───────────────────────── the lookup window ─────────────────────────
+
+// lookupFuzzMode is how windowFuzzReader rewrites a lookup's bitmaps outside
+// the window it was asked for.
+type lookupFuzzMode int
+
+const (
+	// fuzzOutside invents ids the term does not hold and drops ids it does,
+	// everywhere outside the window: what a reader is free to return.
+	fuzzOutside lookupFuzzMode = iota
+	// fuzzClip returns the window's ids and nothing else: what an index that
+	// reads only the window's containers will return.
+	fuzzClip
+)
+
+func (m lookupFuzzMode) String() string {
+	if m == fuzzClip {
+		return "clip"
+	}
+	return "outside"
+}
+
+// windowFuzzReader is the caller's half of Reader.LookupKeys' window: a
+// result answers for the ids in the window it was asked for and for no
+// others. Wrapping any Reader with it — the hot store and this package's test
+// doubles alike — must not move a single match, which is what makes
+// "unspecified outside" a contract rather than an accident of what today's
+// readers happen to return. The bitmaps the wrapped reader hands back may be
+// shared with other readers (hot dense snapshots are), so each is cloned
+// before it is rewritten.
+type windowFuzzReader struct {
+	Reader
+
+	rng  *rand.Rand
+	mode lookupFuzzMode
+	// span bounds the ids invented outside the window.
+	span uint32
+}
+
+func (r windowFuzzReader) LookupKeys(
+	ctx context.Context, keys []TermKey, window IDRange,
+) ([]*roaring.Bitmap, error) {
+	bms, err := r.Reader.LookupKeys(ctx, keys, window)
+	if err != nil {
+		return nil, err
+	}
+	for i, bm := range bms {
+		if bm == nil {
+			continue
+		}
+		out := bm.Clone()
+		if r.mode == fuzzClip {
+			out.RemoveRange(0, uint64(window.Start))
+			out.RemoveRange(uint64(window.End), uint64(math.MaxUint32)+1)
+		} else {
+			r.perturb(out, window)
+		}
+		bms[i] = out
+	}
+	return bms, nil
+}
+
+// perturb runs the fuzzOutside mode: it adds ids to bm and drops ids from
+// it, always outside window. The window's own edges are where a wrong answer
+// bites: an id just past the window is what a NextValue asked at the last id
+// returns, and a walk that read it as the next candidate would fetch it.
+func (r windowFuzzReader) perturb(bm *roaring.Bitmap, window IDRange) {
+	outside := func(id uint64) bool {
+		return id <= uint64(r.span) &&
+			(id < uint64(window.Start) || id >= uint64(window.End))
+	}
+	add := make([]uint64, 0, 7)
+	add = append(add,
+		uint64(window.Start)-1, uint64(window.Start)-2,
+		uint64(window.End), uint64(window.End)+1)
+	for range 3 {
+		add = append(add, uint64(r.rng.Intn(int(r.span)+1)))
+	}
+	for _, id := range add {
+		if outside(id) {
+			bm.Add(uint32(id))
+		}
+	}
+	// And drop a run of the ids the term really holds, on each side.
+	if window.Start > 0 {
+		bm.RemoveRange(uint64(r.rng.Intn(int(window.Start))), uint64(window.Start))
+	}
+	if window.End < r.span {
+		hi := window.End + uint32(r.rng.Intn(int(r.span-window.End)+1))
+		bm.RemoveRange(uint64(window.End), uint64(hi)+1)
+	}
+}
+
+// fuzzWindowSchedules are the (slab width, first batch) pairs the window pin
+// runs under: 1024-wide slabs put ~69 of them in the shaped corpus, so the
+// doubling schedule spends six batches on the whole window, and the
+// production width with a one-slab first batch splits it on the boundary the
+// shaped fixture is built around. Both make the rewritten region land inside
+// the window the consumer asked for, not only outside it.
+var fuzzWindowSchedules = []struct {
+	shift uint
+	slabs int
+}{{10, firstBatchSlabs}, {16, 1}}
+
+// TestMatches_IgnoresIDsOutsideTheLookupWindow is the oracle gate on
+// Reader.LookupKeys' window contract. Every shaped shape runs again with each
+// lookup's bitmaps rewritten outside the window it asked for — ids invented,
+// ids dropped, and the term clipped to the window — and must yield exactly
+// the stream the corpus says it must.
+func TestMatches_IgnoresIDsOutsideTheLookupWindow(t *testing.T) {
+	f := newShapedFixture(t)
+	defer func(s uint) { slabShift = s }(slabShift)
+	defer func(n int) { matchFirstBatchSlabs = n }(matchFirstBatchSlabs)
+
+	const slab = 1 << 16
+	windows := []IDRange{
+		{0, shapedCorpusSize},
+		{20_000, 60_000},
+		{slab - 3, slab + 3},
+		{33_333, shapedCorpusSize},
+	}
+	for _, sh := range f.namedShapes() {
+		all := matchingEvents(t, f.corpus, sh.filters)
+		for _, sc := range fuzzWindowSchedules {
+			slabShift, matchFirstBatchSlabs = sc.shift, sc.slabs
+			for _, mode := range []lookupFuzzMode{fuzzOutside, fuzzClip} {
+				for _, seed := range []int64{1, 2} {
+					r := windowFuzzReader{
+						Reader: diffReader{f.corpus},
+						rng:    rand.New(rand.NewSource(seed)),
+						mode:   mode,
+						span:   shapedCorpusSize + 4*slab,
+					}
+					for _, w := range windows {
+						for _, desc := range []bool{false, true} {
+							for _, limit := range []int{1, 37} {
+								requireStream(t, r, all, queryCase{
+									name: fmt.Sprintf("%s/%s/shift %d/seed %d",
+										sh.name, mode, sc.shift, seed),
+									filters: sh.filters,
+									window:  w,
+									desc:    desc,
+									limit:   limit,
+								})
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// The bounded matrix never reaches the end of a fat stream, where the last
+// batch is clipped by the window rather than by the schedule; this runs whole
+// streams through the same rewriting.
+func TestMatches_IgnoresIDsOutsideTheLookupWindow_WholeStreams(t *testing.T) {
+	f := newShapedFixture(t)
+	defer func(s uint) { slabShift = s }(slabShift)
+	defer func(n int) { matchFirstBatchSlabs = n }(matchFirstBatchSlabs)
+	slabShift, matchFirstBatchSlabs = 10, firstBatchSlabs
+
+	const slab = 1 << 16
+	for _, sh := range f.namedShapes() {
+		all := matchingEvents(t, f.corpus, sh.filters)
+		for _, mode := range []lookupFuzzMode{fuzzOutside, fuzzClip} {
+			r := windowFuzzReader{
+				Reader: diffReader{f.corpus},
+				rng:    rand.New(rand.NewSource(7)),
+				mode:   mode,
+				span:   shapedCorpusSize + 4*slab,
+			}
+			for _, w := range []IDRange{{0, shapedCorpusSize}, {slab - 3, slab + 3}} {
+				for _, desc := range []bool{false, true} {
+					requireStream(t, r, all, queryCase{
+						name:    sh.name + "/" + mode.String(),
+						filters: sh.filters,
+						window:  w,
+						desc:    desc,
+					})
+				}
+			}
+		}
+	}
+}
+
+// The randomized matrix through the same rewriting, at a slab width that puts
+// a batch seam every few ids.
+func TestMatches_IgnoresIDsOutsideTheLookupWindow_Randomized(t *testing.T) {
+	v := newDiffVocab(t)
+	const corpusSize = 300
+	corpus := newDiffCorpus(t, rand.New(rand.NewSource(20260829)), v, corpusSize)
+	defer func(s uint) { slabShift = s }(slabShift)
+	defer func(n int) { matchBatchSize = n }(matchBatchSize)
+	// A small fetch seam exercises fetch batches inside a window batch.
+	slabShift, matchBatchSize = 2, 7
+
+	for _, mode := range []lookupFuzzMode{fuzzOutside, fuzzClip} {
+		for _, seed := range []int64{1, 2, 3} {
+			r := windowFuzzReader{
+				Reader: diffReader{corpus},
+				rng:    rand.New(rand.NewSource(seed)),
+				mode:   mode,
+				span:   2 * corpusSize,
+			}
+			rng := rand.New(rand.NewSource(20260912 + seed))
+			matched := 0
+			for range 150 {
+				matched += randomizedTrial(t, r, corpus, v, rng, corpusSize)
+			}
+			require.Greater(t, matched, 500,
+				"fixture sanity: randomized queries selected too little")
+		}
+	}
+}
+
+// And around the hot store, the reader the contract was written for: a
+// five-event chunk at two ids per slab takes two batches in either
+// direction, and its term snapshots are the mirror's, so the wrapper clones
+// each before rewriting it.
+func TestMatches_IgnoresIDsOutsideTheLookupWindow_HotStore(t *testing.T) {
+	fx := newQueryFixture(t)
+	defer func(s uint) { slabShift = s }(slabShift)
+	defer func(n int) { matchFirstBatchSlabs = n }(matchFirstBatchSlabs)
+	slabShift, matchFirstBatchSlabs = 1, 1
+
+	filters := []Filter{{ContractID: fx.contractA[:]}} // ids 0, 1, 4
+	for _, mode := range []lookupFuzzMode{fuzzOutside, fuzzClip} {
+		for _, seed := range []int64{1, 2, 3} {
+			r := windowFuzzReader{
+				Reader: fx.store,
+				rng:    rand.New(rand.NewSource(seed)),
+				mode:   mode,
+				span:   64,
+			}
+			window := wholeChunk(t, fx.store)
+			assert.Equal(t, []uint32{0, 1, 4},
+				matchOrdinals(collectMatches(t, r, filters, window, false)),
+				"ascending, %s mode, seed %d", mode, seed)
+			assert.Equal(t, []uint32{4, 1, 0},
+				matchOrdinals(collectMatches(t, r, filters, window, true)),
+				"descending, %s mode, seed %d", mode, seed)
+		}
+	}
+}
+
+// ───────────────────────── the batch schedule ─────────────────────────
+
+// TestMatches_BatchScheduleIsInvisible pins that how much of the window a
+// query materializes at once never changes what it yields: every first batch
+// size, the whole window included, runs the shaped matrix and must agree with
+// the corpus.
+func TestMatches_BatchScheduleIsInvisible(t *testing.T) {
+	f := newShapedFixture(t)
+	r := diffReader{f.corpus}
+	defer func(s uint) { slabShift = s }(slabShift)
+	defer func(n int) { matchFirstBatchSlabs = n }(matchFirstBatchSlabs)
+	// 1024-wide slabs, so the corpus is ~69 of them and every bounded
+	// schedule below spends several batches on the whole window.
+	slabShift = 10
+
+	const slab = 1 << 16
+	windows := []IDRange{
+		{0, shapedCorpusSize},
+		{20_000, 60_000},
+		{slab - 3, slab + 3},
+		{33_333, shapedCorpusSize},
+	}
+	for _, sh := range f.namedShapes() {
+		all := matchingEvents(t, f.corpus, sh.filters)
+		for _, slabs := range []int{1, 2, 4, 8, matchWholeWindow} {
+			matchFirstBatchSlabs = slabs
+			for _, w := range windows {
+				for _, desc := range []bool{false, true} {
+					for _, limit := range []int{1, 1000} {
+						requireStream(t, r, all, queryCase{
+							name:    fmt.Sprintf("%s/first batch %d slabs", sh.name, slabs),
+							filters: sh.filters,
+							window:  w,
+							desc:    desc,
+							limit:   limit,
+						})
+					}
+				}
+			}
+		}
+	}
+}
+
+// Whole streams under the schedules that split them, where the last batch is
+// the one the window clips.
+func TestMatches_BatchScheduleIsInvisible_WholeStreams(t *testing.T) {
+	f := newShapedFixture(t)
+	r := diffReader{f.corpus}
+	defer func(s uint) { slabShift = s }(slabShift)
+	defer func(n int) { matchFirstBatchSlabs = n }(matchFirstBatchSlabs)
+	slabShift = 10
+
+	const slab = 1 << 16
+	for _, sh := range f.namedShapes() {
+		all := matchingEvents(t, f.corpus, sh.filters)
+		for _, slabs := range []int{1, matchWholeWindow} {
+			matchFirstBatchSlabs = slabs
+			for _, w := range []IDRange{{0, shapedCorpusSize}, {slab - 3, slab + 3}} {
+				for _, desc := range []bool{false, true} {
+					requireStream(t, r, all, queryCase{
+						name:    fmt.Sprintf("%s/first batch %d slabs", sh.name, slabs),
+						filters: sh.filters,
+						window:  w,
+						desc:    desc,
+					})
+				}
+			}
+		}
+	}
+}
+
+// The randomized matrix under every schedule.
+func TestMatches_BatchScheduleIsInvisible_Randomized(t *testing.T) {
+	v := newDiffVocab(t)
+	const corpusSize = 300
+	corpus := newDiffCorpus(t, rand.New(rand.NewSource(20260829)), v, corpusSize)
+	r := diffReader{corpus}
+	defer func(s uint) { slabShift = s }(slabShift)
+	defer func(n int) { matchFirstBatchSlabs = n }(matchFirstBatchSlabs)
+	defer func(n int) { matchBatchSize = n }(matchBatchSize)
+	slabShift, matchBatchSize = 2, 7
+
+	for _, slabs := range []int{1, 2, 4, 8, matchWholeWindow} {
+		matchFirstBatchSlabs = slabs
+		rng := rand.New(rand.NewSource(20260912))
+		matched := 0
+		for range 150 {
+			matched += randomizedTrial(t, r, corpus, v, rng, corpusSize)
+		}
+		require.Greater(t, matched, 500,
+			"fixture sanity: randomized queries selected too little")
+	}
+}
+
+// TestSlabBatchesOpenTheSameSlabs is the other half of the schedule pin: the
+// shapes TestSlabStepperSkipsCandidateFreeSlabs walks, walked again batch by
+// batch, open exactly the slabs the one-batch walk opens. Batch seams fall on
+// slab boundaries, and a batch proves its bounds from its own bitmaps at the
+// position the unbatched walk's cursor would hold, so the schedule cannot
+// cost a slab or save one.
+func TestSlabBatchesOpenTheSameSlabs(t *testing.T) {
+	defer func(s uint) { slabShift = s }(slabShift)
+	defer func(n int) { matchFirstBatchSlabs = n }(matchFirstBatchSlabs)
+	slabShift = 16
+	const slab = 1 << 16
+	whole, sources := candidateFreeSlabFixture()
+
+	walk := func(window IDRange, plans []termPlan, desc bool, slabs int) [][2]uint32 {
+		matchFirstBatchSlabs = slabs
+		out := [][2]uint32{}
+		for batch := range windowBatches(window, desc) {
+			st := newSlabStepper(plans, sources, batch, desc)
+			for {
+				lo, hi, ok := st.nextBounds()
+				if !ok {
+					break
+				}
+				out = append(out, [2]uint32{lo, hi})
+			}
+		}
+		return out
+	}
+	// Windows whose bounds sit mid-slab as well as on a boundary: a seam cut
+	// anywhere but on a slab boundary would split that slab into two opened
+	// ranges, which only a window entered mid-slab can show.
+	windows := []IDRange{
+		whole,
+		{5_000, whole.End - 35_000},
+		{3 * slab, 7 * slab},
+		{3*slab + 8, 9*slab + 2},
+	}
+	for _, plans := range [][]termPlan{{{0}}, {{0, 2}}, {{2}}, {{0}, {1}}, {{3}}} {
+		for _, w := range windows {
+			for _, desc := range []bool{false, true} {
+				// One batch is the whole window, the walk the pinned lists
+				// are written against.
+				want := walk(w, plans, desc, matchWholeWindow)
+				for _, slabs := range []int{1, 2, 4, 8, 16, 64} {
+					assert.Equal(t, want, walk(w, plans, desc, slabs),
+						"plans %v window %v desc=%v first batch %d slabs",
+						plans, w, desc, slabs)
 				}
 			}
 		}

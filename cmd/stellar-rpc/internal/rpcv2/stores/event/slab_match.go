@@ -1,10 +1,11 @@
 package event
 
-// slab_match.go produces the candidate ids behind Matches. The window is
-// walked one slab at a time, 65536 ids, the span of one roaring container,
-// and the whole filter algebra is evaluated inside each slab. Direction is
-// only the walk order: ascending walks slabs low to high and reads each
-// result forward, descending walks high to low and reads backward.
+// slab_match.go produces the candidate ids behind Matches. One stepper walks
+// one batch of the window (see windowBatches) one slab at a time, 65536 ids,
+// the span of one roaring container, and the whole filter algebra is
+// evaluated inside each slab. Direction is only the walk order: ascending
+// walks slabs low to high and reads each result forward, descending walks
+// high to low and reads backward.
 //
 // Work is lazy per slab. A consumer that stops after one page has paid for
 // the slabs that page spans, one container per term per plan each. Slabs
@@ -12,14 +13,18 @@ package event
 // asks the term bitmaps where the next candidate can be and jumps there (see
 // the bound helpers below).
 //
-// The term bitmaps come from the single Reader.LookupKeys call at query start
-// and are held for the whole walk. They are read-only and may be snapshots
-// shared with other readers. FastAnd reads its arguments and returns fresh
-// containers, which roaring_contract_test.go pins against the pinned roaring
-// version; the only bitmaps this file mutates are the ones it builds for a
-// slab and the results FastAnd hands back. Because the lookup is a
-// point-in-time image, ids ingested during the walk are invisible to it, as
-// IDRange's snapshot-isolation contract already requires.
+// The term bitmaps come from the Reader.LookupKeys call this batch was looked
+// up by, and are held for its walk. They answer for the batch's ids and no
+// others, which is why the stepper's window is the batch: a NextValue or
+// PreviousValue landing outside it says only that this batch holds nothing
+// more, never anything about the rest of the query's window, and the bounds
+// proved from them die with the batch. They are read-only and may be
+// snapshots shared with other readers. FastAnd reads its arguments and
+// returns fresh containers, which roaring_contract_test.go pins against the
+// pinned roaring version; the only bitmaps this file mutates are the ones it
+// builds for a slab and the results FastAnd hands back. Because each lookup
+// is a point-in-time image, ids ingested during the walk are invisible to it,
+// as IDRange's snapshot-isolation contract already requires.
 
 import (
 	"cmp"
@@ -36,7 +41,7 @@ import (
 //nolint:gochecknoglobals // test seam; production never writes it
 var slabShift uint = 16
 
-// slabPlan is one plan's term bitmaps, held for the whole query and ordered
+// slabPlan is one plan's term bitmaps, held for the whole batch and ordered
 // rarest first.
 type slabPlan []*roaring.Bitmap
 
@@ -101,14 +106,16 @@ func (p slabPlan) eval(slab *roaring.Bitmap) *roaring.Bitmap {
 //
 // Descending mirrors this with PreviousValue and the min and max swapped.
 // The post-filter only drops candidates, so a bound proved on the index
-// bounds the stream. NextValue and PreviousValue are inclusive of the target,
-// return -1 for none, and do not write the bitmap they search;
-// roaring_contract_test.go pins all three properties.
+// bounds the stream. A bound is proved from this batch's bitmaps, so it
+// bounds this batch only; the next batch proves its own from scratch.
+// NextValue and PreviousValue are inclusive of the target, return -1 for
+// none, and do not write the bitmap they search; roaring_contract_test.go
+// pins all three properties.
 
 // boundRetired is the bound of a plan whose terms ran out ahead of the
-// cursor: the cursor never comes back, so the plan is dropped for the rest
-// of the walk. It is roaring's own "none" and sorts below every id, so the
-// "outside this slab" test covers it.
+// cursor inside this batch: the cursor never comes back, so the plan is
+// dropped for the rest of the batch's walk. It is roaring's own "none" and
+// sorts below every id, so the "outside this slab" test covers it.
 const boundRetired = int64(-1)
 
 // nextBound is the plan's bound: the largest of its terms' first ids at or
@@ -140,8 +147,9 @@ func (p slabPlan) prevBound(pos uint32) int64 {
 	return bound
 }
 
-// slabStepper walks one query's slabs in emission order, evaluating a slab
-// only when the consumer has drained the previous one.
+// slabStepper walks one batch's slabs in emission order, evaluating a slab
+// only when the consumer has drained the previous one. Its window is the
+// batch, not the query's: the bitmaps it holds answer for no other ids.
 type slabStepper struct {
 	plans  []slabPlan
 	window IDRange
@@ -189,7 +197,7 @@ func newSlabStepper(
 }
 
 // seekAsc returns the lowest position at or above pos where some plan can
-// still match, or false when none can inside the window. A plan is asked
+// still match, or false when none can inside the batch. A plan is asked
 // again only once pos has reached its held bound; a plan with no bound left
 // is retired rather than ending the walk.
 func (s *slabStepper) seekAsc(pos uint32) (uint32, bool) {
@@ -366,26 +374,32 @@ func (s *slabStepper) appendUpTo(dst []uint32, n int) []uint32 {
 	return dst
 }
 
-// streamSlabs is the streaming loop for both directions: fill one batch of
-// candidate ordinals from the stepper, fetch, post-filter, yield.
+// streamSlabs is the streaming loop for both directions over one window
+// batch: fill one fetch of candidate ordinals from the stepper, fetch,
+// post-filter, yield. It returns how many matches it yielded and whether the
+// stream should continue into the next batch — a consumer that stopped, or
+// an error, ends the whole query, an exhausted stepper only this batch.
 func streamSlabs(
 	ctx context.Context, r Reader, filters []Filter, st *slabStepper,
 	descending bool, firstBatch int, yield func(Match, error) bool,
-) {
-	batch, rest := batchSizes(firstBatch)
-	ids := make([]uint32, 0, batch)
+) (int, bool) {
+	fetch, rest := batchSizes(firstBatch)
+	ids := make([]uint32, 0, fetch)
+	emitted := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			yield(Match{}, err)
-			return
+			return emitted, false
 		}
-		ids = st.appendUpTo(ids[:0], batch)
-		batch = rest
+		ids = st.appendUpTo(ids[:0], fetch)
+		fetch = rest
 		if len(ids) == 0 {
-			return
+			return emitted, true
 		}
-		if !emitBatch(ctx, r, filters, ids, descending, yield) {
-			return
+		n, ok := emitBatch(ctx, r, filters, ids, descending, yield)
+		emitted += n
+		if !ok {
+			return emitted, false
 		}
 	}
 }
