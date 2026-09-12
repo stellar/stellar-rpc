@@ -17,15 +17,9 @@ const commandWaitTimeout = 60 * time.Second
 
 // gatherConfig is the environment Gather reads.
 type gatherConfig struct {
-	Poller             pollerConfig
-	ResultsTimeoutSecs int `env:"RESULTS_TIMEOUT,required,notEmpty"`
-}
+	PollerConfig
 
-func (c *gatherConfig) validate() error {
-	if err := c.Poller.validate(); err != nil {
-		return err
-	}
-	return requirePositiveInts(envInt{"RESULTS_TIMEOUT", c.ResultsTimeoutSecs})
+	ResultsTimeout seconds `env:"RESULTS_TIMEOUT,required,notEmpty"`
 }
 
 // Gather is the GHA-runner half: it polls S3 until the box reports a verdict
@@ -36,13 +30,13 @@ func Gather(ctx context.Context) error {
 	if err := loadEnv(&cfg); err != nil {
 		return err
 	}
-	poller, err := newResultPoller(ctx, cfg.Poller)
+	poller, err := newResultPoller(ctx, cfg.PollerConfig)
 	if err != nil {
 		return err
 	}
-	timeout := time.Duration(cfg.ResultsTimeoutSecs) * time.Second
+	timeout := cfg.ResultsTimeout.duration()
 	res, err := poller.poll(ctx, time.Now().Add(timeout))
-	return reportGather(ctx, poller, cfg.Poller.GitHubOutput, timeout, res, err)
+	return reportGather(ctx, poller, cfg.GitHubOutput, timeout, res, err)
 }
 
 func reportGather(

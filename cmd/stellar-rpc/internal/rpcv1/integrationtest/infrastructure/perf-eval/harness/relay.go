@@ -23,15 +23,15 @@ func Relay(ctx context.Context) error {
 	if err := loadEnv(&cfg); err != nil {
 		return err
 	}
-	poller, err := newResultPoller(ctx, cfg.Poller)
+	poller, err := newResultPoller(ctx, cfg.PollerConfig)
 	if err != nil {
 		return err
 	}
 	r := &relay{
 		poller:       poller,
-		githubOutput: cfg.Poller.GitHubOutput,
-		window:       time.Duration(cfg.WindowSecs) * time.Second,
-		deadline:     time.Unix(int64(cfg.DeadlineEpoch), 0),
+		githubOutput: cfg.GitHubOutput,
+		window:       cfg.Window.duration(),
+		deadline:     time.Time(cfg.Deadline),
 	}
 	return r.poll(ctx)
 }
@@ -113,17 +113,8 @@ func (r *relay) reportVerdict(res *Result) error {
 
 // relayConfig is the environment Relay reads.
 type relayConfig struct {
-	Poller        pollerConfig
-	WindowSecs    int `env:"WINDOW_SECONDS,required,notEmpty"`
-	DeadlineEpoch int `env:"DEADLINE_EPOCH,required,notEmpty"`
-}
+	PollerConfig
 
-func (c *relayConfig) validate() error {
-	if err := c.Poller.validate(); err != nil {
-		return err
-	}
-	return requirePositiveInts(
-		envInt{"WINDOW_SECONDS", c.WindowSecs},
-		envInt{"DEADLINE_EPOCH", c.DeadlineEpoch},
-	)
+	Window   seconds  `env:"WINDOW_SECONDS,required,notEmpty"`
+	Deadline unixTime `env:"DEADLINE_EPOCH,required,notEmpty"`
 }
