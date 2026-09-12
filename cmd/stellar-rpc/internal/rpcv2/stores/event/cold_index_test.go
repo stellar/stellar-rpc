@@ -91,9 +91,13 @@ func TestWriteIndex_ProducesBothFiles(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = m.Close() })
 
-	// index.pack has one record per term.
+	// index.pack has one item per term, in one bucket record padded out to
+	// indexPackItemsPerRecord (see cold_format.go's layout).
 	records := loadIndexPack(t, filepath.Join(dir, IndexPackName(indexTestChunkID)))
-	assert.Len(t, records, 64)
+	assert.Len(t, records, indexPackItemsPerRecord)
+	for i := 64; i < indexPackItemsPerRecord; i++ {
+		assert.Empty(t, records[i], "item %d is padding", i)
+	}
 }
 
 func TestWriteIndex_RoundTripsBitmapsPerTerm(t *testing.T) {
@@ -291,7 +295,8 @@ func TestWriteIndex_LargeIndex(t *testing.T) {
 	t.Cleanup(func() { _ = m.Close() })
 
 	records := loadIndexPack(t, filepath.Join(dir, IndexPackName(indexTestChunkID)))
-	assert.Len(t, records, n)
+	buckets := (n + indexPackItemsPerRecord - 1) / indexPackItemsPerRecord
+	assert.Len(t, records, buckets*indexPackItemsPerRecord, "the last bucket is padded")
 
 	// Spot-check a sample of terms.
 	for _, i := range []int{0, 1, 7, n / 2, n - 1} {
@@ -318,7 +323,7 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
 
 	records := loadIndexPack(t, filepath.Join(dir, IndexPackName(indexTestChunkID)))
-	require.Len(t, records, 1)
+	require.Len(t, records, indexPackItemsPerRecord, "one bucket record, padded")
 
 	record := records[0]
 	require.Greater(t, len(record), IndexRecordFingerprintLen)
@@ -348,19 +353,19 @@ func TestWriteColdIndex_StampAndContentHash(t *testing.T) {
 
 	ad, err := r.AppData()
 	require.NoError(t, err)
-	schema, mask, err := decodeIndexBuildStamp(ad)
+	schema, mask, _, err := decodeIndexAppData(ad)
 	require.NoError(t, err)
 	assert.Equal(t, TermSchemaVersion, schema)
 	assert.Equal(t, IndexedFieldMask(), mask)
 
 	// Bytes past the stamp are extension room: the decoder ignores them.
-	_, _, err = decodeIndexBuildStamp(append(append([]byte(nil), ad...), 0xAB, 0xCD))
+	_, _, _, err = decodeIndexAppData(append(append([]byte(nil), ad...), 0xAB, 0xCD))
 	require.NoError(t, err)
 
 	// An unknown stamp version refuses with the newer-binary hint.
 	newer := append([]byte(nil), ad...)
 	newer[0] = indexStampVersion + 1
-	_, _, err = decodeIndexBuildStamp(newer)
+	_, _, _, err = decodeIndexAppData(newer)
 	require.ErrorContains(t, err, "written by a newer stellar-rpc")
 
 	_, hashed, err := r.ContentHash()

@@ -189,10 +189,13 @@ func (h *HotStore) Offsets() (*LedgerOffsets, error) {
 // reader. Neither grows under its holder, so a walk never sees an id
 // written after its lookup.
 //
-// The window is ignored: these images are whole-chunk and already in
-// memory, so clipping one would only copy it. A whole term agrees
-// with the index inside any window, which is all the contract asks.
-func (h *HotStore) LookupKeys(ctx context.Context, keys []TermKey, _ IDRange) ([]*roaring.Bitmap, error) {
+// The window and the held parts are ignored: these images are
+// whole-chunk and already in memory, so clipping one would only copy
+// it and there is nothing to re-read. A whole term agrees with the
+// index inside any window, which is all the contract asks.
+func (h *HotStore) LookupKeys(
+	ctx context.Context, keys []TermKey, _ IDRange, _ *LookupParts,
+) ([]*roaring.Bitmap, error) {
 	if h.chunkStore.IsClosed() {
 		return nil, stores.ErrStoreClosed
 	}

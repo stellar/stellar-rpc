@@ -164,7 +164,7 @@ func TestIngestLedger_AllCFsAdvanceTogether(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, first+1, seqB)
 	// events CFs.
-	bms, err := db.Events().LookupKeys(context.Background(), []event.TermKey{termA}, termWindow)
+	bms, err := db.Events().LookupKeys(context.Background(), []event.TermKey{termA}, termWindow, nil)
 	require.NoError(t, err)
 	require.NotNil(t, bms[0])
 	assert.Equal(t, uint64(2), bms[0].GetCardinality(), "both ledgers share the event term")
@@ -204,7 +204,7 @@ func TestIngestLedger_RejectedLedgerPersistsNothingAcrossAnyCF(t *testing.T) {
 	_, gerr = db.Txhash().Get(hash)
 	require.ErrorIs(t, gerr, stores.ErrNotFound)
 	// events CFs — no term indexed, no event committed (clean miss = nil bitmap).
-	bms, lerr := db.Events().LookupKeys(context.Background(), []event.TermKey{term}, termWindow)
+	bms, lerr := db.Events().LookupKeys(context.Background(), []event.TermKey{term}, termWindow, nil)
 	require.NoError(t, lerr)
 	require.Nil(t, bms[0])
 	assert.Equal(t, uint32(0), eventCount(t, db.Events()))
@@ -384,7 +384,7 @@ func TestIngestLedger_WritesEveryHotType(t *testing.T) {
 	seq, err := db.Txhash().Get(hash)
 	require.NoError(t, err)
 	assert.Equal(t, first, seq)
-	bms, err := db.Events().LookupKeys(context.Background(), []event.TermKey{term}, termWindow)
+	bms, err := db.Events().LookupKeys(context.Background(), []event.TermKey{term}, termWindow, nil)
 	require.NoError(t, err)
 	require.NotNil(t, bms[0])
 	assert.Equal(t, uint64(1), bms[0].GetCardinality())

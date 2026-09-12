@@ -405,8 +405,12 @@ func Matches(
 			return
 		}
 		emitted := 0
+		// One query, one memory of the parts it has been handed: the part on
+		// the stage seam belongs to both stages, and this is what keeps it
+		// from being read twice. It dies with the iterator.
+		held := NewLookupParts()
 		for stage := range windowStages(window, descending) {
-			sources, err := r.LookupKeys(ctx, uniqueKeys, stage)
+			sources, err := r.LookupKeys(ctx, uniqueKeys, stage, held)
 			if err != nil {
 				yield(Match{}, fmt.Errorf("events: query lookup: %w", err))
 				return

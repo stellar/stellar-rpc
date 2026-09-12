@@ -39,7 +39,7 @@ func (r diffReader) Offsets() (*LedgerOffsets, error) {
 // The window is ignored: the corpus is in memory whole, so a term's whole
 // postings agree with the index inside any window the walk asks for.
 func (r diffReader) LookupKeys(
-	_ context.Context, keys []TermKey, _ IDRange,
+	_ context.Context, keys []TermKey, _ IDRange, _ *LookupParts,
 ) ([]*roaring.Bitmap, error) {
 	out := make([]*roaring.Bitmap, len(keys))
 	for i, k := range keys {

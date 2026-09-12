@@ -520,7 +520,7 @@ func TestMatches_ShapedFixtureIsWhatItClaims(t *testing.T) {
 	fat, err := r.LookupKeys(ctx, []TermKey{
 		ComputeTermKey(f.vocab.contracts[0], FieldContractID),
 		ComputeTermKey(f.vocab.topicRaw[1], topicField(0)),
-	}, everyID)
+	}, everyID, nil)
 	require.NoError(t, err)
 	for i, bm := range fat {
 		require.NotNil(t, bm, "thin-overlap term %d must be indexed", i)
@@ -913,9 +913,9 @@ type windowFuzzReader struct {
 }
 
 func (r windowFuzzReader) LookupKeys(
-	ctx context.Context, keys []TermKey, window IDRange,
+	ctx context.Context, keys []TermKey, window IDRange, held *LookupParts,
 ) ([]*roaring.Bitmap, error) {
-	bms, err := r.Reader.LookupKeys(ctx, keys, window)
+	bms, err := r.Reader.LookupKeys(ctx, keys, window, held)
 	if err != nil {
 		return nil, err
 	}

@@ -967,7 +967,7 @@ func (f *fakeEventReader) Offsets() (*event.LedgerOffsets, error) { return f.ofs
 // The window is ignored: the fake's bitmaps are canned whole, and a whole
 // term agrees with the index inside any window.
 func (f *fakeEventReader) LookupKeys(
-	_ context.Context, keys []event.TermKey, _ event.IDRange,
+	_ context.Context, keys []event.TermKey, _ event.IDRange, _ *event.LookupParts,
 ) ([]*roaring.Bitmap, error) {
 	out := make([]*roaring.Bitmap, len(keys))
 	for i, k := range keys {

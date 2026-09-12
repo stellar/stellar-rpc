@@ -56,11 +56,11 @@ type countingReader struct {
 }
 
 func (c *countingReader) LookupKeys(
-	ctx context.Context, keys []TermKey, window IDRange,
+	ctx context.Context, keys []TermKey, window IDRange, held *LookupParts,
 ) ([]*roaring.Bitmap, error) {
 	c.lookupKeysCalls++
 	c.totalKeys += len(keys)
-	return c.Reader.LookupKeys(ctx, keys, window)
+	return c.Reader.LookupKeys(ctx, keys, window, held)
 }
 
 // queryFixture seeds a hot chunk with a small, hand-crafted event set
