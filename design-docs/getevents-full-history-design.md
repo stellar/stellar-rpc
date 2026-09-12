@@ -218,19 +218,43 @@ An MPHF maps each known key to a unique slot in \[0, N) with O(1) lookup and no 
 | File | Description |
 | :---- | :---- |
 | `index.hash` | MPHF mapping term keys to slot positions in `index.pack` |
-| `index.pack` | Serialized roaring bitmaps, one per term, each prefixed with a 4-byte fingerprint |
+| `index.pack` | Serialized roaring bitmaps, each prefixed with a 4-byte fingerprint: one item per slot in bucket records, plus part records for the terms too big to read whole |
 
-Since an MPHF maps any input to a valid slot, even keys not in the build set, a query for a non-existent term would still resolve to a slot and retrieve whatever bitmap is stored there. Each bitmap record in `index.pack` is therefore prefixed with a 4-byte fingerprint to detect and reject these false positives. 
+Since an MPHF maps any input to a valid slot, even keys not in the build set, a query for a non-existent term would still resolve to a slot and retrieve whatever bitmap is stored there. Each bitmap in `index.pack` is therefore prefixed with a 4-byte fingerprint to detect and reject these false positives. 
 
 A 4-byte fingerprint can still collide, so query results are post-filtered after event fetch to verify all terms match (see Section 11.2, step 5).
 
+**Buckets, demotion and parts.** `index.pack` holds 128 items per record: record *r* is the bucket for slots 128*r* … 128*r*+127, item = `fp[4] ‖ roaring portable bitmap`. One read then serves 128 slots and the on-disk offset array stays small (one entry per record, not per term). The last bucket is padded out to 128 items so what follows starts on a record boundary.
+
+Reading whole terms is what the popular query pays for: on pubnet chunk 6410 the fifteen most popular terms are 250 KiB – 1.08 MiB apiece, so a popular page reads ~9 MB of index to answer from one to three slabs of it. So a bucket over 256 KiB (one I/O unit on the storage this serves) **demotes** its largest term at or above a 16 KiB floor, and again until it fits or nothing is left worth demoting. A bucket of nothing but sub-floor terms stays whole — demoting one would trade a bucket read for a part read of the same bytes, and the bucket is still bounded by 128 × the floor. Demotion reads only the bucket's own serialized sizes and breaks ties by slot, so the freeze and the backfill walk produce identical bytes.
+
+A demoted term's slot item keeps its fingerprint and drops its bitmap — a body roaring cannot decode, so a reader that lands there reports corruption rather than an empty term — and the term is written again after every bucket as **part records**: `ceil(S / 64 KiB)` target parts, cut on spans of 2^k slabs of 65,536 ids with `k = floor(log2(C / partCount))` over the chunk's `C` slabs. Every span in `[0, ceil(C / 2^k))` gets a record, empty ones included, and a term's parts are contiguous in span order, so part *p* is item `128·(firstRecord + p)` — arithmetic, not a search. A part record's item 0 is `fp[4] ‖ that span's ids`; its other 127 items are empty (~270 B of framing per part). The span is cut from the chunk's extent rather than the term's, so a term whose ids sit in a corner of the chunk answers a window there out of one part, and its parts elsewhere are empty records nobody reads.
+
+**The directory** that names the demoted terms rides in `index.pack`'s app data, behind the build stamp. The stamp version is bumped to `0x02` and the packfile format id to `0xFE1E0010`, so an older binary refuses the artifact rather than reading a part record as 128 terms:
+
+```
+offset  size   field
+0       1      stamp version (0x02)
+1       2      term schema version
+3       8      indexed-field bitmask
+11      8      numKeys
+19      4      bucketCount
+23      4      totalParts
+27      4      entryCount
+31      23×N   entries sorted by TermKey:
+                 key[16] ‖ firstRecord u32 ‖ partCount u16 ‖ k u8
+```
+
+Entries stay bytes and are binary-searched in place, never parsed into a map. A chunk holds at most `index bytes / 16 KiB` of them — a few hundred on pubnet 6410 — and the parts plus the directory cost ~0.17% of index size. The four counts are the pairing check at open, and it is exact: `numKeys` equals `index.hash`'s key count, `bucketCount == ceil(numKeys / 128)`, and `bucketCount + totalParts == recordCount`.
+
 **Term Lookup:**
 
-1. Hash the term key and query the MPHF in `index.hash` to obtain the slot index.  
-2. Read the record at that slot in `index.pack`.  
-3. If the fingerprint matches the hash prefix, deserialize the bitmap; otherwise the term is not present.
+1. Look the key up in the directory. A demoted term names the parts its window reaches: `p ∈ [Start >> (16+k), (End−1) >> (16+k)]` clamped to `[0, partCount)`, at items `128·(firstRecord + p)`.
+2. Otherwise hash the term key and query the MPHF in `index.hash` for the slot; the item is at that position.
+3. Read every position in one pass. A bucket item whose fingerprint disagrees is a miss — the MPHF answers for keys it never saw — but a part item's fingerprint must match, since the directory named the key.
+4. Union a term's parts in span order: they tile disjoint, ascending spans, so the union is an ordered append onto the first part.
 
-The resulting bitmap contains the event IDs matching the term.
+The resulting bitmap contains the event IDs matching the term, over the range the read covered (§11.4).
 
 ## 10. Freeze Process (Hot → Cold)
 
@@ -297,8 +321,10 @@ The cold segment read path follows the same workflow as the hot segment (steps 2
 
 ```
 1. Load bitmaps from the immutable index files instead of the in-memory concurrent map:
-   * Hash the term key and query the MPHF in index.hash to get a slot.
-   * Read the record at that slot in index.pack.
+   * Resolve the key against index.pack's directory; a demoted term names
+     the part records its window reaches (§9.2). Everything else goes
+     through the MPHF in index.hash to a slot, and reads the bucket item
+     at that position.
    * Check the 4-byte fingerprint. If it matches, deserialize the bitmap.
      Otherwise the term has no matches and can be skipped.
    Note: The 4-byte fingerprint check can produce false positives,
@@ -310,6 +336,19 @@ The cold segment read path follows the same workflow as the hot segment (steps 2
    * Decompress the record from events.pack.
    * Extract the event at the computed position.
 ```
+
+### 11.4 Windowed Lookup
+
+`LookupKeys(ctx, keys, window)` returns one bitmap per key and the id range the answer covers.
+
+* `nil` means the term is absent from the chunk. A term that is present with nothing in the window is a non-nil empty bitmap, never `nil`: a `nil` would read as "absent" and drop that filter's plan for the rest of the query.
+* Every returned bitmap agrees with the index on every id in the covered range, and the covered range always contains the window. Ids outside it may be present or absent, and callers must not depend on them — neither as matches, nor as the answer to a `NextValue` / `PreviousValue` that leaves it.
+* The window exists so a reader can read only the part of a term it is asked for; the covered range exists so it can report the whole of what it read, since a reader whose unit is wider than the window (a whole part) has already paid for the remainder. A reader that returns whole terms satisfies the contract for free: the hot store ignores the window and reports it back unchanged.
+* An empty window does no I/O.
+
+**Two stages.** A query materializes its window in at most two. Stage 1 is the leading 4 slabs in the walk's direction — the trailing 4 when descending — and stage 2 is the remainder, run only if the consumer is still pulling when stage 1 runs out; the common page never makes the second lookup. Each stage is one `LookupKeys`, walked as far as that lookup says it covered, and the next stage starts where the walk stopped, so a part on the seam is read once and no state crosses the stages. Bitmaps do not carry across a stage and neither do bounds proved from them; the cursor and the emitted count do. Rarest-first ordering counts cardinality inside the stage's own window, since a term the walk will never leave one slab of is not the rarest just because it is small elsewhere. The stream is the pinned window's either way: the caller pins `window.End` below the ingest frontier, and a committed ledger's events never change.
+
+**Obligation on the postings-returning lookup (#902).** The prefetch path replaces `LookupKeys` with a form that returns postings rather than bitmaps. It carries the same `window` parameter and owes the same contract: exact inside the covered range it reports, unspecified outside it. A reader that answers from whole terms reports the window back and is done; one that reads parts must report the spans it actually read, and its callers must not look past that range.
 
 ## 12. Startup Procedure
 
