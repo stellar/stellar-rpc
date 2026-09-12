@@ -348,6 +348,23 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 		return metrics.discardedCount() >= 2
 	}, 60*time.Second, 50*time.Millisecond, "the boundary ticks must freeze+fold+discard chunks 0 and 1")
 
+	// discardedCount rises when the stage DEMOTES a chunk; the destroy that removes
+	// its hot DB and key is deferred to end-of-run (after the grace wait), and a
+	// shutdown mid-grace skips it (the demoted keys would then persist for the
+	// next run). Wait for both hot DB directories to be gone — proof the destroys
+	// ran — BEFORE shutting the daemon down, as the prune step does with the
+	// index file.
+	hotLayout := config.NewLayoutFromPaths(
+		config.Config{Storage: config.StorageConfig{DefaultDataDir: dataDir}}.WithDefaults().ResolvePaths())
+	require.Eventually(t, func() bool {
+		for _, c := range []chunk.ID{c0, c1} {
+			if _, statErr := os.Stat(hotLayout.HotChunkPath(c)); !os.IsNotExist(statErr) {
+				return false
+			}
+		}
+		return true
+	}, 60*time.Second, 50*time.Millisecond, "chunks 0 and 1 hot DBs are destroyed while the daemon runs")
+
 	require.GreaterOrEqual(t, served.Load(), int32(1), "reads were served")
 	require.Equal(t, c0First, core.fromSeen.Load(),
 		"first start resumes the ingestion stream at genesis (last committed ledger + 1)")
