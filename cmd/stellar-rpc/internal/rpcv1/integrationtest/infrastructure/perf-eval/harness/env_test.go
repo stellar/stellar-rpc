@@ -65,3 +65,23 @@ func TestLoadEnvDeadlineBeyond2038(t *testing.T) {
 	require.NoError(t, loadEnv(&cfg))
 	require.Equal(t, int64(2147483648), time.Time(cfg.Deadline).Unix())
 }
+
+func TestNewResultPoller(t *testing.T) {
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	setRelayEnv(t, nil)
+	var cfg relayConfig
+	require.NoError(t, loadEnv(&cfg))
+
+	p, err := newResultPoller(t.Context(), cfg.PollerConfig)
+	require.NoError(t, err)
+	require.NotNil(t, p.s3Client)
+	require.NotNil(t, p.runner)
+	require.NotNil(t, p.runner.client)
+	require.Equal(t, "i-0123456789abcdef0", p.runner.instanceID)
+	require.Equal(t, "stellar-rpc-ci-load-test", p.bucket)
+	require.Equal(t, "runs/1/campaign/result.json", p.key)
+	require.Equal(t, "1-1", p.runID)
+	require.Equal(t, 30*time.Second, p.interval)
+	require.Equal(t, 40, p.debugLogLines)
+	require.Equal(t, 10, p.debugEveryPolls)
+}

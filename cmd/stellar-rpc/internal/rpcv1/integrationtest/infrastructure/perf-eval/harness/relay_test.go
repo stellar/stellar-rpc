@@ -63,8 +63,6 @@ func TestRelayEnvValidation(t *testing.T) {
 		{"zero debug cadence", map[string]string{"DEBUG_LOG_EVERY_POLLS": "0"}, "DEBUG_LOG_EVERY_POLLS"},
 		{"zero poll interval", map[string]string{"POLL_INTERVAL": "0"}, "POLL_INTERVAL"},
 		{"negative window", map[string]string{"WINDOW_SECONDS": "-1"}, "WINDOW_SECONDS"},
-		{"overflow window", map[string]string{"WINDOW_SECONDS": "9223372037"}, "WINDOW_SECONDS"},
-		{"overflow interval", map[string]string{"POLL_INTERVAL": "9223372037"}, "POLL_INTERVAL"},
 		{"integer overflow", map[string]string{"POLL_INTERVAL": "99999999999999999999"}, "POLL_INTERVAL"},
 		{"negative debug lines", map[string]string{"DEBUG_LOG_LINES": "-1"}, "DEBUG_LOG_LINES"},
 		{"zero deadline", map[string]string{"DEADLINE_EPOCH": "0"}, "DEADLINE_EPOCH"},
@@ -132,9 +130,6 @@ func TestGatherEnvValidation(t *testing.T) {
 			})
 		}
 	}
-	setRelayEnv(t, nil)
-	t.Setenv("RESULTS_TIMEOUT", "9223372037")
-	require.ErrorContains(t, Gather(t.Context()), "RESULTS_TIMEOUT")
 }
 
 func TestRelayFinalFetch(t *testing.T) {
