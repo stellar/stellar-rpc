@@ -75,8 +75,10 @@ func resolveSlabPlans(plans []termPlan, sources []*roaring.Bitmap) []slabPlan {
 
 // eval returns p's matches inside slab, the bitmap of one slab's ids, as a
 // fresh bitmap the caller owns, or nil when there are none. The slab and
-// the plan's terms go to roaring in one FastAnd call, so that it can find
-// an empty intersection before allocating a container for it.
+// the plan's terms go to roaring in one FastAnd call, the shape in which a
+// count-first FastAnd can reject an empty intersection without allocating
+// for it; the pinned v2.26.0 still intersects pairwise and allocates the
+// first intermediate, so that saving arrives with the roaring bump.
 func (p slabPlan) eval(slab *roaring.Bitmap) *roaring.Bitmap {
 	ops := make([]*roaring.Bitmap, 0, len(p)+1)
 	ops = append(ops, slab)
