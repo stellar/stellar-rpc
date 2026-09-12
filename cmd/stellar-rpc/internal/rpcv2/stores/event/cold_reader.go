@@ -206,27 +206,8 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		if derr != nil {
 			return derr
 		}
-		// The exact pairing, three cheap counts at open. index.pack and
-		// index.hash carry no chunk ID of their own, so a mispaired index would
-		// silently answer with a subset; and part addressing is arithmetic off
-		// bucketCount, so a record count that does not decompose into the
-		// buckets and parts the directory claims cannot be read at all.
-		if dir.numKeys != idx.numKeys() {
-			return fmt.Errorf(
-				"events: index pair mismatch for chunk %s: index.hash holds %d keys "+
-					"but index.pack's directory claims %d (mispaired artifacts)",
-				c.chunkID, idx.numKeys(), dir.numKeys)
-		}
-		wantBuckets := (dir.numKeys + indexPackItemsPerRecord - 1) / indexPackItemsPerRecord
-		if uint64(dir.bucketCount) != wantBuckets {
-			return fmt.Errorf(
-				"%w: events: %s holds %d keys in %d buckets, want %d",
-				stores.ErrCorrupt, indexPackPath, dir.numKeys, dir.bucketCount, wantBuckets)
-		}
-		if uint64(dir.bucketCount)+uint64(dir.totalParts) != uint64(tr.RecordCount) {
-			return fmt.Errorf(
-				"%w: events: %s holds %d records, but its directory claims %d buckets and %d parts",
-				stores.ErrCorrupt, indexPackPath, tr.RecordCount, dir.bucketCount, dir.totalParts)
+		if perr := dir.pair(indexPackPath, c.chunkID, idx.numKeys(), tr.RecordCount); perr != nil {
+			return perr
 		}
 		if idx.isEmpty() {
 			// A zero-term index is only valid for an eventless chunk: cross-check
@@ -410,7 +391,7 @@ func (p keyPlan) assemble() *roaring.Bitmap {
 //     across ColdReaderOptions.Concurrency.
 //  4. A demoted term's parts go back together in span order (keyPlan.assemble).
 //
-//nolint:cyclop,gocognit // the four documented passes above, inline; splitting obscures the structure
+//nolint:cyclop // the passes above, inline; splitting them obscures the structure
 func (c *ColdReader) LookupKeys(
 	ctx context.Context, keys []TermKey, window IDRange,
 ) ([]*roaring.Bitmap, IDRange, error) {
@@ -423,14 +404,7 @@ func (c *ColdReader) LookupKeys(
 	if len(keys) == 0 {
 		return nil, window, nil
 	}
-	if err := c.validateMPHF(); err != nil {
-		return nil, IDRange{}, err
-	}
-	mphf, err := c.waitMPHF()
-	if err != nil {
-		return nil, IDRange{}, err
-	}
-	dir, err := c.waitDir()
+	mphf, dir, err := c.lookupSources()
 	if err != nil {
 		return nil, IDRange{}, err
 	}
@@ -460,8 +434,8 @@ func (c *ColdReader) LookupKeys(
 		}
 		dense = true
 		shift := uint(entry.k) + indexSlabShift
-		first, last, any := entry.window(window)
-		if !any {
+		first, last, reached := entry.window(window)
+		if !reached {
 			// Present in the chunk, nothing of it in the window: the empty
 			// answer is the index's own from the term's last part up.
 			results[i] = roaring.New()
@@ -494,7 +468,23 @@ func (c *ColdReader) LookupKeys(
 	if len(reads) == 0 {
 		return results, covered, nil
 	}
+	if err := readIndexItems(ctx, c.index, keys, reads, results, plans); err != nil {
+		return nil, IDRange{}, fmt.Errorf("events: LookupKeys read for chunk %s: %w", c.chunkID, err)
+	}
+	for i := range plans {
+		if plans[i] != nil {
+			results[i] = plans[i].assemble()
+		}
+	}
+	return results, covered, nil
+}
 
+// readIndexItems is pass 3: every item the plan named, read in one go and
+// decoded into the slot its read owns.
+func readIndexItems(
+	ctx context.Context, index *stores.PackReader, keys []TermKey,
+	reads []partRead, results []*roaring.Bitmap, plans []keyPlan,
+) error {
 	sort.Slice(reads, func(i, j int) bool { return reads[i].pos < reads[j].pos })
 
 	// One entry per distinct item, runs[p] naming where position p's reads
@@ -511,7 +501,7 @@ func (c *ColdReader) LookupKeys(
 		runs = append(runs, i)
 	}
 
-	if err := c.index.ReadItems(ctx, positions, func(idx int, data []byte) error {
+	return index.ReadItems(ctx, positions, func(idx int, data []byte) error {
 		// ReadItems lends data for the callback only and may call back from
 		// several goroutines: decode here, where roaring's UnmarshalBinary
 		// keeps its own copy, and write it straight to this read's own
@@ -528,16 +518,7 @@ func (c *ColdReader) LookupKeys(
 			plans[reads[j].out][reads[j].part] = bm
 		}
 		return nil
-	}); err != nil {
-		return nil, IDRange{}, fmt.Errorf("events: LookupKeys read for chunk %s: %w", c.chunkID, err)
-	}
-
-	for i := range plans {
-		if plans[i] != nil {
-			results[i] = plans[i].assemble()
-		}
-	}
-	return results, covered, nil
+	})
 }
 
 // FetchEvents decodes events_data records for the supplied
@@ -689,6 +670,20 @@ func (c *ColdReader) All(ctx context.Context) iter.Seq2[Payload, error] {
 			}
 		}
 	}
+}
+
+// lookupSources awaits what a lookup reads from: the MPHF, validated against
+// index.pack and its directory, and the directory itself.
+func (c *ColdReader) lookupSources() (*mphf, indexDirectory, error) {
+	if err := c.validateMPHF(); err != nil {
+		return nil, indexDirectory{}, err
+	}
+	m, err := c.waitMPHF()
+	if err != nil {
+		return nil, indexDirectory{}, err
+	}
+	dir, derr := c.waitDir()
+	return m, dir, derr
 }
 
 // loadMeta drives the events.pack open via TotalItems, reads

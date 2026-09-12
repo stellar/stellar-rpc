@@ -213,15 +213,15 @@ const (
 // addressing is arithmetic and the reader needs no per-term extent.
 func chunkSlabCount(entries []indexEntry) uint64 {
 	var maxID uint64
-	var any bool
+	var seen bool
 	for i := range entries {
 		if entries[i].bitmap.IsEmpty() {
 			continue
 		}
-		any = true
+		seen = true
 		maxID = max(maxID, uint64(entries[i].bitmap.Maximum()))
 	}
-	if !any {
+	if !seen {
 		return 0
 	}
 	return maxID>>indexSlabShift + 1
@@ -232,7 +232,7 @@ func chunkSlabCount(entries []indexEntry) uint64 {
 // on spans of 2^k slabs with k = floor(log2(chunkSlabs / target)) clamped at
 // zero. Spans follow the chunk's extent, not the term's, so a term whose ids
 // sit in a corner of the chunk still answers a window there in one part.
-func partLayout(size, chunkSlabs uint64) (k uint8, records uint32, err error) {
+func partLayout(size, chunkSlabs uint64) (uint8, uint32, error) {
 	if chunkSlabs == 0 {
 		return 0, 0, errors.New("events: a demoted term in a chunk with no ids")
 	}
@@ -249,7 +249,7 @@ func partLayout(size, chunkSlabs uint64) (k uint8, records uint32, err error) {
 	if n > math.MaxUint16 {
 		return 0, 0, fmt.Errorf("events: %d parts overflows the directory's uint16", n)
 	}
-	return shift, uint32(n), nil //nolint:gosec // bounded by MaxUint16 just above
+	return shift, uint32(n), nil
 }
 
 // demoteBucket marks the terms in one bucket that become parts: while the
@@ -265,22 +265,22 @@ func demoteBucket(bucket []indexEntry, sizes []uint64, demoted []bool) {
 		total += IndexRecordFingerprintLen + int(sizes[i]) //nolint:gosec // chunk-bounded
 	}
 	for total > indexBucketBudget {
-		best := -1
+		// The largest term at or above the floor, as a pointer into the flags.
+		var best *bool
+		var size uint64
 		for i := range bucket {
-			if demoted[i] || sizes[i] < indexDemoteFloor {
+			if demoted[i] || sizes[i] < indexDemoteFloor || sizes[i] <= size {
 				continue
 			}
-			if best < 0 || sizes[i] > sizes[best] {
-				best = i
-			}
+			best, size = &demoted[i], sizes[i]
 		}
-		if best < 0 {
+		if best == nil {
 			// Nothing left worth demoting: this bucket is all small terms and
 			// stays whole, over budget or not.
 			break
 		}
-		demoted[best] = true
-		total -= int(sizes[best]) //nolint:gosec // chunk-bounded
+		*best = true
+		total -= int(size)
 	}
 }
 

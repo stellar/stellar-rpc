@@ -1,7 +1,7 @@
 package event
 
 // slab_match.go produces the candidate ids behind Matches. One stepper walks
-// one stage of the window (see windowStages) one slab at a time, 65536 ids,
+// one stage of the window (see stage1Request) one slab at a time, 65536 ids,
 // the span of one roaring container, and the whole filter algebra is
 // evaluated inside each slab. Direction is only the walk order: ascending
 // walks slabs low to high and reads each result forward, descending walks

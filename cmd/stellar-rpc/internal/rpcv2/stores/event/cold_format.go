@@ -222,6 +222,31 @@ func (d indexDirectory) lookup(key TermKey) (partEntry, bool) {
 	}, true
 }
 
+// pair is the exact pairing check, three cheap counts at open against the
+// MPHF's key count and the pack's record count. index.pack and index.hash
+// carry no chunk id of their own, so a mispaired index would silently answer
+// with a subset; and part addressing is arithmetic off bucketCount, so a
+// record count that does not decompose into the buckets and parts the
+// directory claims cannot be read at all.
+func (d indexDirectory) pair(path string, chunkID chunk.ID, keys uint64, records uint32) error {
+	if d.numKeys != keys {
+		return fmt.Errorf(
+			"events: index pair mismatch for chunk %s: index.hash holds %d keys "+
+				"but index.pack's directory claims %d (mispaired artifacts)",
+			chunkID, keys, d.numKeys)
+	}
+	wantBuckets := (d.numKeys + indexPackItemsPerRecord - 1) / indexPackItemsPerRecord
+	if uint64(d.bucketCount) != wantBuckets {
+		return fmt.Errorf("%w: events: %s holds %d keys in %d buckets, want %d",
+			stores.ErrCorrupt, path, d.numKeys, d.bucketCount, wantBuckets)
+	}
+	if uint64(d.bucketCount)+uint64(d.totalParts) != uint64(records) {
+		return fmt.Errorf("%w: events: %s holds %d records, but its directory claims %d buckets and %d parts",
+			stores.ErrCorrupt, path, records, d.bucketCount, d.totalParts)
+	}
+	return nil
+}
+
 // encodeIndexAppData serializes the build stamp followed by dir.
 func encodeIndexAppData(dir indexDirectory) []byte {
 	buf := make([]byte, indexStampLen+indexDirHeaderLen, indexStampLen+indexDirHeaderLen+len(dir.entries))
