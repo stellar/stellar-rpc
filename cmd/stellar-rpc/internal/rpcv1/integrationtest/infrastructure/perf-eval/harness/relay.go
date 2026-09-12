@@ -51,8 +51,8 @@ func (r *relay) poll(ctx context.Context) error {
 	if r.deadline.Before(windowEnd) {
 		windowEnd = r.deadline
 	}
-	logger.Infof("polling s3://%s/%s until %s (deadline %s)",
-		r.poller.bucket, r.poller.key, windowEnd.UTC().Format(time.RFC3339), r.deadline.UTC().Format(time.RFC3339))
+	logger.Infof("polling %s until %s (deadline %s)",
+		r.poller.location(), windowEnd.UTC().Format(time.RFC3339), r.deadline.UTC().Format(time.RFC3339))
 
 	res, err := r.poller.poll(ctx, windowEnd)
 	if ctx.Err() != nil {

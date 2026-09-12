@@ -11,6 +11,8 @@
 //	               so successive jobs can wait for the same box.
 //	resultPoller   GHA-side: the polling loop, result validation, and
 //	               diagnostics shared by Gather and Relay.
+//	PollerConfig   GHA-side: the environment Gather and Relay share; each
+//	               command embeds it and adds its own variables.
 //	S3Fetcher      on-box: streams (and sha-verifies) corpus objects from S3.
 //	PublishResult  on-box: writes the ok/fail result object the pollers read.
 //	RunStreaming   on-box: runs a child, streaming output with a bounded tail.
