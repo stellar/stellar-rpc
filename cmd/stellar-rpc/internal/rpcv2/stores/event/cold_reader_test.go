@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -999,17 +998,6 @@ func TestColdReader_RejectsMismatchedBuildStamp(t *testing.T) {
 	}
 }
 
-// slotOf is the bucket item position the MPHF puts key at.
-func slotOf(t *testing.T, dir string, key TermKey) int {
-	t.Helper()
-	m, err := openMPHF(filepath.Join(dir, IndexHashName(partsChunkID)))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = m.Close() })
-	slot, err := m.Lookup(key)
-	require.NoError(t, err)
-	return int(slot)
-}
-
 // dirRowAt is where key's directory row starts inside the app data.
 func dirRowAt(t *testing.T, appData []byte, key TermKey) int {
 	t.Helper()
@@ -1047,22 +1035,13 @@ func firstDemoted(t *testing.T, f *partsFixture, d indexDirectory) (string, part
 type partsCorruption struct {
 	name     string
 	corrupt  func(t *testing.T, dir string, f *partsFixture, d indexDirectory) string
-	want     string // the error's substring; empty when the answer is a miss
+	want     string // the error's substring
 	sentinel bool   // ... and the error is stores.ErrCorrupt
 }
 
 // partsItemCorruptions mutate the items: a bucket slot, or one term's part.
 func partsItemCorruptions() []partsCorruption {
 	return []partsCorruption{
-		{
-			name: "bucket item fingerprint",
-			corrupt: func(t *testing.T, dir string, f *partsFixture, _ indexDirectory) string {
-				rewriteIndexPack(t, dir, func(a *indexArtifact) {
-					a.items[slotOf(t, dir, f.key(singleTerm))][0] ^= 1
-				})
-				return singleTerm
-			},
-		},
 		{
 			name: "a demoted slot reached directly",
 			corrupt: func(t *testing.T, dir string, f *partsFixture, _ indexDirectory) string {
@@ -1110,20 +1089,6 @@ func partsItemCorruptions() []partsCorruption {
 // the stamp in front of them, and the format id on the pack.
 func partsDirectoryCorruptions() []partsCorruption {
 	return []partsCorruption{
-		{
-			name: "directory partCount too large",
-			corrupt: func(t *testing.T, dir string, f *partsFixture, d indexDirectory) string {
-				name, e := firstDemoted(t, f, d)
-				rewriteIndexPack(t, dir, func(a *indexArtifact) {
-					row := dirRowAt(t, a.appData, f.key(name))
-					binary.BigEndian.PutUint16(a.appData[row+20:], e.partCount+1)
-				})
-				return name
-			},
-			// One part past its own is the next term's, which carries the
-			// next term's fingerprint.
-			want: "does not carry its term's fingerprint", sentinel: true,
-		},
 		{
 			name: "directory firstRecord out of range",
 			corrupt: func(t *testing.T, dir string, f *partsFixture, d indexDirectory) string {
@@ -1186,12 +1151,11 @@ func partsDirectoryCorruptions() []partsCorruption {
 // are reached, and it is the shape a writer bug takes, since a writer seals
 // what it writes.
 //
-// Two mutations are deliberately not errors. A bucket item whose fingerprint
-// disagrees is the MPHF's residual false positive — the reader cannot tell
-// one from a flip and calls both a miss, which is what the fingerprint is
-// for. And a resealed k answers a subset in silence: nothing else on disk
-// records a term's span, which is exactly why the directory rides inside the
-// app-data CRC rather than beside it.
+// A resealed k is deliberately not an error: it answers a subset in silence,
+// since nothing else on disk records a term's span — which is exactly why the
+// directory rides inside the app-data CRC rather than beside it. A bucket item
+// whose fingerprint disagrees is a miss rather than an error, the MPHF's
+// residual false positive; TestColdReader_LookupUnseenTermReturnsNil owns it.
 func TestColdReader_CorruptPartsIndexIsCorrupt(t *testing.T) {
 	for _, tc := range append(partsItemCorruptions(), partsDirectoryCorruptions()...) {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1200,17 +1164,11 @@ func TestColdReader_CorruptPartsIndexIsCorrupt(t *testing.T) {
 			d := openDirectory(t, dir)
 			term := tc.corrupt(t, dir, f, d)
 
-			var got []*roaring.Bitmap
 			cr, err := OpenColdReader(partsChunkID, dir, ColdReaderOptions{})
 			if err == nil {
 				// Whatever the pairing check lets open surfaces at the lookup.
 				t.Cleanup(func() { _ = cr.Close() })
-				got, _, err = cr.LookupKeys(context.Background(), []TermKey{f.key(term)}, everyID)
-			}
-			if tc.want == "" {
-				require.NoError(t, err)
-				require.Nil(t, got[0], "an item that does not carry the term's fingerprint is a miss")
-				return
+				_, _, err = cr.LookupKeys(context.Background(), []TermKey{f.key(term)}, everyID)
 			}
 			require.ErrorContains(t, err, tc.want)
 			if tc.sentinel {

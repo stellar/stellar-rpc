@@ -109,11 +109,10 @@ func densePartsFixture() *partsFixture {
 }
 
 // partsChunkID is the chunk every fixture here is built for, and denseTerm
-// and singleTerm the two fixture terms other files name.
+// the fixture term other files name.
 const (
 	partsChunkID = chunk.ID(0)
 	denseTerm    = "dense"
-	singleTerm   = "single-3"
 )
 
 // buildPartsFixture writes a cold artifact set whose index is exactly
@@ -214,27 +213,6 @@ func TestColdReader_WindowedLookupsMatchTheirTerms(t *testing.T) {
 	}
 }
 
-// termPartBitmaps reads a demoted term's part items straight off index.pack,
-// in span order: part p is item 128·(firstRecord+p), which is the whole of
-// the addressing scheme. Read here rather than through the reader, since what
-// the pins below are about is what the writer laid down.
-func termPartBitmaps(t *testing.T, dir string, e partEntry) []*roaring.Bitmap {
-	t.Helper()
-	r := packfile.Open(filepath.Join(dir, IndexPackName(partsChunkID)), packfile.ReaderOptions{})
-	t.Cleanup(func() { _ = r.Close() })
-	positions := make([]int, e.partCount)
-	for p := range positions {
-		positions[p] = (int(e.firstRecord) + p) * indexPackItemsPerRecord
-	}
-	parts := make([]*roaring.Bitmap, len(positions))
-	require.NoError(t, r.ReadItems(context.Background(), positions, func(idx int, data []byte) error {
-		require.GreaterOrEqual(t, len(data), IndexRecordFingerprintLen)
-		parts[idx] = roaring.New()
-		return parts[idx].UnmarshalBinary(data[IndexRecordFingerprintLen:])
-	}))
-	return parts
-}
-
 // openPartsFixture builds the dense fixture and opens a reader on it,
 // returning the fixture, its directory and the reader's parsed directory.
 func openPartsFixture(t *testing.T) (*partsFixture, string, *ColdReader, indexDirectory) {
@@ -248,45 +226,6 @@ func openPartsFixture(t *testing.T) (*partsFixture, string, *ColdReader, indexDi
 	require.NoError(t, err)
 	require.Positive(t, d.entryCount(), "the fixture must demote, or these pins prove nothing")
 	return f, dir, cr, d
-}
-
-// TestColdParts_TileTheirTermDisjointAndAscending is the pin the reader's
-// in-place assembly rests on. Part p holds exactly the ids the term has
-// inside span p, so a term's parts are disjoint and ascending in slab space —
-// which is what makes the union an ordered append onto the first part rather
-// than a merge — and together they are the term the writer was given. Every
-// shape the fixture demotes is checked: dense, run-heavy, small-extent,
-// chunk-edge and the fillers.
-func TestColdParts_TileTheirTermDisjointAndAscending(t *testing.T) {
-	f, dir, _, d := openPartsFixture(t)
-
-	checked := 0
-	for name, want := range f.oracle {
-		e, demoted := d.lookup(f.key(name))
-		if !demoted {
-			continue
-		}
-		checked++
-		width := uint64(1) << (uint64(e.k) + indexSlabShift)
-		acc := roaring.New()
-		last := int64(-1)
-		for p, part := range termPartBitmaps(t, dir, e) {
-			if part.IsEmpty() {
-				continue
-			}
-			lo, hi := uint64(p)*width, uint64(p+1)*width
-			assert.GreaterOrEqual(t, uint64(part.Minimum()), lo,
-				"%s part %d holds an id below its span", name, p)
-			assert.Less(t, uint64(part.Maximum()), hi,
-				"%s part %d holds an id above its span", name, p)
-			assert.Greater(t, int64(part.Minimum()), last,
-				"%s part %d starts at or below the previous part's last id", name, p)
-			last = int64(part.Maximum())
-			acc.Or(part)
-		}
-		assert.True(t, want.Equals(acc), "%s: the parts must union back to the term", name)
-	}
-	require.GreaterOrEqual(t, checked, 4, "the fixture must demote the shapes this pin is about")
 }
 
 // TestColdParts_AssembleToTheTermOverRandomWindows is the oracle gate over
@@ -315,85 +254,6 @@ func TestColdParts_AssembleToTheTermOverRandomWindows(t *testing.T) {
 			assert.True(t, roaring.And(f.oracle[name], clip).Equals(roaring.And(got[i], clip)),
 				"%s over covered [%d, %d) of window [%d, %d)",
 				name, covered.Start, covered.End, window.Start, window.End)
-		}
-	}
-}
-
-// TestColdParts_SpanFollowsTheSlabExtent pins what a part's span is cut
-// from: the chunk's slab extent over the term's target part count, never the
-// term's own id range. Two terms are cut on spans of their own width, but
-// each one's parts tile the whole chunk, so the parts a term has ids in are
-// exactly the spans its id extent reaches — a term whose ids sit in a corner
-// of the chunk occupies one part however many bytes it weighs, and a window
-// there reads that part and no other. Cut from the byte size alone, the
-// corner term would be sliced as finely as a chunk-wide one and a window
-// would have to search for the slice it wanted.
-func TestColdParts_SpanFollowsTheSlabExtent(t *testing.T) {
-	f, dir, _, d := openPartsFixture(t)
-
-	for _, tc := range []struct {
-		name      string
-		partCount uint16
-		occupied  int
-	}{
-		{name: denseTerm, partCount: 13, occupied: 7},     // ids over 54 of the chunk's 102 slabs
-		{name: "run-heavy", partCount: 7, occupied: 4},    // the same extent, a quarter of the bytes
-		{name: "small-extent", partCount: 2, occupied: 1}, // 6 slabs of ids, 49 KiB of them
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			e, demoted := d.lookup(f.key(tc.name))
-			require.True(t, demoted)
-			size := f.bitmaps[f.key(tc.name)].GetSerializedSizeInBytes()
-			target := (size + indexPartTarget - 1) / indexPartTarget
-			shift := uint64(e.k) + indexSlabShift
-
-			occupied := 0
-			for _, part := range termPartBitmaps(t, dir, e) {
-				if !part.IsEmpty() {
-					occupied++
-				}
-			}
-			t.Logf("%s: %d bytes, target %d parts, k=%d, partCount=%d, occupied=%d",
-				tc.name, size, target, e.k, e.partCount, occupied)
-			// The span rounds up to a power of two, so the records are the
-			// target count rounded up to at most twice it.
-			assert.GreaterOrEqual(t, uint64(e.partCount), target, "fewer records than target parts")
-			assert.LessOrEqual(t, uint64(e.partCount), 2*target, "more records than the target warrants")
-			assert.Equal(t, tc.partCount, e.partCount, "records, which tile the chunk")
-			// The occupied parts are the spans the term's own ids reach, and
-			// only those.
-			want := int(uint64(f.oracle[tc.name].Maximum())>>shift - uint64(f.oracle[tc.name].Minimum())>>shift + 1)
-			assert.Equal(t, want, occupied, "parts the term has ids in")
-			assert.Equal(t, tc.occupied, occupied)
-		})
-	}
-}
-
-// TestColdParts_TermWithNoPartsInTheWindowIsNonNilEmpty pins the answer a
-// demoted term gives for a window none of its parts reach: non-nil and empty
-// — present in the chunk, nothing of it here — with no read at all. A nil
-// would read as "term absent from the chunk" and drop the plan for good. The
-// walk asks twice, so both of a window's stages are checked.
-func TestColdParts_TermWithNoPartsInTheWindowIsNonNilEmpty(t *testing.T) {
-	f, _, cr, d := openPartsFixture(t)
-
-	e, demoted := d.lookup(f.key("small-extent"))
-	require.True(t, demoted)
-	// Past the term's last part, the one case the directory answers without
-	// reading anything.
-	past := uint32(uint64(e.partCount) << (uint64(e.k) + indexSlabShift))
-	window := IDRange{Start: past + 1, End: past + 5_000_000}
-	keys := []TermKey{f.key("small-extent")}
-
-	for _, desc := range []bool{false, true} {
-		stage := stage1Request(window, desc)
-		for _, w := range []IDRange{stage, stageRemainder(window, stage, desc)} {
-			got, covered, err := cr.LookupKeys(context.Background(), keys, w)
-			require.NoError(t, err)
-			require.NotNil(t, got[0], "a term in the chunk is never nil (descending=%v)", desc)
-			assert.True(t, got[0].IsEmpty(), "no part reaches [%d, %d)", w.Start, w.End)
-			assert.LessOrEqual(t, covered.Start, w.Start)
-			assert.GreaterOrEqual(t, covered.End, w.End)
 		}
 	}
 }

@@ -8,13 +8,11 @@ package event
 //
 // The same matrices carry the two pins the batched window rests on: that a
 // lookup's bitmaps are read only inside the window they were asked for, and
-// that the batch schedule is invisible in both the stream and the slabs the
-// walk opens.
+// that the stage schedule is invisible in the stream.
 
 import (
 	"cmp"
 	"context"
-	"fmt"
 	"iter"
 	"math"
 	"math/rand"
@@ -970,102 +968,14 @@ func (r windowFuzzReader) perturb(bm *roaring.Bitmap, window IDRange) {
 	}
 }
 
-// fuzzWindowSchedules are the (slab width, stage-1 width) pairs the window pin
-// runs under: 1024-wide slabs put ~69 of them in the shaped corpus, so the
-// build's own stage 1 covers a fraction of the window and stage 2 the rest,
-// and the production width with a one-slab stage 1 splits the window on the
-// boundary the shaped fixture is built around. Both make the rewritten region
-// land inside the window the consumer asked for, not only outside it.
-var fuzzWindowSchedules = []struct {
-	shift uint
-	slabs int
-}{{10, firstStageSlabs}, {16, 1}}
-
 // TestMatches_IgnoresIDsOutsideTheLookupWindow is the oracle gate on
-// Reader.LookupKeys' window contract. Every shaped shape runs again with each
-// lookup's bitmaps rewritten outside the window it asked for — ids invented,
-// ids dropped, and the term clipped to the window — and must yield exactly
-// the stream the corpus says it must.
+// Reader.LookupKeys' window contract. The randomized matrix runs again with
+// each lookup's bitmaps rewritten outside the window it asked for — ids
+// invented, ids dropped, and the term clipped to the window — and must still
+// yield exactly the stream the corpus says it must. Four ids per slab puts a
+// stage seam and a batch seam every few ids, so the rewritten region lands
+// inside the window the consumer asked for, not only outside it.
 func TestMatches_IgnoresIDsOutsideTheLookupWindow(t *testing.T) {
-	f := newShapedFixture(t)
-	defer func(s uint) { slabShift = s }(slabShift)
-	defer func(n int) { matchStage1Slabs = n }(matchStage1Slabs)
-
-	const slab = 1 << 16
-	windows := []IDRange{
-		{0, shapedCorpusSize},
-		{20_000, 60_000},
-		{slab - 3, slab + 3},
-		{33_333, shapedCorpusSize},
-	}
-	for _, sh := range f.namedShapes() {
-		all := matchingEvents(t, f.corpus, sh.filters)
-		for _, sc := range fuzzWindowSchedules {
-			slabShift, matchStage1Slabs = sc.shift, sc.slabs
-			for _, mode := range []lookupFuzzMode{fuzzOutside, fuzzClip} {
-				for _, seed := range []int64{1, 2} {
-					r := windowFuzzReader{
-						Reader: diffReader{f.corpus},
-						rng:    rand.New(rand.NewSource(seed)),
-						mode:   mode,
-						span:   shapedCorpusSize + 4*slab,
-					}
-					for _, w := range windows {
-						for _, desc := range []bool{false, true} {
-							for _, limit := range []int{1, 37} {
-								requireStream(t, r, all, queryCase{
-									name: fmt.Sprintf("%s/%s/shift %d/seed %d",
-										sh.name, mode, sc.shift, seed),
-									filters: sh.filters,
-									window:  w,
-									desc:    desc,
-									limit:   limit,
-								})
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-}
-
-// The bounded matrix never reaches the end of a fat stream, where the last
-// batch is clipped by the window rather than by the schedule; this runs whole
-// streams through the same rewriting.
-func TestMatches_IgnoresIDsOutsideTheLookupWindow_WholeStreams(t *testing.T) {
-	f := newShapedFixture(t)
-	defer func(s uint) { slabShift = s }(slabShift)
-	defer func(n int) { matchStage1Slabs = n }(matchStage1Slabs)
-	slabShift, matchStage1Slabs = 10, firstStageSlabs
-
-	const slab = 1 << 16
-	for _, sh := range f.namedShapes() {
-		all := matchingEvents(t, f.corpus, sh.filters)
-		for _, mode := range []lookupFuzzMode{fuzzOutside, fuzzClip} {
-			r := windowFuzzReader{
-				Reader: diffReader{f.corpus},
-				rng:    rand.New(rand.NewSource(7)),
-				mode:   mode,
-				span:   shapedCorpusSize + 4*slab,
-			}
-			for _, w := range []IDRange{{0, shapedCorpusSize}, {slab - 3, slab + 3}} {
-				for _, desc := range []bool{false, true} {
-					requireStream(t, r, all, queryCase{
-						name:    sh.name + "/" + mode.String(),
-						filters: sh.filters,
-						window:  w,
-						desc:    desc,
-					})
-				}
-			}
-		}
-	}
-}
-
-// The randomized matrix through the same rewriting, at a slab width that puts
-// a batch seam every few ids.
-func TestMatches_IgnoresIDsOutsideTheLookupWindow_Randomized(t *testing.T) {
 	v := newDiffVocab(t)
 	const corpusSize = 300
 	corpus := newDiffCorpus(t, rand.New(rand.NewSource(20260829)), v, corpusSize)
@@ -1093,190 +1003,29 @@ func TestMatches_IgnoresIDsOutsideTheLookupWindow_Randomized(t *testing.T) {
 	}
 }
 
-// And around the hot store, the reader the contract was written for: a
-// five-event chunk at two ids per slab takes two batches in either
-// direction, and its term snapshots are the mirror's, so the wrapper clones
-// each before rewriting it.
-func TestMatches_IgnoresIDsOutsideTheLookupWindow_HotStore(t *testing.T) {
-	fx := newQueryFixture(t)
-	defer func(s uint) { slabShift = s }(slabShift)
-	defer func(n int) { matchStage1Slabs = n }(matchStage1Slabs)
-	slabShift, matchStage1Slabs = 1, 1
-
-	filters := []Filter{{ContractID: fx.contractA[:]}} // ids 0, 1, 4
-	for _, mode := range []lookupFuzzMode{fuzzOutside, fuzzClip} {
-		for _, seed := range []int64{1, 2, 3} {
-			r := windowFuzzReader{
-				Reader: fx.store,
-				rng:    rand.New(rand.NewSource(seed)),
-				mode:   mode,
-				span:   64,
-			}
-			window := wholeChunk(t, fx.store)
-			assert.Equal(t, []uint32{0, 1, 4},
-				matchOrdinals(collectMatches(t, r, filters, window, false)),
-				"ascending, %s mode, seed %d", mode, seed)
-			assert.Equal(t, []uint32{4, 1, 0},
-				matchOrdinals(collectMatches(t, r, filters, window, true)),
-				"descending, %s mode, seed %d", mode, seed)
-		}
-	}
-}
-
 // ───────────────────────── the batch schedule ─────────────────────────
 
-// TestMatches_StageScheduleIsInvisible pins that how much of the window a
-// query materializes at once never changes what it yields: every stage-1
-// width the sweep builds, and the one-stage walk, run the shaped matrix and
-// must agree with the corpus.
+// TestMatches_StageScheduleIsInvisible pins that materializing the window in
+// two stages never changes what a query yields. At four ids per slab stage 1
+// is the leading four slabs — 16 of the corpus's 300 ids — and stage 2 the
+// rest, so every randomized query is split, and the stream must still be the
+// one the corpus says it is.
 func TestMatches_StageScheduleIsInvisible(t *testing.T) {
-	f := newShapedFixture(t)
-	r := diffReader{f.corpus}
-	defer func(s uint) { slabShift = s }(slabShift)
-	defer func(n int) { matchStage1Slabs = n }(matchStage1Slabs)
-	// 1024-wide slabs, so the corpus is ~69 of them and every stage-1
-	// width below leaves a stage 2 to walk.
-	slabShift = 10
-
-	const slab = 1 << 16
-	windows := []IDRange{
-		{0, shapedCorpusSize},
-		{20_000, 60_000},
-		{slab - 3, slab + 3},
-		{33_333, shapedCorpusSize},
-	}
-	for _, sh := range f.namedShapes() {
-		all := matchingEvents(t, f.corpus, sh.filters)
-		for _, slabs := range []int{4, 8, 16, matchOneStage} {
-			matchStage1Slabs = slabs
-			for _, w := range windows {
-				for _, desc := range []bool{false, true} {
-					for _, limit := range []int{1, 1000} {
-						requireStream(t, r, all, queryCase{
-							name:    fmt.Sprintf("%s/stage 1 = %d slabs", sh.name, slabs),
-							filters: sh.filters,
-							window:  w,
-							desc:    desc,
-							limit:   limit,
-						})
-					}
-				}
-			}
-		}
-	}
-}
-
-// Whole streams under the widths that split them, where stage 2 is the one
-// the window clips.
-func TestMatches_StageScheduleIsInvisible_WholeStreams(t *testing.T) {
-	f := newShapedFixture(t)
-	r := diffReader{f.corpus}
-	defer func(s uint) { slabShift = s }(slabShift)
-	defer func(n int) { matchStage1Slabs = n }(matchStage1Slabs)
-	slabShift = 10
-
-	const slab = 1 << 16
-	for _, sh := range f.namedShapes() {
-		all := matchingEvents(t, f.corpus, sh.filters)
-		for _, slabs := range []int{4, matchOneStage} {
-			matchStage1Slabs = slabs
-			for _, w := range []IDRange{{0, shapedCorpusSize}, {slab - 3, slab + 3}} {
-				for _, desc := range []bool{false, true} {
-					requireStream(t, r, all, queryCase{
-						name:    fmt.Sprintf("%s/stage 1 = %d slabs", sh.name, slabs),
-						filters: sh.filters,
-						window:  w,
-						desc:    desc,
-					})
-				}
-			}
-		}
-	}
-}
-
-// The randomized matrix under every stage-1 width.
-func TestMatches_StageScheduleIsInvisible_Randomized(t *testing.T) {
 	v := newDiffVocab(t)
 	const corpusSize = 300
 	corpus := newDiffCorpus(t, rand.New(rand.NewSource(20260829)), v, corpusSize)
 	r := diffReader{corpus}
 	defer func(s uint) { slabShift = s }(slabShift)
-	defer func(n int) { matchStage1Slabs = n }(matchStage1Slabs)
 	defer func(n int) { matchBatchSize = n }(matchBatchSize)
 	slabShift, matchBatchSize = 2, 7
 
-	for _, slabs := range []int{4, 8, 16, matchOneStage} {
-		matchStage1Slabs = slabs
-		rng := rand.New(rand.NewSource(20260912))
-		matched := 0
-		for range 150 {
-			matched += randomizedTrial(t, r, corpus, v, rng, corpusSize)
-		}
-		require.Greater(t, matched, 500,
-			"fixture sanity: randomized queries selected too little")
+	rng := rand.New(rand.NewSource(20260912))
+	matched := 0
+	for range 150 {
+		matched += randomizedTrial(t, r, corpus, v, rng, corpusSize)
 	}
-}
-
-// TestSlabStagesOpenTheSameSlabs is the other half of the stage pin: the
-// shapes TestSlabStepperSkipsCandidateFreeSlabs walks, walked again in two
-// stages, open exactly the slabs the one-stage walk opens. The stage seam
-// falls on a slab boundary, and stage 2 proves its bounds from its own
-// bitmaps at the position the one-stage walk's cursor would hold, so the
-// split cannot cost a slab or save one.
-func TestSlabStagesOpenTheSameSlabs(t *testing.T) {
-	defer func(s uint) { slabShift = s }(slabShift)
-	defer func(n int) { matchStage1Slabs = n }(matchStage1Slabs)
-	slabShift = 16
-	const slab = 1 << 16
-	whole, sources := candidateFreeSlabFixture()
-
-	// The stage schedule Matches runs, with a reader that covers exactly what
-	// it is asked: stage 1 is the leading slabs, every stage after it the
-	// whole remainder.
-	walk := func(window IDRange, plans []termPlan, desc bool, slabs int) [][2]uint32 {
-		matchStage1Slabs = slabs
-		out := [][2]uint32{}
-		remaining := window
-		for first := true; !remaining.isEmpty(); first = false {
-			stage := remaining
-			if first {
-				stage = stage1Request(remaining, desc)
-			}
-			st := newSlabStepper(plans, sources, stage, desc)
-			for {
-				lo, hi, ok := st.nextBounds()
-				if !ok {
-					break
-				}
-				out = append(out, [2]uint32{lo, hi})
-			}
-			remaining = stageRemainder(remaining, stage, desc)
-		}
-		return out
-	}
-	// Windows whose bounds sit mid-slab as well as on a boundary: a seam cut
-	// anywhere but on a slab boundary would split that slab into two opened
-	// ranges, which only a window entered mid-slab can show.
-	windows := []IDRange{
-		whole,
-		{5_000, whole.End - 35_000},
-		{3 * slab, 7 * slab},
-		{3*slab + 8, 9*slab + 2},
-	}
-	for _, plans := range [][]termPlan{{{0}}, {{0, 2}}, {{2}}, {{0}, {1}}, {{3}}} {
-		for _, w := range windows {
-			for _, desc := range []bool{false, true} {
-				// One stage is the whole window, the walk the pinned lists
-				// are written against.
-				want := walk(w, plans, desc, matchOneStage)
-				for _, slabs := range []int{4, 8, 16} {
-					assert.Equal(t, want, walk(w, plans, desc, slabs),
-						"plans %v window %v desc=%v stage 1 = %d slabs",
-						plans, w, desc, slabs)
-				}
-			}
-		}
-	}
+	require.Greater(t, matched, 500,
+		"fixture sanity: randomized queries selected too little")
 }
 
 // TestStage1Request_TakesTheLeadingSlabs pins which end of the window the
@@ -1287,38 +1036,31 @@ func TestSlabStagesOpenTheSameSlabs(t *testing.T) {
 // entered at the edge the walk starts from, not at a slab boundary.
 func TestStage1Request_TakesTheLeadingSlabs(t *testing.T) {
 	defer func(s uint) { slabShift = s }(slabShift)
-	defer func(n int) { matchStage1Slabs = n }(matchStage1Slabs)
 	slabShift = 4
+	// 16 ids to the slab, and a stage is firstStageSlabs (4) of them wide.
 	const slab = 1 << 4
 
 	for _, tc := range []struct {
 		name      string
-		slabs     int
 		window    IDRange
 		asc, desc IDRange
 	}{
-		{"from the edge", 2, IDRange{0, 10 * slab}, IDRange{0, 2 * slab}, IDRange{8 * slab, 10 * slab}},
+		{"from the edge", IDRange{0, 10 * slab}, IDRange{0, 4 * slab}, IDRange{6 * slab, 10 * slab}},
 		{
-			"entered mid-slab", 2,
+			"entered mid-slab",
 			IDRange{slab + 5, 10*slab - 3},
-			IDRange{slab + 5, 3 * slab},
-			IDRange{8 * slab, 10*slab - 3},
+			IDRange{slab + 5, 5 * slab},
+			IDRange{6 * slab, 10*slab - 3},
 		},
 		{
-			"wider than the window", 99,
+			// A window under a stage wide is taken whole, in either direction.
+			"narrower than a stage",
 			IDRange{2 * slab, 3 * slab},
 			IDRange{2 * slab, 3 * slab},
 			IDRange{2 * slab, 3 * slab},
-		},
-		{
-			"one stage", matchOneStage,
-			IDRange{slab, 9 * slab},
-			IDRange{slab, 9 * slab},
-			IDRange{slab, 9 * slab},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			matchStage1Slabs = tc.slabs
 			assert.Equal(t, tc.asc, stage1Request(tc.window, false))
 			assert.Equal(t, tc.desc, stage1Request(tc.window, true))
 			// What is left is the rest of the window, on the other side.

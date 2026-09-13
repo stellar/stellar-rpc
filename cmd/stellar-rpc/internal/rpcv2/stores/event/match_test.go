@@ -1566,11 +1566,9 @@ func TestMatches_FirstBatchHintSizesIO(t *testing.T) {
 func TestMatches_FirstBatchHintCarriesAcrossWindowBatches(t *testing.T) {
 	f := newShapedFixture(t)
 	defer func(s uint) { slabShift = s }(slabShift)
-	defer func(n int) { matchStage1Slabs = n }(matchStage1Slabs)
-	// 16384-wide slabs and a one-slab first batch split the sparse term's
-	// five ids across the schedule: two in the first batch, three in the
-	// third.
-	slabShift, matchStage1Slabs = 14, 1
+	// 4096-wide slabs put the four-slab first stage at [0, 16384), which holds
+	// two of the sparse term's five ids; the other three fall to stage 2.
+	slabShift = 12
 
 	cr := &fetchCountingReader{Reader: diffReader{f.corpus}}
 	got := drainMatches(t, Matches(context.Background(), cr, f.filterSparseOnly(),

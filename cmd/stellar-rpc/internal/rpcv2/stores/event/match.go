@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"math"
 	"slices"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
@@ -214,17 +213,6 @@ var matchBatchSize = 512
 // firstStageSlabs is how many slabs a query's first stage covers.
 const firstStageSlabs = 4
 
-// matchOneStage, as matchStage1Slabs, materializes the window in a single
-// stage — the shape the two-stage walk must agree with.
-const matchOneStage = 0
-
-// matchStage1Slabs is the stage-1 width as a test seam: in-package tests set
-// it to sweep widths, matchOneStage included. It changes I/O counts only,
-// never what a stream yields.
-//
-//nolint:gochecknoglobals // test seam; production never writes it
-var matchStage1Slabs = firstStageSlabs
-
 // Match is a payload plus Ordinal, its chunk-relative event ID. A
 // consumer that stops mid-stream needs the ordinal to know where it
 // stopped; it cannot be recovered from the payload, which carries
@@ -253,8 +241,8 @@ func batchSizes(hint int) (int, int) {
 }
 
 // stage1Request is the piece of remaining a query's first lookup asks for:
-// the leading matchStage1Slabs slabs from the edge the walk starts at — the
-// trailing ones when descending. matchOneStage asks for the whole of it.
+// the leading firstStageSlabs slabs from the edge the walk starts at — the
+// trailing ones when descending.
 //
 // Every stage after it asks for the whole remainder, so there are at most two
 // lookups, and a query that fills its page inside stage 1 never makes the
@@ -263,12 +251,7 @@ func batchSizes(hint int) (int, int) {
 // same whether there are one or two; the leading stage is entered at the
 // window's own bound, which may sit mid-slab.
 func stage1Request(remaining IDRange, descending bool) IDRange {
-	// One slab per id already covers any window, so a wider stage is clamped
-	// there rather than overflowing the slab shift.
-	slabs := min(uint64(max(0, matchStage1Slabs)), uint64(math.MaxUint32))
-	if slabs == 0 {
-		return remaining
-	}
+	const slabs = uint64(firstStageSlabs)
 	if descending {
 		lo := remaining.Start
 		if base := stageFloor(remaining.End, slabs); base > uint64(lo) {
