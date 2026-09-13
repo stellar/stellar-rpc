@@ -18,6 +18,7 @@ import (
 	"math/rand"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/stretchr/testify/assert"
@@ -891,6 +892,67 @@ func (m lookupFuzzMode) String() string {
 		return "clip"
 	}
 	return "outside"
+}
+
+// lookupCountingReader answers for the whole id space, as a reader of whole
+// terms does, and counts the lookups a query makes.
+type lookupCountingReader struct {
+	Reader
+
+	lookups int
+}
+
+func (c *lookupCountingReader) LookupKeys(
+	ctx context.Context, keys []TermKey, window IDRange,
+) ([]*roaring.Bitmap, IDRange, error) {
+	c.lookups++
+	bms, _, err := c.Reader.LookupKeys(ctx, keys, window)
+	return bms, IDRange{End: math.MaxUint32}, err
+}
+
+// TestMatches_WholeTermLookupIsOneStage pins what a covered range of the whole
+// id space buys: a second stage would ask for ids the first already answered
+// for, so there is none — and no stream moves, staging being an I/O schedule.
+func TestMatches_WholeTermLookupIsOneStage(t *testing.T) {
+	f := newShapedFixture(t)
+	for _, sh := range f.namedShapes() {
+		if _, _, matchAll := planIndexTerms(sh.filters); matchAll {
+			continue // served straight off FetchRange, the index untouched
+		}
+		all := matchingEvents(t, f.corpus, sh.filters)
+		for _, w := range []IDRange{{0, shapedCorpusSize}, {65_533, shapedCorpusSize}} {
+			for _, desc := range []bool{false, true} {
+				r := &lookupCountingReader{Reader: diffReader{f.corpus}}
+				requireStream(t, r, all, queryCase{name: sh.name, filters: sh.filters, window: w, desc: desc})
+				assert.Equal(t, 1, r.lookups, "%s over %v desc=%v", sh.name, w, desc)
+			}
+		}
+	}
+}
+
+// underCoveringReader breaks Reader.LookupKeys' contract the one way the walk
+// cannot survive: it answers for less than it was asked, so a stage walks
+// nothing and the remainder never shrinks.
+type underCoveringReader struct{ Reader }
+
+func (r underCoveringReader) LookupKeys(
+	ctx context.Context, keys []TermKey, window IDRange,
+) ([]*roaring.Bitmap, IDRange, error) {
+	bms, _, err := r.Reader.LookupKeys(ctx, keys, window)
+	return bms, IDRange{Start: window.Start + 1, End: window.End}, err
+}
+
+// TestMatches_UnderCoveringLookupIsAnError pins that as an error on the
+// stream rather than a spin: the timeout makes the regression a failure.
+func TestMatches_UnderCoveringLookupIsAnError(t *testing.T) {
+	f := newShapedFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	next, stop := iter.Pull2(Matches(ctx, underCoveringReader{diffReader{f.corpus}},
+		f.filterDenseOnly(), IDRange{0, shapedCorpusSize}, false, 0))
+	defer stop()
+	_, err, _ := next()
+	require.ErrorContains(t, err, "covered")
 }
 
 // windowFuzzReader is the caller's half of Reader.LookupKeys' contract: a

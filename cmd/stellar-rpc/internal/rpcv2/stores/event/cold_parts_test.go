@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -193,6 +194,8 @@ func TestColdReader_WindowedLookupsMatchTheirTerms(t *testing.T) {
 				require.GreaterOrEqual(t, covered.End, window.End,
 					"the covered range must contain the window (pass %d)", pass)
 
+				assert.Equal(t, partsCovered(f, dir2, names, window), covered,
+					"the covered range is the span of the parts read (pass %d)", pass)
 				clip := roaring.New()
 				clip.AddRange(uint64(covered.Start), uint64(covered.End))
 				for i, name := range names {
@@ -212,10 +215,182 @@ func TestColdReader_WindowedLookupsMatchTheirTerms(t *testing.T) {
 		})
 	}
 
-	// An inverted window is refused rather than underflowed into a part range
-	// spanning the whole id space.
+	// An inverted window is refused, not underflowed into a giant part range.
 	_, _, lerr := cr.LookupKeys(context.Background(), keys, IDRange{Start: 500, End: 5})
 	require.ErrorContains(t, lerr, "must be >=")
+}
+
+// termPartBitmaps reads a demoted term's part items straight off index.pack,
+// in span order: part p is item 128·(firstRecord+p), which is the whole of
+// the addressing scheme. Read here rather than through the reader, since what
+// the pins below are about is what the writer laid down.
+func termPartBitmaps(t *testing.T, dir string, e partEntry) []*roaring.Bitmap {
+	t.Helper()
+	r := packfile.Open(filepath.Join(dir, IndexPackName(partsChunkID)), packfile.ReaderOptions{})
+	t.Cleanup(func() { _ = r.Close() })
+	positions := make([]int, e.partCount)
+	for p := range positions {
+		positions[p] = (int(e.firstRecord) + p) * indexPackItemsPerRecord
+	}
+	parts := make([]*roaring.Bitmap, len(positions))
+	require.NoError(t, r.ReadItems(context.Background(), positions, func(idx int, data []byte) error {
+		require.GreaterOrEqual(t, len(data), IndexRecordFingerprintLen)
+		parts[idx] = roaring.New()
+		return parts[idx].UnmarshalBinary(data[IndexRecordFingerprintLen:])
+	}))
+	return parts
+}
+
+// TestColdParts_TileTheirTermDisjointAndAscending is the pin the reader's
+// in-place assembly rests on. Part p holds exactly the ids the term has
+// inside span p, so a term's parts are disjoint and ascending in slab space —
+// which is what makes the union an ordered append onto the first part rather
+// than a merge — and together they are the term the writer was given. Every
+// shape the fixture demotes is checked: dense, run-heavy, small-extent,
+// chunk-edge and the fillers.
+func TestColdParts_TileTheirTermDisjointAndAscending(t *testing.T) {
+	f, dir, _, d := openPartsFixture(t)
+
+	checked := 0
+	for name, want := range f.oracle {
+		e, demoted := d.lookup(f.key(name))
+		if !demoted {
+			continue
+		}
+		checked++
+		width := uint64(1) << (uint64(e.k) + indexSlabShift)
+		acc := roaring.New()
+		last := int64(-1)
+		for p, part := range termPartBitmaps(t, dir, e) {
+			if part.IsEmpty() {
+				continue
+			}
+			lo, hi := uint64(p)*width, uint64(p+1)*width
+			assert.GreaterOrEqual(t, uint64(part.Minimum()), lo,
+				"%s part %d holds an id below its span", name, p)
+			assert.Less(t, uint64(part.Maximum()), hi,
+				"%s part %d holds an id above its span", name, p)
+			assert.Greater(t, int64(part.Minimum()), last,
+				"%s part %d starts at or below the previous part's last id", name, p)
+			last = int64(part.Maximum())
+			acc.Or(part)
+		}
+		assert.True(t, want.Equals(acc), "%s: the parts must union back to the term", name)
+	}
+	require.GreaterOrEqual(t, checked, 4, "the fixture must demote the shapes this pin is about")
+}
+
+// partsMatchReader runs Matches over the real parts index: LookupKeys goes to
+// the fixture's ColdReader under the fixture's own keys, mapped from the
+// filter's, since a filter names the 32-byte contract ids and topic bytes the
+// post-filter compares against. Every candidate comes back as a payload every
+// filter here accepts, so the stream is the candidate set the index produced.
+type partsMatchReader struct {
+	Reader
+
+	cr      *ColdReader
+	terms   map[TermKey]TermKey
+	raw     []byte
+	lookups int
+}
+
+func (r *partsMatchReader) EventCount() (uint32, error) { return 3_600_000, nil }
+
+func (r *partsMatchReader) LookupKeys(
+	ctx context.Context, keys []TermKey, window IDRange,
+) ([]*roaring.Bitmap, IDRange, error) {
+	r.lookups++
+	mapped := make([]TermKey, len(keys))
+	for i, k := range keys {
+		mapped[i] = r.terms[k]
+	}
+	return r.cr.LookupKeys(ctx, mapped, window)
+}
+
+func (r *partsMatchReader) FetchEvents(_ context.Context, ids []uint32) ([]Payload, error) {
+	out := make([]Payload, len(ids))
+	for i := range ids {
+		out[i] = Payload{ContractEventBytes: r.raw}
+	}
+	return out, nil
+}
+
+// TestMatches_OverTheRealPartsIndex composes the engine with the parts reader
+// over windows that cross a stage seam and a part boundary. Nothing else puts
+// the two together: the engine's matrices answer out of whole terms.
+func TestMatches_OverTheRealPartsIndex(t *testing.T) {
+	f, _, cr, _ := openPartsFixture(t)
+	sf := newShapedFixture(t)
+	raw, cid, topic := sf.corpus.raw[0], sf.vocab.contracts[0], sf.vocab.topicRaw[0]
+	cidKey, topicKey := ComputeTermKey(cid, FieldContractID), ComputeTermKey(topic, FieldTopic0)
+	oneTerm := []Filter{{ContractID: cid}}
+	twoTerms := []Filter{{ContractID: cid}}
+	twoTerms[0].Topics[0] = topic
+	andTerms := map[TermKey]TermKey{cidKey: f.key(denseTerm), topicKey: f.key("small-extent")}
+
+	for _, q := range []struct {
+		name    string
+		filters []Filter
+		terms   map[TermKey]TermKey
+		want    *roaring.Bitmap
+	}{
+		{denseTerm, oneTerm, map[TermKey]TermKey{cidKey: f.key(denseTerm)}, f.oracle[denseTerm]},
+		{"run-heavy", oneTerm, map[TermKey]TermKey{cidKey: f.key("run-heavy")}, f.oracle["run-heavy"]},
+		{"small-extent", oneTerm, map[TermKey]TermKey{cidKey: f.key("small-extent")}, f.oracle["small-extent"]},
+		{"dense AND small-extent", twoTerms, andTerms, roaring.And(f.oracle[denseTerm], f.oracle["small-extent"])},
+	} {
+		all := make([]Match, 0, q.want.GetCardinality())
+		for _, id := range q.want.ToArray() {
+			all = append(all, Match{Payload: Payload{ContractEventBytes: raw}, Ordinal: id})
+		}
+		for _, w := range []IDRange{
+			{Start: 4<<16 - 3, End: 9<<16 + 5}, // across the stage seam and a part boundary
+			{Start: 0, End: 3_500_001},         // the whole chunk
+			{Start: 1_060_000, End: 1_100_000}, // inside one part of every demoted term
+		} {
+			for _, desc := range []bool{false, true} {
+				for _, limit := range []int{1, 1000} {
+					requireStream(t, &partsMatchReader{cr: cr, terms: q.terms, raw: raw}, all,
+						queryCase{name: q.name, filters: q.filters, window: w, desc: desc, limit: limit})
+				}
+			}
+		}
+	}
+	// Stage 1 is the leading four slabs: a window inside it is one lookup, one
+	// past it two.
+	lookups := func(w IDRange) int {
+		r := &partsMatchReader{cr: cr, terms: map[TermKey]TermKey{cidKey: f.key(denseTerm)}, raw: raw}
+		drainMatches(t, Matches(context.Background(), r, oneTerm, w, false, 0), 0)
+		return r.lookups
+	}
+	assert.Equal(t, 1, lookups(IDRange{Start: 0, End: 100_000}), "a window inside stage 1")
+	assert.Equal(t, 2, lookups(IDRange{Start: 0, End: 600_000}), "a window past stage 1")
+}
+
+// partsCovered is the range the directory says a lookup of names over window
+// must report: the span of the parts its demoted terms are read to.
+func partsCovered(f *partsFixture, d indexDirectory, names []string, window IDRange) IDRange {
+	if window.isEmpty() {
+		return window // no part of a demoted term is read for it
+	}
+	lo, hi := uint64(0), uint64(math.MaxUint32)
+	for _, name := range names {
+		e, demoted := d.lookup(f.key(name))
+		if !demoted {
+			continue
+		}
+		shift := uint(e.k) + indexSlabShift
+		first, last, reached := e.window(window)
+		if !reached {
+			lo = max(lo, uint64(e.partCount)<<shift)
+			continue
+		}
+		lo = max(lo, uint64(first)<<shift)
+		if uint64(last)+1 < uint64(e.partCount) {
+			hi = min(hi, (uint64(last)+1)<<shift)
+		}
+	}
+	return IDRange{Start: uint32(lo), End: uint32(hi)}
 }
 
 // openPartsFixture builds the dense fixture and opens a reader on it,

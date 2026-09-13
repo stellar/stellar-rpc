@@ -1047,8 +1047,8 @@ func partsItemCorruptions() []partsCorruption {
 			corrupt: func(t *testing.T, dir string, f *partsFixture, _ indexDirectory) string {
 				rewriteIndexPack(t, dir, func(a *indexArtifact) {
 					// A row whose key names nothing leaves the parts tiled, and the
-					// term resolving through the MPHF to the bucket slot demotion
-					// emptied, whose body roaring cannot read.
+					// term resolving through the MPHF to the emptied bucket slot,
+					// whose body roaring cannot read.
 					a.appData[dirRowAt(t, a.appData, f.key(denseTerm))] ^= 1
 				})
 				return denseTerm
@@ -1059,7 +1059,7 @@ func partsItemCorruptions() []partsCorruption {
 			name: "a bucket item missing",
 			corrupt: func(t *testing.T, dir string, _ *partsFixture, _ indexDirectory) string {
 				// A record one item short of its 128: every later item, the parts
-				// included, has slid a slot down from where it is addressed.
+				// included, has slid down a slot from where it is addressed.
 				rewriteIndexPack(t, dir, func(a *indexArtifact) {
 					a.items = append(a.items[:5], a.items[6:]...)
 				})
