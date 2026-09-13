@@ -75,7 +75,7 @@ func TestLedgerOffsets_DecodeRejectsUnknownVersion(t *testing.T) {
 	buf := make([]byte, ledgerOffsetsHeaderLen)
 	buf[0] = 0xff // not LedgerOffsetsFormatVersion
 	_, err := DecodeLedgerOffsets(buf)
-	assert.ErrorContains(t, err, "written by a newer stellar-rpc")
+	assert.ErrorContains(t, err, "written by a different stellar-rpc build")
 }
 
 func TestLedgerOffsets_DecodeRejectsTruncatedArray(t *testing.T) {

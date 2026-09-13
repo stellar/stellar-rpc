@@ -177,6 +177,10 @@ func TestHotStore_IngestLedgerWritesAllCFs(t *testing.T) {
 	bm := lookupOne(t, h.store, keys[0])
 	require.NotNil(t, bm)
 	assert.True(t, bm.Contains(0))
+	// The window is ignored: a whole-chunk image covers the whole id space.
+	_, covered, err := h.store.LookupKeys(context.Background(), keys[:1], IDRange{Start: 0, End: 1})
+	require.NoError(t, err)
+	assert.Equal(t, everyID, covered) // IDRange{End: math.MaxUint32}
 
 	assert.Equal(t, uint32(1), mustEventCount(t, h.store))
 }

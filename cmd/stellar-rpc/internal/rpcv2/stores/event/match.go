@@ -215,9 +215,9 @@ func IDRangeForLedgers(ofs *LedgerOffsets, startLedger, endLedger uint32) (IDRan
 //nolint:gochecknoglobals // test seam; production never writes it
 var matchBatchSize = 512
 
-// firstStageSlabs is how many slabs a query's first stage covers. Four beat
-// eight and sixteen on every row of the width sweep — warm HIT p50 2.08 /
-// 2.35 / 2.63 ms, EBS-cold HIT p50 6.54 / 6.91 / 7.91 ms.
+// firstStageSlabs is how many slabs a query's first stage covers. Four beat eight and sixteen on every row of
+// the width sweep — warm popular-term pages p50 2.08 / 2.35 / 2.63 ms, EBS-cold popular-term pages p50 6.54 /
+// 6.91 / 7.91 ms.
 const firstStageSlabs = 4
 
 // Match is a payload plus Ordinal, its chunk-relative event ID. A

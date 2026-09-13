@@ -930,6 +930,18 @@ func TestMatches_WholeTermLookupIsOneStage(t *testing.T) {
 	}
 }
 
+// TestMatches_DeadPlanEndsTheWalk pins the return on a dropped plan: a term absent chunk-wide is absent from
+// every later stage, so none is asked for. countingReader covers only what it was asked, so the walk stages.
+func TestMatches_DeadPlanEndsTheWalk(t *testing.T) {
+	defer func(s uint) { slabShift = s }(slabShift)
+	slabShift = 12 // stage 1's four slabs fall well short of the window
+	f := newShapedFixture(t)
+	r := &countingReader{Reader: diffReader{f.corpus}}
+	assert.Empty(t, drainMatches(t, Matches(context.Background(), r,
+		f.filterAbsentGroupLeading(), IDRange{0, shapedCorpusSize}, false, 0), 0))
+	assert.Equal(t, 1, r.lookupKeysCalls, "a dead plan must not ask for a second stage")
+}
+
 // underCoveringReader breaks Reader.LookupKeys' contract the one way the walk
 // cannot survive: it answers for less than it was asked, so a stage walks
 // nothing and the remainder never shrinks.

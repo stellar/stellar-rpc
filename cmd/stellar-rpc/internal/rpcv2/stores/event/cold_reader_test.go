@@ -1112,6 +1112,31 @@ func partsDirectoryCorruptions() []partsCorruption {
 			// records the pack does not hold never reaches a lookup.
 			want: "names records", sentinel: true,
 		},
+		// Two ways the rows can stop tiling with every count still adding up.
+		{
+			name: "directory last row's partCount shrunk",
+			corrupt: func(t *testing.T, dir string, _ *partsFixture, d indexDirectory) string {
+				off := indexStampLen + indexDirHeaderLen + (d.entryCount()-1)*indexDirEntryLen + 20
+				rewriteIndexPack(t, dir, func(a *indexArtifact) {
+					binary.BigEndian.PutUint16(a.appData[off:], binary.BigEndian.Uint16(a.appData[off:])-1)
+				})
+				return denseTerm
+			},
+			want: "but the pack holds", sentinel: true,
+		},
+		{
+			name: "directory rows not consecutive",
+			corrupt: func(t *testing.T, dir string, _ *partsFixture, _ indexDirectory) string {
+				rewriteIndexPack(t, dir, func(a *indexArtifact) {
+					const base = indexStampLen + indexDirHeaderLen + 16
+					was := binary.BigEndian.Uint32(a.appData[base:])
+					binary.BigEndian.PutUint32(a.appData[base:], binary.BigEndian.Uint32(a.appData[base+indexDirEntryLen:]))
+					binary.BigEndian.PutUint32(a.appData[base+indexDirEntryLen:], was)
+				})
+				return denseTerm
+			},
+			want: "the rows before it tile up to", sentinel: true,
+		},
 		{
 			name: "directory k past the id space",
 			corrupt: func(t *testing.T, dir string, f *partsFixture, d indexDirectory) string {

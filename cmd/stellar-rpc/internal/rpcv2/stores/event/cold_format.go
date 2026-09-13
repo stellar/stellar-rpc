@@ -268,8 +268,8 @@ func (d indexDirectory) pair(
 			return fmt.Errorf("%w: events: %s directory row %d names records [%d, %d); the rows before it tile "+
 				"up to %d", stores.ErrCorrupt, path, off/indexDirEntryLen, first, first+count, next)
 		}
-		// Every span has to start inside the id space. The last one may
-		// overhang it, which the writer cuts at MaxUint32+1.
+		// Every span has to start inside the id space. The writer cuts the
+		// last one at MaxUint32+1, so it ends at the top at the furthest.
 		if k > 16 || (count-1)<<(k+indexSlabShift) > math.MaxUint32 {
 			return fmt.Errorf("%w: events: %s directory row %d tiles %d spans of 2^%d slabs, which start past "+
 				"the id space", stores.ErrCorrupt, path, off/indexDirEntryLen, count, k)

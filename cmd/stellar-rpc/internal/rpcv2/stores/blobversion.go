@@ -15,7 +15,7 @@ func CheckBlobVersion(blob []byte, want byte) error {
 		return errors.New("empty blob")
 	}
 	if blob[0] != want {
-		return fmt.Errorf("unsupported version 0x%02x, want 0x%02x (written by a newer stellar-rpc?)",
+		return fmt.Errorf("unsupported version v%d, this build reads v%d (written by a different stellar-rpc build)",
 			blob[0], want)
 	}
 	return nil

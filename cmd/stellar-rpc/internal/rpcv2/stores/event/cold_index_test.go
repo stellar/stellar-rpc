@@ -366,7 +366,7 @@ func TestWriteColdIndex_StampAndContentHash(t *testing.T) {
 	newer := append([]byte(nil), ad...)
 	newer[0] = indexStampVersion + 1
 	_, _, _, err = decodeIndexAppData(newer)
-	require.ErrorContains(t, err, "written by a newer stellar-rpc")
+	require.ErrorContains(t, err, "written by a different stellar-rpc build")
 
 	_, hashed, err := r.ContentHash()
 	require.NoError(t, err)

@@ -222,7 +222,7 @@ An MPHF maps each known key to a unique slot in \[0, N) with O(1) lookup and no 
 
 Since an MPHF maps any input to a valid slot, even keys not in the build set, a query for a non-existent term would still resolve to a slot and retrieve whatever bitmap is stored there. Each bitmap in `index.pack` is therefore prefixed with a 4-byte fingerprint to detect and reject these false positives. 
 
-A 4-byte fingerprint can still collide, so query results are post-filtered after event fetch to verify all terms match (see Section 11.2, step 5).
+A 4-byte fingerprint can still collide, so query results are post-filtered after event fetch to verify all terms match (see Section 11.2, step 5). The read path tolerates false postings, since every candidate is verified by the post-filter; the index's guarantee is against missing ones.
 
 **Buckets, demotion and parts.** `index.pack` holds 128 items per record: record *r* is the bucket for slots 128*r* … 128*r*+127, item = `fp[4] ‖ roaring portable bitmap`. One read then serves 128 slots and the on-disk offset array stays small (one entry per record, not per term). The last bucket is padded out to 128 items so what follows starts on a record boundary.
 
@@ -245,7 +245,7 @@ offset  size   field
                  key[16] ‖ firstRecord u32 ‖ partCount u16 ‖ k u8
 ```
 
-Entries stay bytes and are binary-searched in place, never parsed into a map. A chunk holds at most `index bytes / 16 KiB` of them — a few hundred on pubnet 6410 — and the parts plus the directory cost ~0.17% of index size. The four counts are the pairing check at open, and it is exact: `numKeys` equals `index.hash`'s key count, `bucketCount == ceil(numKeys / 128)`, and `bucketCount + totalParts == recordCount`.
+Entries stay bytes and are binary-searched in place, never parsed into a map. A chunk holds at most `index bytes / 16 KiB` of them — a few hundred on pubnet 6410 — and the parts plus the directory cost ~0.17% of index size. The four counts are the pairing check at open, and it is exact: `numKeys` equals `index.hash`'s key count, `bucketCount == ceil(numKeys / 128)`, and `bucketCount + totalParts == recordCount`. A span exponent that is wrong under a valid checksum is not detected at open; it can only come from the writer, which the writer/reader tests cover end to end, and is an accepted residual.
 
 **Term Lookup:**
 
@@ -347,7 +347,7 @@ The cold segment read path follows the same workflow as the hot segment (steps 2
 
 **Two stages.** A query materializes its window in at most two. Stage 1 is the leading 4 slabs in the walk's direction — the trailing 4 when descending — and stage 2 is the remainder, run only if the consumer is still pulling when stage 1 runs out and the first lookup did not already cover it; the common page never makes the second lookup. A lookup that under-covers its request is an error on the stream, not a walk that fails to advance. Each stage is one `LookupKeys`, walked as far as that lookup says it covered, and the next stage starts where the walk stopped, so a part on the seam is read once and no state crosses the stages. Bitmaps do not carry across a stage and neither do bounds proved from them; the cursor and the emitted count do. Rarest-first ordering counts cardinality inside the stage's own window, since a term the walk will never leave one slab of is not the rarest just because it is small elsewhere. The stream is the pinned window's either way: the caller pins `window.End` below the ingest frontier, and a committed ledger's events never change.
 
-**Obligation on the postings-returning lookup (#902).** The prefetch path replaces `LookupKeys` with a form that returns postings rather than bitmaps. It carries the same `window` parameter and owes the same contract: exact inside the covered range it reports, unspecified outside it. A reader that answers from whole terms reports the whole id space and is done; one that reads parts must report the spans it actually read, and its callers must not look past that range.
+**Obligation on the postings-returning lookup (#902).** The prefetch path replaces `LookupKeys` with a form that returns postings rather than bitmaps. It carries the same `window` parameter and owes the same contract: exact inside the covered range it reports, unspecified outside it. A reader that answers from whole terms reports the whole id space and is done; one that reads parts must report the spans it actually read, and its callers must not look past that range. The postings path must keep the post-filter in place, or that tolerance stops being true.
 
 ## 12. Startup Procedure
 
