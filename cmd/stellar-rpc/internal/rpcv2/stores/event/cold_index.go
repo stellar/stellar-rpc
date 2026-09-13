@@ -18,6 +18,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 
 	"github.com/RoaringBitmap/roaring/v2"
@@ -297,9 +298,6 @@ func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
 		flags   [indexPackItemsPerRecord]bool
 		demoted []indexEntry
 	)
-	// Items actually appended, counted rather than derived: it is what the
-	// directory's part addressing is checked against below.
-	items := 0
 	for lo := 0; lo < len(entries); lo += indexPackItemsPerRecord {
 		bucket := entries[lo:min(lo+indexPackItemsPerRecord, len(entries))]
 		demoteBucket(bucket, sizes[:len(bucket)], flags[:len(bucket)])
@@ -313,7 +311,6 @@ func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
 				if err := pw.AppendItem(e.fp[:]); err != nil {
 					return fmt.Errorf("events: write demoted slot %d to index.pack: %w", e.slot, err)
 				}
-				items++
 				continue
 			}
 			buf.Reset()
@@ -323,7 +320,6 @@ func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
 			if err := pw.AppendItem(e.fp[:], buf.Bytes()); err != nil {
 				return fmt.Errorf("events: write slot %d to index.pack: %w", e.slot, err)
 			}
-			items++
 		}
 	}
 	// Pad the last bucket record out so the part records start on a record
@@ -333,7 +329,6 @@ func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
 		if err := pw.AppendItem([]byte{}); err != nil {
 			return fmt.Errorf("events: pad index.pack bucket %d: %w", bucketCount-1, err)
 		}
-		items++
 	}
 
 	dir := indexDirectory{
@@ -341,6 +336,10 @@ func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
 		bucketCount: uint32(bucketCount), //nolint:gosec // chunk term count / 128
 	}
 	dir.entries = make([]byte, 0, len(demoted)*indexDirEntryLen)
+	// Key order is what the reader binary-searches the rows in, and laying the
+	// parts down in it makes the rows firstRecord-ordered too, which is how the
+	// open-time check tiles them.
+	slices.SortFunc(demoted, func(a, b indexEntry) int { return bytes.Compare(a.key[:], b.key[:]) })
 	record := uint32(bucketCount) //nolint:gosec // chunk term count / 128
 	for i := range demoted {
 		e := &demoted[i]
@@ -348,34 +347,22 @@ func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
 		if err != nil {
 			return fmt.Errorf("events: part layout for slot %d: %w", e.slot, err)
 		}
-		if err := writeTermParts(pw, e, k, records, record, items); err != nil {
+		if err := writeTermParts(pw, e, k, records); err != nil {
 			return err
 		}
-		items += int(records) * indexPackItemsPerRecord
 		dir.entries = appendDirEntry(dir.entries, e.key, record, records, k)
 		record += records
 		dir.totalParts += records
 	}
-	// The directory has to be sorted by key for the reader's binary search;
-	// slot order is the MPHF's, which is not key order.
-	sortDirEntries(dir.entries)
 	return pw.Finish(encodeIndexAppData(dir))
 }
 
 // writeTermParts writes one demoted term's part records: every span in
 // [0, records) gets a record whose item 0 is fp[4] ‖ the span's bitmap and
 // whose other 127 items are empty, empty spans included, so part p of the
-// term is item 128·(firstRecord+p). items is where the pack stands, which
-// firstRecord is checked against — the whole addressing scheme is that
-// arithmetic.
-func writeTermParts(
-	pw *packfile.Writer, e *indexEntry, k uint8, records, firstRecord uint32, items int,
-) error {
-	if items != int(firstRecord)*indexPackItemsPerRecord {
-		return fmt.Errorf(
-			"events: parts of slot %d land at item %d, not %d (parts must be contiguous after the buckets)",
-			e.slot, items, uint64(firstRecord)*indexPackItemsPerRecord)
-	}
+// term is item 128·(firstRecord+p) — the whole addressing scheme is that
+// arithmetic, and pair() checks it tiles at open.
+func writeTermParts(pw *packfile.Writer, e *indexEntry, k uint8, records uint32) error {
 	var buf bytes.Buffer
 	width := uint64(1) << (uint64(k) + indexSlabShift)
 	for p := range uint64(records) {
@@ -409,22 +396,4 @@ func appendDirEntry(dst []byte, key TermKey, firstRecord uint32, partCount uint3
 	binary.BigEndian.PutUint16(row[20:22], uint16(partCount)) //nolint:gosec // partLayout bounds it
 	row[22] = k
 	return append(dst, row[:]...)
-}
-
-// sortDirEntries sorts the fixed-stride rows by key in place: they are built
-// in slot order, the order the parts are written in, and the reader
-// binary-searches them by key. Keys are unique, so the row compares as its
-// leading key does.
-func sortDirEntries(rows []byte) {
-	row := func(i int) []byte { return rows[i*indexDirEntryLen : (i+1)*indexDirEntryLen] }
-	order := make([]int, len(rows)/indexDirEntryLen)
-	for i := range order {
-		order[i] = i
-	}
-	sort.Slice(order, func(a, b int) bool { return bytes.Compare(row(order[a]), row(order[b])) < 0 })
-	sorted := make([]byte, 0, len(rows))
-	for _, i := range order {
-		sorted = append(sorted, row(i)...)
-	}
-	copy(rows, sorted)
 }

@@ -206,7 +206,8 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 		if derr != nil {
 			return derr
 		}
-		if perr := dir.pair(indexPackPath, c.chunkID, idx.numKeys(), tr.RecordCount); perr != nil {
+		if perr := dir.pair(
+			indexPackPath, c.chunkID, idx.numKeys(), tr.RecordCount, uint64(tr.TotalItems)); perr != nil {
 			return perr
 		}
 		if idx.isEmpty() {
@@ -399,6 +400,9 @@ func (c *ColdReader) LookupKeys(
 		return nil, IDRange{}, stores.ErrStoreClosed
 	}
 	if err := ctx.Err(); err != nil {
+		return nil, IDRange{}, err
+	}
+	if err := window.check(); err != nil {
 		return nil, IDRange{}, err
 	}
 	if len(keys) == 0 {

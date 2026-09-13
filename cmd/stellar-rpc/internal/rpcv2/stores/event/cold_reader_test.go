@@ -1046,16 +1046,26 @@ func partsItemCorruptions() []partsCorruption {
 			name: "a demoted slot reached directly",
 			corrupt: func(t *testing.T, dir string, f *partsFixture, _ indexDirectory) string {
 				rewriteIndexPack(t, dir, func(a *indexArtifact) {
-					// Without its row the term resolves through the MPHF to the
-					// bucket slot demotion emptied, whose body roaring cannot read.
-					off := dirRowAt(t, a.appData, f.key(denseTerm))
-					a.appData = append(a.appData[:off], a.appData[off+indexDirEntryLen:]...)
-					binary.BigEndian.PutUint32(a.appData[indexStampLen+16:],
-						binary.BigEndian.Uint32(a.appData[indexStampLen+16:])-1)
+					// A row whose key names nothing leaves the parts tiled, and the
+					// term resolving through the MPHF to the bucket slot demotion
+					// emptied, whose body roaring cannot read.
+					a.appData[dirRowAt(t, a.appData, f.key(denseTerm))] ^= 1
 				})
 				return denseTerm
 			},
 			want: "unmarshal index.pack item", sentinel: true,
+		},
+		{
+			name: "a bucket item missing",
+			corrupt: func(t *testing.T, dir string, _ *partsFixture, _ indexDirectory) string {
+				// A record one item short of its 128: every later item, the parts
+				// included, has slid a slot down from where it is addressed.
+				rewriteIndexPack(t, dir, func(a *indexArtifact) {
+					a.items = append(a.items[:5], a.items[6:]...)
+				})
+				return denseTerm
+			},
+			want: "items in", sentinel: true,
 		},
 		{
 			name: "part item fingerprint",
@@ -1101,6 +1111,17 @@ func partsDirectoryCorruptions() []partsCorruption {
 			// The pairing check's own bounds pass, at open: a row naming
 			// records the pack does not hold never reaches a lookup.
 			want: "names records", sentinel: true,
+		},
+		{
+			name: "directory k past the id space",
+			corrupt: func(t *testing.T, dir string, f *partsFixture, d indexDirectory) string {
+				name, _ := firstDemoted(t, f, d)
+				rewriteIndexPack(t, dir, func(a *indexArtifact) {
+					a.appData[dirRowAt(t, a.appData, f.key(name))+22] = 17
+				})
+				return name
+			},
+			want: "past the id space", sentinel: true,
 		},
 		{
 			name: "directory k",

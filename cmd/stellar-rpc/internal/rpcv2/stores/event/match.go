@@ -377,6 +377,13 @@ func Matches(
 				yield(Match{}, fmt.Errorf("events: query lookup: %w", err))
 				return
 			}
+			// A reader that answers for less than it was asked leaves the walk
+			// nothing to advance on, and the loop would never end.
+			if covered.Start > stage.Start || covered.End < stage.End {
+				yield(Match{}, fmt.Errorf("events: query lookup covered [%d, %d) but was asked for [%d, %d)",
+					covered.Start, covered.End, stage.Start, stage.End))
+				return
+			}
 			// The stepper walks what the lookup covered and no further: the
 			// bitmaps say nothing about ids outside it.
 			walked := stageWalk(remaining, covered, descending)

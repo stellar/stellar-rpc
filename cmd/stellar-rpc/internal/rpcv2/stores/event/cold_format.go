@@ -222,13 +222,16 @@ func (d indexDirectory) lookup(key TermKey) (partEntry, bool) {
 	}, true
 }
 
-// pair is the exact pairing check, three cheap counts at open against the
-// MPHF's key count and the pack's record count. index.pack and index.hash
-// carry no chunk id of their own, so a mispaired index would silently answer
-// with a subset; and part addressing is arithmetic off bucketCount, so a
-// record count that does not decompose into the buckets and parts the
-// directory claims cannot be read at all.
-func (d indexDirectory) pair(path string, chunkID chunk.ID, keys uint64, records uint32) error {
+// pair is the exact pairing check, four cheap counts at open against the
+// MPHF's key count and the pack's record and item counts. index.pack and
+// index.hash carry no chunk id of their own, so a mispaired index would
+// silently answer with a subset; and part addressing is arithmetic off
+// bucketCount and a fixed 128 items per record, so a pack that does not
+// decompose into the buckets and parts the directory claims, each padded
+// full, cannot be read at all.
+func (d indexDirectory) pair(
+	path string, chunkID chunk.ID, keys uint64, records uint32, items uint64,
+) error {
 	if d.numKeys != keys {
 		return fmt.Errorf(
 			"events: index pair mismatch for chunk %s: index.hash holds %d keys "+
@@ -244,16 +247,38 @@ func (d indexDirectory) pair(path string, chunkID chunk.ID, keys uint64, records
 		return fmt.Errorf("%w: events: %s holds %d records, but its directory claims %d buckets and %d parts",
 			stores.ErrCorrupt, path, records, d.bucketCount, d.totalParts)
 	}
-	// A row that names records outside the parts region is unreadable: part p
-	// is record firstRecord+p, and the buckets come first.
+	// Every record is padded to a full 128 items — buckets by the writer's pad
+	// loop, part records by their 127 empty ones — so the item count is the
+	// record count times the stride, and anything else means items went
+	// missing under a record count that still adds up.
+	if items != uint64(records)*indexPackItemsPerRecord {
+		return fmt.Errorf("%w: events: %s holds %d items in %d records, want %d (every record is padded full)",
+			stores.ErrCorrupt, path, items, records, uint64(records)*indexPackItemsPerRecord)
+	}
+	// The rows tile the parts region exactly. They are sorted by key, and the
+	// writer sorts the demoted terms by key before laying their parts down, so
+	// that is firstRecord order too: each row starts where the one before it
+	// ended, the first at the bucket region's end and the last at the pack's.
+	next := uint64(d.bucketCount)
 	for off := 0; off+indexDirEntryLen <= len(d.entries); off += indexDirEntryLen {
 		first := uint64(binary.BigEndian.Uint32(d.entries[off+16 : off+20]))
 		count := uint64(binary.BigEndian.Uint16(d.entries[off+20 : off+22]))
-		if count == 0 || first < uint64(d.bucketCount) || first+count > uint64(records) {
-			return fmt.Errorf("%w: events: %s directory row %d names records [%d, %d), outside the %d parts "+
-				"after %d buckets", stores.ErrCorrupt, path, off/indexDirEntryLen, first, first+count,
-				d.totalParts, d.bucketCount)
+		k := uint64(d.entries[off+22])
+		if count == 0 || first != next {
+			return fmt.Errorf("%w: events: %s directory row %d names records [%d, %d); the rows before it tile "+
+				"up to %d", stores.ErrCorrupt, path, off/indexDirEntryLen, first, first+count, next)
 		}
+		// Every span has to start inside the id space. The last one may
+		// overhang it, which the writer cuts at MaxUint32+1.
+		if k > 16 || (count-1)<<(k+indexSlabShift) > math.MaxUint32 {
+			return fmt.Errorf("%w: events: %s directory row %d tiles %d spans of 2^%d slabs, which start past "+
+				"the id space", stores.ErrCorrupt, path, off/indexDirEntryLen, count, k)
+		}
+		next += count
+	}
+	if next != uint64(records) {
+		return fmt.Errorf("%w: events: %s directory rows tile records [%d, %d), but the pack holds %d",
+			stores.ErrCorrupt, path, d.bucketCount, next, records)
 	}
 	return nil
 }

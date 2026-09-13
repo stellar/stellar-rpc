@@ -211,6 +211,11 @@ func TestColdReader_WindowedLookupsMatchTheirTerms(t *testing.T) {
 			}
 		})
 	}
+
+	// An inverted window is refused rather than underflowed into a part range
+	// spanning the whole id space.
+	_, _, lerr := cr.LookupKeys(context.Background(), keys, IDRange{Start: 500, End: 5})
+	require.ErrorContains(t, lerr, "must be >=")
 }
 
 // openPartsFixture builds the dense fixture and opens a reader on it,
