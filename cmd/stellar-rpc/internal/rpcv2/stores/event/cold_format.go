@@ -244,6 +244,17 @@ func (d indexDirectory) pair(path string, chunkID chunk.ID, keys uint64, records
 		return fmt.Errorf("%w: events: %s holds %d records, but its directory claims %d buckets and %d parts",
 			stores.ErrCorrupt, path, records, d.bucketCount, d.totalParts)
 	}
+	// A row that names records outside the parts region is unreadable: part p
+	// is record firstRecord+p, and the buckets come first.
+	for off := 0; off+indexDirEntryLen <= len(d.entries); off += indexDirEntryLen {
+		first := uint64(binary.BigEndian.Uint32(d.entries[off+16 : off+20]))
+		count := uint64(binary.BigEndian.Uint16(d.entries[off+20 : off+22]))
+		if count == 0 || first < uint64(d.bucketCount) || first+count > uint64(records) {
+			return fmt.Errorf("%w: events: %s directory row %d names records [%d, %d), outside the %d parts "+
+				"after %d buckets", stores.ErrCorrupt, path, off/indexDirEntryLen, first, first+count,
+				d.totalParts, d.bucketCount)
+		}
+	}
 	return nil
 }
 

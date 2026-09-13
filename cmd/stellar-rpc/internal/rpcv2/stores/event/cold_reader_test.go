@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -1132,10 +1133,9 @@ func partsDirectoryCorruptions() []partsCorruption {
 				})
 				return name
 			},
-			// The pack's own bounds check. The counts pair record for record
-			// at open, so a row this far out means the app data was rewritten
-			// whole, which its CRC is what catches.
-			want: "out of [0,",
+			// The pairing check's own bounds pass, at open: a row naming
+			// records the pack does not hold never reaches a lookup.
+			want: "names records", sentinel: true,
 		},
 		{
 			name: "directory k",
@@ -1200,10 +1200,13 @@ func TestColdReader_CorruptPartsIndexIsCorrupt(t *testing.T) {
 			d := openDirectory(t, dir)
 			term := tc.corrupt(t, dir, f, d)
 
+			var got []*roaring.Bitmap
 			cr, err := OpenColdReader(partsChunkID, dir, ColdReaderOptions{})
-			require.NoError(t, err)
-			t.Cleanup(func() { _ = cr.Close() })
-			got, _, err := cr.LookupKeys(context.Background(), []TermKey{f.key(term)}, everyID)
+			if err == nil {
+				// Whatever the pairing check lets open surfaces at the lookup.
+				t.Cleanup(func() { _ = cr.Close() })
+				got, _, err = cr.LookupKeys(context.Background(), []TermKey{f.key(term)}, everyID)
+			}
 			if tc.want == "" {
 				require.NoError(t, err)
 				require.Nil(t, got[0], "an item that does not carry the term's fingerprint is a miss")
