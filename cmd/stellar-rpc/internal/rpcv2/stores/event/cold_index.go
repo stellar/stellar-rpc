@@ -1,12 +1,11 @@
 package event
 
-// cold_index.go is the index half of the cold-Chunk pipeline. It
-// produces index.pack (per-slot bitmap records) + index.hash (the
-// serialized MPHF) inside a Chunk's cold directory.
-//
-// The events.pack writer half lives in cold_writer.go. Shared format
-// constants, the LedgerOffsets app-data wire format, and the
-// MPHF wrapper live in cold_format.go.
+// cold_index.go is the index half of the cold-Chunk pipeline: index.hash (the
+// serialized MPHF) and index.pack — 128-item bucket records in slot order,
+// then part records for the terms too big to leave in a bucket, then app data
+// whose directory names them (cold_format.go carries the layout, the wire
+// format and the MPHF wrapper). The events.pack writer half lives in
+// cold_writer.go.
 
 import (
 	"bytes"
@@ -70,8 +69,8 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 //
 // index.hash is the MPHF serialized via buildMPHF.
 //
-// index.pack format. One packfile record per MPHF slot, in slot
-// order. Each record is:
+// index.pack format. One packfile item per MPHF slot, 128 to a
+// record, in slot order. Each item is:
 //
 //	offset  size  field
 //	0       4     fingerprint (first 4 bytes of the TermKey hash)
@@ -85,7 +84,7 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 // the cold reader rejects them at that point.
 //
 // streamhash's MPHF is a *minimal* perfect hash: slots are dense in
-// [0, len(bitmaps)), so packfile record positions exactly equal
+// [0, len(bitmaps)), so packfile item positions exactly equal
 // slots. An assertion guards this invariant in case streamhash
 // semantics ever shift.
 //

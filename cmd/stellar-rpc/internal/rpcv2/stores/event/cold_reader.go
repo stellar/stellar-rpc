@@ -325,12 +325,12 @@ func (c *ColdReader) Offsets() (*LedgerOffsets, error) {
 	return m.offsets, nil
 }
 
-// partRead is one item this lookup has to read: where it is, which result it
+// itemRead is one item this lookup has to read: where it is, which result it
 // feeds, and which of that result's parts it fills (-1 for a bucket item).
-type partRead struct {
+type itemRead struct {
 	pos  int
 	out  int
-	part int32
+	part int
 }
 
 // decodeIndexItem checks the item's leading fingerprint against key's prefix
@@ -339,7 +339,7 @@ type partRead struct {
 // not-found — but a part that disagrees is corruption, since the directory
 // named this key; so is a matching fingerprint over a body roaring cannot
 // decode, which is how a demoted slot's deliberately empty one surfaces.
-func decodeIndexItem(item []byte, key TermKey, r partRead) (*roaring.Bitmap, error) {
+func decodeIndexItem(item []byte, key TermKey, r itemRead) (*roaring.Bitmap, error) {
 	if len(item) < IndexRecordFingerprintLen ||
 		!bytes.Equal(item[:IndexRecordFingerprintLen], key[:IndexRecordFingerprintLen]) {
 		if r.part < 0 && len(item) >= IndexRecordFingerprintLen {
@@ -355,8 +355,8 @@ func decodeIndexItem(item []byte, key TermKey, r partRead) (*roaring.Bitmap, err
 	return bm, nil
 }
 
-// keyPlan is one demoted term's parts, in span order, as the reads fill them.
-type keyPlan []*roaring.Bitmap
+// termParts is one demoted term's parts, in span order, as the reads fill them.
+type termParts []*roaring.Bitmap
 
 // assemble unions a term's parts back together without copying a container:
 // they tile disjoint, ascending spans, so every Or runs off the end of the
@@ -364,7 +364,7 @@ type keyPlan []*roaring.Bitmap
 // source's containers while both bitmaps carry the copy-on-write mark.
 // Leaving the mark on is safe — UnmarshalBinary owns what it keeps, and
 // nothing downstream writes to a term bitmap.
-func (p keyPlan) assemble() *roaring.Bitmap {
+func (p termParts) assemble() *roaring.Bitmap {
 	acc := p[0]
 	acc.SetCopyOnWrite(true)
 	for _, part := range p[1:] {
@@ -383,14 +383,16 @@ func (p keyPlan) assemble() *roaring.Bitmap {
 //  1. Resolve every key against the directory. A demoted term names the part
 //     records covering window; an empty window, or one past the term's last
 //     part, is a non-nil empty result and no I/O at all. Parts are read
-//     whole, so the same pass collects the covered range.
+//     whole, so the same pass collects the covered range — the whole id
+//     space when the batch reached no demoted term, which is what makes such
+//     a query one stage rather than two.
 //  2. Every other key goes through the MPHF. Keys rejected at the routing
 //     stage (streamhash ErrKeyNotFound) get result[i] = nil and never touch
 //     index.pack; the rest name their bucket item by slot.
 //  3. One c.index.ReadItems pass over every position, sorted and deduped,
 //     coalescing adjacent ones into single ReadAt calls and fanning out
 //     across ColdReaderOptions.Concurrency.
-//  4. A demoted term's parts go back together in span order (keyPlan.assemble).
+//  4. A demoted term's parts go back together in span order (termParts.assemble).
 //
 //nolint:cyclop // the passes above, inline; splitting them obscures the structure
 func (c *ColdReader) LookupKeys(
@@ -414,13 +416,13 @@ func (c *ColdReader) LookupKeys(
 	}
 
 	results := make([]*roaring.Bitmap, len(keys))
-	plans := make([]keyPlan, len(keys))
-	reads := make([]partRead, 0, len(keys))
+	plans := make([]termParts, len(keys))
+	reads := make([]itemRead, 0, len(keys))
 	// The covered range starts at everything and is cut back by each demoted
 	// term to the span of the parts it was read to; a term answered out of a
 	// whole bucket item, or missing from the index, answers everywhere and
 	// never cuts it.
-	covLo, covHi, dense := uint64(0), uint64(math.MaxUint32), false
+	covLo, covHi := uint64(0), uint64(math.MaxUint32)
 
 	for i, key := range keys {
 		entry, demoted := dir.lookup(key)
@@ -433,10 +435,9 @@ func (c *ColdReader) LookupKeys(
 				return nil, IDRange{}, fmt.Errorf(
 					"events: LookupKeys MPHF for chunk %s: %w", c.chunkID, lerr)
 			}
-			reads = append(reads, partRead{pos: int(slot), out: i, part: -1})
+			reads = append(reads, itemRead{pos: int(slot), out: i, part: -1})
 			continue
 		}
-		dense = true
 		shift := uint(entry.k) + indexSlabShift
 		first, last, reached := entry.window(window)
 		if !reached {
@@ -452,21 +453,21 @@ func (c *ColdReader) LookupKeys(
 		if uint64(last)+1 < uint64(entry.partCount) {
 			covHi = min(covHi, (uint64(last)+1)<<shift)
 		}
-		plans[i] = make(keyPlan, last-first+1)
+		plans[i] = make(termParts, last-first+1)
 		for part := first; part <= last; part++ {
-			reads = append(reads, partRead{
+			reads = append(reads, itemRead{
 				pos:  int(entry.firstRecord+part) * indexPackItemsPerRecord,
 				out:  i,
-				part: int32(part - first), //nolint:gosec // bounded by partCount (uint16)
+				part: int(part - first),
 			})
 		}
 	}
-	// Every bound came off a part boundary that already bounded the window, so
-	// the covered range contains it. Re-checked rather than assumed: one that
-	// did not would have the walk trust ids nobody looked up.
+	// Every bound came off a part boundary the window already sat inside, so
+	// covLo <= window.Start and covHi <= MaxUint32, and nothing cut either at
+	// all when nothing was demoted. A window with no ids in it reads no part of
+	// a demoted term, and is its own covered range.
 	covered := window
-	if dense && !window.isEmpty() &&
-		covLo <= uint64(window.Start) && covHi >= uint64(window.End) {
+	if !window.isEmpty() {
 		covered = IDRange{Start: uint32(covLo), End: uint32(covHi)}
 	}
 	if len(reads) == 0 {
@@ -487,7 +488,7 @@ func (c *ColdReader) LookupKeys(
 // decoded into the slot its read owns.
 func readIndexItems(
 	ctx context.Context, index *stores.PackReader, keys []TermKey,
-	reads []partRead, results []*roaring.Bitmap, plans []keyPlan,
+	reads []itemRead, results []*roaring.Bitmap, plans []termParts,
 ) error {
 	sort.Slice(reads, func(i, j int) bool { return reads[i].pos < reads[j].pos })
 

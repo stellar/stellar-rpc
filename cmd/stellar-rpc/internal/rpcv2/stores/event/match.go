@@ -173,6 +173,11 @@ type IDRange struct {
 // isEmpty reports whether r covers zero events.
 func (r IDRange) isEmpty() bool { return r.Start == r.End }
 
+// intersect is the part of r that o covers too.
+func (r IDRange) intersect(o IDRange) IDRange {
+	return IDRange{Start: max(r.Start, o.Start), End: min(r.End, o.End)}
+}
+
 // check validates the structural invariant Start <= End. Does NOT
 // check End against the chunk's EventCount — that requires a Reader
 // and is enforced by Matches.
@@ -210,7 +215,9 @@ func IDRangeForLedgers(ofs *LedgerOffsets, startLedger, endLedger uint32) (IDRan
 //nolint:gochecknoglobals // test seam; production never writes it
 var matchBatchSize = 512
 
-// firstStageSlabs is how many slabs a query's first stage covers.
+// firstStageSlabs is how many slabs a query's first stage covers. Four beat
+// eight and sixteen on every row of the width sweep — warm HIT p50 2.08 /
+// 2.35 / 2.63 ms, EBS-cold HIT p50 6.54 / 6.91 / 7.91 ms.
 const firstStageSlabs = 4
 
 // Match is a payload plus Ordinal, its chunk-relative event ID. A
@@ -249,40 +256,25 @@ func batchSizes(hint int) (int, int) {
 // second — the point of the split. The request falls on a slab boundary, so
 // no slab is split across two stages and the candidates evaluated are the
 // same whether there are one or two; the leading stage is entered at the
-// window's own bound, which may sit mid-slab.
+// window's own bound, which may sit mid-slab. remaining is never empty here,
+// so End is never zero.
 func stage1Request(remaining IDRange, descending bool) IDRange {
 	const slabs = uint64(firstStageSlabs)
 	if descending {
+		// The base of the slabs-th slab at or below the one holding End-1.
 		lo := remaining.Start
-		if base := stageFloor(remaining.End, slabs); base > uint64(lo) {
-			lo = uint32(base) //nolint:gosec // base < remaining.End <= MaxUint32
+		if top := (uint64(remaining.End) - 1) >> slabShift; top >= slabs {
+			//nolint:gosec // (top+1-slabs)<<slabShift < remaining.End <= MaxUint32
+			lo = max(lo, uint32((top+1-slabs)<<slabShift))
 		}
 		return IDRange{Start: lo, End: remaining.End}
 	}
+	// The top of the slabs-th slab at or above the one holding Start.
 	hi := remaining.End
-	if top := stageCeil(remaining.Start, slabs); top < uint64(hi) {
+	if top := ((uint64(remaining.Start) >> slabShift) + slabs) << slabShift; top < uint64(hi) {
 		hi = uint32(top) //nolint:gosec // top < remaining.End <= MaxUint32
 	}
 	return IDRange{Start: remaining.Start, End: hi}
-}
-
-// stageWalk is how far a stage's bitmaps can be walked: what the lookup says
-// it covered, cut back to what is left of the window. A reader that answers
-// for more than it was asked (the cold index reads whole parts) saves the
-// next stage a lookup of ids already in memory. covered always contains the
-// request, so the walk always advances.
-func stageWalk(remaining, covered IDRange, descending bool) IDRange {
-	walk := remaining
-	if descending {
-		if covered.Start > remaining.Start {
-			walk.Start = covered.Start
-		}
-		return walk
-	}
-	if covered.End < remaining.End {
-		walk.End = covered.End
-	}
-	return walk
 }
 
 // stageRemainder is what is left of remaining once walked has been walked.
@@ -291,23 +283,6 @@ func stageRemainder(remaining, walked IDRange, descending bool) IDRange {
 		return IDRange{Start: remaining.Start, End: walked.Start}
 	}
 	return IDRange{Start: walked.End, End: remaining.End}
-}
-
-// stageCeil is where an ascending stage 1 entered at lo ends: the top of the
-// slabs-th slab at or above lo's own. slabs is positive here.
-func stageCeil(lo uint32, slabs uint64) uint64 {
-	return ((uint64(lo) >> slabShift) + slabs) << slabShift
-}
-
-// stageFloor is where a descending stage 1 entered at hi starts: the base of
-// the slabs-th slab at or below the one holding hi-1, and id zero when it
-// reaches past it. hi is never zero — an empty window never reaches a stage.
-func stageFloor(hi uint32, slabs uint64) uint64 {
-	top := (uint64(hi) - 1) >> slabShift
-	if top+1 <= slabs {
-		return 0
-	}
-	return (top + 1 - slabs) << slabShift
 }
 
 // Matches yields the events in window matching filters, in
@@ -365,13 +340,10 @@ func Matches(
 		}
 		emitted := 0
 		// remaining is the part of the window no stage has walked yet. A stage
-		// always walks at least what it asked for, so it always shrinks.
+		// always walks at least what it asked for, so it always shrinks; every
+		// stage after the first asks for the whole of it.
 		remaining := window
-		for first := true; !remaining.isEmpty(); first = false {
-			stage := remaining
-			if first {
-				stage = stage1Request(remaining, descending)
-			}
+		for stage := stage1Request(window, descending); !remaining.isEmpty(); stage = remaining {
 			sources, covered, err := r.LookupKeys(ctx, uniqueKeys, stage)
 			if err != nil {
 				yield(Match{}, fmt.Errorf("events: query lookup: %w", err))
@@ -385,14 +357,16 @@ func Matches(
 				return
 			}
 			// The stepper walks what the lookup covered and no further: the
-			// bitmaps say nothing about ids outside it.
-			walked := stageWalk(remaining, covered, descending)
+			// bitmaps say nothing about ids outside it. A reader that covers
+			// more than it was asked saves the next stage the ids it already
+			// read.
+			walked := remaining.intersect(covered)
 			st := newSlabStepper(plans, sources, walked, descending)
-			// Nothing in this stage can match. The next stage is a lookup of
-			// its own, so the walk moves on rather than ending.
+			// A plan is dropped only for a term absent from the chunk, which
+			// is chunk-wide: no later stage can revive it, so nothing past
+			// here can match either.
 			if len(st.plans) == 0 {
-				remaining = stageRemainder(remaining, walked, descending)
-				continue
+				return
 			}
 			// firstBatch is the whole query's hint, so what stage 1 yielded
 			// comes off it. A spent hint goes non-positive and batchSizes

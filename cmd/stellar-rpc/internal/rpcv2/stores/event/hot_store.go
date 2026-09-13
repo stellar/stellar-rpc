@@ -190,9 +190,9 @@ func (h *HotStore) Offsets() (*LedgerOffsets, error) {
 // written after its lookup.
 //
 // The window is ignored — these images are whole-chunk and already in
-// memory, and a whole term agrees with the index inside any window — and
-// the covered range comes back as the window itself, there being no I/O
-// to save by letting the walk run past what it asked for.
+// memory, and a whole term agrees with the index inside any window — so the
+// covered range is the whole id space, and a query over the hot store runs
+// in one stage rather than looking up ids it is already holding.
 func (h *HotStore) LookupKeys(
 	ctx context.Context, keys []TermKey, window IDRange,
 ) ([]*roaring.Bitmap, IDRange, error) {
@@ -213,7 +213,7 @@ func (h *HotStore) LookupKeys(
 		}
 		results[i] = bm // nil for misses — Get already returns nil bitmap for not-found
 	}
-	return results, window, nil
+	return results, IDRange{End: math.MaxUint32}, nil
 }
 
 // FetchEvents decodes the events_data row for each provided eventID
