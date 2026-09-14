@@ -84,7 +84,7 @@ func (e *eventsChecker) ledger(seq uint32, expected []expectedEvent) error {
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("read events.pack: %w", err)
+			return fmt.Errorf("events.pack at event %d: %w", id, err)
 		}
 		if want := &expected[i].payload; !samePayload(want, &actual) {
 			e.mismatch(seq, want.TxHash.HexString(), "payload (event "+u32(id)+")", renderPayload(want), renderPayload(&actual))
@@ -105,13 +105,20 @@ func renderPayload(p *event.Payload) string {
 		p.TxHash.HexString(), p.LedgerSequence, p.TxIdx, p.OpIdx, p.LedgerClosedAt, p.EventIdx, p.ContractEventBytes)
 }
 
+// stopChecking stops the payload comparison after a read failure; the term
+// index is still checked at finish, since it is a separate file.
+func (e *eventsChecker) stopChecking() {
+	e.ended = true
+	e.stop()
+}
+
 // finish checks that events.pack holds nothing past the oracle's last event,
 // then every expected term's posting list and the term count.
 func (e *eventsChecker) finish(ctx context.Context) error {
 	if !e.ended {
 		if _, err, ok := e.next(); ok {
 			if err != nil {
-				return fmt.Errorf("read events.pack: %w", err)
+				return fmt.Errorf("events.pack past the last expected event: %w", err)
 			}
 			e.mismatch(0, "", "event_count", u32(e.nextID), "more payloads in events.pack")
 		}
@@ -119,7 +126,7 @@ func (e *eventsChecker) finish(ctx context.Context) error {
 	e.stop()
 	switch count, err := e.reader.EventCount(); {
 	case err != nil:
-		return err
+		return fmt.Errorf("events.pack event count: %w", err)
 	case count != e.nextID:
 		e.mismatch(0, "", "event_count", u32(e.nextID), u32(count))
 	}
@@ -128,7 +135,7 @@ func (e *eventsChecker) finish(ctx context.Context) error {
 	}
 	switch n, err := e.reader.TermCount(); {
 	case err != nil:
-		return err
+		return fmt.Errorf("index term count: %w", err)
 	case n != uint64(len(e.terms)):
 		e.mismatch(0, "", "term_count", u64(uint64(len(e.terms))), u64(n))
 	}
@@ -145,7 +152,7 @@ func (e *eventsChecker) checkTerms(ctx context.Context) error {
 		batch := keys[start:min(start+lookupBatch, len(keys))]
 		got, err := e.reader.LookupKeys(ctx, batch)
 		if err != nil {
-			return fmt.Errorf("lookup terms: %w", err)
+			return fmt.Errorf("index lookup: %w", err)
 		}
 		for i, k := range batch {
 			want := e.terms[k]
@@ -178,13 +185,15 @@ type indexChecker struct {
 	idx *txhash.ColdReader // shared by every chunk of the index; not owned
 }
 
+// ledger resolves the ledger's expected hashes through the index. A lookup
+// that fails outright is returned: the index file itself is not usable.
 func (t *indexChecker) ledger(seq uint32, hashes []xdr.Hash) error {
 	for _, h := range hashes {
 		switch got, err := t.idx.Get(h); {
 		case errors.Is(err, stores.ErrNotFound):
 			t.mismatch(seq, h, "not found")
 		case err != nil:
-			return fmt.Errorf("tx-hash index lookup: %w", err)
+			return fmt.Errorf("index lookup for %s: %w", h.HexString(), err)
 		case got != seq:
 			t.mismatch(seq, h, u32(got))
 		}
@@ -239,7 +248,7 @@ func (t *binChecker) finish() {
 	for i := 0; i < len(t.bin) && i < len(t.want) && !t.rec.full(); i++ {
 		if t.bin[i] != t.want[i] {
 			t.rec.add(Mismatch{
-				Artifact: "txhash", Field: fmt.Sprintf("bin_entry %d", i),
+				Ledger: t.want[i].Seq, Artifact: "txhash", Field: fmt.Sprintf("bin_entry %d", i),
 				Expected: fmt.Sprintf("%x@%d", t.want[i].Key, t.want[i].Seq),
 				Actual:   fmt.Sprintf("%x@%d", t.bin[i].Key, t.bin[i].Seq),
 			})

@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 
 	"golang.org/x/sync/errgroup"
@@ -43,9 +44,11 @@ type Options struct {
 	// MaxMismatches caps the mismatches recorded per chunk; 0 means 50.
 	MaxMismatches int
 
-	// beforeOpen, when set, runs before a chunk's artifacts are opened. A
-	// test seam for racing the run against catalog changes.
+	// beforeOpen, when set, runs before a chunk's files are opened, and
+	// anchor, when set, replaces the history archive. Test seams for racing
+	// the run against catalog changes and for anchoring without a network.
 	beforeOpen func(chunk.ID)
+	anchor     headerAnchor
 }
 
 func (o Options) withDefaults() Options {
@@ -104,21 +107,25 @@ func Run(ctx context.Context, logger *supportlog.Entry, opts Options) (*Report, 
 	}
 	indexes := newIndexCache(cat.Layout())
 	defer func() { _ = indexes.closeAll() }()
-	d := &deps{opts: opts, cat: cat, indexes: indexes}
+	d := &deps{opts: opts, cat: cat, indexes: indexes, archive: opts.anchor}
 	if opts.ArchiveURL != "" {
-		d.archive, err = historyarchive.Connect(opts.ArchiveURL, historyarchive.ArchiveOptions{
+		archive, err := historyarchive.Connect(opts.ArchiveURL, historyarchive.ArchiveOptions{
 			NetworkPassphrase: opts.Passphrase,
 			ConnectOptions:    storage.ConnectOptions{Context: ctx, UserAgent: "stellar-rpc-verify-cold"},
 		})
 		if err != nil {
 			return nil, fmt.Errorf("connect history archive: %w", err)
 		}
+		d.archive = archive
 	}
 
 	logger.Infof("verifying %d chunks with %d workers", len(targets), opts.Workers)
 	results := runChunks(ctx, logger, d, targets, opts.Workers)
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if !slices.ContainsFunc(results, func(r ChunkResult) bool { return r.Skipped == "" }) {
+		return nil, errors.New("verify: no chunk in range has a frozen ledgers pack to verify against")
 	}
 	return &Report{Chunks: results, Indexes: checkIndexes(indexes, results)}, nil
 }

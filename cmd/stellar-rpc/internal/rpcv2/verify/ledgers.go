@@ -10,10 +10,11 @@ import (
 
 // checkLedger runs the source checks on one decoded ledger: the header names
 // the slot, hashes to the hash stored beside it, chains to the previous
-// ledger, and commits to the stored envelopes and results. prevHash is nil
-// when the previous ledger is not at hand. It reports whether every check
-// passed.
-func checkLedger(rec *recorder, seq uint32, lcm *xdr.LedgerCloseMeta, prevHash *xdr.Hash) bool {
+// ledger, carries as many envelopes as results, and commits to the stored
+// envelopes and results. prevHash is nil when the previous ledger's hash is
+// not at hand. It returns the hash computed over this header, for the next
+// ledger's chain check, and whether every check passed.
+func checkLedger(rec *recorder, seq uint32, lcm *xdr.LedgerCloseMeta, prevHash *xdr.Hash) (xdr.Hash, bool) {
 	ok := true
 	fail := func(field, expected, actual string) {
 		ok = false
@@ -25,14 +26,20 @@ func checkLedger(rec *recorder, seq uint32, lcm *xdr.LedgerCloseMeta, prevHash *
 	if got := uint32(hdr.LedgerSeq); got != seq {
 		fail("ledger_seq", u32(seq), u32(got))
 	}
-	switch h, err := xdr.HashXdr(hdr); {
+	computed, err := xdr.HashXdr(hdr)
+	switch {
 	case err != nil:
 		fail("header_hash", "", err.Error())
-	case h != entry.Hash:
-		fail("header_hash", hexHash(h), hexHash(entry.Hash))
+	case computed != entry.Hash:
+		fail("header_hash", hexHash(computed), hexHash(entry.Hash))
 	}
 	if prevHash != nil && hdr.PreviousLedgerHash != *prevHash {
 		fail("previous_ledger_hash", hexHash(*prevHash), hexHash(hdr.PreviousLedgerHash))
+	}
+	// The decode path pairs envelope i with result i; a set of one size and
+	// results of another would index past the shorter one.
+	if envs, results := len(lcm.TransactionEnvelopes()), lcm.CountTransactions(); envs != results {
+		fail("tx_count", fmt.Sprintf("%d envelopes for %d results", results, results), fmt.Sprintf("%d envelopes", envs))
 	}
 	switch h, err := txSetHash(lcm); {
 	case err != nil:
@@ -46,7 +53,7 @@ func checkLedger(rec *recorder, seq uint32, lcm *xdr.LedgerCloseMeta, prevHash *
 	case h != hdr.TxSetResultHash:
 		fail("tx_set_result_hash", hexHash(h), hexHash(hdr.TxSetResultHash))
 	}
-	return ok
+	return computed, ok
 }
 
 // txSetHash recomputes the hash the header commits the transaction set

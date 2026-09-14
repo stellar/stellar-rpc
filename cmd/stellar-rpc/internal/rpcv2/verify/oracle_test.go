@@ -285,6 +285,20 @@ func TestCheckLedger(t *testing.T) {
 		lcm.V2.TxProcessing[0].TxApplyProcessing.V4.Operations[0].Events = nil
 		assert.Empty(t, check(&lcm, &prevHash))
 	})
+	t.Run("an envelope without a result, resealed", func(t *testing.T) {
+		lcm := cloneLCM(t, &base)
+		withExtraEnvelope(&lcm)
+		sealLedger(t, &lcm)
+		assert.Equal(t, map[string]int{"ledgers/tx_count": 1}, check(&lcm, &prevHash))
+	})
+	t.Run("returns the computed hash even when the stored one is wrong", func(t *testing.T) {
+		lcm := cloneLCM(t, &base)
+		withCorruptStoredHash(&lcm)
+		rec := &recorder{limit: 10}
+		got, ok := checkLedger(rec, 501, &lcm, &prevHash)
+		assert.False(t, ok)
+		assert.Equal(t, base.V2.LedgerHeader.Hash, got, "the hash the untouched header really has")
+	})
 }
 
 // TestRealLedger runs the source checks and the oracle on a real pubnet
@@ -297,7 +311,8 @@ func TestRealLedger(t *testing.T) {
 	require.NoError(t, xdr.SafeUnmarshal(raw, &lcm))
 
 	rec := &recorder{limit: 10}
-	require.True(t, checkLedger(rec, lcm.LedgerSequence(), &lcm, nil), "%+v", rec.out)
+	_, ok := checkLedger(rec, lcm.LedgerSequence(), &lcm, nil)
+	require.True(t, ok, "%+v", rec.out)
 
 	exp, err := expectLedger(network.PublicNetworkPassphrase, &lcm)
 	require.NoError(t, err)

@@ -2,9 +2,11 @@ package verify
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"iter"
 	"os"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -18,6 +20,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 )
 
 // richEvery is how often a fixture chunk carries a rich ledger; the rest
@@ -42,18 +45,47 @@ func chunkLedgersWith(
 	t *testing.T, c chunk.ID, prev xdr.Hash, every uint32, rich func(seq uint32) []txSpec,
 ) ([][]byte, xdr.Hash) {
 	t.Helper()
+	return chunkLedgersMutated(t, c, prev, every, rich, nil)
+}
+
+// chunkLedgersMutated is chunkLedgersWith with a per-ledger mutation of the
+// sealed ledger (see buildLedger); mutate returns nil for ledgers to leave
+// alone.
+func chunkLedgersMutated(
+	t *testing.T, c chunk.ID, prev xdr.Hash, every uint32, rich func(seq uint32) []txSpec,
+	mutate func(seq uint32) func(*xdr.LedgerCloseMeta) bool,
+) ([][]byte, xdr.Hash) {
+	t.Helper()
 	ch := newChain(t, c.FirstLedger(), prev)
 	out := make([][]byte, 0, chunk.LedgersPerChunk)
 	for seq := c.FirstLedger(); seq <= c.LastLedger(); seq++ {
-		var lcm xdr.LedgerCloseMeta
+		var txs []txSpec
 		if every > 0 && seq%every == 0 {
-			lcm = ch.next(rich(seq)...)
-		} else {
-			lcm = ch.next()
+			txs = rich(seq)
 		}
+		var m func(*xdr.LedgerCloseMeta) bool
+		if mutate != nil {
+			m = mutate(seq)
+		}
+		lcm := ch.nextMutated(m, txs...)
 		out = append(out, marshalLCM(t, &lcm))
 	}
 	return out, ch.prev
+}
+
+// richAt returns richTxs for every rich ledger.
+func richAt(t *testing.T) func(uint32) []txSpec {
+	return func(uint32) []txSpec { return richTxs(t, "") }
+}
+
+// only applies m to ledger seq alone.
+func only(seq uint32, m func(*xdr.LedgerCloseMeta) bool) func(uint32) func(*xdr.LedgerCloseMeta) bool {
+	return func(s uint32) func(*xdr.LedgerCloseMeta) bool {
+		if s == seq {
+			return m
+		}
+		return nil
+	}
 }
 
 type fixtureTree struct {
@@ -385,6 +417,186 @@ func TestRun_MetaLostAnEvent(t *testing.T) {
 	assert.Equal(t, uint32(damaged), c.Mismatches[0].Ledger)
 	assert.Equal(t, 3*richPerChunk, c.Invokes)
 	assert.True(t, report.Failed())
+}
+
+// TestRun_EnvelopeWithoutResult: a resealed ledger with one more envelope
+// than results passes both set hashes and would send the decode path past
+// the end of the results. It is a source verdict, and the chunk finishes.
+func TestRun_EnvelopeWithoutResult(t *testing.T) {
+	f := newFixtureTree(t)
+	const bad = 3 * richEvery
+	ledgers, _ := chunkLedgersMutated(t, 0, xdr.Hash{}, richEvery, richAt(t), only(bad, withExtraEnvelope))
+	f.backfillChunk0(t, ledgers)
+
+	report := f.run(t, -1)
+	c := report.Chunks[0]
+	require.NoError(t, c.Err)
+	assert.Equal(t, map[string]int{"ledgers/tx_count": 1}, fieldsOf(c.Mismatches))
+	assert.Equal(t, uint32(bad), c.Mismatches[0].Ledger)
+	assert.Equal(t, chunk.LedgersPerChunk, c.Ledgers, "every ledger still got its source checks")
+}
+
+// TestRun_CorruptStoredHashBlamesOneLedger: only the hash stored beside a
+// header is wrong. That ledger fails its header check, and the next ledger,
+// which chains to the real hash, passes.
+func TestRun_CorruptStoredHashBlamesOneLedger(t *testing.T) {
+	f := newFixtureTree(t)
+	const bad = 2*richEvery + 1
+	ledgers, _ := chunkLedgersMutated(t, 0, xdr.Hash{}, richEvery, richAt(t), only(bad, withCorruptStoredHash))
+	f.backfillChunk0(t, ledgers)
+
+	report := f.run(t, -1)
+	c := report.Chunks[0]
+	require.NoError(t, c.Err)
+	assert.Equal(t, map[string]int{"ledgers/header_hash": 1}, fieldsOf(c.Mismatches))
+	assert.Equal(t, uint32(bad), c.Mismatches[0].Ledger)
+}
+
+// TestRun_UndecodableLedgerBlamesOneLedger: bytes that are not a ledger
+// fail to decode, and the next ledger is not blamed for chaining to nothing.
+func TestRun_UndecodableLedgerBlamesOneLedger(t *testing.T) {
+	f := newFixtureTree(t)
+	ledgers, _ := chunkLedgers(t, 0, xdr.Hash{}, "", richEvery)
+	f.backfillChunk0(t, ledgers)
+	// The backfill refuses such bytes, so the pack is rewritten with them.
+	const bad = 4 * richEvery
+	garbled := slices.Clone(ledgers)
+	garbled[bad-chunk.ID(0).FirstLedger()] = []byte("not a ledger")
+	rpcv2test.WriteFrozenLedgerPack(t, f.cat, 0, garbled...)
+
+	report := f.run(t, -1)
+	c := report.Chunks[0]
+	require.NoError(t, c.Err)
+	assert.Equal(t, map[string]int{"ledgers/decode": 1}, fieldsOf(c.Mismatches))
+	assert.Equal(t, uint32(bad), c.Mismatches[0].Ledger)
+	assert.Positive(t, c.Events, "ledgers before the bad one were still compared")
+}
+
+// TestRun_MalformedArtifactsAreVerdicts: an events segment and a .bin that
+// exist but are not what the writers produce are findings about those
+// files, and the chunk's other artifacts are still checked.
+func TestRun_MalformedArtifactsAreVerdicts(t *testing.T) {
+	f := newFixtureTree(t)
+	ledgers, _ := chunkLedgers(t, 0, xdr.Hash{}, "", richEvery)
+	f.backfillChunk0(t, ledgers)
+	garbage := []byte("not a packfile, not a bin, nothing at all")
+	require.NoError(t, os.WriteFile(f.layout.EventsPaths(0)[0], garbage, 0o600))
+	require.NoError(t, f.cat.DemoteChunkArtifacts(nil)) // keep the catalog handle honest
+	// The .bin key stays frozen while the index also covers the chunk, so
+	// both tx-hash checks run; only the .bin is damaged.
+	require.NoError(t, os.WriteFile(f.layout.TxHashBinPath(0), garbage, 0o600))
+
+	report := f.run(t, -1)
+	c := report.Chunks[0]
+	require.NoError(t, c.Err, "malformed files are verdicts, not the run's failure")
+	fields := fieldsOf(c.Mismatches)
+	assert.Equal(t, 1, fields["events/open"])
+	assert.Equal(t, 1, fields["txhash/bin"])
+	assert.Len(t, fields, 2)
+	assert.True(t, c.IndexChecked, "the index was still checked")
+	assert.Equal(t, 7*richPerChunk, c.TxHashes)
+	assert.True(t, report.Failed())
+}
+
+// fakeAnchor serves one header hash for one ledger, or an error.
+type fakeAnchor struct {
+	seq  uint32
+	hash xdr.Hash
+	err  error
+}
+
+func (a fakeAnchor) GetLedgerHeader(seq uint32) (xdr.LedgerHeaderHistoryEntry, error) {
+	if a.err != nil {
+		return xdr.LedgerHeaderHistoryEntry{}, a.err
+	}
+	if seq != a.seq {
+		return xdr.LedgerHeaderHistoryEntry{}, fmt.Errorf("no header for %d", seq)
+	}
+	return xdr.LedgerHeaderHistoryEntry{Hash: a.hash}, nil
+}
+
+// TestRun_ArchiveAnchor: the chunk's last header is compared with the
+// network's; an agreeing archive passes and a disagreeing one is a verdict
+// on that ledger, with the rest of the chunk still checked.
+func TestRun_ArchiveAnchor(t *testing.T) {
+	f := newFixtureTree(t)
+	ledgers, last := chunkLedgers(t, 0, xdr.Hash{}, "", richEvery)
+	f.backfillChunk0(t, ledgers)
+	require.NoError(t, f.cat.Close())
+	run := func(anchor headerAnchor) ChunkResult {
+		report, err := Run(context.Background(), rpcv2test.SilentLogger(), Options{
+			Layout: f.layout, Passphrase: passphrase, StartChunk: -1, EndChunk: -1, anchor: anchor,
+		})
+		require.NoError(t, err)
+		return report.Chunks[0]
+	}
+	lastSeq := chunk.ID(0).LastLedger()
+
+	c := run(fakeAnchor{seq: lastSeq, hash: last})
+	require.NoError(t, c.Err)
+	assert.Empty(t, c.Mismatches)
+
+	c = run(fakeAnchor{seq: lastSeq, hash: xdr.Hash{0xee}})
+	require.NoError(t, c.Err)
+	assert.Equal(t, map[string]int{"ledgers/archive_anchor": 1}, fieldsOf(c.Mismatches))
+	assert.Equal(t, lastSeq, c.Mismatches[0].Ledger)
+	assert.Equal(t, 9*richPerChunk, c.Events, "the walk still ran")
+}
+
+// TestRun_PackSpanIsChecked: a pack that starts before the chunk's first
+// ledger is reported for its span, not walked with the surplus skipped.
+func TestRun_PackSpanIsChecked(t *testing.T) {
+	f := newFixtureTree(t)
+	ledgers, _ := chunkLedgers(t, 0, xdr.Hash{}, "", 0)
+	f.backfillChunk0(t, ledgers)
+	path := f.layout.LedgerPackPath(0)
+	w, err := ledger.NewColdWriter(path, chunk.ID(0).FirstLedger()-1, ledger.ColdWriterOptions{})
+	require.NoError(t, err)
+	require.NoError(t, w.AppendLedger(chunk.ID(0).FirstLedger()-1, ledgers[0]))
+	for i, raw := range ledgers[:len(ledgers)-1] {
+		require.NoError(t, w.AppendLedger(chunk.ID(0).FirstLedger()+uint32(i), raw))
+	}
+	require.NoError(t, w.Commit())
+	require.NoError(t, w.Close())
+
+	report := f.run(t, -1)
+	c := report.Chunks[0]
+	require.NoError(t, c.Err)
+	assert.Equal(t, map[string]int{"ledgers/span": 1}, fieldsOf(c.Mismatches))
+}
+
+// TestRun_UnreachableArchiveStillWalks: an archive that cannot be reached is
+// the chunk's error, and every other check still runs.
+func TestRun_UnreachableArchiveStillWalks(t *testing.T) {
+	f := newFixtureTree(t)
+	ledgers, _ := chunkLedgers(t, 0, xdr.Hash{}, "", richEvery)
+	f.backfillChunk0(t, ledgers)
+	require.NoError(t, f.cat.Close())
+
+	report, err := Run(context.Background(), rpcv2test.SilentLogger(), Options{
+		Layout: f.layout, Passphrase: passphrase, StartChunk: -1, EndChunk: -1,
+		ArchiveURL: "http://127.0.0.1:1/",
+	})
+	require.NoError(t, err)
+	c := report.Chunks[0]
+	require.ErrorContains(t, c.Err, "history archive")
+	assert.Empty(t, c.Mismatches)
+	assert.Equal(t, chunk.LedgersPerChunk, c.Ledgers)
+	assert.Equal(t, 9*richPerChunk, c.Events)
+	assert.True(t, report.Failed())
+}
+
+// TestRun_NothingToVerifyIsAnError: a range whose chunks have no frozen
+// ledgers pack cannot be verified against anything and must not exit green.
+func TestRun_NothingToVerifyIsAnError(t *testing.T) {
+	f := newFixtureTree(t)
+	require.NoError(t, f.cat.MarkChunkFreezing(0, geometry.KindEvents))
+	require.NoError(t, f.cat.FlipChunkFrozen(0, geometry.KindEvents))
+	require.NoError(t, f.cat.Close())
+	_, err := Run(context.Background(), rpcv2test.SilentLogger(), Options{
+		Layout: f.layout, Passphrase: passphrase, StartChunk: -1, EndChunk: -1,
+	})
+	require.ErrorContains(t, err, "no chunk in range has a frozen ledgers pack")
 }
 
 func TestRun_IndexMissingHashes(t *testing.T) {

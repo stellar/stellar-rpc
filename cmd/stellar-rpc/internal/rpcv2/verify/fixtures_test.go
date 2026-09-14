@@ -246,8 +246,13 @@ func richTxs(t *testing.T, tag string) []txSpec {
 const fixtureProtocol = 25
 
 // buildLedger returns a V2 ledger for seq, closed under protocol, whose header
-// commits to its transactions and chains to prev.
-func buildLedger(t *testing.T, seq uint32, prev xdr.Hash, protocol uint32, txs []txSpec) xdr.LedgerCloseMeta {
+// commits to its transactions and chains to prev. mutate, when set, edits the
+// sealed ledger; it reports whether the ledger must be sealed again, so a
+// test can produce either a consistently resealed ledger or one whose
+// commitments no longer hold.
+func buildLedger(
+	t *testing.T, seq uint32, prev xdr.Hash, protocol uint32, txs []txSpec, mutate func(*xdr.LedgerCloseMeta) bool,
+) xdr.LedgerCloseMeta {
 	t.Helper()
 	envelopes := make([]xdr.TransactionEnvelope, 0, len(txs))
 	processing := make([]xdr.TransactionResultMetaV1, 0, len(txs))
@@ -267,6 +272,9 @@ func buildLedger(t *testing.T, seq uint32, prev xdr.Hash, protocol uint32, txs [
 	lcm.V2.LedgerHeader.Header.PreviousLedgerHash = prev
 	lcm.V2.LedgerHeader.Header.LedgerVersion = xdr.Uint32(protocol)
 	sealLedger(t, &lcm)
+	if mutate != nil && mutate(&lcm) {
+		sealLedger(t, &lcm)
+	}
 	return lcm
 }
 
@@ -319,10 +327,36 @@ func newChain(t *testing.T, first uint32, prev xdr.Hash) *chain {
 }
 
 func (c *chain) next(txs ...txSpec) xdr.LedgerCloseMeta {
-	lcm := buildLedger(c.t, c.seq, c.prev, c.protocol, txs)
-	c.prev = lcm.V2.LedgerHeader.Hash
+	return c.nextMutated(nil, txs...)
+}
+
+// nextMutated is next with a mutation applied to the sealed ledger. The
+// chain continues from the hash computed over the header, as the network
+// does, whatever the mutation left in the stored hash field.
+func (c *chain) nextMutated(mutate func(*xdr.LedgerCloseMeta) bool, txs ...txSpec) xdr.LedgerCloseMeta {
+	lcm := buildLedger(c.t, c.seq, c.prev, c.protocol, txs, mutate)
+	entry := lcm.LedgerHeaderHistoryEntry()
+	h, err := xdr.HashXdr(&entry.Header)
+	require.NoError(c.t, err)
+	c.prev = h
 	c.seq++
 	return lcm
+}
+
+// withExtraEnvelope adds a second copy of the first envelope to the
+// transaction set with no result to pair it with, and reseals.
+func withExtraEnvelope(lcm *xdr.LedgerCloseMeta) bool {
+	comp := *lcm.V2.TxSet.V1TxSet.Phases[0].V0Components
+	txs := &comp[0].TxsMaybeDiscountedFee.Txs
+	*txs = append(*txs, (*txs)[0])
+	return true
+}
+
+// withCorruptStoredHash flips a byte of the hash stored beside the header
+// and leaves the header itself, and so its real hash, alone.
+func withCorruptStoredHash(lcm *xdr.LedgerCloseMeta) bool {
+	lcm.V2.LedgerHeader.Hash[0] ^= 0xff
+	return false
 }
 
 // sqliteEventRow is one event as the v1 SQLite backend serves it.
