@@ -27,13 +27,6 @@ func (m *MockLedgerReader) GetLedger(ctx context.Context, sequence uint32) (xdr.
 	return args.Get(0).(xdr.LedgerCloseMeta), args.Bool(1), args.Error(2) //nolint:forcetypeassert
 }
 
-func (m *MockLedgerReader) WithLedgerRaw(
-	ctx context.Context, sequence uint32, fn store.WithLedgerRawFn,
-) (bool, error) {
-	args := m.Called(ctx, sequence, fn)
-	return args.Bool(0), args.Error(1)
-}
-
 func (m *MockLedgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRange, error) {
 	args := m.Called(ctx)
 	return args.Get(0).(store.LedgerRange), args.Error(1) //nolint:forcetypeassert
@@ -71,11 +64,9 @@ func (m *MockLedgerReaderTx) BatchGetLedgers(ctx context.Context, start, end uin
 	return args.Get(0).([]store.LedgerMetadataChunk), args.Error(1) //nolint:forcetypeassert
 }
 
-func (m *MockLedgerReaderTx) WithLedgerRaw(
-	ctx context.Context, sequence uint32, fn store.WithLedgerRawFn,
-) (bool, error) {
-	args := m.Called(ctx, sequence, fn)
-	return args.Bool(0), args.Error(1)
+func (m *MockLedgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
+	args := m.Called(ctx, sequence)
+	return args.Get(0).(xdr.LedgerCloseMeta), args.Bool(1), args.Error(2) //nolint:forcetypeassert
 }
 
 func (m *MockLedgerReaderTx) Done() error {

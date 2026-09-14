@@ -2,6 +2,7 @@ package methods
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
+//nolint:funlen
 func GetTransaction(
 	ctx context.Context,
 	log *log.Entry,
@@ -61,12 +63,15 @@ func GetTransaction(
 		LatestLedgerCloseTime: storeRange.LastLedger.CloseTime,
 		OldestLedger:          storeRange.FirstLedger.Sequence,
 		OldestLedgerCloseTime: storeRange.FirstLedger.CloseTime,
+		TransactionDetails: protocol.TransactionDetails{
+			TransactionHash: request.Hash,
+		},
 	}
 
-	switch {
-	case errors.Is(getTxErr, store.ErrNoTransaction):
+	if errors.Is(getTxErr, store.ErrNoTransaction) {
 		response.Status = protocol.TransactionStatusNotFound
-	case getTxErr != nil:
+		return response, nil
+	} else if getTxErr != nil {
 		log.WithError(getTxErr).
 			WithField("hash", txHash).
 			Errorf("failed to fetch transaction")
@@ -74,18 +79,54 @@ func GetTransaction(
 			Code:    jrpc2.InternalError,
 			Message: getTxErr.Error(),
 		}
-	default:
-		txInfo, ferr := transactionInfo(tx, request.Format)
-		if ferr != nil {
+	}
+
+	response.ApplicationOrder = tx.ApplicationOrder
+	response.FeeBump = tx.FeeBump
+	response.Ledger = tx.Ledger.Sequence
+	response.LedgerCloseTime = tx.Ledger.CloseTime
+
+	switch request.Format {
+	case protocol.FormatJSON:
+		result, envelope, meta, convErr := transactionToJSON(tx)
+		if convErr != nil {
 			return response, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
-				Message: ferr.Error(),
+				Message: convErr.Error(),
 			}
 		}
-		response.TransactionDetails = txInfo.TransactionDetails
-		response.LedgerCloseTime = txInfo.LedgerCloseTime
+		diagEvents, convErr := jsonifySlice(xdr.DiagnosticEvent{}, tx.Events)
+		if convErr != nil {
+			return response, &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: convErr.Error(),
+			}
+		}
+
+		response.ResultJSON = result
+		response.EnvelopeJSON = envelope
+		response.ResultMetaJSON = meta
+		response.DiagnosticEventsJSON = diagEvents
+
+		response.Events, convErr = BuildEventsJSONFromTransaction(tx)
+		if convErr != nil {
+			return response, &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: convErr.Error(),
+			}
+		}
+	default:
+		response.ResultXDR = base64.StdEncoding.EncodeToString(tx.Result)
+		response.EnvelopeXDR = base64.StdEncoding.EncodeToString(tx.Envelope)
+		response.ResultMetaXDR = base64.StdEncoding.EncodeToString(tx.Meta)
+		response.DiagnosticEventsXDR = base64EncodeSlice(tx.Events)
+		response.Events = BuildEventsXDRFromTransaction(tx)
 	}
-	response.TransactionHash = request.Hash
+
+	response.Status = protocol.TransactionStatusFailed
+	if tx.Successful {
+		response.Status = protocol.TransactionStatusSuccess
+	}
 	return response, nil
 }
 

@@ -17,6 +17,7 @@ type MockTransactionHandler struct {
 	passphrase string
 
 	ledgerRange     store.LedgerRange
+	txs             map[string]ingest.LedgerTransaction
 	txHashToMeta    map[string]*xdr.LedgerCloseMeta
 	ledgerSeqToMeta map[uint32]*xdr.LedgerCloseMeta
 }
@@ -24,6 +25,7 @@ type MockTransactionHandler struct {
 func NewMockTransactionStore(passphrase string) *MockTransactionHandler {
 	return &MockTransactionHandler{
 		passphrase:      passphrase,
+		txs:             make(map[string]ingest.LedgerTransaction),
 		txHashToMeta:    make(map[string]*xdr.LedgerCloseMeta),
 		ledgerSeqToMeta: make(map[uint32]*xdr.LedgerCloseMeta),
 	}
@@ -45,7 +47,9 @@ func (txn *MockTransactionHandler) InsertTransactions(lcm xdr.LedgerCloseMeta) e
 			return err
 		}
 
-		txn.txHashToMeta[tx.Result.TransactionHash.HexString()] = &lcm
+		h := tx.Result.TransactionHash.HexString()
+		txn.txs[h] = tx
+		txn.txHashToMeta[h] = &lcm
 	}
 
 	if lcmSeq := lcm.LedgerSequence(); lcmSeq < txn.ledgerRange.FirstLedger.Sequence ||
@@ -65,22 +69,12 @@ func (txn *MockTransactionHandler) InsertTransactions(lcm xdr.LedgerCloseMeta) e
 func (txn *MockTransactionHandler) GetTransaction(_ context.Context, hash xdr.Hash) (
 	store.Transaction, error,
 ) {
-	lcm, ok := txn.txHashToMeta[hash.HexString()]
+	tx, ok := txn.txs[hash.HexString()]
 	if !ok {
 		return store.Transaction{}, store.ErrNoTransaction
 	}
-	raw, err := lcm.MarshalBinary()
-	if err != nil {
-		return store.Transaction{}, err
-	}
-	txView, found, err := ingest.LedgerTransactionViewByHash(xdr.LedgerCloseMetaView(raw), hash, txn.passphrase)
-	if err != nil {
-		return store.Transaction{}, err
-	}
-	if !found {
-		return store.Transaction{}, store.ErrNoTransaction
-	}
-	return store.ParseTransactionView(txView), nil
+	itx, err := store.ParseTransaction(*txn.txHashToMeta[hash.HexString()], tx)
+	return itx, err
 }
 
 func (txn *MockTransactionHandler) RegisterMetrics(_, _ prometheus.Observer) {}
@@ -101,18 +95,6 @@ func (m *MockLedgerReader) GetLedger(_ context.Context, sequence uint32) (xdr.Le
 		return xdr.LedgerCloseMeta{}, false, nil
 	}
 	return *lcm, true, nil
-}
-
-func (m *MockLedgerReader) WithLedgerRaw(_ context.Context, sequence uint32, fn store.WithLedgerRawFn) (bool, error) {
-	lcm, ok := m.txn.ledgerSeqToMeta[sequence]
-	if !ok {
-		return false, nil
-	}
-	rawMeta, err := lcm.MarshalBinary()
-	if err != nil {
-		return false, err
-	}
-	return true, fn(rawMeta)
 }
 
 func (m *MockLedgerReader) StreamLedgerRange(_ context.Context, _ uint32, _ uint32, _ store.StreamLedgerFn) error {
