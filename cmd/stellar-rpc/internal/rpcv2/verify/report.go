@@ -33,6 +33,11 @@ type ChunkResult struct {
 	Txs      uint64
 	TxHashes uint64
 	Events   uint64
+	// Invokes is the number of successful Soroban invocations whose events
+	// were checked against the hash their result carries; InvokesUnchecked
+	// those the export gave no way to check.
+	Invokes          uint64
+	InvokesUnchecked uint64
 	// IndexChecked is set when every expected tx hash was resolved through
 	// the frozen tx-hash index covering the chunk.
 	IndexChecked bool
@@ -95,7 +100,7 @@ func (r *Report) Failed() bool {
 // Summary is the one-line outcome for the log.
 func (r *Report) Summary() string {
 	var ok, mismatched, errored, skipped int
-	var ledgers, txs, events uint64
+	var ledgers, txs, events, invokes, unchecked uint64
 	for _, c := range r.Chunks {
 		switch c.status() {
 		case statusOK:
@@ -110,6 +115,8 @@ func (r *Report) Summary() string {
 		ledgers += uint64(c.Ledgers)
 		txs += c.Txs
 		events += c.Events
+		invokes += c.Invokes
+		unchecked += c.InvokesUnchecked
 	}
 	var idxBad int
 	for _, ix := range r.Indexes {
@@ -119,8 +126,9 @@ func (r *Report) Summary() string {
 	}
 	return fmt.Sprintf(
 		"chunks: %d ok, %d with mismatches, %d errored, %d skipped; "+
-			"%d ledgers, %d transactions, %d events checked; %d tx-hash index checks failed",
-		ok, mismatched, errored, skipped, ledgers, txs, events, idxBad)
+			"%d ledgers, %d transactions, %d events, %d invocation hashes checked (%d not checkable); "+
+			"%d tx-hash index checks failed",
+		ok, mismatched, errored, skipped, ledgers, txs, events, invokes-unchecked, unchecked, idxBad)
 }
 
 // recorder collects one chunk's mismatches up to a cap; the overflow is

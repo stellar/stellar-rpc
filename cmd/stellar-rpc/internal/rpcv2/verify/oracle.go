@@ -26,11 +26,13 @@ type expectedEvent struct {
 	terms   []event.TermKey
 }
 
-// ledgerExpectation is one ledger's expected artifact content.
+// ledgerExpectation is one ledger's expected artifact content, plus the
+// network's own commitment to the Soroban events among them.
 type ledgerExpectation struct {
 	txs      uint64
 	txHashes []xdr.Hash
 	events   []expectedEvent
+	invokes  []invokeCheck
 }
 
 func expectLedger(passphrase string, lcm *xdr.LedgerCloseMeta) (ledgerExpectation, error) {
@@ -63,6 +65,7 @@ func expectLedger(passphrase string, lcm *xdr.LedgerCloseMeta) (ledgerExpectatio
 				return exp, fmt.Errorf("tx %s: %w", tx.Hash.HexString(), err)
 			}
 		}
+		exp.invokes = append(exp.invokes, invokeChecks(tx, events[i], lcm.ProtocolVersion())...)
 	}
 	exp.events, err = orderEvents(txs, events, lcm.LedgerSequence(), lcm.LedgerCloseTime())
 	return exp, err
@@ -213,4 +216,173 @@ func termsForEvent(ev *xdr.ContractEvent) ([]event.TermKey, error) {
 		keys = append(keys, event.TopicTermKey(i, raw))
 	}
 	return keys, nil
+}
+
+// protocol23 is the protocol at which two shapes of an invocation's meta
+// events begin. At exactly 23 core may prepend asset-contract reconciliation
+// events, which are not hashed, so the committed events are a suffix of the
+// operation's events. Below 23 a V4 meta marks an export that backfilled
+// asset-contract events: core rewrote such events in the operation meta after
+// hashing them, and kept the originals among the diagnostic events.
+const protocol23 = 23
+
+// invokeCheck is one successful InvokeHostFunction operation's check against
+// the network: the hash its result carries, sha256 over the return value and
+// the contract events the invocation emitted, against the same hash
+// recomputed from the events the oracle emits for the operation. reason is
+// set when the hash could not be recomputed at all; skipped is set when the
+// committed events cannot be recovered from the export, which is a limit of
+// the export rather than a verdict.
+type invokeCheck struct {
+	txHash  xdr.Hash
+	opIdx   int
+	want    xdr.Hash
+	got     xdr.Hash
+	reason  string
+	skipped string
+}
+
+func (c invokeCheck) ok() bool { return c.reason == "" && c.skipped == "" && c.got == c.want }
+
+// invokeChecks recomputes the success hash of every successful
+// InvokeHostFunction operation of a successful tx. The result set is
+// committed to by the ledger header, so a match means the events the oracle
+// emits, which the payload comparison holds the artifact byte-equal to, are
+// the events the network agreed on. The hash is taken over the oracle's
+// events rather than the meta's own arrays so that a divergence shared by
+// the decode path and the writers still fails here. A failed transaction
+// keeps no operation events in its meta, so its results are not checked.
+func invokeChecks(tx *ingest.LedgerTransaction, events ingest.TransactionEvents, protocol uint32) []invokeCheck {
+	if !tx.Result.Successful() {
+		return nil
+	}
+	results, ok := tx.Result.Result.OperationResults()
+	if !ok {
+		return nil
+	}
+	var out []invokeCheck
+	for i := range results {
+		want, ok := invokeSuccessHash(&results[i])
+		if !ok {
+			continue
+		}
+		c := invokeCheck{txHash: tx.Hash, opIdx: i, want: want}
+		switch rv, ok := returnValue(tx); {
+		case !ok:
+			c.reason = "return value missing from meta"
+		case i >= len(events.OperationEvents):
+			c.reason = "operation has no events in meta"
+		default:
+			c.got, c.skipped, c.reason = committedHash(rv, events, i, tx.UnsafeMeta.V, protocol, want)
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+func invokeSuccessHash(r *xdr.OperationResult) (xdr.Hash, bool) {
+	tr, ok := r.GetTr()
+	if !ok {
+		return xdr.Hash{}, false
+	}
+	res, ok := tr.GetInvokeHostFunctionResult()
+	if !ok {
+		return xdr.Hash{}, false
+	}
+	return res.GetSuccess()
+}
+
+func returnValue(tx *ingest.LedgerTransaction) (xdr.ScVal, bool) {
+	switch m := tx.UnsafeMeta; m.V {
+	case 3:
+		if m.V3 != nil && m.V3.SorobanMeta != nil {
+			return m.V3.SorobanMeta.ReturnValue, true
+		}
+	case 4:
+		if m.V4 != nil && m.V4.SorobanMeta != nil && m.V4.SorobanMeta.ReturnValue != nil {
+			return *m.V4.SorobanMeta.ReturnValue, true
+		}
+	}
+	return xdr.ScVal{}, false
+}
+
+// committedHash recomputes the hash operation i's result commits to. The
+// operation's events hash to it directly on a native export; at protocol 23
+// a leading run of reconciliation events is skipped; on a backfilled export
+// below protocol 23 the originals kept among the diagnostic events are
+// hashed instead, and the check is skipped when there are none.
+func committedHash(
+	rv xdr.ScVal, events ingest.TransactionEvents, i int, metaVersion int32, protocol uint32, want xdr.Hash,
+) (xdr.Hash, string, string) {
+	opEvents := events.OperationEvents[i]
+	full, err := hashPreimage(rv, opEvents)
+	switch {
+	case err != nil:
+		return xdr.Hash{}, "", err.Error()
+	case full == want:
+		return full, "", ""
+	case protocol == protocol23:
+		return hashAfterReconciliation(rv, opEvents, full, want)
+	case protocol < protocol23 && metaVersion == 4:
+		if len(events.DiagnosticEvents) == 0 {
+			return full, "backfilled export without the diagnostic events that hold the committed originals", ""
+		}
+		h, err := hashPreimage(rv, committedFromDiagnostics(events.DiagnosticEvents))
+		if err != nil {
+			return xdr.Hash{}, "", err.Error()
+		}
+		return h, "", ""
+	}
+	return full, "", ""
+}
+
+// hashAfterReconciliation hashes the preimage over each suffix of events
+// that skips a leading run of reconciliation events, until one matches
+// want. It returns the matching hash, or full when none does.
+func hashAfterReconciliation(rv xdr.ScVal, events []xdr.ContractEvent, full, want xdr.Hash) (xdr.Hash, string, string) {
+	for k := 1; k <= len(events) && isReconciliationEvent(&events[k-1]); k++ {
+		h, err := hashPreimage(rv, events[k:])
+		if err != nil {
+			return xdr.Hash{}, "", err.Error()
+		}
+		if h == want {
+			return h, "", ""
+		}
+	}
+	return full, "", ""
+}
+
+// isReconciliationEvent reports whether ev has the shape of the asset
+// contract mint or burn events core prepends to an invocation's events:
+// a contract event with three topics, the first the symbol mint or burn.
+func isReconciliationEvent(ev *xdr.ContractEvent) bool {
+	if ev.Type != xdr.ContractEventTypeContract || ev.Body.V != 0 || ev.Body.V0 == nil {
+		return false
+	}
+	topics := ev.Body.V0.Topics
+	if len(topics) != 3 || topics[0].Type != xdr.ScValTypeScvSymbol || topics[0].Sym == nil {
+		return false
+	}
+	switch *topics[0].Sym {
+	case "mint", "burn":
+		return true
+	}
+	return false
+}
+
+// committedFromDiagnostics returns, in emission order, the contract events
+// the diagnostic events record for calls that succeeded: the events core
+// hashed, before any backfill rewrite of the operation meta.
+func committedFromDiagnostics(diag []xdr.DiagnosticEvent) []xdr.ContractEvent {
+	var out []xdr.ContractEvent
+	for i := range diag {
+		if diag[i].InSuccessfulContractCall && diag[i].Event.Type != xdr.ContractEventTypeDiagnostic {
+			out = append(out, diag[i].Event)
+		}
+	}
+	return out
+}
+
+func hashPreimage(rv xdr.ScVal, events []xdr.ContractEvent) (xdr.Hash, error) {
+	return xdr.HashXdr(&xdr.InvokeHostFunctionSuccessPreImage{ReturnValue: rv, Events: events})
 }

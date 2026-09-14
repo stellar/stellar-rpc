@@ -72,12 +72,42 @@ func successResult() xdr.TransactionResultResult {
 	return xdr.TransactionResultResult{Code: xdr.TransactionResultCodeTxSuccess, Results: &ops}
 }
 
+// invokeOpResult is a successful InvokeHostFunction operation result whose
+// hash commits to rv and events, the way core computes it.
+func invokeOpResult(t *testing.T, rv xdr.ScVal, events []xdr.ContractEvent) xdr.OperationResult {
+	t.Helper()
+	h, err := xdr.HashXdr(&xdr.InvokeHostFunctionSuccessPreImage{ReturnValue: rv, Events: events})
+	require.NoError(t, err)
+	return xdr.OperationResult{Code: xdr.OperationResultCodeOpInner, Tr: &xdr.OperationResultTr{
+		Type: xdr.OperationTypeInvokeHostFunction,
+		InvokeHostFunctionResult: &xdr.InvokeHostFunctionResult{
+			Code: xdr.InvokeHostFunctionResultCodeInvokeHostFunctionSuccess, Success: &h,
+		},
+	}}
+}
+
+// invokeResult is a successful transaction result carrying one invokeOpResult.
+func invokeResult(t *testing.T, rv xdr.ScVal, events []xdr.ContractEvent) xdr.TransactionResultResult {
+	t.Helper()
+	ops := []xdr.OperationResult{invokeOpResult(t, rv, events)}
+	return xdr.TransactionResultResult{Code: xdr.TransactionResultCodeTxSuccess, Results: &ops}
+}
+
+func voidVal() xdr.ScVal { return xdr.ScVal{Type: xdr.ScValTypeScvVoid} }
+
+func u64Val(v uint64) xdr.ScVal {
+	u := xdr.Uint64(v)
+	return xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &u}
+}
+
 func internalErrorResult() xdr.TransactionResultResult {
 	return xdr.TransactionResultResult{Code: xdr.TransactionResultCodeTxInternalError}
 }
 
-func feeBumpResult(innerHash xdr.Hash) xdr.TransactionResultResult {
-	ops := []xdr.OperationResult{}
+func feeBumpResult(innerHash xdr.Hash, ops ...xdr.OperationResult) xdr.TransactionResultResult {
+	if ops == nil {
+		ops = []xdr.OperationResult{}
+	}
 	return xdr.TransactionResultResult{
 		Code: xdr.TransactionResultCodeTxFeeBumpInnerSuccess,
 		InnerResultPair: &xdr.InnerTransactionResultPair{
@@ -97,9 +127,19 @@ func metaV4(ops [][]xdr.ContractEvent, staged []xdr.TransactionEvent, diag []xdr
 	return xdr.TransactionMeta{V: 4, V4: v4}
 }
 
-func metaV3(evs []xdr.ContractEvent) xdr.TransactionMeta {
+// metaV4Soroban is metaV4 with the Soroban return value a successful
+// invocation leaves in the meta.
+func metaV4Soroban(
+	rv xdr.ScVal, ops [][]xdr.ContractEvent, staged []xdr.TransactionEvent, diag []xdr.DiagnosticEvent,
+) xdr.TransactionMeta {
+	m := metaV4(ops, staged, diag)
+	m.V4.SorobanMeta = &xdr.SorobanTransactionMetaV2{ReturnValue: &rv}
+	return m
+}
+
+func metaV3(rv xdr.ScVal, evs []xdr.ContractEvent) xdr.TransactionMeta {
 	return xdr.TransactionMeta{V: 3, V3: &xdr.TransactionMetaV3{SorobanMeta: &xdr.SorobanTransactionMeta{
-		Events: evs, ReturnValue: xdr.ScVal{Type: xdr.ScValTypeScvVoid},
+		Events: evs, ReturnValue: rv,
 	}}}
 }
 
@@ -121,6 +161,25 @@ func symEvent(cid byte, data string, topics ...string) xdr.ContractEvent {
 	return rpcv2test.SymbolContractEvent(id, data, topics...)
 }
 
+// reconciliationEvent is the asset-contract mint or burn event core prepends
+// to an invocation's events from protocol 23.
+func reconciliationEvent(kind string) xdr.ContractEvent {
+	return symEvent(6, "1000", kind, "GADDRESS", "USDC:GISSUER")
+}
+
+// diagnostic wraps ev the way an export with diagnostics on records it.
+func diagnostic(ev xdr.ContractEvent, inSuccessfulCall bool) xdr.DiagnosticEvent {
+	return xdr.DiagnosticEvent{InSuccessfulContractCall: inSuccessfulCall, Event: ev}
+}
+
+// fnCallDiagnostic is the host's own diagnostic-type event, never hashed.
+func fnCallDiagnostic() xdr.DiagnosticEvent {
+	ev := symEvent(0, "fn_call", "fn_call")
+	ev.ContractId = nil
+	ev.Type = xdr.ContractEventTypeDiagnostic
+	return diagnostic(ev, true)
+}
+
 // systemEvent has no contract ID, so the contract-ID term is absent.
 func systemEvent(data string, topics ...string) xdr.ContractEvent {
 	ev := symEvent(0, data, topics...)
@@ -130,10 +189,12 @@ func systemEvent(data string, topics ...string) xdr.ContractEvent {
 }
 
 // richTxs covers the shapes the extractors branch on: a classic V4
-// transaction with staged fee events, a Soroban V4 transaction with an event
-// past the topic cap and a system event, a V3 Soroban transaction, a V3
-// Soroban transaction charged but never executed, a fee bump, and a
-// pre-Soroban V2 meta. tag varies the event contents between builds.
+// transaction with staged fee events, a successful Soroban V4 invocation with
+// an event past the topic cap and a system event, a successful V3 invocation,
+// a V3 Soroban transaction charged but never executed, a fee bump over a
+// successful invocation, and a pre-Soroban V2 meta. Every successful
+// invocation's result carries the hash core would compute over its events.
+// tag varies the event contents between builds.
 func richTxs(t *testing.T, tag string) []txSpec {
 	t.Helper()
 	inner := sorobanEnvelope()
@@ -141,6 +202,12 @@ func richTxs(t *testing.T, tag string) []txSpec {
 	before := xdr.TransactionEventStageTransactionEventStageBeforeAllTxs
 	afterTx := xdr.TransactionEventStageTransactionEventStageAfterTx
 	afterAll := xdr.TransactionEventStageTransactionEventStageAfterAllTxs
+	v4Events := []xdr.ContractEvent{
+		symEvent(3, "wide"+tag, "t0", "t1", "t2", "t3", "t4"),
+		systemEvent("sys"+tag, "topic"),
+	}
+	v3Events := []xdr.ContractEvent{symEvent(4, "v3"+tag, "old")}
+	bumpedEvents := []xdr.ContractEvent{symEvent(5, "bumped"+tag, "b")}
 	return []txSpec{
 		{env: classicEnvelope(), result: successResult(), meta: metaV4(
 			[][]xdr.ContractEvent{{symEvent(1, "transfer"+tag, "transfer", "a", "b")}},
@@ -149,24 +216,27 @@ func richTxs(t *testing.T, tag string) []txSpec {
 				staged(afterTx, symEvent(2, "refund"+tag, "fee_refund")),
 				staged(afterAll, symEvent(2, "after"+tag, "after_all")),
 			}, nil)},
-		{env: sorobanEnvelope(), result: successResult(), meta: metaV4(
-			[][]xdr.ContractEvent{{
-				symEvent(3, "wide"+tag, "t0", "t1", "t2", "t3", "t4"),
-				systemEvent("sys"+tag, "topic"),
-			}, {}},
+		{env: sorobanEnvelope(), result: invokeResult(t, u64Val(7), v4Events), meta: metaV4Soroban(u64Val(7),
+			[][]xdr.ContractEvent{v4Events},
 			[]xdr.TransactionEvent{staged(afterTx, symEvent(3, "refund2"+tag, "fee_refund"))},
 			[]xdr.DiagnosticEvent{{InSuccessfulContractCall: true, Event: symEvent(3, "diag"+tag, "d")}})},
-		{env: sorobanEnvelope(), result: successResult(), meta: metaV3([]xdr.ContractEvent{symEvent(4, "v3"+tag, "old")})},
+		{env: sorobanEnvelope(), result: invokeResult(t, voidVal(), v3Events), meta: metaV3(voidVal(), v3Events)},
 		{env: sorobanEnvelope(), result: internalErrorResult(), meta: metaV3Absent()},
-		{env: feeBumpEnvelope(inner), result: feeBumpResult(innerHash), meta: metaV4(
-			[][]xdr.ContractEvent{{symEvent(5, "bumped"+tag, "b")}}, nil, nil)},
+		{
+			env: feeBumpEnvelope(inner), result: feeBumpResult(innerHash, invokeOpResult(t, voidVal(), bumpedEvents)),
+			meta: metaV4Soroban(voidVal(), [][]xdr.ContractEvent{bumpedEvents}, nil, nil),
+		},
 		{env: classicEnvelope(), result: successResult(), meta: metaV2()},
 	}
 }
 
-// buildLedger returns a V2 ledger for seq whose header commits to its
-// transactions and chains to prev.
-func buildLedger(t *testing.T, seq uint32, prev xdr.Hash, txs []txSpec) xdr.LedgerCloseMeta {
+// fixtureProtocol is the protocol version fixture ledgers close under: a
+// current one, past the shapes protocol 23 and backfilled exports add.
+const fixtureProtocol = 25
+
+// buildLedger returns a V2 ledger for seq, closed under protocol, whose header
+// commits to its transactions and chains to prev.
+func buildLedger(t *testing.T, seq uint32, prev xdr.Hash, protocol uint32, txs []txSpec) xdr.LedgerCloseMeta {
 	t.Helper()
 	envelopes := make([]xdr.TransactionEnvelope, 0, len(txs))
 	processing := make([]xdr.TransactionResultMetaV1, 0, len(txs))
@@ -184,6 +254,7 @@ func buildLedger(t *testing.T, seq uint32, prev xdr.Hash, txs []txSpec) xdr.Ledg
 	var lcm xdr.LedgerCloseMeta
 	require.NoError(t, xdr.SafeUnmarshal(raw, &lcm))
 	lcm.V2.LedgerHeader.Header.PreviousLedgerHash = prev
+	lcm.V2.LedgerHeader.Header.LedgerVersion = xdr.Uint32(protocol)
 	sealLedger(t, &lcm)
 	return lcm
 }
@@ -226,17 +297,18 @@ func cloneLCM(t *testing.T, lcm *xdr.LedgerCloseMeta) xdr.LedgerCloseMeta {
 
 // chain builds consecutive sealed ledgers, each chained to the last.
 type chain struct {
-	t    *testing.T
-	seq  uint32
-	prev xdr.Hash
+	t        *testing.T
+	seq      uint32
+	prev     xdr.Hash
+	protocol uint32
 }
 
 func newChain(t *testing.T, first uint32, prev xdr.Hash) *chain {
-	return &chain{t: t, seq: first, prev: prev}
+	return &chain{t: t, seq: first, prev: prev, protocol: fixtureProtocol}
 }
 
 func (c *chain) next(txs ...txSpec) xdr.LedgerCloseMeta {
-	lcm := buildLedger(c.t, c.seq, c.prev, txs)
+	lcm := buildLedger(c.t, c.seq, c.prev, c.protocol, txs)
 	c.prev = lcm.V2.LedgerHeader.Hash
 	c.seq++
 	return lcm

@@ -79,6 +79,155 @@ func TestOracle_CountsTxsAndInnerHashes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(6), exp.txs)
 	assert.Len(t, exp.txHashes, 7, "six transactions plus the fee bump's inner hash")
+	require.Len(t, exp.invokes, 3, "the V4, V3 and fee-bumped invocations")
+	for _, c := range exp.invokes {
+		assert.True(t, c.ok(), "%+v", c)
+	}
+}
+
+// TestInvokeChecks pins the preimage rule: the result's hash must equal the
+// hash over the return value and the operation's events; at protocol 23
+// exactly, a leading run of reconciliation events may precede them; on an
+// export that backfilled asset-contract events below protocol 23, the
+// originals among the diagnostic events are hashed when the rewritten
+// operation events no longer match.
+func TestInvokeChecks(t *testing.T) {
+	events := []xdr.ContractEvent{symEvent(9, "a", "x"), symEvent(9, "b", "y")}
+	recon := reconciliationEvent("mint")
+	invoke := func(meta xdr.TransactionMeta, result xdr.TransactionResultResult) txSpec {
+		return txSpec{env: sorobanEnvelope(), result: result, meta: meta}
+	}
+	checks := func(t *testing.T, protocol uint32, tx txSpec) []invokeCheck {
+		t.Helper()
+		c := newChain(t, 1, xdr.Hash{})
+		c.protocol = protocol
+		lcm := c.next(tx)
+		exp, err := expectLedger(passphrase, &lcm)
+		require.NoError(t, err)
+		require.Len(t, exp.invokes, 1)
+		return exp.invokes
+	}
+
+	t.Run("v3 events match", func(t *testing.T) {
+		got := checks(t, 22, invoke(metaV3(voidVal(), events), invokeResult(t, voidVal(), events)))
+		assert.True(t, got[0].ok(), "%+v", got[0])
+	})
+	t.Run("v4 events match", func(t *testing.T) {
+		meta := metaV4Soroban(u64Val(1), [][]xdr.ContractEvent{events}, nil, nil)
+		got := checks(t, 25, invoke(meta, invokeResult(t, u64Val(1), events)))
+		assert.True(t, got[0].ok(), "%+v", got[0])
+	})
+	t.Run("an event dropped from the meta", func(t *testing.T) {
+		got := checks(t, 25, invoke(metaV3(voidVal(), events[:1]), invokeResult(t, voidVal(), events)))
+		assert.False(t, got[0].ok())
+		assert.Empty(t, got[0].reason)
+	})
+	t.Run("a different return value", func(t *testing.T) {
+		got := checks(t, 25, invoke(metaV3(u64Val(2), events), invokeResult(t, u64Val(3), events)))
+		assert.False(t, got[0].ok())
+	})
+	t.Run("reconciliation prefix is allowed at protocol 23", func(t *testing.T) {
+		withPrefix := append([]xdr.ContractEvent{recon, reconciliationEvent("burn")}, events...)
+		meta := metaV4Soroban(voidVal(), [][]xdr.ContractEvent{withPrefix}, nil, nil)
+		got := checks(t, 23, invoke(meta, invokeResult(t, voidVal(), events)))
+		assert.True(t, got[0].ok(), "%+v", got[0])
+	})
+	t.Run("reconciliation prefix alone at protocol 23", func(t *testing.T) {
+		meta := metaV4Soroban(voidVal(), [][]xdr.ContractEvent{{recon}}, nil, nil)
+		got := checks(t, 23, invoke(meta, invokeResult(t, voidVal(), nil)))
+		assert.True(t, got[0].ok(), "%+v", got[0])
+	})
+	t.Run("reconciliation prefix is not allowed after protocol 23", func(t *testing.T) {
+		withPrefix := append([]xdr.ContractEvent{recon}, events...)
+		meta := metaV4Soroban(voidVal(), [][]xdr.ContractEvent{withPrefix}, nil, nil)
+		got := checks(t, 24, invoke(meta, invokeResult(t, voidVal(), events)))
+		assert.False(t, got[0].ok())
+	})
+	t.Run("a prefix that is not a reconciliation event fails at protocol 23", func(t *testing.T) {
+		withPrefix := append([]xdr.ContractEvent{events[0]}, events...)
+		meta := metaV4Soroban(voidVal(), [][]xdr.ContractEvent{withPrefix}, nil, nil)
+		got := checks(t, 23, invoke(meta, invokeResult(t, voidVal(), events)))
+		assert.False(t, got[0].ok(), "a duplicated leading event is not a reconciliation prefix")
+	})
+	t.Run("native V3 export below protocol 23 needs an exact match", func(t *testing.T) {
+		got := checks(t, 22, invoke(metaV3(voidVal(), events[:1]), invokeResult(t, voidVal(), events)))
+		assert.False(t, got[0].ok())
+		assert.Empty(t, got[0].skipped)
+	})
+	t.Run("failed transaction is not checked", func(t *testing.T) {
+		failed := invokeResult(t, voidVal(), events)
+		failed.Code = xdr.TransactionResultCodeTxFailed
+		c := newChain(t, 1, xdr.Hash{})
+		lcm := c.next(invoke(metaV3(voidVal(), nil), failed))
+		exp, err := expectLedger(passphrase, &lcm)
+		require.NoError(t, err)
+		assert.Empty(t, exp.invokes)
+	})
+	t.Run("return value missing from a v4 meta", func(t *testing.T) {
+		got := checks(t, 25, invoke(metaV4([][]xdr.ContractEvent{events}, nil, nil), invokeResult(t, voidVal(), events)))
+		assert.Equal(t, "return value missing from meta", got[0].reason)
+	})
+	t.Run("failed invocation is not checked", func(t *testing.T) {
+		c := newChain(t, 1, xdr.Hash{})
+		lcm := c.next(invoke(metaV3Absent(), internalErrorResult()))
+		exp, err := expectLedger(passphrase, &lcm)
+		require.NoError(t, err)
+		assert.Empty(t, exp.invokes)
+	})
+}
+
+// TestInvokeChecks_BackfilledExport pins the rule for an export that
+// backfilled asset-contract events below protocol 23: core rewrote such
+// events in the operation meta after hashing them, so the committed
+// originals are recovered from the diagnostic events.
+func TestInvokeChecks_BackfilledExport(t *testing.T) {
+	events := []xdr.ContractEvent{symEvent(9, "a", "x"), symEvent(9, "b", "y")}
+	invoke := func(meta xdr.TransactionMeta, result xdr.TransactionResultResult) txSpec {
+		return txSpec{env: sorobanEnvelope(), result: result, meta: meta}
+	}
+	checks := func(t *testing.T, tx txSpec) []invokeCheck {
+		t.Helper()
+		c := newChain(t, 1, xdr.Hash{})
+		c.protocol = 22
+		lcm := c.next(tx)
+		exp, err := expectLedger(passphrase, &lcm)
+		require.NoError(t, err)
+		require.Len(t, exp.invokes, 1)
+		return exp.invokes
+	}
+
+	t.Run("backfilled export: rewritten operation events, originals in diagnostics", func(t *testing.T) {
+		original := symEvent(6, "1000", "transfer", "GISSUER", "GADDRESS", "USDC:GISSUER")
+		rewritten := reconciliationEvent("mint")
+		other := events[0]
+		diag := []xdr.DiagnosticEvent{
+			fnCallDiagnostic(),
+			diagnostic(original, true),
+			diagnostic(symEvent(6, "rolled back", "x"), false),
+			diagnostic(other, true),
+		}
+		meta := metaV4Soroban(voidVal(), [][]xdr.ContractEvent{{rewritten, other}}, nil, diag)
+		got := checks(t, invoke(meta, invokeResult(t, voidVal(), []xdr.ContractEvent{original, other})))
+		assert.True(t, got[0].ok(), "%+v", got[0])
+	})
+	t.Run("backfilled export: operation events that still match need no diagnostics", func(t *testing.T) {
+		meta := metaV4Soroban(voidVal(), [][]xdr.ContractEvent{events}, nil, nil)
+		got := checks(t, invoke(meta, invokeResult(t, voidVal(), events)))
+		assert.True(t, got[0].ok(), "%+v", got[0])
+	})
+	t.Run("backfilled export without diagnostics is not checkable", func(t *testing.T) {
+		meta := metaV4Soroban(voidVal(), [][]xdr.ContractEvent{{reconciliationEvent("mint")}}, nil, nil)
+		got := checks(t, invoke(meta, invokeResult(t, voidVal(), events)))
+		assert.False(t, got[0].ok())
+		assert.NotEmpty(t, got[0].skipped)
+	})
+	t.Run("backfilled export whose diagnostics disagree fails", func(t *testing.T) {
+		diag := []xdr.DiagnosticEvent{diagnostic(events[1], true)}
+		meta := metaV4Soroban(voidVal(), [][]xdr.ContractEvent{{reconciliationEvent("mint")}}, nil, diag)
+		got := checks(t, invoke(meta, invokeResult(t, voidVal(), events)))
+		assert.False(t, got[0].ok())
+		assert.Empty(t, got[0].skipped)
+	})
 }
 
 func TestCheckLedger(t *testing.T) {
@@ -146,6 +295,10 @@ func TestRealLedger(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, exp.events)
 	assertOracleMatchesViewPath(t, exp, raw)
+	require.NotEmpty(t, exp.invokes, "a pubnet ledger from 2025 carries successful invocations")
+	for _, c := range exp.invokes {
+		assert.True(t, c.ok(), "%+v", c)
+	}
 }
 
 // realLedgerBytes loads the SDK's captured pubnet ledger from the module

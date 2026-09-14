@@ -137,6 +137,7 @@ func verifyChunk(ctx context.Context, d *deps, t target) ChunkResult {
 	res.Err = r.run(ctx)
 	res.Mismatches, res.Dropped = r.rec.out, r.rec.dropped
 	res.Ledgers, res.Txs, res.TxHashes = r.ledgers, r.txs, r.txHashes
+	res.Invokes, res.InvokesUnchecked = r.invokes, r.invokesUnchecked
 	res.IndexChecked = r.index != nil && res.Err == nil && !r.sourceBad
 	if r.events != nil {
 		res.Events = uint64(r.events.nextID)

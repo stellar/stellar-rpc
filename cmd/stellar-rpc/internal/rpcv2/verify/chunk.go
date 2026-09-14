@@ -38,6 +38,10 @@ type chunkRun struct {
 	ledgers  uint32
 	txs      uint64
 	txHashes uint64
+	invokes  uint64
+	// invokesUnchecked counts invocations whose committed events the export
+	// does not let the verifier recover.
+	invokesUnchecked uint64
 	// sourceBad is set by the first ledger that fails a source check. The
 	// remaining ledgers still get their source checks, but nothing derived
 	// from a bad source is compared.
@@ -194,6 +198,24 @@ func (r *chunkRun) ledger(seq uint32, raw []byte) error {
 	}
 	r.txs += exp.txs
 	r.txHashes += uint64(len(exp.txHashes))
+	r.invokes += uint64(len(exp.invokes))
+	for _, c := range exp.invokes {
+		if c.skipped != "" {
+			r.invokesUnchecked++
+			continue
+		}
+		if c.ok() {
+			continue
+		}
+		actual := c.reason
+		if actual == "" {
+			actual = hexHash(c.got)
+		}
+		r.rec.add(Mismatch{
+			Ledger: seq, TxHash: c.txHash.HexString(), Artifact: "ledgers",
+			Field: fmt.Sprintf("invoke_success_hash (op %d)", c.opIdx), Expected: hexHash(c.want), Actual: actual,
+		})
+	}
 	if r.events != nil {
 		if err := r.events.ledger(seq, exp.events); err != nil {
 			return err

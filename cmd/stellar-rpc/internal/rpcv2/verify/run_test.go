@@ -32,12 +32,21 @@ const richPerChunk = uint64(chunk.LedgersPerChunk / richEvery)
 // the event contents.
 func chunkLedgers(t *testing.T, c chunk.ID, prev xdr.Hash, tag string, every uint32) ([][]byte, xdr.Hash) {
 	t.Helper()
+	return chunkLedgersWith(t, c, prev, every, func(uint32) []txSpec { return richTxs(t, tag) })
+}
+
+// chunkLedgersWith is chunkLedgers with the rich ledgers' transactions
+// supplied per ledger sequence.
+func chunkLedgersWith(
+	t *testing.T, c chunk.ID, prev xdr.Hash, every uint32, rich func(seq uint32) []txSpec,
+) ([][]byte, xdr.Hash) {
+	t.Helper()
 	ch := newChain(t, c.FirstLedger(), prev)
 	out := make([][]byte, 0, chunk.LedgersPerChunk)
 	for seq := c.FirstLedger(); seq <= c.LastLedger(); seq++ {
 		var lcm xdr.LedgerCloseMeta
 		if every > 0 && seq%every == 0 {
-			lcm = ch.next(richTxs(t, tag)...)
+			lcm = ch.next(rich(seq)...)
 		} else {
 			lcm = ch.next()
 		}
@@ -140,6 +149,7 @@ func TestRun_CleanTree(t *testing.T) {
 		assert.Equal(t, 6*richPerChunk, c.Txs, "six transactions per rich ledger")
 		assert.Equal(t, 7*richPerChunk, c.TxHashes, "plus one inner hash per rich ledger")
 		assert.Equal(t, 9*richPerChunk, c.Events, "nine events per rich ledger")
+		assert.Equal(t, 3*richPerChunk, c.Invokes, "three successful invocations per rich ledger")
 	}
 	assert.True(t, report.Chunks[0].IndexChecked, "chunk 0 is covered by its frozen index")
 	assert.False(t, report.Chunks[1].IndexChecked, "chunk 1 has only its .bin")
@@ -282,6 +292,31 @@ func TestRun_IndexCoveredChunkWithoutBinKey(t *testing.T) {
 	assert.Equal(t, 7*richPerChunk, report.Indexes[0].Expected)
 	assert.Equal(t, report.Indexes[0].Expected, report.Indexes[0].Actual)
 	assert.False(t, report.Failed())
+}
+
+// TestRun_MetaLostAnEvent is the case only the network's commitment can
+// catch: one ledger's meta lost an invocation event before the chunk was
+// built, so the artifacts agree with the ledgers and disagree with the
+// result's hash.
+func TestRun_MetaLostAnEvent(t *testing.T) {
+	f := newFixtureTree(t)
+	const damaged = 2 * richEvery
+	ledgers, _ := chunkLedgersWith(t, 0, xdr.Hash{}, richEvery, func(seq uint32) []txSpec {
+		txs := richTxs(t, "")
+		if seq == damaged {
+			txs[2].meta.V3.SorobanMeta.Events = nil
+		}
+		return txs
+	})
+	f.backfillChunk0(t, ledgers)
+
+	report := f.run(t, -1)
+	c := report.Chunks[0]
+	require.NoError(t, c.Err)
+	assert.Equal(t, map[string]int{"ledgers/invoke_success_hash (op 0)": 1}, fieldsOf(c.Mismatches))
+	assert.Equal(t, uint32(damaged), c.Mismatches[0].Ledger)
+	assert.Equal(t, 3*richPerChunk, c.Invokes)
+	assert.True(t, report.Failed())
 }
 
 func TestRun_IndexMissingHashes(t *testing.T) {
