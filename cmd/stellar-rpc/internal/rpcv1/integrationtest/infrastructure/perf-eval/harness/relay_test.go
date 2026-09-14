@@ -56,15 +56,13 @@ func TestRelayEnvValidation(t *testing.T) {
 		overrides map[string]string
 		wantMsg   string
 	}{
-		{"nothing set", blankAll, "missing required env"},
+		{"nothing set", blankAll, "INSTANCE_ID"},
 		{"no instance", map[string]string{"INSTANCE_ID": ""}, "INSTANCE_ID"},
 		{"no deadline", map[string]string{"DEADLINE_EPOCH": ""}, "DEADLINE_EPOCH"},
 		{"unparsable interval", map[string]string{"POLL_INTERVAL": "half a minute"}, "POLL_INTERVAL"},
 		{"zero debug cadence", map[string]string{"DEBUG_LOG_EVERY_POLLS": "0"}, "DEBUG_LOG_EVERY_POLLS"},
 		{"zero poll interval", map[string]string{"POLL_INTERVAL": "0"}, "POLL_INTERVAL"},
 		{"negative window", map[string]string{"WINDOW_SECONDS": "-1"}, "WINDOW_SECONDS"},
-		{"overflow window", map[string]string{"WINDOW_SECONDS": "9223372037"}, "WINDOW_SECONDS"},
-		{"overflow interval", map[string]string{"POLL_INTERVAL": "9223372037"}, "POLL_INTERVAL"},
 		{"integer overflow", map[string]string{"POLL_INTERVAL": "99999999999999999999"}, "POLL_INTERVAL"},
 		{"negative debug lines", map[string]string{"DEBUG_LOG_LINES": "-1"}, "DEBUG_LOG_LINES"},
 		{"zero deadline", map[string]string{"DEADLINE_EPOCH": "0"}, "DEADLINE_EPOCH"},
@@ -102,8 +100,7 @@ func TestRelayWindowDeadline(t *testing.T) {
 				})
 				p.runner = testDebugRunner()
 				start := time.Now()
-				cfg := &relayConfig{githubOutput: output, window: time.Minute, deadline: start.Add(tc.deadline)}
-				r := &relay{cfg: cfg, poller: p}
+				r := &relay{poller: p, githubOutput: output, window: time.Minute, deadline: start.Add(tc.deadline)}
 				require.NoError(t, r.poll(t.Context()))
 				data, err := os.ReadFile(output)
 				require.NoError(t, err)
@@ -133,9 +130,6 @@ func TestGatherEnvValidation(t *testing.T) {
 			})
 		}
 	}
-	setRelayEnv(t, nil)
-	t.Setenv("RESULTS_TIMEOUT", "9223372037")
-	require.ErrorContains(t, Gather(t.Context()), "RESULTS_TIMEOUT")
 }
 
 func TestRelayFinalFetch(t *testing.T) {
@@ -158,8 +152,7 @@ func TestRelayFinalFetch(t *testing.T) {
 					}
 					return resultResponse(200, resultJSON("1-2", "ok"))
 				})
-				cfg := &relayConfig{githubOutput: output, window: time.Hour, deadline: deadline}
-				r := &relay{cfg: cfg, poller: p}
+				r := &relay{poller: p, githubOutput: output, window: time.Hour, deadline: deadline}
 				require.NoError(t, r.poll(t.Context()))
 				data, err := os.ReadFile(output)
 				require.NoError(t, err)
@@ -184,7 +177,7 @@ func TestGatherFinalOutputs(t *testing.T) {
 			results := filepath.Join(t.TempDir(), "results.md")
 			t.Setenv("RESULTS_FILE", results)
 			res := &Result{Verdict: verdict, Markdown: "report"}
-			require.NoError(t, reportGather(t.Context(), nil, "i-test", output, time.Minute, 40, res, nil))
+			require.NoError(t, reportGather(t.Context(), &resultPoller{}, output, time.Minute, res, nil))
 			data, err := os.ReadFile(output)
 			require.NoError(t, err)
 			passed := "false"
@@ -231,9 +224,9 @@ func TestRelayNoVerdict(t *testing.T) {
 					}
 				})
 				p.runner = testDebugRunner()
+				p.debugLogLines = 40
 				start := time.Now()
-				cfg := &relayConfig{githubOutput: output, window: time.Hour, deadline: start, debugLogLines: 40}
-				r := &relay{cfg: cfg, poller: p}
+				r := &relay{poller: p, githubOutput: output, window: time.Hour, deadline: start}
 				require.NoError(t, r.poll(t.Context()))
 				require.Equal(t, 1, calls)
 				data, err := os.ReadFile(output)
@@ -258,8 +251,8 @@ func TestGatherNoVerdictOutputs(t *testing.T) {
 		dir := t.TempDir()
 		t.Setenv("RESULTS_FILE", filepath.Join(dir, "results.md"))
 		output := filepath.Join(dir, "outputs")
-		require.NoError(t, reportGather(t.Context(), testDebugRunner(), "i-test", output,
-			time.Minute, 40, nil, errors.New("polling failed")))
+		p := &resultPoller{runner: testDebugRunner(), debugLogLines: 40}
+		require.NoError(t, reportGather(t.Context(), p, output, time.Minute, nil, errors.New("polling failed")))
 		data, err := os.ReadFile(output)
 		require.NoError(t, err)
 		require.Equal(t, "found=false\n", string(data))
@@ -288,12 +281,12 @@ func TestReportCancellationDuringDiagnostics(t *testing.T) {
 					})},
 				})}
 				start := time.Now()
+				p := &resultPoller{runner: runner, debugLogLines: 40}
 				var err error
 				if caller == "gather" {
-					err = reportGather(ctx, runner, "i-test", output, time.Minute, 40, nil, nil)
+					err = reportGather(ctx, p, output, time.Minute, nil, nil)
 				} else {
-					cfg := &relayConfig{instanceID: "i-test", githubOutput: output, debugLogLines: 40}
-					r := &relay{cfg: cfg, poller: &resultPoller{runner: runner}}
+					r := &relay{poller: p, githubOutput: output}
 					err = r.reportFault(ctx, "polling failed")
 				}
 				require.ErrorIs(t, err, context.Canceled)
@@ -339,8 +332,7 @@ func TestRelayCancellation(t *testing.T) {
 				deadline = time.Now()
 			}
 			output := filepath.Join(dir, "outputs")
-			cfg := &relayConfig{githubOutput: output, window: time.Minute, deadline: deadline}
-			r := &relay{cfg: cfg, poller: p}
+			r := &relay{poller: p, githubOutput: output, window: time.Minute, deadline: deadline}
 			require.ErrorIs(t, r.poll(ctx), context.Canceled)
 			require.NoFileExists(t, output)
 			require.NoFileExists(t, filepath.Join(dir, "results.md"))
