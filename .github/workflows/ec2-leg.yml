@@ -265,7 +265,7 @@ jobs:
         if: always()
         run: |
           if [ "${{ steps.results.outputs.found }}" != "true" ]; then
-            echo "Leg timed out before producing instance results"
+            echo "Leg produced no final result; see the polling diagnostics"
             exit 1
           fi
 

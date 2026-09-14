@@ -2,10 +2,9 @@ package harness
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
-	"strconv"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,40 +14,32 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 )
 
-// commandWaitTimeout backstops a stuck SSM command (the debug-tail reads).
+// commandWaitTimeout bounds a diagnostic, including dispatch, retries, and reads.
 const commandWaitTimeout = 60 * time.Second
 
 // Gather is the GHA-runner half: it polls S3 until the box reports a verdict
 // and relays the result as step outputs. On timeout it writes a debug comment
 // instead. Used by every leg's runner.
 func Gather(ctx context.Context) error {
-	envStr := map[string]string{}
-	var missing []string
-	for _, k := range []string{
-		"INSTANCE_ID", "AWS_REGION", "RESULTS_TIMEOUT", "POLL_INTERVAL", "GITHUB_OUTPUT",
-		"DEBUG_LOG_LINES", "DEBUG_LOG_EVERY_POLLS", "BUCKET", "RESULT_KEY", "RUN_ID",
-	} {
-		if envStr[k] = os.Getenv(k); envStr[k] == "" {
-			missing = append(missing, k)
-		}
+	strs, err := RequireEnv("INSTANCE_ID", "AWS_REGION", "GITHUB_OUTPUT", "BUCKET", "RESULT_KEY", "RUN_ID")
+	if err != nil {
+		return err
 	}
-	if len(missing) > 0 {
-		return fmt.Errorf("missing required env: %s", strings.Join(missing, ", "))
-	}
-	instanceID, region, githubOutput := envStr["INSTANCE_ID"], envStr["AWS_REGION"], envStr["GITHUB_OUTPUT"]
-	bucket, resultKey, runID := envStr["BUCKET"], envStr["RESULT_KEY"], envStr["RUN_ID"]
+	instanceID, region, githubOutput := strs[0], strs[1], strs[2]
+	bucket, resultKey, runID := strs[3], strs[4], strs[5]
 
-	envInt := map[string]int{}
-	for _, k := range []string{"RESULTS_TIMEOUT", "POLL_INTERVAL", "DEBUG_LOG_LINES", "DEBUG_LOG_EVERY_POLLS"} {
-		n, err := strconv.Atoi(envStr[k])
-		if err != nil {
-			return fmt.Errorf("%s: %w", k, err)
-		}
-		envInt[k] = n
+	ints, err := RequireEnvInts("RESULTS_TIMEOUT", "POLL_INTERVAL", "DEBUG_LOG_LINES", "DEBUG_LOG_EVERY_POLLS")
+	if err != nil {
+		return err
 	}
-	debugLogLines, debugEveryPolls := envInt["DEBUG_LOG_LINES"], envInt["DEBUG_LOG_EVERY_POLLS"]
-	resultsTimeout := time.Duration(envInt["RESULTS_TIMEOUT"]) * time.Second
-	pollInterval := time.Duration(envInt["POLL_INTERVAL"]) * time.Second
+	if err := requirePositive(ints, "DEBUG_LOG_LINES", "DEBUG_LOG_EVERY_POLLS"); err != nil {
+		return err
+	}
+	if err := requireSeconds(ints, "POLL_INTERVAL", "RESULTS_TIMEOUT"); err != nil {
+		return err
+	}
+	debugLogLines := ints["DEBUG_LOG_LINES"]
+	resultsTimeout := time.Duration(ints["RESULTS_TIMEOUT"]) * time.Second
 
 	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
 	if err != nil {
@@ -56,36 +47,41 @@ func Gather(ctx context.Context) error {
 	}
 	s3Client := s3.NewFromConfig(awsCfg)
 	runner := &ssmRunner{client: ssm.NewFromConfig(awsCfg), instanceID: instanceID}
+	poller := &resultPoller{
+		s3Client: s3Client, runner: runner,
+		bucket: bucket, key: resultKey, runID: runID,
+		interval:      time.Duration(ints["POLL_INTERVAL"]) * time.Second,
+		debugLogLines: debugLogLines, debugEveryPolls: ints["DEBUG_LOG_EVERY_POLLS"],
+	}
+	res, err := poller.poll(ctx, time.Now().Add(resultsTimeout))
+	return reportGather(ctx, runner, instanceID, githubOutput, resultsTimeout, debugLogLines, res, err)
+}
 
-	deadline := time.Now().Add(resultsTimeout)
-	for pollCount := 1; time.Now().Before(deadline); pollCount++ {
-		res, derr := FetchResult(ctx, s3Client, bucket, resultKey)
-		switch {
-		case errors.Is(derr, ErrResultNotReady):
-			logger.Infof("still waiting for s3://%s/%s", bucket, resultKey)
-		case derr != nil:
-			logger.Warnf("result fetch failed; retrying: %v", derr)
-		// A leftover object from a prior attempt (re-runs share RESULT_KEY) is
-		// "not published yet" so this attempt's box overwrites it.
-		case res.RunID != runID:
-			logger.Infof("ignoring stale result from run %s (want %s)", res.RunID, runID)
-		default:
-			logger.Infof("result published by instance (verdict: %s)", res.Verdict)
-			if werr := os.WriteFile("/tmp/results.md", []byte(res.Markdown), 0o644); werr != nil {
-				return werr
-			}
-			return appendOutputs(githubOutput,
-				"found=true",
-				fmt.Sprintf("passed=%t", res.Verdict == "ok"))
+func reportGather(
+	ctx context.Context, runner *ssmRunner, instanceID, githubOutput string,
+	resultsTimeout time.Duration, debugLogLines int, res *Result, pollErr error,
+) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if res != nil {
+		logger.Infof("result published by instance (verdict: %s)", res.Verdict)
+		if werr := os.WriteFile(Env("RESULTS_FILE", defaultResultsFile), []byte(res.Markdown), 0o644); werr != nil {
+			return werr
 		}
-
-		if pollCount%debugEveryPolls == 0 {
-			logger.Infof("debug tail:\n%s", runner.debugTail(ctx, debugLogLines))
-		}
-		time.Sleep(pollInterval)
+		return appendOutputs(githubOutput,
+			"found=true",
+			fmt.Sprintf("passed=%t", res.Verdict == VerdictOK))
 	}
 
-	return writeTimeoutComment(ctx, runner, githubOutput, instanceID, resultsTimeout, debugLogLines)
+	headline := fmt.Sprintf("❌ Load test did not produce results within %.0fs.", resultsTimeout.Seconds())
+	if pollErr != nil {
+		headline = fmt.Sprintf("❌ Result polling failed: %v", pollErr)
+	}
+	if werr := writeNoVerdictComment(ctx, runner, instanceID, headline, debugLogLines); werr != nil {
+		return werr
+	}
+	return appendOutputs(githubOutput, "found=false")
 }
 
 // ssmRunner runs shell commands on one instance over SSM RunShellScript.
@@ -96,6 +92,8 @@ type ssmRunner struct {
 
 // capture dispatches command, waits for it, and returns its stdout.
 func (r *ssmRunner) capture(ctx context.Context, command string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, commandWaitTimeout)
+	defer cancel()
 	var id string
 	var sendErr error
 	for attempt := 1; attempt <= 3; attempt++ {
@@ -110,7 +108,9 @@ func (r *ssmRunner) capture(ctx context.Context, command string) (string, error)
 		}
 		sendErr = err
 		logger.Warnf("ssm send-command attempt %d failed", attempt)
-		time.Sleep(5 * time.Second)
+		if err := sleepContext(ctx, 5*time.Second); err != nil {
+			return "", err
+		}
 	}
 	if id == "" {
 		return "", fmt.Errorf("ssm send-command failed: %w", sendErr)
@@ -121,7 +121,7 @@ func (r *ssmRunner) capture(ctx context.Context, command string) (string, error)
 	inv, err := r.client.GetCommandInvocation(ctx, in)
 	if err != nil {
 		// Unreadable result is "not ready", not a dispatch failure.
-		return "", nil //nolint:nilerr
+		return "", nil
 	}
 	return aws.ToString(inv.StandardOutputContent), nil
 }
@@ -137,17 +137,15 @@ func (r *ssmRunner) debugTail(ctx context.Context, n int) string {
 	return out
 }
 
-// writeTimeoutComment is the no-verdict path: it writes a comment to
-// /tmp/timeout-comment.md and records found=false.
-func writeTimeoutComment(
+// writeNoVerdictComment writes diagnostics to timeout-comment.md beside RESULTS_FILE.
+func writeNoVerdictComment(
 	ctx context.Context,
 	runner *ssmRunner,
-	githubOutput, instanceID string,
-	resultsTimeout time.Duration,
+	instanceID, headline string,
 	debugLogLines int,
 ) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "❌ Load test did not produce results within %.0fs.\n\n", resultsTimeout.Seconds())
+	fmt.Fprintf(&b, "%s\n\n", headline)
 	fmt.Fprintf(&b, "Instance: `%s`\n", instanceID)
 	srv, repo, run := os.Getenv("GITHUB_SERVER_URL"), os.Getenv("GITHUB_REPOSITORY"), os.Getenv("GITHUB_RUN_ID")
 	if srv != "" && repo != "" && run != "" {
@@ -156,8 +154,9 @@ func writeTimeoutComment(
 	if tail := runner.debugTail(ctx, debugLogLines); tail != "" {
 		fmt.Fprintf(&b, "\nLast %d lines of /var/log/user-data.log:\n\n```\n%s\n```\n", debugLogLines, tail)
 	}
-	if err := os.WriteFile("/tmp/timeout-comment.md", []byte(b.String()), 0o644); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return appendOutputs(githubOutput, "found=false")
+	commentPath := filepath.Join(filepath.Dir(Env("RESULTS_FILE", defaultResultsFile)), "timeout-comment.md")
+	return os.WriteFile(commentPath, []byte(b.String()), 0o644)
 }
