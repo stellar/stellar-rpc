@@ -70,18 +70,18 @@ func newServeReads(
 
 // startAdminServer binds [service].admin_endpoint and serves pprof plus
 // /metrics over the process registry, where the serving collectors also live.
-// One per process — nothing here depends on run()'s query registry. The caller
-// owns the returned stop.
+// One per process — nothing here depends on run()'s query registry. It returns
+// the bound address and a stop the caller owns.
 func startAdminServer(
 	ctx context.Context, endpoint string, logger *supportlog.Entry,
 	processRegistry *prometheus.Registry,
-) (func(), error) {
+) (net.Addr, func(), error) {
 	mux := jsonrpc.NewAdminMux(logger, processRegistry)
 
 	var lc net.ListenConfig
 	listener, err := lc.Listen(ctx, "tcp", endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("admin server listen on %q: %w", endpoint, err)
+		return nil, nil, fmt.Errorf("admin server listen on %q: %w", endpoint, err)
 	}
 	server := &http.Server{
 		Handler:     mux,
@@ -95,7 +95,7 @@ func startAdminServer(
 			logger.WithError(serr).Error("admin server exited")
 		}
 	}()
-	logger.WithField("endpoint", endpoint).Info("admin server listening (pprof, /metrics)")
+	logger.WithField("endpoint", listener.Addr().String()).Info("admin server listening (pprof, /metrics)")
 
-	return func() { _ = server.Close() }, nil
+	return listener.Addr(), func() { _ = server.Close() }, nil
 }
