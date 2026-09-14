@@ -3,7 +3,6 @@ package methods
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"math"
 	"time"
@@ -272,8 +271,10 @@ func EventInfoFromView(
 	err := xdr.TryVoid(func() {
 		xdrType = ev.MustType().MustValue()
 		v0 := ev.MustBody().MustV0() // panics on a non-V0 body, replacing "unknown event version"
-		for t := range v0.MustTopics().MustIter() {
-			topics = append(topics, t.MustRaw())
+		views := v0.MustTopics().MustAll()
+		topics = make([][]byte, len(views))
+		for i, t := range views {
+			topics[i] = t.MustRaw()
 		}
 		dataRaw = v0.MustData().MustRaw()
 		if cid, ok := ev.MustContractId().MustUnwrap(); ok {
@@ -289,7 +290,7 @@ func EventInfoFromView(
 	}
 
 	info := protocol.EventInfo{
-		EventType:       protocol.GetEventTypeFromEventTypeXDR()[xdrType],
+		EventType:       eventTypeName(xdrType),
 		Ledger:          int32(cursor.Ledger),
 		LedgerClosedAt:  ledgerClosedAt,
 		ID:              cursor.String(),
@@ -299,41 +300,40 @@ func EventInfoFromView(
 	}
 
 	if cidRaw != nil {
-		info.ContractID = strkey.MustEncode(
-			strkey.VersionByteContract,
-			cidRaw,
-		)
+		info.ContractID = strkey.MustEncode(strkey.VersionByteContract, cidRaw)
 	}
 
 	switch format {
 	case protocol.FormatJSON:
-		// json encode the topic
-		info.TopicJSON = make([]json.RawMessage, 0, protocol.MaxTopicCount)
-		for _, topicView := range topics {
-			topic, err := xdr2json.ConvertBytes(xdr.ScVal{}, topicView)
-			if err != nil {
-				return protocol.EventInfo{}, err
-			}
-			info.TopicJSON = append(info.TopicJSON, topic)
+		if info.TopicJSON, err = jsonifySlice(xdr.ScVal{}, topics); err != nil {
+			return protocol.EventInfo{}, err
 		}
-
-		var convErr error
-		info.ValueJSON, convErr = xdr2json.ConvertBytes(xdr.ScVal{}, dataRaw)
-		if convErr != nil {
-			return protocol.EventInfo{}, convErr
+		if info.ValueJSON, err = xdr2json.ConvertBytes(xdr.ScVal{}, dataRaw); err != nil {
+			return protocol.EventInfo{}, err
 		}
-
 	default:
-		// base64-xdr encode the topic
-		topic := make([]string, 0, protocol.MaxTopicCount)
-		for _, segment := range topics {
-			topic = append(topic, base64.StdEncoding.EncodeToString(segment))
+		info.TopicXDR = make([]string, len(topics))
+		for i, segment := range topics {
+			info.TopicXDR[i] = base64.StdEncoding.EncodeToString(segment)
 		}
-		info.TopicXDR = topic
-		info.ValueXDR = base64.StdEncoding.EncodeToString(dataRaw) // base64-xdr encode the data
+		info.ValueXDR = base64.StdEncoding.EncodeToString(dataRaw)
 	}
 
 	return info, nil
+}
+
+// eventTypeName is protocol.GetEventTypeFromEventTypeXDR without the per-call map; "" for an unknown type.
+func eventTypeName(t xdr.ContractEventType) string {
+	switch t {
+	case xdr.ContractEventTypeSystem:
+		return protocol.EventTypeSystem
+	case xdr.ContractEventTypeContract:
+		return protocol.EventTypeContract
+	case xdr.ContractEventTypeDiagnostic:
+		return protocol.EventTypeDiagnostic
+	default:
+		return ""
+	}
 }
 
 // NewGetEventsHandler returns a json rpc handler to fetch and filter events

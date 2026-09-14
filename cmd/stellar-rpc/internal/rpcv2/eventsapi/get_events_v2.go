@@ -455,32 +455,26 @@ func responseScanStatus(s query.ScanStatus) string {
 
 // eventInfoV2 builds one response event from a stored event payload.
 func eventInfoV2(p *event.Payload, format string) (protocol.EventInfoV2, error) {
-	ev := xdr.ContractEventView(p.ContractEventBytes)
-	xdrType, err := xdr.Try(func() xdr.ContractEventType { return ev.MustType().MustValue() })
-	if err != nil {
-		return protocol.EventInfoV2{}, fmt.Errorf("rpcv2: stored event bytes: %w", err)
-	}
-	if _, err := responseEventType(xdrType); err != nil { // stricter than v1, which also renders diagnostic events
-		return protocol.EventInfoV2{}, err
-	}
 	cursor := protocol.Cursor{Ledger: p.LedgerSequence, Tx: p.TxIdx, Op: p.OpIdx, Event: p.EventIdx}
-	info, err := methods.EventInfoFromView(ev, cursor,
+	info, err := methods.EventInfoFromView(xdr.ContractEventView(p.ContractEventBytes), cursor,
 		time.Unix(p.LedgerClosedAt, 0).UTC().Format(time.RFC3339), p.TxHash.HexString(), format)
 	if err != nil {
 		return protocol.EventInfoV2{}, fmt.Errorf("rpcv2: %w", err)
 	}
+	// Stricter than v1, which also renders diagnostic events.
+	if err := checkResponseEventType(info.EventType); err != nil {
+		return protocol.EventInfoV2{}, err
+	}
 	return protocol.EventInfoV2(info), nil
 }
 
-// responseEventType: ingest stores contract and system events only.
-func responseEventType(t xdr.ContractEventType) (string, error) {
-	switch t {
-	case xdr.ContractEventTypeSystem:
-		return protocol.EventTypeSystem, nil
-	case xdr.ContractEventTypeContract:
-		return protocol.EventTypeContract, nil
+// checkResponseEventType: ingest stores contract and system events only.
+func checkResponseEventType(name string) error {
+	switch name {
+	case protocol.EventTypeSystem, protocol.EventTypeContract:
+		return nil
 	default:
-		return "", fmt.Errorf("rpcv2: stored event has type %d;"+
-			" this endpoint serves contract and system events only", t)
+		return fmt.Errorf("rpcv2: stored event has type %q;"+
+			" this endpoint serves contract and system events only", name)
 	}
 }

@@ -466,15 +466,8 @@ func TestResponseScanStatus(t *testing.T) {
 
 // Ingest stores contract and system events only, so a diagnostic event
 // reaching the response means the store is corrupt.
-func TestResponseEventType(t *testing.T) {
-	contract, err := responseEventType(xdr.ContractEventTypeContract)
-	require.NoError(t, err)
-	assert.Equal(t, protocol.EventTypeContract, contract)
-
-	system, err := responseEventType(xdr.ContractEventTypeSystem)
-	require.NoError(t, err)
-	assert.Equal(t, protocol.EventTypeSystem, system)
-
-	_, err = responseEventType(xdr.ContractEventTypeDiagnostic)
-	require.ErrorContains(t, err, "stored event has type")
+func TestCheckResponseEventType(t *testing.T) {
+	require.NoError(t, checkResponseEventType(protocol.EventTypeContract))
+	require.NoError(t, checkResponseEventType(protocol.EventTypeSystem))
+	require.ErrorContains(t, checkResponseEventType(protocol.EventTypeDiagnostic), "stored event has type")
 }
