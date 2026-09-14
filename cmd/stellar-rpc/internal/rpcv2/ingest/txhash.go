@@ -1,12 +1,10 @@
 package ingest
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"time"
 
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
@@ -93,11 +91,7 @@ func (t *txhashCold) write(seq uint32, txParts []sdkingest.LedgerTxParts) error 
 // pkg/stores/txhash/cold_bin.go pins the layout).
 func (t *txhashCold) finalize(_ context.Context) error {
 	start := time.Now()
-	// slices.SortFunc over sort.Slice: reflection-free, meaningfully faster
-	// on a ~3M-element sort.
-	slices.SortFunc(t.entries, func(a, b txhash.ColdEntry) int {
-		return bytes.Compare(a.Key[:], b.Key[:])
-	})
+	txhash.SortColdEntries(t.entries)
 	err := txhash.WriteColdBin(t.binPath, t.secret, t.entries)
 	if err == nil {
 		t.metrics.sink.IngestStage(dataTypeTxhash, stageFinalize, time.Since(start), len(t.entries))

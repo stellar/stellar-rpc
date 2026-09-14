@@ -59,6 +59,10 @@ func (p *PackReader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 	}
 }
 
+// Verify recomputes the pack's content hash over every item and compares it
+// with the trailer's; a pack written without one passes.
+func (p *PackReader) Verify(ctx context.Context) error { return translatePackErr(p.r.Verify(ctx)) }
+
 // Close reports the deferred open error as well as the close itself, so it is
 // the first place an open-time failure surfaces on a handle that was never
 // read — and it owes callers the same sentinel as every other method.
