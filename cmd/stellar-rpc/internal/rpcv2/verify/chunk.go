@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"sync"
 
 	"github.com/stellar/go-stellar-sdk/historyarchive"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -35,11 +34,10 @@ type chunkRun struct {
 	index  *indexChecker
 	bin    *binChecker
 
-	prevHash  *xdr.Hash
-	firstHash xdr.Hash
-	ledgers   uint32
-	txs       uint64
-	txHashes  uint64
+	prevHash *xdr.Hash
+	ledgers  uint32
+	txs      uint64
+	txHashes uint64
 	// sourceBad is set by the first ledger that fails a source check. The
 	// remaining ledgers still get their source checks, but nothing derived
 	// from a bad source is compared.
@@ -124,8 +122,12 @@ func (r *chunkRun) previousChunkHash() (*xdr.Hash, error) {
 	defer func() { _ = lr.Close() }()
 	var h xdr.Hash
 	err = lr.WithLedger(r.c.FirstLedger()-1, func(raw []byte) error {
-		b, err := xdr.LedgerCloseMetaView(raw).LedgerHash()
-		copy(h[:], b)
+		var lcm xdr.LedgerCloseMeta
+		if err := xdr.SafeUnmarshal(raw, &lcm); err != nil {
+			return err
+		}
+		entry := lcm.LedgerHeaderHistoryEntry()
+		h, err = xdr.HashXdr(&entry.Header)
 		return err
 	})
 	if err != nil {
@@ -148,12 +150,7 @@ func (r *chunkRun) openCheckers(ctx context.Context) error {
 		}
 		r.events = ec
 	}
-	idx, covered, err := r.d.indexes.forChunk(r.c)
-	if err != nil {
-		r.closeCheckers()
-		return err
-	}
-	if covered {
+	if idx, covered := r.d.indexes.forChunk(r.c); covered {
 		r.index = &indexChecker{rec: r.rec, idx: idx}
 	}
 	if r.frozen.Has(geometry.KindTxHash) {
@@ -181,14 +178,10 @@ func (r *chunkRun) ledger(seq uint32, raw []byte) error {
 		return nil //nolint:nilerr // recorded as a mismatch: the source is bad, the run is fine
 	}
 	r.ledgers++
-	entry := lcm.LedgerHeaderHistoryEntry()
-	if seq == r.c.FirstLedger() {
-		r.firstHash = entry.Hash
-	}
 	if !checkLedger(r.rec, seq, &lcm, r.prevHash) {
 		r.sourceBad = true
 	}
-	h := entry.Hash
+	h := lcm.LedgerHeaderHistoryEntry().Hash
 	r.prevHash = &h
 	if r.sourceBad {
 		return nil
@@ -229,97 +222,91 @@ func (r *chunkRun) finish(ctx context.Context) error {
 	return r.anchor()
 }
 
-// anchor compares the chunk's first stored header hash with the network's
-// history archive, so a self-consistent chain is also the right chain.
+// anchor compares the chunk's last header hash with the network's history
+// archive. The chain authenticates backwards, each header committing to the
+// one before it, so an authentic last header makes every header of the
+// chunk, and everything they commit to, the network's.
 func (r *chunkRun) anchor() error {
 	if r.d.archive == nil {
 		return nil
 	}
-	seq := r.c.FirstLedger()
+	seq := r.c.LastLedger()
 	entry, err := r.d.archive.GetLedgerHeader(seq)
 	if err != nil {
 		return fmt.Errorf("history archive header for ledger %d: %w", seq, err)
 	}
-	if entry.Hash != r.firstHash {
+	if entry.Hash != *r.prevHash {
 		r.rec.add(Mismatch{
 			Ledger: seq, Artifact: "ledgers", Field: "archive_anchor",
-			Expected: hexHash(entry.Hash), Actual: hexHash(r.firstHash),
+			Expected: hexHash(entry.Hash), Actual: hexHash(*r.prevHash),
 		})
 	}
 	return nil
 }
 
-// indexCache resolves chunks to the frozen tx-hash index coverage containing
-// them, one catalog read per index, and holds one open reader per index for
-// the run.
+// indexCache holds the frozen tx-hash index coverages the run's chunks fall
+// in, each with its reader open for the run.
 type indexCache struct {
-	cat *catalog.Catalog
-
-	mu      sync.Mutex
 	byIndex map[geometry.TxHashIndexID]*indexEntry
 }
 
 type indexEntry struct {
 	cov    geometry.TxHashIndexCoverage
-	frozen bool
-	reader *txhash.ColdReader // opened on first use
+	reader *txhash.ColdReader
 }
 
-func newIndexCache(cat *catalog.Catalog) *indexCache {
-	return &indexCache{cat: cat, byIndex: make(map[geometry.TxHashIndexID]*indexEntry)}
+// openIndexes resolves, for every index a target chunk belongs to, its unique
+// frozen coverage through the catalog, and opens the coverage's reader.
+func openIndexes(cat *catalog.Catalog, targets []target) (*indexCache, error) {
+	ic := &indexCache{byIndex: make(map[geometry.TxHashIndexID]*indexEntry)}
+	txl := cat.TxHashIndexLayout()
+	for _, t := range targets {
+		id := txl.TxHashIndexID(t.chunk)
+		if _, seen := ic.byIndex[id]; seen {
+			continue
+		}
+		cov, frozen, err := cat.FrozenTxHashIndex(id)
+		if err != nil {
+			return nil, errors.Join(err, ic.closeAll())
+		}
+		if !frozen {
+			continue
+		}
+		reader, err := txhash.OpenColdReader(cat.Layout().TxHashIndexFilePath(cov))
+		if err != nil {
+			return nil, errors.Join(err, ic.closeAll())
+		}
+		ic.byIndex[id] = &indexEntry{cov: cov, reader: reader}
+	}
+	return ic, nil
 }
 
-// forChunk returns the open reader of the frozen coverage containing c, or
+// forChunk returns the reader of the frozen coverage containing c, or
 // covered=false when no frozen coverage holds it.
-func (ic *indexCache) forChunk(c chunk.ID) (*txhash.ColdReader, bool, error) {
-	ic.mu.Lock()
-	defer ic.mu.Unlock()
-	id := ic.cat.TxHashIndexLayout().TxHashIndexID(c)
-	e, ok := ic.byIndex[id]
-	if !ok {
-		cov, frozen, err := ic.cat.FrozenTxHashIndex(id)
-		if err != nil {
-			return nil, false, err
+func (ic *indexCache) forChunk(c chunk.ID) (*txhash.ColdReader, bool) {
+	for _, e := range ic.byIndex {
+		if c >= e.cov.Lo && c <= e.cov.Hi {
+			return e.reader, true
 		}
-		e = &indexEntry{cov: cov, frozen: frozen}
-		ic.byIndex[id] = e
 	}
-	if !e.frozen || c < e.cov.Lo || c > e.cov.Hi {
-		return nil, false, nil
-	}
-	if e.reader == nil {
-		reader, err := txhash.OpenColdReader(ic.cat.Layout().TxHashIndexFilePath(e.cov))
-		if err != nil {
-			return nil, false, err
-		}
-		e.reader = reader
-	}
-	return e.reader, true, nil
+	return nil, false
 }
 
-// opened returns the indexes the run resolved a chunk through, ascending.
-func (ic *indexCache) opened() []*indexEntry {
-	ic.mu.Lock()
-	defer ic.mu.Unlock()
-	var out []*indexEntry
+// entries returns the resolved coverages, ascending by index.
+func (ic *indexCache) entries() []*indexEntry {
+	out := make([]*indexEntry, 0, len(ic.byIndex))
 	for _, e := range ic.byIndex {
-		if e.reader != nil {
-			out = append(out, e)
-		}
+		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].cov.Index < out[j].cov.Index })
 	return out
 }
 
 func (ic *indexCache) closeAll() error {
-	ic.mu.Lock()
-	defer ic.mu.Unlock()
 	var err error
 	for _, e := range ic.byIndex {
-		if e.reader != nil {
-			err = errors.Join(err, e.reader.Close())
-			e.reader = nil
-		}
+		err = errors.Join(err, e.reader.Close())
 	}
+	clear(ic.byIndex)
 	return err
 }

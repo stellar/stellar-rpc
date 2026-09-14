@@ -81,8 +81,12 @@ func Run(ctx context.Context, logger *supportlog.Entry, opts Options) (*Report, 
 	if err != nil {
 		return nil, err
 	}
-	d := &deps{opts: opts, cat: cat, indexes: newIndexCache(cat)}
-	defer func() { _ = d.indexes.closeAll() }()
+	indexes, err := openIndexes(cat, targets)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = indexes.closeAll() }()
+	d := &deps{opts: opts, cat: cat, indexes: indexes}
 	if opts.ArchiveURL != "" {
 		d.archive, err = historyarchive.Connect(opts.ArchiveURL, historyarchive.ArchiveOptions{
 			NetworkPassphrase: opts.Passphrase,
@@ -98,7 +102,7 @@ func Run(ctx context.Context, logger *supportlog.Entry, opts Options) (*Report, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return &Report{Chunks: results, Indexes: checkIndexes(d.indexes, results)}, nil
+	return &Report{Chunks: results, Indexes: checkIndexes(indexes, results)}, nil
 }
 
 func runChunks(ctx context.Context, logger *supportlog.Entry, d *deps, targets []target, workers int) []ChunkResult {
@@ -168,18 +172,17 @@ func frozenChunks(cat *catalog.Catalog, opts Options) ([]target, error) {
 	return targets, nil
 }
 
-// checkIndexes compares each tx-hash index the run resolved chunks through
-// with the number of hashes the oracle expects across its coverage. A
-// coverage with a chunk this run did not index-check is skipped with the
-// reason.
+// checkIndexes compares each resolved tx-hash index with the number of
+// hashes the oracle expects across its coverage. A coverage with a chunk
+// this run did not index-check is skipped with the reason.
 func checkIndexes(ic *indexCache, results []ChunkResult) []IndexResult {
 	byChunk := make(map[chunk.ID]ChunkResult, len(results))
 	for _, r := range results {
 		byChunk[r.Chunk] = r
 	}
-	opened := ic.opened()
-	out := make([]IndexResult, 0, len(opened))
-	for _, e := range opened {
+	entries := ic.entries()
+	out := make([]IndexResult, 0, len(entries))
+	for _, e := range entries {
 		out = append(out, checkIndex(e, byChunk))
 	}
 	return out

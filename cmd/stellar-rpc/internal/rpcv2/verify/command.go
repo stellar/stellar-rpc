@@ -55,7 +55,8 @@ It exits non-zero when any chunk has a mismatch.`,
 	fs.StringVar(&opts.Passphrase, "network-passphrase", "", "network passphrase the ledgers were closed under (required)")
 	fs.Int64Var(&opts.StartChunk, "start-chunk", -1, "first chunk to check (default: the first frozen chunk)")
 	fs.Int64Var(&opts.EndChunk, "end-chunk", -1, "last chunk to check, inclusive (default: the last frozen chunk)")
-	fs.IntVar(&opts.Workers, "workers", 0, "chunks checked concurrently (default: one per CPU)")
+	fs.IntVar(&opts.Workers, "workers", 0,
+		"chunks checked concurrently; each holds a chunk's expected term bitmaps in memory (default: one per CPU)")
 	fs.StringVar(&opts.ArchiveURL, "history-archive-url", "",
 		"history archive to anchor each chunk's first ledger hash against (default: no anchoring)")
 	fs.IntVar(&opts.MaxMismatches, "max-mismatches", 0,

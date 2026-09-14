@@ -253,7 +253,8 @@ func TestRun_ChunkRangeAndUnfrozenLedgers(t *testing.T) {
 	assert.Equal(t, chunk.ID(1), report.Chunks[0].Chunk)
 	assert.Empty(t, report.Chunks[0].Mismatches)
 	assert.Equal(t, "ledgers artifact not frozen", report.Chunks[1].Skipped)
-	assert.Empty(t, report.Indexes, "chunk 0's index was not resolved by any chunk in range")
+	require.Len(t, report.Indexes, 1, "window 0 holds a frozen coverage over chunk 0")
+	assert.Contains(t, report.Indexes[0].Skipped, "chunk 00000000 not verified in this run")
 	assert.False(t, report.Failed())
 }
 
