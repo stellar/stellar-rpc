@@ -43,6 +43,10 @@ func TestLoadEnvNamesTheBadVariable(t *testing.T) {
 	setRelayEnv(t, map[string]string{"POLL_INTERVAL": "0"})
 	require.ErrorContains(t, loadEnv(&cfg), "POLL_INTERVAL")
 
+	// One second past the largest whole-second time.Duration wraps negative.
+	setRelayEnv(t, map[string]string{"POLL_INTERVAL": "9223372037"})
+	require.ErrorContains(t, loadEnv(&cfg), "POLL_INTERVAL")
+
 	// t.Setenv has registered the restore, so the variable comes back after the test.
 	setRelayEnv(t, nil)
 	require.NoError(t, os.Unsetenv("WINDOW_SECONDS"))

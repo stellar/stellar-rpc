@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -38,6 +39,9 @@ func (s *seconds) UnmarshalText(text []byte) error {
 	n, err := parsePositive(text)
 	if err != nil {
 		return err
+	}
+	if n > int64(math.MaxInt64/time.Second) {
+		return fmt.Errorf("%d seconds exceeds the maximum duration", n)
 	}
 	*s = seconds(time.Duration(n) * time.Second)
 	return nil

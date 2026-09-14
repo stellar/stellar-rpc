@@ -77,7 +77,7 @@ func (p *resultPoller) checkOnce(ctx context.Context) (*Result, error) {
 	res, err := FetchResult(ctx, p.s3Client, p.bucket, p.key)
 	switch {
 	case errors.Is(err, ErrResultNotReady):
-		logger.Infof("still waiting for s3://%s/%s", p.bucket, p.key)
+		logger.Infof("still waiting for %s", p.location())
 		return nil, nil //nolint:nilnil // absent is a healthy wait
 	case err != nil:
 		return nil, err
