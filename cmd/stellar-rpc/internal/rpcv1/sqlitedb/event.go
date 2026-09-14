@@ -3,6 +3,7 @@ package sqlitedb
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -370,18 +371,15 @@ func (eventHandler *eventHandler) GetEvents(
 
 	defer rows.Close()
 
-	type rowResult struct {
-		eventCursorID   string
-		eventData       []byte
-		transactionHash []byte
+	var row struct {
+		eventCursorID string
+		// Use sql.RawBytes over []byte to avoid unnecessary copying
+		eventData       sql.RawBytes
+		transactionHash sql.RawBytes
 		ledgerCloseTime int64
 	}
-
 	foundRows := 0
 	for rows.Next() {
-		foundRows++
-
-		row := rowResult{}
 		if err := rows.Scan(
 			&row.eventCursorID,
 			&row.eventData,
@@ -408,6 +406,7 @@ func (eventHandler *eventHandler) GetEvents(
 		if !keepGoing {
 			return nil
 		}
+		foundRows++
 	}
 
 	eventHandler.log.
