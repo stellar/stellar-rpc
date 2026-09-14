@@ -43,16 +43,23 @@ func TestV1FiltersTranslation(t *testing.T) {
 		// A validated set holds only contract and system, so a set of both
 		// constrains nothing; with nothing else in the filter, one branch
 		// matches everything and the query collapses to match-all.
-		"type set of both collapses to match-all": {
-			in:   []protocol.EventFilter{{EventType: bothTypes}},
-			want: nil,
+		"type set of both is one clause per type": {
+			in: []protocol.EventFilter{{EventType: bothTypes}},
+			want: []event.Filter{
+				{EventType: eventTypePtr(xdr.ContractEventTypeContract)},
+				{EventType: eventTypePtr(xdr.ContractEventTypeSystem)},
+			},
 		},
-		"type set of both with a contract id keeps the contract id": {
+		"type set of both with a contract id keeps the contract id on each clause": {
 			in: []protocol.EventFilter{{
 				EventType: bothTypes, ContractIDs: []string{testContractStrkey(t, 0xAA)},
 			}},
-			want: []event.Filter{{ContractID: testContractRaw(0xAA)}},
+			want: []event.Filter{
+				{ContractID: testContractRaw(0xAA), EventType: eventTypePtr(xdr.ContractEventTypeContract)},
+				{ContractID: testContractRaw(0xAA), EventType: eventTypePtr(xdr.ContractEventTypeSystem)},
+			},
 		},
+
 		// N segments without a trailing "**" match exactly N topics.
 		"one-segment topic is exact arity one": {
 			in: []protocol.EventFilter{{Topics: []protocol.TopicFilter{{seg(xferVal)}}}},
