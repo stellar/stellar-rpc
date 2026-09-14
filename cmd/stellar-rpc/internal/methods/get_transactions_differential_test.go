@@ -274,7 +274,7 @@ func transactionsCorpus(t *testing.T) []xdr.LedgerCloseMeta {
 			diffTxSpec{diffClassicEnvelope(201), diffMetaV1(), false},
 		),
 		// 3: an empty ledger mid-corpus — the page must walk straight past it.
-		createEmptyTestLedger(103),
+		diffLCM(t, 1, 103),
 		// 4: LCM V2, Soroban envelope, V3 meta WITH SorobanMeta: contract
 		// events and diagnostic events both present.
 		diffLCM(t, 2, 104,
@@ -296,7 +296,7 @@ func transactionsCorpus(t *testing.T) []xdr.LedgerCloseMeta {
 			), true},
 			diffTxSpec{diffClassicEnvelope(205), diffMetaV4(nil, nil, nil), false},
 		),
-		// 7: fee bumps — over a classic inner and over a Soroban inner, one
+		// 7: fee bumps — over a classic inner and over Soroban inners, two
 		// succeeding and one failing, on V4 and V3 metas.
 		diffLCM(t, 2, 107,
 			diffTxSpec{
@@ -356,15 +356,13 @@ func transactionsCorpus(t *testing.T) []xdr.LedgerCloseMeta {
 			diffTxSpec{txEnvelope(225), diffMetaV4([]xdr.OperationMetaV2{{Events: []xdr.ContractEvent{ev2}}}, nil, nil), true},
 			diffTxSpec{diffFeeBumpEnvelope(txEnvelope(226)), diffMetaV4(nil, nil, []xdr.DiagnosticEvent{diag}), true},
 		),
-		// 13: another empty ledger, this time at the tip, so a walk that runs
-		// off the end of the corpus ends on one.
-		createEmptyTestLedger(113),
+		// 13: another empty ledger, on LCM V2 and at the tip, so a walk that
+		// runs off the end of the corpus ends on one.
+		diffLCM(t, 2, 113),
 	}
 }
 
 // transactionsCorpusFirst / transactionsCorpusLast bracket transactionsCorpus.
-// The run starts at 101 because the shared fixture helpers (createTestLedger,
-// createEmptyTestLedger) offset their sequences by 100.
 const (
 	transactionsCorpusFirst = 101
 	transactionsCorpusLast  = 113
