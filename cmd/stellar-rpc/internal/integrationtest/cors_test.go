@@ -15,13 +15,13 @@ import (
 // Specifically, when we include an Origin header in the request, a stellar-rpc should response
 // with a corresponding Access-Control-Allow-Origin.
 func TestCORS(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: infrastructure.SkipLimitsUpgrade()})
 
 	body := `{"jsonrpc": "2.0", "id": 1, "method": "getHealth"}`
 	request, err := http.NewRequestWithContext(
 		t.Context(),
 		http.MethodPost,
-		test.GetSorobanRPCURL(),
+		test.GetStellarRPCURL(),
 		bytes.NewBufferString(body),
 	)
 	require.NoError(t, err)

@@ -161,7 +161,7 @@ func TestHTTPRequestDurationLimiter_NoLimiting_Warn(t *testing.T) {
 	require.NoError(t, resp.Body.Close())
 	require.NoError(t, err)
 	require.Equal(t, []byte{1, 2, 3}, bytes)
-	require.Equal(t, resp.StatusCode, http.StatusOK)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Equal(t, int64(1), warningCounter.count)
 	require.Zero(t, limitCounter.count)
 	require.Equal(t, [7]int{0, 0, 0, 0, 1, 0, 0}, logCounter.writtenLogEntries)
@@ -318,7 +318,7 @@ func TestHTTPRequestDurationLimiter_Panicing(t *testing.T) {
 	ctx := t.Context()
 	addr, redirector, shutdown := createTestServer(ctx)
 	longExecutingHandler := &TestServerHandlerWrapper{
-		f: func(res http.ResponseWriter, req *http.Request) {
+		f: func(_ http.ResponseWriter, _ *http.Request) {
 			panic("test panic")
 		},
 	}

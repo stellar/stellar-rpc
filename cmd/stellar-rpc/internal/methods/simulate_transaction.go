@@ -13,10 +13,10 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 )
 
@@ -281,8 +281,8 @@ func sorobanDataFromTx(tx xdr.Transaction) (*xdr.SorobanTransactionData, bool) {
 //
 //nolint:cyclop,funlen
 func NewSimulateTransactionHandler(logger *log.Entry,
-	ledgerReader db.LedgerReader,
-	coreClient interfaces.FastCoreClient, getter PreflightGetter,
+	ledgerReader store.LedgerReader,
+	coreClient host.FastCoreClient, getter PreflightGetter,
 	decodeOptions xdr.DecodeOptions,
 ) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, request protocol.SimulateTransactionRequest,
@@ -483,7 +483,7 @@ type latestLedgerPreflightInfo struct {
 
 func getLatestLedgerPreflightInfo(
 	ctx context.Context,
-	ledgerReader db.LedgerReader,
+	ledgerReader store.LedgerReader,
 	latestLedger uint32,
 ) (latestLedgerPreflightInfo, error) {
 	// Obtain every preflight ledger field from the same meta so sequence and
