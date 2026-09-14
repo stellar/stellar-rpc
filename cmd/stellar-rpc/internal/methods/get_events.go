@@ -118,13 +118,6 @@ func combineTopics(filters []protocol.EventFilter) (store.TopicFilters, error) {
 	return topicFilters, nil
 }
 
-type entry struct {
-	cursor               protocol.Cursor
-	ledgerCloseTimestamp int64
-	event                xdr.ContractEventView
-	txHash               *xdr.Hash
-}
-
 // TODO: remove this linter exclusions
 //
 //nolint:cyclop,funlen
@@ -177,8 +170,6 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 		}
 	}
 
-	found := make([]entry, 0, limit)
-
 	contractIDs, err := combineContractIDs(request.Filters)
 	if err != nil {
 		return protocol.GetEventsResponse{}, &jrpc2.Error{
@@ -203,6 +194,7 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 	}
 	plan := store.PlanFilters(filters)
 
+	results := []protocol.EventInfo{}
 	// Scan function to apply filters
 	var eventViewScanFunction store.ViewScanFunction = func(
 		eventView xdr.DiagnosticEventView, cursor protocol.Cursor, ledgerCloseTimestamp int64, txHash *xdr.Hash,
@@ -217,10 +209,21 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 				return false, err
 			}
 		}
+		// Render the matched event in the callback to prevent two passes
 		if matched {
-			found = append(found, entry{cursor, ledgerCloseTimestamp, event, txHash})
+			info, err := EventInfoFromView(
+				event,
+				cursor,
+				time.Unix(ledgerCloseTimestamp, 0).UTC().Format(time.RFC3339),
+				txHash.HexString(),
+				request.Format,
+			)
+			if err != nil {
+				return false, errors.Wrap(err, "could not parse event")
+			}
+			results = append(results, info)
 		}
-		return uint(len(found)) < limit, nil
+		return uint(len(results)) < limit, nil
 	}
 
 	err = h.dbReader.GetEvents(ctx, cursorRange, contractIDs, topics, eventTypes, eventViewScanFunction)
@@ -228,21 +231,6 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 		return protocol.GetEventsResponse{}, &jrpc2.Error{
 			Code: jrpc2.InvalidRequest, Message: err.Error(),
 		}
-	}
-
-	results := make([]protocol.EventInfo, 0, len(found))
-	for _, entry := range found {
-		info, err := EventInfoFromView(
-			entry.event,
-			entry.cursor,
-			time.Unix(entry.ledgerCloseTimestamp, 0).UTC().Format(time.RFC3339),
-			entry.txHash.HexString(),
-			request.Format,
-		)
-		if err != nil {
-			return protocol.GetEventsResponse{}, errors.Wrap(err, "could not parse event")
-		}
-		results = append(results, info)
 	}
 
 	var cursor string

@@ -24,7 +24,9 @@ type TopicFilter []TopicCondition
 // matches a row, the DB event is considered a candidate for further filtering.
 type TopicFilters []TopicFilter
 
-// ViewScanFunction visits one event; returning false stops the scan, an error aborts it.
+// ViewScanFunction visits one event. eventView and txHash are on loan for the
+// call's duration, so copy anything that must persist. Returning false stops
+// the scan and an error aborts it.
 type ViewScanFunction func(
 	eventView xdr.DiagnosticEventView,
 	cursor protocol.Cursor,
