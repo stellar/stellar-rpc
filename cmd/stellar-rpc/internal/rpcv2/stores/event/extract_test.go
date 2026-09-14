@@ -1,6 +1,7 @@
 package event_test
 
 import (
+	"bytes"
 	"fmt"
 	"path"
 	"testing"
@@ -607,7 +608,7 @@ func sqliteEventRows(t *testing.T, lcm xdr.LedgerCloseMeta) []sqliteEventRow {
 				cursor:             cur,
 				txHash:             *txHash,
 				ledgerCloseTime:    closeTime,
-				contractEventBytes: evBytes,
+				contractEventBytes: bytes.Clone(evBytes),
 			})
 			return true, nil
 		})
