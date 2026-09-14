@@ -143,8 +143,11 @@ func runChunks(ctx context.Context, logger *supportlog.Entry, d *deps, targets [
 }
 
 // verifyChunk checks one chunk whose frozen kinds are given. The ledgers pack
-// is the source, so it is checked first; a chunk whose ledgers fail is
-// reported for that alone, and its derived artifacts are not compared.
+// is the source, so it is checked first, as a whole (its content hash and
+// its archive anchor) and then ledger by ledger. Derived artifacts are
+// compared for every ledger up to the first that fails a source check; from
+// there on only the source checks continue, so nothing is compared against
+// a source the run no longer trusts.
 func verifyChunk(ctx context.Context, d *deps, t target) ChunkResult {
 	res := ChunkResult{Chunk: t.chunk, Kinds: t.frozen.Kinds()}
 	if !t.frozen.Has(geometry.KindLedgers) {

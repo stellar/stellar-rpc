@@ -62,6 +62,9 @@ func (r *chunkRun) run(ctx context.Context) error {
 	if err != nil || !ok {
 		return err
 	}
+	if err := r.anchor(lr); err != nil {
+		return err
+	}
 	if r.prevHash, err = r.previousChunkHash(); err != nil {
 		return err
 	}
@@ -131,16 +134,7 @@ func (r *chunkRun) previousChunkHash() (*xdr.Hash, error) {
 		return nil, err
 	}
 	defer func() { _ = lr.Close() }()
-	var h xdr.Hash
-	err = lr.WithLedger(r.c.FirstLedger()-1, func(raw []byte) error {
-		var lcm xdr.LedgerCloseMeta
-		if err := xdr.SafeUnmarshal(raw, &lcm); err != nil {
-			return err
-		}
-		entry := lcm.LedgerHeaderHistoryEntry()
-		h, err = xdr.HashXdr(&entry.Header)
-		return err
-	})
+	h, err := headerHash(lr, r.c.FirstLedger()-1)
 	if err != nil {
 		return nil, fmt.Errorf("previous chunk %s: %w", prev, err)
 	}
@@ -303,14 +297,16 @@ func (r *chunkRun) finish(ctx context.Context) error {
 	if r.bin != nil {
 		r.bin.finish()
 	}
-	return r.anchor()
+	return nil
 }
 
-// anchor compares the chunk's last header hash with the network's history
-// archive. The chain authenticates backwards, each header committing to the
-// one before it, so an authentic last header makes every header of the
-// chunk, and everything they commit to, the network's.
-func (r *chunkRun) anchor() error {
+// anchor compares the hash of the chunk's last header with the network's
+// history archive. The chain authenticates backwards, each header committing
+// to the one before it, so an authentic last header makes every header of
+// the chunk, and everything they commit to, the network's. It runs before
+// the walk so its verdict stands whatever the walk finds: with the last
+// header anchored, a broken link lies before it.
+func (r *chunkRun) anchor(lr *ledger.ColdReader) error {
 	if r.d.archive == nil {
 		return nil
 	}
@@ -319,13 +315,36 @@ func (r *chunkRun) anchor() error {
 	if err != nil {
 		return fmt.Errorf("history archive header for ledger %d: %w", seq, err)
 	}
-	if entry.Hash != *r.prevHash {
+	stored, err := headerHash(lr, seq)
+	if err != nil {
+		return err
+	}
+	if entry.Hash != stored {
 		r.rec.add(Mismatch{
 			Ledger: seq, Artifact: "ledgers", Field: "archive_anchor",
-			Expected: hexHash(entry.Hash), Actual: hexHash(*r.prevHash),
+			Expected: hexHash(entry.Hash), Actual: hexHash(stored),
 		})
 	}
 	return nil
+}
+
+// headerHash decodes one stored ledger and hashes its header.
+func headerHash(lr *ledger.ColdReader, seq uint32) (xdr.Hash, error) {
+	var h xdr.Hash
+	err := lr.WithLedger(seq, func(raw []byte) error {
+		var lcm xdr.LedgerCloseMeta
+		if err := xdr.SafeUnmarshal(raw, &lcm); err != nil {
+			return err
+		}
+		entry := lcm.LedgerHeaderHistoryEntry()
+		var err error
+		h, err = xdr.HashXdr(&entry.Header)
+		return err
+	})
+	if err != nil {
+		return xdr.Hash{}, fmt.Errorf("ledger %d header: %w", seq, err)
+	}
+	return h, nil
 }
 
 // indexCache holds one open reader per frozen tx-hash index coverage the
