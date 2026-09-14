@@ -2,6 +2,7 @@ package verify
 
 import (
 	"context"
+	"io/fs"
 	"iter"
 	"os"
 	"testing"
@@ -263,8 +264,75 @@ func TestRun_ChunkRangeAndUnfrozenLedgers(t *testing.T) {
 	assert.Equal(t, chunk.ID(1), report.Chunks[0].Chunk)
 	assert.Empty(t, report.Chunks[0].Mismatches)
 	assert.Equal(t, "ledgers artifact not frozen", report.Chunks[1].Skipped)
-	require.Len(t, report.Indexes, 1, "window 0 holds a frozen coverage over chunk 0")
-	assert.Contains(t, report.Indexes[0].Skipped, "chunk 00000000 not verified in this run")
+	assert.Empty(t, report.Indexes, "no chunk in range resolved through an index")
+	assert.False(t, report.Failed())
+}
+
+func TestRun_RejectsBadRanges(t *testing.T) {
+	f := newFixtureTree(t)
+	ledgers, _ := chunkLedgers(t, 0, xdr.Hash{}, "", 0)
+	f.backfillChunk0(t, ledgers)
+	require.NoError(t, f.cat.Close())
+	run := func(start, end int64) error {
+		_, err := Run(context.Background(), rpcv2test.SilentLogger(), Options{
+			Layout: f.layout, Passphrase: passphrase, StartChunk: start, EndChunk: end,
+		})
+		return err
+	}
+	require.ErrorContains(t, run(-2, -1), "chunk bounds")
+	require.ErrorContains(t, run(3, 1), "past end chunk")
+	require.ErrorContains(t, run(7, 9), "no frozen chunks in range")
+	require.NoError(t, run(0, 0))
+}
+
+// TestRun_MissingLedgerPack: a pack that cannot be opened is the run's
+// error for that chunk, not a verdict on the data.
+func TestRun_MissingLedgerPack(t *testing.T) {
+	f := newFixtureTree(t)
+	ledgers, _ := chunkLedgers(t, 0, xdr.Hash{}, "", 0)
+	f.backfillChunk0(t, ledgers)
+	require.NoError(t, os.Remove(f.layout.LedgerPackPath(0)))
+
+	report := f.run(t, -1)
+	c := report.Chunks[0]
+	require.ErrorIs(t, c.Err, fs.ErrNotExist)
+	assert.Empty(t, c.Mismatches)
+	assert.True(t, report.Failed())
+}
+
+// TestRun_BinSweptAfterListing races the run against a live daemon: the
+// chunk's .bin key was frozen when the run listed its targets, but by the
+// time the chunk opens, the daemon has finalized the window's index, demoted
+// the key and swept the file. The chunk is then checked through the index.
+func TestRun_BinSweptAfterListing(t *testing.T) {
+	f := newFixtureTree(t)
+	ledgers, _ := chunkLedgers(t, 0, xdr.Hash{}, "", richEvery)
+	f.backfillChunk0(t, ledgers)
+	require.NoError(t, f.cat.Close())
+
+	sweep := func(chunk.ID) {
+		txl, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
+		require.NoError(t, err)
+		daemon, err := catalog.Open(f.layout.CatalogPath(), f.layout, txl, rpcv2test.SilentLogger())
+		require.NoError(t, err)
+		require.NoError(t, daemon.DemoteChunkArtifacts([]catalog.ArtifactRef{
+			{Chunk: 0, Kind: geometry.KindTxHash, State: geometry.StateFrozen},
+		}))
+		require.NoError(t, daemon.Close())
+		require.NoError(t, os.Remove(f.layout.TxHashBinPath(0)))
+	}
+	report, err := Run(context.Background(), rpcv2test.SilentLogger(), Options{
+		Layout: f.layout, Passphrase: passphrase, StartChunk: -1, EndChunk: -1, beforeOpen: sweep,
+	})
+	require.NoError(t, err)
+	c := report.Chunks[0]
+	require.NoError(t, c.Err)
+	assert.Equal(t, geometry.AllKinds(), c.Kinds, "listed with its .bin key still frozen")
+	assert.Empty(t, c.Mismatches)
+	assert.True(t, c.IndexChecked)
+	assert.Equal(t, 7*richPerChunk, c.TxHashes)
+	require.Len(t, report.Indexes, 1)
+	assert.Equal(t, report.Indexes[0].Expected, report.Indexes[0].Actual)
 	assert.False(t, report.Failed())
 }
 

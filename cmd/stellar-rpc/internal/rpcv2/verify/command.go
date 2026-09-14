@@ -3,6 +3,7 @@ package verify
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/signal"
 	"syscall"
 
@@ -58,7 +59,8 @@ It exits non-zero when any chunk has a mismatch.`,
 	fs.IntVar(&opts.Workers, "workers", 0,
 		"chunks checked concurrently; each holds a chunk's expected term bitmaps in memory (default: one per CPU)")
 	fs.StringVar(&opts.ArchiveURL, "history-archive-url", "",
-		"history archive to anchor each chunk's first ledger hash against (default: no anchoring)")
+		"history archive to anchor each chunk's last ledger hash against; the chain authenticates the rest "+
+			"(default: no anchoring)")
 	fs.IntVar(&opts.MaxMismatches, "max-mismatches", 0,
 		"mismatches recorded per chunk before the rest are only counted (default: 50)")
 	_ = cmd.MarkFlagRequired("network-passphrase")
@@ -89,8 +91,11 @@ func runCommand(ctx context.Context, logger *supportlog.Entry, opts Options) err
 	logger.Info(report.Summary())
 	for _, c := range report.Chunks {
 		for _, m := range c.Mismatches {
-			logger.Warnf("chunk %s ledger %d %s %s: expected %s, got %s",
-				c.Chunk, m.Ledger, m.Artifact, m.Field, m.Expected, m.Actual)
+			where := fmt.Sprintf("chunk %s ledger %d", c.Chunk, m.Ledger)
+			if m.TxHash != "" {
+				where += " tx " + m.TxHash
+			}
+			logger.Warnf("%s %s %s: expected %s, got %s", where, m.Artifact, m.Field, m.Expected, m.Actual)
 		}
 		if c.Dropped > 0 {
 			logger.Warnf("chunk %s: %d more mismatches not shown", c.Chunk, c.Dropped)

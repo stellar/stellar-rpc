@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"sort"
+	"sync"
 
 	"github.com/stellar/go-stellar-sdk/historyarchive"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -12,6 +14,8 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
@@ -80,12 +84,12 @@ func (r *chunkRun) run(ctx context.Context) error {
 }
 
 // checkPack verifies the pack's content hash and that it spans the whole
-// chunk. A failure is a verdict on the pack unless the run itself was
-// canceled.
+// chunk. A hash mismatch or a corrupt file is a verdict on the pack; any
+// other failure, a missing or unreadable file, is the run's error.
 func (r *chunkRun) checkPack(ctx context.Context, lr *ledger.ColdReader) (bool, error) {
 	if err := lr.Verify(ctx); err != nil {
-		if ctx.Err() != nil {
-			return false, ctx.Err()
+		if !errors.Is(err, packfile.ErrContentHashMismatch) && !errors.Is(err, stores.ErrCorrupt) {
+			return false, err
 		}
 		r.rec.add(Mismatch{
 			Artifact: "ledgers", Field: "content_hash", Expected: "the hash the writer stored", Actual: err.Error(),
@@ -94,8 +98,11 @@ func (r *chunkRun) checkPack(ctx context.Context, lr *ledger.ColdReader) (bool, 
 	}
 	last, err := lr.LastSeq()
 	if err != nil {
+		if !errors.Is(err, stores.ErrCorrupt) {
+			return false, err
+		}
 		r.rec.add(Mismatch{Artifact: "ledgers", Field: "pack", Actual: err.Error()})
-		return false, nil //nolint:nilerr // recorded as a verdict on the pack
+		return false, nil
 	}
 	if last != r.c.LastLedger() {
 		r.rec.add(Mismatch{Artifact: "ledgers", Field: "last_ledger", Expected: u32(r.c.LastLedger()), Actual: u32(last)})
@@ -146,26 +153,81 @@ func (r *chunkRun) previousChunkHash() (*xdr.Hash, error) {
 // its index finalized has only the index; one still waiting on its index
 // build has only the .bin.
 func (r *chunkRun) openCheckers(ctx context.Context) error {
-	layout := r.d.cat.Layout()
+	if r.d.opts.beforeOpen != nil {
+		r.d.opts.beforeOpen(r.c)
+	}
 	if r.frozen.Has(geometry.KindEvents) {
-		ec, err := newEventsChecker(ctx, r.rec, r.c, layout.EventsBucketDir(r.c))
+		ec, err := newEventsChecker(ctx, r.rec, r.c, r.d.cat.Layout().EventsBucketDir(r.c))
 		if err != nil {
 			return err
 		}
 		r.events = ec
 	}
-	if idx, covered := r.d.indexes.forChunk(r.c); covered {
-		r.index = &indexChecker{rec: r.rec, idx: idx}
-	}
-	if r.frozen.Has(geometry.KindTxHash) {
-		bc, err := newBinChecker(r.rec, layout.TxHashBinPath(r.c), r.d.cat.TxHashIndexSecret(r.c))
-		if err != nil {
-			r.closeCheckers()
-			return err
-		}
-		r.bin = bc
+	if err := r.openTxHashCheckers(); err != nil {
+		r.closeCheckers()
+		return err
 	}
 	return nil
+}
+
+// openTxHashCheckers opens the .bin checker when the chunk's key was frozen
+// at listing, and the index checker when a frozen coverage contains the
+// chunk. A .bin that has vanished since listing means a live daemon
+// finalized the chunk's index and swept the inputs; the catalog is then
+// re-read fresh, and the chunk is checked through the index it now has.
+func (r *chunkRun) openTxHashCheckers() error {
+	cat := r.d.cat
+	if r.frozen.Has(geometry.KindTxHash) {
+		bc, err := newBinChecker(r.rec, cat.Layout().TxHashBinPath(r.c), cat.TxHashIndexSecret(r.c))
+		switch {
+		case err == nil:
+			r.bin = bc
+		case errors.Is(err, fs.ErrNotExist):
+			cov, covered, ferr := r.d.freshCoverageAfterSweep(r.c)
+			if ferr != nil {
+				return ferr
+			}
+			if !covered {
+				return err
+			}
+			return r.openIndex(cov)
+		default:
+			return err
+		}
+	}
+	cov, covered, err := r.d.indexes.coverageOf(cat, r.c)
+	if err != nil || !covered {
+		return err
+	}
+	return r.openIndex(cov)
+}
+
+func (r *chunkRun) openIndex(cov geometry.TxHashIndexCoverage) error {
+	idx, err := r.d.indexes.reader(cov)
+	if err != nil {
+		return err
+	}
+	r.index = &indexChecker{rec: r.rec, idx: idx}
+	return nil
+}
+
+// freshCoverageAfterSweep re-reads the catalog through a new read-only open,
+// since the run's own handle is a snapshot of the catalog as it was opened,
+// and reports whether chunk c's .bin key is gone and a frozen coverage
+// contains it. Both are true after a terminal index commit and its sweep;
+// a key still frozen means the .bin really is missing.
+func (d *deps) freshCoverageAfterSweep(c chunk.ID) (geometry.TxHashIndexCoverage, bool, error) {
+	cat := d.cat
+	fresh, err := catalog.OpenReadOnly(cat.Layout().CatalogPath(), cat.Layout(), cat.TxHashIndexLayout(), cat.Logger())
+	if err != nil {
+		return geometry.TxHashIndexCoverage{}, false, fmt.Errorf("re-read catalog: %w", err)
+	}
+	defer func() { _ = fresh.Close() }()
+	state, err := fresh.State(c, geometry.KindTxHash)
+	if err != nil || state == geometry.StateFrozen {
+		return geometry.TxHashIndexCoverage{}, false, err
+	}
+	return d.indexes.coverageOf(fresh, c)
 }
 
 func (r *chunkRun) closeCheckers() {
@@ -266,10 +328,12 @@ func (r *chunkRun) anchor() error {
 	return nil
 }
 
-// indexCache holds the frozen tx-hash index coverages the run's chunks fall
-// in, each with its reader open for the run.
+// indexCache holds one open reader per frozen tx-hash index coverage the
+// run resolves a chunk through.
 type indexCache struct {
-	byIndex map[geometry.TxHashIndexID]*indexEntry
+	layout  geometry.Layout
+	mu      sync.Mutex
+	readers map[string]*indexEntry // by coverage key
 }
 
 type indexEntry struct {
@@ -277,47 +341,41 @@ type indexEntry struct {
 	reader *txhash.ColdReader
 }
 
-// openIndexes resolves, for every index a target chunk belongs to, its unique
-// frozen coverage through the catalog, and opens the coverage's reader.
-func openIndexes(cat *catalog.Catalog, targets []target) (*indexCache, error) {
-	ic := &indexCache{byIndex: make(map[geometry.TxHashIndexID]*indexEntry)}
-	txl := cat.TxHashIndexLayout()
-	for _, t := range targets {
-		id := txl.TxHashIndexID(t.chunk)
-		if _, seen := ic.byIndex[id]; seen {
-			continue
-		}
-		cov, frozen, err := cat.FrozenTxHashIndex(id)
-		if err != nil {
-			return nil, errors.Join(err, ic.closeAll())
-		}
-		if !frozen {
-			continue
-		}
-		reader, err := txhash.OpenColdReader(cat.Layout().TxHashIndexFilePath(cov))
-		if err != nil {
-			return nil, errors.Join(err, ic.closeAll())
-		}
-		ic.byIndex[id] = &indexEntry{cov: cov, reader: reader}
-	}
-	return ic, nil
+func newIndexCache(layout geometry.Layout) *indexCache {
+	return &indexCache{layout: layout, readers: make(map[string]*indexEntry)}
 }
 
-// forChunk returns the reader of the frozen coverage containing c, or
-// covered=false when no frozen coverage holds it.
-func (ic *indexCache) forChunk(c chunk.ID) (*txhash.ColdReader, bool) {
-	for _, e := range ic.byIndex {
-		if c >= e.cov.Lo && c <= e.cov.Hi {
-			return e.reader, true
-		}
+// coverageOf returns the unique frozen coverage of chunk c's index as cat
+// records it, or covered=false when none contains c.
+func (ic *indexCache) coverageOf(cat *catalog.Catalog, c chunk.ID) (geometry.TxHashIndexCoverage, bool, error) {
+	cov, frozen, err := cat.FrozenTxHashIndex(cat.TxHashIndexLayout().TxHashIndexID(c))
+	if err != nil || !frozen || c < cov.Lo || c > cov.Hi {
+		return geometry.TxHashIndexCoverage{}, false, err
 	}
-	return nil, false
+	return cov, true, nil
+}
+
+// reader returns cov's reader, opened on first use.
+func (ic *indexCache) reader(cov geometry.TxHashIndexCoverage) (*txhash.ColdReader, error) {
+	ic.mu.Lock()
+	defer ic.mu.Unlock()
+	if e, ok := ic.readers[cov.Key]; ok {
+		return e.reader, nil
+	}
+	reader, err := txhash.OpenColdReader(ic.layout.TxHashIndexFilePath(cov))
+	if err != nil {
+		return nil, err
+	}
+	ic.readers[cov.Key] = &indexEntry{cov: cov, reader: reader}
+	return reader, nil
 }
 
 // entries returns the resolved coverages, ascending by index.
 func (ic *indexCache) entries() []*indexEntry {
-	out := make([]*indexEntry, 0, len(ic.byIndex))
-	for _, e := range ic.byIndex {
+	ic.mu.Lock()
+	defer ic.mu.Unlock()
+	out := make([]*indexEntry, 0, len(ic.readers))
+	for _, e := range ic.readers {
 		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].cov.Index < out[j].cov.Index })
@@ -325,10 +383,12 @@ func (ic *indexCache) entries() []*indexEntry {
 }
 
 func (ic *indexCache) closeAll() error {
+	ic.mu.Lock()
+	defer ic.mu.Unlock()
 	var err error
-	for _, e := range ic.byIndex {
+	for _, e := range ic.readers {
 		err = errors.Join(err, e.reader.Close())
 	}
-	clear(ic.byIndex)
+	clear(ic.readers)
 	return err
 }

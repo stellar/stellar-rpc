@@ -93,7 +93,7 @@ func TestOracle_CountsTxsAndInnerHashes(t *testing.T) {
 // operation events no longer match.
 func TestInvokeChecks(t *testing.T) {
 	events := []xdr.ContractEvent{symEvent(9, "a", "x"), symEvent(9, "b", "y")}
-	recon := reconciliationEvent("mint")
+	recon := reconciliationEvent(t, "mint")
 	invoke := func(meta xdr.TransactionMeta, result xdr.TransactionResultResult) txSpec {
 		return txSpec{env: sorobanEnvelope(), result: result, meta: meta}
 	}
@@ -127,10 +127,18 @@ func TestInvokeChecks(t *testing.T) {
 		assert.False(t, got[0].ok())
 	})
 	t.Run("reconciliation prefix is allowed at protocol 23", func(t *testing.T) {
-		withPrefix := append([]xdr.ContractEvent{recon, reconciliationEvent("burn")}, events...)
+		withPrefix := append([]xdr.ContractEvent{recon, reconciliationEvent(t, "burn")}, events...)
 		meta := metaV4Soroban(voidVal(), [][]xdr.ContractEvent{withPrefix}, nil, nil)
 		got := checks(t, 23, invoke(meta, invokeResult(t, voidVal(), events)))
 		assert.True(t, got[0].ok(), "%+v", got[0])
+	})
+	t.Run("a mint event from another contract is not a reconciliation prefix", func(t *testing.T) {
+		foreign := reconciliationEvent(t, "mint")
+		foreign.ContractId[0] ^= 0xff
+		withPrefix := append([]xdr.ContractEvent{foreign}, events...)
+		meta := metaV4Soroban(voidVal(), [][]xdr.ContractEvent{withPrefix}, nil, nil)
+		got := checks(t, 23, invoke(meta, invokeResult(t, voidVal(), events)))
+		assert.False(t, got[0].ok())
 	})
 	t.Run("reconciliation prefix alone at protocol 23", func(t *testing.T) {
 		meta := metaV4Soroban(voidVal(), [][]xdr.ContractEvent{{recon}}, nil, nil)
@@ -198,7 +206,7 @@ func TestInvokeChecks_BackfilledExport(t *testing.T) {
 
 	t.Run("backfilled export: rewritten operation events, originals in diagnostics", func(t *testing.T) {
 		original := symEvent(6, "1000", "transfer", "GISSUER", "GADDRESS", "USDC:GISSUER")
-		rewritten := reconciliationEvent("mint")
+		rewritten := reconciliationEvent(t, "mint")
 		other := events[0]
 		diag := []xdr.DiagnosticEvent{
 			fnCallDiagnostic(),
@@ -216,14 +224,14 @@ func TestInvokeChecks_BackfilledExport(t *testing.T) {
 		assert.True(t, got[0].ok(), "%+v", got[0])
 	})
 	t.Run("backfilled export without diagnostics is not checkable", func(t *testing.T) {
-		meta := metaV4Soroban(voidVal(), [][]xdr.ContractEvent{{reconciliationEvent("mint")}}, nil, nil)
+		meta := metaV4Soroban(voidVal(), [][]xdr.ContractEvent{{reconciliationEvent(t, "mint")}}, nil, nil)
 		got := checks(t, invoke(meta, invokeResult(t, voidVal(), events)))
 		assert.False(t, got[0].ok())
 		assert.NotEmpty(t, got[0].skipped)
 	})
 	t.Run("backfilled export whose diagnostics disagree fails", func(t *testing.T) {
 		diag := []xdr.DiagnosticEvent{diagnostic(events[1], true)}
-		meta := metaV4Soroban(voidVal(), [][]xdr.ContractEvent{{reconciliationEvent("mint")}}, nil, diag)
+		meta := metaV4Soroban(voidVal(), [][]xdr.ContractEvent{{reconciliationEvent(t, "mint")}}, nil, diag)
 		got := checks(t, invoke(meta, invokeResult(t, voidVal(), events)))
 		assert.False(t, got[0].ok())
 		assert.Empty(t, got[0].skipped)

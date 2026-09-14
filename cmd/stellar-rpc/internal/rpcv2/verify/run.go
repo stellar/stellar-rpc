@@ -36,11 +36,16 @@ type Options struct {
 	EndChunk   int64
 	// Workers is how many chunks are checked at once; 0 means one per CPU.
 	Workers int
-	// ArchiveURL, when set, anchors each chunk's first header hash to the
-	// network's history archive.
+	// ArchiveURL, when set, anchors each chunk's last header hash to the
+	// network's history archive; the chain then authenticates every header
+	// before it.
 	ArchiveURL string
 	// MaxMismatches caps the mismatches recorded per chunk; 0 means 50.
 	MaxMismatches int
+
+	// beforeOpen, when set, runs before a chunk's artifacts are opened. A
+	// test seam for racing the run against catalog changes.
+	beforeOpen func(chunk.ID)
 }
 
 func (o Options) withDefaults() Options {
@@ -51,6 +56,19 @@ func (o Options) withDefaults() Options {
 		o.MaxMismatches = 50
 	}
 	return o
+}
+
+func (o Options) validate() error {
+	if o.Passphrase == "" {
+		return errors.New("verify: network passphrase is required")
+	}
+	if o.StartChunk < -1 || o.EndChunk < -1 {
+		return fmt.Errorf("verify: chunk bounds must be -1 or a chunk id, got start %d end %d", o.StartChunk, o.EndChunk)
+	}
+	if o.StartChunk >= 0 && o.EndChunk >= 0 && o.StartChunk > o.EndChunk {
+		return fmt.Errorf("verify: start chunk %d is past end chunk %d", o.StartChunk, o.EndChunk)
+	}
+	return nil
 }
 
 // target is one chunk to check with the kinds the catalog holds frozen.
@@ -64,8 +82,8 @@ type target struct {
 // infrastructure failure of the run itself; verdicts are in the Report.
 func Run(ctx context.Context, logger *supportlog.Entry, opts Options) (*Report, error) {
 	opts = opts.withDefaults()
-	if opts.Passphrase == "" {
-		return nil, errors.New("verify: network passphrase is required")
+	if err := opts.validate(); err != nil {
+		return nil, err
 	}
 	txl, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
 	if err != nil {
@@ -81,10 +99,10 @@ func Run(ctx context.Context, logger *supportlog.Entry, opts Options) (*Report, 
 	if err != nil {
 		return nil, err
 	}
-	indexes, err := openIndexes(cat, targets)
-	if err != nil {
-		return nil, err
+	if len(targets) == 0 {
+		return nil, errors.New("verify: no frozen chunks in range")
 	}
+	indexes := newIndexCache(cat.Layout())
 	defer func() { _ = indexes.closeAll() }()
 	d := &deps{opts: opts, cat: cat, indexes: indexes}
 	if opts.ArchiveURL != "" {

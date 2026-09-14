@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/stellar/go-stellar-sdk/ingest"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
@@ -65,7 +66,7 @@ func expectLedger(passphrase string, lcm *xdr.LedgerCloseMeta) (ledgerExpectatio
 				return exp, fmt.Errorf("tx %s: %w", tx.Hash.HexString(), err)
 			}
 		}
-		exp.invokes = append(exp.invokes, invokeChecks(tx, events[i], lcm.ProtocolVersion())...)
+		exp.invokes = append(exp.invokes, invokeChecks(passphrase, tx, events[i], lcm.ProtocolVersion())...)
 	}
 	exp.events, err = orderEvents(txs, events, lcm.LedgerSequence(), lcm.LedgerCloseTime())
 	return exp, err
@@ -252,7 +253,9 @@ func (c invokeCheck) ok() bool { return c.reason == "" && c.skipped == "" && c.g
 // events rather than the meta's own arrays so that a divergence shared by
 // the decode path and the writers still fails here. A failed transaction
 // keeps no operation events in its meta, so its results are not checked.
-func invokeChecks(tx *ingest.LedgerTransaction, events ingest.TransactionEvents, protocol uint32) []invokeCheck {
+func invokeChecks(
+	passphrase string, tx *ingest.LedgerTransaction, events ingest.TransactionEvents, protocol uint32,
+) []invokeCheck {
 	if !tx.Result.Successful() {
 		return nil
 	}
@@ -273,7 +276,7 @@ func invokeChecks(tx *ingest.LedgerTransaction, events ingest.TransactionEvents,
 		case i >= len(events.OperationEvents):
 			c.reason = "operation has no events in meta"
 		default:
-			c.got, c.skipped, c.reason = committedHash(rv, events, i, tx.UnsafeMeta.V, protocol, want)
+			c.got, c.skipped, c.reason = committedHash(passphrase, rv, events, i, tx.UnsafeMeta.V, protocol, want)
 		}
 		out = append(out, c)
 	}
@@ -312,7 +315,8 @@ func returnValue(tx *ingest.LedgerTransaction) (xdr.ScVal, bool) {
 // below protocol 23 the originals kept among the diagnostic events are
 // hashed instead, and the check is skipped when there are none.
 func committedHash(
-	rv xdr.ScVal, events ingest.TransactionEvents, i int, metaVersion int32, protocol uint32, want xdr.Hash,
+	passphrase string, rv xdr.ScVal, events ingest.TransactionEvents, i int, metaVersion int32, protocol uint32,
+	want xdr.Hash,
 ) (xdr.Hash, string, string) {
 	opEvents := events.OperationEvents[i]
 	full, err := hashPreimage(rv, opEvents)
@@ -322,7 +326,7 @@ func committedHash(
 	case full == want:
 		return full, "", ""
 	case protocol == protocol23:
-		return hashAfterReconciliation(rv, opEvents, full, want)
+		return hashAfterReconciliation(passphrase, rv, opEvents, full, want)
 	case protocol < protocol23 && metaVersion == 4:
 		if len(events.DiagnosticEvents) == 0 {
 			return full, "backfilled export without the diagnostic events that hold the committed originals", ""
@@ -338,9 +342,13 @@ func committedHash(
 
 // hashAfterReconciliation hashes the preimage over each suffix of events
 // that skips a leading run of reconciliation events, until one matches
-// want. It returns the matching hash, or full when none does.
-func hashAfterReconciliation(rv xdr.ScVal, events []xdr.ContractEvent, full, want xdr.Hash) (xdr.Hash, string, string) {
-	for k := 1; k <= len(events) && isReconciliationEvent(&events[k-1]); k++ {
+// want. It returns the matching hash, or full when none does. The skipped
+// events are unhashed by design, so this can only bound what they look
+// like, not prove them.
+func hashAfterReconciliation(
+	passphrase string, rv xdr.ScVal, events []xdr.ContractEvent, full, want xdr.Hash,
+) (xdr.Hash, string, string) {
+	for k := 1; k <= len(events) && isReconciliationEvent(passphrase, &events[k-1]); k++ {
 		h, err := hashPreimage(rv, events[k:])
 		if err != nil {
 			return xdr.Hash{}, "", err.Error()
@@ -353,21 +361,49 @@ func hashAfterReconciliation(rv xdr.ScVal, events []xdr.ContractEvent, full, wan
 }
 
 // isReconciliationEvent reports whether ev has the shape of the asset
-// contract mint or burn events core prepends to an invocation's events:
-// a contract event with three topics, the first the symbol mint or burn.
-func isReconciliationEvent(ev *xdr.ContractEvent) bool {
-	if ev.Type != xdr.ContractEventTypeContract || ev.Body.V != 0 || ev.Body.V0 == nil {
+// contract mint or burn events core prepends to an invocation's events: a
+// contract event with three topics, the first the symbol mint or burn, the
+// third the asset's SEP-11 string, emitted by that asset's own contract.
+func isReconciliationEvent(passphrase string, ev *xdr.ContractEvent) bool {
+	if ev.Type != xdr.ContractEventTypeContract || ev.ContractId == nil || ev.Body.V != 0 || ev.Body.V0 == nil {
 		return false
 	}
 	topics := ev.Body.V0.Topics
 	if len(topics) != 3 || topics[0].Type != xdr.ScValTypeScvSymbol || topics[0].Sym == nil {
 		return false
 	}
-	switch *topics[0].Sym {
-	case "mint", "burn":
-		return true
+	if kind := *topics[0].Sym; kind != "mint" && kind != "burn" {
+		return false
 	}
-	return false
+	if topics[2].Type != xdr.ScValTypeScvString || topics[2].Str == nil {
+		return false
+	}
+	asset, err := assetFromSEP11(string(*topics[2].Str))
+	if err != nil {
+		return false
+	}
+	cid, err := asset.ContractID(passphrase)
+	if err != nil {
+		return false
+	}
+	return xdr.ContractId(cid) == *ev.ContractId
+}
+
+// assetFromSEP11 parses the asset string form core writes into asset events:
+// "native", or "CODE:ISSUER".
+func assetFromSEP11(s string) (xdr.Asset, error) {
+	if s == "native" {
+		return xdr.BuildAsset("native", "", "")
+	}
+	code, issuer, ok := strings.Cut(s, ":")
+	if !ok {
+		return xdr.Asset{}, fmt.Errorf("not a SEP-11 asset string: %q", s)
+	}
+	typ := "credit_alphanum4"
+	if len(code) > 4 {
+		typ = "credit_alphanum12"
+	}
+	return xdr.BuildAsset(typ, issuer, code)
 }
 
 // committedFromDiagnostics returns, in emission order, the contract events

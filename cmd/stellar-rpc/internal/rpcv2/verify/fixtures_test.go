@@ -162,9 +162,20 @@ func symEvent(cid byte, data string, topics ...string) xdr.ContractEvent {
 }
 
 // reconciliationEvent is the asset-contract mint or burn event core prepends
-// to an invocation's events from protocol 23.
-func reconciliationEvent(kind string) xdr.ContractEvent {
-	return symEvent(6, "1000", kind, "GADDRESS", "USDC:GISSUER")
+// to an invocation's events at protocol 23: emitted by the asset's own
+// contract, its third topic the asset's SEP-11 string.
+func reconciliationEvent(t *testing.T, kind string) xdr.ContractEvent {
+	t.Helper()
+	issuer := keypair.MustRandom().Address()
+	asset, err := xdr.BuildAsset("credit_alphanum4", issuer, "USDC")
+	require.NoError(t, err)
+	cid, err := asset.ContractID(passphrase)
+	require.NoError(t, err)
+	ev := symEvent(0, "1000", kind, "GADDRESS")
+	ev.ContractId = (*xdr.ContractId)(&cid)
+	assetStr := xdr.ScString("USDC:" + issuer)
+	ev.Body.V0.Topics = append(ev.Body.V0.Topics, xdr.ScVal{Type: xdr.ScValTypeScvString, Str: &assetStr})
+	return ev
 }
 
 // diagnostic wraps ev the way an export with diagnostics on records it.
