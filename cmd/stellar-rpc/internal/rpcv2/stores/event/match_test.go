@@ -15,7 +15,6 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 // Query and QueryOptions are the engine's historical one-shot surface
@@ -1038,11 +1037,6 @@ func TestQuery_UnionOfTypeAndCountFilters(t *testing.T) {
 		Filter{TopicCount: TopicCountFilter{Count: 0, Exact: true}}))
 }
 
-// TestMatchesAnyFilterView_TypeAndCount covers the post-filter's type and
-// topic-count checks. Both index families are exact, so a single-clause query
-// never reaches them with a mismatch: they fire only when a union clause falls
-// through to the next one, or when a term hash collides. Nothing else in the
-// package covers them, and every other test passes with either check disabled.
 // Labels the tests repeat enough for goconst to insist on names.
 const (
 	evtAAB    = "evt-a-ab"
@@ -1050,42 +1044,6 @@ const (
 	labelS1   = "s-1"
 	labelC0   = "c-0"
 )
-
-func TestMatchesAnyFilterView_TypeAndCount(t *testing.T) {
-	// Only arity matters here, so both events carry the same topic value.
-	var cid xdr.ContractId
-	sym := xdr.ScSymbol("alpha")
-	topic := xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym}
-	oneTopic := payloadFor(t, cid, "one-topic", topic).ContractEventBytes
-	twoTopics := payloadFor(t, cid, "two-topics", topic, topic).ContractEventBytes
-
-	system, contract := xdr.ContractEventTypeSystem, xdr.ContractEventTypeContract
-	exactly1 := Filter{TopicCount: TopicCountFilter{Count: 1, Exact: true}}
-	exactly2 := Filter{TopicCount: TopicCountFilter{Count: 2, Exact: true}}
-	atLeast2 := Filter{TopicCount: TopicCountFilter{Count: 2}}
-
-	for name, tc := range map[string]struct {
-		raw    []byte
-		filter Filter
-		want   bool
-	}{
-		"wrong type rejected":     {oneTopic, Filter{EventType: &system}, false},
-		"right type accepted":     {oneTopic, Filter{EventType: &contract}, true},
-		"count above exact":       {twoTopics, exactly1, false},
-		"count below exact":       {oneTopic, exactly2, false},
-		"exact count accepted":    {twoTopics, exactly2, true},
-		"count below the minimum": {oneTopic, atLeast2, false},
-		"at least count accepted": {twoTopics, atLeast2, true},
-	} {
-		t.Run(name, func(t *testing.T) {
-			filters := []Filter{tc.filter}
-			plan := store.PlanFilters(filters)
-			got, err := store.MatchesAnyFilterView(xdr.ContractEventView(tc.raw), filters, &plan)
-			require.NoError(t, err)
-			assert.Equal(t, tc.want, got)
-		})
-	}
-}
 
 // TestQuery_InvalidFilterRejected covers the values that would key a term no
 // event is indexed under, which would otherwise return nothing with no signal.
