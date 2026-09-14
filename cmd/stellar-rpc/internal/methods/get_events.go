@@ -202,7 +202,7 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 		if err != nil {
 			return false, err
 		}
-		matched := filters == nil
+		matched := len(filters) == 0
 		if !matched {
 			if matched, err = store.MatchesAnyFilterView(event, filters, &plan); err != nil {
 				return false, err
