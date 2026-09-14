@@ -56,8 +56,8 @@ func (f TopicCountFilter) Matches(n int) bool {
 // CompileV1EventFilters expands a validated v1 filter list into clauses. The
 // OR dimensions within one v1 filter (contract ids, topic filters) multiply
 // out, one clause per combination: at most 5 filters x 5 contract ids
-// x 5 topics = 125. A combination with no constraints matches every event, so
-// the whole query collapses to match-all (nil).
+// x 5 topics x 2 filter types = 250. A combination with no constraints matches
+// every event, so the whole query collapses to match-all (nil).
 func CompileV1EventFilters(in []protocol.EventFilter) ([]EventFilter, error) {
 	var out []EventFilter
 	for i := range in {
