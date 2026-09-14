@@ -71,6 +71,11 @@ func testGetLedgers(t *testing.T, client *client.Client) {
 
 	// Test invalid requests
 	invalidRequests := []protocol.GetLedgersRequest{
+		// On rpcv2 the oldest ledger in this network is genesis, so the
+		// subtraction wraps and the request is rejected for lying far beyond
+		// the latest ledger instead of below the oldest. The assertion holds
+		// either way. A real below-the-floor probe needs a daemon that has
+		// pruned, which none of the daemons has done at this point.
 		{StartLedger: result.OldestLedger - 4}, // -3 to exceed data store
 		// Far beyond the latest ledger: a ledger closes every second on this
 		// network, so latest+1 can exist by the time the request arrives.

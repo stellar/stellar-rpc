@@ -3,10 +3,10 @@ package infrastructure
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -46,12 +46,13 @@ type rpcv2Daemon struct {
 
 func (d *rpcv2Daemon) start() {
 	i := d.test
-	ports := getFreeTCPPorts(i.t, 5)
+	// Only captive core needs its ports chosen up front, because stellar-core
+	// reads fixed port numbers from its config file. The daemon's own two
+	// listeners bind port 0 and report what the kernel chose.
+	ports := getFreeTCPPorts(i.t, 3)
 	i.testPorts.captiveCorePeerPort = ports[0]
 	i.testPorts.captiveCoreHTTPQueryPort = ports[1]
 	d.captiveCoreHTTPPort = ports[2]
-	i.testPorts.RPCPort = ports[3]
-	i.testPorts.RPCAdminPort = ports[4]
 
 	i.generateCaptiveCoreCfgForDaemon()
 	d.prependNetworkPassphrase()
@@ -64,22 +65,42 @@ func (d *rpcv2Daemon) start() {
 		d.log.SetOutput(newTestLogWriter(i.t, `rpc="daemon" `))
 	}
 
+	configPath := filepath.Join(GetCurrentDirectory(), "docker", rpcv2ConfigFilename)
+	listening := make(chan struct{})
+	opts := rpcv2.Options{
+		Logger: d.log,
+		Flags:  d.flags(),
+		OnListen: func(rpc, admin net.Addr) {
+			i.testPorts.RPCPort = tcpPort(rpc)
+			i.testPorts.RPCAdminPort = tcpPort(admin)
+			close(listening)
+		},
+	}
+
+	// Nothing above can fail once these are set: close waits on stopped, and
+	// only the goroutine below closes it.
 	ctx, cancel := context.WithCancel(context.Background())
 	d.cancel = cancel
-	// The goroutine gets its own copies of the channels: a restart after a
-	// port collision replaces the fields while the old daemon may still be
-	// finishing, and the old goroutine must report on the channels it was
-	// started with.
-	done := make(chan error, 1)
-	stopped := make(chan struct{})
-	d.done, d.stopped = done, stopped
-	configPath := filepath.Join(GetCurrentDirectory(), "docker", rpcv2ConfigFilename)
-	flags := d.flags()
-	log := d.log
+	d.done = make(chan error, 1)
+	d.stopped = make(chan struct{})
 	go func() {
-		done <- rpcv2.RunDaemonWithOptions(ctx, configPath, rpcv2.Options{Logger: log, Flags: flags})
-		close(stopped)
+		d.done <- rpcv2.RunDaemonWithOptions(ctx, configPath, opts)
+		close(d.stopped)
 	}()
+
+	// The daemon binds its read listener only after it has caught up with the
+	// history archive, so this wait can be as long as the health wait. A daemon
+	// that exits first leaves its error on done for waitForRPC to report.
+	select {
+	case <-listening:
+	case <-d.stopped:
+	case <-time.After(rpcHealthyTimeout):
+		i.t.Fatalf("rpcv2 daemon did not bind its listeners within %s", rpcHealthyTimeout)
+	}
+}
+
+func tcpPort(addr net.Addr) uint16 {
+	return uint16(addr.(*net.TCPAddr).Port) //nolint:forcetypeassert // the daemon listens on tcp
 }
 
 // The rpcv1 daemon takes the passphrase as a setting of its own; rpcv2 reads
@@ -102,8 +123,8 @@ func (d *rpcv2Daemon) flags() *pflag.FlagSet {
 	config.BindFlags(fs)
 	values := map[string]string{
 		"storage.default_data_dir":                 filepath.Join(i.t.TempDir(), "rpcv2"),
-		"service.endpoint":                         fmt.Sprintf("127.0.0.1:%d", i.testPorts.RPCPort),
-		"service.admin_endpoint":                   fmt.Sprintf("127.0.0.1:%d", i.testPorts.RPCAdminPort),
+		"service.endpoint":                         "127.0.0.1:0",
+		"service.admin_endpoint":                   "127.0.0.1:0",
 		"service.methods.getNetwork.friendbot_url": FriendbotURL,
 		"ingestion.captive_core_config":            filepath.Join(i.rpcConfigFilesDir, captiveCoreConfigFilename),
 		"ingestion.history_archive_urls":           "http://" + i.testPorts.CoreArchiveHostPort,
@@ -145,19 +166,4 @@ func (d *rpcv2Daemon) exited() <-chan error {
 
 func (d *rpcv2Daemon) logger() *supportlog.Entry {
 	return d.log
-}
-
-// isBindError reports whether a daemon exit was a port collision. Ports are
-// chosen before the daemon binds them, so another process on the host can
-// take one in between; the harness then restarts with fresh ports. The
-// daemon's own listeners say so in the error. Captive core says it only in
-// its log ("bind: Address already in use") and the daemon reports just that
-// core exited, so a core exit while the daemon is starting counts too.
-func isBindError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "address already in use") ||
-		strings.Contains(msg, "stellar core exited unexpectedly")
 }

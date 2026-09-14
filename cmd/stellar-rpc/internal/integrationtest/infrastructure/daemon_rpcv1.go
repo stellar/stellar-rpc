@@ -3,6 +3,7 @@ package infrastructure
 import (
 	"fmt"
 	"runtime"
+	"sync/atomic"
 
 	"github.com/stretchr/testify/require"
 
@@ -17,6 +18,8 @@ type rpcv1Daemon struct {
 	daemon *daemon.Daemon
 	log    *supportlog.Entry
 	done   chan error
+	// building is true while MustNew runs on the test goroutine.
+	building atomic.Bool
 }
 
 func (d *rpcv1Daemon) start() {
@@ -62,21 +65,27 @@ func (d *rpcv1Daemon) create(c rpcConfig) *daemon.Daemon {
 
 	d.log = supportlog.New()
 	d.log.SetOutput(newTestLogWriter(i.t, `rpc="daemon" `))
-	// The daemon's Fatal calls land here, from the test goroutine during
-	// MustNew or from a daemon goroutine later. Error marks the test failed
-	// from any goroutine, the channel lets waitForRPC stop at once, and Goexit
-	// ends the calling goroutine the way Fatal would, so MustNew cannot carry
-	// on with half-built state. On the test goroutine that equals FailNow.
+	// The daemon's Fatal calls land here. During MustNew they come from the
+	// test goroutine, where FailNow is the one correct way to end the test: a
+	// bare Goexit there makes the test runner panic the whole binary. Later
+	// they come from a daemon goroutine, where FailNow is not allowed, so Error
+	// marks the test failed, the channel lets waitForRPC stop at once, and
+	// Goexit ends that goroutine the way Fatal would.
 	d.done = make(chan error, 1)
 	d.log.SetExitFunc(func(code int) {
 		err := fmt.Errorf("rpcv1 daemon exited with code %d", code)
-		i.t.Error(err)
 		select {
 		case d.done <- err:
 		default:
 		}
+		if d.building.Load() {
+			i.t.Fatal(err)
+		}
+		i.t.Error(err)
 		runtime.Goexit()
 	})
+	d.building.Store(true)
+	defer d.building.Store(false)
 	return daemon.MustNew(&cfg, d.log)
 }
 

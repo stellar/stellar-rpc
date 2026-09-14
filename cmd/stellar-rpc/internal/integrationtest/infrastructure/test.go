@@ -69,9 +69,7 @@ const (
 	coreStartupTimeout = 2 * time.Minute
 	rpcHealthyTimeout  = 180 * time.Second
 
-	// Bind collisions are rare, so one retry is usually enough; three
-	// attempts leave room for two unlucky picks in a row.
-	maxDaemonStartAttempts = 3
+	daemonLogLevel = "debug"
 )
 
 //go:embed docker/upgrades/*.xdr
@@ -292,9 +290,11 @@ func (i *Test) rejectRPCv1OnlySettings() {
 	if selectedDaemon(i.t) == daemonRPCv1 {
 		return
 	}
-	if i.datastoreConfigFunc != nil || i.ingestLoadTest.Enabled() || i.historyRetentionWindow != 0 {
-		i.t.Fatalf("DatastoreConfigFunc, IngestLoadTest and HistoryRetentionWindow are rpcv1 settings; "+
-			"this test cannot run with %s=%s", daemonEnvVar, selectedDaemon(i.t))
+	if i.datastoreConfigFunc != nil || i.ingestLoadTest.Enabled() || i.historyRetentionWindow != 0 ||
+		i.ignoreLedgerCloseTimes || i.rpcContainerVersion != "" || i.sqlitePath != "" {
+		i.t.Fatalf("DatastoreConfigFunc, IngestLoadTest, HistoryRetentionWindow, IgnoreLedgerCloseTimes, "+
+			"UseReleasedRPCVersion and SQLitePath are rpcv1 settings; this test cannot run with %s=%s",
+			daemonEnvVar, selectedDaemon(i.t))
 	}
 }
 
@@ -484,7 +484,7 @@ func (i *Test) getRPConfigForContainer() rpcConfig {
 		sqlitePath:               "/db/" + filepath.Base(i.sqlitePath),
 		captiveCoreHTTPQueryPort: i.testPorts.captiveCoreHTTPQueryPort,
 		networkPassphrase:        i.networkPassphrase,
-		logLevel:                 "debug",
+		logLevel:                 daemonLogLevel,
 		historyRetentionWindow:   i.historyRetentionWindow,
 	}
 }
@@ -504,7 +504,7 @@ func findCoreBinary(t testing.TB) string {
 func (i *Test) getRPConfigForDaemon() rpcConfig {
 	stellarCoreURL := "http://" + i.testPorts.CoreHTTPHostPort
 	archiveURL := "http://" + i.testPorts.CoreArchiveHostPort
-	logLevel := "debug"
+	logLevel := daemonLogLevel
 	if i.ingestLoadTest.Enabled() {
 		stellarCoreURL = "http://localhost:0" // unreachable + unused in load test mode, must be not empty
 		archiveURL = i.fakeArchiveURL
@@ -589,7 +589,6 @@ func (i *Test) waitForRPC() {
 	// with the other tests running at the same time, so it needs a window
 	// well above the time a replay takes on an idle machine.
 	deadline := time.Now().Add(rpcHealthyTimeout)
-	attempts := 1
 	// A nil channel never fires, which covers the released-RPC-container path
 	// (TestMigrate): there is no in-process daemon to watch.
 	var exited <-chan error
@@ -599,14 +598,6 @@ func (i *Test) waitForRPC() {
 	for {
 		select {
 		case err := <-exited:
-			if isBindError(err) && attempts < maxDaemonStartAttempts {
-				attempts++
-				i.t.Logf("daemon lost a port race (%v); starting again with new ports, attempt %d", err, attempts)
-				i.daemon.start()
-				exited = i.daemon.exited()
-				i.rpcClient = client.NewClient(i.GetStellarRPCURL(), nil)
-				continue
-			}
 			i.t.Fatalf("RPC daemon exited before it was healthy: %v", err)
 		default:
 		}
