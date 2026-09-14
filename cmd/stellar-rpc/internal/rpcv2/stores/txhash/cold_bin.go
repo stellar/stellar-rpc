@@ -26,9 +26,12 @@ package txhash
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
+	"slices"
 
 	"github.com/stellar/streamhash"
 
@@ -157,6 +160,61 @@ func WriteColdBin(path string, secret [stores.SecretLen]byte, entries []ColdEntr
 		return fmt.Errorf("txhash: close %s: %w", path, clerr)
 	}
 	return nil
+}
+
+// SortColdEntries puts entries in the order WriteColdBin requires and the
+// index build expects: lex by key.
+func SortColdEntries(entries []ColdEntry) {
+	slices.SortFunc(entries, func(a, b ColdEntry) int { return bytes.Compare(a.Key[:], b.Key[:]) })
+}
+
+// ReadColdBin reads a whole .bin back: the secret its keys were blinded with
+// and its entries in file order. The header is validated against the file
+// size first, so the entry count is trusted when the entries are allocated.
+func ReadColdBin(path string) ([stores.SecretLen]byte, []ColdEntry, error) {
+	var secret [stores.SecretLen]byte
+	f, err := os.Open(path)
+	if err != nil {
+		return secret, nil, fmt.Errorf("txhash: open %s: %w", path, err)
+	}
+	defer f.Close()
+	count, secret, err := readBinHeader(path, f)
+	if err != nil {
+		return secret, nil, err
+	}
+	br := bufio.NewReaderSize(f, 1<<20)
+	entries := make([]ColdEntry, count)
+	var buf [coldBinEntrySize]byte
+	for i := range entries {
+		if _, err := io.ReadFull(br, buf[:]); err != nil {
+			return secret, nil, fmt.Errorf("txhash: read entry %d of %s: %w", i, path, err)
+		}
+		copy(entries[i].Key[:], buf[:ColdKeySize])
+		entries[i].Seq = binary.LittleEndian.Uint32(buf[ColdKeySize:])
+	}
+	return secret, entries, nil
+}
+
+// readBinHeader reads and validates the header at the start of an open .bin:
+// the prelude, the entry count checked against the file size, and the index
+// secret. It leaves f positioned at the first entry.
+func readBinHeader(path string, f *os.File) (uint64, [stores.SecretLen]byte, error) {
+	var secret [stores.SecretLen]byte
+	fi, err := f.Stat()
+	if err != nil {
+		return 0, secret, fmt.Errorf("txhash: stat %s: %w", path, err)
+	}
+	var hdr [coldBinHeaderSize]byte
+	if _, err := io.ReadFull(f, hdr[:]); err != nil {
+		return 0, secret, fmt.Errorf("txhash: read header of %s: %w", path, err)
+	}
+	if err := checkBinPrelude(path, hdr[:]); err != nil {
+		return 0, secret, err
+	}
+	copy(secret[:], hdr[coldBinPreludeSize+coldBinCountSize:])
+	count, err := coldBinCount(path, fi.Size(),
+		binary.LittleEndian.Uint64(hdr[coldBinPreludeSize:coldBinPreludeSize+coldBinCountSize]))
+	return count, secret, err
 }
 
 // coldBinCount validates a .bin file's byte size against its declared header

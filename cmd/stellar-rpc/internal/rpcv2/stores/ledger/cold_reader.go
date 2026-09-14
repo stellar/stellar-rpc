@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -197,6 +198,15 @@ func (c *ColdReader) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 			seq++
 		}
 	}
+}
+
+// Verify recomputes the pack's content hash over every ledger and compares it
+// with the one the writer stored.
+func (c *ColdReader) Verify(ctx context.Context) error {
+	if _, err := c.init(); err != nil {
+		return err
+	}
+	return c.r.Verify(ctx)
 }
 
 func (c *ColdReader) Close() error { return c.r.Close() }

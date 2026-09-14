@@ -301,6 +301,21 @@ func (c *ColdReader) EventCount() (uint32, error) {
 	return m.count, nil
 }
 
+// TermCount is the number of terms the chunk's index was built over.
+func (c *ColdReader) TermCount() (uint64, error) {
+	if c.closed.Load() {
+		return 0, stores.ErrStoreClosed
+	}
+	if err := c.validateMPHF(); err != nil {
+		return 0, err
+	}
+	m, err := c.waitMPHF()
+	if err != nil {
+		return 0, err
+	}
+	return m.numKeys(), nil
+}
+
 // Offsets returns the in-memory ledger-offset cache decoded from
 // events.pack's app data on first metadata access, the query side's
 // source for translating ledger bounds into event-id windows (see

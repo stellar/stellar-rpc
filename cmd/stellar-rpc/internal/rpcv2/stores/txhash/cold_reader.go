@@ -70,6 +70,10 @@ func (r *ColdReader) Get(hash [32]byte) (uint32, error) {
 	return r.minLedger + uint32(payload), nil //nolint:gosec // 24-bit payload (width enforced at open)
 }
 
+// KeyCount is the number of keys the index was built over. Immutable; safe
+// after Close.
+func (r *ColdReader) KeyCount() uint64 { return r.idx.NumKeys() }
+
 // MinLedger returns the first ledger the index covers (the payload anchor).
 // Immutable; safe after Close.
 func (r *ColdReader) MinLedger() uint32 { return r.minLedger }

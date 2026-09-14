@@ -12,6 +12,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/bench"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/verify"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version"
 )
 
@@ -43,6 +44,7 @@ func main() {
 
 	rootCmd.AddCommand(version.NewCommand())
 	rootCmd.AddCommand(bench.NewCommand())
+	rootCmd.AddCommand(verify.NewCommand())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "could not run: %v\n", err)

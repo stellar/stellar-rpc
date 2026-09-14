@@ -5,13 +5,9 @@
 package rpcv2test
 
 import (
-	"bytes"
 	"context"
-	"encoding/binary"
-	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"testing"
 
 	"github.com/sirupsen/logrus"
@@ -214,8 +210,7 @@ func WriteColdTxIndexFile(
 	t *testing.T, cat *catalog.Catalog, cov geometry.TxHashIndexCoverage, entries map[xdr.Hash]uint32,
 ) {
 	t.Helper()
-	master := cat.Secret()
-	secret := txhash.ColdIndexSecret(master[:], uint32(cov.Index))
+	secret := cat.TxHashIndexSecret(cov.Lo)
 	cold := make([]txhash.ColdEntry, 0, len(entries))
 	for h, seq := range entries {
 		var e txhash.ColdEntry
@@ -223,7 +218,7 @@ func WriteColdTxIndexFile(
 		e.Seq = seq
 		cold = append(cold, e)
 	}
-	slices.SortFunc(cold, func(a, b txhash.ColdEntry) int { return bytes.Compare(a.Key[:], b.Key[:]) })
+	txhash.SortColdEntries(cold)
 	bin := filepath.Join(t.TempDir(), txhash.ColdBinName(cov.Lo))
 	require.NoError(t, txhash.WriteColdBin(bin, secret, cold))
 
@@ -329,45 +324,11 @@ func FeeTxLCMBytes(t *testing.T, seq uint32, feeCharged int64) []byte {
 	return V2LCMBytes(t, seq, 0, []xdr.TransactionEnvelope{envelope}, processing)
 }
 
-// ReadColdBin reads back a cold txhash .bin file written by
-// txhash.WriteColdBin, verifying the header count against the file size.
-// Test-side mirror of the on-disk contract (production consumes .bin files
-// via the index builder's streaming scan, never a full read-back).
+// ReadColdBin reads back a cold txhash .bin file through the production
+// reader, failing the test on any error.
 func ReadColdBin(t *testing.T, path string) []txhash.ColdEntry {
 	t.Helper()
-	f, err := os.Open(path)
+	_, entries, err := txhash.ReadColdBin(path)
 	require.NoError(t, err)
-	defer f.Close()
-
-	// Prelude (magic "SBIN", version, 3 reserved) + uint64-LE count + secret.
-	const preludeSize = 8
-	const headerSize = preludeSize + 8 + stores.SecretLen
-	entrySize := txhash.ColdKeySize + 4
-
-	var header [headerSize]byte
-	_, err = io.ReadFull(f, header[:])
-	require.NoError(t, err)
-	require.Equal(t, []byte("SBIN"), header[:4], "cold .bin magic")
-	require.Equal(t, byte(1), header[4], "cold .bin version")
-	count := binary.LittleEndian.Uint64(header[preludeSize : preludeSize+8])
-
-	info, err := f.Stat()
-	require.NoError(t, err)
-	// Divide the trusted size rather than multiplying the untrusted
-	// count (mirrors production's overflow-safe coldBinCount check).
-	body := info.Size() - headerSize
-	require.GreaterOrEqual(t, body, int64(0), "cold .bin shorter than its header")
-	require.Zero(t, body%int64(entrySize), "cold .bin body is not whole entries")
-	require.EqualValues(t, count, body/int64(entrySize),
-		"cold .bin size must match its declared entry count")
-
-	entries := make([]txhash.ColdEntry, count)
-	buf := make([]byte, entrySize)
-	for i := range entries {
-		_, err = io.ReadFull(f, buf)
-		require.NoError(t, err)
-		copy(entries[i].Key[:], buf[:txhash.ColdKeySize])
-		entries[i].Seq = binary.LittleEndian.Uint32(buf[txhash.ColdKeySize:])
-	}
 	return entries
 }
