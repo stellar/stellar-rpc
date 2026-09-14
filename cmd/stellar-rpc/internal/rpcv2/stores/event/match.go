@@ -34,7 +34,7 @@ type Filter = store.EventFilter
 // TopicCountFilter constrains an event's topic count; see store.TopicCountFilter.
 type TopicCountFilter = store.TopicCountFilter
 
-// termKeys returns the topic-count buckets whose union covers f. Every
+// topicCountTermKeys returns the topic-count buckets whose union covers f. Every
 // count ValidateFilters admits has a bucket of its own, and an "at
 // least" union is closed by the overflow bucket, so the union never
 // holds an event f does not match.
@@ -48,7 +48,7 @@ func topicCountTermKeys(f TopicCountFilter) []TermKey {
 	return TopicCountTermKeysAtLeast(f.Count)
 }
 
-// valueTermKeys returns one term per constrained value field
+// filterValueTermKeys returns one term per constrained value field
 // (contract ID, event type, topics): the single enumeration
 // termGroups and CountDistinctTerms share, so the two cannot drift
 // over which values a filter names. The topic-count buckets are not
@@ -71,7 +71,7 @@ func filterValueTermKeys(f *Filter) []TermKey {
 	return keys
 }
 
-// termGroups returns the indexed terms this filter constrains, grouped
+// filterTermGroups returns the indexed terms this filter constrains, grouped
 // by field: the bitmaps within a group are OR-ed and the groups are
 // AND-ed. Only the topic-count group ever holds more than one term.
 func filterTermGroups(f *Filter) [][]TermKey {
@@ -92,7 +92,7 @@ func filterTermGroups(f *Filter) [][]TermKey {
 	return groups
 }
 
-// impliesTopicCount reports whether f's constrained topic positions
+// filterImpliesTopicCount reports whether f's constrained topic positions
 // already guarantee its topic-count bound.
 func filterImpliesTopicCount(f *Filter) bool {
 	if f.TopicCount.Exact {
