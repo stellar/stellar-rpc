@@ -125,6 +125,10 @@ func WriteColdIndex(
 	defer m.Close()
 
 	entries := make([]indexEntry, 0, len(bitmaps))
+	// Only a term at or above the floor can be demoted and named in the
+	// directory, so only those keep their key: sixteen bytes on every entry
+	// is most of the writer's footprint on a chunk of singletons.
+	keys := map[uint32]TermKey{}
 	for term, bitmap := range bitmaps {
 		slot, lerr := m.Lookup(term)
 		if lerr != nil {
@@ -137,7 +141,10 @@ func WriteColdIndex(
 		// single-threaded either way: cold backfill from the .pack, or the freeze
 		// from the read-only hot DB.
 		bitmap.RunOptimize()
-		entries = append(entries, indexEntry{slot: slot, key: term, fp: fp, bitmap: bitmap})
+		if bitmap.GetSerializedSizeInBytes() >= indexDemoteFloor {
+			keys[slot] = term
+		}
+		entries = append(entries, indexEntry{slot: slot, fp: fp, bitmap: bitmap})
 	}
 
 	sort.Slice(entries, func(i, j int) bool { return entries[i].slot < entries[j].slot })
@@ -173,7 +180,7 @@ func WriteColdIndex(
 		return fmt.Errorf("events: create index.pack at %s: %w", indexPackPath, err)
 	}
 
-	writerErr := writeIndexPackEntries(pw, entries)
+	writerErr := writeIndexPackEntries(pw, entries, keys)
 	if writerErr != nil {
 		// pw.Close removes the partial index.pack. Join its error so a
 		// cleanup failure surfaces alongside the original write error,
@@ -186,12 +193,10 @@ func WriteColdIndex(
 	return nil
 }
 
-// indexEntry is one term's place in index.pack: the slot it lands at, its
-// key (which the directory is sorted by), the 4-byte fingerprint, and the
-// bitmap to serialize.
+// indexEntry is one term's place in index.pack: the slot it lands at, the
+// 4-byte fingerprint, and the bitmap to serialize.
 type indexEntry struct {
 	slot   uint32
-	key    TermKey
 	fp     [IndexRecordFingerprintLen]byte
 	bitmap *roaring.Bitmap
 }
@@ -289,7 +294,7 @@ func demoteBucket(bucket []indexEntry, sizes []uint64, demoted []bool) {
 // part records, and finally the app data carrying the directory that names
 // them. One reused buffer serializes every bitmap; AppendItem copies its
 // input, and WriteTo emits the bytes MarshalBinary would.
-func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
+func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry, keys map[uint32]TermKey) error {
 	chunkSlabs := chunkSlabCount(entries)
 	var (
 		buf     bytes.Buffer
@@ -338,7 +343,10 @@ func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
 	// Key order is what the reader binary-searches the rows in, and laying the
 	// parts down in it makes the rows firstRecord-ordered too, which is how the
 	// open-time check tiles them.
-	slices.SortFunc(demoted, func(a, b indexEntry) int { return bytes.Compare(a.key[:], b.key[:]) })
+	slices.SortFunc(demoted, func(a, b indexEntry) int {
+		ka, kb := keys[a.slot], keys[b.slot]
+		return bytes.Compare(ka[:], kb[:])
+	})
 	record := uint32(bucketCount) //nolint:gosec // chunk term count / 128
 	for i := range demoted {
 		e := &demoted[i]
@@ -349,7 +357,7 @@ func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
 		if err := writeTermParts(pw, e, k, records); err != nil {
 			return err
 		}
-		dir.entries = appendDirEntry(dir.entries, e.key, record, records, k)
+		dir.entries = appendDirEntry(dir.entries, keys[e.slot], record, records, k)
 		record += records
 		dir.totalParts += records
 	}
