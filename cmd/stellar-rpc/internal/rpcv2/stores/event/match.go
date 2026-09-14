@@ -50,9 +50,9 @@ func topicCountTermKeys(f TopicCountFilter) []TermKey {
 
 // filterValueTermKeys returns one term per constrained value field
 // (contract ID, event type, topics): the single enumeration
-// termGroups and CountDistinctTerms share, so the two cannot drift
+// filterTermGroups and CountDistinctTerms share, so the two cannot drift
 // over which values a filter names. The topic-count buckets are not
-// value terms; termGroups adds them separately and the budget does
+// value terms; filterTermGroups adds them separately and the budget does
 // not count them.
 func filterValueTermKeys(f *Filter) []TermKey {
 	var keys []TermKey
@@ -528,7 +528,7 @@ func ValidateFilters(filters []Filter) error {
 // count twice. Topic-count buckets are excluded: they are an
 // implementation detail of the engine's grouping, not a value the
 // client named. Exported for the v2 handler's term-budget check. It
-// lives here, beside termGroups, so the budget and the engine's
+// lives here, beside filterTermGroups, so the budget and the engine's
 // lookups agree on what a value term is: TermKey over the store's
 // canonical bytes.
 func CountDistinctTerms(filters []Filter) int {
