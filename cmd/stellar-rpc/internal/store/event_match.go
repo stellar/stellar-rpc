@@ -300,11 +300,11 @@ func MatchesAnyFilterView(ev xdr.ContractEventView, filters []EventFilter, plan 
 func resolveViewEventType(ev xdr.ContractEventView) (xdr.ContractEventType, error) {
 	typeView, err := ev.Type()
 	if err != nil {
-		return 0, fmt.Errorf("events: post-filter view Type: %w", err)
+		return 0, fmt.Errorf("events: match Type: %w", err)
 	}
 	eventType, err := typeView.Value()
 	if err != nil {
-		return 0, fmt.Errorf("events: post-filter view Type value: %w", err)
+		return 0, fmt.Errorf("events: match Type value: %w", err)
 	}
 	return eventType, nil
 }
@@ -314,22 +314,22 @@ func resolveViewEventType(ev xdr.ContractEventView) (xdr.ContractEventType, erro
 func resolveViewTopics(ev xdr.ContractEventView) (xdr.ContractEventV0TopicsView, bool, error) {
 	body, err := ev.Body()
 	if err != nil {
-		return nil, false, fmt.Errorf("events: post-filter view Body: %w", err)
+		return nil, false, fmt.Errorf("events: match Body: %w", err)
 	}
 	bodyV, err := body.V()
 	if err != nil {
-		return nil, false, fmt.Errorf("events: post-filter view Body.V: %w", err)
+		return nil, false, fmt.Errorf("events: match Body.V: %w", err)
 	}
 	if bodyV != 0 {
 		return nil, false, nil
 	}
 	v0, err := body.V0()
 	if err != nil {
-		return nil, false, fmt.Errorf("events: post-filter view Body.V0: %w", err)
+		return nil, false, fmt.Errorf("events: match Body.V0: %w", err)
 	}
 	topics, err := v0.Topics()
 	if err != nil {
-		return nil, false, fmt.Errorf("events: post-filter view Body.V0.Topics: %w", err)
+		return nil, false, fmt.Errorf("events: match Body.V0.Topics: %w", err)
 	}
 	return topics, true, nil
 }
@@ -344,7 +344,7 @@ func resolveViewTopicCount(ev xdr.ContractEventView) (int, error) {
 	}
 	count, err := topics.Count()
 	if err != nil {
-		return 0, fmt.Errorf("events: post-filter view Body.V0.Topics.Count: %w", err)
+		return 0, fmt.Errorf("events: match Body.V0.Topics.Count: %w", err)
 	}
 	return count, nil
 }
@@ -354,18 +354,18 @@ func resolveViewTopicCount(ev xdr.ContractEventView) (int, error) {
 func resolveViewContractID(ev xdr.ContractEventView) ([]byte, error) {
 	cidOpt, err := ev.ContractId()
 	if err != nil {
-		return nil, fmt.Errorf("events: post-filter view ContractId opt: %w", err)
+		return nil, fmt.Errorf("events: match ContractId opt: %w", err)
 	}
 	cidView, present, err := cidOpt.Unwrap()
 	if err != nil {
-		return nil, fmt.Errorf("events: post-filter view ContractId unwrap: %w", err)
+		return nil, fmt.Errorf("events: match ContractId unwrap: %w", err)
 	}
 	if !present {
 		return nil, nil
 	}
 	cid, err := cidView.Raw()
 	if err != nil {
-		return nil, fmt.Errorf("events: post-filter view ContractId raw: %w", err)
+		return nil, fmt.Errorf("events: match ContractId raw: %w", err)
 	}
 	return cid, nil
 }
@@ -392,7 +392,7 @@ func collectTopicViewBytes(
 	i := 0
 	for topic, ierr := range topicsArr.Iter() {
 		if ierr != nil {
-			return fmt.Errorf("events: post-filter view topic iter: %w", ierr)
+			return fmt.Errorf("events: match topic iter: %w", ierr)
 		}
 		if i > plan.maxTopicIdx || i >= protocol.MaxTopicCount {
 			break
@@ -400,7 +400,7 @@ func collectTopicViewBytes(
 		if plan.needsTopic[i] {
 			rawBytes, err := topic.Raw()
 			if err != nil {
-				return fmt.Errorf("events: post-filter view topic[%d].Raw: %w", i, err)
+				return fmt.Errorf("events: match topic[%d].Raw: %w", i, err)
 			}
 			topicRaw[i] = rawBytes
 		}
