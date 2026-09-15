@@ -12,36 +12,45 @@ libc = "0.2.147"
 anyhow = "1.0.75"
 serde_json = "1.0"
 
-# Protocol 28 GA steady state: `-prev` is the final released P27 host (for
-# replaying pre-upgrade ledgers), `-curr` is the released P28 host. 28.0.1 is
-# v28.0.0 (ba37ea5f — the exact commit stellar-core 28.0.0 bundles as
-# src/rust/soroban/p28) plus an ed25519-dalek version-constraint fix
-# (rs-soroban-env#1706); no metering change, so preflight simulation and
-# apply-time metering still agree.
 [workspace.dependencies.soroban-env-host-prev]
 package = "soroban-env-host"
-version = "=27.0.1"
+version = "=28.0.1"
 
+# Shift the window: `-prev` is now the released P28 host (crates.io 28.0.1),
+# and `-curr` is the CAP-0087 host pulled from the (unmerged) rs-soroban-env
+# PR, declaring P30 with `next`. Using a git rev keeps -prev and -curr as
+# separate compilation units. Bump the rev as the PR evolves; re-pin to a
+# crates.io release once it merges and GAs.
 [workspace.dependencies.soroban-env-host-curr]
 package = "soroban-env-host"
-version = "=28.0.1"
+git = "https://github.com/sisuresh/rs-soroban-env"
+rev = "d3e8ed2333e902477b5c05fcd2644fd3e9d7b752"
+features = ["next"]
 
 [workspace.dependencies.soroban-simulation-prev]
 package = "soroban-simulation"
-version = "=27.0.1"
+version = "=28.0.1"
 
 [workspace.dependencies.soroban-simulation-curr]
 package = "soroban-simulation"
-version = "=28.0.1"
+git = "https://github.com/sisuresh/rs-soroban-env"
+rev = "d3e8ed2333e902477b5c05fcd2644fd3e9d7b752"
 features = ["unstable-next-api"]
 
 [workspace.dependencies.stellar-xdr]
-version = "=28.0.0"
+# Use the canonical URL, not the sisuresh/rs-stellar-xdr fork: this rev is
+# fetchable from stellar/rs-stellar-xdr too (GitHub shares fork object
+# storage), and soroban-env-host-curr's own Cargo.toml pins that same
+# canonical URL — a different URL for the same rev makes Cargo treat them as
+# two separate crate instances and breaks type unification with the host.
+git = "https://github.com/stellar/rs-stellar-xdr"
+rev = "f1b0285df1a0cac98aee0ba627c03f307c622cf2"
 # `type_enum` provides the `Type`/`TypeVariant` reflection enums used by
-# xdr2json. It was enabled by default in stellar-xdr v26 but is opt-in since
-# v27. The former `cap_0083`/`cap_0085_executable_ref` gates are gone: both
-# CAPs ship ungated in stellar-xdr 28.0.0.
-features = ["serde", "type_enum"]
+# xdr2json. `cap_0087_ml_dsa` gates the CAP-0087 ContractCostType additions
+# (86-94) and is the same feature soroban-env-host-curr enables internally —
+# must match verbatim so xdr2json's reflection and the curr host resolve to
+# the same stellar-xdr feature set.
+features = ["serde", "type_enum", "cap_0087_ml_dsa"]
 
 [workspace.dependencies.rand]
 version = "0.8.5"
