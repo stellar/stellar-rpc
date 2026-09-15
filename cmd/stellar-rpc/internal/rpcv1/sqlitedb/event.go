@@ -3,6 +3,7 @@ package sqlitedb
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -291,7 +292,7 @@ func (eventHandler *eventHandler) trimEvents(latestLedgerSeq uint32, retentionWi
 // ascending Cursor order.
 //
 // If f returns false, the scan terminates early (f will not be applied on
-// remaining events in the range).
+// remaining events in the range). If f returns an error, the scan aborts with it.
 //
 //nolint:funlen,cyclop
 func (eventHandler *eventHandler) GetEvents(
@@ -300,7 +301,7 @@ func (eventHandler *eventHandler) GetEvents(
 	contractIDs [][]byte,
 	topics store.TopicFilters,
 	eventTypes []int,
-	scanner store.ScanFunction,
+	scanner store.ViewScanFunction,
 ) error {
 	start := time.Now()
 
@@ -370,18 +371,15 @@ func (eventHandler *eventHandler) GetEvents(
 
 	defer rows.Close()
 
-	type rowResult struct {
-		eventCursorID   string
-		eventData       []byte
-		transactionHash []byte
+	var row struct {
+		eventCursorID string
+		// Use sql.RawBytes over []byte to avoid unnecessary copying
+		eventData       sql.RawBytes
+		transactionHash sql.RawBytes
 		ledgerCloseTime int64
 	}
-
 	foundRows := 0
 	for rows.Next() {
-		foundRows++
-
-		row := rowResult{}
 		if err := rows.Scan(
 			&row.eventCursorID,
 			&row.eventData,
@@ -398,15 +396,17 @@ func (eventHandler *eventHandler) GetEvents(
 			return errors.Join(err, errors.New("failed to parse cursor"))
 		}
 
-		var event xdr.DiagnosticEvent
-		if err := event.UnmarshalBinary(row.eventData); err != nil {
-			return errors.Join(err, errors.New("failed to decode event"))
-		}
+		eventView := xdr.DiagnosticEventView(row.eventData)
 
 		txHash := xdr.Hash(transactionHash)
-		if !scanner(event, cur, ledgerCloseTime, &txHash) {
+		keepGoing, err := scanner(eventView, cur, ledgerCloseTime, &txHash)
+		if err != nil {
+			return errors.Join(err, errors.New("failed to scan event"))
+		}
+		if !keepGoing {
 			return nil
 		}
+		foundRows++
 	}
 
 	eventHandler.log.

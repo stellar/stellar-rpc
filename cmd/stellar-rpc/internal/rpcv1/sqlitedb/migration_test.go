@@ -82,9 +82,9 @@ func requireLedgerData(t *testing.T, testDB *DB, lcms []xdr.LedgerCloseMeta) {
 		End:   protocol.Cursor{Ledger: lcms[len(lcms)-1].LedgerSequence() + 1},
 	}
 	require.NoError(t, eventReader.GetEvents(t.Context(), cursorRange, nil, nil, nil,
-		func(xdr.DiagnosticEvent, protocol.Cursor, int64, *xdr.Hash) bool {
+		func(xdr.DiagnosticEventView, protocol.Cursor, int64, *xdr.Hash) (bool, error) {
 			eventCount++
-			return true
+			return true, nil
 		}))
 	require.Equal(t, 4*len(lcms), eventCount, "expected 4 events per ledger")
 }
