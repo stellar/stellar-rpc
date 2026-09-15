@@ -151,3 +151,8 @@ require (
 	gopkg.in/tylerb/graceful.v1 v1.2.15 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+// SPIKE: pin go-stellar-sdk to the CAP-0087 fork branch (sisuresh/go
+// p30-cap-0087) until stellar/go-stellar-sdk#6003 merges, then re-pin to the
+// merged upstream commit and drop this replace + the .golangci.yml allow-list.
+replace github.com/stellar/go-stellar-sdk => github.com/sisuresh/go v0.0.0-20260915161658-f73068a5217a
