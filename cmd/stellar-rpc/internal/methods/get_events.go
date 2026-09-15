@@ -262,25 +262,7 @@ func EventInfoFromView(
 	cursor protocol.Cursor,
 	ledgerClosedAt, txHash, format string,
 ) (protocol.EventInfo, error) {
-	var (
-		xdrType xdr.ContractEventType
-		topics  [][]byte
-		dataRaw []byte
-		cidRaw  []byte
-	)
-	err := xdr.TryVoid(func() {
-		xdrType = ev.MustType().MustValue()
-		v0 := ev.MustBody().MustV0() // panics on a non-V0 body, replacing "unknown event version"
-		views := v0.MustTopics().MustAll()
-		topics = make([][]byte, len(views))
-		for i, t := range views {
-			topics[i] = t.MustRaw()
-		}
-		dataRaw = v0.MustData().MustRaw()
-		if cid, ok := ev.MustContractId().MustUnwrap(); ok {
-			cidRaw = cid.MustRaw()
-		}
-	})
+	xdrType, cidRaw, topics, dataRaw, err := eventRawFields(ev)
 	if err != nil {
 		return protocol.EventInfo{}, errors.Wrap(err, "malformed event")
 	}
@@ -320,6 +302,43 @@ func EventInfoFromView(
 	}
 
 	return info, nil
+}
+
+// eventRawFields locates the event's type, contract id, topics and data in one pass per level.
+// Fields and All return views already trimmed to their extent, so their bytes are the raw XDR
+// and calling Raw() would only re-walk them to size them again.
+func eventRawFields(ev xdr.ContractEventView) (xdr.ContractEventType, []byte, [][]byte, []byte, error) {
+	f, err := ev.Fields()
+	if err != nil {
+		return 0, nil, nil, nil, err
+	}
+	xdrType, err := f.Type.Value()
+	if err != nil {
+		return 0, nil, nil, nil, err
+	}
+	var cidRaw []byte
+	if cid, ok, err := f.ContractId.Unwrap(); err != nil {
+		return 0, nil, nil, nil, err
+	} else if ok {
+		cidRaw = []byte(cid)
+	}
+	v0, err := f.Body.V0() // fails on a non-V0 body, replacing "unknown event version"
+	if err != nil {
+		return 0, nil, nil, nil, err
+	}
+	v0f, err := v0.Fields()
+	if err != nil {
+		return 0, nil, nil, nil, err
+	}
+	views, err := v0f.Topics.All()
+	if err != nil {
+		return 0, nil, nil, nil, err
+	}
+	topics := make([][]byte, len(views))
+	for i, t := range views {
+		topics[i] = []byte(t)
+	}
+	return xdrType, cidRaw, topics, []byte(v0f.Data), nil
 }
 
 // eventTypeName is protocol.GetEventTypeFromEventTypeXDR without the per-call map; "" for an unknown type.
