@@ -82,24 +82,17 @@ func TestCompileV1EventFilters(t *testing.T) {
 			in:   []protocol.EventFilter{{EventType: contractType}},
 			want: []EventFilter{{EventType: eventTypePtr(xdr.ContractEventTypeContract)}},
 		},
-		// Valid admits only contract and system, so a set of both is one clause
-		// per type, never a wildcard: the SDK matcher rejects a diagnostic-typed
-		// event for it, and so must the compiled clauses.
-		"type set of both is one clause per type": {
-			in: []protocol.EventFilter{{EventType: bothTypes}},
-			want: []EventFilter{
-				{EventType: eventTypePtr(xdr.ContractEventTypeContract)},
-				{EventType: eventTypePtr(xdr.ContractEventTypeSystem)},
-			},
+		// Valid admits only contract and system, the only types either backend
+		// ingests, so a set of both constrains nothing.
+		"type set of both is a wildcard": {
+			in:   []protocol.EventFilter{{EventType: bothTypes}},
+			want: nil,
 		},
-		"type set of both with a contract id keeps the contract id on each clause": {
+		"type set of both with a contract id keeps only the contract id": {
 			in: []protocol.EventFilter{{
 				EventType: bothTypes, ContractIDs: []string{testContractStrkey(t, 0xAA)},
 			}},
-			want: []EventFilter{
-				{ContractID: testContractRaw(0xAA), EventType: eventTypePtr(xdr.ContractEventTypeContract)},
-				{ContractID: testContractRaw(0xAA), EventType: eventTypePtr(xdr.ContractEventTypeSystem)},
-			},
+			want: []EventFilter{{ContractID: testContractRaw(0xAA)}},
 		},
 		// N segments without a trailing "**" match exactly N topics.
 		"one-segment topic is exact arity one": {
@@ -232,60 +225,6 @@ func TestMatchesAnyFilterView_TypeAndCount(t *testing.T) {
 			got, err := MatchesAnyFilterView(xdr.ContractEventView(tc.raw), filters, &plan)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
-		})
-	}
-}
-
-// TestMatchesAnyFilterView_TypeSetParity pins the SDK matcher's set semantics
-// on the compiled clauses: a set naming both contract and system rejects a
-// diagnostic-typed event, which the sqlite table can hold, while an empty set
-// admits every type. The cells run the compiler and matcher together because
-// the sqlite SQL prefilter drops its type clause as soon as any filter omits a
-// type, leaving the matcher to decide alone.
-func TestMatchesAnyFilterView_TypeSetParity(t *testing.T) {
-	cid := testContractRaw(0xAA)
-	events := map[string][]byte{
-		protocol.EventTypeContract:   contractEventBytes(t, cid, xdr.ContractEventTypeContract),
-		protocol.EventTypeSystem:     contractEventBytes(t, cid, xdr.ContractEventTypeSystem),
-		protocol.EventTypeDiagnostic: contractEventBytes(t, cid, xdr.ContractEventTypeDiagnostic),
-	}
-	bothTypes := protocol.EventTypeSet{protocol.EventTypeContract: nil, protocol.EventTypeSystem: nil}
-	onlyContract := []string{testContractStrkey(t, 0xAA)}
-	contractOrSystem := map[string]bool{protocol.EventTypeContract: true, protocol.EventTypeSystem: true}
-	everyType := map[string]bool{
-		protocol.EventTypeContract: true, protocol.EventTypeSystem: true, protocol.EventTypeDiagnostic: true,
-	}
-
-	for name, tc := range map[string]struct {
-		in   []protocol.EventFilter
-		want map[string]bool // by event type
-	}{
-		"both types alone": {
-			in:   []protocol.EventFilter{{EventType: bothTypes}},
-			want: contractOrSystem,
-		},
-		"both types with contract id, beside an untyped clause": {
-			in: []protocol.EventFilter{
-				{EventType: bothTypes, ContractIDs: onlyContract},
-				{ContractIDs: []string{testContractStrkey(t, 0xBB)}},
-			},
-			want: contractOrSystem,
-		},
-		"empty type set admits every type": {
-			in:   []protocol.EventFilter{{ContractIDs: onlyContract}},
-			want: everyType,
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			filters, err := CompileV1EventFilters(tc.in)
-			require.NoError(t, err)
-			require.NotNil(t, filters, "a constrained filter must not collapse to match-all")
-			plan := PlanFilters(filters)
-			for typ, raw := range events {
-				got, err := MatchesAnyFilterView(xdr.ContractEventView(raw), filters, &plan)
-				require.NoError(t, err)
-				assert.Equal(t, tc.want[typ], got, typ)
-			}
 		})
 	}
 }
