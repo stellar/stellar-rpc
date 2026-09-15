@@ -185,13 +185,12 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 
 	eventTypes := combineEventTypes(request.Filters)
 
-	filters, err := store.CompileV1EventFilters(request.Filters) // nil matches every event
+	filters, err := compileFilters(request.Filters)
 	if err != nil {
 		return protocol.GetEventsResponse{}, &jrpc2.Error{
 			Code: jrpc2.InvalidParams, Message: err.Error(),
 		}
 	}
-	plan := store.PlanFilters(filters)
 
 	results := []protocol.EventInfo{}
 	// procErr keeps the callback's own error out of the reader's wrap, as getTransactions does,
@@ -204,27 +203,31 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 		if event, procErr = eventView.Event(); procErr != nil {
 			return false, procErr
 		}
-		matched := len(filters) == 0
-		if !matched {
-			if matched, procErr = store.MatchesAnyFilterView(event, filters, &plan); procErr != nil {
-				return false, procErr
-			}
+		// Fields are pulled off the view once and feed both the match and the render.
+		// Topics wait until type and contract id pass, so a rejected event never sizes them.
+		head, err := eventHeader(event)
+		if err != nil {
+			procErr = errors.Wrap(err, "could not parse event")
+			return false, procErr
 		}
-		// Render the matched event in the callback to prevent two passes
-		if matched {
-			info, err := EventInfoFromView(
-				event,
-				cursor,
-				time.Unix(ledgerCloseTimestamp, 0).UTC().Format(time.RFC3339),
-				txHash.HexString(),
-				request.Format,
-			)
-			if err != nil {
-				procErr = errors.Wrap(err, "could not parse event")
-				return false, procErr
-			}
-			results = append(results, info)
+		if !filters.matchHeader(head) {
+			return true, nil
 		}
+		body, err := eventBody(head.v0)
+		if err != nil {
+			procErr = errors.Wrap(err, "could not parse event")
+			return false, procErr
+		}
+		if !filters.match(head, body.topics) {
+			return true, nil
+		}
+		info, err := eventInfo(head, body, cursor,
+			time.Unix(ledgerCloseTimestamp, 0).UTC().Format(time.RFC3339), txHash.HexString(), request.Format)
+		if err != nil {
+			procErr = errors.Wrap(err, "could not parse event")
+			return false, procErr
+		}
+		results = append(results, info)
 		return uint(len(results)) < limit, nil
 	}
 
@@ -264,21 +267,80 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 
 // EventInfoFromView renders one stored ContractEvent into the v1 wire type; rpcv2's eventsapi wraps it.
 func EventInfoFromView(
-	ev xdr.ContractEventView,
-	cursor protocol.Cursor,
-	ledgerClosedAt, txHash, format string,
+	ev xdr.ContractEventView, cursor protocol.Cursor, ledgerClosedAt, txHash, format string,
 ) (protocol.EventInfo, error) {
-	xdrType, cidRaw, topics, dataRaw, err := eventRawFields(ev)
+	head, err := eventHeader(ev)
 	if err != nil {
 		return protocol.EventInfo{}, errors.Wrap(err, "malformed event")
 	}
+	body, err := eventBody(head.v0)
+	if err != nil {
+		return protocol.EventInfo{}, errors.Wrap(err, "malformed event")
+	}
+	return eventInfo(head, body, cursor, ledgerClosedAt, txHash, format)
+}
 
+// eventHead is the event's fields above the body, plus the V0 body view to read on demand.
+type eventHead struct {
+	typ xdr.ContractEventType
+	cid []byte // nil when absent
+	v0  xdr.ContractEventV0View
+}
+
+// eventV0 is the V0 body's topics and data as raw XDR.
+type eventV0 struct {
+	topics [][]byte
+	data   []byte
+}
+
+// eventHeader locates type, contract id and body in one pass. Fields returns views trimmed
+// to their extent, so their bytes are the raw XDR and Raw() would only re-walk them.
+func eventHeader(ev xdr.ContractEventView) (eventHead, error) {
+	f, err := ev.Fields()
+	if err != nil {
+		return eventHead{}, err
+	}
+	var h eventHead
+	if h.typ, err = f.Type.Value(); err != nil {
+		return eventHead{}, err
+	}
+	if cid, ok, err := f.ContractId.Unwrap(); err != nil {
+		return eventHead{}, err
+	} else if ok {
+		h.cid = []byte(cid)
+	}
+	if h.v0, err = f.Body.V0(); err != nil { // fails on a non-V0 body, replacing "unknown event version"
+		return eventHead{}, err
+	}
+	return h, nil
+}
+
+// eventBody locates topics and data in one pass; All returns each topic trimmed.
+func eventBody(v0 xdr.ContractEventV0View) (eventV0, error) {
+	f, err := v0.Fields()
+	if err != nil {
+		return eventV0{}, err
+	}
+	views, err := f.Topics.All()
+	if err != nil {
+		return eventV0{}, err
+	}
+	b := eventV0{topics: make([][]byte, len(views)), data: []byte(f.Data)}
+	for i, t := range views {
+		b.topics[i] = []byte(t)
+	}
+	return b, nil
+}
+
+func eventInfo(
+	head eventHead, body eventV0, cursor protocol.Cursor, ledgerClosedAt, txHash, format string,
+) (protocol.EventInfo, error) {
 	if cursor.Ledger > math.MaxInt32 {
 		return protocol.EventInfo{}, fmt.Errorf("ledger sequence %d exceeds supported range", cursor.Ledger)
 	}
 
 	info := protocol.EventInfo{
-		EventType:       eventTypeName(xdrType),
+		EventType:       eventTypeName(head.typ),
 		Ledger:          int32(cursor.Ledger),
 		LedgerClosedAt:  ledgerClosedAt,
 		ID:              cursor.String(),
@@ -287,64 +349,28 @@ func EventInfoFromView(
 		TxIndex:         cursor.Tx,
 	}
 
-	if cidRaw != nil {
-		info.ContractID = strkey.MustEncode(strkey.VersionByteContract, cidRaw)
+	if head.cid != nil {
+		info.ContractID = strkey.MustEncode(strkey.VersionByteContract, head.cid)
 	}
 
+	var err error
 	switch format {
 	case protocol.FormatJSON:
-		if info.TopicJSON, err = jsonifySlice(xdr.ScVal{}, topics); err != nil {
+		if info.TopicJSON, err = jsonifySlice(xdr.ScVal{}, body.topics); err != nil {
 			return protocol.EventInfo{}, err
 		}
-		if info.ValueJSON, err = xdr2json.ConvertBytes(xdr.ScVal{}, dataRaw); err != nil {
+		if info.ValueJSON, err = xdr2json.ConvertBytes(xdr.ScVal{}, body.data); err != nil {
 			return protocol.EventInfo{}, err
 		}
 	default:
-		info.TopicXDR = make([]string, len(topics))
-		for i, segment := range topics {
+		info.TopicXDR = make([]string, len(body.topics))
+		for i, segment := range body.topics {
 			info.TopicXDR[i] = base64.StdEncoding.EncodeToString(segment)
 		}
-		info.ValueXDR = base64.StdEncoding.EncodeToString(dataRaw)
+		info.ValueXDR = base64.StdEncoding.EncodeToString(body.data)
 	}
 
 	return info, nil
-}
-
-// eventRawFields locates the event's type, contract id, topics and data in one pass per level.
-// Fields and All return views already trimmed to their extent, so their bytes are the raw XDR
-// and calling Raw() would only re-walk them to size them again.
-func eventRawFields(ev xdr.ContractEventView) (xdr.ContractEventType, []byte, [][]byte, []byte, error) {
-	f, err := ev.Fields()
-	if err != nil {
-		return 0, nil, nil, nil, err
-	}
-	xdrType, err := f.Type.Value()
-	if err != nil {
-		return 0, nil, nil, nil, err
-	}
-	var cidRaw []byte
-	if cid, ok, err := f.ContractId.Unwrap(); err != nil {
-		return 0, nil, nil, nil, err
-	} else if ok {
-		cidRaw = []byte(cid)
-	}
-	v0, err := f.Body.V0() // fails on a non-V0 body, replacing "unknown event version"
-	if err != nil {
-		return 0, nil, nil, nil, err
-	}
-	v0f, err := v0.Fields()
-	if err != nil {
-		return 0, nil, nil, nil, err
-	}
-	views, err := v0f.Topics.All()
-	if err != nil {
-		return 0, nil, nil, nil, err
-	}
-	topics := make([][]byte, len(views))
-	for i, t := range views {
-		topics[i] = []byte(t)
-	}
-	return xdrType, cidRaw, topics, []byte(v0f.Data), nil
 }
 
 // eventTypeName is protocol.GetEventTypeFromEventTypeXDR without the per-call map; "" for an unknown type.
