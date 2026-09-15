@@ -3,7 +3,6 @@ package store
 import (
 	"bytes"
 	"fmt"
-	"slices"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/strkey"
@@ -56,8 +55,8 @@ func (f TopicCountFilter) Matches(n int) bool {
 // CompileV1EventFilters expands a validated v1 filter list into clauses. The
 // OR dimensions within one v1 filter (contract ids, topic filters) multiply
 // out, one clause per combination: at most 5 filters x 5 contract ids
-// x 5 topics x 2 filter types = 250. A combination with no constraints matches
-// every event, so the whole query collapses to match-all (nil).
+// x 5 topics = 125. A combination with no constraints matches every event,
+// so the whole query collapses to match-all (nil).
 func CompileV1EventFilters(in []protocol.EventFilter) ([]EventFilter, error) {
 	var out []EventFilter
 	for i := range in {
@@ -74,20 +73,19 @@ func CompileV1EventFilters(in []protocol.EventFilter) ([]EventFilter, error) {
 }
 
 func expandV1Filter(f *protocol.EventFilter) ([]EventFilter, bool, error) {
-	// One clause per named type + an empty set is the wildcard. Valid admits
-	// only contract and system, so len is 0, 1 or 2.
-	eventTypes := []*xdr.ContractEventType{nil}
-	if len(f.EventType) > 0 {
-		names := f.EventType.Keys()
-		slices.Sort(names)          // keep clause order deterministic
-		eventTypes = eventTypes[:0] // drop the initial nil, we have explicit names
-		for _, name := range names {
-			typ, ok := protocol.GetEventTypeXDRFromEventType()[name]
-			if !ok {
-				return nil, false, fmt.Errorf("unsupported event type %q", name)
-			}
-			eventTypes = append(eventTypes, &typ)
+	// A validated type set holds only contract and system, the only types
+	// either backend ingests: naming both constrains nothing, naming one is
+	// one term. Either way the type never multiplies the expansion.
+	var eventType *xdr.ContractEventType
+	if len(f.EventType) == 1 {
+		name := f.EventType.Keys()[0]
+		typ, ok := protocol.GetEventTypeXDRFromEventType()[name]
+		if !ok {
+			// Valid admits only contract and system, so anything else is a
+			// handler bug, not client input.
+			return nil, false, fmt.Errorf("unsupported event type %q", name)
 		}
+		eventType = &typ
 	}
 	contracts := [][]byte{nil}
 	if len(f.ContractIDs) > 0 {
@@ -114,16 +112,14 @@ func expandV1Filter(f *protocol.EventFilter) ([]EventFilter, bool, error) {
 		}
 	}
 
-	out := make([]EventFilter, 0, len(eventTypes)*len(contracts)*len(shapes))
-	for _, typ := range eventTypes {
-		for _, cid := range contracts {
-			for _, sh := range shapes {
-				flt := EventFilter{ContractID: cid, EventType: typ, Topics: sh.topics, TopicCount: sh.count}
-				if isMatchAll(&flt) {
-					return nil, true, nil
-				}
-				out = append(out, flt)
+	out := make([]EventFilter, 0, len(contracts)*len(shapes))
+	for _, cid := range contracts {
+		for _, sh := range shapes {
+			flt := EventFilter{ContractID: cid, EventType: eventType, Topics: sh.topics, TopicCount: sh.count}
+			if isMatchAll(&flt) {
+				return nil, true, nil
 			}
+			out = append(out, flt)
 		}
 	}
 	return out, false, nil
