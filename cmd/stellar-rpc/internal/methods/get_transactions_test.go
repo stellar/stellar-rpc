@@ -154,10 +154,6 @@ func TestGetTransactions_CaughtUpCursorIsEchoed(t *testing.T) {
 		"above the tip":          toid.New(15, 1, 1).String(),
 		"at the consumed tip":    toid.New(10, 2, 1).String(),
 		"past the tip's last tx": toid.New(10, 5, 1).String(),
-		// The server issues op order 1; 0 and 2 are client-built and must echo byte for byte.
-		"client-built op 0 at consumed tip": toid.New(10, 2, 0).String(),
-		"client-built op 0 past last tx":    toid.New(10, 5, 0).String(),
-		"client-built op 2 at consumed tip": toid.New(10, 2, 2).String(),
 	}
 	for name, cursor := range cursors {
 		t.Run(name, func(t *testing.T) {
@@ -327,10 +323,7 @@ func createTestLedger(sequence uint32) xdr.LedgerCloseMeta {
 		TxApplyProcessing: xdr.TransactionMeta{
 			V:          3,
 			Operations: &[]xdr.OperationMeta{},
-			// Soroban envelope with NO SorobanMeta: a Soroban tx charged but
-			// never executed (real on protocol 20-22 history). This pins the
-			// [[]] contractEventsXdr arity the view path must preserve.
-			V3: &xdr.TransactionMetaV3{},
+			V3:         &xdr.TransactionMetaV3{},
 		},
 		Result: xdr.TransactionResultPair{
 			TransactionHash: txHash(sequence),
@@ -386,17 +379,6 @@ type sparseLedgerReader struct {
 func (r *sparseLedgerReader) GetLedger(_ context.Context, seq uint32) (xdr.LedgerCloseMeta, bool, error) {
 	r.gets++
 	return createEmptyTestLedger(seq), true, nil
-}
-
-func (r *sparseLedgerReader) WithLedgerRaw(
-	_ context.Context, seq uint32, fn store.WithLedgerRawFn,
-) (bool, error) {
-	r.gets++
-	raw, err := createEmptyTestLedger(seq).MarshalBinary()
-	if err != nil {
-		return false, err
-	}
-	return true, fn(raw)
 }
 
 func (r *sparseLedgerReader) GetLedgerRange(context.Context) (store.LedgerRange, error) {

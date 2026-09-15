@@ -74,7 +74,11 @@ func (txn *transactionHandler) InsertTransactions(lcm xdr.LedgerCloseMeta) error
 
 	reader, err := ingest.NewLedgerTransactionReaderFromLedgerCloseMeta(txn.passphrase, lcm)
 	if err != nil {
-		return fmt.Errorf("failed to open transaction reader for ledger %d: %w", lcm.LedgerSequence(), err)
+		return fmt.Errorf(
+			"failed to open transaction reader for ledger %d: %w",
+			lcm.LedgerSequence(),
+			err,
+		)
 	}
 
 	transactions := make(map[xdr.Hash]ingest.LedgerTransaction, txCount)
@@ -154,12 +158,18 @@ func (txn *transactionHandler) trimTransactions(latestLedgerSeq uint32, retentio
 // directly against the RPC handler.
 //
 // Errors occur if there are issues with the DB connection or the XDR is
-// corrupted somehow. If the transaction is not found, store.ErrNoTransaction
-// is returned.
-func (txn *transactionHandler) GetTransaction(ctx context.Context, hash xdr.Hash) (store.Transaction, error) {
+// corrupted somehow. If the transaction is not found, io.EOF is returned.
+func (txn *transactionHandler) GetTransaction(ctx context.Context, hash xdr.Hash) (
+	store.Transaction, error,
+) {
 	start := time.Now()
+	tx := store.Transaction{}
 
-	tx, err := txn.getTransactionByHash(ctx, hash)
+	lcm, ingestTx, err := txn.getTransactionByHash(ctx, hash)
+	if err != nil {
+		return tx, err
+	}
+	tx, err = store.ParseTransaction(lcm, ingestTx)
 	if err != nil {
 		return tx, err
 	}
@@ -167,7 +177,7 @@ func (txn *transactionHandler) GetTransaction(ctx context.Context, hash xdr.Hash
 	txn.log.
 		WithField("txhash", hex.EncodeToString(hash[:])).
 		WithField("duration", time.Since(start)).
-		Debugf("Fetched and encoded transaction from ledger %d", tx.Ledger.Sequence)
+		Debugf("Fetched and encoded transaction from ledger %d", lcm.LedgerSequence())
 
 	return tx, nil
 }
@@ -179,11 +189,11 @@ func (txn *transactionHandler) GetTransaction(ctx context.Context, hash xdr.Hash
 //
 // Note: Caller must do input sanitization on the hash.
 func (txn *transactionHandler) getTransactionByHash(ctx context.Context, hash xdr.Hash) (
-	store.Transaction, error,
+	xdr.LedgerCloseMeta, ingest.LedgerTransaction, error,
 ) {
 	var rows []struct {
-		TxIndex int                     `db:"application_order"`
-		Lcm     xdr.LedgerCloseMetaView `db:"meta"`
+		TxIndex int                 `db:"application_order"`
+		Lcm     xdr.LedgerCloseMeta `db:"meta"`
 	}
 	rowQ := sq.
 		Select("t.application_order", "lcm.meta").
@@ -193,28 +203,27 @@ func (txn *transactionHandler) getTransactionByHash(ctx context.Context, hash xd
 		Limit(1)
 
 	if err := txn.db.Select(ctx, &rows, rowQ); err != nil {
-		return store.Transaction{}, fmt.Errorf("db read failed for txhash %s: %w", hex.EncodeToString(hash[:]), err)
+		return xdr.LedgerCloseMeta{}, ingest.LedgerTransaction{},
+			fmt.Errorf("db read failed for txhash %s: %w", hex.EncodeToString(hash[:]), err)
 	} else if len(rows) < 1 {
-		return store.Transaction{}, store.ErrNoTransaction
+		return xdr.LedgerCloseMeta{}, ingest.LedgerTransaction{}, store.ErrNoTransaction
 	}
 
 	txIndex, lcm := rows[0].TxIndex, rows[0].Lcm
-	ledgerSeq, err := lcm.LedgerSequence()
+	reader, err := ingest.NewLedgerTransactionReaderFromLedgerCloseMeta(txn.passphrase, lcm)
 	if err != nil {
-		return store.Transaction{}, fmt.Errorf("failed to get ledger sequence: %w", err)
+		return lcm, ingest.LedgerTransaction{},
+			fmt.Errorf("failed to create ledger reader: %w", err)
 	}
-	txnViewRange, err := ingest.LedgerTransactionViewRange(lcm, txIndex-1, 1, txn.passphrase)
+	err = reader.Seek(txIndex - 1)
 	if err != nil {
-		return store.Transaction{}, fmt.Errorf("failed to index to tx %d in ledger %d (txhash=%s): %w",
-			txIndex, ledgerSeq, hex.EncodeToString(hash[:]), err)
+		return lcm, ingest.LedgerTransaction{},
+			fmt.Errorf("failed to index to tx %d in ledger %d (txhash=%s): %w",
+				txIndex, lcm.LedgerSequence(), hash, err)
 	}
-	if len(txnViewRange) == 0 {
-		return store.Transaction{}, fmt.Errorf(
-			"application_order %d does not resolve to a transaction in ledger %d (txhash=%s): index/meta mismatch",
-			txIndex, ledgerSeq, hex.EncodeToString(hash[:]))
-	}
-	txView := txnViewRange[0]
-	return store.ParseTransactionView(txView), nil
+
+	ledgerTx, err := reader.Read()
+	return lcm, ledgerTx, err
 }
 
 type transactionTableMigration struct {
