@@ -194,18 +194,20 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 	plan := store.PlanFilters(filters)
 
 	results := []protocol.EventInfo{}
-	// Scan function to apply filters
+	// procErr keeps the callback's own error out of the reader's wrap, as getTransactions does,
+	// so a render failure stays a plain (system) error rather than an InvalidRequest.
+	var procErr error
 	var eventViewScanFunction store.ViewScanFunction = func(
 		eventView xdr.DiagnosticEventView, cursor protocol.Cursor, ledgerCloseTimestamp int64, txHash *xdr.Hash,
 	) (bool, error) {
-		event, err := eventView.Event()
-		if err != nil {
-			return false, err
+		var event xdr.ContractEventView
+		if event, procErr = eventView.Event(); procErr != nil {
+			return false, procErr
 		}
 		matched := len(filters) == 0
 		if !matched {
-			if matched, err = store.MatchesAnyFilterView(event, filters, &plan); err != nil {
-				return false, err
+			if matched, procErr = store.MatchesAnyFilterView(event, filters, &plan); procErr != nil {
+				return false, procErr
 			}
 		}
 		// Render the matched event in the callback to prevent two passes
@@ -218,7 +220,8 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 				request.Format,
 			)
 			if err != nil {
-				return false, errors.Wrap(err, "could not parse event")
+				procErr = errors.Wrap(err, "could not parse event")
+				return false, procErr
 			}
 			results = append(results, info)
 		}
@@ -226,7 +229,10 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 	}
 
 	err = h.dbReader.GetEvents(ctx, cursorRange, contractIDs, topics, eventTypes, eventViewScanFunction)
-	if err != nil {
+	switch {
+	case procErr != nil:
+		return protocol.GetEventsResponse{}, procErr
+	case err != nil:
 		return protocol.GetEventsResponse{}, &jrpc2.Error{
 			Code: jrpc2.InvalidRequest, Message: err.Error(),
 		}
