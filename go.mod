@@ -26,7 +26,7 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/pflag v1.0.5
-	github.com/stellar/go-stellar-sdk v0.7.4-0.20260903222904-d8c8acf5f56c
+	github.com/stellar/go-stellar-sdk v0.7.4-0.20260916152636-c033eaa5e2ff
 	github.com/stellar/streamhash v0.1.1-0.20260826155856-77556799545b
 	github.com/stretchr/testify v1.12.1
 )
@@ -125,7 +125,7 @@ require (
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.1.0 // indirect
 	github.com/pkg/errors v0.9.1
-	github.com/prometheus/client_model v0.6.2
+	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.67.2 // indirect
 	github.com/prometheus/procfs v0.19.2
 	github.com/sagikazarmark/locafero v0.3.0 // indirect
