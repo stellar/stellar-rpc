@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/creachadair/jrpc2"
+	"github.com/stellar-experimental/jrpc2"
 	"github.com/stretchr/testify/assert"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"

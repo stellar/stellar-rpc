@@ -15,11 +15,12 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/creachadair/jrpc2"
-	"github.com/creachadair/jrpc2/handler"
 	"github.com/go-chi/chi/middleware"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/cors"
+	"github.com/stellar-experimental/jrpc2"
+	"github.com/stellar-experimental/jrpc2/handler"
+	"github.com/stellar-experimental/jrpc2/jhttp"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/support/log"
@@ -50,11 +51,18 @@ const (
 // Handler is the HTTP handler which serves the Soroban JSON RPC responses
 type Handler struct {
 	http.Handler
+
+	bridge jhttp.Bridge
+	logger *log.Entry
 }
 
-// Close is kept for the daemons' shutdown sequence. Requests are served inline
-// on their HTTP goroutine, so there is no longer a bridge server to stop.
-func (h Handler) Close() {}
+// Close closes all the resources held by the Handler instances.
+// After Close is called the Handler instance will stop accepting JSON RPC requests.
+func (h Handler) Close() {
+	if err := h.bridge.Close(); err != nil {
+		h.logger.WithError(err).Warn("could not close bridge")
+	}
+}
 
 // HandlerSpec describes one JSON-RPC method: its handler plus the per-method
 // request limits applied around it.
@@ -214,18 +222,26 @@ func wrapWithLimiters(spec HandlerSpec, daemon host.Daemon, logger *log.Entry) j
 	return durationLimiter.Handle
 }
 
-// NewHandler constructs a Handler instance from the given method specs. Only
-// the listed methods are served: there are no built-in rpc.* methods.
+// NewHandler constructs a Handler instance from the given method specs
 func NewHandler(params Params) Handler {
+	bridgeOptions := jhttp.BridgeOptions{
+		Server: &jrpc2.ServerOptions{
+			Logger: func(text string) { params.Logger.Debug(text) },
+			// Disable built-in rpc.* methods (e.g. rpc.serverInfo) that
+			// bypass the handler allowlist and request limiters.
+			DisableBuiltin: true,
+		},
+	}
+
 	handlersMap := handler.Map{}
 	for _, spec := range params.Specs {
 		handlersMap[spec.MethodName] = wrapWithLimiters(spec, params.Daemon, params.Logger)
 	}
-	dispatch := newDispatcher(decorateHandlers(
+	bridge := jhttp.NewBridge(decorateHandlers(
 		params.Daemon,
 		params.Logger,
 		handlersMap),
-		params.Logger)
+		&bridgeOptions)
 
 	// globalQueueRequestBacklogLimiter is a metric for measuring the total concurrent inflight requests
 	globalQueueRequestBacklogLimiter := prometheus.NewGauge(prometheus.GaugeOpts{
@@ -234,7 +250,7 @@ func NewHandler(params Params) Handler {
 	})
 
 	queueLimitedBridge := network.MakeHTTPBacklogQueueLimiter(
-		dispatch,
+		bridge,
 		globalQueueRequestBacklogLimiter,
 		uint64(params.GlobalQueueLimit),
 		params.Logger)
@@ -268,5 +284,9 @@ func NewHandler(params Params) Handler {
 		AllowedMethods:         []string{"GET", "PUT", "POST", "PATCH", "DELETE", "HEAD", "OPTIONS"},
 	})
 
-	return Handler{Handler: corsMiddleware.Handler(handler)}
+	return Handler{
+		bridge:  bridge,
+		logger:  params.Logger,
+		Handler: corsMiddleware.Handler(handler),
+	}
 }

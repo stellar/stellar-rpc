@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/creachadair/jrpc2"
 	"github.com/pkg/errors"
+	"github.com/stellar-experimental/jrpc2"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/ingest"
