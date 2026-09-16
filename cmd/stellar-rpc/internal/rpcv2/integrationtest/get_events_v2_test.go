@@ -262,8 +262,8 @@ func TestGetEventsV2FiltersOverTheWire(t *testing.T) {
 		assert.Equal(t, wantIDs, eventIDs(call(t, req).Events))
 	})
 
-	// Rejected until #940 lands; then flip this to the positive check.
-	t.Run("topic0 as JSON is rejected until #940", func(t *testing.T) {
+	// The spec lists json as an xdrInputFormat; this server does not serve it.
+	t.Run("topic0 as JSON is rejected", func(t *testing.T) {
 		req := rng
 		req.XDRInputFormat = protocol.FormatJSON
 		req.Filters = []protocol.EventFilterV2{{ContractID: fx.contractID, Topic0: topic0JSON}}

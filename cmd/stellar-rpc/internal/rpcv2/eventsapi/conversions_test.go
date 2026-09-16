@@ -283,7 +283,7 @@ func TestEventFilterFields(t *testing.T) {
 func TestEventFilterJSONFormat(t *testing.T) {
 	_, transfer := symbolScVal(t, "transfer")
 
-	t.Run("with a topic is rejected until #940", func(t *testing.T) {
+	t.Run("with a topic is rejected", func(t *testing.T) {
 		in := protocol.EventFilterV2{Topic0: requestTopic(t, transfer)}
 		_, err := eventFilter(&in, protocol.FormatJSON)
 		require.ErrorIs(t, err, errJSONInputFormatUnsupported)
