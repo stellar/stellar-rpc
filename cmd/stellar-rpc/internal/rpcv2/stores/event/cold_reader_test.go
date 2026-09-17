@@ -102,7 +102,7 @@ func TestColdReader_OpenRoundTrip(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 5, 3)
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -117,7 +117,7 @@ func TestColdReader_LookupKnownTerm(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -144,7 +144,7 @@ func TestColdReader_LookupUnseenTermReturnsNil(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, _ := buildColdFixture(t, chunkID, 32, 1)
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -170,7 +170,7 @@ func TestColdReader_LookupKeysReturnsFreshBitmaps(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 8, 1)
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -189,7 +189,7 @@ func TestColdReader_FetchEventsRoundTrip(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 5, 1)
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -208,7 +208,7 @@ func TestColdReader_FetchEventsRejectsOutOfRangeID(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, _ := buildColdFixture(t, chunkID, 3, 1)
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -220,7 +220,7 @@ func TestColdReader_AllStreamsInEventIDOrder(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 6, 1)
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -246,7 +246,7 @@ func TestColdReader_AllEmptyChunkYieldsNothing(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 1, 1)
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -268,7 +268,7 @@ func TestColdReader_EventlessChunk(t *testing.T) {
 	dir, payloads := buildColdFixture(t, chunkID, 0, 2)
 	require.Empty(t, payloads)
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -313,7 +313,7 @@ func TestColdReader_EmptyIndexOverNonEmptyPackErrors(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, IndexHashName(chunkID)), emptyHash, 0o644))
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err, "Open is lazy — the mismatch surfaces at first Lookup")
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -333,7 +333,7 @@ func TestColdReader_OpenMissingEventsPack(t *testing.T) {
 	dir := t.TempDir()
 	// No files written.
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err, "Open is lazy — files missing should not error at construction")
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -349,7 +349,7 @@ func TestColdReader_OpenMissingIndexHash(t *testing.T) {
 	// Delete index.hash to simulate a corrupted/incomplete cold dir.
 	require.NoError(t, os.Remove(filepath.Join(dir, IndexHashName(chunkID))))
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err, "Open is lazy — files missing should not error at construction")
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -361,7 +361,7 @@ func TestColdReader_OpenMissingIndexHash(t *testing.T) {
 func TestColdReader_CloseIsIdempotent(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, _ := buildColdFixture(t, chunkID, 2, 1)
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	require.NoError(t, cr.Close())
 	assert.NoError(t, cr.Close())
@@ -370,7 +370,7 @@ func TestColdReader_CloseIsIdempotent(t *testing.T) {
 func TestColdReader_PostCloseMethodsError(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 2, 1)
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	require.NoError(t, cr.Close())
 
@@ -391,7 +391,7 @@ func TestColdReader_PostCloseMethodsError(t *testing.T) {
 func TestColdReader_MetadataErrorsAfterClose(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, _ := buildColdFixture(t, chunkID, 5, 3)
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 
 	require.NoError(t, cr.Close())
@@ -409,7 +409,7 @@ func TestColdReader_MetadataErrorsAfterClose(t *testing.T) {
 func TestColdReader_SatisfiesReaderInterface(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, _ := buildColdFixture(t, chunkID, 1, 1)
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -429,7 +429,7 @@ func TestColdReader_MPHFSurvivesIndexHashDeletion(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -457,7 +457,7 @@ func TestColdReader_OpenWithConcurrency(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 8, 1)
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{Concurrency: 4})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{Concurrency: 4})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -492,7 +492,7 @@ func TestColdReader_OpenWithNegativeConcurrency(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, _ := buildColdFixture(t, chunkID, 2, 1)
 
-	_, err := OpenColdReader(chunkID, dir, ColdReaderOptions{Concurrency: -1})
+	_, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{Concurrency: -1})
 	assert.Error(t, err)
 }
 
@@ -503,7 +503,7 @@ func TestColdReader_OpenWithNegativeConcurrency(t *testing.T) {
 func TestColdReader_FetchEventsRejectsUnsortedInput(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, _ := buildColdFixture(t, chunkID, 5, 1)
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -522,7 +522,7 @@ func TestColdReader_FetchEventsRejectsUnsortedInput(t *testing.T) {
 func TestColdReader_FetchEventsHonorsContext(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, _ := buildColdFixture(t, chunkID, 5, 1)
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -542,7 +542,7 @@ func TestColdReader_LookupKeys(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{Concurrency: 4})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{Concurrency: 4})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -574,7 +574,7 @@ func TestColdReader_LookupKeysClonesAcrossCalls(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 8, 1)
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -597,7 +597,7 @@ func TestColdReader_FetchRangeMidRange(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 6, 1)
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -615,7 +615,7 @@ func TestColdReader_FetchRangeZeroCountYieldsNothing(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, _ := buildColdFixture(t, chunkID, 3, 1)
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -628,7 +628,7 @@ func TestColdReader_FetchRangeOutOfBoundsErrors(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 3, 1)
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -642,7 +642,7 @@ func TestColdReader_FetchRangePostCloseYieldsErrClosed(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, _ := buildColdFixture(t, chunkID, 3, 1)
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	require.NoError(t, cr.Close())
 
@@ -653,7 +653,7 @@ func TestColdReader_AllMatchesFetchRange(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -715,7 +715,7 @@ func TestColdReader_CorruptIndexPackIsCorrupt(t *testing.T) {
 	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
 	flipByteAt(t, filepath.Join(dir, IndexPackName(chunkID)), 0)
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -746,7 +746,7 @@ func TestColdReader_CorruptOffsetsBlobIsCorrupt(t *testing.T) {
 	require.GreaterOrEqual(t, off, 0)
 	flipByteAt(t, eventsPath, off)
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -762,7 +762,7 @@ func TestColdReader_RejectsWrongFormatEventsPack(t *testing.T) {
 	dir, _ := buildColdFixture(t, chunkID, 4, 1)
 	writeForeignPack(t, filepath.Join(dir, EventsPackName(chunkID)))
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err, "open is lazy; the format check fires on first metadata access")
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -777,7 +777,7 @@ func TestColdReader_RejectsWrongFormatIndexPack(t *testing.T) {
 	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
 	writeForeignPack(t, filepath.Join(dir, IndexPackName(chunkID)))
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -806,7 +806,7 @@ func TestColdReader_RejectsMispairedOffsets(t *testing.T) {
 	require.NoError(t, offsets.Append(first, 2))
 	require.NoError(t, cw.Finish(offsets))
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -825,7 +825,7 @@ func TestColdReader_RejectsMispairedIndexHash(t *testing.T) {
 
 	copyFile(t, filepath.Join(dirB, IndexHashName(chunkID)), filepath.Join(dirA, IndexHashName(chunkID)))
 
-	cr, err := OpenColdReader(chunkID, dirA, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dirA, Index: dirA}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -844,7 +844,7 @@ func TestColdReader_RejectsNonEmptyIndexOnEventlessChunk(t *testing.T) {
 	copyFile(t, filepath.Join(dirFull, IndexPackName(chunkID)), filepath.Join(dirEventless, IndexPackName(chunkID)))
 	copyFile(t, filepath.Join(dirFull, IndexHashName(chunkID)), filepath.Join(dirEventless, IndexHashName(chunkID)))
 
-	cr, err := OpenColdReader(chunkID, dirEventless, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dirEventless, Index: dirEventless}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -872,7 +872,7 @@ func TestColdReader_CorruptIndexOffsetsIsCorrupt(t *testing.T) {
 	require.Positive(t, tr.IndexSize)
 	flipByteAt(t, indexPath, len(b)-76-int(tr.IndexSize))
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -898,7 +898,7 @@ func TestColdReader_CloseOnlySurfacesCorrupt(t *testing.T) {
 	require.Positive(t, tr.IndexSize)
 	flipByteAt(t, indexPath, len(b)-76-int(tr.IndexSize))
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	require.ErrorIs(t, cr.Close(), stores.ErrCorrupt)
 }
@@ -932,7 +932,7 @@ func TestColdReader_UncheckedIndexPackIsCorrupt(t *testing.T) {
 	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
 	clearRecordChecksumFlag(t, filepath.Join(dir, IndexPackName(chunkID)))
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -983,7 +983,7 @@ func TestColdReader_RejectsMismatchedBuildStamp(t *testing.T) {
 				dir, _ := buildColdFixture(t, chunkID, eventsPerLedger, 2)
 				rewriteIndexPackStamp(t, dir, chunkID, tc.schema, tc.mask)
 
-				cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+				cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 				require.NoError(t, err)
 				t.Cleanup(func() { _ = cr.Close() })
 				_, err = cr.LookupKeys(context.Background(), []TermKey{{1}})
