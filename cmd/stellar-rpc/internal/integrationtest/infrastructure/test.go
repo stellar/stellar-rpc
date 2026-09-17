@@ -604,7 +604,12 @@ func (i *Test) waitForRPC() {
 		result, err := i.GetRPCLient().GetHealth(i.t.Context())
 		i.t.Logf("getHealth: %+v; err: %v", result, err)
 		if err == nil && result.Status == "healthy" && i.caughtUpWithCore(result.LatestLedger) {
-			i.waitForOneMoreLedger(result.LatestLedger, deadline)
+			// Only the live-Core modes need the extra ledger. The synthetic
+			// load test has no Core and a finite stream that may already be
+			// done; the delayed-daemon mode is behind on purpose.
+			if i.coreClient != nil && i.delayDaemonForLedgerN == 0 {
+				i.waitForOneMoreLedger(result.LatestLedger, deadline)
+			}
 			return
 		}
 		require.False(i.t, time.Now().After(deadline), "RPC never got healthy: %+v", err)
