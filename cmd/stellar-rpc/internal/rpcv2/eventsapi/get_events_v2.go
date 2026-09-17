@@ -468,13 +468,11 @@ func eventInfoV2(p *event.Payload, format string) (protocol.EventInfoV2, error) 
 	return protocol.EventInfoV2(info), nil
 }
 
-// checkResponseEventType: ingest stores contract and system events only.
+// checkResponseEventType: ingest stores contract and system events only, so only diagnostic is refused.
 func checkResponseEventType(name string) error {
-	switch name {
-	case protocol.EventTypeSystem, protocol.EventTypeContract:
+	if name != protocol.EventTypeDiagnostic {
 		return nil
-	default:
-		return fmt.Errorf("rpcv2: stored event has type %q;"+
-			" this endpoint serves contract and system events only", name)
 	}
+	return fmt.Errorf("rpcv2: stored event has type %q;"+
+		" this endpoint serves contract and system events only", name)
 }

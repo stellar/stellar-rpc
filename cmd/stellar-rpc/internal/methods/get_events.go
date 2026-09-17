@@ -339,8 +339,13 @@ func eventInfo(
 		return protocol.EventInfo{}, fmt.Errorf("ledger sequence %d exceeds supported range", cursor.Ledger)
 	}
 
+	typeName, ok := eventTypeName(head.typ)
+	if !ok {
+		return protocol.EventInfo{}, fmt.Errorf("unknown XDR ContractEventType type: %d", head.typ)
+	}
+
 	info := protocol.EventInfo{
-		EventType:       eventTypeName(head.typ),
+		EventType:       typeName,
 		Ledger:          int32(cursor.Ledger),
 		LedgerClosedAt:  ledgerClosedAt,
 		ID:              cursor.String(),
@@ -373,17 +378,17 @@ func eventInfo(
 	return info, nil
 }
 
-// eventTypeName is protocol.GetEventTypeFromEventTypeXDR without the per-call map; "" for an unknown type.
-func eventTypeName(t xdr.ContractEventType) string {
+// eventTypeName is protocol.GetEventTypeFromEventTypeXDR without the per-call map; ok is false outside the enum.
+func eventTypeName(t xdr.ContractEventType) (string, bool) {
 	switch t {
 	case xdr.ContractEventTypeSystem:
-		return protocol.EventTypeSystem
+		return protocol.EventTypeSystem, true
 	case xdr.ContractEventTypeContract:
-		return protocol.EventTypeContract
+		return protocol.EventTypeContract, true
 	case xdr.ContractEventTypeDiagnostic:
-		return protocol.EventTypeDiagnostic
+		return protocol.EventTypeDiagnostic, true
 	default:
-		return ""
+		return "", false
 	}
 }
 

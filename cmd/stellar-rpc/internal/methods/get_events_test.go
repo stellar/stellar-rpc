@@ -1279,6 +1279,24 @@ func setupTwoContractEventsHandler(t *testing.T) (eventsRPCHandler, xdr.Contract
 	}, contractA, contractB
 }
 
+// TestEventTypeName pins the three wire names and that a type outside the enum is refused, not rendered empty.
+func TestEventTypeName(t *testing.T) {
+	for want, typ := range map[string]xdr.ContractEventType{
+		protocol.EventTypeSystem:     xdr.ContractEventTypeSystem,
+		protocol.EventTypeContract:   xdr.ContractEventTypeContract,
+		protocol.EventTypeDiagnostic: xdr.ContractEventTypeDiagnostic,
+	} {
+		got, ok := eventTypeName(typ)
+		require.True(t, ok, want)
+		assert.Equal(t, want, got)
+	}
+
+	// The views reject this today; the guard is for an enum that gains a member.
+	got, ok := eventTypeName(xdr.ContractEventType(99))
+	assert.False(t, ok, "a type outside the enum must not render")
+	assert.Empty(t, got)
+}
+
 // Filters are OR-ed together: a filter with no contract IDs matches events
 // from any contract, so it must not be starved by another filter's contract
 // ID restriction.
