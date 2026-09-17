@@ -276,9 +276,9 @@ func TestInsertEventsBatchingExceedsLimit(t *testing.T) {
 
 			var count int
 			err = eventReader.GetEvents(ctx, cursorRange, nil, nil, nil,
-				func(_ xdr.DiagnosticEvent, _ protocol.Cursor, _ int64, _ *xdr.Hash) bool {
+				func(_ xdr.DiagnosticEventView, _ protocol.Cursor, _ int64, _ *xdr.Hash) (bool, error) {
 					count++
-					return true
+					return true, nil
 				})
 			require.NoError(t, err)
 
