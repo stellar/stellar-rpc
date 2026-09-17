@@ -297,7 +297,11 @@ func TestCheckLedger(t *testing.T) {
 		rec := &recorder{limit: 10}
 		got, ok := checkLedger(rec, 501, &lcm, &prevHash)
 		assert.False(t, ok)
-		assert.Equal(t, base.V2.LedgerHeader.Hash, got, "the hash the untouched header really has")
+		// The next ledger chains to what this header really hashes to, not to
+		// the wrong value stored beside it, so one corrupt stored hash is one
+		// finding rather than a broken link for the rest of the chunk.
+		require.NotNil(t, got)
+		assert.Equal(t, base.V2.LedgerHeader.Hash, *got, "the hash the untouched header really has")
 	})
 }
 
@@ -340,4 +344,60 @@ func realLedgerBytes(t *testing.T) []byte {
 		t.Skipf("real ledger fixture not available: %v", err)
 	}
 	return raw
+}
+
+// TestExecutionProtocol covers the ledger a protocol upgrade lands on, where
+// the header already names the new version but every transaction in it ran
+// under the old one. Pubnet ledger 58,762,517 is that ledger for protocol 23;
+// before executionProtocol existed, verifying the chunk holding it reported
+// 25 invocations there as mismatches.
+func TestExecutionProtocol(t *testing.T) {
+	ledger := func(protocol uint32, mutate func(*xdr.LedgerCloseMeta) bool) xdr.LedgerCloseMeta {
+		c := newChain(t, 1, xdr.Hash{})
+		c.protocol = protocol
+		return c.nextMutated(mutate)
+	}
+
+	t.Run("no upgrade: the header version is the one transactions ran under", func(t *testing.T) {
+		lcm := ledger(23, nil)
+		assert.Equal(t, uint32(23), executionProtocol(&lcm))
+	})
+	t.Run("version upgrade: transactions ran below the header version", func(t *testing.T) {
+		lcm := ledger(23, withUpgrade(versionUpgrade(23)))
+		assert.Equal(t, uint32(22), executionProtocol(&lcm))
+	})
+	t.Run("an upgrade that is not a version upgrade says nothing", func(t *testing.T) {
+		lcm := ledger(23, withUpgrade(baseFeeUpgrade(200)))
+		assert.Equal(t, uint32(23), executionProtocol(&lcm))
+	})
+	t.Run("a version upgrade to some other version is not this ledger's", func(t *testing.T) {
+		lcm := ledger(23, withUpgrade(versionUpgrade(21)))
+		assert.Equal(t, uint32(23), executionProtocol(&lcm))
+	})
+}
+
+// TestInvokeChecks_ProtocolUpgradeLedger is the pubnet shape: a backfilled
+// export whose committed originals live in the diagnostics, in the very
+// ledger that raised the protocol to 23. Dispatching on the header sends it
+// down the reconciliation path, which cannot recover those originals, and
+// the invocation is reported as a mismatch.
+func TestInvokeChecks_ProtocolUpgradeLedger(t *testing.T) {
+	original := symEvent(6, "1000", "transfer", "GISSUER", "GADDRESS", "USDC:GISSUER")
+	other := symEvent(9, "a", "x")
+	rewritten := reconciliationEvent(t, "mint")
+	diag := []xdr.DiagnosticEvent{fnCallDiagnostic(), diagnostic(original, true), diagnostic(other, true)}
+	meta := metaV4Soroban(voidVal(), [][]xdr.ContractEvent{{rewritten, other}}, nil, diag)
+	tx := txSpec{
+		env:    sorobanEnvelope(),
+		result: invokeResult(t, voidVal(), []xdr.ContractEvent{original, other}),
+		meta:   meta,
+	}
+
+	c := newChain(t, 1, xdr.Hash{})
+	c.protocol = 23
+	lcm := c.nextMutated(withUpgrade(versionUpgrade(23)), tx)
+	exp, err := expectLedger(passphrase, &lcm)
+	require.NoError(t, err)
+	require.Len(t, exp.invokes, 1)
+	assert.True(t, exp.invokes[0].ok(), "%+v", exp.invokes[0])
 }

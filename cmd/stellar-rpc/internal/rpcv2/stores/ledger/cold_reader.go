@@ -127,7 +127,13 @@ func (c *ColdReader) loadHeader() (coldHeader, error) {
 	return coldHeader{firstSeq: first, lastSeq: first + tr.TotalItems - 1}, nil
 }
 
-func (c *ColdReader) FirstSeq() (uint32, error) { h, err := c.init(); return h.firstSeq, err }
+// Span is the inclusive ledger range the pack holds. Both bounds come from
+// the one cached header, so a caller that wants the range asks once rather
+// than pairing two accessors and discarding the second error.
+func (c *ColdReader) Span() (uint32, uint32, error) {
+	h, err := c.init()
+	return h.firstSeq, h.lastSeq, err
+}
 
 func (c *ColdReader) LastSeq() (uint32, error) { h, err := c.init(); return h.lastSeq, err }
 

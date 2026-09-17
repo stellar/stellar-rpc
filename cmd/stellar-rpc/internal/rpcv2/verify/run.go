@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 
@@ -71,6 +72,17 @@ func (o Options) validate() error {
 	if o.StartChunk >= 0 && o.EndChunk >= 0 && o.StartChunk > o.EndChunk {
 		return fmt.Errorf("verify: start chunk %d is past end chunk %d", o.StartChunk, o.EndChunk)
 	}
+	// A chunk id is a uint32. Without this an end bound above the maximum
+	// truncates into range silently, and the maximum itself makes a c <= hi
+	// loop wrap around forever.
+	if o.StartChunk > math.MaxUint32 || o.EndChunk > math.MaxUint32 {
+		return fmt.Errorf("verify: chunk bounds must be at most %d, got start %d end %d",
+			uint32(math.MaxUint32), o.StartChunk, o.EndChunk)
+	}
+	if o.MaxMismatches < 0 {
+		return fmt.Errorf("verify: max mismatches must be 0 for the default or a positive count, got %d",
+			o.MaxMismatches)
+	}
 	return nil
 }
 
@@ -84,10 +96,12 @@ type target struct {
 // so a run can sit beside a live daemon. The returned error is an
 // infrastructure failure of the run itself; verdicts are in the Report.
 func Run(ctx context.Context, logger *supportlog.Entry, opts Options) (*Report, error) {
-	opts = opts.withDefaults()
+	// Before withDefaults, which maps a non-positive cap to 50 and would hide
+	// a negative one from validate.
 	if err := opts.validate(); err != nil {
 		return nil, err
 	}
+	opts = opts.withDefaults()
 	txl, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
 	if err != nil {
 		return nil, err
@@ -98,7 +112,7 @@ func Run(ctx context.Context, logger *supportlog.Entry, opts Options) (*Report, 
 	}
 	defer func() { _ = cat.Close() }()
 
-	targets, err := frozenChunks(cat, opts)
+	targets, absent, absentTotal, err := frozenChunks(cat, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -121,17 +135,31 @@ func Run(ctx context.Context, logger *supportlog.Entry, opts Options) (*Report, 
 
 	logger.Infof("verifying %d chunks with %d workers", len(targets), opts.Workers)
 	results := runChunks(ctx, logger, d, targets, opts.Workers)
+	report := &Report{
+		Chunks: results, Indexes: checkIndexes(indexes, results),
+		Absent: absent, AbsentCount: absentTotal,
+	}
+	// A canceled run still has verdicts for the chunks it finished, so the
+	// report comes back either way and the error says the run is incomplete.
+	// The caller prints the summary and then surfaces this error, so an
+	// interrupted run reports what it learned AND still exits non-zero.
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return report, err
 	}
-	if !slices.ContainsFunc(results, func(r ChunkResult) bool { return r.Skipped == "" }) {
-		return nil, errors.New("verify: no chunk in range has a frozen ledgers pack to verify against")
+	if !slices.ContainsFunc(results, func(r ChunkResult) bool { return r.Status != statusSkipped }) {
+		return report, errors.New("verify: no chunk in range has a frozen ledgers pack to verify against")
 	}
-	return &Report{Chunks: results, Indexes: checkIndexes(indexes, results)}, nil
+	return report, nil
 }
 
 func runChunks(ctx context.Context, logger *supportlog.Entry, d *deps, targets []target, workers int) []ChunkResult {
 	results := make([]ChunkResult, len(targets))
+	// Seed every slot before any worker starts. A slot a canceled run never
+	// reaches keeps this value, so it carries its real chunk id (which
+	// checkIndexes needs) and reads as not-run rather than as clean.
+	for i, t := range targets {
+		results[i] = ChunkResult{Chunk: t.chunk, Kinds: t.frozen.Kinds(), Status: statusNotRun}
+	}
 	var g errgroup.Group
 	g.SetLimit(workers)
 	for i, t := range targets {
@@ -158,27 +186,52 @@ func runChunks(ctx context.Context, logger *supportlog.Entry, d *deps, targets [
 func verifyChunk(ctx context.Context, d *deps, t target) ChunkResult {
 	res := ChunkResult{Chunk: t.chunk, Kinds: t.frozen.Kinds()}
 	if !t.frozen.Has(geometry.KindLedgers) {
-		res.Skipped = "ledgers artifact not frozen"
+		res.Checks.unexplained(
+			"the catalog names no frozen ledgers pack for this chunk, so there was nothing to check anything against")
+		res.Status = statusSkipped
 		return res
 	}
 	r := &chunkRun{d: d, c: t.chunk, frozen: t.frozen, rec: &recorder{limit: d.opts.MaxMismatches}}
 	res.Err = r.run(ctx)
+	res.Err = errors.Join(res.Err, r.releaseIndex())
 	res.Mismatches, res.Dropped = r.rec.out, r.rec.dropped
 	res.Ledgers, res.Txs, res.TxHashes = r.ledgers, r.txs, r.txHashes
 	res.Invokes, res.InvokesUnchecked = r.invokes, r.invokesUnchecked
-	res.IndexChecked = r.index != nil && res.Err == nil && !r.sourceBad
 	if r.events != nil {
-		res.Events = uint64(r.events.nextID)
+		res.Events = r.events.checked
 	}
+	res.Checks = r.checks
+	// Keep the findings: every row describes bytes really read, and run()
+	// already skips the chunk-wide totals a partial pass would distort.
+	// Failed() keys on the findings, Incomplete() on the status.
+	if ctx.Err() != nil {
+		res.Checks.unexplained("the run was canceled before it got there")
+		res.Status = statusCanceled
+		return res
+	}
+	if !res.Checks[checkLedgers].Ran {
+		// Only when the walk really did stop early. Anything left unexplained
+		// reads as "no reason recorded", which is the signal that some site
+		// forgot to set one.
+		res.Checks.unexplained(
+			"the chunk's ledgers were not walked to the end, so nothing derived from them was compared")
+	}
+	// Gated exactly as checkLedgers is, so the two can never disagree about one
+	// chunk; see the field's doc for why it is not a check.
+	res.ResolvedThroughIndex = r.index != nil && res.Checks[checkLedgers].Ran && !r.sourceBad
+	res.Status = classify(res.Err, len(res.Mismatches))
 	return res
 }
 
 // frozenChunks lists the chunks in range that have any frozen artifact, with
-// the frozen kinds of each, ascending.
-func frozenChunks(cat *catalog.Catalog, opts Options) ([]target, error) {
+// the frozen kinds of each, ascending, and separately the chunks in the range
+// the catalog does not name at all. A chunk with nothing frozen never becomes
+// a target, so without that second return it is absent from the report, the
+// summary's denominator and the exit status.
+func frozenChunks(cat *catalog.Catalog, opts Options) ([]target, []chunk.ID, int, error) {
 	refs, err := cat.ChunkArtifactKeys()
 	if err != nil {
-		return nil, fmt.Errorf("list chunk artifacts: %w", err)
+		return nil, nil, 0, fmt.Errorf("list chunk artifacts: %w", err)
 	}
 	byChunk := make(map[chunk.ID]catalog.ArtifactSet)
 	for _, ref := range refs {
@@ -198,7 +251,41 @@ func frozenChunks(cat *catalog.Catalog, opts Options) ([]target, error) {
 		targets = append(targets, target{chunk: c, frozen: kinds})
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].chunk < targets[j].chunk })
-	return targets, nil
+	absent, total := absentChunks(byChunk, targets, opts)
+	return targets, absent, total, nil
+}
+
+// absentChunks lists the chunks the run was asked for that the catalog names
+// no frozen artifact for. The span is the requested range where the operator
+// gave bounds, and the frozen extent where they did not — so a default run
+// reports holes in the middle of its own history, and a bounded run also
+// reports a range that runs off the end of what has been backfilled.
+func absentChunks(byChunk map[chunk.ID]catalog.ArtifactSet, targets []target, opts Options) ([]chunk.ID, int) {
+	if len(targets) == 0 {
+		return nil, 0
+	}
+	lo, hi := targets[0].chunk, targets[len(targets)-1].chunk
+	if opts.StartChunk >= 0 {
+		lo = chunk.ID(opts.StartChunk) //nolint:gosec // validated non-negative above
+	}
+	if opts.EndChunk >= 0 {
+		hi = chunk.ID(opts.EndChunk) //nolint:gosec // validated non-negative above
+	}
+	// Counted in full, listed only up to idsListed: a bound far past the
+	// end of the data is a legitimate thing to ask for, and answering it with
+	// one id per chunk would be tens of megabytes of report.
+	var out []chunk.ID
+	var total int
+	for c := uint64(lo); c <= uint64(hi); c++ {
+		if _, ok := byChunk[chunk.ID(c)]; ok { //nolint:gosec // bounded by hi, a chunk.ID
+			continue
+		}
+		total++
+		if len(out) < idsListed {
+			out = append(out, chunk.ID(c)) //nolint:gosec // same bound
+		}
+	}
+	return out, total
 }
 
 // checkIndexes compares each resolved tx-hash index with the number of
@@ -222,11 +309,11 @@ func checkIndex(e *indexEntry, byChunk map[chunk.ID]ChunkResult) IndexResult {
 	for c := e.cov.Lo; c <= e.cov.Hi; c++ {
 		r, ok := byChunk[c]
 		switch {
-		case !ok || r.Skipped != "":
+		case !ok || r.Status == statusSkipped || r.Status == statusNotRun || r.Status == statusCanceled:
 			res.Skipped = fmt.Sprintf("chunk %s not verified in this run", c)
 		case r.Err != nil:
 			res.Skipped = fmt.Sprintf("chunk %s errored", c)
-		case !r.IndexChecked:
+		case !r.ResolvedThroughIndex:
 			res.Skipped = fmt.Sprintf("chunk %s did not complete its index check", c)
 		}
 		if res.Skipped != "" {
@@ -234,6 +321,6 @@ func checkIndex(e *indexEntry, byChunk map[chunk.ID]ChunkResult) IndexResult {
 		}
 		res.Expected += r.TxHashes
 	}
-	res.Actual = e.reader.KeyCount()
+	res.Actual = e.keyCount
 	return res
 }

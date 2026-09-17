@@ -343,6 +343,28 @@ func (c *chain) nextMutated(mutate func(*xdr.LedgerCloseMeta) bool, txs ...txSpe
 	return lcm
 }
 
+// withUpgrade adds the upgrade meta core writes for an upgrade applied at the
+// end of a ledger. UpgradesProcessing is meta, not something a header
+// commitment covers, so the sealed ledger stays valid without resealing.
+func withUpgrade(u xdr.LedgerUpgrade) func(*xdr.LedgerCloseMeta) bool {
+	return func(lcm *xdr.LedgerCloseMeta) bool {
+		lcm.V2.UpgradesProcessing = append(lcm.V2.UpgradesProcessing, xdr.UpgradeEntryMeta{Upgrade: u})
+		return false
+	}
+}
+
+// versionUpgrade is the upgrade that raises the protocol version to v.
+func versionUpgrade(v uint32) xdr.LedgerUpgrade {
+	nv := xdr.Uint32(v)
+	return xdr.LedgerUpgrade{Type: xdr.LedgerUpgradeTypeLedgerUpgradeVersion, NewLedgerVersion: &nv}
+}
+
+// baseFeeUpgrade is an upgrade that leaves the protocol version alone.
+func baseFeeUpgrade(fee uint32) xdr.LedgerUpgrade {
+	f := xdr.Uint32(fee)
+	return xdr.LedgerUpgrade{Type: xdr.LedgerUpgradeTypeLedgerUpgradeBaseFee, NewBaseFee: &f}
+}
+
 // withExtraEnvelope adds a second copy of the first envelope to the
 // transaction set with no result to pair it with, and reseals.
 func withExtraEnvelope(lcm *xdr.LedgerCloseMeta) bool {

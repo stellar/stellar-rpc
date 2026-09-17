@@ -43,6 +43,9 @@ func (r *recordingMetrics) Prune(count int, d time.Duration) {
 
 func (*recordingMetrics) LastCommitted(uint32)       {}
 func (*recordingMetrics) RetentionFloor(uint32)      {}
+func (*recordingMetrics) BackfillRetry()             {}
+func (*recordingMetrics) BackfillPlanned(int)        {}
+func (*recordingMetrics) BackfillCompleted(int)      {}
 func (*recordingMetrics) ChunkBoundary()             {}
 func (*recordingMetrics) BackfillPass(time.Duration) {}
 func (*recordingMetrics) LiveHotChunks(int)          {}

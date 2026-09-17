@@ -15,6 +15,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 )
 
 // hotOptions configures one hot-ingest benchmark run.
@@ -144,7 +145,7 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 	})
 	// VmHWM never decreases, so it can be read right here — before the
 	// completion check — and a failed run's partial CSV still gets the row.
-	recordPeakRSS(logger, sink, readPeakRSS)
+	recordPeakRSS(logger, sink, observability.ReadPeakRSS)
 	// The loop cannot tell a complete bounded stream from one that ran dry;
 	// the sink's last-committed gauge (set once per ingested ledger) can.
 	if err == nil && sink.lastCommittedSeq() != last {

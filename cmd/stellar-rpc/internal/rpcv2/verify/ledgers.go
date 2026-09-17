@@ -13,8 +13,10 @@ import (
 // ledger, carries as many envelopes as results, and commits to the stored
 // envelopes and results. prevHash is nil when the previous ledger's hash is
 // not at hand. It returns the hash computed over this header, for the next
-// ledger's chain check, and whether every check passed.
-func checkLedger(rec *recorder, seq uint32, lcm *xdr.LedgerCloseMeta, prevHash *xdr.Hash) (xdr.Hash, bool) {
+// ledger's chain check, and whether every check passed. The hash is nil when
+// the header would not hash at all: chaining the zero value forward would
+// report every later ledger of the chunk as a broken link.
+func checkLedger(rec *recorder, seq uint32, lcm *xdr.LedgerCloseMeta, prevHash *xdr.Hash) (*xdr.Hash, bool) {
 	ok := true
 	fail := func(field, expected, actual string) {
 		ok = false
@@ -27,9 +29,11 @@ func checkLedger(rec *recorder, seq uint32, lcm *xdr.LedgerCloseMeta, prevHash *
 		fail("ledger_seq", u32(seq), u32(got))
 	}
 	computed, err := xdr.HashXdr(hdr)
+	chain := &computed
 	switch {
 	case err != nil:
 		fail("header_hash", "", err.Error())
+		chain = nil
 	case computed != entry.Hash:
 		fail("header_hash", hexHash(computed), hexHash(entry.Hash))
 	}
@@ -53,7 +57,7 @@ func checkLedger(rec *recorder, seq uint32, lcm *xdr.LedgerCloseMeta, prevHash *
 	case h != hdr.TxSetResultHash:
 		fail("tx_set_result_hash", hexHash(h), hexHash(hdr.TxSetResultHash))
 	}
-	return computed, ok
+	return chain, ok
 }
 
 // txSetHash recomputes the hash the header commits the transaction set

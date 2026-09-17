@@ -49,6 +49,7 @@ func expectLedger(passphrase string, lcm *xdr.LedgerCloseMeta) (ledgerExpectatio
 	}
 	exp.txs = uint64(len(txs))
 
+	protocol := executionProtocol(lcm)
 	events := make([]ingest.TransactionEvents, len(txs))
 	for i := range txs {
 		tx := &txs[i]
@@ -66,10 +67,35 @@ func expectLedger(passphrase string, lcm *xdr.LedgerCloseMeta) (ledgerExpectatio
 				return exp, fmt.Errorf("tx %s: %w", tx.Hash.HexString(), err)
 			}
 		}
-		exp.invokes = append(exp.invokes, invokeChecks(passphrase, tx, events[i], lcm.ProtocolVersion())...)
+		exp.invokes = append(exp.invokes, invokeChecks(passphrase, tx, events[i], protocol)...)
 	}
 	exp.events, err = orderEvents(txs, events, lcm.LedgerSequence(), lcm.LedgerCloseTime())
 	return exp, err
+}
+
+// executionProtocol is the protocol version a ledger's transactions were
+// applied under, which is not the version its header carries on the ledger an
+// upgrade lands on: core applies upgrades after transactions, so the header
+// already names the new version while the transactions ran under the old one.
+// Pubnet ledger 58,762,517 is one — header 23, transactions at 22.
+//
+// The meta records the version an upgrade set, never the one the ledger opened
+// at, so this is the highest the transactions can have run under. Exact for
+// any upgrade that advances by one, which is all of them so far.
+func executionProtocol(lcm *xdr.LedgerCloseMeta) uint32 {
+	header := lcm.ProtocolVersion()
+	if header == 0 {
+		return header
+	}
+	for _, u := range lcm.UpgradesProcessing() {
+		// Only an upgrade that set the header's own version moves the
+		// transactions below it; a fee or limit upgrade in the same ledger
+		// says nothing about the version they ran under.
+		if v, ok := u.Upgrade.GetNewLedgerVersion(); ok && uint32(v) == header {
+			return header - 1
+		}
+	}
+	return header
 }
 
 func readTransactions(reader *ingest.LedgerTransactionReader) ([]ingest.LedgerTransaction, error) {
@@ -243,7 +269,7 @@ type invokeCheck struct {
 	skipped string
 }
 
-func (c invokeCheck) ok() bool { return c.reason == "" && c.skipped == "" && c.got == c.want }
+func (c *invokeCheck) ok() bool { return c.reason == "" && c.skipped == "" && c.got == c.want }
 
 // invokeChecks recomputes the success hash of every successful
 // InvokeHostFunction operation of a successful tx. The result set is
@@ -276,7 +302,7 @@ func invokeChecks(
 		case i >= len(events.OperationEvents):
 			c.reason = "operation has no events in meta"
 		default:
-			c.got, c.skipped, c.reason = committedHash(passphrase, rv, events, i, tx.UnsafeMeta.V, protocol, want)
+			c.fill(passphrase, rv, events, i, tx.UnsafeMeta.V, protocol)
 		}
 		out = append(out, c)
 	}
@@ -309,55 +335,63 @@ func returnValue(tx *ingest.LedgerTransaction) (xdr.ScVal, bool) {
 	return xdr.ScVal{}, false
 }
 
-// committedHash recomputes the hash operation i's result commits to. The
-// operation's events hash to it directly on a native export; at protocol 23
-// a leading run of reconciliation events is skipped; on a backfilled export
-// below protocol 23 the originals kept among the diagnostic events are
-// hashed instead, and the check is skipped when there are none.
-func committedHash(
+// fill recomputes the hash operation i's result commits to and records the
+// outcome on c. The operation's events hash to it directly on a native
+// export; at protocol 23 a leading run of reconciliation events is skipped;
+// on a backfilled export below protocol 23 the originals kept among the
+// diagnostic events are hashed instead, and the check is skipped when there
+// are none.
+//
+// The protocol 23 arm is an exact match, not >=: above 23 the operation's own
+// events hash to the commitment directly.
+func (c *invokeCheck) fill(
 	passphrase string, rv xdr.ScVal, events ingest.TransactionEvents, i int, metaVersion int32, protocol uint32,
-	want xdr.Hash,
-) (xdr.Hash, string, string) {
+) {
 	opEvents := events.OperationEvents[i]
 	full, err := hashPreimage(rv, opEvents)
 	switch {
 	case err != nil:
-		return xdr.Hash{}, "", err.Error()
-	case full == want:
-		return full, "", ""
+		c.reason = err.Error()
+	case full == c.want:
+		c.got = full
 	case protocol == protocol23:
-		return hashAfterReconciliation(passphrase, rv, opEvents, full, want)
+		c.got, c.reason = hashAfterReconciliation(passphrase, rv, opEvents, full, c.want)
 	case protocol < protocol23 && metaVersion == 4:
 		if len(events.DiagnosticEvents) == 0 {
-			return full, "backfilled export without the diagnostic events that hold the committed originals", ""
+			c.got = full
+			c.skipped = "backfilled export without the diagnostic events that hold the committed originals"
+			return
 		}
-		h, err := hashPreimage(rv, committedFromDiagnostics(events.DiagnosticEvents))
-		if err != nil {
-			return xdr.Hash{}, "", err.Error()
+		h, herr := hashPreimage(rv, committedFromDiagnostics(events.DiagnosticEvents))
+		if herr != nil {
+			c.reason = herr.Error()
+			return
 		}
-		return h, "", ""
+		c.got = h
+	default:
+		c.got = full
 	}
-	return full, "", ""
 }
 
 // hashAfterReconciliation hashes the preimage over each suffix of events
 // that skips a leading run of reconciliation events, until one matches
-// want. It returns the matching hash, or full when none does. The skipped
-// events are unhashed by design, so this can only bound what they look
-// like, not prove them.
+// want. It returns the matching hash, or full when none does, and the
+// reason when the preimage would not hash at all. The skipped events are
+// unhashed by design, so this can only bound what they look like, not prove
+// them.
 func hashAfterReconciliation(
 	passphrase string, rv xdr.ScVal, events []xdr.ContractEvent, full, want xdr.Hash,
-) (xdr.Hash, string, string) {
+) (xdr.Hash, string) {
 	for k := 1; k <= len(events) && isReconciliationEvent(passphrase, &events[k-1]); k++ {
 		h, err := hashPreimage(rv, events[k:])
 		if err != nil {
-			return xdr.Hash{}, "", err.Error()
+			return xdr.Hash{}, err.Error()
 		}
 		if h == want {
-			return h, "", ""
+			return h, ""
 		}
 	}
-	return full, "", ""
+	return full, ""
 }
 
 // isReconciliationEvent reports whether ev has the shape of the asset

@@ -32,14 +32,31 @@ type eventsChecker struct {
 	stop    func()
 	offsets *event.LedgerOffsets
 	nextID  uint32
+	// checked counts the payloads actually compared with the pack. It is not
+	// nextID: that cursor advances over every expected event so the offsets
+	// stay aligned, including the ones after a read failure or the end of the
+	// pack, which nothing compared. Reporting nextID would say the run
+	// checked events it skipped.
+	checked uint64
 	terms   event.Bitmaps
-	// ended is set once events.pack ran out before the oracle did; later
-	// payload comparisons are pointless and only the counts are reported.
-	ended bool
+	// unfinished is why this checker stopped short of comparing everything
+	// the events segment is made of, and doubles as the flag that stops the
+	// payload loop: once set, later ledgers accumulate their terms but
+	// compare nothing, and finish does not probe for a trailing payload.
+	//
+	// The term sweep writes here too, which is safe only because it runs
+	// after finish's last read of this field. Move it earlier and a cap
+	// reached during the sweep would retroactively suppress the trailing
+	// payload probe.
+	unfinished string
+	// termsCompared is set once the term sweep has run to the end. A finish
+	// that bailed before it — on an unreadable index.pack, say — leaves the
+	// chunk uncompared against its events index however clean the pack was.
+	termsCompared bool
 }
 
-func newEventsChecker(ctx context.Context, rec *recorder, c chunk.ID, bucketDir string) (*eventsChecker, error) {
-	reader, err := event.OpenColdReader(c, bucketDir, event.ColdReaderOptions{})
+func newEventsChecker(ctx context.Context, rec *recorder, c chunk.ID, dirs event.ColdDirs) (*eventsChecker, error) {
+	reader, err := event.OpenColdReader(c, dirs, event.ColdReaderOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -58,10 +75,19 @@ func (e *eventsChecker) mismatch(seq uint32, txHash, field, expected, actual str
 	e.rec.add(Mismatch{Ledger: seq, TxHash: txHash, Artifact: "events", Field: field, Expected: expected, Actual: actual})
 }
 
-// ledger consumes one ledger's expected events.
+// ledger consumes one ledger's expected events. It always walks all of them,
+// even after it stops comparing: the loop also accumulates the ledger's
+// expected terms, which come from the oracle, not from the pack.
 func (e *eventsChecker) ledger(seq uint32, expected []expectedEvent) error {
 	//nolint:gosec // a ledger's event count is far below uint32
 	n := uint32(len(expected))
+	// nextID advances on EVERY exit path, including the error return below.
+	// Leaving it behind would make the next ledger's expected ID range short
+	// by n, and the offsets check runs before the unfinished guard, so every
+	// later ledger of the chunk would report a spurious offsets mismatch
+	// until the recorder's cap.
+	defer func() { e.nextID += n }()
+	var readErr error
 	want := fmt.Sprintf("[%d,%d)", e.nextID, e.nextID+n)
 	switch start, end, err := e.offsets.EventIDs(seq); {
 	case err != nil:
@@ -74,24 +100,32 @@ func (e *eventsChecker) ledger(seq uint32, expected []expectedEvent) error {
 		for _, k := range expected[i].terms {
 			e.terms.AddTo(k, id)
 		}
-		if e.ended {
+		if e.unfinished != "" {
 			continue
 		}
 		actual, err, ok := e.next()
 		if !ok {
-			e.ended = true
+			e.unfinished = "events.pack ran out before the chunk's ledgers did"
 			e.mismatch(seq, expected[i].payload.TxHash.HexString(), "payload", "event "+u32(id), "end of events.pack")
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("events.pack at event %d: %w", id, err)
+			// Stop comparing payloads here, so a later ledger cannot report an
+			// end-of-pack mismatch for an environmental failure — but keep
+			// walking and return the error at the end. The term bitmaps above
+			// come from the ORACLE, and finish compares them against the
+			// index; leaving early leaves them short and reports a
+			// byte-perfect index.pack as disagreeing.
+			e.unfinished = fmt.Sprintf("a read of events.pack failed at event %d: %v", id, err)
+			readErr = fmt.Errorf("events.pack at event %d: %w", id, err)
+			continue
 		}
+		e.checked++
 		if want := &expected[i].payload; !samePayload(want, &actual) {
 			e.mismatch(seq, want.TxHash.HexString(), "payload (event "+u32(id)+")", renderPayload(want), renderPayload(&actual))
 		}
 	}
-	e.nextID += n
-	return nil
+	return readErr
 }
 
 func samePayload(a, b *event.Payload) bool {
@@ -106,16 +140,19 @@ func renderPayload(p *event.Payload) string {
 }
 
 // stopChecking stops the payload comparison after a read failure; the term
-// index is still checked at finish, since it is a separate file.
+// index is still checked at finish, since it is a separate file. The failing
+// read normally set the reason already; this covers a caller that did not.
 func (e *eventsChecker) stopChecking() {
-	e.ended = true
+	if e.unfinished == "" {
+		e.unfinished = "the payload comparison was stopped"
+	}
 	e.stop()
 }
 
 // finish checks that events.pack holds nothing past the oracle's last event,
 // then every expected term's posting list and the term count.
 func (e *eventsChecker) finish(ctx context.Context) error {
-	if !e.ended {
+	if e.unfinished == "" {
 		if _, err, ok := e.next(); ok {
 			if err != nil {
 				return fmt.Errorf("events.pack past the last expected event: %w", err)
@@ -155,6 +192,14 @@ func (e *eventsChecker) checkTerms(ctx context.Context) error {
 			return fmt.Errorf("index lookup: %w", err)
 		}
 		for i, k := range batch {
+			if e.rec.full() {
+				// A comparison the cap prevented is lost coverage, not a
+				// suppressed mismatch, so it is said as a reason.
+				e.unfinished = fmt.Sprintf(
+					"the mismatch cap stopped the term sweep with %d of %d terms unchecked",
+					len(keys)-(start+i), len(keys))
+				return nil
+			}
 			want := e.terms[k]
 			switch {
 			case got[i] == nil:
@@ -163,12 +208,23 @@ func (e *eventsChecker) checkTerms(ctx context.Context) error {
 				e.mismatch(0, "", "term "+hex.EncodeToString(k[:]),
 					u64(want.GetCardinality())+" events", u64(got[i].GetCardinality())+" events, different set")
 			}
-			if e.rec.full() {
-				return nil
-			}
 		}
 	}
+	e.termsCompared = true
 	return nil
+}
+
+// gap is why this checker did not compare everything the events segment is
+// made of — its payloads, its per-ledger ranges, its counts and its terms —
+// or "" when it compared all of it.
+func (e *eventsChecker) gap() string {
+	switch {
+	case e.unfinished != "":
+		return e.unfinished
+	case !e.termsCompared:
+		return "the term sweep did not run"
+	}
+	return ""
 }
 
 // close releases the pull iterator before the reader, so no range read is
@@ -214,6 +270,9 @@ type binChecker struct {
 	bin   []txhash.ColdEntry // in file order
 	blind [stores.SecretLen]byte
 	want  []txhash.ColdEntry
+	// unfinished is why the entry comparison stopped short; see
+	// eventsChecker.unfinished.
+	unfinished string
 }
 
 // newBinChecker reads the chunk's .bin; secret is the per-index secret the
@@ -238,6 +297,10 @@ func (t *binChecker) ledger(seq uint32, hashes []xdr.Hash) {
 	}
 }
 
+// gap is why the entry comparison stopped short of the end, or "" when it
+// reached it.
+func (t *binChecker) gap() string { return t.unfinished }
+
 func (t *binChecker) finish() {
 	txhash.SortColdEntries(t.want)
 	if len(t.bin) != len(t.want) {
@@ -245,7 +308,15 @@ func (t *binChecker) finish() {
 			Artifact: "txhash", Field: "bin_count", Expected: strconv.Itoa(len(t.want)), Actual: strconv.Itoa(len(t.bin)),
 		})
 	}
-	for i := 0; i < len(t.bin) && i < len(t.want) && !t.rec.full(); i++ {
+	n := min(len(t.bin), len(t.want))
+	for i := range n {
+		if t.rec.full() {
+			// See checkTerms: a comparison the cap prevented is lost coverage,
+			// not a suppressed mismatch.
+			t.unfinished = fmt.Sprintf(
+				"the mismatch cap stopped the entry comparison with %d of %d entries unchecked", n-i, n)
+			return
+		}
 		if t.bin[i] != t.want[i] {
 			t.rec.add(Mismatch{
 				Ledger: t.want[i].Seq, Artifact: "txhash", Field: fmt.Sprintf("bin_entry %d", i),
