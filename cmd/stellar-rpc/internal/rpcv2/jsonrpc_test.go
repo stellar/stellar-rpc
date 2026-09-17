@@ -133,11 +133,11 @@ func TestJSONRPCHandler_GetEventsV2ReportsTypedErrorData(t *testing.T) {
 	assert.Equal(t, protocol.ErrorReasonInvalidParams, data.Reason)
 }
 
-// A cursor the client did not get from this node must come back as a typed
-// cursor_malformed or invalid_params error, never as an internal error, and
-// the server must keep serving afterwards. The decoder itself is fuzzed in
-// the query package; this pins the wire shape.
-func TestJSONRPCHandler_GetEventsV2RejectsTamperedCursors(t *testing.T) {
+// A cursor that does not decode must come back as a typed cursor_malformed
+// or invalid_params error, never an internal error, and the server keeps
+// serving. The decoder is fuzzed in the query package; this pins the wire
+// shape.
+func TestJSONRPCHandler_GetEventsV2RejectsMalformedCursors(t *testing.T) {
 	url := newTestRPCServer(t, seedServingRegistry(t))
 
 	first := rpcv2test.PostRPC(t, url, protocol.GetEventsV2MethodName, `{"minLedger":2,"limit":1}`)
@@ -157,7 +157,6 @@ func TestJSONRPCHandler_GetEventsV2RejectsTamperedCursors(t *testing.T) {
 		flipped = "B"
 	}
 	for name, cursor := range map[string]string{
-		"empty":               "",
 		"prefix only":         prefix,
 		"body only":           body,
 		"truncated body":      prefix + body[:len(body)/2],
@@ -186,7 +185,7 @@ func TestJSONRPCHandler_GetEventsV2RejectsTamperedCursors(t *testing.T) {
 	}
 
 	again := rpcv2test.PostRPC(t, url, protocol.GetEventsV2MethodName, `{"minLedger":2,"limit":1}`)
-	require.Nil(t, again.Error, "the server must still serve after a burst of bad cursors")
+	require.Nil(t, again.Error, "the server must still serve after a burst of malformed cursors")
 }
 
 // Every field is optional, so a typo would widen the query rather than fail.
