@@ -485,10 +485,10 @@ func TestFetchLedgersErrors(t *testing.T) {
 	})
 }
 
-// TestGetLedgers_EmptyBatchGetLedgersResult is a regression test that ensures
+// TestGetLedgers_EmptyScanResult is a regression test that ensures
 // when GetLedgerRange reports data but ScanLedgers yields nothing,
 // getLedgers returns an empty page with a stable cursor and does not panic.
-func TestGetLedgers_EmptyBatchGetLedgersResult(t *testing.T) {
+func TestGetLedgers_EmptyScanResult(t *testing.T) {
 	ctx := t.Context()
 
 	t.Run("empty result with cursor", func(t *testing.T) {
@@ -549,9 +549,9 @@ func TestGetLedgers_EmptyBatchGetLedgersResult(t *testing.T) {
 		mockReader.On("NewTx", ctx).Return(mockReaderTx, nil)
 		mockReaderTx.On("Done").Return(nil)
 		mockReaderTx.On("GetLedgerRange", ctx).Return(localRange, nil)
-		// BatchGetLedgers returns empty slice even though GetLedgerRange indicates data exists
-		mockReaderTx.On("BatchGetLedgers", ctx, uint32(100), uint32(104)).
-			Return([]store.LedgerMetadataChunk{}, nil)
+		// ScanLedgers yields nothing even though GetLedgerRange indicates data exists
+		mockReaderTx.On("ScanLedgers", ctx, uint32(100), uint32(104)).
+			Return([]store.RawLedger{}, nil)
 
 		request := protocol.GetLedgersRequest{
 			StartLedger: 100,

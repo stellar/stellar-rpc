@@ -297,7 +297,7 @@ func BenchmarkGetLedgerRange(b *testing.B) {
 	}
 }
 
-func BenchmarkBatchGetLedgers(b *testing.B) {
+func BenchmarkScanLedgers(b *testing.B) {
 	testDB, lcms := setupBenchmarkingDB(b)
 	reader := NewLedgerReader(testDB)
 	readTx, err := reader.NewTx(b.Context())
@@ -308,14 +308,26 @@ func BenchmarkBatchGetLedgers(b *testing.B) {
 	end := start + uint32(batchSize) - 1
 
 	for b.Loop() {
-		ledgers, err := readTx.BatchGetLedgers(b.Context(), start, end)
-		require.NoError(b, err)
-
-		var hdrFirst, hdrLast xdr.LedgerHeaderHistoryEntry
-		require.NoError(b, hdrFirst.UnmarshalBinary(ledgers[0].HeaderRaw))
-		require.NoError(b, hdrLast.UnmarshalBinary(ledgers[batchSize-1].HeaderRaw))
-		assert.EqualValues(b, lcms[0].LedgerSequence(), hdrFirst.Header.LedgerSeq)
-		assert.EqualValues(b, lcms[batchSize-1].LedgerSequence(), hdrLast.Header.LedgerSeq)
+		// The header slice is what getLedgers pulls off each scanned ledger.
+		var first, last xdr.LedgerHeaderHistoryEntry
+		count := 0
+		for entry, err := range readTx.ScanLedgers(b.Context(), start, end) {
+			require.NoError(b, err)
+			headerView, herr := xdr.LedgerCloseMetaView(entry.Raw).LedgerHeader()
+			require.NoError(b, herr)
+			raw, rerr := headerView.Raw()
+			require.NoError(b, rerr)
+			switch count {
+			case 0:
+				require.NoError(b, first.UnmarshalBinary(raw))
+			case int(batchSize) - 1:
+				require.NoError(b, last.UnmarshalBinary(raw))
+			}
+			count++
+		}
+		require.Equal(b, int(batchSize), count)
+		assert.EqualValues(b, lcms[0].LedgerSequence(), first.Header.LedgerSeq)
+		assert.EqualValues(b, lcms[batchSize-1].LedgerSequence(), last.Header.LedgerSeq)
 	}
 }
 
