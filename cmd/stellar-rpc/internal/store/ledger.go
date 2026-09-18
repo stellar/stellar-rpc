@@ -89,15 +89,17 @@ func ScanLedgersFrom(
 				yield(RawLedger{}, err)
 				return
 			}
-			if !found {
-				continue
+			if found {
+				raw, err := lcm.MarshalBinary()
+				if err != nil {
+					yield(RawLedger{}, err)
+					return
+				}
+				if !yield(RawLedger{Sequence: seq, Raw: raw}, nil) {
+					return
+				}
 			}
-			raw, err := lcm.MarshalBinary()
-			if err != nil {
-				yield(RawLedger{}, err)
-				return
-			}
-			if !yield(RawLedger{Sequence: seq, Raw: raw}, nil) {
+			if seq == end { // seq++ would wrap at MaxUint32
 				return
 			}
 		}

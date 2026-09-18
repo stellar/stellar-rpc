@@ -458,6 +458,18 @@ func TestFetchLedgersErrors(t *testing.T) {
 		mockTx.AssertExpectations(t)
 	})
 
+	t.Run("DB error after a full page", func(t *testing.T) {
+		mockTx := new(MockLedgerReaderTx)
+		mockTx.On("ScanLedgers", ctx, uint32(150), uint32(151)).
+			Return(rawLedgers(t, []uint32{150, 151}), errors.New("db error"))
+
+		handler := ledgersHandler{}
+		_, err := handler.fetchLedgers(ctx, 150, 151, "default", mockTx, localRange)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "db error")
+		mockTx.AssertExpectations(t)
+	})
+
 	t.Run("Datastore error", func(t *testing.T) {
 		mockTx := new(MockLedgerReaderTx)
 		mockStore := new(MockDatastoreReader)
