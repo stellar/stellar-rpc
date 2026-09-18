@@ -214,14 +214,14 @@ func (h ledgersHandler) fetchLedgers(
 
 	fetchFromLocalDB := func(start, end uint32) error {
 		for ledger, err := range readTx.ScanLedgers(ctx, start, end) {
-			if len(result) >= int(limit) {
-				break
-			}
 			if err != nil {
 				return &jrpc2.Error{
 					Code:    jrpc2.InternalError,
 					Message: fmt.Sprintf("error fetching ledgers from db: %v", err),
 				}
+			}
+			if len(result) >= int(limit) {
+				break
 			}
 			if aerr := appendLedger(ledger.Sequence, ledger.Raw); aerr != nil {
 				return aerr
