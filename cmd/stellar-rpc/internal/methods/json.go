@@ -36,16 +36,16 @@ func transactionToJSON(tx store.Transaction) (
 	return result, envelope, resultMeta, nil
 }
 
-func ledgerToJSON(chunk *store.LedgerMetadataChunk) ([]byte, []byte, error) {
+func ledgerToJSON(lcm, headerRaw []byte) ([]byte, []byte, error) {
 	var err error
 	var closeMetaJSON, headerJSON []byte
 
-	closeMetaJSON, err = xdr2json.ConvertBytes(xdr.LedgerCloseMeta{}, chunk.Lcm)
+	closeMetaJSON, err = xdr2json.ConvertBytes(xdr.LedgerCloseMeta{}, lcm)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	headerJSON, err = xdr2json.ConvertBytes(xdr.LedgerHeaderHistoryEntry{}, chunk.HeaderRaw)
+	headerJSON, err = xdr2json.ConvertBytes(xdr.LedgerHeaderHistoryEntry{}, headerRaw)
 	if err != nil {
 		return nil, nil, err
 	}

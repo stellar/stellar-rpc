@@ -2,6 +2,7 @@ package methods
 
 import (
 	"context"
+	"iter"
 
 	"github.com/stretchr/testify/mock"
 
@@ -65,17 +66,23 @@ func (m *MockLedgerReaderTx) GetLedgerRange(ctx context.Context) (store.LedgerRa
 	return args.Get(0).(store.LedgerRange), args.Error(1) //nolint:forcetypeassert
 }
 
-func (m *MockLedgerReaderTx) BatchGetLedgers(ctx context.Context, start, end uint32,
-) ([]store.LedgerMetadataChunk, error) {
+// ScanLedgers returns the stubbed ledgers as a stream; a non-nil error is yielded alone.
+func (m *MockLedgerReaderTx) ScanLedgers(
+	ctx context.Context, start, end uint32,
+) iter.Seq2[store.RawLedger, error] {
 	args := m.Called(ctx, start, end)
-	return args.Get(0).([]store.LedgerMetadataChunk), args.Error(1) //nolint:forcetypeassert
-}
-
-func (m *MockLedgerReaderTx) WithLedgerRaw(
-	ctx context.Context, sequence uint32, fn store.WithLedgerRawFn,
-) (bool, error) {
-	args := m.Called(ctx, sequence, fn)
-	return args.Bool(0), args.Error(1)
+	ledgers, _ := args.Get(0).([]store.RawLedger)
+	err := args.Error(1)
+	return func(yield func(store.RawLedger, error) bool) {
+		for _, l := range ledgers {
+			if !yield(l, nil) {
+				return
+			}
+		}
+		if err != nil {
+			yield(store.RawLedger{}, err)
+		}
+	}
 }
 
 func (m *MockLedgerReaderTx) Done() error {

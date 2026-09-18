@@ -199,36 +199,36 @@ func (h ledgersHandler) fetchLedgers(
 	limit := end - start + 1
 	result := make([]protocol.LedgerInfo, 0, limit)
 
-	addToResult := func(ledgers []store.LedgerMetadataChunk) error {
-		// Transform them all into JSON responses.
-		for _, chunk := range ledgers {
-			if len(result) >= int(limit) {
-				break
+	// appendLedger renders one ledger's raw LedgerCloseMeta into the page
+	appendLedger := func(raw []byte) error {
+		info, err := parseLedgerInfo(raw, format)
+		if err != nil {
+			seq, _ := xdr.LedgerCloseMetaView(raw).LedgerSequence()
+			return &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: fmt.Sprintf("error processing ledger %d: %v", seq, err),
 			}
-
-			info, err := parseLedgerInfo(chunk, format)
-			if err != nil {
-				seq, _ := xdr.LedgerCloseMetaView(chunk.Lcm).LedgerSequence()
-				return &jrpc2.Error{
-					Code:    jrpc2.InternalError,
-					Message: fmt.Sprintf("error processing ledger %d: %v", seq, err),
-				}
-			}
-			result = append(result, info)
 		}
+		result = append(result, info)
 		return nil
 	}
 
 	fetchFromLocalDB := func(start, end uint32) error {
-		ledgers, err := readTx.BatchGetLedgers(ctx, start, end)
-		if err != nil {
-			return &jrpc2.Error{
-				Code:    jrpc2.InternalError,
-				Message: fmt.Sprintf("error fetching ledgers from db: %v", err),
+		for ledger, err := range readTx.ScanLedgers(ctx, start, end) {
+			if len(result) >= int(limit) {
+				break
+			}
+			if err != nil {
+				return &jrpc2.Error{
+					Code:    jrpc2.InternalError,
+					Message: fmt.Sprintf("error fetching ledgers from db: %v", err),
+				}
+			}
+			if aerr := appendLedger(ledger.Raw); aerr != nil {
+				return aerr
 			}
 		}
-
-		return addToResult(ledgers)
+		return nil
 	}
 
 	fetchFromDatastore := func(start, end uint32) error {
@@ -245,16 +245,23 @@ func (h ledgersHandler) fetchLedgers(
 				Message: fmt.Sprintf("error fetching ledgers from datastore: %v", err),
 			}
 		}
-
-		// Convert deserialized structures into serialized ones.
-		chunks, err := metaToChunk(ledgers)
-		if err != nil {
-			return &jrpc2.Error{
-				Code:    jrpc2.InternalError,
-				Message: fmt.Sprintf("error serializing ledgers: %v", err),
+		// Serialize lazily so a short page never marshals the ledgers past it.
+		for i := range ledgers {
+			if len(result) >= int(limit) {
+				break
+			}
+			raw, merr := ledgers[i].MarshalBinary()
+			if merr != nil {
+				return &jrpc2.Error{
+					Code:    jrpc2.InternalError,
+					Message: fmt.Sprintf("error serializing ledgers: %v", merr),
+				}
+			}
+			if aerr := appendLedger(raw); aerr != nil {
+				return aerr
 			}
 		}
-		return addToResult(chunks)
+		return nil
 	}
 
 	var err error
@@ -280,8 +287,8 @@ func (h ledgersHandler) fetchLedgers(
 
 // parseLedgerInfo extracts and formats the ledger metadata and header
 // information. In the error case, it returns a jrcp2.Error.
-func parseLedgerInfo(ledger store.LedgerMetadataChunk, format string) (protocol.LedgerInfo, error) {
-	view := xdr.LedgerCloseMetaView(ledger.Lcm)
+func parseLedgerInfo(raw []byte, format string) (protocol.LedgerInfo, error) {
+	view := xdr.LedgerCloseMetaView(raw)
 	sequence, err := view.LedgerSequence()
 	if err != nil {
 		return protocol.LedgerInfo{}, err
@@ -291,6 +298,15 @@ func parseLedgerInfo(ledger store.LedgerMetadataChunk, format string) (protocol.
 		return protocol.LedgerInfo{}, err
 	}
 	hash, err := view.LedgerHash()
+	if err != nil {
+		return protocol.LedgerInfo{}, err
+	}
+	// The header is a slice of raw, not a decode: the wire format base64s it as-is.
+	headerView, err := view.LedgerHeader()
+	if err != nil {
+		return protocol.LedgerInfo{}, err
+	}
+	headerRaw, err := headerView.Raw()
 	if err != nil {
 		return protocol.LedgerInfo{}, err
 	}
@@ -306,36 +322,14 @@ func parseLedgerInfo(ledger store.LedgerMetadataChunk, format string) (protocol.
 	switch format {
 	case protocol.FormatJSON:
 		var convErr error
-		ledgerInfo.LedgerMetadataJSON, ledgerInfo.LedgerHeaderJSON, convErr = ledgerToJSON(&ledger)
+		ledgerInfo.LedgerMetadataJSON, ledgerInfo.LedgerHeaderJSON, convErr = ledgerToJSON(raw, headerRaw)
 		if convErr != nil {
 			return ledgerInfo, convErr
 		}
 
 	default:
-		ledgerInfo.LedgerMetadata = base64.StdEncoding.EncodeToString(ledger.Lcm)
-		ledgerInfo.LedgerHeader = base64.StdEncoding.EncodeToString(ledger.HeaderRaw)
+		ledgerInfo.LedgerMetadata = base64.StdEncoding.EncodeToString(raw)
+		ledgerInfo.LedgerHeader = base64.StdEncoding.EncodeToString(headerRaw)
 	}
 	return ledgerInfo, nil
-}
-
-func metaToChunk(meta []xdr.LedgerCloseMeta) ([]store.LedgerMetadataChunk, error) {
-	result := make([]store.LedgerMetadataChunk, 0, len(meta))
-	for _, lcm := range meta {
-		raw, err := lcm.MarshalBinary()
-		if err != nil {
-			return nil, err
-		}
-
-		headerRaw, err := lcm.LedgerHeaderHistoryEntry().MarshalBinary()
-		if err != nil {
-			return nil, err
-		}
-
-		result = append(result, store.LedgerMetadataChunk{
-			Lcm:       raw,
-			HeaderRaw: headerRaw,
-		})
-	}
-
-	return result, nil
 }
