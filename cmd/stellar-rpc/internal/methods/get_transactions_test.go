@@ -395,19 +395,10 @@ func (r *sparseLedgerReader) GetLedgerRange(context.Context) (store.LedgerRange,
 func (r *sparseLedgerReader) ScanLedgers(
 	_ context.Context, start, end uint32,
 ) iter.Seq2[store.RawLedger, error] {
-	return func(yield func(store.RawLedger, error) bool) {
-		for seq := start; seq <= end; seq++ {
-			raw, err := createEmptyTestLedger(seq).MarshalBinary()
-			if err != nil {
-				yield(store.RawLedger{}, err)
-				return
-			}
-			r.served++
-			if !yield(store.RawLedger{Sequence: seq, Raw: raw}, nil) {
-				return
-			}
-		}
-	}
+	return store.ScanLedgersFrom(start, end, func(seq uint32) (xdr.LedgerCloseMeta, bool, error) {
+		r.served++
+		return createEmptyTestLedger(seq), true, nil
+	})
 }
 
 func (r *sparseLedgerReader) StreamLedgerRange(context.Context, uint32, uint32, store.StreamLedgerFn) error {

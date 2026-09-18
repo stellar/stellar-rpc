@@ -31,26 +31,9 @@ func (m *MockLedgerReader) GetLedger(ctx context.Context, sequence uint32) (xdr.
 
 // ScanLedgers routes each sequence through GetLedger, so tests keep stubbing by sequence.
 func (m *MockLedgerReader) ScanLedgers(ctx context.Context, start, end uint32) iter.Seq2[store.RawLedger, error] {
-	return func(yield func(store.RawLedger, error) bool) {
-		for seq := start; seq <= end; seq++ {
-			lcm, found, err := m.GetLedger(ctx, seq)
-			if err != nil {
-				yield(store.RawLedger{}, err)
-				return
-			}
-			if !found {
-				continue
-			}
-			raw, err := lcm.MarshalBinary()
-			if err != nil {
-				yield(store.RawLedger{}, err)
-				return
-			}
-			if !yield(store.RawLedger{Sequence: seq, Raw: raw}, nil) {
-				return
-			}
-		}
-	}
+	return store.ScanLedgersFrom(start, end, func(seq uint32) (xdr.LedgerCloseMeta, bool, error) {
+		return m.GetLedger(ctx, seq)
+	})
 }
 
 func (m *MockLedgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRange, error) {
