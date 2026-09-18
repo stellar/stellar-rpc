@@ -71,7 +71,7 @@ func (m *MockLedgerReaderTx) ScanLedgers(
 	ctx context.Context, start, end uint32,
 ) iter.Seq2[store.RawLedger, error] {
 	args := m.Called(ctx, start, end)
-	ledgers, _ := args.Get(0).([]store.RawLedger)
+	ledgers := args.Get(0).([]store.RawLedger) //nolint:forcetypeassert
 	err := args.Error(1)
 	return func(yield func(store.RawLedger, error) bool) {
 		for _, l := range ledgers {

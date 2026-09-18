@@ -78,8 +78,7 @@ func legacyGetTransactionsByLedgerSequence(
 				Message: "cursor ledger sequence cannot be negative",
 			}
 		}
-		// The reference's point read, expressed as a scan of one: the Tx no longer
-		// offers WithLedgerRaw, but the legacy per-ledger semantics are unchanged.
+		// The reference's point read as a scan of one; the legacy per-ledger semantics are unchanged.
 		var ledger xdr.LedgerCloseMeta
 		found := false
 		for entry, serr := range readTx.ScanLedgers(ctx, uint32(ledgerSeq), uint32(ledgerSeq)) {

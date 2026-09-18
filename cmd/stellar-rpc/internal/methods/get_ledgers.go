@@ -200,10 +200,9 @@ func (h ledgersHandler) fetchLedgers(
 	result := make([]protocol.LedgerInfo, 0, limit)
 
 	// appendLedger renders one ledger's raw LedgerCloseMeta into the page
-	appendLedger := func(raw []byte) error {
+	appendLedger := func(seq uint32, raw []byte) error {
 		info, err := parseLedgerInfo(raw, format)
 		if err != nil {
-			seq, _ := xdr.LedgerCloseMetaView(raw).LedgerSequence()
 			return &jrpc2.Error{
 				Code:    jrpc2.InternalError,
 				Message: fmt.Sprintf("error processing ledger %d: %v", seq, err),
@@ -224,7 +223,7 @@ func (h ledgersHandler) fetchLedgers(
 					Message: fmt.Sprintf("error fetching ledgers from db: %v", err),
 				}
 			}
-			if aerr := appendLedger(ledger.Raw); aerr != nil {
+			if aerr := appendLedger(ledger.Sequence, ledger.Raw); aerr != nil {
 				return aerr
 			}
 		}
@@ -257,7 +256,7 @@ func (h ledgersHandler) fetchLedgers(
 					Message: fmt.Sprintf("error serializing ledgers: %v", merr),
 				}
 			}
-			if aerr := appendLedger(raw); aerr != nil {
+			if aerr := appendLedger(ledgers[i].LedgerSequence(), raw); aerr != nil {
 				return aerr
 			}
 		}

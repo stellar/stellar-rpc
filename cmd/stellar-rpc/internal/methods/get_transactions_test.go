@@ -378,21 +378,21 @@ func setupDBNoTxs(t *testing.T, numLedgers int) *sqlitedb.DB {
 }
 
 // sparseLedgerReader serves an arbitrarily wide range of empty ledgers,
-// counting yielded ledgers, so a test can observe how far the handler walks.
+// counting ledgers served, so a test can observe how far the handler walks.
 type sparseLedgerReader struct {
 	latest uint32
-	gets   int
+	served int
 }
 
 func (r *sparseLedgerReader) GetLedger(_ context.Context, seq uint32) (xdr.LedgerCloseMeta, bool, error) {
-	r.gets++
+	r.served++
 	return createEmptyTestLedger(seq), true, nil
 }
 
 func (r *sparseLedgerReader) WithLedgerRaw(
 	_ context.Context, seq uint32, fn store.WithLedgerRawFn,
 ) (bool, error) {
-	r.gets++
+	r.served++
 	raw, err := createEmptyTestLedger(seq).MarshalBinary()
 	if err != nil {
 		return false, err
@@ -407,7 +407,7 @@ func (r *sparseLedgerReader) GetLedgerRange(context.Context) (store.LedgerRange,
 	}, nil
 }
 
-// ScanLedgers yields every sequence in range, counting them so a test can see how far the handler walked.
+// ScanLedgers yields every sequence in range.
 func (r *sparseLedgerReader) ScanLedgers(
 	_ context.Context, start, end uint32,
 ) iter.Seq2[store.RawLedger, error] {
@@ -418,7 +418,7 @@ func (r *sparseLedgerReader) ScanLedgers(
 				yield(store.RawLedger{}, err)
 				return
 			}
-			r.gets++
+			r.served++
 			if !yield(store.RawLedger{Sequence: seq, Raw: raw}, nil) {
 				return
 			}
@@ -451,13 +451,6 @@ func TestGetTransactions_ScanGaps(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
-			ledgers := make([]store.RawLedger, 0, len(tc.yield))
-			for _, seq := range tc.yield {
-				raw, err := createEmptyTestLedger(seq).MarshalBinary()
-				require.NoError(t, err)
-				ledgers = append(ledgers, store.RawLedger{Sequence: seq, Raw: raw})
-			}
-
 			mockReader := new(MockLedgerReader)
 			mockTx := new(MockLedgerReaderTx)
 			mockReader.On("NewTx", ctx).Return(mockTx, nil)
@@ -466,7 +459,7 @@ func TestGetTransactions_ScanGaps(t *testing.T) {
 				FirstLedger: store.LedgerInfo{Sequence: 1, CloseTime: 100},
 				LastLedger:  store.LedgerInfo{Sequence: 3, CloseTime: 300},
 			}, nil)
-			mockTx.On("ScanLedgers", ctx, uint32(1), uint32(3)).Return(ledgers, nil)
+			mockTx.On("ScanLedgers", ctx, uint32(1), uint32(3)).Return(rawLedgers(t, tc.yield), nil)
 
 			handler := transactionsRPCHandler{
 				ledgerReader:      mockReader,
@@ -499,7 +492,7 @@ func TestGetTransactions_SparseRangeCapsAtLedgerScanLimit(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Empty(t, response.Transactions)
-	assert.Equal(t, LedgerScanLimit, reader.gets, "the walk stops at the scan limit, not the latest ledger")
+	assert.Equal(t, LedgerScanLimit, reader.served, "the walk stops at the scan limit, not the latest ledger")
 	assert.Equal(t, toid.New(LedgerScanLimit, 0, 1).String(), response.Cursor,
 		"the cursor points at the last scanned ledger so the client can page on")
 	assert.Equal(t, uint32(50_000), response.LatestLedger)
