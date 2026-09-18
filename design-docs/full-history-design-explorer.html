@@ -472,10 +472,12 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
 
   <h3>On disk</h3>
   <div class="dirtree">{default_data_dir}/<br>
-├── meta/rocksdb/ <span class="c">                                 ← catalog (WAL always on)</span><br>
+├── catalog/rocksdb/ <span class="c">                              ← catalog (WAL always on)</span><br>
 ├── <span class="hl">hot/{chunk:08d}/</span> <span class="c">                              ← per-chunk hot RocksDB (transient)</span><br>
 ├── <span class="cold">ledgers/{bucket:05d}/{chunk:08d}.pack</span><br>
-├── <span class="cold">events/{bucket:05d}/{chunk:08d}-events.pack</span> <span class="c">   (+ -index.pack, -index.hash)</span><br>
+├── events/<br>
+&nbsp;&nbsp;&nbsp;&nbsp;├── <span class="cold">data/{bucket:05d}/{chunk:08d}-events.pack</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;└── <span class="cold">index/{bucket:05d}/{chunk:08d}-index.pack</span> <span class="c">  (+ -index.hash; its own root, for storage with the IOPS to serve random probes)</span><br>
 └── txhash/<br>
 &nbsp;&nbsp;&nbsp;&nbsp;├── <span class="tr">raw/{bucket:05d}/{chunk:08d}.bin</span> <span class="c">          ← transient until window finalization (or retention pruning)</span><br>
 &nbsp;&nbsp;&nbsp;&nbsp;└── <span class="cold">index/{window:08d}/{lo:08d}-{hi:08d}.idx</span> <span class="c">  ← one frozen file per window, coverage-named</span>
@@ -1097,7 +1099,7 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
       '<div><span class="dim">indexID(chunk) = chunk / 1000 =</span> <b>' + fmt(win) + "</b></div>",
       '<div><span class="dim">window spans chunks</span> <b>' + fmt(wcLo) + "–" + fmt(wcHi) + '</b> <span class="dim">= ledgers</span> <b>' + fmt(wFirst) + " – " + fmt(wLast) + "</b></div>",
       "<div style='margin-top:10px'><span class='dim'>pack:&nbsp;&nbsp;</span>ledgers/" + p5(bucket) + "/" + p8(chunk) + ".pack</div>",
-      "<div><span class='dim'>events:</span>events/" + p5(bucket) + "/" + p8(chunk) + "-events.pack</div>",
+      "<div><span class='dim'>events:</span>events/data/" + p5(bucket) + "/" + p8(chunk) + "-events.pack</div>",
       "<div><span class='dim'>bin:&nbsp;&nbsp;&nbsp;</span>txhash/raw/" + p5(bucket) + "/" + p8(chunk) + ".bin <span class='dim'>(transient)</span></div>",
       "<div><span class='dim'>idx:&nbsp;&nbsp;&nbsp;</span>txhash/index/" + p8(win) + "/{lo}-{hi}.idx</div>",
     ].join("");
@@ -1167,17 +1169,17 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
         { t:"Write — one streaming pass over 10,000 LCMs",
           d:"Only the requested extractors run. Writes the .pack and events segment as it streams; collects ~3M txhash entries and sorts them in memory (≈60 MB) before writing the .bin — sorted per-chunk runs are what make every-boundary index rebuilds a single streaming merge.",
           meta:[["chunk:00005350:ledgers","freezing"],["chunk:00005350:events","freezing"],["chunk:00005350:txhash","freezing"]],
-          files:[["hot/00005350/",F_DIR,"source"],["ledgers/00005/00005350.pack",F_PART,"being written"],["events/00005/00005350-events.pack",F_PART,"being written"],["txhash/raw/00005/00005350.bin",F_PART,"being written"]],
+          files:[["hot/00005350/",F_DIR,"source"],["ledgers/00005/00005350.pack",F_PART,"being written"],["events/data/00005/00005350-events.pack",F_PART,"being written"],["txhash/raw/00005/00005350.bin",F_PART,"being written"]],
           crash:"Partial files under \"freezing\" keys. Harmless: readers resolve only \"frozen\" keys, and every partial is reachable from its key. Recovery re-materializes — files are (re)created at canonical paths, overwriting wholesale." },
         { t:"FsyncAll — files, parent dirents, grandparent if new bucket",
           d:"Each file, its parent dirent, and the grandparent dirent when the bucket dir was just created (every 1000th chunk). Fsyncing the directory entries — not just the file — is what makes a file's existence on disk durable before its key flips to \"frozen\".",
           meta:[["chunk:00005350:ledgers","freezing"],["chunk:00005350:events","freezing"],["chunk:00005350:txhash","freezing"]],
-          files:[["hot/00005350/",F_DIR,"source"],["ledgers/00005/00005350.pack",F_OK,"durable"],["events/00005/00005350-events.pack",F_OK,"durable"],["txhash/raw/00005/00005350.bin",F_OK,"durable"]],
+          files:[["hot/00005350/",F_DIR,"source"],["ledgers/00005/00005350.pack",F_OK,"durable"],["events/data/00005/00005350-events.pack",F_OK,"durable"],["txhash/raw/00005/00005350.bin",F_OK,"durable"]],
           crash:"Files are durable but the keys never flipped — still \"freezing\", so still re-materialized. The rewrite is byte-identical (deterministic LCM bytes from any conformant backend), so salvage is never attempted." },
         { t:"Flip — one synced batch to \"frozen\"",
           d:"All three keys flip together. From here the artifacts are truth: the resolver self-skips them, readers may resolve them, and only a sweep (which demotes first) can ever touch the files.",
           meta:[["chunk:00005350:ledgers","frozen"],["chunk:00005350:events","frozen"],["chunk:00005350:txhash","frozen"]],
-          files:[["hot/00005350/",F_DIR,"stays until the index covers 5350"],["ledgers/00005/00005350.pack",F_OK,"durable"],["events/00005/00005350-events.pack",F_OK,"durable"],["txhash/raw/00005/00005350.bin",F_OK,"durable"]],
+          files:[["hot/00005350/",F_DIR,"stays until the index covers 5350"],["ledgers/00005/00005350.pack",F_OK,"durable"],["events/data/00005/00005350-events.pack",F_OK,"durable"],["txhash/raw/00005/00005350.bin",F_OK,"durable"]],
           crash:"Nothing to recover — the work is done and idempotency makes any re-run a no-op. The hot DB keeps serving tx lookups until the rolling index covers the chunk." },
       ]},
     { id:"rebuild", label:"Rebuild the index", intro:"buildTxhashIndex(w5, 5100, 5350) — the boundary rebuild, widening coverage [5100,5349] → [5100,5350].",
@@ -1484,7 +1486,7 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
     { a:"lifecycle", t:"ChunkBuild 5350 — write + fsync",
       d:"backfillSource picks the hot DB (\"ready\" and complete — preference 1; no refetch, and the same rule would serve a backfill caller). One streaming pass over the 10,000 LCMs writes 00005350.pack and the events segment, sorts ~3M txhash entries in memory, writes 00005350.bin; FsyncAll makes files + dirents durable.",
       f:s => { s.files.push({ p:"ledgers/00005/00005350.pack", kind:"ok", note:"durable" },
-                            { p:"events/00005/00005350-events.pack", kind:"ok", note:"durable (+index, +hash)" },
+                            { p:"events/data/00005/00005350-events.pack", kind:"ok", note:"durable (+ index.pack, index.hash under events/index/)" },
                             { p:"txhash/raw/00005/00005350.bin", kind:"ok", note:"sorted run, durable" });
                mark(s, "f", s.files.length-3); mark(s, "f", s.files.length-2); mark(s, "f", s.files.length-1); } },
     { a:"lifecycle", t:"ChunkBuild 5350 — flip to \"frozen\"",

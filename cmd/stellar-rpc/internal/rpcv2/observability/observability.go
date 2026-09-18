@@ -39,6 +39,19 @@ type Metrics interface {
 	BackfillPass(d time.Duration)
 	// Freeze records one freeze (plan-and-execute) stage's wall-clock.
 	Freeze(d time.Duration)
+	// BackfillRetry counts one FAILED backfill task attempt that will be
+	// retried. Without it a task that failed twice and succeeded on the third
+	// try is invisible: the failed attempts never reach the cold-chunk
+	// counters, so "no errors" and "retried repeatedly" look identical.
+	BackfillRetry()
+
+	// BackfillPlanned and BackfillCompleted track one pass's chunk builds.
+	// Without them a dashboard has no denominator: the two existing progress
+	// gauges do not move inside a pass, and the cold-chunk counter counts
+	// ATTEMPTS (failures included) rather than completions.
+	BackfillPlanned(chunks int)
+	BackfillCompleted(chunks int)
+
 	// Rebuild records one index rebuild's wall-clock, spanning all retry attempts
 	// (up to MaxRetries+1) and their inter-attempt backoff sleeps in one sample.
 	Rebuild(d time.Duration)
@@ -69,6 +82,9 @@ func (NopMetrics) ChunkBoundary()             {}
 func (NopMetrics) LiveHotChunks(int)          {}
 func (NopMetrics) BackfillPass(time.Duration) {}
 func (NopMetrics) Freeze(time.Duration)       {}
+func (NopMetrics) BackfillRetry()             {}
+func (NopMetrics) BackfillPlanned(int)        {}
+func (NopMetrics) BackfillCompleted(int)      {}
 func (NopMetrics) Rebuild(time.Duration)      {}
 func (NopMetrics) Discard(int, time.Duration) {}
 func (NopMetrics) Prune(int, time.Duration)   {}
@@ -87,11 +103,12 @@ func MetricsOrNop(m Metrics) Metrics {
 // distinct from ingest's so the families never collide in one registry.
 const subsystem = "fullhistory_streaming"
 
-// phaseBuckets time the daemon's phase actions (1ms … ~70min, ×4 per bucket) —
-// same span as ingest's coldStageBuckets so one dashboard renders both.
+// phaseBuckets time the daemon's phase actions (1ms … ~74h, ×4 per bucket).
+// Same base and factor as ingest's coldStageBuckets so the boundaries align on
+// one dashboard; three buckets wider because a full-history pass runs for days.
 //
 //nolint:gochecknoglobals // fixed bucket layout, read-only
-var phaseBuckets = prometheus.ExponentialBuckets(0.001, 4, 12)
+var phaseBuckets = prometheus.ExponentialBuckets(0.001, 4, 15)
 
 // PrometheusMetrics is the production Metrics sink (constructed via NewPrometheusMetrics).
 type PrometheusMetrics struct {
@@ -102,6 +119,9 @@ type PrometheusMetrics struct {
 
 	// Counters — monotonic tallies.
 	chunkBoundaries        prometheus.Counter
+	backfillRetries        prometheus.Counter
+	backfillPlanned        prometheus.Gauge
+	backfillCompleted      prometheus.Gauge
 	discarded              prometheus.Counter
 	pruned                 prometheus.Counter
 	failedDestroys         prometheus.Counter
@@ -134,10 +154,18 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 	}
 
 	m := &PrometheusMetrics{
-		lastCommitted:   gauge("last_committed_ledger", "highest ledger durably committed"),
-		retentionFloor:  gauge("retention_floor_ledger", "effective retention floor — lowest in-window ledger"),
-		liveHotChunks:   gauge("live_hot_chunks", "count of hot-chunk DBs currently on disk"),
+		lastCommitted: gauge("last_committed_ledger", "highest ledger durably committed"),
+		retentionFloor: gauge("retention_floor_ledger",
+			"retention POLICY floor — the lowest ledger policy allows. Not coverage: on a "+
+				"fresh full-history start it sits above last_committed_ledger for the whole "+
+				"first backfill, because nothing is on disk yet"),
+		liveHotChunks: gauge("live_hot_chunks", "count of hot-chunk DBs currently on disk"),
+		backfillPlanned: gauge("backfill_chunks_planned",
+			"chunk builds the current backfill pass planned"),
+		backfillCompleted: gauge("backfill_chunks_completed",
+			"chunk builds the current backfill pass has finished"),
 		chunkBoundaries: counter("chunk_boundaries_total", "ingestion chunk-boundary handoffs"),
+		backfillRetries: counter("backfill_task_retries_total", "backfill task attempts that failed and were retried"),
 		discarded: counter("discarded_hot_chunks_total", "hot DBs demoted by the discard stage "+
 			"(a chunk whose deferred destroy stays reader-busy recounts on later runs)"),
 		pruned: counter("pruned_artifacts_total", "artifacts swept by the prune stage (below-floor artifacts, "+
@@ -165,7 +193,7 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 
 	registry.MustRegister(
 		m.lastCommitted, m.retentionFloor, m.liveHotChunks,
-		m.chunkBoundaries, m.discarded, m.pruned,
+		m.chunkBoundaries, m.backfillRetries, m.backfillPlanned, m.backfillCompleted, m.discarded, m.pruned,
 		m.failedDestroys, m.txIndexInconsistencies,
 		m.phaseDuration,
 		counterFunc("store_ops_after_deferred_close_total",
@@ -208,6 +236,12 @@ func (m *PrometheusMetrics) BackfillPass(d time.Duration) {
 func (m *PrometheusMetrics) Freeze(d time.Duration) {
 	m.phaseDuration.WithLabelValues(phaseFreeze).Observe(d.Seconds())
 }
+
+func (m *PrometheusMetrics) BackfillRetry() { m.backfillRetries.Inc() }
+
+func (m *PrometheusMetrics) BackfillPlanned(chunks int) { m.backfillPlanned.Set(float64(chunks)) }
+
+func (m *PrometheusMetrics) BackfillCompleted(chunks int) { m.backfillCompleted.Set(float64(chunks)) }
 
 func (m *PrometheusMetrics) Rebuild(d time.Duration) {
 	m.phaseDuration.WithLabelValues(phaseRebuild).Observe(d.Seconds())

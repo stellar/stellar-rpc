@@ -366,7 +366,8 @@ func TestBackfillSource_NoBackendConfigured(t *testing.T) {
 // nil on the first poll.
 func TestWaitForCoverage_CoveredReturnsNil(t *testing.T) {
 	b := &fakeBackend{tip: 100}
-	require.NoError(t, waitForCoverage(context.Background(), b, 100, time.Millisecond, time.Second))
+	err := waitForCoverage(context.Background(), rpcv2test.SilentLogger(), b, 100, time.Millisecond, time.Second)
+	require.NoError(t, err)
 }
 
 // TestWaitForCoverage_TimeoutReturnsSentinel: when the tip keeps succeeding but
@@ -376,7 +377,9 @@ func TestWaitForCoverage_TimeoutReturnsSentinel(t *testing.T) {
 	b := &fakeBackend{tip: 1} // always below the target
 
 	done := make(chan error, 1)
-	go func() { done <- waitForCoverage(context.Background(), b, 100, time.Millisecond, 50*time.Millisecond) }()
+	go func() {
+		done <- waitForCoverage(context.Background(), rpcv2test.SilentLogger(), b, 100, time.Millisecond, 50*time.Millisecond)
+	}()
 	select {
 	case err := <-done:
 		require.ErrorIs(t, err, ErrBackendCoverageTimeout)
@@ -391,7 +394,9 @@ func TestWaitForCoverage_TipQueryFatal(t *testing.T) {
 	b := &fakeBackend{tipErr: errors.New("boom")}
 
 	done := make(chan error, 1)
-	go func() { done <- waitForCoverage(context.Background(), b, 100, time.Millisecond, 5*time.Second) }()
+	go func() {
+		done <- waitForCoverage(context.Background(), rpcv2test.SilentLogger(), b, 100, time.Millisecond, 5*time.Second)
+	}()
 	select {
 	case err := <-done:
 		require.Error(t, err)
@@ -411,7 +416,10 @@ func TestWaitForCoverage_TipBoundedByDeadline(t *testing.T) {
 	}}
 
 	done := make(chan error, 1)
-	go func() { done <- waitForCoverage(context.Background(), b, 100, time.Millisecond, 100*time.Millisecond) }()
+	go func() {
+		done <- waitForCoverage(
+			context.Background(), rpcv2test.SilentLogger(), b, 100, time.Millisecond, 100*time.Millisecond)
+	}()
 	select {
 	case err := <-done:
 		require.Error(t, err)

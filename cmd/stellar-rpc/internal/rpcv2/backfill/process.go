@@ -129,7 +129,7 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 	dirs := ingest.ColdDirs{
 		LedgerPack: layout.LedgerPackPath(chunkID),
 		TxhashBin:  layout.TxHashBinPath(chunkID),
-		EventsDir:  layout.EventsBucketDir(chunkID),
+		Events:     layout.EventsColdDirs(chunkID),
 	}
 	raw := src.RawLedgers(ctx, ledgerbackend.BoundedRange(chunkID.FirstLedger(), chunkID.LastLedger()))
 	ic := ingestConfigFor(artifacts, chunkID, cfg)
@@ -210,7 +210,7 @@ func backfillSource(
 	// must block until the backend's tip covers the chunk (design: backfillSource
 	// always waits for coverage). cfg.Backend's own Tip drives it.
 	if werr := waitForCoverage(
-		ctx, cfg.Backend, chunkID.LastLedger(), defaultCoveragePollInterval, defaultCoverageTimeout,
+		ctx, cfg.Logger, cfg.Backend, chunkID.LastLedger(), defaultCoveragePollInterval, defaultCoverageTimeout,
 	); werr != nil {
 		return nil, noClose, werr
 	}

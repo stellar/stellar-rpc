@@ -49,10 +49,13 @@ func TestKeyToPathBijection(t *testing.T) {
 	require.Equal(t, "/data/ledgers/00005/00005350.pack", l.LedgerPackPath(5350))
 	require.Equal(t, l.LedgerPackPath(5350), LedgerPackPath("/data/ledgers", 5350))
 	require.Equal(t, "/data/txhash/raw/00005/00005350.bin", l.TxHashBinPath(5350))
+	// The pack and its index live in separate roots: EventsPaths spans both,
+	// so the sweep and the freeze barrier cover them without knowing there
+	// are two.
 	require.Equal(t, []string{
-		"/data/events/00005/00005350-events.pack",
-		"/data/events/00005/00005350-index.pack",
-		"/data/events/00005/00005350-index.hash",
+		"/data/events/data/00005/00005350-events.pack",
+		"/data/events/index/00005/00005350-index.pack",
+		"/data/events/index/00005/00005350-index.hash",
 	}, l.EventsPaths(5350))
 	require.Equal(t, "/data/hot/00005350", l.HotChunkPath(5350))
 

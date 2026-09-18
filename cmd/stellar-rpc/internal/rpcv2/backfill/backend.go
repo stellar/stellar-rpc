@@ -9,6 +9,7 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/stellar/go-stellar-sdk/support/datastore"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
 
 // Backend is an EXTERNAL ledger source the backfill freeze path fetches from and
@@ -164,8 +165,12 @@ const (
 // if ctx is canceled first. interval and timeout must be positive — the sole caller
 // passes defaultCoveragePollInterval/defaultCoverageTimeout, and tests pass their
 // own explicit values.
-func waitForCoverage(ctx context.Context, b Backend, target uint32, interval, timeout time.Duration) error {
+func waitForCoverage(
+	ctx context.Context, logger *supportlog.Entry, b Backend, target uint32, interval, timeout time.Duration,
+) error {
 	deadline := time.Now().Add(timeout)
+	start := time.Now()
+	var reported bool
 	poll := func() error {
 		// Bound each tip query by the overall deadline — the parent ctx may carry no
 		// deadline, and the backoff caps total retry time, not a single in-flight
@@ -180,7 +185,19 @@ func waitForCoverage(ctx context.Context, b Backend, target uint32, interval, ti
 			return backoff.Permanent(fmt.Errorf("backend tip query: %w", err))
 		}
 		if tip >= target {
+			if reported {
+				logger.WithFields(supportlog.F{
+					"needed_ledger": target, "tip": tip, "waited": time.Since(start).Round(time.Second).String(),
+				}).Info("backend coverage reached")
+			}
 			return nil
+		}
+		// Warn once per wait, not once per poll; a retried task warns again.
+		if !reported {
+			reported = true
+			logger.WithFields(supportlog.F{
+				"needed_ledger": target, "tip": tip, "timeout": timeout.String(),
+			}).Warn("waiting for the backend to cover this chunk")
 		}
 		// Retryable. This is the error backoff.Retry returns once MaxElapsedTime
 		// stops the loop, so callers still classify the timeout via ErrBackendCoverageTimeout.

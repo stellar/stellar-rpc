@@ -100,7 +100,8 @@ Every TOML leaf is also settable from the command line:
 | `default_data_dir` | **required** | base directory for the catalog and default storage paths (moved here from `[service]` in #882) |
 | `catalog` | `{default_data_dir}/catalog/rocksdb` | the catalog RocksDB |
 | `ledgers` | `{default_data_dir}/ledgers` | `.pack` files |
-| `events` | `{default_data_dir}/events` | events cold segments |
+| `events` | `{default_data_dir}/events/data` | events `.pack` segments |
+| `events_index` | `{default_data_dir}/events/index` | events `index.pack` + `index.hash` |
 | `txhash_raw` | `{default_data_dir}/txhash/raw` | transient `.bin` files |
 | `txhash_index` | `{default_data_dir}/txhash/index` | per-window `.idx` |
 | `hot` | `{default_data_dir}/hot` | per-chunk hot RocksDB databases |
@@ -182,7 +183,9 @@ Chunk-level files group into buckets of 1,000 chunks (`bucket_id = chunk_id / 10
 ├── catalog/rocksdb/                                  ← catalog (WAL always on)
 ├── hot/{chunk:08d}/                               ← per-chunk hot RocksDB (transient)
 ├── ledgers/{bucket:05d}/{chunk:08d}.pack
-├── events/{bucket:05d}/{chunk:08d}-events.pack    (+ -index.pack, -index.hash)
+├── events/
+│   ├── data/{bucket:05d}/{chunk:08d}-events.pack
+│   └── index/{bucket:05d}/{chunk:08d}-index.pack   (+ -index.hash)
 └── txhash/
     ├── raw/{bucket:05d}/{chunk:08d}.bin           ← transient until window finalization (or retention pruning)
     └── index/{window:08d}/{lo:08d}-{hi:08d}.idx   ← one frozen file per window, coverage-named
