@@ -63,17 +63,17 @@ func drain(t *testing.T, rpc *client.Client, req protocol.GetEventsV2Request,
 		if req.Limit != nil {
 			require.LessOrEqual(t, len(resp.Events), int(*req.Limit), "page %d", page)
 		}
-		if page > 0 {
-			prev := all[len(all)-1].Ledger
-			for _, e := range resp.Events {
+		for _, e := range resp.Events {
+			if len(all) > 0 {
+				prev := all[len(all)-1].Ledger
 				if descending {
 					require.LessOrEqual(t, e.Ledger, prev, "page %d: descending order broken", page)
 				} else {
 					require.GreaterOrEqual(t, e.Ledger, prev, "page %d: ascending order broken", page)
 				}
 			}
+			all = append(all, e)
 		}
-		all = append(all, resp.Events...)
 		if resp.ScanStatus != protocol.ScanStatusHasMore {
 			return all, resp
 		}
