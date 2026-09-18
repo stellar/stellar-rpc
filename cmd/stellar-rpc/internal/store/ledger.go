@@ -36,29 +36,23 @@ func (lr LedgerRange) ToLedgerSeqRange() protocol.LedgerSeqRange {
 // implements. Handlers depend on this interface, never on a concrete backend.
 type LedgerReader interface {
 	GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error)
-	WithLedgerRaw(ctx context.Context, sequence uint32, fn WithLedgerRawFn) (found bool, err error)
 	GetLedgerRange(ctx context.Context) (LedgerRange, error)
 	StreamLedgerRange(ctx context.Context, startLedger uint32, endLedger uint32, f StreamLedgerFn) error
 	NewTx(ctx context.Context) (LedgerReaderTx, error)
 	GetLatestLedgerSequence(ctx context.Context) (uint32, error)
 }
 
-// WithLedgerRawFn receives one ledger's marshaled LCM on loan and the bytes
-// are valid only inside the call, read-only. Copy whatever outlives fn.
-type WithLedgerRawFn func(raw []byte) error
-
 // LedgerReaderTx is a read-only snapshot of the ledger store. Call Done to
 // release it.
 //
-// WithLedgerRaw is a walk, not a free-form point read: calls must be
-// ascending and contiguous from the first call's sequence, and read at most
-// methods.LedgerScanLimit ledgers per Tx. The v1 (SQL) backend accepts any
-// pattern, while the v2 backend only walks from a forward iterator primed on
-// the first call. fn borrows the marshaled LCM under WithLedgerRawFn's loan
-// terms. found=false means fn never ran; fn's own error comes back verbatim
-// with found=true.
+// GetLedger is a walk, not a free-form point read. Call it with ascending,
+// contiguous sequences, starting from the first call's sequence. Read at most
+// methods.LedgerScanLimit ledgers per Tx. This is getTransactions' access
+// pattern. The v1 (SQL) backend accepts any pattern; the v2 backend serves
+// the walk from a forward iterator primed on the first call and fails loudly
+// on anything else.
 type LedgerReaderTx interface {
-	WithLedgerRaw(ctx context.Context, sequence uint32, fn WithLedgerRawFn) (bool, error)
+	GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error)
 	GetLedgerRange(ctx context.Context) (LedgerRange, error)
 	BatchGetLedgers(ctx context.Context, start uint32, end uint32) ([]LedgerMetadataChunk, error)
 	Done() error
