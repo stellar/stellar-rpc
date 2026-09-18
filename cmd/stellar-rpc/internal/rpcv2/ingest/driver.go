@@ -71,11 +71,9 @@ type ColdDirs struct {
 //
 // Source resolution (pack-stat, coverage wait) runs in the caller BEFORE this, so
 // a pack-missing or coverage-timeout failure never becomes a ColdChunkTotal
-// attempt here. Note it is not metered anywhere else either: the backfill
-// passes its sink no further than WriteColdChunk, so a chunk that failed to
-// resolve its source moves no counter. It is visible only in the scheduler's
-// retry and failure logs. The only pre-open failures metered here are a
-// canceled ctx and a cold-writer open failure.
+// attempt here; it reaches only the scheduler's retry counter and its retry and
+// failure logs. The only pre-open failures metered here are a canceled ctx and a
+// cold-writer open failure.
 func WriteColdChunk(
 	ctx context.Context,
 	logger *supportlog.Entry,

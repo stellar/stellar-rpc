@@ -140,6 +140,32 @@ func TestColdReader_LookupKnownTerm(t *testing.T) {
 	}
 }
 
+// TestColdReader_SplitRootsRoundTrip reads a chunk whose events.pack and index
+// files live in different directories, the production layout.
+func TestColdReader_SplitRootsRoundTrip(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dataDir, payloads := buildColdFixture(t, chunkID, 4, 1)
+	indexDir := t.TempDir()
+	for _, name := range []string{IndexPackName(chunkID), IndexHashName(chunkID)} {
+		require.NoError(t, os.Rename(filepath.Join(dataDir, name), filepath.Join(indexDir, name)))
+	}
+
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dataDir, Index: indexDir}, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	bm := lookupOne(t, cr, contractTermKey(payloads[0]))
+	require.NotNil(t, bm)
+	assert.Equal(t, uint64(len(payloads)), bm.GetCardinality())
+
+	last := uint32(len(payloads) - 1)
+	got, err := cr.FetchEvents(context.Background(), []uint32{0, last})
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	assert.Equal(t, dataSym(t, payloads[0]), dataSym(t, got[0]))
+	assert.Equal(t, dataSym(t, payloads[last]), dataSym(t, got[1]))
+}
+
 func TestColdReader_LookupUnseenTermReturnsNil(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, _ := buildColdFixture(t, chunkID, 32, 1)
