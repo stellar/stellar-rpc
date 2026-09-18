@@ -97,22 +97,13 @@ func NewMockLedgerReader(txn *MockTransactionHandler) *MockLedgerReader {
 }
 
 func (m *MockLedgerReader) ScanLedgers(_ context.Context, start, end uint32) iter.Seq2[store.RawLedger, error] {
-	return func(yield func(store.RawLedger, error) bool) {
-		for seq := start; seq <= end; seq++ {
-			lcm, ok := m.txn.ledgerSeqToMeta[seq]
-			if !ok {
-				continue
-			}
-			raw, err := lcm.MarshalBinary()
-			if err != nil {
-				yield(store.RawLedger{}, err)
-				return
-			}
-			if !yield(store.RawLedger{Sequence: seq, Raw: raw}, nil) {
-				return
-			}
+	return store.ScanLedgersFrom(start, end, func(seq uint32) (xdr.LedgerCloseMeta, bool, error) {
+		lcm, ok := m.txn.ledgerSeqToMeta[seq]
+		if !ok {
+			return xdr.LedgerCloseMeta{}, false, nil
 		}
-	}
+		return *lcm, true, nil
+	})
 }
 
 func (m *MockLedgerReader) StreamLedgerRange(_ context.Context, _ uint32, _ uint32, _ store.StreamLedgerFn) error {

@@ -77,6 +77,33 @@ func GetLedger(ctx context.Context, s LedgerScanner, seq uint32) (xdr.LedgerClos
 	return lcm, found, nil
 }
 
+// ScanLedgersFrom is the inverse adapter: a scan over a per-sequence lookup, for
+// a source that only has point reads. get reports an absent ledger as false.
+func ScanLedgersFrom(
+	start, end uint32, get func(seq uint32) (xdr.LedgerCloseMeta, bool, error),
+) iter.Seq2[RawLedger, error] {
+	return func(yield func(RawLedger, error) bool) {
+		for seq := start; seq <= end; seq++ {
+			lcm, found, err := get(seq)
+			if err != nil {
+				yield(RawLedger{}, err)
+				return
+			}
+			if !found {
+				continue
+			}
+			raw, err := lcm.MarshalBinary()
+			if err != nil {
+				yield(RawLedger{}, err)
+				return
+			}
+			if !yield(RawLedger{Sequence: seq, Raw: raw}, nil) {
+				return
+			}
+		}
+	}
+}
+
 // RawLedger is one ledger as ScanLedgers yields it. Raw is the read-only LCM
 // bytes on loan, valid only inside the loop body that received it, overwritten
 // by the next step. Copy whatever outlives the body.

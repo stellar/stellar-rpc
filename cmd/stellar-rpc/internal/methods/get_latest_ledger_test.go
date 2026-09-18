@@ -40,18 +40,9 @@ func (ledgerReader *ConstantLedgerReader) NewTx(_ context.Context) (store.Ledger
 func (ledgerReader *ConstantLedgerReader) ScanLedgers(
 	_ context.Context, start, end uint32,
 ) iter.Seq2[store.RawLedger, error] {
-	return func(yield func(store.RawLedger, error) bool) {
-		for seq := start; seq <= end; seq++ {
-			raw, err := createLedger(expectedLatestLedgerHashBytes, seq, expectedLatestLedgerCloseTime).MarshalBinary()
-			if err != nil {
-				yield(store.RawLedger{}, err)
-				return
-			}
-			if !yield(store.RawLedger{Sequence: seq, Raw: raw}, nil) {
-				return
-			}
-		}
-	}
+	return store.ScanLedgersFrom(start, end, func(seq uint32) (xdr.LedgerCloseMeta, bool, error) {
+		return createLedger(expectedLatestLedgerHashBytes, seq, expectedLatestLedgerCloseTime), true, nil
+	})
 }
 
 func (ledgerReader *ConstantLedgerReader) StreamLedgerRange(
