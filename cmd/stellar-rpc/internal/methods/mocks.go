@@ -2,6 +2,7 @@ package methods
 
 import (
 	"context"
+	"iter"
 
 	"github.com/stretchr/testify/mock"
 
@@ -22,16 +23,17 @@ type MockLedgerReader struct {
 	mock.Mock
 }
 
+// GetLedger is the mock's stubbing surface; it is not on store.LedgerReader.
 func (m *MockLedgerReader) GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
 	args := m.Called(ctx, sequence)
 	return args.Get(0).(xdr.LedgerCloseMeta), args.Bool(1), args.Error(2) //nolint:forcetypeassert
 }
 
-func (m *MockLedgerReader) WithLedgerRaw(
-	ctx context.Context, sequence uint32, fn store.WithLedgerRawFn,
-) (bool, error) {
-	args := m.Called(ctx, sequence, fn)
-	return args.Bool(0), args.Error(1)
+// ScanLedgers routes each sequence through GetLedger, so tests keep stubbing by sequence.
+func (m *MockLedgerReader) ScanLedgers(ctx context.Context, start, end uint32) iter.Seq2[store.RawLedger, error] {
+	return store.ScanLedgersFrom(start, end, func(seq uint32) (xdr.LedgerCloseMeta, bool, error) {
+		return m.GetLedger(ctx, seq)
+	})
 }
 
 func (m *MockLedgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRange, error) {
@@ -65,17 +67,23 @@ func (m *MockLedgerReaderTx) GetLedgerRange(ctx context.Context) (store.LedgerRa
 	return args.Get(0).(store.LedgerRange), args.Error(1) //nolint:forcetypeassert
 }
 
-func (m *MockLedgerReaderTx) BatchGetLedgers(ctx context.Context, start, end uint32,
-) ([]store.LedgerMetadataChunk, error) {
+// ScanLedgers returns the stubbed ledgers as a stream; a non-nil error is yielded alone.
+func (m *MockLedgerReaderTx) ScanLedgers(
+	ctx context.Context, start, end uint32,
+) iter.Seq2[store.RawLedger, error] {
 	args := m.Called(ctx, start, end)
-	return args.Get(0).([]store.LedgerMetadataChunk), args.Error(1) //nolint:forcetypeassert
-}
-
-func (m *MockLedgerReaderTx) WithLedgerRaw(
-	ctx context.Context, sequence uint32, fn store.WithLedgerRawFn,
-) (bool, error) {
-	args := m.Called(ctx, sequence, fn)
-	return args.Bool(0), args.Error(1)
+	ledgers := args.Get(0).([]store.RawLedger) //nolint:forcetypeassert
+	err := args.Error(1)
+	return func(yield func(store.RawLedger, error) bool) {
+		for _, l := range ledgers {
+			if !yield(l, nil) {
+				return
+			}
+		}
+		if err != nil {
+			yield(store.RawLedger{}, err)
+		}
+	}
 }
 
 func (m *MockLedgerReaderTx) Done() error {

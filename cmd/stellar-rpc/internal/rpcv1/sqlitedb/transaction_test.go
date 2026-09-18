@@ -284,7 +284,7 @@ func TestInsertTransactionsBatchingExceedsLimit(t *testing.T) {
 
 			// Verify ledger was ingested with the correct number of transactions.
 			ledgerReader := NewLedgerReader(testDB)
-			lcmReadBack, exists, err := ledgerReader.GetLedger(ctx, lcm.LedgerSequence())
+			lcmReadBack, exists, err := store.GetLedger(ctx, ledgerReader, lcm.LedgerSequence())
 			require.NoError(t, err)
 			require.True(t, exists)
 			envelopes := lcmReadBack.TransactionEnvelopes()

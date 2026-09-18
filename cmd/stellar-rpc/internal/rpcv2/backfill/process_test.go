@@ -32,7 +32,7 @@ import (
 // backend) that has the whole requested range.
 type fullChunkStream struct {
 	t   *testing.T
-	gen func(*testing.T, uint32) []byte
+	gen func(testing.TB, uint32) []byte
 }
 
 var _ ledgerbackend.LedgerStream = (*fullChunkStream)(nil)
@@ -54,7 +54,7 @@ func (s *fullChunkStream) RawLedgers(
 // assert whether backfillSource actually read from the bulk backend (vs the pack).
 type fakeBackend struct {
 	t        *testing.T
-	gen      func(*testing.T, uint32) []byte
+	gen      func(testing.TB, uint32) []byte
 	tip      uint32
 	tipErr   error
 	tipFn    func(context.Context) (uint32, error) // overrides tip/tipErr when set

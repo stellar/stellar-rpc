@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/ingest"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/support/log"
@@ -29,11 +32,14 @@ import (
 // matching it with the SDK's GetEventsRequest.Matches to matching and
 // rendering off the zero-copy DiagnosticEventView.
 //
-// The reference below is the pre-migration path, with the SDK matcher frozen
-// here so it cannot drift under a dependency bump. Its one adaptation is
-// decoding the view the store now hands out. Pagination and the DB-level
-// prefilters are unchanged by the migration and shared with production.
-// Shared machinery lives in differential_test.go.
+// The reference below is the pre-migration matcher and renderer, frozen here
+// so they cannot drift under a dependency bump, fed from the ledgers rather
+// than the events table: it re-derives each window's events from the raw
+// LedgerCloseMeta that store.LedgerReader.ScanLedgers yields, indexed by the
+// writer's own cursor rules. The two sides share only pagination. The events
+// table, its prefilters and the view path stand on one side, the ledger scan
+// and the decode-based extraction on the other, and each is the other's
+// oracle. Shared machinery lives in differential_test.go.
 
 //
 // ---- the frozen matcher (protocol.GetEventsRequest.Matches and below) ----
@@ -222,9 +228,8 @@ type legacyEventEntry struct {
 	txHash               *xdr.Hash
 }
 
-// legacyGetEvents is the pre-view handler: each event decoded, then the frozen matcher and renderer.
-//
-//nolint:cyclop,funlen // frozen reference; it mirrors the production handler's shape by design
+// legacyGetEvents is the pre-view handler over ledger-derived events: the
+// frozen matcher and renderer on what legacyScanEvents finds.
 func legacyGetEvents(ctx context.Context, h eventsRPCHandler, request protocol.GetEventsRequest,
 ) (protocol.GetEventsResponse, error) {
 	if err := request.Valid(h.maxLimit); err != nil {
@@ -271,39 +276,20 @@ func legacyGetEvents(ctx context.Context, h eventsRPCHandler, request protocol.G
 		}
 	}
 
-	found := make([]legacyEventEntry, 0, limit)
-
-	contractIDs, err := combineContractIDs(request.Filters)
-	if err != nil {
+	// The filter validation stays for error parity; the prefilters it builds are
+	// production's alone, since the reference reads ledgers, not the events table.
+	if _, err := combineContractIDs(request.Filters); err != nil {
+		return protocol.GetEventsResponse{}, &jrpc2.Error{
+			Code: jrpc2.InvalidParams, Message: err.Error(),
+		}
+	}
+	if _, err := combineTopics(request.Filters); err != nil {
 		return protocol.GetEventsResponse{}, &jrpc2.Error{
 			Code: jrpc2.InvalidParams, Message: err.Error(),
 		}
 	}
 
-	topics, err := combineTopics(request.Filters)
-	if err != nil {
-		return protocol.GetEventsResponse{}, &jrpc2.Error{
-			Code: jrpc2.InvalidParams, Message: err.Error(),
-		}
-	}
-
-	eventTypes := combineEventTypes(request.Filters)
-
-	var scan store.ViewScanFunction = func(
-		eventView xdr.DiagnosticEventView, cursor protocol.Cursor, ledgerCloseTimestamp int64, txHash *xdr.Hash,
-	) (bool, error) {
-		// The store hands out views now; decode into the struct the old path received.
-		var event xdr.DiagnosticEvent
-		if err := event.UnmarshalBinary([]byte(eventView)); err != nil {
-			return false, err
-		}
-		if legacyRequestMatches(&request, event) {
-			found = append(found, legacyEventEntry{cursor, ledgerCloseTimestamp, event, txHash})
-		}
-		return uint(len(found)) < limit, nil
-	}
-
-	err = h.dbReader.GetEvents(ctx, cursorRange, contractIDs, topics, eventTypes, scan)
+	found, err := legacyScanEvents(ctx, h.ledgerReader, cursorRange, &request, limit)
 	if err != nil {
 		return protocol.GetEventsResponse{}, &jrpc2.Error{
 			Code: jrpc2.InvalidRequest, Message: err.Error(),
@@ -344,6 +330,110 @@ func legacyGetEvents(ctx context.Context, h eventsRPCHandler, request protocol.G
 		LatestLedgerCloseTime: ledgerRange.LastLedger.CloseTime,
 		OldestLedgerCloseTime: ledgerRange.FirstLedger.CloseTime,
 	}, nil
+}
+
+// legacyScanEvents re-derives the window's events from the ledgers: one
+// ScanLedgers pass, each ledger decoded inside the loop (its bytes are on
+// loan) and indexed by legacyLedgerEvents, then the frozen matcher, up to limit.
+func legacyScanEvents(
+	ctx context.Context, reader store.LedgerReader, window protocol.CursorRange,
+	request *protocol.GetEventsRequest, limit uint,
+) ([]legacyEventEntry, error) {
+	found := make([]legacyEventEntry, 0, limit)
+	if window.End.Ledger <= window.Start.Ledger {
+		return found, nil
+	}
+	// The events table is keyed by cursor strings, so the window is the same compare.
+	first, end := window.Start.String(), window.End.String()
+	for ledger, err := range reader.ScanLedgers(ctx, window.Start.Ledger, window.End.Ledger-1) {
+		if err != nil {
+			return nil, err
+		}
+		var lcm xdr.LedgerCloseMeta
+		if err := lcm.UnmarshalBinary(ledger.Raw); err != nil {
+			return nil, err
+		}
+		entries, err := legacyLedgerEvents(lcm)
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			id := entry.cursor.String()
+			if id < first || id >= end || !legacyRequestMatches(request, entry.event) {
+				continue
+			}
+			found = append(found, entry)
+			if uint(len(found)) >= limit {
+				return found, nil
+			}
+		}
+	}
+	return found, nil
+}
+
+// legacyLedgerEvents is the writer's indexing (sqlitedb InsertEvents) over a
+// decoded ledger: every transaction's events, failed ones included, wrapped as
+// the DiagnosticEvent the table stores, in id order.
+func legacyLedgerEvents(lcm xdr.LedgerCloseMeta) ([]legacyEventEntry, error) {
+	if lcm.CountTransactions() == 0 {
+		return nil, nil
+	}
+	reader, err := ingest.NewLedgerTransactionReaderFromLedgerCloseMeta(passphrase, lcm)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+
+	seq, closeTime := lcm.LedgerSequence(), lcm.LedgerCloseTime()
+	var entries []legacyEventEntry
+	var beforeAll, afterAll uint32 // per-ledger stage counters; afterTx restarts per transaction
+	for {
+		tx, err := reader.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		all, err := tx.GetTransactionEvents()
+		if err != nil {
+			return nil, err
+		}
+		add := func(cursor protocol.Cursor, event xdr.ContractEvent) {
+			entries = append(entries, legacyEventEntry{
+				cursor:               cursor,
+				ledgerCloseTimestamp: closeTime,
+				event:                xdr.DiagnosticEvent{InSuccessfulContractCall: tx.Successful(), Event: event},
+				txHash:               &tx.Hash,
+			})
+		}
+		var afterTx uint32
+		for _, event := range all.TransactionEvents {
+			txIdx, opIdx, err := store.StageSentinels(event.Stage, tx.Index)
+			if err != nil {
+				return nil, err
+			}
+			counter := &afterTx
+			switch event.Stage {
+			case xdr.TransactionEventStageTransactionEventStageBeforeAllTxs:
+				counter = &beforeAll
+			case xdr.TransactionEventStageTransactionEventStageAfterAllTxs:
+				counter = &afterAll
+			case xdr.TransactionEventStageTransactionEventStageAfterTx: // numbered within its transaction
+			}
+			add(protocol.Cursor{Ledger: seq, Tx: txIdx, Op: opIdx, Event: *counter}, event.Event)
+			*counter++
+		}
+		for op, events := range all.OperationEvents {
+			for i, event := range events {
+				add(protocol.Cursor{Ledger: seq, Tx: tx.Index, Op: uint32(op), Event: uint32(i)}, event)
+			}
+		}
+	}
+	slices.SortFunc(entries, func(a, b legacyEventEntry) int {
+		return strings.Compare(a.cursor.String(), b.cursor.String())
+	})
+	return entries, nil
 }
 
 //

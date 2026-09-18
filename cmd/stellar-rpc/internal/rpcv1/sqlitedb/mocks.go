@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"iter"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -95,24 +96,14 @@ func NewMockLedgerReader(txn *MockTransactionHandler) *MockLedgerReader {
 	}
 }
 
-func (m *MockLedgerReader) GetLedger(_ context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
-	lcm, ok := m.txn.ledgerSeqToMeta[sequence]
-	if !ok {
-		return xdr.LedgerCloseMeta{}, false, nil
-	}
-	return *lcm, true, nil
-}
-
-func (m *MockLedgerReader) WithLedgerRaw(_ context.Context, sequence uint32, fn store.WithLedgerRawFn) (bool, error) {
-	lcm, ok := m.txn.ledgerSeqToMeta[sequence]
-	if !ok {
-		return false, nil
-	}
-	rawMeta, err := lcm.MarshalBinary()
-	if err != nil {
-		return false, err
-	}
-	return true, fn(rawMeta)
+func (m *MockLedgerReader) ScanLedgers(_ context.Context, start, end uint32) iter.Seq2[store.RawLedger, error] {
+	return store.ScanLedgersFrom(start, end, func(seq uint32) (xdr.LedgerCloseMeta, bool, error) {
+		lcm, ok := m.txn.ledgerSeqToMeta[seq]
+		if !ok {
+			return xdr.LedgerCloseMeta{}, false, nil
+		}
+		return *lcm, true, nil
+	})
 }
 
 func (m *MockLedgerReader) StreamLedgerRange(_ context.Context, _ uint32, _ uint32, _ store.StreamLedgerFn) error {

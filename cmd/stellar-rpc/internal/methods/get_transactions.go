@@ -72,39 +72,16 @@ func (h transactionsRPCHandler) initializePagination(
 	return *start, requestCursor, limit, nil
 }
 
-// readLedgerPage borrows ledgerSeq's raw LedgerCloseMeta and runs the page
-// extraction inside the loan. Extraction errors are already *jrpc2.Error and
-// pass through unchanged; only the read's own outcomes are classified here.
-func (h transactionsRPCHandler) readLedgerPage(
-	ctx context.Context, ledgerSeq uint32, readTx store.LedgerReaderTx,
-	start toid.ID, txns *[]protocol.TransactionInfo, limit uint, format string,
-) (*toid.ID, bool, error) {
-	var cursor *toid.ID
-	var done bool
-	var procErr error
-	found, err := readTx.WithLedgerRaw(ctx, ledgerSeq, func(raw []byte) error {
-		cursor, done, procErr = h.processTransactionsInLedger(raw, start, txns, limit, format)
-		return procErr
-	})
-	switch {
-	case procErr != nil:
-		return nil, false, procErr
-	case err != nil:
-		return nil, false, &jrpc2.Error{
-			Code:    jrpc2.InternalError,
-			Message: err.Error(),
-		}
-	case !found:
-		return nil, false, &jrpc2.Error{
-			Code:    jrpc2.InvalidParams,
-			Message: fmt.Sprintf("database does not contain metadata for ledger: %d", ledgerSeq),
-		}
+// missingLedger is the wire error for a ledger the scan did not yield.
+func missingLedger(seq uint32) *jrpc2.Error {
+	return &jrpc2.Error{
+		Code:    jrpc2.InvalidParams,
+		Message: fmt.Sprintf("database does not contain metadata for ledger: %d", seq),
 	}
-	return cursor, done, nil
 }
 
 // processTransactionsInLedger extracts the page's worth of transactions from
-// raw — a marshaled LedgerCloseMeta on loan from WithLedgerRaw — through the
+// raw — a marshaled LedgerCloseMeta on loan from ScanLedgers — through the
 // SDK's zero-copy views. Every byte field below aliases raw until it is
 // base64- or JSON-encoded into txns; nothing that aliases raw outlives this call.
 func (h transactionsRPCHandler) processTransactionsInLedger(
@@ -264,25 +241,37 @@ func (h transactionsRPCHandler) getTransactionsByLedgerSequence(ctx context.Cont
 	txns := make([]protocol.TransactionInfo, 0, limit)
 	var done bool
 	cursor := toid.New(0, 0, 0)
-	// Bound the walk the way getEvents bounds its scan (LedgerScanLimit): over a
-	// sparse range the response is a short page and the client pages on from the
-	// returned cursor, instead of the handler walking unboundedly toward the tip.
-	endLedger := min(int64(ledgerRange.LastLedger.Sequence), int64(start.LedgerSequence)+LedgerScanLimit-1)
-	for ledgerSeq := start.LedgerSequence; int64(ledgerSeq) <= endLedger; ledgerSeq++ {
-		if ledgerSeq < 0 {
+	if start.LedgerSequence < 0 {
+		return protocol.GetTransactionsResponse{}, &jrpc2.Error{
+			Code:    jrpc2.InvalidParams,
+			Message: "cursor ledger sequence cannot be negative",
+		}
+	}
+	// Cap the scan at LedgerScanLimit so a sparse range returns a short page instead of walking to the tip.
+	first := uint32(start.LedgerSequence) // a non-negative int32, so first+LedgerScanLimit cannot overflow
+	last := min(ledgerRange.LastLedger.Sequence, first+LedgerScanLimit-1)
+	next := first
+	for entry, serr := range readTx.ScanLedgers(ctx, first, last) {
+		if serr != nil {
 			return protocol.GetTransactionsResponse{}, &jrpc2.Error{
-				Code:    jrpc2.InvalidParams,
-				Message: "cursor ledger sequence cannot be negative",
+				Code:    jrpc2.InternalError,
+				Message: serr.Error(),
 			}
 		}
-		cursor, done, err = h.readLedgerPage(
-			ctx, uint32(ledgerSeq), readTx, start, &txns, limit, request.Format)
+		if entry.Sequence != next {
+			return protocol.GetTransactionsResponse{}, missingLedger(next)
+		}
+		cursor, done, err = h.processTransactionsInLedger(entry.Raw, start, &txns, limit, request.Format)
 		if err != nil {
 			return protocol.GetTransactionsResponse{}, err
 		}
 		if done {
 			break
 		}
+		next++
+	}
+	if !done && next <= last {
+		return protocol.GetTransactionsResponse{}, missingLedger(next)
 	}
 
 	// A caught-up poller's cursor points at or past the tip. The walk then

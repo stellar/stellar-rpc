@@ -50,7 +50,7 @@ func assertLedgerRange(t *testing.T, reader LedgerReader, start, end uint32) {
 	})
 	require.NoError(t, err)
 	for i := start - 1; i <= end+1; i++ {
-		ledger, exists, err := reader.GetLedger(ctx, i)
+		ledger, exists, err := store.GetLedger(ctx, reader, i)
 		require.NoError(t, err)
 		if i < start || i > end {
 			assert.False(t, exists)
@@ -77,7 +77,7 @@ func TestLedgers(t *testing.T) {
 	daemon := host.MakeNoOpDaemon()
 
 	reader := NewLedgerReader(db)
-	_, exists, err := reader.GetLedger(t.Context(), 1)
+	_, exists, err := store.GetLedger(t.Context(), reader, 1)
 	require.NoError(t, err)
 	assert.False(t, exists)
 
@@ -267,7 +267,7 @@ func TestWithLedgerRaw(t *testing.T) {
 
 	reader := NewLedgerReader(db)
 	var got []byte
-	found, err := reader.WithLedgerRaw(t.Context(), 42, func(raw []byte) error {
+	found, err := store.WithLedgerRaw(t.Context(), reader, 42, func(raw []byte) error {
 		got = bytes.Clone(raw)
 		return nil
 	})
@@ -276,13 +276,47 @@ func TestWithLedgerRaw(t *testing.T) {
 	assert.Equal(t, want, got)
 
 	ran := false
-	found, err = reader.WithLedgerRaw(t.Context(), 43, func([]byte) error {
+	found, err = store.WithLedgerRaw(t.Context(), reader, 43, func([]byte) error {
 		ran = true
 		return nil
 	})
 	require.NoError(t, err)
 	assert.False(t, found)
 	assert.False(t, ran)
+}
+
+// TestScanLedgers pins what the handlers' gap checks rest on: ascending, duplicate-free,
+// within [start, end], absent sequences skipped, and a start below the oldest row served from it.
+func TestScanLedgers(t *testing.T) {
+	db := NewTestDB(t)
+	for _, seq := range []uint32{10, 11, 13, 14} { // 12 is missing
+		tx, err := NewReadWriter(logger, db, host.MakeNoOpDaemon(), 15, passphrase).NewTx(t.Context())
+		require.NoError(t, err)
+		lcm := createLedger(seq)
+		require.NoError(t, tx.LedgerWriter().InsertLedger(lcm))
+		require.NoError(t, tx.Commit(lcm, nil))
+	}
+	readTx, err := NewLedgerReader(db).NewTx(t.Context())
+	require.NoError(t, err)
+	defer func() { _ = readTx.Done() }()
+
+	scan := func(start, end uint32) []uint32 {
+		var got []uint32
+		for l, err := range readTx.ScanLedgers(t.Context(), start, end) {
+			require.NoError(t, err)
+			var lcm xdr.LedgerCloseMeta
+			require.NoError(t, lcm.UnmarshalBinary(l.Raw))
+			require.Equal(t, l.Sequence, lcm.LedgerSequence(), "Sequence must match the bytes")
+			got = append(got, l.Sequence)
+		}
+		return got
+	}
+	assert.Equal(t, []uint32{10, 11, 13, 14}, scan(10, 14), "ascending, and the gap at 12 is silent")
+	assert.Equal(t, []uint32{11, 13}, scan(11, 13), "bounded on both ends")
+	assert.Equal(t, []uint32{10, 11}, scan(1, 11), "a start below the oldest row is served from it")
+	assert.Empty(t, scan(12, 12), "an absent ledger yields nothing")
+	assert.Empty(t, scan(14, 10), "start above end yields nothing")
+	assert.Empty(t, scan(20, 30), "beyond the latest row yields nothing")
 }
 
 func BenchmarkGetLedgerRange(b *testing.B) {
@@ -297,7 +331,7 @@ func BenchmarkGetLedgerRange(b *testing.B) {
 	}
 }
 
-func BenchmarkBatchGetLedgers(b *testing.B) {
+func BenchmarkScanLedgers(b *testing.B) {
 	testDB, lcms := setupBenchmarkingDB(b)
 	reader := NewLedgerReader(testDB)
 	readTx, err := reader.NewTx(b.Context())
@@ -308,14 +342,26 @@ func BenchmarkBatchGetLedgers(b *testing.B) {
 	end := start + uint32(batchSize) - 1
 
 	for b.Loop() {
-		ledgers, err := readTx.BatchGetLedgers(b.Context(), start, end)
-		require.NoError(b, err)
-
-		var hdrFirst, hdrLast xdr.LedgerHeaderHistoryEntry
-		require.NoError(b, hdrFirst.UnmarshalBinary(ledgers[0].HeaderRaw))
-		require.NoError(b, hdrLast.UnmarshalBinary(ledgers[batchSize-1].HeaderRaw))
-		assert.EqualValues(b, lcms[0].LedgerSequence(), hdrFirst.Header.LedgerSeq)
-		assert.EqualValues(b, lcms[batchSize-1].LedgerSequence(), hdrLast.Header.LedgerSeq)
+		// The header slice is what getLedgers pulls off each scanned ledger.
+		var first, last xdr.LedgerHeaderHistoryEntry
+		count := 0
+		for entry, err := range readTx.ScanLedgers(b.Context(), start, end) {
+			require.NoError(b, err)
+			headerView, herr := xdr.LedgerCloseMetaView(entry.Raw).LedgerHeader()
+			require.NoError(b, herr)
+			raw, rerr := headerView.Raw()
+			require.NoError(b, rerr)
+			switch count {
+			case 0:
+				require.NoError(b, first.UnmarshalBinary(raw))
+			case int(batchSize) - 1:
+				require.NoError(b, last.UnmarshalBinary(raw))
+			}
+			count++
+		}
+		require.Equal(b, int(batchSize), count)
+		assert.EqualValues(b, lcms[0].LedgerSequence(), first.Header.LedgerSeq)
+		assert.EqualValues(b, lcms[batchSize-1].LedgerSequence(), last.Header.LedgerSeq)
 	}
 }
 
