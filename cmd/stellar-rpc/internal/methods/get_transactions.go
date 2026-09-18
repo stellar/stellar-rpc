@@ -81,7 +81,7 @@ func missingLedger(seq uint32) *jrpc2.Error {
 }
 
 // processTransactionsInLedger extracts the page's worth of transactions from
-// raw — a marshaled LedgerCloseMeta on loan from WithLedgerRaw — through the
+// raw — a marshaled LedgerCloseMeta on loan from ScanLedgers — through the
 // SDK's zero-copy views. Every byte field below aliases raw until it is
 // base64- or JSON-encoded into txns; nothing that aliases raw outlives this call.
 func (h transactionsRPCHandler) processTransactionsInLedger(
@@ -247,15 +247,15 @@ func (h transactionsRPCHandler) getTransactionsByLedgerSequence(ctx context.Cont
 			Message: "cursor ledger sequence cannot be negative",
 		}
 	}
-	first := uint32(start.LedgerSequence)
-	//nolint:gosec // bounded above by LastLedger.Sequence, a uint32, so the result always fits
-	last := uint32(min(int64(ledgerRange.LastLedger.Sequence), int64(first)+LedgerScanLimit-1))
+	// Cap the scan at LedgerScanLimit so a sparse range returns a short page instead of walking to the tip.
+	first := uint32(start.LedgerSequence) // a non-negative int32, so first+LedgerScanLimit cannot overflow
+	last := min(ledgerRange.LastLedger.Sequence, first+LedgerScanLimit-1)
 	next := first
-	for entry, err := range readTx.ScanLedgers(ctx, first, last) {
-		if err != nil {
+	for entry, serr := range readTx.ScanLedgers(ctx, first, last) {
+		if serr != nil {
 			return protocol.GetTransactionsResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
-				Message: err.Error(),
+				Message: serr.Error(),
 			}
 		}
 		if entry.Sequence != next {
