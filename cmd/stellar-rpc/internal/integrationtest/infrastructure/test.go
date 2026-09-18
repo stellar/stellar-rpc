@@ -1083,6 +1083,7 @@ func (i *Test) upgradeLimitsWithFile(limitFile, expectInSorobanInfo string) {
 	txnCount := len(lines) / 2 // each upgrade command outputs txnB64 \n hash
 	assert.Len(i.t, lines, 9)
 
+	var lastLedger uint32
 	for j := 0; j+1 < len(lines); j += 2 {
 		b64 := lines[j]
 		i.t.Logf("Upgrade transaction: %s (hash: %s)", b64, lines[j+1])
@@ -1093,8 +1094,13 @@ func (i *Test) upgradeLimitsWithFile(limitFile, expectInSorobanInfo string) {
 		txn, t := gtxn.Transaction()
 		require.True(i.t, t)
 
-		SendSuccessfulTransaction(i.t, i.rpcClient, nil /* signed @ L791 */, txn)
+		lastLedger = SendSuccessfulTransaction(i.t, i.rpcClient, nil /* signed @ L791 */, txn).Ledger
 	}
+
+	// The daemon reported the ledger from its captive core. The upgrade key
+	// below is resolved by the Core container against its own last closed
+	// ledger, which can still be behind under load.
+	i.waitForCoreAtLedger(int(lastLedger))
 
 	upgradeKey := strings.TrimSpace(lines[len(lines)-1])
 	i.t.Logf("Upgrading Core config with key: %s", upgradeKey)
