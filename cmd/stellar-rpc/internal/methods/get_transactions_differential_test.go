@@ -78,11 +78,20 @@ func legacyGetTransactionsByLedgerSequence(
 				Message: "cursor ledger sequence cannot be negative",
 			}
 		}
+		// The reference's point read, expressed as a scan of one: the Tx no longer
+		// offers WithLedgerRaw, but the legacy per-ledger semantics are unchanged.
 		var ledger xdr.LedgerCloseMeta
-		found, gerr := readTx.WithLedgerRaw(ctx, uint32(ledgerSeq), ledger.UnmarshalBinary)
-		if gerr != nil {
-			return protocol.GetTransactionsResponse{}, &jrpc2.Error{Code: jrpc2.InternalError, Message: gerr.Error()}
-		} else if !found {
+		found := false
+		for entry, serr := range readTx.ScanLedgers(ctx, uint32(ledgerSeq), uint32(ledgerSeq)) {
+			if serr != nil {
+				return protocol.GetTransactionsResponse{}, &jrpc2.Error{Code: jrpc2.InternalError, Message: serr.Error()}
+			}
+			if uerr := ledger.UnmarshalBinary(entry.Raw); uerr != nil {
+				return protocol.GetTransactionsResponse{}, &jrpc2.Error{Code: jrpc2.InternalError, Message: uerr.Error()}
+			}
+			found = true
+		}
+		if !found {
 			return protocol.GetTransactionsResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InvalidParams,
 				Message: fmt.Sprintf("database does not contain metadata for ledger: %d", ledgerSeq),

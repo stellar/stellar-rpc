@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"iter"
 	"testing"
 
 	"github.com/creachadair/jrpc2"
@@ -377,7 +378,7 @@ func setupDBNoTxs(t *testing.T, numLedgers int) *sqlitedb.DB {
 }
 
 // sparseLedgerReader serves an arbitrarily wide range of empty ledgers,
-// counting point reads, so a test can observe how far the handler walks.
+// counting yielded ledgers, so a test can observe how far the handler walks.
 type sparseLedgerReader struct {
 	latest uint32
 	gets   int
@@ -406,8 +407,23 @@ func (r *sparseLedgerReader) GetLedgerRange(context.Context) (store.LedgerRange,
 	}, nil
 }
 
-func (r *sparseLedgerReader) BatchGetLedgers(context.Context, uint32, uint32) ([]store.LedgerMetadataChunk, error) {
-	return nil, nil
+// ScanLedgers yields every sequence in range, counting them so a test can see how far the handler walked.
+func (r *sparseLedgerReader) ScanLedgers(
+	_ context.Context, start, end uint32,
+) iter.Seq2[store.RawLedger, error] {
+	return func(yield func(store.RawLedger, error) bool) {
+		for seq := start; seq <= end; seq++ {
+			raw, err := createEmptyTestLedger(seq).MarshalBinary()
+			if err != nil {
+				yield(store.RawLedger{}, err)
+				return
+			}
+			r.gets++
+			if !yield(store.RawLedger{Sequence: seq, Raw: raw}, nil) {
+				return
+			}
+		}
+	}
 }
 
 func (r *sparseLedgerReader) StreamLedgerRange(context.Context, uint32, uint32, store.StreamLedgerFn) error {
@@ -421,6 +437,53 @@ func (r *sparseLedgerReader) GetLatestLedgerSequence(context.Context) (uint32, e
 func (r *sparseLedgerReader) NewTx(context.Context) (store.LedgerReaderTx, error) { return r, nil }
 
 func (r *sparseLedgerReader) Done() error { return nil }
+
+// TestGetTransactions_ScanGaps covers the two branches that replaced the not-found
+// point read: a gap the scan jumps over, and a range that runs dry before its end.
+func TestGetTransactions_ScanGaps(t *testing.T) {
+	for name, tc := range map[string]struct {
+		yield   []uint32 // sequences the scan hands back for a requested [1, 3]
+		wantSeq uint32   // the ledger the error must name
+	}{
+		"gap in the middle": {[]uint32{1, 3}, 2},
+		"range runs dry":    {[]uint32{1, 2}, 3},
+		"nothing at all":    {nil, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			ledgers := make([]store.RawLedger, 0, len(tc.yield))
+			for _, seq := range tc.yield {
+				raw, err := createEmptyTestLedger(seq).MarshalBinary()
+				require.NoError(t, err)
+				ledgers = append(ledgers, store.RawLedger{Sequence: seq, Raw: raw})
+			}
+
+			mockReader := new(MockLedgerReader)
+			mockTx := new(MockLedgerReaderTx)
+			mockReader.On("NewTx", ctx).Return(mockTx, nil)
+			mockTx.On("Done").Return(nil)
+			mockTx.On("GetLedgerRange", ctx).Return(store.LedgerRange{
+				FirstLedger: store.LedgerInfo{Sequence: 1, CloseTime: 100},
+				LastLedger:  store.LedgerInfo{Sequence: 3, CloseTime: 300},
+			}, nil)
+			mockTx.On("ScanLedgers", ctx, uint32(1), uint32(3)).Return(ledgers, nil)
+
+			handler := transactionsRPCHandler{
+				ledgerReader:      mockReader,
+				maxLimit:          100,
+				defaultLimit:      10,
+				networkPassphrase: NetworkPassphrase,
+			}
+			_, err := handler.getTransactionsByLedgerSequence(
+				ctx, protocol.GetTransactionsRequest{StartLedger: 1})
+			require.Error(t, err)
+			assert.Equal(t,
+				fmt.Sprintf("[%d] database does not contain metadata for ledger: %d",
+					jrpc2.InvalidParams, tc.wantSeq),
+				err.Error())
+		})
+	}
+}
 
 func TestGetTransactions_SparseRangeCapsAtLedgerScanLimit(t *testing.T) {
 	reader := &sparseLedgerReader{latest: 50_000}
