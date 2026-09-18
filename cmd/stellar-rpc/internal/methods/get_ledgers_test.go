@@ -331,6 +331,18 @@ func createLedgerCloseMeta(ledgerSeq uint32) xdr.LedgerCloseMeta {
 	}
 }
 
+// rawLedgers builds what ScanLedgers yields for the given sequences.
+func rawLedgers(t *testing.T, sequences []uint32) []store.RawLedger {
+	t.Helper()
+	out := make([]store.RawLedger, 0, len(sequences))
+	for _, seq := range sequences {
+		raw, err := createLedgerCloseMeta(seq).MarshalBinary()
+		require.NoError(t, err)
+		out = append(out, store.RawLedger{Sequence: seq, Raw: raw})
+	}
+	return out
+}
+
 func getLedgerRange(sequences []uint32) []xdr.LedgerCloseMeta {
 	ledgers := make([]xdr.LedgerCloseMeta, 0, len(sequences))
 	for _, seq := range sequences {
@@ -400,10 +412,8 @@ func TestGetLedgers(t *testing.T) {
 				FirstLedger: 2,
 			}, nil)
 			if len(tc.expectLocal) > 0 {
-				ledgerChunks, err := metaToChunk(getLedgerRange(tc.expectLocal))
-				require.NoError(t, err)
-				mockReaderTx.On("BatchGetLedgers", ctx, tc.expectLocal[0], tc.expectLocal[len(tc.expectLocal)-1]).
-					Return(ledgerChunks, nil)
+				mockReaderTx.On("ScanLedgers", ctx, tc.expectLocal[0], tc.expectLocal[len(tc.expectLocal)-1]).
+					Return(rawLedgers(t, tc.expectLocal), nil)
 			}
 
 			if len(tc.expectDatastore) > 0 {
@@ -437,8 +447,8 @@ func TestFetchLedgersErrors(t *testing.T) {
 
 	t.Run("DB error", func(t *testing.T) {
 		mockTx := new(MockLedgerReaderTx)
-		mockTx.On("BatchGetLedgers", ctx, uint32(150), uint32(151)).
-			Return([]store.LedgerMetadataChunk(nil), errors.New("db error"))
+		mockTx.On("ScanLedgers", ctx, uint32(150), uint32(151)).
+			Return([]store.RawLedger(nil), errors.New("db error"))
 
 		handler := ledgersHandler{}
 		_, err := handler.fetchLedgers(ctx, 150, 151, "default", mockTx, localRange)
@@ -476,7 +486,7 @@ func TestFetchLedgersErrors(t *testing.T) {
 }
 
 // TestGetLedgers_EmptyBatchGetLedgersResult is a regression test that ensures
-// when GetLedgerRange reports data but BatchGetLedgers returns an empty slice,
+// when GetLedgerRange reports data but ScanLedgers yields nothing,
 // getLedgers returns an empty page with a stable cursor and does not panic.
 func TestGetLedgers_EmptyBatchGetLedgersResult(t *testing.T) {
 	ctx := t.Context()
@@ -499,9 +509,9 @@ func TestGetLedgers_EmptyBatchGetLedgersResult(t *testing.T) {
 		mockReader.On("NewTx", ctx).Return(mockReaderTx, nil)
 		mockReaderTx.On("Done").Return(nil)
 		mockReaderTx.On("GetLedgerRange", ctx).Return(localRange, nil)
-		// BatchGetLedgers returns empty slice even though GetLedgerRange indicates data exists
-		mockReaderTx.On("BatchGetLedgers", ctx, uint32(151), uint32(155)).
-			Return([]store.LedgerMetadataChunk{}, nil)
+		// ScanLedgers yields nothing even though GetLedgerRange indicates data exists
+		mockReaderTx.On("ScanLedgers", ctx, uint32(151), uint32(155)).
+			Return([]store.RawLedger{}, nil)
 
 		request := protocol.GetLedgersRequest{
 			Pagination: &protocol.LedgerPaginationOptions{
