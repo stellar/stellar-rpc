@@ -1,7 +1,6 @@
 package methods
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -13,8 +12,7 @@ import (
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 const (
@@ -30,18 +28,11 @@ func (ledgerReader *ConstantLedgerReader) GetLatestLedgerSequence(_ context.Cont
 	return expectedLatestLedgerSequence, nil
 }
 
-func (ledgerReader *ConstantLedgerReader) GetLedgerRange(_ context.Context) (ledgerbucketwindow.LedgerRange, error) {
-	return ledgerbucketwindow.LedgerRange{}, nil
+func (ledgerReader *ConstantLedgerReader) GetLedgerRange(_ context.Context) (store.LedgerRange, error) {
+	return store.LedgerRange{}, nil
 }
 
-func (ledgerReader *ConstantLedgerReader) GetLedgerCountInRange(
-	_ context.Context,
-	_, _ uint32,
-) (uint32, uint32, uint32, error) {
-	return 0, 0, 0, nil
-}
-
-func (ledgerReader *ConstantLedgerReader) NewTx(_ context.Context) (db.LedgerReaderTx, error) {
+func (ledgerReader *ConstantLedgerReader) NewTx(_ context.Context) (store.LedgerReaderTx, error) {
 	return nil, errors.New("mock NewTx error")
 }
 
@@ -50,35 +41,28 @@ func (ledgerReader *ConstantLedgerReader) GetLedger(_ context.Context,
 ) (xdr.LedgerCloseMeta, bool, error) {
 	return createLedger(expectedLatestLedgerHashBytes,
 			sequence,
-			expectedLatestLedgerProtocolVersion,
 			expectedLatestLedgerCloseTime),
 		true, nil
 }
 
-func (ledgerReader *ConstantLedgerReader) GetLedgerRaw(
-	_ context.Context,
-	sequence uint32,
-) (db.RawLedger, bool, error) {
+func (ledgerReader *ConstantLedgerReader) WithLedgerRaw(
+	_ context.Context, sequence uint32, fn store.WithLedgerRawFn,
+) (bool, error) {
 	lcm := createLedger(expectedLatestLedgerHashBytes,
 		sequence,
-		expectedLatestLedgerProtocolVersion,
 		expectedLatestLedgerCloseTime)
-	var buf bytes.Buffer
-	if _, err := xdr.Marshal(&buf, lcm); err != nil {
-		return nil, false, err
+	raw, err := lcm.MarshalBinary()
+	if err != nil {
+		return false, err
 	}
-	return buf.Bytes(), true, nil
-}
-
-func (ledgerReader *ConstantLedgerReader) StreamAllLedgers(_ context.Context, _ db.StreamLedgerFn) error {
-	return nil
+	return true, fn(raw)
 }
 
 func (ledgerReader *ConstantLedgerReader) StreamLedgerRange(
 	_ context.Context,
 	_ uint32,
 	_ uint32,
-	_ db.StreamLedgerFn,
+	_ store.StreamLedgerFn,
 ) error {
 	return nil
 }
@@ -107,13 +91,13 @@ func MakeLedgerHeader(ledgerSequence uint32, protocolVersion uint32, closeTime x
 	return header
 }
 
-func createLedger(hash byte, ledgerSeq uint32, protocolVersion uint32, closeTime xdr.TimePoint) xdr.LedgerCloseMeta {
+func createLedger(hash byte, ledgerSeq uint32, closeTime xdr.TimePoint) xdr.LedgerCloseMeta {
 	return xdr.LedgerCloseMeta{
 		V: 1,
 		V1: &xdr.LedgerCloseMetaV1{
 			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
 				Hash:   xdr.Hash{hash},
-				Header: MakeLedgerHeader(ledgerSeq, protocolVersion, closeTime),
+				Header: MakeLedgerHeader(ledgerSeq, expectedLatestLedgerProtocolVersion, closeTime),
 			},
 			TxSet:        MakeTxSet(), // minimal empty
 			TxProcessing: nil,
@@ -132,7 +116,6 @@ func TestGetLatestLedger(t *testing.T) {
 
 	expectedLedger := createLedger(expectedLatestLedgerHashBytes,
 		expectedLatestLedgerSequence,
-		expectedLatestLedgerProtocolVersion,
 		expectedLatestLedgerCloseTime)
 
 	var receivedHeader xdr.LedgerHeader

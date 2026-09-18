@@ -1,0 +1,597 @@
+package adapters
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/stellar/go-stellar-sdk/xdr"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
+)
+
+// sparseFixture seeds chunk 5's first four ledgers and chunk 6's first two,
+// with latest pinned to chunk 6's first ledger — one below the last committed
+// one, so clamping at latest is distinguishable from data running out. The
+// retention floor is chunk 5, so OldestLedger sits on real data.
+func sparseFixture(t *testing.T) (context.Context, *LedgerReader, chunk.ID, chunk.ID) {
+	t.Helper()
+	cat := openTestCatalog(t)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
+	c0, c1 := testChunk, testChunk+1
+	seedHotLedgers(t, cat, r, c0, seqRange(c0.FirstLedger(), c0.FirstLedger()+3)...)
+	seedHotLedgers(t, cat, r, c1, c1.FirstLedger(), c1.FirstLedger()+1)
+	r.SetLatestLedger(c1.FirstLedger(), query.CloseTimeAt(closeTimeFor(c1.FirstLedger())))
+	return viewCtx(t, r), NewLedgerReader(), c0, c1
+}
+
+// emptyFixture is a genuine first start: the live chunk's key is ready (a
+// catalog with no ready hot chunk at all is broken, and NewReadView rejects
+// it), but nothing is committed yet, so the last committed ledger is
+// earliest-1 and OldestLedger exceeds LatestLedger by one.
+func emptyFixture(t *testing.T) (context.Context, *LedgerReader) {
+	t.Helper()
+	cat := openTestCatalog(t)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
+	seedHotLedgers(t, cat, r, testChunk)
+	r.SetLatestLedger(testChunk.FirstLedger()-1, query.UnknownCloseTime())
+	return viewCtx(t, r), NewLedgerReader()
+}
+
+func TestGetLatestLedgerSequence(t *testing.T) {
+	ctx, reader, _, c1 := sparseFixture(t)
+	got, err := reader.GetLatestLedgerSequence(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, c1.FirstLedger(), got)
+}
+
+func TestGetLatestLedgerSequence_EmptyStore(t *testing.T) {
+	ctx, reader := emptyFixture(t)
+	_, err := reader.GetLatestLedgerSequence(ctx)
+	assert.ErrorIs(t, err, store.ErrEmptyDB)
+}
+
+func TestGetLedgerRange(t *testing.T) {
+	ctx, reader, c0, c1 := sparseFixture(t)
+	got, err := reader.GetLedgerRange(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, store.LedgerRange{
+		FirstLedger: store.LedgerInfo{Sequence: c0.FirstLedger(), CloseTime: closeTimeFor(c0.FirstLedger())},
+		LastLedger:  store.LedgerInfo{Sequence: c1.FirstLedger(), CloseTime: closeTimeFor(c1.FirstLedger())},
+	}, got)
+}
+
+func TestGetLedgerRange_EmptyStore(t *testing.T) {
+	ctx, reader := emptyFixture(t)
+	_, err := reader.GetLedgerRange(ctx)
+	assert.ErrorIs(t, err, store.ErrEmptyDB)
+}
+
+func TestGetLedgerRange_BootStampFallsBackThenCaches(t *testing.T) {
+	cat := openTestCatalog(t)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
+	seedHotLedgers(t, cat, r, testChunk, testChunk.FirstLedger(), testChunk.FirstLedger()+1)
+	// The boot seeding: OpenRegistry publishes the latest seq with no close
+	// time, because the catalog records sequences and not timestamps.
+	r.SetLatestLedger(testChunk.FirstLedger()+1, query.UnknownCloseTime())
+	reader := NewLedgerReader()
+
+	got, err := reader.GetLedgerRange(viewCtx(t, r))
+	require.NoError(t, err)
+	assert.Equal(t, closeTimeFor(testChunk.FirstLedger()), got.FirstLedger.CloseTime,
+		"a stamp miss still serves the real close time via the point read")
+	assert.Equal(t, closeTimeFor(testChunk.FirstLedger()+1), got.LastLedger.CloseTime)
+
+	// The fallback recorded the oldest edge, so the next view serves it from
+	// memory.
+	view, err := r.NewReadView()
+	require.NoError(t, err)
+	defer view.Release()
+	ct, ok := view.OldestCloseTime()
+	assert.True(t, ok, "first GetLedgerRange populates the oldest cache")
+	assert.Equal(t, closeTimeFor(testChunk.FirstLedger()), ct)
+}
+
+func TestGetLedger_PointRead(t *testing.T) {
+	ctx, reader, c0, _ := sparseFixture(t)
+	lcm, ok, err := reader.GetLedger(ctx, c0.FirstLedger()+2)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, c0.FirstLedger()+2, lcm.LedgerSequence())
+	assert.Equal(t, closeTimeFor(c0.FirstLedger()+2), lcm.LedgerCloseTime())
+}
+
+func TestGetLedger_SubGenesisDoesNotPanic(t *testing.T) {
+	ctx, reader, _, _ := sparseFixture(t)
+	for _, seq := range []uint32{0, 1} {
+		_, ok, err := reader.GetLedger(ctx, seq)
+		assert.NoError(t, err)
+		assert.False(t, ok)
+	}
+}
+
+func TestGetLedger_OutsideWindow(t *testing.T) {
+	ctx, reader, c0, c1 := sparseFixture(t)
+	// c1.FirstLedger()+1 is committed but above the view's latest; the gate,
+	// not the store, must produce the miss.
+	for _, seq := range []uint32{c0.FirstLedger() - 1, c1.FirstLedger() + 1} {
+		_, ok, err := reader.GetLedger(ctx, seq)
+		assert.NoError(t, err)
+		assert.False(t, ok)
+	}
+}
+
+func TestGetLedger_V1LedgerCloseMeta(t *testing.T) {
+	cat := openTestCatalog(t)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
+	raw, _ := lcmV1WithClassicTx(t, testChunk.FirstLedger())
+	seedHotChunkLCMs(t, cat, r, testChunk, raw)
+	r.SetLatestLedger(testChunk.FirstLedger(), query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger())))
+	reader := NewLedgerReader()
+
+	lcm, ok, err := reader.GetLedger(viewCtx(t, r), testChunk.FirstLedger())
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, testChunk.FirstLedger(), lcm.LedgerSequence())
+	assert.Equal(t, closeTimeFor(testChunk.FirstLedger()), lcm.LedgerCloseTime())
+}
+
+func TestStreamLedgerRange(t *testing.T) {
+	ctx, reader, c0, c1 := sparseFixture(t)
+	var seqs []uint32
+	err := reader.StreamLedgerRange(ctx, c0.FirstLedger(), c1.FirstLedger()+500,
+		func(lcm xdr.LedgerCloseMeta) error {
+			assert.Equal(t, closeTimeFor(lcm.LedgerSequence()), lcm.LedgerCloseTime())
+			seqs = append(seqs, lcm.LedgerSequence())
+			return nil
+		})
+	require.NoError(t, err)
+	assert.Equal(t, append(seqRange(c0.FirstLedger(), c0.FirstLedger()+3), c1.FirstLedger()), seqs,
+		"streams what is committed, flat across the chunk border, clamped at latest")
+}
+
+func TestStreamLedgerRange_CallbackErrorStopsStream(t *testing.T) {
+	ctx, reader, c0, _ := sparseFixture(t)
+	boom := errors.New("boom")
+	calls := 0
+	err := reader.StreamLedgerRange(ctx, c0.FirstLedger(), c0.FirstLedger()+3,
+		func(xdr.LedgerCloseMeta) error {
+			calls++
+			return boom
+		})
+	assert.ErrorIs(t, err, boom)
+	assert.Equal(t, 1, calls)
+}
+
+func TestStreamLedgerRange_BelowFloorIsRangeError(t *testing.T) {
+	ctx, reader, c0, _ := sparseFixture(t)
+	var rangeErr *query.RangeError
+	err := reader.StreamLedgerRange(ctx, 2, c0.FirstLedger(),
+		func(xdr.LedgerCloseMeta) error { return nil })
+	require.ErrorAs(t, err, &rangeErr)
+	assert.Equal(t, uint32(2), rangeErr.Requested)
+	assert.Equal(t, c0.FirstLedger(), rangeErr.Oldest)
+}
+
+// txGetLedger is the Tx's retired GetLedger: one WithLedgerRaw step, decoded inside the loan.
+func txGetLedger(ctx context.Context, tx store.LedgerReaderTx, seq uint32) (xdr.LedgerCloseMeta, bool, error) {
+	var lcm xdr.LedgerCloseMeta
+	found, err := tx.WithLedgerRaw(ctx, seq, lcm.UnmarshalBinary)
+	return lcm, found, err
+}
+
+func TestTxWalk_Contiguous(t *testing.T) {
+	ctx, reader, c0, _ := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	for seq := c0.FirstLedger(); seq <= c0.FirstLedger()+3; seq++ {
+		lcm, ok, err := txGetLedger(context.Background(), tx, seq)
+		require.NoError(t, err)
+		require.True(t, ok, "ledger %d", seq)
+		assert.Equal(t, seq, lcm.LedgerSequence())
+		assert.Equal(t, closeTimeFor(seq), lcm.LedgerCloseTime())
+	}
+}
+
+func TestTxWalk_NonSequentialFailsLoudly(t *testing.T) {
+	ctx, reader, c0, _ := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	_, ok, err := txGetLedger(context.Background(), tx, c0.FirstLedger())
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// Skipping ahead breaks the walk contract; serving the wrong ledger's
+	// data would be worse than an error.
+	_, _, err = txGetLedger(context.Background(), tx, c0.FirstLedger()+2)
+	assert.ErrorContains(t, err, "non-sequential")
+}
+
+func TestTxWalk_GuardsBeforePriming(t *testing.T) {
+	ctx, reader, c0, c1 := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	// Sub-genesis and out-of-window sequences return clean misses without
+	// consuming the walk iterator...
+	for _, seq := range []uint32{0, 1, c0.FirstLedger() - 1, c1.FirstLedger() + 1} {
+		_, ok, err := txGetLedger(context.Background(), tx, seq)
+		assert.NoError(t, err)
+		assert.False(t, ok)
+	}
+	// ...so a walk primed afterwards still starts at its own sequence.
+	lcm, ok, err := txGetLedger(context.Background(), tx, c0.FirstLedger())
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, c0.FirstLedger(), lcm.LedgerSequence())
+}
+
+func TestTxGetLedgerRange_DoesNotDisturbTheWalk(t *testing.T) {
+	ctx, reader, c0, c1 := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	// getTransactions reads the range first, then walks; the range's point
+	// reads must not consume the walk iterator.
+	lr, err := tx.GetLedgerRange(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, c0.FirstLedger(), lr.FirstLedger.Sequence)
+	assert.Equal(t, c1.FirstLedger(), lr.LastLedger.Sequence)
+
+	lcm, ok, err := txGetLedger(context.Background(), tx, c0.FirstLedger()+1)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, c0.FirstLedger()+1, lcm.LedgerSequence())
+}
+
+func TestTxBatchGetLedgers(t *testing.T) {
+	ctx, reader, c0, c1 := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	got, err := tx.BatchGetLedgers(context.Background(), c0.FirstLedger(), c1.FirstLedger()+500)
+	require.NoError(t, err)
+	require.Len(t, got, 5, "four from chunk 5, one from chunk 6, clamped at latest")
+
+	want := append(seqRange(c0.FirstLedger(), c0.FirstLedger()+3), c1.FirstLedger())
+	for i, mc := range got {
+		var hdr xdr.LedgerHeaderHistoryEntry
+		require.NoError(t, hdr.UnmarshalBinary(mc.HeaderRaw))
+		assert.Equal(t, want[i], uint32(hdr.Header.LedgerSeq))
+		// Entry.Bytes is borrowed from the reader's scratch buffer; if the
+		// adapter forgot to clone, earlier entries would decode to a later
+		// ledger's bytes by the time the loop finishes.
+		var lcm xdr.LedgerCloseMeta
+		require.NoError(t, lcm.UnmarshalBinary(mc.Lcm))
+		assert.Equal(t, want[i], lcm.LedgerSequence())
+		assert.Equal(t, closeTimeFor(want[i]), lcm.LedgerCloseTime())
+	}
+}
+
+func TestTxBatchGetLedgers_HeaderMatchesFullDecode(t *testing.T) {
+	cat := openTestCatalog(t)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
+	rawV1, _ := lcmV1WithClassicTx(t, testChunk.FirstLedger())
+	rawV2, _ := lcmWithTxs(t, testChunk.FirstLedger()+1, txSpec{})
+	seedHotChunkLCMs(t, cat, r, testChunk, rawV1, rawV2)
+	r.SetLatestLedger(testChunk.FirstLedger()+1, query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger()+1)))
+	reader := NewLedgerReader()
+
+	tx, err := reader.NewTx(viewCtx(t, r))
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	got, err := tx.BatchGetLedgers(context.Background(), testChunk.FirstLedger(), testChunk.FirstLedger()+1)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	for i, raw := range [][]byte{rawV1, rawV2} {
+		var full xdr.LedgerCloseMeta
+		require.NoError(t, full.UnmarshalBinary(raw))
+		wantHeader, err := full.LedgerHeaderHistoryEntry().MarshalBinary()
+		require.NoError(t, err)
+		assert.Equal(t, wantHeader, got[i].HeaderRaw,
+			"the header slice must equal what the full decode re-marshals")
+		assert.Equal(t, raw, got[i].Lcm)
+	}
+}
+
+func TestTxBatchGetLedgers_BelowFloorIsRangeError(t *testing.T) {
+	ctx, reader, c0, _ := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	var rangeErr *query.RangeError
+	_, err = tx.BatchGetLedgers(context.Background(), 2, c0.FirstLedger())
+	require.ErrorAs(t, err, &rangeErr)
+}
+
+func TestTxBatchGetLedgers_BeyondLatestIsEmpty(t *testing.T) {
+	ctx, reader, _, c1 := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	got, err := tx.BatchGetLedgers(context.Background(), c1.FirstLedger()+100, c1.FirstLedger()+200)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+func TestTxDone_WithAndWithoutPriming(t *testing.T) {
+	ctx, reader, c0, _ := sparseFixture(t)
+
+	tx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	assert.NoError(t, tx.Done())
+	assert.NoError(t, tx.Done(), "a second Done must be a no-op, not a double release")
+
+	tx, err = reader.NewTx(ctx)
+	require.NoError(t, err)
+	_, _, err = txGetLedger(context.Background(), tx, c0.FirstLedger())
+	require.NoError(t, err)
+	assert.NoError(t, tx.Done())
+	assert.NoError(t, tx.Done(), "a second Done must be a no-op, not a double release")
+}
+
+func TestTxWalk_CrossesChunkBorder(t *testing.T) {
+	if testing.Short() {
+		t.Skip("seeds a full 10k-ledger chunk")
+	}
+	cat := openTestCatalog(t)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
+	c0, c1 := testChunk, testChunk+1
+	seedHotLedgers(t, cat, r, c0, seqRange(c0.FirstLedger(), c0.LastLedger())...)
+	seedHotLedgers(t, cat, r, c1, c1.FirstLedger(), c1.FirstLedger()+1)
+	r.SetLatestLedger(c1.FirstLedger()+1, query.CloseTimeAt(closeTimeFor(c1.FirstLedger()+1)))
+	reader := NewLedgerReader()
+
+	tx, err := reader.NewTx(viewCtx(t, r))
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	for seq := c0.LastLedger() - 1; seq <= c1.FirstLedger()+1; seq++ {
+		lcm, ok, err := txGetLedger(context.Background(), tx, seq)
+		require.NoError(t, err, "ledger %d", seq)
+		require.True(t, ok, "ledger %d", seq)
+		assert.Equal(t, seq, lcm.LedgerSequence())
+	}
+}
+
+func TestTxWalk_PastSpanCapIsExhaustedNotNonSequential(t *testing.T) {
+	if testing.Short() {
+		t.Skip("seeds a full 10k-ledger chunk")
+	}
+	cat := openTestCatalog(t)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
+	c0, c1 := testChunk, testChunk+1
+	seedHotLedgers(t, cat, r, c0, seqRange(c0.FirstLedger(), c0.LastLedger())...)
+	seedHotLedgers(t, cat, r, c1, c1.FirstLedger(), c1.FirstLedger()+1, c1.FirstLedger()+2)
+	r.SetLatestLedger(c1.FirstLedger()+2, query.CloseTimeAt(closeTimeFor(c1.FirstLedger()+2)))
+	reader := NewLedgerReader()
+
+	tx, err := reader.NewTx(viewCtx(t, r))
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	start := c0.FirstLedger()
+	for seq := start; seq < start+walkSpanCap; seq++ {
+		_, ok, err := txGetLedger(context.Background(), tx, seq)
+		require.NoError(t, err, "ledger %d", seq)
+		require.True(t, ok, "ledger %d", seq)
+	}
+
+	_, _, err = txGetLedger(context.Background(), tx, start+walkSpanCap)
+	require.ErrorContains(t, err, "exhausted its primed")
+	assert.NotContains(t, err.Error(), "non-sequential")
+}
+
+func TestBatchGetLedgers_ClonesBorrowedBytes(t *testing.T) {
+	ctx, reader, c0, _ := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	got, err := tx.BatchGetLedgers(context.Background(), c0.FirstLedger(), c0.FirstLedger()+1)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	assert.False(t, bytes.Equal(got[0].Lcm, got[1].Lcm),
+		"two entries decoding identically would mean both alias one scratch buffer")
+}
+
+func TestWalkSpanCapCoversTheHandlerScanLimit(t *testing.T) {
+	assert.Equal(t, methods.LedgerScanLimit, int(walkSpanCap),
+		"the per-request scan bound has one value (chunk.LedgersPerChunk); "+
+			"methods.LedgerScanLimit cannot derive from it (shared v1 code), so it is pinned here")
+}
+
+func TestLedgerReaderTx_BatchGetLedgersStopsOnCanceledContext(t *testing.T) {
+	r, first := sharedViewFixture(t)
+	reader := NewLedgerReader()
+
+	ctx, cancel := context.WithCancel(viewCtx(t, r))
+	tx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+	cancel()
+
+	_, err = tx.BatchGetLedgers(ctx, first, first+2)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+// TestGetLedgerRange_SeededWindowReadsNoLedgers is the standing guard on the
+// close-time path: once both edges are stamped, a served daemon that is not
+// ingesting must answer getLedgerRange without touching a ledger at all. Each
+// read it does take costs a whole decompressed ledger to recover eight bytes,
+// so a regression here is not a small one.
+//
+// Proved by the allocation budget rather than by breaking the store: a point
+// read decompresses a whole ledger, so a served range that stays under a couple
+// of kilobytes per call did not take one. The numbers are asserted too, which is
+// what rules out answering cheaply by answering wrongly.
+func TestGetLedgerRange_SeededWindowReadsNoLedgers(t *testing.T) {
+	cat := openTestCatalog(t)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
+	seedHotLedgers(t, cat, r, testChunk, testChunk.FirstLedger(), testChunk.FirstLedger()+1)
+	r.SetLatestLedger(testChunk.FirstLedger()+1, query.UnknownCloseTime())
+	reader := NewLedgerReader()
+
+	// Seeding is the one read per edge the daemon pays before serving.
+	require.NoError(t, SeedCloseTimes(r))
+
+	want := store.LedgerRange{
+		FirstLedger: store.LedgerInfo{
+			Sequence: testChunk.FirstLedger(), CloseTime: closeTimeFor(testChunk.FirstLedger()),
+		},
+		LastLedger: store.LedgerInfo{
+			Sequence: testChunk.FirstLedger() + 1, CloseTime: closeTimeFor(testChunk.FirstLedger() + 1),
+		},
+	}
+	ctx := viewCtx(t, r)
+	got, err := reader.GetLedgerRange(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, want, got, "seeded stamps must answer with the real close times")
+
+	// Both edges come from stamps, so nothing is read: a served range costs
+	// about nothing per call.
+	perCall := allocBytesPerRun(t, 200, func() {
+		if _, err := reader.GetLedgerRange(ctx); err != nil {
+			t.Error(err)
+		}
+	})
+	assert.Less(t, perCall, uint64(2048),
+		"a seeded GetLedgerRange allocated %d bytes per call; it should not be reading ledgers", perCall)
+}
+
+func TestWithLedgerRaw_LendsTheSameBytesGetLedgerDecodes(t *testing.T) {
+	ctx, reader, c0, _ := sparseFixture(t)
+	lcm, ok, err := reader.GetLedger(ctx, c0.FirstLedger())
+	require.NoError(t, err)
+	require.True(t, ok)
+	want, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+
+	var got []byte
+	found, err := reader.WithLedgerRaw(ctx, c0.FirstLedger(), func(raw []byte) error {
+		got = bytes.Clone(raw) // the loan forbids retaining raw
+		return nil
+	})
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, want, got)
+}
+
+func TestWithLedgerRaw_MissDoesNotRunFn(t *testing.T) {
+	ctx, reader, c0, c1 := sparseFixture(t)
+	// below the floor, in an in-window gap, and above latest
+	for _, seq := range []uint32{c0.FirstLedger() - 1, c0.FirstLedger() + 10, c1.FirstLedger() + 1} {
+		ran := false
+		found, err := reader.WithLedgerRaw(ctx, seq, func([]byte) error {
+			ran = true
+			return nil
+		})
+		assert.NoError(t, err, "ledger %d", seq)
+		assert.False(t, found, "ledger %d", seq)
+		assert.False(t, ran, "fn must not run for an absent ledger %d", seq)
+	}
+}
+
+func TestTxWithLedgerRaw_LendsTheSameBytesGetLedgerDecodes(t *testing.T) {
+	ctx, reader, c0, _ := sparseFixture(t)
+	rawTx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = rawTx.Done() }()
+
+	for seq := c0.FirstLedger(); seq <= c0.FirstLedger()+3; seq++ {
+		lcm, ok, err := reader.GetLedger(ctx, seq)
+		require.NoError(t, err)
+		require.True(t, ok, "ledger %d", seq)
+		want, err := lcm.MarshalBinary()
+		require.NoError(t, err)
+
+		var got []byte
+		found, err := rawTx.WithLedgerRaw(context.Background(), seq, func(raw []byte) error {
+			// The loan forbids retaining raw, so clone inside fn.
+			got = bytes.Clone(raw)
+			return nil
+		})
+		require.NoError(t, err)
+		require.True(t, found, "ledger %d", seq)
+		assert.Equal(t, want, got, "ledger %d", seq)
+	}
+}
+
+func TestTxWithLedgerRaw_MissDoesNotRunFn(t *testing.T) {
+	ctx, reader, c0, c1 := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	for _, seq := range []uint32{0, 1, c0.FirstLedger() - 1, c1.FirstLedger() + 1} {
+		ran := false
+		found, err := tx.WithLedgerRaw(context.Background(), seq, func([]byte) error {
+			ran = true
+			return nil
+		})
+		assert.NoError(t, err)
+		assert.False(t, found, "ledger %d", seq)
+		assert.False(t, ran, "fn must not run for an absent ledger %d", seq)
+	}
+}
+
+func TestWithLedgerRaw_CallbackErrorSurfacesAsFound(t *testing.T) {
+	ctx, reader, c0, _ := sparseFixture(t)
+	boom := errors.New("boom")
+	// found stays true: the ledger WAS there, the caller's own callback failed.
+	found, err := reader.WithLedgerRaw(ctx, c0.FirstLedger(), func([]byte) error { return boom })
+	assert.ErrorIs(t, err, boom)
+	assert.True(t, found)
+}
+
+func TestTxWithLedgerRaw_CallbackErrorSurfacesAsFound(t *testing.T) {
+	ctx, reader, c0, _ := sparseFixture(t)
+	tx, err := reader.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	boom := errors.New("boom")
+	// found stays true: the ledger WAS there, the caller's own callback failed.
+	found, err := tx.WithLedgerRaw(context.Background(), c0.FirstLedger(),
+		func([]byte) error { return boom })
+	assert.ErrorIs(t, err, boom)
+	assert.True(t, found)
+}
+
+func TestTxWithLedgerRaw_StopsOnCanceledContext(t *testing.T) {
+	baseCtx, reader, c0, _ := sparseFixture(t)
+	tx, err := reader.NewTx(baseCtx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Done() }()
+
+	ctx, cancel := context.WithCancel(baseCtx)
+	_, err = tx.WithLedgerRaw(ctx, c0.FirstLedger(), func([]byte) error { return nil })
+	require.NoError(t, err)
+
+	cancel()
+	ran := false
+	_, err = tx.WithLedgerRaw(ctx, c0.FirstLedger()+1, func([]byte) error {
+		ran = true
+		return nil
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, ran)
+}

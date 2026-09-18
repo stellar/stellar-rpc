@@ -1,0 +1,946 @@
+// Package rocksdb wraps grocksdb: Layer-1 generic store +
+// Layer-2 typed facades. Schema-agnostic primitives here; key
+// shapes and tunings owned by each facade.
+package rocksdb
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"iter"
+	"os"
+	"path/filepath"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/dustin/go-humanize"
+	"github.com/linxGnu/grocksdb"
+
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+)
+
+var (
+	ErrInvalidConfig    = errors.New("rocksdb: invalid config")
+	ErrCFNotFound       = errors.New("rocksdb: column family not configured at open")
+	ErrStoreClosed      = errors.New("rocksdb: store is closed")
+	ErrSnapshotReleased = errors.New("rocksdb: nil or released snapshot")
+)
+
+// deferredCloseOps counts operations refused because deferred deletion
+// (CloseIfIdle) had already closed the store. Each count is a caller that
+// outlived the deletion grace period. Teardown closes (Close) are not
+// counted: restarts are routine and say nothing about the grace. Process-wide
+// by design — the metrics exporter reads it via DeferredCloseOps.
+//
+//nolint:gochecknoglobals // one tally across all stores; read-only outside this file
+var deferredCloseOps atomic.Uint64
+
+// DeferredCloseOps returns the process-wide count of operations refused after
+// a deferred close. See deferredCloseOps.
+func DeferredCloseOps() uint64 { return deferredCloseOps.Load() }
+
+// openSnapshots counts snapshots not yet released, across all stores — the
+// process-wide sum of every store's snapRefs. The metrics exporter reads it
+// via OpenSnapshots, so a leaked snapshot is visible while the process runs,
+// not only in a store's teardown log.
+//
+//nolint:gochecknoglobals // one tally across all stores; read-only outside this file
+var openSnapshots atomic.Int64
+
+// OpenSnapshots returns the process-wide count of unreleased snapshots. See
+// openSnapshots.
+func OpenSnapshots() int64 { return openSnapshots.Load() }
+
+const (
+	dirPerm       os.FileMode = 0o700
+	defaultCFName             = "default"
+
+	// pinnedTableFormatVersion pins the block-based table format written to
+	// disk, so a grocksdb/librocksdb upgrade cannot silently change the on-disk
+	// format. 6 is the default in librocksdb 10.9.1 (the version
+	// scripts/install-rocksdb.sh builds), so the pin changes no byte
+	// today. RocksDB's own header advises leaving format_version at the
+	// default so improvements arrive automatically; we choose the opposite on
+	// purpose. Raising it is a format-touching change: an older binary cannot
+	// open the newer tables, so it must ship as a declared storage-format bump,
+	// never as a side effect of a dependency bump.
+	pinnedTableFormatVersion = 6
+)
+
+// Config — per-store knobs. Each Layer-2 facade owns one, built in
+// code (never from operator TOML).
+type Config struct {
+	// Path is the on-disk directory the store occupies. Required.
+	// Created (with parents) by New if missing.
+	Path string
+
+	// ColumnFamilies — full CF list, fixed for the store's lifetime.
+	// nil or [] means default-CF only. "default" is implicitly added
+	// if the caller leaves it out. Empty string at the call site
+	// normalizes to "default".
+	ColumnFamilies []string
+
+	// Logger receives the on-open state line and the close-time
+	// Flush warning. Required.
+	Logger *supportlog.Entry
+
+	// Tuning — per-facade RocksDB knobs. Zero-valued fields fall
+	// back to grocksdb defaults (the wrapper skips the setter).
+	Tuning Tuning
+
+	// PerCFOptions — per-CF overrides applied after the pinned
+	// defaults and global Tuning. nil or absent CF name means
+	// "inherit the pinned defaults"; see CFOptions docstring for
+	// the per-knob inherit/override semantics.
+	PerCFOptions map[string]CFOptions
+
+	// ReadOnly opens the store read-only (dir never created, no writes, no
+	// flush-on-close). An un-flushed WAL IS recovered into in-memory memtables
+	// on open (RocksDB OpenForReadOnly semantics; nothing is persisted), so
+	// reads see every synced write, not just SST/MANIFEST state. Used by the
+	// freeze source.
+	ReadOnly bool
+
+	// MustExist opens read-WRITE but with create-if-missing OFF, so opening a
+	// missing or gutted DB fails instead of silently fabricating a fresh empty one
+	// — the "never auto-heal" hot-DB open under a "ready" key, a DB the filesystem
+	// should already hold. (RocksDB's env layer may still leave a stub leaf dir with
+	// a LOG file behind on the failed open; correctness holds — every retry still
+	// fails on the missing CURRENT — but no usable DB is created.) Ignored when
+	// ReadOnly is set (read-only never creates regardless).
+	MustExist bool
+}
+
+// Store is the Layer-1 RocksDB handle. Concrete struct: one impl,
+// every test runs against a real RocksDB in a tempdir.
+//
+// Lifecycle: New returns a fully-open store ready to use; Close
+// flushes and tears down. Close is idempotent. Each Layer-2 facade
+// owns its own Store; two Stores on the same Path collide on
+// grocksdb's LOCK by design.
+type Store struct {
+	cfg Config
+
+	db        *grocksdb.DB
+	opts      *grocksdb.Options
+	cfOpts    []*grocksdb.Options
+	cfHandles map[string]*grocksdb.ColumnFamilyHandle
+	ro        *grocksdb.ReadOptions
+	wo        *grocksdb.WriteOptions
+
+	// cache is the block cache shared across every CF in this store,
+	// created in applyTuning when BlockCacheMB is set. bbtos are the
+	// per-CF block-based-table options (one per CF, carrying the pinned
+	// table format version); each may own a moved-in bloom filter. Both
+	// are destroyed in Close after opts/cfOpts, which hold C-side refs
+	// we must drop first.
+	cache *grocksdb.Cache
+	bbtos []*grocksdb.BlockBasedTableOptions
+
+	// mu is a lifecycle / memory-safety lock at the C boundary, not
+	// a data-consistency lock (RocksDB is already thread-safe).
+	// Every op (Put/Get/Delete/Iterate/Batch/Flush) takes RLock for
+	// the duration of its C call. Close takes Lock after flipping
+	// closed=true so it waits for in-flight ops to drain before
+	// freeing the C++ DB. Without this, a Put already past checkOpen
+	// would segfault against a torn-down DB.
+	mu sync.RWMutex
+	// GetPinned runs its callback under the read side, so a reader can hold it
+	// for milliseconds. Close waits that out; CloseIfIdle does not, taking the
+	// write side with TryLock so a slow read costs it a sweep, not the loop.
+
+	closed atomic.Bool
+	// deferredClose remembers that CloseIfIdle (deferred deletion) set the
+	// closed flag, so checkOpen can count stragglers without counting the
+	// routine ops a teardown Close cuts off. Set before closed so checkOpen
+	// never sees closed without it.
+	deferredClose atomic.Bool
+
+	// snapRefs counts snapshots not yet returned to ReleaseSnapshot; teardown
+	// logs a leak when it closes with snapRefs > 0.
+	snapRefs atomic.Int64
+}
+
+// New validates cfg and returns a fully-open Store. On any failure
+// no Store is returned and every C resource allocated as a side
+// effect is destroyed before this returns. Caller retries by calling
+// New again — failed attempts are not cached anywhere.
+func New(cfg Config) (*Store, error) {
+	if cfg.Path == "" {
+		return nil, ErrInvalidConfig
+	}
+	if cfg.Logger == nil {
+		return nil, ErrInvalidConfig
+	}
+	s := &Store{cfg: cfg}
+	if err := s.constructAndOpen(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// resolveCFNames returns the final CF list. "default" is appended
+// if the caller left it out (RocksDB requires it).
+func resolveCFNames(cfg Config) []string {
+	if len(cfg.ColumnFamilies) == 0 {
+		return []string{defaultCFName}
+	}
+	out := make([]string, 0, len(cfg.ColumnFamilies)+1)
+	hasDefault := false
+	for _, n := range cfg.ColumnFamilies {
+		if n == defaultCFName {
+			hasDefault = true
+		}
+		out = append(out, n)
+	}
+	if !hasDefault {
+		out = append(out, defaultCFName)
+	}
+	return out
+}
+
+// Put writes one (key, value) to cf. cf == "" normalizes to "default".
+// For atomic multi-write, use Batch.
+func (s *Store) Put(cf string, key, value []byte) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.checkOpen(); err != nil {
+		return err
+	}
+	cfh, err := s.resolveCF(cf)
+	if err != nil {
+		return err
+	}
+	return s.db.PutCF(s.wo, cfh, key, value)
+}
+
+// Get returns (value, true, nil) on hit, (nil, false, nil) on miss.
+// Returned value is a fresh copy the caller owns.
+func (s *Store) Get(cf string, key []byte) ([]byte, bool, error) {
+	return s.getWith(s.ro, cf, key)
+}
+
+// GetPinned hands fn RocksDB's own pinned block, uncopied. Returns (false, nil)
+// — fn uncalled — on a miss.
+//
+// fn must not retain, append to, or mutate the slice: it is RocksDB-owned memory
+// that Destroy invalidates as fn returns. The store's lifecycle read lock is
+// held across fn, so fn must not block on anything that could close the store,
+// nor call back into a Store method that takes the lock — a nested RLock behind
+// a waiting Close writer deadlocks both and the read with them.
+func (s *Store) GetPinned(cf string, key []byte, fn func(value []byte) error) (bool, error) {
+	return s.getPinnedWith(s.ro, cf, key, fn)
+}
+
+// BatchMultiGet reads many keys from cf in a single batched call.
+// Returns a [][]byte of length len(keys) where result[i] is the
+// value for keys[i] (a fresh copy the caller owns), or nil if that
+// key is absent. An empty keys slice returns (nil, nil).
+//
+// keys must be sorted ascending — the underlying RocksDB
+// BatchedMultiGetCF is invoked with sortedInput=true, which lets it
+// merge adjacent SST seeks across the input set. Behavior on
+// unsorted input is undefined per RocksDB semantics.
+//
+// Uses async_io read options so the kernel can issue overlapping
+// I/Os under the hood (notable on EBS / high random-latency
+// storage). The batched call is a single CGO crossing; callers
+// needing cancellation between individual key reads should not use
+// this API — split into multiple calls or use Get in a loop.
+func (s *Store) BatchMultiGet(cf string, keys [][]byte) ([][]byte, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.checkOpen(); err != nil {
+		return nil, err
+	}
+	cfh, err := s.resolveCF(cf)
+	if err != nil {
+		return nil, err
+	}
+
+	// Fresh ReadOptions: mutating s.ro would surface async_io to
+	// every concurrent reader on this Store.
+	ro := grocksdb.NewDefaultReadOptions()
+	ro.SetAsyncIO(true)
+	defer ro.Destroy()
+
+	pinned, err := s.db.BatchedMultiGetCF(ro, cfh, true /* sortedInput */, keys...)
+	if err != nil {
+		return nil, fmt.Errorf("rocksdb: batched multi get on %q: %w", cf, err)
+	}
+	defer pinned.Destroy()
+
+	results := make([][]byte, len(keys))
+	for i, p := range pinned {
+		if !p.Exists() {
+			continue
+		}
+		// p.Data() points into the pinned cache page; copy before
+		// Destroy invalidates it.
+		results[i] = bytes.Clone(p.Data())
+	}
+	return results, nil
+}
+
+// Delete removes key from cf. Idempotent: no error on miss.
+func (s *Store) Delete(cf string, key []byte) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.checkOpen(); err != nil {
+		return err
+	}
+	cfh, err := s.resolveCF(cf)
+	if err != nil {
+		return err
+	}
+	return s.db.DeleteCF(s.wo, cfh, key)
+}
+
+// Entry is one (key, value) yielded by Iterate / IterateRange.
+// Key and Value are zero-copy refs into the iterator's internal
+// buffer — valid ONLY during the current iteration step. Copy
+// before retaining past the next step.
+type Entry struct {
+	Key, Value []byte
+}
+
+// Iterate yields (key, value) for every key in cf that starts with
+// prefix, in byte-lex order. Empty prefix iterates the whole CF.
+// Up-front errors (closed/never-opened/unknown CF) and mid-walk
+// RocksDB errors yield once with (Entry{}, err).
+func (s *Store) Iterate(cf string, prefix []byte) iter.Seq2[Entry, error] {
+	return s.iterateWith(s.ro, cf, prefix)
+}
+
+// LastKey returns the largest key in cf. If cf has no keys this is not an
+// error: it returns (nil, false, nil), so callers detect emptiness via ok.
+// (cf == "" selects the default column family; an unregistered cf name
+// returns ErrCFNotFound.)
+// Cheap: a single boundary seek (no scan).
+func (s *Store) LastKey(cf string) ([]byte, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if err := s.checkOpen(); err != nil {
+		return nil, false, err
+	}
+	cfh, err := s.resolveCF(cf)
+	if err != nil {
+		return nil, false, err
+	}
+
+	it := s.db.NewIteratorCF(s.ro, cfh)
+	defer it.Close()
+	it.SeekToLast()
+	if !it.Valid() {
+		// Empty CF (it.Err() is nil) or a mid-seek RocksDB error.
+		return nil, false, it.Err()
+	}
+	// Copy: the KeySlice is freed when the iterator closes.
+	return bytes.Clone(it.KeySlice().Data()), true, it.Err()
+}
+
+// IterateRange yields (key, value) for keys in [start, end] byte-lex
+// inclusive. nil or empty start means "from the first key in the CF";
+// nil or empty end means "walk to the end of the CF". Right tool for
+// range scans over EncodeUint32 keys where numeric order matches
+// byte-lex order.
+//
+// Gap handling: yields every key that exists in [start, end]. Holes
+// (e.g., 100, 102, 105) are silent — callers comparing consecutive
+// yielded keys decide whether a gap is fatal.
+func (s *Store) IterateRange(cf string, start, end []byte) iter.Seq2[Entry, error] {
+	return func(yield func(Entry, error) bool) {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+
+		if err := s.checkOpen(); err != nil {
+			yield(Entry{}, err)
+			return
+		}
+		cfh, err := s.resolveCF(cf)
+		if err != nil {
+			yield(Entry{}, err)
+			return
+		}
+
+		it := s.db.NewIteratorCF(s.ro, cfh)
+		defer it.Close()
+
+		if len(start) == 0 {
+			it.SeekToFirst()
+		} else {
+			sk := bytes.Clone(start)
+			it.Seek(sk)
+		}
+
+		// Copy end: caller may mutate its buffer mid-iteration.
+		endCopy := bytes.Clone(end)
+		hasUpperBound := len(endCopy) > 0
+
+		for ; it.Valid(); it.Next() {
+			kSlice := it.KeySlice()
+			if hasUpperBound && bytes.Compare(kSlice.Data(), endCopy) > 0 {
+				return
+			}
+			vSlice := it.ValueSlice()
+			if !yield(Entry{Key: kSlice.Data(), Value: vSlice.Data()}, nil) {
+				return
+			}
+		}
+		if err := it.Err(); err != nil {
+			yield(Entry{}, err)
+		}
+	}
+}
+
+// Snapshot is a pinned, repeatable-read view of the store. Acquire with
+// NewSnapshot, read through GetAsOf / IterateAsOf, and release it via
+// ReleaseSnapshot when done: a leaked snapshot is a held C resource never
+// reclaimed until the store closes.
+type Snapshot struct {
+	snap *grocksdb.Snapshot
+}
+
+// NewSnapshot pins the store's current state for snapshot-scoped reads. Fails
+// with ErrStoreClosed on a closed store.
+func (s *Store) NewSnapshot() (*Snapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.checkOpen(); err != nil {
+		return nil, err
+	}
+	s.snapRefs.Add(1)
+	openSnapshots.Add(1)
+	return &Snapshot{snap: s.db.NewSnapshot()}, nil
+}
+
+// ReleaseSnapshot releases a snapshot acquired from NewSnapshot. Nil-safe, and
+// idempotent for the owning request (a second sequential release is a no-op).
+// Releasing the same snapshot from two goroutines at once is NOT safe — it would
+// double-free and skew snapRefs — but the one-snapshot-per-read-view contract
+// precludes it. If the store already tore down its C DB, the release is skipped:
+// teardown already freed the snapshot along with the DB, so there is nothing left
+// to release.
+func (s *Store) ReleaseSnapshot(snap *Snapshot) {
+	if snap == nil || snap.snap == nil {
+		return
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	s.snapRefs.Add(-1)
+	openSnapshots.Add(-1)
+	if s.db != nil {
+		s.db.ReleaseSnapshot(snap.snap)
+	}
+	snap.snap = nil
+}
+
+// GetAsOf is Get pinned to snap's view. A nil or released snapshot returns
+// ErrSnapshotReleased.
+func (s *Store) GetAsOf(snap *Snapshot, cf string, key []byte) ([]byte, bool, error) {
+	if snap == nil || snap.snap == nil {
+		return nil, false, ErrSnapshotReleased
+	}
+	// Fresh ReadOptions: setting the snapshot on shared s.ro would surface it
+	// to every concurrent live reader (same reason as BatchMultiGet).
+	ro := grocksdb.NewDefaultReadOptions()
+	ro.SetSnapshot(snap.snap)
+	defer ro.Destroy()
+	return s.getWith(ro, cf, key)
+}
+
+// IterateAsOf is Iterate pinned to snap's view: the whole prefix scan is
+// unaffected by concurrent writes. A nil or released snapshot yields
+// ErrSnapshotReleased once.
+func (s *Store) IterateAsOf(snap *Snapshot, cf string, prefix []byte) iter.Seq2[Entry, error] {
+	return func(yield func(Entry, error) bool) {
+		if snap == nil || snap.snap == nil {
+			yield(Entry{}, ErrSnapshotReleased)
+			return
+		}
+		ro := grocksdb.NewDefaultReadOptions()
+		ro.SetSnapshot(snap.snap)
+		defer ro.Destroy()
+		s.iterateWith(ro, cf, prefix)(yield)
+	}
+}
+
+// Flush drains the active memtable to an SST. Callers do NOT need
+// to call this before Close — Close auto-Flushes internally.
+func (s *Store) Flush() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.checkOpen(); err != nil {
+		return err
+	}
+	return s.doFlush()
+}
+
+// IsClosed reports whether Close has been called. Used by Layer-2
+// facade methods that short-circuit before reaching the wrapper.
+func (s *Store) IsClosed() bool {
+	return s.closed.Load()
+}
+
+// Close shuts the store down. Idempotent. Sets the closed flag, waits for
+// in-flight ops to drain, then tears down. Auto-Flushes the memtable
+// (best-effort) so the next graceful New on the same path replays zero WAL; on
+// Flush failure teardown still proceeds and the WAL replays on the next New.
+func (s *Store) Close() error {
+	s.closed.Store(true)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.teardownLocked()
+	return nil
+}
+
+// CloseIfIdle is the non-blocking variant of Close used by deferred deletion.
+// It sets the closed flag, then tears down ONLY if no op is in flight; if one
+// still holds the read-lock it returns (false, nil) at once, leaving the store
+// closed to new ops. The straggler's next op then fails with ErrStoreClosed,
+// and a later retry tears down once it has drained. The closed flag is never
+// rolled back, which is safe only because this runs on a resource being deleted.
+func (s *Store) CloseIfIdle() (bool, error) {
+	s.deferredClose.Store(true)
+	s.closed.Store(true)
+	if !s.mu.TryLock() {
+		return false, nil
+	}
+	defer s.mu.Unlock()
+	s.teardownLocked()
+	return true, nil
+}
+
+// teardownLocked frees every C resource once. The caller MUST hold mu.Lock so
+// no op is in flight against the C DB. Idempotent via the s.db == nil latch,
+// which also covers a half-built store whose constructAndOpen never set s.db.
+func (s *Store) teardownLocked() {
+	if s.db == nil {
+		return
+	}
+
+	// A read-only store has nothing to flush (and the RocksDB read-only handle
+	// would reject it); only a writable store flushes its memtable on close.
+	if !s.cfg.ReadOnly {
+		if err := s.doFlush(); err != nil {
+			s.cfg.Logger.WithError(err).Warnf(
+				"rocksdb: graceful close Flush failed at %s; next Open will replay WAL", s.cfg.Path)
+		}
+	}
+
+	if n := s.snapRefs.Load(); n > 0 {
+		s.cfg.Logger.Warnf("rocksdb: closing %s with %d unreleased snapshot(s)", s.cfg.Path, n)
+	}
+
+	for _, cfh := range s.cfHandles {
+		cfh.Destroy()
+	}
+	s.ro.Destroy()
+	s.wo.Destroy()
+	s.db.Close()
+	s.opts.Destroy()
+	for _, o := range s.cfOpts {
+		o.Destroy()
+	}
+	// Tear down the per-CF BBTOs and the shared cache AFTER opts/cfOpts.
+	// SetBlockBasedTableFactory copies the BBTO into the CF's factory, so
+	// destroying the BBTO frees the copy we own (Options.Destroy does not);
+	// a BBTO with a moved-in bloom filter frees that filter too.
+	for _, bbto := range s.bbtos {
+		bbto.Destroy()
+	}
+	s.bbtos = nil
+	if s.cache != nil {
+		s.cache.Destroy()
+		s.cache = nil
+	}
+	s.db = nil // latch: a second teardown no-ops
+}
+
+// getWith is the shared body for Get and GetAsOf; ro selects the read view
+// (s.ro for a live read, a snapshot-pinned ReadOptions for GetAsOf).
+func (s *Store) getWith(ro *grocksdb.ReadOptions, cf string, key []byte) ([]byte, bool, error) {
+	var out []byte
+	found, err := s.getPinnedWith(ro, cf, key, func(value []byte) error {
+		out = bytes.Clone(value)
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return out, found, nil
+}
+
+// getPinnedWith is the shared body for GetPinned and getWith; ro selects the
+// read view.
+func (s *Store) getPinnedWith(
+	ro *grocksdb.ReadOptions, cf string, key []byte, fn func(value []byte) error,
+) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.checkOpen(); err != nil {
+		return false, err
+	}
+	cfh, err := s.resolveCF(cf)
+	if err != nil {
+		return false, err
+	}
+	handle, err := s.db.GetPinnedCFV2(ro, cfh, key)
+	if err != nil {
+		return false, err
+	}
+	defer handle.Destroy()
+	if !handle.Exists() {
+		return false, nil
+	}
+	return true, fn(handle.Data())
+}
+
+// iterateWith is the shared body for Iterate and IterateAsOf; ro selects the read
+// view (s.ro for a live scan, a snapshot-pinned ReadOptions for IterateAsOf).
+func (s *Store) iterateWith(ro *grocksdb.ReadOptions, cf string, prefix []byte) iter.Seq2[Entry, error] {
+	return func(yield func(Entry, error) bool) {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+
+		if err := s.checkOpen(); err != nil {
+			yield(Entry{}, err)
+			return
+		}
+		cfh, err := s.resolveCF(cf)
+		if err != nil {
+			yield(Entry{}, err)
+			return
+		}
+
+		it := s.db.NewIteratorCF(ro, cfh)
+		defer it.Close()
+
+		// Copy prefix: the caller may mutate its buffer while ranging.
+		pcopy := bytes.Clone(prefix)
+		it.Seek(pcopy)
+
+		for ; it.Valid(); it.Next() {
+			kSlice := it.KeySlice()
+			if !bytes.HasPrefix(kSlice.Data(), pcopy) {
+				return
+			}
+			vSlice := it.ValueSlice()
+			if !yield(Entry{Key: kSlice.Data(), Value: vSlice.Data()}, nil) {
+				return
+			}
+		}
+		if err := it.Err(); err != nil {
+			yield(Entry{}, err)
+		}
+	}
+}
+
+// doFlush is the lock-less core of Flush. Caller holds at least
+// mu.RLock and has confirmed s.db != nil. Flushes every CF: the
+// data CFs are all named, and DB.Flush drains only the (always
+// empty) default CF, so a plain Flush would persist nothing.
+func (s *Store) doFlush() error {
+	fo := grocksdb.NewDefaultFlushOptions()
+	defer fo.Destroy()
+	cfs := make([]*grocksdb.ColumnFamilyHandle, 0, len(s.cfHandles))
+	for _, cfh := range s.cfHandles {
+		cfs = append(cfs, cfh)
+	}
+	return s.db.FlushCFs(cfs, fo)
+}
+
+func (s *Store) checkOpen() error {
+	if s.closed.Load() {
+		if s.deferredClose.Load() {
+			deferredCloseOps.Add(1)
+		}
+		return ErrStoreClosed
+	}
+	return nil
+}
+
+// resolveCF normalizes "" → "default" and looks up the CF handle.
+func (s *Store) resolveCF(cf string) (*grocksdb.ColumnFamilyHandle, error) {
+	if cf == "" {
+		cf = defaultCFName
+	}
+	cfh, ok := s.cfHandles[cf]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", ErrCFNotFound, cf)
+	}
+	return cfh, nil
+}
+
+// constructAndOpen does the full open work — validation, mkdir,
+// options setup, applyTuning (which allocates the shared cache and
+// filter as side effects on s), then OpenDbColumnFamilies. On
+// failure, every C resource allocated as a side effect is destroyed
+// before returning. New is the thin public wrapper that returns nil
+// on error so callers never observe a half-built Store. Keeping
+// this method package-private lets the leak-regression test build a
+// Store directly and call constructAndOpen to inspect post-failure
+// state on the half-built receiver, which the New caller can't.
+func (s *Store) constructAndOpen() error {
+	abs, err := filepath.Abs(s.cfg.Path)
+	if err != nil {
+		return fmt.Errorf("rocksdb: canonicalize path %s: %w", s.cfg.Path, err)
+	}
+	// Read-only and must-exist opens require a pre-existing DB; neither creates
+	// the directory. Only a plain read-write open (create-if-missing) does.
+	if !s.cfg.ReadOnly && !s.cfg.MustExist {
+		if err := os.MkdirAll(abs, dirPerm); err != nil {
+			return fmt.Errorf("mkdir %s: %w", abs, err)
+		}
+	}
+
+	cfNames := resolveCFNames(s.cfg)
+	opts := grocksdb.NewDefaultOptions()
+	if !s.cfg.ReadOnly && !s.cfg.MustExist {
+		opts.SetCreateIfMissing(true)
+		opts.SetCreateIfMissingColumnFamilies(true)
+	}
+
+	cfOpts := make([]*grocksdb.Options, len(cfNames))
+	for i := range cfOpts {
+		cfOpts[i] = grocksdb.NewDefaultOptions()
+	}
+
+	s.applyTuning(opts, cfNames, cfOpts)
+
+	start := time.Now()
+	var (
+		db        *grocksdb.DB
+		cfHandles []*grocksdb.ColumnFamilyHandle
+	)
+	if s.cfg.ReadOnly {
+		// errorIfWalFileExists=false: a cleanly-closed DB has no WAL; if a crash ever
+		// left one, the open recovers it into in-memory memtables (see Config.ReadOnly)
+		// rather than failing, so reads still see every synced write.
+		db, cfHandles, err = grocksdb.OpenDbForReadOnlyColumnFamilies(opts, abs, cfNames, cfOpts, false)
+	} else {
+		db, cfHandles, err = grocksdb.OpenDbColumnFamilies(opts, abs, cfNames, cfOpts)
+	}
+	elapsed := time.Since(start)
+	if err != nil {
+		opts.Destroy()
+		for _, o := range cfOpts {
+			o.Destroy()
+		}
+		// applyTuning allocated the per-CF BBTOs and the shared cache
+		// as side effects before the open attempt; without this
+		// teardown they leak (no Close path can reach them since New
+		// returns nil to the caller on failure).
+		for _, bbto := range s.bbtos {
+			bbto.Destroy()
+		}
+		s.bbtos = nil
+		if s.cache != nil {
+			s.cache.Destroy()
+			s.cache = nil
+		}
+		return fmt.Errorf("rocksdb: open %s: %w", abs, err)
+	}
+
+	cfMap := make(map[string]*grocksdb.ColumnFamilyHandle, len(cfHandles))
+	for i, name := range cfNames {
+		cfMap[name] = cfHandles[i]
+	}
+
+	s.db = db
+	s.opts = opts
+	s.cfOpts = cfOpts
+	s.cfHandles = cfMap
+	s.ro = grocksdb.NewDefaultReadOptions()
+	s.wo = grocksdb.NewDefaultWriteOptions()
+
+	// WAL on + per-write Sync on — non-negotiable across every
+	// rpcv2 store, so pinned here on the shared wo rather
+	// than exposed via Tuning. The ingestion contract
+	// requires "the ledger batch committed" to mean "durable on disk";
+	// one fsync per Put/Batch regardless of size.
+	s.wo.DisableWAL(false)
+	s.wo.SetSync(true)
+
+	logOpenState(s.cfg.Logger, abs, s, elapsed)
+	return nil
+}
+
+// applyTuning splits configuration into wrapper-pinned values (every CF,
+// unconditional), per-CF overrides (applied after the pinned defaults so
+// they win), and DB-wide Tuning fields (applied to the shared Options).
+// BloomFilterBitsPerKey == 0 is the documented "no bloom filter" sentinel.
+func (s *Store) applyTuning(opts *grocksdb.Options, cfNames []string, cfOpts []*grocksdb.Options) {
+	t := s.cfg.Tuning
+	for i, o := range cfOpts {
+		applyPinnedCFOptions(o)
+		applyCFOverride(o, s.cfg.PerCFOptions[cfNames[i]])
+	}
+	applyDBTuning(opts, t)
+	s.applySharedTableOptions(cfNames, cfOpts, t)
+}
+
+// applyCFOverride applies the per-CF memtable/compaction/compression knobs.
+// Each is applied only when non-zero, leaving the pinned default otherwise.
+// BlockSize and BloomFilterBitsPerKey are applied inside
+// applySharedTableOptions when the BBTO is built.
+func applyCFOverride(o *grocksdb.Options, c CFOptions) {
+	// CompressionType is an int alias; NoCompression (the pinned
+	// default) is 0. A zero-value override is therefore a no-op and
+	// leaves the pinned NoCompression in place. Non-zero values
+	// (Snappy, ZSTD, ...) replace it.
+	if c.Compression != grocksdb.NoCompression {
+		o.SetCompression(c.Compression)
+	}
+	if c.WriteBufferMB > 0 {
+		o.SetWriteBufferSize(uint64(c.WriteBufferMB) << 20)
+	}
+	if c.MaxWriteBufferNumber > 0 {
+		o.SetMaxWriteBufferNumber(c.MaxWriteBufferNumber)
+	}
+	if c.Level0FileNumCompactionTrigger > 0 {
+		o.SetLevel0FileNumCompactionTrigger(c.Level0FileNumCompactionTrigger)
+	}
+	if c.Level0SlowdownWritesTrigger > 0 {
+		o.SetLevel0SlowdownWritesTrigger(c.Level0SlowdownWritesTrigger)
+	}
+	if c.Level0StopWritesTrigger > 0 {
+		o.SetLevel0StopWritesTrigger(c.Level0StopWritesTrigger)
+	}
+	if c.DisableAutoCompactions {
+		o.SetDisableAutoCompactions(true)
+	}
+	if c.TargetFileSizeMB > 0 {
+		o.SetTargetFileSizeBase(uint64(c.TargetFileSizeMB) << 20)
+	}
+}
+
+// applyPinnedCFOptions sets the per-CF values that hold for every
+// facade — applied unconditionally so a future facade can't drift
+// off these defaults.
+func applyPinnedCFOptions(o *grocksdb.Options) {
+	o.SetMinWriteBufferNumberToMerge(1)
+	o.SetCompactionStyle(grocksdb.LevelCompactionStyle)
+	o.SetTargetFileSizeMultiplier(1)
+	o.SetMaxBytesForLevelMultiplier(10)
+	o.SetCompression(grocksdb.NoCompression)
+}
+
+func applyDBTuning(opts *grocksdb.Options, t Tuning) {
+	if t.MaxBackgroundJobs > 0 {
+		opts.SetMaxBackgroundJobs(t.MaxBackgroundJobs)
+	}
+	if t.MaxOpenFiles > 0 {
+		opts.SetMaxOpenFiles(t.MaxOpenFiles)
+	}
+	if t.MaxTotalWalSizeMB > 0 {
+		opts.SetMaxTotalWalSize(uint64(t.MaxTotalWalSizeMB) << 20)
+	}
+}
+
+// applySharedTableOptions builds one BBTO per CF, referencing the
+// DB-wide block cache (when set), a fresh per-CF bloom filter (when
+// that CF sets BloomFilterBitsPerKey), and the per-CF BlockSize
+// override (when set). The Store retains every BBTO and the cache;
+// Close destroys them after opts/cfOpts.
+//
+// Every CF gets an explicit BBTO, tuned or not, so the on-disk table
+// format stays pinned (pinnedTableFormatVersion) instead of riding
+// grocksdb's default; restoring a skip-when-untuned path would
+// silently unpin it.
+//
+// The bloom filter is built per CF because SetFilterPolicy MOVES the
+// policy into the BBTO (it nils the source pointer), so a single
+// shared filter would install on the first CF only and every later
+// CF would silently get none.
+func (s *Store) applySharedTableOptions(cfNames []string, cfOpts []*grocksdb.Options, t Tuning) {
+	if t.BlockCacheMB > 0 {
+		s.cache = grocksdb.NewLRUCache(uint64(t.BlockCacheMB) << 20)
+	}
+	for i, o := range cfOpts {
+		override := s.cfg.PerCFOptions[cfNames[i]]
+		bbto := grocksdb.NewDefaultBlockBasedTableOptions()
+		bbto.SetFormatVersion(pinnedTableFormatVersion)
+		if s.cache != nil {
+			bbto.SetBlockCache(s.cache)
+		}
+		if override.BloomFilterBitsPerKey > 0 {
+			bbto.SetFilterPolicy(grocksdb.NewBloomFilter(float64(override.BloomFilterBitsPerKey)))
+		}
+		if override.BlockSize > 0 {
+			bbto.SetBlockSize(override.BlockSize)
+		}
+		o.SetBlockBasedTableFactory(bbto)
+		s.bbtos = append(s.bbtos, bbto)
+	}
+}
+
+// logOpenState emits one Info line summarizing on-disk state and
+// open elapsed. Diagnoses slow restarts: big WAL → replay; high L0
+// → pending compaction; large memtable → crash with unflushed data.
+func logOpenState(log *supportlog.Entry, abs string, s *Store, elapsed time.Duration) {
+	// These are per-CF properties; a DB-level GetProperty resolves against the
+	// always-empty default CF, so sum each across every CF instead.
+	memtable := s.sumUintPropertyCF("rocksdb.cur-size-active-mem-table")
+	l0Count := s.sumUintPropertyCF("rocksdb.num-files-at-level0")
+	sstSize := s.sumUintPropertyCF("rocksdb.total-sst-files-size")
+	walSize := walDirSize(abs) // DB-level: one WAL spans all CFs.
+
+	log.Infof(
+		"[ROCKSDB:OPEN] path=%s elapsed=%s WAL size=%s L0 file count=%d data size=%s memtable size=%s",
+		abs,
+		// Round to microseconds: a fast open like 350µs stays
+		// "350µs" rather than "350.812µs" (operator-noise nanos);
+		// Round(time.Millisecond) would round to "0s".
+		elapsed.Round(time.Microsecond).String(),
+		humanize.Bytes(walSize),
+		l0Count,
+		humanize.Bytes(sstSize),
+		humanize.Bytes(memtable),
+	)
+}
+
+// sumUintPropertyCF sums an unsigned-integer RocksDB property across every CF.
+// Empty (ParseUint of "") or unparseable values count as zero.
+func (s *Store) sumUintPropertyCF(name string) uint64 {
+	var total uint64
+	for _, cfh := range s.cfHandles {
+		if n, err := strconv.ParseUint(s.db.GetPropertyCF(name, cfh), 10, 64); err == nil {
+			total += n
+		}
+	}
+	return total
+}
+
+// walDirSize sums *.log file sizes in dir (RocksDB exposes no
+// single "WAL size" property).
+func walDirSize(dir string) uint64 {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	var total uint64
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if len(name) < 4 || name[len(name)-4:] != ".log" {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if size := info.Size(); size > 0 {
+			total += uint64(size)
+		}
+	}
+	return total
+}
