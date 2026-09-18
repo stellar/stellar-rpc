@@ -52,7 +52,6 @@ func deployAndIncrement(t *testing.T, test *infrastructure.Test, n int) *eventsF
 	return fx
 }
 
-// drain follows the cursor until the status is not HAS_MORE.
 func drain(t *testing.T, rpc *client.Client, req protocol.GetEventsV2Request,
 ) ([]protocol.EventInfoV2, protocol.GetEventsV2Response) {
 	const maxPages = 200
@@ -203,7 +202,6 @@ func TestGetEventsV2FiltersOverTheWire(t *testing.T) {
 		return out
 	}
 
-	// Filter with the topic the node itself emitted, in both encodings.
 	unfiltered := call(t, rng)
 	requireFixtureEvents(t, fx, unfiltered.Events)
 	sample := contractOnly(unfiltered)[0]
@@ -314,8 +312,8 @@ func TestGetEventsV2MatchesV1(t *testing.T) {
 	}
 }
 
-// Page to the tip, submit, resume from the tip cursor. The union of the pages
-// must equal a closed range read: nothing lost at the tip, nothing twice.
+// The union of the pages must equal a closed range read: nothing lost at the
+// tip, nothing twice.
 func TestGetEventsV2PagingWhileTipMoves(t *testing.T) {
 	test := infrastructure.NewTest(t, nil)
 	rpc := test.GetRPCLient()

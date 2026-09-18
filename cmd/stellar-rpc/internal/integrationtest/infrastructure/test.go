@@ -595,14 +595,10 @@ func (i *Test) waitForRPC() {
 	if i.daemon != nil {
 		exited = i.daemon.exited()
 	}
-	// caughtUp is the ledger seen on the first poll that was healthy and caught
-	// up with Core, or 0 until then. Core creates its Soroban transaction queue
-	// only when a ledger closes through consensus, never during catch-up, so a
-	// captive core that has just caught up rejects every Soroban transaction
-	// with txNOT_SUPPORTED until its first consensus ledger closes. One more
-	// committed ledger after catch-up means that close has happened. Only the
-	// live-Core modes need it: the synthetic load test has no Core and a finite
-	// stream, and the delayed-daemon mode is behind on purpose.
+	// Core builds its Soroban transaction queue only when a ledger closes
+	// through consensus, not during catch-up. The limits upgrade is a Soroban
+	// transaction, so wait for one consensus ledger before setup sends it.
+	// The load test has no Core; the delayed-daemon mode is behind on purpose.
 	var caughtUp uint32
 	needOneMore := i.coreClient != nil && i.delayDaemonForLedgerN == 0
 	for {
