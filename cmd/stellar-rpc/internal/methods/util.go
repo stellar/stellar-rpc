@@ -17,7 +17,7 @@ func getProtocolVersion(
 	}
 
 	// obtain bucket size
-	closeMeta, ok, err := ledgerReader.GetLedger(ctx, latestLedger)
+	closeMeta, ok, err := store.GetLedger(ctx, ledgerReader, latestLedger)
 	if err != nil {
 		return 0, err
 	}

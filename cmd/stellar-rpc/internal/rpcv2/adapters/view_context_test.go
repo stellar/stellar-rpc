@@ -43,7 +43,7 @@ func TestWithView_OneSnapshotPerRequest(t *testing.T) {
 	assert.Equal(t, first+2, got,
 		"the request's snapshot froze at acquisition")
 
-	_, found, err := reader.GetLedger(ctx, first+3)
+	_, found, err := store.GetLedger(ctx, reader, first+3)
 	require.NoError(t, err)
 	assert.False(t, found,
 		"a ledger committed after the snapshot is invisible to this request")
@@ -89,7 +89,7 @@ func TestWithView_TxDoneLeavesTheRequestViewAlive(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, tx.Done())
 
-	_, found, err := reader.GetLedger(ctx, first)
+	_, found, err := store.GetLedger(ctx, reader, first)
 	require.NoError(t, err)
 	assert.True(t, found,
 		"Done releases nothing it does not own; the request's view still serves reads")

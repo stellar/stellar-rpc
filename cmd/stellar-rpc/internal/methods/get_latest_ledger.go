@@ -27,7 +27,7 @@ func NewGetLatestLedgerHandler(ledgerReader store.LedgerReader) jrpc2.Handler {
 		}
 		var response protocol.GetLatestLedgerResponse
 		var parseErr error
-		found, err := ledgerReader.WithLedgerRaw(ctx, latestSequence, func(raw []byte) error {
+		found, err := store.WithLedgerRaw(ctx, ledgerReader, latestSequence, func(raw []byte) error {
 			response, parseErr = latestLedgerResponse(xdr.LedgerCloseMetaView(raw), latestSequence)
 			return parseErr
 		})

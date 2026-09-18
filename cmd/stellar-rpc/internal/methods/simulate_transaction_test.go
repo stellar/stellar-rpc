@@ -422,8 +422,8 @@ func TestSimulateTransactionReturnsErrorForUnknownLedgerMetaVersion(t *testing.T
 	ledgerReader := &MockLedgerReader{}
 	handler := NewSimulateTransactionHandler(logger, ledgerReader, nil, panicPreflightGetter{}, xdr.DecodeOptions{})
 
-	// V=99 is deliberately out of range to trigger the default error branch.
-	unknownVersionMeta := xdr.LedgerCloseMeta{V: 99}
+	// V0 is encodable but predates the versions the handler reads, so it reaches the default branch.
+	unknownVersionMeta := xdr.LedgerCloseMeta{V: 0, V0: &xdr.LedgerCloseMetaV0{}}
 
 	ledgerReader.
 		On("GetLatestLedgerSequence", mock.Anything).
@@ -453,7 +453,7 @@ func TestSimulateTransactionReturnsErrorForUnknownLedgerMetaVersion(t *testing.T
 
 	simResp, ok := resp.(protocol.SimulateTransactionResponse)
 	require.True(t, ok)
-	require.Equal(t, "latest ledger (77) meta has unexpected version (99)", simResp.Error)
+	require.Equal(t, "latest ledger (77) meta has unexpected version (0)", simResp.Error)
 	require.Equal(t, uint32(77), simResp.LatestLedger)
 
 	ledgerReader.AssertExpectations(t)
@@ -636,6 +636,8 @@ func TestSimulateTransactionThreadsUseUpgradedAuth(t *testing.T) {
 			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
 				Header: xdr.LedgerHeader{LedgerVersion: 23},
 			},
+			// GeneralizedTransactionSet has no zero arm; the ledger must round-trip through bytes.
+			TxSet:                           xdr.GeneralizedTransactionSet{V: 1, V1TxSet: &xdr.TransactionSetV1{}},
 			TotalByteSizeOfLiveSorobanState: 100,
 		},
 	}

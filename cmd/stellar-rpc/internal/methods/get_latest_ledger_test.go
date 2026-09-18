@@ -3,6 +3,7 @@ package methods
 import (
 	"context"
 	"errors"
+	"iter"
 	"testing"
 
 	"github.com/creachadair/jrpc2"
@@ -36,26 +37,21 @@ func (ledgerReader *ConstantLedgerReader) NewTx(_ context.Context) (store.Ledger
 	return nil, errors.New("mock NewTx error")
 }
 
-func (ledgerReader *ConstantLedgerReader) GetLedger(_ context.Context,
-	sequence uint32,
-) (xdr.LedgerCloseMeta, bool, error) {
-	return createLedger(expectedLatestLedgerHashBytes,
-			sequence,
-			expectedLatestLedgerCloseTime),
-		true, nil
-}
-
-func (ledgerReader *ConstantLedgerReader) WithLedgerRaw(
-	_ context.Context, sequence uint32, fn store.WithLedgerRawFn,
-) (bool, error) {
-	lcm := createLedger(expectedLatestLedgerHashBytes,
-		sequence,
-		expectedLatestLedgerCloseTime)
-	raw, err := lcm.MarshalBinary()
-	if err != nil {
-		return false, err
+func (ledgerReader *ConstantLedgerReader) ScanLedgers(
+	_ context.Context, start, end uint32,
+) iter.Seq2[store.RawLedger, error] {
+	return func(yield func(store.RawLedger, error) bool) {
+		for seq := start; seq <= end; seq++ {
+			raw, err := createLedger(expectedLatestLedgerHashBytes, seq, expectedLatestLedgerCloseTime).MarshalBinary()
+			if err != nil {
+				yield(store.RawLedger{}, err)
+				return
+			}
+			if !yield(store.RawLedger{Sequence: seq, Raw: raw}, nil) {
+				return
+			}
+		}
 	}
-	return true, fn(raw)
 }
 
 func (ledgerReader *ConstantLedgerReader) StreamLedgerRange(

@@ -50,7 +50,7 @@ func assertLedgerRange(t *testing.T, reader LedgerReader, start, end uint32) {
 	})
 	require.NoError(t, err)
 	for i := start - 1; i <= end+1; i++ {
-		ledger, exists, err := reader.GetLedger(ctx, i)
+		ledger, exists, err := store.GetLedger(ctx, reader, i)
 		require.NoError(t, err)
 		if i < start || i > end {
 			assert.False(t, exists)
@@ -77,7 +77,7 @@ func TestLedgers(t *testing.T) {
 	daemon := host.MakeNoOpDaemon()
 
 	reader := NewLedgerReader(db)
-	_, exists, err := reader.GetLedger(t.Context(), 1)
+	_, exists, err := store.GetLedger(t.Context(), reader, 1)
 	require.NoError(t, err)
 	assert.False(t, exists)
 
@@ -267,7 +267,7 @@ func TestWithLedgerRaw(t *testing.T) {
 
 	reader := NewLedgerReader(db)
 	var got []byte
-	found, err := reader.WithLedgerRaw(t.Context(), 42, func(raw []byte) error {
+	found, err := store.WithLedgerRaw(t.Context(), reader, 42, func(raw []byte) error {
 		got = bytes.Clone(raw)
 		return nil
 	})
@@ -276,7 +276,7 @@ func TestWithLedgerRaw(t *testing.T) {
 	assert.Equal(t, want, got)
 
 	ran := false
-	found, err = reader.WithLedgerRaw(t.Context(), 43, func([]byte) error {
+	found, err = store.WithLedgerRaw(t.Context(), reader, 43, func([]byte) error {
 		ran = true
 		return nil
 	})
