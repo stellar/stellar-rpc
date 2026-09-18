@@ -275,12 +275,12 @@ func absentChunks(byChunk map[chunk.ID]catalog.ArtifactSet, targets []target, op
 	var out []chunk.ID
 	var total int
 	for c := uint64(lo); c <= uint64(hi); c++ {
-		if _, ok := byChunk[chunk.ID(c)]; ok { //nolint:gosec // bounded by hi, a chunk.ID
+		if _, ok := byChunk[chunk.ID(c)]; ok {
 			continue
 		}
 		total++
 		if len(out) < idsListed {
-			out = append(out, chunk.ID(c)) //nolint:gosec // same bound
+			out = append(out, chunk.ID(c))
 		}
 	}
 	return out, total
