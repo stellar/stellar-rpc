@@ -595,6 +595,12 @@ func (i *Test) waitForRPC() {
 	if i.daemon != nil {
 		exited = i.daemon.exited()
 	}
+	// Core builds its Soroban transaction queue only when a ledger closes
+	// through consensus, not during catch-up. The limits upgrade is a Soroban
+	// transaction, so wait for one consensus ledger before setup sends it.
+	// The load test has no Core; the delayed-daemon mode is behind on purpose.
+	var caughtUp uint32
+	needOneMore := i.coreClient != nil && i.delayDaemonForLedgerN == 0
 	for {
 		select {
 		case err := <-exited:
@@ -603,8 +609,18 @@ func (i *Test) waitForRPC() {
 		}
 		result, err := i.GetRPCLient().GetHealth(i.t.Context())
 		i.t.Logf("getHealth: %+v; err: %v", result, err)
-		if err == nil && result.Status == "healthy" && i.caughtUpWithCore(result.LatestLedger) {
-			return
+		if err == nil && result.Status == "healthy" {
+			switch {
+			case caughtUp != 0:
+				if result.LatestLedger > caughtUp {
+					return
+				}
+			case i.caughtUpWithCore(result.LatestLedger):
+				if !needOneMore {
+					return
+				}
+				caughtUp = result.LatestLedger
+			}
 		}
 		require.False(i.t, time.Now().After(deadline), "RPC never got healthy: %+v", err)
 		time.Sleep(time.Second)
@@ -973,6 +989,15 @@ func (i *Test) CreateHelloWorldContract() (protocol.GetTransactionResponse, [32]
 	return i.PreflightAndSendMasterOperation(op), contractID, contractHash
 }
 
+func (i *Test) CreateEventsContract() (protocol.GetTransactionResponse, [32]byte, xdr.Hash) {
+	_, contractHash := i.uploadContract(GetEventsContract())
+	salt := xdr.Uint256(testSalt)
+	account := i.MasterAccount().GetAccountID()
+	op := createCreateContractV2Operation(account, salt, contractHash)
+	contractID := GetContractID(i.t, account, salt, StandaloneNetworkPassphrase)
+	return i.PreflightAndSendMasterOperation(op), contractID, contractHash
+}
+
 func (i *Test) CreateAutorestoreContract(items int) (protocol.GetTransactionResponse, [32]byte, xdr.Hash) {
 	contractBinary := GetAutorestoreContract()
 	_, contractHash := i.uploadContract(contractBinary)
@@ -1058,6 +1083,7 @@ func (i *Test) upgradeLimitsWithFile(limitFile, expectInSorobanInfo string) {
 	txnCount := len(lines) / 2 // each upgrade command outputs txnB64 \n hash
 	assert.Len(i.t, lines, 9)
 
+	var lastLedger uint32
 	for j := 0; j+1 < len(lines); j += 2 {
 		b64 := lines[j]
 		i.t.Logf("Upgrade transaction: %s (hash: %s)", b64, lines[j+1])
@@ -1068,8 +1094,13 @@ func (i *Test) upgradeLimitsWithFile(limitFile, expectInSorobanInfo string) {
 		txn, t := gtxn.Transaction()
 		require.True(i.t, t)
 
-		SendSuccessfulTransaction(i.t, i.rpcClient, nil /* signed @ L791 */, txn)
+		lastLedger = SendSuccessfulTransaction(i.t, i.rpcClient, nil /* signed @ L791 */, txn).Ledger
 	}
+
+	// The daemon reported the ledger from its captive core. The upgrade key
+	// below is resolved by the Core container against its own last closed
+	// ledger, which can still be behind under load.
+	i.waitForCoreAtLedger(int(lastLedger))
 
 	upgradeKey := strings.TrimSpace(lines[len(lines)-1])
 	i.t.Logf("Upgrading Core config with key: %s", upgradeKey)

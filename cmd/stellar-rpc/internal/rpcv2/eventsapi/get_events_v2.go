@@ -351,9 +351,9 @@ func jrpcError(message string, data any) error {
 	return &jrpc2.Error{Code: jrpc2.InvalidParams, Message: message, Data: encoded}
 }
 
-// errJSONInputFormatUnsupported: xdrInputFormat "json" needs a JSON-to-XDR
-// converter, because the term index matches on a topic's canonical bytes.
-// Deferred to #940.
+// errJSONInputFormatUnsupported: xdrInputFormat "json" is a spec option this
+// server does not serve. The term index matches on a topic's canonical XDR
+// bytes; xdr2json can produce them, but the handler is not wired to it.
 var errJSONInputFormatUnsupported = errors.New(
 	"xdrInputFormat \"json\" is not supported yet")
 

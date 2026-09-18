@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -130,6 +131,59 @@ func TestJSONRPCHandler_GetEventsV2ReportsTypedErrorData(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(out.Error.Data, &data))
 	assert.Equal(t, protocol.ErrorReasonInvalidParams, data.Reason)
+}
+
+// A cursor that does not decode gets a typed cursor_malformed error and the
+// server keeps serving. The decoder itself is fuzzed in the query package.
+func TestJSONRPCHandler_GetEventsV2RejectsMalformedCursors(t *testing.T) {
+	url := newTestRPCServer(t, seedServingRegistry(t))
+
+	first := rpcv2test.PostRPC(t, url, protocol.GetEventsV2MethodName, `{"minLedger":2,"limit":1}`)
+	require.Nil(t, first.Error)
+	var page struct {
+		Cursor string `json:"cursor"`
+	}
+	require.NoError(t, json.Unmarshal(first.Result, &page))
+	require.NotEmpty(t, page.Cursor, "an open range at the tip hands back a cursor")
+	c := page.Cursor
+	prefixEnd := strings.IndexByte(c, '_') + 1
+	require.Positive(t, prefixEnd, "cursor %q has no prefix separator", c)
+	prefix, body := c[:prefixEnd], c[prefixEnd:]
+
+	flipped := "A"
+	if strings.HasSuffix(body, "A") {
+		flipped = "B"
+	}
+	for name, cursor := range map[string]string{
+		"prefix only":         prefix,
+		"body only":           body,
+		"truncated body":      prefix + body[:len(body)/2],
+		"flipped last char":   prefix + body[:len(body)-1] + flipped,
+		"doubled body":        prefix + body + body,
+		"v1 shaped cursor":    "0000000137438953472-0000000000",
+		"wrong prefix":        "gec0_" + body,
+		"garbage":             prefix + "!!!not-base64!!!",
+		"extra trailing char": c + "A",
+		"whitespace inside":   prefix + " " + body,
+		"very long":           prefix + strings.Repeat("A", 4096),
+	} {
+		t.Run(name, func(t *testing.T) {
+			params, err := json.Marshal(map[string]string{"cursor": cursor})
+			require.NoError(t, err)
+			out := rpcv2test.PostRPC(t, url, protocol.GetEventsV2MethodName, string(params))
+			require.NotNil(t, out.Error)
+			assert.EqualValues(t, jrpc2.InvalidParams, out.Error.Code, "message: %s", out.Error.Message)
+			var data struct {
+				Reason string `json:"reason"`
+			}
+			require.NoError(t, json.Unmarshal(out.Error.Data, &data))
+			assert.Equal(t, protocol.ErrorReasonCursorMalformed, data.Reason,
+				"message: %s", out.Error.Message)
+		})
+	}
+
+	again := rpcv2test.PostRPC(t, url, protocol.GetEventsV2MethodName, `{"minLedger":2,"limit":1}`)
+	require.Nil(t, again.Error, "the server must still serve after a burst of malformed cursors")
 }
 
 // Every field is optional, so a typo would widen the query rather than fail.
