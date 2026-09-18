@@ -18,9 +18,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
-// lookupBatch is how many term keys one LookupKeys call carries.
-const lookupBatch = 1024
-
 // eventsChecker compares a chunk's events artifacts with the oracle's
 // expectations as the ledgers stream by: payloads position by position
 // against events.pack, per-ledger ranges against the offsets, and at the end
@@ -185,29 +182,30 @@ func (e *eventsChecker) checkTerms(ctx context.Context) error {
 		keys = append(keys, k)
 	}
 	slices.SortFunc(keys, func(a, b event.TermKey) int { return bytes.Compare(a[:], b[:]) })
-	for start := 0; start < len(keys); start += lookupBatch {
-		batch := keys[start:min(start+lookupBatch, len(keys))]
-		got, err := e.reader.LookupKeys(ctx, batch)
-		if err != nil {
-			return fmt.Errorf("index lookup: %w", err)
+	// One call for the whole chunk: LookupKeys reads its keys in slot order,
+	// so every term at once is one front-to-back pass over index.pack, where
+	// batches of keys each scatter over the whole file. The result is at most
+	// the chunk's own index in memory, which e.terms already is.
+	got, err := e.reader.LookupKeys(ctx, keys)
+	if err != nil {
+		return fmt.Errorf("index lookup: %w", err)
+	}
+	for i, k := range keys {
+		if e.rec.full() {
+			// A comparison the cap prevented is lost coverage, not a
+			// suppressed mismatch, so it is said as a reason.
+			e.unfinished = fmt.Sprintf(
+				"the mismatch cap stopped the term sweep with %d of %d terms unchecked",
+				len(keys)-i, len(keys))
+			return nil
 		}
-		for i, k := range batch {
-			if e.rec.full() {
-				// A comparison the cap prevented is lost coverage, not a
-				// suppressed mismatch, so it is said as a reason.
-				e.unfinished = fmt.Sprintf(
-					"the mismatch cap stopped the term sweep with %d of %d terms unchecked",
-					len(keys)-(start+i), len(keys))
-				return nil
-			}
-			want := e.terms[k]
-			switch {
-			case got[i] == nil:
-				e.mismatch(0, "", "term "+hex.EncodeToString(k[:]), u64(want.GetCardinality())+" events", "missing")
-			case !got[i].Equals(want):
-				e.mismatch(0, "", "term "+hex.EncodeToString(k[:]),
-					u64(want.GetCardinality())+" events", u64(got[i].GetCardinality())+" events, different set")
-			}
+		want := e.terms[k]
+		switch {
+		case got[i] == nil:
+			e.mismatch(0, "", "term "+hex.EncodeToString(k[:]), u64(want.GetCardinality())+" events", "missing")
+		case !got[i].Equals(want):
+			e.mismatch(0, "", "term "+hex.EncodeToString(k[:]),
+				u64(want.GetCardinality())+" events", u64(got[i].GetCardinality())+" events, different set")
 		}
 	}
 	e.termsCompared = true
