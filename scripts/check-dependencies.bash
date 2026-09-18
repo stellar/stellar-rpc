@@ -105,12 +105,19 @@ fi
 # on the same XDR revision
 
 # Extract (protocol_version, core_version) pairs from the packaged-core integration jobs in
-# stellar-rpc.yml. Each pkg job has a with: block containing protocol_version followed by
-# core_version; source jobs have core_git_ref instead and are skipped.
+# stellar-rpc.yml. A job either names one protocol (protocol_version: '27') or runs a matrix
+# (protocol: ['27', '28'] with protocol_version: ${{ matrix.protocol }}); in the matrix form
+# every listed protocol pairs with the job's core_deb_version. Source jobs have core_git_ref
+# instead and are skipped.
 PROTO_VERSION_PAIRS=$(awk "
   /^[[:space:]]*#/ { next }
-  /protocol_version:/ { p = \$NF; gsub(/'/, \"\", p) }
-  /core_deb_version:/     { c = \$NF; gsub(/'/, \"\", c); if (c != \"\") print p, c }
+  /^[[:space:]]*protocol:[[:space:]]*\\[/ { m = \$0; sub(/.*\\[/, \"\", m); sub(/\\].*/, \"\", m); gsub(/['\" ]/, \"\", m); matrix = m }
+  /protocol_version:/ { p = \$NF; gsub(/'/, \"\", p); if (p !~ /^[0-9]+\$/) p = \"\" }
+  /core_deb_version:/ {
+    c = \$NF; gsub(/'/, \"\", c); if (c == \"\") next
+    if (p != \"\") { print p, c; next }
+    n = split(matrix, list, \",\"); for (i = 1; i <= n; i++) print list[i], c
+  }
 " .github/workflows/stellar-rpc.yml)
 
 if [ -z "$PROTO_VERSION_PAIRS" ]; then

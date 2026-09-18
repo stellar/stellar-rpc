@@ -11,7 +11,7 @@ import (
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 )
 
 // Test that every Stellar RPC version (within the current protocol) can migrate

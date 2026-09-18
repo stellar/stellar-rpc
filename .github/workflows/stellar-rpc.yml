@@ -84,19 +84,17 @@ jobs:
           CGO_ENABLED: 1
           GOARCH: ${{ matrix.go_arch }}
 
-  integration-p27-pkg:
-    name: Integration tests (P27)
+  integration:
+    name: Integration tests (P${{ matrix.protocol }}, ${{ matrix.daemon }})
+    strategy:
+      fail-fast: false
+      matrix:
+        protocol: ['27', '28']
+        daemon: [rpcv1, rpcv2]
     uses: ./.github/workflows/integration-tests.yml
     with:
-      protocol_version: '27'
-      core_deb_version: '28.0.1-3508.947aad841.noble'
-      core_docker_img: 'stellar/stellar-core:28.0.1-3508.947aad841.noble'
-
-  integration-p28-pkg:
-    name: Integration tests (P28)
-    uses: ./.github/workflows/integration-tests.yml
-    with:
-      protocol_version: '28'
+      protocol_version: ${{ matrix.protocol }}
+      daemon: ${{ matrix.daemon }}
       # Protocol 28 stable core release (28.0.1). Its src/rust/soroban/p28
       # submodule is unchanged from 28.0.0: rs-soroban-env v28.0.0 (ba37ea5f)
       # — the same release soroban-env-host-curr pins from crates.io, keeping

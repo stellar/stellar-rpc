@@ -55,19 +55,3 @@ func newGCSBucket(t *testing.T) string {
 	sharedGCSServer.CreateBucketWithOpts(fakestorage.CreateBucketOpts{Name: name})
 	return name
 }
-
-// skipLimitsUpgrade returns the value to pass as TestConfig.ApplyLimits when a
-// test does not need Core's Soroban resource limits raised. Skipping the
-// upgrade saves about 19 seconds of setup.
-//
-//	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
-//		ApplyLimits: skipLimitsUpgrade(),
-//	})
-//
-// Only a test that never submits a Soroban transaction may skip it. Anything
-// that uploads a contract, invokes one, or calls simulateTransaction needs the
-// raised limits and must leave ApplyLimits unset.
-func skipLimitsUpgrade() *string {
-	skip := ""
-	return &skip
-}

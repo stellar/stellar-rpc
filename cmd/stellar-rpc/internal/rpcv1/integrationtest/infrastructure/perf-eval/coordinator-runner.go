@@ -99,7 +99,7 @@ func run(ctx context.Context) error {
 			logger.Warnf("no result at s3://%s/%s: %v", l.Bucket, l.Key, err)
 			continue
 		}
-		results[i].Verdict, results[i].Markdown = res.Verdict, res.Markdown
+		results[i] = reportableLeg(l.Label, res, os.Getenv("GITHUB_RUN_ID"), os.Getenv("TARGET_SHA"))
 	}
 
 	body := renderComment(runRecord{
@@ -110,6 +110,19 @@ func run(ctx context.Context) error {
 	}, string(prev))
 	_, err = io.WriteString(os.Stdout, body)
 	return err
+}
+
+// reportableLeg includes results from the same workflow run and target
+// commit. Results from previous attempts remain usable when only failed jobs
+// are rerun. A mismatched result produces a label-only entry.
+func reportableLeg(label string, res *harness.Result, runID, targetSHA string) legResult {
+	result := legResult{Label: label}
+	if !strings.HasPrefix(res.RunID, runID+"-") || res.TargetSHA != targetSHA {
+		logger.Warnf("%s result belongs to another run or target", label)
+		return result
+	}
+	result.Verdict, result.Markdown = res.Verdict, res.Markdown
+	return result
 }
 
 // renderComment numbers cur, prepends it to the prior comment's history, and
@@ -158,10 +171,10 @@ func renderRun(r runRecord) string {
 }
 
 // renderLeg renders one leg's section: a verdict heading plus its result markdown,
-// or a fallback when no result object was published.
+// or a fallback when no final result was published.
 func renderLeg(l legResult) string {
 	emoji := "❌"
-	if l.Verdict == "ok" {
+	if l.Verdict == harness.VerdictOK {
 		emoji = "✅"
 	}
 	var b strings.Builder
@@ -170,7 +183,7 @@ func renderLeg(l legResult) string {
 		b.WriteString(strings.TrimRight(l.Markdown, "\n"))
 		b.WriteByte('\n')
 	} else {
-		b.WriteString("_No result object published (leg timed out or failed before publishing). See the run logs._\n")
+		b.WriteString("_No final result was published (leg timed out or failed before publishing). See the run logs._\n")
 	}
 	return b.String()
 }

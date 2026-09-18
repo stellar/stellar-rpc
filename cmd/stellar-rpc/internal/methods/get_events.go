@@ -2,9 +2,9 @@ package methods
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/base64"
 	"fmt"
-	"strconv"
+	"math"
 	"time"
 
 	"github.com/creachadair/jrpc2"
@@ -117,13 +117,6 @@ func combineTopics(filters []protocol.EventFilter) (store.TopicFilters, error) {
 	return topicFilters, nil
 }
 
-type entry struct {
-	cursor               protocol.Cursor
-	ledgerCloseTimestamp int64
-	event                xdr.DiagnosticEvent
-	txHash               *xdr.Hash
-}
-
 // TODO: remove this linter exclusions
 //
 //nolint:cyclop,funlen
@@ -176,8 +169,6 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 		}
 	}
 
-	found := make([]entry, 0, limit)
-
 	contractIDs, err := combineContractIDs(request.Filters)
 	if err != nil {
 		return protocol.GetEventsResponse{}, &jrpc2.Error{
@@ -194,36 +185,60 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 
 	eventTypes := combineEventTypes(request.Filters)
 
-	// Scan function to apply filters
-	var eventScanFunction store.ScanFunction = func(
-		event xdr.DiagnosticEvent, cursor protocol.Cursor, ledgerCloseTimestamp int64, txHash *xdr.Hash,
-	) bool {
-		if request.Matches(event) {
-			found = append(found, entry{cursor, ledgerCloseTimestamp, event, txHash})
+	filters, err := compileFilters(request.Filters)
+	if err != nil {
+		return protocol.GetEventsResponse{}, &jrpc2.Error{
+			Code: jrpc2.InvalidParams, Message: err.Error(),
 		}
-		return uint(len(found)) < limit
 	}
 
-	err = h.dbReader.GetEvents(ctx, cursorRange, contractIDs, topics, eventTypes, eventScanFunction)
-	if err != nil {
+	results := []protocol.EventInfo{}
+	// procErr keeps the callback's own error out of the reader's wrap, as getTransactions does,
+	// so a render failure stays a plain (system) error rather than an InvalidRequest.
+	var procErr error
+	var eventViewScanFunction store.ViewScanFunction = func(
+		eventView xdr.DiagnosticEventView, cursor protocol.Cursor, ledgerCloseTimestamp int64, txHash *xdr.Hash,
+	) (bool, error) {
+		var event xdr.ContractEventView
+		if event, procErr = eventView.Event(); procErr != nil {
+			return false, procErr
+		}
+		// Fields are pulled off the view once and feed both the match and the render.
+		// Topics wait until type and contract id pass, so a rejected event never sizes them.
+		head, err := eventHeader(event)
+		if err != nil {
+			procErr = errors.Wrap(err, "could not parse event")
+			return false, procErr
+		}
+		if !filters.matchHeader(head) {
+			return true, nil
+		}
+		body, err := eventBody(head.v0)
+		if err != nil {
+			procErr = errors.Wrap(err, "could not parse event")
+			return false, procErr
+		}
+		if !filters.match(head, body.topics) {
+			return true, nil
+		}
+		info, err := eventInfo(head, body, cursor,
+			time.Unix(ledgerCloseTimestamp, 0).UTC().Format(time.RFC3339), txHash.HexString(), request.Format)
+		if err != nil {
+			procErr = errors.Wrap(err, "could not parse event")
+			return false, procErr
+		}
+		results = append(results, info)
+		return uint(len(results)) < limit, nil
+	}
+
+	err = h.dbReader.GetEvents(ctx, cursorRange, contractIDs, topics, eventTypes, eventViewScanFunction)
+	switch {
+	case procErr != nil:
+		return protocol.GetEventsResponse{}, procErr
+	case err != nil:
 		return protocol.GetEventsResponse{}, &jrpc2.Error{
 			Code: jrpc2.InvalidRequest, Message: err.Error(),
 		}
-	}
-
-	results := make([]protocol.EventInfo, 0, len(found))
-	for _, entry := range found {
-		info, err := eventInfoForEvent(
-			entry.event,
-			entry.cursor,
-			time.Unix(entry.ledgerCloseTimestamp, 0).UTC().Format(time.RFC3339),
-			entry.txHash.HexString(),
-			request.Format,
-		)
-		if err != nil {
-			return protocol.GetEventsResponse{}, errors.Wrap(err, "could not parse event")
-		}
-		results = append(results, info)
 	}
 
 	var cursor string
@@ -250,29 +265,88 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 	}, nil
 }
 
-func eventInfoForEvent(
-	event xdr.DiagnosticEvent,
-	cursor protocol.Cursor,
-	ledgerClosedAt, txHash, format string,
+// EventInfoFromView renders one stored ContractEvent into the v1 wire type; rpcv2's eventsapi wraps it.
+func EventInfoFromView(
+	ev xdr.ContractEventView, cursor protocol.Cursor, ledgerClosedAt, txHash, format string,
 ) (protocol.EventInfo, error) {
-	v0, ok := event.Event.Body.GetV0()
-	if !ok {
-		return protocol.EventInfo{}, errors.New("unknown event version")
-	}
-
-	eventType, ok := protocol.GetEventTypeFromEventTypeXDR()[event.Event.Type]
-	if !ok {
-		return protocol.EventInfo{}, fmt.Errorf("unknown XDR ContractEventType type: %d", event.Event.Type)
-	}
-
-	ledger, err := strconv.ParseInt(strconv.FormatUint(uint64(cursor.Ledger), 10), 10, 32)
+	head, err := eventHeader(ev)
 	if err != nil {
+		return protocol.EventInfo{}, errors.Wrap(err, "malformed event")
+	}
+	body, err := eventBody(head.v0)
+	if err != nil {
+		return protocol.EventInfo{}, errors.Wrap(err, "malformed event")
+	}
+	return eventInfo(head, body, cursor, ledgerClosedAt, txHash, format)
+}
+
+// eventHead is the event's fields above the body, plus the V0 body view to read on demand.
+type eventHead struct {
+	typ xdr.ContractEventType
+	cid []byte // nil when absent
+	v0  xdr.ContractEventV0View
+}
+
+// eventV0 is the V0 body's topics and data as raw XDR.
+type eventV0 struct {
+	topics [][]byte
+	data   []byte
+}
+
+// eventHeader locates type, contract id and body in one pass. Fields returns views trimmed
+// to their extent, so their bytes are the raw XDR and Raw() would only re-walk them.
+func eventHeader(ev xdr.ContractEventView) (eventHead, error) {
+	f, err := ev.Fields()
+	if err != nil {
+		return eventHead{}, err
+	}
+	var h eventHead
+	if h.typ, err = f.Type.Value(); err != nil {
+		return eventHead{}, err
+	}
+	if cid, ok, err := f.ContractId.Unwrap(); err != nil {
+		return eventHead{}, err
+	} else if ok {
+		h.cid = []byte(cid)
+	}
+	if h.v0, err = f.Body.V0(); err != nil { // fails on a non-V0 body, replacing "unknown event version"
+		return eventHead{}, err
+	}
+	return h, nil
+}
+
+// eventBody locates topics and data in one pass; All returns each topic trimmed.
+func eventBody(v0 xdr.ContractEventV0View) (eventV0, error) {
+	f, err := v0.Fields()
+	if err != nil {
+		return eventV0{}, err
+	}
+	views, err := f.Topics.All()
+	if err != nil {
+		return eventV0{}, err
+	}
+	b := eventV0{topics: make([][]byte, len(views)), data: []byte(f.Data)}
+	for i, t := range views {
+		b.topics[i] = []byte(t)
+	}
+	return b, nil
+}
+
+func eventInfo(
+	head eventHead, body eventV0, cursor protocol.Cursor, ledgerClosedAt, txHash, format string,
+) (protocol.EventInfo, error) {
+	if cursor.Ledger > math.MaxInt32 {
 		return protocol.EventInfo{}, fmt.Errorf("ledger sequence %d exceeds supported range", cursor.Ledger)
 	}
 
+	typeName, ok := eventTypeName(head.typ)
+	if !ok {
+		return protocol.EventInfo{}, fmt.Errorf("unknown XDR ContractEventType type: %d", head.typ)
+	}
+
 	info := protocol.EventInfo{
-		EventType:       eventType,
-		Ledger:          int32(ledger),
+		EventType:       typeName,
+		Ledger:          int32(cursor.Ledger),
 		LedgerClosedAt:  ledgerClosedAt,
 		ID:              cursor.String(),
 		TransactionHash: txHash,
@@ -280,51 +354,42 @@ func eventInfoForEvent(
 		TxIndex:         cursor.Tx,
 	}
 
+	if head.cid != nil {
+		info.ContractID = strkey.MustEncode(strkey.VersionByteContract, head.cid)
+	}
+
+	var err error
 	switch format {
 	case protocol.FormatJSON:
-		// json encode the topic
-		info.TopicJSON = make([]json.RawMessage, 0, protocol.MaxTopicCount)
-		for _, topic := range v0.Topics {
-			topic, err := xdr2json.ConvertInterface(topic)
-			if err != nil {
-				return protocol.EventInfo{}, err
-			}
-			info.TopicJSON = append(info.TopicJSON, topic)
-		}
-
-		var convErr error
-		info.ValueJSON, convErr = xdr2json.ConvertInterface(v0.Data)
-		if convErr != nil {
-			return protocol.EventInfo{}, convErr
-		}
-
-	default:
-		// base64-xdr encode the topic
-		topic := make([]string, 0, protocol.MaxTopicCount)
-		for _, segment := range v0.Topics {
-			seg, err := xdr.MarshalBase64(segment)
-			if err != nil {
-				return protocol.EventInfo{}, err
-			}
-			topic = append(topic, seg)
-		}
-
-		// base64-xdr encode the data
-		data, err := xdr.MarshalBase64(v0.Data)
-		if err != nil {
+		if info.TopicJSON, err = jsonifySlice(xdr.ScVal{}, body.topics); err != nil {
 			return protocol.EventInfo{}, err
 		}
-
-		info.TopicXDR = topic
-		info.ValueXDR = data
+		if info.ValueJSON, err = xdr2json.ConvertBytes(xdr.ScVal{}, body.data); err != nil {
+			return protocol.EventInfo{}, err
+		}
+	default:
+		info.TopicXDR = make([]string, len(body.topics))
+		for i, segment := range body.topics {
+			info.TopicXDR[i] = base64.StdEncoding.EncodeToString(segment)
+		}
+		info.ValueXDR = base64.StdEncoding.EncodeToString(body.data)
 	}
 
-	if event.Event.ContractId != nil {
-		info.ContractID = strkey.MustEncode(
-			strkey.VersionByteContract,
-			(*event.Event.ContractId)[:])
-	}
 	return info, nil
+}
+
+// eventTypeName is protocol.GetEventTypeFromEventTypeXDR without the per-call map; ok is false outside the enum.
+func eventTypeName(t xdr.ContractEventType) (string, bool) {
+	switch t {
+	case xdr.ContractEventTypeSystem:
+		return protocol.EventTypeSystem, true
+	case xdr.ContractEventTypeContract:
+		return protocol.EventTypeContract, true
+	case xdr.ContractEventTypeDiagnostic:
+		return protocol.EventTypeDiagnostic, true
+	default:
+		return "", false
+	}
 }
 
 // NewGetEventsHandler returns a json rpc handler to fetch and filter events

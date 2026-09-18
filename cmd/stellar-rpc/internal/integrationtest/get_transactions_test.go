@@ -11,7 +11,7 @@ import (
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/txnbuild"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 )
 
 // buildSetOptionsTxParams constructs the parameters necessary for creating a transaction from the given account.
@@ -57,7 +57,7 @@ func sendTransactions(t *testing.T, client *client.Client) []uint32 {
 
 func TestGetTransactions(t *testing.T) {
 	ctx := t.Context()
-	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: skipLimitsUpgrade()})
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: infrastructure.SkipLimitsUpgrade()})
 	client := test.GetRPCLient()
 
 	ledgers := sendTransactions(t, client)

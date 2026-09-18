@@ -39,11 +39,35 @@ import (
 // config.BindFlags (nil = none); each set flag overlays its TOML key before
 // defaults resolve.
 func RunDaemon(ctx context.Context, configPath string, flags config.FlagOverrides) error {
+	return RunDaemonWithOptions(ctx, configPath, Options{Flags: flags})
+}
+
+// Options is the part of the daemon's wiring a caller outside this package may
+// set. The integration-test harness uses it to route the daemon's log lines
+// into the test log and to pass per-test settings without writing a TOML file
+// per test.
+type Options struct {
+	// Logger replaces the logger the daemon would build from [logging]. nil
+	// keeps the built one.
+	Logger *supportlog.Entry
+
+	// Flags carries overrides registered by config.BindFlags; nil = none.
+	Flags config.FlagOverrides
+
+	// OnListen, when set, is called once with the addresses the read server
+	// and the admin server bound. admin is nil when [service].admin_endpoint
+	// is empty. A caller that configured port 0 learns the chosen ports here.
+	OnListen func(rpc, admin net.Addr)
+}
+
+// RunDaemonWithOptions is RunDaemon with a caller-supplied logger. It blocks
+// until ctx is canceled or the daemon fails.
+func RunDaemonWithOptions(ctx context.Context, configPath string, opts Options) error {
 	// The whole daemon — including the pre-run startup phase (archive dial, tip
 	// sampling, core wiring) — runs on the signal-derived ctx, so a drain that
 	// lands mid-startup unwinds with ctx-shaped errors. Classify those as the
 	// clean shutdown they are; a nonzero exit must keep meaning failure.
-	err := runDaemonWith(ctx, configPath, daemonOptions{Flags: flags})
+	err := runDaemonWith(ctx, configPath, daemonOptions{Logger: opts.Logger, Flags: opts.Flags, OnListen: opts.OnListen})
 	if ctx.Err() == nil {
 		return err
 	}
@@ -86,6 +110,9 @@ type daemonOptions struct {
 
 	// Flags carries the CLI overrides registered by config.BindFlags; nil = none.
 	Flags config.FlagOverrides
+
+	// OnListen is called once both HTTP listeners are bound (see Options.OnListen); nil = nobody asked.
+	OnListen func(rpc, admin net.Addr)
 
 	// chunksPerTxhashIndex overrides the tx-hash index width (test-only). 0 ⇒ the
 	// fixed geometry.ChunksPerTxhashIndex. Tests set it to 1 so a single chunk's
@@ -211,6 +238,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// ONE registry, built after the validateConfig gate (it registers Prometheus
 	// collectors). The admin server's /metrics serves it.
 	registry := prometheus.NewRegistry()
+	host.RegisterProcessMetrics(registry, logger)
 	metrics, sink := buildSinks(opts, registry)
 
 	// --- Captive-core state access for the three endpoints that need it, plus
@@ -241,12 +269,14 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// --- The two HTTP servers. The admin server (pprof, /metrics) is
 	// process-wide; the JSON-RPC server is per run(): its handlers hold run()'s
 	// query registry, so ServeReads builds it there. ---
+	var adminAddr net.Addr
 	if cfg.Service.AdminEndpoint != "" {
-		stopAdmin, aerr := startAdminServer(ctx, cfg.Service.AdminEndpoint, logger, registry)
+		addr, stopAdmin, aerr := startAdminServer(ctx, cfg.Service.AdminEndpoint, logger, registry)
 		if aerr != nil {
 			return aerr
 		}
 		defer stopAdmin()
+		adminAddr = addr
 	}
 	serveReads := opts.ServeReads
 	if serveReads == nil {
@@ -269,6 +299,10 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 		start.lifecycleGrace = deriveLifecycleGrace(cfg.Service)
 	}
 	start.FeeWindows = feeWindows
+	if opts.OnListen != nil {
+		onListen := opts.OnListen
+		start.OnListen = func(rpc net.Addr) { onListen(rpc, adminAddr) }
+	}
 
 	return runBody(ctx, start, logger)
 }

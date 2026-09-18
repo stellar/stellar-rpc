@@ -154,6 +154,10 @@ func TestGetTransactions_CaughtUpCursorIsEchoed(t *testing.T) {
 		"above the tip":          toid.New(15, 1, 1).String(),
 		"at the consumed tip":    toid.New(10, 2, 1).String(),
 		"past the tip's last tx": toid.New(10, 5, 1).String(),
+		// The server issues op order 1; 0 and 2 are client-built and must echo byte for byte.
+		"client-built op 0 at consumed tip": toid.New(10, 2, 0).String(),
+		"client-built op 0 past last tx":    toid.New(10, 5, 0).String(),
+		"client-built op 2 at consumed tip": toid.New(10, 2, 2).String(),
 	}
 	for name, cursor := range cursors {
 		t.Run(name, func(t *testing.T) {

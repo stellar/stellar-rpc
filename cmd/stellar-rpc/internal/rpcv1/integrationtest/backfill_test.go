@@ -19,8 +19,8 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/config"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
 )
 
@@ -67,10 +67,10 @@ func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint
 		DatastoreConfigFunc:    makeDatastoreConfig,
 		DelayDaemonForLedgerN:  int(datastoreEnd), // don't start daemon until core has at least the datastore ledgers
 		IgnoreLedgerCloseTimes: true,              // fake/seeded ledgers don't need correct close times relative to core's
-		ApplyLimits:            skipLimitsUpgrade(),
+		ApplyLimits:            infrastructure.SkipLimitsUpgrade(),
 	})
 
-	testDb := test.GetDaemon().GetDB()
+	testDb := infrastructure.RPCv1Daemon(t, test).GetDB()
 	client := test.GetRPCLient()
 
 	// This budget has to hold on a busy machine: three backfill environments and

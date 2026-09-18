@@ -176,6 +176,9 @@ func run(ctx context.Context, cfg StartConfig) error {
 	}
 	defer func() { _ = listener.Close() }()
 	cfg.Exec.Logger.WithField("endpoint", listener.Addr().String()).Info("read server listening")
+	if cfg.OnListen != nil {
+		cfg.OnListen(listener.Addr())
+	}
 
 	// Ingestion and the lifecycle run as a joined pair under errgroup.WithContext:
 	// gctx cancels as soon as EITHER returns — and WithContext records the returning
@@ -381,6 +384,10 @@ type StartConfig struct {
 	// launch); everything else about serving belongs to the ServeReads
 	// implementation. Required.
 	Endpoint string
+
+	// OnListen, when set, is called once with the read server's bound address,
+	// right after the bind and before the loops launch. Optional.
+	OnListen func(net.Addr)
 
 	// ServeReads serves the read surface for this run's registry on the bound
 	// listener, blocking until its context cancels — draining before

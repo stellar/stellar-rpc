@@ -18,9 +18,8 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// Result is the structured run outcome the box publishes to S3 as an atomic
-// object. The gatherer polls for it and reads either a complete object or
-// a 404.
+// Result is the run outcome the box publishes to S3 as one atomic object.
+// The pollers read either a complete object or a 404.
 type Result struct {
 	SchemaVersion int             `json:"schemaVersion"`
 	Verdict       string          `json:"verdict"` // "ok" or "fail"
@@ -29,6 +28,28 @@ type Result struct {
 	RunID         string          `json:"runId"`
 	TargetSHA     string          `json:"targetSha"`
 }
+
+// Validate checks the result schema, required run identity, and verdict.
+func (r Result) Validate() error {
+	if r.SchemaVersion != 1 {
+		return fmt.Errorf("unsupported schemaVersion %d", r.SchemaVersion)
+	}
+	if r.RunID == "" {
+		return errors.New("runId is required")
+	}
+	switch r.Verdict {
+	case VerdictOK, VerdictFail:
+		return nil
+	default:
+		return fmt.Errorf("unknown verdict %q", r.Verdict)
+	}
+}
+
+// VerdictOK and VerdictFail are the two outcomes a box can publish.
+const (
+	VerdictOK   = "ok"
+	VerdictFail = "fail"
+)
 
 // PublishResult uploads the run result to s3://bucket/key as one atomic object
 // that the gatherer can poll for.
@@ -75,11 +96,14 @@ func PublishResult(
 	return nil
 }
 
-// ErrResultNotReady means the result object hasn't been published yet.
+// ErrResultNotReady means S3 reported that the result key is absent.
 var ErrResultNotReady = errors.New("result not published yet")
 
+// ErrInvalidResult means an object cannot satisfy the result protocol.
+var ErrInvalidResult = errors.New("invalid result object")
+
 // FetchResult gets and decodes the result object, returning ErrResultNotReady
-// when it is absent.
+// when it is absent. S3 reports a missing key as 404 (absent) rather than 403 (a permissions fault).
 func FetchResult(ctx context.Context, client *s3.Client, bucket, key string) (*Result, error) {
 	out, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: &bucket, Key: &key})
 	if err != nil {
@@ -96,7 +120,10 @@ func FetchResult(ctx context.Context, client *s3.Client, bucket, key string) (*R
 	}
 	var res Result
 	if err := json.Unmarshal(data, &res); err != nil {
-		return nil, fmt.Errorf("decoding result object: %w", err)
+		return nil, fmt.Errorf("%w: decoding JSON: %w", ErrInvalidResult, err)
+	}
+	if err := res.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidResult, err)
 	}
 	return &res, nil
 }
