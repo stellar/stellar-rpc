@@ -134,9 +134,8 @@ func TestJSONRPCHandler_GetEventsV2ReportsTypedErrorData(t *testing.T) {
 }
 
 // A cursor that does not decode must come back as a typed cursor_malformed
-// or invalid_params error, never an internal error, and the server keeps
-// serving. The decoder is fuzzed in the query package; this pins the wire
-// shape.
+// error, never an internal error, and the server keeps serving. The decoder
+// is fuzzed in the query package; this pins the wire shape.
 func TestJSONRPCHandler_GetEventsV2RejectsMalformedCursors(t *testing.T) {
 	url := newTestRPCServer(t, seedServingRegistry(t))
 
@@ -179,7 +178,7 @@ func TestJSONRPCHandler_GetEventsV2RejectsMalformedCursors(t *testing.T) {
 				Reason string `json:"reason"`
 			}
 			require.NoError(t, json.Unmarshal(out.Error.Data, &data))
-			assert.Contains(t, []string{protocol.ErrorReasonCursorMalformed, protocol.ErrorReasonInvalidParams}, data.Reason,
+			assert.Equal(t, protocol.ErrorReasonCursorMalformed, data.Reason,
 				"message: %s", out.Error.Message)
 		})
 	}

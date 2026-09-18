@@ -595,6 +595,16 @@ func (i *Test) waitForRPC() {
 	if i.daemon != nil {
 		exited = i.daemon.exited()
 	}
+	// caughtUp is the ledger seen on the first poll that was healthy and caught
+	// up with Core, or 0 until then. Core creates its Soroban transaction queue
+	// only when a ledger closes through consensus, never during catch-up, so a
+	// captive core that has just caught up rejects every Soroban transaction
+	// with txNOT_SUPPORTED until its first consensus ledger closes. One more
+	// committed ledger after catch-up means that close has happened. Only the
+	// live-Core modes need it: the synthetic load test has no Core and a finite
+	// stream, and the delayed-daemon mode is behind on purpose.
+	var caughtUp uint32
+	needOneMore := i.coreClient != nil && i.delayDaemonForLedgerN == 0
 	for {
 		select {
 		case err := <-exited:
@@ -603,36 +613,21 @@ func (i *Test) waitForRPC() {
 		}
 		result, err := i.GetRPCLient().GetHealth(i.t.Context())
 		i.t.Logf("getHealth: %+v; err: %v", result, err)
-		if err == nil && result.Status == "healthy" && i.caughtUpWithCore(result.LatestLedger) {
-			// Only the live-Core modes need the extra ledger. The synthetic
-			// load test has no Core and a finite stream that may already be
-			// done; the delayed-daemon mode is behind on purpose.
-			if i.coreClient != nil && i.delayDaemonForLedgerN == 0 {
-				i.waitForOneMoreLedger(result.LatestLedger, deadline)
+		if err == nil && result.Status == "healthy" {
+			switch {
+			case caughtUp != 0:
+				if result.LatestLedger > caughtUp {
+					return
+				}
+			case i.caughtUpWithCore(result.LatestLedger):
+				if !needOneMore {
+					return
+				}
+				caughtUp = result.LatestLedger
 			}
-			return
 		}
 		require.False(i.t, time.Now().After(deadline), "RPC never got healthy: %+v", err)
 		time.Sleep(time.Second)
-	}
-}
-
-// waitForOneMoreLedger returns once the daemon has committed a ledger past
-// caughtUp. Core creates its Soroban transaction queue only when a ledger
-// closes through consensus, not during catch-up. A captive core that has just
-// caught up rejects every Soroban transaction with txNOT_SUPPORTED until its
-// first consensus ledger closes, so a test that submits one right after
-// getHealth turns healthy fails in that window. One more committed ledger
-// after catch-up means that close has happened.
-func (i *Test) waitForOneMoreLedger(caughtUp uint32, deadline time.Time) {
-	for {
-		result, err := i.GetRPCLient().GetHealth(i.t.Context())
-		if err == nil && result.LatestLedger > caughtUp {
-			return
-		}
-		require.False(i.t, time.Now().After(deadline),
-			"RPC never committed a ledger past %d: %+v", caughtUp, err)
-		time.Sleep(200 * time.Millisecond)
 	}
 }
 
@@ -994,6 +989,15 @@ func (i *Test) CreateHelloWorldContract() (protocol.GetTransactionResponse, [32]
 	salt := xdr.Uint256(testSalt)
 	account := i.MasterAccount().GetAccountID()
 	op := createCreateContractOperation(account, salt, contractHash)
+	contractID := GetContractID(i.t, account, salt, StandaloneNetworkPassphrase)
+	return i.PreflightAndSendMasterOperation(op), contractID, contractHash
+}
+
+func (i *Test) CreateEventsContract() (protocol.GetTransactionResponse, [32]byte, xdr.Hash) {
+	_, contractHash := i.uploadContract(GetEventsContract())
+	salt := xdr.Uint256(testSalt)
+	account := i.MasterAccount().GetAccountID()
+	op := createCreateContractV2Operation(account, salt, contractHash)
 	contractID := GetContractID(i.t, account, salt, StandaloneNetworkPassphrase)
 	return i.PreflightAndSendMasterOperation(op), contractID, contractHash
 }

@@ -11,7 +11,6 @@ import (
 	client "github.com/stellar/go-stellar-sdk/clients/rpcclient"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/strkey"
-	"github.com/stellar/go-stellar-sdk/txnbuild"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
@@ -38,24 +37,7 @@ func (f *eventsFixture) last() uint32 { return f.ledgers[len(f.ledgers)-1] }
 
 // Each call waits for inclusion, so the increments land in distinct ledgers.
 func deployAndIncrement(t *testing.T, test *infrastructure.Test, n int) *eventsFixture {
-	rpc := test.GetRPCLient()
-	test.UploadEventsContract()
-
-	creationOp := infrastructure.CreateCreateEventsContractOperation(test.MasterAccount().GetAccountID())
-	params := infrastructure.PreflightTransactionParams(t, rpc,
-		infrastructure.CreateTransactionParams(test.MasterAccount(), creationOp),
-	)
-	tx, err := txnbuild.NewTransaction(params)
-	require.NoError(t, err)
-	infrastructure.SendSuccessfulTransaction(t, rpc, test.MasterKey(), tx)
-
-	preimage := creationOp.HostFunction.MustCreateContractV2().ContractIdPreimage
-	rawID := infrastructure.GetContractID(
-		t,
-		test.MasterAccount().GetAccountID(),
-		preimage.MustFromAddress().Salt,
-		infrastructure.StandaloneNetworkPassphrase,
-	)
+	_, rawID, _ := test.CreateEventsContract()
 	fx := &eventsFixture{
 		contractID:  strkey.MustEncode(strkey.VersionByteContract, rawID[:]),
 		contractRaw: xdr.ContractId(rawID),
@@ -324,7 +306,9 @@ func TestGetEventsV2MatchesV1(t *testing.T) {
 			for i := range v1.Events {
 				assert.Equal(t, protocol.EventInfoV2(v1.Events[i]), v2.Events[i], "event %d", i)
 			}
-			assert.Equal(t, v1.LatestLedger, v2.LatestLedger, "latestLedger")
+			// The tip moves between the two reads; v2 was read second.
+			assert.GreaterOrEqual(t, v2.LatestLedger, v1.LatestLedger, "latestLedger")
+			assert.GreaterOrEqual(t, v1.LatestLedger, fx.last(), "latestLedger")
 			assert.Equal(t, v1.OldestLedger, v2.OldestLedger, "oldestLedger")
 		})
 	}
@@ -348,8 +332,8 @@ func TestGetEventsV2PagingWhileTipMoves(t *testing.T) {
 
 		idle, err := rpc.GetEventsV2(t.Context(), protocol.GetEventsV2Request{Cursor: last.Cursor})
 		require.NoError(t, err)
-		assert.Empty(t, idle.Events, "round %d: idle tip cursor served events", round)
-		assert.NotEmpty(t, idle.Cursor, "round %d: idle tip cursor lost the cursor", round)
+		require.Empty(t, idle.Events, "round %d: idle tip cursor served events", round)
+		require.NotEmpty(t, idle.Cursor, "round %d: idle tip cursor lost the cursor", round)
 
 		if round < rounds-1 {
 			fx.increment(test)
