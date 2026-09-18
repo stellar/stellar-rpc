@@ -45,8 +45,7 @@ type chunkRun struct {
 	index  *indexChecker
 	bin    *binChecker
 	// heldIndex is the cached index coverage this chunk acquired, if any, and
-	// must release when it finishes. At most one: openIndex runs once per
-	// chunk, and its retry replaces the coverage rather than adding one.
+	// must release when it finishes.
 	heldIndex string
 
 	// prevHash is the hash computed over the previous ledger's header, or
@@ -55,22 +54,25 @@ type chunkRun struct {
 	ledgers  uint32
 	txs      uint64
 	txHashes uint64
-	invokes  uint64
-	// invokesUnchecked counts invocations whose committed events the export
-	// does not let the verifier recover.
+	// invokes counts the successful invocations whose committed events were
+	// checked; invokesUnchecked those the export does not let the verifier
+	// recover.
+	invokes          uint64
 	invokesUnchecked uint64
-	// binWhy and indexWhy are why each tx-hash artifact could not be used.
-	// They are NOT written straight into checkTxHashes: either artifact
-	// satisfies that comparison on its own, and a reason recorded at one
-	// artifact's failure would latch the check shut over the other one's
-	// success. settle picks between them once both are known.
-	binWhy   string
-	indexWhy string
-	// checks records which of this chunk's comparisons happened and why each
-	// of the others did not. Every site that decides a comparison will not
-	// run writes its reason here, where the cause is known, rather than
-	// leaving the caller to infer one from a bare false.
-	checks checkSet
+
+	// What became of each comparison, recorded where the cause is known and
+	// judged once by outcomes when the run is over. A checker that opened
+	// answers for itself; these cover the ones that did not, and the
+	// comparisons no checker makes.
+	walked     bool   // the walk reached the pack's last ledger
+	ledgersWhy string // or why it stopped short
+	chained    bool   // the first header was compared with the predecessor's last
+	chainWhy   string
+	anchored   bool // the last header was compared with the archive's
+	archiveWhy string
+	eventsWhy  string // why no events checker opened
+	binWhy     string // why the .bin could not be used
+	indexWhy   string // why the tx-hash index could not be used
 	// sourceBad is set by the first ledger that fails a source check. The
 	// remaining ledgers still get their source checks, but nothing derived
 	// from a bad source is compared.
@@ -86,15 +88,12 @@ type chunkRun struct {
 // bytes are wrong is a verdict. Neither stops the other artifacts from being
 // checked.
 func (r *chunkRun) run(ctx context.Context) error {
-	// Deferred first so every return below runs it, and so LIFO puts it after
-	// closeCheckers.
-	defer r.settle()
 	if r.d.opts.beforeOpen != nil {
 		r.d.opts.beforeOpen(r.c)
 	}
 	lr, err := ledger.OpenColdReader(r.d.cat.Layout().LedgerPackPath(r.c))
 	if err != nil {
-		r.checks.notCompared(checkLedgers, "the ledger pack would not open: "+err.Error())
+		r.ledgersWhy = "the ledger pack would not open: " + err.Error()
 		return err
 	}
 	defer func() { _ = lr.Close() }()
@@ -105,9 +104,9 @@ func (r *chunkRun) run(ctx context.Context) error {
 		// environment's fault, not a verdict.
 		r.sourceBad = !ok
 		if err != nil {
-			r.checks.notCompared(checkLedgers, "the pack could not be read: "+err.Error())
+			r.ledgersWhy = "the pack could not be read: " + err.Error()
 		} else {
-			r.checks.notCompared(checkLedgers, "the pack failed its own checks, so its ledgers were not walked")
+			r.ledgersWhy = "the pack failed its own checks, so its ledgers were not walked"
 		}
 		return err
 	}
@@ -130,14 +129,13 @@ func (r *chunkRun) run(ctx context.Context) error {
 				return errors.Join(r.infra, err)
 			}
 			r.rec.add(Mismatch{Ledger: entry.Seq, Artifact: "ledgers", Field: "pack", Actual: err.Error()})
-			r.checks.notCompared(checkLedgers,
-				fmt.Sprintf("the pack stopped yielding ledgers at %d: %v", entry.Seq, err))
+			r.ledgersWhy = fmt.Sprintf("the pack stopped yielding ledgers at %d: %v", entry.Seq, err)
 			r.sourceBad = true
-			break
+			return r.infra
 		}
 		r.ledger(entry.Seq, entry.Bytes)
 	}
-	r.checks.compared(checkLedgers)
+	r.walked = true
 	// finish compares chunk-wide totals (event and term counts, the .bin key
 	// count). After a canceled walk those totals come from a partial pass, so
 	// running it would report differences that describe how far the run got
@@ -146,6 +144,61 @@ func (r *chunkRun) run(ctx context.Context) error {
 		r.finish(ctx)
 	}
 	return r.infra
+}
+
+// outcomes judges every comparison once the run is over. A checker that
+// opened answers for itself, but only over a whole walk of a source the run
+// still trusts; otherwise what stopped the walk is the reason. A comparison
+// no checker made carries the reason recorded where it was decided.
+func (r *chunkRun) outcomes(canceled bool) checkSet {
+	var s checkSet
+	s[checkLedgers] = judged(r.walked, r.ledgersWhy)
+	s[checkChain] = judged(r.chained, r.chainWhy)
+	s[checkArchive] = judged(r.anchored, r.archiveWhy)
+	derived := r.walked && !r.sourceBad
+	switch {
+	case r.events == nil:
+		s[checkEvents] = outcome{Why: r.eventsWhy}
+	case derived:
+		s[checkEvents] = r.events.outcome()
+	}
+	switch {
+	case r.index == nil && r.bin == nil:
+		s[checkTxHashes] = outcome{Why: cmp.Or(r.binWhy, r.indexWhy,
+			"the chunk has neither a frozen .bin nor a frozen index coverage")}
+	case derived:
+		s[checkTxHashes] = r.txHashOutcome()
+	}
+	switch {
+	case canceled:
+		s.unexplained("the run was canceled before it got there")
+	case !r.walked:
+		s.unexplained("the chunk's ledgers were not walked to the end, so nothing derived from them was compared")
+	case r.sourceBad:
+		s.unexplained("the chunk's own ledgers did not check out, so nothing derived from them was compared")
+	}
+	return s
+}
+
+func judged(ran bool, why string) outcome {
+	if why != "" {
+		return outcome{Why: why}
+	}
+	return outcome{Ran: ran}
+}
+
+// txHashOutcome judges the tx-hash comparison when at least one checker
+// opened. Either artifact satisfies it on its own: they hold the same hashes,
+// so the .bin stopping at the cap costs no coverage when an index resolved
+// them all.
+func (r *chunkRun) txHashOutcome() outcome {
+	switch {
+	case r.index != nil:
+		return outcome{Ran: true}
+	case r.bin.gap() != "":
+		return outcome{Why: r.bin.gap()}
+	}
+	return outcome{Ran: true}
 }
 
 // verdict records a failure of an artifact's own bytes as a mismatch, or
@@ -200,8 +253,7 @@ func (d *deps) freshCatalog() (*catalog.Catalog, error) {
 
 // previousChunkHash returns the hash computed over the header of the ledger
 // before this chunk's first, read from the previous chunk's frozen pack. That
-// link is what carries a chunk's authenticity across the boundary; the walk
-// records checkChain when it makes the comparison.
+// link is what carries a chunk's authenticity across the boundary.
 //
 // nil with no finding when there is nothing to read: chunk 0 follows the
 // genesis ledger, and an unfrozen predecessor has no pack. A predecessor that
@@ -210,31 +262,31 @@ func (d *deps) freshCatalog() (*catalog.Catalog, error) {
 // history.
 func (r *chunkRun) previousChunkHash() *xdr.Hash {
 	if r.c == 0 {
-		r.checks.notCompared(checkChain, "the first chunk of the history follows the genesis ledger, which no pack holds")
+		r.chainWhy = "the first chunk of the history follows the genesis ledger, which no pack holds"
 		return nil
 	}
 	prev := r.c - 1
 	state, err := r.d.cat.State(prev, geometry.KindLedgers)
 	if err != nil {
 		r.infra = errors.Join(r.infra, fmt.Errorf("previous chunk %s: %w", prev, err))
-		r.checks.notCompared(checkChain, fmt.Sprintf("the catalog would not answer for chunk %s: %v", prev, err))
+		r.chainWhy = fmt.Sprintf("the catalog would not answer for chunk %s: %v", prev, err)
 		return nil
 	}
 	if state != geometry.StateFrozen {
-		r.checks.notCompared(checkChain, fmt.Sprintf("chunk %s is not frozen, so it has no pack to read", prev))
+		r.chainWhy = fmt.Sprintf("chunk %s is not frozen, so it has no pack to read", prev)
 		return nil
 	}
 	lr, err := ledger.OpenColdReader(r.d.cat.Layout().LedgerPackPath(prev))
 	if err != nil {
 		r.infra = errors.Join(r.infra, fmt.Errorf("previous chunk %s: %w", prev, err))
-		r.checks.notCompared(checkChain, fmt.Sprintf("chunk %s's pack would not open: %v", prev, err))
+		r.chainWhy = fmt.Sprintf("chunk %s's pack would not open: %v", prev, err)
 		return nil
 	}
 	defer func() { _ = lr.Close() }()
 	seq := r.c.FirstLedger() - 1
 	h, err := headerHash(lr, seq)
 	if err != nil {
-		r.checks.notCompared(checkChain, fmt.Sprintf("chunk %s's last header would not come back out of it: %v", prev, err))
+		r.chainWhy = fmt.Sprintf("chunk %s's last header would not come back out of it: %v", prev, err)
 		if isInfrastructure(err) {
 			r.infra = errors.Join(r.infra, fmt.Errorf("previous chunk %s: %w", prev, err))
 			return nil
@@ -250,69 +302,31 @@ func (r *chunkRun) previousChunkHash() *xdr.Hash {
 }
 
 // openCheckers opens one checker per artifact the chunk has: its events
-// segment and its .bin when those are frozen, and the tx-hash index when a
-// frozen coverage contains the chunk. A chunk whose .bin was demoted after
-// its index finalized has only the index; one still waiting on its index
-// build has only the .bin. An artifact that fails to open is set aside or
-// recorded, and the others are still checked.
+// segment when that is frozen, and its tx-hash artifacts. An artifact that
+// fails to open is set aside or recorded, and the others are still checked.
 func (r *chunkRun) openCheckers(ctx context.Context) {
 	if !r.frozen.Has(geometry.KindEvents) {
-		r.checks.notCompared(checkEvents, "the catalog names no frozen events artifact for it")
+		r.eventsWhy = "the catalog names no frozen events artifact for it"
 	} else if ec, err := newEventsChecker(ctx, r.rec, r.c, r.d.cat.Layout().EventsColdDirs(r.c)); err != nil {
 		r.verdict(0, "events", "open", err)
-		r.checks.notCompared(checkEvents, "the events segment would not open: "+err.Error())
+		r.eventsWhy = "the events segment would not open: " + err.Error()
 	} else {
 		r.events = ec
 	}
 	r.openTxHashCheckers()
 }
 
-// openTxHashCheckers opens the .bin checker when the chunk's key was frozen
-// at listing, and the index checker when a frozen coverage contains the
-// chunk. A .bin that has vanished since listing means a live daemon
-// finalized the chunk's index and swept the inputs; the catalog is then
-// re-read fresh, and the chunk is checked through the index it now has.
+// openTxHashCheckers opens what the catalog names for the chunk's tx hashes:
+// its .bin while that key is frozen, and the frozen index coverage containing
+// it. A chunk whose .bin was demoted after its index finalized has only the
+// index; one still waiting on its index build has only the .bin.
+//
+// The run's catalog handle is a snapshot, so a live daemon may have finalized
+// the chunk's index and swept its .bin, or rebuilt the window, since the
+// listing. A named file that is gone is resolved once more against a fresh
+// view, and the chunk is checked through what replaced it.
 func (r *chunkRun) openTxHashCheckers() {
-	cat := r.d.cat
-	if r.frozen.Has(geometry.KindTxHash) {
-		bc, err := newBinChecker(r.rec, cat.Layout().TxHashBinPath(r.c), cat.TxHashIndexSecret(r.c))
-		switch {
-		case err == nil:
-			r.bin = bc
-		case errors.Is(err, fs.ErrNotExist):
-			cov, covered, ferr := r.d.freshCoverageAfterSweep(r.c)
-			switch {
-			case ferr != nil:
-				r.infra = errors.Join(r.infra, ferr)
-			case covered:
-				r.openIndex(cov)
-			default:
-				r.infra = errors.Join(r.infra, fmt.Errorf("txhash: %w", err))
-			}
-			return
-		default:
-			r.verdict(0, "txhash", "bin", err)
-			r.binWhy = "the .bin would not parse: " + err.Error()
-		}
-	}
-	cov, covered, err := r.d.indexes.coverageOf(cat, r.c)
-	switch {
-	case err != nil:
-		r.infra = errors.Join(r.infra, fmt.Errorf("txhash index coverage: %w", err))
-	case covered:
-		r.openIndex(cov)
-	}
-}
-
-// openIndex opens the index of coverage cov. An index file gone since the
-// run listed its coverage means a live daemon rebuilt the window and swept
-// the old file; the chunk is then checked through the coverage that
-// replaced it.
-func (r *chunkRun) openIndex(cov geometry.TxHashIndexCoverage) {
-	idx, err := r.d.indexes.acquire(cov)
-	if err == nil {
-		r.heldIndex = cov.Key
-	}
+	err := r.openTxHashSources(r.d.cat)
 	if errors.Is(err, fs.ErrNotExist) {
 		fresh, ferr := r.d.freshCatalog()
 		if ferr != nil {
@@ -320,25 +334,63 @@ func (r *chunkRun) openIndex(cov geometry.TxHashIndexCoverage) {
 			return
 		}
 		defer func() { _ = fresh.Close() }()
-		newCov, covered, cerr := r.d.indexes.coverageOf(fresh, r.c)
-		switch {
-		case cerr != nil:
-			r.infra = errors.Join(r.infra, cerr)
-			return
-		case !covered || newCov.Key == cov.Key:
-			r.infra = errors.Join(r.infra, fmt.Errorf("txhash index: %w", err))
-			return
-		}
-		idx, err = r.d.indexes.acquire(newCov)
-		if err == nil {
-			r.heldIndex, cov = newCov.Key, newCov
-		}
+		err = r.openTxHashSources(fresh)
 	}
 	if err != nil {
+		r.infra = errors.Join(r.infra, err)
+	}
+}
+
+// openTxHashSources opens the tx-hash artifacts cat names for the chunk that
+// are not open yet. A named file that is missing is returned, wrapping
+// fs.ErrNotExist; a file that is there but wrong is a verdict, recorded here.
+func (r *chunkRun) openTxHashSources(cat *catalog.Catalog) error {
+	state, err := cat.State(r.c, geometry.KindTxHash)
+	if err != nil {
+		return fmt.Errorf("txhash state: %w", err)
+	}
+	var missing error
+	if state == geometry.StateFrozen && r.bin == nil && r.binWhy == "" {
+		bc, err := newBinChecker(r.rec, cat.Layout().TxHashBinPath(r.c), cat.TxHashIndexSecret(r.c))
+		switch {
+		case err == nil:
+			r.bin = bc
+		case errors.Is(err, fs.ErrNotExist):
+			missing = fmt.Errorf("txhash: %w", err)
+		default:
+			r.verdict(0, "txhash", "bin", err)
+			r.binWhy = "the .bin would not parse: " + err.Error()
+		}
+	}
+	if r.index != nil || r.indexWhy != "" {
+		return missing
+	}
+	cov, covered, err := r.d.indexes.coverageOf(cat, r.c)
+	switch {
+	case err != nil:
+		return errors.Join(missing, fmt.Errorf("txhash index coverage: %w", err))
+	case covered:
+		if err := r.openIndex(cov); err != nil {
+			missing = errors.Join(missing, fmt.Errorf("txhash index: %w", err))
+		}
+	}
+	return missing
+}
+
+// openIndex opens the index of coverage cov and checks that the file is the
+// one the catalog means. A missing file is returned; anything wrong with
+// the file that is there is a verdict.
+func (r *chunkRun) openIndex(cov geometry.TxHashIndexCoverage) error {
+	idx, err := r.d.indexes.acquire(cov)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
 		r.verdict(0, "txhash", "index", err)
 		r.indexWhy = "the tx-hash index would not open: " + err.Error()
-		return
+		return nil
 	}
+	r.heldIndex = cov.Key
 	// The index names its own routing secret and keys every lookup with it,
 	// so a file built under a different master secret — or copied in from
 	// another data tree — resolves perfectly and answers about the wrong
@@ -351,50 +403,21 @@ func (r *chunkRun) openIndex(cov geometry.TxHashIndexCoverage) {
 			Actual:   "the index file declares a different one",
 		})
 		r.indexWhy = "the tx-hash index declares a secret this catalog did not derive"
-		return
+		return nil
+	}
+	// The file is chosen by the coverage in its name; its own bounds must
+	// agree, or an empty index under the wrong name would pass every lookup
+	// it is never asked.
+	if lo, hi := cov.Lo.FirstLedger(), cov.Hi.LastLedger(); idx.MinLedger() != lo || idx.MaxLedger() != hi {
+		r.rec.add(Mismatch{
+			Artifact: "txhash", Field: "index_span",
+			Expected: fmt.Sprintf("[%d,%d]", lo, hi), Actual: fmt.Sprintf("[%d,%d]", idx.MinLedger(), idx.MaxLedger()),
+		})
+		r.indexWhy = "the tx-hash index spans different ledgers than its coverage names"
+		return nil
 	}
 	r.index = &indexChecker{rec: r.rec, idx: idx}
-}
-
-// settle records the outcome of the comparisons only the finished run can
-// answer for: the derived artifacts, which depend both on the checkers that
-// opened and on the source they were compared against.
-func (r *chunkRun) settle() {
-	if !r.checks[checkLedgers].Ran {
-		// The walk did not reach the end, so nothing derived from it was
-		// fully compared either. Whatever stopped the walk is the reason,
-		// and the caller fills it in for every check still open.
-		return
-	}
-	if r.sourceBad {
-		const why = "the chunk's own ledgers did not check out, so nothing derived from them was compared"
-		r.checks.notCompared(checkEvents, why)
-		r.checks.notCompared(checkTxHashes, why)
-		return
-	}
-	if r.events != nil {
-		if why := r.events.gap(); why != "" {
-			r.checks.notCompared(checkEvents, why)
-		} else {
-			r.checks.compared(checkEvents)
-		}
-	}
-	// Either artifact satisfies the tx-hash comparison on its own: they hold
-	// the same hashes, so the .bin stopping at the cap costs no coverage when
-	// an index resolved them all, and only matters when there is no index.
-	switch {
-	case r.index != nil:
-		r.checks.compared(checkTxHashes)
-	case r.bin == nil:
-		// Neither artifact compared anything. Prefer a specific failure over
-		// the generic "neither is frozen".
-		r.checks.notCompared(checkTxHashes, cmp.Or(r.binWhy, r.indexWhy,
-			"the chunk has neither a frozen .bin nor a frozen index coverage"))
-	case r.bin.gap() != "":
-		r.checks.notCompared(checkTxHashes, r.bin.gap())
-	default:
-		r.checks.compared(checkTxHashes)
-	}
+	return nil
 }
 
 // releaseIndex drops this chunk's hold on the index it acquired, if any.
@@ -405,23 +428,6 @@ func (r *chunkRun) releaseIndex() error {
 	key := r.heldIndex
 	r.heldIndex = ""
 	return r.d.indexes.release(key)
-}
-
-// freshCoverageAfterSweep re-reads the catalog and reports whether chunk c's
-// .bin key is gone and a frozen coverage contains it. Both are true after a
-// terminal index commit and its sweep; a key still frozen means the .bin
-// really is missing.
-func (d *deps) freshCoverageAfterSweep(c chunk.ID) (geometry.TxHashIndexCoverage, bool, error) {
-	fresh, err := d.freshCatalog()
-	if err != nil {
-		return geometry.TxHashIndexCoverage{}, false, fmt.Errorf("re-read catalog: %w", err)
-	}
-	defer func() { _ = fresh.Close() }()
-	state, err := fresh.State(c, geometry.KindTxHash)
-	if err != nil || state == geometry.StateFrozen {
-		return geometry.TxHashIndexCoverage{}, false, err
-	}
-	return d.indexes.coverageOf(fresh, c)
 }
 
 func (r *chunkRun) closeCheckers() {
@@ -437,10 +443,8 @@ func (r *chunkRun) ledger(seq uint32, raw []byte) {
 	if err := xdr.SafeUnmarshal(raw, &lcm); err != nil {
 		r.rec.add(Mismatch{Ledger: seq, Artifact: "ledgers", Field: "decode", Actual: err.Error()})
 		if seq == r.c.FirstLedger() && r.prevHash != nil {
-			// verifyChunk's fallback reason only applies when the walk stopped
-			// early. This walk finished, so record the real reason here.
-			r.checks.notCompared(checkChain,
-				"the chunk's first ledger would not decode, so the previous chunk's last header was compared with nothing")
+			r.chainWhy = "the chunk's first ledger would not decode, " +
+				"so the previous chunk's last header was compared with nothing"
 		}
 		r.sourceBad = true
 		r.prevHash = nil // the next ledger has nothing sound to chain to
@@ -448,11 +452,9 @@ func (r *chunkRun) ledger(seq uint32, raw []byte) {
 	}
 	r.ledgers++
 	if seq == r.c.FirstLedger() && r.prevHash != nil {
-		// The predecessor's hash is in hand and checkLedger is about to
-		// compare it. Recorded here rather than where it was fetched: a run
-		// canceled in between, or a first ledger that will not decode, never
-		// reaches the comparison, and the count must not claim it did.
-		r.checks.compared(checkChain)
+		// Recorded here rather than where the hash was fetched: a run
+		// canceled in between never reaches the comparison.
+		r.chained = true
 	}
 	computed, ok := checkLedger(r.rec, seq, &lcm, r.prevHash)
 	if !ok {
@@ -470,7 +472,6 @@ func (r *chunkRun) ledger(seq uint32, raw []byte) {
 	}
 	r.txs += exp.txs
 	r.txHashes += uint64(len(exp.txHashes))
-	r.invokes += uint64(len(exp.invokes))
 	r.invocations(seq, exp.invokes)
 	if r.events != nil {
 		if err := r.events.ledger(seq, exp.events); err != nil {
@@ -497,20 +498,22 @@ func (r *chunkRun) ledger(seq uint32, raw []byte) {
 func (r *chunkRun) invocations(seq uint32, checks []invokeCheck) {
 	for i := range checks {
 		c := &checks[i]
-		switch {
-		case c.skipped != "":
+		if c.skipped != "" {
 			r.invokesUnchecked++
-		case c.ok():
-		default:
-			actual := c.reason
-			if actual == "" {
-				actual = hexHash(c.got)
-			}
-			r.rec.add(Mismatch{
-				Ledger: seq, TxHash: c.txHash.HexString(), Artifact: "ledgers",
-				Field: fmt.Sprintf("invoke_success_hash (op %d)", c.opIdx), Expected: hexHash(c.want), Actual: actual,
-			})
+			continue
 		}
+		r.invokes++
+		if c.ok() {
+			continue
+		}
+		actual := c.reason
+		if actual == "" {
+			actual = hexHash(c.got)
+		}
+		r.rec.add(Mismatch{
+			Ledger: seq, TxHash: c.txHash.HexString(), Artifact: "ledgers",
+			Field: fmt.Sprintf("invoke_success_hash (op %d)", c.opIdx), Expected: hexHash(c.want), Actual: actual,
+		})
 	}
 }
 
@@ -518,7 +521,6 @@ func (r *chunkRun) finish(ctx context.Context) {
 	if r.events != nil {
 		if err := r.events.finish(ctx); err != nil {
 			r.verdict(0, "events", "finish", err)
-			r.checks.notCompared(checkEvents, "the events segment's chunk-wide checks did not finish: "+err.Error())
 		}
 	}
 	if r.bin != nil {
@@ -535,14 +537,14 @@ func (r *chunkRun) finish(ctx context.Context) {
 // reached is set aside as the run's error; the walk still runs.
 func (r *chunkRun) anchor(lr *ledger.ColdReader) {
 	if r.d.archive == nil {
-		r.checks.notCompared(checkArchive, "no history archive was given")
+		r.archiveWhy = "no history archive was given"
 		return
 	}
 	seq := r.c.LastLedger()
 	entry, err := r.d.archive.GetLedgerHeader(seq)
 	if err != nil {
 		r.infra = errors.Join(r.infra, fmt.Errorf("history archive header for ledger %d: %w", seq, err))
-		r.checks.notCompared(checkArchive, "the archive would not serve the chunk's last header: "+err.Error())
+		r.archiveWhy = "the archive would not serve the chunk's last header: " + err.Error()
 		return
 	}
 	stored, err := headerHash(lr, seq)
@@ -551,10 +553,10 @@ func (r *chunkRun) anchor(lr *ledger.ColdReader) {
 		if isInfrastructure(err) {
 			r.infra = errors.Join(r.infra, err)
 		}
-		r.checks.notCompared(checkArchive, "the chunk's own last header would not decode: "+err.Error())
+		r.archiveWhy = "the chunk's own last header would not decode: " + err.Error()
 		return
 	}
-	r.checks.compared(checkArchive)
+	r.anchored = true
 	if entry.Hash != stored {
 		r.rec.add(Mismatch{
 			Ledger: seq, Artifact: "ledgers", Field: "archive_anchor",

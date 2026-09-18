@@ -36,20 +36,35 @@ type eventsChecker struct {
 	// checked events it skipped.
 	checked uint64
 	terms   event.Bitmaps
-	// unfinished is why this checker stopped short of comparing everything
-	// the events segment is made of, and doubles as the flag that stops the
-	// payload loop: once set, later ledgers accumulate their terms but
-	// compare nothing, and finish does not probe for a trailing payload.
-	//
-	// The term sweep writes here too, which is safe only because it runs
-	// after finish's last read of this field. Move it earlier and a cap
-	// reached during the sweep would retroactively suppress the trailing
-	// payload probe.
+	// unfinished is why the payload comparison stopped short, and doubles as
+	// the flag that stops it: once set, later ledgers accumulate their terms
+	// but compare nothing, and finish does not probe for a trailing payload.
 	unfinished string
+	// sweepStopped is why the term sweep stopped short, when it did.
+	sweepStopped string
 	// termsCompared is set once the term sweep has run to the end. A finish
 	// that bailed before it — on an unreadable index.pack, say — leaves the
 	// chunk uncompared against its events index however clean the pack was.
 	termsCompared bool
+	// finishWhy is why the chunk-wide checks did not finish, when they did not.
+	finishWhy string
+}
+
+// outcome is this checker's own account of whether it compared everything
+// the events segment is made of: its payloads, its per-ledger ranges, its
+// counts and its terms.
+func (e *eventsChecker) outcome() outcome {
+	switch {
+	case e.finishWhy != "":
+		return outcome{Why: e.finishWhy}
+	case e.unfinished != "":
+		return outcome{Why: e.unfinished}
+	case e.sweepStopped != "":
+		return outcome{Why: e.sweepStopped}
+	case !e.termsCompared:
+		return outcome{Why: "the term sweep did not run"}
+	}
+	return outcome{Ran: true}
 }
 
 func newEventsChecker(ctx context.Context, rec *recorder, c chunk.ID, dirs event.ColdDirs) (*eventsChecker, error) {
@@ -149,6 +164,14 @@ func (e *eventsChecker) stopChecking() {
 // finish checks that events.pack holds nothing past the oracle's last event,
 // then every expected term's posting list and the term count.
 func (e *eventsChecker) finish(ctx context.Context) error {
+	err := e.compareTotals(ctx)
+	if err != nil {
+		e.finishWhy = "the events segment's chunk-wide checks did not finish: " + err.Error()
+	}
+	return err
+}
+
+func (e *eventsChecker) compareTotals(ctx context.Context) error {
 	if e.unfinished == "" {
 		if _, err, ok := e.next(); ok {
 			if err != nil {
@@ -194,7 +217,7 @@ func (e *eventsChecker) checkTerms(ctx context.Context) error {
 		if e.rec.full() {
 			// A comparison the cap prevented is lost coverage, not a
 			// suppressed mismatch, so it is said as a reason.
-			e.unfinished = fmt.Sprintf(
+			e.sweepStopped = fmt.Sprintf(
 				"the mismatch cap stopped the term sweep with %d of %d terms unchecked",
 				len(keys)-i, len(keys))
 			return nil
@@ -210,19 +233,6 @@ func (e *eventsChecker) checkTerms(ctx context.Context) error {
 	}
 	e.termsCompared = true
 	return nil
-}
-
-// gap is why this checker did not compare everything the events segment is
-// made of — its payloads, its per-ledger ranges, its counts and its terms —
-// or "" when it compared all of it.
-func (e *eventsChecker) gap() string {
-	switch {
-	case e.unfinished != "":
-		return e.unfinished
-	case !e.termsCompared:
-		return "the term sweep did not run"
-	}
-	return ""
 }
 
 // close releases the pull iterator before the reader, so no range read is

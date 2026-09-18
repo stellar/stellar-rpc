@@ -94,34 +94,18 @@ type outcome struct {
 	Why string
 }
 
-// checkSet is every comparison's outcome for one chunk. An array rather than
-// a map so the zero value is "nothing was compared", which is exactly what a
-// result nobody filled in must look like.
+// checkSet is every comparison's outcome for one chunk, judged once by
+// chunkRun.outcomes. An array rather than a map so the zero value is
+// "nothing was compared", which is exactly what a result nobody filled in
+// must look like.
 type checkSet [numChecks]outcome
 
-// compared records that a comparison ran to completion — unless a reason was
-// already recorded, in which case that site was closer to the cause and its
-// reason stands.
-func (s *checkSet) compared(c check) {
-	if s[c].Why == "" {
-		s[c].Ran = true
-	}
-}
-
-// notCompared records why a comparison did not happen. The first reason wins;
-// it is the one closest to the cause.
-func (s *checkSet) notCompared(c check, why string) {
-	if s[c].Why == "" {
-		s[c] = outcome{Why: why}
-	}
-}
-
-// unexplained gives every comparison that neither ran nor recorded a reason
-// the one the caller knows, so no gap in a report is ever silent.
+// unexplained gives every comparison that neither ran nor has a reason the
+// one the caller knows, so no gap in a report is ever silent.
 func (s *checkSet) unexplained(why string) {
 	for c := range allChecks {
-		if !s[c].Ran {
-			s.notCompared(c, why)
+		if !s[c].Ran && s[c].Why == "" {
+			s[c].Why = why
 		}
 	}
 }
@@ -326,7 +310,7 @@ func (r *Report) Summary() string {
 			"of %d chunks asked for, compared against: %s; "+
 			"tx-hash index: %d checked, %d failed, %d not checked",
 		ok, mismatched, errored, skipped, canceled, notRun, r.AbsentCount,
-		ledgers, txs, events, invokes-unchecked, unchecked,
+		ledgers, txs, events, invokes, unchecked,
 		len(r.Chunks)+r.AbsentCount, strings.Join(against, ", "),
 		idxChecked, idxBad, idxSkipped)
 }

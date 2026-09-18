@@ -905,13 +905,13 @@ func TestReport_GapsGroupByReasonAndHideNothing(t *testing.T) {
 	ran := func(cs ...check) checkSet {
 		var s checkSet
 		for _, c := range cs {
-			s.compared(c)
+			s[c] = outcome{Ran: true}
 		}
 		return s
 	}
 	full := ChunkResult{Chunk: 1, Status: statusOK, Checks: ran(checkLedgers, checkChain, checkEvents, checkTxHashes)}
 	short := ChunkResult{Chunk: 2, Status: statusOK, Checks: ran(checkLedgers, checkChain, checkTxHashes)}
-	short.Checks.notCompared(checkEvents, "the events segment would not open")
+	short.Checks[checkEvents] = outcome{Why: "the events segment would not open"}
 	r := &Report{Chunks: []ChunkResult{full, short}}
 
 	gaps := r.gaps()
@@ -947,21 +947,12 @@ func TestCheckSet_ZeroValueIsNothingCompared(t *testing.T) {
 		assert.Equal(t, "no reason recorded", s[c].reason(), "check %d", c)
 	}
 
-	s.notCompared(checkEvents, "first reason")
-	s.notCompared(checkEvents, "second reason")
-	s.compared(checkEvents)
-	assert.False(t, s[checkEvents].Ran, "a recorded reason outlives a later compared()")
-	assert.Equal(t, "first reason", s[checkEvents].Why, "the first reason is closest to the cause")
-
-	s.compared(checkChain)
-	s.notCompared(checkChain, "too late")
-	assert.False(t, s[checkChain].Ran, "and a later reason still wins over a bare compared()")
-
-	var u checkSet
-	u.compared(checkLedgers)
-	u.unexplained("the run stopped first")
-	assert.True(t, u[checkLedgers].Ran, "unexplained leaves what ran alone")
-	assert.Equal(t, "the run stopped first", u[checkEvents].Why, "and explains every gap that had no reason")
+	s[checkLedgers] = outcome{Ran: true}
+	s[checkChain] = outcome{Why: "its own reason"}
+	s.unexplained("the run stopped first")
+	assert.True(t, s[checkLedgers].Ran, "unexplained leaves what ran alone")
+	assert.Equal(t, "its own reason", s[checkChain].Why, "and a recorded reason, which is closer to the cause")
+	assert.Equal(t, "the run stopped first", s[checkEvents].Why, "and explains every gap that had none")
 }
 
 // TestRun_AnchoredIsReportedOnlyWhenItRan: without an archive the anchor
@@ -1193,4 +1184,73 @@ func TestRun_UnreadableEventRecordIsOneFindingNotTwenty(t *testing.T) {
 		"and the reason names the artifact that actually failed")
 	assert.True(t, c.Checks[checkTxHashes].Ran, "the tx hashes were, and say so")
 	assert.True(t, c.Checks[checkLedgers].Ran, "so were the ledgers themselves")
+}
+
+// TestRun_IndexSpanIsChecked: an index built under this tree's secret but
+// over different ledgers than its coverage names is a verdict on the file,
+// and the chunk is resolved through its .bin instead.
+func TestRun_IndexSpanIsChecked(t *testing.T) {
+	f := newFixtureTree(t)
+	ledgers, _ := chunkLedgers(t, 0, xdr.Hash{}, "", richEvery)
+	f.backfillChunk0(t, ledgers)
+
+	cov, covered, err := newIndexCache(f.layout).coverageOf(f.cat, 0)
+	require.NoError(t, err)
+	require.True(t, covered, "the backfill built chunk 0's index")
+
+	secret := f.cat.TxHashIndexSecret(0)
+	bin := filepath.Join(t.TempDir(), txhash.ColdBinName(cov.Lo))
+	var e txhash.ColdEntry
+	e.Key = stores.BlindKey(secret, make([]byte, txhash.ColdKeySize))
+	e.Seq = cov.Lo.FirstLedger() + 1
+	require.NoError(t, txhash.WriteColdBin(bin, secret, []txhash.ColdEntry{e}))
+	idx := f.layout.TxHashIndexFilePath(cov)
+	require.NoError(t, os.Remove(idx))
+	require.NoError(t, txhash.BuildColdIndex(
+		t.Context(), []string{bin}, idx, cov.Lo.FirstLedger()+1, cov.Hi.LastLedger()))
+
+	report := f.run(t, -1)
+	c := report.Chunks[0]
+	require.NoError(t, c.Err)
+	assert.Equal(t, 1, fieldsOf(c.Mismatches)["txhash/index_span"])
+	assert.False(t, c.ResolvedThroughIndex)
+	assert.True(t, c.Checks[checkTxHashes].Ran, "the .bin still covered the hashes")
+	assert.True(t, report.Failed())
+}
+
+// TestRun_EmptyRangeStillNamesItsAbsentChunks: a bounded range with nothing
+// frozen in it is an error, and the report still says which chunks were
+// asked for.
+func TestRun_EmptyRangeStillNamesItsAbsentChunks(t *testing.T) {
+	f := newFixtureTree(t)
+	ledgers, _ := chunkLedgers(t, 0, xdr.Hash{}, "", richEvery)
+	f.backfillChunk0(t, ledgers)
+	require.NoError(t, f.cat.Close())
+
+	report, err := Run(context.Background(), rpcv2test.SilentLogger(), Options{
+		Layout: f.layout, Passphrase: passphrase, StartChunk: 5, EndChunk: 7,
+	})
+	require.ErrorContains(t, err, "no frozen chunks in range")
+	require.NotNil(t, report)
+	assert.Equal(t, []chunk.ID{5, 6, 7}, report.Absent)
+	assert.Equal(t, 3, report.AbsentCount)
+	assert.Empty(t, report.Chunks)
+}
+
+// TestInvocations_CountsOnlyWhatWasChecked: an invocation the export gave no
+// way to check is counted apart from the ones compared with their result.
+func TestInvocations_CountsOnlyWhatWasChecked(t *testing.T) {
+	var same, other xdr.Hash
+	other[0] = 1
+	r := &chunkRun{rec: &recorder{limit: 50}}
+	r.invocations(7, []invokeCheck{
+		{want: same, got: same},
+		{want: same, got: other},
+		{want: same, skipped: "backfilled export without the diagnostic events that hold the committed originals"},
+	})
+	assert.Equal(t, uint64(2), r.invokes, "checked, whether or not they matched")
+	assert.Equal(t, uint64(1), r.invokesUnchecked)
+	require.Len(t, r.rec.out, 1)
+	assert.Equal(t, "ledgers", r.rec.out[0].Artifact)
+	assert.Contains(t, r.rec.out[0].Field, "invoke_success_hash")
 }

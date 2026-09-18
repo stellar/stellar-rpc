@@ -132,7 +132,11 @@ func logFindings(logger *supportlog.Entry, report *Report) {
 			if m.TxHash != "" {
 				where += " tx " + m.TxHash
 			}
-			logger.Warnf("%s %s %s: expected %s, got %s", where, m.Artifact, m.Field, m.Expected, m.Actual)
+			if m.Expected == "" {
+				logger.Warnf("%s %s %s: %s", where, m.Artifact, m.Field, m.Actual)
+			} else {
+				logger.Warnf("%s %s %s: expected %s, got %s", where, m.Artifact, m.Field, m.Expected, m.Actual)
+			}
 		}
 		if c.Dropped > 0 {
 			logger.Warnf("chunk %s: %d more mismatches not shown", c.Chunk, c.Dropped)

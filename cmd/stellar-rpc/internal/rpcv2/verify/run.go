@@ -117,7 +117,7 @@ func Run(ctx context.Context, logger *supportlog.Entry, opts Options) (*Report, 
 		return nil, err
 	}
 	if len(targets) == 0 {
-		return nil, errors.New("verify: no frozen chunks in range")
+		return &Report{Absent: absent, AbsentCount: absentTotal}, errors.New("verify: no frozen chunks in range")
 	}
 	indexes := newIndexCache(cat.Layout())
 	defer func() { _ = indexes.closeAll() }()
@@ -200,25 +200,18 @@ func verifyChunk(ctx context.Context, d *deps, t target) ChunkResult {
 	if r.events != nil {
 		res.Events = r.events.checked
 	}
-	res.Checks = r.checks
 	// Keep the findings: every row describes bytes really read, and run()
 	// already skips the chunk-wide totals a partial pass would distort.
 	// Failed() keys on the findings, Incomplete() on the status.
-	if ctx.Err() != nil {
-		res.Checks.unexplained("the run was canceled before it got there")
+	canceled := ctx.Err() != nil
+	res.Checks = r.outcomes(canceled)
+	if canceled {
 		res.Status = statusCanceled
 		return res
 	}
-	if !res.Checks[checkLedgers].Ran {
-		// Only when the walk really did stop early. Anything left unexplained
-		// reads as "no reason recorded", which is the signal that some site
-		// forgot to set one.
-		res.Checks.unexplained(
-			"the chunk's ledgers were not walked to the end, so nothing derived from them was compared")
-	}
 	// Gated exactly as checkLedgers is, so the two can never disagree about one
 	// chunk; see the field's doc for why it is not a check.
-	res.ResolvedThroughIndex = r.index != nil && res.Checks[checkLedgers].Ran && !r.sourceBad
+	res.ResolvedThroughIndex = r.index != nil && r.walked && !r.sourceBad
 	res.Status = classify(res.Err, len(res.Mismatches))
 	return res
 }
@@ -259,12 +252,17 @@ func frozenChunks(cat *catalog.Catalog, opts Options) ([]target, []chunk.ID, int
 // no frozen artifact for. The span is the requested range where the operator
 // gave bounds, and the frozen extent where they did not — so a default run
 // reports holes in the middle of its own history, and a bounded run also
-// reports a range that runs off the end of what has been backfilled.
+// reports a range that runs off the end of what has been backfilled. With
+// nothing frozen there is no extent, so only a range bounded on both sides
+// has anything to count.
 func absentChunks(byChunk map[chunk.ID]catalog.ArtifactSet, targets []target, opts Options) ([]chunk.ID, int) {
-	if len(targets) == 0 {
+	var lo, hi chunk.ID
+	switch {
+	case len(targets) > 0:
+		lo, hi = targets[0].chunk, targets[len(targets)-1].chunk
+	case opts.StartChunk < 0 || opts.EndChunk < 0:
 		return nil, 0
 	}
-	lo, hi := targets[0].chunk, targets[len(targets)-1].chunk
 	if opts.StartChunk >= 0 {
 		lo = chunk.ID(opts.StartChunk) //nolint:gosec // validated non-negative above
 	}
