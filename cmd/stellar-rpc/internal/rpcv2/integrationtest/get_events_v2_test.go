@@ -35,6 +35,15 @@ func (f *eventsFixture) increment(test *infrastructure.Test) {
 }
 func (f *eventsFixture) last() uint32 { return f.ledgers[len(f.ledgers)-1] }
 
+// The fixture deploys with CreateContractV2 and counts unified transaction
+// events, both protocol 23 and later.
+func newEventsTest(t *testing.T) *infrastructure.Test {
+	if infrastructure.GetCoreMaxSupportedProtocol() < 23 {
+		t.Skip("Only test this for protocol >= 23")
+	}
+	return infrastructure.NewTest(t, nil)
+}
+
 // Each call waits for inclusion, so the increments land in distinct ledgers.
 func deployAndIncrement(t *testing.T, test *infrastructure.Test, n int) *eventsFixture {
 	_, rawID, _ := test.CreateEventsContract()
@@ -122,7 +131,7 @@ func reversed(s []string) []string {
 }
 
 func TestGetEventsV2AscendingDrainToTheTip(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	test := newEventsTest(t)
 	rpc := test.GetRPCLient()
 	fx := deployAndIncrement(t, test, 3)
 
@@ -146,7 +155,7 @@ func TestGetEventsV2AscendingDrainToTheTip(t *testing.T) {
 }
 
 func TestGetEventsV2ClosedRangeBothOrders(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	test := newEventsTest(t)
 	rpc := test.GetRPCLient()
 	fx := deployAndIncrement(t, test, 3)
 
@@ -181,7 +190,7 @@ func TestGetEventsV2ClosedRangeBothOrders(t *testing.T) {
 }
 
 func TestGetEventsV2FiltersOverTheWire(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	test := newEventsTest(t)
 	rpc := test.GetRPCLient()
 	fx := deployAndIncrement(t, test, 2)
 
@@ -279,7 +288,7 @@ func TestGetEventsV2FiltersOverTheWire(t *testing.T) {
 
 // Same node, real Core output. The unit parity harness uses synthetic data.
 func TestGetEventsV2MatchesV1(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	test := newEventsTest(t)
 	rpc := test.GetRPCLient()
 	fx := deployAndIncrement(t, test, 3)
 
@@ -315,7 +324,7 @@ func TestGetEventsV2MatchesV1(t *testing.T) {
 // The union of the pages must equal a closed range read: nothing lost at the
 // tip, nothing twice.
 func TestGetEventsV2PagingWhileTipMoves(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	test := newEventsTest(t)
 	rpc := test.GetRPCLient()
 	fx := deployAndIncrement(t, test, 1)
 
