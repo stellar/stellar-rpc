@@ -1,6 +1,7 @@
 package verify
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"iter"
@@ -411,11 +412,20 @@ func sqliteEventRows(t *testing.T, lcm xdr.LedgerCloseMeta) []sqliteEventRow {
 	var rows []sqliteEventRow
 	reader := sqlitedb.NewEventReader(logger, testDB, passphrase)
 	err = reader.GetEvents(ctx, cursorRange, nil, nil, nil,
-		func(ev xdr.DiagnosticEvent, cur protocol.Cursor, closeTime int64, txHash *xdr.Hash) bool {
-			raw, merr := ev.Event.MarshalBinary()
-			require.NoError(t, merr)
-			rows = append(rows, sqliteEventRow{cursor: cur, txHash: *txHash, closeTime: closeTime, eventXDR: raw})
-			return true
+		func(eventView xdr.DiagnosticEventView, cur protocol.Cursor, closeTime int64, txHash *xdr.Hash) (bool, error) {
+			ev, verr := eventView.Event()
+			if verr != nil {
+				return false, verr
+			}
+			raw, rerr := ev.Raw()
+			if rerr != nil {
+				return false, rerr
+			}
+			// The view aliases the row buffer, valid only for this call.
+			rows = append(rows, sqliteEventRow{
+				cursor: cur, txHash: *txHash, closeTime: closeTime, eventXDR: bytes.Clone(raw),
+			})
+			return true, nil
 		})
 	require.NoError(t, err)
 	return rows
