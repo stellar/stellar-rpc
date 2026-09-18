@@ -4,8 +4,8 @@ package sqlitedb
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
+	"iter"
 
 	sq "github.com/Masterminds/squirrel"
 
@@ -51,52 +51,48 @@ func (l ledgerReaderTx) GetLedgerRange(ctx context.Context) (store.LedgerRange, 
 	return getLedgerRangeWithoutCache(ctx, l.tx)
 }
 
-// BatchGetLedgers fetches ledgers in batches from the db.
-func (l ledgerReaderTx) BatchGetLedgers(
-	ctx context.Context,
-	start, end uint32,
-) ([]store.LedgerMetadataChunk, error) {
-	if start > end {
-		return nil, errors.New("batch size must be greater than zero")
-	}
-	sql := sq.Select("meta").
-		From(ledgerCloseMetaTableName).
-		Where(sq.And{
-			sq.GtOrEq{"sequence": start},
-			sq.LtOrEq{"sequence": end},
-		})
-
-	results := make([][]byte, 0, end-start+1)
-	if err := l.tx.Select(ctx, &results, sql); err != nil {
-		return nil, err
-	}
-
-	batch := make([]store.LedgerMetadataChunk, len(results))
-	for i, meta := range results {
-		headerView, err := xdr.LedgerCloseMetaView(meta).LedgerHeader()
-		if err != nil {
-			return nil, err
+// ScanLedgers yields the stored ledgers in [start, end] ascending, one row at a
+// time inside the reader's transaction. Absent sequences are simply not yielded.
+func (l ledgerReaderTx) ScanLedgers(
+	ctx context.Context, start, end uint32,
+) iter.Seq2[store.RawLedger, error] {
+	return func(yield func(store.RawLedger, error) bool) {
+		if start > end {
+			return
 		}
-		headerRaw, err := headerView.Raw()
+		sql := sq.Select("sequence", "meta").From(ledgerCloseMetaTableName).
+			Where(sq.GtOrEq{"sequence": start}).
+			Where(sq.LtOrEq{"sequence": end}).
+			OrderBy("sequence asc")
+
+		rows, err := l.tx.Query(ctx, sql)
 		if err != nil {
-			return nil, err
+			yield(store.RawLedger{}, err)
+			return
 		}
-		batch[i] = store.LedgerMetadataChunk{HeaderRaw: headerRaw, Lcm: meta}
-	}
+		// Runs on an early break too, which is how the consumer ends the scan.
+		defer rows.Close()
 
-	return batch, nil
-}
-
-// WithLedgerRaw lends the ledger's stored meta blob without decoding it. The
-// blob is ours to lend: database/sql clones each BLOB scanned into a *[]byte.
-func (l ledgerReaderTx) WithLedgerRaw(
-	ctx context.Context, sequence uint32, fn store.WithLedgerRawFn,
-) (bool, error) {
-	meta, found, err := getLedgerRawFromDB(ctx, l.tx, sequence)
-	if err != nil || !found {
-		return found, err
+		for rows.Next() {
+			if err := ctx.Err(); err != nil {
+				yield(store.RawLedger{}, err)
+				return
+			}
+			var seq uint32
+			var meta []byte
+			if err := rows.Scan(&seq, &meta); err != nil {
+				yield(store.RawLedger{}, err)
+				return
+			}
+			// database/sql clones each BLOB into meta, so the loan is a formality here.
+			if !yield(store.RawLedger{Sequence: seq, Raw: meta}, nil) {
+				return
+			}
+		}
+		if err := rows.Err(); err != nil {
+			yield(store.RawLedger{}, err)
+		}
 	}
-	return true, fn(meta)
 }
 
 func (l ledgerReaderTx) Done() error {
