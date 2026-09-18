@@ -384,22 +384,6 @@ type sparseLedgerReader struct {
 	served int
 }
 
-func (r *sparseLedgerReader) GetLedger(_ context.Context, seq uint32) (xdr.LedgerCloseMeta, bool, error) {
-	r.served++
-	return createEmptyTestLedger(seq), true, nil
-}
-
-func (r *sparseLedgerReader) WithLedgerRaw(
-	_ context.Context, seq uint32, fn store.WithLedgerRawFn,
-) (bool, error) {
-	r.served++
-	raw, err := createEmptyTestLedger(seq).MarshalBinary()
-	if err != nil {
-		return false, err
-	}
-	return true, fn(raw)
-}
-
 func (r *sparseLedgerReader) GetLedgerRange(context.Context) (store.LedgerRange, error) {
 	return store.LedgerRange{
 		FirstLedger: store.LedgerInfo{Sequence: 1, CloseTime: 100},

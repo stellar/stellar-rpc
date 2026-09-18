@@ -102,7 +102,7 @@ func TestGetLedgerRange_BootStampFallsBackThenCaches(t *testing.T) {
 
 func TestGetLedger_PointRead(t *testing.T) {
 	ctx, reader, c0, _ := sparseFixture(t)
-	lcm, ok, err := reader.GetLedger(ctx, c0.FirstLedger()+2)
+	lcm, ok, err := store.GetLedger(ctx, reader, c0.FirstLedger()+2)
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, c0.FirstLedger()+2, lcm.LedgerSequence())
@@ -112,7 +112,7 @@ func TestGetLedger_PointRead(t *testing.T) {
 func TestGetLedger_SubGenesisDoesNotPanic(t *testing.T) {
 	ctx, reader, _, _ := sparseFixture(t)
 	for _, seq := range []uint32{0, 1} {
-		_, ok, err := reader.GetLedger(ctx, seq)
+		_, ok, err := store.GetLedger(ctx, reader, seq)
 		assert.NoError(t, err)
 		assert.False(t, ok)
 	}
@@ -123,7 +123,7 @@ func TestGetLedger_OutsideWindow(t *testing.T) {
 	// c1.FirstLedger()+1 is committed but above the view's latest; the gate,
 	// not the store, must produce the miss.
 	for _, seq := range []uint32{c0.FirstLedger() - 1, c1.FirstLedger() + 1} {
-		_, ok, err := reader.GetLedger(ctx, seq)
+		_, ok, err := store.GetLedger(ctx, reader, seq)
 		assert.NoError(t, err)
 		assert.False(t, ok)
 	}
@@ -137,7 +137,7 @@ func TestGetLedger_V1LedgerCloseMeta(t *testing.T) {
 	r.SetLatestLedger(testChunk.FirstLedger(), query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger())))
 	reader := NewLedgerReader()
 
-	lcm, ok, err := reader.GetLedger(viewCtx(t, r), testChunk.FirstLedger())
+	lcm, ok, err := store.GetLedger(viewCtx(t, r), reader, testChunk.FirstLedger())
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, testChunk.FirstLedger(), lcm.LedgerSequence())
@@ -220,7 +220,7 @@ func TestTxScanLedgers_LendsTheSameBytesGetLedgerDecodes(t *testing.T) {
 	seqs, raws := scanAll(t, tx, c0.FirstLedger(), c0.FirstLedger()+3)
 	require.Len(t, seqs, 4)
 	for i, seq := range seqs {
-		lcm, ok, err := reader.GetLedger(ctx, seq)
+		lcm, ok, err := store.GetLedger(ctx, reader, seq)
 		require.NoError(t, err)
 		require.True(t, ok)
 		want, err := lcm.MarshalBinary()
@@ -394,14 +394,14 @@ func TestGetLedgerRange_SeededWindowReadsNoLedgers(t *testing.T) {
 
 func TestWithLedgerRaw_LendsTheSameBytesGetLedgerDecodes(t *testing.T) {
 	ctx, reader, c0, _ := sparseFixture(t)
-	lcm, ok, err := reader.GetLedger(ctx, c0.FirstLedger())
+	lcm, ok, err := store.GetLedger(ctx, reader, c0.FirstLedger())
 	require.NoError(t, err)
 	require.True(t, ok)
 	want, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 
 	var got []byte
-	found, err := reader.WithLedgerRaw(ctx, c0.FirstLedger(), func(raw []byte) error {
+	found, err := store.WithLedgerRaw(ctx, reader, c0.FirstLedger(), func(raw []byte) error {
 		got = bytes.Clone(raw) // the loan forbids retaining raw
 		return nil
 	})
@@ -415,7 +415,7 @@ func TestWithLedgerRaw_MissDoesNotRunFn(t *testing.T) {
 	// below the floor, in an in-window gap, and above latest
 	for _, seq := range []uint32{c0.FirstLedger() - 1, c0.FirstLedger() + 10, c1.FirstLedger() + 1} {
 		ran := false
-		found, err := reader.WithLedgerRaw(ctx, seq, func([]byte) error {
+		found, err := store.WithLedgerRaw(ctx, reader, seq, func([]byte) error {
 			ran = true
 			return nil
 		})
@@ -429,7 +429,7 @@ func TestWithLedgerRaw_CallbackErrorSurfacesAsFound(t *testing.T) {
 	ctx, reader, c0, _ := sparseFixture(t)
 	boom := errors.New("boom")
 	// found stays true: the ledger WAS there, the caller's own callback failed.
-	found, err := reader.WithLedgerRaw(ctx, c0.FirstLedger(), func([]byte) error { return boom })
+	found, err := store.WithLedgerRaw(ctx, reader, c0.FirstLedger(), func([]byte) error { return boom })
 	assert.ErrorIs(t, err, boom)
 	assert.True(t, found)
 }

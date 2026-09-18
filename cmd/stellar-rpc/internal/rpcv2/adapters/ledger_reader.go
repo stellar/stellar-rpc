@@ -36,35 +36,13 @@ func (r *LedgerReader) GetLatestLedgerSequence(ctx context.Context) (uint32, err
 	return view.LatestLedger(), nil
 }
 
-func (r *LedgerReader) GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
+// ScanLedgers reads the request's view; unlike a Tx it takes no snapshot of its own.
+func (r *LedgerReader) ScanLedgers(ctx context.Context, start, end uint32) iter.Seq2[store.RawLedger, error] {
 	view, err := query.ViewFrom(ctx)
 	if err != nil {
-		return xdr.LedgerCloseMeta{}, false, err
+		return func(yield func(store.RawLedger, error) bool) { yield(store.RawLedger{}, err) }
 	}
-	lcm, found, err := getLedger(view, sequence)
-	return lcm, found, err
-}
-
-// WithLedgerRaw lends the ledger's raw bytes with no copy: the routed point
-// read lends the tier's buffer, whose validity ends with fn — exactly the
-// loan's terms.
-func (r *LedgerReader) WithLedgerRaw(ctx context.Context, sequence uint32, fn store.WithLedgerRawFn) (bool, error) {
-	view, err := query.ViewFrom(ctx)
-	if err != nil {
-		return false, err
-	}
-	if !inWindow(view, sequence) {
-		return false, nil
-	}
-	found := false
-	err = view.WithLedger(sequence, func(raw []byte) error {
-		found = true
-		return fn(raw)
-	})
-	if !found && errors.Is(err, stores.ErrNotFound) {
-		return false, nil
-	}
-	return found, err
+	return scanView(ctx, view, start, end)
 }
 
 func (r *LedgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRange, error) {
@@ -120,42 +98,8 @@ type ledgerReaderTx struct {
 	view *query.ReadView
 }
 
-// ScanLedgers yields [start, end] straight off the view's scan with no copy:
-// RawLedger.Raw aliases the chunk reader's scratch buffer until the next step.
-func (tx *ledgerReaderTx) ScanLedgers(
-	ctx context.Context, start, end uint32,
-) iter.Seq2[store.RawLedger, error] {
-	return func(yield func(store.RawLedger, error) bool) {
-		// ClampRange answers a start below the floor with a *RangeError and an
-		// inverted range with an error; raising start keeps the not-yielded
-		// shape, which the handler turns into v1's InvalidParams naming the
-		// caller's ledger. A start past latest already scans empty.
-		start = max(start, tx.view.OldestLedger())
-		if start > end {
-			return
-		}
-		scan, err := tx.view.ScanLedgers(start, end)
-		if err != nil {
-			yield(store.RawLedger{}, err)
-			return
-		}
-		for entry, err := range scan {
-			if err != nil {
-				yield(store.RawLedger{}, err)
-				return
-			}
-			// The request duration limiter answers the client at the deadline
-			// but only abandons the handler goroutine; without this check an
-			// abandoned scan would keep decoding while holding its read view.
-			if err := ctx.Err(); err != nil {
-				yield(store.RawLedger{}, err)
-				return
-			}
-			if !yield(store.RawLedger{Sequence: entry.Seq, Raw: entry.Bytes}, nil) {
-				return
-			}
-		}
-	}
+func (tx *ledgerReaderTx) ScanLedgers(ctx context.Context, start, end uint32) iter.Seq2[store.RawLedger, error] {
+	return scanView(ctx, tx.view, start, end)
 }
 
 func (tx *ledgerReaderTx) GetLedgerRange(_ context.Context) (store.LedgerRange, error) {
@@ -172,27 +116,59 @@ func inWindow(view *query.ReadView, seq uint32) bool {
 	return seq >= view.OldestLedger() && seq <= view.LatestLedger()
 }
 
-// getLedger is the one-shot point read: window-gated, then one ledger read. A
-// hot-store miss inside the window maps to (false, nil), matching v1's
-// absent-ledger shape.
-func getLedger(view *query.ReadView, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
-	if !inWindow(view, sequence) {
-		return xdr.LedgerCloseMeta{}, false, nil
-	}
-	var lcm xdr.LedgerCloseMeta
-	err := view.WithLedger(sequence, func(raw []byte) error {
-		if uerr := lcm.UnmarshalBinary(raw); uerr != nil {
-			return fmt.Errorf("adapters: unmarshal ledger %d: %w", sequence, uerr)
+// scanView yields [start, end] off the view with no copy: RawLedger.Raw
+// aliases the tier's buffer until the next step. A scan of one is the routed
+// point read, so getLatestLedger's I/O stays a pinned lookup, not a chunk walk;
+// a hot-store miss inside the window yields nothing, matching v1's absent shape.
+func scanView(ctx context.Context, view *query.ReadView, start, end uint32) iter.Seq2[store.RawLedger, error] {
+	return func(yield func(store.RawLedger, error) bool) {
+		// The request duration limiter answers the client at the deadline but
+		// only abandons the handler goroutine; without these checks an
+		// abandoned scan would keep decoding while holding its read view.
+		if err := ctx.Err(); err != nil {
+			yield(store.RawLedger{}, err)
+			return
 		}
-		return nil
-	})
-	if errors.Is(err, stores.ErrNotFound) {
-		return xdr.LedgerCloseMeta{}, false, nil
+		if start == end {
+			if !inWindow(view, start) {
+				return
+			}
+			err := view.WithLedger(start, func(raw []byte) error {
+				yield(store.RawLedger{Sequence: start, Raw: raw}, nil)
+				return nil
+			})
+			if err != nil && !errors.Is(err, stores.ErrNotFound) {
+				yield(store.RawLedger{}, err)
+			}
+			return
+		}
+		// ClampRange answers a start below the floor with a *RangeError and an
+		// inverted range with an error; raising start keeps the not-yielded
+		// shape, which the handler turns into v1's InvalidParams naming the
+		// caller's ledger. A start past latest already scans empty.
+		start = max(start, view.OldestLedger())
+		if start > end {
+			return
+		}
+		scan, err := view.ScanLedgers(start, end)
+		if err != nil {
+			yield(store.RawLedger{}, err)
+			return
+		}
+		for entry, err := range scan {
+			if err != nil {
+				yield(store.RawLedger{}, err)
+				return
+			}
+			if err := ctx.Err(); err != nil {
+				yield(store.RawLedger{}, err)
+				return
+			}
+			if !yield(store.RawLedger{Sequence: entry.Seq, Raw: entry.Bytes}, nil) {
+				return
+			}
+		}
 	}
-	if err != nil {
-		return xdr.LedgerCloseMeta{}, false, err
-	}
-	return lcm, true, nil
 }
 
 // getLedgerRange reads the window's edge sequences from the view. Close times

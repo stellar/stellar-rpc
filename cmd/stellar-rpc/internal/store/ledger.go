@@ -36,8 +36,9 @@ func (lr LedgerRange) ToLedgerSeqRange() protocol.LedgerSeqRange {
 // LedgerReader is the serving-side read contract every storage backend
 // implements. Handlers depend on this interface, never on a concrete backend.
 type LedgerReader interface {
-	GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error)
-	WithLedgerRaw(ctx context.Context, sequence uint32, fn WithLedgerRawFn) (found bool, err error)
+	// ScanLedgers is LedgerReaderTx.ScanLedgers without the snapshot: each call
+	// reads the store as it stands.
+	ScanLedgers(ctx context.Context, start, end uint32) iter.Seq2[RawLedger, error]
 	GetLedgerRange(ctx context.Context) (LedgerRange, error)
 	StreamLedgerRange(ctx context.Context, startLedger uint32, endLedger uint32, f StreamLedgerFn) error
 	NewTx(ctx context.Context) (LedgerReaderTx, error)
@@ -47,6 +48,34 @@ type LedgerReader interface {
 // WithLedgerRawFn receives one ledger's marshaled LCM on loan and the bytes
 // are valid only inside the call, read-only. Copy whatever outlives fn.
 type WithLedgerRawFn func(raw []byte) error
+
+// LedgerScanner is the contract's one read idiom; LedgerReader and LedgerReaderTx both satisfy it.
+type LedgerScanner interface {
+	ScanLedgers(ctx context.Context, start, end uint32) iter.Seq2[RawLedger, error]
+}
+
+// WithLedgerRaw lends one ledger's bytes under RawLedger's loan: a scan of one.
+// found is false when the ledger is absent and fn never ran; fn's own error
+// comes back verbatim with found true.
+func WithLedgerRaw(ctx context.Context, s LedgerScanner, seq uint32, fn WithLedgerRawFn) (bool, error) {
+	for l, err := range s.ScanLedgers(ctx, seq, seq) {
+		if err != nil {
+			return false, err
+		}
+		return true, fn(l.Raw)
+	}
+	return false, nil
+}
+
+// GetLedger decodes one ledger, or reports it absent.
+func GetLedger(ctx context.Context, s LedgerScanner, seq uint32) (xdr.LedgerCloseMeta, bool, error) {
+	var lcm xdr.LedgerCloseMeta
+	found, err := WithLedgerRaw(ctx, s, seq, lcm.UnmarshalBinary)
+	if err != nil {
+		return xdr.LedgerCloseMeta{}, false, err
+	}
+	return lcm, found, nil
+}
 
 // RawLedger is one ledger as ScanLedgers yields it. Raw is the read-only LCM
 // bytes on loan, valid only inside the loop body that received it, overwritten

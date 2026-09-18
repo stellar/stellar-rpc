@@ -51,48 +51,9 @@ func (l ledgerReaderTx) GetLedgerRange(ctx context.Context) (store.LedgerRange, 
 	return getLedgerRangeWithoutCache(ctx, l.tx)
 }
 
-// ScanLedgers yields the stored ledgers in [start, end] ascending, one row at a
-// time inside the reader's transaction. Absent sequences are simply not yielded.
-func (l ledgerReaderTx) ScanLedgers(
-	ctx context.Context, start, end uint32,
-) iter.Seq2[store.RawLedger, error] {
-	return func(yield func(store.RawLedger, error) bool) {
-		if start > end {
-			return
-		}
-		sql := sq.Select("sequence", "meta").From(ledgerCloseMetaTableName).
-			Where(sq.GtOrEq{"sequence": start}).
-			Where(sq.LtOrEq{"sequence": end}).
-			OrderBy("sequence asc")
-
-		rows, err := l.tx.Query(ctx, sql)
-		if err != nil {
-			yield(store.RawLedger{}, err)
-			return
-		}
-		// Runs on an early break too, which is how the consumer ends the scan.
-		defer rows.Close()
-
-		for rows.Next() {
-			if err := ctx.Err(); err != nil {
-				yield(store.RawLedger{}, err)
-				return
-			}
-			var seq uint32
-			var meta []byte
-			if err := rows.Scan(&seq, &meta); err != nil {
-				yield(store.RawLedger{}, err)
-				return
-			}
-			// database/sql clones each BLOB into meta, so the loan is a formality here.
-			if !yield(store.RawLedger{Sequence: seq, Raw: meta}, nil) {
-				return
-			}
-		}
-		if err := rows.Err(); err != nil {
-			yield(store.RawLedger{}, err)
-		}
-	}
+// ScanLedgers reads inside the reader's transaction.
+func (l ledgerReaderTx) ScanLedgers(ctx context.Context, start, end uint32) iter.Seq2[store.RawLedger, error] {
+	return scanLedgers(ctx, l.tx, start, end)
 }
 
 func (l ledgerReaderTx) Done() error {
@@ -147,18 +108,58 @@ func (r ledgerReader) StreamLedgerRange(
 	return q.Err()
 }
 
-// GetLedger fetches a single ledger from the db.
-func (r ledgerReader) GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
-	return getLedgerFromDB(ctx, r.db, sequence)
+// ScanLedgers reads the pooled connection: no snapshot, the store as it stands.
+func (r ledgerReader) ScanLedgers(ctx context.Context, start, end uint32) iter.Seq2[store.RawLedger, error] {
+	return scanLedgers(ctx, r.db, start, end)
 }
 
-// WithLedgerRaw lends the ledger's stored meta blob without decoding it.
-func (r ledgerReader) WithLedgerRaw(ctx context.Context, sequence uint32, fn store.WithLedgerRawFn) (bool, error) {
-	meta, found, err := getLedgerRawFromDB(ctx, r.db, sequence)
-	if err != nil || !found {
-		return found, err
+// ledgerQuerier is the slice of db.SessionInterface a scan needs; *DB and a Tx session both provide it.
+type ledgerQuerier interface {
+	Query(ctx context.Context, query sq.Sqlizer) (*db.Rows, error)
+}
+
+// scanLedgers yields the stored ledgers in [start, end] ascending, one row at a
+// time. Absent sequences are simply not yielded.
+func scanLedgers(ctx context.Context, q ledgerQuerier, start, end uint32) iter.Seq2[store.RawLedger, error] {
+	return func(yield func(store.RawLedger, error) bool) {
+		if start > end {
+			return
+		}
+		sql := sq.Select("sequence", "meta").From(ledgerCloseMetaTableName)
+		if start == end { // a scan of one is a primary-key point read
+			sql = sql.Where(sq.Eq{"sequence": start})
+		} else {
+			sql = sql.Where(sq.GtOrEq{"sequence": start}).Where(sq.LtOrEq{"sequence": end}).OrderBy("sequence asc")
+		}
+
+		rows, err := q.Query(ctx, sql)
+		if err != nil {
+			yield(store.RawLedger{}, err)
+			return
+		}
+		// Runs on an early break too, which is how the consumer ends the scan.
+		defer rows.Close()
+
+		for rows.Next() {
+			if err := ctx.Err(); err != nil {
+				yield(store.RawLedger{}, err)
+				return
+			}
+			var seq uint32
+			var meta []byte
+			if err := rows.Scan(&seq, &meta); err != nil {
+				yield(store.RawLedger{}, err)
+				return
+			}
+			// database/sql clones each BLOB into meta, so the loan is a formality here.
+			if !yield(store.RawLedger{Sequence: seq, Raw: meta}, nil) {
+				return
+			}
+		}
+		if err := rows.Err(); err != nil {
+			yield(store.RawLedger{}, err)
+		}
 	}
-	return true, fn(meta)
 }
 
 // GetLedgerRange pulls the min/max ledger sequence numbers from the meta table.
@@ -355,19 +356,6 @@ func (l ledgerWriter) trimLedgers(latestLedgerSeq uint32, retentionWindow uint32
 		Where(sq.Lt{"sequence": cutoff}).
 		Exec()
 	return err
-}
-
-// getLedgerFromDB fetches a single ledger from the database.
-func getLedgerFromDB(ctx context.Context, db readDB, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
-	meta, found, err := getLedgerRawFromDB(ctx, db, sequence)
-	if err != nil || !found {
-		return xdr.LedgerCloseMeta{}, false, err
-	}
-	var lcm xdr.LedgerCloseMeta
-	if err := lcm.UnmarshalBinary(meta); err != nil {
-		return xdr.LedgerCloseMeta{}, false, err
-	}
-	return lcm, true, nil
 }
 
 // getLedgerRawFromDB fetches a single ledger's meta blob. The bytes are owned:
