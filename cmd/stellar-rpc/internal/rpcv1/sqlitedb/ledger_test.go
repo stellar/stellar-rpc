@@ -285,6 +285,40 @@ func TestWithLedgerRaw(t *testing.T) {
 	assert.False(t, ran)
 }
 
+// TestScanLedgers pins what the handlers' gap checks rest on: ascending, duplicate-free,
+// within [start, end], absent sequences skipped, and a start below the oldest row served from it.
+func TestScanLedgers(t *testing.T) {
+	db := NewTestDB(t)
+	for _, seq := range []uint32{10, 11, 13, 14} { // 12 is missing
+		tx, err := NewReadWriter(logger, db, host.MakeNoOpDaemon(), 15, passphrase).NewTx(t.Context())
+		require.NoError(t, err)
+		lcm := createLedger(seq)
+		require.NoError(t, tx.LedgerWriter().InsertLedger(lcm))
+		require.NoError(t, tx.Commit(lcm, nil))
+	}
+	readTx, err := NewLedgerReader(db).NewTx(t.Context())
+	require.NoError(t, err)
+	defer func() { _ = readTx.Done() }()
+
+	scan := func(start, end uint32) []uint32 {
+		var got []uint32
+		for l, err := range readTx.ScanLedgers(t.Context(), start, end) {
+			require.NoError(t, err)
+			var lcm xdr.LedgerCloseMeta
+			require.NoError(t, lcm.UnmarshalBinary(l.Raw))
+			require.Equal(t, l.Sequence, lcm.LedgerSequence(), "Sequence must match the bytes")
+			got = append(got, l.Sequence)
+		}
+		return got
+	}
+	assert.Equal(t, []uint32{10, 11, 13, 14}, scan(10, 14), "ascending, and the gap at 12 is silent")
+	assert.Equal(t, []uint32{11, 13}, scan(11, 13), "bounded on both ends")
+	assert.Equal(t, []uint32{10, 11}, scan(1, 11), "a start below the oldest row is served from it")
+	assert.Empty(t, scan(12, 12), "an absent ledger yields nothing")
+	assert.Empty(t, scan(14, 10), "start above end yields nothing")
+	assert.Empty(t, scan(20, 30), "beyond the latest row yields nothing")
+}
+
 func BenchmarkGetLedgerRange(b *testing.B) {
 	testDB, lcms := setupBenchmarkingDB(b)
 	reader := NewLedgerReader(testDB)

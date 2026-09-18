@@ -2,6 +2,7 @@ package methods
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -567,4 +568,22 @@ func TestGetLedgers_EmptyScanResult(t *testing.T) {
 		mockReader.AssertExpectations(t)
 		mockReaderTx.AssertExpectations(t)
 	})
+}
+
+// TestParseLedgerInfo_HeaderMatchesFullDecode pins that the header parseLedgerInfo slices
+// off the raw bytes equals what a full decode re-marshals, on every LCM wire version.
+func TestParseLedgerInfo_HeaderMatchesFullDecode(t *testing.T) {
+	for _, version := range []int32{0, 1, 2} {
+		lcm := diffLCM(t, version, 101)
+		raw, err := lcm.MarshalBinary()
+		require.NoError(t, err)
+		wantHeader, err := lcm.LedgerHeaderHistoryEntry().MarshalBinary()
+		require.NoError(t, err)
+
+		info, err := parseLedgerInfo(raw, protocol.FormatBase64)
+		require.NoError(t, err, "version %d", version)
+		assert.Equal(t, uint32(101), info.Sequence)
+		assert.Equal(t, base64.StdEncoding.EncodeToString(wantHeader), info.LedgerHeader, "version %d", version)
+		assert.Equal(t, base64.StdEncoding.EncodeToString(raw), info.LedgerMetadata, "version %d", version)
+	}
 }

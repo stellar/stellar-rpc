@@ -70,11 +70,3 @@ type LedgerReaderTx interface {
 	GetLedgerRange(ctx context.Context) (LedgerRange, error)
 	Done() error
 }
-
-// LedgerMetadataChunk is one ledger as getLedgers serves it: the marshaled
-// LedgerCloseMeta plus the marshaled LedgerHeaderHistoryEntry sliced out of
-// it. Both stay raw bytes because the XDR wire format base64s them as-is.
-type LedgerMetadataChunk struct {
-	HeaderRaw []byte
-	Lcm       []byte
-}
