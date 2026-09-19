@@ -1,11 +1,8 @@
 package txhash
 
 import (
-	"bufio"
 	"context"
 	"encoding/binary"
-	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,45 +18,6 @@ import (
 // with; the header records it and the reader/build validate it.
 var testBinSecret = [stores.SecretLen]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
 
-// readColdBin reads back a cold .bin file, validating its header count against
-// the file size via the shared coldBinCount. It is the test-side mirror of the
-// .bin codec: production consumes .bin files through the index builder's
-// streaming pre-scan, never a full read-back, so this read path lives only in
-// the tests that pin the writer's output.
-func readColdBin(path string) ([]ColdEntry, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("txhash: open %s: %w", path, err)
-	}
-	defer func() { _ = f.Close() }()
-
-	br := bufio.NewReaderSize(f, 1<<20)
-	var header [coldBinHeaderSize]byte
-	if _, err := io.ReadFull(br, header[:]); err != nil {
-		return nil, fmt.Errorf("txhash: read header of %s: %w", path, err)
-	}
-	count := binary.LittleEndian.Uint64(header[coldBinPreludeSize : coldBinPreludeSize+coldBinCountSize])
-
-	info, err := f.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("txhash: stat %s: %w", path, err)
-	}
-	if _, err := coldBinCount(path, info.Size(), count); err != nil {
-		return nil, err
-	}
-
-	entries := make([]ColdEntry, count)
-	var entryBuf [coldBinEntrySize]byte
-	for i := range entries {
-		if _, err := io.ReadFull(br, entryBuf[:]); err != nil {
-			return nil, fmt.Errorf("txhash: read entry %d of %s: %w", i, path, err)
-		}
-		copy(entries[i].Key[:], entryBuf[:ColdKeySize])
-		entries[i].Seq = binary.LittleEndian.Uint32(entryBuf[ColdKeySize:])
-	}
-	return entries, nil
-}
-
 // TestColdBin_RoundTrip writes entries and reads them back through the
 // matching reader, pinning the writer/reader codec to each other.
 func TestColdBin_RoundTrip(t *testing.T) {
@@ -72,8 +30,9 @@ func TestColdBin_RoundTrip(t *testing.T) {
 	}
 	require.NoError(t, WriteColdBin(path, testBinSecret, entries))
 
-	got, err := readColdBin(path)
+	secret, got, err := ReadColdBin(path)
 	require.NoError(t, err)
+	assert.Equal(t, testBinSecret, secret)
 	assert.Equal(t, entries, got)
 }
 
@@ -170,7 +129,7 @@ func TestColdBin_OverwritesPriorAttempt(t *testing.T) {
 	entries := []ColdEntry{{Key: [ColdKeySize]byte{0x03}, Seq: 21}}
 	require.NoError(t, WriteColdBin(path, testBinSecret, entries))
 
-	got, err := readColdBin(path)
+	_, got, err := ReadColdBin(path)
 	require.NoError(t, err)
 	assert.Equal(t, entries, got)
 }
@@ -188,7 +147,7 @@ func TestColdBin_ReadRejectsTruncated(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, data[:len(data)-4], 0o644)) // tear the tail off
 
-	_, err = readColdBin(path)
+	_, _, err = ReadColdBin(path)
 	require.Error(t, err)
 }
 

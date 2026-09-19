@@ -224,9 +224,16 @@ func TermsForBytes(eventBytes []byte) ([]TermKey, error) {
 		// All returns each element trimmed to its exact size, so the
 		// ScValView bytes are already the topic's raw XDR — hash them
 		// directly rather than calling Raw() (which re-walks size).
-		keys = append(keys, ComputeTermKey([]byte(topic), topicField(i)))
+		keys = append(keys, TopicTermKey(i, topic))
 	}
 	return keys, nil
+}
+
+// TopicTermKey returns the term key for the topic at position pos of an
+// event, given the topic's raw ScVal XDR. pos must be below
+// protocol.MaxTopicCount; positions past it are not indexed.
+func TopicTermKey(pos int, topicXDR []byte) TermKey {
+	return ComputeTermKey(topicXDR, topicField(pos))
 }
 
 // topicField maps a topic position (0..MaxTopicCount-1) to its

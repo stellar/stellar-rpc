@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -126,6 +127,14 @@ func (c *ColdReader) loadHeader() (coldHeader, error) {
 	return coldHeader{firstSeq: first, lastSeq: first + tr.TotalItems - 1}, nil
 }
 
+// Span is the inclusive ledger range the pack holds. Both bounds come from
+// the one cached header, so a caller that wants the range asks once rather
+// than pairing two accessors and discarding the second error.
+func (c *ColdReader) Span() (uint32, uint32, error) {
+	h, err := c.init()
+	return h.firstSeq, h.lastSeq, err
+}
+
 func (c *ColdReader) LastSeq() (uint32, error) { h, err := c.init(); return h.lastSeq, err }
 
 // WithLedger calls fn with seq's bytes; see query.LedgerReader for the loan
@@ -197,6 +206,26 @@ func (c *ColdReader) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 			seq++
 		}
 	}
+}
+
+// ErrNoContentHash is returned by Verify for a pack written without a content
+// hash: there is nothing to verify the ledgers against.
+var ErrNoContentHash = errors.New("cold: pack carries no content hash")
+
+// Verify recomputes the pack's content hash over every ledger and compares it
+// with the one the writer stored.
+func (c *ColdReader) Verify(ctx context.Context) error {
+	if _, err := c.init(); err != nil {
+		return err
+	}
+	tr, err := c.r.Trailer()
+	if err != nil {
+		return err
+	}
+	if !tr.HasContentHash {
+		return fmt.Errorf("%w: %s", ErrNoContentHash, c.path)
+	}
+	return c.r.Verify(ctx)
 }
 
 func (c *ColdReader) Close() error { return c.r.Close() }

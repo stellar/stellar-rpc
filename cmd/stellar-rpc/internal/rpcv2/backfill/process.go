@@ -17,10 +17,8 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/durable"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
 // ErrBackendCoverageTimeout is returned when the bulk backend's tip never reaches the chunk in time.
@@ -66,17 +64,13 @@ func ingestConfigFor(s catalog.ArtifactSet, chunkID chunk.ID, cfg ProcessConfig)
 		Txhash:  s.Has(geometry.KindTxHash),
 		Events:  s.Has(geometry.KindEvents),
 	}
-	if c.Txhash || c.Events {
-		catalogSecret := cfg.Catalog.Secret()
-		if c.Txhash {
-			indexID := uint32(cfg.Catalog.TxHashIndexLayout().TxHashIndexID(chunkID))
-			sec := txhash.ColdIndexSecret(catalogSecret[:], indexID)
-			c.TxhashSecret = sec[:]
-		}
-		if c.Events {
-			sec := event.ColdIndexSecret(catalogSecret[:], chunkID)
-			c.EventsSecret = sec[:]
-		}
+	if c.Txhash {
+		sec := cfg.Catalog.TxHashIndexSecret(chunkID)
+		c.TxhashSecret = sec[:]
+	}
+	if c.Events {
+		sec := cfg.Catalog.EventsIndexSecret(chunkID)
+		c.EventsSecret = sec[:]
 	}
 	return c
 }
@@ -129,7 +123,7 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 	dirs := ingest.ColdDirs{
 		LedgerPack: layout.LedgerPackPath(chunkID),
 		TxhashBin:  layout.TxHashBinPath(chunkID),
-		EventsDir:  layout.EventsBucketDir(chunkID),
+		Events:     layout.EventsColdDirs(chunkID),
 	}
 	raw := src.RawLedgers(ctx, ledgerbackend.BoundedRange(chunkID.FirstLedger(), chunkID.LastLedger()))
 	ic := ingestConfigFor(artifacts, chunkID, cfg)
@@ -210,7 +204,7 @@ func backfillSource(
 	// must block until the backend's tip covers the chunk (design: backfillSource
 	// always waits for coverage). cfg.Backend's own Tip drives it.
 	if werr := waitForCoverage(
-		ctx, cfg.Backend, chunkID.LastLedger(), defaultCoveragePollInterval, defaultCoverageTimeout,
+		ctx, cfg.Logger, cfg.Backend, chunkID.LastLedger(), defaultCoveragePollInterval, defaultCoverageTimeout,
 	); werr != nil {
 		return nil, noClose, werr
 	}

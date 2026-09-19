@@ -38,9 +38,9 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 
 // WriteColdIndex produces index.pack + index.hash for chunkID inside
 // bucketDir. Both files are fsync'd before the function returns.
-// bucketDir is the chunk's bucket directory; filenames are composed
-// from chunkID via IndexPackName / IndexHashName so the two halves
-// of the cold artifact always live together.
+// bucketDir is the chunk's INDEX bucket directory (ColdDirs.Index), not
+// the one holding events.pack. It must already exist; filenames are
+// composed from chunkID via IndexPackName / IndexHashName.
 //
 // A zero-term bitmaps (an eventless chunk, e.g. a pre-Soroban
 // backfill range) produces a real (empty) index.hash over zero terms
