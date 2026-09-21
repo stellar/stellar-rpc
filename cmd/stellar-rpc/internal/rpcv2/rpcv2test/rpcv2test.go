@@ -131,7 +131,7 @@ func WriteFrozenLedgerPackSeq(t testing.TB, cat *catalog.Catalog, c chunk.ID, lc
 func NewLocalClient(t testing.TB, handlers jrpc2.Assigner) *jrpc2.Client {
 	t.Helper()
 	local := server.NewLocal(handlers, nil)
-	t.Cleanup(func() { _ = local.Client.Close() })
+	t.Cleanup(func() { _ = local.Close() })
 	return local.Client
 }
 
