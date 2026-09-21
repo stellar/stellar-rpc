@@ -11,10 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
@@ -296,6 +298,36 @@ func TestRunIngestionLoop_LastCommittedGaugeAdvancesPerLedger(t *testing.T) {
 
 	assert.Equal(t, []uint32{first, first + 1, first + 2}, rec.lastCommittedSeq(),
 		"the loop sets the last-committed gauge per committed ledger, not chunk-aligned")
+}
+
+// TestRunIngestionLoop_LedgerLinesThrottleUnderReplay: a replay that commits
+// several ledgers within a second logs fewer "ledger ingested" lines than
+// ledgers, and the first names the ledger and its place in the chunk.
+func TestRunIngestionLoop_LedgerLinesThrottleUnderReplay(t *testing.T) {
+	cat, _ := testCatalog(t)
+	c := chunk.ID(0)
+	first := c.FirstLedger()
+
+	stream := streamForSeqs(t, first, first+3)
+	stream.endErr = errors.New("end")
+	cfg, _ := loopConfig(t, stream, cat, first)
+	logger := supportlog.New()
+	logger.SetLevel(logrus.InfoLevel)
+	entries := logger.StartTest(logrus.InfoLevel)
+	cfg.Logger = logger
+
+	require.Error(t, runIngestionLoop(context.Background(), cfg))
+
+	var lines []logrus.Entry
+	for _, e := range entries() {
+		if e.Message == "ledger ingested" {
+			lines = append(lines, e)
+		}
+	}
+	require.NotEmpty(t, lines, "the first ledger always logs")
+	assert.Less(t, len(lines), 4, "four ledgers within a second are not four lines")
+	assert.EqualValues(t, first, lines[0].Data["ledger"])
+	assert.EqualValues(t, 1, lines[0].Data["ledger_in_chunk"])
 }
 
 // TestRunIngestionLoop_AdvancesLatestLedger: when a registry is wired, the loop

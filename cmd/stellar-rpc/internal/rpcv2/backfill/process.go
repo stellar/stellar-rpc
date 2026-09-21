@@ -171,6 +171,7 @@ func backfillSource(
 	noClose := func() error { return nil }
 	cat := cfg.Catalog
 	layout := cat.Layout()
+	logger := cfg.Logger.WithField("chunk", chunkID.String())
 
 	// (1) Hot branch: only when the hot key is "ready". A "transient" key (mid-op
 	// or recovery-demoted) is not a read source; an absent key falls through.
@@ -179,7 +180,7 @@ func backfillSource(
 		return nil, noClose, herr // hot-DB open failure — fails the run, never auto-healed
 	}
 	if used {
-		cfg.Logger.Debugf("backfillSource: chunk %s from complete hot tier", chunkID)
+		logger.WithField("source", "hot tier").Info("chunk build started")
 		return src, closer, nil
 	}
 
@@ -192,7 +193,7 @@ func backfillSource(
 	if ledgersState == geometry.StateFrozen && !artifacts.Has(geometry.KindLedgers) {
 		packPath := layout.LedgerPackPath(chunkID)
 		if _, serr := os.Stat(packPath); serr == nil {
-			cfg.Logger.Debugf("backfillSource: chunk %s re-derived from frozen .pack", chunkID)
+			logger.WithField("source", "frozen pack").Info("chunk build started")
 			return ledger.NewPackStream(packPath), noClose, nil
 		}
 		// frozen ⇒ file exists; a missing pack is a bug, not a re-download trigger.
@@ -214,7 +215,7 @@ func backfillSource(
 	); werr != nil {
 		return nil, noClose, werr
 	}
-	cfg.Logger.Debugf("backfillSource: chunk %s from bulk backend", chunkID)
+	logger.WithField("source", "bulk backend").Info("chunk build started")
 	return cfg.Backend, noClose, nil
 }
 

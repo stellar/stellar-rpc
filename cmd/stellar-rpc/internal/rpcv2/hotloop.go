@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -176,6 +177,7 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 	// rather than re-parsing each view's sequence. A stream / decode error ends the
 	// loop for the daemon to classify.
 	seq := cfg.Resume
+	var lastLogged time.Time
 	for raw, verr := range cfg.Stream.RawLedgers(ctx, ledgerbackend.UnboundedRange(cfg.Resume)) {
 		if verr != nil {
 			return fmt.Errorf("ingestion stream: %w", verr)
@@ -183,6 +185,7 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 
 		// One atomic synced WriteBatch across all hot CFs (via hotDB.IngestLedger).
 		view := xdr.LedgerCloseMetaView(raw)
+		start := time.Now()
 		closeUnix, ierr := hotService.Ingest(seq, view)
 		if ierr != nil {
 			return fmt.Errorf("ingest ledger %d: %w", seq, ierr)
@@ -198,6 +201,19 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		// every hot store. This one write carries the sequence and its close
 		// time, so getLedgerRange never point-reads the tip.
 		cfg.Registry.SetLatestLedger(seq, query.CloseTimeAt(closeUnix))
+		// One line per ledger at network pace. A replay that commits many a
+		// second (catch-up after downtime, a bench) gets one a second instead.
+		if now := time.Now(); now.Sub(lastLogged) >= time.Second {
+			lastLogged = now
+			c := chunk.IDFromLedger(seq)
+			cfg.Logger.WithFields(supportlog.F{
+				"ledger":          seq,
+				"chunk":           c.String(),
+				"ledger_in_chunk": seq - c.FirstLedger() + 1,
+				"ingest_took":     now.Sub(start).Round(time.Millisecond).String(),
+				"behind":          now.Sub(time.Unix(closeUnix, 0)).Round(time.Second).String(),
+			}).Info("ledger ingested")
+		}
 
 		// Chunk boundary: this seq is the chunk's last ledger.
 		if closed := chunk.IDFromLedger(seq); seq == closed.LastLedger() {
