@@ -6,8 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"sync"
-	"sync/atomic"
 
 	"github.com/stellar-experimental/jrpc2"
 
@@ -17,19 +15,11 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
-// renderedLatestLedger is one ledger's fully rendered getLatestLedger result.
-type renderedLatestLedger struct {
-	seq  uint32
-	body json.RawMessage
-}
-
 // latestLedgerCache memoizes the rendered, final JSON response keyed by ledger
-// sequence. A newly closed ledger invalidates the memo by moving the key.
+// sequence, so requests landing on the same latest ledger share one render.
 type latestLedgerCache struct {
 	ledgerReader store.LedgerReader
-
-	rendered atomic.Pointer[renderedLatestLedger]
-	renderMu sync.Mutex // serializes misses so a new ledger renders once, not once per waiting request
+	rendered     latestMemo[json.RawMessage]
 }
 
 // NewGetLatestLedgerHandler returns a JSON RPC handler to retrieve the latest ledger entry from Stellar core.
@@ -47,24 +37,9 @@ func (c *latestLedgerCache) handle(ctx context.Context, _ protocol.GetLatestLedg
 			Message: "could not get latest ledger sequence",
 		}
 	}
-	if r := c.rendered.Load(); r != nil && r.seq == latestSequence {
-		return r.body, nil
-	}
-
-	c.renderMu.Lock()
-	defer c.renderMu.Unlock()
-	if r := c.rendered.Load(); r != nil && r.seq == latestSequence { // rendered while waiting for the lock
-		return r.body, nil
-	}
-	body, err := c.render(ctx, latestSequence)
-	if err != nil {
-		return nil, err
-	}
-	// A request on an older read view must not evict a newer ledger's render.
-	if r := c.rendered.Load(); r == nil || latestSequence >= r.seq {
-		c.rendered.Store(&renderedLatestLedger{seq: latestSequence, body: body})
-	}
-	return body, nil
+	return c.rendered.get(latestSequence, func() (json.RawMessage, error) {
+		return c.render(ctx, latestSequence)
+	})
 }
 
 func (c *latestLedgerCache) render(ctx context.Context, latestSequence uint32) (json.RawMessage, error) {
