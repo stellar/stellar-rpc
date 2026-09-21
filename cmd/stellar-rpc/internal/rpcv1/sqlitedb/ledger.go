@@ -125,14 +125,14 @@ func scanLedgers(ctx context.Context, q ledgerQuerier, start, end uint32) iter.S
 		if start > end {
 			return
 		}
-		sql := sq.Select("sequence", "meta").From(ledgerCloseMetaTableName)
+		stmt := sq.Select("sequence", "meta").From(ledgerCloseMetaTableName)
 		if start == end { // a scan of one is a primary-key point read
-			sql = sql.Where(sq.Eq{"sequence": start})
+			stmt = stmt.Where(sq.Eq{"sequence": start})
 		} else {
-			sql = sql.Where(sq.GtOrEq{"sequence": start}).Where(sq.LtOrEq{"sequence": end}).OrderBy("sequence asc")
+			stmt = stmt.Where(sq.GtOrEq{"sequence": start}).Where(sq.LtOrEq{"sequence": end}).OrderBy("sequence asc")
 		}
 
-		rows, err := q.Query(ctx, sql)
+		rows, err := q.Query(ctx, stmt)
 		if err != nil {
 			yield(store.RawLedger{}, err)
 			return
@@ -146,13 +146,12 @@ func scanLedgers(ctx context.Context, q ledgerQuerier, start, end uint32) iter.S
 				return
 			}
 			var seq uint32
-			var meta []byte
+			var meta sql.RawBytes // the driver's buffer, valid until the next Next: RawLedger's loan
 			if err := rows.Scan(&seq, &meta); err != nil {
 				yield(store.RawLedger{}, err)
 				return
 			}
-			// database/sql clones each BLOB into meta, so the loan is a formality here.
-			if !yield(store.RawLedger{Sequence: seq, Raw: meta}, nil) {
+			if !yield(store.RawLedger{Sequence: seq, Raw: []byte(meta)}, nil) {
 				return
 			}
 		}

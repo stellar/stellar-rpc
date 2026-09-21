@@ -1,6 +1,7 @@
 package methods
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -213,17 +214,12 @@ func (h ledgersHandler) fetchLedgers(
 	}
 
 	fetchFromLocalDB := func(start, end uint32) error {
-		for ledger, err := range readTx.ScanLedgers(ctx, start, end) {
-			if err != nil {
-				return &jrpc2.Error{
-					Code:    jrpc2.InternalError,
-					Message: fmt.Sprintf("error fetching ledgers from db: %v", err),
-				}
-			}
-			if len(result) >= int(limit) {
-				break
-			}
-			if aerr := appendLedger(ledger.Sequence, ledger.Raw); aerr != nil {
+		page, err := collectLedgerPage(ctx, readTx, start, end, int(limit)-len(result))
+		if err != nil {
+			return err
+		}
+		for _, l := range page {
+			if aerr := appendLedger(l.Sequence, l.Raw); aerr != nil {
 				return aerr
 			}
 		}
@@ -282,6 +278,28 @@ func (h ledgersHandler) fetchLedgers(
 	}
 
 	return result, err
+}
+
+// collectLedgerPage copies up to room ledgers of [start, end] out of the scan, so
+// rendering runs after the scan's readers close (encoding a page under an open
+// hot-store iterator measurably slows it).
+func collectLedgerPage(
+	ctx context.Context, readTx store.LedgerReaderTx, start, end uint32, room int,
+) ([]store.RawLedger, error) {
+	page := make([]store.RawLedger, 0, max(room, 0))
+	for ledger, err := range readTx.ScanLedgers(ctx, start, end) {
+		if err != nil {
+			return nil, &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: fmt.Sprintf("error fetching ledgers from db: %v", err),
+			}
+		}
+		if len(page) >= room {
+			break
+		}
+		page = append(page, store.RawLedger{Sequence: ledger.Sequence, Raw: bytes.Clone(ledger.Raw)})
+	}
+	return page, nil
 }
 
 // parseLedgerInfo extracts and formats the ledger metadata and header
