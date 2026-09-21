@@ -184,30 +184,45 @@ Cold events files follow the chunk-level bucketing convention defined
 authoritatively in the backfill workflow design doc
 (`full-history/design-docs/03-backfill-workflow.md`, §"Directory
 Structure"). Chunks are grouped into buckets of 1,000 (hardcoded), and
-each chunk's three artifacts live as flat siblings inside the bucket
-directory, with the chunk ID as a filename prefix:
+each artifact is named by the chunk ID as a filename prefix inside its
+bucket directory.
+
+The pack and the index are **separate storage roots**. They are read
+completely differently — the pack is streamed sequentially and holds
+almost all of the bytes, while `index.pack` is probed at random — so a
+deployment can put the index on storage with the IOPS to serve those
+probes without moving the pack's terabytes with it. The two roots
+default to siblings:
 
 ```
 events/
-├── 00000/
-│   ├── 00000000-events.pack
-│   ├── 00000000-index.hash
-│   ├── 00000000-index.pack
-│   ├── 00000001-events.pack
-│   ├── 00000001-index.hash
-│   ├── 00000001-index.pack
-│   ...
-├── 00001/
-│   ├── 00001000-events.pack
-│   ...
+├── data/
+│   ├── 00000/
+│   │   ├── 00000000-events.pack
+│   │   ├── 00000001-events.pack
+│   │   ...
+│   ├── 00001/
+│   │   ├── 00001000-events.pack
+│   │   ...
+└── index/
+    ├── 00000/
+    │   ├── 00000000-index.hash
+    │   ├── 00000000-index.pack
+    │   ├── 00000001-index.hash
+    │   ├── 00000001-index.pack
+    │   ...
+    ├── 00001/
+    │   ...
 ```
 
 - Bucket ID: `chunk_id / 1000`, formatted `%05d`.
 - Chunk ID: formatted `%08d`.
 - Bucket path composition is the orchestrator's job (freeze service /
-  backfill worker); the events package takes a bucket directory and
-  composes per-chunk filenames via the helpers in `cold_format.go`
-  (`EventsPackName`, `IndexPackName`, `IndexHashName`).
+  backfill worker); the events package takes a `ColdDirs` — the pair of
+  bucket directories, one per root — and composes per-chunk filenames via
+  the helpers in `cold_format.go` (`EventsPackName`, `IndexPackName`,
+  `IndexHashName`). Taking the pair rather than one directory is what
+  stops a caller picking up one root and missing the other.
 
 ### 9.2 Cold Index Storage
 

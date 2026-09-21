@@ -14,10 +14,8 @@ package txhash
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"runtime"
 
@@ -150,30 +148,13 @@ func scanAndValidate(inputs []string) (uint64, [stores.SecretLen]byte, error) {
 	return total, secret, nil
 }
 
-// scanBinHeader opens path, reads its declared entry count and index secret,
-// and verifies its byte size matches that count via coldBinCount (the shared,
-// overflow-safe header check).
+// scanBinHeader opens path and returns its declared entry count and index
+// secret, the header validated against the file size (see readBinHeader).
 func scanBinHeader(path string) (uint64, [stores.SecretLen]byte, error) {
-	var secret [stores.SecretLen]byte
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, secret, fmt.Errorf("txhash: open %s: %w", path, err)
+		return 0, [stores.SecretLen]byte{}, fmt.Errorf("txhash: open %s: %w", path, err)
 	}
 	defer f.Close()
-
-	fi, err := f.Stat()
-	if err != nil {
-		return 0, secret, fmt.Errorf("txhash: stat %s: %w", path, err)
-	}
-	var hdr [coldBinHeaderSize]byte
-	if _, err := io.ReadFull(f, hdr[:]); err != nil {
-		return 0, secret, fmt.Errorf("txhash: read header of %s: %w", path, err)
-	}
-	if err := checkBinPrelude(path, hdr[:]); err != nil {
-		return 0, secret, err
-	}
-	copy(secret[:], hdr[coldBinPreludeSize+coldBinCountSize:])
-	count, err := coldBinCount(path, fi.Size(),
-		binary.LittleEndian.Uint64(hdr[coldBinPreludeSize:coldBinPreludeSize+coldBinCountSize]))
-	return count, secret, err
+	return readBinHeader(path, f)
 }

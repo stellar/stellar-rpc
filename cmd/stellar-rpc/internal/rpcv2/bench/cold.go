@@ -15,6 +15,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 )
 
 // maxChunkID is the last chunk ID whose LastLedger fits in a uint32 ledger
@@ -101,7 +102,8 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 	// Create and fsync the write roots up front — the daemon's own root prep.
 	layout := geometry.NewLayout(opts.ColdRoot)
 	if err := config.PrepareRoots(
-		layout.LedgersRoot(), layout.EventsRoot(), layout.TxHashRawRoot(), layout.TxHashIndexRoot(),
+		layout.LedgersRoot(), layout.EventsRoot(), layout.EventsIndexRoot(),
+		layout.TxHashRawRoot(), layout.TxHashIndexRoot(),
 	); err != nil {
 		return fmt.Errorf("prepare --cold-out-dir write roots: %w", err)
 	}
@@ -139,7 +141,7 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 	}, opts.StartChunk, end)
 	// VmHWM never decreases, so it can be read right here — before the error
 	// check — and a failed run's partial CSV still gets the row.
-	recordPeakRSS(logger, sink, readPeakRSS)
+	recordPeakRSS(logger, sink, observability.ReadPeakRSS)
 	if err != nil {
 		writePartialCSVs(logger, sink, opts.OutDir)
 		return fmt.Errorf("backfill [%s,%s]: %w", opts.StartChunk, end, err)

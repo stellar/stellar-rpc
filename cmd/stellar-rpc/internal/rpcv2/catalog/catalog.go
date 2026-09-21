@@ -41,29 +41,63 @@ type Catalog struct {
 func Open(
 	path string, layout geometry.Layout, txhashIndex geometry.TxHashIndexLayout, logger *supportlog.Entry,
 ) (*Catalog, error) {
-	store, err := rocksdb.New(rocksdb.Config{Path: path, Logger: logger})
+	c, err := open(path, layout, txhashIndex, logger, false)
 	if err != nil {
-		return nil, err
-	}
-	c := &Catalog{store: store, logger: logger, layout: layout, txhashIndex: txhashIndex}
-	// Census before the secret mint below: a catalog holding entries outside
-	// this binary's vocabulary (a newer binary's formats, or corruption) is
-	// refused here, so Open writes no catalog entry of its own into a tree it
-	// refuses. RocksDB itself may still create housekeeping files and flush a
-	// previous binary's recovered WAL on Close.
-	if err := c.census(); err != nil {
-		_ = c.Close()
 		return nil, err
 	}
 	// Mint-or-load the cold-index secret up front (get-or-create is not atomic;
 	// here it runs single-threaded) and cache it, so post-Open Secret() reads are
 	// lock-free and cannot fail.
-	secret, err := c.ensureSecret()
-	if err != nil {
+	if c.secret, err = c.ensureSecret(); err != nil {
 		_ = c.Close()
 		return nil, fmt.Errorf("catalog: ensure cold-index secret: %w", err)
 	}
+	return c, nil
+}
+
+// OpenReadOnly opens an existing catalog read-only: nothing is written, and a
+// read-only RocksDB open takes no lock, so it works beside a running daemon.
+// The catalog must already hold its cold-index secret, which every catalog
+// that has recorded an artifact does (Open mints it before anything else).
+func OpenReadOnly(
+	path string, layout geometry.Layout, txhashIndex geometry.TxHashIndexLayout, logger *supportlog.Entry,
+) (*Catalog, error) {
+	c, err := open(path, layout, txhashIndex, logger, true)
+	if err != nil {
+		return nil, err
+	}
+	secret, found, err := c.loadSecret()
+	if err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("catalog: read cold-index secret: %w", err)
+	}
+	if !found {
+		_ = c.Close()
+		return nil, errors.New("catalog: no cold-index secret; the catalog has never been opened read-write")
+	}
 	c.secret = secret
+	return c, nil
+}
+
+// open opens the store and runs the census, the prologue Open and
+// OpenReadOnly share. The census comes before anything is written: a catalog
+// holding entries outside this binary's vocabulary (a newer binary's formats,
+// or corruption) is refused here, so Open writes no catalog entry of its own
+// into a tree it refuses. RocksDB itself may still create housekeeping files
+// and flush a previous binary's recovered WAL on Close.
+func open(
+	path string, layout geometry.Layout, txhashIndex geometry.TxHashIndexLayout, logger *supportlog.Entry,
+	readOnly bool,
+) (*Catalog, error) {
+	store, err := rocksdb.New(rocksdb.Config{Path: path, Logger: logger, ReadOnly: readOnly})
+	if err != nil {
+		return nil, err
+	}
+	c := &Catalog{store: store, logger: logger, layout: layout, txhashIndex: txhashIndex}
+	if err := c.census(); err != nil {
+		_ = c.Close()
+		return nil, err
+	}
 	return c, nil
 }
 

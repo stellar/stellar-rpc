@@ -277,6 +277,7 @@ func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
 	hotOverride := filepath.Join(overrideRoot, "hot")
 	ledgersOverride := filepath.Join(overrideRoot, "ledgers")
 	eventsOverride := filepath.Join(overrideRoot, "events")
+	eventsIndexOverride := filepath.Join(overrideRoot, "eventsidx")
 	txhashRawOverride := filepath.Join(overrideRoot, "txraw")
 	txhashIndexOverride := filepath.Join(overrideRoot, "txidx")
 	catalogOverride := filepath.Join(overrideRoot, "meta")
@@ -287,6 +288,7 @@ func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
 			Catalog:        catalogOverride,
 			Ledgers:        ledgersOverride,
 			Events:         eventsOverride,
+			EventsIndex:    eventsIndexOverride,
 			TxhashRaw:      txhashRawOverride,
 			TxhashIndex:    txhashIndexOverride,
 			Hot:            hotOverride,
@@ -305,12 +307,21 @@ func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
 		layout.LedgerPackPath(cid))
 	assert.Equal(t, ledgersOverride, layout.LedgersRoot())
 	assert.Equal(t, eventsOverride, layout.EventsRoot())
+	assert.Equal(t, eventsIndexOverride, layout.EventsIndexRoot())
 	assert.Equal(t, txhashRawOverride, layout.TxHashRawRoot())
 	assert.Equal(t, filepath.Join(txhashRawOverride, cid.BucketID(), cid.String()+".bin"),
 		layout.TxHashBinPath(cid))
 	assert.Equal(t, txhashIndexOverride, layout.TxHashIndexRoot())
-	for _, p := range layout.EventsPaths(cid) {
-		assert.True(t, filepathHasPrefix(p, eventsOverride), "events path %q under override", p)
+	// The events pack and its index are independently placeable, so each file
+	// must land under ITS OWN root: an operator puts the randomly-probed index
+	// on fast storage while the pack's bulk stays on the big volume.
+	eventsFiles := layout.EventsPaths(cid)
+	require.Len(t, eventsFiles, 3)
+	assert.True(t, filepathHasPrefix(eventsFiles[0], eventsOverride),
+		"events pack %q under the data override", eventsFiles[0])
+	for _, p := range eventsFiles[1:] {
+		assert.True(t, filepathHasPrefix(p, eventsIndexOverride), "events index %q under the index override", p)
+		assert.False(t, filepathHasPrefix(p, eventsOverride), "events index %q must not sit under the data root", p)
 	}
 	// Nothing resolves under {DataDir}/hot or {DataDir}/ledgers.
 	assert.NotEqual(t, filepath.Join(dataDir, "hot", cid.String()), layout.HotChunkPath(cid))

@@ -42,7 +42,15 @@ default_data_dir = "/var/stellar/rpc-v2"
 # Any two overrides resolving to the same tree are rejected at startup.
 #catalog = ""        # {default_data_dir}/catalog/rocksdb — the catalog RocksDB
 #ledgers = ""        # {default_data_dir}/ledgers         — immutable ledger .pack files
-#events = ""         # {default_data_dir}/events          — immutable events segments
+# A chunk's events live in two roots. The pack is streamed sequentially and holds nearly all the
+# bytes; the index is probed at random. On a volume with a low IOPS ceiling
+# those random probes are the bottleneck, so putting events_index on fast
+# local storage is worth far more than moving the packs.
+#
+# `events` is the PACK root only. It named all three events files before the
+# index moved out, so set both keys or the indexes stay under default_data_dir.
+#events = ""         # {default_data_dir}/events/data     — immutable events packs
+#events_index = ""   # {default_data_dir}/events/index    — immutable events indexes
 #txhash_raw = ""     # {default_data_dir}/txhash/raw      — transient txhash .bin files
 #txhash_index = ""   # {default_data_dir}/txhash/index    — frozen per-window .idx files
 #hot = ""            # {default_data_dir}/hot             — per-chunk hot RocksDB databases

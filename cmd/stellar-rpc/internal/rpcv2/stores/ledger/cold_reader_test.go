@@ -244,6 +244,32 @@ func TestColdReader_RejectsWrongFormat(t *testing.T) {
 	assert.Contains(t, err.Error(), "format")
 }
 
+// TestColdReader_VerifyRequiresContentHash: a pack written without a content
+// hash has nothing to verify against and must not pass Verify silently.
+func TestColdReader_VerifyRequiresContentHash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unhashed.pack")
+	pw, err := packfile.Create(path, packfile.WriterOptions{
+		ItemsPerRecord: 1,
+		Format:         formatLedgerCold,
+	})
+	require.NoError(t, err)
+	require.NoError(t, pw.AppendItem([]byte("v")))
+	appData := make([]byte, appDataSize)
+	appData[0] = coldAppDataVersion
+	require.NoError(t, pw.Finish(appData))
+
+	c, err := OpenColdReader(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.ErrorIs(t, c.Verify(t.Context()), ErrNoContentHash)
+
+	hashed, _ := writeFixturePack(t, 1, 1)
+	h, err := OpenColdReader(hashed)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = h.Close() })
+	require.NoError(t, h.Verify(t.Context()))
+}
+
 func TestColdReader_CloseIsIdempotent(t *testing.T) {
 	path, _ := writeFixturePack(t, 1, 1)
 	c, err := OpenColdReader(path)
