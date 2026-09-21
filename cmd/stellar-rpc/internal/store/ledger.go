@@ -36,8 +36,8 @@ func (lr LedgerRange) ToLedgerSeqRange() protocol.LedgerSeqRange {
 // LedgerReader is the serving-side read contract every storage backend
 // implements. Handlers depend on this interface, never on a concrete backend.
 type LedgerReader interface {
-	// ScanLedgers is LedgerReaderTx.ScanLedgers without the snapshot: each call
-	// reads the store as it stands.
+	// ScanLedgers reads whatever the request already sees (the live store on
+	// v1 and the request's read view on v2), without its own snapshot.
 	ScanLedgers(ctx context.Context, start, end uint32) iter.Seq2[RawLedger, error]
 	GetLedgerRange(ctx context.Context) (LedgerRange, error)
 	StreamLedgerRange(ctx context.Context, startLedger uint32, endLedger uint32, f StreamLedgerFn) error
