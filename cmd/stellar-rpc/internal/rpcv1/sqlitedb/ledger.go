@@ -32,6 +32,7 @@ type LedgerWriter interface {
 
 type readDB interface {
 	Select(ctx context.Context, dest any, query sq.Sqlizer) error
+	Query(ctx context.Context, query sq.Sqlizer) (*db.Rows, error)
 }
 
 type ledgerReader struct {
@@ -113,24 +114,16 @@ func (r ledgerReader) ScanLedgers(ctx context.Context, start, end uint32) iter.S
 	return scanLedgers(ctx, r.db, start, end)
 }
 
-// ledgerQuerier is the slice of db.SessionInterface a scan needs; *DB and a Tx session both provide it.
-type ledgerQuerier interface {
-	Query(ctx context.Context, query sq.Sqlizer) (*db.Rows, error)
-}
-
 // scanLedgers yields the stored ledgers in [start, end] ascending, one row at a
 // time. Absent sequences are simply not yielded.
-func scanLedgers(ctx context.Context, q ledgerQuerier, start, end uint32) iter.Seq2[store.RawLedger, error] {
+func scanLedgers(ctx context.Context, q readDB, start, end uint32) iter.Seq2[store.RawLedger, error] {
 	return func(yield func(store.RawLedger, error) bool) {
 		if start > end {
 			return
 		}
-		stmt := sq.Select("sequence", "meta").From(ledgerCloseMetaTableName)
-		if start == end { // a scan of one is a primary-key point read
-			stmt = stmt.Where(sq.Eq{"sequence": start})
-		} else {
-			stmt = stmt.Where(sq.GtOrEq{"sequence": start}).Where(sq.LtOrEq{"sequence": end}).OrderBy("sequence asc")
-		}
+		// The primary-key range plan is one B-tree seek, for a scan of one too.
+		stmt := sq.Select("sequence", "meta").From(ledgerCloseMetaTableName).
+			Where(sq.GtOrEq{"sequence": start}).Where(sq.LtOrEq{"sequence": end}).OrderBy("sequence asc")
 
 		rows, err := q.Query(ctx, stmt)
 		if err != nil {

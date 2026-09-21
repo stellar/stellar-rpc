@@ -135,10 +135,8 @@ func scanView(ctx context.Context, view *query.ReadView, start, end uint32) iter
 			}
 			yielded := false
 			err := view.WithLedger(start, func(raw []byte) error {
-				if !yielded {
-					yielded = true
-					yield(store.RawLedger{Sequence: start, Raw: raw}, nil)
-				}
+				yielded = true
+				yield(store.RawLedger{Sequence: start, Raw: raw}, nil)
 				return nil
 			})
 			if err != nil && !yielded && !errors.Is(err, stores.ErrNotFound) {

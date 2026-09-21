@@ -18,7 +18,6 @@ import (
 
 	"github.com/creachadair/jrpc2"
 	"github.com/creachadair/jrpc2/handler"
-	"github.com/creachadair/jrpc2/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -157,10 +156,7 @@ func multiTxLCMBytes(t *testing.T, seq uint32, closeTime int64, txs []parityTx) 
 }
 
 func newLocalClient(t *testing.T, h jrpc2.Handler) *jrpc2.Client {
-	t.Helper()
-	local := server.NewLocal(handler.Map{protocol.GetEventsMethodName: h}, nil)
-	t.Cleanup(func() { _ = local.Client.Close() })
-	return local.Client
+	return rpcv2test.NewLocalClient(t, handler.Map{protocol.GetEventsMethodName: h})
 }
 
 // newV1Client seeds an rpcv1 sqlite store from lcms and serves the shared v1

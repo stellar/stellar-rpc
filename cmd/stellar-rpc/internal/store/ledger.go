@@ -38,7 +38,7 @@ func (lr LedgerRange) ToLedgerSeqRange() protocol.LedgerSeqRange {
 type LedgerReader interface {
 	// ScanLedgers reads whatever the request already sees (the live store on
 	// v1 and the request's read view on v2), without its own snapshot.
-	ScanLedgers(ctx context.Context, start, end uint32) iter.Seq2[RawLedger, error]
+	LedgerScanner
 	GetLedgerRange(ctx context.Context) (LedgerRange, error)
 	StreamLedgerRange(ctx context.Context, startLedger uint32, endLedger uint32, f StreamLedgerFn) error
 	NewTx(ctx context.Context) (LedgerReaderTx, error)
@@ -49,8 +49,13 @@ type LedgerReader interface {
 // are valid only inside the call, read-only. Copy whatever outlives fn.
 type WithLedgerRawFn func(raw []byte) error
 
-// LedgerScanner is the contract's one read idiom; LedgerReader and LedgerReaderTx both satisfy it.
+// LedgerScanner is the contract's one read idiom, embedded by LedgerReader and LedgerReaderTx.
 type LedgerScanner interface {
+	// ScanLedgers yields the stored ledgers in [start, end], ascending, as one
+	// forward read that ends when the loop body breaks. Ledgers the source
+	// does not hold, below its oldest, above its latest, or missing inside the
+	// range, are not yielded, so callers should check the sequences they receive.
+	// A non-nil error ends the stream and the RawLedger beside it is zero.
 	ScanLedgers(ctx context.Context, start, end uint32) iter.Seq2[RawLedger, error]
 }
 
@@ -118,12 +123,7 @@ type RawLedger struct {
 // and every ScanLedgers on it answer from the same committed state. Call Done
 // to release it, however the loops ended.
 type LedgerReaderTx interface {
-	// ScanLedgers yields the stored ledgers in [start, end], ascending, as one
-	// forward read that ends when the loop body breaks. Ledgers the snapshot
-	// does not hold, below its oldest, above its latest, or missing inside the
-	// range, are not yielded, so callers should check the sequences they receive.
-	// A non-nil error ends the stream and the RawLedger beside it is zero.
-	ScanLedgers(ctx context.Context, start, end uint32) iter.Seq2[RawLedger, error]
+	LedgerScanner
 	// GetLedgerRange is the snapshot's oldest and latest ledger.
 	GetLedgerRange(ctx context.Context) (LedgerRange, error)
 	Done() error

@@ -15,9 +15,9 @@ package rpcv2
 // metric must not move between them.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"iter"
 	"os"
 	"testing"
@@ -29,7 +29,6 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/network"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
-	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
@@ -161,24 +160,15 @@ func (f benchLedgers) chunkRun(b *testing.B) iter.Seq[[]byte] {
 // sequences by position, so the run must be contiguous.
 func (f benchLedgers) raw(b *testing.B) iter.Seq[[]byte] {
 	return func(yield func([]byte) bool) {
-		errStop := errors.New("stop")
 		next := f.first.Sequence
-		err := sqlitedb.NewLedgerReader(f.db).StreamLedgerRange(
-			context.Background(), f.first.Sequence, f.last.Sequence,
-			func(lcm xdr.LedgerCloseMeta) error {
-				require.Equal(b, next, lcm.LedgerSequence(), "the fixture must be one contiguous run")
-				next++
-				raw, err := lcm.MarshalBinary()
-				if err != nil {
-					return err
-				}
-				if !yield(raw) {
-					return errStop
-				}
-				return nil
-			})
-		if !errors.Is(err, errStop) {
+		reader := sqlitedb.NewLedgerReader(f.db)
+		for l, err := range reader.ScanLedgers(context.Background(), f.first.Sequence, f.last.Sequence) {
 			require.NoError(b, err)
+			require.Equal(b, next, l.Sequence, "the fixture must be one contiguous run")
+			next++
+			if !yield(bytes.Clone(l.Raw)) { // Raw is on loan until the next step
+				return
+			}
 		}
 	}
 }

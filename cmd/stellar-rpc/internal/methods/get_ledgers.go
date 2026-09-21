@@ -286,7 +286,7 @@ func (h ledgersHandler) fetchLedgers(
 func collectLedgerPage(
 	ctx context.Context, readTx store.LedgerReaderTx, start, end uint32, room int,
 ) ([]store.RawLedger, error) {
-	page := make([]store.RawLedger, 0, max(room, 0))
+	page := make([]store.RawLedger, 0, room)
 	for ledger, err := range readTx.ScanLedgers(ctx, start, end) {
 		if err != nil {
 			return nil, &jrpc2.Error{
