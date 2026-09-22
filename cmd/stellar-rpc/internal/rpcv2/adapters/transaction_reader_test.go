@@ -2,6 +2,7 @@ package adapters
 
 import (
 	"context"
+	"math"
 	"runtime"
 	"sync/atomic"
 	"testing"
@@ -314,4 +315,70 @@ func allocBytesPerRun(t *testing.T, runs int, fn func()) uint64 {
 	}
 	runtime.ReadMemStats(&after)
 	return (after.TotalAlloc - before.TotalAlloc) / uint64(runs)
+}
+
+func TestGetTransaction_BoundsSelectTheLedger(t *testing.T) {
+	cat := openTestCatalog(t)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
+	seq := testChunk.FirstLedger()
+	lcm, txs := lcmWithTxs(t, seq, txSpec{})
+	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
+	r.SetLatestLedger(seq, query.CloseTimeAt(closeTimeFor(seq)))
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
+	ctx := viewCtx(t, r)
+
+	got, err := reader.GetTransaction(ctx, txs[0].hash, store.LedgerSeqBounds{First: seq, Last: seq})
+	require.NoError(t, err)
+	assert.Equal(t, seq, got.Ledger.Sequence)
+
+	for _, bounds := range []store.LedgerSeqBounds{
+		{First: seq + 1, Last: math.MaxUint32},
+		{First: 0, Last: seq - 1},
+	} {
+		_, err := reader.GetTransaction(ctx, txs[0].hash, bounds)
+		assert.ErrorIs(t, err, store.ErrNoTransaction, "bounds %+v exclude ledger %d", bounds, seq)
+	}
+}
+
+func TestGetTransaction_BoundsGateColdCandidates(t *testing.T) {
+	ctx, reader, txs, orphanHash := coldFixture(t)
+	bounds := store.LedgerSeqBounds{First: testChunk.FirstLedger(), Last: testChunk.LastLedger()}
+
+	// The orphan's candidate ledger lies in testChunk+2, outside the bounds, so
+	// the gate turns it into a miss before the unresolvable fetch that makes
+	// the unbounded lookup an error (TestGetTransaction_UnresolvableCandidateIsAnError).
+	_, err := reader.GetTransaction(ctx, orphanHash, bounds)
+	assert.ErrorIs(t, err, store.ErrNoTransaction)
+
+	got, err := reader.GetTransaction(ctx, txs[0].hash, bounds)
+	require.NoError(t, err)
+	assert.Equal(t, testChunk.FirstLedger(), got.Ledger.Sequence)
+}
+
+// TestGetTransaction_HotCoveredBoundsNeverTouchTheColdTier is the polling case
+// end to end: bounds the hot chunk covers make a miss final without opening a
+// window index. The frozen coverage here has no .idx behind it, so any lookup
+// that reaches the cold tier fails instead of missing cleanly.
+func TestGetTransaction_HotCoveredBoundsNeverTouchTheColdTier(t *testing.T) {
+	cat := openTestCatalog(t)
+	// Floor one chunk below the hot chunk, so an unbounded lookup's range is
+	// not hot-covered and does reach the cold tier.
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk-1))
+	seq := testChunk.FirstLedger()
+	lcm, _ := lcmWithTxs(t, seq, txSpec{})
+	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
+	cov, err := cat.MarkTxHashIndexFreezing(0, testChunk, testChunk)
+	require.NoError(t, err)
+	require.NoError(t, cat.CommitTxHashIndex(cov))
+	r.SetLatestLedger(seq, query.CloseTimeAt(closeTimeFor(seq)))
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
+	ctx := viewCtx(t, r)
+	unknown := xdr.Hash{0xde, 0xad}
+
+	_, err = reader.GetTransaction(ctx, unknown, allLedgers)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, store.ErrNoTransaction, "the unbounded miss reaches the broken cold index")
+
+	_, err = reader.GetTransaction(ctx, unknown, store.LedgerSeqBounds{First: seq, Last: math.MaxUint32})
+	assert.ErrorIs(t, err, store.ErrNoTransaction, "bounds the hot chunk covers never reach it")
 }
