@@ -46,11 +46,7 @@ func GetTransaction(
 		}
 	}
 
-	bounds := store.AllLedgers()
-	bounds.First = request.StartLedger
-	if request.EndLedger != 0 {
-		bounds.Last = request.EndLedger
-	}
+	bounds := store.Bounds(request.MinLedger, request.MaxLedger)
 	// Read txn first before checking latest ledger cache to avoid race
 	tx, getTxErr := reader.GetTransaction(ctx, txHash, bounds)
 	storeRange, err := ledgerReader.GetLedgerRange(ctx)

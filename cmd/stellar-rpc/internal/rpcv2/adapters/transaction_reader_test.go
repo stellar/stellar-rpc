@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/network"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
@@ -329,13 +330,13 @@ func TestGetTransaction_BoundsSelectTheLedger(t *testing.T) {
 	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 	ctx := viewCtx(t, r)
 
-	got, err := reader.GetTransaction(ctx, txs[0].hash, store.LedgerSeqBounds{First: first + 1, Last: first + 1})
+	got, err := reader.GetTransaction(ctx, txs[0].hash, store.Bounds(first+1, first+1))
 	require.NoError(t, err)
 	assert.Equal(t, first+1, got.Ledger.Sequence)
 
-	for _, bounds := range []store.LedgerSeqBounds{
-		{First: first + 2, Last: math.MaxUint32},
-		{First: 0, Last: first},
+	for _, bounds := range []protocol.LedgerSeqRange{
+		store.Bounds(first+2, math.MaxUint32),
+		store.Bounds(0, first),
 	} {
 		_, err := reader.GetTransaction(ctx, txs[0].hash, bounds)
 		assert.ErrorIs(t, err, store.ErrNoTransaction, "bounds %+v exclude ledger %d", bounds, first+1)
@@ -344,7 +345,7 @@ func TestGetTransaction_BoundsSelectTheLedger(t *testing.T) {
 
 func TestGetTransaction_BoundsGateColdCandidates(t *testing.T) {
 	ctx, reader, txs, orphanHash := coldFixture(t)
-	bounds := store.LedgerSeqBounds{First: testChunk.FirstLedger(), Last: testChunk.LastLedger()}
+	bounds := store.Bounds(testChunk.FirstLedger(), testChunk.LastLedger())
 
 	// The orphan's candidate ledger lies in testChunk+2, outside the bounds, so
 	// the gate turns it into a miss before the unresolvable fetch that makes
@@ -381,7 +382,7 @@ func TestGetTransaction_HotCoveredBoundsNeverTouchTheColdTier(t *testing.T) {
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, store.ErrNoTransaction, "the unbounded miss reaches the broken cold index")
 
-	_, err = reader.GetTransaction(ctx, unknown, store.LedgerSeqBounds{First: seq, Last: math.MaxUint32})
+	_, err = reader.GetTransaction(ctx, unknown, store.Bounds(seq, math.MaxUint32))
 	assert.ErrorIs(t, err, store.ErrNoTransaction, "bounds the hot chunk covers never reach it")
 }
 
@@ -404,7 +405,7 @@ func TestGetTransaction_StalePartialHotChunkDoesNotHideColdTransactions(t *testi
 	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 
 	got, err := reader.GetTransaction(viewCtx(t, r), txs[0].hash,
-		store.LedgerSeqBounds{First: first + 2, Last: first + 5})
+		store.Bounds(first+2, first+5))
 	require.NoError(t, err)
 	assert.Equal(t, first+5, got.Ledger.Sequence)
 }

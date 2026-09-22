@@ -390,7 +390,7 @@ Instead, the lookup probes the transaction indexes in two stages:
 1. Probe the hot transaction indexes. A match is definitive.
 2. Probe each window transaction index. A match identifies a candidate ledger, which is fetched and verified against the full transaction hash.
 
-The request's `startLedger` and `endLedger` (inclusive; an omitted side is unbounded) are clamped into the view's range: `lo = max(startLedger, floor)` and `hi = min(endLedger, latestLedger)`. A candidate is served only if `lo <= ledger <= hi`. The floor side enforces R2 and makes it safe for a window index to keep naming pruned ledgers. The `latestLedger` side enforces H3: without it, a probe could return a transaction from a ledger above the view's `latestLedger`, since the hot store keeps advancing after acquisition. An empty clamped range probes nothing and answers not found.
+The request's `minLedger` and `maxLedger` (inclusive; an omitted side is unbounded) are clamped into the view's range: `lo = max(minLedger, floor)` and `hi = min(maxLedger, latestLedger)`. A candidate is served only if `lo <= ledger <= hi`. The floor side enforces R2 and makes it safe for a window index to keep naming pruned ledgers. The `latestLedger` side enforces H3: without it, a probe could return a transaction from a ledger above the view's `latestLedger`, since the hot store keeps advancing after acquisition. An empty clamped range probes nothing and answers not found.
 
 The same range selects the probe set. The read view supplies `TxReader` (through `TxIndexes`) with:
 

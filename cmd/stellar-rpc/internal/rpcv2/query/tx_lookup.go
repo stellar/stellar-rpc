@@ -23,16 +23,15 @@ import (
 // in resolve.go), that makes the read view the probe's whole ledger-side
 // dependency, so nothing has to wrap it to hand it over.
 
-// TxIndexes returns the probe set for a lookup bounded to [first, last]
-// (inclusive; 0 and MaxUint32 for an unbounded side): the hot indexes, and a
-// function enumerating the cold indexes on demand, since that costs a catalog
-// scan the common hot hit must not pay. The bounds are clamped into the view's
-// servable window, and only indexes that can hold a ledger in the clamped range
-// are returned, each gated to it. When every ledger in the range is committed
-// to a hot chunk the cold function returns nothing: a hot miss is then final.
-// That is the polling case, a just-submitted transaction looked up from the
-// latest ledger of its sendTransaction response.
+// TxIndexes returns the probe set for a lookup bounded to [first, last],
+// inclusive: the hot indexes, and a function enumerating the cold indexes on
+// demand, since that costs a catalog scan the common hot hit must not pay. The
+// bounds are clamped into the view's servable window; only indexes that can
+// hold a ledger in the clamped range are returned, each gated to it. When every
+// ledger in the range is committed to a hot chunk the cold function returns
+// nothing: a hot miss is then final.
 func (a *ReadView) TxIndexes(first, last uint32) ([]txhash.HashIndex, func() ([]txhash.HashIndex, error)) {
+	// Not ClampRange: a point lookup below the floor is a miss, not a range error.
 	lo, hi := max(first, a.OldestLedger()), min(last, a.LatestLedger())
 	if lo > hi {
 		return nil, nil

@@ -276,16 +276,16 @@ func TestTransactionBounds(t *testing.T) {
 
 	testCases := []struct {
 		name   string
-		bounds store.LedgerSeqBounds
+		bounds protocol.LedgerSeqRange
 		found  bool
 	}{
-		{"only the ledger", store.LedgerSeqBounds{First: seq, Last: seq}, true},
-		{"ledger at the last bound", store.LedgerSeqBounds{First: 0, Last: seq}, true},
-		{"ledger at the first bound", store.LedgerSeqBounds{First: seq, Last: math.MaxUint32}, true},
+		{"only the ledger", store.Bounds(seq, seq), true},
+		{"ledger at the last bound", store.Bounds(0, seq), true},
+		{"ledger at the first bound", store.Bounds(seq, math.MaxUint32), true},
 		{"unbounded", store.AllLedgers(), true},
-		{"first bound above the ledger", store.LedgerSeqBounds{First: seq + 1, Last: math.MaxUint32}, false},
-		{"last bound below the ledger", store.LedgerSeqBounds{First: 0, Last: seq - 1}, false},
-		{"first bound above the latest ledger", store.LedgerSeqBounds{First: seq + 1000, Last: math.MaxUint32}, false},
+		{"first bound above the ledger", store.Bounds(seq+1, math.MaxUint32), false},
+		{"last bound below the ledger", store.Bounds(0, seq-1), false},
+		{"first bound above the latest ledger", store.Bounds(seq+1000, math.MaxUint32), false},
 	}
 
 	for _, tc := range testCases {

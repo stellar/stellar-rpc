@@ -227,29 +227,38 @@ func TestGetTransaction_LedgerBounds(t *testing.T) {
 	hash1, hash2 := hex.EncodeToString(firstHash[:]), hex.EncodeToString(secondHash[:])
 
 	_, err := GetTransaction(ctx, log, store, ledgerReader,
-		protocol.GetTransactionRequest{Hash: hash1, StartLedger: 102, EndLedger: 101})
-	require.EqualError(t, err, "[-32602] startLedger (102) must not exceed endLedger (101)")
+		protocol.GetTransactionRequest{Hash: hash1, MinLedger: 102, MaxLedger: 101})
+	require.EqualError(t, err, "[-32602] minLedger (102) must not exceed maxLedger (101)")
 
 	for _, tc := range []struct {
-		name   string
-		hash   string
-		start  uint32
-		end    uint32
-		status string
-		ledger uint32
+		name      string
+		hash      string
+		minLedger uint32
+		maxLedger uint32
+		status    string
+		ledger    uint32
 	}{
-		{name: "ExactLedger", hash: hash1, start: 101, end: 101, status: protocol.TransactionStatusSuccess, ledger: 101},
-		{name: "UnboundedEnd", hash: hash1, start: 101, status: protocol.TransactionStatusSuccess, ledger: 101},
-		{name: "UnboundedStart", hash: hash1, end: 101, status: protocol.TransactionStatusSuccess, ledger: 101},
-		{name: "WiderRange", hash: hash1, start: 100, end: 102, status: protocol.TransactionStatusSuccess, ledger: 101},
-		{name: "FailedTx", hash: hash2, start: 102, end: 102, status: protocol.TransactionStatusFailed, ledger: 102},
-		{name: "StartAboveTx", hash: hash1, start: 102, status: protocol.TransactionStatusNotFound},
-		{name: "EndBelowTx", hash: hash1, end: 100, status: protocol.TransactionStatusNotFound},
-		{name: "StartAboveLatestLedger", hash: hash1, start: 500, status: protocol.TransactionStatusNotFound},
+		{
+			name: "ExactLedger", hash: hash1, minLedger: 101, maxLedger: 101,
+			status: protocol.TransactionStatusSuccess, ledger: 101,
+		},
+		{name: "UnboundedMax", hash: hash1, minLedger: 101, status: protocol.TransactionStatusSuccess, ledger: 101},
+		{name: "UnboundedMin", hash: hash1, maxLedger: 101, status: protocol.TransactionStatusSuccess, ledger: 101},
+		{
+			name: "WiderRange", hash: hash1, minLedger: 100, maxLedger: 102,
+			status: protocol.TransactionStatusSuccess, ledger: 101,
+		},
+		{
+			name: "FailedTx", hash: hash2, minLedger: 102, maxLedger: 102,
+			status: protocol.TransactionStatusFailed, ledger: 102,
+		},
+		{name: "MinAboveTx", hash: hash1, minLedger: 102, status: protocol.TransactionStatusNotFound},
+		{name: "MaxBelowTx", hash: hash1, maxLedger: 100, status: protocol.TransactionStatusNotFound},
+		{name: "MinAboveLatestLedger", hash: hash1, minLedger: 500, status: protocol.TransactionStatusNotFound},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tx, err := GetTransaction(ctx, log, store, ledgerReader,
-				protocol.GetTransactionRequest{Hash: tc.hash, StartLedger: tc.start, EndLedger: tc.end})
+				protocol.GetTransactionRequest{Hash: tc.hash, MinLedger: tc.minLedger, MaxLedger: tc.maxLedger})
 			require.NoError(t, err)
 			if tc.status == protocol.TransactionStatusNotFound {
 				require.Equal(t, protocol.GetTransactionResponse{

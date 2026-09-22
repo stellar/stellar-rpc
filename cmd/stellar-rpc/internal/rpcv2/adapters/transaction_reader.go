@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
@@ -27,14 +28,14 @@ func NewTransactionReader(networkPassphrase string, metrics observability.Metric
 }
 
 func (r *TransactionReader) GetTransaction(
-	ctx context.Context, hash xdr.Hash, bounds store.LedgerSeqBounds,
+	ctx context.Context, hash xdr.Hash, bounds protocol.LedgerSeqRange,
 ) (store.Transaction, error) {
 	view, err := query.ViewFrom(ctx)
 	if err != nil {
 		return store.Transaction{}, err
 	}
 
-	hot, cold := view.TxIndexes(bounds.First, bounds.Last)
+	hot, cold := view.TxIndexes(bounds.FirstLedger, bounds.LastLedger)
 	probe, err := txhash.NewTxReader(hot, cold, view, r.passphrase)
 	if err != nil {
 		return store.Transaction{}, err

@@ -18,20 +18,31 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
-// openHotChunk opens chunk c's hot DB, commits n zero-tx ledgers from its first
-// ledger, and publishes the handle on r unless r is nil.
+// openHotChunk seeds chunk c's hot DB with n zero-tx ledgers from its first
+// ledger, marks it ready, and publishes the handle on r unless r is nil.
 func openHotChunk(t *testing.T, cat *catalog.Catalog, r *Registry, c chunk.ID, n uint32) *hotchunk.DB {
 	t.Helper()
-	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	lcms := make([][]byte, 0, n)
 	for seq := c.FirstLedger(); seq < c.FirstLedger()+n; seq++ {
-		rpcv2test.IngestLedger(t, db, seq, rpcv2test.ZeroTxLCMBytesAt(t, seq, int64(seq)))
+		lcms = append(lcms, rpcv2test.ZeroTxLCMBytesAt(t, seq, int64(seq)))
 	}
-	if r != nil {
-		r.PublishHandle(c, db)
-	}
+	var db *hotchunk.DB
+	rpcv2test.SeedHotChunkLCMs(t, cat, c, func(d *hotchunk.DB) {
+		db = d
+		if r != nil {
+			r.PublishHandle(c, d)
+		}
+	}, lcms...)
 	return db
+}
+
+// coldIndexes enumerates the cold tier of a's probe set for [first, last].
+func coldIndexes(t *testing.T, a *ReadView, first, last uint32) []txhash.HashIndex {
+	t.Helper()
+	_, cold := a.TxIndexes(first, last)
+	idxs, err := cold()
+	require.NoError(t, err)
+	return idxs
 }
 
 // TestHotTxHashIndexes pins that every published hot chunk's tx index that
@@ -190,14 +201,8 @@ func TestColdTxIndexes(t *testing.T) {
 
 	a, err := r.NewReadView()
 	require.NoError(t, err)
-	coldIndexes := func(first, last uint32) []txhash.HashIndex {
-		_, cold := a.TxIndexes(first, last)
-		idxs, err := cold()
-		require.NoError(t, err)
-		return idxs
-	}
 
-	idxs := coldIndexes(0, math.MaxUint32)
+	idxs := coldIndexes(t, a, 0, math.MaxUint32)
 	require.Len(t, idxs, 2, "one reader per frozen coverage, freezing debris excluded")
 
 	got, err := idxs[0].Get(hashes[1])
@@ -207,13 +212,13 @@ func TestColdTxIndexes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, seqs[0], got)
 
-	only1 := coldIndexes(seqs[1], seqs[1])
+	only1 := coldIndexes(t, a, seqs[1], seqs[1])
 	require.Len(t, only1, 1, "bounds inside window 1 reach only its index")
 	got, err = only1[0].Get(hashes[1])
 	require.NoError(t, err)
 	assert.Equal(t, seqs[1], got)
 
-	only0 := coldIndexes(0, chunk.ID(0).LastLedger())
+	only0 := coldIndexes(t, a, 0, chunk.ID(0).LastLedger())
 	require.Len(t, only0, 1, "bounds inside window 0 reach only its index")
 	_, err = only0[0].Get(hashes[1])
 	assert.ErrorIs(t, err, stores.ErrNotFound, "window 0's index does not hold window 1's hash")
@@ -245,21 +250,15 @@ func TestColdTxIndexes_HotCoveredBoundsSkipTheColdTier(t *testing.T) {
 	a, err := r.NewReadView()
 	require.NoError(t, err)
 	defer a.Release()
-	coldIndexes := func(first, last uint32) []txhash.HashIndex {
-		_, cold := a.TxIndexes(first, last)
-		idxs, err := cold()
-		require.NoError(t, err)
-		return idxs
-	}
 
 	for _, first := range []uint32{chunk.ID(6).FirstLedger(), latest} {
-		assert.Empty(t, coldIndexes(first, math.MaxUint32), "bounds from %d are committed in hot chunk 6", first)
+		assert.Empty(t, coldIndexes(t, a, first, math.MaxUint32), "bounds from %d are committed in hot chunk 6", first)
 	}
-	assert.Empty(t, coldIndexes(chunk.ID(5).FirstLedger(), chunk.ID(5).FirstLedger()+1),
+	assert.Empty(t, coldIndexes(t, a, chunk.ID(5).FirstLedger(), chunk.ID(5).FirstLedger()+1),
 		"bounds within chunk 5's committed ledgers")
 
 	for _, first := range []uint32{0, chunk.ID(5).FirstLedger()} {
-		idxs := coldIndexes(first, math.MaxUint32)
+		idxs := coldIndexes(t, a, first, math.MaxUint32)
 		require.Len(t, idxs, 1, "bounds from %d reach ledgers no hot chunk committed, so the coverage is probed", first)
 		_, err = idxs[0].Get([32]byte{1})
 		require.Error(t, err)
