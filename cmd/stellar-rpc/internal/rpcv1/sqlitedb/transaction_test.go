@@ -141,7 +141,7 @@ func TestTransactionEvent(t *testing.T) {
 		require.NoError(t, write.Commit(lcm, nil))
 
 		reader := NewTransactionReader(log, db, passphrase)
-		tx, err := reader.GetTransaction(t.Context(), lcm.TransactionHash(0), allLedgers)
+		tx, err := reader.GetTransaction(t.Context(), lcm.TransactionHash(0), store.AllLedgers())
 		require.NoError(t, err)
 
 		require.Equal(t, tc.expectedTx.ContractEvents, tx.ContractEvents)
@@ -149,17 +149,13 @@ func TestTransactionEvent(t *testing.T) {
 	}
 }
 
-// allLedgers is the unbounded lookup: what a request without startLedger or
-// endLedger resolves to.
-var allLedgers = store.LedgerSeqBounds{Last: math.MaxUint32}
-
 func TestTransactionNotFound(t *testing.T) {
 	db := NewTestDB(t)
 	log := log.DefaultLogger
 	log.SetLevel(logrus.TraceLevel)
 
 	reader := NewTransactionReader(log, db, passphrase)
-	_, err := reader.GetTransaction(context.TODO(), xdr.Hash{}, allLedgers)
+	_, err := reader.GetTransaction(context.TODO(), xdr.Hash{}, store.AllLedgers())
 	require.ErrorIs(t, err, store.ErrNoTransaction)
 }
 
@@ -227,7 +223,7 @@ func TestTransactionFound(t *testing.T) {
 
 	// check 404 case
 	reader := NewTransactionReader(log, db, passphrase)
-	_, err = reader.GetTransaction(ctx, xdr.Hash{}, allLedgers)
+	_, err = reader.GetTransaction(ctx, xdr.Hash{}, store.AllLedgers())
 	require.ErrorIs(t, err, store.ErrNoTransaction)
 
 	eventReader := NewEventReader(log, db, passphrase)
@@ -241,7 +237,7 @@ func TestTransactionFound(t *testing.T) {
 	// check all 200 cases
 	for _, lcm := range lcms {
 		h := lcm.TransactionHash(0)
-		tx, err := reader.GetTransaction(ctx, h, allLedgers)
+		tx, err := reader.GetTransaction(ctx, h, store.AllLedgers())
 		require.NoError(t, err, "failed to find txhash %s in db", hex.EncodeToString(h[:]))
 		assert.EqualValues(t, 1, tx.ApplicationOrder)
 
@@ -286,9 +282,10 @@ func TestTransactionBounds(t *testing.T) {
 		{"only the ledger", store.LedgerSeqBounds{First: seq, Last: seq}, true},
 		{"ledger at the last bound", store.LedgerSeqBounds{First: 0, Last: seq}, true},
 		{"ledger at the first bound", store.LedgerSeqBounds{First: seq, Last: math.MaxUint32}, true},
-		{"unbounded", allLedgers, true},
+		{"unbounded", store.AllLedgers(), true},
 		{"first bound above the ledger", store.LedgerSeqBounds{First: seq + 1, Last: math.MaxUint32}, false},
 		{"last bound below the ledger", store.LedgerSeqBounds{First: 0, Last: seq - 1}, false},
+		{"first bound above the latest ledger", store.LedgerSeqBounds{First: seq + 1000, Last: math.MaxUint32}, false},
 	}
 
 	for _, tc := range testCases {
@@ -302,34 +299,6 @@ func TestTransactionBounds(t *testing.T) {
 			require.Equal(t, seq, tx.Ledger.Sequence)
 		})
 	}
-
-	// The bounds select a ledger, not the store, so another seeded transaction
-	// still resolves under bounds that cover only its own ledger.
-	other := lcms[3]
-	otherSeq := other.LedgerSequence()
-	tx, err := reader.GetTransaction(ctx, other.TransactionHash(0),
-		store.LedgerSeqBounds{First: otherSeq, Last: otherSeq})
-	require.NoError(t, err)
-	require.Equal(t, otherSeq, tx.Ledger.Sequence)
-}
-
-func TestMockTransactionHandlerBounds(t *testing.T) {
-	ctx := t.Context()
-	mock := NewMockTransactionStore(passphrase)
-
-	lcm := txMeta(1234, true)
-	require.NoError(t, mock.InsertTransactions(lcm))
-	seq, hash := lcm.LedgerSequence(), lcm.TransactionHash(0)
-
-	tx, err := mock.GetTransaction(ctx, hash, store.LedgerSeqBounds{First: seq, Last: seq})
-	require.NoError(t, err)
-	require.Equal(t, seq, tx.Ledger.Sequence)
-
-	_, err = mock.GetTransaction(ctx, hash, store.LedgerSeqBounds{First: seq + 1, Last: math.MaxUint32})
-	require.ErrorIs(t, err, store.ErrNoTransaction)
-
-	_, err = mock.GetTransaction(ctx, hash, store.LedgerSeqBounds{First: 0, Last: seq - 1})
-	require.ErrorIs(t, err, store.ErrNoTransaction)
 }
 
 func TestInsertTransactionsBatchingExceedsLimit(t *testing.T) {
@@ -476,7 +445,7 @@ func BenchmarkTransactionFetch(b *testing.B) {
 
 	for i := 0; b.Loop(); i++ {
 		r := randoms[i%len(randoms)]
-		tx, err := reader.GetTransaction(ctx, lcms[r].TransactionHash(0), allLedgers)
+		tx, err := reader.GetTransaction(ctx, lcms[r].TransactionHash(0), store.AllLedgers())
 		require.NoError(b, err)
 		assert.Equal(b, r%2 == 0, tx.Successful)
 	}

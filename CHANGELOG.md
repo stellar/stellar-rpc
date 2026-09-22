@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Added
-* `getTransaction` accepts optional `startLedger` and `endLedger` request fields, both inclusive, that restrict the lookup to that ledger range. A transaction outside the range is reported `NOT_FOUND`, an omitted side is unbounded, bounds beyond the node's ledger range are clamped, and `startLedger` above `endLedger` is rejected with `-32602`. This applies to BOTH rpcv1 and rpcv2, since the handler is shared. The main use is polling for a just-submitted transaction: passing the `latestLedger` of the `sendTransaction` response as `startLedger` lets a full-history node answer each poll from its newest transaction index alone instead of probing every window index.
+* `getTransaction` accepts optional `startLedger` and `endLedger` request fields, both inclusive, that restrict the lookup to that ledger range. A transaction outside the range is reported `NOT_FOUND`, an omitted side is unbounded, bounds beyond the node's ledger range are clamped, and `startLedger` above `endLedger` is rejected with `-32602`. This applies to BOTH rpcv1 and rpcv2, since the handler is shared. The main use is polling for a just-submitted transaction: pass the `latestLedger` of the `sendTransaction` response as `startLedger`.
 
 ### Removed
 * **`getEvents` responses no longer carry `inSuccessfulContractCall`.** This changes wire behavior for BOTH rpcv1 and rpcv2 — the response type is shared. The field has been deprecated ("remove in v24") since protocol 23, and its value was derivable anyway: `true` for every operation event, and `false` only on the fee and refund events of failed transactions.

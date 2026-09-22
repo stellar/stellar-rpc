@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"math"
 
 	"github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -32,7 +33,9 @@ type LedgerSeqBounds struct {
 	Last  uint32
 }
 
-// Contains reports whether seq lies within the bounds.
+// AllLedgers is the unbounded lookup.
+func AllLedgers() LedgerSeqBounds { return LedgerSeqBounds{Last: math.MaxUint32} }
+
 func (b LedgerSeqBounds) Contains(seq uint32) bool {
 	return b.First <= seq && seq <= b.Last
 }

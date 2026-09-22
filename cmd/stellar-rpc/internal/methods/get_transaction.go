@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math"
 
 	"github.com/creachadair/jrpc2"
 
@@ -47,9 +46,10 @@ func GetTransaction(
 		}
 	}
 
-	bounds := store.LedgerSeqBounds{First: request.StartLedger, Last: request.EndLedger}
-	if request.EndLedger == 0 {
-		bounds.Last = math.MaxUint32
+	bounds := store.AllLedgers()
+	bounds.First = request.StartLedger
+	if request.EndLedger != 0 {
+		bounds.Last = request.EndLedger
 	}
 	// Read txn first before checking latest ledger cache to avoid race
 	tx, getTxErr := reader.GetTransaction(ctx, txHash, bounds)
