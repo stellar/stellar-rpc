@@ -328,6 +328,8 @@ The leading edge determines where results begin. An ascending request whose lead
 
 The trailing edge determines where the scan ends. Ascending requests extending beyond `latestLedger` are truncated, and descending scans terminate at the retention floor.
 
+`getTransaction` is the exception: both of its optional bounds are clamped, never rejected. A point lookup below the floor already answers not found, the same as a pruned transaction, so an error would only turn an expired poll into a failure.
+
 ### Cursors
 
 Pagination cursors obey five rules:
@@ -388,13 +390,15 @@ Instead, the lookup probes the transaction indexes in two stages:
 1. Probe the hot transaction indexes. A match is definitive.
 2. Probe each window transaction index. A match identifies a candidate ledger, which is fetched and verified against the full transaction hash.
 
-A candidate is served only if `floor <= ledger <= latestLedger`, both from the view. The floor gate enforces R2 and makes it safe for a window index to keep naming pruned ledgers. The `latestLedger` gate enforces H3: without it, a probe could return a transaction from a ledger above the view's `latestLedger`, since the hot store keeps advancing after acquisition.
+The request's `startLedger` and `endLedger` (inclusive; an omitted side is unbounded) are clamped into the view's range: `lo = max(startLedger, floor)` and `hi = min(endLedger, latestLedger)`. A candidate is served only if `lo <= ledger <= hi`. The floor side enforces R2 and makes it safe for a window index to keep naming pruned ledgers. The `latestLedger` side enforces H3: without it, a probe could return a transaction from a ledger above the view's `latestLedger`, since the hot store keeps advancing after acquisition. An empty clamped range probes nothing and answers not found.
 
-The read view supplies `TxReader` with:
+The same range selects the probe set. The read view supplies `TxReader` with:
 
-- the hot transaction indexes (`HotTxHashIndexes`, newest first),
-- the window index coverages (`ColdTxHashIndexCoverages`), read from the view's snapshot, whose `.idx` files the lookup opens as it probes, and
+- the hot transaction indexes of the chunks that meet `[lo, hi]` (`HotTxHashIndexes`, newest first),
+- the window index coverages that meet `[lo, hi]` (`ColdTxIndexes`), read from the view's snapshot, whose `.idx` files the lookup opens as it probes, and
 - a ledger source backed by `Ledgers(chunk)`.
+
+When the published hot chunks cover all of `[lo, hi]`, the window coverages are not enumerated at all. The hot chunks are the live chunk plus the frozen chunks no window index covers yet, contiguous through the tip, so a hot miss on a range they cover is final. A poll for a just-submitted transaction, bounded by the `latestLedger` of its `sendTransaction` response, therefore costs one hot get and never touches the catalog or a window index.
 
 This preserves the existing lookup semantics while allowing `TxReader` to operate across both hot and cold storage.
 

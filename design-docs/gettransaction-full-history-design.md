@@ -190,9 +190,11 @@ A hash names no ledger, so the reader cannot know which home holds it in advance
 
 The hot tier is normally just the live chunk plus a window's tail — after downtime or a slow freeze it can be many chunks, shrinking as rebuilds advance `hi` (§8.3) — so the probe set is `≈ (in-retention windows) + (the hot chunks)`. Before a window has any index, all of its chunks are hot-tier. How the reader learns current coverage and stays consistent across rebuilds is the query-routing design's concern. This document requires only two things: that the two tiers together cover the whole retention window (the gap-free hot→cold handoff, §5.3), and that each transaction lives in exactly one of them. So **at most one probe confirms**: the verify runs on every fingerprint hit but succeeds for at most one.
 
+A request may bound the lookup with `startLedger` and `endLedger`, both inclusive; an omitted side is unbounded. The bounds are clamped into the retention window, and the probe set shrinks to the homes that can hold a ledger in the clamped range: the hot chunks that meet it, and the windows whose coverage `[lo, hi]` meets it. Every candidate is gated to the range before its ledger is fetched, so a fingerprint hit naming a ledger outside it is a miss without a fetch. When the hot chunks cover the whole range, a hot miss is final and no window is enumerated or probed. That is the polling case: a client that just submitted a transaction passes the `latestLedger` of its `sendTransaction` response as `startLedger`, since the transaction can only be in a later ledger, and each poll for it costs one exact hot get instead of a probe of every in-retention window. A transaction outside the bounds is reported not found, the same answer as a pruned or unknown one.
+
 ### 8.2 Cold lookup
 
-The cold tier **probes every in-retention window's `.idx`**. A hash gives no hint about which window it's in — to know the window you'd compute `chunkID(seq) / 1000`, and `seq` is the very thing the lookup is trying to find. So there is nothing to pre-select, and each window is probed in turn:
+The cold tier **probes every in-retention window's `.idx`** that meets the request's bounds (§8.1). A hash gives no hint about which window it's in — to know the window you'd compute `chunkID(seq) / 1000`, and `seq` is the very thing the lookup is trying to find. So there is nothing to pre-select, and each window is probed in turn:
 
 ```
 for each in-retention window (its live index → {lo}-{hi}.idx):
@@ -243,7 +245,7 @@ Transient peaks: ~2× the index size in the window dir during each rebuild (~25 
 - **Ingest, hot**: one `(hash, seq)` put per transaction, inside the ledger's existing write.
 - **Ingest, cold**: the in-memory sort of ~3M entries is negligible against the chunk's streaming pass; the `.bin` write is sequential.
 - **Rebuild**: a full dense window merges ~60 GB of sorted `.bin` files into a ~12.5 GB `.idx` in ≈1 minute (~200 MB/s write burst), measured in the `bench-fullhistory` harness. Mid-window rebuilds scale with `hi − lo`. Against a ~14-hour boundary cadence at mainnet rates, the rebuild is a ~0.1% duty cycle.
-- **Lookup, cold**: one MPHF probe per in-retention window — fingerprint screen, then fetch-and-verify on a hit. The hash is in at most one window, so at most one fetch confirms; fingerprint false positives (~1/256 per window, §6.2) are rejected by the full-hash verify. Probe ordering, parallelism, and the resulting latency/throughput are the query-routing design's concern (§8.1).
+- **Lookup, cold**: one MPHF probe per in-retention window that meets the request's bounds — fingerprint screen, then fetch-and-verify on a hit. The hash is in at most one window, so at most one fetch confirms; fingerprint false positives (~1/256 per window, §6.2) are rejected by the full-hash verify. Probe ordering, parallelism, and the resulting latency/throughput are the query-routing design's concern (§8.1).
 - **Lookup, hot**: one RocksDB point get in a bloom-filtered CF, then the same ledger fetch.
 
 ---
