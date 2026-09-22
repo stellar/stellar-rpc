@@ -26,9 +26,23 @@ type Transaction struct {
 	ContractEvents    [][][]byte // XDR encoded xdr.ContractEvent
 }
 
+// LedgerSeqBounds is the inclusive range of ledgers a lookup considers.
+type LedgerSeqBounds struct {
+	First uint32
+	Last  uint32
+}
+
+// Contains reports whether seq lies within the bounds.
+func (b LedgerSeqBounds) Contains(seq uint32) bool {
+	return b.First <= seq && seq <= b.Last
+}
+
 // TransactionReader provides all the public ways to read transactions from the backend.
 type TransactionReader interface {
-	GetTransaction(ctx context.Context, hash xdr.Hash) (Transaction, error)
+	// GetTransaction resolves hash to the transaction, considering only
+	// ledgers within bounds. A transaction outside bounds, like an unknown
+	// or pruned one, is ErrNoTransaction.
+	GetTransaction(ctx context.Context, hash xdr.Hash, bounds LedgerSeqBounds) (Transaction, error)
 }
 
 // ParseTransactionView reshapes an SDK transaction view into a Transaction; the

@@ -71,7 +71,7 @@ func requireLedgerData(t *testing.T, testDB *DB, lcms []xdr.LedgerCloseMeta) {
 	t.Helper()
 	txReader := NewTransactionReader(log.DefaultLogger, testDB, passphrase)
 	for _, lcm := range lcms {
-		_, err := txReader.GetTransaction(t.Context(), lcm.TransactionHash(0))
+		_, err := txReader.GetTransaction(t.Context(), lcm.TransactionHash(0), allLedgers)
 		require.NoError(t, err, "transaction of ledger %d missing", lcm.LedgerSequence())
 	}
 

@@ -55,7 +55,7 @@ func TestWithView_SharedAcrossAdapters(t *testing.T) {
 	ledgerReader := NewLedgerReader()
 	ctx := viewCtx(t, r)
 
-	_, err := txReader.GetTransaction(ctx, xdr.Hash{1})
+	_, err := txReader.GetTransaction(ctx, xdr.Hash{1}, allLedgers)
 	assert.ErrorIs(t, err, store.ErrNoTransaction)
 
 	r.SetLatestLedger(first+3, query.CloseTimeAt(closeTimeFor(first+3)))
@@ -76,7 +76,7 @@ func TestViewFrom_ContextWithoutViewIsAnError(t *testing.T) {
 	_, err = ledgerReader.NewTx(context.Background())
 	assert.ErrorIs(t, err, query.ErrNoView)
 
-	_, err = txReader.GetTransaction(context.Background(), xdr.Hash{1})
+	_, err = txReader.GetTransaction(context.Background(), xdr.Hash{1}, allLedgers)
 	assert.ErrorIs(t, err, query.ErrNoView)
 }
 

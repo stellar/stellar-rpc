@@ -7,6 +7,7 @@ package adapters
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -21,9 +22,14 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 const testChunk = chunk.ID(5)
+
+// allLedgers is the unbounded lookup: what a request without startLedger or
+// endLedger resolves to.
+var allLedgers = store.LedgerSeqBounds{Last: math.MaxUint32}
 
 func openTestCatalog(t *testing.T) *catalog.Catalog {
 	t.Helper()

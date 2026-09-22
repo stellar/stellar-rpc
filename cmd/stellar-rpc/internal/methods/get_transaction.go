@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/creachadair/jrpc2"
 
@@ -47,7 +48,7 @@ func GetTransaction(
 	}
 
 	// Read txn first before checking latest ledger cache to avoid race
-	tx, getTxErr := reader.GetTransaction(ctx, txHash)
+	tx, getTxErr := reader.GetTransaction(ctx, txHash, store.LedgerSeqBounds{Last: math.MaxUint32})
 	storeRange, err := ledgerReader.GetLedgerRange(ctx)
 	if err != nil {
 		return protocol.GetTransactionResponse{}, &jrpc2.Error{

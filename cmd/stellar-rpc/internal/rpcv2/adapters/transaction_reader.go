@@ -26,7 +26,9 @@ func NewTransactionReader(networkPassphrase string, metrics observability.Metric
 	return &TransactionReader{passphrase: networkPassphrase, metrics: observability.MetricsOrNop(metrics)}
 }
 
-func (r *TransactionReader) GetTransaction(ctx context.Context, hash xdr.Hash) (store.Transaction, error) {
+func (r *TransactionReader) GetTransaction(
+	ctx context.Context, hash xdr.Hash, bounds store.LedgerSeqBounds,
+) (store.Transaction, error) {
 	view, err := query.ViewFrom(ctx)
 	if err != nil {
 		return store.Transaction{}, err
