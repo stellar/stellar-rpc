@@ -41,7 +41,7 @@ func openTestHotStoreAt(t *testing.T, path string) (*HotStore, *rocksdb.Store) {
 	t.Helper()
 	store, err := rocksdb.New(rocksdb.Config{
 		Path:           path,
-		ColumnFamilies: []string{LedgersCF},
+		ColumnFamilies: CFNames(),
 		Logger:         silentLogger(),
 	})
 	require.NoError(t, err)

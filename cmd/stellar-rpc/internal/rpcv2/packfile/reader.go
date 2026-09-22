@@ -76,10 +76,14 @@ type ReaderOptions struct {
 	// ContentHashExtract mirrors WriterOptions.ContentHashExtract. When the
 	// file was written with an extract function, Verify must apply the same
 	// transformation before hashing or the recomputed digest will not match
-	// the stored one. Caller responsibility to keep this in sync with the
-	// writer-side option, same as for the codec itself.
+	// the stored one — UNLESS RecordDecoder already inverts it. Verify hashes
+	// items as the read path returns them, after decoding, so the pair only
+	// has to reproduce the bytes the writer hashed between them: a pack
+	// written pre-compressed with a decompressing extract, and read with a
+	// decompressing RecordDecoder, needs no extract here. Caller
+	// responsibility either way, same as for the codec itself.
 	//
-	// If nil, items are hashed as read from disk.
+	// If nil, items are hashed as the read path returns them.
 	ContentHashExtract func(item []byte) ([]byte, error)
 
 	// Concurrency sets the max parallel goroutines for ReadItems. The

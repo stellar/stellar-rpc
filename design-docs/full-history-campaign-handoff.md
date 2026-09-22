@@ -72,13 +72,18 @@ one-thread-per-physical-core pinning (measured: total p90 37.8→29.2, p99
 exclusive PHYSICAL cores; co-located validation owed at the 2-disk
 campaign.
 
-**Branch:** the PR stack is one commit per concern (bench diagnostics →
-hot-latency wave 1 → cold-memory redesign → Sorted-Run Tier →
-zero-decompress freeze → window-scale bench + separation residue →
-hot-latency wave 2 × 4 → views-walk port × 3, pin-bump fused with the
-API swap since no intermediate state compiles → this docs commit). Each
-boundary builds and
-passes `-race` standalone; byte-identity gates (freeze-written vs
+**Branch:** 21 commits, one per concern: bench diagnostics → hot-latency
+wave 1 → the events Sorted-Run Tier and its spill-and-merge cold build →
+the zero-decompression freeze (which also owns the cold pack's freeze-time
+content hash) → hot-latency wave 2 → delta postings → the storage-layer
+consolidation → the docs commit that first added this document, mid-stack
+→ keyed cold routing and blind-at-seal → the lint follow-ups → the
+go-stellar-sdk pin, second from the tip → a second docs commit at the tip
+(this paragraph's own). The views-walk port is not in the stack — it is in
+the base now — so that pin is a go.mod/go.sum-only commit with no call-site
+adaptation behind it. Every commit builds; `stores/ledger` and
+`stores/txhash` pass at every commit from the freeze onward, and the tip
+passes `go test -race ./cmd/...`. Byte-identity gates (freeze-written vs
 walk-written artifacts, per-store AND full-composition) pass and must stay
 as permanent gates.
 

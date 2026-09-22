@@ -366,8 +366,11 @@ func (d *DB) FreezeEventsCold(
 
 // FreezeLedgersCold builds the chunk's cold ledger .pack at packPath by
 // copying THIS hot DB's ledgers-CF zstd frames verbatim (PreCompressed cold
-// writer) — no decompression. Valid on a read-only view; the DB must be
-// complete through the chunk's last ledger. Returns the ledgers written.
+// writer): nothing is re-encoded, and the one decode left is the pack
+// writer's own — its hashing workers decompress each frame once to feed the
+// content hash, which is over RAW ledger bytes. Valid on a read-only view;
+// the DB must be complete through the chunk's last ledger. Returns the
+// ledgers written.
 func (d *DB) FreezeLedgersCold(
 	ctx context.Context, packPath string, opts ledger.ColdWriterOptions,
 ) (int, error) {
