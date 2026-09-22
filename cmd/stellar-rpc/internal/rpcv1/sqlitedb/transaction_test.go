@@ -5,6 +5,7 @@ import (
 	"encoding"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"math/rand"
 	"testing"
 
@@ -140,7 +141,7 @@ func TestTransactionEvent(t *testing.T) {
 		require.NoError(t, write.Commit(lcm, nil))
 
 		reader := NewTransactionReader(log, db, passphrase)
-		tx, err := reader.GetTransaction(t.Context(), lcm.TransactionHash(0))
+		tx, err := reader.GetTransaction(t.Context(), lcm.TransactionHash(0), store.AllLedgers())
 		require.NoError(t, err)
 
 		require.Equal(t, tc.expectedTx.ContractEvents, tx.ContractEvents)
@@ -154,7 +155,7 @@ func TestTransactionNotFound(t *testing.T) {
 	log.SetLevel(logrus.TraceLevel)
 
 	reader := NewTransactionReader(log, db, passphrase)
-	_, err := reader.GetTransaction(context.TODO(), xdr.Hash{})
+	_, err := reader.GetTransaction(context.TODO(), xdr.Hash{}, store.AllLedgers())
 	require.ErrorIs(t, err, store.ErrNoTransaction)
 }
 
@@ -222,7 +223,7 @@ func TestTransactionFound(t *testing.T) {
 
 	// check 404 case
 	reader := NewTransactionReader(log, db, passphrase)
-	_, err = reader.GetTransaction(ctx, xdr.Hash{})
+	_, err = reader.GetTransaction(ctx, xdr.Hash{}, store.AllLedgers())
 	require.ErrorIs(t, err, store.ErrNoTransaction)
 
 	eventReader := NewEventReader(log, db, passphrase)
@@ -236,13 +237,67 @@ func TestTransactionFound(t *testing.T) {
 	// check all 200 cases
 	for _, lcm := range lcms {
 		h := lcm.TransactionHash(0)
-		tx, err := reader.GetTransaction(ctx, h)
+		tx, err := reader.GetTransaction(ctx, h, store.AllLedgers())
 		require.NoError(t, err, "failed to find txhash %s in db", hex.EncodeToString(h[:]))
 		assert.EqualValues(t, 1, tx.ApplicationOrder)
 
 		expectedEnvelope, err := lcm.TransactionEnvelopes()[0].MarshalBinary()
 		require.NoError(t, err)
 		assert.Equal(t, expectedEnvelope, tx.Envelope)
+	}
+}
+
+func TestTransactionBounds(t *testing.T) {
+	db := NewTestDB(t)
+	ctx := t.Context()
+	log := log.DefaultLogger
+	log.SetLevel(logrus.TraceLevel)
+
+	writer := NewReadWriter(log, db, host.MakeNoOpDaemon(), 10, passphrase)
+	write, err := writer.NewTx(ctx)
+	require.NoError(t, err)
+
+	lcms := []xdr.LedgerCloseMeta{
+		txMetaWithEvents(1234),
+		txMetaWithEvents(1235),
+		txMetaWithEvents(1236),
+		txMetaWithEvents(1237),
+	}
+	ledgerW, txW := write.LedgerWriter(), write.TransactionWriter()
+	for _, lcm := range lcms {
+		require.NoError(t, ledgerW.InsertLedger(lcm))
+		require.NoError(t, txW.InsertTransactions(lcm))
+	}
+	require.NoError(t, write.Commit(lcms[len(lcms)-1], nil))
+
+	reader := NewTransactionReader(log, db, passphrase)
+	target := lcms[1]
+	seq, hash := target.LedgerSequence(), target.TransactionHash(0)
+
+	testCases := []struct {
+		name   string
+		bounds protocol.LedgerSeqRange
+		found  bool
+	}{
+		{"only the ledger", store.Bounds(seq, seq), true},
+		{"ledger at the last bound", store.Bounds(0, seq), true},
+		{"ledger at the first bound", store.Bounds(seq, math.MaxUint32), true},
+		{"unbounded", store.AllLedgers(), true},
+		{"first bound above the ledger", store.Bounds(seq+1, math.MaxUint32), false},
+		{"last bound below the ledger", store.Bounds(0, seq-1), false},
+		{"first bound above the latest ledger", store.Bounds(seq+1000, math.MaxUint32), false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tx, err := reader.GetTransaction(ctx, hash, tc.bounds)
+			if !tc.found {
+				require.ErrorIs(t, err, store.ErrNoTransaction)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, seq, tx.Ledger.Sequence)
+		})
 	}
 }
 
@@ -390,7 +445,7 @@ func BenchmarkTransactionFetch(b *testing.B) {
 
 	for i := 0; b.Loop(); i++ {
 		r := randoms[i%len(randoms)]
-		tx, err := reader.GetTransaction(ctx, lcms[r].TransactionHash(0))
+		tx, err := reader.GetTransaction(ctx, lcms[r].TransactionHash(0), store.AllLedgers())
 		require.NoError(b, err)
 		assert.Equal(b, r%2 == 0, tx.Successful)
 	}

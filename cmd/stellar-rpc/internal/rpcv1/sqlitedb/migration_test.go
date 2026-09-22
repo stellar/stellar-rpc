@@ -11,6 +11,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 // TestMigrationCommitFlushesPartialBatches runs the guarded data migrations
@@ -71,7 +72,7 @@ func requireLedgerData(t *testing.T, testDB *DB, lcms []xdr.LedgerCloseMeta) {
 	t.Helper()
 	txReader := NewTransactionReader(log.DefaultLogger, testDB, passphrase)
 	for _, lcm := range lcms {
-		_, err := txReader.GetTransaction(t.Context(), lcm.TransactionHash(0))
+		_, err := txReader.GetTransaction(t.Context(), lcm.TransactionHash(0), store.AllLedgers())
 		require.NoError(t, err, "transaction of ledger %d missing", lcm.LedgerSequence())
 	}
 

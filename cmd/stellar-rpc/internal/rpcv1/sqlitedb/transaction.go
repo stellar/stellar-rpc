@@ -12,6 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/stellar/go-stellar-sdk/ingest"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/support/db"
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -156,10 +157,12 @@ func (txn *transactionHandler) trimTransactions(latestLedgerSeq uint32, retentio
 // Errors occur if there are issues with the DB connection or the XDR is
 // corrupted somehow. If the transaction is not found, store.ErrNoTransaction
 // is returned.
-func (txn *transactionHandler) GetTransaction(ctx context.Context, hash xdr.Hash) (store.Transaction, error) {
+func (txn *transactionHandler) GetTransaction(
+	ctx context.Context, hash xdr.Hash, bounds protocol.LedgerSeqRange,
+) (store.Transaction, error) {
 	start := time.Now()
 
-	tx, err := txn.getTransactionByHash(ctx, hash)
+	tx, err := txn.getTransactionByHash(ctx, hash, bounds)
 	if err != nil {
 		return tx, err
 	}
@@ -178,9 +181,9 @@ func (txn *transactionHandler) GetTransaction(ctx context.Context, hash xdr.Hash
 // field.
 //
 // Note: Caller must do input sanitization on the hash.
-func (txn *transactionHandler) getTransactionByHash(ctx context.Context, hash xdr.Hash) (
-	store.Transaction, error,
-) {
+func (txn *transactionHandler) getTransactionByHash(
+	ctx context.Context, hash xdr.Hash, bounds protocol.LedgerSeqRange,
+) (store.Transaction, error) {
 	var rows []struct {
 		TxIndex int                     `db:"application_order"`
 		Lcm     xdr.LedgerCloseMetaView `db:"meta"`
@@ -190,6 +193,8 @@ func (txn *transactionHandler) getTransactionByHash(ctx context.Context, hash xd
 		From(transactionTableName + " t").
 		Join(ledgerCloseMetaTableName + " lcm ON (t.ledger_sequence = lcm.sequence)").
 		Where(sq.Eq{"t.hash": hash[:]}).
+		Where(sq.GtOrEq{"t.ledger_sequence": bounds.FirstLedger}).
+		Where(sq.LtOrEq{"t.ledger_sequence": bounds.LastLedger}).
 		Limit(1)
 
 	if err := txn.db.Select(ctx, &rows, rowQ); err != nil {

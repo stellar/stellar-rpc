@@ -213,6 +213,72 @@ func TestGetTransaction(t *testing.T) {
 	}, tx)
 }
 
+func TestGetTransaction_LedgerBounds(t *testing.T) {
+	var (
+		ctx          = t.Context()
+		log          = log.DefaultLogger
+		store        = sqlitedb.NewMockTransactionStore("passphrase")
+		ledgerReader = sqlitedb.NewMockLedgerReader(store)
+	)
+	require.NoError(t, store.InsertTransactions(txMeta(1, true)))
+	require.NoError(t, store.InsertTransactions(txMeta(2, false)))
+
+	firstHash, secondHash := txHash(1), txHash(2)
+	hash1, hash2 := hex.EncodeToString(firstHash[:]), hex.EncodeToString(secondHash[:])
+
+	_, err := GetTransaction(ctx, log, store, ledgerReader,
+		protocol.GetTransactionRequest{Hash: hash1, MinLedger: 102, MaxLedger: 101})
+	require.EqualError(t, err, "[-32602] minLedger (102) must not exceed maxLedger (101)")
+
+	for _, tc := range []struct {
+		name      string
+		hash      string
+		minLedger uint32
+		maxLedger uint32
+		status    string
+		ledger    uint32
+	}{
+		{
+			name: "ExactLedger", hash: hash1, minLedger: 101, maxLedger: 101,
+			status: protocol.TransactionStatusSuccess, ledger: 101,
+		},
+		{name: "UnboundedMax", hash: hash1, minLedger: 101, status: protocol.TransactionStatusSuccess, ledger: 101},
+		{name: "UnboundedMin", hash: hash1, maxLedger: 101, status: protocol.TransactionStatusSuccess, ledger: 101},
+		{
+			name: "WiderRange", hash: hash1, minLedger: 100, maxLedger: 102,
+			status: protocol.TransactionStatusSuccess, ledger: 101,
+		},
+		{
+			name: "FailedTx", hash: hash2, minLedger: 102, maxLedger: 102,
+			status: protocol.TransactionStatusFailed, ledger: 102,
+		},
+		{name: "MinAboveTx", hash: hash1, minLedger: 102, status: protocol.TransactionStatusNotFound},
+		{name: "MaxBelowTx", hash: hash1, maxLedger: 100, status: protocol.TransactionStatusNotFound},
+		{name: "MinAboveLatestLedger", hash: hash1, minLedger: 500, status: protocol.TransactionStatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx, err := GetTransaction(ctx, log, store, ledgerReader,
+				protocol.GetTransactionRequest{Hash: tc.hash, MinLedger: tc.minLedger, MaxLedger: tc.maxLedger})
+			require.NoError(t, err)
+			if tc.status == protocol.TransactionStatusNotFound {
+				require.Equal(t, protocol.GetTransactionResponse{
+					LatestLedger:          102,
+					LatestLedgerCloseTime: 2650,
+					OldestLedger:          101,
+					OldestLedgerCloseTime: 2625,
+					TransactionDetails: protocol.TransactionDetails{
+						Status:          protocol.TransactionStatusNotFound,
+						TransactionHash: tc.hash,
+					},
+				}, tx)
+				return
+			}
+			require.Equal(t, tc.status, tx.Status)
+			require.Equal(t, tc.ledger, tx.Ledger)
+		})
+	}
+}
+
 func newEventObject() protocol.Events {
 	return protocol.Events{
 		ContractEventsXDR:    [][]string{{}},

@@ -8,6 +8,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/stellar/go-stellar-sdk/ingest"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
@@ -62,9 +63,9 @@ func (txn *MockTransactionHandler) InsertTransactions(lcm xdr.LedgerCloseMeta) e
 	return nil
 }
 
-func (txn *MockTransactionHandler) GetTransaction(_ context.Context, hash xdr.Hash) (
-	store.Transaction, error,
-) {
+func (txn *MockTransactionHandler) GetTransaction(
+	_ context.Context, hash xdr.Hash, bounds protocol.LedgerSeqRange,
+) (store.Transaction, error) {
 	lcm, ok := txn.txHashToMeta[hash.HexString()]
 	if !ok {
 		return store.Transaction{}, store.ErrNoTransaction
@@ -78,6 +79,9 @@ func (txn *MockTransactionHandler) GetTransaction(_ context.Context, hash xdr.Ha
 		return store.Transaction{}, err
 	}
 	if !found {
+		return store.Transaction{}, store.ErrNoTransaction
+	}
+	if !protocol.IsLedgerWithinRange(txView.LedgerSequence, bounds) {
 		return store.Transaction{}, store.ErrNoTransaction
 	}
 	return store.ParseTransactionView(txView), nil

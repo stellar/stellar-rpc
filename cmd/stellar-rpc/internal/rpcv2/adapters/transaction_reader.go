@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
@@ -16,7 +17,7 @@ import (
 // each GetTransaction probes the hot tx-hash indexes and — only when every hot
 // index misses — the frozen window indexes, through one read view, verifying
 // candidates against the full hash. Both tiers come from the view already
-// window-gated (see query.ReadView.HotTxHashIndexes).
+// clamped and gated to the request's ledger bounds (query.ReadView.TxIndexes).
 type TransactionReader struct {
 	passphrase string
 	metrics    observability.Metrics
@@ -26,14 +27,16 @@ func NewTransactionReader(networkPassphrase string, metrics observability.Metric
 	return &TransactionReader{passphrase: networkPassphrase, metrics: observability.MetricsOrNop(metrics)}
 }
 
-func (r *TransactionReader) GetTransaction(ctx context.Context, hash xdr.Hash) (store.Transaction, error) {
+func (r *TransactionReader) GetTransaction(
+	ctx context.Context, hash xdr.Hash, bounds protocol.LedgerSeqRange,
+) (store.Transaction, error) {
 	view, err := query.ViewFrom(ctx)
 	if err != nil {
 		return store.Transaction{}, err
 	}
 
-	probe, err := txhash.NewTxReader(
-		view.HotTxHashIndexes(), view.ColdTxIndexes, view, r.passphrase)
+	hot, cold := view.TxIndexes(bounds.FirstLedger, bounds.LastLedger)
+	probe, err := txhash.NewTxReader(hot, cold, view, r.passphrase)
 	if err != nil {
 		return store.Transaction{}, err
 	}

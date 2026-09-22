@@ -22,7 +22,7 @@ func GetTransaction(
 	ledgerReader store.LedgerReader,
 	request protocol.GetTransactionRequest,
 ) (protocol.GetTransactionResponse, error) {
-	if err := protocol.IsValidFormat(request.Format); err != nil {
+	if err := request.IsValid(); err != nil {
 		return protocol.GetTransactionResponse{}, &jrpc2.Error{
 			Code:    jrpc2.InvalidParams,
 			Message: err.Error(),
@@ -46,8 +46,9 @@ func GetTransaction(
 		}
 	}
 
+	bounds := store.Bounds(request.MinLedger, request.MaxLedger)
 	// Read txn first before checking latest ledger cache to avoid race
-	tx, getTxErr := reader.GetTransaction(ctx, txHash)
+	tx, getTxErr := reader.GetTransaction(ctx, txHash, bounds)
 	storeRange, err := ledgerReader.GetLedgerRange(ctx)
 	if err != nil {
 		return protocol.GetTransactionResponse{}, &jrpc2.Error{

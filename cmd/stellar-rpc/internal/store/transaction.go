@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"math"
 
 	"github.com/stellar/go-stellar-sdk/ingest"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
@@ -26,9 +28,24 @@ type Transaction struct {
 	ContractEvents    [][][]byte // XDR encoded xdr.ContractEvent
 }
 
+// Bounds is the inclusive lookup range for a request's optional minLedger and
+// maxLedger, where zero means unbounded.
+func Bounds(minLedger, maxLedger uint32) protocol.LedgerSeqRange {
+	if maxLedger == 0 {
+		maxLedger = math.MaxUint32
+	}
+	return protocol.LedgerSeqRange{FirstLedger: minLedger, LastLedger: maxLedger}
+}
+
+// AllLedgers is the unbounded lookup.
+func AllLedgers() protocol.LedgerSeqRange { return Bounds(0, 0) }
+
 // TransactionReader provides all the public ways to read transactions from the backend.
 type TransactionReader interface {
-	GetTransaction(ctx context.Context, hash xdr.Hash) (Transaction, error)
+	// GetTransaction resolves hash to the transaction, considering only
+	// ledgers within bounds. A transaction outside bounds, like an unknown
+	// or pruned one, is ErrNoTransaction.
+	GetTransaction(ctx context.Context, hash xdr.Hash, bounds protocol.LedgerSeqRange) (Transaction, error)
 }
 
 // ParseTransactionView reshapes an SDK transaction view into a Transaction; the

@@ -215,7 +215,7 @@ func (d *DB) Ledgers() *ledger.HotStore { return d.ledger }
 
 // Txhash returns the txhash read/write facade over the shared store. The write
 // side feeds the ingestion loop; the read side probes it via
-// query.ReadView.HotTxHashIndexes.
+// query.ReadView.TxIndexes.
 func (d *DB) Txhash() *txhash.HotStore { return d.txhash }
 
 // Events returns the events read/write facade over the shared store. Writes feed
