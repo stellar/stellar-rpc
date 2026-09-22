@@ -213,6 +213,63 @@ func TestGetTransaction(t *testing.T) {
 	}, tx)
 }
 
+func TestGetTransaction_LedgerBounds(t *testing.T) {
+	var (
+		ctx          = t.Context()
+		log          = log.DefaultLogger
+		store        = sqlitedb.NewMockTransactionStore("passphrase")
+		ledgerReader = sqlitedb.NewMockLedgerReader(store)
+	)
+	require.NoError(t, store.InsertTransactions(txMeta(1, true)))
+	require.NoError(t, store.InsertTransactions(txMeta(2, false)))
+
+	firstHash, secondHash := txHash(1), txHash(2)
+	hash1, hash2 := hex.EncodeToString(firstHash[:]), hex.EncodeToString(secondHash[:])
+
+	_, err := GetTransaction(ctx, log, store, ledgerReader,
+		protocol.GetTransactionRequest{Hash: hash1, StartLedger: 102, EndLedger: 101})
+	require.EqualError(t, err, "[-32602] startLedger (102) must not exceed endLedger (101)")
+
+	for _, tc := range []struct {
+		name   string
+		hash   string
+		start  uint32
+		end    uint32
+		status string
+		ledger uint32
+	}{
+		{name: "ExactLedger", hash: hash1, start: 101, end: 101, status: protocol.TransactionStatusSuccess, ledger: 101},
+		{name: "UnboundedEnd", hash: hash1, start: 101, status: protocol.TransactionStatusSuccess, ledger: 101},
+		{name: "UnboundedStart", hash: hash1, end: 101, status: protocol.TransactionStatusSuccess, ledger: 101},
+		{name: "WiderRange", hash: hash1, start: 100, end: 102, status: protocol.TransactionStatusSuccess, ledger: 101},
+		{name: "FailedTx", hash: hash2, start: 102, end: 102, status: protocol.TransactionStatusFailed, ledger: 102},
+		{name: "StartAboveTx", hash: hash1, start: 102, status: protocol.TransactionStatusNotFound},
+		{name: "EndBelowTx", hash: hash1, end: 100, status: protocol.TransactionStatusNotFound},
+		{name: "StartAboveLatestLedger", hash: hash1, start: 500, status: protocol.TransactionStatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx, err := GetTransaction(ctx, log, store, ledgerReader,
+				protocol.GetTransactionRequest{Hash: tc.hash, StartLedger: tc.start, EndLedger: tc.end})
+			require.NoError(t, err)
+			if tc.status == protocol.TransactionStatusNotFound {
+				require.Equal(t, protocol.GetTransactionResponse{
+					LatestLedger:          102,
+					LatestLedgerCloseTime: 2650,
+					OldestLedger:          101,
+					OldestLedgerCloseTime: 2625,
+					TransactionDetails: protocol.TransactionDetails{
+						Status:          protocol.TransactionStatusNotFound,
+						TransactionHash: tc.hash,
+					},
+				}, tx)
+				return
+			}
+			require.Equal(t, tc.status, tx.Status)
+			require.Equal(t, tc.ledger, tx.Ledger)
+		})
+	}
+}
+
 func newEventObject() protocol.Events {
 	return protocol.Events{
 		ContractEventsXDR:    [][]string{{}},
