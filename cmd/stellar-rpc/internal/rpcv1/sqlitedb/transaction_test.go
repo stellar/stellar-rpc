@@ -251,6 +251,87 @@ func TestTransactionFound(t *testing.T) {
 	}
 }
 
+func TestTransactionBounds(t *testing.T) {
+	db := NewTestDB(t)
+	ctx := t.Context()
+	log := log.DefaultLogger
+	log.SetLevel(logrus.TraceLevel)
+
+	writer := NewReadWriter(log, db, host.MakeNoOpDaemon(), 10, passphrase)
+	write, err := writer.NewTx(ctx)
+	require.NoError(t, err)
+
+	lcms := []xdr.LedgerCloseMeta{
+		txMetaWithEvents(1234),
+		txMetaWithEvents(1235),
+		txMetaWithEvents(1236),
+		txMetaWithEvents(1237),
+	}
+	ledgerW, txW := write.LedgerWriter(), write.TransactionWriter()
+	for _, lcm := range lcms {
+		require.NoError(t, ledgerW.InsertLedger(lcm))
+		require.NoError(t, txW.InsertTransactions(lcm))
+	}
+	require.NoError(t, write.Commit(lcms[len(lcms)-1], nil))
+
+	reader := NewTransactionReader(log, db, passphrase)
+	target := lcms[1]
+	seq, hash := target.LedgerSequence(), target.TransactionHash(0)
+
+	testCases := []struct {
+		name   string
+		bounds store.LedgerSeqBounds
+		found  bool
+	}{
+		{"only the ledger", store.LedgerSeqBounds{First: seq, Last: seq}, true},
+		{"ledger at the last bound", store.LedgerSeqBounds{First: 0, Last: seq}, true},
+		{"ledger at the first bound", store.LedgerSeqBounds{First: seq, Last: math.MaxUint32}, true},
+		{"unbounded", allLedgers, true},
+		{"first bound above the ledger", store.LedgerSeqBounds{First: seq + 1, Last: math.MaxUint32}, false},
+		{"last bound below the ledger", store.LedgerSeqBounds{First: 0, Last: seq - 1}, false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tx, err := reader.GetTransaction(ctx, hash, tc.bounds)
+			if !tc.found {
+				require.ErrorIs(t, err, store.ErrNoTransaction)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, seq, tx.Ledger.Sequence)
+		})
+	}
+
+	// The bounds select a ledger, not the store, so another seeded transaction
+	// still resolves under bounds that cover only its own ledger.
+	other := lcms[3]
+	otherSeq := other.LedgerSequence()
+	tx, err := reader.GetTransaction(ctx, other.TransactionHash(0),
+		store.LedgerSeqBounds{First: otherSeq, Last: otherSeq})
+	require.NoError(t, err)
+	require.Equal(t, otherSeq, tx.Ledger.Sequence)
+}
+
+func TestMockTransactionHandlerBounds(t *testing.T) {
+	ctx := t.Context()
+	mock := NewMockTransactionStore(passphrase)
+
+	lcm := txMeta(1234, true)
+	require.NoError(t, mock.InsertTransactions(lcm))
+	seq, hash := lcm.LedgerSequence(), lcm.TransactionHash(0)
+
+	tx, err := mock.GetTransaction(ctx, hash, store.LedgerSeqBounds{First: seq, Last: seq})
+	require.NoError(t, err)
+	require.Equal(t, seq, tx.Ledger.Sequence)
+
+	_, err = mock.GetTransaction(ctx, hash, store.LedgerSeqBounds{First: seq + 1, Last: math.MaxUint32})
+	require.ErrorIs(t, err, store.ErrNoTransaction)
+
+	_, err = mock.GetTransaction(ctx, hash, store.LedgerSeqBounds{First: 0, Last: seq - 1})
+	require.ErrorIs(t, err, store.ErrNoTransaction)
+}
+
 func TestInsertTransactionsBatchingExceedsLimit(t *testing.T) {
 	ctx := t.Context()
 	log := log.DefaultLogger
