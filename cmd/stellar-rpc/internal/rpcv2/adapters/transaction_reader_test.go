@@ -29,7 +29,7 @@ func TestGetTransaction_HotHit(t *testing.T) {
 	r.SetLatestLedger(testChunk.FirstLedger(), query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger())))
 	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 
-	got, err := reader.GetTransaction(viewCtx(t, r), txs[0].hash, allLedgers)
+	got, err := reader.GetTransaction(viewCtx(t, r), txs[0].hash, store.AllLedgers())
 	require.NoError(t, err)
 
 	assert.Equal(t, txs[0].hash.HexString(), got.TransactionHash)
@@ -57,7 +57,7 @@ func TestGetTransaction_MissIsErrNoTransaction(t *testing.T) {
 	r.SetLatestLedger(testChunk.FirstLedger(), query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger())))
 	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 
-	_, err := reader.GetTransaction(viewCtx(t, r), xdr.Hash{0xde, 0xad}, allLedgers)
+	_, err := reader.GetTransaction(viewCtx(t, r), xdr.Hash{0xde, 0xad}, store.AllLedgers())
 	assert.ErrorIs(t, err, store.ErrNoTransaction)
 }
 
@@ -72,7 +72,7 @@ func TestGetTransaction_AboveLatestIsGated(t *testing.T) {
 	r.SetLatestLedger(testChunk.FirstLedger(), query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger())))
 	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 
-	_, err := reader.GetTransaction(viewCtx(t, r), txs2[0].hash, allLedgers)
+	_, err := reader.GetTransaction(viewCtx(t, r), txs2[0].hash, store.AllLedgers())
 	assert.ErrorIs(t, err, store.ErrNoTransaction)
 }
 
@@ -89,10 +89,10 @@ func TestGetTransaction_BelowFloorIsGated(t *testing.T) {
 	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 	ctx := viewCtx(t, r)
 
-	_, err := reader.GetTransaction(ctx, txs5[0].hash, allLedgers)
+	_, err := reader.GetTransaction(ctx, txs5[0].hash, store.AllLedgers())
 	assert.ErrorIs(t, err, store.ErrNoTransaction, "hot match below the floor must not be served")
 
-	got, err := reader.GetTransaction(ctx, txs6[0].hash, allLedgers)
+	got, err := reader.GetTransaction(ctx, txs6[0].hash, store.AllLedgers())
 	require.NoError(t, err)
 	assert.Equal(t, (testChunk + 1).FirstLedger(), got.Ledger.Sequence)
 }
@@ -113,7 +113,7 @@ func TestGetTransaction_PrunedDuringAcquisitionIsCleanMiss(t *testing.T) {
 	require.NoError(t, cat.PutHotTransient(testChunk))
 
 	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
-	_, err := reader.GetTransaction(viewCtx(t, r), txs5[0].hash, allLedgers)
+	_, err := reader.GetTransaction(viewCtx(t, r), txs5[0].hash, store.AllLedgers())
 	assert.ErrorIs(t, err, store.ErrNoTransaction,
 		"a just-pruned transaction is a clean miss, not a retryable failure")
 }
@@ -146,7 +146,7 @@ func coldFixture(t *testing.T) (context.Context, *TransactionReader, []fixtureTx
 func TestGetTransaction_ColdIndexHit(t *testing.T) {
 	ctx, reader, txs, _ := coldFixture(t)
 
-	got, err := reader.GetTransaction(ctx, txs[0].hash, allLedgers)
+	got, err := reader.GetTransaction(ctx, txs[0].hash, store.AllLedgers())
 	require.NoError(t, err)
 	assert.Equal(t, txs[0].hash.HexString(), got.TransactionHash)
 	assert.Equal(t, testChunk.FirstLedger(), got.Ledger.Sequence)
@@ -161,7 +161,7 @@ func TestGetTransaction_ColdFingerprintFalsePositiveIsCleanMiss(t *testing.T) {
 	// reject the candidate.
 	mutated := txs[0].hash
 	mutated[20] ^= 0xff
-	_, err := reader.GetTransaction(ctx, mutated, allLedgers)
+	_, err := reader.GetTransaction(ctx, mutated, store.AllLedgers())
 	assert.ErrorIs(t, err, store.ErrNoTransaction)
 }
 
@@ -171,7 +171,7 @@ func TestGetTransaction_UnresolvableCandidateIsAnError(t *testing.T) {
 	// The candidate's chunk has no serving store, so the transaction's absence
 	// cannot be verified; a clean not-found would be indistinguishable from the
 	// transaction genuinely not existing.
-	_, err := reader.GetTransaction(ctx, orphanHash, allLedgers)
+	_, err := reader.GetTransaction(ctx, orphanHash, store.AllLedgers())
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, store.ErrNoTransaction)
 	assert.ErrorContains(t, err, "lookup incomplete")
@@ -185,7 +185,7 @@ func TestGetTransaction_V1LedgerCloseMeta(t *testing.T) {
 	r.SetLatestLedger(testChunk.FirstLedger(), query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger())))
 	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 
-	got, err := reader.GetTransaction(viewCtx(t, r), hash, allLedgers)
+	got, err := reader.GetTransaction(viewCtx(t, r), hash, store.AllLedgers())
 	require.NoError(t, err)
 	assert.Equal(t, hash.HexString(), got.TransactionHash)
 	assert.Equal(t, store.LedgerInfo{
@@ -214,7 +214,7 @@ func TestGetTransaction_AgedOutColdCandidateIsCleanMiss(t *testing.T) {
 	r.SetLatestLedger((testChunk + 1).FirstLedger(), query.CloseTimeAt(closeTimeFor((testChunk + 1).FirstLedger())))
 
 	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
-	_, err := reader.GetTransaction(viewCtx(t, r), agedHash, allLedgers)
+	_, err := reader.GetTransaction(viewCtx(t, r), agedHash, store.AllLedgers())
 	assert.ErrorIs(t, err, store.ErrNoTransaction,
 		"an aged-out transaction is a clean miss, not a lookup-incomplete error")
 }
@@ -229,7 +229,7 @@ func TestGetTransaction_FeeBumpByEitherHash(t *testing.T) {
 	ctx := viewCtx(t, r)
 
 	for _, hash := range []xdr.Hash{outerHash, innerHash} {
-		got, err := reader.GetTransaction(ctx, hash, allLedgers)
+		got, err := reader.GetTransaction(ctx, hash, store.AllLedgers())
 		require.NoError(t, err)
 		assert.True(t, got.FeeBump)
 		assert.Equal(t, outerHash.HexString(), got.TransactionHash,
@@ -260,7 +260,7 @@ func TestGetTransaction_HotIndexInconsistencyIsCounted(t *testing.T) {
 
 	metrics := &inconsistencyCounter{}
 	reader := NewTransactionReader(network.PublicNetworkPassphrase, metrics)
-	_, err := reader.GetTransaction(viewCtx(t, r), txs[0].hash, allLedgers)
+	_, err := reader.GetTransaction(viewCtx(t, r), txs[0].hash, store.AllLedgers())
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, store.ErrNoTransaction)
 	assert.Equal(t, int32(1), metrics.n.Load())
@@ -283,12 +283,12 @@ func TestGetTransaction_AllocatesPerTransactionNotPerLedger(t *testing.T) {
 	ctx := viewCtx(t, r)
 	hash := txs[len(txs)/2].hash
 
-	got, err := reader.GetTransaction(ctx, hash, allLedgers)
+	got, err := reader.GetTransaction(ctx, hash, store.AllLedgers())
 	require.NoError(t, err)
 	require.Equal(t, hash.HexString(), got.TransactionHash)
 
 	perCall := allocBytesPerRun(t, 40, func() {
-		if _, err := reader.GetTransaction(ctx, hash, allLedgers); err != nil {
+		if _, err := reader.GetTransaction(ctx, hash, store.AllLedgers()); err != nil {
 			t.Error(err)
 		}
 	})
@@ -320,23 +320,25 @@ func allocBytesPerRun(t *testing.T, runs int, fn func()) uint64 {
 func TestGetTransaction_BoundsSelectTheLedger(t *testing.T) {
 	cat := openTestCatalog(t)
 	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
-	seq := testChunk.FirstLedger()
-	lcm, txs := lcmWithTxs(t, seq, txSpec{})
-	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
-	r.SetLatestLedger(seq, query.CloseTimeAt(closeTimeFor(seq)))
+	first := testChunk.FirstLedger()
+	lcm1, txs := lcmWithTxs(t, first+1, txSpec{})
+	seedHotChunkLCMs(t, cat, r, testChunk, lcmBytes(t, first), lcm1)
+	// Latest well past the transaction, so bounds excluding its ledger still
+	// clamp to a non-empty range and the answer comes from the gate.
+	r.SetLatestLedger(first+5, query.CloseTimeAt(closeTimeFor(first+5)))
 	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
 	ctx := viewCtx(t, r)
 
-	got, err := reader.GetTransaction(ctx, txs[0].hash, store.LedgerSeqBounds{First: seq, Last: seq})
+	got, err := reader.GetTransaction(ctx, txs[0].hash, store.LedgerSeqBounds{First: first + 1, Last: first + 1})
 	require.NoError(t, err)
-	assert.Equal(t, seq, got.Ledger.Sequence)
+	assert.Equal(t, first+1, got.Ledger.Sequence)
 
 	for _, bounds := range []store.LedgerSeqBounds{
-		{First: seq + 1, Last: math.MaxUint32},
-		{First: 0, Last: seq - 1},
+		{First: first + 2, Last: math.MaxUint32},
+		{First: 0, Last: first},
 	} {
 		_, err := reader.GetTransaction(ctx, txs[0].hash, bounds)
-		assert.ErrorIs(t, err, store.ErrNoTransaction, "bounds %+v exclude ledger %d", bounds, seq)
+		assert.ErrorIs(t, err, store.ErrNoTransaction, "bounds %+v exclude ledger %d", bounds, first+1)
 	}
 }
 
@@ -375,10 +377,34 @@ func TestGetTransaction_HotCoveredBoundsNeverTouchTheColdTier(t *testing.T) {
 	ctx := viewCtx(t, r)
 	unknown := xdr.Hash{0xde, 0xad}
 
-	_, err = reader.GetTransaction(ctx, unknown, allLedgers)
+	_, err = reader.GetTransaction(ctx, unknown, store.AllLedgers())
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, store.ErrNoTransaction, "the unbounded miss reaches the broken cold index")
 
 	_, err = reader.GetTransaction(ctx, unknown, store.LedgerSeqBounds{First: seq, Last: math.MaxUint32})
 	assert.ErrorIs(t, err, store.ErrNoTransaction, "bounds the hot chunk covers never reach it")
+}
+
+// A restart can leave a partial hot chunk published after the startup backfill
+// served the whole chunk cold. Bounds inside that chunk beyond its last hot
+// commit must still reach the cold index.
+func TestGetTransaction_StalePartialHotChunkDoesNotHideColdTransactions(t *testing.T) {
+	cat := openTestCatalog(t)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
+	first := testChunk.FirstLedger()
+	seedHotLedgers(t, cat, r, testChunk, first, first+1)
+	pack := [][]byte{}
+	for seq := first; seq < first+5; seq++ {
+		pack = append(pack, lcmBytes(t, seq))
+	}
+	txLCM, txs := lcmWithTxs(t, first+5, txSpec{})
+	rpcv2test.WriteFrozenLedgerPack(t, cat, testChunk, append(pack, txLCM)...)
+	writeFrozenTxIndex(t, cat, testChunk, testChunk, map[xdr.Hash]uint32{txs[0].hash: first + 5})
+	r.SetLatestLedger(first+5, query.CloseTimeAt(closeTimeFor(first+5)))
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
+
+	got, err := reader.GetTransaction(viewCtx(t, r), txs[0].hash,
+		store.LedgerSeqBounds{First: first + 2, Last: first + 5})
+	require.NoError(t, err)
+	assert.Equal(t, first+5, got.Ledger.Sequence)
 }

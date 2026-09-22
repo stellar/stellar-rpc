@@ -303,7 +303,7 @@ type ReadView struct {
 // chunk boundary the hot key can flip ready before the handle publishes, and a
 // prune can retire a chunk whose handle this view already loaded. What keeps
 // skewed reads correct are the gates downstream: every lookup is checked
-// against the view's window (the adapters' inWindow / windowGatedIndex), and a
+// against the view's window (the adapters' inWindow / boundsGatedIndex), and a
 // chunk without a serving store resolves to ErrUnavailable. A read path that
 // skips those gates cannot lean on this ordering. (See the design's Read views
 // section.)

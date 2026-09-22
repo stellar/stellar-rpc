@@ -16,9 +16,7 @@ import (
 // each GetTransaction probes the hot tx-hash indexes and — only when every hot
 // index misses — the frozen window indexes, through one read view, verifying
 // candidates against the full hash. Both tiers come from the view already
-// clamped and gated to the request's ledger bounds (see
-// query.ReadView.HotTxHashIndexes), so a bounded lookup probes only the
-// indexes that can hold a ledger in range.
+// clamped and gated to the request's ledger bounds (query.ReadView.TxIndexes).
 type TransactionReader struct {
 	passphrase string
 	metrics    observability.Metrics
@@ -36,10 +34,8 @@ func (r *TransactionReader) GetTransaction(
 		return store.Transaction{}, err
 	}
 
-	probe, err := txhash.NewTxReader(
-		view.HotTxHashIndexes(bounds.First, bounds.Last),
-		func() ([]txhash.HashIndex, error) { return view.ColdTxIndexes(bounds.First, bounds.Last) },
-		view, r.passphrase)
+	hot, cold := view.TxIndexes(bounds.First, bounds.Last)
+	probe, err := txhash.NewTxReader(hot, cold, view, r.passphrase)
 	if err != nil {
 		return store.Transaction{}, err
 	}

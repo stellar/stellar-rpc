@@ -15,41 +15,38 @@ import (
 // The by-hash lookup groundwork. A transaction hash does not identify its chunk,
 // so routing cannot resolve it directly; instead the getTransaction path probes
 // the hot transaction indexes (a match is definitive) and then the frozen window
-// indexes (a match is a candidate, verified against the full hash). These two
-// methods supply what that path needs from the read view — the hot indexes, the
-// (lazily opened) cold window indexes, each wrapped in the servable-window gate
-// (see windowGatedIndex) — leaving the probe order and candidate verification
-// to the lookup itself. With the routed ledger read the view already offers
-// (WithLedger, in resolve.go), that makes the read view the probe's whole
-// ledger-side dependency, so nothing has to wrap it to hand it over.
-//
-// Both methods take the request's ledger bounds [first, last], inclusive, as
-// the caller received them (0 and MaxUint32 for an unbounded side), clamp them
-// into the view's servable window, and return only the indexes that can hold a
-// ledger in the clamped range, each gated to it. Bounds near the tip are the
-// polling case: a just-submitted transaction looked up from the latest ledger
-// of its sendTransaction response. The hot chunks cover such a range, so the
-// cold tier is never enumerated or probed (see ColdTxIndexes).
+// indexes (a match is a candidate, verified against the full hash). TxIndexes
+// supplies what that path needs from the read view — the hot indexes and the
+// (lazily opened) cold window indexes, each gated to the request's bounds (see
+// boundsGatedIndex) — leaving the probe order and candidate verification to the
+// lookup itself. With the routed ledger read the view already offers (WithLedger,
+// in resolve.go), that makes the read view the probe's whole ledger-side
+// dependency, so nothing has to wrap it to hand it over.
 
-// bounded clamps [first, last] into the view's servable window [OldestLedger,
-// LatestLedger]. The bool is false when no ledger in the window lies within
-// the bounds.
-func (a *ReadView) bounded(first, last uint32) (uint32, uint32, bool) {
+// TxIndexes returns the probe set for a lookup bounded to [first, last]
+// (inclusive; 0 and MaxUint32 for an unbounded side): the hot indexes, and a
+// function enumerating the cold indexes on demand, since that costs a catalog
+// scan the common hot hit must not pay. The bounds are clamped into the view's
+// servable window, and only indexes that can hold a ledger in the clamped range
+// are returned, each gated to it. When every ledger in the range is committed
+// to a hot chunk the cold function returns nothing: a hot miss is then final.
+// That is the polling case, a just-submitted transaction looked up from the
+// latest ledger of its sendTransaction response.
+func (a *ReadView) TxIndexes(first, last uint32) ([]txhash.HashIndex, func() ([]txhash.HashIndex, error)) {
 	lo, hi := max(first, a.OldestLedger()), min(last, a.LatestLedger())
-	return lo, hi, lo <= hi
+	if lo > hi {
+		return nil, nil
+	}
+	return a.hotTxHashIndexes(lo, hi), func() ([]txhash.HashIndex, error) { return a.coldTxIndexes(lo, hi) }
 }
 
-// HotTxHashIndexes returns the transaction hash index of every published hot
-// chunk that meets the clamped bounds, newest chunk first. A hot match is exact
-// and definitive, so the newest indexes are probed first. Every index is gated
-// to the bounds (see windowGatedIndex): the handle set can include chunks below
-// the view's floor, and a match there must read as a miss. The returned indexes
-// are registry-owned handles; the caller does not close them.
-func (a *ReadView) HotTxHashIndexes(first, last uint32) []txhash.HashIndex {
-	lo, hi, ok := a.bounded(first, last)
-	if !ok {
-		return nil
-	}
+// hotTxHashIndexes returns the transaction hash index of every published hot
+// chunk that meets [lo, hi], newest chunk first. A hot match is exact and
+// definitive, so the newest indexes are probed first. The handle set can
+// include chunks below the view's floor, and a match there must read as a
+// miss. The returned indexes are registry-owned handles; the caller does not
+// close them.
+func (a *ReadView) hotTxHashIndexes(lo, hi uint32) []txhash.HashIndex {
 	ids := slices.Sorted(maps.Keys(a.handles.byChunk))
 	slices.Reverse(ids) // newest first
 
@@ -58,40 +55,19 @@ func (a *ReadView) HotTxHashIndexes(first, last uint32) []txhash.HashIndex {
 		if c.LastLedger() < lo || c.FirstLedger() > hi {
 			continue
 		}
-		idxs = append(idxs, &windowGatedIndex{inner: a.handles.byChunk[c].Txhash(), lo: lo, hi: hi})
+		idxs = append(idxs, &boundsGatedIndex{inner: a.handles.byChunk[c].Txhash(), lo: lo, hi: hi})
 	}
 	return idxs
 }
 
-// hotChunksCover reports whether every ledger in [lo, hi] lies in a chunk with
-// a published hot handle. The hot chunks run contiguously through the tip (the
-// live chunk plus the frozen chunks no window index covers yet), and a chunk's
-// hot index holds every transaction of every ledger committed to it, so a miss
-// across the hot indexes of a covered range is final.
-func (a *ReadView) hotChunksCover(lo, hi uint32) bool {
-	last := chunk.IDFromLedger(hi)
-	for c := chunk.IDFromLedger(lo); c <= last; c++ {
-		if _, ok := a.handles.byChunk[c]; !ok {
-			return false
-		}
-	}
-	return true
-}
-
-// ColdTxIndexes returns one reader per frozen window index in the view's
-// snapshot whose coverage meets the clamped bounds, newest coverage first — a
-// cold match is a fingerprinted candidate, so the lookup verifies it against
-// the full hash. Every index is gated to the bounds (see windowGatedIndex).
-// Each .idx file is opened on its first Get, not here: the common case — a
-// recent transaction resolved by the hot indexes — must not pay one file open
+// coldTxIndexes returns one reader per frozen window index in the view's
+// snapshot whose coverage meets [lo, hi], newest coverage first — a cold match
+// is a fingerprinted candidate, so the lookup verifies it against the full
+// hash. Each .idx file is opened on its first Get, not here: the common case —
+// a recent transaction resolved by the hot indexes — must not pay one file open
 // per frozen window. Opened readers are view-owned: Release closes them.
-//
-// When the published hot chunks cover the whole clamped range, the cold tier
-// cannot hold a ledger in it, so the coverages are not even enumerated (a
-// catalog scan): a hot miss is then the final answer.
-func (a *ReadView) ColdTxIndexes(first, last uint32) ([]txhash.HashIndex, error) {
-	lo, hi, ok := a.bounded(first, last)
-	if !ok || a.hotChunksCover(lo, hi) {
+func (a *ReadView) coldTxIndexes(lo, hi uint32) ([]txhash.HashIndex, error) {
+	if a.hotChunksCover(lo, hi) {
 		return nil, nil
 	}
 	covs, err := a.coldTxHashIndexCoverages()
@@ -103,12 +79,32 @@ func (a *ReadView) ColdTxIndexes(first, last uint32) ([]txhash.HashIndex, error)
 		if cov.Hi.LastLedger() < lo || cov.Lo.FirstLedger() > hi {
 			continue
 		}
-		idxs = append(idxs, &windowGatedIndex{inner: &lazyColdTxIndex{view: a, cov: cov}, lo: lo, hi: hi})
+		idxs = append(idxs, &boundsGatedIndex{inner: &lazyColdTxIndex{view: a, cov: cov}, lo: lo, hi: hi})
 	}
 	return idxs, nil
 }
 
-// windowGatedIndex wraps a tx-hash index — hot or cold — so a hit outside
+// hotChunksCover reports whether every ledger in [lo, hi] is committed to a
+// published hot chunk, so that a miss across their hot indexes is final. A
+// handle alone is not enough: a partial chunk left by a restart stays
+// published after the startup backfill has served it cold, so each chunk must
+// have committed through the range.
+func (a *ReadView) hotChunksCover(lo, hi uint32) bool {
+	last := chunk.IDFromLedger(hi)
+	for c := chunk.IDFromLedger(lo); c <= last; c++ {
+		db, ok := a.handles.byChunk[c]
+		if !ok {
+			return false
+		}
+		committed, ok, err := db.MaxCommittedSeq()
+		if err != nil || !ok || committed < min(hi, c.LastLedger()) {
+			return false
+		}
+	}
+	return true
+}
+
+// boundsGatedIndex wraps a tx-hash index — hot or cold — so a hit outside
 // [lo, hi] reads as a plain miss. [lo, hi] is the request's bounds clamped into
 // the view's servable window [OldestLedger, LatestLedger], so the gate enforces
 // retention and the admitted latest as well as the caller's bounds.
@@ -139,12 +135,12 @@ func (a *ReadView) ColdTxIndexes(first, last uint32) ([]txhash.HashIndex, error)
 // Skipping a candidate here is safe in both tiers: even a fully verified
 // out-of-window match must be answered not-found — retention is the
 // observable behavior, not handle or file lifecycle.
-type windowGatedIndex struct {
+type boundsGatedIndex struct {
 	inner  txhash.HashIndex
 	lo, hi uint32
 }
 
-func (g *windowGatedIndex) Get(hash [32]byte) (uint32, error) {
+func (g *boundsGatedIndex) Get(hash [32]byte) (uint32, error) {
 	seq, err := g.inner.Get(hash)
 	if err != nil {
 		return 0, err
