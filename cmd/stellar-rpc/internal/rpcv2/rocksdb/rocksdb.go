@@ -245,6 +245,51 @@ func (s *Store) GetPinned(cf string, key []byte, fn func(value []byte) error) (b
 	return s.getPinnedWith(s.ro, cf, key, fn)
 }
 
+// GetPinnedPair hands fn RocksDB's own pinned blocks for two keys, under ONE
+// acquisition of the store's lifecycle read lock. fn runs only when BOTH keys
+// exist; the returned flags say which were missing otherwise.
+//
+// It exists because GetPinned's callback may not call back into the store: a
+// nested read lock behind a waiting Close deadlocks both. A reader that needs
+// two values alive at once — a value and the index that describes it —
+// therefore cannot nest two GetPinned calls, and must take them together here.
+//
+// fn's loan rule is GetPinned's, for both slices: RocksDB-owned memory that
+// Destroy invalidates as fn returns, not to be retained, appended to, or
+// mutated, and fn must neither block on anything that could close the store
+// nor re-enter one of its methods.
+func (s *Store) GetPinnedPair(
+	cfA string, keyA []byte, cfB string, keyB []byte, fn func(a, b []byte) error,
+) (bool, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.checkOpen(); err != nil {
+		return false, false, err
+	}
+	cfhA, err := s.resolveCF(cfA)
+	if err != nil {
+		return false, false, err
+	}
+	cfhB, err := s.resolveCF(cfB)
+	if err != nil {
+		return false, false, err
+	}
+	handleA, err := s.db.GetPinnedCFV2(s.ro, cfhA, keyA)
+	if err != nil {
+		return false, false, err
+	}
+	defer handleA.Destroy()
+	handleB, err := s.db.GetPinnedCFV2(s.ro, cfhB, keyB)
+	if err != nil {
+		return false, false, err
+	}
+	defer handleB.Destroy()
+	if !handleA.Exists() || !handleB.Exists() {
+		return handleA.Exists(), handleB.Exists(), nil
+	}
+	return true, true, fn(handleA.Data(), handleB.Data())
+}
+
 // BatchMultiGet reads many keys from cf in a single batched call.
 // Returns a [][]byte of length len(keys) where result[i] is the
 // value for keys[i] (a fresh copy the caller owns), or nil if that
@@ -723,12 +768,8 @@ func (s *Store) constructAndOpen() error {
 		}
 	}
 
-	cfNames := resolveCFNames(s.cfg)
 	opts := grocksdb.NewDefaultOptions()
-	if !s.cfg.ReadOnly && !s.cfg.MustExist {
-		opts.SetCreateIfMissing(true)
-		opts.SetCreateIfMissingColumnFamilies(true)
-	}
+	cfNames := s.openCFNames(opts)
 	// STELLAR_RPC_ROCKSDB_STATS=1 — debug/bench knob: collect RocksDB
 	// statistics (tickers + histograms: WAL sync micros, write micros, stall
 	// micros, ...) and dump them to STATISTICS.txt in the DB dir on Close.
@@ -975,4 +1016,23 @@ func walDirSize(dir string) uint64 {
 		}
 	}
 	return total
+}
+
+// openCFNames resolves the families this open names and sets the creation
+// flags that go with the open's mode. Every mode names the SAME list, and a
+// family the DB on disk does not have fails the open — a read-only one as
+// loudly as a must-exist one. A store that opened has every family its caller
+// named, so nothing below this line has to ask whether one is there.
+//
+// Only a plain read-write open creates, and it creates the DB along with them:
+// that is how a FRESH store gets its families. Adopting a family into an
+// existing DB is not something an open does on the side — a caller naming a
+// family a DB has never held is a caller pointed at the wrong DB, and reading
+// that family as empty is the answer that hides it.
+func (s *Store) openCFNames(opts *grocksdb.Options) []string {
+	if !s.cfg.ReadOnly && !s.cfg.MustExist {
+		opts.SetCreateIfMissing(true)
+		opts.SetCreateIfMissingColumnFamilies(true)
+	}
+	return resolveCFNames(s.cfg)
 }

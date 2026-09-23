@@ -90,6 +90,51 @@ func TestNew_MustExist_GuttedDirFailsOpen(t *testing.T) {
 	require.Error(t, err, "must-exist open of a gutted dir (no CURRENT) fails, never auto-heals")
 }
 
+// TestNew_MissingFamilyFailsEveryExistingDBOpen pins the one answer an open
+// gives for a family the DB does not have: it fails. Neither mode invents the
+// family or drops it — a dropped family reads as EMPTY, which is the same
+// answer as "this DB is not the one you think it is", and the difference is
+// what an operator needs. A fresh read-write open still creates whatever it
+// names, which is where a store's families come from in the first place.
+func TestNew_MissingFamilyFailsEveryExistingDBOpen(t *testing.T) {
+	path := t.TempDir()
+	s, err := New(Config{Path: path, ColumnFamilies: []string{"kept"}, Logger: silentLogger()})
+	require.NoError(t, err, "a fresh open creates the families it names")
+	require.NoError(t, s.Put("kept", []byte("k"), []byte("v")))
+	require.NoError(t, s.Close())
+
+	for name, cfg := range map[string]Config{
+		"read-only": {
+			Path: path, ColumnFamilies: []string{"kept", "later"},
+			Logger: silentLogger(), ReadOnly: true,
+		},
+		"must-exist": {
+			Path: path, ColumnFamilies: []string{"kept", "later"},
+			Logger: silentLogger(), MustExist: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, oerr := New(cfg)
+			require.Error(t, oerr, "a family the DB lacks must fail the open")
+			assert.ErrorContains(t, oerr, "later")
+		})
+	}
+
+	// And the DB is untouched by the refused opens: no family was created on
+	// the way past, so the next open of what it does have still succeeds.
+	ro, err := New(Config{
+		Path: path, ColumnFamilies: []string{"kept"}, Logger: silentLogger(), ReadOnly: true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ro.Close() })
+	found, err := ro.GetPinned("kept", []byte("k"), func(v []byte) error {
+		assert.Equal(t, []byte("v"), v)
+		return nil
+	})
+	require.NoError(t, err)
+	assert.True(t, found)
+}
+
 func TestMain(m *testing.M) {
 	if os.Getenv("ROCKSDB_LOCK_PROBE") == "1" {
 		_, err := New(Config{
