@@ -203,7 +203,9 @@ func (d indexDirectory) entryCount() int { return len(d.entries) / indexDirEntry
 
 // lookup finds key's parts, reporting false for a term that was not demoted
 // (which is almost every term). Binary search over the fixed stride.
-func (d indexDirectory) lookup(key TermKey) (partEntry, bool) {
+// lookupRouted finds the row for a ROUTED (blinded) key. Rows are keyed
+// that way because the streaming builder never sees the original.
+func (d indexDirectory) lookupRouted(key TermKey) (partEntry, bool) {
 	n := d.entryCount()
 	i := sort.Search(n, func(i int) bool {
 		return bytes.Compare(d.entries[i*indexDirEntryLen:i*indexDirEntryLen+len(key)], key[:]) >= 0

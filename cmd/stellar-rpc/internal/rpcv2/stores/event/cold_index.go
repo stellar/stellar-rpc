@@ -135,10 +135,10 @@ func WriteColdIndex(
 		if lerr != nil {
 			return fmt.Errorf("events: MPHF lookup during index.pack build: %w", lerr)
 		}
-		// The fingerprint names the ROUTED (blinded) key. The streaming
-		// builder never holds the original — its runs carry keys blinded at
-		// seal and are merged verbatim — so the routed key is the only
-		// identity both builders have when a record is written.
+		// Fingerprint and directory both name the ROUTED (blinded) key. The
+		// streaming builder never holds the original — its runs carry keys
+		// blinded at seal and are merged verbatim — so the routed key is the
+		// only identity both builders can agree on.
 		var fp [IndexRecordFingerprintLen]byte
 		copy(fp[:], rk[:IndexRecordFingerprintLen])
 		// Mutate in place — bitmaps is uniquely owned by the caller, built
@@ -146,7 +146,7 @@ func WriteColdIndex(
 		// from the read-only hot DB.
 		bitmap.RunOptimize()
 		if bitmap.GetSerializedSizeInBytes() >= indexDemoteFloor {
-			keys[slot] = term
+			keys[slot] = rk
 		}
 		entries = append(entries, indexEntry{slot: slot, fp: fp, bitmap: bitmap})
 	}

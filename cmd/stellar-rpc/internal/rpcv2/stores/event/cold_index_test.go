@@ -485,3 +485,8 @@ func routedFP(term TermKey) []byte {
 	rk := TermKey(stores.BlindKey(testIndexSecret, term[:]))
 	return rk[:IndexRecordFingerprintLen]
 }
+
+// routedKey is the blinded key the directory rows are keyed by.
+func routedKey(term TermKey) TermKey {
+	return TermKey(stores.BlindKey(testIndexSecret, term[:]))
+}

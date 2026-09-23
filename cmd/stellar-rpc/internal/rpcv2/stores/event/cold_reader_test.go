@@ -999,10 +999,13 @@ func TestColdReader_RejectsMismatchedBuildStamp(t *testing.T) {
 }
 
 // dirRowAt is where key's directory row starts inside the app data.
+// dirRowAt finds key's directory row. Rows are keyed by the routed
+// (blinded) key, so callers pass the term and this blinds it.
 func dirRowAt(t *testing.T, appData []byte, key TermKey) int {
 	t.Helper()
+	routed := TermKey(stores.BlindKey(testIndexSecret, key[:]))
 	for off := indexStampLen + indexDirHeaderLen; off+indexDirEntryLen <= len(appData); off += indexDirEntryLen {
-		if bytes.Equal(appData[off:off+len(key)], key[:]) {
+		if bytes.Equal(appData[off:off+len(routed)], routed[:]) {
 			return off
 		}
 	}
@@ -1020,7 +1023,7 @@ func firstDemoted(t *testing.T, f *partsFixture, d indexDirectory) (string, part
 		entry partEntry
 	)
 	for candidate := range f.oracle {
-		e, demoted := d.lookup(f.key(candidate))
+		e, demoted := d.lookupRouted(routedKey(f.key(candidate)))
 		if !demoted || (name != "" && e.firstRecord >= entry.firstRecord) {
 			continue
 		}

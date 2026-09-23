@@ -26,7 +26,7 @@ func TestColdParts_RejectsAPartOutsideItsDeclaredSpan(t *testing.T) {
 	require.NoError(t, err)
 	d, err := before.waitDir()
 	require.NoError(t, err)
-	entry, demoted := d.lookup(f.key(denseTerm))
+	entry, demoted := d.lookupRouted(routedKey(f.key(denseTerm)))
 	require.True(t, demoted, "the fixture must demote this term, or the pin proves nothing")
 	require.NoError(t, before.Close())
 

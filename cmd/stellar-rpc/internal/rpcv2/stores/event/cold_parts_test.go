@@ -157,7 +157,7 @@ func TestColdReader_WindowedLookupsMatchTheirTerms(t *testing.T) {
 	dir2, err := cr.waitDir()
 	require.NoError(t, err)
 	for _, name := range []string{denseTerm, "run-heavy", "small-extent"} {
-		entry, ok := dir2.lookup(f.key(name))
+		entry, ok := dir2.lookupRouted(routedKey(f.key(name)))
 		require.True(t, ok, "%s must have been demoted, or this test proves nothing", name)
 		require.Positive(t, entry.partCount)
 	}
@@ -253,7 +253,7 @@ func TestColdParts_TileTheirTermDisjointAndAscending(t *testing.T) {
 
 	checked := 0
 	for name, want := range f.oracle {
-		e, demoted := d.lookup(f.key(name))
+		e, demoted := d.lookupRouted(routedKey(f.key(name)))
 		if !demoted {
 			continue
 		}
@@ -375,7 +375,7 @@ func partsCovered(f *partsFixture, d indexDirectory, names []string, window IDRa
 	}
 	lo, hi := uint64(0), uint64(math.MaxUint32)
 	for _, name := range names {
-		e, demoted := d.lookup(f.key(name))
+		e, demoted := d.lookupRouted(routedKey(f.key(name)))
 		if !demoted {
 			continue
 		}

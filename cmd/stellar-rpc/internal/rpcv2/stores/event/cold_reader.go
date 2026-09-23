@@ -442,15 +442,15 @@ func (c *ColdReader) LookupKeys(
 	// never cuts it.
 	covLo, covHi := uint64(0), uint64(math.MaxUint32)
 
-	// The item fingerprints name the routed (blinded) key, so blind once
-	// here and carry it alongside. mphf.Lookup blinds its own argument, so
-	// it keeps taking the original.
+	// The directory rows and the item fingerprints both name the routed
+	// (blinded) key, so blind once here and carry it alongside. mphf.Lookup
+	// blinds its own argument, so it keeps taking the original.
 	blinded := make([]TermKey, len(keys))
 	for i, key := range keys {
 		blinded[i] = TermKey(stores.BlindKey(mphf.secret, key[:]))
 	}
 	for i, key := range keys {
-		entry, demoted := dir.lookup(key)
+		entry, demoted := dir.lookupRouted(blinded[i])
 		if !demoted {
 			slot, lerr := mphf.Lookup(key)
 			if lerr != nil {
