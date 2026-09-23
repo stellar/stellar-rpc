@@ -300,6 +300,9 @@ func (h *HotStore) WithLedger(seq uint32, fn func(raw []byte) error) error {
 	}
 	// A ledger too big for the pooled capacity got a fresh, larger array; keep it.
 	*buf = raw
+	if cerr := checkHeaderSeq(raw, seq); cerr != nil {
+		return cerr
+	}
 	return fn(slices.Clip(raw))
 }
 
@@ -588,6 +591,10 @@ func (h *HotStore) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 				return
 			}
 			*buf = decoded
+			if cerr := checkHeaderSeq(decoded, seq); cerr != nil {
+				yield(Entry{}, cerr)
+				return
+			}
 			if !yield(Entry{Seq: seq, Bytes: slices.Clip(decoded)}, nil) {
 				return
 			}

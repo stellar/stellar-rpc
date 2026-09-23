@@ -3,7 +3,6 @@ package ledger
 import (
 	"context"
 	"encoding/binary"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -51,9 +50,9 @@ func TestColdWriter_AppendRejectsGapAndKeepsCounter(t *testing.T) {
 	const firstSeq uint32 = 100
 	w, path := newTestColdWriter(t, firstSeq)
 
-	require.NoError(t, w.AppendLedger(100, []byte("a")))
-	require.Error(t, w.AppendLedger(103, []byte("c")))
-	require.NoError(t, w.AppendLedger(101, []byte("b")))
+	require.NoError(t, w.AppendLedger(100, fillerLedger(100, 0)))
+	require.Error(t, w.AppendLedger(103, fillerLedger(103, 0)))
+	require.NoError(t, w.AppendLedger(101, fillerLedger(101, 0)))
 	require.NoError(t, w.Commit())
 
 	c, err := OpenColdReader(path)
@@ -62,7 +61,7 @@ func TestColdWriter_AppendRejectsGapAndKeepsCounter(t *testing.T) {
 
 	got, err := readLedgerRaw(c, 100)
 	require.NoError(t, err)
-	assert.Equal(t, []byte("a"), got)
+	assert.Equal(t, fillerLedger(100, 0), got)
 	last, err := c.LastSeq()
 	require.NoError(t, err)
 	assert.Equal(t, uint32(101), last)
@@ -139,7 +138,7 @@ func TestNewColdWriter_TruncatesPreexistingFile(t *testing.T) {
 
 	fresh, err := NewColdWriter(path, 999, ColdWriterOptions{})
 	require.NoError(t, err)
-	require.NoError(t, fresh.AppendLedger(999, []byte("fresh")))
+	require.NoError(t, fresh.AppendLedger(999, fillerLedger(999, 0)))
 	require.NoError(t, fresh.Commit())
 
 	final, err := os.Stat(path)
@@ -155,7 +154,7 @@ func TestNewColdWriter_TruncatesPreexistingFile(t *testing.T) {
 	assert.Equal(t, uint32(999), last)
 	got, err := readLedgerRaw(c, 999)
 	require.NoError(t, err)
-	assert.Equal(t, []byte("fresh"), got)
+	assert.Equal(t, fillerLedger(999, 0), got)
 }
 
 // TestColdWriter_CloseAfterCommitIsNoop pins behavior: Close
@@ -213,7 +212,7 @@ func TestColdWriterOptions_Plumbing(t *testing.T) {
 
 	raws := make([][]byte, n)
 	for i := range n {
-		raws[i] = fmt.Appendf(nil, "ledger-payload-%d", i)
+		raws[i] = fillerLedger(firstSeq+uint32(i), i)
 		require.NoError(t, w.AppendLedger(firstSeq+uint32(i), raws[i]))
 	}
 	require.NoError(t, w.Commit())

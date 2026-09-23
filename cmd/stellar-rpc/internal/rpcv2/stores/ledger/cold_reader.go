@@ -210,6 +210,10 @@ func (c *ColdReader) WithLedger(seq uint32, fn func(raw []byte) error) error {
 	// that way would be reclassified as a store failure.
 	var fnErr error
 	rerr := c.r.ReadItem(int(seq-h.firstSeq), func(b []byte) error {
+		if cerr := checkHeaderSeq(b, seq); cerr != nil {
+			fnErr = fmt.Errorf("cold %q: %w", c.path, cerr)
+			return nil
+		}
 		fnErr = fn(b)
 		return nil
 	})
@@ -560,6 +564,10 @@ func (c *ColdReader) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 		for item, err := range c.r.ReadRange(startPos, count) {
 			if err != nil {
 				yield(Entry{}, err)
+				return
+			}
+			if cerr := checkHeaderSeq(item, seq); cerr != nil {
+				yield(Entry{}, fmt.Errorf("cold %q: %w", c.path, cerr))
 				return
 			}
 			// Entry.Bytes is the packfile's: valid only until the loop body

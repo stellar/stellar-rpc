@@ -60,14 +60,14 @@ func TestHotStore_AddGetRoundTripVerbatim(t *testing.T) {
 	require.ErrorIs(t, err, stores.ErrNotFound)
 
 	// Single-entry write.
-	payload := []byte("arbitrary opaque bytes the store has no opinion about")
+	payload := fillerLedger(42, 0)
 	require.NoError(t, addLedgers(h, Entry{Seq: 42, Bytes: payload}))
 	got, err := readLedgerRaw(h, 42)
 	require.NoError(t, err)
 	assert.Equal(t, payload, got)
 
 	// Overwrite.
-	updated := []byte("different bytes")
+	updated := fillerLedger(42, 1)
 	require.NoError(t, addLedgers(h, Entry{Seq: 42, Bytes: updated}))
 	got, err = readLedgerRaw(h, 42)
 	require.NoError(t, err)
@@ -85,7 +85,7 @@ func TestHotStore_AddGetRoundTripVerbatim(t *testing.T) {
 // does not duplicate the key.
 func TestHotStore_AddLedgersIdempotentRetry(t *testing.T) {
 	h := openTestHotStore(t)
-	payload := []byte("ledger payload")
+	payload := fillerLedger(7, 0)
 
 	require.NoError(t, addLedgers(h, Entry{Seq: 7, Bytes: payload}))
 	require.NoError(t, addLedgers(h, Entry{Seq: 7, Bytes: payload})) // retry
@@ -125,9 +125,9 @@ func TestHotStore_AddLedgersMultipleEntries(t *testing.T) {
 	h := openTestHotStore(t)
 
 	entries := []Entry{
-		{Seq: 100, Bytes: []byte("ledger 100 payload")},
-		{Seq: 101, Bytes: []byte("ledger 101 payload")},
-		{Seq: 102, Bytes: []byte("ledger 102 payload")},
+		{Seq: 100, Bytes: fillerLedger(100, 0)},
+		{Seq: 101, Bytes: fillerLedger(101, 0)},
+		{Seq: 102, Bytes: fillerLedger(102, 0)},
 	}
 	require.NoError(t, addLedgers(h, entries...))
 	for _, e := range entries {
@@ -140,7 +140,7 @@ func TestHotStore_AddLedgersMultipleEntries(t *testing.T) {
 func TestHotStore_IterateLedgers(t *testing.T) {
 	h := openTestHotStore(t)
 	for _, seq := range []uint32{10, 20, 30, 40, 50} {
-		require.NoError(t, addLedgers(h, Entry{Seq: seq, Bytes: []byte("v")}))
+		require.NoError(t, addLedgers(h, Entry{Seq: seq, Bytes: fillerLedger(seq, 0)}))
 	}
 
 	// Full window.
@@ -191,7 +191,7 @@ func TestHotStore_IterateLedgersVisibleGap(t *testing.T) {
 	h := openTestHotStore(t)
 	// Non-contiguous keyspace: missing 30.
 	for _, seq := range []uint32{10, 20, 40, 50} {
-		require.NoError(t, addLedgers(h, Entry{Seq: seq, Bytes: []byte("v")}))
+		require.NoError(t, addLedgers(h, Entry{Seq: seq, Bytes: fillerLedger(seq, 0)}))
 	}
 
 	var seen []uint32
@@ -211,7 +211,7 @@ func TestHotStore_WithLedgerReusesAndGrows(t *testing.T) {
 	require.ErrorIs(t, err, stores.ErrNotFound)
 	assert.False(t, called)
 
-	small := bytes.Repeat([]byte("a"), 32)
+	small := fillerLedger(42, 0)
 	require.NoError(t, addLedgers(h, Entry{Seq: 42, Bytes: small}))
 	require.NoError(t, h.WithLedger(42, func(raw []byte) error {
 		assert.Equal(t, small, raw)
@@ -223,7 +223,7 @@ func TestHotStore_WithLedgerReusesAndGrows(t *testing.T) {
 	// and a small one read afterwards must still come back exact and clipped.
 	// Whether the grown buffer is the one the pool hands back is not asserted:
 	// sync.Pool may discard at any GC, so identity is not a contract.
-	big := bytes.Repeat([]byte("b"), 8192)
+	big := framedLedger(t, 43)
 	require.NoError(t, addLedgers(h, Entry{Seq: 43, Bytes: big}))
 	require.NoError(t, h.WithLedger(43, func(raw []byte) error {
 		assert.Equal(t, big, raw)
@@ -259,11 +259,12 @@ func TestHotStore_WithLedgerReturnsWhatWasStored(t *testing.T) {
 // surfaces unchanged, and that the buffer still goes back.
 func TestHotStore_WithLedgerPropagatesCallbackError(t *testing.T) {
 	h := openTestHotStore(t)
-	require.NoError(t, addLedgers(h, Entry{Seq: 9, Bytes: []byte("payload")}))
+	raw := fillerLedger(9, 0)
+	require.NoError(t, addLedgers(h, Entry{Seq: 9, Bytes: raw}))
 	sentinel := errors.New("caller said no")
 	require.ErrorIs(t, h.WithLedger(9, func([]byte) error { return sentinel }), sentinel)
-	require.NoError(t, h.WithLedger(9, func(raw []byte) error {
-		assert.Equal(t, []byte("payload"), raw)
+	require.NoError(t, h.WithLedger(9, func(got []byte) error {
+		assert.Equal(t, raw, got)
 		return nil
 	}))
 }
@@ -280,9 +281,9 @@ func TestHotStore_GracefulCloseAndReopen(t *testing.T) {
 	path := t.TempDir()
 
 	seeded := []Entry{
-		{Seq: 5, Bytes: []byte("payload-5")},
-		{Seq: 10, Bytes: []byte("payload-10")},
-		{Seq: 15, Bytes: []byte("payload-15")},
+		{Seq: 5, Bytes: fillerLedger(5, 0)},
+		{Seq: 10, Bytes: fillerLedger(10, 0)},
+		{Seq: 15, Bytes: fillerLedger(15, 0)},
 	}
 
 	first, firstStore := openTestHotStoreAt(t, path)
@@ -364,15 +365,18 @@ func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	require.ErrorIs(t, addLedgers(h, Entry{Seq: 1, Bytes: []byte("v")}), stores.ErrStoreClosed)
 }
 
-// TestHotStore_AddLedgersEmptyBytes pins behavior on zero-length
-// Bytes round-trip. zstd handles empty input; the value is stored
-// and read back as empty.
+// TestHotStore_AddLedgersEmptyBytes pins where the write side's indifference
+// ends. zstd handles empty input and the store commits the row without
+// complaint — the write path has no opinion about what a ledger looks like —
+// but a whole-ledger READ checks the stored header's sequence, and empty bytes
+// carry no header, so the read reports corruption instead of handing back
+// something that is not a ledger.
 func TestHotStore_AddLedgersEmptyBytes(t *testing.T) {
 	h := openTestHotStore(t)
 	require.NoError(t, addLedgers(h, Entry{Seq: 1, Bytes: nil}))
-	got, err := readLedgerRaw(h, 1)
-	require.NoError(t, err)
-	assert.Empty(t, got)
+	_, err := readLedgerRaw(h, 1)
+	require.ErrorIs(t, err, stores.ErrCorrupt)
+	assert.ErrorContains(t, err, "ledger 1")
 }
 
 // TestHotToColdMigration exercises the symmetric byte-convention:
@@ -661,6 +665,42 @@ func TestWithTxTable_PiecesEqualTheRawSpans(t *testing.T) {
 	assert.Equal(t, 24, rows)
 }
 
+// TestWithTxTable_SpansStraddlingAFrameCut pins the piece reader's hardest
+// case: with the window low enough that a ledger is cut several times, a span
+// crossing a cut must still come back whole. The window is lowered rather than
+// a four-megabyte fixture built, but every other part of the path — the
+// directory, the compressed offsets, the decode — is the production one.
+func TestWithTxTable_SpansStraddlingAFrameCut(t *testing.T) {
+	h := openTestHotStore(t)
+	lcm, _ := makeRandomLedgerCloseMeta(10, 64)
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+	// A window a few hundred bytes wide cuts between (and through) envelopes
+	// and elements alike.
+	withFrameWindow(t, 512)
+	require.Greater(t, len(raw), 4*512, "the fixture must span several frames")
+	putLedgerWithTable(t, h, 10, raw)
+
+	straddled := 0
+	require.NoError(t, h.WithTxTable(10, func(tbl txspan.Table, _ txspan.LedgerHeader, pieces txspan.PieceReader) error {
+		require.Greater(t, tbl.FrameCount(), 4, "the value must be cut into several frames")
+		for i := range tbl.TxCount() {
+			row := tbl.Row(i)
+			env, elem, perr := pieces(row)
+			require.NoError(t, perr)
+			assert.Equal(t, raw[row.EnvStart:row.EnvEnd], env, "envelope %d", i)
+			assert.Equal(t, raw[row.ElemStart:row.ElemEnd], elem, "element %d", i)
+			first, _, _, _ := tbl.RawOffsetFrame(row.EnvStart)
+			last, _, _, _ := tbl.RawOffsetFrame(row.EnvEnd - 1)
+			if first != last {
+				straddled++
+			}
+		}
+		return nil
+	}))
+	assert.Positive(t, straddled, "no envelope crossed a cut; the fixture proves nothing")
+}
+
 // TestWithTxTable_UnparsableTableIsAnError pins that a table this store wrote
 // and cannot read back fails the read naming the ledger and the reason. It is
 // NOT reported as an absent table: the ledger beside it could answer, and
@@ -792,59 +832,6 @@ func TestHotStore_FreshWriteOpenCreatesTheTableFamily(t *testing.T) {
 	}))
 }
 
-// zeroTxLedger marshals a minimal V2 LedgerCloseMeta holding no transactions.
-func zeroTxLedger(t *testing.T, seq uint32) []byte {
-	t.Helper()
-	lcm := xdr.LedgerCloseMeta{
-		V: 2,
-		V2: &xdr.LedgerCloseMetaV2{
-			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
-				Header: xdr.LedgerHeader{LedgerSeq: xdr.Uint32(seq)},
-			},
-			TxSet: xdr.GeneralizedTransactionSet{V: 1, V1TxSet: &xdr.TransactionSetV1{}},
-		},
-	}
-	raw, err := lcm.MarshalBinary()
-	require.NoError(t, err)
-	return raw
-}
-
-// TestWithTxTable_SpansStraddlingAFrameCut pins the piece reader's hardest
-// case: with the window low enough that a ledger is cut several times, a span
-// crossing a cut must still come back whole. The window is lowered rather than
-// a four-megabyte fixture built, but every other part of the path — the
-// directory, the compressed offsets, the decode — is the production one.
-func TestWithTxTable_SpansStraddlingAFrameCut(t *testing.T) {
-	h := openTestHotStore(t)
-	lcm, _ := makeRandomLedgerCloseMeta(10, 64)
-	raw, err := lcm.MarshalBinary()
-	require.NoError(t, err)
-	// A window a few hundred bytes wide cuts between (and through) envelopes
-	// and elements alike.
-	withFrameWindow(t, 512)
-	require.Greater(t, len(raw), 4*512, "the fixture must span several frames")
-	putLedgerWithTable(t, h, 10, raw)
-
-	straddled := 0
-	require.NoError(t, h.WithTxTable(10, func(tbl txspan.Table, _ txspan.LedgerHeader, pieces txspan.PieceReader) error {
-		require.Greater(t, tbl.FrameCount(), 4, "the value must be cut into several frames")
-		for i := range tbl.TxCount() {
-			row := tbl.Row(i)
-			env, elem, perr := pieces(row)
-			require.NoError(t, perr)
-			assert.Equal(t, raw[row.EnvStart:row.EnvEnd], env, "envelope %d", i)
-			assert.Equal(t, raw[row.ElemStart:row.ElemEnd], elem, "element %d", i)
-			first, _, _, _ := tbl.RawOffsetFrame(row.EnvStart)
-			last, _, _, _ := tbl.RawOffsetFrame(row.EnvEnd - 1)
-			if first != last {
-				straddled++
-			}
-		}
-		return nil
-	}))
-	assert.Positive(t, straddled, "no envelope crossed a cut; the fixture proves nothing")
-}
-
 // TestStartCompress_SingleFrameValueIsUnchanged pins the byte-identity floor:
 // a ledger inside the window is compressed to exactly what the plain encoder
 // produces, and reports one frame.
@@ -938,4 +925,59 @@ func ledgerWithTable(t *testing.T, seq uint32) ([]byte, []byte) {
 	table, err := txspan.Build(raw, txParts, network.PublicNetworkPassphrase)
 	require.NoError(t, err)
 	return raw, table
+}
+
+// zeroTxLedger marshals a minimal V2 LedgerCloseMeta holding no transactions.
+func zeroTxLedger(t *testing.T, seq uint32) []byte {
+	t.Helper()
+	lcm := xdr.LedgerCloseMeta{
+		V: 2,
+		V2: &xdr.LedgerCloseMetaV2{
+			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
+				Header: xdr.LedgerHeader{LedgerSeq: xdr.Uint32(seq)},
+			},
+			TxSet: xdr.GeneralizedTransactionSet{V: 1, V1TxSet: &xdr.TransactionSetV1{}},
+		},
+	}
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+	return raw
+}
+
+// fillerLedger marshals a minimal V2 LedgerCloseMeta whose HEADER SEQUENCE is
+// seq, padded with deterministic, compressible filler. variant changes the
+// filler without changing the sequence, so a test can overwrite a ledger with
+// different bytes that are still that ledger.
+//
+// Whole-ledger reads verify the header sequence against the sequence they
+// resolved, so a store fixture has to be a real LedgerCloseMeta at the right
+// sequence — opaque marker payloads are no longer readable back, which is the
+// point of the check.
+func fillerLedger(seq uint32, variant int) []byte {
+	const upgrades, upgradeBytes = 6, 128 // StellarValue.Upgrades' own XDR limits
+	pad := make([]xdr.UpgradeType, upgrades)
+	for i := range pad {
+		chunk := make([]byte, upgradeBytes)
+		for j := range chunk {
+			chunk[j] = byte(int(seq) + variant + i + j/8)
+		}
+		pad[i] = chunk
+	}
+	lcm := xdr.LedgerCloseMeta{
+		V: 2,
+		V2: &xdr.LedgerCloseMetaV2{
+			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
+				Header: xdr.LedgerHeader{
+					LedgerSeq: xdr.Uint32(seq),
+					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(seq), Upgrades: pad},
+				},
+			},
+			TxSet: xdr.GeneralizedTransactionSet{V: 1, V1TxSet: &xdr.TransactionSetV1{}},
+		},
+	}
+	raw, err := lcm.MarshalBinary()
+	if err != nil {
+		panic(err)
+	}
+	return raw
 }

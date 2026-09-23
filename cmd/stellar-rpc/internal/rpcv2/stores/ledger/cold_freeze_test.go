@@ -3,7 +3,6 @@ package ledger
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,19 +13,16 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 )
 
-// freezePayload fabricates a deterministic, compressible pseudo-ledger for
-// seq — enough structure that zstd does real work, small enough that a full
-// chunk's worth stays fast.
-func freezePayload(seq uint32) []byte {
-	b := make([]byte, 0, 2048)
-	var s [4]byte
-	binary.BigEndian.PutUint32(s[:], seq)
-	for len(b) < 2048 {
-		b = append(b, s[:]...)
-		b = append(b, "ledger-close-meta-filler-"...)
-	}
-	return b
-}
+// freezePayload is the freeze fixtures' ledger for seq: a real, minimal
+// LedgerCloseMeta stamped with that sequence and padded with deterministic,
+// compressible filler — enough structure that zstd does real work, small
+// enough that a full chunk's worth stays fast.
+//
+// It has to be a real ledger at the right sequence because whole-ledger reads
+// now check the stored header's sequence against the one they resolved; a
+// pseudo-ledger of filler alone would be written happily and then refused on
+// the way back out.
+func freezePayload(seq uint32) []byte { return fillerLedger(seq, 0) }
 
 // populateFreezeChunk writes the chunk's full ledger range into the hot
 // store through the production compress-and-batch path, in batches.

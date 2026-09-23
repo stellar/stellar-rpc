@@ -129,13 +129,18 @@ func TestScanLedgers_ColdHotBorder(t *testing.T) {
 	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 	const c0, c1 = chunk.ID(5), chunk.ID(6)
 
-	// c0's cold pack: two marker payloads at the chunk's last two ledgers. The
-	// pack covers only what the scan requests; AppendLedger stores raw bytes.
+	// c0's cold pack: two ledgers at the chunk's last two sequences, stamped
+	// with a close time no hot fixture uses so the BYTES say which tier served
+	// them. The pack covers only what the scan requests. They have to be real
+	// ledgers at those sequences: a whole-ledger read checks the stored
+	// header's sequence against the one it resolved.
 	packPath := cat.Layout().LedgerPackPath(c0)
 	require.NoError(t, os.MkdirAll(filepath.Dir(packPath), 0o755))
 	cw, err := ledger.NewColdWriter(packPath, c0.LastLedger()-1, ledger.ColdWriterOptions{})
 	require.NoError(t, err)
-	coldA, coldB := []byte("cold-payload-a"), []byte("cold-payload-b")
+	const coldCloseTime = 424242
+	coldA := rpcv2test.ZeroTxLCMBytesAt(t, c0.LastLedger()-1, coldCloseTime)
+	coldB := rpcv2test.ZeroTxLCMBytesAt(t, c0.LastLedger(), coldCloseTime)
 	require.NoError(t, cw.AppendLedger(c0.LastLedger()-1, coldA))
 	require.NoError(t, cw.AppendLedger(c0.LastLedger(), coldB))
 	require.NoError(t, cw.Commit())
