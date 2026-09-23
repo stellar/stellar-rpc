@@ -49,6 +49,7 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/stellar/go-stellar-sdk/keypair"
+	"github.com/stellar/go-stellar-sdk/network"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
@@ -220,6 +221,7 @@ func runDaemonInBackground(
 		ServeReads:           countingServeReads(served),
 		Logger:               silentLogger(),
 		Metrics:              metrics,
+		networkPassphrase:    network.PublicNetworkPassphrase,
 		chunksPerTxhashIndex: 1,
 		lifecycleGrace:       time.Millisecond, // don't park the run on the 5m default
 	}

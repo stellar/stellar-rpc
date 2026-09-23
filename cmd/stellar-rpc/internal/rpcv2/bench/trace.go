@@ -15,7 +15,8 @@ import (
 // is Unix nanoseconds at the ledger's PhaseExtract signal (the burst's first),
 // so rows can be correlated against external timelines (RocksDB LOG flush
 // events, iostat samples). pace_lag_ns is 0 on unpaced runs.
-const hotTraceHeader = "seq,wall_ns,extract_ns,ledgers_ns,txhash_ns,events_ns,commit_ns,apply_ns,total_ns,pace_lag_ns"
+const hotTraceHeader = "seq,wall_ns,extract_ns,ledgers_ns,txhash_ns,events_ns,txspans_ns," +
+	"commit_ns,apply_ns,total_ns,pace_lag_ns"
 
 // hotTrace streams one CSV row per ingested ledger to --trace. The csvSink
 // feeds it under the sink's own mutex (recordPhase from HotPhase, writeRow
@@ -86,12 +87,13 @@ func (t *hotTrace) writeRow(seq uint32, paceLag time.Duration) {
 	for _, d := range t.pending {
 		total += d
 	}
-	_, err := fmt.Fprintf(t.w, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+	_, err := fmt.Fprintf(t.w, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
 		seq, t.wallStart.UnixNano(),
 		t.pending[hotchunk.PhaseExtract].Nanoseconds(),
 		t.pending[hotchunk.PhaseLedgers].Nanoseconds(),
 		t.pending[hotchunk.PhaseTxhash].Nanoseconds(),
 		t.pending[hotchunk.PhaseEvents].Nanoseconds(),
+		t.pending[hotchunk.PhaseTxSpans].Nanoseconds(),
 		t.pending[hotchunk.PhaseCommit].Nanoseconds(),
 		t.pending[hotchunk.PhaseApply].Nanoseconds(),
 		total.Nanoseconds(), paceLag.Nanoseconds())

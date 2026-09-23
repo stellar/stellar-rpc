@@ -115,6 +115,13 @@ type daemonOptions struct {
 	// OnListen is called once both HTTP listeners are bound (see Options.OnListen); nil = nobody asked.
 	OnListen func(rpc, admin net.Addr)
 
+	// networkPassphrase is the network an INJECTED opener's ledgers were
+	// produced on (test-only). Production reads it from the captive-core file,
+	// which is where a real opener comes from; an injected one brings no file,
+	// and the span tables the backfill and the ingestion loop write are keyed
+	// under it. Empty is refused downstream, as it is for a real opener.
+	networkPassphrase string
+
 	// chunksPerTxhashIndex overrides the tx-hash index width (test-only). 0 ⇒ the
 	// fixed geometry.ChunksPerTxhashIndex. Tests set it to 1 so a single chunk's
 	// freeze is a terminal index (exercising the index rebuild + prune path cheaply).
@@ -294,7 +301,8 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	// --- Assemble the StartConfig and run the daemon body once. ---
 	start := startConfig(
-		cfg, cat, logger, backend, core.live, serveReads, metrics, sink, retention)
+		cfg, cat, logger, backend, core.live, serveReads, metrics, sink, retention,
+		core.networkPassphrase)
 	start.lifecycleGrace = opts.lifecycleGrace
 	if start.lifecycleGrace <= 0 {
 		start.lifecycleGrace = deriveLifecycleGrace(cfg.Service)
@@ -359,8 +367,10 @@ type resolvedCore struct {
 	// backfill core.
 	backfill CoreOpener
 
-	// networkPassphrase comes from the captive-core file. Empty means unknown (an
-	// injected opener) and skips the datastore's wrong-network check.
+	// networkPassphrase comes from the captive-core file, or from the options
+	// beside an injected opener. Empty means unknown, which skips the
+	// datastore's wrong-network check and is refused by every configuration
+	// that would key a span table under it.
 	networkPassphrase string
 
 	// binaryPath is the resolved stellar-core binary. Empty for an injected
@@ -372,7 +382,9 @@ type resolvedCore struct {
 // production pair built from [ingestion].
 func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry) (resolvedCore, error) {
 	if opts.Core != nil {
-		return resolvedCore{live: opts.Core, backfill: opts.Core}, nil
+		return resolvedCore{
+			live: opts.Core, backfill: opts.Core, networkPassphrase: opts.networkPassphrase,
+		}, nil
 	}
 	return newCaptiveCoreOpeners(cfg.Ingestion, cfg.Storage.DefaultDataDir, logger)
 }
@@ -385,6 +397,7 @@ func startConfig(
 	backend backfill.Backend, core CoreOpener,
 	serveReads func(context.Context, *query.Registry, net.Listener) error,
 	metrics observability.Metrics, sink ingest.MetricSink, retention geometry.Retention,
+	networkPassphrase string,
 ) StartConfig {
 	// ONE resolved zstd_encode_workers value feeds BOTH ledger-frame encoders
 	// — the hot tier's (HotTuning) and the walk/backfill cold writer's
@@ -404,12 +417,13 @@ func startConfig(
 		},
 	}
 	return StartConfig{
-		Exec:       exec,
-		Retention:  retention,
-		Core:       core,
-		ServeReads: serveReads,
-		HotTuning:  hotchunk.Tuning{ZstdEncodeWorkers: zstdWorkers},
-		Endpoint:   cfg.Service.Endpoint,
+		Exec:              exec,
+		Retention:         retention,
+		Core:              core,
+		ServeReads:        serveReads,
+		HotTuning:         hotchunk.Tuning{ZstdEncodeWorkers: zstdWorkers},
+		Endpoint:          cfg.Service.Endpoint,
+		NetworkPassphrase: networkPassphrase,
 	}
 }
 

@@ -25,6 +25,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/txspan"
 )
 
 const testPassphrase = "Public Global Stellar Network ; September 2015"
@@ -54,14 +55,24 @@ func testSecrets() Secrets {
 }
 
 // ingestRaw runs the caller's half of the production write path — the shared
-// ExtractLedgerTxParts walk — and hands its output to IngestLedger, so these
-// tests keep driving the storage write from raw LCM bytes.
+// ExtractLedgerTxParts walk plus the two forked builds — and hands its output
+// to IngestLedger, so these tests keep driving the storage write from raw LCM
+// bytes.
 func ingestRaw(t *testing.T, db *DB, seq uint32, raw []byte) (LedgerReport, error) {
 	t.Helper()
-	txParts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
+	return ingestRawAs(t, db, seq, raw, network.PublicNetworkPassphrase)
+}
+
+// ingestRawAs is ingestRaw under a chosen span-table passphrase; empty writes
+// no table at all.
+func ingestRawAs(t *testing.T, db *DB, seq uint32, raw []byte, passphrase string) (LedgerReport, error) {
+	t.Helper()
+	view := xdr.LedgerCloseMetaView(raw)
+	txParts, err := sdkingest.ExtractLedgerTxParts(view)
 	require.NoError(t, err)
-	return db.IngestLedger(seq, xdr.LedgerCloseMetaView(raw), txParts,
-		db.StartCompress(seq, xdr.LedgerCloseMetaView(raw)))
+	spans := StartSpans(view, passphrase)
+	spans.Provide(txParts)
+	return db.IngestLedger(seq, view, txParts, db.StartCompress(seq, view), spans)
 }
 
 // openTestDB opens a fresh hot DB bound to chunk 0 (every test uses chunk 0).
@@ -127,7 +138,7 @@ func TestOpen_ValidatesInputs(t *testing.T) {
 
 func TestColumnFamilies_UnionIsNonColliding(t *testing.T) {
 	cfs := ColumnFamilies()
-	// 1 ledger CF + 3 events CFs + 1 txhash CF = 5.
+	// 2 ledger CFs (raw ledgers + span tables) + 3 events CFs + 1 txhash CF = 6.
 	require.Len(t, cfs, len(ledger.CFNames())+len(event.CFNames())+len(txhash.CFNames()))
 	seen := map[string]bool{}
 	for _, cf := range cfs {
@@ -135,6 +146,7 @@ func TestColumnFamilies_UnionIsNonColliding(t *testing.T) {
 		seen[cf] = true
 	}
 	require.Contains(t, seen, ledger.LedgersCF)
+	require.Contains(t, seen, ledger.TxSpansCF)
 	for _, cf := range event.CFNames() {
 		require.Contains(t, seen, cf)
 	}
@@ -446,6 +458,16 @@ func TestOpenReadOnly_ReadsCommittedAndRejectsWrites(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, first+1, seq, "read-only handle sees the committed data")
+
+	// It names the same families the writer did, span tables included: the
+	// freeze copies those tables into the pack, so a read-only open that left
+	// the family out would freeze a chunk's worth of ledgers without them.
+	require.NoError(t, ro.Ledgers().WithTxTable(first,
+		func(tbl txspan.Table, header txspan.LedgerHeader, _ txspan.PieceReader) error {
+			assert.Equal(t, first, tbl.LedgerSeq())
+			assert.Equal(t, first, header.LedgerSeq)
+			return nil
+		}))
 
 	// A write through the read-only handle must fail — the freeze never mutates.
 	_, err = ingestRaw(t, ro, first+2, zeroTxLCM(t, first+2))
@@ -775,4 +797,126 @@ func readLedgerRaw(r interface {
 		return nil
 	})
 	return out, err
+}
+
+// TestIngestLedger_WritesTheSpanTableInTheSameBatch pins the atomicity the
+// design rests on: the table lands with its ledger, so an index hit implies the
+// table exists.
+func TestIngestLedger_WritesTheSpanTableInTheSameBatch(t *testing.T) {
+	db := openTestDB(t)
+	first := chunk.ID(0).FirstLedger()
+	raw, hash := oneTxLedger(t, first, network.PublicNetworkPassphrase)
+
+	written := ledger.TablesWritten()
+	rep, err := ingestRaw(t, db, first, raw)
+	require.NoError(t, err)
+	assert.Equal(t, written+1, ledger.TablesWritten())
+
+	// The table is readable beside its ledger, carries the ledger's own header
+	// stamp, and routes the ledger's hash.
+	require.NoError(t, db.Ledgers().WithTxTable(first,
+		func(tbl txspan.Table, header txspan.LedgerHeader, pieces txspan.PieceReader) error {
+			assert.Equal(t, 1, tbl.TxCount())
+			assert.Equal(t, first, tbl.LedgerSeq())
+			assert.Equal(t, first, header.LedgerSeq, "the header the store read is the ledger's own")
+			_, found, lookupErr := txspan.LookupPieces(tbl, pieces, hash, header, testPassphrase)
+			require.NoError(t, lookupErr)
+			assert.True(t, found)
+			return nil
+		}))
+	require.NoError(t, db.Ledgers().WithLedger(first, func(got []byte) error {
+		assert.Equal(t, raw, got)
+		return nil
+	}))
+	assert.Positive(t, rep.Phases[PhaseTxSpans].Dur, "the span phase reported no duration")
+}
+
+// TestIngestLedger_SpanTableFailureDoesNotFailTheLedger pins the accelerator's
+// standing: a build that cannot vouch for the spans is counted, logged, and
+// otherwise invisible — the ledger commits and stays fully readable.
+func TestIngestLedger_SpanTableFailureDoesNotFailTheLedger(t *testing.T) {
+	db := openTestDB(t)
+	first := chunk.ID(0).FirstLedger()
+	// Hashed under one network, ingested under another: no TxSet envelope
+	// hashes to the apply result, so the build refuses the ledger.
+	raw, _ := oneTxLedger(t, first, network.PublicNetworkPassphrase)
+
+	skipped := ledger.TablesSkipped()
+	_, err := ingestRawAs(t, db, first, raw, network.TestNetworkPassphrase)
+	require.NoError(t, err)
+	assert.Equal(t, skipped+1, ledger.TablesSkipped())
+
+	require.ErrorIs(t, db.Ledgers().WithTxTable(first, func(txspan.Table, txspan.LedgerHeader, txspan.PieceReader) error {
+		return nil
+	}), stores.ErrNoTable)
+	require.NoError(t, db.Ledgers().WithLedger(first, func(got []byte) error {
+		assert.Equal(t, raw, got)
+		return nil
+	}))
+}
+
+// TestIngestLedger_AWrongNetworkWritesNoTable pins what is left of the
+// passphrase's failure mode now that an empty one is a configuration error: a
+// passphrase that is not the ledger's network hashes its envelopes to nothing
+// the apply-order elements claim, the build refuses the ledger, and the ledger
+// still commits — tallied as a skip, served by decoding.
+func TestIngestLedger_AWrongNetworkWritesNoTable(t *testing.T) {
+	db := openTestDB(t)
+	first := chunk.ID(0).FirstLedger()
+	raw, _ := oneTxLedger(t, first, network.PublicNetworkPassphrase)
+
+	written, skipped := ledger.TablesWritten(), ledger.TablesSkipped()
+	_, err := ingestRawAs(t, db, first, raw, network.TestNetworkPassphrase)
+	require.NoError(t, err)
+	assert.Equal(t, written, ledger.TablesWritten())
+	assert.Equal(t, skipped+1, ledger.TablesSkipped())
+
+	require.ErrorIs(t, db.Ledgers().WithTxTable(first,
+		func(txspan.Table, txspan.LedgerHeader, txspan.PieceReader) error {
+			t.Fatal("fn must not run for a ledger the build refused")
+			return nil
+		}), stores.ErrNoTable)
+}
+
+// oneTxLedger marshals a V2 LedgerCloseMeta holding one successful classic
+// transaction hashed under passphrase, returning its bytes and that hash.
+func oneTxLedger(t *testing.T, seq uint32, passphrase string) ([]byte, [32]byte) {
+	t.Helper()
+	envelope := xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1: &xdr.TransactionV1Envelope{
+			Tx: xdr.Transaction{SourceAccount: xdr.MustMuxedAddress(keypair.MustRandom().Address())},
+		},
+	}
+	hash, err := network.HashTransactionInEnvelope(envelope, passphrase)
+	require.NoError(t, err)
+	opResults := []xdr.OperationResult{}
+	lcm := xdr.LedgerCloseMeta{
+		V: 2,
+		V2: &xdr.LedgerCloseMetaV2{
+			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
+				Header: xdr.LedgerHeader{LedgerSeq: xdr.Uint32(seq)},
+			},
+			TxSet: xdr.GeneralizedTransactionSet{V: 1, V1TxSet: &xdr.TransactionSetV1{
+				Phases: []xdr.TransactionPhase{{V: 0, V0Components: &[]xdr.TxSetComponent{{
+					Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
+					TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
+						Txs: []xdr.TransactionEnvelope{envelope},
+					},
+				}}}},
+			}},
+			TxProcessing: []xdr.TransactionResultMetaV1{{
+				Result: xdr.TransactionResultPair{
+					TransactionHash: hash,
+					Result: xdr.TransactionResult{FeeCharged: 100, Result: xdr.TransactionResultResult{
+						Code: xdr.TransactionResultCodeTxSuccess, Results: &opResults,
+					}},
+				},
+				TxApplyProcessing: xdr.TransactionMeta{V: 4, V4: &xdr.TransactionMetaV4{}},
+			}},
+		},
+	}
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+	return raw, hash
 }

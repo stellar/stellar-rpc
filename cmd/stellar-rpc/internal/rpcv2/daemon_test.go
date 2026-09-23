@@ -85,6 +85,9 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 		Core:       &fakeCore{}, // default getter blocks until ctx cancel
 		ServeReads: countingServeReads(&served),
 		Logger:     silentLogger(),
+		// The network the injected opener's ledgers are hashed under, which a
+		// production daemon reads from its captive-core file.
+		networkPassphrase: network.PublicNetworkPassphrase,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -215,10 +218,11 @@ func TestRunDaemon_BackfillMaterializesAllColdTypesAndIndex(t *testing.T) {
 		errCh <- runDaemonWith(ctx, configPath, daemonOptions{
 			// Backend's tip is chunk 0's last ledger ⇒ chunk 0 complete, backfill freezes it.
 			// The network tip is derived from this same backend's Tip.
-			Backend:    someTxBackend(t),
-			Core:       &fakeCore{}, // default getter blocks until ctx cancel
-			ServeReads: signalingServeReads(servedCh),
-			Logger:     silentLogger(),
+			Backend:           someTxBackend(t),
+			Core:              &fakeCore{}, // default getter blocks until ctx cancel
+			ServeReads:        signalingServeReads(servedCh),
+			Logger:            silentLogger(),
+			networkPassphrase: network.PublicNetworkPassphrase,
 		})
 	}()
 	select {
@@ -620,12 +624,15 @@ func TestNewCaptiveCoreOpeners_SilentWhenCoreFileAgrees(t *testing.T) {
 
 func TestResolveCore_InjectedOpenerServesBothRoles(t *testing.T) {
 	injected := &fakeCore{}
-	core, err := resolveCore(daemonOptions{Core: injected}, config.Config{}, silentLogger())
+	core, err := resolveCore(
+		daemonOptions{Core: injected, networkPassphrase: network.PublicNetworkPassphrase},
+		config.Config{}, silentLogger())
 	require.NoError(t, err)
 
 	assert.Same(t, injected, core.live)
 	assert.Same(t, injected, core.backfill)
-	assert.Empty(t, core.networkPassphrase, "an injected opener carries no passphrase")
+	assert.Equal(t, network.PublicNetworkPassphrase, core.networkPassphrase,
+		"an injected opener's network comes from the options beside it")
 	assert.Empty(t, core.binaryPath, "and no binary path, so no core version is reported")
 }
 
@@ -787,9 +794,10 @@ history_archive_urls = [%q]
 		errCh <- runDaemonWith(ctx, configPath, daemonOptions{
 			// NO Backend injected: the daemon wires the captive source itself from
 			// the injected core opener + the file:// archive pool.
-			Core:       &streamCore{stream: &coreReplayStream{t: t, gen: someTxGen(t)}},
-			ServeReads: signalingServeReads(servedCh),
-			Logger:     silentLogger(),
+			Core:              &streamCore{stream: &coreReplayStream{t: t, gen: someTxGen(t)}},
+			ServeReads:        signalingServeReads(servedCh),
+			Logger:            silentLogger(),
+			networkPassphrase: network.PublicNetworkPassphrase,
 		})
 	}()
 	select {

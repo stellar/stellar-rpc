@@ -1183,7 +1183,7 @@ func TestHotService_FeedsFeeWindowsAfterCommit(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	windows := feewindow.NewFeeWindows(10, 10)
-	svc := NewHotService(db, windows, &testSink{})
+	svc := NewHotService(db, windows, &testSink{}, network.PublicNetworkPassphrase)
 	first := chunk.ID(0).FirstLedger()
 	raw := rpcv2test.FeeTxLCMBytes(t, first, 500)
 	_, err = svc.Ingest(first, xdr.LedgerCloseMetaView(raw))
@@ -1205,7 +1205,7 @@ func TestHotService_RejectedLedgerFeedsNoFees(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	windows := feewindow.NewFeeWindows(10, 10)
-	svc := NewHotService(db, windows, &testSink{})
+	svc := NewHotService(db, windows, &testSink{}, network.PublicNetworkPassphrase)
 	first := chunk.ID(0).FirstLedger()
 
 	skipped := rpcv2test.FeeTxLCMBytes(t, first+5, 500)
@@ -1232,7 +1232,7 @@ func TestHotService_FeeClassificationErrorFailsCommittedLedger(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	windows := feewindow.NewFeeWindows(10, 10)
-	svc := NewHotService(db, windows, &testSink{})
+	svc := NewHotService(db, windows, &testSink{}, network.PublicNetworkPassphrase)
 	first := chunk.ID(0).FirstLedger()
 
 	_, err = svc.Ingest(first, xdr.LedgerCloseMetaView(rpcv2test.FeeTxLCMBytes(t, first, -1)))
@@ -1256,7 +1256,7 @@ func TestHotService_EmitsEveryPhaseOnSuccess(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	sink := &testSink{}
-	svc := NewHotService(db, nil, sink)
+	svc := NewHotService(db, nil, sink, network.PublicNetworkPassphrase)
 	first := chunk.ID(0).FirstLedger()
 	raw, _, _ := marshalLCMWithEvent(t, first) // one tx, one event
 	_, err = svc.Ingest(first, xdr.LedgerCloseMetaView(raw))
@@ -1283,7 +1283,7 @@ func TestHotService_CommitErrorLandsOnCommitPhase(t *testing.T) {
 	require.NoError(t, db.Close()) // closed => the batch commit fails
 
 	sink := &testSink{}
-	svc := NewHotService(db, nil, sink)
+	svc := NewHotService(db, nil, sink, network.PublicNetworkPassphrase)
 	first := chunk.ID(0).FirstLedger()
 	raw, _, _ := marshalLCMWithEvent(t, first)
 	_, err = svc.Ingest(first, xdr.LedgerCloseMetaView(raw))
@@ -1307,7 +1307,7 @@ func TestHotService_ExtractFailureLandsOnExtractPhase(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	sink := &testSink{}
-	svc := NewHotService(db, nil, sink)
+	svc := NewHotService(db, nil, sink, network.PublicNetworkPassphrase)
 	first := chunk.ID(0).FirstLedger()
 	// Garbage bytes fail XDR decode in ExtractLedgerTxParts, before any batch opens.
 	garbage := bytes.Repeat([]byte{0xff}, 16)
@@ -1331,7 +1331,7 @@ func TestHotService_EventsQueueFailureLandsOnEventsPhase(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	sink := &testSink{}
-	svc := NewHotService(db, nil, sink)
+	svc := NewHotService(db, nil, sink, network.PublicNetworkPassphrase)
 	first := chunk.ID(0).FirstLedger()
 	// A valid LCM but a seq that skips ahead: the events facade expects the empty
 	// chunk's first ledger and rejects first+5 as out of order (ErrLedgerOutOfOrder).
@@ -1358,7 +1358,7 @@ func TestHotService_FailedPhaseCarriesPartialDuration(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	sink := &testSink{}
-	svc := NewHotService(db, nil, sink)
+	svc := NewHotService(db, nil, sink, network.PublicNetworkPassphrase)
 	first := chunk.ID(0).FirstLedger()
 	raw, _, _ := marshalLCMWithEvent(t, first+5)
 	_, err = svc.Ingest(first+5, xdr.LedgerCloseMetaView(raw))

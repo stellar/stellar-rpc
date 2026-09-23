@@ -47,6 +47,14 @@ type freezeOptions struct {
 	// CPU profile (an in-process populate contaminates both).
 	ReuseHot bool
 
+	// Passphrase is the network passphrase the populate phase keys each
+	// ledger's transaction span table under, so the frozen pack carries the
+	// tables a production freeze would. Required: the freeze pass is
+	// configured with it too, and a ReuseHot run — whose adopted DB already
+	// holds the tables its own populate wrote — still names the network it
+	// froze.
+	Passphrase string
+
 	// OutDir receives the CSV report.
 	OutDir string
 }
@@ -55,6 +63,9 @@ type freezeOptions struct {
 func (o freezeOptions) validate() error {
 	if o.WorkRoot == "" {
 		return errors.New("--work-dir is required")
+	}
+	if o.Passphrase == "" {
+		return errors.New("--passphrase is required (it keys the transaction span tables the run writes)")
 	}
 	if o.Chunk > maxChunkID {
 		return fmt.Errorf("--chunk=%d is past the last valid chunk ID %d", uint32(o.Chunk), uint32(maxChunkID))
@@ -186,14 +197,15 @@ func populateHotChunk(
 	setupSink := newCSVSink()
 	start := time.Now()
 	if err := rpcv2.RunBoundedIngestionLoop(ctx, rpcv2.BoundedIngestConfig{
-		Stream:   boundedStream{inner: backend, first: first, last: last},
-		Resume:   first,
-		Catalog:  cat,
-		Boundary: nopBoundary{},
-		Logger:   logger,
-		Metrics:  setupSink,
-		Sink:     setupSink,
-		Tuning:   hotchunk.DefaultTuning(),
+		Stream:     boundedStream{inner: backend, first: first, last: last},
+		Resume:     first,
+		Catalog:    cat,
+		Boundary:   nopBoundary{},
+		Logger:     logger,
+		Metrics:    setupSink,
+		Sink:       setupSink,
+		Tuning:     hotchunk.DefaultTuning(),
+		Passphrase: opts.Passphrase,
 	}); err != nil {
 		return fmt.Errorf("populate hot chunk %s: %w", opts.Chunk, err)
 	}

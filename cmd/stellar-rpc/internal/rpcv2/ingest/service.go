@@ -27,13 +27,21 @@ type HotService struct {
 	db      *hotchunk.DB
 	windows *feewindow.FeeWindows
 	sink    MetricSink
+	// passphrase is the network the ledgers were produced on. It is needed to
+	// build each ledger's transaction span table, whose keys are transaction
+	// hashes, and the daemon has already refused to start without one.
+	passphrase string
 }
 
 // NewHotService builds a HotService that writes ledgers, txhash, and events into
 // the shared per-chunk DB and folds each committed ledger's fees into windows
-// (nil = no fee consumer). A nil sink defaults to NopSink.
-func NewHotService(db *hotchunk.DB, windows *feewindow.FeeWindows, sink MetricSink) *HotService {
-	return &HotService{db: db, windows: windows, sink: orNop(sink)}
+// (nil = no fee consumer). A nil sink defaults to NopSink. passphrase is the
+// network passphrase the span tables are keyed under (see
+// HotService.passphrase).
+func NewHotService(
+	db *hotchunk.DB, windows *feewindow.FeeWindows, sink MetricSink, passphrase string,
+) *HotService {
+	return &HotService{db: db, windows: windows, sink: orNop(sink), passphrase: passphrase}
 }
 
 // Ingest commits lcmView to the shared hot DB in one atomic synced WriteBatch
@@ -65,18 +73,24 @@ func (s *HotService) Ingest(seq uint32, lcmView xdr.LedgerCloseMetaView) (int64,
 	// the largest step it can hide behind. IngestLedger consumes the handle
 	// and owns its Discard; the walk-failure path below owns it here.
 	pending := s.db.StartCompress(seq, lcmView)
+	// The span table's TxSet traversal and envelope hashing are independent of
+	// the walk below, so they start alongside it and are joined inside the
+	// batch; the walk's own output reaches the build through Provide.
+	spans := hotchunk.StartSpans(lcmView, s.passphrase)
 	walkStart := time.Now()
 	txParts, err := sdkingest.ExtractLedgerTxParts(lcmView)
 	walkDur := time.Since(walkStart)
 	if err != nil {
 		pending.Discard()
+		spans.Discard()
 		// The walk failed before any batch opened: the extract phase is the only
 		// one that ran, mirroring hotchunk's own pre-batch failures.
 		s.sink.HotPhase(hotchunk.PhaseExtract, walkDur, 0, err)
 		return 0, fmt.Errorf("extract ledger tx parts seq %d: %w", seq, err)
 	}
+	spans.Provide(txParts)
 
-	rep, err := s.db.IngestLedger(seq, lcmView, txParts, pending)
+	rep, err := s.db.IngestLedger(seq, lcmView, txParts, pending, spans)
 	rep.Phases[hotchunk.PhaseExtract].Dur += walkDur
 
 	last := hotchunk.NumPhases - 1

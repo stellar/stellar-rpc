@@ -72,17 +72,29 @@ func OpenTestCatalogWith(t *testing.T, cpi uint32, logger *supportlog.Entry) (*c
 //		lcms...)
 func SeedHotChunkLCMs(
 	t *testing.T, cat *catalog.Catalog, c chunk.ID, publish func(*hotchunk.DB), lcms ...[]byte,
-) {
+) *hotchunk.DB {
+	t.Helper()
+	return SeedHotChunkLCMsAs(t, cat, c, network.PublicNetworkPassphrase, publish, lcms...)
+}
+
+// SeedHotChunkLCMsAs is SeedHotChunkLCMs under a chosen span-table passphrase.
+// One the fixtures' envelopes do not hash under seeds a chunk whose ledgers
+// have NO span tables — the tier a reader must still serve by decoding.
+func SeedHotChunkLCMsAs(
+	t *testing.T, cat *catalog.Catalog, c chunk.ID, passphrase string,
+	publish func(*hotchunk.DB), lcms ...[]byte,
+) *hotchunk.DB {
 	t.Helper()
 	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, SilentLogger(), hotchunk.DefaultTuning(),
 		hotchunk.SecretsFor(cat, c))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	for i, raw := range lcms {
-		IngestLedger(t, db, c.FirstLedger()+uint32(i), raw)
+		IngestLedgerAs(t, db, c.FirstLedger()+uint32(i), raw, passphrase)
 	}
 	require.NoError(t, cat.FlipHotReady(c))
 	publish(db)
+	return db
 }
 
 // WriteFrozenLedgerPack writes a real cold ledgers.pack for chunk c holding
@@ -128,14 +140,27 @@ func SymbolContractEvent(contractID xdr.ContractId, data string, topics ...strin
 
 // IngestLedger commits one raw ledger into db the way production does: the
 // shared ExtractLedgerTxParts walk, then hotchunk's atomic write over its
-// output. Tests that just need ledgers in a hot DB use this instead of
-// hand-running the walk.
+// output, including the transaction span table. Tests that just need ledgers
+// in a hot DB use this instead of hand-running the walk.
+//
+// The span table is keyed under the PUBLIC network passphrase, which every
+// fixture in this package hashes its envelopes with.
 func IngestLedger(t *testing.T, db *hotchunk.DB, seq uint32, raw []byte) {
 	t.Helper()
-	txParts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
+	IngestLedgerAs(t, db, seq, raw, network.PublicNetworkPassphrase)
+}
+
+// IngestLedgerAs is IngestLedger under a chosen network passphrase. A
+// passphrase the ledger's envelopes do not hash under leaves the ledger
+// without a span table — the shape a reader must still serve, by decoding.
+func IngestLedgerAs(t *testing.T, db *hotchunk.DB, seq uint32, raw []byte, passphrase string) {
+	t.Helper()
+	view := xdr.LedgerCloseMetaView(raw)
+	txParts, err := sdkingest.ExtractLedgerTxParts(view)
 	require.NoError(t, err)
-	_, err = db.IngestLedger(seq, xdr.LedgerCloseMetaView(raw), txParts,
-		db.StartCompress(seq, xdr.LedgerCloseMetaView(raw)))
+	spans := hotchunk.StartSpans(view, passphrase)
+	spans.Provide(txParts)
+	_, err = db.IngestLedger(seq, view, txParts, db.StartCompress(seq, view), spans)
 	require.NoError(t, err)
 }
 

@@ -28,11 +28,12 @@ func TestRunFreezeFromHot(t *testing.T) {
 	runOnce := func(csvDir string, reuseHot bool) map[string]map[string]int64 {
 		t.Helper()
 		require.NoError(t, runFreeze(context.Background(), testLogger(), freezeOptions{
-			Source:   sourceConfig{Kind: sourcePack, PackDir: packDir},
-			Chunk:    chunkID,
-			WorkRoot: workRoot,
-			ReuseHot: reuseHot,
-			OutDir:   csvDir,
+			Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
+			Chunk:      chunkID,
+			WorkRoot:   workRoot,
+			ReuseHot:   reuseHot,
+			OutDir:     csvDir,
+			Passphrase: benchPassphrase,
 		}))
 		return readCSV(t, filepath.Join(csvDir, "driver.csv"))
 	}
@@ -80,10 +81,11 @@ func TestRunFreezeFromHot(t *testing.T) {
 // fails up front with the pointer to populate, not deep inside the backfill.
 func TestRunFreezeReuseHotMissing(t *testing.T) {
 	err := runFreeze(context.Background(), testLogger(), freezeOptions{
-		Chunk:    chunk.ID(0),
-		WorkRoot: t.TempDir(),
-		ReuseHot: true,
-		OutDir:   filepath.Join(t.TempDir(), "csv"),
+		Chunk:      chunk.ID(0),
+		WorkRoot:   t.TempDir(),
+		ReuseHot:   true,
+		OutDir:     filepath.Join(t.TempDir(), "csv"),
+		Passphrase: benchPassphrase,
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "--reuse-hot")

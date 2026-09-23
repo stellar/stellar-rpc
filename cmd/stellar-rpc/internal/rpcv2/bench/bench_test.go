@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	"github.com/stellar/go-stellar-sdk/network"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
@@ -30,6 +31,10 @@ const linuxGOOS = "linux"
 // eventEvery: every eventEvery-th ledger of a fixture chunk carries one
 // transaction with one contract event; the rest are zero-tx ledgers.
 const eventEvery = 100
+
+// benchPassphrase is the network the rpcv2test fixtures these runs read hash
+// their transactions under, which is what the span tables must be keyed with.
+const benchPassphrase = network.PublicNetworkPassphrase
 
 func testLogger() *supportlog.Entry {
 	l := supportlog.New()
@@ -261,6 +266,7 @@ func TestBenchRejectsInvalidSourceEarly(t *testing.T) {
 		NumChunks:  1,
 		HotRoot:    hotRoot,
 		OutDir:     outDir,
+		Passphrase: benchPassphrase,
 	})
 	require.ErrorContains(t, err, "expected pack|bsb")
 
@@ -271,6 +277,36 @@ func TestBenchRejectsInvalidSourceEarly(t *testing.T) {
 
 	for _, dir := range []string{coldRoot, hotRoot, outDir} {
 		require.NoDirExists(t, dir, "invalid invocation must not create %s", dir)
+	}
+}
+
+// TestBenchRejectsAnEmptyPassphraseEarly pins the same gate for the network:
+// every cell that ingests writes span tables keyed under it, so a run that
+// named no network would quietly produce artifacts production never writes.
+// The drivers refuse in validate(), before any directory is created.
+func TestBenchRejectsAnEmptyPassphraseEarly(t *testing.T) {
+	base := t.TempDir()
+	hotRoot := filepath.Join(base, "hot")
+	workRoot := filepath.Join(base, "work")
+	outDir := filepath.Join(base, "csv")
+	packDir := filepath.Join(base, "src")
+
+	err := runHot(context.Background(), testLogger(), hotOptions{
+		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
+		StartChunk: chunk.ID(0), NumChunks: 1,
+		HotRoot: hotRoot, OutDir: outDir,
+	})
+	require.ErrorContains(t, err, "--passphrase is required")
+
+	err = runFreeze(context.Background(), testLogger(), freezeOptions{
+		Source:   sourceConfig{Kind: sourcePack, PackDir: packDir},
+		Chunk:    chunk.ID(0),
+		WorkRoot: workRoot, OutDir: outDir,
+	})
+	require.ErrorContains(t, err, "--passphrase is required")
+
+	for _, dir := range []string{hotRoot, workRoot, outDir} {
+		require.NoDirExists(t, dir, "a refused invocation must not create %s", dir)
 	}
 }
 
@@ -319,6 +355,7 @@ func TestRunHotFromPack(t *testing.T) {
 		NumLedgers: numLedgers,
 		HotRoot:    hotRoot,
 		OutDir:     csvDir,
+		Passphrase: benchPassphrase,
 	}
 	require.NoError(t, runHot(context.Background(), testLogger(), opts))
 
@@ -380,6 +417,7 @@ func TestRunHotIncompleteStream(t *testing.T) {
 		NumLedgers: packed + 10, // asks for more than the pack holds
 		HotRoot:    t.TempDir(),
 		OutDir:     filepath.Join(t.TempDir(), "csv"),
+		Passphrase: benchPassphrase,
 	})
 	// Seqs are fixture-determined: 50 ledgers from chunk 0 → coverage [2, 51];
 	// packed+10 requested → [2, 61]. Both bounds are deterministic, so pinning
@@ -412,6 +450,7 @@ func TestRunHotPaced(t *testing.T) {
 		HotRoot:       t.TempDir(),
 		CloseInterval: interval,
 		OutDir:        csvDir,
+		Passphrase:    benchPassphrase,
 	}))
 	// The last ledger (position numLedgers-1) yields no sooner than its due time,
 	// anchor + (numLedgers-1)*interval, and the anchor is set after this start.

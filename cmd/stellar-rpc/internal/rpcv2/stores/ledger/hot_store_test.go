@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/txspan"
 )
 
 func silentLogger() *supportlog.Entry {
@@ -591,4 +593,249 @@ func TestStartCompress_SingleFlightGuard(t *testing.T) {
 
 	third := h.StartCompress(Entry{Seq: 3, Bytes: payload})
 	third.Discard() // latch released by the join — reusable again
+}
+
+// TestCFNamesCarriesTheSpanTableCF pins the CF list the shared hot DB opens
+// with: a facade that forgets a CF cannot store into it.
+func TestCFNamesCarriesTheSpanTableCF(t *testing.T) {
+	assert.Equal(t, []string{LedgersCF, TxSpansCF}, CFNames())
+}
+
+// TestWithTxTable_AbsentTableIsErrNoTable pins the ordinary case: a ledger
+// without a span table reports the sentinel, which is how a reader learns to
+// decode instead.
+func TestWithTxTable_AbsentTableIsErrNoTable(t *testing.T) {
+	h := openTestHotStore(t)
+	raw := []byte("a ledger the store has no table for")
+	require.NoError(t, h.store.Batch(func(b *rocksdb.BatchWriter) error {
+		return h.AddLedgerToBatch(b, Entry{Seq: 7, Bytes: raw})
+	}))
+
+	require.ErrorIs(t, h.WithTxTable(7, func(txspan.Table, txspan.LedgerHeader, txspan.PieceReader) error {
+		t.Fatal("fn must not run for a ledger with no table")
+		return nil
+	}), stores.ErrNoTable)
+}
+
+// TestWithTxTable_TableWithoutItsLedgerIsNotFound pins the other half of the
+// paired read: a table whose ledger is gone is a missing ledger, not a missing
+// table, so the caller's fallback reports the same thing.
+func TestWithTxTable_TableWithoutItsLedgerIsNotFound(t *testing.T) {
+	h := openTestHotStore(t)
+	_, table := ledgerWithTable(t, 21)
+	require.NoError(t, h.store.Batch(func(b *rocksdb.BatchWriter) error {
+		h.AddTableToBatch(b, 21, table)
+		return nil
+	}))
+	require.ErrorIs(t, h.WithTxTable(21, func(txspan.Table, txspan.LedgerHeader, txspan.PieceReader) error {
+		t.Fatal("fn must not run without the ledger")
+		return nil
+	}), stores.ErrNotFound)
+}
+
+// TestWithTxTable_PiecesEqualTheRawSpans is the read path's core claim: the
+// bytes a piece read returns for every transaction are exactly the bytes the
+// same spans name in the decoded ledger.
+func TestWithTxTable_PiecesEqualTheRawSpans(t *testing.T) {
+	h := openTestHotStore(t)
+	lcm, _ := makeRandomLedgerCloseMeta(9, 24)
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+	putLedgerWithTable(t, h, 9, raw)
+
+	var rows int
+	require.NoError(t, h.WithTxTable(9, func(tbl txspan.Table, _ txspan.LedgerHeader, pieces txspan.PieceReader) error {
+		require.Equal(t, uint32(9), tbl.LedgerSeq())
+		for i := range tbl.TxCount() {
+			row := tbl.Row(i)
+			env, elem, perr := pieces(row)
+			require.NoError(t, perr)
+			assert.Equal(t, raw[row.EnvStart:row.EnvEnd], env, "envelope %d", i)
+			assert.Equal(t, raw[row.ElemStart:row.ElemEnd], elem, "element %d", i)
+			rows++
+		}
+		return nil
+	}))
+	assert.Equal(t, 24, rows)
+}
+
+// TestWithTxTable_UnparsableTableIsAnError pins that a table this store wrote
+// and cannot read back fails the read naming the ledger and the reason. It is
+// NOT reported as an absent table: the ledger beside it could answer, and
+// answering would leave the operator with no sign that a stored table is bad.
+func TestWithTxTable_UnparsableTableIsAnError(t *testing.T) {
+	h := openTestHotStore(t)
+	raw, table := ledgerWithTable(t, 11)
+	table[len(table)-1] ^= 0x01 // a flipped trailer byte fails the checksum
+	require.NoError(t, h.store.Batch(func(b *rocksdb.BatchWriter) error {
+		h.AddTableToBatch(b, 11, table)
+		return h.AddLedgerToBatch(b, Entry{Seq: 11, Bytes: raw})
+	}))
+
+	err := h.WithTxTable(11, func(txspan.Table, txspan.LedgerHeader, txspan.PieceReader) error {
+		t.Fatal("fn must not run for a table that will not parse")
+		return nil
+	})
+	require.ErrorIs(t, err, stores.ErrCorrupt)
+	require.NotErrorIs(t, err, stores.ErrNoTable, "a bad table is not an absent one")
+	assert.ErrorContains(t, err, "ledger 11")
+	assert.ErrorContains(t, err, "checksum mismatch")
+}
+
+// TestAddTableToBatch_EmptyTableCountsASkip pins that a ledger the build
+// refused stores nothing and is tallied apart from the written ones.
+func TestAddTableToBatch_EmptyTableCountsASkip(t *testing.T) {
+	h := openTestHotStore(t)
+	skipped, written := TablesSkipped(), TablesWritten()
+	require.NoError(t, h.store.Batch(func(b *rocksdb.BatchWriter) error {
+		h.AddTableToBatch(b, 13, nil)
+		return h.AddLedgerToBatch(b, Entry{Seq: 13, Bytes: []byte("no table for this one")})
+	}))
+	assert.Equal(t, skipped+1, TablesSkipped())
+	assert.Equal(t, written, TablesWritten())
+
+	require.ErrorIs(t, h.WithTxTable(13, func(txspan.Table, txspan.LedgerHeader, txspan.PieceReader) error { return nil }),
+		stores.ErrNoTable)
+}
+
+// TestAddTableToBatch_EmptyTableDeletesThePriorRow pins the table family's own
+// rule through a replay: a table under a key always describes the ledger
+// stored beside it. Re-ingesting a sequence whose build refuses a table must
+// therefore remove the table the earlier ingest left there, rather than leave
+// it standing over bytes it no longer describes.
+func TestAddTableToBatch_EmptyTableDeletesThePriorRow(t *testing.T) {
+	h := openTestHotStore(t)
+	lcm, _ := makeRandomLedgerCloseMeta(17, 4)
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+	putLedgerWithTable(t, h, 17, raw)
+	require.NoError(t, h.WithTxTable(17, func(txspan.Table, txspan.LedgerHeader, txspan.PieceReader) error { return nil }),
+		"premise: the first ingest stored a readable table")
+
+	require.NoError(t, h.store.Batch(func(b *rocksdb.BatchWriter) error {
+		h.AddTableToBatch(b, 17, nil)
+		return h.AddLedgerToBatch(b, Entry{Seq: 17, Bytes: raw})
+	}))
+	require.ErrorIs(t, h.WithTxTable(17, func(txspan.Table, txspan.LedgerHeader, txspan.PieceReader) error {
+		t.Fatal("the earlier table must not survive a ledger re-ingested without one")
+		return nil
+	}), stores.ErrNoTable)
+}
+
+// TestWithTxTable_CallbackErrorReachesTheCaller pins that fn's error is
+// carried out rather than swallowed by the pinned read.
+func TestWithTxTable_CallbackErrorReachesTheCaller(t *testing.T) {
+	h := openTestHotStore(t)
+	putLedgerWithTable(t, h, 15, zeroTxLedger(t, 15))
+
+	sentinel := errors.New("callback said no")
+	require.ErrorIs(t, h.WithTxTable(15,
+		func(txspan.Table, txspan.LedgerHeader, txspan.PieceReader) error { return sentinel }),
+		sentinel)
+}
+
+// TestHotStore_MissingTableFamilyFailsEveryOpen pins the family as part of
+// what a hot DB IS. A DB without it is not this facade's DB, and both opens
+// that take a DB as they find it — the read-only one the freeze and the
+// startup refiner use, and the must-exist one ingestion resumes with — refuse
+// it rather than serving its tables as absent. A read that answered ErrNoTable
+// for a whole missing family would turn "this is the wrong database" into
+// "these ledgers have no tables", which is a slower answer and a silent one.
+func TestHotStore_MissingTableFamilyFailsEveryOpen(t *testing.T) {
+	dir := t.TempDir()
+	// A DB created with the ledgers family alone, which is not a hot ledger DB.
+	store, err := rocksdb.New(rocksdb.Config{
+		Path: dir, ColumnFamilies: []string{LedgersCF}, Logger: silentLogger(),
+	})
+	require.NoError(t, err)
+	h := NewWithStore(store, 0)
+	require.NoError(t, store.Batch(func(b *rocksdb.BatchWriter) error {
+		return h.AddLedgerToBatch(b, Entry{Seq: 31, Bytes: zeroTxLedger(t, 31)})
+	}))
+	require.NoError(t, store.Close())
+
+	for name, cfg := range map[string]rocksdb.Config{
+		"read-only": {
+			Path: dir, ColumnFamilies: CFNames(), Logger: silentLogger(), ReadOnly: true,
+		},
+		"must-exist": {
+			Path: dir, ColumnFamilies: CFNames(), Logger: silentLogger(), MustExist: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, oerr := rocksdb.New(cfg)
+			require.Error(t, oerr, "a DB without the table family is not this facade's DB")
+			assert.ErrorContains(t, oerr, TxSpansCF)
+		})
+	}
+}
+
+// TestHotStore_FreshWriteOpenCreatesTheTableFamily pins the other side of the
+// same rule: a store opened fresh on this facade's CF list HAS the table
+// family, so ingest can write into it and a read finds it there. Every hot DB
+// in the deployment starts this way.
+func TestHotStore_FreshWriteOpenCreatesTheTableFamily(t *testing.T) {
+	h := openTestHotStore(t)
+	lcm, _ := makeRandomLedgerCloseMeta(34, 4)
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+	putLedgerWithTable(t, h, 34, raw)
+
+	require.NoError(t, h.WithTxTable(34, func(tbl txspan.Table, _ txspan.LedgerHeader, pieces txspan.PieceReader) error {
+		row := tbl.Row(0)
+		env, _, perr := pieces(row)
+		require.NoError(t, perr)
+		assert.Equal(t, raw[row.EnvStart:row.EnvEnd], env)
+		return nil
+	}))
+}
+
+// putLedgerWithTable commits one ledger the way the ingest loop does: the
+// forked compression and the span table built beside it, both landing in one
+// batch.
+func putLedgerWithTable(t *testing.T, h *HotStore, seq uint32, raw []byte) {
+	t.Helper()
+	pending := h.StartCompress(Entry{Seq: seq, Bytes: raw})
+	txParts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
+	require.NoError(t, err)
+	table, err := txspan.Build(raw, txParts, network.TestNetworkPassphrase)
+	require.NoError(t, err)
+	require.NoError(t, h.store.Batch(func(b *rocksdb.BatchWriter) error {
+		if perr := h.AddPendingToBatch(b, pending); perr != nil {
+			return perr
+		}
+		h.AddTableToBatch(b, seq, table)
+		return nil
+	}))
+}
+
+// ledgerWithTable returns a zero-transaction ledger and the span table built
+// for it, so the store tests exercise real encoded tables rather than
+// stand-ins. It stores no ledger beside the table, so it is for tests about
+// the table row alone; putLedgerWithTable commits the pair.
+func ledgerWithTable(t *testing.T, seq uint32) ([]byte, []byte) {
+	t.Helper()
+	raw := zeroTxLedger(t, seq)
+	txParts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
+	require.NoError(t, err)
+	table, err := txspan.Build(raw, txParts, network.PublicNetworkPassphrase)
+	require.NoError(t, err)
+	return raw, table
+}
+
+// zeroTxLedger marshals a minimal V2 LedgerCloseMeta holding no transactions.
+func zeroTxLedger(t *testing.T, seq uint32) []byte {
+	t.Helper()
+	lcm := xdr.LedgerCloseMeta{
+		V: 2,
+		V2: &xdr.LedgerCloseMetaV2{
+			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
+				Header: xdr.LedgerHeader{LedgerSeq: xdr.Uint32(seq)},
+			},
+			TxSet: xdr.GeneralizedTransactionSet{V: 1, V1TxSet: &xdr.TransactionSetV1{}},
+		},
+	}
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+	return raw
 }

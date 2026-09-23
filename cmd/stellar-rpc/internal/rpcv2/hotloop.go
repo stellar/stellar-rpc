@@ -114,6 +114,11 @@ type ingestionLoopConfig struct {
 	// chunk boundaries; run() opens the initial HotDB with the same value.
 	// Its ZstdEncodeWorkers field is FORMAT-AFFECTING (see hotchunk.Tuning).
 	Tuning hotchunk.Tuning
+
+	// Passphrase is the network passphrase every ledger's transaction span
+	// table is keyed under. It is the network the daemon resolved at startup,
+	// which refuses to run without one (see ingest.NewHotService).
+	Passphrase string
 }
 
 // handleSink is the slice of the registry the loop publishes into. The daemon's
@@ -184,7 +189,7 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 
 	// hotService binds the metrics sink to THIS hotDB instance; the boundary handoff
 	// rebuilds it for the reopened chunk DB below.
-	hotService := ingest.NewHotService(hotDB, cfg.FeeWindows, cfg.Sink)
+	hotService := ingest.NewHotService(hotDB, cfg.FeeWindows, cfg.Sink, cfg.Passphrase)
 
 	// One continuous stream from the resume ledger, consumed on a local sequence
 	// counter. The in-order contract is enforced at the SOURCE — captive core (and
@@ -223,7 +228,7 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 				return fmt.Errorf("open hot DB for chunk %s at boundary: %w", next, oerr)
 			}
 			hotDB = nextDB
-			hotService = ingest.NewHotService(hotDB, cfg.FeeWindows, cfg.Sink)
+			hotService = ingest.NewHotService(hotDB, cfg.FeeWindows, cfg.Sink, cfg.Passphrase)
 			// Publish the next chunk's handle before its first ledger commits (the
 			// completed chunk's owner is the sink from here), then announce the
 			// completed chunk to the lifecycle.
@@ -273,6 +278,10 @@ type BoundedIngestConfig struct {
 	// bench cells resolve it from --zstd-workers (default
 	// ledger.DefaultZstdEncodeWorkers).
 	Tuning hotchunk.Tuning
+	// Passphrase is the network passphrase the transaction span tables are
+	// keyed under — the network the run's ledgers were produced on, which the
+	// bench options refuse to leave empty (see ingest.NewHotService).
+	Passphrase string
 }
 
 // RunBoundedIngestionLoop runs the ingestion loop over a bounded stream: it
@@ -286,16 +295,17 @@ func RunBoundedIngestionLoop(ctx context.Context, cfg BoundedIngestConfig) error
 		return fmt.Errorf("open hot DB for resume ledger %d: %w", cfg.Resume, err)
 	}
 	err = runIngestionLoop(ctx, ingestionLoopConfig{
-		Stream:   cfg.Stream,
-		Resume:   cfg.Resume,
-		HotDB:    hotDB,
-		Catalog:  cfg.Catalog,
-		Boundary: cfg.Boundary,
-		Logger:   cfg.Logger,
-		Metrics:  cfg.Metrics,
-		Sink:     cfg.Sink,
-		Registry: &closingSink{},
-		Tuning:   cfg.Tuning,
+		Stream:     cfg.Stream,
+		Resume:     cfg.Resume,
+		HotDB:      hotDB,
+		Catalog:    cfg.Catalog,
+		Boundary:   cfg.Boundary,
+		Logger:     cfg.Logger,
+		Metrics:    cfg.Metrics,
+		Sink:       cfg.Sink,
+		Registry:   &closingSink{},
+		Tuning:     cfg.Tuning,
+		Passphrase: cfg.Passphrase,
 	})
 	if errors.Is(err, errStreamEnded) {
 		return nil

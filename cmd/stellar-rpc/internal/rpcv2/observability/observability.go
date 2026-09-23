@@ -182,6 +182,13 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 			"cold ledger packs whose file was gone on first read "+
 				"(routing only opens packs the catalog snapshot holds; any count is an alarm)",
 			ledger.MissingPackOpens),
+		counterFunc("txspan_tables_written_total",
+			"transaction span tables written with their ledger",
+			ledger.TablesWritten),
+		counterFunc("txspan_tables_skipped_total",
+			"ledgers ingested without a transaction span table because the build refused them "+
+				"(each one is still served, by decoding the ledger)",
+			ledger.TablesSkipped),
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 			Namespace: namespace, Subsystem: subsystem, Name: "open_snapshots",
 			Help: "RocksDB snapshots currently held, across all stores " +

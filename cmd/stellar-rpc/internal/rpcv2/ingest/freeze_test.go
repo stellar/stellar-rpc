@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/network"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
@@ -52,7 +53,7 @@ func TestFreezeColdChunk_ByteIdenticalToWalk(t *testing.T) {
 	db, err := hotchunk.Open(dbPath, chunkID, hotTestLogger(), hotchunk.DefaultTuning(), testHotSecrets())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	svc := NewHotService(db, nil, nil)
+	svc := NewHotService(db, nil, nil, network.PublicNetworkPassphrase)
 	for i, raw := range fixtures {
 		_, ierr := svc.Ingest(first+uint32(i), xdr.LedgerCloseMetaView(raw))
 		require.NoError(t, ierr)

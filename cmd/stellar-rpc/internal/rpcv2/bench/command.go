@@ -9,6 +9,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
+	"github.com/stellar/go-stellar-sdk/network"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
@@ -219,6 +220,7 @@ func newHotCommand() *cobra.Command {
 		closeInterval time.Duration
 		traceFile     string
 		zstdWorkers   int
+		passphrase    string
 		prof          profileFlags
 	)
 	cmd := newBenchCommand("hot",
@@ -236,6 +238,7 @@ func newHotCommand() *cobra.Command {
 				OutDir:        outDir,
 				TraceFile:     traceFile,
 				ZstdWorkers:   zstdWorkers,
+				Passphrase:    passphrase,
 			})
 		})
 	fs := cmd.Flags()
@@ -256,6 +259,9 @@ func newHotCommand() *cobra.Command {
 	fs.IntVar(&zstdWorkers, "zstd-workers", ledger.DefaultZstdEncodeWorkers,
 		"hot ledger-frame zstd encode workers (0 = single-threaded; format-affecting "+
 			"in production — see hotchunk.Tuning)")
+	fs.StringVar(&passphrase, "passphrase", network.PublicNetworkPassphrase,
+		"network passphrase the transaction span tables are keyed under; must match the source's "+
+			"network (empty = ingest no tables)")
 	markRequired(cmd, "start-chunk", "hot-dir")
 	return cmd
 }
@@ -267,6 +273,7 @@ func newFreezeCommand() *cobra.Command {
 		workDir    string
 		catalogDir string
 		reuseHot   bool
+		passphrase string
 		prof       profileFlags
 	)
 	cmd := newBenchCommand("freeze",
@@ -280,6 +287,7 @@ func newFreezeCommand() *cobra.Command {
 				WorkRoot:   workDir,
 				CatalogDir: catalogDir,
 				ReuseHot:   reuseHot,
+				Passphrase: passphrase,
 				OutDir:     outDir,
 			})
 		})
@@ -293,6 +301,9 @@ func newFreezeCommand() *cobra.Command {
 	fs.BoolVar(&reuseHot, "reuse-hot", false,
 		"skip the populate phase and adopt the hot DB a prior run left in --work-dir "+
 			"(cheap iteration; freeze-only RSS row and CPU profile)")
+	fs.StringVar(&passphrase, "passphrase", network.PublicNetworkPassphrase,
+		"network passphrase the populate keys the transaction span tables under; must match "+
+			"the source's network (empty = populate no tables, so the pack carries none)")
 	markRequired(cmd, "chunk", "work-dir")
 	return cmd
 }

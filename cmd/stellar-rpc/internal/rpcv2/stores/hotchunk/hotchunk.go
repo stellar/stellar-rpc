@@ -12,6 +12,7 @@ package hotchunk
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -28,6 +29,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/txspan"
 )
 
 // DB is one chunk's hot tier: a single multi-CF rocksdb.Store plus the typed
@@ -41,6 +43,7 @@ import (
 type DB struct {
 	store   *rocksdb.Store
 	chunkID chunk.ID
+	logger  *supportlog.Entry
 
 	ledger *ledger.HotStore
 	txhash *txhash.HotStore
@@ -288,6 +291,7 @@ func open(
 	db := &DB{
 		store:   store,
 		chunkID: chunkID,
+		logger:  logger,
 		ledger:  ledger.NewWithStore(store, tun.ZstdEncodeWorkers),
 	}
 	// A read-only open is a ledgers-only freeze/probe view (see OpenReadOnly): it
@@ -444,6 +448,7 @@ const (
 	PhaseLedgers
 	PhaseTxhash
 	PhaseEvents
+	PhaseTxSpans
 	PhaseCommit
 	PhaseApply
 	// NumPhases is the array size; it is not itself a phase.
@@ -461,6 +466,8 @@ func (p Phase) String() string {
 		return "txhash"
 	case PhaseEvents:
 		return "events"
+	case PhaseTxSpans:
+		return "txspans"
 	case PhaseCommit:
 		return "commit"
 	case PhaseApply:
@@ -502,10 +509,14 @@ type LedgerReport struct {
 // serving state. lcmView is still needed for the raw-ledgers write and the
 // close time.
 //
+// pending and spans are the caller's two forked builds over the same lcmView
+// (StartCompress and StartSpans); this call owns joining or discarding both.
+//
 // lcmView is a borrowed zero-copy view and txParts aliases it; every extractor
-// copies what it retains, so neither need outlive this call. Store.Batch's
-// lifecycle RLock + checkOpen is the authoritative closed-store guard, so there
-// is no separate pre-check here.
+// copies what it retains, so neither need outlive this call — both joins block
+// until their goroutine has finished reading it. Store.Batch's lifecycle RLock
+// + checkOpen is the authoritative closed-store guard, so there is no separate
+// pre-check here.
 
 // StartCompress forks the ledger-bytes zstd encode. The caller starts it
 // BEFORE its own TxProcessing walk so the encode overlaps that walk — the
@@ -517,9 +528,21 @@ func (d *DB) StartCompress(seq uint32, lcmView xdr.LedgerCloseMetaView) *ledger.
 	return d.ledger.StartCompress(ledger.Entry{Seq: seq, Bytes: []byte(lcmView)})
 }
 
+// StartSpans forks the span table build for lcmView. passphrase is the network
+// the ledger was produced on and is REQUIRED — the table is keyed on
+// transaction hashes, which cannot be computed without one, and every
+// configuration that reaches here has already refused an empty one. Like
+// StartCompress the caller starts it BEFORE its own TxProcessing walk, hands
+// that walk's output to Provide, and passes the handle to IngestLedger, which
+// owns the Discard; a caller that fails before calling IngestLedger must
+// Discard it itself.
+func StartSpans(lcmView xdr.LedgerCloseMetaView, passphrase string) *txspan.Pending {
+	return txspan.StartBuild([]byte(lcmView), passphrase)
+}
+
 func (d *DB) IngestLedger(
 	seq uint32, lcmView xdr.LedgerCloseMetaView, txParts []sdkingest.LedgerTxParts,
-	pending *ledger.PendingCompression,
+	pending *ledger.PendingCompression, spans *txspan.Pending,
 ) (LedgerReport, error) {
 	var rep LedgerReport
 
@@ -539,6 +562,9 @@ func (d *DB) IngestLedger(
 	// deferred Discard bounds the borrowed lcmView on every early-error path:
 	// both join and Discard block until the encoder is done with the bytes.
 	defer pending.Discard()
+	// The span table build is the other fork the caller started ahead of its
+	// walk. Its Discard bounds the borrowed lcmView the same way.
+	defer spans.Discard()
 
 	// Pre-extract anything that can fail BEFORE opening the batch, so a decode
 	// error rejects the ledger without a half-built batch.
@@ -603,11 +629,12 @@ func (d *DB) IngestLedger(
 	failed := PhaseCommit
 	batchStart := time.Now()
 	cerr := d.store.Batch(func(b *rocksdb.BatchWriter) error {
-		// Queue order: txhash and events first, the compression JOIN last —
-		// maximizing the window the background encode has to finish, so the
-		// join usually waits ~0. Rows land in one atomic batch regardless of
-		// queue order; only the emission order of the phase metrics is fixed
-		// (by the Phase constants), not the execution order here.
+		// Queue order: txhash and events first, then the two background JOINs —
+		// maximizing the window the compression and the span build have to
+		// finish, so each join usually waits ~0. Rows land in one atomic batch
+		// regardless of queue order; only the emission order of the phase
+		// metrics is fixed (by the Phase constants), not the execution order
+		// here.
 		// One packed-row Put per ledger — EVERY ledger, an empty row for a
 		// tx-less one, keeping the txhash CF's dense chain.
 		ts := time.Now()
@@ -631,15 +658,23 @@ func (d *DB) IngestLedger(
 			return fmt.Errorf("queue ledger seq %d: %w", seq, err)
 		}
 		rep.Phases[PhaseLedgers].Dur = time.Since(ls)
+
+		// The span table is an accelerator, so its failure never fails the
+		// ledger: the reader falls back to decoding. It lands in THIS batch,
+		// which is what makes a table's existence imply its ledger's.
+		ss := time.Now()
+		d.ledger.AddTableToBatch(b, seq, d.joinSpans(seq, spans))
+		rep.Phases[PhaseTxSpans].Dur = time.Since(ss)
 		return nil
 	})
-	// Commit is the whole Batch call minus the three queue steps: the RocksDB write
+	// Commit is the whole Batch call minus the queue steps: the RocksDB write
 	// (WAL append + fsync + memtable). Stamp it whether the batch succeeded or the
 	// commit itself failed (all queue steps ran) — a slow-then-failed commit is
 	// signal. A queue-step failure already stamped its own partial above.
 	if failed == PhaseCommit {
 		rep.Phases[PhaseCommit].Dur = time.Since(batchStart) -
-			rep.Phases[PhaseLedgers].Dur - rep.Phases[PhaseTxhash].Dur - rep.Phases[PhaseEvents].Dur
+			rep.Phases[PhaseLedgers].Dur - rep.Phases[PhaseTxhash].Dur -
+			rep.Phases[PhaseEvents].Dur - rep.Phases[PhaseTxSpans].Dur
 	}
 	if cerr != nil {
 		rep.Failed = failed
@@ -666,6 +701,24 @@ func (d *DB) IngestLedger(
 		return rep, fmt.Errorf("apply hot indexes for ledger %d: %w", seq, aerr)
 	}
 	return rep, nil
+}
+
+// joinSpans joins the forked span build and returns the table to store, or
+// nothing when the ledger gets none. A build that refused the ledger is
+// routine and logged at debug; any other failure is logged at warn, because it
+// means the builder and the ledger disagreed. Neither fails the ledger.
+func (d *DB) joinSpans(seq uint32, spans *txspan.Pending) []byte {
+	table, err := spans.Join()
+	if err == nil {
+		return table
+	}
+	entry := d.logger.WithField("seq", seq).WithError(err)
+	if errors.Is(err, txspan.ErrUnsupportedLedger) || errors.Is(err, txspan.ErrLayout) {
+		entry.Debug("hotchunk: no transaction span table for this ledger; reads decode it instead")
+		return nil
+	}
+	entry.Warn("hotchunk: transaction span table build failed; reads decode this ledger instead")
+	return nil
 }
 
 // ledgerTxHashes collects one ledger's indexable tx hashes in apply order —

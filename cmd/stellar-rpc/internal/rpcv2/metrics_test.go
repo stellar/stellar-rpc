@@ -14,6 +14,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/network"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
 
@@ -32,10 +34,11 @@ func TestRunDaemon_ExposesProcessMetrics(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- runDaemonWith(ctx, configPath, daemonOptions{
-			Backend:    &fakeBackend{tip: chunk.FirstLedgerSeq + 10},
-			Core:       &fakeCore{},
-			ServeReads: countingServeReads(&served),
-			Logger:     logger,
+			Backend:           &fakeBackend{tip: chunk.FirstLedgerSeq + 10},
+			Core:              &fakeCore{},
+			ServeReads:        countingServeReads(&served),
+			Logger:            logger,
+			networkPassphrase: network.PublicNetworkPassphrase,
 		})
 	}()
 	require.Eventually(t, func() bool { return served.Load() == 1 }, 3*time.Second, 5*time.Millisecond)

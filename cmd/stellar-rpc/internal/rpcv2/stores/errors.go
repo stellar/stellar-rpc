@@ -34,6 +34,17 @@ var ErrInvalidConfig = errors.New("stores: invalid config")
 // boundary.
 var ErrCorrupt = errors.New("stores: data corrupt")
 
+// ErrNoTable — the accelerator-absent sentinel. Returned by a ledger store's
+// table read when the ledger HAS no transaction span table: a store that
+// predates the table, a ledger whose build refused one, a cold record too
+// small to carry one. It is never a failure — the caller reads the ledger
+// whole and walks it, which is what every reader did before tables existed.
+//
+// A table that is there and cannot be used is NOT this: it is an error naming
+// the ledger and the reason, because a read that quietly walked around it
+// would hide a bad artifact from the operator.
+var ErrNoTable = errors.New("stores: no transaction span table")
+
 // ErrOutOfRange — range/bounds sentinel. Returned when a requested
 // sequence or [start, end] range falls outside the store's known
 // coverage, or when the range is otherwise invalid (e.g., start

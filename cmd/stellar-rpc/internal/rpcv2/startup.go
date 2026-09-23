@@ -203,6 +203,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 			Registry:   registry,
 			FeeWindows: cfg.FeeWindows,
 			Tuning:     cfg.HotTuning,
+			Passphrase: cfg.NetworkPassphrase,
 		})
 		if err == nil {
 			// WithContext cancels gctx (unblocking the lifecycle sibling in g.Wait)
@@ -419,6 +420,11 @@ type StartConfig struct {
 	// once, before the daemon body; nil (tests without a fee consumer)
 	// means the loop never computes fees.
 	FeeWindows *feewindow.FeeWindows
+
+	// NetworkPassphrase is the one read back from the captive-core file. The
+	// ingestion loop keys each ledger's transaction span table under it; empty
+	// means no tables and a read path that decodes every ledger.
+	NetworkPassphrase string
 }
 
 // withDefaults fills the embedded Exec defaults (Workers -> GOMAXPROCS). The

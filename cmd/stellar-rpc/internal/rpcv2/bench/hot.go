@@ -55,6 +55,14 @@ type hotOptions struct {
 	// pure catch-up throughput.
 	CloseInterval time.Duration
 
+	// Passphrase is the network passphrase the run keys each ledger's
+	// transaction span table under. It must be the network the source's
+	// ledgers were produced on — envelopes that do not hash under it pair with
+	// nothing and every ledger is ingested without a table — and it is
+	// required: a run measuring the tier must measure the one production
+	// writes.
+	Passphrase string
+
 	// OutDir receives the CSV report.
 	OutDir string
 
@@ -89,6 +97,9 @@ func (o hotOptions) validate() error {
 	}
 	if o.CloseInterval < 0 {
 		return fmt.Errorf("--close-interval must be >= 0, got %s", o.CloseInterval)
+	}
+	if o.Passphrase == "" {
+		return errors.New("--passphrase is required (it keys the transaction span tables the run writes)")
 	}
 	if o.ZstdWorkers < 0 {
 		return fmt.Errorf("--zstd-workers must be >= 0 (0 = single-threaded), got %d", o.ZstdWorkers)
@@ -173,14 +184,15 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 
 	start := time.Now()
 	err = rpcv2.RunBoundedIngestionLoop(ctx, rpcv2.BoundedIngestConfig{
-		Stream:   stream,
-		Resume:   first,
-		Catalog:  cat,
-		Boundary: nopBoundary{},
-		Logger:   logger,
-		Metrics:  sink,
-		Sink:     sink,
-		Tuning:   hotchunk.Tuning{ZstdEncodeWorkers: opts.ZstdWorkers},
+		Stream:     stream,
+		Resume:     first,
+		Catalog:    cat,
+		Boundary:   nopBoundary{},
+		Logger:     logger,
+		Metrics:    sink,
+		Sink:       sink,
+		Tuning:     hotchunk.Tuning{ZstdEncodeWorkers: opts.ZstdWorkers},
+		Passphrase: opts.Passphrase,
 	})
 	// VmHWM never decreases, so it can be read right here — before the
 	// completion check — and a failed run's partial CSV still gets the row.
