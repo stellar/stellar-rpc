@@ -260,3 +260,28 @@ func assertIndexSorted(t *testing.T, tbl Table) {
 			"index entries are not sorted at %d", i)
 	}
 }
+
+// TestReadLedgerHeaderFromTheHeaderFrame pins what lets a reader serve a
+// transaction's ledger fields without decoding the ledger: the fields come out
+// of the header-only prefix a framed value cuts as its first frame, and they
+// are the same fields the whole ledger reports.
+func TestReadLedgerHeaderFromTheHeaderFrame(t *testing.T) {
+	for name, raw := range map[string][]byte{
+		"V0": lcmBytes(t, 0, 610, classicTx),
+		"V1": lcmBytes(t, 1, 611, classicTx, feeBumpTx),
+		"V2": lcmBytes(t, 2, 612, classicTx, sorobanTx),
+	} {
+		t.Run(name, func(t *testing.T) {
+			whole, err := ReadLedgerHeader(raw)
+			require.NoError(t, err)
+			end, err := HeaderEnd(raw)
+			require.NoError(t, err)
+			require.Less(t, end, len(raw), "the header must be a prefix of the ledger")
+
+			fromFrame, err := ReadLedgerHeader(raw[:end])
+			require.NoError(t, err, "the header frame alone must answer")
+			assert.Equal(t, whole, fromFrame)
+			assert.Equal(t, whole.LedgerSeq, fromFrame.LedgerSeq)
+		})
+	}
+}
