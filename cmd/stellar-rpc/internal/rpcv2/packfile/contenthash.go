@@ -75,3 +75,47 @@ func (h *contentHasher) flushChunk() {
 	h.chunk.Reset()
 	h.count = 0
 }
+
+// AuxHasher computes the auxiliary hash WriterOptions.AuxHashExtract feeds:
+//
+//	digest_i = SHA-256([4B LE len][item_i])
+//	Sum      = SHA-256(digest_0 || digest_1 || ...)
+//
+// one chunk per record, in record order. The writer folds digests its workers
+// computed; a verifier replaying the records calls Add with each record's item
+// instead. Both reach Sum through the same arithmetic, which is why this type
+// exists rather than two open-coded hashers.
+//
+// A zero-length item is a real item: a record that carried no sidecar still
+// contributes a digest, so "no sidecar anywhere" and "no records" are
+// different hashes.
+type AuxHasher struct{ final hash.Hash }
+
+// NewAuxHasher returns an empty auxiliary hasher.
+func NewAuxHasher() *AuxHasher { return &AuxHasher{final: sha256.New()} }
+
+// Add folds one record's auxiliary item, in record order.
+func (h *AuxHasher) Add(item []byte) { h.addDigest(auxItemDigest(item)) }
+
+// Sum returns the hash of everything added so far. It does not finalize the
+// hasher: adding more records after it is well defined.
+func (h *AuxHasher) Sum() [sha256.Size]byte {
+	var out [sha256.Size]byte
+	h.final.Sum(out[:0])
+	return out
+}
+
+// addDigest folds an already-computed chunk digest, which is what the writer
+// has: its workers compute each record's digest off the writing goroutine.
+func (h *AuxHasher) addDigest(d [sha256.Size]byte) { _, _ = h.final.Write(d[:]) }
+
+// auxItemDigest is one item's chunk digest, SHA-256([4B LE len][item]). It
+// shares writeLenPrefixed with the content hash, so the two schemes cannot
+// drift.
+func auxItemDigest(item []byte) [sha256.Size]byte {
+	h := sha256.New()
+	writeLenPrefixed(h, item)
+	var d [sha256.Size]byte
+	h.Sum(d[:0])
+	return d
+}

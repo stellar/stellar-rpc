@@ -101,6 +101,31 @@ type WriterOptions struct {
 	// invocation.
 	ContentHashExtract func(item []byte) ([]byte, error)
 
+	// AuxHashExtract, when non-nil, turns one record's FINAL PAYLOAD BYTES —
+	// what the codec produced, before the FOR index and the record checksum —
+	// into a second byte string folded into an AUXILIARY hash. That hash is
+	// computed exactly as the content hash is, one chunk per record:
+	//
+	//	digest_i = SHA-256([4B LE len][aux_i])
+	//	AuxHash  = SHA-256(digest_0 || digest_1 || ...)
+	//
+	// and is read back with AuxHash once Drain (or Finish) has returned. The
+	// library never stores it: where it goes is the caller's business, which
+	// is the point — it covers something the library cannot see, such as a
+	// per-record sidecar riding inside the record's own bytes.
+	//
+	// It is what lets a caller hash a property of the ENCODED record in
+	// record order without serializing the encode: the extract runs on the
+	// worker that produced the bytes, and the per-record digests are folded
+	// by the single goroutine that writes the records, in the order it writes
+	// them. Returning nothing is a zero-length item, which still contributes
+	// a digest — a record with no sidecar is not the same as no record.
+	//
+	// Like ContentHashExtract it is called concurrently from worker
+	// goroutines and must be safe for that. Setting it forces the worker
+	// pipeline on, since the extract is worker-side work.
+	AuxHashExtract func(record []byte) ([]byte, error)
+
 	// Concurrency sets the number of parallel worker goroutines used when
 	// a record encoder or content hashing is enabled. 0 defaults to 1.
 	// Writers with neither a record encoder nor content hash ignore this
@@ -138,7 +163,10 @@ type processedRecord struct {
 	ordinal uint32
 	data    []byte // sealed record bytes (encoded-or-raw payload + forIndex + CRC32C)
 	digest  [sha256.Size]byte
-	err     error
+	// auxDigest is this record's AuxHashExtract chunk digest; the zero value
+	// when no extract is configured, in which case nothing reads it.
+	auxDigest [sha256.Size]byte
+	err       error
 }
 
 type hashWork struct {
@@ -271,6 +299,11 @@ type Writer struct {
 	contentHashExtract func([]byte) ([]byte, error)
 	digestHasher       hash.Hash // running SHA-256 over chunk digests; nil if !contentHash
 	sizesPool          sync.Pool // pooled []uint32 for hash goroutines
+
+	// Auxiliary hash. Same shape as the content hash, one chunk per record,
+	// over whatever AuxHashExtract pulls out of the encoded record.
+	auxHashExtract func([]byte) ([]byte, error)
+	auxHasher      *AuxHasher // nil when no extract is configured
 
 	// Pipeline. Spawned when newRecordEncoder != nil OR contentHash; otherwise the
 	// writer is a pure passthrough and main writes records directly.
@@ -407,12 +440,13 @@ func Create(path string, opts WriterOptions) (*Writer, error) {
 		recordChecksum:     opts.RecordChecksum == ChecksumCRC32C,
 		contentHash:        opts.ContentHash,
 		contentHashExtract: opts.ContentHashExtract,
+		auxHashExtract:     opts.AuxHashExtract,
 		bytesPerSync:       int64(opts.BytesPerSync),
 	}
 
 	// Spawn the pipeline when there's CPU work (compress and/or hash).
 	// Pure passthrough writes records directly from main.
-	if opts.NewRecordEncoder != nil || opts.ContentHash {
+	if opts.NewRecordEncoder != nil || opts.ContentHash || opts.AuxHashExtract != nil {
 		workers := max(w.concurrency, 1)
 		w.concurrency = workers
 		w.workCh = make(chan pendingRecord, workers)
@@ -421,6 +455,9 @@ func Create(path string, opts WriterOptions) (*Writer, error) {
 		w.cancelCh = make(chan struct{})
 		if opts.ContentHash {
 			w.digestHasher = sha256.New()
+		}
+		if opts.AuxHashExtract != nil {
+			w.auxHasher = NewAuxHasher()
 		}
 
 		var recordWg sync.WaitGroup
@@ -515,14 +552,42 @@ func (w *Writer) recordWorker() {
 			// (so the append on the next line doesn't reallocate).
 			work.data = append(work.data[:0], encScratch...)
 		}
+		// The auxiliary extract sees the payload as the codec left it — the
+		// bytes a reader will decode — and before the FOR index and checksum,
+		// which are the library's own framing and no business of a sidecar.
+		auxDigest, auxErr := w.auxDigestOf(work.data)
+		if auxErr != nil {
+			w.resultCh <- processedRecord{
+				ordinal: work.ordinal,
+				err:     fmt.Errorf("packfile: record %d aux hash extract: %w", work.ordinal, auxErr),
+			}
+			return
+		}
 		// Seal after the codec: the checksum has to cover the bytes that
 		// actually land on disk.
 		w.resultCh <- processedRecord{
-			ordinal: work.ordinal,
-			data:    sealRecord(work.data, work.forIndex, w.recordChecksum),
-			digest:  digest,
+			ordinal:   work.ordinal,
+			data:      sealRecord(work.data, work.forIndex, w.recordChecksum),
+			digest:    digest,
+			auxDigest: auxDigest,
 		}
 	}
+}
+
+// auxDigestOf applies AuxHashExtract to one record's payload and returns that
+// record's auxiliary chunk digest, or the zero digest when no extract is
+// configured (in which case nothing downstream reads it).
+//
+//nolint:funcorder // helper for recordWorker
+func (w *Writer) auxDigestOf(record []byte) ([sha256.Size]byte, error) {
+	if w.auxHashExtract == nil {
+		return [sha256.Size]byte{}, nil
+	}
+	aux, err := w.auxHashExtract(record)
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	return auxItemDigest(aux), nil
 }
 
 // hashGoroutine is the inner per-worker hash goroutine. Each chunk's items
@@ -587,6 +652,9 @@ func (w *Writer) runWriter() {
 			}
 			if w.contentHash {
 				w.digestHasher.Write(r.digest[:])
+			}
+			if w.auxHasher != nil {
+				w.auxHasher.addDigest(r.auxDigest)
 			}
 			nextOrdinal++
 		}
@@ -728,6 +796,32 @@ func (w *Writer) flush() error {
 	}
 	w.nextOrdinal++
 	return nil
+}
+
+// Drain flushes any partial record and waits for the worker pipeline to write
+// everything appended so far. After it returns, AuxHash is final.
+//
+// It exists for a caller whose app data depends on what the records turned out
+// to hold: Finish takes the app data as an argument, so anything derived from
+// the records has to be available BEFORE it is called. Finish drains too, and
+// draining twice is a no-op, so Drain is only ever an early half of Finish —
+// never a substitute for it.
+func (w *Writer) Drain() error {
+	if w.closed {
+		return ErrWriterClosed
+	}
+	return w.drainPipeline()
+}
+
+// AuxHash returns the auxiliary hash described by WriterOptions.AuxHashExtract,
+// and whether one was computed at all. It is final once Drain or Finish has
+// returned; before that it reflects only the records already written, which is
+// not a meaningful value.
+func (w *Writer) AuxHash() ([sha256.Size]byte, bool) {
+	if w.auxHasher == nil {
+		return [sha256.Size]byte{}, false
+	}
+	return w.auxHasher.Sum(), true
 }
 
 // Finish flushes any partial record, drains the pipeline, writes the index,

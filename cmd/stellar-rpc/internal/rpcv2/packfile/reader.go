@@ -408,6 +408,40 @@ func (r *Reader) ContentHash() ([32]byte, bool, error) {
 	return r.trailer.ContentHash, r.trailer.HasContentHash, nil
 }
 
+// RecordRange returns the byte extent of the RECORD holding the item at
+// position: its offset in the file and its length. It decodes nothing — it is
+// for a caller that reads a record's bytes itself, because it wants only part
+// of one and knows the record's internal layout.
+//
+// For a pack with more than one item per record the extent also covers the
+// record's other items and its FOR index, so only a caller whose pack is one
+// item per record can treat the extent as that item's bytes.
+func (r *Reader) RecordRange(position int) (int64, int64, error) {
+	if err := r.waitOpen(); err != nil {
+		return 0, 0, err
+	}
+	if position < 0 || position >= r.totalItems {
+		return 0, 0, ErrPositionOutOfRange
+	}
+	recordIdx := position / r.itemsPerRecord
+	start, end := r.offsets[recordIdx], r.offsets[recordIdx+1]
+	return start, end - start, nil
+}
+
+// ReadAt fills dst from offset in the pack file. It is the raw companion to
+// RecordRange: no decode, no bounds beyond the file's own, so a caller reading
+// part of a record is responsible for asking only within an extent
+// RecordRange gave it.
+func (r *Reader) ReadAt(dst []byte, offset int64) error {
+	if err := r.waitOpen(); err != nil {
+		return err
+	}
+	if _, err := r.file.ReadAt(dst, offset); err != nil {
+		return fmt.Errorf("packfile: read %d bytes at %d: %w", len(dst), offset, err)
+	}
+	return nil
+}
+
 // ReadItem reads a single item by position and passes it to fn.
 // The []byte passed to fn is borrowed and must not be retained after fn
 // returns — copy if needed. Returns ErrPositionOutOfRange if position is
