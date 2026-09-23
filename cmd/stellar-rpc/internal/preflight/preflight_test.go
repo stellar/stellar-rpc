@@ -212,10 +212,10 @@ func (m inMemoryLedgerEntryGetter) Done() error {
 }
 
 // supportedProtocolVersions are the protocol versions the bundled soroban hosts
-// can simulate: the previous host (prev) handles protocol 27 and the current
-// host (curr) handles protocol 28. Preflight switches between them at runtime
+// can simulate: the previous host (prev) handles protocol 28 and the current
+// host (curr) handles protocol 30. Preflight switches between them at runtime
 // based on the ledger's protocol version, so the tests exercise both paths.
-var supportedProtocolVersions = []uint32{27, 28}
+var supportedProtocolVersions = []uint32{28, 30}
 
 func getPreflightParameters(t testing.TB, protocolVersion uint32) Parameters {
 	ledgerEntryGetter, err := newInMemoryLedgerEntryGetter(mockLedgerEntries, latestSimulateTransactionLedgerSeq)
@@ -324,8 +324,8 @@ func BenchmarkGetPreflight(b *testing.B) {
 
 // TestGetPreflightUseUpgradedAuthOnPrevProtocol locks in the behavior that
 // requesting v2 (AddressV2) credentials on the protocol served by the prev
-// soroban-env host succeeds. Since the P28 rotation the prev host is 27.x,
-// which supports v2 credentials (UseUpgradedAuth shipped in v27.1.0), so the
+// soroban-env host succeeds. The prev host is 28.0.1, which supports v2
+// credentials (UseUpgradedAuth shipped in v27.1.0), so the
 // flag passes through to the host rather than being silently dropped — the
 // pre-P28 "silently ignored" contract applied only while the prev host
 // predated v2 credentials. (Asserting the credential version itself requires
