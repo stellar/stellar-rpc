@@ -33,7 +33,7 @@ func newServeReads(
 		p := params
 		p.registry = reg
 		p.ledgerReader = adapters.NewLedgerReader()
-		p.transactionReader = adapters.NewTransactionReader(p.networkPassphrase, p.metrics)
+		p.transactionReader = adapters.NewTransactionReader(p.networkPassphrase, p.metrics, p.logger)
 		handler := newJSONRPCHandler(cfg, p)
 		server := &http.Server{
 			Handler:     handler,

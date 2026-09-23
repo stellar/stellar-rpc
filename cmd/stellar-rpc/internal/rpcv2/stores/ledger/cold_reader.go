@@ -12,6 +12,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/txspan"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/zstd"
 )
 
@@ -154,6 +155,27 @@ func (c *ColdReader) WithLedger(seq uint32, fn func(raw []byte) error) error {
 		return rerr
 	}
 	return nil
+}
+
+// WithTxTable reports stores.ErrNoTable for every ledger this pack holds: a
+// cold record is the ledger's bytes and nothing else, so there is no table to
+// lend and the caller reads the ledger whole through WithLedger and walks it
+// for the hash — which is what every read did before tables existed. A
+// sequence outside the pack's coverage is stores.ErrOutOfRange, as it is for
+// WithLedger, so the caller can tell an unservable ledger from an untabled
+// one.
+func (c *ColdReader) WithTxTable(
+	seq uint32, _ func(t txspan.Table, header txspan.LedgerHeader, pieces txspan.PieceReader) error,
+) error {
+	h, err := c.init()
+	if err != nil {
+		return err
+	}
+	if seq < h.firstSeq || seq > h.lastSeq {
+		return fmt.Errorf("%w: seq %d outside store coverage [%d, %d]",
+			stores.ErrOutOfRange, seq, h.firstSeq, h.lastSeq)
+	}
+	return stores.ErrNoTable
 }
 
 // IterateLedgers walks (seq, raw bytes) pairs in [start, end] inclusive,

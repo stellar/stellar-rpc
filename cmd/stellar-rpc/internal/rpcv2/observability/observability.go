@@ -8,6 +8,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
 // Metrics is the daemon's control-plane sink — the derived-progress gauges plus
@@ -189,6 +190,18 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 			"ledgers ingested without a transaction span table because the build refused them "+
 				"(each one is still served, by decoding the ledger)",
 			ledger.TablesSkipped),
+		counterFunc("txspan_table_served_lookups_total",
+			"getTransaction candidate ledgers resolved through a transaction span table",
+			txhash.TableServedLookups),
+		counterFunc("txspan_walk_served_lookups_total",
+			"getTransaction candidate ledgers resolved by decoding the ledger and walking it "+
+				"(the read path for every candidate whose tier holds no span table)",
+			txhash.WalkServedLookups),
+		counterFunc("txspan_table_errors_total",
+			"getTransaction candidate ledgers whose span table was there and could not be used "+
+				"(it would not parse, it disagreed with its ledger, or reading it failed; "+
+				"each one failed its request, and any count is an alarm)",
+			txhash.TableErrors),
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 			Namespace: namespace, Subsystem: subsystem, Name: "open_snapshots",
 			Help: "RocksDB snapshots currently held, across all stores " +

@@ -55,7 +55,7 @@ func testHandlerParams(t *testing.T, r *query.Registry) handlerParams {
 		metrics:           observability.NopMetrics{},
 		registry:          r,
 		ledgerReader:      adapters.NewLedgerReader(),
-		transactionReader: adapters.NewTransactionReader("test passphrase", nil),
+		transactionReader: adapters.NewTransactionReader("test passphrase", nil, nil),
 		feeWindows:        feewindow.NewFeeWindows(10, 10),
 		networkPassphrase: "test passphrase",
 		retentionWindow:   1,

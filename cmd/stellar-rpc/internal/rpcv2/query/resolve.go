@@ -11,6 +11,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/txspan"
 )
 
 // ErrUnavailable means a chunk has no serving store for the requested kind in the
@@ -54,6 +55,19 @@ type LedgerReader interface {
 	// tier: the bytes are the store's and are valid inside fn only — it reuses
 	// them for the next ledger — so anything kept must be copied out there.
 	WithLedger(seq uint32, fn func(raw []byte) error) error
+	// WithTxTable calls fn with the ledger's transaction span table, the
+	// ledger header's own fields, and a reader for the byte spans the table
+	// names, so a caller after one transaction reads that transaction's bytes
+	// instead of the whole ledger. The loan rule covers the table and every
+	// piece the reader returns.
+	//
+	// It reports stores.ErrNoTable when this tier holds NO table for the
+	// ledger, which is ordinary — the caller reads the ledger whole through
+	// WithLedger and walks it. A table that is there and cannot be used is an
+	// error, not an absent one: see the tiers' own contracts.
+	WithTxTable(
+		seq uint32, fn func(t txspan.Table, header txspan.LedgerHeader, pieces txspan.PieceReader) error,
+	) error
 	IterateLedgers(start, end uint32) iter.Seq2[ledger.Entry, error]
 }
 
@@ -110,15 +124,34 @@ func (a *ReadView) Ledgers(c chunk.ID) (LedgerReader, error) {
 // WithLedger is the routed point read: it resolves the chunk serving seq and
 // lends that tier's bytes, so callers holding only a sequence need not resolve.
 func (a *ReadView) WithLedger(seq uint32, fn func(raw []byte) error) error {
-	// chunk.IDFromLedger panics below ledger 2; corrupt data must fail, not crash.
-	if seq < chunk.FirstLedgerSeq {
-		return stores.ErrNotFound
-	}
-	reader, err := a.Ledgers(chunk.IDFromLedger(seq))
+	reader, err := a.ledgersFor(seq)
 	if err != nil {
 		return err
 	}
 	return reader.WithLedger(seq, fn)
+}
+
+// WithTxTable is the routed point read that serves seq's two transaction byte
+// spans out of the tier holding it, reports stores.ErrNoTable when that tier
+// holds none, and fails when it holds one that cannot be used. See
+// LedgerReader.
+func (a *ReadView) WithTxTable(
+	seq uint32, fn func(t txspan.Table, header txspan.LedgerHeader, pieces txspan.PieceReader) error,
+) error {
+	reader, err := a.ledgersFor(seq)
+	if err != nil {
+		return err
+	}
+	return reader.WithTxTable(seq, fn)
+}
+
+// ledgersFor resolves the ledger store serving seq.
+func (a *ReadView) ledgersFor(seq uint32) (LedgerReader, error) {
+	// chunk.IDFromLedger panics below ledger 2; corrupt data must fail, not crash.
+	if seq < chunk.FirstLedgerSeq {
+		return nil, stores.ErrNotFound
+	}
+	return a.Ledgers(chunk.IDFromLedger(seq))
 }
 
 // resolveLedgers is Ledgers without the view registration: the returned close is

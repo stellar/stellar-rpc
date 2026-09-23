@@ -21,18 +21,20 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/txspan"
 )
 
 var (
 	_ HashIndex    = (*HotStore)(nil)
 	_ HashIndex    = (*ColdReader)(nil)
 	_ LedgerSource = mapLedgerSource(nil)
+	_ LedgerSource = tableLedgerSource(nil)
 	_ LedgerSource = (*poisoningLedgerSource)(nil)
 )
 
-// mapLedgerSource is an in-memory LedgerSource shaped like the cold tier: it
-// lends storage it already holds, so the release is a no-op. An unheld seq
-// returns ErrOutOfRange.
+// mapLedgerSource is an in-memory LedgerSource with no span tables: it lends
+// storage it already holds, so the release is a no-op and every read is
+// walk-served. An unheld seq returns ErrOutOfRange.
 type mapLedgerSource map[uint32][]byte
 
 func (m mapLedgerSource) WithLedger(seq uint32, fn func(raw []byte) error) error {
@@ -43,10 +45,57 @@ func (m mapLedgerSource) WithLedger(seq uint32, fn func(raw []byte) error) error
 	return fn(raw[:len(raw):len(raw)])
 }
 
+func (m mapLedgerSource) WithTxTable(uint32, func(txspan.Table, txspan.LedgerHeader, txspan.PieceReader) error) error {
+	return stores.ErrNoTable
+}
+
+// tableLedgerSource is mapLedgerSource with a real span table per ledger — a
+// tabled tier's shape, so the same assembly tests run table-served over the
+// whole-ledger piece reader. The table is built on every borrow rather than
+// cached: these fixtures are small, and rebuilding proves the spans are a
+// function of the bytes alone.
+type tableLedgerSource map[uint32][]byte
+
+func (m tableLedgerSource) WithLedger(seq uint32, fn func(raw []byte) error) error {
+	return mapLedgerSource(m).WithLedger(seq, fn)
+}
+
+func (m tableLedgerSource) WithTxTable(
+	seq uint32, fn func(t txspan.Table, header txspan.LedgerHeader, pieces txspan.PieceReader) error,
+) error {
+	raw, ok := m[seq]
+	if !ok {
+		return stores.ErrOutOfRange
+	}
+	lent := raw[:len(raw):len(raw)]
+	txParts, err := ingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(lent))
+	if err != nil {
+		return err
+	}
+	encoded, err := txspan.Build(lent, txParts, network.TestNetworkPassphrase)
+	if err != nil {
+		return err
+	}
+	table, err := txspan.Parse(encoded)
+	if err != nil {
+		return err
+	}
+	// The header comes from the LEDGER, as every tier reads it.
+	header, err := txspan.ReadLedgerHeader(lent)
+	if err != nil {
+		return err
+	}
+	return fn(table, header, txspan.RawPieces(lent))
+}
+
 // errLedgerSource always fails the borrow with a fixed error.
 type errLedgerSource struct{ err error }
 
 func (e errLedgerSource) WithLedger(uint32, func([]byte) error) error { return e.err }
+
+func (e errLedgerSource) WithTxTable(uint32, func(txspan.Table, txspan.LedgerHeader, txspan.PieceReader) error) error {
+	return e.err
+}
 
 // fakeIndex is a scripted HashIndex for driving the assembly without a real index.
 type fakeIndex struct {
@@ -463,6 +512,12 @@ func newPoisoningSource(src mapLedgerSource) *poisoningLedgerSource {
 	return p
 }
 
+func (p *poisoningLedgerSource) WithTxTable(
+	uint32, func(txspan.Table, txspan.LedgerHeader, txspan.PieceReader) error,
+) error {
+	return stores.ErrNoTable
+}
+
 func (p *poisoningLedgerSource) WithLedger(seq uint32, fn func(raw []byte) error) error {
 	raw, ok := p.src[seq]
 	if !ok {
@@ -584,6 +639,21 @@ func TestTxReader_LookupsMatchDirectExtraction(t *testing.T) {
 			},
 			source: func(fl fixtureLedgers) LedgerSource { return fl.src },
 		},
+		{
+			// The differential that matters for the accelerator: a source that
+			// lends a span table must serve exactly what the walk serves.
+			name:    "source lends a span table",
+			fixture: func(t *testing.T) fixtureLedgers { return buildLedgers(t, []uint32{100, 200}, 3) },
+			source:  func(fl fixtureLedgers) LedgerSource { return tableLedgerSource(fl.src) },
+		},
+		{
+			name: "lopsided ledgers from a source that lends a span table",
+			fixture: func(t *testing.T) fixtureLedgers {
+				t.Helper()
+				return mergeLedgers(buildLedgers(t, []uint32{100}, 40), buildLedgers(t, []uint32{200}, 1))
+			},
+			source: func(fl fixtureLedgers) LedgerSource { return tableLedgerSource(fl.src) },
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fl := tc.fixture(t)
@@ -592,31 +662,74 @@ func TestTxReader_LookupsMatchDirectExtraction(t *testing.T) {
 				[]HashIndex{fakeIndex{out: fl.byHash}}, nil, source, network.TestNetworkPassphrase)
 			require.NoError(t, err)
 
-			want := map[[32]byte]ingest.LedgerTransactionView{}
-			for hash := range fl.byHash {
-				want[hash] = directView(t, fl, hash)
-			}
-			// Nothing may write back into the fixture: a source that lends its
-			// own storage must get it back untouched, and one that lends a copy
-			// must never reach past it.
-			untouched := map[uint32][]byte{}
-			for seq, raw := range fl.src {
-				untouched[seq] = bytes.Clone(raw)
-			}
 			if tc.before != nil {
 				tc.before(t, reader, fl)
 			}
-			for hash := range fl.byHash {
-				got, found, err := reader.GetTransaction(hash)
-				require.NoError(t, err)
-				require.Truef(t, found, "hash %x should resolve", hash)
-				assert.Equalf(t, want[hash], got, "lookup differs for hash %x", hash)
-			}
-			for seq, raw := range fl.src {
-				assert.Equalf(t, untouched[seq], raw, "ledger %d was written through", seq)
-			}
+			assertMatchesDirectExtraction(t, reader, fl)
 			if tc.after != nil {
 				tc.after(t, fl, source)
+			}
+		})
+	}
+}
+
+// assertMatchesDirectExtraction reads every fixture transaction through reader
+// and compares it against the decode-and-walk view of the same ledger, then
+// checks the fixture came back untouched: a source that lends its own storage
+// must get it back unchanged, and one that lends a copy must never reach past
+// it.
+func assertMatchesDirectExtraction(t *testing.T, reader *TxReader, fl fixtureLedgers) {
+	t.Helper()
+	want := map[[32]byte]ingest.LedgerTransactionView{}
+	for hash := range fl.byHash {
+		want[hash] = directView(t, fl, hash)
+	}
+	untouched := map[uint32][]byte{}
+	for seq, raw := range fl.src {
+		untouched[seq] = bytes.Clone(raw)
+	}
+	for hash := range fl.byHash {
+		got, found, err := reader.GetTransaction(hash)
+		require.NoError(t, err)
+		require.Truef(t, found, "hash %x should resolve", hash)
+		assert.Equalf(t, want[hash], got, "lookup differs for hash %x", hash)
+	}
+	for seq, raw := range fl.src {
+		assert.Equalf(t, untouched[seq], raw, "ledger %d was written through", seq)
+	}
+}
+
+// TestTxReader_CountsHowEachLookupWasServed pins the two tallies: a source
+// lending a span table serves through it, one lending none walks the ledger,
+// and the two partition the verified candidates.
+func TestTxReader_CountsHowEachLookupWasServed(t *testing.T) {
+	fl := buildLedgers(t, []uint32{100, 200}, 3)
+
+	for name, source := range map[string]LedgerSource{
+		"with a span table": tableLedgerSource(fl.src),
+		"without one":       fl.src,
+	} {
+		t.Run(name, func(t *testing.T) {
+			reader, err := NewTxReader(
+				[]HashIndex{fakeIndex{out: fl.byHash}}, nil, source, network.TestNetworkPassphrase)
+			require.NoError(t, err)
+
+			tables, walks := TableServedLookups(), WalkServedLookups()
+			for hash := range fl.byHash {
+				_, found, lookupErr := reader.GetTransaction(hash)
+				require.NoError(t, lookupErr)
+				require.True(t, found)
+			}
+			gotTables := TableServedLookups() - tables
+			gotWalks := WalkServedLookups() - walks
+			require.EqualValues(t, len(fl.byHash), gotTables+gotWalks,
+				"every verified candidate must land on exactly one tally")
+			if _, tabled := source.(tableLedgerSource); tabled {
+				assert.EqualValues(t, len(fl.byHash), gotTables)
+				assert.Zero(t, gotWalks)
+			} else {
+				assert.EqualValues(t, len(fl.byHash), gotWalks)
+				assert.Zero(t, gotTables)
 			}
 		})
 	}

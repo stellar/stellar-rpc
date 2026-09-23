@@ -4,11 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync/atomic"
 
 	"github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/txspan"
 )
 
 // ErrInconsistent means an exact index named a ledger that does not contain the
@@ -22,11 +24,55 @@ type HashIndex interface {
 	Get(hash [32]byte) (uint32, error)
 }
 
-// LedgerSource lends a candidate ledger's raw LedgerCloseMeta; see
-// query.LedgerReader for the loan rule. *query.ReadView is the served one.
+// LedgerSource is the two ways a tier serves a candidate ledger: the span
+// table, the ledger header's own fields and a reader for the byte spans the
+// table names; and — for a ledger with no table at all — the whole raw
+// LedgerCloseMeta. See query.LedgerReader for the loan rule, which covers
+// both. *query.ReadView is the served one.
 type LedgerSource interface {
 	WithLedger(seq uint32, fn func(raw []byte) error) error
+	WithTxTable(
+		seq uint32, fn func(t txspan.Table, header txspan.LedgerHeader, pieces txspan.PieceReader) error,
+	) error
 }
+
+// tableServedLookups, walkServedLookups and tableErrors tally how each
+// candidate ledger was searched: through a span table, reading only the
+// transaction's two byte spans; by decoding the whole ledger and walking it
+// for the hash, which is the path for a ledger whose tier has no table; and
+// the reads that failed because a table was there and could not be used.
+// Process-wide by design — the metrics exporter reads them through the
+// accessors below.
+//
+// tableServed + walkServed counts every search the probe completed, so their
+// ratio is the table's coverage of the served load. The two are disjoint: a
+// candidate is searched one way or the other, never both.
+//
+//nolint:gochecknoglobals // one tally across all readers; read-only outside this file
+var (
+	tableServedLookups atomic.Uint64
+	walkServedLookups  atomic.Uint64
+	tableErrors        atomic.Uint64
+)
+
+// TableServedLookups returns the process-wide count of candidate ledgers
+// searched through a transaction span table.
+func TableServedLookups() uint64 { return tableServedLookups.Load() }
+
+// WalkServedLookups returns the process-wide count of candidate ledgers
+// searched by decoding the ledger and walking it: every candidate whose tier
+// holds no span table for it, and no others.
+func WalkServedLookups() uint64 { return walkServedLookups.Load() }
+
+// TableErrors returns the process-wide count of candidate ledgers whose span
+// table was there and could not be used: it would not parse, it disagreed with
+// the ledger it describes, or reading it failed.
+//
+// It is expected to be ZERO, and every count is an alarm: it means a stored
+// artifact is bad. None of them is worked around — each failed the request it
+// was on, which is what puts the error in front of an operator instead of
+// hiding it behind a slower answer.
+func TableErrors() uint64 { return tableErrors.Load() }
 
 type TxReader struct {
 	hot        []HashIndex
@@ -133,31 +179,103 @@ func (r *TxReader) scan(
 func (r *TxReader) verify(
 	seq uint32, hash [32]byte, exact bool,
 ) (ingest.LedgerTransactionView, bool, error) {
-	var txv ingest.LedgerTransactionView
-	var found bool
-	var extractErr error
+	txv, found, extractErr, readErr := r.searchTable(seq, hash)
+	// A ledger whose tier holds NO table (ErrNoTable) is read whole and
+	// walked. That is not a fallback: it is the read path for an untabled
+	// ledger — a hot DB predating the table family, a build the ledger's shape
+	// refused, a cold record too small to carry one — and it is what every
+	// read did before tables existed.
+	//
+	// A table that IS there and cannot be used fails the request instead, and
+	// is deliberately not worked around. The walk would produce the right
+	// answer, and that is the problem: the request would succeed while a
+	// stored artifact was quietly wrong, and nobody would learn of it until
+	// something else broke. The error carries the ledger, the hash and the
+	// reason, and it is counted.
+	//
+	// A table that is fine and does not hold the hash is neither: it is a
+	// negative, settled below exactly as a walk's negative is — an exact index
+	// disagreeing with it is an inconsistency, a fingerprinted one is a
+	// false-positive candidate.
+	switch {
+	case errors.Is(readErr, stores.ErrNoTable):
+		txv, found, extractErr, readErr = r.searchWalk(seq, hash)
+	case extractErr != nil || tableFailure(readErr):
+		tableErrors.Add(1)
+	}
+	switch {
+	case extractErr != nil:
+		return failed(fmt.Errorf("txhash: tx %x in ledger %d: %w", hash, seq, extractErr))
+	case readErr == nil:
+		return txv, found, nil
+	case !exact:
+		return failed(fmt.Errorf("txhash: tx %x candidate ledger %d: %w", hash, seq, readErr))
+	case errors.Is(readErr, stores.ErrNotFound) || errors.Is(readErr, stores.ErrOutOfRange):
+		return failed(fmt.Errorf("txhash: exact index mapped tx %x to unavailable ledger %d: %w",
+			hash, seq, ErrInconsistent))
+	default:
+		return failed(fmt.Errorf("txhash: tx %x read ledger %d: %w", hash, seq, readErr))
+	}
+}
+
+// tableFailure reports whether a table read's error is the TABLE's problem
+// rather than the store's. An absent ledger or a sequence outside the tier's
+// coverage says nothing about a table and is classified with every other
+// unavailable ledger; ErrNoTable never reaches here, having been walked.
+func tableFailure(err error) bool {
+	return err != nil &&
+		!errors.Is(err, stores.ErrNotFound) &&
+		!errors.Is(err, stores.ErrOutOfRange)
+}
+
+// searchTable looks hash up through seq's span table, if this tier has one.
+// stores.ErrNoTable as readErr is the caller's cue to walk; every other
+// readErr fails the request. The extract error is kept apart from it so a
+// table that disagreed with its ledger is distinguishable from one that could
+// not be read at all.
+func (r *TxReader) searchTable(
+	seq uint32, hash [32]byte,
+) (ingest.LedgerTransactionView, bool, error, error) {
+	var (
+		txv        ingest.LedgerTransactionView
+		found      bool
+		extractErr error
+	)
+	readErr := r.ledgers.WithTxTable(seq,
+		func(t txspan.Table, header txspan.LedgerHeader, pieces txspan.PieceReader) error {
+			tableServedLookups.Add(1)
+			var v ingest.LedgerTransactionView
+			v, found, extractErr = txspan.LookupPieces(t, pieces, hash, header, r.passphrase)
+			if extractErr == nil && found {
+				// v's byte fields still point into the lent pieces.
+				txv = compactView(v)
+			}
+			return nil
+		})
+	return txv, found, extractErr, readErr
+}
+
+// searchWalk decodes seq's ledger and walks it for hash — the read path for
+// every ledger whose tier holds no span table.
+func (r *TxReader) searchWalk(
+	seq uint32, hash [32]byte,
+) (ingest.LedgerTransactionView, bool, error, error) {
+	var (
+		txv        ingest.LedgerTransactionView
+		found      bool
+		extractErr error
+	)
 	readErr := r.ledgers.WithLedger(seq, func(raw []byte) error {
+		walkServedLookups.Add(1)
 		var v ingest.LedgerTransactionView
 		v, found, extractErr = ingest.LedgerTransactionViewByHash(
 			xdr.LedgerCloseMetaView(raw), hash, r.passphrase)
 		if extractErr == nil && found {
-			// v's byte fields still point into the lent bytes.
 			txv = compactView(v)
 		}
 		return nil
 	})
-	switch {
-	case extractErr != nil:
-		return failed(fmt.Errorf("txhash: extract tx from ledger %d: %w", seq, extractErr))
-	case readErr == nil:
-		return txv, found, nil
-	case !exact:
-		return failed(fmt.Errorf("txhash: candidate ledger %d: %w", seq, readErr))
-	case errors.Is(readErr, stores.ErrNotFound) || errors.Is(readErr, stores.ErrOutOfRange):
-		return failed(fmt.Errorf("txhash: exact index mapped tx to unavailable ledger %d: %w", seq, ErrInconsistent))
-	default:
-		return failed(fmt.Errorf("txhash: read ledger %d: %w", seq, readErr))
-	}
+	return txv, found, extractErr, readErr
 }
 
 // failed is the not-found-with-a-reason return.

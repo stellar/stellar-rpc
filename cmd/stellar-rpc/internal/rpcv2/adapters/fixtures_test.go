@@ -68,6 +68,10 @@ type txSpec struct {
 	failed   bool
 	events   []xdr.ContractEvent
 	txEvents []xdr.TransactionEvent
+	// padBytes inflates this transaction's meta by that many bytes of contract
+	// event payload, which is how a fixture reaches the size at which the
+	// ledger store cuts a ledger into several frames.
+	padBytes int
 }
 
 // fixtureTx is one transaction as built into a fixture ledger, keeping the
@@ -115,7 +119,7 @@ func lcmWithTxs(t *testing.T, seq uint32, specs ...txSpec) ([]byte, []fixtureTx)
 		meta := xdr.TransactionMeta{
 			V: 4,
 			V4: &xdr.TransactionMetaV4{
-				Operations: []xdr.OperationMetaV2{{Events: spec.events}},
+				Operations: []xdr.OperationMetaV2{{Events: append(padEvents(spec.padBytes), spec.events...)}},
 				Events:     spec.txEvents,
 			},
 		}
@@ -127,6 +131,28 @@ func lcmWithTxs(t *testing.T, seq uint32, specs ...txSpec) ([]byte, []fixtureTx)
 		txs[i] = fixtureTx{hash: hash, envelope: envelope, result: result, meta: meta}
 	}
 	return rpcv2test.V2LCMBytes(t, seq, closeTimeFor(seq), envelopes, processing), txs
+}
+
+// padChunk is how much payload one padding event carries. Several mid-sized
+// events reach a target size without any single XDR value being unusual.
+const padChunk = 640 << 10
+
+// padEvents returns contract events whose payloads total at least total
+// bytes, or nothing when no padding was asked for.
+func padEvents(total int) []xdr.ContractEvent {
+	var out []xdr.ContractEvent
+	for filled := 0; filled < total; filled += padChunk {
+		blob := xdr.ScBytes(make([]byte, min(padChunk, total-filled)))
+		out = append(out, xdr.ContractEvent{
+			ContractId: &xdr.ContractId{0xcd},
+			Type:       xdr.ContractEventTypeContract,
+			Body: xdr.ContractEventBody{
+				V:  0,
+				V0: &xdr.ContractEventV0{Data: xdr.ScVal{Type: xdr.ScValTypeScvBytes, Bytes: &blob}},
+			},
+		})
+	}
+	return out
 }
 
 // feeBumpLCM builds a V2 LedgerCloseMeta for seq holding one successful
@@ -257,6 +283,16 @@ func seedHotLedgers(t *testing.T, cat *catalog.Catalog, r *query.Registry, c chu
 func seedHotChunkLCMs(t *testing.T, cat *catalog.Catalog, r *query.Registry, c chunk.ID, lcms ...[]byte) {
 	t.Helper()
 	rpcv2test.SeedHotChunkLCMs(t, cat, c, func(db *hotchunk.DB) { r.PublishHandle(c, db) }, lcms...)
+}
+
+// seedHotChunkLCMsAs is seedHotChunkLCMs under a chosen span-table passphrase;
+// one the fixtures do not hash under seeds a chunk with no span tables.
+func seedHotChunkLCMsAs(
+	t *testing.T, cat *catalog.Catalog, r *query.Registry, c chunk.ID, passphrase string, lcms ...[]byte,
+) *hotchunk.DB {
+	t.Helper()
+	return rpcv2test.SeedHotChunkLCMsAs(t, cat, c, passphrase,
+		func(db *hotchunk.DB) { r.PublishHandle(c, db) }, lcms...)
 }
 
 // ───────────────────────── Frozen artifacts ─────────────────────────

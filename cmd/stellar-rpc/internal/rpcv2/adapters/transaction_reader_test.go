@@ -1,15 +1,18 @@
 package adapters
 
 import (
+	"bytes"
 	"context"
 	"runtime"
 	"sync/atomic"
 	"testing"
 
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/network"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
@@ -26,7 +29,7 @@ func TestGetTransaction_HotHit(t *testing.T) {
 		txSpec{events: []xdr.ContractEvent{rpcv2test.SymbolContractEvent(xdr.ContractId{0xab}, "transfer", "transfer")}})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
 	r.SetLatestLedger(testChunk.FirstLedger(), query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger())))
-	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil, nil)
 
 	got, err := reader.GetTransaction(viewCtx(t, r), txs[0].hash)
 	require.NoError(t, err)
@@ -54,7 +57,7 @@ func TestGetTransaction_MissIsErrNoTransaction(t *testing.T) {
 	lcm, _ := lcmWithTxs(t, testChunk.FirstLedger(), txSpec{})
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
 	r.SetLatestLedger(testChunk.FirstLedger(), query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger())))
-	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil, nil)
 
 	_, err := reader.GetTransaction(viewCtx(t, r), xdr.Hash{0xde, 0xad})
 	assert.ErrorIs(t, err, store.ErrNoTransaction)
@@ -69,7 +72,7 @@ func TestGetTransaction_AboveLatestIsGated(t *testing.T) {
 	// The second ledger is committed but above the view's frozen latest; only
 	// the adapter's gate, not the store, can produce the miss.
 	r.SetLatestLedger(testChunk.FirstLedger(), query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger())))
-	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil, nil)
 
 	_, err := reader.GetTransaction(viewCtx(t, r), txs2[0].hash)
 	assert.ErrorIs(t, err, store.ErrNoTransaction)
@@ -85,7 +88,7 @@ func TestGetTransaction_BelowFloorIsGated(t *testing.T) {
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm5)
 	seedHotChunkLCMs(t, cat, r, testChunk+1, lcm6)
 	r.SetLatestLedger((testChunk + 1).FirstLedger(), query.CloseTimeAt(closeTimeFor((testChunk + 1).FirstLedger())))
-	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil, nil)
 	ctx := viewCtx(t, r)
 
 	_, err := reader.GetTransaction(ctx, txs5[0].hash)
@@ -111,7 +114,7 @@ func TestGetTransaction_PrunedDuringAcquisitionIsCleanMiss(t *testing.T) {
 	// miss, never reach the unresolvable ledger read.
 	require.NoError(t, cat.PutHotTransient(testChunk))
 
-	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil, nil)
 	_, err := reader.GetTransaction(viewCtx(t, r), txs5[0].hash)
 	assert.ErrorIs(t, err, store.ErrNoTransaction,
 		"a just-pruned transaction is a clean miss, not a retryable failure")
@@ -139,7 +142,7 @@ func coldFixture(t *testing.T) (context.Context, *TransactionReader, []fixtureTx
 	// Latest sits in testChunk+2 so the orphan candidate is in-window; a
 	// candidate outside the window would be gated to a clean miss instead.
 	r.SetLatestLedger((testChunk + 2).FirstLedger(), query.CloseTimeAt(closeTimeFor((testChunk + 2).FirstLedger())))
-	return viewCtx(t, r), NewTransactionReader(network.PublicNetworkPassphrase, nil), txs, orphanHash
+	return viewCtx(t, r), NewTransactionReader(network.PublicNetworkPassphrase, nil, nil), txs, orphanHash
 }
 
 func TestGetTransaction_ColdIndexHit(t *testing.T) {
@@ -182,7 +185,7 @@ func TestGetTransaction_V1LedgerCloseMeta(t *testing.T) {
 	raw, hash := lcmV1WithClassicTx(t, testChunk.FirstLedger())
 	seedHotChunkLCMs(t, cat, r, testChunk, raw)
 	r.SetLatestLedger(testChunk.FirstLedger(), query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger())))
-	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil, nil)
 
 	got, err := reader.GetTransaction(viewCtx(t, r), hash)
 	require.NoError(t, err)
@@ -212,7 +215,7 @@ func TestGetTransaction_AgedOutColdCandidateIsCleanMiss(t *testing.T) {
 	rpcv2test.WriteFrozenLedgerPack(t, cat, testChunk+1, lcm)
 	r.SetLatestLedger((testChunk + 1).FirstLedger(), query.CloseTimeAt(closeTimeFor((testChunk + 1).FirstLedger())))
 
-	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil, nil)
 	_, err := reader.GetTransaction(viewCtx(t, r), agedHash)
 	assert.ErrorIs(t, err, store.ErrNoTransaction,
 		"an aged-out transaction is a clean miss, not a lookup-incomplete error")
@@ -224,7 +227,7 @@ func TestGetTransaction_FeeBumpByEitherHash(t *testing.T) {
 	lcm, outerHash, innerHash := feeBumpLCM(t, testChunk.FirstLedger())
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
 	r.SetLatestLedger(testChunk.FirstLedger(), query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger())))
-	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil, nil)
 	ctx := viewCtx(t, r)
 
 	for _, hash := range []xdr.Hash{outerHash, innerHash} {
@@ -258,11 +261,27 @@ func TestGetTransaction_HotIndexInconsistencyIsCounted(t *testing.T) {
 	rpcv2test.WriteFrozenLedgerPack(t, cat, testChunk, lcmBytes(t, testChunk.FirstLedger()))
 
 	metrics := &inconsistencyCounter{}
-	reader := NewTransactionReader(network.PublicNetworkPassphrase, metrics)
+	var logged bytes.Buffer
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, metrics, captureLogger(&logged))
 	_, err := reader.GetTransaction(viewCtx(t, r), txs[0].hash)
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, store.ErrNoTransaction)
 	assert.Equal(t, int32(1), metrics.n.Load())
+
+	// The client sees a generic internal error, so the reason exists only in
+	// the log — and only at a level an operator is watching.
+	assert.Contains(t, logged.String(), "level=error")
+	assert.Contains(t, logged.String(), txs[0].hash.HexString(), "the log must name the transaction")
+	assert.Contains(t, logged.String(), "ledger", "the log must carry the reader's own wording")
+}
+
+// captureLogger returns a logger writing into buf at debug level, so a test
+// can read back what an operator would have seen.
+func captureLogger(buf *bytes.Buffer) *supportlog.Entry {
+	l := supportlog.New()
+	l.SetLevel(logrus.DebugLevel)
+	l.SetOutput(buf)
+	return l
 }
 
 // TestGetTransaction_AllocatesPerTransactionNotPerLedger is the standing guard
@@ -278,7 +297,7 @@ func TestGetTransaction_AllocatesPerTransactionNotPerLedger(t *testing.T) {
 	lcm, txs := lcmWithTxs(t, testChunk.FirstLedger(), specs...)
 	seedHotChunkLCMs(t, cat, r, testChunk, lcm)
 	r.SetLatestLedger(testChunk.FirstLedger(), query.CloseTimeAt(closeTimeFor(testChunk.FirstLedger())))
-	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil)
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil, nil)
 	ctx := viewCtx(t, r)
 	hash := txs[len(txs)/2].hash
 
