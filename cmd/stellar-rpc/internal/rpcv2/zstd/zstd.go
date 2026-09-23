@@ -27,6 +27,7 @@ package zstd
 #cgo darwin CFLAGS: -I/opt/homebrew/include -I/usr/local/include
 #cgo darwin LDFLAGS: -L/opt/homebrew/lib -L/usr/local/lib
 #cgo linux LDFLAGS: -lzstd
+#define ZSTD_STATIC_LINKING_ONLY
 #include <zstd.h>
 */
 import "C"
@@ -74,11 +75,18 @@ type Compressor struct {
 type EncoderState struct {
 	comp *Compressor
 	buf  []byte
+	// opts are the options comp was built with, kept so EncodeFrames can build
+	// more contexts that encode a frame to the same bytes comp would.
+	opts []CompressorOption
+	// spare pools those extra contexts across calls. A CGo context is
+	// expensive to create and GC-emptying only costs a rebuild, so unlike buf
+	// this one is safe to lose.
+	spare sync.Pool
 }
 
 // NewEncoderState returns an encoder state with the given compressor options.
 func NewEncoderState(opts ...CompressorOption) *EncoderState {
-	return &EncoderState{comp: NewCompressor(opts...)}
+	return &EncoderState{comp: NewCompressor(opts...), opts: opts}
 }
 
 // Encode compresses src into the retained buffer and returns the encoded
@@ -250,39 +258,28 @@ func NewDecompressor() *Decompressor {
 	return d
 }
 
-// Decode decompresses src into dst, returning the result.
-// dst is reused if large enough. Frames must include the decompressed size
-// in the header (standard for ZSTD_compress2). Streaming frames without a
-// content size use a fixed 4x estimate and will fail if the actual ratio exceeds that.
+// Decode decompresses src into dst, returning the result. dst is reused if
+// large enough.
+//
+// src may be ANY concatenation of frames — one frame, several independently
+// compressed ones, skippable frames carrying a caller's own metadata — and the
+// result is every compressed frame's content, in order, with the skippable
+// ones contributing nothing. Compressed frames must record their decompressed
+// size (standard for ZSTD_compress2); a sequence that does not is sized by
+// libzstd's own upper bound instead, and one that cannot be bounded at all is
+// an error rather than a guess.
 //
 // Safe to call from multiple goroutines concurrently.
 func (d *Decompressor) Decode(dst, src []byte) ([]byte, error) {
 	if len(src) == 0 {
 		return dst[:0], nil
 	}
-
-	// Get decompressed size from frame header.
-	// ZSTD_getFrameContentSize returns an unsigned 64-bit int with two sentinel values:
-	//   ZSTD_CONTENTSIZE_UNKNOWN (0xFFFFFFFFFFFFFFFF) — size not in header
-	//   ZSTD_CONTENTSIZE_ERROR   (0xFFFFFFFFFFFFFFFE) — corrupt/invalid frame
-	fcs := C.ZSTD_getFrameContentSize(
-		unsafe.Pointer(&src[0]), C.size_t(len(src)))
-	var size int
-	switch fcs {
-	case C.ZSTD_CONTENTSIZE_ERROR:
-		return nil, errors.New("zstd: zstd frame header invalid")
-	case C.ZSTD_CONTENTSIZE_UNKNOWN:
-		// Our Compressor always writes content size (ZSTD_compress2 default).
-		// This path only triggers for externally-produced streaming frames.
-		size = len(src) * 4 // fallback estimate
-	default:
-		if fcs > math.MaxInt {
-			return nil, fmt.Errorf("zstd: frame claims decompressed size %d (exceeds addressable memory)", uint64(fcs))
-		}
-		size = int(fcs)
-		if size == 0 {
-			return dst[:0], nil
-		}
+	size, err := decodedSize(src)
+	if err != nil {
+		return nil, err
+	}
+	if size == 0 {
+		return dst[:0], nil
 	}
 	if cap(dst) < size {
 		dst = make([]byte, size)
@@ -303,6 +300,31 @@ func (d *Decompressor) Decode(dst, src []byte) ([]byte, error) {
 	return dst[:int(n)], nil
 }
 
+// decodedSize is the total decompressed length of the frame sequence src,
+// which must end exactly on a frame boundary. Skippable frames contribute
+// nothing. A sequence whose frames do not all record a content size falls back
+// to libzstd's upper bound, which over-allocates but never under-allocates;
+// only an unreadable sequence is an error.
+func decodedSize(src []byte) (int, error) {
+	// Both calls return an unsigned 64-bit value with two sentinels:
+	//   ZSTD_CONTENTSIZE_UNKNOWN (0xFFFFFFFFFFFFFFFF) — size not recorded
+	//   ZSTD_CONTENTSIZE_ERROR   (0xFFFFFFFFFFFFFFFE) — corrupt or truncated
+	total := C.ZSTD_findDecompressedSize(unsafe.Pointer(&src[0]), C.size_t(len(src)))
+	switch total {
+	case C.ZSTD_CONTENTSIZE_ERROR:
+		return 0, errors.New("zstd: zstd frame header invalid")
+	case C.ZSTD_CONTENTSIZE_UNKNOWN:
+		total = C.ZSTD_decompressBound(unsafe.Pointer(&src[0]), C.size_t(len(src)))
+		if total == C.ZSTD_CONTENTSIZE_ERROR {
+			return 0, errors.New("zstd: frames record no decompressed size and cannot be bounded")
+		}
+	}
+	if total > math.MaxInt {
+		return 0, fmt.Errorf("zstd: frames claim decompressed size %d (exceeds addressable memory)", uint64(total))
+	}
+	return int(total), nil
+}
+
 // Decode decompresses src into dst, returning the result.
 // Allocates a context per call. Use Decompressor for hot paths.
 func Decode(dst, src []byte) ([]byte, error) {
@@ -320,41 +342,70 @@ const (
 // (little-endian).
 var frameMagic = []byte{0x28, 0xB5, 0x2F, 0xFD} //nolint:gochecknoglobals // immutable format constant
 
-// FrameHeaderValid checks — without decompressing — that src is a single
-// zstd frame this package's other half can serve: magic number, a recorded
-// frame content size (present and <= MaxUint32, the bound packfile item
-// lengths live under), no dictionary ID (the shared Decompressor is
-// dictionary-less), and the content checksum flag set (Compressor's default;
-// the checksum is what makes a later corrupt read loud).
+// FrameHeaderValid checks — without decompressing — that src is a frame
+// sequence this package's other half can serve: an optional LEADING skippable
+// frame (where a caller stores metadata of its own), then one or more
+// compressed frames, each with a recorded frame content size (present and <=
+// MaxUint32, the bound packfile item lengths live under), no dictionary ID
+// (the shared Decompressor is dictionary-less), and the content checksum flag
+// set (Compressor's default; the checksum is what makes a later corrupt read
+// loud). The frames must tile src exactly — trailing bytes are a corruption,
+// not padding.
 //
 // This is the freeze-time guard for verbatim frame copies (hot ledgers CF →
 // cold pack): it pins the invariant that hot ledger values remain plain,
-// dictionary-less, content-sized, checksummed single frames. Any hot-side
-// change that breaks one of these must revisit the cold ledger format in the
-// same commit.
+// dictionary-less, content-sized, checksummed frames. Any hot-side change that
+// breaks one of these must revisit the cold ledger format in the same commit.
 func FrameHeaderValid(src []byte) error {
+	compressed := 0
+	for off := 0; off < len(src); {
+		// The header fields come first, so a buffer that is not a frame at all
+		// is reported as bad magic rather than as an unreadable frame size.
+		if !IsSkippable(src[off:]) {
+			if err := compressedFrameHeaderValid(src[off:]); err != nil {
+				return fmt.Errorf("zstd: frame header at offset %d: %w", off, err)
+			}
+			compressed++
+		} else if off != 0 {
+			return fmt.Errorf("zstd: frame header: skippable frame at offset %d, only a leading one is allowed", off)
+		}
+		n, err := FrameCompressedSize(src[off:])
+		if err != nil {
+			return fmt.Errorf("zstd: frame header at offset %d: %w", off, err)
+		}
+		off += n
+	}
+	if compressed == 0 {
+		return errors.New("zstd: frame header: no compressed frame")
+	}
+	return nil
+}
+
+// compressedFrameHeaderValid checks one compressed frame's header fields. See
+// FrameHeaderValid for what each one is load-bearing for.
+func compressedFrameHeaderValid(src []byte) error {
 	if len(src) < 5 {
-		return fmt.Errorf("zstd: frame header: %d bytes, want >= 5", len(src))
+		return fmt.Errorf("%d bytes, want >= 5", len(src))
 	}
 	if !bytes.Equal(src[:4], frameMagic) {
-		return errors.New("zstd: frame header: bad magic")
+		return errors.New("bad magic")
 	}
 	descriptor := src[4]
 	if descriptor&frameDescriptorDictIDMask != 0 {
-		return errors.New("zstd: frame header: dictionary ID present; the shared decompressor is dictionary-less")
+		return errors.New("dictionary ID present; the shared decompressor is dictionary-less")
 	}
 	if descriptor&frameDescriptorChecksumFlag == 0 {
-		return errors.New("zstd: frame header: content checksum flag unset")
+		return errors.New("content checksum flag unset")
 	}
 	fcs := C.ZSTD_getFrameContentSize(unsafe.Pointer(&src[0]), C.size_t(len(src)))
 	switch fcs {
 	case C.ZSTD_CONTENTSIZE_ERROR:
-		return errors.New("zstd: frame header invalid")
+		return errors.New("frame header invalid")
 	case C.ZSTD_CONTENTSIZE_UNKNOWN:
-		return errors.New("zstd: frame header carries no content size")
+		return errors.New("frame header carries no content size")
 	}
 	if uint64(fcs) > math.MaxUint32 {
-		return fmt.Errorf("zstd: frame claims content size %d > MaxUint32", uint64(fcs))
+		return fmt.Errorf("frame claims content size %d > MaxUint32", uint64(fcs))
 	}
 	return nil
 }
