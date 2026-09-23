@@ -455,6 +455,104 @@ func (s *Store) IterateRange(cf string, start, end []byte) iter.Seq2[Entry, erro
 	}
 }
 
+// PairedEntry is one key of the primary column family with the value the
+// secondary family holds under the SAME key, or nil where it holds none. Both
+// slices are the iterators' own and are valid only until the loop body ends.
+type PairedEntry struct {
+	Key, Value, Paired []byte
+}
+
+// IterateRangePaired is IterateRange over cf, each entry carrying the value
+// other holds under the same key. Both families must be keyed alike; the walk
+// is forward-only through both, so a key missing from other is simply a nil
+// Paired.
+//
+// It exists because a caller cannot read the second family from inside
+// IterateRange's loop body: that body runs under the store's lifecycle read
+// lock, and a nested read lock behind a waiting Close deadlocks both. Pairing
+// here takes the lock once and runs both iterators under it.
+//
+// A secondary family this store was not opened with is an ERROR, yielded once
+// before any entry. Pairing every key with nil would read as "the family holds
+// nothing for these keys", which is the answer a caller acts on — and the
+// freeze acts on it by writing a chunk of records without their span tables.
+// Every open names the families it needs and fails without them, so a name
+// that will not resolve here is a caller asking the wrong store.
+func (s *Store) IterateRangePaired(cf, other string, start, end []byte) iter.Seq2[PairedEntry, error] {
+	return func(yield func(PairedEntry, error) bool) {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+
+		if err := s.checkOpen(); err != nil {
+			yield(PairedEntry{}, err)
+			return
+		}
+		cfh, err := s.resolveCF(cf)
+		if err != nil {
+			yield(PairedEntry{}, err)
+			return
+		}
+		pit, oerr := s.pairedIterator(other)
+		if oerr != nil {
+			yield(PairedEntry{}, oerr)
+			return
+		}
+		defer pit.Close()
+
+		it := s.db.NewIteratorCF(s.ro, cfh)
+		defer it.Close()
+		seekBoth(it, pit, bytes.Clone(start))
+		endCopy := bytes.Clone(end)
+
+		for ; it.Valid(); it.Next() {
+			key := it.KeySlice().Data()
+			if len(endCopy) > 0 && bytes.Compare(key, endCopy) > 0 {
+				return
+			}
+			if !yield(PairedEntry{Key: key, Value: it.ValueSlice().Data(), Paired: seekPaired(pit, key)}, nil) {
+				return
+			}
+		}
+		if err := iteratorErr(it, pit); err != nil {
+			yield(PairedEntry{}, err)
+		}
+	}
+}
+
+// seekBoth positions both iterators at start, or at the first key when start
+// is empty.
+func seekBoth(it, pit *grocksdb.Iterator, start []byte) {
+	for _, i := range []*grocksdb.Iterator{it, pit} {
+		if len(start) == 0 {
+			i.SeekToFirst()
+		} else {
+			i.Seek(start)
+		}
+	}
+}
+
+// iteratorErr reports the first error either iterator ended on.
+func iteratorErr(it, pit *grocksdb.Iterator) error {
+	if err := it.Err(); err != nil {
+		return err
+	}
+	return pit.Err()
+}
+
+// seekPaired advances the secondary iterator to key and returns its value
+// there, or nil when the secondary has no row under it. Forward-only: the
+// primary walk is ascending, so keys the secondary has already passed are
+// behind both.
+func seekPaired(pit *grocksdb.Iterator, key []byte) []byte {
+	for pit.Valid() && bytes.Compare(pit.KeySlice().Data(), key) < 0 {
+		pit.Next()
+	}
+	if !pit.Valid() || !bytes.Equal(pit.KeySlice().Data(), key) {
+		return nil
+	}
+	return pit.ValueSlice().Data()
+}
+
 // Snapshot is a pinned, repeatable-read view of the store. Acquire with
 // NewSnapshot, read through GetAsOf / IterateAsOf, and release it via
 // ReleaseSnapshot when done: a leaked snapshot is a held C resource never
@@ -1035,4 +1133,16 @@ func (s *Store) openCFNames(opts *grocksdb.Options) []string {
 		opts.SetCreateIfMissingColumnFamilies(true)
 	}
 	return resolveCFNames(s.cfg)
+}
+
+// pairedIterator opens the secondary family's iterator. A family this store
+// was not opened with has no iterator and no silent stand-in: the error is the
+// caller's, and the walk carries it out rather than pairing everything with
+// nothing.
+func (s *Store) pairedIterator(cf string) (*grocksdb.Iterator, error) {
+	cfh, err := s.resolveCF(cf)
+	if err != nil {
+		return nil, err
+	}
+	return s.db.NewIteratorCF(s.ro, cfh), nil
 }

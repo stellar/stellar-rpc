@@ -5,7 +5,10 @@ package ledger
 // values ARE the pack's records — one internal/rpcv2/zstd frame per ledger, the
 // same level and checksum the raw-mode cold writer would produce — so the
 // freeze copies frames verbatim (PreCompressed mode) instead of
-// decompressing ~every ledger only to recompress it identically. What used
+// decompressing ~every ledger only to recompress it identically. A framed
+// ledger's span table rides along from the table CF into the record's leading
+// skippable frame, so the cold tier answers a transaction lookup the way the
+// hot tier does. What used
 // to be the freeze's largest CPU stream (per the 2026-07-24 baseline
 // profile, ~200s of ZSTD_compress2 per chunk plus the decompress feeding
 // it) becomes a checked copy.
@@ -32,7 +35,33 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/txspan"
 )
+
+// checkPairedTable proves the span table paired with a ledger is that ledger's
+// own. The freeze is the one producer that copies a table without reading it —
+// every other writer builds the table from the ledger in front of it, and
+// cannot mis-key one — so a hot row stored under the wrong key would otherwise
+// ride into a durable pack, where a reader serving from it would answer with
+// another ledger's transactions.
+//
+// It reads the stamp and not the whole table: the copy preserves the table's
+// checksum, which the reader that parses it verifies, and a pass over every
+// table of a chunk is not what the freeze is for. A mismatch fails the freeze
+// loudly — it is corruption of the hot tier, not a table to drop quietly.
+func checkPairedTable(seq uint32, table []byte) error {
+	if len(table) == 0 {
+		return nil
+	}
+	stamped, err := txspan.StampedSeq(table)
+	if err != nil {
+		return fmt.Errorf("ledger %d span table: %w", seq, err)
+	}
+	if stamped != seq {
+		return fmt.Errorf("ledger %d is stored with a span table stamped for ledger %d", seq, stamped)
+	}
+	return nil
+}
 
 // freezeCtxPollEvery is how many ledgers the freeze scan copies between
 // context checks — frequent enough that cancellation lands in well under a
@@ -64,7 +93,13 @@ func FreezeColdFromStore(
 	// a no-op release.
 	defer func() { _ = w.Close() }()
 
-	for entry, ierr := range store.IterateRange(LedgersCF, rocksdb.EncodeUint32(first), rocksdb.EncodeUint32(last)) {
+	// The span tables ride alongside the ledgers under the same keys, so the
+	// paired scan carries each ledger's table without a second pass or a point
+	// read. A chunk whose CF holds none — one ingested without a passphrase,
+	// or a DB from before the family existed — pairs every ledger with nil,
+	// and its records are written exactly as they were before tables.
+	for entry, ierr := range store.IterateRangePaired(
+		LedgersCF, TxSpansCF, rocksdb.EncodeUint32(first), rocksdb.EncodeUint32(last)) {
 		if ierr != nil {
 			return n, fmt.Errorf("cold freeze %s: scan %s: %w", chunkID, LedgersCF, ierr)
 		}
@@ -78,7 +113,11 @@ func FreezeColdFromStore(
 		}
 		// The seq comes from the KEY, never a local counter: the writer's
 		// contiguity check must see a CF hole as a mismatch and abort.
-		if aerr := w.AppendCompressedLedger(rocksdb.DecodeUint32(entry.Key), entry.Value, nil); aerr != nil {
+		seq := rocksdb.DecodeUint32(entry.Key)
+		if terr := checkPairedTable(seq, entry.Paired); terr != nil {
+			return n, fmt.Errorf("cold freeze %s: %w", chunkID, terr)
+		}
+		if aerr := w.AppendCompressedLedger(seq, entry.Value, entry.Paired); aerr != nil {
 			return n, aerr
 		}
 		n++

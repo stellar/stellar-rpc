@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"math"
 	"os"
@@ -11,9 +12,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/network"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/txspan"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/zstd"
@@ -368,6 +373,172 @@ func firstRecord(t *testing.T, path string) ([]byte, int64) {
 	return buf, at
 }
 
+// TestFreezeColdFromStore_FramedLedgersMatchTheWalk is the identity gate for
+// the shape this layout exists for: a chunk whose big ledgers are framed and
+// carry span tables must freeze to the same bytes the walk materializer
+// writes from the same ledgers, tables included.
+func TestFreezeColdFromStore_FramedLedgersMatchTheWalk(t *testing.T) {
+	withFrameWindow(t, coldFrameWindow)
+	chunkID := chunk.ID(0)
+	first, last := chunkID.FirstLedger(), chunkID.LastLedger()
+	// A handful of framed, table-bearing ledgers among a chunk of small ones:
+	// enough to exercise both record shapes without marshaling ten thousand
+	// dense ledgers.
+	// The framed fixtures are built ONCE: their source accounts are random, so
+	// rebuilding one would hand the two materializers different ledgers.
+	framedAt := map[uint32][]byte{}
+	for _, seq := range []uint32{first, first + 1, first + 5_000, last} {
+		framedAt[seq] = framedLedger(t, seq)
+	}
+	payload := func(seq uint32) []byte {
+		if raw, ok := framedAt[seq]; ok {
+			return raw
+		}
+		return zeroTxLedger(t, seq)
+	}
+
+	walkPath := filepath.Join(t.TempDir(), "walk.pack")
+	w, err := NewColdWriter(walkPath, first, ColdWriterOptions{Passphrase: testColdPassphrase})
+	require.NoError(t, err)
+	for seq := first; seq <= last; seq++ {
+		require.NoError(t, w.AppendLedger(seq, payload(seq)))
+	}
+	require.NoError(t, w.Commit())
+	require.NoError(t, w.Close())
+
+	h, store := openTestHotStoreAt(t, t.TempDir())
+	populateTabledChunk(t, h, chunkID, payload)
+	freezePath := filepath.Join(t.TempDir(), "freeze.pack")
+	n, err := FreezeColdFromStore(context.Background(), chunkID, store, freezePath, ColdWriterOptions{})
+	require.NoError(t, err)
+	require.EqualValues(t, chunk.LedgersPerChunk, n)
+
+	walkBytes, err := os.ReadFile(walkPath)
+	require.NoError(t, err)
+	freezeBytes, err := os.ReadFile(freezePath)
+	require.NoError(t, err)
+	require.Len(t, freezeBytes, len(walkBytes), "pack sizes diverge")
+	require.True(t, bytes.Equal(walkBytes, freezeBytes), "pack bytes diverge")
+
+	// Byte identity is the strong claim; the CONTENT hash is the one that
+	// outlives it. It is taken over RAW LCM bytes, so a tabled, framed record
+	// must contribute exactly the ledger and never the table's skippable
+	// frame — on the walk, which hashes the raw bytes it was handed, and on
+	// the freeze, whose ContentHashExtract decodes the WHOLE record back to
+	// those same bytes: the multi-frame decoder walks past the leading
+	// skippable frame without contributing any, so table bytes never enter
+	// the hash. Verify recomputes the hash from the stored items, so it is
+	// what catches a writer that hashed something other than what it wrote;
+	// asserted directly because a zstd bump would end frame-level identity
+	// while leaving this the thing the two must agree on.
+	walkHash, hashed, err := openFreezeTestPack(t, walkPath).ContentHash()
+	require.NoError(t, err)
+	require.True(t, hashed)
+	freezeHash, hashed, err := openFreezeTestPack(t, freezePath).ContentHash()
+	require.NoError(t, err)
+	require.True(t, hashed)
+	require.Equal(t, walkHash, freezeHash,
+		"a frozen tabled pack and a walked one must hash the same raw ledgers to the same digest")
+	require.NoError(t, openFreezeTestPack(t, walkPath).Verify(context.Background()))
+	require.NoError(t, openFreezeTestPack(t, freezePath).Verify(context.Background()))
+
+	// The frozen pack answers lookups through its tables and still reads whole.
+	r := newTestColdReader(t, freezePath)
+	for seq, want := range framedAt {
+		require.NoError(t, r.WithTxTable(seq, func(tbl txspan.Table, _ txspan.LedgerHeader, pieces txspan.PieceReader) error {
+			for i := range tbl.TxCount() {
+				row := tbl.Row(i)
+				env, elem, perr := pieces(row)
+				require.NoError(t, perr)
+				assert.Equal(t, want[row.EnvStart:row.EnvEnd], env)
+				assert.Equal(t, want[row.ElemStart:row.ElemEnd], elem)
+			}
+			return nil
+		}))
+		require.NoError(t, r.WithLedger(seq, func(got []byte) error {
+			assert.Equal(t, want, got)
+			return nil
+		}))
+	}
+	tabled, err := VerifyPack(freezePath)
+	require.NoError(t, err)
+	assert.Equal(t, len(framedAt), tabled)
+}
+
+// TestFreezeColdFromStore_WithoutTheTableFamily pins what a freeze does with a
+// store that has no table family: it FAILS, naming the family, and writes no
+// pack. The freeze pairs every ledger with its table as it scans, so a store
+// that cannot be paired would otherwise hand it nil for all ten thousand of
+// them and commit a chunk whose every cold transaction lookup decodes a whole
+// ledger — an artifact indistinguishable from a legitimately untabled one.
+//
+// A hot DB always has the family (every open names it), so reaching this needs
+// a store built by hand, which is the point: the failure is the one that says
+// the store is not a hot ledger store.
+func TestFreezeColdFromStore_WithoutTheTableFamily(t *testing.T) {
+	withFrameWindow(t, coldFrameWindow)
+	chunkID := chunk.ID(0)
+	dir := t.TempDir()
+	store, err := rocksdb.New(rocksdb.Config{
+		Path: dir, ColumnFamilies: []string{LedgersCF}, Logger: silentLogger(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	h := NewWithStore(store, DefaultZstdEncodeWorkers)
+	require.NoError(t, store.Batch(func(b *rocksdb.BatchWriter) error {
+		return h.AddLedgerToBatch(b, Entry{Seq: chunkID.FirstLedger(), Bytes: freezePayload(chunkID.FirstLedger())})
+	}))
+
+	packPath := filepath.Join(t.TempDir(), "freeze.pack")
+	n, err := FreezeColdFromStore(context.Background(), chunkID, store, packPath, ColdWriterOptions{})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, TxSpansCF)
+	assert.Zero(t, n, "a freeze that cannot pair must copy nothing")
+	assert.NoFileExists(t, packPath, "a failed freeze leaves no pack behind")
+}
+
+// populateTabledChunk writes a whole chunk into the hot store the way the
+// ingest loop does — the forked compression, the span table, and the value's
+// frame directory stamped into it — batched so the test stays affordable.
+func populateTabledChunk(t *testing.T, h *HotStore, chunkID chunk.ID, payload func(uint32) []byte) {
+	t.Helper()
+	const batch = 1000
+	first, last := chunkID.FirstLedger(), chunkID.LastLedger()
+	for lo := first; lo <= last; lo += batch {
+		hi := min(lo+batch-1, last)
+		require.NoError(t, h.store.Batch(func(b *rocksdb.BatchWriter) error {
+			for seq := lo; seq <= hi; seq++ {
+				if err := addTabledLedger(h, b, seq, payload(seq)); err != nil {
+					return err
+				}
+			}
+			return nil
+		}))
+	}
+}
+
+// addTabledLedger queues one ledger and its stamped span table into b.
+func addTabledLedger(h *HotStore, b *rocksdb.BatchWriter, seq uint32, raw []byte) error {
+	pending := h.StartCompress(Entry{Seq: seq, Bytes: raw})
+	if err := h.AddPendingToBatch(b, pending); err != nil {
+		return err
+	}
+	txParts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
+	if err != nil {
+		return err
+	}
+	table, err := txspan.Build(raw, txParts, testColdPassphrase)
+	if err != nil {
+		return err
+	}
+	stamped, err := txspan.WithFrames(table, pending.Frames())
+	if err != nil {
+		return err
+	}
+	h.AddTableToBatch(b, seq, stamped)
+	return nil
+}
+
 // TestColdWithTxTable_FrontCoversTheTableAndTheHeaderFrame pins the exact
 // read from both sides. A front that is what the record needs answers every
 // row; a front one byte short of the HEADER frame — the table itself still
@@ -552,4 +723,36 @@ func TestSkippableFrameLen_RefusesWhatIsNotASkippableHeader(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+// TestFreezeColdFromStore_RefusesAMiskeyedTable pins the freeze's own header
+// assertion. The freeze copies a table verbatim without ever decoding it, so
+// it is the one producer that could carry a hot row stored under the wrong key
+// into a durable pack; a reader serving from that pack would then answer with
+// another ledger's transactions. The freeze must fail loudly instead, and must
+// not quietly drop the table either.
+func TestFreezeColdFromStore_RefusesAMiskeyedTable(t *testing.T) {
+	withFrameWindow(t, coldFrameWindow)
+	chunkID := chunk.ID(0)
+	h, store := openTestHotStoreAt(t, t.TempDir())
+	first := chunkID.FirstLedger()
+
+	// An honest table for the NEXT ledger, stored under this one's key.
+	other := framedLedger(t, first+1)
+	txParts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(other))
+	require.NoError(t, err)
+	table, err := txspan.Build(other, txParts, testColdPassphrase)
+	require.NoError(t, err)
+	require.NoError(t, h.store.Batch(func(b *rocksdb.BatchWriter) error {
+		if perr := h.AddLedgerToBatch(b, Entry{Seq: first, Bytes: framedLedger(t, first)}); perr != nil {
+			return perr
+		}
+		h.AddTableToBatch(b, first, table)
+		return nil
+	}))
+
+	packPath := filepath.Join(t.TempDir(), "freeze.pack")
+	_, err = FreezeColdFromStore(context.Background(), chunkID, store, packPath, ColdWriterOptions{})
+	require.Error(t, err, "a mis-keyed table must never reach a durable pack")
+	assert.ErrorContains(t, err, "stamped for ledger")
 }
