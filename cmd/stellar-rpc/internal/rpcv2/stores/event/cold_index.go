@@ -130,13 +130,17 @@ func WriteColdIndex(
 	// is most of the writer's footprint on a chunk of singletons.
 	keys := map[uint32]TermKey{}
 	for term, bitmap := range bitmaps {
-		slot, lerr := m.Lookup(term)
+		rk := TermKey(stores.BlindKey(secret, term[:]))
+		slot, lerr := m.lookupRouted(rk)
 		if lerr != nil {
 			return fmt.Errorf("events: MPHF lookup during index.pack build: %w", lerr)
 		}
-		// App fingerprint stays on the ORIGINAL term key, not the routed key.
+		// The fingerprint names the ROUTED (blinded) key. The streaming
+		// builder never holds the original — its runs carry keys blinded at
+		// seal and are merged verbatim — so the routed key is the only
+		// identity both builders have when a record is written.
 		var fp [IndexRecordFingerprintLen]byte
-		copy(fp[:], term[:IndexRecordFingerprintLen])
+		copy(fp[:], rk[:IndexRecordFingerprintLen])
 		// Mutate in place — bitmaps is uniquely owned by the caller, built
 		// single-threaded either way: cold backfill from the .pack, or the freeze
 		// from the read-only hot DB.

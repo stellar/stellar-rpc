@@ -442,6 +442,13 @@ func (c *ColdReader) LookupKeys(
 	// never cuts it.
 	covLo, covHi := uint64(0), uint64(math.MaxUint32)
 
+	// The item fingerprints name the routed (blinded) key, so blind once
+	// here and carry it alongside. mphf.Lookup blinds its own argument, so
+	// it keeps taking the original.
+	blinded := make([]TermKey, len(keys))
+	for i, key := range keys {
+		blinded[i] = TermKey(stores.BlindKey(mphf.secret, key[:]))
+	}
 	for i, key := range keys {
 		entry, demoted := dir.lookup(key)
 		if !demoted {
@@ -497,7 +504,7 @@ func (c *ColdReader) LookupKeys(
 	if len(reads) == 0 {
 		return results, covered, nil
 	}
-	if err := readIndexItems(ctx, c.index, keys, reads, results, plans); err != nil {
+	if err := readIndexItems(ctx, c.index, blinded, reads, results, plans); err != nil {
 		return nil, IDRange{}, fmt.Errorf("events: LookupKeys read for chunk %s: %w", c.chunkID, err)
 	}
 	for i := range plans {
@@ -511,7 +518,7 @@ func (c *ColdReader) LookupKeys(
 // readIndexItems is pass 3: every item the plan named, read in one go and
 // decoded into the slot its read owns.
 func readIndexItems(
-	ctx context.Context, index *stores.PackReader, keys []TermKey,
+	ctx context.Context, index *stores.PackReader, routed []TermKey,
 	reads []itemRead, results []*roaring.Bitmap, plans []termParts,
 ) error {
 	sort.Slice(reads, func(i, j int) bool { return reads[i].pos < reads[j].pos })
@@ -536,7 +543,7 @@ func readIndexItems(
 		// keeps its own copy, and write it straight to this read's own
 		// destination, which no other read shares.
 		for j := runs[idx]; j < len(reads) && reads[j].pos == positions[idx]; j++ {
-			bm, derr := decodeIndexItem(data, keys[reads[j].out], reads[j])
+			bm, derr := decodeIndexItem(data, routed[reads[j].out], reads[j])
 			if derr != nil {
 				return derr
 			}

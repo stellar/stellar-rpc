@@ -15,6 +15,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
 // indexTestChunkID is the chunk ID every WriteColdIndex test uses for
@@ -129,7 +130,7 @@ func TestWriteIndex_RoundTripsBitmapsPerTerm(t *testing.T) {
 		require.GreaterOrEqual(t, len(record), IndexRecordFingerprintLen, "record at slot %d too short", slot)
 
 		// Fingerprint must match term[:4].
-		assert.Equal(t, term[:IndexRecordFingerprintLen], record[:IndexRecordFingerprintLen],
+		assert.Equal(t, routedFP(term), record[:IndexRecordFingerprintLen],
 			"fingerprint mismatch at slot %d", slot)
 
 		// Deserialize bitmap.
@@ -175,7 +176,7 @@ func TestWriteIndex_UnseenTermFingerprintMismatches(t *testing.T) {
 		record, ok := records[int(slot)]
 		require.True(t, ok)
 		recordFP := record[:IndexRecordFingerprintLen]
-		if string(recordFP) != string(unseen[:IndexRecordFingerprintLen]) {
+		if string(recordFP) != string(routedFP(unseen)) {
 			mismatches++
 		}
 	}
@@ -308,7 +309,7 @@ func TestWriteIndex_LargeIndex(t *testing.T) {
 		require.NoError(t, err)
 		record, ok := records[int(slot)]
 		require.True(t, ok)
-		assert.Equal(t, term[:IndexRecordFingerprintLen], record[:IndexRecordFingerprintLen])
+		assert.Equal(t, routedFP(term), record[:IndexRecordFingerprintLen])
 	}
 }
 
@@ -329,7 +330,7 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	require.Greater(t, len(record), IndexRecordFingerprintLen)
 
 	term := ComputeTermKey([]byte("only"), FieldContractID)
-	assert.Equal(t, term[:IndexRecordFingerprintLen], record[:IndexRecordFingerprintLen])
+	assert.Equal(t, routedFP(term), record[:IndexRecordFingerprintLen])
 
 	bm := roaring.New()
 	require.NoError(t, bm.UnmarshalBinary(record[IndexRecordFingerprintLen:]))
@@ -476,4 +477,11 @@ func TestWriteColdIndex_SubFloorBucketStaysWhole(t *testing.T) {
 	assert.Zero(t, d.totalParts)
 	assert.Greater(t, bucketBytes(t, dir, d), indexBucketBudget,
 		"the fixture must leave the bucket over the budget, or it pins nothing")
+}
+
+// routedFP is the fingerprint the writer stores for term: the first bytes of
+// the routed (blinded) key, not of the term itself.
+func routedFP(term TermKey) []byte {
+	rk := TermKey(stores.BlindKey(testIndexSecret, term[:]))
+	return rk[:IndexRecordFingerprintLen]
 }
