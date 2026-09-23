@@ -331,6 +331,10 @@ type itemRead struct {
 	pos  int
 	out  int
 	part int
+	// lo, hi bound the ids a part may hold, set only for part reads. The
+	// term's last part is open above, so hi is math.MaxUint64 there: the
+	// parts tile the chunk, so nothing sits past the last one to exclude.
+	lo, hi uint64
 }
 
 // decodeIndexItem checks the item's leading fingerprint against key's prefix
@@ -351,6 +355,20 @@ func decodeIndexItem(item []byte, key TermKey, r itemRead) (*roaring.Bitmap, err
 	bm := roaring.New()
 	if err := bm.UnmarshalBinary(item[IndexRecordFingerprintLen:]); err != nil {
 		return nil, fmt.Errorf("%w: events: unmarshal index.pack item %d: %w", stores.ErrCorrupt, r.pos, err)
+	}
+	// A part's span comes from the directory's k, which the record's checksum
+	// does not cover: a wrong k decodes into a valid bitmap of the wrong ids
+	// and would answer the query from the wrong slabs. Reject it here, where
+	// the ids the part actually holds are in hand.
+	if r.part >= 0 && !bm.IsEmpty() {
+		if lo := uint64(bm.Minimum()); lo < r.lo {
+			return nil, fmt.Errorf("%w: events: index.pack item %d holds id %d below its part's span [%d, %d)",
+				stores.ErrCorrupt, r.pos, lo, r.lo, r.hi)
+		}
+		if hi := uint64(bm.Maximum()); hi >= r.hi {
+			return nil, fmt.Errorf("%w: events: index.pack item %d holds id %d above its part's span [%d, %d)",
+				stores.ErrCorrupt, r.pos, hi, r.lo, r.hi)
+		}
 	}
 	return bm, nil
 }
@@ -455,10 +473,16 @@ func (c *ColdReader) LookupKeys(
 		}
 		plans[i] = make(termParts, last-first+1)
 		for part := first; part <= last; part++ {
+			hi := uint64(math.MaxUint64)
+			if uint64(part)+1 < uint64(entry.partCount) {
+				hi = (uint64(part) + 1) << shift
+			}
 			reads = append(reads, itemRead{
 				pos:  int(entry.firstRecord+part) * indexPackItemsPerRecord,
 				out:  i,
 				part: int(part - first),
+				lo:   uint64(part) << shift,
+				hi:   hi,
 			})
 		}
 	}
