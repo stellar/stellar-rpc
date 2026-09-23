@@ -1,6 +1,6 @@
 module github.com/stellar/stellar-rpc
 
-go 1.26
+go 1.26.0
 
 require (
 	github.com/Masterminds/squirrel v1.5.4
@@ -27,7 +27,7 @@ require (
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/pflag v1.0.5
 	github.com/stellar/go-stellar-sdk v0.7.4-0.20260922153802-dec600e04cda
-	github.com/stellar/streamhash v0.1.1-0.20260826155856-77556799545b
+	github.com/stellar/streamhash v0.1.1-0.20260923083519-c089e9211f0e
 	github.com/stretchr/testify v1.12.1
 )
 
@@ -150,8 +150,8 @@ require (
 	golang.org/x/mod v0.38.0
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.22.0
-	golang.org/x/sys v0.47.0
+	golang.org/x/sync v0.23.0
+	golang.org/x/sys v0.48.0
 	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	google.golang.org/api v0.264.0 // indirect
