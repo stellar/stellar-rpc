@@ -52,13 +52,9 @@ type dbCache struct {
 	latestLedgerSeq       uint32
 	latestLedgerCloseTime int64
 	// firstLedgerSeq/firstLedgerCloseTime cache the oldest retained ledger's
-	// range scalars. Without this, GetLedgerRange decodes the entire oldest
-	// LedgerCloseMeta blob on every call (e.g. on every getTransaction) just to
-	// read a sequence + close time. A value of 0 means "unknown" -- it is
-	// populated lazily on the first GetLedgerRange after a reset or after the
-	// cached oldest ledger has been trimmed away (see Commit), so the expensive
-	// oldest-ledger decode happens at most once per trim (~once per ledger
-	// once retention is full) instead of once per read.
+	// range scalars so GetLedgerRange never decodes the oldest LedgerCloseMeta
+	// blob per call. Commit publishes them on every trim; 0 means "unknown"
+	// and is filled lazily by the first GetLedgerRange after a reset.
 	firstLedgerSeq       uint32
 	firstLedgerCloseTime int64
 }
@@ -387,6 +383,9 @@ func (rw *readWriter) NewTx(ctx context.Context) (WriteTx, error) {
 	db := rw.db
 	writer := writeTx{
 		globalCache: db.cache,
+		oldestLedger: func() (store.LedgerInfo, error) {
+			return oldestLedgerInfo(ctx, txSession)
+		},
 		postCommit: func(durationMetrics map[string]time.Duration) error {
 			// TODO: this is sqlite-only, it shouldn't be here
 			startTime := time.Now()
@@ -426,6 +425,7 @@ func (rw *readWriter) NewTx(ctx context.Context) (WriteTx, error) {
 
 type writeTx struct {
 	globalCache            *dbCache
+	oldestLedger           func() (store.LedgerInfo, error) // reads inside the write tx
 	postCommit             func(durationMetrics map[string]time.Duration) error
 	tx                     db.SessionInterface
 	stmtCache              *sq.StmtCache
@@ -459,41 +459,38 @@ func (w writeTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta, durationMetrics map
 		return err
 	}
 
-	// We need to make the cache update atomic with the transaction commit.
-	// Otherwise, the cache can be made inconsistent if a write transaction finishes
-	// in between, updating the cache in the wrong order.
-	commitAndUpdateCache := func() error {
-		w.globalCache.Lock()
-		defer w.globalCache.Unlock()
-		if err := w.tx.Commit(); err != nil {
+	// The cache may only advertise ledgers a reader's snapshot can serve: the
+	// oldest is raised before the commit and the latest after it, so the commit
+	// (a whole ledger's WAL write) never holds the lock every read path takes.
+	if w.historyRetentionWindow != 0 && ledgerSeq+1 > w.historyRetentionWindow { // trimLedgers ran
+		startTime := time.Now()
+		oldest, err := w.oldestLedger()
+		if err != nil && !errors.Is(err, store.ErrEmptyDB) {
 			return err
 		}
-		if ledgerSeq > w.globalCache.latestLedgerSeq {
-			w.globalCache.latestLedgerSeq = ledgerSeq
-			w.globalCache.latestLedgerCloseTime = ledgerCloseTime
+		if durationMetrics != nil {
+			durationMetrics["oldest_ledger"] = time.Since(startTime)
 		}
-		// Invalidate the cached oldest-ledger scalars when trimLedgers (run
-		// above with this same retention window) has removed the ledger they
-		// describe. cutoff mirrors trimLedgers: rows with sequence < cutoff are
-		// deleted. Only invalidate when retention is actually trimming and the
-		// cached oldest was at/below the cutoff, so the lazy recompute happens
-		// at most once per trim rather than on every read.
-		if w.historyRetentionWindow != 0 && ledgerSeq+1 > w.historyRetentionWindow {
-			cutoff := ledgerSeq + 1 - w.historyRetentionWindow
-			if w.globalCache.firstLedgerSeq != 0 && w.globalCache.firstLedgerSeq < cutoff {
-				w.globalCache.firstLedgerSeq = 0
-				w.globalCache.firstLedgerCloseTime = 0
-			}
-		}
-		return nil
+		w.globalCache.Lock()
+		w.globalCache.firstLedgerSeq = oldest.Sequence
+		w.globalCache.firstLedgerCloseTime = oldest.CloseTime
+		w.globalCache.Unlock()
 	}
+
 	startTime := time.Now()
-	if err := commitAndUpdateCache(); err != nil {
+	if err := w.tx.Commit(); err != nil {
 		return err
 	}
 	if durationMetrics != nil {
 		durationMetrics["commit"] = time.Since(startTime)
 	}
+
+	w.globalCache.Lock()
+	if ledgerSeq > w.globalCache.latestLedgerSeq {
+		w.globalCache.latestLedgerSeq = ledgerSeq
+		w.globalCache.latestLedgerCloseTime = ledgerCloseTime
+	}
+	w.globalCache.Unlock()
 
 	return w.postCommit(durationMetrics)
 }

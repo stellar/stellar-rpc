@@ -159,14 +159,8 @@ func (r ledgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRange, er
 			return ledgerRange, err
 		}
 		r.db.cache.Lock()
-		// Only memoize the oldest if no commit advanced the latest ledger since
-		// we read it above. A trim runs inside a commit and always advances
-		// latest, so an unchanged latest proves no trim raced our MIN(sequence)
-		// query -- otherwise the trim could have removed the very ledger we just
-		// read, and caching it would report a trimmed ledger as the oldest until
-		// the next commit's invalidation. The returned range is still correct as
-		// of the query; we just decline to persist a possibly-stale oldest and
-		// let the next call recompute.
+		// Commit publishes the oldest on every trim, so only fill an empty slot,
+		// and only if no commit raced our MIN(sequence) read.
 		if r.db.cache.firstLedgerSeq == 0 && r.db.cache.latestLedgerSeq == latestLedgerSeqCache {
 			r.db.cache.firstLedgerSeq = ledgerRange.FirstLedger.Sequence
 			r.db.cache.firstLedgerCloseTime = ledgerRange.FirstLedger.CloseTime
@@ -214,11 +208,9 @@ func ledgerInfoFromRow(ctx context.Context, db readDB, row ledgerRangeRow) (stor
 	return store.LedgerInfo{Sequence: row.Sequence, CloseTime: closeTime}, nil
 }
 
-// getLedgerRangeWithCache uses the latest ledger cache to optimize the query.
-// It only needs to look up the first ledger since we have the latest cached.
-func getLedgerRangeWithCache(ctx context.Context, db readDB,
-	latestSeq uint32, latestTime int64,
-) (store.LedgerRange, error) {
+// oldestLedgerInfo reads the oldest stored ledger's range scalars; db may be a
+// write transaction, in which case its own trims are visible.
+func oldestLedgerInfo(ctx context.Context, db readDB) (store.LedgerInfo, error) {
 	query := sq.Select("sequence", fmt.Sprintf("substr(meta, 1, %d) AS meta_prefix", ledgerCloseTimePrefixBytes)).
 		From(ledgerCloseMetaTableName).
 		Where(
@@ -226,13 +218,20 @@ func getLedgerRangeWithCache(ctx context.Context, db readDB,
 		)
 	var rows []ledgerRangeRow
 	if err := db.Select(ctx, &rows, query); err != nil {
-		return store.LedgerRange{}, fmt.Errorf("couldn't query ledger range: %w", err)
+		return store.LedgerInfo{}, fmt.Errorf("couldn't query ledger range: %w", err)
 	}
-
 	if len(rows) == 0 {
-		return store.LedgerRange{}, store.ErrEmptyDB
+		return store.LedgerInfo{}, store.ErrEmptyDB
 	}
-	firstLedger, err := ledgerInfoFromRow(ctx, db, rows[0])
+	return ledgerInfoFromRow(ctx, db, rows[0])
+}
+
+// getLedgerRangeWithCache uses the latest ledger cache to optimize the query.
+// It only needs to look up the first ledger since we have the latest cached.
+func getLedgerRangeWithCache(ctx context.Context, db readDB,
+	latestSeq uint32, latestTime int64,
+) (store.LedgerRange, error) {
+	firstLedger, err := oldestLedgerInfo(ctx, db)
 	if err != nil {
 		return store.LedgerRange{}, err
 	}
