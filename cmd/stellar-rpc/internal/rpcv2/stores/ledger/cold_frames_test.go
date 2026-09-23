@@ -1,7 +1,10 @@
 package ledger
 
 import (
+	"bytes"
 	"encoding/binary"
+	"math"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -229,6 +232,142 @@ func TestColdWriter_UnframedRecordsAreThePreFramesBytes(t *testing.T) {
 	}
 }
 
+// TestVerifyPack_AcceptsAFramedPack pins the artifact verifier's happy path:
+// every table parses, its directory matches the frames on disk, and the
+// sampled rows' elements carry hashes the table routes to them.
+func TestVerifyPack_AcceptsAFramedPack(t *testing.T) {
+	withFrameWindow(t, coldFrameWindow)
+	const first = 4_400
+	lcms := [][]byte{framedLedger(t, first), zeroTxLedger(t, first+1), framedLedger(t, first+2)}
+	path := writeFramedPack(t, first, testColdPassphrase, lcms...)
+
+	tabled, err := VerifyPack(path)
+	require.NoError(t, err)
+	assert.Equal(t, 2, tabled, "only the framed records carry a table")
+}
+
+// TestVerifyPack_CatchesADriftedDirectory pins the failure the verifier
+// exists for: a directory entry that no longer describes the frames stored
+// beside it is reported, naming the ledger — and a lookup through that table
+// errors rather than slicing the wrong bytes.
+func TestVerifyPack_CatchesADriftedDirectory(t *testing.T) {
+	withFrameWindow(t, coldFrameWindow)
+	const first = 4_500
+	raw := framedLedger(t, first)
+	path := writeFramedPack(t, first, testColdPassphrase, raw)
+	driftOneFrameSize(t, path)
+
+	_, err := VerifyPack(path)
+	require.ErrorIs(t, err, stores.ErrCorrupt)
+	require.ErrorContains(t, err, "4500")
+
+	r := newTestColdReader(t, path)
+	lookupErr := r.WithTxTable(first, func(tbl txspan.Table, _ txspan.LedgerHeader, pieces txspan.PieceReader) error {
+		// Every row is read: a drifted directory must be caught, not silently
+		// answered with neighboring bytes.
+		for i := range tbl.TxCount() {
+			if _, _, perr := pieces(tbl.Row(i)); perr != nil {
+				return perr
+			}
+		}
+		return nil
+	})
+	require.ErrorIs(t, lookupErr, stores.ErrCorrupt)
+	require.ErrorContains(t, lookupErr, "4500")
+}
+
+// TestVerifyPack_NamesTheRecordWhoseTableFailedItsChecksum pins the
+// attribution the digest replay cannot give. A table edited under its own
+// checksum is reported as corruption of THAT record, with the reason, where it
+// is read — the digest would disagree at the end and name neither.
+func TestVerifyPack_NamesTheRecordWhoseTableFailedItsChecksum(t *testing.T) {
+	withFrameWindow(t, coldFrameWindow)
+	const first = 4_600
+	raw := framedLedger(t, first)
+	path := writeFramedPack(t, first, testColdPassphrase, raw)
+	corruptFirstTable(t, path)
+
+	_, err := VerifyPack(path)
+	require.ErrorIs(t, err, stores.ErrCorrupt)
+	assert.ErrorContains(t, err, "4600", "the failure must name the record")
+	assert.ErrorContains(t, err, path, "the failure must name the pack")
+	assert.ErrorContains(t, err, "checksum mismatch", "the failure must give the reason")
+
+	// A serving read of the same record fails the same way, and says the same
+	// three things — the pack is a bad artifact whichever read finds it.
+	r := newTestColdReader(t, path)
+	serveErr := r.WithTxTable(first, func(txspan.Table, txspan.LedgerHeader, txspan.PieceReader) error {
+		t.Fatal("fn must not run for a table that will not parse")
+		return nil
+	})
+	require.ErrorIs(t, serveErr, stores.ErrCorrupt)
+	require.NotErrorIs(t, serveErr, stores.ErrNoTable, "a bad table is not an absent one")
+	assert.ErrorContains(t, serveErr, "4600")
+	assert.ErrorContains(t, serveErr, "checksum mismatch")
+}
+
+// corruptFirstTable flips one byte of the pack's first record's span table,
+// leaving every length alone, so the table fails its own CRC inside a record
+// that is otherwise exactly what the writer wrote.
+func corruptFirstTable(t *testing.T, path string) {
+	t.Helper()
+	record, at := firstRecord(t, path)
+	payload, _, err := zstd.SkippablePayload(record)
+	require.NoError(t, err)
+	flipped := bytes.Clone(payload)
+	flipped[len(flipped)-1] ^= 0x01
+
+	f, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	require.NoError(t, err)
+	defer func() { _ = f.Close() }()
+	_, err = f.WriteAt(flipped, at+8) // past the skippable frame's header
+	require.NoError(t, err)
+}
+
+// driftOneFrameSize rewrites the pack's first record so its table claims a
+// frame layout the stored frames do not have, with a checksum that still
+// validates — the corruption a checksum alone cannot catch.
+func driftOneFrameSize(t *testing.T, path string) {
+	t.Helper()
+	record, at := firstRecord(t, path)
+	payload, _, err := zstd.SkippablePayload(record)
+	require.NoError(t, err)
+	table, err := txspan.Parse(payload)
+	require.NoError(t, err)
+
+	frames := make([]txspan.Frame, table.FrameCount())
+	for i := range frames {
+		frames[i] = table.Frame(i)
+	}
+	// Move a byte from one frame to the next: the total is unchanged, so the
+	// drift shows only against the frames themselves.
+	frames[0].Compressed--
+	frames[1].Compressed++
+	drifted, err := txspan.WithFrames(payload, frames)
+	require.NoError(t, err)
+	require.Len(t, drifted, len(payload), "the rewrite must keep the record's length")
+
+	f, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	require.NoError(t, err)
+	defer func() { _ = f.Close() }()
+	_, err = f.WriteAt(drifted, at+8) // past the skippable frame's header
+	require.NoError(t, err)
+}
+
+// firstRecord reads the pack's first record and returns it with its file
+// offset.
+func firstRecord(t *testing.T, path string) ([]byte, int64) {
+	t.Helper()
+	r := newTestColdReader(t, path)
+	_, err := r.init()
+	require.NoError(t, err)
+	at, size, err := r.r.RecordRange(0)
+	require.NoError(t, err)
+	buf := make([]byte, size)
+	require.NoError(t, r.r.ReadAt(buf, at))
+	return buf, at
+}
+
 // TestColdWithTxTable_FrontCoversTheTableAndTheHeaderFrame pins the exact
 // read from both sides. A front that is what the record needs answers every
 // row; a front one byte short of the HEADER frame — the table itself still
@@ -353,6 +492,44 @@ func recordFront(t *testing.T, r *ColdReader, i int) int {
 	first, err := zstd.FrameCompressedSize(record[frameLen:])
 	require.NoError(t, err)
 	return frameLen + first
+}
+
+// TestColdWithTxTable_LeadingFrameClaimingPastTheRecord pins the bound itself:
+// a leading frame whose length field reaches past the front the pack records
+// is corruption of that record, not license to read the rest of it — or the
+// next one's bytes — as a table.
+func TestColdWithTxTable_LeadingFrameClaimingPastTheRecord(t *testing.T) {
+	withFrameWindow(t, coldFrameWindow)
+	const first = 4_800
+	path := writeFramedPack(t, first, testColdPassphrase,
+		framedLedger(t, first), framedLedger(t, first+1))
+	overstateFirstFrameLen(t, path)
+
+	r := newTestColdReader(t, path)
+	readErr := r.WithTxTable(first, func(txspan.Table, txspan.LedgerHeader, txspan.PieceReader) error {
+		t.Fatal("fn must not run for a frame that does not fit its record")
+		return nil
+	})
+	require.ErrorIs(t, readErr, stores.ErrCorrupt)
+	require.NotErrorIs(t, readErr, stores.ErrNoTable)
+	assert.ErrorContains(t, readErr, "leading frame claims")
+
+	_, verr := VerifyPack(path)
+	require.ErrorIs(t, verr, stores.ErrCorrupt)
+	assert.ErrorContains(t, verr, "leading frame claims")
+}
+
+// overstateFirstFrameLen rewrites the length field of the pack's first
+// record's leading skippable frame so it claims more bytes than the record
+// holds, leaving every other byte of the pack alone.
+func overstateFirstFrameLen(t *testing.T, path string) {
+	t.Helper()
+	_, at := firstRecord(t, path)
+	f, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	require.NoError(t, err)
+	defer func() { _ = f.Close() }()
+	_, err = f.WriteAt(binary.LittleEndian.AppendUint32(nil, math.MaxUint32), at+4)
+	require.NoError(t, err)
 }
 
 // TestSkippableFrameLen_RefusesWhatIsNotASkippableHeader pins the header read

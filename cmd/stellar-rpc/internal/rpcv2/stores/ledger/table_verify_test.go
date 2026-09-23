@@ -186,6 +186,43 @@ func TestStoredTableServesTheLedgersOwnHeader(t *testing.T) {
 	}
 }
 
+// TestStoredMisstampedTableIsAnError pins the pairing check the stamp exists
+// for, on BOTH tiers. A table whose rows and index are honest but whose
+// stamped sequence is another ledger's describes bytes that are not here, so
+// the read fails naming both numbers — and the verifier refuses the pack
+// rather than leaving it to each reader.
+func TestStoredMisstampedTableIsAnError(t *testing.T) {
+	withFrameWindow(t, coldFrameWindow)
+	const seq = 7_300
+	raw := framedLedger(t, seq)
+	value, frames := encodeFramedValue(t, raw)
+	misstamped := restampedTable(t, raw, frames, seq+1)
+
+	tiers := tieredTable(t, seq, raw, value, misstamped)
+	for name, tier := range tiers.All() {
+		t.Run(name, func(t *testing.T) {
+			err := tier.WithTxTable(seq,
+				func(txspan.Table, txspan.LedgerHeader, txspan.PieceReader) error {
+					t.Fatal("fn must not run for a table stamped for another ledger")
+					return nil
+				})
+			require.ErrorIs(t, err, stores.ErrCorrupt)
+			require.NotErrorIs(t, err, stores.ErrNoTable, "a mis-stamped table is not an absent one")
+			assert.ErrorContains(t, err, "7301")
+
+			// The ledger itself is untouched by any of it.
+			require.NoError(t, tier.WithLedger(seq, func(got []byte) error {
+				assert.Equal(t, raw, got)
+				return nil
+			}))
+		})
+	}
+
+	_, verr := VerifyPack(tiers.coldPath)
+	require.ErrorIs(t, verr, stores.ErrCorrupt)
+	assert.ErrorContains(t, verr, "7301")
+}
+
 // TestStoredNewerVersionTableIsWalked pins the one table failure that is not a
 // failure, on BOTH tiers: a table stamped with a format version this build
 // does not read is a LATER build's artifact, not a broken one. The tier
