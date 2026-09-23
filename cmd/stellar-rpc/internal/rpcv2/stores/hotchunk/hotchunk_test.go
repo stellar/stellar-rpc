@@ -813,12 +813,14 @@ func TestIngestLedger_WritesTheSpanTableInTheSameBatch(t *testing.T) {
 	assert.Equal(t, written+1, ledger.TablesWritten())
 
 	// The table is readable beside its ledger, carries the ledger's own header
-	// stamp, and routes the ledger's hash.
+	// stamp and the value's frame directory, and routes the ledger's hash.
 	require.NoError(t, db.Ledgers().WithTxTable(first,
 		func(tbl txspan.Table, header txspan.LedgerHeader, pieces txspan.PieceReader) error {
 			assert.Equal(t, 1, tbl.TxCount())
 			assert.Equal(t, first, tbl.LedgerSeq())
 			assert.Equal(t, first, header.LedgerSeq, "the header the store read is the ledger's own")
+			assert.Equal(t, 1, tbl.FrameCount(), "a ledger inside the frame window is one frame")
+			assert.Equal(t, uint32(len(raw)), tbl.RawSize())
 			_, found, lookupErr := txspan.LookupPieces(tbl, pieces, hash, header, testPassphrase)
 			require.NoError(t, lookupErr)
 			assert.True(t, found)

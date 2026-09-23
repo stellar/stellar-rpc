@@ -97,6 +97,24 @@ type HotStore struct {
 	scratch sync.Pool
 }
 
+// FrameWindow is the raw byte window of one stored ledger frame. A ledger at
+// or under it is stored as ONE frame, byte-for-byte what this store wrote
+// before frames existed; a larger one is cut into a frame holding its header
+// and then fixed FrameWindow-sized frames, so a reader after two byte spans
+// decompresses only the frames those spans fall in.
+//
+// It is a constant, not a configuration knob: it selects the stored frame
+// bytes, the same way the encode-workers count does, and a deployment whose
+// two materializers disagreed on it would stop writing byte-identical packs.
+const FrameWindow = 4 << 20
+
+// frameWindow is the window every write actually uses. It is a variable only
+// so a test can lower it below the size of any LedgerCloseMeta a fixture can
+// build; production never changes it.
+//
+//nolint:gochecknoglobals // the constant above is the contract; this is its test seam
+var frameWindow = FrameWindow
+
 // maxPooledLedgerBytes is the largest decode buffer this store keeps. Capacity
 // only ratchets upward and sync.Pool accepts whatever it is given, so without a
 // ceiling N concurrent borrows can park N outsized buffers for the store's life.
@@ -158,6 +176,7 @@ type PendingCompression struct {
 	done chan struct{}
 
 	compressed []byte
+	frames     []txspan.Frame
 	err        error
 	consumed   bool
 }
@@ -165,6 +184,12 @@ type PendingCompression struct {
 // StartCompress begins compressing e.Bytes into a pooled buffer on its own
 // goroutine. e.Bytes is read until the returned pending resolves — join or
 // Discard before invalidating it.
+//
+// A ledger past FrameWindow is cut into frames (see FrameWindow); one that
+// fits, or one whose header this store cannot locate, is the single frame it
+// always was. Frames reports the cut once the pending has been joined. The
+// cut changes the stored value only — the raw ledger bytes a reader gets back,
+// and the content the cold pack's hash is taken over, are unchanged.
 func (h *HotStore) StartCompress(e Entry) *PendingCompression {
 	if !h.encBusy.CompareAndSwap(false, true) {
 		panic("ledger: concurrent StartCompress violates the single-flight write contract")
@@ -172,10 +197,51 @@ func (h *HotStore) StartCompress(e Entry) *PendingCompression {
 	p := &PendingCompression{seq: e.Seq, h: h, done: make(chan struct{})}
 	go func() {
 		defer close(p.done)
-		p.compressed, p.err = h.enc.Encode(e.Bytes)
+		var sizes []zstd.FrameSize
+		end, window := frameCut(e.Bytes)
+		p.compressed, sizes, p.err = h.enc.EncodeFrames(e.Bytes, end, window)
+		p.frames = framesOf(sizes)
 	}()
 	return p
 }
+
+// frameCut resolves how a value is cut: the offset the first frame ends at —
+// the end of the ledger's own header — and the window the rest is cut by.
+// A value that already fits the window is left alone, and one whose header
+// will not resolve gets a window wide enough to hold it whole, so a payload
+// this store cannot navigate stays the single frame it has always been.
+func frameCut(raw []byte) (int, int) {
+	if len(raw) <= frameWindow {
+		return 0, frameWindow
+	}
+	end, err := txspan.HeaderEnd(raw)
+	if err != nil {
+		return 0, len(raw)
+	}
+	return end, frameWindow
+}
+
+// framesOf converts the encoder's per-frame sizes into the directory shape a
+// span table stores. Sizes past uint32 cannot occur: a frame's raw extent is
+// bounded by the window and its compressed extent by the value's own length,
+// which the store's uint32 offsets already bound.
+func framesOf(sizes []zstd.FrameSize) []txspan.Frame {
+	if len(sizes) == 0 {
+		return nil
+	}
+	out := make([]txspan.Frame, len(sizes))
+	for i, s := range sizes {
+		//nolint:gosec // bounded by the ledger value's own uint32-bounded length
+		out[i] = txspan.Frame{Compressed: uint32(s.Compressed), Raw: uint32(s.Raw)}
+	}
+	return out
+}
+
+// Frames is the joined compression's frame directory, in order. Valid after
+// AddPendingToBatch or Discard has joined the pending; empty when the encode
+// failed. It is what stamps the span table's directory, so a reader can map a
+// raw offset onto the frame holding it.
+func (p *PendingCompression) Frames() []txspan.Frame { return p.frames }
 
 // AddPendingToBatch joins p and queues its compressed ledger into b on
 // LedgersCF — the deferred-join twin of AddLedgerToBatch. Put copies
@@ -262,12 +328,15 @@ func (h *HotStore) AddTableToBatch(b *rocksdb.BatchWriter, seq uint32, table []b
 }
 
 // WithTxTable calls fn with seq's transaction span table, the ledger's own
-// header fields, and a reader for the byte spans the table names.
+// header fields, and a reader for the byte spans the table names, without
+// decoding the whole ledger: a span's bytes come from the frames it falls in
+// and nothing else.
 //
-// The header comes from the LEDGER, not from the table: the two scalars a
-// served transaction carries, and the union discriminant its element is read
-// under, are read out of the ledger's own header, and the table's stamps are
-// asserted against them rather than trusted.
+// The header comes from the ledger's FIRST FRAME, which a framed value cuts at
+// the end of the header — so the two scalars a served transaction carries, and
+// the union discriminant its element is read under, are the ledger's own and
+// not the table's stamps. A value stored as one frame is decoded whole for it,
+// which is the same decode its spans would have needed anyway.
 //
 // It returns stores.ErrNoTable when this store holds no table the caller can
 // use: no row under the key, or a row a LATER build wrote in a format version
@@ -275,10 +344,10 @@ func (h *HotStore) AddTableToBatch(b *rocksdb.BatchWriter, seq uint32, table []b
 // broken one). The table family itself is always there, since every open names
 // it and fails without it. The caller then reads the ledger through WithLedger
 // and walks it, which is the pre-table read path. A stored table that will not
-// parse for any OTHER reason is an ERROR naming the ledger and the reason, not
-// an absent accelerator: the store wrote it and cannot read it back, and a
-// read that quietly walked instead would leave nothing for an operator to see.
-// A missing LEDGER is stores.ErrNotFound, as it is everywhere else.
+// parse for any OTHER reason is an ERROR naming the ledger and the reason, not an absent
+// accelerator: the store wrote it and cannot read it back, and a read that
+// quietly walked instead would leave nothing for an operator to see. A missing
+// LEDGER is stores.ErrNotFound, as it is everywhere else.
 //
 // THE LOAN RULE covers everything fn sees: the table is RocksDB's own pinned
 // block and every piece the reader returns aliases a decode buffer this store
@@ -319,11 +388,7 @@ func (h *HotStore) WithTxTable(
 					stores.ErrCorrupt, seq, stamped)
 				return nil
 			}
-			pieces, derr := h.borrowPieces(seq, t, value)
-			if derr != nil {
-				tableErr = derr
-				return nil
-			}
+			pieces := h.borrowPieces(seq, t, value)
 			defer pieces.release()
 			header, herr := pieces.header()
 			if herr != nil {
@@ -348,48 +413,137 @@ func (h *HotStore) WithTxTable(
 	return nil
 }
 
-// pieceReader hands a lookup the byte spans a row names, out of the ledger
-// this read decoded. Both pieces are windows on one pooled buffer, so they
-// stay valid together for as long as the call that lent them.
+// pieceReader decodes, per read, only the frames a row's two spans fall in.
+// Each piece owns a scratch buffer holding the contiguous raw bytes of the run
+// of frames covering it; a second piece inside the same run reuses the first's
+// buffer rather than decoding it again.
 type pieceReader struct {
 	h     *HotStore
 	seq   uint32
 	table txspan.Table
-	buf   *[]byte
-	raw   []byte
+	value []byte
+
+	env, elem *frameRun
 }
 
-// header reads from the ledger's own header the fields a served transaction
-// takes from the ledger rather than from its table, proving as it goes that
-// this really is the ledger the read resolved.
+// frameRun is one decoded run of consecutive frames: the raw bytes of frames
+// [lo, hi) and the raw offset they start at.
+type frameRun struct {
+	buf      *[]byte
+	raw      []byte
+	rawStart uint32
+	lo, hi   int
+	loaded   bool
+}
+
+// header decodes the frame the ledger's own header lives in — frame 0, which
+// a framed value cuts at the header's end — and reads from it the fields a
+// served transaction takes from the ledger rather than from its table, proving
+// as it goes that this really is the ledger the read resolved.
+//
+// It loads the ENVELOPE's run, so a value stored as one frame pays one decode
+// for the header and the spans together, which is what it paid before.
 func (p *pieceReader) header() (txspan.LedgerHeader, error) {
-	return ledgerHeader(p.raw, p.seq)
+	if p.table.FrameCount() == 0 {
+		return txspan.LedgerHeader{}, fmt.Errorf("%w: ledger %d: its span table has no frame directory",
+			stores.ErrCorrupt, p.seq)
+	}
+	raw, err := p.slice(p.env, 0, p.table.Frame(0).Raw)
+	if err != nil {
+		return txspan.LedgerHeader{}, err
+	}
+	return ledgerHeader(raw, p.seq)
 }
 
-// read is the PieceReader: it slices both of a row's spans out of the ledger.
+// read is the PieceReader: it resolves each span to the run of frames covering
+// it, decodes the runs that are not already in hand, and slices.
 func (p *pieceReader) read(r txspan.Row) ([]byte, []byte, error) {
 	if err := p.bounds(r); err != nil {
 		return nil, nil, err
 	}
-	return p.raw[r.EnvStart:r.EnvEnd], p.raw[r.ElemStart:r.ElemEnd], nil
+	env, err := p.slice(p.env, r.EnvStart, r.EnvEnd)
+	if err != nil {
+		return nil, nil, err
+	}
+	// The element usually shares the envelope's run; reusing it keeps the
+	// common read at one decode.
+	if p.env.covers(r.ElemStart, r.ElemEnd) {
+		elem, serr := p.slice(p.env, r.ElemStart, r.ElemEnd)
+		return env, elem, serr
+	}
+	elem, err := p.slice(p.elem, r.ElemStart, r.ElemEnd)
+	return env, elem, err
 }
 
-// bounds proves both spans lie inside the ledger stored under this key, so a
-// table paired with the wrong value fails here rather than mid-slice.
+// bounds proves both spans lie inside the ledger the directory describes, so a
+// table paired with the wrong value fails here rather than mid-decode.
 func (p *pieceReader) bounds(r txspan.Row) error {
-	size := uint64(len(p.raw))
-	if r.EnvStart > r.EnvEnd || uint64(r.EnvEnd) > size ||
-		r.ElemStart > r.ElemEnd || uint64(r.ElemEnd) > size {
+	size := p.table.RawSize()
+	if r.EnvStart > r.EnvEnd || r.EnvEnd > size || r.ElemStart > r.ElemEnd || r.ElemEnd > size {
 		return fmt.Errorf("%w: ledger %d: spans [%d, %d) and [%d, %d) are not inside a %d-byte ledger",
 			stores.ErrCorrupt, p.seq, r.EnvStart, r.EnvEnd, r.ElemStart, r.ElemEnd, size)
 	}
 	return nil
 }
 
-// release returns the scratch buffer to the store's pool.
+// slice returns [start, end) of the raw ledger, decoding into run the frames
+// covering it when run does not already hold them.
+func (p *pieceReader) slice(run *frameRun, start, end uint32) ([]byte, error) {
+	if !run.covers(start, end) {
+		if err := p.load(run, start, end); err != nil {
+			return nil, err
+		}
+	}
+	return run.raw[start-run.rawStart : end-run.rawStart], nil
+}
+
+// load decodes into run the shortest run of frames covering [start, end).
+func (p *pieceReader) load(run *frameRun, start, end uint32) error {
+	lo, rawStart, compStart, ok := p.table.RawOffsetFrame(start)
+	if !ok {
+		return fmt.Errorf("%w: ledger %d: offset %d is outside the frame directory",
+			stores.ErrCorrupt, p.seq, start)
+	}
+	// end is exclusive, so the last covering frame is the one holding end-1;
+	// an empty span covers the frame it starts in.
+	last := start
+	if end > start {
+		last = end - 1
+	}
+	hi, lastRawStart, lastCompStart, ok := p.table.RawOffsetFrame(last)
+	if !ok {
+		return fmt.Errorf("%w: ledger %d: offset %d is outside the frame directory",
+			stores.ErrCorrupt, p.seq, last)
+	}
+	lastFrame := p.table.Frame(hi)
+	compEnd := lastCompStart + lastFrame.Compressed
+	if uint64(compEnd) > uint64(len(p.value)) {
+		return fmt.Errorf("%w: ledger %d: frames [%d, %d] end at %d in a %d-byte value",
+			stores.ErrCorrupt, p.seq, lo, hi, compEnd, len(p.value))
+	}
+	decoded, err := p.h.dec.Decode((*run.buf)[:0], p.value[compStart:compEnd])
+	if err != nil {
+		return decodeErr(p.seq, err)
+	}
+	if want := int(lastRawStart + lastFrame.Raw - rawStart); len(decoded) != want {
+		return fmt.Errorf("%w: ledger %d: frames [%d, %d] decoded to %d bytes, the directory says %d",
+			stores.ErrCorrupt, p.seq, lo, hi, len(decoded), want)
+	}
+	*run.buf = decoded
+	run.raw, run.rawStart, run.lo, run.hi, run.loaded = decoded, rawStart, lo, hi+1, true
+	return nil
+}
+
+// covers reports whether the run already holds [start, end).
+func (f *frameRun) covers(start, end uint32) bool {
+	return f.loaded && start >= f.rawStart && uint64(end) <= uint64(f.rawStart)+uint64(len(f.raw))
+}
+
+// release returns both scratch buffers to the store's pool.
 func (p *pieceReader) release() {
-	p.h.recycle(p.buf)
-	p.buf, p.raw = nil, nil
+	p.h.recycle(p.env.buf)
+	p.h.recycle(p.elem.buf)
+	p.env, p.elem = nil, nil
 }
 
 // LastSeq returns the highest ledger sequence in the store, or ok=false
@@ -441,18 +595,21 @@ func (h *HotStore) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 	}
 }
 
-// borrowPieces decodes the stored value into a pooled buffer and binds it to
-// the table that describes it, so a lookup slices spans instead of walking.
-func (h *HotStore) borrowPieces(seq uint32, t txspan.Table, value []byte) (*pieceReader, error) {
-	buf, _ := h.scratch.Get().(*[]byte)
-	raw, err := h.dec.Decode((*buf)[:0], value)
-	if err != nil {
-		h.recycle(buf)
-		return nil, decodeErr(seq, err)
+// borrowPieces binds a table and its compressed value to two pooled decode
+// buffers, one per piece, so the envelope and the element of a single read
+// stay valid together even when they land in different frames.
+func (h *HotStore) borrowPieces(seq uint32, t txspan.Table, value []byte) *pieceReader {
+	return &pieceReader{
+		h: h, seq: seq, table: t, value: value,
+		env:  h.borrowScratch(),
+		elem: h.borrowScratch(),
 	}
-	// A ledger too big for the pooled capacity got a fresh, larger array; keep it.
-	*buf = raw
-	return &pieceReader{h: h, seq: seq, table: t, buf: buf, raw: raw}, nil
+}
+
+// borrowScratch takes a decode buffer from the pool for one frame run.
+func (h *HotStore) borrowScratch() *frameRun {
+	buf, _ := h.scratch.Get().(*[]byte)
+	return &frameRun{buf: buf}
 }
 
 // recycle pools a decode buffer the store still wants back.

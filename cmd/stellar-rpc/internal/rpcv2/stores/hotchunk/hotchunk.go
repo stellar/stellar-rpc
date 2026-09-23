@@ -661,9 +661,12 @@ func (d *DB) IngestLedger(
 
 		// The span table is an accelerator, so its failure never fails the
 		// ledger: the reader falls back to decoding. It lands in THIS batch,
-		// which is what makes a table's existence imply its ledger's.
+		// which is what makes a table's existence imply its ledger's. Both
+		// forks have joined by here, so this is where the value's frame
+		// directory — known only once the encode finished — is stamped into
+		// the table that describes the same bytes.
 		ss := time.Now()
-		d.ledger.AddTableToBatch(b, seq, d.joinSpans(seq, spans))
+		d.ledger.AddTableToBatch(b, seq, d.stampFrames(seq, d.joinSpans(seq, spans), pending.Frames()))
 		rep.Phases[PhaseTxSpans].Dur = time.Since(ss)
 		return nil
 	})
@@ -719,6 +722,21 @@ func (d *DB) joinSpans(seq uint32, spans *txspan.Pending) []byte {
 	}
 	entry.Warn("hotchunk: transaction span table build failed; reads decode this ledger instead")
 	return nil
+}
+
+// stampFrames writes the compressed value's frame directory into the table, so
+// a reader mapping a byte offset to the frame holding it needs nothing but the
+// table. A failure is treated like a refused build — the ledger keeps its
+// spans out of the store and readers decode it — because a table whose
+// directory does not describe the stored value is worse than none.
+func (d *DB) stampFrames(seq uint32, table []byte, frames []txspan.Frame) []byte {
+	stamped, err := txspan.WithFrames(table, frames)
+	if err != nil {
+		d.logger.WithField("seq", seq).WithError(err).
+			Warn("hotchunk: stamping the ledger's frame directory failed; reads decode this ledger instead")
+		return nil
+	}
+	return stamped
 }
 
 // ledgerTxHashes collects one ledger's indexable tx hashes in apply order —

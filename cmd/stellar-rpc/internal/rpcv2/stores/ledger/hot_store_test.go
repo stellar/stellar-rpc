@@ -23,6 +23,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/txspan"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/zstd"
 )
 
 func silentLogger() *supportlog.Entry {
@@ -646,6 +647,7 @@ func TestWithTxTable_PiecesEqualTheRawSpans(t *testing.T) {
 	var rows int
 	require.NoError(t, h.WithTxTable(9, func(tbl txspan.Table, _ txspan.LedgerHeader, pieces txspan.PieceReader) error {
 		require.Equal(t, uint32(9), tbl.LedgerSeq())
+		require.Equal(t, 1, tbl.FrameCount(), "a ledger inside the window is one frame")
 		for i := range tbl.TxCount() {
 			row := tbl.Row(i)
 			env, elem, perr := pieces(row)
@@ -790,39 +792,6 @@ func TestHotStore_FreshWriteOpenCreatesTheTableFamily(t *testing.T) {
 	}))
 }
 
-// putLedgerWithTable commits one ledger the way the ingest loop does: the
-// forked compression and the span table built beside it, both landing in one
-// batch.
-func putLedgerWithTable(t *testing.T, h *HotStore, seq uint32, raw []byte) {
-	t.Helper()
-	pending := h.StartCompress(Entry{Seq: seq, Bytes: raw})
-	txParts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
-	require.NoError(t, err)
-	table, err := txspan.Build(raw, txParts, network.TestNetworkPassphrase)
-	require.NoError(t, err)
-	require.NoError(t, h.store.Batch(func(b *rocksdb.BatchWriter) error {
-		if perr := h.AddPendingToBatch(b, pending); perr != nil {
-			return perr
-		}
-		h.AddTableToBatch(b, seq, table)
-		return nil
-	}))
-}
-
-// ledgerWithTable returns a zero-transaction ledger and the span table built
-// for it, so the store tests exercise real encoded tables rather than
-// stand-ins. It stores no ledger beside the table, so it is for tests about
-// the table row alone; putLedgerWithTable commits the pair.
-func ledgerWithTable(t *testing.T, seq uint32) ([]byte, []byte) {
-	t.Helper()
-	raw := zeroTxLedger(t, seq)
-	txParts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
-	require.NoError(t, err)
-	table, err := txspan.Build(raw, txParts, network.PublicNetworkPassphrase)
-	require.NoError(t, err)
-	return raw, table
-}
-
 // zeroTxLedger marshals a minimal V2 LedgerCloseMeta holding no transactions.
 func zeroTxLedger(t *testing.T, seq uint32) []byte {
 	t.Helper()
@@ -838,4 +807,135 @@ func zeroTxLedger(t *testing.T, seq uint32) []byte {
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 	return raw
+}
+
+// TestWithTxTable_SpansStraddlingAFrameCut pins the piece reader's hardest
+// case: with the window low enough that a ledger is cut several times, a span
+// crossing a cut must still come back whole. The window is lowered rather than
+// a four-megabyte fixture built, but every other part of the path — the
+// directory, the compressed offsets, the decode — is the production one.
+func TestWithTxTable_SpansStraddlingAFrameCut(t *testing.T) {
+	h := openTestHotStore(t)
+	lcm, _ := makeRandomLedgerCloseMeta(10, 64)
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+	// A window a few hundred bytes wide cuts between (and through) envelopes
+	// and elements alike.
+	withFrameWindow(t, 512)
+	require.Greater(t, len(raw), 4*512, "the fixture must span several frames")
+	putLedgerWithTable(t, h, 10, raw)
+
+	straddled := 0
+	require.NoError(t, h.WithTxTable(10, func(tbl txspan.Table, _ txspan.LedgerHeader, pieces txspan.PieceReader) error {
+		require.Greater(t, tbl.FrameCount(), 4, "the value must be cut into several frames")
+		for i := range tbl.TxCount() {
+			row := tbl.Row(i)
+			env, elem, perr := pieces(row)
+			require.NoError(t, perr)
+			assert.Equal(t, raw[row.EnvStart:row.EnvEnd], env, "envelope %d", i)
+			assert.Equal(t, raw[row.ElemStart:row.ElemEnd], elem, "element %d", i)
+			first, _, _, _ := tbl.RawOffsetFrame(row.EnvStart)
+			last, _, _, _ := tbl.RawOffsetFrame(row.EnvEnd - 1)
+			if first != last {
+				straddled++
+			}
+		}
+		return nil
+	}))
+	assert.Positive(t, straddled, "no envelope crossed a cut; the fixture proves nothing")
+}
+
+// TestStartCompress_SingleFrameValueIsUnchanged pins the byte-identity floor:
+// a ledger inside the window is compressed to exactly what the plain encoder
+// produces, and reports one frame.
+func TestStartCompress_SingleFrameValueIsUnchanged(t *testing.T) {
+	h := openTestHotStore(t)
+	lcm, _ := makeRandomLedgerCloseMeta(41, 8)
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+
+	pending := h.StartCompress(Entry{Seq: 41, Bytes: raw})
+	require.NoError(t, h.store.Batch(func(b *rocksdb.BatchWriter) error {
+		return h.AddPendingToBatch(b, pending)
+	}))
+	require.Len(t, pending.Frames(), 1)
+	assert.Equal(t, uint32(len(raw)), pending.Frames()[0].Raw)
+
+	want, err := zstd.NewEncoderState().Encode(raw)
+	require.NoError(t, err)
+	var got []byte
+	_, err = h.store.GetPinned(LedgersCF, rocksdb.EncodeUint32(41), func(v []byte) error {
+		got = bytes.Clone(v)
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, want, got, "a ledger inside the window must encode to the pre-frames bytes")
+}
+
+// TestStartCompress_FramedValueRoundTripsWhole pins that framing changes only
+// how a value is stored: every whole-ledger read still hands back the exact
+// ledger bytes.
+func TestStartCompress_FramedValueRoundTripsWhole(t *testing.T) {
+	h := openTestHotStore(t)
+	withFrameWindow(t, 1024)
+	lcm, _ := makeRandomLedgerCloseMeta(42, 48)
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+	putLedgerWithTable(t, h, 42, raw)
+
+	require.NoError(t, h.WithLedger(42, func(got []byte) error {
+		assert.Equal(t, raw, got)
+		return nil
+	}))
+	for e, ierr := range h.IterateLedgers(42, 42) {
+		require.NoError(t, ierr)
+		assert.Equal(t, raw, e.Bytes)
+	}
+}
+
+// withFrameWindow lowers the store's frame window for one test, so a fixture
+// small enough to build in memory is still cut into several frames.
+func withFrameWindow(t *testing.T, window int) {
+	t.Helper()
+	previous := frameWindow
+	frameWindow = window
+	t.Cleanup(func() { frameWindow = previous })
+}
+
+// putLedgerWithTable commits one ledger the way the ingest loop does: the
+// forked compression, the span table built beside it, and the value's frame
+// directory stamped into that table before both land in one batch.
+func putLedgerWithTable(t *testing.T, h *HotStore, seq uint32, raw []byte) {
+	t.Helper()
+	pending := h.StartCompress(Entry{Seq: seq, Bytes: raw})
+	txParts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
+	require.NoError(t, err)
+	table, err := txspan.Build(raw, txParts, network.TestNetworkPassphrase)
+	require.NoError(t, err)
+	require.NoError(t, h.store.Batch(func(b *rocksdb.BatchWriter) error {
+		if perr := h.AddPendingToBatch(b, pending); perr != nil {
+			return perr
+		}
+		stamped, serr := txspan.WithFrames(table, pending.Frames())
+		if serr != nil {
+			return serr
+		}
+		h.AddTableToBatch(b, seq, stamped)
+		return nil
+	}))
+}
+
+// ledgerWithTable returns a zero-transaction ledger and the span table built
+// for it, so the store tests exercise real encoded tables rather than
+// stand-ins. The table carries NO frame directory — nothing stamps one here —
+// so it is for tests that never read it back through the piece reader;
+// putLedgerWithTable is the readable one.
+func ledgerWithTable(t *testing.T, seq uint32) ([]byte, []byte) {
+	t.Helper()
+	raw := zeroTxLedger(t, seq)
+	txParts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
+	require.NoError(t, err)
+	table, err := txspan.Build(raw, txParts, network.PublicNetworkPassphrase)
+	require.NoError(t, err)
+	return raw, table
 }
