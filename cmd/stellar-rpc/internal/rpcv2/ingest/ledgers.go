@@ -29,8 +29,11 @@ type ledgerCold struct {
 // caller, is always a batch freeze/backfill. zstdWorkers is the
 // FORMAT-AFFECTING frame encode setting (Config.ZstdEncodeWorkers) — it must
 // match the hot tier's so the walk-built pack is byte-identical to a
-// freeze-built one.
-func newLedgerCold(packPath string, chunkID chunk.ID, sink MetricSink, zstdWorkers int) (*ledgerCold, error) {
+// freeze-built one, and passphrase carries the same obligation for the span
+// tables the records hold.
+func newLedgerCold(
+	packPath string, chunkID chunk.ID, sink MetricSink, zstdWorkers int, passphrase string,
+) (*ledgerCold, error) {
 	if err := os.MkdirAll(filepath.Dir(packPath), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(packPath), err)
 	}
@@ -38,6 +41,7 @@ func newLedgerCold(packPath string, chunkID chunk.ID, sink MetricSink, zstdWorke
 		Concurrency:       coldEncoderConcurrency,
 		BytesPerSync:      coldBytesPerSync,
 		ZstdEncodeWorkers: zstdWorkers,
+		Passphrase:        passphrase,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ledger.NewColdWriter %s: %w", packPath, err)

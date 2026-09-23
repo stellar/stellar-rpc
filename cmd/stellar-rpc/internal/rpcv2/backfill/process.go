@@ -48,6 +48,13 @@ type ProcessConfig struct {
 	// hot tier (FORMAT-AFFECTING — the two must agree; see hotchunk.Tuning
 	// and ingest.Config.ZstdEncodeWorkers, which this feeds).
 	ZstdEncodeWorkers int
+
+	// Passphrase is the network the ledgers were produced on, resolved from
+	// the same daemon value the hot tier keys its transaction span tables
+	// under. The walk materializer builds those tables under it, and it is
+	// REQUIRED: a backfill that ran without one would write packs whose every
+	// transaction lookup decodes a whole ledger (see ingest.Config.Passphrase).
+	Passphrase string
 }
 
 func (cfg ProcessConfig) validate() error {
@@ -56,6 +63,10 @@ func (cfg ProcessConfig) validate() error {
 	}
 	if cfg.Logger == nil {
 		return errors.New("ProcessConfig.Logger is nil")
+	}
+	if cfg.Passphrase == "" {
+		return errors.New("ProcessConfig.Passphrase is empty " +
+			"(the network the ledgers were produced on keys their span tables)")
 	}
 	return nil
 }
@@ -75,6 +86,7 @@ func ingestConfigFor(s catalog.ArtifactSet, chunkID chunk.ID, cfg ProcessConfig)
 		Txhash:            s.Has(geometry.KindTxHash),
 		Events:            s.Has(geometry.KindEvents),
 		ZstdEncodeWorkers: cfg.ZstdEncodeWorkers,
+		Passphrase:        cfg.Passphrase,
 	}
 	if c.Txhash || c.Events {
 		secrets := hotchunk.SecretsFor(cfg.Catalog, chunkID)

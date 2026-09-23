@@ -497,7 +497,8 @@ func TestLedgerColdWriter_Readback(t *testing.T) {
 	raw := marshalLCM(t, seq)
 	coldDir := t.TempDir()
 
-	ing, err := newLedgerCold(packPath(coldDir, chunkID), chunkID, nil, ledger.DefaultZstdEncodeWorkers)
+	ing, err := newLedgerCold(
+		packPath(coldDir, chunkID), chunkID, nil, ledger.DefaultZstdEncodeWorkers, network.PublicNetworkPassphrase)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
@@ -693,7 +694,7 @@ func TestColdChunk_Success(t *testing.T) {
 	cc, err := openColdChunk(
 		coldDirsAt(coldDir, chunkID), chunkID, sink,
 		Config{
-			Ledgers: true, Txhash: true, Events: true,
+			Ledgers: true, Txhash: true, Events: true, Passphrase: testPassphrase,
 			TxhashSecret: testTxhashSecretBytes(), EventsSecret: testEventsSecretBytes(),
 		})
 	require.NoError(t, err)
@@ -784,7 +785,7 @@ func TestColdChunk_MidChunkFailure_NoArtifact(t *testing.T) {
 	sink := &testSink{}
 
 	cc, err := openColdChunk(coldDirsAt(coldDir, chunkID), chunkID, sink,
-		Config{Ledgers: true, Events: true, EventsSecret: testEventsSecretBytes()})
+		Config{Ledgers: true, Events: true, EventsSecret: testEventsSecretBytes(), Passphrase: testPassphrase})
 	require.NoError(t, err)
 
 	require.NoError(t, cc.ingest(first, viewOf(t, first)))
@@ -826,7 +827,8 @@ func TestColdWriter_Failure_RecordsErrorMetric(t *testing.T) {
 	coldDir := t.TempDir()
 	sink := &testSink{}
 
-	cc, err := openColdChunk(coldDirsAt(coldDir, chunkID), chunkID, sink, Config{Ledgers: true})
+	cc, err := openColdChunk(coldDirsAt(coldDir, chunkID), chunkID, sink,
+		Config{Ledgers: true, Passphrase: testPassphrase})
 	require.NoError(t, err)
 
 	// An out-of-order seq makes the writer's own AppendLedger fail inside write,
@@ -886,7 +888,7 @@ func TestWriteColdChunk_RoundTrip(t *testing.T) {
 
 	require.NoError(t, WriteColdChunk(
 		context.Background(), logger, chunkID, rawChunk(stream, chunkID),
-		coldDirsAt(coldDir, chunkID), sink, Config{Ledgers: true},
+		coldDirsAt(coldDir, chunkID), sink, Config{Ledgers: true, Passphrase: testPassphrase},
 	))
 
 	path := packPath(filepath.Join(coldDir, "ledgers"), chunkID)
@@ -966,7 +968,7 @@ func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 		context.Background(), testLogger(), chunkID, rawChunk(fullStream(t, chunkID, gen), chunkID),
 		coldDirsAt(coldDir, chunkID), nil,
 		Config{
-			Ledgers: true, Txhash: true, Events: true,
+			Ledgers: true, Txhash: true, Events: true, Passphrase: testPassphrase,
 			TxhashSecret: testTxhashSecretBytes(), EventsSecret: testEventsSecretBytes(),
 		},
 	))
@@ -1050,7 +1052,7 @@ func TestWriteColdChunk_ShortStream_NoArtifact(t *testing.T) {
 	short := &fakeStream{t: t, count: 3}
 	err := WriteColdChunk(
 		context.Background(), logger, chunkID, rawChunk(short, chunkID),
-		coldDirsAt(coldDir, chunkID), nil, Config{Ledgers: true},
+		coldDirsAt(coldDir, chunkID), nil, Config{Ledgers: true, Passphrase: testPassphrase},
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ended at")
@@ -1150,7 +1152,7 @@ func TestWriteColdChunk_DrainStreamError_NoArtifact(t *testing.T) {
 
 	err := WriteColdChunk(
 		context.Background(), logger, chunkID, rawChunk(stream, chunkID),
-		coldDirsAt(coldDir, chunkID), nil, Config{Ledgers: true},
+		coldDirsAt(coldDir, chunkID), nil, Config{Ledgers: true, Passphrase: testPassphrase},
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, wantErr, "the backend error must propagate")
@@ -1429,7 +1431,7 @@ func TestWriteColdChunk_CanceledContext(t *testing.T) {
 	cancel()
 	rerr := WriteColdChunk(
 		ctx, logger, chunkID, rawChunk(fullStream(t, chunkID, nil), chunkID),
-		coldDirsAt(coldDir, chunkID), sink, Config{Ledgers: true},
+		coldDirsAt(coldDir, chunkID), sink, Config{Ledgers: true, Passphrase: testPassphrase},
 	)
 	require.ErrorIs(t, rerr, context.Canceled)
 	require.Equal(t, 1, sink.coldChunkTotals, "a canceled chunk attempt still emits one ColdChunkTotal")
@@ -1482,7 +1484,7 @@ func TestOpenColdChunk_RollbackOneBuilt(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(coldDir, dataTypeTxhash), []byte("not a dir"), 0o644))
 
 	_, err := openColdChunk(coldDirsAt(coldDir, chunkID), chunkID, sink,
-		Config{Ledgers: true, Txhash: true, TxhashSecret: testTxhashSecretBytes()})
+		Config{Ledgers: true, Txhash: true, TxhashSecret: testTxhashSecretBytes(), Passphrase: testPassphrase})
 	require.Error(t, err, "the txhash open must fail on the planted file")
 
 	// The ledger writer was opened then rolled back with no write/finalize, so
@@ -1507,7 +1509,7 @@ func TestOpenColdChunk_RollbackTwoBuilt(t *testing.T) {
 
 	_, err := openColdChunk(coldDirsAt(coldDir, chunkID), chunkID, sink,
 		Config{
-			Ledgers: true, Txhash: true, Events: true,
+			Ledgers: true, Txhash: true, Events: true, Passphrase: testPassphrase,
 			TxhashSecret: testTxhashSecretBytes(), EventsSecret: testEventsSecretBytes(),
 		})
 	require.Error(t, err, "the events open must fail on the planted directory")
@@ -1532,7 +1534,7 @@ func TestWriteColdChunk_ConstructorFailure_EmitsAggregate(t *testing.T) {
 
 	err := WriteColdChunk(
 		context.Background(), logger, chunkID, rawChunk(fullStream(t, chunkID, nil), chunkID),
-		coldDirsAt(coldDir, chunkID), sink, Config{Ledgers: true},
+		coldDirsAt(coldDir, chunkID), sink, Config{Ledgers: true, Passphrase: testPassphrase},
 	)
 	require.Error(t, err)
 	require.Equal(t, 1, sink.coldChunkTotals,
@@ -1626,7 +1628,7 @@ func TestColdChunk_Finalize_FirstErrorStopsRemaining(t *testing.T) {
 
 	cc, err := openColdChunk(coldDirsAt(coldDir, chunkID), chunkID, sink,
 		Config{
-			Ledgers: true, Txhash: true, Events: true,
+			Ledgers: true, Txhash: true, Events: true, Passphrase: testPassphrase,
 			TxhashSecret: testTxhashSecretBytes(), EventsSecret: testEventsSecretBytes(),
 		})
 	require.NoError(t, err)
@@ -1670,7 +1672,8 @@ func TestDrain_OverrunPastChunk(t *testing.T) {
 	// One ledger past the chunk, still in order.
 	stream := &fakeStream{t: t, count: ledgersInChunk + 1}
 	sink := &testSink{}
-	cc, err := openColdChunk(coldDirsAt(t.TempDir(), chunkID), chunkID, sink, Config{Ledgers: true})
+	cc, err := openColdChunk(coldDirsAt(t.TempDir(), chunkID), chunkID, sink,
+		Config{Ledgers: true, Passphrase: testPassphrase})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cc.close()) }()
 
@@ -1711,7 +1714,7 @@ func TestWriteColdChunk_LazySourceFirstReadError(t *testing.T) {
 	wantErr := errors.New("induced lazy-source failure (bad config / missing object)")
 	err := WriteColdChunk(
 		context.Background(), logger, chunkID, rawChunk(lazyErrStream{err: wantErr}, chunkID),
-		coldDirsAt(coldDir, chunkID), sink, Config{Ledgers: true},
+		coldDirsAt(coldDir, chunkID), sink, Config{Ledgers: true, Passphrase: testPassphrase},
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, wantErr)
@@ -1735,7 +1738,7 @@ func TestWriteColdChunk_EmptyStream(t *testing.T) {
 
 	err := WriteColdChunk(
 		context.Background(), logger, chunkID, rawChunk(&fakeStream{t: t, count: 0}, chunkID),
-		coldDirsAt(coldDir, chunkID), sink, Config{Ledgers: true},
+		coldDirsAt(coldDir, chunkID), sink, Config{Ledgers: true, Passphrase: testPassphrase},
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ended at", "the completeness check rejects the empty stream")

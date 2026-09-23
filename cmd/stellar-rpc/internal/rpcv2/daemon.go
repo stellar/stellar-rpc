@@ -414,6 +414,7 @@ func startConfig(
 			Backend:           backend,
 			Sink:              sink,
 			ZstdEncodeWorkers: zstdWorkers,
+			Passphrase:        networkPassphrase,
 		},
 	}
 	return StartConfig{

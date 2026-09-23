@@ -49,6 +49,13 @@ type coldOptions struct {
 	// under. Empty means ColdRoot.
 	CatalogDir string
 
+	// Passphrase is the network passphrase the walk keys each framed ledger's
+	// transaction span table under. It must be the network the source's
+	// ledgers were produced on, and it is required: packs written without one
+	// would carry no tables, so every cold transaction lookup in them would
+	// decode a whole ledger.
+	Passphrase string
+
 	// OutDir receives the CSV report.
 	OutDir string
 }
@@ -72,6 +79,9 @@ func (o coldOptions) validate() error {
 	}
 	if o.ColdRoot == "" {
 		return errors.New("--cold-out-dir is required")
+	}
+	if o.Passphrase == "" {
+		return errors.New("--passphrase is required (it keys the transaction span tables the walk writes)")
 	}
 	// Refuse re-packing a source pack tree in place: the backfill always
 	// materializes ledger packs, the cold ledger writer overwrites its
@@ -135,7 +145,11 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 		// The production-default encode workers: the backfill cell measures (and
 		// produces) production-shape packs (see hotchunk.Tuning on why the value
 		// is format-affecting).
-		Process: backfill.ProcessConfig{Sink: sink, Backend: backend, ZstdEncodeWorkers: ledger.DefaultZstdEncodeWorkers},
+		Process: backfill.ProcessConfig{
+			Sink: sink, Backend: backend,
+			ZstdEncodeWorkers: ledger.DefaultZstdEncodeWorkers,
+			Passphrase:        opts.Passphrase,
+		},
 		Workers: opts.Workers,
 		// Benchmarks measure one clean attempt; retries would fold failure +
 		// backoff time into the samples.

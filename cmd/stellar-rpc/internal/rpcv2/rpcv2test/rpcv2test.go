@@ -101,11 +101,27 @@ func SeedHotChunkLCMsAs(
 // lcms from the chunk's first ledger, and flips the chunk's ledgers artifact
 // frozen. AppendLedger stores raw bytes, so marker payloads work as well as
 // real LCMs.
+//
+// The pack is keyed under the PUBLIC network passphrase, which every fixture
+// in this package hashes its envelopes with, so a ledger large enough to be
+// framed carries its span table; a smaller one is the single frame it always
+// was, and a payload that is not a LedgerCloseMeta at all simply gets no
+// table.
 func WriteFrozenLedgerPack(t *testing.T, cat *catalog.Catalog, c chunk.ID, lcms ...[]byte) {
+	t.Helper()
+	WriteFrozenLedgerPackAs(t, cat, c, network.PublicNetworkPassphrase, lcms...)
+}
+
+// WriteFrozenLedgerPackAs is WriteFrozenLedgerPack under a chosen network
+// passphrase. An empty one writes a pack with no span tables — the tier a
+// reader must still serve, by decoding.
+func WriteFrozenLedgerPackAs(
+	t *testing.T, cat *catalog.Catalog, c chunk.ID, passphrase string, lcms ...[]byte,
+) {
 	t.Helper()
 	path := cat.Layout().LedgerPackPath(c)
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
-	w, err := ledger.NewColdWriter(path, c.FirstLedger(), ledger.ColdWriterOptions{})
+	w, err := ledger.NewColdWriter(path, c.FirstLedger(), ledger.ColdWriterOptions{Passphrase: passphrase})
 	require.NoError(t, err)
 	defer func() { _ = w.Close() }()
 	for i, raw := range lcms {

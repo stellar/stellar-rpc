@@ -60,13 +60,18 @@ func TestFreezeColdChunk_ByteIdenticalToWalk(t *testing.T) {
 	}
 
 	// The walk half must encode ledger frames with the SAME workers value the
-	// hot DB above was opened with (DefaultTuning) — the setting is
-	// format-affecting and this test is the freeze-vs-walk identity arbiter.
+	// hot DB above was opened with (DefaultTuning) and under the same network
+	// passphrase — both are format-affecting and this test is the
+	// freeze-vs-walk identity arbiter.
 	cfgAll := Config{
 		Ledgers: true, Txhash: true, Events: true,
 		ZstdEncodeWorkers: ledger.DefaultZstdEncodeWorkers,
-		TxhashSecret:      testTxhashSecretBytes(),
-		EventsSecret:      testEventsSecretBytes(),
+		// The walk must also key its span tables under the network the hot DB
+		// above used: the freeze copies the hot tables into the pack, so the
+		// two halves only agree when both build the same ones.
+		Passphrase:   network.PublicNetworkPassphrase,
+		TxhashSecret: testTxhashSecretBytes(),
+		EventsSecret: testEventsSecretBytes(),
 	}
 	dirsFor := func(root string) ColdDirs {
 		return ColdDirs{
@@ -141,7 +146,7 @@ func TestEventsScratchDir_SharedAcrossMaterializers(t *testing.T) {
 func TestFreezeColdChunk_NilDB(t *testing.T) {
 	err := FreezeColdChunk(context.Background(), hotTestLogger(), chunk.ID(0), nil,
 		ColdDirs{LedgerPack: "x", TxhashBin: "y", EventsDir: "z"},
-		nil, Config{Ledgers: true})
+		nil, Config{Ledgers: true, Passphrase: testPassphrase})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "nil hot DB")
 }

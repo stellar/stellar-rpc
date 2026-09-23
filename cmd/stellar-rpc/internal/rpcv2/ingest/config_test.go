@@ -18,7 +18,8 @@ func zeroSecret() []byte { return make([]byte, stores.SecretLen) }
 // fully-valid config it must accept. The secret guards are the load-bearing
 // ones: without them a Txhash/Events pass can key its .bin/index under a nil
 // or all-zero secret — the first silently unqueryable, the second reproducible
-// by anyone who can influence the indexed keys. Both used to be silent.
+// by anyone who can influence the indexed keys. Both used to be silent, as was
+// the missing passphrase that left a ledger pack with no span tables at all.
 func TestConfig_Validate(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -56,8 +57,13 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: "all zero",
 		},
 		{
+			name:    "ledgers without a passphrase",
+			cfg:     Config{Ledgers: true},
+			wantErr: "Passphrase is empty",
+		},
+		{
 			name:    "negative encode workers",
-			cfg:     Config{Ledgers: true, ZstdEncodeWorkers: -1},
+			cfg:     Config{Ledgers: true, Passphrase: testPassphrase, ZstdEncodeWorkers: -1},
 			wantErr: "must be >= 0",
 		},
 		{
@@ -66,6 +72,7 @@ func TestConfig_Validate(t *testing.T) {
 				Ledgers:           true,
 				Txhash:            true,
 				Events:            true,
+				Passphrase:        testPassphrase,
 				TxhashSecret:      testTxhashSecretBytes(),
 				EventsSecret:      testEventsSecretBytes(),
 				ZstdEncodeWorkers: 0,

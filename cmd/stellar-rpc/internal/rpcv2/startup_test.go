@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	"github.com/stellar/go-stellar-sdk/network"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
@@ -100,7 +101,8 @@ func startTestConfig(
 		Catalog: cat,
 		Logger:  silentLogger(),
 		Workers: 2,
-		Process: backfill.ProcessConfig{Backend: tip}, // the tip source every pass samples
+		// The tip source every pass samples, on the network the fixtures hash under.
+		Process: backfill.ProcessConfig{Backend: tip, Passphrase: network.PublicNetworkPassphrase},
 	}
 	cfg := StartConfig{
 		Exec:       exec,

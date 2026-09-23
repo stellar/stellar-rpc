@@ -134,7 +134,7 @@ func TestColdWriter_ModeMisuse(t *testing.T) {
 	raw, err := NewColdWriter(filepath.Join(dir, "raw.pack"), 2, ColdWriterOptions{})
 	require.NoError(t, err)
 	defer func() { _ = raw.Close() }()
-	require.ErrorContains(t, raw.AppendCompressedLedger(2, []byte{0x28, 0xB5, 0x2F, 0xFD, 0}),
+	require.ErrorContains(t, raw.AppendCompressedLedger(2, []byte{0x28, 0xB5, 0x2F, 0xFD, 0}, nil),
 		"raw-mode writer")
 
 	pre, err := NewColdWriter(filepath.Join(dir, "pre.pack"), 2, ColdWriterOptions{PreCompressed: true})
@@ -143,7 +143,7 @@ func TestColdWriter_ModeMisuse(t *testing.T) {
 	require.ErrorContains(t, pre.AppendLedger(2, []byte("raw")), "PreCompressed writer")
 
 	// And a non-frame payload is rejected before it can reach the pack.
-	require.ErrorContains(t, pre.AppendCompressedLedger(2, []byte("definitely not zstd")), "magic")
+	require.ErrorContains(t, pre.AppendCompressedLedger(2, []byte("definitely not zstd"), nil), "magic")
 }
 
 // openFreezeTestPack opens a finished ledger pack through the raw packfile

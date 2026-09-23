@@ -125,6 +125,7 @@ func TestRunColdFromPack(t *testing.T) {
 		Workers:    1,
 		ColdRoot:   outRoot,
 		OutDir:     csvDir,
+		Passphrase: benchPassphrase,
 	})
 	require.NoError(t, err)
 
@@ -209,6 +210,7 @@ func TestRunColdMultiChunk(t *testing.T) {
 		Workers:    2,
 		ColdRoot:   outRoot,
 		OutDir:     csvDir,
+		Passphrase: benchPassphrase,
 	})
 	require.NoError(t, err)
 
@@ -238,6 +240,7 @@ func TestRunColdRefusesInPlaceRepack(t *testing.T) {
 		Workers:    1,
 		ColdRoot:   root,
 		OutDir:     t.TempDir(),
+		Passphrase: benchPassphrase,
 	})
 	require.ErrorContains(t, err, "must differ from --pack-dir")
 }
@@ -257,6 +260,7 @@ func TestBenchRejectsInvalidSourceEarly(t *testing.T) {
 		Workers:    1,
 		ColdRoot:   coldRoot,
 		OutDir:     outDir,
+		Passphrase: benchPassphrase,
 	})
 	require.ErrorContains(t, err, "--pack-dir is required")
 
@@ -281,17 +285,25 @@ func TestBenchRejectsInvalidSourceEarly(t *testing.T) {
 }
 
 // TestBenchRejectsAnEmptyPassphraseEarly pins the same gate for the network:
-// every cell that ingests writes span tables keyed under it, so a run that
-// named no network would quietly produce artifacts production never writes.
-// The drivers refuse in validate(), before any directory is created.
+// every cell writes span tables keyed under it, so a run that named no network
+// would quietly produce artifacts production never writes. All three drivers
+// refuse in validate(), before any directory is created.
 func TestBenchRejectsAnEmptyPassphraseEarly(t *testing.T) {
 	base := t.TempDir()
+	coldRoot := filepath.Join(base, "cold")
 	hotRoot := filepath.Join(base, "hot")
 	workRoot := filepath.Join(base, "work")
 	outDir := filepath.Join(base, "csv")
 	packDir := filepath.Join(base, "src")
 
-	err := runHot(context.Background(), testLogger(), hotOptions{
+	err := runCold(context.Background(), testLogger(), coldOptions{
+		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
+		StartChunk: chunk.ID(0), NumChunks: 1, Workers: 1,
+		ColdRoot: coldRoot, OutDir: outDir,
+	})
+	require.ErrorContains(t, err, "--passphrase is required")
+
+	err = runHot(context.Background(), testLogger(), hotOptions{
 		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
 		StartChunk: chunk.ID(0), NumChunks: 1,
 		HotRoot: hotRoot, OutDir: outDir,
@@ -305,7 +317,7 @@ func TestBenchRejectsAnEmptyPassphraseEarly(t *testing.T) {
 	})
 	require.ErrorContains(t, err, "--passphrase is required")
 
-	for _, dir := range []string{hotRoot, workRoot, outDir} {
+	for _, dir := range []string{coldRoot, hotRoot, workRoot, outDir} {
 		require.NoDirExists(t, dir, "a refused invocation must not create %s", dir)
 	}
 }

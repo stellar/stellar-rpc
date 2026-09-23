@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/stellar/go-stellar-sdk/network"
 )
 
 // ---------------------------------------------------------------------------
@@ -20,7 +22,7 @@ func TestRunBackfill_ResolvesThenExecutes(t *testing.T) {
 	rec := newRecordingMetrics()
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 2, Metrics: rec,
-		Process: ProcessConfig{Backend: zeroTxBackend(t)},
+		Process: ProcessConfig{Backend: zeroTxBackend(t), Passphrase: network.PublicNetworkPassphrase},
 		runChunk: func(context.Context, ChunkBuild) error {
 			chunksRun.Add(1)
 			return nil
@@ -46,7 +48,7 @@ func TestRunBackfill_NoBackendNoLocalCopyFatals(t *testing.T) {
 	cat, _ := smallTxHashIndexCatalog(t, 4)
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 1,
-		Process: ProcessConfig{}, // no backend, nothing local
+		Process: ProcessConfig{Passphrase: network.PublicNetworkPassphrase}, // no backend, nothing local
 	}
 	err := RunBackfill(context.Background(), cfg, 0, 0)
 	require.Error(t, err)
@@ -59,7 +61,7 @@ func TestRunBackfill_InvertedRangeIsNoop(t *testing.T) {
 	var ran int
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 1,
-		Process:  ProcessConfig{Backend: zeroTxBackend(t)},
+		Process:  ProcessConfig{Backend: zeroTxBackend(t), Passphrase: network.PublicNetworkPassphrase},
 		runChunk: func(context.Context, ChunkBuild) error { ran++; return nil },
 	}
 	require.NoError(t, RunBackfill(context.Background(), cfg, 5, 4))

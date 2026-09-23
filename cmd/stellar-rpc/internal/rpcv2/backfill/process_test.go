@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	"github.com/stellar/go-stellar-sdk/network"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
@@ -92,6 +93,20 @@ func zeroTxBackend(t *testing.T) *fakeBackend {
 	return &fakeBackend{t: t, gen: rpcv2test.ZeroTxLCMBytes, tip: math.MaxUint32}
 }
 
+// TestProcessConfig_ValidateRejectsAnEmptyPassphrase pins the network as part
+// of a backfill's configuration: every ledger pack it materializes carries
+// span tables keyed under it, so a backfill that named no network would write
+// packs whose every transaction lookup decodes a whole ledger — silently,
+// until someone measured it.
+func TestProcessConfig_ValidateRejectsAnEmptyPassphrase(t *testing.T) {
+	cat, _ := testCatalog(t)
+	cfg := testProcessConfig(t, cat)
+	require.NoError(t, cfg.validate())
+
+	cfg.Passphrase = ""
+	require.ErrorContains(t, cfg.validate(), "Passphrase is empty")
+}
+
 // ---------------------------------------------------------------------------
 // process config helper.
 // ---------------------------------------------------------------------------
@@ -99,9 +114,10 @@ func zeroTxBackend(t *testing.T) *fakeBackend {
 func testProcessConfig(t *testing.T, cat *catalog.Catalog) ProcessConfig {
 	t.Helper()
 	return ProcessConfig{
-		Catalog: cat,
-		Logger:  silentLogger(),
-		Sink:    ingest.NopSink{},
+		Catalog:    cat,
+		Logger:     silentLogger(),
+		Sink:       ingest.NopSink{},
+		Passphrase: network.PublicNetworkPassphrase,
 	}
 }
 
@@ -433,7 +449,7 @@ func writeRealPack(t *testing.T, cat *catalog.Catalog, chunkID chunk.ID) {
 	dirs := ingest.ColdDirs{LedgerPack: cat.Layout().LedgerPackPath(chunkID)}
 	require.NoError(t, ingest.WriteColdChunk(
 		context.Background(), silentLogger(), chunkID, raw, dirs,
-		ingest.NopSink{}, ingest.Config{Ledgers: true}))
+		ingest.NopSink{}, ingest.Config{Ledgers: true, Passphrase: network.PublicNetworkPassphrase}))
 	require.FileExists(t, cat.Layout().LedgerPackPath(chunkID))
 }
 

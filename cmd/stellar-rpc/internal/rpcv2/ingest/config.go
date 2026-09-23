@@ -11,13 +11,21 @@ import (
 // materializer (WriteColdChunk's raw walk or FreezeColdChunk's CF scans; the
 // hot-DB-vs-stream choice is the ENTRY POINT, not a config knob). At least
 // one of Ledgers/Txhash/Events must be enabled.
-//
-// The view-based event path derives payloads from the LedgerCloseMetaView and
-// needs no network passphrase, so Config carries no passphrase.
 type Config struct {
 	Ledgers bool
 	Txhash  bool
 	Events  bool
+
+	// Passphrase is the network the ledgers were produced on. The walk
+	// materializer keys each framed ledger's transaction span table under it,
+	// so a cold lookup reads one transaction's byte spans. It must be the SAME
+	// network the hot tier keys its tables under — the freeze copies those
+	// tables into the pack, so a walk-built pack and a frozen one only stay
+	// byte-identical when both sides agree. REQUIRED with Ledgers: a pack
+	// written without one would carry no tables at all, and that is a
+	// misconfiguration to refuse rather than a slower pack to ship. The events
+	// path needs none: it derives payloads from the view.
+	Passphrase string
 
 	// TxhashSecret is the resolved per-index secret that blinds the txhash .bin
 	// keys — the caller derives it (txhash.ColdIndexSecret) so ingest keys match
@@ -40,11 +48,16 @@ type Config struct {
 	ZstdEncodeWorkers int
 }
 
-// validate rejects a Config with no enabled data types, a txhash/events
-// config missing its cold-index secret, or a negative encode-workers count.
+// validate rejects a Config with no enabled data types, a ledgers config with
+// no network passphrase, a txhash/events config missing its cold-index secret,
+// or a negative encode-workers count.
 func (c Config) validate() error {
 	if !c.Ledgers && !c.Txhash && !c.Events {
 		return errors.New("ingest: Config enables no data types (set at least one of Ledgers/Txhash/Events)")
+	}
+	if c.Ledgers && c.Passphrase == "" {
+		return errors.New("ingest: Ledgers enabled but Passphrase is empty " +
+			"(the network the ledgers were produced on keys their span tables)")
 	}
 	if c.Txhash && len(c.TxhashSecret) != stores.SecretLen {
 		return fmt.Errorf("ingest: Txhash enabled but TxhashSecret is %d bytes, want %d (per-index secret required)",

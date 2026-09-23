@@ -142,7 +142,10 @@ func runFreeze(ctx context.Context, logger *supportlog.Entry, opts freezeOptions
 		// The default encode workers on BOTH halves (the populate below and this
 		// cold walk) — the format-affecting value must agree across them (see
 		// hotchunk.Tuning).
-		Process: backfill.ProcessConfig{Sink: sink, ZstdEncodeWorkers: ledger.DefaultZstdEncodeWorkers},
+		Process: backfill.ProcessConfig{
+			Sink: sink, ZstdEncodeWorkers: ledger.DefaultZstdEncodeWorkers,
+			Passphrase: opts.Passphrase,
+		},
 		Workers: 1,
 		// Benchmarks measure one clean attempt; retries would fold failure +
 		// backoff time into the samples.

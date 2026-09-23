@@ -190,6 +190,10 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 			"ledgers ingested without a transaction span table because the build refused them "+
 				"(each one is still served, by decoding the ledger)",
 			ledger.TablesSkipped),
+		counterFunc("txspan_cold_table_front_probes_total",
+			"cold records whose front was read looking for a span table "+
+				"(a pack whose app data says no record carries one is never probed)",
+			ledger.TableFrontProbes),
 		counterFunc("txspan_table_served_lookups_total",
 			"getTransaction candidate ledgers resolved through a transaction span table",
 			txhash.TableServedLookups),

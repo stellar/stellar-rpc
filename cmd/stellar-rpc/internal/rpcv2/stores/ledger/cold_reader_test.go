@@ -176,9 +176,10 @@ func TestColdReader_LazyOpen(t *testing.T) {
 
 func TestColdReader_RejectsWrongAppDataSize(t *testing.T) {
 	// Every blob carries a valid version byte, so the size check (which runs
-	// after the version check) is what fires. appDataSize is 5: too long and
-	// too short both refuse, and the 1-byte case pins that the firstSeq read
-	// never runs on a blob that only holds the version byte.
+	// after the version check) is what fires. Only the two stated lengths are
+	// a blob this reader knows: anything between or beyond them refuses, and
+	// the 1-byte case pins that the firstSeq read never runs on a blob that
+	// only holds the version byte.
 	for _, tc := range []struct {
 		name string
 		ad   []byte

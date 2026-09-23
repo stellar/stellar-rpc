@@ -78,7 +78,7 @@ func FreezeColdFromStore(
 		}
 		// The seq comes from the KEY, never a local counter: the writer's
 		// contiguity check must see a CF hole as a mismatch and abort.
-		if aerr := w.AppendCompressedLedger(rocksdb.DecodeUint32(entry.Key), entry.Value); aerr != nil {
+		if aerr := w.AppendCompressedLedger(rocksdb.DecodeUint32(entry.Key), entry.Value, nil); aerr != nil {
 			return n, aerr
 		}
 		n++

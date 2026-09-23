@@ -180,6 +180,7 @@ func newColdCommand() *cobra.Command {
 		workers    int
 		coldOutDir string
 		catalogDir string
+		passphrase string
 		prof       profileFlags
 	)
 	cmd := newBenchCommand("cold",
@@ -193,6 +194,7 @@ func newColdCommand() *cobra.Command {
 				Workers:    workers,
 				ColdRoot:   coldOutDir,
 				CatalogDir: catalogDir,
+				Passphrase: passphrase,
 				OutDir:     outDir,
 			})
 		})
@@ -205,6 +207,9 @@ func newColdCommand() *cobra.Command {
 			"re-runs overwrite, but leftovers from other ranges are never swept)")
 	fs.StringVar(&catalogDir, "catalog-dir", "",
 		"base dir for the run's scratch catalog; default: --cold-out-dir")
+	fs.StringVar(&passphrase, "passphrase", network.PublicNetworkPassphrase,
+		"network passphrase the walk keys the transaction span tables under; must match "+
+			"the source's network (empty = write packs with no tables)")
 	markRequired(cmd, "start-chunk", "cold-out-dir")
 	return cmd
 }

@@ -59,6 +59,20 @@ func (p *PackReader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 	}
 }
 
+// RecordRange reports the file extent of the record holding an item, so a
+// caller that wants PART of a record can read it without decoding the whole
+// one. See packfile.Reader.RecordRange.
+func (p *PackReader) RecordRange(position int) (int64, int64, error) {
+	off, size, err := p.r.RecordRange(position)
+	return off, size, translatePackErr(err)
+}
+
+// ReadAt fills dst from offset in the pack file — the raw companion to
+// RecordRange. See packfile.Reader.ReadAt for the bounds contract.
+func (p *PackReader) ReadAt(dst []byte, offset int64) error {
+	return translatePackErr(p.r.ReadAt(dst, offset))
+}
+
 // Close reports the deferred open error as well as the close itself, so it is
 // the first place an open-time failure surfaces on a handle that was never
 // read — and it owes callers the same sentinel as every other method.

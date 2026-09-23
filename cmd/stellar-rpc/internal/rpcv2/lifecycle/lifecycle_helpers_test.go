@@ -113,7 +113,7 @@ func lifecycleTestConfig(t *testing.T, cat *catalog.Catalog, retentionChunks uin
 			Catalog: cat,
 			Logger:  silentLogger(),
 			Workers: 2,
-			Process: backfill.ProcessConfig{},
+			Process: backfill.ProcessConfig{Passphrase: network.PublicNetworkPassphrase},
 		},
 		Retention: rpcv2test.RetentionFor(t, cat, retentionChunks),
 	}

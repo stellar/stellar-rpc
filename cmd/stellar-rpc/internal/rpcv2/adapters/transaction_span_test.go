@@ -16,6 +16,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/txspan"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
@@ -141,4 +142,58 @@ func hasTable(t *testing.T, db *hotchunk.DB, seq uint32) bool {
 	}
 	require.NoError(t, err)
 	return true
+}
+
+// TestSpanTableServesAFramedColdLedger is the cold half of the round trip: a
+// ledger past the store's frame window is written into the pack as its span
+// table plus several frames, and a lookup against it must be served through
+// that table — reading the transaction's two byte spans — and answer exactly
+// what the same lookup against an untabled pack answers by decoding.
+func TestSpanTableServesAFramedColdLedger(t *testing.T) {
+	seq := testChunk.FirstLedger()
+	// Past the frame window, so the record is framed and carries a table. The
+	// padding sits in the first transaction's meta, which therefore spans
+	// several frames.
+	lcm, txs := lcmWithTxs(t, seq, txSpec{padBytes: ledger.FrameWindow + (1 << 20)}, txSpec{})
+	require.Greater(t, len(lcm), ledger.FrameWindow, "the fixture must be framed to carry a table")
+
+	tabledCtx := seedColdTier(t, network.PublicNetworkPassphrase, lcm, txs)
+	walkedCtx := seedColdTier(t, "", lcm, txs)
+	reader := NewTransactionReader(network.PublicNetworkPassphrase, nil, nil)
+
+	for i, tx := range txs {
+		tables, walks := txhash.TableServedLookups(), txhash.WalkServedLookups()
+		fromTable, err := reader.GetTransaction(tabledCtx, tx.hash)
+		require.NoError(t, err)
+		assert.Equal(t, tables+1, txhash.TableServedLookups(), "cold lookup %d was not table-served", i)
+		assert.Equal(t, walks, txhash.WalkServedLookups(), "cold lookup %d also walked the ledger", i)
+
+		tables, walks = txhash.TableServedLookups(), txhash.WalkServedLookups()
+		fromWalk, err := reader.GetTransaction(walkedCtx, tx.hash)
+		require.NoError(t, err)
+		assert.Equal(t, walks+1, txhash.WalkServedLookups(), "cold lookup %d was not walk-served", i)
+		assert.Equal(t, tables, txhash.TableServedLookups(), "cold lookup %d used a table", i)
+
+		assert.Equal(t, fromWalk, fromTable, "the table and the walk served different transactions")
+	}
+}
+
+// seedColdTier stands up a catalog of its own serving one frozen ledger from a
+// pack written under passphrase — empty for a pack with no span tables — with
+// a frozen window index naming every transaction in it.
+func seedColdTier(t *testing.T, passphrase string, lcm []byte, txs []fixtureTx) context.Context {
+	t.Helper()
+	cat := openTestCatalog(t)
+	r := query.NewRegistry(cat, geometry.NewRetention(0, testChunk))
+	require.NoError(t, cat.FlipHotReady(999)) // acquisition needs a ready live chunk
+
+	seq := testChunk.FirstLedger()
+	rpcv2test.WriteFrozenLedgerPackAs(t, cat, testChunk, passphrase, lcm)
+	entries := make(map[xdr.Hash]uint32, len(txs))
+	for _, tx := range txs {
+		entries[tx.hash] = seq
+	}
+	writeFrozenTxIndex(t, cat, testChunk, testChunk+2, entries)
+	r.SetLatestLedger(seq, query.CloseTimeAt(closeTimeFor(seq)))
+	return viewCtx(t, r)
 }
