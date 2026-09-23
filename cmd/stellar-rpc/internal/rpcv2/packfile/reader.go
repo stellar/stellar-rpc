@@ -14,9 +14,35 @@ import (
 )
 
 const (
-	readBufSize         = 1 << 20    // 1 MiB pooled coalesced-read buffer
-	speculativeReadSize = 256 * 1024 // 256 KiB tail prefetch on Open
+	readBufSize = 1 << 20 // 1 MiB pooled coalesced-read buffer
+	// DefaultSpeculativeTailSize is how much of a file's tail Open reads in
+	// one go when ReaderOptions leaves the size unset. It is a guess at
+	// "trailer + index + app data", and getting it right is worth one syscall
+	// per open: too small and Open reads the index region a second time, too
+	// large and every open pulls in pages it will not look at.
+	DefaultSpeculativeTailSize = 256 * 1024
 )
+
+// tailReads and tailRefills tally the two shapes an open can take: the
+// speculative tail read every open makes, and the follow-up read an open has
+// to make when that tail did not reach the index. Process-wide by design — a
+// store tuning its tail size reads them through the accessors below, and a
+// test asserts on which shape an open took.
+//
+//nolint:gochecknoglobals // one tally across all readers; read-only outside this file
+var (
+	tailReads   atomic.Uint64
+	tailRefills atomic.Uint64
+)
+
+// TailReads returns the process-wide count of speculative tail reads made at
+// Open — one per successfully-opened file.
+func TailReads() uint64 { return tailReads.Load() }
+
+// TailRefills returns the process-wide count of opens whose speculative tail
+// fell short of the index region and had to read it again. A store whose
+// refills track its opens has its SpeculativeTailSize set too small.
+func TailRefills() uint64 { return tailRefills.Load() }
 
 // Reader-side errors that come from trailer parsing on Open. All three
 // wrap ErrCorrupt, so callers can match them generically with
@@ -85,6 +111,19 @@ type ReaderOptions struct {
 	//
 	// If nil, items are hashed as the read path returns them.
 	ContentHashExtract func(item []byte) ([]byte, error)
+
+	// SpeculativeTailSize is how many bytes of the file's tail Open reads in
+	// one go, hoping to find the trailer, the index and the app data inside
+	// it. 0 means DefaultSpeculativeTailSize; negative values are rejected
+	// (deferred error surfaced by the first read call).
+	//
+	// It is purely a tuning knob: a tail that falls short costs one extra
+	// read of the index region and nothing else, so a store that knows its
+	// own geometry — a fixed record count and a small app data, say — sets it
+	// to what that geometry actually needs instead of paying for the default
+	// on every open. A value below TrailerSize is raised to it, since the
+	// trailer is what locates everything else.
+	SpeculativeTailSize int
 
 	// Concurrency sets the max parallel goroutines for ReadItems. The
 	// zero value is normalized to 1 (serial): ReadItems still coalesces
@@ -188,10 +227,24 @@ func Open(path string, opts ReaderOptions) *Reader {
 		r.waitOpen = sync.OnceValue(func() error { return err })
 		return r
 	}
+	if opts.SpeculativeTailSize < 0 {
+		err := fmt.Errorf("packfile: SpeculativeTailSize must be non-negative, got %d", opts.SpeculativeTailSize)
+		r.waitOpen = sync.OnceValue(func() error { return err })
+		return r
+	}
 	r.concurrency = max(opts.Concurrency, 1)
+	tailSize := int64(opts.SpeculativeTailSize)
+	if tailSize == 0 {
+		tailSize = DefaultSpeculativeTailSize
+	}
+	// The trailer is the one thing the tail MUST contain — it is what says
+	// where everything else is — so a smaller request is raised to it rather
+	// than failing the open. The knob tunes how much of the index comes along
+	// for the ride, nothing more.
+	tailSize = max(tailSize, trailerSize)
 
 	r.waitOpen = sync.OnceValue(func() error {
-		res := doOpen(path)
+		res := doOpen(path, tailSize)
 		if res.err != nil {
 			return res.err
 		}
@@ -214,7 +267,7 @@ func Open(path string, opts ReaderOptions) *Reader {
 // On error it closes the file and returns openResult{err: ...}.
 //
 //nolint:cyclop,nestif,funlen // step-by-step open flow; splitting hurts readability
-func doOpen(path string) openResult {
+func doOpen(path string, speculativeReadSize int64) openResult {
 	f, err := os.Open(path)
 	if err != nil {
 		return openResult{err: fmt.Errorf("packfile: open %q: %w", path, err)}
@@ -237,12 +290,13 @@ func doOpen(path string) openResult {
 	}
 
 	// Speculative read: last min(speculativeReadSize, fileSize) bytes.
-	speculativeSize := min(int64(speculativeReadSize), fileSize)
+	speculativeSize := min(speculativeReadSize, fileSize)
 	speculativeOff := fileSize - speculativeSize
 	speculativeBuf := make([]byte, speculativeSize)
 	if _, err := f.ReadAt(speculativeBuf, speculativeOff); err != nil {
 		return openResult{err: fmt.Errorf("packfile: read trailer region: %w", err)}
 	}
+	tailReads.Add(1)
 
 	trailer, err := unmarshalTrailer(speculativeBuf)
 	if err != nil {
@@ -278,6 +332,7 @@ func doOpen(path string) openResult {
 		}
 	} else {
 		// Single fallback read for index + appData.
+		tailRefills.Add(1)
 		readSize := indexSize + appDataSize
 		buf := make([]byte, readSize)
 		if readSize > 0 {

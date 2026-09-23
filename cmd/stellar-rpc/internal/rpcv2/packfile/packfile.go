@@ -15,6 +15,11 @@ const (
 	trailerSize = 76
 )
 
+// TrailerSize is the on-disk trailer's width, exported so a caller sizing a
+// tail read — SpeculativeTailSize — can account for it alongside the index and
+// app-data sizes the Trailer reports.
+const TrailerSize = trailerSize
+
 // Trailer field byte offsets. The 76-byte trailer is the single source of
 // truth that the writer emits and the reader parses; both sides MUST use
 // these constants instead of hard-coded indices so the layout can never

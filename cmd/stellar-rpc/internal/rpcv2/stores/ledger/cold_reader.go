@@ -81,6 +81,18 @@ const (
 // none still gets the same answer, only slower.
 const coldFlagTables byte = 1 << 0
 
+// coldTailRead is how much of a cold ledger pack's tail the reader pulls in on
+// Open, in place of the packfile's 256 KiB default. A chunk's pack holds one
+// record per ledger and the record index is a FOR-packed offset per record, so
+// 10k records plus the app data and the trailer fit inside this
+// comfortably; a pack that somehow does not still opens, at the cost of the
+// second read packfile makes when the tail falls short.
+//
+// The saving is per OPEN, not per read: routing opens a pack the first time a
+// request lands on the chunk, and 192 KiB of pages per pack is worth not
+// faulting in when the useful part is a few tens of kilobytes.
+const coldTailRead = 64 << 10
+
 // coldPackDecoder is the process-wide zstd decoder for cold ledger
 // pack records. packfile.RecordDecoder must be concurrent-safe and
 // zstd.Decompressor satisfies that, so a single shared instance
@@ -127,11 +139,23 @@ type coldHeader struct {
 // on the first method call. Uses the package-level coldPackDecoder,
 // shared across all readers in the process.
 func OpenColdReader(path string) (*ColdReader, error) {
+	return openColdReaderWithTail(path, coldTailRead)
+}
+
+// openColdReaderWithTail is OpenColdReader with the speculative tail read
+// sized explicitly. It is package-private because it is a test seam — the tail
+// exercised from both sides, one that covers the pack's index and one that
+// does not, without fabricating a pack big enough to overrun the default.
+// OpenColdReader is the only way in from outside.
+func openColdReaderWithTail(path string, tail int) (*ColdReader, error) {
 	if path == "" {
 		return nil, stores.ErrInvalidConfig
 	}
 	c := &ColdReader{
-		r:    stores.OpenPack(path, packfile.ReaderOptions{RecordDecoder: coldPackDecoder}),
+		r: stores.OpenPack(path, packfile.ReaderOptions{
+			RecordDecoder:       coldPackDecoder,
+			SpeculativeTailSize: tail,
+		}),
 		path: path,
 	}
 	c.init = sync.OnceValues(c.loadHeader)
