@@ -78,7 +78,10 @@ const (
 	// to the routed key. A 0xB file passes the build stamp — that stamp
 	// covers the term schema and field mask, not the record layout — and
 	// then mismatches every fingerprint, answering every query empty rather
-	// than failing. Moving the format makes a stale file fail at open.
+	// than failing. Moving the format turns that silence into a refusal on
+	// the first indexed lookup, where the reader already compares formats.
+	// Not at open: that check is lazy and lookup-path-only by design, so an
+	// un-rebuilt chunk surfaces when traffic reaches it, not on startup.
 	indexPackFormat packfile.Format = 0xFE1E000D // "Fellow Events 0xD"
 )
 
@@ -485,6 +488,16 @@ func routedKey(secret [stores.SecretLen]byte, term TermKey) TermKey {
 // to name the same identity the MPHF indexed. Blinding, the secret and the
 // routed key therefore never leave this type.
 //
+// The fingerprint is the routed key's LAST four bytes, not its first. A
+// residual collision can only land on a member of the probe's own block, and
+// streamhash picks that block with FastRange32 over the big-endian first
+// eight bytes — so two keys reaching the same slot already agree on the
+// leading bits. Cutting the head would hand back a fingerprint the block
+// assignment had largely pre-agreed: measured over 400k terms in 130 blocks,
+// head bytes collide 130x more often than chance and the excess tracks the
+// block count exactly, while tail bytes sit at chance. streamhash's own
+// extractFingerprint avoids the same bytes for the same reason (key.go:82).
+//
 // streamhash returns ErrKeyNotFound for keys its routing-stage check
 // can prove were never in the build set; callers should treat this
 // as a fast no-match and skip the index.pack read. For keys that DO
@@ -495,7 +508,7 @@ func routedKey(secret [stores.SecretLen]byte, term TermKey) TermKey {
 func (m *mphf) Lookup(key TermKey) (uint32, [IndexRecordFingerprintLen]byte, error) {
 	rk := routedKey(m.secret, key)
 	var fp [IndexRecordFingerprintLen]byte
-	copy(fp[:], rk[:IndexRecordFingerprintLen])
+	copy(fp[:], rk[len(rk)-IndexRecordFingerprintLen:])
 	slot, err := m.idx.QueryRank(rk[:])
 	if err != nil {
 		if errors.Is(err, streamhash.ErrNotFound) {

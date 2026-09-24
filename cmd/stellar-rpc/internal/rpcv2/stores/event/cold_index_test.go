@@ -373,5 +373,5 @@ func TestWriteColdIndex_StampAndContentHash(t *testing.T) {
 // the routed (blinded) key, not of the term itself.
 func routedFP(term TermKey) []byte {
 	rk := routedKey(testIndexSecret, term)
-	return rk[:IndexRecordFingerprintLen]
+	return rk[len(rk)-IndexRecordFingerprintLen:]
 }
