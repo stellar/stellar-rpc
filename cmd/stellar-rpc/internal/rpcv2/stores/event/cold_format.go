@@ -414,8 +414,16 @@ func buildMPHF(
 	}
 	defer os.RemoveAll(tmpDir)
 
+	// The algorithm is pinned, not defaulted, because the record fingerprint
+	// depends on it. Bijection assigns buckets from k0, the routed key's first
+	// eight bytes, which is why mphf.Lookup can cut the fingerprint from k1.
+	// PTRHash assigns buckets from k1 — the same half — so inheriting a
+	// changed default would silently collapse the screen to near nothing.
+	// TestFingerprintIsIndependentOfTheSlot fails if that ever happens, and
+	// this line says which algorithm that test's conclusion is about.
 	builder, builderErr := streamhash.NewUnsortedBuilder(ctx, outputPath, uint64(total), tmpDir,
-		streamhash.WithMetadata(encodeEventsMeta(secret)))
+		streamhash.WithMetadata(encodeEventsMeta(secret)),
+		streamhash.WithAlgorithm(streamhash.AlgoBijection))
 	if builderErr != nil {
 		return nil, fmt.Errorf("events: create streamhash builder: %w", builderErr)
 	}
