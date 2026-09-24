@@ -456,14 +456,17 @@ func TestFingerprintComesFromTheRoutedKeyTail(t *testing.T) {
 // residually collides into an occupied slot must agree with that slot's owner
 // on fingerprint bytes no more often than chance.
 //
-// Pinning the range alone is not enough. If a future streamhash consulted k1
-// to place a key, rk[12:16] would still be rk[12:16] and the position test
-// would still pass while the screen silently weakened. This fails instead.
+// Pinning the range alone is not enough. The tail's independence is an
+// empirical property of the pinned algorithm, which already consults k1 through
+// a mix. If a streamhash change let those bytes track the slot — as PTRHash's
+// direct bucket assignment from k1 would — rk[12:16] would still be rk[12:16]
+// and the position test would still pass while the screen weakened. This
+// measures the correlation itself, so it fails instead.
 //
 // What this does and does not establish. The full 2^-32 joint rate is not
 // samplable, so this measures per-byte agreement plus a two-byte joint rate
 // at 2^-16. That combination catches the failures that can actually happen
-// here: streamhash beginning to constrain k1 lifts the per-byte rate, and a
+// here: the chosen bytes coming to track the slot lifts the per-byte rate, and a
 // derivation whose bytes move together lifts the joint one. It does not
 // prove 2^-32. That rests on SipHash-128 being a PRF, which is an assumption
 // about the primitive, plus TestFingerprintComesFromTheRoutedKeyTail holding
@@ -500,9 +503,12 @@ func TestFingerprintIsIndependentOfTheSlot(t *testing.T) {
 	for i := range probes {
 		term := ComputeTermKey(fmt.Appendf(nil, "unseen-%d", i), FieldContractID)
 		slot, fp, lerr := m.Lookup(term)
-		if lerr != nil {
-			continue
+		if errors.Is(lerr, ErrKeyNotFound) {
+			continue // a routing-stage reject: never reaches a record
 		}
+		// Anything else is a real failure, not a miss to skip — a sample that
+		// quietly drops broken lookups could pass on whatever was left.
+		require.NoError(t, lerr)
 		own, occupied := owner[slot]
 		if !occupied {
 			continue

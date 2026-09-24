@@ -416,9 +416,10 @@ func buildMPHF(
 
 	// The algorithm is pinned, not defaulted, because the record fingerprint
 	// depends on it. Bijection assigns buckets from k0, the routed key's first
-	// eight bytes, which is why mphf.Lookup can cut the fingerprint from k1.
-	// PTRHash assigns buckets from k1 — the same half — so inheriting a
-	// changed default would silently collapse the screen to near nothing.
+	// eight bytes, and lets k1 reach the slot only through a mix — which is why
+	// mphf.Lookup's tail bytes measure at chance. PTRHash assigns buckets
+	// directly from k1, the half the fingerprint is cut from, so inheriting a
+	// changed default would silently collapse the screen.
 	// TestFingerprintIsIndependentOfTheSlot fails if that ever happens, and
 	// this line says which algorithm that test's conclusion is about.
 	builder, builderErr := streamhash.NewUnsortedBuilder(ctx, outputPath, uint64(total), tmpDir,
@@ -502,13 +503,16 @@ func routedKey(secret [stores.SecretLen]byte, term TermKey) TermKey {
 // to name the same identity the MPHF indexed. Blinding, the secret and the
 // routed key therefore never leave this type.
 //
-// The fingerprint is the routed key's LAST four bytes. The safe region is
-// k1, rk[8:16], and only k1 — everything streamhash consults to reach a slot
-// lives in k0, rk[0:8]. It picks the block with FastRange32 over the
-// big-endian first eight bytes, and then picks a bucket with FastRange32 over
-// k0 again; slots are bucket-contiguous, so a residual collision agrees with
-// its victim on both. Measured per-byte agreement at 2.6M terms, the top of
-// the design's per-chunk range, against a 1/256 baseline:
+// The fingerprint is the routed key's LAST four bytes, chosen by measurement
+// rather than by a structural guarantee. Under the pinned Bijection
+// algorithm, k0 (rk[0:8]) selects both the block and the bucket directly —
+// FastRange32 over its big-endian and then its native form — and slots are
+// bucket-contiguous, so a residual collision agrees with its victim on those
+// bits outright. k1 (rk[8:16]) also reaches the slot, but only through a
+// 128-bit multiply mix that picks among a bucket's handful of slots, which
+// leaves its raw bytes unpinned. Measured per-byte agreement between colliding
+// keys at 2.6M terms, the top of the design's per-chunk range, against a
+// 1/256 baseline:
 //
 //	rk[12:16]  1.0x     chance
 //	rk[8:12]   1.0x     chance — k1 is safe in full
@@ -520,9 +524,10 @@ func routedKey(secret [stores.SecretLen]byte, term TermKey) TermKey {
 // small test index — it is not a fixed property.
 //
 // So "not the head" is the wrong lesson, and rk[4:8] is the trap it leads to.
-// Take the tail. TestFingerprintIsIndependentOfTheSlot pins this as a rate
-// rather than a byte range, so a streamhash change that started constraining
-// k1 fails CI instead of quietly weakening the screen.
+// Take the tail. Because this is an empirical property of one algorithm's
+// internals, TestFingerprintIsIndependentOfTheSlot pins it as a measured rate
+// rather than a byte range: a streamhash change that made these bytes track
+// the slot fails CI instead of quietly weakening the screen.
 //
 // streamhash returns ErrKeyNotFound for keys its routing-stage check
 // can prove were never in the build set; callers should treat this
