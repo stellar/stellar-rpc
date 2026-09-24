@@ -321,17 +321,19 @@ func (c *ColdReader) Offsets() (*LedgerOffsets, error) {
 }
 
 // verifyAndDeserializeBitmap checks the index.pack record's leading
-// fingerprint against the routed key's prefix and, on match, unmarshals a fresh
+// fingerprint against the one mphf.Lookup returned and, on match, unmarshals a fresh
 // bitmap. On fingerprint mismatch (residual MPHF collision on an
 // unseen key) it returns (nil, nil) — the caller treats nil as
 // not-found. record is valid only inside ReadItem's callback;
 // UnmarshalBinary copies into roaring's internal state so the
 // returned bitmap outlives the callback safely.
-func verifyAndDeserializeBitmap(record []byte, routed TermKey, slot uint32) (*roaring.Bitmap, error) {
+func verifyAndDeserializeBitmap(
+	record []byte, fp [IndexRecordFingerprintLen]byte, slot uint32,
+) (*roaring.Bitmap, error) {
 	if len(record) < IndexRecordFingerprintLen {
 		return nil, fmt.Errorf("events: index.pack record at slot %d truncated (%d bytes)", slot, len(record))
 	}
-	if !bytes.Equal(record[:IndexRecordFingerprintLen], routed[:IndexRecordFingerprintLen]) {
+	if !bytes.Equal(record[:IndexRecordFingerprintLen], fp[:]) {
 		return nil, nil //nolint:nilnil // not-found signaled by nil bitmap, no error
 	}
 	bm := roaring.New()
@@ -383,24 +385,24 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring
 
 	results := make([]*roaring.Bitmap, len(keys))
 
-	// The record fingerprints name the routed (blinded) key, so blind once
-	// and carry it on the pending entry for the later fingerprint check.
+	// mphf.Lookup hands back the fingerprint the record at that slot must
+	// carry, so the check below needs no key material of its own. fp sits
+	// last: it fills the padding {outIdx, slot} already had.
 	type pendingKey struct {
-		routed TermKey
 		outIdx int
 		slot   uint32
+		fp     [IndexRecordFingerprintLen]byte
 	}
 	pending := make([]pendingKey, 0, len(keys))
 	for i, key := range keys {
-		routed := routedKey(mphf.secret, key)
-		slot, err := mphf.lookupRouted(routed)
+		slot, fp, err := mphf.Lookup(key)
 		if err != nil {
 			if errors.Is(err, ErrKeyNotFound) {
 				continue // result[i] stays nil
 			}
 			return nil, fmt.Errorf("events: LookupKeys MPHF for chunk %s: %w", c.chunkID, err)
 		}
-		pending = append(pending, pendingKey{routed: routed, outIdx: i, slot: slot})
+		pending = append(pending, pendingKey{outIdx: i, slot: slot, fp: fp})
 	}
 	if len(pending) == 0 {
 		return results, nil
@@ -429,7 +431,7 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring
 		// leaving results[outIdx] = nil for misses.
 		for _, pIdx := range pendingBySlot[readIdx] {
 			p := pending[pIdx]
-			bm, err := verifyAndDeserializeBitmap(record, p.routed, p.slot)
+			bm, err := verifyAndDeserializeBitmap(record, p.fp, p.slot)
 			if err != nil {
 				return err
 			}

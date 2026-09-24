@@ -74,7 +74,12 @@ const (
 	// records. The Format value identifies the on-disk codec; readers
 	// dispatch on it to select a matching RecordDecoder.
 	eventsPackFormat packfile.Format = 0xFE1E000C // "Fellow Events 0xC" (zstd)
-	indexPackFormat  packfile.Format = 0xFE1E000B // "Fellow Events 0xB"
+	// Bumped from 0xFE1E000B when the record fingerprint moved from the term
+	// to the routed key. A 0xB file passes the build stamp — that stamp
+	// covers the term schema and field mask, not the record layout — and
+	// then mismatches every fingerprint, answering every query empty rather
+	// than failing. Moving the format makes a stale file fail at open.
+	indexPackFormat packfile.Format = 0xFE1E000D // "Fellow Events 0xD"
 )
 
 // indexPackChecksum belongs to index.pack's on-disk identity, so it lives here
@@ -472,7 +477,13 @@ func routedKey(secret [stores.SecretLen]byte, term TermKey) TermKey {
 	return TermKey(stores.BlindKey(secret, term[:]))
 }
 
-// Lookup returns the dense slot in [0, N) that key maps to.
+// Lookup returns the dense slot in [0, N) that key maps to, and the
+// fingerprint that index.pack's record at that slot must carry.
+//
+// Both name the routed key, because the routed key is what the MPHF was
+// built over: a fingerprint exists to validate the MPHF's answer, so it has
+// to name the same identity the MPHF indexed. Blinding, the secret and the
+// routed key therefore never leave this type.
 //
 // streamhash returns ErrKeyNotFound for keys its routing-stage check
 // can prove were never in the build set; callers should treat this
@@ -481,32 +492,29 @@ func routedKey(secret [stores.SecretLen]byte, term TermKey) TermKey {
 // 4-byte fingerprint stored alongside the bitmap at that slot in
 // index.pack — an MPHF can map an unseen key to a valid build-set
 // slot, and only the fingerprint catches that residual collision.
-func (m *mphf) Lookup(key TermKey) (uint32, error) {
-	return m.lookupRouted(routedKey(m.secret, key))
-}
-
-// Close releases the index; a no-op for the in-memory OpenBytes path.
-func (m *mphf) Close() error {
-	return m.idx.Close()
-}
-
-// lookupRouted is Lookup for a caller that already holds the routed key, so
-// a caller that needs it for the fingerprint anyway blinds once.
-func (m *mphf) lookupRouted(rk TermKey) (uint32, error) {
+func (m *mphf) Lookup(key TermKey) (uint32, [IndexRecordFingerprintLen]byte, error) {
+	rk := routedKey(m.secret, key)
+	var fp [IndexRecordFingerprintLen]byte
+	copy(fp[:], rk[:IndexRecordFingerprintLen])
 	slot, err := m.idx.QueryRank(rk[:])
 	if err != nil {
 		if errors.Is(err, streamhash.ErrNotFound) {
-			return 0, ErrKeyNotFound
+			return 0, fp, ErrKeyNotFound
 		}
-		return 0, fmt.Errorf("events: query: %w", err)
+		return 0, fp, fmt.Errorf("events: query: %w", err)
 	}
 	if slot > math.MaxUint32 {
 		// streamhash returns uint64 but slot count is bounded by the
 		// chunk's unique-term count (≪ 2^32). An overflow here would
 		// signal a build-time invariant violation, not a query error.
-		return 0, fmt.Errorf("events: slot %d overflows uint32", slot)
+		return 0, fp, fmt.Errorf("events: slot %d overflows uint32", slot)
 	}
-	return uint32(slot), nil
+	return uint32(slot), fp, nil
+}
+
+// Close releases the index; a no-op for the in-memory OpenBytes path.
+func (m *mphf) Close() error {
+	return m.idx.Close()
 }
 
 // isEmpty reports whether the index holds zero terms (an eventless chunk).
