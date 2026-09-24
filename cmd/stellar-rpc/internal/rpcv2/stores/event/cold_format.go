@@ -499,14 +499,19 @@ func routedKey(secret [stores.SecretLen]byte, term TermKey) TermKey {
 // lives in k0, rk[0:8]. It picks the block with FastRange32 over the
 // big-endian first eight bytes, and then picks a bucket with FastRange32 over
 // k0 again; slots are bucket-contiguous, so a residual collision agrees with
-// its victim on both. Measured per-byte agreement across 284k real residual
-// collisions, against a 1/256 baseline:
+// its victim on both. Measured per-byte agreement at 2.6M terms, the top of
+// the design's per-chunk range, against a 1/256 baseline:
 //
-//	rk[12:16]  1.0x   (chance)
-//	rk[0:4]    8.7x   (block assignment)
-//	rk[4:8]    65.5x  (bucket selection — the WORST range, not the best)
+//	rk[12:16]  1.0x     chance
+//	rk[8:12]   1.0x     chance — k1 is safe in full
+//	rk[0:4]    58.8x    block assignment
+//	rk[4:8]    65.5x    bucket selection — the WORST range in the key
 //
-// So "not the head" is the wrong lesson and rk[4:8] is the trap it leads to.
+// rk[7] alone is 256x: the bucket index determines it outright. The head's
+// excess grows with block count, so it is worse at production scale than on a
+// small test index — it is not a fixed property.
+//
+// So "not the head" is the wrong lesson, and rk[4:8] is the trap it leads to.
 // Take the tail. TestFingerprintIsIndependentOfTheSlot pins this as a rate
 // rather than a byte range, so a streamhash change that started constraining
 // k1 fails CI instead of quietly weakening the screen.
