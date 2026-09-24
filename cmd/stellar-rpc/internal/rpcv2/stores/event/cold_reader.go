@@ -383,27 +383,24 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring
 
 	results := make([]*roaring.Bitmap, len(keys))
 
+	// The record fingerprints name the routed (blinded) key, so blind once
+	// and carry it on the pending entry for the later fingerprint check.
 	type pendingKey struct {
+		routed TermKey
 		outIdx int
 		slot   uint32
 	}
-	// The record fingerprints name the routed (blinded) key, so blind once
-	// here and use it for both the MPHF probe and the fingerprint check.
-	blinded := make([]TermKey, len(keys))
-	for i, key := range keys {
-		blinded[i] = TermKey(stores.BlindKey(mphf.secret, key[:]))
-	}
-
 	pending := make([]pendingKey, 0, len(keys))
-	for i := range keys {
-		slot, err := mphf.lookupRouted(blinded[i])
+	for i, key := range keys {
+		routed := routedKey(mphf.secret, key)
+		slot, err := mphf.lookupRouted(routed)
 		if err != nil {
 			if errors.Is(err, ErrKeyNotFound) {
 				continue // result[i] stays nil
 			}
 			return nil, fmt.Errorf("events: LookupKeys MPHF for chunk %s: %w", c.chunkID, err)
 		}
-		pending = append(pending, pendingKey{outIdx: i, slot: slot})
+		pending = append(pending, pendingKey{routed: routed, outIdx: i, slot: slot})
 	}
 	if len(pending) == 0 {
 		return results, nil
@@ -432,7 +429,7 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring
 		// leaving results[outIdx] = nil for misses.
 		for _, pIdx := range pendingBySlot[readIdx] {
 			p := pending[pIdx]
-			bm, err := verifyAndDeserializeBitmap(record, blinded[p.outIdx], p.slot)
+			bm, err := verifyAndDeserializeBitmap(record, p.routed, p.slot)
 			if err != nil {
 				return err
 			}
