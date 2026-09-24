@@ -15,7 +15,6 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
 // indexTestChunkID is the chunk ID every WriteColdIndex test uses for
@@ -125,7 +124,7 @@ func TestWriteIndex_RoundTripsBitmapsPerTerm(t *testing.T) {
 		require.True(t, ok, "record missing at slot %d (term-%d)", slot, i)
 		require.GreaterOrEqual(t, len(record), IndexRecordFingerprintLen, "record at slot %d too short", slot)
 
-		// Fingerprint must match term[:4].
+		// Fingerprint must match the routed key's first four bytes.
 		assert.Equal(t, routedFP(term), record[:IndexRecordFingerprintLen],
 			"fingerprint mismatch at slot %d", slot)
 
@@ -153,7 +152,7 @@ func TestWriteIndex_UnseenTermFingerprintMismatches(t *testing.T) {
 	// Probe a batch of unseen terms. For each, the MPHF either
 	// fast-no-matches (ErrKeyNotFound — already covered by mphf_test)
 	// or returns a slot whose fingerprint does NOT match the unseen
-	// term's first four bytes. The latter is the case index.pack's
+	// term's routed key. The latter is the case index.pack's
 	// fingerprint check screens. 2000 probes keep P(zero collisions)
 	// negligible.
 	var collisions, mismatches int
@@ -373,6 +372,6 @@ func TestWriteColdIndex_StampAndContentHash(t *testing.T) {
 // routedFP is the fingerprint the writer stores for term: the first bytes of
 // the routed (blinded) key, not of the term itself.
 func routedFP(term TermKey) []byte {
-	rk := TermKey(stores.BlindKey(testIndexSecret, term[:]))
+	rk := routedKey(testIndexSecret, term)
 	return rk[:IndexRecordFingerprintLen]
 }
