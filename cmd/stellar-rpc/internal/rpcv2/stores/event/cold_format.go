@@ -99,8 +99,9 @@ const indexPackChecksum = packfile.ChecksumCRC32C
 
 // IndexRecordFingerprintLen is the byte width of the leading
 // fingerprint in every index.pack record. The cold reader checks
-// this against the routed key's first four bytes to filter MPHF
-// false positives before deserializing the bitmap.
+// this against the routed key's last four bytes to filter MPHF false
+// positives before deserializing the bitmap. The range is not arbitrary:
+// see mphf.Lookup for why it must not be the leading bytes.
 const IndexRecordFingerprintLen = 4
 
 // ──────────────────────────────────────────────────────────────────

@@ -708,7 +708,7 @@ func flipByteAt(t *testing.T, path string, off int) {
 // record checksum. roaring's UnmarshalBinary accepts a flipped container bit
 // and hands back a DIFFERENT posting set, so without the checksum this lookup
 // would return a wrong answer with no error. The first record starts at file
-// offset 0, and its first bytes are a term fingerprint followed by that term's
+// offset 0, and its first bytes are a routed-key fingerprint followed by that term's
 // serialized bitmap.
 func TestColdReader_CorruptIndexPackIsCorrupt(t *testing.T) {
 	const chunkID = chunk.ID(0)
