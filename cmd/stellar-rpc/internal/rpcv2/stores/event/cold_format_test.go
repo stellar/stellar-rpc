@@ -401,18 +401,9 @@ func TestOpenMPHF_RejectsMissingOrMalformedMetadata(t *testing.T) {
 	assert.ErrorIs(t, err, errBadIndexMetadata, "malformed metadata")
 }
 
-// TestPackFormatsAreDistinct pins what the Format field is for: events.pack
-// and index.pack sit in the same directory under the same naming scheme, and
-// the format id is what tells a reader which one it opened. Bumping one of
-// them onto the other's value would make that check vacuous.
+// index.pack's format id must differ from events.pack's, and stay past 0xB,
+// whose fingerprints this code cannot read.
 func TestPackFormatsAreDistinct(t *testing.T) {
-	require.NotEqual(t, eventsPackFormat, indexPackFormat,
-		"events.pack and index.pack must not share a format id")
-	// And pin the value itself. The check above admits any distinct id,
-	// including the pre-tail 0xFE1E000B, which would let an old index.pack
-	// open and then miss every fingerprint silently — the failure the bump
-	// exists to stop. Changing this constant must be a deliberate edit here.
-	require.Equal(t, indexPackFormat, packfile.Format(0xFE1E000D),
-		"index.pack's format id is pinned; a record-layout change needs a new "+
-			"value AND this line updated, so the bump cannot regress silently")
+	require.NotEqual(t, eventsPackFormat, indexPackFormat)
+	require.Equal(t, indexPackFormat, packfile.Format(0xFE1E000D))
 }

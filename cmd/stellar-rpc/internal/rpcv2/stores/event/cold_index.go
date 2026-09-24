@@ -74,11 +74,10 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 //	0       4     fingerprint (streamhash.Fingerprint of the routed key)
 //	4       N     serialized roaring bitmap (Bitmap.MarshalBinary)
 //
-// The cold reader calls mphf.Lookup(term), which returns both the slot and
-// the fingerprint that slot's record must carry, uses
-// packfile.Reader.ReadItem(slot, ...) to read the bytes, compares the
-// 4-byte fingerprint, and then deserializes the bitmap on match. Unseen
-// terms still produce a slot (vanilla MPHF semantics) but their fingerprint
+// The cold reader uses mphf.Lookup(term) → slot and fingerprint,
+// packfile.Reader.ReadItem(slot, ...) to read the bytes, verifies the
+// fingerprint, and then deserializes the bitmap on match. Unseen terms
+// still produce a slot (vanilla MPHF semantics) but their fingerprint
 // mismatches — the cold reader rejects them at that point.
 //
 // streamhash's MPHF is a *minimal* perfect hash: slots are dense in

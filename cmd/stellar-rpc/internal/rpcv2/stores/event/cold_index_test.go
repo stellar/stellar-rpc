@@ -126,7 +126,6 @@ func TestWriteIndex_RoundTripsBitmapsPerTerm(t *testing.T) {
 		require.True(t, ok, "record missing at slot %d (term-%d)", slot, i)
 		require.GreaterOrEqual(t, len(record), IndexRecordFingerprintLen, "record at slot %d too short", slot)
 
-		// Fingerprint must match streamhash's fingerprint of the routed key.
 		assert.Equal(t, routedFP(term), record[:IndexRecordFingerprintLen],
 			"fingerprint mismatch at slot %d", slot)
 
@@ -371,8 +370,7 @@ func TestWriteColdIndex_StampAndContentHash(t *testing.T) {
 	require.NoError(t, r.Verify(context.Background()))
 }
 
-// routedFP is the fingerprint the writer stores for term: streamhash's
-// fingerprint of the routed (blinded) key.
+// routedFP is the fingerprint the writer stores for term.
 func routedFP(term TermKey) []byte {
 	rk := routedKey(testIndexSecret, term)
 	v, _ := streamhash.Fingerprint(rk[:])

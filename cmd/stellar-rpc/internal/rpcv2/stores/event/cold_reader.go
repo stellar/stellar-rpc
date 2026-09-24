@@ -385,9 +385,7 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring
 
 	results := make([]*roaring.Bitmap, len(keys))
 
-	// mphf.Lookup hands back the fingerprint the record at that slot must
-	// carry, so the check below needs no key material of its own. fp sits
-	// last: it fills the padding {outIdx, slot} already had.
+	// fp goes last, in the padding after slot.
 	type pendingKey struct {
 		outIdx int
 		slot   uint32

@@ -74,19 +74,8 @@ const (
 	// records. The Format value identifies the on-disk codec; readers
 	// dispatch on it to select a matching RecordDecoder.
 	eventsPackFormat packfile.Format = 0xFE1E000C // "Fellow Events 0xC" (zstd)
-	// Bumped from 0xFE1E000B when the record fingerprint moved from the term
-	// to the routed key. A 0xB file passes the build stamp — that stamp
-	// covers the term schema and field mask, not the record layout — and
-	// then mismatches every fingerprint, answering every query empty rather
-	// than failing. Moving the format turns that silence into a refusal on
-	// the first indexed lookup, where the reader already compares formats.
-	// Not at open: that check is lazy and lookup-path-only by design, so an
-	// un-rebuilt chunk surfaces when traffic reaches it, not on startup. And
-	// backfill will not repair it — resolve.go skips any chunk the catalog
-	// already marks frozen — so an artifact written before this bump has to
-	// be dropped and rebuilt deliberately. That is acceptable only because
-	// nothing has shipped; a post-release layout change needs a real
-	// migration path, not just a new id.
+	// Bumped from 0xFE1E000B when the record fingerprint moved to the routed
+	// key, so an older index.pack is rejected instead of missing every lookup.
 	indexPackFormat packfile.Format = 0xFE1E000D // "Fellow Events 0xD"
 )
 
@@ -102,9 +91,8 @@ const (
 // zstd frames.
 const indexPackChecksum = packfile.ChecksumCRC32C
 
-// IndexRecordFingerprintLen is the byte width of the leading fingerprint in
-// every index.pack record: the low bytes of streamhash's fingerprint of the
-// routed key, which the cold reader checks to filter MPHF false positives.
+// IndexRecordFingerprintLen is the byte width of the fingerprint leading every
+// index.pack record: streamhash's fingerprint of the routed key.
 const IndexRecordFingerprintLen = 4
 
 // ──────────────────────────────────────────────────────────────────
@@ -316,11 +304,9 @@ func DecodeLedgerOffsets(data []byte) (*LedgerOffsets, error) {
 // (see stores/blind.go). The wrapper therefore feeds
 // streamhash stores.BlindKey(secret, TermKey) at both build and
 // query, with the deterministic per-chunk secret (ColdIndexSecret)
-// stored in index.hash's user metadata. The 4-byte app fingerprint in
-// index.pack names that routed key too: a builder that holds only blinded
-// keys — the streaming one merges sealed runs verbatim — can still write
-// it. The downstream post-filter stays on the ORIGINAL TermKey bytes,
-// since it matches against event contents rather than the index.
+// stored in index.hash's user metadata. The 4-byte app fingerprint in index.pack
+// comes from the routed key too; the downstream post-filter stays on the
+// ORIGINAL TermKey bytes.
 // ──────────────────────────────────────────────────────────────────
 
 // index.hash user-metadata wire format (streamhash WithMetadata):
@@ -476,17 +462,13 @@ func openMPHF(path string) (*mphf, error) {
 	return &mphf{idx: idx, secret: secret}, nil
 }
 
-// routedKey is the single definition of the build/query routing identity:
-// the term blinded under the chunk secret. Build (buildMPHF), the
-// index.pack fingerprint (WriteColdIndex) and query (Lookup, LookupKeys)
-// must all derive it identically or the index silently stops matching.
+// routedKey is term blinded under the chunk secret, the key the MPHF uses.
 func routedKey(secret [stores.SecretLen]byte, term TermKey) TermKey {
 	return TermKey(stores.BlindKey(secret, term[:]))
 }
 
 // Lookup returns the dense slot in [0, N) that key maps to, and the
-// fingerprint that index.pack's record at that slot must carry: streamhash's
-// fingerprint of the routed key, which it keeps independent of the slot.
+// fingerprint that index.pack's record at that slot must carry.
 //
 // streamhash returns ErrKeyNotFound for keys its routing-stage check
 // can prove were never in the build set; callers should treat this
