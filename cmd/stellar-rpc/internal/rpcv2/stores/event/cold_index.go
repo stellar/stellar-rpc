@@ -71,7 +71,10 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 // order. Each record is:
 //
 //	offset  size  field
-//	0       4     fingerprint (first 4 bytes of the routed key)
+//	0       4     fingerprint (LAST 4 bytes of the routed key — see
+//	              mphf.Lookup; the leading bytes pick the streamhash
+//	              block, so a head fingerprint would be pre-agreed
+//	              with every key that can collide with it)
 //	4       N     serialized roaring bitmap (Bitmap.MarshalBinary)
 //
 // The cold reader calls mphf.Lookup(term), which returns both the slot and
