@@ -106,10 +106,6 @@ func (m *MockLedgerReader) ScanLedgers(_ context.Context, start, end uint32) ite
 	})
 }
 
-func (m *MockLedgerReader) StreamLedgerRange(_ context.Context, _ uint32, _ uint32, _ store.StreamLedgerFn) error {
-	return nil
-}
-
 func (m *MockLedgerReader) GetLedgerRange(_ context.Context) (store.LedgerRange, error) {
 	return m.txn.ledgerRange, nil
 }

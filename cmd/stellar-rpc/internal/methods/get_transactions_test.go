@@ -401,10 +401,6 @@ func (r *sparseLedgerReader) ScanLedgers(
 	})
 }
 
-func (r *sparseLedgerReader) StreamLedgerRange(context.Context, uint32, uint32, store.StreamLedgerFn) error {
-	return nil
-}
-
 func (r *sparseLedgerReader) GetLatestLedgerSequence(context.Context) (uint32, error) {
 	return r.latest, nil
 }

@@ -54,36 +54,6 @@ func (r *LedgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRange, e
 	return lr, err
 }
 
-func (r *LedgerReader) StreamLedgerRange(
-	ctx context.Context, startLedger, endLedger uint32, f store.StreamLedgerFn,
-) error {
-	view, err := query.ViewFrom(ctx)
-	if err != nil {
-		return err
-	}
-
-	scan, err := view.ScanLedgers(startLedger, endLedger)
-	if err != nil {
-		return err
-	}
-	for entry, err := range scan {
-		if err != nil {
-			return err
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		var lcm xdr.LedgerCloseMeta
-		if err := lcm.UnmarshalBinary(entry.Bytes); err != nil {
-			return fmt.Errorf("adapters: unmarshal ledger %d: %w", entry.Seq, err)
-		}
-		if err := f(lcm); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (r *LedgerReader) NewTx(ctx context.Context) (store.LedgerReaderTx, error) {
 	view, err := query.ViewFrom(ctx)
 	if err != nil {

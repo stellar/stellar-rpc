@@ -19,12 +19,8 @@ import (
 //
 // The replay is the fees-only consumer of the shared walk: raw bytes from the
 // query router's read view → ExtractLedgerTxParts → FeesFromTxParts, events
-// never computed. It deliberately does NOT go through store.LedgerReader /
-// StreamLedgerFn — that seam exists for the JSON-RPC handlers and hands out
-// parsed xdr.LedgerCloseMeta, which would force a full LCM decode per
-// replayed ledger (the only full decode anywhere on the v2 path, paid up to
-// 1,000 times per restart) just to walk data the view extractor reads for
-// free off raw bytes.
+// never computed. It holds the view itself, so it scans it directly rather than
+// through the store.LedgerReader adapter, which takes the view from a request ctx.
 func replayFeeWindows(registry *query.Registry, windows *feewindow.FeeWindows, lastCommitted uint32) error {
 	if windows == nil {
 		return nil // no fee consumer (tests) → nothing to refill

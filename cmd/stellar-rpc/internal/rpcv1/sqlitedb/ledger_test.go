@@ -43,12 +43,11 @@ func createLedger(ledgerSequence uint32) xdr.LedgerCloseMeta {
 
 func assertLedgerRange(t *testing.T, reader LedgerReader, start, end uint32) {
 	ctx := t.Context()
-	var allLedgers []xdr.LedgerCloseMeta
-	err := reader.StreamLedgerRange(ctx, start-1, end+1, func(txmeta xdr.LedgerCloseMeta) error {
-		allLedgers = append(allLedgers, txmeta)
-		return nil
-	})
-	require.NoError(t, err)
+	var allLedgers [][]byte
+	for l, err := range reader.ScanLedgers(ctx, start-1, end+1) {
+		require.NoError(t, err)
+		allLedgers = append(allLedgers, bytes.Clone(l.Raw)) // the loan forbids retaining Raw
+	}
 	for i := start - 1; i <= end+1; i++ {
 		ledger, exists, err := store.GetLedger(ctx, reader, i)
 		require.NoError(t, err)
@@ -64,9 +63,7 @@ func assertLedgerRange(t *testing.T, reader LedgerReader, start, end uint32) {
 		require.NoError(t, err)
 		assert.Equal(t, expectedBinary, ledgerBinary)
 
-		ledgerBinary, err = allLedgers[0].MarshalBinary()
-		require.NoError(t, err)
-		assert.Equal(t, expectedBinary, ledgerBinary)
+		assert.Equal(t, expectedBinary, allLedgers[0])
 		allLedgers = allLedgers[1:]
 	}
 	assert.Empty(t, allLedgers)

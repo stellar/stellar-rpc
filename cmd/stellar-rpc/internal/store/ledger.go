@@ -12,8 +12,6 @@ import (
 // ErrEmptyDB is returned when the storage backend holds no ledgers yet.
 var ErrEmptyDB = errors.New("DB is empty")
 
-type StreamLedgerFn func(xdr.LedgerCloseMeta) error
-
 // LedgerInfo identifies one ledger: its sequence number and close time.
 type LedgerInfo struct {
 	Sequence  uint32
@@ -40,7 +38,6 @@ type LedgerReader interface {
 	// v1 and the request's read view on v2), without its own snapshot.
 	LedgerScanner
 	GetLedgerRange(ctx context.Context) (LedgerRange, error)
-	StreamLedgerRange(ctx context.Context, startLedger uint32, endLedger uint32, f StreamLedgerFn) error
 	NewTx(ctx context.Context) (LedgerReaderTx, error)
 	GetLatestLedgerSequence(ctx context.Context) (uint32, error)
 }

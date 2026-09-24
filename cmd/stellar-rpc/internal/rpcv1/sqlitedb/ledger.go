@@ -80,35 +80,6 @@ func (r ledgerReader) NewTx(ctx context.Context) (store.LedgerReaderTx, error) {
 	return tx, nil
 }
 
-// StreamLedgerRange runs f over inclusive (startLedger, endLedger) (until f errors or signals it's done).
-func (r ledgerReader) StreamLedgerRange(
-	ctx context.Context,
-	startLedger uint32,
-	endLedger uint32,
-	f store.StreamLedgerFn,
-) error {
-	sql := sq.Select("meta").From(ledgerCloseMetaTableName).
-		Where(sq.GtOrEq{"sequence": startLedger}).
-		Where(sq.LtOrEq{"sequence": endLedger}).
-		OrderBy("sequence asc")
-
-	q, err := r.db.Query(ctx, sql)
-	if err != nil {
-		return err
-	}
-	defer q.Close()
-	for q.Next() {
-		var closeMeta xdr.LedgerCloseMeta
-		if err = q.Scan(&closeMeta); err != nil {
-			return err
-		}
-		if err = f(closeMeta); err != nil {
-			return err
-		}
-	}
-	return q.Err()
-}
-
 // ScanLedgers reads the pooled connection: no snapshot, the store as it stands.
 func (r ledgerReader) ScanLedgers(ctx context.Context, start, end uint32) iter.Seq2[store.RawLedger, error] {
 	return scanLedgers(ctx, r.db, start, end)

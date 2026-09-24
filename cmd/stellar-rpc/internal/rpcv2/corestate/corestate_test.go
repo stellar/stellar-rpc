@@ -219,12 +219,6 @@ func (s stubLedgerReader) GetLedgerRange(context.Context) (store.LedgerRange, er
 	return store.LedgerRange{}, errors.New("unused")
 }
 
-func (s stubLedgerReader) StreamLedgerRange(
-	context.Context, uint32, uint32, store.StreamLedgerFn,
-) error {
-	return errors.New("unused")
-}
-
 func (s stubLedgerReader) NewTx(context.Context) (store.LedgerReaderTx, error) {
 	return nil, errors.New("unused")
 }

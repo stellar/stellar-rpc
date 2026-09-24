@@ -45,15 +45,6 @@ func (ledgerReader *ConstantLedgerReader) ScanLedgers(
 	})
 }
 
-func (ledgerReader *ConstantLedgerReader) StreamLedgerRange(
-	_ context.Context,
-	_ uint32,
-	_ uint32,
-	_ store.StreamLedgerFn,
-) error {
-	return nil
-}
-
 func MakeTxSet() xdr.GeneralizedTransactionSet {
 	txset := xdr.GeneralizedTransactionSet{
 		V: 1,

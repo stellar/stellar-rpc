@@ -41,13 +41,6 @@ func (m *MockLedgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRang
 	return args.Get(0).(store.LedgerRange), args.Error(1) //nolint:forcetypeassert
 }
 
-func (m *MockLedgerReader) StreamLedgerRange(ctx context.Context, startLedger, endLedger uint32,
-	f store.StreamLedgerFn,
-) error {
-	args := m.Called(ctx, startLedger, endLedger, f)
-	return args.Error(0)
-}
-
 func (m *MockLedgerReader) NewTx(ctx context.Context) (store.LedgerReaderTx, error) {
 	args := m.Called(ctx)
 	return args.Get(0).(store.LedgerReaderTx), args.Error(1) //nolint:forcetypeassert

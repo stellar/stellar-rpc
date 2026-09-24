@@ -144,43 +144,6 @@ func TestGetLedger_V1LedgerCloseMeta(t *testing.T) {
 	assert.Equal(t, closeTimeFor(testChunk.FirstLedger()), lcm.LedgerCloseTime())
 }
 
-func TestStreamLedgerRange(t *testing.T) {
-	ctx, reader, c0, c1 := sparseFixture(t)
-	var seqs []uint32
-	err := reader.StreamLedgerRange(ctx, c0.FirstLedger(), c1.FirstLedger()+500,
-		func(lcm xdr.LedgerCloseMeta) error {
-			assert.Equal(t, closeTimeFor(lcm.LedgerSequence()), lcm.LedgerCloseTime())
-			seqs = append(seqs, lcm.LedgerSequence())
-			return nil
-		})
-	require.NoError(t, err)
-	assert.Equal(t, append(seqRange(c0.FirstLedger(), c0.FirstLedger()+3), c1.FirstLedger()), seqs,
-		"streams what is committed, flat across the chunk border, clamped at latest")
-}
-
-func TestStreamLedgerRange_CallbackErrorStopsStream(t *testing.T) {
-	ctx, reader, c0, _ := sparseFixture(t)
-	boom := errors.New("boom")
-	calls := 0
-	err := reader.StreamLedgerRange(ctx, c0.FirstLedger(), c0.FirstLedger()+3,
-		func(xdr.LedgerCloseMeta) error {
-			calls++
-			return boom
-		})
-	assert.ErrorIs(t, err, boom)
-	assert.Equal(t, 1, calls)
-}
-
-func TestStreamLedgerRange_BelowFloorIsRangeError(t *testing.T) {
-	ctx, reader, c0, _ := sparseFixture(t)
-	var rangeErr *query.RangeError
-	err := reader.StreamLedgerRange(ctx, 2, c0.FirstLedger(),
-		func(xdr.LedgerCloseMeta) error { return nil })
-	require.ErrorAs(t, err, &rangeErr)
-	assert.Equal(t, uint32(2), rangeErr.Requested)
-	assert.Equal(t, c0.FirstLedger(), rangeErr.Oldest)
-}
-
 // scanAll drains a Tx scan into sequences and clones of the borrowed bytes.
 func scanAll(t *testing.T, tx store.LedgerReaderTx, start, end uint32) ([]uint32, [][]byte) {
 	t.Helper()
