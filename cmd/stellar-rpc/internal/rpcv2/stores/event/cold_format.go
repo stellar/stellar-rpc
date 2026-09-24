@@ -494,15 +494,22 @@ func routedKey(secret [stores.SecretLen]byte, term TermKey) TermKey {
 // to name the same identity the MPHF indexed. Blinding, the secret and the
 // routed key therefore never leave this type.
 //
-// The fingerprint is the routed key's LAST four bytes, not its first. A
-// residual collision can only land on a member of the probe's own block, and
-// streamhash picks that block with FastRange32 over the big-endian first
-// eight bytes — so two keys reaching the same slot already agree on the
-// leading bits. Cutting the head would hand back a fingerprint the block
-// assignment had largely pre-agreed: measured over 400k terms in 130 blocks,
-// head bytes collide 130x more often than chance and the excess tracks the
-// block count exactly, while tail bytes sit at chance. streamhash's own
-// extractFingerprint avoids the same bytes for the same reason (key.go:82).
+// The fingerprint is the routed key's LAST four bytes. The safe region is
+// k1, rk[8:16], and only k1 — everything streamhash consults to reach a slot
+// lives in k0, rk[0:8]. It picks the block with FastRange32 over the
+// big-endian first eight bytes, and then picks a bucket with FastRange32 over
+// k0 again; slots are bucket-contiguous, so a residual collision agrees with
+// its victim on both. Measured per-byte agreement across 284k real residual
+// collisions, against a 1/256 baseline:
+//
+//	rk[12:16]  1.0x   (chance)
+//	rk[0:4]    8.7x   (block assignment)
+//	rk[4:8]    65.5x  (bucket selection — the WORST range, not the best)
+//
+// So "not the head" is the wrong lesson and rk[4:8] is the trap it leads to.
+// Take the tail. TestFingerprintIsIndependentOfTheSlot pins this as a rate
+// rather than a byte range, so a streamhash change that started constraining
+// k1 fails CI instead of quietly weakening the screen.
 //
 // streamhash returns ErrKeyNotFound for keys its routing-stage check
 // can prove were never in the build set; callers should treat this

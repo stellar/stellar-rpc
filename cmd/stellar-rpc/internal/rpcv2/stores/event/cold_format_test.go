@@ -450,3 +450,82 @@ func TestFingerprintComesFromTheRoutedKeyTail(t *testing.T) {
 	require.Equal(t, n, differsFromHead,
 		"head and tail bytes must differ, or this test cannot tell them apart")
 }
+
+// TestFingerprintIsIndependentOfTheSlot pins the property the fingerprint
+// exists for, not the byte range that currently delivers it: a key that
+// residually collides into an occupied slot must agree with that slot's owner
+// on fingerprint bytes no more often than chance.
+//
+// Pinning the range alone is not enough. If a future streamhash consulted k1
+// to place a key, rk[12:16] would still be rk[12:16] and the position test
+// would still pass while the screen silently weakened. This fails instead.
+// Per-byte agreement is sampled because 4-byte agreement at 2^-32 is not.
+func TestFingerprintIsIndependentOfTheSlot(t *testing.T) {
+	const members, probes = 60_000, 150_000
+	idx := NewBitmaps()
+	for i := range members {
+		idx.AddTo(ComputeTermKey(fmt.Appendf(nil, "mem-%d", i), FieldContractID), uint32(i))
+	}
+	m, err := buildMPHF(context.Background(), idx,
+		filepath.Join(t.TempDir(), "index.hash"), testIndexSecret)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = m.Close() })
+
+	// Record the fingerprint Lookup ACTUALLY returns, so this measures the
+	// shipped screen rather than a byte range chosen here.
+	type resident struct {
+		fp   [IndexRecordFingerprintLen]byte
+		head [IndexRecordFingerprintLen]byte
+	}
+	owner := make(map[uint32]resident, members)
+	for i := range members {
+		term := ComputeTermKey(fmt.Appendf(nil, "mem-%d", i), FieldContractID)
+		slot, fp, lerr := m.Lookup(term)
+		require.NoError(t, lerr)
+		rk := routedKey(testIndexSecret, term)
+		var head [IndexRecordFingerprintLen]byte
+		copy(head[:], rk[:IndexRecordFingerprintLen])
+		owner[slot] = resident{fp: fp, head: head}
+	}
+
+	var collisions, shippedAgree, headAgree int
+	for i := range probes {
+		term := ComputeTermKey(fmt.Appendf(nil, "unseen-%d", i), FieldContractID)
+		slot, fp, lerr := m.Lookup(term)
+		if lerr != nil {
+			continue
+		}
+		own, occupied := owner[slot]
+		if !occupied {
+			continue
+		}
+		collisions++
+		rk := routedKey(testIndexSecret, term)
+		for b := range IndexRecordFingerprintLen {
+			if fp[b] == own.fp[b] {
+				shippedAgree++
+			}
+			if rk[b] == own.head[b] {
+				headAgree++
+			}
+		}
+	}
+	require.Greater(t, collisions, 50_000, "too few collisions to measure a rate")
+
+	const chance = 1.0 / 256.0
+	samples := float64(collisions * IndexRecordFingerprintLen)
+	shippedRate := float64(shippedAgree) / samples
+	headRate := float64(headAgree) / samples
+	t.Logf("%d collisions; per-byte agreement shipped=%.5f head=%.5f chance=%.5f",
+		collisions, shippedRate, headRate, chance)
+
+	require.Less(t, shippedRate, 2*chance,
+		"the fingerprint Lookup returns is correlated with slot selection, so the "+
+			"screen is weaker than 2^-32: either it was cut from a constrained range "+
+			"of the routed key, or streamhash changed which key bits it consults")
+	// Teeth: without this the assertion above would pass on a hash that
+	// constrained nothing, so it would not prove the tail is doing the work.
+	require.Greater(t, headRate, 3*chance,
+		"leading bytes are no longer constrained, so a passing result above no longer "+
+			"proves the chosen range is doing the work; re-derive the safe region")
+}
