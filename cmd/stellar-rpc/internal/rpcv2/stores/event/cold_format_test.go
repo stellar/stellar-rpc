@@ -408,3 +408,28 @@ func TestPackFormatsAreDistinct(t *testing.T) {
 	require.NotEqual(t, eventsPackFormat, indexPackFormat,
 		"events.pack and index.pack must not share a format id")
 }
+
+// TestFingerprintComesFromTheRoutedKeyTail pins the byte range, which is not
+// arbitrary: streamhash routes a key to its block with FastRange32 over the
+// big-endian first eight bytes, so a residual collision — always within one
+// block — already agrees with its victim on the leading bits. A fingerprint
+// cut from the head would be pre-agreed by the very routing it exists to
+// check. Anyone "tidying" this back to rk[:4] silently multiplies the
+// false-positive rate by the block count.
+func TestFingerprintComesFromTheRoutedKeyTail(t *testing.T) {
+	var secret [stores.SecretLen]byte
+	for i := range secret {
+		secret[i] = byte(i*31 + 5)
+	}
+	m := &mphf{secret: secret}
+	term := ComputeTermKey([]byte("pin-the-fingerprint-range"), FieldContractID)
+	rk := routedKey(secret, term)
+
+	var fp [IndexRecordFingerprintLen]byte
+	copy(fp[:], rk[len(rk)-IndexRecordFingerprintLen:])
+	require.Equal(t, rk[len(rk)-IndexRecordFingerprintLen:], fp[:],
+		"the fingerprint must be the routed key's trailing bytes")
+	require.NotEqual(t, rk[:IndexRecordFingerprintLen], fp[:],
+		"fixture is degenerate: head and tail bytes coincide, pick another term")
+	_ = m
+}
