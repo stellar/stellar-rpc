@@ -321,17 +321,17 @@ func (c *ColdReader) Offsets() (*LedgerOffsets, error) {
 }
 
 // verifyAndDeserializeBitmap checks the index.pack record's leading
-// fingerprint against key's prefix and, on match, unmarshals a fresh
+// fingerprint against the routed key's prefix and, on match, unmarshals a fresh
 // bitmap. On fingerprint mismatch (residual MPHF collision on an
 // unseen key) it returns (nil, nil) — the caller treats nil as
 // not-found. record is valid only inside ReadItem's callback;
 // UnmarshalBinary copies into roaring's internal state so the
 // returned bitmap outlives the callback safely.
-func verifyAndDeserializeBitmap(record []byte, key TermKey, slot uint32) (*roaring.Bitmap, error) {
+func verifyAndDeserializeBitmap(record []byte, routed TermKey, slot uint32) (*roaring.Bitmap, error) {
 	if len(record) < IndexRecordFingerprintLen {
 		return nil, fmt.Errorf("events: index.pack record at slot %d truncated (%d bytes)", slot, len(record))
 	}
-	if !bytes.Equal(record[:IndexRecordFingerprintLen], key[:IndexRecordFingerprintLen]) {
+	if !bytes.Equal(record[:IndexRecordFingerprintLen], routed[:IndexRecordFingerprintLen]) {
 		return nil, nil //nolint:nilnil // not-found signaled by nil bitmap, no error
 	}
 	bm := roaring.New()
@@ -387,9 +387,16 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring
 		outIdx int
 		slot   uint32
 	}
-	pending := make([]pendingKey, 0, len(keys))
+	// The record fingerprints name the routed (blinded) key, so blind once
+	// here and use it for both the MPHF probe and the fingerprint check.
+	blinded := make([]TermKey, len(keys))
 	for i, key := range keys {
-		slot, err := mphf.Lookup(key)
+		blinded[i] = TermKey(stores.BlindKey(mphf.secret, key[:]))
+	}
+
+	pending := make([]pendingKey, 0, len(keys))
+	for i := range keys {
+		slot, err := mphf.lookupRouted(blinded[i])
 		if err != nil {
 			if errors.Is(err, ErrKeyNotFound) {
 				continue // result[i] stays nil
@@ -425,7 +432,7 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring
 		// leaving results[outIdx] = nil for misses.
 		for _, pIdx := range pendingBySlot[readIdx] {
 			p := pending[pIdx]
-			bm, err := verifyAndDeserializeBitmap(record, keys[p.outIdx], p.slot)
+			bm, err := verifyAndDeserializeBitmap(record, blinded[p.outIdx], p.slot)
 			if err != nil {
 				return err
 			}

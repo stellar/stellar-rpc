@@ -471,7 +471,12 @@ func openMPHF(path string) (*mphf, error) {
 // index.pack — an MPHF can map an unseen key to a valid build-set
 // slot, and only the fingerprint catches that residual collision.
 func (m *mphf) Lookup(key TermKey) (uint32, error) {
-	rk := stores.BlindKey(m.secret, key[:])
+	return m.lookupRouted(TermKey(stores.BlindKey(m.secret, key[:])))
+}
+
+// lookupRouted is Lookup for a caller that already holds the routed key, so
+// a caller that needs it for the fingerprint anyway blinds once.
+func (m *mphf) lookupRouted(rk TermKey) (uint32, error) {
 	slot, err := m.idx.QueryRank(rk[:])
 	if err != nil {
 		if errors.Is(err, streamhash.ErrNotFound) {
