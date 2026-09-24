@@ -13,6 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/streamhash"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 )
@@ -124,7 +126,7 @@ func TestWriteIndex_RoundTripsBitmapsPerTerm(t *testing.T) {
 		require.True(t, ok, "record missing at slot %d (term-%d)", slot, i)
 		require.GreaterOrEqual(t, len(record), IndexRecordFingerprintLen, "record at slot %d too short", slot)
 
-		// Fingerprint must match the routed key's trailing bytes.
+		// Fingerprint must match streamhash's fingerprint of the routed key.
 		assert.Equal(t, routedFP(term), record[:IndexRecordFingerprintLen],
 			"fingerprint mismatch at slot %d", slot)
 
@@ -369,10 +371,10 @@ func TestWriteColdIndex_StampAndContentHash(t *testing.T) {
 	require.NoError(t, r.Verify(context.Background()))
 }
 
-// routedFP is the fingerprint the writer stores for term: the trailing bytes
-// of the routed (blinded) key, not of the term itself. It must track
-// mphf.Lookup; see there for why the range is the tail and not the head.
+// routedFP is the fingerprint the writer stores for term: streamhash's
+// fingerprint of the routed (blinded) key.
 func routedFP(term TermKey) []byte {
 	rk := routedKey(testIndexSecret, term)
-	return rk[len(rk)-IndexRecordFingerprintLen:]
+	v, _ := streamhash.Fingerprint(rk[:])
+	return binary.LittleEndian.AppendUint32(nil, v)
 }
