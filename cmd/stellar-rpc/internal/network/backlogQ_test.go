@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/creachadair/jrpc2"
+	"github.com/stellar-experimental/jrpc2"
 	"github.com/stretchr/testify/require"
 )
 

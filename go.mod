@@ -1,6 +1,6 @@
 module github.com/stellar/stellar-rpc
 
-go 1.26
+go 1.26.0
 
 require (
 	github.com/Masterminds/squirrel v1.5.4
@@ -14,7 +14,6 @@ require (
 	github.com/aws/smithy-go v1.28.1
 	github.com/caarlos0/env/v11 v11.4.1
 	github.com/cenkalti/backoff/v4 v4.3.0
-	github.com/creachadair/jrpc2 v1.3.3
 	github.com/dustin/go-humanize v1.0.1
 	github.com/fsouza/fake-gcs-server v1.49.2
 	github.com/go-chi/chi v4.1.2+incompatible
@@ -32,9 +31,11 @@ require (
 )
 
 require (
+	github.com/creachadair/jrpc2 v1.2.0
 	github.com/dchest/siphash v1.2.3
 	github.com/mattn/go-sqlite3 v1.14.17
 	github.com/rubenv/sql-migrate v1.5.2
+	github.com/stellar-experimental/jrpc2 v0.0.0-20260916041201-6eeba1479b1f
 	go.uber.org/goleak v1.3.0
 )
 
@@ -100,7 +101,7 @@ require (
 	github.com/aws/aws-sdk-go v1.55.8 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/creachadair/mds v0.25.10 // indirect
+	github.com/creachadair/mds v0.31.0 // indirect
 	github.com/djherbis/fscache v0.10.1 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect

@@ -15,9 +15,9 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/creachadair/jrpc2"
-	"github.com/creachadair/jrpc2/server"
 	"github.com/sirupsen/logrus"
+	"github.com/stellar-experimental/jrpc2"
+	"github.com/stellar-experimental/jrpc2/server"
 	"github.com/stretchr/testify/require"
 
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"

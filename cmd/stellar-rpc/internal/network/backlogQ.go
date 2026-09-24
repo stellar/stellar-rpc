@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"sync/atomic"
 
-	"github.com/creachadair/jrpc2"
+	"github.com/stellar-experimental/jrpc2"
 
 	"github.com/stellar/go-stellar-sdk/support/log"
 )

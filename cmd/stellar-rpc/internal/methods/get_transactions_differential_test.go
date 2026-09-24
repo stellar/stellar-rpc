@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/creachadair/jrpc2"
+	"github.com/stellar-experimental/jrpc2"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/ingest"
