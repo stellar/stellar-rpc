@@ -124,7 +124,7 @@ func TestWriteIndex_RoundTripsBitmapsPerTerm(t *testing.T) {
 		require.True(t, ok, "record missing at slot %d (term-%d)", slot, i)
 		require.GreaterOrEqual(t, len(record), IndexRecordFingerprintLen, "record at slot %d too short", slot)
 
-		// Fingerprint must match the routed key's first four bytes.
+		// Fingerprint must match the routed key's trailing bytes.
 		assert.Equal(t, routedFP(term), record[:IndexRecordFingerprintLen],
 			"fingerprint mismatch at slot %d", slot)
 
@@ -369,8 +369,9 @@ func TestWriteColdIndex_StampAndContentHash(t *testing.T) {
 	require.NoError(t, r.Verify(context.Background()))
 }
 
-// routedFP is the fingerprint the writer stores for term: the first bytes of
-// the routed (blinded) key, not of the term itself.
+// routedFP is the fingerprint the writer stores for term: the trailing bytes
+// of the routed (blinded) key, not of the term itself. It must track
+// mphf.Lookup; see there for why the range is the tail and not the head.
 func routedFP(term TermKey) []byte {
 	rk := routedKey(testIndexSecret, term)
 	return rk[len(rk)-IndexRecordFingerprintLen:]

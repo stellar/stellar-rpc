@@ -14,6 +14,7 @@ import (
 
 	"github.com/stellar/streamhash"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
@@ -408,6 +409,12 @@ func TestOpenMPHF_RejectsMissingOrMalformedMetadata(t *testing.T) {
 func TestPackFormatsAreDistinct(t *testing.T) {
 	require.NotEqual(t, eventsPackFormat, indexPackFormat,
 		"events.pack and index.pack must not share a format id")
+	// And pin the bump itself. Reverting to 0xFE1E000B would still satisfy
+	// the check above, while letting a pre-tail index.pack open and then
+	// miss every fingerprint silently — the failure the bump exists to stop.
+	require.NotEqual(t, indexPackFormat, packfile.Format(0xFE1E000B),
+		"index.pack's format must stay ahead of 0xB: records written before "+
+			"the fingerprint moved to the routed key's tail must be refused")
 }
 
 // TestFingerprintComesFromTheRoutedKeyTail pins the byte range Lookup cuts
