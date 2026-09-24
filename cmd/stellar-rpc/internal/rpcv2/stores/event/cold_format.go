@@ -414,12 +414,13 @@ func buildMPHF(
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// The algorithm is pinned, not defaulted, because the record fingerprint
-	// depends on it. Bijection assigns buckets from k0, the routed key's first
-	// eight bytes, and lets k1 reach the slot only through a mix — which is why
-	// mphf.Lookup's tail bytes measure at chance. PTRHash assigns buckets
-	// directly from k1, the half the fingerprint is cut from, so inheriting a
-	// changed default would silently collapse the screen.
+	// The algorithm is pinned, not defaulted, because the record fingerprint's
+	// independence from the slot is measured, not proven, and the reason it
+	// holds is algorithm-specific. Bijection lets k1 reach the slot only
+	// through a mix; PTRHash takes buckets from k1 but a collision need not
+	// share its victim's bucket. Both measure at chance today, for different
+	// reasons, so pinning keeps the algorithm in production the one
+	// TestFingerprintIsIndependentOfTheSlot actually measured.
 	// TestFingerprintIsIndependentOfTheSlot fails if that ever happens, and
 	// this line says which algorithm that test's conclusion is about.
 	builder, builderErr := streamhash.NewUnsortedBuilder(ctx, outputPath, uint64(total), tmpDir,
