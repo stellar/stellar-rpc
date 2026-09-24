@@ -5,8 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 
-	"github.com/creachadair/jrpc2"
 	"github.com/pkg/errors"
+	"github.com/stellar-experimental/jrpc2"
 
 	"github.com/stellar/go-stellar-sdk/network"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
