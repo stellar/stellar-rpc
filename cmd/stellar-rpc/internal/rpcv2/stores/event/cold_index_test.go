@@ -117,7 +117,7 @@ func TestWriteIndex_RoundTripsBitmapsPerTerm(t *testing.T) {
 			fmt.Appendf(nil, "term-%d", i),
 			FieldContractID,
 		)
-		slot, err := m.Lookup(term)
+		slot, _, err := m.Lookup(term)
 		require.NoError(t, err, "lookup term-%d", i)
 
 		record, ok := records[int(slot)]
@@ -161,7 +161,7 @@ func TestWriteIndex_UnseenTermFingerprintMismatches(t *testing.T) {
 			fmt.Appendf(nil, "never-seen-%d", i),
 			FieldTopic0,
 		)
-		slot, err := m.Lookup(unseen)
+		slot, _, err := m.Lookup(unseen)
 		if errors.Is(err, ErrKeyNotFound) {
 			continue
 		}
@@ -223,7 +223,7 @@ func TestWriteIndex_ZeroTerms_WritesEmptyIndex(t *testing.T) {
 	m, err := openMPHF(filepath.Join(dir, IndexHashName(indexTestChunkID)))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = m.Close() })
-	_, lerr := m.Lookup(ComputeTermKey([]byte("anything"), FieldContractID))
+	_, _, lerr := m.Lookup(ComputeTermKey([]byte("anything"), FieldContractID))
 	assert.ErrorIs(t, lerr, ErrKeyNotFound)
 }
 
@@ -266,7 +266,7 @@ func TestWriteIndex_SlotsAreDense(t *testing.T) {
 					fmt.Appendf(nil, "term-%d", i),
 					FieldContractID,
 				)
-				slot, err := m.Lookup(term)
+				slot, _, err := m.Lookup(term)
 				require.NoError(t, err)
 				assert.Less(t, slot, uint32(n))
 				seen[slot] = struct{}{}
@@ -299,7 +299,7 @@ func TestWriteIndex_LargeIndex(t *testing.T) {
 			fmt.Appendf(nil, "term-%d", i),
 			FieldContractID,
 		)
-		slot, err := m.Lookup(term)
+		slot, _, err := m.Lookup(term)
 		require.NoError(t, err)
 		record, ok := records[int(slot)]
 		require.True(t, ok)

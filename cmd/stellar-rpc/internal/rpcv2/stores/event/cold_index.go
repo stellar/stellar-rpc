@@ -74,13 +74,12 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 //	0       4     fingerprint (first 4 bytes of the routed key)
 //	4       N     serialized roaring bitmap (Bitmap.MarshalBinary)
 //
-// The cold reader blinds the term once into its routed key rk, uses
-// mphf.lookupRouted(rk) → slot to find the record position,
-// packfile.Reader.ReadItem(slot, ...) to read the bytes, verifies the
-// 4-byte fingerprint against rk[:4], and then deserializes the bitmap
-// on match. Unseen terms still produce a
-// slot (vanilla MPHF semantics) but their fingerprint mismatches —
-// the cold reader rejects them at that point.
+// The cold reader calls mphf.Lookup(term), which returns both the slot and
+// the fingerprint that slot's record must carry, uses
+// packfile.Reader.ReadItem(slot, ...) to read the bytes, compares the
+// 4-byte fingerprint, and then deserializes the bitmap on match. Unseen
+// terms still produce a slot (vanilla MPHF semantics) but their fingerprint
+// mismatches — the cold reader rejects them at that point.
 //
 // streamhash's MPHF is a *minimal* perfect hash: slots are dense in
 // [0, len(bitmaps)), so packfile record positions exactly equal
@@ -125,17 +124,10 @@ func WriteColdIndex(
 
 	entries := make([]indexEntry, 0, len(bitmaps))
 	for term, bitmap := range bitmaps {
-		rk := routedKey(secret, term)
-		slot, lerr := m.lookupRouted(rk)
+		slot, fp, lerr := m.Lookup(term)
 		if lerr != nil {
 			return fmt.Errorf("events: MPHF lookup during index.pack build: %w", lerr)
 		}
-		// The fingerprint names the ROUTED (blinded) key. The streaming
-		// builder never holds the original — its runs carry keys blinded at
-		// seal and are merged verbatim — so the routed key is the only
-		// identity both builders have when a record is written.
-		var fp [IndexRecordFingerprintLen]byte
-		copy(fp[:], rk[:IndexRecordFingerprintLen])
 		// Mutate in place — bitmaps is uniquely owned by the caller, built
 		// single-threaded either way: cold backfill from the .pack, or the freeze
 		// from the read-only hot DB.
