@@ -81,7 +81,12 @@ const (
 	// than failing. Moving the format turns that silence into a refusal on
 	// the first indexed lookup, where the reader already compares formats.
 	// Not at open: that check is lazy and lookup-path-only by design, so an
-	// un-rebuilt chunk surfaces when traffic reaches it, not on startup.
+	// un-rebuilt chunk surfaces when traffic reaches it, not on startup. And
+	// backfill will not repair it — resolve.go skips any chunk the catalog
+	// already marks frozen — so an artifact written before this bump has to
+	// be dropped and rebuilt deliberately. That is acceptable only because
+	// nothing has shipped; a post-release layout change needs a real
+	// migration path, not just a new id.
 	indexPackFormat packfile.Format = 0xFE1E000D // "Fellow Events 0xD"
 )
 
