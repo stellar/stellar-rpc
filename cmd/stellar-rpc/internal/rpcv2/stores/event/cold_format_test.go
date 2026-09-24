@@ -459,9 +459,17 @@ func TestFingerprintComesFromTheRoutedKeyTail(t *testing.T) {
 // Pinning the range alone is not enough. If a future streamhash consulted k1
 // to place a key, rk[12:16] would still be rk[12:16] and the position test
 // would still pass while the screen silently weakened. This fails instead.
-// Per-byte agreement is sampled because 4-byte agreement at 2^-32 is not.
+//
+// What this does and does not establish. The full 2^-32 joint rate is not
+// samplable, so this measures per-byte agreement plus a two-byte joint rate
+// at 2^-16. That combination catches the failures that can actually happen
+// here: streamhash beginning to constrain k1 lifts the per-byte rate, and a
+// derivation whose bytes move together lifts the joint one. It does not
+// prove 2^-32. That rests on SipHash-128 being a PRF, which is an assumption
+// about the primitive, plus TestFingerprintComesFromTheRoutedKeyTail holding
+// the derivation to a slice of its output.
 func TestFingerprintIsIndependentOfTheSlot(t *testing.T) {
-	const members, probes = 60_000, 150_000
+	const members, probes = 60_000, 1_200_000
 	idx := NewBitmaps()
 	for i := range members {
 		idx.AddTo(ComputeTermKey(fmt.Appendf(nil, "mem-%d", i), FieldContractID), uint32(i))
@@ -488,7 +496,7 @@ func TestFingerprintIsIndependentOfTheSlot(t *testing.T) {
 		owner[slot] = resident{fp: fp, head: head}
 	}
 
-	var collisions, shippedAgree, headAgree int
+	var collisions, shippedAgree, headAgree, jointAgree int
 	for i := range probes {
 		term := ComputeTermKey(fmt.Appendf(nil, "unseen-%d", i), FieldContractID)
 		slot, fp, lerr := m.Lookup(term)
@@ -509,6 +517,14 @@ func TestFingerprintIsIndependentOfTheSlot(t *testing.T) {
 				headAgree++
 			}
 		}
+		// Per-byte rates alone cannot establish the joint rate: a derivation
+		// whose bytes always agree together would show 1/256 on every byte
+		// while the real screen was 2^-8. Sample two bytes jointly, which at
+		// 2^-16 is measurable at this N, as a proxy for that whole failure
+		// class. Full 4-byte agreement at 2^-32 is not samplable here.
+		if fp[0] == own.fp[0] && fp[1] == own.fp[1] {
+			jointAgree++
+		}
 	}
 	require.Greater(t, collisions, 50_000, "too few collisions to measure a rate")
 
@@ -521,10 +537,17 @@ func TestFingerprintIsIndependentOfTheSlot(t *testing.T) {
 
 	require.Less(t, shippedRate, 2*chance,
 		"the fingerprint Lookup returns is correlated with slot selection, so the "+
-			"screen is weaker than 2^-32: either it was cut from a constrained range "+
-			"of the routed key, or streamhash changed which key bits it consults")
+			"screen is weaker than its nominal width: either it was cut from a "+
+			"constrained range of the routed key, or streamhash changed which key "+
+			"bits it consults")
 	// Teeth: without this the assertion above would pass on a hash that
 	// constrained nothing, so it would not prove the tail is doing the work.
+	jointExpected := float64(collisions) / 65536.0
+	t.Logf("2-byte joint agreement: got %d, expected ~%.0f", jointAgree, jointExpected)
+	require.Less(t, float64(jointAgree), 10*jointExpected,
+		"fingerprint bytes agree jointly far more often than independently, so the "+
+			"screen is much weaker than its byte-wise rate suggests")
+
 	require.Greater(t, headRate, 3*chance,
 		"leading bytes are no longer constrained, so a passing result above no longer "+
 			"proves the chosen range is doing the work; re-derive the safe region")
