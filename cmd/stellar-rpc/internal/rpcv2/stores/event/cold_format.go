@@ -102,11 +102,9 @@ const (
 // zstd frames.
 const indexPackChecksum = packfile.ChecksumCRC32C
 
-// IndexRecordFingerprintLen is the byte width of the leading
-// fingerprint in every index.pack record. The cold reader checks
-// this against the routed key's last four bytes to filter MPHF false
-// positives before deserializing the bitmap. The range is not arbitrary:
-// see mphf.Lookup for why it must not be the leading bytes.
+// IndexRecordFingerprintLen is the byte width of the leading fingerprint in
+// every index.pack record: the low bytes of streamhash's fingerprint of the
+// routed key, which the cold reader checks to filter MPHF false positives.
 const IndexRecordFingerprintLen = 4
 
 // ──────────────────────────────────────────────────────────────────
@@ -414,18 +412,8 @@ func buildMPHF(
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// The algorithm is pinned, not defaulted, because the record fingerprint's
-	// independence from the slot is measured, not proven, and the reason it
-	// holds is algorithm-specific. Bijection lets k1 reach the slot only
-	// through a mix; PTRHash takes buckets from k1 but a collision need not
-	// share its victim's bucket. Both measure at chance today, for different
-	// reasons, so pinning keeps the algorithm in production the one
-	// TestFingerprintIsIndependentOfTheSlot actually measured.
-	// TestFingerprintIsIndependentOfTheSlot fails if that ever happens, and
-	// this line says which algorithm that test's conclusion is about.
 	builder, builderErr := streamhash.NewUnsortedBuilder(ctx, outputPath, uint64(total), tmpDir,
-		streamhash.WithMetadata(encodeEventsMeta(secret)),
-		streamhash.WithAlgorithm(streamhash.AlgoBijection))
+		streamhash.WithMetadata(encodeEventsMeta(secret)))
 	if builderErr != nil {
 		return nil, fmt.Errorf("events: create streamhash builder: %w", builderErr)
 	}
@@ -497,38 +485,8 @@ func routedKey(secret [stores.SecretLen]byte, term TermKey) TermKey {
 }
 
 // Lookup returns the dense slot in [0, N) that key maps to, and the
-// fingerprint that index.pack's record at that slot must carry.
-//
-// Both name the routed key, because the routed key is what the MPHF was
-// built over: a fingerprint exists to validate the MPHF's answer, so it has
-// to name the same identity the MPHF indexed. Blinding, the secret and the
-// routed key therefore never leave this type.
-//
-// The fingerprint is the routed key's LAST four bytes, chosen by measurement
-// rather than by a structural guarantee. Under the pinned Bijection
-// algorithm, k0 (rk[0:8]) selects both the block and the bucket directly —
-// FastRange32 over its big-endian and then its native form — and slots are
-// bucket-contiguous, so a residual collision agrees with its victim on those
-// bits outright. k1 (rk[8:16]) also reaches the slot, but only through a
-// 128-bit multiply mix that picks among a bucket's handful of slots, which
-// leaves its raw bytes unpinned. Measured per-byte agreement between colliding
-// keys at 2.6M terms, the top of the design's per-chunk range, against a
-// 1/256 baseline:
-//
-//	rk[12:16]  1.0x     chance
-//	rk[8:12]   1.0x     chance — k1 is safe in full
-//	rk[0:4]    58.8x    block assignment
-//	rk[4:8]    65.5x    bucket selection — the WORST range in the key
-//
-// rk[7] alone is 256x: the bucket index determines it outright. The head's
-// excess grows with block count, so it is worse at production scale than on a
-// small test index — it is not a fixed property.
-//
-// So "not the head" is the wrong lesson, and rk[4:8] is the trap it leads to.
-// Take the tail. Because this is an empirical property of one algorithm's
-// internals, TestFingerprintIsIndependentOfTheSlot pins it as a measured rate
-// rather than a byte range: a streamhash change that made these bytes track
-// the slot fails CI instead of quietly weakening the screen.
+// fingerprint that index.pack's record at that slot must carry: streamhash's
+// fingerprint of the routed key, which it keeps independent of the slot.
 //
 // streamhash returns ErrKeyNotFound for keys its routing-stage check
 // can prove were never in the build set; callers should treat this
@@ -540,7 +498,8 @@ func routedKey(secret [stores.SecretLen]byte, term TermKey) TermKey {
 func (m *mphf) Lookup(key TermKey) (uint32, [IndexRecordFingerprintLen]byte, error) {
 	rk := routedKey(m.secret, key)
 	var fp [IndexRecordFingerprintLen]byte
-	copy(fp[:], rk[len(rk)-IndexRecordFingerprintLen:])
+	v, _ := streamhash.Fingerprint(rk[:]) // rk is 16 bytes, so this cannot fail
+	binary.LittleEndian.PutUint32(fp[:], v)
 	slot, err := m.idx.QueryRank(rk[:])
 	if err != nil {
 		if errors.Is(err, streamhash.ErrNotFound) {

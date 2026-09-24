@@ -228,7 +228,7 @@ A 4-byte fingerprint can still collide, so query results are post-filtered after
 
 1. Blind the term key under the chunk secret to get its routed key, and query the MPHF in `index.hash` with it to obtain the slot index.  
 2. Read the record at that slot in `index.pack`.  
-3. If the fingerprint matches the routed key's **last** 4 bytes, deserialize the bitmap; otherwise the term is not present. The trailing bytes are used because the leading ones select the streamhash block, so any key that can collide into this slot already agrees with it on the head.
+3. If the fingerprint matches streamhash's fingerprint of the routed key (`streamhash.Fingerprint`), deserialize the bitmap; otherwise the term is not present.
 
 The resulting bitmap contains the event IDs matching the term.
 
