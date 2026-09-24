@@ -409,12 +409,13 @@ func TestOpenMPHF_RejectsMissingOrMalformedMetadata(t *testing.T) {
 func TestPackFormatsAreDistinct(t *testing.T) {
 	require.NotEqual(t, eventsPackFormat, indexPackFormat,
 		"events.pack and index.pack must not share a format id")
-	// And pin the bump itself. Reverting to 0xFE1E000B would still satisfy
-	// the check above, while letting a pre-tail index.pack open and then
-	// miss every fingerprint silently — the failure the bump exists to stop.
-	require.NotEqual(t, indexPackFormat, packfile.Format(0xFE1E000B),
-		"index.pack's format must stay ahead of 0xB: records written before "+
-			"the fingerprint moved to the routed key's tail must be refused")
+	// And pin the value itself. The check above admits any distinct id,
+	// including the pre-tail 0xFE1E000B, which would let an old index.pack
+	// open and then miss every fingerprint silently — the failure the bump
+	// exists to stop. Changing this constant must be a deliberate edit here.
+	require.Equal(t, indexPackFormat, packfile.Format(0xFE1E000D),
+		"index.pack's format id is pinned; a record-layout change needs a new "+
+			"value AND this line updated, so the bump cannot regress silently")
 }
 
 // TestFingerprintComesFromTheRoutedKeyTail pins the byte range Lookup cuts
