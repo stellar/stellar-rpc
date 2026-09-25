@@ -6,13 +6,14 @@ package event
 // HotStore and ColdReader without branching. Filter semantics are on
 // Matches.
 //
-// Optimization shape: terms are deduped across filters and issued as
-// a single batched Reader.LookupKeys at iteration start, whose bitmaps
-// the walk holds for the whole query; payload fetches stream in
-// internal batches. On the cold path the lookup is one MPHF+index.pack
-// round trip per Matches call. The candidate set comes from the slab
-// engine in slab_match.go, which serves both directions from one walk
-// over the window.
+// Optimization shape: terms are deduped across filters and issued as one
+// batched Reader.LookupKeys per window stage, whose bitmaps the walk holds
+// for that stage; payload fetches stream in internal batches. The window is
+// materialized in two stages — the leading slabs in the walk's direction,
+// then the remainder, and the second only if the page did not fill — so a
+// query that stops after a page asked the index about the slabs that page
+// spans, not about the whole window. The candidate set comes from the slab
+// engine in slab_match.go, which serves both directions from one walk.
 
 import (
 	"bytes"
@@ -172,6 +173,11 @@ type IDRange struct {
 // isEmpty reports whether r covers zero events.
 func (r IDRange) isEmpty() bool { return r.Start == r.End }
 
+// intersect is the part of r that o covers too.
+func (r IDRange) intersect(o IDRange) IDRange {
+	return IDRange{Start: max(r.Start, o.Start), End: min(r.End, o.End)}
+}
+
 // check validates the structural invariant Start <= End. Does NOT
 // check End against the chunk's EventCount — that requires a Reader
 // and is enforced by Matches.
@@ -209,6 +215,11 @@ func IDRangeForLedgers(ofs *LedgerOffsets, startLedger, endLedger uint32) (IDRan
 //nolint:gochecknoglobals // test seam; production never writes it
 var matchBatchSize = 512
 
+// firstStageSlabs is how many slabs a query's first stage covers. Four beat eight and sixteen on every row of
+// the width sweep — warm popular-term pages p50 2.08 / 2.35 / 2.63 ms, EBS-cold popular-term pages p50 6.54 /
+// 6.91 / 7.91 ms.
+const firstStageSlabs = 4
+
 // Match is a payload plus Ordinal, its chunk-relative event ID. A
 // consumer that stops mid-stream needs the ordinal to know where it
 // stopped; it cannot be recovered from the payload, which carries
@@ -236,6 +247,44 @@ func batchSizes(hint int) (int, int) {
 	return first, rest
 }
 
+// stage1Request is the piece of remaining a query's first lookup asks for:
+// the leading firstStageSlabs slabs from the edge the walk starts at — the
+// trailing ones when descending.
+//
+// Every stage after it asks for the whole remainder, so there are at most two
+// lookups, and a query that fills its page inside stage 1 never makes the
+// second — the point of the split. The request falls on a slab boundary, so
+// no slab is split across two stages and the candidates evaluated are the
+// same whether there are one or two; the leading stage is entered at the
+// window's own bound, which may sit mid-slab. remaining is never empty here,
+// so End is never zero.
+func stage1Request(remaining IDRange, descending bool) IDRange {
+	const slabs = uint64(firstStageSlabs)
+	if descending {
+		// The base of the slabs-th slab at or below the one holding End-1.
+		lo := remaining.Start
+		if top := (uint64(remaining.End) - 1) >> slabShift; top >= slabs {
+			//nolint:gosec // (top+1-slabs)<<slabShift < remaining.End <= MaxUint32
+			lo = max(lo, uint32((top+1-slabs)<<slabShift))
+		}
+		return IDRange{Start: lo, End: remaining.End}
+	}
+	// The top of the slabs-th slab at or above the one holding Start.
+	hi := remaining.End
+	if top := ((uint64(remaining.Start) >> slabShift) + slabs) << slabShift; top < uint64(hi) {
+		hi = uint32(top) //nolint:gosec // top < remaining.End <= MaxUint32
+	}
+	return IDRange{Start: remaining.Start, End: hi}
+}
+
+// stageRemainder is what is left of remaining once walked has been walked.
+func stageRemainder(remaining, walked IDRange, descending bool) IDRange {
+	if descending {
+		return IDRange{Start: remaining.Start, End: walked.Start}
+	}
+	return IDRange{Start: walked.End, End: remaining.End}
+}
+
 // Matches yields the events in window matching filters, in
 // chunk-relative ordinal order (reversed when descending), each
 // verified by the post-filter. Yielded payloads are owned by the
@@ -256,9 +305,19 @@ func batchSizes(hint int) (int, int) {
 // drops are invisible: the iterator advances past them internally, so
 // consumers never see or reason about resume state.
 //
+// The window is materialized in at most two stages (see stage1Request): the
+// leading slabs in the walk's direction, then the remainder, and the second
+// only if the consumer is still pulling when the first runs out. A stage is
+// walked as far as its lookup says it covered, so the seam moves to where the
+// reading stopped and no part is read twice. The stream is still the pinned
+// window's: the caller pins window.End below the ingest frontier (see
+// IDRange) and a committed ledger's events never change, so every stage's
+// image answers for the window identically.
+//
 // firstBatch sizes the first internal fetch: a consumer that will stop after
-// N matches passes N. Zero and negative hints use the default. The hint
-// changes I/O counts only, never what the stream yields.
+// N matches passes N. Zero and negative hints use the default. A page that
+// spans the stage seam carries the rest of its hint into the second stage.
+// The hint changes I/O counts only, never what the stream yields.
 func Matches(
 	ctx context.Context, r Reader, filters []Filter, window IDRange,
 	descending bool, firstBatch int,
@@ -279,18 +338,47 @@ func Matches(
 			streamRange(ctx, r, window, descending, firstBatch, yield)
 			return
 		}
-		sources, err := r.LookupKeys(ctx, uniqueKeys)
-		if err != nil {
-			yield(Match{}, fmt.Errorf("events: query lookup: %w", err))
-			return
+		emitted := 0
+		// remaining is the part of the window no stage has walked yet. A stage
+		// always walks at least what it asked for, so it always shrinks; every
+		// stage after the first asks for the whole of it.
+		remaining := window
+		for stage := stage1Request(window, descending); !remaining.isEmpty(); stage = remaining {
+			sources, covered, err := r.LookupKeys(ctx, uniqueKeys, stage)
+			if err != nil {
+				yield(Match{}, fmt.Errorf("events: query lookup: %w", err))
+				return
+			}
+			// A reader that answers for less than it was asked leaves the walk
+			// nothing to advance on, and the loop would never end.
+			if covered.Start > stage.Start || covered.End < stage.End {
+				yield(Match{}, fmt.Errorf("events: query lookup covered [%d, %d) but was asked for [%d, %d)",
+					covered.Start, covered.End, stage.Start, stage.End))
+				return
+			}
+			// The stepper walks what the lookup covered and no further: the
+			// bitmaps say nothing about ids outside it. A reader that covers
+			// more than it was asked saves the next stage the ids it already
+			// read.
+			walked := remaining.intersect(covered)
+			st := newSlabStepper(plans, sources, walked, descending)
+			// A plan is dropped only for a term absent from the chunk, which
+			// is chunk-wide: no later stage can revive it, so nothing past
+			// here can match either.
+			if len(st.plans) == 0 {
+				return
+			}
+			// firstBatch is the whole query's hint, so what stage 1 yielded
+			// comes off it. A spent hint goes non-positive and batchSizes
+			// falls back to the default.
+			n, ok := streamSlabs(
+				ctx, r, filters, st, descending, firstBatch-emitted, yield)
+			emitted += n
+			if !ok {
+				return
+			}
+			remaining = stageRemainder(remaining, walked, descending)
 		}
-		st := newSlabStepper(plans, sources, window, descending)
-		// No plan survived term resolution, so nothing can match and no slab
-		// is worth evaluating.
-		if len(st.plans) == 0 {
-			return
-		}
-		streamSlabs(ctx, r, filters, st, descending, firstBatch, yield)
 	}
 }
 
@@ -356,36 +444,37 @@ func planIndexTerms(filters []Filter) ([]termPlan, []TermKey, bool) {
 }
 
 // emitBatch fetches one batch of candidate ordinals, drops the bitmap-side
-// false positives and yields the survivors, reporting whether the stream
-// should continue. FetchEvents requires ascending ids, so a descending batch
-// is flipped in place before the fetch and flipped back before yielding.
+// false positives and yields the survivors, reporting how many it yielded
+// and whether the stream should continue. FetchEvents requires ascending
+// ids, so a descending batch is flipped in place before the fetch and
+// flipped back before yielding.
 func emitBatch(
 	ctx context.Context, r Reader, filters []Filter, ids []uint32,
 	descending bool, yield func(Match, error) bool,
-) bool {
+) (int, bool) {
 	if descending {
 		slices.Reverse(ids)
 	}
 	payloads, err := r.FetchEvents(ctx, ids)
 	if err != nil {
 		yield(Match{}, err)
-		return false
+		return 0, false
 	}
 	// Drop bitmap-side false positives (see postFilter for the rationale).
 	matched, err := postFilter(payloads, ids, filters)
 	if err != nil {
 		yield(Match{}, err)
-		return false
+		return 0, false
 	}
 	if descending {
 		slices.Reverse(matched)
 	}
 	for i := range matched {
 		if !yield(matched[i], nil) {
-			return false
+			return i, false
 		}
 	}
-	return true
+	return len(matched), true
 }
 
 // ValidateFilters rejects filters that would silently never match
