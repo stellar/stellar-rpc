@@ -223,7 +223,7 @@ func TestColdReader_RejectsNewerAppDataVersion(t *testing.T) {
 	t.Cleanup(func() { _ = c.Close() })
 	_, err = c.LastSeq()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "written by a newer stellar-rpc")
+	assert.Contains(t, err.Error(), "written by a different stellar-rpc build")
 }
 
 func TestColdReader_RejectsWrongFormat(t *testing.T) {

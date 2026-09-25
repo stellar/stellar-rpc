@@ -23,12 +23,14 @@ package event
 // cold_writer.go + cold_index.go; the reader lives in cold_reader.go.
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
 	"os"
+	"sort"
 
 	"github.com/stellar/streamhash"
 
@@ -74,9 +76,10 @@ const (
 	// records. The Format value identifies the on-disk codec; readers
 	// dispatch on it to select a matching RecordDecoder.
 	eventsPackFormat packfile.Format = 0xFE1E000C // "Fellow Events 0xC" (zstd)
-	// Bumped from 0xFE1E000B when the record fingerprint moved to the routed
-	// key, so an older index.pack is rejected instead of missing every lookup.
-	indexPackFormat packfile.Format = 0xFE1E000D // "Fellow Events 0xD"
+	// Bumped from 0xFE1E000D when index.pack grew dense-term parts: an older
+	// binary must refuse the artifact rather than read a part record as 128
+	// terms. 0xE and 0xF are spent on unreleased experiments.
+	indexPackFormat packfile.Format = 0xFE1E0010 // "Fellow Events 0x10" (dense-term parts)
 )
 
 // indexPackChecksum belongs to index.pack's on-disk identity, so it lives here
@@ -96,68 +99,248 @@ const indexPackChecksum = packfile.ChecksumCRC32C
 const IndexRecordFingerprintLen = 4
 
 // ──────────────────────────────────────────────────────────────────
-// index.pack build stamp.
+// index.pack layout and app data.
 //
-// Embedded in index.pack's app-data slot:
+// index.pack is a packfile of 128-item records (indexPackItemsPerRecord)
+// with a CRC32C per record, in two kinds.
 //
-//	offset  size  field
-//	0       1     version (0x01)
-//	1       2     term schema version (uint16 BE)
-//	3       8     indexed-field bitmask (uint64 BE)
+// Bucket records come first, one per 128 MPHF slots in slot order: record r
+// holds slots 128r .. 128r+127, item = fp[4] ‖ roaring portable bitmap of the
+// term's ids. The last one is padded out to 128 items, so the part records
+// after it start on a record boundary.
 //
-// The stamp records which term-derivation scheme and field set the
-// index was built under, making the artifact self-describing: an
-// index missing a term family becomes distinguishable from one that
-// simply matched nothing. Freeze and walk write identical stamps
-// (all three values are compile-time constants), so freeze-vs-walk
-// byte identity is unaffected. Decoding ignores trailing bytes so a
-// future version can extend the blob without moving these fields.
+// A term whose bitmap would make its bucket too big to read in one I/O unit
+// is demoted (see cold_index.go): its slot item keeps the fingerprint and
+// drops the bitmap, and the term is written again as part records. A part
+// record covers 2^k slabs of 65,536 ids — item 0 = fp[4] ‖ roaring bitmap of
+// that span's ids, items 1..127 empty — and a term's parts are contiguous, in
+// span order, after every bucket record, one per span in [0, partCount) and
+// empty ones included. So part p is item 128·(firstRecord+p), no search.
+//
+// The directory that names the demoted terms rides in index.pack's
+// app-data slot, behind the build stamp:
+//
+//	offset  size   field
+//	0       1      version (0x02)
+//	1       2      term schema version (uint16 BE)
+//	3       8      indexed-field bitmask (uint64 BE)
+//	11      8      numKeys        (uint64 BE)
+//	19      4      bucketCount    (uint32 BE)
+//	23      4      totalParts     (uint32 BE)
+//	27      4      entryCount     (uint32 BE)
+//	31      23×N   entries, sorted by TermKey:
+//	                 key[16] ‖ firstRecord uint32 BE ‖ partCount uint16 BE ‖ k uint8
+//
+// The stamp records which term-derivation scheme and field set the index
+// was built under, making the artifact self-describing: an index missing a
+// term family becomes distinguishable from one that simply matched
+// nothing. The four counts are what the reader pairs index.hash and
+// index.pack on, and the entries stay bytes there, binary-searched in place.
+//
+// Freeze and walk write identical app data (the schema and mask are
+// compile-time constants and demotion is deterministic), so freeze-vs-walk
+// byte identity is unaffected. Decoding ignores bytes past the last entry so
+// a future version can extend the blob without moving these fields.
 // ──────────────────────────────────────────────────────────────────
 
 const (
-	indexStampVersion byte = 0x01
+	indexStampVersion byte = 0x02
 	indexStampLen          = 1 + 2 + 8
+	// indexDirHeaderLen is the four counts that follow the stamp.
+	indexDirHeaderLen = 8 + 4 + 4 + 4
+	// indexDirEntryLen is the fixed stride of one directory entry.
+	indexDirEntryLen = 16 + 4 + 2 + 1
 )
 
-func encodeIndexBuildStamp() []byte {
-	buf := make([]byte, indexStampLen)
-	buf[0] = indexStampVersion
-	binary.BigEndian.PutUint16(buf[1:3], TermSchemaVersion)
-	binary.BigEndian.PutUint64(buf[3:11], IndexedFieldMask())
-	return buf
+// indexSlabShift is the slab width the part layout is cut on: one roaring
+// container, 65,536 ids. It is the format's own constant, not the engine's
+// slabShift (a test seam) — the bytes on disk cannot move because a test
+// shrank a walk.
+const indexSlabShift = 16
+
+// partEntry is one directory row: where a demoted term's parts start, how
+// many there are, and how many slabs each covers.
+type partEntry struct {
+	firstRecord uint32
+	partCount   uint16
+	k           uint8
 }
 
-// checkIndexBuildStamp refuses an index.pack whose build stamp names a term
-// schema or field set other than this binary's own.
-func checkIndexBuildStamp(indexPackPath string, r *stores.PackReader) error {
-	ad, err := r.AppData()
-	if err != nil {
-		return fmt.Errorf("events: read build stamp of %s: %w", indexPackPath, err)
+// window is the range of part indices that can hold an id in w: parts tile
+// the chunk on spans of 2^k slabs, so this is a shift, not a search. False
+// means the term has nothing in w — an empty window, or one starting past
+// its last part.
+func (e partEntry) window(w IDRange) (uint32, uint32, bool) {
+	if w.isEmpty() || e.partCount == 0 {
+		return 0, 0, false
 	}
-	schema, mask, err := decodeIndexBuildStamp(ad)
-	if err != nil {
-		return fmt.Errorf("events: %s: %w", indexPackPath, err)
+	shift := uint(e.k) + indexSlabShift
+	first := uint64(w.Start) >> shift
+	last := uint64(w.End-1) >> shift
+	top := uint64(e.partCount) - 1
+	if first > top {
+		return 0, 0, false
 	}
-	if schema != TermSchemaVersion || mask != IndexedFieldMask() {
+	if last > top {
+		last = top
+	}
+	return uint32(first), uint32(last), true //nolint:gosec // both <= partCount-1 (uint16)
+}
+
+// indexDirectory is index.pack's app data as the reader keeps it: the
+// pairing counts, plus the entry table left as bytes for binary search.
+type indexDirectory struct {
+	numKeys     uint64
+	bucketCount uint32
+	totalParts  uint32
+	entries     []byte // entryCount × indexDirEntryLen, sorted by key
+}
+
+// entryCount is how many demoted terms the directory names.
+func (d indexDirectory) entryCount() int { return len(d.entries) / indexDirEntryLen }
+
+// lookup finds key's parts, reporting false for a term that was not demoted
+// (which is almost every term). Binary search over the fixed stride.
+// lookupRouted finds the row for a ROUTED (blinded) key. Rows are keyed
+// that way because the streaming builder never sees the original.
+func (d indexDirectory) lookupRouted(key TermKey) (partEntry, bool) {
+	n := d.entryCount()
+	i := sort.Search(n, func(i int) bool {
+		return bytes.Compare(d.entries[i*indexDirEntryLen:i*indexDirEntryLen+len(key)], key[:]) >= 0
+	})
+	if i >= n {
+		return partEntry{}, false
+	}
+	row := d.entries[i*indexDirEntryLen : (i+1)*indexDirEntryLen]
+	if !bytes.Equal(row[:len(key)], key[:]) {
+		return partEntry{}, false
+	}
+	return partEntry{
+		firstRecord: binary.BigEndian.Uint32(row[16:20]),
+		partCount:   binary.BigEndian.Uint16(row[20:22]),
+		k:           row[22],
+	}, true
+}
+
+// pair is the exact pairing check, four cheap counts at open against the
+// MPHF's key count and the pack's record and item counts. index.pack and
+// index.hash carry no chunk id of their own, so a mispaired index would
+// silently answer with a subset; and part addressing is arithmetic off
+// bucketCount and a fixed 128 items per record, so a pack that does not
+// decompose into the buckets and parts the directory claims, each padded
+// full, cannot be read at all.
+func (d indexDirectory) pair(
+	path string, chunkID chunk.ID, keys uint64, records uint32, items uint64,
+) error {
+	if d.numKeys != keys {
 		return fmt.Errorf(
-			"events: %s was built under term schema %d with field mask %#x; this binary expects "+
-				"schema %d with mask %#x (rebuilt index required, or a binary matching the artifact)",
-			indexPackPath, schema, mask, TermSchemaVersion, IndexedFieldMask())
+			"events: index pair mismatch for chunk %s: index.hash holds %d keys "+
+				"but index.pack's directory claims %d (mispaired artifacts)",
+			chunkID, keys, d.numKeys)
+	}
+	wantBuckets := (d.numKeys + indexPackItemsPerRecord - 1) / indexPackItemsPerRecord
+	if uint64(d.bucketCount) != wantBuckets {
+		return fmt.Errorf("%w: events: %s holds %d keys in %d buckets, want %d",
+			stores.ErrCorrupt, path, d.numKeys, d.bucketCount, wantBuckets)
+	}
+	if uint64(d.bucketCount)+uint64(d.totalParts) != uint64(records) {
+		return fmt.Errorf("%w: events: %s holds %d records, but its directory claims %d buckets and %d parts",
+			stores.ErrCorrupt, path, records, d.bucketCount, d.totalParts)
+	}
+	// Every record is padded to a full 128 items — buckets by the writer's pad
+	// loop, part records by their 127 empty ones — so the item count is the
+	// record count times the stride, and anything else means items went
+	// missing under a record count that still adds up.
+	if items != uint64(records)*indexPackItemsPerRecord {
+		return fmt.Errorf("%w: events: %s holds %d items in %d records, want %d (every record is padded full)",
+			stores.ErrCorrupt, path, items, records, uint64(records)*indexPackItemsPerRecord)
+	}
+	// The rows tile the parts region exactly. They are sorted by key, and the
+	// writer sorts the demoted terms by key before laying their parts down, so
+	// that is firstRecord order too: each row starts where the one before it
+	// ended, the first at the bucket region's end and the last at the pack's.
+	next := uint64(d.bucketCount)
+	for off := 0; off+indexDirEntryLen <= len(d.entries); off += indexDirEntryLen {
+		first := uint64(binary.BigEndian.Uint32(d.entries[off+16 : off+20]))
+		count := uint64(binary.BigEndian.Uint16(d.entries[off+20 : off+22]))
+		k := uint64(d.entries[off+22])
+		if count == 0 || first != next {
+			return fmt.Errorf("%w: events: %s directory row %d names records [%d, %d); the rows before it tile "+
+				"up to %d", stores.ErrCorrupt, path, off/indexDirEntryLen, first, first+count, next)
+		}
+		// Every span has to start inside the id space. The writer cuts the
+		// last one at MaxUint32+1, so it ends at the top at the furthest.
+		if k > 16 || (count-1)<<(k+indexSlabShift) > math.MaxUint32 {
+			return fmt.Errorf("%w: events: %s directory row %d tiles %d spans of 2^%d slabs, which start past "+
+				"the id space", stores.ErrCorrupt, path, off/indexDirEntryLen, count, k)
+		}
+		next += count
+	}
+	if next != uint64(records) {
+		return fmt.Errorf("%w: events: %s directory rows tile records [%d, %d), but the pack holds %d",
+			stores.ErrCorrupt, path, d.bucketCount, next, records)
 	}
 	return nil
 }
 
-// decodeIndexBuildStamp recovers (termSchema, fieldMask) from an index.pack
-// app-data blob, rejecting a short blob or an unknown stamp version. Bytes
-// past the stamp are ignored (future extension room).
-func decodeIndexBuildStamp(data []byte) (uint16, uint64, error) {
+// encodeIndexAppData serializes the build stamp followed by dir.
+func encodeIndexAppData(dir indexDirectory) []byte {
+	buf := make([]byte, indexStampLen+indexDirHeaderLen, indexStampLen+indexDirHeaderLen+len(dir.entries))
+	buf[0] = indexStampVersion
+	binary.BigEndian.PutUint16(buf[1:3], TermSchemaVersion)
+	binary.BigEndian.PutUint64(buf[3:11], IndexedFieldMask())
+	binary.BigEndian.PutUint64(buf[11:19], dir.numKeys)
+	binary.BigEndian.PutUint32(buf[19:23], dir.bucketCount)
+	binary.BigEndian.PutUint32(buf[23:27], dir.totalParts)
+	//nolint:gosec // entry count is bounded by the chunk's term count
+	binary.BigEndian.PutUint32(buf[27:31], uint32(len(dir.entries)/indexDirEntryLen))
+	return append(buf, dir.entries...)
+}
+
+// decodeIndexAppData recovers (termSchema, fieldMask, directory) from an
+// index.pack app-data blob, rejecting a short blob or an unknown stamp
+// version. Bytes past the last entry are ignored (future extension room).
+func decodeIndexAppData(data []byte) (uint16, uint64, indexDirectory, error) {
+	var dir indexDirectory
 	if err := stores.CheckBlobVersion(data, indexStampVersion); err != nil {
-		return 0, 0, fmt.Errorf("events: index.pack build stamp: %w", err)
+		return 0, 0, dir, fmt.Errorf("events: index.pack build stamp: %w", err)
 	}
-	if len(data) < indexStampLen {
-		return 0, 0, fmt.Errorf("events: index.pack build stamp is %d bytes, want at least %d", len(data), indexStampLen)
+	if len(data) < indexStampLen+indexDirHeaderLen {
+		return 0, 0, dir, fmt.Errorf("events: index.pack app data is %d bytes, want at least %d",
+			len(data), indexStampLen+indexDirHeaderLen)
 	}
-	return binary.BigEndian.Uint16(data[1:3]), binary.BigEndian.Uint64(data[3:11]), nil
+	dir.numKeys = binary.BigEndian.Uint64(data[11:19])
+	dir.bucketCount = binary.BigEndian.Uint32(data[19:23])
+	dir.totalParts = binary.BigEndian.Uint32(data[23:27])
+	count := int(binary.BigEndian.Uint32(data[27:31]))
+	end := indexStampLen + indexDirHeaderLen + count*indexDirEntryLen
+	if count < 0 || end < 0 || len(data) < end {
+		return 0, 0, dir, fmt.Errorf("%w: events: index.pack directory claims %d entries, app data holds %d bytes",
+			stores.ErrCorrupt, count, len(data))
+	}
+	dir.entries = data[indexStampLen+indexDirHeaderLen : end]
+	return binary.BigEndian.Uint16(data[1:3]), binary.BigEndian.Uint64(data[3:11]), dir, nil
+}
+
+// loadIndexAppData reads index.pack's app data, refuses a stamp that names a
+// term schema or field set other than this binary's own, and hands back the
+// directory behind it.
+func loadIndexAppData(indexPackPath string, r *stores.PackReader) (indexDirectory, error) {
+	ad, err := r.AppData()
+	if err != nil {
+		return indexDirectory{}, fmt.Errorf("events: read build stamp of %s: %w", indexPackPath, err)
+	}
+	schema, mask, dir, err := decodeIndexAppData(ad)
+	if err != nil {
+		return indexDirectory{}, fmt.Errorf("events: %s: %w", indexPackPath, err)
+	}
+	if schema != TermSchemaVersion || mask != IndexedFieldMask() {
+		return indexDirectory{}, fmt.Errorf(
+			"events: %s was built under term schema %d with field mask %#x; this binary expects "+
+				"schema %d with mask %#x (rebuilt index required, or a binary matching the artifact)",
+			indexPackPath, schema, mask, TermSchemaVersion, IndexedFieldMask())
+	}
+	return dir, nil
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -460,6 +643,14 @@ func routedKey(secret [stores.SecretLen]byte, term TermKey) TermKey {
 	return TermKey(stores.BlindKey(secret, term[:]))
 }
 
+// routedFingerprint is the fingerprint index.pack stores for a routed key.
+func routedFingerprint(rk TermKey) [IndexRecordFingerprintLen]byte {
+	var fp [IndexRecordFingerprintLen]byte
+	v, _ := streamhash.Fingerprint(rk[:]) // rk is 16 bytes, so this cannot fail
+	binary.LittleEndian.PutUint32(fp[:], v)
+	return fp
+}
+
 // Lookup returns the dense slot in [0, N) that key maps to, and the
 // fingerprint that index.pack's record at that slot must carry.
 //
@@ -471,10 +662,19 @@ func routedKey(secret [stores.SecretLen]byte, term TermKey) TermKey {
 // index.pack — an MPHF can map an unseen key to a valid build-set
 // slot, and only the fingerprint catches that residual collision.
 func (m *mphf) Lookup(key TermKey) (uint32, [IndexRecordFingerprintLen]byte, error) {
-	rk := routedKey(m.secret, key)
-	var fp [IndexRecordFingerprintLen]byte
-	v, _ := streamhash.Fingerprint(rk[:]) // rk is 16 bytes, so this cannot fail
-	binary.LittleEndian.PutUint32(fp[:], v)
+	return m.lookupRouted(routedKey(m.secret, key))
+}
+
+// Close unmaps the index file; callers must call it (see openMPHF).
+func (m *mphf) Close() error {
+	return m.idx.Close()
+}
+
+// lookupRouted is Lookup for a caller that already holds the routed key, so
+// the build loop and the cold reader, which need it for the directory, blind
+// once.
+func (m *mphf) lookupRouted(rk TermKey) (uint32, [IndexRecordFingerprintLen]byte, error) {
+	fp := routedFingerprint(rk)
 	slot, err := m.idx.QueryRank(rk[:])
 	if err != nil {
 		if errors.Is(err, streamhash.ErrNotFound) {
@@ -489,11 +689,6 @@ func (m *mphf) Lookup(key TermKey) (uint32, [IndexRecordFingerprintLen]byte, err
 		return 0, fp, fmt.Errorf("events: slot %d overflows uint32", slot)
 	}
 	return uint32(slot), fp, nil
-}
-
-// Close unmaps the index file; callers must call it (see openMPHF).
-func (m *mphf) Close() error {
-	return m.idx.Close()
 }
 
 // isEmpty reports whether the index holds zero terms (an eventless chunk).

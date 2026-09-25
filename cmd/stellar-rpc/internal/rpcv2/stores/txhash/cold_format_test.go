@@ -44,7 +44,7 @@ func TestParseColdMetadata_UnknownVersionErrors(t *testing.T) {
 	blob := EncodeColdMetadata(5, 9, testSecret())
 	blob[0] = coldMetadataVersion + 1
 	_, _, _, err := ParseColdMetadata(blob)
-	require.ErrorContains(t, err, "written by a newer stellar-rpc")
+	require.ErrorContains(t, err, "written by a different stellar-rpc build")
 }
 
 func TestParseColdMetadata_MaxBelowMinErrors(t *testing.T) {

@@ -111,8 +111,9 @@ type Reader interface {
 	//
 	// ColdReader coalesces the underlying packfile reads into a
 	// single ReadItems pass, fanning out across the worker count
-	// configured via ColdReaderOptions.Concurrency. It returns whole
-	// terms, so its covered range is the whole id space. HotStore returns
+	// configured via ColdReaderOptions.Concurrency, and reads only
+	// the parts of a demoted term the window reaches — whole parts,
+	// which is what its covered range reports. HotStore returns
 	// snapshots of the live mirror shared by all readers of a term;
 	// a dense term written since its last lookup is cloned once, by
 	// the first reader to look it up, and that clone is then shared,
