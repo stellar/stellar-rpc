@@ -238,6 +238,15 @@ fn preflight_extend_ttl_op(
     network_config: &NetworkConfig,
     ledger_info: &LedgerInfo,
 ) -> Result<CPreflightResult> {
+    // Mirror stellar-core, which treats `extend_to > max_entry_ttl - 1` as malformed. This also
+    // keeps `ledger_seq + extend_to` from overflowing inside `simulate_extend_ttl_op`.
+    let max_extend_to = ledger_info.max_entry_ttl.saturating_sub(1);
+    if extend_op.extend_to > max_extend_to {
+        return Err(anyhow!(
+            "extend_to ({}) exceeds the maximum allowed value ({max_extend_to})",
+            extend_op.extend_to
+        ));
+    }
     let auto_restore_snapshot = AutoRestoringSnapshotSource::new(go_storage.clone(), ledger_info)?;
     let simulation_result = simulate_extend_ttl_op(
         &auto_restore_snapshot,

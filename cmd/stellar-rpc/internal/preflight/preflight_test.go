@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"fmt"
+	"math"
 	"os"
 	"path"
 	"runtime"
@@ -337,4 +338,47 @@ func TestGetPreflightUseUpgradedAuthOnPrevProtocol(t *testing.T) {
 	result, err := GetPreflight(t.Context(), params)
 	require.NoError(t, err)
 	require.Empty(t, result.Error)
+}
+
+func getExtendTTLPreflightParameters(t *testing.T, protocolVersion uint32, extendTo uint32) Parameters {
+	params := getPreflightParameters(t, protocolVersion)
+	params.LedgerSeq = latestSimulateTransactionLedgerSeq
+	params.OpBody = xdr.OperationBody{
+		Type: xdr.OperationTypeExtendFootprintTtl,
+		ExtendFootprintTtlOp: &xdr.ExtendFootprintTtlOp{
+			ExtendTo: xdr.Uint32(extendTo),
+		},
+	}
+	instanceKey, err := mockLedgerEntriesWithoutTTLs[1].LedgerKey()
+	require.NoError(t, err)
+	params.Footprint = xdr.LedgerFootprint{ReadOnly: []xdr.LedgerKey{instanceKey}}
+	return params
+}
+
+func TestGetPreflightExtendTTL(t *testing.T) {
+	for _, protocolVersion := range supportedProtocolVersions {
+		t.Run(fmt.Sprintf("protocol %d", protocolVersion), func(t *testing.T) {
+			params := getExtendTTLPreflightParameters(t, protocolVersion, entryTTLValue*2)
+			result, err := GetPreflight(t.Context(), params)
+			require.NoError(t, err)
+			require.Empty(t, result.Error)
+			var txData xdr.SorobanTransactionData
+			require.NoError(t, xdr.SafeUnmarshal(result.TransactionData, &txData))
+			require.Len(t, txData.Resources.Footprint.ReadOnly, 1)
+		})
+	}
+}
+
+// An extend_to that overflows the ledger sequence number must be rejected
+// rather than wrapping around and producing an empty footprint.
+func TestGetPreflightExtendTTLRejectsOversizedExtendTo(t *testing.T) {
+	for _, protocolVersion := range supportedProtocolVersions {
+		t.Run(fmt.Sprintf("protocol %d", protocolVersion), func(t *testing.T) {
+			params := getExtendTTLPreflightParameters(t, protocolVersion, math.MaxUint32)
+			result, err := GetPreflight(t.Context(), params)
+			require.NoError(t, err)
+			require.Contains(t, result.Error, "extend_to")
+			require.Empty(t, result.TransactionData)
+		})
+	}
 }
