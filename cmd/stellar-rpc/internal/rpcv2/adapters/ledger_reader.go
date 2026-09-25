@@ -78,17 +78,9 @@ func (tx *ledgerReaderTx) GetLedgerRange(_ context.Context) (store.LedgerRange, 
 
 func (tx *ledgerReaderTx) Done() error { return nil }
 
-// inWindow reports whether seq falls inside the view's servable window
-// [OldestLedger, LatestLedger] — the one gate every point read must apply.
-// OldestLedger is always ≥ 2 (the floor sits on a chunk, and chunk 0 starts at
-// ledger 2), so this also rejects the sequences chunk.IDFromLedger panics on.
-func inWindow(view *query.ReadView, seq uint32) bool {
-	return seq >= view.OldestLedger() && seq <= view.LatestLedger()
-}
-
 // scanView yields [start, end] off the view with no copy: RawLedger.Raw
-// aliases the tier's buffer until the next step. A scan of one is the routed
-// point read, so getLatestLedger's I/O stays a pinned lookup, not a chunk walk;
+// aliases the tier's buffer until the next step. A scan of one, after clamping,
+// is the routed point read, so getLatestLedger's I/O stays a pinned lookup, not a chunk walk;
 // a hot-store miss inside the window yields nothing, matching v1's absent shape.
 func scanView(ctx context.Context, view *query.ReadView, start, end uint32) iter.Seq2[store.RawLedger, error] {
 	return func(yield func(store.RawLedger, error) bool) {
@@ -99,10 +91,15 @@ func scanView(ctx context.Context, view *query.ReadView, start, end uint32) iter
 			yield(store.RawLedger{}, err)
 			return
 		}
+		// Clamp to the window here rather than let ClampRange answer a start below
+		// the floor with a *RangeError: not yielding is the shape the handler
+		// turns into v1's InvalidParams naming the caller's ledger.
+		start = max(start, view.OldestLedger())
+		end = min(end, view.LatestLedger())
+		if start > end {
+			return
+		}
 		if start == end {
-			if !inWindow(view, start) {
-				return
-			}
 			yielded := false
 			err := view.WithLedger(start, func(raw []byte) error {
 				yielded = true
@@ -112,14 +109,6 @@ func scanView(ctx context.Context, view *query.ReadView, start, end uint32) iter
 			if err != nil && !yielded && !errors.Is(err, stores.ErrNotFound) {
 				yield(store.RawLedger{}, err)
 			}
-			return
-		}
-		// ClampRange answers a start below the floor with a *RangeError and an
-		// inverted range with an error; raising start keeps the not-yielded
-		// shape, which the handler turns into v1's InvalidParams naming the
-		// caller's ledger. A start past latest already scans empty.
-		start = max(start, view.OldestLedger())
-		if start > end {
 			return
 		}
 		scan, err := view.ScanLedgers(start, end)
