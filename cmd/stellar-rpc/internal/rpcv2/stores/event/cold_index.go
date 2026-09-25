@@ -1,21 +1,23 @@
 package event
 
-// cold_index.go is the index half of the cold-Chunk pipeline. It
-// produces index.pack (per-slot bitmap records) + index.hash (the
-// serialized MPHF) inside a Chunk's cold directory.
-//
-// The events.pack writer half lives in cold_writer.go. Shared format
-// constants, the LedgerOffsets app-data wire format, and the
-// MPHF wrapper live in cold_format.go.
+// cold_index.go is the index half of the cold-Chunk pipeline: index.hash (the
+// serialized MPHF) and index.pack — 128-item bucket records in slot order,
+// then part records for the terms too big to leave in a bucket, then app data
+// whose directory names them (cold_format.go carries the layout, the wire
+// format and the MPHF wrapper). The events.pack writer half lives in
+// cold_writer.go.
 
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 
 	"github.com/RoaringBitmap/roaring/v2"
@@ -67,8 +69,8 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 //
 // index.hash is the MPHF serialized via buildMPHF.
 //
-// index.pack format. One packfile record per MPHF slot, in slot
-// order. Each record is:
+// index.pack format. One packfile item per MPHF slot, 128 to a
+// record, in slot order. Each item is:
 //
 //	offset  size  field
 //	0       4     fingerprint (streamhash.Fingerprint of the routed key)
@@ -81,7 +83,7 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 // mismatches — the cold reader rejects them at that point.
 //
 // streamhash's MPHF is a *minimal* perfect hash: slots are dense in
-// [0, len(bitmaps)), so packfile record positions exactly equal
+// [0, len(bitmaps)), so packfile item positions exactly equal
 // slots. An assertion guards this invariant in case streamhash
 // semantics ever shift.
 //
@@ -122,15 +124,27 @@ func WriteColdIndex(
 	defer m.Close()
 
 	entries := make([]indexEntry, 0, len(bitmaps))
+	// Only a term at or above the floor can be demoted and named in the
+	// directory, so only those keep their key: sixteen bytes on every entry
+	// is most of the writer's footprint on a chunk of singletons.
+	keys := map[uint32]TermKey{}
 	for term, bitmap := range bitmaps {
-		slot, fp, lerr := m.Lookup(term)
+		rk := routedKey(secret, term)
+		slot, fp, lerr := m.lookupRouted(rk)
 		if lerr != nil {
 			return fmt.Errorf("events: MPHF lookup during index.pack build: %w", lerr)
 		}
+		// Fingerprint and directory both come from the ROUTED (blinded) key.
+		// The streaming builder never holds the original — its runs carry keys
+		// blinded at seal and are merged verbatim — so the routed key is the
+		// only identity both builders can agree on.
 		// Mutate in place — bitmaps is uniquely owned by the caller, built
 		// single-threaded either way: cold backfill from the .pack, or the freeze
 		// from the read-only hot DB.
 		bitmap.RunOptimize()
+		if bitmap.GetSerializedSizeInBytes() >= indexDemoteFloor {
+			keys[slot] = rk
+		}
 		entries = append(entries, indexEntry{slot: slot, fp: fp, bitmap: bitmap})
 	}
 
@@ -167,7 +181,7 @@ func WriteColdIndex(
 		return fmt.Errorf("events: create index.pack at %s: %w", indexPackPath, err)
 	}
 
-	writerErr := writeIndexPackEntries(pw, entries)
+	writerErr := writeIndexPackEntries(pw, entries, keys)
 	if writerErr != nil {
 		// pw.Close removes the partial index.pack. Join its error so a
 		// cleanup failure surfaces alongside the original write error,
@@ -180,30 +194,214 @@ func WriteColdIndex(
 	return nil
 }
 
-// indexEntry is one assembled index.pack record: the slot it lands at,
-// the 4-byte fingerprint, and the bitmap to serialize.
+// indexEntry is one term's place in index.pack: the slot it lands at, the
+// 4-byte fingerprint, and the bitmap to serialize.
 type indexEntry struct {
 	slot   uint32
 	fp     [IndexRecordFingerprintLen]byte
 	bitmap *roaring.Bitmap
 }
 
-// writeIndexPackEntries appends every assembled record to the index.pack
-// writer in slot order and finishes the pack.
-func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
-	// Serialize each bitmap into one reused buffer rather than a fresh
-	// MarshalBinary slice per record. AppendItem copies its input, so the
-	// buffer is safe to reuse across iterations; roaring's WriteTo emits
-	// the same bytes MarshalBinary would, so the pack is byte-identical.
-	var buf bytes.Buffer
-	for _, e := range entries {
-		buf.Reset()
-		if _, werr := e.bitmap.WriteTo(&buf); werr != nil {
-			return fmt.Errorf("events: serialize bitmap at slot %d: %w", e.slot, werr)
+// The budgets that decide which terms become parts, and how big a part is.
+// indexBucketBudget is the read a bucket is sized to fit, one I/O unit on the
+// storage this serves. indexDemoteFloor is the per-term floor: demoting a
+// smaller term would trade a bucket read for a part read of the same size, so
+// a bucket of nothing but sub-floor terms is left whole. indexPartTarget is
+// what one part should weigh (see partLayout).
+const (
+	indexBucketBudget = 256 << 10
+	indexDemoteFloor  = 16 << 10
+	indexPartTarget   = 64 << 10
+)
+
+// chunkSlabCount is how many slabs of 65,536 ids the chunk spans. Every
+// demoted term's parts tile it, whatever the term's own extent, so part
+// addressing is arithmetic and the reader needs no per-term extent.
+func chunkSlabCount(entries []indexEntry) uint64 {
+	var maxID uint64
+	var seen bool
+	for i := range entries {
+		if entries[i].bitmap.IsEmpty() {
+			continue
 		}
-		if err := pw.AppendItem(e.fp[:], buf.Bytes()); err != nil {
-			return fmt.Errorf("events: write slot %d to index.pack: %w", e.slot, err)
+		seen = true
+		maxID = max(maxID, uint64(entries[i].bitmap.Maximum()))
+	}
+	if !seen {
+		return 0
+	}
+	return maxID>>indexSlabShift + 1
+}
+
+// partLayout resolves a demoted term's part geometry from its serialized size
+// and the chunk's slab count: ceil(size / indexPartTarget) target parts, cut
+// on spans of 2^k slabs with k = floor(log2(chunkSlabs / target)) clamped at
+// zero. Spans follow the chunk's extent, not the term's, so a term whose ids
+// sit in a corner of the chunk still answers a window there in one part.
+func partLayout(size, chunkSlabs uint64) (uint8, uint32, error) {
+	if chunkSlabs == 0 {
+		return 0, 0, errors.New("events: a demoted term in a chunk with no ids")
+	}
+	target := (size + indexPartTarget - 1) / indexPartTarget
+	if target == 0 {
+		target = 1
+	}
+	var shift uint8
+	for target<<(shift+1) <= chunkSlabs {
+		shift++
+	}
+	span := uint64(1) << shift
+	n := (chunkSlabs + span - 1) / span
+	if n > math.MaxUint16 {
+		return 0, 0, fmt.Errorf("events: %d parts overflows the directory's uint16", n)
+	}
+	return shift, uint32(n), nil
+}
+
+// demoteBucket marks the terms in one bucket that become parts: while the
+// bucket's serialized size is over the budget and it still holds a term at or
+// above the floor, the largest such term is demoted. Ties go to the lower
+// slot, so freeze and walk demote identically. sizes and demoted are scratch,
+// one slot per term.
+func demoteBucket(bucket []indexEntry, sizes []uint64, demoted []bool) {
+	total := 0
+	for i := range bucket {
+		sizes[i] = bucket[i].bitmap.GetSerializedSizeInBytes()
+		demoted[i] = false
+		total += IndexRecordFingerprintLen + int(sizes[i]) //nolint:gosec // chunk-bounded
+	}
+	for total > indexBucketBudget {
+		// The largest term at or above the floor, as a pointer into the flags.
+		var best *bool
+		var size uint64
+		for i := range bucket {
+			if demoted[i] || sizes[i] < indexDemoteFloor || sizes[i] <= size {
+				continue
+			}
+			best, size = &demoted[i], sizes[i]
+		}
+		if best == nil {
+			// Nothing left worth demoting: this bucket is all small terms and
+			// stays whole, over budget or not.
+			break
+		}
+		*best = true
+		total -= int(size)
+	}
+}
+
+// writeIndexPackEntries writes index.pack: every term's bucket item in slot
+// order, the last bucket padded to a full record, then the demoted terms'
+// part records, and finally the app data carrying the directory that names
+// them. One reused buffer serializes every bitmap; AppendItem copies its
+// input, and WriteTo emits the bytes MarshalBinary would.
+func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry, keys map[uint32]TermKey) error {
+	chunkSlabs := chunkSlabCount(entries)
+	var (
+		buf     bytes.Buffer
+		sizes   [indexPackItemsPerRecord]uint64
+		flags   [indexPackItemsPerRecord]bool
+		demoted []indexEntry
+	)
+	for lo := 0; lo < len(entries); lo += indexPackItemsPerRecord {
+		bucket := entries[lo:min(lo+indexPackItemsPerRecord, len(entries))]
+		demoteBucket(bucket, sizes[:len(bucket)], flags[:len(bucket)])
+		for i := range bucket {
+			e := &bucket[i]
+			if flags[i] {
+				demoted = append(demoted, *e)
+				// A demoted slot keeps only its fingerprint: a body roaring
+				// cannot decode, so a reader landing here (the directory and
+				// the buckets disagreeing) reports corruption, not a miss.
+				if err := pw.AppendItem(e.fp[:]); err != nil {
+					return fmt.Errorf("events: write demoted slot %d to index.pack: %w", e.slot, err)
+				}
+				continue
+			}
+			buf.Reset()
+			if _, werr := e.bitmap.WriteTo(&buf); werr != nil {
+				return fmt.Errorf("events: serialize bitmap at slot %d: %w", e.slot, werr)
+			}
+			if err := pw.AppendItem(e.fp[:], buf.Bytes()); err != nil {
+				return fmt.Errorf("events: write slot %d to index.pack: %w", e.slot, err)
+			}
 		}
 	}
-	return pw.Finish(encodeIndexBuildStamp())
+	// Pad the last bucket record out so the part records start on a record
+	// boundary. A bare AppendItem() is a no-op, so the empty item is spelled out.
+	bucketCount := (len(entries) + indexPackItemsPerRecord - 1) / indexPackItemsPerRecord
+	for i := len(entries); i < bucketCount*indexPackItemsPerRecord; i++ {
+		if err := pw.AppendItem([]byte{}); err != nil {
+			return fmt.Errorf("events: pad index.pack bucket %d: %w", bucketCount-1, err)
+		}
+	}
+
+	dir := indexDirectory{
+		numKeys:     uint64(len(entries)),
+		bucketCount: uint32(bucketCount), //nolint:gosec // chunk term count / 128
+	}
+	dir.entries = make([]byte, 0, len(demoted)*indexDirEntryLen)
+	// Key order is what the reader binary-searches the rows in, and laying the
+	// parts down in it makes the rows firstRecord-ordered too, which is how the
+	// open-time check tiles them.
+	slices.SortFunc(demoted, func(a, b indexEntry) int {
+		ka, kb := keys[a.slot], keys[b.slot]
+		return bytes.Compare(ka[:], kb[:])
+	})
+	record := uint32(bucketCount) //nolint:gosec // chunk term count / 128
+	for i := range demoted {
+		e := &demoted[i]
+		k, records, err := partLayout(e.bitmap.GetSerializedSizeInBytes(), chunkSlabs)
+		if err != nil {
+			return fmt.Errorf("events: part layout for slot %d: %w", e.slot, err)
+		}
+		if err := writeTermParts(pw, e, k, records); err != nil {
+			return err
+		}
+		dir.entries = appendDirEntry(dir.entries, keys[e.slot], record, records, k)
+		record += records
+		dir.totalParts += records
+	}
+	return pw.Finish(encodeIndexAppData(dir))
+}
+
+// writeTermParts writes one demoted term's part records: every span in
+// [0, records) gets a record whose item 0 is fp[4] ‖ the span's bitmap and
+// whose other 127 items are empty, empty spans included, so part p of the
+// term is item 128·(firstRecord+p) — the whole addressing scheme is that
+// arithmetic, and pair() checks it tiles at open.
+func writeTermParts(pw *packfile.Writer, e *indexEntry, k uint8, records uint32) error {
+	var buf bytes.Buffer
+	width := uint64(1) << (uint64(k) + indexSlabShift)
+	for p := range uint64(records) {
+		span := roaring.New()
+		span.AddRange(p*width, min((p+1)*width, uint64(math.MaxUint32)+1))
+		part := roaring.And(e.bitmap, span)
+		// The form policy whole terms get: runs pay for themselves on the
+		// query side.
+		part.RunOptimize()
+		buf.Reset()
+		if _, err := part.WriteTo(&buf); err != nil {
+			return fmt.Errorf("events: serialize part %d of slot %d: %w", p, e.slot, err)
+		}
+		if err := pw.AppendItem(e.fp[:], buf.Bytes()); err != nil {
+			return fmt.Errorf("events: write part %d of slot %d: %w", p, e.slot, err)
+		}
+		for range indexPackItemsPerRecord - 1 {
+			if err := pw.AppendItem([]byte{}); err != nil {
+				return fmt.Errorf("events: pad part %d of slot %d: %w", p, e.slot, err)
+			}
+		}
+	}
+	return nil
+}
+
+// appendDirEntry appends one fixed-stride directory row.
+func appendDirEntry(dst []byte, key TermKey, firstRecord uint32, partCount uint32, k uint8) []byte {
+	var row [indexDirEntryLen]byte
+	copy(row[:16], key[:])
+	binary.BigEndian.PutUint32(row[16:20], firstRecord)
+	binary.BigEndian.PutUint16(row[20:22], uint16(partCount)) //nolint:gosec // partLayout bounds it
+	row[22] = k
+	return append(dst, row[:]...)
 }

@@ -13,8 +13,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/streamhash"
-
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 )
@@ -93,9 +91,13 @@ func TestWriteIndex_ProducesBothFiles(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = m.Close() })
 
-	// index.pack has one record per term.
+	// index.pack has one item per term, in one bucket record padded out to
+	// indexPackItemsPerRecord (see cold_format.go's layout).
 	records := loadIndexPack(t, filepath.Join(dir, IndexPackName(indexTestChunkID)))
-	assert.Len(t, records, 64)
+	assert.Len(t, records, indexPackItemsPerRecord)
+	for i := 64; i < indexPackItemsPerRecord; i++ {
+		assert.Empty(t, records[i], "item %d is padding", i)
+	}
 }
 
 func TestWriteIndex_RoundTripsBitmapsPerTerm(t *testing.T) {
@@ -126,6 +128,7 @@ func TestWriteIndex_RoundTripsBitmapsPerTerm(t *testing.T) {
 		require.True(t, ok, "record missing at slot %d (term-%d)", slot, i)
 		require.GreaterOrEqual(t, len(record), IndexRecordFingerprintLen, "record at slot %d too short", slot)
 
+		// Fingerprint must match term[:4].
 		assert.Equal(t, routedFP(term), record[:IndexRecordFingerprintLen],
 			"fingerprint mismatch at slot %d", slot)
 
@@ -292,7 +295,8 @@ func TestWriteIndex_LargeIndex(t *testing.T) {
 	t.Cleanup(func() { _ = m.Close() })
 
 	records := loadIndexPack(t, filepath.Join(dir, IndexPackName(indexTestChunkID)))
-	assert.Len(t, records, n)
+	buckets := (n + indexPackItemsPerRecord - 1) / indexPackItemsPerRecord
+	assert.Len(t, records, buckets*indexPackItemsPerRecord, "the last bucket is padded")
 
 	// Spot-check a sample of terms.
 	for _, i := range []int{0, 1, 7, n / 2, n - 1} {
@@ -319,7 +323,7 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
 
 	records := loadIndexPack(t, filepath.Join(dir, IndexPackName(indexTestChunkID)))
-	require.Len(t, records, 1)
+	require.Len(t, records, indexPackItemsPerRecord, "one bucket record, padded")
 
 	record := records[0]
 	require.Greater(t, len(record), IndexRecordFingerprintLen)
@@ -349,20 +353,20 @@ func TestWriteColdIndex_StampAndContentHash(t *testing.T) {
 
 	ad, err := r.AppData()
 	require.NoError(t, err)
-	schema, mask, err := decodeIndexBuildStamp(ad)
+	schema, mask, _, err := decodeIndexAppData(ad)
 	require.NoError(t, err)
 	assert.Equal(t, TermSchemaVersion, schema)
 	assert.Equal(t, IndexedFieldMask(), mask)
 
 	// Bytes past the stamp are extension room: the decoder ignores them.
-	_, _, err = decodeIndexBuildStamp(append(append([]byte(nil), ad...), 0xAB, 0xCD))
+	_, _, _, err = decodeIndexAppData(append(append([]byte(nil), ad...), 0xAB, 0xCD))
 	require.NoError(t, err)
 
 	// An unknown stamp version refuses with the newer-binary hint.
 	newer := append([]byte(nil), ad...)
 	newer[0] = indexStampVersion + 1
-	_, _, err = decodeIndexBuildStamp(newer)
-	require.ErrorContains(t, err, "written by a newer stellar-rpc")
+	_, _, _, err = decodeIndexAppData(newer)
+	require.ErrorContains(t, err, "written by a different stellar-rpc build")
 
 	_, hashed, err := r.ContentHash()
 	require.NoError(t, err)
@@ -370,9 +374,113 @@ func TestWriteColdIndex_StampAndContentHash(t *testing.T) {
 	require.NoError(t, r.Verify(context.Background()))
 }
 
-// routedFP is the fingerprint the writer stores for term.
+// TestPartLayout_CutsSpansFromTheChunkExtent pins the part geometry: ceil(S /
+// 64 KiB) target parts, spans of 2^k slabs with k the largest shift that
+// keeps that many spans inside the chunk, and one record per span of the
+// chunk — so the span a part covers is the chunk's to give and a term's ids
+// name their part by arithmetic. A chunk too small to cut yields one record.
+func TestPartLayout_CutsSpansFromTheChunkExtent(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		size       uint64
+		chunkSlabs uint64
+		k          uint8
+		records    uint32
+	}{
+		{"a one-slab chunk cannot be cut", 1 << 10, 1, 0, 1},
+		{"a term under the part target spans the chunk", 32 << 10, 54, 5, 2},
+		{"a wide term gets its S/64KiB parts", 432 << 10, 54, 2, 14},
+		{"records never fall below the target", 1 << 20, 64, 2, 16},
+		{"a big term in a tiny chunk is one part", 1 << 20, 1, 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k, records, err := partLayout(tc.size, tc.chunkSlabs)
+			require.NoError(t, err)
+			assert.Equal(t, tc.k, k)
+			assert.Equal(t, tc.records, records)
+		})
+	}
+	_, _, err := partLayout(1<<20, 0)
+	require.Error(t, err, "a demoted term in a chunk with no ids is a writer bug")
+}
+
+// spreadTerm adds one term holding every other id of slabs [0, slabs), the
+// shape roaring keeps as one bitmap container per slab — 8 KiB apiece,
+// RunOptimize or not — so the term's serialized size is 8 KiB × slabs.
+func spreadTerm(t *testing.T, bitmaps Bitmaps, name string, slabs int) {
+	t.Helper()
+	ids := make([]uint32, 0, slabs<<15)
+	for i := range uint32(slabs << 15) {
+		ids = append(ids, i*2)
+	}
+	bitmaps.AddTo(ComputeTermKey([]byte(name), FieldContractID), ids...)
+}
+
+// openDirectory decodes the fixture's index.pack app data — the directory the
+// writer left behind, read without a ColdReader's validation in the way.
+func openDirectory(t *testing.T, dir string) indexDirectory {
+	t.Helper()
+	r := packfile.Open(filepath.Join(dir, IndexPackName(partsChunkID)), packfile.ReaderOptions{})
+	t.Cleanup(func() { _ = r.Close() })
+	ad, err := r.AppData()
+	require.NoError(t, err)
+	_, _, d, err := decodeIndexAppData(ad)
+	require.NoError(t, err)
+	return d
+}
+
+// bucketBytes is what the bucket records weigh after demotion: the items a
+// reader gets back from them, which is what the writer budgets on.
+func bucketBytes(t *testing.T, dir string, d indexDirectory) int {
+	t.Helper()
+	items := loadIndexPack(t, filepath.Join(dir, IndexPackName(partsChunkID)))
+	total := 0
+	for i := range int(d.bucketCount) * indexPackItemsPerRecord {
+		total += len(items[i])
+	}
+	return total
+}
+
+// TestWriteColdIndex_DemotesUntilTheBucketFits pins the loop: demoting the
+// largest term once is not enough when two of them are over the budget, so
+// the writer demotes again until what is left fits in one I/O unit.
+func TestWriteColdIndex_DemotesUntilTheBucketFits(t *testing.T) {
+	bitmaps := NewBitmaps()
+	// 320 KiB each: either one alone puts the bucket over the budget.
+	spreadTerm(t, bitmaps, "big-a", 40)
+	spreadTerm(t, bitmaps, "big-b", 40)
+	dir := buildPartsFixture(t, bitmaps)
+
+	d := openDirectory(t, dir)
+	require.Equal(t, 2, d.entryCount(), "both terms over the budget must be demoted")
+	require.LessOrEqual(t, bucketBytes(t, dir, d), indexBucketBudget)
+}
+
+// TestWriteColdIndex_SubFloorBucketStaysWhole is the other end of the loop.
+// Demoting a term below the floor would trade a bucket read for a part read
+// of the same bytes, so a bucket of nothing but small terms is left whole
+// however far over the budget it is — bounded, at worst, by 128 × the floor.
+func TestWriteColdIndex_SubFloorBucketStaysWhole(t *testing.T) {
+	bitmaps := NewBitmaps()
+	ids := make([]uint32, 0, 8000)
+	for i := range uint32(8000) {
+		ids = append(ids, i*8) // one bitmap container, ~8 KiB: half the floor
+	}
+	for i := range indexPackItemsPerRecord {
+		bitmaps.AddTo(ComputeTermKey(fmt.Appendf(nil, "small-%d", i), FieldContractID), ids...)
+	}
+	dir := buildPartsFixture(t, bitmaps)
+
+	d := openDirectory(t, dir)
+	assert.Zero(t, d.entryCount(), "no term is worth demoting")
+	assert.Zero(t, d.totalParts)
+	assert.Greater(t, bucketBytes(t, dir, d), indexBucketBudget,
+		"the fixture must leave the bucket over the budget, or it pins nothing")
+}
+
+// routedFP is the fingerprint the writer stores for term: the first bytes of
+// the routed (blinded) key, not of the term itself.
 func routedFP(term TermKey) []byte {
-	rk := routedKey(testIndexSecret, term)
-	v, _ := streamhash.Fingerprint(rk[:])
-	return binary.LittleEndian.AppendUint32(nil, v)
+	fp := routedFingerprint(routedKey(testIndexSecret, term))
+	return fp[:]
 }

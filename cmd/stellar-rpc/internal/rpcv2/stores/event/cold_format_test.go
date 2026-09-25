@@ -76,7 +76,7 @@ func TestLedgerOffsets_DecodeRejectsUnknownVersion(t *testing.T) {
 	buf := make([]byte, ledgerOffsetsHeaderLen)
 	buf[0] = 0xff // not LedgerOffsetsFormatVersion
 	_, err := DecodeLedgerOffsets(buf)
-	assert.ErrorContains(t, err, "written by a newer stellar-rpc")
+	assert.ErrorContains(t, err, "written by a different stellar-rpc build")
 }
 
 func TestLedgerOffsets_DecodeRejectsTruncatedArray(t *testing.T) {
@@ -401,9 +401,9 @@ func TestOpenMPHF_RejectsMissingOrMalformedMetadata(t *testing.T) {
 	assert.ErrorIs(t, err, errBadIndexMetadata, "malformed metadata")
 }
 
-// index.pack's format id must differ from events.pack's, and stay past 0xB,
-// whose fingerprints this code cannot read.
+// index.pack's format id must differ from events.pack's, and stay past 0xD,
+// which has no parts.
 func TestPackFormatsAreDistinct(t *testing.T) {
 	require.NotEqual(t, eventsPackFormat, indexPackFormat)
-	require.Equal(t, indexPackFormat, packfile.Format(0xFE1E000D))
+	require.Equal(t, indexPackFormat, packfile.Format(0xFE1E0010))
 }
