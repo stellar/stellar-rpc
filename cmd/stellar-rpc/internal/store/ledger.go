@@ -53,6 +53,8 @@ type LedgerScanner interface {
 	// does not hold, below its oldest, above its latest, or missing inside the
 	// range, are not yielded, so callers should check the sequences they receive.
 	// A non-nil error ends the stream and the RawLedger beside it is zero.
+	// The body runs inside the source's read (a v2 hot range scan holds the
+	// store's read lock across every step): decode and copy, never call back into the store.
 	ScanLedgers(ctx context.Context, start, end uint32) iter.Seq2[RawLedger, error]
 }
 

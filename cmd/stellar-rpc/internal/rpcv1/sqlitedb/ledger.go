@@ -110,7 +110,7 @@ func scanLedgers(ctx context.Context, q readDB, start, end uint32) iter.Seq2[sto
 				return
 			}
 			var seq uint32
-			var meta sql.RawBytes // database/sql's per-Rows buffer, reused by the next Scan: RawLedger's loan
+			var meta sql.RawBytes // the driver's buffer, valid until the next Next: RawLedger's loan
 			if err := rows.Scan(&seq, &meta); err != nil {
 				yield(store.RawLedger{}, err)
 				return
