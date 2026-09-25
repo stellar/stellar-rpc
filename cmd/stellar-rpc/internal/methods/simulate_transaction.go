@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/creachadair/jrpc2"
+	"github.com/stellar-experimental/jrpc2"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/support/log"

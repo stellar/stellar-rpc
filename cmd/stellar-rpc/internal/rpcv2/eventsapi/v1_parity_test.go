@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/creachadair/jrpc2"
-	"github.com/creachadair/jrpc2/handler"
+	"github.com/stellar-experimental/jrpc2"
+	"github.com/stellar-experimental/jrpc2/handler"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 

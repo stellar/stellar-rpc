@@ -1,8 +1,8 @@
 package methods
 
 import (
-	"github.com/creachadair/jrpc2"
-	"github.com/creachadair/jrpc2/handler"
+	"github.com/stellar-experimental/jrpc2"
+	"github.com/stellar-experimental/jrpc2/handler"
 )
 
 func NewHandler(fn any) jrpc2.Handler {
