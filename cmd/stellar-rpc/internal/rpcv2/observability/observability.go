@@ -5,6 +5,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
@@ -153,10 +154,10 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 		}, []string{"phase"}),
 	}
 
-	// Three serving-invariant counters are tallied where their condition is
-	// detected — deep in the store and routing packages, below any metrics
-	// plumbing — as package-level atomics. CounterFuncs export them; each
-	// should flatline at zero, so one alert rule per family is "rate > 0".
+	// Four serving-invariant counters are tallied where their condition is
+	// detected — deep in the store, routing and packfile packages, below any
+	// metrics plumbing — as package-level atomics. CounterFuncs export them;
+	// each should flatline at zero, so one alert rule per family is "rate > 0".
 	counterFunc := func(name, help string, read func() uint64) prometheus.CounterFunc {
 		return prometheus.NewCounterFunc(prometheus.CounterOpts{
 			Namespace: namespace, Subsystem: subsystem, Name: name, Help: help,
@@ -180,6 +181,10 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 			"cold ledger packs whose file was gone on first read "+
 				"(routing only opens packs the catalog snapshot holds; any count is an alarm)",
 			ledger.MissingPackOpens),
+		counterFunc("pooled_buffer_cap_skips_total",
+			"pooled packfile buffers dropped for exceeding a pool's capacity cap "+
+				"(the pool drains and every open allocates afresh; any count means a cap wants raising)",
+			packfile.PoolCapSkips),
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 			Namespace: namespace, Subsystem: subsystem, Name: "open_snapshots",
 			Help: "RocksDB snapshots currently held, across all stores " +
