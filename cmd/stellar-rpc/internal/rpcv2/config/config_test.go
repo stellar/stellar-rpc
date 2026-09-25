@@ -550,8 +550,8 @@ func TestValidateRoots(t *testing.T) {
 // ever fails, the alias got closed: delete it and the doc note.
 func TestEventsMethodConfig_TypeNameAlias(t *testing.T) {
 	cfg, err := DecodeConfig([]byte(
-		"[service.methods.getEventsV2.PaginatedMethodConfig]\nqueue_limit = 3\n"))
+		"[service.methods.queryEvents.PaginatedMethodConfig]\nqueue_limit = 3\n"))
 	require.NoError(t, err)
-	require.NotNil(t, cfg.Service.Methods.GetEventsV2.QueueLimit)
-	assert.Equal(t, uint(3), *cfg.Service.Methods.GetEventsV2.QueueLimit)
+	require.NotNil(t, cfg.Service.Methods.QueryEvents.QueueLimit)
+	assert.Equal(t, uint(3), *cfg.Service.Methods.QueryEvents.QueueLimit)
 }

@@ -61,13 +61,13 @@ func deployAndIncrement(t *testing.T, test *infrastructure.Test, n int) *eventsF
 	return fx
 }
 
-func drain(t *testing.T, rpc *client.Client, req protocol.GetEventsV2Request,
-) ([]protocol.EventInfoV2, protocol.GetEventsV2Response) {
+func drain(t *testing.T, rpc *client.Client, req protocol.QueryEventsRequest,
+) ([]protocol.EventInfo, protocol.QueryEventsResponse) {
 	const maxPages = 200
 	descending := req.Order == protocol.OrderDescending
-	var all []protocol.EventInfoV2
+	var all []protocol.EventInfo
 	for page := range maxPages {
-		resp, err := rpc.GetEventsV2(t.Context(), req)
+		resp, err := rpc.QueryEvents(t.Context(), req)
 		require.NoError(t, err, "page %d", page)
 		if req.Limit != nil {
 			require.LessOrEqual(t, len(resp.Events), int(*req.Limit), "page %d", page)
@@ -87,15 +87,15 @@ func drain(t *testing.T, rpc *client.Client, req protocol.GetEventsV2Request,
 			return all, resp
 		}
 		require.NotEmpty(t, resp.Cursor, "page %d: HAS_MORE without a cursor", page)
-		req = protocol.GetEventsV2Request{Cursor: resp.Cursor, Limit: req.Limit, Format: req.Format}
+		req = protocol.QueryEventsRequest{Cursor: resp.Cursor, Limit: req.Limit, Format: req.Format}
 	}
 	t.Fatalf("still HAS_MORE after %d pages", maxPages)
-	return nil, protocol.GetEventsV2Response{}
+	return nil, protocol.QueryEventsResponse{}
 }
 
 // The fee and refund events belong to the native asset contract, so only the
 // contract id tells the fixture's own event apart.
-func requireFixtureEvents(t *testing.T, fx *eventsFixture, events []protocol.EventInfoV2) {
+func requireFixtureEvents(t *testing.T, fx *eventsFixture, events []protocol.EventInfo) {
 	require.Len(t, events, eventsPerInvoke*len(fx.ledgers))
 	ids := make(map[string]struct{}, len(events))
 	fromContract := 0
@@ -114,7 +114,7 @@ func requireFixtureEvents(t *testing.T, fx *eventsFixture, events []protocol.Eve
 	require.Equal(t, len(fx.ledgers), fromContract, "one event per increment from the fixture's contract")
 }
 
-func eventIDs(events []protocol.EventInfoV2) []string {
+func eventIDs(events []protocol.EventInfo) []string {
 	ids := make([]string, 0, len(events))
 	for _, e := range events {
 		ids = append(ids, e.ID)
@@ -130,12 +130,12 @@ func reversed(s []string) []string {
 	return out
 }
 
-func TestGetEventsV2AscendingDrainToTheTip(t *testing.T) {
+func TestQueryEventsAscendingDrainToTheTip(t *testing.T) {
 	test := newEventsTest(t)
 	rpc := test.GetRPCLient()
 	fx := deployAndIncrement(t, test, 3)
 
-	events, last := drain(t, rpc, protocol.GetEventsV2Request{
+	events, last := drain(t, rpc, protocol.QueryEventsRequest{
 		MinLedger: fx.first(),
 		Limit:     new(uint(1)),
 	})
@@ -149,17 +149,17 @@ func TestGetEventsV2AscendingDrainToTheTip(t *testing.T) {
 	assert.GreaterOrEqual(t, last.LatestLedger, fx.last())
 	assert.LessOrEqual(t, last.OldestLedger, fx.first())
 
-	again, err := rpc.GetEventsV2(t.Context(), protocol.GetEventsV2Request{Cursor: last.Cursor})
+	again, err := rpc.QueryEvents(t.Context(), protocol.QueryEventsRequest{Cursor: last.Cursor})
 	require.NoError(t, err)
 	assert.Empty(t, again.Events)
 }
 
-func TestGetEventsV2ClosedRangeBothOrders(t *testing.T) {
+func TestQueryEventsClosedRangeBothOrders(t *testing.T) {
 	test := newEventsTest(t)
 	rpc := test.GetRPCLient()
 	fx := deployAndIncrement(t, test, 3)
 
-	asc, err := rpc.GetEventsV2(t.Context(), protocol.GetEventsV2Request{
+	asc, err := rpc.QueryEvents(t.Context(), protocol.QueryEventsRequest{
 		MinLedger: fx.first(),
 		MaxLedger: fx.last(),
 	})
@@ -168,7 +168,7 @@ func TestGetEventsV2ClosedRangeBothOrders(t *testing.T) {
 	assert.Equal(t, protocol.ScanStatusComplete, asc.ScanStatus)
 	assert.Empty(t, asc.Cursor, "a complete query carries no cursor")
 
-	desc, err := rpc.GetEventsV2(t.Context(), protocol.GetEventsV2Request{
+	desc, err := rpc.QueryEvents(t.Context(), protocol.QueryEventsRequest{
 		MinLedger: fx.first(),
 		MaxLedger: fx.last(),
 		Order:     protocol.OrderDescending,
@@ -179,7 +179,7 @@ func TestGetEventsV2ClosedRangeBothOrders(t *testing.T) {
 	assert.Equal(t, reversed(eventIDs(asc.Events)), eventIDs(desc.Events),
 		"descending is the exact reverse of ascending")
 
-	paged, last := drain(t, rpc, protocol.GetEventsV2Request{
+	paged, last := drain(t, rpc, protocol.QueryEventsRequest{
 		MinLedger: fx.first(),
 		MaxLedger: fx.last(),
 		Order:     protocol.OrderDescending,
@@ -189,20 +189,20 @@ func TestGetEventsV2ClosedRangeBothOrders(t *testing.T) {
 	assert.Equal(t, eventIDs(desc.Events), eventIDs(paged))
 }
 
-func TestGetEventsV2FiltersOverTheWire(t *testing.T) {
+func TestQueryEventsFiltersOverTheWire(t *testing.T) {
 	test := newEventsTest(t)
 	rpc := test.GetRPCLient()
 	fx := deployAndIncrement(t, test, 2)
 
-	rng := protocol.GetEventsV2Request{MinLedger: fx.first(), MaxLedger: fx.last()}
-	call := func(t *testing.T, req protocol.GetEventsV2Request) protocol.GetEventsV2Response {
-		resp, err := rpc.GetEventsV2(t.Context(), req)
+	rng := protocol.QueryEventsRequest{MinLedger: fx.first(), MaxLedger: fx.last()}
+	call := func(t *testing.T, req protocol.QueryEventsRequest) protocol.QueryEventsResponse {
+		resp, err := rpc.QueryEvents(t.Context(), req)
 		require.NoError(t, err)
 		assert.Equal(t, protocol.ScanStatusComplete, resp.ScanStatus)
 		return resp
 	}
-	contractOnly := func(resp protocol.GetEventsV2Response) []protocol.EventInfoV2 {
-		var out []protocol.EventInfoV2
+	contractOnly := func(resp protocol.QueryEventsResponse) []protocol.EventInfo {
+		var out []protocol.EventInfo
 		for _, e := range resp.Events {
 			if e.ContractID == fx.contractID {
 				out = append(out, e)
@@ -232,19 +232,19 @@ func TestGetEventsV2FiltersOverTheWire(t *testing.T) {
 
 	t.Run("contract id", func(t *testing.T) {
 		req := rng
-		req.Filters = []protocol.EventFilterV2{{ContractID: fx.contractID}}
+		req.Filters = []protocol.QueryEventsFilter{{ContractID: fx.contractID}}
 		assert.Equal(t, wantIDs, eventIDs(call(t, req).Events))
 	})
 
 	t.Run("contract id and type", func(t *testing.T) {
 		req := rng
-		req.Filters = []protocol.EventFilterV2{{ContractID: fx.contractID, EventType: protocol.EventTypeContract}}
+		req.Filters = []protocol.QueryEventsFilter{{ContractID: fx.contractID, EventType: protocol.EventTypeContract}}
 		assert.Equal(t, wantIDs, eventIDs(call(t, req).Events))
 	})
 
 	t.Run("topic0 as base64", func(t *testing.T) {
 		req := rng
-		req.Filters = []protocol.EventFilterV2{{
+		req.Filters = []protocol.QueryEventsFilter{{
 			ContractID: fx.contractID,
 			Topic0:     json.RawMessage(`"` + topic0XDR + `"`),
 		}}
@@ -255,8 +255,8 @@ func TestGetEventsV2FiltersOverTheWire(t *testing.T) {
 	t.Run("topic0 as JSON is rejected", func(t *testing.T) {
 		req := rng
 		req.XDRInputFormat = protocol.FormatJSON
-		req.Filters = []protocol.EventFilterV2{{ContractID: fx.contractID, Topic0: topic0JSON}}
-		_, err := rpc.GetEventsV2(t.Context(), req)
+		req.Filters = []protocol.QueryEventsFilter{{ContractID: fx.contractID, Topic0: topic0JSON}}
+		_, err := rpc.QueryEvents(t.Context(), req)
 		var rpcErr *jrpc2.Error
 		require.ErrorAs(t, err, &rpcErr)
 		assert.Equal(t, jrpc2.InvalidParams, rpcErr.Code)
@@ -269,7 +269,7 @@ func TestGetEventsV2FiltersOverTheWire(t *testing.T) {
 		nothing, err := xdr.MarshalBase64(xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: new(xdr.ScSymbol)})
 		require.NoError(t, err)
 		req := rng
-		req.Filters = []protocol.EventFilterV2{{
+		req.Filters = []protocol.QueryEventsFilter{{
 			ContractID: fx.contractID,
 			Topic0:     json.RawMessage(`"` + nothing + `"`),
 		}}
@@ -278,7 +278,7 @@ func TestGetEventsV2FiltersOverTheWire(t *testing.T) {
 
 	t.Run("filters are OR-ed", func(t *testing.T) {
 		req := rng
-		req.Filters = []protocol.EventFilterV2{
+		req.Filters = []protocol.QueryEventsFilter{
 			{ContractID: fx.contractID},
 			{EventType: protocol.EventTypeContract},
 		}
@@ -287,7 +287,7 @@ func TestGetEventsV2FiltersOverTheWire(t *testing.T) {
 }
 
 // Same node, real Core output. The unit parity harness uses synthetic data.
-func TestGetEventsV2MatchesV1(t *testing.T) {
+func TestQueryEventsMatchesV1(t *testing.T) {
 	test := newEventsTest(t)
 	rpc := test.GetRPCLient()
 	fx := deployAndIncrement(t, test, 3)
@@ -301,7 +301,7 @@ func TestGetEventsV2MatchesV1(t *testing.T) {
 				Format:      format,
 			})
 			require.NoError(t, err)
-			v2, err := rpc.GetEventsV2(t.Context(), protocol.GetEventsV2Request{
+			v2, err := rpc.QueryEvents(t.Context(), protocol.QueryEventsRequest{
 				MinLedger: fx.first(),
 				MaxLedger: fx.last(),
 				Format:    format,
@@ -311,7 +311,7 @@ func TestGetEventsV2MatchesV1(t *testing.T) {
 
 			require.Len(t, v2.Events, len(v1.Events))
 			for i := range v1.Events {
-				assert.Equal(t, protocol.EventInfoV2(v1.Events[i]), v2.Events[i], "event %d", i)
+				assert.Equal(t, protocol.EventInfo(v1.Events[i]), v2.Events[i], "event %d", i)
 			}
 			// The tip moves between the two reads; v2 was read second.
 			assert.GreaterOrEqual(t, v2.LatestLedger, v1.LatestLedger, "latestLedger")
@@ -323,13 +323,13 @@ func TestGetEventsV2MatchesV1(t *testing.T) {
 
 // The union of the pages must equal a closed range read: nothing lost at the
 // tip, nothing twice.
-func TestGetEventsV2PagingWhileTipMoves(t *testing.T) {
+func TestQueryEventsPagingWhileTipMoves(t *testing.T) {
 	test := newEventsTest(t)
 	rpc := test.GetRPCLient()
 	fx := deployAndIncrement(t, test, 1)
 
-	seen := make([]protocol.EventInfoV2, 0, 16)
-	req := protocol.GetEventsV2Request{MinLedger: fx.first(), Limit: new(uint(1))}
+	seen := make([]protocol.EventInfo, 0, 16)
+	req := protocol.QueryEventsRequest{MinLedger: fx.first(), Limit: new(uint(1))}
 	const rounds = 3
 	for round := range rounds {
 		got, last := drain(t, rpc, req)
@@ -337,7 +337,7 @@ func TestGetEventsV2PagingWhileTipMoves(t *testing.T) {
 		require.Equal(t, protocol.ScanStatusWaitingForLedgers, last.ScanStatus, "round %d", round)
 		require.NotEmpty(t, last.Cursor, "round %d", round)
 
-		idle, err := rpc.GetEventsV2(t.Context(), protocol.GetEventsV2Request{Cursor: last.Cursor})
+		idle, err := rpc.QueryEvents(t.Context(), protocol.QueryEventsRequest{Cursor: last.Cursor})
 		require.NoError(t, err)
 		require.Empty(t, idle.Events, "round %d: idle tip cursor served events", round)
 		require.NotEmpty(t, idle.Cursor, "round %d: idle tip cursor lost the cursor", round)
@@ -345,11 +345,11 @@ func TestGetEventsV2PagingWhileTipMoves(t *testing.T) {
 		if round < rounds-1 {
 			fx.increment(test)
 		}
-		req = protocol.GetEventsV2Request{Cursor: idle.Cursor, Limit: new(uint(1))}
+		req = protocol.QueryEventsRequest{Cursor: idle.Cursor, Limit: new(uint(1))}
 	}
 
 	requireFixtureEvents(t, fx, seen)
-	final, err := rpc.GetEventsV2(t.Context(), protocol.GetEventsV2Request{MinLedger: fx.first(), MaxLedger: fx.last()})
+	final, err := rpc.QueryEvents(t.Context(), protocol.QueryEventsRequest{MinLedger: fx.first(), MaxLedger: fx.last()})
 	require.NoError(t, err)
 	assert.Equal(t, eventIDs(final.Events), eventIDs(seen), "paging to the tip disagrees with a closed range read")
 }

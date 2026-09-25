@@ -127,8 +127,8 @@ type MethodsConfig struct {
 	GetTransactions PaginatedMethodConfig `toml:"getTransactions"`
 	GetLedgers      PaginatedMethodConfig `toml:"getLedgers"`
 	GetEvents       PaginatedMethodConfig `toml:"getEvents"`
-	// GetEventsV2 carries getEvents' knob set and defaults.
-	GetEventsV2 EventsMethodConfig `toml:"getEventsV2"`
+	// QueryEvents carries getEvents' knob set and defaults.
+	QueryEvents EventsMethodConfig `toml:"queryEvents"`
 	GetFeeStats MethodConfig       `toml:"getFeeStats"`
 
 	// The three methods that read current ledger state through captive core
@@ -171,7 +171,7 @@ type NetworkMethodConfig struct {
 	FriendbotURL string `toml:"friendbot_url"`
 }
 
-// EventsMethodConfig adds term_budget, which only getEventsV2 has: v1's
+// EventsMethodConfig adds term_budget, which only queryEvents has: v1's
 // own filter caps bound a request's terms already, so a budget there could
 // only reject requests v1 accepts. The decoder flattens the embedded
 // fields, keeping the method's TOML table flat.
@@ -448,16 +448,16 @@ const (
 
 	DefaultMaxHealthyLedgerLatency time.Duration = 30 * time.Second
 
-	// DefaultGetEventsV2MaxItemsPerResponse is the page cap the finalized
+	// DefaultQueryEventsMaxItemsPerResponse is the page cap the finalized
 	// getEvents v2 API fixes as a spec constant
 	// (github.com/orgs/stellar/discussions/1872). The v1 method keeps v1's
 	// own cap; see DefaultGetEventsV1MaxItemsPerResponse.
-	DefaultGetEventsV2MaxItemsPerResponse   uint = 1000
+	DefaultQueryEventsMaxItemsPerResponse   uint = 1000
 	DefaultGetEventsDefaultItemsPerResponse uint = 100
 
-	// DefaultGetEventsV2TermBudget is the getEvents v2 proposal's default
+	// DefaultQueryEventsTermBudget is the getEvents v2 proposal's default
 	// (github.com/orgs/stellar/discussions/1872).
-	DefaultGetEventsV2TermBudget uint = 15
+	DefaultQueryEventsTermBudget uint = 15
 
 	// DefaultGetEventsV1MaxItemsPerResponse is v1's own page cap, matching
 	// the existing service's max-events-limit. The 1,000 above is the v2
@@ -673,11 +673,11 @@ func (cfg Config) WithDefaults() Config {
 	fillUint(&m.GetEvents.MaxItemsPerResponse, DefaultGetEventsV1MaxItemsPerResponse)
 	fillUint(&m.GetEvents.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
 
-	queue(&m.GetEventsV2.QueueLimit, DefaultMethodQueueLimit)
-	dur(&m.GetEventsV2.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
-	fillUint(&m.GetEventsV2.MaxItemsPerResponse, DefaultGetEventsV2MaxItemsPerResponse)
-	fillUint(&m.GetEventsV2.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
-	fillUint(&m.GetEventsV2.TermBudget, DefaultGetEventsV2TermBudget)
+	queue(&m.QueryEvents.QueueLimit, DefaultMethodQueueLimit)
+	dur(&m.QueryEvents.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
+	fillUint(&m.QueryEvents.MaxItemsPerResponse, DefaultQueryEventsMaxItemsPerResponse)
+	fillUint(&m.QueryEvents.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
+	fillUint(&m.QueryEvents.TermBudget, DefaultQueryEventsTermBudget)
 
 	queue(&m.GetFeeStats.QueueLimit, DefaultGetFeeStatsQueueLimit)
 	dur(&m.GetFeeStats.MaxExecutionDuration, DefaultMethodMaxExecutionDuration)

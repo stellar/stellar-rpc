@@ -268,7 +268,7 @@ func validateService(svc config.ServiceConfig) error {
 		{"getTransactions", *m.GetTransactions.QueueLimit, *m.GetTransactions.MaxExecutionDuration},
 		{"getLedgers", *m.GetLedgers.QueueLimit, *m.GetLedgers.MaxExecutionDuration},
 		{"getEvents", *m.GetEvents.QueueLimit, *m.GetEvents.MaxExecutionDuration},
-		{"getEventsV2", *m.GetEventsV2.QueueLimit, *m.GetEventsV2.MaxExecutionDuration},
+		{"queryEvents", *m.QueryEvents.QueueLimit, *m.QueryEvents.MaxExecutionDuration},
 		{"getFeeStats", *m.GetFeeStats.QueueLimit, *m.GetFeeStats.MaxExecutionDuration},
 		{"sendTransaction", *m.SendTransaction.QueueLimit, *m.SendTransaction.MaxExecutionDuration},
 		{"simulateTransaction", *m.SimulateTransaction.QueueLimit, *m.SimulateTransaction.MaxExecutionDuration},
@@ -293,10 +293,10 @@ func validateService(svc config.ServiceConfig) error {
 	if err := validatePaginatedMethods(m); err != nil {
 		return err
 	}
-	if err := validateEventsMethod("getEventsV2", m.GetEventsV2); err != nil {
+	if err := validateEventsMethod("queryEvents", m.QueryEvents); err != nil {
 		return err
 	}
-	if err := validateGetEventsV2Limit(m.GetEventsV2); err != nil {
+	if err := validateQueryEventsLimit(m.QueryEvents); err != nil {
 		return err
 	}
 	if err := validatePreflight(svc.Preflight); err != nil {
@@ -326,7 +326,7 @@ func validatePaginatedMethods(m config.MethodsConfig) error {
 		{"getTransactions", m.GetTransactions},
 		{"getLedgers", m.GetLedgers},
 		{"getEvents", m.GetEvents},
-		{"getEventsV2", m.GetEventsV2.PaginatedMethodConfig},
+		{"queryEvents", m.QueryEvents.PaginatedMethodConfig},
 	}
 	for _, pp := range paginated {
 		if *pp.p.MaxItemsPerResponse < 1 {
@@ -351,15 +351,15 @@ func validateEventsMethod(name string, e config.EventsMethodConfig) error {
 	return nil
 }
 
-// validateGetEventsV2Limit bounds the largest limit an operator may allow.
+// validateQueryEventsLimit bounds the largest limit an operator may allow.
 // The spec fixes what a client may ask for, so an operator can lower it but
 // not raise it. It is separate from validateEventsMethod because v1 getEvents
 // has no such fixed limit. The bound also holds default_items_per_response
 // down, which validation otherwise only requires to be <= max.
-func validateGetEventsV2Limit(e config.EventsMethodConfig) error {
-	if *e.MaxItemsPerResponse > protocol.MaxLimitV2 {
-		return fmt.Errorf("[service.methods.getEventsV2].max_items_per_response (%d) cannot exceed %d",
-			*e.MaxItemsPerResponse, protocol.MaxLimitV2)
+func validateQueryEventsLimit(e config.EventsMethodConfig) error {
+	if *e.MaxItemsPerResponse > protocol.QueryEventsMaxLimit {
+		return fmt.Errorf("[service.methods.queryEvents].max_items_per_response (%d) cannot exceed %d",
+			*e.MaxItemsPerResponse, protocol.QueryEventsMaxLimit)
 	}
 	return nil
 }

@@ -26,7 +26,7 @@ type RPCResponse struct {
 
 // PostRPC sends one JSON-RPC 2.0 request over HTTP and returns the decoded
 // response. It speaks the raw wire on purpose: tests using it assert on wire
-// error codes and on methods the SDK client does not expose (getEventsV2).
+// error codes and on methods the SDK client does not expose (queryEvents).
 // params is a JSON literal, e.g. `{}` or `{"startLedger":2}`.
 func PostRPC(t *testing.T, url, method, params string) RPCResponse {
 	t.Helper()
