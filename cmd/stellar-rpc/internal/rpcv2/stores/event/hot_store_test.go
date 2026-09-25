@@ -177,6 +177,10 @@ func TestHotStore_IngestLedgerWritesAllCFs(t *testing.T) {
 	bm := lookupOne(t, h.store, keys[0])
 	require.NotNil(t, bm)
 	assert.True(t, bm.Contains(0))
+	// The window is ignored: a whole-chunk image covers the whole id space.
+	_, covered, err := h.store.LookupKeys(context.Background(), keys[:1], IDRange{Start: 0, End: 1})
+	require.NoError(t, err)
+	assert.Equal(t, everyID, covered) // IDRange{End: math.MaxUint32}
 
 	assert.Equal(t, uint32(1), mustEventCount(t, h.store))
 }
@@ -400,7 +404,7 @@ func TestHotStore_PostCloseReadsError(t *testing.T) {
 	require.NoError(t, h.raw.Close())
 
 	// LookupKeys must error rather than silently returning cached bitmaps.
-	bms, err := h.store.LookupKeys(context.Background(), []TermKey{keys[0]})
+	bms, _, err := h.store.LookupKeys(context.Background(), []TermKey{keys[0]}, everyID)
 	assert.Nil(t, bms)
 	require.ErrorIs(t, err, stores.ErrStoreClosed)
 
@@ -560,7 +564,7 @@ func TestHotStore_ConcurrentIngestAndLookup(t *testing.T) {
 		for range N {
 			// A miss during the race window (writer hasn't ingested
 			// yet) is a nil bitmap, not an error — any error is a bug.
-			if _, err := h.store.LookupKeys(context.Background(), keys[:1]); err != nil {
+			if _, _, err := h.store.LookupKeys(context.Background(), keys[:1], everyID); err != nil {
 				t.Errorf("lookup: %v", err)
 				return
 			}
@@ -612,7 +616,7 @@ func firstIterError(seq iter.Seq2[Payload, error]) error {
 // LookupKeys directly and assert on the error.
 func lookupOne(t *testing.T, r Reader, key TermKey) *roaring.Bitmap {
 	t.Helper()
-	bms, err := r.LookupKeys(context.Background(), []TermKey{key})
+	bms, _, err := r.LookupKeys(context.Background(), []TermKey{key}, everyID)
 	require.NoError(t, err)
 	require.Len(t, bms, 1)
 	return bms[0]
