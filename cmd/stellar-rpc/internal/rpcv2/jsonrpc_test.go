@@ -99,10 +99,10 @@ func TestJSONRPCHandler_ServesGetEventsV1(t *testing.T) {
 // The registered handler answers over the real server, so this covers
 // the wiring the eventsapi tests cannot: the method name in the table,
 // and the wrapper's read view reaching a handler that is not an adapter.
-func TestJSONRPCHandler_ServesGetEventsV2(t *testing.T) {
+func TestJSONRPCHandler_ServesQueryEvents(t *testing.T) {
 	url := newTestRPCServer(t, seedServingRegistry(t))
 
-	out := rpcv2test.PostRPC(t, url, "getEventsV2",
+	out := rpcv2test.PostRPC(t, url, "queryEvents",
 		`{"minLedger":2,"maxLedger":2}`)
 	require.Nil(t, out.Error)
 	var result struct {
@@ -120,10 +120,10 @@ func TestJSONRPCHandler_ServesGetEventsV2(t *testing.T) {
 
 // An invalid request must reach the client as typed error data, not as a
 // bare message.
-func TestJSONRPCHandler_GetEventsV2ReportsTypedErrorData(t *testing.T) {
+func TestJSONRPCHandler_QueryEventsReportsTypedErrorData(t *testing.T) {
 	url := newTestRPCServer(t, seedServingRegistry(t))
 
-	out := rpcv2test.PostRPC(t, url, "getEventsV2", `{"minLedger":2,"limit":9999}`)
+	out := rpcv2test.PostRPC(t, url, "queryEvents", `{"minLedger":2,"limit":9999}`)
 	require.NotNil(t, out.Error)
 	assert.EqualValues(t, jrpc2.InvalidParams, out.Error.Code)
 	var data struct {
@@ -135,10 +135,10 @@ func TestJSONRPCHandler_GetEventsV2ReportsTypedErrorData(t *testing.T) {
 
 // A cursor that does not decode gets a typed cursor_malformed error and the
 // server keeps serving. The decoder itself is fuzzed in the query package.
-func TestJSONRPCHandler_GetEventsV2RejectsMalformedCursors(t *testing.T) {
+func TestJSONRPCHandler_QueryEventsRejectsMalformedCursors(t *testing.T) {
 	url := newTestRPCServer(t, seedServingRegistry(t))
 
-	first := rpcv2test.PostRPC(t, url, protocol.GetEventsV2MethodName, `{"minLedger":2,"limit":1}`)
+	first := rpcv2test.PostRPC(t, url, protocol.QueryEventsMethodName, `{"minLedger":2,"limit":1}`)
 	require.Nil(t, first.Error)
 	var page struct {
 		Cursor string `json:"cursor"`
@@ -170,7 +170,7 @@ func TestJSONRPCHandler_GetEventsV2RejectsMalformedCursors(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			params, err := json.Marshal(map[string]string{"cursor": cursor})
 			require.NoError(t, err)
-			out := rpcv2test.PostRPC(t, url, protocol.GetEventsV2MethodName, string(params))
+			out := rpcv2test.PostRPC(t, url, protocol.QueryEventsMethodName, string(params))
 			require.NotNil(t, out.Error)
 			assert.EqualValues(t, jrpc2.InvalidParams, out.Error.Code, "message: %s", out.Error.Message)
 			var data struct {
@@ -182,12 +182,12 @@ func TestJSONRPCHandler_GetEventsV2RejectsMalformedCursors(t *testing.T) {
 		})
 	}
 
-	again := rpcv2test.PostRPC(t, url, protocol.GetEventsV2MethodName, `{"minLedger":2,"limit":1}`)
+	again := rpcv2test.PostRPC(t, url, protocol.QueryEventsMethodName, `{"minLedger":2,"limit":1}`)
 	require.Nil(t, again.Error, "the server must still serve after a burst of malformed cursors")
 }
 
 // Every field is optional, so a typo would widen the query rather than fail.
-func TestJSONRPCHandler_GetEventsV2RejectsUnknownFields(t *testing.T) {
+func TestJSONRPCHandler_QueryEventsRejectsUnknownFields(t *testing.T) {
 	url := newTestRPCServer(t, seedServingRegistry(t))
 
 	for name, params := range map[string]string{
@@ -199,7 +199,7 @@ func TestJSONRPCHandler_GetEventsV2RejectsUnknownFields(t *testing.T) {
 		"filter not obj": `{"minLedger":2,"filters":[7]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			out := rpcv2test.PostRPC(t, url, protocol.GetEventsV2MethodName, params)
+			out := rpcv2test.PostRPC(t, url, protocol.QueryEventsMethodName, params)
 			require.NotNil(t, out.Error)
 			assert.EqualValues(t, jrpc2.InvalidParams, out.Error.Code)
 			var data struct {
