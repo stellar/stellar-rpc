@@ -311,7 +311,7 @@ func TestQueryEventsMatchesV1(t *testing.T) {
 
 			require.Len(t, v2.Events, len(v1.Events))
 			for i := range v1.Events {
-				assert.Equal(t, protocol.EventInfo(v1.Events[i]), v2.Events[i], "event %d", i)
+				assert.Equal(t, v1.Events[i], v2.Events[i], "event %d", i)
 			}
 			// The tip moves between the two reads; v2 was read second.
 			assert.GreaterOrEqual(t, v2.LatestLedger, v1.LatestLedger, "latestLedger")

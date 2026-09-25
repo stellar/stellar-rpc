@@ -465,7 +465,7 @@ func eventInfo(p *event.Payload, format string) (protocol.EventInfo, error) {
 	if err := checkResponseEventType(info.EventType); err != nil {
 		return protocol.EventInfo{}, err
 	}
-	return protocol.EventInfo(info), nil
+	return info, nil
 }
 
 // checkResponseEventType: ingest stores contract and system events only, so only diagnostic is refused.
