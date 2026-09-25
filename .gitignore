@@ -1,5 +1,7 @@
 target/
 captive-core/
+/stellar-rpc
+/stellar-rpc-v2
 .soroban/
 !test.toml
 *.sqlite*

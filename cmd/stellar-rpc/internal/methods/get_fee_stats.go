@@ -8,11 +8,10 @@ import (
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/support/log"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/feewindow"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
-func convertFeeDistribution(distribution feewindow.FeeDistribution) protocol.FeeDistribution {
+func convertFeeDistribution(distribution store.FeeDistribution) protocol.FeeDistribution {
 	return protocol.FeeDistribution{
 		Max:              distribution.Max,
 		Min:              distribution.Min,
@@ -34,7 +33,7 @@ func convertFeeDistribution(distribution feewindow.FeeDistribution) protocol.Fee
 }
 
 // NewGetFeeStatsHandler returns a handler obtaining fee statistics
-func NewGetFeeStatsHandler(windows *feewindow.FeeWindows, ledgerReader db.LedgerReader,
+func NewGetFeeStatsHandler(feeStats store.FeeStats, ledgerReader store.LedgerReader,
 	logger *log.Entry,
 ) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, _ protocol.GetFeeStatsRequest) (protocol.GetFeeStatsResponse, error) {
@@ -45,8 +44,8 @@ func NewGetFeeStatsHandler(windows *feewindow.FeeWindows, ledgerReader db.Ledger
 		}
 
 		result := protocol.GetFeeStatsResponse{
-			SorobanInclusionFee: convertFeeDistribution(windows.SorobanInclusionFeeWindow.GetFeeDistribution()),
-			InclusionFee:        convertFeeDistribution(windows.ClassicFeeWindow.GetFeeDistribution()),
+			SorobanInclusionFee: convertFeeDistribution(feeStats.SorobanInclusionFeeDistribution()),
+			InclusionFee:        convertFeeDistribution(feeStats.ClassicFeeDistribution()),
 			LatestLedger:        ledgerRange.LastLedger.Sequence,
 		}
 		return result, nil
