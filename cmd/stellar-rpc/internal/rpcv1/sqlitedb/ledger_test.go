@@ -189,12 +189,10 @@ func TestGetLedgerRange_SingleDBRow(t *testing.T) {
 	assert.Equal(t, ledgerCloseTime(1334), ledgerRange.LastLedger.CloseTime)
 }
 
-// TestGetLedgerRange_OldestCacheInvalidatedOnTrim verifies that the cached
-// oldest-ledger scalars are refreshed once the retention window trims the
-// ledger they describe -- so GetLedgerRange keeps reporting the true oldest
-// ledger rather than a stale cached one, while still avoiding the per-call
-// oldest-ledger decode in steady state.
-func TestGetLedgerRange_OldestCacheInvalidatedOnTrim(t *testing.T) {
+// TestGetLedgerRange_OldestCachePublishedOnTrim verifies that a trimming
+// commit itself publishes the new oldest ledger's scalars, so GetLedgerRange
+// reports the true oldest without ever decoding it on the read path.
+func TestGetLedgerRange_OldestCachePublishedOnTrim(t *testing.T) {
 	const retentionWindow = 10
 	db := NewTestDB(t)
 	ctx := context.TODO()
@@ -215,9 +213,18 @@ func TestGetLedgerRange_OldestCacheInvalidatedOnTrim(t *testing.T) {
 		require.NoError(t, write.Commit(last, nil))
 	}
 
-	// Phase 1: ingest exactly the retention window (sequences 1334..1343); no
-	// trimming yet, oldest = 1334. The read populates the oldest cache.
+	cachedOldest := func() (uint32, int64) {
+		db.cache.RLock()
+		defer db.cache.RUnlock()
+		return db.cache.firstLedgerSeq, db.cache.firstLedgerCloseTime
+	}
+
+	// Phase 1: ingest exactly the retention window (sequences 1334..1343); the
+	// trim removes nothing, and the commit publishes oldest = 1334.
 	ingest(1234, retentionWindow)
+	seq, closeTime := cachedOldest()
+	assert.Equal(t, uint32(1334), seq)
+	assert.Equal(t, ledgerCloseTime(1334), closeTime)
 	ledgerRange, err := reader.GetLedgerRange(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(1334), ledgerRange.FirstLedger.Sequence)
@@ -226,9 +233,11 @@ func TestGetLedgerRange_OldestCacheInvalidatedOnTrim(t *testing.T) {
 
 	// Phase 2: ingest 5 more (sequences 1344..1348). With retention 10 and
 	// latest 1348, the cutoff is 1339, trimming 1334..1338 -- which includes the
-	// cached oldest (1334), so the cache must invalidate and the next read must
-	// report the new oldest (1339), not the stale 1334.
+	// cached oldest (1334), so the commit must publish 1339 before any read.
 	ingest(1244, 5)
+	seq, closeTime = cachedOldest()
+	assert.Equal(t, uint32(1339), seq)
+	assert.Equal(t, ledgerCloseTime(1339), closeTime)
 	ledgerRange, err = reader.GetLedgerRange(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(1339), ledgerRange.FirstLedger.Sequence)
