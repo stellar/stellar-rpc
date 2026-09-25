@@ -226,9 +226,9 @@ A 4-byte fingerprint can still collide, so query results are post-filtered after
 
 **Term Lookup:**
 
-1. Hash the term key and query the MPHF in `index.hash` to obtain the slot index.  
+1. Blind the term key under the chunk secret to get its routed key, and query the MPHF in `index.hash` with it to obtain the slot index.  
 2. Read the record at that slot in `index.pack`.  
-3. If the fingerprint matches the hash prefix, deserialize the bitmap; otherwise the term is not present.
+3. If the fingerprint matches streamhash's fingerprint of the routed key (`streamhash.Fingerprint`), deserialize the bitmap; otherwise the term is not present.
 
 The resulting bitmap contains the event IDs matching the term.
 

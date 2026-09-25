@@ -74,7 +74,9 @@ const (
 	// records. The Format value identifies the on-disk codec; readers
 	// dispatch on it to select a matching RecordDecoder.
 	eventsPackFormat packfile.Format = 0xFE1E000C // "Fellow Events 0xC" (zstd)
-	indexPackFormat  packfile.Format = 0xFE1E000B // "Fellow Events 0xB"
+	// Bumped from 0xFE1E000B when the record fingerprint moved to the routed
+	// key, so an older index.pack is rejected instead of missing every lookup.
+	indexPackFormat packfile.Format = 0xFE1E000D // "Fellow Events 0xD"
 )
 
 // indexPackChecksum belongs to index.pack's on-disk identity, so it lives here
@@ -89,10 +91,8 @@ const (
 // zstd frames.
 const indexPackChecksum = packfile.ChecksumCRC32C
 
-// IndexRecordFingerprintLen is the byte width of the leading
-// fingerprint in every index.pack record. The cold reader checks
-// this against the queried term's first four bytes to filter MPHF
-// false positives before deserializing the bitmap.
+// IndexRecordFingerprintLen is the byte width of the fingerprint leading every
+// index.pack record: streamhash's fingerprint of the routed key.
 const IndexRecordFingerprintLen = 4
 
 // ──────────────────────────────────────────────────────────────────
@@ -304,8 +304,9 @@ func DecodeLedgerOffsets(data []byte) (*LedgerOffsets, error) {
 // (see stores/blind.go). The wrapper therefore feeds
 // streamhash stores.BlindKey(secret, TermKey) at both build and
 // query, with the deterministic per-chunk secret (ColdIndexSecret)
-// stored in index.hash's user metadata. The 4-byte app fingerprint in index.pack and the
-// downstream post-filter stay on the ORIGINAL TermKey bytes.
+// stored in index.hash's user metadata. The 4-byte app fingerprint in index.pack
+// comes from the routed key too; the downstream post-filter stays on the
+// ORIGINAL TermKey bytes.
 // ──────────────────────────────────────────────────────────────────
 
 // index.hash user-metadata wire format (streamhash WithMetadata):
@@ -417,7 +418,7 @@ func buildMPHF(
 		if err = ctx.Err(); err != nil {
 			return nil, fmt.Errorf("events: build MPHF canceled after %d keys: %w", i, err)
 		}
-		rk := stores.BlindKey(secret, key[:])
+		rk := routedKey(secret, key)
 		if err = builder.AddKey(rk[:], 0); err != nil {
 			return nil, fmt.Errorf("events: add key %d: %w", i, err)
 		}
@@ -461,7 +462,13 @@ func openMPHF(path string) (*mphf, error) {
 	return &mphf{idx: idx, secret: secret}, nil
 }
 
-// Lookup returns the dense slot in [0, N) that key maps to.
+// routedKey is term blinded under the chunk secret, the key the MPHF uses.
+func routedKey(secret [stores.SecretLen]byte, term TermKey) TermKey {
+	return TermKey(stores.BlindKey(secret, term[:]))
+}
+
+// Lookup returns the dense slot in [0, N) that key maps to, and the
+// fingerprint that index.pack's record at that slot must carry.
 //
 // streamhash returns ErrKeyNotFound for keys its routing-stage check
 // can prove were never in the build set; callers should treat this
@@ -470,22 +477,25 @@ func openMPHF(path string) (*mphf, error) {
 // 4-byte fingerprint stored alongside the bitmap at that slot in
 // index.pack — an MPHF can map an unseen key to a valid build-set
 // slot, and only the fingerprint catches that residual collision.
-func (m *mphf) Lookup(key TermKey) (uint32, error) {
-	rk := stores.BlindKey(m.secret, key[:])
+func (m *mphf) Lookup(key TermKey) (uint32, [IndexRecordFingerprintLen]byte, error) {
+	rk := routedKey(m.secret, key)
+	var fp [IndexRecordFingerprintLen]byte
+	v, _ := streamhash.Fingerprint(rk[:]) // rk is 16 bytes, so this cannot fail
+	binary.LittleEndian.PutUint32(fp[:], v)
 	slot, err := m.idx.QueryRank(rk[:])
 	if err != nil {
 		if errors.Is(err, streamhash.ErrNotFound) {
-			return 0, ErrKeyNotFound
+			return 0, fp, ErrKeyNotFound
 		}
-		return 0, fmt.Errorf("events: query: %w", err)
+		return 0, fp, fmt.Errorf("events: query: %w", err)
 	}
 	if slot > math.MaxUint32 {
 		// streamhash returns uint64 but slot count is bounded by the
 		// chunk's unique-term count (≪ 2^32). An overflow here would
 		// signal a build-time invariant violation, not a query error.
-		return 0, fmt.Errorf("events: slot %d overflows uint32", slot)
+		return 0, fp, fmt.Errorf("events: slot %d overflows uint32", slot)
 	}
-	return uint32(slot), nil
+	return uint32(slot), fp, nil
 }
 
 // Close releases the index; a no-op for the in-memory OpenBytes path.
