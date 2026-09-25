@@ -293,10 +293,7 @@ func validateService(svc config.ServiceConfig) error {
 	if err := validatePaginatedMethods(m); err != nil {
 		return err
 	}
-	if err := validateEventsMethod("queryEvents", m.QueryEvents); err != nil {
-		return err
-	}
-	if err := validateQueryEventsLimit(m.QueryEvents); err != nil {
+	if err := validateQueryEvents(m.QueryEvents); err != nil {
 		return err
 	}
 	if err := validatePreflight(svc.Preflight); err != nil {
@@ -343,20 +340,14 @@ func validatePaginatedMethods(m config.MethodsConfig) error {
 	return nil
 }
 
-// validateEventsMethod form-validates one events method's v2 knobs.
-func validateEventsMethod(name string, e config.EventsMethodConfig) error {
+// validateQueryEvents form-validates the queryEvents knobs. The spec fixes
+// the largest limit a client may ask for, so an operator can lower it but
+// not raise it. That bound also holds default_items_per_response down,
+// which validation otherwise only requires to be <= max.
+func validateQueryEvents(e config.QueryEventsMethodConfig) error {
 	if *e.TermBudget < 1 {
-		return fmt.Errorf("[service.methods.%s].term_budget must be >= 1", name)
+		return errors.New("[service.methods.queryEvents].term_budget must be >= 1")
 	}
-	return nil
-}
-
-// validateQueryEventsLimit bounds the largest limit an operator may allow.
-// The spec fixes what a client may ask for, so an operator can lower it but
-// not raise it. It is separate from validateEventsMethod because v1 getEvents
-// has no such fixed limit. The bound also holds default_items_per_response
-// down, which validation otherwise only requires to be <= max.
-func validateQueryEventsLimit(e config.EventsMethodConfig) error {
 	if *e.MaxItemsPerResponse > protocol.QueryEventsMaxLimit {
 		return fmt.Errorf("[service.methods.queryEvents].max_items_per_response (%d) cannot exceed %d",
 			*e.MaxItemsPerResponse, protocol.QueryEventsMaxLimit)

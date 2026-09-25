@@ -543,12 +543,12 @@ func TestValidateRoots(t *testing.T) {
 	})
 }
 
-// TestEventsMethodConfig_TypeNameAlias documents a known, accepted
+// TestQueryEventsMethodConfig_TypeNameAlias documents a known, accepted
 // quirk of embedding PaginatedMethodConfig (see the struct doc): the
 // decoder also accepts the shared keys through a table named after
 // the embedded type, and strict mode cannot reject it. If this test
 // ever fails, the alias got closed: delete it and the doc note.
-func TestEventsMethodConfig_TypeNameAlias(t *testing.T) {
+func TestQueryEventsMethodConfig_TypeNameAlias(t *testing.T) {
 	cfg, err := DecodeConfig([]byte(
 		"[service.methods.queryEvents.PaginatedMethodConfig]\nqueue_limit = 3\n"))
 	require.NoError(t, err)

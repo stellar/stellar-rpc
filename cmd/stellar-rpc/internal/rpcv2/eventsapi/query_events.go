@@ -1,5 +1,5 @@
-// Package eventsapi serves queryEvents. It holds the handler and the
-// conversions between the SDK's request and response types and the
+// Package eventsapi serves the events methods, queryEvents and v1 getEvents.
+// It holds the handlers and the conversions between the SDK's request and response types and the
 // pager's own form (query.EventScope, stores/event.Filter).
 package eventsapi
 
@@ -46,9 +46,9 @@ type QueryEventsLimits struct {
 	TermBudget uint32
 }
 
-// NewHandler builds the queryEvents handler. It decodes the params itself,
+// NewQueryEventsHandler builds the queryEvents handler. It decodes the params itself,
 // not through methods.NewHandler, so an unknown field fails.
-func NewHandler(limits QueryEventsLimits, logger *supportlog.Entry) jrpc2.Handler {
+func NewQueryEventsHandler(limits QueryEventsLimits, logger *supportlog.Entry) jrpc2.Handler {
 	return func(ctx context.Context, r *jrpc2.Request) (any, error) {
 		req, err := decodeRequest(r.ParamString(), limits.MaxLimit)
 		if err != nil {
@@ -212,7 +212,7 @@ func requestCursor(
 	return query.EventCursor{Scope: scope}, pageLimit, nil
 }
 
-// validateCursorFilters rejects filter shapes no v2 request can build, so
+// validateCursorFilters rejects filter shapes no queryEvents request can build, so
 // only a hand-built cursor carries them: a clause with no constraint (a
 // match-all the term budget counts as zero), a type outside contract and
 // system, and a topic-count clause. The pager accepts all three because
@@ -337,7 +337,7 @@ func responseError(err error, oldest, latest uint32, logger *supportlog.Entry) e
 	// cursor this server minted and cannot re-encode, or a store failure.
 	// The client gets the message; an operator needs it in the log too,
 	// since the response is gone the moment it is sent.
-	logger.WithError(err).Error("getEvents: unclassified failure, serving an internal error")
+	logger.WithError(err).Error("queryEvents: unclassified failure, serving an internal error")
 	return &jrpc2.Error{Code: jrpc2.InternalError, Message: err.Error()}
 }
 
@@ -399,7 +399,7 @@ func eventScope(
 }
 
 // eventFilter converts one request filter into the store's matching form.
-// v2 filters carry no arity, so TopicCount stays the wildcard.
+// queryEvents filters carry no arity, so TopicCount stays the wildcard.
 func eventFilter(f *protocol.QueryEventsFilter, xdrInputFormat string) (event.Filter, error) {
 	var out event.Filter
 	if f.ContractID != "" {

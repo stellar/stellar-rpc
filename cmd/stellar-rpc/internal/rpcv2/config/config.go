@@ -119,17 +119,16 @@ type MethodsConfig struct {
 	QueueLimit           *uint          `toml:"queue_limit"`
 	MaxExecutionDuration *time.Duration `toml:"max_execution_duration"`
 
-	GetHealth       HealthMethodConfig    `toml:"getHealth"`
-	GetNetwork      NetworkMethodConfig   `toml:"getNetwork"`
-	GetVersionInfo  MethodConfig          `toml:"getVersionInfo"`
-	GetLatestLedger MethodConfig          `toml:"getLatestLedger"`
-	GetTransaction  MethodConfig          `toml:"getTransaction"`
-	GetTransactions PaginatedMethodConfig `toml:"getTransactions"`
-	GetLedgers      PaginatedMethodConfig `toml:"getLedgers"`
-	GetEvents       PaginatedMethodConfig `toml:"getEvents"`
-	// QueryEvents carries getEvents' knob set and defaults.
-	QueryEvents EventsMethodConfig `toml:"queryEvents"`
-	GetFeeStats MethodConfig       `toml:"getFeeStats"`
+	GetHealth       HealthMethodConfig      `toml:"getHealth"`
+	GetNetwork      NetworkMethodConfig     `toml:"getNetwork"`
+	GetVersionInfo  MethodConfig            `toml:"getVersionInfo"`
+	GetLatestLedger MethodConfig            `toml:"getLatestLedger"`
+	GetTransaction  MethodConfig            `toml:"getTransaction"`
+	GetTransactions PaginatedMethodConfig   `toml:"getTransactions"`
+	GetLedgers      PaginatedMethodConfig   `toml:"getLedgers"`
+	GetEvents       PaginatedMethodConfig   `toml:"getEvents"`
+	QueryEvents     QueryEventsMethodConfig `toml:"queryEvents"`
+	GetFeeStats     MethodConfig            `toml:"getFeeStats"`
 
 	// The three methods that read current ledger state through captive core
 	// rather than this daemon's stores (#884). Their serving knobs belong here;
@@ -171,7 +170,7 @@ type NetworkMethodConfig struct {
 	FriendbotURL string `toml:"friendbot_url"`
 }
 
-// EventsMethodConfig adds term_budget, which only queryEvents has: v1's
+// QueryEventsMethodConfig adds term_budget, which only queryEvents has: v1's
 // own filter caps bound a request's terms already, so a budget there could
 // only reject requests v1 accepts. The decoder flattens the embedded
 // fields, keeping the method's TOML table flat.
@@ -181,11 +180,11 @@ type NetworkMethodConfig struct {
 // and strict mode cannot reject it. Accepted over duplicating the
 // fields: the config is trusted input, and nobody writes a Go type
 // name into TOML by hand.
-type EventsMethodConfig struct {
+type QueryEventsMethodConfig struct {
 	PaginatedMethodConfig
 
 	// TermBudget caps the distinct index terms one request may look
-	// up; over budget fails with the v2 invalid_params error. Must be
+	// up; over budget fails with the queryEvents invalid_params error. Must be
 	// >= 1: a zero budget would reject every filtered request.
 	TermBudget *uint `toml:"term_budget"`
 }

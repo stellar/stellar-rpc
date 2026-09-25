@@ -269,7 +269,7 @@ func TestQueryEvents_TermBudgetRejectsBothRequestShapes(t *testing.T) {
 	})
 }
 
-// A hand-built cursor can carry filter shapes no v2 request can. Each is
+// A hand-built cursor can carry filter shapes no queryEvents request can. Each is
 // cursor_malformed. The first one matters most: an unconstrained clause is
 // a full scan the term budget counts as zero.
 func TestQueryEvents_CursorWithV2ForbiddenFilterIsMalformed(t *testing.T) {

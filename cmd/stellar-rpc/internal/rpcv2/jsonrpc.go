@@ -77,7 +77,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 		})
 	specs = append(specs, jsonrpc.HandlerSpec{
 		MethodName: protocol.QueryEventsMethodName,
-		Handler: eventsapi.NewHandler(eventsapi.QueryEventsLimits{
+		Handler: eventsapi.NewQueryEventsHandler(eventsapi.QueryEventsLimits{
 			Limits: eventsapi.Limits{
 				MaxLimit:     deref(m.QueryEvents.MaxItemsPerResponse),
 				DefaultLimit: deref(m.QueryEvents.DefaultItemsPerResponse),

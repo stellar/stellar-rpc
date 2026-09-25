@@ -273,7 +273,7 @@ func TestEventFilterFields(t *testing.T) {
 			got, err := eventFilter(&tc.in, protocol.FormatBase64)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
-			// v2 filters carry no arity, so the count stays the wildcard.
+			// queryEvents filters carry no arity, so the count stays the wildcard.
 			assert.Equal(t, event.TopicCountFilter{}, got.TopicCount)
 		})
 	}
