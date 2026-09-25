@@ -3,6 +3,7 @@ package methods
 import (
 	"context"
 	"errors"
+	"iter"
 	"testing"
 
 	"github.com/creachadair/jrpc2"
@@ -36,35 +37,12 @@ func (ledgerReader *ConstantLedgerReader) NewTx(_ context.Context) (store.Ledger
 	return nil, errors.New("mock NewTx error")
 }
 
-func (ledgerReader *ConstantLedgerReader) GetLedger(_ context.Context,
-	sequence uint32,
-) (xdr.LedgerCloseMeta, bool, error) {
-	return createLedger(expectedLatestLedgerHashBytes,
-			sequence,
-			expectedLatestLedgerCloseTime),
-		true, nil
-}
-
-func (ledgerReader *ConstantLedgerReader) WithLedgerRaw(
-	_ context.Context, sequence uint32, fn store.WithLedgerRawFn,
-) (bool, error) {
-	lcm := createLedger(expectedLatestLedgerHashBytes,
-		sequence,
-		expectedLatestLedgerCloseTime)
-	raw, err := lcm.MarshalBinary()
-	if err != nil {
-		return false, err
-	}
-	return true, fn(raw)
-}
-
-func (ledgerReader *ConstantLedgerReader) StreamLedgerRange(
-	_ context.Context,
-	_ uint32,
-	_ uint32,
-	_ store.StreamLedgerFn,
-) error {
-	return nil
+func (ledgerReader *ConstantLedgerReader) ScanLedgers(
+	_ context.Context, start, end uint32,
+) iter.Seq2[store.RawLedger, error] {
+	return store.ScanLedgersFrom(start, end, func(seq uint32) (xdr.LedgerCloseMeta, bool, error) {
+		return createLedger(expectedLatestLedgerHashBytes, seq, expectedLatestLedgerCloseTime), true, nil
+	})
 }
 
 func MakeTxSet() xdr.GeneralizedTransactionSet {

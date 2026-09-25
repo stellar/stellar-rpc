@@ -483,33 +483,32 @@ func (d *Daemon) mustInitializeStorage(cfg *config.Config) *feewindow.FeeWindows
 	// 3. Apply all migrations, including fee stat analysis.
 	//
 	var initialSeq, currentSeq uint32
-	err = sqlitedb.NewLedgerReader(d.db).StreamLedgerRange(
-		readTxMetaCtx,
-		ledgerSeqRange.First,
-		ledgerSeqRange.Last,
-		func(txMeta xdr.LedgerCloseMeta) error {
-			currentSeq = txMeta.LedgerSequence()
-			if initialSeq == 0 {
-				initialSeq = currentSeq
-				d.logger.
-					WithField("first", initialSeq).
-					WithField("last", ledgerSeqRange.Last).
-					Info("Initializing in-memory store")
-			} else if (currentSeq-initialSeq)%inMemoryInitializationLedgerLogPeriod == 0 {
-				d.logger.
-					WithField("seq", currentSeq).
-					WithField("last", ledgerSeqRange.Last).
-					Debug("Still initializing in-memory store")
-			}
+	reader := sqlitedb.NewLedgerReader(d.db)
+	for l, err := range reader.ScanLedgers(readTxMetaCtx, ledgerSeqRange.First, ledgerSeqRange.Last) {
+		if err != nil {
+			d.logger.WithError(err).Fatal("Could not obtain txmeta cache from the database")
+		}
+		var txMeta xdr.LedgerCloseMeta
+		if err := txMeta.UnmarshalBinary(l.Raw); err != nil {
+			d.logger.WithError(err).Fatal("could not decode ledger ", l.Sequence)
+		}
+		currentSeq = txMeta.LedgerSequence()
+		if initialSeq == 0 {
+			initialSeq = currentSeq
+			d.logger.
+				WithField("first", initialSeq).
+				WithField("last", ledgerSeqRange.Last).
+				Info("Initializing in-memory store")
+		} else if (currentSeq-initialSeq)%inMemoryInitializationLedgerLogPeriod == 0 {
+			d.logger.
+				WithField("seq", currentSeq).
+				WithField("last", ledgerSeqRange.Last).
+				Debug("Still initializing in-memory store")
+		}
 
-			if err := dataMigrations.Apply(readTxMetaCtx, txMeta); err != nil {
-				d.logger.WithError(err).Fatal("could not apply migration for ledger ", currentSeq)
-			}
-
-			return nil
-		})
-	if err != nil {
-		d.logger.WithError(err).Fatal("Could not obtain txmeta cache from the database")
+		if err := dataMigrations.Apply(readTxMetaCtx, txMeta); err != nil {
+			d.logger.WithError(err).Fatal("could not apply migration for ledger ", currentSeq)
+		}
 	}
 
 	if err := dataMigrations.Commit(readTxMetaCtx); err != nil {

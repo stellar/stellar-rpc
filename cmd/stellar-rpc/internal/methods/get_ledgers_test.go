@@ -2,6 +2,7 @@ package methods
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -331,6 +332,18 @@ func createLedgerCloseMeta(ledgerSeq uint32) xdr.LedgerCloseMeta {
 	}
 }
 
+// rawLedgers builds what ScanLedgers yields for the given sequences.
+func rawLedgers(t *testing.T, sequences []uint32) []store.RawLedger {
+	t.Helper()
+	out := make([]store.RawLedger, 0, len(sequences))
+	for _, seq := range sequences {
+		raw, err := createLedgerCloseMeta(seq).MarshalBinary()
+		require.NoError(t, err)
+		out = append(out, store.RawLedger{Sequence: seq, Raw: raw})
+	}
+	return out
+}
+
 func getLedgerRange(sequences []uint32) []xdr.LedgerCloseMeta {
 	ledgers := make([]xdr.LedgerCloseMeta, 0, len(sequences))
 	for _, seq := range sequences {
@@ -400,10 +413,8 @@ func TestGetLedgers(t *testing.T) {
 				FirstLedger: 2,
 			}, nil)
 			if len(tc.expectLocal) > 0 {
-				ledgerChunks, err := metaToChunk(getLedgerRange(tc.expectLocal))
-				require.NoError(t, err)
-				mockReaderTx.On("BatchGetLedgers", ctx, tc.expectLocal[0], tc.expectLocal[len(tc.expectLocal)-1]).
-					Return(ledgerChunks, nil)
+				mockReaderTx.On("ScanLedgers", ctx, tc.expectLocal[0], tc.expectLocal[len(tc.expectLocal)-1]).
+					Return(rawLedgers(t, tc.expectLocal), nil)
 			}
 
 			if len(tc.expectDatastore) > 0 {
@@ -437,8 +448,20 @@ func TestFetchLedgersErrors(t *testing.T) {
 
 	t.Run("DB error", func(t *testing.T) {
 		mockTx := new(MockLedgerReaderTx)
-		mockTx.On("BatchGetLedgers", ctx, uint32(150), uint32(151)).
-			Return([]store.LedgerMetadataChunk(nil), errors.New("db error"))
+		mockTx.On("ScanLedgers", ctx, uint32(150), uint32(151)).
+			Return([]store.RawLedger(nil), errors.New("db error"))
+
+		handler := ledgersHandler{}
+		_, err := handler.fetchLedgers(ctx, 150, 151, "default", mockTx, localRange)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "db error")
+		mockTx.AssertExpectations(t)
+	})
+
+	t.Run("DB error after a full page", func(t *testing.T) {
+		mockTx := new(MockLedgerReaderTx)
+		mockTx.On("ScanLedgers", ctx, uint32(150), uint32(151)).
+			Return(rawLedgers(t, []uint32{150, 151}), errors.New("db error"))
 
 		handler := ledgersHandler{}
 		_, err := handler.fetchLedgers(ctx, 150, 151, "default", mockTx, localRange)
@@ -475,10 +498,10 @@ func TestFetchLedgersErrors(t *testing.T) {
 	})
 }
 
-// TestGetLedgers_EmptyBatchGetLedgersResult is a regression test that ensures
-// when GetLedgerRange reports data but BatchGetLedgers returns an empty slice,
+// TestGetLedgers_EmptyScanResult is a regression test that ensures
+// when GetLedgerRange reports data but ScanLedgers yields nothing,
 // getLedgers returns an empty page with a stable cursor and does not panic.
-func TestGetLedgers_EmptyBatchGetLedgersResult(t *testing.T) {
+func TestGetLedgers_EmptyScanResult(t *testing.T) {
 	ctx := t.Context()
 
 	t.Run("empty result with cursor", func(t *testing.T) {
@@ -499,9 +522,9 @@ func TestGetLedgers_EmptyBatchGetLedgersResult(t *testing.T) {
 		mockReader.On("NewTx", ctx).Return(mockReaderTx, nil)
 		mockReaderTx.On("Done").Return(nil)
 		mockReaderTx.On("GetLedgerRange", ctx).Return(localRange, nil)
-		// BatchGetLedgers returns empty slice even though GetLedgerRange indicates data exists
-		mockReaderTx.On("BatchGetLedgers", ctx, uint32(151), uint32(155)).
-			Return([]store.LedgerMetadataChunk{}, nil)
+		// ScanLedgers yields nothing even though GetLedgerRange indicates data exists
+		mockReaderTx.On("ScanLedgers", ctx, uint32(151), uint32(155)).
+			Return([]store.RawLedger{}, nil)
 
 		request := protocol.GetLedgersRequest{
 			Pagination: &protocol.LedgerPaginationOptions{
@@ -539,9 +562,9 @@ func TestGetLedgers_EmptyBatchGetLedgersResult(t *testing.T) {
 		mockReader.On("NewTx", ctx).Return(mockReaderTx, nil)
 		mockReaderTx.On("Done").Return(nil)
 		mockReaderTx.On("GetLedgerRange", ctx).Return(localRange, nil)
-		// BatchGetLedgers returns empty slice even though GetLedgerRange indicates data exists
-		mockReaderTx.On("BatchGetLedgers", ctx, uint32(100), uint32(104)).
-			Return([]store.LedgerMetadataChunk{}, nil)
+		// ScanLedgers yields nothing even though GetLedgerRange indicates data exists
+		mockReaderTx.On("ScanLedgers", ctx, uint32(100), uint32(104)).
+			Return([]store.RawLedger{}, nil)
 
 		request := protocol.GetLedgersRequest{
 			StartLedger: 100,
@@ -557,4 +580,22 @@ func TestGetLedgers_EmptyBatchGetLedgersResult(t *testing.T) {
 		mockReader.AssertExpectations(t)
 		mockReaderTx.AssertExpectations(t)
 	})
+}
+
+// TestParseLedgerInfo_HeaderMatchesFullDecode pins that the header parseLedgerInfo slices
+// off the raw bytes equals what a full decode re-marshals, on every LCM wire version.
+func TestParseLedgerInfo_HeaderMatchesFullDecode(t *testing.T) {
+	for _, version := range []int32{0, 1, 2} {
+		lcm := diffLCM(t, version, 101)
+		raw, err := lcm.MarshalBinary()
+		require.NoError(t, err)
+		wantHeader, err := lcm.LedgerHeaderHistoryEntry().MarshalBinary()
+		require.NoError(t, err)
+
+		info, err := parseLedgerInfo(raw, protocol.FormatBase64)
+		require.NoError(t, err, "version %d", version)
+		assert.Equal(t, uint32(101), info.Sequence)
+		assert.Equal(t, base64.StdEncoding.EncodeToString(wantHeader), info.LedgerHeader, "version %d", version)
+		assert.Equal(t, base64.StdEncoding.EncodeToString(raw), info.LedgerMetadata, "version %d", version)
+	}
 }

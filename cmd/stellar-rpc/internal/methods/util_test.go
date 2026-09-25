@@ -12,6 +12,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 func BenchmarkGetProtocolVersion(b *testing.B) {
@@ -19,7 +20,7 @@ func BenchmarkGetProtocolVersion(b *testing.B) {
 	daemon := host.MakeNoOpDaemon()
 
 	ledgerReader := sqlitedb.NewLedgerReader(dbx)
-	_, exists, err := ledgerReader.GetLedger(b.Context(), 1)
+	_, exists, err := store.GetLedger(b.Context(), ledgerReader, 1)
 	require.NoError(b, err)
 	assert.False(b, exists)
 
@@ -43,7 +44,7 @@ func TestGetProtocolVersion(t *testing.T) {
 	daemon := host.MakeNoOpDaemon()
 
 	ledgerReader := sqlitedb.NewLedgerReader(dbx)
-	_, exists, err := ledgerReader.GetLedger(t.Context(), 1)
+	_, exists, err := store.GetLedger(t.Context(), ledgerReader, 1)
 	require.NoError(t, err)
 	assert.False(t, exists)
 

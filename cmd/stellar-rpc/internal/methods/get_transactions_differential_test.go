@@ -79,10 +79,11 @@ func legacyGetTransactionsByLedgerSequence(
 			}
 		}
 		var ledger xdr.LedgerCloseMeta
-		found, gerr := readTx.WithLedgerRaw(ctx, uint32(ledgerSeq), ledger.UnmarshalBinary)
+		found, gerr := store.WithLedgerRaw(ctx, readTx, uint32(ledgerSeq), ledger.UnmarshalBinary)
 		if gerr != nil {
 			return protocol.GetTransactionsResponse{}, &jrpc2.Error{Code: jrpc2.InternalError, Message: gerr.Error()}
-		} else if !found {
+		}
+		if !found {
 			return protocol.GetTransactionsResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InvalidParams,
 				Message: fmt.Sprintf("database does not contain metadata for ledger: %d", ledgerSeq),

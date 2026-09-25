@@ -488,7 +488,7 @@ func getLatestLedgerPreflightInfo(
 ) (latestLedgerPreflightInfo, error) {
 	// Obtain every preflight ledger field from the same meta so sequence and
 	// close time cannot come from different ingestion snapshots.
-	closeMeta, ok, err := ledgerReader.GetLedger(ctx, latestLedger)
+	closeMeta, ok, err := store.GetLedger(ctx, ledgerReader, latestLedger)
 	if err != nil {
 		return latestLedgerPreflightInfo{}, err
 	}

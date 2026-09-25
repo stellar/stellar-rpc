@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -210,22 +211,12 @@ func (s stubLedgerReader) GetLatestLedgerSequence(context.Context) (uint32, erro
 	return s.latest, nil
 }
 
-func (s stubLedgerReader) GetLedger(context.Context, uint32) (xdr.LedgerCloseMeta, bool, error) {
-	return xdr.LedgerCloseMeta{}, false, errors.New("unused")
-}
-
-func (s stubLedgerReader) WithLedgerRaw(context.Context, uint32, store.WithLedgerRawFn) (bool, error) {
-	return false, errors.New("unused")
+func (s stubLedgerReader) ScanLedgers(context.Context, uint32, uint32) iter.Seq2[store.RawLedger, error] {
+	return func(yield func(store.RawLedger, error) bool) { yield(store.RawLedger{}, errors.New("unused")) }
 }
 
 func (s stubLedgerReader) GetLedgerRange(context.Context) (store.LedgerRange, error) {
 	return store.LedgerRange{}, errors.New("unused")
-}
-
-func (s stubLedgerReader) StreamLedgerRange(
-	context.Context, uint32, uint32, store.StreamLedgerFn,
-) error {
-	return errors.New("unused")
 }
 
 func (s stubLedgerReader) NewTx(context.Context) (store.LedgerReaderTx, error) {

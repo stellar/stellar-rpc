@@ -9,11 +9,14 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
+	"iter"
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
 
+	"github.com/creachadair/jrpc2"
+	"github.com/creachadair/jrpc2/server"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 
@@ -44,14 +47,14 @@ func SilentLogger() *supportlog.Entry {
 // artifacts under another, cpi-wide tx-hash indexes, silent logger, closed on
 // test cleanup. Returns the catalog and the artifact root. Most tests pass
 // geometry.ChunksPerTxhashIndex for cpi.
-func OpenTestCatalog(t *testing.T, cpi uint32) (*catalog.Catalog, string) {
+func OpenTestCatalog(t testing.TB, cpi uint32) (*catalog.Catalog, string) {
 	t.Helper()
 	return OpenTestCatalogWith(t, cpi, SilentLogger())
 }
 
 // OpenTestCatalogWith is OpenTestCatalog with the caller's logger, for tests
 // that assert on what the catalog logs.
-func OpenTestCatalogWith(t *testing.T, cpi uint32, logger *supportlog.Entry) (*catalog.Catalog, string) {
+func OpenTestCatalogWith(t testing.TB, cpi uint32, logger *supportlog.Entry) (*catalog.Catalog, string) {
 	t.Helper()
 	artifactRoot := t.TempDir()
 	idxLayout, err := geometry.NewTxHashIndexLayout(cpi)
@@ -73,14 +76,25 @@ func OpenTestCatalogWith(t *testing.T, cpi uint32, logger *supportlog.Entry) (*c
 //		func(db *hotchunk.DB) { registry.PublishHandle(c, db) },
 //		lcms...)
 func SeedHotChunkLCMs(
-	t *testing.T, cat *catalog.Catalog, c chunk.ID, publish func(*hotchunk.DB), lcms ...[]byte,
+	t testing.TB, cat *catalog.Catalog, c chunk.ID, publish func(*hotchunk.DB), lcms ...[]byte,
+) {
+	t.Helper()
+	SeedHotChunkSeq(t, cat, c, publish, slices.Values(lcms))
+}
+
+// SeedHotChunkSeq is SeedHotChunkLCMs over a stream of raw LCMs, for fixtures
+// too large to hold at once.
+func SeedHotChunkSeq(
+	t testing.TB, cat *catalog.Catalog, c chunk.ID, publish func(*hotchunk.DB), lcms iter.Seq[[]byte],
 ) {
 	t.Helper()
 	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, SilentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	for i, raw := range lcms {
-		IngestLedger(t, db, c.FirstLedger()+uint32(i), raw)
+	seq := c.FirstLedger()
+	for raw := range lcms {
+		IngestLedger(t, db, seq, raw)
+		seq++
 	}
 	require.NoError(t, cat.FlipHotReady(c))
 	publish(db)
@@ -90,18 +104,35 @@ func SeedHotChunkLCMs(
 // lcms from the chunk's first ledger, and flips the chunk's ledgers artifact
 // frozen. AppendLedger stores raw bytes, so marker payloads work as well as
 // real LCMs.
-func WriteFrozenLedgerPack(t *testing.T, cat *catalog.Catalog, c chunk.ID, lcms ...[]byte) {
+func WriteFrozenLedgerPack(t testing.TB, cat *catalog.Catalog, c chunk.ID, lcms ...[]byte) {
+	t.Helper()
+	WriteFrozenLedgerPackSeq(t, cat, c, slices.Values(lcms))
+}
+
+// WriteFrozenLedgerPackSeq is WriteFrozenLedgerPack over a stream of raw LCMs.
+func WriteFrozenLedgerPackSeq(t testing.TB, cat *catalog.Catalog, c chunk.ID, lcms iter.Seq[[]byte]) {
 	t.Helper()
 	path := cat.Layout().LedgerPackPath(c)
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 	w, err := ledger.NewColdWriter(path, c.FirstLedger(), ledger.ColdWriterOptions{})
 	require.NoError(t, err)
 	defer func() { _ = w.Close() }()
-	for i, raw := range lcms {
-		require.NoError(t, w.AppendLedger(c.FirstLedger()+uint32(i), raw))
+	seq := c.FirstLedger()
+	for raw := range lcms {
+		require.NoError(t, w.AppendLedger(seq, raw))
+		seq++
 	}
 	require.NoError(t, w.Commit())
 	require.NoError(t, cat.FlipChunkFrozen(c, geometry.KindLedgers))
+}
+
+// NewLocalClient serves handlers over an in-memory JSON-RPC pipe: a request
+// crosses the handler and the response encode, but not HTTP.
+func NewLocalClient(t testing.TB, handlers jrpc2.Assigner) *jrpc2.Client {
+	t.Helper()
+	local := server.NewLocal(handlers, nil)
+	t.Cleanup(func() { _ = local.Close() })
+	return local.Client
 }
 
 // SymbolContractEvent returns a contract event whose topics and data
@@ -131,7 +162,7 @@ func SymbolContractEvent(contractID xdr.ContractId, data string, topics ...strin
 // shared ExtractLedgerTxParts walk, then hotchunk's atomic write over its
 // output. Tests that just need ledgers in a hot DB use this instead of
 // hand-running the walk.
-func IngestLedger(t *testing.T, db *hotchunk.DB, seq uint32, raw []byte) {
+func IngestLedger(t testing.TB, db *hotchunk.DB, seq uint32, raw []byte) {
 	t.Helper()
 	txParts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err)
@@ -155,14 +186,14 @@ func RetentionFor(t *testing.T, cat *catalog.Catalog, size uint32) geometry.Rete
 // ZeroTxLCMBytes returns the marshaled bytes of a minimal, zero-transaction
 // LedgerCloseMeta (V2) for ledger seq — the fixture ingestion/backfill/lifecycle
 // tests feed in when they need a valid but empty ledger.
-func ZeroTxLCMBytes(t *testing.T, seq uint32) []byte {
+func ZeroTxLCMBytes(t testing.TB, seq uint32) []byte {
 	t.Helper()
 	return ZeroTxLCMBytesAt(t, seq, 0)
 }
 
 // ZeroTxLCMBytesAt is ZeroTxLCMBytes with an explicit close time, for tests
 // that assert against a known close-time value.
-func ZeroTxLCMBytesAt(t *testing.T, seq uint32, closeTimeUnix int64) []byte {
+func ZeroTxLCMBytesAt(t testing.TB, seq uint32, closeTimeUnix int64) []byte {
 	t.Helper()
 	return V2LCMBytes(t, seq, closeTimeUnix, nil, nil)
 }
@@ -172,7 +203,7 @@ func ZeroTxLCMBytesAt(t *testing.T, seq uint32, closeTimeUnix int64) []byte {
 // at all when empty), and processing as the apply results. Every V2 fixture
 // builder delegates here so the skeleton exists once.
 func V2LCMBytes(
-	t *testing.T, seq uint32, closeTimeUnix int64,
+	t testing.TB, seq uint32, closeTimeUnix int64,
 	envelopes []xdr.TransactionEnvelope, processing []xdr.TransactionResultMetaV1,
 ) []byte {
 	t.Helper()

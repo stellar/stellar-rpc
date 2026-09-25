@@ -5,6 +5,7 @@ package xdr2json
 // See preflight.go for add'l explanations:
 // Note: no blank lines allowed.
 #include <stdlib.h>
+#include <string.h>
 #include "../../lib/xdr2json.h"
 #cgo windows,amd64 LDFLAGS: -L${SRCDIR}/../../../../target/x86_64-pc-windows-gnu/release-with-panic-unwind/ -lxdr2json -lntdll -static -lws2_32 -lbcrypt -luserenv
 #cgo darwin,amd64  LDFLAGS: -L${SRCDIR}/../../../../target/x86_64-apple-darwin/release-with-panic-unwind/ -lxdr2json -ldl -lm
@@ -103,7 +104,6 @@ func ConvertJSON(xdr any, js json.RawMessage) ([]byte, error) {
 }
 
 func convertAnyBytes(xdrTypeName string, field []byte) (json.RawMessage, error) {
-	var jsonStr, errStr string
 	goRawXdr := CXDR(field)
 	defer FreeGoXDR(goRawXdr)
 
@@ -113,14 +113,14 @@ func convertAnyBytes(xdrTypeName string, field []byte) (json.RawMessage, error) 
 	result := C.xdr_to_json(b, goRawXdr)
 	defer C.free_conversion_result(result)
 
-	jsonStr = C.GoString(result.json)
-	errStr = C.GoString(result.error)
-
-	if errStr != "" {
-		return json.RawMessage(jsonStr), errors.New(errStr)
+	if errStr := C.GoString(result.error); errStr != "" {
+		return json.RawMessage(C.GoString(result.json)), errors.New(errStr)
 	}
-
-	return json.RawMessage(jsonStr), nil
+	if result.json == nil {
+		return json.RawMessage{}, nil
+	}
+	// One copy out of C; GoString followed by []byte(string) would copy the JSON twice.
+	return C.GoBytes(unsafe.Pointer(result.json), C.int(C.strlen(result.json))), nil
 }
 
 // CXDR is ripped directly from preflight.go to avoid a dependency.
