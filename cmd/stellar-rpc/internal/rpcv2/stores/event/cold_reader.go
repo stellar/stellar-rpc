@@ -45,6 +45,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"math"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -347,6 +348,12 @@ func verifyAndDeserializeBitmap(
 // the input slice (result[i] corresponds to keys[i]). See
 // Reader.LookupKeys for the semantics.
 //
+// The window is ignored: an index.pack record holds one whole term,
+// so a lookup reads and returns the whole of it and reports the whole
+// id space as covered. A whole term agrees with the index inside any
+// window, which is all the contract asks. The window is honored once
+// the format can answer for part of a term.
+//
 // Cold-side implementation:
 //
 //  1. MPHF-resolve every key. Keys rejected at the routing stage
@@ -364,23 +371,25 @@ func verifyAndDeserializeBitmap(
 //     match. Misses (fingerprint mismatch) leave result[i] = nil.
 //
 //nolint:cyclop // the four documented steps above, inline; splitting obscures the pass structure
-func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.Bitmap, error) {
+func (c *ColdReader) LookupKeys(
+	ctx context.Context, keys []TermKey, _ IDRange,
+) ([]*roaring.Bitmap, IDRange, error) {
 	if c.closed.Load() {
-		return nil, stores.ErrStoreClosed
+		return nil, IDRange{}, stores.ErrStoreClosed
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, IDRange{}, err
 	}
 	if len(keys) == 0 {
-		return nil, nil
+		return nil, IDRange{End: math.MaxUint32}, nil
 	}
 
 	if err := c.validateMPHF(); err != nil {
-		return nil, err
+		return nil, IDRange{}, err
 	}
 	mphf, err := c.waitMPHF()
 	if err != nil {
-		return nil, err
+		return nil, IDRange{}, err
 	}
 
 	results := make([]*roaring.Bitmap, len(keys))
@@ -398,12 +407,12 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring
 			if errors.Is(err, ErrKeyNotFound) {
 				continue // result[i] stays nil
 			}
-			return nil, fmt.Errorf("events: LookupKeys MPHF for chunk %s: %w", c.chunkID, err)
+			return nil, IDRange{}, fmt.Errorf("events: LookupKeys MPHF for chunk %s: %w", c.chunkID, err)
 		}
 		pending = append(pending, pendingKey{outIdx: i, slot: slot, fp: fp})
 	}
 	if len(pending) == 0 {
-		return results, nil
+		return results, IDRange{End: math.MaxUint32}, nil
 	}
 
 	sort.Slice(pending, func(i, j int) bool { return pending[i].slot < pending[j].slot })
@@ -437,10 +446,10 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring
 		}
 		return nil
 	}); err != nil {
-		return nil, fmt.Errorf("events: LookupKeys read for chunk %s: %w", c.chunkID, err)
+		return nil, IDRange{}, fmt.Errorf("events: LookupKeys read for chunk %s: %w", c.chunkID, err)
 	}
 
-	return results, nil
+	return results, IDRange{End: math.MaxUint32}, nil
 }
 
 // FetchEvents decodes events_data records for the supplied
