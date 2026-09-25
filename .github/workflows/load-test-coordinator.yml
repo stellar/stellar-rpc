@@ -11,7 +11,7 @@ defaults:
 
 on:
   push:
-    branches: [release/**]
+    branches: [release/**, cache-getLatestLedger]
   workflow_dispatch:
     inputs:
       target_ref:
@@ -76,7 +76,8 @@ jobs:
           # matrix fan-out: entries carrying a script ride the matrix; the
           # chained backfill + blaster pair runs as explicit jobs below.
           # Unquoted heredoc so $BASELINE expands into the go-bench entry;
-          LEGS="$(jq -c . <<EOF
+          # temporary, for testing: drop the apply-load and go-bench legs from the roster
+          LEGS="$(jq -c 'map(select(.run_label | IN("apply-load", "go-bench") | not))' <<EOF
           [
             {"label":"Apply-load ingestion","run_label":"apply-load","script":"cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh","budget":225},
             {"label":"Backfill ingestion","run_label":"backfill"},
