@@ -144,6 +144,16 @@ func (a *ReadView) resolveLedgers(c chunk.ID) (LedgerReader, func() error, error
 	}
 }
 
+// defaultColdEventReadConcurrency is the worker fan-out for one cold events
+// read over its packfiles. A page's payload fetch is hundreds of scattered
+// records with no ordering between them, and serial reads add their latencies
+// together. The value depends on the storage the daemon reads through, not on
+// the query, and was measured on NVMe. Its footprint is workers times
+// in-flight cold pages, in goroutines and in packfile's coalesced-read
+// buffers. It is compiled in; a config knob can follow if a deployment needs
+// a different value.
+const defaultColdEventReadConcurrency = 8
+
 // Events resolves chunk c's event store as the common event.Reader the
 // query engine consumes, uniform across tiers. A cold reader is view-owned —
 // Release closes it; the hot facade is registry-owned. Returns ErrUnavailable
@@ -157,10 +167,8 @@ func (a *ReadView) Events(c chunk.ID) (event.Reader, error) {
 	}
 	switch t {
 	case tierCold:
-		// TODO(events adapter / #772): thread read concurrency
-		// (ColdReaderOptions.Concurrency → the packfile ReadItems concurrency) here;
-		// decide whether it is config-driven or caller-supplied. Default for now.
-		cr, err := event.OpenColdReader(c, a.catalog.Layout().EventsBucketDir(c), event.ColdReaderOptions{})
+		cr, err := event.OpenColdReader(c, a.catalog.Layout().EventsBucketDir(c),
+			event.ColdReaderOptions{Concurrency: defaultColdEventReadConcurrency})
 		if err != nil {
 			return nil, err
 		}
