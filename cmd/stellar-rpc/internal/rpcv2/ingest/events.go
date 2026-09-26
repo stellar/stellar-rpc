@@ -22,11 +22,11 @@ import (
 // NewBitmaps + per-event TermsForBytes, and an event.LedgerOffsets to assign
 // chunk-relative event IDs.
 type eventsCold struct {
-	chunkID   chunk.ID
-	writer    *event.ColdWriter
-	mirror    event.Bitmaps
-	offsets   *event.LedgerOffsets
-	bucketDir string
+	chunkID chunk.ID
+	writer  *event.ColdWriter
+	mirror  event.Bitmaps
+	offsets *event.LedgerOffsets
+	dirs    event.ColdDirs
 	// secret is the chunk's deterministic routing secret (event.ColdIndexSecret),
 	// handed to WriteColdIndex at finalize.
 	secret  [stores.SecretLen]byte
@@ -40,18 +40,23 @@ type eventsCold struct {
 	failed bool
 }
 
-// newEventsCold opens a per-chunk events.pack cold writer in bucketDir —
-// the caller's geometry.Layout.EventsBucketDir(chunkID), so the write path is
-// Layout's single derivation. The writer opts into the batch tuning
+// newEventsCold opens a per-chunk events cold writer over dirs —
+// the caller's geometry.Layout.EventsColdDirs(chunkID), so the write path is
+// Layout's single derivation of both roots. The writer opts into the batch tuning
 // (coldEncoderConcurrency/coldBytesPerSync): WriteColdChunk, the sole
 // production caller, is always a batch freeze/backfill.
 func newEventsCold(
-	bucketDir string, chunkID chunk.ID, sink MetricSink, secret [stores.SecretLen]byte,
+	dirs event.ColdDirs, chunkID chunk.ID, sink MetricSink, secret [stores.SecretLen]byte,
 ) (*eventsCold, error) {
-	if err := os.MkdirAll(bucketDir, 0o755); err != nil {
-		return nil, fmt.Errorf("mkdir %s: %w", bucketDir, err)
+	// Both, here: WriteColdIndex runs at finalize and creates no directory of
+	// its own, so missing the index root would fail the freeze at the end
+	// rather than at open.
+	for _, dir := range []string{dirs.Data, dirs.Index} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("mkdir %s: %w", dir, err)
+		}
 	}
-	w, err := event.NewColdWriter(chunkID, bucketDir, event.ColdWriterOptions{
+	w, err := event.NewColdWriter(chunkID, dirs.Data, event.ColdWriterOptions{
 		Concurrency:  coldEncoderConcurrency,
 		BytesPerSync: coldBytesPerSync,
 	})
@@ -59,13 +64,13 @@ func newEventsCold(
 		return nil, fmt.Errorf("event.NewColdWriter: %w", err)
 	}
 	return &eventsCold{
-		chunkID:   chunkID,
-		writer:    w,
-		mirror:    event.NewBitmaps(),
-		offsets:   event.NewLedgerOffsets(chunkID.FirstLedger()),
-		bucketDir: bucketDir,
-		secret:    secret,
-		metrics:   newColdMetrics(sink, dataTypeEvents),
+		chunkID: chunkID,
+		writer:  w,
+		mirror:  event.NewBitmaps(),
+		offsets: event.NewLedgerOffsets(chunkID.FirstLedger()),
+		dirs:    dirs,
+		secret:  secret,
+		metrics: newColdMetrics(sink, dataTypeEvents),
 	}, nil
 }
 
@@ -103,7 +108,7 @@ func (e *eventsCold) finalize(ctx context.Context) error {
 		e.metrics.emit(time.Since(start), err)
 		return err
 	}
-	if err := event.WriteColdIndex(ctx, e.chunkID, e.mirror, e.bucketDir, e.secret); err != nil {
+	if err := event.WriteColdIndex(ctx, e.chunkID, e.mirror, e.dirs.Index, e.secret); err != nil {
 		// Finish already committed events.pack; the index-less pack is left
 		// in place — without the orchestrator's completion record it is
 		// inert scratch (see the package doc's artifact model), and the

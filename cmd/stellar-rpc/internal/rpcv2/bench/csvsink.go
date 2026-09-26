@@ -273,6 +273,17 @@ func (s *csvSink) Freeze(d time.Duration) {
 	s.observe(fileDriver, driverBackfillWall, d, 0)
 }
 
+// BackfillRetry is a no-op here: a benchmark runs with MaxRetries 0, so the
+// scheduler never notifies a retry, and the report's timings are per-stage
+// rather than per-attempt.
+func (*csvSink) BackfillRetry() {}
+
+// BackfillPlanned and BackfillCompleted are the daemon's live progress gauges;
+// a benchmark reports its own totals from the CSV, so it ignores them.
+func (*csvSink) BackfillPlanned(int) {}
+
+func (*csvSink) BackfillCompleted(int) {}
+
 // Rebuild records one txhash index build's wall-clock (including its eager
 // post-build sweep).
 func (s *csvSink) Rebuild(d time.Duration) {

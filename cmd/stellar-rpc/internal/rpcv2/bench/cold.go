@@ -101,7 +101,8 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 	// Create and fsync the write roots up front — the daemon's own root prep.
 	layout := geometry.NewLayout(opts.ColdRoot)
 	if err := config.PrepareRoots(
-		layout.LedgersRoot(), layout.EventsRoot(), layout.TxHashRawRoot(), layout.TxHashIndexRoot(),
+		layout.LedgersRoot(), layout.EventsRoot(), layout.EventsIndexRoot(),
+		layout.TxHashRawRoot(), layout.TxHashIndexRoot(),
 	); err != nil {
 		return fmt.Errorf("prepare --cold-out-dir write roots: %w", err)
 	}

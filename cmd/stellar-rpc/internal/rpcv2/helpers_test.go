@@ -128,6 +128,9 @@ func (r *recordingMetrics) BackfillPass(time.Duration) {
 	r.backfillPasses++
 }
 
+func (*recordingMetrics) BackfillRetry()             {}
+func (*recordingMetrics) BackfillPlanned(int)        {}
+func (*recordingMetrics) BackfillCompleted(int)      {}
 func (*recordingMetrics) ChunkBoundary()             {}
 func (*recordingMetrics) Freeze(time.Duration)       {}
 func (*recordingMetrics) Rebuild(time.Duration)      {}

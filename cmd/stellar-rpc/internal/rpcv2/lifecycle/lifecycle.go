@@ -8,6 +8,8 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
@@ -155,11 +157,15 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	// needed is the empty-range check (floor above lastChunk when retention outran
 	// production). An empty range emits no Freeze sample — the Discard/Prune samples
 	// below carry empty-tick visibility.
+	tickStart := time.Now()
 	var errs []error
+	var backfillTook time.Duration
 	if floor <= lastChunk {
+		backfillStart := time.Now()
 		if eerr := backfill.RunBackfill(ctx, cfg.ExecConfig, floor, lastChunk); eerr != nil {
 			errs = append(errs, fmt.Errorf("run backfill [%s,%s]: %w", floor, lastChunk, eerr))
 		}
+		backfillTook = time.Since(backfillStart)
 	}
 
 	// Stage 2 — discard scan. Demote each eligible hot chunk (unpublish its handle,
@@ -183,9 +189,6 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	metrics.Discard(discarded, time.Since(discardStart))
 	if err != nil {
 		errs = append(errs, fmt.Errorf("discard demote: %w", err))
-	}
-	if discarded > 0 {
-		logger.WithField("discarded", discarded).Info("lifecycle discard stage complete")
 	}
 
 	// Live hot-chunk gauge after the discard stage.
@@ -224,14 +227,20 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	if err != nil {
 		errs = append(errs, fmt.Errorf("prune demote: %w", err))
 	}
-	if prunedArtifacts > 0 {
-		logger.WithField("pruned", prunedArtifacts).Info("lifecycle prune stage complete")
-	}
 
 	// End of run: destroy everything demoted this run — discarded hot handles and
 	// pruned cold files — after one grace wait (design: wait once, then delete).
 	// Reached even when stages errored, so a failing freeze cannot wedge reclaim.
 	pending.destroyAll(ctx, cfg)
+	logger.WithFields(supportlog.F{
+		"last_chunk":    lastChunk.String(),
+		"floor_chunk":   floor.String(),
+		"backfill_took": backfillTook.Round(time.Millisecond).String(),
+		"discarded":     discarded,
+		"pruned":        prunedArtifacts,
+		"errors":        len(errs),
+		"took":          time.Since(tickStart).Round(time.Millisecond).String(),
+	}).Info("lifecycle tick complete")
 	return errors.Join(errs...)
 }
 
