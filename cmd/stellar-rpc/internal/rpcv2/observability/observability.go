@@ -13,6 +13,8 @@ import (
 // Metrics is the daemon's control-plane sink — the derived-progress gauges plus
 // per-phase wall-clock timings; distinct from the per-data-type ingest.MetricSink.
 // All methods must be safe for concurrent use.
+//
+//nolint:interfacebloat // one cohesive metrics sink; every method is a distinct exported signal, not hidden coupling
 type Metrics interface {
 	// LastCommitted sets the derived last-committed ledger gauge. Owned by the two
 	// call sites that know the TRUE value: startup/backfill (as history advances)

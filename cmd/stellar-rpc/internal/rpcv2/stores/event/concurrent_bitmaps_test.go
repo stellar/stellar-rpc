@@ -25,8 +25,8 @@ func TestConcurrentBitmaps_AddToAndGet(t *testing.T) {
 
 	bm, err := s.Get(key)
 	require.NoError(t, err)
-	require.NotNil(t, bm)
-	assert.Equal(t, uint64(3), bm.GetCardinality())
+	require.True(t, bm.Present())
+	assert.Equal(t, uint64(3), bm.Cardinality())
 	assert.True(t, bm.Contains(0))
 	assert.True(t, bm.Contains(1))
 	assert.True(t, bm.Contains(2))
@@ -37,7 +37,7 @@ func TestConcurrentBitmaps_GetMissing(t *testing.T) {
 	key := ComputeTermKey([]byte("missing"), FieldTopic0)
 	bm, err := s.Get(key)
 	require.NoError(t, err)
-	assert.Nil(t, bm)
+	assert.False(t, bm.Present())
 }
 
 func TestConcurrentBitmaps_ListMode(t *testing.T) {
@@ -55,10 +55,18 @@ func TestConcurrentBitmaps_ListMode(t *testing.T) {
 	assert.Nil(t, st.dense, "must still be in list mode")
 	assert.Len(t, st.ids, promotionThreshold-1)
 
-	bm, err := s.Get(key)
+	post, err := s.Get(key)
 	require.NoError(t, err)
-	require.NotNil(t, bm)
-	assert.Equal(t, uint64(promotionThreshold-1), bm.GetCardinality())
+	require.True(t, post.Present())
+	assert.Equal(t, uint64(promotionThreshold-1), post.Cardinality())
+
+	// A sparse term is handed back UN-MATERIALIZED and ZERO-COPY: the ids
+	// slice is the store's own published one, not a bitmap built for the
+	// caller. Intersect drives straight off it, which is the whole point of
+	// keeping small terms as delta postings.
+	require.NotNil(t, post.IDs(), "a sparse term's postings must stay ID-backed")
+	assert.Same(t, &st.ids[0], &post.IDs()[0],
+		"a sparse Get must alias the published ids, not copy them")
 
 	// Get must not have promoted.
 	assert.Nil(t, p.Load().dense)
@@ -77,9 +85,10 @@ func TestConcurrentBitmaps_Promotion(t *testing.T) {
 	st := p.Load()
 	require.NotNil(t, st.dense)
 	assert.Empty(t, st.ids, "sparse ids cleared after promotion")
-	bm, err := s.Get(key)
+	post, err := s.Get(key)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(promotionThreshold), bm.GetCardinality())
+	assert.Equal(t, uint64(promotionThreshold), post.Cardinality())
+	assert.Nil(t, post.IDs(), "a dense term's postings are bitmap-backed, never ID-backed")
 }
 
 func TestConcurrentBitmaps_AddAfterPromotion(t *testing.T) {
@@ -94,7 +103,7 @@ func TestConcurrentBitmaps_AddAfterPromotion(t *testing.T) {
 
 	bm, err := s.Get(key)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(promotionThreshold+2), bm.GetCardinality())
+	assert.Equal(t, uint64(promotionThreshold+2), bm.Cardinality())
 	assert.True(t, bm.Contains(1000))
 	assert.True(t, bm.Contains(2000))
 }
@@ -107,8 +116,8 @@ func TestConcurrentBitmaps_BatchAddTo(t *testing.T) {
 
 	bm, err := s.Get(key)
 	require.NoError(t, err)
-	require.NotNil(t, bm)
-	assert.Equal(t, uint64(5), bm.GetCardinality())
+	require.True(t, bm.Present())
+	assert.Equal(t, uint64(5), bm.Cardinality())
 	assert.True(t, bm.Contains(0))
 	assert.True(t, bm.Contains(4))
 }
@@ -130,7 +139,7 @@ func TestConcurrentBitmaps_BatchAddToPromotion(t *testing.T) {
 	require.NotNil(t, st.dense, "single-batch over threshold must promote immediately")
 	bm, err := s.Get(key)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(promotionThreshold+10), bm.GetCardinality())
+	assert.Equal(t, uint64(promotionThreshold+10), bm.Cardinality())
 }
 
 // TestConcurrentBitmaps_GetReturnsImmutableSnapshot pins the
@@ -150,13 +159,13 @@ func TestConcurrentBitmaps_GetReturnsImmutableSnapshot(t *testing.T) {
 
 	before, err := s.Get(key)
 	require.NoError(t, err)
-	beforeCard := before.GetCardinality()
+	beforeCard := before.Cardinality()
 
 	// New AddTo publishes a new snapshot via atomic.Store.
 	s.AddTo(key, 9_999_999)
 
 	// before still observes the pre-AddTo cardinality.
-	assert.Equal(t, beforeCard, before.GetCardinality(),
+	assert.Equal(t, beforeCard, before.Cardinality(),
 		"AddTo published a new snapshot; the borrowed pointer must remain unchanged")
 
 	after, err := s.Get(key)
@@ -195,7 +204,7 @@ func TestConcurrentBitmaps_ConcurrentGetIsSafe(t *testing.T) {
 				for _, k := range keys {
 					bm, err := s.Get(k)
 					require.NoError(t, err)
-					require.NotNil(t, bm)
+					require.True(t, bm.Present())
 					_ = bm.Contains(0)
 				}
 			}
@@ -207,7 +216,7 @@ func TestConcurrentBitmaps_ConcurrentGetIsSafe(t *testing.T) {
 	for _, k := range keys {
 		bm, err := s.Get(k)
 		require.NoError(t, err)
-		require.NotNil(t, bm)
+		require.True(t, bm.Present())
 	}
 }
 
@@ -249,8 +258,8 @@ func TestConcurrentBitmaps_ConcurrentReadWrite(t *testing.T) {
 	for _, key := range keys {
 		bm, err := s.Get(key)
 		require.NoError(t, err)
-		require.NotNil(t, bm)
-		assert.Equal(t, uint64(numEvents/numTerms), bm.GetCardinality())
+		require.True(t, bm.Present())
+		assert.Equal(t, uint64(numEvents/numTerms), bm.Cardinality())
 	}
 }
 
@@ -312,7 +321,7 @@ func TestConcurrentBitmaps_GetDuringPromotionNeverReturnsNil(t *testing.T) {
 					// The term was seeded with promotionThreshold-1
 					// ids and the writer only appends — Get must
 					// always observe a non-nil bitmap.
-					require.NotNil(t, bm, "Get returned nil during promotion window")
+					require.True(t, bm.Present(), "Get returned nil during promotion window")
 				}
 			}
 		})
@@ -346,8 +355,8 @@ func TestConcurrentBitmaps_AddToIsIdempotent(t *testing.T) {
 
 		bm, err := s.Get(key)
 		require.NoError(t, err)
-		require.NotNil(t, bm)
-		assert.Equal(t, uint64(4), bm.GetCardinality())
+		require.True(t, bm.Present())
+		assert.Equal(t, uint64(4), bm.Cardinality())
 		for _, id := range []uint32{0, 1, 2, 3} {
 			assert.True(t, bm.Contains(id))
 		}
@@ -371,7 +380,7 @@ func TestConcurrentBitmaps_AddToIsIdempotent(t *testing.T) {
 
 		bm, err := s.Get(key)
 		require.NoError(t, err)
-		assert.Equal(t, uint64(promotionThreshold), bm.GetCardinality())
+		assert.Equal(t, uint64(promotionThreshold), bm.Cardinality())
 	})
 }
 
@@ -388,8 +397,8 @@ func assertDenseCOW(t *testing.T, s *ConcurrentBitmaps, key TermKey, msg string)
 	assert.True(t, d.wbm.GetCopyOnWrite(), msg+" (writer bitmap)")
 	bm, err := s.Get(key)
 	require.NoError(t, err)
-	require.NotNil(t, bm)
-	assert.True(t, bm.GetCopyOnWrite(), msg+" (published snapshot)")
+	require.True(t, bm.Present())
+	assert.True(t, bm.Bitmap().GetCopyOnWrite(), msg+" (published snapshot)")
 }
 
 // TestConcurrentBitmaps_DenseAddToSetsCopyOnWrite pins that the
@@ -461,26 +470,55 @@ func TestNewConcurrentBitmapsFromBitmaps_DirectlyPinsContract(t *testing.T) {
 
 	bmSparse, err := cb.Get(keySparse)
 	require.NoError(t, err)
-	require.NotNil(t, bmSparse)
-	assert.Equal(t, uint64(5), bmSparse.GetCardinality())
+	require.True(t, bmSparse.Present())
+	assert.Equal(t, uint64(5), bmSparse.Cardinality())
 	assert.Nil(t, cb.terms[keySparse].Load().dense, "a sub-threshold warmup term must be sparse")
 
 	bmDense, err := cb.Get(keyDense)
 	require.NoError(t, err)
-	require.NotNil(t, bmDense)
-	assert.Equal(t, uint64(len(dense)), bmDense.GetCardinality())
-	assert.True(t, bmDense.GetCopyOnWrite())
+	require.True(t, bmDense.Present())
+	assert.Equal(t, uint64(len(dense)), bmDense.Cardinality())
+	assert.True(t, bmDense.Bitmap().GetCopyOnWrite())
 	assert.NotNil(t, cb.terms[keyDense].Load().dense, "a warmup term at the threshold must be dense")
 
 	bmNil, err := cb.Get(keyNil)
 	require.NoError(t, err)
-	assert.Nil(t, bmNil, "nil source entries must be skipped, not panicked")
+	assert.False(t, bmNil.Present(), "nil source entries must be skipped, not panicked")
 
 	cb.AddTo(keyDense, 999_999)
 	post, err := cb.Get(keyDense)
 	require.NoError(t, err)
-	require.NotNil(t, post)
-	assert.True(t, post.GetCopyOnWrite())
-	assert.Equal(t, uint64(len(dense)+1), post.GetCardinality())
-	assert.Equal(t, uint64(len(dense)), bmDense.GetCardinality(), "earlier snapshot stays immutable")
+	require.True(t, post.Present())
+	assert.True(t, post.Bitmap().GetCopyOnWrite())
+	assert.Equal(t, uint64(len(dense)+1), post.Cardinality())
+	assert.Equal(t, uint64(len(dense)), bmDense.Cardinality(), "earlier snapshot stays immutable")
+}
+
+// TestConcurrentBitmaps_ContentEquivalenceAcrossTransitions drives one term
+// through every representation transition — sparse, promotion, and a long
+// run of dense appends — and checks Get's exact contents against a reference
+// set at each step. The batch widths straddle promotionThreshold and the id
+// stride leaves gaps, so a range-shaped off-by-one cannot hide behind a
+// contiguous run, and the assertion is on the ids themselves rather than on
+// a cardinality.
+func TestConcurrentBitmaps_ContentEquivalenceAcrossTransitions(t *testing.T) {
+	cb := newTestConcurrentBitmaps()
+	key := ComputeTermKey([]byte("equivalence"), FieldTopic0)
+	var want []uint32
+
+	next := uint32(0)
+	for _, batch := range []int{1, 63, 100, 4000, 4200, 8192, 9000, 17} {
+		ids := make([]uint32, batch)
+		for i := range ids {
+			ids[i] = next
+			next += 2 // gaps, so ranges don't mask off-by-ones
+		}
+		cb.AddTo(key, ids...)
+		want = append(want, ids...)
+
+		post, err := cb.Get(key)
+		require.NoError(t, err)
+		require.True(t, post.Present())
+		assert.Equal(t, want, post.Bitmap().ToArray(), "after batch of %d", batch)
+	}
 }

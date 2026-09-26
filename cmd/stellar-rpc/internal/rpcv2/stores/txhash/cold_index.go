@@ -9,8 +9,7 @@ package txhash
 // The merge requires each file's entries pre-sorted ascending by the
 // big-endian uint64 of their first 8 key bytes — the block order streamhash
 // routes on (for the first 8 bytes this is identical to the lex key order
-// WriteColdBin guarantees). The .bin keys are already the keyed routing keys
-// (see cold_format.go), so the build feeds them verbatim — no keying here.
+// WriteColdBin guarantees).
 
 import (
 	"context"
@@ -33,21 +32,18 @@ import (
 // (MinLedger/MaxLedger report it). The span must fit the 3-byte payload.
 //
 // The .bin files are k-way merged (cold_merge.go) and fed single-pass to
-// streamhash. By default the block build uses runtime.NumCPU()/2 workers
-// (~2.7x over single-threaded); caller opts override. Removes the partial
-// output on error, and honors ctx cancellation.
-//
-// The index secret written into the metadata is ADOPTED from the .bin headers
-// (the secret the .bin producer keyed the inputs with), not re-derived — so the
-// index can never disagree with its inputs' keying. All inputs must share one
-// secret (scanAndValidate enforces it). That secret is deterministic, so an
-// ErrBlockOverflow here recurs identically on rebuild — non-retryable by design.
+// streamhash — the keys are already the blinded routing keys, so the build
+// feeds them verbatim (no keying here). The index secret written into the
+// metadata is ADOPTED from the .bin headers (the secret the producer keyed
+// the inputs with), not re-derived — an index can never disagree with its
+// inputs' keying, and scanAndValidate rejects mixed-secret inputs. The block
+// build uses runtime.NumCPU()/2 workers (~2.7x over single-threaded).
+// Removes the partial output on error, and honors ctx cancellation.
 func BuildColdIndex(
 	ctx context.Context,
 	inputs []string,
 	outputPath string,
 	minLedger, maxLedger uint32,
-	opts ...streamhash.BuildOption,
 ) (err error) {
 	if maxLedger < minLedger {
 		return fmt.Errorf("txhash: maxLedger %d < minLedger %d", maxLedger, minLedger)
@@ -62,13 +58,9 @@ func BuildColdIndex(
 		return err
 	}
 
-	// The cold format options go last so they win: a caller can override the
-	// default WithWorkers (its opt precedes the format ones, which don't set
-	// workers) but cannot change the pinned payload/fingerprint/metadata.
-	buildOpts := make([]streamhash.BuildOption, 0, len(opts)+4)
-	buildOpts = append(buildOpts, streamhash.WithWorkers(defaultBuildWorkers()))
-	buildOpts = append(buildOpts, opts...)
-	buildOpts = append(buildOpts, ColdBuildOptions(minLedger, maxLedger, secret)...)
+	buildOpts := append(
+		[]streamhash.BuildOption{streamhash.WithWorkers(defaultBuildWorkers())},
+		ColdBuildOptions(minLedger, maxLedger, secret)...)
 	builder, berr := streamhash.NewSortedBuilder(ctx, outputPath, total, buildOpts...)
 	if berr != nil {
 		return fmt.Errorf("txhash: create cold index builder at %s: %w", outputPath, berr)
@@ -103,9 +95,8 @@ func BuildColdIndex(
 	return nil
 }
 
-// defaultBuildWorkers is the streamhash block-build parallelism used when
-// the caller doesn't override it. NumCPU/2 — see maxMergeLeaves for the
-// joint (leaves, workers) sweep that picked it.
+// defaultBuildWorkers is the streamhash block-build parallelism. NumCPU/2 —
+// see maxMergeLeaves for the joint (leaves, workers) sweep that picked it.
 func defaultBuildWorkers() int {
 	return max(1, runtime.NumCPU()/2)
 }
@@ -120,13 +111,14 @@ func maxMergeLeaves() int {
 	return max(1, runtime.NumCPU()/2)
 }
 
-// scanAndValidate sums the per-file header counts, cross-checking each against
-// the file length (an understated count would otherwise silently drop a file's
-// trailing entries — the merge reads to EOF), and returns the index secret the
-// inputs were blinded with. Every input in a window must carry the SAME secret;
-// a mismatch means the .bin files were keyed under different secrets (a catalog
-// remint or geometry drift between ingest passes), so the build stops rather
-// than silently producing an index no query can hit.
+// scanAndValidate sums the per-file header counts, cross-checking each
+// against the file length (an understated count would otherwise silently
+// drop a file's trailing entries — the merge reads to EOF), and returns the
+// index secret the inputs were blinded with. Every input in a window must
+// carry the SAME secret; a mismatch means the .bin files were keyed under
+// different secrets (a catalog remint or geometry drift between ingest
+// passes), so the build stops rather than silently producing an index no
+// query can hit.
 func scanAndValidate(inputs []string) (uint64, [stores.SecretLen]byte, error) {
 	var total uint64
 	var secret [stores.SecretLen]byte
@@ -142,17 +134,16 @@ func scanAndValidate(inputs []string) (uint64, [stores.SecretLen]byte, error) {
 			secret = s
 		} else if s != secret {
 			return 0, secret, fmt.Errorf(
-				"txhash: %s was blinded with a different index secret than %s — inputs must share one secret",
-				path, inputs[0])
+				"txhash: %s is keyed under a different index secret than %s — refusing to build", path, inputs[0])
 		}
 		total += count
 	}
 	return total, secret, nil
 }
 
-// scanBinHeader opens path, reads its declared entry count and index secret,
-// and verifies its byte size matches that count via coldBinCount (the shared,
-// overflow-safe header check).
+// scanBinHeader opens path, reads its declared entry count and the index
+// secret its keys were blinded with, and verifies its byte size matches the
+// count via coldBinCount (the shared, overflow-safe header check).
 func scanBinHeader(path string) (uint64, [stores.SecretLen]byte, error) {
 	var secret [stores.SecretLen]byte
 	f, err := os.Open(path)

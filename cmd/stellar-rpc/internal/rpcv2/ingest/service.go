@@ -61,17 +61,22 @@ func NewHotService(db *hotchunk.DB, windows *feewindow.FeeWindows, sink MetricSi
 // ledger and fails run() before the loop starts — the daemon wedges rather
 // than serve fee stats that silently miss a ledger.
 func (s *HotService) Ingest(seq uint32, lcmView xdr.LedgerCloseMetaView) (int64, error) {
+	// Fork the ledger-bytes encode BEFORE the walk so it overlaps the walk —
+	// the largest step it can hide behind. IngestLedger consumes the handle
+	// and owns its Discard; the walk-failure path below owns it here.
+	pending := s.db.StartCompress(seq, lcmView)
 	walkStart := time.Now()
 	txParts, err := sdkingest.ExtractLedgerTxParts(lcmView)
 	walkDur := time.Since(walkStart)
 	if err != nil {
+		pending.Discard()
 		// The walk failed before any batch opened: the extract phase is the only
 		// one that ran, mirroring hotchunk's own pre-batch failures.
 		s.sink.HotPhase(hotchunk.PhaseExtract, walkDur, 0, err)
 		return 0, fmt.Errorf("extract ledger tx parts seq %d: %w", seq, err)
 	}
 
-	rep, err := s.db.IngestLedger(seq, lcmView, txParts)
+	rep, err := s.db.IngestLedger(seq, lcmView, txParts, pending)
 	rep.Phases[hotchunk.PhaseExtract].Dur += walkDur
 
 	last := hotchunk.NumPhases - 1

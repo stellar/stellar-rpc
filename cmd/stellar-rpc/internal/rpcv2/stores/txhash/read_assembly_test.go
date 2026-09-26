@@ -389,10 +389,12 @@ func TestTxReader_ExactSourceUnavailableLedgerErrors(t *testing.T) {
 func TestTxReader_HotAndColdFederation(t *testing.T) {
 	hotSeq := chunk.ID(10).FirstLedger()
 	flHot := buildLedgers(t, []uint32{hotSeq}, 1)
-	hotStore := openTestHotStore(t)
-	for h, seq := range flHot.byHash {
-		require.NoError(t, addEntries(hotStore, []Entry{{Hash: h, LedgerSeq: seq}}))
+	hotStore, _ := openPackedStoreAt(t, t.TempDir(), chunk.ID(10), windowLedgers)
+	hotHashes := make([][32]byte, 0, len(flHot.byHash))
+	for h := range flHot.byHash {
+		hotHashes = append(hotHashes, h)
 	}
+	ingestLedger(t, hotStore, hotSeq, hotHashes)
 
 	coldSeq := chunk.ID(5).FirstLedger()
 	flCold := buildLedgers(t, []uint32{coldSeq}, 1)

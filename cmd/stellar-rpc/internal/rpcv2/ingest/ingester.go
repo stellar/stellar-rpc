@@ -10,6 +10,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
@@ -37,9 +38,11 @@ type coldChunk struct {
 	sink    MetricSink
 }
 
-// openColdChunk opens one cold writer per enabled type at its resolved path —
-// the single definition site of the canonical ledgers→txhash→events order and
-// the build rollback. An enabled type with an empty ColdDirs path is a config
+// openColdChunk opens one cold writer per enabled type at its resolved path,
+// in the canonical ledgers→txhash→events order, with build rollback. (The
+// freeze path re-encodes the same order and per-kind dispatch in
+// FreezeColdChunk — an order or kind change must touch both entry points.)
+// An enabled type with an empty ColdDirs path is a config
 // error. On any failure the already-opened writers are closed; they never
 // ingested or finalized, and close emits no per-writer ColdIngest sample, so a
 // rolled-back build produces no phantom-success sample.
@@ -50,7 +53,7 @@ func openColdChunk(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Config)
 		if dirs.LedgerPack == "" {
 			return fail(errors.New("ingest: ledgers enabled but its ColdDirs path is empty"))
 		}
-		w, err := newLedgerCold(dirs.LedgerPack, chunkID, sink)
+		w, err := newLedgerCold(dirs.LedgerPack, chunkID, sink, cfg.ZstdEncodeWorkers)
 		if err != nil {
 			return fail(fmt.Errorf("open ledgers cold writer: %w", err))
 		}
@@ -65,7 +68,7 @@ func openColdChunk(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Config)
 		}
 		var secret [stores.SecretLen]byte
 		copy(secret[:], cfg.TxhashSecret)
-		w, err := newTxhashCold(dirs.TxhashBin, chunkID, sink, secret)
+		w, err := newTxhashCold(dirs.TxhashBin, sink, secret)
 		if err != nil {
 			return fail(fmt.Errorf("open txhash cold writer: %w", err))
 		}
@@ -208,5 +211,5 @@ const (
 	// coldBytesPerSync triggers background writeback every 1 MiB so Commit/Finish
 	// doesn't flush a whole pack's dirty pages at once (a large win on networked
 	// storage, per the writer docs).
-	coldBytesPerSync = 1 << 20
+	coldBytesPerSync = packfile.DefaultBytesPerSync
 )

@@ -117,7 +117,9 @@ func (r *TxReader) scan(
 		}
 		if exact {
 			return ingest.LedgerTransactionView{}, false,
-				fmt.Errorf("txhash: exact index mapped tx to ledger %d that does not contain it: %w", seq, ErrInconsistent)
+				fmt.Errorf("txhash: exact index mapped tx to ledger %d that does not contain it "+
+					"(corrupt index or store; a 16-byte blinded-key collision is the ~2^-128 alternative "+
+					"and reproduces deterministically on retry): %w", seq, ErrInconsistent)
 		}
 	}
 	return ingest.LedgerTransactionView{}, false, nil

@@ -20,6 +20,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
 // ---------------------------------------------------------------------------
@@ -510,7 +511,7 @@ func TestRun_BindFailureSurfaces(t *testing.T) {
 
 	// run() opened the resume hot DB before serving and closed it on the error path
 	// (the loop never took ownership): reopening it succeeds (LOCK released).
-	db, err := openHotDBForChunk(cat, chunk.IDFromLedger(chunk.FirstLedgerSeq), silentLogger())
+	db, err := openHotDBForChunk(cat, chunk.IDFromLedger(chunk.FirstLedgerSeq), silentLogger(), hotchunk.DefaultTuning())
 	require.NoError(t, err, "the resume hot DB is reopenable — run released its LOCK")
 	require.NoError(t, db.Close())
 }

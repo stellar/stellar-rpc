@@ -7,7 +7,6 @@ import (
 	"iter"
 	"testing"
 
-	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -54,7 +53,7 @@ type countingReader struct {
 	totalKeys       int
 }
 
-func (c *countingReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.Bitmap, error) {
+func (c *countingReader) LookupKeys(ctx context.Context, keys []TermKey) ([]Postings, error) {
 	c.lookupKeysCalls++
 	c.totalKeys += len(keys)
 	return c.Reader.LookupKeys(ctx, keys)
@@ -548,6 +547,47 @@ func TestQuery_DescendingWithRange(t *testing.T) {
 	assert.Equal(t,
 		[]string{"evt-extra-1", evtExtra0, "evt-a-b", "evt-b-a", "evt-b-ab", "evt-a-ac", evtAAB},
 		dataSyms(t, got))
+}
+
+// TestMatches_PostFilterRejectsTermHashCollision pins the defensive
+// post-filter: if a bitmap entry survives the index lookup but the
+// underlying event's bytes don't actually match the filter clause,
+// Query must drop it. TermKey is xxh3_128(field || value), a
+// non-cryptographic hash on attacker-controllable values; a
+// collision (or a corrupt index) could otherwise leak the wrong
+// event through Query.
+//
+// We force the case by injecting a false-positive entry directly
+// into the mirror's bitmap for the "topic1 == gamma" term —
+// equivalent to what a real collision would produce.
+func TestMatches_PostFilterRejectsTermHashCollision(t *testing.T) {
+	fx := newQueryFixture(t)
+
+	// gamma's term legitimately matches id=1 only (evt-a-ac with
+	// topic1=gamma). Inject id=4 (evt-a-b — topic0=beta only,
+	// no topic1) into the same bitmap to simulate a collision.
+	gammaKey := ComputeTermKey(fx.t0cRaw, FieldTopic1)
+	before := lookupOne(t, fx.store, gammaKey)
+	require.True(t, before.Contains(1), "fixture sanity: id=1 indexes topic1=gamma")
+	require.False(t, before.Contains(4), "fixture sanity: id=4 not yet in topic1=gamma bitmap")
+
+	// Inject through the hot index's dense overlay. An overlay entry SHADOWS
+	// window+runs for its term, so it must be complete — the engine's
+	// promotion path guarantees this via history backfill; the injection
+	// mirrors that by carrying the legitimate id=1 alongside the collision.
+	fx.store.hotIdx.overlay.AddTo(gammaKey, 1, 4)
+
+	after := lookupOne(t, fx.store, gammaKey)
+	require.True(t, after.Contains(4), "fixture sanity: collision id=4 is now in the bitmap")
+
+	// Query with the colliding term: only id=1 should survive the
+	// post-filter; id=4's bytes don't actually have topic1=gamma.
+	got, err := Query(context.Background(), fx.store,
+		[]Filter{{Topics: [protocol.MaxTopicCount][]byte{nil, fx.t0cRaw}}},
+		QueryOptions{Range: wholeChunk(t, fx.store)})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"evt-a-ac"}, dataSyms(t, got),
+		"post-filter must drop the collision-injected id=4")
 }
 
 // ─── Additional coverage: gap-closing tests ────────────────────────────────
@@ -1131,19 +1171,19 @@ func TestQuery_InvalidFilterRejected(t *testing.T) {
 // multi-term group, and the overflow bucket is populated in any chunk holding
 // an event with topics.
 func TestUnionSlots(t *testing.T) {
-	first := roaring.BitmapOf(1, 2)
-	second := roaring.BitmapOf(3)
-	bitmaps := []*roaring.Bitmap{first, nil, second, nil}
+	first := IDPostings([]uint32{1, 2})
+	second := IDPostings([]uint32{3})
+	postings := []Postings{first, {}, second, {}}
 
-	assert.Same(t, first, unionSlots(bitmaps, []int{0}),
-		"a lone bitmap is borrowed, not cloned")
-	assert.Nil(t, unionSlots(bitmaps, []int{1}))
-	assert.Nil(t, unionSlots(bitmaps, []int{1, 3}),
+	assert.Equal(t, first, unionSlots(postings, []int{0}),
+		"a lone postings entry is borrowed, not cloned")
+	assert.False(t, unionSlots(postings, []int{1}).Present())
+	assert.False(t, unionSlots(postings, []int{1, 3}).Present(),
 		"a group absent from the index empties the filter")
-	assert.Same(t, second, unionSlots(bitmaps, []int{1, 2}),
-		"the one present bitmap in a group is borrowed too")
-	assert.Equal(t, []uint32{1, 2, 3}, unionSlots(bitmaps, []int{0, 2}).ToArray())
-	assert.Equal(t, []uint32{1, 2}, first.ToArray(), "inputs must not be mutated")
+	assert.Equal(t, second, unionSlots(postings, []int{1, 2}),
+		"the one present entry in a group is borrowed too")
+	assert.Equal(t, []uint32{1, 2, 3}, unionSlots(postings, []int{0, 2}).SelectIDs(0, false))
+	assert.Equal(t, []uint32{1, 2}, first.SelectIDs(0, false), "inputs must not be mutated")
 }
 
 // ─── Cold-reader parity coverage ────────────────────────────────────────
@@ -1236,7 +1276,7 @@ func freezeFixtureToColdReader(t *testing.T, hot *HotStore, chunkID chunk.ID) *C
 		}
 	}
 
-	require.NoError(t, cw.Finish(coldOffsets))
+	require.NoError(t, cw.Commit(coldOffsets))
 	require.NoError(t, WriteColdIndex(context.Background(), chunkID, idx, dir, testIndexSecret))
 
 	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
@@ -1573,16 +1613,16 @@ func TestMatches_FirstBatchHintSizesIO(t *testing.T) {
 // stream internally with no yield, so a consumer sees exactly the true
 // matches no matter how many false positives the index returns between
 // them. False positives are injected directly into the term bitmap,
-// the same technique as TestQuery_PostFilterRejectsTermHashCollision.
+// the same technique as TestMatches_PostFilterRejectsTermHashCollision.
 func TestMatches_DropsAreInvisible(t *testing.T) {
 	fx := newQueryFixture(t)
 	// topic1 == gamma legitimately matches id 1 only. Inject ids 2, 3,
 	// and 4 as false positives, so the candidate set is {1, 2, 3, 4}
 	// and every candidate after the true match drops.
 	gammaKey := ComputeTermKey(fx.t0cRaw, FieldTopic1)
-	for _, fp := range []uint32{2, 3, 4} {
-		fx.store.index().AddTo(gammaKey, fp)
-	}
+	// An overlay entry holds the term's FULL id set, so the injection carries
+	// the true id 1 alongside the false positives.
+	fx.store.hotIdx.overlay.AddTo(gammaKey, 1, 2, 3, 4)
 	filters := []Filter{{Topics: [protocol.MaxTopicCount][]byte{nil, fx.t0cRaw}}}
 
 	for _, batch := range []int{512, 1} {
@@ -1645,8 +1685,9 @@ func TestMatches_WindowANDLeavesBorrowedBitmapUntouched(t *testing.T) {
 	// Promote contract A's term (real matches: ids 0, 1, 4) to dense
 	// mode. The injected ids sit above the chunk's EventCount and every
 	// window below, so they are clipped before any fetch.
+	fx.store.hotIdx.overlay.AddTo(key, 0, 1, 4)
 	for id := uint32(100); id < 200; id++ {
-		fx.store.index().AddTo(key, id)
+		fx.store.hotIdx.overlay.AddTo(key, id)
 	}
 	before := lookupOne(t, fx.store, key)
 	require.GreaterOrEqual(t, before.GetCardinality(), uint64(100),
@@ -1668,52 +1709,6 @@ func TestMatches_WindowANDLeavesBorrowedBitmapUntouched(t *testing.T) {
 	full := collectMatches(t, fx.store, []Filter{{ContractID: fx.contractA[:]}},
 		wholeChunk(t, fx.store), false)
 	assert.Equal(t, []uint32{0, 1, 4}, matchOrdinals(full))
-}
-
-// TestQuery_PostFilterRejectsTermHashCollision pins the defensive
-// post-filter: if a bitmap entry survives the index lookup but the
-// underlying event's bytes don't actually match the filter clause,
-// Query must drop it. TermKey is xxh3_128(field || value), a
-// non-cryptographic hash on attacker-controllable values; a
-// collision (or a corrupt index) could otherwise leak the wrong
-// event through Query.
-//
-// We force the case by injecting a false-positive entry directly
-// into the mirror's bitmap for the "topic1 == gamma" term,
-// equivalent to what a real collision would produce.
-func TestQuery_PostFilterRejectsTermHashCollision(t *testing.T) {
-	fx := newQueryFixture(t)
-
-	// gamma's term legitimately matches id=1 only (evt-a-ac with
-	// topic1=gamma). Inject id=4 (evt-a-b: topic0=beta only,
-	// no topic1) into the same bitmap to simulate a collision.
-	gammaKey := ComputeTermKey(fx.t0cRaw, FieldTopic1)
-	before := lookupOne(t, fx.store, gammaKey)
-	require.True(t, before.Contains(1), "fixture sanity: id=1 indexes topic1=gamma")
-	require.False(t, before.Contains(4), "fixture sanity: id=4 not yet in topic1=gamma bitmap")
-
-	filters := []Filter{{Topics: [protocol.MaxTopicCount][]byte{nil, fx.t0cRaw}}}
-	want, err := Query(context.Background(), fx.store, filters,
-		QueryOptions{Range: wholeChunk(t, fx.store)})
-	require.NoError(t, err)
-	require.Len(t, want, 1, "fixture sanity: exactly one true match before injection")
-
-	// ConcurrentBitmaps.AddTo is the writer-side API the ingest path uses
-	// to register (term, eventID) pairs. No concurrent ingest is running
-	// in this test, so the single-writer contract is satisfied.
-	fx.store.index().AddTo(gammaKey, 4)
-
-	after := lookupOne(t, fx.store, gammaKey)
-	require.True(t, after.Contains(4), "fixture sanity: collision id=4 is now in the bitmap")
-
-	// Query with the colliding term: the result must be invariant under
-	// the injection: only id=1 survives the post-filter, since id=4's
-	// bytes don't actually have topic1=gamma.
-	got, err := Query(context.Background(), fx.store, filters,
-		QueryOptions{Range: wholeChunk(t, fx.store)})
-	require.NoError(t, err)
-	assert.Equal(t, dataSyms(t, want), dataSyms(t, got),
-		"post-filter must drop the collision-injected id=4")
 }
 
 // TestPostFilter_OrdinalAlignmentWithLeadingDrop pins that a surviving

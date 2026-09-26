@@ -58,8 +58,14 @@ type ConcurrentBitmaps struct {
 	terms map[TermKey]*atomic.Pointer[termState]
 }
 
-// NewConcurrentBitmapsFromBitmaps takes ownership of a Bitmaps built
-// by warmup or backfill. The input must not be used afterwards.
+// NewConcurrentBitmapsFromBitmaps takes ownership of b. The input must not
+// be used afterwards.
+//
+// It is the only constructor, and production's only caller hands it an EMPTY
+// Bitmaps: the hot index's dense overlay starts empty and self-fills via
+// promotion, and a warmed-up chunk rebuilds the overlay by replaying its rows
+// and sealed runs, never by handing a built Bitmaps over. The conversion path
+// below is what the tests that pin the ownership contract drive.
 //
 // Terms below promotionThreshold become sparse lists, the same
 // representation AddTo gives them. Terms at or above it keep their
@@ -82,11 +88,17 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 	return cb
 }
 
-// Get returns the bitmap for key, or (nil, nil) when key is not
-// indexed. The result is read-only: dense terms share one bitmap
-// across all concurrent readers, and the index never mutates it.
+// Get returns the postings for key, or the zero Postings when key is not
+// indexed. The result is read-only: a dense term hands back the snapshot
+// every concurrent reader of that term shares, and a sparse term hands back
+// the store's own published id slice. The index mutates neither.
 //
-// Forbidden on the returned bitmap — these mutate internal state a
+// A sparse entry is returned as its id slice, un-materialized, since that is
+// the form it is stored in and the form Intersect can drive from. AddTo
+// never writes into a published slice — it builds a fresh one per publish —
+// so holding it is safe for as long as the caller wants it.
+//
+// Forbidden on a returned bitmap — these mutate internal state a
 // concurrent reader or the writer may also be touching:
 //   - Clone, CloneCopyOnWriteContainers (COW is on: Clone writes its
 //     source's copy-on-write flags, so two readers cloning race)
@@ -96,26 +108,36 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 //   - single-input roaring.FastAnd / roaring.FastOr (roaring takes a
 //     Clone-the-input shortcut when there is only one input)
 //
+// The same rule applies to a returned id slice: read it, never write to it.
+//
 // Safe: any non-mutating read (Contains, GetCardinality, Iterator,
 // ToArray, IsEmpty, Minimum, Maximum) plus roaring.And / FastAnd /
-// FastOr with 2+ inputs.
+// FastOr with 2+ inputs (Intersect and Union guard their single-input
+// cases before calling the aggregators).
 //
 // A Get that starts after an AddTo returns sees that AddTo's IDs, and
-// the pointer stays valid for as long as the caller holds it.
-func (s *ConcurrentBitmaps) Get(key TermKey) (*roaring.Bitmap, error) {
+// what it returns stays valid for as long as the caller holds it.
+func (s *ConcurrentBitmaps) Get(key TermKey) (Postings, error) {
 	s.rwmu.RLock()
 	p := s.terms[key]
 	s.rwmu.RUnlock()
 	if p == nil {
-		return nil, nil //nolint:nilnil // not-found is signaled by nil bitmap, no error
+		return Postings{}, nil
 	}
 	st := p.Load()
 	if st.dense != nil {
-		return st.dense.snapshot(), nil
+		return BitmapPostings(st.dense.snapshot()), nil
 	}
-	bm := roaring.New()
-	bm.AddMany(st.ids)
-	return bm, nil
+	return IDPostings(st.ids), nil
+}
+
+// Has reports whether key is tracked, without materializing anything — the
+// hot index's per-ledger dense-overlay membership probe.
+func (s *ConcurrentBitmaps) Has(key TermKey) bool {
+	s.rwmu.RLock()
+	_, ok := s.terms[key]
+	s.rwmu.RUnlock()
+	return ok
 }
 
 // snapshot returns the term's current immutable bitmap. If a write

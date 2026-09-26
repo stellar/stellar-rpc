@@ -130,7 +130,7 @@ For each unique value seen in an indexed field, the system stores a roaring bitm
 (topic0, 0x7b2c...)      → {0, 1, 5, 12, 13, 14, 98, 102, ...}
 ```
 
-Each term is identified by a 16-byte key: `hash(value bytes || field byte)`, where the field byte encodes the field type (contractId, topic0–3). Including the field byte in the hash input ensures uniqueness across fields. The resulting 16-byte key is used directly as a lookup key in the in-memory index and can be fed into the MPHF without re-hashing.
+Each term is identified by a 16-byte key: `hash(value bytes || field byte)`, where the field byte encodes the field type (contractId, topic0–3). Including the field byte in the hash input ensures uniqueness across fields. The resulting 16-byte key is used directly as a lookup key in the in-memory index and can be blinded with the chunk's routing secret (stores.BlindKey) and fed into the MPHF.
 
 Roaring bitmaps are used because term density varies widely across the data. Most terms match very few events while common terms like "transfer" can match millions. Roaring bitmaps handle this efficiently across the full range: array containers for sparse terms (where a full bitmap would be mostly empty) and compressed bitmap containers for dense terms (where a sorted array would be too large).
 

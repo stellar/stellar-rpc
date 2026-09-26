@@ -65,7 +65,7 @@ func openHotStoreForTestAt(t *testing.T, dir string, chunkID chunk.ID) (*HotStor
 func tryOpenHotStoreForTest(t *testing.T, dir string, chunkID chunk.ID) (*HotStore, *rocksdb.Store, error) {
 	t.Helper()
 	raw := openRawHotChunkForTest(t, dir, chunkID)
-	hot, err := NewWithStore(raw, chunkID)
+	hot, err := NewWithStore(raw, chunkID, testIndexSecret)
 	if err != nil {
 		_ = raw.Close()
 		return nil, nil, err
@@ -160,11 +160,16 @@ func TestHotStore_IngestLedgerWritesAllCFs(t *testing.T) {
 	require.NoError(t, decoded.Unmarshal(got))
 	assert.Equal(t, p.TxHash, decoded.TxHash)
 
-	// events_index row per term.
+	// events_index: ONE packed row for the ledger, carrying every term.
+	idxVal, found, err := h.store.chunkStore.Get(IndexCF, encodePackedIndexKey(2))
+	require.NoError(t, err)
+	require.True(t, found, "missing packed index row for ledger 2")
+	decodedTerms := map[TermKey][]uint32{}
+	require.NoError(t, DecodePackedRow(idxVal, func(term TermKey, ids []uint32) {
+		decodedTerms[term] = append([]uint32(nil), ids...)
+	}))
 	for _, key := range keys {
-		_, found, err := h.store.chunkStore.Get(IndexCF, encodeIndexKey(key, 0))
-		require.NoError(t, err)
-		assert.True(t, found, "missing index row for term %x", key)
+		assert.Equal(t, []uint32{0}, decodedTerms[key], "missing/wrong ids for term %x", key)
 	}
 
 	// events_offsets: cumulative = 1.
@@ -400,8 +405,8 @@ func TestHotStore_PostCloseReadsError(t *testing.T) {
 	require.NoError(t, h.raw.Close())
 
 	// LookupKeys must error rather than silently returning cached bitmaps.
-	bms, err := h.store.LookupKeys(context.Background(), []TermKey{keys[0]})
-	assert.Nil(t, bms)
+	post, err := h.store.LookupKeys(context.Background(), []TermKey{keys[0]})
+	assert.Nil(t, post)
 	require.ErrorIs(t, err, stores.ErrStoreClosed)
 
 	// FetchEvents returns ErrStoreClosed.
@@ -610,12 +615,18 @@ func firstIterError(seq iter.Seq2[Payload, error]) error {
 // hot/cold/query tests that assert on one term at a time. It requires
 // LookupKeys to succeed, so closed/corrupt-path tests must call
 // LookupKeys directly and assert on the error.
+//
+// A bitmap-backed result comes back as the store's own bitmap, so the tests
+// pinning the mirror's immutable-snapshot contract still see it.
 func lookupOne(t *testing.T, r Reader, key TermKey) *roaring.Bitmap {
 	t.Helper()
-	bms, err := r.LookupKeys(context.Background(), []TermKey{key})
+	got, err := r.LookupKeys(context.Background(), []TermKey{key})
 	require.NoError(t, err)
-	require.Len(t, bms, 1)
-	return bms[0]
+	require.Len(t, got, 1)
+	if !got[0].Present() {
+		return nil
+	}
+	return got[0].Bitmap()
 }
 
 func TestHotStore_FetchRangeMidRange(t *testing.T) {
@@ -717,7 +728,7 @@ func ingestLedgerEvents(h *HotStore, ledgerSeq uint32, payloads []Payload) error
 	if h.chunkStore.IsClosed() {
 		return stores.ErrStoreClosed
 	}
-	var apply func()
+	var apply func() error
 	if err := h.chunkStore.Batch(func(b *rocksdb.BatchWriter) error {
 		a, aerr := h.IngestLedgerToBatch(b, ledgerSeq, payloads)
 		apply = a
@@ -726,7 +737,7 @@ func ingestLedgerEvents(h *HotStore, ledgerSeq uint32, payloads []Payload) error
 		return err
 	}
 	if apply != nil {
-		apply()
+		return apply()
 	}
 	return nil
 }

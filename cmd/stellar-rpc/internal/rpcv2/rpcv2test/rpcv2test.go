@@ -5,14 +5,12 @@
 package rpcv2test
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"io"
 	"iter"
 	"os"
 	"path/filepath"
-	"slices"
 	"testing"
 
 	"github.com/creachadair/jrpc2"
@@ -88,7 +86,8 @@ func SeedHotChunkSeq(
 	t testing.TB, cat *catalog.Catalog, c chunk.ID, publish func(*hotchunk.DB), lcms iter.Seq[[]byte],
 ) {
 	t.Helper()
-	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, SilentLogger())
+	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, SilentLogger(), hotchunk.DefaultTuning(),
+		hotchunk.SecretsFor(cat, c))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	seq := c.FirstLedger()
@@ -166,7 +165,8 @@ func IngestLedger(t testing.TB, db *hotchunk.DB, seq uint32, raw []byte) {
 	t.Helper()
 	txParts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err)
-	_, err = db.IngestLedger(seq, xdr.LedgerCloseMetaView(raw), txParts)
+	_, err = db.IngestLedger(seq, xdr.LedgerCloseMetaView(raw), txParts,
+		db.StartCompress(seq, xdr.LedgerCloseMetaView(raw)))
 	require.NoError(t, err)
 }
 
@@ -250,11 +250,11 @@ func WriteColdTxIndexFile(
 	cold := make([]txhash.ColdEntry, 0, len(entries))
 	for h, seq := range entries {
 		var e txhash.ColdEntry
-		e.Key = stores.BlindKey(secret, h[:txhash.ColdKeySize])
+		e.Key = txhash.RoutingKey(secret, h[:])
 		e.Seq = seq
 		cold = append(cold, e)
 	}
-	slices.SortFunc(cold, func(a, b txhash.ColdEntry) int { return bytes.Compare(a.Key[:], b.Key[:]) })
+	txhash.SortColdEntries(cold) // the production stored order, not a second comparator
 	bin := filepath.Join(t.TempDir(), txhash.ColdBinName(cov.Lo))
 	require.NoError(t, txhash.WriteColdBin(bin, secret, cold))
 

@@ -1,17 +1,14 @@
 package ingest
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"time"
 
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
@@ -19,7 +16,7 @@ import (
 // ───────────────────────── Cold writer ─────────────────────────
 
 // txhashCold accumulates (routing key, seq) tuples per ledger — each stored
-// key is stores.BlindKey(secret, txhash[:ColdKeySize]), keyed at ingest so
+// key is txhash.RoutingKey(secret, hash), keyed at ingest so
 // the deferred SortedBuilder index build consumes an already-keyed, sorted
 // .bin unchanged. At finalize time it lex-sorts by the (keyed) key and writes
 // a per-chunk sorted .bin file under <out-root>/<bucketID:05d>/<chunkID:08d>.bin
@@ -29,7 +26,6 @@ import (
 // this package) turns these .bin files into the queryable cold MPHF index.
 type txhashCold struct {
 	binPath string
-	chunkID chunk.ID
 	secret  [stores.SecretLen]byte
 	entries []txhash.ColdEntry
 	metrics coldMetrics
@@ -41,9 +37,7 @@ type txhashCold struct {
 // (overwriting any prior attempt's file — see the package doc's artifact model).
 // secret is the chunk's per-index secret — the same one the index build derives
 // (txhash.ColdIndexSecret) — that the stored keys are blinded with.
-func newTxhashCold(
-	binPath string, chunkID chunk.ID, sink MetricSink, secret [stores.SecretLen]byte,
-) (*txhashCold, error) {
+func newTxhashCold(binPath string, sink MetricSink, secret [stores.SecretLen]byte) (*txhashCold, error) {
 	if err := os.MkdirAll(filepath.Dir(binPath), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(binPath), err)
 	}
@@ -52,7 +46,6 @@ func newTxhashCold(
 	// and a busy chunk just pays a few amortized growths.
 	t := &txhashCold{
 		binPath: binPath,
-		chunkID: chunkID,
 		entries: make([]txhash.ColdEntry, 0, 1<<16),
 		metrics: newColdMetrics(sink, dataTypeTxhash),
 	}
@@ -63,7 +56,7 @@ func newTxhashCold(
 // write accumulates one ledger's tx hashes — one entry per hash, two for a
 // fee-bump (outer + inner). They come from coldChunk's shared
 // ExtractLedgerTxParts walk, in apply order. Each is keyed
-// (BlindKey(secret, hash[:ColdKeySize])) and appended STRAIGHT into the
+// (txhash.RoutingKey — the one blind-and-truncate site) and appended STRAIGHT into the
 // accumulator — no intermediate per-ledger entry slice; over a ~3M-tx chunk
 // that intermediate would be hundreds of MB of transient garbage. The
 // extraction itself is metered once, ledger-scoped, as the ColdExtract signal;
@@ -74,12 +67,12 @@ func (t *txhashCold) write(seq uint32, txParts []sdkingest.LedgerTxParts) error 
 	before := len(t.entries)
 	for i := range txParts {
 		t.entries = append(t.entries, txhash.ColdEntry{
-			Key: stores.BlindKey(t.secret, txParts[i].Hash[:txhash.ColdKeySize]),
+			Key: txhash.RoutingKey(t.secret, txParts[i].Hash[:]),
 			Seq: seq,
 		})
 		if txParts[i].FeeBump {
 			t.entries = append(t.entries, txhash.ColdEntry{
-				Key: stores.BlindKey(t.secret, txParts[i].InnerHash[:txhash.ColdKeySize]),
+				Key: txhash.RoutingKey(t.secret, txParts[i].InnerHash[:]),
 				Seq: seq,
 			})
 		}
@@ -93,11 +86,11 @@ func (t *txhashCold) write(seq uint32, txParts []sdkingest.LedgerTxParts) error 
 // pkg/stores/txhash/cold_bin.go pins the layout).
 func (t *txhashCold) finalize(_ context.Context) error {
 	start := time.Now()
-	// slices.SortFunc over sort.Slice: reflection-free, meaningfully faster
-	// on a ~3M-element sort.
-	slices.SortFunc(t.entries, func(a, b txhash.ColdEntry) int {
-		return bytes.Compare(a.Key[:], b.Key[:])
-	})
+	// SortColdEntries is the .bin's stored order — the ONE comparator the
+	// hot tier's seal sorts through too, so this path and the freeze (which
+	// streams those sealed records verbatim) agree by construction, down to
+	// the duplicate-key tie-break.
+	txhash.SortColdEntries(t.entries)
 	err := txhash.WriteColdBin(t.binPath, t.secret, t.entries)
 	if err == nil {
 		t.metrics.sink.IngestStage(dataTypeTxhash, stageFinalize, time.Since(start), len(t.entries))

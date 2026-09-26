@@ -2,14 +2,12 @@ package query
 
 import (
 	"bytes"
-	"context"
 	"testing"
 
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
@@ -46,7 +44,8 @@ func newTestRegistry(t *testing.T, size uint32, earliest chunk.ID) (*Registry, *
 // leaving no open handle — the on-disk state OpenRegistry reopens.
 func makeReadyHotChunk(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 	t.Helper()
-	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
+	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger(), hotchunk.DefaultTuning(),
+		hotchunk.SecretsFor(cat, c))
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 	require.NoError(t, cat.FlipHotReady(c))
@@ -61,10 +60,11 @@ func TestOpenRegistry(t *testing.T) {
 	for _, c := range []chunk.ID{5, 6, 7} {
 		makeReadyHotChunk(t, cat, c)
 	}
-	live, err := hotchunk.OpenExisting(cat.Layout().HotChunkPath(7), 7, silentLogger())
+	live, err := hotchunk.OpenExisting(cat.Layout().HotChunkPath(7), 7, silentLogger(), hotchunk.DefaultTuning(),
+		hotchunk.SecretsFor(cat, 7))
 	require.NoError(t, err)
 
-	r, err := OpenRegistry(cat, geometry.NewRetention(0, 0), live, 70_500)
+	r, err := OpenRegistry(cat, geometry.NewRetention(0, 0), live, 70_500, hotchunk.DefaultTuning())
 	require.NoError(t, err)
 	defer r.Close()
 
@@ -276,7 +276,8 @@ func TestHotHandles_CopyOnWrite(t *testing.T) {
 func publishReadyHandle(t *testing.T, r *Registry, cat *catalog.Catalog, c chunk.ID) {
 	t.Helper()
 	makeReadyHotChunk(t, cat, c)
-	db, err := hotchunk.OpenExisting(cat.Layout().HotChunkPath(c), c, silentLogger())
+	db, err := hotchunk.OpenExisting(cat.Layout().HotChunkPath(c), c, silentLogger(), hotchunk.DefaultTuning(),
+		hotchunk.SecretsFor(cat, c))
 	require.NoError(t, err)
 	r.PublishHandle(c, db)
 }
@@ -312,7 +313,8 @@ func TestTryCloseHandle_BusyRetainsThenRetryDrains(t *testing.T) {
 	r := NewRegistry(cat, geometry.NewRetention(0, 0))
 	const c chunk.ID = 5
 
-	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
+	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger(), hotchunk.DefaultTuning(),
+		hotchunk.SecretsFor(cat, c))
 	require.NoError(t, err)
 	rpcv2test.IngestLedger(t, db, c.FirstLedger(), rpcv2test.ZeroTxLCMBytes(t, c.FirstLedger()))
 	r.PublishHandle(c, db)
@@ -323,9 +325,7 @@ func TestTryCloseHandle_BusyRetainsThenRetryDrains(t *testing.T) {
 	go func() {
 		defer close(done)
 		first := true
-		for _, ierr := range db.Source().RawLedgers(
-			context.Background(), ledgerbackend.BoundedRange(c.FirstLedger(), c.FirstLedger()),
-		) {
+		for _, ierr := range db.Ledgers().IterateLedgers(c.FirstLedger(), c.FirstLedger()) {
 			if ierr != nil {
 				return
 			}
@@ -474,15 +474,17 @@ func TestOpenRegistry_ErrorClosesOpenedHandles(t *testing.T) {
 	cat := openTestCatalog(t, silentLogger())
 	makeReadyHotChunk(t, cat, 5)            // opens fine
 	require.NoError(t, cat.FlipHotReady(6)) // ready key with NO dir: the open fails
-	live, err := hotchunk.Open(cat.Layout().HotChunkPath(9), 9, silentLogger())
+	live, err := hotchunk.Open(cat.Layout().HotChunkPath(9), 9, silentLogger(), hotchunk.DefaultTuning(),
+		hotchunk.SecretsFor(cat, 9))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = live.Close() })
 
-	_, err = OpenRegistry(cat, geometry.NewRetention(0, 0), live, 100)
+	_, err = OpenRegistry(cat, geometry.NewRetention(0, 0), live, 100, hotchunk.DefaultTuning())
 	require.Error(t, err)
 	require.ErrorContains(t, err, "bootstrap: open hot chunk")
 
-	db5, err := hotchunk.OpenExisting(cat.Layout().HotChunkPath(5), 5, silentLogger())
+	db5, err := hotchunk.OpenExisting(cat.Layout().HotChunkPath(5), 5, silentLogger(), hotchunk.DefaultTuning(),
+		hotchunk.SecretsFor(cat, 5))
 	require.NoError(t, err, "chunk 5's LOCK is free: the error path closed the handle it opened")
 	_ = db5.Close()
 

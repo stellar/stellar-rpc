@@ -260,6 +260,25 @@ func hashAt(n uint64) [32]byte {
 	return h
 }
 
+// reopenHotChunk reopens a chunk's hot DB after the daemon that owned it has
+// stopped, retrying because RocksDB's process-level LOCK can linger
+// momentarily after the writer closed — the same transient a production
+// reader retries through.
+func reopenHotChunk(t *testing.T, cat *catalog.Catalog, c chunk.ID) *hotchunk.DB {
+	t.Helper()
+	var db *hotchunk.DB
+	require.Eventually(t, func() bool {
+		opened, oerr := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger(),
+			hotchunk.DefaultTuning(), hotchunk.SecretsFor(cat, c))
+		if oerr != nil {
+			return false
+		}
+		db = opened
+		return true
+	}, 10*time.Second, 50*time.Millisecond, "the chunk's hot DB must be reopenable after shutdown")
+	return db
+}
+
 // TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune drives the
 // whole daemon lifecycle in one process against the real stores and the fake
 // ledger source:
@@ -432,17 +451,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	require.NoError(t, err)
 	require.Equal(t, geometry.State(""), c2lfs, "the live chunk has no cold artifacts yet")
 
-	// Retry the open: RocksDB's process-level LOCK can linger momentarily after the
-	// writer closed (the same transient a production reader retries through).
-	var liveDB *hotchunk.DB
-	require.Eventually(t, func() bool {
-		db, oerr := hotchunk.Open(postCat.Layout().HotChunkPath(c2), c2, silentLogger())
-		if oerr != nil {
-			return false
-		}
-		liveDB = db
-		return true
-	}, 10*time.Second, 50*time.Millisecond, "chunk 2's hot DB must be reopenable after shutdown")
+	liveDB := reopenHotChunk(t, postCat, c2)
 	hotSeq, err := liveDB.Txhash().Get(hotHash)
 	require.NoError(t, err, "the chunk-2 tx hash must resolve from the live hot CF")
 	assert.Equal(t, c2First, hotSeq, "hot lookup returns the live tx's ledger")

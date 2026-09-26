@@ -32,6 +32,7 @@ package zstd
 import "C"
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math"
@@ -59,11 +60,55 @@ type Compressor struct {
 	ctx *C.ZSTD_CCtx
 }
 
+// EncoderState pairs one compressor with its retained destination buffer —
+// the reuse idiom for zstd encode state (a CGo context is expensive to
+// create; a fresh worst-case dst per Encode was measured at 43% of hot
+// ingestion's allocations before reuse). NOT safe for concurrent use: the
+// owner serializes Encodes (the ledger hot store's single-flight
+// compression). Deliberately NOT a sync.Pool: the state is one expensive,
+// long-lived object, and sync.Pool's GC-emptied semantics were measured
+// dropping it ~1-in-5 ledgers under per-ledger GC cadence — a ~15MB dst
+// re-allocation plus a CGo context re-init each time. Callers' consumers
+// must copy synchronously (e.g. rocksdb BatchWriter.Put, packfile
+// AppendItem do).
+type EncoderState struct {
+	comp *Compressor
+	buf  []byte
+}
+
+// NewEncoderState returns an encoder state with the given compressor options.
+func NewEncoderState(opts ...CompressorOption) *EncoderState {
+	return &EncoderState{comp: NewCompressor(opts...)}
+}
+
+// Encode compresses src into the retained buffer and returns the encoded
+// bytes, which are valid until this state's next Encode.
+func (s *EncoderState) Encode(src []byte) ([]byte, error) {
+	out, err := s.comp.Encode(s.buf[:0], src)
+	if err != nil {
+		return nil, err
+	}
+	s.buf = out[:cap(out)]
+	return out, nil
+}
+
 // CompressorOption configures a Compressor.
 type CompressorOption func(*compressorConfig)
 
 type compressorConfig struct {
 	checksum bool
+	workers  int
+}
+
+// WithWorkers enables zstd's internal multithreaded compression (n worker
+// threads inside libzstd). The output is ONE standard frame — same header
+// shape FrameHeaderValid gates, deterministic for fixed input+params — so
+// the cold-inherits-hot frame contract is unaffected; the trade is a ≲1%
+// ratio cost from job splitting. Requires a ZSTD_MULTITHREAD build of
+// libzstd; NewCompressor panics loudly if the library refuses the
+// parameter (a silent single-threaded fallback would fake the experiment).
+func WithWorkers(n int) CompressorOption {
+	return func(c *compressorConfig) { c.workers = n }
 }
 
 // WithoutChecksum disables the zstd content checksum.
@@ -90,6 +135,11 @@ func NewCompressor(opts ...CompressorOption) *Compressor {
 	var flag C.int
 	if cfg.checksum {
 		flag = 1
+	}
+	if cfg.workers > 0 {
+		if rc := C.ZSTD_CCtx_setParameter(ctx, C.ZSTD_c_nbWorkers, C.int(cfg.workers)); C.ZSTD_isError(rc) != 0 {
+			panic("zstd: libzstd built without ZSTD_MULTITHREAD — WithWorkers unavailable")
+		}
 	}
 	if rc := C.ZSTD_CCtx_setParameter(ctx, C.ZSTD_c_checksumFlag, flag); C.ZSTD_isError(rc) != 0 {
 		C.ZSTD_freeCCtx(ctx)
@@ -257,4 +307,54 @@ func (d *Decompressor) Decode(dst, src []byte) ([]byte, error) {
 // Allocates a context per call. Use Decompressor for hot paths.
 func Decode(dst, src []byte) ([]byte, error) {
 	return NewDecompressor().Decode(dst, src)
+}
+
+// Frame_Header_Descriptor bit layout (RFC 8878 §3.1.1.1.1): bits 0-1 are the
+// Dictionary_ID_flag, bit 2 the Content_Checksum_flag.
+const (
+	frameDescriptorDictIDMask   = 0x03
+	frameDescriptorChecksumFlag = 0x04
+)
+
+// frameMagic is the zstd frame magic number 0xFD2FB528 as it appears on disk
+// (little-endian).
+var frameMagic = []byte{0x28, 0xB5, 0x2F, 0xFD} //nolint:gochecknoglobals // immutable format constant
+
+// FrameHeaderValid checks — without decompressing — that src is a single
+// zstd frame this package's other half can serve: magic number, a recorded
+// frame content size (present and <= MaxUint32, the bound packfile item
+// lengths live under), no dictionary ID (the shared Decompressor is
+// dictionary-less), and the content checksum flag set (Compressor's default;
+// the checksum is what makes a later corrupt read loud).
+//
+// This is the freeze-time guard for verbatim frame copies (hot ledgers CF →
+// cold pack): it pins the invariant that hot ledger values remain plain,
+// dictionary-less, content-sized, checksummed single frames. Any hot-side
+// change that breaks one of these must revisit the cold ledger format in the
+// same commit.
+func FrameHeaderValid(src []byte) error {
+	if len(src) < 5 {
+		return fmt.Errorf("zstd: frame header: %d bytes, want >= 5", len(src))
+	}
+	if !bytes.Equal(src[:4], frameMagic) {
+		return errors.New("zstd: frame header: bad magic")
+	}
+	descriptor := src[4]
+	if descriptor&frameDescriptorDictIDMask != 0 {
+		return errors.New("zstd: frame header: dictionary ID present; the shared decompressor is dictionary-less")
+	}
+	if descriptor&frameDescriptorChecksumFlag == 0 {
+		return errors.New("zstd: frame header: content checksum flag unset")
+	}
+	fcs := C.ZSTD_getFrameContentSize(unsafe.Pointer(&src[0]), C.size_t(len(src)))
+	switch fcs {
+	case C.ZSTD_CONTENTSIZE_ERROR:
+		return errors.New("zstd: frame header invalid")
+	case C.ZSTD_CONTENTSIZE_UNKNOWN:
+		return errors.New("zstd: frame header carries no content size")
+	}
+	if uint64(fcs) > math.MaxUint32 {
+		return fmt.Errorf("zstd: frame claims content size %d > MaxUint32", uint64(fcs))
+	}
+	return nil
 }
