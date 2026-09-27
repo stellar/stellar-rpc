@@ -35,6 +35,11 @@ const (
 
 	maxHistory    = 10    // runs kept in the history (and so rendered as drop-downs)
 	maxCommentLen = 60000 // shed oldest runs beyond this; GitHub caps comments at 65536
+
+	// zwsp is a zero-width space (as an HTML entity so it stays visible in
+	// source). It breaks up "#N" in rendered titles so GitHub does not
+	// autolink every run header to an unrelated issue number.
+	zwsp = "&#8203;"
 )
 
 var (
@@ -133,13 +138,19 @@ func renderComment(cur runRecord, prev string) string {
 	return body
 }
 
+// testTitle renders "Performance Evaluation Test #N" with a zero-width space
+// after the '#', so GitHub renders "#N" without linking issue N.
+func testTitle(num int) string {
+	return fmt.Sprintf("Performance Evaluation Test #%s%d", zwsp, num)
+}
+
 func renderBody(hist []runRecord) string {
 	var b strings.Builder
 	fmt.Fprintln(&b, marker)
 	fmt.Fprintf(&b, "<!-- perf-eval-history: %s -->\n", encodeHistory(hist))
 	b.WriteString(renderRun(hist[0]))
 	for _, r := range hist[1:] {
-		fmt.Fprintf(&b, "\n<details>\n<summary>Performance Evaluation Test #%d</summary>\n\n", r.Num)
+		fmt.Fprintf(&b, "\n<details>\n<summary>%s</summary>\n\n", testTitle(r.Num))
 		b.WriteString(strings.Trim(renderRun(r), "\n"))
 		b.WriteString("\n</details>\n")
 	}
@@ -148,7 +159,7 @@ func renderBody(hist []runRecord) string {
 
 func renderRun(r runRecord) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "## 🧪 Performance Evaluation Test #%d\n\n", r.Num)
+	fmt.Fprintf(&b, "## 🧪 %s\n\n", testTitle(r.Num))
 	fmt.Fprintf(&b, "**Commit:** `%s` (`%s`)\n", r.TargetSHA[:min(12, len(r.TargetSHA))], r.TargetRef)
 	fmt.Fprintf(&b, "**Run:** %s\n", r.RunURL)
 	for _, l := range r.Legs {
