@@ -119,17 +119,16 @@ type MethodsConfig struct {
 	QueueLimit           *uint          `toml:"queue_limit"`
 	MaxExecutionDuration *time.Duration `toml:"max_execution_duration"`
 
-	GetHealth       HealthMethodConfig    `toml:"getHealth"`
-	GetNetwork      NetworkMethodConfig   `toml:"getNetwork"`
-	GetVersionInfo  MethodConfig          `toml:"getVersionInfo"`
-	GetLatestLedger MethodConfig          `toml:"getLatestLedger"`
-	GetTransaction  MethodConfig          `toml:"getTransaction"`
-	GetTransactions PaginatedMethodConfig `toml:"getTransactions"`
-	GetLedgers      PaginatedMethodConfig `toml:"getLedgers"`
-	GetEvents       PaginatedMethodConfig `toml:"getEvents"`
-	// GetEventsV2 carries getEvents' knob set and defaults.
-	GetEventsV2 EventsMethodConfig `toml:"getEventsV2"`
-	GetFeeStats MethodConfig       `toml:"getFeeStats"`
+	GetHealth       HealthMethodConfig      `toml:"getHealth"`
+	GetNetwork      NetworkMethodConfig     `toml:"getNetwork"`
+	GetVersionInfo  MethodConfig            `toml:"getVersionInfo"`
+	GetLatestLedger MethodConfig            `toml:"getLatestLedger"`
+	GetTransaction  MethodConfig            `toml:"getTransaction"`
+	GetTransactions PaginatedMethodConfig   `toml:"getTransactions"`
+	GetLedgers      PaginatedMethodConfig   `toml:"getLedgers"`
+	GetEvents       PaginatedMethodConfig   `toml:"getEvents"`
+	QueryEvents     QueryEventsMethodConfig `toml:"queryEvents"`
+	GetFeeStats     MethodConfig            `toml:"getFeeStats"`
 
 	// The three methods that read current ledger state through captive core
 	// rather than this daemon's stores (#884). Their serving knobs belong here;
@@ -171,7 +170,7 @@ type NetworkMethodConfig struct {
 	FriendbotURL string `toml:"friendbot_url"`
 }
 
-// EventsMethodConfig adds term_budget, which only getEventsV2 has: v1's
+// QueryEventsMethodConfig adds term_budget, which only queryEvents has: v1's
 // own filter caps bound a request's terms already, so a budget there could
 // only reject requests v1 accepts. The decoder flattens the embedded
 // fields, keeping the method's TOML table flat.
@@ -181,11 +180,11 @@ type NetworkMethodConfig struct {
 // and strict mode cannot reject it. Accepted over duplicating the
 // fields: the config is trusted input, and nobody writes a Go type
 // name into TOML by hand.
-type EventsMethodConfig struct {
+type QueryEventsMethodConfig struct {
 	PaginatedMethodConfig
 
 	// TermBudget caps the distinct index terms one request may look
-	// up; over budget fails with the v2 invalid_params error. Must be
+	// up; over budget fails with the queryEvents invalid_params error. Must be
 	// >= 1: a zero budget would reject every filtered request.
 	TermBudget *uint `toml:"term_budget"`
 }
@@ -448,16 +447,16 @@ const (
 
 	DefaultMaxHealthyLedgerLatency time.Duration = 30 * time.Second
 
-	// DefaultGetEventsV2MaxItemsPerResponse is the page cap the finalized
+	// DefaultQueryEventsMaxItemsPerResponse is the page cap the finalized
 	// getEvents v2 API fixes as a spec constant
 	// (github.com/orgs/stellar/discussions/1872). The v1 method keeps v1's
 	// own cap; see DefaultGetEventsV1MaxItemsPerResponse.
-	DefaultGetEventsV2MaxItemsPerResponse   uint = 1000
+	DefaultQueryEventsMaxItemsPerResponse   uint = 1000
 	DefaultGetEventsDefaultItemsPerResponse uint = 100
 
-	// DefaultGetEventsV2TermBudget is the getEvents v2 proposal's default
+	// DefaultQueryEventsTermBudget is the getEvents v2 proposal's default
 	// (github.com/orgs/stellar/discussions/1872).
-	DefaultGetEventsV2TermBudget uint = 15
+	DefaultQueryEventsTermBudget uint = 15
 
 	// DefaultGetEventsV1MaxItemsPerResponse is v1's own page cap, matching
 	// the existing service's max-events-limit. The 1,000 above is the v2
@@ -673,11 +672,11 @@ func (cfg Config) WithDefaults() Config {
 	fillUint(&m.GetEvents.MaxItemsPerResponse, DefaultGetEventsV1MaxItemsPerResponse)
 	fillUint(&m.GetEvents.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
 
-	queue(&m.GetEventsV2.QueueLimit, DefaultMethodQueueLimit)
-	dur(&m.GetEventsV2.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
-	fillUint(&m.GetEventsV2.MaxItemsPerResponse, DefaultGetEventsV2MaxItemsPerResponse)
-	fillUint(&m.GetEventsV2.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
-	fillUint(&m.GetEventsV2.TermBudget, DefaultGetEventsV2TermBudget)
+	queue(&m.QueryEvents.QueueLimit, DefaultMethodQueueLimit)
+	dur(&m.QueryEvents.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
+	fillUint(&m.QueryEvents.MaxItemsPerResponse, DefaultQueryEventsMaxItemsPerResponse)
+	fillUint(&m.QueryEvents.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
+	fillUint(&m.QueryEvents.TermBudget, DefaultQueryEventsTermBudget)
 
 	queue(&m.GetFeeStats.QueueLimit, DefaultGetFeeStatsQueueLimit)
 	dur(&m.GetFeeStats.MaxExecutionDuration, DefaultMethodMaxExecutionDuration)

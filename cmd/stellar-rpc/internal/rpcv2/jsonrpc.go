@@ -42,7 +42,7 @@ type handlerParams struct {
 // internal/methods constructors, unmodified; only their inputs are v2's (the
 // router-backed adapters, the daemon-owned fee windows, captive-core state).
 // The two events methods are the exception: eventsapi implements both
-// natively on the v2 pager — getEventsV2 because v1 has no such method, and
+// natively on the v2 pager — queryEvents because v1 has no such method, and
 // v1 getEvents as the compatibility surface, byte-parity with the shared
 // handler held by its parity suite.
 func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
@@ -76,13 +76,13 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 			DefaultTransactionsLimit: deref(m.GetTransactions.DefaultItemsPerResponse),
 		})
 	specs = append(specs, jsonrpc.HandlerSpec{
-		MethodName: protocol.GetEventsV2MethodName,
-		Handler: eventsapi.NewHandler(eventsapi.V2Limits{
+		MethodName: protocol.QueryEventsMethodName,
+		Handler: eventsapi.NewQueryEventsHandler(eventsapi.QueryEventsLimits{
 			Limits: eventsapi.Limits{
-				MaxLimit:     deref(m.GetEventsV2.MaxItemsPerResponse),
-				DefaultLimit: deref(m.GetEventsV2.DefaultItemsPerResponse),
+				MaxLimit:     deref(m.QueryEvents.MaxItemsPerResponse),
+				DefaultLimit: deref(m.QueryEvents.DefaultItemsPerResponse),
 			},
-			TermBudget: uint32(min(deref(m.GetEventsV2.TermBudget), math.MaxUint32)), //nolint:gosec // min clamps it
+			TermBudget: uint32(min(deref(m.QueryEvents.TermBudget), math.MaxUint32)), //nolint:gosec // min clamps it
 		}, p.logger),
 	})
 	specs = limitsByMethod(m).Apply(specs)
@@ -113,7 +113,7 @@ func limitsByMethod(m config.MethodsConfig) jsonrpc.LimitsByMethod {
 	return jsonrpc.LimitsByMethod{
 		protocol.GetHealthMethodName:        lim(m.GetHealth.QueueLimit, m.GetHealth.MaxExecutionDuration),
 		protocol.GetEventsMethodName:        lim(m.GetEvents.QueueLimit, m.GetEvents.MaxExecutionDuration),
-		protocol.GetEventsV2MethodName:      lim(m.GetEventsV2.QueueLimit, m.GetEventsV2.MaxExecutionDuration),
+		protocol.QueryEventsMethodName:      lim(m.QueryEvents.QueueLimit, m.QueryEvents.MaxExecutionDuration),
 		protocol.GetNetworkMethodName:       lim(m.GetNetwork.QueueLimit, m.GetNetwork.MaxExecutionDuration),
 		protocol.GetVersionInfoMethodName:   lim(m.GetVersionInfo.QueueLimit, m.GetVersionInfo.MaxExecutionDuration),
 		protocol.GetLatestLedgerMethodName:  lim(m.GetLatestLedger.QueueLimit, m.GetLatestLedger.MaxExecutionDuration),

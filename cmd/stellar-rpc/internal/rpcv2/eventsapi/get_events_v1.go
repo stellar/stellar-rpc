@@ -127,9 +127,9 @@ func getEventsV1(
 	}
 	events := make([]protocol.EventInfo, 0, len(page.Events))
 	for i := range page.Events {
-		info, err := eventInfoV1(&page.Events[i], req.Format)
+		info, err := eventInfo(&page.Events[i], req.Format)
 		if err != nil {
-			return zero, err
+			return zero, fmt.Errorf("could not parse event: %w", err)
 		}
 		events = append(events, info)
 	}
@@ -305,13 +305,4 @@ func isMatchAll(f *event.Filter) bool {
 		}
 	}
 	return true
-}
-
-// eventInfoV1 mints the v1 response event: eventInfoV2's output in the v1 wire type.
-func eventInfoV1(p *event.Payload, format string) (protocol.EventInfo, error) {
-	v2, err := eventInfoV2(p, format)
-	if err != nil {
-		return protocol.EventInfo{}, fmt.Errorf("could not parse event: %w", err)
-	}
-	return protocol.EventInfo(v2), nil
 }

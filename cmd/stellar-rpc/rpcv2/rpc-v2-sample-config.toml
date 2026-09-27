@@ -172,7 +172,7 @@ default_items_per_response = 100
 # cap at 1,000 and gives it a term budget, which v1 has no equivalent of: a
 # cap on the distinct index terms one request may look up. Over budget fails
 # with invalid_params; the client splits the query and merges results.
-[service.methods.getEventsV2]
+[service.methods.queryEvents]
 queue_limit = 1000
 max_execution_duration = "10s"
 max_items_per_response = 1000

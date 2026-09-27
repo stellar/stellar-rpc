@@ -187,8 +187,8 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 		},
 		{
 			"zero term_budget",
-			func(c *config.Config) { c.Service.Methods.GetEventsV2.TermBudget = uintPtr(0) },
-			"[service.methods.getEventsV2].term_budget",
+			func(c *config.Config) { c.Service.Methods.QueryEvents.TermBudget = uintPtr(0) },
+			"[service.methods.queryEvents].term_budget",
 		},
 		{
 			"fee window above the cap",
@@ -216,21 +216,21 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 			"[service.methods.getLedgerEntries].queue_limit",
 		},
 		{
-			"zero getEventsV2 queue_limit",
-			func(c *config.Config) { c.Service.Methods.GetEventsV2.QueueLimit = uintPtr(0) },
-			"[service.methods.getEventsV2].queue_limit",
+			"zero queryEvents queue_limit",
+			func(c *config.Config) { c.Service.Methods.QueryEvents.QueueLimit = uintPtr(0) },
+			"[service.methods.queryEvents].queue_limit",
 		},
 		{
-			"zero getEventsV2 max_items_per_response",
-			func(c *config.Config) { c.Service.Methods.GetEventsV2.MaxItemsPerResponse = uintPtr(0) },
-			"[service.methods.getEventsV2].max_items_per_response",
+			"zero queryEvents max_items_per_response",
+			func(c *config.Config) { c.Service.Methods.QueryEvents.MaxItemsPerResponse = uintPtr(0) },
+			"[service.methods.queryEvents].max_items_per_response",
 		},
 		{
 			// The spec fixes the largest limit a client may ask for, so an
 			// operator can only lower this cap.
-			"getEventsV2 max_items_per_response above the spec's cap",
+			"queryEvents max_items_per_response above the spec's cap",
 			func(c *config.Config) {
-				c.Service.Methods.GetEventsV2.MaxItemsPerResponse = uintPtr(protocol.MaxLimitV2 + 1)
+				c.Service.Methods.QueryEvents.MaxItemsPerResponse = uintPtr(protocol.QueryEventsMaxLimit + 1)
 			},
 			"cannot exceed 1000",
 		},
@@ -615,7 +615,7 @@ func itoa(n uint32) string { return strconv.FormatUint(uint64(n), 10) }
 func TestValidateConfig_AllowsGetEventsV1CapAboveTheV2Ceiling(t *testing.T) {
 	cat, _ := testCatalog(t)
 	cfg := validCfg(4, 3, "genesis")
-	above := uint(protocol.MaxLimitV2 + 1)
+	above := uint(protocol.QueryEventsMaxLimit + 1)
 	cfg.Service.Methods.GetEvents.MaxItemsPerResponse = &above
 
 	_, err := callValidate(t, cfg, cat, readyTip(chunk.ID(10).FirstLedger()))
