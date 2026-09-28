@@ -77,9 +77,9 @@ type ColdWriterOptions struct {
 	BytesPerSync int
 }
 
-// NewColdWriter creates the events.pack for chunkID inside bucketDir.
-// bucketDir must already exist — like the sibling stores, directory
-// creation belongs to the ingest layer. The filename is
+// NewColdWriter creates the events.pack for chunkID inside bucketDir, the
+// chunk's DATA bucket directory (ColdDirs.Data). It must already exist —
+// like the sibling stores, directory creation belongs to the ingest layer. The filename is
 // {chunkID:08d}-events.pack per the backfill design doc. The returned
 // ColdWriter must be closed via either Finish (on success) or Close
 // (on abort) — leaving a ColdWriter open leaks the underlying

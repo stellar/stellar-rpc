@@ -26,6 +26,9 @@ func TestMetricsOrNop_NilNeverPanics(t *testing.T) {
 	m.Rebuild(time.Second)
 	m.Discard(1, time.Second)
 	m.Prune(2, time.Second)
+	m.BackfillRetry()
+	m.BackfillPlanned(1)
+	m.BackfillCompleted(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -48,6 +51,10 @@ func TestPrometheusMetrics_RegistersAndRecords(t *testing.T) {
 	m.Rebuild(50 * time.Millisecond)
 	m.Discard(3, 20*time.Millisecond)
 	m.Prune(2, 5*time.Millisecond)
+	m.BackfillPlanned(200)
+	m.BackfillCompleted(37)
+	m.BackfillRetry()
+	m.BackfillRetry()
 
 	families, err := reg.Gather()
 	require.NoError(t, err)
@@ -74,6 +81,12 @@ func TestPrometheusMetrics_RegistersAndRecords(t *testing.T) {
 	assert.InDelta(t, float64(2), values["test_ns_fullhistory_streaming_chunk_boundaries_total"], 0)
 	assert.InDelta(t, float64(3), values["test_ns_fullhistory_streaming_discarded_hot_chunks_total"], 0)
 	assert.InDelta(t, float64(2), values["test_ns_fullhistory_streaming_pruned_artifacts_total"], 0)
+	// A collector built but left out of MustRegister is a silent no-op: it
+	// takes every signal and exports nothing. Gathering each one is what makes
+	// that visible.
+	assert.InDelta(t, float64(200), values["test_ns_fullhistory_streaming_backfill_chunks_planned"], 0)
+	assert.InDelta(t, float64(37), values["test_ns_fullhistory_streaming_backfill_chunks_completed"], 0)
+	assert.InDelta(t, float64(2), values["test_ns_fullhistory_streaming_backfill_task_retries_total"], 0)
 
 	_, exported := values["test_ns_fullhistory_streaming_open_snapshots"]
 	assert.True(t, exported, "open_snapshots gauge must be registered")

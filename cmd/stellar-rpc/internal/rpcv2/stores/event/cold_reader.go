@@ -14,7 +14,7 @@ package event
 // alongside them. Decoded metadata is awaited on the first call
 // that needs it. Close drains the MPHF goroutine and releases the
 // packfile handles. Multiple ColdReaders can be open against the
-// same chunk directory concurrently — the pack handle is safe for
+// same chunk's files concurrently — the pack handle is safe for
 // concurrent reads and the MPHF is read-only after load.
 //
 // Concurrency contract: read methods (LookupKeys,
@@ -118,7 +118,7 @@ type ColdReaderOptions struct {
 	Concurrency int
 }
 
-// OpenColdReader prepares a ColdReader for chunkID inside bucketDir.
+// OpenColdReader prepares a ColdReader for chunkID over dirs.
 // It does no synchronous I/O — OpenPack starts each file's open
 // in a background goroutine (holding its fd once open), the
 // events.pack metadata decode is sync.OnceValues-deferred, and the
@@ -128,18 +128,18 @@ type ColdReaderOptions struct {
 // MPHF parse) surface from the first method that needs the data, not
 // from Open itself.
 //
-// bucketDir is the orchestrator-supplied bucket directory
-// ({events_root}/{bucketID:05d}/); this reader does not compose it.
-// chunkID drives both error messages and the per-chunk filename
-// composition (see EventsPackName / IndexPackName / IndexHashName).
-func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) (*ColdReader, error) {
+// dirs are the orchestrator-supplied bucket directories, one per events
+// root (geometry.Layout.EventsColdDirs); this reader does not compose
+// them. events.pack comes from dirs.Data, index.pack and index.hash from
+// dirs.Index.
+func OpenColdReader(chunkID chunk.ID, dirs ColdDirs, opts ColdReaderOptions) (*ColdReader, error) {
 	if opts.Concurrency < 0 {
 		return nil, fmt.Errorf("events: ColdReaderOptions.Concurrency must be >= 0, got %d", opts.Concurrency)
 	}
 
-	eventsPath := filepath.Join(bucketDir, EventsPackName(chunkID))
-	indexPackPath := filepath.Join(bucketDir, IndexPackName(chunkID))
-	indexHashPath := filepath.Join(bucketDir, IndexHashName(chunkID))
+	eventsPath := filepath.Join(dirs.Data, EventsPackName(chunkID))
+	indexPackPath := filepath.Join(dirs.Index, IndexPackName(chunkID))
+	indexHashPath := filepath.Join(dirs.Index, IndexHashName(chunkID))
 
 	c := &ColdReader{
 		chunkID: chunkID,

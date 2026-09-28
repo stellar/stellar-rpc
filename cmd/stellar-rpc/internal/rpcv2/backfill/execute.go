@@ -139,6 +139,7 @@ func executePlan(ctx context.Context, plan Plan, cfg ExecConfig) error {
 		}
 	}
 
+	prog := newProgress(cfg, plan, time.Now())
 	g, gctx := errgroup.WithContext(ctx)
 
 	for _, cb := range plan.ChunkBuilds {
@@ -147,13 +148,17 @@ func executePlan(ctx context.Context, plan Plan, cfg ExecConfig) error {
 				return err
 			}
 			defer releaseSlot(slots)
-			if err := withRetries(gctx, cfg, func() error {
+			prog.chunkStarted()
+			defer prog.chunkEnded()
+			if err := withRetries(gctx, cfg, cfg.notifyRetry("chunk", cb.Chunk.String()), func() error {
 				return runChunk(gctx, cb)
 			}); err != nil {
 				// Leave done[cb.Chunk] open: dependents unblock via <-gctx.Done().
+				prog.chunkFailed(cb, err)
 				return err
 			}
 			// Success: artifacts durable — unblock dependents to read the .bin.
+			prog.chunkFrozen(cb)
 			close(done[cb.Chunk])
 			return nil
 		})
@@ -169,12 +174,17 @@ func executePlan(ctx context.Context, plan Plan, cfg ExecConfig) error {
 				return err
 			}
 			defer releaseSlot(slots)
+			// Report once the slot is held, so the line means "running" rather
+			// than "queued behind every remaining chunk build".
+			prog.indexStarted(b)
 			// Time the rebuild on completion (failure duration is signal too).
 			start := time.Now()
-			err := withRetries(gctx, cfg, func() error {
+			err := withRetries(gctx, cfg, cfg.notifyRetry("txhash index", b.Index.String()), func() error {
 				return runIndex(gctx, b)
 			})
-			cfg.metrics().Rebuild(time.Since(start))
+			dur := time.Since(start)
+			cfg.metrics().Rebuild(dur)
+			prog.indexBuilt(b, dur, err)
 			return err
 		})
 	}
@@ -213,9 +223,23 @@ func releaseSlot(slots chan struct{}) { <-slots }
 
 // withRetries runs fn up to MaxRetries+1 times with exponential backoff between
 // attempts, aborting the wait on ctx cancellation. Built on cenkalti/backoff, the
-// same primitive waitForCoverage uses.
-func withRetries(ctx context.Context, cfg ExecConfig, fn func() error) error {
-	return backoff.Retry(fn, backoff.WithContext(cfg.retryBackOff(), ctx))
+// same primitive waitForCoverage uses. notify reports each failed attempt, so
+// a task that failed twice and then succeeded is not silent.
+func withRetries(ctx context.Context, cfg ExecConfig, notify backoff.Notify, fn func() error) error {
+	return backoff.RetryNotify(fn, backoff.WithContext(cfg.retryBackOff(), ctx), notify)
+}
+
+// notifyRetry builds the per-attempt reporter for one task.
+func (cfg ExecConfig) notifyRetry(kind, id string) backoff.Notify {
+	return func(err error, wait time.Duration) {
+		cfg.metrics().BackfillRetry()
+		cfg.Logger.WithFields(supportlog.F{
+			"task":        kind,
+			"id":          id,
+			"retry_in":    wait.Round(time.Millisecond).String(),
+			"max_retries": cfg.MaxRetries,
+		}).WithError(err).Warn("backfill task attempt failed; retrying")
+	}
 }
 
 // retryBackOff is the per-task retry policy: count-bounded (MaxRetries) exponential
@@ -256,6 +280,17 @@ func RunBackfill(ctx context.Context, cfg ExecConfig, rangeStart, rangeEnd chunk
 	if err != nil {
 		return fmt.Errorf("resolve plan [%s,%s]: %w", rangeStart, rangeEnd, err)
 	}
+	// The plan is the only honest denominator, and it is known before the first
+	// byte is fetched. Logged here rather than in startup so the lifecycle's
+	// per-boundary passes report it too.
+	cfg.Logger.WithFields(supportlog.F{
+		"range_lo":     rangeStart.String(),
+		"range_hi":     rangeEnd.String(),
+		"chunk_builds": len(plan.ChunkBuilds),
+		"index_builds": len(plan.IndexBuilds),
+		"workers":      cfg.Workers,
+		"resolve_took": time.Since(start).Round(time.Millisecond).String(),
+	}).Info("backfill plan resolved")
 	err = executePlan(ctx, plan, cfg)
 	cfg.metrics().Freeze(time.Since(start))
 	return err

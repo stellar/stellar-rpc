@@ -476,7 +476,8 @@ func TestResolvePaths_DefaultsUnderDataDir(t *testing.T) {
 	assert.Equal(t, "/data", p.DataDir)
 	assert.Equal(t, filepath.Join("/data", "catalog", "rocksdb"), p.Catalog)
 	assert.Equal(t, filepath.Join("/data", "ledgers"), p.Ledgers)
-	assert.Equal(t, filepath.Join("/data", "events"), p.Events)
+	assert.Equal(t, filepath.Join("/data", "events", "data"), p.Events)
+	assert.Equal(t, filepath.Join("/data", "events", "index"), p.EventsIndex)
 	assert.Equal(t, filepath.Join("/data", "txhash", "raw"), p.TxhashRaw)
 	assert.Equal(t, filepath.Join("/data", "txhash", "index"), p.TxhashIndex)
 	assert.Equal(t, filepath.Join("/data", "hot"), p.HotStorage)
@@ -499,8 +500,10 @@ func TestRoots_AllDistinct(t *testing.T) {
 	cfg, err := ParseConfig([]byte(minimalValidConfig))
 	require.NoError(t, err)
 	roots := cfg.ResolvePaths().Roots()
-	// Meta store + four immutable trees + hot storage = six roots.
-	require.Len(t, roots, 6)
+	// Meta store + five immutable trees + hot storage = seven roots. The
+	// events pack and its index are separate trees so a deployment can put
+	// the randomly-probed index on faster storage than the bulk pack.
+	require.Len(t, roots, 7)
 	assert.NotContains(t, roots, "/data", "the data dir parent is not itself a root")
 }
 

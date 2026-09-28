@@ -1239,7 +1239,7 @@ func freezeFixtureToColdReader(t *testing.T, hot *HotStore, chunkID chunk.ID) *C
 	require.NoError(t, cw.Finish(coldOffsets))
 	require.NoError(t, WriteColdIndex(context.Background(), chunkID, idx, dir, testIndexSecret))
 
-	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 	return cr

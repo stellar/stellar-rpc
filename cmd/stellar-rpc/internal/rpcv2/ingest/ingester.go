@@ -72,7 +72,7 @@ func openColdChunk(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Config)
 		cc.txhash = w
 	}
 	if cfg.Events {
-		if dirs.EventsDir == "" {
+		if dirs.Events.Data == "" || dirs.Events.Index == "" {
 			return fail(errors.New("ingest: events enabled but its ColdDirs path is empty"))
 		}
 		if len(cfg.EventsSecret) != stores.SecretLen {
@@ -80,7 +80,7 @@ func openColdChunk(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Config)
 		}
 		var secret [stores.SecretLen]byte
 		copy(secret[:], cfg.EventsSecret)
-		w, err := newEventsCold(dirs.EventsDir, chunkID, sink, secret)
+		w, err := newEventsCold(dirs.Events, chunkID, sink, secret)
 		if err != nil {
 			return fail(fmt.Errorf("open events cold writer: %w", err))
 		}

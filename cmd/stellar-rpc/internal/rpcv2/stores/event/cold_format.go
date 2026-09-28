@@ -42,14 +42,16 @@ import (
 // Filenames + packfile format identifiers.
 // ──────────────────────────────────────────────────────────────────
 
-// Cold artifact filenames are chunk-ID-prefixed and live as flat
-// siblings inside a bucket directory, per the backfill design doc
+// Cold artifact filenames are chunk-ID-prefixed and live directly in a
+// bucket directory, per the backfill design doc
 // (design-docs/full-history-streaming-workflow.md).
-// Layout: {events_root}/{bucketID:05d}/{chunkID:08d}-events.pack
-// and analogous for index.pack / index.hash.
+// Layout: {events_root}/{bucketID:05d}/{chunkID:08d}-events.pack and
+// {events_index_root}/{bucketID:05d}/{chunkID:08d}-index.pack (and
+// -index.hash). The two roots are distinct, so a chunk's three files
+// are not in one directory. ColdDirs carries the pair.
 //
 // Bucket path composition is the orchestrator's job — this package
-// takes a bucket directory and composes the per-chunk filename via
+// takes bucket directories and composes the per-chunk filename via
 // these helpers.
 
 // EventsPackName returns the events.pack filename for chunkID.

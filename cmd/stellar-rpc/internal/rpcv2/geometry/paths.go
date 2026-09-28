@@ -17,7 +17,9 @@ import (
 //	├── catalog/rocksdb/
 //	├── hot/{chunk:08d}/
 //	├── ledgers/{bucket:05d}/{chunk:08d}.pack
-//	├── events/{bucket:05d}/{chunk:08d}-events.pack (+ -index.pack, -index.hash)
+//	├── events/
+//	│   ├── data/{bucket:05d}/{chunk:08d}-events.pack
+//	│   └── index/{bucket:05d}/{chunk:08d}-index.pack (+ -index.hash)
 //	└── txhash/
 //	    ├── raw/{bucket:05d}/{chunk:08d}.bin
 //	    └── index/{idx:08d}/{lo:08d}-{hi:08d}.idx
@@ -29,6 +31,7 @@ type Layout struct {
 	hotRoot         string
 	ledgersRoot     string
 	eventsRoot      string
+	eventsIndexRoot string
 	txhashRawRoot   string
 	txhashIndexRoot string
 }
@@ -40,7 +43,8 @@ func NewLayout(root string) Layout {
 		catalogRoot:     filepath.Join(root, "catalog", "rocksdb"),
 		hotRoot:         filepath.Join(root, "hot"),
 		ledgersRoot:     filepath.Join(root, "ledgers"),
-		eventsRoot:      filepath.Join(root, "events"),
+		eventsRoot:      filepath.Join(root, "events", "data"),
+		eventsIndexRoot: filepath.Join(root, "events", "index"),
 		txhashRawRoot:   filepath.Join(root, "txhash", "raw"),
 		txhashIndexRoot: filepath.Join(root, "txhash", "index"),
 	}
@@ -51,12 +55,15 @@ func NewLayout(root string) Layout {
 // strings (rather than the config Paths struct) keeps geometry free of any
 // config dependency; the config package's NewLayoutFromPaths adapts a Paths
 // to this so prepared roots and data location can never disagree.
-func NewLayoutFromRoots(catalogRoot, hotRoot, ledgersRoot, eventsRoot, txhashRawRoot, txhashIndexRoot string) Layout {
+func NewLayoutFromRoots(
+	catalogRoot, hotRoot, ledgersRoot, eventsRoot, eventsIndexRoot, txhashRawRoot, txhashIndexRoot string,
+) Layout {
 	return Layout{
 		catalogRoot:     catalogRoot,
 		hotRoot:         hotRoot,
 		ledgersRoot:     ledgersRoot,
 		eventsRoot:      eventsRoot,
+		eventsIndexRoot: eventsIndexRoot,
 		txhashRawRoot:   txhashRawRoot,
 		txhashIndexRoot: txhashIndexRoot,
 	}
@@ -82,28 +89,44 @@ func (l Layout) LedgerPackPath(c chunk.ID) string {
 
 // LedgerPackPath composes a chunk's ledger pack path under an explicit ledgers
 // root, for callers that hold only that one tree (a full Layout would carry
-// five unused roots). Layout.LedgerPackPath delegates here so the formula has
+// six unused roots). Layout.LedgerPackPath delegates here so the formula has
 // one home.
 func LedgerPackPath(ledgersRoot string, c chunk.ID) string {
 	return filepath.Join(ledgersRoot, c.BucketID(), ledger.PackName(c))
 }
 
-// EventsBucketDir is a chunk's events cold-segment directory — the bucket dir the
-// three events files (pack, index-pack, index-hash) live under, and the single
-// path the cold events ingester writes into. Sharing it with EventsPaths keeps
-// the events tree's shape defined once.
+// EventsBucketDir is a chunk's events DATA directory — the bucket dir the
+// events pack lives under. Its index files live under EventsIndexBucketDir,
+// a separate root: the pack is streamed sequentially and is by far the
+// largest artifact, while the index is probed randomly, so an operator can
+// put the index on fast storage without moving terabytes of pack with it.
 func (l Layout) EventsBucketDir(c chunk.ID) string {
 	return filepath.Join(l.eventsRoot, c.BucketID())
 }
 
-// EventsPaths are a chunk's three events cold-segment files. Leaves owned by
-// event.*.
+// EventsIndexBucketDir is a chunk's events INDEX directory — the bucket dir
+// index.pack and index.hash live under.
+func (l Layout) EventsIndexBucketDir(c chunk.ID) string {
+	return filepath.Join(l.eventsIndexRoot, c.BucketID())
+}
+
+// EventsColdDirs is the pair of directories a chunk's events artifacts live
+// in. Readers take the pair, so no caller composes it by hand and none can
+// pick up one root while missing the other.
+func (l Layout) EventsColdDirs(c chunk.ID) event.ColdDirs {
+	return event.ColdDirs{Data: l.EventsBucketDir(c), Index: l.EventsIndexBucketDir(c)}
+}
+
+// EventsPaths are a chunk's three events cold-segment files, which span the
+// two events roots. Leaves owned by event.*. ArtifactPaths returns this for
+// KindEvents, so the sweep and the freeze barrier cover both roots without
+// knowing there are two.
 func (l Layout) EventsPaths(c chunk.ID) []string {
-	dir := l.EventsBucketDir(c)
+	d := l.EventsColdDirs(c)
 	return []string{
-		filepath.Join(dir, event.EventsPackName(c)),
-		filepath.Join(dir, event.IndexPackName(c)),
-		filepath.Join(dir, event.IndexHashName(c)),
+		filepath.Join(d.Data, event.EventsPackName(c)),
+		filepath.Join(d.Index, event.IndexPackName(c)),
+		filepath.Join(d.Index, event.IndexHashName(c)),
 	}
 }
 
@@ -115,7 +138,11 @@ func (l Layout) TxHashBinPath(c chunk.ID) string {
 // LedgersRoot is the root a cold ledger ingester composes LedgerPackPath under.
 func (l Layout) LedgersRoot() string { return l.ledgersRoot }
 
-// EventsRoot is the root EventsPaths composes under.
+// EventsIndexRoot is the root the events index files live under.
+func (l Layout) EventsIndexRoot() string { return l.eventsIndexRoot }
+
+// EventsRoot is the root the events packs live under; EventsPaths also
+// composes under EventsIndexRoot.
 func (l Layout) EventsRoot() string { return l.eventsRoot }
 
 // TxHashRawRoot is its own root because the cold pipeline (ingest.WriteColdChunk)

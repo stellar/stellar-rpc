@@ -42,7 +42,16 @@ default_data_dir = "/var/stellar/rpc-v2"
 # Any two overrides resolving to the same tree are rejected at startup.
 #catalog = ""        # {default_data_dir}/catalog/rocksdb — the catalog RocksDB
 #ledgers = ""        # {default_data_dir}/ledgers         — immutable ledger .pack files
-#events = ""         # {default_data_dir}/events          — immutable events segments
+# A chunk's events live in two roots. The pack is streamed sequentially and
+# holds nearly all the bytes; the index is read in a handful of small random
+# probes per chunk, so a filtered getEvents over a wide range pays read
+# latency once per chunk. Measured against gp3 EBS, moving only events_index
+# to local NVMe halved that cold per-chunk cost without moving the packs.
+#
+# `events` is the pack root only, and overriding it does not move the index.
+# Set both keys, or the indexes stay under default_data_dir.
+#events = ""         # {default_data_dir}/events/data     — immutable events packs
+#events_index = ""   # {default_data_dir}/events/index    — immutable events indexes
 #txhash_raw = ""     # {default_data_dir}/txhash/raw      — transient txhash .bin files
 #txhash_index = ""   # {default_data_dir}/txhash/index    — frozen per-window .idx files
 #hot = ""            # {default_data_dir}/hot             — per-chunk hot RocksDB databases

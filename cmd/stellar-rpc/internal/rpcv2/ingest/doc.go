@@ -55,8 +55,9 @@
 // openColdChunk is the order's single definition site. The on-disk
 // formats and per-chunk filenames are owned by the store packages
 // (ledger.PackName, txhash.ColdBinName + its .bin codec, the event store's
-// cold-format helpers); this package only composes the {bucketID:05d}/
-// bucket directories around them.
+// cold-format helpers), and every directory they go in arrives already
+// composed in ingest.ColdDirs — geometry.Layout is the one place the path
+// formula lives, and this package never re-derives it.
 //
 // Inputs are borrowed: every ingest receives a view over the source
 // stream's buffer, valid only until the next ledger is pulled, and

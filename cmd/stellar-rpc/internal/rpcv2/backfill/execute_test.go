@@ -401,7 +401,7 @@ func TestRetryBackOff_ZeroBaseUsesDefault(t *testing.T) {
 func TestWithRetries_AttemptsThenGivesUp(t *testing.T) {
 	cfg := ExecConfig{MaxRetries: 3, retryBackoff: time.Nanosecond}
 	calls := 0
-	err := withRetries(context.Background(), cfg, func() error {
+	err := withRetries(context.Background(), cfg, nil, func() error {
 		calls++
 		return errors.New("always fails")
 	})
@@ -415,7 +415,7 @@ func TestWithRetries_CtxCancelAborts(t *testing.T) {
 	cancel()
 	cfg := ExecConfig{MaxRetries: 5, retryBackoff: time.Hour}
 	calls := 0
-	err := withRetries(ctx, cfg, func() error {
+	err := withRetries(ctx, cfg, nil, func() error {
 		calls++
 		return errors.New("fails")
 	})

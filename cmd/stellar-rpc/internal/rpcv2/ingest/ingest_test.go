@@ -242,7 +242,12 @@ func packPath(ledgersRoot string, c chunk.ID) string {
 	return filepath.Join(ledgersRoot, c.BucketID(), ledger.PackName(c))
 }
 
-// coldDirsAt resolves chunk c's three cold-artifact paths under one dir's per-type
+// sameDirs points both events roots at one directory — the shape a test that
+// only cares about the files wants, and one the store supports even though a
+// deployment must keep the two roots apart.
+func sameDirs(dir string) event.ColdDirs { return event.ColdDirs{Data: dir, Index: dir} }
+
+// coldDirsAt resolves chunk c's cold-artifact paths under one dir's per-type
 // roots — mirroring what geometry.Layout derives in production, so the readback
 // helpers (packPath/txhashBinPath) find what the ingesters wrote.
 //
@@ -251,7 +256,7 @@ func coldDirsAt(dir string, c chunk.ID) ColdDirs {
 	return ColdDirs{
 		LedgerPack: packPath(filepath.Join(dir, dataTypeLedgers), c),
 		TxhashBin:  txhashBinPath(filepath.Join(dir, dataTypeTxhash)),
-		EventsDir:  filepath.Join(dir, dataTypeEvents, c.BucketID()),
+		Events:     sameDirs(filepath.Join(dir, dataTypeEvents, c.BucketID())),
 	}
 }
 
@@ -540,7 +545,7 @@ func TestEventsColdWriter_Readback(t *testing.T) {
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := newEventsCold(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil, testEventsSecret())
+	ing, err := newEventsCold(sameDirs(filepath.Join(coldDir, chunkID.BucketID())), chunkID, nil, testEventsSecret())
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
@@ -554,7 +559,7 @@ func TestEventsColdWriter_Readback(t *testing.T) {
 	require.NoError(t, ing.finalize(context.Background()))
 
 	bucketDir := filepath.Join(coldDir, chunkID.BucketID())
-	cr, err := event.OpenColdReader(chunkID, bucketDir, event.ColdReaderOptions{})
+	cr, err := event.OpenColdReader(chunkID, sameDirs(bucketDir), event.ColdReaderOptions{})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cr.Close()) }()
 	cnt, err := cr.EventCount()
@@ -577,7 +582,7 @@ func TestEventsColdWriter_V0KeepsOffsetsContiguous(t *testing.T) {
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := newEventsCold(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil, testEventsSecret())
+	ing, err := newEventsCold(sameDirs(filepath.Join(coldDir, chunkID.BucketID())), chunkID, nil, testEventsSecret())
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
@@ -591,7 +596,7 @@ func TestEventsColdWriter_V0KeepsOffsetsContiguous(t *testing.T) {
 	require.NoError(t, ing.finalize(context.Background()))
 
 	bucketDir := filepath.Join(coldDir, chunkID.BucketID())
-	cr, err := event.OpenColdReader(chunkID, bucketDir, event.ColdReaderOptions{})
+	cr, err := event.OpenColdReader(chunkID, sameDirs(bucketDir), event.ColdReaderOptions{})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cr.Close()) }()
 
@@ -655,7 +660,7 @@ func TestWriteColdChunk_EventlessChunk_FullyReadable(t *testing.T) {
 
 	// The chunk is readable end to end: zero events, and a filtered lookup
 	// misses cleanly rather than erroring on a missing index.
-	cr, err := event.OpenColdReader(chunkID, bucketDir, event.ColdReaderOptions{})
+	cr, err := event.OpenColdReader(chunkID, sameDirs(bucketDir), event.ColdReaderOptions{})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cr.Close()) }()
 	cnt, err := cr.EventCount()
@@ -713,7 +718,7 @@ func TestColdChunk_Success(t *testing.T) {
 
 	// Events cold readback.
 	ecr, err := event.OpenColdReader(
-		chunkID, filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID()), event.ColdReaderOptions{})
+		chunkID, sameDirs(filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID())), event.ColdReaderOptions{})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ecr.Close()) }()
 	bms, err := ecr.LookupKeys(context.Background(), []event.TermKey{term})
@@ -1010,7 +1015,7 @@ func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 	require.NotEmpty(t, wantTermIDs, "sentinels must carry events")
 
 	ecr, err := event.OpenColdReader(
-		chunkID, filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID()), event.ColdReaderOptions{})
+		chunkID, sameDirs(filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID())), event.ColdReaderOptions{})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ecr.Close()) }()
 
@@ -1103,7 +1108,7 @@ func TestWriteColdChunk_EventsCold_Readback(t *testing.T) {
 	))
 
 	bucketDir := filepath.Join(coldDir, "events", chunkID.BucketID())
-	cr, err := event.OpenColdReader(chunkID, bucketDir, event.ColdReaderOptions{})
+	cr, err := event.OpenColdReader(chunkID, sameDirs(bucketDir), event.ColdReaderOptions{})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cr.Close()) }()
 
@@ -1544,7 +1549,7 @@ func TestEventsCold_FinishThenIndexFails_LeavesInertPack(t *testing.T) {
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := newEventsCold(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil, testEventsSecret())
+	ing, err := newEventsCold(sameDirs(filepath.Join(coldDir, chunkID.BucketID())), chunkID, nil, testEventsSecret())
 	require.NoError(t, err)
 
 	// Ingest one event-bearing ledger so the mirror is non-empty, exercising a
@@ -1582,7 +1587,7 @@ func TestEventsCold_FinalizeAfterFailedIngest_Refuses(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldDir := t.TempDir()
 
-	ing, err := newEventsCold(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil, testEventsSecret())
+	ing, err := newEventsCold(sameDirs(filepath.Join(coldDir, chunkID.BucketID())), chunkID, nil, testEventsSecret())
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
@@ -1843,4 +1848,47 @@ func readLedgerRaw(r interface {
 		return nil
 	})
 	return out, err
+}
+
+// ───────────────────────── split events roots ─────────────────────────
+
+// TestEventsCold_CreatesBothRootsOnFreeze pins that a freeze into two events
+// roots that do not exist yet creates BOTH of them.
+//
+// This is the one regression a read-side test cannot catch. Until the roots
+// could differ, all three events files shared a directory, and only the pack
+// writer's constructor created it — the index writer, which runs at finalize,
+// has never made a directory of its own. Split the roots and that omission
+// fails every cold events freeze, at finalize rather than at open. Every other
+// events test hands both roots one t.TempDir(), which always exists, so none
+// of them would notice.
+func TestEventsCold_CreatesBothRootsOnFreeze(t *testing.T) {
+	chunkID := chunk.ID(0)
+	first := chunkID.FirstLedger()
+	root := t.TempDir()
+
+	// Two roots, neither of which exists, as an operator gets on a fresh
+	// deployment that puts the index on separate storage.
+	dirs := event.ColdDirs{
+		Data:  filepath.Join(root, "events", "data", chunkID.BucketID()),
+		Index: filepath.Join(root, "events", "index", chunkID.BucketID()),
+	}
+	require.NoDirExists(t, dirs.Data)
+	require.NoDirExists(t, dirs.Index)
+
+	ing, err := newEventsCold(dirs, chunkID, nil, testEventsSecret())
+	require.NoError(t, err)
+
+	rawEv, _, _ := marshalLCMWithEvent(t, first)
+	txParts, closedAt := extractFor(t, rawEv)
+	require.NoError(t, ing.write(first, closedAt, txParts))
+	require.NoError(t, ing.finalize(context.Background()), "finalize writes the index into its own root")
+
+	require.FileExists(t, filepath.Join(dirs.Data, event.EventsPackName(chunkID)))
+	require.FileExists(t, filepath.Join(dirs.Index, event.IndexPackName(chunkID)))
+	require.FileExists(t, filepath.Join(dirs.Index, event.IndexHashName(chunkID)))
+
+	// The split is real: no index file was written beside the pack.
+	require.NoFileExists(t, filepath.Join(dirs.Data, event.IndexPackName(chunkID)))
+	require.NoFileExists(t, filepath.Join(dirs.Data, event.IndexHashName(chunkID)))
 }

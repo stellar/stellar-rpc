@@ -11,6 +11,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 )
 
 // drain feeds each of the chunk's raw ledgers (as a borrowed view) to the cold
@@ -50,12 +51,12 @@ func drain(ledgers iter.Seq2[[]byte, error], chunkID chunk.ID, cc *coldChunk) er
 // caller from geometry.Layout so the ingesters write exactly where the freeze
 // barrier and the sweeps resolve — the path formula lives in Layout alone, never
 // re-derived here. LedgerPack and TxhashBin are the chunk's full file paths;
-// EventsDir is its events bucket dir. An empty field for an enabled type is a
+// Events is its pair of events bucket dirs. An empty field for an enabled type is a
 // config error.
 type ColdDirs struct {
 	LedgerPack string
 	TxhashBin  string
-	EventsDir  string
+	Events     event.ColdDirs
 }
 
 // WriteColdChunk materializes ONE chunk's cold artifacts at the resolved paths
@@ -69,9 +70,10 @@ type ColdDirs struct {
 // artifact model) and a retry's overwrite is the cleanup.
 //
 // Source resolution (pack-stat, coverage wait) runs in the caller BEFORE this, so
-// a pack-missing or coverage-timeout failure is metered there rather than as a
-// ColdChunkTotal attempt here. The only pre-open failures left to meter here
-// are a canceled ctx and a cold-writer open failure.
+// a pack-missing or coverage-timeout failure never becomes a ColdChunkTotal
+// attempt here; it reaches only the scheduler's retry counter and its retry and
+// failure logs. The only pre-open failures metered here are a canceled ctx and a
+// cold-writer open failure.
 func WriteColdChunk(
 	ctx context.Context,
 	logger *supportlog.Entry,
