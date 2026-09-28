@@ -82,5 +82,5 @@ COPY --from=rocksdb-build /usr/local/bin/sst_dump /usr/local/bin/
 COPY --from=rocksdb-build /usr/local/bin/db_bench /usr/local/bin/
 RUN ldconfig
 
-COPY --from=rpc-build /bin/stellar-rpc-v2 /app/stellar-rpc-v2
-ENTRYPOINT ["/app/stellar-rpc-v2"]
+COPY --from=rpc-build /bin/stellar-rpc-v2 /usr/bin/stellar-rpc
+ENTRYPOINT ["/usr/bin/stellar-rpc"]
