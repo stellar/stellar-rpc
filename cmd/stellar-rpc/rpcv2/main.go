@@ -34,7 +34,7 @@ func main() {
 					fmt.Fprintln(os.Stderr, err)
 					os.Exit(1)
 				}
-				fmt.Println(string(out))
+				fmt.Fprintln(os.Stdout, string(out))
 				return
 			}
 			// Cancel the daemon on SIGINT/SIGTERM for a clean shutdown.
