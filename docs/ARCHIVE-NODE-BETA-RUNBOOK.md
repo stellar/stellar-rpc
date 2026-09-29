@@ -4,7 +4,7 @@
 
 The Stellar RPC Archive Node maintains full network history from genesis, whereas standard RPC nodes are optimized for short retention windows (e.g., 7 days). To support full history efficiently, the archive node uses a hybrid storage architecture combining RocksDB for recent hot data and immutable flat files for historical cold data.
 
-The archive node is currently in beta (`rpcv2-v0.1.0-beta.1`), so details in this guide may change before the full release.
+The archive node is currently in beta ([`rpcv2-v0.1.0-beta.1`](https://github.com/stellar/stellar-rpc/tree/rpcv2-v0.1.0-beta.1)), so details in this guide may change before the full release.
 
 This guide covers running the node. See the API changes guide for endpoint differences.
 
@@ -51,11 +51,11 @@ The public AWS Open Data bucket supports anonymous access and requires no AWS cr
 
 ## 4. Setup & Installation
 
-Create local host directories and pull the container image:
+Create local host directories and pull the container image. Put `/srv/rpc-archive` on the 7 TB NVMe volume:
 
 ```bash
 mkdir -p /srv/rpc-archive/config /srv/rpc-archive/data
-docker pull unsafe-stellar-rpc/stellar-rpc-v2:rpcv2-v0.1.0-beta.1
+docker pull stellar/unsafe-stellar-rpc:archive-node-beta
 ```
 
 ---
@@ -107,7 +107,7 @@ history_archive_urls = [
 ```toml
 [retention]
 earliest_ledger  = "genesis"    # Pinned on first startup; cannot be changed without wiping data
-retention_chunks = 0            # 0 indicates unbounded/full history retention
+retention_chunks = 0            # Number of 10,000-ledger chunks to keep. 0 keeps full history.
 ```
 
 **Splitting storage across disks (optional):** By default, the node keeps all of its data under `default_data_dir`. If a single NVMe volume is too small for full history, you can move the large stores (`ledgers`, `events`) to a second NVMe volume. The stores are:
@@ -142,7 +142,7 @@ docker run -d --name stellar-rpc-v2 \
   -v /srv/rpc-archive/data:/data \
   -p 8000:8000 \
   -p 127.0.0.1:6061:6061 \
-  unsafe-stellar-rpc/stellar-rpc-v2:rpcv2-v0.1.0-beta.1 \
+  stellar/unsafe-stellar-rpc:archive-node-beta \
   --config /config/rpc-archive.toml
 ```
 
