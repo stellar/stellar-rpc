@@ -31,13 +31,15 @@ Data moves through a two-tier storage system:
 
 ## 3. Data Lake Access for Backfill
 
-During initial startup, the node downloads historical ledgers from an external ledger datalake. You have two options for your datalake source:
+During initial startup, the node downloads historical ledgers from an external ledger data lake. You have two options for your data lake source:
 
-### Option 1: Public AWS Open Data Bucket
+### Option 1: Public Data Lake
 
-Utilize the public AWS Open Data bucket provided by Stellar:
+Use the public AWS Open Data bucket:
 
 - **Pubnet Bucket:** `s3://aws-public-blockchain/v1.1/stellar/ledgers/pubnet`
+
+See the [Galexie data lake providers](https://developers.stellar.org/docs/data/indexers/build-your-own/galexie/providers) page for the full list.
 
 ### Option 2: Self-Hosted Data Lake
 
