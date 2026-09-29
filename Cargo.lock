@@ -939,10 +939,10 @@ dependencies = [
  "rand",
  "serde_json",
  "sha2",
- "soroban-env-host 28.0.1",
  "soroban-env-host 29.0.0",
- "soroban-simulation 28.0.1",
+ "soroban-env-host 30.0.0",
  "soroban-simulation 29.0.0",
+ "soroban-simulation 30.0.0",
 ]
 
 [[package]]
@@ -1228,9 +1228,8 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "soroban-builtin-sdk-macros"
-version = "28.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc470cc875cbdeb5ffb0fcb45017803c94b65075d493f097304b132ab95f353c"
+version = "29.0.0"
+source = "git+https://github.com/stellar/rs-soroban-env?rev=cb32250d926bd7188f3a6f9075bd48c44550dcac#cb32250d926bd7188f3a6f9075bd48c44550dcac"
 dependencies = [
  "itertools",
  "proc-macro2",
@@ -1240,8 +1239,8 @@ dependencies = [
 
 [[package]]
 name = "soroban-builtin-sdk-macros"
-version = "29.0.0"
-source = "git+https://github.com/sisuresh/rs-soroban-env?rev=a2094aa582c75b8cdb5a08a4640e147911f31870#a2094aa582c75b8cdb5a08a4640e147911f31870"
+version = "30.0.0"
+source = "git+https://github.com/stellar/rs-soroban-env?rev=169890d50e27ef948bef66401147aba814d9b04e#169890d50e27ef948bef66401147aba814d9b04e"
 dependencies = [
  "itertools",
  "proc-macro2",
@@ -1251,26 +1250,8 @@ dependencies = [
 
 [[package]]
 name = "soroban-env-common"
-version = "28.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74059594274a1b51d0ec410ef1acd9009a888e73c5f8bdd5577d28ea8766e6f2"
-dependencies = [
- "arbitrary",
- "crate-git-revision 0.0.9",
- "ethnum",
- "num-derive",
- "num-traits",
- "soroban-env-macros 28.0.1",
- "soroban-wasmi 0.31.1-soroban.20.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "static_assertions",
- "stellar-xdr 28.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "wasmparser",
-]
-
-[[package]]
-name = "soroban-env-common"
 version = "29.0.0"
-source = "git+https://github.com/sisuresh/rs-soroban-env?rev=a2094aa582c75b8cdb5a08a4640e147911f31870#a2094aa582c75b8cdb5a08a4640e147911f31870"
+source = "git+https://github.com/stellar/rs-soroban-env?rev=cb32250d926bd7188f3a6f9075bd48c44550dcac#cb32250d926bd7188f3a6f9075bd48c44550dcac"
 dependencies = [
  "arbitrary",
  "crate-git-revision 0.0.9",
@@ -1278,53 +1259,33 @@ dependencies = [
  "num-derive",
  "num-traits",
  "soroban-env-macros 29.0.0",
- "soroban-wasmi 0.31.1-soroban.20.0.1 (git+https://github.com/stellar/wasmi?rev=0ed3f3dee30dc41ebe21972399e0a73a41944aa0)",
+ "soroban-wasmi",
  "static_assertions",
  "stellar-xdr 28.0.0 (git+https://github.com/stellar/rs-stellar-xdr?rev=e0d289adf4ad2483a10bcc8df743126974d77301)",
  "wasmparser",
 ]
 
 [[package]]
-name = "soroban-env-host"
-version = "28.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d3d108fff17fd4181343e29fd8d81d5053dfc29b337643e3b6c38e750eeb2f7"
+name = "soroban-env-common"
+version = "30.0.0"
+source = "git+https://github.com/stellar/rs-soroban-env?rev=169890d50e27ef948bef66401147aba814d9b04e#169890d50e27ef948bef66401147aba814d9b04e"
 dependencies = [
- "ark-bls12-381",
- "ark-bn254",
- "ark-ec",
- "ark-ff",
- "ark-serialize",
- "curve25519-dalek",
- "ecdsa",
- "ed25519-dalek",
- "elliptic-curve",
- "generic-array",
- "getrandom",
- "hex-literal",
- "hmac",
- "k256",
+ "arbitrary",
+ "crate-git-revision 0.0.9",
+ "ethnum",
  "num-derive",
- "num-integer",
  "num-traits",
- "p256",
- "rand",
- "rand_chacha",
- "sec1",
- "sha2",
- "sha3",
- "soroban-builtin-sdk-macros 28.0.1",
- "soroban-env-common 28.0.1",
- "soroban-wasmi 0.31.1-soroban.20.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "soroban-env-macros 30.0.0",
+ "soroban-wasmi",
  "static_assertions",
- "stellar-strkey 0.0.13",
+ "stellar-xdr 28.0.0 (git+https://github.com/stellar/rs-stellar-xdr?rev=a9c9750e4a24473323f550b5184742975d6419f4)",
  "wasmparser",
 ]
 
 [[package]]
 name = "soroban-env-host"
 version = "29.0.0"
-source = "git+https://github.com/sisuresh/rs-soroban-env?rev=a2094aa582c75b8cdb5a08a4640e147911f31870#a2094aa582c75b8cdb5a08a4640e147911f31870"
+source = "git+https://github.com/stellar/rs-soroban-env?rev=cb32250d926bd7188f3a6f9075bd48c44550dcac#cb32250d926bd7188f3a6f9075bd48c44550dcac"
 dependencies = [
  "ark-bls12-381",
  "ark-bn254",
@@ -1351,7 +1312,43 @@ dependencies = [
  "sha3",
  "soroban-builtin-sdk-macros 29.0.0",
  "soroban-env-common 29.0.0",
- "soroban-wasmi 0.31.1-soroban.20.0.1 (git+https://github.com/stellar/wasmi?rev=0ed3f3dee30dc41ebe21972399e0a73a41944aa0)",
+ "soroban-wasmi",
+ "static_assertions",
+ "stellar-strkey 0.0.13",
+ "wasmparser",
+]
+
+[[package]]
+name = "soroban-env-host"
+version = "30.0.0"
+source = "git+https://github.com/stellar/rs-soroban-env?rev=169890d50e27ef948bef66401147aba814d9b04e#169890d50e27ef948bef66401147aba814d9b04e"
+dependencies = [
+ "ark-bls12-381",
+ "ark-bn254",
+ "ark-ec",
+ "ark-ff",
+ "ark-serialize",
+ "curve25519-dalek",
+ "ecdsa",
+ "ed25519-dalek",
+ "elliptic-curve",
+ "generic-array",
+ "getrandom",
+ "hex-literal",
+ "hmac",
+ "k256",
+ "num-derive",
+ "num-integer",
+ "num-traits",
+ "p256",
+ "rand",
+ "rand_chacha",
+ "sec1",
+ "sha2",
+ "sha3",
+ "soroban-builtin-sdk-macros 30.0.0",
+ "soroban-env-common 30.0.0",
+ "soroban-wasmi",
  "static_assertions",
  "stellar-strkey 0.0.18",
  "wasmparser",
@@ -1359,23 +1356,8 @@ dependencies = [
 
 [[package]]
 name = "soroban-env-macros"
-version = "28.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45f63006270b7ddfa604f4a12a43d1f489aa96c280877f24e37a139bb69964af"
-dependencies = [
- "itertools",
- "proc-macro2",
- "quote",
- "serde",
- "serde_json",
- "stellar-xdr 28.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "syn",
-]
-
-[[package]]
-name = "soroban-env-macros"
 version = "29.0.0"
-source = "git+https://github.com/sisuresh/rs-soroban-env?rev=a2094aa582c75b8cdb5a08a4640e147911f31870#a2094aa582c75b8cdb5a08a4640e147911f31870"
+source = "git+https://github.com/stellar/rs-soroban-env?rev=cb32250d926bd7188f3a6f9075bd48c44550dcac#cb32250d926bd7188f3a6f9075bd48c44550dcac"
 dependencies = [
  "itertools",
  "proc-macro2",
@@ -1387,22 +1369,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "soroban-simulation"
-version = "28.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d13a9b89ac7d87e873f6a2154619cf891c9e79aebf074bd3e94ec85d09ed5666"
+name = "soroban-env-macros"
+version = "30.0.0"
+source = "git+https://github.com/stellar/rs-soroban-env?rev=169890d50e27ef948bef66401147aba814d9b04e#169890d50e27ef948bef66401147aba814d9b04e"
 dependencies = [
- "anyhow",
- "rand",
- "soroban-env-host 28.0.1",
- "static_assertions",
- "thiserror",
+ "itertools",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "stellar-xdr 28.0.0 (git+https://github.com/stellar/rs-stellar-xdr?rev=a9c9750e4a24473323f550b5184742975d6419f4)",
+ "syn",
 ]
 
 [[package]]
 name = "soroban-simulation"
 version = "29.0.0"
-source = "git+https://github.com/sisuresh/rs-soroban-env?rev=a2094aa582c75b8cdb5a08a4640e147911f31870#a2094aa582c75b8cdb5a08a4640e147911f31870"
+source = "git+https://github.com/stellar/rs-soroban-env?rev=cb32250d926bd7188f3a6f9075bd48c44550dcac#cb32250d926bd7188f3a6f9075bd48c44550dcac"
 dependencies = [
  "anyhow",
  "rand",
@@ -1412,16 +1395,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "soroban-wasmi"
-version = "0.31.1-soroban.20.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "710403de32d0e0c35375518cb995d4fc056d0d48966f2e56ea471b8cb8fc9719"
+name = "soroban-simulation"
+version = "30.0.0"
+source = "git+https://github.com/stellar/rs-soroban-env?rev=169890d50e27ef948bef66401147aba814d9b04e#169890d50e27ef948bef66401147aba814d9b04e"
 dependencies = [
- "smallvec",
- "spin",
- "wasmi_arena 0.4.1",
- "wasmi_core 0.13.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "wasmparser-nostd",
+ "anyhow",
+ "rand",
+ "soroban-env-host 30.0.0",
+ "static_assertions",
+ "thiserror",
 ]
 
 [[package]]
@@ -1431,8 +1413,8 @@ source = "git+https://github.com/stellar/wasmi?rev=0ed3f3dee30dc41ebe21972399e0a
 dependencies = [
  "smallvec",
  "spin",
- "wasmi_arena 0.4.0",
- "wasmi_core 0.13.0 (git+https://github.com/stellar/wasmi?rev=0ed3f3dee30dc41ebe21972399e0a73a41944aa0)",
+ "wasmi_arena",
+ "wasmi_core",
  "wasmparser-nostd",
 ]
 
@@ -1488,23 +1470,7 @@ dependencies = [
 [[package]]
 name = "stellar-xdr"
 version = "28.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f93d09ff8b9f919b084f664003c4c546ac66a76affd5429460dbe29f4b326f8e"
-dependencies = [
- "arbitrary",
- "base64",
- "crate-git-revision 0.0.9",
- "escape-bytes",
- "ethnum",
- "hex",
- "sha2",
- "stellar-strkey 0.0.13",
-]
-
-[[package]]
-name = "stellar-xdr"
-version = "28.0.0"
-source = "git+https://github.com/stellar/rs-stellar-xdr?rev=e0d289adf4ad2483a10bcc8df743126974d77301#e0d289adf4ad2483a10bcc8df743126974d77301"
+source = "git+https://github.com/stellar/rs-stellar-xdr?rev=a9c9750e4a24473323f550b5184742975d6419f4#a9c9750e4a24473323f550b5184742975d6419f4"
 dependencies = [
  "arbitrary",
  "base64",
@@ -1515,6 +1481,21 @@ dependencies = [
  "hex",
  "serde",
  "serde_with",
+ "sha2",
+ "stellar-strkey 0.0.18",
+]
+
+[[package]]
+name = "stellar-xdr"
+version = "28.0.0"
+source = "git+https://github.com/stellar/rs-stellar-xdr?rev=e0d289adf4ad2483a10bcc8df743126974d77301#e0d289adf4ad2483a10bcc8df743126974d77301"
+dependencies = [
+ "arbitrary",
+ "base64",
+ "crate-git-revision 0.0.9",
+ "escape-bytes",
+ "ethnum",
+ "hex",
  "sha2",
  "stellar-strkey 0.0.13",
 ]
@@ -1682,24 +1663,6 @@ version = "0.4.0"
 source = "git+https://github.com/stellar/wasmi?rev=0ed3f3dee30dc41ebe21972399e0a73a41944aa0#0ed3f3dee30dc41ebe21972399e0a73a41944aa0"
 
 [[package]]
-name = "wasmi_arena"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "104a7f73be44570cac297b3035d76b169d6599637631cf37a1703326a0727073"
-
-[[package]]
-name = "wasmi_core"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dcf1a7db34bff95b85c261002720c00c3a6168256dcb93041d3fa2054d19856a"
-dependencies = [
- "downcast-rs",
- "libm",
- "num-traits",
- "paste",
-]
-
-[[package]]
 name = "wasmi_core"
 version = "0.13.0"
 source = "git+https://github.com/stellar/wasmi?rev=0ed3f3dee30dc41ebe21972399e0a73a41944aa0#0ed3f3dee30dc41ebe21972399e0a73a41944aa0"
@@ -1799,7 +1762,7 @@ dependencies = [
  "rand",
  "serde_json",
  "sha2",
- "stellar-xdr 28.0.0 (git+https://github.com/stellar/rs-stellar-xdr?rev=e0d289adf4ad2483a10bcc8df743126974d77301)",
+ "stellar-xdr 28.0.0 (git+https://github.com/stellar/rs-stellar-xdr?rev=a9c9750e4a24473323f550b5184742975d6419f4)",
 ]
 
 [[package]]

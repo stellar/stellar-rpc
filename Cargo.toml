@@ -12,37 +12,38 @@ libc = "0.2.147"
 anyhow = "1.0.75"
 serde_json = "1.0"
 
+# `-prev` is core's protocol-29 stand-in: 29 was an internal security release,
+# never GA'd on crates.io, so it's pinned by git rev like `-curr`.
 [workspace.dependencies.soroban-env-host-prev]
 package = "soroban-env-host"
-version = "=28.0.1"
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "cb32250d926bd7188f3a6f9075bd48c44550dcac"
 
-# Shift the window: `-prev` is now the released P28 host (crates.io 28.0.1),
-# and `-curr` is the muxed-contract-address host pulled from the (unmerged)
-# rs-soroban-env PR, declaring P30 with `next`. Using a git rev keeps -prev
-# and -curr as separate compilation units. Bump the rev as the PR evolves;
-# re-pin to a crates.io release once it merges and GAs.
+# `-curr` is rs-soroban-env#1700 (CAP-0084 muxed contract addresses), merged
+# to stellar/rs-soroban-env main. It declares protocol 30 by default, so no
+# `next` feature is needed.
 [workspace.dependencies.soroban-env-host-curr]
 package = "soroban-env-host"
-git = "https://github.com/sisuresh/rs-soroban-env"
-rev = "a2094aa582c75b8cdb5a08a4640e147911f31870"
-features = ["next"]
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "169890d50e27ef948bef66401147aba814d9b04e"
 
 [workspace.dependencies.soroban-simulation-prev]
 package = "soroban-simulation"
-version = "=28.0.1"
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "cb32250d926bd7188f3a6f9075bd48c44550dcac"
 
 [workspace.dependencies.soroban-simulation-curr]
 package = "soroban-simulation"
-git = "https://github.com/sisuresh/rs-soroban-env"
-rev = "a2094aa582c75b8cdb5a08a4640e147911f31870"
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "169890d50e27ef948bef66401147aba814d9b04e"
 features = ["unstable-next-api"]
 
 [workspace.dependencies.stellar-xdr]
-# Same URL and rev as soroban-env-host-curr's own workspace pin: a different
-# URL or rev for stellar-xdr makes Cargo treat them as two separate crate
-# instances and breaks type unification with the host.
+# Must match soroban-env-host-curr's own rs-stellar-xdr pin, or Cargo treats
+# them as two separate crate instances and type unification with the host
+# breaks.
 git = "https://github.com/stellar/rs-stellar-xdr"
-rev = "e0d289adf4ad2483a10bcc8df743126974d77301"
+rev = "a9c9750e4a24473323f550b5184742975d6419f4"
 # `type_enum` provides the `Type`/`TypeVariant` reflection enums used by
 # xdr2json. `cap_0084_muxed_contract` gates the `ScAddress` muxed-contract arm
 # and is the same feature soroban-env-host-curr enables at its workspace
