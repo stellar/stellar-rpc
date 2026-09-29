@@ -53,7 +53,7 @@ The public AWS Open Data bucket supports anonymous access and requires no AWS cr
 
 ## 4. Setup & Installation
 
-Create local host directories and pull the container image. Put `/srv/rpc-archive` on the 7 TB NVMe volume:
+Create local host directories to hold the configuration files and network data, respectively. Then, pull the container image. Put `/srv/rpc-archive` on the 7 TB NVMe volume:
 
 ```bash
 mkdir -p /srv/rpc-archive/config /srv/rpc-archive/data
