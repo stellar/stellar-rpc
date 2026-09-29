@@ -122,13 +122,15 @@ retention_chunks = 0            # 0 indicates unbounded/full history retention
 | `txhash_index` | `{default_data_dir}/txhash/index` | Frozen transaction-hash indexes |
 | `hot` | `{default_data_dir}/hot` | Per-chunk hot RocksDB databases |
 
-To put a store on a different volume, set its key inside `[storage]`.
+To put a store on a different volume, set its key inside `[storage]`. Mount that volume into the container with a second `-v` flag, and use the container path in the key.
 
 ### 5.2 Captive Core Configuration (`/srv/rpc-archive/config/captive-core.toml`)
 
 You should create a configuration file for [Stellar Core](https://github.com/stellar/stellar-core). If you are already running standard Stellar RPC, you can copy your existing Stellar Core configuration file. Otherwise, a sample configuration file for Pubnet is available here:
 
 - [Pubnet Sample Config](https://github.com/stellar/go-stellar-sdk/blob/main/ingest/ledgerbackend/configs/captive-core-pubnet.cfg)
+
+The sample file is not for production use. Its quorum set is only an example. Select the quorum set yourself before you run the node.
 
 ### 5.3 Launch Container
 
@@ -155,7 +157,7 @@ On initial startup, the container downloads ledger metadata from the configured 
 
 - **Estimated Duration:** 24 to 48 hours depending on network bandwidth and disk IOPS.
 - **Port 8000 Status & Health Checks:** Port 8000 remains closed and `getHealth` fails throughout backfill. Do **not** configure liveness probes (or ECS target group checks) on port 8000 during initial backfill, as failing health checks will trigger continuous restart loops. Use admin port 6061 for liveness checks during backfill, and enable `getHealth` probes on port 8000 only for readiness or post-backfill serving.
-- **Admin Port (6061):** Open and scraping metrics. Note that `soroban_rpc_fullhistory_streaming_last_committed_ledger` updates in batch jumps (at the end of each 10,000-ledger chunk pass) rather than continuously ledger-by-ledger.
+- **Admin Port (6061):** Open and scraping metrics. `soroban_rpc_fullhistory_streaming_last_committed_ledger` does not move during backfill. It updates only when a backfill pass ends. Use the `backfill_chunks_planned` and `backfill_chunks_completed` gauges for per-chunk progress.
 
 ### 6.1 Monitoring Backfill Progress
 
