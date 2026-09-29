@@ -24,7 +24,7 @@ Data moves through a two-tier storage system:
 |---|---|---|
 | CPU | 8 vCPU | |
 | RAM | 32 GB | |
-| Storage Volume | 6 TB initial | Grows by ~1.1 TB per year at current network activity rates. |
+| Storage Volume | 7 TB initial | Grows by ~1.1 TB per year at current network activity rates. |
 | Storage Type | Local, direct-attached NVMe | Network storage (e.g., AWS EBS, GCP Persistent Disk) is **NOT** tested. |
 
 ---
@@ -137,7 +137,7 @@ The sample file is not for production use. Its quorum set is only an example. Se
 Once configuration files are in place, run the container:
 
 ```bash
-docker run -d --name stellar-rpc-v2 --restart unless-stopped \
+docker run -d --name stellar-rpc-v2 \
   -v /srv/rpc-archive/config:/config:ro \
   -v /srv/rpc-archive/data:/data \
   -p 8000:8000 \
@@ -147,7 +147,7 @@ docker run -d --name stellar-rpc-v2 --restart unless-stopped \
 ```
 
 - **Persistent Storage:** Preserve `/srv/rpc-archive/data` across restarts. Wiping it triggers a full backfill.
-- **Process Restarts:** The node exits non-zero on fatal errors and relies on the orchestrator to restart it from a durable state. Backfill progress is persisted per 10,000-ledger chunk, allowing restarts to resume without losing completed work.
+- **Process Restarts:** The node exits non-zero on fatal errors. Check the logs, then start it again. Backfill progress is persisted per 10,000-ledger chunk, so a restart resumes without losing completed work.
 
 ---
 
