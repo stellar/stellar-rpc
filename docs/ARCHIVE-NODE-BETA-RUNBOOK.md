@@ -69,6 +69,7 @@ The archive node requires two primary configuration files:
 - **`rpc-archive.toml`:** Configures the RPC server settings, storage, and backfill sources.
 - **`captive-core.toml`:** Configures the embedded Stellar Core instance.
 
+These will go in the `/srv/rpc-archive/config/` folder.
 ### 5.1 RPC Configuration (`/srv/rpc-archive/config/rpc-archive.toml`)
 
 Download or copy the reference configuration file directly from GitHub:
