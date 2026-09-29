@@ -16,6 +16,7 @@ serde_json = "1.0"
 # never GA'd on crates.io, so it's pinned by git rev like `-curr`.
 [workspace.dependencies.soroban-env-host-prev]
 package = "soroban-env-host"
+version = "=29.0.0"
 git = "https://github.com/stellar/rs-soroban-env"
 rev = "cb32250d926bd7188f3a6f9075bd48c44550dcac"
 
@@ -24,6 +25,7 @@ rev = "cb32250d926bd7188f3a6f9075bd48c44550dcac"
 # `next` feature is needed.
 [workspace.dependencies.soroban-env-host-curr]
 package = "soroban-env-host"
+version = "=30.0.0"
 git = "https://github.com/stellar/rs-soroban-env"
 rev = "169890d50e27ef948bef66401147aba814d9b04e"
 
