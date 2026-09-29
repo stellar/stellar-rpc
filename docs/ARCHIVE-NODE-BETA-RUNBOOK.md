@@ -191,7 +191,7 @@ curl -s localhost:8000 -H 'content-type: application/json' -d '{"jsonrpc":"2.0",
 
 ## 7. Monitoring & Operational Alerting
 
-Metrics are exposed via Prometheus on `service.admin_endpoint` at `/metrics` (namespace: `soroban_rpc`).
+Metrics are exposed via Prometheus on `service.admin_endpoint` at `/metrics` (namespace: `soroban_rpc`). Set alerts in your own monitoring system on the metrics below.
 
 ### Key Metrics to Monitor
 
@@ -204,10 +204,12 @@ Metrics are exposed via Prometheus on `service.admin_endpoint` at `/metrics` (na
 
 ### Critical Error Counters
 
-Alert if `rate(...) > 0` for any of the following:
+Alert if `rate(...) > 0` for any of the following. Any count means a fault in the node.
 
 - `soroban_rpc_fullhistory_streaming_failed_destroys_total`
 - `soroban_rpc_fullhistory_streaming_tx_index_inconsistencies_total`
 - `soroban_rpc_fullhistory_streaming_store_ops_after_deferred_close_total`
 - `soroban_rpc_fullhistory_streaming_unavailable_chunk_resolves_total`
 - `soroban_rpc_fullhistory_streaming_missing_cold_pack_opens_total`
+
+For support or to report errors, reach out to SDF through your usual channels.
