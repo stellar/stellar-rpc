@@ -271,14 +271,13 @@ func eventInfoForEvent(
 	}
 
 	info := protocol.EventInfo{
-		EventType:                eventType,
-		Ledger:                   int32(ledger),
-		LedgerClosedAt:           ledgerClosedAt,
-		ID:                       cursor.String(),
-		InSuccessfulContractCall: event.InSuccessfulContractCall,
-		TransactionHash:          txHash,
-		OpIndex:                  cursor.Op,
-		TxIndex:                  cursor.Tx,
+		EventType:       eventType,
+		Ledger:          int32(ledger),
+		LedgerClosedAt:  ledgerClosedAt,
+		ID:              cursor.String(),
+		TransactionHash: txHash,
+		OpIndex:         cursor.Op,
+		TxIndex:         cursor.Tx,
 	}
 
 	switch format {
