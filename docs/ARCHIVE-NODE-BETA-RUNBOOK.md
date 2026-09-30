@@ -105,13 +105,7 @@ history_archive_urls = [
 ]
 ```
 
-**Retention** is another important configuration block. It is configured by default to retain full history, so you do not need to modify these settings:
-
-```toml
-[retention]
-earliest_ledger  = "genesis"    # Pinned on first startup; cannot be changed without wiping data
-retention_chunks = 0            # Number of 10,000-ledger chunks to keep. 0 keeps full history.
-```
+**Retention** defaults to full history. Leave the `[retention]` section at its defaults.
 
 **Splitting storage across disks (optional):** By default, the node keeps all of its data under `default_data_dir`. If a single NVMe volume is too small for full history, you can move the large stores (`ledgers`, `events`) to a second NVMe volume. The stores are:
 
