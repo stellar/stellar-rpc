@@ -77,8 +77,8 @@ Rules:
 
 | `scanStatus` | Meaning |
 |---|---|
-| `HAS_MORE` | More events in range. Send the cursor. |
-| `WAITING_FOR_LEDGERS` | Scan reached the latest ledger. Poll with the cursor, about once per ledger close. |
+| `HAS_MORE` | Scan range remains. Send the cursor. |
+| `WAITING_FOR_LEDGERS` | The scan needs ledgers this node does not have yet. Poll with the cursor, about once per ledger close. |
 | `OLDEST_REACHED` | The range extends below the oldest ledger this node has. Events below it are not available. Resending the cursor returns the same status. |
 | `COMPLETE` | Range fully scanned. No cursor. A descending scan whose `minLedger` is at or above the oldest ledger ends here, not in `OLDEST_REACHED`. |
 
