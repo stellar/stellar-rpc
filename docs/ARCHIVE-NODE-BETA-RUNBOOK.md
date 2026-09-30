@@ -72,13 +72,12 @@ The archive node requires two primary configuration files:
 These will go in the `/srv/rpc-archive/config/` folder.
 ### 5.1 RPC Configuration (`/srv/rpc-archive/config/rpc-archive.toml`)
 
-Download or copy the reference configuration file directly from GitHub:
-
-[`rpc-v2-sample-config.toml` on GitHub](https://github.com/stellar/stellar-rpc/blob/rpcv2-v0.1.0-beta.1/cmd/stellar-rpc/rpcv2/rpc-v2-sample-config.toml)
-
 **Note:** The RPC server doesn't read environment variables (e.g., `SOROBAN_RPC_*`). Set its parameters in `rpc-archive.toml` or pass them as command-line flags.
 
-**Mandatory parameters you must set:**
+There are two ways to create the file:
+
+- **Option 1: Minimal configuration.** Copy the block below into `rpc-archive.toml`. It is a complete configuration. Every key not shown takes its default.
+- **Option 2: Full configuration.** Download [`rpc-v2-sample-config.toml`](https://github.com/stellar/stellar-rpc/blob/rpcv2-v0.1.0-beta.1/cmd/stellar-rpc/rpcv2/rpc-v2-sample-config.toml) and set the keys shown in the block below.
 
 ```toml
 [storage]
