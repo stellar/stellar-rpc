@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Removed
+* **`getEvents` responses no longer carry `inSuccessfulContractCall`.** This changes wire behavior for BOTH rpcv1 and rpcv2 — the response type is shared. The field has been deprecated ("remove in v24") since protocol 23, and its value was derivable anyway: `true` for every operation event, and `false` only on the fee and refund events of failed transactions.
+
+### Fixed
+* **`getLedgers` no longer rejects its own cursor at the tip.** This changes wire behavior for BOTH rpcv1 and rpcv2 — the handler is shared. Resending the cursor of the last page used to fail with `-32602` ("cursor must be between the oldest ledger ... and the latest ledger ...") until the next ledger closed — the same code a malformed cursor gets, so a poller could not tell "wait and retry" from "bad cursor". A cursor at or past the tip now returns an empty page with the cursor echoed back. A cursor below the oldest ledger still errors (that data is gone), and an explicit `startLedger` above the tip still errors (only the server-issued token gets the echo).
+* **`getTransactions` cursor no longer breaks a caught-up poller.** This changes wire behavior for BOTH rpcv1 and rpcv2 — the handler is shared. Two long-standing bugs, one fix: the returned `cursor` is now never below the request's cursor; at the tip, the request's cursor is echoed back. Before this fix: (1) a cursor at or above the node's latest ledger returned the literal cursor `"0"`, and resending it failed every poll with `-32602` — the client was stuck until it discarded its cursor (reported in [#745](https://github.com/stellar/stellar-rpc/issues/745)); (2) a cursor at a fully-consumed ledger returned a cursor pointing back at that ledger's start, and the next poll re-delivered all of its transactions as duplicates. Clients need no changes: the returned cursor now always does what the docs promise — fetch what comes next.
+
+### Changed
+* `getTransactions` now scans at most 10,000 ledgers per request. On a sparse range a page can come back short — or even empty — while still carrying a `cursor`, so a response shorter than `limit` no longer implies end-of-data. Every response carries a `cursor`; to tell a sparse scan window from the tip, compare the cursor's ledger part against `latestLedger` and keep paging while it is below ([#908](https://github.com/stellar/stellar-rpc/pull/908)).
+* `getEvents` now rejects malformed contract IDs in filters with `-32602`: a `C…` string with a valid checksum but wrong-length payload used to decode and silently match nothing, and now errors under the SDK's stricter SEP-23 strkey parsing ([#908](https://github.com/stellar/stellar-rpc/pull/908)).
+* `getTransactions` now returns `-32603` (internal error) instead of `-32602` (invalid params) when the node cannot parse a transaction out of its own stored ledger meta in both rpcv1 and rpcv2. Because the request parameters are valid in that case, the previous error was misleading ([#962](https://github.com/stellar/stellar-rpc/pull/962)).
+* `getTransaction` and `getTransactions` now serve transactions with legacy `TransactionMeta` V0. This changes wire behavior for BOTH rpcv1 and rpcv2 (though in practice only a full-history node retains ledgers old enough to carry V0 meta). Such a transaction used to fail the request with `-32603` ("unsupported TransactionMeta version: 0"), and in `getTransactions` one V0 transaction failed the whole page. They are now returned like any other pre-Soroban transaction, with no events ([#962](https://github.com/stellar/stellar-rpc/pull/962)).
+
 ## [v28.0.1](https://github.com/stellar/stellar-rpc/compare/v28.0.0...v28.0.1)
 
 ### Fixed

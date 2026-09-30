@@ -52,7 +52,7 @@ func TestGetLedgerEntriesNotFound(t *testing.T) {
 }
 
 func TestGetLedgerEntriesInvalidParams(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: infrastructure.SkipLimitsUpgrade()})
 
 	client := test.GetRPCLient()
 
