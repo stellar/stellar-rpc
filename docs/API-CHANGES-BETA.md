@@ -47,7 +47,7 @@ Filter fields, at least one per filter:
 Rules:
 
 - `minLedger` above `maxLedger` returns `invalid_params`. `minLedger: 1` is treated as `2`. `minLedger: 0` is the same as omitting it.
-- `maxLedger` above the latest ledger returns `WAITING_FOR_LEDGERS` until that ledger closes.
+- `maxLedger` above the latest ledger is allowed. Ascending serves events up to the latest ledger, then returns `WAITING_FOR_LEDGERS`. Descending returns an empty page with `WAITING_FOR_LEDGERS` until that ledger closes. Ascending with `minLedger` above the latest ledger returns an empty page with `WAITING_FOR_LEDGERS`.
 - With `desc` and no `maxLedger`, the top edge is the latest ledger at query start, so every page shares it.
 - Descending reverses the full event order, including events inside one ledger.
 - An omitted topic position matches any value. A set position must match exactly. There is no topic-count matching, so events with more than four topics still match on positions 0 to 3.
