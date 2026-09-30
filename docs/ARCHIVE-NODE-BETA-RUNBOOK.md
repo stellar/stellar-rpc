@@ -182,12 +182,13 @@ Monitor backfill progress via container logs (`docker logs -f stellar-rpc-v2`), 
 
 **Log Signals:**
 
+- `msg="backfill pass starting"` / `msg="backfill pass complete"`: backfill runs in passes. The first covers history up to the network's latest ledger when it started, and later passes pick up chunks completed in the meantime.
 - `msg="chunk frozen"`: a chunk was written to flat files; reports progress (e.g., `done=X of=Y`) and throughput
 - A line that starts with `msg="backfill complete`, followed by `msg="read server listening"`: port 8000 is open. The node is ready once `getHealth` succeeds (see 6.2).
 
 **Disk Growth:** Capacity increases primarily inside `events/` and `ledgers/` under your data directory.
 
-**Prometheus Metrics:** Track progress via `soroban_rpc_fullhistory_streaming_backfill_chunks_planned` and `soroban_rpc_fullhistory_streaming_backfill_chunks_completed`.
+**Prometheus Metrics:** Track progress via `soroban_rpc_fullhistory_streaming_backfill_chunks_planned` and `soroban_rpc_fullhistory_streaming_backfill_chunks_completed`. `soroban_rpc_fullhistory_streaming_backfill_task_retries_total` counts backfill tasks that failed and were retried. A task that keeps failing stops the node, so if this keeps rising, check the logs for the cause.
 
 ### 6.2 Verifying Node Readiness
 
