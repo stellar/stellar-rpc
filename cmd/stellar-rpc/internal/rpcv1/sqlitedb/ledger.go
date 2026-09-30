@@ -186,9 +186,8 @@ func (r ledgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRange, er
 			return ledgerRange, err
 		}
 		r.db.cache.Lock()
-		// Every commit publishes the oldest, so only fill an empty slot,
-		// and only if no commit raced our MIN(sequence) read.
-		if r.db.cache.firstLedgerSeq == 0 && r.db.cache.latestLedgerSeq == latestLedgerSeqCache {
+		// Every commit publishes the oldest, so only fill an empty slot.
+		if r.db.cache.firstLedgerSeq == 0 {
 			r.db.cache.firstLedgerSeq = ledgerRange.FirstLedger.Sequence
 			r.db.cache.firstLedgerCloseTime = ledgerRange.FirstLedger.CloseTime
 		}
