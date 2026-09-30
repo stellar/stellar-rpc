@@ -86,7 +86,7 @@ endpoint       = "0.0.0.0:8000"  # JSON-RPC endpoint (Binds 0.0.0.0 for Docker f
 admin_endpoint = "0.0.0.0:6061"  # Prometheus metrics & pprof (Internal only - DO NOT EXPOSE TO INTERNET)
 
 [backfill.datastore]
-type = "S3"                     # "S3", "GCS" or "Filesystem"
+type = "S3"                     # "S3" or "GCS"
 
 [backfill.datastore.params]
 destination_bucket_path = "aws-public-blockchain/v1.1/stellar/ledgers/pubnet"
