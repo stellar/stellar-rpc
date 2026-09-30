@@ -4,7 +4,7 @@
 
 The Stellar RPC Archive Node maintains full network history from genesis, whereas standard RPC nodes are optimized for short retention windows (e.g., 7 days). To support full history efficiently, the archive node uses a hybrid storage architecture combining RocksDB for recent hot data and immutable flat files for historical cold data.
 
-The archive node is currently in beta ([`archive-node-beta`](https://github.com/stellar/stellar-rpc/tree/archive-node-beta)), so details in this guide may change before the full release.
+The archive node is currently in beta, so details in this guide may change before the full release.
 
 This guide covers running the node. See the [API changes guide](API-CHANGES-BETA.md) for endpoint differences.
 
