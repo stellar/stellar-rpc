@@ -200,8 +200,8 @@ Metrics are exposed via Prometheus on `service.admin_endpoint` at `/metrics` (na
 |---|---|
 | `soroban_rpc_fullhistory_streaming_last_committed_ledger` | Highest ledger written to disk. Alert if flat/unmoving for > 2 minutes (active serving mode only; ignore during initial batch backfill). |
 | `soroban_rpc_fullhistory_streaming_retention_floor_ledger` | Lowest ledger the retention policy allows. Expected: 2 for full history. Not a coverage or readiness signal. |
-| `soroban_rpc_fullhistory_streaming_live_hot_chunks` | Open RocksDB chunk databases. Expected: 1 (briefly 2 during boundary conversion). |
-| `soroban_rpc_json_rpc_request_duration_seconds` | Histogram tracking latency per method and status code. |
+| `soroban_rpc_fullhistory_streaming_live_hot_chunks` | Hot RocksDB chunk databases on disk. Expected: 2. Reads 1 only before the first chunk boundary. |
+| `soroban_rpc_json_rpc_request_duration_seconds` | Summary of request latency per method and status code. Use its quantile series, not `histogram_quantile`. |
 
 ### Critical Error Counters
 
