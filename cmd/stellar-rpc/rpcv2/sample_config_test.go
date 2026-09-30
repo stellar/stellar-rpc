@@ -4,12 +4,12 @@ import (
 	"os"
 	"regexp"
 	"testing"
-	"time"
 
+	"github.com/pelletier/go-toml"
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 )
 
@@ -24,50 +24,54 @@ func TestSampleConfig_ParsesStrict(t *testing.T) {
 	assert.Equal(t, config.DefaultEndpoint, cfg.Service.Endpoint)
 	assert.Equal(t, "GCS", cfg.Backfill.DataStore.Type)
 	assert.Equal(t, "/etc/stellar/captive-core.toml", cfg.Ingestion.CaptiveCoreConfig)
-
-	// The sample spells out the compiled defaults; drift between the two would
-	// make the sample lie about what an absent key means.
-	assert.Equal(t, config.DefaultMaxConcurrentRequests, *cfg.Service.MaxConcurrentRequests)
-	assert.Equal(t, config.DefaultMethodQueueLimit, *cfg.Service.Methods.GetLedgers.QueueLimit)
-	assert.Equal(t, config.DefaultScanMethodMaxExecutionDuration, *cfg.Service.Methods.GetLedgers.MaxExecutionDuration)
-	assert.Equal(t, config.DefaultGetFeeStatsQueueLimit, *cfg.Service.Methods.GetFeeStats.QueueLimit)
-	assert.Equal(t, config.DefaultClassicFeeWindowLedgers, *cfg.Service.FeeStats.ClassicFeeWindowLedgers)
-	assert.Equal(t, config.DefaultMaxHealthyLedgerLatency, *cfg.Service.Methods.GetHealth.MaxHealthyLedgerLatency)
-	assert.Equal(t, 30*time.Second, *cfg.Service.Methods.GetHealth.MaxHealthyLedgerLatency)
-
-	assert.Equal(t, config.DefaultSendTransactionQueueLimit, *cfg.Service.Methods.SendTransaction.QueueLimit)
-	assert.Equal(t, config.DefaultCoreMethodMaxExecutionDuration,
-		*cfg.Service.Methods.SimulateTransaction.MaxExecutionDuration)
-	assert.Equal(t, config.DefaultMethodQueueLimit, *cfg.Service.Methods.GetLedgerEntries.QueueLimit)
 	assert.False(t, *cfg.Service.Preflight.EnableDebug,
 		"the sample deliberately departs from the true default: it is a production starting point")
-
-	assert.Equal(t, config.DefaultCoreHTTPPort, *cfg.Ingestion.CoreHTTPPort)
-	assert.Equal(t, config.DefaultCoreHTTPQueryPort, *cfg.Ingestion.CoreHTTPQueryPort)
-	assert.Equal(t, config.DefaultCoreRequestTimeout, *cfg.Ingestion.CoreRequestTimeout)
-	assert.Equal(t, config.DefaultCoreHTTPQuerySnapshotLedgers, *cfg.Ingestion.CoreHTTPQuerySnapshotLedgers)
-	assert.Equal(t, "http://localhost:11626", cfg.Ingestion.CoreURL,
-		"the sample leaves core_url commented out, so it derives from core_http_port")
-
-	assert.Equal(t, uint32(backfill.DefaultBSBPrefetchObjects), *cfg.Backfill.BSB.BufferSize)
-	assert.Equal(t, uint32(backfill.DefaultBSBDownloads), *cfg.Backfill.BSB.NumWorkers)
-	assert.Equal(t, int64(backfill.DefaultBSBPrefetchBytes), *cfg.Backfill.BSB.BufferBytes)
-	assert.Equal(t, uint32(backfill.DefaultBSBMaxRetries), *cfg.Backfill.BSB.MaxRetries)
-	assert.Equal(t, backfill.DefaultBSBRetryWait, *cfg.Backfill.BSB.RetryWait)
 }
 
-func TestSampleConfig_CommentedOptionalKeysParseStrict(t *testing.T) {
+// Every value the sample shows, set or commented out, is the compiled default
+// unless a comment there says otherwise. The fields cleared below are those
+// exceptions. The strict parse also fails on a commented-out key the schema lacks.
+func TestSampleConfig_ShownValuesAreDefaults(t *testing.T) {
+	cfg, err := config.ParseConfig(uncommentedSample(t))
+	require.NoError(t, err)
+
+	cfg.Storage.DefaultDataDir = ""
+	cfg.Service.Methods.QueueLimit = nil
+	cfg.Service.Methods.MaxExecutionDuration = nil
+	cfg.Service.Methods.GetNetwork.FriendbotURL = ""
+	cfg.Service.Preflight = config.PreflightConfig{}
+	cfg.Backfill.Workers = nil
+	cfg.Backfill.DataStore = config.DataStoreConfig{}
+	cfg.Ingestion.CaptiveCoreConfig = ""
+	cfg.Ingestion.HistoryArchiveURLs = nil
+	cfg.Ingestion.StellarCoreBinaryPath = ""
+	cfg.Ingestion.CoreHTTPQueryThreadPoolSize = nil
+
+	assert.Equal(t, config.Config{}.WithDefaults(), cfg.WithDefaults())
+}
+
+// Every schema key must appear in the sample, set or commented out. BindFlags
+// registers one flag per key, named by its TOML path.
+func TestSampleConfig_ListsEverySchemaKey(t *testing.T) {
+	tree, err := toml.LoadBytes(uncommentedSample(t))
+	require.NoError(t, err)
+
+	fs := pflag.NewFlagSet("schema", pflag.ContinueOnError)
+	config.BindFlags(fs)
+	fs.VisitAll(func(f *pflag.Flag) {
+		assert.True(t, tree.Has(f.Name), "the sample does not list %s", f.Name)
+	})
+}
+
+// uncommentedSample turns every optional-key line in the sample (`#key = value`,
+// no space after #, unlike prose comments) into a live key.
+func uncommentedSample(t *testing.T) []byte {
+	t.Helper()
 	data, err := os.ReadFile("rpc-v2-sample-config.toml")
 	require.NoError(t, err)
 
-	// Optional keys are documented as `#key = value` lines (no space after #,
-	// unlike prose comments). Uncomment them all: every documented-but-disabled
-	// key must still exist in the schema, or this strict parse fails.
-	re := regexp.MustCompile(`(?m)^#([a-z_]+ = )`)
-	uncommented := re.ReplaceAll(data, []byte("$1"))
+	uncommented := regexp.MustCompile(`(?m)^#([a-z_]+ = )`).ReplaceAll(data, []byte("$1"))
 	require.NotEqual(t, string(data), string(uncommented),
 		"expected '#key = value' optional-key lines in the sample")
-
-	_, err = config.ParseConfig(uncommented)
-	require.NoError(t, err)
+	return uncommented
 }
