@@ -24,7 +24,7 @@ The node groups ledgers into chunks of 10,000 (~15–17 hours). Data moves throu
 | CPU | 8 vCPU | |
 | RAM | 32 GB | |
 | Storage Volume | 7 TB initial | Grows by ~1.1 TB per year at current network activity rates. |
-| Storage Type | Local, direct-attached NVMe | Network storage (e.g., AWS EBS, GCP Persistent Disk) is **NOT** tested. |
+| Storage Type | Local, direct-attached NVMe | Network storage (e.g., AWS EBS, GCP Persistent Disk) is **NOT** tested. On cloud instances, local NVMe is usually wiped when the instance stops, and losing it means a full backfill. |
 
 ---
 
@@ -46,7 +46,7 @@ Build and host your own data lake using Galexie.
 
 - [Galexie Admin Guide](https://developers.stellar.org/docs/data/indexers/build-your-own/galexie)
 
-The public AWS Open Data bucket supports anonymous access and requires no AWS credentials or IAM permissions. If using a self-hosted private data lake, configure access via IAM instance roles or mounted cloud credential files.
+The public AWS Open Data bucket supports anonymous access and requires no AWS credentials or IAM permissions. If using a self-hosted private data lake, configure access via IAM instance roles, mounted cloud credential files, or the standard AWS or Google Cloud credential environment variables.
 
 ---
 
@@ -69,11 +69,14 @@ The archive node requires two primary configuration files:
 - **`captive-core.toml`:** Configures the embedded Stellar Core instance.
 
 These will go in the `/srv/rpc-archive/config/` folder.
+
 ### 5.1 RPC Configuration (`/srv/rpc-archive/config/rpc-archive.toml`)
 
-**Note:** The RPC server doesn't read environment variables, including the ones standard Stellar RPC uses (`ENDPOINT`, `NETWORK_PASSPHRASE`, `CAPTIVE_CORE_CONFIG_PATH` and so on). Set its parameters in `rpc-archive.toml`, or pass them as command-line flags named after their TOML path, such as `--service.endpoint=0.0.0.0:8000`.
+**Note:** The RPC server doesn't take its settings from environment variables, including the ones standard Stellar RPC uses (`ENDPOINT`, `NETWORK_PASSPHRASE`, `CAPTIVE_CORE_CONFIG_PATH` and so on). Set its parameters in `rpc-archive.toml`, or pass them as command-line flags named after their TOML path, such as `--service.endpoint=0.0.0.0:8000`.
 
 Copy this minimal configuration into `rpc-archive.toml` to get started. Every key it leaves out takes its default. [`rpc-v2-sample-config.toml`](https://github.com/stellar/stellar-rpc/blob/archive-node-beta/cmd/stellar-rpc/rpcv2/rpc-v2-sample-config.toml) documents every key and its default.
+
+Paths in this file are paths inside the container. The `docker run` command in 5.3 mounts the host's `/srv/rpc-archive/data` at `/data` and `/srv/rpc-archive/config` at `/config`.
 
 ```toml
 [storage]
@@ -114,7 +117,7 @@ history_archive_urls = [
 | `txhash_index` | `{default_data_dir}/txhash/index` | Indexes for looking up transactions by hash |
 | `hot` | `{default_data_dir}/hot` | The hot tier: one RocksDB database per chunk not yet moved to flat files |
 
-To put a store on a different volume, set its key inside `[storage]`. Mount that volume into the container with a second `-v` flag, and use the container path in the key.
+To put a store on a different volume, set its key inside `[storage]`. Mount that volume into the container with another `-v` flag, and use the container path in the key.
 
 For example, with a second NVMe volume mounted on the host at `/mnt/nvme2`, this `[storage]` section puts `ledgers` on it and keeps `events` and everything else under `/data`:
 
@@ -138,7 +141,7 @@ You should create a configuration file for [Stellar Core](https://github.com/ste
 
 - [Pubnet Sample Config](https://github.com/stellar/go-stellar-sdk/blob/main/ingest/ledgerbackend/configs/captive-core-pubnet.cfg)
 
-The sample file is not for production use. Its quorum set is only an example. Select the quorum set yourself before you run the node.
+The sample file is not for production use. Its quorum set is only an example. Select the quorum set yourself before you run the node (see [Choosing your quorum set](https://developers.stellar.org/docs/validators/admin-guide/configuring#choosing-your-quorum-set)).
 
 The file must set `NETWORK_PASSPHRASE`. The node reads the network passphrase from it and does not start without it. Standard Stellar RPC does not need it in this file, so a copied file may not have it. For Pubnet, add:
 
@@ -170,8 +173,8 @@ docker run -d --name stellar-rpc-v2 \
 On initial startup, the container downloads ledger metadata from the configured data lake and backfills history before serving queries. **Nothing is served until the backfill completes.**
 
 - **Estimated Duration:** 24 to 48 hours depending on network bandwidth and disk IOPS.
-- **Port 8000 Status & Health Checks:** Port 8000 remains closed and `getHealth` fails throughout backfill. Do **not** configure liveness probes (or ECS target group checks) on port 8000, as failing health checks will trigger continuous restart loops. Use admin port 6061 for liveness checks (`GET /metrics` returns 200), and use `getHealth` on port 8000 only as a readiness check.
-- **Admin Port (6061):** Open and serving metrics. `soroban_rpc_fullhistory_streaming_last_committed_ledger` does not move during backfill. It updates only when a backfill pass ends. Use the `backfill_chunks_planned` and `backfill_chunks_completed` gauges for per-chunk progress.
+- **Port 8000 Status & Health Checks:** Port 8000 remains closed and `getHealth` fails throughout backfill. Do **not** configure liveness probes (or ECS target group checks) on port 8000, as failing health checks will trigger continuous restart loops. Use admin port 6061 for liveness checks (`GET /metrics` returns 200), and use `getHealth` on port 8000 only as a readiness check. `getHealth` is a JSON-RPC POST, so load-balancer checks and HTTP GET probes can't call it; use a command-based probe such as the `curl` in 6.2.
+- **Admin Port (6061):** Open and serving metrics. `soroban_rpc_fullhistory_streaming_last_committed_ledger` stays flat for most of the backfill, so track progress with the backfill gauges in 6.1.
 
 ### 6.1 Monitoring Backfill Progress
 
@@ -179,14 +182,12 @@ Monitor backfill progress via container logs (`docker logs -f stellar-rpc-v2`), 
 
 **Log Signals:**
 
-- `msg="backfill pass starting"` / `msg="backfill pass complete"`
-- `msg="chunk build started"`
 - `msg="chunk frozen"`: a chunk was written to flat files; reports progress (e.g., `done=X of=Y`) and throughput
 - A line that starts with `msg="backfill complete`, followed by `msg="read server listening"`: port 8000 is open. The node is ready once `getHealth` succeeds (see 6.2).
 
 **Disk Growth:** Capacity increases primarily inside `events/` and `ledgers/` under your data directory.
 
-**Prometheus Metrics:** Track progress via `soroban_rpc_fullhistory_streaming_backfill_chunks_planned` and `soroban_rpc_fullhistory_streaming_backfill_chunks_completed`. `soroban_rpc_fullhistory_streaming_backfill_task_retries_total` counts chunk builds that failed and were retried. If it keeps rising, check the logs for the cause.
+**Prometheus Metrics:** Track progress via `soroban_rpc_fullhistory_streaming_backfill_chunks_planned` and `soroban_rpc_fullhistory_streaming_backfill_chunks_completed`.
 
 ### 6.2 Verifying Node Readiness
 
@@ -203,13 +204,13 @@ curl -s localhost:8000 -H 'content-type: application/json' -d '{"jsonrpc":"2.0",
 
 ## 7. Monitoring & Operational Alerting
 
-Metrics are exposed via Prometheus on `service.admin_endpoint` at `/metrics` (namespace: `soroban_rpc`). Set alerts in your own monitoring system on the metrics below.
+Metrics are exposed via Prometheus on `service.admin_endpoint` at `/metrics` (namespace: `soroban_rpc`). Set alerts in your own monitoring system on the metrics below. The `docker run` command in 5.3 publishes port 6061 on the host's loopback interface only; to scrape it from another machine, publish it on a private interface instead (for example `-p 10.0.0.5:6061:6061`).
 
 ### Key Metrics to Monitor
 
 | Metric Name | Description / Alert Condition |
 |---|---|
-| `soroban_rpc_fullhistory_streaming_last_committed_ledger` | Highest ledger written to disk. Alert if flat/unmoving for > 2 minutes (active serving mode only; ignore it until `getHealth` succeeds). |
+| `soroban_rpc_fullhistory_streaming_last_committed_ledger` | Newest ledger the node can serve. Alert if it stays flat for more than 2 minutes once the node is serving; it is expected to stay flat during backfill. |
 | `soroban_rpc_fullhistory_streaming_retention_floor_ledger` | Lowest ledger the retention policy allows. Expected: 2 for full history. It does not show whether the node holds that ledger or is ready to serve. |
 | `soroban_rpc_fullhistory_streaming_live_hot_chunks` | Hot-tier chunk databases on disk. Expected: 1 (briefly 2 while a completed chunk is moved to flat files). |
 | `soroban_rpc_json_rpc_request_duration_seconds` | Summary of request latency per method and status code. |
@@ -218,7 +219,7 @@ Also alert on free disk space on every volume that holds a store. The node's dat
 
 ### Critical Error Counters
 
-Alert if `rate(...) > 0` for any of the following. Any count means a fault in the node.
+Alert if any of the following increases, for example `increase(<metric>[10m]) > 0`. Any increase means a fault in the node.
 
 - `soroban_rpc_fullhistory_streaming_failed_destroys_total`
 - `soroban_rpc_fullhistory_streaming_tx_index_inconsistencies_total`
@@ -226,4 +227,4 @@ Alert if `rate(...) > 0` for any of the following. Any count means a fault in th
 - `soroban_rpc_fullhistory_streaming_unavailable_chunk_resolves_total`
 - `soroban_rpc_fullhistory_streaming_missing_cold_pack_opens_total`
 
-For support or to report errors, reach out to SDF through your usual channels.
+To report errors, open an issue at https://github.com/stellar/stellar-rpc/issues or reach out to SDF through your usual channels.
