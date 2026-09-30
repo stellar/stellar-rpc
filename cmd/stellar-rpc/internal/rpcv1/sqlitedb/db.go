@@ -53,8 +53,8 @@ type dbCache struct {
 	latestLedgerCloseTime int64
 	// firstLedgerSeq/firstLedgerCloseTime cache the oldest retained ledger's
 	// range scalars so GetLedgerRange never decodes the oldest LedgerCloseMeta
-	// blob per call. Commit publishes them on every trim; 0 means "unknown"
-	// and is filled lazily by the first GetLedgerRange after a reset.
+	// blob per call. Every commit publishes them; 0 means "unknown" and is
+	// filled lazily by the first GetLedgerRange after a reset.
 	firstLedgerSeq       uint32
 	firstLedgerCloseTime int64
 }
@@ -459,25 +459,18 @@ func (w writeTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta, durationMetrics map
 		return err
 	}
 
-	// The cache may only advertise ledgers a reader's snapshot can serve: the
-	// oldest is raised before the commit and the latest after it, so the commit
-	// (a whole ledger's WAL write) never holds the lock every read path takes.
-	if w.historyRetentionWindow != 0 && ledgerSeq+1 > w.historyRetentionWindow { // trimLedgers ran
-		startTime := time.Now()
-		oldest, err := w.oldestLedger()
-		if err != nil && !errors.Is(err, store.ErrEmptyDB) {
-			return err
-		}
-		if durationMetrics != nil {
-			durationMetrics["oldest_ledger"] = time.Since(startTime)
-		}
-		w.globalCache.Lock()
-		w.globalCache.firstLedgerSeq = oldest.Sequence
-		w.globalCache.firstLedgerCloseTime = oldest.CloseTime
-		w.globalCache.Unlock()
+	// Published only after the commit, so the cache holds committed bounds and the
+	// commit never holds the lock; snapshot readers validate inside their own tx.
+	startTime := time.Now()
+	oldest, err := w.oldestLedger()
+	if err != nil && !errors.Is(err, store.ErrEmptyDB) {
+		return err
+	}
+	if durationMetrics != nil {
+		durationMetrics["oldest_ledger"] = time.Since(startTime)
 	}
 
-	startTime := time.Now()
+	startTime = time.Now()
 	if err := w.tx.Commit(); err != nil {
 		return err
 	}
@@ -486,6 +479,8 @@ func (w writeTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta, durationMetrics map
 	}
 
 	w.globalCache.Lock()
+	w.globalCache.firstLedgerSeq = oldest.Sequence
+	w.globalCache.firstLedgerCloseTime = oldest.CloseTime
 	if ledgerSeq > w.globalCache.latestLedgerSeq {
 		w.globalCache.latestLedgerSeq = ledgerSeq
 		w.globalCache.latestLedgerCloseTime = ledgerCloseTime

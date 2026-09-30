@@ -181,9 +181,8 @@ func newV1Client(t *testing.T, lcms [][]byte) *jrpc2.Client {
 		require.NoError(t, wtx.Commit(lcm, map[string]time.Duration{}))
 	}
 	h := methods.NewGetEventsHandler(logger,
-		sqlitedb.NewEventReader(logger, db, network.PublicNetworkPassphrase),
-		parityMaxLimit, parityDefaultLimit,
-		sqlitedb.NewLedgerReader(db))
+		sqlitedb.NewEventReader(logger, db),
+		parityMaxLimit, parityDefaultLimit)
 	return newLocalClient(t, h)
 }
 

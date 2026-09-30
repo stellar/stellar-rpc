@@ -34,8 +34,8 @@ type ViewScanFunction func(
 	txHash *xdr.Hash,
 ) (bool, error)
 
-// EventReader has all the public methods to fetch events from the backend.
-type EventReader interface {
+// EventScanner is the one read idiom, embedded by EventReader and EventReaderTx.
+type EventScanner interface {
 	GetEvents(
 		ctx context.Context,
 		cursorRange protocol.CursorRange,
@@ -44,6 +44,19 @@ type EventReader interface {
 		eventTypes []int,
 		f ViewScanFunction,
 	) error
+}
+
+// EventReader has all the public methods to fetch events from the backend.
+type EventReader interface {
+	EventScanner
+	NewTx(ctx context.Context) (EventReaderTx, error)
+}
+
+// EventReaderTx is a LedgerReaderTx snapshot that also scans events, so a cursor
+// validated against its range cannot be trimmed away before the scan.
+type EventReaderTx interface {
+	LedgerReaderTx
+	EventScanner
 }
 
 // StageSentinels maps a V4 top-level TransactionEvent stage to the

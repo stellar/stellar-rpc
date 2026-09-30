@@ -76,7 +76,7 @@ func requireLedgerData(t *testing.T, testDB *DB, lcms []xdr.LedgerCloseMeta) {
 	}
 
 	eventCount := 0
-	eventReader := NewEventReader(log.DefaultLogger, testDB, passphrase)
+	eventReader := NewEventReader(log.DefaultLogger, testDB)
 	cursorRange := protocol.CursorRange{
 		Start: protocol.Cursor{Ledger: lcms[0].LedgerSequence()},
 		End:   protocol.Cursor{Ledger: lcms[len(lcms)-1].LedgerSequence() + 1},

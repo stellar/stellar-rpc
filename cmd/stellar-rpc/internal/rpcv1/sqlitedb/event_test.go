@@ -204,7 +204,7 @@ func TestInsertEvents(t *testing.T) {
 	err = eventW.InsertEvents(ledgerCloseMeta)
 	require.NoError(t, err)
 
-	eventReader := NewEventReader(log, db, passphrase)
+	eventReader := NewEventReader(log, db)
 	start := protocol.Cursor{Ledger: 1}
 	end := protocol.Cursor{Ledger: 100}
 	cursorRange := protocol.CursorRange{Start: start, End: end}
@@ -269,7 +269,7 @@ func TestInsertEventsBatchingExceedsLimit(t *testing.T) {
 
 			require.NoError(t, write.Commit(lcm, nil))
 
-			eventReader := NewEventReader(log, testDB, passphrase)
+			eventReader := NewEventReader(log, testDB)
 			start := protocol.Cursor{Ledger: ledgerSeq}
 			end := protocol.Cursor{Ledger: ledgerSeq + 1}
 			cursorRange := protocol.CursorRange{Start: start, End: end}

@@ -45,7 +45,7 @@ func TestGetEvents(t *testing.T) {
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := sqlitedb.NewEventReader(log, dbx, passphrase)
+		store := sqlitedb.NewEventReader(log, dbx)
 
 		var txMeta []xdr.TransactionMeta
 		txMeta = append(txMeta, transactionMetaWithEvents(
@@ -71,7 +71,6 @@ func TestGetEvents(t *testing.T) {
 			dbReader:     store,
 			maxLimit:     10000,
 			defaultLimit: 100,
-			ledgerReader: sqlitedb.NewLedgerReader(dbx),
 		}
 		_, err = handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
@@ -95,7 +94,7 @@ func TestGetEvents(t *testing.T) {
 		require.NoError(t, err)
 
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := sqlitedb.NewEventReader(log, dbx, passphrase)
+		store := sqlitedb.NewEventReader(log, dbx)
 
 		contractID := xdr.ContractId([32]byte{})
 		var txMeta []xdr.TransactionMeta
@@ -124,7 +123,6 @@ func TestGetEvents(t *testing.T) {
 			dbReader:     store,
 			maxLimit:     10000,
 			defaultLimit: 100,
-			ledgerReader: sqlitedb.NewLedgerReader(dbx),
 		}
 		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
@@ -184,7 +182,7 @@ func TestGetEvents(t *testing.T) {
 		require.NoError(t, err)
 
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := sqlitedb.NewEventReader(log, dbx, passphrase)
+		store := sqlitedb.NewEventReader(log, dbx)
 
 		var txMeta []xdr.TransactionMeta
 		contractIDs := []xdr.ContractId{
@@ -216,7 +214,6 @@ func TestGetEvents(t *testing.T) {
 			dbReader:     store,
 			maxLimit:     10000,
 			defaultLimit: 100,
-			ledgerReader: sqlitedb.NewLedgerReader(dbx),
 		}
 		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
@@ -250,7 +247,7 @@ func TestGetEvents(t *testing.T) {
 		require.NoError(t, err)
 
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := sqlitedb.NewEventReader(log, dbx, passphrase)
+		store := sqlitedb.NewEventReader(log, dbx)
 
 		var txMeta []xdr.TransactionMeta
 		contractID := xdr.ContractId([32]byte{})
@@ -279,7 +276,6 @@ func TestGetEvents(t *testing.T) {
 			dbReader:     store,
 			maxLimit:     10000,
 			defaultLimit: 100,
-			ledgerReader: sqlitedb.NewLedgerReader(dbx),
 		}
 		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
@@ -389,7 +385,7 @@ func TestGetEvents(t *testing.T) {
 		require.NoError(t, err)
 
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := sqlitedb.NewEventReader(log, dbx, passphrase)
+		store := sqlitedb.NewEventReader(log, dbx)
 
 		var txMeta []xdr.TransactionMeta
 		contractID := xdr.ContractId([32]byte{})
@@ -421,7 +417,6 @@ func TestGetEvents(t *testing.T) {
 			dbReader:     store,
 			maxLimit:     10000,
 			defaultLimit: 100,
-			ledgerReader: sqlitedb.NewLedgerReader(dbx),
 		}
 
 		id := protocol.Cursor{Ledger: 1, Tx: 5, Op: 0, Event: 0}.String()
@@ -584,7 +579,7 @@ func TestGetEvents(t *testing.T) {
 		require.NoError(t, err)
 
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := sqlitedb.NewEventReader(log, dbx, passphrase)
+		store := sqlitedb.NewEventReader(log, dbx)
 
 		contractID := xdr.ContractId([32]byte{})
 		otherContractID := xdr.ContractId([32]byte{1})
@@ -643,7 +638,6 @@ func TestGetEvents(t *testing.T) {
 			dbReader:     store,
 			maxLimit:     10000,
 			defaultLimit: 100,
-			ledgerReader: sqlitedb.NewLedgerReader(dbx),
 		}
 		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
@@ -707,7 +701,7 @@ func TestGetEvents(t *testing.T) {
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := sqlitedb.NewEventReader(log, dbx, passphrase)
+		store := sqlitedb.NewEventReader(log, dbx)
 
 		contractID := xdr.ContractId([32]byte{})
 		txMeta := []xdr.TransactionMeta{
@@ -744,7 +738,6 @@ func TestGetEvents(t *testing.T) {
 			dbReader:     store,
 			maxLimit:     10000,
 			defaultLimit: 100,
-			ledgerReader: sqlitedb.NewLedgerReader(dbx),
 		}
 		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
@@ -796,7 +789,7 @@ func TestGetEvents(t *testing.T) {
 		require.NoError(t, err)
 
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := sqlitedb.NewEventReader(log, dbx, passphrase)
+		store := sqlitedb.NewEventReader(log, dbx)
 
 		contractID := xdr.ContractId([32]byte{})
 		var txMeta []xdr.TransactionMeta
@@ -821,7 +814,6 @@ func TestGetEvents(t *testing.T) {
 			dbReader:     store,
 			maxLimit:     10000,
 			defaultLimit: 100,
-			ledgerReader: sqlitedb.NewLedgerReader(dbx),
 		}
 		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
@@ -879,7 +871,7 @@ func TestGetEvents(t *testing.T) {
 		require.NoError(t, err)
 
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := sqlitedb.NewEventReader(log, dbx, passphrase)
+		store := sqlitedb.NewEventReader(log, dbx)
 
 		contractID := xdr.ContractId([32]byte{})
 		datas := []xdr.ScSymbol{
@@ -933,7 +925,6 @@ func TestGetEvents(t *testing.T) {
 			dbReader:     store,
 			maxLimit:     10000,
 			defaultLimit: 100,
-			ledgerReader: sqlitedb.NewLedgerReader(dbx),
 		}
 		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			Pagination: &protocol.PaginationOptions{
@@ -1019,7 +1010,7 @@ func BenchmarkGetEventsTopicFilters(b *testing.B) {
 	require.NoError(b, err)
 
 	ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-	store := sqlitedb.NewEventReader(log, dbx, passphrase)
+	store := sqlitedb.NewEventReader(log, dbx)
 
 	const (
 		totalEvents     = 5000
@@ -1081,7 +1072,6 @@ func BenchmarkGetEventsTopicFilters(b *testing.B) {
 		dbReader:     store,
 		maxLimit:     10000,
 		defaultLimit: 1000,
-		ledgerReader: sqlitedb.NewLedgerReader(dbx),
 	}
 
 	req := protocol.GetEventsRequest{
@@ -1108,7 +1098,7 @@ func BenchmarkGetEvents(b *testing.B) {
 	ctx := context.TODO()
 	log := log.DefaultLogger
 	log.SetLevel(logrus.TraceLevel)
-	store := sqlitedb.NewEventReader(log, dbx, passphrase)
+	store := sqlitedb.NewEventReader(log, dbx)
 	contractID := xdr.ContractId([32]byte{})
 	now := time.Now().UTC()
 
@@ -1131,7 +1121,6 @@ func BenchmarkGetEvents(b *testing.B) {
 		dbReader:     store,
 		maxLimit:     10000,
 		defaultLimit: 100,
-		ledgerReader: sqlitedb.NewLedgerReader(dbx),
 	}
 
 	request := protocol.GetEventsRequest{
@@ -1246,7 +1235,7 @@ func setupTwoContractEventsHandler(t *testing.T) (eventsRPCHandler, xdr.Contract
 	write, err := writer.NewTx(ctx)
 	require.NoError(t, err)
 	ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-	store := sqlitedb.NewEventReader(logger, dbx, passphrase)
+	store := sqlitedb.NewEventReader(logger, dbx)
 
 	txMeta := []xdr.TransactionMeta{
 		transactionMetaWithEvents(
@@ -1274,7 +1263,6 @@ func setupTwoContractEventsHandler(t *testing.T) (eventsRPCHandler, xdr.Contract
 		dbReader:     store,
 		maxLimit:     10000,
 		defaultLimit: 100,
-		ledgerReader: sqlitedb.NewLedgerReader(dbx),
 	}, contractA, contractB
 }
 

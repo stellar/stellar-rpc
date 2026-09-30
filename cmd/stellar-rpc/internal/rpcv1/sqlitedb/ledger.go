@@ -32,6 +32,7 @@ type LedgerWriter interface {
 
 type readDB interface {
 	Select(ctx context.Context, dest any, query sq.Sqlizer) error
+	GetRaw(ctx context.Context, dest any, query string, args ...any) error
 	Query(ctx context.Context, query sq.Sqlizer) (*db.Rows, error)
 }
 
@@ -43,13 +44,29 @@ type ledgerReaderTx struct {
 	tx                    db.SessionInterface
 	latestLedgerSeq       uint32
 	latestLedgerCloseTime int64
+	// cached oldest at NewTx; its close time is reused when the snapshot's MIN agrees
+	firstLedgerSeq       uint32
+	firstLedgerCloseTime int64
 }
 
 func (l ledgerReaderTx) GetLedgerRange(ctx context.Context) (store.LedgerRange, error) {
-	if l.latestLedgerSeq != 0 {
-		return getLedgerRangeWithCache(ctx, l.tx, l.latestLedgerSeq, l.latestLedgerCloseTime)
+	if l.latestLedgerSeq == 0 {
+		return getLedgerRangeWithoutCache(ctx, l.tx)
 	}
-	return getLedgerRangeWithoutCache(ctx, l.tx)
+	oldestSeq, err := oldestLedgerSeq(ctx, l.tx)
+	if err != nil {
+		return store.LedgerRange{}, err
+	}
+	oldest := store.LedgerInfo{Sequence: oldestSeq, CloseTime: l.firstLedgerCloseTime}
+	if oldestSeq != l.firstLedgerSeq { // cache reset, or a commit not yet published: read the row
+		if oldest, err = oldestLedgerInfo(ctx, l.tx); err != nil {
+			return store.LedgerRange{}, err
+		}
+	}
+	return store.LedgerRange{
+		FirstLedger: oldest,
+		LastLedger:  store.LedgerInfo{Sequence: l.latestLedgerSeq, CloseTime: l.latestLedgerCloseTime},
+	}, nil
 }
 
 // ScanLedgers reads inside the reader's transaction.
@@ -66,18 +83,28 @@ func NewLedgerReader(db *DB) LedgerReader {
 }
 
 func (r ledgerReader) NewTx(ctx context.Context) (store.LedgerReaderTx, error) {
-	r.db.cache.RLock()
-	defer r.db.cache.RUnlock()
-	txSession := r.db.Clone()
-	if err := txSession.BeginTx(ctx, &sql.TxOptions{ReadOnly: true}); err != nil {
-		return nil, fmt.Errorf("failed to begin read transaction: %w", err)
-	}
-	tx := ledgerReaderTx{
-		tx:                    txSession,
-		latestLedgerSeq:       r.db.cache.latestLedgerSeq,
-		latestLedgerCloseTime: r.db.cache.latestLedgerCloseTime,
+	tx, err := newLedgerReaderTx(ctx, r.db)
+	if err != nil {
+		return nil, err
 	}
 	return tx, nil
+}
+
+// newLedgerReaderTx opens a read snapshot pinned to the cached latest ledger.
+func newLedgerReaderTx(ctx context.Context, db *DB) (ledgerReaderTx, error) {
+	db.cache.RLock()
+	defer db.cache.RUnlock()
+	txSession := db.Clone()
+	if err := txSession.BeginTx(ctx, &sql.TxOptions{ReadOnly: true}); err != nil {
+		return ledgerReaderTx{}, fmt.Errorf("failed to begin read transaction: %w", err)
+	}
+	return ledgerReaderTx{
+		tx:                    txSession,
+		latestLedgerSeq:       db.cache.latestLedgerSeq,
+		latestLedgerCloseTime: db.cache.latestLedgerCloseTime,
+		firstLedgerSeq:        db.cache.firstLedgerSeq,
+		firstLedgerCloseTime:  db.cache.firstLedgerCloseTime,
+	}, nil
 }
 
 // ScanLedgers reads the pooled connection: no snapshot, the store as it stands.
@@ -159,7 +186,7 @@ func (r ledgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRange, er
 			return ledgerRange, err
 		}
 		r.db.cache.Lock()
-		// Commit publishes the oldest on every trim, so only fill an empty slot,
+		// Every commit publishes the oldest, so only fill an empty slot,
 		// and only if no commit raced our MIN(sequence) read.
 		if r.db.cache.firstLedgerSeq == 0 && r.db.cache.latestLedgerSeq == latestLedgerSeqCache {
 			r.db.cache.firstLedgerSeq = ledgerRange.FirstLedger.Sequence
@@ -208,8 +235,7 @@ func ledgerInfoFromRow(ctx context.Context, db readDB, row ledgerRangeRow) (stor
 	return store.LedgerInfo{Sequence: row.Sequence, CloseTime: closeTime}, nil
 }
 
-// oldestLedgerInfo reads the oldest stored ledger's range scalars; db may be a
-// write transaction, in which case its own trims are visible.
+// oldestLedgerInfo reads the oldest stored ledger's range scalars (a write tx sees its own trims).
 func oldestLedgerInfo(ctx context.Context, db readDB) (store.LedgerInfo, error) {
 	query := sq.Select("sequence", fmt.Sprintf("substr(meta, 1, %d) AS meta_prefix", ledgerCloseTimePrefixBytes)).
 		From(ledgerCloseMetaTableName).
@@ -224,6 +250,20 @@ func oldestLedgerInfo(ctx context.Context, db readDB) (store.LedgerInfo, error) 
 		return store.LedgerInfo{}, store.ErrEmptyDB
 	}
 	return ledgerInfoFromRow(ctx, db, rows[0])
+}
+
+const oldestLedgerSeqSQL = "SELECT MIN(sequence) FROM " + ledgerCloseMetaTableName
+
+// oldestLedgerSeq is the snapshot's MIN(sequence), without the row's close time.
+func oldestLedgerSeq(ctx context.Context, db readDB) (uint32, error) {
+	var seq sql.Null[uint32]
+	if err := db.GetRaw(ctx, &seq, oldestLedgerSeqSQL); err != nil {
+		return 0, fmt.Errorf("couldn't query oldest ledger: %w", err)
+	}
+	if !seq.Valid {
+		return 0, store.ErrEmptyDB
+	}
+	return seq.V, nil
 }
 
 // getLedgerRangeWithCache uses the latest ledger cache to optimize the query.

@@ -1,4 +1,3 @@
-//nolint:funcorder // event reader/writer helpers are grouped for readability
 package sqlitedb
 
 import (
@@ -48,8 +47,35 @@ type dbEvent struct {
 // 10 bind variables/event * 3,000 events stays under SQLite's 32,766 limit
 const maxEventsPerBatch = 3000
 
-func NewEventReader(log *log.Entry, db db.SessionInterface, passphrase string) store.EventReader {
-	return &eventHandler{log: log, db: db, passphrase: passphrase}
+// eventScanner runs the getEvents query against one readDB: the pool or a snapshot.
+type eventScanner struct {
+	log *log.Entry
+	q   readDB
+}
+
+// eventReader is the pooled read side; NewTx pins a snapshot.
+type eventReader struct {
+	eventScanner
+
+	db *DB
+}
+
+func NewEventReader(log *log.Entry, db *DB) store.EventReader {
+	return eventReader{eventScanner: eventScanner{log: log, q: db}, db: db}
+}
+
+// NewTx opens a read snapshot whose GetLedgerRange and GetEvents agree.
+func (r eventReader) NewTx(ctx context.Context) (store.EventReaderTx, error) {
+	tx, err := newLedgerReaderTx(ctx, r.db)
+	if err != nil {
+		return nil, err
+	}
+	return eventReaderTx{ledgerReaderTx: tx, eventScanner: eventScanner{log: r.log, q: tx.tx}}, nil
+}
+
+type eventReaderTx struct {
+	ledgerReaderTx
+	eventScanner
 }
 
 // Named error return: the deferred txReader.Close errors.Join below
@@ -295,7 +321,7 @@ func (eventHandler *eventHandler) trimEvents(latestLedgerSeq uint32, retentionWi
 // remaining events in the range). If f returns an error, the scan aborts with it.
 //
 //nolint:funlen,cyclop
-func (eventHandler *eventHandler) GetEvents(
+func (s eventScanner) GetEvents(
 	ctx context.Context,
 	cursorRange protocol.CursorRange,
 	contractIDs [][]byte,
@@ -352,9 +378,9 @@ func (eventHandler *eventHandler) GetEvents(
 		encodedContractIDs = append(encodedContractIDs, result)
 	}
 
-	rows, err := eventHandler.db.Query(ctx, rowQ)
+	rows, err := s.q.Query(ctx, rowQ)
 	if err != nil {
-		eventHandler.log.
+		s.log.
 			WithError(err).
 			WithField("duration", time.Since(start)).
 			WithField("start", cursorRange.Start.String()).
@@ -409,7 +435,7 @@ func (eventHandler *eventHandler) GetEvents(
 		foundRows++
 	}
 
-	eventHandler.log.
+	s.log.
 		WithField("duration", time.Since(start)).
 		WithField("start", cursorRange.Start.String()).
 		WithField("end", cursorRange.End.String()).
