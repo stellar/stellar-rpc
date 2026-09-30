@@ -14,7 +14,6 @@ The node groups ledgers into chunks of 10,000 (~15–17 hours). Data moves throu
 
 - **Hot Tier (RocksDB):** Stores live incoming ledgers and serves queries for recent data.
 - **Cold Tier (Flat Files):** When a chunk is complete, its data is packed from RocksDB into immutable flat files and then pruned from RocksDB.
-- **Unified Query Layer:** Server directs incoming requests to RocksDB or flat files based on the requested ledger range.
 
 ---
 
@@ -107,13 +106,13 @@ history_archive_urls = [
 
 | Store key | Default path | What it holds |
 |---|---|---|
-| `catalog` | `{default_data_dir}/catalog/rocksdb` | Catalog RocksDB |
-| `ledgers` | `{default_data_dir}/ledgers` | Immutable ledger pack files |
-| `events` | `{default_data_dir}/events/data` | Immutable event packs |
-| `events_index` | `{default_data_dir}/events/index` | Immutable event indexes |
-| `txhash_raw` | `{default_data_dir}/txhash/raw` | Transient transaction-hash files |
-| `txhash_index` | `{default_data_dir}/txhash/index` | Frozen transaction-hash indexes |
-| `hot` | `{default_data_dir}/hot` | Per-chunk hot RocksDB databases |
+| `catalog` | `{default_data_dir}/catalog/rocksdb` | The node's record of which chunks it holds and their state (small) |
+| `ledgers` | `{default_data_dir}/ledgers` | Ledger data for completed chunks (large) |
+| `events` | `{default_data_dir}/events/data` | Event data for completed chunks (large) |
+| `events_index` | `{default_data_dir}/events/index` | Indexes for event queries |
+| `txhash_raw` | `{default_data_dir}/txhash/raw` | Temporary files used to build the transaction-hash indexes |
+| `txhash_index` | `{default_data_dir}/txhash/index` | Indexes for looking up transactions by hash |
+| `hot` | `{default_data_dir}/hot` | The hot tier: one RocksDB database per chunk not yet moved to flat files |
 
 To put a store on a different volume, set its key inside `[storage]`. Mount that volume into the container with a second `-v` flag, and use the container path in the key.
 
@@ -182,7 +181,7 @@ Monitor backfill progress via container logs (`docker logs -f stellar-rpc-v2`), 
 
 - `msg="backfill pass starting"` / `msg="backfill pass complete"`
 - `msg="chunk build started"`
-- `msg="chunk frozen"`: emitted per chunk, with progress (e.g., `done=X of=Y`) and throughput
+- `msg="chunk frozen"`: a chunk was written to flat files; reports progress (e.g., `done=X of=Y`) and throughput
 - A line that starts with `msg="backfill complete`, followed by `msg="read server listening"`: port 8000 is open. The node is ready once `getHealth` succeeds (see 6.2).
 
 **Disk Growth:** Capacity increases primarily inside `events/` and `ledgers/` under your data directory.
@@ -211,8 +210,8 @@ Metrics are exposed via Prometheus on `service.admin_endpoint` at `/metrics` (na
 | Metric Name | Description / Alert Condition |
 |---|---|
 | `soroban_rpc_fullhistory_streaming_last_committed_ledger` | Highest ledger written to disk. Alert if flat/unmoving for > 2 minutes (active serving mode only; ignore it until `getHealth` succeeds). |
-| `soroban_rpc_fullhistory_streaming_retention_floor_ledger` | Lowest ledger the retention policy allows. Expected: 2 for full history. Not a coverage or readiness signal. |
-| `soroban_rpc_fullhistory_streaming_live_hot_chunks` | Hot-chunk RocksDB databases on disk. Expected: 1 (briefly 2 during boundary conversion). |
+| `soroban_rpc_fullhistory_streaming_retention_floor_ledger` | Lowest ledger the retention policy allows. Expected: 2 for full history. It does not show whether the node holds that ledger or is ready to serve. |
+| `soroban_rpc_fullhistory_streaming_live_hot_chunks` | Hot-tier chunk databases on disk. Expected: 1 (briefly 2 while a completed chunk is moved to flat files). |
 | `soroban_rpc_json_rpc_request_duration_seconds` | Summary of request latency per method and status code. |
 
 Also alert on free disk space on every volume that holds a store. The node's data only grows.
