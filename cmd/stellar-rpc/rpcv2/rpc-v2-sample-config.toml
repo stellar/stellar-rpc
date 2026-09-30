@@ -137,8 +137,9 @@ soroban_inclusion_fee_window_ledgers = 50
 #default_items_per_response = 100
 
 # queryEvents is new in v2, and its max_items_per_response cannot exceed 1000.
-# term_budget caps the distinct filter values (contract IDs, event types and
-# topics) one request may use. Requests over it fail with invalid_params.
+# term_budget caps the index terms one request may use: each distinct contract
+# ID, event type, or topic value in a given position counts once. Requests
+# over it fail with invalid_params.
 [service.methods.queryEvents]
 #queue_limit = 1000
 #max_execution_duration = "10s"
@@ -182,11 +183,12 @@ enable_debug = false
 # Retries for a failed chunk before the daemon stops; 0 means none.
 max_retries = 3
 
-# The lake backfill downloads history from. type is "GCS", "S3" or
-# "Filesystem". Without this block (or with type = ""), backfill replays
-# history through captive core from [ingestion].history_archive_urls, which is
-# much slower. When the lake has a manifest (.config.json), startup checks
-# that it is for the same network as the captive-core file.
+# An example lake for backfill to download history from. type is "GCS", "S3"
+# or "Filesystem". Without this block (the default) or with type = "",
+# backfill replays history through captive core from
+# [ingestion].history_archive_urls, which is much slower. When the lake has a
+# manifest (.config.json), startup checks that it is for the same network as
+# the captive-core file.
 [backfill.datastore]
 type = "GCS"
 

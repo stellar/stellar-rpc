@@ -115,7 +115,7 @@ history_archive_urls = [
 | `txhash_index` | `{default_data_dir}/txhash/index` | Frozen transaction-hash indexes |
 | `hot` | `{default_data_dir}/hot` | Per-chunk hot RocksDB databases |
 
-To put a store on a different volume, set its key inside `[storage]`. Mount that volume into the container with a second `-v` flag, and use the container path in the key. This is simplest before the first start.
+To put a store on a different volume, set its key inside `[storage]`. Mount that volume into the container with a second `-v` flag, and use the container path in the key.
 
 For example, with a second NVMe volume mounted on the host at `/mnt/nvme2`, this `[storage]` section puts `ledgers` on it and keeps `events` and everything else under `/data`:
 
@@ -131,15 +131,7 @@ Add one flag to the `docker run` command in 5.3 to mount the volume at `/data2`:
   -v /mnt/nvme2/rpc-archive:/data2 \
 ```
 
-If one volume is faster than the other, keep `default_data_dir` on the faster one. It holds the catalog, the hot chunk databases and captive core's working directory, which the node writes constantly.
-
-The node looks for a store's files under whatever path its key names, and it does not remember where they were before. If you change a key without moving the files, or move the files without changing the key, the node starts with an empty store while its catalog still lists the chunks that belong in it, and requests for that history fail. To move a store once the node has data, for example `ledgers` to the second volume above:
-
-1. Stop and remove the container: `docker stop stellar-rpc-v2 && docker rm stellar-rpc-v2`.
-2. Copy the store: `rsync -a /srv/rpc-archive/data/ledgers/ /mnt/nvme2/rpc-archive/ledgers/`.
-3. Add `ledgers = "/data2/ledgers"` under `[storage]` in `rpc-archive.toml`.
-4. Start the container as in 5.3, with one more flag: `-v /mnt/nvme2/rpc-archive:/data2`.
-5. Check that old ledgers still read, for example with `getLedgers` starting at ledger 2, and that `soroban_rpc_fullhistory_streaming_missing_cold_pack_opens_total` stays at 0. Then delete `/srv/rpc-archive/data/ledgers`.
+Set store paths before the first start. If you change one after the node has data, the node can no longer find the data already stored there.
 
 ### 5.2 Captive Core Configuration (`/srv/rpc-archive/config/captive-core.toml`)
 
@@ -179,7 +171,7 @@ docker run -d --name stellar-rpc-v2 \
 On initial startup, the container downloads ledger metadata from the configured data lake and backfills history before serving queries. **Nothing is served until the backfill completes.**
 
 - **Estimated Duration:** 24 to 48 hours depending on network bandwidth and disk IOPS.
-- **Port 8000 Status & Health Checks:** Port 8000 remains closed and `getHealth` fails throughout backfill. Do **not** configure liveness probes (or ECS target group checks) on port 8000, as failing health checks will trigger continuous restart loops. This applies after the first start too: every restart backfills whatever the node missed and then catches up with the network before `getHealth` succeeds again (see 6.2). Use admin port 6061 for liveness checks (`GET /metrics` returns 200), and use `getHealth` on port 8000 only as a readiness check.
+- **Port 8000 Status & Health Checks:** Port 8000 remains closed and `getHealth` fails throughout backfill. Do **not** configure liveness probes (or ECS target group checks) on port 8000, as failing health checks will trigger continuous restart loops. Use admin port 6061 for liveness checks (`GET /metrics` returns 200), and use `getHealth` on port 8000 only as a readiness check.
 - **Admin Port (6061):** Open and serving metrics. `soroban_rpc_fullhistory_streaming_last_committed_ledger` does not move during backfill. It updates only when a backfill pass ends. Use the `backfill_chunks_planned` and `backfill_chunks_completed` gauges for per-chunk progress.
 
 ### 6.1 Monitoring Backfill Progress
@@ -206,7 +198,7 @@ curl -s localhost:8000 -H 'content-type: application/json' -d '{"jsonrpc":"2.0",
 ```
 
 > [!NOTE]
-> `getHealth` returns an error until the node has caught up with the network, meaning its newest ledger closed less than 30 seconds ago. After backfill, captive core still has to replay the ledgers the network has already closed in the current 10,000-ledger chunk, up to about 16 hours' worth. That can take a while after `read server listening` appears. The same catch-up happens after every restart. Send traffic to the node only once `getHealth` succeeds.
+> `getHealth` returns an error until the node has committed a live ledger since it started and its newest ledger closed less than 30 seconds ago. That can take a while after `read server listening` appears. Send traffic to the node only once `getHealth` succeeds.
 
 ---
 
@@ -218,7 +210,7 @@ Metrics are exposed via Prometheus on `service.admin_endpoint` at `/metrics` (na
 
 | Metric Name | Description / Alert Condition |
 |---|---|
-| `soroban_rpc_fullhistory_streaming_last_committed_ledger` | Highest ledger written to disk. Alert if flat/unmoving for > 2 minutes (active serving mode only; ignore it during backfill and while the node catches up after a start, see 6.2). |
+| `soroban_rpc_fullhistory_streaming_last_committed_ledger` | Highest ledger written to disk. Alert if flat/unmoving for > 2 minutes (active serving mode only; ignore it until `getHealth` succeeds). |
 | `soroban_rpc_fullhistory_streaming_retention_floor_ledger` | Lowest ledger the retention policy allows. Expected: 2 for full history. Not a coverage or readiness signal. |
 | `soroban_rpc_fullhistory_streaming_live_hot_chunks` | Hot-chunk RocksDB databases on disk. Expected: 1 (briefly 2 during boundary conversion). |
 | `soroban_rpc_json_rpc_request_duration_seconds` | Summary of request latency per method and status code. |
