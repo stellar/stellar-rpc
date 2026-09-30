@@ -24,7 +24,7 @@ The node groups ledgers into chunks of 10,000 (~15–17 hours). Data moves throu
 | CPU | 8 vCPU | |
 | RAM | 32 GB | |
 | Storage Volume | 7 TB initial | Grows by ~1.1 TB per year at current network activity rates. |
-| Storage Type | Local, direct-attached NVMe | Network storage (e.g., AWS EBS, GCP Persistent Disk) is **NOT** tested. On cloud instances, local NVMe is usually wiped when the instance stops, and losing it means a full backfill. |
+| Storage Type | Local, direct-attached NVMe | Network storage (e.g., AWS EBS, GCP Persistent Disk) is **NOT** tested. |
 
 ---
 
@@ -76,7 +76,7 @@ These will go in the `/srv/rpc-archive/config/` folder.
 
 Copy this minimal configuration into `rpc-archive.toml` to get started. Every key it leaves out takes its default. [`rpc-v2-sample-config.toml`](https://github.com/stellar/stellar-rpc/blob/archive-node-beta/cmd/stellar-rpc/rpcv2/rpc-v2-sample-config.toml) documents every key and its default.
 
-Paths in this file are paths inside the container. The `docker run` command in 5.3 mounts the host's `/srv/rpc-archive/data` at `/data` and `/srv/rpc-archive/config` at `/config`.
+Paths in this file are paths inside the container (see the `-v` mounts in [5.3](#53-launch-container)).
 
 ```toml
 [storage]
@@ -127,7 +127,7 @@ default_data_dir = "/data"
 ledgers          = "/data2/ledgers"
 ```
 
-Add one flag to the `docker run` command in 5.3 to mount the volume at `/data2`:
+Add one flag to the `docker run` command in [5.3](#53-launch-container) to mount the volume at `/data2`:
 
 ```bash
   -v /mnt/nvme2/rpc-archive:/data2 \
@@ -143,7 +143,7 @@ You should create a configuration file for [Stellar Core](https://github.com/ste
 
 The sample file is not for production use. Its quorum set is only an example. Select the quorum set yourself before you run the node (see [Choosing your quorum set](https://developers.stellar.org/docs/validators/admin-guide/configuring#choosing-your-quorum-set)).
 
-The file must set `NETWORK_PASSPHRASE`. The node reads the network passphrase from it and does not start without it. Standard Stellar RPC does not need it in this file, so a copied file may not have it. For Pubnet, add:
+The file must set `NETWORK_PASSPHRASE`. A file copied from standard Stellar RPC may not have it. For Pubnet, add:
 
 ```toml
 NETWORK_PASSPHRASE="Public Global Stellar Network ; September 2015"
@@ -173,8 +173,8 @@ docker run -d --name stellar-rpc-v2 \
 On initial startup, the container downloads ledger metadata from the configured data lake and backfills history before serving queries. **Nothing is served until the backfill completes.**
 
 - **Estimated Duration:** 24 to 48 hours depending on network bandwidth and disk IOPS.
-- **Port 8000 Status & Health Checks:** Port 8000 remains closed and `getHealth` fails throughout backfill. Do **not** configure liveness probes (or ECS target group checks) on port 8000, as failing health checks will trigger continuous restart loops. Use admin port 6061 for liveness checks (`GET /metrics` returns 200), and use `getHealth` on port 8000 only as a readiness check. `getHealth` is a JSON-RPC POST, so load-balancer checks and HTTP GET probes can't call it; use a command-based probe such as the one in 6.2.
-- **Admin Port (6061):** Open and serving metrics. `soroban_rpc_fullhistory_streaming_last_committed_ledger` stays flat for most of the backfill, so track progress with the backfill gauges in 6.1.
+- **Port 8000 Status & Health Checks:** Port 8000 remains closed and `getHealth` fails throughout backfill. Do **not** configure liveness probes (or ECS target group checks) on port 8000, as failing health checks will trigger continuous restart loops. Use admin port 6061 for liveness checks (`GET /metrics` returns 200), and use `getHealth` on port 8000 only as a readiness check, with a probe like the one in [6.2](#62-verifying-node-readiness).
+- **Admin Port (6061):** Open and serving metrics. `soroban_rpc_fullhistory_streaming_last_committed_ledger` stays flat for most of the backfill, so track progress with the backfill gauges in [6.1](#61-monitoring-backfill-progress).
 
 ### 6.1 Monitoring Backfill Progress
 
@@ -182,9 +182,9 @@ Monitor backfill progress via container logs (`docker logs -f stellar-rpc-v2`), 
 
 **Log Signals:**
 
-- `msg="backfill pass starting"` / `msg="backfill pass complete"`: backfill runs in passes. The first covers history up to the network's latest ledger when it started, and later passes pick up chunks completed in the meantime.
+- `msg="backfill pass starting"` / `msg="backfill pass complete"`: backfill can run more than one pass; the `backfill complete` line below marks the end.
 - `msg="chunk frozen"`: a chunk was written to flat files; reports progress (e.g., `done=X of=Y`) and throughput
-- A line that starts with `msg="backfill complete`, followed by `msg="read server listening"`: port 8000 is open. The node is ready once `getHealth` succeeds (see 6.2).
+- A line that starts with `msg="backfill complete`, followed by `msg="read server listening"`: port 8000 is open. The node is ready once `getHealth` succeeds (see [6.2](#62-verifying-node-readiness)).
 
 **Disk Growth:** Capacity increases primarily inside `events/` and `ledgers/` under your data directory.
 
@@ -201,7 +201,7 @@ curl -s localhost:8000 -H 'content-type: application/json' -d '{"jsonrpc":"2.0",
 > [!NOTE]
 > `getHealth` returns an error until the node has committed a live ledger since it started and its newest ledger closed less than 30 seconds ago. That can take a while after `read server listening` appears. Send traffic to the node only once `getHealth` succeeds.
 
-For a readiness probe, check the response body: `curl` exits 0 even when `getHealth` returns an error. This command exits 0 only when the node is healthy:
+For a readiness probe, use this command. It exits 0 only when the node is healthy:
 
 ```bash
 curl -s localhost:8000 -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' | grep -q '"status":"healthy"'
@@ -211,7 +211,7 @@ curl -s localhost:8000 -H 'content-type: application/json' -d '{"jsonrpc":"2.0",
 
 ## 7. Monitoring & Operational Alerting
 
-Metrics are exposed via Prometheus on `service.admin_endpoint` at `/metrics` (namespace: `soroban_rpc`). Set alerts in your own monitoring system on the metrics below. The `docker run` command in 5.3 publishes port 6061 on the host's loopback interface only; to scrape it from another machine, publish it on a private interface instead (for example `-p 10.0.0.5:6061:6061`).
+Metrics are exposed via Prometheus on `service.admin_endpoint` at `/metrics` (namespace: `soroban_rpc`). Set alerts in your own monitoring system on the metrics below.
 
 ### Key Metrics to Monitor
 
@@ -226,7 +226,7 @@ Also alert on free disk space on every volume that holds a store. The node's dat
 
 ### Critical Error Counters
 
-Alert if any of the following increases, for example `increase(<metric>[10m]) > 0`. Any increase means a fault in the node.
+Alert if any of the following increases. Any increase means a fault in the node.
 
 - `soroban_rpc_fullhistory_streaming_failed_destroys_total`
 - `soroban_rpc_fullhistory_streaming_tx_index_inconsistencies_total`
