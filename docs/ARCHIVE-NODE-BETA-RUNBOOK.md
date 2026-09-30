@@ -10,10 +10,10 @@ This guide covers running the node. See the [API changes guide](API-CHANGES-BETA
 
 ### Storage Engine
 
-Data moves through a two-tier storage system:
+The node groups ledgers into chunks of 10,000 (~15–17 hours). Data moves through a two-tier storage system:
 
 - **Hot Tier (RocksDB):** Stores live incoming ledgers and serves queries for recent data.
-- **Cold Tier (Flat Files):** Every 10,000 ledgers (~15–17 hours), data is packed from RocksDB into immutable flat files and then pruned from RocksDB.
+- **Cold Tier (Flat Files):** When a chunk is complete, its data is packed from RocksDB into immutable flat files and then pruned from RocksDB.
 - **Unified Query Layer:** Server directs incoming requests to RocksDB or flat files based on the requested ledger range.
 
 ---
