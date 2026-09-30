@@ -95,6 +95,10 @@ type = "S3"                     # "S3" or "GCS"
 destination_bucket_path = "aws-public-blockchain/v1.1/stellar/ledgers/pubnet"
 region                  = "us-east-2" # AWS region hosting the public data lake bucket
 
+[backfill.datastore.schema]
+ledgers_per_file     = 1
+files_per_partition = 64000
+
 [ingestion]
 captive_core_config  = "/config/captive-core.toml"
 history_archive_urls = [
