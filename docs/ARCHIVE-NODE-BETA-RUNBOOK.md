@@ -6,7 +6,7 @@ The Stellar RPC Archive Node maintains full network history from genesis, wherea
 
 The archive node is currently in beta ([`rpcv2-v0.1.0-beta.1`](https://github.com/stellar/stellar-rpc/tree/rpcv2-v0.1.0-beta.1)), so details in this guide may change before the full release.
 
-This guide covers running the node. See the API changes guide for endpoint differences.
+This guide covers running the node. See the [API changes guide](API-CHANGES-BETA.md) for endpoint differences.
 
 ### Storage Engine
 
