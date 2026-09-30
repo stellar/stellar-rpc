@@ -173,7 +173,7 @@ docker run -d --name stellar-rpc-v2 \
 On initial startup, the container downloads ledger metadata from the configured data lake and backfills history before serving queries. **Nothing is served until the backfill completes.**
 
 - **Estimated Duration:** 24 to 48 hours depending on network bandwidth and disk IOPS.
-- **Port 8000 Status & Health Checks:** Port 8000 remains closed and `getHealth` fails throughout backfill. Do **not** configure liveness probes (or ECS target group checks) on port 8000, as failing health checks will trigger continuous restart loops. Use admin port 6061 for liveness checks (`GET /metrics` returns 200), and use `getHealth` on port 8000 only as a readiness check. `getHealth` is a JSON-RPC POST, so load-balancer checks and HTTP GET probes can't call it; use a command-based probe such as the `curl` in 6.2.
+- **Port 8000 Status & Health Checks:** Port 8000 remains closed and `getHealth` fails throughout backfill. Do **not** configure liveness probes (or ECS target group checks) on port 8000, as failing health checks will trigger continuous restart loops. Use admin port 6061 for liveness checks (`GET /metrics` returns 200), and use `getHealth` on port 8000 only as a readiness check. `getHealth` is a JSON-RPC POST, so load-balancer checks and HTTP GET probes can't call it; use a command-based probe such as the one in 6.2.
 - **Admin Port (6061):** Open and serving metrics. `soroban_rpc_fullhistory_streaming_last_committed_ledger` stays flat for most of the backfill, so track progress with the backfill gauges in 6.1.
 
 ### 6.1 Monitoring Backfill Progress
@@ -200,6 +200,12 @@ curl -s localhost:8000 -H 'content-type: application/json' -d '{"jsonrpc":"2.0",
 
 > [!NOTE]
 > `getHealth` returns an error until the node has committed a live ledger since it started and its newest ledger closed less than 30 seconds ago. That can take a while after `read server listening` appears. Send traffic to the node only once `getHealth` succeeds.
+
+For a readiness probe, check the response body: `curl` exits 0 even when `getHealth` returns an error. This command exits 0 only when the node is healthy:
+
+```bash
+curl -s localhost:8000 -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' | grep -q '"status":"healthy"'
+```
 
 ---
 
