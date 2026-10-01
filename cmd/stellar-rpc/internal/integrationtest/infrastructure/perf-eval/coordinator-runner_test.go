@@ -33,7 +33,7 @@ func TestRenderComment_FirstRun(t *testing.T) {
 		Legs:      okLeg("throughput: 42 l/s"),
 	}, "")
 	require.True(t, strings.HasPrefix(out, marker+"\n"))
-	require.Contains(t, out, "## 🧪 Performance Evaluation Test #1")
+	require.Contains(t, out, "## 🧪 Performance Evaluation Test #&#8203;1")
 	require.Contains(t, out, "**Commit:** `abcdef123456` (`release/v1.2.3`)")
 	require.Contains(t, out, "### ✅ Apply-load ingestion — verdict: ok")
 	require.Contains(t, out, "throughput: 42 l/s")
@@ -52,13 +52,13 @@ func TestRenderComment_FoldsHistory(t *testing.T) {
 	out := renderN(4, okLeg("run body"))
 
 	require.Equal(t, 1, strings.Count(out, marker))
-	require.Contains(t, out, "## 🧪 Performance Evaluation Test #4")
+	require.Contains(t, out, "## 🧪 Performance Evaluation Test #&#8203;4")
 	require.Equal(t, 3, strings.Count(out, "<details>\n<summary>Performance Evaluation Test #"))
 
 	// Each prior run in descending order (#3, then #2, then #1)
-	i3 := strings.Index(out, "Performance Evaluation Test #3")
-	i2 := strings.Index(out, "Performance Evaluation Test #2")
-	i1 := strings.Index(out, "Performance Evaluation Test #1")
+	i3 := strings.Index(out, "Performance Evaluation Test #&#8203;3")
+	i2 := strings.Index(out, "Performance Evaluation Test #&#8203;2")
+	i1 := strings.Index(out, "Performance Evaluation Test #&#8203;1")
 	require.Positive(t, i3)
 	require.Less(t, i3, i2)
 	require.Less(t, i2, i1)
@@ -87,9 +87,9 @@ func TestRenderComment_CapsHistory(t *testing.T) {
 	hist := parseHistory(out)
 	require.Len(t, hist, maxHistory)
 	require.Equal(t, maxHistory+2, hist[0].Num)
-	require.Contains(t, out, fmt.Sprintf("## 🧪 Performance Evaluation Test #%d", maxHistory+2))
-	require.NotContains(t, out, "Performance Evaluation Test #2\n") // shed
-	require.NotContains(t, out, "Performance Evaluation Test #1\n") // shed
+	require.Contains(t, out, fmt.Sprintf("## 🧪 Performance Evaluation Test #&#8203;%d", maxHistory+2))
+	require.NotContains(t, out, "Performance Evaluation Test #&#8203;2\n") // shed
+	require.NotContains(t, out, "Performance Evaluation Test #&#8203;1\n") // shed
 }
 
 // Oversized histories shed old runs to stay under the comment-size cap.
@@ -117,5 +117,5 @@ func TestParseHistory_FreshOnAbsentOrCorrupt(t *testing.T) {
 		RunURL:    "https://example/run",
 		Legs:      okLeg("body"),
 	}, marker+"\n## some legacy comment\n")
-	require.Contains(t, out, "## 🧪 Performance Evaluation Test #1")
+	require.Contains(t, out, "## 🧪 Performance Evaluation Test #&#8203;1")
 }
