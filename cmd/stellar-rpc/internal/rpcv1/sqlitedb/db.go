@@ -438,6 +438,7 @@ func (w writeTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta, durationMetrics map
 
 	// Published only after the commit, so the cache holds committed bounds and the
 	// commit never holds the lock; snapshot readers validate inside their own tx.
+	// One writer at a time (the ingest loop), so publish order is commit order.
 	startTime := time.Now()
 	oldest, err := w.oldestLedger()
 	if err != nil && !errors.Is(err, store.ErrEmptyDB) {
