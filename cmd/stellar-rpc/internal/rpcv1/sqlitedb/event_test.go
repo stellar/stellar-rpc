@@ -15,6 +15,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 func transactionMetaWithEvents(events ...xdr.ContractEvent) xdr.TransactionMeta {
@@ -211,6 +212,52 @@ func TestInsertEvents(t *testing.T) {
 
 	err = eventReader.GetEvents(ctx, cursorRange, nil, nil, nil, nil)
 	require.NoError(t, err)
+}
+
+// A snapshot keeps serving the event it validated after a trim commits underneath it.
+func TestEventReaderTx_SurvivesTrim(t *testing.T) {
+	db := NewTestDB(t)
+	ctx := t.Context()
+	counter := xdr.ScSymbol("COUNTER")
+	sym := xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}
+	event := contractEvent(xdr.ContractId([32]byte{}), xdr.ScVec{sym}, sym)
+
+	write, err := NewReadWriter(log.DefaultLogger, db, host.MakeNoOpDaemon(), 10, passphrase).NewTx(ctx)
+	require.NoError(t, err)
+	var last xdr.LedgerCloseMeta
+	for seq := uint32(1); seq <= 2; seq++ {
+		last = ledgerCloseMetaWithEvents(seq, time.Now().Unix(), transactionMetaWithEvents(event))
+		require.NoError(t, write.LedgerWriter().InsertLedger(last))
+		require.NoError(t, write.EventWriter().InsertEvents(last))
+	}
+	require.NoError(t, write.Commit(last, nil))
+
+	count := func(scanner store.EventScanner) int {
+		n := 0
+		window := protocol.CursorRange{Start: protocol.Cursor{Ledger: 1}, End: protocol.Cursor{Ledger: 2}}
+		require.NoError(t, scanner.GetEvents(ctx, window, nil, nil, nil,
+			func(xdr.DiagnosticEventView, protocol.Cursor, int64, *xdr.Hash) (bool, error) { n++; return true, nil }))
+		return n
+	}
+	pool := NewEventReader(log.DefaultLogger, db)
+	before := count(pool)
+	require.NotZero(t, before)
+
+	snap, err := pool.NewTx(ctx)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, snap.Done()) }()
+	_, err = snap.GetLedgerRange(ctx) // the first statement is what pins the snapshot
+	require.NoError(t, err)
+
+	// Trim ledger 1 with the predicates trimLedgers/trimEvents use; a full Commit's
+	// TRUNCATE checkpoint would wait out the busy timeout on the open snapshot.
+	_, err = db.ExecRaw(ctx, "DELETE FROM events WHERE id < ?", protocol.Cursor{Ledger: 2}.String())
+	require.NoError(t, err)
+	_, err = db.ExecRaw(ctx, "DELETE FROM ledger_close_meta WHERE sequence < 2")
+	require.NoError(t, err)
+
+	require.Equal(t, 0, count(pool))
+	require.Equal(t, before, count(snap))
 }
 
 func TestInsertEventsBatchingExceedsLimit(t *testing.T) {
