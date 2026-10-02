@@ -242,7 +242,7 @@ func newDB(session db.SessionInterface) (*DB, error) {
 	switch {
 	case errors.Is(err, store.ErrEmptyDB):
 	case err != nil:
-		return nil, err
+		return nil, errors.Join(err, session.Close())
 	default:
 		d.cache.firstLedgerSeq, d.cache.firstLedgerCloseTime = lr.FirstLedger.Sequence, lr.FirstLedger.CloseTime
 		d.cache.latestLedgerSeq, d.cache.latestLedgerCloseTime = lr.LastLedger.Sequence, lr.LastLedger.CloseTime
@@ -337,8 +337,7 @@ func NewReadWriter(
 }
 
 func (rw *readWriter) GetLatestLedgerSequence(ctx context.Context) (uint32, error) {
-	ledgerRange, err := NewLedgerReader(rw.db).GetLedgerRange(ctx)
-	return ledgerRange.LastLedger.Sequence, err
+	return NewLedgerReader(rw.db).GetLatestLedgerSequence(ctx)
 }
 
 func (rw *readWriter) NewTx(ctx context.Context) (WriteTx, error) {
