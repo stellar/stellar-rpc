@@ -283,16 +283,6 @@ func getMetaValue(ctx context.Context, q db.SessionInterface, key string) (strin
 	return results[0], nil
 }
 
-// getLatestLedgerSequence reads the cached latest; zero means the DB is empty.
-func getLatestLedgerSequence(cache *dbCache) (uint32, error) {
-	cache.RLock()
-	defer cache.RUnlock()
-	if cache.latestLedgerSeq == 0 {
-		return 0, store.ErrEmptyDB
-	}
-	return cache.latestLedgerSeq, nil
-}
-
 type ReadWriterMetrics struct {
 	TxIngestDuration, TxCount prometheus.Observer
 }
@@ -346,8 +336,9 @@ func NewReadWriter(
 	}
 }
 
-func (rw *readWriter) GetLatestLedgerSequence(_ context.Context) (uint32, error) {
-	return getLatestLedgerSequence(rw.db.cache)
+func (rw *readWriter) GetLatestLedgerSequence(ctx context.Context) (uint32, error) {
+	ledgerRange, err := NewLedgerReader(rw.db).GetLedgerRange(ctx)
+	return ledgerRange.LastLedger.Sequence, err
 }
 
 func (rw *readWriter) NewTx(ctx context.Context) (WriteTx, error) {
@@ -441,7 +432,7 @@ func (w writeTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta, durationMetrics map
 	// One writer at a time (the ingest loop), so publish order is commit order.
 	startTime := time.Now()
 	oldest, err := w.oldestLedger()
-	if err != nil && !errors.Is(err, store.ErrEmptyDB) {
+	if err != nil {
 		return err
 	}
 	if durationMetrics != nil {

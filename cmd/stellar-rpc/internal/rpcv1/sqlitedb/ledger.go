@@ -41,12 +41,8 @@ type ledgerReader struct {
 }
 
 type ledgerReaderTx struct {
-	tx                    db.SessionInterface
-	latestLedgerSeq       uint32
-	latestLedgerCloseTime int64
-	// cached bounds at NewTx; their close times are reused when the snapshot agrees
-	firstLedgerSeq       uint32
-	firstLedgerCloseTime int64
+	tx     db.SessionInterface
+	cached store.LedgerRange // bounds at NewTx; its close times are reused when the snapshot agrees
 }
 
 func (l ledgerReaderTx) GetLedgerRange(ctx context.Context) (store.LedgerRange, error) {
@@ -54,13 +50,10 @@ func (l ledgerReaderTx) GetLedgerRange(ctx context.Context) (store.LedgerRange, 
 	if err != nil {
 		return store.LedgerRange{}, err
 	}
-	if first == l.firstLedgerSeq && last == l.latestLedgerSeq {
-		return store.LedgerRange{
-			FirstLedger: store.LedgerInfo{Sequence: first, CloseTime: l.firstLedgerCloseTime},
-			LastLedger:  store.LedgerInfo{Sequence: last, CloseTime: l.latestLedgerCloseTime},
-		}, nil
+	if first == l.cached.FirstLedger.Sequence && last == l.cached.LastLedger.Sequence {
+		return l.cached, nil
 	}
-	return getLedgerRangeWithoutCache(ctx, l.tx) // a commit landed after NewTx, or the cache was reset
+	return getLedgerRangeWithoutCache(ctx, l.tx) // a commit landed between the cache copy and this statement
 }
 
 // ScanLedgers reads inside the reader's transaction.
@@ -92,13 +85,10 @@ func newLedgerReaderTx(ctx context.Context, db *DB) (ledgerReaderTx, error) {
 	}
 	db.cache.RLock()
 	defer db.cache.RUnlock()
-	return ledgerReaderTx{
-		tx:                    txSession,
-		latestLedgerSeq:       db.cache.latestLedgerSeq,
-		latestLedgerCloseTime: db.cache.latestLedgerCloseTime,
-		firstLedgerSeq:        db.cache.firstLedgerSeq,
-		firstLedgerCloseTime:  db.cache.firstLedgerCloseTime,
-	}, nil
+	return ledgerReaderTx{tx: txSession, cached: store.LedgerRange{
+		FirstLedger: store.LedgerInfo{Sequence: db.cache.firstLedgerSeq, CloseTime: db.cache.firstLedgerCloseTime},
+		LastLedger:  store.LedgerInfo{Sequence: db.cache.latestLedgerSeq, CloseTime: db.cache.latestLedgerCloseTime},
+	}}, nil
 }
 
 // ScanLedgers reads the pooled connection: no snapshot, the store as it stands.
@@ -163,8 +153,9 @@ func (r ledgerReader) GetLedgerCountInRange(ctx context.Context, start, end uint
 	return getLedgerCountInRange(ctx, r.db, start, end)
 }
 
-func (r ledgerReader) GetLatestLedgerSequence(_ context.Context) (uint32, error) {
-	return getLatestLedgerSequence(r.db.cache)
+func (r ledgerReader) GetLatestLedgerSequence(ctx context.Context) (uint32, error) {
+	ledgerRange, err := r.GetLedgerRange(ctx)
+	return ledgerRange.LastLedger.Sequence, err
 }
 
 // ledgerCloseTimePrefixBytes is the fast-path meta prefix fetched for range

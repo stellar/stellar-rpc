@@ -258,18 +258,48 @@ func TestLedgerReaderTx_GetLedgerRange_FromSnapshot(t *testing.T) {
 	require.NoError(t, write.Commit(txMeta(1236, true), nil))
 
 	reader := NewLedgerReader(db)
-	for _, cached := range [][2]uint32{{1334, 1336}, {0, 0}, {1333, 1335}} { // agrees, reset, lagging a commit
+	for _, tc := range []struct {
+		cachedFirst, cachedLast uint32
+		wantFirstCT, wantLastCT int64
+	}{
+		{1334, 1336, 41, 43}, // agrees: the cached (sentinel) close times are returned
+		{0, 0, ledgerCloseTime(1334), ledgerCloseTime(1336)},       // unprimed
+		{1333, 1335, ledgerCloseTime(1334), ledgerCloseTime(1336)}, // lagging a commit
+	} {
 		db.cache.Lock()
-		db.cache.firstLedgerSeq, db.cache.latestLedgerSeq = cached[0], cached[1]
+		db.cache.firstLedgerSeq, db.cache.latestLedgerSeq = tc.cachedFirst, tc.cachedLast
+		db.cache.firstLedgerCloseTime, db.cache.latestLedgerCloseTime = 41, 43
 		db.cache.Unlock()
 		tx, err := reader.NewTx(ctx)
 		require.NoError(t, err)
 		ledgerRange, err := tx.GetLedgerRange(ctx)
 		require.NoError(t, tx.Done())
 		require.NoError(t, err)
-		assert.Equal(t, store.LedgerInfo{Sequence: 1334, CloseTime: ledgerCloseTime(1334)}, ledgerRange.FirstLedger)
-		assert.Equal(t, store.LedgerInfo{Sequence: 1336, CloseTime: ledgerCloseTime(1336)}, ledgerRange.LastLedger)
+		assert.Equal(t, store.LedgerInfo{Sequence: 1334, CloseTime: tc.wantFirstCT}, ledgerRange.FirstLedger)
+		assert.Equal(t, store.LedgerInfo{Sequence: 1336, CloseTime: tc.wantLastCT}, ledgerRange.LastLedger)
 	}
+}
+
+// Reopening a populated DB primes the cache without waiting for a commit.
+func TestOpenSQLiteDB_PrimesLedgerRange(t *testing.T) {
+	ctx := context.TODO()
+	dbPath := path.Join(t.TempDir(), "db.sqlite")
+	db, err := OpenSQLiteDB(dbPath)
+	require.NoError(t, err)
+	write, err := NewReadWriter(logger, db, host.MakeNoOpDaemon(), 10, passphrase).NewTx(ctx)
+	require.NoError(t, err)
+	require.NoError(t, write.LedgerWriter().InsertLedger(txMeta(1234, true)))
+	require.NoError(t, write.LedgerWriter().InsertLedger(txMeta(1235, true)))
+	require.NoError(t, write.Commit(txMeta(1235, true), nil))
+	require.NoError(t, db.Close())
+
+	db, err = OpenSQLiteDB(dbPath)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+	ledgerRange, err := NewLedgerReader(db).GetLedgerRange(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, store.LedgerInfo{Sequence: 1334, CloseTime: ledgerCloseTime(1334)}, ledgerRange.FirstLedger)
+	assert.Equal(t, store.LedgerInfo{Sequence: 1335, CloseTime: ledgerCloseTime(1335)}, ledgerRange.LastLedger)
 }
 
 func TestGetLedgerRange_EmptyDB(t *testing.T) {
