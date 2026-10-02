@@ -227,6 +227,28 @@ func formatResponse(preflight preflight.Preflight,
 		StateChanges:    stateChanges,
 	}
 
+	// stellar core charges the budget's contract_events_and_return_value_size
+	// cost with the XDR bytes of successful contract events plus the return
+	// value, so diagnostic output must not count toward this limit.
+	var totalEventsSize uint64
+	for _, eventBytes := range preflight.Events {
+		var diagEvent xdr.DiagnosticEvent
+		if err := xdr.SafeUnmarshal(eventBytes, &diagEvent); err != nil {
+			continue
+		}
+		if !diagEvent.InSuccessfulContractCall || diagEvent.Event.Type != xdr.ContractEventTypeContract {
+			continue
+		}
+		if encoded, err := diagEvent.Event.MarshalBinary(); err == nil {
+			totalEventsSize += uint64(len(encoded))
+		}
+	}
+	totalEventsSize += uint64(len(preflight.Result))
+	const defaultMaxContractEventsSizeBytes uint64 = 16384
+	if simResp.Error == "" && totalEventsSize > defaultMaxContractEventsSizeBytes {
+		simResp.Error = fmt.Sprintf("total contract events size (%d bytes) exceeds maximum limit (%d bytes)", totalEventsSize, defaultMaxContractEventsSizeBytes)
+	}
+
 	switch format {
 	case protocol.FormatJSON:
 		simResp.TransactionDataJSON, err = xdr2json.ConvertBytes(

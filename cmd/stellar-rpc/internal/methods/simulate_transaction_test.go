@@ -678,3 +678,60 @@ func TestSimulateTransactionThreadsUseUpgradedAuth(t *testing.T) {
 		})
 	}
 }
+
+func TestSimulateTransaction_ContractEventsSizeLimit(t *testing.T) {
+	encodedEvent := func(t *testing.T, inSuccessful bool, eventType xdr.ContractEventType, size int) []byte {
+		payload := xdr.ScBytes(make([]byte, size))
+		event := xdr.DiagnosticEvent{
+			InSuccessfulContractCall: inSuccessful,
+			Event: xdr.ContractEvent{
+				Type: eventType,
+				Body: xdr.ContractEventBody{
+					V: 0,
+					V0: &xdr.ContractEventV0{
+						Data: xdr.ScVal{
+							Type:  xdr.ScValTypeScvBytes,
+							Bytes: &payload,
+						},
+					},
+				},
+			},
+		}
+		b, err := event.MarshalBinary()
+		require.NoError(t, err)
+		return b
+	}
+
+	t.Run("successful contract events over the limit", func(t *testing.T) {
+		pf := preflight.Preflight{
+			Events: [][]byte{
+				encodedEvent(t, true, xdr.ContractEventTypeContract, 10000),
+				encodedEvent(t, true, xdr.ContractEventTypeContract, 7000),
+			},
+		}
+		resp, err := formatResponse(pf, protocol.FormatBase64, 100)
+		require.NoError(t, err)
+		require.Contains(t, resp.Error, "total contract events size")
+		require.Contains(t, resp.Error, "exceeds maximum limit")
+	})
+
+	t.Run("diagnostic and system events are not counted", func(t *testing.T) {
+		pf := preflight.Preflight{
+			Events: [][]byte{
+				encodedEvent(t, false, xdr.ContractEventTypeContract, 10000),
+				encodedEvent(t, true, xdr.ContractEventTypeSystem, 10000),
+			},
+		}
+		resp, err := formatResponse(pf, protocol.FormatBase64, 100)
+		require.NoError(t, err)
+		require.Empty(t, resp.Error)
+	})
+
+	t.Run("return value alone can exceed the limit", func(t *testing.T) {
+		pf := preflight.Preflight{Result: make([]byte, 16385)}
+		resp, err := formatResponse(pf, protocol.FormatBase64, 100)
+		require.NoError(t, err)
+		require.Contains(t, resp.Error, "exceeds maximum limit")
+	})
+}
+
