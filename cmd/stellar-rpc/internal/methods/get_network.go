@@ -16,8 +16,9 @@ func NewGetNetworkHandler(
 	friendbotURL string,
 	ledgerReader store.LedgerReader,
 ) jrpc2.Handler {
+	versions := newProtocolVersionCache(ledgerReader)
 	return NewHandler(func(ctx context.Context, _ protocol.GetNetworkRequest) (protocol.GetNetworkResponse, error) {
-		protocolVersion, err := getProtocolVersion(ctx, ledgerReader)
+		protocolVersion, err := versions.get(ctx)
 		if err != nil {
 			return protocol.GetNetworkResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
