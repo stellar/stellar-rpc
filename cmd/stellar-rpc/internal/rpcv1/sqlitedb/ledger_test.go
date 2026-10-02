@@ -189,12 +189,10 @@ func TestGetLedgerRange_SingleDBRow(t *testing.T) {
 	assert.Equal(t, ledgerCloseTime(1334), ledgerRange.LastLedger.CloseTime)
 }
 
-// TestGetLedgerRange_OldestCacheInvalidatedOnTrim verifies that the cached
-// oldest-ledger scalars are refreshed once the retention window trims the
-// ledger they describe -- so GetLedgerRange keeps reporting the true oldest
-// ledger rather than a stale cached one, while still avoiding the per-call
-// oldest-ledger decode in steady state.
-func TestGetLedgerRange_OldestCacheInvalidatedOnTrim(t *testing.T) {
+// TestGetLedgerRange_OldestCachePublishedOnTrim verifies that a trimming
+// commit itself publishes the new oldest ledger's scalars, so GetLedgerRange
+// reports the true oldest without ever decoding it on the read path.
+func TestGetLedgerRange_OldestCachePublishedOnTrim(t *testing.T) {
 	const retentionWindow = 10
 	db := NewTestDB(t)
 	ctx := context.TODO()
@@ -215,9 +213,18 @@ func TestGetLedgerRange_OldestCacheInvalidatedOnTrim(t *testing.T) {
 		require.NoError(t, write.Commit(last, nil))
 	}
 
-	// Phase 1: ingest exactly the retention window (sequences 1334..1343); no
-	// trimming yet, oldest = 1334. The read populates the oldest cache.
+	cachedOldest := func() (uint32, int64) {
+		db.cache.RLock()
+		defer db.cache.RUnlock()
+		return db.cache.firstLedgerSeq, db.cache.firstLedgerCloseTime
+	}
+
+	// Phase 1: ingest exactly the retention window (sequences 1334..1343); the
+	// trim removes nothing, and the commit publishes oldest = 1334.
 	ingest(1234, retentionWindow)
+	seq, closeTime := cachedOldest()
+	assert.Equal(t, uint32(1334), seq)
+	assert.Equal(t, ledgerCloseTime(1334), closeTime)
 	ledgerRange, err := reader.GetLedgerRange(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(1334), ledgerRange.FirstLedger.Sequence)
@@ -226,15 +233,73 @@ func TestGetLedgerRange_OldestCacheInvalidatedOnTrim(t *testing.T) {
 
 	// Phase 2: ingest 5 more (sequences 1344..1348). With retention 10 and
 	// latest 1348, the cutoff is 1339, trimming 1334..1338 -- which includes the
-	// cached oldest (1334), so the cache must invalidate and the next read must
-	// report the new oldest (1339), not the stale 1334.
+	// cached oldest (1334), so the commit must publish 1339 before any read.
 	ingest(1244, 5)
+	seq, closeTime = cachedOldest()
+	assert.Equal(t, uint32(1339), seq)
+	assert.Equal(t, ledgerCloseTime(1339), closeTime)
 	ledgerRange, err = reader.GetLedgerRange(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(1339), ledgerRange.FirstLedger.Sequence)
 	assert.Equal(t, ledgerCloseTime(1339), ledgerRange.FirstLedger.CloseTime)
 	assert.Equal(t, uint32(1348), ledgerRange.LastLedger.Sequence)
 	assert.Equal(t, ledgerCloseTime(1348), ledgerRange.LastLedger.CloseTime)
+}
+
+// The snapshot reader takes both bounds from its own tx; the cached pair only supplies close times.
+func TestLedgerReaderTx_GetLedgerRange_FromSnapshot(t *testing.T) {
+	db := NewTestDB(t)
+	ctx := context.TODO()
+	write, err := NewReadWriter(logger, db, host.MakeNoOpDaemon(), 10, passphrase).NewTx(ctx)
+	require.NoError(t, err)
+	for seq := uint32(1234); seq <= 1236; seq++ {
+		require.NoError(t, write.LedgerWriter().InsertLedger(txMeta(seq, true)))
+	}
+	require.NoError(t, write.Commit(txMeta(1236, true), nil))
+
+	reader := NewLedgerReader(db)
+	for _, tc := range []struct {
+		cachedFirst, cachedLast uint32
+		wantFirstCT, wantLastCT int64
+	}{
+		{1334, 1336, 41, 43}, // agrees: the cached (sentinel) close times are returned
+		{0, 0, ledgerCloseTime(1334), ledgerCloseTime(1336)},       // unprimed
+		{1333, 1335, ledgerCloseTime(1334), ledgerCloseTime(1336)}, // lagging a commit
+	} {
+		db.cache.Lock()
+		db.cache.firstLedgerSeq, db.cache.latestLedgerSeq = tc.cachedFirst, tc.cachedLast
+		db.cache.firstLedgerCloseTime, db.cache.latestLedgerCloseTime = 41, 43
+		db.cache.Unlock()
+		tx, err := reader.NewTx(ctx)
+		require.NoError(t, err)
+		ledgerRange, err := tx.GetLedgerRange(ctx)
+		require.NoError(t, tx.Done())
+		require.NoError(t, err)
+		assert.Equal(t, store.LedgerInfo{Sequence: 1334, CloseTime: tc.wantFirstCT}, ledgerRange.FirstLedger)
+		assert.Equal(t, store.LedgerInfo{Sequence: 1336, CloseTime: tc.wantLastCT}, ledgerRange.LastLedger)
+	}
+}
+
+// Reopening a populated DB primes the cache without waiting for a commit.
+func TestOpenSQLiteDB_PrimesLedgerRange(t *testing.T) {
+	ctx := context.TODO()
+	dbPath := path.Join(t.TempDir(), "db.sqlite")
+	db, err := OpenSQLiteDB(dbPath)
+	require.NoError(t, err)
+	write, err := NewReadWriter(logger, db, host.MakeNoOpDaemon(), 10, passphrase).NewTx(ctx)
+	require.NoError(t, err)
+	require.NoError(t, write.LedgerWriter().InsertLedger(txMeta(1234, true)))
+	require.NoError(t, write.LedgerWriter().InsertLedger(txMeta(1235, true)))
+	require.NoError(t, write.Commit(txMeta(1235, true), nil))
+	require.NoError(t, db.Close())
+
+	db, err = OpenSQLiteDB(dbPath)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+	ledgerRange, err := NewLedgerReader(db).GetLedgerRange(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, store.LedgerInfo{Sequence: 1334, CloseTime: ledgerCloseTime(1334)}, ledgerRange.FirstLedger)
+	assert.Equal(t, store.LedgerInfo{Sequence: 1335, CloseTime: ledgerCloseTime(1335)}, ledgerRange.LastLedger)
 }
 
 func TestGetLedgerRange_EmptyDB(t *testing.T) {
@@ -373,8 +438,8 @@ func padLedger(lcm xdr.LedgerCloseMeta, size int) xdr.LedgerCloseMeta {
 }
 
 // BenchmarkOldestLedgerRangeLookup measures the 1KiB prefix fetch in
-// getLedgerRangeWithCache. The tx read path (getLedgers/getTransactions) runs
-// this lookup once per request.
+// oldestLedgerInfo: every commit runs it, and a snapshot reader only when the
+// cached bounds disagree with its own.
 func BenchmarkOldestLedgerRangeLookup(b *testing.B) {
 	for _, tc := range []struct {
 		name string
@@ -402,16 +467,15 @@ func BenchmarkOldestLedgerRangeLookup(b *testing.B) {
 		}
 		latest := lcms[len(lcms)-1]
 		require.NoError(b, write.Commit(latest, nil))
-		latestSeq, latestTime := latest.LedgerSequence(), latest.LedgerCloseTime()
 
-		got, err := getLedgerRangeWithCache(ctx, testDB, latestSeq, latestTime)
+		got, err := oldestLedgerInfo(ctx, testDB)
 		require.NoError(b, err)
-		require.Equal(b, lcms[0].LedgerSequence(), got.FirstLedger.Sequence)
+		require.Equal(b, lcms[0].LedgerSequence(), got.Sequence)
 
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				_, err := getLedgerRangeWithCache(ctx, testDB, latestSeq, latestTime)
+				_, err := oldestLedgerInfo(ctx, testDB)
 				require.NoError(b, err)
 			}
 		})

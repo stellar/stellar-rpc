@@ -597,7 +597,7 @@ func sqliteEventRows(t *testing.T, lcm xdr.LedgerCloseMeta) []sqliteEventRow {
 		End:   protocol.Cursor{Ledger: seq + 1},
 	}
 	var rows []sqliteEventRow
-	reader := sqlitedb.NewEventReader(logger, testDB, testPassphrase)
+	reader := sqlitedb.NewEventReader(logger, testDB)
 	err = reader.GetEvents(ctx, cursorRange, nil, nil, nil,
 		func(eventView xdr.DiagnosticEventView, cur protocol.Cursor, closeTime int64, txHash *xdr.Hash) (bool, error) {
 			ev, verr := eventView.Event()

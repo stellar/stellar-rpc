@@ -225,7 +225,7 @@ func TestTransactionFound(t *testing.T) {
 	_, err = reader.GetTransaction(ctx, xdr.Hash{})
 	require.ErrorIs(t, err, store.ErrNoTransaction)
 
-	eventReader := NewEventReader(log, db, passphrase)
+	eventReader := NewEventReader(log, db)
 	start := protocol.Cursor{Ledger: 1}
 	end := protocol.Cursor{Ledger: 1000}
 	cursorRange := protocol.CursorRange{Start: start, End: end}
@@ -265,7 +265,7 @@ func TestInsertTransactionsBatchingExceedsLimit(t *testing.T) {
 
 	for i, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			testDB := NewTestDB(t)
+			testDB := NewTestDB(t) //nolint:contextcheck // the test DB opener has no ctx to take
 
 			ledgerSeq := uint32(10 + i)
 			lcm := lcmWithCtTxns(ledgerSeq, tc.numTxs)

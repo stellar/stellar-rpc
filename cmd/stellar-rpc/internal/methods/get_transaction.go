@@ -55,6 +55,10 @@ func GetTransaction(
 			Message: fmt.Sprintf("unable to get ledger range: %v", err),
 		}
 	}
+	// The cache publishes after the commit, so a just-found tx can be newer than the cached latest.
+	if getTxErr == nil && tx.Ledger.Sequence > storeRange.LastLedger.Sequence {
+		storeRange.LastLedger = tx.Ledger
+	}
 
 	response := protocol.GetTransactionResponse{
 		LatestLedger:          storeRange.LastLedger.Sequence,

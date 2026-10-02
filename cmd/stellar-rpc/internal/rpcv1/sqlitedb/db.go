@@ -51,14 +51,7 @@ type dbCache struct {
 
 	latestLedgerSeq       uint32
 	latestLedgerCloseTime int64
-	// firstLedgerSeq/firstLedgerCloseTime cache the oldest retained ledger's
-	// range scalars. Without this, GetLedgerRange decodes the entire oldest
-	// LedgerCloseMeta blob on every call (e.g. on every getTransaction) just to
-	// read a sequence + close time. A value of 0 means "unknown" -- it is
-	// populated lazily on the first GetLedgerRange after a reset or after the
-	// cached oldest ledger has been trimmed away (see Commit), so the expensive
-	// oldest-ledger decode happens at most once per trim (~once per ledger
-	// once retention is full) instead of once per read.
+	// Primed at open and republished by every commit; a zero latest means an empty DB.
 	firstLedgerSeq       uint32
 	firstLedgerCloseTime int64
 }
@@ -67,15 +60,6 @@ type DB struct {
 	db.SessionInterface
 
 	cache *dbCache
-}
-
-func (d *DB) ResetCache() {
-	d.cache.Lock()
-	defer d.cache.Unlock()
-	d.cache.latestLedgerSeq = 0
-	d.cache.latestLedgerCloseTime = 0
-	d.cache.firstLedgerSeq = 0
-	d.cache.firstLedgerCloseTime = 0
 }
 
 const (
@@ -240,11 +224,7 @@ func OpenSQLiteDBWithPrometheusMetrics(dbFilePath string, namespace string, sub 
 	if err != nil {
 		return nil, err
 	}
-	result := DB{
-		SessionInterface: db.RegisterMetrics(session, namespace, sub, registry),
-		cache:            &dbCache{},
-	}
-	return &result, nil
+	return newDB(db.RegisterMetrics(session, namespace, sub, registry))
 }
 
 func OpenSQLiteDB(dbFilePath string) (*DB, error) {
@@ -252,11 +232,22 @@ func OpenSQLiteDB(dbFilePath string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	result := DB{
-		SessionInterface: session,
-		cache:            &dbCache{},
+	return newDB(session)
+}
+
+// newDB primes the range cache from the stored bounds; a fresh DB waits for its first commit.
+func newDB(session db.SessionInterface) (*DB, error) {
+	d := &DB{SessionInterface: session, cache: &dbCache{}}
+	lr, err := getLedgerRangeWithoutCache(context.Background(), session)
+	switch {
+	case errors.Is(err, store.ErrEmptyDB):
+	case err != nil:
+		return nil, errors.Join(err, session.Close())
+	default:
+		d.cache.firstLedgerSeq, d.cache.firstLedgerCloseTime = lr.FirstLedger.Sequence, lr.FirstLedger.CloseTime
+		d.cache.latestLedgerSeq, d.cache.latestLedgerCloseTime = lr.LastLedger.Sequence, lr.LastLedger.CloseTime
 	}
-	return &result, nil
+	return d, nil
 }
 
 func getMetaBool(ctx context.Context, q db.SessionInterface, key string) (bool, error) {
@@ -290,34 +281,6 @@ func getMetaValue(ctx context.Context, q db.SessionInterface, key string) (strin
 			len(results), key, metaTableName)
 	}
 	return results[0], nil
-}
-
-func getLatestLedgerSequence(ctx context.Context, ledgerReader LedgerReader, cache *dbCache) (uint32, error) {
-	cache.RLock()
-	latestLedgerSeqCache := cache.latestLedgerSeq
-	cache.RUnlock()
-
-	if latestLedgerSeqCache != 0 {
-		return latestLedgerSeqCache, nil
-	}
-
-	ledgerRange, err := ledgerReader.GetLedgerRange(ctx)
-	if err != nil {
-		return 0, err
-	}
-
-	// Add missing ledger sequence and close time to the top cache.
-	// Otherwise, the write-through cache won't get updated until the first ingestion commit
-	cache.Lock()
-	if cache.latestLedgerSeq < ledgerRange.LastLedger.Sequence {
-		// Only update the cache if the value is missing (0), otherwise
-		// we may end up overwriting the entry with an older version
-		cache.latestLedgerSeq = ledgerRange.LastLedger.Sequence
-		cache.latestLedgerCloseTime = ledgerRange.LastLedger.CloseTime
-	}
-	cache.Unlock()
-
-	return ledgerRange.LastLedger.Sequence, nil
 }
 
 type ReadWriterMetrics struct {
@@ -374,7 +337,7 @@ func NewReadWriter(
 }
 
 func (rw *readWriter) GetLatestLedgerSequence(ctx context.Context) (uint32, error) {
-	return getLatestLedgerSequence(ctx, NewLedgerReader(rw.db), rw.db.cache)
+	return NewLedgerReader(rw.db).GetLatestLedgerSequence(ctx)
 }
 
 func (rw *readWriter) NewTx(ctx context.Context) (WriteTx, error) {
@@ -387,6 +350,9 @@ func (rw *readWriter) NewTx(ctx context.Context) (WriteTx, error) {
 	db := rw.db
 	writer := writeTx{
 		globalCache: db.cache,
+		oldestLedger: func() (store.LedgerInfo, error) {
+			return oldestLedgerInfo(ctx, txSession)
+		},
 		postCommit: func(durationMetrics map[string]time.Duration) error {
 			// TODO: this is sqlite-only, it shouldn't be here
 			startTime := time.Now()
@@ -426,6 +392,7 @@ func (rw *readWriter) NewTx(ctx context.Context) (WriteTx, error) {
 
 type writeTx struct {
 	globalCache            *dbCache
+	oldestLedger           func() (store.LedgerInfo, error) // reads inside the write tx
 	postCommit             func(durationMetrics map[string]time.Duration) error
 	tx                     db.SessionInterface
 	stmtCache              *sq.StmtCache
@@ -459,41 +426,34 @@ func (w writeTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta, durationMetrics map
 		return err
 	}
 
-	// We need to make the cache update atomic with the transaction commit.
-	// Otherwise, the cache can be made inconsistent if a write transaction finishes
-	// in between, updating the cache in the wrong order.
-	commitAndUpdateCache := func() error {
-		w.globalCache.Lock()
-		defer w.globalCache.Unlock()
-		if err := w.tx.Commit(); err != nil {
-			return err
-		}
-		if ledgerSeq > w.globalCache.latestLedgerSeq {
-			w.globalCache.latestLedgerSeq = ledgerSeq
-			w.globalCache.latestLedgerCloseTime = ledgerCloseTime
-		}
-		// Invalidate the cached oldest-ledger scalars when trimLedgers (run
-		// above with this same retention window) has removed the ledger they
-		// describe. cutoff mirrors trimLedgers: rows with sequence < cutoff are
-		// deleted. Only invalidate when retention is actually trimming and the
-		// cached oldest was at/below the cutoff, so the lazy recompute happens
-		// at most once per trim rather than on every read.
-		if w.historyRetentionWindow != 0 && ledgerSeq+1 > w.historyRetentionWindow {
-			cutoff := ledgerSeq + 1 - w.historyRetentionWindow
-			if w.globalCache.firstLedgerSeq != 0 && w.globalCache.firstLedgerSeq < cutoff {
-				w.globalCache.firstLedgerSeq = 0
-				w.globalCache.firstLedgerCloseTime = 0
-			}
-		}
-		return nil
-	}
+	// Published only after the commit, so the cache holds committed bounds and the
+	// commit never holds the lock; snapshot readers validate inside their own tx.
+	// One writer at a time (the ingest loop), so publish order is commit order.
 	startTime := time.Now()
-	if err := commitAndUpdateCache(); err != nil {
+	oldest, err := w.oldestLedger()
+	if err != nil {
+		return err
+	}
+	if durationMetrics != nil {
+		durationMetrics["oldest_ledger"] = time.Since(startTime)
+	}
+
+	startTime = time.Now()
+	if err := w.tx.Commit(); err != nil {
 		return err
 	}
 	if durationMetrics != nil {
 		durationMetrics["commit"] = time.Since(startTime)
 	}
+
+	w.globalCache.Lock()
+	w.globalCache.firstLedgerSeq = oldest.Sequence
+	w.globalCache.firstLedgerCloseTime = oldest.CloseTime
+	if ledgerSeq > w.globalCache.latestLedgerSeq {
+		w.globalCache.latestLedgerSeq = ledgerSeq
+		w.globalCache.latestLedgerCloseTime = ledgerCloseTime
+	}
+	w.globalCache.Unlock()
 
 	return w.postCommit(durationMetrics)
 }

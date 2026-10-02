@@ -400,7 +400,7 @@ func createJSONRPCHandler(cfg *config.Config, logger *supportlog.Entry, daemon *
 		Logger:                logger,
 		LedgerReader:          sqlitedb.NewLedgerReader(daemon.db),
 		TransactionReader:     sqlitedb.NewTransactionReader(logger, daemon.db, cfg.NetworkPassphrase),
-		EventReader:           sqlitedb.NewEventReader(logger, daemon.db, cfg.NetworkPassphrase),
+		EventReader:           sqlitedb.NewEventReader(logger, daemon.db),
 		PreflightGetter:       daemon.preflightWorkerPool,
 		DataStoreLedgerReader: dataStoreLedgerReader,
 	})
@@ -540,8 +540,7 @@ func (d *Daemon) mustBackfill(cfg *config.Config, feeWindows *feewindow.FeeWindo
 		d.logger.WithError(err).Fatal("failed to backfill ledgers")
 	}
 
-	// Clear the DB cache and fee windows so they re-populate from the database
-	d.db.ResetCache()
+	// Reset the fee windows so they re-populate from the database
 	feeWindows.Reset()
 }
 

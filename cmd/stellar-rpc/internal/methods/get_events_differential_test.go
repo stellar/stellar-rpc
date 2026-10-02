@@ -230,7 +230,8 @@ type legacyEventEntry struct {
 
 // legacyGetEvents is the pre-view handler over ledger-derived events: the
 // frozen matcher and renderer on what legacyScanEvents finds.
-func legacyGetEvents(ctx context.Context, h eventsRPCHandler, request protocol.GetEventsRequest,
+func legacyGetEvents(ctx context.Context, h eventsRPCHandler, ledgerReader store.LedgerReader,
+	request protocol.GetEventsRequest,
 ) (protocol.GetEventsResponse, error) {
 	if err := request.Valid(h.maxLimit); err != nil {
 		return protocol.GetEventsResponse{}, &jrpc2.Error{
@@ -238,7 +239,7 @@ func legacyGetEvents(ctx context.Context, h eventsRPCHandler, request protocol.G
 		}
 	}
 
-	ledgerRange, err := h.ledgerReader.GetLedgerRange(ctx)
+	ledgerRange, err := ledgerReader.GetLedgerRange(ctx)
 	if err != nil {
 		return protocol.GetEventsResponse{}, &jrpc2.Error{
 			Code: jrpc2.InternalError, Message: err.Error(),
@@ -289,7 +290,7 @@ func legacyGetEvents(ctx context.Context, h eventsRPCHandler, request protocol.G
 		}
 	}
 
-	found, err := legacyScanEvents(ctx, h.ledgerReader, cursorRange, &request, limit)
+	found, err := legacyScanEvents(ctx, ledgerReader, cursorRange, &request, limit)
 	if err != nil {
 		return protocol.GetEventsResponse{}, &jrpc2.Error{
 			Code: jrpc2.InvalidRequest, Message: err.Error(),
@@ -686,14 +687,14 @@ type eventsDifferential = differential[protocol.GetEventsRequest, protocol.GetEv
 // handler. The small default limit lands inside the corpus.
 func newEventsDifferential(testDB *sqlitedb.DB) eventsDifferential {
 	h := eventsRPCHandler{
-		dbReader:     sqlitedb.NewEventReader(log.DefaultLogger, testDB, passphrase),
+		dbReader:     sqlitedb.NewEventReader(log.DefaultLogger, testDB),
 		maxLimit:     10000,
 		defaultLimit: 10,
-		ledgerReader: sqlitedb.NewLedgerReader(testDB),
 	}
+	ledgerReader := sqlitedb.NewLedgerReader(testDB)
 	return eventsDifferential{
 		want: func(ctx context.Context, req protocol.GetEventsRequest) (protocol.GetEventsResponse, error) {
-			return legacyGetEvents(ctx, h, req)
+			return legacyGetEvents(ctx, h, ledgerReader, req)
 		},
 		got: h.getEvents,
 	}

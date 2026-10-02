@@ -30,7 +30,6 @@ type eventsRPCHandler struct {
 	maxLimit     uint
 	defaultLimit uint
 	logger       *log.Entry
-	ledgerReader store.LedgerReader
 }
 
 func combineContractIDs(filters []protocol.EventFilter) ([][]byte, error) {
@@ -128,7 +127,19 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 		}
 	}
 
-	ledgerRange, err := h.ledgerReader.GetLedgerRange(ctx)
+	// Range and scan share one snapshot, so a validated startLedger cannot be
+	// trimmed away between the check and the query.
+	readTx, err := h.dbReader.NewTx(ctx)
+	if err != nil {
+		return protocol.GetEventsResponse{}, &jrpc2.Error{
+			Code: jrpc2.InternalError, Message: err.Error(),
+		}
+	}
+	defer func() {
+		_ = readTx.Done()
+	}()
+
+	ledgerRange, err := readTx.GetLedgerRange(ctx)
 	if err != nil {
 		return protocol.GetEventsResponse{}, &jrpc2.Error{
 			Code: jrpc2.InternalError, Message: err.Error(),
@@ -231,7 +242,7 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 		return uint(len(results)) < limit, nil
 	}
 
-	err = h.dbReader.GetEvents(ctx, cursorRange, contractIDs, topics, eventTypes, eventViewScanFunction)
+	err = readTx.GetEvents(ctx, cursorRange, contractIDs, topics, eventTypes, eventViewScanFunction)
 	switch {
 	case procErr != nil:
 		return protocol.GetEventsResponse{}, procErr
@@ -398,14 +409,12 @@ func NewGetEventsHandler(
 	dbReader store.EventReader,
 	maxLimit uint,
 	defaultLimit uint,
-	ledgerReader store.LedgerReader,
 ) jrpc2.Handler {
 	eventsHandler := eventsRPCHandler{
 		dbReader:     dbReader,
 		maxLimit:     maxLimit,
 		defaultLimit: defaultLimit,
 		logger:       logger,
-		ledgerReader: ledgerReader,
 	}
 	return NewHandler(eventsHandler.getEvents)
 }
