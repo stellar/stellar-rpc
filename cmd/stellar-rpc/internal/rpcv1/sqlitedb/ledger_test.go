@@ -408,8 +408,8 @@ func padLedger(lcm xdr.LedgerCloseMeta, size int) xdr.LedgerCloseMeta {
 }
 
 // BenchmarkOldestLedgerRangeLookup measures the 1KiB prefix fetch in
-// getLedgerRangeWithCache. The tx read path (getLedgers/getTransactions) runs
-// this lookup once per request.
+// oldestLedgerInfo: every commit runs it, and a snapshot reader only when the
+// cached bounds disagree with its own.
 func BenchmarkOldestLedgerRangeLookup(b *testing.B) {
 	for _, tc := range []struct {
 		name string
@@ -437,16 +437,15 @@ func BenchmarkOldestLedgerRangeLookup(b *testing.B) {
 		}
 		latest := lcms[len(lcms)-1]
 		require.NoError(b, write.Commit(latest, nil))
-		latestSeq, latestTime := latest.LedgerSequence(), latest.LedgerCloseTime()
 
-		got, err := getLedgerRangeWithCache(ctx, testDB, latestSeq, latestTime)
+		got, err := oldestLedgerInfo(ctx, testDB)
 		require.NoError(b, err)
-		require.Equal(b, lcms[0].LedgerSequence(), got.FirstLedger.Sequence)
+		require.Equal(b, lcms[0].LedgerSequence(), got.Sequence)
 
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				_, err := getLedgerRangeWithCache(ctx, testDB, latestSeq, latestTime)
+				_, err := oldestLedgerInfo(ctx, testDB)
 				require.NoError(b, err)
 			}
 		})

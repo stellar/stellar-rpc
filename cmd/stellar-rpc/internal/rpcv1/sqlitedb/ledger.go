@@ -146,57 +146,25 @@ func scanLedgers(ctx context.Context, q readDB, start, end uint32) iter.Seq2[sto
 	}
 }
 
-// GetLedgerRange pulls the min/max ledger sequence numbers from the meta table.
-func (r ledgerReader) GetLedgerRange(ctx context.Context) (store.LedgerRange, error) {
+// GetLedgerRange returns the cached bounds; a zero latest means the DB is empty.
+func (r ledgerReader) GetLedgerRange(_ context.Context) (store.LedgerRange, error) {
 	r.db.cache.RLock()
-	latestLedgerSeqCache := r.db.cache.latestLedgerSeq
-	latestLedgerCloseTimeCache := r.db.cache.latestLedgerCloseTime
-	firstLedgerSeqCache := r.db.cache.firstLedgerSeq
-	firstLedgerCloseTimeCache := r.db.cache.firstLedgerCloseTime
-	r.db.cache.RUnlock()
-
-	// Fully cached: both ends known, no query at all. This is the hot path for
-	// read-heavy workloads (e.g. getTransaction polling), which previously
-	// decoded the entire oldest LedgerCloseMeta blob on every single call.
-	if latestLedgerSeqCache != 0 && firstLedgerSeqCache != 0 {
-		return store.LedgerRange{
-			FirstLedger: store.LedgerInfo{
-				Sequence:  firstLedgerSeqCache,
-				CloseTime: firstLedgerCloseTimeCache,
-			},
-			LastLedger: store.LedgerInfo{
-				Sequence:  latestLedgerSeqCache,
-				CloseTime: latestLedgerCloseTimeCache,
-			},
-		}, nil
+	defer r.db.cache.RUnlock()
+	if r.db.cache.latestLedgerSeq == 0 {
+		return store.LedgerRange{}, store.ErrEmptyDB
 	}
-
-	// Latest cached but oldest unknown (startup, or invalidated by a trim):
-	// decode the oldest ledger once, then memoize its scalars so subsequent
-	// reads take the fully-cached path above until the next trim.
-	if latestLedgerSeqCache != 0 {
-		ledgerRange, err := getLedgerRangeWithCache(ctx, r.db, latestLedgerSeqCache, latestLedgerCloseTimeCache)
-		if err != nil {
-			return ledgerRange, err
-		}
-		r.db.cache.Lock()
-		// Every commit publishes the oldest, so only fill an empty slot.
-		if r.db.cache.firstLedgerSeq == 0 {
-			r.db.cache.firstLedgerSeq = ledgerRange.FirstLedger.Sequence
-			r.db.cache.firstLedgerCloseTime = ledgerRange.FirstLedger.CloseTime
-		}
-		r.db.cache.Unlock()
-		return ledgerRange, nil
-	}
-	return getLedgerRangeWithoutCache(ctx, r.db)
+	return store.LedgerRange{
+		FirstLedger: store.LedgerInfo{Sequence: r.db.cache.firstLedgerSeq, CloseTime: r.db.cache.firstLedgerCloseTime},
+		LastLedger:  store.LedgerInfo{Sequence: r.db.cache.latestLedgerSeq, CloseTime: r.db.cache.latestLedgerCloseTime},
+	}, nil
 }
 
 func (r ledgerReader) GetLedgerCountInRange(ctx context.Context, start, end uint32) (uint32, uint32, uint32, error) {
 	return getLedgerCountInRange(ctx, r.db, start, end)
 }
 
-func (r ledgerReader) GetLatestLedgerSequence(ctx context.Context) (uint32, error) {
-	return getLatestLedgerSequence(ctx, r, r.db.cache)
+func (r ledgerReader) GetLatestLedgerSequence(_ context.Context) (uint32, error) {
+	return getLatestLedgerSequence(r.db.cache)
 }
 
 // ledgerCloseTimePrefixBytes is the fast-path meta prefix fetched for range
@@ -262,25 +230,6 @@ func snapshotBounds(ctx context.Context, db readDB) (uint32, uint32, error) {
 		return 0, 0, store.ErrEmptyDB
 	}
 	return bounds.Min.V, bounds.Max.V, nil
-}
-
-// getLedgerRangeWithCache uses the latest ledger cache to optimize the query.
-// It only needs to look up the first ledger since we have the latest cached.
-func getLedgerRangeWithCache(ctx context.Context, db readDB,
-	latestSeq uint32, latestTime int64,
-) (store.LedgerRange, error) {
-	firstLedger, err := oldestLedgerInfo(ctx, db)
-	if err != nil {
-		return store.LedgerRange{}, err
-	}
-
-	return store.LedgerRange{
-		FirstLedger: firstLedger,
-		LastLedger: store.LedgerInfo{
-			Sequence:  latestSeq,
-			CloseTime: latestTime,
-		},
-	}, nil
 }
 
 // getLedgerRangeWithoutCache queries both the first and last ledger when cache isn't available

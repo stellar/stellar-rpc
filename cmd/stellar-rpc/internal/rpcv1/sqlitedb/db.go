@@ -51,10 +51,7 @@ type dbCache struct {
 
 	latestLedgerSeq       uint32
 	latestLedgerCloseTime int64
-	// firstLedgerSeq/firstLedgerCloseTime cache the oldest retained ledger's
-	// range scalars so GetLedgerRange never decodes the oldest LedgerCloseMeta
-	// blob per call. Every commit publishes them; 0 means "unknown" and is
-	// filled lazily by the first GetLedgerRange after a reset.
+	// Primed at open and republished by every commit; a zero latest means an empty DB.
 	firstLedgerSeq       uint32
 	firstLedgerCloseTime int64
 }
@@ -63,15 +60,6 @@ type DB struct {
 	db.SessionInterface
 
 	cache *dbCache
-}
-
-func (d *DB) ResetCache() {
-	d.cache.Lock()
-	defer d.cache.Unlock()
-	d.cache.latestLedgerSeq = 0
-	d.cache.latestLedgerCloseTime = 0
-	d.cache.firstLedgerSeq = 0
-	d.cache.firstLedgerCloseTime = 0
 }
 
 const (
@@ -236,11 +224,7 @@ func OpenSQLiteDBWithPrometheusMetrics(dbFilePath string, namespace string, sub 
 	if err != nil {
 		return nil, err
 	}
-	result := DB{
-		SessionInterface: db.RegisterMetrics(session, namespace, sub, registry),
-		cache:            &dbCache{},
-	}
-	return &result, nil
+	return newDB(db.RegisterMetrics(session, namespace, sub, registry))
 }
 
 func OpenSQLiteDB(dbFilePath string) (*DB, error) {
@@ -248,11 +232,22 @@ func OpenSQLiteDB(dbFilePath string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	result := DB{
-		SessionInterface: session,
-		cache:            &dbCache{},
+	return newDB(session)
+}
+
+// newDB primes the range cache from the stored bounds; a fresh DB waits for its first commit.
+func newDB(session db.SessionInterface) (*DB, error) {
+	d := &DB{SessionInterface: session, cache: &dbCache{}}
+	lr, err := getLedgerRangeWithoutCache(context.Background(), session)
+	switch {
+	case errors.Is(err, store.ErrEmptyDB):
+	case err != nil:
+		return nil, err
+	default:
+		d.cache.firstLedgerSeq, d.cache.firstLedgerCloseTime = lr.FirstLedger.Sequence, lr.FirstLedger.CloseTime
+		d.cache.latestLedgerSeq, d.cache.latestLedgerCloseTime = lr.LastLedger.Sequence, lr.LastLedger.CloseTime
 	}
-	return &result, nil
+	return d, nil
 }
 
 func getMetaBool(ctx context.Context, q db.SessionInterface, key string) (bool, error) {
@@ -288,32 +283,14 @@ func getMetaValue(ctx context.Context, q db.SessionInterface, key string) (strin
 	return results[0], nil
 }
 
-func getLatestLedgerSequence(ctx context.Context, ledgerReader LedgerReader, cache *dbCache) (uint32, error) {
+// getLatestLedgerSequence reads the cached latest; zero means the DB is empty.
+func getLatestLedgerSequence(cache *dbCache) (uint32, error) {
 	cache.RLock()
-	latestLedgerSeqCache := cache.latestLedgerSeq
-	cache.RUnlock()
-
-	if latestLedgerSeqCache != 0 {
-		return latestLedgerSeqCache, nil
+	defer cache.RUnlock()
+	if cache.latestLedgerSeq == 0 {
+		return 0, store.ErrEmptyDB
 	}
-
-	ledgerRange, err := ledgerReader.GetLedgerRange(ctx)
-	if err != nil {
-		return 0, err
-	}
-
-	// Add missing ledger sequence and close time to the top cache.
-	// Otherwise, the write-through cache won't get updated until the first ingestion commit
-	cache.Lock()
-	if cache.latestLedgerSeq < ledgerRange.LastLedger.Sequence {
-		// Only update the cache if the value is missing (0), otherwise
-		// we may end up overwriting the entry with an older version
-		cache.latestLedgerSeq = ledgerRange.LastLedger.Sequence
-		cache.latestLedgerCloseTime = ledgerRange.LastLedger.CloseTime
-	}
-	cache.Unlock()
-
-	return ledgerRange.LastLedger.Sequence, nil
+	return cache.latestLedgerSeq, nil
 }
 
 type ReadWriterMetrics struct {
@@ -369,8 +346,8 @@ func NewReadWriter(
 	}
 }
 
-func (rw *readWriter) GetLatestLedgerSequence(ctx context.Context) (uint32, error) {
-	return getLatestLedgerSequence(ctx, NewLedgerReader(rw.db), rw.db.cache)
+func (rw *readWriter) GetLatestLedgerSequence(_ context.Context) (uint32, error) {
+	return getLatestLedgerSequence(rw.db.cache)
 }
 
 func (rw *readWriter) NewTx(ctx context.Context) (WriteTx, error) {

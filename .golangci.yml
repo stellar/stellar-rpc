@@ -116,6 +116,7 @@ linters:
       - std-error-handling
     rules:
       - linters:
+          - contextcheck
           - gochecknoglobals
           - gosec
           - mnd
