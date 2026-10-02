@@ -236,7 +236,7 @@ func TestInsertEventsBatchingExceedsLimit(t *testing.T) {
 
 	for i, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			testDB := NewTestDB(t)
+			testDB := NewTestDB(t) //nolint:contextcheck // the test DB opener has no ctx to take
 
 			opEvents := make([]xdr.ContractEvent, 0, tc.numOpEvents)
 			for range tc.numOpEvents {

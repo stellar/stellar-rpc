@@ -265,7 +265,7 @@ func TestInsertTransactionsBatchingExceedsLimit(t *testing.T) {
 
 	for i, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			testDB := NewTestDB(t)
+			testDB := NewTestDB(t) //nolint:contextcheck // the test DB opener has no ctx to take
 
 			ledgerSeq := uint32(10 + i)
 			lcm := lcmWithCtTxns(ledgerSeq, tc.numTxs)
