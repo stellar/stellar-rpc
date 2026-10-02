@@ -84,14 +84,14 @@ func (r ledgerReader) NewTx(ctx context.Context) (store.LedgerReaderTx, error) {
 	return tx, nil
 }
 
-// newLedgerReaderTx opens a read snapshot pinned to the cached latest ledger.
+// newLedgerReaderTx opens a read snapshot and copies the cached bounds for their close times.
 func newLedgerReaderTx(ctx context.Context, db *DB) (ledgerReaderTx, error) {
-	db.cache.RLock()
-	defer db.cache.RUnlock()
 	txSession := db.Clone()
 	if err := txSession.BeginTx(ctx, &sql.TxOptions{ReadOnly: true}); err != nil {
 		return ledgerReaderTx{}, fmt.Errorf("failed to begin read transaction: %w", err)
 	}
+	db.cache.RLock()
+	defer db.cache.RUnlock()
 	return ledgerReaderTx{
 		tx:                    txSession,
 		latestLedgerSeq:       db.cache.latestLedgerSeq,
