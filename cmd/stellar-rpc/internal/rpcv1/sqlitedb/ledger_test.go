@@ -246,6 +246,32 @@ func TestGetLedgerRange_OldestCachePublishedOnTrim(t *testing.T) {
 	assert.Equal(t, ledgerCloseTime(1348), ledgerRange.LastLedger.CloseTime)
 }
 
+// The snapshot reader takes both bounds from its own tx; the cached pair only supplies close times.
+func TestLedgerReaderTx_GetLedgerRange_FromSnapshot(t *testing.T) {
+	db := NewTestDB(t)
+	ctx := context.TODO()
+	write, err := NewReadWriter(logger, db, host.MakeNoOpDaemon(), 10, passphrase).NewTx(ctx)
+	require.NoError(t, err)
+	for seq := uint32(1234); seq <= 1236; seq++ {
+		require.NoError(t, write.LedgerWriter().InsertLedger(txMeta(seq, true)))
+	}
+	require.NoError(t, write.Commit(txMeta(1236, true), nil))
+
+	reader := NewLedgerReader(db)
+	for _, cached := range [][2]uint32{{1334, 1336}, {0, 0}, {1333, 1335}} { // agrees, reset, lagging a commit
+		db.cache.Lock()
+		db.cache.firstLedgerSeq, db.cache.latestLedgerSeq = cached[0], cached[1]
+		db.cache.Unlock()
+		tx, err := reader.NewTx(ctx)
+		require.NoError(t, err)
+		ledgerRange, err := tx.GetLedgerRange(ctx)
+		require.NoError(t, tx.Done())
+		require.NoError(t, err)
+		assert.Equal(t, store.LedgerInfo{Sequence: 1334, CloseTime: ledgerCloseTime(1334)}, ledgerRange.FirstLedger)
+		assert.Equal(t, store.LedgerInfo{Sequence: 1336, CloseTime: ledgerCloseTime(1336)}, ledgerRange.LastLedger)
+	}
+}
+
 func TestGetLedgerRange_EmptyDB(t *testing.T) {
 	db := NewTestDB(t)
 	ctx := context.TODO()
