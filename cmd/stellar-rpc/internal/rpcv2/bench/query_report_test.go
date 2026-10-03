@@ -43,7 +43,7 @@ func readCSVTable(t *testing.T, path string) ([]string, []map[string]string) {
 func twoScenarioReport() *queryReport {
 	var q queryReport
 	q.add(scenarioReport{
-		queryType: "ledgers",
+		queryType: queryTypeLedgers,
 		targetRPS: 10,
 		result: scenarioResult{
 			scenarioRecord: scenarioRecord{
@@ -61,7 +61,7 @@ func twoScenarioReport() *queryReport {
 		},
 	})
 	q.add(scenarioReport{
-		queryType: "txpage",
+		queryType: queryTypeTxPage,
 		targetRPS: 0.5,
 		result: scenarioResult{
 			scenarioRecord: scenarioRecord{
@@ -146,7 +146,7 @@ func TestQueryReportPercentileColumns(t *testing.T) {
 	}
 	var q queryReport
 	q.add(scenarioReport{
-		queryType: "ledgers",
+		queryType: queryTypeLedgers,
 		targetRPS: 10,
 		result: scenarioResult{
 			scenarioRecord: scenarioRecord{
@@ -232,7 +232,7 @@ func TestQueryReportEmpty(t *testing.T) {
 func TestQueryReportAllDropped(t *testing.T) {
 	var q queryReport
 	q.add(scenarioReport{
-		queryType: "ledgers",
+		queryType: queryTypeLedgers,
 		targetRPS: 100,
 		result: scenarioResult{
 			scenarioRecord: scenarioRecord{
