@@ -1,7 +1,9 @@
 package bench
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"slices"
 	"time"
@@ -28,8 +30,24 @@ type queryPlan struct {
 	// TxHashPoolSize caps the sampled pool, in [1, maxTxHashPoolSize].
 	TxHashPoolSize int
 
+	// Evict requests OS page-cache eviction before each cold scenario.
+	Evict bool
+
 	// Settings receives the values run.json records under settings.
 	Settings map[string]string
+}
+
+// cacheScenario is the settings.cacheScenario value of the plan's cache
+// controls.
+func (p queryPlan) cacheScenario() string {
+	switch {
+	case p.Warmup > 0:
+		return "warm-run"
+	case p.Evict:
+		return "cold-start"
+	default:
+		return "existing-cache"
+	}
 }
 
 // queryDataset is what one bench query run reads: the registry over the files
@@ -48,6 +66,10 @@ type queryDataset struct {
 
 	// FirstLedger and LastLedger bound the ledgers the requests and pools read.
 	FirstLedger, LastLedger uint32
+
+	// EvictPaths are the files a cold scenario requests page-cache eviction for.
+	// Empty for a hot dataset.
+	EvictPaths []string
 }
 
 // view acquires one read view. The caller must Release it.
@@ -78,6 +100,38 @@ func (ds *queryDataset) verifyServes(types []string) error {
 		}
 	}
 	return nil
+}
+
+// evictColdArtifacts requests page-cache eviction and counts successful calls.
+// A missing file is skipped. Off Linux nothing can be evicted and the count is
+// zero; settings.pageCacheEviction records that eviction is unsupported.
+func (ds *queryDataset) evictColdArtifacts() (int, error) {
+	if !evictSupported {
+		return 0, nil
+	}
+	evicted := 0
+	for _, path := range ds.EvictPaths {
+		if err := evictFile(path); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return evicted, fmt.Errorf("evict from the page cache: %w", err)
+		}
+		evicted++
+	}
+	return evicted, nil
+}
+
+// evictionState is the settings.pageCacheEviction value.
+func evictionState(requested bool) string {
+	switch {
+	case !requested:
+		return "off"
+	case evictSupported:
+		return "requested"
+	default:
+		return "unsupported-on-this-platform"
+	}
 }
 
 // chunkRange returns the ascending chunk IDs in [start, start+num). The caller
