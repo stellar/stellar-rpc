@@ -1,0 +1,161 @@
+package bench
+
+import (
+	"math"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/stellar/go-stellar-sdk/network"
+)
+
+func validQueryFlags() queryFlags {
+	return queryFlags{
+		types:       queryTypeLedgers,
+		targetRPS:   "1",
+		duration:    time.Second,
+		ledgersSpan: defaultLedgersSpan,
+		txPageSpan:  defaultTxPageSpan,
+		txPageLimit: defaultTxPageLimit,
+		passphrase:  network.PublicNetworkPassphrase,
+		seed:        defaultSeed,
+	}
+}
+
+func TestParseTargetRPSRateBounds(t *testing.T) {
+	got, err := parseTargetRPS("0.0001, 2," + strconv.Itoa(maxTargetRPS))
+	require.NoError(t, err)
+	assert.Equal(t, []float64{0.0001, 2, maxTargetRPS}, got)
+	for _, bad := range []string{"0", "-1", "NaN", "Inf"} {
+		_, err = parseTargetRPS("1," + bad)
+		require.ErrorContains(t, err, "--target-rps rates must be positive and finite", bad)
+	}
+	_, err = parseTargetRPS("1," + strconv.Itoa(maxTargetRPS+1))
+	require.ErrorContains(t, err, "--target-rps rates must be <= 100000")
+	_, err = parseTargetRPS("1,x")
+	require.ErrorContains(t, err, `--target-rps: "x" is not a number`)
+	_, err = parseTargetRPS("1,")
+	require.ErrorContains(t, err, "empty entry")
+}
+
+func TestParseRejectsRepeats(t *testing.T) {
+	_, err := parseTargetRPS("1,2,1")
+	require.ErrorContains(t, err, "--target-rps repeats 1, which would duplicate its scenario rows")
+	_, err = parseQueryTypes("ledgers,txpage,ledgers")
+	require.ErrorContains(t, err, `--types repeats "ledgers", which would duplicate its scenario rows`)
+	_, err = parseQueryTypes("ledgers,nope")
+	require.ErrorContains(t, err, `unknown query type "nope"`)
+	got, err := parseQueryTypes("txpage, ledgers")
+	require.NoError(t, err)
+	assert.Equal(t, []string{queryTypeTxPage, queryTypeLedgers}, got)
+}
+
+// TestPlanBoundsReadSpans: --ledgers-span and --txpage-span accept maxReadSpan
+// and reject maxReadSpan+1.
+func TestPlanBoundsReadSpans(t *testing.T) {
+	f := validQueryFlags()
+	f.ledgersSpan = maxReadSpan
+	f.txPageSpan = maxReadSpan
+	_, err := f.plan()
+	require.NoError(t, err)
+
+	f = validQueryFlags()
+	f.ledgersSpan = maxReadSpan + 1
+	_, err = f.plan()
+	require.ErrorContains(t, err, "--ledgers-span")
+
+	f = validQueryFlags()
+	f.txPageSpan = maxReadSpan + 1
+	_, err = f.plan()
+	require.ErrorContains(t, err, "--txpage-span")
+}
+
+// plan rejects a --target-rps, --duration and --warmup combination that no
+// scenario can run.
+func TestPlanRejectsUnrunnableScenarios(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		targetRPS string
+		duration  time.Duration
+		warmup    int
+		want      string
+	}{
+		{
+			"no measured iteration", "10,0.001", time.Minute, 0,
+			"--target-rps, --duration and --warmup: scenario at 0.001 rps for 1m0s plans no measured iteration",
+		},
+		{
+			"over the iteration cap", "1,100000", 20 * time.Minute, 0,
+			"--target-rps, --duration and --warmup: scenario at 100000 rps for 20m0s plans more than",
+		},
+		{
+			"warmup plus measured over the cap", "1", time.Second, maxIterations,
+			"--target-rps, --duration and --warmup: scenario plans more than 100000000 iterations: " +
+				"100000000 warmup plus 1 measured",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := validQueryFlags()
+			f.targetRPS = tc.targetRPS
+			f.duration = tc.duration
+			f.warmup = tc.warmup
+			_, err := f.plan()
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+}
+
+func TestColdQueryOptionsValidate(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts coldQueryOptions
+		want string
+	}{
+		{"range ends below maxChunkID", coldQueryOptions{ColdRoot: "x", StartChunk: maxChunkID - 1, NumChunks: 1}, ""},
+		{
+			"range ends at maxChunkID",
+			coldQueryOptions{ColdRoot: "x", StartChunk: maxChunkID, NumChunks: 1},
+			"at or past the last valid chunk ID",
+		},
+		{
+			"range end past uint32",
+			coldQueryOptions{ColdRoot: "x", StartChunk: maxChunkID - 1, NumChunks: math.MaxUint32},
+			"at or past the last valid chunk ID",
+		},
+		{"no --cold-dir", coldQueryOptions{NumChunks: 1}, "--cold-dir is required"},
+		{"no chunk", coldQueryOptions{ColdRoot: "x"}, "--num-chunks must be >= 1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.opts.validate()
+			if tc.want == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+}
+
+func TestHotQueryOptionsValidate(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts hotQueryOptions
+		want string
+	}{
+		{"chunk at maxChunkID", hotQueryOptions{HotRoot: "x", Chunk: maxChunkID}, ""},
+		{"chunk past maxChunkID", hotQueryOptions{HotRoot: "x", Chunk: maxChunkID + 1}, "past the last valid chunk ID"},
+		{"no --hot-dir", hotQueryOptions{}, "--hot-dir is required"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.opts.validate()
+			if tc.want == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+}

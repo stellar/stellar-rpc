@@ -109,11 +109,25 @@ func writePartialCSVs(logger *supportlog.Entry, sink *csvSink, outDir string) {
 	}
 }
 
-// newBenchCommand creates a bench-ingest subcommand with shared flags,
-// profiling, run metadata, and signal-driven cancellation.
+// flagBinder is a flag group newBenchCommand binds onto a subcommand.
+type flagBinder interface {
+	bind(cmd *cobra.Command)
+}
+
+// runEnv is what newBenchCommand hands a run. What the run puts in Settings
+// and SetupTimes goes into run.json.
+type runEnv struct {
+	OutDir     string
+	Settings   map[string]string
+	SetupTimes map[string]time.Duration
+}
+
+// newBenchCommand creates a bench subcommand with shared flags, the given flag
+// groups, profiling, run metadata, and signal-driven cancellation.
 func newBenchCommand(
-	use, short string, src *sourceFlags, prof *profileFlags,
-	run func(ctx context.Context, logger *supportlog.Entry, outDir string) error,
+	use, short string, prof *profileFlags,
+	run func(ctx context.Context, logger *supportlog.Entry, env runEnv) error,
+	groups ...flagBinder,
 ) *cobra.Command {
 	var outDir string
 	cmd := &cobra.Command{
@@ -125,6 +139,11 @@ func newBenchCommand(
 			ctx, stop, logger := benchContext()
 			defer stop()
 			startedAt := time.Now().UTC()
+			env := runEnv{
+				OutDir:     outDir,
+				Settings:   map[string]string{},
+				SetupTimes: map[string]time.Duration{},
+			}
 			if err := refuseStaleCSVs(outDir); err != nil {
 				return err
 			}
@@ -135,9 +154,9 @@ func newBenchCommand(
 			if err := writeRunRecord(outDir, record); err != nil {
 				return err
 			}
-			runErr := prof.around(logger, func() error { return run(ctx, logger, outDir) })
+			runErr := prof.around(logger, func() error { return run(ctx, logger, env) })
 			peakRSS, _ := readPeakRSS() // 0 without /proc
-			record.finish(time.Now().UTC(), peakRSS, runErr)
+			record.finish(time.Now().UTC(), env, peakRSS, runErr)
 			if err := writeRunRecord(outDir, record); err != nil {
 				if runErr == nil {
 					return err
@@ -149,8 +168,10 @@ func newBenchCommand(
 	}
 	cmd.Flags().StringVar(&outDir, "out", "bench-out",
 		"output dir for the CSV report and run.json; must not hold a .csv file")
-	src.bind(cmd)
 	prof.bind(cmd)
+	for _, g := range groups {
+		g.bind(cmd)
+	}
 	return cmd
 }
 
@@ -184,8 +205,8 @@ func newColdCommand() *cobra.Command {
 	)
 	cmd := newBenchCommand("cold",
 		"Benchmark cold ingestion: the daemon's backfill (chunk freezes + txhash index builds) over a chunk range",
-		&src, &prof,
-		func(ctx context.Context, logger *supportlog.Entry, outDir string) error {
+		&prof,
+		func(ctx context.Context, logger *supportlog.Entry, env runEnv) error {
 			return runCold(ctx, logger, coldOptions{
 				Source:     src.config(),
 				StartChunk: chunk.ID(startChunk),
@@ -193,9 +214,9 @@ func newColdCommand() *cobra.Command {
 				Workers:    workers,
 				ColdRoot:   coldOutDir,
 				CatalogDir: catalogDir,
-				OutDir:     outDir,
+				OutDir:     env.OutDir,
 			})
-		})
+		}, &src)
 	fs := cmd.Flags()
 	fs.Uint32Var(&startChunk, "start-chunk", 0, "first chunk ID to backfill (required)")
 	fs.IntVar(&numChunks, "num-chunks", 1, "how many consecutive chunks to backfill starting at --start-chunk")
@@ -222,8 +243,8 @@ func newHotCommand() *cobra.Command {
 	)
 	cmd := newBenchCommand("hot",
 		"Benchmark hot ingestion: the daemon's live ingestion loop over a chunk range",
-		&src, &prof,
-		func(ctx context.Context, logger *supportlog.Entry, outDir string) error {
+		&prof,
+		func(ctx context.Context, logger *supportlog.Entry, env runEnv) error {
 			return runHot(ctx, logger, hotOptions{
 				Source:        src.config(),
 				StartChunk:    chunk.ID(startChunk),
@@ -232,9 +253,9 @@ func newHotCommand() *cobra.Command {
 				HotRoot:       hotDir,
 				CatalogDir:    catalogDir,
 				CloseInterval: closeInterval,
-				OutDir:        outDir,
+				OutDir:        env.OutDir,
 			})
-		})
+		}, &src)
 	fs := cmd.Flags()
 	fs.Uint32Var(&startChunk, "start-chunk", 0, "first chunk ID to ingest (required)")
 	fs.IntVar(&numChunks, "num-chunks", 1,

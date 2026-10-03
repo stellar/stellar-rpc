@@ -83,10 +83,10 @@ func TestCommandRecordsSuccessfulRun(t *testing.T) {
 	outDir := filepath.Join(t.TempDir(), "csv")
 	var ran bool
 
-	cmd := newBenchCommand("probe", "", &sourceFlags{}, &profileFlags{},
-		func(_ context.Context, _ *supportlog.Entry, out string) error {
+	cmd := newBenchCommand("probe", "", &profileFlags{},
+		func(_ context.Context, _ *supportlog.Entry, env runEnv) error {
 			ran = true
-			data, err := os.ReadFile(filepath.Join(out, runRecordFile))
+			data, err := os.ReadFile(filepath.Join(env.OutDir, runRecordFile))
 			require.NoError(t, err)
 
 			var record runRecord
@@ -226,7 +226,7 @@ func TestWriteRunRecordInProgress(t *testing.T) {
 
 	var raw map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(data, &raw))
-	for _, key := range []string{"finishedAt", "peakRssBytes", "error"} {
+	for _, key := range []string{"finishedAt", "peakRssBytes", "settings", "setupNs", "error"} {
 		assert.NotContains(t, raw, key)
 	}
 }
@@ -241,9 +241,13 @@ func TestWriteRunRecord(t *testing.T) {
 	flags := map[string]string{"start-chunk": "1000", "num-chunks": "10", "workers": "4"}
 	startedAt := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
 	finishedAt := time.Date(2026, 7, 21, 12, 5, 30, 0, time.UTC)
+	env := runEnv{
+		Settings:   map[string]string{"fixedReadRange": "ledgers,txpage"},
+		SetupTimes: map[string]time.Duration{"storeOpen": 1500 * time.Millisecond},
+	}
 
 	record := newRunRecord(cmd, flags, startedAt)
-	record.finish(finishedAt, 4096, nil)
+	record.finish(finishedAt, env, 4096, nil)
 	require.NoError(t, writeRunRecord(outDir, record))
 
 	data, err := os.ReadFile(filepath.Join(outDir, runRecordFile))
@@ -255,6 +259,8 @@ func TestWriteRunRecord(t *testing.T) {
 	assert.Equal(t, "bench-ingest cold", got.Command) // CommandPath returns "parent child"
 	assert.Equal(t, "1000", got.Flags["start-chunk"])
 	assert.Equal(t, "10", got.Flags["num-chunks"])
+	assert.Equal(t, "ledgers,txpage", got.Settings["fixedReadRange"])
+	assert.Equal(t, int64(1_500_000_000), got.SetupNs["storeOpen"])
 	assert.Equal(t, uint64(4096), got.PeakRSSBytes)
 	assert.Equal(t, "2026-07-21T12:00:00Z", got.StartedAt)
 	assert.Equal(t, "2026-07-21T12:05:30Z", got.FinishedAt)
@@ -274,7 +280,7 @@ func TestWriteRunRecordWithError(t *testing.T) {
 
 	runErr := errors.New("backfill [chunk 3, chunk 3]: boom")
 	record := newRunRecord(cmd, nil, now)
-	record.finish(now, 0, runErr)
+	record.finish(now, runEnv{}, 0, runErr)
 	require.NoError(t, writeRunRecord(outDir, record))
 
 	data, err := os.ReadFile(filepath.Join(outDir, runRecordFile))
@@ -287,7 +293,9 @@ func TestWriteRunRecordWithError(t *testing.T) {
 
 	var raw map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(data, &raw))
-	assert.NotContains(t, raw, "peakRssBytes")
+	for _, key := range []string{"settings", "setupNs", "peakRssBytes"} {
+		assert.NotContains(t, raw, key)
+	}
 }
 
 // TestCaptureFlags checks captureFlags.
