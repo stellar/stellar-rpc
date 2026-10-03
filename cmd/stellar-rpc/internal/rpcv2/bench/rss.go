@@ -33,7 +33,7 @@ func readPeakRSS() (uint64, error) {
 // it does not fail the run.
 //
 // The row's "duration" columns carry BYTES, not nanoseconds (see the
-// driverPeakRSS constant and the fileSpecs doc comment).
+// driverPeakRSS constant).
 func recordPeakRSS(logger *supportlog.Entry, sink *csvSink, readRSS func() (uint64, error)) {
 	rssBytes, err := readRSS()
 	if err != nil {
