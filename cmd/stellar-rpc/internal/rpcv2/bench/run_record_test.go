@@ -18,10 +18,7 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
 
-// TestCommandRecordsFailedRun drives the real bench-ingest hot command through
-// cobra against an empty pack tree: the run fails at the first ledger read, and
-// the newBenchCommand wrapper still writes run.json into --out with the
-// command path, the parsed flag values, and the run's error.
+// TestCommandRecordsFailedRun checks run.json after a failed hot run.
 func TestCommandRecordsFailedRun(t *testing.T) {
 	outDir := filepath.Join(t.TempDir(), "csv")
 	packDir := t.TempDir() // no pack file for chunk 0
@@ -52,8 +49,7 @@ func TestCommandRecordsFailedRun(t *testing.T) {
 	assert.Equal(t, runStatusFailed, record.Status)
 }
 
-// TestCommandRecordsRunThatFailsValidation: a run that fails validation before
-// it would create --out still leaves a failed run.json there.
+// TestCommandRecordsRunThatFailsValidation checks run.json after a flag error.
 func TestCommandRecordsRunThatFailsValidation(t *testing.T) {
 	outDir := filepath.Join(t.TempDir(), "csv")
 
@@ -82,9 +78,7 @@ func TestCommandRecordsRunThatFailsValidation(t *testing.T) {
 	assert.Equal(t, runStatusFailed, record.Status)
 }
 
-// TestCommandRecordsSuccessfulRun: the run body finds run.json already in
-// --out, carrying startedAt and neither finishedAt nor error. After the run,
-// run.json has status ok and finishedAt, and no error key.
+// TestCommandRecordsSuccessfulRun checks run.json during and after a run.
 func TestCommandRecordsSuccessfulRun(t *testing.T) {
 	outDir := filepath.Join(t.TempDir(), "csv")
 	var ran bool
@@ -126,9 +120,7 @@ func TestCommandRecordsSuccessfulRun(t *testing.T) {
 	assert.NotContains(t, raw, "error")
 }
 
-// TestRefuseStaleCSVs: refuseStaleCSVs names a CSV in the dir, and passes a dir
-// that holds only run.json, a dir with a subdirectory named old.csv, and a
-// missing dir. An --out that is a regular file fails to read.
+// TestRefuseStaleCSVs checks which --out contents refuseStaleCSVs accepts.
 func TestRefuseStaleCSVs(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -169,10 +161,7 @@ func TestRefuseStaleCSVs(t *testing.T) {
 	})
 }
 
-// TestIngestCommandsRefuseOutWithCSVs: an ingest command whose --out holds a
-// CSV fails before it rewrites run.json or reads the source: the pack
-// dir does not exist, so reaching the run body would fail with a different
-// error.
+// TestIngestCommandsRefuseOutWithCSVs checks that cold and hot refuse a stale --out.
 func TestIngestCommandsRefuseOutWithCSVs(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "no-such-pack-dir")
 	for _, args := range [][]string{
@@ -185,10 +174,9 @@ func TestIngestCommandsRefuseOutWithCSVs(t *testing.T) {
 	}
 }
 
-// requireRefusesStaleOut runs cmd with args and an --out that holds
-// run.json and a CSV file named stale. The command must fail with an error that
-// names stale and not missing, which only the run body would report, and must
-// leave --out unchanged.
+// requireRefusesStaleOut requires cmd to refuse an --out that holds the CSV
+// stale, without changing --out. An error that names missing means the run
+// body ran.
 func requireRefusesStaleOut(t *testing.T, cmd *cobra.Command, args []string, stale, missing string) {
 	t.Helper()
 	out := t.TempDir()
@@ -212,8 +200,7 @@ func requireRefusesStaleOut(t *testing.T, cmd *cobra.Command, args []string, sta
 	assert.Len(t, entries, 2, "a refused run must add no files to --out")
 }
 
-// TestWriteRunRecordInProgress: a new record is in the running state, records
-// GOMAXPROCS and NumCPU, and has no finishedAt, peakRssBytes or error key.
+// TestWriteRunRecordInProgress checks the JSON of a start record.
 func TestWriteRunRecordInProgress(t *testing.T) {
 	outDir := t.TempDir()
 	parent := &cobra.Command{Use: "bench-ingest"}
@@ -244,8 +231,7 @@ func TestWriteRunRecordInProgress(t *testing.T) {
 	}
 }
 
-// TestWriteRunRecord: a finished record carries the flags, the peak RSS, and
-// no error key.
+// TestWriteRunRecord checks the JSON of a successful run.
 func TestWriteRunRecord(t *testing.T) {
 	outDir := t.TempDir()
 	parent := &cobra.Command{Use: "bench-ingest"}
@@ -275,14 +261,12 @@ func TestWriteRunRecord(t *testing.T) {
 	assert.Equal(t, runStatusOK, got.Status)
 	assert.Equal(t, byte('\n'), data[len(data)-1])
 
-	// A successful run's record has no error key.
 	var raw map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(data, &raw))
 	assert.NotContains(t, raw, "error")
 }
 
-// TestWriteRunRecordWithError: a failed run's record carries the run error's
-// message, and a run with no peak RSS has no peakRssBytes key.
+// TestWriteRunRecordWithError checks the JSON of a failed run.
 func TestWriteRunRecordWithError(t *testing.T) {
 	outDir := t.TempDir()
 	cmd := &cobra.Command{Use: "cold"}
@@ -306,15 +290,13 @@ func TestWriteRunRecordWithError(t *testing.T) {
 	assert.NotContains(t, raw, "peakRssBytes")
 }
 
-// TestCaptureFlags verifies that captureFlags extracts all flag values from
-// a cobra command's flag set.
+// TestCaptureFlags checks captureFlags.
 func TestCaptureFlags(t *testing.T) {
 	cmd := &cobra.Command{Use: "test"}
 	cmd.Flags().String("string-flag", "default-val", "a string")
 	cmd.Flags().Int("int-flag", 42, "an int")
 	cmd.Flags().Bool("bool-flag", false, "a bool")
 
-	// Set some flags
 	require.NoError(t, cmd.Flags().Set("string-flag", "custom-val"))
 	require.NoError(t, cmd.Flags().Set("int-flag", "100"))
 	require.NoError(t, cmd.Flags().Set("bool-flag", "true"))

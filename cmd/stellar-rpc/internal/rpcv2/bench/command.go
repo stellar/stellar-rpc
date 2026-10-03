@@ -109,9 +109,8 @@ func writePartialCSVs(logger *supportlog.Entry, sink *csvSink, outDir string) {
 	}
 }
 
-// newBenchCommand builds one bench-ingest subcommand with --out, src and prof
-// bound. It refuses an --out that holds a CSV, writes run.json before and
-// after run, and cancels run on SIGINT or SIGTERM.
+// newBenchCommand creates a bench-ingest subcommand with shared flags,
+// profiling, run metadata, and signal-driven cancellation.
 func newBenchCommand(
 	use, short string, src *sourceFlags, prof *profileFlags,
 	run func(ctx context.Context, logger *supportlog.Entry, outDir string) error,
@@ -137,7 +136,7 @@ func newBenchCommand(
 				return err
 			}
 			runErr := prof.around(logger, func() error { return run(ctx, logger, outDir) })
-			peakRSS, _ := readPeakRSS() // 0 without /proc; finish then omits peakRssBytes
+			peakRSS, _ := readPeakRSS() // 0 without /proc
 			record.finish(time.Now().UTC(), peakRSS, runErr)
 			if err := writeRunRecord(outDir, record); err != nil {
 				if runErr == nil {
@@ -155,8 +154,7 @@ func newBenchCommand(
 	return cmd
 }
 
-// refuseStaleCSVs fails when outDir holds a CSV, so that one report never
-// mixes two runs. A missing outDir passes.
+// refuseStaleCSVs fails if outDir holds a CSV from an earlier run.
 func refuseStaleCSVs(outDir string) error {
 	entries, err := os.ReadDir(outDir)
 	if errors.Is(err, fs.ErrNotExist) {

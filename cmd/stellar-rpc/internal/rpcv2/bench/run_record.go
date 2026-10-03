@@ -14,34 +14,24 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version"
 )
 
-// runRecordFile is the run record's basename in --out.
 const runRecordFile = "run.json"
 
-// runRecord describes one bench run: what ran, where, with which flags, and
-// how it ended. The JSON keys are a versioned schema (schemaVersion) that
-// downstream tooling reads; treat key renames as breaking changes.
+// runRecord is the run.json schema. Treat key renames as breaking changes.
 type runRecord struct {
 	SchemaVersion int               `json:"schemaVersion"`
 	Command       string            `json:"command"`
 	Flags         map[string]string `json:"flags"`
 	Binary        binaryInfo        `json:"binary"`
 	Hostname      string            `json:"hostname"`
-	// GOMAXPROCS and NumCPU are the process's GOMAXPROCS and logical CPU count.
-	GOMAXPROCS int    `json:"gomaxprocs"`
-	NumCPU     int    `json:"numCpu"`
-	StartedAt  string `json:"startedAt"`
-	// FinishedAt is absent while the run is in progress.
-	FinishedAt string `json:"finishedAt,omitempty"`
-	// PeakRSSBytes is the process's peak resident set size (VmHWM) at the end
-	// of the run. Absent while the run is in progress and where /proc is not
-	// available.
+	GOMAXPROCS    int               `json:"gomaxprocs"`
+	NumCPU        int               `json:"numCpu"`
+	StartedAt     string            `json:"startedAt"`
+	FinishedAt    string            `json:"finishedAt,omitempty"`
+	// PeakRSSBytes is VmHWM at the end of the run.
 	PeakRSSBytes uint64 `json:"peakRssBytes,omitempty"`
-	// Status is the run's state. The start record says running; the end
-	// record says ok or failed. A record still at running after the process
-	// exits means the run died before its final write.
+	// Status stays running if the process dies before the run ends.
 	Status string `json:"status"`
-	// Error carries a failed run's error message; absent on a successful run.
-	Error string `json:"error,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 // runRecord.Status values.
@@ -59,8 +49,7 @@ type binaryInfo struct {
 	Branch         string `json:"branch"`
 }
 
-// newRunRecord returns the record of a run of cmd that started at startedAt
-// with flags, in the running state.
+// newRunRecord returns a record with status running.
 func newRunRecord(cmd *cobra.Command, flags map[string]string, startedAt time.Time) runRecord {
 	hostname, _ := os.Hostname() // empty string on error
 	return runRecord{
@@ -81,8 +70,7 @@ func newRunRecord(cmd *cobra.Command, flags map[string]string, startedAt time.Ti
 	}
 }
 
-// finish moves the record to its end state: ok when runErr is nil, failed
-// with runErr's message otherwise. A zero peakRSS leaves the field out.
+// finish records how the run ended.
 func (r *runRecord) finish(finishedAt time.Time, peakRSS uint64, runErr error) {
 	r.FinishedAt = finishedAt.UTC().Format(time.RFC3339)
 	r.PeakRSSBytes = peakRSS
@@ -94,8 +82,7 @@ func (r *runRecord) finish(finishedAt time.Time, peakRSS uint64, runErr error) {
 	}
 }
 
-// writeRunRecord writes r to outDir/run.json through a temp file and a rename,
-// so a kill during the write leaves the previous record whole.
+// writeRunRecord atomically replaces outDir/run.json with r.
 func writeRunRecord(outDir string, r runRecord) error {
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
@@ -121,9 +108,7 @@ func writeRunRecord(outDir string, r runRecord) error {
 	return nil
 }
 
-// captureFlags extracts all flag values from a cobra command's flag set,
-// returning them as a map of flag name to string value. Uses VisitAll to
-// capture all flags (default and explicitly-set).
+// captureFlags returns every flag value of cmd, keyed by flag name.
 func captureFlags(cmd *cobra.Command) map[string]string {
 	flags := make(map[string]string)
 	cmd.Flags().VisitAll(func(f *pflag.Flag) {
