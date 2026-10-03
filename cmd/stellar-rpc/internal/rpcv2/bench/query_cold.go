@@ -107,11 +107,13 @@ func runQueryCold(ctx context.Context, logger *supportlog.Entry, env runEnv, opt
 // returns the queryDataset over it, plus its release.
 //
 // The tree has no catalog: bench-ingest cold discards its scratch catalog. Each
-// chunk in the range runs the freeze bracket for each kind on disk; the chunk
-// one past the range gets a "ready" hot key with no handle. LastCompleteChunk
-// is the highest ready hot chunk minus one, and NewReadView fails without one;
-// a hot key with no handle resolves to no tier. Retention is full history from
-// the range's first chunk; the latest ledger is the range's last.
+// chunk in the range runs the freeze bracket for each kind on disk; the tx-hash
+// window index is committed under its own bracket, its coverage read from the
+// .idx filename; the chunk one past the range gets a "ready" hot key with no
+// handle. LastCompleteChunk is the highest ready hot chunk minus one, and
+// NewReadView fails without one; a hot key with no handle resolves to no tier.
+// Retention is full history from the range's first chunk; the latest ledger is
+// the range's last.
 func openColdDataset(logger *supportlog.Entry, opts coldQueryOptions) (*queryDataset, func(), error) {
 	if err := checkInputDir("--cold-dir", opts.ColdRoot); err != nil {
 		return nil, nil, err
@@ -127,6 +129,11 @@ func openColdDataset(logger *supportlog.Entry, opts coldQueryOptions) (*queryDat
 	chunks := chunkRange(opts.StartChunk, opts.NumChunks)
 	end := chunks[len(chunks)-1]
 	if err := freezeChunks(cat, layout, chunks); err != nil {
+		release()
+		return nil, nil, err
+	}
+	txHashRequested := slices.Contains(opts.Plan.Types, queryTypeTxHash)
+	if err := commitDiskTxHashIndex(logger, cat, layout, opts.StartChunk, end, txHashRequested); err != nil {
 		release()
 		return nil, nil, err
 	}
@@ -154,7 +161,7 @@ func openColdDataset(logger *supportlog.Entry, opts coldQueryOptions) (*queryDat
 		FirstLedger: opts.StartChunk.FirstLedger(),
 		LastLedger:  end.LastLedger(),
 	}
-	if err := ds.verifyServes(); err != nil {
+	if err := ds.verifyServes(opts.Plan.Types); err != nil {
 		release()
 		return nil, nil, err
 	}
@@ -217,4 +224,109 @@ func kindList(kinds []geometry.Kind) string {
 		names[i] = string(k)
 	}
 	return strings.Join(names, ",")
+}
+
+// commitDiskTxHashIndex commits the tx-hash window index covering [lo, hi]
+// under its freeze bracket. It must run after the chunks are frozen: a terminal
+// coverage demotes the per-chunk .bin keys it supersedes.
+//
+// With no usable index on disk, the open fails when --types includes txhash and
+// warns otherwise. A range that spans more than one window index is one such
+// case.
+func commitDiskTxHashIndex(
+	logger *supportlog.Entry, cat *catalog.Catalog, layout geometry.Layout, lo, hi chunk.ID,
+	txHashRequested bool,
+) error {
+	txLayout := cat.TxHashIndexLayout()
+	cov, ok, err := diskTxHashCoverage(layout, txLayout, lo, hi)
+	if err != nil {
+		if txHashRequested {
+			return err
+		}
+		logger.Warnf("no usable tx-hash window index for chunks [%s, %s]: %v; "+
+			"cold by-hash lookups have nothing to probe", lo, hi, err)
+		return nil
+	}
+	if !ok {
+		if txHashRequested {
+			return fmt.Errorf(
+				"no tx-hash window index on disk covers chunks [%s, %s], and --types includes %s: "+
+					"expected an .idx file spanning that range in %s; ingest the range with a cold run that "+
+					"builds the index, or drop %s from --types",
+				lo, hi, queryTypeTxHash, layout.TxHashIndexDir(txLayout.TxHashIndexID(lo)), queryTypeTxHash)
+		}
+		logger.Warnf("no tx-hash window index on disk covers chunks [%s, %s]: cold by-hash lookups have nothing to probe",
+			lo, hi)
+		return nil
+	}
+	marked, err := cat.MarkTxHashIndexFreezing(cov.Index, cov.Lo, cov.Hi)
+	if err != nil {
+		return fmt.Errorf("mark tx-hash index %s freezing: %w", cov.Key, err)
+	}
+	if err := cat.CommitTxHashIndex(marked); err != nil {
+		return fmt.Errorf("commit tx-hash index %s: %w", marked.Key, err)
+	}
+	logger.Infof("tx-hash index %s covers chunks [%s, %s]", cov.Index, cov.Lo, cov.Hi)
+	return nil
+}
+
+// diskTxHashCoverage reads the window-index coverage on disk spanning [lo, hi]
+// with the highest Hi, off the {lo:08d}-{hi:08d}.idx filenames. Only the index
+// containing lo is searched; a range that spans more than one window index is
+// an error.
+func diskTxHashCoverage(
+	layout geometry.Layout, txLayout geometry.TxHashIndexLayout, lo, hi chunk.ID,
+) (geometry.TxHashIndexCoverage, bool, error) {
+	idx := txLayout.TxHashIndexID(lo)
+	if txLayout.TxHashIndexID(hi) != idx {
+		return geometry.TxHashIndexCoverage{}, false,
+			fmt.Errorf("chunks [%s, %s] span more than one tx-hash window index; "+
+				"query one index's chunks at a time", lo, hi)
+	}
+	dir := layout.TxHashIndexDir(idx)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return geometry.TxHashIndexCoverage{}, false, nil
+		}
+		return geometry.TxHashIndexCoverage{}, false, fmt.Errorf("read tx-hash index dir %s: %w", dir, err)
+	}
+	var best geometry.TxHashIndexCoverage
+	found := false
+	for _, e := range entries {
+		covLo, covHi, ok := parseIndexFileName(e.Name())
+		if !ok || covLo > lo || covHi < hi {
+			continue
+		}
+		if !found || covHi > best.Hi {
+			best = geometry.TxHashIndexCoverage{
+				Index: idx, Lo: covLo, Hi: covHi,
+				Key: geometry.TxHashIndexKey(idx, covLo, covHi),
+			}
+			found = true
+		}
+	}
+	return best, found, nil
+}
+
+// parseIndexFileName decodes a window index's {lo:08d}-{hi:08d}.idx basename,
+// the reverse of geometry.Layout.TxHashIndexFilePath.
+func parseIndexFileName(name string) (chunk.ID, chunk.ID, bool) {
+	stem, isIdx := strings.CutSuffix(name, ".idx")
+	if !isIdx {
+		return 0, 0, false
+	}
+	loStr, hiStr, split := strings.Cut(stem, "-")
+	if !split {
+		return 0, 0, false
+	}
+	lo, err := geometry.ParsePadded(loStr)
+	if err != nil {
+		return 0, 0, false
+	}
+	hi, err := geometry.ParsePadded(hiStr)
+	if err != nil || hi < lo {
+		return 0, 0, false
+	}
+	return chunk.ID(lo), chunk.ID(hi), true
 }

@@ -25,10 +25,11 @@ type queryRun struct {
 	clock  scenarioClock
 }
 
-// scenarios runs every type at every rate.
+// scenarios runs every type at every rate. A type's pool is built once and
+// shared by every rate.
 func (r *queryRun) scenarios(ctx context.Context) error {
 	for _, qtype := range r.plan.Types {
-		req, err := newQueryRequest(r.ds, r.plan, qtype)
+		req, err := newQueryRequest(ctx, r.logger, r.ds, r.plan, qtype)
 		if err != nil {
 			return fmt.Errorf("prepare the %s benchmark: %w", qtype, err)
 		}
@@ -88,8 +89,8 @@ func isContextErr(err error) bool {
 func warnThinSamples(logger *supportlog.Entry, sc scenarioSummary) {
 	for _, row := range sc.latency {
 		if row.metric == metricLatency && row.agg.n < minLatencyRowSamples {
-			logger.Warnf("%-8s target_rps=%-8s latency has %d samples, fewer than %d",
-				sc.queryType, formatRPS(sc.targetRPS), row.agg.n, minLatencyRowSamples)
+			logger.Warnf("%-8s target_rps=%-8s latency outcome=%s has %d samples, fewer than %d",
+				sc.queryType, formatRPS(sc.targetRPS), row.outcome, row.agg.n, minLatencyRowSamples)
 		}
 	}
 }
@@ -114,6 +115,8 @@ func warnFixedReadRange(logger *supportlog.Entry, ds *queryDataset, p queryPlan)
 			span = p.LedgersSpan
 		case queryTypeTxPage:
 			span = p.TxPageSpan
+		default:
+			continue
 		}
 		if span >= room {
 			fixed = append(fixed, qtype)

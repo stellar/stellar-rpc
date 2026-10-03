@@ -38,8 +38,9 @@ func readCSVTable(t *testing.T, path string) ([]string, []map[string]string) {
 	return header, rows
 }
 
-// twoScenarioReport is a ledgers scenario and a txpage scenario with one drop
-// and one failure in each phase.
+// twoScenarioReport is a ledgers scenario with no lookup outcome and a txhash
+// scenario with found and not-found requests, one drop and one failure in each
+// phase.
 func twoScenarioReport() *queryReport {
 	var q queryReport
 	q.add(scenarioReport{
@@ -61,14 +62,14 @@ func twoScenarioReport() *queryReport {
 		},
 	})
 	q.add(scenarioReport{
-		queryType: queryTypeTxPage,
+		queryType: queryTypeTxHash,
 		targetRPS: 0.5,
 		result: scenarioResult{
 			scenarioRecord: scenarioRecord{
 				startDelays: []time.Duration{time.Microsecond, 0, 0, time.Microsecond},
 				timings: []requestTiming{
-					{latency: 10 * time.Microsecond, latencyFromDue: 12 * time.Microsecond, items: 1},
-					{latency: 20 * time.Microsecond, latencyFromDue: 21 * time.Microsecond},
+					{latency: 10 * time.Microsecond, latencyFromDue: 12 * time.Microsecond, items: 1, outcome: outcomeFound},
+					{latency: 20 * time.Microsecond, latencyFromDue: 21 * time.Microsecond, outcome: outcomeNotFound},
 				},
 				warmup:   phaseCounts{started: 2, dropped: 1, failed: 1, firstErr: errors.New("warmup boom")},
 				measured: phaseCounts{started: 3, dropped: 1, failed: 1, firstErr: errors.New("measured boom")},
@@ -83,7 +84,8 @@ func twoScenarioReport() *queryReport {
 }
 
 // TestQueryReportLatencyRows: per scenario, latency and latency_from_due over
-// the succeeded requests, then start_delay; zero durations count.
+// the succeeded requests, then per lookup outcome, then start_delay; zero
+// durations count.
 func TestQueryReportLatencyRows(t *testing.T) {
 	outDir := t.TempDir()
 	written, err := twoScenarioReport().write(outDir)
@@ -96,18 +98,22 @@ func TestQueryReportLatencyRows(t *testing.T) {
 	header, rows := readCSVTable(t, filepath.Join(outDir, queryLatencyFile))
 	assert.Equal(t, latencyHeader, header)
 
-	type key struct{ queryType, rps, metric string }
+	type key struct{ queryType, rps, metric, outcome string }
 	keys := make([]key, 0, len(rows))
 	for _, r := range rows {
-		keys = append(keys, key{r["query_type"], r["target_rps"], r["metric"]})
+		keys = append(keys, key{r["query_type"], r["target_rps"], r["metric"], r["outcome"]})
 	}
 	assert.Equal(t, []key{
-		{"ledgers", "10", "latency"},
-		{"ledgers", "10", "latency_from_due"},
-		{"ledgers", "10", "start_delay"},
-		{"txpage", "0.5", "latency"},
-		{"txpage", "0.5", "latency_from_due"},
-		{"txpage", "0.5", "start_delay"},
+		{"ledgers", "10", "latency", "all"},
+		{"ledgers", "10", "latency_from_due", "all"},
+		{"ledgers", "10", "start_delay", "all"},
+		{"txhash", "0.5", "latency", "all"},
+		{"txhash", "0.5", "latency_from_due", "all"},
+		{"txhash", "0.5", "latency", "found"},
+		{"txhash", "0.5", "latency_from_due", "found"},
+		{"txhash", "0.5", "latency", "not_found"},
+		{"txhash", "0.5", "latency_from_due", "not_found"},
+		{"txhash", "0.5", "start_delay", "all"},
 	}, keys)
 
 	ledgersLatency := rows[0]
@@ -127,12 +133,18 @@ func TestQueryReportLatencyRows(t *testing.T) {
 	// start_delay keeps its zero sample: count equals planned.
 	assert.Equal(t, "2", rows[2]["count"])
 	assert.Equal(t, "0", rows[2]["items"])
-	assert.Equal(t, "4", rows[5]["count"])
+	assert.Equal(t, "4", rows[9]["count"])
 
-	txPageLatency := rows[3]
-	assert.Equal(t, "2", txPageLatency["count"])
-	assert.Equal(t, "1", txPageLatency["items"])
-	assert.Equal(t, "10000", txPageLatency["p50_ns"])
+	txHashLatency := rows[3]
+	assert.Equal(t, "2", txHashLatency["count"])
+	assert.Equal(t, "1", txHashLatency["items"])
+	assert.Equal(t, "10000", txHashLatency["p50_ns"])
+
+	found := rows[5]
+	assert.Equal(t, "1", found["count"])
+	assert.Equal(t, "10000", found["p50_ns"])
+	assert.Equal(t, "12000", rows[6]["p50_ns"])
+	assert.Equal(t, "20000", rows[7]["p50_ns"])
 }
 
 // TestQueryReportPercentileColumns: with 10 samples, p50, p90 and p99 differ
@@ -196,7 +208,7 @@ func TestQueryReportScenarioRows(t *testing.T) {
 	}, rows[0])
 
 	assert.Equal(t, map[string]string{
-		"query_type": "txpage", "target_rps": "0.5",
+		"query_type": "txhash", "target_rps": "0.5",
 		"planned": "4", "started": "3", "dropped": "1", "succeeded": "2", "failed": "1",
 		"warmup_planned": "3", "warmup_dropped": "1", "warmup_failed": "1",
 		"achieved_rps": "0.375", "completion_rps": "0.2",
@@ -274,10 +286,10 @@ func capturingLogger() (*supportlog.Entry, *bytes.Buffer) {
 func TestQueryReportLogSummary(t *testing.T) {
 	logger, output := capturingLogger()
 	twoScenarioReport().logSummary(logger)
-	assert.Contains(t, output.String(), "txpage   target_rps=0.5")
+	assert.Contains(t, output.String(), "txhash   target_rps=0.5")
 	assert.Contains(t, output.String(), "planned=4 dropped=1 succeeded=2 failed=1")
 	assert.Contains(t, output.String(), "achieved_rps=0.375")
 	assert.Equal(t, 2, strings.Count(output.String(), "first_error="))
-	assert.Contains(t, output.String(), "txpage   target_rps=0.5      warmup failed=1 first_error=warmup boom")
-	assert.Contains(t, output.String(), "txpage   target_rps=0.5      measured failed=1 first_error=measured boom")
+	assert.Contains(t, output.String(), "txhash   target_rps=0.5      warmup failed=1 first_error=warmup boom")
+	assert.Contains(t, output.String(), "txhash   target_rps=0.5      measured failed=1 first_error=measured boom")
 }
