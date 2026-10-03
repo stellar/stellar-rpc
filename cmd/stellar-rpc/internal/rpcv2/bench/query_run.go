@@ -45,8 +45,9 @@ func (r *queryRun) scenarios(ctx context.Context) error {
 	return nil
 }
 
-// scenario runs one type at one rate: plan.Warmup unmeasured iterations, then
-// the measured ones at rps over plan.Duration. The seed mixes in the type.
+// scenario runs one type at one rate: page-cache eviction when the plan asks
+// for it, then plan.Warmup unmeasured iterations and the measured ones at rps
+// over plan.Duration. The seed mixes in the type.
 //
 // A cancel after the first measured iteration adds the partial scenario to the
 // report, logs it PARTIAL and returns the context error. A cancel before it
@@ -55,6 +56,15 @@ func (r *queryRun) scenarios(ctx context.Context) error {
 func (r *queryRun) scenario(ctx context.Context, qtype string, rps float64, req queryRequest) error {
 	p := r.plan
 	sc := scenarioReport{queryType: qtype, targetRPS: rps}
+	if p.Evict {
+		start := r.clock.now()
+		evicted, err := r.ds.evictColdArtifacts()
+		if err != nil {
+			return err
+		}
+		sc.pageCacheEvict = r.clock.now().Sub(start)
+		sc.evicted = evicted > 0
+	}
 	r.logger.Infof("query %s at %s rps for %s, %d warmup iterations",
 		qtype, formatRPS(rps), p.Duration, p.Warmup)
 	res, err := runConstantArrivalRate(ctx, r.clock, rps, p.Duration, p.Warmup, scenarioSeed(p.Seed, qtype), req)

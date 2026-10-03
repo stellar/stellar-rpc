@@ -81,6 +81,18 @@ type queryFlags struct {
 	seed             int64
 }
 
+// defaultHotWarmup is --warmup's default for bench-query hot.
+const defaultHotWarmup = 20
+
+// queryTierFlags returns the flag set a tier's subcommand binds. bind takes
+// the --warmup default from the struct, so the tier's default is set here.
+func queryTierFlags(tier string) queryFlags {
+	if tier == queryTierHot {
+		return queryFlags{warmup: defaultHotWarmup}
+	}
+	return queryFlags{}
+}
+
 func (f *queryFlags) bind(cmd *cobra.Command) {
 	fs := cmd.Flags()
 	fs.StringVar(&f.types, "types", strings.Join(allQueryTypes, ","),
@@ -90,7 +102,7 @@ func (f *queryFlags) bind(cmd *cobra.Command) {
 			strconv.Itoa(maxTargetRPS)+", e.g. 0.5,1,2")
 	fs.DurationVar(&f.duration, "duration", defaultScenarioDuration,
 		"measured duration of each --target-rps scenario; the --warmup iterations run before it")
-	fs.IntVar(&f.warmup, "warmup", 0,
+	fs.IntVar(&f.warmup, "warmup", f.warmup,
 		"unmeasured iterations per scenario, started at the scenario's rate before measurement starts")
 	spanRange := "in [1, " + strconv.FormatUint(uint64(maxReadSpan), 10) + "]"
 	fs.Uint32Var(&f.ledgersSpan, "ledgers-span", defaultLedgersSpan,
