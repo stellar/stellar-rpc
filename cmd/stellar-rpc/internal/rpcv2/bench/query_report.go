@@ -63,10 +63,8 @@ type latencyRow struct {
 	agg       row
 }
 
-// latencyRows aggregates the scenario's distributions one at a time: latency
-// and latency_from_due over all successful requests, then start_delay over
-// every measured iteration. A distribution with no sample has no row. Zero
-// durations are kept, so count equals succeeded (or planned, for start_delay).
+// latencyRows returns the scenario's latency.csv rows. A metric with no sample
+// has no row, and zero durations count as samples.
 func (s scenarioReport) latencyRows() []latencyRow {
 	var out []latencyRow
 	add := func(metric string, dist *series) {
@@ -186,8 +184,7 @@ func (q *queryReport) write(outDir string) ([]string, error) {
 }
 
 // logSummary logs one line per scenario, and a warning with the first error of
-// each phase that had failed requests. A scenario with no successful measured
-// request logs latency=none.
+// each phase that had failed requests.
 func (q *queryReport) logSummary(logger *supportlog.Entry) {
 	for _, sc := range q.scenarios {
 		res := sc.result

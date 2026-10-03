@@ -16,39 +16,32 @@ import (
 
 // requestTiming holds the timings of one successful request.
 type requestTiming struct {
-	// latency spans the request body, from its start to its end.
+	// latency is the run time of the request itself.
 	latency time.Duration
 	// latencyFromDue spans the iteration's due time to its response.
 	latencyFromDue time.Duration
-	// items counts what the response carried.
-	items int
+	items          int
 }
 
-// queryRequest sends one request and measures its own latency, usually through
-// timed. Calls run concurrently on separate goroutines; rng is per call. ctx
-// is the scenario's context. A request must return soon after ctx is done,
-// because a canceled scenario waits for every running request before it
-// returns.
+// queryRequest sends one request and measures its own latency, usually by
+// calling timed. Calls run concurrently, each with its own rng. A request must
+// return soon after ctx is done, because a canceled scenario waits for every
+// running request.
 type queryRequest func(ctx context.Context, rng *rand.Rand) (requestTiming, error)
 
-// maxConcurrent caps a scenario's running requests. An iteration that the
-// generator reaches while maxConcurrent requests run is dropped, so a slow
-// store cannot grow the goroutine count without bound.
+// maxConcurrent caps a scenario's running requests. An iteration reached while
+// maxConcurrent requests run is dropped.
 const maxConcurrent = 512
 
 // maxRPS is the highest target rate: one iteration per nanosecond.
 const maxRPS = float64(time.Second)
 
-// maxIterations caps a scenario's iterations, warmup included: about 2.8
-// hours at 10k rps. At the cap a scenario's timings (24 bytes each) and start
-// delays (8 bytes each) take about 3.2 GB. queryReport.add then aggregates one
-// metric at a time, with 24 more bytes per sample, so one scenario peaks at
-// about 5.6 GB. The report keeps only aggregated rows.
+// maxIterations caps a scenario's iterations, warmup included. At the cap one
+// scenario peaks at about 5.6 GB of memory.
 const maxIterations = 100_000_000
 
-// phaseCounts counts one phase's iterations. Every iteration is started or
-// dropped. failed counts the started requests that returned an error, and
-// firstErr is nil when failed is zero.
+// phaseCounts counts one phase's iterations. Each iteration is started or
+// dropped, and failed counts the started requests that returned an error.
 type phaseCounts struct {
 	started  int
 	dropped  int
@@ -57,9 +50,8 @@ type phaseCounts struct {
 }
 
 // scenarioRecord holds what a scenario records as it runs. The generator
-// goroutine writes startDelays and each phase's started and dropped without
-// the lock. The request goroutines write timings and each phase's failed and
-// firstErr under scenarioRun.mu.
+// goroutine writes startDelays, started and dropped without a lock; request
+// goroutines write timings, failed and firstErr under scenarioRun.mu.
 type scenarioRecord struct {
 	// startDelays has one entry per measured iteration, dropped ones included.
 	startDelays []time.Duration
@@ -78,18 +70,16 @@ type scenarioResult struct {
 	// planned counts the measured iterations: round(rps × duration), or the
 	// iterations reached before a cancel.
 	planned int
-	// schedule is planned × interval, the length of the schedule.
+	// schedule is planned × interval.
 	schedule time.Duration
 	// elapsed spans the first measured due time to the last measured response,
-	// and is at least schedule. Failed requests count as responses.
+	// failed ones included, and is at least schedule.
 	elapsed time.Duration
-	// overrun is elapsed − schedule: how long the last response arrived after
-	// the schedule ended.
+	// overrun is elapsed − schedule.
 	overrun time.Duration
-	// processCPU is the CPU time of the whole process, user plus system, from
-	// when the generator reaches the first measured iteration to the end of
-	// the scenario. It includes the store's work. Zero when the generator
-	// reached no measured iteration.
+	// processCPU is the user plus system CPU time of the whole process, store
+	// included, from the first measured iteration to the end of the scenario,
+	// or zero when no measured iteration was reached.
 	processCPU time.Duration
 }
 
@@ -104,9 +94,8 @@ type scenarioClock interface {
 	waitUntil(ctx context.Context, t time.Time) error
 }
 
-// timerClock is the real scenarioClock. It waits on a Go timer, which can end
-// its wait late. That delay shows in start_delay and latency_from_due, not in
-// latency.
+// timerClock is the real scenarioClock. Timer lateness shows in start_delay and
+// latency_from_due, not in latency.
 type timerClock struct{}
 
 func (timerClock) now() time.Time { return time.Now() }
@@ -115,8 +104,7 @@ func (timerClock) waitUntil(ctx context.Context, t time.Time) error {
 	if err := contextSleep(ctx, time.Until(t)); err != nil {
 		return err
 	}
-	// contextSleep returns nil at once for a past t, and the timer and the
-	// cancel can be ready together; in both cases the cancel wins.
+	// contextSleep can return nil while ctx is done.
 	return ctx.Err()
 }
 
@@ -158,8 +146,8 @@ func (r *scenarioRun) recordTiming(t requestTiming, done time.Time) {
 	}
 }
 
-// recordFailure counts a failed request in phase p. Only a measured failure
-// moves lastResponse, which bounds elapsed.
+// recordFailure counts a failed request in phase p. A warmup failure does not
+// move elapsed.
 func (r *scenarioRun) recordFailure(p *phaseCounts, err error, done time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -173,8 +161,6 @@ func (r *scenarioRun) recordFailure(p *phaseCounts, err error, done time.Time) {
 }
 
 // result assembles the scenarioResult once every request has returned.
-// Each measured iteration reached has one start delay, so len(startDelays) is
-// planned.
 func (r *scenarioRun) result(firstDue time.Time, interval, processCPU time.Duration) scenarioResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -236,17 +222,14 @@ func validateScenario(rps float64, duration time.Duration, warmup int) (time.Dur
 	return interval, planned, nil
 }
 
-// runConstantArrivalRate runs one scenario: it starts req at rps iterations
-// per second, an open-loop load. Iteration i is due at start + i×interval,
-// where start is clock.now() when the scenario begins. Iterations 0 to
-// warmup-1 are warmup; the round(rps × duration) iterations after them are
-// measured. A negative warmup counts as zero.
+// runConstantArrivalRate runs one open-loop scenario: it starts req at rps
+// iterations per second and never waits for a response. The first warmup
+// iterations are not measured; a negative warmup counts as zero.
 //
-// A failed request is counted and does not end the scenario. A non-nil error
-// is a bad argument, with an empty result, or a context error, with a result
-// that covers the iterations reached before the cancel. The cancel reaches the
-// running requests through ctx; a request that then returns an error counts as
-// failed.
+// A failed request is counted and does not end the scenario. A bad argument
+// returns an error and an empty result. A cancel returns the context error and
+// a result that covers the iterations reached; running requests get the cancel
+// through ctx.
 func runConstantArrivalRate(
 	ctx context.Context, clock scenarioClock, rps float64, duration time.Duration, warmup int, seed int64,
 	req queryRequest,
@@ -284,10 +267,9 @@ func runConstantArrivalRate(
 	return run.result(due(warmup), interval, processCPU), err
 }
 
-// start runs iteration i's request on its own goroutine when fewer than
-// maxConcurrent requests run, and drops the iteration otherwise. A measured
-// iteration records its start delay, now minus due, whether or not it is
-// dropped. Called from the generator goroutine only.
+// start runs iteration i's request on its own goroutine, or drops the
+// iteration when maxConcurrent requests run. Call it from the generator
+// goroutine only.
 func (r *scenarioRun) start(ctx context.Context, i int, due, now time.Time, measured bool) {
 	phase := &r.warmup
 	if measured {
@@ -326,13 +308,12 @@ func processCPUTime() time.Duration {
 }
 
 // scenarioRNGKey mixes the run seed and the scenario rate into one key.
-// Scenarios at different rates get different keys.
 func scenarioRNGKey(seed int64, rps float64) uint64 {
 	return splitmix64(uint64(seed) ^ splitmix64(math.Float64bits(rps))) //nolint:gosec // seed mixing, not cryptography
 }
 
 // requestRNG returns the RNG of iteration i in the scenario with key. Distinct
-// iterations or keys give distinct PCG states, so distinct streams.
+// iterations or keys give distinct streams.
 func requestRNG(key uint64, i int) *rand.Rand {
 	return rand.New(rand.NewPCG(key, splitmix64(key^uint64(i)))) //nolint:gosec // seed mixing, not cryptography
 }
