@@ -66,7 +66,8 @@ func TestArtifactOnDisk(t *testing.T) {
 }
 
 // openColdDataset fails on a chunk with no ledger pack, and leaves the input
-// tree as it found it.
+// tree as it found it. A chunk with no events store fails the open only when
+// --types includes events.
 func TestOpenColdDatasetErrors(t *testing.T) {
 	t.Run("no ledger pack", func(t *testing.T) {
 		root := t.TempDir()
@@ -75,6 +76,23 @@ func TestOpenColdDatasetErrors(t *testing.T) {
 		_, _, err := openColdDataset(testLogger(), coldQueryOptions{ColdRoot: root, NumChunks: 2})
 		require.ErrorContains(t, err, "chunk "+chunk.ID(1).String()+" has no ledger pack")
 		assert.Equal(t, before, treeEntries(t, root))
+	})
+	t.Run("no events store", func(t *testing.T) {
+		root := ingestColdChunk(t)
+		for _, p := range geometry.NewLayout(root).EventsPaths(0) {
+			require.NoError(t, os.Remove(p))
+		}
+		open := func(queryType string) error {
+			_, release, err := openColdDataset(testLogger(), coldQueryOptions{
+				ColdRoot: root, NumChunks: 1, Plan: queryPlan{Types: []string{queryType}},
+			})
+			if err == nil {
+				release()
+			}
+			return err
+		}
+		require.ErrorContains(t, open(queryTypeEvents), "chunk "+chunk.ID(0).String()+" has no servable events store")
+		require.NoError(t, open(queryTypeLedgers))
 	})
 }
 

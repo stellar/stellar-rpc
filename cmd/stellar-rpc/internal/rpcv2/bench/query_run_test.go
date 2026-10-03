@@ -129,22 +129,30 @@ func TestQueryScenarioCanceled(t *testing.T) {
 	}
 }
 
-// A latency row under minLatencyRowSamples warns; a latency_from_due row does
-// not.
+// Each latency row under minLatencyRowSamples warns, whatever its outcome.
 func TestWarnThinSamples(t *testing.T) {
-	sc := scenarioReport{queryType: queryTypeLedgers, targetRPS: 2}
-	for range minLatencyRowSamples {
-		sc.result.timings = append(sc.result.timings, requestTiming{latency: time.Millisecond})
+	sc := scenarioReport{queryType: queryTypeTxHash, targetRPS: 2}
+	for i := range minLatencyRowSamples + 10 {
+		outcome := outcomeFound
+		if i < 10 {
+			outcome = outcomeNotFound
+		}
+		sc.result.timings = append(sc.result.timings, requestTiming{latency: time.Millisecond, outcome: outcome})
 	}
 	logger, output := capturingLogger()
 	var q queryReport
 	warnThinSamples(logger, q.add(sc))
-	assert.NotContains(t, output.String(), "fewer than")
+	assert.Contains(t, output.String(), "latency outcome=not_found has 10 samples, fewer than 100")
+	assert.NotContains(t, output.String(), "outcome=found has")
+	assert.NotContains(t, output.String(), "outcome=all has")
 
+	output.Reset()
 	sc.result.timings = sc.result.timings[:50]
 	warnThinSamples(logger, q.add(sc))
-	assert.Contains(t, output.String(), "latency has 50 samples, fewer than 100")
-	assert.Equal(t, 1, strings.Count(output.String(), "fewer than"), "latency_from_due rows do not warn")
+	for _, label := range []string{"all has 50", "found has 40", "not_found has 10"} {
+		assert.Contains(t, output.String(), "latency outcome="+label+" samples")
+	}
+	assert.Equal(t, 3, strings.Count(output.String(), "fewer than"), "latency_from_due rows do not warn")
 }
 
 // A configured span that covers the whole dataset warns and lands in the run
@@ -164,7 +172,7 @@ func TestWarnFixedReadRange(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			logger, output := capturingLogger()
 			p := queryPlan{
-				Types:       []string{queryTypeLedgers, queryTypeTxPage},
+				Types:       []string{queryTypeLedgers, queryTypeTxPage, queryTypeEvents},
 				LedgersSpan: tc.ledgersSpan,
 				TxPageSpan:  tc.txPageSpan,
 				Settings:    map[string]string{},
@@ -244,9 +252,9 @@ func TestQueryCommandsRejectBadInputsBeforeOut(t *testing.T) {
 	}
 }
 
-// runQueryCommand runs bench query with args and --out, checks the run record,
-// and returns the scenarios.csv rows.
-func runQueryCommand(t *testing.T, args ...string) []map[string]string {
+// runQueryCommand runs bench query with args and --out, and returns the run
+// record and the scenarios.csv rows.
+func runQueryCommand(t *testing.T, args ...string) (runRecord, []map[string]string) {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "out")
 	cmd := NewCommand()
@@ -264,13 +272,13 @@ func runQueryCommand(t *testing.T, args ...string) []map[string]string {
 	assert.Positive(t, record.SetupNs["storeOpen"])
 	assert.FileExists(t, filepath.Join(out, queryLatencyFile))
 	_, rows := readCSVTable(t, filepath.Join(out, queryScenariosFile))
-	return rows
+	return record, rows
 }
 
 // A hot run records the store open time.
 func TestQueryHotCommandRecordsRun(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
-	rows := runQueryCommand(t, queryTierHot, "--chunk", "0", "--hot-dir", hotRoot,
+	_, rows := runQueryCommand(t, queryTierHot, "--chunk", "0", "--hot-dir", hotRoot,
 		"--types", queryTypeLedgers, "--target-rps", "1000", "--duration", "20ms")
 	require.Len(t, rows, 1)
 	assert.Equal(t, queryTypeLedgers, rows[0]["query_type"])
@@ -294,12 +302,65 @@ func ingestColdChunk(t *testing.T) string {
 	return coldRoot
 }
 
-// A cold run records the store open time and adds one row per scenario.
+// A cold run serves every query type at two rates, type by type, and records
+// the store open time and the pool settings in run.json.
 func TestQueryColdCommandRecordsRun(t *testing.T) {
 	coldRoot := ingestColdChunk(t)
-	rows := runQueryCommand(t, queryTierCold, "--start-chunk", "0", "--cold-dir", coldRoot,
-		"--types", queryTypeLedgers+","+queryTypeTxPage, "--target-rps", "1000,2000", "--duration", "10ms")
-	require.Len(t, rows, 4)
+	record, rows := runQueryCommand(t, queryTierCold, "--start-chunk", "0", "--cold-dir", coldRoot,
+		"--types", strings.Join(allQueryTypes, ","), "--target-rps", "1000,2000", "--duration", "10ms")
+	assert.NotEmpty(t, record.Settings["txhashPoolHashes"])
+	assert.NotEmpty(t, record.Settings["eventsPool"])
+	require.Len(t, rows, 2*len(allQueryTypes))
+	for i, row := range rows {
+		assert.Equal(t, allQueryTypes[i/2], row["query_type"], "row %d", i)
+		assert.Equal(t, []string{"1000", "2000"}[i%2], row["target_rps"], "row %d", i)
+		assert.Equal(t, "0", row["failed"], row["query_type"])
+	}
+}
+
+// scenarios builds each type's pool once and runs every rate on it.
+func TestQueryRunBuildsEachPoolOnce(t *testing.T) {
+	plan := queryPlan{
+		Types:          []string{queryTypeTxHash, queryTypeEvents},
+		TargetRPS:      []float64{1000, 2000},
+		Duration:       10 * time.Millisecond,
+		EventsLimit:    defaultEventsLimit,
+		Passphrase:     network.PublicNetworkPassphrase,
+		Seed:           defaultSeed,
+		TxHashPoolSize: defaultTxHashPoolSize,
+		Settings:       map[string]string{},
+	}
+	ds, release, err := openHotDataset(testLogger(), hotQueryOptions{HotRoot: ingestHotChunk(t), Chunk: 0, Plan: plan})
+	require.NoError(t, err)
+	defer release()
+
+	logger, output := capturingLogger()
+	run := testQueryRun(logger, ds, plan, timerClock{})
+	require.NoError(t, run.scenarios(context.Background()))
+	require.Len(t, run.report.scenarios, 4)
+	assert.Equal(t, 1, strings.Count(output.String(), "txhash pool: "))
+	assert.Equal(t, 1, strings.Count(output.String(), "events pool: "))
+}
+
+// With no tx-hash window index on disk, a cold run fails when --types includes
+// txhash and runs the other types.
+func TestQueryColdCommandWithoutTxHashIndex(t *testing.T) {
+	coldRoot := ingestColdChunk(t)
+	require.NoError(t, os.Remove(txhashIndexPath(t, geometry.NewLayout(coldRoot), 0, 0)))
+
+	cmd := NewQueryCommand()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{
+		queryTierCold, "--start-chunk", "0", "--cold-dir", coldRoot,
+		"--types", queryTypeTxHash, "--target-rps", "1000", "--duration", "10ms",
+		"--out", filepath.Join(t.TempDir(), "out"),
+	})
+	require.ErrorContains(t, cmd.Execute(), "no tx-hash window index")
+
+	_, rows := runQueryCommand(t, queryTierCold, "--start-chunk", "0", "--cold-dir", coldRoot,
+		"--types", queryTypeLedgers, "--target-rps", "1000", "--duration", "10ms")
+	require.Len(t, rows, 1)
 }
 
 // A run that fails after a scenario is added still writes that scenario's

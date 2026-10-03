@@ -35,17 +35,21 @@ func ingestHotChunk(t *testing.T) string {
 	return hotRoot
 }
 
-// Every query type reads under a live context and stops with the context error
-// once the context is done.
+// Every query type reads under a live context. The ledgers and txpage scans
+// stop with the context error once the context is done.
 func TestQueryRequests(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
 	plan := queryPlan{
-		Types:       allQueryTypes,
-		LedgersSpan: defaultLedgersSpan,
-		TxPageSpan:  defaultTxPageSpan,
-		TxPageLimit: defaultTxPageLimit,
-		Passphrase:  network.PublicNetworkPassphrase,
-		Seed:        defaultSeed,
+		Types:            allQueryTypes,
+		LedgersSpan:      defaultLedgersSpan,
+		TxPageSpan:       defaultTxPageSpan,
+		TxPageLimit:      defaultTxPageLimit,
+		EventsLimit:      defaultEventsLimit,
+		NotFoundFraction: 0.5,
+		Passphrase:       network.PublicNetworkPassphrase,
+		Seed:             defaultSeed,
+		TxHashPoolSize:   defaultTxHashPoolSize,
+		Settings:         map[string]string{},
 	}
 	ds, release, err := openHotDataset(testLogger(), hotQueryOptions{HotRoot: hotRoot, Chunk: 0, Plan: plan})
 	require.NoError(t, err)
@@ -54,22 +58,45 @@ func TestQueryRequests(t *testing.T) {
 
 	for _, qtype := range allQueryTypes {
 		t.Run(qtype, func(t *testing.T) {
-			req, err := newQueryRequest(ds, plan, qtype)
+			req, err := newQueryRequest(context.Background(), testLogger(), ds, plan, qtype)
 			require.NoError(t, err)
 			rng := rand.New(rand.NewPCG(defaultSeed, defaultSeed))
-			for range 10 {
+			outcomes := map[lookupOutcome]int{}
+			events := 0
+			for range 40 {
 				timing, err := req(context.Background(), rng)
 				require.NoError(t, err)
-				if qtype == queryTypeLedgers {
+				switch qtype {
+				case queryTypeLedgers:
 					assert.Equal(t, defaultLedgersSpan, timing.items)
+				case queryTypeTxHash:
+					switch timing.outcome {
+					case outcomeFound:
+						assert.Equal(t, 1, timing.items)
+					case outcomeNotFound:
+						assert.Equal(t, 0, timing.items)
+					default:
+						t.Fatalf("txhash outcome %v", timing.outcome)
+					}
+					outcomes[timing.outcome]++
+				case queryTypeEvents:
+					assert.LessOrEqual(t, timing.items, plan.EventsLimit)
+					events += timing.items
 				}
+			}
+			if qtype == queryTypeTxHash {
+				assert.Positive(t, outcomes[outcomeFound])
+				assert.Positive(t, outcomes[outcomeNotFound])
+			}
+			if qtype == queryTypeEvents {
+				assert.Positive(t, events)
 			}
 		})
 	}
 
-	for _, qtype := range allQueryTypes {
+	for _, qtype := range []string{queryTypeLedgers, queryTypeTxPage} {
 		t.Run(qtype+" stops on cancel", func(t *testing.T) {
-			req, err := newQueryRequest(ds, plan, qtype)
+			req, err := newQueryRequest(context.Background(), testLogger(), ds, plan, qtype)
 			require.NoError(t, err)
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
@@ -96,6 +123,21 @@ func (c *errCounter) Err() error {
 }
 
 func (*errCounter) Value(any) any { return nil }
+
+// A txhash request fails when the lookup outcome differs from the pool's
+// expectation.
+func TestTxHashRequestOutcomeMismatch(t *testing.T) {
+	ds, release, err := openHotDataset(testLogger(), hotQueryOptions{
+		HotRoot: ingestHotChunk(t), Chunk: 0,
+		Plan: queryPlan{Types: []string{queryTypeTxHash}, Passphrase: network.PublicNetworkPassphrase},
+	})
+	require.NoError(t, err)
+	defer release()
+
+	pool := &txHashPool{hashes: [][32]byte{{0xff}}, ledgerCount: 1}
+	_, err = txHashRequest(ds, pool)(context.Background(), rand.New(rand.NewPCG(defaultSeed, defaultSeed)))
+	require.ErrorContains(t, err, "found=false, expected true")
+}
 
 // A txpage request ends at the ledger that fills the page and reads no ledger
 // after it.
