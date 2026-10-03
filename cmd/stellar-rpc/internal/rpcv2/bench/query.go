@@ -30,10 +30,12 @@ func NewQueryCommand() *cobra.Command {
 
 // Read-shape flag defaults.
 const (
-	defaultLedgersSpan = 10
-	defaultTxPageSpan  = 5
-	defaultTxPageLimit = 200
-	defaultSeed        = 1
+	defaultLedgersSpan      = 10
+	defaultTxPageSpan       = 5
+	defaultTxPageLimit      = 200
+	defaultEventsLimit      = 10
+	defaultNotFoundFraction = 0.12
+	defaultSeed             = 1
 )
 
 // Scenario flag defaults.
@@ -44,6 +46,9 @@ const (
 
 // maxTargetRPS is the highest rate --target-rps accepts.
 const maxTargetRPS = 100_000
+
+// maxTxHashPoolSize is the largest --txhash-pool-size.
+const maxTxHashPoolSize = 1_000_000
 
 // The tier names bench-query registers its subcommands under.
 const (
@@ -66,11 +71,14 @@ type queryFlags struct {
 	duration  time.Duration
 	warmup    int
 
-	ledgersSpan uint32
-	txPageSpan  uint32
-	txPageLimit int
-	passphrase  string
-	seed        int64
+	ledgersSpan      uint32
+	txPageSpan       uint32
+	txPageLimit      int
+	eventsLimit      int
+	notFoundFraction float64
+	txHashPoolSize   int
+	passphrase       string
+	seed             int64
 }
 
 func (f *queryFlags) bind(cmd *cobra.Command) {
@@ -91,9 +99,15 @@ func (f *queryFlags) bind(cmd *cobra.Command) {
 		"ledgers one txpage request scans, "+spanRange)
 	fs.IntVar(&f.txPageLimit, "txpage-limit", defaultTxPageLimit,
 		"the most transactions one txpage request makes (the page size), >= 1")
+	fs.IntVar(&f.eventsLimit, "events-limit", defaultEventsLimit,
+		"events one events page may return, >= 1")
+	fs.Float64Var(&f.notFoundFraction, "not-found-fraction", defaultNotFoundFraction,
+		"share of txhash lookups for a hash that is not in the dataset, in [0, 1]")
+	fs.IntVar(&f.txHashPoolSize, "txhash-pool-size", defaultTxHashPoolSize,
+		"txhash pool size, in [1, "+strconv.Itoa(maxTxHashPoolSize)+"]; the pool can hold fewer hashes")
 	fs.StringVar(&f.passphrase, "network-passphrase", network.PublicNetworkPassphrase,
-		"network passphrase the dataset's transactions were signed under; txpage needs it "+
-			"to pair envelopes")
+		"network passphrase the dataset's transactions were signed under; txhash and "+
+			"txpage need it to pair envelopes, and a wrong one fails the pool build")
 	fs.Int64Var(&f.seed, "seed", defaultSeed,
 		"seed for the work each request picks, so a re-run reads the same ledgers")
 }
@@ -118,15 +132,18 @@ func (f *queryFlags) plan() (queryPlan, error) {
 		return queryPlan{}, errors.New("--network-passphrase is required")
 	}
 	return queryPlan{
-		Types:       types,
-		TargetRPS:   rates,
-		Duration:    f.duration,
-		Warmup:      f.warmup,
-		LedgersSpan: f.ledgersSpan,
-		TxPageSpan:  f.txPageSpan,
-		TxPageLimit: f.txPageLimit,
-		Passphrase:  f.passphrase,
-		Seed:        f.seed,
+		Types:            types,
+		TargetRPS:        rates,
+		Duration:         f.duration,
+		Warmup:           f.warmup,
+		LedgersSpan:      f.ledgersSpan,
+		TxPageSpan:       f.txPageSpan,
+		TxPageLimit:      f.txPageLimit,
+		EventsLimit:      f.eventsLimit,
+		NotFoundFraction: f.notFoundFraction,
+		TxHashPoolSize:   f.txHashPoolSize,
+		Passphrase:       f.passphrase,
+		Seed:             f.seed,
 	}, nil
 }
 
@@ -156,6 +173,13 @@ func (f *queryFlags) checkRequestFlags() error {
 		return fmt.Errorf("--txpage-span must be in [1, %d], got %d", maxReadSpan, f.txPageSpan)
 	case f.txPageLimit < 1:
 		return fmt.Errorf("--txpage-limit must be >= 1, got %d", f.txPageLimit)
+	case f.eventsLimit < 1:
+		return fmt.Errorf("--events-limit must be >= 1, got %d", f.eventsLimit)
+	case !(f.notFoundFraction >= 0 && f.notFoundFraction <= 1): // also rejects NaN
+		return fmt.Errorf("--not-found-fraction must be in [0, 1], got %v", f.notFoundFraction)
+	case f.txHashPoolSize < 1 || f.txHashPoolSize > maxTxHashPoolSize:
+		return fmt.Errorf("--txhash-pool-size must be in [1, %d], got %d",
+			maxTxHashPoolSize, f.txHashPoolSize)
 	}
 	return nil
 }

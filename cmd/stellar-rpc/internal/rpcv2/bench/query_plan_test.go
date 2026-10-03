@@ -14,14 +14,17 @@ import (
 
 func validQueryFlags() queryFlags {
 	return queryFlags{
-		types:       queryTypeLedgers,
-		targetRPS:   "1",
-		duration:    time.Second,
-		ledgersSpan: defaultLedgersSpan,
-		txPageSpan:  defaultTxPageSpan,
-		txPageLimit: defaultTxPageLimit,
-		passphrase:  network.PublicNetworkPassphrase,
-		seed:        defaultSeed,
+		types:            queryTypeLedgers,
+		targetRPS:        "1",
+		duration:         time.Second,
+		ledgersSpan:      defaultLedgersSpan,
+		txPageSpan:       defaultTxPageSpan,
+		txPageLimit:      defaultTxPageLimit,
+		eventsLimit:      defaultEventsLimit,
+		notFoundFraction: defaultNotFoundFraction,
+		txHashPoolSize:   defaultTxHashPoolSize,
+		passphrase:       network.PublicNetworkPassphrase,
+		seed:             defaultSeed,
 	}
 }
 
@@ -51,6 +54,35 @@ func TestParseRejectsRepeats(t *testing.T) {
 	got, err := parseQueryTypes("txpage, ledgers")
 	require.NoError(t, err)
 	assert.Equal(t, []string{queryTypeTxPage, queryTypeLedgers}, got)
+}
+
+func TestQueryPlanPoolAndNotFoundFraction(t *testing.T) {
+	for _, size := range []int{-1, 0, 1, defaultTxHashPoolSize, maxTxHashPoolSize, maxTxHashPoolSize + 1} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			f := validQueryFlags()
+			f.txHashPoolSize = size
+			p, err := f.plan()
+			if size < 1 || size > maxTxHashPoolSize {
+				require.ErrorContains(t, err, "--txhash-pool-size")
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, size, p.TxHashPoolSize)
+			}
+		})
+	}
+	for _, fraction := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), -0.1, 1.1} {
+		f := validQueryFlags()
+		f.notFoundFraction = fraction
+		_, err := f.plan()
+		require.ErrorContains(t, err, "--not-found-fraction")
+	}
+	for _, fraction := range []float64{0, 1} {
+		f := validQueryFlags()
+		f.notFoundFraction = fraction
+		p, err := f.plan()
+		require.NoError(t, err)
+		assert.InDelta(t, fraction, p.NotFoundFraction, 0)
+	}
 }
 
 // TestPlanBoundsReadSpans: --ledgers-span and --txpage-span accept maxReadSpan

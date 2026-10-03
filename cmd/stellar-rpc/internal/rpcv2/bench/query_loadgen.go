@@ -22,7 +22,19 @@ type requestTiming struct {
 	latencyFromDue time.Duration
 	// items counts what the response carried.
 	items int
+	// outcome is the txhash lookup result, or outcomeNone.
+	outcome lookupOutcome
 }
+
+// lookupOutcome splits txhash latencies by lookup result.
+type lookupOutcome uint8
+
+const (
+	outcomeNone lookupOutcome = iota
+
+	outcomeFound
+	outcomeNotFound
+)
 
 // queryRequest sends one request and measures its own latency, usually through
 // timed. Calls run concurrently on separate goroutines; rng is per call. ctx
@@ -40,10 +52,10 @@ const maxConcurrent = 512
 const maxRPS = float64(time.Second)
 
 // maxIterations caps a scenario's iterations, warmup included: about 2.8
-// hours at 10k rps. At the cap a scenario's timings (24 bytes each) and start
-// delays (8 bytes each) take about 3.2 GB. queryReport.add then aggregates one
+// hours at 10k rps. At the cap a scenario's timings (32 bytes each) and start
+// delays (8 bytes each) take about 4 GB. queryReport.add then aggregates one
 // metric at a time, with 24 more bytes per sample, so one scenario peaks at
-// about 5.6 GB. The report keeps only aggregated rows.
+// about 6.4 GB. The report keeps only aggregated rows.
 const maxIterations = 100_000_000
 
 // phaseCounts counts one phase's iterations. Every iteration is started or

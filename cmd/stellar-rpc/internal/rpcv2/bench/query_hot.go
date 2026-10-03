@@ -50,7 +50,7 @@ func newQueryHotCommand() *cobra.Command {
 	fs.StringVar(&catalogDir, "catalog-dir", "",
 		"base dir for the run's scratch catalog; default: --hot-dir")
 	fs.Uint32Var(&sampleLedgers, "sample-ledgers", 0,
-		"use only this many ledgers from the chunk's start for the requests "+
+		"use only this many ledgers from the chunk's start for the requests and the pools "+
 			"(0 = every committed ledger)")
 	markRequired(cmd, "chunk", "hot-dir")
 	return cmd
@@ -183,7 +183,7 @@ func openHotDataset(logger *supportlog.Entry, opts hotQueryOptions) (*queryDatas
 		FirstLedger: first,
 		LastLedger:  last,
 	}
-	if err := ds.verifyServes(); err != nil {
+	if err := ds.verifyServes(opts.Plan.Types); err != nil {
 		release()
 		return nil, nil, err
 	}
