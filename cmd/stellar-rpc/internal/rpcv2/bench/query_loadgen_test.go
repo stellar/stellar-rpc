@@ -15,10 +15,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeScenarioClock is a scenarioClock that never sleeps. waitUntil(t) calls onWait
-// with the wait's index, when set, and then returns ctx.Err() if ctx is done.
-// Otherwise it moves the time to t plus lateness[index], when given; the time
-// never moves back.
+// fakeScenarioClock is a scenarioClock that never sleeps. Wait i calls
+// onWait(i) when set and, unless ctx is done, moves the time forward to t plus
+// lateness[i].
 type fakeScenarioClock struct {
 	lateness []time.Duration
 	onWait   func(i int)
@@ -66,8 +65,8 @@ func cancelAtWait(cancel context.CancelFunc, k int) func(int) {
 	}
 }
 
-// countingRequest is a queryRequest that counts calls, warmup included, and
-// sleeps countingRequestLatency so latency is never zero.
+// countingRequest is a queryRequest that counts calls and never has a zero
+// latency.
 type countingRequest struct {
 	calls atomic.Int64
 }
@@ -88,7 +87,7 @@ func okRequest(context.Context, *rand.Rand) (requestTiming, error) {
 }
 
 // TestScenarioPlannedCount: a clean scenario measures round(rps × duration)
-// iterations, runs warmup iterations without timing them, and drops nothing.
+// iterations after its warmup.
 func TestScenarioPlannedCount(t *testing.T) {
 	const rps = 200.0
 	fake := &countingRequest{}
@@ -170,16 +169,15 @@ func (b *blockingRequest) run(context.Context, *rand.Rand) (requestTiming, error
 	})
 }
 
-// TestScenarioDrops: with every slot held, the first maxConcurrent measured
-// iterations start and the rest are dropped; start delays cover every
-// measured iteration. The scenario plans one more iteration than the test
-// reaches: the wait for it cancels the scenario and releases the requests, so
-// every slot is held until the last reached iteration.
+// TestScenarioDrops: iterations past maxConcurrent running requests are
+// dropped.
 func TestScenarioDrops(t *testing.T) {
 	const reached = 1000
 	fake := &blockingRequest{release: make(chan struct{})}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
+	// The wait for one more iteration than reached cancels the scenario and
+	// releases the requests, so every slot stays held until then.
 	clock := &fakeScenarioClock{onWait: func(i int) {
 		if i == reached {
 			cancel()
@@ -201,8 +199,8 @@ func TestScenarioDrops(t *testing.T) {
 	assert.Equal(t, int64(0), fake.running.Load())
 }
 
-// TestScenarioCountsFailures: a failed request is counted, leaves no timing
-// and does not end the scenario.
+// TestScenarioCountsFailures: a failed request is counted and does not end the
+// scenario.
 func TestScenarioCountsFailures(t *testing.T) {
 	const rps = 200.0
 	var ordinal atomic.Int64
@@ -245,9 +243,8 @@ func TestScenarioRoundsTheInterval(t *testing.T) {
 	assert.Equal(t, []time.Time{{}, time.Time{}.Add(142857143 * time.Nanosecond)}, clock.waits)
 }
 
-// TestScenarioContextCancel: a canceled context ends the scenario with the
-// context's error and no request running. The result covers the iterations
-// reached before the cancel, at any rate.
+// TestScenarioContextCancel: a cancel returns the context error and a result
+// for the iterations reached.
 func TestScenarioContextCancel(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -282,8 +279,8 @@ func TestScenarioContextCancel(t *testing.T) {
 	}
 }
 
-// TestScenarioAlreadyCanceled: a context that is done before the scenario
-// starts plans and starts nothing.
+// TestScenarioAlreadyCanceled: a context done before the scenario starts
+// nothing.
 func TestScenarioAlreadyCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -323,9 +320,8 @@ func TestScenarioCancelWhileRequestsRun(t *testing.T) {
 	assert.Len(t, res.timings, 3)
 }
 
-// TestScenarioCancelReachesRequests: a request gets the scenario's context, so
-// a cancel ends a running request, and the request counts as failed because
-// it returns the context's error.
+// TestScenarioCancelReachesRequests: a cancel reaches running requests through
+// ctx.
 func TestScenarioCancelReachesRequests(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -351,13 +347,13 @@ func TestScenarioCancelReachesRequests(t *testing.T) {
 }
 
 // TestScenarioStartsWithoutWaitingForResponses: the generator starts each
-// iteration at its due time while earlier requests still run. No request
-// returns until the last one has started, so a generator that waited for a
-// response would never finish.
+// iteration on time while earlier requests still run.
 func TestScenarioStartsWithoutWaitingForResponses(t *testing.T) {
 	const iterations = 50
 	release := make(chan struct{})
 	var calls atomic.Int64
+	// No request returns until the last one starts, so a generator that waited
+	// for a response would never finish.
 	req := func(context.Context, *rand.Rand) (requestTiming, error) {
 		if calls.Add(1) == iterations {
 			close(release)
@@ -391,8 +387,7 @@ func TestScenarioChargesLateStart(t *testing.T) {
 	assert.Equal(t, late, res.startDelays[0], "the start delay is charged too")
 }
 
-// TestScenarioRejectsBadArguments: a bad rate, duration or warmup count is an
-// error.
+// TestScenarioRejectsBadArguments: a bad rate, duration or warmup is an error.
 func TestScenarioRejectsBadArguments(t *testing.T) {
 	clock := &fakeScenarioClock{}
 	_, err := runConstantArrivalRate(t.Context(), clock, 0, time.Second, 0, 1, okRequest)
@@ -423,9 +418,8 @@ func TestScenarioNegativeWarmup(t *testing.T) {
 	assert.Equal(t, 10, res.measured.started+res.measured.dropped)
 }
 
-// TestScenarioIterationCapRounds: the cap applies to the rounded count, so a
-// duration that rounds down to the cap passes and one that rounds above it
-// fails.
+// TestScenarioIterationCapRounds: the iteration cap applies to the rounded
+// count.
 func TestScenarioIterationCapRounds(t *testing.T) {
 	seconds := func(s float64) time.Duration { return time.Duration(s * float64(time.Second)) }
 
@@ -437,8 +431,8 @@ func TestScenarioIterationCapRounds(t *testing.T) {
 	require.ErrorContains(t, err, "more than 100000000 iterations")
 }
 
-// TestScenarioRejectsOutOfRangeArguments: a rate, duration or warmup count past
-// a Duration or iteration limit is an error with an empty result.
+// TestScenarioRejectsOutOfRangeArguments: an argument past a Duration or
+// iteration limit is an error with an empty result.
 func TestScenarioRejectsOutOfRangeArguments(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -468,8 +462,7 @@ func TestScenarioLowRate(t *testing.T) {
 	assert.Equal(t, 5, planned)
 }
 
-// TestScenarioNanosecondInterval: a rate that rounds to a 1ns interval plans
-// and runs one iteration.
+// TestScenarioNanosecondInterval: a rate that rounds to a 1ns interval works.
 func TestScenarioNanosecondInterval(t *testing.T) {
 	for _, rps := range []float64{math.Nextafter(1e9, 0), 1e9} {
 		t.Run(formatRPS(rps), func(t *testing.T) {
@@ -485,8 +478,8 @@ func TestScenarioNanosecondInterval(t *testing.T) {
 	}
 }
 
-// TestScenarioTimeWindows: elapsed is the larger of the schedule and the last
-// measured response, and overrun is elapsed minus the schedule.
+// TestScenarioTimeWindows: elapsed and overrun follow the last measured
+// response.
 func TestScenarioTimeWindows(t *testing.T) {
 	const interval = 10 * time.Millisecond
 	firstDue := time.Unix(1, 0)
@@ -517,7 +510,6 @@ func TestScenarioTimeWindows(t *testing.T) {
 					run.measured.started++
 				}
 			}
-			// Fill all slots so the remaining iterations are dropped.
 			for range maxConcurrent {
 				run.slots <- struct{}{}
 			}
@@ -535,8 +527,8 @@ func TestScenarioTimeWindows(t *testing.T) {
 	}
 }
 
-// TestScenarioWarmupDoesNotMoveElapsed: a warmup response after the last
-// measured response leaves elapsed and overrun unchanged.
+// TestScenarioWarmupDoesNotMoveElapsed: a late warmup response does not move
+// elapsed.
 func TestScenarioWarmupDoesNotMoveElapsed(t *testing.T) {
 	const interval = 10 * time.Millisecond
 	firstDue := time.Unix(1, 0)
@@ -552,8 +544,8 @@ func TestScenarioWarmupDoesNotMoveElapsed(t *testing.T) {
 	assert.Equal(t, 5*time.Millisecond, res.overrun)
 }
 
-// TestScenarioWarmupDrop: a warmup iteration reached while every slot is held
-// is dropped and counted in the warmup phase only.
+// TestScenarioWarmupDrop: a dropped warmup iteration counts in the warmup phase
+// only.
 func TestScenarioWarmupDrop(t *testing.T) {
 	run := newScenarioRun(&fakeScenarioClock{}, nil, 1, 100, 1)
 	for range maxConcurrent {
@@ -567,8 +559,8 @@ func TestScenarioWarmupDrop(t *testing.T) {
 	assert.Empty(t, run.startDelays)
 }
 
-// TestScenarioCancelDuringWarmup: a cancel before the first measured iteration
-// leaves the reached warmup iterations and no measured phase.
+// TestScenarioCancelDuringWarmup: a cancel during warmup leaves no measured
+// phase.
 func TestScenarioCancelDuringWarmup(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -584,8 +576,7 @@ func TestScenarioCancelDuringWarmup(t *testing.T) {
 }
 
 // TestScenarioAbsoluteDueTimes: iteration i is due at start + i×interval,
-// whatever the lateness of earlier iterations. Every request completes at the
-// final fake time, so each latency_from_due is that time minus its due time.
+// whatever the lateness of earlier iterations.
 func TestScenarioAbsoluteDueTimes(t *testing.T) {
 	const (
 		rps      = 1000
@@ -654,9 +645,8 @@ func cpuRequest(context.Context, *rand.Rand) (requestTiming, error) {
 	})
 }
 
-// TestTimerClock is a smoke test of the real clock: each latency_from_due is at
-// least its latency, and processCPU counts the requests' CPU time. Its bounds
-// are generous, so a busy machine does not fail it.
+// TestTimerClock is a smoke test of the real clock, with bounds loose enough
+// for a busy machine.
 func TestTimerClock(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()

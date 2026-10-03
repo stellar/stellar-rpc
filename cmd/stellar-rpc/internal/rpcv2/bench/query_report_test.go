@@ -38,8 +38,8 @@ func readCSVTable(t *testing.T, path string) ([]string, []map[string]string) {
 	return header, rows
 }
 
-// twoScenarioReport is a ledgers scenario and a txpage scenario with one drop
-// and one failure in each phase.
+// twoScenarioReport returns a clean ledgers scenario and a txpage scenario with
+// one drop and one failure in each phase.
 func twoScenarioReport() *queryReport {
 	var q queryReport
 	q.add(scenarioReport{
@@ -82,8 +82,8 @@ func twoScenarioReport() *queryReport {
 	return &q
 }
 
-// TestQueryReportLatencyRows: per scenario, latency and latency_from_due over
-// the succeeded requests, then start_delay; zero durations count.
+// TestQueryReportLatencyRows: latency.csv has the three metric rows of each
+// scenario.
 func TestQueryReportLatencyRows(t *testing.T) {
 	outDir := t.TempDir()
 	written, err := twoScenarioReport().write(outDir)
@@ -135,8 +135,7 @@ func TestQueryReportLatencyRows(t *testing.T) {
 	assert.Equal(t, "10000", txPageLatency["p50_ns"])
 }
 
-// TestQueryReportPercentileColumns: with 10 samples, p50, p90 and p99 differ
-// and each goes to its own column.
+// TestQueryReportPercentileColumns: each percentile goes to its own column.
 func TestQueryReportPercentileColumns(t *testing.T) {
 	timings := make([]requestTiming, 10)
 	for i := range timings {
@@ -175,8 +174,7 @@ func TestQueryReportPercentileColumns(t *testing.T) {
 	assert.Equal(t, []string{"15000000", "19000000", "20000000", "20000000"}, percentiles(rows[1]))
 }
 
-// TestQueryReportScenarioRows: scenarios.csv carries the counts, the rates
-// started / schedule and succeeded / elapsed, and the time windows.
+// TestQueryReportScenarioRows: scenarios.csv has one row per scenario.
 func TestQueryReportScenarioRows(t *testing.T) {
 	outDir := t.TempDir()
 	_, err := twoScenarioReport().write(outDir)
@@ -205,8 +203,7 @@ func TestQueryReportScenarioRows(t *testing.T) {
 	}, rows[1])
 }
 
-// TestQueryReportAddReleasesSamples: add keeps the scenario's counts and
-// aggregated rows, not its timings or start delays.
+// TestQueryReportAddReleasesSamples: add keeps no raw samples.
 func TestQueryReportAddReleasesSamples(t *testing.T) {
 	q := twoScenarioReport()
 	require.Len(t, q.scenarios, 2)
@@ -230,9 +227,8 @@ func TestQueryReportEmpty(t *testing.T) {
 	assert.Empty(t, entries)
 }
 
-// TestQueryReportAllDropped: a scenario with no successful request has a
-// start_delay row and no latency rows, its rates are zero where nothing started
-// or succeeded, and its summary line has no latency percentiles.
+// TestQueryReportAllDropped: a scenario with no started request reports no
+// latency.
 func TestQueryReportAllDropped(t *testing.T) {
 	var q queryReport
 	q.add(scenarioReport{
@@ -260,7 +256,7 @@ func TestQueryReportAllDropped(t *testing.T) {
 	assert.NotContains(t, output.String(), "p50=")
 }
 
-// capturingLogger returns an Info-level logger that writes into the buffer.
+// capturingLogger returns an Info-level logger and the buffer it writes to.
 func capturingLogger() (*supportlog.Entry, *bytes.Buffer) {
 	var output bytes.Buffer
 	logger := supportlog.New()
@@ -269,8 +265,8 @@ func capturingLogger() (*supportlog.Entry, *bytes.Buffer) {
 	return logger, &output
 }
 
-// TestQueryReportLogSummary: each scenario logs its counts and rates, and only
-// a phase with failed requests logs its first error.
+// TestQueryReportLogSummary: logSummary logs each scenario's counts and the
+// first error of each failed phase.
 func TestQueryReportLogSummary(t *testing.T) {
 	logger, output := capturingLogger()
 	twoScenarioReport().logSummary(logger)
