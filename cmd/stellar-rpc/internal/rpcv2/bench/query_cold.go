@@ -23,12 +23,13 @@ import (
 
 func newQueryColdCommand() *cobra.Command {
 	var (
-		qf         queryFlags
+		qf         = queryTierFlags(queryTierCold)
 		prof       profileFlags
 		startChunk uint32
 		numChunks  int
 		coldDir    string
 		catalogDir string
+		evict      bool
 	)
 	cmd := newBenchCommand(queryTierCold,
 		"Benchmark cold reads: queries served from a chunk range's frozen artifacts",
@@ -38,7 +39,10 @@ func newQueryColdCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			plan.Evict = evict
 			plan.Settings = env.Settings
+			env.Settings["pageCacheEviction"] = evictionState(evict)
+			env.Settings["cacheScenario"] = plan.cacheScenario()
 			return runQueryCold(ctx, logger, env, coldQueryOptions{
 				ColdRoot:   coldDir,
 				CatalogDir: catalogDir,
@@ -54,6 +58,8 @@ func newQueryColdCommand() *cobra.Command {
 		"root of the frozen artifact tree to query, as bench-ingest cold's --cold-out-dir laid it out (required)")
 	fs.StringVar(&catalogDir, "catalog-dir", "",
 		"base dir for the run's scratch catalog; default: --cold-dir")
+	fs.BoolVar(&evict, "evict-page-cache", true,
+		"request best-effort OS page-cache eviction of the dataset files before each scenario (Linux only)")
 	markRequired(cmd, "start-chunk", "cold-dir")
 	return cmd
 }
@@ -154,18 +160,52 @@ func openColdDataset(logger *supportlog.Entry, opts coldQueryOptions) (*queryDat
 		release()
 		return nil, nil, fmt.Errorf("seed close times: %w", err)
 	}
+	evictPaths, err := coldArtifactPaths(cat, layout, chunks)
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
 	ds := &queryDataset{
 		registry:    registry,
 		Passphrase:  opts.Plan.Passphrase,
 		Chunks:      chunks,
 		FirstLedger: opts.StartChunk.FirstLedger(),
 		LastLedger:  end.LastLedger(),
+		EvictPaths:  evictPaths,
 	}
 	if err := ds.verifyServes(opts.Plan.Types); err != nil {
 		release()
 		return nil, nil, err
 	}
 	return ds, release, nil
+}
+
+// coldArtifactPaths lists every file the chunks are served from: each chunk's
+// frozen artifacts and the frozen tx-hash window indexes, read off the catalog.
+func coldArtifactPaths(cat *catalog.Catalog, layout geometry.Layout, chunks []chunk.ID) ([]string, error) {
+	var paths []string
+	for _, c := range chunks {
+		for _, kind := range geometry.AllKinds() {
+			state, err := cat.State(c, kind)
+			if err != nil {
+				return nil, fmt.Errorf("read the state of chunk %s %s: %w", c, kind, err)
+			}
+			if state != geometry.StateFrozen {
+				continue
+			}
+			paths = append(paths, layout.ArtifactPaths(c, kind)...)
+		}
+	}
+	covs, err := cat.AllTxHashIndexKeys()
+	if err != nil {
+		return nil, fmt.Errorf("list tx-hash index coverages: %w", err)
+	}
+	for _, cov := range covs {
+		if cov.State == geometry.StateFrozen {
+			paths = append(paths, layout.TxHashIndexFilePath(cov))
+		}
+	}
+	return paths, nil
 }
 
 // freezeChunks runs the freeze bracket over each chunk for the artifact kinds

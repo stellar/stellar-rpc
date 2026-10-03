@@ -72,7 +72,7 @@ var (
 		"warmup_planned", "warmup_dropped", "warmup_failed",
 		"achieved_rps", "completion_rps",
 		"schedule_ns", "elapsed_ns", "overrun_ns",
-		"process_cpu_ns",
+		"process_cpu_ns", "page_cache_evict_ns",
 	}
 )
 
@@ -81,6 +81,12 @@ type scenarioReport struct {
 	queryType string
 	targetRPS float64
 	result    scenarioResult
+	// pageCacheEvict is the time of the eviction-request pass before the
+	// scenario.
+	pageCacheEvict time.Duration
+	// evicted is true when the pass advised at least one file. Otherwise
+	// scenarios.csv leaves page_cache_evict_ns empty.
+	evicted bool
 }
 
 // achievedRPS is started / schedule: the rate at which requests started.
@@ -207,6 +213,10 @@ func (q *queryReport) write(outDir string) ([]string, error) {
 	scenarios := make([][]string, 0, len(q.scenarios))
 	for _, sc := range q.scenarios {
 		res := sc.result
+		evict := ""
+		if sc.evicted {
+			evict = nanos(sc.pageCacheEvict)
+		}
 		scenarios = append(scenarios, []string{
 			sc.queryType, formatRPS(sc.targetRPS),
 			strconv.Itoa(res.planned), strconv.Itoa(res.measured.started), strconv.Itoa(res.measured.dropped),
@@ -215,7 +225,7 @@ func (q *queryReport) write(outDir string) ([]string, error) {
 			strconv.Itoa(res.warmup.dropped), strconv.Itoa(res.warmup.failed),
 			formatRPS(sc.achievedRPS()), formatRPS(sc.completionRPS()),
 			nanos(res.schedule), nanos(res.elapsed), nanos(res.overrun),
-			nanos(res.processCPU),
+			nanos(res.processCPU), evict,
 		})
 	}
 

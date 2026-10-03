@@ -18,8 +18,9 @@ import (
 // fakeScenarioClock is a scenarioClock that never sleeps. waitUntil(t) calls onWait
 // with the wait's index, when set, and then returns ctx.Err() if ctx is done.
 // Otherwise it moves the time to t plus lateness[index], when given; the time
-// never moves back.
+// never moves back. Each now call moves the time on by step.
 type fakeScenarioClock struct {
+	step     time.Duration
 	lateness []time.Duration
 	onWait   func(i int)
 
@@ -31,6 +32,7 @@ type fakeScenarioClock struct {
 func (c *fakeScenarioClock) now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.t = c.t.Add(c.step)
 	return c.t
 }
 
