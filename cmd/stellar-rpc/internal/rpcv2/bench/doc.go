@@ -15,5 +15,6 @@
 // as one scenario, through query.ReadView. It measures storage read paths, not
 // RPC handlers, response serialization or network work. Its open-loop load
 // generator, runConstantArrivalRate, starts requests on a fixed schedule, and
-// queryReport writes the results.
+// queryReport writes the results. README.md defines the terms and the
+// formulas.
 package bench
