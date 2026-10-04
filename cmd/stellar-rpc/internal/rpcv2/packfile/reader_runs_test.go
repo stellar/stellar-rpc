@@ -20,7 +20,7 @@ func writeSizedRecords(t *testing.T, sizes ...int) (string, [][]byte) {
 	for i, n := range sizes {
 		items[i] = bytes.Repeat([]byte{byte(i + 1)}, n)
 	}
-	return writeTestPackfile(t, items, WriterOptions{ItemsPerRecord: 1}), items
+	return writePackfile(t, WriterOptions{ItemsPerRecord: 1}, items), items
 }
 
 func logReads(t *testing.T, r *Reader) *readLog {
@@ -134,7 +134,7 @@ func TestReadItemsGapSplitsReads(t *testing.T) {
 // Positions in one record share its read, even past 256 KiB.
 func TestReadItemsRecordReadOnce(t *testing.T) {
 	items := makeItems(4, 100<<10)
-	path := writeTestPackfile(t, items, WriterOptions{ItemsPerRecord: 4})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 4}, items)
 	r := Open(path, ReaderOptions{Concurrency: 8})
 	defer r.Close()
 	log := logReads(t, r)
@@ -153,7 +153,7 @@ func TestReadsAcrossIndexGroups(t *testing.T) {
 	for i := range items {
 		items[i] = bytes.Repeat([]byte{byte(i)}, 900+i%201)
 	}
-	path := writeTestPackfile(t, items, WriterOptions{ItemsPerRecord: perRecord})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: perRecord}, items)
 
 	all := make([]int, len(items))
 	for i := range all {
