@@ -26,13 +26,10 @@ func buildPayload(items [][]byte) ([]byte, []uint32) {
 	return payload, sizes
 }
 
-// newTestRecord builds a record bound to a stub Reader configured for a
-// single chunk of n items (totalItems == itemsPerRecord == n, so the record
-// at index 0 contains all n items). The RecordDecoder lives on the stub
-// Reader, since records read it via r.reader.recordDecoder.
+// newTestRecord builds a record bound to a stub Reader with n items per record.
 func newTestRecord(n int, dec RecordDecoder) *record {
 	return &record{
-		reader: &Reader{totalItems: n, itemsPerRecord: n, recordDecoder: dec},
+		reader: &Reader{itemsPerRecord: n, recordDecoder: dec},
 	}
 }
 
@@ -59,7 +56,7 @@ func TestRecordWithDecoder(t *testing.T) {
 
 	rec := newTestRecord(len(entries), newXorDecoder())
 
-	if err := rec.decode(data, 0); err != nil {
+	if err := rec.decode(data, 0, len(entries)); err != nil {
 		t.Fatal(err)
 	}
 	for i, want := range entries {
@@ -78,7 +75,7 @@ func TestRecordPassthrough(t *testing.T) {
 
 	rec := newTestRecord(len(entries), nil)
 
-	if err := rec.decode(data, 0); err != nil {
+	if err := rec.decode(data, 0, len(entries)); err != nil {
 		t.Fatal(err)
 	}
 	for i, want := range entries {
@@ -98,7 +95,7 @@ func TestRecordWidenedChecksum(t *testing.T) {
 	rec := newTestRecord(len(entries), nil)
 	rec.reader.recordChecksum = true
 
-	if err := rec.decode(data, 0); err != nil {
+	if err := rec.decode(data, 0, len(entries)); err != nil {
 		t.Fatal(err)
 	}
 	if got := string(rec.item(0)); got != string(entries[0]) {
@@ -108,7 +105,7 @@ func TestRecordWidenedChecksum(t *testing.T) {
 	// The payload is inside the covered range now, so a flipped bit there is
 	// an error rather than a different item.
 	data[0] ^= 0x01
-	if err := rec.decode(data, 0); !errors.Is(err, ErrChecksum) {
+	if err := rec.decode(data, 0, len(entries)); !errors.Is(err, ErrChecksum) {
 		t.Errorf("decode of corrupted payload = %v, want ErrChecksum", err)
 	}
 }
@@ -123,7 +120,7 @@ func TestRecordNoForIndex(t *testing.T) {
 
 	rec := newTestRecord(1, newXorDecoder())
 
-	if err := rec.decode(encoded, 0); err != nil {
+	if err := rec.decode(encoded, 0, 1); err != nil {
 		t.Fatal(err)
 	}
 	if got := string(rec.item(0)); got != string(payload) {
@@ -137,7 +134,7 @@ func TestItemBoundsCheck(t *testing.T) {
 	data := buildRecordBytes(payload, sizes, false)
 
 	rec := newTestRecord(3, nil)
-	if err := rec.decode(data, 0); err != nil {
+	if err := rec.decode(data, 0, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -155,37 +152,6 @@ func assertPanics(t *testing.T, name string, f func()) {
 	f()
 }
 
-// --- Metadata tests ---
-
-func TestItemsInRecord(t *testing.T) {
-	tests := []struct {
-		name           string
-		total          int
-		itemsPerRecord int
-		recordIdx      int
-		want           int
-	}{
-		{"full block", 300, 128, 0, 128},
-		{"full block second", 300, 128, 1, 128},
-		{"partial last block", 300, 128, 2, 44},
-		{"exact multiple", 256, 128, 1, 128},
-		{"single record", 50, 128, 0, 50},
-		{"totalItems zero", 0, 128, 0, 0},
-		{"small itemsPerRecord", 10, 3, 0, 3},
-		{"small itemsPerRecord last", 10, 3, 3, 1},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rec := &record{reader: &Reader{totalItems: tt.total, itemsPerRecord: tt.itemsPerRecord}}
-			got := rec.itemsInRecord(tt.recordIdx)
-			if got != tt.want {
-				t.Errorf("itemsInRecord(%d, %d, %d) = %d, want %d",
-					tt.total, tt.itemsPerRecord, tt.recordIdx, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestRecordReuse(t *testing.T) {
 	// Decode a 5-item record, then decode a 2-item record on the same
 	// record. Verifies that stale state from the first decode (larger
@@ -200,7 +166,7 @@ func TestRecordReuse(t *testing.T) {
 
 	rec := newTestRecord(5, newXorDecoder())
 
-	if err := rec.decode(data1, 0); err != nil {
+	if err := rec.decode(data1, 0, 5); err != nil {
 		t.Fatal(err)
 	}
 	for i, want := range entries1 {
@@ -218,9 +184,8 @@ func TestRecordReuse(t *testing.T) {
 	}
 	data2 := buildRecordBytes(enc2, sizes2, false)
 
-	rec.reader.totalItems = 2
 	rec.reader.itemsPerRecord = 2
-	if err := rec.decode(data2, 0); err != nil {
+	if err := rec.decode(data2, 0, 2); err != nil {
 		t.Fatal(err)
 	}
 	for i, want := range entries2 {
@@ -231,16 +196,6 @@ func TestRecordReuse(t *testing.T) {
 
 	// Bounds check: Item(2) should panic after the second decode.
 	assertPanics(t, "Item(2) after shrink", func() { rec.item(2) })
-}
-
-func TestItemsInRecordPanics(t *testing.T) {
-	mk := func(total, perRec int) *record {
-		return &record{reader: &Reader{totalItems: total, itemsPerRecord: perRec}}
-	}
-	assertPanics(t, "itemsPerRecord=0", func() { mk(10, 0).itemsInRecord(0) })
-	assertPanics(t, "itemsPerRecord=-1", func() { mk(10, -1).itemsInRecord(0) })
-	assertPanics(t, "recordIdx=5", func() { mk(300, 128).itemsInRecord(5) })
-	assertPanics(t, "recordIdx=-1", func() { mk(300, 128).itemsInRecord(-1) })
 }
 
 // TestPassthroughDecodePreservesPayload pins that passthrough decode leaves
@@ -257,7 +212,7 @@ func TestPassthroughDecodePreservesPayload(t *testing.T) {
 	payload, sizes := buildPayload(entries)
 	data := buildRecordBytes(payload, sizes, false)
 
-	if err := rec.decode(data, 0); err != nil {
+	if err := rec.decode(data, 0, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -278,6 +233,7 @@ func TestPutRecordDropsCurrent(t *testing.T) {
 	rec.scratch = make([]byte, 4, 16)
 	rec.sizes = make([]uint32, 2, 8)
 	rec.offsets = make([]int, 3, 8)
+	rec.tab.n = groupSize
 
 	(&Reader{}).putRecord(rec)
 
@@ -300,5 +256,8 @@ func TestPutRecordDropsCurrent(t *testing.T) {
 	}
 	if rec.reader != nil {
 		t.Error("rec.reader should be cleared in putRecord")
+	}
+	if rec.tab.n != 0 {
+		t.Errorf("rec.tab should hold no group after putRecord; holds %d records", rec.tab.n)
 	}
 }

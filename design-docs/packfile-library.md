@@ -25,14 +25,14 @@ Record bytes are transformed on the way to and from disk by a **caller-supplied 
 
 The trailer carries a caller-assigned `Format uint32` field. Readers dispatch on `Format` to pick the matching decoder (and any other decode-side choice such as the content-hash extract — see [Codec Contract](#codec-contract)). The library does not interpret `Format` values.
 
-The file ends with a compact **offset index** that maps each record to its byte position on disk. When a file is opened, the offset index is loaded into memory. After that, looking up any item is a single read to fetch the record containing it — no further index I/O. This is how packfile achieves the "one I/O on open, one I/O per lookup" goal.
+The file ends with a compact **offset index** that maps each record to its byte position on disk. When a file is opened, the offset index is read into memory with the trailer, and a lookup decodes only the part of it that covers its record. After that, looking up any item is a single read to fetch the record containing it, with no further index I/O. This is how packfile achieves the "one I/O on open, one I/O per lookup" goal.
 
 `ItemsPerRecord` is the key configuration choice because it directly controls the size of the offset index:
 
 - A larger `ItemsPerRecord` (e.g. 128, the default) means fewer records, which means a smaller offset index. With compression enabled, it also gives the compressor more context, improving compression for small items. The cost is that reading one item requires reading and decoding its entire record, extracting the requested item, and discarding the rest.
 - `ItemsPerRecord=1` stores each item as its own record. The offset index is larger (one entry per item), but each read fetches exactly what's needed.
 
-The offset index has `ceil(totalItems / ItemsPerRecord)` entries, at most 4 bytes each but typically much less — the entries are compressed, so when records are similar in size each entry is closer to 1-2 bytes. Use `4 * ceil(totalItems / ItemsPerRecord)` as a conservative upper bound.
+The offset index has `ceil(totalItems / ItemsPerRecord)` entries, at most 4 bytes each but typically much less: the entries are compressed, so when records are similar in size each entry is closer to 1-2 bytes. Every 128 records also take a 17-byte directory entry. Use `4.2 * ceil(totalItems / ItemsPerRecord)` as a conservative upper bound.
 
 Choose `ItemsPerRecord` so the index fits within your I/O budget — for example, on storage where each I/O reads up to 256 KB, keep the index under 256 KB. You can check the actual index size of a written file via `Trailer().IndexSize`. See [Index Encoding](#index-encoding) for how the offset index is encoded.
 
@@ -394,6 +394,7 @@ Everything below is internal to the library. Callers don't need to know this —
 | **Payload** | The concatenated raw bytes of all items in a record, before the caller's encoder runs |
 | **Item size index** | FOR-encoded byte lengths appended to each multi-item record, so the reader can find individual items within the decoded payload |
 | **Offset index** | The file-level table at the end of the file mapping each record to its byte position on disk |
+| **Index group** | 128 consecutive records, indexed together: one FOR group of their byte sizes and one directory entry |
 | **FOR group** | A batch of integers (up to 128) encoded together using Frame of Reference compression |
 | **W** | Bit width needed to store the largest residual in a FOR group |
 | **min** | The smallest value in a FOR group, subtracted from all values before bit-packing |
@@ -409,7 +410,8 @@ Reads throughout this section use `pread` — positioned read at a specific file
 │ ...                              │
 │ record N-1                       │
 ├──────────────────────────────────┤  indexBase
-│ offset index                     │
+│ offset index: index groups       │
+│ group directory                  │
 │ CRC32C (4 bytes)                 │
 ├──────────────────────────────────┤  (optional)
 │ app data                         │
@@ -439,19 +441,29 @@ Width and minimum are always the final 5 bytes. For example, a group where all v
 
 ### Index Encoding
 
-The offset index maps record numbers to byte positions. Rather than storing absolute offsets (which grow with file size), the index stores **record byte sizes**. These are encoded using FOR in groups of 128.
+The offset index maps record numbers to byte positions. Rather than storing absolute offsets (which grow with file size), the index stores **record byte sizes**. These are encoded using FOR in **index groups** of 128 records, followed by a directory with one fixed-size entry per group:
+
+```
+groups      one FOR group of record sizes per index group, back to back
+directory   one 17-byte entry per index group:
+              u64 firstByte    file offset of the group's first record
+              u32 end          where the group's FOR group ends within the groups (group 0 starts at 0)
+              u32 firstItem    position of the group's first item
+              u8  flags        no flag is defined yet; a set bit is corrupt
+crc32c      u32 over the groups and the directory
+```
 
 A file with 20KB records uses ~15-bit values whether the file is 500MB or 50GB, because the values are record sizes, not file offsets.
 
-On open, all groups are decoded into a flat `[]int64` offset table. Resolving item `i`:
+On open, the reader checks the CRC and the directory and decodes no group. A read decodes the index group of each record it touches into its workspace, which keeps it until a lookup moves to another group. Resolving item `i`:
 
 ```
-recordIdx = i / ItemsPerRecord
-localIdx  = i % ItemsPerRecord
-offset    = offsets[recordIdx]
+group     = the last group whose firstItem is at most i (binary search over the directory)
+recordIdx = the last record of that group whose first item is at most i (binary search over the decoded group)
+offset    = firstByte[group] + the group's sizes before recordIdx, summed
 ```
 
-Each `ReadItem` is an array lookup + single disk read + decode.
+Each `ReadItem` is a group decode + single disk read + decode.
 
 The FOR group size for the offset index is 128 — a library constant, independent of `ItemsPerRecord` and of the caller-assigned `Format` value. The chosen value is recorded in the trailer's `indexForGroupSize` field; readers reject files whose recorded value doesn't match the library constant, so changing it would require bumping the on-disk `version` byte.
 
@@ -474,7 +486,7 @@ What that CRC32C covers is what `RecordChecksum` selects, and the trailer's `fla
 | `ChecksumNone` | the FOR group alone | after `DecodeGroup` reports the group's length |
 | `ChecksumCRC32C` | every preceding byte, payload included | before the FOR group is parsed |
 
-Widening costs a multi-item record nothing on disk, because the four bytes are already there. It also strengthens the ordering: the widened range follows from the record bounds in the offsets index, which `Open` has already verified, so nothing the record claims about itself selects the bytes being checked. The narrow form cannot be hoisted that way, since the FOR group's extent is only known after parsing it.
+Widening costs a multi-item record nothing on disk, because the four bytes are already there. It also strengthens the ordering: the widened range follows from the record bounds in the offset index, which the reader checked when it decoded the record's index group, so nothing the record claims about itself selects the bytes being checked. The narrow form cannot be hoisted that way, since the FOR group's extent is only known after parsing it.
 
 **Single-item records** (`ItemsPerRecord=1`): The item size index is omitted entirely — the item is the entire payload. These records carry no CRC32C unless `RecordChecksum` is set, in which case four bytes are appended.
 
@@ -519,17 +531,18 @@ Record 2: item 4 only (partial last record)
   on disk: [zstd(payload) ≈ 125 B] ≈ 125 B
   no item_sizes — single-item record
 
-Offset index stores record byte sizes: [191, 246, 125]
+Offset index stores record byte sizes: [191, 246, 125], one index group
   FOR group: min=125, residuals=[66, 121, 0], W=7
-  ceil(3×7/8)=3B packed + 1B W + 4B min + 4B CRC = 12 bytes
+  ceil(3×7/8)=3B packed + 1B W + 4B min = 8 bytes
+  + 17B directory entry + 4B CRC = 29 bytes
 
 File layout:
   0       Record 0  (≈ 191 B)
   191     Record 1  (≈ 246 B)
   437     Record 2  (≈ 125 B)
-  562     Offset index (12 B)
-  574     Trailer (76 B)
-  650     EOF
+  562     Offset index (29 B)
+  591     Trailer (76 B)
+  667     EOF
 ```
 
 **With `ItemsPerRecord=1`** (5 records, same items):
@@ -543,7 +556,8 @@ Record 4: [zstd(150 B)] ≈ 125 B
 
 Offset index stores: [100, 82, 165, 70, 125]
   FOR group: min=70, residuals=[30, 12, 95, 0, 55], W=7
-  ceil(5×7/8)=5B packed + 1B W + 4B min + 4B CRC = 14 bytes
+  ceil(5×7/8)=5B packed + 1B W + 4B min = 10 bytes
+  + 17B directory entry + 4B CRC = 31 bytes
 
 File layout:
   0       Record 0  (≈ 100 B)
@@ -551,9 +565,9 @@ File layout:
   182     Record 2  (≈ 165 B)
   347     Record 3  (≈ 70 B)
   417     Record 4  (≈ 125 B)
-  542     Offset index (14 B)
-  556     Trailer (76 B)
-  632     EOF
+  542     Offset index (31 B)
+  573     Trailer (76 B)
+  649     EOF
 ```
 
 Key difference: with `ItemsPerRecord=2`, each multi-item record carries an item size index so the reader can find individual items inside the decompressed payload. With `ItemsPerRecord=1`, that disappears entirely — each read fetches exactly one item, no slicing needed. The tradeoff is 5 index entries instead of 3.
@@ -587,7 +601,7 @@ The extract is useful when items as received aren't the canonical hash input (e.
 ```
 Offset  Size  Type      Field
 0       4     uint32    magic (0x48434C53, "SLCH" in on-disk byte order)
-4       1     uint8     version (1)
+4       1     uint8     version (2)
 5       1     uint8     flags
 6       2     —         reserved
 8       4     uint32    format (caller-assigned)
@@ -596,7 +610,7 @@ Offset  Size  Type      Field
 20      4     uint32    itemsPerRecord
 24      2     uint16    indexForGroupSize (FOR group size for offset index)
 26      2     —         reserved
-28      4     uint32    indexSize (offset index bytes + 4-byte CRC32C)
+28      4     uint32    indexSize (offset index bytes: groups, directory, 4-byte CRC32C)
 32      4     uint32    appDataSize (0 if none)
 36      32    [32]byte  contentHash (zeroed if flagContentHash not set)
 68      4     uint32    appDataCRC (CRC32C of the app data section)
@@ -613,13 +627,13 @@ The `Checksum` at offset 72 covers `trailer[0:72]`.
 
 ### Integrity
 
-**Index checksum:** CRC32C of the raw offset index bytes. Verified on open before decoding. After decoding, the reader also asserts that the running offset sum equals `indexBase` — an independent structural invariant that catches encode/decode logic bugs.
+**Index checksum:** CRC32C of the offset index's groups and directory, verified on open. Open also checks the directory: group ends ascend and fill the groups region, group first bytes ascend from 0 and stay within the records, first items step by `128 × itemsPerRecord`, and no flag is set. These keep each group's records inside the records region without decoding the other groups. A read checks a group when it decodes it: the sizes must sum to the next group's first byte, or to `indexBase` after the last group. A group that fails is `ErrCorrupt` for the reads that touch it.
 
 **Trailer checksum:** CRC32C of `trailer[0:72]` protects all structural fields, including `appDataCRC`.
 
 **App data checksum:** CRC32C of the app-data section, stored in the trailer and verified on open, unconditionally. The section is opaque to the library, so nothing here can check it structurally, and a consumer's own decoder cannot tell plausible corruption from real data. An artifact built before this fails to open and gets rebuilt.
 
-**Trailer validation:** On open: flags against `knownFlags`, `itemsPerRecord > 0`, `ceil(totalItems / itemsPerRecord) == recordCount`.
+**Trailer validation:** On open: flags against `knownFlags`, `itemsPerRecord > 0`, and `totalItems` against the directory, which lets only the pack's last record hold fewer than `itemsPerRecord` items.
 
 **Record checksum:** Each multi-item record carries a CRC32C in its last four bytes, verified on every record read, before the payload is passed to the decoder. `Verify` checks record CRCs only as a side effect of streaming the items for the content hash, and returns immediately when a file has no content hash; record CRCs are enforced on the read path, not by `Verify`. `WriterOptions.RecordChecksum` selects whether it covers the item size index alone or the whole record including the payload; the trailer records which. See [Records](#records).
 
@@ -627,7 +641,7 @@ The `Checksum` at offset 72 covers `trailer[0:72]`.
 
 ### Edge Cases
 
-**Last group:** If `recordCount` is not a multiple of 128, remaining residual slots in the last FOR group are zero-padded. The reader respects `recordCount` and never accesses padding.
+**Last group:** If `recordCount` is not a multiple of 128, the last index group holds the remaining records. Its FOR group encodes only their sizes, and its directory entry is like any other.
 
 **Last record:** If `totalItems` is not a multiple of `ItemsPerRecord`, the last record contains fewer items.
 
@@ -641,18 +655,18 @@ The `Checksum` at offset 72 covers `trailer[0:72]`.
 
 ### Read Path
 
-**Non-blocking Open.** `Open` returns a `*Reader` immediately. A background goroutine performs all I/O: open, stat, first read, trailer parse, CRC verification, index decode, app data read. A `sync.OnceValue` drains the result on the first query call. Errors are deferred to query time; `Open` itself never fails. This enables overlapped initialization: the caller can open multiple files or perform other setup while the goroutine runs.
+**Non-blocking Open.** `Open` returns a `*Reader` immediately. A background goroutine performs all I/O: open, stat, first read, trailer parse, one more read when the tail is larger than the first, app data and index CRCs, directory check. A `sync.OnceValue` drains the result on the first query call. Errors are deferred to query time; `Open` itself never fails. This enables overlapped initialization: the caller can open multiple files or perform other setup while the goroutine runs.
 
-**First Read.** On open, one pread of the last `FirstRead(fileSize)` bytes (256 KiB when `FirstRead` is nil), clamped to [trailer size, file size]. If the index, app data and trailer fit, nothing else is read. Otherwise one more read fetches only the bytes in front of the first read.
+**First Read.** On open, one pread of the last `FirstRead(fileSize)` bytes (256 KiB when `FirstRead` is nil), clamped to [trailer size, file size]. If the index, app data and trailer fit, nothing else is read. Otherwise one more read fetches only the bytes in front of the first read, into a buffer of the tail's size. The Reader keeps the index and app data in that buffer, or in a copy of the tail when the first read covered it, so a large first read is not kept for a small tail.
 
-**Index Decode OOM Guard.** Before decoding the offset index, validates that `recordCount` is plausible given `indexSize`. Each FOR group of up to 128 records requires at least 6 bytes. This prevents crafted trailers from causing huge allocations.
+**Index Groups on Demand.** Open decodes no index group and allocates nothing sized by the trailer's counts: a trailer claiming more groups than the directory holds fails one length check. Each read decodes the groups it touches into the workspace's group table, which holds one group at a time.
 
 **ReadItem.** Given `ReadItem(42, fn)` on a file with `ItemsPerRecord=128`:
 
-1. Record number = `42 / 128 = 0`, local position = `42 % 128 = 42`
-2. Look up record 0's byte offset from the in-memory offset table (array access)
+1. A binary search over the directory's `firstItem` finds index group 0; decode that group's record sizes into the workspace
+2. A binary search over the decoded group's first items finds record 0, local position 42; look up its byte range (array access)
 3. One `pread` fetches the entire record from disk
-4. Decode: verify the record CRC32C, strip the item size index (multi-item records only), then run the caller's `RecordDecoder` on the payload (or alias verbatim in passthrough mode). With `flagRecordChecksum` set the CRC is checked first, over a range the offsets index already fixed; otherwise it is checked against the FOR group after that group is parsed.
+4. Decode: verify the record CRC32C, strip the item size index (multi-item records only), then run the caller's `RecordDecoder` on the payload (or alias verbatim in passthrough mode). With `flagRecordChecksum` set the CRC is checked first, over a range the offset index already fixed; otherwise it is checked against the FOR group after that group is parsed.
 5. Extract item 42 from the decoded payload, pass to `fn`
 
 All of steps 2-5 are a single I/O operation. A `*record` workspace is borrowed from a package-level pool and returned after the callback.
@@ -665,9 +679,9 @@ All of steps 2-5 are a single I/O operation. A `*record` workspace is borrowed f
 
 **Decoder Lifecycle.** `RecordDecoder` is a single concurrent-safe instance supplied by the caller via `ReaderOptions.RecordDecoder` and reused across every read on every Reader. `*zstd.Decompressor` pools `ZSTD_DCtx` instances internally with finalizers, so one decompressor per process amortizes context construction across all packfiles. `Reader.Close` does not touch the decoder.
 
-**Workspace Pool.** A package-level `sync.Pool` of `*record` workspaces (scratch buffers, sizes, offsets — no resources requiring explicit cleanup). Workspaces are reused across Readers; GC reclaims them when the pool drains naturally.
+**Workspace Pool.** A package-level `sync.Pool` of `*record` workspaces (scratch buffers, sizes, offsets, a decoded index group; no resources requiring explicit cleanup). Workspaces are reused across Readers; GC reclaims them when the pool drains naturally.
 
-**Concurrency.** Safe for concurrent use after `Open`. The offset table and metadata are immutable. All read methods use stateless `ReadAt` (pread) with pooled resources.
+**Concurrency.** Safe for concurrent use after `Open`. The index bytes and metadata are immutable; each read decodes index groups into its own workspace. All read methods use stateless `ReadAt` (pread) with pooled resources.
 
 ### Write Path
 
