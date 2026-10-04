@@ -1134,10 +1134,9 @@ func TestReadLoansAreClipped(t *testing.T) {
 }
 
 // TestOpenRejectsItemsWithoutItemsPerRecord pins the guard against a trailer
-// that claims items but no itemsPerRecord. Before the guard, such a file passed
-// Open and the first read indexed past the offsets slice and panicked, so this
-// asserts the failure is an ordinary ErrCorrupt and that nothing panics on the
-// way there. recordCount is zero, so a guard gated on it alone would not fire.
+// that claims items but no itemsPerRecord: the failure is an ordinary
+// ErrCorrupt, and nothing panics on the way there. recordCount is zero, so a
+// guard gated on it alone would not fire.
 func TestOpenRejectsItemsWithoutItemsPerRecord(t *testing.T) {
 	path := writeTestPackfile(t, nil, WriterOptions{ItemsPerRecord: 4})
 

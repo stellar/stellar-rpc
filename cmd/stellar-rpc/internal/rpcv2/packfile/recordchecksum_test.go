@@ -162,11 +162,16 @@ func TestRecordChecksumVerifiesBeforeParsing(t *testing.T) {
 			if err := r.waitOpen(); err != nil {
 				t.Fatal(err)
 			}
-			recordLen := int(r.offsets[1] - r.offsets[0])
+			var tab groupTable
+			s, err := tab.record(r.idx, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recordLen := int(s.end - s.start)
 			_ = r.Close()
 
 			corrupt := corruptAt(t, path, false, flipForWidth(recordLen))
-			err := readAllItems(t, corrupt, nil)
+			err = readAllItems(t, corrupt, nil)
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("read record with corrupt FOR width: got %v, want %v", err, tc.wantErr)
 			}

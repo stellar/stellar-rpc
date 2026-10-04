@@ -8,14 +8,14 @@ import (
 // record is the per-call processing workspace pulled from
 // recordWorkspacePool. It carries scratch buffers and the decoded item-size
 // state needed to slice individual items out of one record's bytes. The
-// reader back-pointer gives access to file-level metadata (totalItems,
-// itemsPerRecord, recordDecoder) without copying those fields per call.
+// reader back-pointer gives access to file-level metadata (itemsPerRecord,
+// recordChecksum, recordDecoder) without copying those fields per call.
 //
 // A *record holds no resources requiring explicit cleanup; putRecord
 // resets the slices to length zero (preserving capacity for reuse) and
 // returns the workspace to the pool.
 type record struct {
-	reader  *Reader // for totalItems / itemsPerRecord / recordDecoder
+	reader  *Reader // for itemsPerRecord / recordChecksum / recordDecoder
 	scratch []byte  // raw read buffer (record bytes from disk)
 	// payload is the record's owned output buffer for encoder mode (when
 	// recordDecoder != nil). Its capacity is preserved across pool cycles
@@ -28,39 +28,12 @@ type record struct {
 	current []byte
 	sizes   []uint32
 	offsets []int // prefix sum: offsets[i] = byte offset of item i within the record
-}
-
-// itemsInRecord returns the number of items in the record at recordIdx.
-// Handles the last (potentially partial) record. Returns 0 when the
-// packfile is empty (totalItems == 0), regardless of recordIdx. Panics
-// if itemsPerRecord <= 0 or, when totalItems > 0, if recordIdx is out
-// of range.
-func (r *record) itemsInRecord(recordIdx int) int {
-	total := r.reader.totalItems
-	perRec := r.reader.itemsPerRecord
-	if total == 0 {
-		return 0
-	}
-	if perRec <= 0 {
-		panic(fmt.Sprintf("packfile: record.itemsInRecord itemsPerRecord must be > 0, got %d", perRec))
-	}
-	recordCount := (total + perRec - 1) / perRec
-	if recordIdx < 0 || recordIdx >= recordCount {
-		panic(fmt.Sprintf("packfile: record.itemsInRecord recordIdx %d out of range [0, %d)", recordIdx, recordCount))
-	}
-	last := recordCount - 1
-	if recordIdx < last {
-		return perRec
-	}
-	rem := total % perRec
-	if rem == 0 {
-		return perRec
-	}
-	return rem
+	tab     groupTable
 }
 
 // decode populates this record's per-item state from one record's on-disk
-// bytes. After decode succeeds, item(i) returns the i-th item's bytes.
+// bytes, which hold n items. After decode succeeds, item(i) returns the i-th
+// item's bytes.
 //
 // On disk a multi-item record is [payload][forIndex][4B crc32c] where payload
 // is the (possibly encoded) record bytes and forIndex is [packed][1B W][4B
@@ -77,8 +50,7 @@ func (r *record) itemsInRecord(recordIdx int) int {
 // stays owned and untouched); r.item's "valid until next decode" contract
 // is preserved because every read path decodes from r.scratch and does not
 // reuse it before the next iteration finishes.
-func (r *record) decode(data []byte, recordIdx int) error {
-	n := r.itemsInRecord(recordIdx)
+func (r *record) decode(data []byte, recordIdx, n int) error {
 	itemsPerRecord := r.reader.itemsPerRecord
 	recordChecksum := r.reader.recordChecksum
 
