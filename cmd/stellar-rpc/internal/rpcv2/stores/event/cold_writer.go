@@ -94,6 +94,7 @@ func NewColdWriter(chunkID chunk.ID, bucketDir string, opts ColdWriterOptions) (
 	pw, err := packfile.Create(path, packfile.WriterOptions{
 		Format:           eventsPackFormat,
 		ItemsPerRecord:   eventsPackItemsPerRecord,
+		MaxRecordBytes:   eventsPackMaxRecordBytes,
 		NewRecordEncoder: newEventsPackEncoder,
 		// Items reach AppendItem in canonical (uncompressed) payload form, so
 		// the content hash is independent of the zstd encoder version.
