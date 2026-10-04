@@ -243,13 +243,9 @@ func TestItemsInRecordPanics(t *testing.T) {
 	assertPanics(t, "recordIdx=-1", func() { mk(300, 128).itemsInRecord(-1) })
 }
 
-// TestPassthroughDecodePreservesPayload pins the alias-safety invariant:
-// passthrough decode (recordDecoder == nil) must NOT touch rec.payload.
-// payload is the owned buffer reserved for encoder mode's cap reuse; if a
-// future change writes the aliased input into payload, the buffer escapes
-// past the read call (via the workspace pool) and a subsequent encoder
-// decode would grow into a returned-to-pool buffer — see the alias-bug
-// commit and the comment above record.decode.
+// TestPassthroughDecodePreservesPayload pins that passthrough decode leaves
+// rec.payload alone: a payload sharing scratch's array would make a later
+// encoder decode write its output over its own input.
 func TestPassthroughDecodePreservesPayload(t *testing.T) {
 	rec := newTestRecord(3, nil) // nil decoder = passthrough
 	// Pre-allocate payload with a known capacity (simulating a previous
@@ -275,11 +271,6 @@ func TestPassthroughDecodePreservesPayload(t *testing.T) {
 	}
 }
 
-// TestPutRecordDropsCurrent pins the other half of the alias-safety
-// invariant: putRecord must clear rec.current so any passthrough alias
-// does not outlive the read call. If the next borrower of this workspace
-// reads rec.current before its own decode runs, it would see stale bytes
-// pointing into a buffer that has been returned to readBufPool.
 func TestPutRecordDropsCurrent(t *testing.T) {
 	rec := &record{}
 	rec.current = make([]byte, 32) // simulates a passthrough alias

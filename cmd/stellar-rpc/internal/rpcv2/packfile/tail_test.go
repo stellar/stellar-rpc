@@ -3,6 +3,7 @@ package packfile
 import (
 	"encoding/binary"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -10,14 +11,17 @@ import (
 )
 
 type readLog struct {
-	*os.File
+	readAtCloser
 
+	mu    sync.Mutex
 	reads [][2]int64
 }
 
 func (l *readLog) ReadAt(p []byte, off int64) (int, error) {
+	l.mu.Lock()
 	l.reads = append(l.reads, [2]int64{off, int64(len(p))})
-	return l.File.ReadAt(p, off)
+	l.mu.Unlock()
+	return l.readAtCloser.ReadAt(p, off)
 }
 
 func TestOpenFirstRead(t *testing.T) {
@@ -34,7 +38,7 @@ func TestOpenFirstRead(t *testing.T) {
 		f, err := os.Open(path)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = f.Close() })
-		log := &readLog{File: f}
+		log := &readLog{readAtCloser: f}
 		res := openFile(log, fileSize, firstRead)
 		return res, log.reads
 	}

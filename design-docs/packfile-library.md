@@ -105,7 +105,7 @@ Safe to break early. The yielded slice is invalidated once the loop exits (break
 
 ### Reading: Multiple Items
 
-`ReadItems` is like `ReadItem` but fetches many items at once. With `Concurrency > 1`, batches are read in parallel and the callback runs concurrently from multiple goroutines. You pass the positions of the items you want (strictly sorted, no duplicates) — `idx` tells you which element in your positions slice the data corresponds to:
+`ReadItems` is like `ReadItem` but fetches many items at once. With `Concurrency > 1`, its reads run in parallel and the callback runs concurrently from multiple goroutines. You pass the positions of the items you want (strictly sorted, no duplicates); `idx` tells you which element in your positions slice the data corresponds to:
 
 ```go
 r := packfile.Open("output.pack", packfile.ReaderOptions{
@@ -279,11 +279,9 @@ type ReaderOptions struct {
     // transformation or the recomputed digest will not match the stored one.
     ContentHashExtract func(item []byte) ([]byte, error)
 
-    // Concurrency sets the max parallel goroutines for ReadItems. Zero
-    // normalizes to 1 (serial). Negative values are rejected (deferred error
-    // surfaced by the first read call). ReadItems still coalesces consecutive
-    // records into single ReadAt calls even when serial; concurrency only
-    // controls fan-out across I/O batches.
+    // Concurrency is the most reads ReadItems keeps in flight; it does not
+    // change which reads it makes. Zero means 1, on the calling goroutine. A
+    // negative value is an error, returned by the first read call.
     Concurrency int
 
     // FirstRead sizes Open's first read from the end of the file, given the
@@ -329,14 +327,14 @@ func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error]
 // fn receives the index in the positions slice and a borrowed data slice
 // valid only for the duration of the call — copy if needed.
 //
-// With Concurrency > 1 and more than one I/O batch, fn is called
-// concurrently from multiple goroutines in arbitrary order; with a single
-// batch (or Concurrency == 1), calls are serial and in order. Context
-// cancellation is checked at batch boundaries, not between items inside a
-// batch, so fn may continue to be called for the remaining items of an
-// in-flight batch after the context is canceled. ReadItems is not atomic
-// on error: if fn returns an error or the context is canceled, fn may
-// have already run for some positions and not others.
+// With Concurrency > 1 and more than one read, fn is called concurrently
+// from multiple goroutines in arbitrary order; with a single read (or
+// Concurrency == 1), calls are serial and in order. Context cancellation is
+// checked between reads, not between items inside a read, so fn may
+// continue to be called for the remaining items of an in-flight read after
+// the context is canceled. ReadItems is not atomic on error: if fn returns
+// an error or the context is canceled, fn may have already run for some
+// positions and not others.
 //
 // positions must be strictly sorted (ascending, no duplicates); an empty
 // slice is valid and returns nil immediately. Returns ErrPositionOutOfRange
@@ -659,9 +657,11 @@ The `Checksum` at offset 72 covers `trailer[0:72]`.
 
 All of steps 2-5 are a single I/O operation. A `*record` workspace is borrowed from a package-level pool and returned after the callback.
 
-**ReadRange.** Coalesces consecutive records that fit in a pooled 1 MiB buffer into single `ReadAt` calls. Oversized records (> 1 MiB) get one-off allocations.
+**Merged Reads.** ReadRange and ReadItems merge adjacent records, by size alone, into one `ReadAt` of up to 256 KiB, read into the workspace's scratch buffer. A larger record is read alone.
 
-**ReadItems.** Single-pass partition of sorted positions into I/O batches (consecutive records ≤ 1 MiB). With `Concurrency == 1`, batches are processed serially in the calling goroutine — no goroutine spawn, no errgroup overhead. With `Concurrency > 1`, an `errgroup.WithContext` drives up to `Concurrency` workers; each worker claims batches via an atomic counter, reads with a single `ReadAt`, decodes, and calls `fn(idx, data)`. The derived context propagates cancellation; the first non-nil error wins.
+**ReadRange.** Makes its reads one at a time, in order. Nothing is read ahead of the consumer.
+
+**ReadItems.** Single-pass partition of sorted positions into reads. With `Concurrency == 1` or a single read, the reads are processed serially in the calling goroutine (no goroutine spawn, no errgroup overhead). Otherwise an `errgroup.WithContext` drives up to `Concurrency` workers; each worker claims reads via an atomic counter, decodes, and calls `fn(idx, data)`. The derived context propagates cancellation; the first non-nil error wins.
 
 **Decoder Lifecycle.** `RecordDecoder` is a single concurrent-safe instance supplied by the caller via `ReaderOptions.RecordDecoder` and reused across every read on every Reader. `*zstd.Decompressor` pools `ZSTD_DCtx` instances internally with finalizers, so one decompressor per process amortizes context construction across all packfiles. `Reader.Close` does not touch the decoder.
 
