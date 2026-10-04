@@ -1,6 +1,7 @@
 package packfile
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,8 +15,8 @@ import (
 )
 
 const (
-	readBufSize         = 1 << 20    // 1 MiB pooled coalesced-read buffer
-	speculativeReadSize = 256 * 1024 // 256 KiB tail prefetch on Open
+	readBufSize      = 1 << 20 // 1 MiB pooled coalesced-read buffer
+	defaultFirstRead = 256 << 10
 )
 
 // Reader-side errors that come from trailer parsing on Open. All three
@@ -89,6 +90,11 @@ type ReaderOptions struct {
 	// surfaced by the first read call). Callers who want parallel
 	// scattered I/O must set this explicitly to a value > 1.
 	Concurrency int
+
+	// FirstRead sizes Open's first read from the end of the file, given the
+	// file size; nil means 256 KiB. Results are clamped to [trailer size,
+	// file size]; a tail that does not fit takes one more read for the rest.
+	FirstRead func(fileSize int64) int
 }
 
 // openResult is the transient result produced by doOpen and consumed once
@@ -187,7 +193,7 @@ func Open(path string, opts ReaderOptions) *Reader {
 	r.concurrency = max(opts.Concurrency, 1)
 
 	r.waitOpen = sync.OnceValue(func() error {
-		res := doOpen(path)
+		res := doOpen(path, opts.FirstRead)
 		if res.err != nil {
 			return res.err
 		}
@@ -208,39 +214,40 @@ func Open(path string, opts ReaderOptions) *Reader {
 
 // doOpen performs all synchronous I/O for opening a packfile.
 // On error it closes the file and returns openResult{err: ...}.
-//
-//nolint:cyclop,nestif,funlen // step-by-step open flow; splitting hurts readability
-func doOpen(path string) openResult {
+func doOpen(path string, firstRead func(int64) int) openResult {
 	f, err := os.Open(path)
 	if err != nil {
 		return openResult{err: fmt.Errorf("packfile: open %q: %w", path, err)}
 	}
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = f.Close()
-		}
-	}()
-
 	fi, err := f.Stat()
 	if err != nil {
+		_ = f.Close()
 		return openResult{err: fmt.Errorf("packfile: stat: %w", err)}
 	}
-	fileSize := fi.Size()
+	res := openFile(f, fi.Size(), firstRead)
+	if res.err != nil {
+		_ = f.Close()
+	}
+	return res
+}
 
+//nolint:cyclop // step-by-step open flow; splitting hurts readability
+func openFile(f readAtCloser, fileSize int64, firstRead func(int64) int) openResult {
 	if fileSize < trailerSize {
 		return openResult{err: ErrSize}
 	}
 
-	// Speculative read: last min(speculativeReadSize, fileSize) bytes.
-	speculativeSize := min(int64(speculativeReadSize), fileSize)
-	speculativeOff := fileSize - speculativeSize
-	speculativeBuf := make([]byte, speculativeSize)
-	if _, err := f.ReadAt(speculativeBuf, speculativeOff); err != nil {
+	first := int64(defaultFirstRead)
+	if firstRead != nil {
+		first = int64(firstRead(fileSize))
+	}
+	first = min(max(first, trailerSize), fileSize)
+	tail := make([]byte, first)
+	if _, err := f.ReadAt(tail, fileSize-first); err != nil {
 		return openResult{err: fmt.Errorf("packfile: read trailer region: %w", err)}
 	}
 
-	trailer, err := unmarshalTrailer(speculativeBuf)
+	trailer, err := unmarshalTrailer(tail)
 	if err != nil {
 		return openResult{err: err}
 	}
@@ -253,39 +260,25 @@ func doOpen(path string) openResult {
 	indexSize := int(trailer.IndexSize)
 	appDataSize := int(trailer.AppDataSize)
 
-	indexBase := fileSize - int64(trailerSize) - int64(appDataSize) - int64(indexSize)
+	tailSize := int64(indexSize) + int64(appDataSize) + int64(trailerSize)
+	indexBase := fileSize - tailSize
 	if indexBase < 0 {
 		return openResult{err: ErrSize}
 	}
-
-	tailSize := int64(indexSize) + int64(appDataSize) + int64(trailerSize)
-	var indexBuf []byte
-	var appData []byte
-
-	if tailSize <= speculativeSize {
-		// Index + appData are already inside the speculative read.
-		tailStart := len(speculativeBuf) - int(tailSize)
-		indexBuf = make([]byte, indexSize)
-		copy(indexBuf, speculativeBuf[tailStart:tailStart+indexSize])
-		if appDataSize > 0 {
-			appData = make([]byte, appDataSize)
-			adStart := tailStart + indexSize
-			copy(appData, speculativeBuf[adStart:adStart+appDataSize])
-		}
+	if tailSize <= first {
+		tail = tail[first-tailSize:]
 	} else {
-		// Single fallback read for index + appData.
-		readSize := indexSize + appDataSize
-		buf := make([]byte, readSize)
-		if readSize > 0 {
-			if _, err := f.ReadAt(buf, indexBase); err != nil {
-				return openResult{err: fmt.Errorf("packfile: read index region: %w", err)}
-			}
+		full := make([]byte, tailSize)
+		copy(full[tailSize-first:], tail)
+		if _, err := f.ReadAt(full[:tailSize-first], indexBase); err != nil {
+			return openResult{err: fmt.Errorf("packfile: read index region: %w", err)}
 		}
-		indexBuf = buf[:indexSize]
-		if appDataSize > 0 {
-			appData = make([]byte, appDataSize)
-			copy(appData, buf[indexSize:indexSize+appDataSize])
-		}
+		tail = full
+	}
+	indexBuf := tail[:indexSize]
+	var appData []byte
+	if appDataSize > 0 {
+		appData = bytes.Clone(tail[indexSize : indexSize+appDataSize])
 	}
 
 	// App data is CRC-covered like the index and the trailer. It has to be:
@@ -330,7 +323,7 @@ func doOpen(path string) openResult {
 		internalItemsPerRecord = 1
 	}
 
-	res := openResult{
+	return openResult{
 		file:           f,
 		trailer:        trailer,
 		offsets:        offsets,
@@ -338,9 +331,6 @@ func doOpen(path string) openResult {
 		totalItems:     totalItems,
 		itemsPerRecord: internalItemsPerRecord,
 	}
-
-	cleanup = false
-	return res
 }
 
 // getRecord borrows a workspace from the process-wide pool and binds this
