@@ -72,11 +72,11 @@ func BenchmarkReader(b *testing.B) {
 	for _, c := range codecs {
 		b.Run(c.name, func(b *testing.B) {
 			items := makeItems(nItems, itemSize)
-			path := writeTestPackfile(b, items, WriterOptions{
+			path := writePackfile(b, WriterOptions{
 				Format:           Format(1),
 				NewRecordEncoder: c.newEncoder,
 				ItemsPerRecord:   itemsPerRecord,
-			})
+			}, items)
 			fixtureBytes := int64(itemSize) * int64(nItems)
 
 			b.Run("ReadItem", func(b *testing.B) {

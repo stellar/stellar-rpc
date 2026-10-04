@@ -17,18 +17,6 @@ import (
 
 // --- helpers ----------------------------------------------------------------
 
-// writeTestPackfile is a reader-test convenience over writePackfile that
-// defaults ItemsPerRecord to 1 (simplest layout) when the caller leaves it
-// unset. Reader tests typically don't care about record packing; writer
-// tests do, so they call writePackfile directly.
-func writeTestPackfile(tb testing.TB, items [][]byte, opts WriterOptions) string {
-	tb.Helper()
-	if opts.ItemsPerRecord == 0 {
-		opts.ItemsPerRecord = 1
-	}
-	return writePackfile(tb, opts, items)
-}
-
 func makeItems(n, size int) [][]byte {
 	items := make([][]byte, n)
 	for i := range items {
@@ -68,7 +56,7 @@ var allCodecs = []recordCodec{
 
 func TestRoundTrip(t *testing.T) {
 	items := makeItems(500, 1024)
-	path := writeTestPackfile(t, items, WriterOptions{})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 1}, items)
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
@@ -89,7 +77,7 @@ func TestRoundTrip(t *testing.T) {
 }
 
 func TestEmptyFile(t *testing.T) {
-	path := writeTestPackfile(t, nil, WriterOptions{})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 1}, nil)
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
@@ -110,7 +98,7 @@ func TestEmptyFile(t *testing.T) {
 
 func TestSingleItem(t *testing.T) {
 	items := makeItems(1, 256)
-	path := writeTestPackfile(t, items, WriterOptions{})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 1}, items)
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
@@ -134,7 +122,7 @@ func TestSingleItem(t *testing.T) {
 func TestItemsPerRecord1NoTrailingWaste(t *testing.T) {
 	const itemSize = 256
 	items := makeItems(10, itemSize)
-	path := writeTestPackfile(t, items, WriterOptions{ItemsPerRecord: 1})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 1}, items)
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
@@ -166,7 +154,7 @@ func TestItemsPerRecord1NoTrailingWaste(t *testing.T) {
 
 func TestMultiItemRecords(t *testing.T) {
 	items := makeItems(300, 512)
-	path := writeTestPackfile(t, items, WriterOptions{ItemsPerRecord: 128})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 128}, items)
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
@@ -189,7 +177,7 @@ func TestMultiItemRecords(t *testing.T) {
 //nolint:cyclop // four sub-cases (full / partial / break / empty) inline for readability
 func TestReadRange(t *testing.T) {
 	items := makeItems(50, 2048)
-	path := writeTestPackfile(t, items, WriterOptions{ItemsPerRecord: 10})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 10}, items)
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
@@ -254,7 +242,7 @@ func TestReadRange(t *testing.T) {
 
 func TestReadItems(t *testing.T) {
 	items := makeItems(300, 512)
-	path := writeTestPackfile(t, items, WriterOptions{ItemsPerRecord: 128})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 128}, items)
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
@@ -277,7 +265,7 @@ func TestReadItems(t *testing.T) {
 
 func TestReadItemsDuplicates(t *testing.T) {
 	items := makeItems(100, 100)
-	path := writeTestPackfile(t, items, WriterOptions{ItemsPerRecord: 128})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 128}, items)
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
@@ -290,7 +278,7 @@ func TestReadItemsDuplicates(t *testing.T) {
 
 func TestReadItemsUnsorted(t *testing.T) {
 	items := makeItems(300, 100)
-	path := writeTestPackfile(t, items, WriterOptions{ItemsPerRecord: 128})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 128}, items)
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
@@ -303,7 +291,7 @@ func TestReadItemsUnsorted(t *testing.T) {
 
 func TestReadItemsOutOfRange(t *testing.T) {
 	items := makeItems(10, 100)
-	path := writeTestPackfile(t, items, WriterOptions{})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 1}, items)
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
@@ -316,7 +304,7 @@ func TestReadItemsOutOfRange(t *testing.T) {
 
 func TestReadItemsEmpty(t *testing.T) {
 	items := makeItems(10, 100)
-	path := writeTestPackfile(t, items, WriterOptions{})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 1}, items)
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
@@ -361,7 +349,7 @@ func corruptAt(t *testing.T, srcPath string, recomputeTrailerCRC bool, mutate fu
 
 func TestIndexIntegrity(t *testing.T) {
 	items := makeItems(10, 100)
-	path := writeTestPackfile(t, items, WriterOptions{})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 1}, items)
 
 	corruptPath := corruptAt(t, path, false, func(data []byte) {
 		trailerStart := len(data) - trailerSize
@@ -383,7 +371,7 @@ func TestIndexIntegrity(t *testing.T) {
 
 func TestTrailerIntegrity(t *testing.T) {
 	items := makeItems(10, 100)
-	path := writeTestPackfile(t, items, WriterOptions{})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 1}, items)
 
 	// Magic bytes corrupted, CRC NOT recomputed — exercises the magic check.
 	corruptPath := corruptAt(t, path, false, func(data []byte) {
@@ -429,7 +417,7 @@ func TestOpenBadPath(t *testing.T) {
 
 func TestConcurrentReads(t *testing.T) {
 	items := makeItems(100, 512)
-	path := writeTestPackfile(t, items, WriterOptions{ItemsPerRecord: 128})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 128}, items)
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
@@ -467,7 +455,7 @@ func TestConcurrentReads(t *testing.T) {
 
 func TestCloseBeforeRead(t *testing.T) {
 	items := makeItems(5, 100)
-	path := writeTestPackfile(t, items, WriterOptions{})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 1}, items)
 
 	r := Open(path, ReaderOptions{})
 	if err := r.Close(); err != nil {
@@ -477,7 +465,7 @@ func TestCloseBeforeRead(t *testing.T) {
 
 func TestDoubleClose(t *testing.T) {
 	items := makeItems(5, 100)
-	path := writeTestPackfile(t, items, WriterOptions{})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 1}, items)
 
 	r := Open(path, ReaderOptions{})
 	err1 := r.Close()
@@ -494,7 +482,7 @@ func TestDoubleClose(t *testing.T) {
 
 func TestReadItemOutOfRange(t *testing.T) {
 	items := makeItems(5, 100)
-	path := writeTestPackfile(t, items, WriterOptions{})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 1}, items)
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
@@ -509,7 +497,7 @@ func TestReadItemOutOfRange(t *testing.T) {
 
 func TestReadRangeOutOfRange(t *testing.T) {
 	items := makeItems(5, 100)
-	path := writeTestPackfile(t, items, WriterOptions{})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 1}, items)
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
@@ -542,7 +530,7 @@ func TestReadRangeOutOfRange(t *testing.T) {
 
 func TestContentHashRoundTrip(t *testing.T) {
 	items := makeItems(500, 200)
-	path := writeTestPackfile(t, items, WriterOptions{ContentHash: true})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 1, ContentHash: true}, items)
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
@@ -577,10 +565,11 @@ func TestContentHashExtractVerifyRoundTrip(t *testing.T) {
 	for i, item := range items {
 		xorItems[i], _ = xorCompress(item)
 	}
-	path := writeTestPackfile(t, xorItems, WriterOptions{
+	path := writePackfile(t, WriterOptions{
+		ItemsPerRecord:     1,
 		ContentHash:        true,
 		ContentHashExtract: xorCompress,
-	})
+	}, xorItems)
 
 	r := Open(path, ReaderOptions{ContentHashExtract: xorCompress})
 	defer r.Close()
@@ -592,8 +581,8 @@ func TestContentHashExtractVerifyRoundTrip(t *testing.T) {
 
 func TestContentHashDeterministic(t *testing.T) {
 	items := makeItems(500, 200)
-	path1 := writeTestPackfile(t, items, WriterOptions{ContentHash: true})
-	path2 := writeTestPackfile(t, items, WriterOptions{ContentHash: true})
+	path1 := writePackfile(t, WriterOptions{ItemsPerRecord: 1, ContentHash: true}, items)
+	path2 := writePackfile(t, WriterOptions{ItemsPerRecord: 1, ContentHash: true}, items)
 
 	r1 := Open(path1, ReaderOptions{})
 	defer r1.Close()
@@ -615,7 +604,7 @@ func TestContentHashDeterministic(t *testing.T) {
 
 func TestContentHashDisabled(t *testing.T) {
 	items := makeItems(100, 200)
-	path := writeTestPackfile(t, items, WriterOptions{})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 1}, items)
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
@@ -635,7 +624,7 @@ func TestContentHashDisabled(t *testing.T) {
 
 func TestContentHashCorruption(t *testing.T) {
 	items := makeItems(200, 200)
-	path := writeTestPackfile(t, items, WriterOptions{ContentHash: true})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 1, ContentHash: true}, items)
 
 	r := Open(path, ReaderOptions{})
 	if err := r.Verify(context.Background()); err != nil {
@@ -664,8 +653,8 @@ func TestContentHashCorruption(t *testing.T) {
 func TestContentHashWithConcurrency(t *testing.T) {
 	items := makeItems(500, 200)
 
-	serialPath := writeTestPackfile(t, items, WriterOptions{ContentHash: true})
-	parallelPath := writeTestPackfile(t, items, WriterOptions{ContentHash: true, Concurrency: 4})
+	serialPath := writePackfile(t, WriterOptions{ItemsPerRecord: 1, ContentHash: true}, items)
+	parallelPath := writePackfile(t, WriterOptions{ItemsPerRecord: 1, ContentHash: true, Concurrency: 4}, items)
 
 	r1 := Open(serialPath, ReaderOptions{})
 	defer r1.Close()
@@ -689,15 +678,15 @@ func TestContentHashWithConcurrency(t *testing.T) {
 	}
 }
 
-func TestContentHashNonDefaultItemsPerRecord(t *testing.T) {
+func TestContentHashItemsPerRecord(t *testing.T) {
 	items := makeItems(500, 200)
 
 	for _, itemsPerRecord := range []int{64, 256, 500} {
 		t.Run(fmt.Sprintf("ItemsPerRecord=%d", itemsPerRecord), func(t *testing.T) {
-			path := writeTestPackfile(t, items, WriterOptions{
+			path := writePackfile(t, WriterOptions{
 				ItemsPerRecord: itemsPerRecord,
 				ContentHash:    true,
-			})
+			}, items)
 
 			r := Open(path, ReaderOptions{})
 			defer r.Close()
@@ -724,7 +713,7 @@ func TestContentHashNonDefaultItemsPerRecord(t *testing.T) {
 
 func TestTrailer(t *testing.T) {
 	items := makeItems(5, 100)
-	path := writeTestPackfile(t, items, WriterOptions{Format: 42})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 1, Format: 42}, items)
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
@@ -833,7 +822,7 @@ func TestAppDataCorruption(t *testing.T) {
 
 func TestAppDataEmpty(t *testing.T) {
 	items := makeItems(5, 100)
-	path := writeTestPackfile(t, items, WriterOptions{})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 1}, items)
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
@@ -867,7 +856,7 @@ func TestWriterReaderMatrix(t *testing.T) {
 							ContentHash:      hash,
 							ItemsPerRecord:   rs,
 						}
-						path := writeTestPackfile(t, items, wopts)
+						path := writePackfile(t, wopts, items)
 
 						r := Open(path, ReaderOptions{RecordDecoder: codec.decoder})
 						defer r.Close()
@@ -925,7 +914,7 @@ func TestContentHashCrossCodec(t *testing.T) {
 				ContentHash:      true,
 				ItemsPerRecord:   128,
 			}
-			path := writeTestPackfile(t, items, opts)
+			path := writePackfile(t, opts, items)
 			r := Open(path, ReaderOptions{RecordDecoder: codec.decoder})
 			h, ok, err := r.ContentHash()
 			r.Close()
@@ -960,7 +949,7 @@ func TestRecordWorkerRaceStress(t *testing.T) {
 					ContentHash:      true,
 					ItemsPerRecord:   rs,
 				}
-				path := writeTestPackfile(t, items, opts)
+				path := writePackfile(t, opts, items)
 
 				r := Open(path, ReaderOptions{RecordDecoder: codec.decoder})
 				defer r.Close()
@@ -988,7 +977,7 @@ func TestRecordWorkerRaceStress(t *testing.T) {
 // path rather than the CRC path.
 func TestUnknownTrailerFlagsRejected(t *testing.T) {
 	items := makeItems(5, 100)
-	path := writeTestPackfile(t, items, WriterOptions{})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 1}, items)
 
 	corruptPath := corruptAt(t, path, true, func(data []byte) {
 		data[len(data)-trailerSize+tOffFlags] |= 0x80
@@ -1007,7 +996,7 @@ func TestUnknownTrailerFlagsRejected(t *testing.T) {
 // and surfaced through waitOpen).
 func TestReaderConcurrencyNegativeRejected(t *testing.T) {
 	items := makeItems(5, 100)
-	path := writeTestPackfile(t, items, WriterOptions{})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 1}, items)
 
 	r := Open(path, ReaderOptions{Concurrency: -1})
 	defer r.Close()
@@ -1048,13 +1037,13 @@ func TestCloseAfterFailedOpen(t *testing.T) {
 // TestPassthroughDecodePreservesPayload and TestPutRecordDropsCurrent.
 func TestWorkspaceSharedAcrossDecoderModes(t *testing.T) {
 	itemsA := makeItems(100, 256)
-	pathA := writeTestPackfile(t, itemsA, WriterOptions{ItemsPerRecord: 32}) // passthrough
+	pathA := writePackfile(t, WriterOptions{ItemsPerRecord: 32}, itemsA) // passthrough
 
 	itemsB := makeItems(100, 256)
-	pathB := writeTestPackfile(t, itemsB, WriterOptions{
+	pathB := writePackfile(t, WriterOptions{
 		NewRecordEncoder: newXorEncoder,
 		ItemsPerRecord:   32,
-	})
+	}, itemsB)
 
 	decB := newXorDecoder()
 
@@ -1089,7 +1078,7 @@ func TestReadLoansAreClipped(t *testing.T) {
 	for i := range want {
 		want[i] = bytes.Repeat([]byte{byte('a' + i)}, 32+i)
 	}
-	path := writeTestPackfile(t, want, WriterOptions{ItemsPerRecord: 4})
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 4}, want)
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
@@ -1130,47 +1119,5 @@ func TestReadLoansAreClipped(t *testing.T) {
 		if got := readItemCopy(t, r, i); !bytes.Equal(want[i], got) {
 			t.Errorf("item %d corrupted by a neighbor's append", i)
 		}
-	}
-}
-
-// TestOpenRejectsItemsWithoutItemsPerRecord pins the guard against a trailer
-// that claims items but no itemsPerRecord: the failure is an ordinary
-// ErrCorrupt, and nothing panics on the way there. recordCount is zero, so a
-// guard gated on it alone would not fire.
-func TestOpenRejectsItemsWithoutItemsPerRecord(t *testing.T) {
-	path := writeTestPackfile(t, nil, WriterOptions{ItemsPerRecord: 4})
-
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tr := b[len(b)-trailerSize:]
-	binary.LittleEndian.PutUint32(tr[tOffTotalItems:], 8)
-	binary.LittleEndian.PutUint32(tr[tOffItemsPerRecord:], 0)
-	// Re-seal so the trailer's own CRC agrees and the guard, not the checksum,
-	// is what rejects the file.
-	binary.LittleEndian.PutUint32(tr[tOffCRC:], crc32c(tr[:trailerCRCEnd]))
-	if werr := os.WriteFile(path, b, 0o600); werr != nil {
-		t.Fatal(werr)
-	}
-
-	r := Open(path, ReaderOptions{})
-	defer r.Close()
-
-	// Must not panic: a crafted trailer is corrupt input, not a bug.
-	_, err = r.TotalItems()
-	if !errors.Is(err, ErrCorrupt) {
-		t.Fatalf("TotalItems on a trailer claiming items with itemsPerRecord=0: got %v, want ErrCorrupt", err)
-	}
-	// Pin the guard itself: several later checks also reject this file, so a
-	// bare ErrCorrupt assertion would survive the guard's removal.
-	if !strings.Contains(err.Error(), "invalid itemsPerRecord") {
-		t.Fatalf("got %v, want the itemsPerRecord guard to be what rejects it", err)
-	}
-	for _, rerr := range r.ReadRange(0, 8) {
-		if !errors.Is(rerr, ErrCorrupt) {
-			t.Fatalf("ReadRange: got %v, want ErrCorrupt", rerr)
-		}
-		break
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -41,6 +42,18 @@ func variedOffsets(records int) []int64 {
 	return offsets
 }
 
+func fullCounts(records, perRecord int) []uint32 {
+	return slices.Repeat([]uint32{uint32(perRecord)}, records)
+}
+
+func itemCount(counts []uint32) int {
+	n := 0
+	for _, c := range counts {
+		n += int(c)
+	}
+	return n
+}
+
 func TestIndexRoundTrip(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -65,10 +78,10 @@ func TestIndexRoundTrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			encoded, err := encodeIndex(tt.offsets, 4)
+			records := len(tt.offsets) - 1
+			encoded, err := encodeIndex(tt.offsets, fullCounts(records, 4), 4)
 			require.NoError(t, err)
 
-			records := len(tt.offsets) - 1
 			decoded, err := decodeOffsets(encoded, records, 4*records, 4, tt.offsets[records])
 			require.NoError(t, err)
 			require.Equal(t, tt.offsets, decoded)
@@ -77,7 +90,7 @@ func TestIndexRoundTrip(t *testing.T) {
 }
 
 func TestIndexCRCCorruption(t *testing.T) {
-	encoded, err := encodeIndex([]int64{0, 1000, 2000, 3000}, 1)
+	encoded, err := encodeIndex([]int64{0, 1000, 2000, 3000}, fullCounts(3, 1), 1)
 	require.NoError(t, err)
 
 	// Corrupt a byte in the payload (before the CRC).
@@ -88,7 +101,7 @@ func TestIndexCRCCorruption(t *testing.T) {
 }
 
 func TestIndexCorruptCRCBytes(t *testing.T) {
-	encoded, err := encodeIndex([]int64{0, 1000, 2000, 3000}, 1)
+	encoded, err := encodeIndex([]int64{0, 1000, 2000, 3000}, fullCounts(3, 1), 1)
 	require.NoError(t, err)
 
 	// Corrupt the CRC itself.
@@ -106,7 +119,7 @@ func TestIndexTooSmall(t *testing.T) {
 // A trailer claiming more groups than the directory holds fails before any
 // allocation sized by its claim.
 func TestIndexImplausibleRecordCount(t *testing.T) {
-	encoded, err := encodeIndex([]int64{0, 10}, 1)
+	encoded, err := encodeIndex([]int64{0, 10}, fullCounts(1, 1), 1)
 	require.NoError(t, err)
 
 	_, err = parseIndex(encoded, 1<<20, 1<<20, 1, 10)
@@ -116,7 +129,7 @@ func TestIndexImplausibleRecordCount(t *testing.T) {
 
 // A wrong end of the records passes Open and fails the group's decode.
 func TestIndexBaseMismatch(t *testing.T) {
-	encoded, err := encodeIndex([]int64{0, 1000, 2000, 3000}, 1)
+	encoded, err := encodeIndex([]int64{0, 1000, 2000, 3000}, fullCounts(3, 1), 1)
 	require.NoError(t, err)
 
 	x, err := parseIndex(encoded, 3, 3, 1, 9999)
@@ -131,7 +144,7 @@ func TestIndexDirectoryChecks(t *testing.T) {
 	records := len(offsets) - 1
 	items := records*perRecord - 1
 	dataEnd := offsets[records]
-	section, err := encodeIndex(offsets, perRecord)
+	section, err := encodeIndex(offsets, fullCounts(records, perRecord), perRecord)
 	require.NoError(t, err)
 	x, err := parseIndex(section, records, items, perRecord, dataEnd)
 	require.NoError(t, err)
@@ -147,13 +160,15 @@ func TestIndexDirectoryChecks(t *testing.T) {
 		name   string
 		mutate func([]byte)
 	}{
-		{"flag set", func(s []byte) { s[field(1, dirFlags)] = 0x01 }},
+		{"unknown flag", func(s []byte) { s[field(1, dirFlags)] = 0x02 }},
+		{"group 0 past item 0", put32(field(0, dirFirstItem), 1)},
 		{"wrong first item", put32(field(1, dirFirstItem), groupSize*perRecord+1)},
 		{"group 0 past byte 0", put64(field(0, dirFirstByte), 1)},
 		{"group before its predecessor", put64(field(2, dirFirstByte), offsets[groupSize]-1)},
 		{"group past the records", put64(field(2, dirFirstByte), dataEnd+1)},
 		{"group shorter than a column", put32(field(1, dirEnd), x.groupEnd(0)+minColumnLen-1)},
 		{"groups short of the region", put32(field(2, dirEnd), x.groupEnd(2)-1)},
+		{"group short of its records", put32(field(2, dirFirstItem), 2*groupSize*perRecord-1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := bytes.Clone(section)
@@ -178,7 +193,7 @@ func TestIndexDirectoryChecks(t *testing.T) {
 	})
 
 	t.Run("empty", func(t *testing.T) {
-		empty, err := encodeIndex([]int64{0}, perRecord)
+		empty, err := encodeIndex([]int64{0}, nil, perRecord)
 		require.NoError(t, err)
 		_, err = parseIndex(empty, 0, 1, perRecord, 0)
 		require.ErrorIs(t, err, ErrCorrupt)
@@ -187,30 +202,122 @@ func TestIndexDirectoryChecks(t *testing.T) {
 	})
 }
 
+// Counts that break the item limit or the directory fail at open or at decode.
+func TestIndexCountChecks(t *testing.T) {
+	records := 3 * groupSize
+	offsets := variedOffsets(records)
+	dataEnd := offsets[records]
+	counts := func(perRecord int, set map[int]uint32) []uint32 {
+		c := fullCounts(records, perRecord)
+		for rec, n := range set {
+			c[rec] = n
+		}
+		return c
+	}
+	uneven := make([]uint32, records)
+	for i := range uneven {
+		uneven[i] = uint32(1 + i%3)
+	}
+	dir := func(s []byte, g, off int) int { return len(s) - 4 - (3-g)*dirEntryLen + off }
+	setFlags := func(g int, flags byte) func([]byte) {
+		return func(s []byte) { s[dir(s, g, 16)] = flags }
+	}
+	shiftFirstItem := func(g, delta int) func([]byte) {
+		return func(s []byte) {
+			at := dir(s, g, 12)
+			binary.LittleEndian.PutUint32(s[at:], uint32(int(binary.LittleEndian.Uint32(s[at:]))+delta))
+		}
+	}
+	shortLast := counts(2, map[int]uint32{2*groupSize + 5: 1}) // only group 2 has counts
+
+	for _, tc := range []struct {
+		name      string
+		perRecord int
+		counts    []uint32
+		mutate    func([]byte) // applied under a recomputed CRC
+		extra     int          // items the trailer claims beyond the counts
+		badGroup  int          // -1: Open fails; otherwise only loading this group fails
+	}{
+		{"counts with one item per record", 1, counts(1, nil), setFlags(1, groupHasCounts), 0, -1},
+		{"no counts without an item limit", 0, uneven, setFlags(1, 0), 0, -1},
+		{"counted group short of an item per record", 2, shortLast, nil, -groupSize, -1},
+		{"counted group over the item limit", 2, shortLast, nil, 2, -1},
+		{"uncounted group after a counted one", 2, counts(2, map[int]uint32{5: 1}), shiftFirstItem(2, 1), 0, -1},
+		{"zero count", 2, counts(2, map[int]uint32{groupSize + 3: 0}), nil, 0, 1},
+		{"count over the item limit", 2, counts(2, map[int]uint32{groupSize + 3: 3, groupSize + 4: 1}), nil, 0, 1},
+		{"counts short of the next group", 2, shortLast, nil, 1, 2},
+		{"flag without a count column", 2, counts(2, nil), setFlags(0, groupHasCounts), 0, 0},
+		{"uncounted last group after a counted one", 2, counts(2, map[int]uint32{groupSize + 3: 1}), setFlags(2, 0), 0, -1},
+		{"count column without the flag", 2, shortLast, setFlags(2, 0), 0, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			section, err := encodeIndex(offsets, tc.counts, tc.perRecord)
+			require.NoError(t, err)
+			if tc.mutate != nil {
+				tc.mutate(section)
+				reseal(section)
+			}
+			x, err := parseIndex(section, records, itemCount(tc.counts)+tc.extra, tc.perRecord, dataEnd)
+			if tc.badGroup < 0 {
+				require.ErrorIs(t, err, ErrCorrupt)
+				require.NotErrorIs(t, err, ErrChecksum)
+				return
+			}
+			require.NoError(t, err)
+			var tab groupTable
+			for g := range x.groupCount {
+				if err := tab.load(x, g); g == tc.badGroup {
+					require.ErrorIs(t, err, ErrCorrupt, "group %d", g)
+				} else {
+					require.NoError(t, err, "group %d", g)
+				}
+			}
+		})
+	}
+}
+
 // Bit flips under a valid CRC either decode or fail with ErrCorrupt.
 func TestIndexMutationsNeverPanic(t *testing.T) {
-	const perRecord = 3
-	offsets := variedOffsets(groupSize + 3)
-	records := len(offsets) - 1
+	records := groupSize + 3
+	offsets := variedOffsets(records)
 	dataEnd := offsets[records]
-	encoded, err := encodeIndex(offsets, perRecord)
-	require.NoError(t, err)
-	for i := range len(encoded) - 4 {
-		for _, bit := range []byte{0x01, 0x80} {
-			mutated := bytes.Clone(encoded)
-			mutated[i] ^= bit
-			reseal(mutated)
-			if _, err := decodeOffsets(mutated, records, perRecord*records, perRecord, dataEnd); err != nil {
-				require.ErrorIs(t, err, ErrCorrupt, "byte %d bit %#x", i, bit)
+	short := fullCounts(records, 3)
+	short[5], short[groupSize+1] = 1, 2
+	uneven := make([]uint32, records)
+	for i := range uneven {
+		uneven[i] = uint32(1 + i%4)
+	}
+	for _, tc := range []struct {
+		name      string
+		perRecord int
+		counts    []uint32
+	}{
+		{"full records", 3, fullCounts(records, 3)},
+		{"short records", 3, short},
+		{"no item limit", 0, uneven},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			items := itemCount(tc.counts)
+			encoded, err := encodeIndex(offsets, tc.counts, tc.perRecord)
+			require.NoError(t, err)
+			for i := range len(encoded) - 4 {
+				for _, bit := range []byte{0x01, 0x80} {
+					mutated := bytes.Clone(encoded)
+					mutated[i] ^= bit
+					reseal(mutated)
+					if _, err := decodeOffsets(mutated, records, items, tc.perRecord, dataEnd); err != nil {
+						require.ErrorIs(t, err, ErrCorrupt, "byte %d bit %#x", i, bit)
+					}
+				}
 			}
-		}
+		})
 	}
 }
 
 // A pack whose group 1 cannot decode opens, and only reads of that group fail.
 func TestIndexOpenDecodesNothing(t *testing.T) {
 	items := makeItems(2*groupSize+1, 8)
-	path := writeTestPackfile(t, items, WriterOptions{}) // one item per record
+	path := writePackfile(t, WriterOptions{ItemsPerRecord: 1}, items)
 	corrupt := corruptAt(t, path, false, func(data []byte) {
 		tr, err := unmarshalTrailer(data)
 		require.NoError(t, err)
@@ -234,22 +341,22 @@ func TestIndexOpenDecodesNothing(t *testing.T) {
 }
 
 func TestIndexEncodeEmptyOffsets(t *testing.T) {
-	_, err := encodeIndex([]int64{}, 1)
+	_, err := encodeIndex([]int64{}, nil, 1)
 	require.Error(t, err)
 }
 
 func TestIndexEncodeNonZeroStart(t *testing.T) {
-	_, err := encodeIndex([]int64{100, 200}, 1)
+	_, err := encodeIndex([]int64{100, 200}, fullCounts(1, 1), 1)
 	require.Error(t, err)
 }
 
 func TestIndexNonMonotonicOffsets(t *testing.T) {
-	_, err := encodeIndex([]int64{0, 1000, 500}, 1)
+	_, err := encodeIndex([]int64{0, 1000, 500}, fullCounts(2, 1), 1)
 	require.Error(t, err)
 }
 
 func TestIndexZeroRecords(t *testing.T) {
-	encoded, err := encodeIndex([]int64{0}, 128)
+	encoded, err := encodeIndex([]int64{0}, nil, 128)
 	require.NoError(t, err)
 	require.Len(t, encoded, 4)
 
@@ -259,7 +366,7 @@ func TestIndexZeroRecords(t *testing.T) {
 }
 
 func TestIndexDeltaExceedsUint32(t *testing.T) {
-	_, err := encodeIndex([]int64{0, math.MaxUint32 + 1}, 1)
+	_, err := encodeIndex([]int64{0, math.MaxUint32 + 1}, fullCounts(1, 1), 1)
 	require.Error(t, err)
 }
 
@@ -267,7 +374,7 @@ func TestIndexLargeDelta(t *testing.T) {
 	// Delta near MaxUint32 exercises width=32 in the FOR encoder.
 	offsets := []int64{0, math.MaxUint32}
 
-	encoded, err := encodeIndex(offsets, 1)
+	encoded, err := encodeIndex(offsets, fullCounts(1, 1), 1)
 	require.NoError(t, err)
 
 	decoded, err := decodeOffsets(encoded, 1, 1, 1, math.MaxUint32)
