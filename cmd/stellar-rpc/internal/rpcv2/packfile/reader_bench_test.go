@@ -62,8 +62,7 @@ func BenchmarkReader(b *testing.B) {
 			})
 
 			// 1000 scattered positions evenly spread across the file, crossing
-			// many record boundaries. Serial path exercises the batched-coalesce
-			// loop; the concurrent path partitions work across workers.
+			// many record boundaries.
 			const npos = 1000
 			positions := make([]int, npos)
 			stride := nItems / npos
