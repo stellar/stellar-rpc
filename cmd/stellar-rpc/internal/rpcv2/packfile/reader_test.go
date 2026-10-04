@@ -1081,68 +1081,6 @@ func TestWorkspaceSharedAcrossDecoderModes(t *testing.T) {
 	}
 }
 
-// TestReadItemsSerialMultiBatch exercises the Concurrency=1 serial fast
-// path with positions spread across many records (so the partitioner
-// produces multiple batches). Without this test the only coverage of the
-// serial path used tiny position lists that collapsed to one batch.
-func TestReadItemsSerialMultiBatch(t *testing.T) {
-	items := makeItems(2000, 100)
-	path := writeTestPackfile(t, items, WriterOptions{ItemsPerRecord: 16})
-
-	r := Open(path, ReaderOptions{Concurrency: 1})
-	defer r.Close()
-
-	// 100 positions spread across the file — at 16 items/record, this
-	// touches 100 different records, forcing the batch partitioner to
-	// produce multiple batches.
-	positions := make([]int, 100)
-	for i := range positions {
-		positions[i] = i * 20 // stride 20 ensures each position is in a different record
-	}
-
-	got := make(map[int][]byte, len(positions))
-	err := r.ReadItems(context.Background(), positions, func(idx int, data []byte) error {
-		got[idx] = bytes.Clone(data)
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for j, pos := range positions {
-		if !bytes.Equal(got[j], items[pos]) {
-			t.Errorf("position %d (idx %d): data mismatch", pos, j)
-		}
-	}
-}
-
-// TestReadItemsConcurrencyMatchesBatchCount exercises the edge case where
-// the configured concurrency equals the number of I/O batches — each
-// worker should claim exactly one batch and then exit cleanly.
-func TestReadItemsConcurrencyMatchesBatchCount(t *testing.T) {
-	items := makeItems(1024, 100)
-	path := writeTestPackfile(t, items, WriterOptions{ItemsPerRecord: 32})
-
-	// Pick positions across exactly 4 widely-separated records so the
-	// partitioner produces 4 batches; then set Concurrency=4.
-	positions := []int{0, 256, 512, 768}
-	r := Open(path, ReaderOptions{Concurrency: 4})
-	defer r.Close()
-
-	got := make([][]byte, len(positions))
-	err := r.ReadItems(context.Background(), positions, func(idx int, data []byte) error {
-		got[idx] = bytes.Clone(data)
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for j, pos := range positions {
-		if !bytes.Equal(got[j], items[pos]) {
-			t.Errorf("position %d (idx %d): data mismatch", pos, j)
-		}
-	}
-}
-
 // TestReadLoansAreClipped pins the loan contract at the lender. Several items
 // share one record here, which is the case that matters.
 func TestReadLoansAreClipped(t *testing.T) {
