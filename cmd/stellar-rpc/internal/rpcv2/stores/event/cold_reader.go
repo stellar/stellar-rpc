@@ -603,7 +603,7 @@ func (c *ColdReader) loadMeta(eventsPath string) (coldMeta, error) {
 	if err != nil {
 		return coldMeta{}, fmt.Errorf("events: read app data from %s: %w", eventsPath, err)
 	}
-	offsets, err := DecodeLedgerOffsets(appData)
+	offsets, err := decodeLedgerOffsets(appData)
 	if err != nil {
 		return coldMeta{}, fmt.Errorf("events: decode offsets from %s: %w", eventsPath, err)
 	}
