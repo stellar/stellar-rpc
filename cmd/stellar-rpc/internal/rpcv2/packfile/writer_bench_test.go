@@ -42,6 +42,7 @@ func BenchmarkWriter(b *testing.B) {
 	zstdOpts := func(conc int, hash bool) WriterOptions {
 		return WriterOptions{
 			Format:           benchFmt,
+			ItemsPerRecord:   128,
 			NewRecordEncoder: newZstdBenchEncoder,
 			Concurrency:      conc,
 			ContentHash:      hash,
@@ -58,8 +59,8 @@ func BenchmarkWriter(b *testing.B) {
 		{"c8_compressed", zstdOpts(8, false)},
 		{"c8_compressed_hash", zstdOpts(8, true)},
 		// Passthrough — no caller encoder, items stored as-is.
-		{"serial_passthrough", WriterOptions{Format: benchFmt}},
-		{"serial_passthrough_hash", WriterOptions{Format: benchFmt, ContentHash: true}},
+		{"serial_passthrough", WriterOptions{Format: benchFmt, ItemsPerRecord: 128}},
+		{"serial_passthrough_hash", WriterOptions{Format: benchFmt, ItemsPerRecord: 128, ContentHash: true}},
 	}
 
 	for _, cfg := range configs {
