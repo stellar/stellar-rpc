@@ -2,8 +2,10 @@ package event
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,6 +15,8 @@ import (
 
 	"github.com/stellar/streamhash"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/intpack"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
@@ -21,32 +25,32 @@ import (
 // LedgerOffsets app-data wire-format tests.
 // ──────────────────────────────────────────────────────────────────
 
+func buildLedgerOffsets(tb testing.TB, startLedger uint32, counts []uint32) *LedgerOffsets {
+	tb.Helper()
+	o := NewLedgerOffsets(startLedger)
+	for i, count := range counts {
+		require.NoError(tb, o.Append(startLedger+uint32(i), count))
+	}
+	return o
+}
+
 func TestLedgerOffsets_EncodeDecodeRoundTrip(t *testing.T) {
-	o := NewLedgerOffsets(50_002)
-	require.NoError(t, o.Append(50_002, 3))
-	require.NoError(t, o.Append(50_003, 0)) // empty ledger
-	require.NoError(t, o.Append(50_004, 7))
+	// An eventless group, a group with one busy ledger, and a short group.
+	counts := make([]uint32, 2*ledgerOffsetsGroupSize+44)
+	for i := ledgerOffsetsGroupSize; i < len(counts); i++ {
+		if i%10 != 0 {
+			counts[i] = uint32(900 + i%300)
+		}
+	}
+	counts[200] = 100_000
+	o := buildLedgerOffsets(t, 50_002, counts)
 
-	bytes, err := encodeLedgerOffsets(o)
+	data, err := encodeLedgerOffsets(o)
 	require.NoError(t, err)
-	// Header (9 bytes) + 3 ledgers × 4 bytes.
-	assert.Len(t, bytes, ledgerOffsetsHeaderLen+3*4)
-	assert.Equal(t, LedgerOffsetsFormatVersion, bytes[0])
-
-	decoded, err := DecodeLedgerOffsets(bytes)
+	decoded, err := decodeLedgerOffsets(data)
 	require.NoError(t, err)
 	assert.Equal(t, o.StartLedger(), decoded.StartLedger())
-	assert.Equal(t, o.LedgerCount(), decoded.LedgerCount())
-	assert.Equal(t, o.TotalEvents(), decoded.TotalEvents())
-
-	for _, ledger := range []uint32{50_002, 50_003, 50_004} {
-		wantStart, wantEnd, err := o.EventIDs(ledger)
-		require.NoError(t, err)
-		gotStart, gotEnd, err := decoded.EventIDs(ledger)
-		require.NoError(t, err)
-		assert.Equal(t, wantStart, gotStart, "ledger %d start", ledger)
-		assert.Equal(t, wantEnd, gotEnd, "ledger %d end", ledger)
-	}
+	assert.Equal(t, o.Offsets(), decoded.Offsets())
 }
 
 func TestLedgerOffsets_EncodeEmpty(t *testing.T) {
@@ -55,48 +59,68 @@ func TestLedgerOffsets_EncodeEmpty(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, bytes, ledgerOffsetsHeaderLen)
 
-	decoded, err := DecodeLedgerOffsets(bytes)
+	decoded, err := decodeLedgerOffsets(bytes)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(50_002), decoded.StartLedger())
 	assert.Zero(t, decoded.LedgerCount())
 	assert.Zero(t, decoded.TotalEvents())
 }
 
-func TestLedgerOffsets_DecodeRejectsShortBuffer(t *testing.T) {
-	_, err := DecodeLedgerOffsets(nil)
-	require.ErrorIs(t, err, ErrShortLedgerOffsets)
-
-	short := make([]byte, ledgerOffsetsHeaderLen-1)
-	short[0] = LedgerOffsetsFormatVersion // valid version, so the length check fires
-	_, err = DecodeLedgerOffsets(short)
-	assert.ErrorIs(t, err, ErrShortLedgerOffsets)
-}
-
-func TestLedgerOffsets_DecodeRejectsUnknownVersion(t *testing.T) {
-	buf := make([]byte, ledgerOffsetsHeaderLen)
-	buf[0] = 0xff // not LedgerOffsetsFormatVersion
-	_, err := DecodeLedgerOffsets(buf)
-	assert.ErrorContains(t, err, "written by a newer stellar-rpc")
-}
-
-func TestLedgerOffsets_DecodeRejectsTruncatedArray(t *testing.T) {
-	// Declare 3 ledgers but only supply 2 entries of payload bytes.
-	o := NewLedgerOffsets(50_002)
-	require.NoError(t, o.Append(50_002, 1))
-	require.NoError(t, o.Append(50_003, 1))
-	require.NoError(t, o.Append(50_004, 1))
-
-	full, err := encodeLedgerOffsets(o)
+func TestLedgerOffsets_Golden(t *testing.T) {
+	golden := []byte{
+		0x02,                   // version
+		0x00, 0x00, 0xc3, 0x52, // start ledger 50,002
+		0x00, 0x00, 0x00, 0x03, // 3 ledgers
+		0x1c,                   // residuals 0, 3, 1 at 2 bits each, low bits first
+		0x02,                   // bit width
+		0xe8, 0x03, 0x00, 0x00, // minimum 1,000
+	}
+	data, err := encodeLedgerOffsets(buildLedgerOffsets(t, 50_002, []uint32{1_000, 1_003, 1_001}))
 	require.NoError(t, err)
-
-	truncated := full[:len(full)-4]
-	_, err = DecodeLedgerOffsets(truncated)
-	assert.ErrorIs(t, err, ErrShortLedgerOffsets)
+	assert.Equal(t, golden, data)
 }
 
-func TestLedgerOffsets_EncodeNil(t *testing.T) {
+func TestLedgerOffsets_DecodeRejects(t *testing.T) {
+	header := func(ledgerCount uint32) []byte {
+		h := binary.BigEndian.AppendUint32([]byte{ledgerOffsetsFormatVersion}, 50_002)
+		return binary.BigEndian.AppendUint32(h, ledgerCount)
+	}
+	tests := []struct {
+		name string
+		data []byte
+		want string
+	}{
+		{"empty", nil, "empty blob"},
+		{"older version", []byte{0x01}, "unsupported version 0x01"},
+		{"short header", header(3)[:ledgerOffsetsHeaderLen-1], "want at least"},
+		{"more ledgers than a chunk", header(chunk.LedgersPerChunk + 1), "a chunk holds"},
+		{"missing group", header(3), "group 0"},
+		{
+			"byte before the first group",
+			append(append(header(3), 0x00), intpack.EncodeGroup([]uint32{3, 0, 7})...),
+			"1 bytes before the first group",
+		},
+		{
+			"counts overflow uint32",
+			append(header(2), intpack.EncodeGroup([]uint32{math.MaxUint32, 1})...),
+			"overflow uint32",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := decodeLedgerOffsets(tc.data)
+			require.ErrorIs(t, err, errBadLedgerOffsets)
+			assert.ErrorContains(t, err, tc.want)
+		})
+	}
+}
+
+func TestLedgerOffsets_EncodeRejects(t *testing.T) {
 	_, err := encodeLedgerOffsets(nil)
-	assert.Error(t, err)
+	require.Error(t, err)
+
+	_, err = encodeLedgerOffsets(buildLedgerOffsets(t, 50_002, make([]uint32, chunk.LedgersPerChunk+1)))
+	assert.ErrorContains(t, err, "a chunk holds")
 }
 
 // ──────────────────────────────────────────────────────────────────

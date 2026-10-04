@@ -11,7 +11,7 @@ package event
 //      constructor, and the shared zstd decoder.
 //
 //   3. LedgerOffsets app-data encoding (encodeLedgerOffsets /
-//      DecodeLedgerOffsets). The writer embeds the encoded form in
+//      decodeLedgerOffsets). The writer embeds the encoded form in
 //      events.pack's app-data slot; the reader decodes it on open.
 //
 //   4. MPHF wrapper around github.com/stellar/streamhash —
@@ -33,6 +33,7 @@ import (
 	"github.com/stellar/streamhash"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/intpack"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/zstd"
@@ -204,33 +205,30 @@ var eventsPackDecoder = zstd.NewDecompressor()
 //
 // Embedded in events.pack's app-data slot:
 //
-//	offset  size       field
-//	0       1          version (0x01)
-//	1       4          startLedger        (uint32 BE)
-//	5       4          ledgerCount N      (uint32 BE)
-//	9       N × 4      cumulative event count per position
-//	                   (uint32 BE; entry i = events through ledger
-//	                    startLedger + i)
+//	offset  size  field
+//	0       1     version (0x02)
+//	1       4     startLedger    (uint32 BE)
+//	5       4     ledgerCount N  (uint32 BE), at most chunk.LedgersPerChunk
+//	9       ...   each ledger's event count, in intpack groups of 128
+//	              ledgers in ledger order; only the last group can be short
 //
-// Cumulative counts (rather than per-ledger counts) match the
-// in-memory representation of LedgerOffsets and let the cold reader
-// resolve ledger range → eventID range in two array lookups.
+// Groups carry no length: intpack ends each group with its width and
+// minimum, so the decoder walks the groups back from the end of the blob.
 //
 // The version byte makes future format additions safe across
 // already-frozen Chunks; readers reject unknown versions at decode
 // time so older binaries fail loudly.
 // ──────────────────────────────────────────────────────────────────
 
-// LedgerOffsetsFormatVersion is the current on-disk version for the
-// LedgerOffsets app-data block.
-const LedgerOffsetsFormatVersion byte = 0x01
+const (
+	ledgerOffsetsFormatVersion byte = 0x02
+	ledgerOffsetsHeaderLen          = 1 + 4 + 4
+	ledgerOffsetsGroupSize          = 128
+)
 
-const ledgerOffsetsHeaderLen = 1 + 4 + 4
-
-// ErrShortLedgerOffsets is returned when the app data buffer is empty,
-// carries an unknown version byte, or is shorter than the declared header
-// or trailing cumulative array.
-var ErrShortLedgerOffsets = errors.New("events: LedgerOffsets app data too short")
+// errBadLedgerOffsets is returned when events.pack's app data does not
+// decode as LedgerOffsets.
+var errBadLedgerOffsets = errors.New("malformed LedgerOffsets app data")
 
 // encodeLedgerOffsets serializes o for packfile app-data embedding.
 func encodeLedgerOffsets(o *LedgerOffsets) ([]byte, error) {
@@ -238,48 +236,66 @@ func encodeLedgerOffsets(o *LedgerOffsets) ([]byte, error) {
 		return nil, errors.New("events: nil LedgerOffsets")
 	}
 	cumulative := o.Offsets()
-	n := uint32(len(cumulative)) //nolint:gosec // bounded by chunk's ledger count
+	if len(cumulative) > int(chunk.LedgersPerChunk) {
+		return nil, fmt.Errorf("events: LedgerOffsets holds %d ledgers, a chunk holds %d",
+			len(cumulative), chunk.LedgersPerChunk)
+	}
 
-	buf := make([]byte, ledgerOffsetsHeaderLen+int(n)*4)
-	buf[0] = LedgerOffsetsFormatVersion
-	binary.BigEndian.PutUint32(buf[1:5], o.StartLedger())
-	binary.BigEndian.PutUint32(buf[5:9], n)
-	for i, c := range cumulative {
-		binary.BigEndian.PutUint32(buf[ledgerOffsetsHeaderLen+i*4:], c)
+	buf := []byte{ledgerOffsetsFormatVersion}
+	buf = binary.BigEndian.AppendUint32(buf, o.StartLedger())
+	buf = binary.BigEndian.AppendUint32(buf, uint32(len(cumulative))) //nolint:gosec // bounded above
+	var counts [ledgerOffsetsGroupSize]uint32
+	var prev uint32
+	for base := 0; base < len(cumulative); base += ledgerOffsetsGroupSize {
+		group := cumulative[base:min(base+ledgerOffsetsGroupSize, len(cumulative))]
+		for i, c := range group {
+			counts[i] = c - prev
+			prev = c
+		}
+		buf = append(buf, intpack.EncodeGroup(counts[:len(group)])...)
 	}
 	return buf, nil
 }
 
-// DecodeLedgerOffsets parses the packfile app-data block written by
-// encodeLedgerOffsets back into a *LedgerOffsets. Used by the cold
-// reader (PR-3a).
-func DecodeLedgerOffsets(data []byte) (*LedgerOffsets, error) {
-	if err := stores.CheckBlobVersion(data, LedgerOffsetsFormatVersion); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrShortLedgerOffsets, err)
+// decodeLedgerOffsets parses the app data written by encodeLedgerOffsets.
+func decodeLedgerOffsets(data []byte) (*LedgerOffsets, error) {
+	if err := stores.CheckBlobVersion(data, ledgerOffsetsFormatVersion); err != nil {
+		return nil, fmt.Errorf("%w: %w", errBadLedgerOffsets, err)
 	}
 	if len(data) < ledgerOffsetsHeaderLen {
-		return nil, ErrShortLedgerOffsets
+		return nil, fmt.Errorf("%w: %d bytes, want at least %d", errBadLedgerOffsets, len(data), ledgerOffsetsHeaderLen)
 	}
 	startLedger := binary.BigEndian.Uint32(data[1:5])
 	n := binary.BigEndian.Uint32(data[5:9])
-	expected := ledgerOffsetsHeaderLen + int(n)*4
-	if len(data) != expected {
-		return nil, fmt.Errorf("%w: want %d bytes, got %d", ErrShortLedgerOffsets, expected, len(data))
+	if n > chunk.LedgersPerChunk {
+		return nil, fmt.Errorf("%w: %d ledgers, a chunk holds %d", errBadLedgerOffsets, n, chunk.LedgersPerChunk)
 	}
 
-	offsets := NewLedgerOffsets(startLedger)
-	var prev uint32
-	for i := range n {
-		cumulative := binary.BigEndian.Uint32(data[ledgerOffsetsHeaderLen+int(i)*4:])
-		if cumulative < prev {
-			return nil, fmt.Errorf("events: non-monotonic cumulative count at ledger %d", startLedger+i)
+	offsets := make([]uint32, n)
+	payload := data[ledgerOffsetsHeaderLen:]
+	groupCount := (len(offsets) + ledgerOffsetsGroupSize - 1) / ledgerOffsetsGroupSize
+	for g := groupCount - 1; g >= 0; g-- {
+		base := g * ledgerOffsetsGroupSize
+		group := offsets[base:min(base+ledgerOffsetsGroupSize, len(offsets))]
+		_, consumed, err := intpack.DecodeGroup(payload, len(group), group)
+		if err != nil {
+			return nil, fmt.Errorf("%w: group %d: %w", errBadLedgerOffsets, g, err)
 		}
-		if err := offsets.Append(startLedger+i, cumulative-prev); err != nil {
-			return nil, fmt.Errorf("events: decode LedgerOffsets: %w", err)
-		}
-		prev = cumulative
+		payload = payload[:len(payload)-consumed]
 	}
-	return offsets, nil
+	if len(payload) != 0 {
+		return nil, fmt.Errorf("%w: %d bytes before the first group", errBadLedgerOffsets, len(payload))
+	}
+
+	var total uint32
+	for i, count := range offsets {
+		if count > math.MaxUint32-total {
+			return nil, fmt.Errorf("%w: event counts overflow uint32", errBadLedgerOffsets)
+		}
+		total += count
+		offsets[i] = total
+	}
+	return &LedgerOffsets{offsets: offsets, startLedger: startLedger}, nil
 }
 
 // ──────────────────────────────────────────────────────────────────
