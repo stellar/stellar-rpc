@@ -285,6 +285,11 @@ type ReaderOptions struct {
     // records into single ReadAt calls even when serial; concurrency only
     // controls fan-out across I/O batches.
     Concurrency int
+
+    // FirstRead sizes Open's first read from the end of the file, given the
+    // file size; nil means 256 KiB. Results are clamped to [trailer size,
+    // file size]; a tail that does not fit takes one more read for the rest.
+    FirstRead func(fileSize int64) int
 }
 
 // Reader provides random access to items in a packfile.
@@ -638,9 +643,9 @@ The `Checksum` at offset 72 covers `trailer[0:72]`.
 
 ### Read Path
 
-**Non-blocking Open.** `Open` returns a `*Reader` immediately. A background goroutine performs all I/O: open, stat, speculative read, trailer parse, CRC verification, index decode, app data read. A `sync.OnceValue` drains the result on the first query call. Errors are deferred to query time — `Open` itself never fails. This enables overlapped initialization: the caller can open multiple files or perform other setup while the goroutine runs.
+**Non-blocking Open.** `Open` returns a `*Reader` immediately. A background goroutine performs all I/O: open, stat, first read, trailer parse, CRC verification, index decode, app data read. A `sync.OnceValue` drains the result on the first query call. Errors are deferred to query time; `Open` itself never fails. This enables overlapped initialization: the caller can open multiple files or perform other setup while the goroutine runs.
 
-**Speculative Read.** On open, one pread of the last `min(256 KiB, fileSize)` bytes. If the offset index fits within this range, the trailer, app data, and index are all loaded in a single I/O operation. Otherwise, a fallback read fetches the rest.
+**First Read.** On open, one pread of the last `FirstRead(fileSize)` bytes (256 KiB when `FirstRead` is nil), clamped to [trailer size, file size]. If the index, app data and trailer fit, nothing else is read. Otherwise one more read fetches only the bytes in front of the first read.
 
 **Index Decode OOM Guard.** Before decoding the offset index, validates that `recordCount` is plausible given `indexSize`. Each FOR group of up to 128 records requires at least 6 bytes. This prevents crafted trailers from causing huge allocations.
 
