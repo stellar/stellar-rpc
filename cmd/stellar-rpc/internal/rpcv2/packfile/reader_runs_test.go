@@ -143,6 +143,50 @@ func TestReadItemsRecordReadOnce(t *testing.T) {
 	assert.Len(t, log.reads, 1)
 }
 
+// Reads across index groups decode each group on the reading worker's own
+// table, whatever order the runs reach the workers in.
+func TestReadsAcrossIndexGroups(t *testing.T) {
+	const perRecord = 3
+	g := groupSize * perRecord // items per index group
+	// Records of about 3 KB, so 256 KiB reads straddle groups, and a short last.
+	items := make([][]byte, (3*groupSize+5)*perRecord-1)
+	for i := range items {
+		items[i] = bytes.Repeat([]byte{byte(i)}, 900+i%201)
+	}
+	path := writeTestPackfile(t, items, WriterOptions{ItemsPerRecord: perRecord})
+
+	all := make([]int, len(items))
+	for i := range all {
+		all[i] = i
+	}
+	var alternate []int // the first item of every other record: one read each
+	for i := 0; i < len(items); i += 2 * perRecord {
+		alternate = append(alternate, i)
+	}
+	for _, concurrency := range []int{1, 8} {
+		t.Run(fmt.Sprintf("ReadItems/c%d", concurrency), func(t *testing.T) {
+			r := Open(path, ReaderOptions{Concurrency: concurrency})
+			defer r.Close()
+			checkReadItems(t, r, items, all)
+			checkReadItems(t, r, items, alternate)
+		})
+	}
+
+	t.Run("ReadRange", func(t *testing.T) {
+		r := Open(path, ReaderOptions{})
+		defer r.Close()
+		for _, rng := range [][2]int{{g - 2, 5}, {g + 1, 2*g + 3}, {2*g - 1, len(items) - (2*g - 1)}} {
+			i := rng[0]
+			for data, err := range r.ReadRange(rng[0], rng[1]) {
+				require.NoError(t, err)
+				assert.Equal(t, items[i], data, "item %d", i)
+				i++
+			}
+			assert.Equal(t, rng[0]+rng[1], i)
+		}
+	})
+}
+
 func TestReadItemsCallbackError(t *testing.T) {
 	path, _ := writeSizedRecords(t, 1000, 1000, 1000, 1000)
 	boom := errors.New("boom")
