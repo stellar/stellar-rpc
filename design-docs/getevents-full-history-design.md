@@ -176,7 +176,7 @@ For each incoming ledger:
 
 ### 9.1 Cold Event Storage
 
-Events are grouped into fixed-size records, compressed with zstd, and stored in `events.pack`. The ledger offset array is maintained during the ingestion workflow and passed to the packfile as app data. It is loaded asynchronously on segment open, allowing parallel I/O with other segment files opened during the same request. See the [packfile library](https://github.com/tamirms/event-analysis/blob/main/packfile-library.md) design for details.
+Events are grouped into records of up to 128 events, compressed with zstd, and stored in `events.pack`. A record also closes before an event that would take it past 128 KiB uncompressed, bounding what a few large events add to reads of their neighbors. The ledger offset array is maintained during the ingestion workflow and passed to the packfile as app data. It is loaded asynchronously on segment open, allowing parallel I/O with other segment files opened during the same request. See the [packfile library](./packfile-library.md) design for details.
 
 **On-disk Layout**
 
@@ -320,10 +320,10 @@ The cold segment read path follows the same workflow as the hot segment (steps 2
    so post-filtering (step 5) is still necessary.
 
 4. Fetch raw events from the immutable packfile instead of the hot segment storage:
-   * Compute record index as (event_id / record_size) and position within
-     the record as (event_id % record_size).
+   * Find the record holding event_id, and the event's position within it,
+     in the packfile's offset index.
    * Decompress the record from events.pack.
-   * Extract the event at the computed position.
+   * Extract the event at that position.
 ```
 
 ## 12. Startup Procedure
