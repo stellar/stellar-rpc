@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -110,9 +109,11 @@ func writePartialCSVs(logger *supportlog.Entry, sink *csvSink, outDir string) {
 }
 
 // newBenchCommand creates a bench-ingest subcommand with shared flags,
-// profiling, run metadata, and signal-driven cancellation.
+// profiling, run metadata, and signal-driven cancellation. validate runs before
+// the command touches --out, so a flag error leaves nothing behind.
 func newBenchCommand(
 	use, short string, src *sourceFlags, prof *profileFlags,
+	validate func() error,
 	run func(ctx context.Context, logger *supportlog.Entry, outDir string) error,
 ) *cobra.Command {
 	var outDir string
@@ -120,12 +121,20 @@ func newBenchCommand(
 		Use:   use,
 		Short: short,
 		Args:  cobra.NoArgs,
+		PreRunE: func(cmd *cobra.Command, _ []string) error {
+			// Cobra checks required flags only after PreRunE; check them first
+			// so a missing flag reports cobra's error, not a validate error.
+			if err := cmd.ValidateRequiredFlags(); err != nil {
+				return err
+			}
+			return validate()
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
 			ctx, stop, logger := benchContext()
 			defer stop()
 			startedAt := time.Now().UTC()
-			if err := refuseStaleCSVs(outDir); err != nil {
+			if err := requireEmptyOut(outDir); err != nil {
 				return err
 			}
 			if err := os.MkdirAll(outDir, 0o755); err != nil {
@@ -136,7 +145,12 @@ func newBenchCommand(
 				return err
 			}
 			runErr := prof.around(logger, func() error { return run(ctx, logger, outDir) })
-			peakRSS, _ := readPeakRSS() // 0 without /proc
+			peakRSS, rssErr := readPeakRSS()
+			if rssErr != nil {
+				logger.Warnf("peak RSS unavailable: %v", rssErr)
+			} else {
+				logger.Infof("peak RSS: %d bytes", peakRSS)
+			}
 			record.finish(time.Now().UTC(), peakRSS, runErr)
 			if err := writeRunRecord(outDir, record); err != nil {
 				if runErr == nil {
@@ -148,14 +162,15 @@ func newBenchCommand(
 		},
 	}
 	cmd.Flags().StringVar(&outDir, "out", "bench-out",
-		"output dir for the CSV report and run.json; must not hold a .csv file")
+		"output dir for the CSV report and run.json; must be missing or empty")
 	src.bind(cmd)
 	prof.bind(cmd)
 	return cmd
 }
 
-// refuseStaleCSVs fails if outDir holds a CSV from an earlier run.
-func refuseStaleCSVs(outDir string) error {
+// requireEmptyOut fails unless outDir is missing or empty, so a run never
+// replaces the files of an earlier run.
+func requireEmptyOut(outDir string) error {
 	entries, err := os.ReadDir(outDir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -163,11 +178,9 @@ func refuseStaleCSVs(outDir string) error {
 	if err != nil {
 		return fmt.Errorf("read --out dir %s: %w", outDir, err)
 	}
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".csv") {
-			return fmt.Errorf("--out dir %s already holds %s from an earlier run; pass an --out dir with no .csv file",
-				outDir, e.Name())
-		}
+	if len(entries) > 0 {
+		return fmt.Errorf("--out dir %s is not empty (it holds %s); pass a missing or empty --out dir",
+			outDir, entries[0].Name())
 	}
 	return nil
 }
@@ -182,19 +195,24 @@ func newColdCommand() *cobra.Command {
 		catalogDir string
 		prof       profileFlags
 	)
+	opts := func() coldOptions {
+		return coldOptions{
+			Source:     src.config(),
+			StartChunk: chunk.ID(startChunk),
+			NumChunks:  numChunks,
+			Workers:    workers,
+			ColdRoot:   coldOutDir,
+			CatalogDir: catalogDir,
+		}
+	}
 	cmd := newBenchCommand("cold",
 		"Benchmark cold ingestion: the daemon's backfill (chunk freezes + txhash index builds) over a chunk range",
 		&src, &prof,
+		func() error { return opts().validate() },
 		func(ctx context.Context, logger *supportlog.Entry, outDir string) error {
-			return runCold(ctx, logger, coldOptions{
-				Source:     src.config(),
-				StartChunk: chunk.ID(startChunk),
-				NumChunks:  numChunks,
-				Workers:    workers,
-				ColdRoot:   coldOutDir,
-				CatalogDir: catalogDir,
-				OutDir:     outDir,
-			})
+			o := opts()
+			o.OutDir = outDir
+			return runCold(ctx, logger, o)
 		})
 	fs := cmd.Flags()
 	fs.Uint32Var(&startChunk, "start-chunk", 0, "first chunk ID to backfill (required)")
@@ -220,20 +238,25 @@ func newHotCommand() *cobra.Command {
 		closeInterval time.Duration
 		prof          profileFlags
 	)
+	opts := func() hotOptions {
+		return hotOptions{
+			Source:        src.config(),
+			StartChunk:    chunk.ID(startChunk),
+			NumChunks:     numChunks,
+			NumLedgers:    numLedgers,
+			HotRoot:       hotDir,
+			CatalogDir:    catalogDir,
+			CloseInterval: closeInterval,
+		}
+	}
 	cmd := newBenchCommand("hot",
 		"Benchmark hot ingestion: the daemon's live ingestion loop over a chunk range",
 		&src, &prof,
+		func() error { return opts().validate() },
 		func(ctx context.Context, logger *supportlog.Entry, outDir string) error {
-			return runHot(ctx, logger, hotOptions{
-				Source:        src.config(),
-				StartChunk:    chunk.ID(startChunk),
-				NumChunks:     numChunks,
-				NumLedgers:    numLedgers,
-				HotRoot:       hotDir,
-				CatalogDir:    catalogDir,
-				CloseInterval: closeInterval,
-				OutDir:        outDir,
-			})
+			o := opts()
+			o.OutDir = outDir
+			return runHot(ctx, logger, o)
 		})
 	fs := cmd.Flags()
 	fs.Uint32Var(&startChunk, "start-chunk", 0, "first chunk ID to ingest (required)")

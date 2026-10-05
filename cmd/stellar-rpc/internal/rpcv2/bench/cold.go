@@ -94,10 +94,6 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 	if err := opts.validate(); err != nil {
 		return err
 	}
-	// Surface an unwritable --out before the run.
-	if err := os.MkdirAll(opts.OutDir, 0o755); err != nil {
-		return fmt.Errorf("create --out dir %s: %w", opts.OutDir, err)
-	}
 	// Create and fsync the write roots up front — the daemon's own root prep.
 	layout := geometry.NewLayout(opts.ColdRoot)
 	if err := config.PrepareRoots(
@@ -138,9 +134,6 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 		// backoff time into the samples.
 		MaxRetries: 0,
 	}, opts.StartChunk, end)
-	// VmHWM never decreases, so it can be read right here — before the error
-	// check — and a failed run's partial CSV still gets the row.
-	recordPeakRSS(logger, sink, readPeakRSS)
 	if err != nil {
 		writePartialCSVs(logger, sink, opts.OutDir)
 		return fmt.Errorf("backfill [%s,%s]: %w", opts.StartChunk, end, err)

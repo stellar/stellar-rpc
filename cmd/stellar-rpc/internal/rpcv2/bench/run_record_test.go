@@ -47,35 +47,38 @@ func TestCommandRecordsFailedRun(t *testing.T) {
 	assert.NotEmpty(t, record.StartedAt)
 	assert.NotEmpty(t, record.FinishedAt)
 	assert.Equal(t, runStatusFailed, record.Status)
+	if runtime.GOOS == "linux" { // readPeakRSS needs /proc
+		assert.Positive(t, record.PeakRSSBytes)
+	}
 }
 
-// TestCommandRecordsRunThatFailsValidation checks run.json after a flag error.
-func TestCommandRecordsRunThatFailsValidation(t *testing.T) {
-	outDir := filepath.Join(t.TempDir(), "csv")
-
-	cmd := NewCommand()
-	cmd.SetOut(io.Discard)
-	cmd.SetErr(io.Discard)
-	cmd.SetArgs([]string{
-		"hot",
-		"--source", "bogus",
-		"--start-chunk", "0",
-		"--hot-dir", t.TempDir(),
-		"--out", outDir,
-	})
-	err := cmd.Execute()
-	require.ErrorContains(t, err, "--source=bogus")
-
-	data, readErr := os.ReadFile(filepath.Join(outDir, runRecordFile))
-	require.NoError(t, readErr)
-	var record runRecord
-	require.NoError(t, json.Unmarshal(data, &record))
-	assert.Equal(t, "bench-ingest hot", record.Command)
-	assert.Equal(t, "bogus", record.Flags["source"])
-	assert.NotEmpty(t, record.StartedAt)
-	assert.Equal(t, err.Error(), record.Error)
-	assert.NotEmpty(t, record.FinishedAt)
-	assert.Equal(t, runStatusFailed, record.Status)
+// TestCommandRejectsBadFlagsBeforeOut checks that a flag error creates no --out.
+func TestCommandRejectsBadFlagsBeforeOut(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{"cold invalid flag", []string{
+			"cold", "--start-chunk", "0", "--cold-out-dir", t.TempDir(),
+			"--pack-dir", t.TempDir(), "--workers", "0",
+		}, "--workers must be >= 1"},
+		{"hot invalid flag", []string{
+			"hot", "--source", "bogus", "--start-chunk", "0",
+			"--hot-dir", t.TempDir(),
+		}, "--source=bogus"},
+		{"hot missing required flags", []string{"hot"}, `required flag(s) "hot-dir", "start-chunk" not set`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outDir := filepath.Join(t.TempDir(), "csv")
+			cmd := NewCommand()
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			cmd.SetArgs(append(tc.args, "--out", outDir))
+			require.ErrorContains(t, cmd.Execute(), tc.wantErr)
+			require.NoDirExists(t, outDir)
+		})
+	}
 }
 
 // TestCommandRecordsSuccessfulRun checks run.json during and after a run.
@@ -84,6 +87,7 @@ func TestCommandRecordsSuccessfulRun(t *testing.T) {
 	var ran bool
 
 	cmd := newBenchCommand("probe", "", &sourceFlags{}, &profileFlags{},
+		func() error { return nil },
 		func(_ context.Context, _ *supportlog.Entry, out string) error {
 			ran = true
 			data, err := os.ReadFile(filepath.Join(out, runRecordFile))
@@ -120,18 +124,19 @@ func TestCommandRecordsSuccessfulRun(t *testing.T) {
 	assert.NotContains(t, raw, "error")
 }
 
-// TestRefuseStaleCSVs checks which --out contents refuseStaleCSVs accepts.
-func TestRefuseStaleCSVs(t *testing.T) {
+// TestRequireEmptyOut checks which --out dirs requireEmptyOut accepts.
+func TestRequireEmptyOut(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		files []string
 		dirs  []string
-		stale string
+		held  string
 	}{
-		{"csv", []string{runRecordFile, "cold.csv"}, nil, "cold.csv"},
-		{"run record only", []string{runRecordFile}, nil, ""},
-		{"csv-named dir", []string{runRecordFile}, []string{"old.csv"}, ""},
 		{"missing dir", nil, nil, ""},
+		{"empty dir", []string{}, nil, ""},
+		{"run record only", []string{runRecordFile}, nil, runRecordFile},
+		{"csv", []string{"cold.csv"}, nil, "cold.csv"},
+		{"subdir only", []string{}, []string{"old"}, "old"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out := t.TempDir()
@@ -144,60 +149,60 @@ func TestRefuseStaleCSVs(t *testing.T) {
 			for _, name := range tc.dirs {
 				require.NoError(t, os.Mkdir(filepath.Join(out, name), 0o700))
 			}
-			err := refuseStaleCSVs(out)
-			if tc.stale == "" {
+			err := requireEmptyOut(out)
+			if tc.held == "" {
 				require.NoError(t, err)
 				return
 			}
 			require.ErrorContains(t, err, out)
-			require.ErrorContains(t, err, tc.stale)
+			require.ErrorContains(t, err, tc.held)
 		})
 	}
 
 	t.Run("out is a file", func(t *testing.T) {
 		out := filepath.Join(t.TempDir(), "out")
 		require.NoError(t, os.WriteFile(out, nil, 0o600))
-		require.ErrorContains(t, refuseStaleCSVs(out), "read --out dir")
+		require.ErrorContains(t, requireEmptyOut(out), "read --out dir")
 	})
 }
 
-// TestIngestCommandsRefuseOutWithCSVs checks that cold and hot refuse a stale --out.
-func TestIngestCommandsRefuseOutWithCSVs(t *testing.T) {
+// TestIngestCommandsRefuseUsedOut checks that cold and hot keep the run.json
+// of a killed run.
+func TestIngestCommandsRefuseUsedOut(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "no-such-pack-dir")
 	for _, args := range [][]string{
 		{"cold", "--start-chunk", "0", "--cold-out-dir", t.TempDir(), "--pack-dir", missing},
 		{"hot", "--start-chunk", "0", "--hot-dir", t.TempDir(), "--pack-dir", missing},
 	} {
 		t.Run(args[0], func(t *testing.T) {
-			requireRefusesStaleOut(t, NewCommand(), args, "cold.csv", missing)
+			requireRefusesUsedOut(t, NewCommand(), args, missing)
 		})
 	}
 }
 
-// requireRefusesStaleOut requires cmd to refuse an --out that holds the CSV
-// stale, without changing --out. An error that names missing means the run
-// body ran.
-func requireRefusesStaleOut(t *testing.T, cmd *cobra.Command, args []string, stale, missing string) {
+// requireRefusesUsedOut requires cmd to refuse an --out that holds the run.json
+// of a killed run, without changing --out. An error that names missing means
+// the run body ran.
+func requireRefusesUsedOut(t *testing.T, cmd *cobra.Command, args []string, missing string) {
 	t.Helper()
 	out := t.TempDir()
-	earlier := []byte(`{"command":"earlier run"}`)
-	require.NoError(t, os.WriteFile(filepath.Join(out, runRecordFile), earlier, 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(out, stale), nil, 0o600))
+	killed := []byte(`{"command":"earlier run","status":"running"}`)
+	require.NoError(t, os.WriteFile(filepath.Join(out, runRecordFile), killed, 0o600))
 
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
 	cmd.SetArgs(append(args, "--out", out))
 	err := cmd.Execute()
-	require.ErrorContains(t, err, stale)
-	require.ErrorContains(t, err, "pass an --out dir with no .csv file")
+	require.ErrorContains(t, err, "is not empty")
+	require.ErrorContains(t, err, runRecordFile)
 	assert.NotContains(t, err.Error(), missing, "the run body must not run")
 
 	got, readErr := os.ReadFile(filepath.Join(out, runRecordFile))
 	require.NoError(t, readErr)
-	assert.Equal(t, string(earlier), string(got), "a refused run must leave run.json unchanged")
+	assert.Equal(t, string(killed), string(got), "a refused run must leave run.json unchanged")
 	entries, readErr := os.ReadDir(out)
 	require.NoError(t, readErr)
-	assert.Len(t, entries, 2, "a refused run must add no files to --out")
+	assert.Len(t, entries, 1, "a refused run must add no files to --out")
 }
 
 // TestWriteRunRecordInProgress checks the JSON of a start record.
