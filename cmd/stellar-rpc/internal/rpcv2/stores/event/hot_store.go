@@ -31,12 +31,16 @@ const (
 //     typically 2-3× on XDR) and read in batches via
 //     BatchedMultiGetCF. Larger blocks give zstd more context per
 //     compression unit and align with batch-fetch shapes.
-//   - IndexCF stores 20-byte (term_hash || event_id) keys with
-//     empty values — nothing in the values to compress, and small
-//     blocks reduce wasted I/O per random Lookup miss (each Lookup
-//     reads one block to find one key).
+//   - IndexCF stores one (slab || term_hash) -> bitmap entry per term of
+//     each sealed slab, loaded one sorted file per slab (see hotIndex).
+//     Auto compaction is off, and the files never overlap so it would have
+//     nothing to do; their index blocks sit in the block cache so a chunk's
+//     many files cost bounded memory. No bloom filter: it would be the
+//     largest thing in that cache, to save a few microseconds per slab on
+//     an absent term.
 //   - OffsetsCF stores 8-byte (ledger_seq -> event_count) rows in
-//     the tens-of-thousands per chunk — same shape as IndexCF.
+//     the tens-of-thousands per chunk; small blocks waste less I/O per
+//     point read.
 const (
 	dataCFBlockSize    = 32 * 1024
 	indexCFBlockSize   = 4 * 1024
@@ -49,7 +53,11 @@ func hotStoreCFOptions() map[string]rocksdb.CFOptions {
 			Compression: grocksdb.ZSTDCompression,
 			BlockSize:   dataCFBlockSize,
 		},
-		IndexCF:   {BlockSize: indexCFBlockSize},
+		IndexCF: {
+			BlockSize:                 indexCFBlockSize,
+			CacheIndexAndFilterBlocks: true,
+			DisableAutoCompactions:    true,
+		},
 		OffsetsCF: {BlockSize: offsetsCFBlockSize},
 	}
 }
@@ -63,10 +71,9 @@ func CFNames() []string { return []string{DataCF, IndexCF, OffsetsCF} }
 func CFOptions() map[string]rocksdb.CFOptions { return hotStoreCFOptions() }
 
 const (
-	dataKeyLen   = 4      // event_id (chunk encoded by per-Chunk DB directory)
-	indexKeyLen  = 16 + 4 // term hash || event_id
-	offsetKeyLen = 4      // ledger_seq
-	offsetValLen = 4      // per-ledger event count (uint32 BE)
+	dataKeyLen   = 4 // event_id (chunk encoded by per-Chunk DB directory)
+	offsetKeyLen = 4 // ledger_seq
+	offsetValLen = 4 // per-ledger event count (uint32 BE)
 )
 
 // ErrLedgerOutOfRange is returned by IngestLedgerToBatch when the
@@ -81,19 +88,19 @@ var ErrLedgerOutOfRange = errors.New("events: ledger outside chunk range")
 // offset chain if not rejected up front.
 var ErrLedgerOutOfOrder = errors.New("events: ledger out of order")
 
-// HotStore wraps one chunk's hot RocksDB DB plus the in-memory term mirror and
+// HotStore wraps one chunk's hot RocksDB DB plus the term index and
 // ledger-offset cache that feed the query path.
 //
 // Atomicity: the per-Chunk DB is the source of truth. IngestLedgerToBatch queues
-// data + index + offsets into one atomic batch, then (post-commit) the apply
-// hook updates the in-memory mirrors; warmup reconstructs them from the on-disk
-// CFs on next startup.
+// data + offsets into one atomic batch, then (post-commit) the apply hook
+// updates the term index and the offset cache; warmup reconstructs both from
+// the on-disk CFs on next startup.
 //
 // Concurrency:
 //
 //   - Writes (IngestLedgerToBatch) are single-writer (one goroutine per chunk).
 //   - Reads (LookupKeys, FetchEvents, All) take NO HotStore-level lock — they guard
-//     via chunkStore.IsClosed() and rely on the mirror's internal locks and
+//     via chunkStore.IsClosed() and rely on the index's lock-free reads and
 //     RocksDB's thread-safety.
 //   - Metadata split after the caller-owned store is closed: ChunkID is
 //     infallible (cached, usable post-close); EventCount and
@@ -101,7 +108,7 @@ var ErrLedgerOutOfOrder = errors.New("events: ledger out of order")
 type HotStore struct {
 	chunkStore *rocksdb.Store
 	chunkID    chunk.ID
-	mirror     *ConcurrentBitmaps
+	index      *hotIndex
 	offsets    *ConcurrentLedgerOffsets
 }
 
@@ -110,19 +117,21 @@ var _ Reader = (*HotStore)(nil)
 
 // NewWithStore wraps an ALREADY-OPEN rocksdb.Store as an events HotStore on the
 // three events CFs (CFNames()), running the mandatory warmup to rebuild the
-// in-memory mirror + offsets. The store is owned by the caller — in production,
+// term index + offsets. The store is owned by the caller — in production,
 // hotchunk.DB composes this facade over the shared per-chunk DB and closes that
-// DB once. The store must have CFNames() registered + CFOptions() applied.
-// A warmup failure returns the error WITHOUT closing the caller-owned store.
+// DB once. The store must have CFNames() registered + CFOptions() applied, and
+// be writable: warmup seals a full slab it indexes again as soon as the next
+// one starts. A warmup failure returns the error WITHOUT closing the
+// caller-owned store.
 func NewWithStore(store *rocksdb.Store, chunkID chunk.ID) (*HotStore, error) {
-	mirror, offsets, err := warmup(store, chunkID)
+	index, offsets, err := warmup(store, chunkID)
 	if err != nil {
 		return nil, fmt.Errorf("events: warmup chunk %s: %w", chunkID, err)
 	}
 	return &HotStore{
 		chunkStore: store,
 		chunkID:    chunkID,
-		mirror:     mirror,
+		index:      index,
 		offsets:    offsets,
 	}, nil
 }
@@ -168,26 +177,13 @@ func (h *HotStore) Offsets() (*LedgerOffsets, error) {
 	return h.offsets.View(), nil
 }
 
-// LookupKeys returns bitmaps for each key, aligned positionally with
-// the input slice. result[i] is nil if keys[i] has no matching
-// events. See Reader.LookupKeys for the semantics — in particular
-// the borrowed-bitmap contract (callers must not mutate).
+// LookupKeys returns each key's event ids in the slabs the window touches,
+// aligned positionally with the input slice, and the id range those slabs
+// span. See Reader.LookupKeys for the semantics.
 //
-// Hot-side implementation is N in-memory mirror lookups — no I/O
-// to batch — but exposing this method satisfies the Reader
-// interface so callers can program against batched lookups
-// uniformly.
-//
-// Each bitmap is a point-in-time image of its term: a sparse term is
-// copied out of the mirror's published id list, a dense one is
-// denseState.snapshot, the immutable clone shared with every other
-// reader. Neither grows under its holder, so a walk never sees an id
-// written after its lookup.
-//
-// The window is ignored — these images are whole-chunk and already in
-// memory, and a whole term agrees with the index inside any window — so the
-// covered range is the whole id space, and a query over the hot store runs
-// in one stage rather than looking up ids it is already holding.
+// A key with no events in the covered range gets an empty bitmap, never
+// nil: nil would promise the chunk has none, and the lookup read only the
+// window's slabs. Every bitmap is built for the caller.
 func (h *HotStore) LookupKeys(
 	ctx context.Context, keys []TermKey, window IDRange,
 ) ([]*roaring.Bitmap, IDRange, error) {
@@ -200,15 +196,14 @@ func (h *HotStore) LookupKeys(
 	if len(keys) == 0 {
 		return nil, window, nil
 	}
-	results := make([]*roaring.Bitmap, len(keys))
-	for i, key := range keys {
-		bm, err := h.mirror.Get(key)
-		if err != nil {
-			return nil, IDRange{}, fmt.Errorf("events: LookupKeys for chunk %s: %w", h.chunkID, err)
-		}
-		results[i] = bm // nil for misses — Get already returns nil bitmap for not-found
+	results, covered, err := h.index.lookup(ctx, keys, window)
+	if errors.Is(err, rocksdb.ErrStoreClosed) {
+		return nil, IDRange{}, stores.ErrStoreClosed
 	}
-	return results, IDRange{End: math.MaxUint32}, nil
+	if err != nil {
+		return nil, IDRange{}, fmt.Errorf("events: LookupKeys for chunk %s: %w", h.chunkID, err)
+	}
+	return results, covered, nil
 }
 
 // FetchEvents decodes the events_data row for each provided eventID
@@ -388,7 +383,7 @@ func (h *HotStore) All(ctx context.Context) iter.Seq2[Payload, error] {
 // contract (event IDs are assigned by arrival position). Terms are derived via
 // TermsForBytes on each payload's ContractEventBytes.
 //
-// Sequence validation, before any Put or mirror mutation:
+// Sequence validation, before any Put or index mutation:
 //
 //   - ledgerSeq must lie within [chunkID.FirstLedger(), chunkID.LastLedger()] —
 //     out-of-range returns ErrLedgerOutOfRange.
@@ -397,14 +392,12 @@ func (h *HotStore) All(ctx context.Context) iter.Seq2[Payload, error] {
 //     ledger is a mis-sequencing source (the ingestion loop's seq guard should
 //     have caught it) — an error (ErrLedgerOutOfOrder), never silent tolerance.
 //
-// Post-batch atomicity: once the batch commits, the apply hook's in-memory
-// mirror + offsets updates are infallible by construction. Any failure there
-// panics rather than returning an error, because a returned error would leave
-// on-disk state ahead of in-memory state with no clean recovery short of
-// close + reopen.
+// The apply hook fails only when the index could not seal an earlier slab
+// (see hotIndex.add). The ledger is committed either way, and the next open
+// indexes it again, so the caller must not go on ingesting after a failure.
 func (h *HotStore) IngestLedgerToBatch(
 	b *rocksdb.BatchWriter, ledgerSeq uint32, payloads []Payload,
-) (func(), error) {
+) (func() error, error) {
 	// Validate BEFORE any Put. On error Store.Batch discards the whole WriteBatch,
 	// so a mid-loop failure never orphans rows — no separate staging buffer needed.
 	if ledgerSeq < h.chunkID.FirstLedger() || ledgerSeq > h.chunkID.LastLedger() {
@@ -419,7 +412,7 @@ func (h *HotStore) IngestLedgerToBatch(
 	}
 
 	// Derive term keys per payload up front (a TermsForBytes error rejects the
-	// ledger without any Put) and retain them for the post-commit mirror update.
+	// ledger without any Put) and retain them for the post-commit index update.
 	termKeys := make([][]TermKey, len(payloads))
 	for i := range payloads {
 		keys, err := TermsForBytes(payloads[i].ContractEventBytes)
@@ -445,110 +438,131 @@ func (h *HotStore) IngestLedgerToBatch(
 			return nil, fmt.Errorf("marshal payload %d for ledger %d: %w", i, ledgerSeq, err)
 		}
 		scratch = blob
-		eventID := startID + uint32(i)
-		b.Put(DataCF, encodeDataKey(eventID), blob)
-		for _, key := range termKeys[i] {
-			b.Put(IndexCF, encodeIndexKey(key, eventID), nil)
-		}
+		b.Put(DataCF, encodeDataKey(startID+uint32(i)), blob)
 	}
 	//nolint:gosec // len bounded by the overflow guard above
 	b.Put(OffsetsCF, encodeOffsetKey(ledgerSeq), encodeLedgerEventCount(uint32(len(payloads))))
 
-	return func() { h.applyLedger(startID, termKeys) }, nil
+	return func() error { return h.applyLedger(startID, termKeys) }, nil
 }
 
-// index returns the in-memory term mirror. Test-only write hook: no production
-// path reads it. Kept unexported until #772 decides whether the v2 read path
-// hooks into it.
-func (h *HotStore) index() *ConcurrentBitmaps { return h.mirror }
-
-// applyLedger updates the mirror + offsets for a ledger whose rows are durable.
-// Infallible by construction (IngestLedgerToBatch validated seq under the
-// single-writer contract); the only non-completion is a crash, after which warmup
-// rebuilds.
+// applyLedger updates the index + offsets for a ledger whose rows are durable.
+// It appends in memory; at a slab boundary it first waits for the previous
+// slab's seal.
 //
-// Ordering invariant: mirror BEFORE offsets. A concurrent Matches call that snapshots
-// offsets then reads the mirror must see either the prior state or a consistent
+// Ordering invariant: index BEFORE offsets. A concurrent Matches call that snapshots
+// offsets then reads the index must see either the prior state or a consistent
 // later one. Reversing it would let a reader see an offsets count including IDs
-// the mirror hasn't published — FetchEvents would then miss them, silently.
-func (h *HotStore) applyLedger(startID uint32, termKeys [][]TermKey) {
-	// Batch by key so each key takes one AddTo per ledger instead of one per
-	// event, saving per-term lock round-trips. Cap 64 ≈ a few × unique-terms
-	// per ledger; the map grows past that.
-	perKeyIDs := make(map[TermKey][]uint32, 64)
-	for i, keys := range termKeys {
-		eventID := startID + uint32(i)
-		for _, key := range keys {
-			perKeyIDs[key] = append(perKeyIDs[key], eventID)
-		}
-	}
-	for key, ids := range perKeyIDs {
-		h.mirror.AddTo(key, ids...)
+// the index hasn't published — FetchEvents would then miss them, silently.
+func (h *HotStore) applyLedger(startID uint32, termKeys [][]TermKey) error {
+	if err := h.index.add(startID, termKeys); err != nil {
+		return err
 	}
 	//nolint:gosec // len bounded by IngestLedgerToBatch's overflow guard
 	h.offsets.Append(uint32(len(termKeys)))
+	return nil
 }
 
 // ──────────────────────────────────────────────────────────────────
-// Warmup — reconstructs the in-memory mirror + offsets from the
-// per-Chunk DB's on-disk CFs. Called by NewWithStore.
+// Warmup — reconstructs the term index + offsets from the per-Chunk
+// DB's on-disk CFs. Called by NewWithStore.
 // ──────────────────────────────────────────────────────────────────
 
-// warmup rebuilds the in-memory mirrors for chunkID by prefix-scanning
-// the chunk's two on-disk caches once each:
+// warmup rebuilds the in-memory state for chunkID:
 //
-//   - events_index  → *ConcurrentBitmaps — every
-//     (TermKey, eventID) row replayed into a fresh in-memory
-//     bitmap mirror.
 //   - events_offsets → *ConcurrentLedgerOffsets — every
 //     (ledger_seq, per_ledger_count) row replayed into a fresh
 //     offset cache.
+//   - events_index + events_data → *hotIndex — the sealed slabs stay
+//     in events_index; the events after them are indexed again from
+//     their events_data rows, and a full slab a later event follows is
+//     sealed.
 //
 // chunkID seeds ConcurrentLedgerOffsets.StartLedger for empty
 // chunks; on-disk rows carry the full ledger sequence themselves.
-// Both mirrors are empty for fresh chunks.
 func warmup(
 	chunkStore *rocksdb.Store, chunkID chunk.ID,
-) (*ConcurrentBitmaps, *ConcurrentLedgerOffsets, error) {
-	mirror, indexUpperBound, err := warmupIndex(chunkStore)
-	if err != nil {
-		return nil, nil, err
-	}
+) (*hotIndex, *ConcurrentLedgerOffsets, error) {
 	offsets, err := warmupOffsets(chunkStore, chunkID)
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := verifyChunkConsistency(chunkStore, offsets.TotalEvents(), indexUpperBound); err != nil {
+	sealed, err := sealedHotSlabs(chunkStore)
+	if err != nil {
 		return nil, nil, err
 	}
-	return mirror, offsets, nil
+	if err := verifyChunkConsistency(chunkStore, offsets.TotalEvents(), sealed); err != nil {
+		return nil, nil, err
+	}
+	index := newHotIndex(chunkStore, sealed)
+	if err := replayUnsealed(chunkStore, index, sealed<<indexSlabShift, offsets.TotalEvents()); err != nil {
+		return nil, nil, err
+	}
+	return index, offsets, nil
 }
 
-// verifyChunkConsistency cross-checks the three on-disk CFs after warmup,
-// turning a torn or tampered chunk into a loud open failure instead of a
-// silently inconsistent in-memory cache. The CFs are written in one
-// atomic batch, so under normal operation these invariants always hold;
-// a violation means a bug or external corruption.
+// replayUnsealed indexes the committed events in [from, total), which the
+// index must not hold yet, from their events_data rows.
+func replayUnsealed(chunkStore *rocksdb.Store, index *hotIndex, from, total uint32) error {
+	if from == total {
+		return nil
+	}
+	// The scan holds the store's lifecycle lock, which a seal takes too, so
+	// the events are indexed after the scan.
+	var termKeys [][]TermKey
+	for entry, err := range chunkStore.IterateRange(DataCF, encodeDataKey(from), encodeDataKey(total-1)) {
+		if err != nil {
+			return fmt.Errorf("events: warmup scan %s: %w", DataCF, err)
+		}
+		id := from + uint32(len(termKeys)) //nolint:gosec // below total
+		if len(entry.Key) != dataKeyLen || binary.BigEndian.Uint32(entry.Key) != id {
+			return fmt.Errorf("events: corrupt chunk: %s key %x where event %d belongs", DataCF, entry.Key, id)
+		}
+		var p Payload
+		if err := p.Unmarshal(entry.Value); err != nil {
+			return fmt.Errorf("events: warmup decode event %d: %w", id, err)
+		}
+		keys, err := TermsForBytes(p.ContractEventBytes)
+		if err != nil {
+			return fmt.Errorf("events: warmup derive terms for event %d: %w", id, err)
+		}
+		termKeys = append(termKeys, keys)
+	}
+	if found := len(termKeys); found != int(total-from) {
+		return fmt.Errorf("events: corrupt chunk: %s holds %d of the %d committed events", DataCF, int(from)+found, total)
+	}
+	if err := index.add(from, termKeys); err != nil {
+		return err
+	}
+	return index.settle()
+}
+
+// verifyChunkConsistency cross-checks the three on-disk CFs before the
+// unsealed events are indexed again, turning a torn or tampered chunk into
+// a loud open failure instead of a
+// silently inconsistent in-memory cache. Data and offsets are written in
+// one atomic batch and a slab is sealed only after its events commit, so
+// under normal operation these invariants always hold; a violation means
+// a bug or external corruption.
 //
-//   - the index may not reference an event the offsets don't account for:
-//     indexUpperBound (max indexed event ID + 1, 0 if none) <= total.
+//   - the index may not hold a slab the offsets don't account for: a
+//     sealed slab is full, so the offsets count all of its ids.
 //   - the data tail matches total: event total-1 present (when total > 0)
 //     and no data row at any id >= total. Together those pin the max data
 //     id to exactly total-1 — one Get plus one bounded seek.
 //
-// Not detected here: interior data holes (a missing id within 0..total-2,
-// masked by a higher present id), under-indexed terms, and wrong
+// Not detected here: interior data holes below the sealed slabs (a missing
+// id masked by a higher present id), under-indexed terms, and wrong
 // per-ledger boundaries — each would need a full scan. The atomic batch
 // makes all of them impossible for the writer; an interior hole that did
 // appear (corruption/tamper) is caught lazily by FetchRange's short-scan
-// check on first read. This is a cheap open-time tripwire on denormalized
+// check on first read, or by warmup when it is among the events indexed
+// again. This is a cheap open-time tripwire on denormalized
 // state, not load-bearing correctness.
-func verifyChunkConsistency(chunkStore *rocksdb.Store, total uint32, indexUpperBound uint64) error {
-	// indexUpperBound is uint64 so a hostile row at eventID ==
-	// MaxUint32 can't wrap max+1 to 0 and slip past this check.
-	if indexUpperBound > uint64(total) {
-		return fmt.Errorf("events: corrupt chunk: index references event %d but only %d committed",
-			indexUpperBound-1, total)
+func verifyChunkConsistency(chunkStore *rocksdb.Store, total, sealedSlabs uint32) error {
+	if sealedSlabs > total>>indexSlabShift {
+		return fmt.Errorf("events: corrupt chunk: %d index slabs sealed but only %d events committed",
+			sealedSlabs, total)
 	}
 	if total > 0 {
 		_, ok, err := chunkStore.Get(DataCF, encodeDataKey(total-1))
@@ -570,64 +584,6 @@ func verifyChunkConsistency(chunkStore *rocksdb.Store, total uint32, indexUpperB
 		return fmt.Errorf("events: corrupt chunk: data present at id >= committed count %d", total)
 	}
 	return nil
-}
-
-// warmupIndex scans the events_index CF and replays every
-// (TermKey, eventID) row into a fresh ConcurrentBitmaps.
-// Design doc §12 step 3.
-//
-// Implementation: build into a single-threaded Bitmaps via
-// per-term batching (rocksdb's byte-sorted iteration delivers all
-// rows for term K consecutively, so a small buffer flushes when the
-// term changes), then convert to ConcurrentBitmaps at the end. This
-// keeps warmup off the concurrent index's per-term locking and
-// promotion path — one AddTo per term instead of one per index row,
-// ~50M for a 10M-event chunk.
-//
-// Also returns the exclusive upper bound of indexed event IDs (max + 1,
-// or 0 if the index is empty; uint64 so max+1 can't wrap — see
-// verifyChunkConsistency) for warmup's cross-check against the
-// committed event count.
-func warmupIndex(chunkStore *rocksdb.Store) (*ConcurrentBitmaps, uint64, error) {
-	builder := NewBitmaps()
-	var (
-		hasPrev         bool
-		prevTerm        TermKey
-		buf             []uint32
-		indexUpperBound uint64 // max indexed event ID + 1; 0 if no rows
-	)
-	flush := func() {
-		if !hasPrev || len(buf) == 0 {
-			return
-		}
-		builder.AddTo(prevTerm, buf...)
-		buf = buf[:0]
-	}
-
-	for entry, err := range chunkStore.Iterate(IndexCF, nil) {
-		if err != nil {
-			return nil, 0, fmt.Errorf("events: warmup scan %s: %w", IndexCF, err)
-		}
-		if len(entry.Key) != indexKeyLen {
-			return nil, 0, fmt.Errorf("events: warmup unexpected %s key length %d (want %d)",
-				IndexCF, len(entry.Key), indexKeyLen)
-		}
-		var term TermKey
-		copy(term[:], entry.Key[0:16])
-		eventID := binary.BigEndian.Uint32(entry.Key[16:20])
-		if uint64(eventID)+1 > indexUpperBound {
-			indexUpperBound = uint64(eventID) + 1
-		}
-		if hasPrev && term != prevTerm {
-			flush()
-		}
-		prevTerm = term
-		hasPrev = true
-		buf = append(buf, eventID)
-	}
-	flush()
-
-	return NewConcurrentBitmapsFromBitmaps(builder), indexUpperBound, nil
 }
 
 // warmupOffsets scans events_offsets and replays every (ledger_seq,
@@ -685,13 +641,6 @@ func warmupOffsets(chunkStore *rocksdb.Store, chunkID chunk.ID) (*ConcurrentLedg
 func encodeDataKey(eventID uint32) []byte {
 	var key [dataKeyLen]byte
 	binary.BigEndian.PutUint32(key[:], eventID)
-	return key[:]
-}
-
-func encodeIndexKey(term TermKey, eventID uint32) []byte {
-	var key [indexKeyLen]byte
-	copy(key[:16], term[:])
-	binary.BigEndian.PutUint32(key[16:], eventID)
 	return key[:]
 }
 

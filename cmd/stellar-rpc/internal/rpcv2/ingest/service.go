@@ -41,11 +41,12 @@ func NewHotService(db *hotchunk.DB, windows *feewindow.FeeWindows, sink MetricSi
 // success it returns the committed ledger's close time (see
 // hotchunk.LedgerReport.CloseTime). Each
 // phase carries its own wall-clock (the phases partition the per-ledger total),
-// the write phases carry per-type item volume on success, and the outcome lands on
+// the write phases carry per-type item volume once the commit landed, and the outcome lands on
 // the phase that failed BY CONSTRUCTION — a decode failure on PhaseExtract, a
 // commit failure on PhaseCommit — so there is no mislabeled batch-scoped error.
-// On failure only phases [0, Failed] ran, so only those are emitted (and with zero
-// items — nothing landed durably); on success every phase is emitted. The walk
+// On failure only phases [0, Failed] ran, so only those are emitted; the write
+// phases carry their item volume once the commit landed, so a failure before
+// the commit carries none. On success every phase is emitted. The walk
 // runs here (see the type doc) and its duration folds into PhaseExtract, keeping
 // that phase "the walk + product reads".
 //
@@ -79,15 +80,11 @@ func (s *HotService) Ingest(seq uint32, lcmView xdr.LedgerCloseMetaView) (int64,
 		last = rep.Failed
 	}
 	for p := hotchunk.Phase(0); p <= last; p++ {
-		items := rep.Phases[p].Items
 		var perr error
-		if err != nil {
-			items = 0 // the failure path committed nothing durably
-			if p == rep.Failed {
-				perr = err
-			}
+		if err != nil && p == rep.Failed {
+			perr = err
 		}
-		s.sink.HotPhase(p, rep.Phases[p].Dur, items, perr)
+		s.sink.HotPhase(p, rep.Phases[p].Dur, rep.Phases[p].Items, perr)
 	}
 	if err != nil {
 		return 0, err
