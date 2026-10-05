@@ -1276,6 +1276,47 @@ func TestHotService_EmitsEveryPhaseOnSuccess(t *testing.T) {
 	assert.False(t, hadErr, "success path carries no phase error")
 }
 
+// A failed apply reports every phase, the write phases with what landed and
+// the error on PhaseApply.
+func TestHotService_EmitsEveryPhaseOnFailedApply(t *testing.T) {
+	dir := t.TempDir()
+	db, err := hotchunk.Open(dir, chunk.ID(0), hotTestLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	// A file where the events index wants its load directory makes every
+	// seal fail.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "loading"), nil, 0o600))
+
+	sink := &testSink{}
+	svc := NewHotService(db, nil, sink)
+	first := chunk.ID(0).FirstLedger()
+	var contractID xdr.ContractId
+	contractID[0] = 0xab
+	events := func(n int) []xdr.ContractEvent {
+		evs := make([]xdr.ContractEvent, n)
+		for i := range evs {
+			evs[i] = rpcv2test.SymbolContractEvent(contractID, "x", "x")
+		}
+		return evs
+	}
+	// The first ledger fills index slab 0, whose seal fails; the second
+	// reaches the next slab boundary and learns of it.
+	_, err = svc.Ingest(first, xdr.LedgerCloseMetaView(rpcv2test.EventsLCMBytes(t, first, events(1<<16+1)...)))
+	require.NoError(t, err)
+	sink.hotPhases = nil
+	_, err = svc.Ingest(first+1, xdr.LedgerCloseMetaView(rpcv2test.EventsLCMBytes(t, first+1, events(1<<16)...)))
+	require.ErrorContains(t, err, "seal index slab 0")
+
+	require.Len(t, sink.hotPhases, int(hotchunk.NumPhases), "every phase emitted once")
+	items := sink.hotPhaseItems()
+	assert.Equal(t, 1, items[hotchunk.PhaseLedgers])
+	assert.Equal(t, 1, items[hotchunk.PhaseTxhash])
+	assert.Equal(t, 1<<16, items[hotchunk.PhaseEvents])
+	failed, hadErr := sink.hotPhaseErr()
+	require.True(t, hadErr)
+	assert.Equal(t, hotchunk.PhaseApply, failed)
+}
+
 // TestHotService_CommitErrorLandsOnCommitPhase asserts a commit failure (a closed
 // DB) surfaces the error on the commit phase — by construction, not by a
 // separately-maintained label — and emits no items on the failure path.

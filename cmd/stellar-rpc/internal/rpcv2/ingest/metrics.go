@@ -60,11 +60,11 @@ var coldStagePairs = []struct{ dataType, stage string }{
 type MetricSink interface {
 	// HotPhase reports ONE phase of one hot ledger ingest — the single hot-tier
 	// signal family. It carries that phase's wall-clock, its item count (0 for the
-	// extract/commit/apply phases, the per-type write volume for the write phases, on
-	// the success path), and its outcome (err is non-nil only on the phase that
+	// extract/commit/apply phases, the per-type write volume for the write phases
+	// once the commit landed), and its outcome (err is non-nil only on the phase that
 	// failed, so a decode failure lands on PhaseExtract and a commit failure on
-	// PhaseCommit by construction; the post-commit PhaseApply runs on success only, so
-	// it never carries an error). The per-ledger total is the sum of the phase
+	// PhaseCommit by construction; the post-commit PhaseApply fails only when the
+	// events index could not seal a slab). The per-ledger total is the sum of the phase
 	// durations; the caller emits phases [0, Failed] on error and all phases on success.
 	HotPhase(phase hotchunk.Phase, d time.Duration, items int, err error)
 	// ColdIngest reports one cold ingester's per-chunk total: the summed Ingest

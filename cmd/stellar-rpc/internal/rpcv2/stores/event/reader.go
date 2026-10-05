@@ -83,7 +83,7 @@ type Reader interface {
 	//   - ColdReader returns the lazily-decoded LedgerOffsets cached
 	//     on the reader; the same pointer is returned to every
 	//     caller. Both paths must treat the returned value as
-	//     read-only — mutation would corrupt either the live mirror
+	//     read-only — mutation would corrupt either the live offsets
 	//     (hot, indirectly via the view's backing slice) or every
 	//     other reader holding the cached pointer (cold).
 	//
@@ -92,8 +92,10 @@ type Reader interface {
 
 	// LookupKeys returns bitmaps for each key, aligned positionally
 	// with the input slice (result[i] corresponds to keys[i]).
-	// result[i] is nil if keys[i] has no matching events in this
-	// chunk — a per-key miss is not an error.
+	// result[i] is nil only when the reader knows keys[i] has no
+	// events anywhere in this chunk; otherwise it is a bitmap, empty
+	// included, that answers for the covered range. A per-key miss
+	// is not an error.
 	//
 	// window is the id range the caller asks to be answered for.
 	// The second result is the range the answer actually covers: it
@@ -112,21 +114,15 @@ type Reader interface {
 	// ColdReader coalesces the underlying packfile reads into a
 	// single ReadItems pass, fanning out across the worker count
 	// configured via ColdReaderOptions.Concurrency. It reads a split term
-	// only in the slabs the window reaches, and covers them. HotStore returns
-	// snapshots of the live mirror shared by all readers of a term;
-	// a dense term written since its last lookup is cloned once, by
-	// the first reader to look it up, and that clone is then shared,
-	// window or no window.
+	// only in the slabs the window reaches, and covers them. HotStore reads
+	// the slabs the window reaches, from memory or from its index column
+	// family, and covers them.
 	//
-	// Callers MUST treat returned bitmaps as read-only. Dense hot
-	// snapshots are shared with other readers; sparse hot terms
-	// return a fresh caller-owned bitmap per lookup; cold-path
-	// bitmaps are freshly unmarshaled and owned by the caller. See
-	// ConcurrentBitmaps.Get.
+	// Callers MUST treat returned bitmaps as read-only.
 	//
 	// ctx cancels in-flight I/O on the cold path (MPHF load,
 	// index.pack ReadAt); hot side checks ctx as a fast guard before
-	// touching the in-memory mirror.
+	// touching the index.
 	LookupKeys(ctx context.Context, keys []TermKey, window IDRange) ([]*roaring.Bitmap, IDRange, error)
 
 	// FetchEvents decodes events for the supplied chunk-relative
