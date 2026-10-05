@@ -9,11 +9,12 @@ package event
 // Optimization shape: terms are deduped across filters and issued as one
 // batched Reader.LookupKeys per window stage, whose bitmaps the walk holds
 // for that stage; payload fetches stream in internal batches. The window is
-// materialized in two stages — the leading slabs in the walk's direction,
-// then the remainder, and the second only if the page did not fill — so a
-// query that stops after a page asked the index about the slabs that page
-// spans, not about the whole window. The candidate set comes from the slab
-// engine in slab_match.go, which serves both directions from one walk.
+// materialized in stages of a few slabs each, in the walk's direction, the
+// next only if the page did not fill — so a query that stops after a page
+// asked the index about the slabs that page spans, not about the whole
+// window, and no query holds more than a stage of the index at once. The
+// candidate set comes from the slab engine in slab_match.go, which serves
+// both directions from one walk.
 
 import (
 	"bytes"
@@ -215,8 +216,15 @@ func IDRangeForLedgers(ofs *LedgerOffsets, startLedger, endLedger uint32) (IDRan
 //nolint:gochecknoglobals // test seam; production never writes it
 var matchBatchSize = 512
 
-// firstStageSlabs is how many slabs a query's first stage covers.
-const firstStageSlabs = 4
+// firstStageSlabs is how many slabs a query's first stage covers, and
+// stageSlabs how many every later one does. A split term is read only for a
+// stage's slabs and held for its walk, at most one container per slab, so a
+// query holds at most 128 KiB of each split term at once whatever the
+// chunk's density: under 2 MiB for queryEvents' 15-term budget.
+const (
+	firstStageSlabs = 4
+	stageSlabs      = 16
+)
 
 // Match is a payload plus Ordinal, its chunk-relative event ID. A
 // consumer that stops mid-stream needs the ordinal to know where it
@@ -245,19 +253,14 @@ func batchSizes(hint int) (int, int) {
 	return first, rest
 }
 
-// stage1Request is the piece of remaining a query's first lookup asks for:
-// the leading firstStageSlabs slabs from the edge the walk starts at — the
-// trailing ones when descending.
-//
-// Every stage after it asks for the whole remainder, so there are at most two
-// lookups, and a query that fills its page inside stage 1 never makes the
-// second — the point of the split. The request falls on a slab boundary, so
-// no slab is split across two stages and the candidates evaluated are the
-// same whether there are one or two; the leading stage is entered at the
-// window's own bound, which may sit mid-slab. remaining is never empty here,
-// so End is never zero.
-func stage1Request(remaining IDRange, descending bool) IDRange {
-	const slabs = uint64(firstStageSlabs)
+// stageRequest is the piece of remaining a lookup asks for: the given
+// number of slabs from the edge the walk starts at — the trailing ones when
+// descending. The request falls on a slab boundary, so no slab is split
+// across two stages and the candidates evaluated are the same however the
+// window is staged; the leading stage is entered at the window's own bound,
+// which may sit mid-slab. remaining is never empty here, so End is never
+// zero.
+func stageRequest(remaining IDRange, descending bool, slabs uint64) IDRange {
 	if descending {
 		// The base of the slabs-th slab at or below the one holding End-1.
 		lo := remaining.Start
@@ -303,18 +306,18 @@ func stageRemainder(remaining, walked IDRange, descending bool) IDRange {
 // drops are invisible: the iterator advances past them internally, so
 // consumers never see or reason about resume state.
 //
-// The window is materialized in at most two stages (see stage1Request): the
-// leading slabs in the walk's direction, then the remainder, and the second
-// only if the consumer is still pulling when the first runs out. A stage is
-// walked as far as its lookup says it covered, so the seam moves to where the
-// reading stopped and no part is read twice. The stream is still the pinned
-// window's: the caller pins window.End below the ingest frontier (see
-// IDRange) and a committed ledger's events never change, so every stage's
-// image answers for the window identically.
+// The window is materialized in stages (see stageRequest): the leading slabs
+// in the walk's direction, then the next, each only if the consumer is still
+// pulling when the previous runs out. A stage is walked as far as its lookup
+// says it covered, so the seam moves to where the reading stopped and no part
+// is read twice. The stream is still the pinned window's: the caller pins
+// window.End below the ingest frontier (see IDRange) and a committed ledger's
+// events never change, so every stage's image answers for the window
+// identically.
 //
 // firstBatch sizes the first internal fetch: a consumer that will stop after
 // N matches passes N. Zero and negative hints use the default. A page that
-// spans the stage seam carries the rest of its hint into the second stage.
+// spans a stage seam carries the rest of its hint into the next stage.
 // The hint changes I/O counts only, never what the stream yields.
 func Matches(
 	ctx context.Context, r Reader, filters []Filter, window IDRange,
@@ -338,10 +341,10 @@ func Matches(
 		}
 		emitted := 0
 		// remaining is the part of the window no stage has walked yet. A stage
-		// always walks at least what it asked for, so it always shrinks; every
-		// stage after the first asks for the whole of it.
+		// always walks at least what it asked for, so it always shrinks.
 		remaining := window
-		for stage := stage1Request(window, descending); !remaining.isEmpty(); stage = remaining {
+		for slabs := uint64(firstStageSlabs); !remaining.isEmpty(); slabs = stageSlabs {
+			stage := stageRequest(remaining, descending, slabs)
 			sources, covered, err := r.LookupKeys(ctx, uniqueKeys, stage)
 			if err != nil {
 				yield(Match{}, fmt.Errorf("events: query lookup: %w", err))
@@ -366,8 +369,8 @@ func Matches(
 			if len(st.plans) == 0 {
 				return
 			}
-			// firstBatch is the whole query's hint, so what stage 1 yielded
-			// comes off it. A spent hint goes non-positive and batchSizes
+			// firstBatch is the whole query's hint, so what earlier stages
+			// yielded comes off it. A spent hint goes non-positive and batchSizes
 			// falls back to the default.
 			n, ok := streamSlabs(
 				ctx, r, filters, st, descending, firstBatch-emitted, yield)
