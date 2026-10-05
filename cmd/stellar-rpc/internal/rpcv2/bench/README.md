@@ -214,8 +214,8 @@ two runs, and it keeps the `run.json` of a run that stopped (see section 7.3).
 The command also checks the flags and the dataset directories (see section 8)
 before it changes `--out`. If a check fails, the command creates nothing in
 `--out`. When the checks pass, `bench query` writes `run.json` to `--out`. It
-writes `latency.csv` and `scenarios.csv` when at least one scenario has a
-result.
+writes `latency.csv`, `scenarios.csv` and `bench.txt` when at least one
+scenario has a result.
 
 If a measured request fails, the run fails after the command adds its scenario
 to the report. A failed warmup request does not fail the run. `warmup_failed`
@@ -296,6 +296,52 @@ If you cancel the run, `status` is `failed`, and `error` contains
 | `settings.eventsPool` | `derived` or `unfiltered`. See section 9.2. Absent when `--types` does not include `events`, or when the pool build does not complete. |
 | `settings.fixedReadRange` | The types whose span covers all ledgers of the dataset, for example `ledgers,txpage`. Absent when no span covers them. |
 | `setupNs.storeOpen` | The time to open the dataset, before the first scenario. |
+
+### 7.4 `bench.txt`
+
+`bench.txt` contains the scenarios in the Go benchmark format, for
+`benchstat`. The first two lines are `goos` and `goarch`. Then there is one
+line for each scenario that has at least one planned iteration, in run order:
+
+```
+BenchmarkQuery/type=ledgers/rps=10  600  812345 ns/op  790123 p50-ns  2345678 p99-ns  2400000 p99-from-due-ns  20 items/op  10 achieved-rps  0 dropped  0 failed
+```
+
+The fields are tab-separated. The name has the parts `type=<query_type>` and
+`rps=<target_rps>`. For `txhash`, one more line for each lookup outcome follows
+the scenario line. Its name ends with `/outcome=found` or
+`/outcome=not_found`. These lines do not have `achieved-rps`, `dropped` and
+`failed`.
+
+| Field | Definition |
+|---|---|
+| Iterations (second field) | `succeeded`, or `count` of the outcome. When no request succeeded, `planned`. |
+| `ns/op` | The mean `latency`: `total_ns / count`, in nanoseconds. |
+| `p50-ns`, `p99-ns` | The `latency` percentiles, in nanoseconds. See section 6. |
+| `p99-from-due-ns` | The p99 of `latency_from_due`, in nanoseconds. |
+| `items/op` | `items / count` of the `latency` row. |
+| `achieved-rps` | `started / schedule`. |
+| `dropped`, `failed` | The dropped and failed measured iterations. |
+
+When no request succeeded, the scenario line has only `achieved-rps`,
+`dropped` and `failed`.
+
+To compare two builds:
+
+1. Run each build at least 6 times. Use a different `--out` for each run.
+   With fewer runs, `benchstat` does not show a 95% confidence interval.
+2. Put the `bench.txt` files of each build into one file, for example
+   `cat old-*/bench.txt > old.txt` and `cat new-*/bench.txt > new.txt`.
+   Use only the runs whose `run.json` has `status` set to `ok`. The
+   `bench.txt` of a failed run can have scenarios that stopped early.
+3. Run `benchstat old.txt new.txt`.
+
+`benchstat` shows the `ns` units in seconds, for example `p99-sec`. To
+compare the rates of one build, run `benchstat -col /rps new.txt`.
+
+`benchstat` tests each metric of each scenario separately. It does not correct
+for multiple comparisons. Thus, when there are many scenarios, expect some
+differences with p < 0.05 by chance.
 
 ## 8. Datasets
 

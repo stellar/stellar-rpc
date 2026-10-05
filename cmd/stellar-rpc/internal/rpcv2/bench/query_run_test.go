@@ -430,7 +430,7 @@ func TestQueryColdCommandWithoutTxHashIndex(t *testing.T) {
 }
 
 // A run that fails after a scenario is added still writes that scenario's
-// CSVs, logs them PARTIAL and returns the run error.
+// report files, logs them PARTIAL and returns the run error.
 func TestQueryBenchWritesPartialReport(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
 	env := runEnv{OutDir: t.TempDir(), Settings: map[string]string{}, SetupTimes: map[string]time.Duration{}}
@@ -454,5 +454,5 @@ func TestQueryBenchWritesPartialReport(t *testing.T) {
 	require.Len(t, rows, 1)
 	assert.Equal(t, queryTypeLedgers, rows[0]["query_type"])
 	assert.FileExists(t, filepath.Join(env.OutDir, queryLatencyFile))
-	assert.Contains(t, output.String(), "PARTIAL CSVs")
+	assert.Contains(t, output.String(), "PARTIAL report files")
 }
