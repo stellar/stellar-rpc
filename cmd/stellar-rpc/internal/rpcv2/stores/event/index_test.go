@@ -250,7 +250,7 @@ func TestTermsForBytes_TopicCountClippedToMax(t *testing.T) {
 
 	keys, err := TermsForBytes(marshaledEvent(t, ev))
 	require.NoError(t, err)
-	assert.Len(t, keys, 3+protocol.MaxTopicCount,
+	assert.Len(t, keys, maxTermsPerEvent,
 		"type + contract-ID + topic-count terms, then MaxTopicCount topic terms (extras dropped)")
 }
 
