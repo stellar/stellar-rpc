@@ -53,6 +53,12 @@ type CFOptions struct {
 	// BloomFilterBitsPerKey installs this CF's bloom filter; 0 = none —
 	// right for a CF never probed for keys it may not hold.
 	BloomFilterBitsPerKey int
+
+	// CacheIndexAndFilterBlocks keeps each SST's index and filter blocks in
+	// the block cache instead of on the heap for as long as the file is
+	// open. For a CF that accumulates many files, it bounds their memory by
+	// the cache size.
+	CacheIndexAndFilterBlocks bool
 }
 
 // Tuning — DB-wide RocksDB knobs shared across every CF of one store. Zero
