@@ -67,22 +67,14 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 //
 // index.hash is the MPHF serialized via buildMPHF.
 //
-// index.pack format. One packfile record per MPHF slot, in slot
-// order. Each record is:
-//
-//	offset  size  field
-//	0       4     fingerprint (streamhash.Fingerprint of the routed key)
-//	4       N     serialized roaring bitmap (Bitmap.MarshalBinary)
-//
-// The cold reader uses mphf.Lookup(term) → slot and fingerprint,
-// packfile.Reader.ReadItem(slot, ...) to read the bytes, verifies the
-// fingerprint, and then deserializes the bitmap on match. Unseen terms
-// still produce a slot (vanilla MPHF semantics) but their fingerprint
-// mismatches — the cold reader rejects them at that point.
+// index.pack holds every term's bitmap in MPHF slot order, a big term
+// as one entry per slab (layout in cold_format.go). Unseen terms still
+// produce a slot (vanilla MPHF semantics) but their fingerprint
+// mismatches, and the cold reader rejects them there.
 //
 // streamhash's MPHF is a *minimal* perfect hash: slots are dense in
-// [0, len(bitmaps)), so packfile record positions exactly equal
-// slots. An assertion guards this invariant in case streamhash
+// [0, len(bitmaps)), which index.pack's entry positions are computed
+// from. An assertion guards this invariant in case streamhash
 // semantics ever shift.
 //
 // Failure semantics: on error, WriteColdIndex removes any index.hash
@@ -122,6 +114,7 @@ func WriteColdIndex(
 	defer m.Close()
 
 	entries := make([]indexEntry, 0, len(bitmaps))
+	var slabs uint32
 	for term, bitmap := range bitmaps {
 		slot, fp, lerr := m.Lookup(term)
 		if lerr != nil {
@@ -131,6 +124,9 @@ func WriteColdIndex(
 		// single-threaded either way: cold backfill from the .pack, or the freeze
 		// from the read-only hot DB.
 		bitmap.RunOptimize()
+		if !bitmap.IsEmpty() {
+			slabs = max(slabs, bitmap.Maximum()>>indexSlabShift+1)
+		}
 		entries = append(entries, indexEntry{slot: slot, fp: fp, bitmap: bitmap})
 	}
 
@@ -145,29 +141,12 @@ func WriteColdIndex(
 		}
 	}
 
-	// indexPackItemsPerRecord bitmaps per record (see cold_format.go
-	// for the rationale: offset-array size is per-record, so larger
-	// records shrink the resident array proportionally).
-	//
-	// No record codec is used: roaring's MarshalBinary already
-	// container-encodes (array / bitmap / RLE) the underlying data,
-	// and a second compression pass slows the query hot path
-	// measurably (~3.6× lookup latency in measurement) for marginal
-	// byte savings. Contrast events.pack, where XDR payloads grouped
-	// at 128/record offer plenty of compression headroom.
-	// Skipping compression is also why indexPackChecksum exists.
-	pw, err := packfile.Create(indexPackPath, packfile.WriterOptions{
-		Format:         indexPackFormat,
-		ItemsPerRecord: indexPackItemsPerRecord,
-		ContentHash:    true,
-		Overwrite:      true,
-		RecordChecksum: indexPackChecksum,
-	})
+	pw, err := packfile.Create(indexPackPath, indexPackWriterOptions())
 	if err != nil {
 		return fmt.Errorf("events: create index.pack at %s: %w", indexPackPath, err)
 	}
 
-	writerErr := writeIndexPackEntries(pw, entries)
+	writerErr := writeIndexPackEntries(pw, entries, slabs)
 	if writerErr != nil {
 		// pw.Close removes the partial index.pack. Join its error so a
 		// cleanup failure surfaces alongside the original write error,
@@ -180,23 +159,28 @@ func WriteColdIndex(
 	return nil
 }
 
-// indexEntry is one assembled index.pack record: the slot it lands at,
-// the 4-byte fingerprint, and the bitmap to serialize.
 type indexEntry struct {
 	slot   uint32
 	fp     [IndexRecordFingerprintLen]byte
 	bitmap *roaring.Bitmap
 }
 
-// writeIndexPackEntries appends every assembled record to the index.pack
-// writer in slot order and finishes the pack.
-func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
+// writeIndexPackEntries writes entries, which must be in slot order, and finishes the pack.
+func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry, slabs uint32) error {
 	// Serialize each bitmap into one reused buffer rather than a fresh
-	// MarshalBinary slice per record. AppendItem copies its input, so the
+	// MarshalBinary slice per entry. AppendItem copies its input, so the
 	// buffer is safe to reuse across iterations; roaring's WriteTo emits
 	// the same bytes MarshalBinary would, so the pack is byte-identical.
 	var buf bytes.Buffer
+	layout := indexLayout{slabs: slabs}
 	for _, e := range entries {
+		if e.bitmap.GetSerializedSizeInBytes() > indexSplitBytes {
+			if err := appendSplitTerm(pw, e.bitmap, slabs, &buf); err != nil {
+				return fmt.Errorf("events: write split slot %d to index.pack: %w", e.slot, err)
+			}
+			layout.rows = appendIndexRow(layout.rows, e.slot, e.fp)
+			continue
+		}
 		buf.Reset()
 		if _, werr := e.bitmap.WriteTo(&buf); werr != nil {
 			return fmt.Errorf("events: serialize bitmap at slot %d: %w", e.slot, werr)
@@ -205,5 +189,24 @@ func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
 			return fmt.Errorf("events: write slot %d to index.pack: %w", e.slot, err)
 		}
 	}
-	return pw.Finish(encodeIndexBuildStamp())
+	return pw.Finish(encodeIndexAppData(layout))
+}
+
+func appendSplitTerm(pw *packfile.Writer, bm *roaring.Bitmap, slabs uint32, buf *bytes.Buffer) error {
+	for x := range uint64(slabs) {
+		mask := roaring.New()
+		mask.AddRange(x<<indexSlabShift, (x+1)<<indexSlabShift)
+		slab := roaring.And(mask, bm)
+		buf.Reset()
+		if !slab.IsEmpty() {
+			slab.RunOptimize()
+			if _, err := slab.WriteTo(buf); err != nil {
+				return err
+			}
+		}
+		if err := pw.AppendItem(buf.Bytes()); err != nil {
+			return err
+		}
+	}
+	return nil
 }

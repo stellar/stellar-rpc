@@ -1,6 +1,7 @@
 package event
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
 // indexTestChunkID is the chunk ID every WriteColdIndex test uses for
@@ -40,26 +42,30 @@ func indexFixture(t *testing.T, n int) Bitmaps {
 	return idx
 }
 
-// loadIndexPack opens index.pack and returns a (slot → record bytes)
-// map. The record bytes include the 4-byte fingerprint prefix.
-func loadIndexPack(t *testing.T, path string) map[int][]byte {
+type indexArtifact struct {
+	entries [][]byte
+	appData []byte
+}
+
+// loadIndexPack reads index.pack. Without split terms, entries are indexed by slot.
+func loadIndexPack(t *testing.T, path string) indexArtifact {
 	t.Helper()
 	r := packfile.Open(path, packfile.ReaderOptions{})
 	t.Cleanup(func() { _ = r.Close() })
 	total, err := r.TotalItems()
 	require.NoError(t, err)
-	out := make(map[int][]byte, total)
+	ad, err := r.AppData()
+	require.NoError(t, err)
+	a := indexArtifact{entries: make([][]byte, total), appData: bytes.Clone(ad)}
 	positions := make([]int, total)
 	for i := range positions {
 		positions[i] = i
 	}
-	err = r.ReadItems(context.Background(), positions, func(idx int, data []byte) error {
-		// Copy out — data is invalidated when the callback returns.
-		out[idx] = append([]byte(nil), data...)
+	require.NoError(t, r.ReadItems(context.Background(), positions, func(i int, entry []byte) error {
+		a.entries[i] = bytes.Clone(entry)
 		return nil
-	})
-	require.NoError(t, err)
-	return out
+	}))
+	return a
 }
 
 // TestIndexPack_TrailerPinsFormatAndRecordSize locks the on-disk
@@ -78,8 +84,7 @@ func TestIndexPack_TrailerPinsFormatAndRecordSize(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, indexPackFormat, tr.Format,
 		"index.pack Format must match indexPackFormat constant")
-	assert.Equal(t, uint32(indexPackItemsPerRecord), tr.ItemsPerRecord,
-		"index.pack ItemsPerRecord must match indexPackItemsPerRecord constant")
+	assert.Zero(t, tr.ItemsPerRecord, "index.pack records have no item limit")
 }
 
 func TestWriteIndex_ProducesBothFiles(t *testing.T) {
@@ -94,7 +99,7 @@ func TestWriteIndex_ProducesBothFiles(t *testing.T) {
 	t.Cleanup(func() { _ = m.Close() })
 
 	// index.pack has one record per term.
-	records := loadIndexPack(t, filepath.Join(dir, IndexPackName(indexTestChunkID)))
+	records := loadIndexPack(t, filepath.Join(dir, IndexPackName(indexTestChunkID))).entries
 	assert.Len(t, records, 64)
 }
 
@@ -109,7 +114,7 @@ func TestWriteIndex_RoundTripsBitmapsPerTerm(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = m.Close() })
 
-	records := loadIndexPack(t, filepath.Join(dir, IndexPackName(indexTestChunkID)))
+	records := loadIndexPack(t, filepath.Join(dir, IndexPackName(indexTestChunkID))).entries
 
 	// For every term added by the fixture, look it up via MPHF +
 	// fingerprint and verify the deserialized bitmap matches the
@@ -122,8 +127,7 @@ func TestWriteIndex_RoundTripsBitmapsPerTerm(t *testing.T) {
 		slot, _, err := m.Lookup(term)
 		require.NoError(t, err, "lookup term-%d", i)
 
-		record, ok := records[int(slot)]
-		require.True(t, ok, "record missing at slot %d (term-%d)", slot, i)
+		record := records[slot]
 		require.GreaterOrEqual(t, len(record), IndexRecordFingerprintLen, "record at slot %d too short", slot)
 
 		assert.Equal(t, routedFP(term), record[:IndexRecordFingerprintLen],
@@ -148,7 +152,7 @@ func TestWriteIndex_UnseenTermFingerprintMismatches(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = m.Close() })
 
-	records := loadIndexPack(t, filepath.Join(dir, IndexPackName(indexTestChunkID)))
+	records := loadIndexPack(t, filepath.Join(dir, IndexPackName(indexTestChunkID))).entries
 
 	// Probe a batch of unseen terms. For each, the MPHF either
 	// fast-no-matches (ErrKeyNotFound — already covered by mphf_test)
@@ -169,9 +173,7 @@ func TestWriteIndex_UnseenTermFingerprintMismatches(t *testing.T) {
 		require.NoError(t, err)
 		collisions++
 
-		record, ok := records[int(slot)]
-		require.True(t, ok)
-		recordFP := record[:IndexRecordFingerprintLen]
+		recordFP := records[slot][:IndexRecordFingerprintLen]
 		if string(recordFP) != string(routedFP(unseen)) {
 			mismatches++
 		}
@@ -291,7 +293,7 @@ func TestWriteIndex_LargeIndex(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = m.Close() })
 
-	records := loadIndexPack(t, filepath.Join(dir, IndexPackName(indexTestChunkID)))
+	records := loadIndexPack(t, filepath.Join(dir, IndexPackName(indexTestChunkID))).entries
 	assert.Len(t, records, n)
 
 	// Spot-check a sample of terms.
@@ -302,9 +304,7 @@ func TestWriteIndex_LargeIndex(t *testing.T) {
 		)
 		slot, _, err := m.Lookup(term)
 		require.NoError(t, err)
-		record, ok := records[int(slot)]
-		require.True(t, ok)
-		assert.Equal(t, routedFP(term), record[:IndexRecordFingerprintLen])
+		assert.Equal(t, routedFP(term), records[slot][:IndexRecordFingerprintLen])
 	}
 }
 
@@ -318,7 +318,7 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 
 	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
 
-	records := loadIndexPack(t, filepath.Join(dir, IndexPackName(indexTestChunkID)))
+	records := loadIndexPack(t, filepath.Join(dir, IndexPackName(indexTestChunkID))).entries
 	require.Len(t, records, 1)
 
 	record := records[0]
@@ -338,9 +338,7 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	_ = binary.LittleEndian.Uint32(record[:IndexRecordFingerprintLen])
 }
 
-// TestWriteColdIndex_StampAndContentHash pins index.pack's app-data build
-// stamp (schema, field mask, trailing-bytes-ignored, newer-version refusal)
-// and its content hash.
+// TestWriteColdIndex_StampAndContentHash pins index.pack's app data and content hash.
 func TestWriteColdIndex_StampAndContentHash(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, indexFixture(t, 4), dir, testIndexSecret))
@@ -349,20 +347,19 @@ func TestWriteColdIndex_StampAndContentHash(t *testing.T) {
 
 	ad, err := r.AppData()
 	require.NoError(t, err)
-	schema, mask, err := decodeIndexBuildStamp(ad)
+	schema, mask, _, err := decodeIndexAppData(ad)
 	require.NoError(t, err)
 	assert.Equal(t, TermSchemaVersion, schema)
 	assert.Equal(t, IndexedFieldMask(), mask)
 
-	// Bytes past the stamp are extension room: the decoder ignores them.
-	_, _, err = decodeIndexBuildStamp(append(append([]byte(nil), ad...), 0xAB, 0xCD))
-	require.NoError(t, err)
+	// The app data has an exact length.
+	_, _, _, err = decodeIndexAppData(append(append([]byte(nil), ad...), 0xAB, 0xCD))
+	require.ErrorIs(t, err, stores.ErrCorrupt)
 
-	// An unknown stamp version refuses with the newer-binary hint.
-	newer := append([]byte(nil), ad...)
-	newer[0] = indexStampVersion + 1
-	_, _, err = decodeIndexBuildStamp(newer)
-	require.ErrorContains(t, err, "written by a newer stellar-rpc")
+	older := append([]byte(nil), ad...)
+	older[0] = 0x01
+	_, _, _, err = decodeIndexAppData(older)
+	require.ErrorContains(t, err, "unsupported version")
 
 	_, hashed, err := r.ContentHash()
 	require.NoError(t, err)
@@ -375,4 +372,49 @@ func routedFP(term TermKey) []byte {
 	rk := routedKey(testIndexSecret, term)
 	v, _ := streamhash.Fingerprint(rk[:])
 	return binary.LittleEndian.AppendUint32(nil, v)
+}
+
+func TestIndexPackFirstRead(t *testing.T) {
+	for size, want := range map[int64]int{
+		0:               64 << 10,
+		256<<20 + 4<<10: 68 << 10,
+		1_490_000_000:   356 << 10,
+	} {
+		assert.Equal(t, want, indexPackFirstRead(size), "a file of %d bytes", size)
+	}
+}
+
+// TestIndexPack_IndexCostsAtMostFourBytesPerRecord pins the bound indexPackFirstRead rests on.
+func TestIndexPack_IndexCostsAtMostFourBytesPerRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		bitmaps func() Bitmaps
+	}{
+		{"singletons", func() Bitmaps { return buildIndex(t, 30_000) }},
+		{"split terms", func() Bitmaps { return newSplitFixture().bitmaps }},
+		{"a record per term", func() Bitmaps {
+			// Over half a record each, so no two share one.
+			b := NewBitmaps()
+			base := roaring.New()
+			base.AddMany(everyOther(0, 1))
+			more := everyOther(1, 2)
+			for i := range 2_000 {
+				bm := base.Clone()
+				bm.AddMany(more[:i%500])
+				b[ComputeTermKey(fmt.Appendf(nil, "term-%d", i), FieldContractID)] = bm
+			}
+			return b
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, tc.bitmaps(), dir, testIndexSecret))
+			r := packfile.Open(filepath.Join(dir, IndexPackName(indexTestChunkID)), packfile.ReaderOptions{})
+			t.Cleanup(func() { _ = r.Close() })
+			tr, err := r.Trailer()
+			require.NoError(t, err)
+			assert.LessOrEqual(t, int64(tr.IndexSize), indexPackTailBytesPerRecord*int64(tr.RecordCount),
+				"index of %d records", tr.RecordCount)
+		})
+	}
 }
