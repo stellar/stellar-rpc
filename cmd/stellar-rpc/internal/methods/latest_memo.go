@@ -5,8 +5,7 @@ import (
 	"sync/atomic"
 )
 
-// latestMemo memoizes one value derived from the latest ledger, keyed by its
-// sequence; a newly closed ledger invalidates it by moving the key.
+// latestMemo memoizes one value per latest ledger sequence; a new ledger moves the key.
 type latestMemo[T any] struct {
 	entry atomic.Pointer[latestEntry[T]]
 	mu    sync.Mutex // serializes misses so a new ledger computes once, not once per waiting request
@@ -26,16 +25,16 @@ func (m *latestMemo[T]) get(seq uint32, compute func() (T, error)) (T, error) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if e := m.entry.Load(); e != nil && e.seq == seq { // computed while waiting for the lock
-		return e.val, nil
+	e := m.entry.Load() // stable while mu is held: get is the only writer
+	if e != nil && e.seq == seq {
+		return e.val, nil // computed while waiting for the lock
 	}
 	val, err := compute()
 	if err != nil {
 		var zero T
 		return zero, err
 	}
-	// A request on an older read view must not evict a newer ledger's value.
-	if e := m.entry.Load(); e == nil || seq >= e.seq {
+	if e == nil || seq > e.seq { // an older read view must not evict a newer ledger's value
 		m.entry.Store(&latestEntry[T]{seq: seq, val: val})
 	}
 	return val, nil
