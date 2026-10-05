@@ -16,7 +16,7 @@ import (
 // returns the workspace to the pool.
 type record struct {
 	reader  *Reader // for itemsPerRecord / recordChecksum / recordDecoder
-	scratch []byte  // raw read buffer (record bytes from disk)
+	scratch []byte  // raw read buffer: record bytes, or Open's first read
 	// payload is the record's owned output buffer for encoder mode (when
 	// recordDecoder != nil). Its capacity is preserved across pool cycles
 	// so the decoder's append-grow reuses warm memory. payload is unused

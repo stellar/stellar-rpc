@@ -3,6 +3,7 @@ package packfile
 import (
 	"encoding/binary"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 
@@ -86,4 +87,81 @@ func TestOpenFirstRead(t *testing.T) {
 		last := len(items) - 1
 		assert.Equal(t, items[last], readItemCopy(t, r, last))
 	})
+}
+
+type firstReadBuf struct {
+	readAtCloser
+
+	buf []byte
+}
+
+func (f *firstReadBuf) ReadAt(p []byte, off int64) (int, error) {
+	if f.buf == nil {
+		f.buf = p
+	}
+	return f.readAtCloser.ReadAt(p, off)
+}
+
+// openTwice opens a then b, with first reads of n bytes, until b's first read
+// reuses a's buffer; sync.Pool may drop it or keep it on another P.
+func openTwice(t *testing.T, n int, a, b string) (openResult, openResult) {
+	t.Helper()
+	open := func(path string) (openResult, []byte) {
+		f, err := os.Open(path)
+		require.NoError(t, err)
+		defer func() { _ = f.Close() }()
+		fi, err := f.Stat()
+		require.NoError(t, err)
+		log := &firstReadBuf{readAtCloser: f}
+		return openFile(log, fi.Size(), func(int64) int { return n }), log.buf
+	}
+	for range 100 {
+		ra, bufA := open(a)
+		rb, bufB := open(b)
+		if &bufA[0] == &bufB[0] {
+			return ra, rb
+		}
+	}
+	t.Fatal("no open reused the previous open's first-read buffer")
+	return openResult{}, openResult{}
+}
+
+// packTail returns the pack's tail size and its index section without the CRC.
+func packTail(t *testing.T, path string) (int, []byte) {
+	t.Helper()
+	tr, fileSize := readTrailer(t, path)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	tailSize := int64(tr.indexSize) + int64(tr.appDataSize) + trailerSize
+	indexBase := fileSize - tailSize
+	return int(tailSize), data[indexBase : indexBase+int64(tr.indexSize)-4]
+}
+
+// A first read reusing another open's buffer leaves that open's tail intact.
+func TestOpenDoesNotKeepFirstReadBuffer(t *testing.T) {
+	appA, appB := []byte("app data a"), []byte("app data b")
+	a := writeAppDataPackfile(t, makeItems(300, 64), appA)
+	// b's index differs from a's, so b's first read would change a view of a's.
+	b := writeAppDataPackfile(t, makeItems(200, 100), appB)
+	tailA, indexA := packTail(t, a)
+	tailB, indexB := packTail(t, b)
+
+	cases := []struct {
+		name string
+		n    int
+	}{
+		{"covers the tail", max(tailA, tailB)},
+		{"falls short", min(tailA, tailB) - 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ra, rb := openTwice(t, tc.n, a, b)
+			require.NoError(t, ra.err)
+			require.NoError(t, rb.err)
+			assert.Equal(t, appA, ra.appData)
+			assert.Equal(t, indexA, slices.Concat(ra.idx.groups, ra.idx.dir))
+			assert.Equal(t, appB, rb.appData)
+			assert.Equal(t, indexB, slices.Concat(rb.idx.groups, rb.idx.dir))
+		})
+	}
 }
