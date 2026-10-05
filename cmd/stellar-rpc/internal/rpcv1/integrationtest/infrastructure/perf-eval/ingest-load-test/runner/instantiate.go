@@ -20,7 +20,7 @@ import (
 // one bundle per scenario (load-test-ledgers-<version>-<scenario>.xdr.zstd).
 var (
 	ledgerScenarios = []string{"oz", "sac", "soroswap"}
-	curVersion      = "v27" // version of the above bundles
+	curVersion      = "v29-nodiag" // version of the above bundles
 )
 
 // instantiate is the instance half after the bootstrap, which streams the corpus
@@ -62,7 +62,8 @@ func instantiate(ctx context.Context) error {
 	logger.Infof("running ingest perf benchmark")
 	benchEnv := []string{
 		"LOADTEST_INGEST_LEDGER_PATH=" + strings.Join(bundlePaths, ","),
-		"LOADTEST_INGEST_DEADLINE=" + harness.Env("LOADTEST_INGEST_DEADLINE", "150m"),
+		// Budget 360m - 15m poll - ~55m bootstrap/golden DB/build; the ingest deadline fires first.
+		"LOADTEST_INGEST_DEADLINE=" + harness.Env("LOADTEST_INGEST_DEADLINE", "275m"),
 		"LOADTEST_SQLITE_PATH=" + goldenDB,
 		"PERF_RESULTS_PATH=" + benchResults,
 		"PERF_RESULTS_MD_PATH=" + env["RESULTS_FILE"],
@@ -73,7 +74,7 @@ func instantiate(ctx context.Context) error {
 		"STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true",
 	}
 	if err := harness.RunStreaming(ctx, repoRoot, benchEnv, 80,
-		"go", "test", "-run", "TestIngestSyntheticLedgers", "-timeout", "170m", "-v",
+		"go", "test", "-run", "TestIngestSyntheticLedgers", "-timeout", "285m", "-v",
 		"./cmd/stellar-rpc/internal/rpcv1/integrationtest/"); err != nil {
 		return bail("benchmark failed:\n%v", err)
 	}
