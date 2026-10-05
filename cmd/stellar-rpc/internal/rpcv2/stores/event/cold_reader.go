@@ -88,12 +88,10 @@ type ColdReader struct {
 	// (a validation failure can never cost it the Close).
 	waitMPHF func() (*mphf, error)
 
-	// validateMPHF is the error-only gate over waitMPHF: the
-	// load-time cross-checks that bind the index pair to this chunk.
-	// The lookup path runs it before using the handle; skipping it on
-	// Close also spares an eventless chunk's teardown the events.pack
-	// metadata I/O. Both are sync.Once*-cached.
-	validateMPHF func() error
+	// waitLayout returns index.pack's layout once the load-time
+	// cross-checks that bind the index pair to this chunk have passed.
+	// The lookup path awaits it before using the MPHF handle.
+	waitLayout func() (indexLayout, error)
 
 	closed atomic.Bool
 }
@@ -150,6 +148,7 @@ func OpenColdReader(chunkID chunk.ID, dirs ColdDirs, opts ColdReaderOptions) (*C
 		}),
 		index: stores.OpenPack(indexPackPath, packfile.ReaderOptions{
 			Concurrency: opts.Concurrency,
+			FirstRead:   indexPackFirstRead,
 		}),
 	}
 
@@ -171,10 +170,10 @@ func OpenColdReader(chunkID chunk.ID, dirs ColdDirs, opts ColdReaderOptions) (*C
 		res := <-ch
 		return res.idx, res.err
 	})
-	c.validateMPHF = sync.OnceValue(func() error {
+	c.waitLayout = sync.OnceValues(func() (indexLayout, error) {
 		idx, err := c.waitMPHF()
 		if err != nil {
-			return err
+			return indexLayout{}, err
 		}
 		// Format, record-checksum, and build-stamp checks run for eventless
 		// chunks too, so a foreign, unchecked, or mis-schemed pack refuses on the
@@ -183,10 +182,10 @@ func OpenColdReader(chunkID chunk.ID, dirs ColdDirs, opts ColdReaderOptions) (*C
 		// consult the index pair and stay valid against events.pack's own checks.
 		tr, terr := c.index.Trailer()
 		if terr != nil {
-			return fmt.Errorf("events: open %s: %w", indexPackPath, terr)
+			return indexLayout{}, fmt.Errorf("events: open %s: %w", indexPackPath, terr)
 		}
 		if tr.Format != indexPackFormat {
-			return fmt.Errorf("events: %s: expected format %#x, got %#x (mis-pointed or foreign pack)",
+			return indexLayout{}, fmt.Errorf("events: %s: expected format %#x, got %#x (mis-pointed or foreign pack)",
 				indexPackPath, indexPackFormat, tr.Format)
 		}
 		// Serving an index whose bitmaps are unchecked is the silent-wrong-answer
@@ -194,11 +193,12 @@ func OpenColdReader(chunkID chunk.ID, dirs ColdDirs, opts ColdReaderOptions) (*C
 		// stores.ErrCorrupt for the same reason a failed checksum is: the artifact
 		// cannot answer queries and has to be rebuilt.
 		if !tr.HasRecordChecksum {
-			return fmt.Errorf("%w: %s: built without a record checksum (stale build)",
+			return indexLayout{}, fmt.Errorf("%w: %s: built without a record checksum (stale build)",
 				stores.ErrCorrupt, indexPackPath)
 		}
-		if err := checkIndexBuildStamp(indexPackPath, c.index); err != nil {
-			return err
+		layout, err := loadIndexLayout(indexPackPath, c.index)
+		if err != nil {
+			return indexLayout{}, err
 		}
 		if idx.isEmpty() {
 			// A zero-term index is only valid for an eventless chunk: cross-check
@@ -206,39 +206,36 @@ func OpenColdReader(chunkID chunk.ID, dirs ColdDirs, opts ColdReaderOptions) (*C
 			// of silently matching nothing.
 			m, merr := c.waitMeta()
 			if merr != nil {
-				return fmt.Errorf("events: validate empty index for chunk %s: %w", c.chunkID, merr)
+				return indexLayout{}, fmt.Errorf("events: validate empty index for chunk %s: %w", c.chunkID, merr)
 			}
 			if m.count != 0 {
-				return fmt.Errorf(
+				return indexLayout{}, fmt.Errorf(
 					"events: %s holds zero terms but events.pack holds %d events for chunk %s (torn or mispaired index)",
 					indexHashPath, m.count, c.chunkID)
 			}
-			return nil
+			return layout, nil
 		}
 		// Non-empty index: bind the pair to this chunk before serving from
 		// it — index.pack/index.hash carry no chunk ID of their own, so a
 		// mispaired index would silently return an incomplete subset of
 		// matches. Two cheap checks beyond the shared format, checksum, and
-		// stamp gates above:
-		// index.hash keys == index.pack records (halves of one build), and
+		// stamp gates above: the layout addresses exactly index.pack's
+		// entries from index.hash's keys (halves of one build), and
 		// non-empty index ⇒ non-empty events.pack (converse of the
 		// empty-index check above).
-		if uint64(tr.TotalItems) != idx.numKeys() {
-			return fmt.Errorf(
-				"events: index pair mismatch for chunk %s: index.hash holds %d keys "+
-					"but index.pack holds %d records (mispaired artifacts)",
-				c.chunkID, idx.numKeys(), tr.TotalItems)
+		if err := layout.check(indexPackPath, idx.numKeys(), tr.TotalItems); err != nil {
+			return indexLayout{}, err
 		}
 		m, merr := c.waitMeta()
 		if merr != nil {
-			return fmt.Errorf("events: validate index for chunk %s: %w", c.chunkID, merr)
+			return indexLayout{}, fmt.Errorf("events: validate index for chunk %s: %w", c.chunkID, merr)
 		}
 		if m.count == 0 {
-			return fmt.Errorf(
+			return indexLayout{}, fmt.Errorf(
 				"events: %s holds %d terms but events.pack is eventless for chunk %s (mispaired index)",
 				indexHashPath, idx.numKeys(), c.chunkID)
 		}
-		return nil
+		return layout, nil
 	})
 
 	// events.pack metadata loader — runs on first call to
@@ -265,7 +262,7 @@ func (c *ColdReader) Close() error {
 	// be (nil, err) if the load failed — in either case the
 	// goroutine has exited and the channel send has happened.
 	// waitMPHF is validation-free, so this always gets the real
-	// handle to release, and skipping validateMPHF spares an
+	// handle to release, and skipping waitLayout spares an
 	// eventless chunk's teardown the events.pack metadata I/O.
 	m, _ := c.waitMPHF()
 	var first error
@@ -321,59 +318,61 @@ func (c *ColdReader) Offsets() (*LedgerOffsets, error) {
 	return m.offsets, nil
 }
 
-// verifyAndDeserializeBitmap checks the index.pack record's leading
-// fingerprint against the one mphf.LookupBatch returned and, on match, unmarshals a fresh
-// bitmap. On fingerprint mismatch (residual MPHF collision on an
-// unseen key) it returns (nil, nil) — the caller treats nil as
-// not-found. record is valid only inside ReadItem's callback;
-// UnmarshalBinary copies into roaring's internal state so the
-// returned bitmap outlives the callback safely.
-func verifyAndDeserializeBitmap(
-	record []byte, fp [IndexRecordFingerprintLen]byte, slot uint32,
-) (*roaring.Bitmap, error) {
-	if len(record) < IndexRecordFingerprintLen {
-		return nil, fmt.Errorf("events: index.pack record at slot %d truncated (%d bytes)", slot, len(record))
-	}
-	if !bytes.Equal(record[:IndexRecordFingerprintLen], fp[:]) {
-		return nil, nil //nolint:nilnil // not-found signaled by nil bitmap, no error
+// entryRead is one index.pack entry a lookup reads. slab is -1 for a whole
+// term's entry, which must lead with fp.
+type entryRead struct {
+	pos  int
+	key  int
+	slab int
+	fp   [IndexRecordFingerprintLen]byte
+	bm   *roaring.Bitmap
+}
+
+// decodeIndexEntry decodes the entry rd names. A slab entry carries no
+// fingerprint, so being one container of slab rd.slab's ids is what shows it
+// was read at the right position. UnmarshalBinary copies out of entry, so the
+// bitmap outlives the ReadItems callback.
+func decodeIndexEntry(entry []byte, rd entryRead) (*roaring.Bitmap, error) {
+	if rd.slab < 0 {
+		if len(entry) < IndexRecordFingerprintLen {
+			return nil, fmt.Errorf("%w: events: index.pack entry %d truncated (%d bytes)",
+				stores.ErrCorrupt, rd.pos, len(entry))
+		}
+		if !bytes.Equal(entry[:IndexRecordFingerprintLen], rd.fp[:]) {
+			return nil, nil //nolint:nilnil // not-found signaled by nil bitmap, no error
+		}
+		entry = entry[IndexRecordFingerprintLen:]
+	} else if len(entry) == 0 {
+		return nil, nil //nolint:nilnil // an empty slab, nothing to decode
 	}
 	bm := roaring.New()
-	if err := bm.UnmarshalBinary(record[IndexRecordFingerprintLen:]); err != nil {
-		return nil, fmt.Errorf("events: unmarshal bitmap at slot %d: %w", slot, err)
+	if err := bm.UnmarshalBinary(entry); err != nil {
+		return nil, fmt.Errorf("%w: events: unmarshal index.pack entry %d: %w", stores.ErrCorrupt, rd.pos, err)
+	}
+	// Stats before Minimum: UnmarshalBinary accepts a run container with no
+	// runs, which Minimum would index.
+	if rd.slab >= 0 {
+		if st := bm.Stats(); st.Containers != 1 || st.Cardinality == 0 || int(bm.Minimum()>>indexSlabShift) != rd.slab {
+			return nil, fmt.Errorf("%w: events: index.pack entry %d is not one container of slab %d's ids",
+				stores.ErrCorrupt, rd.pos, rd.slab)
+		}
 	}
 	return bm, nil
 }
 
 // LookupKeys returns bitmaps for each key, aligned positionally with
-// the input slice (result[i] corresponds to keys[i]). See
-// Reader.LookupKeys for the semantics.
+// the input slice (result[i] corresponds to keys[i]), and the id range
+// they answer for. See Reader.LookupKeys for the semantics.
 //
-// The window is ignored: each index.pack item holds one whole term,
-// so a lookup reads and returns the whole of it and reports the whole
-// id space as covered. A whole term agrees with the index inside any
-// window, which is all the contract asks. The window is honored once
-// the format can answer for part of a term.
+// A split term is read only in the slabs the window reaches. Every split
+// term shares the chunk's slabs, so the lookup covers their span, up to the
+// top when it reaches slab C−1, past which the index holds no id; an empty
+// window covers itself. A lookup that reached no split term covers the whole
+// id space.
 //
-// Cold-side implementation:
-//
-//  1. MPHF-resolve every key in one batch, so their index.hash pages
-//     are read together. Keys rejected at the routing stage
-//     (streamhash ErrKeyNotFound) get result[i] = nil and never
-//     touch index.pack.
-//  2. Sort the surviving (key, slot) pairs by slot and dedupe —
-//     pathological residual collisions can map two distinct keys
-//     to the same MPHF rank.
-//  3. One c.index.ReadItems pass over the unique slot list. The
-//     packfile reader coalesces adjacent slots into single ReadAt
-//     calls and fans out across the worker count configured via
-//     ColdReaderOptions.Concurrency.
-//  4. In the callback, verify each pending key's fingerprint
-//     against the record header and unmarshal a fresh bitmap per
-//     match. Misses (fingerprint mismatch) leave result[i] = nil.
-//
-//nolint:cyclop // the four documented steps above, inline; splitting obscures the pass structure
+//nolint:cyclop,funlen // resolve, read and assemble in one pass; the covered-range rules read best inline
 func (c *ColdReader) LookupKeys(
-	ctx context.Context, keys []TermKey, _ IDRange,
+	ctx context.Context, keys []TermKey, window IDRange,
 ) ([]*roaring.Bitmap, IDRange, error) {
 	if c.closed.Load() {
 		return nil, IDRange{}, stores.ErrStoreClosed
@@ -381,11 +380,15 @@ func (c *ColdReader) LookupKeys(
 	if err := ctx.Err(); err != nil {
 		return nil, IDRange{}, err
 	}
+	if err := window.check(); err != nil {
+		return nil, IDRange{}, err
+	}
 	if len(keys) == 0 {
 		return nil, IDRange{End: math.MaxUint32}, nil
 	}
 
-	if err := c.validateMPHF(); err != nil {
+	layout, err := c.waitLayout()
+	if err != nil {
 		return nil, IDRange{}, err
 	}
 	mphf, err := c.waitMPHF()
@@ -393,15 +396,20 @@ func (c *ColdReader) LookupKeys(
 		return nil, IDRange{}, err
 	}
 
-	results := make([]*roaring.Bitmap, len(keys))
-
-	// fp goes last, in the padding after slot.
-	type pendingKey struct {
-		outIdx int
-		slot   uint32
-		fp     [IndexRecordFingerprintLen]byte
+	first, last := 1, 0
+	splitCovered := window
+	if !window.isEmpty() {
+		x0, x1 := window.Start>>indexSlabShift, (window.End-1)>>indexSlabShift
+		first, last = int(x0), min(int(x1), int(layout.slabs)-1)
+		splitCovered = IDRange{Start: x0 << indexSlabShift, End: math.MaxUint32}
+		if x1+1 < layout.slabs {
+			splitCovered.End = (x1 + 1) << indexSlabShift
+		}
 	}
-	pending := make([]pendingKey, 0, len(keys))
+
+	results := make([]*roaring.Bitmap, len(keys))
+	reads := make([]entryRead, 0, len(keys))
+	covered := IDRange{End: math.MaxUint32}
 	for i, hit := range mphf.LookupBatch(keys) {
 		if hit.err != nil {
 			if errors.Is(hit.err, ErrKeyNotFound) {
@@ -409,47 +417,67 @@ func (c *ColdReader) LookupKeys(
 			}
 			return nil, IDRange{}, fmt.Errorf("events: LookupKeys MPHF for chunk %s: %w", c.chunkID, hit.err)
 		}
-		pending = append(pending, pendingKey{outIdx: i, slot: hit.slot, fp: hit.fp})
-	}
-	if len(pending) == 0 {
-		return results, IDRange{End: math.MaxUint32}, nil
-	}
-
-	sort.Slice(pending, func(i, j int) bool { return pending[i].slot < pending[j].slot })
-
-	// Build the unique slots list. Multiple pending entries may share
-	// a slot when an unbuilt key residually collides into the same
-	// MPHF rank as a built one.
-	positions := make([]int, 0, len(pending))
-	pendingBySlot := make([][]int, 0, len(pending)) // pendingBySlot[readIdx] = indices into pending[]
-	for k, p := range pending {
-		if len(positions) > 0 && positions[len(positions)-1] == int(p.slot) {
-			pendingBySlot[len(pendingBySlot)-1] = append(pendingBySlot[len(pendingBySlot)-1], k)
+		pos, rowFP, split := layout.locate(hit.slot)
+		if !split {
+			reads = append(reads, entryRead{pos: pos, key: i, slab: -1, fp: hit.fp})
 			continue
 		}
-		positions = append(positions, int(p.slot))
-		pendingBySlot = append(pendingBySlot, []int{k})
+		if rowFP != hit.fp {
+			continue
+		}
+		results[i] = roaring.New()
+		results[i].SetCopyOnWrite(true)
+		covered = splitCovered
+		for x := first; x <= last; x++ {
+			reads = append(reads, entryRead{pos: pos + x, key: i, slab: x})
+		}
 	}
 
-	if err := c.index.ReadItems(ctx, positions, func(readIdx int, record []byte) error {
-		// Multiple pending keys may share this slot (residual MPHF
-		// collision). verifyAndDeserializeBitmap returns a fresh
-		// bitmap per match and (nil, nil) on fingerprint mismatch —
-		// leaving results[outIdx] = nil for misses.
-		for _, pIdx := range pendingBySlot[readIdx] {
-			p := pending[pIdx]
-			bm, err := verifyAndDeserializeBitmap(record, p.fp, p.slot)
+	if err := readIndexEntries(ctx, c.index, reads); err != nil {
+		return nil, IDRange{}, fmt.Errorf("events: LookupKeys read for chunk %s: %w", c.chunkID, err)
+	}
+	// reads is in position order, so each Or appends a split term's next
+	// slab; with copy-on-write on both sides it takes over the slab's
+	// containers, which this lookup owns, instead of copying them.
+	for _, rd := range reads {
+		switch {
+		case rd.slab < 0:
+			results[rd.key] = rd.bm
+		case rd.bm != nil:
+			rd.bm.SetCopyOnWrite(true)
+			results[rd.key].Or(rd.bm)
+		}
+	}
+	return results, covered, nil
+}
+
+// readIndexEntries decodes the entry each read names into its bm, in one
+// ReadItems pass, and leaves reads sorted by position.
+func readIndexEntries(ctx context.Context, index *stores.PackReader, reads []entryRead) error {
+	sort.Slice(reads, func(i, j int) bool { return reads[i].pos < reads[j].pos })
+	// starts[p] is positions[p]'s first read. Two keys share a position when
+	// they resolve to one slot: the same key twice or a residual MPHF collision.
+	positions := make([]int, 0, len(reads))
+	starts := make([]int, 0, len(reads))
+	for i, rd := range reads {
+		if i > 0 && reads[i-1].pos == rd.pos {
+			continue
+		}
+		positions = append(positions, rd.pos)
+		starts = append(starts, i)
+	}
+	// ReadItems may call back from several goroutines; each writes only the
+	// reads at its own position.
+	return index.ReadItems(ctx, positions, func(p int, entry []byte) error {
+		for j := starts[p]; j < len(reads) && reads[j].pos == positions[p]; j++ {
+			bm, err := decodeIndexEntry(entry, reads[j])
 			if err != nil {
 				return err
 			}
-			results[p.outIdx] = bm
+			reads[j].bm = bm
 		}
 		return nil
-	}); err != nil {
-		return nil, IDRange{}, fmt.Errorf("events: LookupKeys read for chunk %s: %w", c.chunkID, err)
-	}
-
-	return results, IDRange{End: math.MaxUint32}, nil
+	})
 }
 
 // FetchEvents decodes events_data records for the supplied
