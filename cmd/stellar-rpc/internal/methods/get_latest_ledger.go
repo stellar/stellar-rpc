@@ -15,38 +15,32 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
-// latestLedgerCache memoizes the rendered, final JSON response keyed by ledger
-// sequence, so requests landing on the same latest ledger share one render.
-type latestLedgerCache struct {
-	ledgerReader store.LedgerReader
-	rendered     latestMemo[json.RawMessage]
-}
-
 // NewGetLatestLedgerHandler returns a JSON RPC handler to retrieve the latest ledger entry from Stellar core.
 // Requests landing on the same latest ledger are served the same pre-rendered bytes.
 func NewGetLatestLedgerHandler(ledgerReader store.LedgerReader) jrpc2.Handler {
-	c := &latestLedgerCache{ledgerReader: ledgerReader}
-	return NewHandler(c.handle)
-}
-
-func (c *latestLedgerCache) handle(ctx context.Context, _ protocol.GetLatestLedgerRequest) (json.RawMessage, error) {
-	latestSequence, err := c.ledgerReader.GetLatestLedgerSequence(ctx)
-	if err != nil {
-		return nil, &jrpc2.Error{
-			Code:    jrpc2.InternalError,
-			Message: "could not get latest ledger sequence",
+	var rendered latestMemo[json.RawMessage]
+	coreHandler := func(ctx context.Context, _ protocol.GetLatestLedgerRequest,
+	) (json.RawMessage, error) {
+		latestSequence, err := ledgerReader.GetLatestLedgerSequence(ctx)
+		if err != nil {
+			return nil, &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: "could not get latest ledger sequence",
+			}
 		}
+		return rendered.get(latestSequence, func() (json.RawMessage, error) {
+			return renderLatestLedger(ctx, ledgerReader, latestSequence)
+		})
 	}
-	return c.rendered.get(latestSequence, func() (json.RawMessage, error) {
-		return c.render(ctx, latestSequence)
-	})
+	return NewHandler(coreHandler)
 }
 
-func (c *latestLedgerCache) render(ctx context.Context, latestSequence uint32) (json.RawMessage, error) {
+// renderLatestLedger renders ledger seq's getLatestLedger response as final JSON.
+func renderLatestLedger(ctx context.Context, s store.LedgerScanner, seq uint32) (json.RawMessage, error) {
 	var response protocol.GetLatestLedgerResponse
 	var parseErr error
-	found, err := store.WithLedgerRaw(ctx, c.ledgerReader, latestSequence, func(raw []byte) error {
-		response, parseErr = latestLedgerResponse(xdr.LedgerCloseMetaView(raw), latestSequence)
+	found, err := store.WithLedgerRaw(ctx, s, seq, func(raw []byte) error {
+		response, parseErr = latestLedgerResponse(xdr.LedgerCloseMetaView(raw), seq)
 		return parseErr
 	})
 	if err != nil || !found {
