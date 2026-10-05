@@ -942,6 +942,23 @@ func TestMatches_DeadPlanEndsTheWalk(t *testing.T) {
 	assert.Equal(t, 1, r.lookupKeysCalls, "a dead plan must not ask for a second stage")
 }
 
+// TestMatches_LaterStagesAreBounded pins what stageSlabs buys: a walk that runs
+// the window out asks the index for it in stages of at most stageSlabs slabs,
+// so it never holds more than that of a split term at once.
+func TestMatches_LaterStagesAreBounded(t *testing.T) {
+	defer func(s uint) { slabShift = s }(slabShift)
+	slabShift = 10 // 69 slabs: stage 1's four, four stages of 16, then the last one
+	f := newShapedFixture(t)
+	r := &countingReader{Reader: diffReader{f.corpus}}
+	got := drainMatches(t, Matches(context.Background(), r, f.filterSparseOnly(),
+		IDRange{0, shapedCorpusSize}, false, 0), 0)
+	assert.Equal(t, f.rareContract, matchOrdinals(got))
+	require.Len(t, r.windows, 6)
+	for _, w := range r.windows[1:] {
+		assert.LessOrEqual(t, w.End-w.Start, uint32(stageSlabs)<<slabShift)
+	}
+}
+
 // underCoveringReader breaks Reader.LookupKeys' contract the one way the walk
 // cannot survive: it answers for less than it was asked, so a stage walks
 // nothing and the remainder never shrinks.
@@ -1080,10 +1097,10 @@ func TestMatches_IgnoresIDsOutsideTheLookupWindow(t *testing.T) {
 // ───────────────────────── the batch schedule ─────────────────────────
 
 // TestMatches_StageScheduleIsInvisible pins that materializing the window in
-// two stages never changes what a query yields. At four ids per slab stage 1
-// is the leading four slabs — 16 of the corpus's 300 ids — and stage 2 the
-// rest, so every randomized query is split, and the stream must still be the
-// one the corpus says it is.
+// stages never changes what a query yields. At four ids per slab stage 1 is
+// the leading four slabs — 16 of the corpus's 300 ids — and the rest comes in
+// stages of 64, so most randomized queries are split, many more than once,
+// and the stream must still be the one the corpus says it is.
 func TestMatches_StageScheduleIsInvisible(t *testing.T) {
 	v := newDiffVocab(t)
 	const corpusSize = 300
@@ -1102,16 +1119,16 @@ func TestMatches_StageScheduleIsInvisible(t *testing.T) {
 		"fixture sanity: randomized queries selected too little")
 }
 
-// TestStage1Request_TakesTheLeadingSlabs pins which end of the window the
-// first stage comes off — the low slabs ascending, the trailing ones
-// descending — and that it is cut on whole slabs, so no slab is split across
-// the two stages and the candidates are the same however the window is
-// staged. The window's own bound stands where it sits mid-slab: a stage is
-// entered at the edge the walk starts from, not at a slab boundary.
-func TestStage1Request_TakesTheLeadingSlabs(t *testing.T) {
+// TestStageRequest_TakesTheLeadingSlabs pins which end of the window a
+// stage comes off — the low slabs ascending, the trailing ones descending —
+// and that it is cut on whole slabs, so no slab is split across two stages
+// and the candidates are the same however the window is staged. The
+// window's own bound stands where it sits mid-slab: a stage is entered at
+// the edge the walk starts from, not at a slab boundary.
+func TestStageRequest_TakesTheLeadingSlabs(t *testing.T) {
 	defer func(s uint) { slabShift = s }(slabShift)
 	slabShift = 4
-	// 16 ids to the slab, and a stage is firstStageSlabs (4) of them wide.
+	// 16 ids to the slab, and a stage is four of them wide.
 	const slab = 1 << 4
 
 	for _, tc := range []struct {
@@ -1135,8 +1152,8 @@ func TestStage1Request_TakesTheLeadingSlabs(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.asc, stage1Request(tc.window, false))
-			assert.Equal(t, tc.desc, stage1Request(tc.window, true))
+			assert.Equal(t, tc.asc, stageRequest(tc.window, false, 4))
+			assert.Equal(t, tc.desc, stageRequest(tc.window, true, 4))
 			// What is left is the rest of the window, on the other side.
 			assert.Equal(t, IDRange{tc.asc.End, tc.window.End},
 				stageRemainder(tc.window, tc.asc, false))

@@ -233,19 +233,38 @@ An MPHF maps each known key to a unique slot in \[0, N) with O(1) lookup and no 
 | File | Description |
 | :---- | :---- |
 | `index.hash` | MPHF mapping term keys to slot positions in `index.pack` |
-| `index.pack` | Serialized roaring bitmaps, one per term, each prefixed with a 4-byte fingerprint |
+| `index.pack` | Serialized roaring bitmaps in slot order, each prefixed with a 4-byte fingerprint, except that a large term is stored one slab at a time |
 
-Since an MPHF maps any input to a valid slot, even keys not in the build set, a query for a non-existent term would still resolve to a slot and retrieve whatever bitmap is stored there. Each bitmap record in `index.pack` is therefore prefixed with a 4-byte fingerprint to detect and reject these false positives. 
+Since an MPHF maps any input to a valid slot, even keys not in the build set, a query for a non-existent term would still resolve to a slot and retrieve whatever bitmap is stored there. Each term in `index.pack` therefore carries a 4-byte fingerprint to detect and reject these false positives. 
 
 A 4-byte fingerprint can still collide, so query results are post-filtered after event fetch to verify all terms match (see Section 11.2, step 5).
 
+**Records.** `index.pack` closes a record before an entry would take it past 16 KiB, with no entry limit, so its record count, and with it the tail every open reads, follows the file size. A record adds at most about 4 bytes of tail (3.3 to 3.5 measured), so Open's first read, max(64 KiB, 4 × file size / 16 KiB) rounded up to 4 KiB, covers the tail of a real chunk in one read.
+
+**Split terms.** Popular terms are large: on pubnet chunk 6410 the fifteen most popular are 250 KiB to 1.08 MiB each, so reading them whole costs about 9 MB of index for a page that needs one to four slabs of them. A term whose serialized bitmap is over 64 KiB is therefore stored as C entries, one per slab of the chunk, where a slab is 65,536 event IDs (one roaring container) and C is the number of slabs the chunk's IDs span. Slab entry x holds the term's IDs in slab x, with no fingerprint, and is zero-length where the term has none. Whether a term splits depends on its bitmap alone, so the freeze and the backfill write identical bytes. Splitting costs about 6 bytes per slab entry, 56 KB on pubnet chunk 6465.
+
+The app data names the split terms, behind the build stamp, and has an exact length:
+
+```
+offset  size  field
+0       1     stamp version (0x02)
+1       2     term schema version
+3       8     indexed-field bitmask
+11      4     slab count C
+15      8×D   one row per split term, ascending by slot: slot u32 ‖ fingerprint[4]
+```
+
+At open, the entry count must equal the MPHF's key count plus D × (C − 1), and the rows must be strictly ascending, each slot below the key count, since the lookup binary-searches them.
+
 **Term Lookup:**
 
-1. Blind the term key under the chunk secret to get its routed key, and query the MPHF in `index.hash` with it to obtain the slot index.  
-2. Read the record at that slot in `index.pack`.  
-3. If the fingerprint matches streamhash's fingerprint of the routed key (`streamhash.Fingerprint`), deserialize the bitmap; otherwise the term is not present.
+1. Blind the term key under the chunk secret to get its routed key, and query the MPHF in `index.hash` with it to obtain the slot s.
+2. Binary-search the rows for r, the number of split slots below s. The term's entry, or its slab-0 entry, is at position s + r × (C − 1).
+3. If s is not split, read that entry. If its fingerprint matches streamhash's fingerprint of the routed key (`streamhash.Fingerprint`), deserialize the bitmap; otherwise the term is not present.
+4. If s is split, compare the fingerprint with the row's; on a mismatch the term is not present and nothing is read. Otherwise read each slab x the query window reaches, at the position plus x. A zero-length slab entry is not decoded, and a non-empty one must hold only IDs of slab x, which catches a wrong position.
+5. One read pass serves every term. A split term's slabs are adjacent entries, so a window of them is one contiguous read, and they are OR-ed back together in slab order.
 
-The resulting bitmap contains the event IDs matching the term.
+The resulting bitmap contains the event IDs matching the term, over the range the read covered (§11.4).
 
 ## 10. Freeze Process (Hot → Cold)
 
@@ -312,10 +331,13 @@ The cold segment read path follows the same workflow as the hot segment (steps 2
 
 ```
 1. Load bitmaps from the immutable index files instead of the in-memory concurrent map:
-   * Hash the term key and query the MPHF in index.hash to get a slot.
-   * Read the record at that slot in index.pack.
-   * Check the 4-byte fingerprint. If it matches, deserialize the bitmap.
-     Otherwise the term has no matches and can be skipped.
+   * Hash the term key, query the MPHF in index.hash to get a slot, and
+     find the slot's position in index.pack from the app data's rows (§9.2).
+   * Read the entry at that position, or for a split term the slab entries
+     the query window reaches.
+   * Check the 4-byte fingerprint, the entry's own or the split term's row.
+     If it matches, deserialize the bitmap. Otherwise the term has no
+     matches and can be skipped.
    Note: The 4-byte fingerprint check can produce false positives,
    so post-filtering (step 5) is still necessary.
 
@@ -325,6 +347,16 @@ The cold segment read path follows the same workflow as the hot segment (steps 2
    * Decompress the record from events.pack.
    * Extract the event at that position.
 ```
+
+### 11.4 Windowed Lookup
+
+`LookupKeys(ctx, keys, window)` returns one bitmap per key and the ID range the answer covers.
+
+* `nil` means the term is absent from the chunk. A present term with nothing in the window is a non-nil empty bitmap, since a `nil` would read as absent and drop that filter's plan for the rest of the query.
+* Every returned bitmap agrees with the index on every ID in the covered range, and the covered range always contains the window. IDs outside it may be present or absent, and callers must not depend on them, neither as matches nor as the answer to a `NextValue` or `PreviousValue` that leaves it.
+* The cold reader reads a split term's slab entries whole and reports their span, up to the top of the ID space when they reach the chunk's last slab, past which the index holds no ID. Every split term shares the chunk's slabs, so one range serves the whole lookup. A lookup that reached no split term reports the whole ID space, and so does the hot store, whose images are whole-chunk and already in memory.
+
+**Stages.** A query materializes its window in stages, each one `LookupKeys` walked as far as that lookup says it covered. Stage 1 is the leading 4 slabs in the walk's direction (the trailing 4 when descending), and every later stage the next 16, each run only if the consumer is still pulling when the previous one runs out and no earlier lookup already covered it, and each starting where the walk stopped, so no slab is read twice. So a first page reads 4 slab entries of a split term, the common page makes one lookup, and a query never holds more than 16 slabs of a split term at once: at most one container per slab, so 128 KiB per split term and under 2 MiB for queryEvents' 15-term budget, whatever the chunk's density. Bitmaps, and bounds proved from them, do not carry across a stage; the cursor and the emitted count do.
 
 ## 12. Startup Procedure
 
