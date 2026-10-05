@@ -138,6 +138,8 @@ const (
 // fixed by the format, unlike slabShift, which tests shrink.
 const indexSlabShift = 16
 
+const maxIndexSlabs = 1 << (32 - indexSlabShift)
+
 // indexSplitBytes is the serialized size past which a term is split.
 const indexSplitBytes = 64 << 10
 
@@ -225,7 +227,7 @@ func (l indexLayout) slabsIn(window IDRange) (int, int, IDRange) {
 // search relies on the rows being strictly ascending.
 func (l indexLayout) check(path string, keys uint64, count uint32) error {
 	rows := uint64(len(l.rows) / indexRowLen)
-	if rows > 0 && (l.slabs == 0 || l.slabs > 1<<(32-indexSlabShift)) {
+	if rows > 0 && (l.slabs == 0 || l.slabs > maxIndexSlabs) {
 		return fmt.Errorf("%w: events: %s splits %d terms over %d slabs", stores.ErrCorrupt, path, rows, l.slabs)
 	}
 	if want := keys + rows*(uint64(l.slabs)-1); uint64(count) != want {
