@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -62,14 +63,14 @@ func TestCSVSinkExactOutput(t *testing.T) {
 			"finalize,1,0,7,7,7,7,7\n",
 		"hot.csv": csvHeader + "\n" +
 			"extract,1,0,10,10,10,10,10\n" +
-			"commit,2,3,110,60,60,60,60\n",
+			"commit,2,3,110,50,60,60,60\n",
 		"driver.csv": csvHeader + "\n" +
 			"backfill_wall,1,0,300,300,300,300,300\n" +
 			"index_rebuild,1,0,40,40,40,40,40\n" +
 			"chunk_total,1,0,200,200,200,200,200\n" +
 			"ledgers_total,1,10000,100,100,100,100,100\n" +
 			"events_total,1,20,50,50,50,50,50\n" +
-			"cold_extract,4,10,100,30,40,40,40\n",
+			"cold_extract,4,10,100,20,40,40,40\n",
 	}
 	for name, content := range want {
 		got, rerr := os.ReadFile(filepath.Join(outDir, name))
@@ -282,4 +283,34 @@ func paceLagSamples(sink *csvSink) []time.Duration {
 		ds[i] = sm.d
 	}
 	return ds
+}
+
+// TestAggregatePercentiles: each percentile is the nearest-rank sample,
+// s[ceil(p × n) − 1], also when p × n is an integer.
+func TestAggregatePercentiles(t *testing.T) {
+	for _, tc := range []struct {
+		n             int
+		p50, p90, p99 time.Duration
+	}{
+		{1, 1, 1, 1},
+		{2, 1, 2, 2},
+		{10, 5, 9, 10},
+		{99, 50, 90, 99},
+		{100, 50, 90, 99},
+		{101, 51, 91, 100},
+	} {
+		t.Run(strconv.Itoa(tc.n), func(t *testing.T) {
+			// Samples 1..n, so a sample's value is its rank.
+			var s series
+			for i := tc.n; i >= 1; i-- {
+				s.observe(time.Duration(i), 0)
+			}
+			r, ok := aggregate("row", &s, false)
+			require.True(t, ok)
+			assert.Equal(t, tc.p50, r.p50, "p50")
+			assert.Equal(t, tc.p90, r.p90, "p90")
+			assert.Equal(t, tc.p99, r.p99, "p99")
+			assert.Equal(t, time.Duration(tc.n), r.maxv, "max")
+		})
+	}
 }

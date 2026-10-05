@@ -303,7 +303,8 @@ type row struct {
 }
 
 // aggregate reduces a series to a row. Zero-duration samples are dropped unless
-// includeZeros. ok is false when no sample survives.
+// includeZeros. ok is false when no sample survives. Percentiles use the
+// nearest rank (see nearestRank).
 func aggregate(name string, s *series, includeZeros bool) (row, bool) {
 	durs := make([]time.Duration, 0, len(s.samples))
 	items := 0
@@ -321,17 +322,17 @@ func aggregate(name string, s *series, includeZeros bool) (row, bool) {
 	for _, d := range durs {
 		total += d
 	}
-	pick := func(p float64) time.Duration {
-		i := int(p * float64(len(durs)))
-		if i >= len(durs) {
-			i = len(durs) - 1
-		}
-		return durs[i]
-	}
 	return row{
 		name: name, n: len(durs), items: items, total: total,
-		p50: pick(0.50), p90: pick(0.90), p99: pick(0.99), maxv: durs[len(durs)-1],
+		p50: durs[nearestRank(50, len(durs))], p90: durs[nearestRank(90, len(durs))],
+		p99: durs[nearestRank(99, len(durs))], maxv: durs[len(durs)-1],
 	}, true
+}
+
+// nearestRank returns the index of the pct-th percentile in n sorted samples:
+// ceil(pct × n / 100) − 1. pct is in [1, 100] and n is at least 1.
+func nearestRank(pct, n int) int {
+	return (pct*n+99)/100 - 1
 }
 
 // withUnknown returns order followed by the sorted keys of m that order does
