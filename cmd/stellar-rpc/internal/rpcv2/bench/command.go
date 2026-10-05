@@ -110,7 +110,8 @@ func writePartialCSVs(logger *supportlog.Entry, sink *csvSink, outDir string) {
 
 // newBenchCommand creates a bench-ingest subcommand with shared flags,
 // profiling, run metadata, and signal-driven cancellation. validate runs before
-// the command touches --out, so a flag error leaves nothing behind.
+// the command touches --out, so a flag that validate rejects leaves nothing
+// behind; errors found later in the run are recorded in run.json as failed.
 func newBenchCommand(
 	use, short string, src *sourceFlags, prof *profileFlags,
 	validate func() error,
