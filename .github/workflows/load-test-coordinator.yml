@@ -11,7 +11,7 @@ defaults:
 
 on:
   push:
-    branches: [release/**]
+    branches: [release/**, benchmark-v29-diag-bundle]
   workflow_dispatch:
     inputs:
       target_ref:
