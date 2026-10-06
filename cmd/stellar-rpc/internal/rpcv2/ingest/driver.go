@@ -51,7 +51,7 @@ func drain(ledgers iter.Seq2[[]byte, error], chunkID chunk.ID, cc *coldChunk) er
 // caller from geometry.Layout so the ingesters write exactly where the freeze
 // barrier and the sweeps resolve — the path formula lives in Layout alone, never
 // re-derived here. LedgerPack and TxhashBin are the chunk's full file paths;
-// Events is its pair of events bucket dirs. An empty field for an enabled type is a
+// Events is its events directories. An empty field for an enabled type is a
 // config error.
 type ColdDirs struct {
 	LedgerPack string
