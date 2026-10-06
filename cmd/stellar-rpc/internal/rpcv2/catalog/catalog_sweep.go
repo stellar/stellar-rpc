@@ -79,6 +79,12 @@ func (c *Catalog) DestroyChunkArtifacts(refs []ArtifactRef) error {
 			}
 			paths = append(paths, p)
 		}
+		for _, p := range c.layout.ScratchPaths(ref.Chunk, ref.Kind) {
+			if err := os.RemoveAll(p); err != nil {
+				return err
+			}
+			paths = append(paths, p)
+		}
 		demoted = append(demoted, ref)
 	}
 	if err := durable.FsyncParentDirs(paths); err != nil { // unlinks durable BEFORE keys

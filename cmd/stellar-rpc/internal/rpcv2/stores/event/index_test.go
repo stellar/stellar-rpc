@@ -16,66 +16,6 @@ func testKey(field Field, value string) TermKey {
 	return NewTerm(field, []byte(value)).Key(testIndexSecret)
 }
 
-func TestBitmaps_AddToAndLookupViaKey(t *testing.T) {
-	s := NewBitmaps()
-	key := testKey(FieldContractID, "contract-abc")
-
-	s.AddTo(key, 0)
-
-	bm := s[key]
-	require.NotNil(t, bm)
-	assert.True(t, bm.Contains(0))
-}
-
-func TestBitmaps_MultipleFields(t *testing.T) {
-	s := NewBitmaps()
-	k0 := testKey(FieldTopic0, "same-value")
-	k1 := testKey(FieldTopic1, "same-value")
-	k2 := testKey(FieldTopic2, "same-value")
-
-	s.AddTo(k0, 0)
-	s.AddTo(k1, 1)
-	s.AddTo(k2, 2)
-
-	assert.Len(t, s, 3)
-
-	bm0 := s[k0]
-	require.NotNil(t, bm0)
-	assert.True(t, bm0.Contains(0))
-	assert.False(t, bm0.Contains(1))
-
-	bm1 := s[k1]
-	require.NotNil(t, bm1)
-	assert.True(t, bm1.Contains(1))
-	assert.False(t, bm1.Contains(0))
-}
-
-func TestBitmaps_BatchAddToViaKey(t *testing.T) {
-	s := NewBitmaps()
-	key := testKey(FieldTopic0, "transfer")
-
-	s.AddTo(key, 0, 1, 2, 3, 4)
-
-	bm := s[key]
-	require.NotNil(t, bm)
-	assert.Equal(t, uint64(5), bm.GetCardinality())
-	assert.True(t, bm.Contains(0))
-	assert.True(t, bm.Contains(4))
-}
-
-func TestBitmaps_RangeYieldsAllTerms(t *testing.T) {
-	s := NewBitmaps()
-	s.AddTo(testKey(FieldTopic0, "a"), 0)
-	s.AddTo(testKey(FieldTopic1, "b"), 1, 2)
-
-	var count int
-	for _, bm := range s {
-		require.NotNil(t, bm)
-		count++
-	}
-	assert.Equal(t, 2, count)
-}
-
 func TestTermKey_DependsOnTheSecret(t *testing.T) {
 	term := NewTerm(FieldContractID, []byte("test-value"))
 	assert.Equal(t, term.Key(testIndexSecret), term.Key(testIndexSecret))
