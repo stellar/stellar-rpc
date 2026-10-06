@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"os"
 	"time"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
@@ -94,10 +93,6 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 	if err := opts.validate(); err != nil {
 		return err
 	}
-	// Surface an unwritable --out before the expensive run, not after it.
-	if err := os.MkdirAll(opts.OutDir, 0o755); err != nil {
-		return fmt.Errorf("create --out dir %s: %w", opts.OutDir, err)
-	}
 	layout := geometry.NewLayout(opts.HotRoot)
 	// Create + fsync the hot root up front — the daemon's own root prep.
 	if err := config.PrepareRoots(layout.HotRoot()); err != nil {
@@ -142,9 +137,6 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 		Metrics:  sink,
 		Sink:     sink,
 	})
-	// VmHWM never decreases, so it can be read right here — before the
-	// completion check — and a failed run's partial CSV still gets the row.
-	recordPeakRSS(logger, sink, readPeakRSS)
 	// The loop cannot tell a complete bounded stream from one that ran dry;
 	// the sink's last-committed gauge (set once per ingested ledger) can.
 	if err == nil && sink.lastCommittedSeq() != last {

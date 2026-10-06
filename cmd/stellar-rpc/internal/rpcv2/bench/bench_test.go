@@ -5,7 +5,6 @@ import (
 	"encoding/csv"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -160,15 +159,6 @@ func TestRunColdFromPack(t *testing.T) {
 	// type), so it reports as its own driver row; per-ledger samples bound
 	// loosely (sub-tick walks are excluded).
 	require.Contains(t, driver, "cold_extract")
-
-	// The rss_test.go tests use fake readers; this is the only assertion that
-	// exercises the real readPeakRSS. It only works on Linux — which is what
-	// CI runs — so on other platforms the read fails and the row is skipped.
-	if runtime.GOOS == "linux" {
-		require.Contains(t, driver, "peak_rss_bytes")
-		assert.EqualValues(t, 1, driver["peak_rss_bytes"]["n"])
-		assert.Positive(t, driver["peak_rss_bytes"]["total_ns"])
-	}
 
 	// The cold artifacts landed at the Layout-resolved paths — including the
 	// cross-chunk txhash index the backfill builds beyond WriteColdChunk. The
@@ -343,11 +333,6 @@ func TestRunHotFromPack(t *testing.T) {
 	// An unpaced run must not add the pace_lag row — the CSV rows are a de
 	// facto contract, and pace_lag belongs to --close-interval runs only.
 	assert.NotContains(t, driver, "pace_lag")
-	if runtime.GOOS == "linux" {
-		require.Contains(t, driver, "peak_rss_bytes")
-		assert.EqualValues(t, 1, driver["peak_rss_bytes"]["n"])
-		assert.Positive(t, driver["peak_rss_bytes"]["total_ns"])
-	}
 
 	// A second run against the same hot root succeeds from a fixed (empty)
 	// starting state: the production create bracket wipes the leftover DB.

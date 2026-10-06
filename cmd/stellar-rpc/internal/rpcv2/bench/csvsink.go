@@ -26,15 +26,14 @@ const (
 
 // driver.csv row labels.
 const (
-	driverBackfillWall = "backfill_wall"  // cold: RunBackfill's plan-and-execute wall
-	driverIndexRebuild = "index_rebuild"  // cold: one txhash index build, including its eager sweep
-	driverChunkTotal   = "chunk_total"    // cold: per-chunk ColdService lifetime
-	driverTotalSuffix  = "_total"         // cold: "<type>_total", per-chunk ingester total
-	driverColdExtract  = "cold_extract"   // cold: the per-ledger ExtractLedgerTxParts walk, shared by all types
-	driverIngestTotal  = "ingest_total"   // hot: per-ledger sum of the hot phases
-	driverRunWall      = "run_wall"       // hot: whole-run wall-clock
-	driverPaceLag      = "pace_lag"       // hot, paced runs: per-ledger lag behind the close schedule at commit
-	driverPeakRSS      = "peak_rss_bytes" // cold and hot: peak resident set size; duration columns carry bytes
+	driverBackfillWall = "backfill_wall" // cold: RunBackfill's plan-and-execute wall
+	driverIndexRebuild = "index_rebuild" // cold: one txhash index build, including its eager sweep
+	driverChunkTotal   = "chunk_total"   // cold: per-chunk ColdService lifetime
+	driverTotalSuffix  = "_total"        // cold: "<type>_total", per-chunk ingester total
+	driverColdExtract  = "cold_extract"  // cold: the per-ledger ExtractLedgerTxParts walk, shared by all types
+	driverIngestTotal  = "ingest_total"  // hot: per-ledger sum of the hot phases
+	driverRunWall      = "run_wall"      // hot: whole-run wall-clock
+	driverPaceLag      = "pace_lag"      // hot, paced runs: per-ledger lag behind the close schedule at commit
 )
 
 // Cold data-type and stage labels. They must equal the strings the ingest
@@ -59,9 +58,8 @@ type fileSpec struct {
 
 // fileSpecs is the bench-ingest report schema: one CSV per cold data type with
 // one row per cold stage, hot.csv with one row per hotchunk.Phase, and
-// driver.csv. driver.csv lists the cold rows, then the hot rows, then
-// peak_rss_bytes, which both modes emit where /proc is available. A row with
-// no samples is suppressed, so each mode's report has only its own rows.
+// driver.csv. driver.csv lists the cold rows, then the hot rows. A row with no
+// samples is suppressed, so each mode's report has only its own rows.
 //
 //nolint:gochecknoglobals // fixed report schema, read-only
 var fileSpecs = func() []fileSpec {
@@ -73,13 +71,13 @@ var fileSpecs = func() []fileSpec {
 		hotRows[p] = p.String()
 	}
 
-	driverRows := make([]string, 0, len(coldTypes)+8)
+	driverRows := make([]string, 0, len(coldTypes)+7)
 	driverRows = append(driverRows, driverBackfillWall, driverIndexRebuild, driverChunkTotal)
 	for _, dt := range coldTypes {
 		driverRows = append(driverRows, dt+driverTotalSuffix)
 	}
 	driverRows = append(driverRows, driverColdExtract,
-		driverIngestTotal, driverRunWall, driverPaceLag, driverPeakRSS)
+		driverIngestTotal, driverRunWall, driverPaceLag)
 
 	specs := make([]fileSpec, 0, len(coldTypes)+2)
 	for _, dt := range coldTypes {
@@ -438,15 +436,10 @@ func writeCSV(path string, rows []row) error {
 	return nil
 }
 
-// logSummary logs one line per aggregated row. peak_rss_bytes prints as a
-// byte count.
+// logSummary logs one line per aggregated row.
 func (s *csvSink) logSummary(logger *supportlog.Entry) {
 	for _, f := range s.files() {
 		for _, r := range f.rows {
-			if f.name == fileDriver && r.name == driverPeakRSS {
-				logger.Infof("%-10s %-12s n=%-7d bytes=%d", f.name, r.name, r.n, r.total.Nanoseconds())
-				continue
-			}
 			logger.Infof("%-10s %-12s n=%-7d items=%-9d total=%-12s p50=%-10s p90=%-10s p99=%-10s max=%s",
 				f.name, r.name, r.n, r.items,
 				r.total.Round(time.Microsecond),
