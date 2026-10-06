@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -210,6 +211,8 @@ func TestBuildThenSweep_RollingPredecessorDemotedNotSwept(t *testing.T) {
 		require.True(t, ok)
 		require.Equal(t, chunk.ID(0), frozen.Lo)
 		require.Equal(t, hi, frozen.Hi)
+		require.True(t, strings.HasPrefix(cat.Layout().TxHashIndexFilePath(frozen), cat.Layout().HotRoot()),
+			"a window still filling keeps its index with the hot tier")
 
 		// The predecessors linger as "pruning" debris: the old .idx is
 		// query-visible, so its deletion waits for a lifecycle run's grace-
@@ -279,6 +282,8 @@ func TestBuildThenSweep_TerminalDemotesAndSweepsAllInputs(t *testing.T) {
 	require.True(t, ok)
 	require.True(t, cat.TxHashIndexLayout().IsTerminalCoverage(frozen))
 	require.Equal(t, chunk.ID(3), frozen.Hi)
+	require.True(t, strings.HasPrefix(cat.Layout().TxHashIndexFilePath(frozen), cat.Layout().TxHashIndexRoot()),
+		"a terminal index is a cold artifact")
 
 	// Every in-window txhash key was demoted AND swept: key absent => .bin gone.
 	for c := chunk.ID(0); c <= 3; c++ {
@@ -462,7 +467,8 @@ func TestBuildCrashMatrix_AfterCommitBeforeSweep(t *testing.T) {
 	}
 	// A predecessor [0,2] so the commit has a coverage to demote too.
 	require.NoError(t, buildThenSweep(context.Background(), IndexBuild{Index: 0, Lo: 0, Hi: 2}, cfg))
-	predPath := cat.Layout().TxHashIndexFilePath(geometry.TxHashIndexCoverage{Index: 0, Lo: 0, Hi: 2})
+	pred := geometry.TxHashIndexCoverage{Index: 0, Lo: 0, Hi: 2, Key: geometry.TxHashIndexKey(0, 0, 2)}
+	predPath := cat.Layout().TxHashIndexFilePath(pred)
 
 	// Reconstruct the "crash after commit, before the eager sweep" of the terminal
 	// build [0,3]: buildTxhashIndex commits WITHOUT sweeping (the sweep is
@@ -481,7 +487,7 @@ func TestBuildCrashMatrix_AfterCommitBeforeSweep(t *testing.T) {
 	for _, k := range keys {
 		states[k.Key] = k.State
 	}
-	require.Equal(t, geometry.StatePruning, states[geometry.TxHashIndexKey(0, 0, 2)], "predecessor demoted, not yet swept")
+	require.Equal(t, geometry.StatePruning, states[pred.Key], "predecessor demoted, not yet swept")
 	for c := chunk.ID(0); c <= 3; c++ {
 		s, serr := cat.State(c, geometry.KindTxHash)
 		require.NoError(t, serr)
@@ -513,7 +519,13 @@ func TestBuildCrashMatrix_AfterCommitBeforeSweep(t *testing.T) {
 		states[k.Key] = k.State
 	}
 	require.Equal(t, geometry.StateFrozen, states[geometry.TxHashIndexKey(0, 0, 3)])
-	require.Equal(t, geometry.StatePruning, states[geometry.TxHashIndexKey(0, 0, 2)])
+	require.Equal(t, geometry.StatePruning, states[pred.Key])
+
+	// The lifecycle's destroy takes the predecessor's file and its hot-tier
+	// directory; the terminal index stays in the cold root.
+	require.NoError(t, cat.DestroyTxHashIndexKey(pred))
+	require.NoDirExists(t, cat.Layout().TxHashIndexDir(pred))
+	require.FileExists(t, cat.Layout().TxHashIndexFilePath(frozen))
 }
 
 // Row "mid-sweep": a "pruning" key whose durable unlink completed but whose key

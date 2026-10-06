@@ -60,7 +60,7 @@ func OpenTestCatalogWith(t testing.TB, cpi uint32, logger *supportlog.Entry) (*c
 	idxLayout, err := geometry.NewTxHashIndexLayout(cpi)
 	require.NoError(t, err)
 	cat, err := catalog.Open(
-		filepath.Join(t.TempDir(), "rocksdb"), geometry.NewLayout(artifactRoot), idxLayout, logger)
+		filepath.Join(t.TempDir(), "rocksdb"), geometry.NewLayout(artifactRoot).WithTxHashIndex(idxLayout), logger)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cat.Close() })
 	return cat, artifactRoot

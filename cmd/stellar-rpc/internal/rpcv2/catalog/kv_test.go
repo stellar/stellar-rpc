@@ -23,9 +23,7 @@ import (
 // cases); the artifact layout is irrelevant to the KV tests.
 func openKVAt(t *testing.T, path string) (*Catalog, error) {
 	t.Helper()
-	idxLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
-	require.NoError(t, err)
-	return Open(path, geometry.NewLayout(t.TempDir()), idxLayout, silentLogger())
+	return Open(path, geometry.NewLayout(t.TempDir()), silentLogger())
 }
 
 func openTestKV(t *testing.T) *Catalog {
@@ -54,13 +52,10 @@ func kvGetMiss(t *testing.T, c *Catalog, key string) {
 }
 
 func TestOpen_ValidatesInputs(t *testing.T) {
-	idxLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
-	require.NoError(t, err)
-
-	_, err = Open("", geometry.NewLayout(t.TempDir()), idxLayout, silentLogger())
+	_, err := Open("", geometry.NewLayout(t.TempDir()), silentLogger())
 	require.ErrorIs(t, err, rocksdb.ErrInvalidConfig)
 
-	_, err = Open(t.TempDir(), geometry.NewLayout(t.TempDir()), idxLayout, nil)
+	_, err = Open(t.TempDir(), geometry.NewLayout(t.TempDir()), nil)
 	require.ErrorIs(t, err, rocksdb.ErrInvalidConfig)
 }
 
