@@ -98,7 +98,7 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 	layout := geometry.NewLayout(opts.ColdRoot)
 	if err := config.PrepareRoots(
 		layout.LedgersRoot(), layout.EventsRoot(), layout.EventsIndexRoot(),
-		layout.TxHashRawRoot(), layout.TxHashIndexRoot(),
+		layout.TxHashRawRoot(), layout.TxHashIndexRoot(), layout.HotRoot(),
 	); err != nil {
 		return fmt.Errorf("prepare --cold-out-dir write roots: %w", err)
 	}

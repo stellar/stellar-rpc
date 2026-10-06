@@ -33,10 +33,7 @@ func testCatalog(t *testing.T) (*Catalog, string) {
 	metaDir := t.TempDir()
 	artifactRoot := t.TempDir()
 
-	idxLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
-	require.NoError(t, err)
-
-	cat, err := Open(filepath.Join(metaDir, "rocksdb"), geometry.NewLayout(artifactRoot), idxLayout, silentLogger())
+	cat, err := Open(filepath.Join(metaDir, "rocksdb"), geometry.NewLayout(artifactRoot), silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cat.Close() })
 
@@ -76,12 +73,10 @@ func assertEveryFileHasKey(t *testing.T, cat *Catalog, root string) {
 func keyForArtifactFile(t *testing.T, cat *Catalog, path string) (string, bool) {
 	t.Helper()
 
-	// Index file: txhash/index/{w}/{lo}-{hi}.idx
-	dir := filepath.Dir(path)
+	// Index file: {lo}-{hi}.idx, under the cold index root once terminal and
+	// under the hot root before; lo names the window either way.
 	base := filepath.Base(path)
 	if filepath.Ext(base) == ".idx" {
-		w, errW := geometry.ParsePadded(filepath.Base(dir))
-		require.NoError(t, errW)
 		name := strings.TrimSuffix(base, ".idx")
 		loStr, hiStr, found := strings.Cut(name, "-")
 		require.True(t, found, "bad idx name %q", base)
@@ -89,7 +84,11 @@ func keyForArtifactFile(t *testing.T, cat *Catalog, path string) (string, bool) 
 		require.NoError(t, errLo)
 		hi, errHi := geometry.ParsePadded(hiStr)
 		require.NoError(t, errHi)
-		return geometry.TxHashIndexKey(geometry.TxHashIndexID(w), chunk.ID(lo), chunk.ID(hi)), true
+		cov := geometry.TxHashIndexCoverage{
+			Index: cat.TxHashIndexLayout().TxHashIndexID(chunk.ID(lo)), Lo: chunk.ID(lo), Hi: chunk.ID(hi),
+		}
+		require.Equal(t, cat.layout.TxHashIndexFilePath(cov), path, "an .idx outside its coverage's directory")
+		return geometry.TxHashIndexKey(cov.Index, cov.Lo, cov.Hi), true
 	}
 
 	// Per-chunk files: identify by reconstructing each kind's path for the

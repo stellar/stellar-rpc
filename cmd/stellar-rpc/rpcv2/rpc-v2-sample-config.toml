@@ -32,16 +32,19 @@
 default_data_dir = "/var/stellar/rpc-v2"
 # Per-store paths, for putting stores on different disks. Relative paths
 # resolve against the working directory, and two stores cannot share a path.
-# events and events_index move independently. The indexes are small and read
-# randomly, so putting events_index on fast local disk speeds up filtered
+# With a local NVMe disk and a slower durable volume, put hot and txhash_raw
+# (and [ingestion] captive_core_storage_path) on the NVMe disk and keep the
+# catalog on the durable volume. The other stores can sit on the slower
+# volume. events and events_index move independently: the indexes are small
+# and read randomly, so putting events_index on fast disk speeds up filtered
 # event queries over wide ranges.
 #catalog = ""        # {default_data_dir}/catalog/rocksdb  (catalog RocksDB)
 #ledgers = ""        # {default_data_dir}/ledgers          (ledger packs)
 #events = ""         # {default_data_dir}/events/data      (event packs)
 #events_index = ""   # {default_data_dir}/events/index     (event indexes)
 #txhash_raw = ""     # {default_data_dir}/txhash/raw       (unindexed tx hashes)
-#txhash_index = ""   # {default_data_dir}/txhash/index     (txhash indexes)
-#hot = ""            # {default_data_dir}/hot              (recent chunks)
+#txhash_index = ""   # {default_data_dir}/txhash/index     (terminal txhash indexes)
+#hot = ""            # {default_data_dir}/hot              (recent chunks, the txhash index still being rebuilt, build scratch)
 
 # -----------------------------------------------------------------------------
 # [retention]: how much history this daemon keeps

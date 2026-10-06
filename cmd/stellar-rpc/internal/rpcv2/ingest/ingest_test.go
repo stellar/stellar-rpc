@@ -251,7 +251,7 @@ func packPath(ledgersRoot string, c chunk.ID) string {
 // sameDirs points both events roots at one directory — the shape a test that
 // only cares about the files wants, and one the store supports even though a
 // deployment must keep the two roots apart.
-func sameDirs(dir string) event.ColdDirs { return event.ColdDirs{Data: dir, Index: dir} }
+func sameDirs(dir string) event.ColdDirs { return event.ColdDirs{Data: dir, Index: dir, Scratch: dir} }
 
 // coldDirsAt resolves chunk c's cold-artifact paths under one dir's per-type
 // roots — mirroring what geometry.Layout derives in production, so the readback
@@ -1917,8 +1917,9 @@ func TestEventsCold_CreatesBothRootsOnFreeze(t *testing.T) {
 	// Two roots, neither of which exists, as an operator gets on a fresh
 	// deployment that puts the index on separate storage.
 	dirs := event.ColdDirs{
-		Data:  filepath.Join(root, "events", "data", chunkID.BucketID()),
-		Index: filepath.Join(root, "events", "index", chunkID.BucketID()),
+		Data:    filepath.Join(root, "events", "data", chunkID.BucketID()),
+		Index:   filepath.Join(root, "events", "index", chunkID.BucketID()),
+		Scratch: filepath.Join(root, "hot", "scratch"),
 	}
 	require.NoDirExists(t, dirs.Data)
 	require.NoDirExists(t, dirs.Index)

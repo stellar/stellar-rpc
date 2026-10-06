@@ -91,8 +91,7 @@ func readCSV(t *testing.T, path string) map[string]map[string]int64 {
 // index .idx (both chunks inside one window, as every test range here is).
 func txhashIndexPath(t *testing.T, layout geometry.Layout, lo, hi chunk.ID) string {
 	t.Helper()
-	txLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
-	require.NoError(t, err)
+	txLayout := layout.TxHashIndex()
 	w := txLayout.TxHashIndexID(lo)
 	require.Equal(t, w, txLayout.TxHashIndexID(hi), "test range must stay inside one index window")
 	return layout.TxHashIndexFilePath(geometry.TxHashIndexCoverage{Index: w, Lo: lo, Hi: hi})
