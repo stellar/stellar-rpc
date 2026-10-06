@@ -31,11 +31,10 @@ require (
 )
 
 require (
-	github.com/creachadair/jrpc2 v1.2.0
 	github.com/dchest/siphash v1.2.3
 	github.com/mattn/go-sqlite3 v1.14.17
 	github.com/rubenv/sql-migrate v1.5.2
-	github.com/stellar-experimental/jrpc2 v0.0.0-20260916041201-6eeba1479b1f
+	github.com/stellar-experimental/jrpc2 v0.0.0-20261006155236-314cc34fb17a
 	go.uber.org/goleak v1.3.0
 )
 
@@ -64,6 +63,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.39.0 // indirect
 	github.com/bits-and-blooms/bitset v1.24.2 // indirect
 	github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2 // indirect
+	github.com/creachadair/jrpc2 v1.2.0 // indirect
 	github.com/edsrzf/mmap-go v1.2.0 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.3 // indirect
