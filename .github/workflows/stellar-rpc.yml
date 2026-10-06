@@ -89,21 +89,21 @@ jobs:
     uses: ./.github/workflows/integration-tests.yml
     with:
       protocol_version: '29'
-      # stellar-core master (#5472 merged, 73f2bdd1) without vnext: its current
-      # host is the p29 stand-in at rs-soroban-env cb32250d, the same commit
-      # soroban-env-host-prev pins.
-      core_deb_version: '29.0.1-3625.73f2bdd1a.noble'
-      core_docker_img: 'stellar/unsafe-stellar-core:29.0.1-3625.73f2bdd1a.noble'
+      # stellar-core master (#5476 merged, 88d2431d) without vnext: its p29
+      # host is rs-soroban-env a721944b, the same commit soroban-env-host-prev
+      # pins.
+      core_deb_version: '29.0.1-3629.88d2431d7.noble'
+      core_docker_img: 'stellar/unsafe-stellar-core:29.0.1-3629.88d2431d7.noble'
 
-  integration-p30-pkg:
+  integration-p30-src:
     name: Integration tests (P30)
     uses: ./.github/workflows/integration-tests.yml
     with:
       protocol_version: '30'
-      # The same core commit's vnext build: its p30 host is rs-soroban-env
-      # 169890d5, the commit soroban-env-host-curr pins.
-      core_deb_version: '29.0.1-3626.73f2bdd1a.noble~vnext'
-      core_docker_img: 'stellar/unsafe-stellar-core:29.0.1-3626.73f2bdd1a.noble-vnext'
+      # core #5455 (unmerged) repins the p30 vnext host to rs-soroban-env
+      # f5a9fb79 (CAP-0087), the commit soroban-env-host-curr pins. No -vnext
+      # package carries that pin yet, so build core from source.
+      core_git_ref: '672247571f9b1f374a9eb17094970503c4e12137'
 
   # integration-p25-src:
   #   name: Integration tests (p25, core from source)

@@ -37,15 +37,15 @@
     },
     {
       "contract_events_v0": {
-        "fee_contract_events1_kb": "300",
-        "tx_max_contract_events_size_bytes": 4294967295
+        "tx_max_contract_events_size_bytes": 4294967295,
+        "fee_contract_events1_kb": "300"
       }
     },
     {
       "contract_bandwidth_v0": {
-        "fee_tx_size1_kb": "500",
         "ledger_max_txs_size_bytes": 4294967295,
-        "tx_max_size_bytes": 4294965295
+        "tx_max_size_bytes": 4294965295,
+        "fee_tx_size1_kb": "500"
       }
     },
     {
@@ -479,6 +479,51 @@
           "ext": "v0",
           "const_term": "1185193",
           "linear_term": "41568084"
+        },
+        {
+          "ext": "v0",
+          "const_term": "849110",
+          "linear_term": "0"
+        },
+        {
+          "ext": "v0",
+          "const_term": "1505271",
+          "linear_term": "0"
+        },
+        {
+          "ext": "v0",
+          "const_term": "2625760",
+          "linear_term": "0"
+        },
+        {
+          "ext": "v0",
+          "const_term": "37888",
+          "linear_term": "0"
+        },
+        {
+          "ext": "v0",
+          "const_term": "47691",
+          "linear_term": "0"
+        },
+        {
+          "ext": "v0",
+          "const_term": "66346",
+          "linear_term": "0"
+        },
+        {
+          "ext": "v0",
+          "const_term": "685165",
+          "linear_term": "6103"
+        },
+        {
+          "ext": "v0",
+          "const_term": "983619",
+          "linear_term": "6103"
+        },
+        {
+          "ext": "v0",
+          "const_term": "1437210",
+          "linear_term": "6102"
         }
       ]
     },
@@ -913,6 +958,51 @@
           "ext": "v0",
           "const_term": "73061",
           "linear_term": "229779"
+        },
+        {
+          "ext": "v0",
+          "const_term": "24656",
+          "linear_term": "0"
+        },
+        {
+          "ext": "v0",
+          "const_term": "43088",
+          "linear_term": "0"
+        },
+        {
+          "ext": "v0",
+          "const_term": "73808",
+          "linear_term": "0"
+        },
+        {
+          "ext": "v0",
+          "const_term": "4104",
+          "linear_term": "0"
+        },
+        {
+          "ext": "v0",
+          "const_term": "5128",
+          "linear_term": "0"
+        },
+        {
+          "ext": "v0",
+          "const_term": "7176",
+          "linear_term": "0"
+        },
+        {
+          "ext": "v0",
+          "const_term": "0",
+          "linear_term": "0"
+        },
+        {
+          "ext": "v0",
+          "const_term": "0",
+          "linear_term": "0"
+        },
+        {
+          "ext": "v0",
+          "const_term": "0",
+          "linear_term": "0"
         }
       ]
     },

@@ -151,7 +151,8 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-// SPIKE: pin go-stellar-sdk to the sisuresh/go p30-cap-0084-validate fork
-// branch until the upstream SDK change merges, then re-pin to the merged
-// upstream commit and drop this replace + the .golangci.yml allow-list.
-replace github.com/stellar/go-stellar-sdk => github.com/sisuresh/go v0.0.0-20260929001544-73e446de8da9
+// SPIKE: pin go-stellar-sdk to the sisuresh/go p30-cap-0087 fork branch
+// (go-stellar-sdk#6003, stacked on CAP-84's #6015) until the upstream SDK
+// change merges, then re-pin to the merged upstream commit and drop this
+// replace + the .golangci.yml allow-list.
+replace github.com/stellar/go-stellar-sdk => github.com/sisuresh/go v0.0.0-20261005234555-79af6f7f44f5
