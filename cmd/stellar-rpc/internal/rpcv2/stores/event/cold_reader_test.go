@@ -25,7 +25,7 @@ import (
 //   - feeding the same payload's indexed (contractID + topic0)
 //     fields into a fresh Bitmaps (matching what the freezer
 //     would do via TermsForBytes + idx.Add),
-//   - finalizing with WriteColdIndex.
+//   - finalizing with ColdIndexBuilder.Write.
 //
 // Layout:
 //
@@ -79,7 +79,7 @@ func buildColdFixture(t *testing.T, chunkID chunk.ID, eventsPerLedger, ledgersPe
 	}
 
 	require.NoError(t, cw.Finish(offsets))
-	require.NoError(t, WriteColdIndex(context.Background(), chunkID, idx, dir, testIndexSecret))
+	require.NoError(t, writeColdIndex(context.Background(), chunkID, idx, dir, testIndexSecret))
 	return dir, payloads
 }
 
@@ -279,7 +279,7 @@ func TestColdReader_AllEmptyChunkYieldsNothing(t *testing.T) {
 }
 
 // TestColdReader_EventlessChunk round-trips a chunk with zero events
-// (e.g. a pre-Soroban backfill range): WriteColdIndex publishes a real
+// (e.g. a pre-Soroban backfill range): ColdIndexBuilder.Write publishes a real
 // empty index, and every read path resolves cleanly — no missing-file
 // errors, no special casing for the orchestrator.
 func TestColdReader_EventlessChunk(t *testing.T) {
@@ -850,6 +850,22 @@ func TestColdReader_RejectsMispairedIndexHash(t *testing.T) {
 	require.ErrorContains(t, err, "index pair mismatch")
 }
 
+// An index.pack with the same entries as its index.hash but another secret
+// is refused.
+func TestColdReader_RejectsIndexHashUnderAnotherSecret(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
+	rewriteIndexPack(t, dir, func(a *indexArtifact) { a.appData[11] ^= 1 })
+
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	_, _, err = cr.LookupTerms(context.Background(), []Term{contractTerm(payloads[0])}, everyID)
+	require.ErrorIs(t, err, stores.ErrCorrupt)
+	require.ErrorContains(t, err, "different secrets")
+}
+
 // TestColdReader_RejectsNonEmptyIndexOnEventlessChunk is the converse of
 // the empty-index check: a populated index pair copied onto an
 // eventless chunk (a misrouted snapshot) must fail at load.
@@ -965,7 +981,7 @@ func TestColdReader_UncheckedIndexPackIsCorrupt(t *testing.T) {
 // eventful and eventless chunks.
 func rewriteIndexPackStamp(t *testing.T, dir string, chunkID chunk.ID, schema uint16, mask uint64) {
 	t.Helper()
-	stamp := encodeIndexAppData(indexLayout{})
+	stamp := encodeIndexAppData(indexLayout{}, testIndexSecret)
 	binary.BigEndian.PutUint16(stamp[1:3], schema)
 	binary.BigEndian.PutUint64(stamp[3:11], mask)
 	pw, err := packfile.Create(filepath.Join(dir, IndexPackName(chunkID)), indexPackWriterOptions())
