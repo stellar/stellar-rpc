@@ -9,6 +9,7 @@ package jsonrpc
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -230,7 +231,7 @@ func NewHandler(params Params) Handler {
 			// Disable built-in rpc.* methods (e.g. rpc.serverInfo) that
 			// bypass the handler allowlist and request limiters.
 			DisableBuiltin: true,
-			Concurrency:    -1, // disable built-in jrpc2 concurrency control, use limiters below
+			Concurrency:    math.MaxInt, // disable built-in jrpc2 concurrency control, use limiters below
 		},
 	}
 
