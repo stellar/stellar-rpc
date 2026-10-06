@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 )
 
 // ---------------------------------------------------------------------------
@@ -57,13 +58,26 @@ func TestKeyToPathBijection(t *testing.T) {
 		"/data/events/index/00005/00005350-index.pack",
 		"/data/events/index/00005/00005350-index.hash",
 	}, l.EventsPaths(5350))
-	require.Equal(t, []string{"/data/events/index/00005/00005350-index.runs"}, l.ScratchPaths(5350, KindEvents))
+	require.Equal(t, []string{"/data/hot/scratch/00005350-index.runs"}, l.ScratchPaths(5350, KindEvents))
+	require.Equal(t, event.ColdDirs{
+		Data: "/data/events/data/00005", Index: "/data/events/index/00005", Scratch: "/data/hot/scratch",
+	}, l.EventsColdDirs(5350))
 	require.Nil(t, l.ScratchPaths(5350, KindLedgers))
 	require.Equal(t, "/data/hot/00005350", l.HotChunkPath(5350))
 
+	// A window still being rebuilt lives with the hot tier; its terminal
+	// index is a cold artifact.
 	cov := TxHashIndexCoverage{Index: 5, Lo: 5100, Hi: 5349}
-	require.Equal(t, "/data/txhash/index/00000005", l.TxHashIndexDir(cov.Index))
-	require.Equal(t, "/data/txhash/index/00000005/00005100-00005349.idx", l.TxHashIndexFilePath(cov))
+	require.Equal(t, "/data/hot/txhash-index-00000005", l.TxHashIndexDir(cov))
+	require.Equal(t, "/data/hot/txhash-index-00000005/00005100-00005349.idx", l.TxHashIndexFilePath(cov))
+	terminal := TxHashIndexCoverage{Index: 5, Lo: 5100, Hi: 5999}
+	require.Equal(t, "/data/txhash/index/00000005", l.TxHashIndexDir(terminal))
+	require.Equal(t, "/data/txhash/index/00000005/00005100-00005999.idx", l.TxHashIndexFilePath(terminal))
+	// The width decides what is terminal, so it decides the placement.
+	w4, err := NewTxHashIndexLayout(4)
+	require.NoError(t, err)
+	require.Equal(t, "/data/txhash/index/00000001",
+		l.WithTxHashIndex(w4).TxHashIndexDir(TxHashIndexCoverage{Index: 1, Lo: 4, Hi: 7}))
 }
 
 func TestParseRejectsMalformed(t *testing.T) {
