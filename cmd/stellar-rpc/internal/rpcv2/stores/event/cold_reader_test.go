@@ -25,7 +25,7 @@ import (
 //   - feeding the same payload's indexed (contractID + topic0)
 //     fields into a fresh Bitmaps (matching what the freezer
 //     would do via TermsForBytes + idx.Add),
-//   - finalizing with WriteColdIndex.
+//   - finalizing with ColdIndexBuilder.Write.
 //
 // Layout:
 //
@@ -81,7 +81,7 @@ func buildColdFixture(t *testing.T, chunkID chunk.ID, eventsPerLedger, ledgersPe
 	}
 
 	require.NoError(t, cw.Finish(offsets))
-	require.NoError(t, WriteColdIndex(context.Background(), chunkID, idx, dir, testIndexSecret))
+	require.NoError(t, writeColdIndex(context.Background(), chunkID, idx, dir, testIndexSecret))
 	return dir, payloads
 }
 
@@ -287,7 +287,7 @@ func TestColdReader_AllEmptyChunkYieldsNothing(t *testing.T) {
 }
 
 // TestColdReader_EventlessChunk round-trips a chunk with zero events
-// (e.g. a pre-Soroban backfill range): WriteColdIndex publishes a real
+// (e.g. a pre-Soroban backfill range): ColdIndexBuilder.Write publishes a real
 // empty index, and every read path resolves cleanly — no missing-file
 // errors, no special casing for the orchestrator.
 func TestColdReader_EventlessChunk(t *testing.T) {
